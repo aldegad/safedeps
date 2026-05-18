@@ -89,6 +89,13 @@ sf_require_jq() {
   fi
 }
 
+sf_mktemp_evidence() {
+  local tmp_dir="${TMPDIR:-/tmp}"
+
+  mkdir -p "${tmp_dir}"
+  mktemp "${tmp_dir%/}/safedeps-evidence.XXXXXX"
+}
+
 # parse "pkg@range" or "@scope/pkg@range" → pkg / range
 sf_parse_pkg_spec() {
   local input="$1"
@@ -286,7 +293,7 @@ cmd_check() {
   sf_spinner_stop
 
   local tmp_evidence
-  tmp_evidence=$(mktemp "${TMPDIR:-/tmp}/safedeps-evidence.XXXXXX.json")
+  tmp_evidence=$(sf_mktemp_evidence)
   printf '%s' "${provider_json}" > "${tmp_evidence}"
 
   local status vuln_count kev_exploited
@@ -340,7 +347,7 @@ cmd_check() {
         if [[ "${narrow_status}" == "clean" ]]; then
           # approve patched version
           local narrow_evidence
-          narrow_evidence=$(mktemp "${TMPDIR:-/tmp}/safedeps-evidence.XXXXXX.json")
+          narrow_evidence=$(sf_mktemp_evidence)
           printf '%s' "${narrow_json}" > "${narrow_evidence}"
           local narrow_range="${patched_version}"
           local spec_json
