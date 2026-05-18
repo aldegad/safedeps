@@ -8,20 +8,29 @@ In blockchain networks, a **reorganization (reorg)** invalidates a sequence of b
 
 No manual review. No leftover malicious code. Fully automatic.
 
+## Distribution Model
+
+Safedeps has two distribution surfaces:
+
+1. **Agent skill + hooks (canonical)** -- the repo itself is the skill folder. `SKILL.md`, hook scripts, provider/ledger libraries, and install helpers stay together in one directory.
+2. **npm package (CLI convenience)** -- `@aldegad/safedeps` installs the `safedeps` command. npm does **not** make Claude Code or Codex automatically discover the skill; after npm installation, users still need to run the hook/skill installer or manually register the skill folder.
+
+Use the GitHub release when you want the full skill/hook source tree as the canonical artifact. Use npm when you mainly want a versioned global CLI.
+
 ## How It Works
 
 `safedeps` plugs into Claude Code and Codex CLI hooks as a pair of **PreToolUse** and **PostToolUse** hooks that wrap package install commands. The CLI owns provider lookups and the approved-spec ledger; hooks enforce that ledger and run post-install rollback checks.
 
 ```
                          PreToolUse                          PostToolUse
-                        (guard.sh)                          (verify.sh)
+                  (safedeps-pre-guard.sh)          (safedeps-post-verify.sh)
                             |                                    |
-  npm install ──> [ Pre-flight checks ] ──> [ Execute ] ──> [ Verify ]
+  install cmd ──> [ Advisory/ledger gate ] ──> [ Execute ] ──> [ Verify ]
                      |            |                           |       |
                   Block if      Snapshot                   Clean?  Suspicious?
-                  suspicious    lock files,                  |       |
-                               package.json,              Confirm  REORG
-                               node_modules list            |       |
+                  unapproved    lock/manifest files,        |       |
+                   or risky     package listings          Confirm  REORG
+                                                              |       |
                                     |                       v       v
                                     +--- parent_snapshot_id ──> confirmed
                                                                     |
@@ -29,20 +38,29 @@ No manual review. No leftover malicious code. Fully automatic.
                                                               confirmed snapshot
 ```
 
-### Phase 1: Pre-flight (guard.sh -- PreToolUse)
+### Phase 1: Advisory Gate + Pre-flight (PreToolUse)
 
-When Claude Code is about to run `npm install`, `pnpm add`, `yarn add`, or similar commands, the guard hook:
+Before an agent installs a dependency, it should run:
+
+```bash
+safedeps check <ecosystem> <pkg>@<version|range> --json
+```
+
+That command queries OSV (canonical), CISA KEV (hard-risk overlay), and GitHub Advisory (enrichment). Clean or safely narrowed specs are written to `~/.safedeps/approved-specs/`.
+
+When Claude Code or Codex CLI is about to run `npm install`, `pip install`, `cargo add`, `go get`, `gem install`, or similar commands, the guard hook:
 
 1. **Snapshots** the current `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, and `package.json` into `~/.safedeps/snapshots/`.
 2. **Records metadata** including a `parent_snapshot_id` linking to the previous confirmed snapshot (forming a chain, just like blocks).
 3. **Captures pre-install state** of `node_modules` (package listings and binary listings) for diff-based detection later.
-4. **Runs pre-flight checks** and **blocks** the command entirely if it detects:
+4. **Enforces the approved-spec ledger** for explicit `pkg@version` install commands.
+5. **Runs pre-flight checks** and **blocks** the command entirely if it detects:
    - Typosquatting package names (`lod_sh`, `reacct`, `axois`, etc.)
    - Non-standard `--registry` URLs (anything outside `registry.npmjs.org` and `registry.yarnpkg.com`)
    - Piped remote execution patterns (`curl ... | bash`)
    - Explicit disabling of install script safety (`npm config set ignore-scripts false`)
 
-If a pre-flight check fails, the command is **blocked before execution** -- nothing is installed.
+If the ledger gate or a pre-flight check fails, the command is **blocked before execution** -- nothing is installed.
 
 ### Phase 2: Post-install verification (verify.sh -- PostToolUse)
 
@@ -116,7 +134,7 @@ brew install jq
 sudo apt-get install jq
 ```
 
-### Setup
+### Setup From GitHub (Skill + Hooks)
 
 **1. Clone the repository:**
 
@@ -174,6 +192,23 @@ chmod +x ~/.claude/skills/safedeps/scripts/safedeps-post-verify.sh
 ```
 
 That's it. The guard activates automatically whenever Claude Code or Codex CLI runs a package install command.
+
+### Setup From npm (CLI First)
+
+```bash
+npm install -g @aldegad/safedeps
+safedeps version
+```
+
+This installs the CLI. It does not automatically register the agent skill or hooks. To use the hooks from an npm-installed package, locate the installed package root and run the installer from there:
+
+```bash
+npm root -g
+cd "$(npm root -g)/@aldegad/safedeps"
+node scripts/install/install-safedeps-hooks.mjs --link-bin
+```
+
+If you want the skill folder itself to be the canonical local source, prefer the GitHub setup above.
 
 ### Daily Re-check With macOS Alerts
 
@@ -261,6 +296,10 @@ safedeps/
     safedeps-pre-guard.sh       # PreToolUse hook -- snapshot + ledger enforcement
     safedeps-post-verify.sh     # PostToolUse hook -- post-install verification + reorg
     install/install-safedeps-hooks.mjs
+    install/install-safedeps-recheck-agent.mjs
+    install/migrate-safedeps-state.mjs
+    safedeps-recheck-alert.sh
+    test/
   package.json
   SKILL.md        # Claude Code / Codex skill manifest
   LICENSE         # Apache-2.0
