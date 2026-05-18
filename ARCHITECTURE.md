@@ -60,10 +60,10 @@
    │                              └────────┬────────┘                    │
    │                                       │                             │
    │                                       ▼                             │
-   │                              ╔═════════════════╗                    │
-   │                              ║ PreToolUse HOOK ║                    │
-   │                              ║   guard.sh      ║                    │
-   │                              ╚════════╤════════╝                    │
+   │                              ╔═════════════════════════╗            │
+   │                              ║ PreToolUse HOOK         ║            │
+   │                              ║ safedeps-pre-guard.sh   ║            │
+   │                              ╚════════╤════════════════╝            │
    │                                       │                             │
    │                              ledger 조회:                            │
    │                              "이 명령의 ecosystem +                  │
@@ -82,10 +82,10 @@
    │                  install 실행                                       │
    │                          │                                          │
    │                          ▼                                          │
-   │                  ╔════════════════╗                                 │
-   │                  ║ PostToolUse    ║                                 │
-   │                  ║ HOOK verify.sh ║                                 │
-   │                  ╚════════╤═══════╝                                 │
+   │                  ╔══════════════════════════════╗                  │
+   │                  ║ PostToolUse HOOK             ║                  │
+   │                  ║ safedeps-post-verify.sh      ║                  │
+   │                  ╚════════╤═════════════════════╝                  │
    │                           │                                         │
    │                  lockfile diff vs                                   │
    │                  approved spec 비교                                  │
@@ -262,14 +262,14 @@
    sha256:abc123... = {ecosystem: npm, pkg, version, ...}
 ```
 
-### Phase 2 — Hook Enforcement (PreToolUse / `guard.sh`)
+### Phase 2 — Hook Enforcement (PreToolUse / `safedeps-pre-guard.sh`)
 
 ```
 Claude 가 Bash 실행 요청: "npm install @jackwener/opencli@^1.7.16"
         │
         ▼
    ┌─────────────────────────────────┐
-   │ guard.sh                        │
+   │ safedeps-pre-guard.sh           │
    │ 1. 명령 파싱:                    │
    │    ecosystem = npm               │
    │    pkg = @jackwener/opencli      │
@@ -295,10 +295,10 @@ Claude 가 Bash 실행 요청: "npm install @jackwener/opencli@^1.7.16"
                     └──────────────────────┘
 ```
 
-### Phase 3 — Post-Install Rollback (PostToolUse / `verify.sh`)
+### Phase 3 — Post-Install Rollback (PostToolUse / `safedeps-post-verify.sh`)
 
 ```
-install 완료 → verify.sh
+install 완료 → safedeps-post-verify.sh
         │
         ▼
    ┌─────────────────────────────────────────┐
@@ -340,7 +340,7 @@ install 완료 → verify.sh
 │ • patched_available 시 안전 버전으로 spec auto-rewrite                │
 │ • transitive dep 의 vuln 도 ledger 에 박아 sub-dep 침해 감지          │
 ├─────────────────────────────────────────────────────────────────────┤
-│  PHASE 2 — HOOK ENFORCEMENT (`guard.sh`)                             │
+│  PHASE 2 — HOOK ENFORCEMENT (`safedeps-pre-guard.sh`)                │
 ├─────────────────────────────────────────────────────────────────────┤
 │ v1 의 hardcoded pattern 결도 유지 (defense-in-depth):                 │
 │ • typosquat 명단 매치                                                 │
@@ -351,7 +351,7 @@ install 완료 → verify.sh
 │ + 새로운 enforcement:                                                  │
 │ • spec hash 가 ledger 에 없거나 expired → BLOCK + advisory gate 안내   │
 ├─────────────────────────────────────────────────────────────────────┤
-│  PHASE 3 — POST-INSTALL REORG (`verify.sh`)                          │
+│  PHASE 3 — POST-INSTALL REORG (`safedeps-post-verify.sh`)            │
 ├─────────────────────────────────────────────────────────────────────┤
 │ • install script 의 network/code execution/sensitive path 검사        │
 │ • base64/hex obfuscation                                              │

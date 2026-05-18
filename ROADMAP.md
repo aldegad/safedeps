@@ -45,8 +45,8 @@ OS-level (nginx / apt / brew / system binary) 은 **별도 도구로 분리**. S
 - **외부 vuln DB 결합**: OSV.dev (primary) + CISA KEV (hard-risk overlay) + GHSA (cross-check). NVD / deps.dev / Snyk = enrichment.
 - **3-phase defense**:
   1. Advisory Gate (`safedeps check`) — install 명령 *작성 전* vuln DB 조회 → 안전 spec 결정 → `~/.safedeps/approved-specs/<hash>.json` ledger 기록.
-  2. Hook Enforcement (`guard.sh`) — ledger 일치 검증.
-  3. Post-Install Reorg (`verify.sh`) — v1 engine 그대로 (rollback fallback).
+  2. Hook Enforcement (`safedeps-pre-guard.sh`) — ledger 일치 검증.
+  3. Post-Install Reorg (`safedeps-post-verify.sh`) — v1 engine 그대로 (rollback fallback).
 - Approved spec **TTL** (30일) + **daily re-check** cron (새 CVE 발견 시 revoke + 알람).
 - **No silent fallback**: provider fail = fail-closed + `--allow-unverified` explicit override (observable).
 

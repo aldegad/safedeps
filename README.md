@@ -62,7 +62,7 @@ When Claude Code or Codex CLI is about to run `npm install`, `pip install`, `car
 
 If the ledger gate or a pre-flight check fails, the command is **blocked before execution** -- nothing is installed.
 
-### Phase 2: Post-install verification (verify.sh -- PostToolUse)
+### Phase 2: Post-install verification (`safedeps-post-verify.sh` -- PostToolUse)
 
 After the install command completes, the verify hook analyzes what changed:
 
@@ -200,13 +200,14 @@ npm install -g @aldegad/safedeps
 safedeps version
 ```
 
-This installs the CLI. It does not automatically register the agent skill or hooks. To use the hooks from an npm-installed package, locate the installed package root and run the installer from there:
+npm puts `safedeps` on PATH through its standard `bin` entry. It does **not** register the agent skill or hooks for Claude Code / Codex. To enable the hooks from the npm-installed copy, run the installer from the installed package root:
 
 ```bash
-npm root -g
 cd "$(npm root -g)/@aldegad/safedeps"
-node scripts/install/install-safedeps-hooks.mjs --link-bin
+node scripts/install/install-safedeps-hooks.mjs
 ```
+
+The installer is idempotent and only adds symlinks/hook entries. The `--link-bin` flag is **only useful when you installed via GitHub clone instead of npm** — npm already places the CLI on PATH, so the flag is redundant in this path.
 
 If you want the skill folder itself to be the canonical local source, prefer the GitHub setup above.
 
