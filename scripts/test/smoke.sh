@@ -25,6 +25,11 @@ bash -n lib/ledger/ledger.sh
 bash -n scripts/safedeps-pre-guard.sh
 bash -n scripts/safedeps-post-verify.sh
 bash -n scripts/safedeps-recheck-alert.sh
+bash -n scripts/release-gates.sh
+bash -n lib/gates/repo-profile.sh
+bash -n lib/gates/scan.sh
+bash -n lib/gates/audit.sh
+bash -n lib/gates/hooks.sh
 pass "bash syntax"
 
 node --check scripts/install/install-safedeps-hooks.mjs >/dev/null
@@ -85,5 +90,16 @@ SAFEDEPS_NOTIFY=0 \
 grep -q '"checked":2' "${tmp_root}/safe-recheck/recheck.log" || fail "re-check wrapper writes log"
 grep -q '"provider_skipped":1' "${tmp_root}/safe-recheck/recheck-alerts.jsonl" || fail "re-check wrapper alerts on skipped provider checks"
 pass "re-check alert wrapper"
+
+# Release-time lane (absorbed from security-release-gates): commands must be
+# registered and resolve their gate scripts.
+gates_help=$(HOME="${tmp_root}/home-gates" SAFEDEPS_HOME="${tmp_root}/safe-gates" ./bin/safedeps help)
+for gate_cmd in "gates" "scan secrets" "audit" "hooks"; do
+  grep -q "${gate_cmd}" <<< "${gates_help}" || fail "release-time command listed in help: ${gate_cmd}"
+done
+for gate_script in scripts/release-gates.sh lib/gates/repo-profile.sh lib/gates/scan.sh lib/gates/audit.sh lib/gates/hooks.sh; do
+  [[ -f "${gate_script}" ]] || fail "release-time gate script present: ${gate_script}"
+done
+pass "release-time gate commands registered"
 
 printf 'smoke passed\n'
