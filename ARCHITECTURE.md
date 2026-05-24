@@ -18,7 +18,43 @@
 
 ---
 
-## 1. The Big Picture — 3-Phase Defense
+## 1. 통합 보안 우산 — Two Lanes, One Umbrella
+
+safedeps 는 **두 시점**의 보안 게이트를 한 스킬 우산으로 소유한다. v1 `npm-reorg-guard`(install-time reorg)를 흡수한 데 이어, `security-release-gates`(release-time 검사)도 safedeps umbrella 로 흡수한다 (알렉스 2026-05-24 결정). "보안"이라는 큰 이름으로 한 파일에 몰아넣는 게 아니라, **gate 의 canonical owner 를 하나로** 두고 lane 별 책임 경계를 분리한다 (SRP 유지).
+
+```text
+┌──────────────────────────────────────────────────────────────────────┐
+│                  safedeps — 통합 보안 우산 (one skill)                 │
+│                                                                      │
+│   INSTALL-TIME lane                    RELEASE-TIME lane              │
+│   (개발 중 · 패키지 설치 시점)            (릴리스 · 배포 직전)            │
+│   ─────────────────────                 ──────────────────            │
+│   Phase 1  advisory gate                safedeps scan secrets         │
+│            (OSV/KEV/GHSA)                  (gitleaks worktree/staged)  │
+│   Phase 2  hook enforcement             safedeps audit deps           │
+│            (PreToolUse ledger)             (npm audit / pip-audit)     │
+│   Phase 3  reorg rollback               safedeps hooks install|check  │
+│            (PostToolUse)                   (repo-local git hook)       │
+│                                         safedeps git pre-commit       │
+│   범위: 설치하려는 그 패키지              safedeps repo profile/privacy   │
+│   단위, 설치 전 + 상시 hook                                            │
+│                                         범위: repo 전체 트리, 릴리스 전  │
+│   ↓ section 2~13 상세                    ← security-release-gates 에서   │
+│                                            이식 (Phase B). 옛 release-  │
+│                                            gate orchestrator 흡수.     │
+│                                                                      │
+│   공통 원칙: 공개 DB(OSV/KEV/GHSA) + 로컬 first + No silent fallback    │
+│   (scanner fallback 은 observable + printed 일 때만 허용,             │
+│    provider/scanner miss 는 fail-closed)                              │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+- **INSTALL-TIME lane** = 이 문서 section 2~13 의 3-Phase advisory/hook/reorg 방어. per-package, proactive.
+- **RELEASE-TIME lane** = `security-release-gates` 의 repo-tree 검사(secret scan, dependency audit, repo hook install/check, privacy profile)를 `safedeps scan|audit|hooks|git` command namespace 로 흡수. repo-specific policy(`.gitleaks.toml`, lockfile)는 대상 repo 에 남고, safedeps 는 실행·설치·검증 owner.
+
+> 두 lane 은 시점·범위가 다르다(설치 전 개별 패키지 vs 릴리스 전 repo 전체). 한 우산 아래 두되 command namespace 로 분리해 SRP 를 지킨다.
+
+### Install-time lane: 3-Phase Defense (상세)
 
 ```
    ┌─────────────────────────────────────────────────────────────────────┐
