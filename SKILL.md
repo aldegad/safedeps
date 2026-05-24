@@ -16,7 +16,7 @@ Safedeps protects development dependency installs with a three-phase flow:
 2. **Phase 2 — Hook enforcement (`scripts/safedeps-pre-guard.sh`)**: the PreToolUse hook does not call providers. It only checks the approved-spec ledger for the package/version in the about-to-run install command. Miss or expired → block with a structured message that names the exact `safedeps check` command to run next.
 3. **Phase 3 — Post-install reorg (`scripts/safedeps-post-verify.sh`)**: v1 reorg engine rolls back when the lockfile diverges from the approved spec or install scripts look suspicious.
 
-> **Release-time lane (흡수 진행 중)**: `security-release-gates` 의 repo-tree 검사(secret scan, dependency audit, repo git hook install/check, privacy profile)를 safedeps `scan` / `audit` / `hooks` / `git` command namespace 로 흡수 중이다. 설계 SSoT 는 `ARCHITECTURE.md` §1 (Two Lanes), 실행 plan 은 `safedeps-security-unification`. 아래 CLI Reference 는 현재 구현된 **install-time** command 다 — release-time command 는 이식 완료 시 추가된다.
+> **Release-time lane**: `security-release-gates` 의 release orchestrator 를 `safedeps gates` 로 흡수 완료 — repo-tree 게이트(secret scan, dependency audit, repo git hook/CI check, install-guard presence)를 한 진입점에서 실행한다. repo 의 `security:*` npm script / `scripts/security/*` / gitleaks·npm-audit fallback 을 탐지·orchestrate 한다. 개별 `scan`/`audit`/`hooks`/`git` command 분리와 대상 repo `scripts/security/*` 완전 이관은 후속(plan `safedeps-security-unification` Phase B 잔여/C). 설계 SSoT: `ARCHITECTURE.md` §1 (Two Lanes).
 
 ## CLI Reference
 
@@ -26,6 +26,7 @@ safedeps ledger [--json]
 safedeps revoke <hash> | <ecosystem> <pkg>@<version> | <pkg>@<version> [--reason <r>] [--json]
 safedeps re-check [--json]
 safedeps migrate [--keep-legacy]
+safedeps gates [run] [--root <repo>] [--strict] [--no-run]
 safedeps help [command]
 safedeps version
 ```

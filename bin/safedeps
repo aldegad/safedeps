@@ -702,6 +702,19 @@ cmd_migrate() {
   fi
 }
 
+# ---- release-time gates (absorbed from security-release-gates) ---------------
+
+cmd_gates() {
+  local script="${SAFEDEPS_REPO_DIR}/scripts/release-gates.sh"
+  if [[ ! -f "${script}" ]]; then
+    sf_eprintf "safedeps: release-gates script not found: ${script}"
+    return 4
+  fi
+  # default subcommand is 'run'
+  if [[ "${1:-}" == "run" ]]; then shift; fi
+  exec bash "${script}" "$@"
+}
+
 # ---- help / version ----------------------------------------------------------
 
 cmd_version() {
@@ -771,6 +784,7 @@ COMMANDS
   revoke <hash | pkg@version>               Revoke an approved spec.
   re-check                                  Re-query providers for all approved specs.
   migrate                                   Migrate legacy npm-reorg-guard state.
+  gates [run]                               Release-time repo gates: secret scan, dep audit, hook/CI check.
   help [command]                            Show help.
   version                                   Print version.
 
@@ -830,6 +844,7 @@ main() {
     revoke)   cmd_revoke   "$@" ;;
     re-check|recheck) cmd_recheck "$@" ;;
     migrate)  cmd_migrate  "$@" ;;
+    gates)    cmd_gates    "$@" ;;
     help)     cmd_help     "$@" ;;
     version)  cmd_version ;;
     *)
