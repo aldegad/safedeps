@@ -16,6 +16,8 @@ OS-level (nginx / apt / brew / system binary) 은 **별도 도구로 분리**. S
 → safedeps = dev 의존성 install 단계 결.
 → OS-level 은 별도 (가칭 `infra-cve-monitor` — 미래 v3+).
 
+**Release-time repo gates** (secret scan, dependency audit, repo-local git hook install/check) 도 safedeps umbrella 에 포함한다 — `security-release-gates` 흡수 (2026-05-24). repo-specific policy(gitleaks config, privacy paths)는 대상 repo 에 남고 safedeps 는 실행 owner. OS-level / container scanning 은 계속 non-goal.
+
 ---
 
 ## v1 (출시 완료)

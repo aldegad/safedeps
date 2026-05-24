@@ -19,6 +19,13 @@ Safedeps has two distribution surfaces:
 
 Use the GitHub release when you want the full skill/hook source tree as the canonical artifact. Use npm when you mainly want a versioned global CLI.
 
+## Two Lanes
+
+`safedeps` owns two security lanes (full design in [`ARCHITECTURE.md`](./ARCHITECTURE.md) §1):
+
+- **Install-time** (the focus of this README) — advisory gate + approved-spec ledger + PreToolUse/PostToolUse hooks + post-install reorg. Per-package, before the install runs.
+- **Release-time** — `safedeps gates run`, `safedeps scan secrets [--repo|--worktree|--staged]`, `safedeps audit npm`, `safedeps hooks install|check`. Repo-tree secret scan, dependency audit, and repo-local git hook install/check before push/release. Repo-specific policy (gitleaks config, privacy paths) stays in the target repo; safedeps owns execution. *(Absorbed the former `security-release-gates`.)*
+
 ## How It Works
 
 `safedeps` plugs into Claude Code and Codex CLI hooks as a pair of **PreToolUse** and **PostToolUse** hooks that wrap package install commands. The CLI owns provider lookups and the approved-spec ledger; hooks enforce that ledger and run post-install rollback checks.

@@ -16,6 +16,15 @@
 
 ---
 
+## 두 lane
+
+`safedeps` 는 두 보안 lane 을 소유한다 (전체 설계: [`ARCHITECTURE.md`](./ARCHITECTURE.md) §1):
+
+- **install-time** (이 README 의 초점) — advisory gate + approved-spec ledger + PreToolUse/PostToolUse hook + post-install reorg. 패키지 단위, 설치 전.
+- **release-time** — `safedeps gates run`, `safedeps scan secrets [--repo|--worktree|--staged]`, `safedeps audit npm`, `safedeps hooks install|check`. repo 트리 secret scan, 의존성 audit, repo-local git hook 설치/검사 (push/release 전). repo-specific policy(gitleaks config, privacy 경로)는 대상 repo 에 남고 safedeps 는 실행 owner. *(옛 `security-release-gates` 흡수.)*
+
+---
+
 ## 어떻게 동작
 
 ```
