@@ -12,11 +12,11 @@ hooks:
 
 Safedeps protects development dependency installs with a three-phase flow:
 
-1. **Phase 1 — Advisory gate (`safedeps check`)**: query OSV (canonical advisory truth), CISA KEV (overlay), and GitHub Advisory (enrichment) before install. Write the approved (ecosystem, package, version) tuple to `~/.safedeps/approved-specs/<hash>.json` with a 30-day TTL.
-2. **Phase 2 — Hook enforcement (`scripts/safedeps-pre-guard.sh`)**: the PreToolUse hook does not call providers. It only checks the approved-spec ledger for the package/version in the about-to-run install command. Miss or expired → block with a structured message that names the exact `safedeps check` command to run next.
-3. **Phase 3 — Post-install reorg (`scripts/safedeps-post-verify.sh`)**: v1 reorg engine rolls back when the lockfile diverges from the approved spec or install scripts look suspicious.
+1. **Phase 1 — Advisory gate (`safedeps check`)**: query OSV (canonical advisory truth), CISA KEV (overlay), and GitHub Advisory (enrichment) before install. For npm, resolve the full dependency closure with a script-free lockfile probe and OSV `/v1/querybatch`; write the approved direct spec plus `transitive_specs` to `~/.safedeps/approved-specs/<hash>.json` with a 30-day TTL.
+2. **Phase 2 — Fast command guard (`scripts/safedeps-pre-guard.sh`)**: the PreToolUse hook does not call providers. It checks the approved-spec ledger for package/version tokens in the about-to-run install command and snapshots dependency truth. Miss or expired → block with a structured message that names the exact `safedeps check` command to run next. On Claude Code it also rewrites an npm install to add `--ignore-scripts` (hook `updatedInput`), so the install runs inert until verified; Codex CLI lacks `updatedInput`, so it falls back to detect-and-rollback.
+3. **Phase 3 — Effect enforcement + reorg (`scripts/safedeps-post-verify.sh`)**: PostToolUse is the primary enforcement surface for npm. It compares the actual `package-lock.json` closure against direct ledger entries and their `transitive_specs`, re-checks the closure with OSV batch, and rolls back when any package is unapproved/vulnerable or install scripts look suspicious. After a verified inert install it runs `npm rebuild` so the now-trusted lifecycle scripts execute.
 
-> **Release-time lane**: `security-release-gates` 의 release orchestrator 를 `safedeps gates` 로 흡수 완료 — repo-tree 게이트(secret scan, dependency audit, repo git hook/CI check, install-guard presence)를 한 진입점에서 실행한다. repo 의 `security:*` npm script / `scripts/security/*` / gitleaks·npm-audit fallback 을 탐지·orchestrate 한다. 개별 `scan`/`audit`/`hooks`/`git` command 분리와 대상 repo `scripts/security/*` 완전 이관은 후속(plan `safedeps-security-unification` Phase B 잔여/C). 설계 SSoT: `ARCHITECTURE.md` §1 (Two Lanes).
+> **Release-time lane**: the `security-release-gates` orchestrator is absorbed into `safedeps gates`. It runs the repo-tree gates (secret scan, dependency audit, repo git-hook/CI check, install-guard presence) from one entry point, detecting and orchestrating the repo's `security:*` npm scripts, `scripts/security/*`, and gitleaks/npm-audit fallback. Splitting the individual `scan`/`audit`/`hooks`/`git` commands out and fully migrating a target repo's `scripts/security/*` is follow-up work. Design SSoT: [`ARCHITECTURE.md`](./ARCHITECTURE.md) §1 (Two Lanes).
 
 ## CLI Reference
 
@@ -58,6 +58,8 @@ You are the primary user of this skill when you propose `npm install`, `pip inst
 
    Use `--json` so the output is parseable. Read the `result` field.
 
+   If `safedeps` is not on your PATH, invoke it at the skill path instead — `~/.claude/skills/safedeps/bin/safedeps` (Claude Code) or `~/.codex/skills/safedeps/bin/safedeps` (Codex CLI). The hook's block messages already name a runnable path, so when blocked you never have to resolve this yourself.
+
 2. **Decide from `result`**:
 
    | `result` | Action |
@@ -67,7 +69,7 @@ You are the primary user of this skill when you propose `npm install`, `pip inst
    | `cve_unpatched` | Do **not** install. Surface the CVE list to the human, propose an alternative package. |
    | `kev_hard_block` | Do **not** install. Recommend an alternative module — the package is actively exploited in the wild. |
    | `provider_unavailable` | OSV is unreachable and there is no fresh cache. Do not install. Retry later or tell the human. |
-   | `error` | Argument parsing failed. Fix and retry. |
+   | `error` | Argument parsing or version/closure resolution failed (e.g. an unpublished version). Fix the spec and retry. |
 
 3. **Issue the install** only after the spec is approved. The hook re-checks the ledger; if the approved version differs from your install argument, the hook will block again — re-narrow and retry.
 
@@ -114,7 +116,7 @@ You are the primary user of this skill when you propose `npm install`, `pip inst
 }
 ```
 
-Both engines surface `permissionDecisionReason` back to you as the block message. Run the `safedeps check ...` command quoted inside backticks, parse the `--json` output, and retry the install with the approved version.
+Both engines surface `permissionDecisionReason` back to you as the block message. The command quoted inside backticks is already runnable as-is — bare `safedeps` when the CLI is on PATH, otherwise an absolute path. Run it **verbatim** (do not rewrite a full path back down to a bare `safedeps`), parse the `--json` output, and retry the install with the approved version.
 
 ### Hard rules
 
@@ -162,7 +164,8 @@ Disable color with `--no-color` or `NO_COLOR=1`. Non-TTY pipes also strip color 
 - `lib/providers/providers.sh` — OSV / CISA KEV / GitHub Advisory adapters with a single query interface and 24h local cache under `~/.safedeps/cache/`.
 - `lib/ledger/ledger.sh` — approved spec JSON ledger I/O under `~/.safedeps/approved-specs/`, deterministic spec hash, TTL checks, atomic writes.
 - `scripts/safedeps-pre-guard.sh` — PreToolUse hook. v1 command pattern guard + ledger lookup for install commands.
-- `scripts/safedeps-post-verify.sh` — PostToolUse hook. v1 rollback engine + approved-spec diff.
+- `scripts/safedeps-post-verify.sh` — PostToolUse hook. v1 rollback engine + npm effect gate (lockfile closure vs ledger + OSV batch).
+- `lib/npm/closure.sh` — npm lockfile closure extraction and script-free temp lockfile resolver.
 - `scripts/install/install-safedeps-hooks.mjs` — cross-engine installer. Symlinks `~/.claude/skills/safedeps` and `~/.codex/skills/safedeps`, idempotently patches `~/.claude/settings.json` and `~/.codex/hooks.json`. `--uninstall` removes both.
 
 ## Provider Failure Policy
@@ -185,7 +188,7 @@ What it does:
 - Symlink the repo at `~/.claude/skills/safedeps` (when `~/.claude` exists) and `~/.codex/skills/safedeps` (when `~/.codex` exists).
 - Patch `~/.claude/settings.json` `hooks.PreToolUse[matcher=Bash]` and `hooks.PostToolUse[matcher=Bash]` with the canonical script paths.
 - Patch `~/.codex/hooks.json` with the same matcher and paths.
-- Optionally symlink `~/.local/bin/safedeps -> bin/safedeps` so the CLI is on PATH.
+- Optionally symlink `~/.local/bin/safedeps -> bin/safedeps` (via `--link-bin`) for a clean `safedeps` on PATH. **Not required** — the hook block messages and this skill fall back to the absolute skill-relative path, so the gate is fully self-contained without any PATH setup.
 
 Manual registration is also supported — see [Claude Code Hooks reference](https://code.claude.com/docs/en/hooks) and [Codex CLI Hooks](https://developers.openai.com/codex/hooks). The canonical script paths are:
 

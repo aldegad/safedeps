@@ -55,6 +55,17 @@ function osvResponse(packageName, version) {
   if (packageName === 'fixture-vuln' && version === '1.0.0') {
     return { vulns: [osvVuln('CVE-2026-1001', '1.0.1')] };
   }
+  if (packageName === 'fixture-multi-vuln' && version === '1.0.0') {
+    return {
+      vulns: [
+        osvVuln('CVE-2026-1003', '1.0.1'),
+        osvVuln('CVE-2026-1004', '1.0.5')
+      ]
+    };
+  }
+  if (packageName === 'fixture-multi-vuln' && version === '1.0.1') {
+    return { vulns: [osvVuln('CVE-2026-1004', '1.0.5')] };
+  }
   if (packageName === 'fixture-unpatched') {
     return { vulns: [osvVuln('CVE-2026-1002', null)] };
   }
@@ -71,6 +82,16 @@ const server = http.createServer(async (req, res) => {
     const version = body.version || '';
     res.setHeader('content-type', 'application/json');
     res.end(JSON.stringify(osvResponse(packageName, version)));
+    return;
+  }
+
+  if (req.method === 'POST' && req.url === '/osv/v1/querybatch') {
+    const body = await readJson(req);
+    const queries = Array.isArray(body.queries) ? body.queries : [];
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify({
+      results: queries.map((query) => osvResponse(query.package?.name || '', query.version || ''))
+    }));
     return;
   }
 

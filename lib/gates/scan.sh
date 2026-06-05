@@ -53,21 +53,6 @@ fi
 printf 'safedeps secret scan: profile=%s config=%s mode=%s\n' "$REPO_PROFILE" "$CONFIG_BASENAME" "$MODE" >&2
 
 SCAN_ROOT="$REPO_ROOT"
-TEMP_SCAN_ROOT=""
-cleanup() {
-  if [ -n "$TEMP_SCAN_ROOT" ] && [ -d "$TEMP_SCAN_ROOT" ]; then
-    rm -rf "$TEMP_SCAN_ROOT"
-  fi
-}
-trap cleanup EXIT
-
-if [ "$MODE" = "worktree" ]; then
-  TEMP_SCAN_ROOT="$(mktemp -d "$REPO_ROOT/.tmp-security-scan.XXXXXX")"
-  # Skip LFS smudge: only the pointer text is archived, so the scan runs
-  # independent of LFS budget/network.
-  GIT_LFS_SKIP_SMUDGE=1 git archive --format=tar HEAD | tar -x -C "$TEMP_SCAN_ROOT"
-  SCAN_ROOT="$TEMP_SCAN_ROOT"
-fi
 
 LOCAL_ARGS=(git --no-banner --redact --verbose --config "$CONFIG_PATH")
 DOCKER_ARGS=(git --no-banner --redact --verbose --config "/repo/$CONFIG_BASENAME")
@@ -82,7 +67,7 @@ fi
 
 LOCAL_ARGS+=("$SCAN_ROOT")
 if [ "$MODE" = "worktree" ]; then
-  DOCKER_ARGS+=("/repo/$(basename "$SCAN_ROOT")")
+  DOCKER_ARGS+=("/repo")
 else
   DOCKER_ARGS+=(/repo)
 fi

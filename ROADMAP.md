@@ -1,133 +1,126 @@
 # Safedeps Roadmap
 
-> 시간축 + 우선순위. **왜·어떻게** 는 `ARCHITECTURE.md`, **언제·뭐 먼저** 는 이 파일.
+> Timeline and priorities. The **why / how** lives in [`ARCHITECTURE.md`](./ARCHITECTURE.md); the **when / what first** lives here. *(한국어 → [ROADMAP.ko.md](./ROADMAP.ko.md))*
 
 ---
 
-## 결정 SSoT
+## Scope
 
-**스코프 = 개발 의존성만** (npm / pip / cargo / go / gem / maven / nuget).
-OS-level (nginx / apt / brew / system binary) 은 **별도 도구로 분리**. SRP 측면 더 깔끔.
+Safedeps gates **development dependency installs** (npm / pip / cargo / go / gem / maven / nuget). At release time it also runs a repo-tree secret scan, dependency audit, and git-hook install/check (the lane absorbed from the former `security-release-gates`).
 
-근거: dev 의존성과 OS 패키지는 운영 결이 다름.
-- dev = "새 기능 → install 명령 → 매번 새 패키지 진입" (install 순간 게이트가 의미 큼).
-- OS = "기존 패키지 security update" (cron 주기 audit + RSS 알람이 더 맞음).
-
-→ safedeps = dev 의존성 install 단계 결.
-→ OS-level 은 별도 (가칭 `infra-cve-monitor` — 미래 v3+).
-
-**Release-time repo gates** (secret scan, dependency audit, repo-local git hook install/check) 도 safedeps umbrella 에 포함한다 — `security-release-gates` 흡수 (2026-05-24). repo-specific policy(gitleaks config, privacy paths)는 대상 repo 에 남고 safedeps 는 실행 owner. OS-level / container scanning 은 계속 non-goal.
+Out of scope: OS / system packages, container images, runtime sandboxing, registry integrity, and reputation analysis. Those are different security layers and stay in different tools — see [`ARCHITECTURE.md`](./ARCHITECTURE.md) §1 for the boundary.
 
 ---
 
-## v1 (출시 완료)
+## v1 — `npm-reorg-guard` (shipped)
 
-**이름**: `npm-reorg-guard`
-**Status**: shipped as v1. GitHub repo has since been renamed to `aldegad/safedeps`.
+- npm-only, self-contained, no external advisory database.
+- PreToolUse hook: typosquat / `curl | bash` / non-standard registry pattern blocks.
+- PostToolUse hook: lockfile diff + install-script analysis → reorg (rollback) on suspicion.
 
-- npm ecosystem 전용.
-- PreToolUse hook (guard.sh): typosquat / curl|bash / 비표준 registry 등 **hardcoded pattern** 차단.
-- PostToolUse hook (verify.sh): lockfile diff + install script 검사 → 의심 시 **reorg** (rollback).
-- 외부 vuln DB 조회 0. self-contained.
-
-**한계**:
-- npm 만.
-- 알려진 CVE 검사 X (pattern matching 위주).
-- adversarial 회피 가능.
+Limits: npm only, no CVE lookup (pattern matching), evadable by a determined adversary. The GitHub repo has since been renamed `aldegad/safedeps`.
 
 ---
 
-## v2 — Safedeps (현재 작업 중)
+## v2 — `safedeps` (shipped, v2.1.x)
 
-**이름**: `safedeps`, 내부 engine = `reorg-guard` (v1 자산 보존).
-**Status**: `ARCHITECTURE.md` v2 작성 완료, v2.1 provider/ledger 구현 시작.
+The internal engine keeps the v1 `reorg-guard` assets.
 
-### 핵심 변화
-- ecosystem 통합: npm / yarn / pnpm / pip (poetry, uv, pipenv) / cargo / go / gem / maven / nuget.
-- **외부 vuln DB 결합**: OSV.dev (primary) + CISA KEV (hard-risk overlay) + GHSA (cross-check). NVD / deps.dev / Snyk = enrichment.
-- **3-phase defense**:
-  1. Advisory Gate (`safedeps check`) — install 명령 *작성 전* vuln DB 조회 → 안전 spec 결정 → `~/.safedeps/approved-specs/<hash>.json` ledger 기록.
-  2. Hook Enforcement (`safedeps-pre-guard.sh`) — ledger 일치 검증.
-  3. Post-Install Reorg (`safedeps-post-verify.sh`) — v1 engine 그대로 (rollback fallback).
-- Approved spec **TTL** (30일) + **daily re-check** cron (새 CVE 발견 시 revoke + 알람).
-- **No silent fallback**: provider fail = fail-closed + `--allow-unverified` explicit override (observable).
+### What changed
 
-### 구현 마일스톤
+- **Multi-ecosystem**: npm / yarn / pnpm / pip (poetry, uv, pipenv) / cargo / go / gem / maven / nuget.
+- **External advisory databases**: OSV.dev (canonical) + CISA KEV (hard-risk overlay) + GitHub Advisory (enrichment).
+- **Three-phase defense**:
+  1. Advisory gate (`safedeps check`) — query the advisory databases before the install command is written, decide a safe spec, and record it to the `~/.safedeps/approved-specs/` ledger.
+  2. Hook enforcement (`safedeps-pre-guard.sh`) — verify the install matches the ledger.
+  3. Post-install reorg (`safedeps-post-verify.sh`) — the v1 engine, rolling back on divergence.
+- **Approved-spec TTL** (30 days) + **daily re-check** (revoke + alert when a new CVE appears).
+- **No silent fallback**: a provider failure is fail-closed; any override is explicit and observable.
 
-| 마일스톤 | 산출물 | 의존 |
-|---|---|---|
-| **v2.0-doc** ✅ | `ARCHITECTURE.md` v2 작성·push | — |
-| **v2.0-roadmap** ✅ | 이 문서 | — |
-| **v2.1-rename** ✅ | GitHub repo rename `aldegad/npm-reorg-guard` → `aldegad/safedeps` ✅. 로컬 repo/skill id/path `safedeps` ✅. `safedeps migrate` 로 legacy `~/.npm-reorg-guard` → `~/.safedeps` 이전 + legacy hook cleanup. | v2.0-doc |
-| **v2.1-providers** ✅ | `lib/providers/` 신규 — OSV / KEV / GHSA adapter. 단일 query interface. 응답 cache (TTL 24h). | — |
-| **v2.1-ledger** ✅ | `lib/ledger/` 신규 — approved spec JSON I/O (atomic write, hash 계산, TTL 검사). | v2.1-providers |
-| **v2.1-cli** ✅ | `bin/safedeps` 신규 — `check`, `ledger`, `revoke`, `re-check`, `migrate`, `version` 서브커맨드. | v2.1-providers, v2.1-ledger |
-| **v2.1-guard-patch** ✅ | `scripts/safedeps-pre-guard.sh` 갱신 — ledger 일치 검증 추가 + v1 pattern 유지. | v2.1-ledger |
-| **v2.1-verify-patch** ✅ | `scripts/safedeps-post-verify.sh` 갱신 — approved spec 과 lockfile diff 비교 추가 + v1 reorg 유지. | v2.1-ledger |
-| **v2.1-multi-ecosystem** ✅ | pip / cargo / go / gem / maven / nuget 명령 파싱 + lockfile snapshot. `safedeps-pre-guard.sh` 는 install 분류와 typosquat pattern 을 확장했고, `safedeps-post-verify.sh` 는 monitored dependency files 기준으로 rollback truth 를 공유한다. | v2.1-guard-patch |
-| **v2.1-hook-rename** ✅ | hook 파일 namespacing (`guard.sh` → `safedeps-pre-guard.sh`, `verify.sh` → `safedeps-post-verify.sh`) + cross-engine installer (`scripts/install/install-safedeps-hooks.mjs`, ~/.claude + ~/.codex 자동 등록, idempotent, --uninstall). | v2.1-cli |
-| **v2.1-recheck-cron** ✅ | daily re-check launchd — 전체 approved spec 재 query → 새 CVE/KEV/provider-skip 시 revoke + macOS 알림. | v2.1-providers, v2.1-ledger |
-| **v2.1-tests** ✅ | end-to-end 테스트 — fixture provider 응답 → 명령 시뮬레이션 → ledger / hook / re-check / migration 동작 검증. | 모든 v2.1 |
-| **v2.1-release** | npm package publish (`@aldegad/safedeps`) + GitHub release v2.1.0. | 모든 v2.1 |
+### Milestones (all shipped)
 
-### 2026-05-18 릴리즈 전 정리 메모
+| Milestone | Output |
+|---|---|
+| `v2.0-doc` | `ARCHITECTURE.md` v2 written and pushed. |
+| `v2.1-rename` | Repo / skill id / paths renamed to `safedeps`; `safedeps migrate` moves legacy `~/.npm-reorg-guard` state to `~/.safedeps` and cleans up legacy hooks. |
+| `v2.1-providers` | `lib/providers/` — OSV / KEV / GHSA adapters behind one query interface, with a 24h response cache. |
+| `v2.1-ledger` | `lib/ledger/` — approved-spec JSON I/O (atomic write, hash, TTL check). |
+| `v2.1-cli` | `bin/safedeps` — `check`, `ledger`, `revoke`, `re-check`, `migrate`, `version` subcommands. |
+| `v2.1-guard-patch` | `safedeps-pre-guard.sh` — ledger enforcement on top of the v1 pattern blocks. |
+| `v2.1-verify-patch` | `safedeps-post-verify.sh` — lockfile-diff comparison against the approved spec on top of the v1 reorg. |
+| `v2.1-multi-ecosystem` | pip / cargo / go / gem / maven / nuget command parsing + lockfile snapshots, shared as rollback truth across both hooks. |
+| `v2.1-hook-rename` | Hook file namespacing + cross-engine installer (`install-safedeps-hooks.mjs`, idempotent, `--uninstall`). |
+| `v2.1-recheck-cron` | Daily re-check LaunchAgent — re-queries every approved spec, revokes + notifies on new CVE/KEV/provider-skip. |
+| `v2.1-tests` | End-to-end tests — fixture provider responses drive ledger / hook / re-check / migration checks. |
+| `v2.1-release` | npm publish (`@aldegad/safedeps`) + GitHub release. |
 
-- npm package metadata 는 v2.1.0 기준으로 정합화한다 (`package.json` version + `bin.safedeps`).
-- `npm test` 는 release smoke suite 를 실행한다. full fixture E2E 는 `v2.1-tests` 후속으로 남긴다.
-- daily re-check 는 토큰을 쓰지 않는다. 알렉스가 opt-in 하면 macOS `launchd` user agent 로 `safedeps re-check --json` 을 매일 실행하는 구조가 기본이다. 네트워크는 OSV/CISA/GHSA provider query 에만 사용된다.
-- 실제 local background job 은 `scripts/install/install-safedeps-recheck-agent.mjs` 로 atomic install 한다. wrapper 는 `~/.safedeps/recheck.log` 와 `~/.safedeps/recheck-alerts.jsonl` 를 쓰고, 새 CVE/KEV/revoke/provider-skip 이 있으면 macOS notification 을 띄운다.
+### Release notes
 
-### 후속 로드맵 — 전체 workspace inventory audit
+- The npm package version in `package.json` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION` tracks it and the smoke test reads `package.json` to compare (current: v2.2.0).
+- `npm test` runs the release smoke suite; the full fixture E2E lives under `v2.1-tests`.
+- The daily re-check uses no LLM tokens. It is opt-in: a macOS `launchd` user agent runs `safedeps re-check --json` daily, installed atomically by `install-safedeps-recheck-agent.mjs`. It writes `~/.safedeps/recheck.log` and `~/.safedeps/recheck-alerts.jsonl` and raises a macOS notification on a new CVE/KEV/revoke/provider-skip. Network is used only for OSV / CISA / GHSA queries.
 
-전체 repo/lockfile inventory scan 은 safedeps v2.1 daily re-check 와 분리한다. 후보 설계는 최초 one-shot inventory scan 으로 workspace 의 manifest/lockfile 을 발견하고, 사용자가 채택한 spec 만 approved ledger 또는 별도 inventory ledger 에 넣은 뒤 주기 re-check 대상으로 삼는 방식이다. 이렇게 해야 safedeps 의 현재 책임인 install approval gate 와 이미 디스크에 존재하는 dependency audit 의 책임 소재가 섞이지 않는다.
+## v2.2 — effect-based enforcement (npm)
 
-### 우선순위
+Status: shipped as v2.2.0 (npm-first).
 
-1. v2.1-release: commit / tag / GitHub release / npm publish.
+### What changed
 
----
+- **Authority moved to effects**: PostToolUse now reads the actual `package-lock.json` closure and compares every installed `pkg@version` against approved direct specs plus their `transitive_specs`.
+- **Full closure approval for npm**: `safedeps check npm <pkg>@<version>` resolves a script-free lockfile in a temp dir with `npm install --package-lock-only --ignore-scripts`, extracts the full closure, and queries OSV `/v1/querybatch`.
+- **Batch + cache**: OSV batch responses are written back into the same per `pkg@version` 24h cache used by single-package provider queries.
+- **No blind trust for transitives**: a clean direct package with an unapproved or vulnerable transitive dependency is not enough; the full closure must be clean and recorded.
+- **PreToolUse demoted to fast UX guard**: command parsing still blocks obvious unapproved install attempts and keeps the bypass regression coverage, but PostToolUse is the primary enforcement surface.
+- **Inert install (Claude Code)**: the PreToolUse hook rewrites an npm install to add `--ignore-scripts` via the hook `updatedInput` capability, so the install runs inert; PostToolUse runs `npm rebuild` only after the closure is verified clean, so a rejected package's lifecycle scripts never run. Codex CLI lacks `updatedInput`, so it stays on detect-and-rollback.
 
-## v3 (미래 — 알렉스 결정 시점)
+### npm-only boundary
 
-- **plugin model** — 사용자 정의 provider (회사 내부 vuln DB, private registry).
-- **policy file** — `.safedeps.toml` 로 \"우리 팀 정책: KEV hit 자동 block, CVSS 7+ 사용자 컨펌, 특정 패키지 allowlist\" 명시.
-- **CI mode** — `safedeps check --ci` 로 GitHub Actions / CircleCI fail-fast.
-- **transitive risk score** — deps.dev graph 통합. 직접 dep 만 아니라 transitive dep 의 \"위험 점수\" 시각화.
+This phase covers npm lockfile closure only. pip / cargo / go / gem / maven / nuget keep the v2.1 command/ledger/reorg behavior until each ecosystem has an explicit closure resolver and script/no-execution policy.
 
----
+### Verification
 
-## v4+ (장기)
+- closure approval records `transitive_specs`
+- unapproved transitive package in `package-lock.json` triggers post-verify reorg
+- approved full-closure install passes without false reorg
+- heredoc / echo text does not trigger install detection
+- existing smoke + fixture E2E regression suite remains green
 
-- **team-shared ledger** — multi-machine approved spec sync (회사 dev 모두가 같은 ledger 공유).
-- **AI agent integration** — Claude / Codex 가 vuln 발견 시 \"대체 모듈 X 권장\" 직접 제안 (LLM-as-judge).
-- **diff visualization UI** — 두 approved spec snapshot 사이의 dep tree diff 시각화.
+### Current focus
 
----
-
-## 명시적 NON-GOAL (이 도구는 하지 않는다)
-
-- **OS-level CVE 감시** (nginx, apt 패키지, system binary). → 별도 도구 `infra-cve-monitor` 결로 분리.
-- **컨테이너 이미지 스캔**. → Trivy / Grype.
-- **runtime 권한 sandbox**. → lavamoat / firejail.
-- **registry 자체의 손상 감지**. → registry 운영사 책임.
-- **사용자 평판 분석 (behavioral)**. → socket.dev.
-
-safedeps 의 결 = **\"개발 의존성 install 단계의 advisory + spec gate + rollback\"** 한 줄. 다른 결로 확장하지 않는다 — SRP 측면 다른 도구로 분리.
+1. `v2.2.0-release`: merge `safedeps-security-hardening`, tag `v2.2.0`, GitHub release, `npm publish`.
 
 ---
 
-## 관련 미래 도구 (분리 권장)
+## v3 (future)
 
-| 도구 | 결 | 관계 |
-|---|---|---|
-| `safedeps` (이것) | dev 의존성 (npm/pip/cargo/...) install 단계 | 현재 작업 |
-| `infra-cve-monitor` (가칭) | nginx / apt / OS package 주기적 audit + RSS 알람 | 미래 별 도구 |
-| `container-scan-bridge` (가칭) | Trivy / Grype wrapper, 컨테이너 이미지 결 | 미래 별 도구 |
+### Ledger tamper resistance
 
-세 도구가 같은 결 (\"보안\") 의 다른 layer. 한 skill 에 통합하지 않고 분리.
+Defends the second-order attack where a malicious package's `postinstall` (running as the user) forges a "B approved" ledger entry so a later install of B skips the advisory check. The package cannot do this *before* it runs, so closing the install-time gate is the first line of defense; this hardens the case where a first compromise already happened.
+
+Approach — **treat OSV as the authority and the ledger as a cache**, plus tamper detection. Cheap, layers onto existing infra:
+
+1. **Re-validate at enforcement / re-check** — verify the stored evidence against OSV instead of trusting the ledger verdict. A forged entry with no real evidence (or for a package OSV reports as vulnerable) is caught and revoked. Reduces the ledger to memoization with OSV as SSoT.
+2. **Watch `~/.safedeps/` in the post-install scan** — the post-verify hook already flags `postinstall` scripts that touch `~/.ssh` / `.env`; add `~/.safedeps/` so a package that writes the ledger trips a reorg — catching the forge in the act.
+3. **Provenance cross-check in daily re-check** — flag ledger entries with no matching `advisory.log` record (i.e. no real `safedeps check` ever ran) as suspected forgeries.
+
+Explicit non-approach: **cryptographic ledger signing is not pursued** — a same-uid attacker can read the signing key and re-sign forgeries, so a local HMAC/signature adds no real boundary. The defense is authority-elsewhere (OSV) + detection, not local secrets.
+
+### Other v3 work
+
+- **Plugin providers** — user-defined advisory sources (internal vuln DB, private registry).
+- **Policy file** — `.safedeps.toml` for team policy (auto-block on KEV hit, user confirm on CVSS 7+, per-package allowlist).
+- **CI mode** — `safedeps check --ci` for fail-fast in GitHub Actions / CircleCI.
+- **Closure expansion beyond npm** — pip / cargo / go / gem / maven / nuget closure resolvers with explicit no-script/no-build policies.
+- **Transitive risk score** — deps.dev graph integration; risk visualization beyond direct dependencies.
+
+## v4+ (long-term)
+
+- **Team-shared ledger** — multi-machine approved-spec sync.
+- **Agent remediation** — Claude / Codex suggests a safer replacement when a vuln is found (LLM-as-judge).
+- **Diff visualization** — dependency-tree diff between two approved-spec snapshots.
 
 ---
 
-## 변경 history
+## History
 
-- 2026-05-18: ROADMAP.md 최초 작성. v1 → v2 결정 + v3 / v4 / NON-GOAL 명시. (코덱시 surface:195 합의 + 클로디시 surface:61 작성.)
+- 2026-05-18: Initial ROADMAP — v1 → v2 decision plus v3 / v4 outline.
