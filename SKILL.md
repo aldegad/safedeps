@@ -16,7 +16,7 @@ Safedeps protects development dependency installs with a three-phase flow:
 2. **Phase 2 — Fast command guard (`scripts/safedeps-pre-guard.sh`)**: the PreToolUse hook does not call providers. It checks the approved-spec ledger for package/version tokens in the about-to-run install command and snapshots dependency truth. Miss or expired → block with a structured message that names the exact `safedeps check` command to run next. On Claude Code it also rewrites an npm install to add `--ignore-scripts` (hook `updatedInput`), so the install runs inert until verified; Codex CLI lacks `updatedInput`, so it falls back to detect-and-rollback.
 3. **Phase 3 — Effect enforcement + reorg (`scripts/safedeps-post-verify.sh`)**: PostToolUse is the primary enforcement surface for npm. It compares the actual `package-lock.json` closure against direct ledger entries and their `transitive_specs`, re-checks the closure with OSV batch, and rolls back when any package is unapproved/vulnerable or install scripts look suspicious. After a verified inert install it runs `npm rebuild` so the now-trusted lifecycle scripts execute.
 
-> **Release-time lane**: `security-release-gates` 의 release orchestrator 를 `safedeps gates` 로 흡수 완료 — repo-tree 게이트(secret scan, dependency audit, repo git hook/CI check, install-guard presence)를 한 진입점에서 실행한다. repo 의 `security:*` npm script / `scripts/security/*` / gitleaks·npm-audit fallback 을 탐지·orchestrate 한다. 개별 `scan`/`audit`/`hooks`/`git` command 분리와 대상 repo `scripts/security/*` 완전 이관은 후속(plan `safedeps-security-unification` Phase B 잔여/C). 설계 SSoT: `ARCHITECTURE.md` §1 (Two Lanes).
+> **Release-time lane**: the `security-release-gates` orchestrator is absorbed into `safedeps gates`. It runs the repo-tree gates (secret scan, dependency audit, repo git-hook/CI check, install-guard presence) from one entry point, detecting and orchestrating the repo's `security:*` npm scripts, `scripts/security/*`, and gitleaks/npm-audit fallback. Splitting the individual `scan`/`audit`/`hooks`/`git` commands out and fully migrating a target repo's `scripts/security/*` is follow-up work. Design SSoT: [`ARCHITECTURE.md`](./ARCHITECTURE.md) §1 (Two Lanes).
 
 ## CLI Reference
 
@@ -69,7 +69,7 @@ You are the primary user of this skill when you propose `npm install`, `pip inst
    | `cve_unpatched` | Do **not** install. Surface the CVE list to the human, propose an alternative package. |
    | `kev_hard_block` | Do **not** install. Recommend an alternative module — the package is actively exploited in the wild. |
    | `provider_unavailable` | OSV is unreachable and there is no fresh cache. Do not install. Retry later or tell the human. |
-   | `error` | Argument parsing failed. Fix and retry. |
+   | `error` | Argument parsing or version/closure resolution failed (e.g. an unpublished version). Fix the spec and retry. |
 
 3. **Issue the install** only after the spec is approved. The hook re-checks the ledger; if the approved version differs from your install argument, the hook will block again — re-narrow and retry.
 
