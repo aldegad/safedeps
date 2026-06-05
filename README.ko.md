@@ -34,6 +34,8 @@
 
 설치 전 command hook(PreToolUse)은 빠른 advisory 넛지다 — 명백한 미승인 install 과 위험한 명령 형태를 막아 에이전트에게 즉시 피드백을 준다. 하지만 npm 의 진짜 권위는 설치 후 effect gate 다: 명령이 *어떻게 생겼는지* 가 아니라 *실제로 뭐가 깔렸는지* 를 보기 때문에, wrapper 나 난독화된 install 명령으로도 패키지를 통과시킬 수 없다.
 
+**스크립트 안전 (무실행 설치).** Claude Code 에서는 PreToolUse hook 이 npm install 에 `--ignore-scripts` 를 붙여 rewrite 한다 — 그래서 설치가 **무실행(inert)** 으로 돈다(패키지는 디스크에 앉되 lifecycle script 는 아직 안 돎). 그다음 effect gate 가 closure 를 검증하고, 통과했을 때만 PostToolUse 가 `npm rebuild` 로 이제서야 검증된 스크립트를 실행한다. 게이트가 거부한 패키지는 *스크립트가 한 번도 돌기 전에* reorg 된다. (Claude Code 의 hook `updatedInput` 기능을 쓴다. Codex CLI 는 이 기능이 없어 Codex 에서는 install 이 정상 실행되고 effect gate 는 detect-and-rollback 이다 — 악성 install script 가 롤백 전에 1회 실행될 수 있다.)
+
 이 effect-primary 모델은 현재 npm 한정이다. `pip`, `cargo`, `go`, `gem`, `maven`, `nuget` 은 closure resolver 가 붙기 전까지 v2.1 command-gate + reorg 모델을 유지한다.
 
 ```

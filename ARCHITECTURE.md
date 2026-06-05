@@ -78,7 +78,7 @@ The two lanes differ in timing and scope (one package's effect before/after inst
 ```
 
 - **Phase 1 — advisory check.** For npm, safedeps builds a script-free lockfile in a temp dir (`npm install <pkg>@<version> --package-lock-only --ignore-scripts`), extracts the full closure, and queries OSV `/v1/querybatch` for direct and transitive packages together. When clean, the direct ledger entry records `transitive_specs`.
-- **Phase 2 — fast command gate.** The PreToolUse hook parses the command, blocks obvious unapproved installs, and snapshots dependency files. It is a best-effort advisory layer that gives the agent immediate feedback — not the final authority.
+- **Phase 2 — fast command gate.** The PreToolUse hook parses the command, blocks obvious unapproved installs, and snapshots dependency files. It is a best-effort advisory layer that gives the agent immediate feedback — not the final authority. On Claude Code it also rewrites an npm install to add `--ignore-scripts` (via the hook `updatedInput` capability), so the install runs inert and no lifecycle script executes until the effect gate has verified the closure.
 - **Phase 3 — npm primary effect gate.** The PostToolUse hook compares the actual `package-lock.json` closure against the ledger's direct entries and their `transitive_specs`, and re-queries OSV in batch. Any unapproved or vulnerable package triggers a reorg to the last confirmed snapshot. This authority is scoped to the npm closure.
 
 ---
@@ -239,6 +239,8 @@ npm PRIMARY EFFECT GATE + REORG (safedeps-post-verify.sh)
   • non-standard registry resolved URLs · 50+ dependency explosion · native binaries
   • npm lockfile closure diverging from approved specs / transitive_specs → REORG
 ```
+
+**Install-script timing.** A package's `postinstall` script runs *during* `npm install`. On Claude Code, the Phase 2 hook injects `--ignore-scripts`, so the install is inert and scripts run only after the effect gate confirms the closure (via `npm rebuild`) — a rejected package's scripts never run. On Codex CLI, which does not expose the `updatedInput` hook capability, the install runs normally and a malicious install script can execute once before the post-install reorg cleans up. (The package's *runtime* code is removed before your app runs it on both engines; only install-time lifecycle scripts have this Codex window.)
 
 **What it does not stop (current limits):**
 
