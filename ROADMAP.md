@@ -56,13 +56,13 @@ The internal engine keeps the v1 `reorg-guard` assets.
 
 ### Release notes
 
-- The npm package version in `package.json` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION` tracks it and the smoke test reads `package.json` to compare (current: v2.1.1).
+- The npm package version in `package.json` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION` tracks it and the smoke test reads `package.json` to compare (current: v2.2.0).
 - `npm test` runs the release smoke suite; the full fixture E2E lives under `v2.1-tests`.
 - The daily re-check uses no LLM tokens. It is opt-in: a macOS `launchd` user agent runs `safedeps re-check --json` daily, installed atomically by `install-safedeps-recheck-agent.mjs`. It writes `~/.safedeps/recheck.log` and `~/.safedeps/recheck-alerts.jsonl` and raises a macOS notification on a new CVE/KEV/revoke/provider-skip. Network is used only for OSV / CISA / GHSA queries.
 
-## v2.2 — effect-based enforcement (npm prototype)
+## v2.2 — effect-based enforcement (npm)
 
-Status: implemented as the npm-first prototype.
+Status: shipped as v2.2.0 (npm-first).
 
 ### What changed
 
@@ -71,6 +71,7 @@ Status: implemented as the npm-first prototype.
 - **Batch + cache**: OSV batch responses are written back into the same per `pkg@version` 24h cache used by single-package provider queries.
 - **No blind trust for transitives**: a clean direct package with an unapproved or vulnerable transitive dependency is not enough; the full closure must be clean and recorded.
 - **PreToolUse demoted to fast UX guard**: command parsing still blocks obvious unapproved install attempts and keeps the bypass regression coverage, but PostToolUse is the primary enforcement surface.
+- **Inert install (Claude Code)**: the PreToolUse hook rewrites an npm install to add `--ignore-scripts` via the hook `updatedInput` capability, so the install runs inert; PostToolUse runs `npm rebuild` only after the closure is verified clean, so a rejected package's lifecycle scripts never run. Codex CLI lacks `updatedInput`, so it stays on detect-and-rollback.
 
 ### npm-only boundary
 
@@ -86,7 +87,7 @@ This phase covers npm lockfile closure only. pip / cargo / go / gem / maven / nu
 
 ### Current focus
 
-1. `v2.1-release`: commit / tag / GitHub release / npm publish.
+1. `v2.2.0-release`: merge `safedeps-security-hardening`, tag `v2.2.0`, GitHub release, `npm publish`.
 
 ---
 
