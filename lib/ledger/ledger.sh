@@ -183,16 +183,23 @@ safedeps_ledger_check() {
 
 safedeps_ledger_atomic_write() {
   local target_path="$1"
-  local temp_path="${target_path}.$$"
+  local target_dir
+  local target_base
+  local temp_path
 
   safedeps_ledger_init
+  target_dir=$(dirname "${target_path}")
+  target_base=$(basename "${target_path}")
+  mkdir -p "${target_dir}" || return 1
+  temp_path=$(mktemp "${target_dir}/.${target_base}.XXXXXX") || return 1
+
   cat > "${temp_path}"
   chmod 600 "${temp_path}" 2>/dev/null || true
   safedeps_ledger_validate_json "${temp_path}" || {
     rm -f "${temp_path}"
     return 1
   }
-  mv "${temp_path}" "${target_path}"
+  mv -f "${temp_path}" "${target_path}"
 }
 
 safedeps_ledger_write_approved_spec() {
@@ -203,11 +210,13 @@ safedeps_ledger_write_approved_spec() {
   local approved_by="${5:-local}"
   local evidence_file="${6:-}"
   local ttl_days="${7:-${SAFEDEPS_LEDGER_DEFAULT_TTL_DAYS}}"
+  local transitive_specs_file="${8:-}"
   local approved_at
   local expires_at
   local hash
   local target_path
   local evidence_arg=()
+  local transitive_arg=()
 
   safedeps_ledger_require_jq || return 1
   safedeps_ledger_init
@@ -227,6 +236,20 @@ safedeps_ledger_write_approved_spec() {
     evidence_arg=(--argjson evidence '{}')
   fi
 
+  if [[ -n "${transitive_specs_file}" ]]; then
+    [[ -f "${transitive_specs_file}" ]] || {
+      printf 'safedeps ledger: transitive specs file not found: %s\n' "${transitive_specs_file}" >&2
+      return 1
+    }
+    jq -e 'type == "array"' "${transitive_specs_file}" >/dev/null || {
+      printf 'safedeps ledger: transitive specs file must be a JSON array: %s\n' "${transitive_specs_file}" >&2
+      return 1
+    }
+    transitive_arg=(--slurpfile transitive_specs "${transitive_specs_file}")
+  else
+    transitive_arg=(--argjson transitive_specs '[]')
+  fi
+
   if [[ -n "${evidence_file}" ]]; then
     jq -cn \
       --arg hash "${hash}" \
@@ -238,6 +261,7 @@ safedeps_ledger_write_approved_spec() {
       --arg expires_at "${expires_at}" \
       --arg approved_by "${approved_by}" \
       "${evidence_arg[@]}" \
+      "${transitive_arg[@]}" \
       '{
         hash: $hash,
         ecosystem: $ecosystem,
@@ -248,7 +272,11 @@ safedeps_ledger_write_approved_spec() {
         expires_at: $expires_at,
         approved_by: $approved_by,
         evidence: ($evidence[0] // {}),
-        transitive_specs: []
+        transitive_specs: (($transitive_specs[0] // $transitive_specs) | map({
+          ecosystem: (.ecosystem // $ecosystem),
+          package: .package,
+          version: (.version | tostring)
+        }) | unique_by(.ecosystem + "\u0000" + .package + "\u0000" + .version))
       }' | safedeps_ledger_atomic_write "${target_path}"
   else
     jq -cn \
@@ -261,6 +289,7 @@ safedeps_ledger_write_approved_spec() {
       --arg expires_at "${expires_at}" \
       --arg approved_by "${approved_by}" \
       "${evidence_arg[@]}" \
+      "${transitive_arg[@]}" \
       '{
         hash: $hash,
         ecosystem: $ecosystem,
@@ -271,11 +300,64 @@ safedeps_ledger_write_approved_spec() {
         expires_at: $expires_at,
         approved_by: $approved_by,
         evidence: $evidence,
-        transitive_specs: []
+        transitive_specs: (($transitive_specs[0] // $transitive_specs) | map({
+          ecosystem: (.ecosystem // $ecosystem),
+          package: .package,
+          version: (.version | tostring)
+        }) | unique_by(.ecosystem + "\u0000" + .package + "\u0000" + .version))
       }' | safedeps_ledger_atomic_write "${target_path}"
   fi
 
   cat "${target_path}"
+}
+
+safedeps_ledger_effect_check() {
+  local ecosystem="$1"
+  local package_name="$2"
+  local version="$3"
+  local ledger_file
+  local now_iso
+
+  safedeps_ledger_require_jq || return 1
+  safedeps_ledger_init
+  now_iso=$(safedeps_ledger_now_iso)
+
+  while IFS= read -r -d '' ledger_file; do
+    safedeps_ledger_validate_json "${ledger_file}" || continue
+    safedeps_ledger_is_expired_file "${ledger_file}" && continue
+    if jq -e \
+      --arg ecosystem "${ecosystem}" \
+      --arg package "${package_name}" \
+      --arg version "${version}" \
+      '
+      (.revoked_at // "") == ""
+      and (
+        (.ecosystem == $ecosystem and .package == $package and .version == $version)
+        or (((.transitive_specs // []) | map(select(
+          (.ecosystem // $ecosystem) == $ecosystem
+          and .package == $package
+          and (.version | tostring) == $version
+        )) | length) > 0)
+      )
+    ' \
+      "${ledger_file}" >/dev/null; then
+      jq -cn \
+        --arg owner_hash "$(jq -r '.hash' "${ledger_file}")" \
+        --arg owner_package "$(jq -r '.package' "${ledger_file}")" \
+        --arg owner_version "$(jq -r '.version' "${ledger_file}")" \
+        --arg checked_at "${now_iso}" \
+        '{approved:true, reason:"hit", owner_hash:$owner_hash, owner_package:$owner_package, owner_version:$owner_version, checked_at:$checked_at}'
+      return 0
+    fi
+  done < <(find "${SAFEDEPS_LEDGER_DIR}" -maxdepth 1 -name '*.json' -type f -print0 2>/dev/null)
+
+  jq -cn \
+    --arg ecosystem "${ecosystem}" \
+    --arg package "${package_name}" \
+    --arg version "${version}" \
+    --arg checked_at "${now_iso}" \
+    '{approved:false, reason:"miss", ecosystem:$ecosystem, package:$package, version:$version, checked_at:$checked_at}'
+  return 1
 }
 
 safedeps_ledger_revoke() {
@@ -284,26 +366,18 @@ safedeps_ledger_revoke() {
   local version="$3"
   local reason="${4:-revoked}"
   local ledger_file
-  local temp_path
   local revoked_at
 
   ledger_file=$(safedeps_ledger_path "${ecosystem}" "${package_name}" "${version}")
   [[ -f "${ledger_file}" ]] || return 1
   safedeps_ledger_validate_json "${ledger_file}" || return 1
 
-  temp_path="${ledger_file}.$$"
   revoked_at=$(safedeps_ledger_now_iso)
   jq \
     --arg revoked_at "${revoked_at}" \
     --arg reason "${reason}" \
     '. + {revoked_at: $revoked_at, revoked_reason: $reason, expires_at: $revoked_at}' \
-    "${ledger_file}" > "${temp_path}"
-  chmod 600 "${temp_path}" 2>/dev/null || true
-  safedeps_ledger_validate_json "${temp_path}" || {
-    rm -f "${temp_path}"
-    return 1
-  }
-  mv "${temp_path}" "${ledger_file}"
+    "${ledger_file}" | safedeps_ledger_atomic_write "${ledger_file}"
   cat "${ledger_file}"
 }
 
@@ -325,11 +399,15 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
       safedeps_ledger_check "$@"
       ;;
     approve)
-      if [[ "$#" -lt 3 || "$#" -gt 7 ]]; then
-        printf 'usage: %s approve <ecosystem> <package> <version> [version_range] [approved_by] [evidence_file] [ttl_days]\n' "$0" >&2
+      if [[ "$#" -lt 3 || "$#" -gt 8 ]]; then
+        printf 'usage: %s approve <ecosystem> <package> <version> [version_range] [approved_by] [evidence_file] [ttl_days] [transitive_specs_file]\n' "$0" >&2
         exit 2
       fi
       safedeps_ledger_write_approved_spec "$@"
+      ;;
+    effect-check)
+      [[ "$#" -eq 3 ]] || { printf 'usage: %s effect-check <ecosystem> <package> <version>\n' "$0" >&2; exit 2; }
+      safedeps_ledger_effect_check "$@"
       ;;
     revoke)
       if [[ "$#" -lt 3 || "$#" -gt 4 ]]; then
@@ -339,7 +417,7 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
       safedeps_ledger_revoke "$@"
       ;;
     *)
-      printf 'usage: %s {hash|path|check|approve|revoke} ...\n' "$0" >&2
+      printf 'usage: %s {hash|path|check|effect-check|approve|revoke} ...\n' "$0" >&2
       exit 2
       ;;
   esac

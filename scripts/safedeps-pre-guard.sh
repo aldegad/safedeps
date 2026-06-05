@@ -76,10 +76,16 @@ release_state_lock() {
 write_state_file() {
   local target_path="$1"
   local value="$2"
-  local temp_path="${target_path}.$$"
+  local target_dir
+  local target_base
+  local temp_path
 
+  target_dir=$(dirname "${target_path}")
+  target_base=$(basename "${target_path}")
+  mkdir -p "${target_dir}" || return 1
+  temp_path=$(mktemp "${target_dir}/.${target_base}.XXXXXX") || return 1
   printf '%s\n' "${value}" > "${temp_path}"
-  mv "${temp_path}" "${target_path}"
+  mv -f "${temp_path}" "${target_path}"
 }
 
 compute_dir_hash() {
@@ -99,10 +105,13 @@ command_is_dependency_install() {
   local scan_command
   local install_pattern
 
-  scan_command=$(command_scan_text "${command}")
-  install_pattern='(^|[;&|]+[[:space:]]*)((npm[[:space:]]+(install|i|add|update|up|upgrade))|npx[[:space:]]|pnpm[[:space:]]+(add|install|update|up|dlx)|yarn[[:space:]]+(add|install|upgrade|dlx)|((python3?|py)[[:space:]]+-m[[:space:]]+pip|pip3?)[[:space:]]+install|poetry[[:space:]]+add|uv[[:space:]]+(add|pip[[:space:]]+install)|pipenv[[:space:]]+install|cargo[[:space:]]+(add|install)|go[[:space:]]+(get|install)|gem[[:space:]]+install|bundle[[:space:]]+add|mvn[[:space:]]+dependency:get|dotnet[[:space:]]+add[[:space:]]+package)([[:space:]]|$)'
+  install_pattern='(^|[;&|]+[[:space:]]*)((npm([[:space:]]+--?[a-zA-Z0-9_-]+([=[:space:]][^[:space:]]+)?)?[[:space:]]+(install|i|add|update|up|upgrade))|npx[[:space:]]|pnpm([[:space:]]+--?[a-zA-Z0-9_-]+([=[:space:]][^[:space:]]+)?)?[[:space:]]+(add|install|update|up|dlx)|yarn([[:space:]]+--?[a-zA-Z0-9_-]+([=[:space:]][^[:space:]]+)?)?[[:space:]]+(add|install|upgrade|dlx)|((python3?|py)[[:space:]]+-m[[:space:]]+pip|pip3?)[[:space:]]+install|poetry[[:space:]]+add|uv[[:space:]]+(add|pip[[:space:]]+install)|pipenv[[:space:]]+install|cargo[[:space:]]+(add|install)|go[[:space:]]+(get|install)|gem[[:space:]]+install|bundle[[:space:]]+add|mvn[[:space:]]+dependency:get|dotnet[[:space:]]+add[[:space:]]+package)([[:space:]]|$)'
 
-  echo "${scan_command}" | grep -qEi "${install_pattern}"
+  while IFS= read -r scan_command; do
+    scan_command=$(command_scan_text "${scan_command}")
+    echo "${scan_command}" | grep -qEi "${install_pattern}" && return 0
+  done < <(command_candidate_texts "${command}")
+  return 1
 }
 
 command_hides_dependency_install() {
@@ -113,7 +122,7 @@ command_hides_dependency_install() {
   manager_pattern='(npm|npx|pnpm|yarn|pip3?|python3?[[:space:]]+-m[[:space:]]+pip|poetry|uv|pipenv|cargo|go|gem|bundle|mvn|dotnet)'
   verb_pattern='(install|i|add|update|up|upgrade|dlx|get|dependency:get|package)'
 
-  echo "${command}" | grep -qEi '(eval[[:space:]]|\$\(|`)' && \
+  echo "${command}" | grep -qEi '(eval[[:space:]]|\$\(|`|(^|[[:space:];|&])(bash|sh|zsh)[[:space:]]+-[A-Za-z]*c[[:space:]])' && \
     echo "${command}" | grep -qEi "${manager_pattern}.*${verb_pattern}"
 }
 
@@ -152,6 +161,68 @@ command_scan_text() {
   done
 
   printf '%s' "${output}"
+}
+
+normalize_install_text() {
+  local text="$1"
+
+  for _ in 1 2 3; do
+    text=$(printf '%s' "${text}" | sed -E \
+      -e 's#(^|[[:space:];|&])(/[^[:space:];|&]+/)(npm|npx|pnpm|yarn|pip3?|python3?|py|poetry|uv|pipenv|cargo|go|gem|bundle|mvn|dotnet)([[:space:];|&]|$)#\1\3\4#g' \
+      -e 's#(^|[;&|][[:space:]]*)(env[[:space:]]+([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]+[[:space:]]+)*|command[[:space:]]+)#\1#g')
+  done
+  printf '%s' "${text}"
+}
+
+strip_heredoc_bodies() {
+  local input="$1"
+  local line
+  local delimiter=""
+  local heredoc_re="<<-?[[:space:]]*[\"']?([A-Za-z0-9_][A-Za-z0-9_.-]*)[\"']?"
+
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    if [[ -n "${delimiter}" ]]; then
+      if [[ "${line}" == "${delimiter}" ]]; then
+        delimiter=""
+      fi
+      continue
+    fi
+
+    if [[ "${line}" =~ ${heredoc_re} ]]; then
+      delimiter="${BASH_REMATCH[1]}"
+    fi
+    printf '%s\n' "${line}"
+  done <<< "${input}"
+}
+
+extract_shell_c_payloads() {
+  local rest="$1"
+
+  while [[ "${rest}" =~ (bash|sh|zsh)[[:space:]]+-[A-Za-z]*c[[:space:]]+\"([^\"]*)\" ]]; do
+    printf '%s\n' "${BASH_REMATCH[2]}"
+    rest="${rest#*"${BASH_REMATCH[0]}"}"
+  done
+
+  rest="$1"
+  while [[ "${rest}" =~ (bash|sh|zsh)[[:space:]]+-[A-Za-z]*c[[:space:]]+\'([^\']*)\' ]]; do
+    printf '%s\n' "${BASH_REMATCH[2]}"
+    rest="${rest#*"${BASH_REMATCH[0]}"}"
+  done
+}
+
+command_candidate_texts() {
+  local command="$1"
+  local payload
+
+  command=$(strip_heredoc_bodies "${command}")
+
+  normalize_install_text "${command}"
+  printf '\n'
+  while IFS= read -r payload; do
+    [[ -z "${payload}" ]] && continue
+    normalize_install_text "${payload}"
+    printf '\n'
+  done < <(extract_shell_c_payloads "${command}")
 }
 
 snapshot_project_file() {
@@ -320,8 +391,10 @@ fi
 
 # --- Phase 2 advisory gate — ledger enforcement -------------------------------
 # For commands that name specific packages, require an entry in the approved-
-# spec ledger. Miss/expired → block with a structured message that names the
-# exact `safedeps check` command the caller (agent or human) should run next.
+# spec ledger. Miss/expired → block with a structured message that names a
+# runnable `safedeps check` command the caller (agent or human) should run
+# next — PATH command when present, else an absolute path, so the self-heal
+# loop never dead-ends on a missing PATH symlink.
 #
 # Conservative: only block when at least one pkg@spec token is parseable. Bare
 # `npm install` (lockfile install) falls through to the v1 reorg checks.
@@ -333,24 +406,32 @@ guard_detect_ecosystem() {
   local cmd="$1"
   local scan_cmd
 
-  scan_cmd=$(command_scan_text "${cmd}")
-  if echo "${scan_cmd}" | grep -qEi '(^|[;&|]+[[:space:]]*)(npm|pnpm|yarn|npx)([[:space:]]|$)'; then
-    printf 'npm'
-  elif echo "${scan_cmd}" | grep -qEi '(^|[;&|]+[[:space:]]*)(pip3?|poetry|uv|pipenv|((python3?|py)[[:space:]]+-m[[:space:]]+pip))([[:space:]]|$)'; then
-    printf 'pypi'
-  elif echo "${scan_cmd}" | grep -qEi '(^|[;&|]+[[:space:]]*)cargo([[:space:]]|$)'; then
-    printf 'crates.io'
-  elif echo "${scan_cmd}" | grep -qEi '(^|[;&|]+[[:space:]]*)go([[:space:]]|$)'; then
-    printf 'go'
-  elif echo "${scan_cmd}" | grep -qEi '(^|[;&|]+[[:space:]]*)(gem|bundle)([[:space:]]|$)'; then
-    printf 'rubygems'
-  elif echo "${scan_cmd}" | grep -qEi '(^|[;&|]+[[:space:]]*)mvn([[:space:]]|$)'; then
-    printf 'maven'
-  elif echo "${scan_cmd}" | grep -qEi '(^|[;&|]+[[:space:]]*)dotnet([[:space:]]|$)'; then
-    printf 'nuget'
-  else
-    printf ''
-  fi
+  while IFS= read -r scan_cmd; do
+    scan_cmd=$(command_scan_text "${scan_cmd}")
+    if echo "${scan_cmd}" | grep -qEi '(^|[;&|]+[[:space:]]*)(npm|pnpm|yarn|npx)([[:space:]]|$)'; then
+      printf 'npm'
+      return 0
+    elif echo "${scan_cmd}" | grep -qEi '(^|[;&|]+[[:space:]]*)(pip3?|poetry|uv|pipenv|((python3?|py)[[:space:]]+-m[[:space:]]+pip))([[:space:]]|$)'; then
+      printf 'pypi'
+      return 0
+    elif echo "${scan_cmd}" | grep -qEi '(^|[;&|]+[[:space:]]*)cargo([[:space:]]|$)'; then
+      printf 'crates.io'
+      return 0
+    elif echo "${scan_cmd}" | grep -qEi '(^|[;&|]+[[:space:]]*)go([[:space:]]|$)'; then
+      printf 'go'
+      return 0
+    elif echo "${scan_cmd}" | grep -qEi '(^|[;&|]+[[:space:]]*)(gem|bundle)([[:space:]]|$)'; then
+      printf 'rubygems'
+      return 0
+    elif echo "${scan_cmd}" | grep -qEi '(^|[;&|]+[[:space:]]*)mvn([[:space:]]|$)'; then
+      printf 'maven'
+      return 0
+    elif echo "${scan_cmd}" | grep -qEi '(^|[;&|]+[[:space:]]*)dotnet([[:space:]]|$)'; then
+      printf 'nuget'
+      return 0
+    fi
+  done < <(command_candidate_texts "${cmd}")
+  printf ''
 }
 
 guard_runner_operands() {
@@ -385,6 +466,43 @@ guard_runner_operands() {
   done
 }
 
+guard_extract_flagged_specs() {
+  awk '
+    {
+      for (i = 1; i <= NF; i++) {
+        if ($i ~ /^[A-Za-z][A-Za-z0-9._-]*==[A-Za-z0-9][A-Za-z0-9._+!~-]*$/) {
+          split($i, parts, "==")
+          print parts[1] "\t" parts[2]
+        }
+
+        if ($i == "gem" && $(i + 1) == "install") {
+          pkg = $(i + 2)
+          for (j = i + 3; j <= NF; j++) {
+            if (($j == "-v" || $j == "--version") && $(j + 1) != "") print pkg "\t" $(j + 1)
+            if ($j ~ /^--version=/) { sub(/^--version=/, "", $j); print pkg "\t" $j }
+          }
+        }
+
+        if ($i == "cargo" && $(i + 1) == "add") {
+          pkg = $(i + 2)
+          for (j = i + 3; j <= NF; j++) {
+            if (($j == "--vers" || $j == "--version") && $(j + 1) != "") print pkg "\t" $(j + 1)
+            if ($j ~ /^--(vers|version)=/) { sub(/^--(vers|version)=/, "", $j); print pkg "\t" $j }
+          }
+        }
+
+        if ($i == "dotnet" && $(i + 1) == "add" && $(i + 2) == "package") {
+          pkg = $(i + 3)
+          for (j = i + 4; j <= NF; j++) {
+            if ($j == "--version" && $(j + 1) != "") print pkg "\t" $(j + 1)
+            if ($j ~ /^--version=/) { sub(/^--version=/, "", $j); print pkg "\t" $j }
+          }
+        }
+      }
+    }
+  '
+}
+
 guard_extract_specs() {
   # Echo one "pkg<TAB>spec" line per pkg@spec OPERAND genuinely being installed.
   # Handles @scope/name@spec and bare-name@spec. Two precision rules keep
@@ -405,10 +523,10 @@ guard_extract_specs() {
     else
       source+="${seg}"$'\n'
     fi
-  done < <(printf '%s\n' "${cmd}" | tr ';|&' '\n')
+  done < <(command_candidate_texts "${cmd}" | tr ';|&' '\n')
 
-  printf '%s' "${source}" \
-    | grep -oE '(@[a-zA-Z0-9._/-]+/)?[a-zA-Z][a-zA-Z0-9._-]*@[a-zA-Z0-9._^~|<>=*+-]+' \
+  { printf '%s' "${source}" \
+    | grep -oE '(@[a-zA-Z0-9._/-]+/)?[a-zA-Z][a-zA-Z0-9._-]*@[a-zA-Z0-9._^~|<>=*+-]+' || true; } \
     | while IFS= read -r token; do
         # An email / host operand (user@domain.tld) is never a package spec.
         if [[ "${token}" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]; then
@@ -424,18 +542,35 @@ guard_extract_specs() {
         fi
         printf '%s\t%s\n' "${pkg}" "${spec}"
       done
+  printf '%s\n' "${source}" | guard_extract_flagged_specs
 }
 
 LEDGER_ECOSYSTEM=$(guard_detect_ecosystem "${COMMAND}")
 LEDGER_SPECS=()
 while IFS= read -r ledger_spec_line; do
   [[ -z "${ledger_spec_line}" ]] && continue
+  if [[ ${#LEDGER_SPECS[@]} -gt 0 ]]; then
+    for existing_spec_line in "${LEDGER_SPECS[@]}"; do
+      [[ "${existing_spec_line}" == "${ledger_spec_line}" ]] && continue 2
+    done
+  fi
   LEDGER_SPECS+=("${ledger_spec_line}")
 done < <(guard_extract_specs "${COMMAND}")
 
 if [[ -n "${LEDGER_ECOSYSTEM}" && ${#LEDGER_SPECS[@]} -gt 0 && -f "${SAFEDEPS_LEDGER_LIB}" ]]; then
   # shellcheck source=../lib/ledger/ledger.sh
   source "${SAFEDEPS_LEDGER_LIB}"
+
+  # Resolve a runnable `safedeps` invocation for the block message so the
+  # self-heal loop works whether or not the CLI is on PATH. Prefer the PATH
+  # command (clean UX); otherwise name the absolute repo bin (quoted via %q so
+  # it survives spaces in $HOME). Keeps the gate self-contained — the install
+  # of a `~/.local/bin/safedeps` symlink is a convenience, never a requirement.
+  if command -v safedeps >/dev/null 2>&1; then
+    SAFEDEPS_INVOKE="safedeps"
+  else
+    printf -v SAFEDEPS_INVOKE '%q' "${SAFEDEPS_REPO_BIN}"
+  fi
 
   GUARD_BLOCKED_CMDS=()
   for entry in "${LEDGER_SPECS[@]}"; do
@@ -444,7 +579,7 @@ if [[ -n "${LEDGER_ECOSYSTEM}" && ${#LEDGER_SPECS[@]} -gt 0 && -f "${SAFEDEPS_LE
     [[ -z "${pkg}" || -z "${spec}" ]] && continue
     if ! safedeps_ledger_check "${LEDGER_ECOSYSTEM}" "${pkg}" "${spec}" 2>/dev/null \
         | jq -e '.approved == true' >/dev/null 2>&1; then
-      GUARD_BLOCKED_CMDS+=("safedeps check ${LEDGER_ECOSYSTEM} ${pkg}@${spec}")
+      GUARD_BLOCKED_CMDS+=("${SAFEDEPS_INVOKE} check ${LEDGER_ECOSYSTEM} ${pkg}@${spec}")
     fi
   done
 

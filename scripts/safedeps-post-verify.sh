@@ -40,6 +40,14 @@ if ! command -v jq >/dev/null 2>&1; then
   exit 0
 fi
 
+SAFEDEPS_REPO_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+# shellcheck source=../lib/ledger/ledger.sh
+source "${SAFEDEPS_REPO_DIR}/lib/ledger/ledger.sh"
+# shellcheck source=../lib/providers/providers.sh
+source "${SAFEDEPS_REPO_DIR}/lib/providers/providers.sh"
+# shellcheck source=../lib/npm/closure.sh
+source "${SAFEDEPS_REPO_DIR}/lib/npm/closure.sh"
+
 acquire_state_lock() {
   local attempts=0
 
@@ -75,10 +83,16 @@ release_state_lock() {
 write_state_file() {
   local target_path="$1"
   local value="$2"
-  local temp_path="${target_path}.$$"
+  local target_dir
+  local target_base
+  local temp_path
 
+  target_dir=$(dirname "${target_path}")
+  target_base=$(basename "${target_path}")
+  mkdir -p "${target_dir}" || return 1
+  temp_path=$(mktemp "${target_dir}/.${target_base}.XXXXXX") || return 1
   printf '%s\n' "${value}" > "${temp_path}"
-  mv "${temp_path}" "${target_path}"
+  mv -f "${temp_path}" "${target_path}"
 }
 
 compute_dir_hash() {
@@ -214,7 +228,7 @@ collect_protected_snapshot_ids() {
     local already_seen="false"
     local seen_id
 
-    for seen_id in "${seen[@]}"; do
+    for seen_id in "${seen[@]+${seen[@]}}"; do
       if [[ "${seen_id}" == "${snapshot_id}" ]]; then
         already_seen="true"
         break
@@ -358,6 +372,32 @@ SUSPICIOUS=false
 REASONS=()
 ROLLBACK_WARNINGS=()
 
+redact_install_script_content() {
+  local script_content="$1"
+  local flattened
+  local byte_count
+  local digest
+  local suffix=""
+
+  flattened=$(printf '%s' "${script_content}" | tr '\r\n\t' '   ' | cut -c 1-160)
+  byte_count=$(printf '%s' "${script_content}" | wc -c | tr -d ' ')
+  if command -v shasum >/dev/null 2>&1; then
+    digest=$(printf '%s' "${script_content}" | shasum -a 256 | cut -d' ' -f1)
+  elif command -v sha256sum >/dev/null 2>&1; then
+    digest=$(printf '%s' "${script_content}" | sha256sum | cut -d' ' -f1)
+  else
+    digest="unavailable"
+  fi
+  if [[ "${byte_count}" -gt 160 ]]; then
+    suffix="..."
+  fi
+  printf '[redacted install script sha256=%s bytes=%s preview=%s%s]' \
+    "${digest}" \
+    "${byte_count}" \
+    "${flattened}" \
+    "${suffix}"
+}
+
 # Function: check for suspicious postinstall scripts in new/changed dependencies
 check_postinstall_scripts() {
   local pkg_json="${PROJECT_DIR}/package.json"
@@ -411,17 +451,17 @@ check_postinstall_scripts() {
         # Check for network calls in install scripts
         if echo "${script_content}" | grep -qEi '(curl|wget|fetch|http|https|net\.|socket|dns)'; then
           SUSPICIOUS=true
-          REASONS+=("Package '${pkg_name}' has install script with network access: ${script_content}")
+          REASONS+=("Package '${pkg_name}' has install script with network access: $(redact_install_script_content "${script_content}")")
         fi
 
         # Check for eval/exec in install scripts
         if echo "${script_content}" | grep -qEi '(eval|exec|spawn|child_process|Function\()'; then
           SUSPICIOUS=true
-          REASONS+=("Package '${pkg_name}' has install script with code execution: ${script_content}")
+          REASONS+=("Package '${pkg_name}' has install script with code execution: $(redact_install_script_content "${script_content}")")
         fi
 
         # Check for filesystem access outside project
-        if echo "${script_content}" | grep -qEi '(\/etc\/|\/home\/|~\/|\$HOME|\.ssh|\.env|\.aws|credentials)'; then
+        if echo "${script_content}" | grep -qEi '(\/etc\/|\/home\/|~\/|\$HOME|\.ssh|\.env|\.aws|credentials|~\/\.safedeps|\$HOME\/\.safedeps|\.safedeps\/|SAFEDEPS_HOME)'; then
           SUSPICIOUS=true
           REASONS+=("Package '${pkg_name}' has install script accessing sensitive paths")
         fi
@@ -507,7 +547,74 @@ check_binaries() {
   fi
 }
 
+check_npm_effect_closure() {
+  local lockfile="${PROJECT_DIR}/package-lock.json"
+  local closure_file
+  local provider_file
+  local miss_file
+  local package_name
+  local version
+  local miss_count
+  local vulnerable_summary
+  local kev_summary
+
+  [[ -f "${lockfile}" ]] || return 0
+
+  closure_file=$(mktemp "${TMPDIR:-/tmp}/safedeps-post-closure.XXXXXX") || return
+  provider_file=$(mktemp "${TMPDIR:-/tmp}/safedeps-post-provider.XXXXXX") || {
+    rm -f "${closure_file}"
+    return
+  }
+  miss_file=$(mktemp "${TMPDIR:-/tmp}/safedeps-post-miss.XXXXXX") || {
+    rm -f "${closure_file}" "${provider_file}"
+    return
+  }
+  : > "${miss_file}"
+
+  if ! safedeps_npm_lock_closure "${lockfile}" > "${closure_file}"; then
+    SUSPICIOUS=true
+    REASONS+=("npm package-lock closure could not be parsed")
+    rm -f "${closure_file}" "${provider_file}" "${miss_file}"
+    return
+  fi
+
+  while IFS=$'\t' read -r package_name version; do
+    [[ -n "${package_name}" && -n "${version}" ]] || continue
+    if ! safedeps_ledger_effect_check "npm" "${package_name}" "${version}" >/dev/null 2>&1; then
+      printf '%s@%s\n' "${package_name}" "${version}" >> "${miss_file}"
+    fi
+  done < <(jq -r '.[] | [.package, (.version | tostring)] | @tsv' "${closure_file}")
+
+  miss_count=$(wc -l < "${miss_file}" | tr -d ' ')
+  if [[ "${miss_count}" -gt 0 ]]; then
+    SUSPICIOUS=true
+    REASONS+=("npm closure contains ${miss_count} unapproved package(s): $(head -20 "${miss_file}" | paste -sd ', ' -)")
+  fi
+
+  if ! safedeps_providers_query_batch "npm" "${closure_file}" > "${provider_file}"; then
+    SUSPICIOUS=true
+    REASONS+=("npm closure OSV batch verification failed; fail-closed")
+    rm -f "${closure_file}" "${provider_file}" "${miss_file}"
+    return
+  fi
+
+  kev_summary=$(jq -r '[.[] | select(.status == "hard_block") | "\(.package)@\(.version)"] | join(", ")' "${provider_file}")
+  if [[ -n "${kev_summary}" ]]; then
+    SUSPICIOUS=true
+    REASONS+=("npm closure contains KEV-blocked package(s): ${kev_summary}")
+  fi
+
+  vulnerable_summary=$(jq -r '[.[] | select(.status == "vulnerable") | "\(.package)@\(.version)"] | join(", ")' "${provider_file}")
+  if [[ -n "${vulnerable_summary}" ]]; then
+    SUSPICIOUS=true
+    REASONS+=("npm closure contains vulnerable package(s): ${vulnerable_summary}")
+  fi
+
+  rm -f "${closure_file}" "${provider_file}" "${miss_file}"
+}
+
 # Run all checks
+check_npm_effect_closure
 check_postinstall_scripts
 check_lockfile_diff
 check_binaries
@@ -572,9 +679,22 @@ if [[ "${SUSPICIOUS}" == "true" ]]; then
   Rollback warnings: ${WARNING_STR%%; }
 LOG_EOF
 
-  cat << EOF
-{"systemMessage": "safedeps: 의심스러운 패키지 변경 감지, 마지막으로 confirmed 된 안전 스냅샷으로 롤백했습니다.\n\n감지된 문제:\n${REASON_STR%%; }\n\n롤백 기준 스냅샷: ${ROLLBACK_SNAPSHOT_ID}\n롤백된 파일: ${ROLLED_BACK_STR%, }\n${WARNING_STR:+\n추가 경고:\n${WARNING_STR%%; }}\n\n상세 로그: ${GUARD_DIR}/reorg.log"}
-EOF
+  jq -nc \
+    --arg reasons "${REASON_STR%%; }" \
+    --arg rollback_snapshot "${ROLLBACK_SNAPSHOT_ID}" \
+    --arg rolled_back "${ROLLED_BACK_STR%, }" \
+    --arg warnings "${WARNING_STR%%; }" \
+    --arg log_path "${GUARD_DIR}/reorg.log" \
+    '{
+      systemMessage: (
+        "safedeps: 의심스러운 패키지 변경 감지, 마지막으로 confirmed 된 안전 스냅샷으로 롤백했습니다.\n\n" +
+        "감지된 문제:\n" + $reasons + "\n\n" +
+        "롤백 기준 스냅샷: " + $rollback_snapshot + "\n" +
+        "롤백된 파일: " + $rolled_back +
+        (if $warnings == "" then "" else "\n\n추가 경고:\n" + $warnings end) +
+        "\n\n상세 로그: " + $log_path
+      )
+    }'
   exit 0
 fi
 

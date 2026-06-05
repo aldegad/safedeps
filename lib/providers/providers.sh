@@ -10,6 +10,7 @@ SAFEDEPS_ADVISORY_LOG="${SAFEDEPS_ADVISORY_LOG:-${SAFEDEPS_HOME}/advisory.log}"
 SAFEDEPS_PROVIDER_CACHE_TTL_SECONDS="${SAFEDEPS_PROVIDER_CACHE_TTL_SECONDS:-86400}"
 
 SAFEDEPS_OSV_API_URL="${SAFEDEPS_OSV_API_URL:-https://api.osv.dev/v1/query}"
+SAFEDEPS_OSV_BATCH_API_URL="${SAFEDEPS_OSV_BATCH_API_URL:-https://api.osv.dev/v1/querybatch}"
 SAFEDEPS_KEV_CATALOG_URL="${SAFEDEPS_KEV_CATALOG_URL:-https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json}"
 SAFEDEPS_GHSA_API_URL="${SAFEDEPS_GHSA_API_URL:-https://api.github.com/advisories}"
 
@@ -49,6 +50,27 @@ safedeps_provider_mktemp_dir() {
 
   mkdir -p "${tmp_root}" || return 1
   mktemp -d "${tmp_root%/}/safedeps-providers.XXXXXX"
+}
+
+safedeps_cache_response_temp() {
+  local target_path="$1"
+  local target_dir
+  local target_base
+
+  target_dir=$(dirname "${target_path}")
+  target_base=$(basename "${target_path}")
+  mkdir -p "${target_dir}" || return 1
+  mktemp "${target_dir}/.${target_base}.XXXXXX"
+}
+
+safedeps_url_host() {
+  local url="$1"
+  local host
+
+  host="${url#*://}"
+  host="${host%%/*}"
+  host="${host%%:*}"
+  printf '%s' "${host}"
 }
 
 safedeps_now_iso() {
@@ -167,7 +189,7 @@ safedeps_osv_query() {
     --arg version "${version}" \
     '{version: $version, package: {name: $package, ecosystem: $ecosystem}}')
 
-  response_file="${cache_path}.$$"
+  response_file=$(safedeps_cache_response_temp "${cache_path}") || return 1
   http_status=$(curl -fsS \
     --max-time 15 \
     -H 'Content-Type: application/json' \
@@ -177,7 +199,7 @@ safedeps_osv_query() {
     "${SAFEDEPS_OSV_API_URL}" 2>/dev/null || true)
 
   if [[ "${http_status}" == "200" ]] && jq -e 'type == "object"' "${response_file}" >/dev/null 2>&1; then
-    mv "${response_file}" "${cache_path}"
+    mv -f "${response_file}" "${cache_path}"
     safedeps_provider_log "INFO" "OSV live query ok ecosystem=${osv_ecosystem} package=${package_name} version=${version}"
     cat "${cache_path}"
     return 0
@@ -190,6 +212,134 @@ safedeps_osv_query() {
     safedeps_provider_log "ERROR" "OSV live query failed; cache miss ecosystem=${osv_ecosystem} package=${package_name} version=${version} status=${http_status:-none}"
   fi
   return 1
+}
+
+safedeps_osv_query_batch() {
+  local ecosystem="$1"
+  local closure_file="$2"
+  local osv_ecosystem
+  local temp_dir
+  local all_items_file
+  local miss_items_file
+  local payload_file
+  local response_file
+  local results_file
+  local http_status
+  local index=0
+  local package_name
+  local version
+  local direct
+
+  safedeps_require_json_tools || return 1
+  safedeps_providers_init
+  [[ -f "${closure_file}" ]] || return 1
+
+  osv_ecosystem=$(safedeps_osv_ecosystem "${ecosystem}")
+  temp_dir=$(safedeps_provider_mktemp_dir) || return 1
+  all_items_file="${temp_dir}/items.jsonl"
+  miss_items_file="${temp_dir}/misses.jsonl"
+  payload_file="${temp_dir}/payload.json"
+  response_file="${temp_dir}/response.json"
+  results_file="${temp_dir}/results.json"
+  : > "${all_items_file}"
+  : > "${miss_items_file}"
+
+  while IFS=$'\t' read -r package_name version direct; do
+    [[ -n "${package_name}" && -n "${version}" ]] || continue
+    local cache_key
+    local cache_path
+    cache_key=$(safedeps_cache_key "osv" "${osv_ecosystem}" "${package_name}" "${version}")
+    cache_path="${SAFEDEPS_CACHE_DIR}/osv/${cache_key}.json"
+
+    if safedeps_cache_is_fresh "${cache_path}"; then
+      safedeps_provider_log "INFO" "OSV batch cache hit ecosystem=${osv_ecosystem} package=${package_name} version=${version}"
+      jq -cn \
+        --argjson index "${index}" \
+        --arg ecosystem "${ecosystem}" \
+        --arg package "${package_name}" \
+        --arg version "${version}" \
+        --argjson direct "${direct}" \
+        --slurpfile osv "${cache_path}" \
+        '{index:$index, ecosystem:$ecosystem, package:$package, version:$version, direct:$direct, osv:($osv[0] // {vulns:[]})}' >> "${all_items_file}"
+    else
+      jq -cn \
+        --argjson index "${index}" \
+        --arg ecosystem "${ecosystem}" \
+        --arg package "${package_name}" \
+        --arg version "${version}" \
+        --argjson direct "${direct}" \
+        --arg cache_path "${cache_path}" \
+        '{index:$index, ecosystem:$ecosystem, package:$package, version:$version, direct:$direct, cache_path:$cache_path}' >> "${miss_items_file}"
+    fi
+    index=$((index + 1))
+  done < <(jq -r '.[] | [.package, (.version | tostring), ((.direct // false) | tostring)] | @tsv' "${closure_file}")
+
+  if [[ -s "${miss_items_file}" ]]; then
+    safedeps_require_http_client || {
+      safedeps_provider_log "ERROR" "OSV batch unavailable; cache miss ecosystem=${osv_ecosystem}"
+      rm -rf "${temp_dir}"
+      return 1
+    }
+
+    jq -cn --arg ecosystem "${osv_ecosystem}" --slurpfile misses "${miss_items_file}" '
+      {
+        queries: [
+          $misses[]
+          | {version: .version, package: {name: .package, ecosystem: $ecosystem}}
+        ]
+      }
+    ' > "${payload_file}"
+
+    http_status=$(curl -fsS \
+      --max-time 20 \
+      -H 'Content-Type: application/json' \
+      -o "${response_file}" \
+      -w '%{http_code}' \
+      -d @"${payload_file}" \
+      "${SAFEDEPS_OSV_BATCH_API_URL}" 2>/dev/null || true)
+
+    if [[ "${http_status}" != "200" ]] || ! jq -e '.results | type == "array"' "${response_file}" >/dev/null 2>&1; then
+      safedeps_provider_log "ERROR" "OSV batch query failed status=${http_status:-none}"
+      rm -rf "${temp_dir}"
+      return 1
+    fi
+
+    local miss_count
+    local result_count
+    miss_count=$(jq -s 'length' "${miss_items_file}")
+    result_count=$(jq '.results | length' "${response_file}")
+    if [[ "${miss_count}" != "${result_count}" ]]; then
+      safedeps_provider_log "ERROR" "OSV batch result count mismatch misses=${miss_count} results=${result_count}"
+      rm -rf "${temp_dir}"
+      return 1
+    fi
+
+    local miss_i=0
+    while IFS= read -r miss_item; do
+      local cache_path
+      local response_item_file
+      cache_path=$(jq -r '.cache_path' <<< "${miss_item}")
+      response_item_file=$(safedeps_cache_response_temp "${cache_path}") || {
+        rm -rf "${temp_dir}"
+        return 1
+      }
+      jq -c --argjson i "${miss_i}" '.results[$i] // {vulns: []}' "${response_file}" > "${response_item_file}"
+      if ! jq -e 'type == "object"' "${response_item_file}" >/dev/null 2>&1; then
+        rm -f "${response_item_file}"
+        rm -rf "${temp_dir}"
+        return 1
+      fi
+      mv -f "${response_item_file}" "${cache_path}"
+      safedeps_provider_log "INFO" "OSV batch live query ok ecosystem=${osv_ecosystem} package=$(jq -r '.package' <<< "${miss_item}") version=$(jq -r '.version' <<< "${miss_item}")"
+      jq -cn --argjson miss "${miss_item}" --slurpfile osv "${cache_path}" \
+        '$miss | del(.cache_path) | . + {osv: ($osv[0] // {vulns: []})}' >> "${all_items_file}"
+      miss_i=$((miss_i + 1))
+    done < "${miss_items_file}"
+  fi
+
+  jq -s 'sort_by(.index)' "${all_items_file}" > "${results_file}"
+  cat "${results_file}"
+  rm -rf "${temp_dir}"
 }
 
 safedeps_extract_cves_from_osv() {
@@ -230,11 +380,11 @@ safedeps_kev_refresh_catalog() {
     return 1
   fi
 
-  response_path="${cache_path}.$$"
+  response_path=$(safedeps_cache_response_temp "${cache_path}") || return 1
   http_status=$(curl -fsS --max-time 15 -o "${response_path}" -w '%{http_code}' "${SAFEDEPS_KEV_CATALOG_URL}" 2>/dev/null || true)
 
   if [[ "${http_status}" == "200" ]] && jq -e '.vulnerabilities | type == "array"' "${response_path}" >/dev/null 2>&1; then
-    mv "${response_path}" "${cache_path}"
+    mv -f "${response_path}" "${cache_path}"
     safedeps_provider_log "INFO" "CISA KEV catalog refresh ok"
     printf '%s' "${cache_path}"
     return 0
@@ -301,6 +451,8 @@ safedeps_ghsa_query() {
   local cache_path
   local response_file
   local http_status
+  local ghsa_host
+  local curl_args
 
   safedeps_require_json_tools || return 1
   safedeps_providers_init
@@ -324,29 +476,29 @@ safedeps_ghsa_query() {
 
   encoded_ecosystem=$(safedeps_json_uri_escape "${ghsa_ecosystem}")
   encoded_package=$(safedeps_json_uri_escape "${package_name}")
-  response_file="${cache_path}.$$"
+  response_file=$(safedeps_cache_response_temp "${cache_path}") || return 1
+  ghsa_host=$(safedeps_url_host "${SAFEDEPS_GHSA_API_URL}")
 
-  if [[ -n "${GITHUB_TOKEN:-}" ]]; then
-    http_status=$(curl -fsS \
-      --max-time 15 \
-      -H 'Accept: application/vnd.github+json' \
-      -H 'X-GitHub-Api-Version: 2022-11-28' \
-      -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-      -o "${response_file}" \
-      -w '%{http_code}' \
-      "${SAFEDEPS_GHSA_API_URL}?ecosystem=${encoded_ecosystem}&affects=${encoded_package}&per_page=100" 2>/dev/null || true)
-  else
-    http_status=$(curl -fsS \
-      --max-time 15 \
-      -H 'Accept: application/vnd.github+json' \
-      -H 'X-GitHub-Api-Version: 2022-11-28' \
-      -o "${response_file}" \
-      -w '%{http_code}' \
-      "${SAFEDEPS_GHSA_API_URL}?ecosystem=${encoded_ecosystem}&affects=${encoded_package}&per_page=100" 2>/dev/null || true)
+  curl_args=(
+    -fsS
+    --max-time 15
+    -H 'Accept: application/vnd.github+json'
+    -H 'X-GitHub-Api-Version: 2022-11-28'
+    -o "${response_file}"
+    -w '%{http_code}'
+  )
+
+  if [[ -n "${GITHUB_TOKEN:-}" && "${ghsa_host}" == "api.github.com" ]]; then
+    curl_args+=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
+  elif [[ -n "${GITHUB_TOKEN:-}" ]]; then
+    safedeps_provider_log "WARN" "GHSA token withheld for non-GitHub host host=${ghsa_host}"
   fi
 
+  http_status=$(curl "${curl_args[@]}" \
+    "${SAFEDEPS_GHSA_API_URL}?ecosystem=${encoded_ecosystem}&affects=${encoded_package}&per_page=100" 2>/dev/null || true)
+
   if [[ "${http_status}" == "200" ]] && jq -e 'type == "array"' "${response_file}" >/dev/null 2>&1; then
-    mv "${response_file}" "${cache_path}"
+    mv -f "${response_file}" "${cache_path}"
     safedeps_provider_log "INFO" "GHSA live query ok ecosystem=${ghsa_ecosystem} package=${package_name}"
     jq -cn --arg queried_at "${queried_at}" --slurpfile advisories "${cache_path}" \
       '{queried_at: $queried_at, status: "live", advisories: $advisories[0]}'
@@ -459,6 +611,66 @@ safedeps_providers_query() {
   rm -rf "${temp_dir}"
 }
 
+safedeps_providers_query_batch() {
+  local ecosystem="$1"
+  local closure_file="$2"
+  local queried_at
+  local temp_dir
+  local osv_batch_file
+  local results_file
+
+  safedeps_require_json_tools || return 1
+  queried_at=$(safedeps_now_iso)
+  temp_dir=$(safedeps_provider_mktemp_dir) || return 1
+  osv_batch_file="${temp_dir}/osv-batch.json"
+  results_file="${temp_dir}/results.jsonl"
+  : > "${results_file}"
+
+  if ! safedeps_osv_query_batch "${ecosystem}" "${closure_file}" > "${osv_batch_file}"; then
+    rm -rf "${temp_dir}"
+    return 1
+  fi
+
+  while IFS= read -r item; do
+    local osv_file
+    local kev_json
+    local status
+    osv_file="${temp_dir}/osv-item.json"
+    jq -c '.osv' <<< "${item}" > "${osv_file}"
+    kev_json=$(safedeps_kev_overlay "${osv_file}" "${queried_at}")
+    status=$(jq -r --argjson kev "${kev_json}" '
+      if $kev.exploited then "hard_block"
+      elif ((.osv.vulns // []) | length) > 0 then "vulnerable"
+      else "clean"
+      end
+    ' <<< "${item}")
+    jq -cn \
+      --argjson item "${item}" \
+      --arg queried_at "${queried_at}" \
+      --arg status "${status}" \
+      --argjson kev "${kev_json}" \
+      '{
+        index: $item.index,
+        ecosystem: $item.ecosystem,
+        package: $item.package,
+        version: $item.version,
+        direct: ($item.direct // false),
+        queried_at: $queried_at,
+        status: $status,
+        vulnerabilities: ($item.osv.vulns // []),
+        kev: $kev,
+        provider_status: {
+          osv: {status: "ok", canonical: true, batch: true},
+          kev: {status: ($kev.status // "ok"), overlay: true},
+          ghsa: {status: "skipped", enrichment: true, reason: "closure batch omits GHSA enrichment"}
+        }
+      }' >> "${results_file}"
+  done < <(jq -c '.[]' "${osv_batch_file}")
+
+  jq -s 'sort_by(.index)' "${results_file}"
+  rm -rf "${temp_dir}"
+}
+
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   command_name="${1:-}"
   shift || true
@@ -471,8 +683,15 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
       fi
       safedeps_providers_query "$@"
       ;;
+    query-batch)
+      if [[ "$#" -ne 2 ]]; then
+        printf 'usage: %s query-batch <ecosystem> <closure-json-file>\n' "$0" >&2
+        exit 2
+      fi
+      safedeps_providers_query_batch "$@"
+      ;;
     *)
-      printf 'usage: %s query <ecosystem> <package> <version>\n' "$0" >&2
+      printf 'usage: %s {query|query-batch} ...\n' "$0" >&2
       exit 2
       ;;
   esac

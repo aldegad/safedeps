@@ -89,6 +89,7 @@ function ensureHook(config, eventName, command) {
   const buckets = config.hooks[eventName];
 
   const already = buckets.some((bucket) =>
+    bucket?.matcher === "Bash" &&
     Array.isArray(bucket?.hooks) &&
     bucket.hooks.some((h) => h && h.type === "command" && h.command === command),
   );
@@ -136,6 +137,7 @@ function pruneNonCanonicalSafedepsHooks(config, eventName, canonicalCommand, hoo
     bucket.hooks = bucket.hooks.filter((h) => {
       const command = h?.command;
       if (command === canonicalCommand) {
+        if (bucket.matcher !== "Bash") return false;
         if (seenCanonical) return false;
         seenCanonical = true;
         return true;
