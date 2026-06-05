@@ -2,7 +2,7 @@
 
 > **모든 install 을 미확정 블록으로 본다 — `safedeps` 는 안전한 것만 승인하고, 그렇지 않으면 reorg 한다.**
 >
-> OSV / CISA KEV / GitHub Advisory 로 의존성 spec 을 사전 승인하고, Claude Code 와 Codex CLI 의 hook 에서 그 승인된 spec 을 강제하며, 승인과 어긋난 install 은 자동으로 마지막 안전 snapshot 으로 롤백한다.
+> OSV / CISA KEV / GitHub Advisory 로 의존성 spec 을 사전 승인하고, Claude Code 와 Codex CLI 의 hook 에서 실제 설치 closure 를 강제하며, 승인과 어긋난 install 은 자동으로 마지막 안전 snapshot 으로 롤백한다.
 
 *Detailed reference → [README.md](./README.md) (영문, SSoT)*
 
@@ -40,9 +40,9 @@
 
 ### 3 단계 구성
 
-1. **Phase 1 — Advisory Gate** (사용자 또는 에이전트 단계): `safedeps check <ecosystem> <pkg>@<range>` 로 OSV (canonical) + CISA KEV (hard-risk overlay) + GHSA (enrichment) 를 조회. 안전한 (또는 안전 버전으로 좁힌) spec 을 `~/.safedeps/approved-specs/<hash>.json` 에 30일 TTL 로 기록.
-2. **Phase 2 — Hook 강제** (`safedeps-pre-guard.sh`): PreToolUse hook 이 install 명령 본문의 `pkg@version` 토큰을 승인 ledger 와 매칭. miss / expired 면 modern PreToolUse decision JSON 으로 차단하고, 에이전트가 다음에 실행할 정확한 `safedeps check ...` 명령을 reason 에 박는다 → 에이전트는 그 메시지 받아 check → 다시 install 의 자동 루프.
-3. **Phase 3 — Post-install Reorg** (`safedeps-post-verify.sh`): install 후 lockfile diff + 의심 install script / native binary 검사. 어긋나면 마지막 confirmed snapshot 으로 자동 reorg.
+1. **Phase 1 — Advisory Gate** (사용자 또는 에이전트 단계): `safedeps check <ecosystem> <pkg>@<range>` 로 OSV (canonical) + CISA KEV (hard-risk overlay) + GHSA (enrichment) 를 조회. npm 은 temp dir 에서 `npm install --package-lock-only --ignore-scripts` 로 script 실행 없는 lockfile 을 만들고 full closure 를 OSV `/v1/querybatch` 로 조회한다. 안전한 direct spec 과 `transitive_specs` 를 `~/.safedeps/approved-specs/<hash>.json` 에 30일 TTL 로 기록.
+2. **Phase 2 — 빠른 command guard** (`safedeps-pre-guard.sh`): PreToolUse hook 이 install 명령 본문의 `pkg@version` 토큰을 승인 ledger 와 매칭하고 snapshot 을 준비한다. miss / expired 면 modern PreToolUse decision JSON 으로 차단하고, 에이전트가 다음에 실행할 `safedeps check ...` 명령을 reason 에 박는다 (PATH 에 있으면 `safedeps`, 없으면 절대경로 — 그대로 실행 가능) → 에이전트는 그 메시지 받아 check → 다시 install 의 자동 루프. PATH 심링크 없이도 self-contained.
+3. **Phase 3 — Effect Gate + Reorg** (`safedeps-post-verify.sh`): install 후 실제 npm `package-lock.json` closure 전체를 direct ledger + `transitive_specs` 와 대조하고 OSV batch 로 재확인한다. 미승인/취약/provider fail-closed 또는 의심 install script / native binary 가 있으면 마지막 confirmed snapshot 으로 자동 reorg.
 
 ---
 
@@ -133,7 +133,7 @@ node scripts/install/install-safedeps-recheck-agent.mjs install --hour 9 --minut
 4. 다시 install 시도 → 이번엔 ledger 매치되어 **통과**.
 5. install 후 PostToolUse hook 이 lockfile / install script / native binary 를 검증. 어긋나면 마지막 안전 snapshot 으로 **자동 reorg**.
 
-이 흐름으로 에이전트는 임의의 패키지를 즉시 깔지 못하고, 매 install 마다 advisory 통과를 강제로 거친다. 사람이 PR 리뷰에서 잡을 의심 패키지가 install 시점에 이미 잡힌다. SaaS 의존 없이 로컬 + 공개 DB (OSV / KEV / GHSA) 만 쓴다.
+이 흐름으로 일반적인 package-manager install 명령은 실행 전에 advisory 통과를 거치게 된다. 다만 hook 은 best-effort 명령 휴리스틱이지 sandbox 가 아니다. 비정상 wrapper/interpreter 경로나 같은 사용자 권한으로 로컬 safedeps 상태를 조작하는 공격은 ledger 서명/강화 전까지 trust boundary 밖이다. SaaS 의존 없이 로컬 + 공개 DB (OSV / KEV / GHSA) 만 쓴다.
 
 ---
 

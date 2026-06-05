@@ -2,7 +2,7 @@
 
 > **Treat every install as an unconfirmed block — `safedeps` approves the safe ones, reorgs the rest.**
 >
-> Pre-approve dependency installs against OSV / CISA KEV / GitHub Advisory, enforce that approval from Claude Code and Codex CLI hooks, and auto-rollback any install that diverges from the approved spec. *(한국어 README → [README.ko.md](./README.ko.md))*
+> Pre-approve dependency installs against OSV / CISA KEV / GitHub Advisory, enforce the installed closure from Claude Code and Codex CLI hooks, and auto-rollback any install that diverges from the approved closure. *(한국어 README → [README.ko.md](./README.ko.md))*
 
 ## Why "reorg"?
 
@@ -28,7 +28,7 @@ Use the GitHub release when you want the full skill/hook source tree as the cano
 
 ## How It Works
 
-`safedeps` plugs into Claude Code and Codex CLI hooks as a pair of **PreToolUse** and **PostToolUse** hooks that wrap package install commands. The CLI owns provider lookups and the approved-spec ledger; hooks enforce that ledger and run post-install rollback checks.
+`safedeps` plugs into Claude Code and Codex CLI hooks as a pair of **PreToolUse** and **PostToolUse** hooks that wrap package install commands. The CLI owns provider lookups and the approved-spec ledger; hooks enforce that ledger and run post-install rollback checks. For npm, approval and enforcement cover the full lockfile closure, not just the direct package.
 
 ```
                          PreToolUse                          PostToolUse
@@ -55,14 +55,14 @@ Before an agent installs a dependency, it should run:
 safedeps check <ecosystem> <pkg>@<version|range> --json
 ```
 
-That command queries OSV (canonical), CISA KEV (hard-risk overlay), and GitHub Advisory (enrichment). Clean or safely narrowed specs are written to `~/.safedeps/approved-specs/`.
+That command queries OSV (canonical), CISA KEV (hard-risk overlay), and GitHub Advisory (enrichment). For npm, it first creates a script-free temp lockfile with `npm install --package-lock-only --ignore-scripts`, extracts the full dependency closure, and queries OSV `/v1/querybatch`. Clean or safely narrowed specs are written to `~/.safedeps/approved-specs/`; npm entries also record `transitive_specs`.
 
 When Claude Code or Codex CLI is about to run `npm install`, `pip install`, `cargo add`, `go get`, `gem install`, or similar commands, the guard hook:
 
 1. **Snapshots** the current `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, and `package.json` into `~/.safedeps/snapshots/`.
 2. **Records metadata** including a `parent_snapshot_id` linking to the previous confirmed snapshot (forming a chain, just like blocks).
 3. **Captures pre-install state** of `node_modules` (package listings and binary listings) for diff-based detection later.
-4. **Enforces the approved-spec ledger** for explicit `pkg@version` install commands.
+4. **Fast-checks the approved-spec ledger** for explicit `pkg@version` install commands.
 5. **Runs pre-flight checks** and **blocks** the command entirely if it detects:
    - Typosquatting package names (`lod_sh`, `reacct`, `axois`, etc.)
    - Non-standard `--registry` URLs (anything outside `registry.npmjs.org` and `registry.yarnpkg.com`)
@@ -73,20 +73,22 @@ If the ledger gate or a pre-flight check fails, the command is **blocked before 
 
 ### Phase 2: Post-install verification (`safedeps-post-verify.sh` -- PostToolUse)
 
-After the install command completes, the verify hook analyzes what changed:
+After the install command completes, the verify hook analyzes what changed. For npm, this is the primary enforcement surface: it reads the actual `package-lock.json` closure, verifies every package against approved direct entries and their `transitive_specs`, and re-checks the closure with OSV batch.
 
-1. **Install script analysis** -- Scans newly added packages for `preinstall`, `install`, and `postinstall` scripts containing:
+1. **npm effect gate** -- Reorgs if any lockfile package is unapproved, KEV-blocked, vulnerable, or cannot be verified fail-closed.
+
+2. **Install script analysis** -- Scans newly added packages for `preinstall`, `install`, and `postinstall` scripts containing:
    - Network access (`curl`, `wget`, `fetch`, `http`, `socket`, `dns`)
    - Dynamic code execution (`eval`, `exec`, `spawn`, `child_process`, `Function()`)
    - Sensitive path access (`~/.ssh`, `.env`, `.aws`, `credentials`)
    - Obfuscated content (`base64`, `atob`, `Buffer.from`, hex/unicode escapes)
 
-2. **Lock file diff analysis** -- Compares the snapshotted lock file content against the post-install version:
+3. **Lock file diff analysis** -- Compares the snapshotted lock file content against the post-install version:
    - Resolved URLs pointing to non-standard registries
    - Insecure protocols (`http://`, `git://`) in resolved URLs
    - Unusually large dependency additions (>50 new resolved entries, indicating potential dependency confusion)
 
-3. **Binary inspection** -- Checks `node_modules/.bin/` for newly added native binaries (ELF, Mach-O, shared objects) that should not appear in a JavaScript project.
+4. **Binary inspection** -- Checks `node_modules/.bin/` for newly added native binaries (ELF, Mach-O, shared objects) that should not appear in a JavaScript project.
 
 ### Phase 3: Confirm or Reorg
 
@@ -119,6 +121,8 @@ After the install command completes, the verify hook analyzes what changed:
 | Script safety bypass | `npm config set ignore-scripts false` | Pre-flight | **Block** |
 | Command indirection | `eval "npm install ..."`, subshell expansion, variable indirection | Pre-flight | **Guard** |
 | npx/dlx execution | `npx`, `pnpm dlx`, `yarn dlx` package execution | Pre-flight | **Guard** |
+| Unapproved transitive dependency | npm `package-lock.json` package missing from direct ledger or `transitive_specs` | Post-install | **Reorg** |
+| Vulnerable closure package | npm direct/transitive package with OSV/KEV hit | Post-install | **Reorg** |
 | Malicious install scripts | Network calls, `eval`/`exec`, sensitive path access in hooks | Post-install | **Reorg** |
 | Obfuscated code | Base64, hex encoding, `Buffer.from` in install scripts | Post-install | **Reorg** |
 | Lock file tampering | Resolved URLs from non-standard registries | Post-install | **Reorg** |
@@ -158,7 +162,7 @@ cd safedeps
 node scripts/install/install-safedeps-hooks.mjs
 ```
 
-The installer is idempotent. It symlinks the skill into `~/.claude/skills/safedeps` and `~/.codex/skills/safedeps` when those roots exist, patches the matching hook config, and can also place `safedeps` on PATH through `~/.local/bin`.
+The installer is idempotent. It symlinks the skill into `~/.claude/skills/safedeps` and `~/.codex/skills/safedeps` when those roots exist, patches the matching hook config, and — with `--link-bin` — can also place `safedeps` on PATH through `~/.local/bin`. That PATH link is optional: the hooks name an absolute fallback path in their block messages, so the gate is self-contained and works with zero PATH setup.
 
 **3. Manual hook registration, if needed:**
 
@@ -317,7 +321,7 @@ Typical flow:
 4. The agent retries the install. The ledger entry now matches, so the install **proceeds**.
 5. After the install, the PostToolUse hook diffs the lockfile, checks install scripts and native binaries, and **auto-reorgs** to the last confirmed snapshot if anything diverged.
 
-With this loop, the agent cannot install arbitrary packages on demand. Every install is forced through an advisory check. The suspicious package a human would catch at PR review time is already caught at install time. No SaaS dependency — only the local CLI plus public databases (OSV / KEV / GHSA).
+With this loop, ordinary package-manager install commands are forced through an advisory check before they run. The hook is a best-effort command heuristic, not a sandbox: unusual wrappers, interpreters, or same-user tampering with local safedeps state are outside the trust boundary until signed ledger enforcement is introduced. No SaaS dependency -- only the local CLI plus public databases (OSV / KEV / GHSA).
 
 ## Legacy State Migration (v1 only)
 
