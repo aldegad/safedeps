@@ -72,6 +72,16 @@ run_hook_command() {
     HOME="${home_dir}" SAFEDEPS_HOME="${safe_dir}" scripts/safedeps-pre-guard.sh
 }
 
+run_codex_hook_command() {
+  local home_dir="$1"
+  local safe_dir="$2"
+  local command="$3"
+
+  jq -nc --arg command "${command}" --arg cwd "${project_dir}" \
+    '{tool_name:"Bash",tool_input:{command:$command},cwd:$cwd,turn_id:"turn-smoke",model:"codex-test"}' |
+    HOME="${home_dir}" SAFEDEPS_HOME="${safe_dir}" scripts/safedeps-pre-guard.sh
+}
+
 deny_json=$(
   run_hook_command "${tmp_root}/home-hook" "${tmp_root}/safe-hook" "npm install left-pad@1.3.0"
 )
@@ -83,8 +93,37 @@ SAFEDEPS_HOME="${tmp_root}/safe-hook-allow" lib/ledger/ledger.sh approve npm lef
 allow_output=$(
   run_hook_command "${tmp_root}/home-hook-allow" "${tmp_root}/safe-hook-allow" "npm install left-pad@1.3.0"
 )
-[[ -z "${allow_output}" ]] || fail "hook allows approved install"
-pass "hook allows approved install"
+[[ "$(jq -r '.hookSpecificOutput.permissionDecision' <<< "${allow_output}")" == "allow" ]] || fail "hook emits Claude allow decision for approved install"
+[[ "$(jq -r '.hookSpecificOutput.updatedInput.command' <<< "${allow_output}")" == "npm install left-pad@1.3.0 --ignore-scripts" ]] || fail "hook injects --ignore-scripts for Claude npm install"
+allow_sid=$(jq -r '.snapshot_id' "${tmp_root}/safe-hook-allow/current_state")
+jq -e '.ignore_scripts_injected == true' "${tmp_root}/safe-hook-allow/snapshots/${allow_sid}_meta.json" >/dev/null || fail "hook records injected meta flag"
+pass "hook injects --ignore-scripts for Claude approved install"
+
+mkdir -p "${tmp_root}/safe-hook-codex"
+SAFEDEPS_HOME="${tmp_root}/safe-hook-codex" lib/ledger/ledger.sh approve npm left-pad 1.3.0 1.3.0 smoke >/dev/null
+codex_allow_output=$(
+  run_codex_hook_command "${tmp_root}/home-hook-codex" "${tmp_root}/safe-hook-codex" "npm install left-pad@1.3.0"
+)
+[[ -z "${codex_allow_output}" ]] || fail "hook keeps Codex approved install as plain allow"
+codex_sid=$(jq -r '.snapshot_id' "${tmp_root}/safe-hook-codex/current_state")
+jq -e '.ignore_scripts_injected == false' "${tmp_root}/safe-hook-codex/snapshots/${codex_sid}_meta.json" >/dev/null || fail "hook does not record injected meta flag for Codex"
+pass "hook keeps Codex approved install as plain allow"
+
+for inert_skip_cmd in "npm view left-pad" "npm run build" "npm --version"; do
+  inert_skip_output=$(run_hook_command "${tmp_root}/home-inert-skip" "${tmp_root}/safe-inert-skip" "${inert_skip_cmd}")
+  [[ -z "${inert_skip_output}" ]] || fail "hook does not inject non-install command: ${inert_skip_cmd}"
+done
+pass "hook does not inject npm non-install commands"
+
+mkdir -p "${tmp_root}/safe-hook-ignore-scripts"
+SAFEDEPS_HOME="${tmp_root}/safe-hook-ignore-scripts" lib/ledger/ledger.sh approve npm left-pad 1.3.0 1.3.0 smoke >/dev/null
+ignore_scripts_output=$(
+  run_hook_command "${tmp_root}/home-hook-ignore-scripts" "${tmp_root}/safe-hook-ignore-scripts" "npm install left-pad@1.3.0 --ignore-scripts"
+)
+[[ -z "${ignore_scripts_output}" ]] || fail "hook does not duplicate --ignore-scripts"
+ignore_sid=$(jq -r '.snapshot_id' "${tmp_root}/safe-hook-ignore-scripts/current_state")
+jq -e '.ignore_scripts_injected == false' "${tmp_root}/safe-hook-ignore-scripts/snapshots/${ignore_sid}_meta.json" >/dev/null || fail "hook does not record injected meta flag when flag already exists"
+pass "hook does not duplicate --ignore-scripts"
 
 # Regression: `npx <tool> <args>` runs an already-installed binary. Arguments to
 # the tool (e.g. an email) must NOT be misread as a pkg@spec install and denied.
@@ -136,7 +175,7 @@ tamper_safe="${tmp_root}/safe-tamper"
 tamper_home="${tmp_root}/home-tamper"
 SAFEDEPS_HOME="${tamper_safe}" lib/ledger/ledger.sh approve npm ledger-tamper 1.0.0 1.0.0 smoke >/dev/null
 tamper_pre=$(run_hook_command "${tamper_home}" "${tamper_safe}" "npm install ledger-tamper@1.0.0")
-[[ -z "${tamper_pre}" ]] || fail "tamper fixture pre hook allows approved install"
+[[ "$(jq -r '.hookSpecificOutput.permissionDecision' <<< "${tamper_pre}")" == "allow" ]] || fail "tamper fixture pre hook allows approved install"
 mkdir -p "${project_dir}/node_modules/ledger-tamper"
 jq '.dependencies["ledger-tamper"]="1.0.0"' "${project_dir}/package.json" > "${project_dir}/package.json.tmp"
 mv "${project_dir}/package.json.tmp" "${project_dir}/package.json"

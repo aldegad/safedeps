@@ -319,6 +319,41 @@ restore_node_modules() {
   ROLLBACK_WARNINGS+=("node_modules reinstall failed; review the project manually")
 }
 
+run_verified_npm_rebuild_if_injected() {
+  local injected
+
+  injected=$(jq -r '.ignore_scripts_injected == true' "${META_FILE}" 2>/dev/null || printf 'false')
+  [[ "${injected}" == "true" ]] || return 0
+
+  if ! command -v npm >/dev/null 2>&1; then
+    ROLLBACK_WARNINGS+=("npm is not installed; npm rebuild was not run after verified inert install")
+    return 0
+  fi
+
+  if (cd "${PROJECT_DIR}" && npm rebuild >/dev/null 2>&1); then
+    return 0
+  fi
+
+  ROLLBACK_WARNINGS+=("npm rebuild failed after verified inert install; lifecycle scripts may need manual review")
+}
+
+emit_confirm_warnings_if_any() {
+  local warning_str
+
+  [[ ${#ROLLBACK_WARNINGS[@]} -gt 0 ]] || return 0
+
+  warning_str=$(printf '%s; ' "${ROLLBACK_WARNINGS[@]}")
+  cat >> "${GUARD_DIR}/reorg.log" << LOG_EOF
+[$(date -u +"%Y-%m-%dT%H:%M:%SZ")] CONFIRM warnings
+  Snapshot: ${SNAPSHOT_ID}
+  Project: ${PROJECT_DIR}
+  Warnings: ${warning_str%%; }
+LOG_EOF
+
+  jq -nc --arg warnings "${warning_str%%; }" \
+    '{systemMessage: ("safedeps: verified install completed, but npm rebuild warning(s) were recorded:\n" + $warnings)}'
+}
+
 # Read tool input from stdin
 INPUT=$(cat)
 
@@ -698,7 +733,9 @@ LOG_EOF
   exit 0
 fi
 
+run_verified_npm_rebuild_if_injected
 confirm_snapshot "${SNAPSHOT_ID}" "${DIR_HASH}"
 cleanup_old_snapshots
+emit_confirm_warnings_if_any
 
 exit 0

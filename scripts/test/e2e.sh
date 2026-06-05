@@ -117,7 +117,7 @@ mkdir -p "${project_dir}"
 printf '{"dependencies":{}}\n' > "${project_dir}/package.json"
 hook_allow=$(
   scripts/safedeps-pre-guard.sh <<EOF
-{"tool_name":"Bash","tool_input":{"command":"npm install fixture-vuln@1.0.1"},"cwd":"${project_dir}"}
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-vuln@1.0.1"},"cwd":"${project_dir}","turn_id":"turn-e2e","model":"codex-test"}
 EOF
 )
 [[ -z "${hook_allow}" ]] || fail "hook allows narrowed approved spec"
@@ -129,7 +129,7 @@ printf '{"dependencies":{}}\n' > "${effect_project}/package.json"
 
 effect_clean_pre=$(
   scripts/safedeps-pre-guard.sh <<EOF
-{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${effect_project}"}
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${effect_project}","turn_id":"turn-e2e","model":"codex-test"}
 EOF
 )
 [[ -z "${effect_clean_pre}" ]] || fail "effect clean pre hook allows closure-approved direct spec"
@@ -152,6 +152,44 @@ EOF
 [[ -z "${effect_clean_post}" ]] || fail "post hook passes approved full closure"
 pass "post hook passes approved full closure"
 
+inert_project="${tmp_root}/inert-project"
+mkdir -p "${inert_project}"
+printf '{"dependencies":{}}\n' > "${inert_project}/package.json"
+inert_pre=$(
+  scripts/safedeps-pre-guard.sh <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${inert_project}"}
+EOF
+)
+[[ "$(jq -r '.hookSpecificOutput.permissionDecision' <<< "${inert_pre}")" == "allow" ]] || fail "inert pre hook emits Claude allow"
+[[ "$(jq -r '.hookSpecificOutput.updatedInput.command' <<< "${inert_pre}")" == "npm install fixture-parent@1.0.0 --ignore-scripts" ]] || fail "inert pre hook injects ignore-scripts"
+cat > "${inert_project}/package-lock.json" <<'EOF'
+{
+  "name": "inert-project",
+  "lockfileVersion": 3,
+  "packages": {
+    "": {"dependencies": {"fixture-parent": "1.0.0"}},
+    "node_modules/fixture-parent": {"version": "1.0.0", "dependencies": {"fixture-child": "1.0.0"}},
+    "node_modules/fixture-child": {"version": "1.0.0"}
+  }
+}
+EOF
+stub_bin="${tmp_root}/stub-bin"
+mkdir -p "${stub_bin}"
+cat > "${stub_bin}/npm" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "${tmp_root}/npm-calls.log"
+exit 0
+EOF
+chmod +x "${stub_bin}/npm"
+inert_post=$(
+  PATH="${stub_bin}:${PATH}" scripts/safedeps-post-verify.sh <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0 --ignore-scripts"}}
+EOF
+)
+[[ -z "${inert_post}" ]] || fail "post hook keeps verified inert rebuild success quiet"
+grep -qx 'rebuild' "${tmp_root}/npm-calls.log" || fail "post hook runs npm rebuild after verified injected install"
+pass "post hook rebuilds after verified inert install"
+
 export SAFEDEPS_HOME="${tmp_root}/safe-missing-transitive"
 export SAFEDEPS_OSV_API_URL="http://127.0.0.1:${port}/osv/v1/query"
 export SAFEDEPS_OSV_BATCH_API_URL="http://127.0.0.1:${port}/osv/v1/querybatch"
@@ -165,7 +203,7 @@ printf '{"dependencies":{}}\n' > "${missing_project}/package.json"
 SAFEDEPS_HOME="${SAFEDEPS_HOME}" lib/ledger/ledger.sh approve npm fixture-parent 1.0.0 1.0.0 direct-only >/dev/null
 missing_pre=$(
   scripts/safedeps-pre-guard.sh <<EOF
-{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${missing_project}"}
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${missing_project}","turn_id":"turn-e2e","model":"codex-test"}
 EOF
 )
 [[ -z "${missing_pre}" ]] || fail "missing-transitive pre hook allows direct-only approved spec"

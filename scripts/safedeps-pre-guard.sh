@@ -105,7 +105,7 @@ command_is_dependency_install() {
   local scan_command
   local install_pattern
 
-  install_pattern='(^|[;&|]+[[:space:]]*)((npm([[:space:]]+--?[a-zA-Z0-9_-]+([=[:space:]][^[:space:]]+)?)?[[:space:]]+(install|i|add|update|up|upgrade))|npx[[:space:]]|pnpm([[:space:]]+--?[a-zA-Z0-9_-]+([=[:space:]][^[:space:]]+)?)?[[:space:]]+(add|install|update|up|dlx)|yarn([[:space:]]+--?[a-zA-Z0-9_-]+([=[:space:]][^[:space:]]+)?)?[[:space:]]+(add|install|upgrade|dlx)|((python3?|py)[[:space:]]+-m[[:space:]]+pip|pip3?)[[:space:]]+install|poetry[[:space:]]+add|uv[[:space:]]+(add|pip[[:space:]]+install)|pipenv[[:space:]]+install|cargo[[:space:]]+(add|install)|go[[:space:]]+(get|install)|gem[[:space:]]+install|bundle[[:space:]]+add|mvn[[:space:]]+dependency:get|dotnet[[:space:]]+add[[:space:]]+package)([[:space:]]|$)'
+  install_pattern='(^|[;&|]+[[:space:]]*)((npm([[:space:]]+--?[a-zA-Z0-9_-]+([=[:space:]][^[:space:]]+)?)?[[:space:]]+(install|i|add|ci|update|up|upgrade))|npx[[:space:]]|pnpm([[:space:]]+--?[a-zA-Z0-9_-]+([=[:space:]][^[:space:]]+)?)?[[:space:]]+(add|install|update|up|dlx)|yarn([[:space:]]+--?[a-zA-Z0-9_-]+([=[:space:]][^[:space:]]+)?)?[[:space:]]+(add|install|upgrade|dlx)|((python3?|py)[[:space:]]+-m[[:space:]]+pip|pip3?)[[:space:]]+install|poetry[[:space:]]+add|uv[[:space:]]+(add|pip[[:space:]]+install)|pipenv[[:space:]]+install|cargo[[:space:]]+(add|install)|go[[:space:]]+(get|install)|gem[[:space:]]+install|bundle[[:space:]]+add|mvn[[:space:]]+dependency:get|dotnet[[:space:]]+add[[:space:]]+package)([[:space:]]|$)'
 
   while IFS= read -r scan_command; do
     scan_command=$(command_scan_text "${scan_command}")
@@ -223,6 +223,31 @@ command_candidate_texts() {
     normalize_install_text "${payload}"
     printf '\n'
   done < <(extract_shell_c_payloads "${command}")
+}
+
+command_is_injectable_npm_install() {
+  local command="$1"
+  local scan_command
+  local npm_install_pattern
+
+  npm_install_pattern='(^|[;&|]+[[:space:]]*)npm([[:space:]]+--?[a-zA-Z0-9_-]+([=[:space:]][^[:space:]]+)?)?[[:space:]]+(install|i|add|ci|update|up|upgrade)([[:space:]]|$)'
+
+  while IFS= read -r scan_command; do
+    scan_command=$(command_scan_text "${scan_command}")
+    echo "${scan_command}" | grep -qEi "${npm_install_pattern}" && return 0
+  done < <(command_candidate_texts "${command}")
+  return 1
+}
+
+command_has_ignore_scripts_flag() {
+  local command="$1"
+  local scan_command
+
+  while IFS= read -r scan_command; do
+    scan_command=$(command_scan_text "${scan_command}")
+    echo "${scan_command}" | grep -qEi -- '(^|[[:space:]])--ignore-scripts([=[:space:]]|$)' && return 0
+  done < <(command_candidate_texts "${command}")
+  return 1
 }
 
 snapshot_project_file() {
@@ -346,9 +371,23 @@ cat > "${SNAPSHOT_DIR}/${SNAPSHOT_ID}_meta.json" << META_EOF
   "timestamp": ${TIMESTAMP},
   "project_dir": $(printf '%s' "${PROJECT_DIR}" | jq -Rs .),
   "command": $(printf '%s' "${COMMAND}" | jq -Rs .),
+  "ignore_scripts_injected": false,
   "lock_files_found": ${SNAPSHOTTED}
 }
 META_EOF
+
+mark_ignore_scripts_injected() {
+  local meta_file="${SNAPSHOT_DIR}/${SNAPSHOT_ID}_meta.json"
+  local temp_file
+
+  [[ -f "${meta_file}" ]] || return 0
+  temp_file=$(mktemp "${SNAPSHOT_DIR}/.${SNAPSHOT_ID}_meta.XXXXXX") || return 0
+  if jq '.ignore_scripts_injected = true' "${meta_file}" > "${temp_file}"; then
+    mv -f "${temp_file}" "${meta_file}"
+  else
+    rm -f "${temp_file}"
+  fi
+}
 
 # --- Pre-flight security checks on the command itself ---
 
@@ -611,6 +650,16 @@ fi
 CURRENT_STATE=$(jq -n --arg sid "${SNAPSHOT_ID}" --arg pdir "${PROJECT_DIR}" --arg dhash "${DIR_HASH}" \
   '{snapshot_id: $sid, project_dir: $pdir, dir_hash: $dhash}')
 write_state_file "${GUARD_DIR}/current_state" "${CURRENT_STATE}"
+
+if ! jq -e 'has("turn_id")' <<< "${INPUT}" >/dev/null 2>&1 && \
+   command_is_injectable_npm_install "${COMMAND}" && \
+   ! command_has_ignore_scripts_flag "${COMMAND}"; then
+  UPDATED_COMMAND="${COMMAND} --ignore-scripts"
+  mark_ignore_scripts_injected
+  jq -nc --arg command "${UPDATED_COMMAND}" \
+    '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"allow",updatedInput:{command:$command}}}'
+  exit 0
+fi
 
 # Allow the command to proceed — PostToolUse will verify the result
 exit 0
