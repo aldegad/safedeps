@@ -219,6 +219,51 @@ function unlinkBin() {
   removeSymlink(join(HOME, ".local", "bin", "safedeps"));
 }
 
+function safedepsOnPath() {
+  const dirs = (process.env.PATH || "").split(":").filter(Boolean);
+  return dirs.some((d) => {
+    try { return existsSync(join(d, "safedeps")); } catch { return false; }
+  });
+}
+
+// The dependency-install gate is global and now active. The rest of the
+// surface (secret-leak lane, dep audit) is per-repo and opt-in — its policy
+// lives in each repo. Nudge with a recommended setup; never auto-write.
+function printRecommendedSetup() {
+  const line = "─".repeat(58);
+  const out = [];
+  out.push("");
+  out.push("Recommended setup");
+  out.push(line);
+  out.push("  1. Dependency-install gate  ........  ✓ active now (global, all repos)");
+  out.push("       Every agent install is checked; for npm the installed");
+  out.push("       closure is reorged (rolled back) if it diverges.");
+  out.push("");
+  out.push("  The rest is per-repo and opt-in. Run these INSIDE a repo:");
+  out.push("");
+  out.push("  2. Pre-commit gate  ...............  recommended");
+  out.push("       safedeps doctor          # diagnose this repo (read-only)");
+  out.push("       safedeps doctor --fix    # scaffold .gitleaks.toml + pre-commit, then activate");
+  out.push("       → every commit: blocks a secret / real .env (fail-closed).");
+  out.push("       → every commit (npm repos): audits deps for vulnerable transitives;");
+  out.push("         a real finding blocks, an offline advisory DB only warns + allows.");
+  out.push("");
+  out.push("  3. Release / CI gate  .............  optional");
+  out.push("       safedeps gates run       # secret scan + npm dep audit + hook/CI check");
+  out.push("       → full-repo sweep for CI / pre-release: scans the whole tree (not just");
+  out.push("         the staged diff) and verifies the hooks themselves are installed.");
+  out.push("");
+  out.push("  Docs: README → \"Two Lanes\"");
+  if (!safedepsOnPath()) {
+    out.push("");
+    out.push("  Note: `safedeps` is not on your PATH. To run the commands above:");
+    out.push("    - re-run this installer with --link-bin (adds ~/.local/bin/safedeps), or");
+    out.push("    - use the full path: ~/.claude/skills/safedeps/bin/safedeps");
+  }
+  out.push("");
+  console.log(out.join("\n"));
+}
+
 function main() {
   if (!existsSync(REPO_PRE_HOOK) || !existsSync(REPO_POST_HOOK)) {
     throw new Error(`hook scripts not found at ${REPO_PRE_HOOK} / ${REPO_POST_HOOK}`);
@@ -242,9 +287,7 @@ function main() {
     log("uninstall done.");
   } else {
     log("install done. New hook events fire on the next session start.");
-    // The dependency-install gate is global. The secret-leak lane is per-repo
-    // and stays opt-in (its policy lives in each repo). Nudge, do not auto-write.
-    log("secret-leak lane is per-repo — in a repo run: safedeps doctor (then `safedeps doctor --fix` to scaffold + activate).");
+    printRecommendedSetup();
   }
 }
 

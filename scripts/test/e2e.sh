@@ -328,4 +328,64 @@ else
   printf 'ok - pre-commit gate behavior SKIPPED (needs gitleaks + openssl)\n'
 fi
 
+# --- Dependency audit gate (npm) — v2.5.0 -----------------------------------
+# A fake `npm` makes the crucial distinction deterministic and offline: a
+# vulnerable verdict (block) must never be confused with an unreachable advisory
+# DB (warn + allow). If those two collapsed, an offline failover would silently
+# let real vulnerabilities through.
+fakebin="${tmp_root}/fakebin"
+mkdir -p "${fakebin}"
+cat > "${fakebin}/npm" <<'FAKE'
+#!/bin/bash
+[ "${1:-}" = "audit" ] || exit 0
+case "${FAKE_NPM_MODE:-clean}" in
+  clean)   printf '%s\n' '{"auditReportVersion":2,"vulnerabilities":{},"metadata":{"vulnerabilities":{"info":0,"low":0,"moderate":0,"high":0,"critical":0,"total":0}}}'; exit 0 ;;
+  vuln)    printf '%s\n' '{"auditReportVersion":2,"vulnerabilities":{"hono":{"name":"hono","severity":"moderate","via":[{"title":"JWT"}]}},"metadata":{"vulnerabilities":{"info":0,"low":0,"moderate":4,"high":0,"critical":0,"total":4}}}'; exit 1 ;;
+  offline) printf '%s\n' '{"error":{"code":"ENOTFOUND","summary":"registry unreachable"}}'; exit 1 ;;
+esac
+FAKE
+chmod +x "${fakebin}/npm"
+
+if command -v jq >/dev/null 2>&1; then
+  audit_repo="${tmp_root}/audit-repo"
+  mkdir -p "${audit_repo}"
+  printf '{"name":"a","lockfileVersion":3}\n' > "${audit_repo}/package-lock.json"
+  run_audit() {
+    PATH="${fakebin}:${PATH}" FAKE_NPM_MODE="$1" \
+      "${ROOT_DIR}/bin/safedeps" audit npm --root "${audit_repo}" >/dev/null 2>&1
+  }
+  run_audit clean   && rc=0 || rc=$?; [ "${rc}" = "0" ] || fail "audit exit 0 on a clean lockfile (got ${rc})"
+  run_audit vuln    && rc=0 || rc=$?; [ "${rc}" = "1" ] || fail "audit exit 1 on a vulnerable lockfile (got ${rc})"
+  run_audit offline && rc=0 || rc=$?; [ "${rc}" = "2" ] || fail "audit exit 2 when the advisory DB is unreachable (got ${rc})"
+  pass "audit npm exit-code contract: clean=0 / vulnerable=1 / unreachable=2"
+else
+  printf 'ok - audit exit-code contract SKIPPED (needs jq)\n'
+fi
+
+if command -v gitleaks >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  dep_repo="${tmp_root}/dep-repo"
+  mkdir -p "${dep_repo}"
+  git -C "${dep_repo}" init -q
+  git -C "${dep_repo}" config user.email t@safedeps.test
+  git -C "${dep_repo}" config user.name safedeps-e2e
+  HOME="${tmp_root}/doc-home" "${ROOT_DIR}/bin/safedeps" doctor --fix --root "${dep_repo}" >/dev/null
+  printf '{"name":"a","lockfileVersion":3}\n' > "${dep_repo}/package-lock.json"
+  git -C "${dep_repo}" add package-lock.json
+
+  # Threat: a vulnerable dependency must BLOCK the commit (fail-closed verdict).
+  if PATH="${fakebin}:${PATH}" FAKE_NPM_MODE=vuln SAFEDEPS_BIN="${ROOT_DIR}/bin/safedeps" \
+       git -C "${dep_repo}" commit -q -m "vuln" 2>/dev/null; then
+    fail "pre-commit blocks a commit carrying a vulnerable dependency"
+  fi
+
+  # Availability failover: an unreachable advisory DB must WARN and ALLOW.
+  offline_out="$(PATH="${fakebin}:${PATH}" FAKE_NPM_MODE=offline SAFEDEPS_BIN="${ROOT_DIR}/bin/safedeps" \
+       git -C "${dep_repo}" commit -m "offline" 2>&1)" \
+    || fail "pre-commit allows the commit when the advisory DB is unreachable (offline failover)"
+  grep -q "offline failover" <<< "${offline_out}" || fail "offline failover prints an observable warning"
+  pass "pre-commit dep gate: blocks on vuln, warns+allows when offline"
+else
+  printf 'ok - pre-commit dep gate SKIPPED (needs gitleaks + jq)\n'
+fi
+
 printf 'e2e passed\n'
