@@ -1,18 +1,28 @@
-# Safedeps
+# safedeps
 
-> **모든 install 을 미확정 블록으로 본다 — `safedeps` 는 안전한 것만 승인하고, 그렇지 않으면 reorg 한다.**
+> **AI 코딩 에이전트가 취약하거나 미승인된 의존성을 설치하지 못하게 막고, 빠져나간 건 롤백한다.**
 >
-> OSV / CISA KEV / GitHub Advisory 로 의존성 spec 을 사전 승인하고, Claude Code 와 Codex CLI 의 hook 에서 실제 설치 closure 를 강제하며, 승인과 어긋난 install 은 자동으로 마지막 안전 snapshot 으로 롤백한다.
+> `safedeps` 는 Claude Code·Codex CLI 에이전트가 실행하는 모든 의존성 install 을 게이트한다. 패키지를 OSV / CISA KEV / GitHub Advisory 로 사전 승인하고, 실제로 lockfile 에 깔린 closure 를 다시 검증하며, 어긋난 건 자동으로 롤백한다. 전부 로컬에서 돌고 런타임 의존성은 0.
+
+- **사전 승인** — 모든 `pkg@version` 과 (npm 은) 그 전체 transitive closure 를 설치 *전에* OSV(정본)·CISA KEV·GitHub Advisory 로 검사한다.
+- **실제 effect 강제** — 설치 후 실제 `package-lock.json` closure 를 다시 확인하므로, 래핑·난독화된 명령도 게이트를 못 빠져나간다.
+- **롤백** — 미승인·신규 취약 패키지는 마지막 확정 안전 snapshot 으로 되돌린다. Claude Code 에서는 install 이 inert(`--ignore-scripts`)로 돌아 거부된 패키지의 lifecycle script 가 아예 실행되지 않는다.
+
+## Quickstart
+
+```bash
+# 1. CLI 설치 — npm 패키지는 scoped, @aldegad/ 접두사 주의
+npm install -g @aldegad/safedeps
+
+# 2. Claude Code / Codex 에 hook 연결 (idempotent)
+cd "$(npm root -g)/@aldegad/safedeps" && node scripts/install/install-safedeps-hooks.mjs
+
+# 3. 끝 — 이제 에이전트가 실행하는 모든 의존성 install 이 자동으로 게이트된다.
+```
+
+> `safedeps` 는 CLI 명령어이고, npm 패키지는 **`@aldegad/safedeps`** 다 — npm 의 unscoped `safedeps` 는 무관한 남의 패키지. 전체 skill 소스 트리를 원하면 [설치](#설치) 참고.
 
 *Detailed reference → [README.md](./README.md) (영문, SSoT)*
-
----
-
-## "reorg" 는 뭐고 왜 그 비유인가
-
-블록체인에서 **reorg (재편성)** 은 미확정 블록 시퀀스를 무효화하고 마지막 확정된 안전 상태로 체인을 되돌린다. `safedeps` 는 같은 원리를 `node_modules` 에 적용한다 — 모든 install 은 일련의 공급망 보안 검사를 통과하기 전까지는 **미확정 블록 후보** 로 취급된다. 의심스러우면 도구가 **reorg** 를 수행한다 — lock 파일, `package.json`, `node_modules` 를 마지막 확정된 안전 snapshot 으로 되돌린다.
-
-빠른 advisory 피드백, 관측 가능한 rollback, silent fallback 없음. command guard 는 best-effort UX 이고, 설치 결과 effect 가 backstop 이다.
 
 ---
 
@@ -192,6 +202,14 @@ node scripts/install/install-safedeps-recheck-agent.mjs install --hour 9 --minut
 | `~/.safedeps/recheck-alerts.jsonl` | 재검증으로 발견된 새 CVE / KEV / revoke 알람 jsonl |
 
 ---
+
+## "reorg" 는 뭐고 왜 그 비유인가
+
+블록체인에서 **reorg (재편성)** 은 미확정 블록 시퀀스를 무효화하고 마지막 확정된 안전 상태로 체인을 되돌린다. `safedeps` 는 모든 install 을 똑같이 본다 — 일련의 공급망 보안 검사를 통과하기 전까지는 미확정 블록 후보다. 설치된 effect 가 어긋나면 도구가 **reorg** 를 수행한다 — lock 파일, `package.json`, `node_modules` 를 마지막 확정된 안전 snapshot 으로 되돌린다.
+
+하지만 reorg 는 **최전선이 아니라 backstop 이다.** 나쁜 install 의 대부분은 여기까지 오지도 않는다 — 사전 승인 게이트가 미승인·플래그된 패키지를 실행 전에 *거부* 하고, Claude Code 에서는 install 이 **inert (`--ignore-scripts`)** 로 돌아 closure 가 깨끗하다고 검증되기 전까지 lifecycle script 가 실행되지 않는다. reorg 가 발동하는 건 잔여 케이스뿐이다 — 승인된 직접 패키지가 미승인·취약 transitive 를 끌어오거나, 래핑된 명령이 advisory 계층을 빠져나간 경우 — 그리고 그때조차 실행되지도 못한 파일을 되돌린다.
+
+빠른 advisory 피드백, 관측 가능한 rollback, silent fallback 없음. command guard 는 best-effort UX 이고, 설치 결과 effect 가 backstop 이다.
 
 ## 다른 도구와 뭐가 다른가
 
