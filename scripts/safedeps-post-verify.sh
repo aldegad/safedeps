@@ -120,6 +120,21 @@ compute_dir_hash() {
   fi
 }
 
+# Per-install pending-state key (issue #5) — must match the PreToolUse derivation:
+# dir hash + a hash of the command with the inert-install rewrite normalized out.
+compute_pending_key() {
+  local dir_hash="$1" command="$2" norm cmd_hash
+  norm=$(printf '%s' "${command}" | sed -E 's/[[:space:]]+--ignore-scripts([[:space:]]|$)/ /g; s/[[:space:]]+/ /g; s/^ //; s/ $//')
+  if command -v md5sum >/dev/null 2>&1; then
+    cmd_hash=$(printf '%s' "${norm}" | md5sum | cut -d' ' -f1)
+  elif command -v md5 >/dev/null 2>&1; then
+    cmd_hash=$(md5 -q -s "${norm}")
+  else
+    cmd_hash=$(printf '%s' "${norm}" | cksum | cut -d' ' -f1)
+  fi
+  printf '%s_%s' "${dir_hash}" "${cmd_hash}"
+}
+
 hash_file() {
   local file_path="$1"
 
@@ -376,25 +391,43 @@ if [[ "${TOOL_NAME}" != "Bash" ]]; then
   exit 0
 fi
 
+# The command + cwd identify which pending install this PostToolUse belongs to
+# (issue #5), so concurrent installs do not consume each other's state.
+COMMAND=$(echo "${INPUT}" | jq -r '.tool_input.command // empty' 2>/dev/null)
+POST_CWD=$(echo "${INPUT}" | jq -r '.cwd // empty' 2>/dev/null)
+[[ -z "${POST_CWD}" ]] && POST_CWD=$(pwd)
+if command -v realpath >/dev/null 2>&1; then
+  POST_CWD=$(realpath "${POST_CWD}" 2>/dev/null || echo "${POST_CWD}")
+elif command -v readlink >/dev/null 2>&1; then
+  POST_CWD=$(readlink -f "${POST_CWD}" 2>/dev/null || echo "${POST_CWD}")
+fi
+POST_DIR_HASH=$(compute_dir_hash "${POST_CWD}")
+
 STATE_LOCK_HELD=true
 acquire_state_lock
 trap '[ "${STATE_LOCK_HELD:-}" = "true" ] && release_state_lock; STATE_LOCK_HELD=false' EXIT
 
-# Check if we have a pending snapshot to verify (V-004: atomic state file)
-if [[ ! -f "${GUARD_DIR}/current_state" ]]; then
-  # Legacy fallback for in-flight upgrades
-  if [[ ! -f "${GUARD_DIR}/current_snapshot_id" ]]; then
-    exit 0
-  fi
-  SNAPSHOT_ID=$(cat "${GUARD_DIR}/current_snapshot_id")
-  PROJECT_DIR=$(cat "${GUARD_DIR}/current_project_dir" 2>/dev/null || pwd)
-  rm -f "${GUARD_DIR}/current_snapshot_id" "${GUARD_DIR}/current_project_dir"
-else
+# Resolve THIS install's pending state by its per-install key (issue #5). Fall back
+# to the legacy global files for in-flight upgrades from a pre-#5 PreToolUse.
+PENDING_FILE="${GUARD_DIR}/pending/$(compute_pending_key "${POST_DIR_HASH}" "${COMMAND}").json"
+if [[ -f "${PENDING_FILE}" ]]; then
+  CURRENT_STATE=$(cat "${PENDING_FILE}")
+  SNAPSHOT_ID=$(echo "${CURRENT_STATE}" | jq -r '.snapshot_id // empty')
+  PROJECT_DIR=$(echo "${CURRENT_STATE}" | jq -r '.project_dir // empty')
+  DIR_HASH=$(echo "${CURRENT_STATE}" | jq -r '.dir_hash // empty')
+  rm -f "${PENDING_FILE}"
+elif [[ -f "${GUARD_DIR}/current_state" ]]; then
   CURRENT_STATE=$(cat "${GUARD_DIR}/current_state")
   SNAPSHOT_ID=$(echo "${CURRENT_STATE}" | jq -r '.snapshot_id // empty')
   PROJECT_DIR=$(echo "${CURRENT_STATE}" | jq -r '.project_dir // empty')
   DIR_HASH=$(echo "${CURRENT_STATE}" | jq -r '.dir_hash // empty')
   rm -f "${GUARD_DIR}/current_state"
+elif [[ -f "${GUARD_DIR}/current_snapshot_id" ]]; then
+  SNAPSHOT_ID=$(cat "${GUARD_DIR}/current_snapshot_id")
+  PROJECT_DIR=$(cat "${GUARD_DIR}/current_project_dir" 2>/dev/null || pwd)
+  rm -f "${GUARD_DIR}/current_snapshot_id" "${GUARD_DIR}/current_project_dir"
+else
+  exit 0
 fi
 
 if [[ -z "${SNAPSHOT_ID}" ]]; then

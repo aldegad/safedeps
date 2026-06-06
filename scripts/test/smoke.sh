@@ -103,7 +103,7 @@ allow_output=$(
 )
 [[ "$(jq -r '.hookSpecificOutput.permissionDecision' <<< "${allow_output}")" == "allow" ]] || fail "hook emits Claude allow decision for approved install"
 [[ "$(jq -r '.hookSpecificOutput.updatedInput.command' <<< "${allow_output}")" == "npm install left-pad@1.3.0 --ignore-scripts" ]] || fail "hook injects --ignore-scripts for Claude npm install"
-allow_sid=$(jq -r '.snapshot_id' "${tmp_root}/safe-hook-allow/current_state")
+allow_sid=$(jq -r '.snapshot_id' "${tmp_root}/safe-hook-allow/pending/"*.json)
 jq -e '.ignore_scripts_injected == true' "${tmp_root}/safe-hook-allow/snapshots/${allow_sid}_meta.json" >/dev/null || fail "hook records injected meta flag"
 pass "hook injects --ignore-scripts for Claude approved install"
 
@@ -113,7 +113,7 @@ codex_allow_output=$(
   run_codex_hook_command "${tmp_root}/home-hook-codex" "${tmp_root}/safe-hook-codex" "npm install left-pad@1.3.0"
 )
 [[ -z "${codex_allow_output}" ]] || fail "hook keeps Codex approved install as plain allow"
-codex_sid=$(jq -r '.snapshot_id' "${tmp_root}/safe-hook-codex/current_state")
+codex_sid=$(jq -r '.snapshot_id' "${tmp_root}/safe-hook-codex/pending/"*.json)
 jq -e '.ignore_scripts_injected == false' "${tmp_root}/safe-hook-codex/snapshots/${codex_sid}_meta.json" >/dev/null || fail "hook does not record injected meta flag for Codex"
 pass "hook keeps Codex approved install as plain allow"
 
@@ -129,7 +129,7 @@ ignore_scripts_output=$(
   run_hook_command "${tmp_root}/home-hook-ignore-scripts" "${tmp_root}/safe-hook-ignore-scripts" "npm install left-pad@1.3.0 --ignore-scripts"
 )
 [[ -z "${ignore_scripts_output}" ]] || fail "hook does not duplicate --ignore-scripts"
-ignore_sid=$(jq -r '.snapshot_id' "${tmp_root}/safe-hook-ignore-scripts/current_state")
+ignore_sid=$(jq -r '.snapshot_id' "${tmp_root}/safe-hook-ignore-scripts/pending/"*.json)
 jq -e '.ignore_scripts_injected == false' "${tmp_root}/safe-hook-ignore-scripts/snapshots/${ignore_sid}_meta.json" >/dev/null || fail "hook does not record injected meta flag when flag already exists"
 pass "hook does not duplicate --ignore-scripts"
 
@@ -224,6 +224,23 @@ fc_noledger=$(
 grep -q 'ledger library missing' "${fc_safe}/advisory.log" || fail "pre-guard logs the missing-ledger deny to advisory.log"
 pass "pre-guard fails closed when the ledger library is missing (observable)"
 
+# Concurrency (issue #5): two installs in one project must keep separate pending
+# state. A second install's pre hook must not clobber the first's, and a post hook
+# must consume only its own install's state.
+conc_safe="${tmp_root}/safe-concurrency"
+mkdir -p "${conc_safe}"
+SAFEDEPS_HOME="${conc_safe}" lib/ledger/ledger.sh approve npm conc-a 1.0.0 1.0.0 smoke >/dev/null
+SAFEDEPS_HOME="${conc_safe}" lib/ledger/ledger.sh approve npm conc-b 1.0.0 1.0.0 smoke >/dev/null
+run_hook_command "${tmp_root}/home-conc" "${conc_safe}" "npm install conc-a@1.0.0" >/dev/null
+run_hook_command "${tmp_root}/home-conc" "${conc_safe}" "npm install conc-b@1.0.0" >/dev/null
+conc_pending=$(find "${conc_safe}/pending" -name '*.json' -type f | wc -l | tr -d ' ')
+[[ "${conc_pending}" == "2" ]] || fail "two installs in one project keep two separate pending files (got ${conc_pending}, want 2)"
+jq -nc --arg c "npm install conc-a@1.0.0" --arg cwd "${project_dir}" '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
+  HOME="${tmp_root}/home-conc" SAFEDEPS_HOME="${conc_safe}" scripts/safedeps-post-verify.sh >/dev/null 2>&1 || true
+conc_left=$(find "${conc_safe}/pending" -name '*.json' -type f | wc -l | tr -d ' ')
+[[ "${conc_left}" == "1" ]] || fail "post hook consumes only its own install's pending state (left ${conc_left}, want 1)"
+pass "concurrent installs keep isolated pending state (issue #5)"
+
 tamper_safe="${tmp_root}/safe-tamper"
 tamper_home="${tmp_root}/home-tamper"
 SAFEDEPS_HOME="${tamper_safe}" lib/ledger/ledger.sh approve npm ledger-tamper 1.0.0 1.0.0 smoke >/dev/null
@@ -236,7 +253,7 @@ cat > "${project_dir}/node_modules/ledger-tamper/package.json" <<'EOF'
 {"name":"ledger-tamper","version":"1.0.0","scripts":{"postinstall":"node -e \"require('fs').writeFileSync(process.env.HOME + '/.safedeps/approved-specs/evil.json', '{}')\""}}
 EOF
 tamper_post=$(
-  jq -nc '{tool_name:"Bash",tool_input:{command:"npm install ledger-tamper@1.0.0"}}' |
+  jq -nc --arg cwd "${project_dir}" '{tool_name:"Bash",tool_input:{command:"npm install ledger-tamper@1.0.0"},cwd:$cwd}' |
     HOME="${tamper_home}" SAFEDEPS_HOME="${tamper_safe}" scripts/safedeps-post-verify.sh
 )
 grep -q '의심스러운 패키지 변경 감지' <<< "${tamper_post}" || fail "post hook reorgs safedeps ledger tamper script"
