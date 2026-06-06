@@ -280,4 +280,52 @@ if jq -e '[.. | strings] | any(contains("npm-reorg-guard"))' "${installer_home}/
 fi
 pass "installer legacy hook cleanup"
 
+# --- Secret-leak lane: pre-commit gate must DENY a secret, PASS clean/example -
+# The real bypass harness for the secret lane. Needs a scanner (gitleaks or
+# docker) and openssl for a synthetic high-entropy secret; skip explicitly
+# (not silently) when either is missing.
+secret_repo="${tmp_root}/secret-repo"
+mkdir -p "${secret_repo}"
+git -C "${secret_repo}" init -q
+git -C "${secret_repo}" config user.email t@safedeps.test
+git -C "${secret_repo}" config user.name safedeps-e2e
+
+# doctor flags gaps on the bare repo, then --fix scaffolds + activates the lane.
+if HOME="${tmp_root}/doc-home" "${ROOT_DIR}/bin/safedeps" doctor --root "${secret_repo}" >/dev/null 2>&1; then
+  fail "doctor flags gaps on an unconfigured repo"
+fi
+HOME="${tmp_root}/doc-home" "${ROOT_DIR}/bin/safedeps" doctor --fix --root "${secret_repo}" >/dev/null
+[[ -f "${secret_repo}/.gitleaks.toml" ]] || fail "doctor --fix scaffolds .gitleaks.toml"
+[[ -x "${secret_repo}/.githooks/pre-commit" ]] || fail "doctor --fix scaffolds executable pre-commit"
+[[ "$(git -C "${secret_repo}" config --get core.hooksPath)" == ".githooks" ]] || fail "doctor --fix activates core.hooksPath"
+pass "doctor --fix scaffolds + activates the secret lane"
+
+# The scaffolded pre-commit resolves `safedeps` via PATH, then SAFEDEPS_BIN, then
+# the skill install paths. In CI none of those exist, so point it at this repo's
+# binary; the git commit subprocess inherits the env and the hook resolves it.
+export SAFEDEPS_BIN="${ROOT_DIR}/bin/safedeps"
+
+if command -v gitleaks >/dev/null 2>&1 && command -v openssl >/dev/null 2>&1; then
+  # Regression: a clean file commits cleanly.
+  echo "hello" > "${secret_repo}/readme.txt"
+  git -C "${secret_repo}" add readme.txt
+  git -C "${secret_repo}" commit -q -m "clean" || fail "pre-commit allows a clean commit"
+
+  # Threat: a literal .env with an assigned (synthetic) secret must be blocked.
+  printf 'API_KEY=%s\n' "$(openssl rand -hex 20)" > "${secret_repo}/.env"
+  git -C "${secret_repo}" add .env
+  if git -C "${secret_repo}" commit -q -m "leak" 2>/dev/null; then
+    fail "pre-commit blocks a committed .env secret"
+  fi
+  git -C "${secret_repo}" reset -q HEAD .env >/dev/null 2>&1 || true
+
+  # Regression: the .env.example placeholder is allowlisted and commits.
+  printf 'API_KEY=your_api_key_here\n' > "${secret_repo}/.env.example"
+  git -C "${secret_repo}" add .env.example
+  git -C "${secret_repo}" commit -q -m "example" || fail "pre-commit allows the .env.example placeholder"
+  pass "pre-commit gate denies a secret, passes clean and example commits"
+else
+  printf 'ok - pre-commit gate behavior SKIPPED (needs gitleaks + openssl)\n'
+fi
+
 printf 'e2e passed\n'

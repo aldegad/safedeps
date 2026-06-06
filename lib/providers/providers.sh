@@ -93,7 +93,10 @@ safedeps_hash_text() {
 safedeps_file_mtime() {
   local path="$1"
 
-  stat -f %m "${path}" 2>/dev/null || stat -c %Y "${path}" 2>/dev/null
+  # GNU coreutils (Linux) uses `-c %Y`; BSD/macOS uses `-f %m`. GNU must run
+  # first: on Linux `stat -f` means --file-system and prints filesystem info to
+  # stdout, which would pollute the mtime and break the arithmetic downstream.
+  stat -c %Y "${path}" 2>/dev/null || stat -f %m "${path}" 2>/dev/null
 }
 
 safedeps_cache_is_fresh() {

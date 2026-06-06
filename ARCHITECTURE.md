@@ -39,9 +39,11 @@ safedeps owns security gates at two distinct moments, under one skill. It absorb
 ```
 
 - **Install-time lane** (sections 2–13 below) — advisory check, fast command guard, and the npm effect gate + reorg. Per-package and proactive.
-- **Release-time lane** — the repo-tree checks from `security-release-gates` (secret scan, dependency audit, repo hook install/check, privacy profile), exposed under the `safedeps scan|audit|hooks|git` command namespace. Repo-specific policy (`.gitleaks.toml`, lockfiles) stays in the target repo; safedeps owns execution, install, and verification.
+- **Release-time lane** — the repo-tree checks from `security-release-gates` (secret scan, dependency audit, repo hook install/check, privacy profile), exposed under the `safedeps scan|audit|hooks|doctor` command namespace. Repo-specific policy (`.gitleaks.toml`, lockfiles) stays in the target repo; safedeps owns execution, install, and verification.
 
 The two lanes differ in timing and scope (one package's effect before/after install vs. the whole repo before a release). They live under one umbrella but stay separated by command namespace.
+
+**The secret-leak side of the release-time lane is per-repo and opt-in.** Its detection policy lives in the target repo, not in safedeps, so it does nothing until the repo provides a `.gitleaks` config and an active `.githooks/pre-commit`. `safedeps doctor` is the repo-entry diagnostic that closes that gap: it reports each piece of the secret-leak lane (`.gitleaks` policy, `pre-commit`, `core.hooksPath`, scanner availability) plus the global install-time gate, and exits non-zero when the per-repo lane has gaps. `safedeps doctor --fix` (= `safedeps hooks init` then `safedeps hooks install`) scaffolds a starter policy from `lib/gates/templates/` and activates the hooks. The scaffold is **non-destructive** — an existing repo-owned config is never overwritten — preserving the invariant that safedeps owns *execution*, not *policy*. The scaffolded `pre-commit` delegates to `safedeps scan secrets --staged` (a single canonical scanner path) and is fail-closed: an unresolvable `safedeps` or missing scanner blocks the commit rather than skipping silently.
 
 **The effect-primary model is npm-only.** `pip`, `cargo`, `go`, `gem`, `maven`, and `nuget` stay on the v2.1 command-gate + reorg model until their closure resolvers land; they are not described as having PostToolUse closure authority.
 
@@ -332,6 +334,8 @@ OSV normalizes ecosystem names, so one API path covers all of them at advisory-c
 | `lib/providers/` | OSV / KEV / GHSA (and optional NVD / deps.dev / Snyk) adapters behind one query interface. |
 | `lib/ledger/` | Approved-spec ledger I/O — atomic write, hashing, TTL checks. |
 | `lib/npm/closure.sh` | npm closure resolution from a lockfile. |
+| `lib/gates/` | Release-time repo lane — `scan.sh` (gitleaks runner), `audit.sh` (npm lockfile audit), `hooks.sh` (`install`/`check`/`init`), `doctor.sh` (posture diagnose + `--fix`), `repo-profile.sh` (public/private resolution). Owns *execution*; the repo owns *policy*. |
+| `lib/gates/templates/` | Starter `.gitleaks[.private].toml` + `.githooks/pre-commit`, scaffolded by `hooks init`. Seeds the repo owns and tunes — never overwritten on re-run. |
 
 ---
 

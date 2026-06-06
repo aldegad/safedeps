@@ -23,6 +23,8 @@
 - **install-time** (이 README 의 초점) — advisory check + approved-spec ledger + 빠른 PreToolUse guard + PostToolUse effect enforcement + post-install reorg. 패키지 단위, install 명령과 실제 lockfile effect 주변.
 - **release-time** — `safedeps gates run`, `safedeps scan secrets [--repo|--worktree|--staged]`, `safedeps audit npm`, `safedeps hooks install|check`. repo 트리 secret scan, 의존성 audit, repo-local git hook 설치/검사 (push/release 전). repo-specific policy(gitleaks config, privacy 경로)는 대상 repo 에 남고 safedeps 는 실행 owner. *(옛 `security-release-gates` 흡수.)*
 
+release-time lane 의 secret 누출 쪽은 **repo 별이고 opt-in** 이다. `safedeps doctor` 가 그 repo-entry 점검이다 — repo 의 `.gitleaks` policy, `.githooks/pre-commit`, 활성 `core.hooksPath`, scanner 가용성을 진단하고(전역 install-time gate 상태도 같이 보고), `safedeps doctor --fix` 가 시작 policy 를 scaffold(`safedeps hooks init`)하고 활성화(`safedeps hooks install`)한다. scaffold 는 비파괴적이라 repo 가 소유한 기존 `.gitleaks.toml` 은 덮어쓰지 않으며, pre-commit hook 은 `safedeps scan secrets --staged` 에 위임하고 fail-closed 다. [secret 누출 lane (repo 별)](#secret-누출-lane-repo-별) 참고.
+
 ---
 
 ## 어떻게 동작
@@ -69,6 +71,46 @@
 | go | `go get`, `go install` |
 | ruby | `gem install`, `bundle add` |
 | maven / nuget | `mvn dependency:get`, `dotnet add package` |
+
+---
+
+## secret 누출 lane (repo 별)
+
+install-time gate 는 전역이지만, secret 이나 진짜 `.env` 가 커밋되는 걸 막는 건 **repo 별이고 opt-in** 이다 — 탐지 policy 가 safedeps 가 아니라 각 repo 에 있기 때문이다. `safedeps doctor` 가 그 빈틈을 메우는 진입점이다.
+
+```bash
+# 이 repo 의 자세 진단 (read-only). secret lane 에 gap 이 있으면 non-zero 로 끝난다.
+$ safedeps doctor
+safedeps doctor — repo security posture
+repo:    /path/to/repo
+profile: public
+
+Secret-leak lane (per-repo)
+  ✓ git worktree
+  ✗ gitleaks config (.gitleaks.toml)             → safedeps hooks init --root "/path/to/repo"
+  ✗ .githooks/pre-commit (present)               → safedeps hooks init --root "/path/to/repo"
+  ✗ git hooks active (core.hooksPath=<unset>)    → safedeps hooks install --root "/path/to/repo"
+  ✓ secret scanner available (gitleaks)
+
+Dependency-install gate (global, all repos)
+  ✓ dependency-install gate installed (~/.claude/skills/safedeps)
+
+3 gap(s) in the secret-leak lane.
+Fix all at once:  safedeps doctor --fix --root "/path/to/repo"
+
+# 시작 policy scaffold + hook 활성화 (비파괴적).
+$ safedeps doctor --fix
+```
+
+lane 구성 요소:
+
+- **`safedeps hooks init`** 가 시작용 `.gitleaks.toml`(private repo 면 `.gitleaks.private.toml`)과 `.githooks/pre-commit` 을 scaffold 한다. 기존 파일은 덮지 않고 유지 — policy 는 repo 가 소유한다.
+- **`safedeps hooks install`** 이 repo-local hook 을 활성화한다(`core.hooksPath = .githooks`).
+- **pre-commit hook 은 `safedeps scan secrets --staged` 에 위임**하고 **fail-closed** 다: scanner(로컬 `gitleaks` 또는 Docker)가 못 돌면 silent skip 이 아니라 커밋을 막는다. 의도된 우회는 사람이 소유하는 `git commit --no-verify` 뿐이다.
+
+scaffold 된 `.gitleaks.toml` 은 **네가 손보는 시작점**이다: gitleaks 기본 ruleset 을 extend 하고, 값이 할당된 `.env` 커밋을 잡는 rule 을 더하며(`.env.example`/`.sample`/`.template` 변형은 allowlist), fixture 용 repo-owned `[allowlist]` 블록을 남겨둔다. safedeps 는 *실행* — `safedeps scan secrets` 로 gitleaks 구동 — 만 소유하고 policy 내용은 소유하지 않는다.
+
+`safedeps doctor --json` 은 `{ command, repo, profile, gaps, ok, checks[] }` 를 돌려준다; `gaps`/`ok` 는 repo 별 secret 누출 lane 만 반영한다.
 
 ---
 

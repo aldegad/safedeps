@@ -48,8 +48,10 @@ acquire_state_lock() {
     # Detect stale locks left by SIGKILL/OOM (V-005)
     if [[ -d "${STATE_LOCK_DIR}" ]]; then
       local lock_mtime=""
-      if lock_mtime=$(stat -f %m "${STATE_LOCK_DIR}" 2>/dev/null) || \
-         lock_mtime=$(stat -c %Y "${STATE_LOCK_DIR}" 2>/dev/null); then
+      # GNU (`-c %Y`, Linux) first, then BSD/macOS (`-f %m`): on Linux `stat -f`
+      # means --file-system and would not yield an mtime.
+      if lock_mtime=$(stat -c %Y "${STATE_LOCK_DIR}" 2>/dev/null) || \
+         lock_mtime=$(stat -f %m "${STATE_LOCK_DIR}" 2>/dev/null); then
         local now
         now=$(date +%s)
         if [[ $(( now - lock_mtime )) -gt 60 ]]; then
