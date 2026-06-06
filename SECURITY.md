@@ -42,4 +42,4 @@ Out of scope — issues requiring an already-root/same-user attacker beyond the 
 
 - **No SaaS** — local CLI + public databases (OSV / CISA KEV / GHSA) only.
 - **Zero npm dependencies** — the tool ships no runtime deps; this is a deliberate security property, kept enforced by `npm pack` review in CI.
-- **No silent fallback** — a provider/scanner miss is fail-closed; any unavoidable bypass is recorded in `~/.safedeps/advisory.log`.
+- **No silent fallback** — a provider/scanner miss is fail-closed (the install is denied). The one unavoidable exception is `jq` being absent — it is needed to parse the hook payload — and even then the guard reads the raw payload and denies anything that looks like a dependency install, falling back to an explicit allow-with-warning only for non-install commands. Every such outcome is recorded in `~/.safedeps/advisory.log`.

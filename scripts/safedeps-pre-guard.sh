@@ -43,11 +43,19 @@ log_advisory() {
 }
 
 if ! command -v jq >/dev/null 2>&1; then
-  # jq is required to parse the hook payload, so the gate cannot even read the
-  # command without it — this is the one case we cannot fail closed. Make it an
-  # EXPLICIT, LOGGED allow-with-warning rather than a silent skip.
-  log_advisory "pre-guard ALLOW-WITH-WARNING: jq missing — install gate disabled (payload parse needs jq)."
-  echo "safedeps: jq is not installed — install gate DISABLED until jq is present (allow-with-warning, logged to advisory.log)." >&2
+  # jq is required to parse the hook payload. Without it we cannot read the exact
+  # command, so do a best-effort fail-closed: read the raw payload and, if it
+  # looks like a dependency install, DENY (an install we cannot verify must not
+  # proceed). Non-install commands are allowed — jq absence must not block `ls`.
+  # Either branch is recorded in advisory.log; never a silent skip.
+  raw_input=$(cat)
+  log_advisory "pre-guard: jq missing — gate cannot parse the payload."
+  if printf '%s' "${raw_input}" | grep -qiE '(npm|pnpm|yarn|bun)([^"]*)(install|add|dlx)|[^a-z]npx[[:space:]]|pip[0-9]*[[:space:]]+install|poetry[[:space:]]+add|uv[[:space:]]+(add|pip[[:space:]]+install)|pipenv[[:space:]]+install|cargo[[:space:]]+(add|install)|go[[:space:]]+(get|install)|gem[[:space:]]+install|bundle[[:space:]]+add|mvn([^"]*)dependency:get|dotnet[[:space:]]+add[[:space:]]+package'; then
+    log_advisory "pre-guard DENY: jq missing on a likely dependency-install command — fail-closed."
+    printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"safedeps: jq is required to gate dependency installs and is not installed — install blocked fail-closed. Install jq, then retry."}}\n'
+    exit 0
+  fi
+  echo "safedeps: jq is not installed — install gate disabled (non-install commands still allowed); logged to advisory.log." >&2
   exit 0
 fi
 
@@ -453,7 +461,7 @@ fi
 # Conservative: only block when at least one pkg@spec token is parseable. Bare
 # `npm install` (lockfile install) falls through to the v1 reorg checks.
 
-SAFEDEPS_LEDGER_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/ledger/ledger.sh"
+SAFEDEPS_LEDGER_LIB="${SAFEDEPS_LEDGER_LIB:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/ledger/ledger.sh}"
 SAFEDEPS_REPO_BIN="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/safedeps"
 
 guard_detect_ecosystem() {
@@ -611,7 +619,16 @@ while IFS= read -r ledger_spec_line; do
   LEDGER_SPECS+=("${ledger_spec_line}")
 done < <(guard_extract_specs "${COMMAND}")
 
-if [[ -n "${LEDGER_ECOSYSTEM}" && ${#LEDGER_SPECS[@]} -gt 0 && -f "${SAFEDEPS_LEDGER_LIB}" ]]; then
+if [[ -n "${LEDGER_ECOSYSTEM}" && ${#LEDGER_SPECS[@]} -gt 0 ]]; then
+  if [[ ! -f "${SAFEDEPS_LEDGER_LIB}" ]]; then
+    # The ledger library is the gate for direct install specs. If it is missing
+    # (broken install / moved repo) the gate cannot run — fail CLOSED, observably,
+    # instead of falling through to allow.
+    log_advisory "pre-guard DENY: ledger library missing (${SAFEDEPS_LEDGER_LIB}) — cannot enforce ${LEDGER_ECOSYSTEM} install, fail-closed."
+    jq -nc --arg eco "${LEDGER_ECOSYSTEM}" \
+      '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:("safedeps: the ledger library is missing, so the " + $eco + " install gate cannot run — install blocked fail-closed. Reinstall safedeps: node scripts/install/install-safedeps-hooks.mjs")}}'
+    exit 0
+  fi
   # shellcheck source=../lib/ledger/ledger.sh
   source "${SAFEDEPS_LEDGER_LIB}"
 
