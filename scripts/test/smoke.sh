@@ -224,22 +224,28 @@ fc_noledger=$(
 grep -q 'ledger library missing' "${fc_safe}/advisory.log" || fail "pre-guard logs the missing-ledger deny to advisory.log"
 pass "pre-guard fails closed when the ledger library is missing (observable)"
 
-# Concurrency (issue #5): two installs in one project must keep separate pending
-# state. A second install's pre hook must not clobber the first's, and a post hook
-# must consume only its own install's state.
+# Concurrency (issue #5): two installs of the SAME command in one project must
+# keep separate pending state — the per-install snapshot+PID suffix isolates them,
+# not just the command hash — and a post hook must consume exactly one.
 conc_safe="${tmp_root}/safe-concurrency"
 mkdir -p "${conc_safe}"
 SAFEDEPS_HOME="${conc_safe}" lib/ledger/ledger.sh approve npm conc-a 1.0.0 1.0.0 smoke >/dev/null
-SAFEDEPS_HOME="${conc_safe}" lib/ledger/ledger.sh approve npm conc-b 1.0.0 1.0.0 smoke >/dev/null
 run_hook_command "${tmp_root}/home-conc" "${conc_safe}" "npm install conc-a@1.0.0" >/dev/null
-run_hook_command "${tmp_root}/home-conc" "${conc_safe}" "npm install conc-b@1.0.0" >/dev/null
+run_hook_command "${tmp_root}/home-conc" "${conc_safe}" "npm install conc-a@1.0.0" >/dev/null
 conc_pending=$(find "${conc_safe}/pending" -name '*.json' -type f | wc -l | tr -d ' ')
-[[ "${conc_pending}" == "2" ]] || fail "two installs in one project keep two separate pending files (got ${conc_pending}, want 2)"
+[[ "${conc_pending}" == "2" ]] || fail "two identical concurrent installs keep two separate pending files (got ${conc_pending}, want 2)"
 jq -nc --arg c "npm install conc-a@1.0.0" --arg cwd "${project_dir}" '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
   HOME="${tmp_root}/home-conc" SAFEDEPS_HOME="${conc_safe}" scripts/safedeps-post-verify.sh >/dev/null 2>&1 || true
 conc_left=$(find "${conc_safe}/pending" -name '*.json' -type f | wc -l | tr -d ' ')
-[[ "${conc_left}" == "1" ]] || fail "post hook consumes only its own install's pending state (left ${conc_left}, want 1)"
-pass "concurrent installs keep isolated pending state (issue #5)"
+[[ "${conc_left}" == "1" ]] || fail "post hook consumes exactly one identical-command install's pending state (left ${conc_left}, want 1)"
+pass "concurrent installs (even identical commands) keep isolated pending state (issue #5)"
+
+# A dependency-install PostToolUse with no pending state (e.g. a payload missing
+# cwd) is recorded UNVERIFIED, not dropped silently (issue #5 review finding 3).
+jq -nc '{tool_name:"Bash",tool_input:{command:"npm install orphan@1.0.0"}}' |
+  HOME="${tmp_root}/home-conc" SAFEDEPS_HOME="${conc_safe}" scripts/safedeps-post-verify.sh >/dev/null 2>&1 || true
+grep -q 'UNVERIFIED: no pending state for an install-looking command' "${conc_safe}/advisory.log" || fail "post hook records an install with no pending state as UNVERIFIED"
+pass "post hook records an install-looking command with no pending state as UNVERIFIED"
 
 tamper_safe="${tmp_root}/safe-tamper"
 tamper_home="${tmp_root}/home-tamper"

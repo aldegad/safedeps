@@ -702,12 +702,18 @@ fi
 # (write_state_file) to prevent TOCTOU within one install.
 PENDING_DIR="${GUARD_DIR}/pending"
 mkdir -p "${PENDING_DIR}"
-# Best-effort GC of pending entries whose PostToolUse never fired (crash/no-op).
-find "${PENDING_DIR}" -name '*.json' -type f -mmin +60 -delete 2>/dev/null || true
+# GC pending entries whose PostToolUse never fired (crash/no-op). 24h is well past
+# any real install, so this never deletes an in-flight one (a 60-min window could
+# have reaped a slow native build that was still running).
+find "${PENDING_DIR}" -name '*.json' -type f -mmin +1440 -delete 2>/dev/null || true
+# Key = (dir, normalized command); the snapshot id suffix makes the filename unique
+# per install, so even two identical concurrent commands keep separate state.
 PENDING_KEY=$(compute_pending_key "${DIR_HASH}" "${COMMAND}")
 CURRENT_STATE=$(jq -n --arg sid "${SNAPSHOT_ID}" --arg pdir "${PROJECT_DIR}" --arg dhash "${DIR_HASH}" \
   '{snapshot_id: $sid, project_dir: $pdir, dir_hash: $dhash}')
-write_state_file "${PENDING_DIR}/${PENDING_KEY}.json" "${CURRENT_STATE}"
+# $$ (this pre hook's PID) guarantees a unique filename even for two installs in
+# the same second (SNAPSHOT_ID has only 1s resolution).
+write_state_file "${PENDING_DIR}/${PENDING_KEY}__${SNAPSHOT_ID}_$$.json" "${CURRENT_STATE}"
 
 if ! jq -e 'has("turn_id")' <<< "${INPUT}" >/dev/null 2>&1 && \
    command_is_injectable_npm_install "${COMMAND}" && \

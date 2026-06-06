@@ -407,10 +407,17 @@ STATE_LOCK_HELD=true
 acquire_state_lock
 trap '[ "${STATE_LOCK_HELD:-}" = "true" ] && release_state_lock; STATE_LOCK_HELD=false' EXIT
 
-# Resolve THIS install's pending state by its per-install key (issue #5). Fall back
-# to the legacy global files for in-flight upgrades from a pre-#5 PreToolUse.
-PENDING_FILE="${GUARD_DIR}/pending/$(compute_pending_key "${POST_DIR_HASH}" "${COMMAND}").json"
-if [[ -f "${PENDING_FILE}" ]]; then
+# Resolve THIS install's pending state by its per-install key (issue #5). The
+# filename also carries a snapshot id, so identical concurrent commands produce
+# several files; consume exactly one (they verify the same closure), leaving the
+# rest for their own post hooks. Fall back to the legacy global files for in-flight
+# upgrades from a pre-#5 PreToolUse.
+PENDING_PREFIX="${GUARD_DIR}/pending/$(compute_pending_key "${POST_DIR_HASH}" "${COMMAND}")__"
+PENDING_FILE=""
+for pending_candidate in "${PENDING_PREFIX}"*.json; do
+  [[ -f "${pending_candidate}" ]] && { PENDING_FILE="${pending_candidate}"; break; }
+done
+if [[ -n "${PENDING_FILE}" ]]; then
   CURRENT_STATE=$(cat "${PENDING_FILE}")
   SNAPSHOT_ID=$(echo "${CURRENT_STATE}" | jq -r '.snapshot_id // empty')
   PROJECT_DIR=$(echo "${CURRENT_STATE}" | jq -r '.project_dir // empty')
@@ -427,6 +434,12 @@ elif [[ -f "${GUARD_DIR}/current_snapshot_id" ]]; then
   PROJECT_DIR=$(cat "${GUARD_DIR}/current_project_dir" 2>/dev/null || pwd)
   rm -f "${GUARD_DIR}/current_snapshot_id" "${GUARD_DIR}/current_project_dir"
 else
+  # No pending state for this command. If it nonetheless looks like a dependency
+  # install, the effect gate could not verify it — record UNVERIFIED (observable)
+  # rather than disappearing silently (e.g. a payload with no `cwd`).
+  if printf '%s' "${COMMAND}" | grep -qiE '(npm|pnpm|yarn|bun)([^"]*)(install|add|dlx)|[^a-z]npx[[:space:]]|pip[0-9]*[[:space:]]+install|cargo[[:space:]]+(add|install)|go[[:space:]]+(get|install)|gem[[:space:]]+install|bundle[[:space:]]+add|poetry[[:space:]]+add|uv[[:space:]]+(add|pip)|pipenv[[:space:]]+install|mvn([^"]*)dependency:get|dotnet[[:space:]]+add[[:space:]]+package'; then
+    log_advisory "post-verify UNVERIFIED: no pending state for an install-looking command (missing cwd or pre hook never ran)."
+  fi
   exit 0
 fi
 
