@@ -1,14 +1,28 @@
-# Safedeps
+# safedeps
 
-> **Treat every install as an unconfirmed block — `safedeps` approves the safe ones, reorgs the rest.**
+> **Stop your AI coding agent from installing vulnerable or unapproved dependencies — and roll back the ones that slip through.**
 >
-> Pre-approve dependency installs against OSV / CISA KEV / GitHub Advisory, enforce the installed closure from Claude Code and Codex CLI hooks, and auto-rollback any install that diverges from the approved closure. *(한국어 README → [README.ko.md](./README.ko.md))*
+> `safedeps` gates every dependency install your Claude Code or Codex CLI agent runs. It pre-approves packages against OSV / CISA KEV / GitHub Advisory, re-verifies the closure that actually lands in your lockfile, and auto-rolls-back anything that diverges. Local-only, with zero runtime dependencies. *(한국어 README → [README.ko.md](./README.ko.md))*
 
-## Why "reorg"?
+- **Pre-approve** — every `pkg@version`, plus its full transitive closure for npm, is cleared against OSV (canonical), CISA KEV, and GitHub Advisory *before* it installs.
+- **Enforce the real effect** — after the install, the actual `package-lock.json` closure is re-checked, so a wrapped or obfuscated command can't sneak a package past the gate.
+- **Roll back** — anything unapproved or newly-vulnerable is reverted to the last confirmed safe snapshot. On Claude Code the install runs inert (`--ignore-scripts`), so a rejected package's lifecycle scripts never run.
 
-In blockchain networks, a **reorganization (reorg)** invalidates a sequence of blocks and reverts the chain to a previously confirmed safe state. `safedeps` applies the same principle to your `node_modules`: every install is treated as an unconfirmed block candidate until it passes a battery of supply-chain security checks. If anything looks wrong, the tool performs a **reorg** -- rolling back lock files, `package.json`, and `node_modules` to the last confirmed safe snapshot.
+## Quickstart
 
-Fast advisory feedback, observable rollback, and no hidden fallback. The command guard is best-effort UX; the installed effect is the backstop.
+```bash
+# 1. Install the CLI — the npm package is scoped, note the @aldegad/ prefix
+npm install -g @aldegad/safedeps
+
+# 2. Wire the hooks into Claude Code / Codex (idempotent)
+cd "$(npm root -g)/@aldegad/safedeps" && node scripts/install/install-safedeps-hooks.mjs
+
+# 3. Done — every dependency install your agent runs is now gated.
+```
+
+> `safedeps` is the CLI command; the npm package is **`@aldegad/safedeps`** — the unscoped `safedeps` on npm is an unrelated package. Prefer the full skill source tree? See [Installation](#installation).
+
+<!-- TODO(demo): add a 15-20s asciinema/VHS recording of safedeps catching a malicious install live (inert -> reorg). Highest-leverage conversion asset per launch review. -->
 
 ## Distribution Model
 
@@ -114,6 +128,14 @@ After the install command completes, the verify hook analyzes what changed. For 
   3. `node_modules` is rebuilt via `npm ci` (or `npm install` as fallback) to purge any malicious artifacts.
   4. The event is logged to `~/.safedeps/reorg.log`.
   5. Claude Code receives a system message detailing the detected threats and rollback actions.
+
+## Why "reorg"?
+
+The name borrows from blockchain, where a **reorganization (reorg)** invalidates a sequence of unconfirmed blocks and reverts the chain to its last confirmed safe state. `safedeps` treats every install the same way: an unconfirmed block candidate until it passes a battery of supply-chain checks. If the installed effect diverges, the tool performs a **reorg** -- rolling the lock file, `package.json`, and `node_modules` back to the last confirmed safe snapshot.
+
+But the reorg is the **backstop, not the front line.** Most bad installs never reach it: the pre-approval gate *denies* an unapproved or flagged package before it runs, and on Claude Code the install runs **inert** (`--ignore-scripts`) so lifecycle scripts do not execute until the closure verifies clean. The reorg fires for the residual case -- an approved direct package that pulls in an unapproved or vulnerable transitive, or a wrapped command that slips past the advisory layer -- and even then it rolls back files that never got to run.
+
+Fast advisory feedback, observable rollback, and no hidden fallback. The command guard is best-effort UX; the installed effect is the backstop.
 
 ## The Blockchain Analogy
 
