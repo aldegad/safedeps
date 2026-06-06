@@ -1,0 +1,45 @@
+# .gitleaks.private.toml — safedeps starter secret-scan policy (PRIVATE profile).
+#
+# Resolved when the repo's origin slug or directory leaf ends in "-private",
+# or when SAFEDEPS_REPO_PROFILE=private. Use this for the stricter policy a
+# private repo wants on top of the public defaults.
+#
+# safedeps OWNS execution; THIS FILE is the repo's POLICY — you own it.
+# `safedeps hooks init` scaffolds this once and will NOT overwrite your edits.
+
+title = "safedeps secret-scan policy (private)"
+
+# Inherit gitleaks' built-in ruleset. To also layer the repo's public policy,
+# point `path` at it instead of (or in addition to) useDefault.
+[extend]
+useDefault = true
+# path = ".gitleaks.toml"
+
+# --- Extra rules layered on top of the defaults -------------------------------
+
+[[rules]]
+id = "safedeps-dotenv-file"
+description = "Committed .env file with an assigned secret value"
+path = '''(^|/)\.env(\.[\w.-]+)?$'''
+regex = '''(?i)(secret|token|password|passwd|api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret)\s*[:=]\s*\S{6,}'''
+  [rules.allowlist]
+  paths = [
+    '''(^|/)\.env\.example$''',
+    '''(^|/)\.env\.sample$''',
+    '''(^|/)\.env\.template$''',
+  ]
+
+# Private repos often also flag internal identifiers (infra hosts, account ids).
+# Add your own, e.g.:
+# [[rules]]
+# id = "safedeps-internal-host"
+# description = "Internal hostname / infra endpoint"
+# regex = '''(?i)\b[\w.-]+\.internal\.example\.com\b'''
+
+# --- Repo-owned allowlist — CUSTOMIZE FOR THIS REPO ---------------------------
+[allowlist]
+description = "Repo-specific allowlist (tune me)"
+paths = [
+  '''(^|/)\.gitleaks\.toml$''',
+  '''(^|/)\.gitleaks\.private\.toml$''',
+]

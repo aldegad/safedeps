@@ -242,6 +242,9 @@ function main() {
     log("uninstall done.");
   } else {
     log("install done. New hook events fire on the next session start.");
+    // The dependency-install gate is global. The secret-leak lane is per-repo
+    // and stays opt-in (its policy lives in each repo). Nudge, do not auto-write.
+    log("secret-leak lane is per-repo — in a repo run: safedeps doctor (then `safedeps doctor --fix` to scaffold + activate).");
   }
 }
 

@@ -7,7 +7,7 @@
 
 set -euo pipefail
 
-SAFEDEPS_VERSION="2.2.0"
+SAFEDEPS_VERSION="2.3.0"
 
 # ---- repo / lib bootstrap ----------------------------------------------------
 
@@ -1027,6 +1027,11 @@ cmd_hooks() {
   exec bash "${SAFEDEPS_REPO_DIR}/lib/gates/hooks.sh" "$@"
 }
 
+cmd_doctor() {
+  exec env SAFEDEPS_JSON_MODE="${SAFEDEPS_JSON_MODE}" \
+    bash "${SAFEDEPS_REPO_DIR}/lib/gates/doctor.sh" "$@"
+}
+
 # ---- help / version ----------------------------------------------------------
 
 cmd_version() {
@@ -1083,6 +1088,33 @@ safedeps migrate [--keep-legacy]
   By default the legacy directory is archived to remove the old active truth path.
 EOF
       ;;
+    doctor)
+      cat <<'EOF'
+safedeps doctor [--root <repo>] [--fix] [--json]
+
+  Diagnose this repo's security posture: the per-repo secret-leak lane
+  (.gitleaks policy + .githooks/pre-commit + active core.hooksPath + an
+  available scanner) plus the global dependency-install gate. Read-only by
+  default; exits 1 when the secret-leak lane has gaps.
+
+  --fix   Scaffold the missing policy (hooks init) and activate it (hooks
+          install). Non-destructive: existing repo-owned files are kept.
+
+  The scaffolded .gitleaks.toml is a STARTER you own and tune; safedeps owns
+  execution (running gitleaks via `safedeps scan secrets`), not the policy.
+EOF
+      ;;
+    hooks)
+      cat <<'EOF'
+safedeps hooks <install|check|init> [--root <repo>] [--hooks-path <dir>] [--auto]
+
+  init     Scaffold the repo's secret-leak policy from starter templates
+           (.gitleaks[.private].toml + .githooks/pre-commit). Non-destructive.
+  install  Activate repo-local git hooks (sets core.hooksPath). Requires the
+           hook file to exist — run `init` first if the repo has none.
+  check    Verify the hooks are active, executable, and a scanner is available.
+EOF
+      ;;
     *)
       cat <<EOF
 safedeps ${SAFEDEPS_VERSION} — multi-ecosystem install safety gate
@@ -1099,7 +1131,8 @@ COMMANDS
   gates [run]                               Release-time repo gates: secret scan, dep audit, hook/CI check.
   scan secrets [--repo|--worktree|--staged] Run gitleaks secret scan (repo profile aware).
   audit [npm]                               Run npm lockfile audit.
-  hooks <install|check>                     Install/verify repo-local git hooks.
+  hooks <install|check|init>                Install/verify/scaffold repo-local git hooks.
+  doctor [--fix]                            Diagnose this repo's secret-leak lane (--fix scaffolds + activates).
   help [command]                            Show help.
   version                                   Print version.
 
@@ -1163,6 +1196,7 @@ main() {
     scan)     cmd_scan     "$@" ;;
     audit)    cmd_audit    "$@" ;;
     hooks)    cmd_hooks    "$@" ;;
+    doctor)   cmd_doctor   "$@" ;;
     help)     cmd_help     "$@" ;;
     version)  cmd_version ;;
     *)

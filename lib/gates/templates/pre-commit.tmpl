@@ -1,0 +1,49 @@
+#!/bin/bash
+# .githooks/pre-commit — safedeps secret-leak gate (scaffolded by `safedeps hooks init`).
+#
+# Blocks a commit when gitleaks finds a secret in the STAGED changes, so a key
+# or a real .env never enters the repo's history. The detection POLICY lives in
+# this repo's .gitleaks.toml (public) / .gitleaks.private.toml (private);
+# safedeps owns execution. This hook delegates to one canonical scanner path:
+# `safedeps scan secrets --staged`.
+#
+# Intentional bypass (use sparingly — you own the risk):  git commit --no-verify
+set -euo pipefail
+
+repo_root=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+
+# Resolve the safedeps CLI: PATH first, then the known skill install locations.
+resolve_safedeps() {
+  if command -v safedeps >/dev/null 2>&1; then printf 'safedeps'; return 0; fi
+  local candidate
+  for candidate in \
+    "${SAFEDEPS_BIN:-}" \
+    "${HOME}/.claude/skills/safedeps/bin/safedeps" \
+    "${HOME}/.codex/skills/safedeps/bin/safedeps"; do
+    if [ -n "${candidate}" ] && [ -x "${candidate}" ]; then
+      printf '%s' "${candidate}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+if ! sd=$(resolve_safedeps); then
+  cat >&2 <<'EOF'
+safedeps pre-commit: cannot locate the `safedeps` CLI.
+
+The secret-scan gate is FAIL-CLOSED — the commit is blocked because the scanner
+could not run (no silent skip). Fix one of:
+  - put `safedeps` on PATH, or
+  - export SAFEDEPS_BIN=/path/to/bin/safedeps, or
+  - install the skill: node scripts/install/install-safedeps-hooks.mjs
+
+To bypass intentionally (you own the risk):  git commit --no-verify
+EOF
+  exit 1
+fi
+
+# Delegate to the single canonical scanner. A non-zero exit means either a
+# secret was found OR no scanner (gitleaks/docker) is available — both
+# fail-closed and block the commit.
+exec "${sd}" scan secrets --staged --root "${repo_root}"

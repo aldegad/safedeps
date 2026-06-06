@@ -16,12 +16,12 @@ HOOKS_PATH=".githooks"
 AUTO=0
 
 usage() {
-  printf 'Usage: safedeps hooks <install|check> [--root <repo>] [--hooks-path <dir>] [--auto]\n' >&2
+  printf 'Usage: safedeps hooks <install|check|init> [--root <repo>] [--hooks-path <dir>] [--auto]\n' >&2
 }
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    install|check) SUB="$1"; shift ;;
+    install|check|init) SUB="$1"; shift ;;
     --root) REPO_ROOT="${2:?--root needs a path}"; shift 2 ;;
     --hooks-path) HOOKS_PATH="${2:?--hooks-path needs a dir}"; shift 2 ;;
     --auto) AUTO=1; shift ;;
@@ -46,6 +46,44 @@ fi
 HOOK_FILE="$REPO_ROOT/$HOOKS_PATH/pre-commit"
 
 case "$SUB" in
+  init)
+    # Scaffold the repo's secret-leak policy from starter templates. Non-destructive:
+    # an existing file is reported and skipped, so repo-owned edits survive a re-run.
+    # `init` only drops files; `install` activates them (core.hooksPath).
+    TEMPLATES_DIR="$GATES_LIB_DIR/templates"
+    PROFILE="$(safedeps_repo_profile "$REPO_ROOT")"
+    created=0
+
+    scaffold() {
+      local dest="$1" tmpl="$2" mode="$3"
+      if [ -e "$dest" ]; then
+        printf 'safedeps hooks init: exists, skipped: %s\n' "$dest"
+        return 0
+      fi
+      if [ ! -f "$tmpl" ]; then
+        printf 'ERROR: template missing: %s\n' "$tmpl" >&2
+        exit 1
+      fi
+      mkdir -p "$(dirname "$dest")"
+      cp "$tmpl" "$dest"
+      chmod "$mode" "$dest"
+      printf 'safedeps hooks init: created %s\n' "$dest"
+      created=$((created + 1))
+    }
+
+    if [ "$PROFILE" = "private" ]; then
+      scaffold "$REPO_ROOT/.gitleaks.private.toml" "$TEMPLATES_DIR/gitleaks.private.toml.tmpl" 0644
+    else
+      scaffold "$REPO_ROOT/.gitleaks.toml" "$TEMPLATES_DIR/gitleaks.toml.tmpl" 0644
+    fi
+    scaffold "$REPO_ROOT/$HOOKS_PATH/pre-commit" "$TEMPLATES_DIR/pre-commit.tmpl" 0755
+
+    printf 'safedeps hooks init: profile=%s, %d file(s) created.\n' "$PROFILE" "$created"
+    if [ "$created" -gt 0 ]; then
+      printf '       Review the scaffolded .gitleaks policy, then activate:\n'
+      printf '         safedeps hooks install --root "%s"\n' "$REPO_ROOT"
+    fi
+    ;;
   install)
     if [ ! -f "$HOOK_FILE" ]; then
       printf 'ERROR: hook file not found: %s\n' "$HOOK_FILE" >&2

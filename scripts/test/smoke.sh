@@ -31,6 +31,7 @@ bash -n lib/gates/repo-profile.sh
 bash -n lib/gates/scan.sh
 bash -n lib/gates/audit.sh
 bash -n lib/gates/hooks.sh
+bash -n lib/gates/doctor.sh
 pass "bash syntax"
 
 node --check scripts/install/install-safedeps-hooks.mjs >/dev/null
@@ -203,12 +204,36 @@ pass "re-check alert wrapper"
 # Release-time lane (absorbed from security-release-gates): commands must be
 # registered and resolve their gate scripts.
 gates_help=$(HOME="${tmp_root}/home-gates" SAFEDEPS_HOME="${tmp_root}/safe-gates" ./bin/safedeps help)
-for gate_cmd in "gates" "scan secrets" "audit" "hooks"; do
+for gate_cmd in "gates" "scan secrets" "audit" "hooks" "doctor"; do
   grep -q "${gate_cmd}" <<< "${gates_help}" || fail "release-time command listed in help: ${gate_cmd}"
 done
-for gate_script in scripts/release-gates.sh lib/gates/repo-profile.sh lib/gates/scan.sh lib/gates/audit.sh lib/gates/hooks.sh; do
+for gate_script in scripts/release-gates.sh lib/gates/repo-profile.sh lib/gates/scan.sh lib/gates/audit.sh lib/gates/hooks.sh lib/gates/doctor.sh; do
   [[ -f "${gate_script}" ]] || fail "release-time gate script present: ${gate_script}"
 done
+for tmpl in gitleaks.toml.tmpl gitleaks.private.toml.tmpl pre-commit.tmpl; do
+  [[ -f "lib/gates/templates/${tmpl}" ]] || fail "secret-lane template present: ${tmpl}"
+done
 pass "release-time gate commands registered"
+
+# Secret-leak lane: doctor diagnoses, hooks init scaffolds, hooks install
+# activates. No scanner (gitleaks/docker) needed for these structural checks.
+doctor_repo=$(mktemp -d "${tmp_root}/secret-repo.XXXXXX")
+git -C "${doctor_repo}" init -q
+# doctor exits 1 when gaps exist; capture the JSON without tripping set -e.
+doctor_json=$(HOME="${tmp_root}/home-doctor" ./bin/safedeps --json doctor --root "${doctor_repo}" || true)
+[[ "$(jq -r '.command' <<< "${doctor_json}")" == "doctor" ]] || fail "doctor --json command field"
+[[ "$(jq -r '.ok' <<< "${doctor_json}")" == "false" ]] || fail "doctor reports gaps on a bare repo"
+secret_gaps=$(jq -r '[.checks[] | select(.lane == "secret" and .status == "gap")] | length' <<< "${doctor_json}")
+[[ "${secret_gaps}" -ge 3 ]] || fail "doctor lists at least 3 secret-lane gaps (got ${secret_gaps})"
+HOME="${tmp_root}/home-doctor" ./bin/safedeps hooks init --root "${doctor_repo}" >/dev/null
+[[ -f "${doctor_repo}/.gitleaks.toml" ]] || fail "hooks init scaffolds .gitleaks.toml"
+[[ -x "${doctor_repo}/.githooks/pre-commit" ]] || fail "hooks init scaffolds an executable pre-commit"
+grep -q 'scan secrets --staged' "${doctor_repo}/.githooks/pre-commit" || fail "pre-commit delegates to safedeps scan"
+printf '\n# repo-owned edit marker\n' >> "${doctor_repo}/.gitleaks.toml"
+HOME="${tmp_root}/home-doctor" ./bin/safedeps hooks init --root "${doctor_repo}" >/dev/null
+grep -q 'repo-owned edit marker' "${doctor_repo}/.gitleaks.toml" || fail "hooks init is non-destructive (keeps repo edits)"
+HOME="${tmp_root}/home-doctor" ./bin/safedeps hooks install --root "${doctor_repo}" >/dev/null
+[[ "$(git -C "${doctor_repo}" config --get core.hooksPath)" == ".githooks" ]] || fail "hooks install activates core.hooksPath"
+pass "doctor + hooks init/install wire the secret lane (non-destructive)"
 
 printf 'smoke passed\n'

@@ -26,6 +26,8 @@ Use the GitHub release when you want the full skill/hook source tree as the cano
 - **Install-time** (the focus of this README) — advisory check + approved-spec ledger + fast PreToolUse guard + PostToolUse effect enforcement + post-install reorg. Per-package, around the install command and its actual lockfile effect.
 - **Release-time** — `safedeps gates run`, `safedeps scan secrets [--repo|--worktree|--staged]`, `safedeps audit npm`, `safedeps hooks install|check`. Repo-tree secret scan, dependency audit, and repo-local git hook install/check before push/release. Repo-specific policy (gitleaks config, privacy paths) stays in the target repo; safedeps owns execution. *(Absorbed the former `security-release-gates`.)*
 
+The secret-leak side of the release-time lane is **per-repo and opt-in**. `safedeps doctor` is its repo-entry check: it diagnoses the repo's `.gitleaks` policy, `.githooks/pre-commit`, the active `core.hooksPath`, and scanner availability (and reports the global install-time gate too), then `safedeps doctor --fix` scaffolds a starter policy (`safedeps hooks init`) and activates it (`safedeps hooks install`). The scaffold is non-destructive — an existing repo-owned `.gitleaks.toml` is never overwritten — and the pre-commit hook delegates to `safedeps scan secrets --staged`, fail-closed. See [Secret-Leak Lane (per-repo)](#secret-leak-lane-per-repo).
+
 ## How It Works
 
 `safedeps` works in two moves around every install:
@@ -140,6 +142,44 @@ After the install command completes, the verify hook analyzes what changed. For 
 | Insecure protocols | `http://` or `git://` resolved URLs | PostToolUse effect verify | **Reorg** |
 | Dependency confusion | >50 new dependencies in a single install | PostToolUse effect verify | **Reorg** |
 | Native binaries | Compiled executables in `node_modules/.bin/` | PostToolUse effect verify | **Reorg** |
+
+## Secret-Leak Lane (per-repo)
+
+The install-time gate is global, but stopping a secret or a real `.env` from being committed is **per-repo** and stays opt-in — its detection policy lives in each repo, not in safedeps. `safedeps doctor` is the entry point that closes that gap.
+
+```bash
+# Diagnose this repo's posture (read-only). Exits non-zero if the secret lane has gaps.
+$ safedeps doctor
+safedeps doctor — repo security posture
+repo:    /path/to/repo
+profile: public
+
+Secret-leak lane (per-repo)
+  ✓ git worktree
+  ✗ gitleaks config (.gitleaks.toml)             → safedeps hooks init --root "/path/to/repo"
+  ✗ .githooks/pre-commit (present)               → safedeps hooks init --root "/path/to/repo"
+  ✗ git hooks active (core.hooksPath=<unset>)    → safedeps hooks install --root "/path/to/repo"
+  ✓ secret scanner available (gitleaks)
+
+Dependency-install gate (global, all repos)
+  ✓ dependency-install gate installed (~/.claude/skills/safedeps)
+
+3 gap(s) in the secret-leak lane.
+Fix all at once:  safedeps doctor --fix --root "/path/to/repo"
+
+# Scaffold the starter policy + activate the hooks (non-destructive).
+$ safedeps doctor --fix
+```
+
+What the lane is made of:
+
+- **`safedeps hooks init`** scaffolds a starter `.gitleaks.toml` (or `.gitleaks.private.toml` for a private repo) and a `.githooks/pre-commit`. Existing files are kept, never overwritten — the repo owns the policy.
+- **`safedeps hooks install`** activates the repo-local hooks (`core.hooksPath = .githooks`).
+- The **pre-commit hook delegates to `safedeps scan secrets --staged`** and is **fail-closed**: if the scanner (local `gitleaks` or Docker) cannot run, it blocks the commit instead of skipping silently. The only intentional bypass is `git commit --no-verify`, which the human owns.
+
+The scaffolded `.gitleaks.toml` is a **starter you tune**: it extends gitleaks' default ruleset, adds a rule for a committed `.env` with an assigned secret (the `.env.example`/`.sample`/`.template` variants are allowlisted), and leaves a repo-owned `[allowlist]` block for your fixtures. safedeps owns *execution* — running gitleaks via `safedeps scan secrets` — not the policy content.
+
+`safedeps doctor --json` returns `{ command, repo, profile, gaps, ok, checks[] }`; `gaps`/`ok` reflect the per-repo secret-leak lane only.
 
 ## Installation
 
@@ -307,6 +347,8 @@ safedeps/
   lib/
     providers/    # OSV / CISA KEV / GHSA adapters
     ledger/       # approved-spec ledger
+    npm/          # lockfile closure resolver
+    gates/        # repo-tree lane: scan / audit / hooks / doctor + templates/
   scripts/
     safedeps-pre-guard.sh       # PreToolUse hook -- advisory ledger UX + snapshots
     safedeps-post-verify.sh     # PostToolUse hook -- npm primary effect verification + reorg
