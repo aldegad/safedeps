@@ -300,6 +300,11 @@ HOME="${tmp_root}/doc-home" "${ROOT_DIR}/bin/safedeps" doctor --fix --root "${se
 [[ "$(git -C "${secret_repo}" config --get core.hooksPath)" == ".githooks" ]] || fail "doctor --fix activates core.hooksPath"
 pass "doctor --fix scaffolds + activates the secret lane"
 
+# The scaffolded pre-commit resolves `safedeps` via PATH, then SAFEDEPS_BIN, then
+# the skill install paths. In CI none of those exist, so point it at this repo's
+# binary; the git commit subprocess inherits the env and the hook resolves it.
+export SAFEDEPS_BIN="${ROOT_DIR}/bin/safedeps"
+
 if command -v gitleaks >/dev/null 2>&1 && command -v openssl >/dev/null 2>&1; then
   # Regression: a clean file commits cleanly.
   echo "hello" > "${secret_repo}/readme.txt"
