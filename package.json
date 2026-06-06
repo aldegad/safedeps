@@ -1,6 +1,6 @@
 {
   "name": "@aldegad/safedeps",
-  "version": "2.3.0",
+  "version": "2.4.0",
   "description": "Dependency install safety gate with OSV-backed advisory checks, approved-spec ledger enforcement, and reorg rollback hooks",
   "main": "bin/safedeps",
   "bin": {
@@ -16,6 +16,7 @@
     "ARCHITECTURE.md",
     "ROADMAP.md",
     "SKILL.md",
+    "SECURITY.md",
     "LICENSE"
   ],
   "scripts": {

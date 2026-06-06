@@ -179,6 +179,51 @@ for bypass_cmd in "${bypass_cases[@]}"; do
 done
 pass "hook denies install bypass forms"
 
+# Fail-closed gate: when the gate cannot run it must NOT silently pass, and the
+# outcome must be observable in the advisory log (AGENTS.md: no silent fallback).
+fc_safe="${tmp_root}/safe-failclosed"
+fc_home="${tmp_root}/home-failclosed"
+mkdir -p "${fc_safe}"
+# (a) lock unavailable on an install command → DENY (fail-closed), logged.
+mkdir -p "${fc_safe}/state.lock"
+fc_deny=$(
+  jq -nc --arg c "npm install evil@1.0.0" --arg cwd "${project_dir}" \
+    '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
+    HOME="${fc_home}" SAFEDEPS_HOME="${fc_safe}" SAFEDEPS_LOCK_MAX_ATTEMPTS=2 scripts/safedeps-pre-guard.sh
+)
+rmdir "${fc_safe}/state.lock" 2>/dev/null || true
+[[ "$(jq -r '.hookSpecificOutput.permissionDecision' <<< "${fc_deny}")" == "deny" ]] || fail "pre-guard fails closed (deny) when the state lock is unavailable for an install"
+grep -q 'pre-guard DENY' "${fc_safe}/advisory.log" || fail "pre-guard logs the fail-closed deny to advisory.log"
+pass "pre-guard fails closed on lock contention (observable)"
+
+# (b) jq missing → best-effort fail-closed: a likely install DENIES, a non-install
+# is allowed, both recorded in advisory.log (never a silent skip).
+fc_nojq=$(mktemp -d "${tmp_root}/nojq.XXXXXX")
+for fc_tool in bash mkdir date printf cat grep; do
+  ln -sf "$(command -v "${fc_tool}")" "${fc_nojq}/${fc_tool}" 2>/dev/null || true
+done
+fc_nojq_deny=$(
+  jq -nc --arg c "npm install x@1" --arg cwd "${project_dir}" '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
+    HOME="${fc_home}" SAFEDEPS_HOME="${fc_safe}" PATH="${fc_nojq}" scripts/safedeps-pre-guard.sh 2>/dev/null
+)
+[[ "$(jq -r '.hookSpecificOutput.permissionDecision' <<< "${fc_nojq_deny}")" == "deny" ]] || fail "pre-guard denies a likely install when jq is missing (best-effort fail-closed)"
+grep -q 'DENY: jq missing' "${fc_safe}/advisory.log" || fail "pre-guard logs the jq-missing install deny to advisory.log"
+fc_nojq_allow=$(
+  jq -nc --arg c "ls -la" --arg cwd "${project_dir}" '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
+    HOME="${fc_home}" SAFEDEPS_HOME="${fc_safe}" PATH="${fc_nojq}" scripts/safedeps-pre-guard.sh 2>/dev/null
+)
+[[ "$(jq -r '.hookSpecificOutput.permissionDecision // "allow"' <<< "${fc_nojq_allow}" 2>/dev/null || echo allow)" != "deny" ]] || fail "pre-guard allows a non-install command when jq is missing"
+pass "pre-guard fails closed on jq-missing installs, allows non-installs (observable)"
+
+# (c) ledger library missing → DENY (fail-closed), logged — not a silent fall-through allow.
+fc_noledger=$(
+  jq -nc --arg c "npm install x@1" --arg cwd "${project_dir}" '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
+    HOME="${fc_home}" SAFEDEPS_HOME="${fc_safe}" SAFEDEPS_LEDGER_LIB="${tmp_root}/does-not-exist.sh" scripts/safedeps-pre-guard.sh 2>/dev/null
+)
+[[ "$(jq -r '.hookSpecificOutput.permissionDecision' <<< "${fc_noledger}")" == "deny" ]] || fail "pre-guard denies an install when the ledger library is missing (fail-closed)"
+grep -q 'ledger library missing' "${fc_safe}/advisory.log" || fail "pre-guard logs the missing-ledger deny to advisory.log"
+pass "pre-guard fails closed when the ledger library is missing (observable)"
+
 tamper_safe="${tmp_root}/safe-tamper"
 tamper_home="${tmp_root}/home-tamper"
 SAFEDEPS_HOME="${tamper_safe}" lib/ledger/ledger.sh approve npm ledger-tamper 1.0.0 1.0.0 smoke >/dev/null

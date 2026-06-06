@@ -35,8 +35,16 @@ SAFEDEPS_MANIFEST_FILES=(
 umask 077
 mkdir -p "${GUARD_DIR}" "${SNAPSHOT_DIR}"
 
+# Observable record when the effect gate cannot run (AGENTS.md: no silent fallback).
+# The install already happened by PostToolUse, so we cannot block it; what we can
+# guarantee is that an un-runnable gate is recorded as UNVERIFIED, never a silent pass.
+log_advisory() {
+  printf '%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" >> "${GUARD_DIR}/advisory.log" 2>/dev/null || true
+}
+
 if ! command -v jq >/dev/null 2>&1; then
-  echo "safedeps: jq is not installed; skipping verify hook." >&2
+  log_advisory "post-verify UNVERIFIED: jq missing — could not verify the install closure. Install jq to restore the effect gate."
+  echo "safedeps: jq is not installed — the post-install effect gate could not run; this install is UNVERIFIED (logged to advisory.log)." >&2
   exit 0
 fi
 
@@ -70,8 +78,11 @@ acquire_state_lock() {
     fi
 
     attempts=$((attempts + 1))
-    if [[ ${attempts} -ge 100 ]]; then
-      echo "safedeps: could not acquire state lock; skipping verify hook." >&2
+    if [[ ${attempts} -ge ${SAFEDEPS_LOCK_MAX_ATTEMPTS:-100} ]]; then
+      # Install already ran; another safedeps run holds the lock. Record UNVERIFIED
+      # rather than silently passing — the other run, or a re-check, owns verification.
+      log_advisory "post-verify UNVERIFIED: state lock unavailable (another safedeps run active) — install not verified by this run."
+      echo "safedeps: could not acquire state lock; this install is UNVERIFIED by this run (logged to advisory.log)." >&2
       exit 0
     fi
     sleep 0.1
