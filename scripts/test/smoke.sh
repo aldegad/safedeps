@@ -152,15 +152,42 @@ grep -q 'evil-pkg@9.9.9' <<< "${reason}" || fail "deny reason names the real pac
 [[ "${reason}" != *"dev1@block-s.io"* ]] || fail "deny reason must not name the email arg"
 pass "hook gates real install chained with npx run (email not polluted)"
 
-echo_output=$(
-  run_hook_command "${tmp_root}/home-echo" "${tmp_root}/safe-echo" "echo \"npm install evil-pkg@9.9.9\""
+false_positive_safe="${tmp_root}/safe-false-positive"
+false_positive_cases=(
+  $'grep -nE "install|add" README.md'
+  $'echo "npm install evil-pkg@9.9.9"'
+  $'cat <<"EOF"\nnpm install evil-pkg@9.9.9\nEOF'
+  $'node <<"NODE"\nconst text = "$(npm install evil-pkg@9.9.9)";\nconsole.log(text);\nNODE'
+  $'X=$(date +%s); echo "see npm install foo in docs"'
+  $'msg="run npm install later"; result=$(ls)'
+  $'echo "npm install pkg"; Y=`pwd`'
+  "npm run build"
+  "npm view left-pad"
+  "npx --version"
 )
-[[ -z "${echo_output}" ]] || fail "hook ignores quoted echo text"
-heredoc_output=$(
-  run_hook_command "${tmp_root}/home-heredoc" "${tmp_root}/safe-heredoc" $'cat <<'\''EOF'\''\nnpm install evil-pkg@9.9.9\nEOF'
+for fp_cmd in "${false_positive_cases[@]}"; do
+  rm -rf "${false_positive_safe}"
+  fp_output=$(run_hook_command "${tmp_root}/home-false-positive" "${false_positive_safe}" "${fp_cmd}")
+  [[ -z "${fp_output}" ]] || fail "hook ignores non-install text command: ${fp_cmd}"
+  fp_pending=$({ find "${false_positive_safe}/pending" -name '*.json' -type f 2>/dev/null || true; } | wc -l | tr -d ' ')
+  fp_snapshots=$({ find "${false_positive_safe}/snapshots" -name '*_meta.json' -type f 2>/dev/null || true; } | wc -l | tr -d ' ')
+  [[ "${fp_pending}" == "0" && "${fp_snapshots}" == "0" ]] || fail "hook does not snapshot non-install text command: ${fp_cmd}"
+done
+pass "hook ignores false-positive install text without snapshotting"
+
+hidden_install_cases=(
+  $'eval "npm install hidden-eval@1.0.0"'
+  $'sub_result=$(npm install hidden-sub@1.0.0)'
+  $'pipe_result=$(echo npm install hidden-pipe@1.0.0 | sh)'
 )
-[[ -z "${heredoc_output}" ]] || fail "hook ignores heredoc body text"
-pass "hook ignores echo/heredoc text"
+for hidden_cmd in "${hidden_install_cases[@]}"; do
+  hidden_safe="${tmp_root}/safe-hidden-$(printf '%s' "${hidden_cmd}" | cksum | cut -d' ' -f1)"
+  hidden_output=$(run_hook_command "${tmp_root}/home-hidden" "${hidden_safe}" "${hidden_cmd}")
+  [[ "$(jq -r '.hookSpecificOutput.permissionDecision' <<< "${hidden_output}")" == "deny" ]] || fail "hook denies hidden install command: ${hidden_cmd}"
+  hidden_snapshots=$({ find "${hidden_safe}/snapshots" -name '*_meta.json' -type f 2>/dev/null || true; } | wc -l | tr -d ' ')
+  [[ "${hidden_snapshots}" -gt 0 ]] || fail "hook snapshots hidden install command before denying: ${hidden_cmd}"
+done
+pass "hook denies and snapshots hidden install indirection"
 
 bypass_cases=(
   "/usr/bin/npm install evil@1.2.3"

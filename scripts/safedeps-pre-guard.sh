@@ -146,7 +146,7 @@ command_is_dependency_install() {
   local scan_command
   local install_pattern
 
-  install_pattern='(^|[;&|]+[[:space:]]*)((npm([[:space:]]+--?[a-zA-Z0-9_-]+([=[:space:]][^[:space:]]+)?)?[[:space:]]+(install|i|add|ci|update|up|upgrade))|npx[[:space:]]|pnpm([[:space:]]+--?[a-zA-Z0-9_-]+([=[:space:]][^[:space:]]+)?)?[[:space:]]+(add|install|update|up|dlx)|yarn([[:space:]]+--?[a-zA-Z0-9_-]+([=[:space:]][^[:space:]]+)?)?[[:space:]]+(add|install|upgrade|dlx)|((python3?|py)[[:space:]]+-m[[:space:]]+pip|pip3?)[[:space:]]+install|poetry[[:space:]]+add|uv[[:space:]]+(add|pip[[:space:]]+install)|pipenv[[:space:]]+install|cargo[[:space:]]+(add|install)|go[[:space:]]+(get|install)|gem[[:space:]]+install|bundle[[:space:]]+add|mvn[[:space:]]+dependency:get|dotnet[[:space:]]+add[[:space:]]+package)([[:space:]]|$)'
+  install_pattern='(^|[;&|]+[[:space:]]*)((npm([[:space:]]+--?[a-zA-Z0-9_-]+([=[:space:]][^[:space:]]+)?)?[[:space:]]+(install|i|add|ci|update|up|upgrade))|npx([[:space:]]+--?[a-zA-Z0-9_-]+([=[:space:]][^[:space:]]+)?)?[[:space:]]+(@?[A-Za-z0-9._-])|pnpm([[:space:]]+--?[a-zA-Z0-9_-]+([=[:space:]][^[:space:]]+)?)?[[:space:]]+(add|install|update|up|dlx)|yarn([[:space:]]+--?[a-zA-Z0-9_-]+([=[:space:]][^[:space:]]+)?)?[[:space:]]+(add|install|upgrade|dlx)|((python3?|py)[[:space:]]+-m[[:space:]]+pip|pip3?)[[:space:]]+install|poetry[[:space:]]+add|uv[[:space:]]+(add|pip[[:space:]]+install)|pipenv[[:space:]]+install|cargo[[:space:]]+(add|install)|go[[:space:]]+(get|install)|gem[[:space:]]+install|bundle[[:space:]]+add|mvn[[:space:]]+dependency:get|dotnet[[:space:]]+add[[:space:]]+package)([[:space:]]|$)'
 
   while IFS= read -r scan_command; do
     scan_command=$(command_scan_text "${scan_command}")
@@ -157,14 +157,20 @@ command_is_dependency_install() {
 
 command_hides_dependency_install() {
   local command="$1"
-  local manager_pattern
-  local verb_pattern
+  local payload
 
-  manager_pattern='(npm|npx|pnpm|yarn|pip3?|python3?[[:space:]]+-m[[:space:]]+pip|poetry|uv|pipenv|cargo|go|gem|bundle|mvn|dotnet)'
-  verb_pattern='(install|i|add|update|up|upgrade|dlx|get|dependency:get|package)'
+  while IFS= read -r payload; do
+    [[ -z "${payload}" ]] && continue
+    command_is_dependency_install "${payload}" && return 0
+  done < <(extract_eval_payloads "${command}")
 
-  echo "${command}" | grep -qEi '(eval[[:space:]]|\$\(|`|(^|[[:space:];|&])(bash|sh|zsh)[[:space:]]+-[A-Za-z]*c[[:space:]])' && \
-    echo "${command}" | grep -qEi "${manager_pattern}.*${verb_pattern}"
+  while IFS= read -r payload; do
+    [[ -z "${payload}" ]] && continue
+    command_is_dependency_install "${payload}" && return 0
+    payload_pipes_install_text_to_shell "${payload}" && return 0
+  done < <(extract_command_substitution_payloads "${command}")
+
+  return 1
 }
 
 command_scan_text() {
@@ -251,6 +257,55 @@ extract_shell_c_payloads() {
   done
 }
 
+extract_eval_payloads() {
+  local rest="$1"
+
+  rest=$(strip_heredoc_bodies "${rest}")
+  while [[ "${rest}" =~ (^|[[:space:];|&])eval[[:space:]]+\"([^\"]*)\" ]]; do
+    printf '%s\n' "${BASH_REMATCH[2]}"
+    rest="${rest#*"${BASH_REMATCH[0]}"}"
+  done
+
+  rest="$1"
+  rest=$(strip_heredoc_bodies "${rest}")
+  while [[ "${rest}" =~ (^|[[:space:];|&])eval[[:space:]]+\'([^\']*)\' ]]; do
+    printf '%s\n' "${BASH_REMATCH[2]}"
+    rest="${rest#*"${BASH_REMATCH[0]}"}"
+  done
+}
+
+extract_command_substitution_payloads() {
+  local input="$1"
+  local rest
+
+  rest=$(strip_heredoc_bodies "${input}")
+  while [[ "${rest}" == *'$('* ]]; do
+    rest="${rest#*'$('}"
+    printf '%s\n' "${rest%%)*}"
+    rest="${rest#*)}"
+  done
+
+  rest=$(strip_heredoc_bodies "${input}")
+  while [[ "${rest}" == *'`'* ]]; do
+    rest="${rest#*\`}"
+    printf '%s\n' "${rest%%\`*}"
+    [[ "${rest}" == *'`'* ]] || break
+    rest="${rest#*\`}"
+  done
+}
+
+payload_pipes_install_text_to_shell() {
+  local payload="$1"
+  local manager_pattern
+  local verb_pattern
+
+  manager_pattern='(npm|npx|pnpm|yarn|pip3?|python3?[[:space:]]+-m[[:space:]]+pip|poetry|uv|pipenv|cargo|go|gem|bundle|mvn|dotnet)'
+  verb_pattern='(install|i|add|update|up|upgrade|dlx|get|dependency:get|package)'
+
+  echo "${payload}" | grep -qEi "${manager_pattern}.*${verb_pattern}" && \
+    echo "${payload}" | grep -qEi '\|[[:space:]]*(bash|sh|zsh)([[:space:]]|$)'
+}
+
 command_candidate_texts() {
   local command="$1"
   local payload
@@ -264,6 +319,16 @@ command_candidate_texts() {
     normalize_install_text "${payload}"
     printf '\n'
   done < <(extract_shell_c_payloads "${command}")
+  while IFS= read -r payload; do
+    [[ -z "${payload}" ]] && continue
+    normalize_install_text "${payload}"
+    printf '\n'
+  done < <(extract_eval_payloads "${command}")
+  while IFS= read -r payload; do
+    [[ -z "${payload}" ]] && continue
+    normalize_install_text "${payload}"
+    printf '\n'
+  done < <(extract_command_substitution_payloads "${command}")
 }
 
 command_is_injectable_npm_install() {
@@ -326,9 +391,11 @@ if [[ "${TOOL_NAME}" != "Bash" ]] || [[ -z "${COMMAND}" ]]; then
   exit 0
 fi
 
+HIDDEN_DEPENDENCY_INSTALL=false
 if ! command_is_dependency_install "${COMMAND}"; then
   # Catch indirection patterns that hide install commands (V-002)
   if command_hides_dependency_install "${COMMAND}"; then
+    HIDDEN_DEPENDENCY_INSTALL=true
     : # Fall through — treat as install candidate
   else
     exit 0
@@ -694,6 +761,12 @@ if [[ -n "${LEDGER_ECOSYSTEM}" && ${#LEDGER_SPECS[@]} -gt 0 ]]; then
     printf '%s\n' "${REASON_JSON}"
     exit 0
   fi
+fi
+
+if [[ "${HIDDEN_DEPENDENCY_INSTALL}" == "true" && ( -z "${LEDGER_ECOSYSTEM}" || ${#LEDGER_SPECS[@]} -eq 0 ) ]]; then
+  log_advisory "pre-guard DENY: hidden dependency install could not be reduced to an approved spec — fail-closed."
+  jq -nc '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:"safedeps: hidden dependency install detected, but no package spec could be extracted for ledger approval — install blocked fail-closed."}}'
+  exit 0
 fi
 
 # Write per-install pending state for PostToolUse, keyed by (dir_hash, normalized

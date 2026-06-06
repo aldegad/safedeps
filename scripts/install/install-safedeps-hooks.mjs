@@ -26,6 +26,8 @@ const POST_HOOK_NAME = "safedeps-post-verify.sh";
 const REPO_PRE_HOOK = join(REPO_ROOT, "scripts", PRE_HOOK_NAME);
 const REPO_POST_HOOK = join(REPO_ROOT, "scripts", POST_HOOK_NAME);
 const CLI_BIN = join(REPO_ROOT, "bin", "safedeps");
+const PRE_HOOK_TIMEOUT_SECONDS = 30;
+const POST_HOOK_TIMEOUT_SECONDS = 30;
 
 const args = new Set(process.argv.slice(2));
 const UNINSTALL = args.has("--uninstall");
@@ -83,17 +85,10 @@ function engineHookCommand(engineRoot, hookName) {
   return `~/.${engineName}/skills/${SKILL_ID}/scripts/${hookName}`;
 }
 
-function ensureHook(config, eventName, command) {
+function ensureHook(config, eventName, command, timeoutSeconds) {
   config.hooks = config.hooks ?? {};
   config.hooks[eventName] = config.hooks[eventName] ?? [];
   const buckets = config.hooks[eventName];
-
-  const already = buckets.some((bucket) =>
-    bucket?.matcher === "Bash" &&
-    Array.isArray(bucket?.hooks) &&
-    bucket.hooks.some((h) => h && h.type === "command" && h.command === command),
-  );
-  if (already) return false;
 
   let bashBucket = buckets.find((b) => b && b.matcher === "Bash");
   if (!bashBucket) {
@@ -102,7 +97,16 @@ function ensureHook(config, eventName, command) {
   }
   bashBucket.hooks = bashBucket.hooks ?? [];
 
-  bashBucket.hooks.push({ type: "command", command });
+  const existing = bashBucket.hooks.find((h) => h && h.type === "command" && h.command === command);
+  if (existing) {
+    if (existing.timeout !== timeoutSeconds) {
+      existing.timeout = timeoutSeconds;
+      return true;
+    }
+    return false;
+  }
+
+  bashBucket.hooks.push({ type: "command", command, timeout: timeoutSeconds });
   return true;
 }
 
@@ -193,8 +197,8 @@ function installInEngine({ engineRoot, configPath, label }) {
   const cfg = readJson(configPath);
   const legacyPreRemoved = pruneNonCanonicalSafedepsHooks(cfg, "PreToolUse", preCommand, PRE_HOOK_NAME);
   const legacyPostRemoved = pruneNonCanonicalSafedepsHooks(cfg, "PostToolUse", postCommand, POST_HOOK_NAME);
-  const preAdded = ensureHook(cfg, "PreToolUse", preCommand);
-  const postAdded = ensureHook(cfg, "PostToolUse", postCommand);
+  const preAdded = ensureHook(cfg, "PreToolUse", preCommand, PRE_HOOK_TIMEOUT_SECONDS);
+  const postAdded = ensureHook(cfg, "PostToolUse", postCommand, POST_HOOK_TIMEOUT_SECONDS);
   if (legacyPreRemoved || legacyPostRemoved || preAdded || postAdded) {
     writeJsonWithBackup(configPath, cfg);
     log(`patched ${configPath} (pre=${preAdded ? "added" : "ok"}, post=${postAdded ? "added" : "ok"}, legacy=${legacyPreRemoved || legacyPostRemoved ? "removed" : "ok"})`);
