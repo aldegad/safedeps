@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: smoke + e2e + secret scan
+    runs-on: ubuntu-latest
+    env:
+      GITLEAKS_VERSION: "8.30.1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history so the dogfood secret scan covers every commit
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # gitleaks lets the e2e secret-gate bypass harness actually run (not skip)
+      # and backs the dogfood scan below.
+      - name: Install gitleaks
+        run: |
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" -o /tmp/gitleaks.tar.gz
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+          sudo install /tmp/gitleaks /usr/local/bin/gitleaks
+          gitleaks version
+
+      - name: Test (smoke + e2e, incl. secret-gate bypass harness)
+        run: npm test
+
+      # Dogfood: safedeps scans its own repo history for leaked secrets.
+      - name: Secret scan (dogfood, full history)
+        run: ./bin/safedeps scan secrets --repo
