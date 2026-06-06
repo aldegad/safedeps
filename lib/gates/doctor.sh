@@ -122,7 +122,6 @@ run_checks() {
   fi
 
   DOCTOR_PROFILE="$profile"
-  DOCTOR_IS_GIT="$is_git"
 }
 
 emit_human() {

@@ -36,8 +36,18 @@ SAFEDEPS_MANIFEST_FILES=(
 umask 077
 mkdir -p "${GUARD_DIR}" "${SNAPSHOT_DIR}"
 
+# Observable record of any gate bypass / unavailability (AGENTS.md: no silent fallback —
+# every bypass must be observable and logged).
+log_advisory() {
+  printf '%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" >> "${GUARD_DIR}/advisory.log" 2>/dev/null || true
+}
+
 if ! command -v jq >/dev/null 2>&1; then
-  echo "safedeps: jq is not installed; skipping guard hook." >&2
+  # jq is required to parse the hook payload, so the gate cannot even read the
+  # command without it — this is the one case we cannot fail closed. Make it an
+  # EXPLICIT, LOGGED allow-with-warning rather than a silent skip.
+  log_advisory "pre-guard ALLOW-WITH-WARNING: jq missing — install gate disabled (payload parse needs jq)."
+  echo "safedeps: jq is not installed — install gate DISABLED until jq is present (allow-with-warning, logged to advisory.log)." >&2
   exit 0
 fi
 
@@ -63,8 +73,11 @@ acquire_state_lock() {
     fi
 
     attempts=$((attempts + 1))
-    if [[ ${attempts} -ge 100 ]]; then
-      echo "safedeps: could not acquire state lock; skipping guard hook." >&2
+    if [[ ${attempts} -ge ${SAFEDEPS_LOCK_MAX_ATTEMPTS:-100} ]]; then
+      # acquire_state_lock is only reached for install candidates, so failing to
+      # serialize/snapshot means this install cannot be gated — fail CLOSED (deny).
+      log_advisory "pre-guard DENY: state lock unavailable for an install command — fail-closed."
+      jq -nc '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:"safedeps: could not acquire the state lock (another safedeps run may be active). Install blocked fail-closed — retry in a moment."}}'
       exit 0
     fi
     sleep 0.1
