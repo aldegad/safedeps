@@ -22,7 +22,7 @@ cd "$(npm root -g)/@aldegad/safedeps" && node scripts/install/install-safedeps-h
 
 > `safedeps` is the CLI command; the npm package is **`@aldegad/safedeps`** — the unscoped `safedeps` on npm is an unrelated package. Prefer the full skill source tree? See [Installation](#installation).
 
-<!-- TODO(demo): add a 15-20s asciinema/VHS recording of safedeps catching a malicious install live (inert -> reorg). Highest-leverage conversion asset per launch review. -->
+![safedeps withholds a vulnerable install, then clears the patched version](assets/demo.gif)
 
 ## Distribution Model
 

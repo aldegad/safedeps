@@ -781,12 +781,12 @@ LOG_EOF
     --arg log_path "${GUARD_DIR}/reorg.log" \
     '{
       systemMessage: (
-        "safedeps: 의심스러운 패키지 변경 감지, 마지막으로 confirmed 된 안전 스냅샷으로 롤백했습니다.\n\n" +
-        "감지된 문제:\n" + $reasons + "\n\n" +
-        "롤백 기준 스냅샷: " + $rollback_snapshot + "\n" +
-        "롤백된 파일: " + $rolled_back +
-        (if $warnings == "" then "" else "\n\n추가 경고:\n" + $warnings end) +
-        "\n\n상세 로그: " + $log_path
+        "safedeps: suspicious dependency change detected — rolled back to the last confirmed safe snapshot.\n\n" +
+        "Detected problems:\n" + $reasons + "\n\n" +
+        "Rollback snapshot: " + $rollback_snapshot + "\n" +
+        "Rolled-back files: " + $rolled_back +
+        (if $warnings == "" then "" else "\n\nAdditional warnings:\n" + $warnings end) +
+        "\n\nDetails log: " + $log_path
       )
     }'
   exit 0

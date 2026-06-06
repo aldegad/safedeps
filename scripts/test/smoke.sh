@@ -262,7 +262,7 @@ tamper_post=$(
   jq -nc --arg cwd "${project_dir}" '{tool_name:"Bash",tool_input:{command:"npm install ledger-tamper@1.0.0"},cwd:$cwd}' |
     HOME="${tamper_home}" SAFEDEPS_HOME="${tamper_safe}" scripts/safedeps-post-verify.sh
 )
-grep -q '의심스러운 패키지 변경 감지' <<< "${tamper_post}" || fail "post hook reorgs safedeps ledger tamper script"
+grep -q 'suspicious dependency change detected' <<< "${tamper_post}" || fail "post hook reorgs safedeps ledger tamper script"
 pass "post hook reorgs safedeps ledger tamper script"
 
 fixture_json="${tmp_root}/recheck-fixture.json"

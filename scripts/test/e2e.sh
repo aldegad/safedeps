@@ -230,7 +230,7 @@ revert_post=$(
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${revert_project}"}
 EOF
 )
-grep -q '의심스러운 패키지 변경 감지' <<< "${revert_post}" || fail "reorg fires on a tampered lockfile"
+grep -q 'suspicious dependency change detected' <<< "${revert_post}" || fail "reorg fires on a tampered lockfile"
 cmp -s "${revert_project}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "reorg restores the exact safe lockfile content on disk"
 pass "reorg reverts a tampered lockfile to safe content on disk"
 
@@ -267,7 +267,7 @@ missing_post=$(
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${missing_project}"}
 EOF
 )
-grep -q '의심스러운 패키지 변경 감지' <<< "${missing_post}" || fail "post hook reorgs unapproved transitive package"
+grep -q 'suspicious dependency change detected' <<< "${missing_post}" || fail "post hook reorgs unapproved transitive package"
 grep -q 'fixture-child@1.0.0' <<< "${missing_post}" || fail "post hook names unapproved transitive package"
 # Not just the message — the unapproved transitive must be gone from the on-disk
 # lockfile. (Reorg removes the tampered lockfile; a no-network reinstall may recreate
