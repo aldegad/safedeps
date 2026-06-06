@@ -1,11 +1,17 @@
 #!/bin/bash
-# .githooks/pre-commit — safedeps secret-leak gate (scaffolded by `safedeps hooks init`).
+# .githooks/pre-commit — safedeps repo gate (scaffolded by `safedeps hooks init`).
 #
-# Blocks a commit when gitleaks finds a secret in the STAGED changes, so a key
-# or a real .env never enters the repo's history. The detection POLICY lives in
-# this repo's .gitleaks.toml (public) / .gitleaks.private.toml (private);
-# safedeps owns execution. This hook delegates to one canonical scanner path:
-# `safedeps scan secrets --staged`.
+# Two checks:
+#   1. Secret scan (always, fail-closed) — blocks a commit when gitleaks finds a
+#      secret in the STAGED changes, so a key or a real .env never enters
+#      history. The detection POLICY lives in this repo's .gitleaks.toml
+#      (public) / .gitleaks.private.toml (private); safedeps owns execution.
+#   2. Dependency audit (npm) — on every commit when this repo has an npm
+#      lockfile. Catches a vulnerable direct or *transitive* dependency,
+#      including a CVE published AFTER you installed it ("looked safe then,
+#      flagged now"). A real finding blocks (fail-closed); only the advisory DB
+#      being unreachable (offline) warns and lets the commit through — an
+#      observable availability failover, never a silent skip.
 #
 # Intentional bypass (use sparingly — you own the risk):  git commit --no-verify
 set -euo pipefail
@@ -43,7 +49,30 @@ EOF
   exit 1
 fi
 
-# Delegate to the single canonical scanner. A non-zero exit means either a
-# secret was found OR no scanner (gitleaks/docker) is available — both
-# fail-closed and block the commit.
-exec "${sd}" scan secrets --staged --root "${repo_root}"
+# 1. Secret scan (always). A non-zero exit means either a secret was found OR
+#    no scanner (gitleaks/docker) is available — both fail-closed, block commit.
+"${sd}" scan secrets --staged --root "${repo_root}"
+
+# 2. Dependency audit (npm) — every commit when this repo has an npm lockfile.
+#    `safedeps audit npm` exit codes: 0 clean / 1 vulnerable / 2 could-not-run.
+#      - vulnerable (1)  → BLOCK (fail-closed on the security verdict).
+#      - unreachable (2) → WARN and ALLOW (availability failover, observable):
+#        an offline commit is never silently dropped, and CI / the daily
+#        re-check still cover what this commit could not verify.
+if [ -f "${repo_root}/package-lock.json" ] || [ -f "${repo_root}/npm-shrinkwrap.json" ]; then
+  if "${sd}" audit npm --root "${repo_root}"; then
+    : # clean — no advisory at or above the audit level.
+  else
+    audit_rc=$?
+    if [ "${audit_rc}" -eq 2 ]; then
+      {
+        printf '\n'
+        printf 'safedeps pre-commit: dependency audit could not reach the advisory DB.\n'
+        printf '  -> commit ALLOWED without a fresh dependency verdict (offline failover).\n'
+        printf '  -> re-run `safedeps audit npm` once online; CI / the daily re-check also cover this.\n'
+      } >&2
+    else
+      exit "${audit_rc}"   # vulnerable (or unknown failure) -> fail-closed.
+    fi
+  fi
+fi

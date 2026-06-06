@@ -16,6 +16,19 @@
 
 ---
 
+## 배포 모델
+
+safedeps 에는 두 배포 surface 가 있다:
+
+1. **Agent skill + hooks (canonical)** -- repo 자체가 skill folder 다. `SKILL.md`, hook script, provider/ledger library, install helper 가 한 디렉터리에 함께 있다.
+2. **npm package (CLI convenience)** -- `@aldegad/safedeps` 는 `safedeps` command 를 설치한다. npm 설치만으로 Claude Code 나 Codex 가 skill 을 자동 discover 하지는 않는다. npm 설치 후에도 hook/skill installer 를 실행하거나 skill folder 를 수동 등록해야 한다.
+
+전체 skill/hook source tree 를 canonical artifact 로 원하면 GitHub release 를 쓴다. versioned global CLI 가 주목적이면 npm 을 쓴다.
+
+용어: safedeps 는 Claude/Codex hook 과 local CLI 로 동작하는 agent security skill 이다. plugin manifest 로 감싸기 전까지는 Codex plugin bundle 이 아니다.
+
+---
+
 ## 두 lane
 
 `safedeps` 는 두 보안 lane 을 소유한다 (전체 설계: [`ARCHITECTURE.md`](./ARCHITECTURE.md) §1):
@@ -23,7 +36,7 @@
 - **install-time** (이 README 의 초점) — advisory check + approved-spec ledger + 빠른 PreToolUse guard + PostToolUse effect enforcement + post-install reorg. 패키지 단위, install 명령과 실제 lockfile effect 주변.
 - **release-time** — `safedeps gates run`, `safedeps scan secrets [--repo|--worktree|--staged]`, `safedeps audit npm`, `safedeps hooks install|check`. repo 트리 secret scan, 의존성 audit, repo-local git hook 설치/검사 (push/release 전). repo-specific policy(gitleaks config, privacy 경로)는 대상 repo 에 남고 safedeps 는 실행 owner. *(옛 `security-release-gates` 흡수.)*
 
-release-time lane 의 secret 누출 쪽은 **repo 별이고 opt-in** 이다. `safedeps doctor` 가 그 repo-entry 점검이다 — repo 의 `.gitleaks` policy, `.githooks/pre-commit`, 활성 `core.hooksPath`, scanner 가용성을 진단하고(전역 install-time gate 상태도 같이 보고), `safedeps doctor --fix` 가 시작 policy 를 scaffold(`safedeps hooks init`)하고 활성화(`safedeps hooks install`)한다. scaffold 는 비파괴적이라 repo 가 소유한 기존 `.gitleaks.toml` 은 덮어쓰지 않으며, pre-commit hook 은 `safedeps scan secrets --staged` 에 위임하고 fail-closed 다. [secret 누출 lane (repo 별)](#secret-누출-lane-repo-별) 참고.
+release-time lane 의 secret 누출 쪽은 **repo 별이고 opt-in** 이다. `safedeps doctor` 가 그 repo-entry 점검이다 — repo 의 `.gitleaks` policy, `.githooks/pre-commit`, 활성 `core.hooksPath`, scanner 가용성을 진단하고(전역 install-time gate 상태도 같이 보고), `safedeps doctor --fix` 가 시작 policy 를 scaffold(`safedeps hooks init`)하고 활성화(`safedeps hooks install`)한다. scaffold 는 비파괴적이라 repo 가 소유한 기존 `.gitleaks.toml` 은 덮어쓰지 않으며, pre-commit hook 은 매 커밋 비밀키 스캔(`safedeps scan secrets --staged`)을 돌리고 npm repo 면 매 커밋 의존성 audit(`safedeps audit npm`)도 돌린다 — 실제 취약점은 차단(fail-closed)하고, 어드바이저리 DB 도달 불가 시에는 경고만 하고 커밋을 통과시킨다(관측 가능한 오프라인 failover). [secret 누출 lane (repo 별)](#secret-누출-lane-repo-별) 참고.
 
 ---
 
@@ -106,7 +119,11 @@ lane 구성 요소:
 
 - **`safedeps hooks init`** 가 시작용 `.gitleaks.toml`(private repo 면 `.gitleaks.private.toml`)과 `.githooks/pre-commit` 을 scaffold 한다. 기존 파일은 덮지 않고 유지 — policy 는 repo 가 소유한다.
 - **`safedeps hooks install`** 이 repo-local hook 을 활성화한다(`core.hooksPath = .githooks`).
-- **pre-commit hook 은 `safedeps scan secrets --staged` 에 위임**하고 **fail-closed** 다: scanner(로컬 `gitleaks` 또는 Docker)가 못 돌면 silent skip 이 아니라 커밋을 막는다. 의도된 우회는 사람이 소유하는 `git commit --no-verify` 뿐이다.
+- **pre-commit hook 은 두 검사를 돌린다**:
+  - **비밀키 스캔**(`safedeps scan secrets --staged`)을 매 커밋, **fail-closed**. scanner(로컬 `gitleaks` 또는 Docker)가 못 돌면 silent skip 이 아니라 커밋을 막는다.
+  - **npm 의존성 audit**(`safedeps audit npm`)을 npm lockfile 이 있는 repo 면 **매 커밋**. 취약한 직접·*transitive* 의존성을 잡는다 — 패키지를 깐 *뒤에* 공개된 CVE("그땐 안전해 보였는데 지금 발견됨")까지 포함해서, 사람이 손으로 절대 못 보는 그것. lockfile 이 바뀔 때만이 아니라 매 커밋 돌리는 게 핵심이다: 어드바이저리 DB 를 다시 조회하니까 이미 깔린 의존성에 *새로* 뜬 CVE 가 바로 다음 커밋에 드러난다. 보안 판정과 가용성 실패는 구분된다 — 실제 취약점은 **차단**(fail-closed)하지만, 어드바이저리 DB 가 **도달 불가**(오프라인/레지스트리 오류)면 **경고만 하고 커밋을 통과**시킨다(관측 가능한 가용성 failover, silent skip 아님). 오프라인 커밋이 못 본 건 CI 와 데일리 re-check 가 다시 메운다.
+
+  의도된 우회는 사람이 소유하는 `git commit --no-verify` 뿐이다.
 
 scaffold 된 `.gitleaks.toml` 은 **네가 손보는 시작점**이다: gitleaks 기본 ruleset 을 extend 하고, 값이 할당된 `.env` 커밋을 잡는 rule 을 더하며(`.env.example`/`.sample`/`.template` 변형은 allowlist), fixture 용 repo-owned `[allowlist]` 블록을 남겨둔다. safedeps 는 *실행* — `safedeps scan secrets` 로 gitleaks 구동 — 만 소유하고 policy 내용은 소유하지 않는다.
 

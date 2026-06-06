@@ -10,7 +10,9 @@ hooks:
 
 # Safedeps
 
-Two gates, one skill. You (the agent) are the primary user — drive both:
+Two gates, one skill. Safedeps is an agent security skill backed by Claude/Codex hooks and a local CLI. It is not a Codex plugin bundle unless it is later wrapped with a plugin manifest.
+
+You (the agent) are the primary user — drive both:
 
 - **Install-time gate** — clear every dependency install through an OSV-backed advisory check before it runs.
 - **Secret-leak gate** — stop a secret or a real `.env` from being committed (per-repo).
@@ -71,7 +73,7 @@ safedeps doctor --fix    # scaffold the policy + activate the hooks (non-destruc
 2. Gaps? Run `safedeps doctor --fix`. It scaffolds `.gitleaks.toml` (or `.gitleaks.private.toml`) and `.githooks/pre-commit`, then activates them. Existing repo files are never overwritten.
 3. Tune the scaffolded `.gitleaks.toml` for the repo — allowlist fixtures, add rules. You own the policy; safedeps runs it (gitleaks via `safedeps scan secrets`).
 
-The pre-commit hook delegates to `safedeps scan secrets --staged` and is **fail-closed**: no scanner → it blocks the commit. The only bypass is the human's `git commit --no-verify`.
+The pre-commit hook runs two checks: a secret scan (`safedeps scan secrets --staged`) on every commit (fail-closed), and an npm dependency audit (`safedeps audit npm`) on every commit in an npm repo — so a CVE published *after* you installed a package is caught at the next commit, not weeks later. `audit npm` exits 0 clean / 1 vulnerable / 2 could-not-run; the hook **blocks** on a real finding (1) but **warns and allows** when the advisory DB is unreachable (2 — observable offline failover). No secret scanner → blocks. The only bypass is the human's `git commit --no-verify`.
 
 ---
 
