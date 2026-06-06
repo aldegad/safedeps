@@ -146,7 +146,7 @@ cat > "${effect_project}/package-lock.json" <<'EOF'
 EOF
 effect_clean_post=$(
   scripts/safedeps-post-verify.sh <<EOF
-{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"}}
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${effect_project}"}
 EOF
 )
 [[ -z "${effect_clean_post}" ]] || fail "post hook passes approved full closure"
@@ -183,7 +183,7 @@ EOF
 chmod +x "${stub_bin}/npm"
 inert_post=$(
   PATH="${stub_bin}:${PATH}" scripts/safedeps-post-verify.sh <<EOF
-{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0 --ignore-scripts"}}
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0 --ignore-scripts"},"cwd":"${inert_project}"}
 EOF
 )
 [[ -z "${inert_post}" ]] || fail "post hook keeps verified inert rebuild success quiet"
@@ -220,7 +220,7 @@ cat > "${missing_project}/package-lock.json" <<'EOF'
 EOF
 missing_post=$(
   scripts/safedeps-post-verify.sh <<EOF
-{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"}}
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${missing_project}"}
 EOF
 )
 grep -q '의심스러운 패키지 변경 감지' <<< "${missing_post}" || fail "post hook reorgs unapproved transitive package"

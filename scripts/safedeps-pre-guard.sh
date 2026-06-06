@@ -123,6 +123,24 @@ compute_dir_hash() {
   fi
 }
 
+# Per-install pending-state key (issue #5): dir hash + a hash of the command with
+# the inert-install rewrite normalized out, so PreToolUse (original command) and
+# PostToolUse (possibly `--ignore-scripts`-appended) of the SAME install resolve to
+# the same key. This keeps concurrent installs in one project on separate pending
+# files instead of clobbering a single global one.
+compute_pending_key() {
+  local dir_hash="$1" command="$2" norm cmd_hash
+  norm=$(printf '%s' "${command}" | sed -E 's/[[:space:]]+--ignore-scripts([[:space:]]|$)/ /g; s/[[:space:]]+/ /g; s/^ //; s/ $//')
+  if command -v md5sum >/dev/null 2>&1; then
+    cmd_hash=$(printf '%s' "${norm}" | md5sum | cut -d' ' -f1)
+  elif command -v md5 >/dev/null 2>&1; then
+    cmd_hash=$(md5 -q -s "${norm}")
+  else
+    cmd_hash=$(printf '%s' "${norm}" | cksum | cut -d' ' -f1)
+  fi
+  printf '%s_%s' "${dir_hash}" "${cmd_hash}"
+}
+
 command_is_dependency_install() {
   local command="$1"
   local scan_command
@@ -678,10 +696,24 @@ if [[ -n "${LEDGER_ECOSYSTEM}" && ${#LEDGER_SPECS[@]} -gt 0 ]]; then
   fi
 fi
 
-# Write current state atomically for PostToolUse (V-004: single file prevents TOCTOU)
+# Write per-install pending state for PostToolUse, keyed by (dir_hash, normalized
+# command) so concurrent installs in the same project keep separate state instead
+# of clobbering one global file (issue #5). The single-file write is still atomic
+# (write_state_file) to prevent TOCTOU within one install.
+PENDING_DIR="${GUARD_DIR}/pending"
+mkdir -p "${PENDING_DIR}"
+# GC pending entries whose PostToolUse never fired (crash/no-op). 24h is well past
+# any real install, so this never deletes an in-flight one (a 60-min window could
+# have reaped a slow native build that was still running).
+find "${PENDING_DIR}" -name '*.json' -type f -mmin +1440 -delete 2>/dev/null || true
+# Key = (dir, normalized command); the snapshot id suffix makes the filename unique
+# per install, so even two identical concurrent commands keep separate state.
+PENDING_KEY=$(compute_pending_key "${DIR_HASH}" "${COMMAND}")
 CURRENT_STATE=$(jq -n --arg sid "${SNAPSHOT_ID}" --arg pdir "${PROJECT_DIR}" --arg dhash "${DIR_HASH}" \
   '{snapshot_id: $sid, project_dir: $pdir, dir_hash: $dhash}')
-write_state_file "${GUARD_DIR}/current_state" "${CURRENT_STATE}"
+# $$ (this pre hook's PID) guarantees a unique filename even for two installs in
+# the same second (SNAPSHOT_ID has only 1s resolution).
+write_state_file "${PENDING_DIR}/${PENDING_KEY}__${SNAPSHOT_ID}_$$.json" "${CURRENT_STATE}"
 
 if ! jq -e 'has("turn_id")' <<< "${INPUT}" >/dev/null 2>&1 && \
    command_is_injectable_npm_install "${COMMAND}" && \
