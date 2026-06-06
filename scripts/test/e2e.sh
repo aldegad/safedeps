@@ -190,6 +190,50 @@ EOF
 grep -qx 'rebuild' "${tmp_root}/npm-calls.log" || fail "post hook runs npm rebuild after verified injected install"
 pass "post hook rebuilds after verified inert install"
 
+# Reorg must actually revert the on-disk lockfile, not just print the message. The
+# missing-transitive test below proves the systemMessage; this proves the stronger
+# claim — a tampered lockfile is restored byte-for-byte to the last confirmed safe
+# snapshot on disk. Regression guard so a future change cannot break the rollback
+# while keeping the message green. Stub npm keeps `npm ci` from rewriting the file.
+revert_project="${tmp_root}/revert-project"
+mkdir -p "${revert_project}"
+printf '{"dependencies":{"fixture-parent":"1.0.0"}}\n' > "${revert_project}/package.json"
+cat > "${revert_project}/package-lock.json" <<'EOF'
+{
+  "name": "revert-project",
+  "lockfileVersion": 3,
+  "packages": {
+    "": {"dependencies": {"fixture-parent": "1.0.0"}},
+    "node_modules/fixture-parent": {"version": "1.0.0", "dependencies": {"fixture-child": "1.0.0"}},
+    "node_modules/fixture-child": {"version": "1.0.0"}
+  }
+}
+EOF
+cp "${revert_project}/package-lock.json" "${tmp_root}/revert-safe-lock.json"
+scripts/safedeps-pre-guard.sh > /dev/null <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${revert_project}"}
+EOF
+cat > "${revert_project}/package-lock.json" <<'EOF'
+{
+  "name": "revert-project",
+  "lockfileVersion": 3,
+  "packages": {
+    "": {"dependencies": {"fixture-parent": "1.0.0"}},
+    "node_modules/fixture-parent": {"version": "1.0.0", "dependencies": {"fixture-child": "1.0.0"}},
+    "node_modules/fixture-child": {"version": "1.0.0"},
+    "node_modules/fixture-evil": {"version": "6.6.6", "resolved": "git://evil.example.com/fixture-evil.git"}
+  }
+}
+EOF
+revert_post=$(
+  PATH="${stub_bin}:${PATH}" scripts/safedeps-post-verify.sh <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${revert_project}"}
+EOF
+)
+grep -q '의심스러운 패키지 변경 감지' <<< "${revert_post}" || fail "reorg fires on a tampered lockfile"
+cmp -s "${revert_project}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "reorg restores the exact safe lockfile content on disk"
+pass "reorg reverts a tampered lockfile to safe content on disk"
+
 export SAFEDEPS_HOME="${tmp_root}/safe-missing-transitive"
 export SAFEDEPS_OSV_API_URL="http://127.0.0.1:${port}/osv/v1/query"
 export SAFEDEPS_OSV_BATCH_API_URL="http://127.0.0.1:${port}/osv/v1/querybatch"
@@ -225,7 +269,13 @@ EOF
 )
 grep -q '의심스러운 패키지 변경 감지' <<< "${missing_post}" || fail "post hook reorgs unapproved transitive package"
 grep -q 'fixture-child@1.0.0' <<< "${missing_post}" || fail "post hook names unapproved transitive package"
-pass "post hook reorgs unapproved transitive package"
+# Not just the message — the unapproved transitive must be gone from the on-disk
+# lockfile. (Reorg removes the tampered lockfile; a no-network reinstall may recreate
+# an empty one, so assert fixture-child is absent rather than the file itself.)
+if grep -q 'fixture-child' "${missing_project}/package-lock.json" 2>/dev/null; then
+  fail "post hook reorg leaves the unapproved transitive in the on-disk lockfile"
+fi
+pass "post hook reorgs unapproved transitive package (verified on disk)"
 
 export SAFEDEPS_HOME="${tmp_root}/safe"
 export SAFEDEPS_OSV_API_URL="http://127.0.0.1:${port}/osv/v1/query"
