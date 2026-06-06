@@ -56,7 +56,7 @@ The internal engine keeps the v1 `reorg-guard` assets.
 
 ### Release notes
 
-- The npm package version in `package.json` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION` tracks it and the smoke test reads `package.json` to compare (current: v2.3.0).
+- The npm package version in `package.json` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION` tracks it and the smoke test reads `package.json` to compare (current: v2.4.0).
 - `npm test` runs the release smoke suite; the full fixture E2E lives under `v2.1-tests`.
 - The daily re-check uses no LLM tokens. It is opt-in: a macOS `launchd` user agent runs `safedeps re-check --json` daily, installed atomically by `install-safedeps-recheck-agent.mjs`. It writes `~/.safedeps/recheck.log` and `~/.safedeps/recheck-alerts.jsonl` and raises a macOS notification on a new CVE/KEV/revoke/provider-skip. Network is used only for OSV / CISA / GHSA queries.
 
@@ -113,6 +113,25 @@ Status: shipped as v2.3.0.
 - `hooks init` is non-destructive across a re-run (repo edits survive)
 - pre-commit gate denies a committed secret, passes clean and `.env.example` placeholder commits (bypass harness + regression)
 - existing smoke + fixture E2E regression suite remains green
+
+---
+
+## v2.4 — fail-closed hooks + supply-chain hardening (shipped)
+
+Status: shipped as v2.4.0.
+
+### What changed
+
+- **Fail-closed gate** — the PreToolUse/PostToolUse hooks no longer `exit 0` (silent pass) when they cannot run. A lock-unavailable install now **denies** fail-closed; an unavoidable `jq`-missing case becomes an **explicit allow-with-warning**; every such outcome is recorded in `~/.safedeps/advisory.log` (observable, per the no-silent-fallback invariant). The PostToolUse path records an un-runnable gate as **UNVERIFIED** rather than a clean pass.
+- **`SECURITY.md`** — vulnerability disclosure policy, supported versions, scope, and the by-design security properties (no SaaS, zero deps, no silent fallback).
+- **CI hardening** — `actions/*` pinned to commit SHA; the gitleaks download is checksum-verified; a ShellCheck gate (error-clean); a macOS + Linux matrix (the v2.3 `stat` fix proved cross-OS coverage matters); and an `npm pack` step that keeps the zero-dependency property honest.
+
+### Verification
+
+- lock-unavailable install denies fail-closed and logs to `advisory.log`
+- jq-missing is logged as an observable allow-with-warning, never a silent skip
+- ShellCheck (`--severity=error`) is clean across all shell sources
+- existing smoke + e2e regression suite remains green on both Linux and macOS
 
 ---
 

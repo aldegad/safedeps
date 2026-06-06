@@ -10,31 +10,65 @@ permissions:
 
 jobs:
   test:
-    name: smoke + e2e + secret scan
-    runs-on: ubuntu-latest
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
     env:
       GITLEAKS_VERSION: "8.30.1"
+      GITLEAKS_LINUX_X64_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
     steps:
-      - uses: actions/checkout@v6
+      # A security tool pins its own actions to a commit SHA (supply chain).
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           fetch-depth: 0 # full history so the dogfood secret scan covers every commit
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: "20"
 
-      # gitleaks lets the e2e secret-gate bypass harness actually run (not skip)
-      # and backs the dogfood scan below.
-      - name: Install gitleaks
+      # Linux: download the pinned gitleaks release and verify its checksum before use.
+      - name: Install gitleaks (Linux, checksum-verified)
+        if: runner.os == 'Linux'
         run: |
           curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" -o /tmp/gitleaks.tar.gz
+          echo "${GITLEAKS_LINUX_X64_SHA256}  /tmp/gitleaks.tar.gz" | sha256sum -c -
           tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
           sudo install /tmp/gitleaks /usr/local/bin/gitleaks
           gitleaks version
 
-      - name: Test (smoke + e2e, incl. secret-gate bypass harness)
+      - name: Install gitleaks (macOS, Homebrew)
+        if: runner.os == 'macOS'
+        run: |
+          brew install gitleaks
+          gitleaks version
+
+      # The gate is bash-heavy; lint it for real bugs. The tree is error-clean;
+      # the remaining shellcheck noise is unused-var and intentional-literal-tilde.
+      - name: ShellCheck
+        if: runner.os == 'Linux'
+        run: |
+          shellcheck --version
+          shellcheck --severity=error \
+            bin/safedeps \
+            lib/gates/*.sh lib/ledger/*.sh lib/npm/*.sh lib/providers/*.sh \
+            scripts/safedeps-pre-guard.sh scripts/safedeps-post-verify.sh \
+            scripts/safedeps-recheck-alert.sh scripts/release-gates.sh \
+            scripts/test/smoke.sh scripts/test/e2e.sh
+
+      - name: Test (smoke + e2e — secret-gate + fail-closed harness)
         run: npm test
 
-      # Dogfood: safedeps scans its own repo history for leaked secrets.
       - name: Secret scan (dogfood, full history)
         run: ./bin/safedeps scan secrets --repo
+
+      # Keep the zero-dependency security property honest, and catch stray files.
+      - name: Verify package contents (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          node -e "const d=require('./package.json').dependencies||{}; if(Object.keys(d).length){console.error('unexpected runtime deps:',Object.keys(d));process.exit(1)} console.log('zero runtime deps OK')"
+          npm pack --dry-run 2>&1 | tee /tmp/pack.txt
+          if grep -Eq 'node_modules|/\.env|/\.git' /tmp/pack.txt; then echo "stray files in package"; exit 1; fi
+          echo "package contents OK"
