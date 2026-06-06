@@ -325,10 +325,47 @@ jq -e --arg pre "~/.codex/skills/safedeps/scripts/safedeps-pre-guard.sh" '
 jq -e --arg post "~/.codex/skills/safedeps/scripts/safedeps-post-verify.sh" '
   [.hooks.PostToolUse[]?.hooks[]?.command] | index($post)
 ' "${installer_home}/.codex/hooks.json" >/dev/null || fail "installer writes codex post hook"
+jq -e '
+  [.hooks.PreToolUse[]?, .hooks.PostToolUse[]? | select(.matcher == "Bash") | .hooks[]? | select(.command | contains("/safedeps/")) | .timeout] | all(. == 30)
+' "${installer_home}/.claude/settings.json" >/dev/null || fail "installer writes claude safedeps hook timeouts"
+jq -e '
+  [.hooks.PreToolUse[]?, .hooks.PostToolUse[]? | select(.matcher == "Bash") | .hooks[]? | select(.command | contains("/safedeps/")) | .timeout] | all(. == 30)
+' "${installer_home}/.codex/hooks.json" >/dev/null || fail "installer writes codex safedeps hook timeouts"
 if jq -e '[.. | strings] | any(contains("npm-reorg-guard"))' "${installer_home}/.claude/settings.json" >/dev/null; then
   fail "installer removes legacy hook"
 fi
-pass "installer legacy hook cleanup"
+installer_backfill_home="${tmp_root}/installer-backfill-home"
+mkdir -p "${installer_backfill_home}/.claude" "${installer_backfill_home}/.codex"
+cat > "${installer_backfill_home}/.codex/hooks.json" <<'EOF'
+{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"~/.codex/skills/safedeps/scripts/safedeps-pre-guard.sh"}]}],"PostToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"~/.codex/skills/safedeps/scripts/safedeps-post-verify.sh","timeout":10}]}]}}
+EOF
+HOME="${installer_backfill_home}" node scripts/install/install-safedeps-hooks.mjs >/dev/null
+jq -e '
+  [.hooks.PreToolUse[]?, .hooks.PostToolUse[]? | select(.matcher == "Bash") | .hooks[]? | select(.command | contains("/safedeps/")) | .timeout] | length == 2 and all(. == 30)
+' "${installer_backfill_home}/.codex/hooks.json" >/dev/null || fail "installer backfills existing codex safedeps hook timeouts"
+pass "installer legacy cleanup and hook timeout backfill"
+
+legacy_skip_safe="${tmp_root}/safe-legacy-skip"
+legacy_pending_project="${tmp_root}/legacy-pending-project"
+legacy_post_project="${tmp_root}/legacy-post-project"
+mkdir -p "${legacy_skip_safe}/snapshots" "${legacy_pending_project}" "${legacy_post_project}"
+legacy_sid="legacy-snapshot"
+legacy_pending_hash=$(printf '%s' "${legacy_pending_project}" | md5 -q 2>/dev/null || printf '%s' "${legacy_pending_project}" | md5sum | cut -d' ' -f1)
+cat > "${legacy_skip_safe}/current_state" <<EOF
+{"snapshot_id":"${legacy_sid}","project_dir":"${legacy_pending_project}","dir_hash":"${legacy_pending_hash}"}
+EOF
+cat > "${legacy_skip_safe}/snapshots/${legacy_sid}_meta.json" <<EOF
+{"snapshot_id":"${legacy_sid}","project_dir":"${legacy_pending_project}"}
+EOF
+legacy_skip_out=$(
+  SAFEDEPS_HOME="${legacy_skip_safe}" scripts/safedeps-post-verify.sh <<EOF
+{"tool_name":"Bash","tool_input":{"command":"echo done"},"cwd":"${legacy_post_project}"}
+EOF
+)
+[[ -z "${legacy_skip_out}" ]] || fail "post hook keeps unrelated legacy-pending Bash quiet"
+grep -q 'post-verify SKIP: legacy current_state' "${legacy_skip_safe}/advisory.log" || fail "post hook logs legacy pending bounded skip"
+[[ -f "${legacy_skip_safe}/current_state" ]] || fail "post hook does not consume mismatched legacy pending"
+pass "post hook bounds unrelated Bash with stale legacy pending"
 
 # --- Secret-leak lane: pre-commit gate must DENY a secret, PASS clean/example -
 # The real bypass harness for the secret lane. Needs a scanner (gitleaks or

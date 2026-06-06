@@ -382,6 +382,30 @@ LOG_EOF
     '{systemMessage: ("safedeps: verified install completed, but npm rebuild warning(s) were recorded:\n" + $warnings)}'
 }
 
+post_command_looks_like_install() {
+  local command="$1"
+
+  printf '%s' "${command}" | grep -qiE '(npm|pnpm|yarn|bun)([^"]*)(install|add|dlx)|(^|[^a-zA-Z0-9_-])npx[[:space:]]+(@?[A-Za-z0-9._-])|pip[0-9]*[[:space:]]+install|cargo[[:space:]]+(add|install)|go[[:space:]]+(get|install)|gem[[:space:]]+install|bundle[[:space:]]+add|poetry[[:space:]]+add|uv[[:space:]]+(add|pip)|pipenv[[:space:]]+install|mvn([^"]*)dependency:get|dotnet[[:space:]]+add[[:space:]]+package'
+}
+
+legacy_pending_matches_post_context() {
+  local pending_project_dir="${1:-}"
+  local pending_dir_hash="${2:-}"
+
+  [[ -n "${pending_project_dir}" ]] || return 1
+  if command -v realpath >/dev/null 2>&1; then
+    pending_project_dir=$(realpath "${pending_project_dir}" 2>/dev/null || echo "${pending_project_dir}")
+  elif command -v readlink >/dev/null 2>&1; then
+    pending_project_dir=$(readlink -f "${pending_project_dir}" 2>/dev/null || echo "${pending_project_dir}")
+  fi
+
+  [[ "${pending_project_dir}" == "${POST_CWD}" ]] || return 1
+  if [[ -n "${pending_dir_hash}" && "${pending_dir_hash}" != "${POST_DIR_HASH}" ]]; then
+    return 1
+  fi
+  post_command_looks_like_install "${COMMAND}"
+}
+
 # Read tool input from stdin
 INPUT=$(cat)
 
@@ -428,16 +452,25 @@ elif [[ -f "${GUARD_DIR}/current_state" ]]; then
   SNAPSHOT_ID=$(echo "${CURRENT_STATE}" | jq -r '.snapshot_id // empty')
   PROJECT_DIR=$(echo "${CURRENT_STATE}" | jq -r '.project_dir // empty')
   DIR_HASH=$(echo "${CURRENT_STATE}" | jq -r '.dir_hash // empty')
+  if ! legacy_pending_matches_post_context "${PROJECT_DIR}" "${DIR_HASH}"; then
+    log_advisory "post-verify SKIP: legacy current_state did not match this Bash command/cwd (post_cwd=${POST_CWD}, pending_project=${PROJECT_DIR:-unknown}) — bounded no-op."
+    exit 0
+  fi
   rm -f "${GUARD_DIR}/current_state"
 elif [[ -f "${GUARD_DIR}/current_snapshot_id" ]]; then
   SNAPSHOT_ID=$(cat "${GUARD_DIR}/current_snapshot_id")
   PROJECT_DIR=$(cat "${GUARD_DIR}/current_project_dir" 2>/dev/null || pwd)
+  DIR_HASH=$(compute_dir_hash "${PROJECT_DIR}")
+  if ! legacy_pending_matches_post_context "${PROJECT_DIR}" "${DIR_HASH}"; then
+    log_advisory "post-verify SKIP: legacy current_snapshot_id did not match this Bash command/cwd (post_cwd=${POST_CWD}, pending_project=${PROJECT_DIR:-unknown}) — bounded no-op."
+    exit 0
+  fi
   rm -f "${GUARD_DIR}/current_snapshot_id" "${GUARD_DIR}/current_project_dir"
 else
   # No pending state for this command. If it nonetheless looks like a dependency
   # install, the effect gate could not verify it — record UNVERIFIED (observable)
   # rather than disappearing silently (e.g. a payload with no `cwd`).
-  if printf '%s' "${COMMAND}" | grep -qiE '(npm|pnpm|yarn|bun)([^"]*)(install|add|dlx)|[^a-z]npx[[:space:]]|pip[0-9]*[[:space:]]+install|cargo[[:space:]]+(add|install)|go[[:space:]]+(get|install)|gem[[:space:]]+install|bundle[[:space:]]+add|poetry[[:space:]]+add|uv[[:space:]]+(add|pip)|pipenv[[:space:]]+install|mvn([^"]*)dependency:get|dotnet[[:space:]]+add[[:space:]]+package'; then
+  if post_command_looks_like_install "${COMMAND}"; then
     log_advisory "post-verify UNVERIFIED: no pending state for an install-looking command (missing cwd or pre hook never ran)."
   fi
   exit 0
