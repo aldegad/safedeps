@@ -59,6 +59,13 @@ provider_created=$(
 [[ "${provider_created}" == "${provider_tmp%/}/safedeps-providers."* ]] || fail "provider tmp helper uses requested TMPDIR"
 pass "provider temp dir"
 
+# Portability guard: safedeps_file_mtime must return a bare integer on both BSD
+# (macOS, `stat -f`) and GNU (Linux, `stat -c`). A wrong-order stat leaks
+# filesystem info into the value and breaks the cache-freshness arithmetic.
+mtime_val=$(bash -c 'source lib/providers/providers.sh; f=$(mktemp); safedeps_file_mtime "$f"; rm -f "$f"')
+[[ "${mtime_val}" =~ ^[0-9]+$ ]] || fail "safedeps_file_mtime returns a bare integer (got: ${mtime_val})"
+pass "file mtime is a portable integer"
+
 project_dir="${tmp_root}/project"
 mkdir -p "${project_dir}"
 printf '{"dependencies":{}}\n' > "${project_dir}/package.json"
