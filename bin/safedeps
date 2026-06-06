@@ -340,7 +340,7 @@ sf_cmd_check_npm_full_closure() {
   evidence_file=$(sf_mktemp_evidence)
   transitive_file=$(sf_closure_temp_file)
 
-  sf_spinner_start "npm closure 해석 중 (${pkg}@${version})"
+  sf_spinner_start "resolving npm closure (${pkg}@${version})"
   if ! sf_npm_closure_for_spec "${pkg}" "${version}" "${closure_file}"; then
     sf_spinner_stop
     rm -f "${closure_file}" "${batch_file}" "${evidence_file}" "${transitive_file}"
@@ -352,10 +352,10 @@ sf_cmd_check_npm_full_closure() {
   fi
   sf_spinner_stop
 
-  sf_spinner_start "closure 취약점 batch 조회 중 (OSV / KEV)"
+  sf_spinner_start "batch-checking closure for advisories (OSV / KEV)"
   if ! sf_npm_batch_check_closure "${closure_file}" "${batch_file}"; then
     sf_spinner_stop
-    sf_err "OSV batch 응답 없음 — fail-closed (closure cache miss + 라이브 실패)"
+    sf_err "no OSV batch response — fail-closed (closure cache miss + live query failed)"
     sf_advisory_log "check fail-closed npm-closure package=${pkg} version=${version}"
     rm -f "${closure_file}" "${batch_file}" "${evidence_file}" "${transitive_file}"
     if [[ "${SAFEDEPS_JSON_MODE}" -eq 1 ]]; then
@@ -377,7 +377,7 @@ sf_cmd_check_npm_full_closure() {
   if [[ "${kev_count}" -gt 0 ]]; then
     local kev_summary
     kev_summary=$(jq -r '[.[] | select(.status == "hard_block") | "\(.package)@\(.version)" + (if .direct then " (direct)" else " (transitive)" end)] | join(", ")' "${batch_file}")
-    sf_err "KEV 매칭 closure 감지 — 설치 차단: ${kev_summary}"
+    sf_err "KEV-matched package in closure — install blocked: ${kev_summary}"
     sf_advisory_log "check block(KEV closure) package=${pkg} version=${version} affected=${kev_summary}"
     if [[ "${SAFEDEPS_JSON_MODE}" -eq 1 ]]; then
       sf_npm_emit_closure_block_json "kev_hard_block" "${ecosystem}" "${pkg}" "${range}" "${version}" "${batch_file}"
@@ -402,7 +402,7 @@ sf_cmd_check_npm_full_closure() {
       fi
 
       for patched_version in "${patched_versions[@]+${patched_versions[@]}}"; do
-        sf_warn "${pkg}@${version} direct 취약 — 후보 ${patched_version} closure 재조회 중."
+        sf_warn "${pkg}@${version} direct vulnerable — re-checking closure for candidate ${patched_version}."
         if ! sf_npm_closure_for_spec "${pkg}" "${patched_version}" "${closure_file}"; then
           continue
         fi
@@ -422,7 +422,7 @@ sf_cmd_check_npm_full_closure() {
         local hash; hash=$(jq -r '.hash' <<< "${spec_json}")
         local expires_at; expires_at=$(jq -r '.expires_at' <<< "${spec_json}")
         local transitive_count; transitive_count=$(jq 'length' "${transitive_file}")
-        sf_ok "${pkg}@${patched_version} full closure 승인 (transitive ${transitive_count}, until ${expires_at})"
+        sf_ok "${pkg}@${patched_version} full closure cleared (transitive ${transitive_count}, until ${expires_at})"
         sf_info "ledger: ${hash}"
         sf_advisory_log "check approve(patched closure) package=${pkg} version=${patched_version} hash=${hash} transitive=${transitive_count} prev_version=${version}"
         rm -f "${direct_evidence}" "${closure_file}" "${batch_file}" "${evidence_file}" "${transitive_file}"
@@ -443,7 +443,7 @@ sf_cmd_check_npm_full_closure() {
 
     local affected_summary
     affected_summary=$(jq -r '[.[] | select(.status == "vulnerable") | "\(.package)@\(.version)" + (if .direct then " (direct)" else " (transitive)" end)] | join(", ")' "${batch_file}")
-    sf_warn "closure 에 취약 패키지 감지 — 승인 보류: ${affected_summary}"
+    sf_warn "vulnerable package in closure — approval withheld: ${affected_summary}"
     sf_advisory_log "check block(vulnerable closure) package=${pkg} version=${version} affected=${affected_summary}"
     if [[ "${SAFEDEPS_JSON_MODE}" -eq 1 ]]; then
       sf_npm_emit_closure_block_json "${block_result}" "${ecosystem}" "${pkg}" "${range}" "${version}" "${batch_file}"
@@ -459,7 +459,7 @@ sf_cmd_check_npm_full_closure() {
   local hash; hash=$(jq -r '.hash' <<< "${spec_json}")
   local expires_at; expires_at=$(jq -r '.expires_at' <<< "${spec_json}")
   local transitive_count; transitive_count=$(jq 'length' "${transitive_file}")
-  sf_ok "${pkg}@${version} full closure 승인 (transitive ${transitive_count}, until ${expires_at})"
+  sf_ok "${pkg}@${version} full closure cleared (transitive ${transitive_count}, until ${expires_at})"
   sf_info "ledger: ${hash}"
   sf_advisory_log "check approve(clean closure) package=${pkg} version=${version} hash=${hash} transitive=${transitive_count}"
   rm -f "${closure_file}" "${batch_file}" "${evidence_file}" "${transitive_file}"
@@ -506,10 +506,10 @@ cmd_check() {
   range=$(sf_parse_pkg_spec "${pkg_spec}" | sed -n '2p')
 
   local version
-  sf_spinner_start "버전 해석 중 (${pkg}@${range})"
+  sf_spinner_start "resolving version (${pkg}@${range})"
   if ! version=$(sf_resolve_version "${ecosystem}" "${pkg}" "${range}"); then
     sf_spinner_stop
-    sf_err "버전 해석 실패: ${pkg}@${range}"
+    sf_err "version resolution failed: ${pkg}@${range}"
     if [[ "${SAFEDEPS_JSON_MODE}" -eq 1 ]]; then
       jq -nc --arg ecosystem "${ecosystem}" --arg package "${pkg}" --arg range "${range}" \
         '{command:"check", ecosystem:$ecosystem, package:$package, input_range:$range, result:"error", error:"version_resolution_failed"}'
@@ -526,7 +526,7 @@ cmd_check() {
       hash=$(jq -r '.hash' <<< "${ledger_check}")
       approved_at=$(jq -r '.spec.approved_at // "n/a"' <<< "${ledger_check}")
       expires_at=$(jq -r '.spec.expires_at // "n/a"' <<< "${ledger_check}")
-      sf_ok "${pkg}@${version} 이미 승인됨 (until ${expires_at})"
+      sf_ok "${pkg}@${version} already approved (until ${expires_at})"
       sf_info "ledger: ${hash}"
       if [[ "${SAFEDEPS_JSON_MODE}" -eq 1 ]]; then
         jq -nc \
@@ -551,10 +551,10 @@ cmd_check() {
 
   # Provider query (canonical truth = OSV; KEV overlay; GHSA enrichment)
   local provider_json
-  sf_spinner_start "취약점 조회 중 (OSV / KEV / GHSA)"
+  sf_spinner_start "checking advisories (OSV / KEV / GHSA)"
   if ! provider_json=$(safedeps_providers_query "${ecosystem}" "${pkg}" "${version}"); then
     sf_spinner_stop
-    sf_err "OSV primary 응답 없음 — fail-closed (cache miss + 라이브 실패)"
+    sf_err "no OSV primary response — fail-closed (cache miss + live query failed)"
     sf_advisory_log "check fail-closed ecosystem=${ecosystem} package=${pkg} version=${version}"
     if [[ "${SAFEDEPS_JSON_MODE}" -eq 1 ]]; then
       jq -nc \
@@ -577,11 +577,11 @@ cmd_check() {
 
   case "${status}" in
     hard_block)
-      sf_err "KEV 매칭 — ${pkg}@${version} 은 실제 야생에서 exploit 확인됨. 설치 차단."
+      sf_err "KEV match — ${pkg}@${version} is exploited in the wild. install blocked."
       local kev_cves
       kev_cves=$(jq -r '[.kev.matches[]?.cveID] | unique | join(", ")' <<< "${provider_json}")
-      [[ -n "${kev_cves}" ]] && sf_info "관련 CVE: ${kev_cves}"
-      sf_warn "대체 모듈을 검토하세요. 이 spec 은 ledger 에 승인되지 않습니다."
+      [[ -n "${kev_cves}" ]] && sf_info "related CVEs: ${kev_cves}"
+      sf_warn "consider an alternative package; this spec is not approved in the ledger."
       sf_advisory_log "check block(KEV) ecosystem=${ecosystem} package=${pkg} version=${version} cves=${kev_cves}"
       if [[ "${SAFEDEPS_JSON_MODE}" -eq 1 ]]; then
         jq -c \
@@ -610,11 +610,11 @@ cmd_check() {
 
         for patched_version in "${patched_versions[@]}"; do
           last_patched="${patched_version}"
-          sf_warn "${pkg}@${version} 에 ${vuln_count} 개 CVE — 후보 ${patched_version} 재조회 중."
-          sf_spinner_start "${patched_version} 재조회 중"
+          sf_warn "${pkg}@${version} has ${vuln_count} CVE(s) — re-checking candidate ${patched_version}."
+          sf_spinner_start "re-checking ${patched_version}"
           if ! narrow_json=$(safedeps_providers_query "${ecosystem}" "${pkg}" "${patched_version}"); then
             sf_spinner_stop
-            sf_err "${pkg}@${patched_version} 재조회 실패 — fail-closed"
+            sf_err "${pkg}@${patched_version} re-check failed — fail-closed"
             rm -f "${tmp_evidence}"
             if [[ "${SAFEDEPS_JSON_MODE}" -eq 1 ]]; then
               jq -nc \
@@ -630,7 +630,7 @@ cmd_check() {
           narrow_status=$(jq -r '.status' <<< "${narrow_json}")
           last_status="${narrow_status}"
           if [[ "${narrow_status}" != "clean" ]]; then
-            sf_warn "패치 후보 ${patched_version} 도 깨끗하지 않음 (status=${narrow_status}); 다음 후보를 확인합니다."
+            sf_warn "patch candidate ${patched_version} is not clean either (status=${narrow_status}); trying the next candidate."
             continue
           fi
 
@@ -644,7 +644,7 @@ cmd_check() {
           rm -f "${narrow_evidence}" "${tmp_evidence}"
           local hash; hash=$(jq -r '.hash' <<< "${spec_json}")
           local expires_at; expires_at=$(jq -r '.expires_at' <<< "${spec_json}")
-          sf_ok "${pkg}@${patched_version} 승인 (until ${expires_at})"
+          sf_ok "${pkg}@${patched_version} approved (until ${expires_at})"
           sf_info "ledger: ${hash}"
           sf_advisory_log "check approve(patched) ecosystem=${ecosystem} package=${pkg} version=${patched_version} hash=${hash} prev_version=${version}"
           if [[ "${SAFEDEPS_JSON_MODE}" -eq 1 ]]; then
@@ -658,7 +658,7 @@ cmd_check() {
           return 0
         done
 
-        sf_err "패치 후보를 모두 재조회했지만 clean 후보가 없음 (last=${last_patched}, status=${last_status})"
+        sf_err "re-checked all patch candidates but none are clean (last=${last_patched}, status=${last_status})"
         rm -f "${tmp_evidence}"
         if [[ "${SAFEDEPS_JSON_MODE}" -eq 1 ]]; then
           jq -nc \
@@ -669,7 +669,7 @@ cmd_check() {
         fi
         return 2
       else
-        sf_warn "${pkg}@${version} 에 ${vuln_count} 개 CVE — 사용 가능한 patch 없음. 승인 보류."
+        sf_warn "${pkg}@${version} has ${vuln_count} CVE(s) — no patch available. approval withheld."
         sf_advisory_log "check warn(no-patch) ecosystem=${ecosystem} package=${pkg} version=${version} vulns=${vuln_count}"
         rm -f "${tmp_evidence}"
         if [[ "${SAFEDEPS_JSON_MODE}" -eq 1 ]]; then
@@ -688,7 +688,7 @@ cmd_check() {
       rm -f "${tmp_evidence}"
       local hash; hash=$(jq -r '.hash' <<< "${spec_json}")
       local expires_at; expires_at=$(jq -r '.expires_at' <<< "${spec_json}")
-      sf_ok "${pkg}@${version} 승인 (until ${expires_at})"
+      sf_ok "${pkg}@${version} approved (until ${expires_at})"
       sf_info "ledger: ${hash}"
       sf_advisory_log "check approve(clean) ecosystem=${ecosystem} package=${pkg} version=${version} hash=${hash}"
       if [[ "${SAFEDEPS_JSON_MODE}" -eq 1 ]]; then
@@ -702,7 +702,7 @@ cmd_check() {
       ;;
 
     *)
-      sf_err "예상치 못한 provider status: ${status}"
+      sf_err "unexpected provider status: ${status}"
       rm -f "${tmp_evidence}"
       return 4
       ;;
@@ -757,7 +757,7 @@ cmd_ledger() {
   fi
 
   if [[ ${#entries[@]} -eq 0 ]]; then
-    sf_info "approved-specs 비어있음 (${SAFEDEPS_LEDGER_DIR})"
+    sf_info "approved-specs is empty (${SAFEDEPS_LEDGER_DIR})"
     return 0
   fi
 
@@ -830,7 +830,7 @@ cmd_revoke() {
   local target_file=""
   if [[ "${arg1}" == sha256:* ]]; then
     target_file=$(safedeps_ledger_path_for_hash "${arg1}")
-    [[ -f "${target_file}" ]] || { sf_err "ledger entry 없음: ${arg1}"; return 1; }
+    [[ -f "${target_file}" ]] || { sf_err "no ledger entry: ${arg1}"; return 1; }
   else
     # one or two args. Two = ecosystem + pkg@version. One = pkg@version (scan).
     if [[ -n "${arg2}" ]]; then
@@ -839,7 +839,7 @@ cmd_revoke() {
       version=$(sf_parse_pkg_spec "${arg2}" | sed -n '2p')
       [[ -n "${version}" ]] || { sf_eprintf "safedeps: revoke needs pkg@version, got '${arg2}'"; return 4; }
       target_file=$(safedeps_ledger_path "${arg1}" "${pkg}" "${version}")
-      [[ -f "${target_file}" ]] || { sf_err "ledger entry 없음: ${arg1} ${pkg}@${version}"; return 1; }
+      [[ -f "${target_file}" ]] || { sf_err "no ledger entry: ${arg1} ${pkg}@${version}"; return 1; }
     else
       local pkg version
       pkg=$(sf_parse_pkg_spec "${arg1}" | sed -n '1p')
@@ -855,9 +855,9 @@ cmd_revoke() {
         fi
       done < <(find "${SAFEDEPS_LEDGER_DIR}" -maxdepth 1 -name '*.json' -type f -print0 2>/dev/null)
       case "${#matches[@]}" in
-        0) sf_err "ledger entry 없음: ${pkg}@${version}"; return 1 ;;
+        0) sf_err "no ledger entry: ${pkg}@${version}"; return 1 ;;
         1) target_file="${matches[0]}" ;;
-        *) sf_err "${pkg}@${version} 가 여러 ecosystem 에서 매칭됨 — ecosystem 을 명시하세요"; return 4 ;;
+        *) sf_err "${pkg}@${version} matched in multiple ecosystems — specify the ecosystem"; return 4 ;;
       esac
     fi
   fi
@@ -870,7 +870,7 @@ cmd_revoke() {
   local revoked_json
   revoked_json=$(safedeps_ledger_revoke "${ecosystem}" "${pkg}" "${version}" "${reason}")
   sf_advisory_log "revoke ecosystem=${ecosystem} package=${pkg} version=${version} reason=${reason}"
-  sf_ok "취소: ${ecosystem} ${pkg}@${version}"
+  sf_ok "revoked: ${ecosystem} ${pkg}@${version}"
   sf_info "reason: ${reason}"
 
   if [[ "${SAFEDEPS_JSON_MODE}" -eq 1 ]]; then
@@ -909,17 +909,17 @@ cmd_recheck() {
     hash=$(jq -r '.hash // ""' "${f}")
     [[ -n "${revoked_at}" ]] && continue
     if [[ -f "${SAFEDEPS_ADVISORY_LOG}" ]] && ! sf_ledger_has_approval_provenance "${hash}" "${ecosystem}" "${pkg}" "${version}"; then
-      sf_warn "  provenance 없음 — 위조 의심 flag (revoke 안 함)"
+      sf_warn "  no provenance — flagged as suspected forgery (not revoked)"
       suspected_forgery_arr=$(jq -c \
         --arg ecosystem "${ecosystem}" --arg package "${pkg}" --arg version "${version}" --arg hash "${hash}" \
         '. + [{ecosystem:$ecosystem, package:$package, version:$version, hash:$hash, reason:"missing_advisory_log_approval"}]' <<< "${suspected_forgery_arr}")
     fi
     checked=$(( checked + 1 ))
 
-    sf_info "재검증 ${ecosystem} ${pkg}@${version}"
+    sf_info "re-checking ${ecosystem} ${pkg}@${version}"
     local pj
     if ! pj=$(safedeps_providers_query "${ecosystem}" "${pkg}" "${version}" 2>/dev/null); then
-      sf_warn "  provider 응답 없음 — skip"
+      sf_warn "  no provider response — skipped"
       continue
     fi
     local s; s=$(jq -r '.status' <<< "${pj}")
@@ -932,12 +932,12 @@ cmd_recheck() {
         safedeps_ledger_revoke "${ecosystem}" "${pkg}" "${version}" "${reason}" >/dev/null
         sf_advisory_log "re-check revoke ecosystem=${ecosystem} package=${pkg} version=${version} status=${s}"
         if [[ "${s}" == "hard_block" ]]; then
-          sf_err "  KEV 매칭 → revoke"
+          sf_err "  KEV match -> revoked"
           kev_hit_arr=$(jq -c \
             --arg ecosystem "${ecosystem}" --arg package "${pkg}" --arg version "${version}" \
             '. + [{ecosystem:$ecosystem, package:$package, version:$version, status:"hard_block"}]' <<< "${kev_hit_arr}")
         else
-          sf_warn "  새 CVE 매치 → revoke"
+          sf_warn "  new CVE match -> revoked"
           newly_vuln_arr=$(jq -c \
             --arg ecosystem "${ecosystem}" --arg package "${pkg}" --arg version "${version}" \
             '. + [{ecosystem:$ecosystem, package:$package, version:$version, status:"vulnerable"}]' <<< "${newly_vuln_arr}")
@@ -961,15 +961,15 @@ cmd_recheck() {
     return 0
   fi
 
-  sf_info "검증 완료: ${checked} 개 중 ${still_clean} 개 clean"
+  sf_info "re-check complete: ${still_clean}/${checked} still clean"
   local nv kv
   nv=$(jq -r 'length' <<< "${newly_vuln_arr}")
   kv=$(jq -r 'length' <<< "${kev_hit_arr}")
   local fg
   fg=$(jq -r 'length' <<< "${suspected_forgery_arr}")
-  [[ "${nv}" -gt 0 ]] && sf_warn "새 CVE 매치로 ${nv} 개 revoke"
-  [[ "${kv}" -gt 0 ]] && sf_err  "KEV 매치로 ${kv} 개 revoke"
-  [[ "${fg}" -gt 0 ]] && sf_warn "approval provenance 없는 ledger entry ${fg} 개 flag"
+  [[ "${nv}" -gt 0 ]] && sf_warn "revoked ${nv} for new CVE match"
+  [[ "${kv}" -gt 0 ]] && sf_err  "revoked ${kv} for KEV match"
+  [[ "${fg}" -gt 0 ]] && sf_warn "flagged ${fg} ledger entries with no approval provenance"
 }
 
 # ---- migrate -----------------------------------------------------------------
