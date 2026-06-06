@@ -22,6 +22,8 @@ cd "$(npm root -g)/@aldegad/safedeps" && node scripts/install/install-safedeps-h
 
 > `safedeps` 는 CLI 명령어이고, npm 패키지는 **`@aldegad/safedeps`** 다 — npm 의 unscoped `safedeps` 는 무관한 남의 패키지. 전체 skill 소스 트리를 원하면 [설치](#설치) 참고.
 
+![safedeps 가 취약한 install 을 보류하고, 패치 버전은 통과시킨다](assets/demo.gif)
+
 *Detailed reference → [README.md](./README.md) (영문, SSoT)*
 
 ---
