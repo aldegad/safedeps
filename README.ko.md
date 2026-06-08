@@ -46,9 +46,9 @@ safedeps 에는 두 배포 surface 가 있다:
 `safedeps` 는 두 보안 lane 을 소유한다 (전체 설계: [`ARCHITECTURE.md`](./ARCHITECTURE.md) §1):
 
 - **install-time** (이 README 의 초점) — advisory check + approved-spec ledger + 빠른 PreToolUse guard + PostToolUse effect enforcement + post-install reorg. 패키지 단위, install 명령과 실제 lockfile effect 주변.
-- **release-time** — `safedeps gates run`, `safedeps scan secrets [--repo|--worktree|--staged]`, `safedeps audit npm`, `safedeps hooks install|check`. repo 트리 secret scan, 의존성 audit, repo-local git hook 설치/검사 (push/release 전). repo-specific policy(gitleaks config, privacy 경로)는 대상 repo 에 남고 safedeps 는 실행 owner. *(옛 `security-release-gates` 흡수.)*
+- **release-time** — `safedeps gates run`, `safedeps scan secrets [--repo|--worktree|--staged]`, `safedeps audit npm`, `safedeps hooks install|check`. repo 트리 secret scan, 의존성 audit, repo-local git hook 설치/검사(push/release 전), opt-in 원격 PR 보안 자세 점검. repo-specific policy(gitleaks config, privacy 경로)는 대상 repo 에 남고 safedeps 는 로컬 실행 owner. *(옛 `security-release-gates` 흡수.)*
 
-release-time lane 의 secret 누출 쪽은 **repo 별이고 opt-in** 이다. `safedeps doctor` 가 그 repo-entry 점검이다 — repo 의 `.gitleaks` policy, `.githooks/pre-commit`, 활성 `core.hooksPath`, scanner 가용성을 진단하고(전역 install-time gate 상태도 같이 보고), `safedeps doctor --fix` 가 시작 policy 를 scaffold(`safedeps hooks init`)하고 활성화(`safedeps hooks install`)한다. scaffold 는 비파괴적이라 repo 가 소유한 기존 `.gitleaks.toml` 은 덮어쓰지 않으며, pre-commit hook 은 매 커밋 비밀키 스캔(`safedeps scan secrets --staged`)을 돌리고 npm repo 면 매 커밋 의존성 audit(`safedeps audit npm`)도 돌린다 — 실제 취약점은 차단(fail-closed)하고, 어드바이저리 DB 도달 불가 시에는 경고만 하고 커밋을 통과시킨다(관측 가능한 오프라인 failover). [secret 누출 lane (repo 별)](#secret-누출-lane-repo-별) 참고.
+release-time lane 의 secret 누출 쪽은 **repo 별이고 opt-in** 이다. `safedeps doctor` 가 그 repo-entry 점검이다 — repo 의 `.gitleaks` policy, `.githooks/pre-commit`, 활성 `core.hooksPath`, scanner 가용성을 진단하고(전역 install-time gate 상태도 같이 보고), `safedeps doctor --fix` 가 시작 policy 를 scaffold(`safedeps hooks init`)하고 활성화(`safedeps hooks install`)한다. 이 로컬 pre-commit 설정은 `--fix` 를 선택하면 자동으로 붙고, 원격 CI 비용을 쓰지 않는다. scaffold 는 비파괴적이라 repo 가 소유한 기존 `.gitleaks.toml` 은 덮어쓰지 않으며, pre-commit hook 은 매 커밋 비밀키 스캔(`safedeps scan secrets --staged`)을 돌리고 npm repo 면 매 커밋 의존성 audit(`safedeps audit npm`)도 돌린다 — 실제 취약점은 차단(fail-closed)하고, 어드바이저리 DB 도달 불가 시에는 경고만 하고 커밋을 통과시킨다(관측 가능한 오프라인 failover). 원격 PR enforcement 는 별개다: `doctor` 는 빠진 PR 보안 체크와 branch protection 자세를 알려줄 수 있지만, hosted runner 비용이 생길 수 있으므로 GitHub Actions workflow 나 required check 를 만들지 않는다. [secret 누출 lane (repo 별)](#secret-누출-lane-repo-별) 참고.
 
 ---
 
@@ -120,6 +120,10 @@ Secret-leak lane (per-repo)
 Dependency-install gate (global, all repos)
   ✓ dependency-install gate installed (~/.claude/skills/safedeps)
 
+Remote PR security checks (opt-in; may spend CI minutes)
+  ! remote PR security workflow (opt-in; may spend CI minutes) → safedeps gates run --root "/path/to/repo" --strict
+  – required PR status checks for main (remote opt-in)         → opt-in remote check: add a safedeps workflow, then require it for PRs before merging main
+
 3 gap(s) in the secret-leak lane.
 Fix all at once:  safedeps doctor --fix --root "/path/to/repo"
 
@@ -139,7 +143,7 @@ lane 구성 요소:
 
 scaffold 된 `.gitleaks.toml` 은 **네가 손보는 시작점**이다: gitleaks 기본 ruleset 을 extend 하고, 값이 할당된 `.env` 커밋을 잡는 rule 을 더하며(`.env.example`/`.sample`/`.template` 변형은 allowlist), fixture 용 repo-owned `[allowlist]` 블록을 남겨둔다. safedeps 는 *실행* — `safedeps scan secrets` 로 gitleaks 구동 — 만 소유하고 policy 내용은 소유하지 않는다.
 
-`safedeps doctor --json` 은 `{ command, repo, profile, gaps, ok, checks[] }` 를 돌려준다; `gaps`/`ok` 는 repo 별 secret 누출 lane 만 반영한다.
+`safedeps doctor --json` 은 `{ command, repo, profile, gaps, ok, checks[] }` 를 돌려준다; `gaps`/`ok` 는 repo 별 secret 누출 lane 만 반영한다. 원격 PR 자세는 `lane: "remote"` check 로 나타나지만, 원격 workflow 나 required status check 가 없어도 `ok` 는 바뀌지 않는다. `doctor --fix` 는 로컬 전용이다: repo hook 만 scaffold 하고 `.github/workflows` 생성, GitHub Actions 활성화, branch protection 변경은 하지 않는다.
 
 ---
 

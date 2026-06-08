@@ -327,6 +327,10 @@ doctor_json=$(HOME="${tmp_root}/home-doctor" ./bin/safedeps --json doctor --root
 [[ "$(jq -r '.ok' <<< "${doctor_json}")" == "false" ]] || fail "doctor reports gaps on a bare repo"
 secret_gaps=$(jq -r '[.checks[] | select(.lane == "secret" and .status == "gap")] | length' <<< "${doctor_json}")
 [[ "${secret_gaps}" -ge 3 ]] || fail "doctor lists at least 3 secret-lane gaps (got ${secret_gaps})"
+remote_checks=$(jq -r '[.checks[] | select(.lane == "remote")] | length' <<< "${doctor_json}")
+[[ "${remote_checks}" -ge 1 ]] || fail "doctor lists remote governance posture checks"
+remote_gaps=$(jq -r '[.checks[] | select(.lane == "remote" and .status == "gap")] | length' <<< "${doctor_json}")
+[[ "${remote_gaps}" -ge 1 ]] || fail "doctor flags missing remote workflow as opt-in posture gap"
 HOME="${tmp_root}/home-doctor" ./bin/safedeps hooks init --root "${doctor_repo}" >/dev/null
 [[ -f "${doctor_repo}/.gitleaks.toml" ]] || fail "hooks init scaffolds .gitleaks.toml"
 [[ -x "${doctor_repo}/.githooks/pre-commit" ]] || fail "hooks init scaffolds an executable pre-commit"

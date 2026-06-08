@@ -15,7 +15,7 @@ Two gates, one skill. Safedeps is an agent security skill backed by Claude/Codex
 You (the agent) are the primary user — drive both:
 
 - **Install-time gate** — clear every dependency install through an OSV-backed advisory check before it runs.
-- **Secret-leak gate** — stop a secret or a real `.env` from being committed (per-repo).
+- **Secret-leak gate** — stop a secret or a real `.env` from being committed (per-repo, local by default).
 
 ---
 
@@ -62,7 +62,7 @@ The block message is `permissionDecisionReason`. The command quoted in backticks
 
 ## Secret-leak gate (per-repo)
 
-The install-time gate is global; this one is per-repo and opt-in. Make it part of entering a repo, so the agent — not a later leak — is on guard.
+The install-time gate is global; this one is per-repo and opt-in. Make it part of entering a repo, so the agent — not a later leak — is on guard. Local setup is allowed to be automatic after `doctor --fix`; remote PR enforcement is not.
 
 ```bash
 safedeps doctor          # diagnose; exits non-zero if the secret lane has gaps
@@ -74,6 +74,8 @@ safedeps doctor --fix    # scaffold the policy + activate the hooks (non-destruc
 3. Tune the scaffolded `.gitleaks.toml` for the repo — allowlist fixtures, add rules. You own the policy; safedeps runs it (gitleaks via `safedeps scan secrets`).
 
 The pre-commit hook runs two checks: a secret scan (`safedeps scan secrets --staged`) on every commit (fail-closed), and an npm dependency audit (`safedeps audit npm`) on every commit in an npm repo — so a CVE published *after* you installed a package is caught at the next commit, not weeks later. `audit npm` exits 0 clean / 1 vulnerable / 2 could-not-run; the hook **blocks** on a real finding (1) but **warns and allows** when the advisory DB is unreachable (2 — observable offline failover). No secret scanner → blocks. The only bypass is the human's `git commit --no-verify`.
+
+Remote PR security checks are opt-in. `doctor` may report `lane: "remote"` gaps for missing PR security workflows or required status checks, but agents must not create GitHub Actions workflows, enable branch protection, or require PR checks automatically. Hosted CI can spend runner minutes; ask the human before adding remote enforcement. Running `safedeps gates run --root <repo> --strict` locally is the safe first step.
 
 ---
 
@@ -131,12 +133,12 @@ safedeps version
   "gaps": 0,
   "ok": true,
   "checks": [
-    { "lane": "secret | deps", "status": "ok | gap | na", "label": "...", "remedy": "safedeps hooks init ..." }
+    { "lane": "secret | deps | remote", "status": "ok | gap | na", "label": "...", "remedy": "safedeps hooks init ..." }
   ]
 }
 ```
 
-- `gaps` / `ok` reflect the per-repo secret-leak lane only; a missing global gate is a `deps` check but does not change `ok`.
+- `gaps` / `ok` reflect the per-repo secret-leak lane only; missing global (`deps`) or remote PR (`remote`) posture checks do not change `ok`.
 
 `ledger`, `revoke`, `re-check`, `migrate` each return a `{ "command": "...", ... }` envelope; run `safedeps help <command>` for the fields.
 
