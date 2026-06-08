@@ -5,10 +5,11 @@ set -euo pipefail
 #
 # Diagnoses whether the per-repo secret-leak lane is set up (.gitleaks policy +
 # .githooks/pre-commit + active core.hooksPath + an available scanner), reports
-# the global dependency-install gate, and nudges remote PR governance as opt-in
-# only. Read-only by default; `--fix` scaffolds the local secret lane (hooks init)
-# and activates it (hooks install). It never creates remote workflows or branch
-# protection, because remote CI can spend hosted-runner minutes.
+# the global dependency-install gate, and nudges remote repository governance as
+# opt-in only. Read-only by default; `--fix` scaffolds the local secret lane
+# (hooks init) and activates it (hooks install). It never creates remote
+# workflows or mutates branch protection. No-runner branch rules are a safe
+# recommendation, but any remote mutation still belongs to the human.
 #
 # Exit codes: 0 = no gaps in the secret-leak lane, 1 = gaps remain.
 
@@ -82,7 +83,12 @@ main_branch_name() {
 
 branch_protection_remedy() {
   local branch="$1"
-  printf 'opt-in remote check: add a safedeps workflow, then require it for PRs before merging %s' "$branch"
+  printf 'no-runner opt-in: require pull requests before updating %s; do not require status checks unless CI cost is accepted' "$branch"
+}
+
+required_status_remedy() {
+  local branch="$1"
+  printf 'cost-bearing opt-in: add a safedeps workflow, then require it before merging %s' "$branch"
 }
 
 dependency_gate_root() {
@@ -158,12 +164,15 @@ run_checks() {
     else
       add_check remote gap "remote PR security workflow (opt-in; may spend CI minutes)" "safedeps gates run --root \"$REPO_ROOT\" --strict"
     fi
-    # Branch protection is intentionally not auto-queried or auto-mutated.
-    # It needs provider auth/network and can spend hosted CI minutes once a
-    # workflow exists. safedeps names the desired posture; the human opts in.
-    add_check remote na "required PR status checks for ${default_branch} (remote opt-in)" "$(branch_protection_remedy "$default_branch")"
+    # Remote settings are intentionally not auto-queried or auto-mutated.
+    # A branch/ruleset that blocks direct pushes to the default branch does not
+    # spend runner minutes by itself, so it is a recommended no-runner posture.
+    # Required status checks are separate: once backed by hosted workflows, they
+    # can spend CI minutes and remain explicit cost-bearing opt-in.
+    add_check remote na "main direct-push protection for ${default_branch} (no runner minutes; opt-in)" "$(branch_protection_remedy "$default_branch")"
+    add_check remote na "required PR status checks for ${default_branch} (CI-cost opt-in)" "$(required_status_remedy "$default_branch")"
   else
-    add_check remote na "remote PR security checks (needs git remote)"
+    add_check remote na "remote repository governance (needs git remote)"
   fi
 
   DOCTOR_PROFILE="$profile"
@@ -208,7 +217,7 @@ emit_human() {
     fi
   done
 
-  printf '\nRemote PR security checks (opt-in; may spend CI minutes)\n'
+  printf '\nRemote repository governance (opt-in; no-runner vs CI-cost)\n'
   for row in "${CHECK_ROWS[@]}"; do
     IFS=$'\t' read -r lane status label remedy <<< "$row"
     [ "$lane" = "remote" ] || continue

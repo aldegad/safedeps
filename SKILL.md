@@ -75,7 +75,12 @@ safedeps doctor --fix    # scaffold the policy + activate the hooks (non-destruc
 
 The pre-commit hook runs two checks: a secret scan (`safedeps scan secrets --staged`) on every commit (fail-closed), and an npm dependency audit (`safedeps audit npm`) on every commit in an npm repo — so a CVE published *after* you installed a package is caught at the next commit, not weeks later. `audit npm` exits 0 clean / 1 vulnerable / 2 could-not-run; the hook **blocks** on a real finding (1) but **warns and allows** when the advisory DB is unreachable (2 — observable offline failover). No secret scanner → blocks. The only bypass is the human's `git commit --no-verify`.
 
-Remote PR security checks are opt-in. `doctor` may report `lane: "remote"` gaps for missing PR security workflows or required status checks, but agents must not create GitHub Actions workflows, enable branch protection, or require PR checks automatically. Hosted CI can spend runner minutes; ask the human before adding remote enforcement. Running `safedeps gates run --root <repo> --strict` locally is the safe first step.
+Remote repository governance is opt-in and cost-aware. `doctor` may report `lane: "remote"` recommendations for two different things:
+
+- No-runner posture: block direct pushes to `main`/the default branch by requiring pull requests. This is recommended when the human asks for the "no paid CI" setup, but agents still must not mutate remote branch protection unless explicitly told to do so for a specific repo.
+- CI-cost posture: add GitHub Actions security workflows and require their status checks. Hosted CI can spend runner minutes; ask the human before adding this enforcement.
+
+Running `safedeps gates run --root <repo> --strict` locally is the safe first step.
 
 ---
 
