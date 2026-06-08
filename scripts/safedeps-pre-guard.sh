@@ -586,7 +586,7 @@ guard_runner_operands() {
   # the executed package are arguments to that program, NOT package specs. Emit
   # only the spec-bearing operands: any `-p/--package <pkg>` value plus the first
   # bare token (the executed package). This stops an argument such as an email
-  # (`dev1@block-s.io`) or a secret value passed to `npx wrangler ...` from being
+  # (`ops@example.test`) or a secret value passed to `npx wrangler ...` from being
   # misread as a `pkg@spec` install.
   local scan="$1"
   local after want_value tok
@@ -656,7 +656,7 @@ guard_extract_specs() {
   # non-package "@" tokens from being misread as an install:
   #   1. Runner segments (npx / pnpm dlx / yarn dlx) contribute ONLY their
   #      executed package — trailing tokens are program arguments, not specs
-  #      (so `npx wrangler ... dev1@block-s.io` is never read as a spec).
+  #      (so `npx wrangler ... ops@example.test` is never read as a spec).
   #   2. Email / host operands (user@domain.tld) are never package specs.
   # Each shell segment is judged independently so a genuine install in one
   # segment is still gated even when another segment just runs a tool via npx.

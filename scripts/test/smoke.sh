@@ -136,7 +136,7 @@ pass "hook does not duplicate --ignore-scripts"
 # Regression: `npx <tool> <args>` runs an already-installed binary. Arguments to
 # the tool (e.g. an email) must NOT be misread as a pkg@spec install and denied.
 npx_runner_output=$(
-  run_hook_command "${tmp_root}/home-npx-run" "${tmp_root}/safe-npx-run" "npx wrangler secret put ORIGIN_SHARED_SECRET --name pqc-auth-gateway dev1@block-s.io"
+  run_hook_command "${tmp_root}/home-npx-run" "${tmp_root}/safe-npx-run" "npx wrangler secret put EXAMPLE_SHARED_SECRET --name example-gateway ops@example.test"
 )
 [[ -z "${npx_runner_output}" ]] || fail "hook allows npx tool run with @-bearing args"
 pass "hook allows npx tool run with @-bearing args"
@@ -144,12 +144,12 @@ pass "hook allows npx tool run with @-bearing args"
 # Regression: a genuine install chained with an npx tool run must STILL be gated
 # on the real package — and must not be polluted by the npx arg email.
 mixed_output=$(
-  run_hook_command "${tmp_root}/home-mixed" "${tmp_root}/safe-mixed" "npm install evil-pkg@9.9.9 && npx wrangler secret put X dev1@block-s.io"
+  run_hook_command "${tmp_root}/home-mixed" "${tmp_root}/safe-mixed" "npm install evil-pkg@9.9.9 && npx wrangler secret put X ops@example.test"
 )
 [[ "$(jq -r '.hookSpecificOutput.permissionDecision' <<< "${mixed_output}")" == "deny" ]] || fail "hook gates real install chained with npx run"
 reason=$(jq -r '.hookSpecificOutput.permissionDecisionReason' <<< "${mixed_output}")
 grep -q 'evil-pkg@9.9.9' <<< "${reason}" || fail "deny reason names the real package"
-[[ "${reason}" != *"dev1@block-s.io"* ]] || fail "deny reason must not name the email arg"
+[[ "${reason}" != *"ops@example.test"* ]] || fail "deny reason must not name the email arg"
 pass "hook gates real install chained with npx run (email not polluted)"
 
 false_positive_safe="${tmp_root}/safe-false-positive"
