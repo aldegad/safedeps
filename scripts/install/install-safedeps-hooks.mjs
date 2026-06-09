@@ -252,7 +252,12 @@ function printRecommendedSetup() {
   out.push("       → every commit (npm repos): audits deps for vulnerable transitives;");
   out.push("         a real finding blocks, an offline advisory DB only warns + allows.");
   out.push("");
-  out.push("  3. Release / CI gate  .............  optional");
+  out.push("  3. No-runner remote guard  ........  recommended opt-in");
+  out.push("       safedeps doctor          # reports main direct-push protection posture");
+  out.push("       → recommended when installing the no-paid-CI setup: block direct");
+  out.push("         pushes to main/default with a branch rule; no Actions runner needed.");
+  out.push("");
+  out.push("  4. Release / CI gate  .............  cost opt-in");
   out.push("       safedeps gates run       # secret scan + npm dep audit + hook/CI check");
   out.push("       → full-repo sweep for CI / pre-release: scans the whole tree (not just");
   out.push("         the staged diff) and verifies the hooks themselves are installed.");

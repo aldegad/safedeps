@@ -4,9 +4,12 @@ set -euo pipefail
 # safedeps doctor — repo security posture check.
 #
 # Diagnoses whether the per-repo secret-leak lane is set up (.gitleaks policy +
-# .githooks/pre-commit + active core.hooksPath + an available scanner) and
-# reports the global dependency-install gate too. Read-only by default; `--fix`
-# scaffolds the missing pieces (hooks init) and activates them (hooks install).
+# .githooks/pre-commit + active core.hooksPath + an available scanner), reports
+# the global dependency-install gate, and nudges remote repository governance as
+# opt-in only. Read-only by default; `--fix` scaffolds the local secret lane
+# (hooks init) and activates it (hooks install). It never creates remote
+# workflows or mutates branch protection. No-runner branch rules are a safe
+# recommendation, but any remote mutation still belongs to the human.
 #
 # Exit codes: 0 = no gaps in the secret-leak lane, 1 = gaps remain.
 
@@ -54,6 +57,38 @@ scanner_available() {
   if command -v gitleaks >/dev/null 2>&1; then printf 'gitleaks'; return 0; fi
   if command -v docker >/dev/null 2>&1; then printf 'docker'; return 0; fi
   return 1
+}
+
+has_remote_security_workflow() {
+  local workflows_dir="$REPO_ROOT/.github/workflows"
+  [ -d "$workflows_dir" ] || return 1
+  find "$workflows_dir" -maxdepth 1 -type f \( -name '*.yml' -o -name '*.yaml' \) -print0 2>/dev/null \
+    | xargs -0 grep -E 'safedeps|gitleaks|npm audit|pip-audit|cargo audit|osv-scanner|trufflehog' >/dev/null 2>&1
+}
+
+main_branch_name() {
+  local branch
+  branch="$(git -C "$REPO_ROOT" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##' || true)"
+  if [ -n "$branch" ]; then printf '%s' "$branch"; return 0; fi
+  if git -C "$REPO_ROOT" show-ref --verify --quiet refs/heads/main || git -C "$REPO_ROOT" show-ref --verify --quiet refs/remotes/origin/main; then
+    printf 'main'
+    return 0
+  fi
+  if git -C "$REPO_ROOT" show-ref --verify --quiet refs/heads/master || git -C "$REPO_ROOT" show-ref --verify --quiet refs/remotes/origin/master; then
+    printf 'master'
+    return 0
+  fi
+  printf 'main'
+}
+
+branch_protection_remedy() {
+  local branch="$1"
+  printf 'no-runner opt-in: require pull requests before updating %s; do not require status checks unless CI cost is accepted' "$branch"
+}
+
+required_status_remedy() {
+  local branch="$1"
+  printf 'cost-bearing opt-in: add a safedeps workflow, then require it before merging %s' "$branch"
 }
 
 dependency_gate_root() {
@@ -121,6 +156,25 @@ run_checks() {
     add_check deps gap "dependency-install gate installed" "node scripts/install/install-safedeps-hooks.mjs"
   fi
 
+  if [ "$is_git" = 1 ]; then
+    local default_branch
+    default_branch="$(main_branch_name)"
+    if has_remote_security_workflow; then
+      add_check remote ok "remote security workflow detected (.github/workflows)"
+    else
+      add_check remote gap "remote PR security workflow (opt-in; may spend CI minutes)" "safedeps gates run --root \"$REPO_ROOT\" --strict"
+    fi
+    # Remote settings are intentionally not auto-queried or auto-mutated.
+    # A branch/ruleset that blocks direct pushes to the default branch does not
+    # spend runner minutes by itself, so it is a recommended no-runner posture.
+    # Required status checks are separate: once backed by hosted workflows, they
+    # can spend CI minutes and remain explicit cost-bearing opt-in.
+    add_check remote na "main direct-push protection for ${default_branch} (no runner minutes; opt-in)" "$(branch_protection_remedy "$default_branch")"
+    add_check remote na "required PR status checks for ${default_branch} (CI-cost opt-in)" "$(required_status_remedy "$default_branch")"
+  else
+    add_check remote na "remote repository governance (needs git remote)"
+  fi
+
   DOCTOR_PROFILE="$profile"
 }
 
@@ -163,6 +217,22 @@ emit_human() {
     fi
   done
 
+  printf '\nRemote repository governance (opt-in; no-runner vs CI-cost)\n'
+  for row in "${CHECK_ROWS[@]}"; do
+    IFS=$'\t' read -r lane status label remedy <<< "$row"
+    [ "$lane" = "remote" ] || continue
+    case "$status" in
+      ok) sym='✓' ;;
+      gap) sym='!' ;;
+      *) sym='–' ;;
+    esac
+    if { [ "$status" = "gap" ] || [ "$status" = "na" ]; } && [ -n "$remedy" ]; then
+      printf '  %s %-58s → %s\n' "$sym" "$label" "$remedy"
+    else
+      printf '  %s %s\n' "$sym" "$label"
+    fi
+  done
+
   printf '\n'
   if [ "$GAPS" -eq 0 ]; then
     printf 'No gaps in the secret-leak lane. The agent is on guard.\n'
@@ -178,7 +248,7 @@ emit_json() {
     IFS=$'\t' read -r lane status label remedy <<< "$row"
     rows_json="$(jq -c \
       --arg lane "$lane" --arg status "$status" --arg label "$label" --arg remedy "$remedy" \
-      '. + [{lane:$lane, status:$status, label:$label, remedy:($remedy|select(length>0))}]' \
+      '. + [{lane:$lane, status:$status, label:$label, remedy:(if ($remedy|length)>0 then $remedy else null end)}]' \
       <<< "$rows_json")"
   done
   jq -nc \

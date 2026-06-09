@@ -385,6 +385,11 @@ HOME="${tmp_root}/doc-home" "${ROOT_DIR}/bin/safedeps" doctor --fix --root "${se
 [[ -f "${secret_repo}/.gitleaks.toml" ]] || fail "doctor --fix scaffolds .gitleaks.toml"
 [[ -x "${secret_repo}/.githooks/pre-commit" ]] || fail "doctor --fix scaffolds executable pre-commit"
 [[ "$(git -C "${secret_repo}" config --get core.hooksPath)" == ".githooks" ]] || fail "doctor --fix activates core.hooksPath"
+[[ ! -d "${secret_repo}/.github/workflows" ]] || fail "doctor --fix does not create remote CI workflows"
+remote_json=$(HOME="${tmp_root}/doc-home" "${ROOT_DIR}/bin/safedeps" --json doctor --root "${secret_repo}")
+[[ "$(jq -r '.ok' <<< "${remote_json}")" == "true" ]] || fail "doctor remains OK after local lane fix even when remote is opt-in"
+remote_gap_count=$(jq -r '[.checks[] | select(.lane == "remote" and .status == "gap")] | length' <<< "${remote_json}")
+[[ "${remote_gap_count}" -ge 1 ]] || fail "doctor reports missing remote workflow as opt-in gap"
 pass "doctor --fix scaffolds + activates the secret lane"
 
 # The scaffolded pre-commit resolves `safedeps` via PATH, then SAFEDEPS_BIN, then
