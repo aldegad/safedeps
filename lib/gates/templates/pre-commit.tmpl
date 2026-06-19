@@ -6,12 +6,12 @@
 #      secret in the STAGED changes, so a key or a real .env never enters
 #      history. The detection POLICY lives in this repo's .gitleaks.toml
 #      (public) / .gitleaks.private.toml (private); safedeps owns execution.
-#   2. Dependency audit (npm) — on every commit when this repo has an npm
-#      lockfile. Catches a vulnerable direct or *transitive* dependency,
-#      including a CVE published AFTER you installed it ("looked safe then,
-#      flagged now"). A real finding blocks (fail-closed); only the advisory DB
-#      being unreachable (offline) warns and lets the commit through — an
-#      observable availability failover, never a silent skip.
+#   2. Dependency audit (npm / pnpm / yarn / bun) — on every commit when this
+#      repo has a supported lockfile. Catches a vulnerable direct or *transitive*
+#      dependency, including a CVE published AFTER you installed it ("looked safe
+#      then, flagged now"). A real finding blocks (fail-closed); only the
+#      advisory DB being unreachable (offline) warns and lets the commit through
+#      — an observable availability failover, never a silent skip.
 #
 # Intentional bypass (use sparingly — you own the risk):  git commit --no-verify
 set -euo pipefail
@@ -53,14 +53,22 @@ fi
 #    no scanner (gitleaks/docker) is available — both fail-closed, block commit.
 "${sd}" scan secrets --staged --root "${repo_root}"
 
-# 2. Dependency audit (npm) — every commit when this repo has an npm lockfile.
-#    `safedeps audit npm` exit codes: 0 clean / 1 vulnerable / 2 could-not-run.
+# 2. Dependency audit — every commit when this repo has a supported lockfile.
+#    `safedeps audit` auto-detects the ecosystem(s) from the lockfile(s) present
+#    (npm / pnpm / yarn / bun) and returns: 0 clean / 1 vulnerable / 2 could-not-run.
 #      - vulnerable (1)  → BLOCK (fail-closed on the security verdict).
 #      - unreachable (2) → WARN and ALLOW (availability failover, observable):
 #        an offline commit is never silently dropped, and CI / the daily
 #        re-check still cover what this commit could not verify.
-if [ -f "${repo_root}/package-lock.json" ] || [ -f "${repo_root}/npm-shrinkwrap.json" ]; then
-  if "${sd}" audit npm --root "${repo_root}"; then
+has_lockfile() {
+  local f
+  for f in package-lock.json npm-shrinkwrap.json pnpm-lock.yaml yarn.lock bun.lock bun.lockb; do
+    [ -f "${repo_root}/${f}" ] && return 0
+  done
+  return 1
+}
+if has_lockfile; then
+  if "${sd}" audit --root "${repo_root}"; then
     : # clean — no advisory at or above the audit level.
   else
     audit_rc=$?
@@ -69,7 +77,7 @@ if [ -f "${repo_root}/package-lock.json" ] || [ -f "${repo_root}/npm-shrinkwrap.
         printf '\n'
         printf 'safedeps pre-commit: dependency audit could not reach the advisory DB.\n'
         printf '  -> commit ALLOWED without a fresh dependency verdict (offline failover).\n'
-        printf '  -> re-run `safedeps audit npm` once online; CI / the daily re-check also cover this.\n'
+        printf '  -> re-run `safedeps audit` once online; CI / the daily re-check also cover this.\n'
       } >&2
     else
       exit "${audit_rc}"   # vulnerable (or unknown failure) -> fail-closed.

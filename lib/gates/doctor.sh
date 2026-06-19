@@ -63,7 +63,7 @@ has_remote_security_workflow() {
   local workflows_dir="$REPO_ROOT/.github/workflows"
   [ -d "$workflows_dir" ] || return 1
   find "$workflows_dir" -maxdepth 1 -type f \( -name '*.yml' -o -name '*.yaml' \) -print0 2>/dev/null \
-    | xargs -0 grep -E 'safedeps|gitleaks|npm audit|pip-audit|cargo audit|osv-scanner|trufflehog' >/dev/null 2>&1
+    | xargs -0 grep -E 'safedeps|gitleaks|npm audit|pnpm audit|yarn audit|bun audit|pip-audit|cargo audit|osv-scanner|trufflehog' >/dev/null 2>&1
 }
 
 main_branch_name() {
