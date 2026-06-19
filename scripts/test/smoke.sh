@@ -133,6 +133,30 @@ ignore_sid=$(jq -r '.snapshot_id' "${tmp_root}/safe-hook-ignore-scripts/pending/
 jq -e '.ignore_scripts_injected == false' "${tmp_root}/safe-hook-ignore-scripts/snapshots/${ignore_sid}_meta.json" >/dev/null || fail "hook does not record injected meta flag when flag already exists"
 pass "hook does not duplicate --ignore-scripts"
 
+# Finding #7: on a COMPOUND command the inert-install flag must land ON the npm
+# install, not appended to the end (which would put it on the trailing statement,
+# leaving the install running lifecycle scripts).
+mkdir -p "${tmp_root}/safe-compound"
+SAFEDEPS_HOME="${tmp_root}/safe-compound" lib/ledger/ledger.sh approve npm left-pad 1.3.0 1.3.0 smoke >/dev/null
+compound_out=$(run_hook_command "${tmp_root}/home-compound" "${tmp_root}/safe-compound" "npm install left-pad@1.3.0 && npm run build")
+compound_cmd=$(jq -r '.hookSpecificOutput.updatedInput.command' <<< "${compound_out}")
+[[ "${compound_cmd}" == "npm install --ignore-scripts left-pad@1.3.0 && npm run build" ]] || fail "compound inert-install injects --ignore-scripts on the install, not the trailing command (got: ${compound_cmd})"
+pass "compound install injects --ignore-scripts in-place on the npm install (finding #7)"
+
+# Finding #3: an `--prefix <dir>` install must be snapshotted/effect-gated against
+# the OVERRIDE dir, not cwd. The pending state's project_dir must be the prefix dir.
+prefix_safe="${tmp_root}/safe-prefix"
+prefix_proj=$(cd "$(mktemp -d "${tmp_root}/prefix-target.XXXXXX")" && pwd -P)
+mkdir -p "${prefix_safe}"
+printf '{"dependencies":{}}\n' > "${prefix_proj}/package.json"
+SAFEDEPS_HOME="${prefix_safe}" lib/ledger/ledger.sh approve npm left-pad 1.3.0 1.3.0 smoke >/dev/null
+jq -nc --arg c "npm install --prefix ${prefix_proj} left-pad@1.3.0" --arg cwd "${project_dir}" \
+  '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
+  HOME="${tmp_root}/home-prefix" SAFEDEPS_HOME="${prefix_safe}" scripts/safedeps-pre-guard.sh >/dev/null
+prefix_pending_dir=$(jq -r '.project_dir' "${prefix_safe}/pending/"*.json | head -1)
+[[ "${prefix_pending_dir}" == "${prefix_proj}" ]] || fail "--prefix install snapshots the override dir, not cwd (got: ${prefix_pending_dir}, want ${prefix_proj})"
+pass "--prefix install targets the override dir for snapshot/effect-gate (finding #3)"
+
 # Regression: `npx <tool> <args>` runs an already-installed binary. Arguments to
 # the tool (e.g. an email) must NOT be misread as a pkg@spec install and denied.
 npx_runner_output=$(
@@ -179,6 +203,7 @@ hidden_install_cases=(
   $'eval "npm install hidden-eval@1.0.0"'
   $'sub_result=$(npm install hidden-sub@1.0.0)'
   $'pipe_result=$(echo npm install hidden-pipe@1.0.0 | sh)'
+  $'printf \'pip install hidden-pipe2@1.0.0\' | sh'
 )
 for hidden_cmd in "${hidden_install_cases[@]}"; do
   hidden_safe="${tmp_root}/safe-hidden-$(printf '%s' "${hidden_cmd}" | cksum | cut -d' ' -f1)"
@@ -195,7 +220,15 @@ bypass_cases=(
   "env npm install evil@1.2.3"
   "command npm install evil@1.2.3"
   "npm --prefix sub install evil@1.2.3"
+  " npm install evil@1.2.3"
+  $'\tnpm install evil@1.2.3'
+  "HTTPS_PROXY=http://x npm install evil@1.2.3"
+  "FOO=bar BAZ=qux npm install evil@1.2.3"
+  "bun add evil@1.2.3"
+  "bun install evil@1.2.3"
+  " bun add evil@1.2.3"
   "pip install requests==2.31.0"
+  " pip install requests==2.31.0"
   "gem install rails -v 7.1.0"
   "cargo add serde --vers 1.0.0"
   "dotnet add package X --version 1.0.0"
@@ -267,12 +300,32 @@ conc_left=$(find "${conc_safe}/pending" -name '*.json' -type f | wc -l | tr -d '
 [[ "${conc_left}" == "1" ]] || fail "post hook consumes exactly one identical-command install's pending state (left ${conc_left}, want 1)"
 pass "concurrent installs (even identical commands) keep isolated pending state (issue #5)"
 
-# A dependency-install PostToolUse with no pending state (e.g. a payload missing
-# cwd) is recorded UNVERIFIED, not dropped silently (issue #5 review finding 3).
-jq -nc '{tool_name:"Bash",tool_input:{command:"npm install orphan@1.0.0"}}' |
-  HOME="${tmp_root}/home-conc" SAFEDEPS_HOME="${conc_safe}" scripts/safedeps-post-verify.sh >/dev/null 2>&1 || true
-grep -q 'UNVERIFIED: no pending state for an install-looking command' "${conc_safe}/advisory.log" || fail "post hook records an install with no pending state as UNVERIFIED"
-pass "post hook records an install-looking command with no pending state as UNVERIFIED"
+# A dependency-install PostToolUse with no pending state in a project that has no
+# npm lockfile cannot be closure-checked — recorded UNVERIFIED, never dropped
+# silently (issue #5 review finding 3).
+nolock_dir="${tmp_root}/no-lock"
+mkdir -p "${nolock_dir}"
+printf '{"dependencies":{}}\n' > "${nolock_dir}/package.json"
+nolock_safe="${tmp_root}/safe-nolock"
+jq -nc --arg cwd "${nolock_dir}" '{tool_name:"Bash",tool_input:{command:"pip install orphan==1.0.0"},cwd:$cwd}' |
+  HOME="${tmp_root}/home-conc" SAFEDEPS_HOME="${nolock_safe}" scripts/safedeps-post-verify.sh >/dev/null 2>&1 || true
+grep -q 'UNVERIFIED:.*no pending state.*no package-lock.json' "${nolock_safe}/advisory.log" || fail "post hook records a no-lockfile no-pending install as UNVERIFIED"
+pass "post hook records an install-looking command with no pending state (no lockfile) as UNVERIFIED"
+
+# Finding #5: the npm effect gate is a COMMAND-INDEPENDENT backstop. An install-
+# looking command that left NO pending state (a PreToolUse parser blind spot) but
+# lands in a project WITH a package-lock.json still gets the closure check — proving
+# the gate runs without a pre-install snapshot, so a parser miss does not also blind
+# the documented backstop.
+backstop_safe="${tmp_root}/safe-backstop"
+backstop_proj="${tmp_root}/backstop-proj"
+mkdir -p "${backstop_safe}" "${backstop_proj}"
+printf '{"name":"p","version":"1.0.0","lockfileVersion":3,"packages":{"":{"name":"p","version":"1.0.0"}}}\n' > "${backstop_proj}/package-lock.json"
+printf '{"name":"p","version":"1.0.0"}\n' > "${backstop_proj}/package.json"
+jq -nc --arg cwd "${backstop_proj}" '{tool_name:"Bash",tool_input:{command:" npm install left-pad@1.3.0"},cwd:$cwd}' |
+  HOME="${tmp_root}/home-backstop" SAFEDEPS_HOME="${backstop_safe}" scripts/safedeps-post-verify.sh >/dev/null 2>&1 || true
+grep -q 'BACKSTOP clean' "${backstop_safe}/advisory.log" || fail "npm effect gate runs command-independently as a backstop with no pending state (finding #5)"
+pass "npm effect gate runs command-independently as a backstop (finding #5)"
 
 tamper_safe="${tmp_root}/safe-tamper"
 tamper_home="${tmp_root}/home-tamper"

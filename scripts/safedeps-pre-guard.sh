@@ -13,6 +13,8 @@ SAFEDEPS_LOCK_FILES=(
   "package-lock.json"
   "pnpm-lock.yaml"
   "yarn.lock"
+  "bun.lock"
+  "bun.lockb"
   "poetry.lock"
   "uv.lock"
   "Pipfile.lock"
@@ -146,7 +148,7 @@ command_is_dependency_install() {
   local scan_command
   local install_pattern
 
-  install_pattern='(^|[;&|]+[[:space:]]*)((npm([[:space:]]+--?[a-zA-Z0-9_-]+([=[:space:]][^[:space:]]+)?)?[[:space:]]+(install|i|add|ci|update|up|upgrade))|npx([[:space:]]+--?[a-zA-Z0-9_-]+([=[:space:]][^[:space:]]+)?)?[[:space:]]+(@?[A-Za-z0-9._-])|pnpm([[:space:]]+--?[a-zA-Z0-9_-]+([=[:space:]][^[:space:]]+)?)?[[:space:]]+(add|install|update|up|dlx)|yarn([[:space:]]+--?[a-zA-Z0-9_-]+([=[:space:]][^[:space:]]+)?)?[[:space:]]+(add|install|upgrade|dlx)|((python3?|py)[[:space:]]+-m[[:space:]]+pip|pip3?)[[:space:]]+install|poetry[[:space:]]+add|uv[[:space:]]+(add|pip[[:space:]]+install)|pipenv[[:space:]]+install|cargo[[:space:]]+(add|install)|go[[:space:]]+(get|install)|gem[[:space:]]+install|bundle[[:space:]]+add|mvn[[:space:]]+dependency:get|dotnet[[:space:]]+add[[:space:]]+package)([[:space:]]|$)'
+  install_pattern='(^|[;&|]+[[:space:]]*)((npm([[:space:]]+--?[a-zA-Z0-9_-]+([=[:space:]][^[:space:]]+)?)?[[:space:]]+(install|i|add|ci|update|up|upgrade))|npx([[:space:]]+--?[a-zA-Z0-9_-]+([=[:space:]][^[:space:]]+)?)?[[:space:]]+(@?[A-Za-z0-9._-])|pnpm([[:space:]]+--?[a-zA-Z0-9_-]+([=[:space:]][^[:space:]]+)?)?[[:space:]]+(add|install|update|up|dlx)|yarn([[:space:]]+--?[a-zA-Z0-9_-]+([=[:space:]][^[:space:]]+)?)?[[:space:]]+(add|install|upgrade|dlx)|bun([[:space:]]+--?[a-zA-Z0-9_-]+([=[:space:]][^[:space:]]+)?)?[[:space:]]+(add|install|i|update|upgrade)|((python3?|py)[[:space:]]+-m[[:space:]]+pip|pip3?)[[:space:]]+install|poetry[[:space:]]+add|uv[[:space:]]+(add|pip[[:space:]]+install)|pipenv[[:space:]]+install|cargo[[:space:]]+(add|install)|go[[:space:]]+(get|install)|gem[[:space:]]+install|bundle[[:space:]]+add|mvn[[:space:]]+dependency:get|dotnet[[:space:]]+add[[:space:]]+package)([[:space:]]|$)'
 
   while IFS= read -r scan_command; do
     scan_command=$(command_scan_text "${scan_command}")
@@ -158,6 +160,15 @@ command_is_dependency_install() {
 command_hides_dependency_install() {
   local command="$1"
   local payload
+
+  # Top-level pipe-to-shell: `<producer> | sh` whose producer text literally
+  # contains a package manager + install verb (e.g. `printf 'pip install x' | sh`).
+  # Checked on the RAW command (quotes intact) because command_scan_text blanks
+  # quoted bodies — erasing the install text before the regular classifier sees
+  # it — and a plain top-level pipe has no command substitution to extract. Before
+  # this, the pipe detector only ran on $(...) / backtick payloads, so a plain
+  # `... | sh` slipped the gate (finding #4).
+  payload_pipes_install_text_to_shell "${command}" && return 0
 
   while IFS= read -r payload; do
     [[ -z "${payload}" ]] && continue
@@ -215,8 +226,10 @@ normalize_install_text() {
 
   for _ in 1 2 3; do
     text=$(printf '%s' "${text}" | sed -E \
-      -e 's#(^|[[:space:];|&])(/[^[:space:];|&]+/)(npm|npx|pnpm|yarn|pip3?|python3?|py|poetry|uv|pipenv|cargo|go|gem|bundle|mvn|dotnet)([[:space:];|&]|$)#\1\3\4#g' \
-      -e 's#(^|[;&|][[:space:]]*)(env[[:space:]]+([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]+[[:space:]]+)*|command[[:space:]]+)#\1#g')
+      -e 's/^[[:space:]]+//' \
+      -e 's#(^|[[:space:];|&])(/[^[:space:];|&]+/)(npm|npx|pnpm|yarn|bun|pip3?|python3?|py|poetry|uv|pipenv|cargo|go|gem|bundle|mvn|dotnet)([[:space:];|&]|$)#\1\3\4#g' \
+      -e 's#(^|[;&|][[:space:]]*)(env[[:space:]]+([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]+[[:space:]]+)*|command[[:space:]]+)#\1#g' \
+      -e 's#(^|[;&|][[:space:]]*)([A-Za-z_][A-Za-z0-9_]*=[^[:space:]'\''"]*[[:space:]]+)+#\1#g')
   done
   printf '%s' "${text}"
 }
@@ -299,7 +312,7 @@ payload_pipes_install_text_to_shell() {
   local manager_pattern
   local verb_pattern
 
-  manager_pattern='(npm|npx|pnpm|yarn|pip3?|python3?[[:space:]]+-m[[:space:]]+pip|poetry|uv|pipenv|cargo|go|gem|bundle|mvn|dotnet)'
+  manager_pattern='(npm|npx|pnpm|yarn|bun|pip3?|python3?[[:space:]]+-m[[:space:]]+pip|poetry|uv|pipenv|cargo|go|gem|bundle|mvn|dotnet)'
   verb_pattern='(install|i|add|update|up|upgrade|dlx|get|dependency:get|package)'
 
   echo "${payload}" | grep -qEi "${manager_pattern}.*${verb_pattern}" && \
@@ -356,6 +369,43 @@ command_has_ignore_scripts_flag() {
   return 1
 }
 
+# True when the command chains more than one statement at the shell level (a `;`,
+# `&&`, `||`, or `|` OUTSIDE quotes). Quoted separators are blanked by
+# command_scan_text first so `echo "a && b"` is NOT treated as compound. Used to
+# decide how to inject `--ignore-scripts`: appending to a compound command lands
+# the flag on the trailing statement, not on the npm install (finding #7).
+command_is_compound() {
+  local scanned
+  scanned=$(command_scan_text "$1")
+  printf '%s' "${scanned}" | grep -qE '[;&|]'
+}
+
+# Echo the install directory when the command redirects the install target away
+# from cwd via a tool-specific long flag — npm `--prefix`, pnpm `--dir`, yarn
+# `--cwd`, or `--install-dir`. Empty when there is no override. Without this, an
+# `npm install --prefix /other pkg` is snapshotted/effect-gated against cwd (which
+# never changed), so the effect gate falsely confirms cwd clean and even advances
+# the safe pointer while the real install lands in /other unverified (finding #3).
+# Operates on the quote-blanked text so a quoted occurrence is not misread; only
+# unambiguous long flags are honored to avoid colliding with other tools' `-C`.
+resolve_install_dir_override() {
+  local cmd="$1" scanned tok want=""
+  local -a toks=()
+  scanned=$(command_scan_text "${cmd}")
+  read -ra toks <<< "${scanned//$'\n'/ }"
+  for tok in "${toks[@]+${toks[@]}}"; do
+    if [[ -n "${want}" ]]; then printf '%s' "${tok}"; return 0; fi
+    case "${tok}" in
+      --prefix=*)      printf '%s' "${tok#--prefix=}"; return 0 ;;
+      --cwd=*)         printf '%s' "${tok#--cwd=}"; return 0 ;;
+      --dir=*)         printf '%s' "${tok#--dir=}"; return 0 ;;
+      --install-dir=*) printf '%s' "${tok#--install-dir=}"; return 0 ;;
+      --prefix|--cwd|--dir|--install-dir) want=1 ;;
+    esac
+  done
+  return 0
+}
+
 snapshot_project_file() {
   local relative_file="$1"
   local category="${2:-manifest}"
@@ -407,20 +457,44 @@ fi
 # Find lock files in common locations
 # Per Claude Code / Codex CLI hook spec, `cwd` is top-level. Fall back to `pwd`
 # only when the hook is invoked outside the engine (manual test, no stdin payload).
-PROJECT_DIR=$(echo "${INPUT}" | jq -r '.cwd // empty' 2>/dev/null)
-if [[ -z "${PROJECT_DIR}" ]]; then
-  PROJECT_DIR=$(pwd)
+CWD_DIR=$(echo "${INPUT}" | jq -r '.cwd // empty' 2>/dev/null)
+if [[ -z "${CWD_DIR}" ]]; then
+  CWD_DIR=$(pwd)
+fi
+
+# Resolve the actual install target: an `--prefix`/`--cwd`/`--dir`/`--install-dir`
+# override relocates the install away from cwd (finding #3). Snapshot + effect-gate
+# must follow the real target, while the PostToolUse pending-key still keys on cwd
+# (post-verify only knows cwd) — so KEY_DIR_HASH (cwd) and DIR_HASH (install dir)
+# are tracked separately below.
+PROJECT_DIR="${CWD_DIR}"
+INSTALL_DIR_OVERRIDE=$(resolve_install_dir_override "${COMMAND}")
+if [[ -n "${INSTALL_DIR_OVERRIDE}" ]]; then
+  case "${INSTALL_DIR_OVERRIDE}" in
+    /*) PROJECT_DIR="${INSTALL_DIR_OVERRIDE}" ;;
+    *)  PROJECT_DIR="${CWD_DIR%/}/${INSTALL_DIR_OVERRIDE}" ;;
+  esac
+  log_advisory "pre-guard: install dir override detected (${INSTALL_DIR_OVERRIDE}) — snapshotting/verifying ${PROJECT_DIR} instead of cwd (${CWD_DIR})."
 fi
 
 # Canonicalize to prevent path traversal (V-003)
-if command -v realpath >/dev/null 2>&1; then
-  PROJECT_DIR=$(realpath "${PROJECT_DIR}" 2>/dev/null || echo "${PROJECT_DIR}")
-elif command -v readlink >/dev/null 2>&1; then
-  PROJECT_DIR=$(readlink -f "${PROJECT_DIR}" 2>/dev/null || echo "${PROJECT_DIR}")
-fi
+canonicalize_dir() {
+  if command -v realpath >/dev/null 2>&1; then
+    realpath "$1" 2>/dev/null || printf '%s' "$1"
+  elif command -v readlink >/dev/null 2>&1; then
+    readlink -f "$1" 2>/dev/null || printf '%s' "$1"
+  else
+    printf '%s' "$1"
+  fi
+}
+PROJECT_DIR=$(canonicalize_dir "${PROJECT_DIR}")
+CWD_DIR=$(canonicalize_dir "${CWD_DIR}")
 
 TIMESTAMP=$(date +%s)
 DIR_HASH=$(compute_dir_hash "${PROJECT_DIR}")
+# Pending-key hash keys on cwd so the PostToolUse hook (which only sees cwd) can
+# find this install's pending state even when the install dir was overridden.
+KEY_DIR_HASH=$(compute_dir_hash "${CWD_DIR}")
 SNAPSHOT_ID="${TIMESTAMP}_${DIR_HASH}"
 
 acquire_state_lock
@@ -555,7 +629,7 @@ guard_detect_ecosystem() {
 
   while IFS= read -r scan_cmd; do
     scan_cmd=$(command_scan_text "${scan_cmd}")
-    if echo "${scan_cmd}" | grep -qEi '(^|[;&|]+[[:space:]]*)(npm|pnpm|yarn|npx)([[:space:]]|$)'; then
+    if echo "${scan_cmd}" | grep -qEi '(^|[;&|]+[[:space:]]*)(npm|pnpm|yarn|npx|bun)([[:space:]]|$)'; then
       printf 'npm'
       return 0
     elif echo "${scan_cmd}" | grep -qEi '(^|[;&|]+[[:space:]]*)(pip3?|poetry|uv|pipenv|((python3?|py)[[:space:]]+-m[[:space:]]+pip))([[:space:]]|$)'; then
@@ -781,7 +855,7 @@ mkdir -p "${PENDING_DIR}"
 find "${PENDING_DIR}" -name '*.json' -type f -mmin +1440 -delete 2>/dev/null || true
 # Key = (dir, normalized command); the snapshot id suffix makes the filename unique
 # per install, so even two identical concurrent commands keep separate state.
-PENDING_KEY=$(compute_pending_key "${DIR_HASH}" "${COMMAND}")
+PENDING_KEY=$(compute_pending_key "${KEY_DIR_HASH}" "${COMMAND}")
 CURRENT_STATE=$(jq -n --arg sid "${SNAPSHOT_ID}" --arg pdir "${PROJECT_DIR}" --arg dhash "${DIR_HASH}" \
   '{snapshot_id: $sid, project_dir: $pdir, dir_hash: $dhash}')
 # $$ (this pre hook's PID) guarantees a unique filename even for two installs in
@@ -791,11 +865,33 @@ write_state_file "${PENDING_DIR}/${PENDING_KEY}__${SNAPSHOT_ID}_$$.json" "${CURR
 if ! jq -e 'has("turn_id")' <<< "${INPUT}" >/dev/null 2>&1 && \
    command_is_injectable_npm_install "${COMMAND}" && \
    ! command_has_ignore_scripts_flag "${COMMAND}"; then
-  UPDATED_COMMAND="${COMMAND} --ignore-scripts"
-  mark_ignore_scripts_injected
-  jq -nc --arg command "${UPDATED_COMMAND}" \
-    '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"allow",updatedInput:{command:$command}}}'
-  exit 0
+  UPDATED_COMMAND=""
+  if command_is_compound "${COMMAND}"; then
+    # Compound command: insert `--ignore-scripts` immediately AFTER each npm-install
+    # verb so the flag stays inside its own statement. Appending to the end of the
+    # whole string would land it on the trailing statement (e.g.
+    # `npm install evil && npm run build --ignore-scripts`), leaving the install
+    # itself running lifecycle scripts (finding #7). `npm install --ignore-scripts <pkg>`
+    # is valid npm syntax (flags may precede operands).
+    UPDATED_COMMAND=$(printf '%s' "${COMMAND}" | sed -E \
+      's/(npm([[:space:]]+--?[a-zA-Z0-9_-]+([=[:space:]][^[:space:]]+)?)*[[:space:]]+(install|i|add|ci|update|up|upgrade))([[:space:]]|$)/\1 --ignore-scripts\5/g')
+    if [[ "${UPDATED_COMMAND}" == "${COMMAND}" ]]; then
+      # Rewrite did not land — never blind-append to a compound command. Downgrade
+      # to detect-and-rollback (the effect gate still verifies the closure) and
+      # record it; the inert guarantee is observably relaxed, never silently.
+      log_advisory "pre-guard: could not make compound npm install inert in-place; lifecycle scripts may run before the effect gate verifies (downgraded to detect-and-rollback). Command: ${COMMAND}"
+      UPDATED_COMMAND=""
+    fi
+  else
+    UPDATED_COMMAND="${COMMAND} --ignore-scripts"
+  fi
+
+  if [[ -n "${UPDATED_COMMAND}" ]]; then
+    mark_ignore_scripts_injected
+    jq -nc --arg command "${UPDATED_COMMAND}" \
+      '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"allow",updatedInput:{command:$command}}}'
+    exit 0
+  fi
 fi
 
 # Allow the command to proceed — PostToolUse will verify the result

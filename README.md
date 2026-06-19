@@ -411,7 +411,7 @@ Every install command gets fast advisory feedback before it runs; every npm inst
 
 Two honest boundaries:
 
-- **The command hook is a heuristic, not a sandbox.** Unusual wrappers, shell interpreters, or same-user tampering with local `~/.safedeps` state sit outside its trust boundary. The npm effect gate is the backstop — it catches what the command hook misses, because it inspects the installed result rather than the command text.
+- **The command hook is a heuristic, not a sandbox.** Unusual wrappers, shell interpreters, or same-user tampering with local `~/.safedeps` state sit outside its trust boundary. The npm effect gate is the backstop — it catches what the command hook misses, because it inspects the installed result rather than the command text. It is **command-independent**: when an install-looking command leaves no pending state (the PreToolUse parser did not recognize it), the PostToolUse hook still runs the npm closure check against the live `package-lock.json`, so a parser blind spot does not also blind the backstop. Detection is always command-independent; *automatic rollback* of such a parser-missed install needs a prior confirmed-safe snapshot for that project — the first-ever install with no baseline is flagged loudly (systemMessage + advisory log) but not auto-reverted.
 - **Effect-primary enforcement is npm-only today.** `pip`, `cargo`, `go`, `gem`, `maven`, and `nuget` stay on the v2.1 command-gate + reorg model until their closure resolvers land.
 
 ## Legacy / Migration: v1 `npm-reorg-guard`

@@ -12,6 +12,8 @@ SAFEDEPS_LOCK_FILES=(
   "package-lock.json"
   "pnpm-lock.yaml"
   "yarn.lock"
+  "bun.lock"
+  "bun.lockb"
   "poetry.lock"
   "uv.lock"
   "Pipfile.lock"
@@ -467,16 +469,23 @@ elif [[ -f "${GUARD_DIR}/current_snapshot_id" ]]; then
   fi
   rm -f "${GUARD_DIR}/current_snapshot_id" "${GUARD_DIR}/current_project_dir"
 else
-  # No pending state for this command. If it nonetheless looks like a dependency
-  # install, the effect gate could not verify it — record UNVERIFIED (observable)
-  # rather than disappearing silently (e.g. a payload with no `cwd`).
+  # No pending state for this command (PreToolUse never recognized it — a parser
+  # blind spot, a payload with no `cwd`, or a genuinely novel install form). If it
+  # nonetheless looks like an install, the documented effect gate must NOT inherit
+  # the parser's blind spot: run a command-independent closure backstop instead of
+  # only logging UNVERIFIED (finding #5). The backstop machinery lives past the
+  # function definitions below, so flag it here and fall through.
   if post_command_looks_like_install "${COMMAND}"; then
-    log_advisory "post-verify UNVERIFIED: no pending state for an install-looking command (missing cwd or pre hook never ran)."
+    BACKSTOP_INSTALL=true
+    SNAPSHOT_ID=""
+    PROJECT_DIR="${POST_CWD}"
+    DIR_HASH="${POST_DIR_HASH}"
+  else
+    exit 0
   fi
-  exit 0
 fi
 
-if [[ -z "${SNAPSHOT_ID}" ]]; then
+if [[ "${BACKSTOP_INSTALL:-false}" != "true" && -z "${SNAPSHOT_ID}" ]]; then
   exit 0
 fi
 if [[ -z "${PROJECT_DIR}" ]]; then
@@ -487,9 +496,10 @@ if [[ -z "${DIR_HASH:-}" ]]; then
 fi
 release_state_lock; STATE_LOCK_HELD=false
 
-# Verify snapshot exists
+# Verify snapshot exists (skipped in command-independent backstop mode, which has
+# no pre-install snapshot — it diffs the live closure against the confirmed baseline).
 META_FILE="${SNAPSHOT_DIR}/${SNAPSHOT_ID}_meta.json"
-if [[ ! -f "${META_FILE}" ]]; then
+if [[ "${BACKSTOP_INSTALL:-false}" != "true" && ! -f "${META_FILE}" ]]; then
   exit 0
 fi
 
@@ -739,6 +749,73 @@ check_npm_effect_closure() {
 
   rm -f "${closure_file}" "${provider_file}" "${miss_file}"
 }
+
+run_command_independent_backstop() {
+  # Reached when PreToolUse left no pending state for an install-looking command.
+  # Detection is command-independent (the npm closure check reads the live
+  # package-lock.json, not the command text); automatic rollback still needs a
+  # prior confirmed-safe snapshot to restore from. Never silent — every path logs.
+  if [[ ! -f "${PROJECT_DIR}/package-lock.json" ]]; then
+    log_advisory "post-verify UNVERIFIED: install-looking command with no pending state and no package-lock.json in ${PROJECT_DIR} — nothing to closure-check."
+    return 0
+  fi
+
+  check_npm_effect_closure
+
+  if [[ "${SUSPICIOUS}" != "true" ]]; then
+    log_advisory "post-verify BACKSTOP clean: a parser-missed install in ${PROJECT_DIR} passed the command-independent npm closure check."
+    return 0
+  fi
+
+  local reason_str
+  reason_str=$(printf '%s; ' "${REASONS[@]}")
+
+  local rollback_id
+  rollback_id=$(read_confirmed_snapshot "${DIR_HASH}")
+  if [[ -z "${rollback_id}" ]] || [[ ! -f "${SNAPSHOT_DIR}/${rollback_id}_meta.json" ]]; then
+    # Detected, but no known-good baseline to restore — fail LOUD, never silent.
+    log_advisory "post-verify BACKSTOP FLAGGED (no baseline): parser-missed install in ${PROJECT_DIR} — ${reason_str%%; }. No confirmed snapshot to roll back to; left in place."
+    jq -nc --arg reasons "${reason_str%%; }" --arg dir "${PROJECT_DIR}" \
+      '{systemMessage: ("safedeps: an install the command gate did not recognize produced a suspicious closure:\n" + $reasons + "\n\nThere is no confirmed-safe snapshot for " + $dir + " yet, so safedeps could NOT roll it back automatically. Review and revert manually, then run `safedeps check` for the intended versions.")}'
+    return 0
+  fi
+
+  # Roll back to the confirmed baseline using the existing reorg helpers.
+  SNAPSHOT_ID="${rollback_id}"   # so monitored_files() reads the baseline's list
+  ROLLED_BACK=()
+  local monitored_file
+  while IFS= read -r monitored_file; do
+    [[ -z "${monitored_file}" ]] && continue
+    restore_monitored_file "${monitored_file}" "${rollback_id}"
+  done < <(monitored_files)
+
+  local rb_pkg="${SNAPSHOT_DIR}/${rollback_id}_package.json"
+  if [[ -f "${rb_pkg}" ]] && files_differ "${rb_pkg}" "${PROJECT_DIR}/package.json"; then
+    cp "${rb_pkg}" "${PROJECT_DIR}/package.json"
+    ROLLED_BACK+=("package.json")
+  fi
+
+  restore_node_modules
+
+  local rolled_str=""
+  [[ ${#ROLLED_BACK[@]} -gt 0 ]] && rolled_str=$(printf '%s, ' "${ROLLED_BACK[@]}")
+  cat >> "${GUARD_DIR}/reorg.log" << LOG_EOF
+[$(date -u +"%Y-%m-%dT%H:%M:%SZ")] REORG executed (command-independent backstop)
+  Rollback snapshot: ${rollback_id}
+  Project: ${PROJECT_DIR}
+  Reasons: ${reason_str%%; }
+  Rolled back: ${rolled_str%, }
+LOG_EOF
+
+  jq -nc --arg reasons "${reason_str%%; }" --arg snap "${rollback_id}" --arg rolled "${rolled_str%, }" \
+    '{systemMessage: ("safedeps: a dependency install the command gate did not recognize introduced a suspicious closure — rolled back to the last confirmed safe snapshot.\n\nDetected:\n" + $reasons + "\n\nRollback snapshot: " + $snap + "\nRolled-back files: " + $rolled)}'
+  return 0
+}
+
+if [[ "${BACKSTOP_INSTALL:-false}" == "true" ]]; then
+  run_command_independent_backstop
+  exit 0
+fi
 
 # Run all checks
 check_npm_effect_closure

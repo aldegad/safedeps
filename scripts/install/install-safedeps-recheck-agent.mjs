@@ -107,7 +107,24 @@ function installRuntime() {
   copyRuntimeFile('bin/safedeps', 0o755);
   copyRuntimeFile('lib/providers/providers.sh', 0o755);
   copyRuntimeFile('lib/ledger/ledger.sh', 0o755);
+  // bin/safedeps sources lib/npm/closure.sh under `set -euo pipefail`, so omitting
+  // it made the copied agent bin abort at source time on every scheduled run — the
+  // daily re-check never actually ran (finding #6). Keep this list in sync with the
+  // `source` set in bin/safedeps; the post-install smoke below guards against drift.
+  copyRuntimeFile('lib/npm/closure.sh', 0o755);
   copyRuntimeFile('scripts/safedeps-recheck-alert.sh', 0o755);
+
+  // Smoke the copied runtime so a future added lib dependency cannot silently
+  // re-break the agent: the copied bin must at least load and answer `version`.
+  const copiedBin = path.join(agentRoot, 'bin/safedeps');
+  const smoke = spawnSync(copiedBin, ['--json', 'version'], { encoding: 'utf8' });
+  if (smoke.status !== 0) {
+    const detail = [smoke.stdout, smoke.stderr].filter(Boolean).join('\n').trim();
+    throw new Error(
+      `safedeps re-check agent runtime smoke failed — the copied bin did not load ` +
+      `(a runtime file is likely missing from installRuntime()).${detail ? `\n${detail}` : ''}`,
+    );
+  }
 }
 
 function run(command, args, { allowFailure = false } = {}) {
