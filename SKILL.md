@@ -73,7 +73,7 @@ safedeps doctor --fix    # scaffold the policy + activate the hooks (non-destruc
 2. Gaps? Run `safedeps doctor --fix`. It scaffolds `.gitleaks.toml` (or `.gitleaks.private.toml`) and `.githooks/pre-commit`, then activates them. Existing repo files are never overwritten.
 3. Tune the scaffolded `.gitleaks.toml` for the repo — allowlist fixtures, add rules. You own the policy; safedeps runs it (gitleaks via `safedeps scan secrets`).
 
-The pre-commit hook runs two checks: a secret scan (`safedeps scan secrets --staged`) on every commit (fail-closed), and an npm dependency audit (`safedeps audit npm`) on every commit in an npm repo — so a CVE published *after* you installed a package is caught at the next commit, not weeks later. `audit npm` exits 0 clean / 1 vulnerable / 2 could-not-run; the hook **blocks** on a real finding (1) but **warns and allows** when the advisory DB is unreachable (2 — observable offline failover). No secret scanner → blocks. The only bypass is the human's `git commit --no-verify`.
+The pre-commit hook runs two checks: a secret scan (`safedeps scan secrets --staged`) on every commit (fail-closed), and a dependency audit (`safedeps audit`) on every commit in a repo with a supported lockfile (npm / pnpm / yarn / bun, auto-detected from the lockfile) — so a CVE published *after* you installed a package is caught at the next commit, not weeks later. `audit` exits 0 clean / 1 vulnerable / 2 could-not-run; the hook **blocks** on a real finding (1) but **warns and allows** when the advisory DB is unreachable (2 — observable offline failover). No secret scanner → blocks. The only bypass is the human's `git commit --no-verify`.
 
 Remote repository governance is opt-in and cost-aware. `doctor` may report `lane: "remote"` recommendations for two different things:
 
@@ -94,7 +94,7 @@ safedeps re-check [--json]
 safedeps doctor [--root <repo>] [--fix] [--json]
 safedeps hooks <install|check|init> [--root <repo>]
 safedeps scan secrets [--repo|--worktree|--staged] [--root <repo>]
-safedeps audit [npm] [--root <repo>]
+safedeps audit [npm|pnpm|yarn|bun] [--root <repo>] [--level <low|moderate|high|critical>]
 safedeps gates [run] [--root <repo>] [--strict] [--no-run]
 safedeps migrate [--keep-legacy]
 safedeps help [command]

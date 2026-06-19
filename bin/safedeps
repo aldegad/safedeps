@@ -7,7 +7,7 @@
 
 set -euo pipefail
 
-SAFEDEPS_VERSION="2.8.1"
+SAFEDEPS_VERSION="2.9.0"
 
 # ---- repo / lib bootstrap ----------------------------------------------------
 
@@ -1142,7 +1142,7 @@ COMMANDS
   migrate                                   Migrate legacy npm-reorg-guard state.
   gates [run]                               Release-time repo gates: secret scan, dep audit, hook/CI check.
   scan secrets [--repo|--worktree|--staged] Run gitleaks secret scan (repo profile aware).
-  audit [npm]                               Run npm lockfile audit.
+  audit [npm|pnpm|yarn|bun]                 Audit dependency lockfiles (auto-detects ecosystem).
   hooks <install|check|init>                Install/verify/scaffold repo-local git hooks.
   doctor [--fix]                            Diagnose this repo's secret-leak lane (--fix scaffolds + activates).
   help [command]                            Show help.

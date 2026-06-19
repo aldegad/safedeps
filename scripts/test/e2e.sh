@@ -420,11 +420,13 @@ else
   printf 'ok - pre-commit gate behavior SKIPPED (needs gitleaks + openssl)\n'
 fi
 
-# --- Dependency audit gate (npm) — v2.5.0 -----------------------------------
-# A fake `npm` makes the crucial distinction deterministic and offline: a
+# --- Dependency audit gate (npm/pnpm/yarn/bun) — v2.5.0, multi-eco v2.9 ------
+# Fake audit tools make the crucial distinction deterministic and offline: a
 # vulnerable verdict (block) must never be confused with an unreachable advisory
 # DB (warn + allow). If those two collapsed, an offline failover would silently
-# let real vulnerabilities through.
+# let real vulnerabilities through. Each fake emits its tool's REAL report shape
+# (npm/pnpm: .metadata.vulnerabilities; yarn: NDJSON auditSummary; bun: object
+# keyed by package), switched by a per-tool MODE env (default clean).
 fakebin="${tmp_root}/fakebin"
 mkdir -p "${fakebin}"
 cat > "${fakebin}/npm" <<'FAKE'
@@ -436,9 +438,60 @@ case "${FAKE_NPM_MODE:-clean}" in
   offline) printf '%s\n' '{"error":{"code":"ENOTFOUND","summary":"registry unreachable"}}'; exit 1 ;;
 esac
 FAKE
-chmod +x "${fakebin}/npm"
+cat > "${fakebin}/pnpm" <<'FAKE'
+#!/bin/bash
+[ "${1:-}" = "audit" ] || exit 0
+case "${FAKE_PNPM_MODE:-clean}" in
+  clean)   printf '%s\n' '{"actions":[],"advisories":{},"metadata":{"vulnerabilities":{"info":0,"low":0,"moderate":0,"high":0,"critical":0}}}'; exit 0 ;;
+  vuln)    printf '%s\n' '{"advisories":{"x":{}},"metadata":{"vulnerabilities":{"info":0,"low":0,"moderate":1,"high":0,"critical":1}}}'; exit 1 ;;
+  offline) printf '%s\n' '{"error":{"code":"ECONNREFUSED","message":"request failed"}}'; exit 1 ;;
+esac
+FAKE
+cat > "${fakebin}/yarn" <<'FAKE'
+#!/bin/bash
+# FAKE_YARN_BERRY=1 emulates Yarn Berry (2+): `yarn --version` is 4.x and audit
+# lives under `yarn npm audit` (NDJSON advisory lines). Default is Classic 1.x.
+if [ "${FAKE_YARN_BERRY:-0}" = "1" ]; then
+  [ "${1:-}" = "--version" ] && { printf '4.5.0\n'; exit 0; }
+  if [ "${1:-}" = "npm" ] && [ "${2:-}" = "audit" ]; then
+    case "${FAKE_YARN_MODE:-clean}" in
+      clean)   exit 0 ;;
+      vuln)    printf '%s\n' '{"value":"minimist","children":{"ID":1,"Severity":"high"}}'; printf '%s\n' '{"value":"x","children":{"ID":2,"Severity":"moderate"}}'; exit 1 ;;
+      weirdsev) printf '%s\n' '{"value":"minimist","children":{"ID":1,"Severity":"Critical"}}'; exit 1 ;;
+      offline) exit 1 ;;
+    esac
+  fi
+  exit 0
+fi
+[ "${1:-}" = "--version" ] && { printf '1.22.22\n'; exit 0; }
+[ "${1:-}" = "audit" ] || exit 0
+case "${FAKE_YARN_MODE:-clean}" in
+  clean)   printf '%s\n' '{"type":"auditSummary","data":{"vulnerabilities":{"info":0,"low":0,"moderate":0,"high":0,"critical":0}}}'; exit 0 ;;
+  vuln)    printf '%s\n' '{"type":"auditAdvisory","data":{}}'; printf '%s\n' '{"type":"auditSummary","data":{"vulnerabilities":{"info":0,"low":0,"moderate":0,"high":2,"critical":0}}}'; exit 8 ;;
+  offline) printf '%s\n' '{"type":"info","data":"Visit https://yarnpkg.com/en/docs/cli/audit"}'; exit 1 ;;
+esac
+FAKE
+cat > "${fakebin}/bun" <<'FAKE'
+#!/bin/bash
+[ "${1:-}" = "audit" ] || exit 0
+case "${FAKE_BUN_MODE:-clean}" in
+  clean)     printf '%s\n' '{}'; exit 0 ;;
+  vuln)      printf '%s\n' '{"minimist":[{"id":1,"severity":"critical"},{"id":2,"severity":"moderate"}]}'; exit 1 ;;
+  offline)   printf ''; exit 1 ;;
+  # Fail-closed edges (bun re-tallies raw severities; these must NOT read as clean):
+  malformed) printf '%s\n' '{"meta":{"x":1},"minimist":[{"id":1,"severity":"high"}]}'; exit 1 ;;
+  capital)   printf '%s\n' '{"minimist":[{"id":1,"severity":"CRITICAL"}]}'; exit 1 ;;
+  nosev)     printf '%s\n' '{"minimist":[{"id":1}]}'; exit 1 ;;
+  # Could-not-run shapes (registry/error object, non-advisory junk): availability
+  # failure -> must be exit 2, never a silent clean, matching the npm path.
+  errobj)    printf '%s\n' '{"error":{"code":"ENOTFOUND","message":"registry unreachable"}}'; exit 1 ;;
+  junkobj)   printf '%s\n' '{"some":"object","not":"advisories"}'; exit 1 ;;
+esac
+FAKE
+chmod +x "${fakebin}/npm" "${fakebin}/pnpm" "${fakebin}/yarn" "${fakebin}/bun"
 
 if command -v jq >/dev/null 2>&1; then
+  # Explicit-ecosystem path (back-compat): `safedeps audit npm`.
   audit_repo="${tmp_root}/audit-repo"
   mkdir -p "${audit_repo}"
   printf '{"name":"a","lockfileVersion":3}\n' > "${audit_repo}/package-lock.json"
@@ -450,6 +503,90 @@ if command -v jq >/dev/null 2>&1; then
   run_audit vuln    && rc=0 || rc=$?; [ "${rc}" = "1" ] || fail "audit exit 1 on a vulnerable lockfile (got ${rc})"
   run_audit offline && rc=0 || rc=$?; [ "${rc}" = "2" ] || fail "audit exit 2 when the advisory DB is unreachable (got ${rc})"
   pass "audit npm exit-code contract: clean=0 / vulnerable=1 / unreachable=2"
+
+  # Auto-detect path across every ecosystem: a single lockfile in the dir routes
+  # `safedeps audit` (no arg) to the right tool, and each must honor 0/1/2.
+  for spec in "npm:package-lock.json:FAKE_NPM_MODE" \
+              "pnpm:pnpm-lock.yaml:FAKE_PNPM_MODE" \
+              "yarn:yarn.lock:FAKE_YARN_MODE" \
+              "bun:bun.lock:FAKE_BUN_MODE"; do
+    eco="${spec%%:*}"; rest="${spec#*:}"; lf="${rest%%:*}"; modevar="${rest##*:}"
+    eco_dir="${tmp_root}/audit-${eco}"; mkdir -p "${eco_dir}"; : > "${eco_dir}/${lf}"
+    for pair in "clean:0" "vuln:1" "offline:2"; do
+      mode="${pair%%:*}"; want="${pair#*:}"
+      PATH="${fakebin}:${PATH}" env "${modevar}=${mode}" \
+        "${ROOT_DIR}/bin/safedeps" audit --root "${eco_dir}" >/dev/null 2>&1 && rc=0 || rc=$?
+      [ "${rc}" = "${want}" ] || fail "audit auto-detect ${eco} ${mode}: expected ${want}, got ${rc}"
+    done
+  done
+  pass "audit exit-code contract across npm/pnpm/yarn/bun (auto-detect; clean=0/vuln=1/offline=2)"
+
+  # Aggregate across coexisting lockfiles: a real finding in ANY ecosystem
+  # dominates (1); else an availability failure anywhere surfaces as 2; no
+  # ecosystem is skipped silently.
+  agg_dir="${tmp_root}/audit-agg"; mkdir -p "${agg_dir}"
+  : > "${agg_dir}/package-lock.json"; : > "${agg_dir}/pnpm-lock.yaml"
+  PATH="${fakebin}:${PATH}" FAKE_NPM_MODE=clean FAKE_PNPM_MODE=vuln \
+    "${ROOT_DIR}/bin/safedeps" audit --root "${agg_dir}" >/dev/null 2>&1 && rc=0 || rc=$?
+  [ "${rc}" = "1" ] || fail "aggregate audit: a vuln in any ecosystem blocks (npm clean + pnpm vuln, got ${rc})"
+  PATH="${fakebin}:${PATH}" FAKE_NPM_MODE=clean FAKE_PNPM_MODE=offline \
+    "${ROOT_DIR}/bin/safedeps" audit --root "${agg_dir}" >/dev/null 2>&1 && rc=0 || rc=$?
+  [ "${rc}" = "2" ] || fail "aggregate audit: availability failure surfaces as 2 when nothing is vulnerable (got ${rc})"
+  pass "aggregate audit across coexisting lockfiles (vuln dominates; else availability)"
+
+  # bun re-tallies raw per-advisory severities (npm/pnpm/yarn report pre-aggregated
+  # counts). The tally must be total (an unexpected shape must not crash and read as
+  # CLEAN) and fail-closed (a missing/unrecognized severity counts, never dropped).
+  # Each of these carries a real advisory, so audit must BLOCK (1), never exit 0.
+  bun_dir="${tmp_root}/audit-bun-edge"; mkdir -p "${bun_dir}"; : > "${bun_dir}/bun.lock"
+  for bmode in malformed capital nosev; do
+    PATH="${fakebin}:${PATH}" FAKE_BUN_MODE="${bmode}" \
+      "${ROOT_DIR}/bin/safedeps" audit --root "${bun_dir}" >/dev/null 2>&1 && rc=0 || rc=$?
+    [ "${rc}" = "1" ] || fail "bun audit fail-closed on ${bmode} advisory (expected block=1, got ${rc} — silent clean is a no-silent-fallback violation)"
+  done
+  # A registry/error object or non-advisory junk is an availability failure: it must
+  # surface as could-not-run (2), never a silent clean (0) — parity with the npm path.
+  for bmode in errobj junkobj; do
+    PATH="${fakebin}:${PATH}" FAKE_BUN_MODE="${bmode}" \
+      "${ROOT_DIR}/bin/safedeps" audit --root "${bun_dir}" >/dev/null 2>&1 && rc=0 || rc=$?
+    [ "${rc}" = "2" ] || fail "bun audit maps a ${bmode} (non-advisory) response to could-not-run=2 (got ${rc}; exit 0 would be a silent clean)"
+  done
+  pass "bun audit is total + fail-closed (vuln shapes block; error/junk shapes -> could-not-run, never silent clean)"
+
+  # --level validation: an unrecognized level must be a usage error (64), not
+  # silently snapped to moderate (which would let a deliberately-strict typo pass).
+  PATH="${fakebin}:${PATH}" "${ROOT_DIR}/bin/safedeps" audit npm --root "${audit_repo}" --level garbage >/dev/null 2>&1 && rc=0 || rc=$?
+  [ "${rc}" = "64" ] || fail "audit rejects an invalid --level with usage error 64 (got ${rc})"
+  pass "audit --level validates the threshold (invalid -> 64, not a silent moderate fallback)"
+
+  # Yarn Berry (2+) has no `yarn audit`; the dispatcher must detect the major
+  # version and route to `yarn npm audit` (NDJSON), honoring the same 0/1/2.
+  berry_dir="${tmp_root}/audit-yarn-berry"; mkdir -p "${berry_dir}"; : > "${berry_dir}/yarn.lock"
+  for pair in "clean:0" "vuln:1" "offline:2"; do
+    mode="${pair%%:*}"; want="${pair#*:}"
+    PATH="${fakebin}:${PATH}" FAKE_YARN_BERRY=1 FAKE_YARN_MODE="${mode}" \
+      "${ROOT_DIR}/bin/safedeps" audit --root "${berry_dir}" >/dev/null 2>&1 && rc=0 || rc=$?
+    [ "${rc}" = "${want}" ] || fail "yarn Berry audit ${mode}: expected ${want}, got ${rc}"
+  done
+  # Berry re-tallies raw severities too, so a non-canonical value must fail-closed
+  # (count as critical -> block), never be dropped to a clean verdict.
+  PATH="${fakebin}:${PATH}" FAKE_YARN_BERRY=1 FAKE_YARN_MODE=weirdsev \
+    "${ROOT_DIR}/bin/safedeps" audit --root "${berry_dir}" >/dev/null 2>&1 && rc=0 || rc=$?
+  [ "${rc}" = "1" ] || fail "yarn Berry fail-closed on a non-canonical severity (expected block=1, got ${rc})"
+  pass "yarn Berry (2+) routes to 'yarn npm audit', honors 0/1/2, fail-closed on odd severities"
+
+  # no-jq fallback must ALSO version-route yarn: running 'yarn audit' (which Berry
+  # removed) unconditionally would block every clean Berry repo. With jq absent, a
+  # clean Berry project must still return 0.
+  nojq_bin="${tmp_root}/nojq-bin"; mkdir -p "${nojq_bin}"
+  for t in bash env dirname mktemp cat grep sed; do
+    src="$(command -v "${t}" 2>/dev/null)" && ln -sf "${src}" "${nojq_bin}/${t}"
+  done
+  ln -sf "${fakebin}/yarn" "${nojq_bin}/yarn"   # Berry fake (clean -> 'yarn npm audit' exit 0)
+  PATH="${nojq_bin}" FAKE_YARN_BERRY=1 FAKE_YARN_MODE=clean \
+    bash "${ROOT_DIR}/lib/gates/audit.sh" --root "${berry_dir}" >/dev/null 2>&1 && rc=0 || rc=$?
+  [ "${rc}" = "0" ] || fail "no-jq fallback routes Yarn Berry to 'yarn npm audit'; a clean Berry repo must return 0 (got ${rc})"
+  pass "no-jq fallback version-routes yarn (clean Berry not falsely blocked)"
 else
   printf 'ok - audit exit-code contract SKIPPED (needs jq)\n'
 fi
@@ -475,7 +612,23 @@ if command -v gitleaks >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
        git -C "${dep_repo}" commit -m "offline" 2>&1)" \
     || fail "pre-commit allows the commit when the advisory DB is unreachable (offline failover)"
   grep -q "offline failover" <<< "${offline_out}" || fail "offline failover prints an observable warning"
-  pass "pre-commit dep gate: blocks on vuln, warns+allows when offline"
+
+  # Multi-ecosystem: the scaffolded hook detects a non-npm lockfile too and
+  # routes `safedeps audit` (auto-detect) to it. A pnpm-lock.yaml with a
+  # vulnerable verdict must BLOCK exactly like npm.
+  pnpm_repo="${tmp_root}/dep-repo-pnpm"
+  mkdir -p "${pnpm_repo}"
+  git -C "${pnpm_repo}" init -q
+  git -C "${pnpm_repo}" config user.email t@safedeps.test
+  git -C "${pnpm_repo}" config user.name safedeps-e2e
+  HOME="${tmp_root}/doc-home" "${ROOT_DIR}/bin/safedeps" doctor --fix --root "${pnpm_repo}" >/dev/null
+  printf 'lockfileVersion: "9.0"\n' > "${pnpm_repo}/pnpm-lock.yaml"
+  git -C "${pnpm_repo}" add pnpm-lock.yaml
+  if PATH="${fakebin}:${PATH}" FAKE_PNPM_MODE=vuln SAFEDEPS_BIN="${ROOT_DIR}/bin/safedeps" \
+       git -C "${pnpm_repo}" commit -q -m "pnpm vuln" 2>/dev/null; then
+    fail "pre-commit blocks a commit carrying a vulnerable pnpm dependency"
+  fi
+  pass "pre-commit dep gate: blocks on vuln, warns+allows when offline (npm + pnpm)"
 else
   printf 'ok - pre-commit dep gate SKIPPED (needs gitleaks + jq)\n'
 fi
