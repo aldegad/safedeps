@@ -7,12 +7,24 @@
 
 set -euo pipefail
 
-SAFEDEPS_VERSION="2.8.0"
+SAFEDEPS_VERSION="2.8.1"
 
 # ---- repo / lib bootstrap ----------------------------------------------------
 
-SAFEDEPS_BIN_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-SAFEDEPS_REPO_DIR=$(cd "${SAFEDEPS_BIN_DIR}/.." && pwd)
+# Resolve the symlink chain to the real script before deriving the repo dir.
+# A global install (npm -g, or ~/.local/bin via --link-bin) puts a FILE symlink
+# at <prefix>/bin/safedeps; ${BASH_SOURCE[0]} keeps that symlink path, so a naive
+# dirname/.. lands on <prefix> and `source <prefix>/lib/providers/providers.sh`
+# fails. Walk to the link target first. (readlink -f is non-portable on macOS, so
+# loop with bare readlink + cd -P.)
+SAFEDEPS_SOURCE="${BASH_SOURCE[0]}"
+while [[ -h "${SAFEDEPS_SOURCE}" ]]; do
+  SAFEDEPS_BIN_DIR=$(cd -P "$(dirname "${SAFEDEPS_SOURCE}")" && pwd)
+  SAFEDEPS_SOURCE=$(readlink "${SAFEDEPS_SOURCE}")
+  [[ "${SAFEDEPS_SOURCE}" != /* ]] && SAFEDEPS_SOURCE="${SAFEDEPS_BIN_DIR}/${SAFEDEPS_SOURCE}"
+done
+SAFEDEPS_BIN_DIR=$(cd -P "$(dirname "${SAFEDEPS_SOURCE}")" && pwd)
+SAFEDEPS_REPO_DIR=$(cd -P "${SAFEDEPS_BIN_DIR}/.." && pwd)
 
 # shellcheck source=../lib/providers/providers.sh
 source "${SAFEDEPS_REPO_DIR}/lib/providers/providers.sh"
