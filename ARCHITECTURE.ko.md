@@ -250,7 +250,7 @@ npm PRIMARY EFFECT GATE + REORG (safedeps-post-verify.sh)
 
 - `approved_at` 이후 발견된 zero-day — daily re-check 로만 잡고, install 시점엔 못 잡는다.
 - npm registry 자체의 손상.
-- 사용자가 `--allow-unverified` 로 명시 우회한 경우 (observable, 로그됨).
+- 설정된 Claude/Codex hook 경로 밖에서 사람이 직접 실행한 package-manager install. 이런 변경은 release-time gate 가 backstop 으로 잡을 수 있지만, install-time approval 을 증명하지는 않는다.
 - 같은 OS 사용자 권한으로 `~/.safedeps/approved-specs/` 를 직접 작성/수정하는 공격. ledger 는 로컬 convenience cache 이며, 서명/HMAC 또는 install-time 재조회가 도입되기 전엔 same-user 공격의 보안 경계가 아니다. (단 effect gate 의 OSV 재조회는 *알려진 취약* 패키지에 대한 위조 승인은 여전히 잡는다 — [`ROADMAP.md`](./ROADMAP.md) "Ledger 변조 내성" 참고.)
 
 ---
@@ -261,7 +261,7 @@ npm PRIMARY EFFECT GATE + REORG (safedeps-post-verify.sh)
 OSV.dev — 응답 무 / timeout
   • 1차: 로컬 provider cache (24h TTL) 사용
   • cache miss → fail-closed (block; "OSV 응답 없음, 재시도")
-  • explicit --allow-unverified 일 때만 우회, 로그됨
+  • install-time CLI bypass flag 는 없다; OSV 또는 cache 가 응답할 때 재시도한다
 
 CISA KEV — 응답 무
   • KEV 는 하루 1회 download 하는 정적 catalog; 로컬 cache 만 사용
@@ -272,7 +272,7 @@ GHSA / NVD — 응답 무
   • OSV 결과로만 진행 + "GHSA cross-check skipped" 로그
 ```
 
-설계 원칙: **silent fallback 금지.** 모든 우회는 observable + 로그. canonical truth(OSV)가 응답 못 하면 default 는 fail-closed.
+설계 원칙: **silent fallback 금지.** canonical truth(OSV)가 응답하지 못하고 cache 도 없으면, safedeps 는 secondary truth 나 숨은 bypass 를 만들지 않고 fail-closed 한다.
 
 ---
 
