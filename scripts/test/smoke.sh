@@ -46,6 +46,21 @@ pkg_version=$(jq -r '.version' package.json)
 [[ "$(jq -r '.version' <<< "${version_json}")" == "${pkg_version}" ]] || fail "cli version matches package.json (${pkg_version})"
 pass "cli version"
 
+# Regression: a global install must resolve its package dir through the symlink.
+# npm -g (and ~/.local/bin via --link-bin) put a RELATIVE FILE symlink in
+# <prefix>/bin and the package under <prefix>/lib/node_modules; without symlink
+# resolution ${BASH_SOURCE[0]}/../lib points at <prefix>/lib (not the package) and
+# every command dies at `source .../lib/providers/providers.sh`. Mirror that layout
+# and invoke the CLI through the symlink — `version` only succeeds if all three
+# bootstrap `source` lines resolved against the real repo dir.
+global_prefix="${tmp_root}/global-prefix"
+mkdir -p "${global_prefix}/bin" "${global_prefix}/lib/node_modules/@aldegad"
+ln -s "${ROOT_DIR}" "${global_prefix}/lib/node_modules/@aldegad/safedeps"
+ln -s "../lib/node_modules/@aldegad/safedeps/bin/safedeps" "${global_prefix}/bin/safedeps"
+global_version=$(HOME="${tmp_root}/home-global" SAFEDEPS_HOME="${tmp_root}/safe-global" "${global_prefix}/bin/safedeps" --json version)
+[[ "$(jq -r '.version' <<< "${global_version}")" == "${pkg_version}" ]] || fail "cli resolves its package dir through an npm-style global file symlink (got: ${global_version})"
+pass "cli works through an npm-style global file symlink"
+
 ledger_json=$(HOME="${tmp_root}/home-ledger" SAFEDEPS_HOME="${tmp_root}/safe-ledger" ./bin/safedeps --json ledger)
 [[ "$(jq -r '.count' <<< "${ledger_json}")" == "0" ]] || fail "isolated ledger starts empty"
 pass "isolated ledger"
