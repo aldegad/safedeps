@@ -251,7 +251,7 @@ npm PRIMARY EFFECT GATE + REORG (safedeps-post-verify.sh)
 
 - A zero-day discovered *after* `approved_at` — only the daily re-check catches it, not the install itself.
 - Compromise of the npm registry itself.
-- An install the user explicitly waved through with `--allow-unverified` (observable, logged).
+- A manual package-manager install run outside the configured Claude/Codex hook path; release-time gates are the backstop for those changes, not proof of install-time approval.
 - An attacker writing to `~/.safedeps/approved-specs/` directly under the same OS user. The ledger is a local convenience cache; until signing/HMAC or install-time re-validation is added, it is not a security boundary against a same-user attacker. (The effect gate's OSV re-query does, however, still catch a forged approval for a *known-vulnerable* package — see [`ROADMAP.md`](./ROADMAP.md) "Ledger tamper resistance".)
 
 ---
@@ -262,7 +262,7 @@ npm PRIMARY EFFECT GATE + REORG (safedeps-post-verify.sh)
 OSV.dev — no response / timeout
   • first: use the local provider cache (24h TTL)
   • cache miss → fail-closed (block; "no OSV response, retry")
-  • bypass only with explicit --allow-unverified, and it is logged
+  • no install-time CLI bypass flag exists; retry when OSV or the cache can answer
 
 CISA KEV — no response
   • KEV is a static catalog downloaded once a day; only the local cache is used
@@ -273,7 +273,7 @@ GHSA / NVD — no response
   • proceed on OSV alone and log "GHSA cross-check skipped"
 ```
 
-Design principle: **no silent fallback.** Every bypass is observable and logged. When the canonical truth (OSV) cannot answer, the default is fail-closed.
+Design principle: **no silent fallback.** When the canonical truth (OSV) cannot answer and the cache misses, safedeps fails closed instead of inventing a secondary truth or hidden bypass.
 
 ---
 
