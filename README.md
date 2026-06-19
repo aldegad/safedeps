@@ -8,6 +8,8 @@
 - **Enforce the real effect** — after the install, the actual `package-lock.json` closure is re-checked, so a wrapped or obfuscated command can't sneak a package past the gate.
 - **Roll back** — anything unapproved or newly-vulnerable is reverted to the last confirmed safe snapshot. On Claude Code the install runs inert (`--ignore-scripts`), so a rejected package's lifecycle scripts never run.
 
+> **A real catch.** The pre-commit audit flagged a vulnerable transitive `hono` advisory that Dependabot missed — by re-querying the advisory DB at commit time. A CVE disclosed *after* you installed a package ("looked safe then, flagged now") surfaces at your next commit, not weeks later.
+
 ## Quickstart
 
 ```bash
@@ -45,6 +47,8 @@ Terminology: safedeps is an agent security skill backed by Claude/Codex hooks an
 The secret-leak side of the release-time lane is **per-repo and opt-in**. `safedeps doctor` is its repo-entry check: it diagnoses the repo's `.gitleaks` policy, `.githooks/pre-commit`, the active `core.hooksPath`, and scanner availability (and reports the global install-time gate too), then `safedeps doctor --fix` scaffolds a starter policy (`safedeps hooks init`) and activates it (`safedeps hooks install`). That local pre-commit setup is automatic once you choose `--fix`; it does not spend remote CI minutes. The scaffold is non-destructive — an existing repo-owned `.gitleaks.toml` is never overwritten — and the pre-commit hook runs a secret scan (`safedeps scan secrets --staged`) plus, on every commit in a repo with a supported lockfile, a dependency audit (`safedeps audit`, auto-detecting npm/pnpm/yarn/bun): a real finding blocks (fail-closed), while an unreachable advisory DB only warns and lets the commit through (observable offline failover). Remote enforcement is split: blocking direct pushes to `main` with a branch rule is recommended no-runner posture, while GitHub Actions workflows and required status checks remain explicit cost-bearing opt-in because hosted runners can cost money. See [Secret-Leak Lane (per-repo)](#secret-leak-lane-per-repo).
 
 ## How It Works
+
+[![safedeps architecture — two lanes, a three-phase install gate, and OSV as the one canonical truth](assets/architecture.png)](./ARCHITECTURE.md)
 
 `safedeps` works in two moves around every install:
 

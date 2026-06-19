@@ -1,0 +1,284 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>safedeps — architecture</title>
+<style>
+  :root{
+    --ink:#0a0d13; --panel:#121823; --panel2:#0f141d; --line:#222c3a;
+    --tx:#e7eef6; --mut:#8896a8; --dim:#5b6878;
+    --osv:#58a6ff; --kev:#e3a008; --ghsa:#a371f7;
+    --ok:#3fb950; --warn:#d29922; --block:#f85149;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0}
+  html{background:#0a0d13}
+  body{
+    background:
+      radial-gradient(1100px 520px at 82% -8%, rgba(88,166,255,.10), transparent 60%),
+      radial-gradient(900px 480px at 6% 8%, rgba(63,185,80,.07), transparent 55%),
+      var(--ink);
+    color:var(--tx); font-family:var(--sans);
+    -webkit-font-smoothing:antialiased; line-height:1.5;
+    padding:34px 22px 56px;
+  }
+  .wrap{max-width:1080px;margin:0 auto}
+  .mono{font-family:var(--mono)}
+
+  header{display:flex;align-items:flex-end;justify-content:space-between;gap:20px;flex-wrap:wrap;margin-bottom:6px}
+  h1{font-size:30px;margin:0;letter-spacing:-.6px;font-weight:680}
+  h1 .sd{color:var(--ok)}
+  .sub{color:var(--mut);font-size:14.5px;margin-top:7px;max-width:680px}
+  .ver{font-family:var(--mono);font-size:12px;color:var(--ok);border:1px solid rgba(63,185,80,.4);
+    background:rgba(63,185,80,.08);border-radius:999px;padding:5px 11px;white-space:nowrap}
+
+  .props{display:flex;flex-wrap:wrap;gap:7px;margin:18px 0 30px}
+  .chip{font-family:var(--mono);font-size:11.5px;color:var(--mut);border:1px solid var(--line);
+    background:var(--panel2);border-radius:7px;padding:5px 9px}
+  .chip b{color:var(--tx);font-weight:600}
+
+  .sec-label{font-family:var(--mono);font-size:11px;letter-spacing:1.6px;text-transform:uppercase;
+    color:var(--dim);margin:34px 0 12px}
+
+  .lanes{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  @media(max-width:760px){.lanes{grid-template-columns:1fr}}
+  .lane{border:1px solid var(--line);border-radius:14px;background:linear-gradient(180deg,var(--panel),var(--panel2));padding:16px 16px 14px}
+  .lane h3{margin:0 0 3px;font-size:15px;font-weight:640}
+  .lane .tag{font-family:var(--mono);font-size:10.5px;color:var(--dim);text-transform:uppercase;letter-spacing:1px}
+  .lane p{color:var(--mut);font-size:12.8px;margin:8px 0 0}
+  .lane.install h3{color:var(--osv)} .lane.release h3{color:var(--warn)}
+
+  /* pipeline */
+  .pipe{display:grid;grid-template-columns:1fr 1fr 1fr;gap:0;align-items:stretch;
+    border:1px solid var(--line);border-radius:14px;overflow:hidden;background:var(--panel2)}
+  @media(max-width:760px){.pipe{grid-template-columns:1fr}}
+  .stage{padding:16px 15px;position:relative;border-right:1px solid var(--line)}
+  .stage:last-child{border-right:none}
+  @media(max-width:760px){.stage{border-right:none;border-bottom:1px solid var(--line)}}
+  .stage .ph{font-family:var(--mono);font-size:11px;color:var(--dim);letter-spacing:.5px}
+  .stage h4{margin:5px 0 2px;font-size:14.5px;font-weight:640}
+  .stage .cmd{font-family:var(--mono);font-size:11.5px;color:var(--osv);margin:0 0 9px}
+  .stage ul{margin:0;padding-left:15px;color:var(--mut);font-size:12.3px}
+  .stage li{margin:4px 0}
+  .stage .auth{position:absolute;top:13px;right:13px;font-family:var(--mono);font-size:9.5px;
+    border-radius:6px;padding:3px 7px;letter-spacing:.5px}
+  .auth.primary{color:var(--ok);background:rgba(63,185,80,.1);border:1px solid rgba(63,185,80,.35)}
+  .auth.advisory{color:var(--mut);background:#0d121b;border:1px solid var(--line)}
+  .flowhint{display:flex;align-items:center;gap:8px;color:var(--dim);font-family:var(--mono);
+    font-size:11px;margin:11px 2px 0}
+  .flowhint .arr{color:var(--osv)}
+
+  /* effect gate decision */
+  .verdict{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+  .v{font-family:var(--mono);font-size:11px;border-radius:7px;padding:5px 9px;border:1px solid}
+  .v.ok{color:var(--ok);border-color:rgba(63,185,80,.4);background:rgba(63,185,80,.07)}
+  .v.block{color:var(--block);border-color:rgba(248,81,73,.4);background:rgba(248,81,73,.07)}
+  .v.reorg{color:var(--warn);border-color:rgba(210,153,34,.4);background:rgba(210,153,34,.07)}
+
+  /* two-col blocks */
+  .grid2{display:grid;grid-template-columns:1.15fr .85fr;gap:14px}
+  @media(max-width:760px){.grid2{grid-template-columns:1fr}}
+  .card{border:1px solid var(--line);border-radius:14px;background:linear-gradient(180deg,var(--panel),var(--panel2));padding:16px}
+  .card h3{margin:0 0 12px;font-size:14px;font-weight:640}
+
+  /* advisory truth stack */
+  .truth{display:flex;flex-direction:column;gap:9px}
+  .src{display:flex;align-items:center;gap:11px;border:1px solid var(--line);border-radius:10px;
+    padding:10px 12px;background:var(--panel2)}
+  .src .dot{width:9px;height:9px;border-radius:50%;flex:0 0 auto}
+  .src .nm{font-family:var(--mono);font-size:13px;font-weight:600}
+  .src .role{font-size:11.5px;color:var(--mut);margin-left:auto;text-align:right}
+  .src.osv{border-color:rgba(88,166,255,.4)} .src.osv .dot{background:var(--osv)} .src.osv .nm{color:var(--osv)}
+  .src.kev .dot{background:var(--kev)} .src.kev .nm{color:var(--kev)}
+  .src.ghsa .dot{background:var(--ghsa)} .src.ghsa .nm{color:var(--ghsa)}
+  .src.deps .dot{background:var(--dim)} .src.deps .nm{color:var(--mut)}
+  .truthnote{font-size:11.5px;color:var(--dim);margin-top:10px;font-style:italic}
+
+  /* engine asymmetry */
+  .eng{display:flex;flex-direction:column;gap:10px}
+  .erow{border:1px solid var(--line);border-radius:10px;padding:10px 12px;background:var(--panel2)}
+  .erow .en{font-family:var(--mono);font-size:12.5px;font-weight:600;color:var(--tx)}
+  .erow .ed{font-size:11.8px;color:var(--mut);margin-top:3px}
+  .erow .en .pin{font-size:10px;color:var(--ok);margin-left:6px}
+
+  /* release tools */
+  .tools{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:4px}
+  @media(max-width:760px){.tools{grid-template-columns:repeat(2,1fr)}}
+  .tool{border:1px solid var(--line);border-radius:11px;background:var(--panel2);padding:12px}
+  .tool .tn{font-family:var(--mono);font-size:12.5px;color:var(--warn);font-weight:600}
+  .tool .td{font-size:11.6px;color:var(--mut);margin-top:5px}
+  .tool .eco{font-family:var(--mono);font-size:10px;color:var(--ok);margin-top:7px;letter-spacing:.3px}
+
+  /* invariants */
+  .inv{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:4px}
+  @media(max-width:760px){.inv{grid-template-columns:1fr}}
+  .ic{border:1px solid var(--line);border-left:3px solid var(--ok);border-radius:8px;
+    background:var(--panel2);padding:11px 13px}
+  .ic .it{font-size:12.8px;font-weight:600}
+  .ic .id{font-size:11.6px;color:var(--mut);margin-top:3px}
+
+  /* state store */
+  .store{font-family:var(--mono);font-size:12px;color:var(--mut);border:1px dashed var(--line);
+    border-radius:10px;padding:13px 15px;background:#0c1119}
+  .store .p{color:var(--ok)} .store .c{color:var(--dim)}
+
+  footer{margin-top:38px;color:var(--dim);font-size:11.5px;font-family:var(--mono);
+    border-top:1px solid var(--line);padding-top:14px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div>
+      <h1><span class="sd">safe</span>deps <span style="color:var(--dim);font-weight:400">architecture</span></h1>
+      <div class="sub">A local, zero-dependency security gate for <b style="color:var(--tx)">development dependency installs</b>. Approval happens <b style="color:var(--tx)">before</b> the install against canonical advisory evidence; enforcement happens <b style="color:var(--tx)">after</b>, against what actually landed on disk.</div>
+    </div>
+    <div class="ver mono">v2.9.0 · Claude Code + Codex CLI</div>
+  </header>
+
+  <div class="props">
+    <span class="chip"><b>OSV</b> single canonical truth</span>
+    <span class="chip"><b>No</b> silent fallback · fail-closed</span>
+    <span class="chip"><b>Zero</b> npm dependencies</span>
+    <span class="chip"><b>No</b> SaaS — local CLI + public DBs</span>
+    <span class="chip"><b>Effect-primary</b> = npm-only</span>
+  </div>
+
+  <div class="sec-label">Two lanes</div>
+  <div class="lanes">
+    <div class="lane install">
+      <span class="tag">per-package · proactive</span>
+      <h3>Install-time lane</h3>
+      <p>Gates every agent dependency install. Three phases: an advisory check that writes an approved-spec ledger, a fast PreToolUse command guard, and the npm PostToolUse <b style="color:var(--tx)">effect gate</b> — the real authority — that reorgs (rolls back) anything that diverges.</p>
+    </div>
+    <div class="lane release">
+      <span class="tag">per-repo · opt-in</span>
+      <h3>Release-time lane</h3>
+      <p>Repo-tree hygiene exposed under one namespace: secret scan, multi-ecosystem dependency audit, repo git-hook install/check, and a posture <span class="mono">doctor</span>. safedeps owns <b style="color:var(--tx)">execution</b>; the repo owns <b style="color:var(--tx)">policy</b>.</p>
+    </div>
+  </div>
+
+  <div class="sec-label">Install-time pipeline — gate before, enforce after</div>
+  <div class="pipe">
+    <div class="stage">
+      <span class="auth advisory">advisory</span>
+      <div class="ph">PHASE 1</div>
+      <h4>Advisory check</h4>
+      <div class="cmd mono">safedeps check</div>
+      <ul>
+        <li>Query OSV → KEV → GHSA</li>
+        <li>npm: build a script-free temp lockfile, resolve the <b>full closure</b>, OSV <span class="mono">/v1/querybatch</span></li>
+        <li>Clean/patched → write approved-spec to the <b>ledger</b> (+ transitive_specs)</li>
+      </ul>
+    </div>
+    <div class="stage">
+      <span class="auth advisory">advisory</span>
+      <div class="ph">PHASE 2</div>
+      <h4>Fast command gate</h4>
+      <div class="cmd mono">PreToolUse hook</div>
+      <ul>
+        <li>Parse the install command; block obvious unapproved installs</li>
+        <li>Snapshot lockfiles / manifests</li>
+        <li><b style="color:var(--ok)">Claude:</b> inject <span class="mono">--ignore-scripts</span> → install runs <b>inert</b></li>
+      </ul>
+    </div>
+    <div class="stage">
+      <span class="auth primary">authority</span>
+      <div class="ph">PHASE 3</div>
+      <h4>npm effect gate</h4>
+      <div class="cmd mono">PostToolUse hook</div>
+      <ul>
+        <li>Read the <b>actual</b> package-lock.json closure</li>
+        <li>Verify every pkg@version vs ledger + transitive_specs; re-query OSV in batch</li>
+        <li><span class="mono">npm rebuild</span> only after the closure verifies clean</li>
+      </ul>
+      <div class="verdict">
+        <span class="v ok">clean → keep</span>
+        <span class="v reorg">diverged → reorg</span>
+        <span class="v block">KEV → hard block</span>
+      </div>
+    </div>
+  </div>
+  <div class="flowhint mono">
+    <span class="arr">▸</span> command guard is a best-effort UX layer
+    <span class="arr">▸</span> the effect gate is command-independent: a parser blind spot still gets the live closure check
+  </div>
+
+  <div class="sec-label">Advisory sources &amp; engine asymmetry</div>
+  <div class="grid2">
+    <div class="card">
+      <h3>One canonical truth, overlays around it</h3>
+      <div class="truth">
+        <div class="src osv"><span class="dot"></span><span class="nm">OSV.dev</span><span class="role">canonical · first query target</span></div>
+        <div class="src kev"><span class="dot"></span><span class="nm">CISA KEV</span><span class="role">hard-risk overlay · match = hard block, no override</span></div>
+        <div class="src ghsa"><span class="dot"></span><span class="nm">GitHub Advisory</span><span class="role">enrichment · patched-version metadata</span></div>
+        <div class="src deps"><span class="dot"></span><span class="nm">deps.dev</span><span class="role">transitive risk graph (future)</span></div>
+      </div>
+      <div class="truthnote">Treating several live sources as co-equal truths invites cross-fire. OSV <i>is</i> the truth; everything else only surfaces signals that disagree with it.</div>
+    </div>
+    <div class="card">
+      <h3>Detect-and-branch, never assume parity</h3>
+      <div class="eng">
+        <div class="erow">
+          <div class="en">Claude Code <span class="pin">● inert install</span></div>
+          <div class="ed">Has <span class="mono">updatedInput</span> → PreToolUse rewrites the install to add <span class="mono">--ignore-scripts</span>. A rejected package's lifecycle scripts never run.</div>
+        </div>
+        <div class="erow">
+          <div class="en">Codex CLI</div>
+          <div class="ed">No <span class="mono">updatedInput</span> → falls back to detect-and-rollback. Sends <span class="mono">turn_id</span>/<span class="mono">model</span> in the hook payload; Claude does not.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="sec-label">Release-time tools</div>
+  <div class="tools">
+    <div class="tool">
+      <div class="tn">scan secrets</div>
+      <div class="td">gitleaks runner; repo owns the <span class="mono">.gitleaks</span> policy, fail-closed on a missing scanner.</div>
+    </div>
+    <div class="tool">
+      <div class="tn">audit</div>
+      <div class="td">Multi-ecosystem lockfile audit, delegated to each native tool. 0/1/2 contract; aggregate-worst across lockfiles.</div>
+      <div class="eco mono">npm · pnpm · yarn¹⁺² · bun</div>
+    </div>
+    <div class="tool">
+      <div class="tn">hooks</div>
+      <div class="td"><span class="mono">init</span> scaffolds a starter policy, <span class="mono">install</span> activates repo-local git hooks, <span class="mono">check</span> verifies them.</div>
+    </div>
+    <div class="tool">
+      <div class="tn">doctor</div>
+      <div class="td">Repo-entry posture diagnose; <span class="mono">--fix</span> scaffolds + activates the secret lane. Non-destructive.</div>
+    </div>
+  </div>
+
+  <div class="sec-label">State — <span class="mono" style="text-transform:none;letter-spacing:0">~/.safedeps/</span></div>
+  <div class="store">
+    <span class="p">approved-specs/</span> <span class="c">— the ledger (hash · TTL 30d · transitive_specs)</span><br>
+    <span class="p">snapshots/</span> <span class="c">— pre-install lockfile baselines for reorg</span><br>
+    <span class="p">cache/osv/ · cache/kev/</span> <span class="c">— provider responses under TTL (24h)</span><br>
+    <span class="p">advisory.log</span> <span class="c">— every approve / block / fail-closed decision (observable)</span>
+  </div>
+
+  <div class="sec-label">Invariants — do not break</div>
+  <div class="inv">
+    <div class="ic"><div class="it">Effect is the authority</div><div class="id">For npm, the PostToolUse closure check decides — not the command-text guard.</div></div>
+    <div class="ic"><div class="it">No silent fallback</div><div class="id">A provider miss is fail-closed; every bypass is observable and logged.</div></div>
+    <div class="ic"><div class="it">Zero dependencies</div><div class="id">The tool itself ships no npm deps — a security property, not an oversight.</div></div>
+    <div class="ic"><div class="it">Inert install (Claude)</div><div class="id">Rejected packages never execute their lifecycle scripts.</div></div>
+    <div class="ic"><div class="it">OSV is singular</div><div class="id">KEV is an overlay, GHSA is enrichment — no second co-equal truth.</div></div>
+    <div class="ic"><div class="it">Ledger ≠ boundary</div><div class="id">A same-user convenience cache, not a wall against a same-user attacker (until signing).</div></div>
+  </div>
+
+  <footer>
+    <span>safedeps · gate dev-dependency installs · OSV-backed · local-first</span>
+    <span>github.com/aldegad/safedeps · @aldegad/safedeps@2.9.0</span>
+  </footer>
+
+</div>
+</body>
+</html>
