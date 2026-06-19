@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>safedeps — 아키텍처</title>
+<style>
+  :root{
+    --ink:#0a0d13; --panel:#121823; --panel2:#0f141d; --line:#222c3a;
+    --tx:#e7eef6; --mut:#8896a8; --dim:#5b6878;
+    --osv:#58a6ff; --kev:#e3a008; --ghsa:#a371f7;
+    --ok:#3fb950; --warn:#d29922; --block:#f85149;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Pretendard,"Apple SD Gothic Neo",Roboto,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0}
+  html{background:#0a0d13}
+  body{
+    background:
+      radial-gradient(1100px 520px at 82% -8%, rgba(88,166,255,.10), transparent 60%),
+      radial-gradient(900px 480px at 6% 8%, rgba(63,185,80,.07), transparent 55%),
+      var(--ink);
+    color:var(--tx); font-family:var(--sans);
+    -webkit-font-smoothing:antialiased; line-height:1.6;
+    padding:34px 22px 56px;
+  }
+  .wrap{max-width:1080px;margin:0 auto}
+  .mono{font-family:var(--mono)}
+
+  header{display:flex;align-items:flex-end;justify-content:space-between;gap:20px;flex-wrap:wrap;margin-bottom:6px}
+  h1{font-size:30px;margin:0;letter-spacing:-.4px;font-weight:680}
+  h1 .sd{color:var(--ok)}
+  .sub{color:var(--mut);font-size:14.5px;margin-top:7px;max-width:700px}
+  .ver{font-family:var(--mono);font-size:12px;color:var(--ok);border:1px solid rgba(63,185,80,.4);
+    background:rgba(63,185,80,.08);border-radius:999px;padding:5px 11px;white-space:nowrap}
+
+  .props{display:flex;flex-wrap:wrap;gap:7px;margin:18px 0 30px}
+  .chip{font-size:12px;color:var(--mut);border:1px solid var(--line);
+    background:var(--panel2);border-radius:7px;padding:5px 10px}
+  .chip b{color:var(--tx);font-weight:600;font-family:var(--mono);font-size:11.5px}
+
+  .sec-label{font-family:var(--mono);font-size:11px;letter-spacing:1.4px;
+    color:var(--dim);margin:34px 0 12px}
+
+  .lanes{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  @media(max-width:760px){.lanes{grid-template-columns:1fr}}
+  .lane{border:1px solid var(--line);border-radius:14px;background:linear-gradient(180deg,var(--panel),var(--panel2));padding:16px 16px 14px}
+  .lane h3{margin:0 0 3px;font-size:15px;font-weight:640}
+  .lane .tag{font-family:var(--mono);font-size:10.5px;color:var(--dim);letter-spacing:.5px}
+  .lane p{color:var(--mut);font-size:12.8px;margin:8px 0 0}
+  .lane.install h3{color:var(--osv)} .lane.release h3{color:var(--warn)}
+
+  .pipe{display:grid;grid-template-columns:1fr 1fr 1fr;gap:0;align-items:stretch;
+    border:1px solid var(--line);border-radius:14px;overflow:hidden;background:var(--panel2)}
+  @media(max-width:760px){.pipe{grid-template-columns:1fr}}
+  .stage{padding:16px 15px;position:relative;border-right:1px solid var(--line)}
+  .stage:last-child{border-right:none}
+  @media(max-width:760px){.stage{border-right:none;border-bottom:1px solid var(--line)}}
+  .stage .ph{font-family:var(--mono);font-size:11px;color:var(--dim);letter-spacing:.5px}
+  .stage h4{margin:5px 0 2px;font-size:14.5px;font-weight:640}
+  .stage .cmd{font-family:var(--mono);font-size:11.5px;color:var(--osv);margin:0 0 9px}
+  .stage ul{margin:0;padding-left:15px;color:var(--mut);font-size:12.4px}
+  .stage li{margin:5px 0}
+  .stage .auth{position:absolute;top:13px;right:13px;font-family:var(--mono);font-size:9.5px;
+    border-radius:6px;padding:3px 7px;letter-spacing:.3px}
+  .auth.primary{color:var(--ok);background:rgba(63,185,80,.1);border:1px solid rgba(63,185,80,.35)}
+  .auth.advisory{color:var(--mut);background:#0d121b;border:1px solid var(--line)}
+  .flowhint{display:flex;align-items:center;gap:10px;color:var(--dim);
+    font-size:11.8px;margin:11px 2px 0;flex-wrap:wrap}
+  .flowhint .arr{color:var(--osv);font-family:var(--mono)}
+
+  .verdict{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+  .v{font-family:var(--mono);font-size:11px;border-radius:7px;padding:5px 9px;border:1px solid}
+  .v.ok{color:var(--ok);border-color:rgba(63,185,80,.4);background:rgba(63,185,80,.07)}
+  .v.block{color:var(--block);border-color:rgba(248,81,73,.4);background:rgba(248,81,73,.07)}
+  .v.reorg{color:var(--warn);border-color:rgba(210,153,34,.4);background:rgba(210,153,34,.07)}
+
+  .grid2{display:grid;grid-template-columns:1.15fr .85fr;gap:14px}
+  @media(max-width:760px){.grid2{grid-template-columns:1fr}}
+  .card{border:1px solid var(--line);border-radius:14px;background:linear-gradient(180deg,var(--panel),var(--panel2));padding:16px}
+  .card h3{margin:0 0 12px;font-size:14px;font-weight:640}
+
+  .truth{display:flex;flex-direction:column;gap:9px}
+  .src{display:flex;align-items:center;gap:11px;border:1px solid var(--line);border-radius:10px;
+    padding:10px 12px;background:var(--panel2)}
+  .src .dot{width:9px;height:9px;border-radius:50%;flex:0 0 auto}
+  .src .nm{font-family:var(--mono);font-size:13px;font-weight:600}
+  .src .role{font-size:11.5px;color:var(--mut);margin-left:auto;text-align:right}
+  .src.osv{border-color:rgba(88,166,255,.4)} .src.osv .dot{background:var(--osv)} .src.osv .nm{color:var(--osv)}
+  .src.kev .dot{background:var(--kev)} .src.kev .nm{color:var(--kev)}
+  .src.ghsa .dot{background:var(--ghsa)} .src.ghsa .nm{color:var(--ghsa)}
+  .src.deps .dot{background:var(--dim)} .src.deps .nm{color:var(--mut)}
+  .truthnote{font-size:11.8px;color:var(--dim);margin-top:10px}
+
+  .eng{display:flex;flex-direction:column;gap:10px}
+  .erow{border:1px solid var(--line);border-radius:10px;padding:10px 12px;background:var(--panel2)}
+  .erow .en{font-family:var(--mono);font-size:12.5px;font-weight:600;color:var(--tx)}
+  .erow .ed{font-size:12px;color:var(--mut);margin-top:3px}
+  .erow .en .pin{font-size:10px;color:var(--ok);margin-left:6px}
+
+  .tools{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:4px}
+  @media(max-width:760px){.tools{grid-template-columns:repeat(2,1fr)}}
+  .tool{border:1px solid var(--line);border-radius:11px;background:var(--panel2);padding:12px}
+  .tool .tn{font-family:var(--mono);font-size:12.5px;color:var(--warn);font-weight:600}
+  .tool .td{font-size:11.8px;color:var(--mut);margin-top:5px}
+  .tool .eco{font-family:var(--mono);font-size:10px;color:var(--ok);margin-top:7px;letter-spacing:.3px}
+
+  .inv{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:4px}
+  @media(max-width:760px){.inv{grid-template-columns:1fr}}
+  .ic{border:1px solid var(--line);border-left:3px solid var(--ok);border-radius:8px;
+    background:var(--panel2);padding:11px 13px}
+  .ic .it{font-size:12.8px;font-weight:600}
+  .ic .id{font-size:11.8px;color:var(--mut);margin-top:3px}
+
+  .store{font-family:var(--mono);font-size:12px;color:var(--mut);border:1px dashed var(--line);
+    border-radius:10px;padding:13px 15px;background:#0c1119;line-height:1.9}
+  .store .p{color:var(--ok)} .store .c{color:var(--dim)}
+
+  footer{margin-top:38px;color:var(--dim);font-size:11.5px;font-family:var(--mono);
+    border-top:1px solid var(--line);padding-top:14px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div>
+      <h1><span class="sd">safe</span>deps <span style="color:var(--dim);font-weight:400">아키텍처</span></h1>
+      <div class="sub">로컬에서 도는, 의존성 없는 <b style="color:var(--tx)">개발 의존성 설치</b> 보안 게이트. 설치 <b style="color:var(--tx)">전</b>에 canonical advisory 증거로 승인하고, 설치 <b style="color:var(--tx)">후</b>에는 디스크에 실제로 깔린 결과를 기준으로 집행한다.</div>
+    </div>
+    <div class="ver mono">v2.9.0 · Claude Code + Codex CLI</div>
+  </header>
+
+  <div class="props">
+    <span class="chip"><b>OSV</b> 단일 canonical 진실</span>
+    <span class="chip"><b>No</b> silent fallback · fail-closed</span>
+    <span class="chip"><b>의존성 0</b> (npm deps 없음)</span>
+    <span class="chip"><b>No SaaS</b> — 로컬 CLI + 공개 DB</span>
+    <span class="chip"><b>effect-primary</b> = npm 한정</span>
+  </div>
+
+  <div class="sec-label">두 개의 레인</div>
+  <div class="lanes">
+    <div class="lane install">
+      <span class="tag">패키지 단위 · 선제적</span>
+      <h3>설치 시점 레인 (Install-time)</h3>
+      <p>모든 에이전트 의존성 설치를 게이트한다. 3단계: advisory check 가 approved-spec ledger 를 쓰고, 빠른 PreToolUse 커맨드 가드가 막고, npm PostToolUse <b style="color:var(--tx)">effect gate</b>(진짜 권위)가 어긋난 건 reorg(롤백)한다.</p>
+    </div>
+    <div class="lane release">
+      <span class="tag">레포 단위 · opt-in</span>
+      <h3>릴리스 시점 레인 (Release-time)</h3>
+      <p>레포 트리 위생을 한 namespace 로: secret 스캔, 멀티-ecosystem 의존성 audit, 레포 git-hook 설치/검사, 자세 진단 <span class="mono">doctor</span>. safedeps 는 <b style="color:var(--tx)">실행</b>을, 레포는 <b style="color:var(--tx)">정책</b>을 소유한다.</p>
+    </div>
+  </div>
+
+  <div class="sec-label">설치 파이프라인 — 전엔 게이트, 후엔 집행</div>
+  <div class="pipe">
+    <div class="stage">
+      <span class="auth advisory">advisory</span>
+      <div class="ph">PHASE 1</div>
+      <h4>advisory 검사</h4>
+      <div class="cmd mono">safedeps check</div>
+      <ul>
+        <li>OSV → KEV → GHSA 조회</li>
+        <li>npm: 스크립트 없는 임시 lockfile 로 <b>전체 closure</b> 해석, OSV <span class="mono">/v1/querybatch</span></li>
+        <li>clean/patched → approved-spec 를 <b>ledger</b> 에 기록 (+ transitive_specs)</li>
+      </ul>
+    </div>
+    <div class="stage">
+      <span class="auth advisory">advisory</span>
+      <div class="ph">PHASE 2</div>
+      <h4>빠른 커맨드 가드</h4>
+      <div class="cmd mono">PreToolUse hook</div>
+      <ul>
+        <li>설치 명령 파싱, 명백한 미승인 설치 차단</li>
+        <li>lockfile / manifest 스냅샷</li>
+        <li><b style="color:var(--ok)">Claude:</b> <span class="mono">--ignore-scripts</span> 주입 → 설치가 <b>무실행(inert)</b>으로</li>
+      </ul>
+    </div>
+    <div class="stage">
+      <span class="auth primary">authority</span>
+      <div class="ph">PHASE 3</div>
+      <h4>npm effect gate</h4>
+      <div class="cmd mono">PostToolUse hook</div>
+      <ul>
+        <li><b>실제</b> package-lock.json closure 를 읽음</li>
+        <li>모든 pkg@version 을 ledger + transitive_specs 와 대조, OSV 배치 재조회</li>
+        <li>closure 가 clean 검증된 뒤에만 <span class="mono">npm rebuild</span></li>
+      </ul>
+      <div class="verdict">
+        <span class="v ok">clean → 유지</span>
+        <span class="v reorg">어긋남 → reorg</span>
+        <span class="v block">KEV → hard block</span>
+      </div>
+    </div>
+  </div>
+  <div class="flowhint">
+    <span class="arr">▸</span> 커맨드 가드는 best-effort UX 레이어
+    <span class="arr">▸</span> effect gate 는 커맨드-독립: 파서 맹점이어도 live closure 검사는 돈다
+  </div>
+
+  <div class="sec-label">advisory 출처 &amp; 엔진 비대칭</div>
+  <div class="grid2">
+    <div class="card">
+      <h3>단일 canonical 진실, 그 주위의 overlay</h3>
+      <div class="truth">
+        <div class="src osv"><span class="dot"></span><span class="nm">OSV.dev</span><span class="role">canonical · 1순위 조회 대상</span></div>
+        <div class="src kev"><span class="dot"></span><span class="nm">CISA KEV</span><span class="role">고위험 overlay · 매치 = hard block, override 없음</span></div>
+        <div class="src ghsa"><span class="dot"></span><span class="nm">GitHub Advisory</span><span class="role">enrichment · patched 버전 메타데이터</span></div>
+        <div class="src deps"><span class="dot"></span><span class="nm">deps.dev</span><span class="role">transitive 위험 그래프 (future)</span></div>
+      </div>
+      <div class="truthnote">여러 live 출처를 동등한 진실로 두면 cross-fire 가 난다. OSV <i>가</i> 진실이고, 나머지는 OSV 와 어긋나는 신호만 띄운다.</div>
+    </div>
+    <div class="card">
+      <h3>감지해서 분기, 절대 동일하다 가정 안 함</h3>
+      <div class="eng">
+        <div class="erow">
+          <div class="en">Claude Code <span class="pin">● inert install</span></div>
+          <div class="ed"><span class="mono">updatedInput</span> 보유 → PreToolUse 가 설치를 <span class="mono">--ignore-scripts</span> 로 rewrite. 거부된 패키지의 lifecycle 스크립트는 안 돈다.</div>
+        </div>
+        <div class="erow">
+          <div class="en">Codex CLI</div>
+          <div class="ed"><span class="mono">updatedInput</span> 없음 → detect-and-rollback 로 폴백. hook payload 에 <span class="mono">turn_id</span>/<span class="mono">model</span> 전달(Claude 는 안 보냄).</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="sec-label">릴리스 시점 도구</div>
+  <div class="tools">
+    <div class="tool">
+      <div class="tn">scan secrets</div>
+      <div class="td">gitleaks 러너. 레포가 <span class="mono">.gitleaks</span> 정책 소유, scanner 부재 시 fail-closed.</div>
+    </div>
+    <div class="tool">
+      <div class="tn">audit</div>
+      <div class="td">멀티-ecosystem lockfile audit, 각 네이티브 도구에 위임. 0/1/2 계약 · lockfile 간 aggregate-worst.</div>
+      <div class="eco mono">npm · pnpm · yarn¹⁺² · bun</div>
+    </div>
+    <div class="tool">
+      <div class="tn">hooks</div>
+      <div class="td"><span class="mono">init</span> 시작 정책 scaffold, <span class="mono">install</span> 레포 로컬 git hook 활성화, <span class="mono">check</span> 검증.</div>
+    </div>
+    <div class="tool">
+      <div class="tn">doctor</div>
+      <div class="td">레포 진입 자세 진단. <span class="mono">--fix</span> 가 secret 레인 scaffold+활성화. 비파괴적.</div>
+    </div>
+  </div>
+
+  <div class="sec-label">상태 — <span class="mono" style="letter-spacing:0">~/.safedeps/</span></div>
+  <div class="store">
+    <span class="p">approved-specs/</span> <span class="c">— ledger (hash · TTL 30일 · transitive_specs)</span><br>
+    <span class="p">snapshots/</span> <span class="c">— reorg 용 설치-전 lockfile 베이스라인</span><br>
+    <span class="p">cache/osv/ · cache/kev/</span> <span class="c">— TTL 하의 provider 응답 (24시간)</span><br>
+    <span class="p">advisory.log</span> <span class="c">— 모든 approve / block / fail-closed 결정 (관측 가능)</span>
+  </div>
+
+  <div class="sec-label">불변식 — 깨지 말 것</div>
+  <div class="inv">
+    <div class="ic"><div class="it">effect 가 권위</div><div class="id">npm 은 PostToolUse closure 검사가 결정한다 — 커맨드-텍스트 가드가 아니라.</div></div>
+    <div class="ic"><div class="it">No silent fallback</div><div class="id">provider 미스는 fail-closed. 모든 bypass 는 관측 가능하고 로깅된다.</div></div>
+    <div class="ic"><div class="it">의존성 0</div><div class="id">도구 자체가 npm deps 0 — 실수가 아니라 보안 속성.</div></div>
+    <div class="ic"><div class="it">inert install (Claude)</div><div class="id">거부된 패키지는 lifecycle 스크립트를 절대 실행하지 않는다.</div></div>
+    <div class="ic"><div class="it">OSV 는 단수</div><div class="id">KEV 는 overlay, GHSA 는 enrichment — 두 번째 동등 진실 없음.</div></div>
+    <div class="ic"><div class="it">ledger ≠ 경계</div><div class="id">동일 사용자 편의 캐시일 뿐, 동일 사용자 공격자 방벽이 아니다 (서명 전까지).</div></div>
+  </div>
+
+  <footer>
+    <span>safedeps · 개발 의존성 설치 게이트 · OSV 기반 · 로컬 우선</span>
+    <span>github.com/aldegad/safedeps · @aldegad/safedeps@2.9.0</span>
+  </footer>
+
+</div>
+</body>
+</html>
