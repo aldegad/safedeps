@@ -191,6 +191,26 @@ grep -q 'evil-pkg@9.9.9' <<< "${reason}" || fail "deny reason names the real pac
 [[ "${reason}" != *"ops@example.test"* ]] || fail "deny reason must not name the email arg"
 pass "hook gates real install chained with npx run (email not polluted)"
 
+# Regression: a pkg@version that merely APPEARS in a non-install segment (an echo /
+# log line) must not be attached to a real install elsewhere in the command. Specs
+# are extracted only from segments that are themselves install commands.
+echo_mention_output=$(
+  run_hook_command "${tmp_root}/home-echo-mention" "${tmp_root}/safe-echo-mention" 'npm install evil-pkg@9.9.9; echo "bumped other-pkg@2.0.0"'
+)
+[[ "$(jq -r '.hookSpecificOutput.permissionDecision' <<< "${echo_mention_output}")" == "deny" ]] || fail "hook still gates the real install when another segment merely echoes a pkg@version"
+echo_mention_reason=$(jq -r '.hookSpecificOutput.permissionDecisionReason' <<< "${echo_mention_output}")
+grep -q 'evil-pkg@9.9.9' <<< "${echo_mention_reason}" || fail "deny reason names the real install spec"
+[[ "${echo_mention_reason}" != *"other-pkg@2.0.0"* ]] || fail "deny reason must not name a pkg@version that only appears in an echo segment"
+pass "hook extracts specs only from install segments, not from echoed pkg@version mentions"
+
+# Regression: an echoed pkg@version next to a BARE install (no operand) must not be
+# read as installing that package — the bare install is allowed, not denied.
+bare_mention_output=$(
+  run_hook_command "${tmp_root}/home-bare-mention" "${tmp_root}/safe-bare-mention" 'echo "bumped left-pad@1.0.0 -> 1.0.1"; npm install'
+)
+[[ "$(jq -r '.hookSpecificOutput.permissionDecision // "allow"' <<< "${bare_mention_output}" 2>/dev/null || echo allow)" != "deny" ]] || fail "bare npm install must not be denied because of a pkg@version in an echo segment"
+pass "echoed pkg@version beside a bare install does not trigger a false deny"
+
 false_positive_safe="${tmp_root}/safe-false-positive"
 false_positive_cases=(
   $'grep -nE "install|add" README.md'

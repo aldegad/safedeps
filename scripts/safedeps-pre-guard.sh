@@ -741,7 +741,11 @@ guard_extract_specs() {
     [[ -z "${seg//[[:space:]]/}" ]] && continue
     if printf '%s' "${seg}" | grep -qEi '(^|[[:space:]])(npx|dlx)([[:space:]]|$)'; then
       source+="$(guard_runner_operands "${seg}")"$'\n'
-    else
+    elif command_is_dependency_install "${seg}"; then
+      # Only a segment that is itself an install command contributes its operands.
+      # A non-install segment (an echo / log line, a path, a comment that merely
+      # MENTIONS a pkg@version) is data, not an install — extracting its tokens
+      # would falsely flag e.g. `echo "bumped left-pad@1.0.0"; npm install`.
       source+="${seg}"$'\n'
     fi
   done < <(command_candidate_texts "${cmd}" | tr ';|&' '\n')
