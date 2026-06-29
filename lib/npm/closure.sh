@@ -590,6 +590,62 @@ safedeps_npm_write_source() {
   fi
 }
 
+# Discover the consuming repo's npm `overrides` so the closure probe resolves
+# transitive deps the way the real install will. Without this, safedeps probes
+# the *published* closure (no overrides) and false-positives on a transitive the
+# repo has already pinned to a patched version via `overrides`.
+#
+# Honoring overrides cannot hide a real vuln: the probe still resolves each
+# override to a concrete version and OSV is queried for THAT version — exactly
+# the version that will be installed. An override pointing at a still-vulnerable
+# version is therefore flagged like any other.
+#
+# Source precedence:
+#   1. SAFEDEPS_NPM_OVERRIDES_JSON env (explicit JSON; testing / non-cwd callers).
+#   2. Nearest package.json walking up from SAFEDEPS_NPM_OVERRIDES_DIR (default
+#      $PWD = the consuming repo) with a non-empty `.overrides`, bounded by the
+#      git repo root.
+#
+# Only concrete version pins are honored: string values starting with `$`
+# (direct-dep refs like "$react") and nested objects mentioning `$` are dropped,
+# because they have no meaning in the standalone probe and would break the
+# `npm install` resolution.
+safedeps_npm_repo_overrides_json() {
+  if [[ -n "${SAFEDEPS_NPM_OVERRIDES_JSON:-}" ]]; then
+    printf '%s' "${SAFEDEPS_NPM_OVERRIDES_JSON}"
+    return 0
+  fi
+  command -v jq >/dev/null 2>&1 || { printf '{}'; return 0; }
+
+  local filter='
+    (.overrides // {})
+    | if type == "object" then . else {} end
+    | to_entries
+    | map(select(
+        ((.value | type) == "string" and (.value | startswith("$") | not))
+        or
+        ((.value | type) == "object" and ((.value | tostring | contains("$")) | not))
+      ))
+    | from_entries
+  '
+
+  local dir="${SAFEDEPS_NPM_OVERRIDES_DIR:-${PWD}}"
+  while [[ -n "${dir}" && "${dir}" != "/" ]]; do
+    local pkg="${dir}/package.json"
+    if [[ -f "${pkg}" ]]; then
+      local raw
+      raw=$(jq -c 'if (.overrides | type) == "object" and (.overrides | length) > 0 then 1 else empty end' "${pkg}" 2>/dev/null) || raw=""
+      if [[ -n "${raw}" ]]; then
+        jq -c "${filter}" "${pkg}" 2>/dev/null || printf '{}'
+        return 0
+      fi
+    fi
+    [[ -d "${dir}/.git" ]] && break
+    dir=$(dirname "${dir}")
+  done
+  printf '{}'
+}
+
 safedeps_npm_resolve_spec_closure() {
   local package_name="$1"
   local version="$2"
@@ -645,7 +701,20 @@ safedeps_npm_resolve_spec_closure() {
 
   tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/safedeps-npm-closure.XXXXXX") || return 1
 
-  printf '{"name":"safedeps-closure-probe","version":"0.0.0","private":true}\n' > "${tmp_dir}/package.json"
+  local overrides_json
+  overrides_json=$(safedeps_npm_repo_overrides_json)
+  [[ -n "${overrides_json}" ]] || overrides_json='{}'
+  if ! jq -n --argjson overrides "${overrides_json}" \
+    '{name:"safedeps-closure-probe",version:"0.0.0",private:true}
+     + (if ($overrides | length) > 0 then {overrides: $overrides} else {} end)' \
+    > "${tmp_dir}/package.json" 2>/dev/null; then
+    printf '{"name":"safedeps-closure-probe","version":"0.0.0","private":true}\n' > "${tmp_dir}/package.json"
+    overrides_json='{}'
+  fi
+  if [[ "${overrides_json}" != '{}' ]]; then
+    printf 'safedeps npm closure: applied %s repo override(s) to closure probe\n' \
+      "$(jq 'length' <<<"${overrides_json}" 2>/dev/null || printf '?')" >&2
+  fi
   if ! (
     cd "${tmp_dir}" &&
       npm install "${package_name}@${version}" \

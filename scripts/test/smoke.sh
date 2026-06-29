@@ -81,6 +81,34 @@ mtime_val=$(bash -c 'source lib/providers/providers.sh; f=$(mktemp); safedeps_fi
 [[ "${mtime_val}" =~ ^[0-9]+$ ]] || fail "safedeps_file_mtime returns a bare integer (got: ${mtime_val})"
 pass "file mtime is a portable integer"
 
+# Repo-override awareness: the npm closure probe must resolve transitive deps
+# through the consuming repo's `overrides`, so a transitive the repo has pinned
+# to a patched version is not false-flagged. Unit-test the discovery + filter.
+ov_repo="${tmp_root}/ov-repo"
+mkdir -p "${ov_repo}"
+git -C "${ov_repo}" init -q
+cat > "${ov_repo}/package.json" <<'JSON'
+{"name":"ov","version":"0.0.0","overrides":{"uuid@8.3.2":"^11.1.1","react":"$react","badnest":{"dep":"$x"},"goodnest":{"dep":"1.2.3"}}}
+JSON
+ov_out=$(SAFEDEPS_NPM_OVERRIDES_DIR="${ov_repo}" bash -c 'source lib/npm/closure.sh; safedeps_npm_repo_overrides_json')
+[[ "$(jq -r '."uuid@8.3.2"' <<< "${ov_out}")" == "^11.1.1" ]] || fail "override discovery keeps concrete transitive pin (got: ${ov_out})"
+[[ "$(jq -r 'has("react")' <<< "${ov_out}")" == "false" ]] || fail "override discovery drops \$-ref string (got: ${ov_out})"
+[[ "$(jq -r 'has("badnest")' <<< "${ov_out}")" == "false" ]] || fail "override discovery drops object mentioning \$ (got: ${ov_out})"
+[[ "$(jq -r '.goodnest.dep' <<< "${ov_out}")" == "1.2.3" ]] || fail "override discovery keeps concrete nested pin (got: ${ov_out})"
+pass "npm closure honors repo overrides (concrete pins kept, \$-refs dropped)"
+
+ov_none="${tmp_root}/ov-none"
+mkdir -p "${ov_none}"
+git -C "${ov_none}" init -q
+printf '{"name":"none","version":"0.0.0"}\n' > "${ov_none}/package.json"
+ov_none_out=$(SAFEDEPS_NPM_OVERRIDES_DIR="${ov_none}" bash -c 'source lib/npm/closure.sh; safedeps_npm_repo_overrides_json')
+[[ "${ov_none_out}" == "{}" ]] || fail "no repo overrides yields empty object (got: ${ov_none_out})"
+pass "npm closure with no repo overrides is unchanged"
+
+ov_env_out=$(SAFEDEPS_NPM_OVERRIDES_JSON='{"x":"1.0.0"}' bash -c 'source lib/npm/closure.sh; safedeps_npm_repo_overrides_json')
+[[ "$(jq -r '.x' <<< "${ov_env_out}")" == "1.0.0" ]] || fail "SAFEDEPS_NPM_OVERRIDES_JSON env takes precedence (got: ${ov_env_out})"
+pass "npm closure override env source precedence"
+
 project_dir="${tmp_root}/project"
 mkdir -p "${project_dir}"
 printf '{"dependencies":{}}\n' > "${project_dir}/package.json"
