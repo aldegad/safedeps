@@ -320,7 +320,7 @@ Install a per-user LaunchAgent to re-check the approved-spec ledger once per day
 node scripts/install/install-safedeps-recheck-agent.mjs install --hour 9 --minute 0
 ```
 
-This runs `safedeps re-check --json` against `~/.safedeps/approved-specs/`. It does not use LLM tokens; it only calls the advisory providers used by safedeps. If a new CVE/KEV is found, a spec is revoked, or a provider check is skipped, the wrapper writes `~/.safedeps/recheck-alerts.jsonl` and raises a macOS notification.
+This runs `safedeps re-check --json` against `~/.safedeps/approved-specs/`. It does not use LLM tokens; it only calls the advisory providers used by safedeps. If a new CVE/KEV is found, a spec is revoked, a provider check is skipped, or a ledger entry has no matching `advisory.log` approval record (a suspected forgery), the wrapper writes `~/.safedeps/recheck-alerts.jsonl` and raises a macOS notification.
 
 Useful commands:
 

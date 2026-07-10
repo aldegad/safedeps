@@ -320,7 +320,7 @@ node scripts/install/install-safedeps-hooks.mjs
 node scripts/install/install-safedeps-recheck-agent.mjs install --hour 9 --minute 0
 ```
 
-이 명령은 `~/.safedeps/approved-specs/`에 대해 `safedeps re-check --json`을 실행합니다. LLM 토큰은 사용하지 않으며, safedeps에서 사용하는 advisory provider만 호출합니다. 새 CVE/KEV가 발견되거나 spec이 폐기되거나 provider 확인이 생략되면 wrapper가 `~/.safedeps/recheck-alerts.jsonl`에 기록하고 macOS 알림을 표시합니다.
+이 명령은 `~/.safedeps/approved-specs/`에 대해 `safedeps re-check --json`을 실행합니다. LLM 토큰은 사용하지 않으며, safedeps에서 사용하는 advisory provider만 호출합니다. 새 CVE/KEV가 발견되거나, spec이 폐기되거나, provider 확인이 생략되거나, `advisory.log` 승인 기록이 없는 ledger 엔트리(위조 의심)가 발견되면 wrapper가 `~/.safedeps/recheck-alerts.jsonl`에 기록하고 macOS 알림을 표시합니다.
 
 유용한 명령:
 

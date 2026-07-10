@@ -94,12 +94,13 @@ still_clean=$(jq -r '.still_clean // 0' "${tmp_json}")
 newly_vulnerable=$(jq -r '(.newly_vulnerable // []) | length' "${tmp_json}")
 kev_hit=$(jq -r '(.kev_hit // []) | length' "${tmp_json}")
 revoked=$(jq -r '(.revoked // []) | length' "${tmp_json}")
+suspected_forgery=$(jq -r '(.suspected_forgery // []) | length' "${tmp_json}")
 skipped=$(( checked - still_clean - revoked ))
 if [[ "${skipped}" -lt 0 ]]; then
   skipped=0
 fi
 
-if [[ "${newly_vulnerable}" -gt 0 || "${kev_hit}" -gt 0 || "${revoked}" -gt 0 || "${skipped}" -gt 0 ]]; then
+if [[ "${newly_vulnerable}" -gt 0 || "${kev_hit}" -gt 0 || "${revoked}" -gt 0 || "${skipped}" -gt 0 || "${suspected_forgery}" -gt 0 ]]; then
   alert=$(jq -c \
     --arg at "${run_at}" \
     --argjson skipped "${skipped}" \
@@ -110,6 +111,9 @@ if [[ "${newly_vulnerable}" -gt 0 || "${kev_hit}" -gt 0 || "${revoked}" -gt 0 ||
   message="${revoked} revoked, ${newly_vulnerable} new CVE, ${kev_hit} KEV"
   if [[ "${skipped}" -gt 0 ]]; then
     message="${message}, ${skipped} provider skipped"
+  fi
+  if [[ "${suspected_forgery}" -gt 0 ]]; then
+    message="${message}, ${suspected_forgery} suspected ledger forgery"
   fi
   notify "safedeps attention needed" "${message}. See ~/.safedeps/recheck-alerts.jsonl"
 fi

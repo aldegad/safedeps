@@ -56,9 +56,9 @@ The internal engine keeps the v1 `reorg-guard` assets.
 
 ### Release notes
 
-- The npm package version in `package.json` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION` tracks it and the smoke test reads `package.json` to compare (current: v2.9.1).
+- The npm package version in `package.json` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION` tracks it and the smoke test reads `package.json` to compare (current: v2.9.2).
 - `npm test` runs the release smoke suite; the full fixture E2E lives under `v2.1-tests`.
-- The daily re-check uses no LLM tokens. It is opt-in: a macOS `launchd` user agent runs `safedeps re-check --json` daily, installed atomically by `install-safedeps-recheck-agent.mjs`. It writes `~/.safedeps/recheck.log` and `~/.safedeps/recheck-alerts.jsonl` and raises a macOS notification on a new CVE/KEV/revoke/provider-skip. Network is used only for OSV / CISA / GHSA queries.
+- The daily re-check uses no LLM tokens. It is opt-in: a macOS `launchd` user agent runs `safedeps re-check --json` daily, installed atomically by `install-safedeps-recheck-agent.mjs`. It writes `~/.safedeps/recheck.log` and `~/.safedeps/recheck-alerts.jsonl` and raises a macOS notification on a new CVE/KEV/revoke/provider-skip/suspected-forgery. Network is used only for OSV / CISA / GHSA queries.
 
 ## v2.2 — effect-based enforcement (npm)
 
@@ -252,6 +252,10 @@ Status: shipped as v2.9.0.
 
 The PreToolUse guard extracted `pkg@version` tokens from *every* segment of a compound command, so a token that only appeared in a non-install segment (an `echo` / log line, a path, a comment) was attached to a real install elsewhere and triggered a spurious DENY — e.g. `echo "bumped left-pad@1.0.0"; npm install` was blocked as if installing `left-pad@1.0.0`. Spec extraction is now gated on `command_is_dependency_install` per segment: only a segment that is itself an install command contributes its operands (npx/dlx runners keep their existing operand handling). Real installs, hidden installs (`eval` / `$()` / `… | sh`), and the bypass corpus still DENY; the echoed-mention case now passes. Regression tests cover both the compound (deny names only the real spec) and bare-install (no false deny) cases.
 
+### v2.9.2 — daily re-check alert surfaces suspected ledger forgeries
+
+`safedeps re-check` already flagged ledger entries with no matching `advisory.log` approval record as `suspected_forgery`, but the daily alert wrapper (`safedeps-recheck-alert.sh`) never read that field: a forged entry whose package queries clean counted as `still_clean`, so no alert condition fired and the flag was silently swallowed — exactly the silent-fallback the invariants forbid. The wrapper now counts `suspected_forgery`, includes it in the alert trigger and the notification message, and the alert record carries the flagged entries. Smoke covers both directions: a forgery-only fixture (every other trigger zero) must alert, and a fully clean fixture must append nothing.
+
 ---
 
 ## v3 (future)
@@ -262,9 +266,9 @@ Defends the second-order attack where a malicious package's `postinstall` (runni
 
 Approach — **treat OSV as the authority and the ledger as a cache**, plus tamper detection. Cheap, layers onto existing infra:
 
-1. **Re-validate at enforcement / re-check** — verify the stored evidence against OSV instead of trusting the ledger verdict. A forged entry with no real evidence (or for a package OSV reports as vulnerable) is caught and revoked. Reduces the ledger to memoization with OSV as SSoT.
-2. **Watch `~/.safedeps/` in the post-install scan** — the post-verify hook already flags `postinstall` scripts that touch `~/.ssh` / `.env`; add `~/.safedeps/` so a package that writes the ledger trips a reorg — catching the forge in the act.
-3. **Provenance cross-check in daily re-check** — flag ledger entries with no matching `advisory.log` record (i.e. no real `safedeps check` ever ran) as suspected forgeries.
+1. **Re-validate at enforcement / re-check** — verify the stored evidence against OSV instead of trusting the ledger verdict. A forged entry with no real evidence (or for a package OSV reports as vulnerable) is caught and revoked. Reduces the ledger to memoization with OSV as SSoT. *(Still open — per-install network cost tradeoff.)*
+2. **Watch `~/.safedeps/` in the post-install scan** — shipped: the post-verify sensitive-path scan flags install scripts touching `~/.safedeps` / `SAFEDEPS_HOME`, so a package that writes the ledger trips a reorg — catching the forge in the act (smoke: ledger-tamper fixture).
+3. **Provenance cross-check in daily re-check** — shipped: `re-check` flags ledger entries with no matching `advisory.log` record as `suspected_forgery` (not revoked), and as of v2.9.2 the daily alert wrapper surfaces the flag.
 
 Explicit non-approach: **cryptographic ledger signing is not pursued** — a same-uid attacker can read the signing key and re-sign forgeries, so a local HMAC/signature adds no real boundary. The defense is authority-elsewhere (OSV) + detection, not local secrets.
 

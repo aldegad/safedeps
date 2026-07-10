@@ -391,6 +391,35 @@ grep -q '"checked":2' "${tmp_root}/safe-recheck/recheck.log" || fail "re-check w
 grep -q '"provider_skipped":1' "${tmp_root}/safe-recheck/recheck-alerts.jsonl" || fail "re-check wrapper alerts on skipped provider checks"
 pass "re-check alert wrapper"
 
+# Forgery flag alone must trigger a daily alert: checked==still_clean so
+# provider_skipped is 0 and every other trigger array is empty — only the
+# suspected_forgery condition can fire here.
+forgery_fixture="${tmp_root}/recheck-forgery-fixture.json"
+printf '%s\n' '{"command":"re-check","checked":1,"still_clean":1,"newly_vulnerable":[],"kev_hit":[],"revoked":[],"suspected_forgery":[{"ecosystem":"npm","package":"fixture-forged","version":"1.0.0","hash":"deadbeef","reason":"missing_advisory_log_approval"}]}' > "${forgery_fixture}"
+SAFEDEPS_NOTIFY=0 \
+  HOME="${tmp_root}/home-recheck" \
+  SAFEDEPS_HOME="${tmp_root}/safe-recheck" \
+  SAFEDEPS_RECHECK_FIXTURE_JSON="${forgery_fixture}" \
+  scripts/safedeps-recheck-alert.sh
+forgery_alert=$(tail -1 "${tmp_root}/safe-recheck/recheck-alerts.jsonl")
+[[ "$(jq -r '.kind' <<< "${forgery_alert}")" == "recheck_attention" ]] || fail "re-check wrapper alerts on suspected ledger forgery"
+[[ "$(jq -r '.suspected_forgery[0].package' <<< "${forgery_alert}")" == "fixture-forged" ]] || fail "forgery alert carries the flagged entry"
+pass "re-check wrapper alerts on suspected ledger forgery"
+
+# Regression: a fully clean re-check (empty suspected_forgery included) must
+# not append an alert.
+clean_fixture="${tmp_root}/recheck-clean-fixture.json"
+printf '%s\n' '{"command":"re-check","checked":1,"still_clean":1,"newly_vulnerable":[],"kev_hit":[],"revoked":[],"suspected_forgery":[]}' > "${clean_fixture}"
+alerts_before=$(wc -l < "${tmp_root}/safe-recheck/recheck-alerts.jsonl")
+SAFEDEPS_NOTIFY=0 \
+  HOME="${tmp_root}/home-recheck" \
+  SAFEDEPS_HOME="${tmp_root}/safe-recheck" \
+  SAFEDEPS_RECHECK_FIXTURE_JSON="${clean_fixture}" \
+  scripts/safedeps-recheck-alert.sh
+alerts_after=$(wc -l < "${tmp_root}/safe-recheck/recheck-alerts.jsonl")
+[[ "${alerts_before}" -eq "${alerts_after}" ]] || fail "clean re-check must not append an alert"
+pass "clean re-check appends no alert"
+
 # Release-time lane (absorbed from security-release-gates): commands must be
 # registered and resolve their gate scripts.
 gates_help=$(HOME="${tmp_root}/home-gates" SAFEDEPS_HOME="${tmp_root}/safe-gates" ./bin/safedeps help)
