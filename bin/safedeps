@@ -209,7 +209,9 @@ sf_ledger_has_approval_provenance() {
   local package_name="$3"
   local version="$4"
 
-  [[ -f "${SAFEDEPS_ADVISORY_LOG}" ]] || return 0
+  # A missing advisory.log is missing provenance, not proof of approval: every
+  # legitimate approval writes the log, so entries without it are suspect.
+  [[ -f "${SAFEDEPS_ADVISORY_LOG}" ]] || return 1
   grep -F "check approve" "${SAFEDEPS_ADVISORY_LOG}" 2>/dev/null \
     | grep -F "hash=${hash}" >/dev/null 2>&1 && return 0
   grep -F "check approve" "${SAFEDEPS_ADVISORY_LOG}" 2>/dev/null \
@@ -920,7 +922,7 @@ cmd_recheck() {
     revoked_at=$(jq -r '.revoked_at // ""' "${f}")
     hash=$(jq -r '.hash // ""' "${f}")
     [[ -n "${revoked_at}" ]] && continue
-    if [[ -f "${SAFEDEPS_ADVISORY_LOG}" ]] && ! sf_ledger_has_approval_provenance "${hash}" "${ecosystem}" "${pkg}" "${version}"; then
+    if ! sf_ledger_has_approval_provenance "${hash}" "${ecosystem}" "${pkg}" "${version}"; then
       sf_warn "  no provenance — flagged as suspected forgery (not revoked)"
       suspected_forgery_arr=$(jq -c \
         --arg ecosystem "${ecosystem}" --arg package "${pkg}" --arg version "${version}" --arg hash "${hash}" \

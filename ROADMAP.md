@@ -256,6 +256,8 @@ The PreToolUse guard extracted `pkg@version` tokens from *every* segment of a co
 
 `safedeps re-check` already flagged ledger entries with no matching `advisory.log` approval record as `suspected_forgery`, but the daily alert wrapper (`safedeps-recheck-alert.sh`) never read that field: a forged entry whose package queries clean counted as `still_clean`, so no alert condition fired and the flag was silently swallowed — exactly the silent-fallback the invariants forbid. The wrapper now counts `suspected_forgery`, includes it in the alert trigger and the notification message, and the alert record carries the flagged entries. Smoke covers both directions: a forgery-only fixture (every other trigger zero) must alert, and a fully clean fixture must append nothing.
 
+A cross-engine validator pass on the same release caught a second silent skip: when `advisory.log` did not exist at all, the provenance check was bypassed entirely (`[[ -f advisory.log ]]` treated file absence as proof of approval), so a forger who deleted the log evaded the flag. A missing log is now missing provenance — every legitimate approval writes the log, so entries without it are suspect — and an e2e regression covers the ledger-entry-with-no-log case.
+
 ---
 
 ## v3 (future)

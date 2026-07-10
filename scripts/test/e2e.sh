@@ -297,6 +297,17 @@ forgery_json=$(./bin/safedeps --json re-check)
 [[ "$(jq -r '.suspected_forgery[0].package' <<< "${forgery_json}")" == "fixture-forged" ]] || fail "re-check flags expected forged package"
 pass "re-check flags ledger approval provenance mismatch"
 
+# A forged ledger entry must be flagged even when advisory.log does not exist at
+# all — file absence is missing provenance, not proof of approval. (Previously
+# the [[ -f advisory.log ]] precondition silently skipped the check.)
+nolog_home="${tmp_root}/safe-nolog"
+SAFEDEPS_HOME="${nolog_home}" lib/ledger/ledger.sh approve npm fixture-forged 1.0.0 1.0.0 forged-test >/dev/null
+rm -f "${nolog_home}/advisory.log"
+nolog_json=$(SAFEDEPS_HOME="${nolog_home}" ./bin/safedeps --json re-check)
+[[ "$(jq -r '.suspected_forgery | length' <<< "${nolog_json}")" == "1" ]] || fail "re-check flags forged ledger entry when advisory.log is missing entirely"
+[[ "$(jq -r '.suspected_forgery[0].package' <<< "${nolog_json}")" == "fixture-forged" ]] || fail "missing-log forgery flag names the forged package"
+pass "re-check flags forged entry with no advisory.log (missing log = missing provenance)"
+
 legacy_home="${tmp_root}/legacy"
 target_home="${tmp_root}/migrated"
 mkdir -p "${legacy_home}/approved-specs"

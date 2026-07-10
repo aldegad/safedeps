@@ -256,6 +256,8 @@ PreToolUse 가드가 복합 명령의 *모든* 세그먼트에서 `pkg@version` 
 
 `safedeps re-check` 는 `advisory.log` 승인 기록이 없는 ledger 엔트리를 이미 `suspected_forgery` 로 flag 했지만, daily 알림 wrapper(`safedeps-recheck-alert.sh`)가 그 필드를 읽지 않았다: 위조 엔트리의 패키지가 clean 으로 조회되면 `still_clean` 으로 집계돼 어떤 알림 조건도 발화하지 않았고 flag 는 조용히 삼켜졌다 — invariant 가 금지하는 silent fallback 그 자체. 이제 wrapper 가 `suspected_forgery` 를 집계해 알림 트리거와 notification 메시지에 포함하고, alert 레코드에 flag 된 엔트리가 실린다. smoke 가 양방향을 커버한다: forgery-only fixture(다른 트리거 전부 0)는 반드시 알림, 완전 clean fixture 는 아무것도 추가하지 않아야 한다.
 
+같은 릴리스의 cross-engine validator 검수가 두 번째 silent skip 을 잡았다: `advisory.log` 파일 자체가 없으면 provenance 검사가 통째로 우회됐다(`[[ -f advisory.log ]]` 가 파일 부재를 승인 증거로 취급) — 위조자가 로그를 지우면 flag 를 피할 수 있었다. 이제 missing log = missing provenance 다 — 모든 정상 승인은 로그를 쓰므로, 로그 없는 엔트리는 의심 대상이다. ledger-엔트리-로그-부재 케이스를 e2e 회귀가 커버한다.
+
 ---
 
 ## v3 (미래)
