@@ -55,6 +55,9 @@ cat > "${closure_fixture}" <<'EOF'
   "fixture-pad@1.0.0": [
     {"package":"fixture-pad","version":"1.0.0","direct":true}
   ],
+  "fixture-vpad@1.0.0": [
+    {"package":"fixture-vpad","version":"1.0.0","direct":true}
+  ],
   "fixture-vuln@1.0.0": [
     {"package":"fixture-vuln","version":"1.0.0","direct":true}
   ],
@@ -352,6 +355,19 @@ escape_json=$(SAFEDEPS_HOME="${escape_home}" ./bin/safedeps --json re-check)
 [[ "$(jq -r '[.suspected_forgery[] | select(.package == "fixture-pad")] | length' <<< "${escape_json}")" == "0" ]] || fail "legit fixture-pad stays clean beside escape-named forgery"
 [[ "$(jq -r '.suspected_forgery[0].reason' <<< "${escape_json}")" == "missing_advisory_log_approval" ]] || fail "escape forgery flagged as missing provenance (honest hash, no log match)"
 pass "re-check flags backslash-escape forged name (literal provenance match)"
+
+# The same escape hazard applies to the version field: a forged entry with
+# version 1.\060.0 (\060 is '0') must not normalize to 1.0.0 and borrow the
+# legit fixture-vpad@1.0.0 approval. Its hash is honest for the literal spec,
+# so only the literal log comparison keeps it flagged.
+verescape_home="${tmp_root}/safe-verescape"
+SAFEDEPS_HOME="${verescape_home}" ./bin/safedeps --json check npm fixture-vpad@1.0.0 >/dev/null
+SAFEDEPS_HOME="${verescape_home}" lib/ledger/ledger.sh approve npm fixture-vpad '1.\060.0' '1.\060.0' verescape-forge >/dev/null
+verescape_json=$(SAFEDEPS_HOME="${verescape_home}" ./bin/safedeps --json re-check)
+[[ "$(jq -r '.suspected_forgery | length' <<< "${verescape_json}")" == "1" ]] || fail "backslash-escape forged version does not borrow provenance"
+[[ "$(jq -r '[.suspected_forgery[] | select(.version == "1.0.0")] | length' <<< "${verescape_json}")" == "0" ]] || fail "legit fixture-vpad@1.0.0 stays clean beside escape-version forgery"
+[[ "$(jq -r '.suspected_forgery[0].reason' <<< "${verescape_json}")" == "missing_advisory_log_approval" ]] || fail "escape-version forgery flagged as missing provenance"
+pass "re-check flags backslash-escape forged version (literal provenance match)"
 
 legacy_home="${tmp_root}/legacy"
 target_home="${tmp_root}/migrated"
