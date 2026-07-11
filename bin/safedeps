@@ -212,12 +212,26 @@ sf_ledger_has_approval_provenance() {
   # A missing advisory.log is missing provenance, not proof of approval: every
   # legitimate approval writes the log, so entries without it are suspect.
   [[ -f "${SAFEDEPS_ADVISORY_LOG}" ]] || return 1
-  grep -F "check approve" "${SAFEDEPS_ADVISORY_LOG}" 2>/dev/null \
-    | grep -F "hash=${hash}" >/dev/null 2>&1 && return 0
-  grep -F "check approve" "${SAFEDEPS_ADVISORY_LOG}" 2>/dev/null \
-    | grep -F "ecosystem=${ecosystem}" \
-    | grep -F "package=${package_name}" \
-    | grep -F "version=${version}" >/dev/null 2>&1
+  # Whole-field comparison, never substring grep: the ledger entry's hash /
+  # package / version fields are attacker-controlled, and grep -F "hash=${hash}"
+  # also matched a *prefix* of a legitimate hash (and an empty hash matched
+  # every approve line).
+  if [[ -n "${hash}" ]]; then
+    if awk -v want="hash=${hash}" '
+        /check approve/ { for (i = 1; i <= NF; i++) if ($i == want) { found = 1; exit } }
+        END { exit found ? 0 : 1 }
+      ' "${SAFEDEPS_ADVISORY_LOG}" 2>/dev/null; then
+      return 0
+    fi
+  fi
+  awk -v e="ecosystem=${ecosystem}" -v p="package=${package_name}" -v v="version=${version}" '
+    /check approve/ {
+      fe = fp = fv = 0
+      for (i = 1; i <= NF; i++) { if ($i == e) fe = 1; if ($i == p) fp = 1; if ($i == v) fv = 1 }
+      if (fe && fp && fv) { found = 1; exit }
+    }
+    END { exit found ? 0 : 1 }
+  ' "${SAFEDEPS_ADVISORY_LOG}" 2>/dev/null
 }
 
 # Emit either JSON or human text. Both forms describe the same event.
@@ -922,11 +936,21 @@ cmd_recheck() {
     revoked_at=$(jq -r '.revoked_at // ""' "${f}")
     hash=$(jq -r '.hash // ""' "${f}")
     [[ -n "${revoked_at}" ]] && continue
-    if ! sf_ledger_has_approval_provenance "${hash}" "${ecosystem}" "${pkg}" "${version}"; then
-      sf_warn "  no provenance — flagged as suspected forgery (not revoked)"
+    # The stored hash is attacker-writable: recompute the canonical hash from
+    # the entry's own spec so a valid hash copied from another approval cannot
+    # borrow that approval's provenance.
+    local expected_hash forgery_reason=""
+    expected_hash=$(safedeps_ledger_hash "${ecosystem}" "${pkg}" "${version}")
+    if [[ "${hash}" != "${expected_hash}" ]]; then
+      forgery_reason="hash_spec_mismatch"
+    elif ! sf_ledger_has_approval_provenance "${expected_hash}" "${ecosystem}" "${pkg}" "${version}"; then
+      forgery_reason="missing_advisory_log_approval"
+    fi
+    if [[ -n "${forgery_reason}" ]]; then
+      sf_warn "  no provenance — flagged as suspected forgery (not revoked, reason=${forgery_reason})"
       suspected_forgery_arr=$(jq -c \
-        --arg ecosystem "${ecosystem}" --arg package "${pkg}" --arg version "${version}" --arg hash "${hash}" \
-        '. + [{ecosystem:$ecosystem, package:$package, version:$version, hash:$hash, reason:"missing_advisory_log_approval"}]' <<< "${suspected_forgery_arr}")
+        --arg ecosystem "${ecosystem}" --arg package "${pkg}" --arg version "${version}" --arg hash "${hash}" --arg reason "${forgery_reason}" \
+        '. + [{ecosystem:$ecosystem, package:$package, version:$version, hash:$hash, reason:$reason}]' <<< "${suspected_forgery_arr}")
     fi
     checked=$(( checked + 1 ))
 

@@ -49,6 +49,9 @@ cat > "${closure_fixture}" <<'EOF'
   "fixture-clean@1.0.0": [
     {"package":"fixture-clean","version":"1.0.0","direct":true}
   ],
+  "fixture-copysafe@1.0.0": [
+    {"package":"fixture-copysafe","version":"1.0.0","direct":true}
+  ],
   "fixture-vuln@1.0.0": [
     {"package":"fixture-vuln","version":"1.0.0","direct":true}
   ],
@@ -307,6 +310,30 @@ nolog_json=$(SAFEDEPS_HOME="${nolog_home}" ./bin/safedeps --json re-check)
 [[ "$(jq -r '.suspected_forgery | length' <<< "${nolog_json}")" == "1" ]] || fail "re-check flags forged ledger entry when advisory.log is missing entirely"
 [[ "$(jq -r '.suspected_forgery[0].package' <<< "${nolog_json}")" == "fixture-forged" ]] || fail "missing-log forgery flag names the forged package"
 pass "re-check flags forged entry with no advisory.log (missing log = missing provenance)"
+
+# A forged entry that copies a *valid* 64-char hash from a legitimate approval
+# must not borrow that approval's provenance: the canonical hash is recomputed
+# from the entry's own spec, and a stored-vs-recomputed mismatch is itself
+# flagged. The legitimately approved entry in the same home must stay clean.
+copyhash_home="${tmp_root}/safe-copyhash"
+SAFEDEPS_HOME="${copyhash_home}" ./bin/safedeps --json check npm fixture-copysafe@1.0.0 >/dev/null
+legit_entry=$(find "${copyhash_home}/approved-specs" -name '*.json' -type f | head -1)
+[[ -n "${legit_entry}" ]] || fail "precondition: legit approval entry exists in copyhash home"
+jq '.package = "fixture-evil" | .version = "9.9.9"' "${legit_entry}" > "${copyhash_home}/approved-specs/forged-copyhash.json"
+copyhash_json=$(SAFEDEPS_HOME="${copyhash_home}" ./bin/safedeps --json re-check)
+[[ "$(jq -r '.suspected_forgery | length' <<< "${copyhash_json}")" == "1" ]] || fail "re-check flags forged entry carrying a copied valid hash"
+[[ "$(jq -r '.suspected_forgery[0].package' <<< "${copyhash_json}")" == "fixture-evil" ]] || fail "copied-hash forgery flag names the forged package"
+[[ "$(jq -r '.suspected_forgery[0].reason' <<< "${copyhash_json}")" == "hash_spec_mismatch" ]] || fail "copied-hash forgery is flagged as hash_spec_mismatch"
+pass "re-check flags copied-valid-hash forgery, keeps the legit approval clean"
+
+# A forged entry whose package/version is a *prefix* of a legitimate approval
+# (fixture-copysaf vs fixture-copysafe) must not borrow its provenance line:
+# advisory.log comparison is whole-field, not substring.
+SAFEDEPS_HOME="${copyhash_home}" lib/ledger/ledger.sh approve npm fixture-copysaf 1.0 1.0 prefix-forge >/dev/null
+prefix_json=$(SAFEDEPS_HOME="${copyhash_home}" ./bin/safedeps --json re-check)
+[[ "$(jq -r '[.suspected_forgery[] | select(.package == "fixture-copysaf")] | length' <<< "${prefix_json}")" == "1" ]] || fail "prefix-named forged entry does not borrow provenance (whole-field match)"
+[[ "$(jq -r '[.suspected_forgery[] | select(.package == "fixture-copysafe")] | length' <<< "${prefix_json}")" == "0" ]] || fail "legit approval stays clean beside prefix-named forgery"
+pass "re-check flags prefix-named forged entry (whole-field provenance match)"
 
 legacy_home="${tmp_root}/legacy"
 target_home="${tmp_root}/migrated"
