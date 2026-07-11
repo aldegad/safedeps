@@ -943,15 +943,24 @@ cmd_recheck() {
     revoked_at=$(jq -r '.revoked_at // ""' "${f}")
     hash=$(jq -r '.hash // ""' "${f}")
     [[ -n "${revoked_at}" ]] && continue
-    # The stored hash is attacker-writable: recompute the canonical hash from
-    # the entry's own spec so a valid hash copied from another approval cannot
-    # borrow that approval's provenance.
     local expected_hash forgery_reason=""
-    expected_hash=$(safedeps_ledger_hash "${ecosystem}" "${pkg}" "${version}")
-    if [[ "${hash}" != "${expected_hash}" ]]; then
-      forgery_reason="hash_spec_mismatch"
-    elif ! sf_ledger_has_approval_provenance "${expected_hash}" "${ecosystem}" "${pkg}" "${version}"; then
-      forgery_reason="missing_advisory_log_approval"
+    if [[ "${ecosystem}" == *[[:cntrl:]]* || "${pkg}" == *[[:cntrl:]]* || "${version}" == *[[:cntrl:]]* ]]; then
+      # The canonical hash joins the fields with newlines, so a control char
+      # (newline/tab/...) injected into one field shifts the field boundary and
+      # lets a different (ecosystem, package, version) tuple collide onto a
+      # legitimate approval's hash. No real package spec contains control
+      # characters, so a spec that does is itself a forged/malformed entry.
+      forgery_reason="malformed_spec"
+    else
+      # The stored hash is attacker-writable: recompute the canonical hash from
+      # the entry's own spec so a valid hash copied from another approval cannot
+      # borrow that approval's provenance.
+      expected_hash=$(safedeps_ledger_hash "${ecosystem}" "${pkg}" "${version}")
+      if [[ "${hash}" != "${expected_hash}" ]]; then
+        forgery_reason="hash_spec_mismatch"
+      elif ! sf_ledger_has_approval_provenance "${expected_hash}" "${ecosystem}" "${pkg}" "${version}"; then
+        forgery_reason="missing_advisory_log_approval"
+      fi
     fi
     if [[ -n "${forgery_reason}" ]]; then
       sf_warn "  no provenance — flagged as suspected forgery (not revoked, reason=${forgery_reason})"

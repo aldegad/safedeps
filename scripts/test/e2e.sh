@@ -58,6 +58,9 @@ cat > "${closure_fixture}" <<'EOF'
   "fixture-vpad@1.0.0": [
     {"package":"fixture-vpad","version":"1.0.0","direct":true}
   ],
+  "fixture-nl@1.0.0": [
+    {"package":"fixture-nl","version":"1.0.0","direct":true}
+  ],
   "fixture-vuln@1.0.0": [
     {"package":"fixture-vuln","version":"1.0.0","direct":true}
   ],
@@ -368,6 +371,18 @@ verescape_json=$(SAFEDEPS_HOME="${verescape_home}" ./bin/safedeps --json re-chec
 [[ "$(jq -r '[.suspected_forgery[] | select(.version == "1.0.0")] | length' <<< "${verescape_json}")" == "0" ]] || fail "legit fixture-vpad@1.0.0 stays clean beside escape-version forgery"
 [[ "$(jq -r '.suspected_forgery[0].reason' <<< "${verescape_json}")" == "missing_advisory_log_approval" ]] || fail "escape-version forgery flagged as missing provenance"
 pass "re-check flags backslash-escape forged version (literal provenance match)"
+
+# Hash-delimiter injection: the canonical hash joins fields with newlines, so a
+# real newline in package/version could shift the boundary and let a different
+# tuple collide onto a legit approval's hash. A spec carrying a control char is
+# rejected as malformed before any hash/provenance comparison runs.
+malformed_home="${tmp_root}/safe-malformed"
+SAFEDEPS_HOME="${malformed_home}" ./bin/safedeps --json check npm fixture-nl@1.0.0 >/dev/null
+SAFEDEPS_HOME="${malformed_home}" lib/ledger/ledger.sh approve npm "$(printf 'fixture-x\ninjected')" 1.0.0 1.0.0 nl-forge >/dev/null
+malformed_json=$(SAFEDEPS_HOME="${malformed_home}" ./bin/safedeps --json re-check)
+[[ "$(jq -r '[.suspected_forgery[] | select(.reason == "malformed_spec")] | length' <<< "${malformed_json}")" == "1" ]] || fail "newline-injected ledger spec flagged as malformed_spec"
+[[ "$(jq -r '[.suspected_forgery[] | select(.package == "fixture-nl")] | length' <<< "${malformed_json}")" == "0" ]] || fail "legit fixture-nl stays clean beside newline-injected forgery"
+pass "re-check flags control-char (newline) injected ledger spec (hash-delimiter injection)"
 
 legacy_home="${tmp_root}/legacy"
 target_home="${tmp_root}/migrated"
