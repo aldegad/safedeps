@@ -212,26 +212,33 @@ sf_ledger_has_approval_provenance() {
   # A missing advisory.log is missing provenance, not proof of approval: every
   # legitimate approval writes the log, so entries without it are suspect.
   [[ -f "${SAFEDEPS_ADVISORY_LOG}" ]] || return 1
-  # Whole-field comparison, never substring grep: the ledger entry's hash /
-  # package / version fields are attacker-controlled, and grep -F "hash=${hash}"
-  # also matched a *prefix* of a legitimate hash (and an empty hash matched
-  # every approve line).
-  if [[ -n "${hash}" ]]; then
-    if awk -v want="hash=${hash}" '
-        /check approve/ { for (i = 1; i <= NF; i++) if ($i == want) { found = 1; exit } }
-        END { exit found ? 0 : 1 }
-      ' "${SAFEDEPS_ADVISORY_LOG}" 2>/dev/null; then
-      return 0
-    fi
-  fi
-  awk -v e="ecosystem=${ecosystem}" -v p="package=${package_name}" -v v="version=${version}" '
-    /check approve/ {
-      fe = fp = fv = 0
-      for (i = 1; i <= NF; i++) { if ($i == e) fe = 1; if ($i == p) fp = 1; if ($i == v) fv = 1 }
-      if (fe && fp && fv) { found = 1; exit }
-    }
-    END { exit found ? 0 : 1 }
-  ' "${SAFEDEPS_ADVISORY_LOG}" 2>/dev/null
+  # Whole-field comparison in pure bash. Two properties matter and both are
+  # attacker-relevant because the ledger fields are attacker-controlled:
+  #   - never substring: grep -F "hash=${hash}" matched a *prefix* of a
+  #     legitimate hash (and an empty hash matched every approve line).
+  #   - never escape-interpreting: awk -v processes backslash escapes in the
+  #     value, so a package field like `left-p\141d` normalized to `left-pad`
+  #     and borrowed another entry's approval. bash `==` compares literally.
+  local want_hash="hash=${hash}"
+  local want_eco="ecosystem=${ecosystem}"
+  local want_pkg="package=${package_name}"
+  local want_ver="version=${version}"
+  local line tok has_hash has_eco has_pkg has_ver
+  local -a toks
+  while IFS= read -r line; do
+    [[ "${line}" == *"check approve"* ]] || continue
+    IFS=$' \t' read -ra toks <<< "${line}"
+    has_hash=0 has_eco=0 has_pkg=0 has_ver=0
+    for tok in "${toks[@]}"; do
+      [[ -n "${hash}" && "${tok}" == "${want_hash}" ]] && has_hash=1
+      [[ "${tok}" == "${want_eco}" ]] && has_eco=1
+      [[ "${tok}" == "${want_pkg}" ]] && has_pkg=1
+      [[ "${tok}" == "${want_ver}" ]] && has_ver=1
+    done
+    [[ -n "${hash}" && "${has_hash}" -eq 1 ]] && return 0
+    [[ "${has_eco}" -eq 1 && "${has_pkg}" -eq 1 && "${has_ver}" -eq 1 ]] && return 0
+  done < "${SAFEDEPS_ADVISORY_LOG}"
+  return 1
 }
 
 # Emit either JSON or human text. Both forms describe the same event.

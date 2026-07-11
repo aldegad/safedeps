@@ -52,6 +52,9 @@ cat > "${closure_fixture}" <<'EOF'
   "fixture-copysafe@1.0.0": [
     {"package":"fixture-copysafe","version":"1.0.0","direct":true}
   ],
+  "fixture-pad@1.0.0": [
+    {"package":"fixture-pad","version":"1.0.0","direct":true}
+  ],
   "fixture-vuln@1.0.0": [
     {"package":"fixture-vuln","version":"1.0.0","direct":true}
   ],
@@ -334,6 +337,21 @@ prefix_json=$(SAFEDEPS_HOME="${copyhash_home}" ./bin/safedeps --json re-check)
 [[ "$(jq -r '[.suspected_forgery[] | select(.package == "fixture-copysaf")] | length' <<< "${prefix_json}")" == "1" ]] || fail "prefix-named forged entry does not borrow provenance (whole-field match)"
 [[ "$(jq -r '[.suspected_forgery[] | select(.package == "fixture-copysafe")] | length' <<< "${prefix_json}")" == "0" ]] || fail "legit approval stays clean beside prefix-named forgery"
 pass "re-check flags prefix-named forged entry (whole-field provenance match)"
+
+# A forged package name carrying a backslash-octal escape (fixture-p\141d,
+# where \141 is 'a') must not normalize to a legitimate name (fixture-pad) and
+# borrow its provenance. The provenance match is pure-bash literal comparison,
+# so the escape is never interpreted. The forged entry's own hash is honest
+# (so it is not caught by hash_spec_mismatch) — only the whole-field literal
+# log match keeps it flagged.
+escape_home="${tmp_root}/safe-escape"
+SAFEDEPS_HOME="${escape_home}" ./bin/safedeps --json check npm fixture-pad@1.0.0 >/dev/null
+SAFEDEPS_HOME="${escape_home}" lib/ledger/ledger.sh approve npm 'fixture-p\141d' 1.0.0 1.0.0 escape-forge >/dev/null
+escape_json=$(SAFEDEPS_HOME="${escape_home}" ./bin/safedeps --json re-check)
+[[ "$(jq -r '.suspected_forgery | length' <<< "${escape_json}")" == "1" ]] || fail "backslash-escape forged name does not borrow provenance"
+[[ "$(jq -r '[.suspected_forgery[] | select(.package == "fixture-pad")] | length' <<< "${escape_json}")" == "0" ]] || fail "legit fixture-pad stays clean beside escape-named forgery"
+[[ "$(jq -r '.suspected_forgery[0].reason' <<< "${escape_json}")" == "missing_advisory_log_approval" ]] || fail "escape forgery flagged as missing provenance (honest hash, no log match)"
+pass "re-check flags backslash-escape forged name (literal provenance match)"
 
 legacy_home="${tmp_root}/legacy"
 target_home="${tmp_root}/migrated"
