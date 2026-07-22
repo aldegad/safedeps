@@ -4,6 +4,8 @@ set -euo pipefail
 ROOT=""
 STRICT=0
 NO_RUN=0
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+AUDIT_SCRIPT="${SCRIPT_DIR}/../lib/gates/audit.sh"
 
 usage() {
   cat <<'EOF'
@@ -194,13 +196,8 @@ fi
 section "node"
 if has_file package.json; then
   pass node "package.json detected"
-  if run_npm_script_if_present "security:audit" "node"; then
-    :
-  elif has_file package-lock.json || has_file npm-shrinkwrap.json; then
-    run_cmd node "npm audit --audit-level=moderate" npm audit --audit-level=moderate
-  else
-    strict_or_warn node "package.json exists but no npm lockfile/audit script was detected"
-  fi
+  run_cmd node "safedeps dependency audit" \
+    bash "${AUDIT_SCRIPT}" --root "${ROOT}" --level moderate
 
   if safedeps_install_guard_present; then
     pass install-guard "safedeps appears installed/configured"

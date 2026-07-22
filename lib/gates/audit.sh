@@ -100,7 +100,7 @@ if ! command -v jq >/dev/null 2>&1; then
         # so running it unconditionally would block every clean Berry repo.
         yv="$(yarn --version 2>/dev/null)"; ymaj="${yv%%.*}"
         if [[ "$ymaj" =~ ^[0-9]+$ ]] && [ "$ymaj" -ge 2 ]; then
-          yarn npm audit --all >/dev/null 2>&1 || worst=1
+          yarn npm audit --all --recursive >/dev/null 2>&1 || worst=1
         else
           yarn audit --level "$AUDIT_LEVEL" >/dev/null 2>&1 || worst=1
         fi ;;
@@ -200,7 +200,7 @@ audit_yarn_classic() {
 # Severities are fail-closed (an unrecognized value counts as critical).
 audit_yarn_berry() {
   local out rc adv counts
-  out="$(yarn npm audit --all --json 2>/dev/null)"; rc=$?
+  out="$(yarn npm audit --all --recursive --json 2>/dev/null)"; rc=$?
   adv="$(printf '%s' "$out" | jq -c 'select(type == "object" and (.children.Severity? != null))' 2>/dev/null || true)"
   if [ "${rc}" -ne 0 ] && [ -z "${adv}" ]; then
     note 'could not produce a Yarn Berry npm audit verdict (offline or registry error).'

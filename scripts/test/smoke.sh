@@ -433,6 +433,7 @@ for tmpl in gitleaks.toml.tmpl gitleaks.private.toml.tmpl pre-commit.tmpl; do
   [[ -f "lib/gates/templates/${tmpl}" ]] || fail "secret-lane template present: ${tmpl}"
 done
 pass "release-time gate commands registered"
+bash scripts/test/gate-audit-contract.sh
 
 # Secret-leak lane: doctor diagnoses, hooks init scaffolds, hooks install
 # activates. No scanner (gitleaks/docker) needed for these structural checks.

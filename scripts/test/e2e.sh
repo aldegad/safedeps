@@ -541,6 +541,8 @@ cat > "${fakebin}/yarn" <<'FAKE'
 if [ "${FAKE_YARN_BERRY:-0}" = "1" ]; then
   [ "${1:-}" = "--version" ] && { printf '4.5.0\n'; exit 0; }
   if [ "${1:-}" = "npm" ] && [ "${2:-}" = "audit" ]; then
+    case " $* " in *' --all '*) ;; *) exit 90 ;; esac
+    case " $* " in *' --recursive '*) ;; *) exit 91 ;; esac
     case "${FAKE_YARN_MODE:-clean}" in
       clean)   exit 0 ;;
       vuln)    printf '%s\n' '{"value":"minimist","children":{"ID":1,"Severity":"high"}}'; printf '%s\n' '{"value":"x","children":{"ID":2,"Severity":"moderate"}}'; exit 1 ;;
@@ -660,7 +662,7 @@ if command -v jq >/dev/null 2>&1; then
   PATH="${fakebin}:${PATH}" FAKE_YARN_BERRY=1 FAKE_YARN_MODE=weirdsev \
     "${ROOT_DIR}/bin/safedeps" audit --root "${berry_dir}" >/dev/null 2>&1 && rc=0 || rc=$?
   [ "${rc}" = "1" ] || fail "yarn Berry fail-closed on a non-canonical severity (expected block=1, got ${rc})"
-  pass "yarn Berry (2+) routes to 'yarn npm audit', honors 0/1/2, fail-closed on odd severities"
+  pass "yarn Berry (2+) uses '--all --recursive', honors 0/1/2, fail-closed on odd severities"
 
   # no-jq fallback must ALSO version-route yarn: running 'yarn audit' (which Berry
   # removed) unconditionally would block every clean Berry repo. With jq absent, a
@@ -673,7 +675,7 @@ if command -v jq >/dev/null 2>&1; then
   PATH="${nojq_bin}" FAKE_YARN_BERRY=1 FAKE_YARN_MODE=clean \
     bash "${ROOT_DIR}/lib/gates/audit.sh" --root "${berry_dir}" >/dev/null 2>&1 && rc=0 || rc=$?
   [ "${rc}" = "0" ] || fail "no-jq fallback routes Yarn Berry to 'yarn npm audit'; a clean Berry repo must return 0 (got ${rc})"
-  pass "no-jq fallback version-routes yarn (clean Berry not falsely blocked)"
+  pass "no-jq fallback version-routes yarn with '--all --recursive' (clean Berry not falsely blocked)"
 else
   printf 'ok - audit exit-code contract SKIPPED (needs jq)\n'
 fi
