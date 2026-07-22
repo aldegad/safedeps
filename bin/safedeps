@@ -7,7 +7,7 @@
 
 set -euo pipefail
 
-SAFEDEPS_VERSION="2.9.2"
+SAFEDEPS_VERSION="2.10.0"
 
 # ---- repo / lib bootstrap ----------------------------------------------------
 
@@ -259,8 +259,9 @@ sf_npm_closure_for_spec() {
   local package_name="$1"
   local version="$2"
   local closure_file="$3"
+  local source_file="$4"
 
-  if ! safedeps_npm_resolve_spec_closure "${package_name}" "${version}" > "${closure_file}"; then
+  if ! safedeps_npm_resolve_spec_closure "${package_name}" "${version}" "${source_file}" > "${closure_file}"; then
     sf_eprintf "safedeps: npm closure resolution failed for ${package_name}@${version}"
     return 1
   fi
@@ -301,14 +302,17 @@ sf_npm_transitive_file_from_closure() {
 sf_npm_evidence_file() {
   local provider_file="$1"
   local closure_file="$2"
-  local output_file="$3"
+  local source_file="$3"
+  local output_file="$4"
 
   jq -cn \
     --slurpfile provider "${provider_file}" \
     --slurpfile closure "${closure_file}" \
+    --slurpfile source "${source_file}" \
     '{
       closure_checked: true,
       closure_checked_at: (now | todateiso8601),
+      closure_source: $source[0],
       provider: {type: "osv-querybatch", results: $provider[0]},
       closure: $closure[0]
     }' > "${output_file}"
@@ -327,6 +331,8 @@ sf_npm_emit_closure_block_json() {
   local range="$4"
   local version="$5"
   local batch_file="$6"
+  local closure_file="$7"
+  local source_file="$8"
 
   jq -c \
     --arg result "${result}" \
@@ -334,6 +340,8 @@ sf_npm_emit_closure_block_json() {
     --arg package "${package_name}" \
     --arg range "${range}" \
     --arg version "${version}" \
+    --slurpfile closure "${closure_file}" \
+    --slurpfile source "${source_file}" \
     '{
       command:"check",
       ecosystem:$ecosystem,
@@ -342,6 +350,8 @@ sf_npm_emit_closure_block_json() {
       resolved_version:$version,
       result:$result,
       approved:false,
+      closure_source: $source[0],
+      resolved_closure: $closure[0],
       closure_vulnerabilities: [
         .[]
         | select((.status == "vulnerable") or (.status == "hard_block"))
@@ -366,6 +376,7 @@ sf_cmd_check_npm_full_closure() {
   local batch_file
   local evidence_file
   local transitive_file
+  local source_file
   local direct_status
   local vulnerable_count
   local kev_count
@@ -374,11 +385,12 @@ sf_cmd_check_npm_full_closure() {
   batch_file=$(sf_closure_temp_file)
   evidence_file=$(sf_mktemp_evidence)
   transitive_file=$(sf_closure_temp_file)
+  source_file=$(sf_mktemp_evidence)
 
   sf_spinner_start "resolving npm closure (${pkg}@${version})"
-  if ! sf_npm_closure_for_spec "${pkg}" "${version}" "${closure_file}"; then
+  if ! sf_npm_closure_for_spec "${pkg}" "${version}" "${closure_file}" "${source_file}"; then
     sf_spinner_stop
-    rm -f "${closure_file}" "${batch_file}" "${evidence_file}" "${transitive_file}"
+    rm -f "${closure_file}" "${batch_file}" "${evidence_file}" "${transitive_file}" "${source_file}"
     if [[ "${SAFEDEPS_JSON_MODE}" -eq 1 ]]; then
       jq -nc --arg ecosystem "${ecosystem}" --arg package "${pkg}" --arg range "${range}" --arg version "${version}" \
         '{command:"check", ecosystem:$ecosystem, package:$package, input_range:$range, resolved_version:$version, result:"error", approved:false, error:"npm_closure_resolution_failed"}'
@@ -392,7 +404,7 @@ sf_cmd_check_npm_full_closure() {
     sf_spinner_stop
     sf_err "no OSV batch response — fail-closed (closure cache miss + live query failed)"
     sf_advisory_log "check fail-closed npm-closure package=${pkg} version=${version}"
-    rm -f "${closure_file}" "${batch_file}" "${evidence_file}" "${transitive_file}"
+    rm -f "${closure_file}" "${batch_file}" "${evidence_file}" "${transitive_file}" "${source_file}"
     if [[ "${SAFEDEPS_JSON_MODE}" -eq 1 ]]; then
       jq -nc \
         --arg ecosystem "${ecosystem}" --arg package "${pkg}" \
@@ -415,9 +427,9 @@ sf_cmd_check_npm_full_closure() {
     sf_err "KEV-matched package in closure — install blocked: ${kev_summary}"
     sf_advisory_log "check block(KEV closure) package=${pkg} version=${version} affected=${kev_summary}"
     if [[ "${SAFEDEPS_JSON_MODE}" -eq 1 ]]; then
-      sf_npm_emit_closure_block_json "kev_hard_block" "${ecosystem}" "${pkg}" "${range}" "${version}" "${batch_file}"
+      sf_npm_emit_closure_block_json "kev_hard_block" "${ecosystem}" "${pkg}" "${range}" "${version}" "${batch_file}" "${closure_file}" "${source_file}"
     fi
-    rm -f "${closure_file}" "${batch_file}" "${evidence_file}" "${transitive_file}"
+    rm -f "${closure_file}" "${batch_file}" "${evidence_file}" "${transitive_file}" "${source_file}"
     return 3
   fi
 
@@ -438,11 +450,11 @@ sf_cmd_check_npm_full_closure() {
 
       for patched_version in "${patched_versions[@]+${patched_versions[@]}}"; do
         sf_warn "${pkg}@${version} direct vulnerable — re-checking closure for candidate ${patched_version}."
-        if ! sf_npm_closure_for_spec "${pkg}" "${patched_version}" "${closure_file}"; then
+        if ! sf_npm_closure_for_spec "${pkg}" "${patched_version}" "${closure_file}" "${source_file}"; then
           continue
         fi
         if ! sf_npm_batch_check_closure "${closure_file}" "${batch_file}"; then
-          rm -f "${direct_evidence}" "${closure_file}" "${batch_file}" "${evidence_file}" "${transitive_file}"
+          rm -f "${direct_evidence}" "${closure_file}" "${batch_file}" "${evidence_file}" "${transitive_file}" "${source_file}"
           return 4
         fi
         vulnerable_count=$(jq '[.[] | select(.status == "vulnerable" or .status == "hard_block")] | length' "${batch_file}")
@@ -451,16 +463,24 @@ sf_cmd_check_npm_full_closure() {
         fi
 
         sf_npm_transitive_file_from_closure "${closure_file}" "${pkg}" "${patched_version}" "${transitive_file}"
-        sf_npm_evidence_file "${batch_file}" "${closure_file}" "${evidence_file}"
+        if [[ "$(jq -r '.approval_scope // ""' "${source_file}")" == "deny-only" ]]; then
+          continue
+        fi
+        sf_npm_evidence_file "${batch_file}" "${closure_file}" "${source_file}" "${evidence_file}"
         local spec_json
-        spec_json=$(safedeps_ledger_write_approved_spec "${ecosystem}" "${pkg}" "${patched_version}" "${patched_version}" "safedeps-cli" "${evidence_file}" "${SAFEDEPS_LEDGER_DEFAULT_TTL_DAYS}" "${transitive_file}")
+        local project_context_arg=""
+        [[ "$(jq -r '.type' "${source_file}")" != "yarn-project-lockfile" ]] || project_context_arg="${source_file}"
+        spec_json=$(safedeps_ledger_write_approved_spec "${ecosystem}" "${pkg}" "${patched_version}" "${patched_version}" "safedeps-cli" "${evidence_file}" "${SAFEDEPS_LEDGER_DEFAULT_TTL_DAYS}" "${transitive_file}" "${project_context_arg}")
         local hash; hash=$(jq -r '.hash' <<< "${spec_json}")
         local expires_at; expires_at=$(jq -r '.expires_at' <<< "${spec_json}")
         local transitive_count; transitive_count=$(jq 'length' "${transitive_file}")
         sf_ok "${pkg}@${patched_version} full closure cleared (transitive ${transitive_count}, until ${expires_at})"
         sf_info "ledger: ${hash}"
         sf_advisory_log "check approve(patched closure) package=${pkg} version=${patched_version} hash=${hash} transitive=${transitive_count} prev_version=${version}"
-        rm -f "${direct_evidence}" "${closure_file}" "${batch_file}" "${evidence_file}" "${transitive_file}"
+        local closure_source_json resolved_closure_json
+        closure_source_json=$(cat "${source_file}")
+        resolved_closure_json=$(cat "${closure_file}")
+        rm -f "${direct_evidence}" "${closure_file}" "${batch_file}" "${evidence_file}" "${transitive_file}" "${source_file}"
         if [[ "${SAFEDEPS_JSON_MODE}" -eq 1 ]]; then
           jq -nc \
             --arg ecosystem "${ecosystem}" --arg package "${pkg}" \
@@ -468,7 +488,9 @@ sf_cmd_check_npm_full_closure() {
             --arg patched "${patched_version}" \
             --arg hash "${hash}" --arg expires_at "${expires_at}" \
             --argjson transitive_count "${transitive_count}" \
-            '{command:"check", ecosystem:$ecosystem, package:$package, input_range:$range, resolved_version:$version, suggested_spec:$patched, result:"patched_available", approved:true, spec_hash:$hash, expires_at:$expires_at, transitive_count:$transitive_count, install_hint:("install with " + $package + "@" + $patched)}'
+            --argjson closure_source "${closure_source_json}" \
+            --argjson resolved_closure "${resolved_closure_json}" \
+            '{command:"check", ecosystem:$ecosystem, package:$package, input_range:$range, resolved_version:$version, suggested_spec:$patched, result:"patched_available", approved:true, spec_hash:$hash, expires_at:$expires_at, transitive_count:$transitive_count, closure_source:$closure_source, resolved_closure:$resolved_closure, install_hint:("install with " + $package + "@" + $patched)}'
         fi
         return 0
       done
@@ -481,30 +503,54 @@ sf_cmd_check_npm_full_closure() {
     sf_warn "vulnerable package in closure — approval withheld: ${affected_summary}"
     sf_advisory_log "check block(vulnerable closure) package=${pkg} version=${version} affected=${affected_summary}"
     if [[ "${SAFEDEPS_JSON_MODE}" -eq 1 ]]; then
-      sf_npm_emit_closure_block_json "${block_result}" "${ecosystem}" "${pkg}" "${range}" "${version}" "${batch_file}"
+      sf_npm_emit_closure_block_json "${block_result}" "${ecosystem}" "${pkg}" "${range}" "${version}" "${batch_file}" "${closure_file}" "${source_file}"
     fi
-    rm -f "${closure_file}" "${batch_file}" "${evidence_file}" "${transitive_file}"
+    rm -f "${closure_file}" "${batch_file}" "${evidence_file}" "${transitive_file}" "${source_file}"
     return 2
   fi
 
+  if [[ "$(jq -r '.approval_scope // ""' "${source_file}")" == "deny-only" ]]; then
+    local project_resolution_status
+    project_resolution_status=$(jq -r '.project_resolution_status' "${source_file}")
+    sf_err "Yarn project closure is unavailable (${project_resolution_status}) — approval withheld"
+    sf_advisory_log "check fail-closed yarn-project-closure package=${pkg} version=${version} reason=${project_resolution_status}"
+    if [[ "${SAFEDEPS_JSON_MODE}" -eq 1 ]]; then
+      jq -cn \
+        --arg ecosystem "${ecosystem}" --arg package "${pkg}" \
+        --arg range "${range}" --arg version "${version}" \
+        --arg error "${project_resolution_status}" \
+        --slurpfile source "${source_file}" --slurpfile closure "${closure_file}" \
+        '{command:"check", ecosystem:$ecosystem, package:$package, input_range:$range, resolved_version:$version, result:"error", approved:false, error:$error, closure_source:$source[0], resolved_closure:$closure[0]}'
+    fi
+    rm -f "${closure_file}" "${batch_file}" "${evidence_file}" "${transitive_file}" "${source_file}"
+    return 4
+  fi
+
   sf_npm_transitive_file_from_closure "${closure_file}" "${pkg}" "${version}" "${transitive_file}"
-  sf_npm_evidence_file "${batch_file}" "${closure_file}" "${evidence_file}"
+  sf_npm_evidence_file "${batch_file}" "${closure_file}" "${source_file}" "${evidence_file}"
   local spec_json
-  spec_json=$(safedeps_ledger_write_approved_spec "${ecosystem}" "${pkg}" "${version}" "${range:-${version}}" "safedeps-cli" "${evidence_file}" "${SAFEDEPS_LEDGER_DEFAULT_TTL_DAYS}" "${transitive_file}")
+  local project_context_arg=""
+  [[ "$(jq -r '.type' "${source_file}")" != "yarn-project-lockfile" ]] || project_context_arg="${source_file}"
+  spec_json=$(safedeps_ledger_write_approved_spec "${ecosystem}" "${pkg}" "${version}" "${range:-${version}}" "safedeps-cli" "${evidence_file}" "${SAFEDEPS_LEDGER_DEFAULT_TTL_DAYS}" "${transitive_file}" "${project_context_arg}")
   local hash; hash=$(jq -r '.hash' <<< "${spec_json}")
   local expires_at; expires_at=$(jq -r '.expires_at' <<< "${spec_json}")
   local transitive_count; transitive_count=$(jq 'length' "${transitive_file}")
   sf_ok "${pkg}@${version} full closure cleared (transitive ${transitive_count}, until ${expires_at})"
   sf_info "ledger: ${hash}"
   sf_advisory_log "check approve(clean closure) package=${pkg} version=${version} hash=${hash} transitive=${transitive_count}"
-  rm -f "${closure_file}" "${batch_file}" "${evidence_file}" "${transitive_file}"
+  local closure_source_json resolved_closure_json
+  closure_source_json=$(cat "${source_file}")
+  resolved_closure_json=$(cat "${closure_file}")
+  rm -f "${closure_file}" "${batch_file}" "${evidence_file}" "${transitive_file}" "${source_file}"
   if [[ "${SAFEDEPS_JSON_MODE}" -eq 1 ]]; then
     jq -nc \
       --arg ecosystem "${ecosystem}" --arg package "${pkg}" \
       --arg range "${range}" --arg version "${version}" \
       --arg hash "${hash}" --arg expires_at "${expires_at}" \
       --argjson transitive_count "${transitive_count}" \
-      '{command:"check", ecosystem:$ecosystem, package:$package, input_range:$range, resolved_version:$version, result:"clean", approved:true, spec_hash:$hash, expires_at:$expires_at, transitive_count:$transitive_count, install_hint:("install with " + $package + "@" + $version)}'
+      --argjson closure_source "${closure_source_json}" \
+      --argjson resolved_closure "${resolved_closure_json}" \
+      '{command:"check", ecosystem:$ecosystem, package:$package, input_range:$range, resolved_version:$version, result:"clean", approved:true, spec_hash:$hash, expires_at:$expires_at, transitive_count:$transitive_count, closure_source:$closure_source, resolved_closure:$resolved_closure, install_hint:("install with " + $package + "@" + $version)}'
   fi
   return 0
 }
@@ -555,7 +601,19 @@ cmd_check() {
 
   # Ledger lookup short-circuit
   local ledger_check
-  if ledger_check=$(safedeps_ledger_check "${ecosystem}" "${pkg}" "${version}" 2>/dev/null); then
+  local ledger_context_hash=""
+  local ledger_context_file
+  local ledger_context_status=1
+  ledger_context_file=$(sf_mktemp_evidence)
+  if [[ "${ecosystem}" == "npm" ]]; then
+    if safedeps_npm_yarn_project_context "${ledger_context_file}"; then
+      ledger_context_status=0
+      ledger_context_hash=$(jq -r '.context_hash' "${ledger_context_file}")
+    else
+      ledger_context_status=$?
+    fi
+  fi
+  if [[ "${ledger_context_status}" -ne 2 ]] && ledger_check=$(safedeps_ledger_check "${ecosystem}" "${pkg}" "${version}" "${ledger_context_hash}" 2>/dev/null); then
     if [[ "$(jq -r '.approved' <<< "${ledger_check}")" == "true" ]] && { [[ "${ecosystem}" != "npm" ]] || sf_ledger_hit_has_npm_closure "${ledger_check}"; }; then
       local hash approved_at expires_at
       hash=$(jq -r '.hash' <<< "${ledger_check}")
@@ -572,12 +630,16 @@ cmd_check() {
           --arg hash "${hash}" \
           --arg approved_at "${approved_at}" \
           --arg expires_at "${expires_at}" \
-          '{command:"check", ecosystem:$ecosystem, package:$package, input_range:$range, resolved_version:$version, result:"already_approved", approved:true, spec_hash:$hash, approved_at:$approved_at, expires_at:$expires_at}'
+          --argjson project_context "$(jq -c '.spec.project_context // null' <<< "${ledger_check}")" \
+          --argjson resolved_closure "$(jq -c '.spec.evidence.closure // []' <<< "${ledger_check}")" \
+          '{command:"check", ecosystem:$ecosystem, package:$package, input_range:$range, resolved_version:$version, result:"already_approved", approved:true, spec_hash:$hash, approved_at:$approved_at, expires_at:$expires_at, closure_source:$project_context, resolved_closure:$resolved_closure}'
       fi
       sf_advisory_log "check approve(cache) ecosystem=${ecosystem} package=${pkg} version=${version} hash=${hash}"
+      rm -f "${ledger_context_file}"
       return 0
     fi
   fi
+  rm -f "${ledger_context_file}"
 
   if [[ "${ecosystem}" == "npm" ]]; then
     sf_cmd_check_npm_full_closure "${ecosystem}" "${pkg}" "${range}" "${version}"
@@ -873,8 +935,21 @@ cmd_revoke() {
       pkg=$(sf_parse_pkg_spec "${arg2}" | sed -n '1p')
       version=$(sf_parse_pkg_spec "${arg2}" | sed -n '2p')
       [[ -n "${version}" ]] || { sf_eprintf "safedeps: revoke needs pkg@version, got '${arg2}'"; return 4; }
-      target_file=$(safedeps_ledger_path "${arg1}" "${pkg}" "${version}")
-      [[ -f "${target_file}" ]] || { sf_err "no ledger entry: ${arg1} ${pkg}@${version}"; return 1; }
+      local matches=()
+      while IFS= read -r -d '' f; do
+        local e p v
+        e=$(jq -r '.ecosystem // ""' "${f}")
+        p=$(jq -r '.package // ""' "${f}")
+        v=$(jq -r '.version // ""' "${f}")
+        if [[ "${e}" == "${arg1}" && "${p}" == "${pkg}" && "${v}" == "${version}" ]]; then
+          matches+=("${f}")
+        fi
+      done < <(find "${SAFEDEPS_LEDGER_DIR}" -maxdepth 1 -name '*.json' -type f -print0 2>/dev/null)
+      case "${#matches[@]}" in
+        0) sf_err "no ledger entry: ${arg1} ${pkg}@${version}"; return 1 ;;
+        1) target_file="${matches[0]}" ;;
+        *) sf_err "${arg1} ${pkg}@${version} matched multiple project contexts — revoke by hash"; return 4 ;;
+      esac
     else
       local pkg version
       pkg=$(sf_parse_pkg_spec "${arg1}" | sed -n '1p')
@@ -892,7 +967,7 @@ cmd_revoke() {
       case "${#matches[@]}" in
         0) sf_err "no ledger entry: ${pkg}@${version}"; return 1 ;;
         1) target_file="${matches[0]}" ;;
-        *) sf_err "${pkg}@${version} matched in multiple ecosystems — specify the ecosystem"; return 4 ;;
+        *) sf_err "${pkg}@${version} matched multiple ecosystems or project contexts — revoke by hash"; return 4 ;;
       esac
     fi
   fi
@@ -901,9 +976,11 @@ cmd_revoke() {
   ecosystem=$(jq -r '.ecosystem' "${target_file}")
   pkg=$(jq -r '.package' "${target_file}")
   version=$(jq -r '.version' "${target_file}")
+  local context_hash
+  context_hash=$(jq -r '.project_context.context_hash // ""' "${target_file}")
 
   local revoked_json
-  revoked_json=$(safedeps_ledger_revoke "${ecosystem}" "${pkg}" "${version}" "${reason}")
+  revoked_json=$(safedeps_ledger_revoke "${ecosystem}" "${pkg}" "${version}" "${reason}" "${context_hash}")
   sf_advisory_log "revoke ecosystem=${ecosystem} package=${pkg} version=${version} reason=${reason}"
   sf_ok "revoked: ${ecosystem} ${pkg}@${version}"
   sf_info "reason: ${reason}"
@@ -936,12 +1013,13 @@ cmd_recheck() {
   local newly_vuln_arr='[]' kev_hit_arr='[]' revoked_arr='[]' suspected_forgery_arr='[]'
 
   for f in "${entries[@]+${entries[@]}}"; do
-    local ecosystem pkg version revoked_at hash
+    local ecosystem pkg version revoked_at hash context_hash
     ecosystem=$(jq -r '.ecosystem' "${f}")
     pkg=$(jq -r '.package' "${f}")
     version=$(jq -r '.version' "${f}")
     revoked_at=$(jq -r '.revoked_at // ""' "${f}")
     hash=$(jq -r '.hash // ""' "${f}")
+    context_hash=$(jq -r '.project_context.context_hash // ""' "${f}")
     [[ -n "${revoked_at}" ]] && continue
     local expected_hash forgery_reason=""
     if [[ "${ecosystem}" == *[[:cntrl:]]* || "${pkg}" == *[[:cntrl:]]* || "${version}" == *[[:cntrl:]]* ]]; then
@@ -955,7 +1033,7 @@ cmd_recheck() {
       # The stored hash is attacker-writable: recompute the canonical hash from
       # the entry's own spec so a valid hash copied from another approval cannot
       # borrow that approval's provenance.
-      expected_hash=$(safedeps_ledger_hash "${ecosystem}" "${pkg}" "${version}")
+      expected_hash=$(safedeps_ledger_hash "${ecosystem}" "${pkg}" "${version}" "${context_hash}")
       if [[ "${hash}" != "${expected_hash}" ]]; then
         forgery_reason="hash_spec_mismatch"
       elif ! sf_ledger_has_approval_provenance "${expected_hash}" "${ecosystem}" "${pkg}" "${version}"; then
@@ -983,7 +1061,7 @@ cmd_recheck() {
         ;;
       vulnerable|hard_block)
         local reason="re-check ${s}"
-        safedeps_ledger_revoke "${ecosystem}" "${pkg}" "${version}" "${reason}" >/dev/null
+        safedeps_ledger_revoke "${ecosystem}" "${pkg}" "${version}" "${reason}" "${context_hash}" >/dev/null
         sf_advisory_log "re-check revoke ecosystem=${ecosystem} package=${pkg} version=${version} status=${s}"
         if [[ "${s}" == "hard_block" ]]; then
           sf_err "  KEV match -> revoked"

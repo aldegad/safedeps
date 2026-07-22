@@ -88,6 +88,8 @@ safedeps check <ecosystem> <pkg>@<version|range> --json
 
 That command queries OSV (canonical), CISA KEV (hard-risk overlay), and GitHub Advisory (enrichment). For npm, it first creates a script-free temp lockfile with `npm install --package-lock-only --ignore-scripts`, extracts the full dependency closure, and queries OSV `/v1/querybatch`. Clean or safely narrowed specs are written to `~/.safedeps/approved-specs/`; npm entries also record `transitive_specs`.
 
+**Yarn project-scoped closure.** When the target directory is a Yarn Berry project with a root `resolutions` entry, `check` resolves the closure from that project's actual `yarn.lock` via `yarn info`, instead of a fresh published-package probe. This lets a project that pins a vulnerable transitive dependency to a patched version through `resolutions` get approved on its real, resolved dependency tree -- the published package closure alone would still show the vulnerable version and deny the install. The approval only covers that exact project: the ledger key folds in a hash of the project directory, `resolutions`, and `yarn.lock` content, so it cannot satisfy the check for a different project or after `resolutions`/`yarn.lock` changes. If `resolutions` is declared but the requested package can't be verified in the project's resolved graph, or the lockfile isn't a supported Yarn Berry lockfile, the check stays fail-closed.
+
 ### Phase 2: Fast Command Guard + Snapshots (PreToolUse)
 
 When Claude Code or Codex CLI is about to run `npm install`, `pip install`, `cargo add`, `go get`, `gem install`, or similar commands, the guard hook provides a fast advisory/UX layer:

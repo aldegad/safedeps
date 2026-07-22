@@ -63,11 +63,19 @@ safedeps_ledger_hash() {
   local ecosystem="$1"
   local package_name="$2"
   local version="$3"
+  local context_hash="${4:-}"
   local hex
 
-  hex=$(safedeps_ledger_sha256_hex "${ecosystem}
+  if [[ -n "${context_hash}" ]]; then
+    hex=$(safedeps_ledger_sha256_hex "${ecosystem}
+${package_name}
+${version}
+${context_hash}")
+  else
+    hex=$(safedeps_ledger_sha256_hex "${ecosystem}
 ${package_name}
 ${version}")
+  fi
   printf 'sha256:%s' "${hex}"
 }
 
@@ -88,9 +96,10 @@ safedeps_ledger_path() {
   local ecosystem="$1"
   local package_name="$2"
   local version="$3"
+  local context_hash="${4:-}"
   local hash
 
-  hash=$(safedeps_ledger_hash "${ecosystem}" "${package_name}" "${version}")
+  hash=$(safedeps_ledger_hash "${ecosystem}" "${package_name}" "${version}" "${context_hash}")
   safedeps_ledger_path_for_hash "${hash}"
 }
 
@@ -110,6 +119,14 @@ safedeps_ledger_validate_json() {
     and (.approved_by | type == "string")
     and (.evidence | type == "object")
     and ((.transitive_specs // []) | type == "array")
+    and ((.project_context // null) == null or (
+      (.project_context | type) == "object"
+      and (.project_context.context_hash | type == "string" and startswith("sha256:"))
+      and (.project_context.type == "yarn-project-lockfile")
+      and (.project_context.project_root | type == "string" and length > 0)
+      and (.project_context.manifest_path | type == "string" and length > 0)
+      and (.project_context.lockfile_path | type == "string" and length > 0)
+    ))
   ' "${ledger_file}" >/dev/null
 }
 
@@ -135,9 +152,10 @@ safedeps_ledger_read() {
   local ecosystem="$1"
   local package_name="$2"
   local version="$3"
+  local context_hash="${4:-}"
   local ledger_file
 
-  ledger_file=$(safedeps_ledger_path "${ecosystem}" "${package_name}" "${version}")
+  ledger_file=$(safedeps_ledger_path "${ecosystem}" "${package_name}" "${version}" "${context_hash}")
   [[ -f "${ledger_file}" ]] || return 1
   safedeps_ledger_validate_json "${ledger_file}" || return 1
   cat "${ledger_file}"
@@ -147,12 +165,13 @@ safedeps_ledger_check() {
   local ecosystem="$1"
   local package_name="$2"
   local version="$3"
+  local context_hash="${4:-}"
   local ledger_file
   local expected_hash
   local stored_hash
 
-  ledger_file=$(safedeps_ledger_path "${ecosystem}" "${package_name}" "${version}")
-  expected_hash=$(safedeps_ledger_hash "${ecosystem}" "${package_name}" "${version}")
+  ledger_file=$(safedeps_ledger_path "${ecosystem}" "${package_name}" "${version}" "${context_hash}")
+  expected_hash=$(safedeps_ledger_hash "${ecosystem}" "${package_name}" "${version}" "${context_hash}")
 
   if [[ ! -f "${ledger_file}" ]]; then
     jq -cn --arg hash "${expected_hash}" '{approved: false, reason: "miss", hash: $hash}'
@@ -168,6 +187,14 @@ safedeps_ledger_check() {
   if [[ "${stored_hash}" != "${expected_hash}" ]]; then
     jq -cn --arg hash "${expected_hash}" --arg stored_hash "${stored_hash}" \
       '{approved: false, reason: "hash_mismatch", hash: $hash, stored_hash: $stored_hash}'
+    return 1
+  fi
+
+  local stored_context_hash
+  stored_context_hash=$(jq -r '.project_context.context_hash // ""' "${ledger_file}")
+  if [[ "${stored_context_hash}" != "${context_hash}" ]]; then
+    jq -cn --arg hash "${expected_hash}" --arg context_hash "${context_hash}" --arg stored_context_hash "${stored_context_hash}" \
+      '{approved: false, reason: "context_mismatch", hash: $hash, context_hash: $context_hash, stored_context_hash: $stored_context_hash}'
     return 1
   fi
 
@@ -211,19 +238,37 @@ safedeps_ledger_write_approved_spec() {
   local evidence_file="${6:-}"
   local ttl_days="${7:-${SAFEDEPS_LEDGER_DEFAULT_TTL_DAYS}}"
   local transitive_specs_file="${8:-}"
+  local project_context_file="${9:-}"
   local approved_at
   local expires_at
   local hash
   local target_path
   local evidence_arg=()
   local transitive_arg=()
+  local project_context_arg=()
+  local context_hash=""
 
   safedeps_ledger_require_jq || return 1
   safedeps_ledger_init
 
   approved_at=$(safedeps_ledger_now_iso)
   expires_at=$(safedeps_ledger_add_days_iso "${ttl_days}")
-  hash=$(safedeps_ledger_hash "${ecosystem}" "${package_name}" "${version}")
+  if [[ -n "${project_context_file}" ]]; then
+    [[ -f "${project_context_file}" ]] || {
+      printf 'safedeps ledger: project context file not found: %s\n' "${project_context_file}" >&2
+      return 1
+    }
+    context_hash=$(jq -r 'select(.type == "yarn-project-lockfile") | .context_hash // empty' "${project_context_file}")
+    [[ -n "${context_hash}" ]] || {
+      printf 'safedeps ledger: invalid project context: %s\n' "${project_context_file}" >&2
+      return 1
+    }
+    project_context_arg=(--slurpfile project_context "${project_context_file}")
+  else
+    project_context_arg=(--argjson project_context 'null')
+  fi
+
+  hash=$(safedeps_ledger_hash "${ecosystem}" "${package_name}" "${version}" "${context_hash}")
   target_path=$(safedeps_ledger_path_for_hash "${hash}")
 
   if [[ -n "${evidence_file}" ]]; then
@@ -262,6 +307,7 @@ safedeps_ledger_write_approved_spec() {
       --arg approved_by "${approved_by}" \
       "${evidence_arg[@]}" \
       "${transitive_arg[@]}" \
+      "${project_context_arg[@]}" \
       '{
         hash: $hash,
         ecosystem: $ecosystem,
@@ -272,6 +318,7 @@ safedeps_ledger_write_approved_spec() {
         expires_at: $expires_at,
         approved_by: $approved_by,
         evidence: ($evidence[0] // {}),
+        project_context: (($project_context[0] // $project_context) // null),
         transitive_specs: (($transitive_specs[0] // $transitive_specs) | map({
           ecosystem: (.ecosystem // $ecosystem),
           package: .package,
@@ -290,6 +337,7 @@ safedeps_ledger_write_approved_spec() {
       --arg approved_by "${approved_by}" \
       "${evidence_arg[@]}" \
       "${transitive_arg[@]}" \
+      "${project_context_arg[@]}" \
       '{
         hash: $hash,
         ecosystem: $ecosystem,
@@ -300,6 +348,7 @@ safedeps_ledger_write_approved_spec() {
         expires_at: $expires_at,
         approved_by: $approved_by,
         evidence: $evidence,
+        project_context: (($project_context[0] // $project_context) // null),
         transitive_specs: (($transitive_specs[0] // $transitive_specs) | map({
           ecosystem: (.ecosystem // $ecosystem),
           package: .package,
@@ -315,6 +364,7 @@ safedeps_ledger_effect_check() {
   local ecosystem="$1"
   local package_name="$2"
   local version="$3"
+  local context_hash="${4:-}"
   local ledger_file
   local now_iso
 
@@ -329,8 +379,14 @@ safedeps_ledger_effect_check() {
       --arg ecosystem "${ecosystem}" \
       --arg package "${package_name}" \
       --arg version "${version}" \
+      --arg context_hash "${context_hash}" \
       '
       (.revoked_at // "") == ""
+      and (
+        if $context_hash == "" then (.project_context // null) == null
+        else (.project_context.context_hash // "") == $context_hash
+        end
+      )
       and (
         (.ecosystem == $ecosystem and .package == $package and .version == $version)
         or (((.transitive_specs // []) | map(select(
@@ -365,10 +421,11 @@ safedeps_ledger_revoke() {
   local package_name="$2"
   local version="$3"
   local reason="${4:-revoked}"
+  local context_hash="${5:-}"
   local ledger_file
   local revoked_at
 
-  ledger_file=$(safedeps_ledger_path "${ecosystem}" "${package_name}" "${version}")
+  ledger_file=$(safedeps_ledger_path "${ecosystem}" "${package_name}" "${version}" "${context_hash}")
   [[ -f "${ledger_file}" ]] || return 1
   safedeps_ledger_validate_json "${ledger_file}" || return 1
 
@@ -387,20 +444,20 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
 
   case "${command_name}" in
     hash)
-      [[ "$#" -eq 3 ]] || { printf 'usage: %s hash <ecosystem> <package> <version>\n' "$0" >&2; exit 2; }
+      [[ "$#" -ge 3 && "$#" -le 4 ]] || { printf 'usage: %s hash <ecosystem> <package> <version> [context_hash]\n' "$0" >&2; exit 2; }
       safedeps_ledger_hash "$@"
       ;;
     path)
-      [[ "$#" -eq 3 ]] || { printf 'usage: %s path <ecosystem> <package> <version>\n' "$0" >&2; exit 2; }
+      [[ "$#" -ge 3 && "$#" -le 4 ]] || { printf 'usage: %s path <ecosystem> <package> <version> [context_hash]\n' "$0" >&2; exit 2; }
       safedeps_ledger_path "$@"
       ;;
     check)
-      [[ "$#" -eq 3 ]] || { printf 'usage: %s check <ecosystem> <package> <version>\n' "$0" >&2; exit 2; }
+      [[ "$#" -ge 3 && "$#" -le 4 ]] || { printf 'usage: %s check <ecosystem> <package> <version> [context_hash]\n' "$0" >&2; exit 2; }
       safedeps_ledger_check "$@"
       ;;
     approve)
-      if [[ "$#" -lt 3 || "$#" -gt 8 ]]; then
-        printf 'usage: %s approve <ecosystem> <package> <version> [version_range] [approved_by] [evidence_file] [ttl_days] [transitive_specs_file]\n' "$0" >&2
+      if [[ "$#" -lt 3 || "$#" -gt 9 ]]; then
+        printf 'usage: %s approve <ecosystem> <package> <version> [version_range] [approved_by] [evidence_file] [ttl_days] [transitive_specs_file] [project_context_file]\n' "$0" >&2
         exit 2
       fi
       safedeps_ledger_write_approved_spec "$@"

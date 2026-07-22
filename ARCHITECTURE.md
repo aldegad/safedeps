@@ -136,16 +136,20 @@ Design principle: **OSV is the one canonical truth.** Every other source is over
   },
   "transitive_specs": [
     { "ecosystem": "npm", "package": "…", "version": "…" }
-  ]
+  ],
+  "project_context": null
 }
 ```
 
 Key fields:
 
-- `hash` — a deterministic hash of `(ecosystem, package, version)`. The hook derives the same hash from a command and looks the ledger up by it.
+- `hash` — a deterministic hash of `(ecosystem, package, version)`, folded together with `project_context.context_hash` when one is present. The hook derives the same hash from a command (plus the live project context, if any) and looks the ledger up by it.
 - `approved_at` / `expires_at` — lifecycle TTL, 30 days by default. After expiry a new CVE may exist, so the spec is auto-revoked and re-check is forced.
 - `evidence` — which source saw what, at approval time. An audit trail.
 - `transitive_specs` — the full transitive closure the direct entry approved. The npm effect gate reorgs any `pkg@version` that appears in the lockfile but is in neither the direct entry nor this array.
+- `project_context` — `null` for an ordinary published-package approval, or `{ type: "yarn-project-lockfile", context_hash, project_root, manifest_path, lockfile_path }` when the approval came from a Yarn project's resolved closure (see "Yarn project-scoped closure" in section 4). `context_hash` is a hash of the project directory, its root `resolutions`, and its `yarn.lock` content.
+
+**Project-scoped isolation.** A `project_context` approval is keyed by `context_hash` in addition to `(ecosystem, package, version)`, so it lives at a different ledger path than a package-only approval of the same spec and cannot satisfy a lookup from a different project or from the same project after `resolutions`/`yarn.lock` changes (the hash changes with them). `safedeps_ledger_check` compares the caller's live context hash against the stored one and denies with `reason: "context_mismatch"` on any difference — an approval never silently leaks across project boundaries.
 
 Lifecycle:
 
@@ -189,6 +193,35 @@ safedeps check npm "@jackwener/opencli@^1.7.0"
 
 For npm, "OSV query" runs over the **whole resolved closure** in one `/v1/querybatch` call, and the approved entry records every transitive package in `transitive_specs`.
 
+**Yarn project-scoped closure.** Before falling back to a fresh published-package probe, `safedeps_npm_yarn_project_closure` (in `lib/npm/closure.sh`) looks for a canonical Yarn project context:
+
+```
+resolve project context (walk up from cwd, stop at .git boundary):
+        │
+        ├─► package.json has non-empty root `resolutions` + a yarn.lock next to it
+        │        │
+        │        ├─► yarn.lock has no `__metadata:` marker ──► INVALID CONTEXT (fail-closed)
+        │        └─► valid Berry lockfile
+        │                 │
+        │                 ▼
+        │        context_hash = sha256(project_root, sha256(resolutions), sha256(yarn.lock))
+        │                 │
+        │                 ▼
+        │        `yarn info -A -R --json` → full project locator graph
+        │                 │
+        │                 ▼
+        │        traverse from the requested `pkg@npm:version` locator
+        │                 │
+        │                 ├─► locator found  ──► resolved project closure (approvable)
+        │                 └─► locator absent  ──► approval_scope: "deny-only"
+        │                                          (published closure still checked for vulnerabilities,
+        │                                           but the result is never approved)
+        │
+        └─► no resolutions / no yarn.lock in this Git worktree ──► ordinary npm package-only check
+```
+
+Yarn owns descriptor-to-locator resolution; safedeps consumes `yarn info`'s machine-readable graph rather than re-implementing lockfile resolution. When the context resolves, the approved-spec ledger entry carries `project_context` (section 3) so the approval is scoped to that exact project and cannot leak to a different one or survive a `resolutions`/`yarn.lock` change.
+
 ### Phase 2 — fast command guard (PreToolUse / `safedeps-pre-guard.sh`)
 
 ```
@@ -203,6 +236,8 @@ Claude runs: npm install @jackwener/opencli@^1.7.16
 ```
 
 The guard also snapshots lockfiles/manifests and keeps the v1 hardcoded pattern blocks (see section 5). It is fast and advisory; the authority is the post-install gate.
+
+For an npm-ecosystem command, the guard resolves the same Yarn project context described above (`SAFEDEPS_NPM_PROJECT_DIR` pinned to the project directory) and folds its `context_hash` into the ledger lookup, so a project-scoped approval only passes the guard inside its own project. An invalid context (resolutions present, lockfile unusable) denies the command outright rather than falling back to a package-only lookup.
 
 ### Phase 3 — npm primary effect gate + reorg (PostToolUse / `safedeps-post-verify.sh`)
 
@@ -320,7 +355,7 @@ Design principle: **no silent fallback.** When the canonical truth (OSV) cannot 
 | maven | `pom.xml` | (directory) | `safedeps check maven <group>:<artifact>@<range>` |
 | nuget | `*.csproj` | `packages.lock.json` | `safedeps check nuget <pkg>@<range>` |
 
-OSV normalizes ecosystem names, so one API path covers all of them at advisory-check time. Per-ecosystem typosquat lists and install-script risk patterns live in separate static lists. Note that the npm effect gate (closure-vs-ledger enforcement) is npm-only today; the other ecosystems use the command-gate + reorg model.
+OSV normalizes ecosystem names, so one API path covers all of them at advisory-check time. Per-ecosystem typosquat lists and install-script risk patterns live in separate static lists. Note that the npm effect gate (closure-vs-ledger enforcement) is npm-only today; the other ecosystems use the command-gate + reorg model. Yarn is the one npm-routed lockfile that gets project-scoped closure resolution (section 4, Phase 1) when a root `resolutions` entry is present; pnpm and plain npm always use the published-package probe.
 
 ---
 
@@ -335,8 +370,8 @@ OSV normalizes ecosystem names, so one API path covers all of them at advisory-c
 | `scripts/safedeps-pre-guard.sh` | PreToolUse hook — ledger match + v1 hardcoded patterns + snapshots. |
 | `scripts/safedeps-post-verify.sh` | PostToolUse hook — closure-vs-ledger effect gate + reorg. |
 | `lib/providers/` | OSV / KEV / GHSA (and optional NVD / deps.dev / Snyk) adapters behind one query interface. |
-| `lib/ledger/` | Approved-spec ledger I/O — atomic write, hashing, TTL checks. |
-| `lib/npm/closure.sh` | npm closure resolution from a lockfile. |
+| `lib/ledger/` | Approved-spec ledger I/O — atomic write, hashing, TTL checks, project-context-scoped keys. |
+| `lib/npm/closure.sh` | npm closure resolution from a lockfile, plus Yarn project context/closure resolution (root `resolutions` + `yarn info`). |
 | `lib/gates/` | Release-time repo lane — `scan.sh` (gitleaks runner), `audit.sh` (multi-ecosystem lockfile audit — npm/pnpm/yarn/bun, delegated to each native tool), `hooks.sh` (`install`/`check`/`init`), `doctor.sh` (posture diagnose + `--fix`), `repo-profile.sh` (public/private resolution). Owns *execution*; the repo owns *policy*. |
 | `lib/gates/templates/` | Starter `.gitleaks[.private].toml` + `.githooks/pre-commit`, scaffolded by `hooks init`. Seeds the repo owns and tunes — never overwritten on re-run. |
 
@@ -400,6 +435,7 @@ Migration:
 - A compromise of the registry itself (npm/PyPI/…) is out of reach.
 - KEV updates once a day; a KEV listed in between is not caught until the next refresh.
 - Transitive-closure checking can grow the ledger to hundreds of entries; this needs optimization.
+- Yarn project-scoped closure requires the Yarn CLI on `PATH` and a Yarn Berry lockfile (`__metadata:` present); Yarn Classic (`yarn.lock` v1) and workspaces without a root `resolutions` entry fall back to the ordinary npm package-only check.
 
 **Future direction** (see [`ROADMAP.md`](./ROADMAP.md)):
 
