@@ -621,6 +621,7 @@ fi
 # `npm install` (lockfile install) falls through to the v1 reorg checks.
 
 SAFEDEPS_LEDGER_LIB="${SAFEDEPS_LEDGER_LIB:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/ledger/ledger.sh}"
+SAFEDEPS_NPM_CLOSURE_LIB="${SAFEDEPS_NPM_CLOSURE_LIB:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/npm/closure.sh}"
 SAFEDEPS_REPO_BIN="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/safedeps"
 
 guard_detect_ecosystem() {
@@ -795,6 +796,34 @@ if [[ -n "${LEDGER_ECOSYSTEM}" && ${#LEDGER_SPECS[@]} -gt 0 ]]; then
   # shellcheck source=../lib/ledger/ledger.sh
   source "${SAFEDEPS_LEDGER_LIB}"
 
+  LEDGER_CONTEXT_HASH=""
+  LEDGER_CONTEXT_FILE=""
+  if [[ "${LEDGER_ECOSYSTEM}" == "npm" && ! -f "${SAFEDEPS_NPM_CLOSURE_LIB}" ]]; then
+    log_advisory "pre-guard DENY: npm closure library missing (${SAFEDEPS_NPM_CLOSURE_LIB}); project-scoped approval cannot be enforced."
+    jq -nc '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:"safedeps: the npm closure library is missing, so project-scoped approvals cannot be enforced. Install blocked fail-closed; reinstall safedeps."}}'
+    exit 0
+  fi
+  if [[ "${LEDGER_ECOSYSTEM}" == "npm" ]]; then
+    # shellcheck source=../lib/npm/closure.sh
+    source "${SAFEDEPS_NPM_CLOSURE_LIB}"
+    LEDGER_CONTEXT_FILE=$(mktemp "${TMPDIR:-/tmp}/safedeps-pre-context.XXXXXX") || {
+      log_advisory "pre-guard DENY: could not allocate project-context evidence; scoped approval cannot be enforced."
+      jq -nc '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:"safedeps: project-context evidence could not be created. Install blocked fail-closed."}}'
+      exit 0
+    }
+    if SAFEDEPS_NPM_PROJECT_DIR="${PROJECT_DIR}" safedeps_npm_yarn_project_context "${LEDGER_CONTEXT_FILE}"; then
+      LEDGER_CONTEXT_HASH=$(jq -r '.context_hash' "${LEDGER_CONTEXT_FILE}")
+    else
+      context_status=$?
+      if [[ "${context_status}" -eq 2 ]]; then
+        log_advisory "pre-guard DENY: Yarn project resolution context is invalid in ${PROJECT_DIR}; scoped approval cannot be verified."
+        rm -f "${LEDGER_CONTEXT_FILE}"
+        jq -nc '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:"safedeps: Yarn project resolutions are present, but their lockfile context could not be verified. Install blocked fail-closed; repair the root package.json/yarn.lock context and run `safedeps check` again."}}'
+        exit 0
+      fi
+    fi
+  fi
+
   # Resolve a runnable `safedeps` invocation for the block message so the
   # self-heal loop works whether or not the CLI is on PATH. Prefer the PATH
   # command (clean UX); otherwise name the absolute repo bin (quoted via %q so
@@ -811,7 +840,7 @@ if [[ -n "${LEDGER_ECOSYSTEM}" && ${#LEDGER_SPECS[@]} -gt 0 ]]; then
     pkg="${entry%%$'\t'*}"
     spec="${entry##*$'\t'}"
     [[ -z "${pkg}" || -z "${spec}" ]] && continue
-    if ! safedeps_ledger_check "${LEDGER_ECOSYSTEM}" "${pkg}" "${spec}" 2>/dev/null \
+    if ! safedeps_ledger_check "${LEDGER_ECOSYSTEM}" "${pkg}" "${spec}" "${LEDGER_CONTEXT_HASH}" 2>/dev/null \
         | jq -e '.approved == true' >/dev/null 2>&1; then
       GUARD_BLOCKED_CMDS+=("${SAFEDEPS_INVOKE} check ${LEDGER_ECOSYSTEM} ${pkg}@${spec}")
     fi
@@ -837,8 +866,10 @@ if [[ -n "${LEDGER_ECOSYSTEM}" && ${#LEDGER_SPECS[@]} -gt 0 ]]; then
         }
       }')
     printf '%s\n' "${REASON_JSON}"
+    [[ -z "${LEDGER_CONTEXT_FILE}" ]] || rm -f "${LEDGER_CONTEXT_FILE}"
     exit 0
   fi
+  [[ -z "${LEDGER_CONTEXT_FILE}" ]] || rm -f "${LEDGER_CONTEXT_FILE}"
 fi
 
 if [[ "${HIDDEN_DEPENDENCY_INSTALL}" == "true" && ( -z "${LEDGER_ECOSYSTEM}" || ${#LEDGER_SPECS[@]} -eq 0 ) ]]; then

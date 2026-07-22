@@ -88,6 +88,8 @@ safedeps check <ecosystem> <pkg>@<version|range> --json
 
 이 명령은 OSV(표준), CISA KEV(고위험 오버레이), GitHub Advisory(강화 정보)를 조회합니다. npm의 경우 먼저 스크립트가 없는 임시 lockfile을 `npm install --package-lock-only --ignore-scripts`로 생성한 뒤 전체 의존성 폐쇄성을 추출하고 OSV `/v1/querybatch`를 쿼리합니다. 정상이거나 안전하게 축소된 spec은 `~/.safedeps/approved-specs/`에 기록되고, npm 항목은 `transitive_specs`도 함께 저장합니다.
 
+**Yarn project-scoped closure.** 대상 디렉터리가 루트 `resolutions`를 가진 Yarn Berry 프로젝트라면, `check`는 새로운 published-package probe 대신 그 프로젝트의 실제 `yarn.lock`을 `yarn info`로 읽어 폐쇄성을 계산합니다. 덕분에 `resolutions`로 취약한 transitive dependency를 patched version으로 고정한 프로젝트는 실제 resolved dependency tree 기준으로 승인받을 수 있습니다 -- published package closure만 봤다면 여전히 취약한 version이 보여 install이 거부됐을 것입니다. 승인 범위는 그 프로젝트 하나로 한정됩니다. ledger key가 project directory, `resolutions`, `yarn.lock` content의 hash를 포함하므로, 다른 프로젝트나 `resolutions`/`yarn.lock`이 바뀐 이후에는 같은 승인을 재사용할 수 없습니다. `resolutions`가 선언돼 있는데도 요청한 package를 프로젝트의 resolved graph에서 검증할 수 없거나 lockfile이 지원되는 Yarn Berry lockfile이 아니면, check는 fail-closed 상태를 유지합니다.
+
 ### Phase 2: Fast Command Guard + Snapshots (PreToolUse)
 
 Claude Code 또는 Codex CLI가 `npm install`, `pip install`, `cargo add`, `go get`, `gem install` 같은 명령을 실행하려 할 때, 가드 훅이 빠른 advisory/UX 레이어를 제공합니다.

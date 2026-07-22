@@ -85,6 +85,11 @@ cat > "${closure_fixture}" <<'EOF'
   "fixture-parent@1.0.0": [
     {"package":"fixture-parent","version":"1.0.0","direct":true},
     {"package":"fixture-child","version":"1.0.0","direct":false}
+  ],
+  "next@16.2.11": [
+    {"package":"next","version":"16.2.11","direct":true},
+    {"package":"postcss","version":"8.4.31","direct":false},
+    {"package":"sharp","version":"0.34.5","direct":false}
   ]
 }
 EOF
@@ -101,6 +106,106 @@ parent_hash=$(jq -r '.spec_hash' <<< "${closure_json}")
 parent_file="${SAFEDEPS_HOME}/approved-specs/${parent_hash/:/-}.json"
 [[ "$(jq -r '.transitive_specs[0].package' "${parent_file}")" == "fixture-child" ]] || fail "ledger transitive_specs records fixture child"
 pass "closure approval records transitive_specs"
+
+# Yarn Berry project context: root `resolutions` and Yarn's own actual locator
+# graph replace the published package closure for this check. The approval is
+# keyed by the exact project/resolutions/lockfile context, so it cannot be
+# borrowed by a second project whose lockfile still resolves the vulnerable
+# transitive version.
+yarn_safe_project="${tmp_root}/yarn-safe-project"
+yarn_unsafe_project="${tmp_root}/yarn-unsafe-project"
+yarn_absent_project="${tmp_root}/yarn-absent-project"
+mkdir -p "${yarn_safe_project}" "${yarn_unsafe_project}" "${yarn_absent_project}"
+cat > "${yarn_safe_project}/package.json" <<'EOF'
+{"name":"yarn-safe","private":true,"packageManager":"yarn@4.12.0","resolutions":{"postcss@npm:8.4.31":"8.5.21","sharp@npm:^0.34.5":"0.35.3"}}
+EOF
+cat > "${yarn_unsafe_project}/package.json" <<'EOF'
+{"name":"yarn-unsafe","private":true,"packageManager":"yarn@4.12.0","resolutions":{"postcss@npm:8.4.31":"8.4.31","sharp@npm:^0.34.5":"0.34.5"}}
+EOF
+cat > "${yarn_absent_project}/package.json" <<'EOF'
+{"name":"yarn-absent","private":true,"packageManager":"yarn@4.12.0"}
+EOF
+printf '__metadata:\n  version: 8\n# safe fixture\n' > "${yarn_safe_project}/yarn.lock"
+printf '__metadata:\n  version: 8\n# unsafe fixture\n' > "${yarn_unsafe_project}/yarn.lock"
+printf '__metadata:\n  version: 8\n# absent fixture\n' > "${yarn_absent_project}/yarn.lock"
+yarn_safe_project_canonical=$(cd "${yarn_safe_project}" && pwd -P)
+
+yarn_safe_graph="${tmp_root}/yarn-safe-info.ndjson"
+yarn_unsafe_graph="${tmp_root}/yarn-unsafe-info.ndjson"
+cat > "${yarn_safe_graph}" <<'EOF'
+{"value":"next@npm:16.2.11","children":{"Version":"16.2.11","Dependencies":[{"descriptor":"postcss@npm:8.5.21","locator":"postcss@npm:8.5.21"},{"descriptor":"sharp@npm:0.35.3","locator":"sharp@npm:0.35.3"}]}}
+{"value":"postcss@npm:8.5.21","children":{"Version":"8.5.21"}}
+{"value":"sharp@npm:0.35.3","children":{"Version":"0.35.3"}}
+EOF
+cat > "${yarn_unsafe_graph}" <<'EOF'
+{"value":"next@npm:16.2.11","children":{"Version":"16.2.11","Dependencies":[{"descriptor":"postcss@npm:8.4.31","locator":"postcss@npm:8.4.31"},{"descriptor":"sharp@npm:0.34.5","locator":"sharp@npm:0.34.5"}]}}
+{"value":"postcss@npm:8.4.31","children":{"Version":"8.4.31"}}
+{"value":"sharp@npm:0.34.5","children":{"Version":"0.34.5"}}
+EOF
+printf '%s\n' '{"vulnerable":["postcss@8.4.31","sharp@0.34.5"]}' > "${state_file}"
+
+yarn_safe_home="${tmp_root}/safe-yarn-project"
+yarn_safe_json=$(
+  env -u SAFEDEPS_NPM_CLOSURE_FIXTURE_JSON \
+    SAFEDEPS_HOME="${yarn_safe_home}" \
+    SAFEDEPS_NPM_PROJECT_DIR="${yarn_safe_project}" \
+    SAFEDEPS_YARN_INFO_FIXTURE_NDJSON="${yarn_safe_graph}" \
+    ./bin/safedeps --json check npm next@16.2.11
+)
+[[ "$(jq -r '.result' <<< "${yarn_safe_json}")" == "clean" ]] || fail "Yarn resolved project closure is approved when patched"
+[[ "$(jq -r '.closure_source.type' <<< "${yarn_safe_json}")" == "yarn-project-lockfile" ]] || fail "Yarn check reports lockfile project source"
+[[ "$(jq -r '.closure_source.lockfile_path' <<< "${yarn_safe_json}")" == "${yarn_safe_project_canonical}/yarn.lock" ]] || fail "Yarn check preserves exact source lockfile path"
+[[ "$(jq -r '[.resolved_closure[] | select(.package == "sharp" and .version == "0.35.3")] | length' <<< "${yarn_safe_json}")" == "1" ]] || fail "Yarn check reports patched Sharp locator"
+[[ "$(jq -r '[.resolved_closure[] | select(.package == "postcss" and .version == "8.5.21")] | length' <<< "${yarn_safe_json}")" == "1" ]] || fail "Yarn check reports patched PostCSS locator"
+yarn_safe_hash=$(jq -r '.spec_hash' <<< "${yarn_safe_json}")
+yarn_safe_entry="${yarn_safe_home}/approved-specs/${yarn_safe_hash/:/-}.json"
+[[ "$(jq -r '.project_context.context_hash' "${yarn_safe_entry}")" == "$(jq -r '.closure_source.context_hash' <<< "${yarn_safe_json}")" ]] || fail "Yarn approval ledger is bound to project context"
+
+yarn_safe_cached=$(
+  env -u SAFEDEPS_NPM_CLOSURE_FIXTURE_JSON \
+    SAFEDEPS_HOME="${yarn_safe_home}" \
+    SAFEDEPS_NPM_PROJECT_DIR="${yarn_safe_project}" \
+    ./bin/safedeps --json check npm next@16.2.11
+)
+[[ "$(jq -r '.result' <<< "${yarn_safe_cached}")" == "already_approved" ]] || fail "same Yarn project context reuses scoped approval"
+
+set +e
+yarn_unsafe_json=$(
+  env -u SAFEDEPS_NPM_CLOSURE_FIXTURE_JSON \
+    SAFEDEPS_HOME="${yarn_safe_home}" \
+    SAFEDEPS_NPM_PROJECT_DIR="${yarn_unsafe_project}" \
+    SAFEDEPS_YARN_INFO_FIXTURE_NDJSON="${yarn_unsafe_graph}" \
+    ./bin/safedeps --json check npm next@16.2.11
+)
+yarn_unsafe_status=$?
+yarn_absent_json=$(
+  SAFEDEPS_HOME="${tmp_root}/safe-yarn-absent" \
+    SAFEDEPS_NPM_PROJECT_DIR="${yarn_absent_project}" \
+    ./bin/safedeps --json check npm next@16.2.11
+)
+yarn_absent_status=$?
+set -e
+[[ "${yarn_unsafe_status}" -eq 2 ]] || fail "unsafe Yarn project closure exits 2"
+[[ "$(jq -r '.result' <<< "${yarn_unsafe_json}")" == "closure_vulnerable" ]] || fail "unsafe Yarn project does not borrow safe scoped approval"
+[[ "$(jq -r '[.closure_vulnerabilities[] | select(.package == "sharp" and .version == "0.34.5")] | length' <<< "${yarn_unsafe_json}")" == "1" ]] || fail "unsafe Yarn verdict names vulnerable Sharp locator"
+[[ "$(jq -r '[.closure_vulnerabilities[] | select(.package == "postcss" and .version == "8.4.31")] | length' <<< "${yarn_unsafe_json}")" == "1" ]] || fail "unsafe Yarn verdict names vulnerable PostCSS locator"
+[[ "${yarn_absent_status}" -eq 2 ]] || fail "project without resolutions keeps package-only deny"
+[[ "$(jq -r '.closure_source.type' <<< "${yarn_absent_json}")" == "fixture" ]] || fail "absent resolutions keep published closure source"
+
+yarn_safe_hook=$(
+  SAFEDEPS_HOME="${yarn_safe_home}" scripts/safedeps-pre-guard.sh <<EOF
+{"tool_name":"Bash","tool_input":{"command":"yarn add next@16.2.11"},"cwd":"${yarn_safe_project}","turn_id":"turn-yarn-safe","model":"codex-test"}
+EOF
+)
+[[ -z "${yarn_safe_hook}" ]] || fail "Yarn command gate accepts matching project-scoped approval"
+yarn_unsafe_hook=$(
+  SAFEDEPS_HOME="${yarn_safe_home}" scripts/safedeps-pre-guard.sh <<EOF
+{"tool_name":"Bash","tool_input":{"command":"yarn add next@16.2.11"},"cwd":"${yarn_unsafe_project}","turn_id":"turn-yarn-unsafe","model":"codex-test"}
+EOF
+)
+[[ "$(jq -r '.hookSpecificOutput.permissionDecision' <<< "${yarn_unsafe_hook}")" == "deny" ]] || fail "Yarn command gate rejects approval from a different project context"
+pass "Yarn root resolutions use actual lockfile closure with project-scoped approval isolation"
+printf '%s\n' '{"vulnerable":[]}' > "${state_file}"
 
 patched_json=$(./bin/safedeps --json check npm fixture-vuln@1.0.0)
 [[ "$(jq -r '.result' <<< "${patched_json}")" == "patched_available" ]] || fail "patched fixture narrows"

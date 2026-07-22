@@ -135,16 +135,20 @@ TIER 3 — ENRICHMENT / CROSS-CHECK
   },
   "transitive_specs": [
     { "ecosystem": "npm", "package": "…", "version": "…" }
-  ]
+  ],
+  "project_context": null
 }
 ```
 
 핵심 필드:
 
-- `hash` — `(ecosystem, package, version)` 의 deterministic hash. hook 이 명령에서 같은 hash 를 뽑아 ledger 를 조회한다.
+- `hash` — `(ecosystem, package, version)` 의 deterministic hash. `project_context.context_hash` 가 있으면 함께 접어 넣는다. hook 이 명령(과, 있다면 살아있는 project context)에서 같은 hash 를 뽑아 ledger 를 조회한다.
 - `approved_at` / `expires_at` — lifecycle TTL, 기본 30일. 만료 후엔 새 CVE 가능성이 있어 자동 revoke + re-check 강제.
 - `evidence` — 승인 시점에 어느 source 가 무엇을 봤는지. audit trail.
 - `transitive_specs` — direct entry 가 승인한 전체 transitive closure. npm effect gate 는 lockfile 에 있으면서 direct entry 에도 이 배열에도 없는 `pkg@version` 을 reorg 한다.
+- `project_context` — 일반 published-package 승인은 `null`, Yarn 프로젝트의 resolved closure 에서 온 승인이면 `{ type: "yarn-project-lockfile", context_hash, project_root, manifest_path, lockfile_path }` (4장 "Yarn project-scoped closure" 참고). `context_hash` 는 project directory, 루트 `resolutions`, `yarn.lock` content 의 hash 다.
+
+**Project-scoped isolation.** `project_context` 가 있는 승인은 `(ecosystem, package, version)` 에 더해 `context_hash` 로도 키가 잡히므로, 같은 spec 의 package-only 승인과는 다른 ledger path 에 놓이고 다른 프로젝트나 `resolutions`/`yarn.lock` 이 바뀐 이후의 같은 프로젝트에서는 조회에 성공하지 못한다 (hash 가 함께 바뀌므로). `safedeps_ledger_check` 는 호출자의 살아있는 context hash 를 저장된 값과 비교해 다르면 `reason: "context_mismatch"` 로 거부한다 — 승인이 프로젝트 경계를 조용히 넘어가는 일은 없다.
 
 Lifecycle:
 
@@ -188,6 +192,35 @@ safedeps check npm "@jackwener/opencli@^1.7.0"
 
 npm 은 "OSV query" 가 **전체 resolved closure** 를 `/v1/querybatch` 한 번으로 돌고, 승인 entry 가 모든 transitive 를 `transitive_specs` 에 기록한다.
 
+**Yarn project-scoped closure.** 새로운 published-package probe 로 넘어가기 전에, `lib/npm/closure.sh` 의 `safedeps_npm_yarn_project_closure` 가 먼저 canonical Yarn project context 를 찾는다.
+
+```
+project context 해석 (cwd 에서 위로 탐색, .git 경계에서 중단):
+        │
+        ├─► package.json 에 비어있지 않은 루트 `resolutions` + 옆에 yarn.lock
+        │        │
+        │        ├─► yarn.lock 에 `__metadata:` marker 없음 ──► INVALID CONTEXT (fail-closed)
+        │        └─► 유효한 Berry lockfile
+        │                 │
+        │                 ▼
+        │        context_hash = sha256(project_root, sha256(resolutions), sha256(yarn.lock))
+        │                 │
+        │                 ▼
+        │        `yarn info -A -R --json` → 전체 project locator graph
+        │                 │
+        │                 ▼
+        │        요청된 `pkg@npm:version` locator 부터 traverse
+        │                 │
+        │                 ├─► locator 발견  ──► resolved project closure (approve 가능)
+        │                 └─► locator 없음   ──► approval_scope: "deny-only"
+        │                                        (published closure 는 여전히 취약점 검사하지만
+        │                                         결과를 approve 하지는 않음)
+        │
+        └─► 이 Git worktree 에 resolutions/yarn.lock 없음 ──► 일반 npm package-only check
+```
+
+descriptor-to-locator resolution 은 Yarn 소유다. safedeps 는 lockfile resolution 을 재구현하지 않고 `yarn info` 의 machine-readable graph 를 그대로 소비한다. context 가 resolve 되면 approved-spec ledger entry 가 `project_context` (3장) 를 함께 가져, 승인이 그 프로젝트 하나로 한정되고 다른 프로젝트로 새거나 `resolutions`/`yarn.lock` 변경 이후에도 살아남지 못한다.
+
 ### Phase 2 — fast command guard (PreToolUse / `safedeps-pre-guard.sh`)
 
 ```
@@ -202,6 +235,8 @@ Claude: npm install @jackwener/opencli@^1.7.16
 ```
 
 guard 는 lockfile/manifest 도 snapshot 하고 v1 hardcoded pattern 차단(section 5)도 유지한다. 빠르고 advisory 일 뿐, 권위는 post gate 다.
+
+npm ecosystem 명령이면 guard 도 위와 같은 Yarn project context 를 해석해(`SAFEDEPS_NPM_PROJECT_DIR` 를 project directory 로 고정) 그 `context_hash` 를 ledger 조회에 접어 넣는다 — 그래서 project-scoped 승인은 그 프로젝트 안에서만 guard 를 통과한다. context 가 invalid 하면(resolutions 는 있는데 lockfile 을 못 씀) package-only 조회로 넘어가지 않고 명령을 그대로 거부한다.
 
 ### Phase 3 — npm primary effect gate + reorg (PostToolUse / `safedeps-post-verify.sh`)
 
@@ -319,7 +354,7 @@ GHSA / NVD — 응답 무
 | maven | `pom.xml` | (디렉토리) | `safedeps check maven <group>:<artifact>@<range>` |
 | nuget | `*.csproj` | `packages.lock.json` | `safedeps check nuget <pkg>@<range>` |
 
-OSV 가 ecosystem 이름을 정규화해줘서 advisory-check 시점엔 single API 로 전부 cover 한다. ecosystem 별 typosquat 명단·install-script 위험 패턴은 별도 정적 list 다. npm effect gate(closure-vs-ledger enforcement)는 현재 npm 한정이고, 나머지는 command-gate + reorg 모델을 쓴다.
+OSV 가 ecosystem 이름을 정규화해줘서 advisory-check 시점엔 single API 로 전부 cover 한다. ecosystem 별 typosquat 명단·install-script 위험 패턴은 별도 정적 list 다. npm effect gate(closure-vs-ledger enforcement)는 현재 npm 한정이고, 나머지는 command-gate + reorg 모델을 쓴다. npm 으로 라우팅되는 lockfile 중 project-scoped closure resolution(4장 Phase 1)을 받는 건 Yarn 하나뿐이며, 루트 `resolutions` entry 가 있을 때만이다. pnpm 과 일반 npm 은 항상 published-package probe 를 쓴다.
 
 ---
 
@@ -334,8 +369,8 @@ OSV 가 ecosystem 이름을 정규화해줘서 advisory-check 시점엔 single A
 | `scripts/safedeps-pre-guard.sh` | PreToolUse hook — ledger 일치 + v1 hardcoded pattern + snapshot. |
 | `scripts/safedeps-post-verify.sh` | PostToolUse hook — closure-vs-ledger effect gate + reorg. |
 | `lib/providers/` | OSV / KEV / GHSA (옵션 NVD / deps.dev / Snyk) adapter, 단일 query interface. |
-| `lib/ledger/` | approved-spec ledger I/O — atomic write, hashing, TTL 검사. |
-| `lib/npm/closure.sh` | lockfile 에서 npm closure 해석. |
+| `lib/ledger/` | approved-spec ledger I/O — atomic write, hashing, TTL 검사, project-context-scoped key. |
+| `lib/npm/closure.sh` | lockfile 에서 npm closure 해석, 더해 Yarn project context/closure 해석 (루트 `resolutions` + `yarn info`). |
 | `lib/gates/` | release-time repo lane — `scan.sh`(gitleaks runner), `audit.sh`(멀티-ecosystem lockfile audit — npm/pnpm/yarn/bun, 각 네이티브 도구에 위임), `hooks.sh`(`install`/`check`/`init`), `doctor.sh`(자세 진단 + `--fix`), `repo-profile.sh`(public/private 판별). *실행*을 소유하고 *policy* 는 repo 가 소유. |
 | `lib/gates/templates/` | 시작용 `.gitleaks[.private].toml` + `.githooks/pre-commit`, `hooks init` 가 scaffold. repo 가 소유·튜닝하는 seed — 재실행 시 덮지 않음. |
 
@@ -399,6 +434,7 @@ rm -rf ~/.safedeps/cache/osv/        # OSV cache 비우기 (강제 re-query)
 - registry 자체(npm/PyPI/…) 손상은 막지 못한다.
 - KEV 는 하루 1회 update — 그 사이 등재된 KEV 는 다음 refresh 까지 못 잡는다.
 - transitive closure 검사는 ledger 를 수백 개로 키울 수 있어 최적화가 필요하다.
+- Yarn project-scoped closure 는 `PATH` 상의 Yarn CLI 와 Yarn Berry lockfile(`__metadata:` 존재)이 필요하다. Yarn Classic(`yarn.lock` v1)이나 루트 `resolutions` 가 없는 workspace 는 일반 npm package-only check 로 떨어진다.
 
 **미래 방향** ([`ROADMAP.md`](./ROADMAP.md) 참고):
 
