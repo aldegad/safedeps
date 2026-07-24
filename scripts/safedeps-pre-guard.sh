@@ -821,6 +821,19 @@ if [[ -n "${LEDGER_ECOSYSTEM}" && ${#LEDGER_SPECS[@]} -gt 0 ]]; then
         jq -nc '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:"safedeps: Yarn project resolutions are present, but their lockfile context could not be verified. Install blocked fail-closed; repair the root package.json/yarn.lock context and run `safedeps check` again."}}'
         exit 0
       fi
+      # No Yarn context. An npm `overrides` approval is scoped to the override
+      # set that produced it, so the guard has to derive the same key or a
+      # legitimately approved install would look unapproved here.
+      overrides_source_file=$(mktemp "${TMPDIR:-/tmp}/safedeps-pre-ov-src.XXXXXX") || overrides_source_file=""
+      if [[ -n "${overrides_source_file}" ]]; then
+        overrides_json=$(SAFEDEPS_NPM_OVERRIDES_DIR="${PROJECT_DIR}" safedeps_npm_repo_overrides_json "${overrides_source_file}")
+        overrides_source=$(cat "${overrides_source_file}" 2>/dev/null)
+        rm -f "${overrides_source_file}"
+        if [[ -n "${overrides_json}" && "${overrides_json}" != '{}' ]] && \
+            safedeps_npm_overrides_context "${LEDGER_CONTEXT_FILE}" "${overrides_json}" "${overrides_source}"; then
+          LEDGER_CONTEXT_HASH=$(jq -r '.context_hash' "${LEDGER_CONTEXT_FILE}")
+        fi
+      fi
     fi
   fi
 

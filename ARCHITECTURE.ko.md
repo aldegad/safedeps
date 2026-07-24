@@ -148,6 +148,8 @@ TIER 3 — ENRICHMENT / CROSS-CHECK
 - `transitive_specs` — direct entry 가 승인한 전체 transitive closure. npm effect gate 는 lockfile 에 있으면서 direct entry 에도 이 배열에도 없는 `pkg@version` 을 reorg 한다.
 - `project_context` — 일반 published-package 승인은 `null`, Yarn 프로젝트의 resolved closure 에서 온 승인이면 `{ type, context_hash, project_root, manifest_path, lockfile_path, input_sha256, input_files }` (4장 "Yarn project-scoped closure" 참고). `context_hash` 는 project directory, 루트 `resolutions`, `yarn.lock` content, canonical input set 의 hash 다. `type` 은 package 가 이미 project lockfile 에 있었으면 `yarn-project-lockfile`, candidate 를 isolated mirror 에서 해석했으면 `yarn-project-materialized-lockfile` 이다. materialized 쪽은 `materialization { candidate, input_sha256, generated_lockfile_sha256, command, isolation }` 을 추가로 가진다. `safedeps_ledger_validate_json` 은 이 필드들을 필수로 요구하고, `materialization.input_sha256` 이 context 의 `input_sha256` 과 다르면 entry 를 거부한다.
 
+`project_context.type` 은 published-package probe 가 소비 레포의 npm `overrides` 를 반영했을 때 `npm-overrides-probe` 도 된다. 이 컨텍스트는 `project_root`, `overrides_source`(manifest 경로 또는 `env`), `overrides_sha256`, 그리고 `overrides` 자체를 싣는다. `context_hash` 는 project root 와 canonical(키 정렬) override 집합의 hash 라, 동등한 두 집합은 같은 키를 공유한다. `safedeps_ledger_validate_json` 은 이 필드들을 필수로 요구하고 override 집합이 빈 entry 는 거부한다. 근거는 이렇다 — published-package 승인이 전역일 수 있는 건 오직 그것이 프로젝트 무관이기 때문이다. `overrides` 를 반영하면 resolved closure 가 소비 프로젝트의 함수가 되므로, 그 승인은 Yarn project closure 와 같은 방식으로 키가 잡혀야 한다. 그러지 않으면 transitive 를 patch 한 레포에서 얻은 승인이 patch 하지 않은 레포의 검사를 만족시키고, 그 레포의 실제 설치는 취약한 버전을 해석한다. `overrides` 가 없는 레포는 컨텍스트가 붙지 않고 기존 전역 승인 그대로다.
+
 **Project-scoped isolation.** `project_context` 가 있는 승인은 `(ecosystem, package, version)` 에 더해 `context_hash` 로도 키가 잡히므로, 같은 spec 의 package-only 승인과는 다른 ledger path 에 놓이고 다른 프로젝트나 `resolutions`/`yarn.lock` 이 바뀐 이후의 같은 프로젝트에서는 조회에 성공하지 못한다 (hash 가 함께 바뀌므로). `safedeps_ledger_check` 는 호출자의 살아있는 context hash 를 저장된 값과 비교해 다르면 `reason: "context_mismatch"` 로 거부한다 — 승인이 프로젝트 경계를 조용히 넘어가는 일은 없다.
 
 Lifecycle:
@@ -387,7 +389,7 @@ GHSA / NVD — 응답 무
 | maven | `pom.xml` | (디렉토리) | `safedeps check maven <group>:<artifact>@<range>` |
 | nuget | `*.csproj` | `packages.lock.json` | `safedeps check nuget <pkg>@<range>` |
 
-OSV 가 ecosystem 이름을 정규화해줘서 advisory-check 시점엔 single API 로 전부 cover 한다. ecosystem 별 typosquat 명단·install-script 위험 패턴은 별도 정적 list 다. npm effect gate(closure-vs-ledger enforcement)는 현재 npm 한정이고, 나머지는 command-gate + reorg 모델을 쓴다. npm 으로 라우팅되는 lockfile 중 project-scoped closure resolution(4장 Phase 1)을 받는 건 Yarn 하나뿐이며, 루트 `resolutions` entry 가 있을 때만이다. pnpm 과 일반 npm 은 항상 published-package probe 를 쓴다.
+OSV 가 ecosystem 이름을 정규화해줘서 advisory-check 시점엔 single API 로 전부 cover 한다. ecosystem 별 typosquat 명단·install-script 위험 패턴은 별도 정적 list 다. npm effect gate(closure-vs-ledger enforcement)는 현재 npm 한정이고, 나머지는 command-gate + reorg 모델을 쓴다. npm 으로 라우팅되는 lockfile 중 project-scoped closure resolution(4장 Phase 1)을 받는 건 Yarn 하나뿐이며, 루트 `resolutions` entry 가 있을 때만이다. 일반 npm 은 published-package probe 를 쓰되, 소비 레포에 `overrides` 가 있으면 그것을 probe 에 반영하고 그 승인을 override 집합에 스코프한다(4장 Phase 1). pnpm 은 항상 순수 published-package probe 를 쓴다.
 
 ---
 

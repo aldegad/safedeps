@@ -94,6 +94,12 @@ safedeps check <ecosystem> <pkg>@<version|range> --json
 
 승인에는 그 승인을 만들어낸 근거가 함께 기록됩니다. 정확한 input set의 hash, input 파일 목록, 생성된 lockfile의 hash, candidate locator, 정확한 Yarn 명령, 그리고 `private-project-mirror` isolation 모드입니다. 이 중 하나라도 없으면 ledger가 해당 entry를 거부합니다. safedeps는 Yarn 실행 전후로 프로젝트 input을 다시 hash합니다. 그 사이에 manifest, `resolutions`, config, lockfile이 바뀌었다면 뒤섞인 프로젝트 상태로 승인하지 않고 candidate를 무효화합니다. input 복사, Yarn 실행, 생성된 lockfile에서의 candidate 해석 중 하나라도 실패하면 `project-candidate-materialization-unavailable`로 거부합니다. published-package closure로 되돌아가는 fallback은 없습니다 -- 검증할 수 없는 materialization은 완화가 아니라 거부입니다.
 
+**npm `overrides` 인지 (v2.12.0).** 같은 문제가 일반 npm 에도 있습니다. 취약한 transitive 를 patched version 으로 고정하는 표준 처방이 `overrides` 인데, closure probe 가 빈 manifest 를 써서 published tree 를 해석하는 바람에 이미 고쳐놓은 레포의 설치까지 거부했습니다. 이제 `check` 는 소비 레포의 `overrides` 를 찾아 probe 에 반영하므로, 실제 설치와 같은 방식으로 transitive 를 해석합니다. 탐색은 `SAFEDEPS_NPM_OVERRIDES_JSON` 이 설정돼 있으면 그것을, 아니면 작업 디렉터리에서 위로 올라가며 만나는 첫 번째 비어있지 않은 `overrides` 를 쓰고, 저장소 루트에서 멈춥니다 -- `.git` 이 디렉터리가 아니라 파일인 worktree 루트도 포함합니다. 구체 버전 핀만 인정하고 `"$react"` 같은 `$`-reference 는 버립니다. 독립 probe 에서는 의미가 없기 때문입니다.
+
+`overrides` 를 반영해도 취약점을 숨길 수는 없습니다. probe 는 여전히 각 override 를 구체 버전으로 해석하고 OSV 는 바로 그 버전으로 조회되므로, 여전히 취약한 릴리스를 가리키는 override 는 다른 것과 똑같이 걸립니다. overrides 를 probe manifest 에 반영하지 못하면 safedeps 가 그 사실을 알리고 overrides 없이 진행하는데, 이는 검사를 더 엄격하게 만들 뿐입니다.
+
+closure 가 소비 프로젝트에 의존하게 됐으므로 승인도 거기에 스코프됩니다. published-package 승인이 전역인 건 정확히 그것이 프로젝트 무관이기 때문이고, `overrides` 에서 유도된 승인은 그렇지 않습니다. 그래서 ledger entry 가 project root, override 집합, 그리고 둘의 hash 를 싣고 키가 그 hash 를 포함합니다. transitive 를 patch 한 레포에서 얻은 승인은 patch 하지 않은 레포의 검사를 만족시키지 못합니다. 그 레포의 실제 설치는 취약한 버전을 해석하니까요. override 집합이 바뀌면 키도 바뀝니다. `overrides` 가 없는 레포는 영향이 없고 기존 전역 승인 그대로입니다.
+
 ### Phase 2: Fast Command Guard + Snapshots (PreToolUse)
 
 Claude Code 또는 Codex CLI가 `npm install`, `pip install`, `cargo add`, `go get`, `gem install` 같은 명령을 실행하려 할 때, 가드 훅이 빠른 advisory/UX 레이어를 제공합니다.

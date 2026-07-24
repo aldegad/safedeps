@@ -994,4 +994,74 @@ else
   printf 'ok - pre-commit dep gate SKIPPED (needs gitleaks + jq)\n'
 fi
 
+
+# --- npm `overrides` verdict path -------------------------------------------
+# The closure fixture short-circuits before the probe, so it cannot cover the
+# overrides path. Stub `npm` instead: the stub emits a lockfile whose resolved
+# transitive depends on whether the probe manifest carried `overrides`. That
+# makes the whole chain deterministic -- discovery, probe manifest, resolved
+# closure, OSV verdict -- with no registry access.
+ov_npm_bin="${tmp_root}/ov-npm-bin"
+mkdir -p "${ov_npm_bin}"
+cat > "${ov_npm_bin}/npm" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+# Only the closure probe is stubbed; anything else is not part of this test.
+[[ "${1:-}" == "install" ]] || exit 64
+pinned=$(jq -r '.overrides.minimist // "0.0.8"' package.json 2>/dev/null || printf '0.0.8')
+cat > package-lock.json <<JSON
+{"lockfileVersion":3,"packages":{
+  "":{"name":"safedeps-closure-probe","version":"0.0.0"},
+  "node_modules/mkdirp":{"name":"mkdirp","version":"0.5.1"},
+  "node_modules/minimist":{"name":"minimist","version":"${pinned}"}
+}}
+JSON
+EOF
+chmod +x "${ov_npm_bin}/npm"
+
+printf '%s\n' '{"vulnerable":["minimist@0.0.8","minimist@0.2.0"]}' > "${state_file}"
+
+ov_patched_repo="${tmp_root}/ov-verdict-patched"
+mkdir -p "${ov_patched_repo}"; git -C "${ov_patched_repo}" init -q
+printf '{"name":"p","version":"0.0.0","private":true,"overrides":{"minimist":"1.2.8"}}\n' > "${ov_patched_repo}/package.json"
+
+ov_vuln_repo="${tmp_root}/ov-verdict-vuln"
+mkdir -p "${ov_vuln_repo}"; git -C "${ov_vuln_repo}" init -q
+printf '{"name":"v","version":"0.0.0","private":true,"overrides":{"minimist":"0.2.0"}}\n' > "${ov_vuln_repo}/package.json"
+
+ov_bare_repo="${tmp_root}/ov-verdict-bare"
+mkdir -p "${ov_bare_repo}"; git -C "${ov_bare_repo}" init -q
+printf '{"name":"b","version":"0.0.0","private":true}\n' > "${ov_bare_repo}/package.json"
+
+ov_run() {
+  local dir="$1" home="$2"
+  ( cd "${dir}" && env -u SAFEDEPS_NPM_CLOSURE_FIXTURE_JSON \
+      PATH="${ov_npm_bin}:${PATH}" SAFEDEPS_HOME="${home}" \
+      "${ROOT_DIR}/bin/safedeps" --json check npm mkdirp@0.5.1 2>/dev/null )
+}
+
+ov_home="${tmp_root}/ov-verdict-home"
+ov_patched_json=$(ov_run "${ov_patched_repo}" "${ov_home}") || true
+[[ "$(jq -r '.result' <<< "${ov_patched_json}")" == "clean" ]] \
+  || fail "a patched override yields a clean verdict (got: $(jq -rc '.result' <<< "${ov_patched_json}"))"
+[[ "$(jq -r '.closure_source.type' <<< "${ov_patched_json}")" == "npm-overrides-probe" ]] \
+  || fail "an overrides-derived approval records its overrides context"
+
+ov_vuln_json=$(ov_run "${ov_vuln_repo}" "${tmp_root}/ov-verdict-home-vuln") || true
+[[ "$(jq -r '.approved' <<< "${ov_vuln_json}")" == "false" ]] \
+  || fail "an override pointing at a still-vulnerable version is not hidden"
+
+# The approval above was earned under one override set; a repo without it must
+# not inherit that approval, because its real install resolves the vulnerable
+# transitive.
+ov_bare_json=$(ov_run "${ov_bare_repo}" "${ov_home}") || true
+[[ "$(jq -r '.approved' <<< "${ov_bare_json}")" == "false" ]] \
+  || fail "an overrides-scoped approval does not leak into a repo without those overrides"
+ov_reuse_json=$(ov_run "${ov_patched_repo}" "${ov_home}") || true
+[[ "$(jq -r '.result' <<< "${ov_reuse_json}")" == "already_approved" ]] \
+  || fail "the same override set reuses its own approval (got: $(jq -rc '.result' <<< "${ov_reuse_json}"))"
+printf 'ok - npm overrides drive the verdict and their approval stays scoped\n'
+
+printf '%s\n' '{"vulnerable":[]}' > "${state_file}"
+
 printf 'e2e passed\n'
