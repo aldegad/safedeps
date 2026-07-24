@@ -56,7 +56,7 @@ The internal engine keeps the v1 `reorg-guard` assets.
 
 ### Release notes
 
-- The npm package version in `package.json` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION` tracks it and the smoke test reads `package.json` to compare (current: v2.11.0).
+- The npm package version in `package.json` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION` tracks it and the smoke test reads `package.json` to compare (current: v2.12.0).
 - `npm test` runs the release smoke suite; the full fixture E2E lives under `v2.1-tests`.
 - The daily re-check uses no LLM tokens. It is opt-in: a macOS `launchd` user agent runs `safedeps re-check --json` daily, installed atomically by `install-safedeps-recheck-agent.mjs`. It writes `~/.safedeps/recheck.log` and `~/.safedeps/recheck-alerts.jsonl` and raises a macOS notification on a new CVE/KEV/revoke/provider-skip/suspected-forgery. Network is used only for OSV / CISA / GHSA queries.
 
@@ -287,6 +287,30 @@ v2.10 could only judge a package that was already in `yarn.lock`, which excluded
 - unavailable materialization denies with no ledger approval and no published-closure probe; a changed input or lock context denies
 - caller tree and lockfile hashes are byte-identical before and after; nested `node_modules` is asserted absent from the copied mirror inputs
 - existing smoke + e2e regression suite green; zero npm dependencies; effect-primary stays npm-only
+
+---
+
+## v2.12 — npm `overrides` awareness, scoped to its override set (shipped)
+
+Status: shipped as v2.12.0.
+
+`overrides` is the standard npm remediation for a vulnerable transitive, but the closure probe resolved from an empty manifest and never saw it. A repo that had already patched a transitive that way was still denied, so safedeps punished the correct fix. `check` now discovers the consuming repo's `overrides` and applies them to the probe, resolving transitives the way the real install will.
+
+### What changed
+
+- **Overrides reach the probe.** Discovery reads `SAFEDEPS_NPM_OVERRIDES_JSON`, else the nearest `package.json` carrying a non-empty `overrides`, walking up from the working directory and stopping at the repository root. Only concrete pins are honored; `$`-references are dropped, having no meaning in a standalone probe. Failing to apply them is logged rather than silently dropped -- it only makes the check stricter, but an unexplained denial is not observable.
+- **The boundary includes worktrees.** A worktree root carries a `.git` file, not a directory, so a directory-only test walked past it and picked up an ancestor's overrides. The walk now matches the Yarn project-context walk-up.
+- **The approval is scoped to the override set.** Applying overrides makes the closure a function of the consuming project, and a published-package approval may be global only because it is project-independent. The ledger entry became `npm-overrides-probe`, carrying the project root, the override set, its canonical hash, and a `context_hash` over both; the key folds that hash in. An approval earned in a repo that patched a transitive no longer satisfies the check in a repo that did not, whose real install resolves the vulnerable version. The pre-guard derives the same key, so a scoped approval still passes the gate.
+
+Honoring overrides cannot mask a vulnerability: the probe resolves each one to a concrete version and OSV is queried for that version, so an override pointing at a still-vulnerable release is flagged like any other.
+
+### Verification
+
+- approval scoping live and in tests: patched set approves, the same set reuses its approval, a repo with no overrides is denied, a different override set is denied
+- an override pointing at a still-vulnerable version is denied
+- pre-guard key parity: allow in the repo that earned the approval, deny in one without those overrides
+- hermetic e2e stubs npm so the resolved closure depends on the probe manifest, fixing the whole chain without registry access; the scoping and injection paths are both mutation-verified
+- ledger rejects an `npm-overrides-probe` context missing its override-set hash or carrying an empty set
 
 ---
 
