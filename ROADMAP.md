@@ -56,7 +56,7 @@ The internal engine keeps the v1 `reorg-guard` assets.
 
 ### Release notes
 
-- The npm package version in `package.json` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION` tracks it and the smoke test reads `package.json` to compare (current: v2.10.0).
+- The npm package version in `package.json` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION` tracks it and the smoke test reads `package.json` to compare (current: v2.11.0).
 - `npm test` runs the release smoke suite; the full fixture E2E lives under `v2.1-tests`.
 - The daily re-check uses no LLM tokens. It is opt-in: a macOS `launchd` user agent runs `safedeps re-check --json` daily, installed atomically by `install-safedeps-recheck-agent.mjs`. It writes `~/.safedeps/recheck.log` and `~/.safedeps/recheck-alerts.jsonl` and raises a macOS notification on a new CVE/KEV/revoke/provider-skip/suspected-forgery. Network is used only for OSV / CISA / GHSA queries.
 
@@ -257,6 +257,36 @@ The PreToolUse guard extracted `pkg@version` tokens from *every* segment of a co
 `safedeps re-check` already flagged ledger entries with no matching `advisory.log` approval record as `suspected_forgery`, but the daily alert wrapper (`safedeps-recheck-alert.sh`) never read that field: a forged entry whose package queries clean counted as `still_clean`, so no alert condition fired and the flag was silently swallowed — exactly the silent-fallback the invariants forbid. The wrapper now counts `suspected_forgery`, includes it in the alert trigger and the notification message, and the alert record carries the flagged entries. Smoke covers both directions: a forgery-only fixture (every other trigger zero) must alert, and a fully clean fixture must append nothing.
 
 Cross-engine validator passes on the same release caught five more holes in the provenance check itself, all reproducible. (1) When `advisory.log` did not exist at all, the check was bypassed entirely (`[[ -f advisory.log ]]` treated file absence as proof of approval) — a missing log is now missing provenance, since every legitimate approval writes the log. (2) The stored ledger `hash` field is attacker-writable, so copying a valid 64-char hash from a legitimate approval let a forged entry for a *different* package borrow that approval's provenance — the canonical hash is now recomputed from the entry's own spec, and a stored-vs-recomputed mismatch is itself flagged (`hash_spec_mismatch`). (3) Log matching used substring `grep -F`, so a hash/package/version *prefix* (or an empty hash) matched a legitimate line. (4) The whole-field fix first used `awk -v`, which interprets backslash escapes in the value, so a forged package field like `fixture-p\141d` normalized to `fixture-pad` and borrowed its approval. Matching is now a pure-bash literal field comparison — no substring, no escape interpretation. (5) The canonical hash joins the three fields with newlines, so a real newline (or other control char) injected into a package/version could shift the field boundary and collide a different tuple onto a legit approval's hash — a spec carrying a control character is now rejected as `malformed_spec` before any hash or provenance comparison runs. e2e regressions cover the no-log, copied-hash, prefix-named, backslash-escape, and control-char forgeries plus the legit-approval-stays-clean case.
+
+---
+
+## v2.10 — Yarn resolution-aware check (shipped)
+
+Status: shipped as v2.10.0.
+
+`safedeps check` judged an npm spec only from its published closure, so a Yarn Berry project that patches a vulnerable transitive dependency through root `resolutions` was denied on a vulnerability it does not actually install. The published closure is the wrong truth for that project — the installed closure is. When the target directory is a Yarn Berry project with a non-empty root `resolutions` entry, `check` now resolves the closure from that project's real `yarn.lock` via `yarn info -A -R --json` instead of probing the registry. Yarn keeps ownership of descriptor-to-locator resolution; safedeps consumes its machine-readable graph rather than re-implementing lockfile resolution.
+
+The resulting approval is project-scoped, not global. The ledger entry carries a `project_context` whose `context_hash` folds in the project directory, the root `resolutions`, and the `yarn.lock` content, so the approval cannot satisfy a lookup from another project or survive a `resolutions`/`yarn.lock` change; a mismatch denies with `context_mismatch`. The PreToolUse guard resolves the same context and folds the same hash into its lookup. Fail-closed behavior is unchanged everywhere else: a declared `resolutions` with an unusable lockfile is an invalid context that denies outright, and a package that cannot be verified in the resolved graph stays deny-only even when its published closure is clean.
+
+## v2.11 — Yarn candidate closure materialization (shipped)
+
+Status: shipped as v2.11.0.
+
+v2.10 could only judge a package that was already in `yarn.lock`, which excluded the case the gate exists for: checking a dependency before adding it. An absent locator fell to `project-closure-unavailable` and became deny-only, so the original release path for a new Yarn dependency was blocked even when the project's own `resolutions` would have resolved it safely.
+
+### What changed
+
+- **Isolated candidate materialization.** When the locator is absent, safedeps builds a private mirror under `mktemp` and copies only the project's canonical resolution inputs: root and workspace `package.json` files, `yarn.lock`, `.yarnrc.yml`, and the `.yarn/releases`, `.yarn/plugins`, and `.yarn/patches` files. `node_modules`, caches, unplugged packages, install state, and VCS data are never copied — they are neither canonical resolution input nor safe to hand to a temporary resolver. The candidate is added to the mirror's manifest only, and Yarn resolves it there with `yarn install --mode=update-lockfile --no-immutable`. That documented mode updates lock resolution without the link step, so no candidate lifecycle script runs.
+- **Caller invariance.** The caller's tree is read-only for the whole operation. safedeps re-hashes the project inputs both before and after the Yarn run; a manifest, `resolutions`, config, or lockfile edit landing mid-flight invalidates the candidate rather than producing an approval for a mixed project state.
+- **Provenance-bound approval.** The ledger context becomes `yarn-project-materialized-lockfile` and carries `materialization` with the candidate locator, the bound `input_sha256`, the `generated_lockfile_sha256`, the exact Yarn command, and `isolation: "private-project-mirror"`. `safedeps_ledger_validate_json` requires every one of those fields and rejects an entry whose `materialization.input_sha256` disagrees with its context `input_sha256`. Approval truth is therefore neither a registry probe nor a stale lockfile, but the Yarn resolution derived from a hash-bound copy of the caller's own inputs.
+- **No fallback.** Any failure to copy inputs, match the mirror to the canonical input hash, invoke Yarn, or resolve the candidate in the generated lockfile denies with `project-candidate-materialization-unavailable`. The published closure is never used as a substitute.
+
+### Verification
+
+- hermetic Yarn project fixture: the candidate approves only when the isolated closure resolves the patched `sharp@0.35.3` / `postcss@8.5.21`; the unpatched `sharp@0.34.5` / `postcss@8.4.31` closure denies
+- unavailable materialization denies with no ledger approval and no published-closure probe; a changed input or lock context denies
+- caller tree and lockfile hashes are byte-identical before and after; nested `node_modules` is asserted absent from the copied mirror inputs
+- existing smoke + e2e regression suite green; zero npm dependencies; effect-primary stays npm-only
 
 ---
 

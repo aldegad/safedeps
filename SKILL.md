@@ -122,14 +122,15 @@ safedeps version
   "approved": true,
   "spec_hash": "sha256:...",
   "expires_at": "2026-06-17T05:39:03Z",
-  "closure_source": { "type": "npm-package-probe | yarn-project-lockfile | fixture" },
+  "closure_source": { "type": "npm-package-probe | yarn-project-lockfile | yarn-project-materialized-lockfile | fixture" },
   "resolved_closure": [ { "ecosystem": "npm", "package": "...", "version": "...", "direct": true } ],
   "install_hint": "install with @scope/pkg@1.2.4"
 }
 ```
 
 - `patched_available` adds `suggested_spec`. `kev_hard_block` keeps `vulnerabilities` + `kev.matches`. `cve_unpatched` keeps `vulnerabilities`.
-- `closure_source.type` is `yarn-project-lockfile` when the closure came from the current directory's Yarn project (root `resolutions` + `yarn.lock`) instead of a fresh published-package probe; it then also carries `context_hash`, `project_root`, `manifest_path`, and `lockfile_path`. A `project_resolution_status` field (e.g. `project-closure-unavailable`, `project-context-invalid`) plus `approval_scope: "deny-only"` means a Yarn project context was detected but the requested package could not be verified in it — the check stays fail-closed even on a clean published closure.
+- `closure_source.type` is `yarn-project-lockfile` when the closure came from the current directory's Yarn project (root `resolutions` + `yarn.lock`) instead of a fresh published-package probe; it then also carries `context_hash`, `project_root`, `manifest_path`, `lockfile_path`, `input_sha256`, and `input_files`. A `project_resolution_status` field (e.g. `project-closure-unavailable`, `project-context-invalid`) plus `approval_scope: "deny-only"` means a Yarn project context was detected but the requested package could not be verified in it — the check stays fail-closed even on a clean published closure.
+- `closure_source.type` is `yarn-project-materialized-lockfile` when the package was not yet in the project lockfile and safedeps resolved the candidate in a private mirror of the project's canonical inputs. It then also carries `materialization` with the `candidate` locator, the `input_sha256` it was bound to, the `generated_lockfile_sha256`, the exact Yarn `command`, and `isolation: "private-project-mirror"`. Your project tree is never modified. If the mirror, the Yarn run, or the candidate resolution fails, `project_resolution_status` is `project-candidate-materialization-unavailable` and the check denies — the published closure is never used as a fallback.
 
 `doctor`:
 

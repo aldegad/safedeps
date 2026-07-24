@@ -147,7 +147,7 @@ Key fields:
 - `approved_at` / `expires_at` — lifecycle TTL, 30 days by default. After expiry a new CVE may exist, so the spec is auto-revoked and re-check is forced.
 - `evidence` — which source saw what, at approval time. An audit trail.
 - `transitive_specs` — the full transitive closure the direct entry approved. The npm effect gate reorgs any `pkg@version` that appears in the lockfile but is in neither the direct entry nor this array.
-- `project_context` — `null` for an ordinary published-package approval, or `{ type: "yarn-project-lockfile", context_hash, project_root, manifest_path, lockfile_path }` when the approval came from a Yarn project's resolved closure (see "Yarn project-scoped closure" in section 4). `context_hash` is a hash of the project directory, its root `resolutions`, and its `yarn.lock` content.
+- `project_context` — `null` for an ordinary published-package approval, or `{ type, context_hash, project_root, manifest_path, lockfile_path, input_sha256, input_files }` when the approval came from a Yarn project's resolved closure (see "Yarn project-scoped closure" in section 4). `context_hash` is a hash of the project directory, its root `resolutions`, its `yarn.lock` content, and its canonical input set. `type` is `yarn-project-lockfile` when the package was already in the project lockfile, or `yarn-project-materialized-lockfile` when the candidate was resolved in an isolated mirror; the materialized form additionally carries `materialization { candidate, input_sha256, generated_lockfile_sha256, command, isolation }`. `safedeps_ledger_validate_json` requires those fields and rejects an entry whose `materialization.input_sha256` disagrees with the context `input_sha256`.
 
 **Project-scoped isolation.** A `project_context` approval is keyed by `context_hash` in addition to `(ecosystem, package, version)`, so it lives at a different ledger path than a package-only approval of the same spec and cannot satisfy a lookup from a different project or from the same project after `resolutions`/`yarn.lock` changes (the hash changes with them). `safedeps_ledger_check` compares the caller's live context hash against the stored one and denies with `reason: "context_mismatch"` on any difference — an approval never silently leaks across project boundaries.
 
@@ -213,14 +213,47 @@ resolve project context (walk up from cwd, stop at .git boundary):
         │        traverse from the requested `pkg@npm:version` locator
         │                 │
         │                 ├─► locator found  ──► resolved project closure (approvable)
-        │                 └─► locator absent  ──► approval_scope: "deny-only"
-        │                                          (published closure still checked for vulnerabilities,
-        │                                           but the result is never approved)
+        │                 └─► locator absent  ──► materialize the candidate (see below)
+        │                                          ├─► materialized ──► generated closure (approvable)
+        │                                          └─► failed ──────► project-candidate-materialization-unavailable
+        │                                                              (deny; the published closure is not used)
         │
         └─► no resolutions / no yarn.lock in this Git worktree ──► ordinary npm package-only check
 ```
 
 Yarn owns descriptor-to-locator resolution; safedeps consumes `yarn info`'s machine-readable graph rather than re-implementing lockfile resolution. When the context resolves, the approved-spec ledger entry carries `project_context` (section 3) so the approval is scoped to that exact project and cannot leak to a different one or survive a `resolutions`/`yarn.lock` change.
+
+**Yarn candidate materialization.** A locator is absent from `yarn.lock` precisely when the package has not been added yet, which is the normal pre-install check. `safedeps_npm_yarn_materialize_candidate_closure` resolves that candidate in an isolated mirror rather than denying it or falling back to the published closure:
+
+```
+locator absent from the project lockfile
+        │
+        ▼
+   mktemp private mirror ◄── copy canonical inputs ONLY:
+        │                     root + workspace package.json, yarn.lock, .yarnrc.yml,
+        │                     .yarn/{releases,plugins,patches}
+        │                     (never node_modules, caches, unplugged, install state, VCS)
+        ▼
+   re-hash inputs in the mirror; must equal the caller's input_sha256
+        │
+        ▼
+   add the candidate to the MIRROR manifest only
+        │
+        ▼
+   `yarn install --mode=update-lockfile --no-immutable` (no link step, no lifecycle scripts)
+        │
+        ▼
+   re-hash the caller's inputs again ── changed? ──► INVALIDATE (concurrent project edit)
+        │
+        ▼
+   `yarn info -A -R --json` over the GENERATED lockfile → candidate closure
+        │
+        ▼
+   project_context.type = "yarn-project-materialized-lockfile"
+   + materialization { candidate, input_sha256, generated_lockfile_sha256, command, isolation }
+```
+
+The caller's tree is read-only for the whole operation; only the mirror is mutated. The input recheck before and after Yarn closes the read/copy race, so a manifest or lockfile edit that lands mid-flight invalidates the candidate instead of yielding an approval for a mixed project state. Approval truth is neither a registry probe nor the caller's stale lockfile — it is the Yarn resolution derived from a hash-bound copy of the caller's own inputs, and both the input hash and the generated lockfile hash are recorded as ledger evidence. Every failure path (input copy, context drift, Yarn invocation, unresolvable candidate) returns `project-candidate-materialization-unavailable` and denies. There is no published-closure fallback.
 
 ### Phase 2 — fast command guard (PreToolUse / `safedeps-pre-guard.sh`)
 
@@ -371,7 +404,7 @@ OSV normalizes ecosystem names, so one API path covers all of them at advisory-c
 | `scripts/safedeps-post-verify.sh` | PostToolUse hook — closure-vs-ledger effect gate + reorg. |
 | `lib/providers/` | OSV / KEV / GHSA (and optional NVD / deps.dev / Snyk) adapters behind one query interface. |
 | `lib/ledger/` | Approved-spec ledger I/O — atomic write, hashing, TTL checks, project-context-scoped keys. |
-| `lib/npm/closure.sh` | npm closure resolution from a lockfile, plus Yarn project context/closure resolution (root `resolutions` + `yarn info`). |
+| `lib/npm/closure.sh` | npm closure resolution from a lockfile, plus Yarn project context/closure resolution (root `resolutions` + `yarn info`) and isolated candidate materialization. |
 | `lib/gates/` | Release-time repo lane — `scan.sh` (gitleaks runner), `audit.sh` (multi-ecosystem lockfile audit — npm/pnpm/yarn/bun, delegated to each native tool), `hooks.sh` (`install`/`check`/`init`), `doctor.sh` (posture diagnose + `--fix`), `repo-profile.sh` (public/private resolution). Owns *execution*; the repo owns *policy*. |
 | `lib/gates/templates/` | Starter `.gitleaks[.private].toml` + `.githooks/pre-commit`, scaffolded by `hooks init`. Seeds the repo owns and tunes — never overwritten on re-run. |
 
@@ -436,6 +469,7 @@ Migration:
 - KEV updates once a day; a KEV listed in between is not caught until the next refresh.
 - Transitive-closure checking can grow the ledger to hundreds of entries; this needs optimization.
 - Yarn project-scoped closure requires the Yarn CLI on `PATH` and a Yarn Berry lockfile (`__metadata:` present); Yarn Classic (`yarn.lock` v1) and workspaces without a root `resolutions` entry fall back to the ordinary npm package-only check.
+- Candidate materialization additionally requires that Yarn can resolve the mirror offline or from the network, and that the root manifest's `workspaces` patterns are plain relative globs. An absolute, escaping, `**`, or negated workspace pattern is refused rather than guessed at, and the candidate is denied.
 
 **Future direction** (see [`ROADMAP.md`](./ROADMAP.md)):
 
