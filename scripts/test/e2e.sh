@@ -1062,6 +1062,22 @@ ov_reuse_json=$(ov_run "${ov_patched_repo}" "${ov_home}") || true
   || fail "the same override set reuses its own approval (got: $(jq -rc '.result' <<< "${ov_reuse_json}"))"
 printf 'ok - npm overrides drive the verdict and their approval stays scoped\n'
 
+# The guard has to derive the same key the approval was stored under, or a
+# legitimately approved install looks unapproved at the gate.
+ov_guard_decision() {
+  local dir="$1"
+  jq -nc --arg c 'npm install mkdirp@0.5.1' --arg cwd "${dir}" \
+    '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' \
+    | ( cd "${dir}" && HOME="${ov_home}" SAFEDEPS_HOME="${ov_home}" \
+        PATH="${ov_npm_bin}:${PATH}" "${ROOT_DIR}/scripts/safedeps-pre-guard.sh" 2>/dev/null ) \
+    | jq -r '.hookSpecificOutput.permissionDecision // "allow"'
+}
+[[ "$(ov_guard_decision "${ov_patched_repo}")" == "allow" ]] \
+  || fail "the guard reproduces the overrides approval key for the repo that earned it"
+[[ "$(ov_guard_decision "${ov_bare_repo}")" == "deny" ]] \
+  || fail "the guard does not accept an overrides-scoped approval in a repo without those overrides"
+printf 'ok - pre-guard derives the same overrides approval key as the check\n'
+
 printf '%s\n' '{"vulnerable":[]}' > "${state_file}"
 
 printf 'e2e passed\n'
