@@ -98,6 +98,308 @@ safedeps_npm_sha256_text() {
   fi
 }
 
+# The candidate mirror intentionally contains only the project inputs that
+# affect Yarn's resolution. Package manifests cover workspaces, while the
+# selected .yarn files cover the configured Yarn runtime, plugins, and patches.
+# Caches, unplugged packages, install state, node_modules, and VCS data are
+# never copied. They are neither canonical resolution input nor safe to share
+# with a temporary resolver.
+safedeps_npm_yarn_materialization_inputs() {
+  local project_root="$1"
+  local output_file="$2"
+  local input_list
+  local workspace_patterns
+  local workspace_manifests
+  local input_json
+  local input_sha
+  local source_file
+  local relative_path
+  local source_sha
+  local workspace_pattern
+  local workspace_dir
+  local workspace_root
+  local nullglob_was_enabled=0
+  local workspace_error=0
+
+  project_root=$(cd "${project_root}" 2>/dev/null && pwd -P) || return 1
+  input_list=$(mktemp "${TMPDIR:-/tmp}/safedeps-yarn-inputs.XXXXXX") || return 1
+  workspace_patterns=$(mktemp "${TMPDIR:-/tmp}/safedeps-yarn-workspace-patterns.XXXXXX") || {
+    rm -f "${input_list}"
+    return 1
+  }
+  workspace_manifests=$(mktemp "${TMPDIR:-/tmp}/safedeps-yarn-workspace-manifests.XXXXXX") || {
+    rm -f "${input_list}" "${workspace_patterns}"
+    return 1
+  }
+  : > "${input_list}"
+  printf '%s\n' "${project_root}/package.json" > "${workspace_manifests}"
+
+  if ! jq -r '
+    if (.workspaces | type) == "array" then .workspaces[]
+    elif (.workspaces | type) == "object" then .workspaces.packages[]?
+    else empty
+    end
+  ' "${project_root}/package.json" > "${workspace_patterns}"; then
+    rm -f "${input_list}" "${workspace_patterns}" "${workspace_manifests}"
+    return 1
+  fi
+
+  shopt -q nullglob && nullglob_was_enabled=1
+  shopt -s nullglob
+  while IFS= read -r workspace_pattern; do
+    [[ -n "${workspace_pattern}" ]] || continue
+    if [[ "${workspace_pattern}" == *$'\n'* || "${workspace_pattern}" == *$'\r'* || \
+          "${workspace_pattern}" == *[[:space:]]* || "${workspace_pattern}" == /* || \
+          "${workspace_pattern}" == *..* || "${workspace_pattern}" == *'**'* || \
+          "${workspace_pattern}" == '!'* ]]; then
+      printf 'safedeps npm closure: unsupported Yarn workspace pattern: %s\n' "${workspace_pattern}" >&2
+      workspace_error=1
+      break
+    fi
+    for workspace_dir in "${project_root}"/${workspace_pattern}; do
+      [[ -d "${workspace_dir}" && -f "${workspace_dir}/package.json" ]] || continue
+      workspace_root=$(cd "${workspace_dir}" 2>/dev/null && pwd -P) || {
+        workspace_error=1
+        break
+      }
+      if [[ "${workspace_root}" != "${project_root}"/* ]]; then
+        printf 'safedeps npm closure: Yarn workspace escapes project root: %s\n' "${workspace_pattern}" >&2
+        workspace_error=1
+        break
+      fi
+      printf '%s\n' "${workspace_root}/package.json" >> "${workspace_manifests}"
+    done
+    [[ "${workspace_error}" -eq 0 ]] || break
+  done < "${workspace_patterns}"
+  [[ "${nullglob_was_enabled}" -eq 1 ]] || shopt -u nullglob
+
+  if [[ "${workspace_error}" -ne 0 ]]; then
+    rm -f "${input_list}" "${workspace_patterns}" "${workspace_manifests}"
+    return 1
+  fi
+
+  while IFS= read -r source_file; do
+    [[ -f "${source_file}" ]] || continue
+    relative_path="${source_file#${project_root}/}"
+    if [[ "${relative_path}" == "${source_file}" || -z "${relative_path}" || \
+          "${relative_path}" == *$'\n'* || "${relative_path}" == *$'\r'* || \
+          "${relative_path}" == *$'\t'* ]]; then
+      printf 'safedeps npm closure: unsafe Yarn project input path\n' >&2
+      rm -f "${input_list}" "${workspace_patterns}" "${workspace_manifests}"
+      return 1
+    fi
+    source_sha=$(safedeps_npm_sha256_file "${source_file}") || {
+      rm -f "${input_list}" "${workspace_patterns}" "${workspace_manifests}"
+      return 1
+    }
+    printf '%s\tsha256:%s\n' "${relative_path}" "${source_sha}" >> "${input_list}"
+  done < <(
+    {
+      cat "${workspace_manifests}"
+      [[ -f "${project_root}/yarn.lock" ]] && printf '%s\n' "${project_root}/yarn.lock"
+      [[ -f "${project_root}/.yarnrc.yml" ]] && printf '%s\n' "${project_root}/.yarnrc.yml"
+      for source_file in "${project_root}/.yarn/releases" "${project_root}/.yarn/plugins" "${project_root}/.yarn/patches"; do
+        [[ -d "${source_file}" ]] && find "${source_file}" -type f -print
+      done
+    } | LC_ALL=C sort -u
+  )
+
+  [[ -s "${input_list}" ]] || {
+    printf 'safedeps npm closure: Yarn materialization has no canonical inputs\n' >&2
+    rm -f "${input_list}" "${workspace_patterns}" "${workspace_manifests}"
+    return 1
+  }
+  input_json=$(jq -Rsc '
+    split("\n")
+    | map(select(length > 0) | split("\t") | {path: .[0], sha256: .[1]})
+  ' "${input_list}") || {
+    rm -f "${input_list}" "${workspace_patterns}" "${workspace_manifests}"
+    return 1
+  }
+  input_sha=$(safedeps_npm_sha256_file "${input_list}") || {
+    rm -f "${input_list}" "${workspace_patterns}" "${workspace_manifests}"
+    return 1
+  }
+  jq -cn \
+    --arg input_sha256 "sha256:${input_sha}" \
+    --argjson input_files "${input_json}" \
+    '{input_sha256: $input_sha256, input_files: $input_files}' > "${output_file}"
+  rm -f "${input_list}" "${workspace_patterns}" "${workspace_manifests}"
+}
+
+# Copy the canonical materialization inputs into a new, private mirror. The
+# caller's tree is read-only throughout this operation. The root manifest is
+# changed only after the copy has completed, and only inside the mirror.
+safedeps_npm_yarn_copy_materialization_inputs() {
+  local project_root="$1"
+  local mirror_root="$2"
+  local inputs_file="$3"
+  local relative_path
+  local source_file
+  local destination_file
+
+  while IFS= read -r relative_path; do
+    [[ -n "${relative_path}" ]] || continue
+    source_file="${project_root}/${relative_path}"
+    destination_file="${mirror_root}/${relative_path}"
+    [[ -f "${source_file}" ]] || {
+      printf 'safedeps npm closure: canonical input disappeared: %s\n' "${relative_path}" >&2
+      return 1
+    }
+    mkdir -p "$(dirname "${destination_file}")" || return 1
+    cp -p "${source_file}" "${destination_file}" || return 1
+  done < <(jq -r '.input_files[]?.path' "${inputs_file}")
+}
+
+# Construct an isolated candidate lockfile. This calls Yarn exactly once for
+# the materialization and then queries the graph from that generated lockfile.
+# A source-input recheck before and after Yarn closes the read/copy race: a
+# concurrent manifest, config, resolution, or lockfile change invalidates the
+# candidate instead of producing an approval for a mixed project state.
+safedeps_npm_yarn_materialize_candidate_closure() {
+  local package_name="$1"
+  local version="$2"
+  local project_context_file="$3"
+  local source_file="$4"
+  local project_root
+  local expected_context_hash
+  local expected_input_sha
+  local mirror_root
+  local mirror_manifest
+  local mirror_manifest_tmp
+  local generated_lockfile
+  local generated_lockfile_sha
+  local verify_context_file
+  local mirror_inputs_file
+  local closure_file
+  local verify_context_hash
+  local verify_input_sha
+
+  project_root=$(jq -r '.project_root' "${project_context_file}") || return 1
+  expected_context_hash=$(jq -r '.context_hash' "${project_context_file}") || return 1
+  expected_input_sha=$(jq -r '.input_sha256' "${project_context_file}") || return 1
+  [[ -d "${project_root}" && -n "${expected_context_hash}" && -n "${expected_input_sha}" ]] || return 1
+
+  mirror_root=$(mktemp -d "${TMPDIR:-/tmp}/safedeps-yarn-candidate.XXXXXX") || return 1
+  verify_context_file=$(mktemp "${TMPDIR:-/tmp}/safedeps-yarn-context-verify.XXXXXX") || {
+    rm -rf "${mirror_root}"
+    return 1
+  }
+  mirror_inputs_file=$(mktemp "${TMPDIR:-/tmp}/safedeps-yarn-mirror-inputs.XXXXXX") || {
+    rm -rf "${mirror_root}"
+    rm -f "${verify_context_file}"
+    return 1
+  }
+  closure_file=$(mktemp "${TMPDIR:-/tmp}/safedeps-yarn-candidate-closure.XXXXXX") || {
+    rm -rf "${mirror_root}"
+    rm -f "${verify_context_file}" "${mirror_inputs_file}"
+    return 1
+  }
+
+  if ! safedeps_npm_yarn_copy_materialization_inputs "${project_root}" "${mirror_root}" "${project_context_file}"; then
+    rm -rf "${mirror_root}"
+    rm -f "${verify_context_file}" "${mirror_inputs_file}" "${closure_file}"
+    return 1
+  fi
+
+  if ! safedeps_npm_yarn_materialization_inputs "${mirror_root}" "${mirror_inputs_file}" || \
+      ! verify_input_sha=$(jq -r '.input_sha256' "${mirror_inputs_file}") || \
+      [[ "${verify_input_sha}" != "${expected_input_sha}" ]]; then
+    printf 'safedeps npm closure: isolated Yarn mirror does not match canonical inputs\n' >&2
+    rm -rf "${mirror_root}"
+    rm -f "${verify_context_file}" "${mirror_inputs_file}" "${closure_file}"
+    return 1
+  fi
+
+  if ! safedeps_npm_yarn_project_context "${verify_context_file}" "${project_root}" || \
+      ! verify_context_hash=$(jq -r '.context_hash' "${verify_context_file}") || \
+      ! verify_input_sha=$(jq -r '.input_sha256' "${verify_context_file}") || \
+      [[ "${verify_context_hash}" != "${expected_context_hash}" || "${verify_input_sha}" != "${expected_input_sha}" ]]; then
+    printf 'safedeps npm closure: Yarn project inputs changed while candidate mirror was prepared\n' >&2
+    rm -rf "${mirror_root}"
+    rm -f "${verify_context_file}" "${mirror_inputs_file}" "${closure_file}"
+    return 1
+  fi
+
+  mirror_manifest="${mirror_root}/package.json"
+  mirror_manifest_tmp=$(mktemp "${mirror_root}/.safedeps-package.XXXXXX") || {
+    rm -rf "${mirror_root}"
+    rm -f "${verify_context_file}" "${mirror_inputs_file}" "${closure_file}"
+    return 1
+  }
+  if ! jq --arg package "${package_name}" --arg version "${version}" '
+    .dependencies = (.dependencies // {})
+    | .dependencies[$package] = $version
+  ' "${mirror_manifest}" > "${mirror_manifest_tmp}"; then
+    rm -f "${mirror_manifest_tmp}"
+    rm -rf "${mirror_root}"
+    rm -f "${verify_context_file}" "${mirror_inputs_file}" "${closure_file}"
+    return 1
+  fi
+  mv -f "${mirror_manifest_tmp}" "${mirror_manifest}"
+
+  if ! (
+    cd "${mirror_root}" &&
+      YARN_CACHE_FOLDER="${mirror_root}/.safedeps-yarn-cache" \
+      YARN_ENABLE_GLOBAL_CACHE=false \
+      yarn install --mode=update-lockfile --no-immutable >/dev/null
+  ); then
+    printf 'safedeps npm closure: isolated Yarn candidate materialization failed for %s@%s\n' "${package_name}" "${version}" >&2
+    rm -rf "${mirror_root}"
+    rm -f "${verify_context_file}" "${mirror_inputs_file}" "${closure_file}"
+    return 1
+  fi
+
+  generated_lockfile="${mirror_root}/yarn.lock"
+  if [[ ! -f "${generated_lockfile}" ]] || ! generated_lockfile_sha=$(safedeps_npm_sha256_file "${generated_lockfile}"); then
+    printf 'safedeps npm closure: isolated Yarn candidate lockfile is unavailable\n' >&2
+    rm -rf "${mirror_root}"
+    rm -f "${verify_context_file}" "${mirror_inputs_file}" "${closure_file}"
+    return 1
+  fi
+
+  if ! safedeps_npm_yarn_project_context "${verify_context_file}" "${project_root}" || \
+      ! verify_context_hash=$(jq -r '.context_hash' "${verify_context_file}") || \
+      ! verify_input_sha=$(jq -r '.input_sha256' "${verify_context_file}") || \
+      [[ "${verify_context_hash}" != "${expected_context_hash}" || "${verify_input_sha}" != "${expected_input_sha}" ]]; then
+    printf 'safedeps npm closure: Yarn project inputs changed during candidate materialization\n' >&2
+    rm -rf "${mirror_root}"
+    rm -f "${verify_context_file}" "${mirror_inputs_file}" "${closure_file}"
+    return 1
+  fi
+
+  if ! safedeps_npm_yarn_project_closure "${package_name}" "${version}" "${mirror_root}" > "${closure_file}"; then
+    printf 'safedeps npm closure: generated Yarn candidate lockfile does not resolve %s@%s\n' "${package_name}" "${version}" >&2
+    rm -rf "${mirror_root}"
+    rm -f "${verify_context_file}" "${mirror_inputs_file}" "${closure_file}"
+    return 1
+  fi
+
+  jq -c \
+    --arg type "yarn-project-materialized-lockfile" \
+    --arg candidate "${package_name}@npm:${version}" \
+    --arg generated_lockfile_sha256 "sha256:${generated_lockfile_sha}" \
+    '
+      . + {
+        type: $type,
+        materialization: {
+          candidate: $candidate,
+          input_sha256: .input_sha256,
+          generated_lockfile_sha256: $generated_lockfile_sha256,
+          command: "yarn install --mode=update-lockfile --no-immutable",
+          isolation: "private-project-mirror"
+        }
+      }
+    ' "${project_context_file}" > "${source_file}" || {
+      rm -rf "${mirror_root}"
+      rm -f "${verify_context_file}" "${mirror_inputs_file}" "${closure_file}"
+      return 1
+    }
+  cat "${closure_file}"
+  rm -rf "${mirror_root}"
+  rm -f "${verify_context_file}" "${mirror_inputs_file}" "${closure_file}"
+}
+
 # Resolve one canonical Yarn Berry project context. The root package.json and
 # yarn.lock are live project truth; the ledger key is derived from their exact
 # resolution state so an approval cannot leak into another project or survive a
@@ -110,6 +412,7 @@ safedeps_npm_yarn_project_context() {
   local output_file="$1"
   local start_dir="${2:-${SAFEDEPS_NPM_PROJECT_DIR:-${PWD}}}"
   local dir parent manifest lockfile resolutions_json resolutions_sha lockfile_sha context_hex
+  local inputs_file input_sha input_files
 
   safedeps_npm_require_jq || return 2
   [[ -d "${start_dir}" ]] || {
@@ -127,12 +430,20 @@ safedeps_npm_yarn_project_context() {
           printf 'safedeps npm closure: Yarn resolutions found, but yarn.lock is not a supported Berry lockfile: %s\n' "${lockfile}" >&2
           return 2
         fi
-        resolutions_json=$(jq -cS '.resolutions' "${manifest}") || return 2
-        resolutions_sha=$(safedeps_npm_sha256_text "${resolutions_json}") || return 2
-        lockfile_sha=$(safedeps_npm_sha256_file "${lockfile}") || return 2
+        inputs_file=$(mktemp "${TMPDIR:-/tmp}/safedeps-yarn-context-inputs.XXXXXX") || return 2
+        if ! safedeps_npm_yarn_materialization_inputs "${dir}" "${inputs_file}"; then
+          rm -f "${inputs_file}"
+          return 2
+        fi
+        resolutions_json=$(jq -cS '.resolutions' "${manifest}") || { rm -f "${inputs_file}"; return 2; }
+        resolutions_sha=$(safedeps_npm_sha256_text "${resolutions_json}") || { rm -f "${inputs_file}"; return 2; }
+        lockfile_sha=$(safedeps_npm_sha256_file "${lockfile}") || { rm -f "${inputs_file}"; return 2; }
+        input_sha=$(jq -r '.input_sha256' "${inputs_file}") || { rm -f "${inputs_file}"; return 2; }
+        input_files=$(jq -c '.input_files' "${inputs_file}") || { rm -f "${inputs_file}"; return 2; }
         context_hex=$(safedeps_npm_sha256_text "${dir}
 ${resolutions_sha}
-${lockfile_sha}") || return 2
+${lockfile_sha}
+${input_sha}") || { rm -f "${inputs_file}"; return 2; }
         jq -cn \
           --arg type "yarn-project-lockfile" \
           --arg context_hash "sha256:${context_hex}" \
@@ -141,6 +452,8 @@ ${lockfile_sha}") || return 2
           --arg lockfile_path "${lockfile}" \
           --arg resolutions_sha256 "sha256:${resolutions_sha}" \
           --arg lockfile_sha256 "sha256:${lockfile_sha}" \
+          --arg input_sha256 "${input_sha}" \
+          --argjson input_files "${input_files}" \
           '{
             type: $type,
             context_hash: $context_hash,
@@ -148,8 +461,11 @@ ${lockfile_sha}") || return 2
             manifest_path: $manifest_path,
             lockfile_path: $lockfile_path,
             resolutions_sha256: $resolutions_sha256,
-            lockfile_sha256: $lockfile_sha256
+            lockfile_sha256: $lockfile_sha256,
+            input_sha256: $input_sha256,
+            input_files: $input_files
           }' > "${output_file}"
+        rm -f "${inputs_file}"
         return 0
       fi
     fi
@@ -204,6 +520,14 @@ safedeps_npm_yarn_project_closure() {
     return 1
   fi
 
+  if ! jq -s -e --arg root "${package_name}@npm:${version}" '
+    [ .[] | select((.value | type) == "string") | .value ] | index($root) != null
+  ' "${graph_file}" >/dev/null; then
+    printf 'safedeps npm closure: requested locator absent from Yarn project: %s@npm:%s\n' "${package_name}" "${version}" >&2
+    rm -f "${graph_file}"
+    return 2
+  fi
+
   if ! jq -s -e -c --arg root "${package_name}@npm:${version}" '
     map(select((.value | type) == "string") | {
       key: .value,
@@ -225,23 +549,21 @@ safedeps_npm_yarn_project_closure() {
         elif ($key | test("@patch:.*npm")) then ($key | capture("^(?<name>.+)@patch:").name)
         else null
         end;
-      if ($index[$root] // null) == null then error("requested locator absent from Yarn project: " + $root)
-      else visit([$root]; {}) as $seen
-        | [
-            $seen | keys[] as $key
-            | $index[$key]
-            | (npm_name(.key)) as $name
-            | select($name != null and .version != null)
-            | {
-                ecosystem: "npm",
-                package: $name,
-                version: (.version | tostring),
-                direct: (.key == $root)
-              }
-          ]
-        | unique_by(.ecosystem + "\u0000" + .package + "\u0000" + .version)
-        | sort_by(.package, .version)
-      end
+      visit([$root]; {}) as $seen
+      | [
+          $seen | keys[] as $key
+          | $index[$key]
+          | (npm_name(.key)) as $name
+          | select($name != null and .version != null)
+          | {
+              ecosystem: "npm",
+              package: $name,
+              version: (.version | tostring),
+              direct: (.key == $root)
+            }
+        ]
+      | unique_by(.ecosystem + "\u0000" + .package + "\u0000" + .version)
+      | sort_by(.package, .version)
   ' "${graph_file}"; then
     rm -f "${graph_file}"
     return 1
@@ -276,6 +598,7 @@ safedeps_npm_resolve_spec_closure() {
   local lockfile
   local project_context_file
   local project_context_status=1
+  local project_closure_status=1
   local project_root=""
 
   safedeps_npm_require_jq || return 1
@@ -293,8 +616,23 @@ safedeps_npm_resolve_spec_closure() {
       [[ -z "${source_file}" ]] || safedeps_npm_write_source "${source_file}" "yarn-project-lockfile" "${project_context_file}"
       rm -f "${project_context_file}"
       return 0
+    else
+      project_closure_status=$?
     fi
-    printf 'safedeps npm closure: requested package is not verifiable from Yarn project lockfile; published closure is deny-only\n' >&2
+    if [[ "${project_closure_status}" -eq 2 ]] && safedeps_npm_yarn_materialize_candidate_closure "${package_name}" "${version}" "${project_context_file}" "${source_file}"; then
+      rm -f "${project_context_file}"
+      return 0
+    fi
+    if [[ -n "${source_file}" ]]; then
+      if [[ "${project_closure_status}" -eq 2 ]]; then
+        safedeps_npm_write_source "${source_file}" "yarn-project-candidate-materialization" "${project_context_file}" "project-candidate-materialization-unavailable"
+      else
+        safedeps_npm_write_source "${source_file}" "yarn-project-lockfile" "${project_context_file}" "project-closure-unavailable"
+      fi
+    fi
+    printf 'safedeps npm closure: Yarn project candidate is not verifiable; published closure is not used\n' >&2
+    rm -f "${project_context_file}"
+    return 1
   else
     project_context_status=$?
   fi

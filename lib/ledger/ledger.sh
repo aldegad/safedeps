@@ -122,10 +122,26 @@ safedeps_ledger_validate_json() {
     and ((.project_context // null) == null or (
       (.project_context | type) == "object"
       and (.project_context.context_hash | type == "string" and startswith("sha256:"))
-      and (.project_context.type == "yarn-project-lockfile")
+      and (
+        .project_context.type == "yarn-project-lockfile"
+        or .project_context.type == "yarn-project-materialized-lockfile"
+      )
       and (.project_context.project_root | type == "string" and length > 0)
       and (.project_context.manifest_path | type == "string" and length > 0)
       and (.project_context.lockfile_path | type == "string" and length > 0)
+      and (.project_context.input_sha256 | type == "string" and startswith("sha256:"))
+      and ((.project_context.input_files // []) | type == "array" and length > 0)
+      and (
+        if .project_context.type == "yarn-project-materialized-lockfile" then
+          (.project_context.materialization | type) == "object"
+          and (.project_context.materialization.candidate | type == "string" and length > 0)
+          and (.project_context.materialization.input_sha256 == .project_context.input_sha256)
+          and (.project_context.materialization.generated_lockfile_sha256 | type == "string" and startswith("sha256:"))
+          and (.project_context.materialization.command == "yarn install --mode=update-lockfile --no-immutable")
+          and (.project_context.materialization.isolation == "private-project-mirror")
+        else true
+        end
+      )
     ))
   ' "${ledger_file}" >/dev/null
 }
@@ -258,7 +274,10 @@ safedeps_ledger_write_approved_spec() {
       printf 'safedeps ledger: project context file not found: %s\n' "${project_context_file}" >&2
       return 1
     }
-    context_hash=$(jq -r 'select(.type == "yarn-project-lockfile") | .context_hash // empty' "${project_context_file}")
+    context_hash=$(jq -r '
+      select(.type == "yarn-project-lockfile" or .type == "yarn-project-materialized-lockfile")
+      | .context_hash // empty
+    ' "${project_context_file}")
     [[ -n "${context_hash}" ]] || {
       printf 'safedeps ledger: invalid project context: %s\n' "${project_context_file}" >&2
       return 1

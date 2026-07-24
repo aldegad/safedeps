@@ -207,6 +207,162 @@ EOF
 pass "Yarn root resolutions use actual lockfile closure with project-scoped approval isolation"
 printf '%s\n' '{"vulnerable":[]}' > "${state_file}"
 
+# Candidate locators are not present in the caller's current lockfile. The
+# isolated Yarn stub is hermetic, but safedeps still invokes the actual Yarn
+# contract (`install --mode=update-lockfile`) and then reads the graph from the
+# generated mirror lockfile. The fixture mirrors anttime's relevant shape:
+# root resolutions, a Yarn config file, and a workspace manifest.
+candidate_yarn_bin="${tmp_root}/candidate-yarn-bin"
+candidate_yarn_log="${tmp_root}/candidate-yarn.log"
+mkdir -p "${candidate_yarn_bin}"
+cat > "${candidate_yarn_bin}/yarn" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+printf '%s\t%s\n' "${PWD}" "$*" >> "${SAFEDEPS_YARN_STUB_LOG}"
+case "$*" in
+  *"install --mode=update-lockfile"*)
+    [[ -f package.json && -f .yarnrc.yml && -f packages/web/package.json && ! -e packages/web/node_modules ]] || exit 64
+    [[ "${SAFEDEPS_YARN_STUB_FAIL_INSTALL:-0}" != "1" ]] || exit 65
+    cat "${SAFEDEPS_YARN_STUB_LOCK}" > yarn.lock
+    ;;
+  *"info -A -R --json"*)
+    if grep -q '^# safedeps candidate materialized$' yarn.lock; then
+      cat "${SAFEDEPS_YARN_STUB_GRAPH}"
+    fi
+    ;;
+  *)
+    exit 64
+    ;;
+esac
+EOF
+chmod +x "${candidate_yarn_bin}/yarn"
+
+write_anttime_candidate_project() {
+  local project_dir="$1"
+  local label="$2"
+  local postcss_resolution="$3"
+  local sharp_resolution="$4"
+
+  mkdir -p "${project_dir}/packages/web/node_modules/ignored-package"
+  cat > "${project_dir}/package.json" <<EOF
+{"name":"anttime-${label}","private":true,"packageManager":"yarn@4.12.0","workspaces":["packages/*"],"dependencies":{"react":"19.2.4"},"resolutions":{"postcss@npm:8.4.31":"${postcss_resolution}","sharp@npm:^0.34.5":"${sharp_resolution}"}}
+EOF
+  cat > "${project_dir}/packages/web/package.json" <<'EOF'
+{"name":"@anttime/web","private":true,"version":"0.0.0","dependencies":{"@anttime/shared":"workspace:*"}}
+EOF
+  printf '{"name":"ignored-package","version":"1.0.0"}\n' > "${project_dir}/packages/web/node_modules/ignored-package/package.json"
+  printf 'nodeLinker: node-modules\n' > "${project_dir}/.yarnrc.yml"
+  printf '__metadata:\n  version: 8\n# caller lockfile stays unchanged\n' > "${project_dir}/yarn.lock"
+}
+
+hash_project_tree() {
+  local project_dir="$1"
+
+  (
+    cd "${project_dir}"
+    while IFS= read -r project_file; do
+      printf '%s\t' "${project_file}"
+      shasum -a 256 "${project_file}"
+    done < <(find . -type f -print | LC_ALL=C sort)
+  ) | shasum -a 256 | cut -d' ' -f1
+}
+
+candidate_safe_project="${tmp_root}/anttime-yarn-candidate-safe"
+candidate_unsafe_project="${tmp_root}/anttime-yarn-candidate-unsafe"
+candidate_failure_project="${tmp_root}/anttime-yarn-candidate-failure"
+write_anttime_candidate_project "${candidate_safe_project}" "safe" "8.5.21" "0.35.3"
+write_anttime_candidate_project "${candidate_unsafe_project}" "unsafe" "8.4.31" "0.34.5"
+write_anttime_candidate_project "${candidate_failure_project}" "failure" "8.5.21" "0.35.3"
+
+candidate_safe_lock="${tmp_root}/candidate-safe.lock"
+candidate_unsafe_lock="${tmp_root}/candidate-unsafe.lock"
+candidate_safe_graph="${tmp_root}/candidate-safe-info.ndjson"
+candidate_unsafe_graph="${tmp_root}/candidate-unsafe-info.ndjson"
+cat > "${candidate_safe_lock}" <<'EOF'
+__metadata:
+  version: 8
+# safedeps candidate materialized
+EOF
+cat > "${candidate_unsafe_lock}" <<'EOF'
+__metadata:
+  version: 8
+# safedeps candidate materialized
+EOF
+cat > "${candidate_safe_graph}" <<'EOF'
+{"value":"next@npm:16.2.11","children":{"Version":"16.2.11","Dependencies":[{"descriptor":"postcss@npm:8.5.21","locator":"postcss@npm:8.5.21"},{"descriptor":"sharp@npm:0.35.3","locator":"sharp@npm:0.35.3"}]}}
+{"value":"postcss@npm:8.5.21","children":{"Version":"8.5.21"}}
+{"value":"sharp@npm:0.35.3","children":{"Version":"0.35.3"}}
+EOF
+cat > "${candidate_unsafe_graph}" <<'EOF'
+{"value":"next@npm:16.2.11","children":{"Version":"16.2.11","Dependencies":[{"descriptor":"postcss@npm:8.4.31","locator":"postcss@npm:8.4.31"},{"descriptor":"sharp@npm:0.34.5","locator":"sharp@npm:0.34.5"}]}}
+{"value":"postcss@npm:8.4.31","children":{"Version":"8.4.31"}}
+{"value":"sharp@npm:0.34.5","children":{"Version":"0.34.5"}}
+EOF
+
+candidate_safe_tree_before=$(hash_project_tree "${candidate_safe_project}")
+candidate_safe_lock_before=$(shasum -a 256 "${candidate_safe_project}/yarn.lock" | cut -d' ' -f1)
+candidate_safe_home="${tmp_root}/safe-yarn-candidate"
+candidate_safe_json=$(
+  env -u SAFEDEPS_NPM_CLOSURE_FIXTURE_JSON \
+    PATH="${candidate_yarn_bin}:${PATH}" \
+    SAFEDEPS_HOME="${candidate_safe_home}" \
+    SAFEDEPS_NPM_PROJECT_DIR="${candidate_safe_project}" \
+    SAFEDEPS_YARN_STUB_LOG="${candidate_yarn_log}" \
+    SAFEDEPS_YARN_STUB_LOCK="${candidate_safe_lock}" \
+    SAFEDEPS_YARN_STUB_GRAPH="${candidate_safe_graph}" \
+    ./bin/safedeps --json check npm next@16.2.11
+)
+[[ "$(jq -r '.result' <<< "${candidate_safe_json}")" == "clean" ]] || fail "absent Yarn candidate is approved from its materialized closure"
+[[ "$(jq -r '.closure_source.type' <<< "${candidate_safe_json}")" == "yarn-project-materialized-lockfile" ]] || fail "candidate source identifies isolated materialization"
+[[ "$(jq -r '.closure_source.materialization.command' <<< "${candidate_safe_json}")" == "yarn install --mode=update-lockfile --no-immutable" ]] || fail "candidate materialization records the Yarn update-lockfile contract"
+[[ "$(jq -r '.closure_source.materialization.input_sha256' <<< "${candidate_safe_json}")" == "$(jq -r '.closure_source.input_sha256' <<< "${candidate_safe_json}")" ]] || fail "candidate materialization binds canonical input provenance"
+[[ "$(jq -r '.closure_source.materialization.generated_lockfile_sha256' <<< "${candidate_safe_json}")" != "$(jq -r '.closure_source.lockfile_sha256' <<< "${candidate_safe_json}")" ]] || fail "candidate materialization records its generated lockfile provenance"
+[[ "$(jq -r '[.resolved_closure[] | select(.package == "sharp" and .version == "0.35.3")] | length' <<< "${candidate_safe_json}")" == "1" ]] || fail "materialized candidate resolves patched Sharp"
+[[ "$(jq -r '[.resolved_closure[] | select(.package == "postcss" and .version == "8.5.21")] | length' <<< "${candidate_safe_json}")" == "1" ]] || fail "materialized candidate resolves patched PostCSS"
+[[ "$(hash_project_tree "${candidate_safe_project}")" == "${candidate_safe_tree_before}" ]] || fail "candidate materialization leaves caller tree byte-identical"
+[[ "$(shasum -a 256 "${candidate_safe_project}/yarn.lock" | cut -d' ' -f1)" == "${candidate_safe_lock_before}" ]] || fail "candidate materialization leaves caller lockfile byte-identical"
+if grep -Fq "${candidate_safe_project}" "${candidate_yarn_log}"; then
+  fail "candidate materialization never invokes Yarn in caller project"
+fi
+grep -q $'install --mode=update-lockfile --no-immutable' "${candidate_yarn_log}" || fail "candidate materialization invokes Yarn update-lockfile mode"
+candidate_safe_hash=$(jq -r '.spec_hash' <<< "${candidate_safe_json}")
+candidate_safe_entry="${candidate_safe_home}/approved-specs/${candidate_safe_hash/:/-}.json"
+[[ "$(jq -r '.project_context.materialization.generated_lockfile_sha256' "${candidate_safe_entry}")" == "$(jq -r '.closure_source.materialization.generated_lockfile_sha256' <<< "${candidate_safe_json}")" ]] || fail "ledger stores generated-lock provenance"
+
+candidate_materialize_count_before=$(grep -c $'install --mode=update-lockfile --no-immutable' "${candidate_yarn_log}")
+candidate_safe_cached=$(env -u SAFEDEPS_NPM_CLOSURE_FIXTURE_JSON SAFEDEPS_HOME="${candidate_safe_home}" SAFEDEPS_NPM_PROJECT_DIR="${candidate_safe_project}" ./bin/safedeps --json check npm next@16.2.11)
+[[ "$(jq -r '.result' <<< "${candidate_safe_cached}")" == "already_approved" ]] || fail "same candidate input context reuses materialized approval"
+[[ "$(grep -c $'install --mode=update-lockfile --no-immutable' "${candidate_yarn_log}")" == "${candidate_materialize_count_before}" ]] || fail "ledger hit does not re-materialize candidate"
+
+printf '%s\n' '{"vulnerable":["postcss@8.4.31","sharp@0.34.5"]}' > "${state_file}"
+set +e
+candidate_unsafe_json=$(env -u SAFEDEPS_NPM_CLOSURE_FIXTURE_JSON PATH="${candidate_yarn_bin}:${PATH}" SAFEDEPS_HOME="${tmp_root}/safe-yarn-candidate-unsafe" SAFEDEPS_NPM_PROJECT_DIR="${candidate_unsafe_project}" SAFEDEPS_YARN_STUB_LOG="${candidate_yarn_log}" SAFEDEPS_YARN_STUB_LOCK="${candidate_unsafe_lock}" SAFEDEPS_YARN_STUB_GRAPH="${candidate_unsafe_graph}" ./bin/safedeps --json check npm next@16.2.11)
+candidate_unsafe_status=$?
+candidate_failure_json=$(env -u SAFEDEPS_NPM_CLOSURE_FIXTURE_JSON PATH="${candidate_yarn_bin}:${PATH}" SAFEDEPS_HOME="${tmp_root}/safe-yarn-candidate-failure" SAFEDEPS_NPM_PROJECT_DIR="${candidate_failure_project}" SAFEDEPS_YARN_STUB_LOG="${candidate_yarn_log}" SAFEDEPS_YARN_STUB_LOCK="${candidate_safe_lock}" SAFEDEPS_YARN_STUB_GRAPH="${candidate_safe_graph}" SAFEDEPS_YARN_STUB_FAIL_INSTALL=1 ./bin/safedeps --json check npm next@16.2.11)
+candidate_failure_status=$?
+set -e
+[[ "${candidate_unsafe_status}" -eq 2 ]] || fail "unsafe materialized candidate exits 2"
+[[ "$(jq -r '.result' <<< "${candidate_unsafe_json}")" == "closure_vulnerable" ]] || fail "unsafe materialized candidate is denied"
+[[ "$(jq -r '[.closure_vulnerabilities[] | select(.package == "sharp" and .version == "0.34.5")] | length' <<< "${candidate_unsafe_json}")" == "1" ]] || fail "unsafe materialized candidate names vulnerable Sharp"
+[[ "$(jq -r '[.closure_vulnerabilities[] | select(.package == "postcss" and .version == "8.4.31")] | length' <<< "${candidate_unsafe_json}")" == "1" ]] || fail "unsafe materialized candidate names vulnerable PostCSS"
+[[ "${candidate_failure_status}" -eq 4 ]] || fail "unavailable candidate materialization exits fail-closed 4"
+[[ "$(jq -r '.error' <<< "${candidate_failure_json}")" == "project-candidate-materialization-unavailable" ]] || fail "unavailable candidate materialization reports its deny reason"
+[[ "$(jq -r '.closure_source.type' <<< "${candidate_failure_json}")" == "yarn-project-candidate-materialization" ]] || fail "unavailable candidate does not report a published closure source"
+if find "${tmp_root}/safe-yarn-candidate-failure/approved-specs" -name '*.json' -type f -print -quit 2>/dev/null | grep -q .; then
+  fail "unavailable candidate materialization never writes an approval"
+fi
+
+printf '%s\n' '# context drift' >> "${candidate_safe_project}/yarn.lock"
+candidate_context_mismatch_hook=$(SAFEDEPS_HOME="${candidate_safe_home}" scripts/safedeps-pre-guard.sh <<EOF
+{"tool_name":"Bash","tool_input":{"command":"yarn add next@16.2.11"},"cwd":"${candidate_safe_project}","turn_id":"turn-yarn-candidate-context-drift","model":"codex-test"}
+EOF
+)
+[[ "$(jq -r '.hookSpecificOutput.permissionDecision' <<< "${candidate_context_mismatch_hook}")" == "deny" ]] || fail "candidate approval is rejected after canonical input context drift"
+printf '__metadata:\n  version: 8\n# caller lockfile stays unchanged\n' > "${candidate_safe_project}/yarn.lock"
+pass "Yarn absent candidates materialize only in an isolated mirror with bound provenance"
+printf '%s\n' '{"vulnerable":[]}' > "${state_file}"
+
 patched_json=$(./bin/safedeps --json check npm fixture-vuln@1.0.0)
 [[ "$(jq -r '.result' <<< "${patched_json}")" == "patched_available" ]] || fail "patched fixture narrows"
 [[ "$(jq -r '.suggested_spec' <<< "${patched_json}")" == "1.0.1" ]] || fail "patched fixture suggests fixed version"
