@@ -122,11 +122,25 @@ safedeps_ledger_validate_json() {
     and ((.project_context // null) == null or (
       (.project_context | type) == "object"
       and (.project_context.context_hash | type == "string" and startswith("sha256:"))
+      and (.project_context.project_root | type == "string" and length > 0)
       and (
+        if .project_context.type == "npm-overrides-probe" then
+          # The probe honored the consuming repo overrides, so the closure is
+          # project-specific and the approval is keyed to that override set.
+          (.project_context.overrides_source | type == "string" and length > 0)
+          and (.project_context.overrides_sha256 | type == "string" and startswith("sha256:"))
+          and ((.project_context.overrides // {}) | type == "object" and length > 0)
+        else true
+        end
+      )
+    ))
+    and ((.project_context // null) == null
+      or .project_context.type == "npm-overrides-probe"
+      or (
+      (
         .project_context.type == "yarn-project-lockfile"
         or .project_context.type == "yarn-project-materialized-lockfile"
       )
-      and (.project_context.project_root | type == "string" and length > 0)
       and (.project_context.manifest_path | type == "string" and length > 0)
       and (.project_context.lockfile_path | type == "string" and length > 0)
       and (.project_context.input_sha256 | type == "string" and startswith("sha256:"))
@@ -275,7 +289,11 @@ safedeps_ledger_write_approved_spec() {
       return 1
     }
     context_hash=$(jq -r '
-      select(.type == "yarn-project-lockfile" or .type == "yarn-project-materialized-lockfile")
+      select(
+        .type == "yarn-project-lockfile"
+        or .type == "yarn-project-materialized-lockfile"
+        or .type == "npm-overrides-probe"
+      )
       | .context_hash // empty
     ' "${project_context_file}")
     [[ -n "${context_hash}" ]] || {

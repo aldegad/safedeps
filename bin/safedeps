@@ -7,7 +7,7 @@
 
 set -euo pipefail
 
-SAFEDEPS_VERSION="2.11.0"
+SAFEDEPS_VERSION="2.12.0"
 
 # ---- repo / lib bootstrap ----------------------------------------------------
 
@@ -476,7 +476,7 @@ sf_cmd_check_npm_full_closure() {
         local spec_json
         local project_context_arg=""
         case "$(jq -r '.type' "${source_file}")" in
-          yarn-project-lockfile|yarn-project-materialized-lockfile) project_context_arg="${source_file}" ;;
+          yarn-project-lockfile|yarn-project-materialized-lockfile|npm-overrides-probe) project_context_arg="${source_file}" ;;
         esac
         spec_json=$(safedeps_ledger_write_approved_spec "${ecosystem}" "${pkg}" "${patched_version}" "${patched_version}" "safedeps-cli" "${evidence_file}" "${SAFEDEPS_LEDGER_DEFAULT_TTL_DAYS}" "${transitive_file}" "${project_context_arg}")
         local hash; hash=$(jq -r '.hash' <<< "${spec_json}")
@@ -539,7 +539,7 @@ sf_cmd_check_npm_full_closure() {
   local spec_json
   local project_context_arg=""
   case "$(jq -r '.type' "${source_file}")" in
-    yarn-project-lockfile|yarn-project-materialized-lockfile) project_context_arg="${source_file}" ;;
+    yarn-project-lockfile|yarn-project-materialized-lockfile|npm-overrides-probe) project_context_arg="${source_file}" ;;
   esac
   spec_json=$(safedeps_ledger_write_approved_spec "${ecosystem}" "${pkg}" "${version}" "${range:-${version}}" "safedeps-cli" "${evidence_file}" "${SAFEDEPS_LEDGER_DEFAULT_TTL_DAYS}" "${transitive_file}" "${project_context_arg}")
   local hash; hash=$(jq -r '.hash' <<< "${spec_json}")
@@ -621,6 +621,20 @@ cmd_check() {
       ledger_context_hash=$(jq -r '.context_hash' "${ledger_context_file}")
     else
       ledger_context_status=$?
+      # No Yarn context. An overrides-derived approval is stored under the hash
+      # of the override set that produced it, so the cache lookup has to derive
+      # the same hash or it would re-resolve a closure it already approved.
+      if [[ "${ledger_context_status}" -ne 2 ]]; then
+        local ov_src_file ov_json ov_src
+        ov_src_file=$(sf_mktemp_evidence)
+        ov_json=$(safedeps_npm_repo_overrides_json "${ov_src_file}")
+        ov_src=$(cat "${ov_src_file}" 2>/dev/null)
+        rm -f "${ov_src_file}"
+        if [[ -n "${ov_json}" && "${ov_json}" != '{}' ]] && \
+            safedeps_npm_overrides_context "${ledger_context_file}" "${ov_json}" "${ov_src}"; then
+          ledger_context_hash=$(jq -r '.context_hash' "${ledger_context_file}")
+        fi
+      fi
     fi
   fi
   if [[ "${ledger_context_status}" -ne 2 ]] && ledger_check=$(safedeps_ledger_check "${ecosystem}" "${pkg}" "${version}" "${ledger_context_hash}" 2>/dev/null); then

@@ -81,6 +81,101 @@ mtime_val=$(bash -c 'source lib/providers/providers.sh; f=$(mktemp); safedeps_fi
 [[ "${mtime_val}" =~ ^[0-9]+$ ]] || fail "safedeps_file_mtime returns a bare integer (got: ${mtime_val})"
 pass "file mtime is a portable integer"
 
+# Repo-override awareness: the npm closure probe must resolve transitive deps
+# through the consuming repo's `overrides`, so a transitive the repo has pinned
+# to a patched version is not false-flagged. Unit-test the discovery + filter.
+ov_repo="${tmp_root}/ov-repo"
+mkdir -p "${ov_repo}"
+git -C "${ov_repo}" init -q
+cat > "${ov_repo}/package.json" <<'JSON'
+{"name":"ov","version":"0.0.0","overrides":{"uuid@8.3.2":"^11.1.1","react":"$react","badnest":{"dep":"$x"},"goodnest":{"dep":"1.2.3"}}}
+JSON
+ov_out=$(SAFEDEPS_NPM_OVERRIDES_DIR="${ov_repo}" bash -c 'source lib/npm/closure.sh; safedeps_npm_repo_overrides_json')
+[[ "$(jq -r '."uuid@8.3.2"' <<< "${ov_out}")" == "^11.1.1" ]] || fail "override discovery keeps concrete transitive pin (got: ${ov_out})"
+[[ "$(jq -r 'has("react")' <<< "${ov_out}")" == "false" ]] || fail "override discovery drops \$-ref string (got: ${ov_out})"
+[[ "$(jq -r 'has("badnest")' <<< "${ov_out}")" == "false" ]] || fail "override discovery drops object mentioning \$ (got: ${ov_out})"
+[[ "$(jq -r '.goodnest.dep' <<< "${ov_out}")" == "1.2.3" ]] || fail "override discovery keeps concrete nested pin (got: ${ov_out})"
+pass "npm closure honors repo overrides (concrete pins kept, \$-refs dropped)"
+
+ov_none="${tmp_root}/ov-none"
+mkdir -p "${ov_none}"
+git -C "${ov_none}" init -q
+printf '{"name":"none","version":"0.0.0"}\n' > "${ov_none}/package.json"
+ov_none_out=$(SAFEDEPS_NPM_OVERRIDES_DIR="${ov_none}" bash -c 'source lib/npm/closure.sh; safedeps_npm_repo_overrides_json')
+[[ "${ov_none_out}" == "{}" ]] || fail "no repo overrides yields empty object (got: ${ov_none_out})"
+pass "npm closure with no repo overrides is unchanged"
+
+# A git worktree root carries a `.git` FILE, not a directory. Testing only for a
+# directory walks straight past the worktree root and picks up an ancestor's
+# overrides -- which are not the overrides the real install inside that worktree
+# will use. The Yarn project-context walk-up already handles this with `-e`.
+ov_wt_parent="${tmp_root}/ov-wt-parent"
+mkdir -p "${ov_wt_parent}/inner"
+printf '{"name":"ancestor","version":"0.0.0","overrides":{"leaked":"9.9.9"}}\n' > "${ov_wt_parent}/package.json"
+printf 'gitdir: /somewhere/.git/worktrees/inner\n' > "${ov_wt_parent}/inner/.git"
+printf '{"name":"inner","version":"0.0.0"}\n' > "${ov_wt_parent}/inner/package.json"
+ov_wt_out=$(SAFEDEPS_NPM_OVERRIDES_DIR="${ov_wt_parent}/inner" bash -c 'source lib/npm/closure.sh; safedeps_npm_repo_overrides_json')
+[[ "$(jq -r 'has("leaked")' <<< "${ov_wt_out}")" == "false" ]] || fail "override discovery stops at a worktree root (.git file), got: ${ov_wt_out}"
+pass "npm closure override discovery stops at a worktree root, not just a .git dir"
+
+ov_env_out=$(SAFEDEPS_NPM_OVERRIDES_JSON='{"x":"1.0.0"}' bash -c 'source lib/npm/closure.sh; safedeps_npm_repo_overrides_json')
+[[ "$(jq -r '.x' <<< "${ov_env_out}")" == "1.0.0" ]] || fail "SAFEDEPS_NPM_OVERRIDES_JSON env takes precedence (got: ${ov_env_out})"
+pass "npm closure override env source precedence"
+
+# Honoring `overrides` makes the probe closure project-specific, so the approval
+# must be keyed to the override set that produced it. Without this, an approval
+# earned in a repo that patched a transitive satisfies the check in a repo that
+# did not -- whose real install resolves the vulnerable version.
+ov_repo_a="${tmp_root}/ov-scope-a"
+ov_repo_b="${tmp_root}/ov-scope-b"
+mkdir -p "${ov_repo_a}" "${ov_repo_b}"
+printf '{"name":"a","version":"0.0.0"}\n' > "${ov_repo_a}/package.json"
+printf '{"name":"b","version":"0.0.0"}\n' > "${ov_repo_b}/package.json"
+ov_ctx_a=$(mktemp "${tmp_root}/ov-ctx-a.XXXXXX")
+ov_ctx_b=$(mktemp "${tmp_root}/ov-ctx-b.XXXXXX")
+ov_ctx_c=$(mktemp "${tmp_root}/ov-ctx-c.XXXXXX")
+bash -c 'source lib/npm/closure.sh; safedeps_npm_overrides_context "$1" "{\"minimist\":\"1.2.8\"}" "$2"' _ "${ov_ctx_a}" "${ov_repo_a}/package.json" \
+  || fail "overrides context is produced when overrides apply"
+bash -c 'source lib/npm/closure.sh; safedeps_npm_overrides_context "$1" "{\"minimist\":\"0.2.0\"}" "$2"' _ "${ov_ctx_b}" "${ov_repo_a}/package.json" \
+  || fail "overrides context is produced for a different override set"
+[[ "$(jq -r '.type // "unset"' "${ov_ctx_a}")" == "unset" ]] || fail "context type is stamped by write_source, not the context builder"
+[[ "$(jq -r '.overrides_sha256' "${ov_ctx_a}")" == sha256:* ]] || fail "overrides context records an override-set hash"
+[[ "$(jq -r '.context_hash' "${ov_ctx_a}")" != "$(jq -r '.context_hash' "${ov_ctx_b}")" ]] \
+  || fail "a different override set must produce a different approval key"
+bash -c 'source lib/npm/closure.sh; safedeps_npm_overrides_context "$1" "{}" "$2"' _ "${ov_ctx_c}" "${ov_repo_a}/package.json" \
+  && fail "no overrides must yield no context (the global approval stays correct)"
+pass "npm overrides approvals are keyed to their override set"
+
+# Key equality must mean "the probe resolves the same way", so a reordered but
+# equivalent override object has to land on the same key rather than forcing a
+# needless re-resolve.
+ov_ctx_ord=$(mktemp "${tmp_root}/ov-ctx-ord.XXXXXX")
+bash -c 'source lib/npm/closure.sh; safedeps_npm_overrides_context "$1" "{\"b\":\"2\",\"a\":\"1\"}" "$2"' _ "${ov_ctx_a}" "${ov_repo_a}/package.json" \
+  || fail "overrides context builds for a multi-key set"
+bash -c 'source lib/npm/closure.sh; safedeps_npm_overrides_context "$1" "{\"a\":\"1\",\"b\":\"2\"}" "$2"' _ "${ov_ctx_ord}" "${ov_repo_a}/package.json" \
+  || fail "overrides context builds for the reordered set"
+[[ "$(jq -r '.context_hash' "${ov_ctx_a}")" == "$(jq -r '.context_hash' "${ov_ctx_ord}")" ]] \
+  || fail "equivalent override sets must share one approval key regardless of key order"
+pass "npm overrides approval key is order-independent"
+
+# The ledger must require the new context to carry its provenance, exactly like
+# the Yarn contexts do -- a partial context is a rejected entry, not a default.
+ov_entry=$(mktemp "${tmp_root}/ov-entry.XXXXXX")
+ov_ledger_entry() {
+  jq -cn --argjson pc "$1" '{ecosystem:"npm",package:"p",version:"1.0.0",version_range:"1.0.0",
+    hash:"sha256:x",approved_at:"t",expires_at:"t",approved_by:"b",evidence:{},transitive_specs:[],project_context:$pc}'
+}
+ov_ledger_entry '{"type":"npm-overrides-probe","context_hash":"sha256:a","project_root":"/r","overrides_source":"/r/package.json","overrides_sha256":"sha256:b","overrides":{"x":"1"}}' > "${ov_entry}"
+bash -c 'source lib/ledger/ledger.sh; safedeps_ledger_validate_json "$1"' _ "${ov_entry}" >/dev/null 2>&1 \
+  || fail "ledger accepts a complete npm-overrides-probe context"
+ov_ledger_entry '{"type":"npm-overrides-probe","context_hash":"sha256:a","project_root":"/r","overrides_source":"/r/package.json","overrides":{"x":"1"}}' > "${ov_entry}"
+bash -c 'source lib/ledger/ledger.sh; safedeps_ledger_validate_json "$1"' _ "${ov_entry}" >/dev/null 2>&1 \
+  && fail "ledger rejects an npm-overrides-probe context with no override-set hash"
+ov_ledger_entry '{"type":"npm-overrides-probe","context_hash":"sha256:a","project_root":"/r","overrides_source":"/r/package.json","overrides_sha256":"sha256:b","overrides":{}}' > "${ov_entry}"
+bash -c 'source lib/ledger/ledger.sh; safedeps_ledger_validate_json "$1"' _ "${ov_entry}" >/dev/null 2>&1 \
+  && fail "ledger rejects an npm-overrides-probe context with an empty override set"
+pass "ledger requires npm overrides provenance like it does for Yarn"
+
 project_dir="${tmp_root}/project"
 mkdir -p "${project_dir}"
 printf '{"dependencies":{}}\n' > "${project_dir}/package.json"

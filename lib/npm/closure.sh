@@ -590,6 +590,134 @@ safedeps_npm_write_source() {
   fi
 }
 
+# Discover the consuming repo's npm `overrides` so the closure probe resolves
+# transitive deps the way the real install will. Without this, safedeps probes
+# the *published* closure (no overrides) and false-positives on a transitive the
+# repo has already pinned to a patched version via `overrides`.
+#
+# Honoring overrides cannot hide a real vuln: the probe still resolves each
+# override to a concrete version and OSV is queried for THAT version — exactly
+# the version that will be installed. An override pointing at a still-vulnerable
+# version is therefore flagged like any other.
+#
+# Source precedence:
+#   1. SAFEDEPS_NPM_OVERRIDES_JSON env (explicit JSON; testing / non-cwd callers).
+#   2. Nearest package.json walking up from SAFEDEPS_NPM_OVERRIDES_DIR (default
+#      $PWD = the consuming repo) with a non-empty `.overrides`, bounded by the
+#      git repo root.
+#
+# Only concrete version pins are honored: string values starting with `$`
+# (direct-dep refs like "$react") and nested objects mentioning `$` are dropped,
+# because they have no meaning in the standalone probe and would break the
+# `npm install` resolution.
+# An optional second argument names a file that receives where the overrides
+# came from (`env`, or the manifest path). The approval context is keyed on that
+# origin, so it has to come from the same walk that found them — a second,
+# independent walk could disagree with the one that fed the probe.
+safedeps_npm_repo_overrides_json() {
+  local source_out="${1:-}"
+
+  [[ -z "${source_out}" ]] || : > "${source_out}"
+  if [[ -n "${SAFEDEPS_NPM_OVERRIDES_JSON:-}" ]]; then
+    [[ -z "${source_out}" ]] || printf 'env' > "${source_out}"
+    printf '%s' "${SAFEDEPS_NPM_OVERRIDES_JSON}"
+    return 0
+  fi
+  command -v jq >/dev/null 2>&1 || { printf '{}'; return 0; }
+
+  local filter='
+    (.overrides // {})
+    | if type == "object" then . else {} end
+    | to_entries
+    | map(select(
+        ((.value | type) == "string" and (.value | startswith("$") | not))
+        or
+        ((.value | type) == "object" and ((.value | tostring | contains("$")) | not))
+      ))
+    | from_entries
+  '
+
+  local dir="${SAFEDEPS_NPM_OVERRIDES_DIR:-${PWD}}"
+  while [[ -n "${dir}" && "${dir}" != "/" ]]; do
+    local pkg="${dir}/package.json"
+    if [[ -f "${pkg}" ]]; then
+      local raw
+      raw=$(jq -c 'if (.overrides | type) == "object" and (.overrides | length) > 0 then 1 else empty end' "${pkg}" 2>/dev/null) || raw=""
+      if [[ -n "${raw}" ]]; then
+        [[ -z "${source_out}" ]] || printf '%s' "${pkg}" > "${source_out}"
+        jq -c "${filter}" "${pkg}" 2>/dev/null || printf '{}'
+        return 0
+      fi
+    fi
+    # Worktree roots use a `.git` file; normal clones use a `.git` directory.
+    # Testing only for a directory walks straight past a worktree root and
+    # picks up an ancestor's overrides, which are not the ones the real install
+    # will use. Matches the Yarn project-context walk-up above.
+    [[ -e "${dir}/.git" ]] && break
+    dir=$(dirname "${dir}")
+  done
+  printf '{}'
+}
+
+# Honoring `overrides` makes the probe's closure a function of the consuming
+# project, not of the published package alone. A published-closure approval is
+# global because it is project-independent; an overridden one is not, so it must
+# be keyed like the Yarn project closure is. Without this, an approval earned in
+# a repo that pins a transitive to a patched version satisfies the same check in
+# a repo that does not, whose real install resolves the vulnerable version.
+#
+# Writes the approval context and returns 0 when overrides apply. Returns 1 when
+# there are none — then the closure is project-independent and the ordinary
+# global approval is correct.
+safedeps_npm_overrides_context() {
+  local output_file="$1"
+  local overrides_json="$2"
+  local overrides_source="$3"
+  local project_root
+  local overrides_sha
+  local context_hex
+
+  [[ -n "${overrides_json}" && "${overrides_json}" != '{}' ]] || return 1
+  [[ -n "${overrides_source}" ]] || return 1
+
+  if [[ "${overrides_source}" == "env" ]]; then
+    project_root="env"
+  else
+    project_root=$(cd "$(dirname "${overrides_source}")" 2>/dev/null && pwd -P) || return 1
+  fi
+
+  # The key folds in the project root as well as the override set, even though
+  # the probe resolves from an empty manifest and so depends only on the set.
+  # Two repos with identical overrides therefore re-resolve instead of sharing
+  # one entry. That is deliberate: it errs strict, keeps the entry auditable
+  # back to the manifest that declared the overrides, and matches how the Yarn
+  # project context is keyed. The cost is a redundant resolve, never a missed
+  # denial.
+  #
+  # Hash the canonical (sorted) override set, so key equality means the probe
+  # resolves the same way, not merely that the manifest bytes matched.
+  local canonical_overrides
+  canonical_overrides=$(jq -cS '.' <<< "${overrides_json}" 2>/dev/null) || return 1
+  [[ -n "${canonical_overrides}" ]] || return 1
+  overrides_sha=$(safedeps_npm_sha256_text "${canonical_overrides}") || return 1
+  context_hex=$(safedeps_npm_sha256_text "${project_root}
+${overrides_sha}") || return 1
+
+  jq -cn \
+    --arg context_hash "sha256:${context_hex}" \
+    --arg project_root "${project_root}" \
+    --arg overrides_source "${overrides_source}" \
+    --arg overrides_sha256 "sha256:${overrides_sha}" \
+    --argjson overrides "${overrides_json}" \
+    '{
+      context_hash: $context_hash,
+      project_root: $project_root,
+      overrides_source: $overrides_source,
+      overrides_sha256: $overrides_sha256,
+      overrides: $overrides
+    }' > "${output_file}"
+}
+
 safedeps_npm_resolve_spec_closure() {
   local package_name="$1"
   local version="$2"
@@ -643,9 +771,38 @@ safedeps_npm_resolve_spec_closure() {
     return 1
   fi
 
-  tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/safedeps-npm-closure.XXXXXX") || return 1
+  tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/safedeps-npm-closure.XXXXXX") || {
+    rm -f "${project_context_file}"
+    return 1
+  }
 
-  printf '{"name":"safedeps-closure-probe","version":"0.0.0","private":true}\n' > "${tmp_dir}/package.json"
+  local overrides_json
+  local overrides_source_file
+  local overrides_source=""
+  overrides_source_file=$(mktemp "${TMPDIR:-/tmp}/safedeps-npm-overrides-src.XXXXXX") || {
+    rm -rf "${tmp_dir}"
+    rm -f "${project_context_file}"
+    return 1
+  }
+  overrides_json=$(safedeps_npm_repo_overrides_json "${overrides_source_file}")
+  [[ -n "${overrides_json}" ]] || overrides_json='{}'
+  overrides_source=$(cat "${overrides_source_file}" 2>/dev/null)
+  rm -f "${overrides_source_file}"
+  if ! jq -n --argjson overrides "${overrides_json}" \
+    '{name:"safedeps-closure-probe",version:"0.0.0",private:true}
+     + (if ($overrides | length) > 0 then {overrides: $overrides} else {} end)' \
+    > "${tmp_dir}/package.json" 2>/dev/null; then
+    # Dropping the overrides only makes the probe stricter, but a silent drop
+    # would surface as an unexplained denial. Every bypass stays observable.
+    printf 'safedeps npm closure: could not apply repo overrides to the probe manifest; continuing without them (the check stays fail-closed)\n' >&2
+    printf '{"name":"safedeps-closure-probe","version":"0.0.0","private":true}\n' > "${tmp_dir}/package.json"
+    overrides_json='{}'
+    overrides_source=""
+  fi
+  if [[ "${overrides_json}" != '{}' ]]; then
+    printf 'safedeps npm closure: applied %s repo override(s) to closure probe\n' \
+      "$(jq 'length' <<<"${overrides_json}" 2>/dev/null || printf '?')" >&2
+  fi
   if ! (
     cd "${tmp_dir}" &&
       npm install "${package_name}@${version}" \
@@ -664,13 +821,21 @@ safedeps_npm_resolve_spec_closure() {
   lockfile="${tmp_dir}/package-lock.json"
   safedeps_npm_lock_closure "${lockfile}" "${package_name}"
   local status=$?
+  local overrides_context_file=""
   if [[ -n "${source_file}" ]]; then
     if [[ "${project_context_status}" -eq 0 ]]; then
       safedeps_npm_write_source "${source_file}" "npm-package-probe" "${project_context_file}" "project-closure-unavailable"
     elif [[ "${project_context_status}" -eq 2 ]]; then
       safedeps_npm_write_source "${source_file}" "npm-package-probe" "" "project-context-invalid"
     else
-      safedeps_npm_write_source "${source_file}" "npm-package-probe"
+      overrides_context_file=$(mktemp "${TMPDIR:-/tmp}/safedeps-npm-overrides-ctx.XXXXXX") || overrides_context_file=""
+      if [[ -n "${overrides_context_file}" ]] && \
+          safedeps_npm_overrides_context "${overrides_context_file}" "${overrides_json}" "${overrides_source}"; then
+        safedeps_npm_write_source "${source_file}" "npm-overrides-probe" "${overrides_context_file}"
+      else
+        safedeps_npm_write_source "${source_file}" "npm-package-probe"
+      fi
+      rm -f "${overrides_context_file}"
     fi
   fi
   rm -rf "${tmp_dir}"

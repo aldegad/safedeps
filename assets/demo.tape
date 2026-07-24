@@ -11,7 +11,7 @@ Set TypingSpeed 45ms
 Hide
 Type "setopt interactive_comments"
 Enter
-Type "export PATH=/Users/soohongkim/Documents/workspace/personal/alex-extensions/safedeps/bin:$PATH"
+Type "export PATH=/Users/soohongkim/Documents/workspace/personal/agent-extensions/safedeps/bin:$PATH"
 Enter
 Type "export SAFEDEPS_HOME=/tmp/safedeps-demo/home"
 Enter
