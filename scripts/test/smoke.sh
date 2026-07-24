@@ -105,6 +105,19 @@ ov_none_out=$(SAFEDEPS_NPM_OVERRIDES_DIR="${ov_none}" bash -c 'source lib/npm/cl
 [[ "${ov_none_out}" == "{}" ]] || fail "no repo overrides yields empty object (got: ${ov_none_out})"
 pass "npm closure with no repo overrides is unchanged"
 
+# A git worktree root carries a `.git` FILE, not a directory. Testing only for a
+# directory walks straight past the worktree root and picks up an ancestor's
+# overrides -- which are not the overrides the real install inside that worktree
+# will use. The Yarn project-context walk-up already handles this with `-e`.
+ov_wt_parent="${tmp_root}/ov-wt-parent"
+mkdir -p "${ov_wt_parent}/inner"
+printf '{"name":"ancestor","version":"0.0.0","overrides":{"leaked":"9.9.9"}}\n' > "${ov_wt_parent}/package.json"
+printf 'gitdir: /somewhere/.git/worktrees/inner\n' > "${ov_wt_parent}/inner/.git"
+printf '{"name":"inner","version":"0.0.0"}\n' > "${ov_wt_parent}/inner/package.json"
+ov_wt_out=$(SAFEDEPS_NPM_OVERRIDES_DIR="${ov_wt_parent}/inner" bash -c 'source lib/npm/closure.sh; safedeps_npm_repo_overrides_json')
+[[ "$(jq -r 'has("leaked")' <<< "${ov_wt_out}")" == "false" ]] || fail "override discovery stops at a worktree root (.git file), got: ${ov_wt_out}"
+pass "npm closure override discovery stops at a worktree root, not just a .git dir"
+
 ov_env_out=$(SAFEDEPS_NPM_OVERRIDES_JSON='{"x":"1.0.0"}' bash -c 'source lib/npm/closure.sh; safedeps_npm_repo_overrides_json')
 [[ "$(jq -r '.x' <<< "${ov_env_out}")" == "1.0.0" ]] || fail "SAFEDEPS_NPM_OVERRIDES_JSON env takes precedence (got: ${ov_env_out})"
 pass "npm closure override env source precedence"

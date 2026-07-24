@@ -640,7 +640,11 @@ safedeps_npm_repo_overrides_json() {
         return 0
       fi
     fi
-    [[ -d "${dir}/.git" ]] && break
+    # Worktree roots use a `.git` file; normal clones use a `.git` directory.
+    # Testing only for a directory walks straight past a worktree root and
+    # picks up an ancestor's overrides, which are not the ones the real install
+    # will use. Matches the Yarn project-context walk-up above.
+    [[ -e "${dir}/.git" ]] && break
     dir=$(dirname "${dir}")
   done
   printf '{}'
