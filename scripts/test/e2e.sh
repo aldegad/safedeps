@@ -322,10 +322,21 @@ candidate_safe_json=$(
 [[ "$(jq -r '[.resolved_closure[] | select(.package == "postcss" and .version == "8.5.21")] | length' <<< "${candidate_safe_json}")" == "1" ]] || fail "materialized candidate resolves patched PostCSS"
 [[ "$(hash_project_tree "${candidate_safe_project}")" == "${candidate_safe_tree_before}" ]] || fail "candidate materialization leaves caller tree byte-identical"
 [[ "$(shasum -a 256 "${candidate_safe_project}/yarn.lock" | cut -d' ' -f1)" == "${candidate_safe_lock_before}" ]] || fail "candidate materialization leaves caller lockfile byte-identical"
-if grep -Fq "${candidate_safe_project}" "${candidate_yarn_log}"; then
-  fail "candidate materialization never invokes Yarn in caller project"
+# The caller project IS read in place: locator discovery runs `yarn info` there,
+# which is the v2.10 project-closure path. What it must never receive is a
+# mutating command. Compare physical paths -- the stub logs $PWD, so a /tmp or
+# /var symlink would otherwise make this assertion match nothing and pass
+# vacuously on one platform while failing on another.
+candidate_safe_project_real=$(cd "${candidate_safe_project}" && pwd -P)
+if awk -F'\t' -v proj="${candidate_safe_project_real}" \
+    '$1 == proj && $2 ~ /install/ { found = 1 } END { exit !found }' "${candidate_yarn_log}"; then
+  fail "candidate materialization never runs a mutating Yarn command in the caller project"
 fi
-grep -q $'install --mode=update-lockfile --no-immutable' "${candidate_yarn_log}" || fail "candidate materialization invokes Yarn update-lockfile mode"
+# Positive half: the materialization really happened, and somewhere that is not
+# the caller. Together these two cannot both hold unless the install was isolated.
+awk -F'\t' -v proj="${candidate_safe_project_real}" \
+  '$1 != proj && $2 == "install --mode=update-lockfile --no-immutable" { found = 1 } END { exit !found }' \
+  "${candidate_yarn_log}" || fail "candidate materialization runs Yarn update-lockfile outside the caller project"
 candidate_safe_hash=$(jq -r '.spec_hash' <<< "${candidate_safe_json}")
 candidate_safe_entry="${candidate_safe_home}/approved-specs/${candidate_safe_hash/:/-}.json"
 [[ "$(jq -r '.project_context.materialization.generated_lockfile_sha256' "${candidate_safe_entry}")" == "$(jq -r '.closure_source.materialization.generated_lockfile_sha256' <<< "${candidate_safe_json}")" ]] || fail "ledger stores generated-lock provenance"
