@@ -686,6 +686,14 @@ safedeps_npm_overrides_context() {
     project_root=$(cd "$(dirname "${overrides_source}")" 2>/dev/null && pwd -P) || return 1
   fi
 
+  # The key folds in the project root as well as the override set, even though
+  # the probe resolves from an empty manifest and so depends only on the set.
+  # Two repos with identical overrides therefore re-resolve instead of sharing
+  # one entry. That is deliberate: it errs strict, keeps the entry auditable
+  # back to the manifest that declared the overrides, and matches how the Yarn
+  # project context is keyed. The cost is a redundant resolve, never a missed
+  # denial.
+  #
   # Hash the canonical (sorted) override set, so key equality means the probe
   # resolves the same way, not merely that the manifest bytes matched.
   local canonical_overrides
