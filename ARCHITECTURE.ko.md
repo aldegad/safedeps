@@ -146,7 +146,7 @@ TIER 3 — ENRICHMENT / CROSS-CHECK
 - `approved_at` / `expires_at` — lifecycle TTL, 기본 30일. 만료 후엔 새 CVE 가능성이 있어 자동 revoke + re-check 강제.
 - `evidence` — 승인 시점에 어느 source 가 무엇을 봤는지. audit trail.
 - `transitive_specs` — direct entry 가 승인한 전체 transitive closure. npm effect gate 는 lockfile 에 있으면서 direct entry 에도 이 배열에도 없는 `pkg@version` 을 reorg 한다.
-- `project_context` — 일반 published-package 승인은 `null`, Yarn 프로젝트의 resolved closure 에서 온 승인이면 `{ type: "yarn-project-lockfile", context_hash, project_root, manifest_path, lockfile_path }` (4장 "Yarn project-scoped closure" 참고). `context_hash` 는 project directory, 루트 `resolutions`, `yarn.lock` content 의 hash 다.
+- `project_context` — 일반 published-package 승인은 `null`, Yarn 프로젝트의 resolved closure 에서 온 승인이면 `{ type, context_hash, project_root, manifest_path, lockfile_path, input_sha256, input_files }` (4장 "Yarn project-scoped closure" 참고). `context_hash` 는 project directory, 루트 `resolutions`, `yarn.lock` content, canonical input set 의 hash 다. `type` 은 package 가 이미 project lockfile 에 있었으면 `yarn-project-lockfile`, candidate 를 isolated mirror 에서 해석했으면 `yarn-project-materialized-lockfile` 이다. materialized 쪽은 `materialization { candidate, input_sha256, generated_lockfile_sha256, command, isolation }` 을 추가로 가진다. `safedeps_ledger_validate_json` 은 이 필드들을 필수로 요구하고, `materialization.input_sha256` 이 context 의 `input_sha256` 과 다르면 entry 를 거부한다.
 
 **Project-scoped isolation.** `project_context` 가 있는 승인은 `(ecosystem, package, version)` 에 더해 `context_hash` 로도 키가 잡히므로, 같은 spec 의 package-only 승인과는 다른 ledger path 에 놓이고 다른 프로젝트나 `resolutions`/`yarn.lock` 이 바뀐 이후의 같은 프로젝트에서는 조회에 성공하지 못한다 (hash 가 함께 바뀌므로). `safedeps_ledger_check` 는 호출자의 살아있는 context hash 를 저장된 값과 비교해 다르면 `reason: "context_mismatch"` 로 거부한다 — 승인이 프로젝트 경계를 조용히 넘어가는 일은 없다.
 
@@ -212,14 +212,47 @@ project context 해석 (cwd 에서 위로 탐색, .git 경계에서 중단):
         │        요청된 `pkg@npm:version` locator 부터 traverse
         │                 │
         │                 ├─► locator 발견  ──► resolved project closure (approve 가능)
-        │                 └─► locator 없음   ──► approval_scope: "deny-only"
-        │                                        (published closure 는 여전히 취약점 검사하지만
-        │                                         결과를 approve 하지는 않음)
+        │                 └─► locator 없음   ──► candidate 를 materialize (아래 참고)
+        │                                        ├─► materialize 성공 ──► generated closure (approve 가능)
+        │                                        └─► 실패 ───────────► project-candidate-materialization-unavailable
+        │                                                              (거부; published closure 는 쓰지 않음)
         │
         └─► 이 Git worktree 에 resolutions/yarn.lock 없음 ──► 일반 npm package-only check
 ```
 
 descriptor-to-locator resolution 은 Yarn 소유다. safedeps 는 lockfile resolution 을 재구현하지 않고 `yarn info` 의 machine-readable graph 를 그대로 소비한다. context 가 resolve 되면 approved-spec ledger entry 가 `project_context` (3장) 를 함께 가져, 승인이 그 프로젝트 하나로 한정되고 다른 프로젝트로 새거나 `resolutions`/`yarn.lock` 변경 이후에도 살아남지 못한다.
+
+**Yarn candidate materialization.** locator 가 `yarn.lock` 에 없다는 건 대개 그 package 를 아직 추가하지 않았다는 뜻이고, 그게 바로 일반적인 pre-install check 상황이다. `safedeps_npm_yarn_materialize_candidate_closure` 는 그 candidate 를 거부하거나 published closure 로 되돌아가는 대신 isolated mirror 에서 해석한다.
+
+```
+project lockfile 에 locator 없음
+        │
+        ▼
+   mktemp private mirror ◄── canonical input 만 복사:
+        │                     루트 + workspace package.json, yarn.lock, .yarnrc.yml,
+        │                     .yarn/{releases,plugins,patches}
+        │                     (node_modules, cache, unplugged, install state, VCS 는 절대 복사 안 함)
+        ▼
+   mirror 안에서 input 을 다시 hash; 호출자의 input_sha256 과 같아야 함
+        │
+        ▼
+   candidate 를 MIRROR manifest 에만 추가
+        │
+        ▼
+   `yarn install --mode=update-lockfile --no-immutable` (link 단계 없음, lifecycle script 없음)
+        │
+        ▼
+   호출자 input 을 다시 hash ── 바뀌었나? ──► 무효화 (동시 프로젝트 편집)
+        │
+        ▼
+   생성된 lockfile 위에서 `yarn info -A -R --json` → candidate closure
+        │
+        ▼
+   project_context.type = "yarn-project-materialized-lockfile"
+   + materialization { candidate, input_sha256, generated_lockfile_sha256, command, isolation }
+```
+
+전 과정에서 호출자의 tree 는 read-only 이고 mirror 만 변경된다. Yarn 실행 전후의 input recheck 가 read/copy race 를 닫는다. 중간에 manifest 나 lockfile 편집이 끼어들면 뒤섞인 프로젝트 상태에 대한 승인을 내주는 대신 candidate 를 무효화한다. 승인의 truth 는 registry probe 도 아니고 호출자의 낡은 lockfile 도 아니다. 호출자 자신의 input 을 hash 로 묶어 복사한 것에서 유도된 Yarn resolution 이며, input hash 와 생성된 lockfile hash 둘 다 ledger evidence 로 기록된다. 모든 실패 경로(input 복사, context drift, Yarn 호출, candidate 해석 불가)는 `project-candidate-materialization-unavailable` 로 거부한다. published-closure fallback 은 없다.
 
 ### Phase 2 — fast command guard (PreToolUse / `safedeps-pre-guard.sh`)
 
@@ -370,7 +403,7 @@ OSV 가 ecosystem 이름을 정규화해줘서 advisory-check 시점엔 single A
 | `scripts/safedeps-post-verify.sh` | PostToolUse hook — closure-vs-ledger effect gate + reorg. |
 | `lib/providers/` | OSV / KEV / GHSA (옵션 NVD / deps.dev / Snyk) adapter, 단일 query interface. |
 | `lib/ledger/` | approved-spec ledger I/O — atomic write, hashing, TTL 검사, project-context-scoped key. |
-| `lib/npm/closure.sh` | lockfile 에서 npm closure 해석, 더해 Yarn project context/closure 해석 (루트 `resolutions` + `yarn info`). |
+| `lib/npm/closure.sh` | lockfile 에서 npm closure 해석, 더해 Yarn project context/closure 해석 (루트 `resolutions` + `yarn info`) 과 isolated candidate materialization. |
 | `lib/gates/` | release-time repo lane — `scan.sh`(gitleaks runner), `audit.sh`(멀티-ecosystem lockfile audit — npm/pnpm/yarn/bun, 각 네이티브 도구에 위임), `hooks.sh`(`install`/`check`/`init`), `doctor.sh`(자세 진단 + `--fix`), `repo-profile.sh`(public/private 판별). *실행*을 소유하고 *policy* 는 repo 가 소유. |
 | `lib/gates/templates/` | 시작용 `.gitleaks[.private].toml` + `.githooks/pre-commit`, `hooks init` 가 scaffold. repo 가 소유·튜닝하는 seed — 재실행 시 덮지 않음. |
 
@@ -435,6 +468,7 @@ rm -rf ~/.safedeps/cache/osv/        # OSV cache 비우기 (강제 re-query)
 - KEV 는 하루 1회 update — 그 사이 등재된 KEV 는 다음 refresh 까지 못 잡는다.
 - transitive closure 검사는 ledger 를 수백 개로 키울 수 있어 최적화가 필요하다.
 - Yarn project-scoped closure 는 `PATH` 상의 Yarn CLI 와 Yarn Berry lockfile(`__metadata:` 존재)이 필요하다. Yarn Classic(`yarn.lock` v1)이나 루트 `resolutions` 가 없는 workspace 는 일반 npm package-only check 로 떨어진다.
+- candidate materialization 은 추가로 Yarn 이 mirror 를 offline 또는 network 로 해석할 수 있어야 하고, 루트 manifest 의 `workspaces` 패턴이 평범한 상대 glob 이어야 한다. 절대경로, 루트를 벗어나는 경로, `**`, 부정(`!`) 패턴은 추측하지 않고 거부하며 candidate 는 deny 된다.
 
 **미래 방향** ([`ROADMAP.md`](./ROADMAP.md) 참고):
 

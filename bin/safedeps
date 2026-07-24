@@ -7,7 +7,7 @@
 
 set -euo pipefail
 
-SAFEDEPS_VERSION="2.10.0"
+SAFEDEPS_VERSION="2.11.0"
 
 # ---- repo / lib bootstrap ----------------------------------------------------
 
@@ -389,11 +389,17 @@ sf_cmd_check_npm_full_closure() {
 
   sf_spinner_start "resolving npm closure (${pkg}@${version})"
   if ! sf_npm_closure_for_spec "${pkg}" "${version}" "${closure_file}" "${source_file}"; then
+    local closure_source_json="null"
     sf_spinner_stop
+    if [[ -s "${source_file}" ]]; then
+      closure_source_json=$(cat "${source_file}")
+    fi
     rm -f "${closure_file}" "${batch_file}" "${evidence_file}" "${transitive_file}" "${source_file}"
     if [[ "${SAFEDEPS_JSON_MODE}" -eq 1 ]]; then
-      jq -nc --arg ecosystem "${ecosystem}" --arg package "${pkg}" --arg range "${range}" --arg version "${version}" \
-        '{command:"check", ecosystem:$ecosystem, package:$package, input_range:$range, resolved_version:$version, result:"error", approved:false, error:"npm_closure_resolution_failed"}'
+      jq -nc \
+        --arg ecosystem "${ecosystem}" --arg package "${pkg}" --arg range "${range}" --arg version "${version}" \
+        --argjson closure_source "${closure_source_json}" \
+        '{command:"check", ecosystem:$ecosystem, package:$package, input_range:$range, resolved_version:$version, result:"error", approved:false, error:(if $closure_source.project_resolution_status? then $closure_source.project_resolution_status else "npm_closure_resolution_failed" end), closure_source:$closure_source}'
     fi
     return 4
   fi
@@ -469,7 +475,9 @@ sf_cmd_check_npm_full_closure() {
         sf_npm_evidence_file "${batch_file}" "${closure_file}" "${source_file}" "${evidence_file}"
         local spec_json
         local project_context_arg=""
-        [[ "$(jq -r '.type' "${source_file}")" != "yarn-project-lockfile" ]] || project_context_arg="${source_file}"
+        case "$(jq -r '.type' "${source_file}")" in
+          yarn-project-lockfile|yarn-project-materialized-lockfile) project_context_arg="${source_file}" ;;
+        esac
         spec_json=$(safedeps_ledger_write_approved_spec "${ecosystem}" "${pkg}" "${patched_version}" "${patched_version}" "safedeps-cli" "${evidence_file}" "${SAFEDEPS_LEDGER_DEFAULT_TTL_DAYS}" "${transitive_file}" "${project_context_arg}")
         local hash; hash=$(jq -r '.hash' <<< "${spec_json}")
         local expires_at; expires_at=$(jq -r '.expires_at' <<< "${spec_json}")
@@ -530,7 +538,9 @@ sf_cmd_check_npm_full_closure() {
   sf_npm_evidence_file "${batch_file}" "${closure_file}" "${source_file}" "${evidence_file}"
   local spec_json
   local project_context_arg=""
-  [[ "$(jq -r '.type' "${source_file}")" != "yarn-project-lockfile" ]] || project_context_arg="${source_file}"
+  case "$(jq -r '.type' "${source_file}")" in
+    yarn-project-lockfile|yarn-project-materialized-lockfile) project_context_arg="${source_file}" ;;
+  esac
   spec_json=$(safedeps_ledger_write_approved_spec "${ecosystem}" "${pkg}" "${version}" "${range:-${version}}" "safedeps-cli" "${evidence_file}" "${SAFEDEPS_LEDGER_DEFAULT_TTL_DAYS}" "${transitive_file}" "${project_context_arg}")
   local hash; hash=$(jq -r '.hash' <<< "${spec_json}")
   local expires_at; expires_at=$(jq -r '.expires_at' <<< "${spec_json}")
