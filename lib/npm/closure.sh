@@ -763,12 +763,19 @@ safedeps_npm_resolve_spec_closure() {
     return 1
   fi
 
-  tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/safedeps-npm-closure.XXXXXX") || return 1
+  tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/safedeps-npm-closure.XXXXXX") || {
+    rm -f "${project_context_file}"
+    return 1
+  }
 
   local overrides_json
   local overrides_source_file
   local overrides_source=""
-  overrides_source_file=$(mktemp "${TMPDIR:-/tmp}/safedeps-npm-overrides-src.XXXXXX") || return 1
+  overrides_source_file=$(mktemp "${TMPDIR:-/tmp}/safedeps-npm-overrides-src.XXXXXX") || {
+    rm -rf "${tmp_dir}"
+    rm -f "${project_context_file}"
+    return 1
+  }
   overrides_json=$(safedeps_npm_repo_overrides_json "${overrides_source_file}")
   [[ -n "${overrides_json}" ]] || overrides_json='{}'
   overrides_source=$(cat "${overrides_source_file}" 2>/dev/null)
