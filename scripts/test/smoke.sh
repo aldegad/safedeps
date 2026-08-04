@@ -64,6 +64,33 @@ installer_pre_timeout=$(grep -m1 '^const PRE_HOOK_TIMEOUT_SECONDS = ' scripts/in
   || fail "self-budget ceiling sits below the runtime budget (ceiling=${guard_budget_ceiling}s, runtime=${guard_runtime_budget}s)"
 pass "self-budget ceiling is pinned below the hook timeout the installer registers"
 
+# The manual-install docs and the installer describe the same registration, and
+# they are different files — which is exactly how they drifted: the docs told
+# readers to register the hook scripts directly for as long as the shim has
+# existed, while AGENTS.md said the registered command is the shim. Following
+# the docs still gated installs, but without the shim a broken checkout goes
+# back to being a silently disabled gate, and the reader had no way to know.
+# The comparison is machine-made now rather than left to whoever reads both.
+installer_entry=$(grep -m1 '^const ENTRY_HOOK_NAME = ' scripts/install/install-safedeps-hooks.mjs | sed 's/.*"\(.*\)".*/\1/')
+[[ -n "${installer_entry}" ]] || fail "installer entry-hook constant is readable"
+for doc in README.md README.ko.md; do
+  for target in pre post; do
+    grep -q "${installer_entry} ${target}" "${doc}" \
+      || fail "${doc} registers the entry shim with '${target}' (the command the installer writes)"
+  done
+  # The hook scripts must not be named as a registered command anywhere in the
+  # manual block; naming them in prose or in a tree listing is fine.
+  if grep -qE '"command":[^"]*"[^"]*safedeps-(pre-guard|post-verify)\.sh"' "${doc}"; then
+    fail "${doc} does not register a hook script directly"
+  fi
+done
+# SKILL.md must not carry a second registration declaration: no runtime reads it,
+# and a second description of a registration is a second thing to keep in sync.
+if grep -qE '^\s*script:\s*scripts/safedeps-' SKILL.md; then
+  fail "SKILL.md leaves registration to the installer rather than declaring its own"
+fi
+pass "manual-install docs register the same command the installer writes"
+
 # Regression: a global install must resolve its package dir through the symlink.
 # npm -g (and ~/.local/bin via --link-bin) put a RELATIVE FILE symlink in
 # <prefix>/bin and the package under <prefix>/lib/node_modules; without symlink

@@ -56,7 +56,7 @@ Safedeps 는 **개발 의존성 install** (npm / pip / cargo / go / gem / maven 
 
 ### 릴리즈 메모
 
-- npm 패키지 version 은 `package.json` 이 SSoT. `bin/safedeps` `SAFEDEPS_VERSION` 이 이를 따라가고, smoke 테스트는 `package.json` 을 읽어 대조한다 (현재 v2.15.3).
+- npm 패키지 version 은 `package.json` 이 SSoT. `bin/safedeps` `SAFEDEPS_VERSION` 이 이를 따라가고, smoke 테스트는 `package.json` 을 읽어 대조한다 (현재 v2.15.4).
 - `npm test` 는 release smoke suite 를 실행한다. full fixture E2E 는 `v2.1-tests` 에 있다.
 - daily re-check 는 LLM 토큰을 쓰지 않는다. opt-in 이며, macOS `launchd` user agent 가 매일 `safedeps re-check --json` 을 실행한다 (`install-safedeps-recheck-agent.mjs` 로 atomic install). `~/.safedeps/recheck.log` 와 `~/.safedeps/recheck-alerts.jsonl` 를 쓰고, 새 CVE/KEV/revoke/provider-skip/위조-의심 시 macOS notification 을 띄운다. 네트워크는 OSV / CISA / GHSA query 에만 쓴다.
 
@@ -555,6 +555,20 @@ v2.15.2 는 이 구멍을 암시가 아니라 이름으로 릴리스 노트에 �
 검증: 실제 훅 경로(엔트리 shim)에 마커를 export 한 상태로 12KB 패딩된 `pip install` 이 2s 예산에서 3s 에 `UNDECIDED` 거부된다. 마감이 스캔 깊숙이 떨어지는 경우도 11s 예산을 1s 초과로 종전과 같고, 고아 프로세스를 남기지 않는다. `scripts/test/self-budget.sh`(32 ok)가 export 된 마커에도 마감이 살아있는 것과 두 채널 알림을 고정한다.
 
 이게 랜딩하면서 v2.15.2 릴리스의 "Known gap" 항목은 닫힌다: 이 마감의 off 스위치는 하나이고, 이름이 있고, 기록된다.
+
+---
+
+### v2.15.4 — 수동 설치 문서가 설치기와 같은 것을 등록한다 (v2.15.3 패치)
+
+`SKILL.md`·`README.md`·`README.ko.md` 는 수동 설치하는 독자에게 훅 커맨드로 `safedeps-pre-guard.sh` 와 `safedeps-post-verify.sh` 를 등록하라고 말했다. 설치기가 등록하는 것은 `safedeps-hook-entry.sh pre|post` 이고 `AGENTS.md` 도 셔틀이 등록 커맨드라고 못 박아 뒀다 — 셔틀이 생긴 이래로 문서는 도구가 실제로 하는 것과 다른 설치를 서술해 왔다. `README.md` 는 그 블록 200줄 위에서 셔틀을 설명하기까지 한다.
+
+문서대로 해도 설치는 막히니까 깨져 보이지 않았다. 빠지는 건 셔틀의 존재 이유 전체다 — 체크아웃이 깨진 상태(머지 중, 저장이 덜 됨, 훅 크래시)를 조용히 꺼진 게이트가 아니라 설명이 붙은 fail-closed 거부로 바꾸는 것. 독자는 자기가 그 보호 없이 돌고 있다는 걸 알 방법이 없었다.
+
+- **수동 JSON 이 셔틀을 등록한다.** 설치기가 쓰는 것과 같은 30s 타임아웃까지 포함하고, 왜 등록 커맨드가 훅이 아니라 셔틀인지 한 줄로 말한다.
+- **`SKILL.md` 는 더 이상 frontmatter 에 훅을 선언하지 않는다.** 어느 런타임도 그 블록을 등록으로 읽지 않으므로, 그건 아무도 참으로 유지하지 않는 두 번째 설치 서술이었다 — 드리프트가 난 경로가 그것이다. 등록 채널은 설치기 하나다.
+- **대조를 기계가 한다.** `scripts/test/smoke.sh` 가 설치기의 엔트리 훅 상수를 직접 읽고, 두 README 중 하나라도 `pre`·`post` 로 그 이름을 대지 않거나 훅 스크립트를 직접 등록하면, 또는 `SKILL.md` 가 자기 선언을 다시 키우면 빨강을 낸다.
+
+문서에 적힌 커맨드를 엔진이 부르듯 실제로 실행해 검증했다 — `README.md` 의 그 문자열이 페이로드를 받아 미승인 `pip` 설치를 거부한다. 드리프트 검사는 옛 커맨드를 되돌려 빨강이 나는지로 mutation 검증했다.
 
 ## v3 (미래)
 

@@ -274,6 +274,8 @@ The installer is idempotent. It symlinks the skill into `~/.claude/skills/safede
 
 **3. Manual hook registration, if needed:**
 
+The registered command is the entry shim with `pre` or `post`, not the hook script itself — that is what the installer writes, and it is what turns a broken checkout into an explained fail-closed deny instead of a silently disabled gate. Registering the hook scripts directly still gates installs, but without that protection.
+
 Edit `.claude/settings.json` (project-level) or `~/.claude/settings.json` (global):
 
 ```json
@@ -285,7 +287,8 @@ Edit `.claude/settings.json` (project-level) or `~/.claude/settings.json` (globa
         "hooks": [
           {
             "type": "command",
-            "command": "~/.claude/skills/safedeps/scripts/safedeps-pre-guard.sh"
+            "command": "~/.claude/skills/safedeps/scripts/safedeps-hook-entry.sh pre",
+            "timeout": 30
           }
         ]
       }
@@ -296,7 +299,8 @@ Edit `.claude/settings.json` (project-level) or `~/.claude/settings.json` (globa
         "hooks": [
           {
             "type": "command",
-            "command": "~/.claude/skills/safedeps/scripts/safedeps-post-verify.sh"
+            "command": "~/.claude/skills/safedeps/scripts/safedeps-hook-entry.sh post",
+            "timeout": 30
           }
         ]
       }
@@ -308,6 +312,7 @@ Edit `.claude/settings.json` (project-level) or `~/.claude/settings.json` (globa
 **4. Verify permissions:**
 
 ```bash
+chmod +x ~/.claude/skills/safedeps/scripts/safedeps-hook-entry.sh
 chmod +x ~/.claude/skills/safedeps/scripts/safedeps-pre-guard.sh
 chmod +x ~/.claude/skills/safedeps/scripts/safedeps-post-verify.sh
 ```

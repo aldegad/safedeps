@@ -274,6 +274,8 @@ node scripts/install/install-safedeps-hooks.mjs
 
 **3. 필요한 경우 수동 훅 등록:**
 
+등록되는 커맨드는 훅 스크립트 자체가 아니라 엔트리 셔틀에 `pre` 또는 `post` 를 붙인 것입니다. 설치기가 쓰는 것이 그것이고, 체크아웃이 깨졌을 때 게이트가 조용히 사라지는 대신 설명이 붙은 fail-closed 거부가 되게 하는 것도 그것입니다. 훅 스크립트를 직접 등록해도 설치는 막히지만, 그 보호는 빠집니다.
+
 `.claude/settings.json`(프로젝트 수준) 또는 `~/.claude/settings.json`(전역)을 편집합니다.
 
 ```json
@@ -285,7 +287,8 @@ node scripts/install/install-safedeps-hooks.mjs
         "hooks": [
           {
             "type": "command",
-            "command": "~/.claude/skills/safedeps/scripts/safedeps-pre-guard.sh"
+            "command": "~/.claude/skills/safedeps/scripts/safedeps-hook-entry.sh pre",
+            "timeout": 30
           }
         ]
       }
@@ -296,7 +299,8 @@ node scripts/install/install-safedeps-hooks.mjs
         "hooks": [
           {
             "type": "command",
-            "command": "~/.claude/skills/safedeps/scripts/safedeps-post-verify.sh"
+            "command": "~/.claude/skills/safedeps/scripts/safedeps-hook-entry.sh post",
+            "timeout": 30
           }
         ]
       }
@@ -308,6 +312,7 @@ node scripts/install/install-safedeps-hooks.mjs
 **4. 실행 권한 확인:**
 
 ```bash
+chmod +x ~/.claude/skills/safedeps/scripts/safedeps-hook-entry.sh
 chmod +x ~/.claude/skills/safedeps/scripts/safedeps-pre-guard.sh
 chmod +x ~/.claude/skills/safedeps/scripts/safedeps-post-verify.sh
 ```

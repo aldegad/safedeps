@@ -56,7 +56,7 @@ The internal engine keeps the v1 `reorg-guard` assets.
 
 ### Release notes
 
-- The npm package version in `package.json` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION` tracks it and the smoke test reads `package.json` to compare (current: v2.15.3).
+- The npm package version in `package.json` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION` tracks it and the smoke test reads `package.json` to compare (current: v2.15.4).
 - `npm test` runs the release smoke suite; the full fixture E2E lives under `v2.1-tests`.
 - The daily re-check uses no LLM tokens. It is opt-in: a macOS `launchd` user agent runs `safedeps re-check --json` daily, installed atomically by `install-safedeps-recheck-agent.mjs`. It writes `~/.safedeps/recheck.log` and `~/.safedeps/recheck-alerts.jsonl` and raises a macOS notification on a new CVE/KEV/revoke/provider-skip/suspected-forgery. Network is used only for OSV / CISA / GHSA queries.
 
@@ -555,6 +555,20 @@ Cross-validation found it 90 lines from the clamp v2.15.2 added, which is the ho
 Verification: through the real hook path (the entry shim) with the marker exported, a 12KB padded `pip install` is denied `UNDECIDED` at 3s against a 2s budget. The deadline landing deep in the scan still overshoots its 11s budget by 1s, the same as before, and leaves no orphaned processes. `scripts/test/self-budget.sh` (32 ok) pins both the deadline surviving an exported marker and the announcement on both channels.
 
 With this landed, the "Known gap" note in the v2.15.2 release stands closed: the deadline has one off switch, it has a name, and it logs.
+
+---
+
+### v2.15.4 — the manual-install docs register what the installer registers (patch on v2.15.3)
+
+`SKILL.md`, `README.md` and `README.ko.md` told a reader doing a manual install to register `safedeps-pre-guard.sh` and `safedeps-post-verify.sh` as the hook commands. The installer registers `safedeps-hook-entry.sh pre|post`, and `AGENTS.md` says the shim is the registered command — the docs had been describing a different installation than the one the tool performs, for as long as the shim has existed. `README.md` even explains the shim two hundred lines above the block that tells you not to use it.
+
+Following the docs still gated installs, so nothing looked broken. What it dropped is the shim's whole job: turning a broken checkout — mid-merge, half-saved, crashed hook — from a silently disabled gate into an explained fail-closed deny. The reader had no way to know they were running without it.
+
+- **The manual JSON registers the shim**, with the same 30s timeout the installer writes, and says in one line why the registered command is the shim rather than the hook.
+- **`SKILL.md` no longer declares hooks in its frontmatter.** No runtime reads that block as a registration, so it was a second description of an installation with nothing keeping it true — which is how it drifted. Registration has one channel: the installer.
+- **The comparison is machine-made now.** `scripts/test/smoke.sh` reads the installer's own entry-hook constant and fails if either README stops naming it for `pre` and `post`, if either registers a hook script directly, or if `SKILL.md` grows its own declaration again.
+
+Verified by running the documented command as an engine would: the exact string from `README.md`, invoked on a payload, denies an unapproved `pip` install. The drift check was mutation-tested by restoring the old command, which turns it red.
 
 ## v3 (future)
 
