@@ -717,6 +717,57 @@ guard_runner_operands() {
   done
 }
 
+guard_names_package_without_spec() {
+  # True when an install NAMES a package but carries no version spec, so the
+  # ledger gate never ran for it. Used only to make that fact observable — it
+  # changes no verdict.
+  #
+  # The boundary is what keeps this record readable. Two shapes are deliberately
+  # NOT reported, because a record that fires on routine installs becomes
+  # background noise and background noise is the same as no record:
+  #   - file-driven installs (`pip install -r requirements.txt`,
+  #     `-c constraints.txt`, `-e .`) name no package here; the file does
+  #   - bare lockfile installs (`npm install`, `bundle install`) have no operand
+  # What IS reported is the shape that walks the gate: a named package with no
+  # version, e.g. `pip install evil` or `cargo add evil`.
+  local cmd="$1"
+  local seg tok verb_seen file_driven
+  local -a toks=()
+
+  while IFS= read -r seg; do
+    [[ -z "${seg//[[:space:]]/}" ]] && continue
+    command_is_dependency_install "${seg}" || continue
+
+    verb_seen=false
+    file_driven=false
+    read -ra toks <<< "$(command_scan_text "${seg}")"
+    for tok in "${toks[@]+${toks[@]}}"; do
+      case "${tok}" in
+        -r|--requirement|-c|--constraint|-e|--editable|--requirement=*|--constraint=*|--editable=*)
+          file_driven=true
+          ;;
+      esac
+    done
+    [[ "${file_driven}" == true ]] && continue
+
+    for tok in "${toks[@]+${toks[@]}}"; do
+      if [[ "${verb_seen}" != true ]]; then
+        case "${tok}" in
+          install|i|add|ci|get|up|update|upgrade|dependency:get|package) verb_seen=true ;;
+        esac
+        continue
+      fi
+      # A flag, or a token that already carries a spec, is not an unpinned name.
+      case "${tok}" in
+        -*) continue ;;
+        *@*|*==*) continue ;;
+      esac
+      return 0
+    done
+  done < <(command_candidate_texts "${cmd}" | tr ';|&' '\n')
+  return 1
+}
+
 guard_extract_flagged_specs() {
   awk '
     {
@@ -912,6 +963,22 @@ if [[ -n "${LEDGER_ECOSYSTEM}" && ${#LEDGER_SPECS[@]} -gt 0 ]]; then
     exit 0
   fi
   [[ -z "${LEDGER_CONTEXT_FILE}" ]] || rm -f "${LEDGER_CONTEXT_FILE}"
+fi
+
+# An install that names a package but pins no version yields no spec, so the
+# ledger gate above never ran for it. In npm that is not a gap: the effect gate
+# reads the resulting lockfile closure and enforces there. In the ecosystems
+# where this command gate IS the authority there is nothing behind it, so the
+# install proceeds unverified — and until now it did so with no record at all,
+# which contradicts the invariant that every bypass must be observable.
+#
+# This records the fact. It deliberately does NOT deny: refusing every unpinned
+# install is a policy change (it would block ordinary `cargo add x` workflows)
+# and belongs to the repo owner, not to this gate. The record is what makes that
+# decision answerable with evidence instead of guesswork.
+if [[ "${HIDDEN_DEPENDENCY_INSTALL}" != "true" && -n "${LEDGER_ECOSYSTEM}" && "${LEDGER_ECOSYSTEM}" != "npm" \
+      && ${#LEDGER_SPECS[@]} -eq 0 ]] && guard_names_package_without_spec "${COMMAND}"; then
+  log_advisory "pre-guard UNGATED: ${LEDGER_ECOSYSTEM} install names a package with no version spec, so the ledger gate did not run. This ecosystem has no effect gate behind the command gate, so the install is unverified. Command: ${COMMAND}"
 fi
 
 if [[ "${HIDDEN_DEPENDENCY_INSTALL}" == "true" && ( -z "${LEDGER_ECOSYSTEM}" || ${#LEDGER_SPECS[@]} -eq 0 ) ]]; then
