@@ -22,10 +22,15 @@ SAFEDEPS_ADVISORY_LOG_ENV_IGNORED="${SAFEDEPS_ADVISORY_LOG_ENV_IGNORED:-${SAFEDE
 SAFEDEPS_ADVISORY_LOG="${SAFEDEPS_HOME}/advisory.log"
 SAFEDEPS_PROVIDER_CACHE_TTL_SECONDS="${SAFEDEPS_PROVIDER_CACHE_TTL_SECONDS:-86400}"
 
-SAFEDEPS_OSV_API_URL="${SAFEDEPS_OSV_API_URL:-https://api.osv.dev/v1/query}"
-SAFEDEPS_OSV_BATCH_API_URL="${SAFEDEPS_OSV_BATCH_API_URL:-https://api.osv.dev/v1/querybatch}"
-SAFEDEPS_KEV_CATALOG_URL="${SAFEDEPS_KEV_CATALOG_URL:-https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json}"
-SAFEDEPS_GHSA_API_URL="${SAFEDEPS_GHSA_API_URL:-https://api.github.com/advisories}"
+# Defaults and the moved-source notice live in one file, so the value a run is
+# compared against is the value it was assigned.
+# shellcheck source=../truth-sources.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/truth-sources.sh"
+
+SAFEDEPS_OSV_API_URL="${SAFEDEPS_OSV_API_URL:-${SAFEDEPS_DEFAULT_OSV_API_URL}}"
+SAFEDEPS_OSV_BATCH_API_URL="${SAFEDEPS_OSV_BATCH_API_URL:-${SAFEDEPS_DEFAULT_OSV_BATCH_API_URL}}"
+SAFEDEPS_KEV_CATALOG_URL="${SAFEDEPS_KEV_CATALOG_URL:-${SAFEDEPS_DEFAULT_KEV_CATALOG_URL}}"
+SAFEDEPS_GHSA_API_URL="${SAFEDEPS_GHSA_API_URL:-${SAFEDEPS_DEFAULT_GHSA_API_URL}}"
 
 safedeps_providers_init() {
   umask 077
@@ -37,30 +42,18 @@ safedeps_providers_init() {
 }
 
 # Say once per process when the run is judging against something other than the
-# canonical sources. These knobs are real needs — a mirror on a network that
-# blocks osv.dev, a fixture in the test suite — so they are not forbidden; but a
-# run that answers from a moved truth must not look like a run that answered
-# from OSV. The record goes where every other bypass goes.
+# canonical sources. The list and the defaults live in lib/truth-sources.sh so
+# the guard can say the same thing without sourcing the provider stack.
 SAFEDEPS_TRUTH_SOURCE_ANNOUNCED=""
 safedeps_announce_truth_sources() {
   [[ -n "${SAFEDEPS_TRUTH_SOURCE_ANNOUNCED}" ]] && return 0
   SAFEDEPS_TRUTH_SOURCE_ANNOUNCED=1
-  local moved=()
-  [[ "${SAFEDEPS_OSV_API_URL}" == https://api.osv.dev/v1/query ]] || moved+=("osv=${SAFEDEPS_OSV_API_URL}")
-  [[ "${SAFEDEPS_OSV_BATCH_API_URL}" == https://api.osv.dev/v1/querybatch ]] || moved+=("osv-batch=${SAFEDEPS_OSV_BATCH_API_URL}")
-  [[ "${SAFEDEPS_KEV_CATALOG_URL}" == https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json ]] || moved+=("kev=${SAFEDEPS_KEV_CATALOG_URL}")
-  [[ "${SAFEDEPS_GHSA_API_URL}" == https://api.github.com/advisories ]] || moved+=("ghsa=${SAFEDEPS_GHSA_API_URL}")
-  [[ -z "${SAFEDEPS_NPM_CLOSURE_FIXTURE_JSON:-}" ]] || moved+=("npm-closure-fixture=${SAFEDEPS_NPM_CLOSURE_FIXTURE_JSON}")
-  [[ -z "${SAFEDEPS_YARN_INFO_FIXTURE_NDJSON:-}" ]] || moved+=("yarn-info-fixture=${SAFEDEPS_YARN_INFO_FIXTURE_NDJSON}")
-  # Not an advisory source, but the same class of claim: the ledger TTL is the
-  # promise that an old approval gets asked again, and a large enough value
-  # retires that promise without retiring the sentence that makes it.
-  [[ -z "${SAFEDEPS_LEDGER_DEFAULT_TTL_DAYS:-}" || "${SAFEDEPS_LEDGER_DEFAULT_TTL_DAYS:-30}" == 30 ]] \
-    || moved+=("ledger-ttl-days=${SAFEDEPS_LEDGER_DEFAULT_TTL_DAYS}")
-  if (( ${#moved[@]} > 0 )); then
+  local moved
+  moved="$(safedeps_truth_sources_moved_list)"
+  if [[ -n "${moved}" ]]; then
     safedeps_providers_init
     printf '[%s] WARN advisory truth source moved: %s — this run did not answer from the canonical sources.\n' \
-      "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" "${moved[*]}" >> "${SAFEDEPS_ADVISORY_LOG}"
+      "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" "${moved}" >> "${SAFEDEPS_ADVISORY_LOG}"
   fi
   if [[ -n "${SAFEDEPS_ADVISORY_LOG_ENV_IGNORED}" ]]; then
     safedeps_providers_init

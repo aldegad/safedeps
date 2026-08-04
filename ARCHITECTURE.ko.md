@@ -313,7 +313,7 @@ guard 는 lockfile/manifest 도 snapshot 하고 v1 hardcoded pattern 차단(sect
 
 **기록을 검사 밑에서 빼낼 수 없다.** `advisory.log` 는 모든 우회와 불가용이 적히는 자리이고, `re-check` 는 그 파일을 "이 승인이 실제로 있었나" 의 oracle 로도 읽는다. 경로가 `SAFEDEPS_ADVISORY_LOG` 에서 오는 동안에는, 위조 ledger 항목을 쓰는 그 환경이 oracle 에게 자기가 만든 증거를 건넬 수 있었다 — 실측으로 `suspected_forgery` 로 잡히던 항목이, 변수를 "그 승인은 있었다" 고 적힌 호출자 작성 파일로 돌리자 잡히지 않았다. 이제 경로는 `SAFEDEPS_HOME` 에서 유도되므로 기록과 그것이 보증하는 ledger 는 같이 움직이거나 아예 안 움직인다. 설정됐지만 무시된 변수는 stderr 와 로그 양쪽에 그 사실을 말한다.
 
-**옮겨진 출처로 판정한 실행은 그렇다고 말한다.** `SAFEDEPS_OSV_API_URL`(또는 KEV/GHSA URL, closure fixture, 기본값 아닌 ledger TTL)을 다른 곳으로 돌리는 것은 실재하는 필요다 — osv.dev 를 막는 망의 사내 미러, 테스트 스위트의 fixture. 그래서 아무것도 금지하지 않는다. 잘못된 것은 옮겨진 정본으로 답한 실행이 OSV 로 답한 실행과 똑같이 보이는 쪽이다. 각 이탈은 실행당 한 번, 이름과 함께 `advisory.log` 에 기록된다.
+**옮겨진 출처로 판정한 실행은 그렇다고 말한다 — 모든 경로에서, 그리고 그 목록은 완전성 주장이 아니다.** `SAFEDEPS_OSV_API_URL`(또는 KEV/GHSA URL, closure fixture, 기본값 아닌 ledger TTL)을 다른 곳으로 돌리는 것은 실재하는 필요다 — osv.dev 를 막는 망의 사내 미러, 테스트 스위트의 fixture. 그래서 아무것도 금지하지 않는다. 잘못된 것은 옮겨진 정본으로 답한 실행이 OSV 로 답한 실행과 똑같이 보이는 쪽이다. 각 이탈은 실행당 한 번, 이름과 함께 `advisory.log` 에 기록된다. 그 고지는 provider 스택이 아니라 `lib/truth-sources.sh` 에 있다 — PreToolUse 가드도 같은 말을 할 수 있어야 하는데, 모든 Bash 호출마다 provider 스택을 sourcing 할 수는 없기 때문이다. 가드는 그 파일 하나만, 그것도 무언가 실제로 설정됐을 때만 읽는다. 기본값과 비교가 같은 파일에 있으므로 실행은 자기가 대입받은 값과 대조된다. 거기 열거된 노브 집합은 **발견된 범위**다 — 그중 둘은 스스로 완전하다고 적은 앞선 열거 뒤에 검증자가 찾아냈다. 그래서 늘어나는 목록으로 적어 뒀다.
 
 npm ecosystem 명령이면 guard 도 위와 같은 Yarn project context 를 해석해(`SAFEDEPS_NPM_PROJECT_DIR` 를 project directory 로 고정) 그 `context_hash` 를 ledger 조회에 접어 넣는다 — 그래서 project-scoped 승인은 그 프로젝트 안에서만 guard 를 통과한다. context 가 invalid 하면(resolutions 는 있는데 lockfile 을 못 씀) package-only 조회로 넘어가지 않고 명령을 그대로 거부한다.
 

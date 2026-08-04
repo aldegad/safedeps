@@ -56,7 +56,7 @@ The internal engine keeps the v1 `reorg-guard` assets.
 
 ### Release notes
 
-- The npm package version in `package.json` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION` tracks it and the smoke test reads `package.json` to compare (current: v2.15.7).
+- The npm package version in `package.json` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION` tracks it and the smoke test reads `package.json` to compare (current: v2.15.8).
 - `npm test` runs the release smoke suite; the full fixture E2E lives under `v2.1-tests`.
 - The daily re-check uses no LLM tokens. It is opt-in: a macOS `launchd` user agent runs `safedeps re-check --json` daily, installed atomically by `install-safedeps-recheck-agent.mjs`. It writes `~/.safedeps/recheck.log` and `~/.safedeps/recheck-alerts.jsonl` and raises a macOS notification on a new CVE/KEV/revoke/provider-skip/suspected-forgery. Network is used only for OSV / CISA / GHSA queries.
 
@@ -608,6 +608,18 @@ Measured: a forged ledger entry that `re-check` flags as `suspected_forgery` on 
 - **Moved advisory sources are announced, not refused.** Provider URLs, the closure fixtures, and a non-default ledger TTL are real needs — a mirror on a network that blocks osv.dev, a fixture in this very suite. Each deviation is named once per run in `advisory.log`, at startup rather than on the first provider call, so a command that reaches no provider is still recorded. What is not allowed is a run judged against a moved truth looking exactly like a run judged against OSV.
 
 Verification: the e2e forgery battery gains the relocation case and the moved-source record, and both were mutation-tested in an isolated clone by restoring the environment override — the forgery case turns red.
+
+---
+
+### v2.15.8 — the notice exists on the hook path too (patch on v2.15.7)
+
+v2.15.7 said a run judged against a moved advisory source announces itself. That was true of the CLI. The PreToolUse guard does not source the provider stack, so it had nowhere to say it — a guard run under a moved source wrote nothing. It was harmless only because the guard does not currently reach a provider or a fixture, which is a reason that disappears the day the code changes. A channel that exists only where the claim is already true is not a channel.
+
+- **The notice moved to `lib/truth-sources.sh`**, which the guard sources — and only when something is actually set, because that hook runs on every Bash call and the common case has to stay free.
+- **Defaults and the comparison live in that one file.** They were duplicated: the URL a run is compared against was written separately from the URL it was assigned, which is the shape a whole release went to fixing one field over.
+- **Two more knobs are named.** `SAFEDEPS_NPM_OVERRIDES_JSON` replaces the overrides the closure verdict folds in — the e2e suite says so in its own assertion name — and `SAFEDEPS_RECHECK_FIXTURE_JSON` replaces the re-check output the daily alert reads. Both were outside the v2.15.7 enumeration, which is why that list is now written as a growing one rather than a complete one.
+
+Verification: a guard run under a moved source records it and names the overrides knob; the unmoved control is built by unsetting the suite's own fixtures, so it asserts the notice tracks the environment rather than always firing.
 
 ## v3 (future)
 

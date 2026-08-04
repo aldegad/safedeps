@@ -608,6 +608,41 @@ grep -q 'osv=' "${SAFEDEPS_HOME}/advisory.log" \
   || fail "the moved-truth record names which source moved"
 pass "a run judged against a moved advisory source says so in the record"
 
+# The notice has to exist on the hook path too, not only in the CLI. It used to
+# live in the provider stack, which the PreToolUse guard does not source, so a
+# guard run under a moved source said nothing — harmless only because the guard
+# does not currently reach a provider or a fixture, which is a reason that
+# disappears when the code changes.
+guard_moved_home="${tmp_root}/safe-guard-moved"
+mkdir -p "${guard_moved_home}" "${tmp_root}/guard-moved-project"
+printf '{"dependencies":{}}\n' > "${tmp_root}/guard-moved-project/package.json"
+guard_moved_payload=$(jq -nc --arg cwd "${tmp_root}/guard-moved-project" \
+  '{tool_name:"Bash",tool_input:{command:"ls -la"},cwd:$cwd}')
+SAFEDEPS_HOME="${guard_moved_home}" SAFEDEPS_OSV_API_URL="http://mirror.invalid/osv" \
+  SAFEDEPS_NPM_OVERRIDES_JSON='{"minimist":"1.2.8"}' \
+  scripts/safedeps-pre-guard.sh <<< "${guard_moved_payload}" >/dev/null 2>&1 || true
+grep -q 'advisory truth source moved' "${guard_moved_home}/advisory.log" \
+  || fail "the guard records a moved advisory source on its own path"
+grep -q 'npm-overrides=set' "${guard_moved_home}/advisory.log" \
+  || fail "the guard names the overrides knob, which the closure verdict reads"
+pass "the guard has its own channel for a moved advisory source"
+
+# And the common case stays silent, on the hook that runs for every Bash call.
+guard_clean_home="${tmp_root}/safe-guard-clean"
+mkdir -p "${guard_clean_home}"
+# The suite itself runs under moved sources, so the unmoved case has to be
+# built by removing them — which is also the honest control: this asserts the
+# notice tracks the environment rather than always firing.
+env -u SAFEDEPS_OSV_API_URL -u SAFEDEPS_OSV_BATCH_API_URL -u SAFEDEPS_KEV_CATALOG_URL \
+  -u SAFEDEPS_GHSA_API_URL -u SAFEDEPS_NPM_CLOSURE_FIXTURE_JSON -u SAFEDEPS_YARN_INFO_FIXTURE_NDJSON \
+  -u SAFEDEPS_NPM_OVERRIDES_JSON -u SAFEDEPS_RECHECK_FIXTURE_JSON -u SAFEDEPS_LEDGER_DEFAULT_TTL_DAYS \
+  -u SAFEDEPS_ADVISORY_LOG \
+  env SAFEDEPS_HOME="${guard_clean_home}" scripts/safedeps-pre-guard.sh <<< "${guard_moved_payload}" >/dev/null 2>&1 || true
+if [[ -f "${guard_clean_home}/advisory.log" ]] && grep -q 'truth source moved' "${guard_clean_home}/advisory.log"; then
+  fail "an unmoved run leaves no moved-source line"
+fi
+pass "an unmoved run says nothing on the hook path"
+
 # A forged ledger entry must be flagged even when advisory.log does not exist at
 # all — file absence is missing provenance, not proof of approval. (Previously
 # the [[ -f advisory.log ]] precondition silently skipped the check.)

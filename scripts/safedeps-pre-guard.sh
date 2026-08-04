@@ -60,6 +60,28 @@ mkdir -p "${GUARD_DIR}" "${SNAPSHOT_DIR}"
 
 # Observable record of any gate bypass / unavailability (AGENTS.md: no silent fallback —
 # every bypass must be observable and logged).
+# A moved advisory source is recorded from this hook too, not only from the CLI.
+# The notice used to live in the provider stack, which this hook does not source
+# — so a guard run under a moved source said nothing, and the only reason that
+# was harmless is that the guard does not currently reach a provider or a
+# fixture. "It does not take that path yet" is a reason that disappears when the
+# code changes, and a channel that exists only where the claim is already true is
+# not a channel. The list and the defaults live in lib/truth-sources.sh, which is
+# sourced ONLY when something is actually set: this hook runs on every Bash call
+# and the common case must stay free.
+safedeps_guard_announce_truth_sources() {
+  local lib
+  lib="${SAFEDEPS_TRUTH_SOURCES_LIB:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/truth-sources.sh}"
+  [[ -r "${lib}" ]] || return 0
+  # shellcheck source=../lib/truth-sources.sh
+  source "${lib}"
+  safedeps_truth_sources_possibly_moved || return 0
+  local moved
+  moved="$(safedeps_truth_sources_moved_list)"
+  [[ -n "${moved}" ]] || return 0
+  log_advisory "pre-guard: advisory truth source moved: ${moved} — this run did not judge against the canonical sources."
+}
+
 log_advisory() {
   printf '%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" >> "${GUARD_DIR}/advisory.log" 2>/dev/null || true
 }
@@ -488,6 +510,12 @@ COMMAND=$(echo "${INPUT}" | jq -r '.tool_input.command // empty' 2>/dev/null)
 # Only intercept Bash tool calls
 if [[ "${TOOL_NAME}" != "Bash" ]] || [[ -z "${COMMAND}" ]]; then
   exit 0
+fi
+
+# Said before any judging, and only in the child or an unengaged run, so the
+# record carries one line per hook invocation rather than one per process.
+if [[ "${SAFEDEPS_BUDGET_ROLE}" == "parent" ]]; then
+  safedeps_guard_announce_truth_sources
 fi
 
 # --- Self budget: never let the runtime kill us mid-judgment ----------------

@@ -56,7 +56,7 @@ Safedeps 는 **개발 의존성 install** (npm / pip / cargo / go / gem / maven 
 
 ### 릴리즈 메모
 
-- npm 패키지 version 은 `package.json` 이 SSoT. `bin/safedeps` `SAFEDEPS_VERSION` 이 이를 따라가고, smoke 테스트는 `package.json` 을 읽어 대조한다 (현재 v2.15.7).
+- npm 패키지 version 은 `package.json` 이 SSoT. `bin/safedeps` `SAFEDEPS_VERSION` 이 이를 따라가고, smoke 테스트는 `package.json` 을 읽어 대조한다 (현재 v2.15.8).
 - `npm test` 는 release smoke suite 를 실행한다. full fixture E2E 는 `v2.1-tests` 에 있다.
 - daily re-check 는 LLM 토큰을 쓰지 않는다. opt-in 이며, macOS `launchd` user agent 가 매일 `safedeps re-check --json` 을 실행한다 (`install-safedeps-recheck-agent.mjs` 로 atomic install). `~/.safedeps/recheck.log` 와 `~/.safedeps/recheck-alerts.jsonl` 를 쓰고, 새 CVE/KEV/revoke/provider-skip/위조-의심 시 macOS notification 을 띄운다. 네트워크는 OSV / CISA / GHSA query 에만 쓴다.
 
@@ -608,6 +608,18 @@ v2.15.5 는 등록 JSON 블록 둘 안의 timeout 을 핀했다. 그런데 그 �
 - **옮겨진 자문 출처는 금지가 아니라 고지 대상이다.** provider URL, closure fixture, 기본값 아닌 ledger TTL 은 실재하는 필요다 — osv.dev 를 막는 망의 미러, 이 스위트 자신이 쓰는 fixture. 각 이탈은 실행당 한 번 이름과 함께 `advisory.log` 에 적히고, 첫 provider 호출이 아니라 시작 시점에 적히므로 provider 에 닿지 않는 명령도 기록된다. 허용되지 않는 것은 옮겨진 정본으로 판정한 실행이 OSV 로 판정한 실행과 똑같이 보이는 쪽이다.
 
 검증: e2e 위조 배터리에 relocation 케이스와 moved-source 기록 케이스가 추가됐고, 격리 클론에서 환경 override 를 되돌리는 mutation 으로 위조 케이스가 빨강이 되는 것을 확인했다.
+
+---
+
+### v2.15.8 — 고지가 훅 경로에도 있다 (v2.15.7 패치)
+
+v2.15.7 은 옮겨진 자문 출처로 판정한 실행이 스스로 고지한다고 적었다. CLI 에서는 참이었다. PreToolUse 가드는 provider 스택을 sourcing 하지 않으므로 **말할 자리가 없었다** — 옮겨진 출처 아래서 돈 가드 실행이 아무것도 안 남겼다. 무해했던 이유는 가드가 아직 provider 도 fixture 도 안 탄다는 것뿐이고, 그건 코드가 바뀌는 날 사라지는 이유다. 주장이 이미 참인 자리에만 있는 채널은 채널이 아니다.
+
+- **고지를 `lib/truth-sources.sh` 로 옮겼고** 가드가 그 파일을 sourcing 한다 — 그것도 무언가 실제로 설정됐을 때만. 이 훅은 모든 Bash 호출마다 돌기 때문에 평상시 경로는 비어 있어야 한다.
+- **기본값과 비교가 그 한 파일에 있다.** 중복이었다 — 실행이 대조되는 URL 과 대입받는 URL 이 따로 적혀 있었고, 그건 한 릴리스가 통째로 한 칸 옆에서 고쳤던 그 형태다.
+- **노브 둘을 더 이름 붙였다.** `SAFEDEPS_NPM_OVERRIDES_JSON` 은 closure 판정이 접어 넣는 overrides 를 대체하고(e2e 자신의 단언 이름이 그렇게 말한다), `SAFEDEPS_RECHECK_FIXTURE_JSON` 은 일일 alert 이 읽는 re-check 출력을 대체한다. 둘 다 v2.15.7 열거 밖이었고, 그래서 그 목록을 완전한 것이 아니라 늘어나는 것으로 다시 적었다.
+
+검증: 옮겨진 출처 아래 가드 실행이 그것을 기록하고 overrides 노브를 이름으로 댄다. 미이동 대조군은 스위트 자신의 fixture 를 해제해서 만들었으므로, 고지가 항상 뜨는 게 아니라 환경을 따라간다는 것을 단언한다.
 
 ## v3 (미래)
 
