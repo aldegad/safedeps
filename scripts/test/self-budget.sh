@@ -47,7 +47,8 @@ guard() {
     HOME="${tmp_root}/home" SAFEDEPS_HOME="${safe}" \
     SAFEDEPS_SELF_BUDGET_SECONDS="${budget}" \
     SAFEDEPS_BUDGET_ENGAGE_BYTES="${engage}" \
-    scripts/safedeps-pre-guard.sh 2>/dev/null) || true
+    scripts/safedeps-pre-guard.sh 2>"${tmp_root}/stderr") || true
+  GUARD_STDERR=$(cat "${tmp_root}/stderr" 2>/dev/null || printf '')
   end=$(date +%s)
   GUARD_ELAPSED=$(( end - start ))
   if [[ -z "${GUARD_OUT}" ]]; then
@@ -92,6 +93,14 @@ pass "answer arrives on the guard's own budget, ahead of the runtime's"
 grep -qi 'not unsafe' <<< "${GUARD_REASON}" || fail "undecided deny says it is not a finding"
 grep -qi 'Nothing was detected' <<< "${GUARD_REASON}" || fail "undecided deny states nothing was detected"
 pass "undecided deny reads as undecided, not as a detection"
+
+# The shell announces a signalled background job by itself, and that lands on
+# the hook's stderr where the engine shows it. Beside a security deny, a line
+# reading "Terminated: 15" says something went wrong when nothing did.
+if [[ -n "${GUARD_STDERR}" ]]; then
+  fail "undecided deny leaves stderr clean (got: $(printf '%s' "${GUARD_STDERR}" | head -c 80))"
+fi
+pass "undecided deny leaves the hook's stderr clean"
 
 # Every bypass or unavailability is observable (AGENTS.md invariant).
 grep -q 'unfinished' "${GUARD_STATE_DIR}/advisory.log" || fail "undecided deny is recorded in advisory.log"

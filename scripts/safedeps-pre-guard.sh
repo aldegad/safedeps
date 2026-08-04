@@ -541,8 +541,13 @@ if [[ -z "${SAFEDEPS_BUDGET_CHILD:-}" ]] && (( ${#COMMAND} >= SAFEDEPS_BUDGET_EN
     fi
   done
 
+  # `2>/dev/null` on the wait, because the shell announces a signalled background
+  # job on its own ("Terminated: 15" plus the whole pipeline text). That lands on
+  # the hook's stderr, which the engine shows to the reader — directly beside a
+  # security deny, where a word like Terminated reads as something having gone
+  # wrong rather than as the gate doing exactly what it decided to do.
   budget_rc=0
-  wait "${budget_child}" || budget_rc=$?
+  wait "${budget_child}" 2>/dev/null || budget_rc=$?
 
   # The hooks exit 0 on every designed path (decisions travel as JSON on
   # stdout), so a non-zero child is an unfinished judgment, whether the watchdog
