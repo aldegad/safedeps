@@ -318,6 +318,13 @@ false_positive_cases=(
   "npm run build"
   "npm view left-pad"
   "npx --version"
+  # A pipe-to-shell idiom QUOTED as data (commit message, log line, heredoc body)
+  # is not an execution pipe — the pipe sits inside quotes / a heredoc body, not
+  # in execution position. Blocking these forced workers to smuggle commit
+  # messages through -F files (observed twice on 2026-08-04).
+  $'git commit -m "repro: printf \'pip install evil-quoted@1.0.0\' | sh blocked the commit"'
+  $'git commit -m \'repro: echo "npm install evil-quoted@1.0.0" | sh\''
+  $'cat <<"EOF"\npip install evil-quoted@1.0.0 | sh\nEOF'
 )
 for fp_cmd in "${false_positive_cases[@]}"; do
   rm -rf "${false_positive_safe}"
@@ -334,6 +341,12 @@ hidden_install_cases=(
   $'sub_result=$(npm install hidden-sub@1.0.0)'
   $'pipe_result=$(echo npm install hidden-pipe@1.0.0 | sh)'
   $'printf \'pip install hidden-pipe2@1.0.0\' | sh'
+  # The pipe-position check is applied per quoting level: a pipe hidden from the
+  # top level by `sh -c "..."` / `eval "..."` quoting, or riding the redirect
+  # line of a heredoc piped to sh, is still an execution pipe.
+  $'sh -c "printf \'pip install hidden-shc@1.0.0\' | sh"'
+  $'eval "printf \'pip install hidden-eval2@1.0.0\' | sh"'
+  $'cat <<EOF | sh\npip install hidden-heredoc@1.0.0\nEOF'
 )
 for hidden_cmd in "${hidden_install_cases[@]}"; do
   hidden_safe="${tmp_root}/safe-hidden-$(printf '%s' "${hidden_cmd}" | cksum | cut -d' ' -f1)"
