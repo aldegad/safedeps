@@ -56,7 +56,7 @@ The internal engine keeps the v1 `reorg-guard` assets.
 
 ### Release notes
 
-- The npm package version in `package.json` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION` tracks it and the smoke test reads `package.json` to compare (current: v2.13.1).
+- The npm package version in `package.json` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION` tracks it and the smoke test reads `package.json` to compare (current: v2.13.2).
 - `npm test` runs the release smoke suite; the full fixture E2E lives under `v2.1-tests`.
 - The daily re-check uses no LLM tokens. It is opt-in: a macOS `launchd` user agent runs `safedeps re-check --json` daily, installed atomically by `install-safedeps-recheck-agent.mjs`. It writes `~/.safedeps/recheck.log` and `~/.safedeps/recheck-alerts.jsonl` and raises a macOS notification on a new CVE/KEV/revoke/provider-skip/suspected-forgery. Network is used only for OSV / CISA / GHSA queries.
 
@@ -361,6 +361,28 @@ The answer is one reason. The gate recognizes an install by the syntactic carrie
 - the pypi complete-miss claim is machine-checked: `UNVERIFIED` is recorded and no rollback is produced
 - battery mutation-verified against the pre-fix tree (red at the first normalization assertion)
 - the false-positive corpus from v2.13 stays allowed: quoted idioms, `npm run`, `npx`
+
+## v2.13.2 — the unpinned install is not gated, and now it says so (shipped)
+
+Status: shipped as v2.13.2.
+
+Found while measuring the carrier boundary in v2.13.1, and larger than what that release closed. The ledger gate runs on a parseable `pkg@version` operand. Omit the version and no spec is produced, so the gate never runs. `pip install evil`, `cargo add evil`, `go get example.com/evil`, `gem install evil`, `poetry add`, `uv add`, `bundle add`, and `dotnet add package` all pass. No wrapper is needed — the attacker does not have to reach for a herestring, only to leave the version off.
+
+Two things made it invisible. The code's stated reason is npm-shaped: a bare `npm install` is a lockfile install that names no new package, so falling through is correct for npm, and the effect gate catches the result anyway. That reasoning was carried into the ecosystems where the command gate is the authority, where an unpinned install names a package and nothing is behind the gate. And the direction is inverted — the hidden path denies fail-closed when no spec can be extracted while the plain path allows under the identical condition, so one predicate is read in opposite directions inside one file.
+
+### What changed
+
+- **The ungated install leaves a record.** An install that names a package with no version, in an ecosystem with no effect gate behind the command gate, writes `UNGATED` to `~/.safedeps/advisory.log` with the ecosystem and the command. Until now it passed with no trace, which contradicted the invariant that every bypass must be observable.
+- **It changes no verdict.** Refusing every unpinned install is a policy change that would block ordinary `cargo add x` workflows, so it stays the repo owner's decision. The record exists so that decision can be made from evidence.
+- **The silence is scoped as carefully as the record.** File-driven installs (`-r`, `-c`, `-e`), bare lockfile installs, npm, and already-pinned installs stay out of the log. A record that fires on routine installs is background noise, and background noise is the same as no record.
+
+### Verification
+
+- 68-case corpus replayed against `main`: zero decision change, so the record is verdict-neutral
+- both halves pinned in `scripts/test/consumer-forms.sh` — ten named-unpinned installs recorded, twelve routine or already-gated commands silent
+- mutation-verified against the tree without the fix (red at the first record assertion)
+
+---
 
 ## v3 (future)
 

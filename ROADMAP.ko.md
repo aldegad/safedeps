@@ -56,7 +56,7 @@ Safedeps 는 **개발 의존성 install** (npm / pip / cargo / go / gem / maven 
 
 ### 릴리즈 메모
 
-- npm 패키지 version 은 `package.json` 이 SSoT. `bin/safedeps` `SAFEDEPS_VERSION` 이 이를 따라가고, smoke 테스트는 `package.json` 을 읽어 대조한다 (현재 v2.13.1).
+- npm 패키지 version 은 `package.json` 이 SSoT. `bin/safedeps` `SAFEDEPS_VERSION` 이 이를 따라가고, smoke 테스트는 `package.json` 을 읽어 대조한다 (현재 v2.13.2).
 - `npm test` 는 release smoke suite 를 실행한다. full fixture E2E 는 `v2.1-tests` 에 있다.
 - daily re-check 는 LLM 토큰을 쓰지 않는다. opt-in 이며, macOS `launchd` user agent 가 매일 `safedeps re-check --json` 을 실행한다 (`install-safedeps-recheck-agent.mjs` 로 atomic install). `~/.safedeps/recheck.log` 와 `~/.safedeps/recheck-alerts.jsonl` 를 쓰고, 새 CVE/KEV/revoke/provider-skip/위조-의심 시 macOS notification 을 띄운다. 네트워크는 OSV / CISA / GHSA query 에만 쓴다.
 
@@ -361,6 +361,28 @@ Status: v2.13.1 로 출시.
 - pypi 완전 미탐 주장도 기계 검증: `UNVERIFIED` 가 기록되고 rollback 은 생성되지 않는다
 - 배터리는 수리 이전 트리에 대고 뮤테이션 검증(첫 정규화 assertion 에서 빨강)
 - v2.13 의 오탐 코퍼스는 그대로 통과: 인용된 관용구, `npm run`, `npx`
+
+## v2.13.2 — 버전 없는 설치는 게이트를 안 거친다, 이제 그 사실이 기록된다 (출시)
+
+Status: v2.13.2 로 출시.
+
+v2.13.1 에서 carrier 경계를 재다가 발견했고, 그 릴리스가 닫은 것보다 크다. 원장 게이트는 파싱 가능한 `pkg@version` 피연산자에 대해서만 돈다. 버전을 빼면 spec 이 안 나오므로 게이트가 아예 안 돈다. `pip install evil`, `cargo add evil`, `go get example.com/evil`, `gem install evil`, `poetry add`, `uv add`, `bundle add`, `dotnet add package` 전부 통과다. 래핑도 필요 없다 — 공격자는 herestring 을 집을 필요 없이 버전만 안 적으면 된다.
+
+안 보였던 이유가 둘이다. 코드가 밝힌 근거가 npm 모양이다 — 맨 `npm install` 은 새 패키지를 지목하지 않는 lockfile 설치라 통과가 npm 에서는 맞고, 효과 게이트가 어차피 결과를 잡는다. 그 논리가 커맨드 게이트가 권위인 생태계로 이식됐는데, 거기서 버전 없는 설치는 패키지를 지목하고 게이트 뒤에는 아무것도 없다. 그리고 방향이 뒤집혀 있다 — 숨김 경로는 spec 을 못 뽑으면 fail-closed 로 거부하는데 평문 경로는 똑같은 조건에서 허용한다. 한 파일 안에서 하나의 조건이 반대 방향으로 읽힌다.
+
+### 무엇이 바뀌었나
+
+- **게이트를 안 거친 설치가 기록을 남긴다.** 커맨드 게이트 뒤에 효과 게이트가 없는 생태계에서 버전 없이 패키지를 지목한 설치는 `~/.safedeps/advisory.log` 에 생태계와 명령과 함께 `UNGATED` 를 남긴다. 지금까지는 흔적 없이 통과했고, 그건 "모든 우회는 관측 가능해야 한다" 는 불변식 위반이었다.
+- **판정은 안 바꾼다.** 버전 없는 설치를 전부 거부하는 건 평범한 `cargo add x` 흐름을 막는 정책 변경이라 레포 소유자 결정으로 남긴다. 기록은 그 결정을 근거로 내릴 수 있게 하려고 있다.
+- **침묵도 기록만큼 정밀하게 범위를 잡았다.** 파일 기반 설치(`-r`, `-c`, `-e`), 맨 lockfile 설치, npm, 이미 버전이 박힌 설치는 로그에 안 남는다. 평범한 설치마다 찍히는 기록은 배경 소음이고, 배경 소음은 없는 기록과 같다.
+
+### 검증
+
+- 68케이스 코퍼스를 `main` 과 대조: 판정 변화 0 — 기록은 verdict-neutral
+- 양쪽 절반을 `scripts/test/consumer-forms.sh` 에 고정 — 버전 없는 지목 설치 10개 기록, 평범하거나 이미 게이트된 명령 12개 침묵
+- 수리 없는 트리에 대고 뮤테이션 검증(첫 기록 assertion 에서 빨강)
+
+---
 
 ## v3 (미래)
 
