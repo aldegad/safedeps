@@ -307,6 +307,8 @@ guard 는 lockfile/manifest 도 snapshot 하고 v1 hardcoded pattern 차단(sect
 
 **그런데 상한 없이 올릴 수 있는 성능 게이트는 off 스위치다.** engage 크기는 마감 전체에 걸린 유일한 조건이라, 문제되는 커맨드보다 크게 올리면 그 커맨드들에서 마감이 통째로 사라진다 — 실측으로 32KB 패딩된 `pip install` 이 기본 engage 에서 21s, 올린 상태에서 198s 였고, 런타임은 어느 쪽이든 30s 에 훅을 죽인다. 그래서 4KB 로 클램프한다. 그 선 바로 아래 커맨드도 약 0.68s 에 판정되므로 런타임 예산의 약 44배 안쪽이다. 기본값 1KB 와 그 상한 사이의 튜닝은 이 노브의 본래 용도이고 그대로 남는다. 클램프는 예산 쪽과 같은 3채널로 알린다.
 
+스폰된 자식에게 자기가 자식임을 알리는 마커는 환경변수가 아니라 argv 로 다닌다. 환경변수였을 때 그건 이름 없는 두 번째 off 스위치였다 — export 하면 부모가 자기를 이미 자식으로 알고 마감을 건너뛰었고, 3s 에 답하는 입력이 32s 가 되면서 stderr 에도 `advisory.log` 에도 아무것도 안 남았다. 엔진은 인자를 넘기지 않는 shim 을 통해 훅을 부르므로 argv 는 환경이 닿을 수 없는 채널이다. 옛 변수는 여전히 감지해서 "무시됨" 으로 보고한다 — 마감을 끄던 신호가 조용히 무력해지는 것도 같은 종류의 침묵이기 때문이다.
+
 마감을 끄는 것은 이름이 다른 별개의 행위다: `SAFEDEPS_BUDGET_DISABLED`. 배터리에는 이게 필요하다 — 통과만 알고 결함을 잡는지는 모르는 테스트는 증거가 아니라서, mutation check 가 마감 없는 경우를 만들어낼 수 있어야 한다. 그걸 engage 크기로 하면 튜닝과 비활성화가 같은 동작이 되고, 그게 바로 마찰 조정이 아무도 결정하지 않은 채 경계를 지우는 경로다. off 스위치는 다른 일을 하지 않고, 이름이 하는 일을 말하며, 발동할 때마다 기록된다. 회귀: `scripts/test/self-budget.sh`.
 
 npm ecosystem 명령이면 guard 도 위와 같은 Yarn project context 를 해석해(`SAFEDEPS_NPM_PROJECT_DIR` 를 project directory 로 고정) 그 `context_hash` 를 ledger 조회에 접어 넣는다 — 그래서 project-scoped 승인은 그 프로젝트 안에서만 guard 를 통과한다. context 가 invalid 하면(resolutions 는 있는데 lockfile 을 못 씀) package-only 조회로 넘어가지 않고 명령을 그대로 거부한다.

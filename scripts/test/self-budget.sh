@@ -36,7 +36,7 @@ pad() { head -c "$1" < /dev/zero | tr '\0' 'x'; }
 # Runs the guard and captures decision, whether the reason is the undecided
 # one, and how long the answer took.
 guard() {
-  local command="$1" budget="${2:-2}" engage="${3:-1024}" disabled="${4:-}"
+  local command="$1" budget="${2:-2}" engage="${3:-1024}" disabled="${4:-}" legacy_child="${5:-}"
   local safe="${tmp_root}/safe-$$-${RANDOM}"
   mkdir -p "${safe}"
   GUARD_STATE_DIR="${safe}"
@@ -48,6 +48,7 @@ guard() {
     SAFEDEPS_SELF_BUDGET_SECONDS="${budget}" \
     SAFEDEPS_BUDGET_ENGAGE_BYTES="${engage}" \
     SAFEDEPS_BUDGET_DISABLED="${disabled}" \
+    SAFEDEPS_BUDGET_CHILD="${legacy_child}" \
     scripts/safedeps-pre-guard.sh 2>"${tmp_root}/stderr") || true
   GUARD_STDERR=$(cat "${tmp_root}/stderr" 2>/dev/null || printf '')
   end=$(date +%s)
@@ -335,6 +336,31 @@ grep -q 'DISABLED' <<< "${GUARD_STDERR}" \
 grep -q 'deadline is OFF' "${GUARD_STATE_DIR}/advisory.log" \
   || fail "the disabled deadline is recorded in advisory.log"
 pass "a disabled deadline announces itself every time it is used"
+
+# --- the parent/child marker cannot be set from outside ----------------------
+# The marker that tells this script it is the spawned child used to be an
+# environment variable, so exporting it made the parent believe it was already
+# the child and skip the deadline entirely — an unnamed off switch beside the
+# named one, measured at 32s on an input that answers in 3s. It travels in argv
+# now, and the engines invoke the hook through a shim that passes no arguments,
+# so there is no route from the environment into it.
+guard "pip install requests==2.31.0 # ${big}" "${tiny_budget}" 1024 "" 1
+[[ "${GUARD_DECISION}" == "deny" ]] \
+  || fail "the deadline runs even with the old marker exported (got: ${GUARD_DECISION})"
+grep -q 'UNDECIDED' <<< "${GUARD_REASON}" \
+  || fail "the old marker cannot turn the deadline into a silent pass"
+(( GUARD_ELAPSED <= 12 )) \
+  || fail "the old marker does not lift the deadline (took ${GUARD_ELAPSED}s)"
+pass "the parent/child marker cannot be injected from the environment"
+
+# A signal that used to switch the deadline off and now does nothing must not
+# fail silently in either direction: whoever exports it should learn that it
+# stopped meaning anything, rather than keep believing the deadline is off.
+grep -q 'BUDGET_CHILD' <<< "${GUARD_STDERR}" \
+  || fail "the ignored marker is announced on stderr (got: $(printf '%s' "${GUARD_STDERR}" | head -c 80))"
+grep -q 'BUDGET_CHILD' "${GUARD_STATE_DIR}/advisory.log" \
+  || fail "the ignored marker is recorded in advisory.log"
+pass "the ignored marker says it is ignored, on both channels"
 
 # --- the knob reader itself must not become the slow path --------------------
 # Both knobs go through one reader, and that reader runs BEFORE the child spawn
