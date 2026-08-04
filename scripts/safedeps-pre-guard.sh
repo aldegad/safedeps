@@ -590,8 +590,9 @@ SAFEDEPS_KNOB_MAX_INPUT_CHARS=32
 # digits, or nothing with a non-zero status when the value is not a number.
 safedeps_normalize_knob() {
   local raw="$1" value
-  # Length first, in one O(1) check, because everything below is pattern work on
-  # the whole string and pattern work is where this has now failed twice. The
+  # Length first, in one cheap pass before any pattern work, because everything
+  # below is pattern work on the whole string, and pattern work is where this has
+  # now failed twice. The
   # per-zero strip loop was quadratic; the regex that replaced it cut the
   # constant about a hundredfold and left the class alone — measured on the
   # reader itself, doubling the input quadrupled the time (50k 0.34s, 100k
