@@ -556,6 +556,47 @@ Verification: through the real hook path (the entry shim) with the marker export
 
 With this landed, the "Known gap" note in the v2.15.2 release stands closed: the deadline has one off switch, it has a name, and it logs.
 
+### v2.16.0 — the effect gate finishes for ordinary projects, and an unfinished rollback is loud
+
+v2.15.0 measured that PostToolUse is killed at its budget like PreToolUse, and stopped there: the exposure was recorded as structural, because nobody had measured where the effect gate actually crosses 30s. Measured now, with the harness committed as `scripts/measure/effect-gate-cost.sh`, the honest answer was worse than "structural".
+
+The gate rides on two axes. One is the project's lockfile closure. The other was nobody's design: the gate asked the ledger about each closure package separately, and every one of those questions walked the whole approved-spec directory, spawning two or three `jq` processes per ledger file. That is O(closure x ledger).
+
+- real 738-entry ledger: closure of 1 -> 10.8s, 2 -> 18.5s, **4 -> 36.6s**
+- empty ledger, a 1081-package application lockfile: 256 -> 24.0s, **512 -> 72.0s, 1024 -> 100.7s**
+
+A closure of four packages is nearly every real `npm install`. So for the machine this was measured on, npm's "delayed detection" was in practice no detection, and a fresh machine with nothing approved still crossed on any ordinary application.
+
+- **The ledger is read once per closure, not once per package.** The predicate did not move: it is jq source that both the single-file validator and the new index embed, so "does the ledger approve this spec" still has one implementation rather than a fast copy and a slow one. Same harness, same ledger, same lockfile: closure of 4 goes 36.6s -> 2.1s, and the ledger stage is flat at ~0.23s from a closure of 4 to 512. Equivalence was checked against the previous per-file reader before landing — 60 specs drawn from the real ledger (owner, transitive, absent), identical verdicts on all 60.
+- **A corrupt ledger entry cannot empty the index.** jq stops at the first file it cannot parse, so the index hands files over in chunks and retries a failed chunk one file at a time, naming what broke. An emptied index reads as "nothing is approved", which is a rollback of a clean install — a typo in one ledger file must not cost that.
+- **What remains, stated as a range and not as a claim.** The OSV/KEV pass is still per-package. On the same machine with a cold provider cache the gate now crosses 30s near a **390-package** closure. Below that npm's delayed detection is real; above it the runtime kills the gate and the install is not judged. That number is a property of a host, a network, and a cache — the harness is committed so the next reader measures their own instead of inheriting this one.
+
+### An interrupted rollback used to leave nothing at all
+
+The gate cannot deny; by PostToolUse the install has run. Its answer to a bad closure is a rollback, and that rollback wrote its `reorg.log` entry and its message last, after the `node_modules` rebuild — the slowest step.
+
+Measured with `scripts/measure/rollback-kill-state.sh`, which drives both real hooks in a sandbox and kills the post hook at controlled points:
+
+- killed before the rollback: flagged install left in place, `reorg.log` **0 lines**
+- killed inside the rollback: project fully reverted, `reorg.log` **0 lines**, no message
+
+The second is the worse one. The first looks like the gate did not run; the second looks like the user's install undid itself for no stated reason, which is how people learn to distrust a gate and route around it.
+
+- **The intent is written before the act.** A journal entry naming the project, the snapshot, the reasons, and the stage is written before the first destructive step and cleared once the rollback has reported itself. An entry that outlives its run *is* the report.
+- **The next Bash call reports it — once.** PostToolUse fires on every Bash call, not only on installs, so the report arrives promptly. It moves the entry to `~/.safedeps/rollback-incidents/`, appends `REORG INTERRUPTED` to the same `reorg.log` the finished rollbacks write to, and states which stage was reached and what repairs the tree. Reported once and kept forever, rather than nagged on every later command.
+- **This is not atomicity, and does not claim to be.** safedeps does not own the atomicity of an npm tree rebuild. What it owns is whether an unfinished rollback is silent.
+- **One message channel.** Engines parse this hook's stdout as a single JSON object, so all of the hook's messages now leave through one emitter; a second object would be a lost message, not an extra one.
+
+### Verification
+
+- `npm test` green. Both directions pinned in the e2e battery: an interrupted rollback is reported, logged, kept as an incident, and not repeated; a completed rollback leaves no journal entry, so a clean run never cries interrupted.
+- Ledger index verdicts pinned across owner, transitive, expired, revoked and absent specs, plus an unreadable entry that must not empty the index.
+- Both measurement harnesses are committed rather than described, because a number nobody can reproduce is decoration.
+
+### Known gap
+
+Whether the engines kill the hook alone or its whole process tree is **not measured**. Killing the hook process by itself, the `npm ci` it spawned survived and finished the tree; if a runtime kills the process group instead, the tree stays torn. Measuring it means registering a deliberately slow hook on a live machine, which this repo has already had block Bash machine-wide once, so it was left unmeasured on purpose. The journal does not depend on the answer: the record is written before the first destructive act either way.
+
 ## v3 (future)
 
 ### Ledger tamper resistance

@@ -7,7 +7,7 @@
 
 set -euo pipefail
 
-SAFEDEPS_VERSION="2.15.3"
+SAFEDEPS_VERSION="2.16.0"
 
 # ---- repo / lib bootstrap ----------------------------------------------------
 
