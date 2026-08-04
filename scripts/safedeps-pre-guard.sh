@@ -794,11 +794,17 @@ guard_names_package_without_spec() {
         # An unknown flag is therefore assumed NOT to take a value. Guessing
         # wrong in that direction costs a spurious line; guessing wrong the other
         # way drops the install this record exists to catch.
-        -r|--requirement|-c|--constraint|-t|--target|-f|--find-links|--index-url|--extra-index-url)
+        -r|--requirement|-c|--constraint|-t|--target|-f|--find-links|-i|--index-url|--extra-index-url)
           # Every one of these takes a value for pip and is a boolean somewhere
           # else: gem's `-r` is `--remote`, go's `-t` includes test deps, gem and
           # cargo spell `--force` as `-f`. Only the pypi family consumes an
           # argument here.
+          #
+          # `-i` is the short form of `--index-url`. Leaving it out did not hide
+          # an install — it invented one: the mirror URL read as an operand, so
+          # `pip install -i <mirror> -r requirements.txt` filed a spurious
+          # record. Same defect as the silences above, pointing the other way,
+          # which is why both directions belong in the battery.
           [[ "${seg_ecosystem}" == "pypi" ]] && { skip_next=true; continue; }
           continue
           ;;

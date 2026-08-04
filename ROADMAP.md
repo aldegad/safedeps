@@ -56,7 +56,7 @@ The internal engine keeps the v1 `reorg-guard` assets.
 
 ### Release notes
 
-- The npm package version in `package.json` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION` tracks it and the smoke test reads `package.json` to compare (current: v2.14.3).
+- The npm package version in `package.json` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION` tracks it and the smoke test reads `package.json` to compare (current: v2.14.4).
 - `npm test` runs the release smoke suite; the full fixture E2E lives under `v2.1-tests`.
 - The daily re-check uses no LLM tokens. It is opt-in: a macOS `launchd` user agent runs `safedeps re-check --json` daily, installed atomically by `install-safedeps-recheck-agent.mjs`. It writes `~/.safedeps/recheck.log` and `~/.safedeps/recheck-alerts.jsonl` and raises a macOS notification on a new CVE/KEV/revoke/provider-skip/suspected-forgery. Network is used only for OSV / CISA / GHSA queries.
 
@@ -374,7 +374,7 @@ Two things made it invisible. The code's stated reason is npm-shaped: a bare `np
 
 - **The ungated install leaves a record.** An install that names a package as a bare operand with no version, in an ecosystem with no effect gate behind the command gate, writes `UNGATED` to `~/.safedeps/advisory.log` with the ecosystem and the command. (The operand-only scope left gaps, closed in v2.14.1.) Until now it passed with no trace, which contradicted the invariant that every bypass must be observable.
 - **It changes no verdict.** Refusing every unpinned install is a policy change that would block ordinary `cargo add x` workflows, so it stays the repo owner's decision. The record exists so that decision can be made from evidence.
-- **The silence is scoped as carefully as the record.** File-driven installs (`-r`, `-c`, `-e`), bare lockfile installs, npm, and already-pinned installs stay out of the log. A record that fires on routine installs is background noise, and background noise is the same as no record.
+- **The silence is scoped as carefully as the record.** File-driven installs (`-r`, `-c`, `-e`), bare lockfile installs, npm, and installs pinned in a form the spec extractor reads stay out of the log. That last qualifier matters: the extractor reads `cargo add --vers` but not `cargo install --version`, so a version can be present and the ledger gate still not run -- and the record correctly fires. A record that fires on routine installs is background noise, and background noise is the same as no record.
 
 ### Verification
 
@@ -440,6 +440,16 @@ v2.14.2 announced that value-consuming flags were resolved per ecosystem, but on
 The whole table is now gated on the pypi family, which is the only one that consumes an argument for any of these spellings.
 
 The verification sentence is also rewritten rather than restated. "Nothing moved from recorded to silent" was falsified twice here: `pip install .` and `pip install ./local-pkg` did move out, which is the working-tree boundary v2.14.1 declared and the battery pins. The claim is now scoped to registry-fetch forms, which is what the battery actually checks. A blanket claim that the author's own corpus cannot falsify is not a verification.
+
+---
+
+### v2.14.4 — the record's short-form trap (patch on v2.14.3)
+
+`-i` was missing from the pypi value-consuming table while `--index-url` was in it. This did not hide an install; it invented one. The mirror URL read as an operand, so `pip install -i <mirror> -r requirements.txt` filed a spurious record and `pip install -i <mirror>` did too. Same defect as the three silences this plan already fixed, pointing the other way — which is the reason both directions now sit in the battery. Fixing one direction leaves the other.
+
+Also corrected: "already-pinned installs stay out" was too strong. The spec extractor reads `cargo add --vers` but not `cargo install --version`, so a version can be present while the ledger gate still does not run — and the record correctly fires. The claim now says "pinned in a form the spec extractor reads", and the surprising-but-true row is pinned in the battery so it does not read as a stray line.
+
+Two more silences are pinned rather than changed: `pip install --index-url <url>` alone names no package, and `pip install /tmp/evil.whl` installs from the filesystem. Both were already correct and now cannot drift unnoticed.
 
 ---
 

@@ -268,6 +268,8 @@ for named_unpinned in \
   "gem install --force evil" \
   "gem install -r evil" \
   "gem install --remote evil" \
+  "pip install -i https://mirror.example/simple evil" \
+  "cargo install evil --version 1.0.0" \
   "cargo install -f evil" \
   "cargo install --force evil"
 do
@@ -276,6 +278,12 @@ do
   [[ "$(gate_decision "${named_unpinned}")" != "deny" ]] \
     || fail "the UNGATED record must not change the verdict: ${named_unpinned}"
 done
+# `cargo install evil --version 1.0.0` is recorded even though a version IS
+# present: the spec extractor reads `cargo add --vers` but not
+# `cargo install --version`, so the ledger gate genuinely did not run for it.
+# The record is true. It is pinned here so that stays visible rather than
+# reading as a stray line, and ROADMAP says "pinned in a form the extractor
+# reads" instead of "already-pinned".
 pass "an unpinned named install is recorded, including past a source flag, a URL user, and a flag-carried coordinate"
 
 for stays_quiet in \
@@ -291,6 +299,10 @@ for stays_quiet in \
   "mvn dependency:get -Dartifact=g:evil:1.0.0" \
   "pip install ." \
   "pip install ./local-pkg" \
+  "pip install /tmp/evil.whl" \
+  "pip install -i https://mirror.example/simple -r requirements.txt" \
+  "pip install --index-url https://mirror.example/simple" \
+  "pip install -i https://mirror.example/simple" \
   "pip install -e ." \
   'echo "remember to pip install evil"'
 do
