@@ -163,16 +163,23 @@ command_hides_dependency_install() {
 
   # Top-level pipe-to-shell: `<producer> | sh` whose producer text literally
   # contains a package manager + install verb (e.g. `printf 'pip install x' | sh`).
-  # Checked on the RAW command (quotes intact) because command_scan_text blanks
-  # quoted bodies — erasing the install text before the regular classifier sees
-  # it — and a plain top-level pipe has no command substitution to extract. Before
-  # this, the pipe detector only ran on $(...) / backtick payloads, so a plain
-  # `... | sh` slipped the gate (finding #4).
+  # The install TEXT is searched raw (in a real hidden install it legitimately
+  # lives inside the producer's quotes), but the PIPE must sit in execution
+  # position — see payload_pipes_install_text_to_shell. Because outer quoting
+  # hides an inner pipe from that position check, every executed inner text
+  # (`sh -c` payloads, eval payloads, command substitutions) gets the same check
+  # on its own quoting level below.
   payload_pipes_install_text_to_shell "${command}" && return 0
 
   while IFS= read -r payload; do
     [[ -z "${payload}" ]] && continue
+    payload_pipes_install_text_to_shell "${payload}" && return 0
+  done < <(extract_shell_c_payloads "${command}")
+
+  while IFS= read -r payload; do
+    [[ -z "${payload}" ]] && continue
     command_is_dependency_install "${payload}" && return 0
+    payload_pipes_install_text_to_shell "${payload}" && return 0
   done < <(extract_eval_payloads "${command}")
 
   while IFS= read -r payload; do
@@ -309,14 +316,23 @@ extract_command_substitution_payloads() {
 
 payload_pipes_install_text_to_shell() {
   local payload="$1"
+  local exec_view
   local manager_pattern
   local verb_pattern
 
   manager_pattern='(npm|npx|pnpm|yarn|bun|pip3?|python3?[[:space:]]+-m[[:space:]]+pip|poetry|uv|pipenv|cargo|go|gem|bundle|mvn|dotnet)'
   verb_pattern='(install|i|add|update|up|upgrade|dlx|get|dependency:get|package)'
 
-  echo "${payload}" | grep -qEi "${manager_pattern}.*${verb_pattern}" && \
-    echo "${payload}" | grep -qEi '\|[[:space:]]*(bash|sh|zsh)([[:space:]]|$)'
+  # The pipe must sit in EXECUTION position at this quoting level: outside
+  # quotes (a quoted `| sh` is data — e.g. a repro idiom quoted in a commit
+  # message) and outside heredoc bodies (a body is data; `cat <<EOF | sh` keeps
+  # its pipe on the redirect line, which survives the strip). The install text
+  # is still searched raw, because in a real hidden install it lives inside the
+  # producer's quotes or heredoc body by construction.
+  exec_view=$(command_scan_text "$(strip_heredoc_bodies "${payload}")")
+
+  echo "${exec_view}" | grep -qEi '\|[[:space:]]*(bash|sh|zsh)([[:space:]]|$)' && \
+    echo "${payload}" | grep -qEi "${manager_pattern}.*${verb_pattern}"
 }
 
 command_candidate_texts() {
