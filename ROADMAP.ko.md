@@ -56,7 +56,7 @@ Safedeps 는 **개발 의존성 install** (npm / pip / cargo / go / gem / maven 
 
 ### 릴리즈 메모
 
-- npm 패키지 version 은 `package.json` 이 SSoT. `bin/safedeps` `SAFEDEPS_VERSION` 이 이를 따라가고, smoke 테스트는 `package.json` 을 읽어 대조한다 (현재 v2.15.4).
+- npm 패키지 version 은 `package.json` 이 SSoT. `bin/safedeps` `SAFEDEPS_VERSION` 이 이를 따라가고, smoke 테스트는 `package.json` 을 읽어 대조한다 (현재 v2.15.5).
 - `npm test` 는 release smoke suite 를 실행한다. full fixture E2E 는 `v2.1-tests` 에 있다.
 - daily re-check 는 LLM 토큰을 쓰지 않는다. opt-in 이며, macOS `launchd` user agent 가 매일 `safedeps re-check --json` 을 실행한다 (`install-safedeps-recheck-agent.mjs` 로 atomic install). `~/.safedeps/recheck.log` 와 `~/.safedeps/recheck-alerts.jsonl` 를 쓰고, 새 CVE/KEV/revoke/provider-skip/위조-의심 시 macOS notification 을 띄운다. 네트워크는 OSV / CISA / GHSA query 에만 쓴다.
 
@@ -569,6 +569,17 @@ v2.15.2 는 이 구멍을 암시가 아니라 이름으로 릴리스 노트에 �
 - **대조를 기계가 한다.** `scripts/test/smoke.sh` 가 설치기의 엔트리 훅 상수를 직접 읽고, 두 README 중 하나라도 `pre`·`post` 로 그 이름을 대지 않거나 훅 스크립트를 직접 등록하면, 또는 `SKILL.md` 가 자기 선언을 다시 키우면 빨강을 낸다.
 
 문서에 적힌 커맨드를 엔진이 부르듯 실제로 실행해 검증했다 — `README.md` 의 그 문자열이 페이로드를 받아 미승인 `pip` 설치를 거부한다. 드리프트 검사는 옛 커맨드를 되돌려 빨강이 나는지로 mutation 검증했다.
+
+---
+
+### v2.15.5 — 드리프트 검사가 문자열이 아니라 값을 핀한다 (v2.15.4 패치)
+
+v2.15.4 의 드리프트 검사는 인스톨러의 엔트리 훅 상수를 읽고 문서가 그 이름을 안 대면 실패했다. timeout 은 안 읽었다. 그래서 문서는 맞는 커맨드를, 인스톨러가 더는 쓰지 않는 숫자와 함께 계속 댈 수 있었다 — 그 릴리스가 닫은 결함이 한 필드 옆에 그대로 있었던 것이고, 발견 경로도 그거다. 릴리스 노트가 그걸 덮은 척하지 않고 알려진 한계로 이름 박아 뒀다.
+
+- **timeout 을 커맨드처럼 핀한다.** 이벤트별로, 파일 아무 데서나가 아니라 커맨드 바로 옆 줄에서 읽는다. 가드가 이미 자기 상한 때문에 `PRE_HOOK_TIMEOUT_SECONDS` 를 읽고 있으므로, 이건 진실이 사는 자리를 늘리는 게 아니라 같은 상수를 세 번째로 읽는 일이다.
+- **`SKILL.md` 는 훅 선언을 두지 않고, 그게 결정으로 기록됐다.** Claude 는 skill frontmatter hooks 를 실제로 문서화하고 그 스키마는 event-keyed + `matcher` + `command:` 다 — 다만 **스킬 라이프사이클 스코프라 스킬이 활성일 때만 돈다.** 이 게이트는 스킬 호출 여부와 무관하게 모든 Bash 호출을 판정해야 하므로 그 형태로는 못 싣는다. 그래서 드리프트 검사는 어느 스키마도 읽지 않는 legacy `script:` 형태에서만 실패하고, 문서화된 형태는 일부러 막지 않는다 — 동작하는 기능을 grep 으로 막는 것은 죽은 것을 치우는 것과 다르다. 판정은 `AGENTS.md` 가 들고 있다.
+
+mutation 세 방향으로 검증했다: 인스톨러 상수만 옮기면 기존 가드 핀이 빨강, 문서 timeout 만 옮기면 새 검사가 빨강, 그리고 인스톨러 상수와 가드 상수를 **같이** 옮기면(정당한 예산 변경이 취하는 형태) 문서만 남겨지고 새 검사가 잡는다 — 옛 검사가 놓치던 경우가 그거다.
 
 ## v3 (미래)
 

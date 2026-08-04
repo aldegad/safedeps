@@ -56,7 +56,7 @@ The internal engine keeps the v1 `reorg-guard` assets.
 
 ### Release notes
 
-- The npm package version in `package.json` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION` tracks it and the smoke test reads `package.json` to compare (current: v2.15.4).
+- The npm package version in `package.json` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION` tracks it and the smoke test reads `package.json` to compare (current: v2.15.5).
 - `npm test` runs the release smoke suite; the full fixture E2E lives under `v2.1-tests`.
 - The daily re-check uses no LLM tokens. It is opt-in: a macOS `launchd` user agent runs `safedeps re-check --json` daily, installed atomically by `install-safedeps-recheck-agent.mjs`. It writes `~/.safedeps/recheck.log` and `~/.safedeps/recheck-alerts.jsonl` and raises a macOS notification on a new CVE/KEV/revoke/provider-skip/suspected-forgery. Network is used only for OSV / CISA / GHSA queries.
 
@@ -569,6 +569,17 @@ Following the docs still gated installs, so nothing looked broken. What it dropp
 - **The comparison is machine-made now.** `scripts/test/smoke.sh` reads the installer's own entry-hook constant and fails if either README stops naming it for `pre` and `post`, if either registers a hook script directly, or if `SKILL.md` grows its own declaration again.
 
 Verified by running the documented command as an engine would: the exact string from `README.md`, invoked on a payload, denies an unapproved `pip` install. The drift check was mutation-tested by restoring the old command, which turns it red.
+
+---
+
+### v2.15.5 — the drift check pins the value, not just the string (patch on v2.15.4)
+
+v2.15.4's drift check read the installer's entry-hook constant and failed if the docs stopped naming it. It did not read the timeout. So the docs could keep naming the right command at a number the installer had stopped writing — the same defect one field over from the one that release closed, which is how it was found: the release notes named it as a known limit rather than implying it was covered.
+
+- **The timeout is pinned like the command**, per event, read from the line beside the command rather than from anywhere in the file. The guard already reads `PRE_HOOK_TIMEOUT_SECONDS` for its own ceiling, so this is the same constant read a third time rather than a new place for the truth to live.
+- **`SKILL.md` keeps no hook declaration, and that is now written down as a decision.** Claude does document skill-frontmatter hooks, and their schema is event-keyed with `matcher` and `command:` — but they are scoped to the skill's lifecycle and run only while the skill is active, and this gate has to judge every Bash call whether or not the skill was invoked. The documented form cannot carry it. The drift check therefore fails only on the legacy `script:` shape that no schema reads; it deliberately does not forbid the documented shape, because blocking a working feature by grep is not the same as removing a dead one. `AGENTS.md` carries the judgment.
+
+Verification by mutation, three ways: moving the installer constant alone turns the existing guard pin red; moving a doc timeout alone turns the new check red; moving the installer constant **and** the guard constant together — the shape a legitimate budget change takes — leaves the docs behind and is caught by the new check, which is the case the old one missed.
 
 ## v3 (future)
 
