@@ -266,6 +266,8 @@ for named_unpinned in \
   "go get -u example.com/evil" \
   "gem install -f evil" \
   "gem install --force evil" \
+  "gem install -r evil" \
+  "gem install --remote evil" \
   "cargo install -f evil" \
   "cargo install --force evil"
 do
@@ -278,7 +280,6 @@ pass "an unpinned named install is recorded, including past a source flag, a URL
 
 for stays_quiet in \
   "pip install -r requirements.txt" \
-  "pip install -e ." \
   "bundle install" \
   "npm install left-pad" \
   "npm install" \

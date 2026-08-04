@@ -56,7 +56,7 @@ The internal engine keeps the v1 `reorg-guard` assets.
 
 ### Release notes
 
-- The npm package version in `package.json` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION` tracks it and the smoke test reads `package.json` to compare (current: v2.14.2).
+- The npm package version in `package.json` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION` tracks it and the smoke test reads `package.json` to compare (current: v2.14.3).
 - `npm test` runs the release smoke suite; the full fixture E2E lives under `v2.1-tests`.
 - The daily re-check uses no LLM tokens. It is opt-in: a macOS `launchd` user agent runs `safedeps re-check --json` daily, installed atomically by `install-safedeps-recheck-agent.mjs`. It writes `~/.safedeps/recheck.log` and `~/.safedeps/recheck-alerts.jsonl` and raises a macOS notification on a new CVE/KEV/revoke/provider-skip/suspected-forgery. Network is used only for OSV / CISA / GHSA queries.
 
@@ -429,7 +429,17 @@ Value-consuming flags are now resolved per ecosystem, and an unknown flag is ass
 
 One boundary is pinned as deliberate rather than fixed: `mvn -Dartifact=… dependency:get` never reaches the record because install *recognition* (`mvn dependency:get`) does not match a flag before the goal. That belongs to command recognition, and widening it is the carrier enumeration `ARCHITECTURE.md` declines to grow.
 
-Verified against a `git archive` of v2.13.2: every previously recorded form is recorded again (nothing moved from recorded to silent), the additions are net new, and decisions stay unchanged.
+Verified against a `git archive` of v2.13.2: decisions stay unchanged, and every registry-fetch form recorded then is recorded now. Two forms did move out of the record -- `pip install .` and `pip install ./local-pkg` -- which is the working-tree boundary v2.14.1 declared and the battery pins; they build from the tree rather than fetching. Stating it as a blanket "nothing moved" was wrong twice in this plan's history, so the claim is now scoped to what the battery checks.
+
+---
+
+### v2.14.3 — the same class, third time (patch on v2.14.2)
+
+v2.14.2 announced that value-consuming flags were resolved per ecosystem, but only gated `-t` and `-f`. `-r` and `-c` stayed unconditional, and gem's `-r` is `--remote`, a boolean — so `gem install -r evil` went silent while `gem install --remote evil` was recorded. The same install split by spelling, for the third time in this plan, and this time the shipped prose was ahead of the code rather than behind it.
+
+The whole table is now gated on the pypi family, which is the only one that consumes an argument for any of these spellings.
+
+The verification sentence is also rewritten rather than restated. "Nothing moved from recorded to silent" was falsified twice here: `pip install .` and `pip install ./local-pkg` did move out, which is the working-tree boundary v2.14.1 declared and the battery pins. The claim is now scoped to registry-fetch forms, which is what the battery actually checks. A blanket claim that the author's own corpus cannot falsify is not a verification.
 
 ---
 

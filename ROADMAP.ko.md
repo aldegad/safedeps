@@ -56,7 +56,7 @@ Safedeps 는 **개발 의존성 install** (npm / pip / cargo / go / gem / maven 
 
 ### 릴리즈 메모
 
-- npm 패키지 version 은 `package.json` 이 SSoT. `bin/safedeps` `SAFEDEPS_VERSION` 이 이를 따라가고, smoke 테스트는 `package.json` 을 읽어 대조한다 (현재 v2.14.2).
+- npm 패키지 version 은 `package.json` 이 SSoT. `bin/safedeps` `SAFEDEPS_VERSION` 이 이를 따라가고, smoke 테스트는 `package.json` 을 읽어 대조한다 (현재 v2.14.3).
 - `npm test` 는 release smoke suite 를 실행한다. full fixture E2E 는 `v2.1-tests` 에 있다.
 - daily re-check 는 LLM 토큰을 쓰지 않는다. opt-in 이며, macOS `launchd` user agent 가 매일 `safedeps re-check --json` 을 실행한다 (`install-safedeps-recheck-agent.mjs` 로 atomic install). `~/.safedeps/recheck.log` 와 `~/.safedeps/recheck-alerts.jsonl` 를 쓰고, 새 CVE/KEV/revoke/provider-skip/위조-의심 시 macOS notification 을 띄운다. 네트워크는 OSV / CISA / GHSA query 에만 쓴다.
 
@@ -429,7 +429,17 @@ v2.14.1 의 수리가 pip 의 플래그 표를 전 생태계에 적용했다. `-
 
 경계 하나는 고치는 대신 의도로 고정했다: `mvn -Dartifact=… dependency:get` 은 install **인식**(`mvn dependency:get`)이 goal 앞의 플래그를 매치하지 않아 기록에 도달조차 못 한다. 그건 명령 인식의 몫이고, 그걸 넓히는 건 `ARCHITECTURE.md` 가 키우지 않기로 한 carrier 열거다.
 
-v2.13.2 의 `git archive` 와 대조 검증: 이전에 기록되던 형태는 전부 다시 기록되고(기록→침묵 이동 0), 추가분은 순증이며, 판정은 불변이다.
+v2.13.2 의 `git archive` 와 대조 검증: 판정은 불변이고, 그때 기록되던 registry-fetch 형태는 지금도 전부 기록된다. 기록에서 빠진 형태가 둘 있다 — `pip install .` 과 `pip install ./local-pkg` — 이건 v2.14.1 이 선언하고 배터리가 고정한 작업 트리 경계다(가져오는 게 아니라 트리에서 빌드한다). 이걸 "기록→침묵 0" 이라는 전역 주장으로 쓴 것이 이 플랜에서 두 번 반증돼서, 이제 주장 범위를 배터리가 실제로 검사하는 것에 맞춘다.
+
+---
+
+### v2.14.3 — 같은 클래스, 세 번째 (v2.14.2 의 패치)
+
+v2.14.2 는 값 소비 플래그를 생태계별로 갈랐다고 발표했지만 실제로 게이트한 건 `-t` 와 `-f` 뿐이었다. `-r` 과 `-c` 는 무조건이었고, gem 의 `-r` 은 불리언 `--remote` 다 — 그래서 `gem install -r evil` 은 침묵하고 `gem install --remote evil` 은 기록됐다. 같은 설치가 철자로 갈리는 일이 이 플랜에서 세 번째이고, 이번엔 출하된 산문이 코드보다 뒤처진 게 아니라 앞서 있었다.
+
+이제 표 전체를 pypi 계열로 게이트한다 — 이 철자들 중 어느 것이라도 인자를 소비하는 건 그 계열뿐이다.
+
+검증 문장도 다시 쓰는 대신 범위를 바꿨다. "기록→침묵 0" 은 여기서 두 번 반증됐다. `pip install .` 과 `pip install ./local-pkg` 는 실제로 기록에서 빠졌고, 그건 v2.14.1 이 선언하고 배터리가 고정한 작업 트리 경계다. 이제 주장을 registry-fetch 형태로 좁혔다 — 그게 배터리가 실제로 검사하는 것이다. **작성자 자신의 코퍼스가 반증할 수 없는 전역 주장은 검증이 아니다.**
 
 ---
 
