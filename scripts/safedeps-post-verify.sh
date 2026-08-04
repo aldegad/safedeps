@@ -57,6 +57,8 @@ source "${SAFEDEPS_REPO_DIR}/lib/ledger/ledger.sh"
 source "${SAFEDEPS_REPO_DIR}/lib/providers/providers.sh"
 # shellcheck source=../lib/npm/closure.sh
 source "${SAFEDEPS_REPO_DIR}/lib/npm/closure.sh"
+# shellcheck source=../lib/gates/rollback-journal.sh
+source "${SAFEDEPS_REPO_DIR}/lib/gates/rollback-journal.sh"
 
 acquire_state_lock() {
   local attempts=0
@@ -380,8 +382,8 @@ emit_confirm_warnings_if_any() {
   Warnings: ${warning_str%%; }
 LOG_EOF
 
-  jq -nc --arg warnings "${warning_str%%; }" \
-    '{systemMessage: ("safedeps: verified install completed, but npm rebuild warning(s) were recorded:\n" + $warnings)}'
+  emit_system_message "safedeps: verified install completed, but npm rebuild warning(s) were recorded:
+${warning_str%%; }"
 }
 
 post_command_looks_like_install() {
@@ -408,6 +410,34 @@ legacy_pending_matches_post_context() {
   post_command_looks_like_install "${COMMAND}"
 }
 
+# An unfinished rollback from an earlier run is the loudest thing this hook can
+# have to say, so it is collected before anything else and before any of the
+# early exits below. PostToolUse fires on every Bash call, so the report reaches
+# the user on the very next command rather than on the next install.
+#
+# It is emitted through a single channel: engines parse this hook's stdout as
+# one JSON object, so a second object would be a lost message, not an extra one.
+UNFINISHED_REPORT=$(safedeps_journal_report_unfinished "${GUARD_DIR}/reorg.log" 2>/dev/null || true)
+
+emit_system_message() {
+  local body="$1"
+
+  if [[ -n "${UNFINISHED_REPORT}" ]]; then
+    body="${UNFINISHED_REPORT}
+${body}"
+    UNFINISHED_REPORT=""
+  fi
+  jq -nc --arg message "${body}" '{systemMessage: $message}'
+}
+
+# If this run has nothing else to say, the report still has to get out.
+emit_unfinished_report_if_unsent() {
+  [[ -n "${UNFINISHED_REPORT}" ]] || return 0
+  jq -nc --arg message "${UNFINISHED_REPORT}" '{systemMessage: $message}'
+  UNFINISHED_REPORT=""
+}
+trap 'emit_unfinished_report_if_unsent' EXIT
+
 # Read tool input from stdin
 INPUT=$(cat)
 
@@ -431,7 +461,10 @@ POST_DIR_HASH=$(compute_dir_hash "${POST_CWD}")
 
 STATE_LOCK_HELD=true
 acquire_state_lock
-trap '[ "${STATE_LOCK_HELD:-}" = "true" ] && release_state_lock; STATE_LOCK_HELD=false' EXIT
+# Keeps the unfinished-rollback report on the exit path it was registered on
+# above; replacing that trap rather than extending it would drop the report on
+# every run that reaches this far.
+trap '[ "${STATE_LOCK_HELD:-}" = "true" ] && release_state_lock; STATE_LOCK_HELD=false; emit_unfinished_report_if_unsent' EXIT
 
 # Resolve THIS install's pending state by its per-install key (issue #5). The
 # filename also carries a snapshot id, so identical concurrent commands produce
@@ -777,12 +810,20 @@ run_command_independent_backstop() {
   if [[ -z "${rollback_id}" ]] || [[ ! -f "${SNAPSHOT_DIR}/${rollback_id}_meta.json" ]]; then
     # Detected, but no known-good baseline to restore — fail LOUD, never silent.
     log_advisory "post-verify BACKSTOP FLAGGED (no baseline): parser-missed install in ${PROJECT_DIR} — ${reason_str%%; }. No confirmed snapshot to roll back to; left in place."
-    jq -nc --arg reasons "${reason_str%%; }" --arg dir "${PROJECT_DIR}" \
-      '{systemMessage: ("safedeps: an install the command gate did not recognize produced a suspicious closure:\n" + $reasons + "\n\nThere is no confirmed-safe snapshot for " + $dir + " yet, so safedeps could NOT roll it back automatically. Review and revert manually, then run `safedeps check` for the intended versions.")}'
+    emit_system_message "safedeps: an install the command gate did not recognize produced a suspicious closure:
+${reason_str%%; }
+
+There is no confirmed-safe snapshot for ${PROJECT_DIR} yet, so safedeps could NOT roll it back automatically. Review and revert manually, then run \`safedeps check\` for the intended versions."
     return 0
   fi
 
   # Roll back to the confirmed baseline using the existing reorg helpers.
+  # The journal opens before the first file is touched: everything below is
+  # destructive, and a kill anywhere in it used to leave no trace at all.
+  local journal_id="backstop-${rollback_id}-$$"
+  safedeps_journal_open "${journal_id}" "${PROJECT_DIR}" "${rollback_id}" \
+    "${reason_str%%; }" "restoring-files"
+
   SNAPSHOT_ID="${rollback_id}"   # so monitored_files() reads the baseline's list
   ROLLED_BACK=()
   local monitored_file
@@ -797,6 +838,7 @@ run_command_independent_backstop() {
     ROLLED_BACK+=("package.json")
   fi
 
+  safedeps_journal_stage "${journal_id}" "reinstalling-node-modules"
   restore_node_modules
 
   local rolled_str=""
@@ -809,8 +851,17 @@ run_command_independent_backstop() {
   Rolled back: ${rolled_str%, }
 LOG_EOF
 
-  jq -nc --arg reasons "${reason_str%%; }" --arg snap "${rollback_id}" --arg rolled "${rolled_str%, }" \
-    '{systemMessage: ("safedeps: a dependency install the command gate did not recognize introduced a suspicious closure — rolled back to the last confirmed safe snapshot.\n\nDetected:\n" + $reasons + "\n\nRollback snapshot: " + $snap + "\nRolled-back files: " + $rolled)}'
+  # The rollback finished and is about to report itself, so there is nothing
+  # unfinished left to warn about.
+  safedeps_journal_close "${journal_id}"
+
+  emit_system_message "safedeps: a dependency install the command gate did not recognize introduced a suspicious closure — rolled back to the last confirmed safe snapshot.
+
+Detected:
+${reason_str%%; }
+
+Rollback snapshot: ${rollback_id}
+Rolled-back files: ${rolled_str%, }"
   return 0
 }
 
@@ -835,6 +886,15 @@ if [[ "${SUSPICIOUS}" == "true" ]]; then
   fi
 
   ROLLED_BACK=()
+
+  # Everything from here to the reorg.log write below is destructive. The
+  # journal records the intent first so an interrupted rollback leaves a record
+  # instead of a silently half-reverted project (measured:
+  # scripts/measure/rollback-kill-state.sh).
+  REASON_STR_FOR_JOURNAL=$(printf '%s; ' "${REASONS[@]}")
+  JOURNAL_ID="reorg-${SNAPSHOT_ID}-$$"
+  safedeps_journal_open "${JOURNAL_ID}" "${PROJECT_DIR}" "${ROLLBACK_SNAPSHOT_ID}" \
+    "${REASON_STR_FOR_JOURNAL%%; }" "restoring-files"
 
   while IFS= read -r monitored_file; do
     [[ -z "${monitored_file}" ]] && continue
@@ -864,6 +924,7 @@ if [[ "${SUSPICIOUS}" == "true" ]]; then
     ROLLED_BACK+=("package.json")
   fi
 
+  safedeps_journal_stage "${JOURNAL_ID}" "reinstalling-node-modules"
   restore_node_modules
   cleanup_old_snapshots
 
@@ -885,22 +946,25 @@ if [[ "${SUSPICIOUS}" == "true" ]]; then
   Rollback warnings: ${WARNING_STR%%; }
 LOG_EOF
 
-  jq -nc \
-    --arg reasons "${REASON_STR%%; }" \
-    --arg rollback_snapshot "${ROLLBACK_SNAPSHOT_ID}" \
-    --arg rolled_back "${ROLLED_BACK_STR%, }" \
-    --arg warnings "${WARNING_STR%%; }" \
-    --arg log_path "${GUARD_DIR}/reorg.log" \
-    '{
-      systemMessage: (
-        "safedeps: suspicious dependency change detected — rolled back to the last confirmed safe snapshot.\n\n" +
-        "Detected problems:\n" + $reasons + "\n\n" +
-        "Rollback snapshot: " + $rollback_snapshot + "\n" +
-        "Rolled-back files: " + $rolled_back +
-        (if $warnings == "" then "" else "\n\nAdditional warnings:\n" + $warnings end) +
-        "\n\nDetails log: " + $log_path
-      )
-    }'
+  # Recorded and about to be reported — nothing unfinished remains.
+  safedeps_journal_close "${JOURNAL_ID}"
+
+  ROLLBACK_MESSAGE="safedeps: suspicious dependency change detected — rolled back to the last confirmed safe snapshot.
+
+Detected problems:
+${REASON_STR%%; }
+
+Rollback snapshot: ${ROLLBACK_SNAPSHOT_ID}
+Rolled-back files: ${ROLLED_BACK_STR%, }"
+  if [[ -n "${WARNING_STR%%; }" ]]; then
+    ROLLBACK_MESSAGE="${ROLLBACK_MESSAGE}
+
+Additional warnings:
+${WARNING_STR%%; }"
+  fi
+  emit_system_message "${ROLLBACK_MESSAGE}
+
+Details log: ${GUARD_DIR}/reorg.log"
   exit 0
 fi
 

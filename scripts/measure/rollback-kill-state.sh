@@ -149,6 +149,17 @@ JSON
     nm_settled=$(find "${project}/node_modules" -maxdepth 1 -mindepth 1 -not -name '.*' | wc -l | tr -d ' ')
   fi
 
+  local journal_state
+  if [[ -d "${sd_home}/rollback-journal" ]] && \
+     [[ -n "$(find "${sd_home}/rollback-journal" -maxdepth 1 -name '*.json' 2>/dev/null)" ]]; then
+    journal_state='OPEN'
+  elif [[ -d "${sd_home}/rollback-incidents" ]] && \
+       [[ -n "$(find "${sd_home}/rollback-incidents" -maxdepth 1 -name '*.json' 2>/dev/null)" ]]; then
+    journal_state='reported'
+  else
+    journal_state='-'
+  fi
+
   local reorg_lines advisory_lines lock_left
   reorg_lines=$([[ -f "${sd_home}/reorg.log" ]] && wc -l < "${sd_home}/reorg.log" | tr -d ' ' || echo 0)
   advisory_lines=$([[ -f "${sd_home}/advisory.log" ]] && wc -l < "${sd_home}/advisory.log" | tr -d ' ' || echo 0)
@@ -165,7 +176,7 @@ JSON
 
   printf '%-13s  %-7s  %-13s  %-7s  %-6s %-8s  %-9s  %-9s  %s\n' \
     "${offset}" "${killed}" "${pkg_state}" "${post_lock_entries}" "${nm_state}" "${nm_settled}" \
-    "${reorg_lines}" "${advisory_lines}" "${lock_left}" \
+    "${journal_state}" "${reorg_lines}" "${lock_left}" \
     | sed "s|\$| deps=${deps_in_pkg}|"
 }
 
@@ -173,7 +184,7 @@ printf 'sandbox: baseline %s@%s (confirmed) then unapproved %s@%s\n' \
   "${BASELINE_DEP}" "${BASELINE_VER}" "${BAD_DEP}" "${BAD_VER}"
 printf 'kill signal: SIGKILL (the runtime hook timeout does not let the hook clean up either)\n\n'
 printf '%-13s  %-7s  %-13s  %-7s  %-6s %-8s  %-9s  %-9s  %s\n' \
-  'offset' 'killed' 'package.json' 'lock' 'nm@t0' 'nm@t0+8s' 'reorg.log' 'advisory' 'state.lock'
+  'offset' 'killed' 'package.json' 'lock' 'nm@t0' 'nm@t0+8s' 'journal' 'reorg.log' 'state.lock'
 CONTROL_SECONDS=""
 for offset in "${OFFSETS[@]}"; do
   run_case "${offset}"

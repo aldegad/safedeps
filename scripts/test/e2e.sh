@@ -1078,6 +1078,125 @@ ov_guard_decision() {
   || fail "the guard does not accept an overrides-scoped approval in a repo without those overrides"
 printf 'ok - pre-guard derives the same overrides approval key as the check\n'
 
+# --- rollback journal: an interrupted rollback must not vanish ---------------
+#
+# Measured before this existed (scripts/measure/rollback-kill-state.sh): kill the
+# post hook anywhere inside its rollback and reorg.log was zero lines. The
+# project had been reverted and nothing said so. These two checks pin both
+# directions: an unfinished rollback is reported, and a finished one is not.
+
+journal_home="${tmp_root}/journal-home"
+journal_project="${tmp_root}/journal-project"
+mkdir -p "${journal_home}" "${journal_project}"
+
+# An unfinished rollback, written the way the gate writes it before it starts
+# restoring files.
+( export SAFEDEPS_HOME="${journal_home}"
+  . "${ROOT_DIR}/lib/gates/rollback-journal.sh"
+  safedeps_journal_open 'test-interrupted' "${journal_project}" 'snap-baseline' \
+    'npm closure contains 1 unapproved package(s): fixture-evil@9.9.9' \
+    'reinstalling-node-modules' )
+
+journal_report=$(
+  SAFEDEPS_HOME="${journal_home}" scripts/safedeps-post-verify.sh <<EOF
+{"tool_name":"Bash","tool_input":{"command":"echo unrelated"},"cwd":"${journal_project}"}
+EOF
+)
+grep -q 'did not finish' <<< "${journal_report}" \
+  || fail "an unfinished rollback is reported on the next Bash call"
+grep -q 'reinstalling-node-modules' <<< "${journal_report}" \
+  || fail "the unfinished-rollback report names the stage it was cut off at"
+grep -q 'fixture-evil@9.9.9' <<< "${journal_report}" \
+  || fail "the unfinished-rollback report says why the rollback was started"
+grep -q 'REORG INTERRUPTED' "${journal_home}/reorg.log" \
+  || fail "an interrupted rollback lands in the same log the finished ones use"
+[[ -f "${journal_home}/rollback-incidents/test-interrupted.json" ]] \
+  || fail "the interrupted rollback is kept as a durable incident record"
+[[ -z "$(find "${journal_home}/rollback-journal" -maxdepth 1 -name '*.json' 2>/dev/null)" ]] \
+  || fail "a reported journal entry is cleared from the open-journal directory"
+
+# Reported once, not on every command from here on.
+journal_repeat=$(
+  SAFEDEPS_HOME="${journal_home}" scripts/safedeps-post-verify.sh <<EOF
+{"tool_name":"Bash","tool_input":{"command":"echo unrelated"},"cwd":"${journal_project}"}
+EOF
+)
+grep -q 'did not finish' <<< "${journal_repeat}" \
+  && fail "an already-reported rollback is reported again on every later command"
+printf 'ok - an interrupted rollback is reported, logged, and kept as an incident\n'
+
+# The other direction: the rollback that DID finish must leave no journal entry,
+# or every clean run would cry interrupted on the next command.
+[[ -z "$(find "${SAFEDEPS_HOME}/rollback-journal" -maxdepth 1 -name '*.json' 2>/dev/null)" ]] \
+  || fail "a completed rollback leaves an open journal entry behind"
+printf 'ok - a completed rollback leaves no journal entry\n'
+
+# --- ledger effect index: same verdicts, one read ----------------------------
+#
+# The index replaced a per-package walk of the whole ledger directory. It must
+# answer exactly what that walk answered, including the cases that are supposed
+# to be misses, and one unreadable entry must not empty it (an empty index reads
+# as "nothing is approved", which is a rollback of a clean install).
+
+idx_home="${tmp_root}/ledger-index-home"
+idx_ledger="${idx_home}/approved-specs"
+mkdir -p "${idx_ledger}"
+
+idx_entry() {
+  local name="$1" package="$2" version="$3" expires="$4" revoked="$5" transitive="$6"
+  jq -nc \
+    --arg package "${package}" --arg version "${version}" \
+    --arg expires "${expires}" --arg revoked "${revoked}" \
+    --argjson transitive "${transitive}" \
+    '{hash:"sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      ecosystem:"npm", package:$package, version:$version, version_range:$version,
+      approved_at:"2020-01-01T00:00:00Z", expires_at:$expires,
+      approved_by:"e2e", evidence:{}, transitive_specs:$transitive}
+     + (if $revoked == "" then {} else {revoked_at:$revoked} end)' \
+    > "${idx_ledger}/${name}.json"
+}
+
+idx_entry 'live'    'idx-live'    '1.0.0' '2099-01-01T00:00:00Z' '' \
+  '[{"ecosystem":"npm","package":"idx-child","version":"2.0.0"}]'
+idx_entry 'expired' 'idx-expired' '1.0.0' '2020-01-01T00:00:00Z' '' '[]'
+idx_entry 'revoked' 'idx-revoked' '1.0.0' '2099-01-01T00:00:00Z' '2021-01-01T00:00:00Z' '[]'
+printf '{ this is not json\n' > "${idx_ledger}/corrupt.json"
+
+idx_check() {
+  ( export SAFEDEPS_HOME="${idx_home}" SAFEDEPS_LEDGER_DIR="${idx_ledger}"
+    # Assigned as statements, not as a `VAR=x . file` prefix: a prefix
+    # assignment on `.` lasts only for the source itself, so the library
+    # functions would run afterwards with the variable already gone.
+    . "${ROOT_DIR}/lib/ledger/ledger.sh"
+    if safedeps_ledger_effect_check npm "$1" "$2" >/dev/null 2>&1; then
+      printf 'approved\n'
+    else
+      printf 'miss\n'
+    fi )
+}
+
+[[ "$(idx_check idx-live 1.0.0)" == "approved" ]]     || fail "ledger index approves a live owner spec"
+[[ "$(idx_check idx-child 2.0.0)" == "approved" ]]    || fail "ledger index approves a live transitive spec"
+[[ "$(idx_check idx-live 9.9.9)" == "miss" ]]         || fail "ledger index does not approve an unlisted version"
+[[ "$(idx_check idx-expired 1.0.0)" == "miss" ]]      || fail "ledger index does not approve an expired spec"
+[[ "$(idx_check idx-revoked 1.0.0)" == "miss" ]]      || fail "ledger index does not approve a revoked spec"
+[[ "$(idx_check idx-absent 1.0.0)" == "miss" ]]       || fail "ledger index does not approve an absent spec"
+printf 'ok - ledger effect index verdicts (owner, transitive, expired, revoked, absent)\n'
+
+# The corrupt entry sitting alongside the others above is the point: assert the
+# index still carries every spec it should, rather than inferring it from one
+# lookup. jq stops at the first file it cannot parse, so a single bad entry
+# emptying the index would read as "nothing is approved" — a rollback of a clean
+# install, from a typo in a ledger file.
+idx_lines=$(
+  ( export SAFEDEPS_HOME="${idx_home}" SAFEDEPS_LEDGER_DIR="${idx_ledger}"
+    . "${ROOT_DIR}/lib/ledger/ledger.sh"
+    safedeps_ledger_effect_index '' 2>/dev/null | wc -l | tr -d ' ' )
+)
+[[ "${idx_lines}" == "2" ]] \
+  || fail "one unreadable ledger entry emptied the index (expected 2 live specs, got ${idx_lines})"
+printf 'ok - one unreadable ledger entry does not empty the index\n'
+
 printf '%s\n' '{"vulnerable":[]}' > "${state_file}"
 
 printf 'e2e passed\n'
