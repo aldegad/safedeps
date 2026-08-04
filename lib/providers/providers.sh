@@ -6,7 +6,20 @@ set -euo pipefail
 
 SAFEDEPS_HOME="${SAFEDEPS_HOME:-${HOME}/.safedeps}"
 SAFEDEPS_CACHE_DIR="${SAFEDEPS_CACHE_DIR:-${SAFEDEPS_HOME}/cache}"
-SAFEDEPS_ADVISORY_LOG="${SAFEDEPS_ADVISORY_LOG:-${SAFEDEPS_HOME}/advisory.log}"
+# The advisory log is DERIVED from the state root, never taken from the
+# environment. It is not a log in the ordinary sense: it is where every bypass
+# and unavailability is recorded, and `re-check` reads it as the oracle for
+# whether a ledger approval ever happened. Letting the environment move it moved
+# that oracle too — measured, a forged ledger entry that `re-check` flags as
+# `suspected_forgery` on the default path stops being flagged when
+# SAFEDEPS_ADVISORY_LOG points at a file the caller wrote. The check and the
+# thing it checks have to live in one trust domain, and SAFEDEPS_HOME is what
+# moves them together.
+# A caller that already captured the environment value (bin/safedeps does, before
+# it sources this file) keeps it, so the notice quotes what the user set rather
+# than the path we derived over it.
+SAFEDEPS_ADVISORY_LOG_ENV_IGNORED="${SAFEDEPS_ADVISORY_LOG_ENV_IGNORED:-${SAFEDEPS_ADVISORY_LOG:-}}"
+SAFEDEPS_ADVISORY_LOG="${SAFEDEPS_HOME}/advisory.log"
 SAFEDEPS_PROVIDER_CACHE_TTL_SECONDS="${SAFEDEPS_PROVIDER_CACHE_TTL_SECONDS:-86400}"
 
 SAFEDEPS_OSV_API_URL="${SAFEDEPS_OSV_API_URL:-https://api.osv.dev/v1/query}"
@@ -23,11 +36,45 @@ safedeps_providers_init() {
     "$(dirname "${SAFEDEPS_ADVISORY_LOG}")"
 }
 
+# Say once per process when the run is judging against something other than the
+# canonical sources. These knobs are real needs — a mirror on a network that
+# blocks osv.dev, a fixture in the test suite — so they are not forbidden; but a
+# run that answers from a moved truth must not look like a run that answered
+# from OSV. The record goes where every other bypass goes.
+SAFEDEPS_TRUTH_SOURCE_ANNOUNCED=""
+safedeps_announce_truth_sources() {
+  [[ -n "${SAFEDEPS_TRUTH_SOURCE_ANNOUNCED}" ]] && return 0
+  SAFEDEPS_TRUTH_SOURCE_ANNOUNCED=1
+  local moved=()
+  [[ "${SAFEDEPS_OSV_API_URL}" == https://api.osv.dev/v1/query ]] || moved+=("osv=${SAFEDEPS_OSV_API_URL}")
+  [[ "${SAFEDEPS_OSV_BATCH_API_URL}" == https://api.osv.dev/v1/querybatch ]] || moved+=("osv-batch=${SAFEDEPS_OSV_BATCH_API_URL}")
+  [[ "${SAFEDEPS_KEV_CATALOG_URL}" == https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json ]] || moved+=("kev=${SAFEDEPS_KEV_CATALOG_URL}")
+  [[ "${SAFEDEPS_GHSA_API_URL}" == https://api.github.com/advisories ]] || moved+=("ghsa=${SAFEDEPS_GHSA_API_URL}")
+  [[ -z "${SAFEDEPS_NPM_CLOSURE_FIXTURE_JSON:-}" ]] || moved+=("npm-closure-fixture=${SAFEDEPS_NPM_CLOSURE_FIXTURE_JSON}")
+  [[ -z "${SAFEDEPS_YARN_INFO_FIXTURE_NDJSON:-}" ]] || moved+=("yarn-info-fixture=${SAFEDEPS_YARN_INFO_FIXTURE_NDJSON}")
+  # Not an advisory source, but the same class of claim: the ledger TTL is the
+  # promise that an old approval gets asked again, and a large enough value
+  # retires that promise without retiring the sentence that makes it.
+  [[ -z "${SAFEDEPS_LEDGER_DEFAULT_TTL_DAYS:-}" || "${SAFEDEPS_LEDGER_DEFAULT_TTL_DAYS:-30}" == 30 ]] \
+    || moved+=("ledger-ttl-days=${SAFEDEPS_LEDGER_DEFAULT_TTL_DAYS}")
+  if (( ${#moved[@]} > 0 )); then
+    safedeps_providers_init
+    printf '[%s] WARN advisory truth source moved: %s — this run did not answer from the canonical sources.\n' \
+      "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" "${moved[*]}" >> "${SAFEDEPS_ADVISORY_LOG}"
+  fi
+  if [[ -n "${SAFEDEPS_ADVISORY_LOG_ENV_IGNORED}" ]]; then
+    safedeps_providers_init
+    printf '[%s] WARN SAFEDEPS_ADVISORY_LOG=%s ignored — the record and the ledger it vouches for stay in one place (move SAFEDEPS_HOME instead).\n' \
+      "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" "${SAFEDEPS_ADVISORY_LOG_ENV_IGNORED}" >> "${SAFEDEPS_ADVISORY_LOG}"
+  fi
+}
+
 safedeps_provider_log() {
   local level="$1"
   local message="$2"
 
   safedeps_providers_init
+  safedeps_announce_truth_sources
   printf '[%s] %s %s\n' "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" "${level}" "${message}" >> "${SAFEDEPS_ADVISORY_LOG}"
 }
 

@@ -7,7 +7,7 @@
 
 set -euo pipefail
 
-SAFEDEPS_VERSION="2.15.6"
+SAFEDEPS_VERSION="2.15.7"
 
 # ---- repo / lib bootstrap ----------------------------------------------------
 
@@ -35,7 +35,24 @@ source "${SAFEDEPS_REPO_DIR}/lib/npm/closure.sh"
 
 SAFEDEPS_HOME="${SAFEDEPS_HOME:-${HOME}/.safedeps}"
 SAFEDEPS_LEDGER_DIR="${SAFEDEPS_LEDGER_DIR:-${SAFEDEPS_HOME}/approved-specs}"
-SAFEDEPS_ADVISORY_LOG="${SAFEDEPS_ADVISORY_LOG:-${SAFEDEPS_HOME}/advisory.log}"
+# Derived, never taken from the environment — see lib/providers/providers.sh for
+# why: this file is also the oracle `re-check` reads to tell a real approval
+# from a forged one. providers.sh is sourced above and captured the environment
+# value before overwriting it, so the notice below quotes what the user set.
+SAFEDEPS_ADVISORY_LOG="${SAFEDEPS_HOME}/advisory.log"
+
+# Announce a moved truth source once per run, at startup rather than from the
+# first provider call: a command that reaches no provider (an empty re-check,
+# a ledger listing) is still a command that ran under a moved source, and the
+# record should not depend on which code path happened to be taken.
+safedeps_announce_truth_sources
+
+# Said here rather than from providers, because the provider query paths run
+# with their stderr redirected and the notice would be swallowed there.
+if [[ -n "${SAFEDEPS_ADVISORY_LOG_ENV_IGNORED:-}" ]]; then
+  printf 'safedeps: SAFEDEPS_ADVISORY_LOG=%s is ignored. The advisory log is where every bypass is recorded AND the oracle re-check uses to tell a real approval from a forged one, so it cannot be moved on its own — a caller that moves it moves the evidence out from under the check. Move SAFEDEPS_HOME to relocate the state root.\n' \
+    "${SAFEDEPS_ADVISORY_LOG_ENV_IGNORED}" >&2
+fi
 
 # ---- output mode -------------------------------------------------------------
 

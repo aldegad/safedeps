@@ -56,7 +56,7 @@ The internal engine keeps the v1 `reorg-guard` assets.
 
 ### Release notes
 
-- The npm package version in `package.json` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION` tracks it and the smoke test reads `package.json` to compare (current: v2.15.6).
+- The npm package version in `package.json` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION` tracks it and the smoke test reads `package.json` to compare (current: v2.15.7).
 - `npm test` runs the release smoke suite; the full fixture E2E lives under `v2.1-tests`.
 - The daily re-check uses no LLM tokens. It is opt-in: a macOS `launchd` user agent runs `safedeps re-check --json` daily, installed atomically by `install-safedeps-recheck-agent.mjs`. It writes `~/.safedeps/recheck.log` and `~/.safedeps/recheck-alerts.jsonl` and raises a macOS notification on a new CVE/KEV/revoke/provider-skip/suspected-forgery. Network is used only for OSV / CISA / GHSA queries.
 
@@ -594,6 +594,20 @@ v2.15.5 pinned the timeout inside the two registration JSON blocks. The number w
 Stated plainly, because a check whose limits are unread gets mistaken for coverage: the canonical pin is what closes this, and it works whatever the prose looks like. The proximity rule is a backstop, and a leaky one — its document list is hardcoded, it matches one written form of the figure and only mid-line, it is line-based, and its measurement exemption tests for the word rather than for a date. Two further axes are outside both checks and need the documented JSON parsed against the installer's output: a second registration block for the same event, and a doc that swaps the `pre` and `post` registrations. All of it is written beside the check, where someone deciding whether to trust it will be looking.
 
 Mutation-verified in an isolated clone: moving both installer constants, the guard constant, and both JSON blocks to 45 while leaving the canonical sentence at 30 turns it red; restoring a numeral to `SKILL.md` turns the proximity rule red.
+
+---
+
+### v2.15.7 — the record cannot be moved out from under the check (patch on v2.15.6)
+
+Three releases closed knobs that could switch the deadline off. The enumeration behind them listed a different family and left it recorded rather than fixed: knobs that replace canonical truth instead of tuning it. The worst of them is `SAFEDEPS_ADVISORY_LOG`, because `advisory.log` is not only where every bypass is written — `re-check` reads it as the oracle for whether a ledger approval ever happened.
+
+Measured: a forged ledger entry that `re-check` flags as `suspected_forgery` on the default path stops being flagged when `SAFEDEPS_ADVISORY_LOG` points at a caller-written file saying the approval happened. The same environment that writes the forgery hands the check its evidence. Nothing in the repo, the docs, the tests, or the installer ever set that variable — it was an unused knob holding open the one file the forgery check depends on.
+
+- **The path is derived from `SAFEDEPS_HOME`.** Record and ledger move together or not at all, which is what keeps the check and the thing it checks in one trust domain. A set-but-ignored variable is reported on stderr and written to the canonical log, because a signal that used to do something and now does nothing must not go quietly inert.
+- **The channel is single by construction now.** The hooks always wrote `$SAFEDEPS_HOME/advisory.log` while the CLI and providers honored the variable, so the observation channel could split in two depending on which half of the tool spoke.
+- **Moved advisory sources are announced, not refused.** Provider URLs, the closure fixtures, and a non-default ledger TTL are real needs — a mirror on a network that blocks osv.dev, a fixture in this very suite. Each deviation is named once per run in `advisory.log`, at startup rather than on the first provider call, so a command that reaches no provider is still recorded. What is not allowed is a run judged against a moved truth looking exactly like a run judged against OSV.
+
+Verification: the e2e forgery battery gains the relocation case and the moved-source record, and both were mutation-tested in an isolated clone by restoring the environment override — the forgery case turns red.
 
 ## v3 (future)
 

@@ -56,7 +56,7 @@ Safedeps 는 **개발 의존성 install** (npm / pip / cargo / go / gem / maven 
 
 ### 릴리즈 메모
 
-- npm 패키지 version 은 `package.json` 이 SSoT. `bin/safedeps` `SAFEDEPS_VERSION` 이 이를 따라가고, smoke 테스트는 `package.json` 을 읽어 대조한다 (현재 v2.15.6).
+- npm 패키지 version 은 `package.json` 이 SSoT. `bin/safedeps` `SAFEDEPS_VERSION` 이 이를 따라가고, smoke 테스트는 `package.json` 을 읽어 대조한다 (현재 v2.15.7).
 - `npm test` 는 release smoke suite 를 실행한다. full fixture E2E 는 `v2.1-tests` 에 있다.
 - daily re-check 는 LLM 토큰을 쓰지 않는다. opt-in 이며, macOS `launchd` user agent 가 매일 `safedeps re-check --json` 을 실행한다 (`install-safedeps-recheck-agent.mjs` 로 atomic install). `~/.safedeps/recheck.log` 와 `~/.safedeps/recheck-alerts.jsonl` 를 쓰고, 새 CVE/KEV/revoke/provider-skip/위조-의심 시 macOS notification 을 띄운다. 네트워크는 OSV / CISA / GHSA query 에만 쓴다.
 
@@ -594,6 +594,20 @@ v2.15.5 는 등록 JSON 블록 둘 안의 timeout 을 핀했다. 그런데 그 �
 한계를 그대로 적는다 — 한계를 모르는 검사는 커버리지로 오독되기 때문이다. 이걸 실제로 닫는 건 canonical 핀이고, 그건 산문이 어떻게 생겼든 동작한다. 근접성 규칙은 백스톱이고 새는 백스톱이다 — 문서 목록이 하드코딩이고, 숫자를 한 표기(`<N>s`)로만, 그것도 줄 중간에서만 잡으며, 줄 단위이고, 측정 예외가 날짜가 아니라 단어를 본다. 구조 축 둘(같은 이벤트에 두 번째 JSON 블록, `pre`/`post` 뒤바뀜)은 둘 다 바깥이고 문서 JSON 을 파싱해 인스톨러 출력과 대조해야 닫힌다. 전부 검사 옆에 적었다 — 이걸 믿을지 판단하는 사람이 보는 자리가 거기다.
 
 격리 클론에서 mutation 검증했다: 인스톨러 상수 둘·가드 상수·JSON 블록 둘을 45 로 옮기고 canonical 문장만 30 으로 두면 빨강, `SKILL.md` 에 숫자를 되살리면 근접성 규칙이 빨강.
+
+---
+
+### v2.15.7 — 기록을 검사 밑에서 빼낼 수 없다 (v2.15.6 패치)
+
+세 릴리스가 마감을 끌 수 있는 노브를 닫았다. 그 뒤의 전수 열거는 다른 계열을 목록으로만 남겨 뒀다 — 튜닝이 아니라 **정본을 갈아치우는** 노브들. 그중 최악이 `SAFEDEPS_ADVISORY_LOG` 다. `advisory.log` 는 모든 우회가 적히는 자리일 뿐 아니라, `re-check` 가 "이 승인이 실제로 있었나" 를 묻는 oracle 이기 때문이다.
+
+실측: `suspected_forgery` 로 잡히던 위조 ledger 항목이, `SAFEDEPS_ADVISORY_LOG` 를 "그 승인은 있었다" 고 적힌 호출자 작성 파일로 돌리자 잡히지 않는다. 위조를 쓰는 그 환경이 검사에게 증거를 건넨다. 그리고 레포·문서·테스트·설치기 어디에서도 그 변수를 설정한 적이 없다 — 위조 검사가 의존하는 그 파일 하나를 열어두고만 있던 미사용 노브였다.
+
+- **경로를 `SAFEDEPS_HOME` 에서 유도한다.** 기록과 ledger 가 같이 움직이거나 아예 안 움직이고, 그게 검사와 검사 대상을 한 신뢰 도메인에 두는 조건이다. 설정됐지만 무시된 변수는 stderr 와 canonical 로그에 보고된다 — 무언가를 하던 신호가 조용히 무력해지면 안 된다.
+- **채널이 이제 구조적으로 하나다.** 훅은 늘 `$SAFEDEPS_HOME/advisory.log` 에 썼고 CLI 와 providers 는 변수를 존중했으므로, 도구의 어느 쪽이 말하느냐에 따라 관측 채널이 둘로 갈릴 수 있었다.
+- **옮겨진 자문 출처는 금지가 아니라 고지 대상이다.** provider URL, closure fixture, 기본값 아닌 ledger TTL 은 실재하는 필요다 — osv.dev 를 막는 망의 미러, 이 스위트 자신이 쓰는 fixture. 각 이탈은 실행당 한 번 이름과 함께 `advisory.log` 에 적히고, 첫 provider 호출이 아니라 시작 시점에 적히므로 provider 에 닿지 않는 명령도 기록된다. 허용되지 않는 것은 옮겨진 정본으로 판정한 실행이 OSV 로 판정한 실행과 똑같이 보이는 쪽이다.
+
+검증: e2e 위조 배터리에 relocation 케이스와 moved-source 기록 케이스가 추가됐고, 격리 클론에서 환경 override 를 되돌리는 mutation 으로 위조 케이스가 빨강이 되는 것을 확인했다.
 
 ## v3 (미래)
 

@@ -581,6 +581,33 @@ forgery_json=$(./bin/safedeps --json re-check)
 [[ "$(jq -r '.suspected_forgery[0].package' <<< "${forgery_json}")" == "fixture-forged" ]] || fail "re-check flags expected forged package"
 pass "re-check flags ledger approval provenance mismatch"
 
+# The forgery check reads advisory.log as its oracle, so whoever can move that
+# file can hand the check its own evidence. Measured before this was closed: the
+# same forged entry stopped being flagged when SAFEDEPS_ADVISORY_LOG pointed at
+# a caller-written file saying the approval happened. The log location is
+# derived from SAFEDEPS_HOME now — the record and the ledger it vouches for move
+# together or not at all — and the ignored variable says so on both channels.
+moved_log="${tmp_root}/attacker-authored.log"
+printf '[2026-01-01T00:00:00Z] check approve(patched closure) ecosystem=npm package=fixture-forged version=1.0.0 hash=deadbeef\n' > "${moved_log}"
+moved_err="${tmp_root}/moved-log.err"
+moved_json=$(SAFEDEPS_ADVISORY_LOG="${moved_log}" ./bin/safedeps --json re-check 2>"${moved_err}")
+[[ "$(jq -r '.suspected_forgery | length' <<< "${moved_json}")" == "1" ]] \
+  || fail "a relocated advisory log cannot supply provenance for a forged ledger entry"
+grep -q 'SAFEDEPS_ADVISORY_LOG' "${moved_err}" \
+  || fail "the ignored advisory-log variable is reported on stderr"
+grep -q 'SAFEDEPS_ADVISORY_LOG' "${SAFEDEPS_HOME}/advisory.log" \
+  || fail "the ignored advisory-log variable is recorded in the canonical log"
+pass "the forgery oracle cannot be relocated by the environment it polices"
+
+# A run that answers from a moved advisory source must not read like a run that
+# answered from OSV. These knobs are legitimate — this very suite is using them —
+# so they are recorded rather than refused.
+grep -q 'advisory truth source moved' "${SAFEDEPS_HOME}/advisory.log" \
+  || fail "a moved advisory truth source is recorded in advisory.log"
+grep -q 'osv=' "${SAFEDEPS_HOME}/advisory.log" \
+  || fail "the moved-truth record names which source moved"
+pass "a run judged against a moved advisory source says so in the record"
+
 # A forged ledger entry must be flagged even when advisory.log does not exist at
 # all — file absence is missing provenance, not proof of approval. (Previously
 # the [[ -f advisory.log ]] precondition silently skipped the check.)
