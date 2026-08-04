@@ -643,6 +643,38 @@ if [[ -f "${guard_clean_home}/advisory.log" ]] && grep -q 'truth source moved' "
 fi
 pass "an unmoved run says nothing on the hook path"
 
+# The first version of the guard's notice took its library path from an
+# environment variable and returned quietly when the file could not be read —
+# an unnamed off switch for the notice, built beside the invariant that forbids
+# unnamed off switches. The path comes from the script's own location now, so
+# nothing in the environment can silence it.
+guard_override_home="${tmp_root}/safe-guard-override"
+mkdir -p "${guard_override_home}"
+SAFEDEPS_HOME="${guard_override_home}" SAFEDEPS_OSV_API_URL="http://mirror.invalid/osv" \
+  SAFEDEPS_TRUTH_SOURCES_LIB=/dev/null \
+  scripts/safedeps-pre-guard.sh <<< "${guard_moved_payload}" >/dev/null 2>&1 || true
+grep -q 'advisory truth source moved' "${guard_override_home}/advisory.log" \
+  || fail "no environment variable can silence the moved-source notice"
+pass "the moved-source notice cannot be switched off from the environment"
+
+# And when the library genuinely cannot be read, that is an unavailability, said
+# out loud like every other one rather than swallowed by a quiet return.
+guard_nolib_repo="${tmp_root}/guard-nolib-repo"
+mkdir -p "${guard_nolib_repo}/scripts" "${guard_nolib_repo}/lib"
+cp -R lib/. "${guard_nolib_repo}/lib/"
+cp scripts/safedeps-pre-guard.sh "${guard_nolib_repo}/scripts/"
+rm -f "${guard_nolib_repo}/lib/truth-sources.sh"
+guard_nolib_home="${tmp_root}/safe-guard-nolib"
+guard_nolib_err="${tmp_root}/guard-nolib.err"
+mkdir -p "${guard_nolib_home}"
+SAFEDEPS_HOME="${guard_nolib_home}" SAFEDEPS_OSV_API_URL="http://mirror.invalid/osv" \
+  "${guard_nolib_repo}/scripts/safedeps-pre-guard.sh" <<< "${guard_moved_payload}" >/dev/null 2>"${guard_nolib_err}" || true
+grep -q 'truth-sources.sh is unreadable' "${guard_nolib_home}/advisory.log" \
+  || fail "an unreadable truth-source library is recorded as an unavailability"
+grep -q 'truth-sources.sh is unreadable' "${guard_nolib_err}" \
+  || fail "an unreadable truth-source library is reported on stderr"
+pass "an unreadable truth-source library is an announced unavailability, not a quiet skip"
+
 # A forged ledger entry must be flagged even when advisory.log does not exist at
 # all — file absence is missing provenance, not proof of approval. (Previously
 # the [[ -f advisory.log ]] precondition silently skipped the check.)

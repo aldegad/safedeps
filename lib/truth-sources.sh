@@ -14,8 +14,10 @@
 #
 # This file is separate from providers.sh because the PreToolUse guard must be
 # able to say it too, and that hook runs on every Bash call — it cannot afford to
-# source the provider stack, so it sources this instead, and only when something
-# is actually set.
+# source the provider stack, so it sources this instead. It is sourced
+# unconditionally there: making it conditional would mean restating the knob list
+# at the call site to decide whether to read the list, and a second copy of that
+# list is how the first one goes stale.
 
 SAFEDEPS_DEFAULT_OSV_API_URL="https://api.osv.dev/v1/query"
 SAFEDEPS_DEFAULT_OSV_BATCH_API_URL="https://api.osv.dev/v1/querybatch"
