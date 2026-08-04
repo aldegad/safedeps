@@ -56,7 +56,7 @@ The internal engine keeps the v1 `reorg-guard` assets.
 
 ### Release notes
 
-- The npm package version in `package.json` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION` tracks it and the smoke test reads `package.json` to compare (current: v2.15.0).
+- The npm package version in `package.json` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION` tracks it and the smoke test reads `package.json` to compare (current: v2.15.1).
 - `npm test` runs the release smoke suite; the full fixture E2E lives under `v2.1-tests`.
 - The daily re-check uses no LLM tokens. It is opt-in: a macOS `launchd` user agent runs `safedeps re-check --json` daily, installed atomically by `install-safedeps-recheck-agent.mjs`. It writes `~/.safedeps/recheck.log` and `~/.safedeps/recheck-alerts.jsonl` and raises a macOS notification on a new CVE/KEV/revoke/provider-skip/suspected-forgery. Network is used only for OSV / CISA / GHSA queries.
 
@@ -501,6 +501,21 @@ v2.13.0 said the PostToolUse effect gate "remains the enforcement authority" for
 **PostToolUse is killed at its budget too.** The effect gate is registered with the same 30s, and its work — `npm ci`, `npm install`, `npm rebuild`, plus an OSV batch over the whole closure — is bounded by the user's project and the network rather than by anything safedeps controls. So npm has the same exposure, and it is worse in kind than the command gate's: the pre-hook's kill lets one unjudged command through, while the post-hook's kill can land in the middle of a rollback.
 
 This release does not fix that. A post-install gate cannot deny — the command has already run — so its answer to "I could not finish" is a different design question, tracked as `safedeps/effect-gate-killed-mid-rollback`. What is fixed here is the claim: the docs no longer say npm is covered past the budget, because it is not.
+
+---
+
+### v2.15.1 — the self budget has a ceiling, because a boundary the user can move is a default (patch on v2.15.0)
+
+v2.15.0's whole claim is that the guard answers on its own budget instead of vanishing past the runtime's. One environment variable undid it: `SAFEDEPS_SELF_BUDGET_SECONDS` had no upper bound, and any value above the registered 30s hook timeout hands the kill back to the runtime — silently, and with the fail-open exactly as it was before the release.
+
+The motive to set such a value is an ordinary one, which is what makes it worth closing. Someone who meets an `UNDECIDED` deny on a large command reads it as "the budget is short" and raises it. No intent to disable anything, and the boundary is gone anyway.
+
+- **The value is clamped to 25s**, and the clamp is one-directional: lower values are honoured as given, because a shorter budget only denies earlier. `SAFEDEPS_RUNTIME_BUDGET_SECONDS` (30) and `SAFEDEPS_SELF_BUDGET_MAX_SECONDS` (25) are named constants next to the budget they bound.
+- **The 30s is hardcoded, and the reason is recorded next to it.** The hook payload does not carry the runtime's budget, and registrations from several settings files all fire, so the guard cannot tell which one launched it. It names the number safedeps itself registers — `PRE_HOOK_TIMEOUT_SECONDS` in the installer — and the smoke test pins the two constants together so an installer change cannot leave the guard computing against a stale one. A hand-edited registration below 30s is outside what the constant can know.
+- **The 5s of headroom is the guard's cost outside the budget window**, not a round number: up to 1s waiting out the final poll step, up to 0.5s of TERM grace before the KILL, ~0.1s of reap, `jq`, and process start. A 1.6s structural worst case, against 0.73–1.05s measured end to end and flat from 4KB to 256KB of command text (2026-08-04, same machine as the 30s kill measurement).
+- **The clamp is observable.** It is announced on stderr, recorded in `advisory.log`, and named in the `UNDECIDED` deny reason. A silently reduced budget would leave the user believing their value is the one running and debugging the next surprise against a number that was never true.
+
+Verification: `scripts/test/self-budget.sh` gains a 64KB padded `pip install` under a 600s budget. That input's natural scan runs past 300s on the development machine, so only the ceiling can bring the answer back inside the runtime's 30s — it is denied as `UNDECIDED` at ~26s, with the clamp stated in all three places, while a budget under the ceiling passes through untouched and unannounced. `scripts/test/smoke.sh` pins the guard's runtime-budget constant to the installer's registered timeout and asserts the ceiling sits below it.
 
 ## v3 (future)
 

@@ -56,7 +56,7 @@ Safedeps 는 **개발 의존성 install** (npm / pip / cargo / go / gem / maven 
 
 ### 릴리즈 메모
 
-- npm 패키지 version 은 `package.json` 이 SSoT. `bin/safedeps` `SAFEDEPS_VERSION` 이 이를 따라가고, smoke 테스트는 `package.json` 을 읽어 대조한다 (현재 v2.15.0).
+- npm 패키지 version 은 `package.json` 이 SSoT. `bin/safedeps` `SAFEDEPS_VERSION` 이 이를 따라가고, smoke 테스트는 `package.json` 을 읽어 대조한다 (현재 v2.15.1).
 - `npm test` 는 release smoke suite 를 실행한다. full fixture E2E 는 `v2.1-tests` 에 있다.
 - daily re-check 는 LLM 토큰을 쓰지 않는다. opt-in 이며, macOS `launchd` user agent 가 매일 `safedeps re-check --json` 을 실행한다 (`install-safedeps-recheck-agent.mjs` 로 atomic install). `~/.safedeps/recheck.log` 와 `~/.safedeps/recheck-alerts.jsonl` 를 쓰고, 새 CVE/KEV/revoke/provider-skip/위조-의심 시 macOS notification 을 띄운다. 네트워크는 OSV / CISA / GHSA query 에만 쓴다.
 
@@ -501,6 +501,21 @@ v2.13.0 은 커맨드 게이트의 예산을 넘어서도 npm 은 PostToolUse �
 **PostToolUse 도 자기 예산에서 죽는다.** 효과게이트는 같은 30s 로 등록돼 있고, 그 작업(`npm ci`, `npm install`, `npm rebuild`, closure 전체 OSV 배치)은 safedeps 가 통제하는 것이 아니라 사용자 프로젝트와 네트워크에 매인다. 그래서 npm 도 같은 노출을 갖고, 그 종류는 커맨드 게이트보다 나쁘다: pre 훅의 죽음은 판정 못 한 커맨드 하나를 통과시키지만, post 훅의 죽음은 롤백 도중에 떨어질 수 있다.
 
 이번 릴리스는 그걸 고치지 않는다. 설치 후 게이트는 deny 할 수 없으므로("커맨드가 이미 돌았다") "못 끝냈다" 에 대한 답이 별개의 설계 문제이고, `safedeps/effect-gate-killed-mid-rollback` 으로 추적한다. 여기서 고친 것은 주장이다 — 문서가 더는 예산 너머에서 npm 이 커버된다고 말하지 않는다. 실제로 아니기 때문이다.
+
+---
+
+### v2.15.1 — 자체 예산에 상한이 생겼다. 사용자가 옮길 수 있는 경계는 경계가 아니라 기본값이니까 (v2.15.0 패치)
+
+v2.15.0 의 주장 전체가 "가드가 런타임 예산 너머로 사라지는 대신 자기 예산 안에 답한다" 였다. 환경변수 하나가 그걸 무효화했다 — `SAFEDEPS_SELF_BUDGET_SECONDS` 에 상한이 없었고, 등록된 30s 훅 타임아웃 위의 값은 kill 권한을 런타임에 되돌려준다. 조용히, 그리고 릴리스 이전과 똑같은 fail-open 으로.
+
+그런 값을 넣을 동기가 아주 평범하다는 점이 이걸 닫을 이유다. 큰 커맨드에서 `UNDECIDED` 거부를 만난 사람은 "예산이 짧네" 로 읽고 올린다. 무언가를 끄려는 의도는 전혀 없고, 그래도 경계는 사라진다.
+
+- **값은 25s 로 클램프된다.** 클램프는 한 방향이다 — 더 낮은 값은 준 그대로 존중된다. 짧은 예산은 더 일찍 거부할 뿐이기 때문이다. `SAFEDEPS_RUNTIME_BUDGET_SECONDS`(30) 와 `SAFEDEPS_SELF_BUDGET_MAX_SECONDS`(25) 는 그들이 묶는 예산 바로 옆의 이름 있는 상수다.
+- **30s 는 하드코딩이고, 그 이유를 상수 옆에 적었다.** 훅 페이로드는 런타임 예산을 싣지 않고 여러 settings 파일의 등록이 모두 발화하므로, 가드는 자기를 띄운 등록을 알 수 없다. 대신 safedeps 자신이 등록하는 숫자(인스톨러의 `PRE_HOOK_TIMEOUT_SECONDS`)를 명시하고, smoke 테스트가 두 상수를 함께 고정해 인스톨러만 바뀌고 가드가 낡은 숫자로 계산하는 상태를 막는다. 손으로 30s 아래로 고친 등록은 이 상수가 알 수 있는 범위 밖이다.
+- **5s 여유는 반올림한 숫자가 아니라 가드가 예산 창 바깥에서 쓰는 비용이다.** 마지막 폴 스텝 대기 최대 1s, KILL 전 TERM 유예 최대 0.5s, reap·`jq`·프로세스 시작 약 0.1s. 구조적 최악 1.6s 이고, 실측 종단 초과분은 0.73~1.05s 로 커맨드 4KB 에서 256KB 까지 평평했다(2026-08-04, 30s kill 을 잰 것과 같은 머신).
+- **클램프는 관측된다.** stderr 로 알리고, `advisory.log` 에 기록하고, `UNDECIDED` deny 사유에 명시한다. 조용히 깎으면 사용자는 자기가 준 값이 도는 줄 알고, 다음 이상 현상을 한 번도 참이었던 적 없는 숫자를 놓고 디버깅한다.
+
+검증: `scripts/test/self-budget.sh` 에 600s 예산 + 64KB 패딩된 `pip install` 케이스가 추가됐다. 이 입력의 자연 스캔은 개발 머신에서 300s 를 넘으므로 답을 런타임 30s 안으로 되돌릴 수 있는 것은 상한뿐이다 — 약 26s 에 `UNDECIDED` 로 거부되고 클램프가 세 곳 모두에 나타난다. 상한 아래 값은 손대지 않고 알리지도 않는다. `scripts/test/smoke.sh` 는 가드의 런타임 예산 상수를 인스톨러가 등록하는 타임아웃에 고정하고, 상한이 그 아래인지 검사한다.
 
 ## v3 (미래)
 

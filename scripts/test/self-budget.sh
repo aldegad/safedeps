@@ -161,6 +161,52 @@ budget_six=${GUARD_ELAPSED}
   || fail "a longer budget is still honoured rather than overrun (6s->${budget_six}s)"
 pass "answer time tracks the configured budget, not the judgment's natural length"
 
+# --- the budget is tunable only downward ------------------------------------
+# A self budget at or above the runtime's hook budget is not a budget: the
+# runtime kills the hook first and the tool call proceeds, which is the exact
+# fail-open the machinery above exists to remove. The value is therefore clamped
+# to a ceiling below the runtime budget. Both constants are read from the guard
+# so this battery tracks them instead of restating them.
+runtime_budget=$(grep -m1 '^SAFEDEPS_RUNTIME_BUDGET_SECONDS=' scripts/safedeps-pre-guard.sh | cut -d= -f2)
+budget_ceiling=$(grep -m1 '^SAFEDEPS_SELF_BUDGET_MAX_SECONDS=' scripts/safedeps-pre-guard.sh | cut -d= -f2)
+[[ -n "${runtime_budget}" && -n "${budget_ceiling}" ]] || fail "budget constants are readable from the guard"
+
+# 64KB, because the clamp has to be the reason the answer arrives: this input's
+# natural scan runs past 300s on the machine this was measured on (2026-08-04),
+# so nothing but the ceiling can bring the answer back under the runtime budget.
+# If the clamp ever regresses this case does not fail fast — it sits for minutes
+# and then fails. That wait IS the defect: it is the window in which the runtime
+# kills the hook and the install proceeds unjudged.
+huge=$(pad 65536)
+guard "pip install requests==2.31.0 # ${huge}" 600
+[[ "${GUARD_DECISION}" == "deny" ]] \
+  || fail "an over-ceiling budget still denies (got: ${GUARD_DECISION})"
+grep -q 'UNDECIDED' <<< "${GUARD_REASON}" \
+  || fail "an over-ceiling budget still answers as undecided rather than being killed"
+(( GUARD_ELAPSED < runtime_budget )) \
+  || fail "an over-ceiling budget answers inside the ${runtime_budget}s runtime budget (took ${GUARD_ELAPSED}s; past it the runtime kills the hook and the install proceeds)"
+pass "a budget raised above the ceiling is clamped, so the answer still beats the runtime's kill"
+
+# Clamping silently would be its own defect: the user would believe the value
+# they set is the one running, and debug the next surprise against a number that
+# was never true.
+grep -q 'clamped' <<< "${GUARD_STDERR}" \
+  || fail "the clamp is announced on stderr (got: $(printf '%s' "${GUARD_STDERR}" | head -c 80))"
+grep -q '600' <<< "${GUARD_STDERR}" \
+  || fail "the clamp names the value the user actually set"
+grep -q 'clamped' "${GUARD_STATE_DIR}/advisory.log" \
+  || fail "the clamp is recorded in advisory.log"
+grep -q 'clamped' <<< "${GUARD_REASON}" \
+  || fail "the undecided deny says the budget was clamped, so its figure is not read as the setting being ignored"
+pass "the clamp is observable — stderr, advisory.log, and the deny reason all say it happened"
+
+# Lowering stays free: a shorter budget only denies earlier, and it must not be
+# reported as clamped.
+guard "echo ${big}" "${tiny_budget}"
+if grep -q 'clamped' <<< "${GUARD_STDERR}"; then fail "a budget under the ceiling is left alone"; fi
+if grep -q 'clamped' "${GUARD_STATE_DIR}/advisory.log"; then fail "a budget under the ceiling is not logged as clamped"; fi
+pass "a budget under the ceiling is honoured as given, silently"
+
 # --- without the budget the same input walks through -----------------------
 # Mutation check in the honest direction: disable the machinery (engage size
 # above the input) and the over-budget command is judged clean and allowed.

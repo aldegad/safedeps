@@ -47,6 +47,23 @@ pkg_version=$(jq -r '.version' package.json)
 [[ "$(jq -r '.version' <<< "${version_json}")" == "${pkg_version}" ]] || fail "cli version matches package.json (${pkg_version})"
 pass "cli version"
 
+# The guard clamps its self budget below the runtime hook budget, and it cannot
+# read that budget at runtime — the payload does not carry it and any of several
+# settings files may have registered the hook. So it names the number safedeps
+# itself registers. These two constants are one fact in two files; pin them
+# together, because an installer that raises the registered timeout while the
+# guard still assumes 30s leaves the clamp computed against a stale number.
+guard_runtime_budget=$(grep -m1 '^SAFEDEPS_RUNTIME_BUDGET_SECONDS=' scripts/safedeps-pre-guard.sh | cut -d= -f2)
+guard_budget_ceiling=$(grep -m1 '^SAFEDEPS_SELF_BUDGET_MAX_SECONDS=' scripts/safedeps-pre-guard.sh | cut -d= -f2)
+installer_pre_timeout=$(grep -m1 '^const PRE_HOOK_TIMEOUT_SECONDS = ' scripts/install/install-safedeps-hooks.mjs | tr -dc '0-9')
+[[ -n "${guard_runtime_budget}" && -n "${guard_budget_ceiling}" && -n "${installer_pre_timeout}" ]] \
+  || fail "budget constants are readable (guard=${guard_runtime_budget}/${guard_budget_ceiling}, installer=${installer_pre_timeout})"
+[[ "${guard_runtime_budget}" == "${installer_pre_timeout}" ]] \
+  || fail "guard's runtime budget matches the timeout the installer registers (guard=${guard_runtime_budget}s, installer=${installer_pre_timeout}s)"
+(( guard_budget_ceiling < guard_runtime_budget )) \
+  || fail "self-budget ceiling sits below the runtime budget (ceiling=${guard_budget_ceiling}s, runtime=${guard_runtime_budget}s)"
+pass "self-budget ceiling is pinned below the hook timeout the installer registers"
+
 # Regression: a global install must resolve its package dir through the symlink.
 # npm -g (and ~/.local/bin via --link-bin) put a RELATIVE FILE symlink in
 # <prefix>/bin and the package under <prefix>/lib/node_modules; without symlink

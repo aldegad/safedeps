@@ -502,10 +502,70 @@ fi
 # engage size is a performance gate with ~300x of headroom behind it, not a
 # security boundary — the security boundary is the wall-clock budget below,
 # which is machine-independent in a way a byte count can never be.
+#
+# The self budget is tunable, but only downward. A budget at or above the
+# runtime's is not a budget: the runtime kills the hook first and the tool call
+# proceeds, which is exactly the fail-open this machinery exists to remove. And
+# the motive to raise it is an ordinary one — someone who hits UNDECIDED on a
+# large command reads it as "the budget is short" and raises it, switching off a
+# security boundary without ever meaning to. A boundary a user can move is not a
+# boundary, it is a default. So the value is clamped to a ceiling below the
+# runtime's budget, and lowering it stays free because a shorter budget only
+# denies earlier.
+#
+# Where the runtime's number comes from: the hook payload does not carry it, and
+# a Claude Code settings file that registers hooks can live in any of three
+# places whose entries all fire, so the hook cannot tell at runtime which
+# registration launched it. What it can do is name the number safedeps itself
+# registers — `PRE_HOOK_TIMEOUT_SECONDS` in scripts/install/install-safedeps-hooks.mjs,
+# 30s, matching the measured kill time (Claude Code, 2026-08-04). The smoke test
+# pins the two constants together so an installer change cannot leave this one
+# stale. A user who hand-edits the registered timeout below 30s is outside what
+# this constant can know; the clamp is still correct for every install safedeps
+# performs.
+SAFEDEPS_RUNTIME_BUDGET_SECONDS=30
+
+# The ceiling is the runtime's budget minus what the guard spends OUTSIDE the
+# budget window, plus slack. The cost outside the window is structural, not
+# proportional to the command:
+#   - up to 1.0s waiting out the final poll step (the step doubles and caps at 1s)
+#   - up to 0.5s of TERM grace before the KILL (10 polls x 50ms)
+#   - reap, jq, process start and payload parse: ~0.1s
+# That is a 1.6s structural worst case. Measured end-to-end overshoot past the
+# budget was 0.73-1.05s and flat from 4KB to 256KB of command text (2026-08-04,
+# same machine as the 30s kill measurement). 30 - 25 = 5s of headroom, i.e.
+# ~3x the structural worst case and ~5x the measured one, which is what a
+# loaded machine needs before an on-time answer becomes a late one.
+SAFEDEPS_SELF_BUDGET_MAX_SECONDS=25
+
 SAFEDEPS_SELF_BUDGET_SECONDS="${SAFEDEPS_SELF_BUDGET_SECONDS:-20}"
 SAFEDEPS_BUDGET_ENGAGE_BYTES="${SAFEDEPS_BUDGET_ENGAGE_BYTES:-1024}"
 
+# `[0-9]` first because a non-numeric value must not reach the comparison: it
+# stays as given and fails closed downstream (its deadline evaluates to zero and
+# fires immediately), which is loud and safe rather than quietly permissive.
+SAFEDEPS_SELF_BUDGET_CLAMPED_FROM=""
+if [[ "${SAFEDEPS_SELF_BUDGET_SECONDS}" =~ ^[0-9]+$ ]] \
+  && (( SAFEDEPS_SELF_BUDGET_SECONDS > SAFEDEPS_SELF_BUDGET_MAX_SECONDS )); then
+  SAFEDEPS_SELF_BUDGET_CLAMPED_FROM="${SAFEDEPS_SELF_BUDGET_SECONDS}"
+  SAFEDEPS_SELF_BUDGET_SECONDS="${SAFEDEPS_SELF_BUDGET_MAX_SECONDS}"
+fi
+
 if [[ -z "${SAFEDEPS_BUDGET_CHILD:-}" ]] && (( ${#COMMAND} >= SAFEDEPS_BUDGET_ENGAGE_BYTES )); then
+  # Say that the clamp happened, and say it here rather than at the assignment
+  # above: this is the point where the budget is actually in play, and a line on
+  # every `ls` the agent runs would be noise people learn to scroll past. A
+  # silently reduced budget would let the user believe the value they set is the
+  # one running, and the next surprise gets debugged against a number that was
+  # never true — so it goes to advisory.log like every other bypass or
+  # unavailability, AND to stderr so it reaches the session and not only a file.
+  if [[ -n "${SAFEDEPS_SELF_BUDGET_CLAMPED_FROM}" ]]; then
+    log_advisory "pre-guard: SAFEDEPS_SELF_BUDGET_SECONDS=${SAFEDEPS_SELF_BUDGET_CLAMPED_FROM} exceeds the ${SAFEDEPS_SELF_BUDGET_MAX_SECONDS}s ceiling — clamped to ${SAFEDEPS_SELF_BUDGET_SECONDS}s. Above the ceiling the ${SAFEDEPS_RUNTIME_BUDGET_SECONDS}s runtime hook budget kills this gate first and the install proceeds unjudged."
+    printf 'safedeps: SAFEDEPS_SELF_BUDGET_SECONDS=%ss exceeds the %ss ceiling and was clamped to %ss. The ceiling sits below the runtime hook budget (%ss); above it the runtime kills this gate mid-judgment and the install runs unjudged, so raising the value removes the check rather than extending it. Lower values are honoured as given.\n' \
+      "${SAFEDEPS_SELF_BUDGET_CLAMPED_FROM}" "${SAFEDEPS_SELF_BUDGET_MAX_SECONDS}" \
+      "${SAFEDEPS_SELF_BUDGET_SECONDS}" "${SAFEDEPS_RUNTIME_BUDGET_SECONDS}" >&2
+  fi
+
   budget_out=$(mktemp "${TMPDIR:-/tmp}/safedeps-budget.XXXXXX")
   budget_err=$(mktemp "${TMPDIR:-/tmp}/safedeps-budget.XXXXXX")
 
@@ -621,8 +681,14 @@ if [[ -z "${SAFEDEPS_BUDGET_CHILD:-}" ]] && (( ${#COMMAND} >= SAFEDEPS_BUDGET_EN
 
   rm -f "${budget_out}" "${budget_err}" "${budget_in}"
   log_advisory "pre-guard DENY: judgment unfinished within the ${SAFEDEPS_SELF_BUDGET_SECONDS}s self-budget (command ${#COMMAND} bytes, child rc=${budget_rc}) — fail-closed, not a detection."
-  jq -nc --arg budget "${SAFEDEPS_SELF_BUDGET_SECONDS}" --arg size "${#COMMAND}" \
-    '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:("safedeps: UNDECIDED, not unsafe — safedeps could not finish judging this command within its " + $budget + "s budget (" + $size + " bytes of command text), so it is blocked fail-closed. Nothing was detected in it; the gate simply did not get to an answer, and an install it cannot judge must not run. Scan cost grows with command length. Split the command, or write long content with a file-writing tool instead of one very large shell command, and retry.")}}'
+  # When the budget was clamped, the reason says so. Otherwise the user reads a
+  # budget figure they never set and concludes the setting did not take.
+  budget_clamp_note=""
+  if [[ -n "${SAFEDEPS_SELF_BUDGET_CLAMPED_FROM}" ]]; then
+    budget_clamp_note=" Your SAFEDEPS_SELF_BUDGET_SECONDS=${SAFEDEPS_SELF_BUDGET_CLAMPED_FROM} was clamped to the ${SAFEDEPS_SELF_BUDGET_MAX_SECONDS}s ceiling: above it the ${SAFEDEPS_RUNTIME_BUDGET_SECONDS}s runtime hook budget kills this gate mid-judgment and the install runs unjudged, so raising it removes the check rather than extending it."
+  fi
+  jq -nc --arg budget "${SAFEDEPS_SELF_BUDGET_SECONDS}" --arg size "${#COMMAND}" --arg clamp "${budget_clamp_note}" \
+    '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:("safedeps: UNDECIDED, not unsafe — safedeps could not finish judging this command within its " + $budget + "s budget (" + $size + " bytes of command text), so it is blocked fail-closed. Nothing was detected in it; the gate simply did not get to an answer, and an install it cannot judge must not run. Scan cost grows with command length. Split the command, or write long content with a file-writing tool instead of one very large shell command, and retry." + $clamp)}}'
   exit 0
 fi
 
