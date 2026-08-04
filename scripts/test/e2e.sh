@@ -672,16 +672,16 @@ cat > "${installer_home}/.claude/settings.json" <<EOF
 {"hooks":{"PreToolUse":[{"matcher":"Other","hooks":[{"type":"command","command":"~/.claude/skills/safedeps/scripts/safedeps-pre-guard.sh"}]},{"matcher":"Bash","hooks":[{"type":"command","command":"${installer_home}/.claude/skills/npm-reorg-guard/scripts/guard.sh"}]}],"PostToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"${installer_home}/.claude/skills/npm-reorg-guard/scripts/verify.sh"}]}]}}
 EOF
 HOME="${installer_home}" node scripts/install/install-safedeps-hooks.mjs >/dev/null
-jq -e --arg pre "~/.claude/skills/safedeps/scripts/safedeps-pre-guard.sh" '
+jq -e --arg pre "~/.claude/skills/safedeps/scripts/safedeps-hook-entry.sh pre" '
   [.hooks.PreToolUse[]? | select(.matcher == "Bash") | .hooks[]?.command] | index($pre)
 ' "${installer_home}/.claude/settings.json" >/dev/null || fail "installer writes new pre hook"
-jq -e --arg post "~/.claude/skills/safedeps/scripts/safedeps-post-verify.sh" '
+jq -e --arg post "~/.claude/skills/safedeps/scripts/safedeps-hook-entry.sh post" '
   [.hooks.PostToolUse[]?.hooks[]?.command] | index($post)
 ' "${installer_home}/.claude/settings.json" >/dev/null || fail "installer writes new post hook"
-jq -e --arg pre "~/.codex/skills/safedeps/scripts/safedeps-pre-guard.sh" '
+jq -e --arg pre "~/.codex/skills/safedeps/scripts/safedeps-hook-entry.sh pre" '
   [.hooks.PreToolUse[]?.hooks[]?.command] | index($pre)
 ' "${installer_home}/.codex/hooks.json" >/dev/null || fail "installer writes codex pre hook"
-jq -e --arg post "~/.codex/skills/safedeps/scripts/safedeps-post-verify.sh" '
+jq -e --arg post "~/.codex/skills/safedeps/scripts/safedeps-hook-entry.sh post" '
   [.hooks.PostToolUse[]?.hooks[]?.command] | index($post)
 ' "${installer_home}/.codex/hooks.json" >/dev/null || fail "installer writes codex post hook"
 jq -e '
