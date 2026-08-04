@@ -538,6 +538,8 @@ Verification: `scripts/test/self-budget.sh` (30 ok) pins the engage clamp with a
 
 Still open, recorded rather than fixed: several one-value knobs replace canonical truth rather than tune it — `SAFEDEPS_OSV_API_URL` / `SAFEDEPS_KEV_CATALOG_URL` / `SAFEDEPS_GHSA_API_URL` repoint the advisory source, `SAFEDEPS_NPM_CLOSURE_FIXTURE_JSON` and `SAFEDEPS_YARN_INFO_FIXTURE_NDJSON` replace closure resolution with canned data, `SAFEDEPS_LEDGER_DEFAULT_TTL_DAYS` can make approvals never expire, and `SAFEDEPS_ADVISORY_LOG` repoints the channel that every bypass is supposed to be observable on. These are test seams and mirror support, and the friction story for at least the URLs is real (a network that blocks osv.dev). Tracked as `safedeps/truth-source-knobs-have-no-declaration`.
 
+One more knob is the same shape as the one this release closed, and the enumeration above missed it on the first pass: **`SAFEDEPS_BUDGET_CHILD`**. It is the recursion marker the parent sets on the child it spawns, so exporting it makes the parent believe it *is* the child and skip the deadline entirely — measured, a 12KB padded `pip install` answers in 3s normally and 32s with it exported, with nothing on stderr and nothing in `advisory.log`. It has no ceiling, its name does not say "off switch", and unlike the engage size there is no friction story that leads anyone to it by accident. Cross-validation caught it inside 90 lines of the clamp this release added, which is the honest measure of how far a fresh reader sees past the change they just made. Tracked as `safedeps/budget-child-marker-is-an-unnamed-off-switch`.
+
 ## v3 (future)
 
 ### Ledger tamper resistance

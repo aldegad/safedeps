@@ -538,6 +538,8 @@ v2.15.1 이 예산에 상한을 씌웠다. 그런데 예산이 **돌지 말지�
 
 여전히 열려 있고 고치지 않고 기록만 한 것: 값 하나로 **튜닝이 아니라 정본을 갈아치우는** 노브가 여럿이다 — `SAFEDEPS_OSV_API_URL`·`SAFEDEPS_KEV_CATALOG_URL`·`SAFEDEPS_GHSA_API_URL` 은 자문 출처를 옮기고, `SAFEDEPS_NPM_CLOSURE_FIXTURE_JSON`·`SAFEDEPS_YARN_INFO_FIXTURE_NDJSON` 은 closure 해석을 통조림 데이터로 대체하며, `SAFEDEPS_LEDGER_DEFAULT_TTL_DAYS` 는 승인을 영구화할 수 있고, `SAFEDEPS_ADVISORY_LOG` 는 모든 우회가 관측돼야 하는 그 채널 자체를 옮긴다. 테스트 seam 이자 미러 지원이고, 적어도 URL 쪽은 마찰 서사가 실재한다(osv.dev 를 막는 망). `safedeps/truth-source-knobs-have-no-declaration` 로 추적한다.
 
+이번 릴리스가 닫은 것과 같은 형태의 노브가 하나 더 있고, 위 열거는 1차에서 그걸 놓쳤다: **`SAFEDEPS_BUDGET_CHILD`**. 부모가 스폰한 자식에게 세팅하는 재귀 마커라, 이걸 export 하면 부모가 자기를 자식으로 알고 마감을 통째로 건너뛴다 — 실측으로 12KB 패딩된 `pip install` 이 평소 3s, export 상태에서 32s 였고 stderr 에도 `advisory.log` 에도 아무것도 안 남는다. 상한이 없고, 이름이 off 스위치라고 말하지 않으며, engage 크기와 달리 우연히 도달할 마찰 서사도 없다. 크로스 검증이 이번에 넣은 클램프에서 90줄 안쪽에서 찾아냈다 — 방금 자기가 만든 변경 너머를 사람이 얼마나 못 보는지의 정직한 척도다. `safedeps/budget-child-marker-is-an-unnamed-off-switch` 로 추적한다.
+
 ## v3 (미래)
 
 ### Ledger 변조 내성
