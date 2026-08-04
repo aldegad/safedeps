@@ -293,6 +293,8 @@ guard 는 lockfile/manifest 도 snapshot 하고 v1 hardcoded pattern 차단(sect
 
 런타임의 타임아웃 동작은 safedeps 소관이 아니지만, 그게 발동하기 전에 답을 내는 것은 소관이다. guard 는 판정을 자식 프로세스에서 `SAFEDEPS_SELF_BUDGET_SECONDS`(기본 20) 아래 돌리고, 그 자식이 기한까지 답을 못 내면 guard 가 대신 답한다: deny — 판정하지 못한 설치는 돌면 안 되기 때문이다. 그 deny 가 지켜야 할 두 가지 — fail-closed 이지만 **적발이 아니다**(사유가 `UNDECIDED, not unsafe` 로 시작하고 아무것도 탐지되지 않았음을 명시한다. "못 끝냈다" 와 "찾았다" 를 구분 못 하는 독자는 게이트를 우회하는 법을 배운다), 그리고 다른 모든 우회·불가용과 마찬가지로 `advisory.log` 에 기록된다.
 
+마감은 자식 셸이 아니라 **자식의 프로세스 트리 전체**에 집행된다. 셸은 포그라운드 외부 명령이 도는 동안 시그널에 반응하지 않고 판정의 비싼 부분이 정확히 그런 명령이라, 셸에만 시그널을 보내면 그 명령이 끝나는 시점에야 닿는다 — 20s 예산에서 9.1s 지연 실측이고, 이는 자체 예산이 만들려던 여유를 통째로 소진한다. 하위 프로세스는 이름 패턴이 아니라 자식 pid 에서 유도해 TERM 후 짧은 유예 뒤 KILL 한다. 같은 이유로 가드는 `EXIT` 만 트랩하고 `TERM` 은 절대 트랩하지 않는다 — `trap` 에 시그널을 적는 순간 기본 처분이 대체되고, TERM 을 트랩한 자식은 자기 마감에서 살아남는다.
+
 `SAFEDEPS_BUDGET_ENGAGE_BYTES`(기본 1KB) 이상인 커맨드만 추가 프로세스 비용을 낸다. 그 아래에서는 판정이 예산의 약 300배 안쪽에서 끝나므로 이 기계장치는 에이전트의 모든 Bash 호출에 얹히는 순수 오버헤드일 뿐이다. 이 engage 크기는 성능 게이트지 보안 경계가 아니다 — 보안 경계는 벽시계 예산이고, 그건 이 숫자를 잰 머신보다 빠르든 느리든 정직하게 유지된다. 회귀: `scripts/test/self-budget.sh`.
 
 npm ecosystem 명령이면 guard 도 위와 같은 Yarn project context 를 해석해(`SAFEDEPS_NPM_PROJECT_DIR` 를 project directory 로 고정) 그 `context_hash` 를 ledger 조회에 접어 넣는다 — 그래서 project-scoped 승인은 그 프로젝트 안에서만 guard 를 통과한다. context 가 invalid 하면(resolutions 는 있는데 lockfile 을 못 씀) package-only 조회로 넘어가지 않고 명령을 그대로 거부한다.

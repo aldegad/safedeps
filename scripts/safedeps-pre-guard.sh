@@ -511,8 +511,30 @@ if [[ -z "${SAFEDEPS_BUDGET_CHILD:-}" ]] && (( ${#COMMAND} >= SAFEDEPS_BUDGET_EN
 
   # Same payload, same script, one env marker so the child judges instead of
   # re-entering this wrapper.
-  printf '%s' "${INPUT}" | SAFEDEPS_BUDGET_CHILD=1 bash "${BASH_SOURCE[0]}" \
-    >"${budget_out}" 2>"${budget_err}" &
+  #
+  # The payload goes through a file rather than a pipe, and job control is on
+  # for the spawn, because the deadline has to be able to signal the whole child
+  # TREE. A bash script blocked in a foreground external command does not act on
+  # a signal until that command returns, and the expensive part of the judgment
+  # is exactly such a command — so signalling the child shell alone lands late,
+  # measured 9.1s late against a 20s budget. With job control the child is its
+  # own process group leader, so `kill -- -PID` reaches the work as well as the
+  # shell. A pipeline would make the group leader the `printf`, not the shell,
+  # and `$!` would name neither.
+  budget_in=$(mktemp "${TMPDIR:-/tmp}/safedeps-budget.XXXXXX")
+  printf '%s' "${INPUT}" > "${budget_in}"
+
+  # Silence this shell's own stderr for the spawn/deadline/reap region. The
+  # shell announces a background job that died by signal ("Terminated: 15" and
+  # the command text) at whatever statement it next reaches, which is why
+  # redirecting `wait` alone does not catch it — the announcement can surface on
+  # any command boundary in the region. Beside a security deny that line reads
+  # as a malfunction rather than as the deadline doing its job. The child's own
+  # stderr is captured to a file and re-emitted verbatim below, so nothing the
+  # judgment actually says is lost; only the shell's bookkeeping is dropped.
+  exec 3>&2 2>/dev/null
+  SAFEDEPS_BUDGET_CHILD=1 bash "${BASH_SOURCE[0]}" \
+    <"${budget_in}" >"${budget_out}" 2>"${budget_err}" &
   budget_child=$!
 
   # The parent keeps the deadline itself rather than delegating to a watchdog
@@ -525,10 +547,31 @@ if [[ -z "${SAFEDEPS_BUDGET_CHILD:-}" ]] && (( ${#COMMAND} >= SAFEDEPS_BUDGET_EN
   # at most the first 50ms step while a long one still coasts on 1s steps.
   budget_waited_ms=0
   budget_step_ms=50
+  budget_timed_out=false
   budget_deadline_ms=$(( SAFEDEPS_SELF_BUDGET_SECONDS * 1000 ))
   while kill -0 "${budget_child}" 2>/dev/null; do
     if (( budget_waited_ms >= budget_deadline_ms )); then
-      kill -TERM "${budget_child}" 2>/dev/null || true
+      # Signal the child AND whatever it is currently blocked in. A bash script
+      # does not act on a signal while a foreground external command is running,
+      # and the expensive part of the judgment is exactly such a command — so
+      # signalling the shell alone lands late, measured 9.1s late against a 20s
+      # budget. Descendants are looked up from this child's own pid, never by
+      # name pattern, so nothing outside this judgment can be selected.
+      budget_kill_tree() {
+        local signal="$1" root="$2" descendant
+        for descendant in $(pgrep -P "${root}" 2>/dev/null); do
+          budget_kill_tree "${signal}" "${descendant}"
+        done
+        kill "-${signal}" "${root}" 2>/dev/null || true
+      }
+      budget_kill_tree TERM "${budget_child}"
+      budget_grace=0
+      while kill -0 "${budget_child}" 2>/dev/null && (( budget_grace < 10 )); do
+        sleep 0.05
+        budget_grace=$(( budget_grace + 1 ))
+      done
+      budget_kill_tree KILL "${budget_child}"
+      budget_timed_out=true
       break
     fi
     sleep "$(printf '%d.%03d' $(( budget_step_ms / 1000 )) $(( budget_step_ms % 1000 )))"
@@ -541,13 +584,21 @@ if [[ -z "${SAFEDEPS_BUDGET_CHILD:-}" ]] && (( ${#COMMAND} >= SAFEDEPS_BUDGET_EN
     fi
   done
 
-  # `2>/dev/null` on the wait, because the shell announces a signalled background
-  # job on its own ("Terminated: 15" plus the whole pipeline text). That lands on
-  # the hook's stderr, which the engine shows to the reader — directly beside a
-  # security deny, where a word like Terminated reads as something having gone
-  # wrong rather than as the gate doing exactly what it decided to do.
+  # Always reap, and always with stderr redirected. The shell announces a
+  # background job that died by signal ("Terminated: 15" plus the command text),
+  # and it does so at whatever statement it next reaches — so skipping `wait`
+  # does not avoid the announcement, it just relocates it to a line with no
+  # redirection, where it lands on the hook's stderr beside a security deny and
+  # reads as a malfunction. Reaping under a redirect is what actually absorbs it.
   budget_rc=0
   wait "${budget_child}" 2>/dev/null || budget_rc=$?
+  if [[ "${budget_timed_out}" == "true" && ${budget_rc} -eq 0 ]]; then
+    # It answered in the instant between the deadline and the signal landing.
+    # We stopped judging it, so we do not get to use its answer.
+    budget_rc=143
+  fi
+
+  exec 2>&3 3>&-
 
   # The hooks exit 0 on every designed path (decisions travel as JSON on
   # stdout), so a non-zero child is an unfinished judgment, whether the watchdog
@@ -555,11 +606,11 @@ if [[ -z "${SAFEDEPS_BUDGET_CHILD:-}" ]] && (( ${#COMMAND} >= SAFEDEPS_BUDGET_EN
   if [[ ${budget_rc} -eq 0 ]]; then
     cat "${budget_err}" >&2
     cat "${budget_out}"
-    rm -f "${budget_out}" "${budget_err}"
+    rm -f "${budget_out}" "${budget_err}" "${budget_in}"
     exit 0
   fi
 
-  rm -f "${budget_out}" "${budget_err}"
+  rm -f "${budget_out}" "${budget_err}" "${budget_in}"
   log_advisory "pre-guard DENY: judgment unfinished within the ${SAFEDEPS_SELF_BUDGET_SECONDS}s self-budget (command ${#COMMAND} bytes, child rc=${budget_rc}) — fail-closed, not a detection."
   jq -nc --arg budget "${SAFEDEPS_SELF_BUDGET_SECONDS}" --arg size "${#COMMAND}" \
     '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:("safedeps: UNDECIDED, not unsafe — safedeps could not finish judging this command within its " + $budget + "s budget (" + $size + " bytes of command text), so it is blocked fail-closed. Nothing was detected in it; the gate simply did not get to an answer, and an install it cannot judge must not run. Scan cost grows with command length. Split the command, or write long content with a file-writing tool instead of one very large shell command, and retry.")}}'
@@ -623,12 +674,15 @@ KEY_DIR_HASH=$(compute_dir_hash "${CWD_DIR}")
 SNAPSHOT_ID="${TIMESTAMP}_${DIR_HASH}"
 
 acquire_state_lock
-# TERM/INT as well as EXIT: under the self budget above this script can be the
-# child that gets signalled, and a lock leaked by a signalled child would make
-# the next install wait out the 60s stale-lock timer. The lock is taken after
-# the scan, so the budget kill lands here only in the narrow case where the
-# install path itself runs long, but the insurance costs one word.
-trap 'release_state_lock' EXIT TERM INT
+# EXIT only, deliberately. Trapping TERM here looks like cheap insurance against
+# a signalled child leaking the state lock, and it was committed as exactly that
+# — but naming a signal in `trap` REPLACES its default disposition, so the child
+# stopped dying at the deadline and ran its judgment to completion instead. The
+# budget above then measured nothing: a padded install answered at 38.9s against
+# a 30s runtime budget, which is the very fail-open this plan exists to close.
+# A leaked lock is bounded by the 60s stale-lock sweep in acquire_state_lock; a
+# defeated deadline is not bounded by anything.
+trap 'release_state_lock' EXIT
 
 PARENT_SNAPSHOT_ID=""
 CONFIRMED_FILE="${GUARD_DIR}/confirmed_${DIR_HASH}"

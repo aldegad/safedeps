@@ -119,6 +119,48 @@ for install_cmd in \
 done
 pass "padded installs past the budget are denied across command-gate-authority ecosystems"
 
+# --- the deadline must survive a child that is not listening ---------------
+# The first version of this battery put every over-budget case on a 1s budget,
+# so the deadline always landed early in the scan, where the child happens to be
+# between external commands and takes a signal immediately. That corpus stayed
+# green while a padded install answered at 38.9s against a 30s runtime budget —
+# the exact fail-open this file exists to prevent. Two things were invisible: a
+# TERM trap on the child (which replaces the default disposition, so the child
+# survived the deadline and ran to completion), and the plain fact that a shell
+# does not act on a signal while a foreground external command is running.
+#
+# Both show up only when the deadline lands deep in the scan, inside one of the
+# long greps. This case is sized to do that: 12KB against an 11s budget answers
+# at ~12s when the deadline is enforced on the whole child tree, and at ~17s
+# when it is only sent to the child shell.
+#
+# The assertion is on the OVERSHOOT, not on elapsed time, because that is the
+# property the runtime cares about — the guard's answer has to arrive before the
+# runtime's own budget expires, and how much slack that leaves is exactly the
+# budget minus the overshoot.
+deep_budget=11
+guard "pip install requests==2.31.0 # ${big}" "${deep_budget}"
+[[ "${GUARD_DECISION}" == "deny" ]] \
+  || fail "deadline deep in the scan still denies (got: ${GUARD_DECISION})"
+grep -q 'UNDECIDED' <<< "${GUARD_REASON}" \
+  || fail "deadline deep in the scan is reported as undecided, not as a finding"
+deep_overshoot=$(( GUARD_ELAPSED - deep_budget ))
+(( deep_overshoot <= 3 )) \
+  || fail "deadline deep in the scan is honoured promptly (overshot the ${deep_budget}s budget by ${deep_overshoot}s; a child that outlasts the deadline is how this gate fails open)"
+pass "deadline landing deep in the scan is honoured promptly, not whenever the child notices"
+
+# The same property stated from the other side: the answer tracks OUR budget,
+# not the judgment's natural length.
+guard "echo ${big}" 2
+budget_two=${GUARD_ELAPSED}
+guard "echo ${big}" 6
+budget_six=${GUARD_ELAPSED}
+(( budget_six > budget_two )) \
+  || fail "answer time tracks the configured budget (2s->${budget_two}s, 6s->${budget_six}s)"
+(( budget_six <= 9 )) \
+  || fail "a longer budget is still honoured rather than overrun (6s->${budget_six}s)"
+pass "answer time tracks the configured budget, not the judgment's natural length"
+
 # --- without the budget the same input walks through -----------------------
 # Mutation check in the honest direction: disable the machinery (engage size
 # above the input) and the over-budget command is judged clean and allowed.
