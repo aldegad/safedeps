@@ -290,6 +290,12 @@ Claude runs: npm install @jackwener/opencli@^1.7.16
 
 The guard also snapshots lockfiles/manifests and keeps the v1 hardcoded pattern blocks (see section 5). It is fast and advisory; the authority is the post-install gate.
 
+**The guard keeps a budget of its own.** The runtime gives this hook a fixed budget (the installer registers 30s) and kills it when that expires, after which the tool call proceeds — measured on Claude Code, 2026-08-04. The command scan is superlinear in command length, so that budget is reachable by padding: measured here, 28KB of command text took 29s and 32KB took 38s. Past that line the gate used to disappear without saying anything, which for `pip`/`cargo`/`go`/`gem` — where this gate is the authority, not an advisory layer — is a bypass that needs no knowledge of the scanner at all.
+
+The runtime's timeout behavior is not safedeps' to change; answering before it fires is. The guard runs its judgment in a child under `SAFEDEPS_SELF_BUDGET_SECONDS` (default 20), and if that child has not answered by the deadline the guard answers for it: deny, because an install it could not judge must not run. Two properties that deny must keep — it is fail-closed but **not a finding** (the reason leads with `UNDECIDED, not unsafe` and says nothing was detected, because a reader who confuses "did not finish" with "found something" learns to route around the gate), and it is recorded to `advisory.log` like every other bypass or unavailability.
+
+Only commands at least `SAFEDEPS_BUDGET_ENGAGE_BYTES` long (default 1KB) pay for the extra process; below that the judgment finishes about 300x inside the budget, so the machinery would be pure overhead on every Bash call. That engage size is a performance gate, not a security boundary — the security boundary is the wall-clock budget, which stays honest on machines faster or slower than the one these numbers were measured on. Regression: `scripts/test/self-budget.sh`.
+
 For an npm-ecosystem command, the guard resolves the same Yarn project context described above (`SAFEDEPS_NPM_PROJECT_DIR` pinned to the project directory) and folds its `context_hash` into the ledger lookup, so a project-scoped approval only passes the guard inside its own project. An invalid context (resolutions present, lockfile unusable) denies the command outright rather than falling back to a package-only lookup.
 
 ### Phase 3 — npm primary effect gate + reorg (PostToolUse / `safedeps-post-verify.sh`)
@@ -309,6 +315,10 @@ install done → safedeps-post-verify.sh
                  • rm -rf node_modules; reinstall to match the ledger
                  • append to reorg.log; message the agent
 ```
+
+**This gate has the same 30s budget, and it is killed the same way — measured, not assumed.** Using the protocol that established the PreToolUse behavior (a sandbox project, a hook that records when it starts and when it finishes, a control inside the budget and an experiment past it), a PostToolUse hook given 20s of work against a 5s budget started and never finished, while the 1s control finished. The work above is bounded by the user's project and the network rather than by anything safedeps controls: `npm ci`, `npm install`, `npm rebuild`, and an OSV batch over the whole closure.
+
+So the sentence "the effect gate backs up the command gate" holds *inside* the budget and not past it, and it fails worse in kind: a killed pre-hook lets one unjudged command through, while a killed post-hook can land in the middle of a rollback. The pre-hook's answer to running out of time is to deny (Phase 2), but a post-install gate cannot deny — the command has already run — so its answer is a different design question, tracked as `safedeps/effect-gate-killed-mid-rollback` and not solved here. Codex CLI timeout behavior remains unmeasured on both hooks; parity is not assumed.
 
 ### Phase 0 — the installed command is an entry shim (`safedeps-hook-entry.sh`)
 

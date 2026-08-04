@@ -289,6 +289,12 @@ Claude: npm install @jackwener/opencli@^1.7.16
 
 guard 는 lockfile/manifest 도 snapshot 하고 v1 hardcoded pattern 차단(section 5)도 유지한다. 빠르고 advisory 일 뿐, 권위는 post gate 다.
 
+**guard 는 자기 예산을 따로 갖는다.** 런타임은 이 훅에 고정 예산을 주고(인스톨러가 30s 로 등록) 그게 지나면 죽인 뒤 tool call 을 그대로 진행시킨다 — Claude Code 에서 실측(2026-08-04). 커맨드 스캔은 길이에 대해 초선형이라 그 예산은 패딩만으로 닿는다: 여기 실측으로 커맨드 텍스트 28KB 가 29s, 32KB 가 38s 였다. 그 선을 넘으면 게이트가 아무 말 없이 사라졌고, `pip`·`cargo`·`go`·`gem` 처럼 이 게이트가 advisory 가 아니라 권위인 생태계에서는 스캐너를 전혀 몰라도 되는 우회다.
+
+런타임의 타임아웃 동작은 safedeps 소관이 아니지만, 그게 발동하기 전에 답을 내는 것은 소관이다. guard 는 판정을 자식 프로세스에서 `SAFEDEPS_SELF_BUDGET_SECONDS`(기본 20) 아래 돌리고, 그 자식이 기한까지 답을 못 내면 guard 가 대신 답한다: deny — 판정하지 못한 설치는 돌면 안 되기 때문이다. 그 deny 가 지켜야 할 두 가지 — fail-closed 이지만 **적발이 아니다**(사유가 `UNDECIDED, not unsafe` 로 시작하고 아무것도 탐지되지 않았음을 명시한다. "못 끝냈다" 와 "찾았다" 를 구분 못 하는 독자는 게이트를 우회하는 법을 배운다), 그리고 다른 모든 우회·불가용과 마찬가지로 `advisory.log` 에 기록된다.
+
+`SAFEDEPS_BUDGET_ENGAGE_BYTES`(기본 1KB) 이상인 커맨드만 추가 프로세스 비용을 낸다. 그 아래에서는 판정이 예산의 약 300배 안쪽에서 끝나므로 이 기계장치는 에이전트의 모든 Bash 호출에 얹히는 순수 오버헤드일 뿐이다. 이 engage 크기는 성능 게이트지 보안 경계가 아니다 — 보안 경계는 벽시계 예산이고, 그건 이 숫자를 잰 머신보다 빠르든 느리든 정직하게 유지된다. 회귀: `scripts/test/self-budget.sh`.
+
 npm ecosystem 명령이면 guard 도 위와 같은 Yarn project context 를 해석해(`SAFEDEPS_NPM_PROJECT_DIR` 를 project directory 로 고정) 그 `context_hash` 를 ledger 조회에 접어 넣는다 — 그래서 project-scoped 승인은 그 프로젝트 안에서만 guard 를 통과한다. context 가 invalid 하면(resolutions 는 있는데 lockfile 을 못 씀) package-only 조회로 넘어가지 않고 명령을 그대로 거부한다.
 
 ### Phase 3 — npm primary effect gate + reorg (PostToolUse / `safedeps-post-verify.sh`)
@@ -308,6 +314,10 @@ install 완료 → safedeps-post-verify.sh
                  • rm -rf node_modules; ledger 와 일치하게 재설치
                  • reorg.log 기록; 에이전트에 경고
 ```
+
+**이 게이트도 같은 30s 예산을 받고 같은 방식으로 죽는다 — 가정이 아니라 실측이다.** PreToolUse 동작을 확정한 그 프로토콜로(샌드박스 프로젝트, 시작과 완료를 각각 기록하는 훅, 예산 내 통제군과 예산 초과 실험군) 쟀더니, 5s 예산에 20s 작업을 준 PostToolUse 훅은 시작만 하고 끝내지 못했고 1s 통제군은 끝냈다. 위 작업은 safedeps 가 통제하는 것이 아니라 사용자 프로젝트와 네트워크에 매인다: `npm ci`, `npm install`, `npm rebuild`, 그리고 closure 전체에 대한 OSV 배치.
+
+그래서 "효과게이트가 커맨드 게이트를 받쳐준다" 는 문장은 예산 **안에서만** 참이고, 실패의 종류는 더 나쁘다: 죽은 pre 훅은 판정 못 한 커맨드 하나를 통과시키지만, 죽은 post 훅은 롤백 도중에 떨어질 수 있다. 시간이 다했을 때 pre 훅의 답은 deny 지만(Phase 2), 설치 후 게이트는 deny 할 수 없다 — 커맨드가 이미 돌았다. 그래서 그 답은 별개의 설계 문제이고 `safedeps/effect-gate-killed-mid-rollback` 으로 추적하며 여기서 풀지 않는다. Codex CLI 의 타임아웃 동작은 두 훅 모두 여전히 미측정이라 parity 를 가정하지 않는다.
 
 ### Phase 0 — 설치되는 커맨드는 엔트리 셔틀이다 (`safedeps-hook-entry.sh`)
 

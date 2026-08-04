@@ -56,7 +56,7 @@ The internal engine keeps the v1 `reorg-guard` assets.
 
 ### Release notes
 
-- The npm package version in `package.json` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION` tracks it and the smoke test reads `package.json` to compare (current: v2.14.5).
+- The npm package version in `package.json` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION` tracks it and the smoke test reads `package.json` to compare (current: v2.15.0).
 - `npm test` runs the release smoke suite; the full fixture E2E lives under `v2.1-tests`.
 - The daily re-check uses no LLM tokens. It is opt-in: a macOS `launchd` user agent runs `safedeps re-check --json` daily, installed atomically by `install-safedeps-recheck-agent.mjs`. It writes `~/.safedeps/recheck.log` and `~/.safedeps/recheck-alerts.jsonl` and raises a macOS notification on a new CVE/KEV/revoke/provider-skip/suspected-forgery. Network is used only for OSV / CISA / GHSA queries.
 
@@ -334,6 +334,7 @@ The pre-guard's hidden-install detector judged pipe-to-shell by grepping the raw
 - Guard cost on a 6KB benign command: 1.5s before the fix, 2.8s with the fix, 1.4s after the order swap. When install text is present the scan must run and the cost stays ~2.7s at 6KB.
 - The PreToolUse hook budget is 30s. The remaining quadratic scanner (compound-command splitting, untouched here) crosses that budget near ~29KB of command text (28KB → 28s measured). That bound predates this release — it sat near ~26KB before the fix — and its linearization is tracked as follow-up work.
 - **Crossing the budget is fail-open.** Measured empirically on Claude Code (2026-08-04): a PreToolUse command hook that exceeds its timeout is killed and the tool call proceeds; an in-budget deny from the same hook blocks. So past the size bound this guard silently disappears, and padding a command past it is trivial. For npm the PostToolUse effect gate remains the enforcement authority (with its own 30s budget); for the other ecosystems the command gate is the primary gate, which is why the scanner linearization is tracked as security follow-up, not a nicety. Codex CLI timeout behavior is unmeasured — do not assume parity.
+  - **Corrected in v2.15.0 on both halves.** The fail-open is closed at the source: the guard now answers on a budget of its own before the runtime's expires. And the npm sentence above was an assumption about an untimed hook — PostToolUse is killed at its budget too (measured), so npm is not covered past it either. See v2.15.0.
 
 ---
 
@@ -464,6 +465,40 @@ Three validator notes that sat outside the verdict, closed as a set.
 The last one is about evidence, not code. A previous release cited "159 forms" from a scratch corpus that no reader can reconstruct — the substantive claims held up under independent replay, but the number was decoration, and a number nobody can check reads as verification without being any. `AGENTS.md` now asks for counts a reader can reproduce: the battery's own form count, `npm test`'s ok lines, or a committed corpus.
 
 ---
+
+## v2.15.0 — the guard answers on its own budget, so the runtime never kills it mid-judgment (shipped)
+
+Status: shipped as v2.15.0.
+
+v2.13.0 recorded that crossing the 30s hook budget is fail-open, and left it as an argument for linearizing the scanner. That was the wrong conclusion to stop at. Linearization moves the crossing point; it does not decide what happens past it, and past it the gate vanished without a word. Padding a command to ~30KB was the whole attack, and for `pip`, `cargo`, `go`, and `gem` — where the command gate is the authority rather than an advisory layer — that is a universal bypass requiring no knowledge of the scanner at all.
+
+The runtime's timeout behavior is not ours to change. Answering before it fires is.
+
+### What changed
+
+- **The guard keeps a budget of its own**, smaller than the runtime's (default 20s against the registered 30s). It runs its judgment in a child, and if that child has not answered by the deadline the guard answers for it: deny, because an install it could not judge must not run. The runtime never gets to kill it mid-flight, so there is nothing left to fail open.
+- **The deny says which kind of deny it is.** "I did not finish looking" and "I looked and found something" are different claims, and a reader who cannot tell them apart learns to route around the gate. The reason string leads with `UNDECIDED, not unsafe`, states that nothing was detected, and says what to do instead. It is recorded to `advisory.log` like every other bypass or unavailability.
+- **Commands below the engage size pay nothing.** The machinery costs one integer comparison until the command is large enough to be anywhere near the budget (default 1KB, measured at ~0.1s against a 30s budget — about 300x of headroom). The engage size is a performance gate, not a security boundary; the security boundary is the wall-clock budget, which stays honest on a machine slower or faster than the one these numbers came from.
+- **The deadline is polled by the guard itself, not by a watchdog subshell.** A watchdog has to sleep in fixed steps, and killing one while it sits in `sleep` does not return until that sleep expires — measured, that rounded every engaged call up to the next whole second (a 788ms judgment took 1050ms). Polling from the parent starts at 50ms and doubles to 1s, so a fast judgment loses at most the first step.
+
+### Verification / measured bounds
+
+- Cost curve on the development machine: 1KB → 0.1s, 4KB → 0.68s, 8KB → 2.5s, 16KB → 9.6s, 24KB → 21.4s, 28KB → 29.3s, 32KB → 37.8s. The 30s runtime budget is crossed between 28KB and 32KB, reproducing the bound recorded in v2.13.0 from the other side.
+- With the budget engaged, a 32KB command is denied at ~20.2s against a 20s budget: the answer arrives with ~9.8s still on the runtime's clock. The overshoot is bounded by one poll step (≤1s).
+- Machinery overhead where it engages, same input both ways: 4KB 684ms → 820ms, 8KB 2482ms → 2623ms. Below the engage size there is no child and no measurable change.
+- `scripts/test/self-budget.sh` pins both directions and joins `npm test`: over-budget commands and padded `pip`/`cargo`/`go`/`gem` installs deny; the deny is marked undecided, is not phrased as a finding, and reaches `advisory.log`; benign commands, `npm run`, unapproved installs, and engaged-but-in-budget commands decide exactly as before.
+- The battery carries its own mutation check: with the budget disengaged, the identical over-budget command walks through. Its first draft sized that input ~1.3x the budget and reported a false pass, so the committed version uses a ~5x margin.
+
+### The npm assumption did not survive being measured
+
+v2.13.0 said the PostToolUse effect gate "remains the enforcement authority" for npm past the command gate's budget. That was an assumption about a hook nobody had timed. Measured 2026-08-04 with the same protocol used for PreToolUse — a sandbox project, a hook that records when it starts and when it finishes, a control inside the budget and an experiment past it:
+
+- control (1s work, 5s budget): started and finished.
+- experiment (20s work, 5s budget): started, never finished.
+
+**PostToolUse is killed at its budget too.** The effect gate is registered with the same 30s, and its work — `npm ci`, `npm install`, `npm rebuild`, plus an OSV batch over the whole closure — is bounded by the user's project and the network rather than by anything safedeps controls. So npm has the same exposure, and it is worse in kind than the command gate's: the pre-hook's kill lets one unjudged command through, while the post-hook's kill can land in the middle of a rollback.
+
+This release does not fix that. A post-install gate cannot deny — the command has already run — so its answer to "I could not finish" is a different design question, tracked as `safedeps/effect-gate-killed-mid-rollback`. What is fixed here is the claim: the docs no longer say npm is covered past the budget, because it is not.
 
 ## v3 (future)
 
