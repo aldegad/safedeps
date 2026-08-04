@@ -715,12 +715,14 @@ check_npm_effect_closure() {
     return
   fi
 
+  # One ledger read for the whole closure. The per-package form walked the whole
+  # ledger directory for every package, which put the gate past its own hook
+  # budget at a closure of four packages on a 738-entry ledger
+  # (scripts/measure/effect-gate-cost.sh).
   while IFS=$'\t' read -r package_name version; do
     [[ -n "${package_name}" && -n "${version}" ]] || continue
-    if ! safedeps_ledger_effect_check "npm" "${package_name}" "${version}" >/dev/null 2>&1; then
-      printf '%s@%s\n' "${package_name}" "${version}" >> "${miss_file}"
-    fi
-  done < <(jq -r '.[] | [.package, (.version | tostring)] | @tsv' "${closure_file}")
+    printf '%s@%s\n' "${package_name}" "${version}" >> "${miss_file}"
+  done < <(safedeps_ledger_effect_check_batch "npm" "${closure_file}")
 
   miss_count=$(wc -l < "${miss_file}" | tr -d ' ')
   if [[ "${miss_count}" -gt 0 ]]; then

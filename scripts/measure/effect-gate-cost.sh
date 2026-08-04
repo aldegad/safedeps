@@ -3,10 +3,12 @@
 #
 # The pre-guard's cost is bound by the command text. The effect gate's is not —
 # it is bound by the project's lockfile closure (N) and by the machine's own
-# approved-spec ledger (L), because `safedeps_ledger_effect_check` walks every
-# ledger file for every closure entry. This harness sweeps both axes and prints
-# the wall clock of each stage, so the crossing point against the registered 30s
-# hook timeout is a measured number rather than an impression.
+# approved-spec ledger (L). This harness sweeps both axes and prints the wall
+# clock of each stage, so the crossing point against the registered 30s hook
+# timeout is a measured number rather than an impression.
+#
+# The ledger column measures what the gate actually calls
+# (safedeps_ledger_effect_check_batch), so a change to that call shows up here.
 #
 # Usage:
 #   scripts/measure/effect-gate-cost.sh <package-lock.json> [--ledger <dir>] [N...]
@@ -96,10 +98,7 @@ for n in "${SIZES[@]}"; do
   jq -c --argjson n "${n}" '.[0:$n]' "${FULL_CLOSURE}" > "${SLICE}"
   t1=$(now_ms)
 
-  while IFS=$'\t' read -r package_name version; do
-    [[ -n "${package_name}" && -n "${version}" ]] || continue
-    safedeps_ledger_effect_check "npm" "${package_name}" "${version}" >/dev/null 2>&1
-  done < <(jq -r '.[] | [.package, (.version | tostring)] | @tsv' "${SLICE}")
+  safedeps_ledger_effect_check_batch "npm" "${SLICE}" >/dev/null 2>&1
   t2=$(now_ms)
 
   safedeps_providers_query_batch "npm" "${SLICE}" > "${PROVIDER_OUT}" 2>/dev/null
