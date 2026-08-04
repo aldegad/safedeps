@@ -333,6 +333,7 @@ The pre-guard's hidden-install detector judged pipe-to-shell by grepping the raw
 - Smoke covers the full case set: 3 quoted-idiom false positives allow, 6 hidden installs (plain pipe, command substitutions, `sh -c`, `eval`, heredoc redirect line) deny. Verdicts were replayed under both check orders in both directions — identical on every case.
 - Guard cost on a 6KB benign command: 1.5s before the fix, 2.8s with the fix, 1.4s after the order swap. When install text is present the scan must run and the cost stays ~2.7s at 6KB.
 - The PreToolUse hook budget is 30s. The remaining quadratic scanner (compound-command splitting, untouched here) crosses that budget near ~29KB of command text (28KB → 28s measured). That bound predates this release — it sat near ~26KB before the fix — and its linearization is tracked as follow-up work.
+- **Crossing the budget is fail-open.** Measured empirically on Claude Code (2026-08-04): a PreToolUse command hook that exceeds its timeout is killed and the tool call proceeds; an in-budget deny from the same hook blocks. So past the size bound this guard silently disappears, and padding a command past it is trivial. For npm the PostToolUse effect gate remains the enforcement authority (with its own 30s budget); for the other ecosystems the command gate is the primary gate, which is why the scanner linearization is tracked as security follow-up, not a nicety. Codex CLI timeout behavior is unmeasured — do not assume parity.
 
 ---
 

@@ -333,6 +333,7 @@ pre-guard 의 hidden-install 탐지가 pipe-to-shell 을 raw 커맨드 텍스트
 - smoke 가 전체 케이스 집합을 덮는다: 인용 idiom 오탐 3건 allow, hidden install 6건(plain pipe, command substitution, `sh -c`, `eval`, heredoc redirect line) deny. 판정은 두 검사 순서 양방향으로 재생해 전 케이스 동일했다.
 - 6KB 양성 커맨드의 guard 비용: 수정 전 1.5s, 수정 후 2.8s, 순서 스왑 후 1.4s. install 텍스트가 있으면 스캔이 돌아야 하고 6KB 기준 ~2.7s 를 유지한다.
 - PreToolUse 훅 예산은 30s 다. 남아 있는 2차 스캐너(compound-command 분리, 이번에 안 건드림)가 커맨드 텍스트 약 29KB 근처에서 예산을 넘는다(28KB → 28s 실측). 이 경계는 이 릴리스 이전부터 있었고 — 수정 전엔 약 26KB — 선형화는 후속 작업으로 추적한다.
+- **예산을 넘으면 fail-open 이다.** Claude Code 에서 실증(2026-08-04): 타임아웃을 넘긴 PreToolUse command 훅은 죽고 tool call 은 진행된다. 같은 훅이 예산 안에서 낸 deny 는 차단된다. 즉 크기 경계를 넘으면 이 guard 는 조용히 사라지고, 커맨드를 그 너머로 패딩하는 건 어렵지 않다. npm 은 PostToolUse effect gate 가 enforcement 권위로 남지만(자체 30s 예산), 나머지 ecosystem 은 command gate 가 primary 라서 — 스캐너 선형화를 편의가 아니라 보안 후속으로 추적하는 이유다. Codex CLI 의 타임아웃 동작은 미실측 — parity 를 가정하지 마라.
 
 ---
 
