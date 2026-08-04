@@ -329,10 +329,15 @@ payload_pipes_install_text_to_shell() {
   # its pipe on the redirect line, which survives the strip). The install text
   # is still searched raw, because in a real hidden install it lives inside the
   # producer's quotes or heredoc body by construction.
-  exec_view=$(command_scan_text "$(strip_heredoc_bodies "${payload}")")
+  #
+  # Check the raw install text FIRST: the grep is O(n) while the exec_view
+  # scan is a quadratic character loop, and both checks are pure predicates,
+  # so conjunction order cannot change the verdict — only the cost. Most
+  # commands carry no install text at all and must not pay for the scan.
+  echo "${payload}" | grep -qEi "${manager_pattern}.*${verb_pattern}" || return 1
 
-  echo "${exec_view}" | grep -qEi '\|[[:space:]]*(bash|sh|zsh)([[:space:]]|$)' && \
-    echo "${payload}" | grep -qEi "${manager_pattern}.*${verb_pattern}"
+  exec_view=$(command_scan_text "$(strip_heredoc_bodies "${payload}")")
+  echo "${exec_view}" | grep -qEi '\|[[:space:]]*(bash|sh|zsh)([[:space:]]|$)'
 }
 
 command_candidate_texts() {

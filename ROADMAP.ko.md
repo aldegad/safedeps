@@ -56,7 +56,7 @@ Safedeps 는 **개발 의존성 install** (npm / pip / cargo / go / gem / maven 
 
 ### 릴리즈 메모
 
-- npm 패키지 version 은 `package.json` 이 SSoT. `bin/safedeps` `SAFEDEPS_VERSION` 이 이를 따라가고, smoke 테스트는 `package.json` 을 읽어 대조한다 (현재 v2.12.0).
+- npm 패키지 version 은 `package.json` 이 SSoT. `bin/safedeps` `SAFEDEPS_VERSION` 이 이를 따라가고, smoke 테스트는 `package.json` 을 읽어 대조한다 (현재 v2.13.0).
 - `npm test` 는 release smoke suite 를 실행한다. full fixture E2E 는 `v2.1-tests` 에 있다.
 - daily re-check 는 LLM 토큰을 쓰지 않는다. opt-in 이며, macOS `launchd` user agent 가 매일 `safedeps re-check --json` 을 실행한다 (`install-safedeps-recheck-agent.mjs` 로 atomic install). `~/.safedeps/recheck.log` 와 `~/.safedeps/recheck-alerts.jsonl` 를 쓰고, 새 CVE/KEV/revoke/provider-skip/위조-의심 시 macOS notification 을 띄운다. 네트워크는 OSV / CISA / GHSA query 에만 쓴다.
 
@@ -311,6 +311,28 @@ overrides 를 반영해도 취약점은 못 숨긴다. probe 가 각 override �
 - pre-guard 키 정합: 승인을 얻은 레포는 allow, 그 overrides 가 없는 레포는 deny
 - hermetic e2e 가 npm 을 stub 해 resolved closure 가 probe manifest 에 의존하게 만들어 registry 접근 없이 전 경로를 고정. 스코핑과 주입 경로 둘 다 뮤테이션 검증
 - ledger 는 override-set hash 가 없거나 집합이 빈 `npm-overrides-probe` 컨텍스트를 거부
+
+---
+
+## v2.13 — pipe 위치 기반 hidden-install 판정 + guard 비용 복원 (출시 완료)
+
+Status: v2.13.0 으로 출시.
+
+pre-guard 의 hidden-install 탐지가 pipe-to-shell 을 raw 커맨드 텍스트 grep 으로 판정했다. 그 idiom 을 *인용만* 한 커맨드 — repro 라인을 적은 커밋 메시지 — 가 hidden install 로 거부됐고, 같은 날 두 워커가 이걸 밟았다. 수정은 무엇을 실행 pipe 로 볼 것인가를 바꾼다. 이 릴리스는 그 동작 변경을 기록하고, 수정이 들여온 guard 상수 회귀를 복원한다.
+
+### 무엇이 바뀌었나
+
+- **pipe 는 실행 자리에서만 인정한다.** pipe-to-shell 연산자는 자기 인용 레벨에서 따옴표 밖, heredoc 본문 밖에 있어야 한다. install 텍스트는 여전히 raw 로 찾는다 — 진짜 hidden install 에서는 구조상 producer 의 따옴표 안에 있기 때문이다. 외곽 인용이 내부 pipe 를 가리므로 같은 검사가 `sh -c` payload, `eval` payload, command substitution 에 재귀 적용된다.
+- **소비자가 보게 될 판정 변화** (이 guard 는 다른 레포의 커밋을 막는 물건인데, 통과 기준이 바뀌고도 지금까지 버전 신호가 없었다):
+  - *이제 허용:* `... install ... | sh` 를 텍스트로 인용한 커밋 메시지나 데이터 heredoc. 오탐 거부였다.
+  - *이제 거부:* `sh -c "... | sh"` 와 `eval "... | sh"` 로 래핑된 piped install. 구 raw grep 은 shell 이름 뒤에 공백이나 줄끝을 요구해서, 닫는 따옴표가 붙은 형태(`| sh"`)가 탐지를 빠져나갔다. 진양성 탐지는 순증이다 — substitution·heredoc-redirect·plain-pipe 형태는 전에도 잡았고 지금도 잡는다.
+- **검사 순서를 cheap-first 로 복원.** 수정은 quote-blank 실행 뷰(2차 문자 스캔)를 O(n) raw install-텍스트 grep 보다 먼저, 모든 커맨드에서 계산했다. 두 검사는 순수 술어라 논리곱 순서가 판정을 못 바꾼다 — 비용만 바꾼다. 이제 raw grep 이 먼저 돌고, install 텍스트가 아예 없는 대다수 커맨드는 스캔을 건너뛴다.
+
+### 검증 / 실측 경계
+
+- smoke 가 전체 케이스 집합을 덮는다: 인용 idiom 오탐 3건 allow, hidden install 6건(plain pipe, command substitution, `sh -c`, `eval`, heredoc redirect line) deny. 판정은 두 검사 순서 양방향으로 재생해 전 케이스 동일했다.
+- 6KB 양성 커맨드의 guard 비용: 수정 전 1.5s, 수정 후 2.8s, 순서 스왑 후 1.4s. install 텍스트가 있으면 스캔이 돌아야 하고 6KB 기준 ~2.7s 를 유지한다.
+- PreToolUse 훅 예산은 30s 다. 남아 있는 2차 스캐너(compound-command 분리, 이번에 안 건드림)가 커맨드 텍스트 약 29KB 근처에서 예산을 넘는다(28KB → 28s 실측). 이 경계는 이 릴리스 이전부터 있었고 — 수정 전엔 약 26KB — 선형화는 후속 작업으로 추적한다.
 
 ---
 

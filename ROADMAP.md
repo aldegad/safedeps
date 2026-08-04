@@ -56,7 +56,7 @@ The internal engine keeps the v1 `reorg-guard` assets.
 
 ### Release notes
 
-- The npm package version in `package.json` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION` tracks it and the smoke test reads `package.json` to compare (current: v2.12.0).
+- The npm package version in `package.json` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION` tracks it and the smoke test reads `package.json` to compare (current: v2.13.0).
 - `npm test` runs the release smoke suite; the full fixture E2E lives under `v2.1-tests`.
 - The daily re-check uses no LLM tokens. It is opt-in: a macOS `launchd` user agent runs `safedeps re-check --json` daily, installed atomically by `install-safedeps-recheck-agent.mjs`. It writes `~/.safedeps/recheck.log` and `~/.safedeps/recheck-alerts.jsonl` and raises a macOS notification on a new CVE/KEV/revoke/provider-skip/suspected-forgery. Network is used only for OSV / CISA / GHSA queries.
 
@@ -311,6 +311,28 @@ Honoring overrides cannot mask a vulnerability: the probe resolves each one to a
 - pre-guard key parity: allow in the repo that earned the approval, deny in one without those overrides
 - hermetic e2e stubs npm so the resolved closure depends on the probe manifest, fixing the whole chain without registry access; the scoping and injection paths are both mutation-verified
 - ledger rejects an `npm-overrides-probe` context missing its override-set hash or carrying an empty set
+
+---
+
+## v2.13 — pipe-position hidden-install judgment + guard cost restore (shipped)
+
+Status: shipped as v2.13.0.
+
+The pre-guard's hidden-install detector judged pipe-to-shell by grepping the raw command text. A command that merely *quoted* the idiom — a commit message documenting a repro line — was denied as a hidden install, and two workers hit that on the same day. The fix changes what counts as an execution pipe. This release records that behavior change and restores the guard's constant cost, which the fix had regressed.
+
+### What changed
+
+- **A pipe counts only in execution position.** The pipe-to-shell operator must sit outside quotes and outside heredoc bodies at its own quoting level. The install text is still searched raw, because in a real hidden install it lives inside the producer's quotes by construction. Outer quoting hides inner pipes, so the same check recurses into `sh -c` payloads, `eval` payloads, and command substitutions.
+- **Verdict changes a consumer will see** (this guard blocks commits in other repos, so the pass criteria shifted with no version signal until now):
+  - *Now allowed:* a commit message or data heredoc quoting `... install ... | sh` as text. These were false-positive denials.
+  - *Now denied:* `sh -c "... | sh"` and `eval "... | sh"` wrapped piped installs. The old raw grep required whitespace or end-of-line after the shell name, so a closing quote hugging it (`| sh"`) escaped detection. True-positive detection strictly grew; the substitution, heredoc-redirect, and plain-pipe forms were already caught and still are.
+- **Check order restored to cheap-first.** The fix computed the quote-blanked execution view (a quadratic character scan) before the O(n) raw install-text grep, on every command. Both checks are pure predicates, so conjunction order cannot change any verdict — only the cost. The raw grep now runs first and the scan is skipped for the vast majority of commands, which carry no install text at all.
+
+### Verification / measured bounds
+
+- Smoke covers the full case set: 3 quoted-idiom false positives allow, 6 hidden installs (plain pipe, command substitutions, `sh -c`, `eval`, heredoc redirect line) deny. Verdicts were replayed under both check orders in both directions — identical on every case.
+- Guard cost on a 6KB benign command: 1.5s before the fix, 2.8s with the fix, 1.4s after the order swap. When install text is present the scan must run and the cost stays ~2.7s at 6KB.
+- The PreToolUse hook budget is 30s. The remaining quadratic scanner (compound-command splitting, untouched here) crosses that budget near ~29KB of command text (28KB → 28s measured). That bound predates this release — it sat near ~26KB before the fix — and its linearization is tracked as follow-up work.
 
 ---
 
