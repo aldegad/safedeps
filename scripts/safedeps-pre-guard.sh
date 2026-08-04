@@ -553,10 +553,19 @@ if [[ -z "${SAFEDEPS_BUDGET_CHILD:-}" ]] && (( ${#COMMAND} >= SAFEDEPS_BUDGET_EN
     if (( budget_waited_ms >= budget_deadline_ms )); then
       # Signal the child AND whatever it is currently blocked in. A bash script
       # does not act on a signal while a foreground external command is running,
-      # and the expensive part of the judgment is exactly such a command — so
-      # signalling the shell alone lands late, measured 9.1s late against a 20s
-      # budget. Descendants are looked up from this child's own pid, never by
-      # name pattern, so nothing outside this judgment can be selected.
+      # and the expensive part of the judgment is exactly such a command — so a
+      # TERM to the shell alone lands whenever that command happens to finish,
+      # measured 9.1s late against a 20s budget.
+      #
+      # What makes the deadline unconditional is the SIGKILL below, because a
+      # KILL cannot be deferred or trapped. The descendant sweep is not what
+      # holds the guarantee: with `pgrep` absent from PATH the same input still
+      # answers on time (11.8s -> 12.3s against an 11s budget, measured). It is
+      # here so the running scan stops with the shell instead of being orphaned
+      # and burning a core until it finishes on its own.
+      #
+      # Descendants are looked up from this child's own pid, never by name
+      # pattern, so nothing outside this judgment can ever be selected.
       budget_kill_tree() {
         local signal="$1" root="$2" descendant
         for descendant in $(pgrep -P "${root}" 2>/dev/null); do
