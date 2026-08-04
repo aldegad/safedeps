@@ -56,7 +56,7 @@ Safedeps 는 **개발 의존성 install** (npm / pip / cargo / go / gem / maven 
 
 ### 릴리즈 메모
 
-- npm 패키지 version 은 `package.json` 이 SSoT. `bin/safedeps` `SAFEDEPS_VERSION` 이 이를 따라가고, smoke 테스트는 `package.json` 을 읽어 대조한다 (현재 v2.13.1).
+- npm 패키지 version 은 `package.json` 이 SSoT. `bin/safedeps` `SAFEDEPS_VERSION` 이 이를 따라가고, smoke 테스트는 `package.json` 을 읽어 대조한다 (현재 v2.14.0).
 - `npm test` 는 release smoke suite 를 실행한다. full fixture E2E 는 `v2.1-tests` 에 있다.
 - daily re-check 는 LLM 토큰을 쓰지 않는다. opt-in 이며, macOS `launchd` user agent 가 매일 `safedeps re-check --json` 을 실행한다 (`install-safedeps-recheck-agent.mjs` 로 atomic install). `~/.safedeps/recheck.log` 와 `~/.safedeps/recheck-alerts.jsonl` 를 쓰고, 새 CVE/KEV/revoke/provider-skip/위조-의심 시 macOS notification 을 띄운다. 네트워크는 OSV / CISA / GHSA query 에만 쓴다.
 
@@ -361,6 +361,20 @@ Status: v2.13.1 로 출시.
 - pypi 완전 미탐 주장도 기계 검증: `UNVERIFIED` 가 기록되고 rollback 은 생성되지 않는다
 - 배터리는 수리 이전 트리에 대고 뮤테이션 검증(첫 정규화 assertion 에서 빨강)
 - v2.13 의 오탐 코퍼스는 그대로 통과: 인용된 관용구, `npm run`, `npx`
+
+## v2.14.0 — 훅 엔트리 셔틀: 깨진 체크아웃이 익명이기를 멈춘다 (출시)
+
+Status: v2.14.0 로 출시.
+
+설치된 훅은 스킬 심링크를 거쳐 레포 체크아웃을 라이브로 실행하므로, 체크아웃이 일시적으로 깨지면(머지 충돌 마커, 저장이 덜 된 편집, 파일 부재) 바로 다음 Bash 호출부터 훅 동작이 바뀐다. 2026-08-04 실제 머지 창에서 이 머신 모든 세션의 Bash 가 막혔고, 사람이 본 유일한 설명은 bash 파서 오류였다 — 무관한 세션 하나는 이 정전을 자기 쪽 인프라 결함으로 라우팅했다. 실패의 방향도 설계가 아니라 우연이었다: 파싱 오류는 하필 exit 2(양 엔진 차단)로 끝나지만, 파일 부재(127)와 런타임 크래시(1)는 비차단 훅 실패라서 설치 게이트를 조용히 없앤다.
+
+### 무엇이 바뀌었나
+
+- **등록되는 커맨드가 엔트리 셔틀** `scripts/safedeps-hook-entry.sh pre|post` 이 됐다. 건강한 훅은 그대로 통과한다(실측 오버헤드 ~7 ms, 베이스라인 ~34 ms). 훅이 비영 종료하면 셔틀이 깨짐을 분류하고(파싱 불가 / 크래시 / 부재), 체크아웃의 머지·리베이스 진행을 감지해 말하고, 폭("이 머신의 모든 세션")·원인·복구 경로를 담아 exit 2 로 끝난다.
+- **훅 종료코드 계약이 명문화됐다**: 진짜 훅은 설계된 모든 경로에서 exit 0 이고 결정은 JSON 으로 나간다. 훅 스크립트의 의도적 비영 종료는 버그다(`AGENTS.md`).
+- **셔틀 자신의 실패 모드는 가정이 아니라 실측이다**: 깨진 셔틀은 셔틀 이전의 status quo(원시 파싱 오류와 함께 차단)로 강등되며 더 넓어지지 않는다. 배터리로 고정.
+- **워크플로 규칙**: main 체크아웃에서 머지 충돌을 풀지 않는다 — 워크트리에서 통합하고 `main` 은 fast-forward 로만 전진시킨다. 셔틀은 폭발을 줄이고, 규율은 창 자체를 없앤다.
+- **`scripts/test/hook-entry.sh`** 가 계약 전체를 고정하고 `npm test` 에 합류했다. 인스톨러는 레거시 직접 경로 등록을 멱등하게 제거한다.
 
 ## v3 (미래)
 

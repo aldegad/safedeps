@@ -1,6 +1,6 @@
 {
   "name": "@aldegad/safedeps",
-  "version": "2.13.1",
+  "version": "2.14.0",
   "description": "Dependency install safety gate with OSV-backed advisory checks, approved-spec ledger enforcement, and reorg rollback hooks",
   "main": "bin/safedeps",
   "bin": {
@@ -20,7 +20,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "test": "bash scripts/test/smoke.sh && bash scripts/test/consumer-forms.sh && bash scripts/test/e2e.sh"
+    "test": "bash scripts/test/smoke.sh && bash scripts/test/consumer-forms.sh && bash scripts/test/hook-entry.sh && bash scripts/test/e2e.sh"
   },
   "keywords": [
     "safedeps",

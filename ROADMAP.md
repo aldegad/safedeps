@@ -56,7 +56,7 @@ The internal engine keeps the v1 `reorg-guard` assets.
 
 ### Release notes
 
-- The npm package version in `package.json` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION` tracks it and the smoke test reads `package.json` to compare (current: v2.13.1).
+- The npm package version in `package.json` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION` tracks it and the smoke test reads `package.json` to compare (current: v2.14.0).
 - `npm test` runs the release smoke suite; the full fixture E2E lives under `v2.1-tests`.
 - The daily re-check uses no LLM tokens. It is opt-in: a macOS `launchd` user agent runs `safedeps re-check --json` daily, installed atomically by `install-safedeps-recheck-agent.mjs`. It writes `~/.safedeps/recheck.log` and `~/.safedeps/recheck-alerts.jsonl` and raises a macOS notification on a new CVE/KEV/revoke/provider-skip/suspected-forgery. Network is used only for OSV / CISA / GHSA queries.
 
@@ -361,6 +361,20 @@ The answer is one reason. The gate recognizes an install by the syntactic carrie
 - the pypi complete-miss claim is machine-checked: `UNVERIFIED` is recorded and no rollback is produced
 - battery mutation-verified against the pre-fix tree (red at the first normalization assertion)
 - the false-positive corpus from v2.13 stays allowed: quoted idioms, `npm run`, `npx`
+
+## v2.14.0 — hook entry shim: a broken checkout stops being anonymous (shipped)
+
+Status: shipped as v2.14.0.
+
+The installed hooks run live from the repo checkout through the skill symlink, so a checkout that is temporarily broken (merge conflict markers, a half-saved edit, a missing file) changes hook behavior on the very next Bash call. On 2026-08-04 a real mid-merge window blocked Bash for every session on the machine, and the only explanation anyone saw was a bash parser error; an unrelated session routed the outage as its own infra defect. The failure direction was also luck, not design: a parse error happens to exit 2 (blocking on both engines), while a missing file (127) or a runtime crash (1) is a non-blocking hook failure that silently removes the install gate.
+
+### What changed
+
+- **The registered command is now the entry shim** `scripts/safedeps-hook-entry.sh pre|post`. A healthy hook passes through untouched (measured overhead ~7 ms on a ~34 ms baseline). On any non-zero hook exit the shim classifies the breakage (does not parse / crashed / missing), detects an in-progress merge or rebase in the checkout and says so, and exits 2 with the breadth ("every session on this machine"), the cause, and the recovery path.
+- **The hook exit-code contract is now explicit**: the real hooks exit 0 on every designed path; decisions travel as JSON. Any intentional non-zero exit in a hook script is a bug (`AGENTS.md`).
+- **The shim's own failure mode is measured, not assumed**: a broken shim degrades to the pre-shim status quo (blocking with a raw parse error) and never to something wider; pinned in the battery.
+- **Workflow rule**: never resolve merge conflicts in the main checkout — integrate in a worktree, move `main` fast-forward-only. The shim softens the blast; the discipline removes the window.
+- **`scripts/test/hook-entry.sh`** pins the whole contract and joins `npm test`; the installer prunes the legacy direct-path registrations idempotently.
 
 ## v3 (future)
 

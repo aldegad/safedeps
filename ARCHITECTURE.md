@@ -304,6 +304,14 @@ install done → safedeps-post-verify.sh
                  • append to reorg.log; message the agent
 ```
 
+### Phase 0 — the installed command is an entry shim (`safedeps-hook-entry.sh`)
+
+Both engines register one command per hook event: `…/skills/safedeps/scripts/safedeps-hook-entry.sh pre|post`. That path resolves through the `~/.claude`/`~/.codex` skill symlink into the live repo checkout, on every Bash tool call. The working tree *is* the runtime. A checkout that is mid-merge, mid-edit, or mid-update therefore changes hook behavior instantly — and before the shim existed, what happened next was decided by accidental exit codes. A bash syntax error (merge conflict markers) exits 2, which both engines treat as a blocking deny, so every session on the machine lost Bash with only a raw parser message as explanation (this happened on 2026-08-04). A missing file exits 127 and a runtime crash exits 1 — both are *non-blocking* hook failures, so those breakage shapes silently removed the install gate entirely.
+
+The shim makes both outcomes designed. The real hooks exit 0 on every intended path (decisions travel as JSON), so any non-zero exit means the source itself is unwell. The shim then classifies the breakage (does not parse / crashed / missing), checks the checkout for an in-progress merge or rebase and says so, and exits 2 with a message that names the machine-wide breadth, the cause, and the recovery path. Fail-closed stays fail-closed; it stops being anonymous, and the fail-open shapes stop being silent.
+
+Measured cost: ~7 ms per Bash call on top of a ~34 ms guard baseline. Residual windows, kept honest: if the shim itself is broken, behavior degrades to the pre-shim status quo (blocking with a raw parse error — never wider), and the shim is a small, rarely edited file, unlike the actively developed guard; if the shim file is missing during a checkout transition (milliseconds), that call is a silent non-blocking failure, same as the pre-shim behavior for any missing hook. The regression battery for all of this is `scripts/test/hook-entry.sh`.
+
 ---
 
 ## 5. Threat model
