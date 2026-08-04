@@ -559,7 +559,14 @@ SAFEDEPS_BUDGET_ENGAGE_BYTES="${SAFEDEPS_BUDGET_ENGAGE_BYTES:-1024}"
 # still not a run of digits is not a budget: it falls back to the default, which
 # is inside the ceiling and therefore safe, and it says so on the same channels
 # as the clamp. `10#` forces base 10 so `08` is eight rather than an octal error.
+#
+# Nine digits, because that is both far more seconds than any budget means
+# (999999999s is about 31 years) and small enough that the value and the
+# `* 1000` deadline below stay inside a 64-bit integer with room to spare.
+SAFEDEPS_SELF_BUDGET_MAX_DIGITS=9
+
 SAFEDEPS_SELF_BUDGET_INVALID_FROM=""
+SAFEDEPS_SELF_BUDGET_CLAMPED_FROM=""
 if [[ -z "${SAFEDEPS_SELF_BUDGET_SECONDS:-}" ]]; then
   SAFEDEPS_SELF_BUDGET_SECONDS="${SAFEDEPS_SELF_BUDGET_DEFAULT_SECONDS}"
 else
@@ -567,18 +574,40 @@ else
   budget_normalized="${budget_given#"${budget_given%%[![:space:]]*}"}"
   budget_normalized="${budget_normalized%"${budget_normalized##*[![:space:]]}"}"
   budget_normalized="${budget_normalized#+}"
-  if [[ "${budget_normalized}" =~ ^[0-9]+$ ]]; then
-    SAFEDEPS_SELF_BUDGET_SECONDS=$(( 10#${budget_normalized} ))
-  else
+  # Leading zeros are not magnitude. Strip them before the digit count below
+  # judges the value by its length, so `0000000005` is five seconds rather than
+  # a ten-digit number.
+  while [[ "${budget_normalized}" =~ ^0[0-9] ]]; do
+    budget_normalized="${budget_normalized#0}"
+  done
+  if [[ ! "${budget_normalized}" =~ ^[0-9]+$ ]]; then
     SAFEDEPS_SELF_BUDGET_INVALID_FROM="${budget_given}"
     SAFEDEPS_SELF_BUDGET_SECONDS="${SAFEDEPS_SELF_BUDGET_DEFAULT_SECONDS}"
+  elif (( ${#budget_normalized} > SAFEDEPS_SELF_BUDGET_MAX_DIGITS )); then
+    # Digits, but more of them than arithmetic can hold. Bash integers are
+    # 64-bit and wrap silently, so evaluating this first and comparing after is
+    # not an option: a value that wraps NEGATIVE is not `> ceiling`, so it walks
+    # straight past the clamp, and `budget * 1000` then wraps again into a large
+    # positive deadline that never arrives. Measured before this check: a 30-digit
+    # value produced no answer for over 600s, which is the runtime kill and the
+    # fail-open, restored by typing enough digits. Counting digits happens in the
+    # string domain, where nothing can wrap, and it is decided BEFORE any
+    # arithmetic sees the value.
+    #
+    # Such a value is unambiguously above the ceiling, so it is clamped rather
+    # than rejected — the rule stays "anything above the ceiling is clamped",
+    # with no exception for how it was written.
+    SAFEDEPS_SELF_BUDGET_CLAMPED_FROM="${budget_normalized}"
+    SAFEDEPS_SELF_BUDGET_SECONDS="${SAFEDEPS_SELF_BUDGET_MAX_SECONDS}"
+  else
+    SAFEDEPS_SELF_BUDGET_SECONDS=$(( 10#${budget_normalized} ))
   fi
 fi
 
-# From here the value is a plain decimal integer, so the comparison and the
-# deadline read the same number the message reports.
-SAFEDEPS_SELF_BUDGET_CLAMPED_FROM=""
-if (( SAFEDEPS_SELF_BUDGET_SECONDS > SAFEDEPS_SELF_BUDGET_MAX_SECONDS )); then
+# From here the value is a plain decimal integer that fits, so the comparison and
+# the deadline read the same number the message reports.
+if [[ -z "${SAFEDEPS_SELF_BUDGET_CLAMPED_FROM}" ]] \
+  && (( SAFEDEPS_SELF_BUDGET_SECONDS > SAFEDEPS_SELF_BUDGET_MAX_SECONDS )); then
   SAFEDEPS_SELF_BUDGET_CLAMPED_FROM="${SAFEDEPS_SELF_BUDGET_SECONDS}"
   SAFEDEPS_SELF_BUDGET_SECONDS="${SAFEDEPS_SELF_BUDGET_MAX_SECONDS}"
 fi

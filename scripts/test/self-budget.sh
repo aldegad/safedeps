@@ -238,6 +238,39 @@ for bad_budget in "0x28" "abc" "-5" "4.5"; do
 done
 pass "a non-numeric budget falls back to the default and says so, instead of reaching arithmetic"
 
+# --- digits, but more than arithmetic can hold -------------------------------
+# The clamp compares numbers, and bash integers are 64-bit and wrap silently. A
+# value that wraps NEGATIVE is not `> ceiling`, so it walks straight past the
+# clamp, and `budget * 1000` then wraps again into a deadline that never
+# arrives: measured before this check, a 30-digit budget produced no answer for
+# over 600s. Which direction a value wraps depends on the value, so "long
+# numbers are safe because they wrap" is not a property — the length is decided
+# in the string domain, before any arithmetic can wrap, which is.
+overflow_budget=123456789012345678901234567890
+guard "pip install requests==2.31.0 # ${huge}" "${overflow_budget}"
+[[ "${GUARD_DECISION}" == "deny" ]] \
+  || fail "a budget too long for arithmetic still denies (got: ${GUARD_DECISION})"
+(( GUARD_ELAPSED < runtime_budget )) \
+  || fail "a budget too long for arithmetic is clamped rather than wrapping past the clamp (took ${GUARD_ELAPSED}s against the ${runtime_budget}s runtime budget)"
+grep -q 'clamped' <<< "${GUARD_STDERR}" || fail "an over-long budget is announced as clamped"
+pass "a budget with more digits than arithmetic can hold is clamped, not wrapped"
+
+# The other side of the wrap: this one lands on the negative bound exactly, and
+# used to reach the user as a `-9223372036854775808s budget` in the deny reason
+# — a number that was never true, from the same class of defect.
+guard "echo ${small}" "9223372036854775808" 128
+[[ "${GUARD_DECISION}" == "pass" ]] \
+  || fail "a budget at the 64-bit bound is clamped rather than deciding by accident (got: ${GUARD_DECISION})"
+grep -q 'clamped' <<< "${GUARD_STDERR}" || fail "a budget at the 64-bit bound is announced as clamped"
+pass "a budget at the 64-bit bound is clamped, and says so"
+
+# Leading zeros are not magnitude, so the digit count must not read them as
+# length. This one is five seconds, honoured as given and unannounced.
+guard "echo ${small}" "0000000005" 128
+[[ "${GUARD_DECISION}" == "pass" ]] || fail "a zero-padded short budget is honoured (got: ${GUARD_DECISION})"
+if [[ -n "${GUARD_STDERR}" ]]; then fail "a zero-padded short budget is neither clamped nor rejected (got: $(printf '%s' "${GUARD_STDERR}" | head -c 80))"; fi
+pass "leading zeros are stripped before the value is judged by its length"
+
 # The same value written the long way is still the same number: `08` must not be
 # read as octal, which is an arithmetic error rather than eight.
 guard "echo ${small}" "08" 128
