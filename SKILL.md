@@ -5,7 +5,7 @@ description: Gate dependency installs (npm/pip/cargo/go/gem/maven/nuget) with OS
 
 # Safedeps
 
-Hook registration is performed by `scripts/install/install-safedeps-hooks.mjs`, which is the single channel: it registers `scripts/safedeps-hook-entry.sh pre|post` for `PreToolUse` and `PostToolUse` at a 30s timeout. This file used to declare the hook scripts directly in its frontmatter, which no runtime reads as a registration and which drifted from what the installer actually writes — a second description of a registration is a second thing to keep in sync, so there is one now.
+Hook registration is performed by `scripts/install/install-safedeps-hooks.mjs`, which is the single channel: it registers `scripts/safedeps-hook-entry.sh pre|post` for `PreToolUse` and `PostToolUse` at the timeout it owns (ARCHITECTURE names the number once). This file used to declare the hook scripts directly in its frontmatter, which no runtime reads as a registration and which drifted from what the installer actually writes — a second description of a registration is a second thing to keep in sync, so there is one now.
 
 Two gates, one skill. Safedeps is an agent security skill backed by Claude/Codex hooks and a local CLI. It is not a Codex plugin bundle unless it is later wrapped with a plugin manifest.
 

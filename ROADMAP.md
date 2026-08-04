@@ -56,7 +56,7 @@ The internal engine keeps the v1 `reorg-guard` assets.
 
 ### Release notes
 
-- The npm package version in `package.json` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION` tracks it and the smoke test reads `package.json` to compare (current: v2.15.5).
+- The npm package version in `package.json` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION` tracks it and the smoke test reads `package.json` to compare (current: v2.15.6).
 - `npm test` runs the release smoke suite; the full fixture E2E lives under `v2.1-tests`.
 - The daily re-check uses no LLM tokens. It is opt-in: a macOS `launchd` user agent runs `safedeps re-check --json` daily, installed atomically by `install-safedeps-recheck-agent.mjs`. It writes `~/.safedeps/recheck.log` and `~/.safedeps/recheck-alerts.jsonl` and raises a macOS notification on a new CVE/KEV/revoke/provider-skip/suspected-forgery. Network is used only for OSV / CISA / GHSA queries.
 
@@ -580,6 +580,20 @@ v2.15.4's drift check read the installer's entry-hook constant and failed if the
 - **`SKILL.md` keeps no hook declaration, and that is now written down as a decision.** Claude does document skill-frontmatter hooks, and their schema is event-keyed with `matcher` and `command:` — but they are scoped to the skill's lifecycle and run only while the skill is active, and this gate has to judge every Bash call whether or not the skill was invoked. The documented form cannot carry it. The drift check therefore fails only on the legacy `script:` shape that no schema reads; it deliberately does not forbid the documented shape, because blocking a working feature by grep is not the same as removing a dead one. `AGENTS.md` carries the judgment.
 
 Verification by mutation, three ways: moving the installer constant alone turns the existing guard pin red; moving a doc timeout alone turns the new check red; moving the installer constant **and** the guard constant together — the shape a legitimate budget change takes — leaves the docs behind and is caught by the new check, which is the case the old one missed.
+
+---
+
+### v2.15.6 — the prose names the hook budget once, and that once is pinned (patch on v2.15.5)
+
+v2.15.5 pinned the timeout inside the two registration JSON blocks. The number went on living in six sentences that no check read — `SKILL.md`, both READMEs, both ARCHITECTUREs, `AGENTS.md` — so moving the constant would have left the docs stating a figure the installer no longer writes. The same drift one field over, again, and named as a known limit in the v2.15.5 notes rather than implied covered, which is why it is closed here.
+
+- **One canonical sentence per language states the number**, in the ARCHITECTURE paragraph that already explains where it comes from, and smoke pins that sentence to `PRE_HOOK_TIMEOUT_SECONDS`. Everywhere else the prose names the budget instead of spelling it.
+- **Dated measurements keep their figures.** "Killed at their registered timeout (30s when measured, 2026-08-04)" is a fact about a day; it stays true when the constant moves, and it is written so it does not read as the current setting.
+- **The rule is proximity, not a list of phrasings.** A sentence putting the installer's own figure next to a budget word must be the canonical one or a dated measurement. Enumerating the ways to phrase a restatement is the shape this repo has been burned by twice; removing the number from the restatements is what actually closes it.
+
+Stated plainly, because a check whose limits are unread gets mistaken for coverage: the canonical pin catches the constant moving; the proximity rule catches a restatement coming back while the constant is unchanged. Nothing here catches a documentation JSON block added *after* the first one for the same event, or a doc that swaps the `pre` and `post` registrations — both are structural, and catching them means parsing the documented JSON against the installer's output, which is a separate decision. That limit is recorded beside the check rather than left for a reader to discover.
+
+Mutation-verified in an isolated clone: moving both installer constants, the guard constant, and both JSON blocks to 45 while leaving the canonical sentence at 30 turns it red; restoring a numeral to `SKILL.md` turns the proximity rule red.
 
 ## v3 (future)
 

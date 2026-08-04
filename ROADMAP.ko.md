@@ -56,7 +56,7 @@ Safedeps 는 **개발 의존성 install** (npm / pip / cargo / go / gem / maven 
 
 ### 릴리즈 메모
 
-- npm 패키지 version 은 `package.json` 이 SSoT. `bin/safedeps` `SAFEDEPS_VERSION` 이 이를 따라가고, smoke 테스트는 `package.json` 을 읽어 대조한다 (현재 v2.15.5).
+- npm 패키지 version 은 `package.json` 이 SSoT. `bin/safedeps` `SAFEDEPS_VERSION` 이 이를 따라가고, smoke 테스트는 `package.json` 을 읽어 대조한다 (현재 v2.15.6).
 - `npm test` 는 release smoke suite 를 실행한다. full fixture E2E 는 `v2.1-tests` 에 있다.
 - daily re-check 는 LLM 토큰을 쓰지 않는다. opt-in 이며, macOS `launchd` user agent 가 매일 `safedeps re-check --json` 을 실행한다 (`install-safedeps-recheck-agent.mjs` 로 atomic install). `~/.safedeps/recheck.log` 와 `~/.safedeps/recheck-alerts.jsonl` 를 쓰고, 새 CVE/KEV/revoke/provider-skip/위조-의심 시 macOS notification 을 띄운다. 네트워크는 OSV / CISA / GHSA query 에만 쓴다.
 
@@ -580,6 +580,20 @@ v2.15.4 의 드리프트 검사는 인스톨러의 엔트리 훅 상수를 읽�
 - **`SKILL.md` 는 훅 선언을 두지 않고, 그게 결정으로 기록됐다.** Claude 는 skill frontmatter hooks 를 실제로 문서화하고 그 스키마는 event-keyed + `matcher` + `command:` 다 — 다만 **스킬 라이프사이클 스코프라 스킬이 활성일 때만 돈다.** 이 게이트는 스킬 호출 여부와 무관하게 모든 Bash 호출을 판정해야 하므로 그 형태로는 못 싣는다. 그래서 드리프트 검사는 어느 스키마도 읽지 않는 legacy `script:` 형태에서만 실패하고, 문서화된 형태는 일부러 막지 않는다 — 동작하는 기능을 grep 으로 막는 것은 죽은 것을 치우는 것과 다르다. 판정은 `AGENTS.md` 가 들고 있다.
 
 mutation 세 방향으로 검증했다: 인스톨러 상수만 옮기면 기존 가드 핀이 빨강, 문서 timeout 만 옮기면 새 검사가 빨강, 그리고 인스톨러 상수와 가드 상수를 **같이** 옮기면(정당한 예산 변경이 취하는 형태) 문서만 남겨지고 새 검사가 잡는다 — 옛 검사가 놓치던 경우가 그거다.
+
+---
+
+### v2.15.6 — 산문이 훅 예산을 한 번만 말하고, 그 한 번이 핀돼 있다 (v2.15.5 패치)
+
+v2.15.5 는 등록 JSON 블록 둘 안의 timeout 을 핀했다. 그런데 그 숫자는 아무 검사도 읽지 않는 여섯 문장에서 계속 살고 있었다 — `SKILL.md`, README 둘, ARCHITECTURE 둘, `AGENTS.md`. 상수를 옮기면 문서는 인스톨러가 더는 쓰지 않는 숫자를 말하는 채로 남는다. 같은 드리프트가 또 한 칸 옆에 있었고, v2.15.5 노트가 그걸 덮은 척하지 않고 알려진 한계로 적어 뒀기 때문에 여기서 닫는다.
+
+- **언어당 한 문장이 숫자를 말한다.** 그 숫자가 어디서 오는지 이미 설명하는 ARCHITECTURE 문단이고, smoke 가 그 문장을 `PRE_HOOK_TIMEOUT_SECONDS` 에 핀한다. 나머지 산문은 숫자를 쓰지 않고 예산을 가리킨다.
+- **날짜가 붙은 측정 기록은 숫자를 유지한다.** "등록된 타임아웃에서 죽는다(측정 시점 30s, 2026-08-04)" 는 그 날의 사실이라 상수가 바뀌어도 틀리지 않는다. 다만 현재 설정으로 읽히지 않도록 썼다.
+- **규칙은 표현 목록이 아니라 근접성이다.** 인스톨러의 그 숫자를 예산 단어 옆에 놓은 문장은 canonical 이거나 날짜 붙은 측정이어야 한다. 재진술의 표현 형태를 열거하는 건 이 레포가 두 번 데인 형태이고, 실제로 닫는 것은 재진술에서 숫자를 빼는 쪽이다.
+
+한계를 그대로 적는다 — 한계를 모르는 검사는 커버리지로 오독되기 때문이다. canonical 핀은 상수가 움직이는 것을 잡고, 근접성 규칙은 상수가 그대로인 채 재진술이 돌아오는 것을 잡는다. 같은 이벤트에 두 번째 JSON 블록이 문서에 추가되는 것, `pre` 와 `post` 등록이 뒤바뀐 문서 — 둘 다 못 잡는다. 구조 축이고, 잡으려면 문서 JSON 을 파싱해 인스톨러 출력과 대조해야 하며 그건 별개 결정이다. 그 한계를 독자가 발견하게 두지 않고 검사 옆에 적었다.
+
+격리 클론에서 mutation 검증했다: 인스톨러 상수 둘·가드 상수·JSON 블록 둘을 45 로 옮기고 canonical 문장만 30 으로 두면 빨강, `SKILL.md` 에 숫자를 되살리면 근접성 규칙이 빨강.
 
 ## v3 (미래)
 

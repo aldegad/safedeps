@@ -118,6 +118,44 @@ if grep -qE '^\s*script:\s*scripts/safedeps-' SKILL.md; then
 fi
 pass "manual-install docs register the same command the installer writes"
 
+# The prose states the hook budget ONCE per language, and that once is pinned.
+# The JSON blocks above were pinned first, and the number went on living in six
+# sentences that no check read — the same drift one field over, which is how it
+# was found. Enumerating the phrasings would be the wrong fix: this repo has
+# been burned twice by enumerations that a new form walks past. So the number is
+# removed from the restatements instead, leaving one canonical sentence per
+# language, and the rule below is a proximity rule over our own corpus rather
+# than a list of ways to say it.
+budget_doc_en="ARCHITECTURE.md"
+budget_doc_ko="ARCHITECTURE.ko.md"
+grep -q "PRE_HOOK_TIMEOUT_SECONDS\`, ${installer_pre_timeout}s\|PRE_HOOK_TIMEOUT_SECONDS\` in \`scripts/install/install-safedeps-hooks.mjs\`, ${installer_pre_timeout}s" "${budget_doc_en}" \
+  || fail "${budget_doc_en} states the hook budget the installer registers (${installer_pre_timeout}s)"
+grep -q "PRE_HOOK_TIMEOUT_SECONDS\`, ${installer_pre_timeout}s" "${budget_doc_ko}" \
+  || fail "${budget_doc_ko} states the hook budget the installer registers (${installer_pre_timeout}s)"
+pass "the prose states the hook budget the installer registers"
+
+# Anywhere else, a sentence that puts THAT figure next to a budget word is
+# either a dated measurement (a fact about a day, which stays true when the
+# constant moves) or a restatement that will rot. Restatements say "the budget"
+# and let the canonical sentence carry the number. Only the installer's own
+# figure is matched, so the self-budget ceiling, the poll steps, and every other
+# measured duration are left alone — they are pinned by their own constants.
+#
+# What this pair does and does not cover, stated plainly: the canonical pin
+# catches the constant moving, and this rule catches a restatement coming back
+# while the constant is unchanged. A constant that moves AND stale prose that
+# still spells the old figure is caught by the first check, not the second,
+# because the second only ever looks for the current number.
+for doc in SKILL.md README.md README.ko.md AGENTS.md ARCHITECTURE.md ARCHITECTURE.ko.md; do
+  while IFS= read -r line; do
+    [[ -z "${line}" ]] && continue
+    grep -q 'PRE_HOOK_TIMEOUT_SECONDS' <<< "${line}" && continue
+    grep -qiE 'measured|실측' <<< "${line}" && continue
+    fail "${doc} restates the hook budget figure instead of naming the budget (${line:0:90})"
+  done < <(grep -E "(budget|timeout|예산|타임아웃)" "${doc}" | grep -E "[^0-9]${installer_pre_timeout}s([^a-zA-Z0-9]|$)" || true)
+done
+pass "no doc restates the hook budget figure outside the canonical sentence"
+
 # Regression: a global install must resolve its package dir through the symlink.
 # npm -g (and ~/.local/bin via --link-bin) put a RELATIVE FILE symlink in
 # <prefix>/bin and the package under <prefix>/lib/node_modules; without symlink
