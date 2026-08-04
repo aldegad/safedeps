@@ -56,7 +56,7 @@ The internal engine keeps the v1 `reorg-guard` assets.
 
 ### Release notes
 
-- The npm package version in `package.json` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION` tracks it and the smoke test reads `package.json` to compare (current: v2.14.4).
+- The npm package version in `package.json` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION` tracks it and the smoke test reads `package.json` to compare (current: v2.14.5).
 - `npm test` runs the release smoke suite; the full fixture E2E lives under `v2.1-tests`.
 - The daily re-check uses no LLM tokens. It is opt-in: a macOS `launchd` user agent runs `safedeps re-check --json` daily, installed atomically by `install-safedeps-recheck-agent.mjs`. It writes `~/.safedeps/recheck.log` and `~/.safedeps/recheck-alerts.jsonl` and raises a macOS notification on a new CVE/KEV/revoke/provider-skip/suspected-forgery. Network is used only for OSV / CISA / GHSA queries.
 
@@ -450,6 +450,18 @@ The verification sentence is also rewritten rather than restated. "Nothing moved
 Also corrected: "already-pinned installs stay out" was too strong. The spec extractor reads `cargo add --vers` but not `cargo install --version`, so a version can be present while the ledger gate still does not run — and the record correctly fires. The claim now says "pinned in a form the spec extractor reads", and the surprising-but-true row is pinned in the battery so it does not read as a stray line.
 
 Two more silences are pinned rather than changed: `pip install --index-url <url>` alone names no package, and `pip install /tmp/evil.whl` installs from the filesystem. Both were already correct and now cannot drift unnoticed.
+
+---
+
+### v2.14.5 — pin what is known-odd, and stop citing numbers nobody can check (patch on v2.14.4)
+
+Three validator notes that sat outside the verdict, closed as a set.
+
+`bundle add evil --version 1.0.0` was named alongside the cargo form but only cargo got a battery row. Both are recorded even though a version is present, because the spec extractor reads `cargo add --vers` and neither `cargo install --version` nor `bundle add --version` — so the ledger gate really did not run. Both rows are pinned now, for the same reason: a true-but-surprising record should not read as a stray line.
+
+`pip install --proxy <url> -r requirements.txt` still files a spurious record, and that is pinned rather than fixed. An unknown flag is assumed to take no value; guessing the other way would drop the install this record exists to catch. Widening the value table instead is the enumeration this work was burned by four times. The row makes the trade-off visible instead of leaving it to be rediscovered as a bug.
+
+The last one is about evidence, not code. A previous release cited "159 forms" from a scratch corpus that no reader can reconstruct — the substantive claims held up under independent replay, but the number was decoration, and a number nobody can check reads as verification without being any. `AGENTS.md` now asks for counts a reader can reproduce: the battery's own form count, `npm test`'s ok lines, or a committed corpus.
 
 ---
 

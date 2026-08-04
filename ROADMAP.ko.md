@@ -56,7 +56,7 @@ Safedeps 는 **개발 의존성 install** (npm / pip / cargo / go / gem / maven 
 
 ### 릴리즈 메모
 
-- npm 패키지 version 은 `package.json` 이 SSoT. `bin/safedeps` `SAFEDEPS_VERSION` 이 이를 따라가고, smoke 테스트는 `package.json` 을 읽어 대조한다 (현재 v2.14.4).
+- npm 패키지 version 은 `package.json` 이 SSoT. `bin/safedeps` `SAFEDEPS_VERSION` 이 이를 따라가고, smoke 테스트는 `package.json` 을 읽어 대조한다 (현재 v2.14.5).
 - `npm test` 는 release smoke suite 를 실행한다. full fixture E2E 는 `v2.1-tests` 에 있다.
 - daily re-check 는 LLM 토큰을 쓰지 않는다. opt-in 이며, macOS `launchd` user agent 가 매일 `safedeps re-check --json` 을 실행한다 (`install-safedeps-recheck-agent.mjs` 로 atomic install). `~/.safedeps/recheck.log` 와 `~/.safedeps/recheck-alerts.jsonl` 를 쓰고, 새 CVE/KEV/revoke/provider-skip/위조-의심 시 macOS notification 을 띄운다. 네트워크는 OSV / CISA / GHSA query 에만 쓴다.
 
@@ -450,6 +450,18 @@ v2.14.2 는 값 소비 플래그를 생태계별로 갈랐다고 발표했지만
 같이 고친 것: "이미 버전이 박힌 설치는 안 남는다" 는 너무 셌다. 추출기는 `cargo add --vers` 는 읽지만 `cargo install --version` 은 못 읽어서, 버전이 있는데도 원장 게이트가 안 도는 경우가 있고 그때 기록이 찍히는 건 옳다. 이제 "추출기가 읽는 형태로 pin 된" 이라고 적고, 놀랍지만 참인 그 행을 배터리에 고정해 떠도는 줄로 안 읽히게 했다.
 
 침묵 둘은 바꾸지 않고 고정만 했다: `pip install --index-url <url>` 단독은 패키지를 안 지목하고, `pip install /tmp/evil.whl` 은 파일시스템에서 설치한다. 둘 다 이미 맞았고 이제 조용히 어긋날 수 없다.
+
+---
+
+### v2.14.5 — 이상해 보이지만 참인 것을 고정하고, 못 세는 숫자를 그만 쓴다 (v2.14.4 의 패치)
+
+verdict 밖에 있던 검증자 note 셋을 한 묶음으로 닫았다.
+
+`bundle add evil --version 1.0.0` 은 cargo 형태와 **함께** 지목됐는데 cargo 행만 배터리에 실렸다. 둘 다 버전이 있는데도 기록된다 — 추출기가 `cargo add --vers` 는 읽지만 `cargo install --version` 도 `bundle add --version` 도 못 읽어서 원장 게이트가 실제로 안 돌기 때문이다. 이제 둘 다 고정한다. 이유도 같다: 참이지만 놀라운 기록이 떠도는 줄로 읽히면 안 된다.
+
+`pip install --proxy <url> -r requirements.txt` 는 여전히 군더더기 기록을 남기고, 그걸 **고치지 않고 고정**했다. 모르는 플래그는 값을 안 받는다고 가정하는데, 반대로 가정하면 이 기록이 잡으려던 설치를 놓친다. 대신 값 테이블을 늘리는 건 이 작업이 네 번 데인 열거다. 이 행이 그 트레이드오프를 보이게 만든다 — 나중에 버그로 재발견되게 두지 않는다.
+
+마지막 하나는 코드가 아니라 증거에 대한 것이다. 직전 릴리스가 스크래치 코퍼스에서 센 "159형태" 를 인용했는데 읽는 사람이 재구성할 수 없다. 실체 주장은 독립 재현으로 버텼지만 숫자는 장식이었고, **아무도 못 세는 숫자는 검증이 아니면서 검증처럼 읽힌다.** `AGENTS.md` 가 이제 재현 가능한 계수를 요구한다 — 배터리 형태 수, `npm test` 의 ok 줄 수, 아니면 커밋된 코퍼스.
 
 ---
 

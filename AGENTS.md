@@ -43,6 +43,7 @@ See the `skill-hook-authoring` skill for the full payload/decision schema. Essen
 
 - `npm test` runs smoke + e2e. Keep it green.
 - A security change needs **both** a bypass harness (the threat must DENY/REORG) and a regression check (normal installs still pass; no false positives on `echo`/heredoc/`npm run`/`npx`).
+- **Cite counts a reader can reproduce from the repo.** "159 forms" measured in a scratch corpus is decoration — nobody can check it, and a number nobody can check reads as verification without being any. Quote the battery's own form count or `npm test`'s ok lines, or commit the corpus you counted.
 
 ## Workflow
 

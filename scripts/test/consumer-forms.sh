@@ -270,6 +270,7 @@ for named_unpinned in \
   "gem install --remote evil" \
   "pip install -i https://mirror.example/simple evil" \
   "cargo install evil --version 1.0.0" \
+  "bundle add evil --version 1.0.0" \
   "cargo install -f evil" \
   "cargo install --force evil"
 do
@@ -278,9 +279,10 @@ do
   [[ "$(gate_decision "${named_unpinned}")" != "deny" ]] \
     || fail "the UNGATED record must not change the verdict: ${named_unpinned}"
 done
-# `cargo install evil --version 1.0.0` is recorded even though a version IS
-# present: the spec extractor reads `cargo add --vers` but not
-# `cargo install --version`, so the ledger gate genuinely did not run for it.
+# `cargo install evil --version 1.0.0` and `bundle add evil --version 1.0.0` are
+# recorded even though a version IS present: the spec extractor reads
+# `cargo add --vers` but neither `cargo install --version` nor
+# `bundle add --version`, so the ledger gate genuinely did not run for them.
 # The record is true. It is pinned here so that stays visible rather than
 # reading as a stray line, and ROADMAP says "pinned in a form the extractor
 # reads" instead of "already-pinned".
@@ -310,6 +312,16 @@ do
     && fail "record stays quiet on a routine or already-gated install: ${stays_quiet}"
 done
 pass "the record stays quiet on file-only, working-tree, bare-lockfile, npm, and already-pinned installs"
+
+# A KNOWN spurious record, pinned rather than fixed. An unknown flag is assumed
+# to take no value, so `--proxy <url>` leaks its URL into the operand walk. The
+# assumption is deliberate: guessing the other way drops the install this record
+# exists to catch. Widening the value table instead is the enumeration this
+# lineage was burned by four times. Pinned so the line reads as a declared
+# trade-off rather than a defect.
+logged_ungated "pip install --proxy https://proxy.example:8080 -r requirements.txt" \
+  || fail "the known --proxy spurious record is still produced (declared trade-off)"
+pass "an unknown value-taking flag still leaks a spurious record (declared, not a defect)"
 
 # `mvn -Dartifact=… dependency:get` puts the flag BEFORE the goal, which the
 # install-recognition pattern (`mvn dependency:get`) does not match, so the
