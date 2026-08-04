@@ -56,7 +56,7 @@ Safedeps 는 **개발 의존성 install** (npm / pip / cargo / go / gem / maven 
 
 ### 릴리즈 메모
 
-- npm 패키지 version 은 `package.json` 이 SSoT. `bin/safedeps` `SAFEDEPS_VERSION` 이 이를 따라가고, smoke 테스트는 `package.json` 을 읽어 대조한다 (현재 v2.15.2).
+- npm 패키지 version 은 `package.json` 이 SSoT. `bin/safedeps` `SAFEDEPS_VERSION` 이 이를 따라가고, smoke 테스트는 `package.json` 을 읽어 대조한다 (현재 v2.15.3).
 - `npm test` 는 release smoke suite 를 실행한다. full fixture E2E 는 `v2.1-tests` 에 있다.
 - daily re-check 는 LLM 토큰을 쓰지 않는다. opt-in 이며, macOS `launchd` user agent 가 매일 `safedeps re-check --json` 을 실행한다 (`install-safedeps-recheck-agent.mjs` 로 atomic install). `~/.safedeps/recheck.log` 와 `~/.safedeps/recheck-alerts.jsonl` 를 쓰고, 새 CVE/KEV/revoke/provider-skip/위조-의심 시 macOS notification 을 띄운다. 네트워크는 OSV / CISA / GHSA query 에만 쓴다.
 
@@ -539,6 +539,22 @@ v2.15.1 이 예산에 상한을 씌웠다. 그런데 예산이 **돌지 말지�
 여전히 열려 있고 고치지 않고 기록만 한 것: 값 하나로 **튜닝이 아니라 정본을 갈아치우는** 노브가 여럿이다 — `SAFEDEPS_OSV_API_URL`·`SAFEDEPS_KEV_CATALOG_URL`·`SAFEDEPS_GHSA_API_URL` 은 자문 출처를 옮기고, `SAFEDEPS_NPM_CLOSURE_FIXTURE_JSON`·`SAFEDEPS_YARN_INFO_FIXTURE_NDJSON` 은 closure 해석을 통조림 데이터로 대체하며, `SAFEDEPS_LEDGER_DEFAULT_TTL_DAYS` 는 승인을 영구화할 수 있고, `SAFEDEPS_ADVISORY_LOG` 는 모든 우회가 관측돼야 하는 그 채널 자체를 옮긴다. 테스트 seam 이자 미러 지원이고, 적어도 URL 쪽은 마찰 서사가 실재한다(osv.dev 를 막는 망). `safedeps/truth-source-knobs-have-no-declaration` 로 추적한다.
 
 이번 릴리스가 닫은 것과 같은 형태의 노브가 하나 더 있고, 위 열거는 1차에서 그걸 놓쳤다: **`SAFEDEPS_BUDGET_CHILD`**. 부모가 스폰한 자식에게 세팅하는 재귀 마커라, 이걸 export 하면 부모가 자기를 자식으로 알고 마감을 통째로 건너뛴다 — 실측으로 12KB 패딩된 `pip install` 이 평소 3s, export 상태에서 32s 였고 stderr 에도 `advisory.log` 에도 아무것도 안 남는다. 상한이 없고, 이름이 off 스위치라고 말하지 않으며, engage 크기와 달리 우연히 도달할 마찰 서사도 없다. 크로스 검증이 이번에 넣은 클램프에서 90줄 안쪽에서 찾아냈다 — 방금 자기가 만든 변경 너머를 사람이 얼마나 못 보는지의 정직한 척도다. `safedeps/budget-child-marker-is-an-unnamed-off-switch` 로 추적한다.
+
+---
+
+### v2.15.3 — 부모/자식 마커가 환경 밖으로 나간다 (v2.15.2 패치)
+
+v2.15.2 는 이 구멍을 암시가 아니라 이름으로 릴리스 노트에 싣고 나갔다: 부모가 스폰한 자식에게 세팅하는 마커 `SAFEDEPS_BUDGET_CHILD` 가 환경변수였다. export 하면 부모가 자기를 이미 자식으로 알고 마감을 통째로 건너뛴다 — 실측으로 12KB 패딩된 `pip install` 이 평소 3s, 마커 export 상태에서 32s 였고 런타임 kill 30s 너머인데 stderr 에도 `advisory.log` 에도 아무것도 안 남았다. 이름 붙은 스위치 옆의 두 번째 off 스위치, 상한도 이름도 기록도 없이.
+
+크로스 검증이 v2.15.2 가 넣은 클램프에서 90줄 거리에서 찾아냈다 — 방금 자기가 만든 변경 너머를 사람이 얼마나 못 보는지의 정직한 척도다.
+
+- **마커가 argv 로 다닌다.** 엔진은 인자를 넘기지 않는 `safedeps-hook-entry.sh` 를 통해 훅을 부르므로 환경에서 이 플래그로 가는 경로가 없다 — 세팅할 수 있는 유일한 프로세스는 자식을 스폰하는 그 프로세스다. 검사가 아니라 구조다.
+- **옛 변수는 무시하되 침묵하지 않는다.** 마감을 끄던 신호가 아무 말 없이 무력해지면 반대 방향으로 실패한다 — export 한 사람은 마감이 꺼져 있다고 계속 믿는다. stderr 와 `advisory.log` 에 알리고, 의도적으로 끄려면 `SAFEDEPS_BUDGET_DISABLED` 를 쓰라고 가리킨다.
+- **마감 기계장치는 그대로다.** 트리 kill 은 자식 자신의 pid 에서 하위를 유도하고 reap 은 그 pid 를 기다린다. 둘 다 마커를 읽지 않는다. 가정이 아니라 확인했다 — "구조적으로 닫힌다" 도 다른 주장과 같은 주장이기 때문이다.
+
+검증: 실제 훅 경로(엔트리 shim)에 마커를 export 한 상태로 12KB 패딩된 `pip install` 이 2s 예산에서 3s 에 `UNDECIDED` 거부된다. 마감이 스캔 깊숙이 떨어지는 경우도 11s 예산을 1s 초과로 종전과 같고, 고아 프로세스를 남기지 않는다. `scripts/test/self-budget.sh`(32 ok)가 export 된 마커에도 마감이 살아있는 것과 두 채널 알림을 고정한다.
+
+이게 랜딩하면서 v2.15.2 릴리스의 "Known gap" 항목은 닫힌다: 이 마감의 off 스위치는 하나이고, 이름이 있고, 기록된다.
 
 ## v3 (미래)
 

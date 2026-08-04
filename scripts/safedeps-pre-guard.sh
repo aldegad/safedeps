@@ -5,6 +5,26 @@
 
 set -euo pipefail
 
+# Which half of the budget machinery this process is: the parent that keeps the
+# deadline, or the child it spawns to do the judging.
+#
+# This used to be an environment variable, and an environment variable is
+# settable from outside. Exporting it made the parent believe it was already the
+# child, so it skipped the deadline entirely — measured, a 12KB padded
+# `pip install` answered in 3s normally and 32s with the marker exported, past
+# the runtime kill, with nothing on stderr and nothing in advisory.log. An
+# unnamed off switch beside the named one (SAFEDEPS_BUDGET_DISABLED), which is
+# the thing this gate says it does not have.
+#
+# It travels in argv instead. The engines run the hook through the entry shim,
+# which invokes this script with no arguments at all, so there is no path from
+# the environment into this flag — the only process that can set it is the one
+# that spawns the child, which is this script.
+SAFEDEPS_BUDGET_ROLE="parent"
+if [[ "${1:-}" == "--budget-child" ]]; then
+  SAFEDEPS_BUDGET_ROLE="child"
+fi
+
 GUARD_DIR="${SAFEDEPS_HOME:-${HOME}/.safedeps}"
 SNAPSHOT_DIR="${GUARD_DIR}/snapshots"
 STATE_LOCK_DIR="${GUARD_DIR}/state.lock"
@@ -695,14 +715,14 @@ SAFEDEPS_BUDGET_DISABLED="${SAFEDEPS_BUDGET_DISABLED:-}"
 # the same channels as every other bypass. It is checked at the engage size and
 # not above it, so turning the deadline off does not also turn its own notice off
 # for the very commands the deadline exists for.
-if [[ -n "${SAFEDEPS_BUDGET_DISABLED}" ]] && [[ -z "${SAFEDEPS_BUDGET_CHILD:-}" ]] \
+if [[ -n "${SAFEDEPS_BUDGET_DISABLED}" ]] && [[ "${SAFEDEPS_BUDGET_ROLE}" == "parent" ]] \
   && (( ${#COMMAND} >= SAFEDEPS_BUDGET_ENGAGE_BYTES )); then
   log_advisory "pre-guard: SAFEDEPS_BUDGET_DISABLED is set — the self-budget deadline is OFF for this command (${#COMMAND} bytes). Past the ${SAFEDEPS_RUNTIME_BUDGET_SECONDS}s runtime hook budget this gate is killed and the install proceeds unjudged."
   printf 'safedeps: SAFEDEPS_BUDGET_DISABLED is set, so the self-budget deadline is OFF for this command. The judgment now runs with no deadline of its own, and past the %ss runtime hook budget the runtime kills this gate and the install proceeds unjudged. Unset it to restore the gate.\n' \
     "${SAFEDEPS_RUNTIME_BUDGET_SECONDS}" >&2
 fi
 
-if [[ -z "${SAFEDEPS_BUDGET_DISABLED}" ]] && [[ -z "${SAFEDEPS_BUDGET_CHILD:-}" ]] \
+if [[ -z "${SAFEDEPS_BUDGET_DISABLED}" ]] && [[ "${SAFEDEPS_BUDGET_ROLE}" == "parent" ]] \
   && (( ${#COMMAND} >= SAFEDEPS_BUDGET_ENGAGE_BYTES )); then
   # Say that the clamp happened, and say it here rather than at the assignment
   # above: this is the point where the budget is actually in play, and a line on
@@ -724,6 +744,16 @@ if [[ -z "${SAFEDEPS_BUDGET_DISABLED}" ]] && [[ -z "${SAFEDEPS_BUDGET_CHILD:-}" 
   # the default is inside the ceiling — but it is still a value nobody asked
   # for, and an unexplained one would send the next debugging session after a
   # number that was never true.
+  # The marker that used to live in the environment is announced when it is
+  # still set, because a signal that used to switch the deadline off and now
+  # does nothing must not fail silently in either direction: someone whose
+  # script exports it should learn that it stopped meaning anything, rather than
+  # keep believing the deadline is off.
+  if [[ -n "${SAFEDEPS_BUDGET_CHILD:-}" ]]; then
+    log_advisory "pre-guard: SAFEDEPS_BUDGET_CHILD is set in the environment and is ignored — the parent/child marker moved to argv, where it cannot be injected. The deadline is running normally."
+    printf 'safedeps: SAFEDEPS_BUDGET_CHILD is set in the environment and has no effect. The parent/child marker moved into argv so it cannot be set from outside; the deadline is running normally. To turn the deadline off deliberately, set SAFEDEPS_BUDGET_DISABLED.\n' >&2
+  fi
+
   # The engage size reports itself on the same channels. It is the condition on
   # this whole branch, so a raised value that went unreported would be the
   # quietest of the three: the machinery would simply not be here.
@@ -749,7 +779,7 @@ if [[ -z "${SAFEDEPS_BUDGET_DISABLED}" ]] && [[ -z "${SAFEDEPS_BUDGET_CHILD:-}" 
   budget_out=$(mktemp "${TMPDIR:-/tmp}/safedeps-budget.XXXXXX")
   budget_err=$(mktemp "${TMPDIR:-/tmp}/safedeps-budget.XXXXXX")
 
-  # Same payload, same script, one env marker so the child judges instead of
+  # Same payload, same script, one argv marker so the child judges instead of
   # re-entering this wrapper.
   #
   # The payload goes through a file rather than a pipe, and job control is on
@@ -773,7 +803,7 @@ if [[ -z "${SAFEDEPS_BUDGET_DISABLED}" ]] && [[ -z "${SAFEDEPS_BUDGET_CHILD:-}" 
   # stderr is captured to a file and re-emitted verbatim below, so nothing the
   # judgment actually says is lost; only the shell's bookkeeping is dropped.
   exec 3>&2 2>/dev/null
-  SAFEDEPS_BUDGET_CHILD=1 bash "${BASH_SOURCE[0]}" \
+  bash "${BASH_SOURCE[0]}" --budget-child \
     <"${budget_in}" >"${budget_out}" 2>"${budget_err}" &
   budget_child=$!
 

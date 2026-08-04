@@ -56,7 +56,7 @@ The internal engine keeps the v1 `reorg-guard` assets.
 
 ### Release notes
 
-- The npm package version in `package.json` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION` tracks it and the smoke test reads `package.json` to compare (current: v2.15.2).
+- The npm package version in `package.json` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION` tracks it and the smoke test reads `package.json` to compare (current: v2.15.3).
 - `npm test` runs the release smoke suite; the full fixture E2E lives under `v2.1-tests`.
 - The daily re-check uses no LLM tokens. It is opt-in: a macOS `launchd` user agent runs `safedeps re-check --json` daily, installed atomically by `install-safedeps-recheck-agent.mjs`. It writes `~/.safedeps/recheck.log` and `~/.safedeps/recheck-alerts.jsonl` and raises a macOS notification on a new CVE/KEV/revoke/provider-skip/suspected-forgery. Network is used only for OSV / CISA / GHSA queries.
 
@@ -539,6 +539,22 @@ Verification: `scripts/test/self-budget.sh` (30 ok) pins the engage clamp with a
 Still open, recorded rather than fixed: several one-value knobs replace canonical truth rather than tune it — `SAFEDEPS_OSV_API_URL` / `SAFEDEPS_KEV_CATALOG_URL` / `SAFEDEPS_GHSA_API_URL` repoint the advisory source, `SAFEDEPS_NPM_CLOSURE_FIXTURE_JSON` and `SAFEDEPS_YARN_INFO_FIXTURE_NDJSON` replace closure resolution with canned data, `SAFEDEPS_LEDGER_DEFAULT_TTL_DAYS` can make approvals never expire, and `SAFEDEPS_ADVISORY_LOG` repoints the channel that every bypass is supposed to be observable on. These are test seams and mirror support, and the friction story for at least the URLs is real (a network that blocks osv.dev). Tracked as `safedeps/truth-source-knobs-have-no-declaration`.
 
 One more knob is the same shape as the one this release closed, and the enumeration above missed it on the first pass: **`SAFEDEPS_BUDGET_CHILD`**. It is the recursion marker the parent sets on the child it spawns, so exporting it makes the parent believe it *is* the child and skip the deadline entirely — measured, a 12KB padded `pip install` answers in 3s normally and 32s with it exported, with nothing on stderr and nothing in `advisory.log`. It has no ceiling, its name does not say "off switch", and unlike the engage size there is no friction story that leads anyone to it by accident. Cross-validation caught it inside 90 lines of the clamp this release added, which is the honest measure of how far a fresh reader sees past the change they just made. Tracked as `safedeps/budget-child-marker-is-an-unnamed-off-switch`.
+
+---
+
+### v2.15.3 — the parent/child marker moves out of the environment (patch on v2.15.2)
+
+v2.15.2 shipped with this gap named in its release notes rather than implied: `SAFEDEPS_BUDGET_CHILD`, the marker the parent sets on the child it spawns, was an environment variable. Exporting it made the parent believe it was already the child and skip the deadline entirely — measured, a 12KB padded `pip install` answers in 3s normally and 32s with the marker exported, past the 30s runtime kill, with nothing on stderr and nothing in `advisory.log`. A second off switch, beside the named one, with no ceiling, no name that says what it does, and no record.
+
+Cross-validation found it 90 lines from the clamp v2.15.2 added, which is the honest measure of how far a reader sees past the change they just made.
+
+- **The marker travels in argv.** The engines invoke the hook through `safedeps-hook-entry.sh`, which passes no arguments, so there is no route from the environment into the flag — the only process that can set it is the one that spawns the child. Structural, not a check.
+- **The old variable is reported, not ignored in silence.** A signal that used to switch the deadline off and now does nothing fails in the other direction if it says nothing: whoever exports it would keep believing the deadline is off. It is announced on stderr and in `advisory.log`, and it points at `SAFEDEPS_BUDGET_DISABLED` for the deliberate act.
+- **The deadline machinery is unchanged.** The tree kill resolves descendants from the child's own pid and the reap waits on that pid; neither reads the marker. Verified rather than assumed, because "structurally closed" is a claim like any other.
+
+Verification: through the real hook path (the entry shim) with the marker exported, a 12KB padded `pip install` is denied `UNDECIDED` at 3s against a 2s budget. The deadline landing deep in the scan still overshoots its 11s budget by 1s, the same as before, and leaves no orphaned processes. `scripts/test/self-budget.sh` (32 ok) pins both the deadline surviving an exported marker and the announcement on both channels.
+
+With this landed, the "Known gap" note in the v2.15.2 release stands closed: the deadline has one off switch, it has a name, and it logs.
 
 ## v3 (future)
 
