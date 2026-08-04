@@ -222,4 +222,63 @@ do
 done
 pass "quoted idioms, npm run, and npx stay allowed (no false positives from the widening)"
 
+# --- 5. The unpinned install leaves a record ----------------------------------
+# An install that names a package but pins no version produces no spec, so the
+# ledger gate never runs for it. npm has the effect gate behind it; the other
+# ecosystems have nothing, and until this record existed they had no trace
+# either. The record changes no verdict — it exists so the question "should
+# unpinned installs be denied?" can be answered from evidence.
+#
+# The quiet half matters as much as the loud half. A record that fires on
+# routine installs is background noise, and background noise is the same as no
+# record, so the scope is pinned from both sides.
+
+logged_ungated() {
+  local command="$1"
+  local safe="${tmp_root}/safe-ungated-$$-${RANDOM}"
+  mkdir -p "${safe}"
+  jq -nc --arg c "${command}" --arg cwd "${project_dir}" \
+    '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
+    HOME="${tmp_root}/home-ungated" SAFEDEPS_HOME="${safe}" scripts/safedeps-pre-guard.sh >/dev/null 2>&1
+  grep -q 'UNGATED' "${safe}/advisory.log" 2>/dev/null
+}
+
+for named_unpinned in \
+  "pip install evil" \
+  "python3 -m pip install evil" \
+  "poetry add evil" \
+  "uv add evil" \
+  "cargo add evil" \
+  "cargo install evil" \
+  "go get example.com/evil" \
+  "gem install evil" \
+  "bundle add evil" \
+  "dotnet add package evil"
+do
+  logged_ungated "${named_unpinned}" \
+    || fail "an unpinned named install is recorded as UNGATED: ${named_unpinned}"
+  [[ "$(gate_decision "${named_unpinned}")" != "deny" ]] \
+    || fail "the UNGATED record must not change the verdict: ${named_unpinned}"
+done
+pass "an unpinned named install is recorded (the ecosystems with no effect gate behind them)"
+
+for stays_quiet in \
+  "pip install -r requirements.txt" \
+  "pip install -c constraints.txt evil" \
+  "pip install -e ." \
+  "bundle install" \
+  "npm install left-pad" \
+  "npm install" \
+  "pip install evil==1.0.0" \
+  "cargo add evil --vers 1.0.0" \
+  "gem install evil -v 1.0.0" \
+  "go get example.com/evil@v1.0.0" \
+  "npm run build" \
+  'echo "remember to pip install evil"'
+do
+  logged_ungated "${stays_quiet}" \
+    && fail "record stays quiet on a routine or already-gated install: ${stays_quiet}"
+done
+pass "the record stays quiet on file-driven, bare-lockfile, npm, and already-pinned installs"
+
 printf 'consumer-forms passed\n'

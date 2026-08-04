@@ -362,6 +362,28 @@ The answer is one reason. The gate recognizes an install by the syntactic carrie
 - battery mutation-verified against the pre-fix tree (red at the first normalization assertion)
 - the false-positive corpus from v2.13 stays allowed: quoted idioms, `npm run`, `npx`
 
+## v2.13.2 — the unpinned install is not gated, and now it says so (shipped)
+
+Status: shipped as v2.13.2.
+
+Found while measuring the carrier boundary in v2.13.1, and larger than what that release closed. The ledger gate runs on a parseable `pkg@version` operand. Omit the version and no spec is produced, so the gate never runs. `pip install evil`, `cargo add evil`, `go get example.com/evil`, `gem install evil`, `poetry add`, `uv add`, `bundle add`, and `dotnet add package` all pass. No wrapper is needed — the attacker does not have to reach for a herestring, only to leave the version off.
+
+Two things made it invisible. The code's stated reason is npm-shaped: a bare `npm install` is a lockfile install that names no new package, so falling through is correct for npm, and the effect gate catches the result anyway. That reasoning was carried into the ecosystems where the command gate is the authority, where an unpinned install names a package and nothing is behind the gate. And the direction is inverted — the hidden path denies fail-closed when no spec can be extracted while the plain path allows under the identical condition, so one predicate is read in opposite directions inside one file.
+
+### What changed
+
+- **The ungated install leaves a record.** An install that names a package with no version, in an ecosystem with no effect gate behind the command gate, writes `UNGATED` to `~/.safedeps/advisory.log` with the ecosystem and the command. Until now it passed with no trace, which contradicted the invariant that every bypass must be observable.
+- **It changes no verdict.** Refusing every unpinned install is a policy change that would block ordinary `cargo add x` workflows, so it stays the repo owner's decision. The record exists so that decision can be made from evidence.
+- **The silence is scoped as carefully as the record.** File-driven installs (`-r`, `-c`, `-e`), bare lockfile installs, npm, and already-pinned installs stay out of the log. A record that fires on routine installs is background noise, and background noise is the same as no record.
+
+### Verification
+
+- 68-case corpus replayed against `main`: zero decision change, so the record is verdict-neutral
+- both halves pinned in `scripts/test/consumer-forms.sh` — ten named-unpinned installs recorded, twelve routine or already-gated commands silent
+- mutation-verified against the tree without the fix (red at the first record assertion)
+
+---
+
 ## v2.14.0 — hook entry shim: a broken checkout stops being anonymous (shipped)
 
 Status: shipped as v2.14.0.
@@ -375,6 +397,7 @@ The installed hooks run live from the repo checkout through the skill symlink, s
 - **The shim's own failure mode is measured, not assumed**: a broken shim degrades to the pre-shim status quo (blocking with a raw parse error) and never to something wider; pinned in the battery.
 - **Workflow rule**: never resolve merge conflicts in the main checkout — integrate in a worktree, move `main` fast-forward-only. The shim softens the blast; the discipline removes the window.
 - **`scripts/test/hook-entry.sh`** pins the whole contract and joins `npm test`; the installer prunes the legacy direct-path registrations idempotently.
+
 
 ## v3 (future)
 

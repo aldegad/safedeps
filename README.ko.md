@@ -120,6 +120,8 @@ ledger 게이트나 사전 비행 체크에 실패하면 해당 명령은 실행
 
 **명령 가드가 못 보는 것과, 그 비용이 생태계마다 다르다는 것.** 가드는 셸에게 텍스트를 넘기는 구문 형태로 설치를 인식합니다 — `sh -c`, `eval`, 명령 치환, 셸로 들어가는 파이프. 그 목록 바깥의 형태는 통과합니다: herestring, `xargs` 가 조립한 명령줄, 파일로 쓴 뒤 실행하는 스크립트. npm 에서는 이것이 미탐이 아니라 **지연 탐지**입니다. 효과 게이트가 살아 있는 lockfile 을 읽어서 명령을 어떻게 썼든 결과를 잡기 때문입니다. `pip`, `cargo`, `go`, `gem`, `maven`, `nuget` 에는 가드 뒤에 closure resolver 가 없으므로 같은 형태가 **완전 미탐**입니다 — `~/.safedeps/advisory.log` 에 `UNVERIFIED` 로 기록되고 그걸로 끝입니다. "가드가 이 형태를 파싱하지 않는다" 를 npm 기준으로 읽지 마세요. 경계는 `scripts/test/consumer-forms.sh` 에 측정되어 고정돼 있고, 왜 경계를 넓히는 게 답이 아닌지는 `ARCHITECTURE.md` 가 설명합니다.
 
+**버전을 안 적은 설치도 게이트를 안 거치며, 이제 그 사실이 기록됩니다.** 원장 검사는 파싱 가능한 `pkg@version` 피연산자에 대해서만 돕니다. `pip install evil`, `cargo add evil`, `go get example.com/evil`, `gem install evil` 은 패키지를 지목하지만 버전을 안 적으므로 spec 이 안 나오고 원장 게이트가 아예 안 돕니다. 여기엔 래핑도 필요 없습니다 — 버전을 안 적으면 됩니다. npm 은 효과 게이트가 결과 lockfile 에서 계속 강제하지만, 나머지 생태계에서는 그대로 미검증 설치가 됩니다. 이 경우가 이제 `~/.safedeps/advisory.log` 에 생태계와 명령과 함께 `UNGATED` 로 기록됩니다. 이 기록은 **차단하지 않습니다** — 버전 없는 설치를 전부 거부하는 것은 평범한 `cargo add x` 흐름을 막는 정책 변경이라 레포 소유자의 결정으로 남기고, 기록은 그 결정을 근거로 답할 수 있게 만드는 역할입니다. 평범한 설치가 로그에 안 남는 것도 의도입니다 — 파일 기반 설치(`pip install -r requirements.txt`)와 맨 lockfile 설치(`npm install`)는 패키지를 지목하지 않고, 모든 설치마다 찍히는 기록은 신호가 아니라 소음이기 때문입니다.
+
 ### Phase 3: Post-install Effect Enforcement (`safedeps-post-verify.sh` -- PostToolUse)
 
 설치 명령이 끝난 뒤 verify 훅이 변경 사항을 분석합니다. npm에서는 이것이 주요 집행 지점입니다. 실제 `package-lock.json` 폐쇄성을 읽고, 각 패키지를 승인된 direct entry와 해당 `transitive_specs`로 검증한 뒤 OSV 배치 조회를 다시 수행합니다.
