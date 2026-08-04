@@ -253,18 +253,23 @@ for named_unpinned in \
   "go get example.com/evil" \
   "gem install evil" \
   "bundle add evil" \
-  "dotnet add package evil"
+  "dotnet add package evil" \
+  "mvn dependency:get -Dartifact=g:evil" \
+  "pip install -c constraints.txt evil" \
+  "pip install -r requirements.txt evil" \
+  "pip install -e . evil" \
+  "pip install git+https://example.test/evil.git" \
+  "pip install git+ssh://git@example.test/evil.git"
 do
   logged_ungated "${named_unpinned}" \
     || fail "an unpinned named install is recorded as UNGATED: ${named_unpinned}"
   [[ "$(gate_decision "${named_unpinned}")" != "deny" ]] \
     || fail "the UNGATED record must not change the verdict: ${named_unpinned}"
 done
-pass "an unpinned named install is recorded (the ecosystems with no effect gate behind them)"
+pass "an unpinned named install is recorded, including past a source flag, a URL user, and a flag-carried coordinate"
 
 for stays_quiet in \
   "pip install -r requirements.txt" \
-  "pip install -c constraints.txt evil" \
   "pip install -e ." \
   "bundle install" \
   "npm install left-pad" \
@@ -274,11 +279,14 @@ for stays_quiet in \
   "gem install evil -v 1.0.0" \
   "go get example.com/evil@v1.0.0" \
   "npm run build" \
+  "mvn dependency:get -Dartifact=g:evil:1.0.0" \
+  "pip install ." \
+  "pip install ./local-pkg" \
   'echo "remember to pip install evil"'
 do
   logged_ungated "${stays_quiet}" \
     && fail "record stays quiet on a routine or already-gated install: ${stays_quiet}"
 done
-pass "the record stays quiet on file-driven, bare-lockfile, npm, and already-pinned installs"
+pass "the record stays quiet on file-only, working-tree, bare-lockfile, npm, and already-pinned installs"
 
 printf 'consumer-forms passed\n'

@@ -722,16 +722,26 @@ guard_names_package_without_spec() {
   # ledger gate never ran for it. Used only to make that fact observable — it
   # changes no verdict.
   #
-  # The boundary is what keeps this record readable. Two shapes are deliberately
-  # NOT reported, because a record that fires on routine installs becomes
-  # background noise and background noise is the same as no record:
-  #   - file-driven installs (`pip install -r requirements.txt`,
-  #     `-c constraints.txt`, `-e .`) name no package here; the file does
-  #   - bare lockfile installs (`npm install`, `bundle install`) have no operand
-  # What IS reported is the shape that walks the gate: a named package with no
-  # version, e.g. `pip install evil` or `cargo add evil`.
+  # The boundary is what keeps this record readable. A record that fires on
+  # routine installs becomes background noise, and background noise is the same
+  # as no record. So a token is a named package only if it survives three tests,
+  # each of which exists because getting it wrong hides a real install:
+  #
+  #   1. It is not a flag, and not the VALUE of a flag. A source flag consumes
+  #      its own argument and nothing more — `-r requirements.txt` names no
+  #      package, but `-r requirements.txt evil` still installs `evil`.
+  #      Silencing the whole command on sight of `-r`/`-c`/`-e` hid that, and
+  #      `-c` is not even a source flag: a constraint file only bounds versions
+  #      while the install target still arrives on the command line.
+  #   2. It is not a local path (`.`, `..`, `./x`, `/x`). Those install from the
+  #      working tree, not from a registry. A module path like
+  #      `example.com/evil` is NOT a local path and stays reportable.
+  #   3. Its `@` actually delimits a version. In a URL the `@` separates a user,
+  #      so `git+ssh://git@host/evil.git` is no more pinned than
+  #      `git+https://host/evil.git` — reading it as a spec silenced one and
+  #      reported the other for the same install.
   local cmd="$1"
-  local seg tok verb_seen file_driven
+  local seg tok verb_seen skip_next
   local -a toks=()
 
   while IFS= read -r seg; do
@@ -739,17 +749,8 @@ guard_names_package_without_spec() {
     command_is_dependency_install "${seg}" || continue
 
     verb_seen=false
-    file_driven=false
+    skip_next=false
     read -ra toks <<< "$(command_scan_text "${seg}")"
-    for tok in "${toks[@]+${toks[@]}}"; do
-      case "${tok}" in
-        -r|--requirement|-c|--constraint|-e|--editable|--requirement=*|--constraint=*|--editable=*)
-          file_driven=true
-          ;;
-      esac
-    done
-    [[ "${file_driven}" == true ]] && continue
-
     for tok in "${toks[@]+${toks[@]}}"; do
       if [[ "${verb_seen}" != true ]]; then
         case "${tok}" in
@@ -757,11 +758,39 @@ guard_names_package_without_spec() {
         esac
         continue
       fi
-      # A flag, or a token that already carries a spec, is not an unpinned name.
+
+      if [[ "${skip_next}" == true ]]; then
+        skip_next=false
+        continue
+      fi
+
       case "${tok}" in
+        # A flag that takes a separate argument consumes exactly that argument.
+        -r|--requirement|-c|--constraint|-e|--editable|-t|--target|-f|--find-links|--index-url|--extra-index-url)
+          skip_next=true
+          continue
+          ;;
+        # Maven carries its coordinate IN a flag rather than as an operand, so
+        # the operand walk never sees it. `-Dartifact=<group>:<name>` with no
+        # third field names a package with no version; a third field is the
+        # version. Whether Maven would even accept the versionless form is
+        # unverified here (no maven on the measuring machine), and for a RECORD
+        # the unresolved case resolves toward reporting: a spurious line costs a
+        # line, a missing one costs the invariant this layer exists to keep.
+        -Dartifact=*:*:*) continue ;;
+        -Dartifact=*:*)   return 0 ;;
         -*) continue ;;
+        # Installing from the working tree is not a registry fetch.
+        .|..|./*|../*|/*) continue ;;
+      esac
+
+      # `@` counts as a version delimiter only outside a URL, where it separates
+      # a user rather than a version.
+      case "${tok}" in
+        *://*) : ;;
         *@*|*==*) continue ;;
       esac
+
       return 0
     done
   done < <(command_candidate_texts "${cmd}" | tr ';|&' '\n')

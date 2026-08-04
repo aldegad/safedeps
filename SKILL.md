@@ -24,6 +24,7 @@ You (the agent) are the primary user — drive both:
 The hooks enforce this; you just run `check` first.
 
 - **PreToolUse** blocks an install whose spec is not approved and quotes the exact `safedeps check` to run. On Claude Code it also rewrites an npm install with `--ignore-scripts`, so it runs **inert** until verified; Codex CLI uses detect-and-rollback.
+- **Pin the version, or the gate does not run.** The ledger check needs a parseable `pkg@version`. `pip install evil` names no version, so no spec is produced and nothing is checked — for npm the effect gate still enforces on the lockfile, but for pip/cargo/go/gem/maven/nuget the install proceeds unverified and is only recorded as `UNGATED` in `~/.safedeps/advisory.log`. Install the exact version that `safedeps check` approved.
 - **PostToolUse** is the npm enforcement authority: it reads the real `package-lock.json` closure, checks every package against the ledger + an OSV batch, and **reorgs** (rolls back) anything unapproved, vulnerable, or with suspicious install scripts. Effect-primary is **npm-only**; pip/cargo/go/gem/maven/nuget use the command-gate + reorg model.
 
 ### Before every install, run

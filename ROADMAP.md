@@ -56,7 +56,7 @@ The internal engine keeps the v1 `reorg-guard` assets.
 
 ### Release notes
 
-- The npm package version in `package.json` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION` tracks it and the smoke test reads `package.json` to compare (current: v2.13.2).
+- The npm package version in `package.json` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION` tracks it and the smoke test reads `package.json` to compare (current: v2.13.3).
 - `npm test` runs the release smoke suite; the full fixture E2E lives under `v2.1-tests`.
 - The daily re-check uses no LLM tokens. It is opt-in: a macOS `launchd` user agent runs `safedeps re-check --json` daily, installed atomically by `install-safedeps-recheck-agent.mjs`. It writes `~/.safedeps/recheck.log` and `~/.safedeps/recheck-alerts.jsonl` and raises a macOS notification on a new CVE/KEV/revoke/provider-skip/suspected-forgery. Network is used only for OSV / CISA / GHSA queries.
 
@@ -372,7 +372,7 @@ Two things made it invisible. The code's stated reason is npm-shaped: a bare `np
 
 ### What changed
 
-- **The ungated install leaves a record.** An install that names a package with no version, in an ecosystem with no effect gate behind the command gate, writes `UNGATED` to `~/.safedeps/advisory.log` with the ecosystem and the command. Until now it passed with no trace, which contradicted the invariant that every bypass must be observable.
+- **The ungated install leaves a record.** An install that names a package as a bare operand with no version, in an ecosystem with no effect gate behind the command gate, writes `UNGATED` to `~/.safedeps/advisory.log` with the ecosystem and the command. (The operand-only scope left gaps, closed in v2.13.3.) Until now it passed with no trace, which contradicted the invariant that every bypass must be observable.
 - **It changes no verdict.** Refusing every unpinned install is a policy change that would block ordinary `cargo add x` workflows, so it stays the repo owner's decision. The record exists so that decision can be made from evidence.
 - **The silence is scoped as carefully as the record.** File-driven installs (`-r`, `-c`, `-e`), bare lockfile installs, npm, and already-pinned installs stay out of the log. A record that fires on routine installs is background noise, and background noise is the same as no record.
 
@@ -381,6 +381,29 @@ Two things made it invisible. The code's stated reason is npm-shaped: a bare `np
 - 68-case corpus replayed against `main`: zero decision change, so the record is verdict-neutral
 - both halves pinned in `scripts/test/consumer-forms.sh` — ten named-unpinned installs recorded, twelve routine or already-gated commands silent
 - mutation-verified against the tree without the fix (red at the first record assertion)
+
+---
+
+## v2.13.3 — the record had holes where it claimed coverage (shipped)
+
+Status: shipped as v2.13.3.
+
+The v2.13.2 record was validated with three notes. Two of them turned out to be behavior, not wording, and that distinction is the release: fixing them as prose would have narrowed a sentence and left the hole, which is the same invariant violation the record was introduced to end — just relocated from the code to the docs.
+
+### What changed
+
+- **A source flag consumes its argument, not the command.** Seeing `-r`, `-c`, or `-e` silenced the whole install. But `-c` is not a source flag at all — a constraint file only bounds versions while the install target still arrives on the command line — so `pip install -c constraints.txt evil` installed `evil` with no record. `-r requirements.txt evil` and `-e . evil` were silenced the same way. Each flag now consumes exactly its own argument.
+- **A URL's `@` is not a version.** The `@` test meant to skip already-pinned tokens also matched the user field of a VCS URL, so `git+ssh://git@host/evil.git` went unrecorded while `git+https://host/evil.git` was recorded — the same install, split by transport.
+- **Maven carries its coordinate in a flag.** `-Dartifact=<group>:<name>` never reached an operand walk, so Maven's actual idiom sat outside the record while a form nobody writes (`mvn dependency:get evil`) was inside it. A two-field coordinate is now reported and a three-field one stays quiet. Whether Maven accepts the versionless form is unverified — no Maven on the measuring machine — and for a record the unresolved case resolves toward reporting: a spurious line costs a line, a missing one costs the invariant.
+- **Working-tree installs stay out.** `pip install .` and `pip install ./pkg` build from the tree rather than fetching, so they name no package. A module path such as `example.com/evil` is not a local path and stays reported.
+- **The docs stopped explaining the boundary by flag.** The line is whether a package is named. The README said file-driven installs "name no package", which was never true of `-c`.
+- **`SKILL.md` now states the boundary too.** It is the manifest agents read, and it told them to run `check` first without saying that omitting the version means nothing is checked.
+
+### Verification
+
+- 106-case corpus replayed against the previous release: zero decision change, so the fixes stay inside the observability layer
+- every boundary pinned in `scripts/test/consumer-forms.sh` from both sides, including the Maven, `git+ssh`, and `-r <file> <pkg>` rows that had no coverage before
+- the notes came from an adversarial probe of the record's edges, not from re-reading the code
 
 ---
 

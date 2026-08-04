@@ -56,7 +56,7 @@ Safedeps 는 **개발 의존성 install** (npm / pip / cargo / go / gem / maven 
 
 ### 릴리즈 메모
 
-- npm 패키지 version 은 `package.json` 이 SSoT. `bin/safedeps` `SAFEDEPS_VERSION` 이 이를 따라가고, smoke 테스트는 `package.json` 을 읽어 대조한다 (현재 v2.13.2).
+- npm 패키지 version 은 `package.json` 이 SSoT. `bin/safedeps` `SAFEDEPS_VERSION` 이 이를 따라가고, smoke 테스트는 `package.json` 을 읽어 대조한다 (현재 v2.13.3).
 - `npm test` 는 release smoke suite 를 실행한다. full fixture E2E 는 `v2.1-tests` 에 있다.
 - daily re-check 는 LLM 토큰을 쓰지 않는다. opt-in 이며, macOS `launchd` user agent 가 매일 `safedeps re-check --json` 을 실행한다 (`install-safedeps-recheck-agent.mjs` 로 atomic install). `~/.safedeps/recheck.log` 와 `~/.safedeps/recheck-alerts.jsonl` 를 쓰고, 새 CVE/KEV/revoke/provider-skip/위조-의심 시 macOS notification 을 띄운다. 네트워크는 OSV / CISA / GHSA query 에만 쓴다.
 
@@ -372,7 +372,7 @@ v2.13.1 에서 carrier 경계를 재다가 발견했고, 그 릴리스가 닫은
 
 ### 무엇이 바뀌었나
 
-- **게이트를 안 거친 설치가 기록을 남긴다.** 커맨드 게이트 뒤에 효과 게이트가 없는 생태계에서 버전 없이 패키지를 지목한 설치는 `~/.safedeps/advisory.log` 에 생태계와 명령과 함께 `UNGATED` 를 남긴다. 지금까지는 흔적 없이 통과했고, 그건 "모든 우회는 관측 가능해야 한다" 는 불변식 위반이었다.
+- **게이트를 안 거친 설치가 기록을 남긴다.** 커맨드 게이트 뒤에 효과 게이트가 없는 생태계에서 버전 없이 패키지를 bare 피연산자로 지목한 설치는(피연산자 한정 범위가 남긴 구멍은 v2.13.3 에서 닫았다) `~/.safedeps/advisory.log` 에 생태계와 명령과 함께 `UNGATED` 를 남긴다. 지금까지는 흔적 없이 통과했고, 그건 "모든 우회는 관측 가능해야 한다" 는 불변식 위반이었다.
 - **판정은 안 바꾼다.** 버전 없는 설치를 전부 거부하는 건 평범한 `cargo add x` 흐름을 막는 정책 변경이라 레포 소유자 결정으로 남긴다. 기록은 그 결정을 근거로 내릴 수 있게 하려고 있다.
 - **침묵도 기록만큼 정밀하게 범위를 잡았다.** 파일 기반 설치(`-r`, `-c`, `-e`), 맨 lockfile 설치, npm, 이미 버전이 박힌 설치는 로그에 안 남는다. 평범한 설치마다 찍히는 기록은 배경 소음이고, 배경 소음은 없는 기록과 같다.
 
@@ -381,6 +381,29 @@ v2.13.1 에서 carrier 경계를 재다가 발견했고, 그 릴리스가 닫은
 - 68케이스 코퍼스를 `main` 과 대조: 판정 변화 0 — 기록은 verdict-neutral
 - 양쪽 절반을 `scripts/test/consumer-forms.sh` 에 고정 — 버전 없는 지목 설치 10개 기록, 평범하거나 이미 게이트된 명령 12개 침묵
 - 수리 없는 트리에 대고 뮤테이션 검증(첫 기록 assertion 에서 빨강)
+
+---
+
+## v2.13.3 — 기록이 커버한다고 적힌 자리에 구멍이 있었다 (출시)
+
+Status: v2.13.3 로 출시.
+
+v2.13.2 의 기록이 note 3건과 함께 검증을 통과했다. 그중 둘이 문면이 아니라 동작이었고, 그 구분이 이 릴리스의 전부다. 문면으로 처리했으면 문장을 좁히고 구멍은 남았을 텐데, 그건 이 기록을 도입한 이유였던 불변식 위반이 코드에서 문서로 자리만 옮긴 것이다.
+
+### 무엇이 바뀌었나
+
+- **소스 플래그는 명령이 아니라 자기 인자를 소비한다.** `-r`·`-c`·`-e` 가 보이면 설치 전체를 침묵시켰다. 그런데 `-c` 는 애초에 소스 플래그가 아니다 — 제약 파일은 버전을 한정할 뿐 설치 대상은 명령줄에 따로 온다. 그래서 `pip install -c constraints.txt evil` 이 기록 없이 `evil` 을 설치했다. `-r requirements.txt evil` 과 `-e . evil` 도 같은 방식으로 침묵했다. 이제 각 플래그는 자기 인자 하나만 소비한다.
+- **URL 의 `@` 는 버전이 아니다.** 이미 pin 된 토큰을 건너뛰려던 `@` 검사가 VCS URL 의 user 필드까지 잡아서, `git+ssh://git@host/evil.git` 은 기록되지 않고 `git+https://host/evil.git` 은 기록됐다 — 같은 설치가 전송 방식으로 갈렸다.
+- **maven 은 좌표를 플래그에 싣는다.** `-Dartifact=<group>:<name>` 은 피연산자 순회에 아예 안 걸려서, maven 의 실제 관용구가 기록 밖에 있고 아무도 안 쓰는 형태(`mvn dependency:get evil`)가 안에 있었다. 이제 두 필드 좌표는 기록되고 세 필드는 침묵한다. maven 이 버전 없는 형태를 받는지는 확인 못 했다 — 측정 머신에 maven 이 없다 — 그리고 기록에서 미확인은 보고 쪽으로 푼다: 군더더기 한 줄의 비용은 한 줄이고, 빠진 한 줄의 비용은 불변식이다.
+- **작업 트리 설치는 빠진다.** `pip install .` 과 `pip install ./pkg` 는 가져오는 게 아니라 트리에서 빌드하므로 패키지를 지목하지 않는다. `example.com/evil` 같은 모듈 경로는 로컬 경로가 아니라 계속 기록된다.
+- **문서가 경계를 플래그로 설명하던 것을 그만뒀다.** 기준은 패키지를 지목하는지다. README 는 파일 기반 설치가 "패키지를 지목하지 않는다" 고 적었는데 `-c` 에는 처음부터 사실이 아니었다.
+- **`SKILL.md` 도 이제 이 경계를 말한다.** 에이전트가 읽는 매니페스트인데 "설치 전에 check 를 돌려라" 라고만 하고 버전을 빼면 아무것도 검사되지 않는다는 사실을 말하지 않았다.
+
+### 검증
+
+- 106케이스 코퍼스를 직전 릴리스와 대조: 판정 변화 0 — 수리가 관측 층 안에 머문다
+- 모든 경계를 `scripts/test/consumer-forms.sh` 에 양방향으로 고정. 커버리지가 아예 없던 maven·`git+ssh`·`-r <파일> <패키지>` 행 포함
+- note 는 코드 재독이 아니라 기록의 가장자리를 적대적으로 탐침해서 나왔다
 
 ---
 
