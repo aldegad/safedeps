@@ -470,6 +470,97 @@ if [[ "${TOOL_NAME}" != "Bash" ]] || [[ -z "${COMMAND}" ]]; then
   exit 0
 fi
 
+# --- Self budget: never let the runtime kill us mid-judgment ----------------
+#
+# The runtime gives this hook a fixed budget (the installer registers 30s), and
+# the measured behavior past that budget is FAIL-OPEN: the hook is killed and
+# the tool call proceeds (Claude Code, measured 2026-08-04; Codex unmeasured, so
+# no parity assumed). The command scan is superlinear in command length, so the
+# budget is reachable by padding — measured here, 28KB took 29s and 32KB took
+# 38s. Past that line this gate silently disappears, which for pip/cargo/go/gem
+# (where the command gate is the authority, not an advisory layer) is a
+# universal bypass that needs no cleverness at all.
+#
+# The runtime's timeout behavior is not ours to change. Answering before it
+# fires is. So the guard runs its judgment in a child under a budget of its own,
+# smaller than the runtime's, and if that child has not answered in time the
+# guard answers for it: DENY, because an install we could not judge must not
+# proceed. The runtime never gets to kill us mid-flight, so there is nothing
+# left to fail open.
+#
+# Two properties this deny must keep, because both were paid for in incidents:
+#   - It is fail-CLOSED but it is NOT a finding. "I did not finish looking" and
+#     "I looked and found a violation" are different sentences, and a reader who
+#     cannot tell them apart learns to route around the gate. The reason string
+#     says which one this is, in its first four words.
+#   - It is observable (advisory.log), like every other bypass or unavailability.
+#
+# Only commands large enough to be anywhere near the budget pay for the extra
+# process. Below the engage size the judgment finishes orders of magnitude
+# inside the budget (1KB measured at ~0.1s against a 30s runtime budget), so the
+# machinery would be pure overhead on every Bash call the agent makes. The
+# engage size is a performance gate with ~300x of headroom behind it, not a
+# security boundary — the security boundary is the wall-clock budget below,
+# which is machine-independent in a way a byte count can never be.
+SAFEDEPS_SELF_BUDGET_SECONDS="${SAFEDEPS_SELF_BUDGET_SECONDS:-20}"
+SAFEDEPS_BUDGET_ENGAGE_BYTES="${SAFEDEPS_BUDGET_ENGAGE_BYTES:-1024}"
+
+if [[ -z "${SAFEDEPS_BUDGET_CHILD:-}" ]] && (( ${#COMMAND} >= SAFEDEPS_BUDGET_ENGAGE_BYTES )); then
+  budget_out=$(mktemp "${TMPDIR:-/tmp}/safedeps-budget.XXXXXX")
+  budget_err=$(mktemp "${TMPDIR:-/tmp}/safedeps-budget.XXXXXX")
+
+  # Same payload, same script, one env marker so the child judges instead of
+  # re-entering this wrapper.
+  printf '%s' "${INPUT}" | SAFEDEPS_BUDGET_CHILD=1 bash "${BASH_SOURCE[0]}" \
+    >"${budget_out}" 2>"${budget_err}" &
+  budget_child=$!
+
+  # The parent keeps the deadline itself rather than delegating to a watchdog
+  # subshell. A watchdog would have to sleep in fixed steps, and killing it
+  # while it sits in `sleep` does not return the shell until that sleep expires
+  # — measured, that rounded every engaged call up to the next whole second
+  # (a 788ms judgment took 1050ms). It would also outlive this process by up to
+  # one step, holding a PID it might no longer own. Polling here costs one
+  # `sleep` per step and starts fine-grained, so a fast judgment is delayed by
+  # at most the first 50ms step while a long one still coasts on 1s steps.
+  budget_waited_ms=0
+  budget_step_ms=50
+  budget_deadline_ms=$(( SAFEDEPS_SELF_BUDGET_SECONDS * 1000 ))
+  while kill -0 "${budget_child}" 2>/dev/null; do
+    if (( budget_waited_ms >= budget_deadline_ms )); then
+      kill -TERM "${budget_child}" 2>/dev/null || true
+      break
+    fi
+    sleep "$(printf '%d.%03d' $(( budget_step_ms / 1000 )) $(( budget_step_ms % 1000 )))"
+    budget_waited_ms=$(( budget_waited_ms + budget_step_ms ))
+    # Plain `if`, not `(( ... )) && assign`: under `set -e` a false arithmetic
+    # test makes the whole && list fail and takes the guard down with it.
+    budget_step_ms=$(( budget_step_ms * 2 ))
+    if (( budget_step_ms > 1000 )); then
+      budget_step_ms=1000
+    fi
+  done
+
+  budget_rc=0
+  wait "${budget_child}" || budget_rc=$?
+
+  # The hooks exit 0 on every designed path (decisions travel as JSON on
+  # stdout), so a non-zero child is an unfinished judgment, whether the watchdog
+  # killed it or it died some other way. Either way we did not judge it.
+  if [[ ${budget_rc} -eq 0 ]]; then
+    cat "${budget_err}" >&2
+    cat "${budget_out}"
+    rm -f "${budget_out}" "${budget_err}"
+    exit 0
+  fi
+
+  rm -f "${budget_out}" "${budget_err}"
+  log_advisory "pre-guard DENY: judgment unfinished within the ${SAFEDEPS_SELF_BUDGET_SECONDS}s self-budget (command ${#COMMAND} bytes, child rc=${budget_rc}) — fail-closed, not a detection."
+  jq -nc --arg budget "${SAFEDEPS_SELF_BUDGET_SECONDS}" --arg size "${#COMMAND}" \
+    '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:("safedeps: UNDECIDED, not unsafe — safedeps could not finish judging this command within its " + $budget + "s budget (" + $size + " bytes of command text), so it is blocked fail-closed. Nothing was detected in it; the gate simply did not get to an answer, and an install it cannot judge must not run. Scan cost grows with command length. Split the command, or write long content with a file-writing tool instead of one very large shell command, and retry.")}}'
+  exit 0
+fi
+
 HIDDEN_DEPENDENCY_INSTALL=false
 if ! command_is_dependency_install "${COMMAND}"; then
   # Catch indirection patterns that hide install commands (V-002)
@@ -527,7 +618,12 @@ KEY_DIR_HASH=$(compute_dir_hash "${CWD_DIR}")
 SNAPSHOT_ID="${TIMESTAMP}_${DIR_HASH}"
 
 acquire_state_lock
-trap 'release_state_lock' EXIT
+# TERM/INT as well as EXIT: under the self budget above this script can be the
+# child that gets signalled, and a lock leaked by a signalled child would make
+# the next install wait out the 60s stale-lock timer. The lock is taken after
+# the scan, so the budget kill lands here only in the narrow case where the
+# install path itself runs long, but the insurance costs one word.
+trap 'release_state_lock' EXIT TERM INT
 
 PARENT_SNAPSHOT_ID=""
 CONFIRMED_FILE="${GUARD_DIR}/confirmed_${DIR_HASH}"
