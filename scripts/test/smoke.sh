@@ -141,11 +141,21 @@ pass "the prose states the hook budget the installer registers"
 # figure is matched, so the self-budget ceiling, the poll steps, and every other
 # measured duration are left alone — they are pinned by their own constants.
 #
-# What this pair does and does not cover, stated plainly: the canonical pin
-# catches the constant moving, and this rule catches a restatement coming back
-# while the constant is unchanged. A constant that moves AND stale prose that
-# still spells the old figure is caught by the first check, not the second,
-# because the second only ever looks for the current number.
+# What this pair does and does not cover. The canonical pin is what actually
+# closes the drift: it catches the constant moving, whatever the prose looks
+# like. This rule is a second-order backstop for a restatement coming back while
+# the constant is unchanged, and it leaks in ways worth naming rather than
+# leaving for a reader to discover — a check whose limits go unread is read as
+# coverage, which is the defect this whole line of work has been about:
+#   - the document list below is hardcoded, so a restatement in a new file walks past
+#   - it matches one written form (`<N>s`), so `30 second budget` walks past
+#   - it matches `<N>s` only mid-line, so a line starting with the figure walks past
+#   - it is line-based, so a sentence split across two lines walks past
+#   - the measurement exemption tests for the WORD `measured`, not for a date
+# Two structural axes are outside both checks and need the documented JSON
+# parsed against the installer's output to close, which is a separate decision:
+# a second registration block added for the same event, and a doc that swaps the
+# `pre` and `post` registrations.
 for doc in SKILL.md README.md README.ko.md AGENTS.md ARCHITECTURE.md ARCHITECTURE.ko.md; do
   while IFS= read -r line; do
     [[ -z "${line}" ]] && continue
