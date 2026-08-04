@@ -27,6 +27,7 @@ bash -n scripts/safedeps-pre-guard.sh
 bash -n scripts/safedeps-post-verify.sh
 bash -n scripts/safedeps-recheck-alert.sh
 bash -n scripts/release-gates.sh
+bash -n scripts/test/consumer-forms.sh
 bash -n lib/gates/repo-profile.sh
 bash -n lib/gates/scan.sh
 bash -n lib/gates/audit.sh

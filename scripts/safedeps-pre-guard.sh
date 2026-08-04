@@ -234,7 +234,7 @@ normalize_install_text() {
   for _ in 1 2 3; do
     text=$(printf '%s' "${text}" | sed -E \
       -e 's/^[[:space:]]+//' \
-      -e 's#(^|[[:space:];|&])(/[^[:space:];|&]+/)(npm|npx|pnpm|yarn|bun|pip3?|python3?|py|poetry|uv|pipenv|cargo|go|gem|bundle|mvn|dotnet)([[:space:];|&]|$)#\1\3\4#g' \
+      -e 's#(^|[[:space:];|&])(/[^[:space:];|&]+/)(npm|npx|pnpm|yarn|bun|pip3?|python3?|py|poetry|uv|pipenv|cargo|go|gem|bundle|mvn|dotnet|sh|bash|zsh)([[:space:];|&]|$)#\1\3\4#g' \
       -e 's#(^|[;&|][[:space:]]*)(env[[:space:]]+([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]+[[:space:]]+)*|command[[:space:]]+)#\1#g' \
       -e 's#(^|[;&|][[:space:]]*)([A-Za-z_][A-Za-z0-9_]*=[^[:space:]'\''"]*[[:space:]]+)+#\1#g')
   done
@@ -338,7 +338,13 @@ payload_pipes_install_text_to_shell() {
   # only, 2.75s with the scan forced first, 1.39s with this order.
   echo "${payload}" | grep -qEi "${manager_pattern}.*${verb_pattern}" || return 1
 
-  exec_view=$(command_scan_text "$(strip_heredoc_bodies "${payload}")")
+  # The consumer side is normalized the same way the producer side already is:
+  # `| /bin/sh`, `| env sh`, and `| command sh` are the same consumer as `| sh`.
+  # normalize_install_text is the file's existing statement of that equivalence —
+  # it was applied to the install text and skipped here, so the two sides of one
+  # pipe disagreed about what counts as the same invocation. It runs after the
+  # raw-text short circuit above, so only install-bearing commands pay for it.
+  exec_view=$(normalize_install_text "$(command_scan_text "$(strip_heredoc_bodies "${payload}")")")
   echo "${exec_view}" | grep -qEi '\|[[:space:]]*(bash|sh|zsh)([[:space:]]|$)'
 }
 

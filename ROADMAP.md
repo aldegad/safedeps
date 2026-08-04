@@ -56,7 +56,7 @@ The internal engine keeps the v1 `reorg-guard` assets.
 
 ### Release notes
 
-- The npm package version in `package.json` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION` tracks it and the smoke test reads `package.json` to compare (current: v2.13.0).
+- The npm package version in `package.json` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION` tracks it and the smoke test reads `package.json` to compare (current: v2.13.1).
 - `npm test` runs the release smoke suite; the full fixture E2E lives under `v2.1-tests`.
 - The daily re-check uses no LLM tokens. It is opt-in: a macOS `launchd` user agent runs `safedeps re-check --json` daily, installed atomically by `install-safedeps-recheck-agent.mjs`. It writes `~/.safedeps/recheck.log` and `~/.safedeps/recheck-alerts.jsonl` and raises a macOS notification on a new CVE/KEV/revoke/provider-skip/suspected-forgery. Network is used only for OSV / CISA / GHSA queries.
 
@@ -335,6 +335,31 @@ The pre-guard's hidden-install detector judged pipe-to-shell by grepping the raw
 - The PreToolUse hook budget is 30s. The remaining quadratic scanner (compound-command splitting, untouched here) crosses that budget near ~29KB of command text (28KB → 28s measured). That bound predates this release — it sat near ~26KB before the fix — and its linearization is tracked as follow-up work.
 
 ---
+
+## v2.13.1 — the command gate's boundary, measured and written down (shipped)
+
+Status: shipped as v2.13.1.
+
+Five shell forms were reported as command-gate bypasses that old and new code missed alike. The question worth answering was not "can we catch five forms" but "do they get through for one reason or five" -- an earlier enumeration in a sibling tool closed five forms and surfaced nine.
+
+The answer is one reason. The gate recognizes an install by the syntactic carrier that hands text to an interpreter, and that recognition is a closed enumeration applied at one quoting level. Every miss is a carrier outside the list. But fixing "that one spot" does not end the enumeration, because the spot *is* an enumeration: probing the reported five surfaced four more (`| command sh`, a script written then run, `eval` nested inside `sh -c`, a top-level command substitution) without looking hard. The 5-to-9 growth reproduced in a single session.
+
+### What changed
+
+- **One fix, and it is not a new carrier.** `normalize_install_text` already declares that a path-qualified or `env`-prefixed invocation is the bare one. It was applied to the install text and skipped on the consumer side of the pipe, so the two sides of one pipe disagreed about what counts as the same invocation. Normalizing the consumer closes `| /bin/sh`, `| /usr/bin/bash`, `| env sh`, `| env FOO=1 sh`, `| command sh`, and the same forms wrapped in `sh -c`. No new concept, and nothing else in the corpus changed decision.
+- **No new carrier syntaxes were added.** A herestring, an `xargs`-built command line, a script written then run, `eval` nested in `sh -c`, and a same-quote nested `sh -c` stay unjudged on purpose. That is where the enumeration grows without converging, and the rule separating the two kinds of change is now written in `ARCHITECTURE.md`.
+- **The ecosystem asymmetry is documented.** For npm an unrecognized carrier is *delayed detection*: the effect gate's recognizer is a raw text match with no carrier enumeration, so it fires on the same command and reads the live lockfile. For `pip`, `cargo`, `go`, `gem`, `maven`, and `nuget` nothing is behind the command gate, so the same form is a complete miss recorded as `UNVERIFIED`. Reading a parser gap as npm-shaped was the misreading this fixes.
+- **Decoys are separated from gaps.** `sh -c "sh -c "…""` reads as double nesting, but the outer quotes close at the inner ones and nothing installs. `xargs sh -c` without `-I` or `-0` hands the line to `sh` as `$0`. Two of the five reported forms were decoys as written.
+- **`scripts/test/consumer-forms.sh`** pins all of it and joins `npm test`.
+
+### Verification
+
+- decision drift measured across the full corpus at `1e33b65` (before the false-positive narrowing), at `main`, and after this fix: the narrowing shrank nothing, and this fix moved six forms from pass to deny and nothing else
+- every form's status proved by execution against a fake package manager, so a form counts as a gap only when it actually reaches one
+- the npm delayed-detection claim is machine-checked: the same wrapped command that the command gate passes triggers the effect-gate backstop
+- the pypi complete-miss claim is machine-checked: `UNVERIFIED` is recorded and no rollback is produced
+- battery mutation-verified against the pre-fix tree (red at the first normalization assertion)
+- the false-positive corpus from v2.13 stays allowed: quoted idioms, `npm run`, `npx`
 
 ## v3 (future)
 

@@ -116,6 +116,8 @@ Claude Code 또는 Codex CLI가 `npm install`, `pip install`, `cargo add`, `go g
 
 ledger 게이트나 사전 비행 체크에 실패하면 해당 명령은 실행 전에 **차단**됩니다. 명령 가드는 의도적으로 best-effort이며, 에이전트 루프를 개선하고 직접적인 누락을 잡는 데 초점을 둡니다. npm의 권한 판단은 설치 후 효과 게이트가 담당합니다.
 
+**명령 가드가 못 보는 것과, 그 비용이 생태계마다 다르다는 것.** 가드는 셸에게 텍스트를 넘기는 구문 형태로 설치를 인식합니다 — `sh -c`, `eval`, 명령 치환, 셸로 들어가는 파이프. 그 목록 바깥의 형태는 통과합니다: herestring, `xargs` 가 조립한 명령줄, 파일로 쓴 뒤 실행하는 스크립트. npm 에서는 이것이 미탐이 아니라 **지연 탐지**입니다. 효과 게이트가 살아 있는 lockfile 을 읽어서 명령을 어떻게 썼든 결과를 잡기 때문입니다. `pip`, `cargo`, `go`, `gem`, `maven`, `nuget` 에는 가드 뒤에 closure resolver 가 없으므로 같은 형태가 **완전 미탐**입니다 — `~/.safedeps/advisory.log` 에 `UNVERIFIED` 로 기록되고 그걸로 끝입니다. "가드가 이 형태를 파싱하지 않는다" 를 npm 기준으로 읽지 마세요. 경계는 `scripts/test/consumer-forms.sh` 에 측정되어 고정돼 있고, 왜 경계를 넓히는 게 답이 아닌지는 `ARCHITECTURE.md` 가 설명합니다.
+
 ### Phase 3: Post-install Effect Enforcement (`safedeps-post-verify.sh` -- PostToolUse)
 
 설치 명령이 끝난 뒤 verify 훅이 변경 사항을 분석합니다. npm에서는 이것이 주요 집행 지점입니다. 실제 `package-lock.json` 폐쇄성을 읽고, 각 패키지를 승인된 direct entry와 해당 `transitive_specs`로 검증한 뒤 OSV 배치 조회를 다시 수행합니다.
