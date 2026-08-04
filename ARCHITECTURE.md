@@ -50,6 +50,18 @@ The two lanes differ in timing and scope (one package's effect before/after inst
 
 **The effect-primary model is npm-only.** `pip`, `cargo`, `go`, `gem`, `maven`, and `nuget` stay on the v2.1 command-gate + reorg model until their closure resolvers land; they are not described as having PostToolUse closure authority.
 
+#### Where each ecosystem's authority lives
+
+The command gate decides whether a command is an install by recognizing the syntactic carrier that hands text to an interpreter. It knows `sh -c`, `eval`, command substitution, and a pipe into a shell. That list is an enumeration, and the shell has unbounded ways to route text to an interpreter, so the list has a boundary. A herestring, an `xargs`-built command line, and a script written to a file and then run all fall outside it. Extending the list finds more forms rather than fewer.
+
+**The same bypass has a different severity in each ecosystem, and that difference is the point.** For npm the boundary costs *delayed detection*: the effect gate reads the live `package-lock.json`, and its own install recognizer is a raw text match with no carrier enumeration, so it fires on exactly the commands the command gate skipped. An unrecognized carrier still ends in a closure check and a rollback. For `pip`, `cargo`, `go`, `gem`, `maven`, and `nuget` there is no closure resolver behind the command gate, so the same carrier is a **complete miss**. The post hook recognizes the command, finds nothing it can check it with, and records `UNVERIFIED`. Read "the command gate does not parse this form" as npm-shaped and you will conclude something is still watching. In the ecosystems where the command gate is the authority, nothing is.
+
+The boundary is not an oversight, and widening it is not free. The two recognizers in this repo make opposite precision trades on purpose. A false positive in the effect gate costs one closure diff, so its recognizer is deliberately loose. A false positive in the command gate **denies the user's command**, so its recognizer must be precise — and precision is what an unenumerated carrier walks through. This is the same conclusion that moved npm's authority to the effect gate in the first place: command text cannot be a fail-closed authority, because deciding from text means deciding from a syntax you have to enumerate.
+
+The rule for changing the command gate follows from that. Applying a rule the gate already states, at a place that skipped it, is in scope — normalizing `| /bin/sh` and `| env sh` to `| sh` is the gate's own existing statement that a path-qualified or env-prefixed invocation is the bare one, applied to the consumer side of the pipe instead of only the producer side. Adding a new carrier syntax to the recognizer is not, because that is where the enumeration grows without converging.
+
+`scripts/test/consumer-forms.sh` holds the measurement. It pins the forms the gate catches, the forms it deliberately leaves unjudged, the ecosystem consequence of each miss, and a third set that matters as much: **decoys**. `sh -c "sh -c "…""` reads as double nesting but the outer quotes close at the inner ones and nothing is installed, and `xargs sh -c` without `-I` or `-0` hands the line to `sh` as `$0` rather than as a script. The battery proves each form's status by running it against a fake package manager, so a form counts as a gap only when it actually reaches one.
+
 ### Install-time flow
 
 ```

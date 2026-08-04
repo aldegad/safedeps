@@ -116,6 +116,8 @@ When Claude Code or Codex CLI is about to run `npm install`, `pip install`, `car
 
 If the ledger gate or a pre-flight check fails, the command is **blocked before execution** -- nothing is installed. This command guard is intentionally best-effort; it improves the agent loop and catches direct misses, while npm authority lives in the post-install effect gate.
 
+**What the command guard does not see, and what that costs per ecosystem.** The guard recognizes an install by the syntactic form that hands text to a shell -- `sh -c`, `eval`, command substitution, a pipe into a shell. Forms outside that list get through: a herestring, a command line built by `xargs`, a script written to a file and then run. For npm this is *delayed* detection, not a miss, because the effect gate reads the live lockfile and catches the result regardless of how the command was written. For `pip`, `cargo`, `go`, `gem`, `maven`, and `nuget` there is no closure resolver behind the guard, so the same form is a **complete miss** -- it is recorded as `UNVERIFIED` in `~/.safedeps/advisory.log` and nothing else happens. Do not read "the guard does not parse this form" as npm-shaped. The boundary is measured and pinned in `scripts/test/consumer-forms.sh`, and `ARCHITECTURE.md` explains why widening it is not the fix.
+
 ### Phase 3: Post-install Effect Enforcement (`safedeps-post-verify.sh` -- PostToolUse)
 
 After the install command completes, the verify hook analyzes what changed. For npm, this is the primary enforcement surface: it reads the actual `package-lock.json` closure, verifies every package against approved direct entries and their `transitive_specs`, and re-checks the closure with OSV batch.
