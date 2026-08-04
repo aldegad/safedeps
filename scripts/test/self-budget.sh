@@ -338,16 +338,28 @@ pass "a disabled deadline announces itself every time it is used"
 
 # --- the knob reader itself must not become the slow path --------------------
 # Both knobs go through one reader, and that reader runs BEFORE the child spawn
-# — outside the deadline it exists to serve, where nothing can interrupt it. A
-# quadratic parse there is a fail-open with no attacker: the earlier per-zero
-# strip loop took 28.9s on 40000 leading zeros and 63.2s on 60000. One regex
-# replaced it, so the same input has to be answered promptly.
-zeros=$(head -c 60000 < /dev/zero | tr '\0' '0')
+# — outside the deadline it exists to serve, where nothing can interrupt it. It
+# has been the slow path twice: a per-zero strip loop (28.9s on 40000 leading
+# zeros, 63.2s on 60000), then the regex that replaced it, which cut the
+# constant about a hundredfold and left the quadratic class alone — the reader
+# still quadrupled its time for every doubling (50k 0.34s, 400k 20.2s, 800k
+# 88.0s), so 500000 zeros burned 224s end to end.
+#
+# What bounds it is a length ceiling on the INPUT, decided before any pattern
+# touches the string. So the case here is sized past that ceiling by four orders
+# of magnitude: whatever the parse costs per character, the answer must not
+# depend on it. A regression that only reinstated the old constant would still
+# pass a 60000-zero case, which is why this one is 500000.
+zeros=$(head -c 500000 < /dev/zero | tr '\0' '0')
 guard "pip install requests==2.31.0 # ${big}" "${zeros}3"
-[[ "${GUARD_DECISION}" == "deny" ]] || fail "a heavily zero-padded budget still decides (got: ${GUARD_DECISION})"
+[[ "${GUARD_DECISION}" == "deny" ]] || fail "an absurdly padded budget still decides (got: ${GUARD_DECISION})"
 (( GUARD_ELAPSED < runtime_budget )) \
-  || fail "reading a heavily zero-padded budget stays inside the runtime budget (took ${GUARD_ELAPSED}s; the parse runs where the deadline cannot reach it)"
-pass "the knob reader is linear, so a padded value cannot burn the runtime budget"
+  || fail "reading an absurdly padded budget stays inside the runtime budget (took ${GUARD_ELAPSED}s; the parse runs where the deadline cannot reach it)"
+grep -q 'characters' <<< "${GUARD_STDERR}" \
+  || fail "a refused over-long value is reported by length rather than quoted whole"
+(( ${#GUARD_STDERR} < 4096 )) \
+  || fail "a refused over-long value is truncated in the message (${#GUARD_STDERR} bytes on stderr)"
+pass "the knob reader refuses over-long input before parsing it, so padding cannot burn the runtime budget"
 
 # --- inside the budget nothing changes --------------------------------------
 

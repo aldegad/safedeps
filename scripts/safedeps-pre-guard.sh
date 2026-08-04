@@ -580,11 +580,30 @@ SAFEDEPS_BUDGET_ENGAGE_MAX_BYTES=4096
 # `* 1000` deadline below stay inside a 64-bit integer with room to spare.
 SAFEDEPS_KNOB_MAX_DIGITS=9
 
+# The longest input the reader will look at. Nine digits plus a sign, some
+# whitespace, and room to spare — a real value never comes close, and refusing
+# past it is what keeps the parse from being the slow path.
+SAFEDEPS_KNOB_MAX_INPUT_CHARS=32
+
 # One reader for both knobs, because they failed the same way and a second
 # hand-rolled parser is how they would drift apart again. Prints the normalized
 # digits, or nothing with a non-zero status when the value is not a number.
 safedeps_normalize_knob() {
   local raw="$1" value
+  # Length first, in one O(1) check, because everything below is pattern work on
+  # the whole string and pattern work is where this has now failed twice. The
+  # per-zero strip loop was quadratic; the regex that replaced it cut the
+  # constant about a hundredfold and left the class alone — measured on the
+  # reader itself, doubling the input quadrupled the time (50k 0.34s, 100k
+  # 1.26s, 200k 5.01s, 400k 20.2s, 800k 88.0s), so 500000 leading zeros still
+  # burned 224s end to end. That work happens before the child spawn, where the
+  # deadline cannot reach it. A cheap ceiling on the INPUT is what actually
+  # bounds it: no reachable knob value is 32 characters long, since nine digits
+  # is already about 31 years of seconds, and anything longer is refused rather
+  # than parsed.
+  if (( ${#raw} > SAFEDEPS_KNOB_MAX_INPUT_CHARS )); then
+    return 1
+  fi
   value="${raw#"${raw%%[![:space:]]*}"}"
   value="${value%"${value##*[![:space:]]}"}"
   value="${value#+}"
@@ -607,7 +626,13 @@ if [[ -z "${SAFEDEPS_SELF_BUDGET_SECONDS:-}" ]]; then
 else
   budget_given="${SAFEDEPS_SELF_BUDGET_SECONDS}"
   if ! budget_normalized=$(safedeps_normalize_knob "${budget_given}"); then
-    SAFEDEPS_SELF_BUDGET_INVALID_FROM="${budget_given}"
+    # Quoted back to the user, so it is truncated: a refused value can be
+    # arbitrarily long, and echoing it whole would put megabytes on the hook's
+    # stderr and into advisory.log.
+    SAFEDEPS_SELF_BUDGET_INVALID_FROM="${budget_given:0:${SAFEDEPS_KNOB_MAX_INPUT_CHARS}}"
+    if (( ${#budget_given} > SAFEDEPS_KNOB_MAX_INPUT_CHARS )); then
+      SAFEDEPS_SELF_BUDGET_INVALID_FROM="${SAFEDEPS_SELF_BUDGET_INVALID_FROM}... (${#budget_given} characters)"
+    fi
     SAFEDEPS_SELF_BUDGET_SECONDS="${SAFEDEPS_SELF_BUDGET_DEFAULT_SECONDS}"
   # Digits first, magnitude second. Bash integers are 64-bit and wrap silently,
   # so evaluating first and comparing after is not an option: a value that wraps
@@ -636,7 +661,10 @@ if [[ -z "${SAFEDEPS_BUDGET_ENGAGE_BYTES:-}" ]]; then
 else
   engage_given="${SAFEDEPS_BUDGET_ENGAGE_BYTES}"
   if ! engage_normalized=$(safedeps_normalize_knob "${engage_given}"); then
-    SAFEDEPS_BUDGET_ENGAGE_INVALID_FROM="${engage_given}"
+    SAFEDEPS_BUDGET_ENGAGE_INVALID_FROM="${engage_given:0:${SAFEDEPS_KNOB_MAX_INPUT_CHARS}}"
+    if (( ${#engage_given} > SAFEDEPS_KNOB_MAX_INPUT_CHARS )); then
+      SAFEDEPS_BUDGET_ENGAGE_INVALID_FROM="${SAFEDEPS_BUDGET_ENGAGE_INVALID_FROM}... (${#engage_given} characters)"
+    fi
     SAFEDEPS_BUDGET_ENGAGE_BYTES="${SAFEDEPS_BUDGET_ENGAGE_DEFAULT_BYTES}"
   elif (( ${#engage_normalized} > SAFEDEPS_KNOB_MAX_DIGITS )) \
     || (( 10#${engage_normalized} > SAFEDEPS_BUDGET_ENGAGE_MAX_BYTES )); then
