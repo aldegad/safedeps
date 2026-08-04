@@ -200,6 +200,51 @@ grep -q 'clamped' <<< "${GUARD_REASON}" \
   || fail "the undecided deny says the budget was clamped, so its figure is not read as the setting being ignored"
 pass "the clamp is observable — stderr, advisory.log, and the deny reason all say it happened"
 
+# --- the clamp must read the value the same way the deadline does ------------
+# The first version of this clamp validated with `^[0-9]+$` and then let the
+# deadline consume the RAW string in `$(( ))`. Bash arithmetic accepts a wider
+# grammar than that regex, so `+40`, ` 40` and `0x28` failed validation, skipped
+# the clamp, and then evaluated to 40 as the budget — above the runtime's, which
+# is the fail-open this whole file exists to prevent. Measured before the fix: a
+# 64KB command under `+40` produced no answer for 41s. Two grammars for one
+# value is the defect, so these cases pin that there is only one.
+#
+# One expensive case proves the property end to end; the cheap ones below prove
+# the parse, which is where the defect actually lived.
+guard "pip install requests==2.31.0 # ${huge}" " 40"
+[[ "${GUARD_DECISION}" == "deny" ]] \
+  || fail "a whitespace-padded over-ceiling budget still denies (got: ${GUARD_DECISION})"
+(( GUARD_ELAPSED < runtime_budget )) \
+  || fail "a whitespace-padded over-ceiling budget is clamped like a bare one (took ${GUARD_ELAPSED}s against the ${runtime_budget}s runtime budget)"
+pass "a budget the regex used to miss but arithmetic accepted is clamped too"
+
+# Cheap parse checks. A small command inside the engage size answers in
+# milliseconds, so what these read is the announcement and the budget figure the
+# guard reports — which is exactly what the raw value used to corrupt.
+guard "echo ${small}" "+40" 128
+grep -q 'clamped' <<< "${GUARD_STDERR}" || fail "a leading + is parsed, then clamped (got: $(printf '%s' "${GUARD_STDERR}" | head -c 80))"
+grep -q '40' <<< "${GUARD_STDERR}" || fail "the clamp names the value the user set, normalized"
+pass "a leading + is normalized rather than skipping the clamp"
+
+# Not a number at all: there is no budget to honour, so the default is in force
+# — inside the ceiling, and said out loud, because a value nobody asked for must
+# not arrive silently.
+for bad_budget in "0x28" "abc" "-5" "4.5"; do
+  guard "echo ${small}" "${bad_budget}" 128
+  [[ "${GUARD_DECISION}" == "pass" ]] \
+    || fail "a non-numeric budget (${bad_budget}) falls back to the default rather than breaking the gate (got: ${GUARD_DECISION})"
+  grep -q 'not a whole number' <<< "${GUARD_STDERR}" \
+    || fail "a non-numeric budget (${bad_budget}) is announced (got: $(printf '%s' "${GUARD_STDERR}" | head -c 80))"
+done
+pass "a non-numeric budget falls back to the default and says so, instead of reaching arithmetic"
+
+# The same value written the long way is still the same number: `08` must not be
+# read as octal, which is an arithmetic error rather than eight.
+guard "echo ${small}" "08" 128
+[[ "${GUARD_DECISION}" == "pass" ]] || fail "a zero-padded budget is base 10 (got: ${GUARD_DECISION})"
+if grep -q 'not a whole number' <<< "${GUARD_STDERR}"; then fail "a zero-padded budget is a number, not a rejection"; fi
+pass "a zero-padded budget is read in base 10"
+
 # Lowering stays free: a shorter budget only denies earlier, and it must not be
 # reported as clamped.
 guard "echo ${big}" "${tiny_budget}"

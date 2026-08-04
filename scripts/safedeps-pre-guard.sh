@@ -538,15 +538,47 @@ SAFEDEPS_RUNTIME_BUDGET_SECONDS=30
 # loaded machine needs before an on-time answer becomes a late one.
 SAFEDEPS_SELF_BUDGET_MAX_SECONDS=25
 
-SAFEDEPS_SELF_BUDGET_SECONDS="${SAFEDEPS_SELF_BUDGET_SECONDS:-20}"
+SAFEDEPS_SELF_BUDGET_DEFAULT_SECONDS=20
 SAFEDEPS_BUDGET_ENGAGE_BYTES="${SAFEDEPS_BUDGET_ENGAGE_BYTES:-1024}"
 
-# `[0-9]` first because a non-numeric value must not reach the comparison: it
-# stays as given and fails closed downstream (its deadline evaluates to zero and
-# fires immediately), which is loud and safe rather than quietly permissive.
+# Normalize the value BEFORE anything compares or clamps it, and let only the
+# normalized digits reach `$(( ))`. This ordering is the whole fix for a defect
+# the first version of the clamp shipped: it validated with `^[0-9]+$` but the
+# deadline consumed the raw string in arithmetic, and bash arithmetic accepts a
+# strictly wider grammar than that regex. `+40`, ` 40` and `0x28` all fail the
+# regex, so the clamp skipped them, and all three then evaluated to 40 as the
+# budget — above the runtime's, which hands the kill back to the runtime and
+# restores the exact fail-open this ceiling exists to remove. Measured: a 64KB
+# command under `+40` produced no answer for 41s. Two grammars for one value is
+# the bug; the fix is that there is now one, checked here, and the raw string
+# never reaches arithmetic.
+#
+# Surrounding whitespace and a leading `+` are accepted and normalized away,
+# because `SAFEDEPS_SELF_BUDGET_SECONDS="40 "` means 40 seconds to everyone who
+# types it, and the clamp should read it the way its author meant it. Anything
+# still not a run of digits is not a budget: it falls back to the default, which
+# is inside the ceiling and therefore safe, and it says so on the same channels
+# as the clamp. `10#` forces base 10 so `08` is eight rather than an octal error.
+SAFEDEPS_SELF_BUDGET_INVALID_FROM=""
+if [[ -z "${SAFEDEPS_SELF_BUDGET_SECONDS:-}" ]]; then
+  SAFEDEPS_SELF_BUDGET_SECONDS="${SAFEDEPS_SELF_BUDGET_DEFAULT_SECONDS}"
+else
+  budget_given="${SAFEDEPS_SELF_BUDGET_SECONDS}"
+  budget_normalized="${budget_given#"${budget_given%%[![:space:]]*}"}"
+  budget_normalized="${budget_normalized%"${budget_normalized##*[![:space:]]}"}"
+  budget_normalized="${budget_normalized#+}"
+  if [[ "${budget_normalized}" =~ ^[0-9]+$ ]]; then
+    SAFEDEPS_SELF_BUDGET_SECONDS=$(( 10#${budget_normalized} ))
+  else
+    SAFEDEPS_SELF_BUDGET_INVALID_FROM="${budget_given}"
+    SAFEDEPS_SELF_BUDGET_SECONDS="${SAFEDEPS_SELF_BUDGET_DEFAULT_SECONDS}"
+  fi
+fi
+
+# From here the value is a plain decimal integer, so the comparison and the
+# deadline read the same number the message reports.
 SAFEDEPS_SELF_BUDGET_CLAMPED_FROM=""
-if [[ "${SAFEDEPS_SELF_BUDGET_SECONDS}" =~ ^[0-9]+$ ]] \
-  && (( SAFEDEPS_SELF_BUDGET_SECONDS > SAFEDEPS_SELF_BUDGET_MAX_SECONDS )); then
+if (( SAFEDEPS_SELF_BUDGET_SECONDS > SAFEDEPS_SELF_BUDGET_MAX_SECONDS )); then
   SAFEDEPS_SELF_BUDGET_CLAMPED_FROM="${SAFEDEPS_SELF_BUDGET_SECONDS}"
   SAFEDEPS_SELF_BUDGET_SECONDS="${SAFEDEPS_SELF_BUDGET_MAX_SECONDS}"
 fi
@@ -564,6 +596,19 @@ if [[ -z "${SAFEDEPS_BUDGET_CHILD:-}" ]] && (( ${#COMMAND} >= SAFEDEPS_BUDGET_EN
     printf 'safedeps: SAFEDEPS_SELF_BUDGET_SECONDS=%ss exceeds the %ss ceiling and was clamped to %ss. The ceiling sits below the runtime hook budget (%ss); above it the runtime kills this gate mid-judgment and the install runs unjudged, so raising the value removes the check rather than extending it. Lower values are honoured as given.\n' \
       "${SAFEDEPS_SELF_BUDGET_CLAMPED_FROM}" "${SAFEDEPS_SELF_BUDGET_MAX_SECONDS}" \
       "${SAFEDEPS_SELF_BUDGET_SECONDS}" "${SAFEDEPS_RUNTIME_BUDGET_SECONDS}" >&2
+  fi
+
+  # A value that is not a number gets the same treatment for the same reason:
+  # the budget in force is not the one the user set, so the user has to hear it.
+  # Falling back to the default is safe in the only sense that matters here —
+  # the default is inside the ceiling — but it is still a value nobody asked
+  # for, and an unexplained one would send the next debugging session after a
+  # number that was never true.
+  if [[ -n "${SAFEDEPS_SELF_BUDGET_INVALID_FROM}" ]]; then
+    log_advisory "pre-guard: SAFEDEPS_SELF_BUDGET_SECONDS='${SAFEDEPS_SELF_BUDGET_INVALID_FROM}' is not a whole number of seconds — using the ${SAFEDEPS_SELF_BUDGET_SECONDS}s default instead."
+    printf "safedeps: SAFEDEPS_SELF_BUDGET_SECONDS='%s' is not a whole number of seconds, so the %ss default is in force. Set a plain integer at or below the %ss ceiling.\n" \
+      "${SAFEDEPS_SELF_BUDGET_INVALID_FROM}" "${SAFEDEPS_SELF_BUDGET_SECONDS}" \
+      "${SAFEDEPS_SELF_BUDGET_MAX_SECONDS}" >&2
   fi
 
   budget_out=$(mktemp "${TMPDIR:-/tmp}/safedeps-budget.XXXXXX")
@@ -681,11 +726,14 @@ if [[ -z "${SAFEDEPS_BUDGET_CHILD:-}" ]] && (( ${#COMMAND} >= SAFEDEPS_BUDGET_EN
 
   rm -f "${budget_out}" "${budget_err}" "${budget_in}"
   log_advisory "pre-guard DENY: judgment unfinished within the ${SAFEDEPS_SELF_BUDGET_SECONDS}s self-budget (command ${#COMMAND} bytes, child rc=${budget_rc}) — fail-closed, not a detection."
-  # When the budget was clamped, the reason says so. Otherwise the user reads a
-  # budget figure they never set and concludes the setting did not take.
+  # When the budget in force is not the one the user set, the reason says so.
+  # Otherwise the user reads a budget figure they never set and concludes the
+  # setting did not take.
   budget_clamp_note=""
   if [[ -n "${SAFEDEPS_SELF_BUDGET_CLAMPED_FROM}" ]]; then
     budget_clamp_note=" Your SAFEDEPS_SELF_BUDGET_SECONDS=${SAFEDEPS_SELF_BUDGET_CLAMPED_FROM} was clamped to the ${SAFEDEPS_SELF_BUDGET_MAX_SECONDS}s ceiling: above it the ${SAFEDEPS_RUNTIME_BUDGET_SECONDS}s runtime hook budget kills this gate mid-judgment and the install runs unjudged, so raising it removes the check rather than extending it."
+  elif [[ -n "${SAFEDEPS_SELF_BUDGET_INVALID_FROM}" ]]; then
+    budget_clamp_note=" Your SAFEDEPS_SELF_BUDGET_SECONDS='${SAFEDEPS_SELF_BUDGET_INVALID_FROM}' is not a whole number of seconds, so the ${SAFEDEPS_SELF_BUDGET_SECONDS}s default is in force."
   fi
   jq -nc --arg budget "${SAFEDEPS_SELF_BUDGET_SECONDS}" --arg size "${#COMMAND}" --arg clamp "${budget_clamp_note}" \
     '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:("safedeps: UNDECIDED, not unsafe — safedeps could not finish judging this command within its " + $budget + "s budget (" + $size + " bytes of command text), so it is blocked fail-closed. Nothing was detected in it; the gate simply did not get to an answer, and an install it cannot judge must not run. Scan cost grows with command length. Split the command, or write long content with a file-writing tool instead of one very large shell command, and retry." + $clamp)}}'
