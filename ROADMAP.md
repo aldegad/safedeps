@@ -56,7 +56,7 @@ The internal engine keeps the v1 `reorg-guard` assets.
 
 ### Release notes
 
-- The npm package version in `package.json` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION` tracks it and the smoke test reads `package.json` to compare (current: v2.14.1).
+- The npm package version in `package.json` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION` tracks it and the smoke test reads `package.json` to compare (current: v2.14.2).
 - `npm test` runs the release smoke suite; the full fixture E2E lives under `v2.1-tests`.
 - The daily re-check uses no LLM tokens. It is opt-in: a macOS `launchd` user agent runs `safedeps re-check --json` daily, installed atomically by `install-safedeps-recheck-agent.mjs`. It writes `~/.safedeps/recheck.log` and `~/.safedeps/recheck-alerts.jsonl` and raises a macOS notification on a new CVE/KEV/revoke/provider-skip/suspected-forgery. Network is used only for OSV / CISA / GHSA queries.
 
@@ -372,7 +372,7 @@ Two things made it invisible. The code's stated reason is npm-shaped: a bare `np
 
 ### What changed
 
-- **The ungated install leaves a record.** An install that names a package as a bare operand with no version, in an ecosystem with no effect gate behind the command gate, writes `UNGATED` to `~/.safedeps/advisory.log` with the ecosystem and the command. (The operand-only scope left gaps, closed in v2.13.3.) Until now it passed with no trace, which contradicted the invariant that every bypass must be observable.
+- **The ungated install leaves a record.** An install that names a package as a bare operand with no version, in an ecosystem with no effect gate behind the command gate, writes `UNGATED` to `~/.safedeps/advisory.log` with the ecosystem and the command. (The operand-only scope left gaps, closed in v2.14.1.) Until now it passed with no trace, which contradicted the invariant that every bypass must be observable.
 - **It changes no verdict.** Refusing every unpinned install is a policy change that would block ordinary `cargo add x` workflows, so it stays the repo owner's decision. The record exists so that decision can be made from evidence.
 - **The silence is scoped as carefully as the record.** File-driven installs (`-r`, `-c`, `-e`), bare lockfile installs, npm, and already-pinned installs stay out of the log. A record that fires on routine installs is background noise, and background noise is the same as no record.
 
@@ -418,6 +418,18 @@ The v2.13.2 record was validated with three notes. Two of them turned out to be 
 - 106-case corpus replayed against v2.13.2: zero decision change, so the fixes stay inside the observability layer
 - every boundary pinned in `scripts/test/consumer-forms.sh` from both sides, including the Maven, `git+ssh`, and `-r <file> <pkg>` rows that had no coverage before
 - the notes came from an adversarial probe of the record's edges, not from re-reading the code
+
+---
+
+### v2.14.2 — the per-ecosystem flag table (patch on v2.14.1)
+
+The v2.14.1 fix applied pip's flag table to every ecosystem. `-t` and `-f` take a value for pip and are booleans for go (`go get -t`), gem (`--force`), and cargo, so the walk ate the package that followed: `go get -t example.com/evil` went silent while `gem install --force evil` stayed reported — one install split by which spelling the author used. That is exactly the mistake v2.14.1 diagnosed in `-c`, repeated one axis over: grouping flags by shape instead of by meaning. Caught by the validator, not by the author.
+
+Value-consuming flags are now resolved per ecosystem, and an unknown flag is assumed to take no value — guessing wrong that way costs a spurious line, while guessing wrong the other way drops the install this record exists to catch. `-e` consumes nothing at all now: its argument is judged like any other token, so `-e .` falls out as a working-tree build while `-e git+ssh://…` stays the fetch it is. Maven's coordinate flag is also read on either side of the goal.
+
+One boundary is pinned as deliberate rather than fixed: `mvn -Dartifact=… dependency:get` never reaches the record because install *recognition* (`mvn dependency:get`) does not match a flag before the goal. That belongs to command recognition, and widening it is the carrier enumeration `ARCHITECTURE.md` declines to grow.
+
+Verified against a `git archive` of v2.13.2: every previously recorded form is recorded again (nothing moved from recorded to silent), the additions are net new, and decisions stay unchanged.
 
 ---
 

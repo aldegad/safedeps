@@ -56,7 +56,7 @@ Safedeps 는 **개발 의존성 install** (npm / pip / cargo / go / gem / maven 
 
 ### 릴리즈 메모
 
-- npm 패키지 version 은 `package.json` 이 SSoT. `bin/safedeps` `SAFEDEPS_VERSION` 이 이를 따라가고, smoke 테스트는 `package.json` 을 읽어 대조한다 (현재 v2.14.1).
+- npm 패키지 version 은 `package.json` 이 SSoT. `bin/safedeps` `SAFEDEPS_VERSION` 이 이를 따라가고, smoke 테스트는 `package.json` 을 읽어 대조한다 (현재 v2.14.2).
 - `npm test` 는 release smoke suite 를 실행한다. full fixture E2E 는 `v2.1-tests` 에 있다.
 - daily re-check 는 LLM 토큰을 쓰지 않는다. opt-in 이며, macOS `launchd` user agent 가 매일 `safedeps re-check --json` 을 실행한다 (`install-safedeps-recheck-agent.mjs` 로 atomic install). `~/.safedeps/recheck.log` 와 `~/.safedeps/recheck-alerts.jsonl` 를 쓰고, 새 CVE/KEV/revoke/provider-skip/위조-의심 시 macOS notification 을 띄운다. 네트워크는 OSV / CISA / GHSA query 에만 쓴다.
 
@@ -372,7 +372,7 @@ v2.13.1 에서 carrier 경계를 재다가 발견했고, 그 릴리스가 닫은
 
 ### 무엇이 바뀌었나
 
-- **게이트를 안 거친 설치가 기록을 남긴다.** 커맨드 게이트 뒤에 효과 게이트가 없는 생태계에서 버전 없이 패키지를 bare 피연산자로 지목한 설치는(피연산자 한정 범위가 남긴 구멍은 v2.13.3 에서 닫았다) `~/.safedeps/advisory.log` 에 생태계와 명령과 함께 `UNGATED` 를 남긴다. 지금까지는 흔적 없이 통과했고, 그건 "모든 우회는 관측 가능해야 한다" 는 불변식 위반이었다.
+- **게이트를 안 거친 설치가 기록을 남긴다.** 커맨드 게이트 뒤에 효과 게이트가 없는 생태계에서 버전 없이 패키지를 bare 피연산자로 지목한 설치는(피연산자 한정 범위가 남긴 구멍은 v2.14.1 에서 닫았다) `~/.safedeps/advisory.log` 에 생태계와 명령과 함께 `UNGATED` 를 남긴다. 지금까지는 흔적 없이 통과했고, 그건 "모든 우회는 관측 가능해야 한다" 는 불변식 위반이었다.
 - **판정은 안 바꾼다.** 버전 없는 설치를 전부 거부하는 건 평범한 `cargo add x` 흐름을 막는 정책 변경이라 레포 소유자 결정으로 남긴다. 기록은 그 결정을 근거로 내릴 수 있게 하려고 있다.
 - **침묵도 기록만큼 정밀하게 범위를 잡았다.** 파일 기반 설치(`-r`, `-c`, `-e`), 맨 lockfile 설치, npm, 이미 버전이 박힌 설치는 로그에 안 남는다. 평범한 설치마다 찍히는 기록은 배경 소음이고, 배경 소음은 없는 기록과 같다.
 
@@ -418,6 +418,18 @@ v2.13.2 의 기록이 note 3건과 함께 검증을 통과했다. 그중 둘이 
 - 106케이스 코퍼스를 v2.13.2 와 대조: 판정 변화 0 — 수리가 관측 층 안에 머문다
 - 모든 경계를 `scripts/test/consumer-forms.sh` 에 양방향으로 고정. 커버리지가 아예 없던 maven·`git+ssh`·`-r <파일> <패키지>` 행 포함
 - note 는 코드 재독이 아니라 기록의 가장자리를 적대적으로 탐침해서 나왔다
+
+---
+
+### v2.14.2 — 생태계별 플래그 표 (v2.14.1 의 패치)
+
+v2.14.1 의 수리가 pip 의 플래그 표를 전 생태계에 적용했다. `-t` 와 `-f` 는 pip 에선 값을 받지만 go(`go get -t`)·gem(`--force`)·cargo 에선 불리언이라, 순회가 뒤따르는 패키지를 삼켰다. `go get -t example.com/evil` 은 침묵하고 `gem install --force evil` 은 기록됐다 — 같은 설치가 작성자가 고른 철자로 갈렸다. v2.14.1 이 `-c` 에서 진단한 바로 그 실수를 한 축 옆에서 반복한 것이다: 플래그를 의미가 아니라 형태로 묶었다. 작성자가 아니라 검증자가 잡았다.
+
+값을 받는 플래그는 이제 생태계별로 갈라 판정하고, 모르는 플래그는 값을 안 받는다고 가정한다 — 그쪽으로 틀리면 군더더기 한 줄이지만 반대로 틀리면 이 기록이 잡으려던 설치를 놓친다. `-e` 는 이제 아무것도 소비하지 않는다. 그 인자를 다른 토큰과 똑같이 판정하므로 `-e .` 는 작업 트리 빌드로 빠지고 `-e git+ssh://…` 는 fetch 로 남는다. maven 좌표 플래그는 goal 양쪽 어디에 있든 읽는다.
+
+경계 하나는 고치는 대신 의도로 고정했다: `mvn -Dartifact=… dependency:get` 은 install **인식**(`mvn dependency:get`)이 goal 앞의 플래그를 매치하지 않아 기록에 도달조차 못 한다. 그건 명령 인식의 몫이고, 그걸 넓히는 건 `ARCHITECTURE.md` 가 키우지 않기로 한 carrier 열거다.
+
+v2.13.2 의 `git archive` 와 대조 검증: 이전에 기록되던 형태는 전부 다시 기록되고(기록→침묵 이동 0), 추가분은 순증이며, 판정은 불변이다.
 
 ---
 

@@ -259,7 +259,15 @@ for named_unpinned in \
   "pip install -r requirements.txt evil" \
   "pip install -e . evil" \
   "pip install git+https://example.test/evil.git" \
-  "pip install git+ssh://git@example.test/evil.git"
+  "pip install git+ssh://git@example.test/evil.git" \
+  "pip install -e git+ssh://git@example.test/evil.git" \
+  "pip install -t /tmp/target evil" \
+  "go get -t example.com/evil" \
+  "go get -u example.com/evil" \
+  "gem install -f evil" \
+  "gem install --force evil" \
+  "cargo install -f evil" \
+  "cargo install --force evil"
 do
   logged_ungated "${named_unpinned}" \
     || fail "an unpinned named install is recorded as UNGATED: ${named_unpinned}"
@@ -282,11 +290,22 @@ for stays_quiet in \
   "mvn dependency:get -Dartifact=g:evil:1.0.0" \
   "pip install ." \
   "pip install ./local-pkg" \
+  "pip install -e ." \
   'echo "remember to pip install evil"'
 do
   logged_ungated "${stays_quiet}" \
     && fail "record stays quiet on a routine or already-gated install: ${stays_quiet}"
 done
 pass "the record stays quiet on file-only, working-tree, bare-lockfile, npm, and already-pinned installs"
+
+# `mvn -Dartifact=… dependency:get` puts the flag BEFORE the goal, which the
+# install-recognition pattern (`mvn dependency:get`) does not match, so the
+# command never reaches this record at all. That boundary belongs to command
+# recognition, not to the record, and widening it is the carrier enumeration
+# ARCHITECTURE.md declines to grow. Pinned here so the silence is a measured
+# decision rather than an assumption.
+logged_ungated "mvn -Dartifact=g:evil dependency:get" \
+  && fail "flag-before-goal maven is silent because install recognition never matches it"
+pass "flag-before-goal maven stays outside the record (install recognition, not the record)"
 
 printf 'consumer-forms passed\n'

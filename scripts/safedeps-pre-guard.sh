@@ -732,7 +732,10 @@ guard_names_package_without_spec() {
   #      package, but `-r requirements.txt evil` still installs `evil`.
   #      Silencing the whole command on sight of `-r`/`-c`/`-e` hid that, and
   #      `-c` is not even a source flag: a constraint file only bounds versions
-  #      while the install target still arrives on the command line.
+  #      while the install target still arrives on the command line. `-e`
+  #      consumes nothing here either — its argument is judged like any other
+  #      token, so `-e .` falls out as a working-tree build while
+  #      `-e git+ssh://…` stays the fetch it is.
   #   2. It is not a local path (`.`, `..`, `./x`, `/x`). Those install from the
   #      working tree, not from a registry. A module path like
   #      `example.com/evil` is NOT a local path and stays reportable.
@@ -741,7 +744,7 @@ guard_names_package_without_spec() {
   #      `git+https://host/evil.git` — reading it as a spec silenced one and
   #      reported the other for the same install.
   local cmd="$1"
-  local seg tok verb_seen skip_next
+  local seg tok verb_seen skip_next seg_ecosystem
   local -a toks=()
 
   while IFS= read -r seg; do
@@ -750,8 +753,22 @@ guard_names_package_without_spec() {
 
     verb_seen=false
     skip_next=false
+    seg_ecosystem=$(guard_detect_ecosystem "${seg}")
     read -ra toks <<< "$(command_scan_text "${seg}")"
     for tok in "${toks[@]+${toks[@]}}"; do
+      # Maven's coordinate flag may sit on either side of the goal
+      # (`mvn -Dartifact=g:x dependency:get`), so it is tested outside the verb
+      # gate that orders the operand walk. A two-field coordinate names a
+      # package with no version; a third field is the version. Whether Maven
+      # accepts the versionless form is unverified (no maven on the measuring
+      # machine), and for a RECORD the unresolved case resolves toward
+      # reporting: a spurious line costs a line, a missing one costs the
+      # invariant this layer exists to keep.
+      case "${tok}" in
+        -Dartifact=*:*:*) continue ;;
+        -Dartifact=*:*)   return 0 ;;
+      esac
+
       if [[ "${verb_seen}" != true ]]; then
         case "${tok}" in
           install|i|add|ci|get|up|update|upgrade|dependency:get|package) verb_seen=true ;;
@@ -765,20 +782,26 @@ guard_names_package_without_spec() {
       fi
 
       case "${tok}" in
-        # A flag that takes a separate argument consumes exactly that argument.
-        -r|--requirement|-c|--constraint|-e|--editable|-t|--target|-f|--find-links|--index-url|--extra-index-url)
+        # A flag that takes a separate argument consumes exactly that argument —
+        # but WHICH flags take one is a property of the tool, not of the flag
+        # spelling. `-t` and `-f` take a value for pip and are booleans for go
+        # (`go get -t`), gem (`-f` = --force), and cargo. Applying pip's table
+        # everywhere ate the package that followed, so `go get -t example.com/x`
+        # went silent while `gem install --force x` stayed reported: one install
+        # split by which spelling the author used. That is the same mistake as
+        # filing `-c` with `-r` — grouping flags by shape instead of meaning.
+        #
+        # An unknown flag is therefore assumed NOT to take a value. Guessing
+        # wrong in that direction costs a spurious line; guessing wrong the other
+        # way drops the install this record exists to catch.
+        -r|--requirement|-c|--constraint)
           skip_next=true
           continue
           ;;
-        # Maven carries its coordinate IN a flag rather than as an operand, so
-        # the operand walk never sees it. `-Dartifact=<group>:<name>` with no
-        # third field names a package with no version; a third field is the
-        # version. Whether Maven would even accept the versionless form is
-        # unverified here (no maven on the measuring machine), and for a RECORD
-        # the unresolved case resolves toward reporting: a spurious line costs a
-        # line, a missing one costs the invariant this layer exists to keep.
-        -Dartifact=*:*:*) continue ;;
-        -Dartifact=*:*)   return 0 ;;
+        -t|--target|-f|--find-links|--index-url|--extra-index-url)
+          [[ "${seg_ecosystem}" == "pypi" ]] && { skip_next=true; continue; }
+          continue
+          ;;
         -*) continue ;;
         # Installing from the working tree is not a registry fetch.
         .|..|./*|../*|/*) continue ;;
