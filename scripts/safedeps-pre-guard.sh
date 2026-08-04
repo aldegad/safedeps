@@ -539,7 +539,22 @@ SAFEDEPS_RUNTIME_BUDGET_SECONDS=30
 SAFEDEPS_SELF_BUDGET_MAX_SECONDS=25
 
 SAFEDEPS_SELF_BUDGET_DEFAULT_SECONDS=20
-SAFEDEPS_BUDGET_ENGAGE_BYTES="${SAFEDEPS_BUDGET_ENGAGE_BYTES:-1024}"
+
+# The engage size has a ceiling for the same reason the budget does. It is the
+# only condition on the whole machinery above — raise it and the judgment runs
+# inline with no deadline at all, which is the same fail-open by a different
+# door: measured, a 32KB padded `pip install` answers in 21s with the default
+# engage size and takes 198s with the size raised past it, and the runtime kills
+# the hook at 30s either way. Someone who cannot raise the budget any more looks
+# for the next knob, and this is the next knob.
+#
+# 4KB, because the ceiling has to keep the un-engaged worst case far inside the
+# runtime budget: on the cost curve recorded in ROADMAP v2.15.0 (1KB 0.1s, 4KB
+# 0.68s, 8KB 2.5s, 16KB 9.6s), a command just under 4KB is judged in about 0.68s,
+# roughly 44x inside the 30s runtime budget. Tuning between the 1KB default and
+# this ceiling stays available, which is what the knob is actually for.
+SAFEDEPS_BUDGET_ENGAGE_DEFAULT_BYTES=1024
+SAFEDEPS_BUDGET_ENGAGE_MAX_BYTES=4096
 
 # Normalize the value BEFORE anything compares or clamps it, and let only the
 # normalized digits reach `$(( ))`. This ordering is the whole fix for a defect
@@ -560,10 +575,30 @@ SAFEDEPS_BUDGET_ENGAGE_BYTES="${SAFEDEPS_BUDGET_ENGAGE_BYTES:-1024}"
 # is inside the ceiling and therefore safe, and it says so on the same channels
 # as the clamp. `10#` forces base 10 so `08` is eight rather than an octal error.
 #
-# Nine digits, because that is both far more seconds than any budget means
-# (999999999s is about 31 years) and small enough that the value and the
+# Nine digits, because that is both far more than either knob can mean (a budget
+# of 999999999s is about 31 years) and small enough that the value and the
 # `* 1000` deadline below stay inside a 64-bit integer with room to spare.
-SAFEDEPS_SELF_BUDGET_MAX_DIGITS=9
+SAFEDEPS_KNOB_MAX_DIGITS=9
+
+# One reader for both knobs, because they failed the same way and a second
+# hand-rolled parser is how they would drift apart again. Prints the normalized
+# digits, or nothing with a non-zero status when the value is not a number.
+safedeps_normalize_knob() {
+  local raw="$1" value
+  value="${raw#"${raw%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  value="${value#+}"
+  # Leading zeros are not magnitude, so they come off before the digit count
+  # judges the value by its length: `0000000005` is five, not ten digits' worth.
+  # One regex rather than one per zero — the loop this replaces was quadratic,
+  # and it ran BEFORE the child spawn, where the deadline cannot reach it:
+  # 40000 zeros took 28.9s and 60000 took 63.2s, past the runtime's own budget.
+  if [[ "${value}" =~ ^0*([0-9].*)$ ]]; then
+    value="${BASH_REMATCH[1]}"
+  fi
+  [[ "${value}" =~ ^[0-9]+$ ]] || return 1
+  printf '%s' "${value}"
+}
 
 SAFEDEPS_SELF_BUDGET_INVALID_FROM=""
 SAFEDEPS_SELF_BUDGET_CLAMPED_FROM=""
@@ -571,32 +606,21 @@ if [[ -z "${SAFEDEPS_SELF_BUDGET_SECONDS:-}" ]]; then
   SAFEDEPS_SELF_BUDGET_SECONDS="${SAFEDEPS_SELF_BUDGET_DEFAULT_SECONDS}"
 else
   budget_given="${SAFEDEPS_SELF_BUDGET_SECONDS}"
-  budget_normalized="${budget_given#"${budget_given%%[![:space:]]*}"}"
-  budget_normalized="${budget_normalized%"${budget_normalized##*[![:space:]]}"}"
-  budget_normalized="${budget_normalized#+}"
-  # Leading zeros are not magnitude. Strip them before the digit count below
-  # judges the value by its length, so `0000000005` is five seconds rather than
-  # a ten-digit number.
-  while [[ "${budget_normalized}" =~ ^0[0-9] ]]; do
-    budget_normalized="${budget_normalized#0}"
-  done
-  if [[ ! "${budget_normalized}" =~ ^[0-9]+$ ]]; then
+  if ! budget_normalized=$(safedeps_normalize_knob "${budget_given}"); then
     SAFEDEPS_SELF_BUDGET_INVALID_FROM="${budget_given}"
     SAFEDEPS_SELF_BUDGET_SECONDS="${SAFEDEPS_SELF_BUDGET_DEFAULT_SECONDS}"
-  elif (( ${#budget_normalized} > SAFEDEPS_SELF_BUDGET_MAX_DIGITS )); then
-    # Digits, but more of them than arithmetic can hold. Bash integers are
-    # 64-bit and wrap silently, so evaluating this first and comparing after is
-    # not an option: a value that wraps NEGATIVE is not `> ceiling`, so it walks
-    # straight past the clamp, and `budget * 1000` then wraps again into a large
-    # positive deadline that never arrives. Measured before this check: a 30-digit
-    # value produced no answer for over 600s, which is the runtime kill and the
-    # fail-open, restored by typing enough digits. Counting digits happens in the
-    # string domain, where nothing can wrap, and it is decided BEFORE any
-    # arithmetic sees the value.
-    #
-    # Such a value is unambiguously above the ceiling, so it is clamped rather
-    # than rejected — the rule stays "anything above the ceiling is clamped",
-    # with no exception for how it was written.
+  # Digits first, magnitude second. Bash integers are 64-bit and wrap silently,
+  # so evaluating first and comparing after is not an option: a value that wraps
+  # NEGATIVE is not `> ceiling`, so it walks straight past the clamp, and
+  # `budget * 1000` then wraps again into a deadline that never arrives.
+  # Measured before this check: a 30-digit value produced no answer for over
+  # 600s. Counting digits happens in the string domain, where nothing can wrap.
+  #
+  # Either way the value is above the ceiling, so it is clamped rather than
+  # rejected — the rule stays "anything above the ceiling is clamped", with no
+  # exception for how it was written.
+  elif (( ${#budget_normalized} > SAFEDEPS_KNOB_MAX_DIGITS )) \
+    || (( 10#${budget_normalized} > SAFEDEPS_SELF_BUDGET_MAX_SECONDS )); then
     SAFEDEPS_SELF_BUDGET_CLAMPED_FROM="${budget_normalized}"
     SAFEDEPS_SELF_BUDGET_SECONDS="${SAFEDEPS_SELF_BUDGET_MAX_SECONDS}"
   else
@@ -604,15 +628,53 @@ else
   fi
 fi
 
-# From here the value is a plain decimal integer that fits, so the comparison and
-# the deadline read the same number the message reports.
-if [[ -z "${SAFEDEPS_SELF_BUDGET_CLAMPED_FROM}" ]] \
-  && (( SAFEDEPS_SELF_BUDGET_SECONDS > SAFEDEPS_SELF_BUDGET_MAX_SECONDS )); then
-  SAFEDEPS_SELF_BUDGET_CLAMPED_FROM="${SAFEDEPS_SELF_BUDGET_SECONDS}"
-  SAFEDEPS_SELF_BUDGET_SECONDS="${SAFEDEPS_SELF_BUDGET_MAX_SECONDS}"
+# The engage size is read exactly the same way, for exactly the same reasons.
+SAFEDEPS_BUDGET_ENGAGE_INVALID_FROM=""
+SAFEDEPS_BUDGET_ENGAGE_CLAMPED_FROM=""
+if [[ -z "${SAFEDEPS_BUDGET_ENGAGE_BYTES:-}" ]]; then
+  SAFEDEPS_BUDGET_ENGAGE_BYTES="${SAFEDEPS_BUDGET_ENGAGE_DEFAULT_BYTES}"
+else
+  engage_given="${SAFEDEPS_BUDGET_ENGAGE_BYTES}"
+  if ! engage_normalized=$(safedeps_normalize_knob "${engage_given}"); then
+    SAFEDEPS_BUDGET_ENGAGE_INVALID_FROM="${engage_given}"
+    SAFEDEPS_BUDGET_ENGAGE_BYTES="${SAFEDEPS_BUDGET_ENGAGE_DEFAULT_BYTES}"
+  elif (( ${#engage_normalized} > SAFEDEPS_KNOB_MAX_DIGITS )) \
+    || (( 10#${engage_normalized} > SAFEDEPS_BUDGET_ENGAGE_MAX_BYTES )); then
+    SAFEDEPS_BUDGET_ENGAGE_CLAMPED_FROM="${engage_normalized}"
+    SAFEDEPS_BUDGET_ENGAGE_BYTES="${SAFEDEPS_BUDGET_ENGAGE_MAX_BYTES}"
+  else
+    SAFEDEPS_BUDGET_ENGAGE_BYTES=$(( 10#${engage_normalized} ))
+  fi
 fi
 
-if [[ -z "${SAFEDEPS_BUDGET_CHILD:-}" ]] && (( ${#COMMAND} >= SAFEDEPS_BUDGET_ENGAGE_BYTES )); then
+# Turning the deadline off entirely is a separate, differently named thing.
+#
+# The mutation check in the battery has to be able to do it: a test that only
+# knows it passes, and not that it catches the defect, is not evidence. But the
+# way it used to do it was by raising the engage size past the input, which is
+# also the way a user reduces friction — one switch served both, so tuning and
+# disabling were the same act, and nothing said which one had happened.
+#
+# So they are split. The tuning knob has a ceiling and cannot disable anything;
+# this variable does nothing else, says what it does in its name, and announces
+# itself every time it takes effect. Someone who exports SAFEDEPS_BUDGET_DISABLED
+# is not adjusting a threshold, and there is no version of that sentence they can
+# arrive at by accident.
+SAFEDEPS_BUDGET_DISABLED="${SAFEDEPS_BUDGET_DISABLED:-}"
+
+# A disabled deadline is a bypass, so it is announced every time it is used, on
+# the same channels as every other bypass. It is checked at the engage size and
+# not above it, so turning the deadline off does not also turn its own notice off
+# for the very commands the deadline exists for.
+if [[ -n "${SAFEDEPS_BUDGET_DISABLED}" ]] && [[ -z "${SAFEDEPS_BUDGET_CHILD:-}" ]] \
+  && (( ${#COMMAND} >= SAFEDEPS_BUDGET_ENGAGE_BYTES )); then
+  log_advisory "pre-guard: SAFEDEPS_BUDGET_DISABLED is set — the self-budget deadline is OFF for this command (${#COMMAND} bytes). Past the ${SAFEDEPS_RUNTIME_BUDGET_SECONDS}s runtime hook budget this gate is killed and the install proceeds unjudged."
+  printf 'safedeps: SAFEDEPS_BUDGET_DISABLED is set, so the self-budget deadline is OFF for this command. The judgment now runs with no deadline of its own, and past the %ss runtime hook budget the runtime kills this gate and the install proceeds unjudged. Unset it to restore the gate.\n' \
+    "${SAFEDEPS_RUNTIME_BUDGET_SECONDS}" >&2
+fi
+
+if [[ -z "${SAFEDEPS_BUDGET_DISABLED}" ]] && [[ -z "${SAFEDEPS_BUDGET_CHILD:-}" ]] \
+  && (( ${#COMMAND} >= SAFEDEPS_BUDGET_ENGAGE_BYTES )); then
   # Say that the clamp happened, and say it here rather than at the assignment
   # above: this is the point where the budget is actually in play, and a line on
   # every `ls` the agent runs would be noise people learn to scroll past. A
@@ -633,6 +695,21 @@ if [[ -z "${SAFEDEPS_BUDGET_CHILD:-}" ]] && (( ${#COMMAND} >= SAFEDEPS_BUDGET_EN
   # the default is inside the ceiling — but it is still a value nobody asked
   # for, and an unexplained one would send the next debugging session after a
   # number that was never true.
+  # The engage size reports itself on the same channels. It is the condition on
+  # this whole branch, so a raised value that went unreported would be the
+  # quietest of the three: the machinery would simply not be here.
+  if [[ -n "${SAFEDEPS_BUDGET_ENGAGE_CLAMPED_FROM}" ]]; then
+    log_advisory "pre-guard: SAFEDEPS_BUDGET_ENGAGE_BYTES=${SAFEDEPS_BUDGET_ENGAGE_CLAMPED_FROM} exceeds the ${SAFEDEPS_BUDGET_ENGAGE_MAX_BYTES}-byte ceiling — clamped to ${SAFEDEPS_BUDGET_ENGAGE_BYTES}. Above the ceiling the deadline never engages and the judgment runs unbounded."
+    printf 'safedeps: SAFEDEPS_BUDGET_ENGAGE_BYTES=%s exceeds the %s-byte ceiling and was clamped to %s. The engage size decides when the deadline runs at all, so raising it past the ceiling would disable the deadline rather than tune it. To turn the deadline off deliberately, set SAFEDEPS_BUDGET_DISABLED.\n' \
+      "${SAFEDEPS_BUDGET_ENGAGE_CLAMPED_FROM}" "${SAFEDEPS_BUDGET_ENGAGE_MAX_BYTES}" \
+      "${SAFEDEPS_BUDGET_ENGAGE_BYTES}" >&2
+  fi
+  if [[ -n "${SAFEDEPS_BUDGET_ENGAGE_INVALID_FROM}" ]]; then
+    log_advisory "pre-guard: SAFEDEPS_BUDGET_ENGAGE_BYTES='${SAFEDEPS_BUDGET_ENGAGE_INVALID_FROM}' is not a whole number of bytes — using the ${SAFEDEPS_BUDGET_ENGAGE_BYTES}-byte default instead."
+    printf "safedeps: SAFEDEPS_BUDGET_ENGAGE_BYTES='%s' is not a whole number of bytes, so the %s-byte default is in force.\n" \
+      "${SAFEDEPS_BUDGET_ENGAGE_INVALID_FROM}" "${SAFEDEPS_BUDGET_ENGAGE_BYTES}" >&2
+  fi
+
   if [[ -n "${SAFEDEPS_SELF_BUDGET_INVALID_FROM}" ]]; then
     log_advisory "pre-guard: SAFEDEPS_SELF_BUDGET_SECONDS='${SAFEDEPS_SELF_BUDGET_INVALID_FROM}' is not a whole number of seconds — using the ${SAFEDEPS_SELF_BUDGET_SECONDS}s default instead."
     printf "safedeps: SAFEDEPS_SELF_BUDGET_SECONDS='%s' is not a whole number of seconds, so the %ss default is in force. Set a plain integer at or below the %ss ceiling.\n" \

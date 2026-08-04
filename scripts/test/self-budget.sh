@@ -36,7 +36,7 @@ pad() { head -c "$1" < /dev/zero | tr '\0' 'x'; }
 # Runs the guard and captures decision, whether the reason is the undecided
 # one, and how long the answer took.
 guard() {
-  local command="$1" budget="${2:-2}" engage="${3:-1024}"
+  local command="$1" budget="${2:-2}" engage="${3:-1024}" disabled="${4:-}"
   local safe="${tmp_root}/safe-$$-${RANDOM}"
   mkdir -p "${safe}"
   GUARD_STATE_DIR="${safe}"
@@ -47,6 +47,7 @@ guard() {
     HOME="${tmp_root}/home" SAFEDEPS_HOME="${safe}" \
     SAFEDEPS_SELF_BUDGET_SECONDS="${budget}" \
     SAFEDEPS_BUDGET_ENGAGE_BYTES="${engage}" \
+    SAFEDEPS_BUDGET_DISABLED="${disabled}" \
     scripts/safedeps-pre-guard.sh 2>"${tmp_root}/stderr") || true
   GUARD_STDERR=$(cat "${tmp_root}/stderr" 2>/dev/null || printf '')
   end=$(date +%s)
@@ -285,14 +286,68 @@ if grep -q 'clamped' <<< "${GUARD_STDERR}"; then fail "a budget under the ceilin
 if grep -q 'clamped' "${GUARD_STATE_DIR}/advisory.log"; then fail "a budget under the ceiling is not logged as clamped"; fi
 pass "a budget under the ceiling is honoured as given, silently"
 
-# --- without the budget the same input walks through -----------------------
-# Mutation check in the honest direction: disable the machinery (engage size
-# above the input) and the over-budget command is judged clean and allowed.
-# That is the shape the runtime kill turned into a silent pass.
-guard "echo ${big}" "${tiny_budget}" 99999999
+# --- the engage size tunes the machinery, it does not switch it off ----------
+# The engage size is the only condition on the whole deadline, so raising it far
+# enough removes the deadline for everything below it — the same fail-open as an
+# over-large budget, through the knob someone reaches for next. It is clamped,
+# and clamped loudly, for the same reasons.
+guard "pip install requests==2.31.0 # ${big}" "${tiny_budget}" 99999999
+[[ "${GUARD_DECISION}" == "deny" ]] \
+  || fail "an engage size past the ceiling still engages the deadline (got: ${GUARD_DECISION})"
+grep -q 'UNDECIDED' <<< "${GUARD_REASON}" \
+  || fail "an engage size past the ceiling still answers on the budget"
+grep -q 'ENGAGE_BYTES' <<< "${GUARD_STDERR}" \
+  || fail "the engage clamp is announced (got: $(printf '%s' "${GUARD_STDERR}" | head -c 80))"
+grep -q 'ENGAGE_BYTES' "${GUARD_STATE_DIR}/advisory.log" \
+  || fail "the engage clamp is recorded in advisory.log"
+pass "an engage size raised past the ceiling is clamped, so the deadline still engages"
+
+# Tuning inside the ceiling is what the knob is for, and it stays silent.
+guard "echo ${small}" 2 2048
+[[ "${GUARD_DECISION}" == "pass" ]] || fail "an engage size inside the ceiling is honoured (got: ${GUARD_DECISION})"
+if [[ -n "${GUARD_STDERR}" ]]; then fail "an engage size inside the ceiling is silent (got: $(printf '%s' "${GUARD_STDERR}" | head -c 80))"; fi
+pass "an engage size inside the ceiling is honoured as given, silently"
+
+# Same reader, same rules: a non-numeric engage size is not a size.
+guard "pip install requests==2.31.0 # ${big}" "${tiny_budget}" "0x10000"
+[[ "${GUARD_DECISION}" == "deny" ]] || fail "a non-numeric engage size falls back to the default (got: ${GUARD_DECISION})"
+grep -q 'not a whole number of bytes' <<< "${GUARD_STDERR}" \
+  || fail "a non-numeric engage size is announced (got: $(printf '%s' "${GUARD_STDERR}" | head -c 80))"
+pass "a non-numeric engage size falls back to the default and says so"
+
+# --- turning the deadline off is a separate, named act -----------------------
+# Mutation check in the honest direction: with the deadline off, the over-budget
+# command is judged clean and allowed. That is the shape the runtime kill turned
+# into a silent pass, and a battery that cannot produce it only knows that it
+# passes, not that it catches anything.
+#
+# It runs through SAFEDEPS_BUDGET_DISABLED rather than through the engage size,
+# because the tuning knob and the off switch being one variable is what let a
+# friction adjustment disable a security boundary without saying so.
+guard "echo ${big}" "${tiny_budget}" 1024 1
 [[ "${GUARD_DECISION}" == "pass" ]] \
-  || fail "with the budget disengaged the same command is allowed (got: ${GUARD_DECISION})"
-pass "battery is meaningful: with the budget disengaged the same command walks through"
+  || fail "with the deadline disabled the same command is allowed (got: ${GUARD_DECISION})"
+pass "battery is meaningful: with the deadline disabled the same command walks through"
+
+# A disabled deadline is a bypass, and every bypass in this tool is observable.
+grep -q 'DISABLED' <<< "${GUARD_STDERR}" \
+  || fail "the disabled deadline is announced on stderr (got: $(printf '%s' "${GUARD_STDERR}" | head -c 80))"
+grep -q 'deadline is OFF' "${GUARD_STATE_DIR}/advisory.log" \
+  || fail "the disabled deadline is recorded in advisory.log"
+pass "a disabled deadline announces itself every time it is used"
+
+# --- the knob reader itself must not become the slow path --------------------
+# Both knobs go through one reader, and that reader runs BEFORE the child spawn
+# — outside the deadline it exists to serve, where nothing can interrupt it. A
+# quadratic parse there is a fail-open with no attacker: the earlier per-zero
+# strip loop took 28.9s on 40000 leading zeros and 63.2s on 60000. One regex
+# replaced it, so the same input has to be answered promptly.
+zeros=$(head -c 60000 < /dev/zero | tr '\0' '0')
+guard "pip install requests==2.31.0 # ${big}" "${zeros}3"
+[[ "${GUARD_DECISION}" == "deny" ]] || fail "a heavily zero-padded budget still decides (got: ${GUARD_DECISION})"
+(( GUARD_ELAPSED < runtime_budget )) \
+  || fail "reading a heavily zero-padded budget stays inside the runtime budget (took ${GUARD_ELAPSED}s; the parse runs where the deadline cannot reach it)"
+pass "the knob reader is linear, so a padded value cannot burn the runtime budget"
 
 # --- inside the budget nothing changes --------------------------------------
 

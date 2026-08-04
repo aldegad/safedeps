@@ -56,7 +56,7 @@ The internal engine keeps the v1 `reorg-guard` assets.
 
 ### Release notes
 
-- The npm package version in `package.json` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION` tracks it and the smoke test reads `package.json` to compare (current: v2.15.1).
+- The npm package version in `package.json` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION` tracks it and the smoke test reads `package.json` to compare (current: v2.15.2).
 - `npm test` runs the release smoke suite; the full fixture E2E lives under `v2.1-tests`.
 - The daily re-check uses no LLM tokens. It is opt-in: a macOS `launchd` user agent runs `safedeps re-check --json` daily, installed atomically by `install-safedeps-recheck-agent.mjs`. It writes `~/.safedeps/recheck.log` and `~/.safedeps/recheck-alerts.jsonl` and raises a macOS notification on a new CVE/KEV/revoke/provider-skip/suspected-forgery. Network is used only for OSV / CISA / GHSA queries.
 
@@ -520,6 +520,23 @@ The motive to set such a value is an ordinary one, which is what makes it worth 
 - **A second cross-validation round found the same shape one layer down, in the value's range rather than its grammar.** With one grammar in place, `^[0-9]+$` still does not count digits, and bash integers are 64-bit and wrap silently. A value that wraps negative is not greater than the ceiling, so it passed the clamp untouched, and the deadline multiplication wrapped it again into a time that never arrives: a 30-digit budget produced no answer for over 600s. Digit count is now checked in the string domain, before arithmetic sees the value — more than nine digits is unambiguously above the ceiling and is clamped as such, so the rule stays "anything above the ceiling is clamped" with no exception for how it was written. Nine digits is about 31 years of seconds.
 
 Verification: `scripts/test/self-budget.sh` gains a 64KB padded `pip install` under a 600s budget. That input's natural scan runs past 300s on the development machine, so only the ceiling can bring the answer back inside the runtime's 30s — it is denied as `UNDECIDED` at ~26s, with the clamp stated in all three places, while a budget under the ceiling passes through untouched and unannounced. The same 64KB case runs again under `" 40"` to pin the grammar fix end to end (25-26s where it was 41s), with cheap parse cases for `+40`, `0x28`, `abc`, `-5`, `4.5` and `08`. The overflow round adds the 30-digit budget at 64KB (over 600s before the digit gate, 26s after), the exact 64-bit bound, and a zero-padded short value that must stay five seconds rather than be judged by its length. `scripts/test/smoke.sh` pins the guard's runtime-budget constant to the installer's registered timeout and asserts the ceiling sits below it.
+
+---
+
+### v2.15.2 — the engage size tunes the deadline, it no longer switches it off (patch on v2.15.1)
+
+v2.15.1 put a ceiling on the budget. It left the condition that decides whether the budget runs at all: `SAFEDEPS_BUDGET_ENGAGE_BYTES`. Raise that past the commands that matter and the judgment runs inline with no deadline — the same fail-open through the knob someone reaches for once the budget stops moving. Measured: a 32KB padded `pip install` answers in 21s at the default engage size and takes 198s with it raised, against a 30s runtime kill either way.
+
+The battery was itself the proof that the door was open: its mutation check disabled the gate by raising the engage size, which is the same gesture a user makes to reduce friction.
+
+- **The engage size is clamped to 4KB.** On the v2.15.0 cost curve a command just under 4KB is judged in about 0.68s, roughly 44x inside the runtime budget. Tuning between the 1KB default and the ceiling is what the knob is for and stays available.
+- **Turning the deadline off is a separate act with a separate name.** `SAFEDEPS_BUDGET_DISABLED` does nothing else and announces itself on stderr and in `advisory.log` every time it takes effect. A test that only knows it passes, and not that it catches the defect, is not evidence — so the off switch exists; it just is not the same lever as the tuning knob.
+- **Both knobs now go through one reader.** They failed the same way in v2.15.0 and v2.15.1, and a second hand-rolled parser is how they drift apart again. Whitespace, a leading `+`, leading zeros, non-numbers, and values too long for arithmetic are handled identically for both, and every fallback or clamp is announced.
+- **The knob reader is linear.** The per-zero strip loop v2.15.1 introduced was quadratic and ran before the child spawn, outside the deadline it serves: 40000 leading zeros took 28.9s and 60000 took 63.2s, past the runtime budget. One regex replaced it. Cross-validation raised this as a note rather than a rejection, and it is closed here rather than left in prose.
+
+Verification: `scripts/test/self-budget.sh` (30 ok) pins the engage clamp with a padded install that must still be denied on the budget, the announcement on both channels, silent tuning inside the ceiling, a non-numeric engage size falling back to the default, the disable path as the mutation check, and a 60000-zero budget that must still answer inside the runtime budget.
+
+Still open, recorded rather than fixed: several one-value knobs replace canonical truth rather than tune it — `SAFEDEPS_OSV_API_URL` / `SAFEDEPS_KEV_CATALOG_URL` / `SAFEDEPS_GHSA_API_URL` repoint the advisory source, `SAFEDEPS_NPM_CLOSURE_FIXTURE_JSON` and `SAFEDEPS_YARN_INFO_FIXTURE_NDJSON` replace closure resolution with canned data, `SAFEDEPS_LEDGER_DEFAULT_TTL_DAYS` can make approvals never expire, and `SAFEDEPS_ADVISORY_LOG` repoints the channel that every bypass is supposed to be observable on. These are test seams and mirror support, and the friction story for at least the URLs is real (a network that blocks osv.dev). Tracked as `safedeps/truth-source-knobs-have-no-declaration`.
 
 ## v3 (future)
 

@@ -56,7 +56,7 @@ Safedeps 는 **개발 의존성 install** (npm / pip / cargo / go / gem / maven 
 
 ### 릴리즈 메모
 
-- npm 패키지 version 은 `package.json` 이 SSoT. `bin/safedeps` `SAFEDEPS_VERSION` 이 이를 따라가고, smoke 테스트는 `package.json` 을 읽어 대조한다 (현재 v2.15.1).
+- npm 패키지 version 은 `package.json` 이 SSoT. `bin/safedeps` `SAFEDEPS_VERSION` 이 이를 따라가고, smoke 테스트는 `package.json` 을 읽어 대조한다 (현재 v2.15.2).
 - `npm test` 는 release smoke suite 를 실행한다. full fixture E2E 는 `v2.1-tests` 에 있다.
 - daily re-check 는 LLM 토큰을 쓰지 않는다. opt-in 이며, macOS `launchd` user agent 가 매일 `safedeps re-check --json` 을 실행한다 (`install-safedeps-recheck-agent.mjs` 로 atomic install). `~/.safedeps/recheck.log` 와 `~/.safedeps/recheck-alerts.jsonl` 를 쓰고, 새 CVE/KEV/revoke/provider-skip/위조-의심 시 macOS notification 을 띄운다. 네트워크는 OSV / CISA / GHSA query 에만 쓴다.
 
@@ -520,6 +520,23 @@ v2.15.0 의 주장 전체가 "가드가 런타임 예산 너머로 사라지는 
 - **크로스 검증 2라운드가 같은 형태를 한 층 아래, 문법이 아니라 값의 범위에서 찾았다.** 문법을 하나로 만들어도 `^[0-9]+$` 는 자릿수를 세지 않고, bash 정수는 64비트라 조용히 감긴다. 음수로 감긴 값은 상한보다 크지 않아 클램프를 그대로 통과했고, 마감 곱셈이 한 번 더 감아 영영 오지 않는 시각을 만들었다 — 30자리 예산이 600s 를 넘겨도 답을 내지 않았다. 이제 자릿수를 산술 이전에 문자열 영역에서 검사한다. 아홉 자리를 넘으면 상한 위인 게 분명하므로 그대로 클램프한다 — "상한 위는 클램프한다" 는 규칙에 표기법에 따른 예외를 두지 않는다. 아홉 자리는 초로 약 31년이다.
 
 검증: `scripts/test/self-budget.sh` 에 600s 예산 + 64KB 패딩된 `pip install` 케이스가 추가됐다. 이 입력의 자연 스캔은 개발 머신에서 300s 를 넘으므로 답을 런타임 30s 안으로 되돌릴 수 있는 것은 상한뿐이다 — 약 26s 에 `UNDECIDED` 로 거부되고 클램프가 세 곳 모두에 나타난다. 같은 64KB 케이스를 `" 40"` 으로 한 번 더 돌려 문법 수정을 종단으로 고정했고(41s 였던 것이 25~26s), `+40`·`0x28`·`abc`·`-5`·`4.5`·`08` 은 값싼 파싱 케이스로 건다. 오버플로 라운드로 64KB + 30자리 예산(자릿수 게이트 전 600s+, 후 26s), 64비트 경계값, 그리고 길이로 판정되면 안 되는 0 패딩 짧은 값을 추가했다. 상한 아래 값은 손대지 않고 알리지도 않는다. `scripts/test/smoke.sh` 는 가드의 런타임 예산 상수를 인스톨러가 등록하는 타임아웃에 고정하고, 상한이 그 아래인지 검사한다.
+
+---
+
+### v2.15.2 — engage 크기는 마감을 튜닝할 뿐, 더는 끄지 못한다 (v2.15.1 패치)
+
+v2.15.1 이 예산에 상한을 씌웠다. 그런데 예산이 **돌지 말지를 정하는 조건**은 그대로 남았다: `SAFEDEPS_BUDGET_ENGAGE_BYTES`. 문제되는 커맨드보다 크게 올리면 판정이 마감 없이 인라인으로 돌아간다 — 예산이 안 움직이게 되면 사람이 다음으로 잡는 손잡이로 같은 fail-open 이 돌아온다. 실측: 32KB 패딩된 `pip install` 이 기본 engage 에서 21s, 올린 상태에서 198s. 런타임은 어느 쪽이든 30s 에 죽인다.
+
+문이 열려 있다는 증거는 배터리 자신이었다 — mutation check 가 engage 크기를 올려 게이트를 껐고, 그건 사용자가 마찰을 줄일 때 하는 동작과 같다.
+
+- **engage 크기를 4KB 로 클램프한다.** v2.15.0 비용 곡선에서 4KB 바로 아래 커맨드는 약 0.68s 에 판정되므로 런타임 예산의 약 44배 안쪽이다. 기본값 1KB 와 상한 사이의 튜닝은 본래 용도이고 그대로 남는다.
+- **마감을 끄는 것은 이름이 다른 별개의 행위다.** `SAFEDEPS_BUDGET_DISABLED` 는 다른 일을 하지 않고, 발동할 때마다 stderr 와 `advisory.log` 에 자기를 알린다. 통과만 알고 결함을 잡는지는 모르는 테스트는 증거가 아니므로 off 스위치는 존재한다 — 다만 튜닝 레버와 같은 것이 아닐 뿐이다.
+- **두 노브가 이제 하나의 리더를 쓴다.** v2.15.0·v2.15.1 에서 같은 방식으로 깨졌고, 손으로 짠 두 번째 파서는 다시 갈라지는 경로다. 공백·선행 `+`·선행 0·비숫자·산술이 담지 못하는 길이를 둘 다 똑같이 처리하고, 모든 낙하와 클램프를 알린다.
+- **노브 리더가 선형이다.** v2.15.1 이 넣은 0 제거 루프가 O(n²)였고 자식 스폰 이전, 즉 자기가 지키는 마감 바깥에서 돌았다: 선행 0 4만 개 28.9s, 6만 개 63.2s 로 런타임 예산 너머다. 정규식 하나로 대체했다. 크로스 검증이 이걸 reject 가 아니라 note 로 올렸고, 산문으로 남기지 않고 여기서 닫았다.
+
+검증: `scripts/test/self-budget.sh`(30 ok)가 engage 클램프(패딩된 설치가 여전히 예산으로 거부되어야 함), 두 채널 알림, 상한 내 조용한 튜닝, 비숫자 engage 의 기본값 낙하, mutation check 로서의 disable 경로, 그리고 6만 개 0 예산이 런타임 예산 안에 답하는 것을 고정한다.
+
+여전히 열려 있고 고치지 않고 기록만 한 것: 값 하나로 **튜닝이 아니라 정본을 갈아치우는** 노브가 여럿이다 — `SAFEDEPS_OSV_API_URL`·`SAFEDEPS_KEV_CATALOG_URL`·`SAFEDEPS_GHSA_API_URL` 은 자문 출처를 옮기고, `SAFEDEPS_NPM_CLOSURE_FIXTURE_JSON`·`SAFEDEPS_YARN_INFO_FIXTURE_NDJSON` 은 closure 해석을 통조림 데이터로 대체하며, `SAFEDEPS_LEDGER_DEFAULT_TTL_DAYS` 는 승인을 영구화할 수 있고, `SAFEDEPS_ADVISORY_LOG` 는 모든 우회가 관측돼야 하는 그 채널 자체를 옮긴다. 테스트 seam 이자 미러 지원이고, 적어도 URL 쪽은 마찰 서사가 실재한다(osv.dev 를 막는 망). `safedeps/truth-source-knobs-have-no-declaration` 로 추적한다.
 
 ## v3 (미래)
 
