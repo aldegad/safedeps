@@ -23,8 +23,13 @@ const HOME = process.env.HOME || homedir();
 const SKILL_ID = "safedeps";
 const PRE_HOOK_NAME = "safedeps-pre-guard.sh";
 const POST_HOOK_NAME = "safedeps-post-verify.sh";
+// The registered command is the entry shim, not the real hook: the shim turns
+// a broken hook source (mid-merge checkout, missing file, crash) into an
+// explained fail-closed deny instead of an accidental exit code.
+const ENTRY_HOOK_NAME = "safedeps-hook-entry.sh";
 const REPO_PRE_HOOK = join(REPO_ROOT, "scripts", PRE_HOOK_NAME);
 const REPO_POST_HOOK = join(REPO_ROOT, "scripts", POST_HOOK_NAME);
+const REPO_ENTRY_HOOK = join(REPO_ROOT, "scripts", ENTRY_HOOK_NAME);
 const CLI_BIN = join(REPO_ROOT, "bin", "safedeps");
 const PRE_HOOK_TIMEOUT_SECONDS = 30;
 const POST_HOOK_TIMEOUT_SECONDS = 30;
@@ -80,9 +85,9 @@ function writeJsonWithBackup(path, value) {
   renameSync(tmpPath, path);
 }
 
-function engineHookCommand(engineRoot, hookName) {
+function engineHookCommand(engineRoot, target) {
   const engineName = basename(engineRoot).replace(/^\./u, "");
-  return `~/.${engineName}/skills/${SKILL_ID}/scripts/${hookName}`;
+  return `~/.${engineName}/skills/${SKILL_ID}/scripts/${ENTRY_HOOK_NAME} ${target}`;
 }
 
 function ensureHook(config, eventName, command, timeoutSeconds) {
@@ -127,7 +132,10 @@ function isSafedepsHookCommand(command, hookName) {
   if (typeof command !== "string") return false;
   const normalized = command.replace(/\\/gu, "/");
   if (normalized.includes("npm-reorg-guard")) return true;
-  return normalized.includes("/safedeps/") && normalized.endsWith(`/scripts/${hookName}`);
+  if (!normalized.includes("/safedeps/")) return false;
+  const withoutTarget = normalized.replace(/ (?:pre|post)$/u, "");
+  if (withoutTarget.endsWith(`/scripts/${ENTRY_HOOK_NAME}`)) return true;
+  return normalized.endsWith(`/scripts/${hookName}`);
 }
 
 function pruneNonCanonicalSafedepsHooks(config, eventName, canonicalCommand, hookName) {
@@ -173,8 +181,8 @@ function installInEngine({ engineRoot, configPath, label }) {
   }
   const skillsRoot = join(engineRoot, "skills");
   const skillLink = join(skillsRoot, SKILL_ID);
-  const preCommand = engineHookCommand(engineRoot, PRE_HOOK_NAME);
-  const postCommand = engineHookCommand(engineRoot, POST_HOOK_NAME);
+  const preCommand = engineHookCommand(engineRoot, "pre");
+  const postCommand = engineHookCommand(engineRoot, "post");
 
   if (UNINSTALL) {
     removeSymlink(skillLink);
@@ -274,8 +282,8 @@ function printRecommendedSetup() {
 }
 
 function main() {
-  if (!existsSync(REPO_PRE_HOOK) || !existsSync(REPO_POST_HOOK)) {
-    throw new Error(`hook scripts not found at ${REPO_PRE_HOOK} / ${REPO_POST_HOOK}`);
+  if (!existsSync(REPO_PRE_HOOK) || !existsSync(REPO_POST_HOOK) || !existsSync(REPO_ENTRY_HOOK)) {
+    throw new Error(`hook scripts not found at ${REPO_PRE_HOOK} / ${REPO_POST_HOOK} / ${REPO_ENTRY_HOOK}`);
   }
 
   installInEngine({

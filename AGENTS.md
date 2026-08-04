@@ -35,6 +35,7 @@ See the `skill-hook-authoring` skill for the full payload/decision schema. Essen
 
 - Read `tool_input.command` (single field). `permissionDecision` is `allow`/`deny`/`ask`. `updatedInput` rewrites the command but is **Claude-only** — gate it on engine.
 - `chmod +x` every hook and commit mode `100755`; a missing exec bit is `Permission denied` in every session.
+- The registered command for both events is the entry shim `scripts/safedeps-hook-entry.sh pre|post`, not the hook scripts directly. The shim turns a broken hook source (mid-merge checkout, crash, missing file) into an explained fail-closed deny. It relies on one contract: **the real hooks exit 0 on every designed path** (decisions travel as JSON) — never add an intentional non-zero exit to a hook script.
 - Hooks block clearly and explain; never a silent fallback.
 - Installed copies under `~/.claude`/`~/.codex` are symlinks to this repo — edit the repo, never the installed copy.
 
@@ -47,6 +48,7 @@ See the `skill-hook-authoring` skill for the full payload/decision schema. Essen
 
 - Branch off `main`; do not commit to `main` directly.
 - Do **not** commit or push unless asked. Use logical commits with clear messages.
+- **Never resolve merge conflicts in the main checkout.** The installed hooks execute the main checkout live; conflict markers there blocked Bash machine-wide on 2026-08-04. Integrate in your worktree (merge `main` into your branch, resolve, test), then move `main` forward fast-forward-only (`git merge --ff-only`). The entry shim softens the blast, but the discipline removes the window.
 
 ## Consistency audit (before release or doc changes)
 
