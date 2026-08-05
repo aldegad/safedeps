@@ -56,7 +56,7 @@ The internal engine keeps the v1 `reorg-guard` assets.
 
 ### Release notes
 
-- The npm package version in `package.json` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION` tracks it and the smoke test reads `package.json` to compare (current: v2.16.0).
+- The npm package version in `package.json` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION` tracks it and the smoke test reads `package.json` to compare (current: v2.16.1).
 - `npm test` runs the release smoke suite; the full fixture E2E lives under `v2.1-tests`.
 - The daily re-check uses no LLM tokens. It is opt-in: a macOS `launchd` user agent runs `safedeps re-check --json` daily, installed atomically by `install-safedeps-recheck-agent.mjs`. It writes `~/.safedeps/recheck.log` and `~/.safedeps/recheck-alerts.jsonl` and raises a macOS notification on a new CVE/KEV/revoke/provider-skip/suspected-forgery. Network is used only for OSV / CISA / GHSA queries.
 
@@ -663,6 +663,20 @@ The second is the worse one. The first looks like the gate did not run; the seco
 ### Known gap
 
 Whether the engines kill the hook alone or its whole process tree is **not measured**. Killing the hook process by itself, the `npm ci` it spawned survived and finished the tree; if a runtime kills the process group instead, the tree stays torn. Measuring it means registering a deliberately slow hook on a live machine, which this repo has already had block Bash machine-wide once, so it was left unmeasured on purpose. The journal does not depend on the answer: the record is written before the first destructive act either way.
+
+---
+
+### v2.16.1 — a rollback in progress is not a rollback that failed (patch on v2.16.0)
+
+v2.16.0 made an interrupted rollback loud by writing the journal entry before the first destructive act. Cross-validation of that release found the other side of it: during a rollback the entry is on disk *by design*, and the hook reads the journal on every Bash call, so an unrelated command landing in that window reported a working rollback as interrupted. Reproduced with `scripts/measure/rollback-concurrent-report.sh` — `REORG INTERRUPTED` and `REORG executed` in the same log, plus an incident file and instructions to repair a tree that was about to be fine.
+
+- **The report is gated on liveness, not on a file existing.** "An entry is on disk" and "a rollback did not finish" were the same test; they are now different questions, and the journal has recorded the owner's pid since it was written. The state lock cannot answer this and moving the read inside it would fix nothing: the hook releases the lock before the rollback starts, so the rollback runs unlocked and a second hook would read the same live entry.
+- **The check defaults to reporting.** The two ways to be wrong are not symmetric — calling a dead rollback alive suppresses a real report, which is the silence the journal exists to prevent, while calling a live one dead is noise. So it answers "still running" only on positive evidence, and an owner it cannot resolve counts as gone. pid reuse is settled by process start time alone: the owner was running before it wrote its entry, and a pid is recycled only after its previous holder died.
+- **The ledger batch tells "could not run" apart from "no misses".** A missing jq, a missing or unparseable closure file, or a failed index build all produced no rows, and no rows is how the caller reads "everything is approved" — the per-package form it replaced failed closed in the same conditions. The status was overloaded (1 meant both a verdict and an error), which is why the caller ignored it. Now 0 no misses, 1 misses found, 2 could not run, matching the audit exit-code contract, and the caller fails closed above 1.
+
+Verification: both directions pinned in the e2e battery — a running rollback stays silent, a dead owner and a recycled pid are both reported, and the batch returns 1/2/2 for unapproved, missing, and unparseable closures. Both fixes mutation-verified by restoring the old behaviour, which turns the new checks red.
+
+Two findings this pass, worth stating because neither was hypothetical. The existing "interrupted rollback" fixture built its entry from inside a subshell, where `$$` is the parent's pid — it described a rollback owned by the live test process and passed only while nothing read the field. And the first version of the batch caller aborted the hook on the ordinary misses-found path, because `set -e` is on and the status is 1; the existing reorg test caught it by going silent rather than red, since the hook died before it could speak.
 
 ## v3 (future)
 
