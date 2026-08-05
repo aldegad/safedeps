@@ -36,6 +36,18 @@ safedeps_journal_path() {
   printf '%s/%s.json' "${SAFEDEPS_JOURNAL_DIR}" "$1"
 }
 
+# Parse one of this file's timestamps to epoch seconds. GNU (`date -d`) first,
+# then BSD/macOS (`date -j -f`), the way the state lock already reads mtime from
+# either stat. One implementation because two callers now need it and a second
+# copy is how the first goes stale.
+safedeps_journal_epoch() {
+  local stamp="$1"
+  [[ -n "${stamp}" ]] || return 1
+  date -u -d "${stamp}" +%s 2>/dev/null && return 0
+  date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "${stamp}" +%s 2>/dev/null && return 0
+  return 1
+}
+
 # Write (or overwrite) the journal entry for a rollback in progress. Atomic, so
 # a kill during the write cannot leave a half-written entry that reads as
 # corrupt when someone needs it most.
@@ -114,7 +126,20 @@ safedeps_journal_close() {
 #   - calling a dead rollback alive suppresses a real report (silence — the
 #     defect the journal exists to prevent)
 #   - calling a live rollback dead produces a false report (noise)
-# So this answers "alive" only on positive evidence and defaults to dead.
+# So this answers "running" only on positive evidence and defaults to gone.
+#
+# There is a third state, and folding it into the pair gets it wrong either way.
+# A STOPPED owner (SIGSTOP/SIGTSTP) has not died — SIGCONT resumes it — but it
+# is not progressing either. Called gone, a resumable rollback is reported as
+# unfinished, which is the false-report defect again. Called running, a rollback
+# that is stopped forever is never reported, which is the zombie defect again.
+# The asymmetry rule does not apply: stopped is not an unresolvable owner, it is
+# a resolved state that happens to be neither. So it gets its own answer, the
+# way the pre-guard gave "could not judge" its own answer instead of folding it
+# into safe or unsafe. The three call for three different human actions: repair
+# the tree, wait, or resume-or-kill and then repair.
+#
+# Exit status: 0 running, 1 gone, 2 stopped.
 #
 # pid reuse is the trap. A recycled pid belonging to some unrelated process
 # would make a genuinely interrupted rollback look alive forever, which is the
@@ -122,7 +147,7 @@ safedeps_journal_close() {
 # before it wrote the entry, and a pid can only be recycled after its previous
 # holder died — so anything that started after the entry was opened is a
 # different process, and no other check is needed to know that.
-safedeps_journal_owner_alive() {
+safedeps_journal_owner_state() {
   local pid="$1"
   local opened_at="$2"
   local started_epoch opened_epoch
@@ -136,8 +161,16 @@ safedeps_journal_owner_alive() {
   # and its parent has not reaped yet reads as alive, which is precisely the
   # case the journal exists to report. And a zombie does not go away on its own,
   # so this would suppress that report on every later command, not just once.
-  case "$(ps -o stat= -p "${pid}" 2>/dev/null)" in
-    Z*) return 1 ;;
+  #
+  # Matched anywhere in the field rather than anchored: `ps` pads the column
+  # differently across platforms (macOS gives a trailing run of spaces, others
+  # can lead). `Z` only ever appears as the state character — the flag suffixes
+  # are `<`, `N`, `L`, `s`, `l`, `+` — so a loose match cannot collide.
+  local proc_stat
+  proc_stat=$(ps -o stat= -p "${pid}" 2>/dev/null)
+  case "${proc_stat}" in
+    *Z*) return 1 ;;
+    *T*) return 2 ;;
   esac
 
   # Without a start time this stays fail-loud (treated as dead), so a platform
@@ -150,8 +183,7 @@ safedeps_journal_owner_alive() {
   started_epoch=$(date -d "${lstart}" +%s 2>/dev/null) || \
     started_epoch=$(date -j -f '%a %b %d %T %Y' "${lstart}" +%s 2>/dev/null) || return 1
   [[ -n "${started_epoch}" ]] || return 1
-  opened_epoch=$(date -u -d "${opened_at}" +%s 2>/dev/null) || \
-    opened_epoch=$(date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "${opened_at}" +%s 2>/dev/null) || return 1
+  opened_epoch=$(safedeps_journal_epoch "${opened_at}") || return 1
   [[ -n "${opened_epoch}" ]] || return 1
   # No slack. Both timestamps come from the same system clock at second
   # resolution, and the owner necessarily started before it wrote its entry, so
@@ -187,47 +219,97 @@ safedeps_journal_report_unfinished() {
     # A rollback still running owns its entry. Skipping it is not a silent
     # fallback: the process that owns it will either close it on success or die
     # and leave it for the next hook to report.
-    if safedeps_journal_owner_alive "${entry_pid}" "${entry_opened}"; then
+    #
+    # `|| owner_state=$?` rather than a bare call: this file is sourced into a
+    # hook that runs under `set -e`, and every answer except "running" is a
+    # non-zero status.
+    local owner_state=0
+    safedeps_journal_owner_state "${entry_pid}" "${entry_opened}" || owner_state=$?
+    if [[ ${owner_state} -eq 0 ]]; then
       continue
+    fi
+    local owner_stopped=0
+    if [[ ${owner_state} -eq 2 ]]; then
+      owner_stopped=1
     fi
 
     found=0
 
-    local journal_id project_dir rollback_snapshot reasons stage opened_at
+    local journal_id project_dir rollback_snapshot reasons stage opened_at stage_at
+    local stage_detail=""
     journal_id=$(jq -r '.journal_id // "unknown"' "${entry}" 2>/dev/null || printf 'unknown')
     project_dir=$(jq -r '.project_dir // "unknown"' "${entry}" 2>/dev/null || printf 'unknown')
     rollback_snapshot=$(jq -r '.rollback_snapshot // "unknown"' "${entry}" 2>/dev/null || printf 'unknown')
     reasons=$(jq -r '.reasons // "unrecorded"' "${entry}" 2>/dev/null || printf 'unrecorded')
     stage=$(jq -r '.stage // "unknown"' "${entry}" 2>/dev/null || printf 'unknown')
     opened_at=$(jq -r '.opened_at // "unknown"' "${entry}" 2>/dev/null || printf 'unknown')
+    stage_at=$(jq -r '.stage_at // empty' "${entry}" 2>/dev/null)
+
+    # How far the rollback got in time before its last stage change. This is
+    # deliberately not "how long it was stuck there": nothing records when the
+    # process died, and the report can arrive any number of commands later, so
+    # the interval to now would be mostly idle time. What is knowable is when
+    # the stage was entered and how long the phases before it took, which is
+    # what separates "the restores were still running" from "the reinstall had
+    # been going a while" — different repairs.
+    if [[ -n "${stage_at}" ]]; then
+      local opened_epoch stage_epoch
+      if opened_epoch=$(safedeps_journal_epoch "${opened_at}") \
+         && stage_epoch=$(safedeps_journal_epoch "${stage_at}"); then
+        stage_detail=$(printf ', entered %s — %ds into the rollback' \
+          "${stage_at}" "$(( stage_epoch - opened_epoch ))")
+      else
+        stage_detail=$(printf ', entered %s' "${stage_at}")
+      fi
+    fi
 
     mkdir -p "${SAFEDEPS_INCIDENT_DIR}" 2>/dev/null
     mv -f "${entry}" "${SAFEDEPS_INCIDENT_DIR}/${journal_id}.json" 2>/dev/null || rm -f "${entry}"
 
+    local log_headline='REORG INTERRUPTED'
+    if [[ ${owner_stopped} -eq 1 ]]; then
+      log_headline="REORG STOPPED (owner pid ${entry_pid} is suspended, not dead)"
+    fi
+
     cat >> "${reorg_log}" << LOG_EOF 2>/dev/null
-[$(safedeps_journal_now_iso)] REORG INTERRUPTED
-  Journal: ${journal_id} (opened ${opened_at}, reached stage: ${stage})
+[$(safedeps_journal_now_iso)] ${log_headline}
+  Journal: ${journal_id} (opened ${opened_at}, reached stage: ${stage}${stage_detail})
   Project: ${project_dir}
   Rollback snapshot: ${rollback_snapshot}
   Reasons: ${reasons}
   Incident record: ${SAFEDEPS_INCIDENT_DIR}/${journal_id}.json
 LOG_EOF
 
-    report="${report}A safedeps rollback of ${project_dir} did not finish.
+    local headline body_cause body_first_move
+    if [[ ${owner_stopped} -eq 1 ]]; then
+      headline="A safedeps rollback of ${project_dir} is stopped, not finished."
+      body_cause="The process running it (pid ${entry_pid}) is suspended — it has not died, and
+it is not progressing. Something sent it SIGSTOP or SIGTSTP, or it was stopped
+from a shell job control."
+      body_first_move="First decide what to do with that process. \`kill -CONT ${entry_pid}\` lets the
+rollback finish on its own; killing it leaves the tree mixed and you repair it
+as below. Until one of those happens, nothing about this project is settled."
+    else
+      headline="A safedeps rollback of ${project_dir} did not finish."
+      body_cause="The rollback was cut off — most likely the hook hit the runtime's timeout
+mid-rollback."
+      body_first_move="Run \`npm ci\` in ${project_dir} to rebuild the tree from whichever lockfile is
+there now, and check that the lockfile is the one you expect before you trust
+it."
+    fi
+
+    report="${report}${headline}
 
 safedeps found a suspicious dependency closure and started rolling the project
-back to snapshot ${rollback_snapshot}. The rollback was cut off at stage
-'${stage}' (started ${opened_at}) — most likely the hook hit the runtime's
-timeout mid-rollback.
+back to snapshot ${rollback_snapshot}, reaching stage '${stage}'
+(started ${opened_at}${stage_detail}). ${body_cause}
 
 Why it was rolled back:
 ${reasons}
 
 What this means for the project: the dependency files and node_modules may be
-in a mixed state — partly the rejected install, partly the snapshot. Run
-\`npm ci\` in ${project_dir} to rebuild the tree from whichever lockfile is
-there now, and check that the lockfile is the one you expect before you trust
-it.
+in a mixed state — partly the rejected install, partly the snapshot.
+${body_first_move}
 
 Incident record: ${SAFEDEPS_INCIDENT_DIR}/${journal_id}.json
 Rollback log: ${reorg_log}

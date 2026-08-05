@@ -1346,6 +1346,78 @@ if [[ -n "${race_zombie_pid}" ]] && [[ "$(ps -o stat= -p "${race_zombie_pid}" 2>
   grep -q 'did not finish' <<< "${race_zombie_out}" \
     || fail "a rollback whose owner is an unreaped zombie is reported, not suppressed"
   printf 'ok - an unreaped (zombie) owner does not suppress the report\n'
+
+# 5. A STOPPED owner is neither. It has not died — SIGCONT resumes it — and it
+#    is not progressing. Folding it into the pair is wrong both ways: called
+#    gone, a resumable rollback is reported as unfinished (the false-report
+#    defect); called running, a rollback stopped forever is never reported (the
+#    zombie defect). So it is its own answer, and the report says so, because
+#    the human's first move is different — resume or kill, then repair.
+bash -c 'sleep 120' >/dev/null 2>&1 &
+race_stopped_pid=$!
+sleep 0.3
+kill -STOP "${race_stopped_pid}" 2>/dev/null
+sleep 0.3
+if [[ "$(ps -o stat= -p "${race_stopped_pid}" 2>/dev/null)" == *T* ]]; then
+  race_write_entry "${race_stopped_pid}" "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  race_stopped_out=$(race_report)
+  grep -q 'is stopped, not finished' <<< "${race_stopped_out}" \
+    || fail "a stopped owner is reported as stopped, not as an unfinished rollback"
+  grep -q 'kill -CONT' <<< "${race_stopped_out}" \
+    || fail "the stopped report names the move that resumes the rollback"
+  grep -q 'REORG STOPPED' "${race_home}/reorg.log" \
+    || fail "a stopped rollback is logged as stopped rather than interrupted"
+  printf 'ok - a stopped owner gets its own answer, not dead and not running\n'
+
+# 6. `stage_at` records when the last stage was entered. Until now nothing read
+#    it, and a field with no reader has no verification: `pid` was written and
+#    unread for a release, and it carried two defects that only surfaced when
+#    something finally read it.
+#
+#    What the report may claim is bounded. Nothing records when the process
+#    died, and the report can arrive many commands later, so the interval to now
+#    would be mostly idle time. What is knowable is when the stage was entered
+#    and how long the phases before it took — which separates "the restores were
+#    still going" from "the reinstall had been running a while".
+stage_at_dead_probe() { sleep 60 >/dev/null 2>&1 & echo $!; }
+stage_at_pid=$(stage_at_dead_probe)
+kill -9 "${stage_at_pid}" 2>/dev/null
+stage_at_reap=0
+while kill -0 "${stage_at_pid}" 2>/dev/null && (( stage_at_reap < 100 )); do
+  sleep 0.05; stage_at_reap=$((stage_at_reap + 1))
+done
+
+mkdir -p "${race_home}/rollback-journal"
+jq -nc --arg pid "${stage_at_pid}" \
+  '{journal_id:"test-race", project_dir:"'"${race_project}"'",
+    rollback_snapshot:"snap-baseline", reasons:"npm closure contains 1 unapproved package(s): fixture-evil@9.9.9",
+    stage:"reinstalling-node-modules",
+    opened_at:"2026-08-05T00:00:00Z", stage_at:"2026-08-05T00:00:07Z", pid:$pid}' \
+  > "${race_home}/rollback-journal/test-race.json"
+stage_at_out=$(race_report)
+grep -q 'entered 2026-08-05T00:00:07Z' <<< "${stage_at_out}" \
+  || fail "the report says when the interrupted rollback entered its last stage"
+grep -q '7s into the rollback' <<< "${stage_at_out}" \
+  || fail "the report says how far into the rollback that stage was entered"
+
+# An entry that never reached a stage change has no stage_at, and the report
+# must not invent one or print an empty interval.
+race_write_entry "${stage_at_pid}" "2026-08-05T00:00:00Z"
+stage_at_absent=$(race_report)
+grep -q 'did not finish' <<< "${stage_at_absent}" \
+  || fail "an entry with no stage_at is still reported"
+grep -q 'entered ' <<< "${stage_at_absent}" \
+  && fail "an entry with no stage_at does not claim a stage-entry time"
+printf 'ok - the report reads stage_at, and says nothing when it is absent\n'
+else
+  fail "could not stop a process to test with (ps stat was not T)"
+fi
+kill -CONT "${race_stopped_pid}" 2>/dev/null
+kill -9 "${race_stopped_pid}" 2>/dev/null
+race_sreap=0
+while kill -0 "${race_stopped_pid}" 2>/dev/null && (( race_sreap < 100 )); do
+  sleep 0.05; race_sreap=$((race_sreap + 1))
+done
 else
   fail "could not produce a zombie to test with (ps stat was not Z)"
 fi

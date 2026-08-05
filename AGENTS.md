@@ -66,7 +66,47 @@ grep -rqiE 'current.*2\.[0-9]+\.[0-9]+' ROADMAP*.md   # sanity-check the "curren
 for f in README.md ROADMAP.md ARCHITECTURE.md; do
   grep -vP '\]\(\./[A-Za-z]+\.ko\.md\)' "$f" | grep -qP '[\x{AC00}-\x{D7A3}]' && echo "KOREAN IN $f"
 done
-# concept presence across the prose docs
-grep -lqi 'inert\|--ignore-scripts' README.md ARCHITECTURE.md SKILL.md || echo "inert-install undocumented"
+# concept presence, per file. `grep -lq` over a file list exits on the FIRST
+# match, so the old form passed when ONE of three documents still carried the
+# concept -- it could only catch "all of them lost it at once", never drift
+# between them. AGENTS.md is in the list because it owns the invariants.
+for f in README.md ARCHITECTURE.md ARCHITECTURE.ko.md SKILL.md AGENTS.md; do
+  grep -qi 'inert\|--ignore-scripts' "$f" || echo "inert-install missing from $f"
+done
 npm test
 ```
+
+### What that check cannot do
+
+It answers "is the concept absent from a file", not "do these files state the
+same proposition". Measured against the real v2.16.1 drift, where AGENTS.md got
+a liveness qualifier and the other documents kept the old file-existence
+reading:
+
+- **False negatives, 2 of 3.** Both ARCHITECTUREs were drifted and both already
+  contained the word `pid` -- from an unrelated paragraph about the budget
+  deadline killing a process tree. A per-file vocabulary check would have
+  flagged only README.
+- **False positives, 2.** After the fix, README and ARCHITECTURE.ko.md state the
+  new proposition correctly without using `pid` or `liveness`. README is
+  user-facing prose and says "the process that wrote it is gone" on purpose. A
+  vocabulary check turns those two red, and the way to clear the red is to plant
+  jargon in user-facing prose -- which the Docs section above forbids. The check
+  and the convention would push against each other.
+
+The cause is the direction of the approximation: a check like this approximates
+a proposition by its vocabulary, and every document layer states the same
+proposition in different words on purpose.
+
+So the layers are:
+
+1. **Concept absence** -- the loop above. Real, and this is its ceiling.
+2. **Proposition declaration** -- have each document declare which version of a
+   proposition it reflects, and bump the declaration when the proposition moves.
+   Better than "did the commit touch all of them", because a declaration is an
+   explicit claim by the author rather than an incidental co-edit. Not built.
+3. **Proposition agreement** -- not mechanizable. Re-review owns this: another
+   person reading the same object. That is a design decision, not a gap. Every
+   defect in the v2.16.x round -- a fail-open early return, this prose drift, and
+   a prescription written without opening the check it prescribed -- was invisible
+   to any grep and was caught by someone re-reading.
