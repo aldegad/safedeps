@@ -17,9 +17,10 @@ tmp_root=$(mktemp -d "${TMPDIR:-/tmp}/safedeps-e2e.XXXXXX")
 # Children the owner-state tests spawn, so an exit anywhere can reap them. The
 # stopped-owner test suspends a process and resumes it, and a run that dies in
 # between leaves a permanently stopped orphan -- measured: four of them, up to
-# 65 minutes old, and because their cwd was the plan worktree they blocked
-# `git worktree remove` during finalize. Writing code to judge stopped processes
-# leaked stopped processes.
+# 65 minutes old, and because their cwd was the plan worktree the close gate
+# refused to prescribe removal at finalize. (`git worktree remove` itself exits
+# 0 in that situation -- measured; it is kuma's live-cwd gate that refuses.)
+# Writing code to judge stopped processes leaked stopped processes.
 #
 # SIGCONT before SIGKILL: a stopped process never receives SIGTERM, and SIGKILL
 # is delivered regardless, so this order is what actually reaps one.
@@ -28,8 +29,10 @@ tmp_root=$(mktemp -d "${TMPDIR:-/tmp}/safedeps-e2e.XXXXXX")
 #
 # Suite-unique, deliberately not run-unique. Two overlapping e2e runs mean the
 # later one's startup sweep reaps the earlier one's live children, which is a
-# real cost -- but it fails loud: both blocks that use these children have an
-# `else fail`, so an overlap produces a red assertion rather than a quiet skip.
+# real cost -- but it fails loud. The two owner-state blocks have an `else fail`,
+# and the fixture provider (the third marked child) is load-bearing enough that
+# killing it turns the suite red on its own -- measured, rather than assumed from
+# the two blocks that happened to be written first.
 # A run token would remove that, at the price of a run never being able to
 # recognise the orphans its own SIGKILLed predecessor left, which is the case
 # this sweep exists for. The tradeoff is chosen, not overlooked. It is the child's $0,
@@ -1328,8 +1331,8 @@ mkdir -p "${race_home}" "${race_project}"
 # because that is what the owner check accepts and what a hook actually is —
 # a `sleep` here would pass the test for the wrong reason.
 # Spawned with cwd outside the plan worktree. An orphan that survives anyway
-# then holds a directory nobody is trying to delete, so it cannot block
-# `git worktree remove` at finalize -- that is what actually bit, not the
+# then holds a directory nobody is trying to delete, so it cannot make the
+# close gate refuse removal at finalize -- that is what actually bit, not the
 # process itself.
 ( cd "${tmp_root}" && exec bash -c 'exec -a "$0" sleep 120' "${E2E_CHILD_MARKER}" ) >/dev/null 2>&1 &
 race_owner_pid=$!
