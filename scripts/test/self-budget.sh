@@ -37,8 +37,11 @@ pad() { head -c "$1" < /dev/zero | tr '\0' 'x'; }
 # one, and how long the answer took.
 guard() {
   local command="$1" budget="${2:-2}" engage="${3:-1024}" disabled="${4:-}" legacy_child="${5:-}"
-  local safe="${tmp_root}/safe-$$-${RANDOM}"
-  mkdir -p "${safe}"
+  # mktemp for the same reason as consumer-forms.sh: `$$` is constant within a
+  # run so isolation rested on RANDOM alone, and `mkdir -p` cannot report a
+  # collision. Uniqueness is the kernel's job.
+  local safe
+  safe=$(mktemp -d "${tmp_root}/safe.XXXXXX")
   GUARD_STATE_DIR="${safe}"
   local start end
   start=$(date +%s)

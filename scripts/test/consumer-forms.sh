@@ -40,9 +40,13 @@ printf '{"dependencies":{}}\n' > "${project_dir}/package.json"
 # to be an install.
 gate_decision() {
   local command="$1"
-  local safe="${tmp_root}/safe-$$-${RANDOM}"
-  local out
-  mkdir -p "${safe}"
+  # mktemp, not $$-$RANDOM: `$$` is constant within a run, so isolation rested
+  # entirely on RANDOM, and `mkdir -p` succeeds on an existing directory -- a
+  # collision handed one command's sandbox to another with no way to notice. The
+  # point is not that collisions were likely; it is that nothing could detect
+  # one. The kernel guarantees uniqueness here.
+  local safe out
+  safe=$(mktemp -d "${tmp_root}/safe.XXXXXX")
   out=$(jq -nc --arg c "${command}" --arg cwd "${project_dir}" \
     '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
     HOME="${tmp_root}/home" SAFEDEPS_HOME="${safe}" scripts/safedeps-pre-guard.sh 2>/dev/null)
@@ -127,8 +131,7 @@ for wrapped_npm in \
   "echo 'npm install evil@1.0.0' | xargs -I{} sh -c '{}'" \
   "printf 'npm install evil@1.0.0' > s.sh; sh s.sh"
 do
-  backstop_safe="${tmp_root}/safe-backstop-${RANDOM}"
-  mkdir -p "${backstop_safe}"
+  backstop_safe=$(mktemp -d "${tmp_root}/safe-backstop.XXXXXX")
   [[ "$(gate_decision "${wrapped_npm}")" == "pass" ]] || fail "npm delayed-detection fixture is a command-gate miss: ${wrapped_npm}"
   jq -nc --arg c "${wrapped_npm}" --arg cwd "${backstop_proj}" \
     '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
@@ -171,8 +174,10 @@ chmod +x "${oracle_bin}/pip"
 
 reaches_package_manager() {
   local form="$1"
-  local log="${tmp_root}/oracle-log-${RANDOM}"
-  : > "${log}"
+  # Same reason as the sandbox keys: a reused name silently shares one command's
+  # oracle log with another, and nothing here could tell.
+  local log
+  log=$(mktemp "${tmp_root}/oracle-log.XXXXXX")
   ( cd "${oracle_run}" && SAFEDEPS_ORACLE_LOG="${log}" PATH="${oracle_bin}:${PATH}" \
       bash -c "${form}" ) >/dev/null 2>&1 || true
   grep -q 'install' "${log}" 2>/dev/null
@@ -235,8 +240,10 @@ pass "quoted idioms, npm run, and npx stay allowed (no false positives from the 
 
 logged_ungated() {
   local command="$1"
-  local safe="${tmp_root}/safe-ungated-$$-${RANDOM}"
-  mkdir -p "${safe}"
+  # Same as gate_decision above. Both key sites change together: leaving one
+  # keeps the exposure, and this is the helper whose quiet cases went red.
+  local safe
+  safe=$(mktemp -d "${tmp_root}/safe-ungated.XXXXXX")
   jq -nc --arg c "${command}" --arg cwd "${project_dir}" \
     '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
     HOME="${tmp_root}/home-ungated" SAFEDEPS_HOME="${safe}" scripts/safedeps-pre-guard.sh >/dev/null 2>&1
