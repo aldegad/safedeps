@@ -1304,6 +1304,21 @@ race_reused=$(race_report)
 grep -q 'did not finish' <<< "${race_reused}" \
   || fail "an entry whose pid was recycled by a later process is reported"
 
+#    ...and the same crossing while that recycled pid happens to be STOPPED. The
+#    stopped answer is about a rollback that can resume; it must not apply to a
+#    process that was never this rollback. Ordered wrong, this reported a
+#    genuinely interrupted rollback as "suspended — resume it", which signals a
+#    bystander and defers the repair the project needs.
+kill -STOP "${race_owner_pid}" 2>/dev/null
+sleep 0.3
+race_write_entry "${race_owner_pid}" "1999-01-01T00:00:00Z"
+race_reused_stopped=$(race_report)
+kill -CONT "${race_owner_pid}" 2>/dev/null
+grep -q 'did not finish' <<< "${race_reused_stopped}" \
+  || fail "a recycled pid that is stopped is still reported as an unfinished rollback"
+grep -q 'is stopped, not finished' <<< "${race_reused_stopped}" \
+  && fail "a recycled pid that is stopped must not be reported as a resumable rollback"
+
 # 3. The owner dies mid-rollback — the case the journal exists for.
 kill -9 "${race_owner_pid}" 2>/dev/null
 # `wait` on a SIGKILLed child returns 137 and `set -e` would end the run here.

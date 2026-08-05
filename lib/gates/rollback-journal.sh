@@ -164,13 +164,16 @@ safedeps_journal_owner_state() {
   #
   # Matched anywhere in the field rather than anchored: `ps` pads the column
   # differently across platforms (macOS gives a trailing run of spaces, others
-  # can lead). `Z` only ever appears as the state character — the flag suffixes
-  # are `<`, `N`, `L`, `s`, `l`, `+` — so a loose match cannot collide.
+  # can lead). The claim a loose match rests on is narrow and is only about the
+  # two letters read here: no platform uses `Z`, `T` or `t` as a trailing flag,
+  # so they appear only as the state character. It is deliberately not a claim
+  # that the flag set is enumerable — macOS alone adds `V X A E S W >` beyond
+  # the usual `< N L s l +`, and an enumeration offered as the reason would go
+  # stale the first time a platform grew one.
   local proc_stat
   proc_stat=$(ps -o stat= -p "${pid}" 2>/dev/null)
   case "${proc_stat}" in
     *Z*) return 1 ;;
-    *T*) return 2 ;;
   esac
 
   # Without a start time this stays fail-loud (treated as dead), so a platform
@@ -190,6 +193,23 @@ safedeps_journal_owner_state() {
   # equality is the widest this needs to be. Slack here would only buy a window
   # in which a recycled pid suppresses a real report.
   (( started_epoch <= opened_epoch )) || return 1
+
+  # Stopped is judged only AFTER the pid is confirmed to be this entry's owner.
+  # Ahead of that check it answered for any process holding a recycled pid, so a
+  # genuinely interrupted rollback whose pid had been taken over by some
+  # unrelated stopped process was reported as "suspended — resume it", which
+  # sends a signal to a bystander and defers the repair the project actually
+  # needs. Measured against 001a715, which answered "gone" on the same input.
+  #
+  # The zombie check above stays where it is, and the asymmetry is the point:
+  # a zombie keeps its own start time, so it would pass the comparison below and
+  # has to be caught before it. A stopped process proves nothing about identity.
+  #
+  # Linux marks a debugger-stopped process `t`, macOS uses `T`; neither uses the
+  # other letter as a flag, so both are matched.
+  case "${proc_stat}" in
+    *T*|*t*) return 2 ;;
+  esac
 
   return 0
 }
@@ -256,8 +276,16 @@ safedeps_journal_report_unfinished() {
       local opened_epoch stage_epoch
       if opened_epoch=$(safedeps_journal_epoch "${opened_at}") \
          && stage_epoch=$(safedeps_journal_epoch "${stage_at}"); then
-        stage_detail=$(printf ', entered %s — %ds into the rollback' \
-          "${stage_at}" "$(( stage_epoch - opened_epoch ))")
+        # A corrupt entry can carry a stage_at older than its opened_at, and
+        # "-7s into the rollback" would read as a tool bug rather than as bad
+        # data. Both stamps come from one process on one clock, so this is not
+        # a reachable path — it is just not worth printing nonsense over.
+        if (( stage_epoch >= opened_epoch )); then
+          stage_detail=$(printf ', entered %s — %ds into the rollback' \
+            "${stage_at}" "$(( stage_epoch - opened_epoch ))")
+        else
+          stage_detail=$(printf ', entered %s' "${stage_at}")
+        fi
       else
         stage_detail=$(printf ', entered %s' "${stage_at}")
       fi

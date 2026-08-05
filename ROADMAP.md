@@ -692,6 +692,28 @@ That is the silent direction, and worse than a single miss. The reachable case i
 
 Verification: the e2e battery grows a fourth direction alongside running, dead, and recycled — a zombie owner is reported. The test builds its own zombie with a non-bash parent, and fails loudly if the platform will not produce one rather than passing on a process that was never a zombie. Mutation-verified by removing the state check, which turns it red.
 
+---
+
+### v2.17.0 — the field nobody read, the state that is neither, and a check that was reporting green
+
+Three loose ends from the v2.16.x round, and one it created.
+
+**A field nobody reads is a field nobody verifies.** Counting read sites across the journal's fields turned up exactly one with none: `stage_at`. The rule that found it came from `pid`, which was written and unread for a release and carried both defects that appeared the moment something finally read it — a fixture that described a live-owned rollback, and the zombie. Being visible in the incident record is not verification; `pid` was visible the whole time.
+
+- **`stage_at` gets a reader, not a deletion**, because it answers a real question. The report now says when the last stage was entered and how far into the rollback that was. It deliberately does not claim how long the rollback sat there: nothing records when the process died, and the report can arrive many commands later, so an interval to now would be mostly idle time. What is knowable still separates "the restores were running" from "the reinstall had been going a while", which call for different repairs.
+
+**A stopped owner is neither dead nor running**, and folding it into the pair is wrong in both directions. Called gone, a rollback that `SIGCONT` would resume is reported as unfinished — the false report v2.16.1 closed. Called running, a rollback stopped forever is never reported — the silence v2.16.2 closed. The asymmetry rule does not reach it either: "an owner that cannot be resolved counts as gone" is about unresolvable owners, and stopped is resolved and neither.
+
+- **It gets its own answer**, the way the pre-guard gave "could not judge" its own answer instead of folding it into safe or unsafe. The report differs because the first move differs: resume or kill, then repair.
+- **The zombie match is no longer anchored to the start of the field.** `ps` pads that column differently across platforms; `Z` only ever appears as the state character, so a loose match cannot collide.
+
+**The concept-presence check in the consistency audit was reporting green while the docs drifted.** `grep -lq` over a file list exits on the first match, so one document still carrying a concept passed the whole set. It could only catch "all of them lost it at once" — never drift between them, which is the case that actually happens. That is why the v2.16.1 prose drift had to be caught by a reviewer.
+
+- **Per file now, naming the file**, with `AGENTS.md` in the list since it owns the invariants. Scrubbing the concept from `SKILL.md` leaves the old form green and makes the new form name it.
+- **Its ceiling is written beside it, with numbers.** Against the real drift, a vocabulary check misses 2 of 3 and falsely flags 1 — both ARCHITECTUREs were drifted while already containing `pid` from an unrelated paragraph, and the corrected README states the new proposition without the jargon on purpose, since it is user-facing prose. A check that turns it red pushes against the clean-prose convention one section above it. Proposition agreement is not mechanizable and is recorded as re-review's job — a design decision rather than a gap.
+
+Verification: every new behaviour mutation-verified. Folding stopped into gone turns the stopped case red; dropping the `stage_at` read turns the `stage_at` case red. That second regression exists because the first version of this change had none and the mutation passed — adding a reader without a check would have repeated the defect the change is about.
+
 ## v3 (future)
 
 ### Ledger tamper resistance

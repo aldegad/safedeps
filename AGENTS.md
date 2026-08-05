@@ -70,7 +70,7 @@ done
 # match, so the old form passed when ONE of three documents still carried the
 # concept -- it could only catch "all of them lost it at once", never drift
 # between them. AGENTS.md is in the list because it owns the invariants.
-for f in README.md ARCHITECTURE.md ARCHITECTURE.ko.md SKILL.md AGENTS.md; do
+for f in README.md README.ko.md ARCHITECTURE.md ARCHITECTURE.ko.md SKILL.md AGENTS.md; do
   grep -qi 'inert\|--ignore-scripts' "$f" || echo "inert-install missing from $f"
 done
 npm test
@@ -87,12 +87,15 @@ reading:
   contained the word `pid` -- from an unrelated paragraph about the budget
   deadline killing a process tree. A per-file vocabulary check would have
   flagged only README.
-- **False positives, 2.** After the fix, README and ARCHITECTURE.ko.md state the
-  new proposition correctly without using `pid` or `liveness`. README is
-  user-facing prose and says "the process that wrote it is gone" on purpose. A
-  vocabulary check turns those two red, and the way to clear the red is to plant
-  jargon in user-facing prose -- which the Docs section above forbids. The check
-  and the convention would push against each other.
+- **False positive, 1.** After the fix, README.md states the new proposition
+  correctly without using `pid` or `liveness` -- it is user-facing prose and says
+  "the process that wrote it is gone" on purpose. A vocabulary check turns it
+  red, and the way to clear the red is to plant jargon in user-facing prose,
+  which the Docs section above forbids. The check and the convention would push
+  against each other. (Cross-validation corrected this from 2: ARCHITECTURE.ko.md
+  does use `pid` in that paragraph, so it would not be flagged. The count is the
+  kind of claim this very section warns about -- re-derive it before quoting it:
+  `git show 9b43aee^:README.md | grep -ci pid`.)
 
 The cause is the direction of the approximation: a check like this approximates
 a proposition by its vocabulary, and every document layer states the same
