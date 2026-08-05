@@ -56,7 +56,7 @@ The internal engine keeps the v1 `reorg-guard` assets.
 
 ### Release notes
 
-- The npm package version in `package.json` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION` tracks it and the smoke test reads `package.json` to compare (current: v2.17.0).
+- The npm package version in `package.json` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION` tracks it and the smoke test reads `package.json` to compare (current: v2.17.1).
 - `npm test` runs the release smoke suite; the full fixture E2E lives under `v2.1-tests`.
 - The daily re-check uses no LLM tokens. It is opt-in: a macOS `launchd` user agent runs `safedeps re-check --json` daily, installed atomically by `install-safedeps-recheck-agent.mjs`. It writes `~/.safedeps/recheck.log` and `~/.safedeps/recheck-alerts.jsonl` and raises a macOS notification on a new CVE/KEV/revoke/provider-skip/suspected-forgery. Network is used only for OSV / CISA / GHSA queries.
 
@@ -713,6 +713,20 @@ Three loose ends from the v2.16.x round, and one it created.
 - **Its ceiling is written beside it, with numbers.** Against the real drift, a vocabulary check misses 2 of 3 and falsely flags 1 — both ARCHITECTUREs were drifted while already containing `pid` from an unrelated paragraph, and the corrected README states the new proposition without the jargon on purpose, since it is user-facing prose. A check that turns it red pushes against the clean-prose convention one section above it. Proposition agreement is not mechanizable and is recorded as re-review's job — a design decision rather than a gap.
 
 Verification: every new behaviour mutation-verified. Folding stopped into gone turns the stopped case red; dropping the `stage_at` read turns the `stage_at` case red. That second regression exists because the first version of this change had none and the mutation passed — adding a reader without a check would have repeated the defect the change is about.
+
+---
+
+### v2.17.1 — the verification procedure had its own shared state (patch on v2.17.0)
+
+Nothing here changes what safedeps does to an install. It changes the machinery that checks it, which had three isolation defects of exactly the kind this tool exists to find.
+
+- **Sandbox names come from `mktemp` now.** Five sites keyed test sandboxes on `$$-$RANDOM`, and `$$` is constant within a run, so isolation rested on `RANDOM` alone — with `mkdir -p` succeeding on an existing directory, a collision was undetectable rather than merely unlikely. That undetectability is the reason for the change, not the collision odds, so it does not need re-arguing when call counts move. The count matters: cross-validation named two sites, the first sweep found four, and a fifth lived in another suite.
+- **The stopped-owner test no longer leaks suspended processes.** It suspends a process and resumes it, so a run dying in between left a permanently stopped orphan — measured, four of them, up to 65 minutes old, all holding the plan worktree as their cwd, which blocked `git worktree remove` during a finalize. Writing code to judge stopped processes leaked stopped processes. Three layers now: an EXIT trap for ordinary exits, a marker-scoped sweep for SIGKILL (which defeats traps, and which is this repo's core scenario rather than a hypothetical), and children spawned outside the worktree so a surviving orphan holds nothing anyone needs to delete.
+- **The intermittent `consumer-forms` failure has a committed hunting harness.** Three failures in fifty-two runs, three different assertions, all the same direction: a command that must stay quiet saw an `UNGATED` line. That becomes true either because the sandbox was contaminated or because the verdict is nondeterministic, and those need opposite fixes. The record names its command, so one preserved line settles it — but the suite's trap deleted the sandbox, so every failure so far was re-run blind. The harness keeps it, and carries a `--self-test` that turns a quiet case loud and requires the suite to go red first.
+
+The cause is still unknown, and the `mktemp` change may or may not have removed it. Twenty runs since have been clean, which is weak evidence at the observed rate.
+
+`AGENTS.md` gains a Verification hygiene section: mutate on a copy rather than in the plan worktree (a validator and an author both hold write access there, and a `git checkout --` restore discards the author's uncommitted work silently), and three rules for citing a zero. All three were measured the wrong way first — a zero from a harness with no control, a trial whose condition was inferred rather than measured, and a label that hardened as it passed between two people while nothing at its origin had been measured. The failure mode behind them: elaboration feels like verification.
 
 ## v3 (future)
 

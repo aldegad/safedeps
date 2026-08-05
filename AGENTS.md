@@ -50,6 +50,56 @@ See the `skill-hook-authoring` skill for the full payload/decision schema. Essen
 - A security change needs **both** a bypass harness (the threat must DENY/REORG) and a regression check (normal installs still pass; no false positives on `echo`/heredoc/`npm run`/`npx`).
 - **Cite counts a reader can reproduce from the repo.** "159 forms" measured in a scratch corpus is decoration — nobody can check it, and a number nobody can check reads as verification without being any. Quote the battery's own form count or `npm test`'s ok lines, or commit the corpus you counted.
 
+## Verification hygiene
+
+The verification procedure has its own shared state, and three defects came out
+of it in one round. All three had the same shape: two actors each behaving
+correctly, overlapping into a wrong result.
+
+- **Run mutations on a copy, never in the plan worktree.** The validator is
+  dispatched into that worktree and the author may still be working there, so
+  both hold write access to one tree. Worse, if a mutation is restored with
+  `git checkout -- <file>`, it discards *every* uncommitted change to that file,
+  including the author's, and the file returns to a HEAD state that looks
+  correct. Copy the tree (`git worktree add /tmp/mut-<id> HEAD`), mutate there,
+  and throw it away -- not restoring is the safest restore there is. "The
+  worktree belongs to the validator" is a discipline someone has to remember;
+  mutating a copy is a structure with nothing to remember.
+- **Sandbox names come from `mktemp`, not from `$$-$RANDOM`.** `$$` is constant
+  within a run, so isolation rests on `RANDOM` alone, and `mkdir -p` succeeds on
+  an existing directory -- a collision is undetectable rather than merely
+  unlikely. That undetectability is the reason, so it does not need re-arguing
+  when call counts change.
+- **A test that suspends a process reaps it three ways.** An EXIT trap covers
+  ordinary exits; a marker sweep at suite start covers SIGKILL, which defeats
+  traps and is this repo's core scenario rather than a hypothetical; and
+  spawning children with a cwd outside the worktree removes what the leak costs,
+  since an orphan holding the plan worktree blocks `git worktree remove` at
+  finalize. Scope any sweep with a marker only your own children carry.
+
+### Citing a zero
+
+A run that found nothing is a claim about a measurement, and three ways of
+making that claim are wrong. Each of these was measured the wrong way first in
+the round that produced this section.
+
+1. **A zero from a harness with no control is not evidence.** If the check
+   cannot fail, its silence says nothing. 27 clean runs were reported before the
+   control was tried, and the control turned out to be broken itself.
+2. **A trial whose condition was not measured is not an observation of that
+   condition.** "Quiet machine" was inferred from who else was working; `uptime`
+   showed load 19 during those runs. Record the condition per trial or the
+   batches can neither be compared nor combined.
+3. **Say whether a label came from measurement or from someone saying so.**
+   Hearsay carries no sense of not having measured, so it passes check 2. A
+   label that crossed between two people hardened at each hop while nothing at
+   the origin had ever been measured -- and then a statistical test was run on
+   top of it, which made it look verified rather than merely elaborated.
+
+The failure mode behind all three: **elaboration feels like verification.**
+Handling numbers produces the sensation of handling data, and the step that asks
+where the input came from gets skipped entirely.
+
 ## Workflow
 
 - Branch off `main`; do not commit to `main` directly.
