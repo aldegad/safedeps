@@ -64,6 +64,108 @@ installer_pre_timeout=$(grep -m1 '^const PRE_HOOK_TIMEOUT_SECONDS = ' scripts/in
   || fail "self-budget ceiling sits below the runtime budget (ceiling=${guard_budget_ceiling}s, runtime=${guard_runtime_budget}s)"
 pass "self-budget ceiling is pinned below the hook timeout the installer registers"
 
+# The manual-install docs and the installer describe the same registration, and
+# they are different files — which is exactly how they drifted: the docs told
+# readers to register the hook scripts directly for as long as the shim has
+# existed, while AGENTS.md said the registered command is the shim. Following
+# the docs still gated installs, but without the shim a broken checkout goes
+# back to being a silently disabled gate, and the reader had no way to know.
+# The comparison is machine-made now rather than left to whoever reads both.
+installer_entry=$(grep -m1 '^const ENTRY_HOOK_NAME = ' scripts/install/install-safedeps-hooks.mjs | sed 's/.*"\(.*\)".*/\1/')
+[[ -n "${installer_entry}" ]] || fail "installer entry-hook constant is readable"
+# The timeout is part of the registration, so it is pinned like the command.
+# Pinning only the command string is the same defect one layer in: the docs
+# would keep naming the right script at a number the installer stopped writing,
+# and nothing would say so. The guard already reads PRE_HOOK_TIMEOUT_SECONDS for
+# its own ceiling, so this is the same constant read a third time rather than a
+# new place for the truth to live.
+installer_pre_timeout=$(grep -m1 '^const PRE_HOOK_TIMEOUT_SECONDS = ' scripts/install/install-safedeps-hooks.mjs | tr -dc '0-9')
+installer_post_timeout=$(grep -m1 '^const POST_HOOK_TIMEOUT_SECONDS = ' scripts/install/install-safedeps-hooks.mjs | tr -dc '0-9')
+[[ -n "${installer_pre_timeout}" && -n "${installer_post_timeout}" ]] \
+  || fail "installer hook-timeout constants are readable"
+for doc in README.md README.ko.md; do
+  for target in pre post; do
+    grep -q "${installer_entry} ${target}" "${doc}" \
+      || fail "${doc} registers the entry shim with '${target}' (the command the installer writes)"
+    # The timeout belongs to the same hook entry, so read it from the line after
+    # the command rather than from anywhere in the file.
+    doc_timeout=$(grep -A1 "${installer_entry} ${target}" "${doc}" | grep -m1 '"timeout"' | tr -dc '0-9')
+    case "${target}" in
+      pre)  want="${installer_pre_timeout}" ;;
+      post) want="${installer_post_timeout}" ;;
+    esac
+    [[ "${doc_timeout}" == "${want}" ]] \
+      || fail "${doc} states the ${target}-hook timeout the installer writes (doc=${doc_timeout:-none}, installer=${want})"
+  done
+  # The hook scripts must not be named as a registered command anywhere in the
+  # manual block; naming them in prose or in a tree listing is fine.
+  if grep -qE '"command":[^"]*"[^"]*safedeps-(pre-guard|post-verify)\.sh"' "${doc}"; then
+    fail "${doc} does not register a hook script directly"
+  fi
+done
+# SKILL.md must not carry a second registration declaration. The shape checked
+# here is the legacy `- type: <event>` / `script:` block that was removed: no
+# documented schema reads it, so it declared an installation that never
+# happened. Claude's documented skill-frontmatter form (event-keyed, with
+# `matcher` and `command:`) is deliberately NOT matched — it is a real feature,
+# scoped to the skill's lifecycle and running only while the skill is active,
+# which is why it cannot carry this gate and why forbidding it by grep would
+# block something that works rather than remove something dead. If safedeps ever
+# wants that form, that is a decision about having two registration channels,
+# and AGENTS.md is where it gets made.
+if grep -qE '^\s*script:\s*scripts/safedeps-' SKILL.md; then
+  fail "SKILL.md leaves registration to the installer rather than declaring its own"
+fi
+pass "manual-install docs register the same command the installer writes"
+
+# The prose states the hook budget ONCE per language, and that once is pinned.
+# The JSON blocks above were pinned first, and the number went on living in six
+# sentences that no check read — the same drift one field over, which is how it
+# was found. Enumerating the phrasings would be the wrong fix: this repo has
+# been burned twice by enumerations that a new form walks past. So the number is
+# removed from the restatements instead, leaving one canonical sentence per
+# language, and the rule below is a proximity rule over our own corpus rather
+# than a list of ways to say it.
+budget_doc_en="ARCHITECTURE.md"
+budget_doc_ko="ARCHITECTURE.ko.md"
+grep -q "PRE_HOOK_TIMEOUT_SECONDS\`, ${installer_pre_timeout}s\|PRE_HOOK_TIMEOUT_SECONDS\` in \`scripts/install/install-safedeps-hooks.mjs\`, ${installer_pre_timeout}s" "${budget_doc_en}" \
+  || fail "${budget_doc_en} states the hook budget the installer registers (${installer_pre_timeout}s)"
+grep -q "PRE_HOOK_TIMEOUT_SECONDS\`, ${installer_pre_timeout}s" "${budget_doc_ko}" \
+  || fail "${budget_doc_ko} states the hook budget the installer registers (${installer_pre_timeout}s)"
+pass "the prose states the hook budget the installer registers"
+
+# Anywhere else, a sentence that puts THAT figure next to a budget word is
+# either a dated measurement (a fact about a day, which stays true when the
+# constant moves) or a restatement that will rot. Restatements say "the budget"
+# and let the canonical sentence carry the number. Only the installer's own
+# figure is matched, so the self-budget ceiling, the poll steps, and every other
+# measured duration are left alone — they are pinned by their own constants.
+#
+# What this pair does and does not cover. The canonical pin is what actually
+# closes the drift: it catches the constant moving, whatever the prose looks
+# like. This rule is a second-order backstop for a restatement coming back while
+# the constant is unchanged, and it leaks in ways worth naming rather than
+# leaving for a reader to discover — a check whose limits go unread is read as
+# coverage, which is the defect this whole line of work has been about:
+#   - the document list below is hardcoded, so a restatement in a new file walks past
+#   - it matches one written form (`<N>s`), so `30 second budget` walks past
+#   - it matches `<N>s` only mid-line, so a line starting with the figure walks past
+#   - it is line-based, so a sentence split across two lines walks past
+#   - the measurement exemption tests for the WORD `measured`, not for a date
+# Two structural axes are outside both checks and need the documented JSON
+# parsed against the installer's output to close, which is a separate decision:
+# a second registration block added for the same event, and a doc that swaps the
+# `pre` and `post` registrations.
+for doc in SKILL.md README.md README.ko.md AGENTS.md ARCHITECTURE.md ARCHITECTURE.ko.md; do
+  while IFS= read -r line; do
+    [[ -z "${line}" ]] && continue
+    grep -q 'PRE_HOOK_TIMEOUT_SECONDS' <<< "${line}" && continue
+    grep -qiE 'measured|실측' <<< "${line}" && continue
+    fail "${doc} restates the hook budget figure instead of naming the budget (${line:0:90})"
+  done < <(grep -E "(budget|timeout|예산|타임아웃)" "${doc}" | grep -E "[^0-9]${installer_pre_timeout}s([^a-zA-Z0-9]|$)" || true)
+done
+pass "no doc restates the hook budget figure outside the canonical sentence"
+
 # Regression: a global install must resolve its package dir through the symlink.
 # npm -g (and ~/.local/bin via --link-bin) put a RELATIVE FILE symlink in
 # <prefix>/bin and the package under <prefix>/lib/node_modules; without symlink

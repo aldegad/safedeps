@@ -56,7 +56,7 @@ The internal engine keeps the v1 `reorg-guard` assets.
 
 ### Release notes
 
-- The npm package version in `package.json` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION` tracks it and the smoke test reads `package.json` to compare (current: v2.15.3).
+- The npm package version in `package.json` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION` tracks it and the smoke test reads `package.json` to compare (current: v2.16.0).
 - `npm test` runs the release smoke suite; the full fixture E2E lives under `v2.1-tests`.
 - The daily re-check uses no LLM tokens. It is opt-in: a macOS `launchd` user agent runs `safedeps re-check --json` daily, installed atomically by `install-safedeps-recheck-agent.mjs`. It writes `~/.safedeps/recheck.log` and `~/.safedeps/recheck-alerts.jsonl` and raises a macOS notification on a new CVE/KEV/revoke/provider-skip/suspected-forgery. Network is used only for OSV / CISA / GHSA queries.
 
@@ -555,6 +555,73 @@ Cross-validation found it 90 lines from the clamp v2.15.2 added, which is the ho
 Verification: through the real hook path (the entry shim) with the marker exported, a 12KB padded `pip install` is denied `UNDECIDED` at 3s against a 2s budget. The deadline landing deep in the scan still overshoots its 11s budget by 1s, the same as before, and leaves no orphaned processes. `scripts/test/self-budget.sh` (32 ok) pins both the deadline surviving an exported marker and the announcement on both channels.
 
 With this landed, the "Known gap" note in the v2.15.2 release stands closed: the deadline has one off switch, it has a name, and it logs.
+
+---
+
+### v2.15.4 — the manual-install docs register what the installer registers (patch on v2.15.3)
+
+`SKILL.md`, `README.md` and `README.ko.md` told a reader doing a manual install to register `safedeps-pre-guard.sh` and `safedeps-post-verify.sh` as the hook commands. The installer registers `safedeps-hook-entry.sh pre|post`, and `AGENTS.md` says the shim is the registered command — the docs had been describing a different installation than the one the tool performs, for as long as the shim has existed. `README.md` even explains the shim two hundred lines above the block that tells you not to use it.
+
+Following the docs still gated installs, so nothing looked broken. What it dropped is the shim's whole job: turning a broken checkout — mid-merge, half-saved, crashed hook — from a silently disabled gate into an explained fail-closed deny. The reader had no way to know they were running without it.
+
+- **The manual JSON registers the shim**, with the same 30s timeout the installer writes, and says in one line why the registered command is the shim rather than the hook.
+- **`SKILL.md` no longer declares hooks in its frontmatter.** No runtime reads that block as a registration, so it was a second description of an installation with nothing keeping it true — which is how it drifted. Registration has one channel: the installer.
+- **The comparison is machine-made now.** `scripts/test/smoke.sh` reads the installer's own entry-hook constant and fails if either README stops naming it for `pre` and `post`, if either registers a hook script directly, or if `SKILL.md` grows its own declaration again.
+
+Verified by running the documented command as an engine would: the exact string from `README.md`, invoked on a payload, denies an unapproved `pip` install. The drift check was mutation-tested by restoring the old command, which turns it red.
+
+---
+
+### v2.15.5 — the drift check pins the value, not just the string (patch on v2.15.4)
+
+v2.15.4's drift check read the installer's entry-hook constant and failed if the docs stopped naming it. It did not read the timeout. So the docs could keep naming the right command at a number the installer had stopped writing — the same defect one field over from the one that release closed, which is how it was found: the release notes named it as a known limit rather than implying it was covered.
+
+- **The timeout is pinned like the command**, per event, read from the line beside the command rather than from anywhere in the file. The guard already reads `PRE_HOOK_TIMEOUT_SECONDS` for its own ceiling, so this is the same constant read a third time rather than a new place for the truth to live.
+- **`SKILL.md` keeps no hook declaration, and that is now written down as a decision.** Claude does document skill-frontmatter hooks, and their schema is event-keyed with `matcher` and `command:` — but they are scoped to the skill's lifecycle and run only while the skill is active, and this gate has to judge every Bash call whether or not the skill was invoked. The documented form cannot carry it. The drift check therefore fails only on the legacy `script:` shape that no schema reads; it deliberately does not forbid the documented shape, because blocking a working feature by grep is not the same as removing a dead one. `AGENTS.md` carries the judgment.
+
+Verification by mutation, three ways: moving the installer constant alone turns the existing guard pin red; moving a doc timeout alone turns the new check red; moving the installer constant **and** the guard constant together — the shape a legitimate budget change takes — leaves the docs behind and is caught by the new check, which is the case the old one missed.
+
+---
+
+### v2.15.6 — the prose names the hook budget once, and that once is pinned (patch on v2.15.5)
+
+v2.15.5 pinned the timeout inside the two registration JSON blocks. The number went on living in six sentences that no check read — `SKILL.md`, both READMEs, both ARCHITECTUREs, `AGENTS.md` — so moving the constant would have left the docs stating a figure the installer no longer writes. The same drift one field over, again, and named as a known limit in the v2.15.5 notes rather than implied covered, which is why it is closed here.
+
+- **One canonical sentence per language states the number**, in the ARCHITECTURE paragraph that already explains where it comes from, and smoke pins that sentence to `PRE_HOOK_TIMEOUT_SECONDS`. Everywhere else the prose names the budget instead of spelling it.
+- **Dated measurements keep their figures.** "Killed at their registered timeout (30s when measured, 2026-08-04)" is a fact about a day; it stays true when the constant moves, and it is written so it does not read as the current setting.
+- **The rule is proximity, not a list of phrasings.** A sentence putting the installer's own figure next to a budget word must be the canonical one or a dated measurement. Enumerating the ways to phrase a restatement is the shape this repo has been burned by twice; removing the number from the restatements is what actually closes it.
+
+Stated plainly, because a check whose limits are unread gets mistaken for coverage: the canonical pin is what closes this, and it works whatever the prose looks like. The proximity rule is a backstop, and a leaky one — its document list is hardcoded, it matches one written form of the figure and only mid-line, it is line-based, and its measurement exemption tests for the word rather than for a date. Two further axes are outside both checks and need the documented JSON parsed against the installer's output: a second registration block for the same event, and a doc that swaps the `pre` and `post` registrations. All of it is written beside the check, where someone deciding whether to trust it will be looking.
+
+Mutation-verified in an isolated clone: moving both installer constants, the guard constant, and both JSON blocks to 45 while leaving the canonical sentence at 30 turns it red; restoring a numeral to `SKILL.md` turns the proximity rule red.
+
+---
+
+### v2.15.7 — the record cannot be moved out from under the check (patch on v2.15.6)
+
+Three releases closed knobs that could switch the deadline off. The enumeration behind them listed a different family and left it recorded rather than fixed: knobs that replace canonical truth instead of tuning it. The worst of them is `SAFEDEPS_ADVISORY_LOG`, because `advisory.log` is not only where every bypass is written — `re-check` reads it as the oracle for whether a ledger approval ever happened.
+
+Measured: a forged ledger entry that `re-check` flags as `suspected_forgery` on the default path stops being flagged when `SAFEDEPS_ADVISORY_LOG` points at a caller-written file saying the approval happened. The same environment that writes the forgery hands the check its evidence. Nothing in the repo, the docs, the tests, or the installer ever set that variable — it was an unused knob holding open the one file the forgery check depends on.
+
+- **The path is derived from `SAFEDEPS_HOME`.** Record and ledger move together or not at all, which is what keeps the check and the thing it checks in one trust domain. A set-but-ignored variable is reported on stderr and written to the canonical log, because a signal that used to do something and now does nothing must not go quietly inert.
+- **The channel is single by construction now.** The hooks always wrote `$SAFEDEPS_HOME/advisory.log` while the CLI and providers honored the variable, so the observation channel could split in two depending on which half of the tool spoke.
+- **Moved advisory sources are announced, not refused.** Provider URLs, the closure fixtures, and a non-default ledger TTL are real needs — a mirror on a network that blocks osv.dev, a fixture in this very suite. Each deviation is named once per run in `advisory.log`, at startup rather than on the first provider call, so a command that reaches no provider is still recorded. What is not allowed is a run judged against a moved truth looking exactly like a run judged against OSV.
+
+Verification: the e2e forgery battery gains the relocation case and the moved-source record, and both were mutation-tested in an isolated clone by restoring the environment override — the forgery case turns red.
+
+---
+
+### v2.15.8 — the notice exists on the hook path too (patch on v2.15.7)
+
+v2.15.7 said a run judged against a moved advisory source announces itself. That was true of the CLI. The PreToolUse guard does not source the provider stack, so it had nowhere to say it — a guard run under a moved source wrote nothing. It was harmless only because the guard does not currently reach a provider or a fixture, which is a reason that disappears the day the code changes. A channel that exists only where the claim is already true is not a channel.
+
+- **The notice moved to `lib/truth-sources.sh`**, which the guard sources unconditionally, resolving the path from its own location with plain expansion — no environment variable, and no subshell on a path that runs for every Bash call. Making the source conditional would mean restating the knob list at the call site in order to decide whether to read the knob list, and a second copy is how the first goes stale. Cross-validation rejected the first attempt for exactly the reason the release before it exists: the path came from an environment variable and an unreadable file returned quietly, so pointing it at `/dev/null` left a run under a moved source recording nothing — an unnamed off switch, rebuilt beside the invariant that forbids them. An unreadable library is now an announced unavailability on both channels. One consequence is worth knowing before editing that file: it is sourced on every Bash call, so a parse error in it takes the guard down and the entry shim turns that into a fail-closed deny machine-wide. That is the direction this repo prefers over silence, but it is a wider blast radius than a seventy-line file suggests.
+- **Defaults and the comparison live in that one file.** They were duplicated: the URL a run is compared against was written separately from the URL it was assigned, which is the shape a whole release went to fixing one field over.
+- **Two more knobs are named.** `SAFEDEPS_NPM_OVERRIDES_JSON` replaces the overrides the closure verdict folds in — the e2e suite says so in its own assertion name — and `SAFEDEPS_RECHECK_FIXTURE_JSON` replaces the re-check output the daily alert reads. Both were outside the v2.15.7 enumeration, which is why that list is now written as a growing one rather than a complete one.
+
+Verification: a guard run under a moved source records it and names the overrides knob; the unmoved control is built by unsetting the suite's own fixtures, so it asserts the notice tracks the environment rather than always firing.
+
+---
 
 ### v2.16.0 — the effect gate finishes for ordinary projects, and an unfinished rollback is loud
 

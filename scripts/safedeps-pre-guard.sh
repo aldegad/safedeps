@@ -64,6 +64,42 @@ log_advisory() {
   printf '%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" >> "${GUARD_DIR}/advisory.log" 2>/dev/null || true
 }
 
+# A moved advisory source is recorded from this hook too, not only from the CLI.
+# The notice used to live in the provider stack, which this hook does not source
+# — so a guard run under a moved source said nothing, and the only reason that
+# was harmless is that the guard does not currently reach a provider or a
+# fixture. "It does not take that path yet" is a reason that disappears when the
+# code changes, and a channel that exists only where the claim is already true is
+# not a channel.
+#
+# The list and the defaults live in lib/truth-sources.sh, resolved from this
+# script's own location with plain expansion — no environment variable, and no
+# subshell on a path that runs for every Bash call. The first version of this
+# took the path from SAFEDEPS_TRUTH_SOURCES_LIB and returned quietly when the
+# file could not be read, which is an unnamed off switch for the notice:
+# pointing it at /dev/null left a run under a moved source recording nothing,
+# silently. That is the defect the release before this one closed for the
+# parent/child marker, rebuilt beside the invariant that forbids it.
+#
+# If the file cannot be read the notice is unavailable, and an unavailability is
+# said out loud like every other one — the install gate itself is unaffected, so
+# this reports rather than blocks.
+safedeps_guard_announce_truth_sources() {
+  local lib="${BASH_SOURCE[0]%/*}/../lib/truth-sources.sh"
+  if [[ ! -r "${lib}" ]]; then
+    log_advisory "pre-guard: lib/truth-sources.sh is unreadable — cannot tell whether the advisory sources were moved for this run."
+    printf 'safedeps: lib/truth-sources.sh is unreadable, so this run cannot report whether its advisory sources were moved. The install gate is unaffected; the record is incomplete.\n' >&2
+    return 0
+  fi
+  # shellcheck source=../lib/truth-sources.sh
+  source "${lib}"
+  safedeps_truth_sources_possibly_moved || return 0
+  local moved
+  moved="$(safedeps_truth_sources_moved_list)"
+  [[ -n "${moved}" ]] || return 0
+  log_advisory "pre-guard: advisory truth source moved: ${moved} — this run did not judge against the canonical sources."
+}
+
 if ! command -v jq >/dev/null 2>&1; then
   # jq is required to parse the hook payload. Without it we cannot read the exact
   # command, so do a best-effort fail-closed: read the raw payload and, if it
@@ -488,6 +524,13 @@ COMMAND=$(echo "${INPUT}" | jq -r '.tool_input.command // empty' 2>/dev/null)
 # Only intercept Bash tool calls
 if [[ "${TOOL_NAME}" != "Bash" ]] || [[ -z "${COMMAND}" ]]; then
   exit 0
+fi
+
+# Said before any judging, and only by the parent, so the record carries one line
+# per hook invocation rather than one per process — the budget child re-enters
+# this script and would otherwise say it twice.
+if [[ "${SAFEDEPS_BUDGET_ROLE}" == "parent" ]]; then
+  safedeps_guard_announce_truth_sources
 fi
 
 # --- Self budget: never let the runtime kill us mid-judgment ----------------

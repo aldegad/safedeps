@@ -6,13 +6,31 @@ set -euo pipefail
 
 SAFEDEPS_HOME="${SAFEDEPS_HOME:-${HOME}/.safedeps}"
 SAFEDEPS_CACHE_DIR="${SAFEDEPS_CACHE_DIR:-${SAFEDEPS_HOME}/cache}"
-SAFEDEPS_ADVISORY_LOG="${SAFEDEPS_ADVISORY_LOG:-${SAFEDEPS_HOME}/advisory.log}"
+# The advisory log is DERIVED from the state root, never taken from the
+# environment. It is not a log in the ordinary sense: it is where every bypass
+# and unavailability is recorded, and `re-check` reads it as the oracle for
+# whether a ledger approval ever happened. Letting the environment move it moved
+# that oracle too — measured, a forged ledger entry that `re-check` flags as
+# `suspected_forgery` on the default path stops being flagged when
+# SAFEDEPS_ADVISORY_LOG points at a file the caller wrote. The check and the
+# thing it checks have to live in one trust domain, and SAFEDEPS_HOME is what
+# moves them together.
+# A caller that already captured the environment value (bin/safedeps does, before
+# it sources this file) keeps it, so the notice quotes what the user set rather
+# than the path we derived over it.
+SAFEDEPS_ADVISORY_LOG_ENV_IGNORED="${SAFEDEPS_ADVISORY_LOG_ENV_IGNORED:-${SAFEDEPS_ADVISORY_LOG:-}}"
+SAFEDEPS_ADVISORY_LOG="${SAFEDEPS_HOME}/advisory.log"
 SAFEDEPS_PROVIDER_CACHE_TTL_SECONDS="${SAFEDEPS_PROVIDER_CACHE_TTL_SECONDS:-86400}"
 
-SAFEDEPS_OSV_API_URL="${SAFEDEPS_OSV_API_URL:-https://api.osv.dev/v1/query}"
-SAFEDEPS_OSV_BATCH_API_URL="${SAFEDEPS_OSV_BATCH_API_URL:-https://api.osv.dev/v1/querybatch}"
-SAFEDEPS_KEV_CATALOG_URL="${SAFEDEPS_KEV_CATALOG_URL:-https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json}"
-SAFEDEPS_GHSA_API_URL="${SAFEDEPS_GHSA_API_URL:-https://api.github.com/advisories}"
+# Defaults and the moved-source notice live in one file, so the value a run is
+# compared against is the value it was assigned.
+# shellcheck source=../truth-sources.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/truth-sources.sh"
+
+SAFEDEPS_OSV_API_URL="${SAFEDEPS_OSV_API_URL:-${SAFEDEPS_DEFAULT_OSV_API_URL}}"
+SAFEDEPS_OSV_BATCH_API_URL="${SAFEDEPS_OSV_BATCH_API_URL:-${SAFEDEPS_DEFAULT_OSV_BATCH_API_URL}}"
+SAFEDEPS_KEV_CATALOG_URL="${SAFEDEPS_KEV_CATALOG_URL:-${SAFEDEPS_DEFAULT_KEV_CATALOG_URL}}"
+SAFEDEPS_GHSA_API_URL="${SAFEDEPS_GHSA_API_URL:-${SAFEDEPS_DEFAULT_GHSA_API_URL}}"
 
 safedeps_providers_init() {
   umask 077
@@ -23,11 +41,33 @@ safedeps_providers_init() {
     "$(dirname "${SAFEDEPS_ADVISORY_LOG}")"
 }
 
+# Say once per process when the run is judging against something other than the
+# canonical sources. The list and the defaults live in lib/truth-sources.sh so
+# the guard can say the same thing without sourcing the provider stack.
+SAFEDEPS_TRUTH_SOURCE_ANNOUNCED=""
+safedeps_announce_truth_sources() {
+  [[ -n "${SAFEDEPS_TRUTH_SOURCE_ANNOUNCED}" ]] && return 0
+  SAFEDEPS_TRUTH_SOURCE_ANNOUNCED=1
+  local moved
+  moved="$(safedeps_truth_sources_moved_list)"
+  if [[ -n "${moved}" ]]; then
+    safedeps_providers_init
+    printf '[%s] WARN advisory truth source moved: %s — this run did not answer from the canonical sources.\n' \
+      "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" "${moved}" >> "${SAFEDEPS_ADVISORY_LOG}"
+  fi
+  if [[ -n "${SAFEDEPS_ADVISORY_LOG_ENV_IGNORED}" ]]; then
+    safedeps_providers_init
+    printf '[%s] WARN SAFEDEPS_ADVISORY_LOG=%s ignored — the record and the ledger it vouches for stay in one place (move SAFEDEPS_HOME instead).\n' \
+      "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" "${SAFEDEPS_ADVISORY_LOG_ENV_IGNORED}" >> "${SAFEDEPS_ADVISORY_LOG}"
+  fi
+}
+
 safedeps_provider_log() {
   local level="$1"
   local message="$2"
 
   safedeps_providers_init
+  safedeps_announce_truth_sources
   printf '[%s] %s %s\n' "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" "${level}" "${message}" >> "${SAFEDEPS_ADVISORY_LOG}"
 }
 

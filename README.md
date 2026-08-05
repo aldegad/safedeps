@@ -57,7 +57,7 @@ The secret-leak side of the release-time lane is **per-repo and opt-in**. `safed
 
 The registered command for both hook events is a small entry shim (`safedeps-hook-entry.sh`). The hooks run live from the repo checkout through a symlink, so a checkout that is temporarily broken (a merge in progress, a half-saved edit) used to either block every Bash call with a bare syntax error or silently disable the gate, depending on the exit code. The shim turns both into an explained fail-closed deny: it names what broke, whether a merge is in progress, and how to recover. Details: [ARCHITECTURE — Phase 0](./ARCHITECTURE.md).
 
-**Running out of time is an answer, not a gap.** The agent runtime gives each hook a fixed budget (30s) and kills it when that expires — and the tool call then proceeds, so a gate that runs long simply disappears. Since the command scan gets more expensive with command length, padding a command was enough to cross that line. The pre-install guard now keeps a smaller budget of its own and, if it cannot finish judging in time, blocks and says so: the message leads with `UNDECIDED, not unsafe` so nobody reads a timeout as a finding. Commands short enough to be nowhere near the budget are unaffected.
+**Running out of time is an answer, not a gap.** The agent runtime gives each hook a fixed budget and kills it when that expires — and the tool call then proceeds, so a gate that runs long simply disappears. Since the command scan gets more expensive with command length, padding a command was enough to cross that line. The pre-install guard now keeps a smaller budget of its own and, if it cannot finish judging in time, blocks and says so: the message leads with `UNDECIDED, not unsafe` so nobody reads a timeout as a finding. Commands short enough to be nowhere near the budget are unaffected.
 
 The pre-install command hook (PreToolUse) is a fast advisory nudge — it blocks obvious unapproved installs and risky command forms so the agent gets immediate feedback. But for npm the real authority is the post-install effect gate: it judges what was *actually installed*, not what the command looked like, so a wrapped or obfuscated install command can't slip a package past it.
 
@@ -278,6 +278,8 @@ The installer is idempotent. It symlinks the skill into `~/.claude/skills/safede
 
 **3. Manual hook registration, if needed:**
 
+The registered command is the entry shim with `pre` or `post`, not the hook script itself — that is what the installer writes, and it is what turns a broken checkout into an explained fail-closed deny instead of a silently disabled gate. Registering the hook scripts directly still gates installs, but without that protection.
+
 Edit `.claude/settings.json` (project-level) or `~/.claude/settings.json` (global):
 
 ```json
@@ -289,7 +291,8 @@ Edit `.claude/settings.json` (project-level) or `~/.claude/settings.json` (globa
         "hooks": [
           {
             "type": "command",
-            "command": "~/.claude/skills/safedeps/scripts/safedeps-pre-guard.sh"
+            "command": "~/.claude/skills/safedeps/scripts/safedeps-hook-entry.sh pre",
+            "timeout": 30
           }
         ]
       }
@@ -300,7 +303,8 @@ Edit `.claude/settings.json` (project-level) or `~/.claude/settings.json` (globa
         "hooks": [
           {
             "type": "command",
-            "command": "~/.claude/skills/safedeps/scripts/safedeps-post-verify.sh"
+            "command": "~/.claude/skills/safedeps/scripts/safedeps-hook-entry.sh post",
+            "timeout": 30
           }
         ]
       }
@@ -312,6 +316,7 @@ Edit `.claude/settings.json` (project-level) or `~/.claude/settings.json` (globa
 **4. Verify permissions:**
 
 ```bash
+chmod +x ~/.claude/skills/safedeps/scripts/safedeps-hook-entry.sh
 chmod +x ~/.claude/skills/safedeps/scripts/safedeps-pre-guard.sh
 chmod +x ~/.claude/skills/safedeps/scripts/safedeps-post-verify.sh
 ```

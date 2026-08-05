@@ -581,6 +581,100 @@ forgery_json=$(./bin/safedeps --json re-check)
 [[ "$(jq -r '.suspected_forgery[0].package' <<< "${forgery_json}")" == "fixture-forged" ]] || fail "re-check flags expected forged package"
 pass "re-check flags ledger approval provenance mismatch"
 
+# The forgery check reads advisory.log as its oracle, so whoever can move that
+# file can hand the check its own evidence. Measured before this was closed: the
+# same forged entry stopped being flagged when SAFEDEPS_ADVISORY_LOG pointed at
+# a caller-written file saying the approval happened. The log location is
+# derived from SAFEDEPS_HOME now — the record and the ledger it vouches for move
+# together or not at all — and the ignored variable says so on both channels.
+moved_log="${tmp_root}/attacker-authored.log"
+printf '[2026-01-01T00:00:00Z] check approve(patched closure) ecosystem=npm package=fixture-forged version=1.0.0 hash=deadbeef\n' > "${moved_log}"
+moved_err="${tmp_root}/moved-log.err"
+moved_json=$(SAFEDEPS_ADVISORY_LOG="${moved_log}" ./bin/safedeps --json re-check 2>"${moved_err}")
+[[ "$(jq -r '.suspected_forgery | length' <<< "${moved_json}")" == "1" ]] \
+  || fail "a relocated advisory log cannot supply provenance for a forged ledger entry"
+grep -q 'SAFEDEPS_ADVISORY_LOG' "${moved_err}" \
+  || fail "the ignored advisory-log variable is reported on stderr"
+grep -q 'SAFEDEPS_ADVISORY_LOG' "${SAFEDEPS_HOME}/advisory.log" \
+  || fail "the ignored advisory-log variable is recorded in the canonical log"
+pass "the forgery oracle cannot be relocated by the environment it polices"
+
+# A run that answers from a moved advisory source must not read like a run that
+# answered from OSV. These knobs are legitimate — this very suite is using them —
+# so they are recorded rather than refused.
+grep -q 'advisory truth source moved' "${SAFEDEPS_HOME}/advisory.log" \
+  || fail "a moved advisory truth source is recorded in advisory.log"
+grep -q 'osv=' "${SAFEDEPS_HOME}/advisory.log" \
+  || fail "the moved-truth record names which source moved"
+pass "a run judged against a moved advisory source says so in the record"
+
+# The notice has to exist on the hook path too, not only in the CLI. It used to
+# live in the provider stack, which the PreToolUse guard does not source, so a
+# guard run under a moved source said nothing — harmless only because the guard
+# does not currently reach a provider or a fixture, which is a reason that
+# disappears when the code changes.
+guard_moved_home="${tmp_root}/safe-guard-moved"
+mkdir -p "${guard_moved_home}" "${tmp_root}/guard-moved-project"
+printf '{"dependencies":{}}\n' > "${tmp_root}/guard-moved-project/package.json"
+guard_moved_payload=$(jq -nc --arg cwd "${tmp_root}/guard-moved-project" \
+  '{tool_name:"Bash",tool_input:{command:"ls -la"},cwd:$cwd}')
+SAFEDEPS_HOME="${guard_moved_home}" SAFEDEPS_OSV_API_URL="http://mirror.invalid/osv" \
+  SAFEDEPS_NPM_OVERRIDES_JSON='{"minimist":"1.2.8"}' \
+  scripts/safedeps-pre-guard.sh <<< "${guard_moved_payload}" >/dev/null 2>&1 || true
+grep -q 'advisory truth source moved' "${guard_moved_home}/advisory.log" \
+  || fail "the guard records a moved advisory source on its own path"
+grep -q 'npm-overrides=set' "${guard_moved_home}/advisory.log" \
+  || fail "the guard names the overrides knob, which the closure verdict reads"
+pass "the guard has its own channel for a moved advisory source"
+
+# And the common case stays silent, on the hook that runs for every Bash call.
+guard_clean_home="${tmp_root}/safe-guard-clean"
+mkdir -p "${guard_clean_home}"
+# The suite itself runs under moved sources, so the unmoved case has to be
+# built by removing them — which is also the honest control: this asserts the
+# notice tracks the environment rather than always firing.
+env -u SAFEDEPS_OSV_API_URL -u SAFEDEPS_OSV_BATCH_API_URL -u SAFEDEPS_KEV_CATALOG_URL \
+  -u SAFEDEPS_GHSA_API_URL -u SAFEDEPS_NPM_CLOSURE_FIXTURE_JSON -u SAFEDEPS_YARN_INFO_FIXTURE_NDJSON \
+  -u SAFEDEPS_NPM_OVERRIDES_JSON -u SAFEDEPS_RECHECK_FIXTURE_JSON -u SAFEDEPS_LEDGER_DEFAULT_TTL_DAYS \
+  -u SAFEDEPS_ADVISORY_LOG \
+  env SAFEDEPS_HOME="${guard_clean_home}" scripts/safedeps-pre-guard.sh <<< "${guard_moved_payload}" >/dev/null 2>&1 || true
+if [[ -f "${guard_clean_home}/advisory.log" ]] && grep -q 'truth source moved' "${guard_clean_home}/advisory.log"; then
+  fail "an unmoved run leaves no moved-source line"
+fi
+pass "an unmoved run says nothing on the hook path"
+
+# The first version of the guard's notice took its library path from an
+# environment variable and returned quietly when the file could not be read —
+# an unnamed off switch for the notice, built beside the invariant that forbids
+# unnamed off switches. The path comes from the script's own location now, so
+# nothing in the environment can silence it.
+guard_override_home="${tmp_root}/safe-guard-override"
+mkdir -p "${guard_override_home}"
+SAFEDEPS_HOME="${guard_override_home}" SAFEDEPS_OSV_API_URL="http://mirror.invalid/osv" \
+  SAFEDEPS_TRUTH_SOURCES_LIB=/dev/null \
+  scripts/safedeps-pre-guard.sh <<< "${guard_moved_payload}" >/dev/null 2>&1 || true
+grep -q 'advisory truth source moved' "${guard_override_home}/advisory.log" \
+  || fail "no environment variable can silence the moved-source notice"
+pass "the moved-source notice cannot be switched off from the environment"
+
+# And when the library genuinely cannot be read, that is an unavailability, said
+# out loud like every other one rather than swallowed by a quiet return.
+guard_nolib_repo="${tmp_root}/guard-nolib-repo"
+mkdir -p "${guard_nolib_repo}/scripts" "${guard_nolib_repo}/lib"
+cp -R lib/. "${guard_nolib_repo}/lib/"
+cp scripts/safedeps-pre-guard.sh "${guard_nolib_repo}/scripts/"
+rm -f "${guard_nolib_repo}/lib/truth-sources.sh"
+guard_nolib_home="${tmp_root}/safe-guard-nolib"
+guard_nolib_err="${tmp_root}/guard-nolib.err"
+mkdir -p "${guard_nolib_home}"
+SAFEDEPS_HOME="${guard_nolib_home}" SAFEDEPS_OSV_API_URL="http://mirror.invalid/osv" \
+  "${guard_nolib_repo}/scripts/safedeps-pre-guard.sh" <<< "${guard_moved_payload}" >/dev/null 2>"${guard_nolib_err}" || true
+grep -q 'truth-sources.sh is unreadable' "${guard_nolib_home}/advisory.log" \
+  || fail "an unreadable truth-source library is recorded as an unavailability"
+grep -q 'truth-sources.sh is unreadable' "${guard_nolib_err}" \
+  || fail "an unreadable truth-source library is reported on stderr"
+pass "an unreadable truth-source library is an announced unavailability, not a quiet skip"
+
 # A forged ledger entry must be flagged even when advisory.log does not exist at
 # all — file absence is missing provenance, not proof of approval. (Previously
 # the [[ -f advisory.log ]] precondition silently skipped the check.)

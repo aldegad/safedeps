@@ -1,29 +1,164 @@
-항목은 잡혀 폐기됩니다. 원장을 OSV를 SSoT로 하는 메모이제이션으로 축소합니다. *(여전히 열림 — 설치당 네트워크 비용 트레이드오프.)*
+# Safedeps 로드맵
 
-2. **설치 후 스캔에서 `~/.safedeps/` 감시** — 출시됨: post-verify 민감 경로 스캔이 `~/.safedeps` / `SAFEDEPS_HOME`을 건드리는 설치 스크립트를 플래그하므로, 원장을 쓰는 패키지는 reorg를 트리거합니다 — 위조를 현행범으로 잡습니다(스모크: ledger-tamper 픽스처).
-3. **일일 재점검의 출처 크로스 체크** — 출시됨: `re-check`는 매칭되는 `advisory.log` 기록이 없는 원장 항목을 `suspected_forgery`(폐기 아님)로 플래그하며, v2.9.2부터 일일 알림 래퍼가 그 플래그를 표면화합니다.
-
-명시적 비접근 방식: **암호화 원장 서명은 추구하지 않습니다** — 같은 uid의 공격자는 서명 키를 읽고 위조를 다시 서명할 수 있으므로 로컬 HMAC/서명은 실제 경계를 추가하지 않습니다. 방어는 로컬 비밀이 아니라 다른 곳의 권위(OSV) + 감지입니다.
-
-### 기타 v3 작업
-
-- **플러그인 providers** — 사용자 정의 advisory 소스(내부 취약점 DB, 사설 레지스트리).
-- **정책 파일** — 팀 정책용 `.safedeps.toml`(KEV 히트 시 자동 차단, CVSS 7+에서 사용자 확인, 패키지별 허용 목록).
-- **CI 모드** — GitHub Actions / CircleCI에서 빠른 실패를 위한 `safedeps check --ci`.
-- **npm 너머 클로저 확장** — 명시적 no-script/no-build 정책이 있는 pip / cargo / go / gem / maven / nuget 클로저 해석기.
-- **전이 위험 점수** — deps.dev 그래프 통합; 직접 의존성 너머의 위험 시각화.
-
-## v4+ (장기)
-
-- **팀 공유 원장** — 멀티 머신 승인 스펙 동기화.
-- **에이전트 치료** — 취약점이 발견되면 Claude / Codex가 더 안전한 대체재를 제안(LLM-as-judge).
-- **diff 시각화** — 두 승인 스펙 스냅샷 사이의 의존성 트리 diff.
+> 시간축과 우선순위. **왜·어떻게** 는 [`ARCHITECTURE.md`](./ARCHITECTURE.md), **언제·뭐 먼저** 는 이 파일. *(English → [ROADMAP.md](./ROADMAP.md), SSoT)*
 
 ---
 
-## 이력
+## 스코프
 
-- 2026-05-18: 초기 ROADMAP — v1 → v2 결정 + v3 / v4 개요.
+Safedeps 는 **개발 의존성 install** (npm / pip / cargo / go / gem / maven / nuget) 을 게이트한다. release 시점에는 repo 트리 secret scan, dependency audit, git hook install/check 도 실행한다 (옛 `security-release-gates` 에서 흡수한 lane).
+
+스코프 밖: OS / 시스템 패키지, 컨테이너 이미지, 런타임 sandbox, registry 무결성, 평판 분석. 이들은 다른 보안 layer 라서 다른 도구에 둔다 — 경계는 [`ARCHITECTURE.md`](./ARCHITECTURE.md) §1 참고.
+
+---
+
+## v1 — `npm-reorg-guard` (출시 완료)
+
+- npm 전용, self-contained, 외부 advisory DB 없음.
+- PreToolUse hook: typosquat / `curl | bash` / 비표준 registry 패턴 차단.
+- PostToolUse hook: lockfile diff + install script 분석 → 의심 시 reorg (rollback).
+
+한계: npm 만, CVE 조회 없음 (패턴 매칭), 작정한 공격자는 회피 가능. GitHub repo 는 이후 `aldegad/safedeps` 로 rename 됨.
+
+---
+
+## v2 — `safedeps` (출시 완료, v2.1.x)
+
+내부 engine 은 v1 `reorg-guard` 자산을 그대로 보존한다.
+
+### 핵심 변화
+
+- **멀티 ecosystem**: npm / yarn / pnpm / pip (poetry, uv, pipenv) / cargo / go / gem / maven / nuget.
+- **외부 advisory DB**: OSV.dev (canonical) + CISA KEV (hard-risk overlay) + GitHub Advisory (enrichment).
+- **3-phase 방어**:
+  1. Advisory gate (`safedeps check`) — install 명령을 쓰기 전에 advisory DB 조회 → 안전한 spec 결정 → `~/.safedeps/approved-specs/` ledger 기록.
+  2. Hook enforcement (`safedeps-pre-guard.sh`) — install 이 ledger 와 일치하는지 검증.
+  3. Post-install reorg (`safedeps-post-verify.sh`) — v1 engine, 어긋나면 rollback.
+- **Approved spec TTL** (30일) + **daily re-check** (새 CVE 발견 시 revoke + 알람).
+- **No silent fallback**: provider 실패는 fail-closed, override 는 명시적이고 observable.
+
+### 마일스톤 (전부 출시 완료)
+
+| 마일스톤 | 산출물 |
+|---|---|
+| `v2.0-doc` | `ARCHITECTURE.md` v2 작성·push. |
+| `v2.1-rename` | repo / skill id / path 를 `safedeps` 로 rename; `safedeps migrate` 가 legacy `~/.npm-reorg-guard` state 를 `~/.safedeps` 로 이전 + legacy hook 정리. |
+| `v2.1-providers` | `lib/providers/` — OSV / KEV / GHSA adapter 를 단일 query interface 뒤에, 24h 응답 cache. |
+| `v2.1-ledger` | `lib/ledger/` — approved spec JSON I/O (atomic write, hash, TTL 검사). |
+| `v2.1-cli` | `bin/safedeps` — `check`, `ledger`, `revoke`, `re-check`, `migrate`, `version` 서브커맨드. |
+| `v2.1-guard-patch` | `safedeps-pre-guard.sh` — v1 패턴 차단 위에 ledger enforcement 추가. |
+| `v2.1-verify-patch` | `safedeps-post-verify.sh` — v1 reorg 위에 approved spec 과 lockfile diff 비교 추가. |
+| `v2.1-multi-ecosystem` | pip / cargo / go / gem / maven / nuget 명령 파싱 + lockfile snapshot, 두 hook 이 rollback truth 로 공유. |
+| `v2.1-hook-rename` | hook 파일 namespacing + cross-engine installer (`install-safedeps-hooks.mjs`, idempotent, `--uninstall`). |
+| `v2.1-recheck-cron` | daily re-check LaunchAgent — 전체 approved spec 재조회, 새 CVE/KEV/provider-skip 시 revoke + 알림. |
+| `v2.1-tests` | end-to-end 테스트 — fixture provider 응답으로 ledger / hook / re-check / migration 검증. |
+| `v2.1-release` | npm publish (`@aldegad/safedeps`) + GitHub release. |
+
+### 릴리즈 메모
+
+- npm 패키지 version 은 `package.json` 이 SSoT. `bin/safedeps` `SAFEDEPS_VERSION` 이 이를 따라가고, smoke 테스트는 `package.json` 을 읽어 대조한다 (현재 v2.16.0).
+- `npm test` 는 release smoke suite 를 실행한다. full fixture E2E 는 `v2.1-tests` 에 있다.
+- daily re-check 는 LLM 토큰을 쓰지 않는다. opt-in 이며, macOS `launchd` user agent 가 매일 `safedeps re-check --json` 을 실행한다 (`install-safedeps-recheck-agent.mjs` 로 atomic install). `~/.safedeps/recheck.log` 와 `~/.safedeps/recheck-alerts.jsonl` 를 쓰고, 새 CVE/KEV/revoke/provider-skip/위조-의심 시 macOS notification 을 띄운다. 네트워크는 OSV / CISA / GHSA query 에만 쓴다.
+
+## v2.2 — effect 기반 enforcement (npm)
+
+상태: v2.2.0 으로 출시 (npm 우선).
+
+### 핵심 변화
+
+- **권위를 effect 로 이동**: PostToolUse 가 실제 `package-lock.json` closure 를 읽고, 설치된 모든 `pkg@version` 이 승인된 direct spec 또는 그 `transitive_specs` 안에 있는지 대조한다.
+- **npm full closure 승인**: `safedeps check npm <pkg>@<version>` 이 temp dir 에서 `npm install --package-lock-only --ignore-scripts` 로 script 실행 없는 lockfile 을 만들고 full closure 를 추출한 뒤 OSV `/v1/querybatch` 로 묶어 조회한다.
+- **batch + cache**: OSV batch 응답은 기존 single-package provider 와 같은 pkg@version 24h cache 에 다시 저장한다.
+- **transitive blind trust 제거**: direct package 가 clean 이어도 transitive 가 미승인 또는 취약이면 승인하지 않는다. 전체 closure 가 clean 이고 ledger 에 기록돼야 한다.
+- **PreToolUse 는 빠른 UX guard 로 강등**: 명령 파싱은 명백한 미승인 install 을 빠르게 막고 기존 bypass 회귀 커버리지를 유지하지만, primary enforcement 는 PostToolUse effect gate 다.
+- **무실행 설치 (Claude Code)**: PreToolUse hook 이 hook `updatedInput` 기능으로 npm install 에 `--ignore-scripts` 를 붙여 rewrite → 설치가 무실행으로 돈다. PostToolUse 는 closure 가 clean 으로 검증된 뒤에만 `npm rebuild` 를 돌려, 거부된 패키지의 lifecycle script 는 한 번도 안 돈다. Codex CLI 는 `updatedInput` 이 없어 detect-and-rollback 을 유지한다.
+
+### npm-only 경계
+
+이번 phase 는 npm lockfile closure 만 다룬다. pip / cargo / go / gem / maven / nuget 은 각 ecosystem 별 closure resolver 와 script/no-execution 정책이 명시되기 전까지 v2.1 command/ledger/reorg 동작을 유지한다.
+
+### 검증
+
+- closure 승인 시 `transitive_specs` 기록
+- `package-lock.json` 에 미승인 transitive package 출현 시 post-verify reorg
+- 승인된 full closure install 은 false reorg 없이 통과
+- heredoc / echo 텍스트는 install detection 을 trigger 하지 않음
+- 기존 smoke + fixture E2E 회귀 suite green
+
+### 현재 우선순위
+
+1. `v2.2.0-release`: `safedeps-security-hardening` 머지 완료, `v2.2.0` 태그 (GitHub release + `npm publish`).
+
+---
+
+## v2.3 — secret 누출 lane doctor + scaffold (출시 완료)
+
+상태: v2.3.0 으로 출시.
+
+### 핵심 변화
+
+- **`safedeps doctor`** — repo-entry 자세 점검. repo 별 secret 누출 lane(`.gitleaks` policy, `.githooks/pre-commit`, 활성 `core.hooksPath`, scanner 가용성)을 진단하고 전역 install-time gate 도 함께 보고한다. 기본 read-only, 에이전트용 `--json`, secret 누출 lane 에 gap 이 있으면 non-zero 로 끝난다.
+- **`safedeps doctor --fix` / `safedeps hooks init`** — `lib/gates/templates/` 에서 시작용 `.gitleaks.toml`(또는 `.gitleaks.private.toml`)과 `.githooks/pre-commit` 을 scaffold 한 뒤 hook 을 활성화한다. 비파괴적: repo 가 소유한 기존 policy 는 덮지 않는다.
+- **에이전트-as-보안역할 frame** — `SKILL.md` 가 `safedeps doctor` 를 repo-entry 단계로 둬서, 나중의 누출이 아니라 에이전트가 secret-lane 빈틈을 메우게 한다. 설치 스크립트는 repo 별 nudge 를 출력한다(자동 쓰기 없음 — policy 경계는 repo 에 둔다).
+- **fail-closed 위임** — scaffold 된 `pre-commit` 은 `safedeps scan secrets --staged`(단일 canonical scanner 경로)에 위임한다. safedeps 미해석이나 scanner 부재 시 silent skip 이 아니라 커밋을 막는다.
+
+### 설계 결정
+
+- `doctor` 는 holistic 하되 **secret-lane 중심**이다: exit code 는 repo 별 lane 만 반영하고, 전역 의존성 gate 는 `deps` check 로 보고되지만 repo 결과를 gate 하지 않는다.
+- safedeps 는 **실행**을, repo 는 **policy** 를 소유한다. 템플릿은 repo 가 튜닝하는 seed 로, 기존 Two Lanes 불변식과 정합한다.
+
+### 검증
+
+- `safedeps doctor` 가 미설정 repo 에 gap 을 표시하고 `--fix` 후 clean 으로 보고
+- `hooks init` 가 재실행에 비파괴적(repo 편집 보존)
+- pre-commit gate 가 커밋된 secret 을 막고, clean·`.env.example` placeholder 커밋은 통과(bypass 하네스 + 회귀)
+- 기존 smoke + fixture E2E 회귀 suite green
+
+---
+
+## v2.4 — fail-closed 훅 + 공급망 하드닝 (출시 완료)
+
+상태: v2.4.0 으로 출시.
+
+### 핵심 변화
+
+- **fail-closed 게이트** — PreToolUse/PostToolUse 훅이 못 돌 때 더는 `exit 0`(silent pass) 하지 않는다. lock 못 잡은 설치는 **deny**(fail-closed), 불가피한 `jq` 부재는 **명시적 allow-with-warning**, 그리고 그 결과를 `~/.safedeps/advisory.log` 에 기록한다(observable, no-silent-fallback 불변식). PostToolUse 는 못 돌린 게이트를 clean pass 가 아니라 **UNVERIFIED** 로 기록한다.
+- **`SECURITY.md`** — 취약점 신고 정책, 지원 버전, 범위, 설계상 보안 속성(no SaaS, zero deps, no silent fallback).
+- **CI 하드닝** — `actions/*` 를 commit SHA 로 pin; gitleaks 다운로드 checksum 검증; ShellCheck 게이트(error-clean); macOS + Linux matrix(v2.3 `stat` 수정이 cross-OS 커버리지 가치를 입증); zero-dependency 속성을 지키는 `npm pack` 검증 step.
+
+### 검증
+
+- lock 불가 설치는 fail-closed deny + `advisory.log` 기록
+- jq 부재 시 install 같으면 deny(best-effort fail-closed)+기록, non-install 만 통과
+- ledger 라이브러리 부재는 fall-through allow 대신 fail-closed deny
+- ShellCheck(`--severity=error`) 전 셸 소스 clean
+- 기존 smoke + e2e 회귀 suite Linux·macOS 양쪽 green
+
+### v2.4.1 — 동시 설치 레이스 수정 (#5)
+
+PreToolUse 가 PostToolUse 에 넘기는 pending 상태가 전역 `current_state` 파일 하나였어서, 한 프로젝트에서 설치 둘이 겹치면 서로 덮어써 effect gate 가 엉뚱한 설치를 검증(또는 하나를 누락)할 수 있었다. 이제 pending 을 **설치별로 키잉** — `dir_hash` + (inert rewrite 정규화한) command 해시 — 해서 같은 설치의 Pre/Post 는 같은 키를, 동시 설치는 서로 격리된 키를 갖는다. 동시성 하네스(설치 2개 → pending 2개; post 는 자기 것만 소비)로 가드.
+
+---
+
+## v2.5 — pre-commit 의존성 audit (shipped)
+
+상태: v2.5.0 으로 출시.
+
+### 무엇이 바뀌었나
+
+- **pre-commit 의존성 audit** — scaffold 된 `.githooks/pre-commit` 이 이제 npm lockfile 이 있는 repo 면 비밀키 스캔과 함께 **매 커밋** `safedeps audit npm` 을 돌린다. 취약한 직접·*transitive* 의존성을 — 패키지를 깐 *뒤에* 공개된 CVE("그땐 안전해 보였는데 지금 발견됨")까지 포함해 — 다음 커밋에 잡는다. 데일리 re-check 를 기다리지 않고 어드바이저리 DB 를 다시 조회하기 때문. 실사용이 이걸 만들었다: Dependabot 이 놓친 transitive `hono` 취약점이 정확히 이렇게 잡혔다.
+- **의미 있는 `audit npm` exit code** — `0` clean / `1` 취약 / `2` 못 돌림(lockfile 없음, npm/jq 부재, 어드바이저리 DB 도달 불가). **보안 판정**과 **가용성 실패**를 분리한다; npm audit 혼자서는 둘 다 exit 1 로 뭉갠다.
+- **관측 가능한 오프라인 failover** — 어드바이저리 DB 도달 불가 시 hook 은 fail-close 하지 않고 **경고 후 커밋을 허용**(exit 2)한다. 네트워크 장애가 오프라인 커밋을 막지 않게. 실제 취약점(exit 1)은 여전히 **차단**. no-silent-fallback 불변식대로 failover 는 커밋 출력에 크게 남고, 오프라인 커밋이 못 본 건 CI 와 데일리 re-check 가 다시 메운다.
+
+### 검증
+
+- `audit npm` exit-code 계약(clean=0 / 취약=1 / 도달불가=2), 가짜 npm 으로 결정적 검증
+- pre-commit 이 취약 의존성을 든 커밋을 차단; 어드바이저리 DB 도달 불가 시 경고 후 허용
+- 기존 secret-lane + smoke + e2e 회귀 스위트 green 유지
+
+---
+
+## v2.6 — 영어 CLI 출력 + hook 하드닝 (shipped)
 
 상태: v2.6.1 로 출시.
 
@@ -125,373 +260,440 @@ PreToolUse 가드가 복합 명령의 *모든* 세그먼트에서 `pkg@version` 
 
 ---
 
-## v2.10 — Yarn 해석 인지 검사 (출시됨)
+## v2.10 — Yarn resolution 인지 check (출시 완료)
 
-상태: v2.10.0으로 출시됨.
+Status: v2.10.0 으로 출시.
 
-`safedeps check`는 npm 스펙을 게시된(발행된) 클로저만으로 판단했기 때문에, 루트 `resolutions`를 통해 취약한 전이(transitive) 의존성을 패치한 Yarn Berry 프로젝트는 실제로는 설치하지 않는 취약점 때문에 거부당했다. 그 프로젝트에게 게시된 클로저는 잘못된 진실 소스이고, 진실은 설치된 클로저다. 대상 디렉터리가 비어 있지 않은 루트 `resolutions` 항목을 가진 Yarn Berry 프로젝트라면, `check`는 이제 레지스트리를 조사하는 대신 `yarn info -A -R --json`으로 해당 프로젝트의 실제 `yarn.lock`에서 클로저를 해석한다. Yarn이 descriptor-to-locator 해석의 소유권을 갖고 있으며, safedeps는 lockfile 해석을 재구현하는 대신 그 기계 판독 가능한 그래프를 소비한다.
+`safedeps check` 가 npm 스펙을 published closure 만으로 판정해서, 루트 `resolutions` 로 취약한 transitive dependency 를 patch 한 Yarn Berry 프로젝트가 실제로는 설치하지도 않는 취약점 때문에 거부됐다. 그 프로젝트에 대해서는 published closure 가 틀린 truth 다. installed closure 가 맞다. 이제 대상 디렉터리가 비어있지 않은 루트 `resolutions` 를 가진 Yarn Berry 프로젝트면, `check` 는 registry 를 probe 하지 않고 그 프로젝트의 실제 `yarn.lock` 을 `yarn info -A -R --json` 으로 읽어 closure 를 해석한다. descriptor-to-locator resolution 의 소유권은 Yarn 에 그대로 두고, safedeps 는 lockfile resolution 을 재구현하는 대신 그 machine-readable graph 를 소비한다.
 
-결과 승인은 전역이 아니라 프로젝트 범위다. 원장(ledger) 항목은 `context_hash`가 프로젝트 디렉터리, 루트 `resolutions`, `yarn.lock` 내용을 접어 넣은 `project_context`를 지니므로, 그 승인은 다른 프로젝트의 조회를 충족할 수 없고 `resolutions`/`yarn.lock` 변경도 견디지 못한다. 불일치는 `context_mismatch`로 거부한다. PreToolUse 가드는 같은 컨텍스트를 해석하고 같은 해시를 자신의 조회에 접어 넣는다. 다른 모든 곳에서 fail-closed 동작은 변함없다: 선언된 `resolutions`에 사용할 수 없는 lockfile이 있으면 아예 거부하는 무효 컨텍스트이며, 해석된 그래프에서 검증할 수 없는 패키지는 게시된 클로저가 깨끗하더라도 deny-only로 남는다.
+그 결과 나오는 승인은 전역이 아니라 project-scoped 다. ledger entry 가 가지는 `project_context` 의 `context_hash` 에 project directory, 루트 `resolutions`, `yarn.lock` content 가 접혀 들어가므로, 그 승인은 다른 프로젝트의 조회를 만족시킬 수 없고 `resolutions`/`yarn.lock` 변경 이후에도 살아남지 못한다. 불일치는 `context_mismatch` 로 거부한다. PreToolUse guard 도 같은 context 를 해석해 같은 hash 를 조회에 접어 넣는다. 나머지 fail-closed 동작은 그대로다. `resolutions` 는 선언됐는데 lockfile 을 쓸 수 없으면 invalid context 로 즉시 거부하고, resolved graph 에서 검증할 수 없는 package 는 published closure 가 clean 이어도 deny-only 로 남는다.
 
----
+## v2.11 — Yarn candidate closure materialization (출시 완료)
 
-## v2.11 — Yarn 후보 클로저 구체화(materialization) (출시됨)
+Status: v2.11.0 으로 출시.
 
-상태: v2.11.0으로 출시됨.
+v2.10 은 이미 `yarn.lock` 에 있는 package 만 판정할 수 있었고, 그래서 정작 이 gate 가 존재하는 이유인 "추가하기 전에 dependency 를 검사한다"가 빠져 있었다. locator 가 없으면 `project-closure-unavailable` 로 떨어져 deny-only 가 됐고, 프로젝트 자신의 `resolutions` 로 안전하게 해석됐을 경우에도 새 Yarn dependency 의 정상 릴리스 경로가 막혔다.
 
-v2.10은 이미 `yarn.lock`에 있는 패키지만 판단할 수 있었는데, 이는 가드가 존재하는 이유인 "의존성을 추가하기 전에 검사하는 경우"를 제외한 것이었다. locator가 없으면 `project-closure-unavailable`로 떨어져 deny-only가 되었고, 따라서 프로젝트 자체의 `resolutions`가 안전하게 해석해 줬을 신규 Yarn 의존성의 원래 릴리스 경로도 차단되었다.
+### 무엇이 바뀌었나
 
-### 변경 사항
-
-- **격리된 후보 구체화.** locator가 없으면 safedeps는 `mktemp` 아래에 개인 미러를 만들고 프로젝트의 표준 해석 입력만 복사한다: 루트 및 워크스페이스 `package.json` 파일, `yarn.lock`, `.yarnrc.yml`, 그리고 `.yarn/releases`, `.yarn/plugins`, `.yarn/patches` 파일. `node_modules`, 캐시, unplugged 패키지, 설치 상태, VCS 데이터는 절대 복사하지 않는다 — 그것들은 표준 해석 입력도 아니고 임시 해석기에 넘기기에 안전하지도 않다. 후보는 미러의 매니페스트에만 추가되며, Yarn은 그곳에서 `yarn install --mode=update-lockfile --no-immutable`로 해석한다. 이 문서화된 모드는 링크 단계 없이 lock 해석만 갱신하므로 후보 라이프사이클 스크립트는 실행되지 않는다.
-- **호출자 불변성.** 호출자의 트리는 전체 작업 동안 읽기 전용이다. safedeps는 Yarn 실행 전후로 프로젝트 입력을 다시 해시한다; 도중에 매니페스트, `resolutions`, 설정, 또는 lockfile 편집이 끼어들면 혼합된 프로젝트 상태에 대한 승인을 만드는 대신 후보를 무효화한다.
-- **출처에 묶인 승인.** 원장 컨텍스트는 `yarn-project-materialized-lockfile`이 되고, 후보 locator, 묶인 `input_sha256`, 생성된 lockfile의 `generated_lockfile_sha256`, 정확한 Yarn 명령, `isolation: "private-project-mirror"`를 지닌 `materialization`을 나른다. `safedeps_ledger_validate_json`은 그 모든 필드를 요구하며, `materialization.input_sha256`이 컨텍스트 `input_sha256`과 일치하지 않는 항목을 거부한다. 따라서 승인의 진실은 레지스트리 조사도 낡은 lockfile도 아니고, 호출자 자신의 입력을 해시로 묶은 사본에서 도출된 Yarn 해석이다.
-- **폴백 없음.** 입력 복사 실패, 미러가 표준 입력 해시와 일치하지 않음, Yarn 호출 실패, 생성된 lockfile에서 후보 해석 실패 등 어떤 실패든 `project-candidate-materialization-unavailable`로 거부된다. 게시된 클로저는 대체재로 절대 사용되지 않는다.
+- **Isolated candidate materialization.** locator 가 없으면 safedeps 가 `mktemp` 아래 private mirror 를 만들고 프로젝트의 canonical resolution input 만 복사한다. 루트와 workspace 의 `package.json`, `yarn.lock`, `.yarnrc.yml`, 그리고 `.yarn/releases`·`.yarn/plugins`·`.yarn/patches` 파일이다. `node_modules`, cache, unplugged package, install state, VCS 데이터는 복사하지 않는다. canonical resolution input 도 아니고, 임시 resolver 에 넘겨도 되는 것도 아니기 때문이다. candidate 는 mirror 의 manifest 에만 추가되고, Yarn 이 거기서 `yarn install --mode=update-lockfile --no-immutable` 로 해석한다. 이 공식 모드는 link 단계 없이 lock resolution 만 갱신하므로 candidate 의 lifecycle script 는 실행되지 않는다.
+- **호출자 불변성.** 전 과정에서 호출자의 tree 는 read-only 다. safedeps 는 Yarn 실행 전후 모두 프로젝트 input 을 다시 hash 한다. 중간에 manifest, `resolutions`, config, lockfile 편집이 끼어들면 뒤섞인 프로젝트 상태에 대한 승인을 내주는 대신 candidate 를 무효화한다.
+- **Provenance 로 묶인 승인.** ledger context 가 `yarn-project-materialized-lockfile` 이 되고 `materialization` 에 candidate locator, 묶인 `input_sha256`, `generated_lockfile_sha256`, 정확한 Yarn 명령, `isolation: "private-project-mirror"` 를 싣는다. `safedeps_ledger_validate_json` 은 이 필드 전부를 요구하고, `materialization.input_sha256` 이 context 의 `input_sha256` 과 다른 entry 를 거부한다. 따라서 승인의 truth 는 registry probe 도 낡은 lockfile 도 아니고, 호출자 자신의 input 을 hash 로 묶어 복사한 것에서 유도된 Yarn resolution 이다.
+- **Fallback 없음.** input 복사, mirror 의 canonical input hash 대조, Yarn 호출, 생성된 lockfile 에서의 candidate 해석 중 하나라도 실패하면 `project-candidate-materialization-unavailable` 로 거부한다. published closure 를 대체물로 쓰지 않는다.
 
 ### 검증
 
-- 밀폐(hermetic) Yarn 프로젝트 픽스처: 후보는 격리된 클로저가 패치된 `sharp@0.35.3` / `postcss@8.5.21`을 해석할 때만 승인되고, 패치되지 않은 `sharp@0.34.5` / `postcss@8.4.31` 클로저는 거부한다
-- 구체화 불가능은 원장 승인도 게시된 클로저 조사도 없이 거부한다; 입력 또는 lock 컨텍스트가 바뀌면 거부한다
-- 호출자 트리와 lockfile 해시는 전후 바이트 단위로 동일하다; 복사된 미러 입력에 중첩 `node_modules`가 없음을 단언한다
-- 기존 smoke + e2e 회귀 스위트가 그대로 통과; npm 의존성 0개; effect-primary는 npm 전용 유지
+- hermetic Yarn 프로젝트 fixture: isolated closure 가 patch 된 `sharp@0.35.3` / `postcss@8.5.21` 을 해석할 때만 candidate 가 승인되고, patch 안 된 `sharp@0.34.5` / `postcss@8.4.31` closure 는 거부된다
+- materialization 불가는 ledger 승인도 published-closure probe 도 없이 거부한다. input 이나 lock context 가 바뀌면 거부한다
+- 호출자 tree 와 lockfile hash 가 전후로 byte-identical 이고, 복사된 mirror input 에 nested `node_modules` 가 없음을 assert 한다
+- 기존 smoke + e2e 회귀 green, npm dependency 0, effect-primary 는 npm 한정 유지
 
 ---
 
-## v2.12 — npm `overrides` 인지, override 집합으로 범위 지정 (출시됨)
+## v2.12 — npm `overrides` 인지, override 집합에 스코프 (출시 완료)
 
-상태: v2.12.0으로 출시됨.
+Status: v2.12.0 으로 출시.
 
-`overrides`는 취약한 전이 의존성에 대한 표준 npm 수정(remediation)이지만, 클로저 조사는 빈 매니페스트에서 해석되어 그것을 결코 보지 못했다. 그 방식으로 이미 전이 의존성을 패치한 저장소도 여전히 거부되었으므로, safedeps는 올바른 수정을 처벌했다. `check`는 이제 소비 저장소의 `overrides`를 발견해 조사에 적용하며, 실제 설치가 그럴 것처럼 전이 의존성을 해석한다.
+`overrides` 는 취약한 transitive 를 고치는 npm 표준 처방인데, closure probe 가 빈 manifest 로 해석해서 그걸 아예 못 봤다. 그래서 이미 그 방식으로 고쳐놓은 레포가 여전히 거부됐다 — safedeps 가 올바른 수정을 벌준 셈이다. 이제 `check` 는 소비 레포의 `overrides` 를 찾아 probe 에 반영하고, 실제 설치와 같은 방식으로 transitive 를 해석한다.
 
-### 변경 사항
+### 무엇이 바뀌었나
 
-- **override가 조사에 도달한다.** 발견은 `SAFEDEPS_NPM_OVERRIDES_JSON`을 읽고, 그게 없으면 작업 디렉터리에서 위로 올라가며 저장소 루트에서 멈추는 방식으로 비어 있지 않은 `overrides`를 지닌 가장 가까운 `package.json`을 찾는다. 구체적 고정(pin)만 존중된다; `$`-참조는 독립 조사에서 의미가 없으므로 버려진다. 적용 실패는 조용히 버려지는 대신 로그로 남는다 -- 검사가 더 엄격해질 뿐이지만, 설명 없는 거부는 관찰 가능하지 않기 때문이다.
-- **경계에 worktree가 포함된다.** worktree 루트는 디렉터리가 아닌 `.git` 파일을 지니므로, 디렉터리만 검사하던 테스트는 그것을 지나쳐 조상의 override를 집어 올렸다. 이제 탐색은 Yarn 프로젝트 컨텍스트의 위로 올라가는 탐색과 일치한다.
-- **승인은 override 집합으로 범위가 정해진다.** override를 적용하면 클로저는 소비 프로젝트의 함수가 되며, 게시된 패키지 승인이 전역일 수 있는 것은 프로젝트 독립적이기 때문뿐이다. 원장 항목은 `npm-overrides-probe`가 되었고, 프로젝트 루트, override 집합, 그것의 표준 해시, 그리고 둘 모두를 아우르는 `context_hash`를 나른다; 키는 그 해시를 접어 넣는다. 전이 의존성을 패치한 저장소에서 얻은 승인은 그렇지 않은 저장소의 검사를 더 이상 충족하지 못한다. 그런 저장소의 실제 설치는 취약한 버전을 해석하기 때문이다. 사전 가드는 같은 키를 도출하므로, 범위가 정해진 승인은 여전히 게이트를 통과한다.
+- **overrides 가 probe 까지 간다.** 탐색은 `SAFEDEPS_NPM_OVERRIDES_JSON` 을, 없으면 작업 디렉터리에서 위로 올라가며 만나는 첫 번째 비어있지 않은 `overrides` 를 쓰고 저장소 루트에서 멈춘다. 구체 핀만 인정하고 `$`-reference 는 버린다(독립 probe 에서 의미 없음). 반영에 실패하면 조용히 버리지 않고 로그한다 — 검사가 더 엄격해질 뿐이지만, 설명 없는 거부는 관측 가능하지 않다.
+- **경계가 워크트리를 포함한다.** 워크트리 루트의 `.git` 은 디렉터리가 아니라 파일이라, 디렉터리만 검사하면 그걸 지나쳐 상위의 overrides 를 주워왔다. 이제 Yarn project-context walk-up 과 같은 판정을 쓴다.
+- **승인이 override 집합에 스코프된다.** overrides 를 반영하면 closure 가 소비 프로젝트의 함수가 되고, published-package 승인이 전역일 수 있는 건 오직 그것이 프로젝트 무관이기 때문이다. ledger entry 는 `npm-overrides-probe` 가 되어 project root, override 집합, 그 canonical hash, 그리고 둘을 합친 `context_hash` 를 싣고 키가 그 hash 를 포함한다. transitive 를 patch 한 레포에서 얻은 승인은 patch 하지 않은 레포의 검사를 더 이상 만족시키지 못한다. pre-guard 도 같은 키를 유도하므로 스코프된 승인은 게이트를 그대로 통과한다.
 
-override를 존중하는 것은 취약점을 가릴 수 없다: 조사는 각각을 구체적 버전으로 해석하고 OSV가 그 버전에 대해 조회되므로, 여전히 취약한 릴리스를 가리키는 override도 다른 것과 똑같이 플래그된다.
+overrides 를 반영해도 취약점은 못 숨긴다. probe 가 각 override 를 구체 버전으로 해석하고 OSV 는 그 버전으로 조회되므로, 여전히 취약한 릴리스를 가리키는 override 는 다른 것과 똑같이 걸린다.
 
 ### 검증
 
-- 승인 범위 지정이 실제 및 테스트에서 동작: 패치된 집합은 승인하고, 같은 집합은 승인을 재사용하며, override가 없는 저장소는 거부되고, 다른 override 집합은 거부된다
-- 여전히 취약한 버전을 가리키는 override는 거부된다
-- 사전 가드 키 일치: 승인을 얻은 저장소에서는 허용, 그 override가 없는 저장소에서는 거부
-- 밀폐 e2e는 npm을 스텁해서 해석된 클로저가 조사 매니페스트에 의존하게 만들고, 레지스트리 접근 없이 전체 체인을 고친다; 범위 지정과 주입 경로는 모두 변이(mutation) 검증된다
-- 원장은 override 집합 해시가 없거나 빈 집합을 지닌 `npm-overrides-probe` 컨텍스트를 거부한다
+- 승인 스코핑 실측·테스트: patched 집합은 승인, 같은 집합은 재사용, overrides 없는 레포는 거부, 다른 집합은 거부
+- 여전히 취약한 버전을 가리키는 override 는 거부
+- pre-guard 키 정합: 승인을 얻은 레포는 allow, 그 overrides 가 없는 레포는 deny
+- hermetic e2e 가 npm 을 stub 해 resolved closure 가 probe manifest 에 의존하게 만들어 registry 접근 없이 전 경로를 고정. 스코핑과 주입 경로 둘 다 뮤테이션 검증
+- ledger 는 override-set hash 가 없거나 집합이 빈 `npm-overrides-probe` 컨텍스트를 거부
 
 ---
 
-## v2.13 — 파이프 위치 기반 은닉 설치 판단 + 가드 비용 복원 (출시됨)
+## v2.13 — pipe 위치 기반 hidden-install 판정 + guard 비용 복원 (출시 완료)
 
-상태: v2.13.0으로 출시됨.
+Status: v2.13.0 으로 출시.
 
-사전 가드의 은닉 설치 감지기는 원시 명령 텍스트를 grep하여 파이프-투-쉘을 판단했다. 관용구를 단지 *인용*한 명령 — 재현(repro) 라인을 문서화한 커밋 메시지 — 은 은닉 설치로 거부되었고, 같은 날 두 작업자가 그 문제를 겪었다. 이번 수정은 무엇이 실행 파이프로 간주되는지를 바꾼다. 이 릴리스는 그 동작 변경을 기록하고, 수정으로 퇴행했던 가드의 일정 비용을 복원한다.
+pre-guard 의 hidden-install 탐지가 pipe-to-shell 을 raw 커맨드 텍스트 grep 으로 판정했다. 그 idiom 을 *인용만* 한 커맨드 — repro 라인을 적은 커밋 메시지 — 가 hidden install 로 거부됐고, 같은 날 두 워커가 이걸 밟았다. 수정은 무엇을 실행 pipe 로 볼 것인가를 바꾼다. 이 릴리스는 그 동작 변경을 기록하고, 수정이 들여온 guard 상수 회귀를 복원한다.
 
-### 변경 사항
+### 무엇이 바뀌었나
 
-- **파이프는 실행 위치에서만 인정된다.** 파이프-투-쉘 연산자는 자체 인용 수준에서 따옴표 밖, heredoc 본문 밖에 있어야 한다. 설치 텍스트는 여전히 원시 상태로 검색된다. 실제 은닉 설치에서는 구조상 그것이 생산자(producer)의 따옴표 안에 살아 있기 때문이다. 바깥 인용이 안쪽 파이프를 숨기므로, 같은 검사는 `sh -c` 페이로드, `eval` 페이로드, 명령 치환으로 재귀한다.
-- **소비자가 보게 될 판정 변화** (이 가드는 다른 저장소의 커밋을 막으므로, 통과 기준이 지금까지 버전 신호 없이 이동했다):
-  - *이제 허용:* `... install ... | sh`를 텍스트로 인용하는 커밋 메시지 또는 데이터 heredoc. 이들은 오탐 거부였다.
-  - *이제 거부:* `sh -c "... | sh"`와 `eval "... | sh"`로 감싼 파이프 설치. 기존의 원시 grep은 쉘 이름 뒤에 공백이나 줄 끝을 요구했으므로, 그것을 감싸는 닫는 따옴표(`| sh"`)는 탐지를 피해 갔다. 진양성 탐지는 순수하게 늘어났다; 치환, heredoc 리다이렉트, 평문 파이프 형태는 이미 잡히고 있었고 여전히 잡힌다.
-- **검사 순서가 저비용 우선으로 복원되었다.** 수정은 모든 명령에 대해 O(n) 원시 설치 텍스트 grep보다 먼저 인용-블랭킹된(quote-blanked) 실행 뷰(2차 문자 스캔)를 계산했다. 두 검사 모두 순수 술어이므로 접속(conjunction) 순서는 판정을 바꿀 수 없다 — 비용만 바뀐다. 이제 원시 grep이 먼저 실행되고, 설치 텍스트를 전혀 지니지 않는 대다수 명령은 스캔을 건너뛴다.
+- **pipe 는 실행 자리에서만 인정한다.** pipe-to-shell 연산자는 자기 인용 레벨에서 따옴표 밖, heredoc 본문 밖에 있어야 한다. install 텍스트는 여전히 raw 로 찾는다 — 진짜 hidden install 에서는 구조상 producer 의 따옴표 안에 있기 때문이다. 외곽 인용이 내부 pipe 를 가리므로 같은 검사가 `sh -c` payload, `eval` payload, command substitution 에 재귀 적용된다.
+- **소비자가 보게 될 판정 변화** (이 guard 는 다른 레포의 커밋을 막는 물건인데, 통과 기준이 바뀌고도 지금까지 버전 신호가 없었다):
+  - *이제 허용:* `... install ... | sh` 를 텍스트로 인용한 커밋 메시지나 데이터 heredoc. 오탐 거부였다.
+  - *이제 거부:* `sh -c "... | sh"` 와 `eval "... | sh"` 로 래핑된 piped install. 구 raw grep 은 shell 이름 뒤에 공백이나 줄끝을 요구해서, 닫는 따옴표가 붙은 형태(`| sh"`)가 탐지를 빠져나갔다. 진양성 탐지는 순증이다 — substitution·heredoc-redirect·plain-pipe 형태는 전에도 잡았고 지금도 잡는다.
+- **검사 순서를 cheap-first 로 복원.** 수정은 quote-blank 실행 뷰(2차 문자 스캔)를 O(n) raw install-텍스트 grep 보다 먼저, 모든 커맨드에서 계산했다. 두 검사는 순수 술어라 논리곱 순서가 판정을 못 바꾼다 — 비용만 바꾼다. 이제 raw grep 이 먼저 돌고, install 텍스트가 아예 없는 대다수 커맨드는 스캔을 건너뛴다.
 
-### 검증 / 측정 경계
+### 검증 / 실측 경계
 
-- Smoke가 전체 사례 집합을 다룬다: 인용된 관용구 오탐 3건은 허용되고, 은닉 설치 6건(평문 파이프, 명령 치환, `sh -c`, `eval`, heredoc 리다이렉트 줄)은 거부된다. 판정은 두 검사 순서로 양방향 재실행되었으며 — 모든 사례에서 동일했다.
-- 6KB 무해한 명령의 가드 비용: 수정 전 1.5초, 수정 포함 2.8초, 순서 교체 후 1.4초. 설치 텍스트가 있으면 스캔이 실행되어야 하므로 6KB에서 비용은 ~2.7초로 유지된다.
-- PreToolUse 훅 예산은 30초다. 남은 2차 스캐너(복합 명령 분할, 여기서는 건드리지 않음)는 명령 텍스트 약 ~29KB 근처에서 그 예산을 넘는다(28KB → 28초 측정). 그 경계는 이 릴리스 이전부터 존재했다 — 수정 전에는 ~26KB 근처였다 — 그리고 그 선형화는 후속 작업으로 추적된다.
-- **예산 초과는 fail-open이다.** Claude Code에서 경험적으로 측정(2026-08-04): 시간 초과를 넘는 PreToolUse 명령 훅은 종료되고 도구 호출은 진행된다; 같은 훅의 예산 내 거부는 차단한다. 따라서 크기 경계를 넘으면 이 가드는 조용히 사라지고, 명령을 그 너머로 패딩하는 것은 사소하다. npm의 경우 PostToolUse 효과 게이트가 집행 주체로 남는다(자체 30초 예산 포함); 다른 에코시스템에서는 명령 게이트가 일차 게이트이며, 그래서 스캐너 선형화가 사소한 개선이 아니라 보안 후속 작업으로 추적되는 이유다. Codex CLI의 시간 초과 동작은 측정되지 않았다 — 동일하다고 가정하지 말 것.
-  - **v2.15.0에서 양쪽 모두 수정됨.** fail-open은 소스에서 닫힌다: 가드는 이제 런타임의 예산이 만료되기 전에 자체 예산으로 답한다. 그리고 위의 npm 문장은 타이밍이 측정되지 않은 훅에 대한 가정이었다 — PostToolUse도 그 예산에서 종료된다(측정됨). 따라서 npm도 그 너머에서는 커버되지 않는다. v2.15.0 참조.
+- smoke 가 전체 케이스 집합을 덮는다: 인용 idiom 오탐 3건 allow, hidden install 6건(plain pipe, command substitution, `sh -c`, `eval`, heredoc redirect line) deny. 판정은 두 검사 순서 양방향으로 재생해 전 케이스 동일했다.
+- 6KB 양성 커맨드의 guard 비용: 수정 전 1.5s, 수정 후 2.8s, 순서 스왑 후 1.4s. install 텍스트가 있으면 스캔이 돌아야 하고 6KB 기준 ~2.7s 를 유지한다.
+- PreToolUse 훅 예산은 30s 다. 남아 있는 2차 스캐너(compound-command 분리, 이번에 안 건드림)가 커맨드 텍스트 약 29KB 근처에서 예산을 넘는다(28KB → 28s 실측). 이 경계는 이 릴리스 이전부터 있었고 — 수정 전엔 약 26KB — 선형화는 후속 작업으로 추적한다.
+- **예산을 넘으면 fail-open 이다.** Claude Code 에서 실증(2026-08-04): 타임아웃을 넘긴 PreToolUse command 훅은 죽고 tool call 은 진행된다. 같은 훅이 예산 안에서 낸 deny 는 차단된다. 즉 크기 경계를 넘으면 이 guard 는 조용히 사라지고, 커맨드를 그 너머로 패딩하는 건 어렵지 않다. npm 은 PostToolUse effect gate 가 enforcement 권위로 남지만(자체 30s 예산), 나머지 ecosystem 은 command gate 가 primary 라서 — 스캐너 선형화를 편의가 아니라 보안 후속으로 추적하는 이유다. Codex CLI 의 타임아웃 동작은 미실측 — parity 를 가정하지 마라.
+  - **v2.15.0 에서 양쪽 다 정정됐다.** fail-open 은 근원에서 닫혔다 — guard 가 런타임 예산이 만료되기 전에 자기 예산으로 답한다. 그리고 위의 npm 문장은 재본 적 없는 훅에 대한 가정이었다 — PostToolUse 도 자기 예산에서 죽는다(실측). 그래서 예산 너머에서는 npm 도 커버되지 않는다. v2.15.0 참조.
 
 ---
 
-## v2.13.1 — 명령 게이트의 경계, 측정되고 기록됨 (출시됨)
+## v2.13.1 — 커맨드 게이트의 경계를 재고 문면화 (출시)
 
-상태: v2.13.1로 출시됨.
+Status: v2.13.1 로 출시.
 
-다섯 가지 셸 형태가 명령 게이트 우회로 보고되었는데, 기존 코드와 새 코드가 똑같이 놓쳤다. 답할 가치가 있는 질문은 "다섯 가지 형태를 잡을 수 있느냐"가 아니라 "그것들이 한 가지 이유로 통과하느냐 다섯 가지 이유로 통과하느냐"였다 -- 형제 도구의 이전 열거는 다섯 가지 형태를 닫고 아홉 가지를 드러냈다.
+구·신 코드가 똑같이 놓치는 셸 우회 5형태가 보고됐다. 답할 가치가 있는 질문은 "5형태를 잡을 수 있나" 가 아니라 "이것들이 통과하는 이유가 하나인가 다섯인가" 였다 — 자매 도구에서 같은 축의 열거가 5형태를 닫자 9형태를 뱉은 실측이 있었기 때문이다.
 
-답은 한 가지 이유다. 게이트는 텍스트를 인터프리터에 넘기는 구문적 운반체(carrier)로 설치를 인식하며, 그 인식은 하나의 인용 수준에 적용되는 닫힌 열거다. 모든 누락은 목록 밖의 운반체다. 그러나 "그 한 지점"을 고치는 것이 열거를 끝내지는 않는다. 그 지점 자체가 열거이기 때문이다: 보고된 다섯 가지를 조사하자 열심히 찾지 않아도 네 가지가 더 드러났다(`| command sh`, 작성된 후 실행되는 스크립트, `sh -c` 안에 중첩된 `eval`, 최상위 명령 치환). 5에서 9로의 성장이 단일 세션에서 재현되었다.
+답은 하나다. 게이트는 인터프리터에게 텍스트를 넘기는 구문 carrier 를 인식해 설치를 판정하고, 그 인식은 한 인용 레벨에 적용되는 닫힌 열거다. 모든 미탐이 그 목록 바깥의 carrier 다. 그런데 "그 한 자리" 를 고쳐도 열거는 안 끝난다. 그 자리가 곧 열거이기 때문이다 — 보고된 5형태를 프로브하다 4형태가 더 나왔다(`| command sh`, 파일로 쓴 뒤 실행, `sh -c` 안에 중첩된 `eval`, 최상위 명령 치환). 5→9 성장이 한 세션에서 그대로 재현됐다.
 
-### 변경 사항
+### 무엇이 바뀌었나
 
-- **하나의 수정, 그리고 그것은 새 운반체가 아니다.** `normalize_install_text`는 이미 경로 자격(path-qualified) 또는 `env` 접두사 호출이 맨몸(bare) 호출이라고 선언한다. 그것은 설치 텍스트에 적용되고 파이프의 소비자 측에서는 건너뛰었으므로, 한 파이프의 양쪽이 무엇이 같은 호출인지에 대해 서로 달랐다. 소비자를 정규화하면 `| /bin/sh`, `| /usr/bin/bash`, `| env sh`, `| env FOO=1 sh`, `| command sh`, 그리고 `sh -c`로 감싼 같은 형태들이 닫힌다. 새 개념이 없고, 말뭉치(corpus)의 다른 어떤 것도 판정을 바꾸지 않았다.
-- **새 운반체 문법은 추가되지 않았다.** herestring, `xargs`로 만들어진 명령줄, 작성된 후 실행되는 스크립트, `sh -c`에 중첩된 `eval`, 같은 인용 수준에 중첩된 `sh -c`는 의도적으로 판단하지 않은 채 남는다. 그곳이 열거가 수렴 없이 자라는 지점이며, 두 종류의 변경을 가르는 규칙이 이제 `ARCHITECTURE.md`에 기록되어 있다.
-- **에코시스템 비대칭이 문서화되었다.** npm의 경우 인식되지 않은 운반체는 *지연된 탐지*다: 효과 게이트의 인식기는 운반체 열거가 없는 원시 텍스트 일치이므로, 같은 명령에서 발동해 실제(live) lockfile을 읽는다. `pip`, `cargo`, `go`, `gem`, `maven`, `nuget`의 경우 명령 게이트 뒤에는 아무것도 없으므로, 같은 형태는 `UNVERIFIED`로 기록된 완전한 누락이다. 파서의 갭을 npm 모양으로 읽은 것이 이 수정이 바로잡는 오독이다.
-- **디코이(decoy)는 갭과 분리된다.** `sh -c "sh -c "…""`는 이중 중첩으로 읽히지만, 바깥 따옴표는 안쪽 따옴표에서 닫히고 아무것도 설치되지 않는다. `-I`나 `-0` 없는 `xargs sh -c`는 줄을 `$0`으로서 `sh`에 넘긴다. 보고된 다섯 가지 형태 중 둘은 있는 그대로 디코이였다.
-- **`scripts/test/consumer-forms.sh`**는 그것을 모두 고정(pin)하고 `npm test`에 포함된다.
+- **수리는 하나이고, 그건 새 carrier 가 아니다.** `normalize_install_text` 는 "경로가 붙거나 `env` 가 앞에 붙은 호출은 맨 호출과 같다" 를 이미 선언하고 있다. 그게 설치 텍스트에는 적용되고 파이프의 소비자 쪽에서는 건너뛰어져서, 한 파이프의 양쪽이 "같은 호출" 의 정의를 서로 다르게 쓰고 있었다. 소비자를 정규화하면 `| /bin/sh`, `| /usr/bin/bash`, `| env sh`, `| env FOO=1 sh`, `| command sh`, 그리고 이것들을 `sh -c` 로 감싼 형태가 닫힌다. 새 개념 없고, 코퍼스의 다른 판정은 하나도 안 움직였다.
+- **새 carrier 구문은 하나도 추가하지 않았다.** herestring, `xargs` 조립 명령줄, 파일로 쓴 뒤 실행, `sh -c` 안의 `eval`, 같은따옴표 중첩 `sh -c` 는 의도적으로 판정하지 않는다. 거기가 열거가 수렴 없이 자라는 자리이고, 두 종류의 변경을 가르는 규칙은 이제 `ARCHITECTURE.md` 에 적혀 있다.
+- **생태계 비대칭을 문서화했다.** npm 에서 인식 못 한 carrier 는 **지연 탐지**다 — 효과 게이트의 인식기는 carrier 열거 없는 raw 텍스트 매치라 같은 명령에 발화하고 살아 있는 lockfile 을 읽는다. `pip`, `cargo`, `go`, `gem`, `maven`, `nuget` 은 커맨드 게이트 뒤에 아무것도 없어서 같은 형태가 `UNVERIFIED` 로만 기록되는 완전 미탐이다. 파서 갭을 npm 기준으로 읽던 것이 이번에 고친 오해다.
+- **미끼를 갭에서 분리했다.** `sh -c "sh -c "…""` 는 이중 중첩처럼 읽히지만 바깥 따옴표가 안쪽에서 닫혀 아무것도 설치되지 않는다. `-I` 나 `-0` 없는 `xargs sh -c` 는 그 줄을 `$0` 으로 넘긴다. 보고된 5형태 중 둘은 적힌 그대로는 미끼였다.
+- **`scripts/test/consumer-forms.sh`** 가 전부를 고정하고 `npm test` 에 합류한다.
 
 ### 검증
 
-- 판정 변화(decision drift)를 전체 코퍼스에 대해 `1e33b65`(오탐 축소 이전), `main`, 그리고 이 수정 이후의 세 시점에서 측정했다: 축소는 아무것도 줄이지 않았고, 이 수정은 여섯 가지 형태(form)를 통과에서 거부로 옮겼으며 그 외에는 아무것도 바꾸지 않았다
-- 모든 형태의 상태는 가짜 패키지 매니저를 상대로 실행하여 증명했으므로, 어떤 형태가 실제로 그 매니저에 도달할 때만 갭으로 집계된다
-- npm의 지연 탐지(delayed detection) 주장은 기계적으로 검증했다: 명령 게이트가 통과시키는 바로 그 래핑된 명령이 효과 게이트의 백스톱을 발동시킨다
-- pypi의 완전 누락(complete-miss) 주장은 기계적으로 검증했다: `UNVERIFIED`가 기록되고 롤백은 생성되지 않는다
-- 배터리는 수정 전 트리(pre-fix tree)에 대해 뮤테이션 검증했다(첫 번째 정규화 단언에서 적색)
-- v2.13의 오탐 코퍼스는 계속 허용된다: 따옴표로 감싼 관용구, `npm run`, `npx`
+- 전체 코퍼스 판정 드리프트를 `1e33b65`(오탐 협착 이전), `main`, 이번 수리 이후 세 지점에서 측정: 협착은 아무것도 줄이지 않았고, 이번 수리는 6형태를 pass→deny 로 옮기고 그 외에는 아무것도 안 움직였다
+- 모든 형태의 상태를 가짜 패키지 매니저에 대고 실행해서 증명 — 실제로 매니저에 도달하는 형태만 갭으로 계산
+- npm 지연 탐지 주장은 기계 검증: 커맨드 게이트가 통과시킨 바로 그 래핑 명령이 효과 게이트 backstop 을 발화시킨다
+- pypi 완전 미탐 주장도 기계 검증: `UNVERIFIED` 가 기록되고 rollback 은 생성되지 않는다
+- 배터리는 수리 이전 트리에 대고 뮤테이션 검증(첫 정규화 assertion 에서 빨강)
+- v2.13 의 오탐 코퍼스는 그대로 통과: 인용된 관용구, `npm run`, `npx`
 
-## v2.13.2 — 버전 미지정 설치는 게이트되지 않으며, 이제 그 사실이 기록으로 드러난다 (출시됨)
+## v2.13.2 — 버전 없는 설치는 게이트를 안 거친다, 이제 그 사실이 기록된다 (출시)
 
-상태: v2.13.2로 출시됨.
+Status: v2.13.2 로 출시.
 
-v2.13.1에서 운반체 경계(carrier boundary)를 측정하던 중 발견했으며, 그 릴리스가 막은 것보다 더 큰 문제였다. 원장 게이트는 파싱 가능한 `pkg@version` 피연산자에서 작동한다. 버전을 생략하면 스펙이 생성되지 않으므로 게이트는 결코 실행되지 않는다. `pip install evil`, `cargo add evil`, `go get example.com/evil`, `gem install evil`, `poetry add`, `uv add`, `bundle add`, `dotnet add package`는 모두 통과한다. 래퍼도 필요 없다 — 공격자는 히어스트링(herestring)까지 쓸 필요 없이 버전만 빼면 된다.
+v2.13.1 에서 carrier 경계를 재다가 발견했고, 그 릴리스가 닫은 것보다 크다. 원장 게이트는 파싱 가능한 `pkg@version` 피연산자에 대해서만 돈다. 버전을 빼면 spec 이 안 나오므로 게이트가 아예 안 돈다. `pip install evil`, `cargo add evil`, `go get example.com/evil`, `gem install evil`, `poetry add`, `uv add`, `bundle add`, `dotnet add package` 전부 통과다. 래핑도 필요 없다 — 공격자는 herestring 을 집을 필요 없이 버전만 안 적으면 된다.
 
-이 문제를 보이지 않게 만든 것은 두 가지였다. 코드에 서술된 근거는 npm에 맞춰진 것이다: 맨 `npm install`은 새 패키지를 지명하지 않는 락파일 설치이므로 npm에서는 그대로 통과시키는 것이 옳고, 효과 게이트가 어차피 그 결과를 잡아낸다. 그 근거가 명령 게이트가 최종 권위인 생태계까지 그대로 이어졌는데, 그곳에서는 버전 미지정 설치가 패키지를 지명하는데도 게이트 뒤에는 아무것도 없다. 그리고 방향이 뒤집혀 있다 — 스펙을 추출할 수 없을 때 숨은 경로는 fail-closed로 거부하는 반면, 동일한 조건에서 일반 경로는 허용한다. 그래서 하나의 파일 안에서 하나의 술어가 반대 방향으로 읽힌다.
+안 보였던 이유가 둘이다. 코드가 밝힌 근거가 npm 모양이다 — 맨 `npm install` 은 새 패키지를 지목하지 않는 lockfile 설치라 통과가 npm 에서는 맞고, 효과 게이트가 어차피 결과를 잡는다. 그 논리가 커맨드 게이트가 권위인 생태계로 이식됐는데, 거기서 버전 없는 설치는 패키지를 지목하고 게이트 뒤에는 아무것도 없다. 그리고 방향이 뒤집혀 있다 — 숨김 경로는 spec 을 못 뽑으면 fail-closed 로 거부하는데 평문 경로는 똑같은 조건에서 허용한다. 한 파일 안에서 하나의 조건이 반대 방향으로 읽힌다.
 
-### 변경 사항
+### 무엇이 바뀌었나
 
-- **게이트되지 않은 설치가 기록을 남긴다.** 명령 게이트 뒤에 효과 게이트가 없는 생태계에서, 버전 없이 패키지를 단순 피연산자로 지명하는 설치는 생태계와 명령과 함께 `UNGATED`를 `~/.safedeps/advisory.log`에 기록한다. (피연산자만으로 범위를 잡은 방식에는 갭이 남았고, v2.14.1에서 막았다.) 지금까지는 아무 흔적 없이 통과했는데, 이는 모든 우회(bypass)는 관측 가능해야 한다는 불변식과 모순이었다.
-- **판정은 바꾸지 않는다.** 모든 버전 미지정 설치를 거부하는 것은 일상적인 `cargo add x` 워크플로까지 막는 정책 변경이므로, 이는 저장소 소유자의 결정으로 남는다. 그 결정을 근거로부터 내릴 수 있도록 기록이 존재한다.
-- **침묵의 범위도 기록만큼 신중하게 잡힌다.** 파일 기반 설치(`-r`, `-c`, `-e`), 단순 락파일 설치, npm, 그리고 스펙 추출기가 읽는 형태로 버전이 고정된(pinned) 설치는 로그에서 제외된다. 마지막 조건이 중요한 이유는, 추출기가 `cargo add --vers`는 읽지만 `cargo install --version`은 읽지 않으므로 버전이 있어도 원장 게이트가 실행되지 않을 수 있고 -- 그 경우 기록이 정확히 발동하기 때문이다. 일상적인 설치에서 발동하는 기록은 배경 소음이고, 배경 소음은 기록이 없는 것과 같다.
-
-### 검증
-
-- 68개 케이스 코퍼스를 `main`에 대해 재실행: 판정 변화 0건이므로 기록은 판정 중립적이다
-- 두 절반 모두 `scripts/test/consumer-forms.sh`에 고정되어 있다 — 이름을 지정한(버전 미지정) 설치 10건은 기록되고, 일상적이거나 이미 게이트된 명령 12건은 조용하다
-- 수정이 없는 트리에 대해 뮤테이션 검증(첫 번째 기록 단언에서 적색)
-
----
-
-## v2.14.0 — 훅 진입 심: 고장 난 체크아웃이 더 이상 익명으로 남지 않는다 (출시됨)
-
-상태: v2.14.0으로 출시됨.
-
-설치된 훅은 스킬 심링크를 통해 저장소 체크아웃에서 실시간(live)으로 실행되므로, 일시적으로 고장 난 체크아웃(병합 충돌 마커, 절반만 저장된 편집, 누락된 파일)은 바로 다음 Bash 호출에서 훅 동작을 바꾼다. 2026-08-04에는 실제 병합 도중의 시간대가 이 머신의 모든 세션에서 Bash를 차단했고, 모두가 본 유일한 설명은 bash 파서 오류였다. 무관한 세션은 그 장애를 자기 인프라 결함으로 처리했다. 실패 방향도 설계가 아니라 운이었다: 파스 오류는 우연히 exit 2(두 엔진 모두에서 차단)가 되지만, 파일 누락(127)이나 런타임 크래시(1)는 설치 게이트를 조용히 제거하는 비차단 훅 실패다.
-
-### 변경 사항
-
-- **등록되는 명령은 이제 진입 심(entry shim)** `scripts/safedeps-hook-entry.sh pre|post`이다. 정상 훅은 그대로 통과한다(~34 ms 기준선에서 측정된 오버헤드 ~7 ms). 훅이 0이 아닌 값으로 종료하면 심은 고장 유형을 분류하고(파스 불가 / 크래시 / 누락), 체크아웃에서 진행 중인 병합이나 리베이스를 감지해 알린 다음, 영향 범위("이 머신의 모든 세션"), 원인, 복구 경로와 함께 exit 2로 종료한다.
-- **훅 종료 코드 계약이 이제 명시적이다**: 실제 훅은 설계된 모든 경로에서 0으로 종료하고, 판정은 JSON으로 전달된다. 훅 스크립트에서 의도적인 0이 아닌 종료는 버그다 (`AGENTS.md`).
-- **심 자신의 실패 모드도 추정이 아니라 측정됐다**: 고장 난 심은 심 도입 이전의 기존 상태(원시 파스 오류로 차단)로 퇴화하며, 그보다 더 넓게 번지지 않는다. 배터리에 고정되어 있다.
-- **워크플로 규칙**: 메인 체크아웃에서 병합 충돌을 해결하지 말 것 — 워크트리에서 통합하고, `main`은 fast-forward 전용으로 옮긴다. 심은 충격을 완화하고, 그 규율이 위험 창구를 없앤다.
-- **`scripts/test/hook-entry.sh`**는 계약 전체를 고정하며 `npm test`에 합류한다. 설치 프로그램은 기존의 직접 경로 등록을 멱등적으로 정리한다.
-
-## v2.14.1 — 기록이 커버한다고 주장한 곳에 구멍이 있었다 (출시됨)
-
-상태: v2.14.1로 출시됨.
-
-v2.13.2의 기록은 세 가지 메모와 함께 검증됐다. 그중 둘은 문구 문제가 아니라 동작 문제로 판명됐고, 그 구분이 곧 이 릴리스다: 그것들을 문구 수준에서 고쳤다면 문장만 좁아지고 구멍은 남았을 텐데, 그것은 기록이 끝내려고 도입된 바로 그 불변식 위반을 코드에서 문서로 옮겨 놓는 것에 불과하기 때문이다.
-
-### 변경 사항
-
-- **소스 플래그는 명령이 아니라 자기 인자를 소비한다.** `-r`, `-c`, `-e`가 보이면 설치 전체가 침묵했다. 그런데 `-c`는 전혀 소스 플래그가 아니다 — 제약 파일은 버전의 범위만 제한할 뿐 설치 대상은 여전히 명령줄에 온다 — 그래서 `pip install -c constraints.txt evil`은 기록 없이 `evil`을 설치했다. `-r requirements.txt evil`과 `-e . evil`도 같은 방식으로 침묵했다. 이제 각 플래그는 정확히 자기 인자만 소비한다.
-- **URL의 `@`는 버전이 아니다.** 이미 버전이 고정된 토큰을 건너뛰기 위한 `@` 판별이 VCS URL의 사용자 필드에도 일치했으므로, `git+ssh://git@host/evil.git`은 기록되지 않은 반면 `git+https://host/evil.git`은 기록됐다 — 전송 방식에 따라 갈린 같은 설치였다.
-- **Maven은 좌표를 플래그에 실어 나른다.** `-Dartifact=<group>:<name>`은 피연산자 순회(operand walk)에 도달하지 못했으므로, Maven의 실제 관용구는 기록 밖에 있었고 아무도 쓰지 않는 형태(`mvn dependency:get evil`)는 기록 안에 있었다. 이제 두 필드 좌표는 보고되고 세 필드 좌표는 조용히 지나간다. Maven이 버전 없는 형태를 받아들이는지는 미검증이다 — 측정 머신에는 Maven이 없었다 — 그리고 기록의 관점에서 판단이 서지 않는 경우는 보고 쪽으로 결판난다: 허위 한 줄은 한 줄의 비용일 뿐이지만, 누락된 한 줄은 불변식의 비용이기 때문이다.
-- **워킹 트리 설치는 제외된다.** `pip install .`과 `pip install ./pkg`는 가져오기가 아니라 트리에서 빌드하므로 패키지를 지명하지 않는다. `example.com/evil` 같은 모듈 경로는 로컬 경로가 아니므로 계속 보고된다.
-- **문서는 더 이상 플래그별로 경계를 설명하지 않는다.** 경계선은 패키지가 지명되는지 여부다. README는 파일 기반 설치가 "패키지를 지명하지 않는다"고 말했는데, 이는 `-c`에 대해서는 결코 사실이 아니었다.
-- **`SKILL.md`도 이제 경계를 명시한다.** 그것은 에이전트가 읽는 매니페스트인데, 버전을 생략하면 아무것도 검사되지 않는다는 말 없이 먼저 `check`를 실행하라고 안내하고 있었다.
+- **게이트를 안 거친 설치가 기록을 남긴다.** 커맨드 게이트 뒤에 효과 게이트가 없는 생태계에서 버전 없이 패키지를 bare 피연산자로 지목한 설치는(피연산자 한정 범위가 남긴 구멍은 v2.14.1 에서 닫았다) `~/.safedeps/advisory.log` 에 생태계와 명령과 함께 `UNGATED` 를 남긴다. 지금까지는 흔적 없이 통과했고, 그건 "모든 우회는 관측 가능해야 한다" 는 불변식 위반이었다.
+- **판정은 안 바꾼다.** 버전 없는 설치를 전부 거부하는 건 평범한 `cargo add x` 흐름을 막는 정책 변경이라 레포 소유자 결정으로 남긴다. 기록은 그 결정을 근거로 내릴 수 있게 하려고 있다.
+- **침묵도 기록만큼 정밀하게 범위를 잡았다.** 파일 기반 설치(`-r`, `-c`, `-e`), 맨 lockfile 설치, npm, 그리고 **추출기가 읽는 형태로** 버전이 박힌 설치는 로그에 안 남는다. 마지막 단서가 중요하다 — 추출기는 `cargo add --vers` 는 읽지만 `cargo install --version` 은 못 읽어서, 버전이 있는데도 원장 게이트가 안 도는 경우가 있고 그때 기록이 찍히는 건 옳다. 평범한 설치마다 찍히는 기록은 배경 소음이고, 배경 소음은 없는 기록과 같다.
 
 ### 검증
 
-- 106개 케이스 코퍼스를 v2.13.2에 대해 재실행: 판정 변화 0건이므로 수정은 관측성 계층 안에 머문다
-- 모든 경계가 양쪽에서 `scripts/test/consumer-forms.sh`에 고정되어 있다. 이전에는 커버리지가 없던 Maven, `git+ssh`, `-r <file> <pkg>` 행도 포함한다
-- 메모들은 코드를 다시 읽는 것이 아니라 기록의 가장자리를 적대적으로 탐사(adversarial probe)한 결과에서 나왔다
+- 68케이스 코퍼스를 `main` 과 대조: 판정 변화 0 — 기록은 verdict-neutral
+- 양쪽 절반을 `scripts/test/consumer-forms.sh` 에 고정 — 버전 없는 지목 설치 10개 기록, 평범하거나 이미 게이트된 명령 12개 침묵
+- 수리 없는 트리에 대고 뮤테이션 검증(첫 기록 assertion 에서 빨강)
 
 ---
 
-### v2.14.2 — 생태계별 플래그 표 (v2.14.1 패치)
+## v2.14.0 — 훅 엔트리 셔틀: 깨진 체크아웃이 익명이기를 멈춘다 (출시)
 
-v2.14.1 수정은 pip의 플래그 표를 모든 생태계에 적용했다. `-t`와 `-f`는 pip에서는 값을 받지만 go(`go get -t`), gem(`--force`), cargo에서는 불리언이므로, 순회가 뒤따르는 패키지를 삼켜 버렸다: `go get -t example.com/evil`은 침묵한 반면 `gem install --force evil`은 계속 보고됐다 — 작성자가 어떤 표기법을 썼는지에 따라 갈린 하나의 설치였다. 이것은 v2.14.1이 `-c`에서 진단한 바로 그 실수가 한 축을 따라 반복된 것이다: 플래그를 의미가 아니라 모양으로 묶은 것. 작성자가 아니라 검증기(validator)가 잡아냈다.
+Status: v2.14.0 로 출시.
 
-값을 소비하는 플래그는 이제 생태계별로 판별되며, 알 수 없는 플래그는 값을 받지 않는 것으로 간주한다 — 그쪽으로 잘못 추측하면 허위 한 줄이 드는 반면, 반대쪽으로 잘못 추측하면 이 기록이 잡기 위해 존재하는 설치를 놓친다. `-e`는 이제 아무것도 소비하지 않는다: 그 인자는 다른 토큰들과 똑같이 판정되므로 `-e .`은 워킹 트리 빌드로 빠지고, `-e git+ssh://…`는 그것이 실제로 하는 가져오기로 남는다. Maven의 좌표 플래그도 골(goal)의 양쪽에서 모두 읽힌다.
+설치된 훅은 스킬 심링크를 거쳐 레포 체크아웃을 라이브로 실행하므로, 체크아웃이 일시적으로 깨지면(머지 충돌 마커, 저장이 덜 된 편집, 파일 부재) 바로 다음 Bash 호출부터 훅 동작이 바뀐다. 2026-08-04 실제 머지 창에서 이 머신 모든 세션의 Bash 가 막혔고, 사람이 본 유일한 설명은 bash 파서 오류였다 — 무관한 세션 하나는 이 정전을 자기 쪽 인프라 결함으로 라우팅했다. 실패의 방향도 설계가 아니라 우연이었다: 파싱 오류는 하필 exit 2(양 엔진 차단)로 끝나지만, 파일 부재(127)와 런타임 크래시(1)는 비차단 훅 실패라서 설치 게이트를 조용히 없앤다.
 
-한 경계는 수정하는 대신 의도적인 것으로 고정된다: `mvn -Dartifact=… dependency:get`은 설치 *인식*(`mvn dependency:get`)이 골 앞에 있는 플래그와 일치하지 않으므로 결코 기록에 도달하지 않는다. 그것은 명령 인식에 속하며, 범위를 넓히는 것은 `ARCHITECTURE.md`가 확장을 거절하는 운반체 열거(carrier enumeration)다.
+### 무엇이 바뀌었나
 
-v2.13.2의 `git archive`를 대상으로 검증했다: 판정은 그대로이며, 그때 기록됐던 모든 레지스트리 페치 형태가 지금도 기록된다. 기록에서 빠진 형태는 두 가지뿐이다 -- `pip install .`과 `pip install ./local-pkg` -- 이는 v2.14.1이 선언하고 배터리가 고정하는 워킹 트리 경계로, 이들은 가져오기가 아니라 트리에서 빌드한다. "아무것도 이동하지 않았다"는 포괄적 서술은 이 플랜의 역사에서 두 번 틀렸으므로, 이제 그 주장은 배터리가 실제로 검사하는 범위로 한정된다.
+- **등록되는 커맨드가 엔트리 셔틀** `scripts/safedeps-hook-entry.sh pre|post` 이 됐다. 건강한 훅은 그대로 통과한다(실측 오버헤드 ~7 ms, 베이스라인 ~34 ms). 훅이 비영 종료하면 셔틀이 깨짐을 분류하고(파싱 불가 / 크래시 / 부재), 체크아웃의 머지·리베이스 진행을 감지해 말하고, 폭("이 머신의 모든 세션")·원인·복구 경로를 담아 exit 2 로 끝난다.
+- **훅 종료코드 계약이 명문화됐다**: 진짜 훅은 설계된 모든 경로에서 exit 0 이고 결정은 JSON 으로 나간다. 훅 스크립트의 의도적 비영 종료는 버그다(`AGENTS.md`).
+- **셔틀 자신의 실패 모드는 가정이 아니라 실측이다**: 깨진 셔틀은 셔틀 이전의 status quo(원시 파싱 오류와 함께 차단)로 강등되며 더 넓어지지 않는다. 배터리로 고정.
+- **워크플로 규칙**: main 체크아웃에서 머지 충돌을 풀지 않는다 — 워크트리에서 통합하고 `main` 은 fast-forward 로만 전진시킨다. 셔틀은 폭발을 줄이고, 규율은 창 자체를 없앤다.
+- **`scripts/test/hook-entry.sh`** 가 계약 전체를 고정하고 `npm test` 에 합류했다. 인스톨러는 레거시 직접 경로 등록을 멱등하게 제거한다.
 
----
+## v2.14.1 — 기록이 커버한다고 적힌 자리에 구멍이 있었다 (출시)
 
-### v2.14.3 — 같은 부류, 세 번째 (v2.14.2 패치)
+Status: v2.14.1 로 출시.
 
-v2.14.2는 값 소비 플래그가 생태계별로 판별된다고 발표했지만, 게이트를 건 것은 `-t`와 `-f`뿐이었다. `-r`과 `-c`는 여전히 무조건 처리됐고, gem의 `-r`은 불리언인 `--remote`다 — 그래서 `gem install -r evil`은 침묵했지만 `gem install --remote evil`은 기록됐다. 표기법에 따라 갈린 같은 설치가 이 플랜에서 세 번째였다. 그리고 이번에는 배포된 문구가 코드보다 앞서 있었다 — 코드가 문구를 따라가지 못한 것이다.
+v2.13.2 의 기록이 note 3건과 함께 검증을 통과했다. 그중 둘이 문면이 아니라 동작이었고, 그 구분이 이 릴리스의 전부다. 문면으로 처리했으면 문장을 좁히고 구멍은 남았을 텐데, 그건 이 기록을 도입한 이유였던 불변식 위반이 코드에서 문서로 자리만 옮긴 것이다.
 
-이제 표 전체가 pypi 계열에만 게이트된다. 이 철자들 중 어느 것에 대해서도 인자를 소비하는 유일한 계열이기 때문이다.
+### 무엇이 바뀌었나
 
-검증 문장도 다시 쓰였지, 되풀이된 것이 아니다. "기록에서 침묵으로 이동한 것은 없다"는 여기서 두 번 반증됐다: `pip install .`과 `pip install ./local-pkg`는 실제로 빠져나갔으며, 이는 v2.14.1이 선언하고 배터리가 고정하는 워킹 트리 경계다. 이제 그 주장은 배터리가 실제로 검사하는 레지스트리 페치 형태로 한정된다. 작성자 자신의 코퍼스조차 반증할 수 없는 포괄적 주장은 검증이 아니다.
-
----
-
-### v2.14.4 — 기록의 단축형 함정 (v2.14.3 패치)
-
-`-i`는 pypi 값 소비 표에서 빠져 있었는데 `--index-url`은 들어 있었다. 이것은 설치를 숨긴 것이 아니라 설치를 하나 만들어 냈다. 미러 URL이 피연산자로 읽혀서 `pip install -i <mirror> -r requirements.txt`가 허위 기록을 남겼고 `pip install -i <mirror>`도 마찬가지였다. 이 플랜이 이미 고친 세 건의 침묵과 같은 결함이 반대 방향을 향한 것이다 — 바로 그 이유로 이제 양방향이 배터리에 들어 있다. 한 방향만 고치면 다른 방향이 남는다.
-
-또한 "이미 버전이 고정된 설치는 제외된다"는 표현이 너무 강했다. 스펙 추출기는 `cargo add --vers`는 읽지만 `cargo install --version`은 읽지 않으므로, 버전이 있어도 원장 게이트는 여전히 실행되지 않을 수 있고 — 그 경우 기록이 정확히 발동한다. 이제 그 주장은 "스펙 추출기가 읽는 형태로 버전이 고정된(pinned) 설치"라고 말하며, 놀랍지만 사실인 그 행(row)은 배터리에 고정되어 빗나간 줄처럼 읽히지 않는다.
-
-두 가지 침묵(무기록) 케이스는 변경이 아니라 고정으로 처리한다: `pip install --index-url <url>` 단독은 패키지를 지명하지 않으며, `pip install /tmp/evil.whl`은 파일시스템에서 설치한다. 둘 다 원래 올바르게 동작했고, 이제는 눈치채지 못한 채 어긋날 수 없다.
-
----
-
-### v2.14.5 — 알려진 이상값은 고정하고, 아무도 확인할 수 없는 숫자는 인용하지 않는다 (v2.14.4의 패치)
-
-판정(verdict) 밖에 자리 잡고 있던 세 가지 검증 노트를 한 묶음으로 마감했다.
-
-`bundle add evil --version 1.0.0`은 cargo 형태와 함께 언급되었지만 배터리 행(row)은 cargo만 가졌다. 버전이 있음에도 둘 다 기록된다. 스펙 추출기(spec extractor)가 `cargo add --vers`는 읽지만 `cargo install --version`이나 `bundle add --version`은 읽지 못하기 때문에, 원장 게이트(ledger gate)는 실제로 실행되지 않았다. 이제 두 행 모두 같은 이유로 고정된다: 사실이지만 뜻밖의 기록이 튀는 줄로 읽혀서는 안 되기 때문이다.
-
-`pip install --proxy <url> -r requirements.txt`는 여전히 가짜 기록을 남기며, 이번에는 수정이 아니라 고정으로 처리한다. 알 수 없는 플래그는 값을 받지 않는 것으로 가정한다. 반대로 추측하면 이 기록이 잡아내려는 설치 자체를 놓치게 된다. 대신 값 테이블을 넓히는 것, 그것이 이 작업이 네 번이나 데인 열거(enumeration) 방식이다. 이 행은 그 트레이드오프를 버그로 재발견되도록 내버려 두는 대신 눈에 보이게 만든다.
-
-마지막은 코드가 아니라 증거에 관한 것이다. 이전 릴리스는 독자가 재구성할 수 없는 임시 코퍼스(scratch corpus)에서 "159 forms"을 인용했다 — 실질적인 주장들은 독립적인 재실행에서도 유지되었지만, 그 숫자는 장식이었고, 아무도 확인할 수 없는 숫자는 검증처럼 읽히되 실제로는 검증이 아니다. `AGENTS.md`는 이제 독자가 재현할 수 있는 수치를 요구한다: 배터리 자체의 form 개수, `npm test`의 ok 줄 수, 또는 커밋된 코퍼스.
-
----
-
-## v2.15.0 — 가드가 자체 예산 안에서 답하므로 런타임이 판정 중간에 결코 죽이지 못한다 (출시됨)
-
-상태: v2.15.0으로 출시됨.
-
-v2.13.0은 30초 훅 예산을 넘기는 것이 fail-open(실패 시 통과)임을 기록하고, 이를 스캐너 선형화의 근거로 남겨 두었다. 그 결론에서 멈추는 것은 잘못이었다. 선형화는 교차점을 옮길 뿐, 그 너머에서 무슨 일이 일어날지는 결정하지 않으며, 그 너머에서는 게이트가 한마디도 없이 사라졌다. 명령어를 ~30KB로 패딩하는 것이 공격의 전부였고, 명령어 게이트가 조언 계층이 아니라 권위(authority)인 `pip`, `cargo`, `go`, `gem`에서는 스캐너에 대한 지식이 전혀 필요 없는 범용 우회였다.
-
-런타임의 타임아웃 동작은 우리가 바꿀 수 있는 것이 아니다. 우리가 할 수 있는 것은 그것이 발동하기 전에 답하는 것이다.
-
-### 변경 사항
-
-- **가드는 자체 예산을 가진다**, 런타임의 것보다 작다(등록된 30초에 대해 기본 20초). 판정을 자식 프로세스에서 실행하고, 마감 시한까지 자식이 답하지 않으면 가드가 대신 답한다: 거부(deny). 판정할 수 없었던 설치는 실행되어서는 안 되기 때문이다. 런타임은 결코 판정 도중에 가드를 죽일 수 없으므로, fail-open으로 남을 여지가 없다.
-- **거부는 어떤 종류의 거부인지 밝힌다.** "다 보지 못했다"와 "보았고 무언가를 찾았다"는 서로 다른 주장이며, 둘을 구분하지 못하는 독자는 게이트를 우회하는 법을 배우게 된다. 이유 문자열은 `UNDECIDED, not unsafe`로 시작하고, 아무것도 감지되지 않았음을 밝히며, 대신 무엇을 해야 하는지 말한다. 다른 모든 우회나 불가(unavailability)와 마찬가지로 `advisory.log`에 기록된다.
-- **engage 크기 미만의 명령어는 비용이 들지 않는다.** 그 메커니즘은 명령어가 예산에 근접할 만큼 커질 때까지(기본 1KB, 30초 예산 대비 약 0.1초로 측정 — 약 300배의 여유) 정수 비교 한 번만 든다. engage 크기는 성능 게이트이지 보안 경계가 아니다. 보안 경계는 벽시계(wall-clock) 예산이며, 이 숫자들이 나온 머신보다 느리거나 빠른 머신에서도 정직하게 유지된다.
-- **마감 시한은 watchdog 서브셸이 아니라 가드 자신이 폴링한다.** watchdog은 고정된 간격으로 sleep해야 하는데, `sleep` 중인 watchdog을 죽여도 그 sleep이 끝날 때까지 반환되지 않는다 — 측정 결과, 이 때문에 활성화된 모든 호출이 다음 정수 초로 올림되었다(788ms 판정이 1050ms가 걸림). 부모의 폴링은 50ms에서 시작해 1초까지 배로 증가하므로, 빠른 판정은 기껏해야 첫 단계만 잃는다.
-- **마감 시한은 자식의 전체 프로세스 트리에 시그널을 보낸 뒤 단계를 높인다(escalate).** 셸은 포그라운드 외부 명령어가 실행되는 동안에는 시그널에 반응하지 않으며, 판정에서 비용이 드는 부분이 바로 그런 명령어이므로 — 자식 셸에만 시그널을 보내면 그 명령어가 끝나는 때에야 전달된다. 20초 예산 대비 9.1초 늦게 전달되는 것으로 측정되었고, 이는 자체 예산이 만들려던 여유를 전부 소진한다. 하위 프로세스는 자식 자신의 pid에서 찾아내며(이름 패턴으로 절대 찾지 않음), TERM을 보낸 뒤 짧은 유예 후 KILL을 보낸다. 버틸 수 있는 마감 시한은 마감 시한이 아니다.
-
-### 검증 / 측정된 경계
-
-- 개발 머신에서의 비용 곡선: 1KB → 0.1s, 4KB → 0.68s, 8KB → 2.5s, 16KB → 9.6s, 24KB → 21.4s, 28KB → 29.3s, 32KB → 37.8s. 30초 런타임 예산은 28KB와 32KB 사이에서 넘어가며, v2.13.0에 기록된 경계를 반대 방향에서 재현한다.
-- 예산이 활성화된 상태에서 32KB 명령어는 20초 예산 대비 ~20.2초에 거부되고, 16KB 패딩 `pip install`은 ~20.9초에 거부된다: 런타임 시계에 ~9초가 남은 시점에 답이 도착한다. 오버슈트는 폴링 한 단계(≤1s)로 제한되는데, **이는 마감 시한이 셸뿐 아니라 실제 작업까지 도달하기 때문만** 가능하다 — 자식 셸에만 시그널을 보내면 같은 입력이 ~30초에 답하며, 런타임 예산을 넘으므로 여전히 fail-open이다.
-- 활성화되는 지점에서의 메커니즘 오버헤드, 동일 입력 양방향: 4KB 684ms → 820ms, 8KB 2482ms → 2623ms. engage 크기 미만에서는 자식 프로세스가 없고 측정 가능한 변화도 없다.
-- `scripts/test/self-budget.sh`는 양방향을 고정하고 `npm test`에 편입된다: 예산 초과 명령어와 패딩된 `pip`/`cargo`/`go`/`gem` 설치는 거부되며, 거부는 undecided로 표시되고, 발견(findings)으로 표현되지 않으며, `advisory.log`에 도달한다. 무해한 명령어, `npm run`, 미승인 설치, 그리고 활성화됐지만 예산 안인 명령어는 이전과 정확히 동일하게 판정된다.
-- 배터리는 자체 변형(mutation) 검사를 포함한다: 예산이 비활성화된 상태에서는 동일한 예산 초과 명령어가 통과한다. 첫 초안은 그 입력을 예산의 ~1.3배로 크기를 잡아 오탐 통과(false pass)를 보고했으므로, 커밋된 버전은 ~5배 여유를 사용한다.
-- **이 릴리스의 첫 버전은 배터리가 볼 수 없었던 결함을 실어 보냈으며, 그 경위를 기록할 가치가 있다.** 시그널을 받은 자식이 상태 락을 누수할 것에 대비해 가드에 `trap ... EXIT TERM INT`가 추가되었다. `trap`에서 시그널 이름을 지정하면 기본 처리(disposition)가 대체되므로, 자식은 마감 시한에 죽지 않고 판정을 끝까지 실행했다: 16KB 패딩 `pip install`이 30초 런타임 예산 대비 38.9초에 답했다. 배터리의 모든 예산 초과 케이스는 1초 예산을 사용했는데, 이는 마감 시한을 스캔 초반 — 자식이 외부 명령어 사이에 있어 시그널을 즉시 받는 지점 — 에 위치시키므로 코퍼스는 계속 초록(green)이었다. 이를 커버하는 회귀 테스트는 이제 마감 시한이 스캔 깊숙한 곳에 오도록 입력 크기를 잡고(11초 예산에 12KB: 강제 시 ~12초, 미강제 시 ~17초), 런타임이 실제로 신경 쓰는 수량인 *오버슈트*를 검증한다.
-
-### npm 가정은 측정이라는 현실을 견디지 못했다
-
-v2.13.0은 명령어 게이트의 예산 너머에서도 PostToolUse 효과 게이트가 npm의 "집행 권한(enforcement authority)으로 남는다"고 말했다. 그것은 아무도 시간을 재지 않았던 훅에 대한 가정이었다. 2026-08-04에 PreToolUse에 사용한 것과 동일한 프로토콜로 측정했다 — 샌드박스 프로젝트, 시작과 종료 시각을 기록하는 훅, 예산 안의 대조군(control)과 예산을 넘긴 실험군(experiment):
-
-- 대조군(1초 작업, 5초 예산): 시작하고 끝났다.
-- 실험군(20초 작업, 5초 예산): 시작했지만 끝나지 않았다.
-
-**PostToolUse도 예산 시점에 죽는다.** 효과 게이트도 동일한 30초로 등록되며, 그 작업 — `npm ci`, `npm install`, `npm rebuild`, 그리고 전체 클로저에 대한 OSV 배치 — 은 safedeps가 통제하는 무엇이 아니라 사용자 프로젝트와 네트워크에 의해 좌우된다. 그래서 npm도 같은 노출을 가지며, 그 종류는 명령어 게이트보다 더 나쁘다: 사전 훅의 사망은 판정되지 않은 명령어 하나를 통과시키지만, 사후 훅의 사망은 롤백 중간에 닥칠 수 있다.
-
-이 릴리스는 그것을 고치지 않는다. 설치 후 게이트는 거부할 수 없다 — 명령어는 이미 실행되었으므로 — 그래서 "끝내지 못했다"에 대한 답은 다른 설계 질문이며, `safedeps/effect-gate-killed-mid-rollback`으로 추적된다. 여기서 고쳐진 것은 주장이다: 문서는 더 이상 예산을 넘어서도 npm이 보호된다고 말하지 않는다. 실제로 그렇지 않기 때문이다.
-
----
-
-### v2.15.1 — 자체 예산에 상한선이 생겼다. 사용자가 옮길 수 있는 경계는 기본값일 뿐이기 때문이다 (v2.15.0의 패치)
-
-v2.15.0의 전체 주장은 런타임 예산 너머에서 사라지는 대신 가드가 자체 예산 안에서 답한다는 것이다. 하나의 환경 변수가 그것을 무너뜨렸다: `SAFEDEPS_SELF_BUDGET_SECONDS`에는 상한이 없었고, 등록된 30초 훅 타임아웃보다 높은 값은 조용히 — 그리고 릴리스 이전과 똑같은 fail-open 상태로 — 죽임을 런타임에 되돌려주었다.
-
-그런 값을 설정하게 되는 동기는 평범한 것인데, 바로 그 점 때문에 막을 가치가 있다. 큰 명령어에서 `UNDECIDED` 거부를 만난 사람은 그것을 "예산이 짧다"고 읽고 값을 올린다. 아무것도 비활성화할 의도는 없었는데도 경계는 사라진다.
-
-- **값은 25초로 클램프되며**, 클램프는 단방향이다: 더 낮은 값은 주어진 대로 존중된다. 더 짧은 예산은 더 일찍 거부할 뿐이기 때문이다. `SAFEDEPS_RUNTIME_BUDGET_SECONDS`(30)과 `SAFEDEPS_SELF_BUDGET_MAX_SECONDS`(25)는 자신들이 제한하는 예산 옆에 이름 붙은 상수로 존재한다.
-- **30초는 하드코딩되어 있고, 그 이유가 옆에 기록되어 있다.** 훅 페이로드는 런타임의 예산을 담고 있지 않으며, 여러 설정 파일의 등록이 모두 발화하므로 가드는 어느 것이 자신을 실행했는지 알 수 없다. safedeps가 직접 등록하는 숫자 — 설치 프로그램의 `PRE_HOOK_TIMEOUT_SECONDS` — 를 이름으로 밝히고, 스모크 테스트가 두 상수를 함께 고정해서 설치 프로그램이 바뀌어도 가드가 낡은 값에 맞춰 계산하는 일이 없게 한다. 30초 미만으로 손수 편집된 등록은 그 상수가 알 수 있는 범위 밖이다.
-- **5초의 여유는 예산 창 밖에서 발생하는 가드의 비용이지, 반올림한 숫자가 아니다**: 마지막 폴링 단계를 기다리는 최대 1초, KILL 전 TERM 유예 최대 0.5초, reap(자식 프로세스 회수), `jq`, 프로세스 시작에 약 0.1초. 구조적 최악의 경우 1.6초이며, 측정된 종단 간 값은 0.73–1.05초, 명령어 텍스트 4KB~256KB에서 평평했다(2026-08-04, 30초 kill 측정과 같은 머신).
-- **클램프는 관찰 가능하다.** stderr로 알려지고, `advisory.log`에 기록되며, `UNDECIDED` 거부 이유에 이름으로 포함된다. 조용히 줄어든 예산은 사용자가 자신의 값이 실제로 적용된다고 믿게 만들고, 결코 사실이었던 적 없는 숫자를 기준으로 다음 예상 밖의 문제를 디버깅하게 만든다.
-
-- **클램프의 첫 버전은 같은 구멍을 다른 문법으로 실어 보냈고, 교차 검증이 릴리스 전에 잡아냈다.** `^[0-9]+$`로 검증한 뒤 마감 시한 계산이 `$(( ))` 안에서 원본 문자열을 소비하도록 했다. Bash 산술은 그 정규식이 받아들이는 것보다 더 많은 것을 받아들이므로, `+40`, ` 40`, `0x28`은 검증에 실패하고 클램프를 건너뛴 채 어쨌든 예산 40으로 평가되었다 — `+40` 아래의 64KB 명령어는 41초 동안 답을 내지 못해 런타임의 kill을 넘겼다. 하나의 값에 문법이 두 개인 것이 결함이며, 이제 값은 한 번 정규화되고(공백과 앞의 `+`는 입력한 사람이 의도한 방식으로 읽힘) 정규화된 숫자만 산술에 도달한다. 그 외의 것은 예산이 아니다: 상한선 안에 있는 기본값이 사용되며, 클램프와 같은 채널로 알려진다. `10#`은 `08`이 8진수 오류가 되는 것을 막아준다.
-
-- **두 번째 교차 검증 라운드는 같은 형태를 한 단계 더 아래, 문법이 아니라 값의 범위에서 발견했다.** 문법이 하나로 정리되어도 `^[0-9]+$`는 자릿수를 세지 않으며, bash 정수는 64비트라 조용히 랩(wrap)된다. 음수로 랩되는 값은 상한선보다 크지 않으므로 클램프를 그대로 통과했고, 마감 시한 곱셈이 그것을 다시 랩해 결코 도달하지 않는 시간으로 만들었다: 30자리 예산은 600초가 넘도록 답을 내지 못했다. 이제 자릿수는 산술이 값을 보기 전에 문자열 영역에서 검사된다 — 아홉 자리 초과는 명백히 상한선 위이므로 그렇게 클램프되며, "상한선 위의 어떤 값이든 클램프된다"는 규칙은 어떻게 쓰였는지에 따른 예외 없이 유지된다. 아홉 자리는 대략 31년 분량의 초(秒)다.
-
-### v2.15.2 — engage size가 데드라인을 조정한다, 더 이상 끄지 않는다 (v2.15.1에 대한 패치)
-
-v2.15.1은 예산에 상한을 두었다. 하지만 예산이 아예 작동할지 여부를 결정하는 조건은 그대로 남았다: `SAFEDEPS_BUDGET_ENGAGE_BYTES`. 이 값을 의미 있는 명령들의 크기보다 높이면 판정이 데드라인 없이 인라인으로 실행된다 — 예산이 움직이지 않게 되면 사람이 손대게 되는 바로 그 노브(knob)를 통한 것과 같은 fail-open이다. 측정 결과: 32KB 패딩 `pip install`은 기본 engage size에서 21초에 답하고, 값을 올리면 198초가 걸린다 — 어느 쪽이든 30초 런타임 킬이 있는 상태에서다.
-
-테스트 배터리 자체가 문이 열려 있었다는 증거였다: 그 뮤테이션 검사가 engage size를 올려 게이트를 비활성화했는데, 이는 사용자가 마찰을 줄이려고 하는 바로 그 동작이다.
-
-- **engage size는 4KB로 클램프된다.** v2.15.0 비용 곡선에서 4KB 직전의 명령은 약 0.68초에 판정되며, 런타임 예산 안에서 대략 44배의 여유다. 1KB 기본값과 상한 사이를 조정하는 것이 이 노브의 용도이며, 계속 사용 가능하다.
-- **데드라인 끄기는 이름도 다른 별개의 행위다.** `SAFEDEPS_BUDGET_DISABLED`는 그 외에 아무것도 하지 않으며, 효과가 발휘될 때마다 stderr와 `advisory.log`에 스스로를 알린다. 통과한다는 것만 알고 결함을 잡아낸다는 것을 모르는 테스트는 증거가 아니다 — 그래서 off 스위치는 존재한다; 다만 조정 노브와 같은 레버는 아니다.
-- **이제 두 노브 모두 하나의 리더(reader)를 거친다.** v2.15.0과 v2.15.1에서 같은 방식으로 실패했고, 수제 파서(hand-rolled parser)가 또 하나 늘어나는 것이 둘이 다시 어긋나기 시작하는 경로다. 공백, 앞자리 `+`, 선행 0, 숫자가 아닌 값, 산술로 처리하기엔 너무 긴 값이 둘 모두에 대해 동일하게 처리되며, 모든 폴백이나 클램프는 알림으로 보고된다.
-- **노브 리더는 파싱 전에 과도하게 긴 입력을 거부한다.** 그 리더는 자식 스폰 전에, 자신이 지키는 데드라인 바깥에서 실행되며, 느린 경로로 두 번 적발되었다. v2.15.1의 0 하나씩 제거하는 루프는 2차(quadratic)였다(선행 0 40000개에서 28.9초, 60000개에서 63.2초). 이를 대체한 정규식은 상수를 약 100배 줄였지만 클래스 자체는 그대로였다 — 리더는 여전히 입력이 두 배로 늘 때마다 시간이 네 배로 늘었다(50k 0.34초, 400k 20.2초, 800k 88.0초). 그래서 0 500000개는 여전히 종단 간 224초를 태웠고, 첫 수정은 실패 지점을 한 자리 오른쪽으로 옮겼을 뿐이다. 이를 묶는 것은 입력의 길이 상한이며, 어떤 패턴이 문자열에 닿기 전에 값싼 단일 패스로 검사된다: 도달 가능한 값 중 32자 길이는 없다 — 9자리면 이미 약 31년치의 초(seconds)이기 때문이다. 거부된 값은 통째로 인용되지 않고 길이로 보고되므로, 1MB 패딩이 1MB짜리 stderr가 되지 않는다.
-
-Verification: `scripts/test/self-budget.sh`(30 ok)는 다음을 고정한다 — 예산에 따라 여전히 거부되어야 하는 패딩 설치로 engage 클램프, 두 채널에서의 알림, 상한 안에서의 조용한 조정, 기본값으로 폴백하는 숫자가 아닌 engage size, 뮤테이션 검사로서의 비활성화 경로, 그리고 값이 인용되지 않고 길이로 보고되면서도 런타임 예산 안에서 답해야 하는 0 500000개 예산.
-
-아직 열려 있는 것, 고치기보다 기록해 둔 것: 몇몇 단일 값 노브는 조정이 아니라 정본(canonical truth)을 대체한다 — `SAFEDEPS_OSV_API_URL` / `SAFEDEPS_KEV_CATALOG_URL` / `SAFEDEPS_GHSA_API_URL`은 어드바이저리 소스를 다시 가리키고, `SAFEDEPS_NPM_CLOSURE_FIXTURE_JSON`과 `SAFEDEPS_YARN_INFO_FIXTURE_NDJSON`은 클로저 해석을 캔 데이터로 대체하며, `SAFEDEPS_LEDGER_DEFAULT_TTL_DAYS`는 승인이 만료되지 않게 할 수 있고, `SAFEDEPS_ADVISORY_LOG`는 모든 우회가 관찰 가능해야 하는 채널을 다시 가리킨다. 이들은 테스트 시임(test seam)이자 미러 지원이며, 적어도 URL들에 대한 마찰 이야기는 실제다(osv.dev를 차단하는 네트워크). `safedeps/truth-source-knobs-have-no-declaration`으로 추적됨.
-
-이번 릴리스가 닫은 노브와 똑같은 형태의 노브가 하나 더 있는데, 위 열거는 첫 패스에서 그것을 놓쳤다: **`SAFEDEPS_BUDGET_CHILD`**. 이것은 부모가 스폰한 자식에 설정하는 재귀 마커라서, 이를 export하면 부모가 스스로가 자식이라고 믿고 데드라인을 통째로 건너뛴다 — 측정 결과, 12KB 패딩 `pip install`은 정상적으로 3초에 답하지만 export된 상태에서는 32초가 걸리며, stderr에도 `advisory.log`에도 아무것도 남지 않는다. 상한도 없고, 이름이 "off 스위치"를 말해 주지도 않으며, engage size와 달리 우연히 손대게 만드는 마찰 이야기도 없다. 교차 검증은 이번 릴리스가 추가한 클램프 90줄 안에서 이것을 잡아냈는데, 이것이 새 리더가 방금 만든 변경 너머를 얼마나 멀리 보는지에 대한 정직한 척도다. `safedeps/budget-child-marker-is-an-unnamed-off-switch`로 추적됨.
-
----
-
-### v2.15.3 — 부모/자식 마커가 환경에서 빠져나간다 (v2.15.2에 대한 패치)
-
-v2.15.2는 이 틈을 암시가 아니라 릴리스 노트에 이름을 명시한 채 출시되었다: 부모가 스폰한 자식에 설정하는 마커 `SAFEDEPS_BUDGET_CHILD`가 환경 변수였다. 이를 export하면 부모가 이미 자식이라고 믿고 데드라인을 통째로 건너뛴다 — 측정 결과, 12KB 패딩 `pip install`은 정상적으로 3초에 답하지만 마커가 export된 상태에서는 30초 런타임 킬을 넘어 32초가 걸리며, stderr에도 `advisory.log`에도 아무것도 남지 않는다. 이름 붙은 off 스위치 곁의 두 번째 off 스위치 — 상한도, 하는 일을 말해 주는 이름도, 기록도 없다.
-
-교차 검증은 v2.15.2가 추가한 클램프에서 90줄 떨어진 곳에서 이것을 찾아냈는데, 이것이 리더가 방금 만든 변경 너머를 얼마나 멀리 보는지에 대한 정직한 척도다.
-
-- **마커는 argv로 이동한다.** 엔진은 `safedeps-hook-entry.sh`를 통해 훅을 호출하는데, 이 스크립트는 인자를 넘기지 않으므로 환경에서 플래그로 들어갈 경로가 없다 — 그것을 설정할 수 있는 유일한 프로세스는 자식을 스폰하는 프로세스다. 검사(check)가 아니라 구조적(structural)이다.
-- **이전 변수는 조용히 무시되지 않고 보고된다.** 데드라인을 끄는 데 쓰이던 신호가 이제 아무것도 하지 않는데 아무 말도 없다면 반대 방향으로 실패한다: export하는 사람은 데드라인이 꺼져 있다고 계속 믿게 될 것이다. 이 변수는 stderr와 `advisory.log`에 알림이 나가며, 의도적인 행위로서 `SAFEDEPS_BUDGET_DISABLED`를 가리킨다.
-- **데드라인 메커니즘은 변경되지 않았다.** 트리 킬은 자식 자신의 pid에서 후손을 찾아내고, reap은 그 pid를 기다린다; 둘 다 마커를 읽지 않는다. "구조적으로 닫혔다"는 것도 여느 주장과 같은 주장이므로, 가정이 아니라 검증되었다.
-
-Verification: 실제 훅 경로(엔트리 심)를 통해 마커가 export된 상태에서, 12KB 패딩 `pip install`은 2초 예산에 대해 3초에서 `UNDECIDED`로 거부된다. 스캔 깊은 곳에 떨어진 데드라인은 여전히 11초 예산을 1초 초과하며, 이전과 같고, 고아 프로세스도 남기지 않는다. `scripts/test/self-budget.sh`(32 ok)는 export된 마커를 견디는 데드라인과 두 채널에서의 알림을 모두 고정한다.
-
-이것이 반영되면서 v2.15.2 릴리스의 "Known gap" 메모는 닫힌 것으로 정리된다: 데드라인에는 off 스위치가 하나 있고, 이름이 있으며, 로그를 남긴다.
-
-### v2.16.0 — 효과 게이트가 평범한 프로젝트에서 끝까지 실행되고, 끝나지 않은 롤백은 시끄럽게 알린다
-
-v2.15.0은 PostToolUse가 PreToolUse처럼 자기 예산에서 킬된다는 것을 측정하고 거기서 멈췄다: 효과 게이트가 실제로 30초를 넘는 지점을 아무도 측정하지 않았기 때문에, 그 노출은 구조적(structural)으로 기록되었다. 이제 하네스가 `scripts/measure/effect-gate-cost.sh`로 커밋된 채 측정해 보니, 정직한 답은 "구조적"보다 나빴다.
-
-게이트는 두 축 위에서 움직인다. 하나는 프로젝트의 lockfile 클로저(closure)다. 다른 하나는 누구의 설계도 아니었다: 게이트는 클로저 패키지 각각을 별도로 원장(ledger)에 물었고, 그 질문 하나하나가 승인된 스펙 디렉터리 전체를 훑으며 원장 파일마다 `jq` 프로세스를 두세 개 스폰했다. 즉 O(클로저 × 원장)다.
-
-- 실제 738개 항목 원장: 클로저 1 -> 10.8초, 2 -> 18.5초, **4 -> 36.6초**
-- 빈 원장, 1081개 패키지 애플리케이션 lockfile: 256 -> 24.0초, **512 -> 72.0초, 1024 -> 100.7초**
-
-클로저 4개 패키지는 거의 모든 실제 `npm install`에 해당한다. 따라서 이 측정이 이루어진 머신에서 npm의 "지연 감지(delayed detection)"는 실질적으로 감지가 아니었고, 승인된 것이 하나도 없는 새 머신에서도 평범한 애플리케이션이면 여전히 한계를 넘었다.
-
-- **원장은 패키지마다가 아니라 클로저마다 한 번 읽힌다.** 술어(predicate)는 움직이지 않았다: 단일 파일 검증기와 새 인덱스가 모두 임베드하는 jq 소스이므로, "원장이 이 스펙을 승인하는가"는 여전히 빠른 복사본과 느린 복사본이 아니라 하나의 구현만 가진다. 같은 하네스, 같은 원장, 같은 lockfile에서 클로저 4는 36.6초 -> 2.1초가 되고, 원장 단계는 클로저 4에서 512까지 약 0.23초로 평평하다. 동등성은 반영 전에 이전의 파일별 리더와 대조해 검증되었다 — 실제 원장에서 뽑은 스펙 60개(owner, transitive, absent), 60개 모두 동일한 판정.
-- **손상된 원장 항목이 인덱스를 비울 수 없다.** jq는 파싱하지 못하는 첫 파일에서 멈추므로, 인덱스는 파일을 청크 단위로 넘기고 실패한 청크를 파일 하나씩 재시도하면서 무엇이 깨졌는지 이름을 밝힌다. 비워진 인덱스는 "승인된 것이 없다"로 읽히며, 이는 깨끗한 설치의 롤백이다 — 원장 파일 하나의 오타가 그 대가를 치르게 해서는 안 된다.
-- **남은 것은 주장이 아니라 범위로 진술된다.** OSV/KEV 패스는 여전히 패키지별이다. 프로바이더 캐시가 차가운 같은 머신에서 게이트는 이제 **390개 패키지** 클로저 부근에서 30초를 넘는다. 그 아래에서는 npm의 지연 감지가 실제로 작동하고, 그 위에서는 런타임이 게이트를 킬하고 설치가 판정되지 않는다. 그 숫자는 호스트, 네트워크, 캐시의 속성이다 — 하네스가 커밋되어 있으므로 다음 읽는 사람이 이 숫자를 물려받는 대신 자신의 것을 측정한다.
-
-### 중단된 롤백은 예전에 아무것도 남기지 않았다
-
-게이트는 거부할 수 없다; PostToolUse 시점에는 이미 설치가 실행된 뒤다. 나쁜 클로저에 대한 게이트의 답은 롤백이며, 그 롤백은 `reorg.log` 항목과 메시지를 마지막에, `node_modules` 재빌드 — 가장 느린 단계 — 이후에 썼다.
-
-`scripts/measure/rollback-kill-state.sh`로 측정했는데, 이 스크립트는 샌드박스에서 실제 훅 둘 다를 구동하고 통제된 지점에서 post 훅을 킬한다:
-
-- 롤백 전에 킬: 플래그된 설치가 그대로 남고, `reorg.log` **0줄**
-- 롤백 도중에 킬: 프로젝트가 완전히 되돌려지고, `reorg.log` **0줄**, 메시지 없음
-
-두 번째가 더 나쁘다. 첫 번째는 게이트가 실행되지 않은 것처럼 보이고, 두 번째는 사용자의 설치가 명시된 이유 없이 스스로를 되돌린 것처럼 보인다 — 사람들이 게이트를 불신하고 우회하는 법을 배우는 방식이다.
-
-- **의도는 행위보다 먼저 쓰인다.** 프로젝트, 스냅샷, 이유, 단계를 명명하는 저널 항목이 첫 파괴적 단계 전에 쓰이고, 롤백이 스스로를 보고하면 지워진다. 실행을 넘어 살아남는 항목이 *바로* 그 보고다.
-- **다음 Bash 호출이 그것을 보고한다 — 한 번.** PostToolUse는 설치에서만이 아니라 모든 Bash 호출에서 발화하므로 보고가 즉시 도착한다. 항목을 `~/.safedeps/rollback-incidents/`로 옮기고, 완료된 롤백이 쓰는 바로 그 `reorg.log`에 `REORG INTERRUPTED`를 덧붙이며, 어느 단계까지 도달했고 무엇이 트리를 복구하는지 밝힌다. 이후의 모든 명령에서 잔소리하는 대신, 한 번 보고되고 영원히 보관된다.
-- **이것은 원자성(atomicity)이 아니며, 그렇다고 주장하지도 않는다.** safedeps는 npm 트리 재빌드의 원자성을 소유하지 않는다. 그것이 소유하는 것은 끝나지 않은 롤백이 조용한지 여부다.
-- **메시지 채널 하나.** 엔진은 이 훅의 stdout을 단일 JSON 객체로 파싱하므로, 훅의 모든 메시지는 이제 하나의 이미터(emitter)를 통해 나간다; 두 번째 객체는 추가 메시지가 아니라 유실된 메시지다.
-
-kuma-server(포트 4312)에 연결할 수 없어 CLI 번역 라우트를 사용하지 못했습니다. Markdown 보존 규칙을 그대로 지켜 직접 번역한 결과만 드립니다.
+- **소스 플래그는 명령이 아니라 자기 인자를 소비한다.** `-r`·`-c`·`-e` 가 보이면 설치 전체를 침묵시켰다. 그런데 `-c` 는 애초에 소스 플래그가 아니다 — 제약 파일은 버전을 한정할 뿐 설치 대상은 명령줄에 따로 온다. 그래서 `pip install -c constraints.txt evil` 이 기록 없이 `evil` 을 설치했다. `-r requirements.txt evil` 과 `-e . evil` 도 같은 방식으로 침묵했다. 이제 각 플래그는 자기 인자 하나만 소비한다.
+- **URL 의 `@` 는 버전이 아니다.** 이미 pin 된 토큰을 건너뛰려던 `@` 검사가 VCS URL 의 user 필드까지 잡아서, `git+ssh://git@host/evil.git` 은 기록되지 않고 `git+https://host/evil.git` 은 기록됐다 — 같은 설치가 전송 방식으로 갈렸다.
+- **maven 은 좌표를 플래그에 싣는다.** `-Dartifact=<group>:<name>` 은 피연산자 순회에 아예 안 걸려서, maven 의 실제 관용구가 기록 밖에 있고 아무도 안 쓰는 형태(`mvn dependency:get evil`)가 안에 있었다. 이제 두 필드 좌표는 기록되고 세 필드는 침묵한다. maven 이 버전 없는 형태를 받는지는 확인 못 했다 — 측정 머신에 maven 이 없다 — 그리고 기록에서 미확인은 보고 쪽으로 푼다: 군더더기 한 줄의 비용은 한 줄이고, 빠진 한 줄의 비용은 불변식이다.
+- **작업 트리 설치는 빠진다.** `pip install .` 과 `pip install ./pkg` 는 가져오는 게 아니라 트리에서 빌드하므로 패키지를 지목하지 않는다. `example.com/evil` 같은 모듈 경로는 로컬 경로가 아니라 계속 기록된다.
+- **문서가 경계를 플래그로 설명하던 것을 그만뒀다.** 기준은 패키지를 지목하는지다. README 는 파일 기반 설치가 "패키지를 지목하지 않는다" 고 적었는데 `-c` 에는 처음부터 사실이 아니었다.
+- **`SKILL.md` 도 이제 이 경계를 말한다.** 에이전트가 읽는 매니페스트인데 "설치 전에 check 를 돌려라" 라고만 하고 버전을 빼면 아무것도 검사되지 않는다는 사실을 말하지 않았다.
 
 ### 검증
 
-- `npm test` 그린. e2e 배터리에서 양방향이 모두 고정되어 있다: 중단된 롤백은 보고되고, 로그에 남으며, 인시던트로 유지되고, 반복되지 않는다; 완료된 롤백은 저널 항목을 남기지 않으므로, 깨끗한 실행은 절대 중단을 외치지 않는다.
-- 원장(ledger) 인덱스 판정은 owner, transitive, expired, revoked, absent 스펙과, 인덱스를 비워서는 안 되는 읽을 수 없는 항목에 걸쳐 고정되어 있다.
-- 두 측정 하네스 모두 설명이 아니라 커밋되어 있다. 아무도 재현할 수 없는 수치는 장식일 뿐이기 때문이다.
+- 106케이스 코퍼스를 v2.13.2 와 대조: 판정 변화 0 — 수리가 관측 층 안에 머문다
+- 모든 경계를 `scripts/test/consumer-forms.sh` 에 양방향으로 고정. 커버리지가 아예 없던 maven·`git+ssh`·`-r <파일> <패키지>` 행 포함
+- note 는 코드 재독이 아니라 기록의 가장자리를 적대적으로 탐침해서 나왔다
+
+---
+
+### v2.14.2 — 생태계별 플래그 표 (v2.14.1 의 패치)
+
+v2.14.1 의 수리가 pip 의 플래그 표를 전 생태계에 적용했다. `-t` 와 `-f` 는 pip 에선 값을 받지만 go(`go get -t`)·gem(`--force`)·cargo 에선 불리언이라, 순회가 뒤따르는 패키지를 삼켰다. `go get -t example.com/evil` 은 침묵하고 `gem install --force evil` 은 기록됐다 — 같은 설치가 작성자가 고른 철자로 갈렸다. v2.14.1 이 `-c` 에서 진단한 바로 그 실수를 한 축 옆에서 반복한 것이다: 플래그를 의미가 아니라 형태로 묶었다. 작성자가 아니라 검증자가 잡았다.
+
+값을 받는 플래그는 이제 생태계별로 갈라 판정하고, 모르는 플래그는 값을 안 받는다고 가정한다 — 그쪽으로 틀리면 군더더기 한 줄이지만 반대로 틀리면 이 기록이 잡으려던 설치를 놓친다. `-e` 는 이제 아무것도 소비하지 않는다. 그 인자를 다른 토큰과 똑같이 판정하므로 `-e .` 는 작업 트리 빌드로 빠지고 `-e git+ssh://…` 는 fetch 로 남는다. maven 좌표 플래그는 goal 양쪽 어디에 있든 읽는다.
+
+경계 하나는 고치는 대신 의도로 고정했다: `mvn -Dartifact=… dependency:get` 은 install **인식**(`mvn dependency:get`)이 goal 앞의 플래그를 매치하지 않아 기록에 도달조차 못 한다. 그건 명령 인식의 몫이고, 그걸 넓히는 건 `ARCHITECTURE.md` 가 키우지 않기로 한 carrier 열거다.
+
+v2.13.2 의 `git archive` 와 대조 검증: 판정은 불변이고, 그때 기록되던 registry-fetch 형태는 지금도 전부 기록된다. 기록에서 빠진 형태가 둘 있다 — `pip install .` 과 `pip install ./local-pkg` — 이건 v2.14.1 이 선언하고 배터리가 고정한 작업 트리 경계다(가져오는 게 아니라 트리에서 빌드한다). 이걸 "기록→침묵 0" 이라는 전역 주장으로 쓴 것이 이 플랜에서 두 번 반증돼서, 이제 주장 범위를 배터리가 실제로 검사하는 것에 맞춘다.
+
+---
+
+### v2.14.3 — 같은 클래스, 세 번째 (v2.14.2 의 패치)
+
+v2.14.2 는 값 소비 플래그를 생태계별로 갈랐다고 발표했지만 실제로 게이트한 건 `-t` 와 `-f` 뿐이었다. `-r` 과 `-c` 는 무조건이었고, gem 의 `-r` 은 불리언 `--remote` 다 — 그래서 `gem install -r evil` 은 침묵하고 `gem install --remote evil` 은 기록됐다. 같은 설치가 철자로 갈리는 일이 이 플랜에서 세 번째이고, 이번엔 출하된 산문이 코드보다 뒤처진 게 아니라 앞서 있었다.
+
+이제 표 전체를 pypi 계열로 게이트한다 — 이 철자들 중 어느 것이라도 인자를 소비하는 건 그 계열뿐이다.
+
+검증 문장도 다시 쓰는 대신 범위를 바꿨다. "기록→침묵 0" 은 여기서 두 번 반증됐다. `pip install .` 과 `pip install ./local-pkg` 는 실제로 기록에서 빠졌고, 그건 v2.14.1 이 선언하고 배터리가 고정한 작업 트리 경계다. 이제 주장을 registry-fetch 형태로 좁혔다 — 그게 배터리가 실제로 검사하는 것이다. **작성자 자신의 코퍼스가 반증할 수 없는 전역 주장은 검증이 아니다.**
+
+---
+
+### v2.14.4 — 기록의 단형 함정 (v2.14.3 의 패치)
+
+`--index-url` 은 pypi 값 소비 테이블에 있는데 단형 `-i` 가 빠져 있었다. 이건 설치를 숨긴 게 아니라 **없는 설치를 만들어냈다.** 미러 URL 이 피연산자로 읽혀서 `pip install -i <mirror> -r requirements.txt` 가 군더더기 기록을 남겼고 `pip install -i <mirror>` 도 그랬다. 이 플랜이 이미 고친 침묵 셋과 같은 결함이 반대 방향을 가리킨 것이고, 그래서 이제 배터리에 양방향이 다 들어간다. 한 방향만 고치면 반대쪽이 남는다.
+
+같이 고친 것: "이미 버전이 박힌 설치는 안 남는다" 는 너무 셌다. 추출기는 `cargo add --vers` 는 읽지만 `cargo install --version` 은 못 읽어서, 버전이 있는데도 원장 게이트가 안 도는 경우가 있고 그때 기록이 찍히는 건 옳다. 이제 "추출기가 읽는 형태로 pin 된" 이라고 적고, 놀랍지만 참인 그 행을 배터리에 고정해 떠도는 줄로 안 읽히게 했다.
+
+침묵 둘은 바꾸지 않고 고정만 했다: `pip install --index-url <url>` 단독은 패키지를 안 지목하고, `pip install /tmp/evil.whl` 은 파일시스템에서 설치한다. 둘 다 이미 맞았고 이제 조용히 어긋날 수 없다.
+
+---
+
+### v2.14.5 — 이상해 보이지만 참인 것을 고정하고, 못 세는 숫자를 그만 쓴다 (v2.14.4 의 패치)
+
+verdict 밖에 있던 검증자 note 셋을 한 묶음으로 닫았다.
+
+`bundle add evil --version 1.0.0` 은 cargo 형태와 **함께** 지목됐는데 cargo 행만 배터리에 실렸다. 둘 다 버전이 있는데도 기록된다 — 추출기가 `cargo add --vers` 는 읽지만 `cargo install --version` 도 `bundle add --version` 도 못 읽어서 원장 게이트가 실제로 안 돌기 때문이다. 이제 둘 다 고정한다. 이유도 같다: 참이지만 놀라운 기록이 떠도는 줄로 읽히면 안 된다.
+
+`pip install --proxy <url> -r requirements.txt` 는 여전히 군더더기 기록을 남기고, 그걸 **고치지 않고 고정**했다. 모르는 플래그는 값을 안 받는다고 가정하는데, 반대로 가정하면 이 기록이 잡으려던 설치를 놓친다. 대신 값 테이블을 늘리는 건 이 작업이 네 번 데인 열거다. 이 행이 그 트레이드오프를 보이게 만든다 — 나중에 버그로 재발견되게 두지 않는다.
+
+마지막 하나는 코드가 아니라 증거에 대한 것이다. 직전 릴리스가 스크래치 코퍼스에서 센 "159형태" 를 인용했는데 읽는 사람이 재구성할 수 없다. 실체 주장은 독립 재현으로 버텼지만 숫자는 장식이었고, **아무도 못 세는 숫자는 검증이 아니면서 검증처럼 읽힌다.** `AGENTS.md` 가 이제 재현 가능한 계수를 요구한다 — 배터리 형태 수, `npm test` 의 ok 줄 수, 아니면 커밋된 코퍼스.
+
+---
+
+## v2.15.0 — guard 가 자기 예산으로 답해서 런타임이 판정 중에 죽이지 못한다 (출시)
+
+Status: v2.15.0 로 출시.
+
+v2.13.0 이 30s 훅 예산을 넘기면 fail-open 이라는 사실을 기록하고, 그것을 스캐너 선형화의 근거로 남겼다. 거기서 멈춘 게 틀렸다. 선형화는 교차점을 밀 뿐 그 너머의 동작을 정하지 않고, 그 너머에서 게이트는 아무 말 없이 사라졌다. 커맨드를 ~30KB 로 패딩하는 게 공격의 전부였고, 커맨드 게이트가 advisory 가 아니라 권위인 `pip`·`cargo`·`go`·`gem` 에서는 스캐너를 전혀 몰라도 되는 보편 우회다.
+
+런타임의 타임아웃 동작은 우리 소관이 아니다. 그게 발동하기 전에 답을 내는 것은 우리 소관이다.
+
+### 무엇이 바뀌었나
+
+- **guard 가 자기 예산을 갖는다** — 런타임 예산보다 작다(등록된 30s 대비 기본 20s). 판정을 자식에서 돌리고, 기한까지 답이 없으면 guard 가 대신 답한다: deny. 판정하지 못한 설치는 돌면 안 되기 때문이다. 런타임이 판정 중에 죽일 기회 자체가 없어지므로 fail-open 할 것이 남지 않는다.
+- **그 deny 는 자기가 어떤 종류의 deny 인지 말한다.** "못 끝냈다" 와 "찾았다" 는 다른 주장이고, 구분 못 하는 독자는 게이트를 우회하는 법을 배운다. 사유는 `UNDECIDED, not unsafe` 로 시작해 아무것도 탐지되지 않았음을 밝히고 대신 무엇을 하면 되는지 말한다. 다른 모든 우회·불가용처럼 `advisory.log` 에 남는다.
+- **engage 크기 아래 커맨드는 아무 비용도 안 낸다.** 커맨드가 예산 근처에 갈 만큼 커지기 전까지 이 기계장치는 정수 비교 하나다(기본 1KB, 30s 예산 대비 ~0.1s 실측 — 약 300배 여유). engage 크기는 성능 게이트지 보안 경계가 아니다. 보안 경계는 벽시계 예산이고, 이 숫자를 잰 머신보다 빠르든 느리든 정직하다.
+- **마감은 자식의 프로세스 트리 전체에 집행되고 에스컬레이션한다.** 셸은 포그라운드 외부 명령이 도는 동안 시그널에 반응하지 않고, 판정의 비싼 부분이 정확히 그런 명령이다 — 그래서 자식 셸에만 시그널을 보내면 그 명령이 끝나는 시점에 닿는다(20s 예산에서 9.1s 지연 실측). 자체 예산이 만들려던 여유가 통째로 사라진다. 하위 프로세스는 이름 패턴이 아니라 자식 pid 에서 유도해 TERM 후 짧은 유예 뒤 KILL 한다. 버틸 수 있는 마감은 마감이 아니다.
+- **첫 판본은 배터리가 못 보는 결함을 실었고, 어떻게 그랬는지가 기록할 값이다.** 시그널 받은 자식이 상태 락을 흘릴까 봐 `trap ... EXIT TERM INT` 를 "보험" 으로 넣었다. `trap` 에 시그널을 적으면 기본 처분이 대체되므로 자식이 마감에서 안 죽고 판정을 끝까지 했다 — 16KB 패딩 `pip install` 이 30s 런타임 예산에 대해 38.9s 에 답했다. 배터리의 예산 초과 케이스가 전부 1s 예산이라 마감이 스캔 초반(자식이 외부 명령 사이에 있어 시그널을 즉시 받는 구간)에 떨어졌고, 그래서 코퍼스가 초록으로 남았다. 지금 그 자리를 덮는 회귀는 마감이 스캔 깊숙이 떨어지도록 입력을 잡고(12KB / 11s 예산: 집행되면 ~12s, 아니면 ~17s) **초과분**을 단언한다 — 런타임이 실제로 신경 쓰는 양이 그것이다.
+- **기한은 워치독 서브셸이 아니라 guard 자신이 폴링한다.** 워치독은 고정 간격으로 자야 하고, `sleep` 중인 워치독을 죽여도 그 sleep 이 끝나기 전에는 돌아오지 않는다 — 실측으로 그게 engage 된 모든 호출을 다음 정수 초로 올림했다(788ms 판정이 1050ms). 부모에서 폴링하면 50ms 에서 시작해 1s 까지 배로 늘어나므로 빠른 판정은 첫 스텝만 잃는다.
+
+### 검증 / 실측 경계
+
+- 개발 머신 비용 곡선: 1KB → 0.1s, 4KB → 0.68s, 8KB → 2.5s, 16KB → 9.6s, 24KB → 21.4s, 28KB → 29.3s, 32KB → 37.8s. 30s 런타임 예산은 28KB 와 32KB 사이에서 교차하며, v2.13.0 이 기록한 경계를 반대편에서 재현한다.
+- 예산이 engage 된 상태에서 32KB 커맨드는 20s 예산 대비 ~20.2s 에 거부된다: 런타임 시계에 ~9.8s 를 남기고 답이 나온다. 초과분은 폴링 한 스텝(≤1s) 으로 묶인다.
+- engage 지점의 기계장치 오버헤드, 같은 입력 양방향: 4KB 684ms → 820ms, 8KB 2482ms → 2623ms. engage 크기 아래에서는 자식도 없고 측정 가능한 변화도 없다.
+- `scripts/test/self-budget.sh` 가 양방향을 고정하고 `npm test` 에 합류했다: 예산 초과 커맨드와 패딩된 `pip`/`cargo`/`go`/`gem` 설치는 거부되고, 그 거부는 undecided 로 표시되며 적발처럼 쓰이지 않고 `advisory.log` 에 남는다. 양성 커맨드·`npm run`·미승인 설치·engage 됐지만 예산 내인 커맨드는 종전과 똑같이 판정된다.
+- 배터리는 자체 mutation 검사를 갖는다: 예산을 끄면 동일한 예산 초과 커맨드가 그대로 통과한다. 초안은 그 입력을 예산의 ~1.3배로 잡아 거짓 통과를 냈고, 그래서 커밋본은 ~5배 마진을 쓴다.
+
+### npm 이 받쳐준다는 가정은 실측을 못 견뎠다
+
+v2.13.0 은 커맨드 게이트의 예산을 넘어서도 npm 은 PostToolUse 효과게이트가 "여전히 집행 권위" 라고 적었다. 그건 아무도 재본 적 없는 훅에 대한 가정이었다. PreToolUse 에 썼던 같은 프로토콜로 2026-08-04 실측했다 — 샌드박스 프로젝트, 시작과 완료를 각각 기록하는 훅, 예산 내 통제군과 예산 초과 실험군:
+
+- 통제군(5s 예산에 1s 작업): 시작하고 완료했다.
+- 실험군(5s 예산에 20s 작업): 시작했고 완료하지 못했다.
+
+**PostToolUse 도 자기 예산에서 죽는다.** 효과게이트는 같은 30s 로 등록돼 있고, 그 작업(`npm ci`, `npm install`, `npm rebuild`, closure 전체 OSV 배치)은 safedeps 가 통제하는 것이 아니라 사용자 프로젝트와 네트워크에 매인다. 그래서 npm 도 같은 노출을 갖고, 그 종류는 커맨드 게이트보다 나쁘다: pre 훅의 죽음은 판정 못 한 커맨드 하나를 통과시키지만, post 훅의 죽음은 롤백 도중에 떨어질 수 있다.
+
+이번 릴리스는 그걸 고치지 않는다. 설치 후 게이트는 deny 할 수 없으므로("커맨드가 이미 돌았다") "못 끝냈다" 에 대한 답이 별개의 설계 문제이고, `safedeps/effect-gate-killed-mid-rollback` 으로 추적한다. 여기서 고친 것은 주장이다 — 문서가 더는 예산 너머에서 npm 이 커버된다고 말하지 않는다. 실제로 아니기 때문이다.
+
+---
+
+### v2.15.1 — 자체 예산에 상한이 생겼다. 사용자가 옮길 수 있는 경계는 경계가 아니라 기본값이니까 (v2.15.0 패치)
+
+v2.15.0 의 주장 전체가 "가드가 런타임 예산 너머로 사라지는 대신 자기 예산 안에 답한다" 였다. 환경변수 하나가 그걸 무효화했다 — `SAFEDEPS_SELF_BUDGET_SECONDS` 에 상한이 없었고, 등록된 30s 훅 타임아웃 위의 값은 kill 권한을 런타임에 되돌려준다. 조용히, 그리고 릴리스 이전과 똑같은 fail-open 으로.
+
+그런 값을 넣을 동기가 아주 평범하다는 점이 이걸 닫을 이유다. 큰 커맨드에서 `UNDECIDED` 거부를 만난 사람은 "예산이 짧네" 로 읽고 올린다. 무언가를 끄려는 의도는 전혀 없고, 그래도 경계는 사라진다.
+
+- **값은 25s 로 클램프된다.** 클램프는 한 방향이다 — 더 낮은 값은 준 그대로 존중된다. 짧은 예산은 더 일찍 거부할 뿐이기 때문이다. `SAFEDEPS_RUNTIME_BUDGET_SECONDS`(30) 와 `SAFEDEPS_SELF_BUDGET_MAX_SECONDS`(25) 는 그들이 묶는 예산 바로 옆의 이름 있는 상수다.
+- **30s 는 하드코딩이고, 그 이유를 상수 옆에 적었다.** 훅 페이로드는 런타임 예산을 싣지 않고 여러 settings 파일의 등록이 모두 발화하므로, 가드는 자기를 띄운 등록을 알 수 없다. 대신 safedeps 자신이 등록하는 숫자(인스톨러의 `PRE_HOOK_TIMEOUT_SECONDS`)를 명시하고, smoke 테스트가 두 상수를 함께 고정해 인스톨러만 바뀌고 가드가 낡은 숫자로 계산하는 상태를 막는다. 손으로 30s 아래로 고친 등록은 이 상수가 알 수 있는 범위 밖이다.
+- **5s 여유는 반올림한 숫자가 아니라 가드가 예산 창 바깥에서 쓰는 비용이다.** 마지막 폴 스텝 대기 최대 1s, KILL 전 TERM 유예 최대 0.5s, reap·`jq`·프로세스 시작 약 0.1s. 구조적 최악 1.6s 이고, 실측 종단 초과분은 0.73~1.05s 로 커맨드 4KB 에서 256KB 까지 평평했다(2026-08-04, 30s kill 을 잰 것과 같은 머신).
+- **클램프는 관측된다.** stderr 로 알리고, `advisory.log` 에 기록하고, `UNDECIDED` deny 사유에 명시한다. 조용히 깎으면 사용자는 자기가 준 값이 도는 줄 알고, 다음 이상 현상을 한 번도 참이었던 적 없는 숫자를 놓고 디버깅한다.
+
+- **클램프 첫 판이 같은 구멍을 다른 문법으로 그대로 갖고 있었고, 크로스 검증이 릴리스 전에 잡았다.** `^[0-9]+$` 로 검증하고 마감은 원본 문자열을 `$(( ))` 에 넘겼는데, bash 산술이 그 정규식보다 넓은 문법을 받는다. 그래서 `+40`·` 40`·`0x28` 은 검증을 통과 못 해 클램프를 건너뛴 뒤 그대로 40 으로 평가됐다 — `+40` 에서 64KB 커맨드가 41s 동안 답을 내지 않았다. 런타임 kill 너머다. 한 값에 문법이 둘인 게 결함이고, 이제 값은 한 번 정규화되며(앞뒤 공백과 선행 `+` 는 친 사람 의도대로 읽는다) 산술에는 정규화된 숫자만 들어간다. 그 밖의 값은 예산이 아니라서 기본값을 쓰고, 클램프와 같은 채널로 알린다. `10#` 이 `08` 을 8진수 오류가 아니라 8 로 읽게 한다.
+
+- **크로스 검증 2라운드가 같은 형태를 한 층 아래, 문법이 아니라 값의 범위에서 찾았다.** 문법을 하나로 만들어도 `^[0-9]+$` 는 자릿수를 세지 않고, bash 정수는 64비트라 조용히 감긴다. 음수로 감긴 값은 상한보다 크지 않아 클램프를 그대로 통과했고, 마감 곱셈이 한 번 더 감아 영영 오지 않는 시각을 만들었다 — 30자리 예산이 600s 를 넘겨도 답을 내지 않았다. 이제 자릿수를 산술 이전에 문자열 영역에서 검사한다. 아홉 자리를 넘으면 상한 위인 게 분명하므로 그대로 클램프한다 — "상한 위는 클램프한다" 는 규칙에 표기법에 따른 예외를 두지 않는다. 아홉 자리는 초로 약 31년이다.
+
+검증: `scripts/test/self-budget.sh` 에 600s 예산 + 64KB 패딩된 `pip install` 케이스가 추가됐다. 이 입력의 자연 스캔은 개발 머신에서 300s 를 넘으므로 답을 런타임 30s 안으로 되돌릴 수 있는 것은 상한뿐이다 — 약 26s 에 `UNDECIDED` 로 거부되고 클램프가 세 곳 모두에 나타난다. 같은 64KB 케이스를 `" 40"` 으로 한 번 더 돌려 문법 수정을 종단으로 고정했고(41s 였던 것이 25~26s), `+40`·`0x28`·`abc`·`-5`·`4.5`·`08` 은 값싼 파싱 케이스로 건다. 오버플로 라운드로 64KB + 30자리 예산(자릿수 게이트 전 600s+, 후 26s), 64비트 경계값, 그리고 길이로 판정되면 안 되는 0 패딩 짧은 값을 추가했다. 상한 아래 값은 손대지 않고 알리지도 않는다. `scripts/test/smoke.sh` 는 가드의 런타임 예산 상수를 인스톨러가 등록하는 타임아웃에 고정하고, 상한이 그 아래인지 검사한다.
+
+---
+
+### v2.15.2 — engage 크기는 마감을 튜닝할 뿐, 더는 끄지 못한다 (v2.15.1 패치)
+
+v2.15.1 이 예산에 상한을 씌웠다. 그런데 예산이 **돌지 말지를 정하는 조건**은 그대로 남았다: `SAFEDEPS_BUDGET_ENGAGE_BYTES`. 문제되는 커맨드보다 크게 올리면 판정이 마감 없이 인라인으로 돌아간다 — 예산이 안 움직이게 되면 사람이 다음으로 잡는 손잡이로 같은 fail-open 이 돌아온다. 실측: 32KB 패딩된 `pip install` 이 기본 engage 에서 21s, 올린 상태에서 198s. 런타임은 어느 쪽이든 30s 에 죽인다.
+
+문이 열려 있다는 증거는 배터리 자신이었다 — mutation check 가 engage 크기를 올려 게이트를 껐고, 그건 사용자가 마찰을 줄일 때 하는 동작과 같다.
+
+- **engage 크기를 4KB 로 클램프한다.** v2.15.0 비용 곡선에서 4KB 바로 아래 커맨드는 약 0.68s 에 판정되므로 런타임 예산의 약 44배 안쪽이다. 기본값 1KB 와 상한 사이의 튜닝은 본래 용도이고 그대로 남는다.
+- **마감을 끄는 것은 이름이 다른 별개의 행위다.** `SAFEDEPS_BUDGET_DISABLED` 는 다른 일을 하지 않고, 발동할 때마다 stderr 와 `advisory.log` 에 자기를 알린다. 통과만 알고 결함을 잡는지는 모르는 테스트는 증거가 아니므로 off 스위치는 존재한다 — 다만 튜닝 레버와 같은 것이 아닐 뿐이다.
+- **두 노브가 이제 하나의 리더를 쓴다.** v2.15.0·v2.15.1 에서 같은 방식으로 깨졌고, 손으로 짠 두 번째 파서는 다시 갈라지는 경로다. 공백·선행 `+`·선행 0·비숫자·산술이 담지 못하는 길이를 둘 다 똑같이 처리하고, 모든 낙하와 클램프를 알린다.
+- **노브 리더가 너무 긴 입력을 파싱 전에 거절한다.** 이 리더는 자식 스폰 이전, 자기가 지키는 마감 바깥에서 돌고, 두 번 느린 길이었다. v2.15.1 의 0 제거 루프가 O(n²)였고(선행 0 4만 개 28.9s, 6만 개 63.2s), 그걸 대체한 정규식은 상수를 약 100배 줄였을 뿐 복잡도 클래스를 그대로 뒀다 — 입력이 두 배면 시간이 네 배였고(50k 0.34s, 400k 20.2s, 800k 88.0s) 0 50만 개는 여전히 종단 224s 였다. 1차 수리는 실패 지점을 한 자릿수 오른쪽으로 민 것뿐이다. 실제로 한계를 씌우는 건 **입력 길이 상한**이고, 어떤 패턴이 문자열에 닿기 전에 한 번의 값싼 통과로 판정된다 — 아홉 자리가 이미 초로 약 31년이라 도달 가능한 값 중 32자를 넘는 것은 없다. 거절된 값은 통째로 인용하지 않고 길이로 보고하므로, 패딩 1MB 가 stderr 1MB 가 되지 않는다.
+
+검증: `scripts/test/self-budget.sh`(30 ok)가 engage 클램프(패딩된 설치가 여전히 예산으로 거부되어야 함), 두 채널 알림, 상한 내 조용한 튜닝, 비숫자 engage 의 기본값 낙하, mutation check 로서의 disable 경로, 그리고 0 50만 개 예산이 런타임 예산 안에 답하고 그 값이 통째로 인용되지 않고 길이로 보고되는 것을 고정한다.
+
+여전히 열려 있고 고치지 않고 기록만 한 것: 값 하나로 **튜닝이 아니라 정본을 갈아치우는** 노브가 여럿이다 — `SAFEDEPS_OSV_API_URL`·`SAFEDEPS_KEV_CATALOG_URL`·`SAFEDEPS_GHSA_API_URL` 은 자문 출처를 옮기고, `SAFEDEPS_NPM_CLOSURE_FIXTURE_JSON`·`SAFEDEPS_YARN_INFO_FIXTURE_NDJSON` 은 closure 해석을 통조림 데이터로 대체하며, `SAFEDEPS_LEDGER_DEFAULT_TTL_DAYS` 는 승인을 영구화할 수 있고, `SAFEDEPS_ADVISORY_LOG` 는 모든 우회가 관측돼야 하는 그 채널 자체를 옮긴다. 테스트 seam 이자 미러 지원이고, 적어도 URL 쪽은 마찰 서사가 실재한다(osv.dev 를 막는 망). `safedeps/truth-source-knobs-have-no-declaration` 로 추적한다.
+
+이번 릴리스가 닫은 것과 같은 형태의 노브가 하나 더 있고, 위 열거는 1차에서 그걸 놓쳤다: **`SAFEDEPS_BUDGET_CHILD`**. 부모가 스폰한 자식에게 세팅하는 재귀 마커라, 이걸 export 하면 부모가 자기를 자식으로 알고 마감을 통째로 건너뛴다 — 실측으로 12KB 패딩된 `pip install` 이 평소 3s, export 상태에서 32s 였고 stderr 에도 `advisory.log` 에도 아무것도 안 남는다. 상한이 없고, 이름이 off 스위치라고 말하지 않으며, engage 크기와 달리 우연히 도달할 마찰 서사도 없다. 크로스 검증이 이번에 넣은 클램프에서 90줄 안쪽에서 찾아냈다 — 방금 자기가 만든 변경 너머를 사람이 얼마나 못 보는지의 정직한 척도다. `safedeps/budget-child-marker-is-an-unnamed-off-switch` 로 추적한다.
+
+---
+
+### v2.15.3 — 부모/자식 마커가 환경 밖으로 나간다 (v2.15.2 패치)
+
+v2.15.2 는 이 구멍을 암시가 아니라 이름으로 릴리스 노트에 싣고 나갔다: 부모가 스폰한 자식에게 세팅하는 마커 `SAFEDEPS_BUDGET_CHILD` 가 환경변수였다. export 하면 부모가 자기를 이미 자식으로 알고 마감을 통째로 건너뛴다 — 실측으로 12KB 패딩된 `pip install` 이 평소 3s, 마커 export 상태에서 32s 였고 런타임 kill 30s 너머인데 stderr 에도 `advisory.log` 에도 아무것도 안 남았다. 이름 붙은 스위치 옆의 두 번째 off 스위치, 상한도 이름도 기록도 없이.
+
+크로스 검증이 v2.15.2 가 넣은 클램프에서 90줄 거리에서 찾아냈다 — 방금 자기가 만든 변경 너머를 사람이 얼마나 못 보는지의 정직한 척도다.
+
+- **마커가 argv 로 다닌다.** 엔진은 인자를 넘기지 않는 `safedeps-hook-entry.sh` 를 통해 훅을 부르므로 환경에서 이 플래그로 가는 경로가 없다 — 세팅할 수 있는 유일한 프로세스는 자식을 스폰하는 그 프로세스다. 검사가 아니라 구조다.
+- **옛 변수는 무시하되 침묵하지 않는다.** 마감을 끄던 신호가 아무 말 없이 무력해지면 반대 방향으로 실패한다 — export 한 사람은 마감이 꺼져 있다고 계속 믿는다. stderr 와 `advisory.log` 에 알리고, 의도적으로 끄려면 `SAFEDEPS_BUDGET_DISABLED` 를 쓰라고 가리킨다.
+- **마감 기계장치는 그대로다.** 트리 kill 은 자식 자신의 pid 에서 하위를 유도하고 reap 은 그 pid 를 기다린다. 둘 다 마커를 읽지 않는다. 가정이 아니라 확인했다 — "구조적으로 닫힌다" 도 다른 주장과 같은 주장이기 때문이다.
+
+검증: 실제 훅 경로(엔트리 shim)에 마커를 export 한 상태로 12KB 패딩된 `pip install` 이 2s 예산에서 3s 에 `UNDECIDED` 거부된다. 마감이 스캔 깊숙이 떨어지는 경우도 11s 예산을 1s 초과로 종전과 같고, 고아 프로세스를 남기지 않는다. `scripts/test/self-budget.sh`(32 ok)가 export 된 마커에도 마감이 살아있는 것과 두 채널 알림을 고정한다.
+
+이게 랜딩하면서 v2.15.2 릴리스의 "Known gap" 항목은 닫힌다: 이 마감의 off 스위치는 하나이고, 이름이 있고, 기록된다.
+
+---
+
+### v2.15.4 — 수동 설치 문서가 설치기와 같은 것을 등록한다 (v2.15.3 패치)
+
+`SKILL.md`·`README.md`·`README.ko.md` 는 수동 설치하는 독자에게 훅 커맨드로 `safedeps-pre-guard.sh` 와 `safedeps-post-verify.sh` 를 등록하라고 말했다. 설치기가 등록하는 것은 `safedeps-hook-entry.sh pre|post` 이고 `AGENTS.md` 도 셔틀이 등록 커맨드라고 못 박아 뒀다 — 셔틀이 생긴 이래로 문서는 도구가 실제로 하는 것과 다른 설치를 서술해 왔다. `README.md` 는 그 블록 200줄 위에서 셔틀을 설명하기까지 한다.
+
+문서대로 해도 설치는 막히니까 깨져 보이지 않았다. 빠지는 건 셔틀의 존재 이유 전체다 — 체크아웃이 깨진 상태(머지 중, 저장이 덜 됨, 훅 크래시)를 조용히 꺼진 게이트가 아니라 설명이 붙은 fail-closed 거부로 바꾸는 것. 독자는 자기가 그 보호 없이 돌고 있다는 걸 알 방법이 없었다.
+
+- **수동 JSON 이 셔틀을 등록한다.** 설치기가 쓰는 것과 같은 30s 타임아웃까지 포함하고, 왜 등록 커맨드가 훅이 아니라 셔틀인지 한 줄로 말한다.
+- **`SKILL.md` 는 더 이상 frontmatter 에 훅을 선언하지 않는다.** 어느 런타임도 그 블록을 등록으로 읽지 않으므로, 그건 아무도 참으로 유지하지 않는 두 번째 설치 서술이었다 — 드리프트가 난 경로가 그것이다. 등록 채널은 설치기 하나다.
+- **대조를 기계가 한다.** `scripts/test/smoke.sh` 가 설치기의 엔트리 훅 상수를 직접 읽고, 두 README 중 하나라도 `pre`·`post` 로 그 이름을 대지 않거나 훅 스크립트를 직접 등록하면, 또는 `SKILL.md` 가 자기 선언을 다시 키우면 빨강을 낸다.
+
+문서에 적힌 커맨드를 엔진이 부르듯 실제로 실행해 검증했다 — `README.md` 의 그 문자열이 페이로드를 받아 미승인 `pip` 설치를 거부한다. 드리프트 검사는 옛 커맨드를 되돌려 빨강이 나는지로 mutation 검증했다.
+
+---
+
+### v2.15.5 — 드리프트 검사가 문자열이 아니라 값을 핀한다 (v2.15.4 패치)
+
+v2.15.4 의 드리프트 검사는 인스톨러의 엔트리 훅 상수를 읽고 문서가 그 이름을 안 대면 실패했다. timeout 은 안 읽었다. 그래서 문서는 맞는 커맨드를, 인스톨러가 더는 쓰지 않는 숫자와 함께 계속 댈 수 있었다 — 그 릴리스가 닫은 결함이 한 필드 옆에 그대로 있었던 것이고, 발견 경로도 그거다. 릴리스 노트가 그걸 덮은 척하지 않고 알려진 한계로 이름 박아 뒀다.
+
+- **timeout 을 커맨드처럼 핀한다.** 이벤트별로, 파일 아무 데서나가 아니라 커맨드 바로 옆 줄에서 읽는다. 가드가 이미 자기 상한 때문에 `PRE_HOOK_TIMEOUT_SECONDS` 를 읽고 있으므로, 이건 진실이 사는 자리를 늘리는 게 아니라 같은 상수를 세 번째로 읽는 일이다.
+- **`SKILL.md` 는 훅 선언을 두지 않고, 그게 결정으로 기록됐다.** Claude 는 skill frontmatter hooks 를 실제로 문서화하고 그 스키마는 event-keyed + `matcher` + `command:` 다 — 다만 **스킬 라이프사이클 스코프라 스킬이 활성일 때만 돈다.** 이 게이트는 스킬 호출 여부와 무관하게 모든 Bash 호출을 판정해야 하므로 그 형태로는 못 싣는다. 그래서 드리프트 검사는 어느 스키마도 읽지 않는 legacy `script:` 형태에서만 실패하고, 문서화된 형태는 일부러 막지 않는다 — 동작하는 기능을 grep 으로 막는 것은 죽은 것을 치우는 것과 다르다. 판정은 `AGENTS.md` 가 들고 있다.
+
+mutation 세 방향으로 검증했다: 인스톨러 상수만 옮기면 기존 가드 핀이 빨강, 문서 timeout 만 옮기면 새 검사가 빨강, 그리고 인스톨러 상수와 가드 상수를 **같이** 옮기면(정당한 예산 변경이 취하는 형태) 문서만 남겨지고 새 검사가 잡는다 — 옛 검사가 놓치던 경우가 그거다.
+
+---
+
+### v2.15.6 — 산문이 훅 예산을 한 번만 말하고, 그 한 번이 핀돼 있다 (v2.15.5 패치)
+
+v2.15.5 는 등록 JSON 블록 둘 안의 timeout 을 핀했다. 그런데 그 숫자는 아무 검사도 읽지 않는 여섯 문장에서 계속 살고 있었다 — `SKILL.md`, README 둘, ARCHITECTURE 둘, `AGENTS.md`. 상수를 옮기면 문서는 인스톨러가 더는 쓰지 않는 숫자를 말하는 채로 남는다. 같은 드리프트가 또 한 칸 옆에 있었고, v2.15.5 노트가 그걸 덮은 척하지 않고 알려진 한계로 적어 뒀기 때문에 여기서 닫는다.
+
+- **언어당 한 문장이 숫자를 말한다.** 그 숫자가 어디서 오는지 이미 설명하는 ARCHITECTURE 문단이고, smoke 가 그 문장을 `PRE_HOOK_TIMEOUT_SECONDS` 에 핀한다. 나머지 산문은 숫자를 쓰지 않고 예산을 가리킨다.
+- **날짜가 붙은 측정 기록은 숫자를 유지한다.** "등록된 타임아웃에서 죽는다(측정 시점 30s, 2026-08-04)" 는 그 날의 사실이라 상수가 바뀌어도 틀리지 않는다. 다만 현재 설정으로 읽히지 않도록 썼다.
+- **규칙은 표현 목록이 아니라 근접성이다.** 인스톨러의 그 숫자를 예산 단어 옆에 놓은 문장은 canonical 이거나 날짜 붙은 측정이어야 한다. 재진술의 표현 형태를 열거하는 건 이 레포가 두 번 데인 형태이고, 실제로 닫는 것은 재진술에서 숫자를 빼는 쪽이다.
+
+한계를 그대로 적는다 — 한계를 모르는 검사는 커버리지로 오독되기 때문이다. 이걸 실제로 닫는 건 canonical 핀이고, 그건 산문이 어떻게 생겼든 동작한다. 근접성 규칙은 백스톱이고 새는 백스톱이다 — 문서 목록이 하드코딩이고, 숫자를 한 표기(`<N>s`)로만, 그것도 줄 중간에서만 잡으며, 줄 단위이고, 측정 예외가 날짜가 아니라 단어를 본다. 구조 축 둘(같은 이벤트에 두 번째 JSON 블록, `pre`/`post` 뒤바뀜)은 둘 다 바깥이고 문서 JSON 을 파싱해 인스톨러 출력과 대조해야 닫힌다. 전부 검사 옆에 적었다 — 이걸 믿을지 판단하는 사람이 보는 자리가 거기다.
+
+격리 클론에서 mutation 검증했다: 인스톨러 상수 둘·가드 상수·JSON 블록 둘을 45 로 옮기고 canonical 문장만 30 으로 두면 빨강, `SKILL.md` 에 숫자를 되살리면 근접성 규칙이 빨강.
+
+---
+
+### v2.15.7 — 기록을 검사 밑에서 빼낼 수 없다 (v2.15.6 패치)
+
+세 릴리스가 마감을 끌 수 있는 노브를 닫았다. 그 뒤의 전수 열거는 다른 계열을 목록으로만 남겨 뒀다 — 튜닝이 아니라 **정본을 갈아치우는** 노브들. 그중 최악이 `SAFEDEPS_ADVISORY_LOG` 다. `advisory.log` 는 모든 우회가 적히는 자리일 뿐 아니라, `re-check` 가 "이 승인이 실제로 있었나" 를 묻는 oracle 이기 때문이다.
+
+실측: `suspected_forgery` 로 잡히던 위조 ledger 항목이, `SAFEDEPS_ADVISORY_LOG` 를 "그 승인은 있었다" 고 적힌 호출자 작성 파일로 돌리자 잡히지 않는다. 위조를 쓰는 그 환경이 검사에게 증거를 건넨다. 그리고 레포·문서·테스트·설치기 어디에서도 그 변수를 설정한 적이 없다 — 위조 검사가 의존하는 그 파일 하나를 열어두고만 있던 미사용 노브였다.
+
+- **경로를 `SAFEDEPS_HOME` 에서 유도한다.** 기록과 ledger 가 같이 움직이거나 아예 안 움직이고, 그게 검사와 검사 대상을 한 신뢰 도메인에 두는 조건이다. 설정됐지만 무시된 변수는 stderr 와 canonical 로그에 보고된다 — 무언가를 하던 신호가 조용히 무력해지면 안 된다.
+- **채널이 이제 구조적으로 하나다.** 훅은 늘 `$SAFEDEPS_HOME/advisory.log` 에 썼고 CLI 와 providers 는 변수를 존중했으므로, 도구의 어느 쪽이 말하느냐에 따라 관측 채널이 둘로 갈릴 수 있었다.
+- **옮겨진 자문 출처는 금지가 아니라 고지 대상이다.** provider URL, closure fixture, 기본값 아닌 ledger TTL 은 실재하는 필요다 — osv.dev 를 막는 망의 미러, 이 스위트 자신이 쓰는 fixture. 각 이탈은 실행당 한 번 이름과 함께 `advisory.log` 에 적히고, 첫 provider 호출이 아니라 시작 시점에 적히므로 provider 에 닿지 않는 명령도 기록된다. 허용되지 않는 것은 옮겨진 정본으로 판정한 실행이 OSV 로 판정한 실행과 똑같이 보이는 쪽이다.
+
+검증: e2e 위조 배터리에 relocation 케이스와 moved-source 기록 케이스가 추가됐고, 격리 클론에서 환경 override 를 되돌리는 mutation 으로 위조 케이스가 빨강이 되는 것을 확인했다.
+
+---
+
+### v2.15.8 — 고지가 훅 경로에도 있다 (v2.15.7 패치)
+
+v2.15.7 은 옮겨진 자문 출처로 판정한 실행이 스스로 고지한다고 적었다. CLI 에서는 참이었다. PreToolUse 가드는 provider 스택을 sourcing 하지 않으므로 **말할 자리가 없었다** — 옮겨진 출처 아래서 돈 가드 실행이 아무것도 안 남겼다. 무해했던 이유는 가드가 아직 provider 도 fixture 도 안 탄다는 것뿐이고, 그건 코드가 바뀌는 날 사라지는 이유다. 주장이 이미 참인 자리에만 있는 채널은 채널이 아니다.
+
+- **고지를 `lib/truth-sources.sh` 로 옮겼고** 가드가 자기 위치에서 순수 확장으로 경로를 구해 **무조건** sourcing 한다 — 환경변수도 없고, 모든 Bash 호출마다 도는 경로에 서브셸도 없다. 조건부로 만들려면 노브 목록을 읽을지 정하려고 호출부에서 노브 목록을 다시 적어야 하고, 사본이 둘이면 첫 번째가 낡는다. 크로스 검증이 1차 시도를 기각했는데 그 이유가 바로 앞 릴리스의 존재 이유였다 — 경로가 환경변수에서 왔고 읽을 수 없는 파일이 조용히 반환돼서, `/dev/null` 로 돌리면 옮겨진 출처 아래 실행이 아무것도 안 남겼다. 이름 없는 off 스위치를, 그것을 금지한 불변식 옆에서 다시 만든 것이다. 이제 읽을 수 없는 라이브러리는 두 채널로 고지되는 불가용이다. 그 파일을 편집하기 전에 알아야 할 결과가 하나 있다 — 모든 Bash 호출마다 sourcing 되므로 거기 파스 오류가 나면 가드가 죽고 엔트리 셔틀이 그걸 머신 전역 fail-closed 거부로 바꾼다. 침묵보다 막히는 쪽이 이 레포의 스탠스이지만, 70줄짜리 파일이 시사하는 것보다 넓은 blast radius 다.
+- **기본값과 비교가 그 한 파일에 있다.** 중복이었다 — 실행이 대조되는 URL 과 대입받는 URL 이 따로 적혀 있었고, 그건 한 릴리스가 통째로 한 칸 옆에서 고쳤던 그 형태다.
+- **노브 둘을 더 이름 붙였다.** `SAFEDEPS_NPM_OVERRIDES_JSON` 은 closure 판정이 접어 넣는 overrides 를 대체하고(e2e 자신의 단언 이름이 그렇게 말한다), `SAFEDEPS_RECHECK_FIXTURE_JSON` 은 일일 alert 이 읽는 re-check 출력을 대체한다. 둘 다 v2.15.7 열거 밖이었고, 그래서 그 목록을 완전한 것이 아니라 늘어나는 것으로 다시 적었다.
+
+검증: 옮겨진 출처 아래 가드 실행이 그것을 기록하고 overrides 노브를 이름으로 댄다. 미이동 대조군은 스위트 자신의 fixture 를 해제해서 만들었으므로, 고지가 항상 뜨는 게 아니라 환경을 따라간다는 것을 단언한다.
+
+---
+
+### v2.16.0 — 효과 게이트가 평범한 프로젝트에서 완주하고, 끝나지 않은 롤백은 크게 말한다
+
+v2.15.0 은 PostToolUse 도 PreToolUse 처럼 자기 예산에서 죽는다는 것을 재고 거기서 멈췄다. 노출은 **구조적**이라고만 기록됐는데, 효과 게이트가 실제로 어디서 30초를 넘는지 아무도 안 쟀기 때문이다. `scripts/measure/effect-gate-cost.sh` 로 커밋된 하니스로 이제 쟀고, 정직한 답은 "구조적" 보다 나빴다.
+
+게이트는 두 축을 탄다. 하나는 프로젝트의 lockfile closure 다. 다른 하나는 누구의 설계도 아니었다 — 게이트가 closure 패키지마다 원장에 따로 물었고, 그 질문 하나하나가 승인 스펙 디렉터리 전체를 훑으면서 원장 파일당 `jq` 프로세스를 둘셋씩 띄웠다. O(closure × ledger) 다.
+
+- 실제 738개 원장: closure 1 → 10.8초, 2 → 18.5초, **4 → 36.6초**
+- 빈 원장, 1081개짜리 애플리케이션 lockfile: 256 → 24.0초, **512 → 72.0초, 1024 → 100.7초**
+
+closure 4개는 거의 모든 실제 `npm install` 이다. 그래서 이 측정을 한 머신 기준으로 npm 의 "지연 탐지" 는 사실상 무탐지였고, 아무것도 승인 안 된 새 머신조차 평범한 애플리케이션 하나면 선을 넘었다.
+
+- **원장은 closure 당 한 번 읽는다, 패키지당 한 번이 아니라.** 술어는 옮겨가지 않았다 — 단일파일 검증기와 새 인덱스가 **같은** jq 소스를 임베드하므로 "이 스펙을 원장이 승인하나" 의 구현은 빠른 사본과 느린 사본 둘이 아니라 여전히 하나다. 같은 하니스, 같은 원장, 같은 lockfile: closure 4개가 36.6초 → 2.1초, 원장 단계는 closure 4에서 512까지 ~0.23초로 평평하다. 랜딩 전에 이전 per-file 리더와 등가성을 대조했다 — 실제 원장에서 뽑은 60개 스펙(owner, transitive, absent), 60개 전부 동일 판정.
+- **손상된 원장 항목 하나가 인덱스를 비울 수 없다.** jq 는 파싱 못 하는 첫 파일에서 멈추므로, 인덱스는 파일을 청크로 넘기고 실패한 청크는 한 파일씩 재시도하며 무엇이 깨졌는지 이름을 댄다. 비워진 인덱스는 "아무것도 승인 안 됨" 으로 읽히고 그건 깨끗한 설치의 롤백이다 — 원장 파일 하나의 오타가 그 값을 치르면 안 된다.
+- **남은 것은 주장이 아니라 범위로 적는다.** OSV/KEV 패스는 여전히 패키지당이다. 같은 머신에서 provider 캐시가 비어 있을 때 게이트는 이제 **390개** closure 근처에서 30초를 넘는다. 그 아래에서 npm 의 지연 탐지는 실재하고, 그 위에서는 런타임이 게이트를 죽이고 설치는 판정되지 않는다. 그 숫자는 호스트·네트워크·캐시의 속성이다 — 하니스를 커밋해 뒀으니 다음 독자는 이 숫자를 물려받지 말고 자기 것을 재라.
+
+### 끊긴 롤백은 예전엔 아무것도 안 남겼다
+
+게이트는 거부할 수 없다. PostToolUse 시점에는 설치가 이미 돌았다. 나쁜 closure 에 대한 게이트의 답은 롤백이고, 그 롤백은 `reorg.log` 기록과 메시지를 **맨 마지막** — `node_modules` 재빌드라는 가장 느린 단계 뒤 — 에 썼다.
+
+두 실제 훅을 샌드박스에서 몰고 post 훅을 통제된 지점에서 죽이는 `scripts/measure/rollback-kill-state.sh` 로 측정했다:
+
+- 롤백 전에 죽임: 플래그된 설치가 그대로 남고 `reorg.log` **0줄**
+- 롤백 도중에 죽임: 프로젝트는 완전히 되돌아갔고 `reorg.log` **0줄**, 메시지 없음
+
+둘째가 더 나쁘다. 첫째는 게이트가 안 돈 것처럼 보이지만, 둘째는 사용자의 설치가 아무 이유도 없이 스스로 취소된 것처럼 보인다. 사람이 게이트를 불신하고 우회하는 법을 배우는 경로가 그것이다.
+
+- **의도를 행동 전에 적는다.** 프로젝트·스냅샷·사유·단계를 적은 저널 항목을 첫 파괴적 단계 **앞**에 쓰고, 롤백이 스스로를 보고한 뒤에 지운다. 자기 실행보다 오래 사는 항목이 **곧** 그 보고다.
+- **다음 Bash 호출이 그것을 보고한다 — 한 번.** PostToolUse 는 설치뿐 아니라 모든 Bash 호출에 뜨므로 보고가 빨리 도착한다. 항목을 `~/.safedeps/rollback-incidents/` 로 옮기고, 완주한 롤백이 쓰는 그 `reorg.log` 에 `REORG INTERRUPTED` 를 덧붙이고, 어느 단계까지 갔고 무엇이 트리를 고치는지 말한다. 이후 모든 명령에서 잔소리하는 대신 한 번 보고하고 영구 보관한다.
+- **이것은 원자성이 아니고 그렇게 주장하지도 않는다.** safedeps 는 npm 트리 재빌드의 원자성을 소유하지 않는다. 소유하는 것은 끝나지 않은 롤백이 조용한가다.
+- **메시지 채널은 하나다.** 엔진은 이 훅의 stdout 을 단일 JSON 객체로 파싱하므로, 훅의 모든 메시지가 이제 한 emitter 로 나간다. 두 번째 객체는 추가 메시지가 아니라 잃어버린 메시지다.
+
+### 검증
+
+- `npm test` 초록. e2e 배터리에 양방향을 고정했다 — 끊긴 롤백은 보고되고, 로그에 남고, 인시던트로 보관되고, 반복되지 않는다. 완주한 롤백은 저널 항목을 안 남기므로 깨끗한 실행이 끊겼다고 울지 않는다.
+- 원장 인덱스 판정을 owner·transitive·만료·폐기·부재 스펙에 걸쳐 고정했고, 인덱스를 비우면 안 되는 판독 불가 항목도 함께 고정했다.
+- 측정 하니스 둘 다 서술이 아니라 커밋이다. 아무도 재현할 수 없는 숫자는 장식이기 때문이다.
 
 ### 알려진 갭
 
-엔진이 훅만 종료하는지, 아니면 훅의 전체 프로세스 트리를 종료하는지는 **측정되지 않았다**. 훅 프로세스만 종료하면 훅이 생성한 `npm ci`는 살아남아 트리를 끝까지 완료했다; 런타임이 대신 프로세스 그룹을 종료하면 트리는 찢긴 채 남는다. 측정하려면 실제 머신에 의도적으로 느린 훅을 등록해야 하는데, 이 레포가 이미 한 번 Bash 머신 전체를 블록시킨 적이 있어 의도적으로 측정하지 않은 채 남겨두었다. 저널은 그 답에 의존하지 않는다: 어느 쪽이든 첫 번째 파괴적 행위 이전에 기록이 쓰이기 때문이다.
+엔진이 훅만 죽이는지 프로세스 그룹째 죽이는지는 **안 쟀다**. 훅 프로세스만 죽였을 때는 그것이 띄운 `npm ci` 가 살아남아 트리를 완성했다. 런타임이 프로세스 그룹을 죽인다면 트리는 찢어진 채 남는다. 재려면 라이브 머신에 의도적으로 느린 훅을 등록해야 하는데, 이 레포는 그것 때문에 이미 한 번 Bash 가 머신 전역으로 막힌 적이 있어서 의도적으로 안 쟀다. 저널은 그 답에 의존하지 않는다 — 어느 쪽이든 기록은 첫 파괴적 행위 앞에서 쓰인다.
 
 ## v3 (미래)
 
-### 원장 변조 저항
+### Ledger 변조 내성
 
-악성 패키지의 `postinstall`(사용자 권한으로 실행)이 "B 승인" 원장 항목을 위조해 이후 B 설치 시 어드바이저리 검사를 건너뛰게 만드는 2차 공격을 방어한다. 패키지는 *실행되기 전에는* 이를 할 수 없으므로 설치 시점 게이트를 닫는 것이 1차 방어선이며, 이는 첫 번째 침해가 이미 발생한 경우를 강화한다.
+악성 패키지의 `postinstall`(사용자 권한 실행)이 "B 승인됨" ledger 엔트리를 위조해, 나중에 B 설치가 advisory 검사를 건너뛰게 하는 2차 공격을 방어한다. 패키지는 실행되기 *전*엔 이걸 못 하므로 install-시점 게이트를 닫는 게 1선 방어이고, 이건 이미 한 번 뚫린 뒤를 대비한 강화다.
 
-접근법 — **OSV를 권위(authority)로, 원장을 캐시로 취급**하고 변조 탐지를 더한다. 저렴하며 기존 인프라 위에 얹힌다:
+접근 — **OSV 를 권위로, ledger 를 캐시로 강등** + 변조 탐지. 싸고 기존 인프라에 얹힘:
 
-1. **강제/재확인 시점 재검증** — 원장 판정을 신뢰하는 대신 저장된 증거를 OSV로 검증한다. 실제 증거가 없는 위조 항목(또는 OSV가 취약하다고 보고하는 패키지에 대한 항목)은 적발되어 폐기된다. 원장을 OSV를 SSoT로 하는 메모이제이션으로 축소한다. *(여전히 열려 있음 — 설치당 네트워크 비용 트레이드오프.)*
-2. **설치 후 스캔에서 `~/.safedeps/` 감시** — 출시됨: 검증 후 민감 경로 스캔이 `~/.safedeps` / `SAFEDEPS_HOME`에 닿는 설치 스크립트를 플래그하여, 원장을 쓰는 패키지가 reorg를 유발하게 한다 — 위조를 현장에서 잡는다 (스모크: ledger-tamper 픽스처).
-3. **일일 재확인에서 출처 교차 확인** — 출시됨: `re-check`는 일치하는 `advisory.log` 기록이 없는 원장 항목을 `suspected_forgery`로 플래그하며(폐기하지 않음), v2.9.2부터 일일 알림 래퍼가 이 플래그를 노출한다.
+1. **enforcement / re-check 시점 재검증** — ledger 판정을 믿지 말고 저장된 evidence 를 OSV 로 재검증. evidence 없는(또는 OSV 가 취약이라 답하는) 위조 엔트리는 잡혀서 revoke. ledger 를 OSV SSoT 의 memoization 으로 강등. *(아직 미착수 — per-install 네트워크 비용 tradeoff.)*
+2. **post-install 스캔에 `~/.safedeps/` 추가** — shipped: post-verify sensitive-path 스캔이 `~/.safedeps` / `SAFEDEPS_HOME` 을 건드리는 install script 를 flag 하므로, ledger 에 쓰는 패키지가 reorg 를 유발 — 위조를 현행범으로 (smoke: ledger-tamper fixture).
+3. **daily re-check 의 provenance 대조** — shipped: `re-check` 가 `advisory.log` 기록이 없는 ledger 엔트리를 `suspected_forgery` 로 flag 하고(revoke 는 안 함), v2.9.2 부터 daily 알림 wrapper 가 이 flag 를 표면화한다.
 
-명시적 비접근법: **암호화 원장 서명은 추구하지 않는다** — 같은 uid의 공격자는 서명 키를 읽고 위조물에 다시 서명할 수 있으므로 로컬 HMAC/서명은 실질적 경계를 추가하지 않는다. 방어는 외부 권위(OSV) + 탐지이지 로컬 시크릿이 아니다.
+명시적 비채택: **암호화 ledger 서명은 안 함** — same-uid 공격자가 서명 키를 읽어 위조를 재서명할 수 있어 로컬 HMAC/서명은 실질 경계가 못 됨. 방어는 로컬 비밀이 아니라 authority-elsewhere(OSV) + 탐지.
 
 ### 기타 v3 작업
 
-- **플러그인 공급자** — 사용자 정의 어드바이저리 소스(내부 취약점 DB, 프라이빗 레지스트리).
-- **정책 파일** — 팀 정책용 `.safedeps.toml` (KEV 적중 시 자동 차단, CVSS 7+ 시 사용자 확인, 패키지별 허용 목록).
-- **CI 모드** — GitHub Actions / CircleCI에서 빠른 실패(fail-fast)를 위한 `safedeps check --ci`.
-- **npm 너머의 클로저 확장** — 명시적 no-script/no-build 정책을 가진 pip / cargo / go / gem / maven / nuget 클로저 리졸버.
-- **전이 위험 점수** — deps.dev 그래프 통합; 직접 의존성을 넘어선 위험 시각화.
+- **Plugin provider** — 사용자 정의 advisory source (사내 vuln DB, private registry).
+- **Policy file** — `.safedeps.toml` 로 팀 정책 (KEV hit 자동 block, CVSS 7+ 사용자 컨펌, 패키지 allowlist).
+- **CI mode** — `safedeps check --ci` 로 GitHub Actions / CircleCI fail-fast.
+- **npm 밖 closure 확장** — pip / cargo / go / gem / maven / nuget closure resolver 와 명시적 no-script/no-build 정책.
+- **Transitive risk score** — deps.dev graph 통합; 직접 dep 너머 위험 시각화.
 
 ## v4+ (장기)
 
-- **팀 공유 원장** — 다중 머신 승인 스펙 동기화.
-- **에이전트 remediation(교정)** — 취약점 발견 시 Claude / Codex가 더 안전한 대체재를 제안 (LLM-as-judge).
-- **Diff 시각화** — 두 승인 스펙 스냅샷 간 의존성 트리 diff.
+- **Team-shared ledger** — multi-machine approved spec sync.
+- **Agent remediation** — vuln 발견 시 Claude / Codex 가 더 안전한 대체 모듈 제안 (LLM-as-judge).
+- **Diff visualization** — 두 approved spec snapshot 사이 dependency tree diff.
 
 ---
 
-## 이력
+## 변경 history
 
-- 2026-05-18: 최초 ROADMAP — v1 → v2 결정과 v3 / v4 개요.
+- 2026-05-18: ROADMAP 최초 작성 — v1 → v2 결정 + v3 / v4 개요.
