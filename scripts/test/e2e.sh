@@ -14,14 +14,59 @@ fail() {
 }
 
 tmp_root=$(mktemp -d "${TMPDIR:-/tmp}/safedeps-e2e.XXXXXX")
+# Children the owner-state tests spawn, so an exit anywhere can reap them. The
+# stopped-owner test suspends a process and resumes it, and a run that dies in
+# between leaves a permanently stopped orphan -- measured: four of them, up to
+# 65 minutes old, and because their cwd was the plan worktree they blocked
+# `git worktree remove` during finalize. Writing code to judge stopped processes
+# leaked stopped processes.
+#
+# SIGCONT before SIGKILL: a stopped process never receives SIGTERM, and SIGKILL
+# is delivered regardless, so this order is what actually reaps one.
+# A marker only this suite's children carry, so a sweep can name them without
+# pattern-matching its way onto somebody else's process. It is the child's $0,
+# which means it shows up in `ps -o args=` and nowhere else.
+E2E_CHILD_MARKER='safedeps-e2e-child'
+
+# Layer 2: SIGKILL defeats the EXIT trap, and "the runtime SIGKILLs the hook" is
+# this repo's whole subject rather than a hypothetical -- measured, a suite
+# killed inside the stopped-owner test leaves a suspended orphan behind. So each
+# run also clears any orphan a PREVIOUS run left. Only processes carrying the
+# marker are touched.
+sweep_stale_children() {
+  local pid args
+  while read -r pid args; do
+    [[ -n "${pid}" ]] || continue
+    case "${args}" in
+      *"${E2E_CHILD_MARKER}"*)
+        kill -CONT "${pid}" 2>/dev/null || true
+        kill -9 "${pid}" 2>/dev/null || true
+        ;;
+    esac
+  done < <(ps -Ao pid=,args= 2>/dev/null)
+}
+
+owned_children=()
+reap_owned_children() {
+  local child
+  for child in "${owned_children[@]:-}"; do
+    [[ -n "${child}" ]] || continue
+    kill -CONT "${child}" 2>/dev/null || true
+    kill -9 "${child}" 2>/dev/null || true
+  done
+  owned_children=()
+}
+
 cleanup() {
   if [[ -n "${server_pid:-}" ]]; then
     kill "${server_pid}" 2>/dev/null || true
     wait "${server_pid}" 2>/dev/null || true
   fi
+  reap_owned_children
   rm -rf "${tmp_root}"
 }
 trap cleanup EXIT
+sweep_stale_children
 
 port_file="${tmp_root}/port"
 state_file="${tmp_root}/state.json"
@@ -1199,8 +1244,9 @@ mkdir -p "${journal_home}" "${journal_project}"
 # The redirect is load-bearing: a background job inheriting the command
 # substitution's stdout keeps that pipe open, so `$( … )` would block until the
 # sleep exited rather than returning its pid.
-journal_dead_owner_probe() { sleep 60 >/dev/null 2>&1 & echo $!; }
+journal_dead_owner_probe() { ( cd "${tmp_root}" && exec bash -c 'exec -a "$0" sleep 60' "${E2E_CHILD_MARKER}" ) >/dev/null 2>&1 & echo $!; }
 journal_dead_pid=$(journal_dead_owner_probe)
+owned_children+=("${journal_dead_pid}")
 kill -9 "${journal_dead_pid}" 2>/dev/null
 # Not a child of this shell — it was spawned inside the command substitution —
 # so `wait` would return 127 and `set -e` would end the run. Poll instead.
@@ -1266,8 +1312,13 @@ mkdir -p "${race_home}" "${race_project}"
 # A stand-in for a rollback that is still working. It has to be a bash process,
 # because that is what the owner check accepts and what a hook actually is —
 # a `sleep` here would pass the test for the wrong reason.
-bash -c 'sleep 120' >/dev/null 2>&1 &
+# Spawned with cwd outside the plan worktree. An orphan that survives anyway
+# then holds a directory nobody is trying to delete, so it cannot block
+# `git worktree remove` at finalize -- that is what actually bit, not the
+# process itself.
+( cd "${tmp_root}" && exec bash -c 'exec -a "$0" sleep 120' "${E2E_CHILD_MARKER}" ) >/dev/null 2>&1 &
 race_owner_pid=$!
+owned_children+=("${race_owner_pid}")
 
 race_write_entry() {
   local pid="$1" opened_at="$2"
@@ -1368,8 +1419,9 @@ if [[ -n "${race_zombie_pid}" ]] && [[ "$(ps -o stat= -p "${race_zombie_pid}" 2>
 #    defect); called running, a rollback stopped forever is never reported (the
 #    zombie defect). So it is its own answer, and the report says so, because
 #    the human's first move is different — resume or kill, then repair.
-bash -c 'sleep 120' >/dev/null 2>&1 &
+( cd "${tmp_root}" && exec bash -c 'exec -a "$0" sleep 120' "${E2E_CHILD_MARKER}" ) >/dev/null 2>&1 &
 race_stopped_pid=$!
+owned_children+=("${race_stopped_pid}")
 sleep 0.3
 kill -STOP "${race_stopped_pid}" 2>/dev/null
 sleep 0.3
@@ -1394,8 +1446,9 @@ if [[ "$(ps -o stat= -p "${race_stopped_pid}" 2>/dev/null)" == *T* ]]; then
 #    would be mostly idle time. What is knowable is when the stage was entered
 #    and how long the phases before it took — which separates "the restores were
 #    still going" from "the reinstall had been running a while".
-stage_at_dead_probe() { sleep 60 >/dev/null 2>&1 & echo $!; }
+stage_at_dead_probe() { ( cd "${tmp_root}" && exec bash -c 'exec -a "$0" sleep 60' "${E2E_CHILD_MARKER}" ) >/dev/null 2>&1 & echo $!; }
 stage_at_pid=$(stage_at_dead_probe)
+owned_children+=("${stage_at_pid}")
 kill -9 "${stage_at_pid}" 2>/dev/null
 stage_at_reap=0
 while kill -0 "${stage_at_pid}" 2>/dev/null && (( stage_at_reap < 100 )); do
