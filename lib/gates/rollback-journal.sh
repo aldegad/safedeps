@@ -130,6 +130,16 @@ safedeps_journal_owner_alive() {
   [[ "${pid}" =~ ^[0-9]+$ ]] || return 1
   kill -0 "${pid}" 2>/dev/null || return 1
 
+  # A zombie is not running, but it passes every other test here: it keeps its
+  # process table entry, so `kill -0` succeeds, and it keeps its own start time,
+  # so the reuse check clears it too. Measured — a hook that the runtime killed
+  # and its parent has not reaped yet reads as alive, which is precisely the
+  # case the journal exists to report. And a zombie does not go away on its own,
+  # so this would suppress that report on every later command, not just once.
+  case "$(ps -o stat= -p "${pid}" 2>/dev/null)" in
+    Z*) return 1 ;;
+  esac
+
   # Without a start time this stays fail-loud (treated as dead), so a platform
   # that cannot answer reports rather than goes quiet.
   local lstart

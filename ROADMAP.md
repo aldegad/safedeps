@@ -56,7 +56,7 @@ The internal engine keeps the v1 `reorg-guard` assets.
 
 ### Release notes
 
-- The npm package version in `package.json` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION` tracks it and the smoke test reads `package.json` to compare (current: v2.16.1).
+- The npm package version in `package.json` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION` tracks it and the smoke test reads `package.json` to compare (current: v2.16.2).
 - `npm test` runs the release smoke suite; the full fixture E2E lives under `v2.1-tests`.
 - The daily re-check uses no LLM tokens. It is opt-in: a macOS `launchd` user agent runs `safedeps re-check --json` daily, installed atomically by `install-safedeps-recheck-agent.mjs`. It writes `~/.safedeps/recheck.log` and `~/.safedeps/recheck-alerts.jsonl` and raises a macOS notification on a new CVE/KEV/revoke/provider-skip/suspected-forgery. Network is used only for OSV / CISA / GHSA queries.
 
@@ -677,6 +677,20 @@ v2.16.0 made an interrupted rollback loud by writing the journal entry before th
 Verification: both directions pinned in the e2e battery — a running rollback stays silent, a dead owner and a recycled pid are both reported, and the batch returns 1/2/2 for unapproved, missing, and unparseable closures. Both fixes mutation-verified by restoring the old behaviour, which turns the new checks red.
 
 Two findings this pass, worth stating because neither was hypothetical. The existing "interrupted rollback" fixture built its entry from inside a subshell, where `$$` is the parent's pid — it described a rollback owned by the live test process and passed only while nothing read the field. And the first version of the batch caller aborted the hook on the ordinary misses-found path, because `set -e` is on and the status is 1; the existing reorg test caught it by going silent rather than red, since the hook died before it could speak.
+
+---
+
+### v2.16.2 — a zombie owner is not a running one (patch on v2.16.1)
+
+v2.16.1 gated the interrupted-rollback report on whether the process that wrote the journal entry is still alive. Cross-validation raised an unreaped owner as a theoretical hole and declined to claim it, because bash reaps its own children and no zombie could be produced to demonstrate it. With a parent that does not wait, it reproduces immediately.
+
+A zombie clears every test the check made. It keeps its process table entry, so `kill -0` succeeds. It keeps its own start time, so the pid-reuse comparison passes. Measured: `stat = Z`, `kill -0` passes, `lstart` resolves, and the check answered "still running".
+
+That is the silent direction, and worse than a single miss. The reachable case is the one the journal exists for: the runtime kills the hook mid-rollback, the parent has not reaped it yet, and the entry belongs to a pid that is now a zombie. A zombie does not go away on its own, so every later command answers the same way and the report is lost for good rather than delayed.
+
+- **A process state of `Z` counts as gone.** One more positive-evidence test on a check that already defaults to reporting.
+
+Verification: the e2e battery grows a fourth direction alongside running, dead, and recycled — a zombie owner is reported. The test builds its own zombie with a non-bash parent, and fails loudly if the platform will not produce one rather than passing on a process that was never a zombie. Mutation-verified by removing the state check, which turns it red.
 
 ## v3 (future)
 

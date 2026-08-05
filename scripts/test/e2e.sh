@@ -1317,6 +1317,44 @@ grep -q 'did not finish' <<< "${race_dead}" \
   || fail "a rollback whose process died is still reported as interrupted"
 printf 'ok - a running rollback is not reported as interrupted (dead and recycled pids still are)\n'
 
+# 4. An unreaped (zombie) owner is not running, and it clears every other test
+#    here: it keeps its process table entry so `kill -0` succeeds, and it keeps
+#    its own start time so the reuse check passes. A hook the runtime killed and
+#    whose parent has not reaped yet is exactly that — the case the journal
+#    exists to report. Worse than a single miss: a zombie does not go away, so
+#    every later command would answer the same and the report is lost for good.
+#
+#    bash reaps its own children promptly, so the zombie needs a parent that
+#    does not wait.
+python3 -c '
+import os, sys, time
+pid = os.fork()
+if pid == 0:
+    os._exit(0)
+open("'"${tmp_root}"'/zombie-pid", "w").write(str(pid))
+time.sleep(30)
+' >/dev/null 2>&1 &
+race_zombie_parent=$!
+race_zwait=0
+while [[ ! -s "${tmp_root}/zombie-pid" ]] && (( race_zwait < 100 )); do
+  sleep 0.05; race_zwait=$((race_zwait + 1))
+done
+race_zombie_pid=$(cat "${tmp_root}/zombie-pid" 2>/dev/null)
+if [[ -n "${race_zombie_pid}" ]] && [[ "$(ps -o stat= -p "${race_zombie_pid}" 2>/dev/null)" == Z* ]]; then
+  race_write_entry "${race_zombie_pid}" "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  race_zombie_out=$(race_report)
+  grep -q 'did not finish' <<< "${race_zombie_out}" \
+    || fail "a rollback whose owner is an unreaped zombie is reported, not suppressed"
+  printf 'ok - an unreaped (zombie) owner does not suppress the report\n'
+else
+  fail "could not produce a zombie to test with (ps stat was not Z)"
+fi
+kill "${race_zombie_parent}" 2>/dev/null
+race_zreap=0
+while kill -0 "${race_zombie_parent}" 2>/dev/null && (( race_zreap < 100 )); do
+  sleep 0.05; race_zreap=$((race_zreap + 1))
+done
+
 # --- ledger batch: could-not-run is not "nothing is unapproved" --------------
 #
 # The batch form writes its misses to stdout and the caller turns them into the
