@@ -247,41 +247,68 @@ command_hides_dependency_install() {
   return 1
 }
 
+# Blank every quoted region, delimiters included, and leave unquoted text
+# untouched. Every detection predicate below reads this instead of the raw
+# command, which is why `echo "npm install evil"` is not an install: the text is
+# there, but not in execution position. scripts/test/scan-contract.sh states the
+# rules and checks this implementation against them.
+#
+# One awk pass over BYTES. The bash character loop this replaces was quadratic,
+# and character orientation is precisely why: `${input:i:1}` counts characters
+# from the start of the string on every index, so the cost grew with position.
+# Byte orientation is not a tuning choice here, it is the fix. Measured on this
+# host, an unquoted command with no install text: 32KB went 36.2s -> 0.08s and
+# 64KB went past two minutes -> 0.28s (scripts/measure/scan-cost.sh). The
+# PreToolUse timeout is 30s and fails OPEN, so the old curve did not slow the
+# gate down past ~29KB, it removed it.
+#
+# One thing changed, and it is the blank COUNT inside a quoted region: a
+# multibyte character used to blank to one space and now blanks to one space per
+# byte. Nothing else moves. Unquoted bytes pass through unchanged, so the output
+# is byte-identical wherever no multibyte character sits inside quotes; and the
+# three bytes the state machine tests (' " \) are ASCII, which no UTF-8
+# continuation byte can collide with. Every consumer reads this through
+# `grep -qE` or `read -ra`, and neither can tell one blank from three.
+#
+# awk is already on this path (guard_extract_flagged_specs, lib/ledger). If it
+# were missing, this returns non-zero under `set -o pipefail` and the entry shim
+# turns that into an explained fail-closed deny, which is the direction a
+# missing scanner should fail.
 command_scan_text() {
-  local input="$1"
-  local output=""
-  local quote=""
-  local char
-  local prev=""
-  local i
+  printf '%s\n' "$1" | LC_ALL=C awk '
+    BEGIN { q = 0; prev = ""; buf = ""; held = 0 }
 
-  for ((i = 0; i < ${#input}; i++)); do
-    char="${input:i:1}"
+    # Emit through a bounded buffer. Appending to one string for the whole
+    # input would put a quadratic memcpy back in place of the quadratic loop.
+    function put(c) {
+      buf = buf c
+      if (++held >= 4096) { printf "%s", buf; buf = ""; held = 0 }
+    }
 
-    if [[ -z "${quote}" ]]; then
-      if [[ "${char}" == "'" ]]; then
-        quote="single"
-        output="${output} "
-      elif [[ "${char}" == '"' ]]; then
-        quote="double"
-        output="${output} "
-      else
-        output="${output}${char}"
-      fi
-    elif [[ "${quote}" == "single" && "${char}" == "'" ]]; then
-      quote=""
-      output="${output} "
-    elif [[ "${quote}" == "double" && "${char}" == '"' && "${prev}" != "\\" ]]; then
-      quote=""
-      output="${output} "
-    else
-      output="${output} "
-    fi
+    {
+      # The newline that ended the previous record is a character too: it
+      # survives outside a quoted region and blanks inside one. The trailing
+      # newline this function adds terminates the last record and so is never
+      # emitted, which is what keeps the output the same length as the input.
+      if (NR > 1) { put(q == 0 ? "\n" : " "); prev = "\n" }
 
-    prev="${char}"
-  done
+      n = length($0)
+      for (i = 1; i <= n; i++) {
+        c = substr($0, i, 1)
+        if (q == 0) {
+          if (c == "\047")      { q = 1; put(" ") }
+          else if (c == "\042") { q = 2; put(" ") }
+          else                  { put(c) }
+        }
+        else if (q == 1 && c == "\047")                  { q = 0; put(" ") }
+        else if (q == 2 && c == "\042" && prev != "\\")  { q = 0; put(" ") }
+        else                                             { put(" ") }
+        prev = c
+      }
+    }
 
-  printf '%s' "${output}"
+    END { printf "%s", buf }
+  '
 }
 
 normalize_install_text() {

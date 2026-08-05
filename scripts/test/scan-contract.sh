@@ -21,15 +21,22 @@
 #
 # The contract, as measured (not as intended):
 #
-#   1. Length is preserved in characters. One input character produces exactly
-#      one output character.
-#   2. Outside quotes, characters pass through unchanged -- including a
+#   1. Length is preserved in bytes. One input byte produces exactly one output
+#      byte. This used to read "in characters", and the change is the whole
+#      observable difference the awk rewrite made: a multibyte character inside
+#      a quoted region blanked to one space and now blanks to one space per
+#      byte. It is stated as a rule rather than as history because the character
+#      reading is what made the old loop quadratic -- `${input:i:1}` counts
+#      characters from the start on every index -- so byte orientation is not an
+#      incidental side effect of the rewrite, it is the thing that made it
+#      linear.
+#   2. Outside quotes, bytes pass through unchanged -- including a
 #      backslash, which does NOT escape the quote that follows it.
 #   3. A quote character that opens or closes a region is itself blanked.
-#   4. Every character inside a quoted region is blanked, newlines included.
+#   4. Every byte inside a quoted region is blanked, newlines included.
 #   5. A single-quoted region ends at the next single quote, unconditionally.
 #   6. A double-quoted region ends at the next double quote whose PRECEDING RAW
-#      CHARACTER is not a backslash.
+#      BYTE is not a backslash.
 #   7. An unterminated region blanks the rest of the input.
 #
 # Rule 6 is a defect, and it is pinned here on purpose. `\\` is an escaped
@@ -73,6 +80,7 @@ declare -F command_scan_text > /dev/null || fail "extracted command_scan_text di
 # Deliberately the slowest, most obvious statement of the seven rules. It is
 # read by this battery only, so its cost is irrelevant and its clarity is not.
 reference_scan_text() {
+  local LC_ALL=C
   local input="$1" output="" quote="" prev="" char i
   for ((i = 0; i < ${#input}; i++)); do
     char="${input:i:1}"
@@ -104,6 +112,7 @@ capture() {
 }
 
 sp() { printf '%*s' "$1" ''; }
+byte_len() { local LC_ALL=C; printf '%s' "${#1}"; }
 
 checks=0
 
@@ -116,7 +125,10 @@ check() {
   ref=$(capture reference_scan_text "${input}")
   [[ "${got}" == "${expected}" ]] || fail "${label}: shipped [${got}] != expected [${expected}]"
   [[ "${ref}" == "${expected}" ]] || fail "${label}: reference [${ref}] != expected [${expected}] (the table and the spec disagree)"
-  [[ ${#got} -eq ${#input} ]] || fail "${label}: length not preserved (${#input} in, ${#got} out)"
+  local in_bytes out_bytes
+  in_bytes=$(byte_len "${input}")
+  out_bytes=$(byte_len "${got}")
+  [[ ${out_bytes} -eq ${in_bytes} ]] || fail "${label}: length not preserved (${in_bytes} bytes in, ${out_bytes} out)"
   checks=$((checks + 1))
   pass "${label}"
 }
@@ -181,10 +193,11 @@ check "newline inside a region is blanked" \
   $'echo \'a\nb\'' \
   "echo$(sp 6)"
 
-# rule 1 is in characters, not bytes: a multibyte character blanks to ONE blank
-check "a multibyte character inside a region blanks to one character" \
+# rule 1 is in bytes: a 3-byte character inside a region blanks to THREE blanks,
+# and the byte AFTER the region still lands where it did.
+check "a multibyte character inside a region blanks per byte" \
   "echo '한글' x" \
-  "echo$(sp 6)x"
+  "echo$(sp 10)x"
 
 check "empty input" '' ''
 
@@ -221,6 +234,7 @@ pass "randomized differential: ${fuzz_cases} inputs, seed ${fuzz_seed}, no diver
 # sees it. Without this, a broken harness and a clean run look identical.
 control_hit=0
 reference_scan_text() {
+  local LC_ALL=C
   local input="$1" output="" quote="" prev="" char i
   for ((i = 0; i < ${#input}; i++)); do
     char="${input:i:1}"
