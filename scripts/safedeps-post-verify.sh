@@ -752,10 +752,39 @@ check_npm_effect_closure() {
   # ledger directory for every package, which put the gate past its own hook
   # budget at a closure of four packages on a 738-entry ledger
   # (scripts/measure/effect-gate-cost.sh).
+  #
+  # The status is read, not discarded. Through a process substitution it was
+  # invisible, so a batch that could not run at all delivered no rows and no
+  # rows meant no misses — the closure read as fully approved. The per-package
+  # form it replaced failed closed in the same conditions.
+  local ledger_batch_file
+  local ledger_batch_status
+  ledger_batch_file=$(mktemp "${TMPDIR:-/tmp}/safedeps-ledger-batch.XXXXXX") || {
+    SUSPICIOUS=true
+    REASONS+=("npm ledger closure check could not run; fail-closed")
+    rm -f "${closure_file}" "${provider_file}" "${miss_file}"
+    return
+  }
+  # `set -e` is on and status 1 (misses found) is the ordinary rejected-install
+  # path, so the call has to be a tested condition. Left bare it would abort the
+  # hook exactly when it has something to say, and a hook that exits non-zero is
+  # a broken hook to the entry shim.
+  if safedeps_ledger_effect_check_batch "npm" "${closure_file}" > "${ledger_batch_file}"; then
+    ledger_batch_status=0
+  else
+    ledger_batch_status=$?
+  fi
+  if [[ "${ledger_batch_status}" -gt 1 ]]; then
+    SUSPICIOUS=true
+    REASONS+=("npm ledger closure check could not run; fail-closed")
+    rm -f "${closure_file}" "${provider_file}" "${miss_file}" "${ledger_batch_file}"
+    return
+  fi
   while IFS=$'\t' read -r package_name version; do
     [[ -n "${package_name}" && -n "${version}" ]] || continue
     printf '%s@%s\n' "${package_name}" "${version}" >> "${miss_file}"
-  done < <(safedeps_ledger_effect_check_batch "npm" "${closure_file}")
+  done < "${ledger_batch_file}"
+  rm -f "${ledger_batch_file}"
 
   miss_count=$(wc -l < "${miss_file}" | tr -d ' ')
   if [[ "${miss_count}" -gt 0 ]]; then

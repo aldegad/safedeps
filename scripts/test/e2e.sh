@@ -1317,6 +1317,45 @@ grep -q 'did not finish' <<< "${race_dead}" \
   || fail "a rollback whose process died is still reported as interrupted"
 printf 'ok - a running rollback is not reported as interrupted (dead and recycled pids still are)\n'
 
+# --- ledger batch: could-not-run is not "nothing is unapproved" --------------
+#
+# The batch form writes its misses to stdout and the caller turns them into the
+# unapproved list. So an empty result means "everything is approved", and any
+# early return that produces no output means the same thing to the caller. The
+# per-package form this replaced failed closed in those conditions — every
+# package counted as a miss. Statuses: 0 no misses, 1 misses, 2 could not run.
+
+batch_home="${tmp_root}/ledger-batch-home"
+mkdir -p "${batch_home}"
+batch_closure="${tmp_root}/ledger-batch-closure.json"
+printf '[{"package":"fixture-unapproved","version":"9.9.9"}]\n' > "${batch_closure}"
+
+batch_status() {
+  ( export SAFEDEPS_HOME="${batch_home}"
+    export SAFEDEPS_LEDGER_DIR="${batch_home}/approved-specs"
+    . "${ROOT_DIR}/lib/ledger/ledger.sh"
+    # Sourcing the library turns on `set -e`, and the whole point here is to
+    # read a non-zero status rather than be killed by it.
+    set +e
+    safedeps_ledger_effect_check_batch "npm" "$1" >/dev/null 2>&1
+    echo $? )
+}
+
+# A closure nothing approves is a verdict, not an error.
+[[ "$(batch_status "${batch_closure}")" == "1" ]] \
+  || fail "an unapproved closure reports misses (status 1)"
+
+# A closure file that is not there cannot be judged, and must not read as clean.
+[[ "$(batch_status "${tmp_root}/does-not-exist.json")" == "2" ]] \
+  || fail "a missing closure file is could-not-run (status 2), not zero misses"
+
+# Unparseable closure JSON: jq fails, produces no rows, and the rows are the
+# whole answer.
+printf 'not json at all\n' > "${tmp_root}/ledger-batch-broken.json"
+[[ "$(batch_status "${tmp_root}/ledger-batch-broken.json")" == "2" ]] \
+  || fail "an unparseable closure is could-not-run (status 2), not zero misses"
+printf 'ok - the ledger batch separates could-not-run from no-misses (fail-closed)\n'
+
 # --- ledger effect index: same verdicts, one read ----------------------------
 #
 # The index replaced a per-package walk of the whole ledger directory. It must

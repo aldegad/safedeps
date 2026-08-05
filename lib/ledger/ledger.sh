@@ -514,7 +514,7 @@ safedeps_ledger_effect_misses() {
   local miss_file
   local status
 
-  miss_file=$(mktemp "${TMPDIR:-/tmp}/safedeps-ledger-miss.XXXXXX") || return 1
+  miss_file=$(mktemp "${TMPDIR:-/tmp}/safedeps-ledger-miss.XXXXXX") || return 2
   jq -r --arg ecosystem "${ecosystem}" \
     '.[] | [$ecosystem, .package, (.version | tostring)] | @tsv' "${closure_file}" \
   | awk -F'\t' -v idx="${index_file}" '
@@ -527,6 +527,15 @@ safedeps_ledger_effect_misses() {
       }
       !(($1 SUBSEP $2 SUBSEP $3) in approved) { print $2 "\t" $3 }
     ' > "${miss_file}"
+
+  # A jq that could not read the closure produces no rows, and no rows is
+  # indistinguishable from "every package is approved" once the output is all a
+  # caller sees. That is the fail-open direction, so the failure gets its own
+  # status rather than an empty success.
+  if [[ ${PIPESTATUS[0]} -ne 0 ]]; then
+    rm -f "${miss_file}"
+    return 2
+  fi
 
   status=0
   [[ -s "${miss_file}" ]] && status=1
@@ -545,11 +554,20 @@ safedeps_ledger_effect_check_batch() {
   local index_file
   local status
 
-  safedeps_ledger_require_jq || return 1
-  [[ -f "${closure_file}" ]] || return 1
+  # Status is a verdict OR an error, and the two must not share a code: the
+  # caller writes the output into its miss list, so "could not run" arriving as
+  # an empty result reads as "nothing is unapproved". The per-package form this
+  # replaced failed closed here (every package missed), and the batch form has
+  # to keep that direction. 0 = no misses, 1 = misses found, 2 = could not run,
+  # matching the audit exit-code contract used elsewhere in the tool.
+  safedeps_ledger_require_jq || return 2
+  [[ -f "${closure_file}" ]] || return 2
 
-  index_file=$(mktemp "${TMPDIR:-/tmp}/safedeps-ledger-index.XXXXXX") || return 1
-  safedeps_ledger_effect_index "${context_hash}" > "${index_file}"
+  index_file=$(mktemp "${TMPDIR:-/tmp}/safedeps-ledger-index.XXXXXX") || return 2
+  if ! safedeps_ledger_effect_index "${context_hash}" > "${index_file}"; then
+    rm -f "${index_file}"
+    return 2
+  fi
   safedeps_ledger_effect_misses "${index_file}" "${ecosystem}" "${closure_file}"
   status=$?
   rm -f "${index_file}"
