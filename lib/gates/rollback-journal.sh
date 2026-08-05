@@ -97,6 +97,61 @@ safedeps_journal_close() {
   rm -f "$(safedeps_journal_path "${journal_id}")"
 }
 
+# Is the process that opened this entry still running its rollback?
+#
+# "An entry is on disk" is not "a rollback did not finish". During a rollback
+# its own entry is on disk deliberately, so an unrelated Bash call landing in
+# that window used to report a finished rollback as interrupted (measured:
+# scripts/measure/rollback-concurrent-report.sh — REORG INTERRUPTED and REORG
+# executed in the same log, plus an incident file, for a rollback that worked).
+#
+# The state lock cannot answer this. The post hook releases it before the
+# rollback begins, so the rollback runs unlocked and a second hook would take
+# the lock and read the same live entry. Liveness is the only thing that
+# separates "running" from "killed", so the journal's own pid is the oracle.
+#
+# Two ways to be wrong, and only one of them is safe:
+#   - calling a dead rollback alive suppresses a real report (silence — the
+#     defect the journal exists to prevent)
+#   - calling a live rollback dead produces a false report (noise)
+# So this answers "alive" only on positive evidence and defaults to dead.
+#
+# pid reuse is the trap. A recycled pid belonging to some unrelated process
+# would make a genuinely interrupted rollback look alive forever, which is the
+# silent direction. Process start time settles it exactly: the owner was running
+# before it wrote the entry, and a pid can only be recycled after its previous
+# holder died — so anything that started after the entry was opened is a
+# different process, and no other check is needed to know that.
+safedeps_journal_owner_alive() {
+  local pid="$1"
+  local opened_at="$2"
+  local started_epoch opened_epoch
+
+  [[ "${pid}" =~ ^[0-9]+$ ]] || return 1
+  kill -0 "${pid}" 2>/dev/null || return 1
+
+  # Without a start time this stays fail-loud (treated as dead), so a platform
+  # that cannot answer reports rather than goes quiet.
+  local lstart
+  lstart=$(ps -o lstart= -p "${pid}" 2>/dev/null)
+  [[ -n "${lstart}" ]] || return 1
+  # GNU (`date -d`) first, then BSD/macOS (`date -j -f`), matching how the state
+  # lock reads mtime from either stat.
+  started_epoch=$(date -d "${lstart}" +%s 2>/dev/null) || \
+    started_epoch=$(date -j -f '%a %b %d %T %Y' "${lstart}" +%s 2>/dev/null) || return 1
+  [[ -n "${started_epoch}" ]] || return 1
+  opened_epoch=$(date -u -d "${opened_at}" +%s 2>/dev/null) || \
+    opened_epoch=$(date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "${opened_at}" +%s 2>/dev/null) || return 1
+  [[ -n "${opened_epoch}" ]] || return 1
+  # No slack. Both timestamps come from the same system clock at second
+  # resolution, and the owner necessarily started before it wrote its entry, so
+  # equality is the widest this needs to be. Slack here would only buy a window
+  # in which a recycled pid suppresses a real report.
+  (( started_epoch <= opened_epoch )) || return 1
+
+  return 0
+}
+
 # Any journal entry still on disk belongs to a rollback that did not finish.
 # Move each one to the incident directory (so it is reported once, not on every
 # command from here on), append a line to the same reorg.log the finished
@@ -115,6 +170,17 @@ safedeps_journal_report_unfinished() {
 
   for entry in "${SAFEDEPS_JOURNAL_DIR}"/*.json; do
     [[ -f "${entry}" ]] || continue
+
+    local entry_pid entry_opened
+    entry_pid=$(jq -r '.pid // empty' "${entry}" 2>/dev/null)
+    entry_opened=$(jq -r '.opened_at // empty' "${entry}" 2>/dev/null)
+    # A rollback still running owns its entry. Skipping it is not a silent
+    # fallback: the process that owns it will either close it on success or die
+    # and leave it for the next hook to report.
+    if safedeps_journal_owner_alive "${entry_pid}" "${entry_opened}"; then
+      continue
+    fi
+
     found=0
 
     local journal_id project_dir rollback_snapshot reasons stage opened_at

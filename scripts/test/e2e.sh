@@ -1191,6 +1191,27 @@ mkdir -p "${journal_home}" "${journal_project}"
     'npm closure contains 1 unapproved package(s): fixture-evil@9.9.9' \
     'reinstalling-node-modules' )
 
+# ...and its owner has to be genuinely gone, because "interrupted" now means
+# "the process that opened this is not running". `safedeps_journal_open` stamps
+# `$$`, which inside `( … )` is this script's pid, not the subshell's — so the
+# fixture above describes a rollback owned by a live process. That went unnoticed
+# while nothing read the field. Substitute a pid that is really dead.
+# The redirect is load-bearing: a background job inheriting the command
+# substitution's stdout keeps that pipe open, so `$( … )` would block until the
+# sleep exited rather than returning its pid.
+journal_dead_owner_probe() { sleep 60 >/dev/null 2>&1 & echo $!; }
+journal_dead_pid=$(journal_dead_owner_probe)
+kill -9 "${journal_dead_pid}" 2>/dev/null
+# Not a child of this shell — it was spawned inside the command substitution —
+# so `wait` would return 127 and `set -e` would end the run. Poll instead.
+journal_reap=0
+while kill -0 "${journal_dead_pid}" 2>/dev/null && (( journal_reap < 100 )); do
+  sleep 0.05; journal_reap=$((journal_reap + 1))
+done
+journal_entry_file="${journal_home}/rollback-journal/test-interrupted.json"
+jq -c --arg pid "${journal_dead_pid}" '.pid = $pid' "${journal_entry_file}" \
+  > "${journal_entry_file}.tmp" && mv "${journal_entry_file}.tmp" "${journal_entry_file}"
+
 journal_report=$(
   SAFEDEPS_HOME="${journal_home}" scripts/safedeps-post-verify.sh <<EOF
 {"tool_name":"Bash","tool_input":{"command":"echo unrelated"},"cwd":"${journal_project}"}
@@ -1224,6 +1245,77 @@ printf 'ok - an interrupted rollback is reported, logged, and kept as an inciden
 [[ -z "$(find "${SAFEDEPS_HOME}/rollback-journal" -maxdepth 1 -name '*.json' 2>/dev/null)" ]] \
   || fail "a completed rollback leaves an open journal entry behind"
 printf 'ok - a completed rollback leaves no journal entry\n'
+
+# --- rollback journal: a rollback still RUNNING is not "interrupted" ---------
+#
+# The journal is read at the top of every post hook, and PostToolUse fires on
+# every Bash call. So an unrelated command landing inside a rollback used to
+# read that rollback's own live entry and report it as interrupted — measured in
+# scripts/measure/rollback-concurrent-report.sh, which produced REORG INTERRUPTED
+# and REORG executed in one log plus an incident file, for a rollback that
+# worked. The state lock cannot fix this: the post hook releases it before the
+# rollback starts, so the rollback runs unlocked.
+#
+# Liveness of the journal's own pid is the discriminator, and these pin all
+# three ways it has to answer.
+
+race_home="${tmp_root}/journal-race-home"
+race_project="${tmp_root}/journal-race-project"
+mkdir -p "${race_home}" "${race_project}"
+
+# A stand-in for a rollback that is still working. It has to be a bash process,
+# because that is what the owner check accepts and what a hook actually is —
+# a `sleep` here would pass the test for the wrong reason.
+bash -c 'sleep 120' >/dev/null 2>&1 &
+race_owner_pid=$!
+
+race_write_entry() {
+  local pid="$1" opened_at="$2"
+  mkdir -p "${race_home}/rollback-journal"
+  jq -nc --arg pid "${pid}" --arg opened_at "${opened_at}" \
+    '{journal_id:"test-race", project_dir:"'"${race_project}"'",
+      rollback_snapshot:"snap-baseline", reasons:"npm closure contains 1 unapproved package(s): fixture-evil@9.9.9",
+      stage:"reinstalling-node-modules", opened_at:$opened_at, pid:$pid}' \
+    > "${race_home}/rollback-journal/test-race.json"
+}
+
+race_report() {
+  SAFEDEPS_HOME="${race_home}" scripts/safedeps-post-verify.sh <<EOF
+{"tool_name":"Bash","tool_input":{"command":"echo unrelated"},"cwd":"${race_project}"}
+EOF
+}
+
+# 1. The owner is alive and started before the entry — a rollback in progress.
+race_write_entry "${race_owner_pid}" "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+race_live=$(race_report)
+grep -q 'did not finish' <<< "${race_live}" \
+  && fail "a rollback that is still running is reported as interrupted"
+[[ -f "${race_home}/rollback-journal/test-race.json" ]] \
+  || fail "a running rollback's journal entry is consumed by an unrelated command"
+[[ ! -f "${race_home}/reorg.log" ]] || ! grep -q 'REORG INTERRUPTED' "${race_home}/reorg.log" \
+  || fail "a running rollback puts a REORG INTERRUPTED line in the log"
+
+# 2. pid reuse must not buy silence. An entry whose pid belongs to a process
+#    that started AFTER the entry was opened cannot be that rollback, and the
+#    silent direction is the dangerous one: a recycled pid would hide a real
+#    interrupted rollback forever.
+race_write_entry "${race_owner_pid}" "1999-01-01T00:00:00Z"
+race_reused=$(race_report)
+grep -q 'did not finish' <<< "${race_reused}" \
+  || fail "an entry whose pid was recycled by a later process is reported"
+
+# 3. The owner dies mid-rollback — the case the journal exists for.
+kill -9 "${race_owner_pid}" 2>/dev/null
+# `wait` on a SIGKILLed child returns 137 and `set -e` would end the run here.
+race_reap=0
+while kill -0 "${race_owner_pid}" 2>/dev/null && (( race_reap < 100 )); do
+  sleep 0.05; race_reap=$((race_reap + 1))
+done
+race_write_entry "${race_owner_pid}" "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+race_dead=$(race_report)
+grep -q 'did not finish' <<< "${race_dead}" \
+  || fail "a rollback whose process died is still reported as interrupted"
+printf 'ok - a running rollback is not reported as interrupted (dead and recycled pids still are)\n'
 
 # --- ledger effect index: same verdicts, one read ----------------------------
 #
