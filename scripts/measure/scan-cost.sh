@@ -107,6 +107,11 @@ time_gate() {
 }
 
 printf 'safedeps scan cost — best of %s reps per cell, load average %s at start\n' "${REPS}" "$(load_now)"
+printf 'READ THIS BEFORE QUOTING THE GATE COLUMNS: they run with the guard'"'"'s own\n'
+printf 'deadline DISABLED, so they are the UNBOUNDED cost, not the latency a user\n'
+printf 'sees. With the deadline on, an over-budget command is denied UNDECIDED in\n'
+printf 'about the budget. Quoting a gate number as "how long the hook takes" is\n'
+printf 'wrong, and it was misread that way within an hour of this file existing.\n'
 printf 'bash %s, awk %s\n\n' "${BASH_VERSION}" "$(awk --version 2>/dev/null | head -1 || echo 'BWK awk (no --version)')"
 printf '%-10s %-12s %-12s %-12s %-12s\n' 'size' 'scan quiet' 'scan loud' 'gate quiet' 'gate loud'
 
