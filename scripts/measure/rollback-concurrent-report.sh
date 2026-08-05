@@ -118,11 +118,20 @@ printf 'reorg.log REORG executed lines             : %s\n' "${executed_lines}"
 printf 'incident files                             : %s\n' "${incidents}"
 printf 'journal entries left at the end            : %s\n' "${journal_left}"
 printf '\n'
-if [[ "${bystander_claims_interrupted}" == 'yes' && "${executed_lines}" != '0' ]]; then
+# A bystander that fired after the rollback had already finished proves nothing:
+# there was no live entry for it to misread. That run and a genuine pass produce
+# the same silence, so it must not print the same verdict — a later reader
+# citing this harness would be citing a run that never entered the window.
+if [[ "${executed_lines}" == '0' ]]; then
+  printf 'VERDICT: INCONCLUSIVE — the rollback did not complete; rerun.\n'
+elif [[ "${bystander_claims_interrupted}" == 'yes' ]]; then
   printf 'VERDICT: FALSE REPORT — the rollback completed (REORG executed) and an\n'
   printf '         unrelated command was told it was interrupted.\n'
-elif [[ "${bystander_claims_interrupted}" == 'no' && "${executed_lines}" != '0' ]]; then
-  printf 'VERDICT: CLEAN — the rollback completed and the bystander stayed quiet.\n'
+elif [[ "${rollback_alive}" != 'yes' || "${journal_live}" == '0' ]]; then
+  printf 'VERDICT: WINDOW MISSED — the bystander fired after the rollback finished,\n'
+  printf '         so its silence is not evidence. Rerun with a smaller delta\n'
+  printf '         (0 lands inside the node_modules reinstall).\n'
 else
-  printf 'VERDICT: INCONCLUSIVE — the rollback did not complete; rerun.\n'
+  printf 'VERDICT: CLEAN — the bystander fired while the rollback was still running\n'
+  printf '         with a live journal entry, and stayed quiet.\n'
 fi
