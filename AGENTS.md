@@ -74,8 +74,11 @@ correctly, overlapping into a wrong result.
   ordinary exits; a marker sweep at suite start covers SIGKILL, which defeats
   traps and is this repo's core scenario rather than a hypothetical; and
   spawning children with a cwd outside the worktree removes what the leak costs,
-  since an orphan holding the plan worktree blocks `git worktree remove` at
-  finalize. Scope any sweep with a marker only your own children carry.
+  since an orphan holding the plan worktree makes the close gate refuse to
+  prescribe removal at finalize. (Measured, after review corrected it: `git
+  worktree remove` itself exits 0 with a stopped process sitting in that cwd --
+  the machine that refuses is kuma's live-cwd close gate, not git. The effect and
+  the fix were right; the named cause was not.) Scope any sweep with a marker only your own children carry.
 
 ### Citing a zero
 

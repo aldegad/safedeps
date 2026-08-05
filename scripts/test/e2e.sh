@@ -24,7 +24,15 @@ tmp_root=$(mktemp -d "${TMPDIR:-/tmp}/safedeps-e2e.XXXXXX")
 # SIGCONT before SIGKILL: a stopped process never receives SIGTERM, and SIGKILL
 # is delivered regardless, so this order is what actually reaps one.
 # A marker only this suite's children carry, so a sweep can name them without
-# pattern-matching its way onto somebody else's process. It is the child's $0,
+# pattern-matching its way onto somebody else's process.
+#
+# Suite-unique, deliberately not run-unique. Two overlapping e2e runs mean the
+# later one's startup sweep reaps the earlier one's live children, which is a
+# real cost -- but it fails loud: both blocks that use these children have an
+# `else fail`, so an overlap produces a red assertion rather than a quiet skip.
+# A run token would remove that, at the price of a run never being able to
+# recognise the orphans its own SIGKILLed predecessor left, which is the case
+# this sweep exists for. The tradeoff is chosen, not overlooked. It is the child's $0,
 # which means it shows up in `ps -o args=` and nowhere else.
 E2E_CHILD_MARKER='safedeps-e2e-child'
 
@@ -71,8 +79,15 @@ sweep_stale_children
 port_file="${tmp_root}/port"
 state_file="${tmp_root}/state.json"
 printf '%s\n' '{"vulnerable":[]}' > "${state_file}"
-node scripts/test/fixture-provider.mjs "${port_file}" "${state_file}" &
+# The fourth site of the same shape, found in review: this server outlived its
+# suite six times over, cwd in the plan worktree, and none of the three layers
+# reached it -- no marker, worktree cwd, and it never exits on its own. Only the
+# EXIT trap killed it, so any SIGKILL leaked one. It now spawns from tmp_root and
+# carries the marker, which folds it into the sweep and the cwd layer both.
+( cd "${tmp_root}" && exec -a "${E2E_CHILD_MARKER}" \
+    node "${ROOT_DIR}/scripts/test/fixture-provider.mjs" "${port_file}" "${state_file}" ) &
 server_pid=$!
+owned_children+=("${server_pid}")
 
 for _ in {1..50}; do
   [[ -s "${port_file}" ]] && break
