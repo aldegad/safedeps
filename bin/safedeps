@@ -217,6 +217,10 @@ sf_extract_patched_versions() {
 sf_advisory_log() {
   umask 077
   mkdir -p "$(dirname "${SAFEDEPS_ADVISORY_LOG}")"
+  # Same once-per-process retention check the provider writer does. Both write
+  # this file directly, so a run that never reaches a provider (a ledger listing,
+  # an empty re-check) must still be a run that can rotate it.
+  safedeps_advisory_log_rotate_once
   printf '[%s] %s\n' "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" "$*" >> "${SAFEDEPS_ADVISORY_LOG}"
 }
 
