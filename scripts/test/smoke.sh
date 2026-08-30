@@ -337,6 +337,52 @@ allow_sid=$(jq -r '.snapshot_id' "${tmp_root}/safe-hook-allow/pending/"*.json)
 jq -e '.ignore_scripts_injected == true' "${tmp_root}/safe-hook-allow/snapshots/${allow_sid}_meta.json" >/dev/null || fail "hook records injected meta flag"
 pass "hook injects --ignore-scripts for Claude approved install"
 
+# Global npm installs resolve into npm's global prefix and must not inherit the
+# cwd project's approval context. Reusing that context denied a clean,
+# unscoped approval whenever the agent session happened to start in a project
+# with npm overrides. The local control below proves that only global mode is
+# context-free; an ordinary project install still requires the scoped entry.
+printf '{"dependencies":{},"overrides":{"left-pad":"1.3.0"}}\n' > "${project_dir}/package.json"
+global_forms=(
+  "npm install -g left-pad@1.3.0"
+  "npm install --global left-pad@1.3.0"
+  "npm -g install left-pad@1.3.0"
+  "npm --global install left-pad@1.3.0"
+)
+for i in "${!global_forms[@]}"; do
+  global_safe="${tmp_root}/safe-global-context-${i}"
+  mkdir -p "${global_safe}"
+  SAFEDEPS_HOME="${global_safe}" lib/ledger/ledger.sh approve npm left-pad 1.3.0 1.3.0 smoke >/dev/null
+  global_output=$(run_hook_command "${tmp_root}/home-global-context-${i}" "${global_safe}" "${global_forms[$i]}")
+  [[ "$(jq -r '.hookSpecificOutput.permissionDecision // "allow"' <<< "${global_output}")" != "deny" ]] \
+    || fail "approved global npm install ignores cwd project context: ${global_forms[$i]}"
+done
+
+global_unapproved=$(run_hook_command "${tmp_root}/home-global-unapproved" "${tmp_root}/safe-global-unapproved" "npm install -g unapproved-global@9.9.9")
+[[ "$(jq -r '.hookSpecificOutput.permissionDecision' <<< "${global_unapproved}")" == "deny" ]] \
+  || fail "unapproved global npm install remains denied"
+
+local_context_safe="${tmp_root}/safe-local-context-control"
+mkdir -p "${local_context_safe}"
+SAFEDEPS_HOME="${local_context_safe}" lib/ledger/ledger.sh approve npm left-pad 1.3.0 1.3.0 smoke >/dev/null
+local_context_output=$(run_hook_command "${tmp_root}/home-local-context-control" "${local_context_safe}" "npm install left-pad@1.3.0")
+[[ "$(jq -r '.hookSpecificOutput.permissionDecision' <<< "${local_context_output}")" == "deny" ]] \
+  || fail "local npm install still requires its cwd project context"
+
+global_false_output=$(run_hook_command "${tmp_root}/home-global-false-control" "${local_context_safe}" "npm install --global=false left-pad@1.3.0")
+[[ "$(jq -r '.hookSpecificOutput.permissionDecision' <<< "${global_false_output}")" == "deny" ]] \
+  || fail "--global=false remains project-scoped"
+
+mixed_safe="${tmp_root}/safe-mixed-global-local-control"
+mkdir -p "${mixed_safe}"
+SAFEDEPS_HOME="${mixed_safe}" lib/ledger/ledger.sh approve npm left-pad 1.3.0 1.3.0 smoke >/dev/null
+SAFEDEPS_HOME="${mixed_safe}" lib/ledger/ledger.sh approve npm other-local 2.0.0 2.0.0 smoke >/dev/null
+mixed_context_output=$(run_hook_command "${tmp_root}/home-mixed-global-local-control" "${mixed_safe}" "npm install -g left-pad@1.3.0 && npm install other-local@2.0.0")
+[[ "$(jq -r '.hookSpecificOutput.permissionDecision' <<< "${mixed_context_output}")" == "deny" ]] \
+  || fail "mixed global and local npm operations stay project-scoped"
+printf '{"dependencies":{}}\n' > "${project_dir}/package.json"
+pass "global npm approvals are context-free while local approvals remain project-scoped"
+
 mkdir -p "${tmp_root}/safe-hook-codex"
 SAFEDEPS_HOME="${tmp_root}/safe-hook-codex" lib/ledger/ledger.sh approve npm left-pad 1.3.0 1.3.0 smoke >/dev/null
 codex_allow_output=$(
