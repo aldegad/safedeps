@@ -111,6 +111,21 @@ expect_deny "a pipe to a brace group running sh"      "printf 'pip install evil=
 expect_deny "a |& pipe to sh"                         "printf 'pip install evil==1.0.0' |& sh"
 pass "a pipe into a shell is read through the shell's operators and groups"
 
+# A heredoc body is stripped once, before anything reads the payloads. A reader
+# that stripped again saw the `<<EOF` line with no body after it and dropped
+# every following line, so an install written after a heredoc passed with no
+# verdict. And only a real heredoc opens one: a herestring, an arithmetic shift
+# or a quoted `<<EOF` used to open one with no terminator, which hid every
+# line after it.
+expect_deny "sh -c after a heredoc"                    $'cat <<EOF > notes.md\nhello\nEOF\nsh -c "pip install evil==6.6.6"'
+expect_deny "bash -c after a heredoc"                  $'cat <<EOF > notes.md\nhello\nEOF\nbash -c "npm install evil@6.6.6"'
+expect_deny "zsh -c after a heredoc into git"          $'git commit -F - <<EOF\nmsg\nEOF\nzsh -c "gem install evil -v 6.6.6"'
+expect_deny "an install after a herestring"            $'cat <<<"hello"\npip install evil==6.6.6'
+expect_deny "an install after an arithmetic shift"     $'echo $((1<<2))\npip install evil==6.6.6'
+expect_deny "an install after a quoted <<EOF"          $'echo "use <<EOF here"\npip install evil==6.6.6'
+expect_deny "a pipe continued past a heredoc"          $'cat <<EOF |\npip install evil==6.6.6\nEOF\nsh'
+pass "heredocs are stripped once and only real ones open"
+
 # --- 2. Carrier forms the command gate does NOT catch -------------------------
 # Deliberate. The gate recognizes carriers by enumeration, and the shell has
 # unbounded ways to route text to an interpreter, so the enumeration does not
@@ -688,9 +703,14 @@ for piped in \
   "pip install requests==2.0.0; c='pip install evil==6.6.6'; echo \"\$c\" | sh" \
   "pip install requests==2.0.0; (printf 'pip install evil==6.6.6'; :) | sh" \
   "npx -y echo-cli@1.0.0 pip install evil==6.6.6 | sh" \
-  "pip install'evil==1' ; printf 'pip install evil==6.6.6' | sh"
+  "pip install'evil==1' ; printf 'pip install evil==6.6.6' | sh" \
+  "pip install requests==2.0.0 && printf 'pip\\tinstall evil==6.6.6' | sh" \
+  "pip install requests==2.0.0 && echo pip\\ install evil==6.6.6 | sh" \
+  "pip install requests==2.0.0 && printf pip' install evil==6.6.6' | sh" \
+  "pip install requests==2.0.0 && echo 'pipXinstall evil==6.6.6' | tr X ' ' | sh" \
+  "npm install left-pad@1.3.0 && printf 'pip%sinstall evil==6.6.6' ' ' | sh"
 do
-  grep -q 'pipes install text into a shell' <<< "$(beside_reason "${piped}")" \
+  grep -q 'reads like an install into a shell' <<< "$(beside_reason "${piped}")" \
     || fail "a piped install beside a visible one is denied by the pipe rule: $(printf '%q' "${piped}")"
 done
 pass "an install piped into a shell is denied beside a visible install, even an approved one"
@@ -717,6 +737,8 @@ pass "an install piped into a shell is denied beside a visible install, even an 
   || fail "a heredoc written to a file is not piped into a shell"
 [[ "$(beside_decision $'npm install left-pad@1.3.0 && cat <<EOF | sh\npip install evil==6.6.6\nEOF')" == "deny" ]] \
   || fail "a heredoc piped into a shell beside a visible install is still read"
+[[ "$(beside_decision $'cat <<EOF > notes.md\nhello\nEOF\npip install requests==2.0.0 && eval "pip install evil==6.6.6"')" == "deny" ]] \
+  || fail "an eval install after a heredoc beside a visible install is still read"
 pass "a visible install beside a pipe into a shell with nothing else to install keeps its verdict"
 
 printf 'consumer-forms passed\n'
