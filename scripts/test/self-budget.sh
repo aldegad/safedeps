@@ -33,8 +33,48 @@ printf '{"dependencies":{}}\n' > "${project_dir}/package.json"
 
 pad() { head -c "$1" < /dev/zero | tr '\0' 'x'; }
 
+# --- a judgment that does not finish, on demand ------------------------------
+# Every over-budget case below needs a judgment that outlasts its budget. This
+# battery used to get one from input size: 12KB of padding took ~5.5s to scan
+# on the machine it was written on. That was never a property of the gate. It
+# was a property of the scanner's cost curve and of the machine, and both moved:
+# the linear scanner answers 12KB in 0.2s, and the ubuntu CI runner was already
+# finishing the 11s "deep" case inside its budget before that.
+#
+# So the delay comes from the one input a test controls and the guard does not
+# read: PATH. `slow_guard` puts an awk in front of the real one that sleeps once
+# before it runs. awk is on the judgment's path (command_scan_text) and not on
+# the parent's — the parent reads the payload with jq, keeps the deadline with
+# kill and sleep, and answers with jq — so the delay lands inside the child the
+# deadline watches and nowhere else. The guard gains no knob for this. A delay
+# the environment could set would be one more thing an attacker could set.
+#
+# The sleep is a foreground external command of the child, which is the
+# condition the deadline has to survive: a shell does not act on a signal while
+# one runs. The shim sleeps once per guard run, not once per awk call, so a case
+# costs the same however many times the judgment reaches for awk. It sleeps from
+# `/`, so a sleeper that outlives a regressed kill cannot pin the worktree.
+real_awk=$(command -v awk)
+slow_bin="${tmp_root}/slow-bin"
+slow_delay_file="${tmp_root}/slow-delay"
+slow_once_dir="${tmp_root}/slow-once"
+mkdir -p "${slow_bin}"
+cat > "${slow_bin}/awk" <<SHIM
+#!/usr/bin/env bash
+if mkdir '${slow_once_dir}' 2>/dev/null; then
+  cd / && sleep "\$(cat '${slow_delay_file}')"
+  cd "\${OLDPWD}" || exit 1
+fi
+exec '${real_awk}' "\$@"
+SHIM
+chmod +x "${slow_bin}/awk"
+
+# Long enough that nothing but the deadline can answer inside the runtime's 30s.
+never=60
+
 # Runs the guard and captures decision, whether the reason is the undecided
 # one, and how long the answer took.
+GUARD_PATH=""
 guard() {
   local command="$1" budget="${2:-2}" engage="${3:-1024}" disabled="${4:-}" legacy_child="${5:-}"
   # mktemp for the same reason as consumer-forms.sh: `$$` is constant within a
@@ -43,19 +83,25 @@ guard() {
   local safe
   safe=$(mktemp -d "${tmp_root}/safe.XXXXXX")
   GUARD_STATE_DIR="${safe}"
-  local start end
+  local start end rc=0
   start=$(date +%s)
   GUARD_OUT=$(jq -nc --arg c "${command}" --arg cwd "${project_dir}" \
     '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
+    PATH="${GUARD_PATH:-${PATH}}" \
     HOME="${tmp_root}/home" SAFEDEPS_HOME="${safe}" \
     SAFEDEPS_SELF_BUDGET_SECONDS="${budget}" \
     SAFEDEPS_BUDGET_ENGAGE_BYTES="${engage}" \
     SAFEDEPS_BUDGET_DISABLED="${disabled}" \
     SAFEDEPS_BUDGET_CHILD="${legacy_child}" \
-    scripts/safedeps-pre-guard.sh 2>"${tmp_root}/stderr") || true
+    scripts/safedeps-pre-guard.sh 2>"${tmp_root}/stderr") || rc=$?
   GUARD_STDERR=$(cat "${tmp_root}/stderr" 2>/dev/null || printf '')
   end=$(date +%s)
   GUARD_ELAPSED=$(( end - start ))
+  # The hook exits 0 on every designed path, so anything else means it never
+  # answered. Reading that as an empty answer reads it as `pass`, and that is
+  # how a Linux launch failure (E2BIG) passed for a verdict in CI.
+  (( rc == 0 )) \
+    || fail "the guard ran and answered (it exited ${rc}: $(printf '%s' "${GUARD_STDERR}" | head -c 120))"
   if [[ -z "${GUARD_OUT}" ]]; then
     GUARD_DECISION="pass"
   else
@@ -64,13 +110,19 @@ guard() {
   GUARD_REASON=$(jq -r '.hookSpecificOutput.permissionDecisionReason // ""' <<< "${GUARD_OUT:-{\}}" 2>/dev/null || printf '')
 }
 
-# A command whose scan outruns the smallest budget by a wide margin while still
-# returning fast enough for a test suite: 12KB measured at ~5.5s against a 1s
-# budget that fires at ~1.6s. The margin is the point. Sizing this input close
-# to the budget makes the battery a race, and the first draft of it was one —
-# 8KB (~2.5s) against a 2s budget that fires at ~2.6s reported a false pass.
-# Whatever machine runs this has to be several times faster than the one it was
-# measured on before the margin closes.
+# `guard`, with the judgment held up for <seconds> first.
+slow_guard() {
+  local delay="$1"
+  shift
+  printf '%s' "${delay}" > "${slow_delay_file}"
+  rmdir "${slow_once_dir}" 2>/dev/null || true
+  GUARD_PATH="${slow_bin}:${PATH}"
+  guard "$@"
+  GUARD_PATH=""
+}
+
+# The size only has to engage the deadline, including under the 4KB engage
+# ceiling; the delay above is what makes it outlast the budget.
 big=$(pad 12288)
 # Comfortably inside any budget.
 small=$(pad 256)
@@ -81,7 +133,7 @@ tiny_budget=1
 
 # --- past the budget: the gate answers instead of being killed --------------
 
-guard "echo ${big}" "${tiny_budget}"
+slow_guard "${never}" "echo ${big}" "${tiny_budget}"
 [[ "${GUARD_DECISION}" == "deny" ]] || fail "over-budget command is denied (got: ${GUARD_DECISION})"
 grep -q 'UNDECIDED' <<< "${GUARD_REASON}" || fail "over-budget deny is marked UNDECIDED"
 pass "over-budget command is denied rather than silently allowed"
@@ -118,7 +170,7 @@ for install_cmd in \
   "cargo add serde@1.0.0 # ${big}" \
   "go get example.com/x@v1.0.0 # ${big}" \
   "gem install rails -v 7.0.0 # ${big}"; do
-  guard "${install_cmd}" "${tiny_budget}"
+  slow_guard "${never}" "${install_cmd}" "${tiny_budget}"
   [[ "${GUARD_DECISION}" == "deny" ]] \
     || fail "padded install past the budget is denied: ${install_cmd:0:24}… (got: ${GUARD_DECISION})"
 done
@@ -134,31 +186,34 @@ pass "padded installs past the budget are denied across command-gate-authority e
 # survived the deadline and ran to completion), and the plain fact that a shell
 # does not act on a signal while a foreground external command is running.
 #
-# Both show up only when the deadline lands deep in the scan, inside one of the
-# long greps. This case is sized to do that: 12KB against an 11s budget answers
-# at ~12s when the deadline is enforced on the whole child tree, and at ~17s
-# when it is only sent to the child shell.
+# Both show up only when the deadline lands while the child is blocked in an
+# external command. This case used to reach that state by sizing the input so
+# the deadline landed deep in a long grep (12KB against an 11s budget), which
+# made the case a race against the machine. The slow judgment holds the child
+# in a foreground external command for a full minute instead, so the state is
+# certain rather than likely: a deadline that only reached the child shell would
+# answer when that command returned, about 57s late.
 #
 # The assertion is on the OVERSHOOT, not on elapsed time, because that is the
 # property the runtime cares about — the guard's answer has to arrive before the
 # runtime's own budget expires, and how much slack that leaves is exactly the
 # budget minus the overshoot.
-deep_budget=11
-guard "pip install requests==2.31.0 # ${big}" "${deep_budget}"
+deep_budget=3
+slow_guard "${never}" "pip install requests==2.31.0 # ${big}" "${deep_budget}"
 [[ "${GUARD_DECISION}" == "deny" ]] \
-  || fail "deadline deep in the scan still denies (got: ${GUARD_DECISION})"
+  || fail "deadline landing while the child is blocked still denies (got: ${GUARD_DECISION})"
 grep -q 'UNDECIDED' <<< "${GUARD_REASON}" \
-  || fail "deadline deep in the scan is reported as undecided, not as a finding"
+  || fail "deadline landing while the child is blocked is reported as undecided, not as a finding"
 deep_overshoot=$(( GUARD_ELAPSED - deep_budget ))
 (( deep_overshoot <= 3 )) \
-  || fail "deadline deep in the scan is honoured promptly (overshot the ${deep_budget}s budget by ${deep_overshoot}s; a child that outlasts the deadline is how this gate fails open)"
-pass "deadline landing deep in the scan is honoured promptly, not whenever the child notices"
+  || fail "deadline landing while the child is blocked is honoured promptly (overshot the ${deep_budget}s budget by ${deep_overshoot}s; a child that outlasts the deadline is how this gate fails open)"
+pass "deadline landing while the child is blocked is honoured promptly, not whenever the child notices"
 
 # The same property stated from the other side: the answer tracks OUR budget,
 # not the judgment's natural length.
-guard "echo ${big}" 2
+slow_guard "${never}" "echo ${big}" 2
 budget_two=${GUARD_ELAPSED}
-guard "echo ${big}" 6
+slow_guard "${never}" "echo ${big}" 6
 budget_six=${GUARD_ELAPSED}
 (( budget_six > budget_two )) \
   || fail "answer time tracks the configured budget (2s->${budget_two}s, 6s->${budget_six}s)"
@@ -176,14 +231,12 @@ runtime_budget=$(grep -m1 '^SAFEDEPS_RUNTIME_BUDGET_SECONDS=' scripts/safedeps-p
 budget_ceiling=$(grep -m1 '^SAFEDEPS_SELF_BUDGET_MAX_SECONDS=' scripts/safedeps-pre-guard.sh | cut -d= -f2)
 [[ -n "${runtime_budget}" && -n "${budget_ceiling}" ]] || fail "budget constants are readable from the guard"
 
-# 64KB, because the clamp has to be the reason the answer arrives: this input's
-# natural scan runs past 300s on the machine this was measured on (2026-08-04),
-# so nothing but the ceiling can bring the answer back under the runtime budget.
-# If the clamp ever regresses this case does not fail fast — it sits for minutes
-# and then fails. That wait IS the defect: it is the window in which the runtime
-# kills the hook and the install proceeds unjudged.
-huge=$(pad 65536)
-guard "pip install requests==2.31.0 # ${huge}" 600
+# The judgment is held up for a minute, so nothing but the ceiling can bring the
+# answer back under the runtime budget. If the clamp ever regresses this case
+# does not fail fast — it sits for that minute and then fails. That wait IS the
+# defect: it is the window in which the runtime kills the hook and the install
+# proceeds unjudged.
+slow_guard "${never}" "pip install requests==2.31.0 # ${big}" 600
 [[ "${GUARD_DECISION}" == "deny" ]] \
   || fail "an over-ceiling budget still denies (got: ${GUARD_DECISION})"
 grep -q 'UNDECIDED' <<< "${GUARD_REASON}" \
@@ -216,7 +269,7 @@ pass "the clamp is observable — stderr, advisory.log, and the deny reason all 
 #
 # One expensive case proves the property end to end; the cheap ones below prove
 # the parse, which is where the defect actually lived.
-guard "pip install requests==2.31.0 # ${huge}" " 40"
+slow_guard "${never}" "pip install requests==2.31.0 # ${big}" " 40"
 [[ "${GUARD_DECISION}" == "deny" ]] \
   || fail "a whitespace-padded over-ceiling budget still denies (got: ${GUARD_DECISION})"
 (( GUARD_ELAPSED < runtime_budget )) \
@@ -252,7 +305,7 @@ pass "a non-numeric budget falls back to the default and says so, instead of rea
 # numbers are safe because they wrap" is not a property — the length is decided
 # in the string domain, before any arithmetic can wrap, which is.
 overflow_budget=123456789012345678901234567890
-guard "pip install requests==2.31.0 # ${huge}" "${overflow_budget}"
+slow_guard "${never}" "pip install requests==2.31.0 # ${big}" "${overflow_budget}"
 [[ "${GUARD_DECISION}" == "deny" ]] \
   || fail "a budget too long for arithmetic still denies (got: ${GUARD_DECISION})"
 (( GUARD_ELAPSED < runtime_budget )) \
@@ -284,9 +337,12 @@ if grep -q 'not a whole number' <<< "${GUARD_STDERR}"; then fail "a zero-padded 
 pass "a zero-padded budget is read in base 10"
 
 # Lowering stays free: a shorter budget only denies earlier, and it must not be
-# reported as clamped.
-guard "echo ${big}" "${tiny_budget}"
+# reported as clamped. The deadline has to actually fire here, or there is no
+# deny reason and no record for a stray clamp note to appear in.
+slow_guard "${never}" "echo ${big}" "${tiny_budget}"
+grep -q 'UNDECIDED' <<< "${GUARD_REASON}" || fail "a budget under the ceiling still fires (got: ${GUARD_DECISION})"
 if grep -q 'clamped' <<< "${GUARD_STDERR}"; then fail "a budget under the ceiling is left alone"; fi
+if grep -q 'clamped' <<< "${GUARD_REASON}"; then fail "a budget under the ceiling is not described as clamped"; fi
 if grep -q 'clamped' "${GUARD_STATE_DIR}/advisory.log"; then fail "a budget under the ceiling is not logged as clamped"; fi
 pass "a budget under the ceiling is honoured as given, silently"
 
@@ -295,7 +351,7 @@ pass "a budget under the ceiling is honoured as given, silently"
 # enough removes the deadline for everything below it — the same fail-open as an
 # over-large budget, through the knob someone reaches for next. It is clamped,
 # and clamped loudly, for the same reasons.
-guard "pip install requests==2.31.0 # ${big}" "${tiny_budget}" 99999999
+slow_guard "${never}" "pip install requests==2.31.0 # ${big}" "${tiny_budget}" 99999999
 [[ "${GUARD_DECISION}" == "deny" ]] \
   || fail "an engage size past the ceiling still engages the deadline (got: ${GUARD_DECISION})"
 grep -q 'UNDECIDED' <<< "${GUARD_REASON}" \
@@ -328,9 +384,16 @@ pass "a non-numeric engage size falls back to the default and says so"
 # It runs through SAFEDEPS_BUDGET_DISABLED rather than through the engage size,
 # because the tuning knob and the off switch being one variable is what let a
 # friction adjustment disable a security boundary without saying so.
-guard "echo ${big}" "${tiny_budget}" 1024 1
+#
+# The delay is short here because this case has to wait it out, and it is still
+# longer than the budget: the elapsed check is what proves the deny above came
+# from the deadline and not from something the delay did to the judgment.
+mutation_delay=4
+slow_guard "${mutation_delay}" "echo ${big}" "${tiny_budget}" 1024 1
 [[ "${GUARD_DECISION}" == "pass" ]] \
   || fail "with the deadline disabled the same command is allowed (got: ${GUARD_DECISION})"
+(( GUARD_ELAPSED >= mutation_delay )) \
+  || fail "with the deadline disabled the judgment runs past the budget instead of being cut (took ${GUARD_ELAPSED}s)"
 pass "battery is meaningful: with the deadline disabled the same command walks through"
 
 # A disabled deadline is a bypass, and every bypass in this tool is observable.
@@ -347,7 +410,7 @@ pass "a disabled deadline announces itself every time it is used"
 # named one, measured at 32s on an input that answers in 3s. It travels in argv
 # now, and the engines invoke the hook through a shim that passes no arguments,
 # so there is no route from the environment into it.
-guard "pip install requests==2.31.0 # ${big}" "${tiny_budget}" 1024 "" 1
+slow_guard "${never}" "pip install requests==2.31.0 # ${big}" "${tiny_budget}" 1024 "" 1
 [[ "${GUARD_DECISION}" == "deny" ]] \
   || fail "the deadline runs even with the old marker exported (got: ${GUARD_DECISION})"
 grep -q 'UNDECIDED' <<< "${GUARD_REASON}" \
@@ -379,7 +442,24 @@ pass "the ignored marker says it is ignored, on both channels"
 # of magnitude: whatever the parse costs per character, the answer must not
 # depend on it. A regression that only reinstated the old constant would still
 # pass a 60000-zero case, which is why this one is 500000.
-zeros=$(head -c 500000 < /dev/zero | tr '\0' '0')
+#
+# Where the platform allows it. Linux refuses any single environment string
+# over 128KB (MAX_ARG_STRLEN), so `exec` fails with E2BIG before the guard
+# starts. Measured on ubuntu:24.04: 131000 zeros launch, 131100 do not. That
+# failure used to read as an empty answer, and so as `pass`, which kept ubuntu
+# CI red for a reason that had nothing to do with the knob reader. On such a
+# platform the case runs at the largest value the kernel will carry, and says
+# so. That is also the largest value an attacker there can set, so the case
+# still covers the whole reachable range.
+knob_padding=500000
+zeros=$(head -c "${knob_padding}" < /dev/zero | tr '\0' '0')
+if ! SAFEDEPS_SELF_BUDGET_SECONDS="${zeros}3" env true 2>/dev/null; then
+  knob_padding=131000
+  zeros=$(head -c "${knob_padding}" < /dev/zero | tr '\0' '0')
+  SAFEDEPS_SELF_BUDGET_SECONDS="${zeros}3" env true 2>/dev/null \
+    || fail "this platform can carry a ${knob_padding}-character budget to the guard"
+  printf '# note - this platform refuses a 500000-character environment string; the padded budget runs at %s characters\n' "${knob_padding}"
+fi
 guard "pip install requests==2.31.0 # ${big}" "${zeros}3"
 [[ "${GUARD_DECISION}" == "deny" ]] || fail "an absurdly padded budget still decides (got: ${GUARD_DECISION})"
 (( GUARD_ELAPSED < runtime_budget )) \
