@@ -351,18 +351,43 @@ restore_node_modules() {
   ROLLBACK_WARNINGS+=("node_modules reinstall failed; review the project manually")
 }
 
+# `npm rebuild` runs the lifecycle scripts of every package in the tree it
+# rebuilds, so it may only rebuild the tree the effect gate just read. Two
+# things decide which tree that is, and both were measured:
+#
+#   - The tree has to be on record. The closure above is read from
+#     package-lock.json and the hidden lockfile. A node_modules with no hidden
+#     lockfile holds whatever it holds, and rebuilding it would run scripts the
+#     gate never looked at, so the rebuild is skipped and the user told.
+#   - The rebuild has to stay in the project. `npm rebuild` reads the project's
+#     own .npmrc, and with `global=true` there it rebuilt npm's global tree
+#     instead, running the scripts of a globally installed package nobody had
+#     verified. `--global=false` alone did not hold against `location=global`,
+#     and `--location=project` alone did not hold against `global=true`; the
+#     pair held against both.
+NPM_REBUILD_SCOPE=(--global=false --location=project)
+
 run_verified_npm_rebuild_if_injected() {
   local injected
 
   injected=$(jq -r '.ignore_scripts_injected == true' "${META_FILE}" 2>/dev/null || printf 'false')
   [[ "${injected}" == "true" ]] || return 0
 
+  # Nothing was installed into the project, so there is nothing to rebuild.
+  [[ -d "${PROJECT_DIR}/node_modules" ]] || return 0
+
+  if [[ ! -f "${PROJECT_DIR}/${NPM_HIDDEN_LOCKFILE}" ]]; then
+    log_advisory "post-verify: npm rebuild skipped in ${PROJECT_DIR} — node_modules has no .package-lock.json, so the tree it would rebuild is not the tree the effect gate read."
+    ROLLBACK_WARNINGS+=("npm rebuild was not run: ${PROJECT_DIR}/node_modules has no .package-lock.json, so safedeps could not read the tree it would rebuild. Install scripts have not run; review node_modules, then run \`npm rebuild\` yourself if it is what you expect")
+    return 0
+  fi
+
   if ! command -v npm >/dev/null 2>&1; then
     ROLLBACK_WARNINGS+=("npm is not installed; npm rebuild was not run after verified inert install")
     return 0
   fi
 
-  if (cd "${PROJECT_DIR}" && npm rebuild >/dev/null 2>&1); then
+  if (cd "${PROJECT_DIR}" && npm rebuild "${NPM_REBUILD_SCOPE[@]}" >/dev/null 2>&1); then
     return 0
   fi
 
@@ -732,8 +757,19 @@ check_binaries() {
   fi
 }
 
+# The npm CLI's two records of what a project install put on disk:
+# package-lock.json, and the hidden lockfile it writes into node_modules on
+# every install. They differ exactly when the install asked npm not to save:
+# `--no-save`, `--save=false`, `--no-package-lock`, `--package-lock=false`, the
+# same settings from the environment or an .npmrc. Measured with npm 11.19.0
+# against a local registry, each of those left package-lock.json byte-identical
+# and recorded the package in the hidden lockfile. Reading only
+# package-lock.json, this gate confirmed all of them clean, and the inert
+# rebuild below then ran the unverified package's install scripts
+# (safedeps/effect-gate-blind-to-lockless-npm-installs).
+NPM_HIDDEN_LOCKFILE="node_modules/.package-lock.json"
+
 check_npm_effect_closure() {
-  local lockfile="${PROJECT_DIR}/package-lock.json"
   local closure_file
   local provider_file
   local miss_file
@@ -742,8 +778,21 @@ check_npm_effect_closure() {
   local miss_count
   local vulnerable_summary
   local kev_summary
+  local lockfile
+  local part_file
+  local -a lockfiles=()
 
-  [[ -f "${lockfile}" ]] || return 0
+  for lockfile in "${PROJECT_DIR}/package-lock.json" "${PROJECT_DIR}/${NPM_HIDDEN_LOCKFILE}"; do
+    [[ -f "${lockfile}" ]] && lockfiles+=("${lockfile}")
+  done
+  [[ ${#lockfiles[@]} -gt 0 ]] || return 0
+
+  # A tree with no hidden lockfile was not recorded by the npm that built it
+  # (npm 6 and older, or a tree built by hand). Its closure is read from
+  # package-lock.json alone, and that is on record rather than assumed.
+  if [[ -d "${PROJECT_DIR}/node_modules" && ! -f "${PROJECT_DIR}/${NPM_HIDDEN_LOCKFILE}" ]]; then
+    log_advisory "post-verify: ${PROJECT_DIR}/node_modules has no .package-lock.json, so the installed tree was read from package-lock.json only."
+  fi
 
   closure_file=$(mktemp "${TMPDIR:-/tmp}/safedeps-post-closure.XXXXXX") || return
   provider_file=$(mktemp "${TMPDIR:-/tmp}/safedeps-post-provider.XXXXXX") || {
@@ -754,14 +803,26 @@ check_npm_effect_closure() {
     rm -f "${closure_file}" "${provider_file}"
     return
   }
-  : > "${miss_file}"
-
-  if ! safedeps_npm_lock_closure "${lockfile}" > "${closure_file}"; then
-    SUSPICIOUS=true
-    REASONS+=("npm package-lock closure could not be parsed")
+  part_file=$(mktemp "${TMPDIR:-/tmp}/safedeps-post-part.XXXXXX") || {
     rm -f "${closure_file}" "${provider_file}" "${miss_file}"
     return
-  fi
+  }
+  : > "${miss_file}"
+
+  # One closure over both records, each entry once.
+  printf '[]' > "${closure_file}"
+  for lockfile in "${lockfiles[@]}"; do
+    if ! safedeps_npm_lock_closure "${lockfile}" > "${part_file}" \
+        || ! jq -s 'add | unique_by(.ecosystem + "\u0000" + .package + "\u0000" + .version) | sort_by(.package, .version)' \
+          "${closure_file}" "${part_file}" > "${part_file}.merged" 2>/dev/null; then
+      SUSPICIOUS=true
+      REASONS+=("npm closure could not be parsed from ${lockfile#"${PROJECT_DIR}"/}")
+      rm -f "${closure_file}" "${provider_file}" "${miss_file}" "${part_file}" "${part_file}.merged"
+      return
+    fi
+    mv -f "${part_file}.merged" "${closure_file}"
+  done
+  rm -f "${part_file}"
 
   # One ledger read for the whole closure. The per-package form walked the whole
   # ledger directory for every package, which put the gate past its own hook
@@ -834,8 +895,8 @@ run_command_independent_backstop() {
   # Detection is command-independent (the npm closure check reads the live
   # package-lock.json, not the command text); automatic rollback still needs a
   # prior confirmed-safe snapshot to restore from. Never silent — every path logs.
-  if [[ ! -f "${PROJECT_DIR}/package-lock.json" ]]; then
-    log_advisory "post-verify UNVERIFIED: install-looking command with no pending state and no package-lock.json in ${PROJECT_DIR} — nothing to closure-check."
+  if [[ ! -f "${PROJECT_DIR}/package-lock.json" && ! -f "${PROJECT_DIR}/${NPM_HIDDEN_LOCKFILE}" ]]; then
+    log_advisory "post-verify UNVERIFIED: install-looking command with no pending state and no package-lock.json or ${NPM_HIDDEN_LOCKFILE} in ${PROJECT_DIR} — nothing to closure-check."
     return 0
   fi
 

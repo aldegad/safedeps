@@ -20,7 +20,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "test": "bash scripts/test/smoke.sh && bash scripts/test/scan-contract.sh && bash scripts/test/consumer-forms.sh && bash scripts/test/self-budget.sh && bash scripts/test/advisory-log-retention.sh && bash scripts/test/hook-entry.sh && bash scripts/test/e2e.sh"
+    "test": "bash scripts/test/smoke.sh && bash scripts/test/scan-contract.sh && bash scripts/test/consumer-forms.sh && bash scripts/test/self-budget.sh && bash scripts/test/advisory-log-retention.sh && bash scripts/test/hook-entry.sh && bash scripts/test/lockless-forms.sh && bash scripts/test/e2e.sh"
   },
   "keywords": [
     "safedeps",
