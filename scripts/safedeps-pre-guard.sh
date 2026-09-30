@@ -1433,35 +1433,35 @@ guard_runner_operands() {
   done
 }
 
-# The package an operand names, without its version, extras or markers:
-# `evil[x]==1.0.0` -> evil, `@scope/x@1` -> @scope/x, `example.com/m@v1` ->
-# example.com/m. Whether it is pinned is then asked of the extractor's output by
-# this name, never read off the token's shape.
-guard_operand_name() {
-  local tok="$1" scope="" body
-  if [[ "${tok}" == @* ]]; then
-    scope="@"
-    body="${tok#@}"
-  else
-    body="${tok}"
-  fi
-  body="${body%%;*}"
-  body="${body%%\[*}"
-  body="${body%%@*}"
-  body="${body%%[=<>~!]*}"
-  printf '%s%s' "${scope}" "${body}"
-}
-
 guard_names_package_without_spec() {
   # True when an install NAMES a package but carries no version spec, so the
   # ledger gate never ran for it. Used only to make that fact observable — it
-  # changes no verdict.
+  # changes no verdict. Every such operand is left in UNGATED_OPERANDS as
+  # `<ecosystem>:<operand>`, for the record to name.
+  #
+  # The unit is the operand, and it is read through the same parse the gate
+  # reads (guard_operand_specs over guard_extract_statement_text). Three rounds
+  # of review each found a record missing because this walk used to be a second
+  # parser: it read the statement on its own, then asked the extractor "was this
+  # package pinned?" by name. Each round narrowed the name (token shape, then
+  # name, then ecosystem and name) and each round a collision survived:
+  # `pnpm add x@1 && pnpm add x` quieted the second install because the first
+  # pinned the same name. The same split ran the other way too: the walk did not
+  # know which tokens the extractor had consumed as a flag's value, so
+  # `gem install rails -v 7.1.0` was gated AND recorded as unpinned, on `7.1.0`.
+  # There is no name join now. An operand is pinned when the extractor bound
+  # THIS token: its position is one the extractor reports, or its text is the
+  # text of a spec the extractor produced from this statement.
+  #
+  # So an extractor misreading shows up here instead of being buried: when it
+  # reads `left-pad@npm:evil-pkg` as `left-pad@npm`, the token is not that text
+  # and is recorded.
   #
   # The boundary is what keeps this record readable. A record that fires on
   # routine installs becomes background noise, and background noise is the same
-  # as no record. So a token is a named package only if it survives three tests,
-  # each of which exists because getting it wrong hides a real install
-  # (four, since the fourth was added for pinned-by-flag forms):
+  # as no record. So a token is a named package only if it survives these
+  # tests, each of which exists because getting it wrong hides a real install
+  # or invents one:
   #
   #   1. It is not a flag, and not the VALUE of a flag. A source flag consumes
   #      its own argument and nothing more — `-r requirements.txt` names no
@@ -1471,73 +1471,85 @@ guard_names_package_without_spec() {
   #      while the install target still arrives on the command line. `-e`
   #      consumes nothing here either — its argument is judged like any other
   #      token, so `-e .` falls out as a working-tree build while
-  #      `-e git+ssh://…` stays the fetch it is.
+  #      `-e git+ssh://…` stays the fetch it is. A version flag's value is
+  #      known from the extractor, which consumed it.
   #   2. It is not a local path (`.`, `..`, `./x`, `/x`). Those install from the
   #      working tree, not from a registry. A module path like
   #      `example.com/evil` is NOT a local path and stays reportable.
-  #   3. Its `@` actually delimits a version. In a URL the `@` separates a user,
-  #      so `git+ssh://git@host/evil.git` is no more pinned than
-  #      `git+https://host/evil.git` — reading it as a spec silenced one and
-  #      reported the other for the same install.
-  #   4. The extractor did not produce a spec for it. "Pinned" means the ledger
-  #      gate actually ran, so it is read from what guard_extract_specs found
-  #      (LEDGER_SPECS), never re-derived from flags here: `gem install x -v 1`
-  #      is pinned because the extractor reads gem's -v, while
-  #      `cargo install x --version 1` is not, because it does not. Re-deriving
-  #      it would make that second install neither gated nor recorded.
+  #   3. A URL names a package and pins nothing, whatever `@` it carries:
+  #      `git+ssh://git@host/evil.git` is no more pinned than
+  #      `git+https://host/evil.git`.
+  #   4. The extractor did not bind it (above).
+  #
+  # Statements are skipped whole in two cases. One whose ecosystem cannot be
+  # read (the outer view of `bash -c '...'`, where the payload is blank) is
+  # skipped as the extractor skips it; the payload is a candidate text of its
+  # own and is read there. And a statement the effect gate reads — an npm CLI
+  # install into the project — is exempt; the rest of the command is not.
   local cmd="$1"
-  local seg tok verb_seen skip_next seg_ecosystem entry entry_eco name
+  local seg tok idx verb_seen skip_next seg_ecosystem text runner
+  local f1 f2 f3 pinned bound consumed entry
   local -a toks=()
-  # Keyed by ecosystem as well as name: pypi `openai` and npm `openai` are
-  # different packages, and a pin on one must not quiet the record for the
-  # other (caught in review: `pip install openai==1 && pnpm add openai` left
-  # no trace of the pnpm install).
-  local pinned=$'\n'
-
-  for entry in "${LEDGER_SPECS[@]+${LEDGER_SPECS[@]}}"; do
-    IFS=$'\t' read -r entry_eco name _ <<< "${entry}"
-    pinned+="${entry_eco}"$'\t'"${name}"$'\n'
-  done
+  UNGATED_OPERANDS=""
 
   while IFS= read -r seg; do
     [[ "${seg}" =~ [^[:space:]] ]] || continue
     command_is_dependency_install "${seg}" || continue
+    seg_ecosystem=$(guard_segment_ecosystem "${seg}")
+    [[ -n "${seg_ecosystem}" ]] || continue
+    guard_statement_is_effect_gated "${seg}" && continue
+
+    runner=false
+    guard_segment_is_runner "${seg}" && runner=true
+    text=$(guard_extract_statement_text "${seg_ecosystem}" "${seg}" "${runner}")
+
+    # What the extractor made of this statement: spec lines, whose text an
+    # operand must reproduce, and the positions its flag branches bound.
+    pinned=$'\n' bound=" " consumed=" "
+    while IFS=$'\t' read -r f1 f2 f3; do
+      if [[ "${f1}" == "@" ]]; then
+        [[ "${f2}" == bound ]] && bound+="${f3} "
+        [[ "${f2}" == consumed ]] && consumed+="${f3} "
+      elif [[ -n "${f2}" ]]; then
+        pinned+="${f2}@${f3}"$'\n'
+      fi
+    done < <(guard_operand_specs "${seg_ecosystem}" "${text}" positions)
+
+    # Split the way awk splits the same text, so a position means one token on
+    # both sides. A runner's operands arrive one per line.
+    toks=()
+    read -r -d '' -a toks <<< "${text}" || true
 
     verb_seen=false
     skip_next=false
-    seg_ecosystem=$(guard_segment_ecosystem "${seg}")
+    idx=0
+    for tok in "${toks[@]+${toks[@]}}"; do
+      idx=$((idx + 1))
+      [[ "${bound}" == *" ${idx} "* || "${consumed}" == *" ${idx} "* ]] && continue
 
-    # A runner names the package it executes, and nothing after it.
-    if guard_segment_is_runner "${seg}"; then
-      while IFS= read -r tok; do
-        [[ -z "${tok}" ]] && continue
-        [[ "${pinned}" == *$'\n'"${seg_ecosystem}"$'\t'"$(guard_operand_name "${tok}")"$'\n'* ]] && continue
+      if [[ "${runner}" == true ]]; then
+        # A runner's text is its package operands only (guard_runner_operands).
+        [[ "${pinned}" == *$'\n'"${tok}"$'\n'* ]] && continue
         # npx, npm exec and bunx run a binary the project already has without
         # fetching anything, so `npx tsc` in a TypeScript project is not an
         # install. Only a name with no local binary is fetched, and only that
         # is worth a record; recording every `npx tsc` would bury the ones that
         # matter.
         guard_runner_uses_local_bin "${seg}" "${tok}" && continue
-        return 0
-      done < <(guard_runner_operands "${seg}")
-      continue
-    fi
+        guard_note_ungated "${seg_ecosystem}" "${tok}"
+        continue
+      fi
 
-    # Quotes delimit operands; they do not hide them. `pip install "requests"`
-    # names requests, and reading the blanked scan here made it invisible.
-    read -ra toks <<< "$(printf '%s' "${seg}" | tr -d "\"'" | tr '(){}' '    ')"
-    for tok in "${toks[@]+${toks[@]}}"; do
       # Maven's coordinate flag may sit on either side of the goal
       # (`mvn -Dartifact=g:x dependency:get`), so it is tested outside the verb
-      # gate that orders the operand walk. A two-field coordinate names a
-      # package with no version; a third field is the version. Whether Maven
-      # accepts the versionless form is unverified (no maven on the measuring
-      # machine), and for a RECORD the unresolved case resolves toward
-      # reporting: a spurious line costs a line, a missing one costs the
-      # invariant this layer exists to keep.
+      # gate that orders the operand walk. One the extractor bound was skipped
+      # above; any other names a package with no version it could read
+      # (`g:evil`, `g:evil:`). Whether Maven accepts a versionless coordinate is
+      # unverified (no maven on the measuring machine), and for a RECORD the
+      # unresolved case resolves toward reporting: a spurious line costs a line,
+      # a missing one costs the invariant this layer exists to keep.
       case "${tok}" in
-        -Dartifact=*:*:*) continue ;;
-        -Dartifact=*:*)   return 0 ;;
+        -Dartifact=*) guard_note_ungated "${seg_ecosystem}" "${tok}"; continue ;;
       esac
 
       if [[ "${verb_seen}" != true ]]; then
@@ -1588,22 +1600,21 @@ guard_names_package_without_spec() {
         -*) continue ;;
         # Installing from the working tree is not a registry fetch.
         .|..|./*|../*|/*) continue ;;
+        *://*) guard_note_ungated "${seg_ecosystem}" "${tok}"; continue ;;
       esac
 
-      # Pinned means the extractor produced a spec for this package, asked by
-      # name. Reading it off the token's shape (`*@*|*==*`) let every spelling
-      # the extractor does not read pass as pinned with no record:
-      # `evil[x]==1.0.0`, `evil===1.0.0`, `evil==1.0.*` (caught in review). A
-      # URL names a package and pins nothing, whatever `@` it carries.
-      case "${tok}" in
-        *://*) return 0 ;;
-      esac
-      [[ "${pinned}" == *$'\n'"${seg_ecosystem}"$'\t'"$(guard_operand_name "${tok}")"$'\n'* ]] && continue
-
-      return 0
+      [[ "${pinned}" == *$'\n'"${tok}"$'\n'* ]] && continue
+      guard_note_ungated "${seg_ecosystem}" "${tok}"
     done
   done < <(command_candidate_texts "${cmd}" | tr ';|&' '\n')
-  return 1
+  [[ -n "${UNGATED_OPERANDS}" ]]
+}
+
+# Add `<ecosystem>:<operand>` to UNGATED_OPERANDS once.
+guard_note_ungated() {
+  local entry="$1:$2"
+  [[ ", ${UNGATED_OPERANDS}, " == *", ${entry}, "* ]] && return 0
+  UNGATED_OPERANDS="${UNGATED_OPERANDS:+${UNGATED_OPERANDS}, }${entry}"
 }
 
 guard_extract_flagged_specs() {
@@ -1613,6 +1624,14 @@ guard_extract_flagged_specs() {
   # first operand after the verb, and the verb is found past any options between
   # it and the manager (`gem --norc install x -v 1`, `cargo +nightly add x`,
   # `dotnet add App.csproj package X`), which the adjacent-token reading missed.
+  #
+  # Two kinds of line come out. A spec line is `<pkg><TAB><spec>`, and it is all
+  # the gate reads (guard_operand_specs keeps two-field lines). A position line
+  # is `@<TAB>bound<TAB><n>` for the token a spec was read from, or
+  # `@<TAB>consumed<TAB><n>` for a flag value the spec took, counting tokens
+  # across the whole text. The UNGATED record reads those, so that "pinned" and
+  # "is an operand" come from the one reading that produced the spec -- the same
+  # branch prints both, and there is no second copy of it to drift.
   awk '
     function operand(s,   j) {
       for (j = s; j <= NF; j++) if ($j !~ /^-/ && $j !~ /^[+]/) return j
@@ -1625,10 +1644,17 @@ guard_extract_flagged_specs() {
       }
       return 0
     }
-    function versions(pkg, s, shortv,   j, v) {
+    # A spec for the token at p, read from the token at v (0: from p itself,
+    # or from a `--flag=value` token, which no other operand can be).
+    function bind(p, spec, v) {
+      print $p "\t" spec
+      print "@\tbound\t" (base + p)
+      if (v) print "@\tconsumed\t" (base + v)
+    }
+    function versions(p, s, shortv,   j, v) {
       for (j = s; j <= NF; j++) {
-        if (($j == "--version" || $j == "--vers" || (shortv && $j == "-v")) && $(j + 1) != "") print pkg "\t" $(j + 1)
-        if ($j ~ /^--(vers|version)=/) { v = $j; sub(/^--(vers|version)=/, "", v); print pkg "\t" v }
+        if (($j == "--version" || $j == "--vers" || (shortv && $j == "-v")) && $(j + 1) != "") bind(p, $(j + 1), j + 1)
+        if ($j ~ /^--(vers|version)=/) { v = $j; sub(/^--(vers|version)=/, "", v); bind(p, v, 0) }
       }
     }
     {
@@ -1638,6 +1664,7 @@ guard_extract_flagged_specs() {
         if ($i ~ /^[A-Za-z][A-Za-z0-9._-]*===?[A-Za-z0-9][A-Za-z0-9._+!~-]*$/) {
           split($i, parts, /===?/)
           print parts[1] "\t" parts[2]
+          print "@\tbound\t" (base + i)
         }
 
         # maven-dependency-plugin: -Dartifact=groupId:artifactId:version[:packaging[:classifier]].
@@ -1646,41 +1673,46 @@ guard_extract_flagged_specs() {
         if ($i ~ /^-Dartifact=[^:]+:[^:]+:[^:]+/) {
           c = $i; sub(/^-Dartifact=/, "", c); split(c, m, ":")
           print m[1] ":" m[2] "\t" m[3]
+          print "@\tbound\t" (base + i)
         }
 
         if ($i == "gem" && (k = verb_after(i + 1, "install")) && (p = operand(k + 1))) {
           for (j = p + 1; j <= NF; j++) {
-            if (($j == "-v" || $j == "--version") && $(j + 1) != "") print $p "\t" $(j + 1)
-            if ($j ~ /^--version=/) { v = $j; sub(/^--version=/, "", v); print $p "\t" v }
+            if (($j == "-v" || $j == "--version") && $(j + 1) != "") bind(p, $(j + 1), j + 1)
+            if ($j ~ /^--version=/) { v = $j; sub(/^--version=/, "", v); bind(p, v, 0) }
           }
         }
 
         if ($i == "cargo" && ((k = verb_after(i + 1, "add")) || (k = verb_after(i + 1, "install"))) && (p = operand(k + 1))) {
-          versions($p, p + 1, 0)
+          versions(p, p + 1, 0)
         }
 
         if ($i == "bundle" && (k = verb_after(i + 1, "add")) && (p = operand(k + 1))) {
-          versions($p, p + 1, 1)
+          versions(p, p + 1, 1)
         }
 
         if ($i == "dotnet" && (k = verb_after(i + 1, "add"))) {
           for (j = k + 1; j <= NF; j++) if ($j == "package") break
-          if (j < NF) versions($(j + 1), j + 2, 1)
+          if (j < NF) versions(j + 1, j + 2, 1)
         }
 
         if ($i == "dotnet" && (k = verb_after(i + 1, "tool"))) {
           if ($(k + 1) == "install" || $(k + 1) == "update") {
-            if ((p = operand(k + 2))) versions($p, p + 1, 0)
+            if ((p = operand(k + 2))) versions(p, p + 1, 0)
           }
         }
       }
+      base += NF
     }
   '
 }
 
 # Emit "<ecosystem><TAB><package><TAB><spec>" for every operand of one statement.
+# With `positions` as the third argument, the flag reader's position lines
+# (`@<TAB>bound|consumed<TAB><n>`) come through as well, for the UNGATED record.
+# The gate never asks for them, so they cannot move a verdict.
 guard_operand_specs() {
-  local eco="$1" text="$2" token pkg spec
+  local eco="$1" text="$2" mode="${3:-}" token pkg spec
 
   if [[ "${eco}" == "go" ]]; then
     # A Go package is its whole module path. The generic pattern below keeps
@@ -1711,7 +1743,29 @@ guard_operand_specs() {
           printf '%s\t%s\t%s\n' "${eco}" "${pkg}" "${spec}"
         done
   fi
-  printf '%s\n' "${text}" | guard_extract_flagged_specs | awk -F'\t' -v eco="${eco}" 'NF == 2 { print eco "\t" $1 "\t" $2 }'
+  printf '%s\n' "${text}" | guard_extract_flagged_specs \
+    | awk -F'\t' -v eco="${eco}" -v positions="${mode}" '
+        NF == 2 { print eco "\t" $1 "\t" $2 }
+        NF == 3 && $1 == "@" && positions == "positions" { print }
+      '
+}
+
+# One statement as the extractor reads it: a runner's package operands (one per
+# line), or the statement with its quotes removed and its grouping characters
+# blanked. Quotes delimit operands and are removed before matching: `pip install
+# "requests==2.0.0"` pins requests, and the `==` reader used to miss it. Python
+# extras (`evil[x]==1.0.0`) select optional dependencies of the same package;
+# the package and its version are what the ledger judges. The UNGATED record
+# walks this same text, so that its token positions are the extractor's.
+guard_extract_statement_text() {
+  local eco="$1" seg="$2" runner="$3" text
+  if [[ "${runner}" == true ]]; then
+    text=$(guard_runner_operands "${seg}")
+  else
+    text=$(printf '%s' "${seg}" | tr -d "\"'" | tr '(){}' '    ')
+  fi
+  [[ "${eco}" == "pypi" ]] && text=$(printf '%s' "${text}" | sed -E 's/\[[^] ]*\]//g')
+  printf '%s' "${text}"
 }
 
 guard_extract_specs() {
@@ -1730,25 +1784,17 @@ guard_extract_specs() {
   # take the command's first ecosystem, so `npm run x && pip install evil==1`
   # checked evil as an npm package, prescribed `safedeps check npm evil@1`, and
   # passed once that approved.
-  #
-  # Quotes delimit operands and are removed before matching: `pip install
-  # "requests==2.0.0"` pins requests, and the `==` reader used to miss it.
   local cmd="$1"
-  local seg eco text
+  local seg eco text runner
 
   while IFS= read -r seg; do
     [[ "${seg}" =~ [^[:space:]] ]] || continue
     command_is_dependency_install "${seg}" || continue
     eco=$(guard_segment_ecosystem "${seg}")
     [[ -n "${eco}" ]] || continue
-    if guard_segment_is_runner "${seg}"; then
-      text=$(guard_runner_operands "${seg}")
-    else
-      text=$(printf '%s' "${seg}" | tr -d "\"'" | tr '(){}' '    ')
-    fi
-    # Python extras (`evil[x]==1.0.0`) select optional dependencies of the same
-    # package; the package and its version are what the ledger judges.
-    [[ "${eco}" == "pypi" ]] && text=$(printf '%s' "${text}" | sed -E 's/\[[^] ]*\]//g')
+    runner=false
+    guard_segment_is_runner "${seg}" && runner=true
+    text=$(guard_extract_statement_text "${eco}" "${seg}" "${runner}")
     guard_operand_specs "${eco}" "${text}"
   done < <(command_candidate_texts "${cmd}" | tr ';|&' '\n')
 }
@@ -1879,26 +1925,36 @@ if [[ ${#LEDGER_SPECS[@]} -gt 0 ]]; then
   [[ -z "${LEDGER_CONTEXT_FILE}" ]] || rm -f "${LEDGER_CONTEXT_FILE}"
 fi
 
-# True only when the PostToolUse effect gate reads the result of EVERY install
-# statement in the command. That gate reads package-lock.json, which only the
-# npm CLI writes, and only for a project install. So pnpm, yarn and bun are not
-# covered even though their ledger ecosystem is npm; neither is a runner (npx,
-# npm exec), which changes no lockfile; neither is a global install, which lands
-# outside the project; and neither is `--no-package-lock`. The exemption below
-# used to be keyed on "the ledger ecosystem is npm", and that let an unpinned
-# `pnpm add x` through with no record at all (GitHub #22).
+# True when the PostToolUse effect gate reads the result of this one install
+# statement. That gate reads package-lock.json, which only the npm CLI writes,
+# and only for a project install. So pnpm, yarn and bun are not covered even
+# though their ledger ecosystem is npm; neither is a runner (npx, npm exec),
+# which changes no lockfile; neither is a global install, which lands outside
+# the project; and neither is `--no-package-lock`. The exemption from the
+# UNGATED record used to be keyed on "the ledger ecosystem is npm", and that let
+# an unpinned `pnpm add x` through with no record at all (GitHub #22).
+guard_statement_is_effect_gated() {
+  local seg="$1" scan
+  guard_segment_is_runner "${seg}" && return 1
+  scan=$(command_scan_text "${seg}")
+  printf '%s' "${scan}" | grep -qEi "${SAFEDEPS_G_NPM_INSTALL_RE}" || return 1
+  printf '%s' "${scan}" | grep -qEi -- '(^|[[:space:]])(-g|--global(=true)?|--location(=|[[:space:]]+)global|--no-package-lock|--package-lock=false)([[:space:]]|$)' && return 1
+  return 0
+}
+
+# True when the effect gate reads the result of EVERY install statement in the
+# command: the statement predicate above, for all of them. The record walk
+# applies the same predicate statement by statement, so this is only the cheap
+# answer for the common case of a plain npm install.
 guard_effect_gate_reads_every_install() {
   local cmd="$1"
-  local seg scan any=false
+  local seg any=false
 
   while IFS= read -r seg; do
     [[ "${seg}" =~ [^[:space:]] ]] || continue
     command_is_dependency_install "${seg}" || continue
     any=true
-    guard_segment_is_runner "${seg}" && return 1
-    scan=$(command_scan_text "${seg}")
-    printf '%s' "${scan}" | grep -qEi "${SAFEDEPS_G_NPM_INSTALL_RE}" || return 1
-    printf '%s' "${scan}" | grep -qEi -- '(^|[[:space:]])(-g|--global(=true)?|--location(=|[[:space:]]+)global|--no-package-lock|--package-lock=false)([[:space:]]|$)' && return 1
+    guard_statement_is_effect_gated "${seg}" || return 1
   done < <(command_candidate_texts "${cmd}" | tr ';|&' '\n')
   [[ "${any}" == true ]]
 }
@@ -1910,8 +1966,11 @@ guard_effect_gate_reads_every_install() {
 # and until the record existed it did so with no trace at all, which
 # contradicts the invariant that every bypass must be observable.
 #
-# A command that pins one package and names another without a pin is recorded
-# too: "pinned" is read from what the extractor found, per package.
+# The unit is the operand. A command that pins one package and names another
+# without a pin is recorded, and so is one that pins a package and then names
+# the same package again without a pin (`pnpm add x@1 && pnpm add x`): the
+# second operand installs whatever is latest, and the pin on the first says
+# nothing about it. The line names each operand it recorded.
 #
 # This records the fact. It deliberately does NOT deny: refusing every unpinned
 # install is a policy change (it would block ordinary `cargo add x` workflows)
@@ -1920,7 +1979,7 @@ guard_effect_gate_reads_every_install() {
 if [[ "${HIDDEN_DEPENDENCY_INSTALL}" != "true" && -n "${LEDGER_ECOSYSTEM}" ]] \
     && ! guard_effect_gate_reads_every_install "${COMMAND}" \
     && guard_names_package_without_spec "${COMMAND}"; then
-  log_advisory "pre-guard UNGATED: ${LEDGER_ECOSYSTEM} install names a package with no version spec, so the ledger gate did not run. No effect gate reads the result of this install, so it is unverified. Command: ${COMMAND}"
+  log_advisory "pre-guard UNGATED: ${LEDGER_ECOSYSTEM} install names a package with no version spec, so the ledger gate did not run. No effect gate reads the result of this install, so it is unverified. Unpinned: ${UNGATED_OPERANDS}. Command: ${COMMAND}"
 fi
 
 if [[ "${HIDDEN_DEPENDENCY_INSTALL}" == "true" && ( -z "${LEDGER_ECOSYSTEM}" || ${#LEDGER_SPECS[@]} -eq 0 ) ]]; then
