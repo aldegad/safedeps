@@ -238,6 +238,38 @@ ov_wt_out=$(SAFEDEPS_NPM_OVERRIDES_DIR="${ov_wt_parent}/inner" bash -c 'source l
 [[ "$(jq -r 'has("leaked")' <<< "${ov_wt_out}")" == "false" ]] || fail "override discovery stops at a worktree root (.git file), got: ${ov_wt_out}"
 pass "npm closure override discovery stops at a worktree root, not just a .git dir"
 
+# A walk that stops only at `/` or a `.git` never ends on a path whose dirname
+# reaches a fixed point short of `/`. A Windows drive path does (`dirname C:` is
+# `C:` in Git Bash, `.` here), and so does any relative path. The hook then
+# never answers, and the runtime kills it and lets the install run (GitHub #21).
+# The fixture sits outside any Git repo, because a `.git` above the fixed point
+# stops the walk first and hides the defect.
+ov_nogit="${tmp_root}/ov-nogit"
+mkdir -p "${ov_nogit}"
+git -C "${ov_nogit}" rev-parse --git-dir >/dev/null 2>&1 \
+  && fail "the fixed-point fixture sits outside any Git repo (${ov_nogit} is inside one)"
+for ov_fixed in 'C:/tmp/probe' 'rel/dir'; do
+  # `exec`, so the pid below is the walking shell itself and a KILL stops it.
+  ( cd "${ov_nogit}" && SAFEDEPS_NPM_OVERRIDES_DIR="${ov_fixed}" \
+      exec bash -c "source '${ROOT_DIR}/lib/npm/closure.sh'; safedeps_npm_repo_overrides_json" \
+      > "${ov_nogit}/out" ) &
+  ov_pid=$!
+  ov_waited=0
+  while kill -0 "${ov_pid}" 2>/dev/null && (( ov_waited < 100 )); do
+    sleep 0.1
+    ov_waited=$(( ov_waited + 1 ))
+  done
+  if kill -0 "${ov_pid}" 2>/dev/null; then
+    kill -KILL "${ov_pid}" 2>/dev/null || true
+    wait "${ov_pid}" 2>/dev/null || true
+    fail "override discovery ends on a path whose dirname stops short of / (${ov_fixed} still walking after 10s)"
+  fi
+  wait "${ov_pid}" || fail "override discovery exits cleanly on ${ov_fixed}"
+  [[ "$(cat "${ov_nogit}/out")" == "{}" ]] \
+    || fail "override discovery finds nothing on ${ov_fixed} (got: $(cat "${ov_nogit}/out"))"
+done
+pass "npm closure override discovery ends at a dirname fixed point (drive root, relative path)"
+
 ov_env_out=$(SAFEDEPS_NPM_OVERRIDES_JSON='{"x":"1.0.0"}' bash -c 'source lib/npm/closure.sh; safedeps_npm_repo_overrides_json')
 [[ "$(jq -r '.x' <<< "${ov_env_out}")" == "1.0.0" ]] || fail "SAFEDEPS_NPM_OVERRIDES_JSON env takes precedence (got: ${ov_env_out})"
 pass "npm closure override env source precedence"
