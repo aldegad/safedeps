@@ -656,6 +656,7 @@ install_managers_blanked() {
 join_line_continuations() {
   local joined
   if joined=$(printf '%s\n' "$1" | LC_ALL=C awk '
+    # safedeps:join_line_continuations (scripts/measure/scan-failure-census.sh keys on this line)
     BEGIN { q = 0; out = ""; open = 0 }
     {
       n = split($0, ch, "")
@@ -1233,39 +1234,72 @@ fi
 SAFEDEPS_SCAN_MARK=$(mktemp "${TMPDIR:-/tmp}/safedeps-scan.XXXXXX" 2>/dev/null) || SAFEDEPS_SCAN_MARK=""
 trap 'rm -f "${SAFEDEPS_SCAN_MARK:-}"' EXIT
 
+# Set once the gate below has passed, and exported so that anything reading the
+# command after that point can be counted: scripts/measure/scan-failure-census.sh
+# shims awk and reports every scan that runs with this set. Nothing in the hook
+# reads it, so a value inherited from the caller changes no verdict; it is
+# cleared here only so the census never counts someone else's.
+unset SAFEDEPS_GATE_PASSED
+
 guard_scan_failed() {
   [[ -z "${SAFEDEPS_SCAN_MARK}" || -s "${SAFEDEPS_SCAN_MARK}" ]]
 }
 
-# Called before every path that ALLOWS the command. If any scan failed, the
-# verdicts above were read from missing text, so they are replaced with the rule
-# the jq-missing path uses: an install-looking command is denied as UNDECIDED,
-# anything else runs with the failure on record. Denies above stand as they are.
-# Whether a command looks like an install, judged without the scanner: the
-# precise pattern on every candidate text as it stands (quotes not blanked),
-# or the loose raw pattern on the whole command. command_candidate_texts runs
-# on bash and sed, so this still answers when awk is the thing that failed.
-# The loose pattern alone missed `npm i`, `npm ci` and `npm update` (caught in
-# review), and the precise one alone would miss what only the loose one sees,
-# so neither may shrink what the other finds.
+# Whether a command could be a dependency install, judged without reading it:
+# does it name a package manager's executable anywhere, in any case? Every
+# recognizer needs one spelled out somewhere in the raw command -- blanking
+# quotes and normalizing only ever remove text -- so this answers yes for
+# everything any of them could have found, whatever the scan would have said.
+#
+# The vocabulary is SAFEDEPS_G_EXECUTABLES, so it cannot fall behind the
+# grammar, and the test is bash's own regex, so it still answers when awk,
+# grep, sed or fork is what failed. The version it replaces called grep and the
+# candidate-text pipeline, which runs sed and the join awk; it went quiet with
+# the tools it was standing in for, and a raw regex could not match everything
+# the scanned recognizers match anyway (three review rounds, then a design
+# judgment). It is loose on purpose: `go` and `py` appear in ordinary words, and
+# a false "yes" here costs one UNDECIDED deny on a run where awk had already
+# failed.
 guard_looks_like_install_unscanned() {
-  local text
-  printf '%s' "${COMMAND}" | grep -qiE "${SAFEDEPS_RAW_INSTALL_RE}" && return 0
-  while IFS= read -r text; do
-    printf '%s\n' "${text}" | grep -qiE "${SAFEDEPS_INSTALL_PATTERN}" && return 0
-  done < <(command_candidate_texts "${COMMAND}")
-  return 1
+  local re="(${SAFEDEPS_G_EXECUTABLES})" rc=0
+  shopt -s nocasematch
+  [[ "${COMMAND}" =~ ${re} ]] || rc=1
+  shopt -u nocasematch
+  return ${rc}
 }
 
-guard_settle_scan_failure() {
+# The one UNDECIDED answer for a failed scan. It is the answer both when the
+# gate cannot tell whether a command installs anything and when a scan failed
+# before a finding was reported: a finding read from partly missing text is not
+# a finding, and saying "detected" there teaches people that the gate cries
+# wolf. $1 says which, for advisory.log.
+guard_deny_undecided_scan() {
+  log_advisory "pre-guard DENY: the command scanner failed ($1) — undecided, fail-closed. Command: ${COMMAND}"
+  jq -nc '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:"safedeps: UNDECIDED, not unsafe — the command scanner (awk) failed while reading this command, so safedeps could not tell whether it installs a dependency or what it would install. It is blocked fail-closed, and no finding is claimed. Check that `echo x | awk 1` works, then retry."}}'
+  exit 0
+}
+
+# Every deny that reports a finding calls this first.
+guard_undecided_if_scan_failed() {
   guard_scan_failed || return 0
-  if guard_looks_like_install_unscanned; then
-    log_advisory "pre-guard DENY: the command scanner failed on a likely dependency-install command — undecided, fail-closed. Command: ${COMMAND}"
-    jq -nc '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:"safedeps: UNDECIDED, not unsafe — the command scanner (awk) failed, so safedeps could not tell whether this command installs a dependency. It looks like one, so it is blocked fail-closed. Nothing was detected in it. Check that `echo x | awk 1` works, then retry."}}'
-    exit 0
+  guard_deny_undecided_scan "a finding was read from a failed scan"
+}
+
+# The gate. Every path that lets the command run passes here once, after its
+# last scan and before its first side effect (pending state, the inert meta,
+# the allow itself). If any scan failed, the verdicts above were read from
+# missing text and none of them stands: a command that names a package
+# manager is denied as UNDECIDED, anything else runs with the failure on
+# record.
+guard_settle_scan_failure() {
+  if guard_scan_failed; then
+    if guard_looks_like_install_unscanned; then
+      guard_deny_undecided_scan "the command names a package manager"
+    fi
+    log_advisory "pre-guard: the command scanner failed; the command names no package manager and was allowed. Command: ${COMMAND}"
+    printf 'safedeps: the command scanner (awk) failed, so this command could not be read. It names no package manager, so it was allowed. The failure is recorded in advisory.log.\n' >&2
   fi
-  log_advisory "pre-guard: the command scanner failed; the command did not look like a dependency install and was allowed. Command: ${COMMAND}"
-  printf 'safedeps: the command scanner (awk) failed, so this command was judged from its raw text only. It did not look like a dependency install and was allowed. The failure is recorded in advisory.log.\n' >&2
+  export SAFEDEPS_GATE_PASSED=1
 }
 
 HIDDEN_DEPENDENCY_INSTALL=false
@@ -1283,6 +1317,7 @@ elif command_pipes_unread_install_to_shell "${COMMAND}"; then
   # extracted from candidate texts only, and a pipe's producer is not one, so
   # nothing here can reduce the piped install to a spec: fail-closed, like the
   # same pipe with no visible install beside it.
+  guard_undecided_if_scan_failed
   log_advisory "pre-guard DENY: install text piped into a shell beside a visible install could not be reduced to an approved spec — fail-closed. Command: ${COMMAND}"
   jq -nc '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:"safedeps: this command pipes install text into a shell (`... | sh`) beside the install it runs. The gate checks the visible install, but it cannot extract a package spec from what is piped, so the command is blocked fail-closed. Run the piped install as its own command, written out rather than piped, so it can be checked."}}'
   exit 0
@@ -1448,6 +1483,7 @@ if echo "${COMMAND}" | grep -qEi "${TYPOSQUAT_PATTERNS}"; then
 fi
 
 if [[ "${SUSPICIOUS}" == "true" ]]; then
+  guard_undecided_if_scan_failed
   REASON_STR=$(printf '%s; ' "${REASONS[@]}")
   jq -nc --arg reason "safedeps: ${REASON_STR%%; }" \
     '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:$reason}}'
@@ -2009,6 +2045,12 @@ if [[ ${#LEDGER_SPECS[@]} -gt 0 ]]; then
   done
 
   if [[ ${#GUARD_BLOCKED_CMDS[@]} -gt 0 ]]; then
+    # A prescription read from a failed scan can name the wrong package, and
+    # agents run it: that is how a wrong identity gets approved.
+    if guard_scan_failed; then
+      [[ -z "${LEDGER_CONTEXT_FILE}" ]] || rm -f "${LEDGER_CONTEXT_FILE}"
+      guard_undecided_if_scan_failed
+    fi
     NEXT_CMD=""
     for ((i = 0; i < ${#GUARD_BLOCKED_CMDS[@]}; i++)); do
       if [[ -z "${NEXT_CMD}" ]]; then
@@ -2079,14 +2121,54 @@ if [[ "${HIDDEN_DEPENDENCY_INSTALL}" != "true" && -n "${LEDGER_ECOSYSTEM}" ]] \
 fi
 
 if [[ "${HIDDEN_DEPENDENCY_INSTALL}" == "true" && ( -z "${LEDGER_ECOSYSTEM}" || ${#LEDGER_SPECS[@]} -eq 0 ) ]]; then
+  guard_undecided_if_scan_failed
   log_advisory "pre-guard DENY: hidden dependency install could not be reduced to an approved spec — fail-closed."
   jq -nc '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:"safedeps: hidden dependency install detected, but no package spec could be extracted for ledger approval — install blocked fail-closed."}}'
   exit 0
 fi
 
-# Every verdict from here on allows the command, so this is the last point at
-# which a failed scan can still turn into a deny.
+# Decide the inert rewrite first: it reads the command (the injectable test,
+# the compound test), so it belongs before the gate like every other reading.
+# It used to sit after the last settle, where a failed scan made it skip the
+# rewrite or land it at the end of a compound command, and nothing noticed.
+UPDATED_COMMAND=""
+INERT_DOWNGRADED=false
+if ! jq -e 'has("turn_id")' <<< "${INPUT}" >/dev/null 2>&1 && \
+   command_is_injectable_npm_install "${COMMAND}" && \
+   ! command_has_ignore_scripts_flag "${COMMAND}"; then
+  if command_is_compound "${COMMAND}"; then
+    # Compound command: insert `--ignore-scripts` immediately AFTER each npm-install
+    # verb so the flag stays inside its own statement. Appending to the end of the
+    # whole string would land it on the trailing statement (e.g.
+    # `npm install evil && npm run build --ignore-scripts`), leaving the install
+    # itself running lifecycle scripts (finding #7). `npm install --ignore-scripts <pkg>`
+    # is valid npm syntax (flags may precede operands).
+    # Groups: 1 = through the verb, 2-4 = the options, 5 = the verb, 6 = what
+    # follows it. scripts/test/smoke.sh pins the landing spot.
+    UPDATED_COMMAND=$(printf '%s' "${COMMAND}" | sed -E \
+      "s/(npm${SAFEDEPS_G_OPTS}[[:space:]]+(${SAFEDEPS_G_NPM_VERBS}))([[:space:]]|\$)/\\1 --ignore-scripts\\6/g")
+    if [[ "${UPDATED_COMMAND}" == "${COMMAND}" ]]; then
+      # Rewrite did not land — never blind-append to a compound command. Downgrade
+      # to detect-and-rollback (the effect gate still verifies the closure) and
+      # record it below, once the command is known to run; the inert guarantee is
+      # observably relaxed, never silently.
+      UPDATED_COMMAND=""
+      INERT_DOWNGRADED=true
+    fi
+  else
+    UPDATED_COMMAND="${COMMAND} --ignore-scripts"
+  fi
+fi
+
+# The gate: every verdict from here on lets the command run, and nothing after
+# this line reads the command text. Pending state, the inert meta and the allow
+# are written only once it has passed, so a command it denies leaves no pending
+# file for PostToolUse to pick up on the next identical command.
 guard_settle_scan_failure
+
+if [[ "${INERT_DOWNGRADED}" == "true" ]]; then
+  log_advisory "pre-guard: could not make compound npm install inert in-place; lifecycle scripts may run before the effect gate verifies (downgraded to detect-and-rollback). Command: ${COMMAND}"
+fi
 
 # Write per-install pending state for PostToolUse, keyed by (dir_hash, normalized
 # command) so concurrent installs in the same project keep separate state instead
@@ -2107,38 +2189,11 @@ CURRENT_STATE=$(jq -n --arg sid "${SNAPSHOT_ID}" --arg pdir "${PROJECT_DIR}" --a
 # the same second (SNAPSHOT_ID has only 1s resolution).
 write_state_file "${PENDING_DIR}/${PENDING_KEY}__${SNAPSHOT_ID}_$$.json" "${CURRENT_STATE}"
 
-if ! jq -e 'has("turn_id")' <<< "${INPUT}" >/dev/null 2>&1 && \
-   command_is_injectable_npm_install "${COMMAND}" && \
-   ! command_has_ignore_scripts_flag "${COMMAND}"; then
-  UPDATED_COMMAND=""
-  if command_is_compound "${COMMAND}"; then
-    # Compound command: insert `--ignore-scripts` immediately AFTER each npm-install
-    # verb so the flag stays inside its own statement. Appending to the end of the
-    # whole string would land it on the trailing statement (e.g.
-    # `npm install evil && npm run build --ignore-scripts`), leaving the install
-    # itself running lifecycle scripts (finding #7). `npm install --ignore-scripts <pkg>`
-    # is valid npm syntax (flags may precede operands).
-    # Groups: 1 = through the verb, 2-4 = the options, 5 = the verb, 6 = what
-    # follows it. scripts/test/smoke.sh pins the landing spot.
-    UPDATED_COMMAND=$(printf '%s' "${COMMAND}" | sed -E \
-      "s/(npm${SAFEDEPS_G_OPTS}[[:space:]]+(${SAFEDEPS_G_NPM_VERBS}))([[:space:]]|\$)/\\1 --ignore-scripts\\6/g")
-    if [[ "${UPDATED_COMMAND}" == "${COMMAND}" ]]; then
-      # Rewrite did not land — never blind-append to a compound command. Downgrade
-      # to detect-and-rollback (the effect gate still verifies the closure) and
-      # record it; the inert guarantee is observably relaxed, never silently.
-      log_advisory "pre-guard: could not make compound npm install inert in-place; lifecycle scripts may run before the effect gate verifies (downgraded to detect-and-rollback). Command: ${COMMAND}"
-      UPDATED_COMMAND=""
-    fi
-  else
-    UPDATED_COMMAND="${COMMAND} --ignore-scripts"
-  fi
-
-  if [[ -n "${UPDATED_COMMAND}" ]]; then
-    mark_ignore_scripts_injected
-    jq -nc --arg command "${UPDATED_COMMAND}" \
-      '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"allow",updatedInput:{command:$command}}}'
-    exit 0
-  fi
+if [[ -n "${UPDATED_COMMAND}" ]]; then
+  mark_ignore_scripts_injected
+  jq -nc --arg command "${UPDATED_COMMAND}" \
+    '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"allow",updatedInput:{command:$command}}}'
+  exit 0
 fi
 
 # Allow the command to proceed — PostToolUse will verify the result

@@ -455,4 +455,40 @@ scanfail_guard "${fail_tmp}/all-awk" "pip install requests==2.0.0"
 [[ "${SCANFAIL_DECISION}" == "deny" ]] || fail "with awk failing everywhere an install is still denied (got: ${SCANFAIL_DECISION})"
 pass "with awk failing everywhere an install is still denied"
 
+# --- the discriminator the gate falls back on ---------------------------------
+# When a reading failed, the gate asks one question without reading the command:
+# does it name a package manager's executable anywhere? Two properties make
+# that answer trustworthy, and both are checked on the function as the guard
+# defines it, extracted from the script.
+discriminator=$(sed -n '/^guard_looks_like_install_unscanned() {$/,/^}$/p' scripts/safedeps-pre-guard.sh)
+[[ -n "${discriminator}" ]] || fail "the discriminator can be extracted from the guard"
+discriminate() {
+  # An empty PATH: any subprocess it tried to start would fail, and it must
+  # answer anyway, because the tools it stands in for are the ones failing.
+  env -i PATH= COMMAND="$1" /bin/bash -c '
+    source lib/install-grammar.sh
+    eval "$1"
+    guard_looks_like_install_unscanned' _ "${discriminator}"
+}
+discriminate "npm install left-pad@1.3.0" || fail "the discriminator answers with no PATH (no subprocess) for an install"
+if discriminate "ls -la"; then fail "the discriminator says no for a command that names no manager"; fi
+if discriminate "git commit -m 'fix'"; then fail "the discriminator says no for a plain commit"; fi
+discriminate "NPM INSTALL x" || fail "the discriminator ignores case"
+discriminate $'echo hi\npip3.11 install x' || fail "the discriminator reads every line"
+pass "the discriminator needs no subprocess and ignores case"
+
+# It must say yes to everything any recognizer could find. It is derived from
+# SAFEDEPS_G_EXECUTABLES rather than listed by hand; this checks the derivation
+# against every install form the failure census uses, and against every manager
+# the pipe check names.
+while IFS= read -r -d '' form; do
+  discriminate "${form}" || fail "the discriminator names every census form: ${form}"
+done < <(jq -j '.forms[], .extras[] | . + "\u0000"' scripts/measure/scan-failure-corpus.json)
+pipe_managers=$(sed -n "s/^PIPE_MANAGER_RE='(\(.*\))'\$/\1/p" scripts/safedeps-pre-guard.sh)
+[[ -n "${pipe_managers}" ]] || fail "the pipe check's manager list can be read"
+for manager in $(tr '|' '\n' <<< "${pipe_managers}" | sed -E 's/\[[^]]*\][*+]?//g; s/[()]//g' | grep -E '^[a-z]+$'); do
+  discriminate "${manager} install x" || fail "the discriminator names the pipe check's manager ${manager}"
+done
+pass "the discriminator names every census form and every manager the pipe check knows"
+
 printf 'scan-contract: all checks passed\n'
