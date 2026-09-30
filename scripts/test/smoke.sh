@@ -451,6 +451,26 @@ compound_cmd=$(jq -r '.hookSpecificOutput.updatedInput.command' <<< "${compound_
 [[ "${compound_cmd}" == "npm install --ignore-scripts left-pad@1.3.0 && npm run build" ]] || fail "compound inert-install injects --ignore-scripts on the install, not the trailing command (got: ${compound_cmd})"
 pass "compound install injects --ignore-scripts in-place on the npm install (finding #7)"
 
+# The same holds for a trailing comment, a heredoc and a second line: appending
+# put the flag inside the comment (the shell drops it, the lifecycle scripts run,
+# and the meta says they were suppressed), after the heredoc terminator, or on
+# the last line. Each must land on the install; the quoted `#` is data and stays
+# on the append path.
+for inert_case in \
+  "npm install left-pad@1.3.0 # rebuild the lockfile|npm install --ignore-scripts left-pad@1.3.0 # rebuild the lockfile" \
+  $'npm install left-pad@1.3.0\necho done|npm install --ignore-scripts left-pad@1.3.0\necho done' \
+  $'npm install left-pad@1.3.0 <<EOF\nyes\nEOF|npm install --ignore-scripts left-pad@1.3.0 <<EOF\nyes\nEOF' \
+  "npm install left-pad@1.3.0 --message 'a # b'|npm install left-pad@1.3.0 --message 'a # b' --ignore-scripts"
+do
+  inert_in="${inert_case%%|*}"
+  inert_want="${inert_case#*|}"
+  inert_out=$(run_hook_command "${tmp_root}/home-compound" "${tmp_root}/safe-compound" "${inert_in}")
+  inert_got=$(jq -r '.hookSpecificOutput.updatedInput.command' <<< "${inert_out}")
+  [[ "${inert_got}" == "${inert_want}" ]] \
+    || fail "inert flag lands on the install: $(printf '%q' "${inert_in}") (got: $(printf '%q' "${inert_got}"))"
+done
+pass "inert flag lands on the install before a comment, a heredoc or a second line"
+
 # Finding #3: an `--prefix <dir>` install must be snapshotted/effect-gated against
 # the OVERRIDE dir, not cwd. The pending state's project_dir must be the prefix dir.
 prefix_safe="${tmp_root}/safe-prefix"

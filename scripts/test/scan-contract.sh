@@ -8,7 +8,7 @@
 #   command_is_dependency_install    is this an install command
 #   command_is_injectable_npm_install  may --ignore-scripts be injected
 #   command_has_ignore_scripts_flag  is the flag already there
-#   command_is_compound              may the flag be appended
+#   command_needs_inplace_inert      may the flag be appended
 #   resolve_install_dir_override     where does the install land
 #   guard_detect_ecosystem           which ecosystem
 #   payload_pipes_install_text_to_shell  is the pipe in execution position

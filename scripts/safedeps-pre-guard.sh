@@ -734,15 +734,22 @@ command_has_ignore_scripts_flag() {
   return 1
 }
 
-# True when the command chains more than one statement at the shell level (a `;`,
-# `&&`, `||`, or `|` OUTSIDE quotes). Quoted separators are blanked by
-# command_scan_text first so `echo "a && b"` is NOT treated as compound. Used to
-# decide how to inject `--ignore-scripts`: appending to a compound command lands
-# the flag on the trailing statement, not on the npm install (finding #7).
-command_is_compound() {
+# True when appending `--ignore-scripts` to the end of the command would not put
+# it on the npm install: the command chains more than one statement at the shell
+# level (a `;`, `&&`, `||`, or `|` OUTSIDE quotes), runs over more than one line,
+# or holds a `#` outside quotes. Quoted text is blanked by command_scan_text first
+# so `echo "a && b"` is NOT a reason. Appending to a compound command lands the
+# flag on the trailing statement (finding #7); appending after a comment lands it
+# inside the comment, where the shell never passes it to npm and the lifecycle
+# scripts run while the meta says they were suppressed (`npm ci # rebuild`,
+# caught in the linearize design judgment). Appending after a heredoc lands it
+# after the terminator. A `#` inside a word is not a comment, but the in-place
+# rewrite is correct there too, so no attempt is made to tell them apart.
+command_needs_inplace_inert() {
   local scanned
   scanned=$(command_scan_text "$1")
-  printf '%s' "${scanned}" | grep -qE '[;&|]'
+  [[ "${scanned}" == *$'\n'* ]] && return 0
+  printf '%s' "${scanned}" | grep -qE '[;&|#]'
 }
 
 # Echo the install directory when the command redirects the install target away
@@ -2136,9 +2143,9 @@ INERT_DOWNGRADED=false
 if ! jq -e 'has("turn_id")' <<< "${INPUT}" >/dev/null 2>&1 && \
    command_is_injectable_npm_install "${COMMAND}" && \
    ! command_has_ignore_scripts_flag "${COMMAND}"; then
-  if command_is_compound "${COMMAND}"; then
-    # Compound command: insert `--ignore-scripts` immediately AFTER each npm-install
-    # verb so the flag stays inside its own statement. Appending to the end of the
+  if command_needs_inplace_inert "${COMMAND}"; then
+    # Insert `--ignore-scripts` immediately AFTER each npm-install verb so the
+    # flag stays inside its own statement. Appending to the end of the
     # whole string would land it on the trailing statement (e.g.
     # `npm install evil && npm run build --ignore-scripts`), leaving the install
     # itself running lifecycle scripts (finding #7). `npm install --ignore-scripts <pkg>`
