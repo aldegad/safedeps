@@ -304,8 +304,8 @@ normalize_install_text() {
     text=$(printf '%s' "${text}" | sed -E \
       -e 's/^[[:space:]]+//' \
       -e "s#(^|[[:space:];|&({!])(/[^[:space:];|&]+/)(${SAFEDEPS_G_EXECUTABLES}|sh|bash|zsh)([[:space:];|&]|\$)#\\1\\3\\4#g" \
-      -e 's#(^|[;&|({!][[:space:]]*)(env([[:space:]]+(-i|--ignore-environment|-0|--null|-v|--debug|-u[[:space:]]*[^[:space:]]+|--unset(=|[[:space:]]+)[^[:space:]]+|-C[[:space:]]*[^[:space:]]+|--chdir(=|[[:space:]]+)[^[:space:]]+|[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]+))*[[:space:]]+|command[[:space:]]+|exec[[:space:]]+)#\1#g' \
-      -e 's#(^|[;&|({!][[:space:]]*)([A-Za-z_][A-Za-z0-9_]*=[^[:space:]'\''"]*[[:space:]]+)+#\1#g')
+      -e 's#(^|[;&|({!][[:space:]]*|(then|do|else|elif|if|while|until|time|coproc)[[:space:]]+)(env([[:space:]]+(-i|--ignore-environment|-0|--null|-v|--debug|-u[[:space:]]*[^[:space:]]+|--unset(=|[[:space:]]+)[^[:space:]]+|-C[[:space:]]*[^[:space:]]+|--chdir(=|[[:space:]]+)[^[:space:]]+|[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]+))*[[:space:]]+|command[[:space:]]+|exec[[:space:]]+)#\1#g' \
+      -e 's#(^|[;&|({!][[:space:]]*|(then|do|else|elif|if|while|until|time|coproc)[[:space:]]+)([A-Za-z_][A-Za-z0-9_]*=[^[:space:]'\''"]*[[:space:]]+)+#\1#g')
   done
   printf '%s' "${text}"
 }
@@ -1272,6 +1272,25 @@ guard_runner_operands() {
   done
 }
 
+# The package an operand names, without its version, extras or markers:
+# `evil[x]==1.0.0` -> evil, `@scope/x@1` -> @scope/x, `example.com/m@v1` ->
+# example.com/m. Whether it is pinned is then asked of the extractor's output by
+# this name, never read off the token's shape.
+guard_operand_name() {
+  local tok="$1" scope="" body
+  if [[ "${tok}" == @* ]]; then
+    scope="@"
+    body="${tok#@}"
+  else
+    body="${tok}"
+  fi
+  body="${body%%;*}"
+  body="${body%%\[*}"
+  body="${body%%@*}"
+  body="${body%%[=<>~!]*}"
+  printf '%s%s' "${scope}" "${body}"
+}
+
 guard_names_package_without_spec() {
   # True when an install NAMES a package but carries no version spec, so the
   # ledger gate never ran for it. Used only to make that fact observable — it
@@ -1327,17 +1346,13 @@ guard_names_package_without_spec() {
     if guard_segment_is_runner "${seg}"; then
       while IFS= read -r tok; do
         [[ -z "${tok}" ]] && continue
-        [[ "${pinned}" == *$'\n'"${tok}"$'\n'* ]] && continue
+        [[ "${pinned}" == *$'\n'"$(guard_operand_name "${tok}")"$'\n'* ]] && continue
         # npx, npm exec and bunx run a binary the project already has without
         # fetching anything, so `npx tsc` in a TypeScript project is not an
         # install. Only a name with no local binary is fetched, and only that
         # is worth a record; recording every `npx tsc` would bury the ones that
         # matter.
         guard_runner_uses_local_bin "${seg}" "${tok}" && continue
-        case "${tok#@}" in
-          *://*) return 0 ;;
-          *@*|*==*) continue ;;
-        esac
         return 0
       done < <(guard_runner_operands "${seg}")
       continue
@@ -1410,14 +1425,15 @@ guard_names_package_without_spec() {
         .|..|./*|../*|/*) continue ;;
       esac
 
-      # `@` counts as a version delimiter only outside a URL, where it separates
-      # a user rather than a version, and only after a scope's leading `@`:
-      # `@scope/x` names a package without pinning it.
-      case "${tok#@}" in
-        *://*) : ;;
-        *@*|*==*) continue ;;
+      # Pinned means the extractor produced a spec for this package, asked by
+      # name. Reading it off the token's shape (`*@*|*==*`) let every spelling
+      # the extractor does not read pass as pinned with no record:
+      # `evil[x]==1.0.0`, `evil===1.0.0`, `evil==1.0.*` (caught in review). A
+      # URL names a package and pins nothing, whatever `@` it carries.
+      case "${tok}" in
+        *://*) return 0 ;;
       esac
-      [[ "${pinned}" == *$'\n'"${tok}"$'\n'* ]] && continue
+      [[ "${pinned}" == *$'\n'"$(guard_operand_name "${tok}")"$'\n'* ]] && continue
 
       return 0
     done
@@ -1452,8 +1468,10 @@ guard_extract_flagged_specs() {
     }
     {
       for (i = 1; i <= NF; i++) {
-        if ($i ~ /^[A-Za-z][A-Za-z0-9._-]*==[A-Za-z0-9][A-Za-z0-9._+!~-]*$/) {
-          split($i, parts, "==")
+        # `name==version`, and `name===version` (arbitrary equality, also an
+        # exact pin). A wildcard such as `==1.0.*` is not a pin and stays out.
+        if ($i ~ /^[A-Za-z][A-Za-z0-9._-]*===?[A-Za-z0-9][A-Za-z0-9._+!~-]*$/) {
+          split($i, parts, /===?/)
           print parts[1] "\t" parts[2]
         }
 
@@ -1563,6 +1581,9 @@ guard_extract_specs() {
     else
       text=$(printf '%s' "${seg}" | tr -d "\"'" | tr '(){}' '    ')
     fi
+    # Python extras (`evil[x]==1.0.0`) select optional dependencies of the same
+    # package; the package and its version are what the ledger judges.
+    [[ "${eco}" == "pypi" ]] && text=$(printf '%s' "${text}" | sed -E 's/\[[^] ]*\]//g')
     guard_operand_specs "${eco}" "${text}"
   done < <(command_candidate_texts "${cmd}" | tr ';|&' '\n')
 }

@@ -162,6 +162,25 @@ clean_json=$(./bin/safedeps --json check npm fixture-clean@1.0.0)
 [[ "$(jq -r '.result' <<< "${clean_json}")" == "clean" ]] || fail "clean fixture approved"
 pass "clean advisory approval"
 
+# A Go install names an import path, and OSV keys Go advisories by module path.
+# Asked for the full path alone, a package below a vulnerable module came back
+# clean and was approved, and the guard's own prescription led there
+# (caught in cross-validation). Every prefix is asked now. The fixture knows
+# only the module, the way OSV does.
+printf '%s\n' '{"vulnerable":["example.com/mod@v1.0.0"]}' > "${state_file}"
+go_sub_json=$(./bin/safedeps --json check go example.com/mod/cmd/tool@v1.0.0 2>/dev/null) || true
+[[ "$(jq -r '.approved' <<< "${go_sub_json}")" == "false" ]] \
+  || fail "a Go import path below a vulnerable module is not approved"
+go_sub_guard=$(jq -nc --arg c "go install example.com/mod/cmd/tool@v1.0.0" --arg cwd "${tmp_root}" \
+  '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' | scripts/safedeps-pre-guard.sh 2>/dev/null)
+[[ "$(jq -r '.hookSpecificOutput.permissionDecision // "pass"' <<< "${go_sub_guard:-{\}}")" == "deny" ]] \
+  || fail "after the prescribed check, the install of a package below a vulnerable module is still denied"
+go_clean_json=$(./bin/safedeps --json check go example.com/other/cmd/tool@v1.0.0 2>/dev/null) || true
+[[ "$(jq -r '.approved' <<< "${go_clean_json}")" == "true" ]] \
+  || fail "a Go import path below a clean module is approved (the prefix walk does not flag everything)"
+printf '%s\n' '{"vulnerable":[]}' > "${state_file}"
+pass "a Go package is judged by every module prefix of its import path"
+
 closure_json=$(./bin/safedeps --json check npm fixture-parent@1.0.0)
 [[ "$(jq -r '.result' <<< "${closure_json}")" == "clean" ]] || fail "closure fixture approved"
 [[ "$(jq -r '.transitive_count' <<< "${closure_json}")" == "1" ]] || fail "closure fixture records transitive count"

@@ -410,7 +410,15 @@ for grammar_form in \
   "exec pip install evil==1.0.0" \
   "env -i pip install evil==1.0.0" \
   'pip install "evil==1.0.0"' \
-  "pip install 'evil==1.0.0'"
+  "pip install 'evil==1.0.0'" \
+  "pip install 'evil[x]==1.0.0'" \
+  "pip install evil===1.0.0" \
+  "uv add 'evil[all]==1.0.0'" \
+  "poetry add 'evil[x]@1.0.0'" \
+  "if true; then env pip install evil==1.0.0; fi" \
+  "if true; then FOO=1 pip install evil==1.0.0; fi" \
+  "if true; then command pip install evil==1.0.0; fi" \
+  "coproc pip install evil==1.0.0"
 do
   expect_deny "the install spelled ${grammar_form}" "${grammar_form}"
 done
@@ -476,6 +484,10 @@ for wrapper_form in \
 do
   expect_pass "the wrapper ${wrapper_form%% *}" "${wrapper_form}"
 done
+# A case arm starts a statement after `pattern)`, and `)` cannot join the
+# statement-start set without reading `echo $(date) pip install x` as an
+# install. Pinned here as outside, with the wrappers.
+expect_pass "a case arm" 'case x in *) pip install evil==1.0.0;; esac'
 pass "argv-passing wrappers (sudo, timeout, nohup, nice) stay outside the command gate (documented boundary)"
 
 # --- 9. UNGATED is keyed on the effect gate actually being there --------------
@@ -490,7 +502,9 @@ for no_effect_gate in \
   "npm install --no-package-lock evil" \
   "npx evil" \
   "npm exec evil" \
-  "pnpm dlx evil"
+  "pnpm dlx evil" \
+  "pip install evil==1.0.*" \
+  "pip install 'evil[x]'"
 do
   logged_ungated "${no_effect_gate}" \
     || fail "an unpinned install with no effect gate behind it is recorded: ${no_effect_gate}"
@@ -498,6 +512,22 @@ do
     || fail "the UNGATED record must not change the verdict: ${no_effect_gate}"
 done
 pass "unpinned pnpm/yarn/bun, global npm, and runner installs are recorded"
+
+# "Pinned" is asked of the extractor by name, not read off the token. A wildcard
+# is not a pin, so with evil approved the second package here reaches no ledger
+# check and has to be on record.
+mixed_home="${tmp_root}/mixed-approved"
+mkdir -p "${mixed_home}"
+( export SAFEDEPS_HOME="${mixed_home}"
+  . lib/ledger/ledger.sh
+  safedeps_ledger_write_approved_spec pypi evil 1.0.0 >/dev/null ) \
+  || fail "the mixed-command fixture approval could be written"
+jq -nc --arg c "pip install evil==1.0.0 other==1.0.*" --arg cwd "${project_dir}" \
+  '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
+  HOME="${tmp_root}/home-mixed" SAFEDEPS_HOME="${mixed_home}" scripts/safedeps-pre-guard.sh >/dev/null 2>&1
+grep -q 'UNGATED' "${mixed_home}/advisory.log" 2>/dev/null \
+  || fail "a command that pins one package and not another records the other"
+pass "a package counts as pinned only when the extractor produced a spec for it"
 
 # npx runs a binary the project already has without fetching anything. Only a
 # name with no local binary is a fetch.
