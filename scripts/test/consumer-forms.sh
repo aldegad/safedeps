@@ -669,4 +669,152 @@ expect_prescription 'pypi 3to2@1.1.1;' 'pip install 3to2==1.1.1'
 expect_prescription 'pypi 3to2@1.1.1;' 'poetry add 3to2@1.1.1'
 pass "an alias is checked as its target, and a name that starts with a digit is read whole"
 
+# --- 11. The UNGATED record names each operand the gate did not check ---------
+# The record used to be a second parser: it read each statement on its own and
+# asked the extractor "was this package pinned?" by name, so a pin on one
+# operand quieted another of the same name (`pnpm add x@1 && pnpm add x`), and
+# a version flag's value read as an unpinned package (`gem install rails -v
+# 7.1.0`, gated AND recorded). It now reads the extractor's own output for each
+# statement and names what it recorded.
+#
+# Each row first approves every spec the gate prescribes, the loop an agent
+# follows, so the record code is actually reached. The oracle is the SET of
+# recorded operands: a line merely existing hides a missing operand next to a
+# present one. An empty set means no line at all.
+recorded_operands() {
+  local command="$1" safe out reason approved eco ps iter
+  safe=$(mktemp -d "${tmp_root}/operands.XXXXXX")
+  for iter in 1 2 3 4 5 6; do
+    out=$(jq -nc --arg c "${command}" --arg cwd "${project_dir}" \
+      '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
+      HOME="${safe}/home" SAFEDEPS_HOME="${safe}" scripts/safedeps-pre-guard.sh 2>/dev/null) || true
+    [[ -n "${out}" ]] || break
+    reason=$(jq -r '.hookSpecificOutput.permissionDecisionReason // empty' <<< "${out}" 2>/dev/null) || true
+    [[ "${reason}" == *"install not approved"* ]] || break
+    approved=0
+    while read -r eco ps; do
+      [[ -n "${ps}" ]] || continue
+      ( export SAFEDEPS_HOME="${safe}"
+        . lib/ledger/ledger.sh
+        safedeps_ledger_write_approved_spec "${eco}" "${ps%@*}" "${ps##*@}" >/dev/null ) && approved=$((approved + 1))
+    done < <(printf '%s\n' "${reason}" | sed -nE 's/.*run `([^`]*)` first.*/\1/p' \
+      | awk '{ gsub(/ && /, "\n"); print }' | awk 'NF { print $(NF-1), $NF }')
+    [[ "${approved}" -gt 0 ]] || break
+  done
+  { grep 'pre-guard UNGATED' "${safe}/advisory.log" 2>/dev/null || true; } \
+    | sed -e 's/.* Unpinned: //' -e 's/\. Command: .*//' | sed 's/, /\n/g' | sort -u | tr '\n' ' ' | sed 's/ $//'
+}
+
+# expected<TAB>command. Newlines inside a command are written as $'\n'.
+operand_rows=(
+  # Recorded: an unpinned operand next to a pinned one of the same name.
+  $'npm:left-pad\tpnpm add left-pad@1.0.0 && pnpm add left-pad'
+  $'npm:left-pad\tyarn add left-pad@1.0.0 && yarn add left-pad'
+  $'npm:left-pad\tbun add left-pad@1.0.0 && bun add left-pad'
+  $'npm:left-pad\tnpm i -g left-pad@1.0.0 && npm i -g left-pad'
+  $'npm:left-pad\tyarn add left-pad@1.0.0 && yarn up left-pad'
+  $'npm:left-pad\tpnpm add left-pad@1.0.0 && pnpm update left-pad --latest'
+  $'npm:@scope/pkg\tpnpm add @scope/pkg@1.0.0 && pnpm add @scope/pkg'
+  $'pypi:requests\tpip install requests==2.0.0 && pip install -U requests'
+  $'pypi:requests>=3\tpip install requests==2.0.0 && pip install \'requests>=3\''
+  $'pypi:requests==3.*\tpip install requests==2.0.0 && pip install \'requests==3.*\''
+  $'pypi:requests\tpip install \'requests[socks]==2.0.0\' && pip install -U \'requests[socks]\''
+  $'pypi:requests\tpip install requests==2.0.0 && pip install --force-reinstall requests'
+  $'pypi:requests\tpip install requests==2.0.0 && uv add requests'
+  $'pypi:requests\tpip install requests==2.0.0 && uv pip install -U requests'
+  $'pypi:ruff\tpipx install ruff==0.1.0 && pipx install --force ruff'
+  $'go:example.com/m\tgo get example.com/m@v1.0.0 && go get -u example.com/m'
+  $'go:example.com/m\tgo get example.com/m@v1.0.0 && go get example.com/m'
+  $'rubygems:rake\tgem install rake -v 13.0.0 && gem install rake'
+  $'crates.io:ripgrep\tcargo install ripgrep@13.0.0 && cargo install --force ripgrep'
+  $'crates.io:ripgrep\tcargo install ripgrep --version 13.0.0 && cargo install --force ripgrep'
+  $'nuget:Newtonsoft.Json\tdotnet add package Newtonsoft.Json --version 13.0.1 && dotnet add package Newtonsoft.Json'
+  $'nuget:dotnet-ef\tdotnet tool install -g dotnet-ef --version 7.0.0 && dotnet tool update -g dotnet-ef'
+  # The same across every way statements relate.
+  $'npm:left-pad\tpnpm add left-pad@1.0.0 || pnpm add left-pad'
+  $'npm:left-pad\tpnpm add left-pad@1.0.0; pnpm add left-pad'
+  $'npm:left-pad\tpnpm add left-pad@1.0.0\npnpm add left-pad'
+  $'npm:left-pad\tpnpm add left-pad@1.0.0 & pnpm add left-pad'
+  $'npm:left-pad\t(pnpm add left-pad@1.0.0) && (pnpm add left-pad)'
+  $'npm:left-pad\tif true; then pnpm add left-pad@1.0.0; fi; pnpm add left-pad'
+  $'npm:left-pad\tpnpm add left-pad@1.0.0 && bash -c \'pnpm add left-pad\''
+  $'npm:left-pad\tbash -c \'pnpm add left-pad@1.0.0\' && pnpm add left-pad'
+  $'npm:left-pad\tpnpm add left-pad@1.0.0 && eval \'pnpm add left-pad\''
+  $'npm:left-pad\tpnpm add left-pad@1.0.0 && echo "$(pnpm add left-pad)"'
+  # And inside one statement.
+  $'npm:left-pad\tpnpm add left-pad@1.0.0 left-pad'
+  $'npm:left-pad\tnpm i -g left-pad@1.0.0 left-pad'
+  $'go:example.com/m\tgo get example.com/m@v1.0.0 example.com/m'
+  $'crates.io:ripgrep\tcargo install ripgrep@13.0.0 ripgrep'
+  # Runners.
+  $'npm:cowsay\tnpx cowsay@1.0.0 && npx cowsay'
+  $'npm:cowsay\tnpx -p cowsay@1.0.0 -p cowsay cowsay'
+  $'npm:cowsay\tnpx --package=cowsay@1.0.0 cowsay && npx --package=cowsay cowsay'
+  $'pypi:ruff\tuvx ruff==0.1.0 && uvx ruff'
+  $'pypi:ruff\tuvx --from ruff==0.1.0 ruff && uvx --from ruff ruff'
+  # An alias is its target; a coordinate with no version is unpinned.
+  $'npm:evil-pkg\tpnpm add left-pad@npm:evil-pkg'
+  $'maven:-Dartifact=g:evil:\tmvn dependency:get -Dartifact=g:evil:'
+  $'maven:-Dartifact=g:evil::jar\tmvn dependency:get -Dartifact=g:evil::jar'
+  # Forms the previous release recorded, which a name join quieted.
+  $'pypi:requests\tpip install requests===2.0.0 && pip install -U requests'
+  $'pypi:requests\tpip3.11 install requests==2.0.0 && python3 -m pip install -U requests'
+  $'go:example.com/m\tgo run example.com/m@v1.0.0 && go get example.com/m'
+  # Quiet: routine pinned installs, once approved. A version flag's value is
+  # not an operand, and an option's value is not either.
+  $'\tgem install rails -v 7.1.0'
+  $'\tgem install rails --version 7.1.0'
+  $'\tgem install rails --version=7.1.0'
+  $'\tbundle add rails --version 7.1.0'
+  $'\tbundle add rails --version 7.1.0 --source https://rubygems.org'
+  $'\tcargo install ripgrep --version 13.0.0'
+  $'\tcargo install ripgrep --version=13.0.0'
+  $'\tcargo add serde@1.0.0 --features derive'
+  $'\tdotnet add package Serilog --version 3.1.1'
+  $'\tdotnet add App.csproj package Serilog --version 3.1.1'
+  $'\tdotnet tool install --global dotnet-ef --version 8.0.0'
+  $'\tgem install --source https://rubygems.org rake -v 13.0.0'
+  $'\tpip install 3to2==1.1.1'
+  $'\tpnpm add left-pad@npm:evil-pkg@1.0.0'
+  # Quiet: a pinned install inside a payload. The outer statement's payload is
+  # blank to the extractor, so it is not read there either.
+  $'\tbash -c \'pip install requests==2.31.0\''
+  $'\teval \'pip install requests==2.31.0\''
+  $'\techo "$(pip install requests==2.31.0)"'
+  # Quiet: the exemption is the statement's. The npm CLI install is read by the
+  # effect gate; the pnpm one is pinned.
+  $'\tnpm install left-pad && pnpm add right-pad@1.0.0'
+  # Declared: recorded, and harmless. pip resolves both operands to the pin;
+  # the second install is a no-op at runtime; the local binary does not exist
+  # yet when the gate reads the command; the record assumes an option it does
+  # not know takes no value, and `--no-binary` takes one.
+  $'pypi:requests\tpip install requests==2.0.0 requests'
+  $'pypi:requests\tpip install requests==2.0.0 && pip install requests'
+  $'npm:cowsay\tpnpm add cowsay@1.0.0 && npx cowsay'
+  $'pypi:requests\tpip install requests==2.0.0 --no-binary requests'
+  # Controls: another name, and the npm CLI statement exempt on its own.
+  $'npm:right-pad\tpnpm add left-pad@1.0.0 && pnpm add right-pad'
+  $'npm:right-pad\tnpm install left-pad && pnpm add right-pad'
+)
+
+# The rows are independent sandboxes; run them eight at a time.
+operand_out="${tmp_root}/operand-rows"
+mkdir -p "${operand_out}"
+row_index=0
+for row in "${operand_rows[@]}"; do
+  ( recorded_operands "${row#*$'\t'}" > "${operand_out}/${row_index}" ) &
+  row_index=$((row_index + 1))
+  (( row_index % 8 == 0 )) && wait
+done
+wait
+row_index=0
+for row in "${operand_rows[@]}"; do
+  want="${row%%$'\t'*}"
+  got=$(cat "${operand_out}/${row_index}")
+  [[ "${got}" == "${want}" ]] \
+    || fail "the record names [${want}] for $(printf '%q' "${row#*$'\t'}") (got: [${got}])"
+  row_index=$((row_index + 1))
+done
+pass "the UNGATED record names each unchecked operand, and only those (${#operand_rows[@]} rows)"
+
 printf 'consumer-forms passed\n'
