@@ -362,6 +362,14 @@ install done → safedeps-post-verify.sh
                  • append to reorg.log; message the agent
 ```
 
+**The baseline is the state the last verified install left behind.** On CONFIRM, post-verify copies the project's lock and manifest files as they are now into a new snapshot (`verified-<id>`, whose `verified_from` names the pre-install snapshot) and points `confirmed_${dir_hash}` at it. It used to confirm the pre-install snapshot instead, so the baseline ran one install behind. Measured with a real npm against a local registry, on Claude Code and Codex: an approved `npm install a` followed by an unapproved `npm install b` rolled back to a project without `a` in `package.json`, `package-lock.json` or `node_modules`, and after a second approved install the one lost was the last verified, not the first. `scripts/test/lockless-forms.sh` pins both, and it no longer needs the extra verified `npm install` it used to move the baseline forward.
+
+Three boundaries follow from what the baseline is:
+
+- **It is files, not `node_modules`.** The rollback rebuilds `node_modules` from the restored lockfile, so a verified install that saved nothing (`--no-save`) is not in the baseline and does not survive a later rollback (measured).
+- **Only an install that passed the whole gate moves it.** The command-independent backstop runs the npm closure check alone, so a parser-missed install it finds clean is logged and left in place, but it is not confirmed. A later rollback returns to the baseline before it.
+- **A baseline that cannot be recorded does not move.** The new snapshot's `meta.json` is written last and every reader requires it, so a run killed part-way leaves an unconfirmed snapshot that is pruned, never a baseline with files missing. If recording fails outright, the pointer stays where it was, `advisory.log` says so, and the user is told that a later rollback would undo this install too.
+
 **This gate has the same budget, and it is killed the same way — measured, not assumed.** Using the protocol that established the PreToolUse behavior (a sandbox project, a hook that records when it starts and when it finishes, a control inside the budget and an experiment past it), a PostToolUse hook given 20s of work against a 5s budget started and never finished, while the 1s control finished. The work above is bounded by the user's project and the network rather than by anything safedeps controls: `npm ci`, `npm install`, `npm rebuild`, and an OSV batch over the whole closure.
 
 So the sentence "the effect gate backs up the command gate" holds *inside* the budget and not past it, and it fails worse in kind: a killed pre-hook lets one unjudged command through, while a killed post-hook can land in the middle of a rollback. The pre-hook's answer to running out of time is to deny (Phase 2), but a post-install gate cannot deny — the command has already run — so its answer is a different design question, tracked as `safedeps/effect-gate-killed-mid-rollback` and not solved here. Codex CLI timeout behavior remains unmeasured on both hooks; parity is not assumed.
@@ -444,7 +452,7 @@ Design principle: **no silent fallback.** When the canonical truth (OSV) cannot 
 ├── snapshots/                 ← reorg snapshots (inherited from v1, extended to all lockfiles)
 │   └── <id>/ { package-lock.json, yarn.lock, pnpm-lock.yaml, poetry.lock, uv.lock,
 │               Cargo.lock, go.sum, Gemfile.lock, meta.json }
-├── confirmed_${dir_hash}      ← per-project last confirmed snapshot
+├── confirmed_${dir_hash}      ← per-project baseline: the state the last verified install left
 ├── cache/
 │   ├── osv/                   ← OSV query responses (24h TTL)
 │   └── kev/                   ← CISA KEV daily catalog

@@ -153,7 +153,11 @@ ledger 게이트나 사전 비행 체크에 실패하면 해당 명령은 실행
 
 ### Confirm or Reorg
 
-- **모든 검사 통과** — 해당 스냅샷이 `~/.safedeps/confirmed`에 **confirmed**로 표시됩니다. 이것이 새 안전 기준점입니다.
+- **모든 검사 통과** — 검증된 설치가 남긴 그대로의 lock·manifest 파일을 새 스냅샷으로 기록하고, 그 스냅샷을 `~/.safedeps/confirmed_<dir hash>`에 **confirmed**로 표시합니다. 이것이 새 안전 기준점이므로, 이후의 롤백은 이 설치를 남깁니다.
+
+  예전에는 검증된 설치 *이전*에 찍은 스냅샷이 기준점이었고, 그래서 기준점이 설치 한 번만큼 뒤처져 있었습니다. 로컬 레지스트리에 실제 npm 으로 측정한 결과, 승인된 `npm install a` 다음에 승인되지 않은 `npm install b` 를 하면 프로젝트가 `package.json`, lockfile, `node_modules` 어디에도 `a` 가 없는 상태로 롤백됐습니다. 이제는 Claude Code 와 Codex 모두에서 `a` 는 남고 `b` 만 빠집니다(`scripts/test/lockless-forms.sh`).
+
+  기준점은 파일이지 `node_modules` 가 아닙니다. 롤백은 복원한 lockfile 로 `node_modules` 를 다시 만들기 때문에, 아무것도 저장하지 않은 검증된 설치(`--no-save`)는 기준점에 들어가지 않고 이후 롤백에서 살아남지 않습니다. 검증된 상태를 기록하지 못하면 기준점은 그대로 두고, 이후 롤백이 이 설치까지 되돌린다는 사실을 알려 줍니다.
 - **검사 실패 발생** — **reorg**가 트리거됩니다:
   1. lock file을 마지막 confirmed 스냅샷에서 복원
   2. 변경된 경우 `package.json` 복원
@@ -175,7 +179,7 @@ ledger 게이트나 사전 비행 체크에 실패하면 해당 명령은 실행
 |---|---|
 | **블록 후보(Block candidate)** | `npm install` 이전에 찍힌 스냅샷 |
 | **블록 검증(Block validation)** | 설치 후 효과 검사 (npm closure, scripts, lock diff, binaries) |
-| **최종 확정 / confirmation** | `~/.safedeps/confirmed`에 기록된 snapshot ID |
+| **최종 확정 / confirmation** | 검증된 설치 후 상태를 스냅샷으로 기록해 `~/.safedeps/confirmed_<dir hash>`에 쓴 것 |
 | **체인 재구성(Chain reorganization)** | 마지막 confirmed 스냅샷으로 rollback + `node_modules` 재구성 |
 | **부모 해시 연결(Parent hash linking)** | 각 스냅샷 `_meta.json`의 `parent_snapshot_id` |
 | **체인 가지치기(Chain pruning)** | 오래된 미확정 스냅샷 정리, confirmed chain은 보존 |

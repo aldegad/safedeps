@@ -362,6 +362,14 @@ install 완료 → safedeps-post-verify.sh
                  • reorg.log 기록; 에이전트에 경고
 ```
 
+**기준점은 마지막으로 검증된 설치가 남긴 상태다.** CONFIRM 때 post-verify 는 프로젝트의 lock·manifest 파일을 지금 상태 그대로 새 스냅샷(`verified-<id>`, `verified_from` 이 설치 전 스냅샷을 가리킨다)으로 복사하고 `confirmed_${dir_hash}` 를 그것으로 옮긴다. 예전에는 설치 전 스냅샷을 확정했기 때문에 기준점이 설치 한 번만큼 뒤처져 있었다. 로컬 레지스트리에 실제 npm 으로, Claude Code 와 Codex 양쪽에서 측정했다: 승인된 `npm install a` 다음 승인되지 않은 `npm install b` 는 `package.json`, `package-lock.json`, `node_modules` 어디에도 `a` 가 없는 프로젝트로 롤백됐고, 승인 설치를 하나 더 하면 빠지는 쪽은 처음이 아니라 마지막으로 검증된 설치였다. `scripts/test/lockless-forms.sh` 가 둘 다 고정하며, 기준점을 앞으로 옮기려고 넣었던 검증된 `npm install` 한 번은 더 이상 필요 없다.
+
+기준점이 무엇인지에서 경계 셋이 나온다:
+
+- **파일이지 `node_modules` 가 아니다.** 롤백은 복원한 lockfile 로 `node_modules` 를 다시 만들기 때문에, 아무것도 저장하지 않은 검증된 설치(`--no-save`)는 기준점에 들어가지 않고 이후 롤백에서 살아남지 않는다(실측).
+- **게이트 전체를 통과한 설치만 기준점을 옮긴다.** 명령과 무관한 백스톱은 npm closure 검사만 돌리므로, 파서가 놓친 설치를 clean 으로 판정하면 기록하고 그대로 두지만 확정하지는 않는다. 이후 롤백은 그 이전 기준점으로 돌아간다.
+- **기록하지 못한 기준점은 움직이지 않는다.** 새 스냅샷의 `meta.json` 은 마지막에 쓰이고 모든 판독자가 그것을 요구하므로, 중간에 죽은 실행은 정리될 미확정 스냅샷을 남길 뿐 파일이 빠진 기준점을 남기지 않는다. 기록 자체가 실패하면 포인터는 그대로 두고, `advisory.log` 에 남기고, 이후 롤백이 이 설치까지 되돌린다는 사실을 사용자에게 알린다.
+
 **이 게이트도 같은 예산을 받고 같은 방식으로 죽는다 — 가정이 아니라 실측이다.** PreToolUse 동작을 확정한 그 프로토콜로(샌드박스 프로젝트, 시작과 완료를 각각 기록하는 훅, 예산 내 통제군과 예산 초과 실험군) 쟀더니, 5s 예산에 20s 작업을 준 PostToolUse 훅은 시작만 하고 끝내지 못했고 1s 통제군은 끝냈다. 위 작업은 safedeps 가 통제하는 것이 아니라 사용자 프로젝트와 네트워크에 매인다: `npm ci`, `npm install`, `npm rebuild`, 그리고 closure 전체에 대한 OSV 배치.
 
 그래서 "효과게이트가 커맨드 게이트를 받쳐준다" 는 문장은 예산 **안에서만** 참이고, 실패의 종류는 더 나쁘다: 죽은 pre 훅은 판정 못 한 커맨드 하나를 통과시키지만, 죽은 post 훅은 롤백 도중에 떨어질 수 있다. 시간이 다했을 때 pre 훅의 답은 deny 지만(Phase 2), 설치 후 게이트는 deny 할 수 없다 — 커맨드가 이미 돌았다. 그래서 그 답은 별개의 설계 문제이고 `safedeps/effect-gate-killed-mid-rollback` 으로 추적하며 여기서 풀지 않는다. Codex CLI 의 타임아웃 동작은 두 훅 모두 여전히 미측정이라 parity 를 가정하지 않는다.
@@ -444,7 +452,7 @@ GHSA / NVD — 응답 무
 ├── snapshots/                 ← reorg snapshot (v1 계승, 전 lockfile 로 확장)
 │   └── <id>/ { package-lock.json, yarn.lock, pnpm-lock.yaml, poetry.lock, uv.lock,
 │               Cargo.lock, go.sum, Gemfile.lock, meta.json }
-├── confirmed_${dir_hash}      ← 프로젝트별 마지막 confirmed snapshot
+├── confirmed_${dir_hash}      ← 프로젝트별 기준점: 마지막으로 검증된 설치가 남긴 상태
 ├── cache/
 │   ├── osv/                   ← OSV query 응답 (24h TTL)
 │   └── kev/                   ← CISA KEV daily catalog
