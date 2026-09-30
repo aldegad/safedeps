@@ -330,7 +330,7 @@ pass "control: mutated spec diverges on ${control_hit}/${fuzz_cases} inputs, so 
 real_awk=$(command -v awk)
 fail_tmp=$(mktemp -d "${TMPDIR:-/tmp}/safedeps-scanfail.XXXXXX")
 trap 'rm -rf "${fail_tmp}"' EXIT
-mkdir -p "${fail_tmp}/scanner-only" "${fail_tmp}/all-awk" "${fail_tmp}/scanner-later" "${fail_tmp}/project"
+mkdir -p "${fail_tmp}/scanner-only" "${fail_tmp}/all-awk" "${fail_tmp}/scanner-later" "${fail_tmp}/blanking-only" "${fail_tmp}/project"
 printf '{"dependencies":{}}\n' > "${fail_tmp}/project/package.json"
 cat > "${fail_tmp}/scanner-only/awk" <<SHIM
 #!/usr/bin/env bash
@@ -354,12 +354,33 @@ case "\$*" in
 esac
 exec '${real_awk}' "\$@"
 SHIM
-chmod +x "${fail_tmp}/scanner-only/awk" "${fail_tmp}/all-awk/awk" "${fail_tmp}/scanner-later/awk"
+# The awk that sets a visible install aside before the pipe check reads the
+# rest (install_managers_blanked). It fails alone, and counts its calls so the
+# case below can show it was reached.
+cat > "${fail_tmp}/blanking-only/awk" <<SHIM
+#!/usr/bin/env bash
+case "\$*" in
+  *"safedeps:install_managers_blanked"*)
+    printf 'x' >> '${fail_tmp}/blanking-only/count'
+    exit 2
+    ;;
+esac
+exec '${real_awk}' "\$@"
+SHIM
+chmod +x "${fail_tmp}/scanner-only/awk" "${fail_tmp}/all-awk/awk" "${fail_tmp}/scanner-later/awk" "${fail_tmp}/blanking-only/awk"
 
-# Runs the guard through the entry shim, the way the engines do.
+# Runs the guard through the entry shim, the way the engines do. An optional
+# third argument, `<ecosystem> <name> <version>`, is approved first.
 scanfail_guard() {
-  local bin="$1" command="$2" home
+  local bin="$1" command="$2" approve="${3:-}" home
   home=$(mktemp -d "${fail_tmp}/home.XXXXXX")
+  if [[ -n "${approve}" ]]; then
+    # shellcheck disable=SC2086 # three words on purpose
+    ( export SAFEDEPS_HOME="${home}/safe"
+      . lib/ledger/ledger.sh
+      safedeps_ledger_write_approved_spec ${approve} >/dev/null ) \
+      || fail "the scan-failure fixture approval could be written: ${approve}"
+  fi
   SCANFAIL_OUT=$(jq -nc --arg c "${command}" --arg cwd "${fail_tmp}/project" \
     '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
     PATH="${bin:+${bin}:}${PATH}" HOME="${home}" SAFEDEPS_HOME="${home}/safe" \
@@ -413,6 +434,22 @@ scanfail_guard "${fail_tmp}/scanner-later" "pip install requests==2.0.0"
 grep -q 'UNDECIDED' <<< "${SCANFAIL_REASON}" || fail "a scanner that fails after recognizing the install answers UNDECIDED"
 grep -q 'scanner failed' <<< "${SCANFAIL_LOG}" || fail "a scanner that fails after recognizing the install is recorded"
 pass "a scanner that fails after the install was recognized is settled before pending state is written"
+
+# Beside a visible install, the pipe check sets the install aside with its own
+# awk before reading the rest. When that awk fails the check has no answer, and
+# no answer must not read as "nothing piped": the settle turns it into
+# UNDECIDED. The visible spec is approved so that nothing else denies first.
+piped_beside="pip install requests==2.0.0 && printf 'pip install evil==6.6.6' | sh"
+scanfail_guard "" "${piped_beside}" "pypi requests 2.0.0"
+[[ "${SCANFAIL_DECISION}" == "deny" ]] || fail "control: a working pipe check denies an install piped beside an approved one (got: ${SCANFAIL_DECISION})"
+if grep -q 'UNDECIDED' <<< "${SCANFAIL_REASON}"; then fail "control: a working pipe check answers with a finding, not UNDECIDED"; fi
+rm -f "${fail_tmp}/blanking-only/count"
+scanfail_guard "${fail_tmp}/blanking-only" "${piped_beside}" "pypi requests 2.0.0"
+[[ -s "${fail_tmp}/blanking-only/count" ]] || fail "the blanking shim was reached (otherwise this case tests nothing)"
+[[ "${SCANFAIL_DECISION}" == "deny" ]] || fail "a failed blanking awk does not turn a piped install into a pass (got: ${SCANFAIL_DECISION})"
+grep -q 'UNDECIDED' <<< "${SCANFAIL_REASON}" || fail "a failed blanking awk is reported as undecided, not as a finding"
+grep -q 'scanner failed' <<< "${SCANFAIL_LOG}" || fail "a failed blanking awk is recorded in advisory.log"
+pass "a failed blanking awk beside a visible install answers UNDECIDED, not pass"
 
 scanfail_guard "${fail_tmp}/all-awk" "pip install requests==2.0.0"
 [[ "${SCANFAIL_DECISION}" == "deny" ]] || fail "with awk failing everywhere an install is still denied (got: ${SCANFAIL_DECISION})"

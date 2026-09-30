@@ -270,6 +270,23 @@ command_hides_dependency_install() {
   return 1
 }
 
+# The pipe half of command_hides_dependency_install, asked beside a visible
+# install (see payload_pipes_unread_install_text_to_shell). The payload loops
+# are the same; the install question on eval and substitution payloads is not
+# asked, because beside a visible install those payloads are candidate texts
+# already and their specs reach the ledger.
+command_pipes_unread_install_to_shell() {
+  local command="$1"
+  local payload
+
+  payload_pipes_unread_install_text_to_shell "${command}" && return 0
+  while IFS= read -r payload; do
+    [[ -z "${payload}" ]] && continue
+    payload_pipes_unread_install_text_to_shell "${payload}" && return 0
+  done < <(extract_shell_c_payloads "${command}"; extract_eval_payloads "${command}"; extract_command_substitution_payloads "${command}")
+  return 1
+}
+
 # Blank every quoted region, delimiters included, and leave unquoted text
 # untouched. Every detection predicate below reads this instead of the raw
 # command, which is why `echo "npm install evil"` is not an install: the text is
@@ -376,8 +393,12 @@ normalize_install_text() {
   printf '%s' "${text}"
 }
 
+# Drop heredoc bodies and keep the command lines. With `bodies` as the second
+# argument it keeps the other side instead -- only the body lines -- so that the
+# one reading of where a body starts and ends serves both.
 strip_heredoc_bodies() {
   local input="$1"
+  local keep="${2:-commands}"
   local line
   local delimiter=""
   local heredoc_re="<<-?[[:space:]]*[\"']?([A-Za-z0-9_][A-Za-z0-9_.-]*)[\"']?"
@@ -386,6 +407,8 @@ strip_heredoc_bodies() {
     if [[ -n "${delimiter}" ]]; then
       if [[ "${line}" == "${delimiter}" ]]; then
         delimiter=""
+      elif [[ "${keep}" == "bodies" ]]; then
+        printf '%s\n' "${line}"
       fi
       continue
     fi
@@ -393,7 +416,7 @@ strip_heredoc_bodies() {
     if [[ "${line}" =~ ${heredoc_re} ]]; then
       delimiter="${BASH_REMATCH[1]}"
     fi
-    printf '%s\n' "${line}"
+    [[ "${keep}" == "bodies" ]] || printf '%s\n' "${line}"
   done <<< "${input}"
 }
 
@@ -449,14 +472,40 @@ extract_command_substitution_payloads() {
   done
 }
 
+# Install text as the pipe checks search for it: a manager, then a verb
+# anywhere after it on the same line. Loose on purpose -- it reads text that is
+# data at its own quoting level, where no statement grammar applies.
+PIPE_MANAGER_RE='(npm|npx|pnpm|pnpx|yarn|bun|bunx|pip[0-9.]*|(python[0-9.]*|py)[[:space:]]+-m[[:space:]]*pip|poetry|uv|uvx|pipx|pipenv|cargo|go|gem|bundle|mvn|dotnet)'
+PIPE_INSTALL_TEXT_RE="${PIPE_MANAGER_RE}.*(${SAFEDEPS_G_ALL_VERBS})"
+
+# A pipe into a shell, read on normalized exec text. The consumer ends where the
+# shell ends a word: at a blank, and also at an operator, a redirection or a
+# group closer, so `| sh; echo`, `| sh&&x` and `(... | sh)` are the same
+# consumer as `| sh `. `|&` pipes stderr as well, and a group opener before the
+# shell (`| (sh)`, `| { sh; }`) still hands it the input. Each of these used to
+# pass unjudged.
+PIPE_SHELL_CONSUMER_RE='\|&?[[:space:]]*([({][[:space:]]*)*(bash|sh|zsh)([[:space:];&|)}<>`]|$)'
+
+text_has_install_words() {
+  printf '%s\n' "$1" | grep -qEi "${PIPE_INSTALL_TEXT_RE}"
+}
+
+# $1 has its heredoc bodies stripped already. Stripping twice is not a no-op:
+# the second pass sees the `<<EOF` line again with no body and no terminator
+# after it, and drops every line that follows.
+exec_text_pipes_to_shell() {
+  local exec_view
+  # The consumer side is normalized the same way the producer side already is:
+  # `| /bin/sh`, `| env sh`, and `| command sh` are the same consumer as `| sh`.
+  # normalize_install_text is the file's existing statement of that equivalence —
+  # it was applied to the install text and skipped here, so the two sides of one
+  # pipe disagreed about what counts as the same invocation.
+  exec_view=$(normalize_install_text "$(command_scan_text "$1")")
+  printf '%s\n' "${exec_view}" | grep -qEi "${PIPE_SHELL_CONSUMER_RE}"
+}
+
 payload_pipes_install_text_to_shell() {
   local payload="$1"
-  local exec_view
-  local manager_pattern
-  local verb_pattern
-
-  manager_pattern='(npm|npx|pnpm|pnpx|yarn|bun|bunx|pip[0-9.]*|(python[0-9.]*|py)[[:space:]]+-m[[:space:]]*pip|poetry|uv|uvx|pipx|pipenv|cargo|go|gem|bundle|mvn|dotnet)'
-  verb_pattern="(${SAFEDEPS_G_ALL_VERBS})"
 
   # The pipe must sit in EXECUTION position at this quoting level: outside
   # quotes (a quoted `| sh` is data — e.g. a repro idiom quoted in a commit
@@ -465,22 +514,120 @@ payload_pipes_install_text_to_shell() {
   # is still searched raw, because in a real hidden install it lives inside the
   # producer's quotes or heredoc body by construction.
   #
-  # Check the raw install text FIRST: the grep is O(n) while the exec_view
-  # scan is a quadratic character loop, and both checks are pure predicates,
-  # so conjunction order cannot change the verdict — only the cost. Most
-  # commands carry no install text at all and must not pay for the scan.
-  # Measured on a 6KB no-install-text command: 1.51s with the raw greps
-  # only, 2.75s with the scan forced first, 1.39s with this order.
-  echo "${payload}" | grep -qEi "${manager_pattern}.*${verb_pattern}" || return 1
+  # Check the raw install text FIRST: the grep is O(n) while building the exec
+  # view is not free, and both checks are pure predicates, so conjunction order
+  # cannot change the verdict — only the cost. Most commands carry no install
+  # text at all and must not pay for the exec view.
+  text_has_install_words "${payload}" || return 1
+  exec_text_pipes_to_shell "$(strip_heredoc_bodies "${payload}")"
+}
 
-  # The consumer side is normalized the same way the producer side already is:
-  # `| /bin/sh`, `| env sh`, and `| command sh` are the same consumer as `| sh`.
-  # normalize_install_text is the file's existing statement of that equivalence —
-  # it was applied to the install text and skipped here, so the two sides of one
-  # pipe disagreed about what counts as the same invocation. It runs after the
-  # raw-text short circuit above, so only install-bearing commands pay for it.
-  exec_view=$(normalize_install_text "$(command_scan_text "$(strip_heredoc_bodies "${payload}")")")
-  echo "${exec_view}" | grep -qEi '\|[[:space:]]*(bash|sh|zsh)([[:space:]]|$)'
+# The same question asked beside a visible install.
+#
+# payload_pipes_install_text_to_shell searches the whole payload for install
+# text. That is right when nothing in the command is an install the gate can
+# read: any install text there is something else. Beside a visible install it
+# says nothing, because the visible install is install text too, so the
+# recognition block never asked it -- and a hidden install piped into a shell
+# passed with the visible one (`pip install requests==2.0.0 && printf 'pip
+# install evil==6.6.6' | sh` checked requests and ran evil unchecked).
+#
+# So the visible installs are set aside first. Wherever the install pattern
+# matches the scan text -- exactly what command_is_dependency_install reads as
+# an install -- the manager word that starts the match is blanked out of the
+# raw text, and the whole-payload question is asked of what is left, plus any
+# heredoc bodies. A verb with no manager before it no longer reads as install
+# text, so that is enough to set the install aside.
+#
+# Only the manager word goes, not the whole match. A match can run into the
+# arguments: the grammar cannot know which options take a value, so in `npx -y
+# echo-cli@1.0.0 pip install x | sh` it reads `pip` as the package npx runs,
+# and blanking the whole match hid the `pip install` that is echoed into the
+# shell (caught before review, by this function's own attack battery).
+#
+# An install the recognizer only reads after normalize_install_text (`env pip
+# install`, `/usr/bin/pip install`) is not matched here and stays in the text.
+# That can only turn an allow into a deny, and only beside a pipe into a shell.
+payload_pipes_unread_install_text_to_shell() {
+  local payload="$1"
+  local commands remainder
+
+  [[ "${payload}" == *'|'* ]] || return 1
+  commands=$(strip_heredoc_bodies "${payload}")
+  # Most visible installs pipe into no shell, and that answer is cheap.
+  exec_text_pipes_to_shell "${commands}" || return 1
+
+  remainder=$(install_managers_blanked "${commands}") || return 1
+  text_has_install_words "${remainder}" && return 0
+  [[ "${payload}" == *'<<'* ]] || return 1
+  text_has_install_words "$(strip_heredoc_bodies "${payload}" bodies)"
+}
+
+# $1 with the manager word of every install-pattern match blanked.
+#
+# The pattern is matched on the scan text, where quoted regions are blank, so a
+# match is never install text inside quotes. The scanner blanks bytes and never
+# moves one, so a byte offset into the scan text is the same offset into $1;
+# the awk reads the two side by side and refuses a pair where that does not
+# hold. Only bytes the scan text keeps are blanked. A quote character is blank
+# there, so it is never touched and the quote structure of what is left is the
+# quote structure of $1 -- blanking a quote would re-quote everything after it.
+#
+# A failure is recorded like a scanner failure (see command_scan_text), and the
+# caller reads it as "no answer", which guard_settle_scan_failure turns into an
+# UNDECIDED deny for a command that looks like an install -- and this command
+# has a visible one.
+install_managers_blanked() {
+  local text="$1"
+  local scan spans
+
+  if ! scan=$(command_scan_text "${text}"); then
+    return 1
+  fi
+  # `offset:match` per match, 0-based byte offsets. No match is not an error:
+  # the text is then returned whole, which only keeps more install text in it.
+  spans=$(printf '%s\n' "${scan}" | LC_ALL=C grep -obEi "${SAFEDEPS_INSTALL_PATTERN}" |
+    LC_ALL=C awk '{ c = index($0, ":"); printf "%d:%d ", substr($0, 1, c - 1), length($0) - c }') || spans=""
+
+  if ! { printf '%s\n' "${spans}"; printf '%s\n' "${text}"; printf '%s' "${scan}"; } |
+    SAFEDEPS_PIPE_MANAGER_RE="${PIPE_MANAGER_RE}" LC_ALL=C awk '
+    # safedeps:install_managers_blanked (scripts/test/scan-contract.sh keys on this line)
+    NR == 1 { nspan = split($0, span, " "); next }
+    {
+      if (NR > 2) X[++n] = "\n"
+      m = split($0, c, "")
+      for (j = 1; j <= m; j++) X[++n] = c[j]
+    }
+    END {
+      # The raw text, a newline, then its scan text: 2L + 1 bytes in all.
+      if (n % 2 == 0) exit 2
+      L = (n - 1) / 2
+      if (X[L + 1] != "\n") exit 2
+      for (i = 1; i <= L; i++) {
+        s = X[L + 1 + i]
+        if (s != X[i] && s != " ") exit 2
+      }
+      # The first manager word inside each match, read on the scan text.
+      mre = ENVIRON["SAFEDEPS_PIPE_MANAGER_RE"]
+      for (k = 1; k <= nspan; k++) {
+        split(span[k], p, ":")
+        str = ""
+        for (i = p[1] + 1; i <= p[1] + p[2] && i <= L; i++) str = str X[L + 1 + i]
+        if (!match(tolower(str), mre)) continue
+        for (i = p[1] + RSTART; i < p[1] + RSTART + RLENGTH; i++)
+          if (X[L + 1 + i] != " " && X[i] != "\n") X[i] = " "
+      }
+      buf = ""; held = 0
+      for (i = 1; i <= L; i++) {
+        buf = buf X[i]
+        if (++held >= 4096) { printf "%s", buf; buf = ""; held = 0 }
+      }
+      printf "%s", buf
+    }
+  '; then
+    [[ -z "${SAFEDEPS_SCAN_MARK:-}" ]] || printf 'failed\n' >> "${SAFEDEPS_SCAN_MARK}"
+    return 1
+  fi
 }
 
 # Join what the shell reads as one line before anything splits the command
@@ -1131,6 +1278,14 @@ if ! command_is_dependency_install "${COMMAND}"; then
     guard_settle_scan_failure
     exit 0
   fi
+elif command_pipes_unread_install_to_shell "${COMMAND}"; then
+  # A visible install used to switch the hidden-install check off. Specs are
+  # extracted from candidate texts only, and a pipe's producer is not one, so
+  # nothing here can reduce the piped install to a spec: fail-closed, like the
+  # same pipe with no visible install beside it.
+  log_advisory "pre-guard DENY: install text piped into a shell beside a visible install could not be reduced to an approved spec — fail-closed. Command: ${COMMAND}"
+  jq -nc '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:"safedeps: this command pipes install text into a shell (`... | sh`) beside the install it runs. The gate checks the visible install, but it cannot extract a package spec from what is piped, so the command is blocked fail-closed. Run the piped install as its own command, written out rather than piped, so it can be checked."}}'
+  exit 0
 fi
 
 # --- Reorg Guard Activated ---
