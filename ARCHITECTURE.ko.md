@@ -78,8 +78,12 @@ safedeps 는 **두 시점**의 보안 게이트를 한 스킬 아래 소유한�
 | `--no-package-lock`, `--package-lock false`, `npm_config_package_lock=false` | `node_modules/.package-lock.json` 과 `package.json` | 같음(`--no-package-lock` 은 `UNGATED` 로도 기록됨) | 롤백, 스크립트 안 돎 |
 | `npm -C sub install x`, `cd sub && npm install x`, `cd sub; npm install x` | `sub/package-lock.json` | 깨끗하다고 확인, rebuild 도 안 됨 | 롤백 |
 | `npm_config_global=true npm install x` | npm 전역 prefix, lockfile 없음 | 깨끗하다고 확인, 기록 없음 | `UNGATED` 기록 |
+| 프로젝트나 사용자 `.npmrc` 의 `global` 또는 `location=global` | npm 전역 prefix, lockfile 없음 | 깨끗하다고 확인, 기록 없음 | `UNGATED` 기록, 파일 명시 |
+| `.npmrc` 의 `global=0`, 또는 거기 둔 `location=global` 과 명령의 `--location=project` | `node_modules`, 두 lockfile 어디에도 없음 | 깨끗하다고 확인한 뒤 `npm rebuild` 가 패키지 스크립트를 돌림 | `UNGATED` 기록, rebuild 는 경고와 함께 건너뜀 |
 
 그래서 게이트는 npm 의 두 기록을 모두 읽고, `resolve_install_targets` 가 명령을 따라가며 각 설치가 어디에 떨어지는지 찾는다. 재배치 플래그, 존재하는 디렉터리로 가는 리터럴 `cd`, 또는 전역 prefix 다. 단어는 셸이 나누는 방식대로 읽으므로 따옴표 친 `--prefix "/tmp/x y"` 는 한 경로다. 따옴표를 비운 텍스트로 읽을 때는 이것이 `<cwd>/<패키지>` 가 됐다. 셸이 실행 시점에 정하는 것 — `cd "$DIR"`, 서브셸 안이나 파이프 옆의 `cd` — 은 따라가지 않고, 대신 그 설치를 기록한다. 환경변수 `npm_config_prefix` 는 프로젝트 설치를 옮기지 않는다. 재 보니 cwd 프로젝트에 떨어졌다. `scripts/test/lockless-forms.sh` 가 표의 모든 행을 종단으로 돌리고, 수리 전 트리에서는 빨강이다.
+
+**`.npmrc` 는 명령에 드러나지 않게 설치를 옮긴다.** 그래서 pre-guard 는 그중 둘을 읽는다. 가장 가까운 `package.json` 옆이나 `--prefix` 디렉터리에 있는 프로젝트 파일, 그리고 `--userconfig`, `npm_config_userconfig`, `~/.npmrc` 순으로 정해지는 사용자 파일이다. 읽는 방식은 실측에서 npm 이 읽은 방식을 따른다. 키는 대소문자를 가리고, 마지막 줄이 이기며, 프로젝트 파일이 사용자 파일보다 앞선다. 설치를 기록에 남긴 값은 `global=false`, `global=null`, `location=user`, `location=project` 뿐이었다. `global` 의 다른 값은 설치를 전역 prefix 로 보냈고, `0` 이면 기록 없이 `node_modules` 에 놓았다. 명령의 `--global=false` 는 파일의 `global` 을 이긴다. 파일의 `location=global` 은 어떤 플래그로도 되돌려지지 않았고, 옆에 `--location=project` 를 주면 패키지가 기록 없이 `node_modules` 에 놓였다. 그래서 이 넷을 벗어난 값은 모두 기록 밖으로 읽는다. 이쪽으로 틀리면 `UNGATED` 한 줄이 늘고, 반대쪽으로 틀리면 조용히 통과한다. 설치는 기록할 뿐 검사하지 않는다. 검사하려면 npm 이 놓은 곳에서 패키지를 이름으로 찾아야 하는데, 이는 경계로 남긴다. 전역 npmrc 와 내장 npmrc 는 읽지 않는다.
 
 **설치 문법은 그 규칙을 한 곳에서 적용한다.** v2.18.0 은 인식기를 매니저가 문서화한 표기와 셸이 허용하는 표기에 대고 쟀고, 대부분이 판정도 기록도 없이 통과했다: 별칭(`pnpm i`, `npm isntall`, `yarn up`, `bun a`), 동사 앞의 옵션 여러 개(`pip --quiet install`), 버전이 붙은 인터프리터(`pip3.11`), 실행기(`npx <pkg>@<ver>` 는 한 글자 이름만 맞았고 `npm exec`·`bunx`·`uvx`·`pipx run` 은 몰랐다), 문장 위치(`( ... )`, `then`, `do`, `!`, `time`), 따옴표로 감싼 spec, 플래그로 넘긴 버전(`cargo install x --version 1`). 이 가운데 carrier 는 하나도 없다. 전부 설치 명령 그 자체다. 동사 목록은 손으로 관리하는 사본이 일곱 벌이었고 서로 어긋나 있었다. 그래서 이제 `lib/install-grammar.sh` 가 문법을 한 번 정의하고 두 훅의 모든 인식기가 그것을 읽는다. 설치를 인자 그대로 실행하는 래퍼(`sudo`, `timeout`, `nohup`, `nice`, `xargs`)는 일부러 뺐다. 인자를 실행하는 프로그램 목록은 수렴하지 않으므로, 이것도 carrier 와 같은 논거다.
 
@@ -353,7 +357,8 @@ install 완료 → safedeps-post-verify.sh
         ├─ 전부 승인·clean·무의심 ──► CONFIRM (새 안전 baseline)
         └─ 미승인 / 취약 / 의심 ──► REORG:
                  • lockfile ← 마지막 confirmed snapshot
-                 • rm -rf node_modules; ledger 와 일치하게 재설치
+                 • 프로젝트 안에서 node_modules 재설치: 복원한 lock 으로
+                   npm ci, lock 이 없으면 npm install --ignore-scripts
                  • reorg.log 기록; 에이전트에 경고
 ```
 
@@ -394,13 +399,15 @@ npm PRIMARY EFFECT GATE + REORG (safedeps-post-verify.sh)
 
 **Install-script 타이밍.** 패키지의 `postinstall` 은 `npm install` *도중에* 실행된다. Claude Code 에서는 Phase 2 hook 이 `--ignore-scripts` 를 주입하므로 설치가 무실행이고, effect gate 가 closure 를 confirm 한 뒤에야(`npm rebuild`) 스크립트가 돈다 — 거부된 패키지의 스크립트는 한 번도 안 돈다. Codex CLI 는 `updatedInput` 기능이 없어 install 이 정상 실행되고, 악성 install script 가 사후 reorg 전에 1회 실행될 수 있다. (패키지의 *런타임* 코드는 두 엔진 모두 네 앱 실행 전에 제거된다; install-time lifecycle script 만 Codex 에서 이 창이 있다.)
 
-rebuild 는 게이트가 읽은 트리만 다룬다. `--global=false --location=project` 로 돈다. 프로젝트 `.npmrc` 에 `global=true` 가 있을 때 평범한 `npm rebuild` 는 npm 전역 트리를 rebuild 해서, 아무도 검증하지 않은 전역 설치 패키지의 스크립트를 돌렸다. 두 플래그는 각각 혼자서는 `global=true` 와 `location=global` 중 하나에 졌고, 둘을 함께 줘야 둘 다 버텼다. 그리고 `node_modules` 에 `.package-lock.json` 이 없으면 rebuild 를 경고와 함께 건너뛴다. 그때는 디스크의 트리가 검사한 트리라는 근거가 없기 때문이다.
+rebuild 는 게이트가 읽은 트리만 다룬다. `--global=false --location=project` 로 돈다. 프로젝트 `.npmrc` 에 `global=true` 가 있을 때 평범한 `npm rebuild` 는 npm 전역 트리를 rebuild 해서, 아무도 검증하지 않은 전역 설치 패키지의 스크립트를 돌렸다. 두 플래그는 각각 혼자서는 `global=true` 와 `location=global` 중 하나에 졌고, 둘을 함께 줘야 둘 다 버텼다. 그리고 `node_modules` 에 `.package-lock.json` 이 없거나 어느 lockfile 에도 없는 패키지가 있으면 rebuild 를 경고와 함께 건너뛴다. 그때는 디스크의 트리가 검사한 트리라는 근거가 없기 때문이다.
+
+롤백의 재설치도 같은 두 규칙을 따른다. 같은 플래그로 돈다. 프로젝트 `.npmrc` 에 `global=true` 가 있을 때 평범한 재설치는 프로젝트 자체를 전역 prefix 에 설치하고 프로젝트의 `node_modules` 를 빈 채로 남겼다. 그리고 설치할 lockfile 이 없거나 `npm ci` 가 실패하면 재설치는 `package.json` 을 다시 해석한다. 재 보니 `^1.0.0` 범위가 승인 뒤에 게시된 1.0.1 로 풀렸고, 재설치가 그 스크립트를 돌렸다. 이제 이 재설치는 `--ignore-scripts` 로 돌고, 롤백 메시지가 그렇게 알린다. 복원한 lockfile 로 도는 `npm ci` 는 스크립트를 유지한다. 명령 전에 기록돼 있던 트리를 정확히 그대로 설치하기 때문이다.
 
 **막지 않는 것 (현재 한계):**
 
 - `approved_at` 이후 발견된 zero-day — daily re-check 로만 잡고, install 시점엔 못 잡는다.
 - npm registry 자체의 손상.
-- 파일로 들어오는 설정. 프로젝트 `.npmrc` 의 `global=true` 는 평범한 `npm install x` 를 npm 전역 prefix 로 보내는데, 명령 텍스트에는 드러나지 않으므로 그 설치는 읽히지도 기록되지도 않는다. 패키지와 바이너리는 검증 없이 거기 놓인다. 스크립트는 돌지 않는다. 설치는 무실행이고 rebuild 는 프로젝트 안에 머문다.
+- `.npmrc` 가 옮긴 설치. 프로젝트와 사용자의 `.npmrc` 는 읽으며, 그런 설치는 `UNGATED` 로 기록하되 검사하지는 않는다. 전역 npmrc 와 내장 npmrc 는 읽지 않으므로 거기 둔 설정은 기록도 되지 않는다. 어느 쪽이든 패키지와 바이너리는 검증 없이 놓인다. 스크립트는 돌지 않는다. 설치는 무실행이고, rebuild 는 lockfile 이 빠짐없이 기록한 프로젝트 트리에서만 돈다.
 - 설정된 Claude/Codex hook 경로 밖에서 사람이 직접 실행한 package-manager install. 이런 변경은 release-time gate 가 backstop 으로 잡을 수 있지만, install-time approval 을 증명하지는 않는다.
 - 같은 OS 사용자 권한으로 `~/.safedeps/approved-specs/` 를 직접 작성/수정하는 공격. ledger 는 로컬 convenience cache 이며, 서명/HMAC 또는 install-time 재조회가 도입되기 전엔 same-user 공격의 보안 경계가 아니다. (단 effect gate 의 OSV 재조회는 *알려진 취약* 패키지에 대한 위조 승인은 여전히 잡는다 — [`ROADMAP.md`](./ROADMAP.md) "Ledger 변조 내성" 참고.)
 
