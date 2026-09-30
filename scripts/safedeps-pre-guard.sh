@@ -1486,138 +1486,159 @@ guard_names_package_without_spec() {
   # skipped as the extractor skips it; the payload is a candidate text of its
   # own and is read there. And a statement the effect gate reads — an npm CLI
   # install into the project — is exempt; the rest of the command is not.
-  local cmd="$1"
-  local seg tok idx verb_seen skip_next seg_ecosystem text runner
-  local f1 f2 f3 pinned bound consumed entry
-  local -a toks=()
+  #
+  # It reads GUARD_READINGS, the extractor's reading of the command that the
+  # gate took its specs from (guard_extract_specs ... readings): per statement
+  # the ecosystem, whether it is a runner, the statement, the text it parsed,
+  # and its spec and position lines. Parsing the command again here, even once,
+  # doubled the guard's cost on a many-statement command and put a 4KB one past
+  # the self-budget.
+  local line seg seg_ecosystem text runner f1 f2 f3 pinned bound consumed
+  local open=false
   UNGATED_OPERANDS=""
 
-  while IFS= read -r seg; do
-    [[ "${seg}" =~ [^[:space:]] ]] || continue
-    command_is_dependency_install "${seg}" || continue
-    seg_ecosystem=$(guard_segment_ecosystem "${seg}")
-    [[ -n "${seg_ecosystem}" ]] || continue
-    guard_statement_is_effect_gated "${seg}" && continue
-
-    runner=false
-    guard_segment_is_runner "${seg}" && runner=true
-    text=$(guard_extract_statement_text "${seg_ecosystem}" "${seg}" "${runner}")
-
-    # What the extractor made of this statement: spec lines, whose text an
-    # operand must reproduce, and the positions its flag branches bound.
-    pinned=$'\n' bound=" " consumed=" "
-    while IFS=$'\t' read -r f1 f2 f3; do
-      if [[ "${f1}" == "@" ]]; then
-        [[ "${f2}" == bound ]] && bound+="${f3} "
-        [[ "${f2}" == consumed ]] && consumed+="${f3} "
-      elif [[ -n "${f2}" ]]; then
-        pinned+="${f2}@${f3}"$'\n'
-      fi
-    done < <(guard_operand_specs "${seg_ecosystem}" "${text}" positions)
-
-    # Split the way awk splits the same text, so a position means one token on
-    # both sides. A runner's operands arrive one per line.
-    toks=()
-    read -r -d '' -a toks <<< "${text}" || true
-
-    verb_seen=false
-    skip_next=false
-    idx=0
-    for tok in "${toks[@]+${toks[@]}}"; do
-      idx=$((idx + 1))
-      [[ "${bound}" == *" ${idx} "* || "${consumed}" == *" ${idx} "* ]] && continue
-
-      if [[ "${runner}" == true ]]; then
-        # A runner's text is its package operands only (guard_runner_operands).
-        [[ "${pinned}" == *$'\n'"${tok}"$'\n'* ]] && continue
-        # npx, npm exec and bunx run a binary the project already has without
-        # fetching anything, so `npx tsc` in a TypeScript project is not an
-        # install. Only a name with no local binary is fetched, and only that
-        # is worth a record; recording every `npx tsc` would bury the ones that
-        # matter.
-        guard_runner_uses_local_bin "${seg}" "${tok}" && continue
-        guard_note_ungated "${seg_ecosystem}" "${tok}"
-        continue
-      fi
-
-      # Maven's coordinate flag may sit on either side of the goal
-      # (`mvn -Dartifact=g:x dependency:get`), so it is tested outside the verb
-      # gate that orders the operand walk. One the extractor bound was skipped
-      # above; any other names a package with no version it could read
-      # (`g:evil`, `g:evil:`). Whether Maven accepts a versionless coordinate is
-      # unverified (no maven on the measuring machine), and for a RECORD the
-      # unresolved case resolves toward reporting: a spurious line costs a line,
-      # a missing one costs the invariant this layer exists to keep.
-      case "${tok}" in
-        -Dartifact=*) guard_note_ungated "${seg_ecosystem}" "${tok}"; continue ;;
-      esac
-
-      if [[ "${verb_seen}" != true ]]; then
-        safedeps_grammar_is_verb "${tok}" && verb_seen=true
-        continue
-      fi
-
-      # `dotnet add [<project>] package <id>`: the keyword and the project file
-      # are not packages.
-      if [[ "${seg_ecosystem}" == "nuget" ]]; then
-        case "${tok}" in
-          package|*.csproj|*.fsproj|*.vbproj|*.sln|*.slnx) continue ;;
-        esac
-      fi
-
-      if [[ "${skip_next}" == true ]]; then
-        skip_next=false
-        continue
-      fi
-
-      # A comment ends the statement, and a redirection operator and its
-      # target belong to the shell, not to the manager. Only a bare operator
-      # is one: quotes are gone by now, so `requests>=3` is a specifier and a
-      # token that merely contains `>` has to stay an operand.
-      [[ "${tok}" == \#* ]] && break
-      if [[ "${tok}" =~ ^[0-9]*[\<\>]+$ ]]; then
-        skip_next=true
-        continue
-      fi
-
-      case "${tok}" in
-        # A flag that takes a separate argument consumes exactly that argument —
-        # but WHICH flags take one is a property of the tool, not of the flag
-        # spelling. `-t` and `-f` take a value for pip and are booleans for go
-        # (`go get -t`), gem (`-f` = --force), and cargo. Applying pip's table
-        # everywhere ate the package that followed, so `go get -t example.com/x`
-        # went silent while `gem install --force x` stayed reported: one install
-        # split by which spelling the author used. That is the same mistake as
-        # filing `-c` with `-r` — grouping flags by shape instead of meaning.
-        #
-        # An unknown flag is therefore assumed NOT to take a value. Guessing
-        # wrong in that direction costs a spurious line; guessing wrong the other
-        # way drops the install this record exists to catch.
-        -r|--requirement|-c|--constraint|-t|--target|-f|--find-links|-i|--index-url|--extra-index-url)
-          # Every one of these takes a value for pip and is a boolean somewhere
-          # else: gem's `-r` is `--remote`, go's `-t` includes test deps, gem and
-          # cargo spell `--force` as `-f`. Only the pypi family consumes an
-          # argument here.
-          #
-          # `-i` is the short form of `--index-url`. Leaving it out did not hide
-          # an install — it invented one: the mirror URL read as an operand, so
-          # `pip install -i <mirror> -r requirements.txt` filed a spurious
-          # record. Same defect as the silences above, pointing the other way,
-          # which is why both directions belong in the battery.
-          [[ "${seg_ecosystem}" == "pypi" ]] && { skip_next=true; continue; }
-          continue
-          ;;
-        -*) continue ;;
-        # Installing from the working tree is not a registry fetch.
-        .|..|./*|../*|/*) continue ;;
-        *://*) guard_note_ungated "${seg_ecosystem}" "${tok}"; continue ;;
-      esac
-
-      [[ "${pinned}" == *$'\n'"${tok}"$'\n'* ]] && continue
-      guard_note_ungated "${seg_ecosystem}" "${tok}"
-    done
-  done < <(command_candidate_texts "${cmd}" | tr ';|&' '\n')
+  while IFS= read -r line; do
+    case "${line}" in
+      S$'\t'*)
+        [[ "${open}" == true ]] && guard_walk_statement
+        IFS=$'\t' read -r _ seg_ecosystem runner <<< "${line}"
+        seg="" text="" pinned=$'\n' bound=" " consumed=" " open=true
+        ;;
+      G$'\t'*) seg="${line#G$'\t'}" ;;
+      T$'\t'*) text="${line#T$'\t'}" ;;
+      *)
+        IFS=$'\t' read -r f1 f2 f3 <<< "${line}"
+        if [[ "${f1}" == "@" ]]; then
+          [[ "${f2}" == bound ]] && bound+="${f3} "
+          [[ "${f2}" == consumed ]] && consumed+="${f3} "
+        elif [[ -n "${f2}" ]]; then
+          pinned+="${f2}@${f3}"$'\n'
+        fi
+        ;;
+    esac
+  done <<< "${GUARD_READINGS}"
+  [[ "${open}" == true ]] && guard_walk_statement
   [[ -n "${UNGATED_OPERANDS}" ]]
+}
+
+# The operand walk over one statement, as guard_names_package_without_spec read
+# it: seg, seg_ecosystem, runner, text, pinned, bound and consumed are the
+# caller's. Operands are collected first and noted at the end, because a
+# statement the effect gate reads (an npm CLI install into the project) is
+# exempt as a whole -- asked only when there is something to exempt, since the
+# question costs processes and most statements have nothing to record.
+guard_walk_statement() {
+  local tok idx verb_seen skip_next found=""
+  local -a toks=()
+
+  # Split the way awk splits the same text, so a position means one token on
+  # both sides.
+  read -r -a toks <<< "${text}" || true
+
+  verb_seen=false
+  skip_next=false
+  idx=0
+  for tok in "${toks[@]+${toks[@]}}"; do
+    idx=$((idx + 1))
+    [[ "${bound}" == *" ${idx} "* || "${consumed}" == *" ${idx} "* ]] && continue
+
+    if [[ "${runner}" == true ]]; then
+      # A runner's text is its package operands only (guard_runner_operands).
+      [[ "${pinned}" == *$'\n'"${tok}"$'\n'* ]] && continue
+      # npx, npm exec and bunx run a binary the project already has without
+      # fetching anything, so `npx tsc` in a TypeScript project is not an
+      # install. Only a name with no local binary is fetched, and only that
+      # is worth a record; recording every `npx tsc` would bury the ones that
+      # matter.
+      guard_runner_uses_local_bin "${seg}" "${tok}" && continue
+      found+="${tok}"$'\n'
+      continue
+    fi
+
+    # Maven's coordinate flag may sit on either side of the goal
+    # (`mvn -Dartifact=g:x dependency:get`), so it is tested outside the verb
+    # gate that orders the operand walk. One the extractor bound was skipped
+    # above; any other names a package with no version it could read
+    # (`g:evil`, `g:evil:`). Whether Maven accepts a versionless coordinate is
+    # unverified (no maven on the measuring machine), and for a RECORD the
+    # unresolved case resolves toward reporting: a spurious line costs a line,
+    # a missing one costs the invariant this layer exists to keep.
+    case "${tok}" in
+      -Dartifact=*) found+="${tok}"$'\n'; continue ;;
+    esac
+
+    if [[ "${verb_seen}" != true ]]; then
+      safedeps_grammar_is_verb "${tok}" && verb_seen=true
+      continue
+    fi
+
+    # `dotnet add [<project>] package <id>`: the keyword and the project file
+    # are not packages.
+    if [[ "${seg_ecosystem}" == "nuget" ]]; then
+      case "${tok}" in
+        package|*.csproj|*.fsproj|*.vbproj|*.sln|*.slnx) continue ;;
+      esac
+    fi
+
+    if [[ "${skip_next}" == true ]]; then
+      skip_next=false
+      continue
+    fi
+
+    # A comment ends the statement, and a redirection operator and its
+    # target belong to the shell, not to the manager. Only a bare operator
+    # is one: quotes are gone by now, so `requests>=3` is a specifier and a
+    # token that merely contains `>` has to stay an operand.
+    [[ "${tok}" == \#* ]] && break
+    if [[ "${tok}" =~ ^[0-9]*[\<\>]+$ ]]; then
+      skip_next=true
+      continue
+    fi
+
+    case "${tok}" in
+      # A flag that takes a separate argument consumes exactly that argument —
+      # but WHICH flags take one is a property of the tool, not of the flag
+      # spelling. `-t` and `-f` take a value for pip and are booleans for go
+      # (`go get -t`), gem (`-f` = --force), and cargo. Applying pip's table
+      # everywhere ate the package that followed, so `go get -t example.com/x`
+      # went silent while `gem install --force x` stayed reported: one install
+      # split by which spelling the author used. That is the same mistake as
+      # filing `-c` with `-r` — grouping flags by shape instead of meaning.
+      #
+      # An unknown flag is therefore assumed NOT to take a value. Guessing
+      # wrong in that direction costs a spurious line; guessing wrong the other
+      # way drops the install this record exists to catch.
+      -r|--requirement|-c|--constraint|-t|--target|-f|--find-links|-i|--index-url|--extra-index-url)
+        # Every one of these takes a value for pip and is a boolean somewhere
+        # else: gem's `-r` is `--remote`, go's `-t` includes test deps, gem and
+        # cargo spell `--force` as `-f`. Only the pypi family consumes an
+        # argument here.
+        #
+        # `-i` is the short form of `--index-url`. Leaving it out did not hide
+        # an install — it invented one: the mirror URL read as an operand, so
+        # `pip install -i <mirror> -r requirements.txt` filed a spurious
+        # record. Same defect as the silences above, pointing the other way,
+        # which is why both directions belong in the battery.
+        [[ "${seg_ecosystem}" == "pypi" ]] && { skip_next=true; continue; }
+        continue
+        ;;
+      -*) continue ;;
+      # Installing from the working tree is not a registry fetch.
+      .|..|./*|../*|/*) continue ;;
+      *://*) found+="${tok}"$'\n'; continue ;;
+    esac
+
+    [[ "${pinned}" == *$'\n'"${tok}"$'\n'* ]] && continue
+    found+="${tok}"$'\n'
+  done
+  [[ -n "${found}" ]] || return 0
+  if [[ "${seg_ecosystem}" == npm && "${runner}" == false ]] && guard_statement_is_effect_gated "${seg}"; then
+    return 0
+  fi
+  while IFS= read -r tok; do
+    [[ -n "${tok}" ]] && guard_note_ungated "${seg_ecosystem}" "${tok}"
+  done <<< "${found}"
+  return 0
 }
 
 # Add `<ecosystem>:<operand>` to UNGATED_OPERANDS once.
@@ -1850,8 +1871,15 @@ guard_extract_specs() {
   # take the command's first ecosystem, so `npm run x && pip install evil==1`
   # checked evil as an npm package, prescribed `safedeps check npm evil@1`, and
   # passed once that approved.
-  local cmd="$1"
-  local seg eco text runner
+  #
+  # With `readings` as the second argument, each statement it reads is also
+  # described for the UNGATED record, which walks exactly these statements and
+  # nothing else: `S<TAB><eco><TAB><runner>`, `G<TAB><statement>`,
+  # `T<TAB><parsed text>`, then the spec lines and the flag reader's position
+  # lines. The spec lines are the same in both modes; the gate reads only
+  # those, so the other lines cannot move a verdict.
+  local cmd="$1" mode="${2:-}"
+  local seg eco text text_line runner
 
   while IFS= read -r seg; do
     [[ "${seg}" =~ [^[:space:]] ]] || continue
@@ -1861,21 +1889,39 @@ guard_extract_specs() {
     runner=false
     guard_segment_is_runner "${seg}" && runner=true
     text=$(guard_extract_statement_text "${eco}" "${seg}" "${runner}")
-    guard_operand_specs "${eco}" "${text}"
+    if [[ "${mode}" != readings ]]; then
+      guard_operand_specs "${eco}" "${text}"
+      continue
+    fi
+    # A runner's operands are one per line; on one line they number the same,
+    # since the flag reader counts tokens across lines. Only a runner's text
+    # has newlines, and it is short: a bash 3.2 substitution over a long string
+    # is what made the blank-segment test quadratic.
+    [[ "${runner}" == true ]] && text_line="${text//$'\n'/ }" || text_line="${text}"
+    printf 'S\t%s\t%s\nG\t%s\nT\t%s\n' "${eco}" "${runner}" "${seg}" "${text_line}"
+    guard_operand_specs "${eco}" "${text}" positions
   done < <(command_candidate_texts "${cmd}" | tr ';|&' '\n')
 }
 
 LEDGER_ECOSYSTEM=$(guard_detect_ecosystem "${COMMAND}")
 LEDGER_SPECS=()
+# The extractor's one reading of the command. The gate keeps its spec lines;
+# the UNGATED record walks the whole reading (guard_names_package_without_spec),
+# so the two never parse the same statement twice or differently.
+GUARD_READINGS=""
 while IFS= read -r ledger_spec_line; do
   [[ -z "${ledger_spec_line}" ]] && continue
+  GUARD_READINGS+="${ledger_spec_line}"$'\n'
+  case "${ledger_spec_line}" in
+    S$'\t'*|G$'\t'*|T$'\t'*|@$'\t'*) continue ;;
+  esac
   if [[ ${#LEDGER_SPECS[@]} -gt 0 ]]; then
     for existing_spec_line in "${LEDGER_SPECS[@]}"; do
       [[ "${existing_spec_line}" == "${ledger_spec_line}" ]] && continue 2
     done
   fi
   LEDGER_SPECS+=("${ledger_spec_line}")
-done < <(guard_extract_specs "${COMMAND}")
+done < <(guard_extract_specs "${COMMAND}" readings)
 
 LEDGER_HAS_NPM=false
 for ledger_spec_line in "${LEDGER_SPECS[@]+${LEDGER_SPECS[@]}}"; do
@@ -2008,23 +2054,6 @@ guard_statement_is_effect_gated() {
   return 0
 }
 
-# True when the effect gate reads the result of EVERY install statement in the
-# command: the statement predicate above, for all of them. The record walk
-# applies the same predicate statement by statement, so this is only the cheap
-# answer for the common case of a plain npm install.
-guard_effect_gate_reads_every_install() {
-  local cmd="$1"
-  local seg any=false
-
-  while IFS= read -r seg; do
-    [[ "${seg}" =~ [^[:space:]] ]] || continue
-    command_is_dependency_install "${seg}" || continue
-    any=true
-    guard_statement_is_effect_gated "${seg}" || return 1
-  done < <(command_candidate_texts "${cmd}" | tr ';|&' '\n')
-  [[ "${any}" == true ]]
-}
-
 # An install that names a package but pins no version yields no spec, so the
 # ledger gate above never ran for it. Where the effect gate reads the result
 # (above), that is not a gap: it enforces on the lockfile closure. Everywhere
@@ -2043,8 +2072,7 @@ guard_effect_gate_reads_every_install() {
 # and belongs to the repo owner, not to this gate. The record is what makes that
 # decision answerable with evidence instead of guesswork.
 if [[ "${HIDDEN_DEPENDENCY_INSTALL}" != "true" && -n "${LEDGER_ECOSYSTEM}" ]] \
-    && ! guard_effect_gate_reads_every_install "${COMMAND}" \
-    && guard_names_package_without_spec "${COMMAND}"; then
+    && guard_names_package_without_spec; then
   log_advisory "pre-guard UNGATED: ${LEDGER_ECOSYSTEM} install names a package with no version spec, so the ledger gate did not run. No effect gate reads the result of this install, so it is unverified. Unpinned: ${UNGATED_OPERANDS}. Command: ${COMMAND}"
 fi
 
