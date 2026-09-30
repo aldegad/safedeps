@@ -386,10 +386,25 @@ LOG_EOF
 ${warning_str%%; }"
 }
 
+# The loose install recognizer from lib/install-grammar.sh: this backstop runs
+# on commands PreToolUse did not recognize, so its false positives cost one
+# closure diff and it is kept wide on purpose. If the grammar cannot be read,
+# every command counts as install-looking and the failure is recorded -- this
+# hook cannot block, so the direction to fail is toward checking more.
+SAFEDEPS_INSTALL_GRAMMAR_LIB="${BASH_SOURCE[0]%/*}/../lib/install-grammar.sh"
+if [[ -r "${SAFEDEPS_INSTALL_GRAMMAR_LIB}" ]]; then
+  # shellcheck source=../lib/install-grammar.sh
+  source "${SAFEDEPS_INSTALL_GRAMMAR_LIB}"
+fi
+
 post_command_looks_like_install() {
   local command="$1"
 
-  printf '%s' "${command}" | grep -qiE '(npm|pnpm|yarn|bun)([^"]*)(install|add|dlx)|(^|[^a-zA-Z0-9_-])npx[[:space:]]+(@?[A-Za-z0-9._-])|pip[0-9]*[[:space:]]+install|cargo[[:space:]]+(add|install)|go[[:space:]]+(get|install)|gem[[:space:]]+install|bundle[[:space:]]+add|poetry[[:space:]]+add|uv[[:space:]]+(add|pip)|pipenv[[:space:]]+install|mvn([^"]*)dependency:get|dotnet[[:space:]]+add[[:space:]]+package'
+  if [[ -z "${SAFEDEPS_G_RAW_INSTALL_RE:-}" ]]; then
+    log_advisory "post-verify: lib/install-grammar.sh is unreadable — treating the command as install-looking so the backstop still runs."
+    return 0
+  fi
+  printf '%s' "${command}" | grep -qiE "${SAFEDEPS_G_RAW_INSTALL_RE}|(^|[^a-zA-Z0-9_-])npx[[:space:]]+(@?[A-Za-z0-9._-])"
 }
 
 legacy_pending_matches_post_context() {
