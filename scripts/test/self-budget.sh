@@ -58,10 +58,12 @@ real_awk=$(command -v awk)
 slow_bin="${tmp_root}/slow-bin"
 slow_delay_file="${tmp_root}/slow-delay"
 slow_once_dir="${tmp_root}/slow-once"
+slow_pid_file="${tmp_root}/slow-pid"
 mkdir -p "${slow_bin}"
 cat > "${slow_bin}/awk" <<SHIM
 #!/usr/bin/env bash
 if mkdir '${slow_once_dir}' 2>/dev/null; then
+  printf '%s' "\$\$" > '${slow_pid_file}'
   cd / && sleep "\$(cat '${slow_delay_file}')"
   cd "\${OLDPWD}" || exit 1
 fi
@@ -75,6 +77,7 @@ never=60
 # Runs the guard and captures decision, whether the reason is the undecided
 # one, and how long the answer took.
 GUARD_PATH=""
+GUARD_IGNORE_TERM=""
 guard() {
   local command="$1" budget="${2:-2}" engage="${3:-1024}" disabled="${4:-}" legacy_child="${5:-}"
   # mktemp for the same reason as consumer-forms.sh: `$$` is constant within a
@@ -84,6 +87,12 @@ guard() {
   safe=$(mktemp -d "${tmp_root}/safe.XXXXXX")
   GUARD_STATE_DIR="${safe}"
   local start end rc=0
+  local launch=(scripts/safedeps-pre-guard.sh)
+  if [[ -n "${GUARD_IGNORE_TERM}" ]]; then
+    # A signal ignored on entry stays ignored across exec, and bash cannot trap
+    # or reset it, so every process in the judgment inherits a deaf TERM.
+    launch=(bash -c 'trap "" TERM; exec "$@"' ignore-term scripts/safedeps-pre-guard.sh)
+  fi
   start=$(date +%s)
   GUARD_OUT=$(jq -nc --arg c "${command}" --arg cwd "${project_dir}" \
     '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
@@ -93,7 +102,7 @@ guard() {
     SAFEDEPS_BUDGET_ENGAGE_BYTES="${engage}" \
     SAFEDEPS_BUDGET_DISABLED="${disabled}" \
     SAFEDEPS_BUDGET_CHILD="${legacy_child}" \
-    scripts/safedeps-pre-guard.sh 2>"${tmp_root}/stderr") || rc=$?
+    "${launch[@]}" 2>"${tmp_root}/stderr") || rc=$?
   GUARD_STDERR=$(cat "${tmp_root}/stderr" 2>/dev/null || printf '')
   end=$(date +%s)
   GUARD_ELAPSED=$(( end - start ))
@@ -115,10 +124,22 @@ slow_guard() {
   local delay="$1"
   shift
   printf '%s' "${delay}" > "${slow_delay_file}"
+  rm -f "${slow_pid_file}"
   rmdir "${slow_once_dir}" 2>/dev/null || true
   GUARD_PATH="${slow_bin}:${PATH}"
   guard "$@"
   GUARD_PATH=""
+}
+
+# True once the process the shim ran as is gone. A killed process can sit as a
+# zombie for a moment before it is reaped, so this waits up to two seconds.
+slow_sleeper_gone() {
+  local pid tries=0
+  pid=$(cat "${slow_pid_file}" 2>/dev/null) || return 0
+  while kill -0 "${pid}" 2>/dev/null; do
+    (( tries++ < 40 )) || return 1
+    sleep 0.05
+  done
 }
 
 # The size only has to engage the deadline, including under the 4KB engage
@@ -186,20 +207,27 @@ pass "padded installs past the budget are denied across command-gate-authority e
 # survived the deadline and ran to completion), and the plain fact that a shell
 # does not act on a signal while a foreground external command is running.
 #
-# Both show up only when the deadline lands while the child is blocked in an
-# external command. This case used to reach that state by sizing the input so
-# the deadline landed deep in a long grep (12KB against an 11s budget), which
-# made the case a race against the machine. The slow judgment holds the child
-# in a foreground external command for a full minute instead, so the state is
-# certain rather than likely: a deadline that only reached the child shell would
-# answer when that command returned, about 57s late.
+# Both show up only when the deadline lands on a child that does not act on
+# TERM. This case used to reach that state by sizing the input so the deadline
+# landed deep in a long grep (12KB against an 11s budget), which made it a race
+# against the machine. It is now certain rather than likely: the guard starts
+# with TERM ignored, which every process in the judgment inherits and none can
+# undo, and the slow judgment holds the child in a foreground command for a
+# full minute. Only the KILL escalation answers on time. Without it the answer
+# arrives when that minute is up, about 57s late.
+#
+# Measured while rewriting this: a plain TERM kills an untrapped bash at once,
+# so a battery whose child still hears TERM passes with the KILL removed. It
+# only looked like it pinned the escalation.
 #
 # The assertion is on the OVERSHOOT, not on elapsed time, because that is the
 # property the runtime cares about — the guard's answer has to arrive before the
 # runtime's own budget expires, and how much slack that leaves is exactly the
 # budget minus the overshoot.
 deep_budget=3
+GUARD_IGNORE_TERM=1
 slow_guard "${never}" "pip install requests==2.31.0 # ${big}" "${deep_budget}"
+GUARD_IGNORE_TERM=""
 [[ "${GUARD_DECISION}" == "deny" ]] \
   || fail "deadline landing while the child is blocked still denies (got: ${GUARD_DECISION})"
 grep -q 'UNDECIDED' <<< "${GUARD_REASON}" \
@@ -208,6 +236,13 @@ deep_overshoot=$(( GUARD_ELAPSED - deep_budget ))
 (( deep_overshoot <= 3 )) \
   || fail "deadline landing while the child is blocked is honoured promptly (overshot the ${deep_budget}s budget by ${deep_overshoot}s; a child that outlasts the deadline is how this gate fails open)"
 pass "deadline landing while the child is blocked is honoured promptly, not whenever the child notices"
+
+# Answering on time is the guarantee; leaving nothing behind is the other half.
+# Killing only the child shell answers just as fast, and orphans the command it
+# was blocked in to finish on its own, burning a core for as long as it runs.
+slow_sleeper_gone \
+  || fail "the deadline takes the whole judgment down, not just the shell (the blocked command outlived the answer)"
+pass "the deadline takes the blocked command down with the shell, leaving no orphan"
 
 # The same property stated from the other side: the answer tracks OUR budget,
 # not the judgment's natural length.
