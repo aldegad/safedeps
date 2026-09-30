@@ -545,4 +545,14 @@ expect_pass "an install inside a region an escaped quote keeps open" 'echo "a\\\
 expect_pass "an install inside single quotes across a backslash-newline" $'echo \'a\\\npip install evil==1.0.0\''
 pass "text the shell treats as data stays data"
 
+# A newline inside quotes does not end a statement either. The line that closed
+# a multi-line string used to be scanned alone, so its closing quote opened a
+# region and hid what followed; and the lines inside the string were scanned as
+# commands, so a commit message mentioning an install read as one.
+expect_deny "an install after a multi-line double-quoted string" $'echo "line1\nline2" ; pip install evil==1.0.0'
+expect_deny "an install after a multi-line single-quoted string" $'echo \'line1\nline2\' ; pip install evil==1.0.0'
+expect_pass "a multi-line commit message that mentions an install" $'git commit -m "fix\npip install evil==1.0.0"'
+expect_pass "a single-quoted multi-line message that mentions an install" $'git commit -m \'fix\npip install evil==1.0.0\''
+pass "a newline inside quotes neither hides the next statement nor turns quoted text into one"
+
 printf 'consumer-forms passed\n'

@@ -483,13 +483,23 @@ payload_pipes_install_text_to_shell() {
   echo "${exec_view}" | grep -qEi '\|[[:space:]]*(bash|sh|zsh)([[:space:]]|$)'
 }
 
-# Join line continuations before anything splits the command into lines.
+# Join what the shell reads as one line before anything splits the command
+# into lines.
 #
-# Every consumer reads the candidate texts one line at a time, so a command
-# written `pip \<newline>install x` was judged as two unrelated lines, neither of
-# them an install. The shell removes an escaped newline, so this does too:
-# the backslash and the newline become two blanks, which keeps every byte where
-# it was. What counts as escaped follows command_scan_text exactly -- backslashes
+# Every consumer reads the candidate texts one line at a time. Two kinds of
+# newline do not end a statement, and splitting at them broke the reading:
+#
+#   - An escaped newline. `pip \<newline>install x` was judged as two unrelated
+#     lines, neither of them an install. The shell removes it, so this does
+#     too: the backslash and the newline become two blanks.
+#   - A newline inside quotes. The line that closes a multi-line string was
+#     scanned alone, so its closing quote read as an OPENING one and blanked
+#     whatever followed -- `echo "a<newline>b" ; pip install x` passed. The
+#     other lines were scanned alone too, so a commit message whose second line
+#     mentions an install read as that install. The newline becomes a blank,
+#     which is what the scanner makes of it anyway.
+#
+# Both keep every byte where it was. What counts as escaped follows command_scan_text exactly -- backslashes
 # pair up, and there are no escapes inside single quotes -- because getting it
 # wrong in the other direction is worse: joining after `echo a\\` would make the
 # next line an argument to echo and hide it.
@@ -512,8 +522,9 @@ join_line_continuations() {
         else if (c == "\042")        q = (q == 2 ? 0 : 2)
         out = out c
       }
-      if (pending) { out = out "  "; open = 1 }
-      else         { print out; out = ""; open = 0 }
+      if (pending)     { out = out "  "; open = 1 }
+      else if (q != 0) { out = out " "; open = 1 }
+      else             { print out; out = ""; open = 0 }
     }
     END { if (open) print out }
   '); then
