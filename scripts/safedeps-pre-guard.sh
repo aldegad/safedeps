@@ -261,7 +261,7 @@ command_is_dependency_install() {
 
 command_hides_dependency_install() {
   local command="$1"
-  local payload
+  local payload stripped
 
   # Top-level pipe-to-shell: `<producer> | sh` whose producer text literally
   # contains a package manager + install verb (e.g. `printf 'pip install x' | sh`).
@@ -273,22 +273,24 @@ command_hides_dependency_install() {
   # on its own quoting level below.
   payload_pipes_install_text_to_shell "${command}" && return 0
 
+  # The payload readers take text with its heredoc bodies stripped, once.
+  stripped=$(strip_heredoc_bodies "${command}")
   while IFS= read -r payload; do
     [[ -z "${payload}" ]] && continue
     payload_pipes_install_text_to_shell "${payload}" && return 0
-  done < <(extract_shell_c_payloads "${command}")
+  done < <(extract_shell_c_payloads "${stripped}")
 
   while IFS= read -r payload; do
     [[ -z "${payload}" ]] && continue
     command_is_dependency_install "${payload}" && return 0
     payload_pipes_install_text_to_shell "${payload}" && return 0
-  done < <(extract_eval_payloads "${command}")
+  done < <(extract_eval_payloads "${stripped}")
 
   while IFS= read -r payload; do
     [[ -z "${payload}" ]] && continue
     command_is_dependency_install "${payload}" && return 0
     payload_pipes_install_text_to_shell "${payload}" && return 0
-  done < <(extract_command_substitution_payloads "${command}")
+  done < <(extract_command_substitution_payloads "${stripped}")
 
   return 1
 }
@@ -300,13 +302,14 @@ command_hides_dependency_install() {
 # already and their specs reach the ledger.
 command_pipes_unread_install_to_shell() {
   local command="$1"
-  local payload
+  local payload stripped
 
   payload_pipes_unread_install_text_to_shell "${command}" && return 0
+  stripped=$(strip_heredoc_bodies "${command}")
   while IFS= read -r payload; do
     [[ -z "${payload}" ]] && continue
     payload_pipes_unread_install_text_to_shell "${payload}" && return 0
-  done < <(extract_shell_c_payloads "${command}"; extract_eval_payloads "${command}"; extract_command_substitution_payloads "${command}")
+  done < <(extract_shell_c_payloads "${stripped}"; extract_eval_payloads "${stripped}"; extract_command_substitution_payloads "${stripped}")
   return 1
 }
 
@@ -429,36 +432,73 @@ normalize_install_text() {
   printf '%s' "${text}"
 }
 
-# Drop heredoc bodies and keep the command lines. With `bodies` as the second
-# argument it keeps the other side instead -- only the body lines -- so that the
-# one reading of where a body starts and ends serves both.
+# Drop heredoc bodies and keep the command lines. With `shell-bodies` as the
+# second argument it keeps the other side instead: the body lines of every
+# heredoc whose opening line pipes into a shell (`cat <<EOF | sh`), and nothing
+# else. A body written to a file or read by any other program is data. The one
+# reading of where a body starts and ends serves both.
 strip_heredoc_bodies() {
   local input="$1"
   local keep="${2:-commands}"
   local line
   local delimiter=""
-  local heredoc_re="<<-?[[:space:]]*[\"']?([A-Za-z0-9_][A-Za-z0-9_.-]*)[\"']?"
+  local feeds_shell=false
+  local opened scanned
+  # `<<` not next to another `<` (a herestring is `<<<`), then a delimiter
+  # word. A delimiter starting with a digit is not read as one: `1<<2` is a
+  # shift. The operator must also be unquoted and outside `((...))`, checked
+  # on the scan text below. Each of these used to open a heredoc with no
+  # terminator, and every line after it vanished from the gate (caught in
+  # review: a herestring, an arithmetic shift or a quoted `<<EOF`, then an
+  # install on the next line, passed with no verdict).
+  local heredoc_re="(^|[^<])<<-?[[:space:]]*[\"']?([A-Za-z_][A-Za-z0-9_.-]*)[\"']?"
+  # Bracket forms, not `\<`: GNU regex (Linux bash) reads `\<` as a word
+  # boundary. In variables, because `[[ ]]` parses a bare `<` as an operator.
+  local heredoc_operator_re='(^|[^<])[<][<]([^<]|$)'
+  local arithmetic_shift_re='[(][(][^)]*[<][<]'
+  local trailing_pipe_re='[|][[:space:]]*$'
 
   while IFS= read -r line || [[ -n "${line}" ]]; do
     if [[ -n "${delimiter}" ]]; then
       if [[ "${line}" == "${delimiter}" ]]; then
         delimiter=""
-      elif [[ "${keep}" == "bodies" ]]; then
+      elif [[ "${keep}" == "shell-bodies" && "${feeds_shell}" == "true" ]]; then
         printf '%s\n' "${line}"
       fi
       continue
     fi
 
     if [[ "${line}" =~ ${heredoc_re} ]]; then
-      delimiter="${BASH_REMATCH[1]}"
+      opened="${BASH_REMATCH[2]}"
+      scanned=$(command_scan_text "${line}")
+      if [[ "${scanned}" =~ ${heredoc_operator_re} ]] \
+          && ! [[ "${scanned}" =~ ${arithmetic_shift_re} ]]; then
+        delimiter="${opened}"
+        feeds_shell=false
+        # A body goes to a shell when its opening line pipes into one, or ends
+        # in a pipe that the line after the terminator continues.
+        if [[ "${keep}" == "shell-bodies" ]] \
+            && { exec_text_pipes_to_shell "${line}" || [[ "${scanned}" =~ ${trailing_pipe_re} ]]; }; then
+          feeds_shell=true
+        fi
+      fi
     fi
-    [[ "${keep}" == "bodies" ]] || printf '%s\n' "${line}"
+    [[ "${keep}" == "shell-bodies" ]] || printf '%s\n' "${line}"
   done <<< "${input}"
 }
 
+# The three payload readers below take text whose heredoc bodies are already
+# stripped, and never strip it again. A body is data, so reading `sh -c` out of
+# one made a heredoc that quotes an attack form read as that attack; but
+# stripping twice is not a no-op either (see exec_text_pipes_to_shell), and the
+# candidate texts are stripped before they get here -- a reader that stripped
+# again dropped every line after a heredoc, so `sh -c` and `eval` installs
+# written after one passed with no verdict (caught in review). Callers strip,
+# once.
 extract_shell_c_payloads() {
-  local rest="$1"
+  local rest
 
+  rest="$1"
   while [[ "${rest}" =~ (bash|sh|zsh)[[:space:]]+-[A-Za-z]*c[[:space:]]+\"([^\"]*)\" ]]; do
     printf '%s\n' "${BASH_REMATCH[2]}"
     rest="${rest#*"${BASH_REMATCH[0]}"}"
@@ -474,14 +514,12 @@ extract_shell_c_payloads() {
 extract_eval_payloads() {
   local rest="$1"
 
-  rest=$(strip_heredoc_bodies "${rest}")
   while [[ "${rest}" =~ (^|[[:space:];|&])eval[[:space:]]+\"([^\"]*)\" ]]; do
     printf '%s\n' "${BASH_REMATCH[2]}"
     rest="${rest#*"${BASH_REMATCH[0]}"}"
   done
 
   rest="$1"
-  rest=$(strip_heredoc_bodies "${rest}")
   while [[ "${rest}" =~ (^|[[:space:];|&])eval[[:space:]]+\'([^\']*)\' ]]; do
     printf '%s\n' "${BASH_REMATCH[2]}"
     rest="${rest#*"${BASH_REMATCH[0]}"}"
@@ -492,14 +530,14 @@ extract_command_substitution_payloads() {
   local input="$1"
   local rest
 
-  rest=$(strip_heredoc_bodies "${input}")
+  rest="${input}"
   while [[ "${rest}" == *'$('* ]]; do
     rest="${rest#*'$('}"
     printf '%s\n' "${rest%%)*}"
     rest="${rest#*)}"
   done
 
-  rest=$(strip_heredoc_bodies "${input}")
+  rest="${input}"
   while [[ "${rest}" == *'`'* ]]; do
     rest="${rest#*\`}"
     printf '%s\n' "${rest%%\`*}"
@@ -514,6 +552,16 @@ extract_command_substitution_payloads() {
 PIPE_MANAGER_RE='(npm|npx|pnpm|pnpx|yarn|bun|bunx|pip[0-9.]*|(python[0-9.]*|py)[[:space:]]+-m[[:space:]]*pip|poetry|uv|uvx|pipx|pipenv|cargo|go|gem|bundle|mvn|dotnet)'
 PIPE_INSTALL_TEXT_RE="${PIPE_MANAGER_RE}.*(${SAFEDEPS_G_ALL_VERBS})"
 
+# The same, with the manager starting a word. Beside a visible install the text
+# left after setting the install aside is mostly that install's own arguments,
+# and a manager name inside a word matched there -- `go` inside `mongoose` --
+# so `npm install mongoose@8.0.0 && cat setup.sh | sh` was denied (caught in
+# review). The rest stays loose on purpose: what is piped is data the shell has
+# not read yet, and printf escapes, glued quotes, an escaped blank or a `tr`
+# turn `pip<something>install` into `pip install` on the way. Requiring whole
+# blank-separated words let exactly those through (caught in review).
+PIPE_INSTALL_WORD_START_RE="(^|[^[:alnum:]_.-])${PIPE_MANAGER_RE}.*(${SAFEDEPS_G_ALL_VERBS})"
+
 # A pipe into a shell, read on normalized exec text. The consumer ends where the
 # shell ends a word: at a blank, and also at an operator, a redirection or a
 # group closer, so `| sh; echo`, `| sh&&x` and `(... | sh)` are the same
@@ -524,6 +572,10 @@ PIPE_SHELL_CONSUMER_RE='\|&?[[:space:]]*([({][[:space:]]*)*(bash|sh|zsh)([[:spac
 
 text_has_install_words() {
   printf '%s\n' "$1" | judge_grep -qEi "${PIPE_INSTALL_TEXT_RE}"
+}
+
+text_has_install_words_from_a_word_start() {
+  printf '%s\n' "$1" | judge_grep -qEi "${PIPE_INSTALL_WORD_START_RE}"
 }
 
 # $1 has its heredoc bodies stripped already. Stripping twice is not a no-op:
@@ -537,6 +589,11 @@ exec_text_pipes_to_shell() {
   # it was applied to the install text and skipped here, so the two sides of one
   # pipe disagreed about what counts as the same invocation.
   exec_view=$(normalize_install_text "$(command_scan_text "$1")")
+  # A line that ends in a pipe continues on the next one, and a heredoc's
+  # terminator can sit between them: `cat <<EOF |`, the body, `EOF`, `sh`.
+  # Only a pipe or a shell name can meet across the join, so reading the lines
+  # as one costs nothing else.
+  exec_view="${exec_view//$'\n'/ }"
   printf '%s\n' "${exec_view}" | judge_grep -qEi "${PIPE_SHELL_CONSUMER_RE}"
 }
 
@@ -594,9 +651,9 @@ payload_pipes_unread_install_text_to_shell() {
   exec_text_pipes_to_shell "${commands}" || return 1
 
   remainder=$(install_managers_blanked "${commands}") || return 1
-  text_has_install_words "${remainder}" && return 0
+  text_has_install_words_from_a_word_start "${remainder}" && return 0
   [[ "${payload}" == *'<<'* ]] || return 1
-  text_has_install_words "$(strip_heredoc_bodies "${payload}" bodies)"
+  text_has_install_words_from_a_word_start "$(strip_heredoc_bodies "${payload}" shell-bodies)"
 }
 
 # $1 with the manager word of every install-pattern match blanked.
@@ -2176,7 +2233,7 @@ fi
 if [[ "${PIPED_BESIDE_VISIBLE}" == "true" ]]; then
   guard_undecided_if_scan_failed
   log_advisory "pre-guard DENY: install text piped into a shell beside a visible install could not be reduced to an approved spec — fail-closed. Command: ${COMMAND}"
-  jq -nc '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:"safedeps: this command pipes install text into a shell (`... | sh`) beside the install it runs. The gate checks the visible install, but it cannot extract a package spec from what is piped, so the command is blocked fail-closed. Run the piped install as its own command, written out rather than piped, so it can be checked."}}'
+  jq -nc '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:"safedeps: this command pipes text that reads like an install into a shell (`... | sh`) beside the install it runs. The gate checks the visible install, but it cannot extract a package spec from what is piped, so the command is blocked fail-closed. Run the piped install as its own command, written out rather than piped, so it can be checked."}}'
   exit 0
 fi
 
