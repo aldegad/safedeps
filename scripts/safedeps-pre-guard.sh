@@ -393,21 +393,24 @@ normalize_install_text() {
   printf '%s' "${text}"
 }
 
-# Drop heredoc bodies and keep the command lines. With `bodies` as the second
-# argument it keeps the other side instead -- only the body lines -- so that the
-# one reading of where a body starts and ends serves both.
+# Drop heredoc bodies and keep the command lines. With `shell-bodies` as the
+# second argument it keeps the other side instead: the body lines of every
+# heredoc whose opening line pipes into a shell (`cat <<EOF | sh`), and nothing
+# else. A body written to a file or read by any other program is data. The one
+# reading of where a body starts and ends serves both.
 strip_heredoc_bodies() {
   local input="$1"
   local keep="${2:-commands}"
   local line
   local delimiter=""
+  local feeds_shell=false
   local heredoc_re="<<-?[[:space:]]*[\"']?([A-Za-z0-9_][A-Za-z0-9_.-]*)[\"']?"
 
   while IFS= read -r line || [[ -n "${line}" ]]; do
     if [[ -n "${delimiter}" ]]; then
       if [[ "${line}" == "${delimiter}" ]]; then
         delimiter=""
-      elif [[ "${keep}" == "bodies" ]]; then
+      elif [[ "${keep}" == "shell-bodies" && "${feeds_shell}" == "true" ]]; then
         printf '%s\n' "${line}"
       fi
       continue
@@ -415,20 +418,28 @@ strip_heredoc_bodies() {
 
     if [[ "${line}" =~ ${heredoc_re} ]]; then
       delimiter="${BASH_REMATCH[1]}"
+      feeds_shell=false
+      if [[ "${keep}" == "shell-bodies" ]] && exec_text_pipes_to_shell "${line}"; then
+        feeds_shell=true
+      fi
     fi
-    [[ "${keep}" == "bodies" ]] || printf '%s\n' "${line}"
+    [[ "${keep}" == "shell-bodies" ]] || printf '%s\n' "${line}"
   done <<< "${input}"
 }
 
+# A heredoc body is data, as extract_eval_payloads and the substitution reader
+# already treat it. Reading `sh -c` out of one made a quoted-delimiter heredoc
+# that quotes an attack form read as that attack (caught in review).
 extract_shell_c_payloads() {
-  local rest="$1"
+  local rest
 
+  rest=$(strip_heredoc_bodies "$1")
   while [[ "${rest}" =~ (bash|sh|zsh)[[:space:]]+-[A-Za-z]*c[[:space:]]+\"([^\"]*)\" ]]; do
     printf '%s\n' "${BASH_REMATCH[2]}"
     rest="${rest#*"${BASH_REMATCH[0]}"}"
   done
 
-  rest="$1"
+  rest=$(strip_heredoc_bodies "$1")
   while [[ "${rest}" =~ (bash|sh|zsh)[[:space:]]+-[A-Za-z]*c[[:space:]]+\'([^\']*)\' ]]; do
     printf '%s\n' "${BASH_REMATCH[2]}"
     rest="${rest#*"${BASH_REMATCH[0]}"}"
@@ -478,6 +489,16 @@ extract_command_substitution_payloads() {
 PIPE_MANAGER_RE='(npm|npx|pnpm|pnpx|yarn|bun|bunx|pip[0-9.]*|(python[0-9.]*|py)[[:space:]]+-m[[:space:]]*pip|poetry|uv|uvx|pipx|pipenv|cargo|go|gem|bundle|mvn|dotnet)'
 PIPE_INSTALL_TEXT_RE="${PIPE_MANAGER_RE}.*(${SAFEDEPS_G_ALL_VERBS})"
 
+# The same, as whole words in install order: a manager, any words, then a verb.
+# Beside a visible install the text left after setting the install aside is
+# mostly that install's own arguments, and the loose pattern above matches
+# almost anything there -- `go` inside `mongoose`, a one-letter verb inside any
+# word -- so `npm install mongoose@8.0.0 && cat setup.sh | sh` was denied for
+# install text it does not contain (caught in review). Whole words keep what is
+# really there: `printf 'pip install x'`, `echo pip install x`, a variable
+# holding one.
+PIPE_INSTALL_WORDS_RE="(^|[^[:alnum:]_.-])${PIPE_MANAGER_RE}([[:space:]]+[^[:space:]]+)*[[:space:]]+(${SAFEDEPS_G_ALL_VERBS})([^[:alnum:]_.-]|\$)"
+
 # A pipe into a shell, read on normalized exec text. The consumer ends where the
 # shell ends a word: at a blank, and also at an operator, a redirection or a
 # group closer, so `| sh; echo`, `| sh&&x` and `(... | sh)` are the same
@@ -488,6 +509,10 @@ PIPE_SHELL_CONSUMER_RE='\|&?[[:space:]]*([({][[:space:]]*)*(bash|sh|zsh)([[:spac
 
 text_has_install_words() {
   printf '%s\n' "$1" | grep -qEi "${PIPE_INSTALL_TEXT_RE}"
+}
+
+text_has_install_words_in_order() {
+  printf '%s\n' "$1" | grep -qEi "${PIPE_INSTALL_WORDS_RE}"
 }
 
 # $1 has its heredoc bodies stripped already. Stripping twice is not a no-op:
@@ -558,9 +583,9 @@ payload_pipes_unread_install_text_to_shell() {
   exec_text_pipes_to_shell "${commands}" || return 1
 
   remainder=$(install_managers_blanked "${commands}") || return 1
-  text_has_install_words "${remainder}" && return 0
+  text_has_install_words_in_order "${remainder}" && return 0
   [[ "${payload}" == *'<<'* ]] || return 1
-  text_has_install_words "$(strip_heredoc_bodies "${payload}" bodies)"
+  text_has_install_words_in_order "$(strip_heredoc_bodies "${payload}" shell-bodies)"
 }
 
 # $1 with the manager word of every install-pattern match blanked.

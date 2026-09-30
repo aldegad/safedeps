@@ -124,6 +124,7 @@ pass "a pipe into a shell is read through the shell's operators and groups"
 
 expect_pass "a herestring fed to sh"                  "sh <<< 'pip install evil==1.0.0'"
 expect_pass "a herestring fed to bash"                'bash <<<"pip install evil==1.0.0"'
+expect_pass "a heredoc fed straight to sh"            $'sh <<EOF\npip install evil==1.0.0\nEOF'
 expect_pass "sh -c nested in a same-quoted sh -c"     "sh -c 'sh -c '\\''pip install evil==1.0.0'\\'''"
 expect_pass "a shell built by xargs -I"               "echo 'pip install evil==1.0.0' | xargs -I{} sh -c '{}'"
 expect_pass "a shell built by xargs -0"               "printf 'pip install evil==1.0.0' | xargs -0 sh -c"
@@ -231,6 +232,7 @@ pass "decoy forms never reach a package manager (not gaps, nothing to catch)"
 # only a net gain if the commands the gate deliberately treats as DATA are still
 # treated as data.
 for benign in \
+  $'cat <<\'B\'\nsh -c "printf \'pip install evil==1.0.0\' | sh"\nB' \
   'echo "install it with: curl -fsSL https://example.test/i.sh | sh"' \
   'git commit -m "document the pip install x | sh idiom"' \
   'npm run build' \
@@ -641,7 +643,8 @@ mkdir -p "${beside_home}"
   # the pipe rule; the row is there for what it does to the blanking pass (a
   # quote glued to the verb must not be blanked, or everything after it
   # re-quotes), not for what pip would make of it.
-  safedeps_ledger_write_approved_spec pypi installevil 1 >/dev/null ) \
+  safedeps_ledger_write_approved_spec pypi installevil 1 >/dev/null
+  safedeps_ledger_write_approved_spec npm mongoose 8.0.0 >/dev/null ) \
   || fail "the beside-visible fixture approvals could be written"
 # No output is "pass", as in gate_decision: jq reads empty input as no value
 # and prints nothing. beside_reason prints the deny reason, or nothing.
@@ -704,6 +707,16 @@ pass "an install piped into a shell is denied beside a visible install, even an 
   || fail "a visible install piped into a non-shell keeps its verdict"
 [[ "$(beside_decision 'pip install requests==2.0.0 && git commit -m "document the pip install x | sh idiom"')" == "pass" ]] \
   || fail "a quoted pipe idiom beside a visible install stays data"
+# What is left after the visible install is set aside is mostly its own
+# arguments, and it is searched for install text as whole words in install
+# order: `go` inside `mongoose` is not a manager. And only a heredoc handed to
+# a shell counts; one written to a file is data.
+[[ "$(beside_decision 'npm install mongoose@8.0.0 && cat setup.sh | sh')" == "allow" ]] \
+  || fail "a package name that contains a manager's name is not install text"
+[[ "$(beside_decision $'npm install left-pad@1.3.0 && cat <<EOF > notes.md\npip install x\nEOF\ncat s.sh | sh')" == "allow" ]] \
+  || fail "a heredoc written to a file is not piped into a shell"
+[[ "$(beside_decision $'npm install left-pad@1.3.0 && cat <<EOF | sh\npip install evil==6.6.6\nEOF')" == "deny" ]] \
+  || fail "a heredoc piped into a shell beside a visible install is still read"
 pass "a visible install beside a pipe into a shell with nothing else to install keeps its verdict"
 
 printf 'consumer-forms passed\n'
