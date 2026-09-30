@@ -1643,7 +1643,12 @@ guard_walk_statement() {
     found+="${tok}"$'\n'
   done
   [[ -n "${found}" ]] || return 0
-  if [[ "${seg_ecosystem}" == npm && "${runner}" == false ]] && guard_statement_is_effect_gated "${seg}" false; then
+  # Only an `npm` command word can make the effect gate read the statement, and
+  # most npm-ecosystem statements are pnpm, yarn or bun, so the predicate's
+  # processes are spent only where it can say yes. Missing a spelling here
+  # costs a spurious record, never a missing one.
+  if [[ "${seg_ecosystem}" == npm && "${runner}" == false && " ${text} " =~ [[:space:]/]npm[[:space:]] ]] \
+      && guard_statement_is_effect_gated "${seg}" false; then
     return 0
   fi
   set -f
