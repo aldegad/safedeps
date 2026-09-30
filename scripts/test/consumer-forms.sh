@@ -435,6 +435,34 @@ grep -q 'check pypi evil@1.0.0' <<< "$(identity_reason 'npm run build && pip ins
   || fail "a spec is checked under the ecosystem of the statement it came from"
 pass "Go modules keep their path and each spec keeps its own statement's ecosystem"
 
+# The prescription is only half of it. Approve the wrong identity directly and
+# check that it does not carry over: a Go approval of the bare name `x` must not
+# pass another host's `.../x`, and an npm approval of `evil` must not pass a
+# pip install of `evil`. Each is paired with its exact identity, which must
+# pass, so a deny here cannot come from a seed that did not take.
+identity_home="${tmp_root}/identity-approved"
+mkdir -p "${identity_home}"
+( export SAFEDEPS_HOME="${identity_home}"
+  . lib/ledger/ledger.sh
+  safedeps_ledger_write_approved_spec go x v1.0.0 >/dev/null
+  safedeps_ledger_write_approved_spec npm evil 1.0.0 >/dev/null ) \
+  || fail "the identity fixture approvals could be written"
+approved_decision() {
+  jq -nc --arg c "$1" --arg cwd "${project_dir}" \
+    '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
+    HOME="${tmp_root}/home-identity" SAFEDEPS_HOME="${identity_home}" scripts/safedeps-pre-guard.sh 2>/dev/null |
+    jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || printf 'pass'
+}
+[[ "$(approved_decision 'go get x@v1.0.0')" != "deny" ]] \
+  || fail "identity fixture: the approved Go module itself passes"
+[[ "$(approved_decision 'go get evil.example/attacker/x@v1.0.0')" == "deny" ]] \
+  || fail "an approval of the bare Go name x does not pass another module whose path ends in x"
+[[ "$(approved_decision 'npm install evil@1.0.0')" != "deny" ]] \
+  || fail "identity fixture: the approved npm package itself passes"
+[[ "$(approved_decision 'npm run build && pip install evil==1.0.0')" == "deny" ]] \
+  || fail "an npm approval of evil does not pass a pip install of evil"
+pass "an approval under one identity does not carry over to another module path or ecosystem"
+
 # --- 8. Wrappers stay outside the boundary ----------------------------------------
 # argv-passing wrappers run the install unchanged, and the gate does not know
 # them. Same boundary as section 2, same reason: the list of programs that exec
