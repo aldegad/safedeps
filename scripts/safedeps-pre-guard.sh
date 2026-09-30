@@ -1910,6 +1910,7 @@ guard_extract_flagged_specs() {
   # it and the manager (`gem --norc install x -v 1`, `cargo +nightly add x`,
   # `dotnet add App.csproj package X`), which the adjacent-token reading missed.
   awk '
+    # safedeps:extract_flagged_specs (scripts/measure/scan-failure-census.sh keys on this line)
     function operand(s,   j) {
       for (j = s; j <= NF; j++) if ($j !~ /^-/ && $j !~ /^[+]/) return j
       return 0
@@ -2007,7 +2008,15 @@ guard_operand_specs() {
           printf '%s\t%s\t%s\n' "${eco}" "${pkg}" "${spec}"
         done
   fi
-  printf '%s\n' "${text}" | guard_extract_flagged_specs | awk -F'\t' -v eco="${eco}" 'NF == 2 { print eco "\t" $1 "\t" $2 }'
+  # Both readers here are on the judgment path: a spec they fail to produce is
+  # a spec the ledger never checks, and the install then reads as unpinned --
+  # a pass, recorded as UNGATED for the wrong reason (caught in review). A
+  # failure of either is recorded like any failed reading, for the gate.
+  printf '%s\n' "${text}" | guard_extract_flagged_specs \
+    | awk -F'\t' -v eco="${eco}" '
+        # safedeps:operand_specs_ecosystem (scripts/measure/scan-failure-census.sh keys on this line)
+        NF == 2 { print eco "\t" $1 "\t" $2 }' \
+    || { [[ -z "${SAFEDEPS_SCAN_MARK:-}" ]] || printf 'failed\n' >> "${SAFEDEPS_SCAN_MARK}"; }
 }
 
 guard_extract_specs() {

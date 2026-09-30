@@ -30,8 +30,14 @@
 #   after-gate      a reading that ran after the gate had passed
 #   pending-on-deny a denied command that left pending state behind
 #
-# Exit status is 0 only when weakened, mislabeled, error, after-gate and
-# pending-on-deny are all zero.
+# and one check on the census itself:
+#
+#   idle-mode       a failure mode that failed no call in any run. Its rows are
+#                   all "same", which reads as a clean result and is none: the
+#                   flag mode once keyed on a marker the guard did not carry.
+#
+# Exit status is 0 only when weakened, mislabeled, error, after-gate,
+# pending-on-deny and idle-mode are all zero.
 #
 # Every payload is judged, never executed. Runs happen with PATH led by an awk
 # shim that fails on cue; the guard keys each reading with a marker line in its
@@ -91,6 +97,7 @@ if [[ "${1:-}" == "--run" ]]; then
   done
   reads=$(cat "${T}/st/reads" 2>/dev/null || printf '0')
   after=$(cat "${T}/st/after-gate" 2>/dev/null || printf '0')
+  failed=$(cat "${T}/st/failed" 2>/dev/null || printf '0')
   # Paths under the run's own temp root differ every run; compare them as T.
   # The guard resolves the project directory, so the root appears in its
   # physical spelling too (macOS: /var is /private/var).
@@ -100,8 +107,8 @@ if [[ "${1:-}" == "--run" ]]; then
   pending="${pending//${T_physical}/T}"
   pending="${pending//${T}/T}"
   updated="${updated//$'\n'/\\n}"
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-    "${n}" "${mode}" "${k}" "${rc}" "${decision}" "${class}" "${updated}" "${pending}" "${reads}" "${after}" \
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "${n}" "${mode}" "${k}" "${rc}" "${decision}" "${class}" "${updated}" "${pending}" "${reads}" "${after}" "${failed}" \
     > "${WORK}/results/${n}.${mode}.${k}"
   rm -rf "${T}"
   exit 0
@@ -133,15 +140,6 @@ cat > "${WORK}/bin/awk" <<SHIM
 real='${real_awk}'
 state="\${CENSUS_STATE:-}"
 [[ -n "\${state}" ]] || exec "\${real}" "\$@"
-[[ "\${CENSUS_MODE:-none}" == "awk-all" ]] && exit 127
-kind=""
-case "\$*" in
-  *"safedeps:command_scan_text"*) kind=scan ;;
-  *"safedeps:join_line_continuations"*) kind=join ;;
-  *"safedeps:install_managers_blanked"*) kind=blank ;;
-  *"safedeps:extract_flagged_specs"*) kind=flag ;;
-esac
-[[ -n "\${kind}" ]] || exec "\${real}" "\$@"
 bump() {
   local f="\${state}/\$1" n
   while ! mkdir "\${state}/lock" 2>/dev/null; do :; done
@@ -150,12 +148,23 @@ bump() {
   rmdir "\${state}/lock"
   printf '%s' "\${n}"
 }
+[[ "\${CENSUS_MODE:-none}" == "awk-all" ]] && { bump failed >/dev/null; exit 127; }
+kind=""
+case "\$*" in
+  *"safedeps:command_scan_text"*) kind=scan ;;
+  *"safedeps:join_line_continuations"*) kind=join ;;
+  *"safedeps:install_managers_blanked"*) kind=blank ;;
+  *"safedeps:extract_flagged_specs"*) kind=flag ;;
+  *"safedeps:operand_specs_ecosystem"*) kind=eco ;;
+esac
+[[ -n "\${kind}" ]] || exec "\${real}" "\$@"
 n=\$(bump reads)
 [[ -z "\${SAFEDEPS_GATE_PASSED:-}" ]] || bump after-gate >/dev/null
+fail_it() { bump failed >/dev/null; exit 2; }
 case "\${CENSUS_MODE:-none}" in
-  k)       [[ "\${n}" == "\${CENSUS_K}" ]] && exit 2 ;;
-  from-k)  (( n >= CENSUS_K )) && exit 2 ;;
-  "\${kind}-all") exit 2 ;;
+  k)       [[ "\${n}" == "\${CENSUS_K}" ]] && fail_it ;;
+  from-k)  (( n >= CENSUS_K )) && fail_it ;;
+  "\${kind}-all") fail_it ;;
 esac
 exec "\${real}" "\$@"
 SHIM
@@ -168,7 +177,13 @@ for tool in grep sed; do
   real_tool=$(command -v "${tool}")
   cat > "${WORK}/bin/${tool}" <<SHIM
 #!/usr/bin/env bash
-[[ -n "\${CENSUS_STATE:-}" && "\${CENSUS_MODE:-none}" == "${tool}-all" ]] && exit 2
+if [[ -n "\${CENSUS_STATE:-}" && "\${CENSUS_MODE:-none}" == "${tool}-all" ]]; then
+  # Counted like the awk shim's failures, so the idle-mode check sees them.
+  while ! mkdir "\${CENSUS_STATE}/lock" 2>/dev/null; do :; done
+  printf '%s' "\$(( \$(cat "\${CENSUS_STATE}/failed" 2>/dev/null || echo 0) + 1 ))" > "\${CENSUS_STATE}/failed"
+  rmdir "\${CENSUS_STATE}/lock"
+  exit 2
+fi
 exec '${real_tool}' "\$@"
 SHIM
   chmod +x "${WORK}/bin/${tool}"
@@ -240,7 +255,7 @@ for n in $(seq 1 "${case_count}"); do
     printf '%s k %s\n' "${n}" "${k}" >> "${WORK}/jobs"
     [[ "${QUICK}" == "true" ]] || printf '%s from-k %s\n' "${n}" "${k}" >> "${WORK}/jobs"
   done
-  for mode in scan-all join-all blank-all flag-all awk-all grep-all sed-all; do
+  for mode in scan-all join-all blank-all flag-all eco-all awk-all grep-all sed-all; do
     printf '%s %s 0\n' "${n}" "${mode}" >> "${WORK}/jobs"
   done
 done
@@ -259,6 +274,7 @@ cat "${WORK}/results"/* | awk -F'\t' -v cases="${WORK}/cases" '
       if (f[10] + 0 > 0) { count["after-gate"]++; bad[++nb] = "after-gate\t" row[i] }
       if (dec == "deny" && f[8] != "-") { count["pending-on-deny"]++; bad[++nb] = "pending-on-deny\t" row[i] }
       if (mode == "none") { count["clean"]++; continue }
+      hits[mode] += f[11]
       split(base[n], b, "\t")
       if (rc != 0) verdict = "error"
       else if (tuple == base[n]) verdict = "same"
@@ -271,10 +287,14 @@ cat "${WORK}/results"/* | awk -F'\t' -v cases="${WORK}/cases" '
         bad[++nb] = verdict "\t" row[i] "\tclean=" base[n] "\tcmd=" cmd
       }
     }
-    split("clean same undecided weakened mislabeled error after-gate pending-on-deny", order, " ")
-    for (j = 1; j <= 8; j++) printf "  %-16s %d\n", order[j], count[order[j]] + 0
+    # A failure mode that failed nothing, in any run, contributed only "same"
+    # rows: its zero says nothing. That is how a mode keyed on a marker the
+    # guard did not carry went unnoticed (caught in review).
+    for (m in hits) if (hits[m] == 0) { count["idle-mode"]++; bad[++nb] = "idle-mode\t" m " failed no call in any run" }
+    split("clean same undecided weakened mislabeled error after-gate pending-on-deny idle-mode", order, " ")
+    for (j = 1; j <= 9; j++) printf "  %-16s %d\n", order[j], count[order[j]] + 0
     for (j = 1; j <= nb; j++) print "  " bad[j]
-    fail = count["weakened"] + count["mislabeled"] + count["error"] + count["after-gate"] + count["pending-on-deny"]
+    fail = count["weakened"] + count["mislabeled"] + count["error"] + count["after-gate"] + count["pending-on-deny"] + count["idle-mode"]
     exit (fail > 0 ? 1 : 0)
   }
 '
