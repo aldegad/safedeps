@@ -240,6 +240,7 @@ for benign in \
   'dotnet package list' \
   'dotnet package remove Serilog' \
   'dotnet package search Serilog' \
+  'dotnet package search Fabrikam.WebApi@1.2.3' \
   'python -m pytest' \
   'echo do pip install evil==1.0.0' \
   'echo npm i evil@1.0.0'
@@ -390,6 +391,9 @@ for grammar_form in \
   "dotnet add App.csproj package Evil --version 1.0.0" \
   "dotnet package add Evil --version 1.0.0" \
   "dotnet package add Evil -v 1.0.0 --project App.csproj" \
+  "dotnet package update Evil@1.0.0" \
+  "dotnet package update Contoso.Utilities Evil@1.0.0" \
+  "dotnet package update --project App.csproj -v q Evil@1.0.0" \
   "dotnet tool install evil --version 1.0.0" \
   "mvn -Dartifact=g:evil:1.0.0 dependency:get" \
   "npx evil@1.0.0" \
@@ -672,6 +676,13 @@ expect_prescription 'nuget evil@3.1.1;' 'dotnet package add evil --project App.c
 expect_prescription 'no-deny;' 'dotnet package add Serilog --version 3.1.1 --project App.csproj' \
   nuget Serilog 3.1.1
 expect_prescription 'no-deny;' 'dotnet package add Serilog -v 3.1.1' nuget Serilog 3.1.1
+# `dotnet package update` (.NET 10) carries a version as `<id>@<version>`, and
+# its `-v` is --verbosity, so the level is consumed and pins nothing.
+expect_prescription 'nuget Fabrikam.WebApi@1.2.3;' 'dotnet package update Contoso.Utilities Fabrikam.WebApi@1.2.3'
+expect_prescription 'no-deny;' 'dotnet package update Contoso.Utilities Fabrikam.WebApi@1.2.3' \
+  nuget Fabrikam.WebApi 1.2.3
+expect_prescription 'nuget Fabrikam.WebApi@1.2.3;' 'dotnet package update -v q --project src/App Fabrikam.WebApi@1.2.3' \
+  nuget q 1.2.3 nuget src/App 1.2.3
 # An option the table does not know leaves its value as an operand. That adds
 # a check; it never replaces the package's own.
 expect_prescription 'rubygems rake@13.0.0;rubygems rdoc@13.0.0;' 'gem install rake --document rdoc -v 13.0.0'
@@ -754,6 +765,10 @@ operand_rows=(
   $'nuget:dotnet-ef\tdotnet tool install -g dotnet-ef --version 7.0.0 && dotnet tool update -g dotnet-ef'
   $'nuget:Newtonsoft.Json\tdotnet package add Newtonsoft.Json --version 13.0.1 && dotnet package add Newtonsoft.Json'
   $'nuget:Serilog\tdotnet package add Serilog --project App.csproj'
+  $'nuget:Contoso.Utilities\tdotnet package update Contoso.Utilities Fabrikam.WebApi@1.2.3'
+  $'nuget:Fabrikam.WebApi\tdotnet package update Fabrikam.WebApi@1.2.3 && dotnet package update Fabrikam.WebApi'
+  $'nuget:Contoso.Utilities\tdotnet package update --project src/App -v q Contoso.Utilities'
+  $'nuget:Evil\tdotnet package update Evil -v 1.0.0'
   # The same across every way statements relate.
   $'npm:left-pad\tpnpm add left-pad@1.0.0 || pnpm add left-pad'
   $'npm:left-pad\tpnpm add left-pad@1.0.0; pnpm add left-pad'
@@ -798,10 +813,17 @@ operand_rows=(
   $'\tdotnet add App.csproj package Serilog --version 3.1.1'
   $'\tdotnet package add Serilog --version 3.1.1'
   $'\tdotnet package add Serilog -v 3.1.1 --project App.csproj'
+  $'\tdotnet package update Fabrikam.WebApi@1.2.3'
+  $'\tdotnet package update --verbosity minimal --project src/App Fabrikam.WebApi@1.2.3'
   $'\tdotnet tool install --global dotnet-ef --version 8.0.0'
   $'\tgem install --source https://rubygems.org rake -v 13.0.0'
   $'\tpip install 3to2==1.1.1'
   $'\tpnpm add left-pad@npm:evil-pkg@1.0.0'
+  # Quiet: an update with no operand moves every referenced package, and names
+  # none. The record's unit is the operand, so it is outside, as `pnpm update`
+  # and `yarn up` are.
+  $'\tdotnet package update'
+  $'\tdotnet package update --vulnerable'
   # Quiet: a pinned install inside a payload. The outer statement's payload is
   # blank to the extractor, so it is not read there either.
   $'\tbash -c \'pip install requests==2.31.0\''

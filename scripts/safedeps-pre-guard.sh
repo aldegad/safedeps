@@ -1591,12 +1591,13 @@ guard_walk_statement() {
     fi
 
     # `dotnet add [<project>] package <id>`: the keyword and the project file
-    # are not packages. The .NET 10 spelling, `dotnet package add <id>`, opens
-    # the walk at `package`, and its first operand is the verb `add`.
+    # are not packages. The .NET 10 spellings, `dotnet package add <id>` and
+    # `dotnet package update <id>[@<version>]`, open the walk at `package`, and
+    # their first operand is the verb.
     if [[ "${seg_ecosystem}" == "nuget" ]]; then
       if [[ "${verb_tok}" == package ]]; then
         verb_tok=""
-        [[ "${tok}" == add ]] && continue
+        [[ "${tok}" == add || "${tok}" == update ]] && continue
       fi
       case "${tok}" in
         package|*.csproj|*.fsproj|*.vbproj|*.sln|*.slnx) continue ;;
@@ -1697,7 +1698,8 @@ guard_extract_flagged_specs() {
   # option takes one (the tables below: `gem help install`, `bundle add
   # --help`, `cargo install --help`, `cargo add --help`, and the .NET CLI
   # reference for `dotnet add package`, its .NET 10 spelling `dotnet package
-  # add`, and `dotnet tool install|update`). Only mandatory values are listed.
+  # add`, `dotnet package update`, and `dotnet tool install|update`). Only
+  # mandatory values are listed.
   # An option whose value is optional, or one the table does not know, leaves
   # its value as an operand, and that can only add a check -- never skip the
   # package the manager installs.
@@ -1716,6 +1718,7 @@ guard_extract_flagged_specs() {
       takes["cargo"]  = " --version --vers --index --registry --git --branch --tag --rev --path --root --message-format --color --config -Z --lockfile-path -F --features -j --jobs --profile --target-dir --rename --manifest-path --base "
       takes["dotnet-add"]  = " -v --version -f --framework -s --source --package-directory --project "
       takes["dotnet-tool"] = " -v --verbosity --version -a --arch --add-source --configfile --framework --source --tool-manifest --tool-path "
+      takes["dotnet-update"] = " -v --verbosity --project "
       # Which of those carry the version.
       vers["gem"]    = " -v --version --vers "
       vers["bundle"] = " -v --version --vers "
@@ -1795,6 +1798,12 @@ guard_extract_flagged_specs() {
         # `dotnet package add <id> [--project <p>] [-v <version>]`.
         if ($i == "dotnet" && (k = verb_after(i + 1, "package")) && (k2 = verb_after(k + 1, "add")))
           operands("dotnet-add", k2 + 1)
+        # `dotnet package update [<id>[@<version>]...]` (.NET 10) has no version
+        # option: its `-v` is --verbosity. A version travels as `<id>@<version>`,
+        # which the generic reader takes. Only the option values are read here,
+        # so that `-v q` and `--project src/App` are not operands.
+        if ($i == "dotnet" && (k = verb_after(i + 1, "package")) && (k2 = verb_after(k + 1, "update")))
+          operands("dotnet-update", k2 + 1)
 
         if ($i == "dotnet" && (k = verb_after(i + 1, "tool"))) {
           if ($(k + 1) == "install" || $(k + 1) == "update") operands("dotnet-tool", k + 2)

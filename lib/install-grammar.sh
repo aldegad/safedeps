@@ -37,6 +37,9 @@
 #   yarn up (Berry) moves an existing dependency to the given version.
 #   dotnet package add: the .NET 10 "noun first" spelling of `dotnet add
 #     package`, same arguments (learn.microsoft.com/dotnet/core/tools/dotnet-package-add).
+#   dotnet package update [<pkg>[@<ver>]...]: .NET 10, moves a referenced
+#     package to <ver>, or to the newest one without it
+#     (learn.microsoft.com/dotnet/core/tools/dotnet-package-update).
 SAFEDEPS_G_NPM_VERBS='install|i|in|ins|inst|insta|instal|isnt|isnta|isntal|isntall|add|install-test|it|ci|clean-install|ic|install-clean|isntall-clean|install-ci-test|cit|clean-install-test|sit|update|u|up|upgrade|udpate'
 SAFEDEPS_G_PNPM_VERBS='add|install|i|install-test|it|update|up|upgrade'
 SAFEDEPS_G_YARN_VERBS='add|install|upgrade|up'
@@ -96,7 +99,7 @@ SAFEDEPS_G_INSTALL_BODY="${SAFEDEPS_G_NPM_INSTALL_BODY}\
 |bundle${SAFEDEPS_G_O}[[:space:]]+add\
 |mvn${SAFEDEPS_G_O}[[:space:]]+([^[:space:]]*maven-dependency-plugin[^[:space:]]*:get|dependency:get)\
 |dotnet${SAFEDEPS_G_O}[[:space:]]+add([[:space:]]+[^-[:space:]][^[:space:]]*)?${SAFEDEPS_G_O}[[:space:]]+package\
-|dotnet${SAFEDEPS_G_O}[[:space:]]+package${SAFEDEPS_G_O}[[:space:]]+add\
+|dotnet${SAFEDEPS_G_O}[[:space:]]+package${SAFEDEPS_G_O}[[:space:]]+(add|update)\
 |dotnet${SAFEDEPS_G_O}[[:space:]]+tool${SAFEDEPS_G_O}[[:space:]]+(install|update)"
 
 # --- the patterns the gates read --------------------------------------------------
