@@ -957,8 +957,10 @@ if [[ "${SUSPICIOUS}" == "true" ]]; then
   restore_node_modules
   cleanup_old_snapshots
 
-  REASON_STR=$(printf '%s; ' "${REASONS[@]}")
-  ROLLED_BACK_STR=$(printf '%s, ' "${ROLLED_BACK[@]}")
+  REASON_STR=""
+  [[ ${#REASONS[@]} -gt 0 ]] && REASON_STR=$(printf '%s; ' "${REASONS[@]}")
+  ROLLED_BACK_STR=""
+  [[ ${#ROLLED_BACK[@]} -gt 0 ]] && ROLLED_BACK_STR=$(printf '%s, ' "${ROLLED_BACK[@]}")
   WARNING_STR=""
   if [[ ${#ROLLBACK_WARNINGS[@]} -gt 0 ]]; then
     WARNING_STR=$(printf '%s; ' "${ROLLBACK_WARNINGS[@]}")

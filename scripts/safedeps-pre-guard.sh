@@ -1198,6 +1198,31 @@ guard_detect_ecosystem() {
   printf ''
 }
 
+guard_all_npm_installs_are_global() {
+  # A global npm operation resolves into npm's global prefix, not the cwd
+  # project. Project-scoped Yarn/overrides context must therefore not be mixed
+  # into its ledger key. Otherwise an approved global package is denied merely
+  # because the agent session happens to be anchored in a project with
+  # overrides. Keep mixed local+global compound commands project-scoped: one
+  # context cannot safely represent both operations.
+  local cmd="$1"
+  local candidate seg scan
+  local found=false
+
+  while IFS= read -r candidate; do
+    while IFS= read -r seg; do
+      [[ -z "${seg//[[:space:]]/}" ]] && continue
+      scan=$(command_scan_text "${seg}")
+      echo "${scan}" | grep -qEi '(^|[[:space:]])npm([[:space:]]|$)' || continue
+      echo "${scan}" | grep -qEi '(^|[[:space:]])(install|i|add|ci|update|up|upgrade)([[:space:]]|$)' || continue
+      found=true
+      echo "${scan}" | grep -qEi -- '(^|[[:space:]])(-g|--global(=true)?)([[:space:]]|$)' || return 1
+    done < <(printf '%s\n' "${candidate}" | tr ';|&' '\n')
+  done < <(command_candidate_texts "${cmd}")
+
+  [[ "${found}" == true ]]
+}
+
 guard_runner_operands() {
   # Runner forms (`npx`, `pnpm dlx`, `yarn dlx`) EXECUTE a package; tokens after
   # the executed package are arguments to that program, NOT package specs. Emit
@@ -1454,7 +1479,7 @@ if [[ -n "${LEDGER_ECOSYSTEM}" && ${#LEDGER_SPECS[@]} -gt 0 ]]; then
     jq -nc '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:"safedeps: the npm closure library is missing, so project-scoped approvals cannot be enforced. Install blocked fail-closed; reinstall safedeps."}}'
     exit 0
   fi
-  if [[ "${LEDGER_ECOSYSTEM}" == "npm" ]]; then
+  if [[ "${LEDGER_ECOSYSTEM}" == "npm" ]] && ! guard_all_npm_installs_are_global "${COMMAND}"; then
     # shellcheck source=../lib/npm/closure.sh
     source "${SAFEDEPS_NPM_CLOSURE_LIB}"
     LEDGER_CONTEXT_FILE=$(mktemp "${TMPDIR:-/tmp}/safedeps-pre-context.XXXXXX") || {

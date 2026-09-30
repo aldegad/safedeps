@@ -26,6 +26,10 @@ SAFEDEPS_PROVIDER_CACHE_TTL_SECONDS="${SAFEDEPS_PROVIDER_CACHE_TTL_SECONDS:-8640
 # compared against is the value it was assigned.
 # shellcheck source=../truth-sources.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/truth-sources.sh"
+# Retention for that same file. Sourced here because this is where the advisory
+# log's path is decided — the policy and the path stay in one place.
+# shellcheck source=../advisory-log-rotate.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/advisory-log-rotate.sh"
 
 SAFEDEPS_OSV_API_URL="${SAFEDEPS_OSV_API_URL:-${SAFEDEPS_DEFAULT_OSV_API_URL}}"
 SAFEDEPS_OSV_BATCH_API_URL="${SAFEDEPS_OSV_BATCH_API_URL:-${SAFEDEPS_DEFAULT_OSV_BATCH_API_URL}}"
@@ -39,6 +43,20 @@ safedeps_providers_init() {
     "${SAFEDEPS_CACHE_DIR}/kev" \
     "${SAFEDEPS_CACHE_DIR}/ghsa" \
     "$(dirname "${SAFEDEPS_ADVISORY_LOG}")"
+  safedeps_advisory_log_rotate_once
+}
+
+# ONCE PER PROCESS, not once per line. providers_init runs on every advisory
+# write and a run emits thousands of them, so a size check here would fork `wc`
+# thousands of times to answer a question whose answer cannot change by more than
+# one run's worth of lines. Checking at the first write of each process bounds
+# the file to (threshold + one run) — measured, a run appends single-digit MB —
+# which is what a size bound is for.
+SAFEDEPS_ADVISORY_LOG_ROTATE_CHECKED=""
+safedeps_advisory_log_rotate_once() {
+  [[ -n "${SAFEDEPS_ADVISORY_LOG_ROTATE_CHECKED}" ]] && return 0
+  SAFEDEPS_ADVISORY_LOG_ROTATE_CHECKED=1
+  safedeps_advisory_log_rotate_if_needed "${SAFEDEPS_ADVISORY_LOG}" || true
 }
 
 # Say once per process when the run is judging against something other than the
