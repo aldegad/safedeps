@@ -700,10 +700,124 @@ guard_literal_dir() {
   printf '%s/%s' "${dir%/}" "${path}"
 }
 
+# The last value an .npmrc gives <key>, prefixed with `=` so that a key set to
+# nothing still reads as set. Nothing at all when the file does not set it.
+#
+# Read the way npm 11.19.0 read it, measured against a real install
+# (safedeps/effect-gate-blind-to-lockless-npm-installs): keys are
+# case-sensitive (`GLOBAL=true` did nothing), the last line wins, a key with no
+# `=` is set, an unquoted value ends at `;` or `#`, and one pair of quotes is
+# removed. A key under a `[section]` header is not a top-level key.
+guard_npmrc_value() {
+  local file="$1" key="$2"
+  [[ -f "${file}" && -r "${file}" ]] || return 0
+  awk -v key="${key}" -v q="'" '
+    /^[[:space:]]*\[/ { exit }
+    {
+      line = $0
+      sub(/^[[:space:]]+/, "", line)
+      if (line == "" || line ~ /^[;#]/) next
+      eq = index(line, "=")
+      if (eq == 0) { k = line; v = "true" } else { k = substr(line, 1, eq - 1); v = substr(line, eq + 1) }
+      sub(/[[:space:]]+$/, "", k)
+      if (k != key) next
+      sub(/^[[:space:]]+/, "", v)
+      first = substr(v, 1, 1)
+      if ((first == "\"" || first == q) && index(substr(v, 2), first) > 0) {
+        v = substr(v, 2, index(substr(v, 2), first) - 1)
+      } else {
+        sub(/[;#].*$/, "", v)
+        sub(/[[:space:]]+$/, "", v)
+      }
+      found = 1
+      last = v
+    }
+    END { if (found) printf "=%s", last }
+  ' "${file}" 2>/dev/null || true
+}
+
+# The directory npm reads the project .npmrc from when it installs in <dir>: the
+# nearest directory at or above <dir> with a package.json or a node_modules, or
+# <dir> itself when there is none. `--prefix` names it outright. Measured: with
+# the .npmrc beside the project's package.json, an install from a subdirectory
+# followed it; with the .npmrc in a subdirectory that had no package.json, it
+# did not.
+guard_npm_local_prefix() {
+  local dir="$1" named="$2" probe
+  if [[ "${named}" == true ]]; then
+    printf '%s' "${dir}"
+    return 0
+  fi
+  probe="${dir}"
+  while [[ -n "${probe}" ]]; do
+    if [[ -e "${probe}/package.json" || -d "${probe}/node_modules" ]]; then
+      printf '%s' "${probe}"
+      return 0
+    fi
+    [[ "${probe}" != / ]] || break
+    probe=$(dirname "${probe}")
+  done
+  printf '%s' "${dir}"
+}
+
+# Why an npm install into <dir> is not recorded where the effect gate reads it,
+# because of an .npmrc; nothing when the project and user .npmrc leave it alone.
+#
+# `global` and `location` decide it, each key on its own, and the project file
+# outranks the user file. Measured with npm 11.19.0 (the battery in
+# scripts/test/lockless-forms.sh pins the cases it names):
+#
+#   - `global=false` and `global=null` install in the project and record it.
+#     Every other value sent the package to the global prefix (`true`, `1`,
+#     `yes`, `off`, nothing) or put it in node_modules with no record at all
+#     (`0`). A `--global=false` or `--no-global` on the command overrides the
+#     file; `--location=project` does not.
+#   - `location=user` and `location=project` install in the project. `global`
+#     went to the global prefix. And no flag on the command undoes it:
+#     `--global=false` still went global, and `--location=project` put the
+#     package in node_modules with no record at all.
+#
+# So only the values measured to keep an install on record count as leaving it
+# alone. Anything else is read as not recorded, which costs an UNGATED line
+# where npm would have been harmless; the other direction costs a silent pass.
+guard_npmrc_unrecorded() {
+  local dir="$1" named="$2" user_rc="$3" cli_global_off="$4"
+  local project_rc key value source
+  project_rc="$(guard_npm_local_prefix "${dir}" "${named}")/.npmrc"
+  local undecided=false
+  for key in location global; do
+    source="${project_rc}"
+    value=$(guard_npmrc_value "${project_rc}" "${key}")
+    if [[ -z "${value}" ]]; then
+      if [[ "${user_rc}" == "?" ]]; then
+        undecided=true
+        continue
+      fi
+      source="${user_rc}"
+      value=$(guard_npmrc_value "${user_rc}" "${key}")
+    fi
+    [[ -n "${value}" ]] || continue
+    value="${value#=}"
+    case "${key}:${value}" in
+      location:user|location:project|global:false|global:null) continue ;;
+    esac
+    if [[ "${key}" == global && "${cli_global_off}" == true ]]; then
+      continue
+    fi
+    printf '%s sets %s=%s' "${source}" "${key}" "${value}"
+    return 0
+  done
+  if [[ "${undecided}" == true ]]; then
+    printf 'the user .npmrc is named by a value the shell decides at run time'
+  fi
+  return 0
+}
+
 # Where each install statement in the command lands, one line per statement, as
-# `<kind>\t<dir>`. <kind> is `npm` for an npm CLI install that is not a runner
-# and `other` for every other install. <dir> is an absolute path, `global`, or
-# `?` when the text does not say.
+# `<kind>\t<dir>\t<why>`. <kind> is `npm` for an npm CLI install that is not a
+# runner and `other` for every other install. <dir> is an absolute path,
+# `global`, or `?` when the text does not say. <why> is empty unless an .npmrc
+# keeps the install off the record, and then it names the file and the setting.
 #
 # The effect gate reads one directory, chosen here before the command runs. An
 # install that lands anywhere else is not read, whatever the gate says about the
@@ -728,19 +842,23 @@ guard_literal_dir() {
 #     write no lockfile at all.
 #   - `npm_config_prefix` in the environment does NOT move a project install:
 #     measured, it landed in the cwd project and the gate rolled it back.
-#
-# A setting that arrives through a file (`.npmrc`) is not text in the command
-# and cannot be seen here. That boundary is stated in ARCHITECTURE.md.
+#   - The same two settings in the project's or the user's .npmrc, which the
+#     command does not show. guard_npmrc_unrecorded reads both files; an install
+#     they keep off the record is `?` with the reason in <why>. The global and
+#     builtin npmrc, and a file named only at run time, are outside what this
+#     reads; ARCHITECTURE.md states that boundary.
 resolve_install_targets() {
   local cmd="$1" cwd="$2"
   local text before stmt after words head target want kind manager tok value normalized in_env skip
-  local dir="${cwd}" grouped=false env_global=false
+  local named user_rc cli_global_off why
+  local dir="${cwd}" grouped=false env_global=false env_userconfig=false
   local -a toks=()
 
   text=$(join_line_continuations "$(strip_heredoc_bodies "${cmd}")")
   command_scan_text "${text}" | grep -q '[(){}`]' && grouped=true
   command_scan_text "${text}" \
     | grep -qEi '(^|[[:space:];&|(])(export[[:space:]]+)?npm_config_(global|location)=' && env_global=true
+  command_scan_text "${text}" | grep -qEi 'npm_config_userconfig=' && env_userconfig=true
 
   while IFS=$'\t' read -r before stmt after words; do
     [[ -n "${words}" ]] || continue
@@ -804,6 +922,7 @@ resolve_install_targets() {
     target="${dir}"
     want=""
     skip=false
+    named=false
     in_env=false
     [[ "${toks[0]}" == env ]] && in_env=true
     for tok in "${toks[@]:1}"; do
@@ -823,10 +942,13 @@ resolve_install_targets() {
         esac
       fi
       case "${tok}" in
-        --prefix=*|--cwd=*|--dir=*|--install-dir=*) target=$(guard_literal_dir "${target}" "${tok#*=}") ;;
-        --prefix|--cwd|--dir|--install-dir) want=1 ;;
+        --prefix=*|--cwd=*|--dir=*|--install-dir=*)
+          target=$(guard_literal_dir "${target}" "${tok#*=}")
+          named=true
+          ;;
+        --prefix|--cwd|--dir|--install-dir) want=1; named=true ;;
         -C)
-          if [[ -n "${manager}" ]]; then want=1; fi
+          if [[ -n "${manager}" ]]; then want=1; named=true; fi
           ;;
         -C?*)
           if [[ -n "${manager}" ]]; then target="?"; fi
@@ -841,7 +963,40 @@ resolve_install_targets() {
         target=global
       fi
     fi
-    printf '%s\t%s\n' "${kind}" "${target}"
+
+    # An install the command keeps in a known directory can still be kept off
+    # the record by an .npmrc. The user file is the one npm would read: named
+    # by `--userconfig`, then by npm_config_userconfig, then ~/.npmrc.
+    why=""
+    if [[ "${kind}" == npm && "${target}" != global && "${target}" != "?" ]]; then
+      user_rc=""
+      cli_global_off=false
+      want=""
+      for tok in "${toks[@]}"; do
+        if [[ -n "${want}" ]]; then user_rc="${tok}"; want=""; continue; fi
+        case "${tok}" in
+          --userconfig) want=1 ;;
+          --userconfig=*) user_rc="${tok#*=}" ;;
+          --global=false|--no-global) cli_global_off=true ;;
+        esac
+      done
+      if [[ -n "${want}" ]]; then
+        user_rc="?"
+      elif [[ -z "${user_rc}" ]]; then
+        if [[ "${env_userconfig}" == true ]]; then
+          user_rc="?"
+        else
+          user_rc="${npm_config_userconfig:-${NPM_CONFIG_USERCONFIG:-${HOME}/.npmrc}}"
+        fi
+      fi
+      case "${user_rc}" in
+        '~/'*) user_rc="${HOME}/${user_rc#'~/'}" ;;
+      esac
+      [[ "${user_rc}" == "?" ]] || user_rc=$(guard_literal_dir "${dir}" "${user_rc}")
+      why=$(guard_npmrc_unrecorded "${target}" "${named}" "${user_rc}" "${cli_global_off}")
+      [[ -z "${why}" ]] || target="?"
+    fi
+    printf '%s\t%s\t%s\n' "${kind}" "${target}" "${why}"
   done < <(command_statements "${text}")
   return 0
 }
@@ -1376,10 +1531,17 @@ fi
 # says so.
 PROJECT_DIR="${CWD_DIR}"
 INSTALL_TARGETS=$(resolve_install_targets "${COMMAND}" "${CWD_DIR}")
-while IFS=$'\t' read -r _ install_target; do
+while IFS=$'\t' read -r _ install_target _; do
   [[ -n "${install_target}" && "${install_target}" != "?" && "${install_target}" != global ]] || continue
   PROJECT_DIR="${install_target}"
   break
+done <<< "${INSTALL_TARGETS}"
+# An .npmrc that keeps an install off the record is not text in the command, so
+# the record has to say which file did it; the UNGATED line alone would point at
+# a command that looks like an ordinary project install.
+while IFS=$'\t' read -r _ _ install_why; do
+  [[ -n "${install_why}" ]] || continue
+  log_advisory "pre-guard: ${install_why}, so npm does not record this install where the effect gate reads it. Command: ${COMMAND}"
 done <<< "${INSTALL_TARGETS}"
 if [[ "${PROJECT_DIR}" != "${CWD_DIR}" ]]; then
   log_advisory "pre-guard: the install lands outside cwd — snapshotting/verifying ${PROJECT_DIR} instead of cwd (${CWD_DIR})."
@@ -2140,7 +2302,7 @@ guard_effect_gate_reads_every_install() {
 
   # And every install statement lands in the directory the gate reads.
   any=false
-  while IFS=$'\t' read -r kind target; do
+  while IFS=$'\t' read -r kind target _; do
     [[ -n "${kind}" ]] || continue
     any=true
     [[ "${kind}" == npm ]] || return 1

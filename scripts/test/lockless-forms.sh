@@ -79,7 +79,7 @@ MARKS="${tmp_root}/marks.log"
 : > "${MARKS}"
 mkdir -p "${tmp_root}/tarballs"
 make_package() {
-  local name="$1" src="${tmp_root}/src/$1"
+  local name="$1" version="${2:-1.0.0}" src="${tmp_root}/src/$1-${2:-1.0.0}"
   mkdir -p "${src}"
   # The path lives in mark.js, not in the scripts: post-verify's install-script
   # heuristics read the script text, and a temp path under /home would read as
@@ -87,14 +87,14 @@ make_package() {
   cat > "${src}/mark.js" <<EOF
 require('fs').appendFileSync('${MARKS}', '${name}\t' + process.argv[2] + '\t' + process.cwd() + '\n');
 EOF
-  jq -n --arg name "${name}" '{
+  jq -n --arg name "${name}" --arg version "${version}" '{
     name: $name,
-    version: "1.0.0",
+    version: $version,
     scripts: {preinstall: "node mark.js preinstall", install: "node mark.js install", postinstall: "node mark.js postinstall"}
   }' > "${src}/package.json"
   (cd "${src}" && npm pack --pack-destination "${tmp_root}/tarballs" >/dev/null 2>&1) \
     || fail "npm pack builds the synthetic package ${name}"
-  cp "${src}/package.json" "${tmp_root}/tarballs/${name}-1.0.0.tgz.json"
+  cp "${src}/package.json" "${tmp_root}/tarballs/${name}-${version}.tgz.json"
 }
 # sd-victim is never approved. sd-approved is approved in every sandbox.
 make_package sd-victim
@@ -273,24 +273,104 @@ run_install "npm install sd-victim --no-save" codex
 rolled_back || fail "on Codex, a --no-save install of an unapproved package is rolled back"
 pass "on Codex, a --no-save install is detected and rolled back after its scripts ran (no inert install there)"
 
-# --- 4. The rebuild stays in the project it verified -----------------------------------
-# The project's .npmrc says global=true, so this install lands in the global
-# prefix. The project itself has a verified tree, so the gate rebuilds it. A
-# plain `npm rebuild` reads the same .npmrc and rebuilt the global tree
-# instead, running sd-victim's scripts. A project .npmrc is a carrier the
-# command text does not show, so the pre-guard cannot record this install as
-# UNGATED; that boundary is documented. What is pinned here is that the
-# rebuild does not turn it into script execution.
-new_project
-run_install "npm install sd-approved"
-[[ -z "${CASE_POST}" ]] || fail "an approved install stays quiet before the .npmrc case (post: ${CASE_POST})"
-printf 'global=true\n' > "${CASE_PROJECT}/.npmrc"
-: > "${MARKS}"
-run_install "npm install sd-victim"
-[[ -e "${tmp_root}/global/lib/node_modules/sd-victim" ]] || fail "the .npmrc case lands the package in the global prefix"
-victim_ran && fail "npm rebuild does not follow the project .npmrc into the global tree ($(cut -f1,2 "${MARKS}" | paste -sd, -))"
-grep -q '^sd-approved	install' <<< "${CASE_RAN}" || fail "npm rebuild still rebuilds the verified project tree"
-pass "npm rebuild stays in the verified project tree when the project .npmrc says global=true"
+# --- 4. An .npmrc that makes every install global ---------------------------------------
+# `global=true` or `location=global` in the project's or the user's .npmrc sends
+# a plain `npm install x` to the global prefix, where no lockfile is written.
+# The command text does not show it, so the pre-guard reads those two files and
+# records the install UNGATED, as it does for the same setting in the command.
+#
+# The project has a verified tree of its own, so the gate rebuilds it. A plain
+# `npm rebuild` reads the same .npmrc and rebuilt the global tree instead,
+# running sd-victim's scripts. That is pinned here too.
+USER_NPMRC_BASE=$(cat "${npm_config_userconfig}")
+# <where>|<setting>|<command>|<where npm put the package>
+for carrier in \
+  "project|global=true|npm install sd-victim|global" \
+  "project|location=global|npm install sd-victim|global" \
+  "project|global = true|npm install sd-victim|global" \
+  "project|location = \"global\"|npm install sd-victim|global" \
+  "project|global=1|npm install sd-victim|global" \
+  "project|global=|npm install sd-victim|global" \
+  "project|global=0|npm install sd-victim|unrecorded" \
+  "project|location=global|npm install --location=project sd-victim|unrecorded" \
+  "project|global=true|npm install --location=project sd-victim|global" \
+  "project|location=global|npm install --global=false sd-victim|global" \
+  "user|global=true|npm install sd-victim|global" \
+  "user|location=global|npm install sd-victim|global" \
+  "user|location=global|npm install --location=project sd-victim|unrecorded"
+do
+  IFS='|' read -r where setting form lands <<< "${carrier}"
+  new_project
+  run_install "npm install sd-approved"
+  [[ -z "${CASE_POST}" ]] || fail "an approved install stays quiet before the .npmrc case (post: ${CASE_POST})"
+  case "${where}" in
+    project) printf '%s\n' "${setting}" > "${CASE_PROJECT}/.npmrc" ;;
+    user) printf '%s\n%s\n' "${USER_NPMRC_BASE}" "${setting}" > "${npm_config_userconfig}" ;;
+  esac
+  : > "${MARKS}"
+  run_install "${form}"
+  printf '%s\n' "${USER_NPMRC_BASE}" > "${npm_config_userconfig}"
+  case "${lands}" in
+    global)
+      [[ -e "${tmp_root}/global/lib/node_modules/sd-victim" ]] \
+        || fail "the fixture .npmrc sends the install to the global prefix: ${carrier}"
+      ;;
+    unrecorded)
+      # In node_modules, and in neither record the gate reads.
+      [[ -e "${CASE_PROJECT}/node_modules/sd-victim" ]] \
+        && ! grep -q sd-victim "${CASE_PROJECT}/package-lock.json" "${CASE_PROJECT}/node_modules/.package-lock.json" 2>/dev/null \
+        || fail "the fixture .npmrc puts the package in node_modules with no record: ${carrier}"
+      ;;
+  esac
+  ungated || fail "an unpinned install that an .npmrc keeps off the record is recorded UNGATED: ${carrier}"
+  grep -q "npmrc sets ${setting%%[ =]*}" "${CASE_HOME}/advisory.log" 2>/dev/null \
+    || fail "the record names the .npmrc and the setting: ${carrier}"
+  victim_ran && fail "no script of the unverified package runs: ${carrier} ($(cut -f1,2 "${MARKS}" | paste -sd, -))"
+  case "${lands}" in
+    global)
+      grep -q '^sd-approved	install' <<< "${CASE_RAN}" || fail "npm rebuild still rebuilds the verified project tree: ${carrier}"
+      ;;
+    unrecorded)
+      # The unrecorded package sits in the tree a rebuild would run, so the
+      # rebuild is skipped rather than narrowed, and the user is told.
+      [[ -z "${CASE_RAN}" ]] || fail "npm rebuild does not run over a package no lockfile records: ${carrier} (${CASE_RAN})"
+      grep -q 'neither lockfile records (node_modules/sd-victim)' <<< "${CASE_POST}" \
+        || fail "the skipped rebuild names the unrecorded package: ${carrier} (post: ${CASE_POST:-<quiet>})"
+      ;;
+  esac
+done
+pass "an .npmrc that keeps installs off the record, project or user, is recorded UNGATED, and no rebuild runs what it put there"
+
+# The same files can say the opposite, and the command outranks them. None of
+# these lands in the global prefix, so each is read and rolled back, and none
+# is recorded UNGATED.
+for carrier in \
+  "project|global=false|npm install sd-victim" \
+  "project|global=null|npm install sd-victim" \
+  "project|location=user|npm install sd-victim" \
+  "project|global=true|npm install --global=false sd-victim" \
+  "project|global=true|npm install --no-global sd-victim" \
+  "user|global=true|npm install --no-global sd-victim" \
+  "project|GLOBAL=true|npm install sd-victim" \
+  "project|; global=true|npm install sd-victim" \
+  "project|global=true\nglobal=false|npm install sd-victim" \
+  "project|[section]\nglobal=true|npm install sd-victim"
+do
+  IFS='|' read -r where setting form <<< "${carrier}"
+  new_project
+  case "${where}" in
+    project) printf '%b\n' "${setting}" > "${CASE_PROJECT}/.npmrc" ;;
+    user) printf '%s\n%b\n' "${USER_NPMRC_BASE}" "${setting}" > "${npm_config_userconfig}" ;;
+  esac
+  : > "${MARKS}"
+  run_install "${form}"
+  printf '%s\n' "${USER_NPMRC_BASE}" > "${npm_config_userconfig}"
+  [[ ! -e "${tmp_root}/global/lib/node_modules/sd-victim" ]] || fail "the fixture install stays in the project: ${carrier}"
+  rolled_back || fail "the effect gate rolls back an unapproved install that stays in the project: ${carrier} (post: ${CASE_POST:-<quiet>})"
+  ungated && fail "an install that stays in the project is not recorded UNGATED: ${carrier}"
+  victim_ran && fail "no script of the unverified package runs: ${carrier}"
+done
+pass "an .npmrc that keeps installs in the project, or a command that overrides it, is read and not recorded UNGATED"
 
 # --- 5. A tree nobody recorded is not rebuilt ---------------------------------------------
 drop_hidden_lockfile() { rm -f "$1/node_modules/.package-lock.json"; }
@@ -325,9 +405,60 @@ do
 done
 pass "approved installs, including --no-save and sub-project forms, confirm quietly and rebuild where they landed"
 
+# --- 7. A rollback does not run scripts it did not verify -------------------------------
+# The rollback restores node_modules from the confirmed snapshot. With a
+# package-lock.json that is `npm ci` of the baseline lock. Without one, npm has
+# to resolve package.json's ranges again, and whatever it resolves has not been
+# read by anyone, so that reinstall must not run install scripts.
+#
+# Both reinstalls also have to stay in the project. A project .npmrc with
+# global=true sent a plain `npm ci` / `npm install` to the global prefix, which
+# emptied the project's node_modules and left it empty.
+#
+# A rollback returns to the confirmed snapshot, which is the state before the
+# last verified install. So each case below verifies one more `npm install`
+# after sd-approved, and the rollback then has sd-approved to restore.
+approve_baseline() {
+  run_install "npm install sd-approved"
+  [[ -z "${CASE_POST}" ]] || fail "an approved install stays quiet before the restore case (post: ${CASE_POST})"
+  run_install "npm install"
+  [[ -z "${CASE_POST}" ]] || fail "a bare install of the approved tree stays quiet (post: ${CASE_POST})"
+}
+new_project
+approve_baseline
+printf 'global=true\n' > "${CASE_PROJECT}/.npmrc"
+: > "${MARKS}"
+run_install "npm install --global=false sd-victim"
+rolled_back || fail "an unapproved install beside a global .npmrc is rolled back (post: ${CASE_POST:-<quiet>})"
+[[ -e "${CASE_PROJECT}/node_modules/sd-approved" ]] \
+  || fail "the rollback restores the project's own tree, not the global one (node_modules: $(ls "${CASE_PROJECT}/node_modules" 2>&1 | paste -sd, -))"
+[[ ! -e "${tmp_root}/global/lib/node_modules" ]] \
+  || fail "the rollback installs nothing into the global prefix ($(ls "${tmp_root}/global/lib/node_modules" | paste -sd, -))"
+victim_ran && fail "no script of the unverified package runs during the rollback"
+pass "the rollback reinstalls the project's tree in the project when the project .npmrc says global=true"
+
+# A project that keeps no package-lock.json. sd-approved@1.0.0 is approved and
+# installed, and then 1.0.1 is published, which nobody approved. The rollback's
+# reinstall resolves `^1.0.0` to 1.0.1.
+new_project
+rm -f "${CASE_PROJECT}/package-lock.json"
+printf 'package-lock=false\n' > "${CASE_PROJECT}/.npmrc"
+approve_baseline
+[[ ! -e "${CASE_PROJECT}/package-lock.json" ]] || fail "the fixture project keeps no package-lock.json"
+make_package sd-approved 1.0.1
+: > "${MARKS}"
+run_install "npm install sd-victim"
+rolled_back || fail "an unapproved install in a project with no package-lock.json is rolled back (post: ${CASE_POST:-<quiet>})"
+[[ "$(jq -r .version "${CASE_PROJECT}/node_modules/sd-approved/package.json" 2>/dev/null)" == 1.0.1 ]] \
+  || fail "the fixture reinstall resolves the range to the unapproved 1.0.1"
+[[ ! -s "${MARKS}" ]] || fail "the reinstall runs no install script ($(cut -f1,2 "${MARKS}" | paste -sd, -))"
+grep -q 'install scripts were not run' <<< "${CASE_POST}" \
+  || fail "the rollback says the reinstall ran without install scripts (post: ${CASE_POST})"
+pass "a rollback with no package-lock.json reinstalls without running install scripts, and says so"
+
 # --- the fixture never left the machine ---------------------------------------------------
 [[ -s "${tmp_root}/registry.log" ]] || fail "the installs went through the fixture registry"
-if grep -vE '^GET /sd-(victim|approved)(/-/sd-(victim|approved)-1\.0\.0\.tgz)?$' "${tmp_root}/registry.log" | grep -q .; then
+if grep -vE '^GET /sd-(victim|approved)(/-/sd-(victim|approved)-1\.0\.[01]\.tgz)?$' "${tmp_root}/registry.log" | grep -q .; then
   fail "the fixture registry saw only the synthetic packages ($(sort -u "${tmp_root}/registry.log" | paste -sd, -))"
 fi
 pass "every request went to the local fixture registry, for the synthetic packages only"
