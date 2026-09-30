@@ -1501,13 +1501,20 @@ guard_names_package_without_spec() {
     case "${line}" in
       S$'\t'*)
         [[ "${open}" == true ]] && guard_walk_statement
-        IFS=$'\t' read -r _ seg_ecosystem runner <<< "${line}"
+        # Fields are cut with expansions, not `read <<<`: bash 3.2 writes a
+        # temp file for every here-string, and this loop runs per line.
+        line="${line#S$'\t'}"
+        seg_ecosystem="${line%%$'\t'*}"
+        runner="${line#*$'\t'}"
         seg="" text="" pinned=$'\n' bound=" " consumed=" " open=true
         ;;
       G$'\t'*) seg="${line#G$'\t'}" ;;
       T$'\t'*) text="${line#T$'\t'}" ;;
       *)
-        IFS=$'\t' read -r f1 f2 f3 <<< "${line}"
+        f1="${line%%$'\t'*}"
+        line="${line#*$'\t'}"
+        f2="${line%%$'\t'*}"
+        f3="${line#*$'\t'}"
         if [[ "${f1}" == "@" ]]; then
           [[ "${f2}" == bound ]] && bound+="${f3} "
           [[ "${f2}" == consumed ]] && consumed+="${f3} "
@@ -1532,8 +1539,12 @@ guard_walk_statement() {
   local -a toks=()
 
   # Split the way awk splits the same text, so a position means one token on
-  # both sides.
-  read -r -a toks <<< "${text}" || true
+  # both sides: on blanks, with globbing off so that a token such as `x==1.*`
+  # stays itself.
+  set -f
+  # shellcheck disable=SC2206
+  toks=( ${text} )
+  set +f
 
   verb_seen=false
   skip_next=false
@@ -1632,12 +1643,14 @@ guard_walk_statement() {
     found+="${tok}"$'\n'
   done
   [[ -n "${found}" ]] || return 0
-  if [[ "${seg_ecosystem}" == npm && "${runner}" == false ]] && guard_statement_is_effect_gated "${seg}"; then
+  if [[ "${seg_ecosystem}" == npm && "${runner}" == false ]] && guard_statement_is_effect_gated "${seg}" false; then
     return 0
   fi
-  while IFS= read -r tok; do
-    [[ -n "${tok}" ]] && guard_note_ungated "${seg_ecosystem}" "${tok}"
-  done <<< "${found}"
+  set -f
+  for tok in ${found}; do
+    guard_note_ungated "${seg_ecosystem}" "${tok}"
+  done
+  set +f
   return 0
 }
 
@@ -2046,8 +2059,13 @@ fi
 # UNGATED record used to be keyed on "the ledger ecosystem is npm", and that let
 # an unpinned `pnpm add x` through with no record at all (GitHub #22).
 guard_statement_is_effect_gated() {
-  local seg="$1" scan
-  guard_segment_is_runner "${seg}" && return 1
+  local seg="$1" runner="${2:-}" scan
+  # The caller may already know whether it is a runner.
+  if [[ -z "${runner}" ]]; then
+    guard_segment_is_runner "${seg}" && return 1
+  elif [[ "${runner}" == true ]]; then
+    return 1
+  fi
   scan=$(command_scan_text "${seg}")
   printf '%s' "${scan}" | grep -qEi "${SAFEDEPS_G_NPM_INSTALL_RE}" || return 1
   printf '%s' "${scan}" | grep -qEi -- '(^|[[:space:]])(-g|--global(=true)?|--location(=|[[:space:]]+)global|--no-package-lock|--package-lock=false)([[:space:]]|$)' && return 1
