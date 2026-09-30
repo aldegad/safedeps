@@ -606,4 +606,67 @@ expect_pass "a multi-line commit message that mentions an install" $'git commit 
 expect_pass "a single-quoted multi-line message that mentions an install" $'git commit -m \'fix\npip install evil==1.0.0\''
 pass "a newline inside quotes neither hides the next statement nor turns quoted text into one"
 
+# --- 10. A spec names the package the manager installs ------------------------
+# The deny message prescribes `safedeps check <eco> <pkg>@<spec>`, and an agent
+# runs the prescription by itself. So a spec read from the wrong token is a
+# bypass as soon as that token approves: `gem install --source <url> rake -v
+# 13.0.0` prescribed `check rubygems <url>@13.0.0`, which approves (no advisory
+# names a URL), and from then on any gem at 13.0.0 with that source passed.
+# Each row asserts the whole prescription.
+prescription() {
+  local command="$1" safe out
+  safe=$(mktemp -d "${tmp_root}/prescribe.XXXXXX")
+  shift
+  while [[ $# -ge 3 ]]; do
+    ( export SAFEDEPS_HOME="${safe}"
+      . lib/ledger/ledger.sh
+      safedeps_ledger_write_approved_spec "$1" "$2" "$3" >/dev/null ) \
+      || fail "the prescription fixture approval could be written"
+    shift 3
+  done
+  out=$(jq -nc --arg c "${command}" --arg cwd "${project_dir}" \
+    '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
+    HOME="${safe}/home" SAFEDEPS_HOME="${safe}" scripts/safedeps-pre-guard.sh 2>/dev/null)
+  [[ "${out}" == *'"deny"'* ]] || { printf 'no-deny;'; return 0; }
+  jq -r '.hookSpecificOutput.permissionDecisionReason' <<< "${out}" \
+    | sed -nE 's/.*run `([^`]*)` first.*/\1/p' \
+    | awk '{ gsub(/ && /, "\n"); print }' | awk 'NF { print $(NF-1), $NF }' | tr '\n' ';'
+}
+expect_prescription() {
+  local want="$1" got
+  shift
+  got=$(prescription "$@")
+  [[ "${got}" == "${want}" ]] || fail "the deny for \`$1\` prescribes ${want} (got: ${got})"
+}
+
+expect_prescription 'rubygems rake@13.0.0;' 'gem install --source https://rubygems.org rake -v 13.0.0'
+# The approval the old prescription produced does not pass any other gem.
+expect_prescription 'rubygems evil@13.0.0;' 'gem install --source https://rubygems.org evil -v 13.0.0' \
+  rubygems https://rubygems.org 13.0.0
+expect_prescription 'rubygems rake@13.0.0;' 'gem install -s https://rubygems.org rake -v 13.0.0'
+expect_prescription 'rubygems rake@13.0.0;' 'gem install -v 13.0.0 rake'
+expect_prescription 'rubygems rake@13.0.0;' 'gem install rake --vers 13.0.0'
+expect_prescription 'rubygems rails@7.1.0;' 'bundle add rails --source https://rubygems.org --version 7.1.0'
+expect_prescription 'crates.io ripgrep@13.0.0;' 'cargo install --root /tmp/tools ripgrep --version 13.0.0'
+expect_prescription 'crates.io ripgrep@13.0.0;' 'cargo install ripgrep --version 13.0.0 2>&1'
+expect_prescription 'nuget dotnet-ef@8.0.0;' 'dotnet tool install --tool-path /tmp/tools dotnet-ef --version 8.0.0'
+expect_prescription 'nuget Serilog@3.1.1;' 'dotnet add package -s https://api.nuget.org/v3/index.json Serilog -v 3.1.1'
+# An option the table does not know leaves its value as an operand. That adds
+# a check; it never replaces the package's own.
+expect_prescription 'rubygems rake@13.0.0;rubygems rdoc@13.0.0;' 'gem install rake --document rdoc -v 13.0.0'
+pass "a version flag pins the operands of the verb, not the value of an option in front of them"
+
+# An npm alias installs its target. `left-pad@npm:evil-pkg` prescribed
+# `check npm left-pad@npm`, which names neither package and never approves.
+expect_prescription 'npm evil-pkg@1.0.0;' 'pnpm add left-pad@npm:evil-pkg@1.0.0'
+expect_prescription 'npm @scope/evil@1.0.0;' 'npm install left-pad@npm:@scope/evil@1.0.0'
+expect_prescription 'no-deny;' 'pnpm add left-pad@npm:evil-pkg'
+# A name may start with a digit. `grep -o` read `7zip-bin@5.2.0` from its
+# first letter, as `zip-bin`; the `==` reader read no spec for `3to2` at all.
+expect_prescription 'npm 7zip-bin@5.2.0;' 'pnpm add 7zip-bin@5.2.0'
+expect_prescription 'npm 7zip-bin@5.2.0;' 'pnpm add 7zip-bin@5.2.0' npm zip-bin 5.2.0
+expect_prescription 'pypi 3to2@1.1.1;' 'pip install 3to2==1.1.1'
+expect_prescription 'pypi 3to2@1.1.1;' 'poetry add 3to2@1.1.1'
+pass "an alias is checked as its target, and a name that starts with a digit is read whole"
+
 printf 'consumer-forms passed\n'

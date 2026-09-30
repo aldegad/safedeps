@@ -1570,6 +1570,16 @@ guard_names_package_without_spec() {
         continue
       fi
 
+      # A comment ends the statement, and a redirection operator and its
+      # target belong to the shell, not to the manager. Only a bare operator
+      # is one: quotes are gone by now, so `requests>=3` is a specifier and a
+      # token that merely contains `>` has to stay an operand.
+      [[ "${tok}" == \#* ]] && break
+      if [[ "${tok}" =~ ^[0-9]*[\<\>]+$ ]]; then
+        skip_next=true
+        continue
+      fi
+
       case "${tok}" in
         # A flag that takes a separate argument consumes exactly that argument —
         # but WHICH flags take one is a property of the tool, not of the flag
@@ -1620,22 +1630,46 @@ guard_note_ungated() {
 guard_extract_flagged_specs() {
   # Specs carried by a flag rather than by `pkg@version`: pip's `name==version`,
   # gem's `-v`, cargo's `--vers`, bundle's and dotnet's `--version`, maven's
-  # `-Dartifact` coordinate. The package is the
-  # first operand after the verb, and the verb is found past any options between
-  # it and the manager (`gem --norc install x -v 1`, `cargo +nightly add x`,
+  # `-Dartifact` coordinate. The verb is found past any options between it and
+  # the manager (`gem --norc install x -v 1`, `cargo +nightly add x`,
   # `dotnet add App.csproj package X`), which the adjacent-token reading missed.
+  #
+  # Which operand a version flag pins is the part that has to be right, because
+  # the deny message prescribes `safedeps check` on it and an agent runs the
+  # prescription by itself. It used to be the first token after the verb that
+  # was not a flag, so a value-taking option in front of the package put its
+  # VALUE there: `gem install --source https://rubygems.org rake -v 13.0.0`
+  # prescribed `check rubygems https://rubygems.org@13.0.0`, which approves (no
+  # advisory names a URL), and from then on any gem at 13.0.0 installed with
+  # that source passed. Now the version binds to EVERY operand of the verb.
+  # An option's value is not an operand when the manager's own help says the
+  # option takes one (the tables below: `gem help install`, `bundle add
+  # --help`, `cargo install --help`, `cargo add --help`, and the .NET CLI
+  # reference for `dotnet add package` and `dotnet tool install|update`). Only
+  # mandatory values are listed. An option whose value is optional, or one the
+  # table does not know, leaves its value as an operand, and that can only add
+  # a check -- never skip the package the manager installs.
   #
   # Two kinds of line come out. A spec line is `<pkg><TAB><spec>`, and it is all
   # the gate reads (guard_operand_specs keeps two-field lines). A position line
   # is `@<TAB>bound<TAB><n>` for the token a spec was read from, or
-  # `@<TAB>consumed<TAB><n>` for a flag value the spec took, counting tokens
-  # across the whole text. The UNGATED record reads those, so that "pinned" and
-  # "is an operand" come from the one reading that produced the spec -- the same
+  # `@<TAB>consumed<TAB><n>` for an option value, counting tokens across the
+  # whole text. The UNGATED record reads those, so that "pinned" and "is an
+  # operand" come from the one reading that produced the spec -- the same
   # branch prints both, and there is no second copy of it to drift.
   awk '
-    function operand(s,   j) {
-      for (j = s; j <= NF; j++) if ($j !~ /^-/ && $j !~ /^[+]/) return j
-      return 0
+    BEGIN {
+      takes["gem"]    = " -v --version --vers --platform -i --install-dir -n --bindir --build-root -P --trust-policy --without -B --bulk-threshold -s --source --config-file "
+      takes["bundle"] = " -v --version -g --group -s --source -r --retry "
+      takes["cargo"]  = " --version --vers --index --registry --git --branch --tag --rev --path --root --message-format --color --config -Z --lockfile-path -F --features -j --jobs --profile --target-dir --rename --manifest-path --base "
+      takes["dotnet-add"]  = " -v --version -f --framework -s --source --package-directory --project "
+      takes["dotnet-tool"] = " -v --verbosity --version -a --arch --add-source --configfile --framework --source --tool-manifest --tool-path "
+      # Which of those carry the version.
+      vers["gem"]    = " -v --version --vers "
+      vers["bundle"] = " -v --version --vers "
+      vers["cargo"]  = " --version --vers "
+      vers["dotnet-add"]  = " -v --version --vers "
+      vers["dotnet-tool"] = " --version --vers "
     }
     function verb_after(s, want,   j) {
       for (j = s; j <= NF; j++) {
@@ -1644,24 +1678,45 @@ guard_extract_flagged_specs() {
       }
       return 0
     }
-    # A spec for the token at p, read from the token at v (0: from p itself,
-    # or from a `--flag=value` token, which no other operand can be).
-    function bind(p, spec, v) {
-      print $p "\t" spec
-      print "@\tbound\t" (base + p)
-      if (v) print "@\tconsumed\t" (base + v)
-    }
-    function versions(p, s, shortv,   j, v) {
+    function has(set, t) { return index(set, " " t " ") > 0 }
+    # Read tokens s..NF for one manager: bind every version found to every
+    # operand, and report every option value as consumed.
+    function operands(tool, s,   j, nc, nv, c, v, vp, t, x, y) {
+      nc = 0; nv = 0
       for (j = s; j <= NF; j++) {
-        if (($j == "--version" || $j == "--vers" || (shortv && $j == "-v")) && $(j + 1) != "") bind(p, $(j + 1), j + 1)
-        if ($j ~ /^--(vers|version)=/) { v = $j; sub(/^--(vers|version)=/, "", v); bind(p, v, 0) }
+        t = $j
+        # The shell, not the manager, owns these: a comment ends the statement,
+        # and a bare redirection operator and its target are not arguments at
+        # all. Binding `2>` as a package put a redirection into the prescribed
+        # command.
+        if (t ~ /^#/) break
+        if (t ~ /^[0-9]*[<>]+&?$/) { if (j < NF) print "@\tconsumed\t" (base + j + 1); j++; continue }
+        if (has(takes[tool], t) && j < NF) {
+          print "@\tconsumed\t" (base + j + 1)
+          if (has(vers[tool], t)) { v[++nv] = $(j + 1); vp[nv] = j + 1 }
+          j++
+          continue
+        }
+        if (t ~ /^--(vers|version)=/ && (has(vers[tool], "--version") || has(vers[tool], "--vers"))) {
+          sub(/^--(vers|version)=/, "", t); v[++nv] = t; vp[nv] = 0
+          continue
+        }
+        if (t ~ /^-/ || t ~ /^[+]/) continue
+        c[++nc] = j
       }
+      for (x = 1; x <= nc; x++)
+        for (y = 1; y <= nv; y++) {
+          print $(c[x]) "\t" v[y]
+          print "@\tbound\t" (base + c[x])
+        }
     }
     {
       for (i = 1; i <= NF; i++) {
         # `name==version`, and `name===version` (arbitrary equality, also an
         # exact pin). A wildcard such as `==1.0.*` is not a pin and stays out.
-        if ($i ~ /^[A-Za-z][A-Za-z0-9._-]*===?[A-Za-z0-9][A-Za-z0-9._+!~-]*$/) {
+        # A name may start with a digit (`3to2`); requiring a letter read no
+        # spec at all for those, so the install went unchecked.
+        if ($i ~ /^[A-Za-z0-9][A-Za-z0-9._-]*===?[A-Za-z0-9][A-Za-z0-9._+!~-]*$/) {
           split($i, parts, /===?/)
           print parts[1] "\t" parts[2]
           print "@\tbound\t" (base + i)
@@ -1671,35 +1726,22 @@ guard_extract_flagged_specs() {
         # OSV names a Maven package groupId:artifactId. A two-field coordinate
         # pins nothing and is left to the UNGATED record.
         if ($i ~ /^-Dartifact=[^:]+:[^:]+:[^:]+/) {
-          c = $i; sub(/^-Dartifact=/, "", c); split(c, m, ":")
+          c0 = $i; sub(/^-Dartifact=/, "", c0); split(c0, m, ":")
           print m[1] ":" m[2] "\t" m[3]
           print "@\tbound\t" (base + i)
         }
 
-        if ($i == "gem" && (k = verb_after(i + 1, "install")) && (p = operand(k + 1))) {
-          for (j = p + 1; j <= NF; j++) {
-            if (($j == "-v" || $j == "--version") && $(j + 1) != "") bind(p, $(j + 1), j + 1)
-            if ($j ~ /^--version=/) { v = $j; sub(/^--version=/, "", v); bind(p, v, 0) }
-          }
-        }
-
-        if ($i == "cargo" && ((k = verb_after(i + 1, "add")) || (k = verb_after(i + 1, "install"))) && (p = operand(k + 1))) {
-          versions(p, p + 1, 0)
-        }
-
-        if ($i == "bundle" && (k = verb_after(i + 1, "add")) && (p = operand(k + 1))) {
-          versions(p, p + 1, 1)
-        }
+        if ($i == "gem" && (k = verb_after(i + 1, "install"))) operands("gem", k + 1)
+        if ($i == "cargo" && ((k = verb_after(i + 1, "add")) || (k = verb_after(i + 1, "install")))) operands("cargo", k + 1)
+        if ($i == "bundle" && (k = verb_after(i + 1, "add"))) operands("bundle", k + 1)
 
         if ($i == "dotnet" && (k = verb_after(i + 1, "add"))) {
           for (j = k + 1; j <= NF; j++) if ($j == "package") break
-          if (j < NF) versions(j + 1, j + 2, 1)
+          if (j < NF) operands("dotnet-add", j + 1)
         }
 
         if ($i == "dotnet" && (k = verb_after(i + 1, "tool"))) {
-          if ($(k + 1) == "install" || $(k + 1) == "update") {
-            if ((p = operand(k + 2))) versions(p, p + 1, 0)
-          }
+          if ($(k + 1) == "install" || $(k + 1) == "update") operands("dotnet-tool", k + 2)
         }
       }
       base += NF
@@ -1733,8 +1775,11 @@ guard_operand_specs() {
           printf '%s\t%s\t%s\n' "${eco}" "${token%@*}" "${token##*@}"
         done
   else
+    # A name may start with a digit (`7zip-bin`, `3to2`). Requiring a letter did
+    # not drop the spec -- `grep -o` matched from the first letter, so
+    # `pnpm add 7zip-bin@5.2.0` was checked as `zip-bin@5.2.0`, another package.
     { printf '%s\n' "${text}" \
-      | grep -oE '(@[a-zA-Z0-9._/-]+/)?[a-zA-Z][a-zA-Z0-9._-]*@[a-zA-Z0-9._^~|<>=*+-]+' \
+      | grep -oE '(@[a-zA-Z0-9._/-]+/)?[a-zA-Z0-9][a-zA-Z0-9._-]*@[a-zA-Z0-9._^~|<>=*+-]+' \
         || { rc=$?; (( rc <= 1 )) || guard_mark_scan_failed; }; } \
       | while IFS= read -r token; do
           # An email / host operand (user@domain.tld) is never a package spec.
@@ -1781,6 +1826,11 @@ guard_extract_statement_text() {
     text=$(printf '%s' "${seg}" | tr -d "\"'" | tr '(){}' '    ')
   fi
   [[ "${eco}" == "pypi" ]] && text=$(printf '%s' "${text}" | sed -E 's/\[[^] ]*\]//g')
+  # An npm alias installs its target under another name: `left-pad@npm:evil-pkg`
+  # fetches evil-pkg. Read as written it prescribed `check npm left-pad@npm`,
+  # which names neither package and can never approve. The alias name is
+  # dropped, so the target is what the ledger judges, pinned or not.
+  [[ "${eco}" == "npm" ]] && text=$(printf '%s' "${text}" | sed -E 's/(^|[[:space:]=])(@[A-Za-z0-9._~-]+\/)?[A-Za-z0-9._~-]+@npm:/\1/g')
   printf '%s' "${text}"
 }
 
