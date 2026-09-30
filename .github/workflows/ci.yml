@@ -59,7 +59,7 @@ jobs:
           shellcheck --version
           shellcheck --severity=error \
             bin/safedeps \
-            lib/gates/*.sh lib/ledger/*.sh lib/npm/*.sh lib/providers/*.sh \
+            lib/install-grammar.sh lib/gates/*.sh lib/ledger/*.sh lib/npm/*.sh lib/providers/*.sh \
             scripts/safedeps-pre-guard.sh scripts/safedeps-post-verify.sh \
             scripts/safedeps-recheck-alert.sh scripts/release-gates.sh \
             scripts/test/smoke.sh scripts/test/e2e.sh

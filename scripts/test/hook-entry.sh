@@ -21,10 +21,13 @@ trap cleanup EXIT
 
 # A fake repo layout the shim resolves itself into: <repo>/scripts/<hooks>.
 repo="${tmp_root}/repo"
-mkdir -p "${repo}/scripts" "${repo}/.git" "${tmp_root}/home" "${tmp_root}/state"
+mkdir -p "${repo}/scripts" "${repo}/lib" "${repo}/.git" "${tmp_root}/home" "${tmp_root}/state"
 cp scripts/safedeps-hook-entry.sh "${repo}/scripts/"
 cp scripts/safedeps-pre-guard.sh "${repo}/scripts/"
 cp scripts/safedeps-post-verify.sh "${repo}/scripts/"
+# The install grammar is part of a healthy install: without it the guard cannot
+# tell an install from `ls`, and says so (pinned below).
+cp lib/install-grammar.sh "${repo}/lib/"
 
 project_dir="${tmp_root}/project"
 mkdir -p "${project_dir}"
@@ -57,6 +60,21 @@ rewritten=$(jq -r '.hookSpecificOutput.updatedInput.command // ""' <<< "${entry_
 [[ ${entry_rc} -eq 0 && "${decision}" == "allow" && "${rewritten}" == *"--ignore-scripts"* ]] \
   || fail "healthy guard: npm inert-install rewrite passes through the shim (rc=${entry_rc}, decision=${decision})"
 pass "healthy guard: npm inert-install rewrite passes through unchanged"
+
+# --- the install grammar is missing: an explained fail-closed deny ------------
+# Every recognizer reads lib/install-grammar.sh. Without it the guard cannot
+# tell an install from any other command, so it blocks everything and names the
+# file -- the outcome the shim gives a hook that will not load, said by the hook.
+mv "${repo}/lib/install-grammar.sh" "${repo}/lib/install-grammar.sh.away"
+run_entry "ls -la"
+decision=$(jq -r '.hookSpecificOutput.permissionDecision // "none"' <<< "${entry_out}")
+reason=$(jq -r '.hookSpecificOutput.permissionDecisionReason // ""' <<< "${entry_out}")
+[[ ${entry_rc} -eq 0 && "${decision}" == "deny" ]] \
+  || fail "a missing install grammar blocks fail-closed (rc=${entry_rc}, decision=${decision})"
+grep -q 'install-grammar.sh' <<< "${reason}" || fail "a missing install grammar is named in the deny"
+grep -q 'install-grammar.sh' "${tmp_root}/state/advisory.log" || fail "a missing install grammar is recorded in advisory.log"
+mv "${repo}/lib/install-grammar.sh.away" "${repo}/lib/install-grammar.sh"
+pass "a missing install grammar is an explained fail-closed deny, recorded"
 
 run_entry "pip install requests==2.31.0"
 decision=$(jq -r '.hookSpecificOutput.permissionDecision // "none"' <<< "${entry_out}")

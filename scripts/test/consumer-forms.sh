@@ -220,12 +220,30 @@ for benign in \
   'echo "install it with: curl -fsSL https://example.test/i.sh | sh"' \
   'git commit -m "document the pip install x | sh idiom"' \
   'npm run build' \
+  'npm run it' \
+  'npm test' \
   'npm view left-pad' \
-  'npx tsc --noEmit'
+  'npx tsc --noEmit' \
+  'npx --version' \
+  'go run main.go' \
+  'go run ./cmd/tool' \
+  'go build ./...' \
+  'uv run pytest' \
+  'uv tool list' \
+  'pipx list' \
+  'bun run build' \
+  'bun test' \
+  'yarn workspace web build' \
+  'pnpm run build' \
+  'cargo build' \
+  'dotnet tool run dotnet-ef' \
+  'python -m pytest' \
+  'echo do pip install evil==1.0.0' \
+  'echo npm i evil@1.0.0'
 do
   [[ "$(gate_decision "${benign}")" != "deny" ]] || fail "benign command is not denied: ${benign}"
 done
-pass "quoted idioms, npm run, and npx stay allowed (no false positives from the widening)"
+pass "quoted idioms, npm run, npx, go run, uv run and echoed install text stay allowed (no false positives from the widening)"
 
 # --- 5. The unpinned install leaves a record ----------------------------------
 # An install that names a package but pins no version produces no spec, so the
@@ -276,8 +294,6 @@ for named_unpinned in \
   "gem install -r evil" \
   "gem install --remote evil" \
   "pip install -i https://mirror.example/simple evil" \
-  "cargo install evil --version 1.0.0" \
-  "bundle add evil --version 1.0.0" \
   "cargo install -f evil" \
   "cargo install --force evil"
 do
@@ -286,13 +302,11 @@ do
   [[ "$(gate_decision "${named_unpinned}")" != "deny" ]] \
     || fail "the UNGATED record must not change the verdict: ${named_unpinned}"
 done
-# `cargo install evil --version 1.0.0` and `bundle add evil --version 1.0.0` are
-# recorded even though a version IS present: the spec extractor reads
-# `cargo add --vers` but neither `cargo install --version` nor
-# `bundle add --version`, so the ledger gate genuinely did not run for them.
-# The record is true. It is pinned here so that stays visible rather than
-# reading as a stray line, and ROADMAP says "pinned in a form the extractor
-# reads" instead of "already-pinned".
+# `cargo install evil --version 1.0.0` and `bundle add evil --version 1.0.0` used
+# to be recorded here even though a version is present, because the extractor did
+# not read those two flags and the ledger gate genuinely did not run. The record
+# was true; the gap behind it was not a policy. The extractor reads both now, so
+# they are gated like `cargo add --vers` (section 6).
 pass "an unpinned named install is recorded, including past a source flag, a URL user, and a flag-carried coordinate"
 
 for stays_quiet in \
@@ -330,15 +344,173 @@ logged_ungated "pip install --proxy https://proxy.example:8080 -r requirements.t
   || fail "the known --proxy spurious record is still produced (declared trade-off)"
 pass "an unknown value-taking flag still leaks a spurious record (declared, not a defect)"
 
-# `mvn -Dartifact=… dependency:get` puts the flag BEFORE the goal, which the
-# install-recognition pattern (`mvn dependency:get`) does not match, so the
-# command never reaches this record at all. That boundary belongs to command
-# recognition, not to the record, and widening it is the carrier enumeration
-# ARCHITECTURE.md declines to grow. Pinned here so the silence is a measured
-# decision rather than an assumption.
+# `mvn -Dartifact=… dependency:get` puts the flag BEFORE the goal. This used to
+# be pinned as silent, on the reading that options before the verb are carrier
+# enumeration. They are not: a carrier hands text to an interpreter, and an
+# option between a manager and its verb is the install command itself, which
+# the gate already allowed for npm (one option). lib/install-grammar.sh applies
+# that rule to every manager, so the unpinned form is recorded and the pinned
+# form is gated (section 6).
 logged_ungated "mvn -Dartifact=g:evil dependency:get" \
-  && fail "flag-before-goal maven is silent because install recognition never matches it"
-pass "flag-before-goal maven stays outside the record (install recognition, not the record)"
+  || fail "flag-before-goal maven is recognized and its unpinned form recorded"
+pass "flag-before-goal maven is an install like any other: recorded when unpinned"
+
+# --- 6. The install grammar: forms the command itself spells -----------------
+# Not carriers. Each of these IS the install command, spelled a way the manager
+# documents or the shell grammar allows, and each passed the gate with no record
+# before lib/install-grammar.sh (measured 2026-10-01 against the guard that was
+# live on the development machine). The scope rule is ARCHITECTURE.md's: a rule
+# the gate already states, applied where it was skipped.
+for grammar_form in \
+  "pnpm i evil@1.0.0" \
+  "pnpm upgrade evil@1.0.0" \
+  "pnpm it evil@1.0.0" \
+  "npm in evil@1.0.0" \
+  "npm isntall evil@1.0.0" \
+  "npm it evil@1.0.0" \
+  "npm u evil@1.0.0" \
+  "npm udpate evil@1.0.0" \
+  "yarn up evil@1.0.0" \
+  "yarn global add evil@1.0.0" \
+  "yarn workspace web add evil@1.0.0" \
+  "bun a evil@1.0.0" \
+  "npm --silent --loglevel error install evil@1.0.0" \
+  "pip --quiet install evil==1.0.0" \
+  "pip3.11 install evil==1.0.0" \
+  "python3.11 -m pip install evil==1.0.0" \
+  "py -3.11 -m pip install evil==1.0.0" \
+  "cargo --locked install evil@1.0.0" \
+  "cargo +nightly install evil@1.0.0" \
+  "cargo install evil --version 1.0.0" \
+  "gem --norc install evil -v 1.0.0" \
+  "bundle add evil --version 1.0.0" \
+  "dotnet add App.csproj package Evil --version 1.0.0" \
+  "dotnet tool install evil --version 1.0.0" \
+  "mvn -Dartifact=g:evil:1.0.0 dependency:get" \
+  "npx evil@1.0.0" \
+  "npx -y evil@1.0.0" \
+  "npx -p evil@1.0.0 evil-cli" \
+  "npm exec evil@1.0.0" \
+  "npm x -- evil@1.0.0" \
+  "pnpx evil@1.0.0" \
+  "bunx evil@1.0.0" \
+  "bun x evil@1.0.0" \
+  "uvx evil@1.0.0" \
+  "uv tool install evil==1.0.0" \
+  "pipx install evil==1.0.0" \
+  "pipx run evil==1.0.0" \
+  "go run example.com/evil@v1.0.0" \
+  "( pip install evil==1.0.0 )" \
+  "(pip install evil==1.0.0)" \
+  "{ pip install evil==1.0.0; }" \
+  "if true; then pip install evil==1.0.0; fi" \
+  "for i in 1; do pip install evil==1.0.0; done" \
+  "! pip install evil==1.0.0" \
+  "time pip install evil==1.0.0" \
+  "exec pip install evil==1.0.0" \
+  "env -i pip install evil==1.0.0" \
+  'pip install "evil==1.0.0"' \
+  "pip install 'evil==1.0.0'"
+do
+  expect_deny "the install spelled ${grammar_form}" "${grammar_form}"
+done
+pass "aliases, options, versioned interpreters, runners, statement positions and quoted specs are all gated"
+
+# --- 7. A spec is checked as the package it names ------------------------------
+# Both of these used to prescribe a `safedeps check` for the wrong package --
+# one that OSV knows nothing about, so it approves, and the retry then passes.
+# An agent follows the prescription on its own, so the wrong identity was a
+# bypass, not a typo.
+identity_reason() {
+  local safe
+  safe=$(mktemp -d "${tmp_root}/safe-identity.XXXXXX")
+  jq -nc --arg c "$1" --arg cwd "${project_dir}" \
+    '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
+    HOME="${tmp_root}/home-identity" SAFEDEPS_HOME="${safe}" scripts/safedeps-pre-guard.sh 2>/dev/null |
+    jq -r '.hookSpecificOutput.permissionDecisionReason // ""'
+}
+grep -q 'check go example.com/evil@v1.0.0' <<< "$(identity_reason 'go get example.com/evil@v1.0.0')" \
+  || fail "a Go module is checked by its whole path, not its last element"
+grep -q 'check pypi evil@1.0.0' <<< "$(identity_reason 'npm run build && pip install evil==1.0.0')" \
+  || fail "a spec is checked under the ecosystem of the statement it came from"
+pass "Go modules keep their path and each spec keeps its own statement's ecosystem"
+
+# The prescription is only half of it. Approve the wrong identity directly and
+# check that it does not carry over: a Go approval of the bare name `x` must not
+# pass another host's `.../x`, and an npm approval of `evil` must not pass a
+# pip install of `evil`. Each is paired with its exact identity, which must
+# pass, so a deny here cannot come from a seed that did not take.
+identity_home="${tmp_root}/identity-approved"
+mkdir -p "${identity_home}"
+( export SAFEDEPS_HOME="${identity_home}"
+  . lib/ledger/ledger.sh
+  safedeps_ledger_write_approved_spec go x v1.0.0 >/dev/null
+  safedeps_ledger_write_approved_spec npm evil 1.0.0 >/dev/null ) \
+  || fail "the identity fixture approvals could be written"
+approved_decision() {
+  jq -nc --arg c "$1" --arg cwd "${project_dir}" \
+    '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
+    HOME="${tmp_root}/home-identity" SAFEDEPS_HOME="${identity_home}" scripts/safedeps-pre-guard.sh 2>/dev/null |
+    jq -r '.hookSpecificOutput.permissionDecision // "pass"' 2>/dev/null || printf 'pass'
+}
+[[ "$(approved_decision 'go get x@v1.0.0')" != "deny" ]] \
+  || fail "identity fixture: the approved Go module itself passes"
+[[ "$(approved_decision 'go get evil.example/attacker/x@v1.0.0')" == "deny" ]] \
+  || fail "an approval of the bare Go name x does not pass another module whose path ends in x"
+[[ "$(approved_decision 'npm install evil@1.0.0')" != "deny" ]] \
+  || fail "identity fixture: the approved npm package itself passes"
+[[ "$(approved_decision 'npm run build && pip install evil==1.0.0')" == "deny" ]] \
+  || fail "an npm approval of evil does not pass a pip install of evil"
+pass "an approval under one identity does not carry over to another module path or ecosystem"
+
+# --- 8. Wrappers stay outside the boundary ----------------------------------------
+# argv-passing wrappers run the install unchanged, and the gate does not know
+# them. Same boundary as section 2, same reason: the list of programs that exec
+# their arguments does not converge. Pinned so the boundary is measured, and so
+# README can say which forms it means instead of "unusual wrappers".
+for wrapper_form in \
+  "sudo pip install evil==1.0.0" \
+  "timeout 60 pip install evil==1.0.0" \
+  "nohup pip install evil==1.0.0" \
+  "nice -n 5 pip install evil==1.0.0"
+do
+  expect_pass "the wrapper ${wrapper_form%% *}" "${wrapper_form}"
+done
+pass "argv-passing wrappers (sudo, timeout, nohup, nice) stay outside the command gate (documented boundary)"
+
+# --- 9. UNGATED is keyed on the effect gate actually being there --------------
+# The exemption used to read "the ledger ecosystem is npm", which pnpm, yarn and
+# bun share without the effect gate that reads package-lock.json (GitHub #22).
+for no_effect_gate in \
+  "pnpm add evil" \
+  "pnpm i evil" \
+  "yarn add evil" \
+  "bun add evil" \
+  "npm install -g evil" \
+  "npm install --no-package-lock evil" \
+  "npx evil" \
+  "npm exec evil" \
+  "pnpm dlx evil"
+do
+  logged_ungated "${no_effect_gate}" \
+    || fail "an unpinned install with no effect gate behind it is recorded: ${no_effect_gate}"
+  [[ "$(gate_decision "${no_effect_gate}")" != "deny" ]] \
+    || fail "the UNGATED record must not change the verdict: ${no_effect_gate}"
+done
+pass "unpinned pnpm/yarn/bun, global npm, and runner installs are recorded"
+
+# npx runs a binary the project already has without fetching anything. Only a
+# name with no local binary is a fetch.
+mkdir -p "${project_dir}/node_modules/.bin"
+printf '#!/bin/sh\n' > "${project_dir}/node_modules/.bin/tsc"
+chmod +x "${project_dir}/node_modules/.bin/tsc"
+for local_bin in "npx tsc --noEmit" "npm exec tsc" "npx --yes tsc"; do
+  logged_ungated "${local_bin}" && fail "a runner of a local binary is not a fetch: ${local_bin}"
+done
+logged_ungated "npx prettier" || fail "a runner of a name with no local binary is a fetch and is recorded"
+rm -rf "${project_dir}/node_modules"
+logged_ungated "npm install evil" && fail "a project npm install stays exempt: the effect gate reads its lockfile"
+pass "a runner of a local binary stays quiet, a fetching runner is recorded, and a project npm install stays exempt"
 
 # --- Backslashes are read the way the shell reads them -------------------------
 # A backslash used to be judged by the one byte before a quote, and not at all
