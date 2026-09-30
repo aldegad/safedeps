@@ -25,11 +25,11 @@
 #      byte. This used to read "in characters", and the change is the whole
 #      observable difference the awk rewrite made: a multibyte character inside
 #      a quoted region blanked to one space and now blanks to one space per
-#      byte. It is stated as a rule rather than as history because the character
-#      reading is what made the old loop quadratic -- `${input:i:1}` counts
-#      characters from the start on every index -- so byte orientation is not an
-#      incidental side effect of the rewrite, it is the thing that made it
-#      linear.
+#      byte. An earlier version of this note said byte orientation is what made
+#      the scan linear. It is not: `substr($0, i, 1)` over bytes was still
+#      quadratic in BSD awk, because each call re-measures the string (1MB on
+#      one line took 28.5s, caught in review). Splitting the record once is what
+#      made it linear; bytes are only what LC_ALL=C hands the split.
 #   2. Outside quotes, bytes pass through unchanged -- including a
 #      backslash, which does NOT escape the quote that follows it.
 #   3. A quote character that opens or closes a region is itself blanked.
@@ -264,5 +264,73 @@ for ((c = 0; c < fuzz_cases; c++)); do
 done
 [[ ${control_hit} -gt 0 ]] || fail "control: a mutated spec produced no divergence, so the differential above measures nothing"
 pass "control: mutated spec diverges on ${control_hit}/${fuzz_cases} inputs, so the differential can fail"
+
+# --- when the scanner itself fails ----------------------------------------------
+# Every predicate reads this function's output inside a condition or a command
+# substitution, where `set -e` is off. A scan that fails therefore returns empty
+# text, and empty text reads as "no install": a scanner failure became a silent
+# pass (caught in review, measured through the entry shim). These cases fail
+# awk on purpose and require the guard to say UNDECIDED instead of nothing.
+#
+# The shim keys on the marker line inside the scanner's awk program, so it can
+# fail the scanner alone and leave every other awk call on the path working.
+real_awk=$(command -v awk)
+fail_tmp=$(mktemp -d "${TMPDIR:-/tmp}/safedeps-scanfail.XXXXXX")
+trap 'rm -rf "${fail_tmp}"' EXIT
+mkdir -p "${fail_tmp}/scanner-only" "${fail_tmp}/all-awk" "${fail_tmp}/project"
+printf '{"dependencies":{}}\n' > "${fail_tmp}/project/package.json"
+cat > "${fail_tmp}/scanner-only/awk" <<SHIM
+#!/usr/bin/env bash
+case "\$*" in *"safedeps:command_scan_text"*) exit 2 ;; esac
+exec '${real_awk}' "\$@"
+SHIM
+printf '#!/usr/bin/env bash\nexit 127\n' > "${fail_tmp}/all-awk/awk"
+chmod +x "${fail_tmp}/scanner-only/awk" "${fail_tmp}/all-awk/awk"
+
+# Runs the guard through the entry shim, the way the engines do.
+scanfail_guard() {
+  local bin="$1" command="$2" home
+  home=$(mktemp -d "${fail_tmp}/home.XXXXXX")
+  SCANFAIL_OUT=$(jq -nc --arg c "${command}" --arg cwd "${fail_tmp}/project" \
+    '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
+    PATH="${bin:+${bin}:}${PATH}" HOME="${home}" SAFEDEPS_HOME="${home}/safe" \
+    scripts/safedeps-hook-entry.sh pre 2>"${home}/stderr") || fail "the hook exited non-zero for: ${command}"
+  SCANFAIL_ERR=$(cat "${home}/stderr")
+  SCANFAIL_LOG=$(cat "${home}/safe/advisory.log" 2>/dev/null || printf '')
+  SCANFAIL_DECISION=$(jq -r '.hookSpecificOutput.permissionDecision // "pass"' <<< "${SCANFAIL_OUT:-{\}}" 2>/dev/null || printf 'pass')
+  SCANFAIL_REASON=$(jq -r '.hookSpecificOutput.permissionDecisionReason // ""' <<< "${SCANFAIL_OUT:-{\}}" 2>/dev/null || printf '')
+}
+
+# Control: with a working scanner the same command is denied as a finding. This
+# is what the failing cases would silently lose.
+scanfail_guard "" "pip install requests==2.0.0"
+[[ "${SCANFAIL_DECISION}" == "deny" ]] || fail "control: a working scanner denies an unapproved pip install (got: ${SCANFAIL_DECISION})"
+if grep -q 'UNDECIDED' <<< "${SCANFAIL_REASON}"; then fail "control: a working scanner answers with a finding, not UNDECIDED"; fi
+pass "control: with a working scanner the install is denied as a finding"
+
+for failing_command in \
+  "pip install requests==2.0.0" \
+  "echo hi; pip install requests==2.0.0" \
+  "bash -c \"pip install requests==2.0.0\"" \
+  "npm install left-pad@1.3.0"; do
+  scanfail_guard "${fail_tmp}/scanner-only" "${failing_command}"
+  [[ "${SCANFAIL_DECISION}" == "deny" ]] \
+    || fail "a failed scanner does not turn an install into a pass: ${failing_command} (got: ${SCANFAIL_DECISION})"
+  grep -q 'UNDECIDED' <<< "${SCANFAIL_REASON}" \
+    || fail "a failed scanner is reported as undecided, not as a finding: ${failing_command}"
+  grep -q 'scanner failed' <<< "${SCANFAIL_LOG}" \
+    || fail "a failed scanner is recorded in advisory.log: ${failing_command}"
+done
+pass "a scanner-only awk failure denies install-looking commands as UNDECIDED, including npm (no inert rewrite on an unread command)"
+
+scanfail_guard "${fail_tmp}/scanner-only" "ls -la"
+[[ "${SCANFAIL_DECISION}" == "pass" ]] || fail "a failed scanner does not block a command that does not look like an install (got: ${SCANFAIL_DECISION})"
+grep -q 'scanner' <<< "${SCANFAIL_ERR}" || fail "a failed scanner is announced even when the command is allowed"
+grep -q 'scanner failed' <<< "${SCANFAIL_LOG}" || fail "a failed scanner is recorded even when the command is allowed"
+pass "a failed scanner lets a non-install through, and says so on stderr and in advisory.log"
+
+scanfail_guard "${fail_tmp}/all-awk" "pip install requests==2.0.0"
+[[ "${SCANFAIL_DECISION}" == "deny" ]] || fail "with awk failing everywhere an install is still denied (got: ${SCANFAIL_DECISION})"
+pass "with awk failing everywhere an install is still denied"
 
 printf 'scan-contract: all checks passed\n'
