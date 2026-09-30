@@ -18,6 +18,9 @@ Claude Code + Codex CLI only — not Grok/Hermes yet. When a hook capability dif
 - **OSV is the single canonical advisory truth.** KEV is a hard-risk overlay; GHSA is enrichment. Do not add a second co-equal truth.
 - **No silent fallback.** A provider miss is fail-closed. Every bypass must be observable and logged.
 - **`lib/truth-sources.sh` is on the PreToolUse path, so breaking it blocks Bash machine-wide.** The guard sources it on every Bash call to report a moved advisory source, unconditionally and without an environment override (an override was a silent off switch for the notice, caught in review). A parse error there takes the guard down, which the entry shim turns into an explained fail-closed deny — the right direction, and a wider blast radius than the file's size suggests. Edit it in a worktree and run `npm test` before it reaches the main checkout.
+- **The install grammar is defined once, in `lib/install-grammar.sh`, and it is on the PreToolUse path.** Every recognizer in both hooks reads it: the pre-guard's install and runner patterns, ecosystem detection, spec extraction, the `--ignore-scripts` rewrite, and the post-verify backstop. It replaced seven hand-kept copies of the verb list that had drifted apart (`pnpm i`, `npm isntall`, `npx <pkg>@<ver>` and more passed the gate, v2.18.0). Add an alias, a runner, or a statement position there and nowhere else. A missing grammar is an explained fail-closed deny for every Bash call, so edit it in a worktree like `lib/truth-sources.sh`. **Its scope follows the carrier rule in ARCHITECTURE.md**: the manager's own documented spellings and the shell's statement grammar are in; argv-passing wrappers (`sudo`, `timeout`, `nohup`, `nice`, `xargs`) are out and pinned as unjudged in `scripts/test/consumer-forms.sh`. Moving that line is a decision to record, not a regex to widen.
+- **A scanner that fails must not read as "no install".** Every predicate reads `command_scan_text` inside a condition or a command substitution, where `set -e` is off, so a failed awk returns empty text. The scanner records its failure in a per-run mark file, and every path that allows a command settles it first: install-looking (judged without the scanner) is an `UNDECIDED` deny, anything else runs with the failure on stderr and in `advisory.log`. A new allow path must call `guard_settle_scan_failure`, and a new scanning helper must write the mark on failure.
+- **Quotes and backslashes are read the way the shell reads them.** Inside double quotes backslashes pair up; outside quotes a backslash escapes the next byte; there are no escapes in single quotes; an escaped newline and a newline inside quotes do not end a statement and are joined before anything splits the command into lines. Each earlier approximation blanked text the shell executes, which is a bypass, not a false negative to tune. `scripts/test/scan-contract.sh` holds the rules as a runnable reference.
 - **`advisory.log` is derived from `SAFEDEPS_HOME`, never from its own variable.** It is not just a log: `re-check` reads it as the oracle for whether an approval ever happened, so a movable path let the same environment that forges a ledger entry also supply its provenance (measured — the forgery flag disappeared). Record and ledger move together or not at all. Moved advisory sources (provider URLs, closure fixtures, a non-default ledger TTL) stay allowed and are announced there once per run: a run that answered from a mirror must not look like a run that answered from OSV.
 - **No SaaS dependency** — local CLI + public DBs only. The tool itself has **zero npm dependencies**; keep it that way (it is a security property, not an oversight).
 - The ledger is a same-user convenience cache, **not** a security boundary against a same-user attacker (until signing/re-query lands). Do not document it as one.
@@ -108,6 +111,60 @@ where the input came from gets skipped entirely.
 - Branch off `main`; do not commit to `main` directly.
 - Do **not** commit or push unless asked. Use logical commits with clear messages.
 - **Never resolve merge conflicts in the main checkout.** The installed hooks execute the main checkout live; conflict markers there blocked Bash machine-wide on 2026-08-04. Integrate in your worktree (merge `main` into your branch, resolve, test), then move `main` forward fast-forward-only (`git merge --ff-only`). The entry shim softens the blast, but the discipline removes the window.
+- **Write commit messages through a quoted heredoc** (`git commit -F - <<'EOF'`), never `-m "..."`. Inside double quotes a backtick is command substitution, and this repo's messages quote install commands in backticks as a matter of course: a message about a bypass would run the bypass. The live gate caught one on 2026-10-01; do not rely on that.
+- **A harness judges commands; it never runs them.** Feed a form to the guard as a payload. Do not `bash -c` it to "see what the shell does" -- the form is an install by construction. When shell semantics are the question, use an `echo` in place of the package manager.
+
+## Release procedure
+
+A release is every step below, in order. The list exists because steps were
+skipped and nothing noticed: v2.16.0 through v2.17.1 were never tagged,
+released or published, so npm sat on 2.15.8 until v2.17.2 caught it up; v2.17.2
+shipped with no ROADMAP entry and a stale "current" line; and tags and a
+publish went out while ubuntu CI had been red for eight pushes. Do not start a
+release without the intent to finish it, and do not report one finished while
+any step is open.
+
+1. **Integrate in a worktree.** Merge every finished plan branch into
+   `plan/release-vX.Y.Z` and resolve conflicts there, never in the main checkout.
+2. **Bump the version once.** `package.json` `version` and `bin/safedeps`
+   `SAFEDEPS_VERSION` together (see Version SSoT). A change that moves a verdict
+   is a feature for this purpose: minor, not patch.
+3. **Record it.** A `ROADMAP.md` section for the version -- what changed, how it
+   was verified, measured numbers with the conditions they were measured under
+   -- and the same change in `ROADMAP.ko.md`. Update the "current: vX.Y.Z" line.
+   Update README, ARCHITECTURE and SKILL, with their `.ko` mirrors, wherever a
+   stated proposition moved. Credit issue reporters.
+4. **Run the consistency audit** (next section) and read its ceiling. Then have
+   someone other than the author re-read the changed propositions.
+5. **Test on both platforms before anything leaves the machine.** `npm test` on
+   macOS, and the CI steps on Linux: ubuntu:24.04 with jq, procps, git, node,
+   npm, shellcheck and CI's pinned gitleaks, running CI's exact shellcheck list,
+   `npm test`, `./bin/safedeps scan secrets --repo`, and `npm pack --dry-run`.
+   Record `uptime` beside each run. Linux-only failures (GNU `stat -f`, the
+   128KB `E2BIG` limit, ext4 directory order) were invisible on macOS and kept
+   CI red for a month.
+6. **Run the release gates.** `scripts/release-gates.sh --strict` (secret scan,
+   dependency audit) passes, the package has zero runtime dependencies, and
+   `npm pack --dry-run` lists only what `files` allows.
+7. **Move main forward.** From the main checkout, `git merge --ff-only
+   plan/release-vX.Y.Z`. The installed hooks now run the new code: push one
+   benign command and one install through `scripts/safedeps-hook-entry.sh pre`
+   and read both answers before going on.
+8. **Push and watch CI.** `git push origin main`, then wait for the run on that
+   commit. Both `test (ubuntu-latest)` and `test (macos-latest)` must be green.
+   Red stops the release: fix forward, and do not tag a red commit.
+9. **Tag and publish the GitHub release.** An annotated tag `vX.Y.Z` on the
+   green commit, pushed, and `gh release create vX.Y.Z --notes-file <notes>`.
+   The notes cover every user-visible change since the previous tag (derive them
+   from `git log <previous-tag>..vX.Y.Z` and the ROADMAP section): security
+   fixes first, each with what could get past before and how it is verified
+   now, then fixes, then anything a user has to do.
+10. **Publish to npm.** From a clean checkout of the tag, `npm whoami` (the
+    owner logs in; publishing needs their 2FA), `npm publish --access public`,
+    then confirm `npm view @aldegad/safedeps version` is X.Y.Z and that the
+    published tarball's file list matches `npm pack --dry-run` of the tag.
+11. **Close the loop.** Reply on every GitHub issue the release fixes with the
+    fix commit and the release link, and close it.
 
 ## Consistency audit (before release or doc changes)
 
