@@ -1402,11 +1402,18 @@ guard_runner_operands() {
   # value passed to `npx wrangler ...` from being misread as a `pkg@spec`.
   #
   # Quotes are delimiters here, not data: `npx "cowsay@1.5.0"` runs cowsay@1.5.0.
+  #
+  # A failed tr or sed here is a failed spec reader (see guard_operand_specs):
+  # it yields no operand, and no operand reads as nothing to check.
   local text after want_value tok
   local -a toks=()
-  text=$(printf '%s' "$1" | tr -d "\"'")
+  text=$(printf '%s' "$1" | tr -d "\"'") || guard_mark_scan_failed
+  # The first line is taken here rather than by `head -n1`, which can close the
+  # pipe on a sed that still has lines to write, and pipefail reads that SIGPIPE
+  # as a failed reader.
   after=$(printf '%s\n' "${text}" \
-    | sed -nE "s/^(.*[[:space:];&|({!])?(${SAFEDEPS_G_RUNNER_BODY})([[:space:]]|\$)//p" | head -n1)
+    | sed -nE "s/^(.*[[:space:];&|({!])?(${SAFEDEPS_G_RUNNER_BODY})([[:space:]]|\$)//p") || guard_mark_scan_failed
+  after="${after%%$'\n'*}"
   [[ "${after}" =~ [^[:space:]] ]] || return 0
 
   local named_by_option=false
@@ -1869,17 +1876,25 @@ guard_mark_scan_failed() {
 # walks this same text, so that its token positions are the extractor's.
 guard_extract_statement_text() {
   local eco="$1" seg="$2" runner="$3" text
+  # Each transform below is a spec reader, and a failed one leaves no text or
+  # the wrong text, which reads as no spec. So a failure is marked the way
+  # guard_operand_specs marks its own (the runner reader marks inside).
   if [[ "${runner}" == true ]]; then
     text=$(guard_runner_operands "${seg}")
   else
-    text=$(printf '%s' "${seg}" | tr -d "\"'" | tr '(){}' '    ')
+    text=$(printf '%s' "${seg}" | tr -d "\"'" | tr '(){}' '    ') || guard_mark_scan_failed
   fi
-  [[ "${eco}" == "pypi" ]] && text=$(printf '%s' "${text}" | sed -E 's/\[[^] ]*\]//g')
+  if [[ "${eco}" == "pypi" ]]; then
+    text=$(printf '%s' "${text}" | sed -E 's/\[[^] ]*\]//g') || guard_mark_scan_failed
+  fi
   # An npm alias installs its target under another name: `left-pad@npm:evil-pkg`
   # fetches evil-pkg. Read as written it prescribed `check npm left-pad@npm`,
   # which names neither package and can never approve. The alias name is
   # dropped, so the target is what the ledger judges, pinned or not.
-  [[ "${eco}" == "npm" ]] && text=$(printf '%s' "${text}" | sed -E 's/(^|[[:space:]=])(@[A-Za-z0-9._~-]+\/)?[A-Za-z0-9._~-]+@npm:/\1/g')
+  if [[ "${eco}" == "npm" ]]; then
+    text=$(printf '%s' "${text}" | sed -E 's/(^|[[:space:]=])(@[A-Za-z0-9._~-]+\/)?[A-Za-z0-9._~-]+@npm:/\1/g') \
+      || guard_mark_scan_failed
+  fi
   printf '%s' "${text}"
 }
 

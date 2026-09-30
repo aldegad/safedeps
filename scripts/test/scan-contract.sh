@@ -418,4 +418,54 @@ scanfail_guard "${fail_tmp}/all-awk" "pip install requests==2.0.0"
 [[ "${SCANFAIL_DECISION}" == "deny" ]] || fail "with awk failing everywhere an install is still denied (got: ${SCANFAIL_DECISION})"
 pass "with awk failing everywhere an install is still denied"
 
+# --- when a spec reader's sed or tr fails ---------------------------------------
+# The spec readers rewrite a statement before reading it: quotes and grouping
+# characters are removed, extras are removed, an npm alias is replaced by its
+# target, a runner's operands are cut out. Each runs in a command substitution,
+# so a failed sed or tr left no text, no text read as no spec, and a pinned
+# install passed as if it named nothing to check. Each shim fails one reader
+# alone, keyed on its script.
+real_sed=$(command -v sed)
+real_tr=$(command -v tr)
+for reader in extras alias runner group; do
+  mkdir -p "${fail_tmp}/reader-${reader}"
+  tool=sed real="${real_sed}"
+  case "${reader}" in
+    extras) key='\[[^] ]*\]' ;;
+    alias) key='@npm:/' ;;
+    runner) key='(npx|pnpx|bunx|uvx)' ;;
+    group) key='(){}' tool=tr real="${real_tr}" ;;
+  esac
+  cat > "${fail_tmp}/reader-${reader}/${tool}" <<SHIM
+#!/usr/bin/env bash
+case "\$*" in *'${key}'*) exit 2 ;; esac
+exec '${real}' "\$@"
+SHIM
+  chmod +x "${fail_tmp}/reader-${reader}/${tool}"
+done
+
+# reader<TAB>command
+sed_rows=(
+  $'extras\tpip install \'evil[x]==1.0.0\''
+  $'alias\tpnpm add left-pad@npm:evil-pkg@1.0.0'
+  $'runner\tnpx evil@1.0.0'
+  $'group\tpip install evil==1.0.0'
+)
+for row in "${sed_rows[@]}"; do
+  reader="${row%%$'\t'*}" failing_command="${row#*$'\t'}"
+  # Control: with sed working the same command is denied as a finding.
+  scanfail_guard "" "${failing_command}"
+  if [[ "${SCANFAIL_DECISION}" != "deny" ]] || grep -q 'UNDECIDED' <<< "${SCANFAIL_REASON}"; then
+    fail "control: a working ${reader} reader denies ${failing_command} as a finding (got: ${SCANFAIL_DECISION})"
+  fi
+  scanfail_guard "${fail_tmp}/reader-${reader}" "${failing_command}"
+  [[ "${SCANFAIL_DECISION}" == "deny" ]] \
+    || fail "a failed ${reader} reader does not turn ${failing_command} into a pass (got: ${SCANFAIL_DECISION})"
+  grep -q 'UNDECIDED' <<< "${SCANFAIL_REASON}" \
+    || fail "a failed ${reader} reader is reported as undecided: ${failing_command}"
+  grep -q 'scanner failed' <<< "${SCANFAIL_LOG}" \
+    || fail "a failed ${reader} reader is recorded in advisory.log: ${failing_command}"
+done
+pass "a failed sed or tr in a spec reader denies the install as UNDECIDED (${#sed_rows[@]} readers, each against a working control)"
+
 printf 'scan-contract: all checks passed\n'
