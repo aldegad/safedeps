@@ -477,9 +477,17 @@ safedeps_ledger_effect_index() {
 
   emit_chunk() {
     local files=("$@")
+    local out
     [[ ${#files[@]} -gt 0 ]] || return 0
-    if jq -r --argjson now_epoch "${now_epoch}" --arg context_hash "${context_hash}" \
-      "${program}" "${files[@]}" 2>/dev/null; then
+    # Held until jq succeeds. jq prints the entries it read before the one it
+    # cannot parse, so passing its output straight through and then retrying
+    # file by file printed those entries twice. Which entries came first is the
+    # filesystem's directory order: APFS happened to put the broken file first,
+    # ext4 did not, so the duplicates only showed on Linux (measured on
+    # ubuntu:24.04: 4 index lines for 2 live specs).
+    if out=$(jq -r --argjson now_epoch "${now_epoch}" --arg context_hash "${context_hash}" \
+      "${program}" "${files[@]}" 2>/dev/null); then
+      [[ -z "${out}" ]] || printf '%s\n' "${out}"
       return 0
     fi
     # One of these did not parse. Take them one at a time so the rest survive,
