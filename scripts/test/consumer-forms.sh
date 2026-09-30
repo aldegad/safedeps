@@ -237,6 +237,9 @@ for benign in \
   'pnpm run build' \
   'cargo build' \
   'dotnet tool run dotnet-ef' \
+  'dotnet package list' \
+  'dotnet package remove Serilog' \
+  'dotnet package search Serilog' \
   'python -m pytest' \
   'echo do pip install evil==1.0.0' \
   'echo npm i evil@1.0.0'
@@ -385,6 +388,8 @@ for grammar_form in \
   "gem --norc install evil -v 1.0.0" \
   "bundle add evil --version 1.0.0" \
   "dotnet add App.csproj package Evil --version 1.0.0" \
+  "dotnet package add Evil --version 1.0.0" \
+  "dotnet package add Evil -v 1.0.0 --project App.csproj" \
   "dotnet tool install evil --version 1.0.0" \
   "mvn -Dartifact=g:evil:1.0.0 dependency:get" \
   "npx evil@1.0.0" \
@@ -658,6 +663,15 @@ expect_prescription 'nuget dotnet-ef@8.0.0;' 'dotnet tool install --tool-path /t
 expect_prescription 'nuget evil@8.0.0;' 'dotnet tool install --tool-path /tmp/tools evil --version 8.0.0' \
   nuget /tmp/tools 8.0.0
 expect_prescription 'nuget Serilog@3.1.1;' 'dotnet add package -s https://api.nuget.org/v3/index.json Serilog -v 3.1.1'
+# .NET 10 spells it noun first, with the same options. `--project` takes the
+# project as its value, so the version binds to the package, and once that is
+# approved the install passes.
+expect_prescription 'nuget Serilog@3.1.1;' 'dotnet package add Serilog --project App.csproj --version 3.1.1'
+expect_prescription 'nuget evil@3.1.1;' 'dotnet package add evil --project App.csproj --version 3.1.1' \
+  nuget App.csproj 3.1.1
+expect_prescription 'no-deny;' 'dotnet package add Serilog --version 3.1.1 --project App.csproj' \
+  nuget Serilog 3.1.1
+expect_prescription 'no-deny;' 'dotnet package add Serilog -v 3.1.1' nuget Serilog 3.1.1
 # An option the table does not know leaves its value as an operand. That adds
 # a check; it never replaces the package's own.
 expect_prescription 'rubygems rake@13.0.0;rubygems rdoc@13.0.0;' 'gem install rake --document rdoc -v 13.0.0'
@@ -738,6 +752,8 @@ operand_rows=(
   $'crates.io:ripgrep\tcargo install ripgrep --version 13.0.0 && cargo install --force ripgrep'
   $'nuget:Newtonsoft.Json\tdotnet add package Newtonsoft.Json --version 13.0.1 && dotnet add package Newtonsoft.Json'
   $'nuget:dotnet-ef\tdotnet tool install -g dotnet-ef --version 7.0.0 && dotnet tool update -g dotnet-ef'
+  $'nuget:Newtonsoft.Json\tdotnet package add Newtonsoft.Json --version 13.0.1 && dotnet package add Newtonsoft.Json'
+  $'nuget:Serilog\tdotnet package add Serilog --project App.csproj'
   # The same across every way statements relate.
   $'npm:left-pad\tpnpm add left-pad@1.0.0 || pnpm add left-pad'
   $'npm:left-pad\tpnpm add left-pad@1.0.0; pnpm add left-pad'
@@ -780,6 +796,8 @@ operand_rows=(
   $'\tcargo add serde@1.0.0 --features derive'
   $'\tdotnet add package Serilog --version 3.1.1'
   $'\tdotnet add App.csproj package Serilog --version 3.1.1'
+  $'\tdotnet package add Serilog --version 3.1.1'
+  $'\tdotnet package add Serilog -v 3.1.1 --project App.csproj'
   $'\tdotnet tool install --global dotnet-ef --version 8.0.0'
   $'\tgem install --source https://rubygems.org rake -v 13.0.0'
   $'\tpip install 3to2==1.1.1'

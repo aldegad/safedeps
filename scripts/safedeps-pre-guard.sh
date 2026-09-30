@@ -1535,7 +1535,7 @@ guard_names_package_without_spec() {
 # exempt as a whole -- asked only when there is something to exempt, since the
 # question costs processes and most statements have nothing to record.
 guard_walk_statement() {
-  local tok idx verb_seen skip_next found=""
+  local tok idx verb_seen verb_tok="" skip_next found=""
   local -a toks=()
 
   # Split the way awk splits the same text, so a position means one token on
@@ -1579,13 +1579,18 @@ guard_walk_statement() {
     esac
 
     if [[ "${verb_seen}" != true ]]; then
-      safedeps_grammar_is_verb "${tok}" && verb_seen=true
+      safedeps_grammar_is_verb "${tok}" && { verb_seen=true; verb_tok="${tok}"; }
       continue
     fi
 
     # `dotnet add [<project>] package <id>`: the keyword and the project file
-    # are not packages.
+    # are not packages. The .NET 10 spelling, `dotnet package add <id>`, opens
+    # the walk at `package`, and its first operand is the verb `add`.
     if [[ "${seg_ecosystem}" == "nuget" ]]; then
+      if [[ "${verb_tok}" == package ]]; then
+        verb_tok=""
+        [[ "${tok}" == add ]] && continue
+      fi
       case "${tok}" in
         package|*.csproj|*.fsproj|*.vbproj|*.sln|*.slnx) continue ;;
       esac
@@ -1684,10 +1689,11 @@ guard_extract_flagged_specs() {
   # An option's value is not an operand when the manager's own help says the
   # option takes one (the tables below: `gem help install`, `bundle add
   # --help`, `cargo install --help`, `cargo add --help`, and the .NET CLI
-  # reference for `dotnet add package` and `dotnet tool install|update`). Only
-  # mandatory values are listed. An option whose value is optional, or one the
-  # table does not know, leaves its value as an operand, and that can only add
-  # a check -- never skip the package the manager installs.
+  # reference for `dotnet add package`, its .NET 10 spelling `dotnet package
+  # add`, and `dotnet tool install|update`). Only mandatory values are listed.
+  # An option whose value is optional, or one the table does not know, leaves
+  # its value as an operand, and that can only add a check -- never skip the
+  # package the manager installs.
   #
   # Two kinds of line come out. A spec line is `<pkg><TAB><spec>`, and it is all
   # the gate reads (guard_operand_specs keeps two-field lines). A position line
@@ -1778,6 +1784,10 @@ guard_extract_flagged_specs() {
           for (j = k + 1; j <= NF; j++) if ($j == "package") break
           if (j < NF) operands("dotnet-add", j + 1)
         }
+        # .NET 10 spells the same command noun first, with the same arguments:
+        # `dotnet package add <id> [--project <p>] [-v <version>]`.
+        if ($i == "dotnet" && (k = verb_after(i + 1, "package")) && (k2 = verb_after(k + 1, "add")))
+          operands("dotnet-add", k2 + 1)
 
         if ($i == "dotnet" && (k = verb_after(i + 1, "tool"))) {
           if ($(k + 1) == "install" || $(k + 1) == "update") operands("dotnet-tool", k + 2)
