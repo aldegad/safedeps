@@ -635,7 +635,13 @@ mkdir -p "${beside_home}"
   . lib/ledger/ledger.sh
   safedeps_ledger_write_approved_spec pypi requests 2.0.0 >/dev/null
   safedeps_ledger_write_approved_spec npm left-pad 1.3.0 >/dev/null
-  safedeps_ledger_write_approved_spec npm echo-cli 1.0.0 >/dev/null ) \
+  safedeps_ledger_write_approved_spec npm echo-cli 1.0.0 >/dev/null
+  # `pip install'evil==1'` is one word to the shell, `installevil==1`, and the
+  # extractor reads it the same way. Approving that identity lets the row reach
+  # the pipe rule; the row is there for what it does to the blanking pass (a
+  # quote glued to the verb must not be blanked, or everything after it
+  # re-quotes), not for what pip would make of it.
+  safedeps_ledger_write_approved_spec pypi installevil 1 >/dev/null ) \
   || fail "the beside-visible fixture approvals could be written"
 # No output is "pass", as in gate_decision: jq reads empty input as no value
 # and prints nothing. beside_reason prints the deny reason, or nothing.

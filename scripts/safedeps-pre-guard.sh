@@ -1269,6 +1269,7 @@ guard_settle_scan_failure() {
 }
 
 HIDDEN_DEPENDENCY_INSTALL=false
+PIPED_BESIDE_VISIBLE=false
 if ! command_is_dependency_install "${COMMAND}"; then
   # Catch indirection patterns that hide install commands (V-002)
   if command_hides_dependency_install "${COMMAND}"; then
@@ -1279,13 +1280,11 @@ if ! command_is_dependency_install "${COMMAND}"; then
     exit 0
   fi
 elif command_pipes_unread_install_to_shell "${COMMAND}"; then
-  # A visible install used to switch the hidden-install check off. Specs are
-  # extracted from candidate texts only, and a pipe's producer is not one, so
-  # nothing here can reduce the piped install to a spec: fail-closed, like the
-  # same pipe with no visible install beside it.
-  log_advisory "pre-guard DENY: install text piped into a shell beside a visible install could not be reduced to an approved spec — fail-closed. Command: ${COMMAND}"
-  jq -nc '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:"safedeps: this command pipes install text into a shell (`... | sh`) beside the install it runs. The gate checks the visible install, but it cannot extract a package spec from what is piped, so the command is blocked fail-closed. Run the piped install as its own command, written out rather than piped, so it can be checked."}}'
-  exit 0
+  # A visible install used to switch the hidden-install check off. It is a
+  # hidden install like any other, and it is denied where the others are, after
+  # the snapshot: every path between here and there is a deny.
+  HIDDEN_DEPENDENCY_INSTALL=true
+  PIPED_BESIDE_VISIBLE=true
 fi
 
 # --- Reorg Guard Activated ---
@@ -2076,6 +2075,17 @@ if [[ "${HIDDEN_DEPENDENCY_INSTALL}" != "true" && -n "${LEDGER_ECOSYSTEM}" ]] \
     && ! guard_effect_gate_reads_every_install "${COMMAND}" \
     && guard_names_package_without_spec "${COMMAND}"; then
   log_advisory "pre-guard UNGATED: ${LEDGER_ECOSYSTEM} install names a package with no version spec, so the ledger gate did not run. No effect gate reads the result of this install, so it is unverified. Command: ${COMMAND}"
+fi
+
+# Specs are extracted from candidate texts only, and a pipe's producer is not
+# one, so nothing can reduce a piped install to a spec. Beside a visible install
+# the specs that were extracted are the visible one's, so the count below would
+# read as "reduced" -- this case is settled on its own, fail-closed like the same
+# pipe with nothing beside it.
+if [[ "${PIPED_BESIDE_VISIBLE}" == "true" ]]; then
+  log_advisory "pre-guard DENY: install text piped into a shell beside a visible install could not be reduced to an approved spec — fail-closed. Command: ${COMMAND}"
+  jq -nc '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:"safedeps: this command pipes install text into a shell (`... | sh`) beside the install it runs. The gate checks the visible install, but it cannot extract a package spec from what is piped, so the command is blocked fail-closed. Run the piped install as its own command, written out rather than piped, so it can be checked."}}'
+  exit 0
 fi
 
 if [[ "${HIDDEN_DEPENDENCY_INSTALL}" == "true" && ( -z "${LEDGER_ECOSYSTEM}" || ${#LEDGER_SPECS[@]} -eq 0 ) ]]; then
