@@ -1711,8 +1711,14 @@ guard_extract_flagged_specs() {
 # With `positions` as the third argument, the flag reader's position lines
 # (`@<TAB>bound|consumed<TAB><n>`) come through as well, for the UNGATED record.
 # The gate never asks for them, so they cannot move a verdict.
+#
+# Every reader here is on the verdict path, and every caller reads this through
+# a process substitution where a failed stage is invisible: a failed grep or awk
+# yields no spec, and no spec reads as "nothing to check". So a failure is
+# written to SAFEDEPS_SCAN_MARK, which the top level settles before any allow
+# (guard_settle_scan_failure), the same contract as command_scan_text.
 guard_operand_specs() {
-  local eco="$1" text="$2" mode="${3:-}" token pkg spec
+  local eco="$1" text="$2" mode="${3:-}" token pkg spec rc
 
   if [[ "${eco}" == "go" ]]; then
     # A Go package is its whole module path. The generic pattern below keeps
@@ -1720,14 +1726,16 @@ guard_operand_specs() {
     # `x@v1` and the deny message prescribed `safedeps check go x@v1`, which
     # approves (no advisory names a bare `x`) and then lets any `.../x@v1`
     # through. The path is kept whole here.
-    { printf '%s\n' "${text}" | grep -oE '(^|[[:space:]])[A-Za-z0-9][A-Za-z0-9._~/-]*@[A-Za-z0-9._+~-]+' || true; } \
+    { printf '%s\n' "${text}" | grep -oE '(^|[[:space:]])[A-Za-z0-9][A-Za-z0-9._~/-]*@[A-Za-z0-9._+~-]+' \
+        || { rc=$?; (( rc <= 1 )) || guard_mark_scan_failed; }; } \
       | while read -r token; do
           [[ -n "${token}" ]] || continue
           printf '%s\t%s\t%s\n' "${eco}" "${token%@*}" "${token##*@}"
         done
   else
     { printf '%s\n' "${text}" \
-      | grep -oE '(@[a-zA-Z0-9._/-]+/)?[a-zA-Z][a-zA-Z0-9._-]*@[a-zA-Z0-9._^~|<>=*+-]+' || true; } \
+      | grep -oE '(@[a-zA-Z0-9._/-]+/)?[a-zA-Z][a-zA-Z0-9._-]*@[a-zA-Z0-9._^~|<>=*+-]+' \
+        || { rc=$?; (( rc <= 1 )) || guard_mark_scan_failed; }; } \
       | while IFS= read -r token; do
           # An email / host operand (user@domain.tld) is never a package spec.
           if [[ "${token}" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]; then
@@ -1743,11 +1751,19 @@ guard_operand_specs() {
           printf '%s\t%s\t%s\n' "${eco}" "${pkg}" "${spec}"
         done
   fi
-  printf '%s\n' "${text}" | guard_extract_flagged_specs \
+  # A pipeline in an `if`: this runs in a subshell under `set -e`, which would
+  # otherwise end it on the failure before the mark is written.
+  if ! printf '%s\n' "${text}" | guard_extract_flagged_specs \
     | awk -F'\t' -v eco="${eco}" -v positions="${mode}" '
         NF == 2 { print eco "\t" $1 "\t" $2 }
         NF == 3 && $1 == "@" && positions == "positions" { print }
-      '
+      '; then
+    guard_mark_scan_failed
+  fi
+}
+
+guard_mark_scan_failed() {
+  [[ -z "${SAFEDEPS_SCAN_MARK:-}" ]] || printf 'failed\n' >> "${SAFEDEPS_SCAN_MARK}"
 }
 
 # One statement as the extractor reads it: a runner's package operands (one per
