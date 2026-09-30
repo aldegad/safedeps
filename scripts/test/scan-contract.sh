@@ -8,7 +8,7 @@
 #   command_is_dependency_install    is this an install command
 #   command_is_injectable_npm_install  may --ignore-scripts be injected
 #   command_has_ignore_scripts_flag  is the flag already there
-#   command_is_compound              may the flag be appended
+#   command_needs_inplace_inert      may the flag be appended
 #   resolve_install_dir_override     where does the install land
 #   guard_detect_ecosystem           which ecosystem
 #   payload_pipes_install_text_to_shell  is the pipe in execution position
@@ -451,8 +451,65 @@ grep -q 'UNDECIDED' <<< "${SCANFAIL_REASON}" || fail "a failed blanking awk is r
 grep -q 'scanner failed' <<< "${SCANFAIL_LOG}" || fail "a failed blanking awk is recorded in advisory.log"
 pass "a failed blanking awk beside a visible install answers UNDECIDED, not pass"
 
+# grep and sed sit on the judgment path too. A predicate that reads a grep or
+# sed that never answered as "no match" passed every one of these on the tree
+# before this check existed. They are recorded like a failed awk reading and
+# settled at the same gate.
+mkdir -p "${fail_tmp}/grep-all" "${fail_tmp}/sed-all"
+printf '#!/usr/bin/env bash\nexit 2\n' > "${fail_tmp}/grep-all/grep"
+printf '#!/usr/bin/env bash\nexit 2\n' > "${fail_tmp}/sed-all/sed"
+chmod +x "${fail_tmp}/grep-all/grep" "${fail_tmp}/sed-all/sed"
+for tool in grep sed; do
+  for failing_command in "pip install requests==2.0.0" "npm install left-pad@1.3.0" "cargo add serde@1.0.0"; do
+    scanfail_guard "${fail_tmp}/${tool}-all" "${failing_command}"
+    [[ "${SCANFAIL_DECISION}" == "deny" ]] \
+      || fail "a failed ${tool} does not turn an install into a pass: ${failing_command} (got: ${SCANFAIL_DECISION})"
+    grep -q 'UNDECIDED' <<< "${SCANFAIL_REASON}" \
+      || fail "a failed ${tool} is reported as undecided: ${failing_command}"
+  done
+  scanfail_guard "${fail_tmp}/${tool}-all" "ls -la"
+  [[ "${SCANFAIL_DECISION}" == "pass" ]] || fail "a failed ${tool} does not block a command that names no package manager (got: ${SCANFAIL_DECISION})"
+done
+pass "a failed grep or sed on the judgment path denies install-looking commands as UNDECIDED"
+
 scanfail_guard "${fail_tmp}/all-awk" "pip install requests==2.0.0"
 [[ "${SCANFAIL_DECISION}" == "deny" ]] || fail "with awk failing everywhere an install is still denied (got: ${SCANFAIL_DECISION})"
 pass "with awk failing everywhere an install is still denied"
+
+# --- the discriminator the gate falls back on ---------------------------------
+# When a reading failed, the gate asks one question without reading the command:
+# does it name a package manager's executable anywhere? Two properties make
+# that answer trustworthy, and both are checked on the function as the guard
+# defines it, extracted from the script.
+discriminator=$(sed -n '/^guard_looks_like_install_unscanned() {$/,/^}$/p' scripts/safedeps-pre-guard.sh)
+[[ -n "${discriminator}" ]] || fail "the discriminator can be extracted from the guard"
+discriminate() {
+  # An empty PATH: any subprocess it tried to start would fail, and it must
+  # answer anyway, because the tools it stands in for are the ones failing.
+  env -i PATH= COMMAND="$1" /bin/bash -c '
+    source lib/install-grammar.sh
+    eval "$1"
+    guard_looks_like_install_unscanned' _ "${discriminator}"
+}
+discriminate "npm install left-pad@1.3.0" || fail "the discriminator answers with no PATH (no subprocess) for an install"
+if discriminate "ls -la"; then fail "the discriminator says no for a command that names no manager"; fi
+if discriminate "git commit -m 'fix'"; then fail "the discriminator says no for a plain commit"; fi
+discriminate "NPM INSTALL x" || fail "the discriminator ignores case"
+discriminate $'echo hi\npip3.11 install x' || fail "the discriminator reads every line"
+pass "the discriminator needs no subprocess and ignores case"
+
+# It must say yes to everything any recognizer could find. It is derived from
+# SAFEDEPS_G_EXECUTABLES rather than listed by hand; this checks the derivation
+# against every install form the failure census uses, and against every manager
+# the pipe check names.
+while IFS= read -r -d '' form; do
+  discriminate "${form}" || fail "the discriminator names every census form: ${form}"
+done < <(jq -j '.forms[], .extras[] | . + "\u0000"' scripts/measure/scan-failure-corpus.json)
+pipe_managers=$(sed -n "s/^PIPE_MANAGER_RE='(\(.*\))'\$/\1/p" scripts/safedeps-pre-guard.sh)
+[[ -n "${pipe_managers}" ]] || fail "the pipe check's manager list can be read"
+for manager in $(tr '|' '\n' <<< "${pipe_managers}" | sed -E 's/\[[^]]*\][*+]?//g; s/[()]//g' | grep -E '^[a-z]+$'); do
+  discriminate "${manager} install x" || fail "the discriminator names the pipe check's manager ${manager}"
+done
+pass "the discriminator names every census form and every manager the pipe check knows"
 
 printf 'scan-contract: all checks passed\n'
