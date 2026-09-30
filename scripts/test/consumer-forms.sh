@@ -340,4 +340,37 @@ logged_ungated "mvn -Dartifact=g:evil dependency:get" \
   && fail "flag-before-goal maven is silent because install recognition never matches it"
 pass "flag-before-goal maven stays outside the record (install recognition, not the record)"
 
+# --- Backslashes are read the way the shell reads them -------------------------
+# A backslash used to be judged by the one byte before a quote, and not at all
+# outside quotes. Every form below executes the install after it in a real
+# shell, and every one of them passed the gate with the text blanked
+# (safedeps/escaped-backslash-blanks-the-rest). The controls at the top are
+# the same installs without the backslash.
+expect_deny "the control npm install" 'npm install evil@1.0.0'
+expect_deny "the control after a closed quote" 'echo "a" ; npm install evil@1.0.0'
+for escaped_form in \
+  'echo "a\\" ; npm install evil@1.0.0' \
+  'echo "a\\" && npm install evil@1.0.0' \
+  'echo "a\\" | true ; npm install evil@1.0.0' \
+  'echo "a\\" ; pip install evil==1.0.0' \
+  'echo "a\\" ; cargo add evil@1.0.0' \
+  'echo "a\\\\" ; pip install evil==1.0.0' \
+  'echo "a\"" ; pip install evil==1.0.0' \
+  'echo \" ; pip install evil==1.0.0' \
+  "echo \\' ; pip install evil==1.0.0" \
+  $'pip \\\ninstall evil==1.0.0' \
+  $'echo a\\\\\npip install evil==1.0.0'
+do
+  expect_deny "an install after $(printf '%q' "${escaped_form}")" "${escaped_form}"
+done
+pass "an escaped backslash closes a region, an escaped quote opens none, and a continuation joins its lines"
+
+# The other direction, which a fix like this could get wrong: text the shell
+# really treats as data stays data. An escaped backslash then an escaped quote
+# leaves the region open, and `\<newline>` inside single quotes is not a
+# continuation.
+expect_pass "an install inside a region an escaped quote keeps open" 'echo "a\\\" ; pip install evil==1.0.0'
+expect_pass "an install inside single quotes across a backslash-newline" $'echo \'a\\\npip install evil==1.0.0\''
+pass "text the shell treats as data stays data"
+
 printf 'consumer-forms passed\n'

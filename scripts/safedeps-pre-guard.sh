@@ -288,7 +288,7 @@ command_hides_dependency_install() {
 command_scan_text() {
   if ! printf '%s\n' "$1" | LC_ALL=C awk '
     # safedeps:command_scan_text (scripts/test/scan-contract.sh keys on this line)
-    BEGIN { q = 0; prev = ""; buf = ""; held = 0 }
+    BEGIN { q = 0; esc = 0; buf = ""; held = 0 }
 
     # Emit through a bounded buffer. Appending to one string for the whole
     # input would put a quadratic memcpy back in place of the quadratic loop.
@@ -299,23 +299,42 @@ command_scan_text() {
 
     {
       # The newline that ended the previous record is a character too: it
-      # survives outside a quoted region and blanks inside one. The trailing
-      # newline this function adds terminates the last record and so is never
-      # emitted, which is what keeps the output the same length as the input.
-      if (NR > 1) { put(q == 0 ? "\n" : " "); prev = "\n" }
+      # survives outside a quoted region and blanks inside one. An escaped
+      # newline is a line continuation, which the shell removes, so it blanks
+      # everywhere and the two lines read as one. The trailing newline this
+      # function adds terminates the last record and so is never emitted, which
+      # is what keeps the output the same length as the input.
+      if (NR > 1) {
+        if (esc) { put(" "); esc = 0 }
+        else     { put(q == 0 ? "\n" : " ") }
+      }
 
       n = split($0, ch, "")
       for (i = 1; i <= n; i++) {
         c = ch[i]
-        if (q == 0) {
-          if (c == "\047")      { q = 1; put(" ") }
+        if (esc) {
+          # The escaped byte. Outside a region it is data: it passes through
+          # and never opens one (`\"` is a quote character). Inside a double-
+          # quoted region it is blanked like everything else and never closes it.
+          put(q == 0 ? c : " ")
+          esc = 0
+        }
+        else if (q == 0) {
+          if (c == "\\")        { esc = 1; put(" ") }
+          else if (c == "\047") { q = 1; put(" ") }
           else if (c == "\042") { q = 2; put(" ") }
           else                  { put(c) }
         }
-        else if (q == 1 && c == "\047")                  { q = 0; put(" ") }
-        else if (q == 2 && c == "\042" && prev != "\\")  { q = 0; put(" ") }
-        else                                             { put(" ") }
-        prev = c
+        else if (q == 1) {
+          # No escapes inside single quotes.
+          if (c == "\047") q = 0
+          put(" ")
+        }
+        else {
+          if (c == "\\")        esc = 1
+          else if (c == "\042") q = 0
+          put(" ")
+        }
       }
     }
 
@@ -446,11 +465,53 @@ payload_pipes_install_text_to_shell() {
   echo "${exec_view}" | grep -qEi '\|[[:space:]]*(bash|sh|zsh)([[:space:]]|$)'
 }
 
+# Join line continuations before anything splits the command into lines.
+#
+# Every consumer reads the candidate texts one line at a time, so a command
+# written `pip \<newline>install x` was judged as two unrelated lines, neither of
+# them an install. The shell removes an escaped newline, so this does too:
+# the backslash and the newline become two blanks, which keeps every byte where
+# it was. What counts as escaped follows command_scan_text exactly -- backslashes
+# pair up, and there are no escapes inside single quotes -- because getting it
+# wrong in the other direction is worse: joining after `echo a\\` would make the
+# next line an argument to echo and hide it.
+#
+# awk failing here is recorded like a scanner failure (see command_scan_text),
+# and the text passes through unjoined.
+join_line_continuations() {
+  local joined
+  if joined=$(printf '%s\n' "$1" | LC_ALL=C awk '
+    BEGIN { q = 0; out = ""; open = 0 }
+    {
+      n = split($0, ch, "")
+      pending = 0
+      for (i = 1; i <= n; i++) {
+        c = ch[i]
+        if (pending)                 { out = out "\\" c; pending = 0; continue }
+        if (q == 1)                  { out = out c; if (c == "\047") q = 0; continue }
+        if (c == "\\")               { pending = 1; continue }
+        if (q == 0 && c == "\047")   q = 1
+        else if (c == "\042")        q = (q == 2 ? 0 : 2)
+        out = out c
+      }
+      if (pending) { out = out "  "; open = 1 }
+      else         { print out; out = ""; open = 0 }
+    }
+    END { if (open) print out }
+  '); then
+    printf '%s' "${joined}"
+  else
+    [[ -z "${SAFEDEPS_SCAN_MARK:-}" ]] || printf 'failed\n' >> "${SAFEDEPS_SCAN_MARK}"
+    printf '%s' "$1"
+  fi
+}
+
 command_candidate_texts() {
   local command="$1"
   local payload
 
   command=$(strip_heredoc_bodies "${command}")
+  command=$(join_line_continuations "${command}")
 
   normalize_install_text "${command}"
   printf '\n'

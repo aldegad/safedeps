@@ -30,26 +30,36 @@
 #      quadratic in BSD awk, because each call re-measures the string (1MB on
 #      one line took 28.5s, caught in review). Splitting the record once is what
 #      made it linear; bytes are only what LC_ALL=C hands the split.
-#   2. Outside quotes, bytes pass through unchanged -- including a
-#      backslash, which does NOT escape the quote that follows it.
+#   2. Outside quotes, bytes pass through unchanged, except a backslash. A
+#      backslash is blanked and escapes the byte after it: that byte passes
+#      through as data and never opens a region (`\"` is a quote character,
+#      `\pip` is `pip`), and an escaped newline -- a line continuation, which
+#      the shell removes -- is blanked, so the two lines read as one.
 #   3. A quote character that opens or closes a region is itself blanked.
 #   4. Every byte inside a quoted region is blanked, newlines included.
 #   5. A single-quoted region ends at the next single quote, unconditionally.
-#   6. A double-quoted region ends at the next double quote whose PRECEDING RAW
-#      BYTE is not a backslash.
+#      There are no escapes inside single quotes.
+#   6. Inside a double-quoted region a backslash escapes the byte after it, so
+#      backslashes are consumed in pairs: `"a\\"` closes (an escaped backslash,
+#      then the quote) and `"a\\\"` does not (an escaped backslash, then an
+#      escaped quote).
 #   7. An unterminated region blanks the rest of the input.
 #
-# Rule 6 is a defect, and it is pinned here on purpose. `\\` is an escaped
-# backslash in a real shell, so `"a\\"` closes; this rule reads the second
-# backslash as escaping the quote and blanks everything after it. Measured
-# against the real gate: `npm install evil@1.0.0` denies, and
-# `echo "a\\" ; npm install evil@1.0.0` passes -- the same for pip and cargo,
-# where the command gate is the primary authority. Correcting it is a verdict
-# change and belongs to its own plan
-# (safedeps/escaped-backslash-blanks-the-rest), not to a refactor whose whole
-# check is that no verdict moved. Pinning it here is what makes the two
-# separable: this file goes red when the escape rule changes, which is exactly
-# when someone should be looking.
+# Rules 2 and 6 used to read a backslash by looking only at the byte before a
+# quote, and outside quotes not at all. Each reading blanked text the shell
+# executes, and blanked text is invisible to every predicate: measured against
+# the gate that was live on the development machine, all of these passed with
+# an unapproved pip install after them:
+#
+#   echo "a\\" ; pip install ...      one escaped backslash, then the close
+#   echo \" ; pip install ...         an escaped quote read as an opening one
+#   \pip install ...                  the alias-bypass idiom
+#   pip \<newline>install ...         a line continuation split in two
+#
+# The linearization plan pinned the first as a defect so that a refactor could
+# prove no verdict moved. This fix moves verdicts on purpose;
+# safedeps/escaped-backslash-blanks-the-rest records the replay and the
+# direction of every move.
 #
 # HOW THIS FILE CHECKS. It carries a reference implementation of the rules
 # above and asserts the shipped one agrees with it, on a case table and on
@@ -81,23 +91,34 @@ declare -F command_scan_text > /dev/null || fail "extracted command_scan_text di
 # read by this battery only, so its cost is irrelevant and its clarity is not.
 reference_scan_text() {
   local LC_ALL=C
-  local input="$1" output="" quote="" prev="" char i
+  local input="$1" output="" quote="" escaped="" char i
   for ((i = 0; i < ${#input}; i++)); do
     char="${input:i:1}"
-    if [[ -z "${quote}" ]]; then
+    if [[ -n "${escaped}" ]]; then
+      escaped=""
+      if [[ -z "${quote}" && "${char}" != $'\n' ]]; then
+        output="${output}${char}"
+      else
+        output="${output} "
+      fi
+    elif [[ -z "${quote}" ]]; then
       case "${char}" in
+        "\\") escaped=1; output="${output} " ;;
         "'") quote="single"; output="${output} " ;;
         '"') quote="double"; output="${output} " ;;
         *)   output="${output}${char}" ;;
       esac
-    elif [[ "${quote}" == "single" && "${char}" == "'" ]]; then
-      quote=""; output="${output} "
-    elif [[ "${quote}" == "double" && "${char}" == '"' && "${prev}" != "\\" ]]; then
-      quote=""; output="${output} "
+    elif [[ "${quote}" == "single" ]]; then
+      [[ "${char}" == "'" ]] && quote=""
+      output="${output} "
     else
+      if [[ "${char}" == "\\" ]]; then
+        escaped=1
+      elif [[ "${char}" == '"' ]]; then
+        quote=""
+      fi
       output="${output} "
     fi
-    prev="${char}"
   done
   printf '%s' "${output}"
 }
@@ -161,19 +182,39 @@ check "escaped double quote does not close the region" \
   'echo "a\"b" c' \
   "echo$(sp 8)c"
 
-# rule 6, the pinned defect: `\\` should close and does not
-check "escaped backslash before the closing quote blanks the rest (pinned defect)" \
+# rule 6: backslashes pair up, so an escaped backslash does not escape the quote
+check "escaped backslash before the closing quote closes the region" \
   'echo "a\\" ; npm i x' \
-  "echo$(sp 16)"
+  "echo$(sp 6) ; npm i x"
 
-# rule 2: outside a region a backslash is an ordinary character
-check "backslash outside a region does not escape the quote that follows" \
+check "two escaped backslashes before the closing quote close the region" \
+  'echo "a\\\\" ; npm i x' \
+  "echo$(sp 8) ; npm i x"
+
+check "an escaped backslash then an escaped quote keeps the region open" \
+  'echo "a\\\" ; npm i x' \
+  "echo$(sp 17)"
+
+# rule 2: outside a region a backslash escapes the byte after it
+check "an escaped quote outside a region is data, not an opening quote" \
   'echo \"npm install evil\"' \
-  "echo \\$(sp 19)"
+  'echo  "npm install evil "'
 
-check "backslash outside a region survives" \
+check "an escaped single quote outside a region is data too" \
+  "echo \' ; npm i x" \
+  "echo  ' ; npm i x"
+
+check "a backslash before a command name is blanked" \
+  '\pip install evil' \
+  ' pip install evil'
+
+check "an escaped space outside a region passes through" \
   'echo a\ b' \
-  'echo a\ b'
+  'echo a  b'
+
+check "a line continuation joins the two lines" \
+  $'pip \\\ninstall evil' \
+  'pip   install evil'
 
 # rule 7
 check "unterminated single quote blanks the rest" \
@@ -235,21 +276,33 @@ pass "randomized differential: ${fuzz_cases} inputs, seed ${fuzz_seed}, no diver
 control_hit=0
 reference_scan_text() {
   local LC_ALL=C
-  local input="$1" output="" quote="" prev="" char i
+  local input="$1" output="" quote="" escaped="" char i
   for ((i = 0; i < ${#input}; i++)); do
     char="${input:i:1}"
-    if [[ -z "${quote}" ]]; then
+    if [[ -n "${escaped}" ]]; then
+      escaped=""
+      if [[ -z "${quote}" && "${char}" != $'\n' ]]; then
+        output="${output}${char}"
+      else
+        output="${output} "
+      fi
+    elif [[ -z "${quote}" ]]; then
       case "${char}" in
+        "\\") escaped=1; output="${output} " ;;
         "'") quote="single"; output="${output} " ;;
         '"') quote="double"; output="${output} " ;;
         *)   output="${output}${char}" ;;
       esac
-    elif [[ "${quote}" == "double" && "${char}" == '"' && "${prev}" != "\\" ]]; then
-      quote=""; output="${output} "
+    elif [[ "${quote}" == "single" ]]; then
+      output="${output} "
     else
+      if [[ "${char}" == "\\" ]]; then
+        escaped=1
+      elif [[ "${char}" == '"' ]]; then
+        quote=""
+      fi
       output="${output} "
     fi
-    prev="${char}"
   done
   printf '%s' "${output}"
 }
