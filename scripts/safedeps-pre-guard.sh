@@ -100,6 +100,16 @@ safedeps_guard_announce_truth_sources() {
   log_advisory "pre-guard: advisory truth source moved: ${moved} — this run did not judge against the canonical sources."
 }
 
+# Loose, on purpose: this reads raw text nobody has parsed, for the two cases
+# where the precise recognizer cannot run (jq missing, the scanner failing).
+# A false positive there denies an install-looking command on a broken machine.
+SAFEDEPS_RAW_INSTALL_RE='(npm|pnpm|yarn|bun)([^"]*)(install|add|dlx)|[^a-z]npx[[:space:]]|pip[0-9]*[[:space:]]+install|poetry[[:space:]]+add|uv[[:space:]]+(add|pip[[:space:]]+install)|pipenv[[:space:]]+install|cargo[[:space:]]+(add|install)|go[[:space:]]+(get|install)|gem[[:space:]]+install|bundle[[:space:]]+add|mvn([^"]*)dependency:get|dotnet[[:space:]]+add[[:space:]]+package'
+
+# The precise install recognizer. It is read on scanned text by
+# command_is_dependency_install, and on unscanned text by
+# guard_settle_scan_failure, which has to judge without the scanner.
+SAFEDEPS_INSTALL_PATTERN='(^|[;&|]+[[:space:]]*)((npm([[:space:]]+--?[a-zA-Z0-9_-]+([=[:space:]][^[:space:]]+)?)?[[:space:]]+(install|i|add|ci|update|up|upgrade))|npx([[:space:]]+--?[a-zA-Z0-9_-]+([=[:space:]][^[:space:]]+)?)?[[:space:]]+(@?[A-Za-z0-9._-])|pnpm([[:space:]]+--?[a-zA-Z0-9_-]+([=[:space:]][^[:space:]]+)?)?[[:space:]]+(add|install|update|up|dlx)|yarn([[:space:]]+--?[a-zA-Z0-9_-]+([=[:space:]][^[:space:]]+)?)?[[:space:]]+(add|install|upgrade|dlx)|bun([[:space:]]+--?[a-zA-Z0-9_-]+([=[:space:]][^[:space:]]+)?)?[[:space:]]+(add|install|i|update|upgrade)|((python3?|py)[[:space:]]+-m[[:space:]]+pip|pip3?)[[:space:]]+install|poetry[[:space:]]+add|uv[[:space:]]+(add|pip[[:space:]]+install)|pipenv[[:space:]]+install|cargo[[:space:]]+(add|install)|go[[:space:]]+(get|install)|gem[[:space:]]+install|bundle[[:space:]]+add|mvn[[:space:]]+dependency:get|dotnet[[:space:]]+add[[:space:]]+package)([[:space:]]|$)'
+
 if ! command -v jq >/dev/null 2>&1; then
   # jq is required to parse the hook payload. Without it we cannot read the exact
   # command, so do a best-effort fail-closed: read the raw payload and, if it
@@ -108,7 +118,7 @@ if ! command -v jq >/dev/null 2>&1; then
   # Either branch is recorded in advisory.log; never a silent skip.
   raw_input=$(cat)
   log_advisory "pre-guard: jq missing — gate cannot parse the payload."
-  if printf '%s' "${raw_input}" | grep -qiE '(npm|pnpm|yarn|bun)([^"]*)(install|add|dlx)|[^a-z]npx[[:space:]]|pip[0-9]*[[:space:]]+install|poetry[[:space:]]+add|uv[[:space:]]+(add|pip[[:space:]]+install)|pipenv[[:space:]]+install|cargo[[:space:]]+(add|install)|go[[:space:]]+(get|install)|gem[[:space:]]+install|bundle[[:space:]]+add|mvn([^"]*)dependency:get|dotnet[[:space:]]+add[[:space:]]+package'; then
+  if printf '%s' "${raw_input}" | grep -qiE "${SAFEDEPS_RAW_INSTALL_RE}"; then
     log_advisory "pre-guard DENY: jq missing on a likely dependency-install command — fail-closed."
     printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"safedeps: jq is required to gate dependency installs and is not installed — install blocked fail-closed. Install jq, then retry."}}\n'
     exit 0
@@ -204,7 +214,7 @@ command_is_dependency_install() {
   local scan_command
   local install_pattern
 
-  install_pattern='(^|[;&|]+[[:space:]]*)((npm([[:space:]]+--?[a-zA-Z0-9_-]+([=[:space:]][^[:space:]]+)?)?[[:space:]]+(install|i|add|ci|update|up|upgrade))|npx([[:space:]]+--?[a-zA-Z0-9_-]+([=[:space:]][^[:space:]]+)?)?[[:space:]]+(@?[A-Za-z0-9._-])|pnpm([[:space:]]+--?[a-zA-Z0-9_-]+([=[:space:]][^[:space:]]+)?)?[[:space:]]+(add|install|update|up|dlx)|yarn([[:space:]]+--?[a-zA-Z0-9_-]+([=[:space:]][^[:space:]]+)?)?[[:space:]]+(add|install|upgrade|dlx)|bun([[:space:]]+--?[a-zA-Z0-9_-]+([=[:space:]][^[:space:]]+)?)?[[:space:]]+(add|install|i|update|upgrade)|((python3?|py)[[:space:]]+-m[[:space:]]+pip|pip3?)[[:space:]]+install|poetry[[:space:]]+add|uv[[:space:]]+(add|pip[[:space:]]+install)|pipenv[[:space:]]+install|cargo[[:space:]]+(add|install)|go[[:space:]]+(get|install)|gem[[:space:]]+install|bundle[[:space:]]+add|mvn[[:space:]]+dependency:get|dotnet[[:space:]]+add[[:space:]]+package)([[:space:]]|$)'
+  install_pattern="${SAFEDEPS_INSTALL_PATTERN}"
 
   while IFS= read -r scan_command; do
     scan_command=$(command_scan_text "${scan_command}")
@@ -247,41 +257,97 @@ command_hides_dependency_install() {
   return 1
 }
 
+# Blank every quoted region, delimiters included, and leave unquoted text
+# untouched. Every detection predicate below reads this instead of the raw
+# command, which is why `echo "npm install evil"` is not an install: the text is
+# there, but not in execution position. scripts/test/scan-contract.sh states the
+# rules and checks this implementation against them.
+#
+# One awk pass. The bash character loop this replaces was quadratic because
+# `${input:i:1}` counts from the start of the string on every index, so the cost
+# of reading one character grew with its position. The first awk version kept
+# the same shape: `substr($0, i, 1)` re-measures the string on each call in BSD
+# awk (macOS), so one long line stayed quadratic (1MB took 28.5s; caught in
+# review). Splitting the record into an array once makes every read constant,
+# which is what makes the pass linear -- not the byte orientation, which is
+# only what LC_ALL=C gives the split. Measured on this host, an unquoted command
+# with no install text: 32KB went 36.2s -> 0.08s and 64KB went past two minutes
+# -> 0.28s (scripts/measure/scan-cost.sh). The PreToolUse timeout is 30s and
+# fails OPEN, so the old curve did not slow the gate down past ~29KB, it removed
+# it.
+#
+# One thing changed, and it is the blank COUNT inside a quoted region: a
+# multibyte character used to blank to one space and now blanks to one space per
+# byte. Nothing else moves. Unquoted bytes pass through unchanged, so the output
+# is byte-identical wherever no multibyte character sits inside quotes; and the
+# three bytes the state machine tests (' " \) are ASCII, which no UTF-8
+# continuation byte can collide with. Every consumer reads this through
+# `grep -qE` or `read -ra`, and neither can tell one blank from three.
+#
+# When awk fails, this says so in SAFEDEPS_SCAN_MARK and returns non-zero. The
+# status alone is not enough: every caller tests this output inside a condition
+# or a command substitution, where `set -e` is off and a failed scan reads as
+# empty text, which reads as "no install". That turned a scanner failure into a
+# silent pass (caught in review), and the mark is what lets the top level see
+# it. guard_settle_scan_failure is where it is read.
 command_scan_text() {
-  local input="$1"
-  local output=""
-  local quote=""
-  local char
-  local prev=""
-  local i
+  if ! printf '%s\n' "$1" | LC_ALL=C awk '
+    # safedeps:command_scan_text (scripts/test/scan-contract.sh keys on this line)
+    BEGIN { q = 0; esc = 0; buf = ""; held = 0 }
 
-  for ((i = 0; i < ${#input}; i++)); do
-    char="${input:i:1}"
+    # Emit through a bounded buffer. Appending to one string for the whole
+    # input would put a quadratic memcpy back in place of the quadratic loop.
+    function put(c) {
+      buf = buf c
+      if (++held >= 4096) { printf "%s", buf; buf = ""; held = 0 }
+    }
 
-    if [[ -z "${quote}" ]]; then
-      if [[ "${char}" == "'" ]]; then
-        quote="single"
-        output="${output} "
-      elif [[ "${char}" == '"' ]]; then
-        quote="double"
-        output="${output} "
-      else
-        output="${output}${char}"
-      fi
-    elif [[ "${quote}" == "single" && "${char}" == "'" ]]; then
-      quote=""
-      output="${output} "
-    elif [[ "${quote}" == "double" && "${char}" == '"' && "${prev}" != "\\" ]]; then
-      quote=""
-      output="${output} "
-    else
-      output="${output} "
-    fi
+    {
+      # The newline that ended the previous record is a character too: it
+      # survives outside a quoted region and blanks inside one. An escaped
+      # newline is a line continuation, which the shell removes, so it blanks
+      # everywhere and the two lines read as one. The trailing newline this
+      # function adds terminates the last record and so is never emitted, which
+      # is what keeps the output the same length as the input.
+      if (NR > 1) {
+        if (esc) { put(" "); esc = 0 }
+        else     { put(q == 0 ? "\n" : " ") }
+      }
 
-    prev="${char}"
-  done
+      n = split($0, ch, "")
+      for (i = 1; i <= n; i++) {
+        c = ch[i]
+        if (esc) {
+          # The escaped byte. Outside a region it is data: it passes through
+          # and never opens one (`\"` is a quote character). Inside a double-
+          # quoted region it is blanked like everything else and never closes it.
+          put(q == 0 ? c : " ")
+          esc = 0
+        }
+        else if (q == 0) {
+          if (c == "\\")        { esc = 1; put(" ") }
+          else if (c == "\047") { q = 1; put(" ") }
+          else if (c == "\042") { q = 2; put(" ") }
+          else                  { put(c) }
+        }
+        else if (q == 1) {
+          # No escapes inside single quotes.
+          if (c == "\047") q = 0
+          put(" ")
+        }
+        else {
+          if (c == "\\")        esc = 1
+          else if (c == "\042") q = 0
+          put(" ")
+        }
+      }
+    }
 
-  printf '%s' "${output}"
+    END { printf "%s", buf }
+  '; then
+    [[ -z "${SAFEDEPS_SCAN_MARK:-}" ]] || printf 'failed\n' >> "${SAFEDEPS_SCAN_MARK}"
+    return 1
+  fi
 }
 
 normalize_install_text() {
@@ -404,11 +470,53 @@ payload_pipes_install_text_to_shell() {
   echo "${exec_view}" | grep -qEi '\|[[:space:]]*(bash|sh|zsh)([[:space:]]|$)'
 }
 
+# Join line continuations before anything splits the command into lines.
+#
+# Every consumer reads the candidate texts one line at a time, so a command
+# written `pip \<newline>install x` was judged as two unrelated lines, neither of
+# them an install. The shell removes an escaped newline, so this does too:
+# the backslash and the newline become two blanks, which keeps every byte where
+# it was. What counts as escaped follows command_scan_text exactly -- backslashes
+# pair up, and there are no escapes inside single quotes -- because getting it
+# wrong in the other direction is worse: joining after `echo a\\` would make the
+# next line an argument to echo and hide it.
+#
+# awk failing here is recorded like a scanner failure (see command_scan_text),
+# and the text passes through unjoined.
+join_line_continuations() {
+  local joined
+  if joined=$(printf '%s\n' "$1" | LC_ALL=C awk '
+    BEGIN { q = 0; out = ""; open = 0 }
+    {
+      n = split($0, ch, "")
+      pending = 0
+      for (i = 1; i <= n; i++) {
+        c = ch[i]
+        if (pending)                 { out = out "\\" c; pending = 0; continue }
+        if (q == 1)                  { out = out c; if (c == "\047") q = 0; continue }
+        if (c == "\\")               { pending = 1; continue }
+        if (q == 0 && c == "\047")   q = 1
+        else if (c == "\042")        q = (q == 2 ? 0 : 2)
+        out = out c
+      }
+      if (pending) { out = out "  "; open = 1 }
+      else         { print out; out = ""; open = 0 }
+    }
+    END { if (open) print out }
+  '); then
+    printf '%s' "${joined}"
+  else
+    [[ -z "${SAFEDEPS_SCAN_MARK:-}" ]] || printf 'failed\n' >> "${SAFEDEPS_SCAN_MARK}"
+    printf '%s' "$1"
+  fi
+}
+
 command_candidate_texts() {
   local command="$1"
   local payload
 
   command=$(strip_heredoc_bodies "${command}")
+  command=$(join_line_continuations "${command}")
 
   normalize_install_text "${command}"
   printf '\n'
@@ -948,6 +1056,47 @@ if [[ -z "${SAFEDEPS_BUDGET_DISABLED}" ]] && [[ "${SAFEDEPS_BUDGET_ROLE}" == "pa
   exit 0
 fi
 
+# Where command_scan_text records a failure (see there). An empty name means the
+# mark could not be made, and guard_scan_failed treats that as a failure too:
+# a scanner nobody can hear from is not one to trust.
+SAFEDEPS_SCAN_MARK=$(mktemp "${TMPDIR:-/tmp}/safedeps-scan.XXXXXX" 2>/dev/null) || SAFEDEPS_SCAN_MARK=""
+trap 'rm -f "${SAFEDEPS_SCAN_MARK:-}"' EXIT
+
+guard_scan_failed() {
+  [[ -z "${SAFEDEPS_SCAN_MARK}" || -s "${SAFEDEPS_SCAN_MARK}" ]]
+}
+
+# Called before every path that ALLOWS the command. If any scan failed, the
+# verdicts above were read from missing text, so they are replaced with the rule
+# the jq-missing path uses: an install-looking command is denied as UNDECIDED,
+# anything else runs with the failure on record. Denies above stand as they are.
+# Whether a command looks like an install, judged without the scanner: the
+# precise pattern on every candidate text as it stands (quotes not blanked),
+# or the loose raw pattern on the whole command. command_candidate_texts runs
+# on bash and sed, so this still answers when awk is the thing that failed.
+# The loose pattern alone missed `npm i`, `npm ci` and `npm update` (caught in
+# review), and the precise one alone would miss what only the loose one sees,
+# so neither may shrink what the other finds.
+guard_looks_like_install_unscanned() {
+  local text
+  printf '%s' "${COMMAND}" | grep -qiE "${SAFEDEPS_RAW_INSTALL_RE}" && return 0
+  while IFS= read -r text; do
+    printf '%s\n' "${text}" | grep -qiE "${SAFEDEPS_INSTALL_PATTERN}" && return 0
+  done < <(command_candidate_texts "${COMMAND}")
+  return 1
+}
+
+guard_settle_scan_failure() {
+  guard_scan_failed || return 0
+  if guard_looks_like_install_unscanned; then
+    log_advisory "pre-guard DENY: the command scanner failed on a likely dependency-install command — undecided, fail-closed. Command: ${COMMAND}"
+    jq -nc '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:"safedeps: UNDECIDED, not unsafe — the command scanner (awk) failed, so safedeps could not tell whether this command installs a dependency. It looks like one, so it is blocked fail-closed. Nothing was detected in it. Check that `echo x | awk 1` works, then retry."}}'
+    exit 0
+  fi
+  log_advisory "pre-guard: the command scanner failed; the command did not look like a dependency install and was allowed. Command: ${COMMAND}"
+  printf 'safedeps: the command scanner (awk) failed, so this command was judged from its raw text only. It did not look like a dependency install and was allowed. The failure is recorded in advisory.log.\n' >&2
+}
+
 HIDDEN_DEPENDENCY_INSTALL=false
 if ! command_is_dependency_install "${COMMAND}"; then
   # Catch indirection patterns that hide install commands (V-002)
@@ -955,6 +1104,7 @@ if ! command_is_dependency_install "${COMMAND}"; then
     HIDDEN_DEPENDENCY_INSTALL=true
     : # Fall through — treat as install candidate
   else
+    guard_settle_scan_failure
     exit 0
   fi
 fi
@@ -1013,7 +1163,7 @@ acquire_state_lock
 # a 30s runtime budget, which is the very fail-open this plan exists to close.
 # A leaked lock is bounded by the 60s stale-lock sweep in acquire_state_lock; a
 # defeated deadline is not bounded by anything.
-trap 'release_state_lock' EXIT
+trap 'release_state_lock; rm -f "${SAFEDEPS_SCAN_MARK:-}"' EXIT
 
 PARENT_SNAPSHOT_ID=""
 CONFIRMED_FILE="${GUARD_DIR}/confirmed_${DIR_HASH}"
@@ -1555,6 +1705,10 @@ if [[ "${HIDDEN_DEPENDENCY_INSTALL}" == "true" && ( -z "${LEDGER_ECOSYSTEM}" || 
   jq -nc '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:"safedeps: hidden dependency install detected, but no package spec could be extracted for ledger approval — install blocked fail-closed."}}'
   exit 0
 fi
+
+# Every verdict from here on allows the command, so this is the last point at
+# which a failed scan can still turn into a deny.
+guard_settle_scan_failure
 
 # Write per-install pending state for PostToolUse, keyed by (dir_hash, normalized
 # command) so concurrent installs in the same project keep separate state instead
