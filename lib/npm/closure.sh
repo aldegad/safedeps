@@ -654,7 +654,15 @@ safedeps_npm_repo_overrides_json() {
     # picks up an ancestor's overrides, which are not the ones the real install
     # will use. Matches the Yarn project-context walk-up above.
     [[ -e "${dir}/.git" ]] && break
-    dir=$(dirname "${dir}")
+    # `dirname` stops short of `/` on some paths: a Windows drive root
+    # (`dirname C:` is `C:` in Git Bash) and any relative path, which ends at
+    # `.`. A walk that waits for `/` spins there forever, the hook never
+    # answers, and the runtime kills it and lets the install run (GitHub #21).
+    # Same fixed-point test as the Yarn walk-up above.
+    local parent
+    parent=$(dirname "${dir}")
+    [[ "${parent}" == "${dir}" ]] && break
+    dir="${parent}"
   done
   printf '{}'
 }
