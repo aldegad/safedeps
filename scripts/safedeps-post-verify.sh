@@ -247,6 +247,72 @@ confirm_snapshot() {
   release_state_lock; STATE_LOCK_HELD=false
 }
 
+# The state this install left behind, recorded as a snapshot of its own so it
+# can be confirmed. The pre-install snapshot is the state before the verified
+# install, and confirming that one put the baseline one install behind:
+# measured, an approved `npm install a` followed by an unapproved
+# `npm install b` rolled back to a project without `a` in package.json, the
+# lockfile or node_modules (safedeps/confirmed-snapshot-lags-one-install).
+#
+# The id must not start with `${SNAPSHOT_ID}_`, because cleanup_old_snapshots
+# removes a snapshot with `rm ${id}_*` and would take this one with it.
+# meta.json is written last, and every reader checks for it, so a run killed
+# part-way leaves an unconfirmed snapshot that is pruned, never a baseline
+# with files missing.
+snapshot_verified_state() {
+  local verified_id="$1"
+  local parent_id="$2"
+  local file_name
+  local list_file="${SNAPSHOT_DIR}/${verified_id}_monitored_files.list"
+  local temp_meta
+
+  : > "${list_file}" || return 1
+  while IFS= read -r file_name; do
+    [[ -z "${file_name}" ]] && continue
+    printf '%s\n' "${file_name}" >> "${list_file}" || return 1
+    if [[ -f "${PROJECT_DIR}/${file_name}" ]]; then
+      cp "${PROJECT_DIR}/${file_name}" "${SNAPSHOT_DIR}/${verified_id}_${file_name}" || return 1
+    else
+      touch "${SNAPSHOT_DIR}/${verified_id}_${file_name}.missing" || return 1
+    fi
+  done < <({
+    monitored_files
+    find "${PROJECT_DIR}" -maxdepth 1 -type f -name "*.csproj" -exec basename {} \; 2>/dev/null
+  } | sort -u)
+
+  temp_meta=$(mktemp "${SNAPSHOT_DIR}/.${verified_id}_meta.XXXXXX") || return 1
+  if ! jq -n --arg id "${verified_id}" --arg parent "${parent_id}" --arg from "${SNAPSHOT_ID}" \
+      --arg dir "${PROJECT_DIR}" --argjson ts "$(date +%s)" \
+      '{snapshot_id: $id, parent_snapshot_id: (if $parent == "" then null else $parent end),
+        verified_from: $from, timestamp: $ts, project_dir: $dir}' > "${temp_meta}"; then
+    rm -f "${temp_meta}"
+    return 1
+  fi
+  mv -f "${temp_meta}" "${SNAPSHOT_DIR}/${verified_id}_meta.json"
+}
+
+# Confirm what this install verified. If the post-install state cannot be
+# recorded, the baseline stays where it was and the user is told: an older
+# baseline rolls back too much, a partial one would restore files nobody read.
+confirm_verified_state() {
+  local verified_id="verified-${SNAPSHOT_ID}"
+  local parent_id
+
+  parent_id=$(read_confirmed_snapshot "${DIR_HASH}")
+  if [[ -n "${parent_id}" ]] && [[ ! -f "${SNAPSHOT_DIR}/${parent_id}_meta.json" ]]; then
+    parent_id=""
+  fi
+
+  if ! snapshot_verified_state "${verified_id}" "${parent_id}"; then
+    rm -f "${SNAPSHOT_DIR}/${verified_id}"_*
+    log_advisory "post-verify: the verified state of ${PROJECT_DIR} could not be recorded, so the rollback baseline was not moved (still ${parent_id:-none})."
+    ROLLBACK_WARNINGS+=("safedeps verified this install but could not record the result as the new rollback baseline, so a later rollback in ${PROJECT_DIR} returns to the baseline before it (${parent_id:-none}) and would undo this install too")
+    return 0
+  fi
+
+  confirm_snapshot "${verified_id}" "${DIR_HASH}"
+}
+
 collect_protected_snapshot_ids() {
   local dir_hash="${1:-}"
   local snapshot_id
@@ -480,7 +546,7 @@ emit_confirm_warnings_if_any() {
   Warnings: ${warning_str%%; }
 LOG_EOF
 
-  emit_system_message "safedeps: verified install completed, but npm rebuild warning(s) were recorded:
+  emit_system_message "safedeps: verified install completed, with warning(s):
 ${warning_str%%; }"
 }
 
@@ -1154,7 +1220,7 @@ Details log: ${GUARD_DIR}/reorg.log"
 fi
 
 run_verified_npm_rebuild_if_injected
-confirm_snapshot "${SNAPSHOT_ID}" "${DIR_HASH}"
+confirm_verified_state
 cleanup_old_snapshots
 emit_confirm_warnings_if_any
 

@@ -405,7 +405,70 @@ do
 done
 pass "approved installs, including --no-save and sub-project forms, confirm quietly and rebuild where they landed"
 
-# --- 7. A rollback does not run scripts it did not verify -------------------------------
+# --- 7. A rollback keeps what was verified before it -----------------------------------
+# The rollback baseline is the state the last verified install left behind. It
+# used to be the state before that install, so the baseline ran one install
+# behind: an approved `npm install sd-approved` followed by an unapproved
+# `npm install sd-victim` rolled back to a project without sd-approved in
+# package.json, package-lock.json or node_modules. Each case below checks all
+# three, on both engines, and a second approved install pins the lag itself: the
+# package that goes missing is the last one verified, not the first.
+has_dependency() {
+  local package="$1"
+  jq -e --arg p "${package}" '.dependencies[$p] != null' "${CASE_PROJECT}/package.json" >/dev/null \
+    && jq -e --arg p "node_modules/${package}" '.packages[$p] != null' "${CASE_PROJECT}/package-lock.json" >/dev/null \
+    && [[ -e "${CASE_PROJECT}/node_modules/${package}" ]]
+}
+lacks_dependency() {
+  local package="$1"
+  ! jq -e --arg p "${package}" '.dependencies[$p] != null' "${CASE_PROJECT}/package.json" >/dev/null \
+    && ! jq -e --arg p "node_modules/${package}" '.packages[$p] != null' "${CASE_PROJECT}/package-lock.json" >/dev/null \
+    && [[ ! -e "${CASE_PROJECT}/node_modules/${package}" ]]
+}
+make_package sd-approved-too
+for engine in claude codex; do
+  new_project
+  ( export SAFEDEPS_HOME="${CASE_HOME}"
+    . lib/ledger/ledger.sh
+    safedeps_ledger_write_approved_spec npm sd-approved-too 1.0.0 >/dev/null ) \
+    || fail "the second fixture approval is written"
+  run_install "npm install sd-approved" "${engine}"
+  [[ -z "${CASE_POST}" ]] || fail "the first approved install is confirmed quietly on ${engine} (post: ${CASE_POST})"
+  : > "${MARKS}"
+  run_install "npm install sd-victim" "${engine}"
+  rolled_back || fail "an unapproved install after an approved one is rolled back on ${engine} (post: ${CASE_POST:-<quiet>})"
+  has_dependency sd-approved \
+    || fail "the rollback keeps the approved install verified just before it on ${engine} (package.json: $(jq -c .dependencies "${CASE_PROJECT}/package.json"))"
+  lacks_dependency sd-victim || fail "the rollback removes the unapproved install on ${engine}"
+  [[ "${engine}" == codex ]] || ! victim_ran || fail "no script of the unverified package runs on ${engine}"
+
+  run_install "npm install sd-approved-too" "${engine}"
+  [[ -z "${CASE_POST}" ]] || fail "the second approved install is confirmed quietly on ${engine} (post: ${CASE_POST})"
+  run_install "npm install sd-victim" "${engine}"
+  rolled_back || fail "a second unapproved install is rolled back on ${engine} (post: ${CASE_POST:-<quiet>})"
+  has_dependency sd-approved && has_dependency sd-approved-too \
+    || fail "the rollback keeps both verified installs on ${engine} (package.json: $(jq -c .dependencies "${CASE_PROJECT}/package.json"))"
+  lacks_dependency sd-victim || fail "the second rollback removes the unapproved install on ${engine}"
+done
+pass "a rollback returns to the state the last verified install left, on Claude Code and Codex"
+
+# If the verified state cannot be recorded, the baseline does not move, and the
+# user is told that a later rollback will undo this install too.
+readonly_snapshots() { chmod a-w "${CASE_HOME}/snapshots"; }
+new_project
+run_install "npm install sd-approved"
+baseline=$(cat "${CASE_HOME}"/confirmed_*)
+run_install "npm install sd-approved-too" claude readonly_snapshots
+chmod u+w "${CASE_HOME}/snapshots"
+[[ "$(cat "${CASE_HOME}"/confirmed_*)" == "${baseline}" ]] \
+  || fail "an unrecorded verified state leaves the baseline where it was"
+grep -q 'could not record the result as the new rollback baseline' <<< "${CASE_POST}" \
+  || fail "the user is told the baseline did not move (post: ${CASE_POST:-<quiet>})"
+grep -q 'rollback baseline was not moved' "${CASE_HOME}/advisory.log" \
+  || fail "advisory.log records that the baseline did not move"
+pass "a verified state that cannot be recorded leaves the baseline in place, and says so"
+
+# --- 8. A rollback does not run scripts it did not verify -------------------------------
 # The rollback restores node_modules from the confirmed snapshot. With a
 # package-lock.json that is `npm ci` of the baseline lock. Without one, npm has
 # to resolve package.json's ranges again, and whatever it resolves has not been
@@ -414,15 +477,9 @@ pass "approved installs, including --no-save and sub-project forms, confirm quie
 # Both reinstalls also have to stay in the project. A project .npmrc with
 # global=true sent a plain `npm ci` / `npm install` to the global prefix, which
 # emptied the project's node_modules and left it empty.
-#
-# A rollback returns to the confirmed snapshot, which is the state before the
-# last verified install. So each case below verifies one more `npm install`
-# after sd-approved, and the rollback then has sd-approved to restore.
 approve_baseline() {
   run_install "npm install sd-approved"
   [[ -z "${CASE_POST}" ]] || fail "an approved install stays quiet before the restore case (post: ${CASE_POST})"
-  run_install "npm install"
-  [[ -z "${CASE_POST}" ]] || fail "a bare install of the approved tree stays quiet (post: ${CASE_POST})"
 }
 new_project
 approve_baseline
@@ -458,7 +515,7 @@ pass "a rollback with no package-lock.json reinstalls without running install sc
 
 # --- the fixture never left the machine ---------------------------------------------------
 [[ -s "${tmp_root}/registry.log" ]] || fail "the installs went through the fixture registry"
-if grep -vE '^GET /sd-(victim|approved)(/-/sd-(victim|approved)-1\.0\.[01]\.tgz)?$' "${tmp_root}/registry.log" | grep -q .; then
+if grep -vE '^GET /sd-(victim|approved|approved-too)(/-/sd-(victim|approved|approved-too)-1\.0\.[01]\.tgz)?$' "${tmp_root}/registry.log" | grep -q .; then
   fail "the fixture registry saw only the synthetic packages ($(sort -u "${tmp_root}/registry.log" | paste -sd, -))"
 fi
 pass "every request went to the local fixture registry, for the synthetic packages only"
