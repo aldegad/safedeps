@@ -275,6 +275,44 @@ safedeps_osv_query() {
   return 1
 }
 
+# A Go install names an import path, and OSV keys Go advisories by module
+# path. The module is some prefix of the import path, and only a module proxy
+# knows which one, so every prefix down to host/first-element is asked and the
+# answers are merged, deduplicated by advisory id. Asking for the full path
+# alone let `go install golang.org/x/text/cmd/gotext@v0.3.7` come back clean
+# and get approved, while the module it installs, golang.org/x/text v0.3.7, is
+# vulnerable (caught in cross-validation). Any prefix that cannot be asked
+# fails the whole query closed, like any other OSV miss.
+safedeps_osv_query_go_prefixes() {
+  local package_name="$1"
+  local version="$2"
+  local prefix="${package_name}"
+  local merged='{"vulns":[]}'
+  local answer
+
+  while :; do
+    answer=$(safedeps_osv_query "go" "${prefix}" "${version}") || return 1
+    merged=$(jq -c --argjson add "${answer:-{\}}" \
+      '.vulns = ((.vulns + ($add.vulns // [])) | unique_by(.id))' <<< "${merged}") || return 1
+    [[ "${prefix}" == */*/* ]] || break
+    prefix="${prefix%/*}"
+  done
+  printf '%s\n' "${merged}"
+}
+
+# The OSV answer the per-package check judges by.
+safedeps_osv_query_for_check() {
+  local ecosystem="$1"
+  local package_name="$2"
+  local version="$3"
+
+  if [[ "${ecosystem}" == "go" ]]; then
+    safedeps_osv_query_go_prefixes "${package_name}" "${version}"
+  else
+    safedeps_osv_query "${ecosystem}" "${package_name}" "${version}"
+  fi
+}
+
 safedeps_osv_query_batch() {
   local ecosystem="$1"
   local closure_file="$2"
@@ -614,7 +652,7 @@ safedeps_providers_query() {
   kev_file="${temp_dir}/kev.json"
   ghsa_file="${temp_dir}/ghsa.json"
 
-  if ! safedeps_osv_query "${ecosystem}" "${package_name}" "${version}" > "${osv_file}"; then
+  if ! safedeps_osv_query_for_check "${ecosystem}" "${package_name}" "${version}" > "${osv_file}"; then
     jq -cn \
       --arg ecosystem "${ecosystem}" \
       --arg package "${package_name}" \

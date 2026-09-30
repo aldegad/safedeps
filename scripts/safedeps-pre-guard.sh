@@ -370,8 +370,8 @@ normalize_install_text() {
     text=$(printf '%s' "${text}" | sed -E \
       -e 's/^[[:space:]]+//' \
       -e "s#(^|[[:space:];|&({!])(/[^[:space:];|&]+/)(${SAFEDEPS_G_EXECUTABLES}|sh|bash|zsh)([[:space:];|&]|\$)#\\1\\3\\4#g" \
-      -e 's#(^|[;&|({!][[:space:]]*)(env([[:space:]]+(-i|--ignore-environment|-0|--null|-v|--debug|-u[[:space:]]*[^[:space:]]+|--unset(=|[[:space:]]+)[^[:space:]]+|-C[[:space:]]*[^[:space:]]+|--chdir(=|[[:space:]]+)[^[:space:]]+|[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]+))*[[:space:]]+|command[[:space:]]+|exec[[:space:]]+)#\1#g' \
-      -e 's#(^|[;&|({!][[:space:]]*)([A-Za-z_][A-Za-z0-9_]*=[^[:space:]'\''"]*[[:space:]]+)+#\1#g')
+      -e 's#(^|[;&|({!][[:space:]]*|(then|do|else|elif|if|while|until|time|coproc)[[:space:]]+)(env([[:space:]]+(-i|--ignore-environment|-0|--null|-v|--debug|-u[[:space:]]*[^[:space:]]+|--unset(=|[[:space:]]+)[^[:space:]]+|-C[[:space:]]*[^[:space:]]+|--chdir(=|[[:space:]]+)[^[:space:]]+|[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]+))*[[:space:]]+|command[[:space:]]+|exec[[:space:]]+)#\1#g' \
+      -e 's#(^|[;&|({!][[:space:]]*|(then|do|else|elif|if|while|until|time|coproc)[[:space:]]+)([A-Za-z_][A-Za-z0-9_]*=[^[:space:]'\''"]*[[:space:]]+)+#\1#g')
   done
   printf '%s' "${text}"
 }
@@ -1344,7 +1344,7 @@ guard_detect_ecosystem() {
   local seg eco
 
   while IFS= read -r seg; do
-    [[ -z "${seg//[[:space:]]/}" ]] && continue
+    [[ "${seg}" =~ [^[:space:]] ]] || continue
     command_is_dependency_install "${seg}" || continue
     eco=$(guard_segment_ecosystem "${seg}")
     [[ -n "${eco}" ]] && { printf '%s' "${eco}"; return 0; }
@@ -1381,7 +1381,7 @@ guard_all_npm_installs_are_global() {
 
   while IFS= read -r candidate; do
     while IFS= read -r seg; do
-      [[ -z "${seg//[[:space:]]/}" ]] && continue
+      [[ "${seg}" =~ [^[:space:]] ]] || continue
       scan=$(command_scan_text "${seg}")
       echo "${scan}" | grep -qEi '(^|[[:space:]])npm([[:space:]]|$)' || continue
       echo "${scan}" | grep -qEi "(^|[[:space:]])(${SAFEDEPS_G_NPM_VERBS})([[:space:]]|\$)" || continue
@@ -1407,7 +1407,7 @@ guard_runner_operands() {
   text=$(printf '%s' "$1" | tr -d "\"'")
   after=$(printf '%s\n' "${text}" \
     | sed -nE "s/^(.*[[:space:];&|({!])?(${SAFEDEPS_G_RUNNER_BODY})([[:space:]]|\$)//p" | head -n1)
-  [[ -z "${after//[[:space:]]/}" ]] && return 0
+  [[ "${after}" =~ [^[:space:]] ]] || return 0
 
   local named_by_option=false
   want_value=false
@@ -1431,6 +1431,25 @@ guard_runner_operands() {
         ;;
     esac
   done
+}
+
+# The package an operand names, without its version, extras or markers:
+# `evil[x]==1.0.0` -> evil, `@scope/x@1` -> @scope/x, `example.com/m@v1` ->
+# example.com/m. Whether it is pinned is then asked of the extractor's output by
+# this name, never read off the token's shape.
+guard_operand_name() {
+  local tok="$1" scope="" body
+  if [[ "${tok}" == @* ]]; then
+    scope="@"
+    body="${tok#@}"
+  else
+    body="${tok}"
+  fi
+  body="${body%%;*}"
+  body="${body%%\[*}"
+  body="${body%%@*}"
+  body="${body%%[=<>~!]*}"
+  printf '%s%s' "${scope}" "${body}"
 }
 
 guard_names_package_without_spec() {
@@ -1467,17 +1486,21 @@ guard_names_package_without_spec() {
   #      `cargo install x --version 1` is not, because it does not. Re-deriving
   #      it would make that second install neither gated nor recorded.
   local cmd="$1"
-  local seg tok verb_seen skip_next seg_ecosystem entry name
+  local seg tok verb_seen skip_next seg_ecosystem entry entry_eco name
   local -a toks=()
+  # Keyed by ecosystem as well as name: pypi `openai` and npm `openai` are
+  # different packages, and a pin on one must not quiet the record for the
+  # other (caught in review: `pip install openai==1 && pnpm add openai` left
+  # no trace of the pnpm install).
   local pinned=$'\n'
 
   for entry in "${LEDGER_SPECS[@]+${LEDGER_SPECS[@]}}"; do
-    IFS=$'\t' read -r _ name _ <<< "${entry}"
-    pinned+="${name}"$'\n'
+    IFS=$'\t' read -r entry_eco name _ <<< "${entry}"
+    pinned+="${entry_eco}"$'\t'"${name}"$'\n'
   done
 
   while IFS= read -r seg; do
-    [[ -z "${seg//[[:space:]]/}" ]] && continue
+    [[ "${seg}" =~ [^[:space:]] ]] || continue
     command_is_dependency_install "${seg}" || continue
 
     verb_seen=false
@@ -1488,17 +1511,13 @@ guard_names_package_without_spec() {
     if guard_segment_is_runner "${seg}"; then
       while IFS= read -r tok; do
         [[ -z "${tok}" ]] && continue
-        [[ "${pinned}" == *$'\n'"${tok}"$'\n'* ]] && continue
+        [[ "${pinned}" == *$'\n'"${seg_ecosystem}"$'\t'"$(guard_operand_name "${tok}")"$'\n'* ]] && continue
         # npx, npm exec and bunx run a binary the project already has without
         # fetching anything, so `npx tsc` in a TypeScript project is not an
         # install. Only a name with no local binary is fetched, and only that
         # is worth a record; recording every `npx tsc` would bury the ones that
         # matter.
         guard_runner_uses_local_bin "${seg}" "${tok}" && continue
-        case "${tok#@}" in
-          *://*) return 0 ;;
-          *@*|*==*) continue ;;
-        esac
         return 0
       done < <(guard_runner_operands "${seg}")
       continue
@@ -1571,14 +1590,15 @@ guard_names_package_without_spec() {
         .|..|./*|../*|/*) continue ;;
       esac
 
-      # `@` counts as a version delimiter only outside a URL, where it separates
-      # a user rather than a version, and only after a scope's leading `@`:
-      # `@scope/x` names a package without pinning it.
-      case "${tok#@}" in
-        *://*) : ;;
-        *@*|*==*) continue ;;
+      # Pinned means the extractor produced a spec for this package, asked by
+      # name. Reading it off the token's shape (`*@*|*==*`) let every spelling
+      # the extractor does not read pass as pinned with no record:
+      # `evil[x]==1.0.0`, `evil===1.0.0`, `evil==1.0.*` (caught in review). A
+      # URL names a package and pins nothing, whatever `@` it carries.
+      case "${tok}" in
+        *://*) return 0 ;;
       esac
-      [[ "${pinned}" == *$'\n'"${tok}"$'\n'* ]] && continue
+      [[ "${pinned}" == *$'\n'"${seg_ecosystem}"$'\t'"$(guard_operand_name "${tok}")"$'\n'* ]] && continue
 
       return 0
     done
@@ -1613,8 +1633,10 @@ guard_extract_flagged_specs() {
     }
     {
       for (i = 1; i <= NF; i++) {
-        if ($i ~ /^[A-Za-z][A-Za-z0-9._-]*==[A-Za-z0-9][A-Za-z0-9._+!~-]*$/) {
-          split($i, parts, "==")
+        # `name==version`, and `name===version` (arbitrary equality, also an
+        # exact pin). A wildcard such as `==1.0.*` is not a pin and stays out.
+        if ($i ~ /^[A-Za-z][A-Za-z0-9._-]*===?[A-Za-z0-9][A-Za-z0-9._+!~-]*$/) {
+          split($i, parts, /===?/)
           print parts[1] "\t" parts[2]
         }
 
@@ -1715,7 +1737,7 @@ guard_extract_specs() {
   local seg eco text
 
   while IFS= read -r seg; do
-    [[ -z "${seg//[[:space:]]/}" ]] && continue
+    [[ "${seg}" =~ [^[:space:]] ]] || continue
     command_is_dependency_install "${seg}" || continue
     eco=$(guard_segment_ecosystem "${seg}")
     [[ -n "${eco}" ]] || continue
@@ -1724,6 +1746,9 @@ guard_extract_specs() {
     else
       text=$(printf '%s' "${seg}" | tr -d "\"'" | tr '(){}' '    ')
     fi
+    # Python extras (`evil[x]==1.0.0`) select optional dependencies of the same
+    # package; the package and its version are what the ledger judges.
+    [[ "${eco}" == "pypi" ]] && text=$(printf '%s' "${text}" | sed -E 's/\[[^] ]*\]//g')
     guard_operand_specs "${eco}" "${text}"
   done < <(command_candidate_texts "${cmd}" | tr ';|&' '\n')
 }
@@ -1867,7 +1892,7 @@ guard_effect_gate_reads_every_install() {
   local seg scan any=false
 
   while IFS= read -r seg; do
-    [[ -z "${seg//[[:space:]]/}" ]] && continue
+    [[ "${seg}" =~ [^[:space:]] ]] || continue
     command_is_dependency_install "${seg}" || continue
     any=true
     guard_segment_is_runner "${seg}" && return 1

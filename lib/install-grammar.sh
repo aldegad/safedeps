@@ -52,7 +52,7 @@ SAFEDEPS_G_EXECUTABLES='npm|npx|pnpm|pnpx|yarn|bun|bunx|pip[0-9.]*|python[0-9.]*
 # separator or an opening group, and after the reserved words that begin a
 # statement. A keyword only counts where a statement starts, so `echo do pip
 # install` stays an echo.
-SAFEDEPS_G_START='(^[[:space:]]*|[;&|({!][[:space:]]*)((then|do|else|elif|if|while|until|time)[[:space:]]+)*'
+SAFEDEPS_G_START='(^[[:space:]]*|[;&|({!][[:space:]]*)((then|do|else|elif|if|while|until|time|coproc)[[:space:]]+)*'
 
 # Options between a manager and its verb: any number, each with an optional
 # value, plus the bare `--` that ends them. A value can only be told from the verb by trying both readings, which
