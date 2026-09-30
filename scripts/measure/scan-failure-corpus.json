@@ -1,5 +1,5 @@
 {
-  "comment": "Input for scan-failure-census.sh. Each form is run bare and inside each wrapper ({} is the form); extras run once; controls name no install. Only ever handed to the guard as a payload, never executed.",
+  "comment": "Input for scan-failure-census.sh. Each form is run bare and inside each wrapper ({} is the form); extras run once; controls name no install. Only ever handed to the guard as a payload, never executed. The approved variant runs a payload against a ledger that already approves every spec under approvals, so installs reach the allow path (inert rewrite, pending state) instead of stopping at the ledger deny.",
   "forms": [
     "npm install left-pad@1.3.0",
     "npm i left-pad@1.3.0",
@@ -81,7 +81,7 @@
     "git commit -m 'bump npm i x'"
   ],
   "quick": {
-    "comment": "The subset npm test runs: one form per ecosystem bare, the wrappers that reach a different reader on one form, the extras that exercise join, blanking, inert and --prefix, and two controls. Claude payloads only, except the two rows under variants; K-onward runs are left to the full census.",
+    "comment": "The subset npm test runs: one form per ecosystem bare, the wrappers that reach a different reader on one form, the extras that exercise join, blanking, inert, --prefix and a spec-less npm install, and two controls. Claude payloads only, except the rows under variants, which also run as codex, padded and approved; K-onward runs are left to the full census.",
     "forms": [
       "npm install left-pad@1.3.0",
       "pnpm add left-pad@1.3.0",
@@ -102,7 +102,9 @@
       "pip \\\ninstall requests==2.0.0",
       "echo \"a\nb\" ; pip install requests==2.0.0",
       "pip install requests==2.0.0 && printf 'pip install evil==6.6.6' | sh",
-      "npm install --prefix ../other left-pad@1.3.0"
+      "npm install --prefix ../other left-pad@1.3.0",
+      "npm ci",
+      "npm ci # rebuild the lockfile"
     ],
     "controls": [
       "ls -la",
@@ -110,7 +112,55 @@
     ],
     "variants": [
       "npm install left-pad@1.3.0 && npm run build",
-      "pip install requests==2.0.0"
+      "pip install requests==2.0.0",
+      "npm install left-pad@1.3.0"
     ]
-  }
+  },
+  "approvals": [
+    [
+      "npm",
+      "left-pad",
+      "1.3.0"
+    ],
+    [
+      "npm",
+      "cowsay",
+      "1.5.0"
+    ],
+    [
+      "pypi",
+      "requests",
+      "2.0.0"
+    ],
+    [
+      "crates.io",
+      "serde",
+      "1.0.0"
+    ],
+    [
+      "crates.io",
+      "ripgrep",
+      "14.0.0"
+    ],
+    [
+      "go",
+      "example.com/x",
+      "v1.0.0"
+    ],
+    [
+      "rubygems",
+      "rails",
+      "7.0.0"
+    ],
+    [
+      "nuget",
+      "Newtonsoft.Json",
+      "13.0.1"
+    ],
+    [
+      "maven",
+      "g:a",
+      "1.0"
+    ]
+  ]
 }

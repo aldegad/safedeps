@@ -44,9 +44,12 @@
 #   --jobs N     parallel runs (default 4)
 #   --variants   payload shapes: claude (no turn_id), codex (turn_id, so no
 #                inert rewrite), padded (over 1KB, so the self-budget child
-#                judges it). Default: all three on every fifth command, claude
-#                on the rest; with --quick, all three on the rows the corpus
-#                lists under quick.variants, claude on the rest.
+#                judges it), approved (claude, against a ledger that approves
+#                the corpus's specs, so installs reach the allow path instead
+#                of the ledger deny). Default: all four on every fifth command,
+#                claude and approved on the rest; with --quick, all four on
+#                the rows the corpus lists under quick.variants, claude on the
+#                rest.
 #
 # --quick also skips the K-onward runs (the full census keeps them), so npm
 # test pays for one failing run per reading rather than two.
@@ -63,6 +66,7 @@ if [[ "${1:-}" == "--run" ]]; then
   mkdir -p "${T}/p" "${T}/h" "${T}/st"
   printf '{"dependencies":{}}\n' > "${T}/p/package.json"
   variant=$(cat "${WORK}/cases/${n}.variant")
+  [[ "${variant}" != "approved" ]] || cp -R "${WORK}/approved-home" "${T}/h/safe"
   codex=""
   [[ "${variant}" == "codex" ]] && codex=1
   rc=0
@@ -88,7 +92,12 @@ if [[ "${1:-}" == "--run" ]]; then
   reads=$(cat "${T}/st/reads" 2>/dev/null || printf '0')
   after=$(cat "${T}/st/after-gate" 2>/dev/null || printf '0')
   # Paths under the run's own temp root differ every run; compare them as T.
+  # The guard resolves the project directory, so the root appears in its
+  # physical spelling too (macOS: /var is /private/var).
+  T_physical=$(cd "${T}" && pwd -P)
+  updated="${updated//${T_physical}/T}"
   updated="${updated//${T}/T}"
+  pending="${pending//${T_physical}/T}"
   pending="${pending//${T}/T}"
   updated="${updated//$'\n'/\\n}"
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
@@ -152,6 +161,15 @@ exec "\${real}" "\$@"
 SHIM
 chmod +x "${WORK}/bin/awk"
 
+# --- the approved ledger -------------------------------------------------------
+# Written once and copied into each approved run. Built with the ledger's own
+# writer, so it is whatever the guard reads.
+mkdir -p "${WORK}/approved-home"
+while IFS=$'\t' read -r eco pkg ver; do
+  SAFEDEPS_HOME="${WORK}/approved-home" "${ROOT_DIR}/lib/ledger/ledger.sh" approve "${eco}" "${pkg}" "${ver}" "${ver}" census >/dev/null \
+    || { printf 'census: could not approve %s %s %s\n' "${eco}" "${pkg}" "${ver}" >&2; exit 2; }
+done < <(jq -r '.approvals[] | @tsv' "${CORPUS}")
+
 # --- cases ----------------------------------------------------------------------
 case_count=0
 add_case() {
@@ -175,13 +193,13 @@ variants_for() {
   fi
   if [[ "${QUICK}" == "true" ]]; then
     while IFS= read -r row; do
-      [[ -n "${row}" && "${row}" == "${command}" ]] && { printf 'claude codex padded'; return; }
+      [[ -n "${row}" && "${row}" == "${command}" ]] && { printf 'claude codex padded approved'; return; }
     done <<< "${quick_variant_rows}"
     printf 'claude'
   elif [[ $(( index % 5 )) -eq 0 ]]; then
-    printf 'claude codex padded'
+    printf 'claude codex padded approved'
   else
-    printf 'claude'
+    printf 'claude approved'
   fi
 }
 index=0
