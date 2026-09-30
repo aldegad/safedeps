@@ -9,7 +9,7 @@
 #   command_is_injectable_npm_install  may --ignore-scripts be injected
 #   command_has_ignore_scripts_flag  is the flag already there
 #   command_is_compound              may the flag be appended
-#   resolve_install_dir_override     where does the install land
+#   resolve_install_targets          where does each install land
 #   guard_detect_ecosystem           which ecosystem
 #   payload_pipes_install_text_to_shell  is the pipe in execution position
 #   guard_extract_specs (line loop)  which pkg@spec tokens are named

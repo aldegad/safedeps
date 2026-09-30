@@ -499,7 +499,10 @@ for no_effect_gate in \
   "yarn add evil" \
   "bun add evil" \
   "npm install -g evil" \
-  "npm install --no-package-lock evil" \
+  "npm_config_global=true npm install evil" \
+  "NPM_CONFIG_GLOBAL=true npm install evil" \
+  "export npm_config_global=true; npm install evil" \
+  "npm_config_location=global npm install evil" \
   "npx evil" \
   "npm exec evil" \
   "pnpm dlx evil" \
@@ -512,6 +515,98 @@ do
     || fail "the UNGATED record must not change the verdict: ${no_effect_gate}"
 done
 pass "unpinned pnpm/yarn/bun, global npm, and runner installs are recorded"
+
+# The effect gate reads one directory, chosen before the command runs. An install
+# that lands somewhere the text does not let the gate follow is not read, so it
+# is recorded. A literal `cd` to a directory that exists, and npm's `-C`, are
+# followed; everything the shell decides at run time is not
+# (safedeps/effect-gate-blind-to-lockless-npm-installs).
+mkdir -p "${project_dir}/sub"
+for unfollowed in \
+  'cd "$SUBDIR" && npm install evil' \
+  'cd $(dirname x)/sub && npm install evil' \
+  'cd no-such-dir && npm install evil' \
+  '(cd sub && npm install evil)' \
+  'cd sub | npm install evil' \
+  'pushd sub && popd && npm install evil' \
+  'npm install evil --prefix=$HOME/x' \
+  'cd sub && npm install evil && cd .. && npm install other'
+do
+  logged_ungated "${unfollowed}" \
+    || fail "an unpinned install that lands where the gate cannot follow is recorded: ${unfollowed}"
+done
+pass "an install relocated by run-time shell state, or split across directories, is recorded"
+
+# The other side: forms the effect gate does read stay quiet. `--no-save` and
+# `--no-package-lock` leave package-lock.json alone but record the package in
+# node_modules/.package-lock.json, which the gate reads; `cd` and `-C` are
+# followed to the lockfile they write.
+for followed in \
+  "npm install --no-save evil" \
+  "npm install evil --save=false" \
+  "npm install --no-package-lock evil" \
+  "npm install evil --package-lock false" \
+  "npm_config_save=false npm install evil" \
+  "npm_config_package_lock=false npm install evil" \
+  "npm_config_prefix=sub npm install evil" \
+  "cd sub && npm install evil" \
+  "cd sub; npm install evil" \
+  "cd ${project_dir}/sub && npm install evil" \
+  "npm -C sub install evil" \
+  "npm install evil -C sub" \
+  "npm install --prefix sub evil" \
+  "env -C sub npm install evil" \
+  "npm install evil && npm install other"
+do
+  logged_ungated "${followed}" && fail "an install the effect gate reads is not recorded UNGATED: ${followed}"
+done
+pass "lockless and relocated installs the effect gate reads stay unrecorded"
+
+# Where the gate looks is read the way the shell reads the command. A quoted
+# relocation value is one word: reading the quote-blanked text instead turned
+# `--prefix "/tmp/x y" left-pad` into `--prefix left-pad`, so the effect gate
+# verified <cwd>/left-pad while the install landed in /tmp/x y, and yarn's
+# `--cwd "/tmp/a b" add x` was read as <cwd>/add and denied (caught in review).
+pending_project_dir() {
+  local command="$1" safe
+  safe=$(mktemp -d "${tmp_root}/safe-where.XXXXXX")
+  jq -nc --arg c "${command}" --arg cwd "${project_dir}" \
+    '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
+    HOME="${tmp_root}/home-where" SAFEDEPS_HOME="${safe}" scripts/safedeps-pre-guard.sh >/dev/null 2>&1
+  cat "${safe}"/pending/*.json 2>/dev/null | jq -r '.project_dir' | head -n1
+}
+spaced="${tmp_root}/x y"
+mkdir -p "${spaced}" "${project_dir}/my dir"
+spaced_real=$(cd "${spaced}" && pwd -P)
+project_real=$(cd "${project_dir}" && pwd -P)
+for form in \
+  "npm install --prefix \"${spaced}\" left-pad" \
+  "npm install --prefix='${spaced}' left-pad" \
+  "npm install left-pad --prefix ${spaced// /\\ }" \
+  "npm -C \"${spaced}\" install left-pad"
+do
+  got=$(pending_project_dir "${form}")
+  [[ "${got}" == "${spaced_real}" ]] || fail "a quoted relocation value is one word: ${form} (verifies ${got})"
+done
+for form in 'cd "my dir" && npm install left-pad' 'cd my\ dir && npm install left-pad'; do
+  got=$(pending_project_dir "${form}")
+  [[ "${got}" == "${project_real}/my dir" ]] || fail "a quoted cd operand is one word: ${form} (verifies ${got})"
+done
+got=$(pending_project_dir 'echo "a; cd sub" && npm install left-pad')
+[[ "${got}" == "${project_real}" ]] || fail "a cd inside quotes is not a statement (verifies ${got})"
+# The yarn case denies either way here, because x@1.0.0 is not approved. What
+# moved is why: read as <cwd>/add, the Yarn context of a directory that does
+# not exist was "invalid", and that deny said nothing about approval.
+mkdir -p "${tmp_root}/a b"
+printf '{"name":"ab"}\n' > "${tmp_root}/a b/package.json"
+printf '__metadata:\n  version: 8\n' > "${tmp_root}/a b/yarn.lock"
+yarn_reason=$(jq -nc --arg c "yarn --cwd \"${tmp_root}/a b\" add x@1.0.0" --arg cwd "${project_dir}" \
+    '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
+  HOME="${tmp_root}/home-where" SAFEDEPS_HOME="$(mktemp -d "${tmp_root}/safe-yarn.XXXXXX")" \
+    scripts/safedeps-pre-guard.sh 2>/dev/null | jq -r '.hookSpecificOutput.permissionDecisionReason // empty')
+[[ "${yarn_reason}" == *"not approved"* ]] \
+  || fail "yarn --cwd with a quoted directory is judged in that directory, not in <cwd>/add (reason: ${yarn_reason})"
+pass "quoted and escaped relocation values are read as one word, as the shell reads them"
 
 # "Pinned" is asked of the extractor by name, not read off the token. A wildcard
 # is not a pin, so with evil approved the second package here reaches no ledger

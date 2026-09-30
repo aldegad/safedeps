@@ -597,29 +597,252 @@ command_is_compound() {
   printf '%s' "${scanned}" | grep -qE '[;&|]'
 }
 
-# Echo the install directory when the command redirects the install target away
-# from cwd via a tool-specific long flag — npm `--prefix`, pnpm `--dir`, yarn
-# `--cwd`, or `--install-dir`. Empty when there is no override. Without this, an
-# `npm install --prefix /other pkg` is snapshotted/effect-gated against cwd (which
-# never changed), so the effect gate falsely confirms cwd clean and even advances
-# the safe pointer while the real install lands in /other unverified (finding #3).
-# Operates on the quote-blanked text so a quoted occurrence is not misread; only
-# unambiguous long flags are honored to avoid colliding with other tools' `-C`.
-resolve_install_dir_override() {
-  local cmd="$1" scanned tok want=""
+# The statements of a command, one per line, as
+# `<before>\t<text>\t<after>\t<words>`. <before> and <after> are the separators
+# around the statement (`start`, `;`, `&&`, `||`, `|`, `&`, `end`) and <text> is
+# its quote-blanked text, so a separator inside quotes is not one. A newline
+# separates like `;`, and a redirection (`2>&1`, `&>`, `|&`) does not split a
+# statement.
+#
+# <words> is the statement split into words the way the shell splits it, read
+# from the raw text: quotes delimit and are removed, a backslash escapes, and
+# `"/tmp/x y"` is one word. Words are joined by \037. A word whose value the
+# shell decides at run time (a `$` or backquote outside single quotes, an
+# unquoted glob or leading tilde) ends in \001, which guard_literal_dir reads as
+# unknown. Reading the blanked text instead turned `--prefix "/tmp/x y" pkg`
+# into `--prefix pkg` and sent the gate to <cwd>/pkg (caught in review). The two
+# texts line up byte for byte because command_scan_text preserves length.
+command_statements() {
+  local raw_file scan_file
+  raw_file=$(mktemp "${TMPDIR:-/tmp}/safedeps-stmt-raw.XXXXXX") || return 0
+  scan_file=$(mktemp "${TMPDIR:-/tmp}/safedeps-stmt-scan.XXXXXX") || { rm -f "${raw_file}"; return 0; }
+  printf '%s' "$1" > "${raw_file}"
+  command_scan_text "$1" > "${scan_file}"
+  LC_ALL=C awk -v scan_file="${scan_file}" -v raw_file="${raw_file}" '
+    function slurp(f,   out, line, count) {
+      out = ""; count = 0
+      while ((getline line < f) > 0) out = out (count++ ? "\n" : "") line
+      close(f)
+      return out
+    }
+    function word_end() {
+      if (has) words = words (words == "" ? "" : "\037") word (dyn ? "\001" : "")
+      word = ""; has = 0; dyn = 0
+    }
+    function words_of(from, to,   i, ch, q) {
+      words = ""; word = ""; has = 0; dyn = 0; q = ""
+      for (i = from; i <= to; i++) {
+        ch = r[i]
+        if (q == "") {
+          if (ch == " " || ch == "\t" || ch == "\n") { word_end(); continue }
+          if (ch == "\\") { if (i < to) { i++; word = word r[i]; has = 1 }; continue }
+          if (ch == "\047") { q = "s"; has = 1; continue }
+          if (ch == "\"") { q = "d"; has = 1; continue }
+          if (ch == "$" || ch == "`" || ch == "*" || ch == "?" || ch == "[") dyn = 1
+          if (ch == "~" && !has) dyn = 1
+          word = word ch; has = 1
+          continue
+        }
+        if (q == "s") { if (ch == "\047") q = ""; else word = word ch; continue }
+        if (ch == "\\" && i < to && (r[i + 1] == "$" || r[i + 1] == "`" || r[i + 1] == "\"" || r[i + 1] == "\\")) {
+          i++; word = word r[i]; continue
+        }
+        if (ch == "\"") { q = ""; continue }
+        if (ch == "$" || ch == "`") dyn = 1
+        if (ch == "\n" || ch == "\t") ch = " "
+        word = word ch
+      }
+      word_end()
+      return words
+    }
+    function emit(nx, to) {
+      text = cur; gsub(/\t/, " ", text)
+      printf "%s\t%s\t%s\t%s\n", prev, text, nx, words_of(from, to)
+      prev = nx; cur = ""
+    }
+    BEGIN {
+      n = split(slurp(scan_file), c, "")
+      split(slurp(raw_file), r, "")
+      prev = "start"; cur = ""; from = 1
+      for (i = 1; i <= n; i++) {
+        ch = c[i]
+        if (ch == ";" || ch == "\n") { emit(";", i - 1); from = i + 1; continue }
+        if (ch == "&") {
+          if (c[i - 1] == ">" || c[i + 1] == ">") { cur = cur ch; continue }
+          if (c[i + 1] == "&") { emit("&&", i - 1); i++; from = i + 1; continue }
+          emit("&", i - 1); from = i + 1; continue
+        }
+        if (ch == "|") {
+          if (c[i + 1] == "|") { emit("||", i - 1); i++; from = i + 1; continue }
+          to = i - 1
+          if (c[i + 1] == "&") i++
+          emit("|", to); from = i + 1; continue
+        }
+        cur = cur ch
+      }
+      emit("end", n)
+    }'
+  rm -f "${raw_file}" "${scan_file}"
+}
+
+# The directory a literal path names from <dir>, or `?` when the text cannot
+# say: a variable, a substitution, a tilde or a glob is resolved by the shell at
+# run time, and a relative path from an unknown directory is unknown too.
+guard_literal_dir() {
+  local dir="$1" path="$2"
+  [[ -n "${path}" && "${path}" != -* ]] || { printf '?'; return 0; }
+  case "${path}" in
+    *$'\001'*) printf '?'; return 0 ;;
+    *'$'*|*'`'*|'~'*|*'*'*|*'?'*|*'['*) printf '?'; return 0 ;;
+    /*) printf '%s' "${path}"; return 0 ;;
+  esac
+  [[ "${dir}" != "?" ]] || { printf '?'; return 0; }
+  printf '%s/%s' "${dir%/}" "${path}"
+}
+
+# Where each install statement in the command lands, one line per statement, as
+# `<kind>\t<dir>`. <kind> is `npm` for an npm CLI install that is not a runner
+# and `other` for every other install. <dir> is an absolute path, `global`, or
+# `?` when the text does not say.
+#
+# The effect gate reads one directory, chosen here before the command runs. An
+# install that lands anywhere else is not read, whatever the gate says about the
+# directory it did read. Four things move an install, and each was measured with
+# a real npm against a local registry (safedeps/effect-gate-blind-to-lockless-npm-installs):
+#
+#   - A relocation flag on the install itself: `--prefix`, pnpm's `--dir`,
+#     yarn's and bun's `--cwd`, `--install-dir`, and `-C` where the manager
+#     documents it as one of those (npm: `--prefix`; pnpm: `--dir`). pip reads
+#     `-C` as `--config-settings`, so `-C` is honoured for npm and pnpm only.
+#     `npm -C sub install x` wrote sub/package-lock.json while the gate read the
+#     cwd lockfile and confirmed it clean.
+#   - A `cd` or `pushd` earlier in the command. `cd sub && npm install x` and
+#     `cd sub; npm install x` both wrote sub/package-lock.json. A literal path
+#     to a directory that exists now is followed. Anything the shell decides at
+#     run time is `?`: a variable or substitution, a directory that does not
+#     exist yet, `popd`, a `cd` inside a group or subshell, and a `cd` beside a
+#     pipe or `&`, which run it in a subshell of its own.
+#   - Global installs: `-g`, `--global`, `--location global`, and the same two
+#     settings given as `npm_config_global` / `npm_config_location` anywhere in
+#     the command, prefixed or exported. Those land in npm's global prefix and
+#     write no lockfile at all.
+#   - `npm_config_prefix` in the environment does NOT move a project install:
+#     measured, it landed in the cwd project and the gate rolled it back.
+#
+# A setting that arrives through a file (`.npmrc`) is not text in the command
+# and cannot be seen here. That boundary is stated in ARCHITECTURE.md.
+resolve_install_targets() {
+  local cmd="$1" cwd="$2"
+  local text before stmt after words head target want kind manager tok value normalized in_env skip
+  local dir="${cwd}" grouped=false env_global=false
   local -a toks=()
-  scanned=$(command_scan_text "${cmd}")
-  read -ra toks <<< "${scanned//$'\n'/ }"
-  for tok in "${toks[@]+${toks[@]}}"; do
-    if [[ -n "${want}" ]]; then printf '%s' "${tok}"; return 0; fi
-    case "${tok}" in
-      --prefix=*)      printf '%s' "${tok#--prefix=}"; return 0 ;;
-      --cwd=*)         printf '%s' "${tok#--cwd=}"; return 0 ;;
-      --dir=*)         printf '%s' "${tok#--dir=}"; return 0 ;;
-      --install-dir=*) printf '%s' "${tok#--install-dir=}"; return 0 ;;
-      --prefix|--cwd|--dir|--install-dir) want=1 ;;
+
+  text=$(join_line_continuations "$(strip_heredoc_bodies "${cmd}")")
+  command_scan_text "${text}" | grep -q '[(){}`]' && grouped=true
+  command_scan_text "${text}" \
+    | grep -qEi '(^|[[:space:];&|(])(export[[:space:]]+)?npm_config_(global|location)=' && env_global=true
+
+  while IFS=$'\t' read -r before stmt after words; do
+    [[ -n "${words}" ]] || continue
+    IFS=$'\037' read -ra toks <<< "${words}"
+    [[ ${#toks[@]} -gt 0 ]] || continue
+
+    # A statement may open with a group or a reserved word; the command is
+    # what follows.
+    while [[ ${#toks[@]} -gt 0 ]]; do
+      head="${toks[0]}"
+      head="${head#"${head%%[!({!]*}"}"
+      case "${head}" in
+        ''|then|do|else|elif|if|while|until|time) toks=("${toks[@]:1}") ;;
+        *) toks[0]="${head}"; break ;;
+      esac
+    done
+    [[ ${#toks[@]} -gt 0 ]] || continue
+
+    case "${toks[0]}" in
+      cd|pushd|popd)
+        if [[ "${grouped}" == true || "${toks[0]}" == popd \
+              || "${before}" == "|" || "${before}" == "&" || "${after}" == "|" || "${after}" == "&" ]]; then
+          dir="?"
+          continue
+        fi
+        value=""
+        for tok in "${toks[@]:1}"; do
+          case "${tok}" in -L|-P|-e|-@|-n) continue ;; esac
+          value="${tok}"
+          break
+        done
+        dir=$(guard_literal_dir "${dir}" "${value}")
+        [[ "${dir}" == "?" || -d "${dir}" ]] || dir="?"
+        continue
+        ;;
     esac
-  done
+
+    command_is_dependency_install "${stmt}" || continue
+
+    # Kind is read from the statement as the other recognizers read it, with
+    # `VAR=value` prefixes and `env` wrappers stripped: `npm_config_save=false
+    # npm install x` is an npm install.
+    normalized=$(normalize_install_text "${stmt}")
+    kind=other
+    # The runner test is guard_segment_is_runner's, spelled out: that function
+    # is defined further down, past the point where this one first runs.
+    if ! command_scan_text "${normalized}" | grep -qEi "${SAFEDEPS_G_RUNNER_HEAD_RE}" \
+        && printf '%s' "${normalized}" | grep -qEi "${SAFEDEPS_G_NPM_INSTALL_RE}"; then
+      kind=npm
+    fi
+    manager=""
+    if [[ "${kind}" == npm ]]; then
+      manager=npm
+    elif printf '%s' "${normalized}" | grep -qEi '(^|[[:space:]])pnpm([[:space:]]|$)'; then
+      manager=pnpm
+    fi
+
+    # `env -C <dir>` / `env --chdir <dir>` runs the command in <dir>; its
+    # options come before the first word that is neither an option nor an
+    # assignment.
+    target="${dir}"
+    want=""
+    skip=false
+    in_env=false
+    [[ "${toks[0]}" == env ]] && in_env=true
+    for tok in "${toks[@]:1}"; do
+      if [[ "${skip}" == true ]]; then skip=false; continue; fi
+      if [[ -n "${want}" ]]; then
+        target=$(guard_literal_dir "${target}" "${tok}")
+        want=""
+        continue
+      fi
+      if [[ "${in_env}" == true ]]; then
+        case "${tok}" in
+          -C|--chdir) want=1; continue ;;
+          --chdir=*) target=$(guard_literal_dir "${target}" "${tok#*=}"); continue ;;
+          -u|--unset) skip=true; continue ;;
+          -*|*=*) continue ;;
+          *) in_env=false ;;
+        esac
+      fi
+      case "${tok}" in
+        --prefix=*|--cwd=*|--dir=*|--install-dir=*) target=$(guard_literal_dir "${target}" "${tok#*=}") ;;
+        --prefix|--cwd|--dir|--install-dir) want=1 ;;
+        -C)
+          if [[ -n "${manager}" ]]; then want=1; fi
+          ;;
+        -C?*)
+          if [[ -n "${manager}" ]]; then target="?"; fi
+          ;;
+      esac
+    done
+    if [[ -n "${want}" ]]; then target="?"; fi
+
+    if [[ "${kind}" == npm ]]; then
+      if [[ "${env_global}" == true ]] \
+          || printf '%s' "${stmt}" | grep -qEi -- '(^|[[:space:]])(-g|--global(=true)?|--location(=|[[:space:]]+)global)([[:space:]]|$)'; then
+        target=global
+      fi
+    fi
+    printf '%s\t%s\n' "${kind}" "${target}"
+  done < <(command_statements "${text}")
   return 0
 }
 
@@ -1143,19 +1366,23 @@ if [[ -z "${CWD_DIR}" ]]; then
   CWD_DIR=$(pwd)
 fi
 
-# Resolve the actual install target: an `--prefix`/`--cwd`/`--dir`/`--install-dir`
-# override relocates the install away from cwd (finding #3). Snapshot + effect-gate
-# must follow the real target, while the PostToolUse pending-key still keys on cwd
-# (post-verify only knows cwd) — so KEY_DIR_HASH (cwd) and DIR_HASH (install dir)
-# are tracked separately below.
+# Resolve the actual install target: a relocation flag or an earlier `cd`
+# moves the install away from cwd (finding #3; resolve_install_targets says
+# which). Snapshot + effect-gate must follow the real target, while the
+# PostToolUse pending-key still keys on cwd (post-verify only knows cwd) — so
+# KEY_DIR_HASH (cwd) and DIR_HASH (install dir) are tracked separately below.
+# The first install statement with a known, non-global target decides; an
+# install that lands elsewhere is not read, and guard_effect_gate_reads_every_install
+# says so.
 PROJECT_DIR="${CWD_DIR}"
-INSTALL_DIR_OVERRIDE=$(resolve_install_dir_override "${COMMAND}")
-if [[ -n "${INSTALL_DIR_OVERRIDE}" ]]; then
-  case "${INSTALL_DIR_OVERRIDE}" in
-    /*) PROJECT_DIR="${INSTALL_DIR_OVERRIDE}" ;;
-    *)  PROJECT_DIR="${CWD_DIR%/}/${INSTALL_DIR_OVERRIDE}" ;;
-  esac
-  log_advisory "pre-guard: install dir override detected (${INSTALL_DIR_OVERRIDE}) — snapshotting/verifying ${PROJECT_DIR} instead of cwd (${CWD_DIR})."
+INSTALL_TARGETS=$(resolve_install_targets "${COMMAND}" "${CWD_DIR}")
+while IFS=$'\t' read -r _ install_target; do
+  [[ -n "${install_target}" && "${install_target}" != "?" && "${install_target}" != global ]] || continue
+  PROJECT_DIR="${install_target}"
+  break
+done <<< "${INSTALL_TARGETS}"
+if [[ "${PROJECT_DIR}" != "${CWD_DIR}" ]]; then
+  log_advisory "pre-guard: the install lands outside cwd — snapshotting/verifying ${PROJECT_DIR} instead of cwd (${CWD_DIR})."
 fi
 
 # Canonicalize to prevent path traversal (V-003)
@@ -1880,26 +2107,46 @@ if [[ ${#LEDGER_SPECS[@]} -gt 0 ]]; then
 fi
 
 # True only when the PostToolUse effect gate reads the result of EVERY install
-# statement in the command. That gate reads package-lock.json, which only the
-# npm CLI writes, and only for a project install. So pnpm, yarn and bun are not
-# covered even though their ledger ecosystem is npm; neither is a runner (npx,
-# npm exec), which changes no lockfile; neither is a global install, which lands
-# outside the project; and neither is `--no-package-lock`. The exemption below
-# used to be keyed on "the ledger ecosystem is npm", and that let an unpinned
-# `pnpm add x` through with no record at all (GitHub #22).
+# statement in the command. That gate reads the npm CLI's two records of a
+# project install: package-lock.json and the hidden lockfile
+# node_modules/.package-lock.json. So pnpm, yarn and bun are not covered even
+# though their ledger ecosystem is npm; neither is a runner (npx, npm exec),
+# which changes no lockfile; neither is an install that lands outside the one
+# directory the gate reads (a global install, or a relocation
+# resolve_install_targets could not follow). The exemption below used to be
+# keyed on "the ledger ecosystem is npm", and that let an unpinned `pnpm add x`
+# through with no record at all (GitHub #22).
+#
+# `--no-save`, `--package-lock=false` and their environment spellings are
+# covered: measured with a real npm, each left package-lock.json untouched and
+# recorded the package in the hidden lockfile, which the gate now reads. Before
+# it did, the gate confirmed those installs clean and ran `npm rebuild` over
+# the unverified package (safedeps/effect-gate-blind-to-lockless-npm-installs).
 guard_effect_gate_reads_every_install() {
   local cmd="$1"
-  local seg scan any=false
+  local seg any=false kind target
 
+  # Every install text the command carries, payloads included, must be an npm
+  # CLI install. A payload install (`sh -c "pnpm add x"`) is not a statement of
+  # the command itself, so resolve_install_targets does not list it.
   while IFS= read -r seg; do
     [[ "${seg}" =~ [^[:space:]] ]] || continue
     command_is_dependency_install "${seg}" || continue
     any=true
     guard_segment_is_runner "${seg}" && return 1
-    scan=$(command_scan_text "${seg}")
-    printf '%s' "${scan}" | grep -qEi "${SAFEDEPS_G_NPM_INSTALL_RE}" || return 1
-    printf '%s' "${scan}" | grep -qEi -- '(^|[[:space:]])(-g|--global(=true)?|--location(=|[[:space:]]+)global|--no-package-lock|--package-lock=false)([[:space:]]|$)' && return 1
+    command_scan_text "${seg}" | grep -qEi "${SAFEDEPS_G_NPM_INSTALL_RE}" || return 1
   done < <(command_candidate_texts "${cmd}" | tr ';|&' '\n')
+  [[ "${any}" == true ]] || return 1
+
+  # And every install statement lands in the directory the gate reads.
+  any=false
+  while IFS=$'\t' read -r kind target; do
+    [[ -n "${kind}" ]] || continue
+    any=true
+    [[ "${kind}" == npm ]] || return 1
+    [[ "${target}" != "?" && "${target}" != global ]] || return 1
+    [[ "$(canonicalize_dir "${target}")" == "${PROJECT_DIR}" ]] || return 1
+  done <<< "${INSTALL_TARGETS}"
   [[ "${any}" == true ]]
 }
 
