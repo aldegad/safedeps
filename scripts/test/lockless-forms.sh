@@ -426,12 +426,15 @@ lacks_dependency() {
     && [[ ! -e "${CASE_PROJECT}/node_modules/${package}" ]]
 }
 make_package sd-approved-too
-for engine in claude codex; do
-  new_project
+approve_too() {
   ( export SAFEDEPS_HOME="${CASE_HOME}"
     . lib/ledger/ledger.sh
     safedeps_ledger_write_approved_spec npm sd-approved-too 1.0.0 >/dev/null ) \
     || fail "the second fixture approval is written"
+}
+for engine in claude codex; do
+  new_project
+  approve_too
   run_install "npm install sd-approved" "${engine}"
   [[ -z "${CASE_POST}" ]] || fail "the first approved install is confirmed quietly on ${engine} (post: ${CASE_POST})"
   : > "${MARKS}"
@@ -456,10 +459,12 @@ pass "a rollback returns to the state the last verified install left, on Claude 
 # user is told that a later rollback will undo this install too.
 readonly_snapshots() { chmod a-w "${CASE_HOME}/snapshots"; }
 new_project
+approve_too
 run_install "npm install sd-approved"
 baseline=$(cat "${CASE_HOME}"/confirmed_*)
 run_install "npm install sd-approved-too" claude readonly_snapshots
 chmod u+w "${CASE_HOME}/snapshots"
+rolled_back && fail "the unrecorded case is an approved install, confirmed rather than rolled back (post: ${CASE_POST})"
 [[ "$(cat "${CASE_HOME}"/confirmed_*)" == "${baseline}" ]] \
   || fail "an unrecorded verified state leaves the baseline where it was"
 grep -q 'could not record the result as the new rollback baseline' <<< "${CASE_POST}" \
