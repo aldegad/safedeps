@@ -610,6 +610,20 @@ expect_pass "an install inside a region an escaped quote keeps open" 'echo "a\\\
 expect_pass "an install inside single quotes across a backslash-newline" $'echo \'a\\\npip install evil==1.0.0\''
 pass "text the shell treats as data stays data"
 
+# An escaped operator is a character, and `!` and `{` open a statement only
+# where a statement starts. Read the other way, `echo ! pip install x | sh`
+# and `echo true \; pip install x | sh` were visible unpinned installs -- a
+# record and a pass -- instead of the piped installs they are, and
+# `echo a \; pip install x==1` was denied for an install the shell never runs.
+expect_deny "a piped install after an argument !"      "echo ! pip install evil | sh"
+expect_deny "a piped install after an escaped ;"       "echo true \\; pip install evil | sh"
+expect_pass "an install after an escaped ; is an echo" "echo a \\; pip install evil==1.0.0"
+expect_pass "an escaped pipe is not a pipe"            "echo 'pip install evil==1.0.0' \\| sh"
+expect_deny "! at a statement start still opens one"   "! pip install evil==1.0.0"
+expect_deny "! after a keyword still opens one"        "if ! pip install evil==1.0.0; then :; fi"
+expect_deny "{ at a statement start still opens one"   "{ pip install evil==1.0.0; }"
+pass "escaped operators are characters, and ! and { open statements only where statements start"
+
 # A newline inside quotes does not end a statement either. The line that closed
 # a multi-line string used to be scanned alone, so its closing quote opened a
 # region and hid what followed; and the lines inside the string were scanned as

@@ -34,7 +34,10 @@
 #      backslash is blanked and escapes the byte after it: that byte passes
 #      through as data and never opens a region (`\"` is a quote character,
 #      `\pip` is `pip`), and an escaped newline -- a line continuation, which
-#      the shell removes -- is blanked, so the two lines read as one.
+#      the shell removes -- is blanked, so the two lines read as one. An
+#      escaped operator (`;&|()<>!{}#` or a backtick) passes as `_`: it is a
+#      literal character to the shell, and passed through as itself it would
+#      end a statement or open one for every predicate that reads the scan.
 #   3. A quote character that opens or closes a region is itself blanked.
 #   4. Every byte inside a quoted region is blanked, newlines included.
 #   5. A single-quoted region ends at the next single quote, unconditionally.
@@ -97,7 +100,10 @@ reference_scan_text() {
     if [[ -n "${escaped}" ]]; then
       escaped=""
       if [[ -z "${quote}" && "${char}" != $'\n' ]]; then
-        output="${output}${char}"
+        case "${char}" in
+          ';'|'&'|'|'|'('|')'|'<'|'>'|'!'|'{'|'}'|'#'|'`') output="${output}_" ;;
+          *) output="${output}${char}" ;;
+        esac
       else
         output="${output} "
       fi
@@ -208,6 +214,14 @@ check "a backslash before a command name is blanked" \
   '\pip install evil' \
   ' pip install evil'
 
+check "an escaped semicolon is a character, not the end of a statement" \
+  'echo a \; pip install evil' \
+  'echo a  _ pip install evil'
+
+check "an escaped pipe is a character, not a pipe" \
+  'echo x \| sh' \
+  'echo x  _ sh'
+
 check "an escaped space outside a region passes through" \
   'echo a\ b' \
   'echo a  b'
@@ -282,7 +296,10 @@ reference_scan_text() {
     if [[ -n "${escaped}" ]]; then
       escaped=""
       if [[ -z "${quote}" && "${char}" != $'\n' ]]; then
-        output="${output}${char}"
+        case "${char}" in
+          ';'|'&'|'|'|'('|')'|'<'|'>'|'!'|'{'|'}'|'#'|'`') output="${output}_" ;;
+          *) output="${output}${char}" ;;
+        esac
       else
         output="${output} "
       fi

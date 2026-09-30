@@ -349,9 +349,15 @@ command_scan_text() {
         c = ch[i]
         if (esc) {
           # The escaped byte. Outside a region it is data: it passes through
-          # and never opens one (`\"` is a quote character). Inside a double-
-          # quoted region it is blanked like everything else and never closes it.
-          put(q == 0 ? c : " ")
+          # and never opens one (`\"` is a quote character). An escaped
+          # operator is data too, so it passes as `_`: `\;` is a semicolon
+          # argument to the shell, not the end of a statement, and read as one
+          # it made `echo x \; pip install y | sh` a visible install.
+          # Inside a double-quoted region it is blanked like everything else
+          # and never closes it.
+          if (q != 0)                     put(" ")
+          else if (c ~ /[;&|()<>!{}#`]/)  put("_")
+          else                            put(c)
           esc = 0
         }
         else if (q == 0) {
@@ -569,7 +575,8 @@ payload_pipes_unread_install_text_to_shell() {
 # match is never install text inside quotes. The scanner blanks bytes and never
 # moves one, so a byte offset into the scan text is the same offset into $1;
 # the awk reads the two side by side and refuses a pair where that does not
-# hold. Only bytes the scan text keeps are blanked. A quote character is blank
+# hold (the scan may only blank a byte, or write `_` for an escaped operator).
+# Only bytes the scan text keeps are blanked. A quote character is blank
 # there, so it is never touched and the quote structure of what is left is the
 # quote structure of $1 -- blanking a quote would re-quote everything after it.
 #
@@ -603,9 +610,10 @@ install_managers_blanked() {
       if (n % 2 == 0) exit 2
       L = (n - 1) / 2
       if (X[L + 1] != "\n") exit 2
+      # The scan only blanks a byte or, for an escaped operator, writes `_`.
       for (i = 1; i <= L; i++) {
         s = X[L + 1 + i]
-        if (s != X[i] && s != " ") exit 2
+        if (s != X[i] && s != " " && s != "_") exit 2
       }
       # The first manager word inside each match, read on the scan text.
       mre = ENVIRON["SAFEDEPS_PIPE_MANAGER_RE"]
