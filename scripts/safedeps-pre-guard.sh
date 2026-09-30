@@ -1183,7 +1183,7 @@ guard_detect_ecosystem() {
   local seg eco
 
   while IFS= read -r seg; do
-    [[ -z "${seg//[[:space:]]/}" ]] && continue
+    [[ "${seg}" =~ [^[:space:]] ]] || continue
     command_is_dependency_install "${seg}" || continue
     eco=$(guard_segment_ecosystem "${seg}")
     [[ -n "${eco}" ]] && { printf '%s' "${eco}"; return 0; }
@@ -1220,7 +1220,7 @@ guard_all_npm_installs_are_global() {
 
   while IFS= read -r candidate; do
     while IFS= read -r seg; do
-      [[ -z "${seg//[[:space:]]/}" ]] && continue
+      [[ "${seg}" =~ [^[:space:]] ]] || continue
       scan=$(command_scan_text "${seg}")
       echo "${scan}" | grep -qEi '(^|[[:space:]])npm([[:space:]]|$)' || continue
       echo "${scan}" | grep -qEi "(^|[[:space:]])(${SAFEDEPS_G_NPM_VERBS})([[:space:]]|\$)" || continue
@@ -1246,7 +1246,7 @@ guard_runner_operands() {
   text=$(printf '%s' "$1" | tr -d "\"'")
   after=$(printf '%s\n' "${text}" \
     | sed -nE "s/^(.*[[:space:];&|({!])?(${SAFEDEPS_G_RUNNER_BODY})([[:space:]]|\$)//p" | head -n1)
-  [[ -z "${after//[[:space:]]/}" ]] && return 0
+  [[ "${after}" =~ [^[:space:]] ]] || return 0
 
   local named_by_option=false
   want_value=false
@@ -1325,17 +1325,21 @@ guard_names_package_without_spec() {
   #      `cargo install x --version 1` is not, because it does not. Re-deriving
   #      it would make that second install neither gated nor recorded.
   local cmd="$1"
-  local seg tok verb_seen skip_next seg_ecosystem entry name
+  local seg tok verb_seen skip_next seg_ecosystem entry entry_eco name
   local -a toks=()
+  # Keyed by ecosystem as well as name: pypi `openai` and npm `openai` are
+  # different packages, and a pin on one must not quiet the record for the
+  # other (caught in review: `pip install openai==1 && pnpm add openai` left
+  # no trace of the pnpm install).
   local pinned=$'\n'
 
   for entry in "${LEDGER_SPECS[@]+${LEDGER_SPECS[@]}}"; do
-    IFS=$'\t' read -r _ name _ <<< "${entry}"
-    pinned+="${name}"$'\n'
+    IFS=$'\t' read -r entry_eco name _ <<< "${entry}"
+    pinned+="${entry_eco}"$'\t'"${name}"$'\n'
   done
 
   while IFS= read -r seg; do
-    [[ -z "${seg//[[:space:]]/}" ]] && continue
+    [[ "${seg}" =~ [^[:space:]] ]] || continue
     command_is_dependency_install "${seg}" || continue
 
     verb_seen=false
@@ -1346,7 +1350,7 @@ guard_names_package_without_spec() {
     if guard_segment_is_runner "${seg}"; then
       while IFS= read -r tok; do
         [[ -z "${tok}" ]] && continue
-        [[ "${pinned}" == *$'\n'"$(guard_operand_name "${tok}")"$'\n'* ]] && continue
+        [[ "${pinned}" == *$'\n'"${seg_ecosystem}"$'\t'"$(guard_operand_name "${tok}")"$'\n'* ]] && continue
         # npx, npm exec and bunx run a binary the project already has without
         # fetching anything, so `npx tsc` in a TypeScript project is not an
         # install. Only a name with no local binary is fetched, and only that
@@ -1433,7 +1437,7 @@ guard_names_package_without_spec() {
       case "${tok}" in
         *://*) return 0 ;;
       esac
-      [[ "${pinned}" == *$'\n'"$(guard_operand_name "${tok}")"$'\n'* ]] && continue
+      [[ "${pinned}" == *$'\n'"${seg_ecosystem}"$'\t'"$(guard_operand_name "${tok}")"$'\n'* ]] && continue
 
       return 0
     done
@@ -1572,7 +1576,7 @@ guard_extract_specs() {
   local seg eco text
 
   while IFS= read -r seg; do
-    [[ -z "${seg//[[:space:]]/}" ]] && continue
+    [[ "${seg}" =~ [^[:space:]] ]] || continue
     command_is_dependency_install "${seg}" || continue
     eco=$(guard_segment_ecosystem "${seg}")
     [[ -n "${eco}" ]] || continue
@@ -1727,7 +1731,7 @@ guard_effect_gate_reads_every_install() {
   local seg scan any=false
 
   while IFS= read -r seg; do
-    [[ -z "${seg//[[:space:]]/}" ]] && continue
+    [[ "${seg}" =~ [^[:space:]] ]] || continue
     command_is_dependency_install "${seg}" || continue
     any=true
     guard_segment_is_runner "${seg}" && return 1

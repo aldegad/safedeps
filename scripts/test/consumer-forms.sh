@@ -529,6 +529,27 @@ grep -q 'UNGATED' "${mixed_home}/advisory.log" 2>/dev/null \
   || fail "a command that pins one package and not another records the other"
 pass "a package counts as pinned only when the extractor produced a spec for it"
 
+# Pinned is keyed by ecosystem too: pypi `openai` and npm `openai` are
+# different packages. A pin on one side of a command used to quiet the record
+# for the unpinned install of the same name on the other (caught in review).
+cross_ungated() {
+  local approve_eco="$1" approve_pkg="$2" approve_ver="$3" command="$4" home
+  home=$(mktemp -d "${tmp_root}/cross.XXXXXX")
+  ( export SAFEDEPS_HOME="${home}"
+    . lib/ledger/ledger.sh
+    safedeps_ledger_write_approved_spec "${approve_eco}" "${approve_pkg}" "${approve_ver}" >/dev/null ) \
+    || fail "the cross-ecosystem fixture approval could be written"
+  jq -nc --arg c "${command}" --arg cwd "${project_dir}" \
+    '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
+    HOME="${tmp_root}/home-cross" SAFEDEPS_HOME="${home}" scripts/safedeps-pre-guard.sh >/dev/null 2>&1
+  grep -q 'UNGATED' "${home}/advisory.log" 2>/dev/null
+}
+cross_ungated pypi openai 1.0.0 "pip install openai==1.0.0 && pnpm add openai" \
+  || fail "a pypi pin does not quiet the record for an unpinned npm install of the same name"
+cross_ungated npm left-pad 1.0.0 "pnpm add left-pad@1.0.0 && pip install 'left-pad>=0'" \
+  || fail "an npm pin does not quiet the record for an unpinned pypi install of the same name"
+pass "a pin in one ecosystem does not quiet the record for the same name in another"
+
 # npx runs a binary the project already has without fetching anything. Only a
 # name with no local binary is a fetch.
 mkdir -p "${project_dir}/node_modules/.bin"
