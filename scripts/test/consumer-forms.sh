@@ -612,7 +612,10 @@ pass "a newline inside quotes neither hides the next statement nor turns quoted 
 # bypass as soon as that token approves: `gem install --source <url> rake -v
 # 13.0.0` prescribed `check rubygems <url>@13.0.0`, which approves (no advisory
 # names a URL), and from then on any gem at 13.0.0 with that source passed.
-# Each row asserts the whole prescription.
+# `cargo install --root <dir>`, `dotnet tool install --tool-path <dir>` and
+# `poetry add 3to2@<v>` (read as `to2`) prescribed identities that approve the
+# same way. Each row asserts the whole prescription; a row with an approval
+# asserts that the old prescription's approval does not pass another package.
 prescription() {
   local command="$1" safe out
   safe=$(mktemp -d "${tmp_root}/prescribe.XXXXXX")
@@ -648,8 +651,12 @@ expect_prescription 'rubygems rake@13.0.0;' 'gem install -v 13.0.0 rake'
 expect_prescription 'rubygems rake@13.0.0;' 'gem install rake --vers 13.0.0'
 expect_prescription 'rubygems rails@7.1.0;' 'bundle add rails --source https://rubygems.org --version 7.1.0'
 expect_prescription 'crates.io ripgrep@13.0.0;' 'cargo install --root /tmp/tools ripgrep --version 13.0.0'
+expect_prescription 'crates.io evil@13.0.0;' 'cargo install --root /tmp/tools evil --version 13.0.0' \
+  crates.io /tmp/tools 13.0.0
 expect_prescription 'crates.io ripgrep@13.0.0;' 'cargo install ripgrep --version 13.0.0 2>&1'
 expect_prescription 'nuget dotnet-ef@8.0.0;' 'dotnet tool install --tool-path /tmp/tools dotnet-ef --version 8.0.0'
+expect_prescription 'nuget evil@8.0.0;' 'dotnet tool install --tool-path /tmp/tools evil --version 8.0.0' \
+  nuget /tmp/tools 8.0.0
 expect_prescription 'nuget Serilog@3.1.1;' 'dotnet add package -s https://api.nuget.org/v3/index.json Serilog -v 3.1.1'
 # An option the table does not know leaves its value as an operand. That adds
 # a check; it never replaces the package's own.
@@ -667,6 +674,7 @@ expect_prescription 'npm 7zip-bin@5.2.0;' 'pnpm add 7zip-bin@5.2.0'
 expect_prescription 'npm 7zip-bin@5.2.0;' 'pnpm add 7zip-bin@5.2.0' npm zip-bin 5.2.0
 expect_prescription 'pypi 3to2@1.1.1;' 'pip install 3to2==1.1.1'
 expect_prescription 'pypi 3to2@1.1.1;' 'poetry add 3to2@1.1.1'
+expect_prescription 'pypi 3to2@1.1.1;' 'poetry add 3to2@1.1.1' pypi to2 1.1.1
 pass "an alias is checked as its target, and a name that starts with a digit is read whole"
 
 # --- 11. The UNGATED record names each operand the gate did not check ---------
