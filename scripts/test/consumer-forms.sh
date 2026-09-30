@@ -623,32 +623,47 @@ pass "a newline inside quotes neither hides the next statement nor turns quoted 
 # --- A visible install does not switch the pipe check off ---------------------
 # The hidden-install check ran only when the command held no visible install, so
 # a piped install beside one passed with no lookup and no record. Every form
-# here pins an approved spec on the visible side, so the deny can only come
-# from the piped one.
+# here pins an approved spec on the visible side, and each is checked for the
+# pipe rule's own reason: a deny from anywhere else (an unapproved spec, say)
+# would pass a decision-only check with the rule removed. That is not
+# hypothetical -- blanking the whole install match instead of its manager word
+# hid the echoed install in the runner row, and a decision-only check stayed
+# green because echo-cli was not approved.
 beside_home="${tmp_root}/beside-approved"
 mkdir -p "${beside_home}"
 ( export SAFEDEPS_HOME="${beside_home}"
   . lib/ledger/ledger.sh
   safedeps_ledger_write_approved_spec pypi requests 2.0.0 >/dev/null
-  safedeps_ledger_write_approved_spec npm left-pad 1.3.0 >/dev/null ) \
+  safedeps_ledger_write_approved_spec npm left-pad 1.3.0 >/dev/null
+  safedeps_ledger_write_approved_spec npm echo-cli 1.0.0 >/dev/null ) \
   || fail "the beside-visible fixture approvals could be written"
 # No output is "pass", as in gate_decision: jq reads empty input as no value
-# and prints nothing.
+# and prints nothing. beside_reason prints the deny reason, or nothing.
+beside_guard() {
+  jq -nc --arg c "$1" --arg cwd "${project_dir}" \
+    '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
+    HOME="${tmp_root}/home-beside" SAFEDEPS_HOME="${beside_home}" scripts/safedeps-pre-guard.sh 2>/dev/null
+}
 beside_decision() {
   local out
-  out=$(jq -nc --arg c "$1" --arg cwd "${project_dir}" \
-    '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
-    HOME="${tmp_root}/home-beside" SAFEDEPS_HOME="${beside_home}" scripts/safedeps-pre-guard.sh 2>/dev/null)
+  out=$(beside_guard "$1")
   if [[ -z "${out}" ]]; then
     printf 'pass'
   else
     jq -r '.hookSpecificOutput.permissionDecision // "pass"' <<< "${out}"
   fi
 }
+beside_reason() {
+  local out
+  out=$(beside_guard "$1")
+  [[ -z "${out}" ]] || jq -r '.hookSpecificOutput.permissionDecisionReason // ""' <<< "${out}"
+}
 [[ "$(beside_decision 'pip install requests==2.0.0')" == "pass" ]] \
   || fail "beside-visible fixture: the approved pip install itself passes"
 [[ "$(beside_decision 'npm install left-pad@1.3.0')" == "allow" ]] \
   || fail "beside-visible fixture: the approved npm install itself is allowed"
+[[ "$(beside_decision 'npx -y echo-cli@1.0.0 hello')" != "deny" ]] \
+  || fail "beside-visible fixture: the approved runner itself is not denied"
 
 for piped in \
   "pip install requests==2.0.0 && printf 'pip install evil==6.6.6' | sh" \
@@ -666,8 +681,8 @@ for piped in \
   "npx -y echo-cli@1.0.0 pip install evil==6.6.6 | sh" \
   "pip install'evil==1' ; printf 'pip install evil==6.6.6' | sh"
 do
-  [[ "$(beside_decision "${piped}")" == "deny" ]] \
-    || fail "a piped install beside a visible one is denied: $(printf '%q' "${piped}")"
+  grep -q 'pipes install text into a shell' <<< "$(beside_reason "${piped}")" \
+    || fail "a piped install beside a visible one is denied by the pipe rule: $(printf '%q' "${piped}")"
 done
 pass "an install piped into a shell is denied beside a visible install, even an approved one"
 
