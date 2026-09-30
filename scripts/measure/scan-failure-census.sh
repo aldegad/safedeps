@@ -15,7 +15,7 @@
 # For each command it first runs the guard with nothing failing and counts the
 # readings (N). Then it runs it again with the K-th reading failing, for every
 # K in 1..N, and with readings K..N failing, and with every reading of one kind
-# failing, and with every awk failing. Each run is compared with the clean one
+# failing, and with every awk, every grep or every sed failing. Each run is compared with the clean one
 # on (decision, finding-or-UNDECIDED, updatedInput, pending project_dir).
 #
 #   same        identical to the clean run
@@ -161,6 +161,19 @@ exec "\${real}" "\$@"
 SHIM
 chmod +x "${WORK}/bin/awk"
 
+# grep and sed sit on the judgment path too. These fail every call in their
+# mode and pass everything through otherwise; a reading is not counted by
+# them, because the K-th-reading runs are about awk.
+for tool in grep sed; do
+  real_tool=$(command -v "${tool}")
+  cat > "${WORK}/bin/${tool}" <<SHIM
+#!/usr/bin/env bash
+[[ -n "\${CENSUS_STATE:-}" && "\${CENSUS_MODE:-none}" == "${tool}-all" ]] && exit 2
+exec '${real_tool}' "\$@"
+SHIM
+  chmod +x "${WORK}/bin/${tool}"
+done
+
 # --- the approved ledger -------------------------------------------------------
 # Written once and copied into each approved run. Built with the ledger's own
 # writer, so it is whatever the guard reads.
@@ -227,7 +240,7 @@ for n in $(seq 1 "${case_count}"); do
     printf '%s k %s\n' "${n}" "${k}" >> "${WORK}/jobs"
     [[ "${QUICK}" == "true" ]] || printf '%s from-k %s\n' "${n}" "${k}" >> "${WORK}/jobs"
   done
-  for mode in scan-all join-all blank-all flag-all awk-all; do
+  for mode in scan-all join-all blank-all flag-all awk-all grep-all sed-all; do
     printf '%s %s 0\n' "${n}" "${mode}" >> "${WORK}/jobs"
   done
 done

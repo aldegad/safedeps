@@ -131,7 +131,11 @@ if ! command -v jq >/dev/null 2>&1; then
   # Either branch is recorded in advisory.log; never a silent skip.
   raw_input=$(cat)
   log_advisory "pre-guard: jq missing — gate cannot parse the payload."
-  if printf '%s' "${raw_input}" | grep -qiE "${SAFEDEPS_RAW_INSTALL_RE}"; then
+  # 0 is an install-looking command and 1 is not. Anything else is a grep that
+  # could not answer, and with no jq there is nothing else to ask, so it denies.
+  raw_rc=0
+  printf '%s' "${raw_input}" | grep -qiE "${SAFEDEPS_RAW_INSTALL_RE}" || raw_rc=$?
+  if (( raw_rc != 1 )); then
     log_advisory "pre-guard DENY: jq missing on a likely dependency-install command — fail-closed."
     printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"safedeps: jq is required to gate dependency installs and is not installed — install blocked fail-closed. Install jq, then retry."}}\n'
     exit 0
@@ -222,6 +226,25 @@ compute_pending_key() {
   printf '%s_%s' "${dir_hash}" "${cmd_hash}"
 }
 
+# A tool on the judgment path that fails is recorded like a failed awk reading
+# (see command_scan_text), so the gate settles it. Without this, a predicate
+# read a grep or sed that never answered as "no match", and a command that
+# names a package manager passed as "not an install" -- the same class the gate
+# closes for awk, measured at 267 of 282 corpus commands for each tool.
+guard_mark_reading_failed() {
+  [[ -z "${SAFEDEPS_SCAN_MARK:-}" ]] || printf 'failed\n' >> "${SAFEDEPS_SCAN_MARK}"
+}
+
+# grep for a judgment: 0 is a match and 1 is no match. Anything else -- a grep
+# that errored, was killed or could not be started -- is not "no match"; it is
+# recorded and returns 1, and the gate decides.
+judge_grep() {
+  local rc=0
+  grep "$@" || rc=$?
+  (( rc <= 1 )) || guard_mark_reading_failed
+  return $(( rc == 0 ? 0 : 1 ))
+}
+
 command_is_dependency_install() {
   local command="$1"
   local scan_command
@@ -231,7 +254,7 @@ command_is_dependency_install() {
 
   while IFS= read -r scan_command; do
     scan_command=$(command_scan_text "${scan_command}")
-    echo "${scan_command}" | grep -qEi "${install_pattern}" && return 0
+    echo "${scan_command}" | judge_grep -qEi "${install_pattern}" && return 0
   done < <(command_candidate_texts "${command}")
   return 1
 }
@@ -383,12 +406,19 @@ command_scan_text() {
 normalize_install_text() {
   local text="$1"
 
+  local normalized
   for _ in 1 2 3; do
-    text=$(printf '%s' "${text}" | sed -E \
+    if ! normalized=$(printf '%s' "${text}" | sed -E \
       -e 's/^[[:space:]]+//' \
       -e "s#(^|[[:space:];|&({!])(/[^[:space:];|&]+/)(${SAFEDEPS_G_EXECUTABLES}|sh|bash|zsh)([[:space:];|&]|\$)#\\1\\3\\4#g" \
       -e 's#(^|[;&|({!][[:space:]]*|(then|do|else|elif|if|while|until|time|coproc)[[:space:]]+)(env([[:space:]]+(-i|--ignore-environment|-0|--null|-v|--debug|-u[[:space:]]*[^[:space:]]+|--unset(=|[[:space:]]+)[^[:space:]]+|-C[[:space:]]*[^[:space:]]+|--chdir(=|[[:space:]]+)[^[:space:]]+|[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]+))*[[:space:]]+|command[[:space:]]+|exec[[:space:]]+)#\1#g' \
-      -e 's#(^|[;&|({!][[:space:]]*|(then|do|else|elif|if|while|until|time|coproc)[[:space:]]+)([A-Za-z_][A-Za-z0-9_]*=[^[:space:]'\''"]*[[:space:]]+)+#\1#g')
+      -e 's#(^|[;&|({!][[:space:]]*|(then|do|else|elif|if|while|until|time|coproc)[[:space:]]+)([A-Za-z_][A-Za-z0-9_]*=[^[:space:]'\''"]*[[:space:]]+)+#\1#g'); then
+      # Empty text would read as "no install". Keep what there is and let the
+      # gate settle the failure.
+      guard_mark_reading_failed
+      break
+    fi
+    text="${normalized}"
   done
   printf '%s' "${text}"
 }
@@ -487,7 +517,7 @@ PIPE_INSTALL_TEXT_RE="${PIPE_MANAGER_RE}.*(${SAFEDEPS_G_ALL_VERBS})"
 PIPE_SHELL_CONSUMER_RE='\|&?[[:space:]]*([({][[:space:]]*)*(bash|sh|zsh)([[:space:];&|)}<>`]|$)'
 
 text_has_install_words() {
-  printf '%s\n' "$1" | grep -qEi "${PIPE_INSTALL_TEXT_RE}"
+  printf '%s\n' "$1" | judge_grep -qEi "${PIPE_INSTALL_TEXT_RE}"
 }
 
 # $1 has its heredoc bodies stripped already. Stripping twice is not a no-op:
@@ -501,7 +531,7 @@ exec_text_pipes_to_shell() {
   # it was applied to the install text and skipped here, so the two sides of one
   # pipe disagreed about what counts as the same invocation.
   exec_view=$(normalize_install_text "$(command_scan_text "$1")")
-  printf '%s\n' "${exec_view}" | grep -qEi "${PIPE_SHELL_CONSUMER_RE}"
+  printf '%s\n' "${exec_view}" | judge_grep -qEi "${PIPE_SHELL_CONSUMER_RE}"
 }
 
 payload_pipes_install_text_to_shell() {
@@ -586,7 +616,7 @@ install_managers_blanked() {
   fi
   # `offset:match` per match, 0-based byte offsets. No match is not an error:
   # the text is then returned whole, which only keeps more install text in it.
-  spans=$(printf '%s\n' "${scan}" | LC_ALL=C grep -obEi "${SAFEDEPS_INSTALL_PATTERN}" |
+  spans=$(printf '%s\n' "${scan}" | LC_ALL=C judge_grep -obEi "${SAFEDEPS_INSTALL_PATTERN}" |
     LC_ALL=C awk '{ c = index($0, ":"); printf "%d:%d ", substr($0, 1, c - 1), length($0) - c }') || spans=""
 
   if ! { printf '%s\n' "${spans}"; printf '%s\n' "${text}"; printf '%s' "${scan}"; } |
@@ -718,7 +748,7 @@ command_is_injectable_npm_install() {
 
   while IFS= read -r scan_command; do
     scan_command=$(command_scan_text "${scan_command}")
-    echo "${scan_command}" | grep -qEi "${npm_install_pattern}" && return 0
+    echo "${scan_command}" | judge_grep -qEi "${npm_install_pattern}" && return 0
   done < <(command_candidate_texts "${command}")
   return 1
 }
@@ -729,7 +759,7 @@ command_has_ignore_scripts_flag() {
 
   while IFS= read -r scan_command; do
     scan_command=$(command_scan_text "${scan_command}")
-    echo "${scan_command}" | grep -qEi -- '(^|[[:space:]])--ignore-scripts([=[:space:]]|$)' && return 0
+    echo "${scan_command}" | judge_grep -qEi -- '(^|[[:space:]])--ignore-scripts([=[:space:]]|$)' && return 0
   done < <(command_candidate_texts "${command}")
   return 1
 }
@@ -749,7 +779,7 @@ command_needs_inplace_inert() {
   local scanned
   scanned=$(command_scan_text "$1")
   [[ "${scanned}" == *$'\n'* ]] && return 0
-  printf '%s' "${scanned}" | grep -qE '[;&|#]'
+  printf '%s' "${scanned}" | judge_grep -qE '[;&|#]'
 }
 
 # Echo the install directory when the command redirects the install target away
@@ -1461,20 +1491,20 @@ SUSPICIOUS=false
 REASONS=()
 
 # Check for piped install from suspicious sources
-if echo "${COMMAND}" | grep -qEi 'curl.*\|[[:space:]]*(bash|sh|node)'; then
+if echo "${COMMAND}" | judge_grep -qEi 'curl.*\|[[:space:]]*(bash|sh|node)'; then
   SUSPICIOUS=true
   REASONS+=("Command pipes remote content to shell execution")
 fi
 
 # Check for install with --ignore-scripts being removed (attacker might want scripts to run)
-if echo "${COMMAND}" | grep -qEi 'npm[[:space:]]+config[[:space:]]+set[[:space:]]+ignore-scripts[[:space:]]+false'; then
+if echo "${COMMAND}" | judge_grep -qEi 'npm[[:space:]]+config[[:space:]]+set[[:space:]]+ignore-scripts[[:space:]]+false'; then
   SUSPICIOUS=true
   REASONS+=("Command explicitly enables install scripts")
 fi
 
 # Check for registry override to unknown registry
-if echo "${COMMAND}" | grep -qEi -- '--registry([=[:space:]]+)'; then
-  if ! echo "${COMMAND}" | grep -qEi -- '--registry([=[:space:]]+)https?://(registry\.npmjs\.org|registry\.yarnpkg\.com)(/|[[:space:]]|$)'; then
+if echo "${COMMAND}" | judge_grep -qEi -- '--registry([=[:space:]]+)'; then
+  if ! echo "${COMMAND}" | judge_grep -qEi -- '--registry([=[:space:]]+)https?://(registry\.npmjs\.org|registry\.yarnpkg\.com)(/|[[:space:]]|$)'; then
     SUSPICIOUS=true
     REASONS+=("Command uses non-standard npm registry")
   fi
@@ -1482,7 +1512,7 @@ fi
 
 # Check for packages with suspicious naming patterns (typosquatting indicators)
 TYPOSQUAT_PATTERNS='(lod[bcdfghjklmnpqrstvwxyz]sh|lodahs|loadsh|lodashh|reacct|exprss|axois|babeel|webpackk|esliint|l0dash|m0ment|4xios|reqeusts|requets|djagno|numppy|panddas|pilliow|tensorfow|scikit-learnn|serde_jsonn|tokioo|reqwestt|clapp|github\.con/|githb\.com/|railss|sinatraa|nokogirri|log4jj|springframewrok|commons-collectionss|newtonsoft\.josn|serilogg|nunittt)'
-if echo "${COMMAND}" | grep -qEi "${TYPOSQUAT_PATTERNS}"; then
+if echo "${COMMAND}" | judge_grep -qEi "${TYPOSQUAT_PATTERNS}"; then
   SUSPICIOUS=true
   REASONS+=("Package name matches known typosquatting patterns")
 fi
@@ -1513,19 +1543,19 @@ SAFEDEPS_REPO_BIN="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/safedeps
 guard_segment_ecosystem() {
   local scan
   scan=$(command_scan_text "$1")
-  if echo "${scan}" | grep -qEi "${SAFEDEPS_G_START}(npm|pnpm|pnpx|yarn|npx|bun|bunx)([[:space:]]|\$)"; then
+  if echo "${scan}" | judge_grep -qEi "${SAFEDEPS_G_START}(npm|pnpm|pnpx|yarn|npx|bun|bunx)([[:space:]]|\$)"; then
     printf 'npm'
-  elif echo "${scan}" | grep -qEi "${SAFEDEPS_G_START}(pip[0-9.]*|poetry|uv|uvx|pipx|pipenv|(python[0-9.]*|py)${SAFEDEPS_G_OPTS}[[:space:]]+-m[[:space:]]*pip)([[:space:]]|\$)"; then
+  elif echo "${scan}" | judge_grep -qEi "${SAFEDEPS_G_START}(pip[0-9.]*|poetry|uv|uvx|pipx|pipenv|(python[0-9.]*|py)${SAFEDEPS_G_OPTS}[[:space:]]+-m[[:space:]]*pip)([[:space:]]|\$)"; then
     printf 'pypi'
-  elif echo "${scan}" | grep -qEi "${SAFEDEPS_G_START}cargo([[:space:]]|\$)"; then
+  elif echo "${scan}" | judge_grep -qEi "${SAFEDEPS_G_START}cargo([[:space:]]|\$)"; then
     printf 'crates.io'
-  elif echo "${scan}" | grep -qEi "${SAFEDEPS_G_START}go([[:space:]]|\$)"; then
+  elif echo "${scan}" | judge_grep -qEi "${SAFEDEPS_G_START}go([[:space:]]|\$)"; then
     printf 'go'
-  elif echo "${scan}" | grep -qEi "${SAFEDEPS_G_START}(gem|bundle)([[:space:]]|\$)"; then
+  elif echo "${scan}" | judge_grep -qEi "${SAFEDEPS_G_START}(gem|bundle)([[:space:]]|\$)"; then
     printf 'rubygems'
-  elif echo "${scan}" | grep -qEi "${SAFEDEPS_G_START}mvn([[:space:]]|\$)"; then
+  elif echo "${scan}" | judge_grep -qEi "${SAFEDEPS_G_START}mvn([[:space:]]|\$)"; then
     printf 'maven'
-  elif echo "${scan}" | grep -qEi "${SAFEDEPS_G_START}dotnet([[:space:]]|\$)"; then
+  elif echo "${scan}" | judge_grep -qEi "${SAFEDEPS_G_START}dotnet([[:space:]]|\$)"; then
     printf 'nuget'
   fi
 }
@@ -1555,13 +1585,13 @@ guard_runner_uses_local_bin() {
   local seg="$1" name="$2"
   [[ "${name}" =~ ^[A-Za-z0-9._-]+$ ]] || return 1
   [[ -x "${PROJECT_DIR:-.}/node_modules/.bin/${name}" ]] || return 1
-  command_scan_text "${seg}" | grep -qEi "${SAFEDEPS_G_START}((npx|bunx)([[:space:]]|\$)|npm${SAFEDEPS_G_OPTS}[[:space:]]+(exec|x)([[:space:]]|\$)|bun${SAFEDEPS_G_OPTS}[[:space:]]+x([[:space:]]|\$))"
+  command_scan_text "${seg}" | judge_grep -qEi "${SAFEDEPS_G_START}((npx|bunx)([[:space:]]|\$)|npm${SAFEDEPS_G_OPTS}[[:space:]]+(exec|x)([[:space:]]|\$)|bun${SAFEDEPS_G_OPTS}[[:space:]]+x([[:space:]]|\$))"
 }
 
 # True when the statement is a runner: something that fetches a package and
 # executes it (npx, npm exec, pnpm dlx, bunx, uvx, pipx run, go run ...).
 guard_segment_is_runner() {
-  command_scan_text "$1" | grep -qEi "${SAFEDEPS_G_RUNNER_HEAD_RE}"
+  command_scan_text "$1" | judge_grep -qEi "${SAFEDEPS_G_RUNNER_HEAD_RE}"
 }
 
 guard_all_npm_installs_are_global() {
@@ -1579,10 +1609,10 @@ guard_all_npm_installs_are_global() {
     while IFS= read -r seg; do
       [[ "${seg}" =~ [^[:space:]] ]] || continue
       scan=$(command_scan_text "${seg}")
-      echo "${scan}" | grep -qEi '(^|[[:space:]])npm([[:space:]]|$)' || continue
-      echo "${scan}" | grep -qEi "(^|[[:space:]])(${SAFEDEPS_G_NPM_VERBS})([[:space:]]|\$)" || continue
+      echo "${scan}" | judge_grep -qEi '(^|[[:space:]])npm([[:space:]]|$)' || continue
+      echo "${scan}" | judge_grep -qEi "(^|[[:space:]])(${SAFEDEPS_G_NPM_VERBS})([[:space:]]|\$)" || continue
       found=true
-      echo "${scan}" | grep -qEi -- '(^|[[:space:]])(-g|--global(=true)?|--location(=|[[:space:]]+)global)([[:space:]]|$)' || return 1
+      echo "${scan}" | judge_grep -qEi -- '(^|[[:space:]])(-g|--global(=true)?|--location(=|[[:space:]]+)global)([[:space:]]|$)' || return 1
     done < <(printf '%s\n' "${candidate}" | tr ';|&' '\n')
   done < <(command_candidate_texts "${cmd}")
 
@@ -1601,8 +1631,13 @@ guard_runner_operands() {
   local text after want_value tok
   local -a toks=()
   text=$(printf '%s' "$1" | tr -d "\"'")
-  after=$(printf '%s\n' "${text}" \
-    | sed -nE "s/^(.*[[:space:];&|({!])?(${SAFEDEPS_G_RUNNER_BODY})([[:space:]]|\$)//p" | head -n1)
+  # The first line in bash rather than `| head -n1`: under pipefail, head
+  # closing the pipe early would read as sed failing.
+  if ! after=$(printf '%s\n' "${text}" \
+      | sed -nE "s/^(.*[[:space:];&|({!])?(${SAFEDEPS_G_RUNNER_BODY})([[:space:]]|\$)//p"); then
+    guard_mark_reading_failed
+  fi
+  after="${after%%$'\n'*}"
   [[ "${after}" =~ [^[:space:]] ]] || return 0
 
   local named_by_option=false
@@ -2162,8 +2197,12 @@ if ! jq -e 'has("turn_id")' <<< "${INPUT}" >/dev/null 2>&1 && \
     # is valid npm syntax (flags may precede operands).
     # Groups: 1 = through the verb, 2-4 = the options, 5 = the verb, 6 = what
     # follows it. scripts/test/smoke.sh pins the landing spot.
+    # A failed sed leaves UPDATED_COMMAND empty, which differs from COMMAND and
+    # so would skip both the rewrite and the downgrade record below; the mark
+    # makes the gate settle it instead.
     UPDATED_COMMAND=$(printf '%s' "${COMMAND}" | sed -E \
-      "s/(npm${SAFEDEPS_G_OPTS}[[:space:]]+(${SAFEDEPS_G_NPM_VERBS}))([[:space:]]|\$)/\\1 --ignore-scripts\\6/g")
+      "s/(npm${SAFEDEPS_G_OPTS}[[:space:]]+(${SAFEDEPS_G_NPM_VERBS}))([[:space:]]|\$)/\\1 --ignore-scripts\\6/g") \
+      || guard_mark_reading_failed
     if [[ "${UPDATED_COMMAND}" == "${COMMAND}" ]]; then
       # Rewrite did not land — never blind-append to a compound command. Downgrade
       # to detect-and-rollback (the effect gate still verifies the closure) and

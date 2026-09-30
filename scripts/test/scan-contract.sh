@@ -451,6 +451,27 @@ grep -q 'UNDECIDED' <<< "${SCANFAIL_REASON}" || fail "a failed blanking awk is r
 grep -q 'scanner failed' <<< "${SCANFAIL_LOG}" || fail "a failed blanking awk is recorded in advisory.log"
 pass "a failed blanking awk beside a visible install answers UNDECIDED, not pass"
 
+# grep and sed sit on the judgment path too. A predicate that reads a grep or
+# sed that never answered as "no match" passed every one of these on the tree
+# before this check existed. They are recorded like a failed awk reading and
+# settled at the same gate.
+mkdir -p "${fail_tmp}/grep-all" "${fail_tmp}/sed-all"
+printf '#!/usr/bin/env bash\nexit 2\n' > "${fail_tmp}/grep-all/grep"
+printf '#!/usr/bin/env bash\nexit 2\n' > "${fail_tmp}/sed-all/sed"
+chmod +x "${fail_tmp}/grep-all/grep" "${fail_tmp}/sed-all/sed"
+for tool in grep sed; do
+  for failing_command in "pip install requests==2.0.0" "npm install left-pad@1.3.0" "cargo add serde@1.0.0"; do
+    scanfail_guard "${fail_tmp}/${tool}-all" "${failing_command}"
+    [[ "${SCANFAIL_DECISION}" == "deny" ]] \
+      || fail "a failed ${tool} does not turn an install into a pass: ${failing_command} (got: ${SCANFAIL_DECISION})"
+    grep -q 'UNDECIDED' <<< "${SCANFAIL_REASON}" \
+      || fail "a failed ${tool} is reported as undecided: ${failing_command}"
+  done
+  scanfail_guard "${fail_tmp}/${tool}-all" "ls -la"
+  [[ "${SCANFAIL_DECISION}" == "pass" ]] || fail "a failed ${tool} does not block a command that names no package manager (got: ${SCANFAIL_DECISION})"
+done
+pass "a failed grep or sed on the judgment path denies install-looking commands as UNDECIDED"
+
 scanfail_guard "${fail_tmp}/all-awk" "pip install requests==2.0.0"
 [[ "${SCANFAIL_DECISION}" == "deny" ]] || fail "with awk failing everywhere an install is still denied (got: ${SCANFAIL_DECISION})"
 pass "with awk failing everywhere an install is still denied"
