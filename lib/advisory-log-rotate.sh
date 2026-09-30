@@ -104,8 +104,14 @@ safedeps_advisory_log_lock_is_stale() {
   # BSD and GNU stat disagree on flags; ask both and treat an unreadable mtime as
   # NOT stale. Guessing "stale" would let two rotations run at once, which is the
   # failure this lock exists to prevent.
-  age="$(stat -f %m "${lock}" 2>/dev/null || stat -c %Y "${lock}" 2>/dev/null || printf '')"
-  [[ -z "${age}" ]] && return 1
+  #
+  # GNU goes first. On Linux `stat -f` means --file-system: it succeeds and
+  # prints several lines of filesystem info, so asking BSD first handed that
+  # text to the arithmetic below, which died under `set -u` on its first word
+  # ("File: unbound variable", measured on ubuntu:24.04). The same order as
+  # safedeps_file_mtime. Anything that is still not a number is unreadable.
+  age="$(stat -c %Y "${lock}" 2>/dev/null || stat -f %m "${lock}" 2>/dev/null || printf '')"
+  [[ "${age}" =~ ^[0-9]+$ ]] || return 1
   (( now - age > SAFEDEPS_ADVISORY_LOG_LOCK_STALE_SECONDS ))
 }
 
