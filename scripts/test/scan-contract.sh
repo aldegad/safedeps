@@ -277,7 +277,7 @@ pass "control: mutated spec diverges on ${control_hit}/${fuzz_cases} inputs, so 
 real_awk=$(command -v awk)
 fail_tmp=$(mktemp -d "${TMPDIR:-/tmp}/safedeps-scanfail.XXXXXX")
 trap 'rm -rf "${fail_tmp}"' EXIT
-mkdir -p "${fail_tmp}/scanner-only" "${fail_tmp}/all-awk" "${fail_tmp}/project"
+mkdir -p "${fail_tmp}/scanner-only" "${fail_tmp}/all-awk" "${fail_tmp}/scanner-later" "${fail_tmp}/project"
 printf '{"dependencies":{}}\n' > "${fail_tmp}/project/package.json"
 cat > "${fail_tmp}/scanner-only/awk" <<SHIM
 #!/usr/bin/env bash
@@ -285,7 +285,23 @@ case "\$*" in *"safedeps:command_scan_text"*) exit 2 ;; esac
 exec '${real_awk}' "\$@"
 SHIM
 printf '#!/usr/bin/env bash\nexit 127\n' > "${fail_tmp}/all-awk/awk"
-chmod +x "${fail_tmp}/scanner-only/awk" "${fail_tmp}/all-awk/awk"
+# The scanner works for its first call and fails after that. The first call is
+# the one that recognizes the install, so this is the path that reaches the
+# LAST settle point, just before pending state is written; the other shims
+# fail the recognition itself and never get that far (caught in review: the
+# last settle could be deleted and every case above still passed).
+cat > "${fail_tmp}/scanner-later/awk" <<SHIM
+#!/usr/bin/env bash
+case "\$*" in
+  *"safedeps:command_scan_text"*)
+    count=\$(( \$(cat '${fail_tmp}/scanner-later/count' 2>/dev/null || echo 0) + 1 ))
+    printf '%s' "\${count}" > '${fail_tmp}/scanner-later/count'
+    (( count <= 1 )) || exit 2
+    ;;
+esac
+exec '${real_awk}' "\$@"
+SHIM
+chmod +x "${fail_tmp}/scanner-only/awk" "${fail_tmp}/all-awk/awk" "${fail_tmp}/scanner-later/awk"
 
 # Runs the guard through the entry shim, the way the engines do.
 scanfail_guard() {
@@ -308,11 +324,18 @@ scanfail_guard "" "pip install requests==2.0.0"
 if grep -q 'UNDECIDED' <<< "${SCANFAIL_REASON}"; then fail "control: a working scanner answers with a finding, not UNDECIDED"; fi
 pass "control: with a working scanner the install is denied as a finding"
 
+# npm's short verbs are here because the loose raw pattern alone missed them
+# (caught in review): `npm i x` then passed both hooks, since the PostToolUse
+# backstop reads the same kind of pattern.
 for failing_command in \
   "pip install requests==2.0.0" \
   "echo hi; pip install requests==2.0.0" \
   "bash -c \"pip install requests==2.0.0\"" \
-  "npm install left-pad@1.3.0"; do
+  "npm install left-pad@1.3.0" \
+  "npm i left-pad@1.3.0" \
+  "bun i left-pad@1.3.0" \
+  "npm ci" \
+  "npm update left-pad"; do
   scanfail_guard "${fail_tmp}/scanner-only" "${failing_command}"
   [[ "${SCANFAIL_DECISION}" == "deny" ]] \
     || fail "a failed scanner does not turn an install into a pass: ${failing_command} (got: ${SCANFAIL_DECISION})"
@@ -328,6 +351,15 @@ scanfail_guard "${fail_tmp}/scanner-only" "ls -la"
 grep -q 'scanner' <<< "${SCANFAIL_ERR}" || fail "a failed scanner is announced even when the command is allowed"
 grep -q 'scanner failed' <<< "${SCANFAIL_LOG}" || fail "a failed scanner is recorded even when the command is allowed"
 pass "a failed scanner lets a non-install through, and says so on stderr and in advisory.log"
+
+rm -f "${fail_tmp}/scanner-later/count"
+scanfail_guard "${fail_tmp}/scanner-later" "pip install requests==2.0.0"
+[[ "$(cat "${fail_tmp}/scanner-later/count" 2>/dev/null || echo 0)" -gt 1 ]] \
+  || fail "the later-failure shim reached a second scan (otherwise this case tests nothing)"
+[[ "${SCANFAIL_DECISION}" == "deny" ]] || fail "a scanner that fails after recognizing the install still denies (got: ${SCANFAIL_DECISION})"
+grep -q 'UNDECIDED' <<< "${SCANFAIL_REASON}" || fail "a scanner that fails after recognizing the install answers UNDECIDED"
+grep -q 'scanner failed' <<< "${SCANFAIL_LOG}" || fail "a scanner that fails after recognizing the install is recorded"
+pass "a scanner that fails after the install was recognized is settled before pending state is written"
 
 scanfail_guard "${fail_tmp}/all-awk" "pip install requests==2.0.0"
 [[ "${SCANFAIL_DECISION}" == "deny" ]] || fail "with awk failing everywhere an install is still denied (got: ${SCANFAIL_DECISION})"

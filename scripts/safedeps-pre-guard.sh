@@ -105,6 +105,11 @@ safedeps_guard_announce_truth_sources() {
 # A false positive there denies an install-looking command on a broken machine.
 SAFEDEPS_RAW_INSTALL_RE='(npm|pnpm|yarn|bun)([^"]*)(install|add|dlx)|[^a-z]npx[[:space:]]|pip[0-9]*[[:space:]]+install|poetry[[:space:]]+add|uv[[:space:]]+(add|pip[[:space:]]+install)|pipenv[[:space:]]+install|cargo[[:space:]]+(add|install)|go[[:space:]]+(get|install)|gem[[:space:]]+install|bundle[[:space:]]+add|mvn([^"]*)dependency:get|dotnet[[:space:]]+add[[:space:]]+package'
 
+# The precise install recognizer. It is read on scanned text by
+# command_is_dependency_install, and on unscanned text by
+# guard_settle_scan_failure, which has to judge without the scanner.
+SAFEDEPS_INSTALL_PATTERN='(^|[;&|]+[[:space:]]*)((npm([[:space:]]+--?[a-zA-Z0-9_-]+([=[:space:]][^[:space:]]+)?)?[[:space:]]+(install|i|add|ci|update|up|upgrade))|npx([[:space:]]+--?[a-zA-Z0-9_-]+([=[:space:]][^[:space:]]+)?)?[[:space:]]+(@?[A-Za-z0-9._-])|pnpm([[:space:]]+--?[a-zA-Z0-9_-]+([=[:space:]][^[:space:]]+)?)?[[:space:]]+(add|install|update|up|dlx)|yarn([[:space:]]+--?[a-zA-Z0-9_-]+([=[:space:]][^[:space:]]+)?)?[[:space:]]+(add|install|upgrade|dlx)|bun([[:space:]]+--?[a-zA-Z0-9_-]+([=[:space:]][^[:space:]]+)?)?[[:space:]]+(add|install|i|update|upgrade)|((python3?|py)[[:space:]]+-m[[:space:]]+pip|pip3?)[[:space:]]+install|poetry[[:space:]]+add|uv[[:space:]]+(add|pip[[:space:]]+install)|pipenv[[:space:]]+install|cargo[[:space:]]+(add|install)|go[[:space:]]+(get|install)|gem[[:space:]]+install|bundle[[:space:]]+add|mvn[[:space:]]+dependency:get|dotnet[[:space:]]+add[[:space:]]+package)([[:space:]]|$)'
+
 if ! command -v jq >/dev/null 2>&1; then
   # jq is required to parse the hook payload. Without it we cannot read the exact
   # command, so do a best-effort fail-closed: read the raw payload and, if it
@@ -209,7 +214,7 @@ command_is_dependency_install() {
   local scan_command
   local install_pattern
 
-  install_pattern='(^|[;&|]+[[:space:]]*)((npm([[:space:]]+--?[a-zA-Z0-9_-]+([=[:space:]][^[:space:]]+)?)?[[:space:]]+(install|i|add|ci|update|up|upgrade))|npx([[:space:]]+--?[a-zA-Z0-9_-]+([=[:space:]][^[:space:]]+)?)?[[:space:]]+(@?[A-Za-z0-9._-])|pnpm([[:space:]]+--?[a-zA-Z0-9_-]+([=[:space:]][^[:space:]]+)?)?[[:space:]]+(add|install|update|up|dlx)|yarn([[:space:]]+--?[a-zA-Z0-9_-]+([=[:space:]][^[:space:]]+)?)?[[:space:]]+(add|install|upgrade|dlx)|bun([[:space:]]+--?[a-zA-Z0-9_-]+([=[:space:]][^[:space:]]+)?)?[[:space:]]+(add|install|i|update|upgrade)|((python3?|py)[[:space:]]+-m[[:space:]]+pip|pip3?)[[:space:]]+install|poetry[[:space:]]+add|uv[[:space:]]+(add|pip[[:space:]]+install)|pipenv[[:space:]]+install|cargo[[:space:]]+(add|install)|go[[:space:]]+(get|install)|gem[[:space:]]+install|bundle[[:space:]]+add|mvn[[:space:]]+dependency:get|dotnet[[:space:]]+add[[:space:]]+package)([[:space:]]|$)'
+  install_pattern="${SAFEDEPS_INSTALL_PATTERN}"
 
   while IFS= read -r scan_command; do
     scan_command=$(command_scan_text "${scan_command}")
@@ -1004,9 +1009,25 @@ guard_scan_failed() {
 # verdicts above were read from missing text, so they are replaced with the rule
 # the jq-missing path uses: an install-looking command is denied as UNDECIDED,
 # anything else runs with the failure on record. Denies above stand as they are.
+# Whether a command looks like an install, judged without the scanner: the
+# precise pattern on every candidate text as it stands (quotes not blanked),
+# or the loose raw pattern on the whole command. command_candidate_texts runs
+# on bash and sed, so this still answers when awk is the thing that failed.
+# The loose pattern alone missed `npm i`, `npm ci` and `npm update` (caught in
+# review), and the precise one alone would miss what only the loose one sees,
+# so neither may shrink what the other finds.
+guard_looks_like_install_unscanned() {
+  local text
+  printf '%s' "${COMMAND}" | grep -qiE "${SAFEDEPS_RAW_INSTALL_RE}" && return 0
+  while IFS= read -r text; do
+    printf '%s\n' "${text}" | grep -qiE "${SAFEDEPS_INSTALL_PATTERN}" && return 0
+  done < <(command_candidate_texts "${COMMAND}")
+  return 1
+}
+
 guard_settle_scan_failure() {
   guard_scan_failed || return 0
-  if printf '%s' "${COMMAND}" | grep -qiE "${SAFEDEPS_RAW_INSTALL_RE}"; then
+  if guard_looks_like_install_unscanned; then
     log_advisory "pre-guard DENY: the command scanner failed on a likely dependency-install command — undecided, fail-closed. Command: ${COMMAND}"
     jq -nc '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:"safedeps: UNDECIDED, not unsafe — the command scanner (awk) failed, so safedeps could not tell whether this command installs a dependency. It looks like one, so it is blocked fail-closed. Nothing was detected in it. Check that `echo x | awk 1` works, then retry."}}'
     exit 0
