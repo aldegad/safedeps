@@ -593,12 +593,17 @@ do
   [[ -n "${readings_cmd}" ]] || fail "readings that agree get the rewrite: $(printf '%q' "${readings_case}") (got: ${readings_out:0:200})"
   grep -qs '"ignore_scripts_injected": true' "${readings_safe}/snapshots/"*_meta.json \
     || fail "the meta says inert when the rewrite was injected: $(printf '%q' "${readings_case}")"
+  # A shell that refuses the command runs none of it (dash has no `for ((`),
+  # so each shell is held only to the installs it runs, and one must run them.
+  readings_any=false
   for readings_shell in "${readings_shells[@]}"; do
     readings_ran=$(cd "${project_dir}" && PATH="${readings_stub}:${PATH}" "${readings_shell}" -c "${readings_cmd}" 2>/dev/null | grep '^NPM: ' || true)
-    [[ -n "${readings_ran}" ]] || fail "the stub ran under ${readings_shell}: $(printf '%q' "${readings_cmd}")"
+    [[ -n "${readings_ran}" ]] || continue
+    readings_any=true
     ! grep -vq -- '--ignore-scripts' <<< "${readings_ran}" \
       || fail "every npm install ${readings_shell} runs carries the flag: $(printf '%q' "${readings_cmd}") ran ${readings_ran}"
   done
+  [[ "${readings_any}" == true ]] || fail "the stub ran under some shell: $(printf '%q' "${readings_cmd}")"
 done
 pass "a rewrite the readings agree on puts the flag on every npm install bash, zsh and dash run (${#readings_shells[@]} shells)"
 
