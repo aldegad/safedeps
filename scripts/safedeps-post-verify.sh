@@ -61,6 +61,8 @@ source "${SAFEDEPS_REPO_DIR}/lib/npm/closure.sh"
 source "${SAFEDEPS_REPO_DIR}/lib/gates/rollback-journal.sh"
 # shellcheck source=../lib/npm/workspaces.sh
 source "${SAFEDEPS_REPO_DIR}/lib/npm/workspaces.sh"
+# shellcheck source=../lib/npm/ask.sh
+source "${SAFEDEPS_REPO_DIR}/lib/npm/ask.sh"
 
 acquire_state_lock() {
   local attempts=0
@@ -343,6 +345,12 @@ cleanup_old_snapshots() {
 # node_modules empty (measured, scripts/test/lockless-forms.sh). `--global=false`
 # alone did not hold against `location=global`, and `--location=project` alone
 # did not hold against `global=true`; the pair held against both.
+#
+# Each of them also carries `--prefix "${PROJECT_DIR}"`, so npm works in the
+# directory the gate read and nowhere else. Without it npm walks up from there
+# the way an install does: measured, after `npm install x --no-workspaces` in a
+# workspace member, the gate read the member's lockfiles while `npm rebuild` in
+# the member would have run over the workspace root's tree.
 NPM_PROJECT_SCOPE=(--global=false --location=project)
 
 # The rollback's reinstall of node_modules.
@@ -365,7 +373,7 @@ restore_node_modules() {
 
   local why="there is no package-lock.json to install from"
   if [[ -f "${PROJECT_DIR}/package-lock.json" ]]; then
-    if (cd "${PROJECT_DIR}" && npm ci "${NPM_PROJECT_SCOPE[@]}" >/dev/null 2>&1); then
+    if (cd "${PROJECT_DIR}" && npm ci "${NPM_PROJECT_SCOPE[@]}" --prefix "${PROJECT_DIR}" >/dev/null 2>&1); then
       return
     fi
     ROLLBACK_WARNINGS+=("npm ci failed during rollback; retrying with npm install")
@@ -373,7 +381,7 @@ restore_node_modules() {
   fi
 
   if (cd "${PROJECT_DIR}" && rm -rf node_modules \
-      && npm install --ignore-scripts "${NPM_PROJECT_SCOPE[@]}" >/dev/null 2>&1); then
+      && npm install --ignore-scripts "${NPM_PROJECT_SCOPE[@]}" --prefix "${PROJECT_DIR}" >/dev/null 2>&1); then
     log_advisory "post-verify: node_modules in ${PROJECT_DIR} was reinstalled with --ignore-scripts — ${why}, so npm resolved package.json again and nothing verified what it resolved."
     ROLLBACK_WARNINGS+=("node_modules was reinstalled but its install scripts were not run: ${why}, so npm resolved package.json again and safedeps did not verify what it resolved. Review node_modules, then run \`npm rebuild\` yourself if it is what you expect")
     return
@@ -384,140 +392,85 @@ restore_node_modules() {
 
 # `npm rebuild` runs the lifecycle scripts of every package in the tree it
 # rebuilds, so it may only rebuild the tree the effect gate just read. Two
-# things decide which tree that is, and both were measured:
+# things decide that, and both were measured:
 #
-#   - The tree has to be on record. The closure above is read from
-#     package-lock.json and the hidden lockfile. A node_modules with no hidden
-#     lockfile holds whatever it holds, and so does one holding a package
-#     neither lockfile lists. Rebuilding either would run scripts the gate
-#     never looked at, so the rebuild is skipped and the user told.
+#   - Every package the rebuild runs over has to be on record, at the version
+#     and under the name that is on disk. The closure above is read from
+#     package-lock.json and the hidden lockfile, so a package neither lockfile
+#     lists, or a version written over a recorded one, is something the gate
+#     never looked at. Then the rebuild is skipped and the user told.
 #   - The rebuild has to stay in the project (NPM_PROJECT_SCOPE above).
-# Every package directory in <dir>/node_modules, as the lockfile key npm would
-# record it under (`node_modules/a`, `node_modules/@s/b`,
-# `node_modules/a/node_modules/c`). Only package roots and their own
-# node_modules are walked, never a package's contents, so the cost follows the
-# package count rather than the file count. A link is listed and not followed:
-# npm records a link under its own key.
-npm_installed_package_keys() {
-  local root="$1" rel="${2:-}" entry scoped key
-  for entry in "${root}/${rel}node_modules"/*; do
-    [[ -e "${entry}" || -L "${entry}" ]] || continue
-    case "${entry##*/}" in
-      @*)
-        for scoped in "${entry}"/*; do
-          [[ -e "${scoped}" || -L "${scoped}" ]] || continue
-          key="${rel}node_modules/${entry##*/}/${scoped##*/}"
-          printf '%s\n' "${key}"
-          [[ -L "${scoped}" ]] || npm_installed_package_keys "${root}" "${key}/"
-        done
-        ;;
-      *)
-        key="${rel}node_modules/${entry##*/}"
-        printf '%s\n' "${key}"
-        [[ -L "${entry}" ]] || npm_installed_package_keys "${root}" "${key}/"
-        ;;
-    esac
-  done
-}
-
-# The directories whose node_modules `npm rebuild` in <dir> runs over: <dir>
-# itself and each workspace member, as paths relative to <dir> ending in `/`
-# (the root is the empty string). Members come from the root's `workspaces` and
-# from the lockfiles' member keys, so a member either names is walked. `?` when
-# the root's workspaces cannot be decided: then the tree a rebuild would run
-# over is not known, and the caller must not rebuild.
-npm_rebuild_roots() {
-  local dir="$1" manifest
-  printf '\n'
-  [[ "$(safedeps_npm_workspace_patterns "${dir}")" != none ]] || return 0
-  if safedeps_npm_workspace_members "${dir}" | grep -q '^?'; then
-    printf '?\n'
-    return 0
-  fi
-  safedeps_npm_workspace_manifests "${dir}" | while IFS= read -r manifest; do
-    printf '%s\n' "${manifest%package.json}"
-  done
-}
-
-# What in <dir>'s rebuild tree neither lockfile records, one line per package,
-# naming its key, what is on disk and what the lockfiles say. These are what
-# the effect gate did not read.
 #
-# A key on record is not enough. Measured: with `global=0` in the project
-# .npmrc, `npm install sd-approved` put 1.0.1 on disk over a recorded 1.0.0 and
-# left both lockfiles saying 1.0.0. The closure the gate read was the approved
-# 1.0.0, and `npm rebuild` then ran 1.0.1's scripts. So each package's
-# package.json on disk is compared with what its key records, by version and by
-# name: an `npm:` alias records a key that differs from the name. A link is
-# recorded as a link, and what it points at is a key of its own.
+# Which packages the rebuild runs over is npm's to say. safedeps used to walk
+# the tree in bash, and twice it walked less than npm rebuilds: it took a key on
+# record for the package under it (`global=0` in an .npmrc put 1.0.1 over a
+# recorded 1.0.0), and it did not follow a `file:` link into its target, where
+# `npm rebuild` ran a package no lockfile records. So npm is asked: `npm query
+# '*'` loads the tree the way `npm rebuild` does, links followed into their
+# targets, and names every package by location, name and version. Each is
+# compared with what the two lockfiles record under its location. A link is not
+# a node of its own there; its target is.
 #
-# Anything this cannot compare is listed too, never passed: a package.json
-# that cannot be read, or lockfiles that cannot be.
-npm_unrecorded_packages() {
-  local dir="$1" rel roots keys_file disk_file lockfile
+# Prints what does not match, one per line, and returns 0. Returns 1 with the
+# reason when npm could not be asked or did not answer: then the tree is not
+# known, and the caller must not rebuild it.
+npm_rebuild_unrecorded() {
+  local dir="$1" tmp lockfile rc
   local -a lockfiles=()
-  keys_file=$(mktemp "${TMPDIR:-/tmp}/safedeps-post-keys.XXXXXX") || { printf 'node_modules (could not list it)\n'; return 0; }
-  disk_file=$(mktemp "${TMPDIR:-/tmp}/safedeps-post-disk.XXXXXX") || { rm -f "${keys_file}"; printf 'node_modules (could not list it)\n'; return 0; }
-
-  roots=$(npm_rebuild_roots "${dir}")
-  if grep -qx '?' <<< "${roots}"; then
-    printf 'the workspace members (the root package.json does not say which they are)\n'
-    roots=$'\n'
+  if ! command -v npm >/dev/null 2>&1; then
+    printf 'npm is not on the PATH this hook runs with\n'
+    return 1
   fi
-  while IFS= read -r rel; do
-    npm_installed_package_keys "${dir}" "${rel}"
-  done <<< "${roots}" | LC_ALL=C sort -u > "${keys_file}"
-
-  # Each package.json as {path: manifest}. One jq reads them all; jq stops at
-  # the first file that does not parse, so when the batch fails each file is
-  # read on its own and one that does not parse is null. (Raw-line reading was
-  # tried first and is wrong: a file with no final newline runs into the next
-  # file's first line, and both read as unparsable.)
-  (
-    cd "${dir}" || exit 1
-    while IFS= read -r key; do
-      [[ -f "${key}/package.json" ]] && printf '%s/package.json\n' "${key}"
-    done < "${keys_file}" > "${disk_file}.paths"
-    if ! tr '\n' '\0' < "${disk_file}.paths" \
-        | xargs -0 jq -c '{(input_filename): {name, version}}' > "${disk_file}.lines" 2>/dev/null; then
-      : > "${disk_file}.lines"
-      while IFS= read -r path; do
-        jq -c --arg p "${path}" '{($p): {name, version}}' "${path}" 2>/dev/null \
-          || jq -nc --arg p "${path}" '{($p): null}'
-      done < "${disk_file}.paths" > "${disk_file}.lines"
-    fi
-    jq -s 'add // {}' "${disk_file}.lines"
-  ) > "${disk_file}.json" 2>/dev/null && mv -f "${disk_file}.json" "${disk_file}" || printf '{}' > "${disk_file}"
-  rm -f "${disk_file}.paths" "${disk_file}.lines" "${disk_file}.json"
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/safedeps-post-query.XXXXXX") || {
+    printf 'safedeps could not make a scratch directory to ask npm\n'
+    return 1
+  }
+  safedeps_npm_ask_start "${tmp}/query" "${dir}" npm -- query '*' "${NPM_PROJECT_SCOPE[@]}" --prefix "${dir}"
+  if ! safedeps_npm_ask_wait $(( SECONDS + SAFEDEPS_NPM_ASK_POST_SECONDS )); then
+    printf 'npm query did not answer within %ss\n' "${SAFEDEPS_NPM_ASK_POST_SECONDS}"
+    rm -rf "${tmp}"
+    return 1
+  fi
+  rc="${SAFEDEPS_NPM_ASK_RCS[0]}"
+  if [[ "${rc}" != 0 ]]; then
+    printf 'npm query failed (exit %s: %s)\n' "${rc}" "$(safedeps_npm_ask_error "${tmp}/query")"
+    rm -rf "${tmp}"
+    return 1
+  fi
 
   for lockfile in "${dir}/package-lock.json" "${dir}/${NPM_HIDDEN_LOCKFILE}"; do
     [[ -f "${lockfile}" ]] && lockfiles+=("${lockfile}")
   done
-
-  if ! jq -rn --slurpfile disk "${disk_file}" --rawfile keys "${keys_file}" '
+  # The name a key records: its own `name`, or the last segment under
+  # node_modules. A key outside node_modules (a workspace member, a link
+  # target) is named by its package, which the lockfile may leave out; then
+  # there is no recorded name to compare.
+  if ! jq -rn --slurpfile query "${tmp}/query" '
       def clean: tostring | sub("^[=v[:space:]]+"; "");
       def recorded_name($key; $entry):
-        $entry.name // ($key | split("node_modules/") | last);
+        $entry.name // (if ($key | test("(^|/)node_modules/")) then $key | split("node_modules/") | last else null end);
       ([inputs | (.packages // {}) | to_entries[] | select(.key != "")]
         | group_by(.key) | map({key: .[0].key, value: map(.value)}) | from_entries) as $records
-      | ($disk[0] // {}) as $manifests
-      | $keys | split("\n")[] | select(. != "") as $key
+      | if ($query | length) != 1 or ($query[0] | type) != "array" then error("npm query did not answer with a list") else . end
+      | $query[0][] | select(type == "object" and (.location // "") != "") as $node
+      | $node.location as $key
       | ($records[$key] // []) as $recs
-      | ($manifests[$key + "/package.json"]) as $m
+      | "\($node.name // "?")@\($node.version // "?")" as $here
       | if ($recs | length) == 0 then
-          "\($key) (\($m.name // "?")@\($m.version // "?"), not in either lockfile)"
-        elif any($recs[]; .link == true) then empty
-        elif $m == null or ($m | type) != "object" then
-          "\($key) (its package.json cannot be read)"
-        elif any($recs[]; ((.version // "") | clean) == (($m.version // "") | clean)
-                          and recorded_name($key; .) == $m.name) then empty
+          "\($key) (\($here), not in either lockfile)"
+        elif any($recs[]; .link == true) then
+          "\($key) (\($here) on disk, the lockfile records a link)"
+        elif any($recs[]; ((.version // "") | clean) == (($node.version // "") | clean)
+                          and (recorded_name($key; .) as $n | $n == null or $n == $node.name)) then empty
         else
-          "\($key) (\($m.name // "?")@\($m.version // "?") on disk, the lockfile records \([$recs[] | "\(recorded_name($key; .))@\(.version // "?")"] | unique | join(" or ")))"
+          "\($key) (\($here) on disk, the lockfile records \([$recs[] | "\(recorded_name($key; .) // "?")@\(.version // "?")"] | unique | join(" or ")))"
         end
     ' "${lockfiles[@]+"${lockfiles[@]}"}" < /dev/null 2>/dev/null; then
-    printf 'node_modules (could not compare it with the lockfiles)\n'
+    printf 'npm query answered with something safedeps could not compare with the lockfiles\n'
+    rm -rf "${tmp}"
+    return 1
   fi
-  rm -f "${keys_file}" "${disk_file}"
+  rm -rf "${tmp}"
 }
 
 run_verified_npm_rebuild_if_injected() {
@@ -535,25 +488,27 @@ run_verified_npm_rebuild_if_injected() {
     return 0
   fi
 
-  # The hidden lockfile is on record, but node_modules can hold more than it
-  # records. Measured: `global=0` in the project .npmrc, and `location=global`
-  # there with `--location=project` on the command, put the package in
-  # node_modules and wrote it to neither lockfile, or wrote a new version over a
-  # recorded one and left the record saying the old one. The gate confirmed the
-  # records clean, and `npm rebuild` then ran the unrecorded scripts.
-  unrecorded=$(npm_unrecorded_packages "${PROJECT_DIR}" | paste -sd';' - | sed 's/;/; /g')
+  # The lockfiles are on record, but the tree can hold more than they record.
+  # Measured: `global=0` in the project .npmrc, and `location=global` there with
+  # `--location=project` on the command, put the package in node_modules and
+  # wrote it to neither lockfile, or wrote a new version over a recorded one and
+  # left the record saying the old one. And a `file:` dependency's own
+  # node_modules is rebuilt with the project's, though no lockfile of the
+  # project records it. The gate confirmed the records clean each time, and
+  # `npm rebuild` then ran the unrecorded scripts.
+  if ! unrecorded=$(npm_rebuild_unrecorded "${PROJECT_DIR}"); then
+    log_advisory "post-verify: npm rebuild skipped in ${PROJECT_DIR} — safedeps asked npm which packages a rebuild would run over and got no answer (${unrecorded}), so it cannot tell that tree is the one the effect gate read."
+    ROLLBACK_WARNINGS+=("npm rebuild was not run: safedeps asked npm which packages it would rebuild and got no answer (${unrecorded}), so it could not tell they are the ones it read. Install scripts have not run; review node_modules, then run \`npm rebuild\` yourself if it is what you expect")
+    return 0
+  fi
+  unrecorded=$(printf '%s' "${unrecorded}" | paste -sd';' - | sed 's/;/; /g')
   if [[ -n "${unrecorded}" ]]; then
-    log_advisory "post-verify: npm rebuild skipped in ${PROJECT_DIR} — node_modules holds a package, or a version of one, that neither lockfile records (${unrecorded}), so the tree it would rebuild is not the tree the effect gate read."
-    ROLLBACK_WARNINGS+=("npm rebuild was not run: ${PROJECT_DIR}/node_modules holds a package, or a version of one, that neither lockfile records (${unrecorded}), so safedeps did not read it. Install scripts have not run; review node_modules, then run \`npm rebuild\` yourself if it is what you expect")
+    log_advisory "post-verify: npm rebuild skipped in ${PROJECT_DIR} — the tree npm would rebuild holds a package, or a version of one, that neither lockfile records (${unrecorded}), so it is not the tree the effect gate read."
+    ROLLBACK_WARNINGS+=("npm rebuild was not run: the tree npm would rebuild in ${PROJECT_DIR} holds a package, or a version of one, that neither lockfile records (${unrecorded}), so safedeps did not read it. Install scripts have not run; review it, then run \`npm rebuild\` yourself if it is what you expect")
     return 0
   fi
 
-  if ! command -v npm >/dev/null 2>&1; then
-    ROLLBACK_WARNINGS+=("npm is not installed; npm rebuild was not run after verified inert install")
-    return 0
-  fi
-
-  if (cd "${PROJECT_DIR}" && npm rebuild "${NPM_PROJECT_SCOPE[@]}" >/dev/null 2>&1); then
+  if (cd "${PROJECT_DIR}" && npm rebuild "${NPM_PROJECT_SCOPE[@]}" --prefix "${PROJECT_DIR}" >/dev/null 2>&1); then
     return 0
   fi
 
