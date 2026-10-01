@@ -796,9 +796,12 @@ pass "lockfile writers share a trace only with inert statements between them and
 
 # Where bash and zsh read a command differently the gate judges each reading on
 # its own (resolve_install_targets, A1). A statement both readings share is one
-# statement, not two: counted across readings, the one npm install below would
-# be two writers with the divergent group between them. And the reason a split
-# command gives still comes through when only one reading shows the split.
+# statement, not two, so the one npm install below is one writer. That row has
+# no control: with the readings joined into one text (the reading this
+# replaced), the first reading's open `((` swallowed the second copy, so it was
+# not counted twice either (measured on a mutated copy). The second row is the
+# one that reading failed: the split only the zsh reading shows was swallowed
+# with it, and no reason came through.
 diverge=$'((cat <<EOF > n.txt\nit\'s here\nEOF\n) )'
 state=$(pending_of "npm install evil"$'\n'"${diverge}")
 [[ -n "$(jq -r '.npm_trace.baseline // empty' <<< "${state}")" ]] \
