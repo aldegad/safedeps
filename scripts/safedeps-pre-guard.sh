@@ -4248,8 +4248,9 @@ CWD_DIR=$(echo "${INPUT}" | jq -r '.cwd // empty' 2>/dev/null)
 if [[ -z "${CWD_DIR}" ]]; then
   CWD_DIR=$(pwd)
 fi
+# Codex sends turn_id; Claude does not. Asked once the command is an install
+# candidate (below), so an ordinary command does not pay for one more jq.
 GUARD_IS_CODEX=false
-jq -e 'has("turn_id")' <<< "${INPUT}" >/dev/null 2>&1 && GUARD_IS_CODEX=true
 
 # Where the bash reading says DIVERGE. Without the file the gate cannot tell
 # whether the readings differ, so it reads all three.
@@ -4394,6 +4395,7 @@ if [[ "${GUARD_ANY_INSTALL}" != true ]]; then
   exit 0
 fi
 
+jq -e 'has("turn_id")' <<< "${INPUT}" >/dev/null 2>&1 && GUARD_IS_CODEX=true
 for guard_reading in ${GUARD_READING_SET}; do
   guard_reading_facts "${guard_reading}"
 done
