@@ -189,8 +189,6 @@ case "\$*" in
   *"safedeps:command_statements"*) kind=stmts ;;
   *"safedeps:guard_npmrc_value"*) kind=npmrc ;;
   *"safedeps:extract_pieces"*) kind=pieces ;;
-  *"safedeps:shell_dequote"*) kind=dequote ;;
-  *"safedeps:strip_redirections"*) kind=redirect ;;
   *"safedeps:payload_pieces"*) kind=payload ;;
 esac
 if [[ -z "\${kind}" ]]; then
@@ -300,7 +298,7 @@ for n in $(seq 1 "${case_count}"); do
     printf '%s k %s\n' "${n}" "${k}" >> "${WORK}/jobs"
     [[ "${QUICK}" == "true" ]] || printf '%s from-k %s\n' "${n}" "${k}" >> "${WORK}/jobs"
   done
-  for mode in scan-all join-all strip-all reads-all inert-all offsets-all norm-all subst-all blank-all spans-all flag-all eco-all stmts-all npmrc-all pieces-all dequote-all redirect-all payload-all payspans-all awk-all grep-all sed-all; do
+  for mode in scan-all join-all strip-all reads-all inert-all offsets-all norm-all subst-all blank-all spans-all flag-all eco-all stmts-all npmrc-all pieces-all payload-all payspans-all awk-all grep-all sed-all; do
     printf '%s %s 0\n' "${n}" "${mode}" >> "${WORK}/jobs"
   done
 done

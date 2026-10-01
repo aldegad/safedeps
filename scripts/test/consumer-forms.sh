@@ -69,6 +69,24 @@ expect_pass() {
   [[ "${got}" == "pass" ]] || fail "command gate leaves ${label} unjudged as documented (got: ${got})"
 }
 
+# deny or allow or pass, then the reason, for one command.
+gate_reason() {
+  local safe out
+  safe=$(mktemp -d "${tmp_root}/safe.XXXXXX")
+  out=$(jq -nc --arg c "$1" --arg cwd "${project_dir}" \
+    '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
+    HOME="${tmp_root}/home" SAFEDEPS_HOME="${safe}" scripts/safedeps-pre-guard.sh 2>/dev/null)
+  jq -r '(.hookSpecificOutput.permissionDecision // "pass") + " " + (.hookSpecificOutput.permissionDecisionReason // "")' <<< "${out:-{\}}"
+}
+
+# An UNDECIDED deny: the gate could not finish reading the command, and says so
+# rather than claiming a finding.
+expect_undecided() {
+  local label="$1" command="$2" got
+  got=$(gate_reason "${command}")
+  [[ "${got}" == "deny "*UNDECIDED* ]] || fail "${label} is UNDECIDED (got: ${got:0:120})"
+}
+
 # --- 1. Carrier forms the command gate catches --------------------------------
 # Regression against narrowing. Tightening the gate for false positives must not
 # quietly shrink this set — that would be a trade, not a net gain.
@@ -1056,6 +1074,60 @@ expect_prescription 'npm create-evil@1.0.0;' 'bun create evil@1.0.0' npm evil 1.
 expect_prescription 'npm create-create-evil@1.0.0;' 'bun c create-evil@1.0.0'
 expect_prescription 'npm @usr/create-foo@2.0.0;' 'bun create @usr/foo@2.0.0'
 pass "a create is checked as the package its manager rewrites the operand into"
+
+# --- 10b. One reader of quotes, redirections and cuts ---------------------------
+# The extractor's words, the redirections it drops and the cuts between
+# statements come from one lexing (the pieces view of shell_lex). Each had a
+# reader of its own, and each reader had its own model of the quoting. An awk
+# that knew `'...'`, `"..."` and a backslash read the `>` inside `"$(echo ">'")"`
+# and `$'...\'>'` as a redirection, took the rest of the line as its target, and
+# the pinned install after it passed unchecked; the sed before it read a
+# redirection only at the start of a word and kept a quoted target with a real
+# `2>` as operands; and the cut at `;` `|` `&` read no quotes at all, so
+# `--log "a;b" evil==1.0.0` left evil in a piece that was not an install. Every
+# form here is one bash and zsh run as the pinned install named in its
+# prescription (measured with a stand-in printing its argv in place of the
+# manager).
+for row in \
+  $'pypi evil@1.0.0;\tpip install --log "$(echo ">\'")" evil==1.0.0' \
+  $'pypi evil@1.0.0;\tpip install --log $\'/tmp/x\\\'>\' evil==1.0.0' \
+  $'pypi evil@1.0.0;\tpip install --log "`echo ">\'"`" evil==1.0.0' \
+  $'npm evil@1.0.0;\tpnpm add --reporter "$(echo ">\'")" evil@1.0.0' \
+  $'npm evil@1.0.0;\tnpm install --tag "$(echo ">\'")" evil@1.0.0' \
+  $'pypi evil@1.0.0;\tpip install --log "$(echo ">\'")" evil==1.0.0 2>"$(echo "\'")"' \
+  $'npm evil@1.0.0;\tnpm install --tag "$(echo ">\'")" evil@1.0.0 --foo "$(echo "\'")"' \
+  $'pypi evil@1.0.0;\tpip install --log "$(echo "a b>\'")" evil==1.0.0' \
+  $'pypi evil@1.0.0;\tpip install --log $\'\\\'\' --src \'>x\' evil==1.0.0' \
+  $'pypi evil@1.0.0;\tpip install --log "x >\'" evil==1.0.0 2>"\'"' \
+  $'npm evil@1.0.0;\tnpm install --tag "a >\'" evil@1.0.0 --foo "\'"' \
+  $'npm evil@1.0.0;\tpnpm add --reporter "a >\'" evil@1.0.0 --filter "\'"' \
+  $'pypi evil@1.0.0;\tpip install --log "a;b" evil==1.0.0' \
+  $'pypi evil@1.0.0;\tpip install --log \'a|b\' evil==1.0.0' \
+  $'pypi evil@1.0.0;\tpip install --log "a&b" evil==1.0.0' \
+  $'pypi requests@2.19.0;\tpip install $\'requests==2.19.0\'' \
+  $'pypi evil@1.0.0;\tpip install $\'ev\\x69l==1.0.0\'' \
+  $'pypi evil@1.0.0;\tpip install $\'ev\\151l==1.0.0\''
+do
+  expect_prescription "${row%%$'\t'*}" "${row#*$'\t'}"
+done
+# gem reads the value of `--document` as optional, so the version also binds
+# to the words of that value; the package gem installs is among them.
+for gem_form in \
+  $'gem install --document "$(echo ">\'")" rake -v 13.0.0' \
+  $'gem install --document "a >\'" rake -v 13.0.0 --no-user-install "\'"'
+do
+  got=$(prescription "${gem_form}")
+  [[ "${got}" == *'rubygems rake@13.0.0;'* ]] || fail "the deny for \`${gem_form}\` prescribes rubygems rake@13.0.0 (got: ${got})"
+done
+pass "quotes, redirections and statement cuts are read by the one lexer, and each pinned install is checked as its package"
+
+# The extractor still reads a word only as far as its quote removal goes. A
+# `$'...'` escape whose value depends on the locale or is not one plain byte
+# (`\u`, `\U`, `\c`, a NUL, a byte past 127) is not read as some other text: the
+# reading is marked failed, and the install is UNDECIDED.
+expect_undecided "an ANSI-C \\u escape in a spec" $'pip install $\'ev\\u0069l==1.0.0\''
+expect_undecided "an ANSI-C NUL in a spec" $'pip install $\'evil\\0==1.0.0\''
+pass "an escape the extractor cannot name is a failed reading, not another word"
 
 # --- 11. The UNGATED record names each operand the gate did not check ---------
 # The record used to be a second parser: it read each statement on its own and
