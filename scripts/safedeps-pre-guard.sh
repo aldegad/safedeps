@@ -2478,10 +2478,12 @@ guard_mark_scan_failed() {
 # start of a word is one: `'>=3'` is a version specifier. The target may be
 # attached or follow blanks, and it is one shell word: unquoted bytes, a
 # backslash escape, a double-quoted run (with its own escapes) and a
-# single-quoted run, in any order.
+# single-quoted run, in any order. It reads stdin, a statement per line, so
+# guard_extract_pieces runs it once over every statement instead of once per
+# statement: a 4KB command of short installs is about 250 statements.
 SAFEDEPS_REDIRECT_TARGET_CHAR="([^[:space:]'\"\\\\]|\\\\.|\"([^\"\\\\]|\\\\.)*\"|'[^']*')"
 guard_strip_redirections() {
-  printf '%s' "$1" | sed -E \
+  sed -E \
     "s#(^|[[:space:]])[0-9]*(<<<|>>|>[|&]|<[&>]|>|<)[[:space:]]*${SAFEDEPS_REDIRECT_TARGET_CHAR}*#\\1#g"
 }
 
@@ -2497,7 +2499,6 @@ guard_extract_statement_text() {
   # Each transform below is a spec reader, and a failed one leaves no text or
   # the wrong text, which reads as no spec. So a failure is marked the way
   # guard_operand_specs marks its own (the runner reader marks inside).
-  seg=$(guard_strip_redirections "${seg}") || guard_mark_scan_failed
   if [[ "${runner}" == true ]]; then
     text=$(guard_runner_operands "${seg}")
   else
@@ -2576,6 +2577,7 @@ guard_extract_pieces() {
       printf '%s\n' "${raw}"
     done <<< "${targets}"
   )")
+  normalized=$(printf '%s\n' "${normalized}" | guard_strip_redirections) || guard_mark_scan_failed
   if ! printf '%s\n' "${normalized}" | LC_ALL=C awk -v flags="${read_flags}" -v nl=$'\036' '
     # safedeps:extract_pieces (scripts/test/scan-contract.sh keys on this line)
     NR > length(flags) { exit }
@@ -2588,7 +2590,7 @@ guard_extract_pieces() {
   fi
 
   command_payload_texts "$(join_line_continuations "$(strip_heredoc_bodies "${cmd}")")" \
-    | tr ';|&' '\n' | awk '{ printf "false\t%s\n", $0 }' || guard_mark_scan_failed
+    | guard_strip_redirections | tr ';|&' '\n' | awk '{ printf "false\t%s\n", $0 }' || guard_mark_scan_failed
 }
 
 guard_extract_specs() {
