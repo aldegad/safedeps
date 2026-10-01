@@ -363,7 +363,10 @@ command_pipes_unread_install_to_shell() {
 #           it ends nothing. So a statement starts at a separator here and
 #           nowhere else, and SAFEDEPS_G_START knows only separators. What
 #           command_statements splits on and what the install recognizers
-#           read (command_start_text); length-preserving and idempotent.
+#           read (command_start_text). Length-preserving, and idempotent on
+#           a reading that closes and holds no escape or quote; read again,
+#           a word the view blanked part of may gain a start, never lose one
+#           (scan-contract).
 #
 # It replaced three state machines that ran one after another -- a line-based
 # heredoc regex, a line joiner and the quote scanner -- and had to agree. They
@@ -836,7 +839,6 @@ shell_lex() {
             if (C[k] == "p" && DEP[k] == 1 || op ~ /[\n;&|]/) {
               st = 1; pre = 0; rd = 0; fn = 0; fr = 0; inp = 0; rp = 0; dbr = 0; cop = 0; tm = 0
             }
-            else if (C[k] == "h" && st) pre = 1
             else if (op == "<" || op == ">") {
               # `<(` and `>(` are process substitutions, whose `(` opens a
               # command; anything else is a redirection.
@@ -880,8 +882,12 @@ shell_lex() {
           if (w ~ /^[0-9]+$/ && (X[k] == "<" || X[k] == ">")) continue
           if (!pre) mark_start(s)
           pre = 0
-          if (cop == 1) { cop = (w == "{") ? 0 : 2; if (cop == 2) st = 0; continue }
-          if (opener(w)) continue
+          # The word after `coproc` is a command to zsh and to bash, unless
+          # bash reads it as the NAME of a `coproc NAME {`. It is marked, and
+          # read on as at any other start, so that the view read again, where
+          # the mark is a separator, reads it the same way.
+          if (cop == 1) cop = (w == "{") ? 0 : 2
+          if (opener(w)) { cop = 0; continue }
           if (assignword(w)) { pre = 1; continue }
           if (w == "time") { tm = 1; continue }
           if (w == "function") { fn = 1; continue }
@@ -898,13 +904,26 @@ shell_lex() {
       # byte before the blanks already starts one (a separator, a case
       # pattern, the start of the text). Only a top-level blank is marked, so
       # no mark falls inside quotes, a substitution, arithmetic or a heredoc.
-      function mark_start(s,   k) {
-        if (s < 2 || !((X[s-1] == " " || X[s-1] == "\t") && C[s-1] == "c" && DEP[s-1] == 1)) return
+      #
+      # A word glued to what is before it (`}\pip`, `}\047a\047b`) has no blank
+      # to mark, but the view prints its leading backslash or quote as one,
+      # and the view read again would mark that. So the last of those bytes is
+      # marked instead, which keeps the view idempotent; a word the view
+      # prints all blank is no word read again, and is not marked.
+      function mark_start(s,   k, j, t) {
+        if (s < 2) return
+        if ((X[s-1] == " " || X[s-1] == "\t") && C[s-1] == "c" && DEP[s-1] == 1) t = s - 1
+        else {
+          j = s
+          while (j <= N && !word_sep(j) && C[j] != "c" && C[j] != "p" && C[j] != "e") j++
+          if (j == s || j > N || word_sep(j)) return
+          t = j - 1
+        }
         k = s - 1
         while (k >= 1 && (X[k] == " " || X[k] == "\t") && C[k] == "c") k--
         if (k < 1 || C[k] == "p") return
         if (C[k] == "c" && DEP[k] == 1 && X[k] ~ /[\n;&|(]/) return
-        BND[s-1] = 1
+        BND[t] = 1
       }
       # The `)` at k closes an empty `()`: a function head.
       function emptyparen(k,   j) {

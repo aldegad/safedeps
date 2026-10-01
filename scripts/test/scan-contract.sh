@@ -396,6 +396,25 @@ code_view_sub() { shell_lex "$1" code sub "safedeps:scan-contract"; }
 stmts_view() { shell_lex "$1" stmts arith "safedeps:scan-contract"; }
 stmts_view_sub() { shell_lex "$1" stmts sub "safedeps:scan-contract"; }
 property_failures=0
+stmts_unterm=0
+stmts_added=0
+# Every `;` in <once> is a `;` in <twice>.
+stmts_keeps_starts() {
+  local LC_ALL=C k
+  for ((k = 0; k < ${#1}; k++)); do
+    [[ "${1:k:1}" != ";" || "${2:k:1}" == ";" ]] || return 1
+  done
+}
+# Whether the lexer finishes reading <text>: an open quote, body or context
+# makes it UNTERM, which the guard settles as a failed reading.
+reading_closes() {
+  local flags rc=0
+  flags=$(mktemp "${TMPDIR:-/tmp}/safedeps-flags.XXXXXX")
+  SAFEDEPS_LEX_FLAGS="${flags}" shell_lex "$1" scan arith "safedeps:scan-contract" > /dev/null
+  grep -q '^UNTERM$' "${flags}" && rc=1
+  rm -f "${flags}"
+  return "${rc}"
+}
 check_view_properties() { # input label
   local x="$1" v once twice
   for v in scan_view code_view noredir_view stmts_view scan_view_sub code_view_sub stmts_view_sub; do
@@ -408,7 +427,27 @@ check_view_properties() { # input label
       continue
     fi
     [[ "${v}" == *_sub ]] && continue
+    # The stmts view writes starts only for a reading that closes (as the
+    # prefix and redirection views strip only then). An unclosed reading
+    # writes none, and its view, whose open quote is blank, may close when it
+    # is read again and get starts then. Such a command is UNDECIDED, so
+    # nothing reads its statements; the view is held to idempotence on every
+    # reading that closes, and the ones skipped are counted below.
+    if [[ "${v}" == stmts_view ]] && ! reading_closes "${x}"; then
+      stmts_unterm=$((stmts_unterm + 1))
+      continue
+    fi
     twice=$("${v}" "${once}"; printf 'X'); twice="${twice%X}"
+    # The view prints an escape or a quote as a blank, so read again a word
+    # that holds one is two words, or none (`}\x` is `} x`). There a reading
+    # again may find a start the first did not; it must keep every start and
+    # change no other byte. Without an escape or a quote it is idempotent.
+    if [[ "${v}" == stmts_view && "${twice}" != "${once}" && "${x}" == *[\\\'\"]* ]]; then
+      if [[ "${twice//;/ }" == "${once//;/ }" ]] && stmts_keeps_starts "${once}" "${twice}"; then
+        stmts_added=$((stmts_added + 1))
+        continue
+      fi
+    fi
     if [[ "${twice}" != "${once}" ]]; then
       printf 'idempotence: %s read twice differs on [%q] (%s)\n  once  [%q]\n  twice [%q]\n' "${v}" "${x}" "$2" "${once}" "${twice}" >&2
       property_failures=$((property_failures + 1))
@@ -433,7 +472,7 @@ for ((c = 0; c < fuzz_cases; c++)); do
   check_view_properties "${input}" "random ${c}"
 done
 [[ ${property_failures} -eq 0 ]] || fail "view properties: ${property_failures} violation(s) (seed ${fuzz_seed})"
-pass "view properties: scan, code, noredir and stmts keep length and are idempotent on ${form_count} shell forms and ${fuzz_cases} random inputs"
+pass "view properties: scan, code, noredir and stmts keep length and are idempotent on ${form_count} shell forms and ${fuzz_cases} random inputs (stmts: ${stmts_unterm} unclosed readings not asked, ${stmts_added} with an escape or a quote read again with starts added and none lost)"
 
 # --- the statement starts (the stmts view) ---------------------------------------
 # The install recognizers and command_statements read the stmts view, where
@@ -444,7 +483,14 @@ pass "view properties: scan, code, noredir and stmts keep length and are idempot
 # the starts into it broke its idempotence, because a redirection target read
 # again stood at a command start. The rules, each as a literal:
 #
-#   1. Length is kept, and the view is idempotent (the property check above).
+#   1. Length is kept, and the view is idempotent on every reading that closes
+#      and holds no escape or quote (the property check above). A reading that
+#      does not close writes no starts and is UNDECIDED; read again with its
+#      open quote blank, it may close and get them. And the view prints an
+#      escape or a quote as a blank, so a word holding one reads as two words,
+#      or none, the second time (`}\x` as `} x`, the scan view has the same
+#      property for `a\;b`). There a second reading may add a start, never
+#      drop one, and changes no other byte; the check counts those.
 #   2. Only a top-level blank becomes a start. None falls inside quotes, a
 #      substitution, an arithmetic context or a heredoc body.
 #   3. A `;` `&` `|` at the top of an arithmetic context is `_`: it ends no
@@ -491,13 +537,17 @@ check_stmts "an assignment stays with its command" \
   'if FOO=1 BAR=2 pip i; fi' 'if;FOO=1 BAR=2 pip i; fi'
 check_stmts "a redirection stays with its command, and its target is no command" \
   '! > then 2>&1 pip i' '! > then 2>&1 pip i'
+check_stmts "a command glued to a function head starts at the blank the view prints" \
+  'f()\pip i' 'f();pip i'
 check_stmts "a process substitution opens a command, an argument after it does not" \
   'cat <(echo hi) pip i' 'cat <(echo hi) pip i'
 pass "stmts view: statement starts follow the shell grammar, and nothing nested opens one"
 
 # Rule 5 on random input: where the stmts view differs from the scan view, the
-# byte is a start written over a blank or a case close, or an arithmetic
-# separator written as `_`.
+# byte is a start written over a byte the scan prints blank or a case close, or
+# an arithmetic separator written as `_`. A start is written over a backslash or
+# a quote only where a word is glued to what is before it (`}\pip`): the view
+# prints that byte blank, and read again it is the blank before the word.
 stmts_diffs=0
 RANDOM="${fuzz_seed}"
 for ((c = 0; c < fuzz_cases; c++)); do
@@ -511,7 +561,7 @@ for ((c = 0; c < fuzz_cases; c++)); do
   for ((k = 0; k < ${#sv}; k++)); do
     a="${sv:k:1}" b="${tv:k:1}" r="${input:k:1}"
     [[ "${a}" == "${b}" ]] && continue
-    if [[ "${b}" == ";" && ( "${r}" == " " || "${r}" == $'\t' || "${r}" == ")" ) ]] || [[ "${b}" == "_" && "${a}" =~ [\;\&\|] ]]; then continue; fi
+    if [[ "${b}" == ";" && ( "${a}" == " " || "${a}" == $'\t' || "${r}" == ")" ) ]] || [[ "${b}" == "_" && "${a}" =~ [\;\&\|] ]]; then continue; fi
     printf 'stmts differs from scan at %d of [%q]: scan [%q] stmts [%q]\n' "${k}" "${input}" "${a}" "${b}" >&2
     stmts_diffs=$((stmts_diffs + 1))
   done
@@ -519,6 +569,37 @@ for ((c = 0; c < fuzz_cases; c++)); do
 done
 [[ ${stmts_diffs} -eq 0 ]] || fail "stmts view: ${stmts_diffs} byte(s) differ from the scan view outside the stated rules (seed ${fuzz_seed})"
 pass "stmts view: on ${fuzz_cases} random inputs it differs from the scan view only by starts and arithmetic separators"
+
+# The random inputs above are mostly readings that do not close, and those are
+# not asked for idempotence. These are drawn from the words the start walk
+# reads -- reserved words, heads, short forms, redirections, arithmetic,
+# assignments -- with no escape and no quote, so most readings close, and each
+# that closes must read the same the second time.
+grammar_words=('{' '}' '(' ')' '()' ';' '|' '&&' $'\n' '!' if then else fi do done for i in foreach end '(1)' \
+  repeat 1 time -p '[[' ']]' '((i=0;i<1;i++))' '$((1;2))' '$(a; b)' coproc case x 'x)' ';;' esac function f g \
+  always '>' 'out' '2>&1' '<(a)' 'X=1' while true pip install)
+grammar_closed=0
+grammar_failures=0
+RANDOM="${fuzz_seed}"
+for ((c = 0; c < fuzz_cases; c++)); do
+  len=$((RANDOM % 12 + 1))
+  input=""
+  for ((k = 0; k < len; k++)); do
+    input+="${grammar_words[RANDOM % ${#grammar_words[@]}]}"
+    (( RANDOM % 4 )) && input+=" "
+  done
+  reading_closes "${input}" || continue
+  grammar_closed=$((grammar_closed + 1))
+  once=$(stmts_view "${input}"; printf 'X'); once="${once%X}"
+  twice=$(stmts_view "${once}"; printf 'X'); twice="${twice%X}"
+  if [[ "${once}" != "${twice}" || "$(byte_len "${once}")" != "$(byte_len "${input}")" ]]; then
+    printf 'stmts on grammar words: [%q]\n  once  [%q]\n  twice [%q]\n' "${input}" "${once}" "${twice}" >&2
+    grammar_failures=$((grammar_failures + 1))
+  fi
+done
+[[ ${grammar_failures} -eq 0 ]] || fail "stmts view: ${grammar_failures} of ${grammar_closed} closed readings of grammar words not idempotent (seed ${fuzz_seed})"
+[[ ${grammar_closed} -gt $((fuzz_cases / 4)) ]] || fail "stmts view: only ${grammar_closed} of ${fuzz_cases} grammar-word inputs closed, too few to say anything"
+pass "stmts view: idempotent and length-preserving on ${grammar_closed} closed readings of ${fuzz_cases} random grammar-word inputs"
 
 # --- the words the spec extractor reads -----------------------------------------
 # The pieces view hands the extractor each statement's words: redirections out,
