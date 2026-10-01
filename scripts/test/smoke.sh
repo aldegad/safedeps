@@ -391,6 +391,8 @@ global_forms=(
   "npm i -g=true left-pad@1.3.0"
   "npm i --locat=global left-pad@1.3.0"
   "npm i --no-global=false left-pad@1.3.0"
+  # npm link installs a package the global tree lacks into the global prefix.
+  "npm link left-pad@1.3.0"
 )
 for i in "${!global_forms[@]}"; do
   global_safe="${tmp_root}/safe-global-context-${i}"

@@ -279,6 +279,9 @@ for benign in \
   'npm init -y' \
   'npm init --scope @acme' \
   'npm create' \
+  'npm link' \
+  'npm link ../my-lib' \
+  'npm unlink left-pad' \
   'echo npm create evil@1.0.0'
 do
   [[ "$(gate_decision "${benign}")" != "deny" ]] || fail "benign command is not denied: ${benign}"
@@ -426,6 +429,9 @@ for grammar_form in \
   "yarn create evil@1.0.0" \
   "bun create evil@1.0.0" \
   "bun c evil@1.0.0" \
+  "npm link evil@1.0.0" \
+  "npm ln evil@1.0.0" \
+  "npm lin evil@1.0.0" \
   "yarn up evil@1.0.0" \
   "yarn global add evil@1.0.0" \
   "yarn workspace web add evil@1.0.0" \
@@ -1150,6 +1156,15 @@ operand_rows=(
   $'npm:left-pad\tnpm i --no-global=false left-pad'
   # Quiet: the last value nopt reads wins, so this one is a project install.
   $'\tnpm i -g left-pad --global=false'
+  # Recorded: `npm link <pkg>` installs a package the global tree lacks into
+  # npm's global prefix from the registry (lib/commands/link.js linkInstall),
+  # whatever the flags say. A path or no argument links local code, quiet.
+  $'npm:left-pad\tnpm link left-pad'
+  $'npm:@scope/pkg\tnpm ln @scope/pkg'
+  $'npm:left-pad\tnpm link --save left-pad'
+  $'npm:left-pad\tnpm run build && npm link left-pad'
+  $'\tnpm link'
+  $'\tnpm link ../my-lib'
   # Recorded: a payload's npm install. Where it lands is decided inside the
   # payload, and the landing does not read inside it.
   $'npm:left-pad\tsh -c \'npm install left-pad\''

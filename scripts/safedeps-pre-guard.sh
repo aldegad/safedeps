@@ -1328,6 +1328,14 @@ resolve_install_targets() {
       why=""
 
       [[ "${kind}" == npm ]] || break
+      # `npm link <pkg>` installs a package the global tree lacks into npm's
+      # global prefix from the registry (lib/commands/link.js linkInstall),
+      # whatever the flags say: with `--global` npm refuses to run it at all.
+      if command_scan_text "${normalized}" | grep -qEi "${SAFEDEPS_G_NPM_LINK_RE}"; then
+        target=global
+        why="npm link installs a package the global tree does not have into npm's global prefix, where no lockfile records it"
+        break
+      fi
       # Where an npm install lands is npm's to say, so npm is asked
       # (lib/npm/ask.sh). Every copy of npm's rules in this file disagreed with
       # npm somewhere, and each disagreement was a silent pass: a `cd` into a
@@ -3485,7 +3493,7 @@ if ! jq -e 'has("turn_id")' <<< "${INPUT}" >/dev/null 2>&1 && \
     # so would skip both the rewrite and the downgrade record below; the mark
     # makes the gate settle it instead.
     UPDATED_COMMAND=$(printf '%s' "${COMMAND}" | sed -E \
-      "s/(npm${SAFEDEPS_G_OPTS}[[:space:]]+(${SAFEDEPS_G_NPM_VERBS}))([[:space:]]|\$)/\\1 --ignore-scripts\\6/g") \
+      "s/(npm${SAFEDEPS_G_OPTS}[[:space:]]+(${SAFEDEPS_G_NPM_VERBS}|${SAFEDEPS_G_NPM_LINK_VERBS}))([[:space:]]|\$)/\\1 --ignore-scripts\\6/g") \
       || guard_mark_reading_failed
     if [[ "${UPDATED_COMMAND}" == "${COMMAND}" ]]; then
       # Rewrite did not land — never blind-append to a compound command. Downgrade

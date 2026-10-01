@@ -34,6 +34,7 @@ const groups = {
   INSTALL: ["install", "ci", "install-test", "install-ci-test", "update"],
   EXEC: ["exec"],
   INIT: ["init"],
+  LINK: ["link"],
 }
 const write = w => w.replace(/-([a-z])/g, (m, c) => "-?[" + c + c.toUpperCase() + "]")
 for (const [name, targets] of Object.entries(groups)) {
@@ -56,6 +57,7 @@ while IFS='=' read -r name want; do
     INSTALL) have="${SAFEDEPS_G_NPM_VERBS}" ;;
     EXEC) have="${SAFEDEPS_G_NPM_EXEC_VERBS}" ;;
     INIT) have="${SAFEDEPS_G_NPM_INIT_VERBS}" ;;
+    LINK) have="${SAFEDEPS_G_NPM_LINK_VERBS}" ;;
   esac
   missing=$(comm -13 <(tr '|' '\n' <<< "${have}" | sort) <(tr '|' '\n' <<< "${want}" | sort))
   extra=$(comm -23 <(tr '|' '\n' <<< "${have}" | sort) <(tr '|' '\n' <<< "${want}" | sort))

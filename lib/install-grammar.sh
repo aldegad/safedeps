@@ -59,12 +59,17 @@ SAFEDEPS_G_NPM_EXEC_VERBS='exe|exec|x'
 #   it is `npm exec create-<initializer>` (docs/content/commands/npm-init.md);
 #   without one it writes a package.json and fetches nothing.
 SAFEDEPS_G_NPM_INIT_VERBS='cr|cre|crea|creat|create|ini|init|inn|inni|innit'
+#   link, alias ln. With a package argument it installs any package the global
+#   tree does not have yet into npm's global prefix, from the registry
+#   (lib/commands/link.js linkInstall), then links it into the project. With a
+#   path, or with no argument, it links local code and fetches nothing named.
+SAFEDEPS_G_NPM_LINK_VERBS='lin|link|ln'
 SAFEDEPS_G_PNPM_VERBS='add|install|i|install-test|it|update|up|upgrade'
 SAFEDEPS_G_YARN_VERBS='add|install|upgrade|up'
 SAFEDEPS_G_BUN_VERBS='add|a|install|i|update|upgrade'
 
 # Every token that can open an install's operand list, for the operand walks.
-SAFEDEPS_G_ALL_VERBS="${SAFEDEPS_G_NPM_VERBS}|${SAFEDEPS_G_PNPM_VERBS}|${SAFEDEPS_G_YARN_VERBS}|${SAFEDEPS_G_BUN_VERBS}|${SAFEDEPS_G_NPM_EXEC_VERBS}|dlx|get|run|inject|dependency:get|package"
+SAFEDEPS_G_ALL_VERBS="${SAFEDEPS_G_NPM_VERBS}|${SAFEDEPS_G_NPM_LINK_VERBS}|${SAFEDEPS_G_PNPM_VERBS}|${SAFEDEPS_G_YARN_VERBS}|${SAFEDEPS_G_BUN_VERBS}|${SAFEDEPS_G_NPM_EXEC_VERBS}|dlx|get|run|inject|dependency:get|package"
 
 # Executables the gate names. Used to strip an absolute path prefix, so that
 # `/usr/local/bin/pip3.11` is read as `pip3.11`.
@@ -91,7 +96,7 @@ SAFEDEPS_G_O="${SAFEDEPS_G_OPTS}"
 
 # npm-CLI installs only. The effect gate reads package-lock.json, which only the
 # npm CLI writes, so this is also the set the `--ignore-scripts` rewrite targets.
-SAFEDEPS_G_NPM_INSTALL_BODY="npm${SAFEDEPS_G_O}[[:space:]]+(${SAFEDEPS_G_NPM_VERBS})"
+SAFEDEPS_G_NPM_INSTALL_BODY="npm${SAFEDEPS_G_O}[[:space:]]+(${SAFEDEPS_G_NPM_VERBS})|npm${SAFEDEPS_G_O}[[:space:]]+(${SAFEDEPS_G_NPM_LINK_VERBS})${SAFEDEPS_G_O}[[:space:]]+[^-./~[:space:]][^[:space:]]*"
 
 # Runners fetch a package and execute it. Nothing reads a lockfile after them.
 # This ends AT the runner keyword. Options after it belong to the runner and can
@@ -136,6 +141,8 @@ SAFEDEPS_G_INSTALL_BODY="${SAFEDEPS_G_NPM_INSTALL_BODY}\
 # quoted text is already blanked.
 SAFEDEPS_G_INSTALL_RE="${SAFEDEPS_G_START}(${SAFEDEPS_G_INSTALL_BODY})([[:space:]]|$)"
 SAFEDEPS_G_NPM_INSTALL_RE="${SAFEDEPS_G_START}(${SAFEDEPS_G_NPM_INSTALL_BODY})([[:space:]]|$)"
+# An npm link, which installs into the global prefix whatever its flags say.
+SAFEDEPS_G_NPM_LINK_RE="${SAFEDEPS_G_START}npm${SAFEDEPS_G_O}[[:space:]]+(${SAFEDEPS_G_NPM_LINK_VERBS})([[:space:]]|$)"
 # Ends at the runner keyword; what follows it is the runner's operand list.
 SAFEDEPS_G_RUNNER_HEAD_RE="${SAFEDEPS_G_START}(${SAFEDEPS_G_RUNNER_BODY})([[:space:]]|$)"
 
