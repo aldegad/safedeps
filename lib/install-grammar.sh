@@ -158,7 +158,7 @@ SAFEDEPS_G_INSTALL_BODY="${SAFEDEPS_G_NPM_INSTALL_BODY}\
 |pipenv${SAFEDEPS_G_O}[[:space:]]+install\
 |cargo([[:space:]]+[+][^[:space:]]+)?${SAFEDEPS_G_O}[[:space:]]+(add|install)\
 |go${SAFEDEPS_G_O}[[:space:]]+(get|install)\
-|go${SAFEDEPS_G_O}[[:space:]]+run${SAFEDEPS_G_O}[[:space:]]+[^-[:space:]][^[:space:]]*@[^[:space:]]+\
+|go${SAFEDEPS_G_O}[[:space:]]+run([[:space:]]+[^[:space:]]+)*[[:space:]]+[^-[:space:]][^[:space:]]*@[^[:space:]]+\
 |gem${SAFEDEPS_G_O}[[:space:]]+install\
 |bundle${SAFEDEPS_G_O}[[:space:]]+add\
 |mvn${SAFEDEPS_G_O}[[:space:]]+([^[:space:]]*maven-dependency-plugin[^[:space:]]*:get|dependency:get)\

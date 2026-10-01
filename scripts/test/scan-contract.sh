@@ -442,10 +442,15 @@ pass "view properties: scan, code and noredir keep length and are idempotent on 
 # with its own model of the quoting disagreed here: it took the `>` inside
 # "x>'" for a redirection and dropped the pinned spec after it.
 #
-# The boundary, stated so it is not mistaken for coverage: a blank a quote or
-# a backslash holds still splits a word in two (`"requests == 2.19.0"`), and a
-# substitution is kept as written; reading those as the shell does is the plan
-# safedeps/command-words-read-as-the-shell-dequotes. No form here has either.
+# Inside a word, a byte the extractor would cut at -- a blank or a grouping
+# character -- is \002, and the empty word is \002 alone, so each word stays
+# one token. The argv is mapped the same way before the comparison, so the
+# check holds the word boundaries and every other byte; a blanked \002 here
+# could not tell `"a b"` from `a b`, which is the defect it is meant to catch.
+#
+# The boundary, stated so it is not mistaken for coverage: a substitution is
+# kept as written, since its value is not known before it runs. No form here
+# has one.
 words_view_of() { # text -> the words field of its first piece, one per line
   local line
   line=$(shell_lex "$1" pieces arith "safedeps:scan-contract" | head -n1)
@@ -466,6 +471,7 @@ for ((i = 0; i < words_count; i++)); do
   for shell in bash zsh; do
     want=$(jq -c ".[${i}].argv.${shell}" "${words_forms}")
     [[ "${want}" != "[]" ]] || continue
+    want=$(jq -c 'map(gsub("[ \t\n(){}\u001e\u001f]"; "\u0002") | if . == "" then "\u0002" else . end)' <<< "${want}")
     ran=$((ran + 1))
     [[ "${got}" == "${want}" ]] || fail "words: ${id} reads ${got}; ${shell} handed the manager ${want}"
   done

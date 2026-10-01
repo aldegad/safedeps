@@ -736,19 +736,45 @@ shell_lex() {
         if (cc == "\037" || cc == "\036" || cc == "\t") return " "
         return cc
       }
-      function piece(a, z, n,   k, any) {
+      # The words field: the piece after quote removal by the shell, one word
+      # per blank-separated token. A word whose every byte was a quote is the
+      # empty word, which the shell passes, so it is \002 too. Dropped, it
+      # moved each later word up one place: `uvx --python "" evil==1.0.0` runs
+      # evil (uv 0.10.11 reads the empty value as no preference), and
+      # --python took evil==1.0.0 as its value.
+      function piece(a, z, n,   k, any, w) {
         any = 0
         for (k = a; k <= z; k++) if (!(k in DROP) && X[k] !~ /[ \t\n]/) { any = 1; break }
         if (!any) return
         put(n "\037")
         for (k = a; k <= z; k++) put(pbyte(k))
         put("\037")
+        w = 0
         for (k = a; k <= z; k++) {
-          if (k in DROP) put(" ")
-          else if (k in VAL) put(VAL[k] == "\n" || VAL[k] == "\t" || VAL[k] == "\037" || VAL[k] == "\036" ? " " : VAL[k])
-          else if (!RM[k]) put(pbyte(k))
+          if ((k in DROP) || !(k in VAL) && !RM[k] && word_sep(k)) {
+            if (w == 1) put("\002")
+            w = 0
+            put((k in DROP) ? " " : pbyte(k))
+            continue
+          }
+          if (w == 0) w = 1
+          if (k in VAL) {
+            if (VAL[k] != "") { put(VAL[k] ~ /^[ \t\n(){}\036\037]$/ ? "\002" : VAL[k]); w = 2 }
+          } else if (!RM[k]) { put(wbyte(k)); w = 2 }
         }
+        if (w == 1) put("\002")
         put("\n")
+      }
+      # A byte inside a word, for the words field: one the extractor would cut
+      # the word at -- a blank, which splits its tokens, or a grouping
+      # character, which it blanks (guard_extract_statement_text) -- is \002,
+      # so a quoted value or an unquoted substitution stays one word. Split on
+      # blanks, `--python $(which python3) ruff==0.1.0` gave the option half a
+      # word and read `python3)` as the package, and the real pin went
+      # unchecked (caught in review). An operator inside a word is data: the
+      # statement is already cut, and `requests>=3` is a version range.
+      function wbyte(k) {
+        return (X[k] ~ /^[ \t\n(){}\036\037]$/) ? "\002" : X[k]
       }
 
       # A byte that ends a word at the top level: unquoted blank or operator
@@ -3201,7 +3227,9 @@ guard_all_npm_installs_are_global() {
 #         read as not taking it: if pnpm does, the record names `true` instead
 #         of hiding a package.
 #   yarn  yarn dlx: yarnpkg.com/cli/dlx (`-p,--package`, `-q`).
-#   bun   bunx, bun x: `bunx --help` (1.3.14).
+#   bun   bunx, bun x: `bunx --help` (1.3.14), and bun's global `--cwd`, which
+#         `bunx --help` does not list but bunx reads (review measured
+#         `bunx --cwd <dir> evil@1.0.0` running evil).
 #   uv    uvx, uv tool run: `uvx --help` (0.10.11); the two list the same
 #         options. `-p` is `--python`, `-w` is `--with`.
 #   pipx  pipx run: `pipx run --help` (1.12.0). Its parser is argparse with
@@ -3241,7 +3269,7 @@ SAFEDEPS_RUNNER_ADDS_PACKAGE_yarn=" "
 SAFEDEPS_RUNNER_TAKES_VALUE_yarn=" "
 SAFEDEPS_RUNNER_NAMES_PACKAGE_bun=" -p --package "
 SAFEDEPS_RUNNER_ADDS_PACKAGE_bun=" "
-SAFEDEPS_RUNNER_TAKES_VALUE_bun=" "
+SAFEDEPS_RUNNER_TAKES_VALUE_bun=" --cwd "
 SAFEDEPS_RUNNER_NAMES_PACKAGE_uv=" --from "
 SAFEDEPS_RUNNER_ADDS_PACKAGE_uv=" -w --with "
 SAFEDEPS_RUNNER_TAKES_VALUE_uv="
@@ -3706,8 +3734,11 @@ guard_walk_statement() {
 # Add `<ecosystem>:<operand>` to UNGATED_OPERANDS once.
 guard_note_ungated() {
   local entry="$1:$2"
+  # An empty operand names nothing: `go run ./cmd user@example.com` runs a local
+  # package, and its reader leaves no module name behind.
+  [[ -n "$2" ]] || return 0
   [[ ", ${UNGATED_OPERANDS}, " == *", ${entry}, "* ]] && return 0
-  UNGATED_OPERANDS="${UNGATED_OPERANDS:+${UNGATED_OPERANDS}, }${entry}"
+  UNGATED_OPERANDS="${UNGATED_OPERANDS:+${UNGATED_OPERANDS}, }${entry//$'\002'/ }"
 }
 
 guard_extract_flagged_specs() {
@@ -3902,6 +3933,29 @@ guard_operand_specs() {
   fi
 }
 
+# A statement's words as its package manager reads them. A blank or a grouping
+# character inside a word is \002 (the lexer's pieces view), and the empty word
+# is \002 alone. A manager reads past the blanks at the ends of an argument
+# (`pip install "evil==1.0.0 "` pins evil), and a Python requirement reads past
+# every blank and parenthesis in it: PEP 508 allows `evil ==1.0.0` and
+# `requests (>=3)`, and pip's parser (packaging, measured) reads the first as
+# a pin. Read as written, each is an unpinned name, and the pin passes
+# unchecked. A word that is nothing but such bytes stays one \002, so no word
+# goes missing.
+guard_words_as_read() {
+  local eco="$1" words="$2"
+  printf '%s\n' "${words}" | LC_ALL=C awk -v eco="${eco}" '
+    # safedeps:words_as_read (scripts/measure/scan-failure-census.sh keys on this line)
+    {
+      for (i = 1; i <= NF; i++) {
+        if (eco == "pypi") gsub(/\002/, "", $i)
+        else gsub(/^\002+|\002+$/, "", $i)
+        if ($i == "") $i = "\002"
+      }
+      print
+    }' || guard_mark_reading_failed
+}
+
 # One statement as the extractor reads it: a runner's package operands (one per
 # line), or the statement's words with their grouping characters blanked.
 # <words> is the statement after the shell's quote removal, from the lexer's
@@ -4070,6 +4124,7 @@ guard_extract_specs() {
     [[ -n "${eco}" ]] || continue
     runner=false
     guard_segment_is_runner "${seg}" && runner=true
+    words=$(guard_words_as_read "${eco}" "${words}")
     text=$(guard_extract_statement_text "${eco}" "${words}" "${runner}")
     if [[ "${mode}" != readings ]]; then
       guard_operand_specs "${eco}" "${text}"
@@ -4185,7 +4240,7 @@ if [[ ${#LEDGER_SPECS[@]} -gt 0 ]]; then
     [[ "${eco}" == "npm" ]] && spec_context="${LEDGER_CONTEXT_HASH}"
     if ! safedeps_ledger_check "${eco}" "${pkg}" "${spec}" "${spec_context}" 2>/dev/null \
         | jq -e '.approved == true' >/dev/null 2>&1; then
-      GUARD_BLOCKED_CMDS+=("${SAFEDEPS_INVOKE} check ${eco} ${pkg}@${spec}")
+      GUARD_BLOCKED_CMDS+=("${SAFEDEPS_INVOKE} check ${eco} ${pkg//$'\002'/ }@${spec//$'\002'/ }")
       case ",${GUARD_BLOCKED_ECOSYSTEMS}," in
         *",${eco},"*) : ;;
         *) GUARD_BLOCKED_ECOSYSTEMS="${GUARD_BLOCKED_ECOSYSTEMS:+${GUARD_BLOCKED_ECOSYSTEMS},}${eco}" ;;

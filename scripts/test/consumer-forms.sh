@@ -619,6 +619,20 @@ do
 done
 pass "argv-passing wrappers (sudo, timeout, nohup, nice) stay outside the command gate (documented boundary)"
 
+# A command word or a runner's package that the shell assembles from quotes is
+# not recognized: the recognizers read the scan view, where a quoted word is
+# blank. v2.17.2 behaved the same. Pinned so README can name the forms, and so
+# the plan that reads them the way the shell does has rows to turn
+# (safedeps/command-words-read-as-the-shell-dequotes).
+for quoted_form in \
+  "'pip' install evil==1.0.0" \
+  'npx "evil@1.0.0"' \
+  'uvx "ruff==0.1.0" --help'
+do
+  expect_pass "the quoted form ${quoted_form}" "${quoted_form}"
+done
+pass "a command word or a runner package assembled from quotes stays unrecognized (documented boundary)"
+
 # A case arm is a statement. A grammar pattern cannot tell a pattern's `)` from
 # any other `)` (`echo $(date) pip install x` would read as an install), so case
 # arms were pinned outside the gate. The lexer knows where a pattern ends: it
@@ -1214,6 +1228,37 @@ expect_prescription 'pypi evil@1.0.0;' 'pip install --log ${X:-a|b} evil==1.0.0'
 expect_pass "a pipeline of ordinary commands" 'npm run build | tee out'
 expect_pass "a pipeline with no install" 'echo hi | grep h'
 pass "statement cuts and shell names are read the way the shell reads them"
+
+# A word is cut where the shell cuts it: a blank inside quotes or an unquoted
+# substitution does not split it. Split on blanks, a value option took half of
+# `$(which python3)` and the rest read as the package, so the real pin went
+# unchecked (caught in review).
+expect_prescription 'pypi ruff@0.1.0;' 'uvx --python $(which python3) ruff==0.1.0'
+expect_prescription 'pypi ruff@0.1.0;' 'uvx -p $(command -v python3) ruff==0.1.0'
+expect_prescription 'pypi ruff@0.1.0;' 'uv tool run --python $(which python3) ruff==0.1.0'
+expect_prescription 'pypi black@24.1.0;' 'pipx run --python $(which python3.11) black==24.1.0'
+expect_prescription 'npm evil@1.0.0;' 'npx --cache $(mktemp -d /tmp/x.XXXX) evil@1.0.0'
+expect_prescription 'npm evil@1.0.0;' 'pnpm dlx --dir $(git rev-parse --show-toplevel) evil@1.0.0'
+expect_prescription 'npm evil@1.0.0;' 'bunx --cwd $(git rev-parse --show-toplevel) evil@1.0.0'
+expect_prescription 'go example.com/m@v1.0.0;' 'go run -C $(git rev-parse --show-toplevel) example.com/m@v1.0.0'
+expect_prescription 'pypi ruff@0.1.0;' 'uvx --python `which python3` ruff==0.1.0'
+expect_prescription 'pypi ruff@0.1.0;' 'uvx --python "$(which python3)" ruff==0.1.0'
+expect_prescription 'rubygems rake@13.0.0;' 'gem install --install-dir $(gem env gemdir) rake -v 13.0.0'
+expect_pass "go run of a local package with an @ argument" 'go run ./cmd user@example.com'
+# The same for a quoted or escaped blank, and for the empty word, which the
+# shell passes: uv 0.10.11 reads `--python ""` as no preference and runs the
+# package after it.
+expect_prescription 'pypi ruff@0.1.0;' 'uvx --python "/opt/my python/bin/python3" ruff==0.1.0'
+expect_prescription 'pypi evil@1.0.0;' 'uvx --python "" evil==1.0.0'
+expect_prescription 'pypi evil@1.0.0;' 'pip install --log a\ b evil==1.0.0'
+# A manager reads past the blanks at the ends of an argument, and pip past
+# every blank in a requirement (PEP 508; pip's parser, measured), so a word
+# kept whole is still the pin it names.
+expect_prescription 'pypi evil@1.0.0;' 'pip install "evil==1.0.0 "'
+expect_prescription 'pypi evil@1.0.0;' 'pip install "evil ==1.0.0"'
+expect_prescription 'pypi requests@2.19.0;' 'pip install "requests == 2.19.0"'
+expect_prescription 'npm evil@1.0.0;' 'npm install "evil@1.0.0 "'
+pass "a word is cut where the shell cuts it, so a value option takes the whole value"
 
 # `npm link` reads every argument with npm-package-arg and installs the
 # registry ones into the global prefix (lib/commands/link.js:92-104); a path,
