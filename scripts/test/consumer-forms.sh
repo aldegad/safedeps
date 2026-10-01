@@ -543,11 +543,48 @@ for wrapper_form in \
 do
   expect_pass "the wrapper ${wrapper_form%% *}" "${wrapper_form}"
 done
-# A case arm starts a statement after `pattern)`, and `)` cannot join the
-# statement-start set without reading `echo $(date) pip install x` as an
-# install. Pinned here as outside, with the wrappers.
-expect_pass "a case arm" 'case x in *) pip install evil==1.0.0;; esac'
 pass "argv-passing wrappers (sudo, timeout, nohup, nice) stay outside the command gate (documented boundary)"
+
+# A case arm is a statement. A grammar pattern cannot tell a pattern's `)` from
+# any other `)` (`echo $(date) pip install x` would read as an install), so case
+# arms were pinned outside the gate. The lexer knows where a pattern ends: it
+# reads `case ... in`, and the `)` that closes each pattern is a statement
+# boundary in the view the recognizers read.
+for arm in \
+  'case x in *) pip install evil==1.0.0;; esac' \
+  'case x in (x) pip install evil==1.0.0;; esac' \
+  'case x in a|b) ls;; *) pip install evil==1.0.0;; esac' \
+  'case x in x) :;& y) pip install evil==1.0.0;; esac' \
+  'case x in x) FOO="a b" pip install evil==1.0.0;; esac' \
+  'echo "$(case x in x) pip install evil==1.0.0;; esac)"' \
+  'x=$(case x in x) pip install evil==1.0.0;; esac)'
+do
+  expect_deny "an install in a case arm: ${arm}" "${arm}"
+done
+expect_pass "a case statement with no install" 'case x in *) echo hi;; esac'
+expect_pass "a parenthesized value next to a command name is not a case arm" 'echo $(date) pip install x'
+pass "an install in a case arm is gated, and a stray parenthesis still is not a statement start"
+
+# Substitution bodies come from the lexer: a nested escaped backtick is a
+# nested substitution, and a substitution that closes on its line drops the
+# heredoc it opened, so the next line is a command.
+expect_deny "an install in a nested backtick" 'echo `echo \`pip install evil==1.0.0\``'
+expect_deny "an install after a heredoc whose substitution closed on its line" $'x=$(cat <<EOF)\npip install evil==1.0.0\nEOF'
+pass "substitution bodies are read as the shell delimits them"
+
+# A quote inside a comment opens nothing (a line joiner that did not know
+# comments joined the next line and hid it; caught in review).
+for commented in \
+  $'# don\'t\npip install evil==1.0.0' \
+  $'echo hi # it\'s\npip install evil==1.0.0' \
+  $'echo hi # say "hi\npip install evil==1.0.0' \
+  $'# it\'s fine\ncargo add serde@1.0.0' \
+  $'# don\'t do this\nnpm install evil@1.0.0'
+do
+  expect_deny "an install after a comment holding a quote" "${commented}"
+done
+expect_pass "a # inside a word is no comment" $'echo a#\'b\npip install evil==1.0.0\n\''
+pass "a quote inside a comment hides nothing after it"
 
 # --- 9. UNGATED is keyed on the effect gate actually being there --------------
 # The exemption used to read "the ledger ecosystem is npm", which pnpm, yarn and

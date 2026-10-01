@@ -389,6 +389,10 @@ shell_lex() {
       #              in quotes becomes `;`); for text read one line at a time
       #   view=shell-bodies  the raw lines of heredoc bodies whose command pipes
       #              into something
+      #   view=substs  the body of every command substitution, one after another,
+      #              as the shell delimits it: `$(...)` (case patterns inside close
+      #              nothing) and backticks, a backtick body unescaped the way the
+      #              shell unescapes it (`\`` nests). For the payload extractor.
       #   view=unprefixed  the text with the prefixes a statement may start with
       #              removed: assignments (NAME=value, the value one word however
       #              it is quoted or nested), env with its options and
@@ -408,11 +412,11 @@ shell_lex() {
       }
       END {
         N = n
-        d = 1; ctx[1] = "T"; par[1] = 0; dq = 0
+        d = 1; ctx[1] = "T"; par[1] = 0; dq = 0; dc = 1
         # The bytes any rule below acts on. Every other byte keeps the class of
         # its context and changes nothing, so it is classified without running
         # the rules -- most of a long command is such bytes.
-        split("\\ $ \047 \042 # ( ) < ] } ` \n", sl, " ")
+        split("\\ $ \047 \042 # ( ) < ] } ` c e i ;", sl, " ")
         for (j in sl) SPC[sl[j]] = 1
         SPC["\n"] = 1
         DQS["\\"] = 1; DQS["\042"] = 1; DQS["$"] = 1; DQS["`"] = 1
@@ -420,7 +424,7 @@ shell_lex() {
         mode = ""; np = 0; ambig = 0; unterm = 0
         for (i = 1; i <= N; i++) {
           c = X[i]
-          if (wantdep) DEP[i] = (mode == "") ? d : 99
+          if (wantdep) DEP[i] = (mode == "") ? dc : 99
           if (mode == "SQ") { C[i] = "q"; if (c == "\047") mode = ""; continue }
           if (mode == "AQ") {
             C[i] = "q"
@@ -430,6 +434,9 @@ shell_lex() {
           }
           if (mode == "CM") {
             if (c == "\n") { mode = ""; i = at_newline(i) }
+            # A comment inside backticks ends at the closing backtick: the shell
+            # cuts the backtick body out before it reads the comment (form P3).
+            else if (c == "`" && ctx[d] == "B") { mode = ""; C[i] = (dq > 0) ? "Q" : "c"; pop() }
             else C[i] = "m"
             continue
           }
@@ -453,13 +460,44 @@ shell_lex() {
           if (!(c in SPC)) continue
           if (c == "\\") {
             if (X[i+1] == "\n") { C[i] = "l"; C[i+1] = "l"; i++; continue }
+            # Inside backticks an escaped backtick opens or closes a nested one.
+            if (top == "B" && X[i+1] == "`") {
+              C[i+1] = cls; i++
+              if (besc[d]) pop(); else { push("B"); besc[d] = 1 }
+              continue
+            }
             if (dq > 0) { i++; C[i] = "Q"; continue }
             C[i] = "x"; if (i < N) { i++; C[i] = "e" }
             continue
           }
           if (c == "$" && X[i+1] == "\047") { C[i] = "q"; C[i+1] = "q"; i++; mode = "AQ"; continue }
-          if (c == "\047") { C[i] = "q"; mode = "SQ"; continue }
+          if (c == "\047") {
+            # Inside "${...}" bash opens a quote here and zsh reads a plain
+            # character (forms P4, Q6). Both readings are judged: the second
+            # policy is the zsh reading.
+            if (top == "V" && dq > 0) { ambig = 1; if (policy == "sub") continue }
+            C[i] = "q"; mode = "SQ"; continue
+          }
           if (c == "\042") { C[i] = "q"; push("D"); continue }
+          # case ... esac: a pattern close `)` closes no substitution (form P8).
+          if ((c == "c" || c == "e") && wordstart(i) && (i + 4 > N || X[i+4] ~ /[ \t\n;&|()<>]/)) {
+            w4 = X[i] X[i+1] X[i+2] X[i+3]
+            if (w4 == "case" && cmdpos(i)) { C[i+1] = cls; C[i+2] = cls; C[i+3] = cls; i += 3; push("C"); continue }
+            if (w4 == "esac" && top == "C") { C[i+1] = cls; C[i+2] = cls; C[i+3] = cls; i += 3; pop(); continue }
+          }
+          # Inside case: after `in`, and after each `;;` `;&` `;;&`, a pattern
+          # runs to its `)`, which ends the pattern -- class p, read by the
+          # unprefixed view as a statement boundary, so the arm is judged.
+          if (top == "C") {
+            if (cpat[d] == 0 && c == "i" && X[i+1] == "n" && wordstart(i) && (i + 2 > N || X[i+2] ~ /[ \t\n;&|()<>]/)) { C[i+1] = cls; i++; cpat[d] = 1; continue }
+            if (cpat[d] == 1 && c == "(") continue
+            if (cpat[d] == 1 && c == ")") { C[i] = "p"; cpat[d] = 2; continue }
+            if (cpat[d] == 2 && c == ";" && (X[i+1] == ";" || X[i+1] == "&")) {
+              C[i+1] = cls; i++
+              if (X[i] == ";" && X[i+1] == "&") { C[i+1] = cls; i++ }
+              cpat[d] = 1; continue
+            }
+          }
           if (top == "A" || top == "K") {
             if (c == "<" && X[i+1] == "<" && X[i+2] != "<") ambig = 1
             if (c == "#" && wordstart(i)) ambig = 1
@@ -469,9 +507,13 @@ shell_lex() {
             else if (c == "\n") i = at_newline(i)
             continue
           }
-          if (c == "#" && wordstart(i) && top != "V") { C[i] = "m"; mode = "CM"; continue }
+          if (c == "#" && (wordstart(i) || top == "B" && X[i-1] == "`") && top != "V") { C[i] = "m"; mode = "CM"; continue }
           if (c == "$" && X[i+1] == "(" && X[i+2] == "(") { C[i+1] = cls; C[i+2] = cls; arith_or_sub(i, 1); continue }
-          if (c == "(" && X[i+1] == "(" && cmdpos(i)) { C[i+1] = cls; arith_or_sub(i, 0); continue }
+          # `((` reads as arithmetic in the first reading wherever it stands; a
+          # hand list of command positions missed backticks, case patterns,
+          # coproc and time -p (forms P1, P2, P15, Q2). Where it holds `<<` or a
+          # comment, AMBIG hands on the subshell reading too.
+          if (c == "(" && X[i+1] == "(") { C[i+1] = cls; arith_or_sub(i, 0); continue }
           if (c == "$" && X[i+1] == "(") { C[i+1] = cls; i++; push("S"); continue }
           if (c == "$" && X[i+1] == "[") { C[i+1] = cls; i++; push("K"); continue }
           if (c == "$" && X[i+1] == "{") { C[i+1] = cls; i++; push("V"); continue }
@@ -493,14 +535,15 @@ shell_lex() {
         # heredoc inside `$((` that bash reads as arithmetic). Such a command is
         # settled as UNDECIDED by guard_check_command_reads anyway.
         if (view == "unprefixed" && !unterm) prefixes()
-        emit()
+        if (view == "substs") emit_substs()
+        else emit()
       }
 
       # A byte that ends a word at the top level: unquoted blank or operator
       # in code that is not nested, or anything the shell does not read as a
       # word (a comment, a heredoc operator or body).
       function word_sep(k) {
-        if (C[k] == "m" || C[k] == "h" || C[k] == "b" || C[k] == "B") return 1
+        if (C[k] == "m" || C[k] == "h" || C[k] == "b" || C[k] == "B" || C[k] == "p") return 1
         return C[k] == "c" && DEP[k] == 1 && X[k] ~ /[ \t\n;&|()<>]/
       }
       function mark(a, z,   k) { for (k = a; k <= z; k++) A[k] = 1 }
@@ -508,11 +551,11 @@ shell_lex() {
       # after each. A word is cut only by word_sep, so a quoted or nested value
       # (FOO="a b", FOO=$(cmd arg), FOO=a\ b) stays one word -- the sed this
       # replaced read a value as the bytes up to the first blank or quote.
-      function prefixes(   k, s, w, atstart, envmode, takes, hit) {
-        atstart = 1; envmode = 0; takes = 0; k = 1
+      function prefixes(   k, s, w, atstart, envmode, takes, hit, execmode, cmdmode, timemode) {
+        atstart = 1; envmode = 0; takes = 0; execmode = 0; cmdmode = 0; timemode = 0; k = 1
         while (k <= N) {
           if (word_sep(k)) {
-            if (X[k] ~ /[\n;&|(]/) { atstart = 1; envmode = 0; takes = 0 }
+            if (X[k] ~ /[\n;&|(]/ || C[k] == "p") { atstart = 1; envmode = 0; takes = 0; execmode = 0; cmdmode = 0; timemode = 0 }
             k++; continue
           }
           s = k; w = ""
@@ -521,23 +564,44 @@ shell_lex() {
           hit = 0
           if (takes) { takes = 0; hit = 1 }
           else if (envmode && w ~ /^-/) { if (w ~ /^(-u|--unset|-C|--chdir)$/) takes = 1; hit = 1 }
+          else if (execmode && w ~ /^-[a-z]+$/) { if (w ~ /a$/) takes = 1; hit = 1 }
+          else if (cmdmode && w == "-p") hit = 1
+          else if (timemode && w == "-p") hit = 1
           else if (w ~ /^[A-Za-z_][A-Za-z0-9_]*=/) hit = 1
           else if (w == "env") { envmode = 1; hit = 1 }
-          else if (w == "command" || w == "exec") { envmode = 0; hit = 1 }
-          else if (w ~ /^(!|[{]|if|then|else|elif|while|until|do|time|coproc)$/) { envmode = 0; continue }
+          else if (w == "exec") { envmode = 0; execmode = 1; cmdmode = 0; hit = 1 }
+          else if (w == "command") { envmode = 0; cmdmode = 1; execmode = 0; hit = 1 }
+          else if (w == "time") { envmode = 0; timemode = 1; continue }
+          else if (w ~ /^(!|[{]|if|then|else|elif|while|until|do|coproc)$/) { envmode = 0; continue }
           else { atstart = 0; envmode = 0; continue }
           mark(s, k - 1)
           while (k <= N && C[k] == "c" && DEP[k] == 1 && (X[k] == " " || X[k] == "\t")) { A[k] = 1; k++ }
         }
       }
 
-      function push(k) { d++; ctx[d] = k; par[d] = 0; if (k == "D") dq++ }
-      function pop() { if (d > 1) { if (ctx[d] == "D") dq--; d-- } }
+      function push(k) {
+        d++; ctx[d] = k; par[d] = 0; pnp[d] = np; besc[d] = 0; cpat[d] = 0
+        if (k == "D") dq++
+        if (k != "C") dc++
+        if (k == "S" || k == "B") { nsub++; sbeg[nsub] = i + 1; send[nsub] = N; skind[nsub] = k; sid[d] = nsub }
+      }
+      # A substitution that closes on the line it opened drops the heredocs
+      # opened inside it: `x=$(cat <<EOF)` has no body, and every shell runs the
+      # next line as a command (form P7).
+      function pop() {
+        if (d > 1) {
+          if (ctx[d] == "S" || ctx[d] == "B") send[sid[d]] = besc[d] ? i - 2 : i - 1
+          if ((ctx[d] == "S" || ctx[d] == "B") && np > pnp[d]) np = pnp[d]
+          if (ctx[d] == "D") dq--
+          if (ctx[d] != "C") dc--
+          d--
+        }
+      }
       function wordstart(j) { return j == 1 || X[j-1] ~ /[ \t\n;&|()<>]/ }
       function cmdpos(j,   k, w) {
         k = j - 1
         while (k >= 1 && (X[k] == " " || X[k] == "\t")) k--
-        if (k < 1 || X[k] ~ /[\n;&|(!{]/) return 1
+        if (k < 1 || X[k] ~ /[\n;&|(!{)`]/) return 1
         w = ""
         while (k >= 1 && X[k] ~ /[a-z]/) { w = X[k] w; k-- }
         return w ~ /^(if|then|else|elif|while|until|do|time)$/
@@ -566,7 +630,7 @@ shell_lex() {
           w = w cc; k++
         }
         if (w == "") { C[j] = cls; return j }
-        np++; pd[np] = w; ps[np] = strip; pq[np] = q; pstart[np] = j; pdq[np] = (dq > 0)
+        np++; pd[np] = w; ps[np] = strip; pq[np] = q; pstart[np] = j; pdq[np] = (dq > 0); pb[np] = (ctx[d] == "B")
         for (mm = j; mm < k && mm <= N; mm++) C[mm] = "h"
         return k - 1
       }
@@ -597,6 +661,14 @@ shell_lex() {
               break
             }
             t = line; if (ps[p]) sub(/^\t+/, "", t)
+            # Inside backticks the delimiter may be followed at once by the
+            # closing backtick, which the main loop then reads as code (P19).
+            if (pb[p] && index(t, pd[p] "`") == 1) {
+              lead = length(line) - length(t)
+              for (kk = s; kk < s + lead + length(pd[p]); kk++) C[kk] = "b"
+              np = 0
+              return s + lead + length(pd[p]) - 1
+            }
             if (t == pd[p]) {
               for (kk = s; kk < e; kk++) C[kk] = "b"
               if (e <= N) C[e] = "b"
@@ -641,6 +713,20 @@ shell_lex() {
           kk++
         }
       }
+      function emit_substs(   k, a, z, t, b) {
+        buf = ""; held = 0
+        for (k = 1; k <= nsub; k++) {
+          a = sbeg[k]; z = send[k]
+          for (t = a; t <= z; t++) {
+            b = X[t]
+            # The shell unescapes a backtick body before it reads it.
+            if (skind[k] == "B" && b == "\\" && t < z && (X[t+1] == "`" || X[t+1] == "\\" || X[t+1] == "$")) { t++; b = X[t] }
+            put(b)
+          }
+          put("\n")
+        }
+        printf "%s", buf
+      }
       function put(s) {
         buf = buf s
         if (++held >= 4096) { printf "%s", buf; buf = ""; held = 0 }
@@ -666,14 +752,14 @@ shell_lex() {
             # when the scan is read again: after a blanked region (a quoted word
             # with a `#` glued to its closing quote) it would follow a blank,
             # which is where a comment starts.
-            if (cl == "c") put(cc == "#" && (k == 1 || C[k-1] != "c" && C[k-1] != "e") ? "_" : cc)
+            if (cl == "c" || cl == "p") put(cc == "#" && (k == 1 || C[k-1] != "c" && C[k-1] != "e") ? "_" : cc)
             else if (cl == "e") put(index(";&|()<>!{}#`\042\047\\$", cc) ? "_" : (cc == "\n" ? " " : cc))
             else if (cl == "B") put(" ")
             else put(" ")
             continue
           }
           if (view == "unprefixed") {
-            if (!(k in A)) put(cc)
+            if (!(k in A)) put(cl == "p" ? ";" : cc)
             if (k == N && ambig) {
               # Where bash and zsh read the text differently, the prefixes were
               # found on one reading only; hand on the text as written too.
@@ -801,23 +887,10 @@ extract_eval_payloads() {
 }
 
 extract_command_substitution_payloads() {
-  local input="$1"
-  local rest
-
-  rest="${input}"
-  while [[ "${rest}" == *'$('* ]]; do
-    rest="${rest#*'$('}"
-    printf '%s\n' "${rest%%)*}"
-    rest="${rest#*)}"
-  done
-
-  rest="${input}"
-  while [[ "${rest}" == *'`'* ]]; do
-    rest="${rest#*\`}"
-    printf '%s\n' "${rest%%\`*}"
-    [[ "${rest}" == *'`'* ]] || break
-    rest="${rest#*\`}"
-  done
+  # The bodies as the lexer delimits them. The string scan this replaced cut a
+  # body at its first `)` (so a case pattern ended it) and did not unescape or
+  # nest backticks, and it was a second parser of the command.
+  shell_lex "$1" substs arith "safedeps:extract_command_substitution_payloads"
 }
 
 # Install text as the pipe checks search for it: a manager, then a verb

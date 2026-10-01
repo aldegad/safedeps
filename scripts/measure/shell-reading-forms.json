@@ -863,5 +863,346 @@
       "sh": "-!",
       "agent": "R"
     }
+  },
+  {
+    "id": "P1",
+    "label": "backtick arith x=`((1<<2))`",
+    "text": "x=`((1<<2))`\n@@TAIL@@\n2\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "Q1",
+    "label": "dq backtick arith",
+    "text": "x=\"`((1<<2))`\"\n@@TAIL@@\n2\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "P2",
+    "label": "case pattern then ((1<<2))",
+    "text": "case x in x) ((1<<2));; esac\n@@TAIL@@\n2\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "Q4",
+    "label": "case x)(( no space",
+    "text": "case x in x)((1<<2));; esac\n@@TAIL@@\n2\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "Q5",
+    "label": "case (x) ((",
+    "text": "case x in (x) ((1<<2));; esac\n@@TAIL@@\n2\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "Q3",
+    "label": "case ;& then ((",
+    "text": "case x in x) :;& y) ((1<<2));; esac\n@@TAIL@@\n2\n",
+    "measured": {
+      "bash": "-!",
+      "zsh": "R",
+      "sh": "-!",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "P15",
+    "label": "coproc then ((",
+    "text": "coproc ((1<<2))\n@@TAIL@@\n2\n",
+    "measured": {
+      "bash": "-!",
+      "zsh": "R",
+      "sh": "-!",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "Q2",
+    "label": "time -p ((",
+    "text": "time -p ((1<<2))\n@@TAIL@@\n2\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "-!",
+      "sh": "R",
+      "agent": "-!"
+    }
+  },
+  {
+    "id": "P4",
+    "label": "dq param ${x:-'}",
+    "text": "echo \"${x:-'}\"\n@@TAIL@@\necho \"'}\"\n",
+    "measured": {
+      "bash": "-",
+      "zsh": "R",
+      "sh": "-",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "P13",
+    "label": "dq param ${x#'}",
+    "text": "echo \"${x#'}\"\n@@TAIL@@\necho \"'}\"\n",
+    "measured": {
+      "bash": "-",
+      "zsh": "R",
+      "sh": "-",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "Q6",
+    "label": "dq ${x/'/}",
+    "text": "echo \"${x/'/}\"\n@@TAIL@@\necho \"'}\"\n",
+    "measured": {
+      "bash": "-",
+      "zsh": "R",
+      "sh": "-",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "Q7",
+    "label": "dq ${x:+'}",
+    "text": "echo \"${x:+'}\"\n@@TAIL@@\necho \"'}\"\n",
+    "measured": {
+      "bash": "-",
+      "zsh": "R",
+      "sh": "-",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "Q8",
+    "label": "dq ${x%'}",
+    "text": "echo \"${x%'}\"\n@@TAIL@@\necho \"'}\"\n",
+    "measured": {
+      "bash": "-",
+      "zsh": "R",
+      "sh": "-",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "P3",
+    "label": "backtick starts with comment #'",
+    "text": "echo `#'`\n@@TAIL@@\necho '` # '\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "P7",
+    "label": "heredoc op inside $( ) closed on line",
+    "text": "x=$(cat <<EOF)\n@@TAIL@@\nEOF\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "P8",
+    "label": "dq subst holding case pattern",
+    "text": "echo \"$(case x in x) @@TAIL@@;; esac)\"\n",
+    "measured": {
+      "bash": "-!",
+      "zsh": "R",
+      "sh": "-!",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "P9",
+    "label": "exec -a name",
+    "text": "exec -a foo @@TAIL@@\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "P10",
+    "label": "command -p",
+    "text": "command -p @@TAIL@@\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "P12",
+    "label": "time -p",
+    "text": "time -p @@TAIL@@\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "-",
+      "sh": "R",
+      "agent": "-"
+    }
+  },
+  {
+    "id": "P19",
+    "label": "heredoc inside backticks, terminator before the closing backtick",
+    "text": "x=`cat <<EOF\nhello\nEOF`\n@@TAIL@@\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "R1",
+    "label": "control: backtick body with a statement before ((",
+    "text": "x=`:; ((1<<2))`\n@@TAIL@@\n2\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "R2",
+    "label": "control: $(( holding a nested (( then a space",
+    "text": "x=$(((1<<2)) )\n@@TAIL@@\n2\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "R3",
+    "label": "control: else then ((",
+    "text": "if false; then :; else ((1<<2)); fi\n@@TAIL@@\n2\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "R4",
+    "label": "control: $( then a spaced ((",
+    "text": "x=$( ((1<<2)) )\n@@TAIL@@\n2\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "R5",
+    "label": "control: |& then ((",
+    "text": "true |& ((1<<2))\n@@TAIL@@\n2\n",
+    "measured": {
+      "bash": "-!",
+      "zsh": "R",
+      "sh": "-!",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "S1",
+    "label": "comment holding an apostrophe, then the install",
+    "text": "# don't\n@@TAIL@@\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "S2",
+    "label": "trailing comment holding an apostrophe",
+    "text": "echo hi # it's\n@@TAIL@@\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "S3",
+    "label": "trailing comment holding a double quote",
+    "text": "echo hi # say \"hi\n@@TAIL@@\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "S4",
+    "label": "nested escaped backtick",
+    "text": "echo `echo \\`@@TAIL@@\\``\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "S5",
+    "label": "case arm",
+    "text": "case x in *) @@TAIL@@;; esac\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "S6",
+    "label": "case arm after a parenthesized pattern",
+    "text": "case x in (x) @@TAIL@@;; esac\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
   }
 ]

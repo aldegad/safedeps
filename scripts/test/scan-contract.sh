@@ -167,7 +167,9 @@ reference_spec_scan_text() {
       continue
     fi
     if [[ "${c}" == '$' && "${input:i+1:2}" == "((" ]]; then output+="${three}"; ((i += 2)); ((d++)); ctx[d]=A; par[d]=0; continue; fi
-    if [[ "${c}" == "(" && "${input:i+1:1}" == "(" ]] && reference_cmdpos "${input}" "${i}"; then
+    # `((` is arithmetic wherever it stands (the subshell reading is the other
+    # policy, judged when the shells disagree).
+    if [[ "${c}" == "(" && "${input:i+1:1}" == "(" ]]; then
       output+="${two}"; ((i++)); ((d++)); ctx[d]=A; par[d]=0; continue
     fi
     if [[ "${c}" == '$' && "${input:i+1:1}" == "(" ]]; then output+="${two}"; ((i++)); ((d++)); ctx[d]=S; par[d]=0; continue; fi
