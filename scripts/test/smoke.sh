@@ -492,6 +492,41 @@ do
 done
 pass "inert flag lands on the install before a comment, a heredoc or a second line"
 
+# A script handed to a shell runs its install too, so the flag goes inside it:
+# `sh -c '...'`, `eval '...'`, a double-quoted script with no escape, and a
+# substitution inside quotes. The scan view blanks all of them, and an install
+# in `sh -c '...'` beside a visible one ran its lifecycle scripts while the
+# visible one was made inert (caught in the release integration). Appending is
+# no answer either: after `sh -c '...'` the flag becomes the script's $0. Quoted
+# data stays as written.
+for inert_case in \
+  "sh -c 'npm install left-pad@1.3.0'|sh -c 'npm install --ignore-scripts left-pad@1.3.0'" \
+  "npm install left-pad@1.3.0; sh -c 'cd sub && npm install left-pad@1.3.0'|npm install --ignore-scripts left-pad@1.3.0; sh -c 'cd sub && npm install --ignore-scripts left-pad@1.3.0'" \
+  'bash -lc "npm install left-pad@1.3.0"|bash -lc "npm install --ignore-scripts left-pad@1.3.0"' \
+  "eval 'npm install left-pad@1.3.0'|eval 'npm install --ignore-scripts left-pad@1.3.0'" \
+  'echo "$(npm install left-pad@1.3.0)"|echo "$(npm install --ignore-scripts left-pad@1.3.0)"' \
+  "npm install left-pad@1.3.0 && echo 'npm install left-pad@1.3.0'|npm install --ignore-scripts left-pad@1.3.0 && echo 'npm install left-pad@1.3.0'"
+do
+  inert_in="${inert_case%%|*}"
+  inert_want="${inert_case#*|}"
+  inert_out=$(run_hook_command "${tmp_root}/home-compound" "${tmp_root}/safe-compound" "${inert_in}")
+  inert_got=$(jq -r '.hookSpecificOutput.updatedInput.command' <<< "${inert_out}")
+  [[ "${inert_got}" == "${inert_want}" ]] \
+    || fail "inert flag lands inside the script a shell runs: $(printf '%q' "${inert_in}") (got: $(printf '%q' "${inert_got}"))"
+done
+pass "inert flag lands inside a script handed to a shell, and quoted data stays as written"
+
+# A script the rewrite cannot map -- double-quoted with an escape in it -- is a
+# recorded downgrade, never a command reported inert while an install in it
+# runs its scripts.
+downgrades_before=$(grep -c 'could not make every npm install in this command inert' "${tmp_root}/safe-compound/advisory.log" 2>/dev/null || true)
+inert_out=$(run_hook_command "${tmp_root}/home-compound" "${tmp_root}/safe-compound" 'npm install left-pad@1.3.0; sh -c "echo \"hi\"; npm install left-pad@1.3.0"')
+[[ -z "$(jq -r '.hookSpecificOutput.updatedInput.command // ""' <<< "${inert_out}")" ]] \
+  || fail "a script the inert rewrite cannot map gets no partial rewrite"
+downgrades_after=$(grep -c 'could not make every npm install in this command inert' "${tmp_root}/safe-compound/advisory.log" 2>/dev/null || true)
+(( ${downgrades_after:-0} > ${downgrades_before:-0} )) || fail "a script the inert rewrite cannot map is recorded as a downgrade"
+pass "a script the inert rewrite cannot reach is a recorded downgrade"
+
 # Finding #3: an `--prefix <dir>` install must be snapshotted/effect-gated against
 # the OVERRIDE dir, not cwd. The pending state's project_dir must be the prefix dir.
 prefix_safe="${tmp_root}/safe-prefix"
