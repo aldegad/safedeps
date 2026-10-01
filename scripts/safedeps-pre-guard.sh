@@ -481,7 +481,7 @@ shell_lex() {
         for (j in sl) SPC[sl[j]] = 1
         SPC["\n"] = 1
         DQS["\\"] = 1; DQS["\042"] = 1; DQS["$"] = 1; DQS["`"] = 1
-        wantdep = (view == "unprefixed" || view == "unprefixed-lines" || view == "noredir" || view == "pieces" || view == "cscripts")
+        wantdep = (view == "unprefixed" || view == "unprefixed-lines" || view == "noredir" || view == "pieces" || view == "cscripts" || view == "stmts")
         if (view == "pieces") {
           # The value of each one-letter escape in $\047...\047.
           AQV["a"] = "\007"; AQV["b"] = "\010"; AQV["e"] = "\033"; AQV["E"] = "\033"
@@ -659,7 +659,7 @@ shell_lex() {
         # The same holds for redirections: in a reading that never closes, a
         # stripped target changes how the rest reads, and the view stops
         # being idempotent (random inputs in scan-contract).
-        if ((view == "noredir" && !unterm) || view == "pieces" || view == "cscripts") redirs()
+        if ((view == "noredir" && !unterm) || view == "pieces" || view == "cscripts" || view == "stmts") redirs()
         if (view == "substs") emit_substs()
         else if (view == "pieces") emit_pieces()
         else if (view == "cscripts") emit_cscripts()
@@ -940,11 +940,28 @@ shell_lex() {
         if (aqbad) put("!\035")
         printf "%s", buf
       }
-      function cscripts_of(W, n,   j, m, base, args) {
+      # A shell is any command word whose name ends in sh (ksh, csh, tcsh, fish
+      # as well as sh, bash, zsh, dash): the reader it replaced matched those
+      # by a regex open on the left, and narrowing it to four names passed
+      # `ksh -c "pip install ..."` with no verdict (caught in review). Options
+      # may stand before -c: -o and +o take a name, -- ends the options.
+      function cscripts_of(W, n,   j, m, s, base, args) {
         for (j = 1; j <= n; j++) {
           base = W[j]; sub(/.*\//, "", base)
-          if (base ~ /^(sh|bash|zsh|dash)$/ && j + 2 <= n && W[j+1] ~ /^-[A-Za-z]*c[A-Za-z]*$/) {
-            put("S" W[j+2] "\035"); j += 2; continue
+          if (base ~ /sh$/ && j < n) {
+            for (m = j + 1; m <= n; m++) {
+              # -o, or a cluster ending in o (-euo), takes the next word as an option name
+              if (W[m] ~ /^[-+][A-Za-z]*o$/) { m++; continue }
+              if (W[m] ~ /^-[A-Za-z]*c[A-Za-z]*$/) {
+                s = m + 1
+                if (s <= n && W[s] == "--") s++
+                if (s <= n) { put("S" W[s] "\035"); j = s }
+                break
+              }
+              if (W[m] ~ /^[-+][A-Za-z]+$/ || W[m] == "--") continue
+              break
+            }
+            continue
           }
           if (W[j] == "eval" && j < n) {
             args = ""
@@ -994,6 +1011,12 @@ shell_lex() {
             # with a `#` glued to its closing quote) it would follow a blank,
             # which is where a comment starts.
             if (cl == "p" && view == "stmts") put(";")
+            # A statement ends only at a top-level separator: not inside a
+            # substitution, an expansion or arithmetic, and not in a
+            # redirection operator (`>|`, `<&-`, `2>&1`). command_statements
+            # cut wherever these bytes were, so the words after
+            # `$(pwd | sed x)` or `>| f` left the install (caught in review).
+            else if (view == "stmts" && cl == "c" && (DEP[k] != 1 || (k in DROP)) && cc ~ /[;&|\n]/) put(cc == "\n" ? " " : "_")
             else if (cl == "c" || cl == "p") put(cc == "#" && (k == 1 || C[k-1] != "c" && C[k-1] != "e") ? "_" : cc)
             else if (cl == "e") put(index(";&|()<>!{}#`\042\047\\$", cc) ? "_" : (cc == "\n" ? " " : cc))
             else if (view == "live" && (cl == "Q" || cl == "B")) put(cc)

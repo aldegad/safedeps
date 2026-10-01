@@ -1187,6 +1187,34 @@ expect_pass "a sh -c head inside quoted text is data" $'echo \'sh -c "pip instal
 expect_pass "a quoted mention of sh -c with escaped quotes" $'git commit -m \'run sh -c "npm test -- \\"x\\""\''
 pass "a script handed to a shell is read as the word the shell passes"
 
+# Any shell whose name ends in sh reads its -c script (macOS ships ksh, csh
+# and tcsh), and options may come before -c. Narrowing the shell names to four
+# passed `ksh -c "pip install ..."` with no verdict (caught in review).
+for shell_form in \
+  'ksh -c "pip install evil==1.0.0"' \
+  '/bin/ksh -c "pip install evil==1.0.0"' \
+  'csh -c "pip install evil==1.0.0"' \
+  'tcsh -c "pip install evil==1.0.0"' \
+  'fish -c "pip install evil==1.0.0"' \
+  'bash -o pipefail -c "pip install evil==1.0.0"' \
+  'bash -euo pipefail -c "pip install evil==1.0.0"' \
+  'bash -c -- "pip install evil==1.0.0"'
+do
+  expect_prescription 'pypi evil@1.0.0;' "${shell_form}"
+done
+# A statement ends only at a top-level separator: not inside a substitution,
+# an expansion or arithmetic, and not in a redirection operator. Cutting there
+# left the install's words behind (`>| f`, `2<&-`, `$(pwd | sed x)`).
+expect_prescription 'pypi evil@1.0.0;' 'pip install >| f evil==1.0.0'
+expect_prescription 'crates.io evil@1.0.0;' 'cargo install 2<&- evil --version 1.0.0'
+expect_prescription 'npm evil@1.0.0;' 'pnpm add --dir $(pwd | cat) evil@1.0.0'
+expect_prescription 'pypi evil@1.0.0;' 'pip install --cache-dir $(pwd | sed s/x/y/) evil==1.0.0'
+expect_prescription 'pypi evil@1.0.0;' 'pip install --retries $((1|2)) evil==1.0.0'
+expect_prescription 'pypi evil@1.0.0;' 'pip install --log ${X:-a|b} evil==1.0.0'
+expect_pass "a pipeline of ordinary commands" 'npm run build | tee out'
+expect_pass "a pipeline with no install" 'echo hi | grep h'
+pass "statement cuts and shell names are read the way the shell reads them"
+
 # `npm link` reads every argument with npm-package-arg and installs the
 # registry ones into the global prefix (lib/commands/link.js:92-104); a path,
 # a tarball, a git or a URL argument is linked as written. Reading only the
