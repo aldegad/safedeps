@@ -254,63 +254,107 @@ confirm_snapshot() {
 # `npm install b` rolled back to a project without `a` in package.json, the
 # lockfile or node_modules (safedeps/confirmed-snapshot-lags-one-install).
 #
+# The record is copied before the checks read the project, and sealed after
+# they finish only if the project still holds the same bytes. Copying after the
+# checks recorded whatever was there by then: measured, an unapproved install
+# that finished between the closure check and the copy went into the baseline,
+# a later rollback could not remove it, and the rollback's `npm ci` ran its
+# install scripts (scripts/test/lockless-forms.sh, section 7). Equal bytes at
+# both ends is what is compared; a change undone to the same bytes in between is
+# not seen, and the bytes recorded are still the ones at both ends.
+#
 # The id must not start with `${SNAPSHOT_ID}_`, because cleanup_old_snapshots
 # removes a snapshot with `rm ${id}_*` and would take this one with it.
-# meta.json is written last, and every reader checks for it, so a run killed
-# part-way leaves an unconfirmed snapshot that is pruned, never a baseline
-# with files missing.
-snapshot_verified_state() {
-  local verified_id="$1"
-  local parent_id="$2"
-  local file_name
-  local list_file="${SNAPSHOT_DIR}/${verified_id}_monitored_files.list"
-  local temp_meta
+VERIFIED_ID=""
+VERIFIED_STAGED=false
 
-  : > "${list_file}" || return 1
-  while IFS= read -r file_name; do
-    [[ -z "${file_name}" ]] && continue
-    printf '%s\n' "${file_name}" >> "${list_file}" || return 1
-    if [[ -f "${PROJECT_DIR}/${file_name}" ]]; then
-      cp "${PROJECT_DIR}/${file_name}" "${SNAPSHOT_DIR}/${verified_id}_${file_name}" || return 1
-    else
-      touch "${SNAPSHOT_DIR}/${verified_id}_${file_name}.missing" || return 1
-    fi
-  done < <({
+verified_state_file_names() {
+  {
     monitored_files
     find "${PROJECT_DIR}" -maxdepth 1 -type f -name "*.csproj" -exec basename {} \; 2>/dev/null
-  } | sort -u)
+  } | sed '/^$/d' | sort -u
+}
 
-  temp_meta=$(mktemp "${SNAPSHOT_DIR}/.${verified_id}_meta.XXXXXX") || return 1
-  if ! jq -n --arg id "${verified_id}" --arg parent "${parent_id}" --arg from "${SNAPSHOT_ID}" \
+# Copies the files, without meta.json. Every reader requires meta.json, so
+# until it is written this is not a snapshot anything can roll back to.
+stage_verified_state() {
+  local file_name
+  local list_file="${SNAPSHOT_DIR}/${VERIFIED_ID}_monitored_files.list"
+
+  verified_state_file_names > "${list_file}" || return 1
+  while IFS= read -r file_name; do
+    if [[ -f "${PROJECT_DIR}/${file_name}" ]]; then
+      cp "${PROJECT_DIR}/${file_name}" "${SNAPSHOT_DIR}/${VERIFIED_ID}_${file_name}" || return 1
+    else
+      touch "${SNAPSHOT_DIR}/${VERIFIED_ID}_${file_name}.missing" || return 1
+    fi
+  done < "${list_file}"
+}
+
+# True when the project holds exactly the files that were staged.
+staged_state_matches_project() {
+  local file_name
+  local list_file="${SNAPSHOT_DIR}/${VERIFIED_ID}_monitored_files.list"
+
+  [[ "$(cat "${list_file}")" == "$(verified_state_file_names)" ]] || return 1
+  while IFS= read -r file_name; do
+    if [[ -f "${SNAPSHOT_DIR}/${VERIFIED_ID}_${file_name}" ]]; then
+      files_differ "${SNAPSHOT_DIR}/${VERIFIED_ID}_${file_name}" "${PROJECT_DIR}/${file_name}" && return 1
+    elif [[ -e "${PROJECT_DIR}/${file_name}" ]]; then
+      return 1
+    fi
+  done < "${list_file}"
+}
+
+# meta.json last, through a rename, so the snapshot appears whole or not at all.
+seal_verified_state() {
+  local parent_id="$1"
+  local temp_meta
+
+  temp_meta=$(mktemp "${SNAPSHOT_DIR}/.${VERIFIED_ID}_meta.XXXXXX") || return 1
+  if ! jq -n --arg id "${VERIFIED_ID}" --arg parent "${parent_id}" --arg from "${SNAPSHOT_ID}" \
       --arg dir "${PROJECT_DIR}" --argjson ts "$(date +%s)" \
       '{snapshot_id: $id, parent_snapshot_id: (if $parent == "" then null else $parent end),
         verified_from: $from, timestamp: $ts, project_dir: $dir}' > "${temp_meta}"; then
     rm -f "${temp_meta}"
     return 1
   fi
-  mv -f "${temp_meta}" "${SNAPSHOT_DIR}/${verified_id}_meta.json"
+  mv -f "${temp_meta}" "${SNAPSHOT_DIR}/${VERIFIED_ID}_meta.json"
+}
+
+discard_staged_state() {
+  rm -f "${SNAPSHOT_DIR}/${VERIFIED_ID}"_* 2>/dev/null || true
 }
 
 # Confirm what this install verified. If the post-install state cannot be
 # recorded, the baseline stays where it was and the user is told: an older
-# baseline rolls back too much, a partial one would restore files nobody read.
+# baseline rolls back too much, a partial or unread one would restore files
+# nobody verified.
 confirm_verified_state() {
-  local verified_id="verified-${SNAPSHOT_ID}"
   local parent_id
+  local why=""
 
   parent_id=$(read_confirmed_snapshot "${DIR_HASH}")
   if [[ -n "${parent_id}" ]] && [[ ! -f "${SNAPSHOT_DIR}/${parent_id}_meta.json" ]]; then
     parent_id=""
   fi
 
-  if ! snapshot_verified_state "${verified_id}" "${parent_id}"; then
-    rm -f "${SNAPSHOT_DIR}/${verified_id}"_* 2>/dev/null || true
-    log_advisory "post-verify: the verified state of ${PROJECT_DIR} could not be recorded, so the rollback baseline was not moved (still ${parent_id:-none})."
-    ROLLBACK_WARNINGS+=("safedeps verified this install but could not record the result as the new rollback baseline, so a later rollback in ${PROJECT_DIR} returns to the baseline before it (${parent_id:-none}) and would undo this install too")
+  if [[ "${VERIFIED_STAGED}" != "true" ]]; then
+    why="its files could not be copied"
+  elif ! staged_state_matches_project; then
+    why="the dependency files changed while they were being verified, so what they hold now was not read by this check"
+  elif ! seal_verified_state "${parent_id}"; then
+    why="its record could not be written"
+  fi
+
+  if [[ -n "${why}" ]]; then
+    discard_staged_state
+    log_advisory "post-verify: the verified state of ${PROJECT_DIR} could not be recorded (${why}), so the rollback baseline was not moved (still ${parent_id:-none})."
+    ROLLBACK_WARNINGS+=("safedeps verified this install but could not record the result as the new rollback baseline (${why}), so a later rollback in ${PROJECT_DIR} returns to the baseline before it (${parent_id:-none}) and would undo this install too")
     return 0
   fi
 
-  confirm_snapshot "${verified_id}" "${DIR_HASH}"
+  confirm_snapshot "${VERIFIED_ID}" "${DIR_HASH}"
 }
 
 collect_protected_snapshot_ids() {
@@ -364,6 +408,10 @@ snapshot_is_protected() {
   return 1
 }
 
+# Lists snapshots by meta.json only. Files without one are left alone: a run in
+# progress holds exactly that while its checks run, nothing on disk tells it
+# from a killed run's leftovers, and pruning it would let its meta.json land
+# over missing files. A killed run costs disk, never a baseline.
 cleanup_old_snapshots() {
   local protected_snapshot_ids=()
   local protected_snapshot_id
@@ -1119,6 +1167,14 @@ if [[ "${BACKSTOP_INSTALL:-false}" == "true" ]]; then
   exit 0
 fi
 
+# Stage the record before anything reads the project (see stage_verified_state).
+VERIFIED_ID="verified-${SNAPSHOT_ID}"
+if stage_verified_state; then
+  VERIFIED_STAGED=true
+else
+  discard_staged_state
+fi
+
 # Run all checks
 check_npm_effect_closure
 check_postinstall_scripts
@@ -1129,6 +1185,7 @@ check_binaries
 
 if [[ "${SUSPICIOUS}" == "true" ]]; then
   # REORG: Rollback to last confirmed safe snapshot
+  discard_staged_state
   ROLLBACK_SNAPSHOT_ID=$(read_confirmed_snapshot "${DIR_HASH}")
   if [[ -z "${ROLLBACK_SNAPSHOT_ID}" ]] || [[ ! -f "${SNAPSHOT_DIR}/${ROLLBACK_SNAPSHOT_ID}_meta.json" ]]; then
     ROLLBACK_SNAPSHOT_ID="${SNAPSHOT_ID}"

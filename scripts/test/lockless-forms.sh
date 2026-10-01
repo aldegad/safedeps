@@ -481,6 +481,88 @@ grep -q 'rollback baseline was not moved' "${CASE_HOME}/advisory.log" \
   || fail "advisory.log records that the baseline did not move"
 pass "a verified state that cannot be recorded leaves the baseline in place, and says so"
 
+# An unapproved install that finishes while an approved one is being verified.
+# The baseline used to be copied after the checks, from whatever the project
+# held by then. Measured: sd-victim, installed by a second Bash call between
+# sd-approved's closure check and that copy, went into the baseline. Its own
+# rollback then restored it, and the rollback's `npm ci` ran its install
+# scripts. The record is now copied before the checks and sealed only if the
+# project still holds those bytes afterwards.
+#
+# The schedule is pinned rather than hoped for: a PATH shim on npm lets
+# post-verify's real `npm rebuild` finish, then runs the second call (its
+# PreToolUse and its install) before handing control back. On Claude Code that
+# rebuild sits between the checks and the record. Codex has no rebuild there,
+# so this pins the Claude Code schedule only; the code path is the same one.
+new_project
+real_npm=$(command -v npm)
+race_dir=$(mktemp -d "${tmp_root}/race.XXXXXX")
+mkdir -p "${race_dir}/shim"
+cat > "${race_dir}/second-call.sh" <<RACE_EOF
+#!/usr/bin/env bash
+payload=\$(jq -nc --arg c "npm install sd-victim" --arg d "${CASE_PROJECT}" '{tool_name:"Bash",tool_input:{command:\$c},cwd:\$d}')
+pre=\$(printf '%s' "\${payload}" | SAFEDEPS_HOME="${CASE_HOME}" "${ROOT_DIR}/scripts/safedeps-hook-entry.sh" pre 2>/dev/null)
+cmd=\$(jq -r '.hookSpecificOutput.updatedInput.command // empty' <<< "\${pre}")
+printf '%s' "\${cmd}" > "${race_dir}/second.cmd"
+[[ -n "\${cmd}" ]] && (cd "${CASE_PROJECT}" && bash -c "\${cmd}") > "${race_dir}/second.log" 2>&1
+printf 'exit=%s\n' "\$?" >> "${race_dir}/second.log"
+RACE_EOF
+cat > "${race_dir}/shim/npm" <<RACE_EOF
+#!/usr/bin/env bash
+if [[ "\${1:-}" == rebuild && ! -e "${race_dir}/fired" ]]; then
+  touch "${race_dir}/fired"
+  "${real_npm}" "\$@"; rc=\$?
+  "${race_dir}/second-call.sh"
+  exit "\${rc}"
+fi
+exec "${real_npm}" "\$@"
+RACE_EOF
+chmod +x "${race_dir}/second-call.sh" "${race_dir}/shim/npm"
+
+: > "${MARKS}"
+payload=$(jq -nc --arg c "npm install sd-approved" --arg d "${CASE_PROJECT}" '{tool_name:"Bash",tool_input:{command:$c},cwd:$d}')
+pre=$(printf '%s' "${payload}" | SAFEDEPS_HOME="${CASE_HOME}" scripts/safedeps-hook-entry.sh pre 2>/dev/null)
+first_cmd=$(jq -r '.hookSpecificOutput.updatedInput.command // empty' <<< "${pre}")
+[[ "${first_cmd}" == *--ignore-scripts* ]] || fail "the approved install runs inert on Claude Code (pre: ${pre})"
+(cd "${CASE_PROJECT}" && bash -c "${first_cmd}" > "${race_dir}/first.log" 2>&1) || fail "the approved install succeeds"
+payload=$(jq -nc --arg c "${first_cmd}" --arg d "${CASE_PROJECT}" '{tool_name:"Bash",tool_input:{command:$c},cwd:$d}')
+first_post=$(printf '%s' "${payload}" | PATH="${race_dir}/shim:${PATH}" SAFEDEPS_HOME="${CASE_HOME}" \
+  scripts/safedeps-hook-entry.sh post 2>/dev/null)
+[[ -e "${race_dir}/fired" ]] || fail "the second call ran inside the first one's post-verify (post: ${first_post:-<quiet>})"
+second_cmd=$(cat "${race_dir}/second.cmd")
+[[ "${second_cmd}" == *--ignore-scripts* ]] || fail "the second call was let through inert to the effect gate"
+grep -qx 'exit=0' "${race_dir}/second.log" || fail "the second install succeeds ($(tail -3 "${race_dir}/second.log"))"
+jq -e '.dependencies["sd-victim"] != null' "${CASE_PROJECT}/package.json" >/dev/null \
+  || fail "the second install landed in the project while the first was verified"
+
+payload=$(jq -nc --arg c "${second_cmd}" --arg d "${CASE_PROJECT}" '{tool_name:"Bash",tool_input:{command:$c},cwd:$d}')
+CASE_POST=$(printf '%s' "${payload}" | SAFEDEPS_HOME="${CASE_HOME}" scripts/safedeps-hook-entry.sh post 2>/dev/null)
+rolled_back || fail "the unapproved install is rolled back (post: ${CASE_POST:-<quiet>})"
+lacks_dependency sd-victim \
+  || fail "the rollback removes the unapproved install that landed during verification (package.json: $(jq -c .dependencies "${CASE_PROJECT}/package.json"))"
+victim_ran && fail "no script of the unapproved package runs, in the rebuild or the rollback ($(cut -f1,2 "${MARKS}" | paste -sd, -))"
+for confirmed in "${CASE_HOME}"/confirmed_*; do
+  [[ -f "${confirmed}" ]] || continue
+  for recorded in "${CASE_HOME}/snapshots/$(cat "${confirmed}")"_package{,-lock}.json; do
+    [[ -f "${recorded}" ]] || continue
+    grep -q sd-victim "${recorded}" && fail "the baseline records the unapproved package ($(basename "${recorded}"))"
+  done
+done
+for meta in "${CASE_HOME}"/snapshots/*_meta.json; do
+  [[ -f "${meta}" ]] || continue
+  for recorded in "${meta%_meta.json}"_package{,-lock}.json; do
+    [[ -f "${recorded}" ]] || continue
+    grep -q sd-victim "${recorded}" && fail "no snapshot a rollback can take records the unapproved package ($(basename "${recorded}"))"
+  done
+done
+has_dependency sd-approved \
+  || fail "the approved install stays (package.json: $(jq -c .dependencies "${CASE_PROJECT}/package.json"))"
+grep -q 'changed while they were being verified' <<< "${first_post}" \
+  || fail "the first install says its baseline was not recorded because the files changed (post: ${first_post:-<quiet>})"
+grep -q 'changed while they were being verified' "${CASE_HOME}/advisory.log" \
+  || fail "advisory.log records why the baseline did not move"
+pass "an unapproved install that lands while an approved one is verified stays out of the baseline and is rolled back"
+
 # --- 8. A rollback does not run scripts it did not verify -------------------------------
 # The rollback restores node_modules from the confirmed snapshot. With a
 # package-lock.json that is `npm ci` of the baseline lock. Without one, npm has
