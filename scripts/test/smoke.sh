@@ -525,13 +525,82 @@ inert_out=$(run_hook_command "${tmp_root}/home-compound" "${tmp_root}/safe-compo
   || fail "a script the inert rewrite cannot map gets no partial rewrite"
 downgrades_after=$(grep -c 'could not make every npm install in this command inert' "${tmp_root}/safe-compound/advisory.log" 2>/dev/null || true)
 (( ${downgrades_after:-0} > ${downgrades_before:-0} )) || fail "a script the inert rewrite cannot map is recorded as a downgrade"
-# One with an escaped quote in it is not read to its end by the payload reader
-# either, so the command is UNDECIDED before any rewrite is attempted.
+# One with an escaped quote in it is read to its end now (the payload reader
+# takes the word the shell passes), so the approved install inside it is judged
+# and allowed; the inert rewrite cannot map an escaped double-quoted script, so
+# it is a recorded downgrade, as above.
+downgrades_before=$(grep -c 'could not make every npm install in this command inert' "${tmp_root}/safe-compound/advisory.log" 2>/dev/null || true)
 inert_out=$(run_hook_command "${tmp_root}/home-compound" "${tmp_root}/safe-compound" 'npm install left-pad@1.3.0; sh -c "echo \"hi\"; npm install left-pad@1.3.0"')
-[[ "$(jq -r '.hookSpecificOutput.permissionDecision // ""' <<< "${inert_out}")" == deny ]] \
-  && grep -q UNDECIDED <<< "${inert_out}" \
-  || fail "a script with an escaped quote the payload reader cannot finish is UNDECIDED"
+[[ "$(jq -r '.hookSpecificOutput.permissionDecision // "allow"' <<< "${inert_out}")" != deny ]] \
+  || fail "an approved install in a script with an escaped quote is read and allowed (got: ${inert_out:0:160})"
+[[ -z "$(jq -r '.hookSpecificOutput.updatedInput.command // ""' <<< "${inert_out}")" ]] \
+  || fail "a script with an escaped quote gets no partial inert rewrite"
+downgrades_after=$(grep -c 'could not make every npm install in this command inert' "${tmp_root}/safe-compound/advisory.log" 2>/dev/null || true)
+(( ${downgrades_after:-0} > ${downgrades_before:-0} )) || fail "a script with an escaped quote is recorded as an inert downgrade"
 pass "a script the inert rewrite cannot reach is a recorded downgrade, or UNDECIDED when it cannot be read"
+
+# The rewrite changes the text every shell reads, so it is made only where
+# bash, zsh and dash agree where the npm installs are. In I2 and I3 the
+# apostrophe in "${x:-'}" opens a quote for bash and is a character for zsh and
+# dash, so zsh runs an `npm ci` that bash reads as quoted text. Before the
+# readings were shells, the rewrite followed bash alone: zsh ran that install
+# with no flag and no downgrade record while the meta said inert (verdict
+# bogeuli-20261001-234308). Now the command is UNDECIDED, with its own reason,
+# and the meta never says inert.
+mkdir -p "${project_dir}/sub"
+for readings_case in \
+  $'npm install left-pad@1.3.0\necho "${x:-\'}"\ncd sub && npm ci\necho "\'}"' \
+  $'npm ci\necho "${x:-\'}"\ncd sub && npm ci\necho "\'}"'
+do
+  readings_safe=$(mktemp -d "${tmp_root}/safe-readings.XXXXXX")
+  SAFEDEPS_HOME="${readings_safe}" lib/ledger/ledger.sh approve npm left-pad 1.3.0 1.3.0 smoke >/dev/null
+  readings_out=$(run_hook_command "${tmp_root}/home-readings" "${readings_safe}" "${readings_case}")
+  [[ "$(jq -r '.hookSpecificOutput.permissionDecision // "pass"' <<< "${readings_out}")" == deny ]] \
+    && jq -r '.hookSpecificOutput.permissionDecisionReason' <<< "${readings_out}" | grep -q 'UNDECIDED.*read the npm installs in this command in different places' \
+    || fail "readings that put the npm installs in different places are UNDECIDED: $(printf '%q' "${readings_case}") (got: ${readings_out:0:200})"
+  ! grep -qs '"ignore_scripts_injected": true' "${readings_safe}/snapshots/"*_meta.json \
+    || fail "the meta never says inert when nothing was injected: $(printf '%q' "${readings_case}")"
+  [[ -z "$(ls "${readings_safe}/pending" 2>/dev/null)" ]] \
+    || fail "an UNDECIDED command leaves no pending state: $(printf '%q' "${readings_case}")"
+done
+pass "a rewrite the readings disagree on is UNDECIDED with its own reason, and the meta never says inert"
+
+# Where they agree, the rewrite is checked by running it. A stub stands in for
+# npm and prints its arguments (the one thing run here is that stub), and the
+# rewritten command runs under bash, zsh and dash: every npm install any of them
+# runs must carry the flag, and the meta must say inert. K2 is the effect-gate
+# grid's M6, where an install in `sh -c` ran its lifecycle scripts.
+readings_stub="${tmp_root}/readings-stub"
+mkdir -p "${readings_stub}"
+printf '#!/bin/sh\nprintf "NPM: %%s\\n" "$*"\n' > "${readings_stub}/npm"
+chmod +x "${readings_stub}/npm"
+readings_shells=()
+for readings_shell in /bin/bash /bin/zsh /bin/dash /usr/bin/dash; do
+  [[ -x "${readings_shell}" ]] && readings_shells+=("${readings_shell}")
+done
+for readings_case in \
+  'npm install left-pad@1.3.0; ((count++)); echo "$((count+1))"' \
+  "npm install left-pad@1.3.0; sh -c 'cd sub && npm install left-pad@1.3.0'" \
+  $'npm ci\necho "${x:-hi}"' \
+  'npm ci # then npm i later' \
+  $'i=0; ((i++)); npm ci && echo "${x:-\'}" && echo "\'}"' \
+  'for ((i=0;i<1;i++)); do npm install left-pad@1.3.0; done'
+do
+  readings_safe=$(mktemp -d "${tmp_root}/safe-readings.XXXXXX")
+  SAFEDEPS_HOME="${readings_safe}" lib/ledger/ledger.sh approve npm left-pad 1.3.0 1.3.0 smoke >/dev/null
+  readings_out=$(run_hook_command "${tmp_root}/home-readings" "${readings_safe}" "${readings_case}")
+  readings_cmd=$(jq -r '.hookSpecificOutput.updatedInput.command // empty' <<< "${readings_out}")
+  [[ -n "${readings_cmd}" ]] || fail "readings that agree get the rewrite: $(printf '%q' "${readings_case}") (got: ${readings_out:0:200})"
+  grep -qs '"ignore_scripts_injected": true' "${readings_safe}/snapshots/"*_meta.json \
+    || fail "the meta says inert when the rewrite was injected: $(printf '%q' "${readings_case}")"
+  for readings_shell in "${readings_shells[@]}"; do
+    readings_ran=$(cd "${project_dir}" && PATH="${readings_stub}:${PATH}" "${readings_shell}" -c "${readings_cmd}" 2>/dev/null | grep '^NPM: ' || true)
+    [[ -n "${readings_ran}" ]] || fail "the stub ran under ${readings_shell}: $(printf '%q' "${readings_cmd}")"
+    ! grep -vq -- '--ignore-scripts' <<< "${readings_ran}" \
+      || fail "every npm install ${readings_shell} runs carries the flag: $(printf '%q' "${readings_cmd}") ran ${readings_ran}"
+  done
+done
+pass "a rewrite the readings agree on puts the flag on every npm install bash, zsh and dash run (${#readings_shells[@]} shells)"
 
 # Finding #3: an `--prefix <dir>` install must be snapshotted/effect-gated against
 # the OVERRIDE dir, not cwd. The pending state's project_dir must be the prefix dir.

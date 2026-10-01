@@ -355,11 +355,12 @@ command_pipes_unread_install_to_shell() {
 #   live    scan, with code nested in quotes ("$(...)") and live code in an
 #           unquoted heredoc body kept: every byte the shell runs at this
 #           level. What the inert rewrite reads.
-#   stmts   scan, with every statement start written as `;`: the `)` that
-#           closes a case pattern, and the blank before each word that stands
-#           where the shell reads a command (after a reserved word, a function
-#           head, `time`, the zsh short forms; see starts() in the awk). A
-#           `;`, `&` or `|` at the top of an arithmetic `((...))` is `_`, since
+#   stmts   scan, with every statement start written as `;`: the blank before
+#           each word that stands where the shell of this reading reads a
+#           command (after a separator, a case pattern close, a reserved word,
+#           a function head, `time`, the zsh short forms; see starts() in the
+#           awk). A `;`, `&` or `|` that is not at the top level (in
+#           arithmetic, a substitution, a redirection operator) is `_`, since
 #           it ends nothing. So a statement starts at a separator here and
 #           nowhere else, and SAFEDEPS_G_START knows only separators. What
 #           command_statements splits on and what the install recognizers
@@ -378,34 +379,61 @@ command_pipes_unread_install_to_shell() {
 # and are idempotent, so reading a view again changes nothing -- which is why
 # stripping twice can no longer drop anything.
 #
-# `((` and `$((` read as arithmetic (policy=arith). A reading that met an
-# arithmetic context holding something the other reading takes differently
-# (`<<`, a comment) reports AMBIG, and join_line_continuations then also reads
-# it as a subshell (policy=sub) and hands on both: bash and zsh disagree there,
-# and the agent shell here is zsh. A reading that ends inside a quote, a body
-# or a context reports UNTERM; guard_check_command_reads records that as a
-# failed reading.
+# A reading is a shell: bash, zsh or dash, named by SAFEDEPS_READING. The three
+# lex the same text differently in a few places (ARCHITECTURE.md has the table:
+# `((`, `$((`, quotes inside arithmetic, `$[`, an apostrophe inside "${...}",
+# `$'...'`), and a command is judged under every reading a shell could give it.
+# Nothing here picks a reading: the guard's driver sets the variable, once per
+# reading, and every reader of the command lexes under it, including a reader
+# that lexes text another reader handed it. A reading picked per call was how
+# a line zsh runs was re-lexed the bash way one step later and hidden again
+# (verdict bogeuli-20261001-234308, form SL1). A call with no reading set is a
+# reader outside the driver, and it fails the reading rather than guess one.
+#
+# Where a lexing passes a place the readings answer differently, it appends
+# DIVERGE to the file in SAFEDEPS_LEX_DIVERGE. The readings agree byte for byte
+# up to the first such place, and the bash reading passes it in the same state,
+# so the bash reading alone can say whether the others are needed. A reading
+# that ends inside a quote, a body or a context reports UNTERM to the file in
+# SAFEDEPS_LEX_FLAGS; guard_check_command_reads records that as a failed reading.
 #
 # One awk pass over a split array, emitted through a bounded buffer, so the
 # cost is linear (see scripts/measure/scan-cost.sh). When awk fails it says so
 # in SAFEDEPS_SCAN_MARK and returns non-zero, as every reading does.
 shell_lex() {
-  local text="$1" view="$2" policy="${3:-arith}" marker="$4" memo="" out tmp
+  local text="$1" view="$2" marker="$3" policy="${SAFEDEPS_READING:-}" memo="" out tmp div=""
+  case "${policy}" in
+    bash|zsh|dash) ;;
+    *)
+      [[ -z "${SAFEDEPS_SCAN_MARK:-}" ]] || printf 'failed\n' >> "${SAFEDEPS_SCAN_MARK}"
+      return 1
+      ;;
+  esac
   # One guard run reads the same text through the same view several times (25
   # lexer calls for 11 distinct inputs on a 32KB install command, measured).
   # Above 4KB, where a pass costs more than looking one up, a view is kept for
   # the rest of the run. The key only picks the file: a hit also requires the
   # stored text to equal this one byte for byte, because a checksum is easy to
   # collide on purpose and the command is the attacker. A run that asks for
-  # flags is not memoized, since the flags are a side output.
+  # flags is not memoized, since the flags are a side output. DIVERGE is a side
+  # output too, and a hit must still report it, so the pass that fills an entry
+  # leaves a .div beside it when it diverged. Nothing removes a .div: one left
+  # by another text under a colliding key costs a reading, never a missed one.
   if [[ -n "${SAFEDEPS_LEX_CACHE:-}" && -d "${SAFEDEPS_LEX_CACHE}" && -z "${SAFEDEPS_LEX_FLAGS:-}" && ${#text} -gt 4096 ]]; then
     memo="${SAFEDEPS_LEX_CACHE}/${view}.${policy}.$(printf '%s' "${text}" | cksum | tr ' ' '.')"
     if [[ -f "${memo}.out" && -f "${memo}.in" ]] && [[ "$(cat "${memo}.in"; printf 'X')" == "${text}X" ]]; then
+      if [[ -f "${memo}.div" && -n "${SAFEDEPS_LEX_DIVERGE:-}" ]]; then
+        printf 'DIVERGE\n' >> "${SAFEDEPS_LEX_DIVERGE}" || {
+          [[ -z "${SAFEDEPS_SCAN_MARK:-}" ]] || printf 'failed\n' >> "${SAFEDEPS_SCAN_MARK}"
+          return 1
+        }
+      fi
       cat "${memo}.out"
       return 0
     fi
+    div="${memo}.div"
   fi
-  if ! out=$(printf '%s\n' "${text}" | LC_ALL=C awk -v view="${view}" -v policy="${policy}" -v marker="${marker}" '
+  if ! out=$(printf '%s\n' "${text}" | LC_ALL=C awk -v view="${view}" -v policy="${policy}" -v marker="${marker}" -v divfile="${SAFEDEPS_LEX_DIVERGE:-}" -v divmemo="${div}" '
       # One pass over the command as the shell lexes it. Every byte gets a class,
       # and each view is printed from the classes:
       #
@@ -417,10 +445,10 @@ shell_lex() {
       #
       # view=scan    quoted text, comments, heredoc operators and bodies blanked;
       #              an escaped operator is `_`; length-preserving
-      #   view=stmts   scan, with a statement start as `;`: a case pattern close,
-      #              and the blank before each word in command position (BND,
-      #              from starts below); a `;` `&` `|` at the top of an
-      #              arithmetic context as `_`; length-preserving
+      #   view=stmts   scan, with a statement start as `;`: the blank before each
+      #              word in command position in this reading (BND, from starts
+      #              below), or the byte a glued word starts after; a nested
+      #              `;` `&` `|` as `_`; length-preserving
       #   view=code    comments, heredoc operators and bodies blanked, quotes kept;
       #              length-preserving
       #   view=joined  code view with line continuations removed and every newline
@@ -460,19 +488,30 @@ shell_lex() {
       #              adds a line `!`, so the reader can record the failure. For
       #              the spec extractor.
       #
-      # Two places where bash and zsh read the same text differently, each its
-      # own axis: `((` / `$((` holding `<<` or a comment (arithmetic, or a
-      # subshell), and an apostrophe inside "${...}" (a quote to bash, a character to
-      # zsh). policy is "arith" or "sub" for the first, with "-zq" appended to
-      # read the second the zsh way: arith, sub, arith-zq, sub-zq. A command is
-      # judged under every combination of the axes it actually flags; tying the
-      # two to one switch left the reading zsh makes (arithmetic and a plain
-      # character) unjudged (caught in review).
-      # policy=arith reads `((` and `$((` as arithmetic; policy=sub reads them as
-      # subshells. The caller runs the second only when the first reports AMBIG.
-      # Flags go to ENVIRON["SAFEDEPS_LEX_FLAGS"] when set: AMBIG (an arithmetic
-      # context held something the other policy reads differently), UNTERM (the
-      # input ended inside a quote, a heredoc body or a nested context).
+      # policy is the reading: bash, zsh or dash. Where they lex the same text
+      # differently (the table in ARCHITECTURE.md, each cell measured in
+      # scripts/measure/shell-reading-forms.json):
+      #
+      #   `((`         bash and zsh look ahead to the first unnested `)`:
+      #                followed by `)` it is arithmetic, otherwise a subshell,
+      #                and with none it is arithmetic left open. bash honors
+      #                quotes in that look-ahead and zsh reads a bare quote as a
+      #                character; both step over `$(...)`, backticks, `${...}`
+      #                and an escape whole. dash: always a subshell.
+      #   `$((`        bash and zsh as above; dash: always arithmetic.
+      #   quotes inside arithmetic: bash honors them; zsh and dash read a
+      #                character.
+      #   `$[`         bash and zsh: arithmetic, as above; dash: plain text.
+      #   `\047` inside "${...}": a quote to bash, a character to zsh and dash.
+      #   `$\047...\047`  bash and zsh: an ANSI-C string, where \\047 does not
+      #                close it; dash: `$` and a single-quoted string.
+      #
+      # Each site is decided per shell where it stands: zsh read one `((` as a
+      # subshell and the next as arithmetic in one command (form M1), which no
+      # switch for the whole command can follow. A reading that passes a site
+      # where the three answer differently writes DIVERGE (see shell_lex).
+      # Flags go to ENVIRON["SAFEDEPS_LEX_FLAGS"] when set: UNTERM (the input
+      # ended inside a quote, a heredoc body or a nested context).
       BEGIN { n = 0; started = 0 }
       {
         if (started) X[++n] = "\n"
@@ -490,7 +529,7 @@ shell_lex() {
         for (j in sl) SPC[sl[j]] = 1
         SPC["\n"] = 1
         DQS["\\"] = 1; DQS["\042"] = 1; DQS["$"] = 1; DQS["`"] = 1
-        wantdep = (view == "unprefixed" || view == "unprefixed-lines" || view == "noredir" || view == "pieces" || view == "stmts")
+        wantdep = (view == "unprefixed" || view == "unprefixed-lines" || view == "noredir" || view == "pieces" || view == "cscripts" || view == "stmts")
         wantar = (view == "stmts")
         if (view == "pieces") {
           # The value of each one-letter escape in $\047...\047.
@@ -498,16 +537,16 @@ shell_lex() {
           AQV["f"] = "\014"; AQV["n"] = "\n"; AQV["r"] = "\r"; AQV["t"] = "\t"; AQV["v"] = "\013"
           AQV["\\"] = "\\"; AQV["\047"] = "\047"; AQV["\042"] = "\042"; AQV["?"] = "?"
         }
-        mode = ""; np = 0; ambig_a = 0; ambig_q = 0; unterm = 0; hn = 0; hstop = 0
-        subp = (policy ~ /^sub/); zq = (policy ~ /-zq$/)
+        mode = ""; np = 0; unterm = 0; hn = 0; hstop = 0; div = 0
+        shb = (policy == "bash"); shz = (policy == "zsh"); shd = (policy == "dash")
         perline = (view == "pieces" || view == "unprefixed-lines")
         for (i = 1; i <= N; i++) {
-          # The pieces view reads one statement per line, and the statements
-          # come from more than one reading of the command (bash and zsh, see
-          # policy below). A line starts from nothing, so a quote that one
-          # reading left open on its line cannot run into the next: read as one
-          # text, a bash reading of an apostrophe in "${...}" swallowed the
-          # install the zsh reading had split out (caught by the verdict replay).
+          # The pieces view reads one statement per line. A line starts from
+          # nothing, so a quote one statement left open on its line cannot run
+          # into the next: when the statements of two readings were joined
+          # into one text, a bash reading of an apostrophe in "${...}"
+          # swallowed the install the zsh reading had split out (caught by the
+          # verdict replay).
           if (perline && X[i] == "\n") {
             mode = ""; d = 1; dq = 0; dc = 1; hn = 0; np = 0; hstop = 0; par[1] = 0
             C[i] = "c"; DEP[i] = 1; continue
@@ -532,7 +571,9 @@ shell_lex() {
           if (mode == "SQ") { C[i] = "q"; if (c == "\047") { mode = ""; if (qtop) RM[i] = 1 }; continue }
           if (mode == "AQ") {
             C[i] = "q"
-            if (c == "\\") { if (qtop) aq_escape(i); i++; C[i] = "q" }
+            # dash has no ANSI-C string: to it `\\` ends nothing and the
+            # escaped quote closes the string (form AC1).
+            if (c == "\\") { if (X[i+1] == "\047") div = 1; if (qtop) aq_escape(i); i++; C[i] = "q" }
             else if (c == "\047") { mode = ""; if (qtop) RM[i] = 1 }
             continue
           }
@@ -595,18 +636,25 @@ shell_lex() {
             C[i] = "x"; if (dc == 1) RM[i] = 1; if (i < N) { i++; C[i] = "e" }
             continue
           }
+          # dash reads `$` and a single-quoted string: the same extent unless
+          # an escaped quote is inside (AQ above), so the `$` is blanked with
+          # the string as bash blanks it, and only its word value differs.
+          if (c == "$" && X[i+1] == "\047" && shd) { C[i] = "q"; continue }
           if (c == "$" && X[i+1] == "\047") {
             C[i] = "q"; C[i+1] = "q"; qtop = (dc == 1); if (qtop) { RM[i] = 1; RM[i+1] = 1 }
             i++; mode = "AQ"; continue
           }
           if (c == "\047") {
-            # Inside "${...}" bash opens a quote here and zsh reads a plain
-            # character (forms P4, Q6). Both readings are judged: the second
-            # policy is the zsh reading.
-            if (top == "V" && dq > 0) { ambig_q = 1; if (zq) continue }
+            # Inside arithmetic, and inside "${...}" within double quotes, bash
+            # opens a quote here; zsh and dash read a plain character (forms
+            # QM, P4, Q6).
+            if (top == "A" || top == "K" || top == "V" && dq > 0) { div = 1; if (!shb) continue }
             C[i] = "q"; mode = "SQ"; qtop = (dc == 1); if (qtop) RM[i] = 1; continue
           }
-          if (c == "\042") { C[i] = "q"; if (dc == 1) RM[i] = 1; push("D"); continue }
+          if (c == "\042") {
+            if (top == "A" || top == "K") { div = 1; if (!shb) continue }
+            C[i] = "q"; if (dc == 1) RM[i] = 1; push("D"); continue
+          }
           # case ... esac: a pattern close `)` closes no substitution (form P8).
           if ((c == "c" || c == "e") && wordstart(i) && (i + 4 > N || X[i+4] ~ /[ \t\n;&|()<>]/)) {
             w4 = X[i] X[i+1] X[i+2] X[i+3]
@@ -623,16 +671,18 @@ shell_lex() {
             if (cpat[d] == 1 && c == "(" && !cpw[d]) continue
             if (cpat[d] == 1 && c == ")") { C[i] = "p"; cpat[d] = 2; continue }
             if (cpat[d] == 1 && c !~ /[ \t\n]/) cpw[d] = 1
-            # An arm ends at `;;`, `;&`, `;;&`, or zsh `;|` (forms X8, X9).
-            if (cpat[d] == 2 && c == ";" && (X[i+1] == ";" || X[i+1] == "&" || X[i+1] == "|")) {
+            # An arm ends at `;;` or `;&` (forms X8, X9), at `;;&` in bash and
+            # at `;|` in zsh. The other shells fail to parse those two, so
+            # each is its own reading rule and the bash reading says DIVERGE
+            # at both.
+            if (cpat[d] == 2 && c == ";" && (X[i+1] == "|" || X[i+1] == ";" && X[i+2] == "&")) div = 1
+            if (cpat[d] == 2 && c == ";" && (X[i+1] == ";" || X[i+1] == "&" || X[i+1] == "|" && shz)) {
               C[i+1] = cls; i++
-              if (X[i] == ";" && X[i+1] == "&") { C[i+1] = cls; i++ }
+              if (X[i] == ";" && X[i+1] == "&" && shb) { C[i+1] = cls; i++ }
               cpat[d] = 1; cpw[d] = 0; continue
             }
           }
           if (top == "A" || top == "K") {
-            if (c == "<" && X[i+1] == "<" && X[i+2] != "<") ambig_a = 1
-            if (c == "#" && wordstart(i)) ambig_a = 1
             if (top == "K") { if (c == "]") pop(); continue }
             if (c == "(") par[d]++
             else if (c == ")") { if (par[d] > 0) par[d]--; else if (X[i+1] == ")") { i++; C[i] = cls; pop() } }
@@ -641,13 +691,14 @@ shell_lex() {
           }
           if (c == "#" && (wordstart(i) || top == "B" && X[i-1] == "`") && top != "V") { C[i] = "m"; mode = "CM"; continue }
           if (c == "$" && X[i+1] == "(" && X[i+2] == "(") { C[i+1] = cls; C[i+2] = cls; arith_or_sub(i, 1); continue }
-          # `((` reads as arithmetic in the first reading wherever it stands; a
-          # hand list of command positions missed backticks, case patterns,
-          # coproc and time -p (forms P1, P2, P15, Q2). Where it holds `<<` or a
-          # comment, AMBIG hands on the subshell reading too.
+          # `((` is decided wherever it stands, not only where a command starts:
+          # a hand list of command positions missed backticks, case patterns,
+          # coproc and time -p (forms P1, P2, P15, Q2).
           if (c == "(" && X[i+1] == "(") { C[i+1] = cls; arith_or_sub(i, 0); continue }
           if (c == "$" && X[i+1] == "(") { C[i+1] = cls; i++; push("S"); continue }
-          if (c == "$" && X[i+1] == "[") { C[i+1] = cls; i++; push("K"); continue }
+          # dash has no `$[`: the bytes are a word, quotes and comments in it
+          # read as anywhere else (forms K1, K2).
+          if (c == "$" && X[i+1] == "[") { div = 1; if (shd) continue; C[i+1] = cls; i++; push("K"); continue }
           if (c == "$" && X[i+1] == "{") { C[i+1] = cls; i++; push("V"); continue }
           if (c == "`") { if (top == "B") pop(); else push("B"); continue }
           if (top == "V") { if (c == "}") pop(); continue }
@@ -658,13 +709,7 @@ shell_lex() {
         }
         if (mode == "SQ" || mode == "AQ" || d > 1 || np > 0) unterm = 1
         flagfile = ENVIRON["SAFEDEPS_LEX_FLAGS"]
-        ambig = ambig_a || ambig_q
-        if (flagfile != "") {
-          if (ambig) print "AMBIG" >> flagfile
-          if (ambig_a) print "AMBIG_ARITH" >> flagfile
-          if (ambig_q) print "AMBIG_DQQ" >> flagfile
-          if (unterm) print "UNTERM" >> flagfile
-        }
+        if (flagfile != "" && unterm) print "UNTERM" >> flagfile
         # A reading that never closes strips nothing: a prefix word would run to
         # the end of the input and take every line after it along (form A7, a
         # heredoc inside `$((` that bash reads as arithmetic). Such a command is
@@ -673,13 +718,18 @@ shell_lex() {
         # Statement starts are read only from a reading that closes, for the
         # same reason: a word walk through a quote or a body that never ends
         # marks starts the shell never reads.
-        if (view == "stmts" && !unterm) starts()
+        if (view == "stmts" && !unterm) starts_all()
+        if (div) {
+          if (divfile != "") print "DIVERGE" >> divfile
+          if (divmemo != "") print "DIVERGE" > divmemo
+        }
         # The same holds for redirections: in a reading that never closes, a
         # stripped target changes how the rest reads, and the view stops
         # being idempotent (random inputs in scan-contract).
-        if ((view == "noredir" && !unterm) || view == "pieces") redirs()
+        if ((view == "noredir" && !unterm) || view == "pieces" || view == "cscripts" || view == "stmts") redirs()
         if (view == "substs") emit_substs()
         else if (view == "pieces") emit_pieces()
+        else if (view == "cscripts") emit_cscripts()
         else emit()
       }
 
@@ -801,7 +851,7 @@ shell_lex() {
           else if (w == "exec") { envmode = 0; execmode = 1; cmdmode = 0; hit = 1 }
           else if (w == "command") { envmode = 0; cmdmode = 1; execmode = 0; hit = 1 }
           else if (w == "time") { envmode = 0; timemode = 1; continue }
-          else if (opener(w) || w == "coproc") { envmode = 0; continue }
+          else if (opener(w) || shz && zopener(w) || w == "coproc") { envmode = 0; continue }
           else { atstart = 0; envmode = 0; continue }
           mark(s, k - 1)
           while (k <= N && C[k] == "c" && DEP[k] == 1 && (X[k] == " " || X[k] == "\t")) { A[k] = 1; k++ }
@@ -812,25 +862,38 @@ shell_lex() {
       # prefixes() and starts() read it. SAFEDEPS_G_START used to carry a
       # second copy as a regex chain, and a chain names only the words before
       # a command, never the shell state that puts one there (the function
-      # heads, `for ((...))`, the zsh short forms).
-      function opener(w) { return w ~ /^(!|[{]|[}]|if|then|else|elif|while|until|do|always)$/ }
+      # heads, `for ((...))`, the zsh short forms). zopener() holds the two
+      # only zsh reads so: `}` closes a group wherever it stands, and
+      # `always` opens the block after one.
+      function opener(w) { return w ~ /^(!|[{]|if|then|else|elif|while|until|do)$/ }
+      function zopener(w) { return w == "}" || w == "always" }
       # A word that assigns. It stays with the command it prefixes.
       function assignword(w) { return w ~ /^[A-Za-z_][A-Za-z0-9_]*=/ }
-      # Where each command starts, for the stmts view. The walk follows the
-      # shell grammar word by word and keeps st set while the next word stands
-      # where the shell reads a command name: after a separator or a case
-      # pattern, a reserved word, a function head (an empty `()`, or
-      # `function NAME... {`), `time` and its options, `coproc` and
-      # `coproc NAME {`, and the zsh short forms: `for NAME... (WORDS)`,
-      # `repeat WORD`, `[[ ... ]]`, an arithmetic `((...))` before a body. The
-      # blank before such a word is marked in BND, and the view prints it as
-      # `;`. Assignments and redirections before a command are part of it, so
-      # no mark falls between them and the command; the word after a
+      # Where each command starts, for the stmts view, in the reading rs. The
+      # walk follows the shell grammar word by word and keeps st set while the
+      # next word stands where the shell reads a command name. The blank
+      # before such a word is marked in B, and the view prints it as `;`.
+      # Assignments and redirections before a command are part of it, so no
+      # mark falls between them and the command; the word after a
       # redirection operator is its target, never a command.
+      #
+      # Every reading: after a separator or a case pattern, a reserved word, a
+      # function head (an empty `()`, or `function NAME... {`), `time` and its
+      # options, `coproc`, `for NAME... {` and `for ((...)) {`. A rule may be
+      # shared only when it adds starts: a shell that has no such form fails
+      # to parse the command, and runs none of it (measured per shell in
+      # scan-contract). zsh alone: `}` wherever it stands, `always`, the short
+      # forms `for NAME (WORDS)`, `foreach`, `repeat WORD`, `[[ ... ]]` and an
+      # arithmetic `((...))` before a body, and `case WORD {`. bash alone:
+      # `coproc NAME {`. These take starts away from what the shared walk
+      # reads (the words in `for i (1)`) or only one shell runs them, so the
+      # reading that is not that shell does not read them; the bash reading
+      # walks all three and says DIVERGE where they differ (see starts_all).
       #
       # The arithmetic word is read as such: its first `(` is a separator to
       # the word walk, so the word starts at the second one, with AR after it.
-      function starts(   k, s, w, op, st, pre, rd, fn, fr, inp, rp, dbr, cop, tm, cs) {
+      function starts(rs, B,   k, s, w, op, st, pre, rd, fn, fr, inp, rp, dbr, cop, tm, cs, zr, br) {
+        zr = (rs == "zsh"); br = (rs == "bash")
         st = 1; pre = 0; rd = 0; fn = 0; fr = 0; inp = 0; rp = 0; dbr = 0; cop = 0; tm = 0; cs = 0; k = 1
         while (k <= N) {
           if (word_sep(k)) {
@@ -846,7 +909,7 @@ shell_lex() {
             }
             else if (op == "(") {
               if (X[k+1] == "(" && (k + 2) in AR) { }
-              else if (fr == 2) { inp = 1; fr = 0 }
+              else if (zr && fr == 2) { inp = 1; fr = 0 }
               else { st = 1; pre = 0; rd = 0; fn = 0; fr = 0; rp = 0; cop = 0; tm = 0 }
             }
             else if (op == ")") {
@@ -860,7 +923,7 @@ shell_lex() {
           while (k <= N && !word_sep(k)) { w = w X[k]; k++ }
           if (inp) continue
           if (rd) { rd = 0; continue }
-          if (dbr) { if (w == "]]") { dbr = 0; st = 1 }; continue }
+          if (dbr) { if (w == "]]") { dbr = 0; st = zr }; continue }
           if (fn) { if (w == "{") { fn = 0; st = 1 }; continue }
           if (fr == 1) { fr = 2; continue }
           if (fr == 2) {
@@ -870,9 +933,10 @@ shell_lex() {
           }
           if (rp) { rp = 0; st = 1; continue }
           if (cs == 1) { cs = 2; continue }
-          if (cs == 2) { cs = (w == "{") ? 3 : 0; continue }
+          if (cs == 2) { cs = (zr && w == "{") ? 3 : 0; continue }
           if (!st) {
-            if (cop == 2 && w == "{") st = 1
+            if (br && cop == 2 && w == "{") st = 1
+            else if (zr && w == "}") st = 1
             cop = 0
             continue
           }
@@ -880,39 +944,60 @@ shell_lex() {
           tm = 0
           # A file descriptor number glued to a redirection belongs to it.
           if (w ~ /^[0-9]+$/ && (X[k] == "<" || X[k] == ">")) continue
-          if (!pre) mark_start(s)
+          if (!pre) mark_start(s, B)
           pre = 0
           # The word after `coproc` is a command to zsh and to bash, unless
           # bash reads it as the NAME of a `coproc NAME {`. It is marked, and
           # read on as at any other start, so that the view read again, where
           # the mark is a separator, reads it the same way.
           if (cop == 1) cop = (w == "{") ? 0 : 2
-          if (opener(w)) { cop = 0; continue }
+          if (opener(w) || zr && zopener(w)) { cop = 0; continue }
           if (assignword(w)) { pre = 1; continue }
           if (w == "time") { tm = 1; continue }
           if (w == "function") { fn = 1; continue }
-          if (w == "for" || w == "foreach" || w == "select") { fr = 1; continue }
-          if (w == "repeat") { rp = 1; continue }
+          if (w == "for" || w == "select" || zr && w == "foreach") { fr = 1; continue }
+          if (zr && w == "repeat") { rp = 1; continue }
           if (w == "[[") { dbr = 1; continue }
           if (w == "coproc") { cop = 1; continue }
           if (w == "case") { cs = 1; st = 0; continue }
-          if (substr(w, 1, 1) == "(" && (s + 1) in AR) continue
+          if (zr && substr(w, 1, 1) == "(" && (s + 1) in AR) continue
           st = 0
         }
       }
-      # Mark the blank before the word at s as a statement start, unless the
-      # byte before the blanks already starts one (a separator, a case
-      # pattern, the start of the text). Only a top-level blank is marked, so
-      # no mark falls inside quotes, a substitution, arithmetic or a heredoc.
+      # The starts of this reading in BND. The bash reading also walks as zsh
+      # and as dash, and says DIVERGE where a start differs, so that a form
+      # only zsh runs brings the zsh reading in. On the same classes the walks
+      # differ only by the rules above; where the classes themselves differ,
+      # the lexing has said DIVERGE already.
+      function starts_all(   j) {
+        starts(policy, BND)
+        if (!shb || div) return
+        starts("zsh", BZ); starts("dash", BD)
+        for (j in BZ) if (!(j in BND)) { div = 1; return }
+        for (j in BD) if (!(j in BND)) { div = 1; return }
+        for (j in BND) if (!(j in BZ) || !(j in BD)) { div = 1; return }
+      }
+      # Mark the blank before the word at s as a statement start in B, unless
+      # the byte before the blanks already starts one (a separator, the start
+      # of the text). Only a top-level blank is marked, so no mark falls inside
+      # quotes, a substitution, arithmetic or a heredoc.
+      #
+      # A case pattern close is marked the same way, on the blank after it,
+      # and the close itself stays. Written over the close, the view read
+      # again had a pattern that ran on to the next top-level `)` of the arm
+      # (`case x in x) (echo hi);; esac`), which closed it there instead. Only
+      # an arm glued to its close (`x)pip`) has no blank, and the close is
+      # marked.
       #
       # A word glued to what is before it (`}\pip`, `}\047a\047b`) has no blank
       # to mark, but the view prints its leading backslash or quote as one,
       # and the view read again would mark that. So the last of those bytes is
       # marked instead, which keeps the view idempotent; a word the view
       # prints all blank is no word read again, and is not marked.
-      function mark_start(s,   k, j, t) {
+      function mark_start(s, B,   k, j, t) {
         if (s < 2) return
         if ((X[s-1] == " " || X[s-1] == "\t") && C[s-1] == "c" && DEP[s-1] == 1) t = s - 1
+        else if (C[s-1] == "p") t = s - 1
         else {
           j = s
           while (j <= N && !word_sep(j) && C[j] != "c" && C[j] != "p" && C[j] != "e") j++
@@ -921,9 +1006,9 @@ shell_lex() {
         }
         k = s - 1
         while (k >= 1 && (X[k] == " " || X[k] == "\t") && C[k] == "c") k--
-        if (k < 1 || C[k] == "p") return
+        if (k < 1) return
         if (C[k] == "c" && DEP[k] == 1 && X[k] ~ /[\n;&|(]/) return
-        BND[t] = 1
+        B[t] = 1
       }
       # The `)` at k closes an empty `()`: a function head.
       function emptyparen(k,   j) {
@@ -961,17 +1046,78 @@ shell_lex() {
         while (k >= 1 && X[k] ~ /[a-z]/) { w = X[k] w; k-- }
         return w ~ /^(if|then|else|elif|while|until|do|time)$/
       }
-      function arith_or_sub(j, dollar) {
-        if (subp) {
-          if (dollar) { i = j + 1; push("S") }
-          else { i = j + 1; par[d] += 2 }
-          return
+      # `((` (dollar=0) or `$((` (dollar=1) at byte j, decided the way this
+      # reading decides it (see the table above). The bash reading also asks
+      # how the others decide, and says DIVERGE where they differ.
+      function arith_or_sub(j, dollar,   k, a, ab, az) {
+        k = j + dollar + 2
+        if (shd) a = dollar
+        else if (shz) a = (la(k, 1) != 0)
+        else {
+          ab = (la(k, 0) != 0); az = (la(k, 1) != 0)
+          if (ab != az || az != dollar) div = 1
+          a = ab
         }
-        i = j + dollar + 1; push("A")
+        if (a) { i = j + dollar + 1; push("A"); return }
+        if (dollar) { i = j + 1; push("S") }
+        else { i = j + 1; par[d] += 2 }
+      }
+      # The look-ahead bash and zsh make at `((`: from byte k to the first `)`
+      # not nested in a parenthesis. 1 when another `)` follows it
+      # (arithmetic), 0 when not (a subshell), -1 when there is none. With lit
+      # set, a bare quote is a character (zsh); bash honors it. Both step over
+      # an escape, `$(...)`, `${...}` and backticks whole, each read with its
+      # own quoting (forms LA1-LA5).
+      function la(k, lit,   depth, cc) {
+        depth = 0
+        while (k <= N) {
+          cc = X[k]
+          if (cc == "\\") { k += 2; continue }
+          if (cc == "$" && (X[k+1] == "(" || X[k+1] == "{")) { k = la_close(k + 2, X[k+1] == "(" ? ")" : "}"); continue }
+          if (cc == "`") { k = la_bq(k + 1); continue }
+          if (!lit && cc == "\047") { k = la_sq(k + 1); continue }
+          if (!lit && cc == "\042") { k = la_dq(k + 1); continue }
+          if (cc == "(") depth++
+          else if (cc == ")") { if (depth > 0) depth--; else return (X[k+1] == ")") ? 1 : 0 }
+          k++
+        }
+        return -1
+      }
+      # The byte after the closer of a unit opened just before k, quotes honored.
+      function la_close(k, closer,   depth, cc) {
+        depth = 0
+        while (k <= N) {
+          cc = X[k]
+          if (cc == "\\") { k += 2; continue }
+          if (cc == "\047") { k = la_sq(k + 1); continue }
+          if (cc == "\042") { k = la_dq(k + 1); continue }
+          if (cc == "`") { k = la_bq(k + 1); continue }
+          if (cc == "$" && (X[k+1] == "(" || X[k+1] == "{")) { k = la_close(k + 2, X[k+1] == "(" ? ")" : "}"); continue }
+          if (closer == ")" && cc == "(") depth++
+          else if (cc == closer) { if (depth > 0) depth--; else return k + 1 }
+          k++
+        }
+        return N + 1
+      }
+      function la_sq(k) { while (k <= N && X[k] != "\047") k++; return k + 1 }
+      function la_dq(k,   cc) {
+        while (k <= N) {
+          cc = X[k]
+          if (cc == "\\") { k += 2; continue }
+          if (cc == "\042") return k + 1
+          if (cc == "`") { k = la_bq(k + 1); continue }
+          if (cc == "$" && (X[k+1] == "(" || X[k+1] == "{")) { k = la_close(k + 2, X[k+1] == "(" ? ")" : "}"); continue }
+          k++
+        }
+        return N + 1
+      }
+      function la_bq(k) {
+        while (k <= N) { if (X[k] == "\\") { k += 2; continue } if (X[k] == "`") return k + 1; k++ }
+        return N + 1
       }
       # `<<`, an optional `-`, blanks, then the delimiter word with its quoting
       # removed. A quoted delimiter makes the body literal.
-      function heredoc_op(j,   k, strip, w, q, cc) {
+      function heredoc_op(j,   k, strip, w, q, cc, sk) {
         k = j + 2; strip = 0
         if (X[k] == "-") { strip = 1; k++ }
         while (X[k] == " " || X[k] == "\t") k++
@@ -986,6 +1132,8 @@ shell_lex() {
         }
         if (w == "") { C[j] = cls; return j }
         np++; pd[np] = w; ps[np] = strip; pq[np] = q; pstart[np] = j; pdq[np] = (dq > 0); pb[np] = (ctx[d] == "B")
+        pS[np] = 0
+        for (sk = d; sk > 1; sk--) if (ctx[sk] == "S") { pS[np] = 1; break }
         for (mm = j; mm < k && mm <= N; mm++) C[mm] = "h"
         return k - 1
       }
@@ -1024,7 +1172,11 @@ shell_lex() {
             t = line; if (ps[p]) sub(/^\t+/, "", t)
             # Inside backticks the delimiter may be followed at once by the
             # closing backtick, which the main loop then reads as code (P19).
-            if (pb[p] && index(t, pd[p] "`") == 1) {
+            # bash reads the delimiter followed at once by `)` as the end of a
+            # body inside `$(...)`, and the `)` as code; zsh and dash read
+            # the line as body (forms A2, HC1-HC3).
+            if (shb && pS[p] && index(t, pd[p] ")") == 1) div = 1
+            if (pb[p] && index(t, pd[p] "`") == 1 || shb && pS[p] && index(t, pd[p] ")") == 1) {
               lead = length(line) - length(t)
               body_region(bs, s - 1, p)
               for (kk = s; kk < s + lead + length(pd[p]); kk++) C[kk] = "b"
@@ -1057,6 +1209,59 @@ shell_lex() {
           return
         }
         nh++; HSTART[bs] = nh; HEND[nh] = be
+      }
+      # The scripts the command hands to a shell. Words are cut where the shell
+      # cuts them (word_sep) and read after its quote removal, so a script word
+      # holding escaped quotes, blanks in quotes, glued quoting, an ANSI-C word or
+      # escaped blanks is the string the shell passes. Each record ends in \035:
+      # `S` and the word after `sh|bash|zsh|dash -...c`, or `E` and the words
+      # after `eval` joined by blanks. A $\047...\047 escape this cannot name
+      # adds a record `!`.
+      function emit_cscripts(   k, w, inw, n, W) {
+        buf = ""; held = 0; n = 0; w = ""; inw = 0
+        for (k = 1; k <= N + 1; k++) {
+          if (k > N || word_sep(k)) {
+            if (inw) { W[++n] = w; w = ""; inw = 0 }
+            if (k > N || C[k] == "p" || C[k] == "c" && DEP[k] == 1 && X[k] ~ /[\n;&|()]/) { cscripts_of(W, n); n = 0 }
+            continue
+          }
+          inw = 1
+          if (k in DROP) continue
+          if (k in VAL) w = w VAL[k]
+          else if (!RM[k]) w = w X[k]
+        }
+        if (aqbad) put("!\035")
+        printf "%s", buf
+      }
+      # A shell is any command word whose name ends in sh (ksh, csh, tcsh, fish
+      # as well as sh, bash, zsh, dash): the reader it replaced matched those
+      # by a regex open on the left, and narrowing it to four names passed
+      # `ksh -c "pip install ..."` with no verdict (caught in review). Options
+      # may stand before -c: -o and +o take a name, -- ends the options.
+      function cscripts_of(W, n,   j, m, s, base, args) {
+        for (j = 1; j <= n; j++) {
+          base = W[j]; sub(/.*\//, "", base)
+          if (base ~ /sh$/ && j < n) {
+            for (m = j + 1; m <= n; m++) {
+              # -o, or a cluster ending in o (-euo), takes the next word as an option name
+              if (W[m] ~ /^[-+][A-Za-z]*o$/) { m++; continue }
+              if (W[m] ~ /^-[A-Za-z]*c[A-Za-z]*$/) {
+                s = m + 1
+                if (s <= n && W[s] == "--") s++
+                if (s <= n) { put("S" W[s] "\035"); j = s }
+                break
+              }
+              if (W[m] ~ /^[-+][A-Za-z]+$/ || W[m] == "--") continue
+              break
+            }
+            continue
+          }
+          if (W[j] == "eval" && j < n) {
+            args = ""
+            for (m = j + 1; m <= n; m++) args = args (m > j + 1 ? " " : "") W[m]
+            put("E" args "\035"); break
+          }
+        }
       }
       function emit_substs(   k, a, z, t, b) {
         buf = ""; held = 0
@@ -1098,8 +1303,13 @@ shell_lex() {
             # when the scan is read again: after a blanked region (a quoted word
             # with a `#` glued to its closing quote) it would follow a blank,
             # which is where a comment starts.
-            if (view == "stmts" && (cl == "p" || k in BND)) put(";")
-            else if (view == "stmts" && (k in AR) && (cc == ";" || cc == "&" || cc == "|")) put("_")
+            if (view == "stmts" && (k in BND)) put(";")
+            # A statement ends only at a top-level separator: not inside a
+            # substitution, an expansion or arithmetic, and not in a
+            # redirection operator (`>|`, `<&-`, `2>&1`). command_statements
+            # cut wherever these bytes were, so the words after
+            # `$(pwd | sed x)` or `>| f` left the install (caught in review).
+            else if (view == "stmts" && cl == "c" && (DEP[k] != 1 || (k in DROP)) && cc ~ /[;&|\n]/) put(cc == "\n" ? " " : "_")
             else if (cl == "c" || cl == "p") put(cc == "#" && (k == 1 || C[k-1] != "c" && C[k-1] != "e") ? "_" : cc)
             else if (cl == "e") put(index(";&|()<>!{}#`\042\047\\$", cc) ? "_" : (cc == "\n" ? " " : cc))
             else if (view == "live" && (cl == "Q" || cl == "B")) put(cc)
@@ -1113,11 +1323,6 @@ shell_lex() {
             # the stmts view of it marked no start (`case x in x) { ... }`).
             # The stmts view writes the close as `;` itself.
             if (!(k in A)) put(cc)
-            if (k == N && ambig && view == "unprefixed") {
-              # Where bash and zsh read the text differently, the prefixes were
-              # found on one reading only; hand on the text as written too.
-              put("\n"); for (p = 1; p <= N; p++) put(X[p])
-            }
             continue
           }
           if (view == "code") {
@@ -1159,7 +1364,7 @@ shell_lex() {
 # checks this implementation against them. The marker names this reading for
 # the scan-failure census and the scan-contract shims.
 command_scan_text() {
-  shell_lex "$1" scan arith "safedeps:command_scan_text"
+  shell_lex "$1" scan "safedeps:command_scan_text"
 }
 
 # What the install recognizers read: the stmts view, where every place a
@@ -1172,14 +1377,13 @@ command_scan_text() {
 # The marker is the scan's, so a failed reading here fails the recognition the
 # same way (scan-contract's scanner shims).
 command_start_text() {
-  shell_lex "$1" stmts "${2:-arith}" "safedeps:command_scan_text"
+  shell_lex "$1" stmts "safedeps:command_scan_text"
 }
 
 normalize_install_text() {
-  local text="$1" view="unprefixed" policy="${3:-arith}"
+  local text="$1" view="unprefixed"
   local normalized unprefixed
   # `lines`: <text> holds one statement per line, each read on its own.
-  # <policy>: the reading <text> belongs to (see shell_lex).
   [[ "${2:-}" != lines ]] || view="unprefixed-lines"
 
   # An absolute path before an executable reads as the executable.
@@ -1199,7 +1403,7 @@ normalize_install_text() {
   # `FOO="a b" pip install evil==6.6.6` and `FOO=$(cmd arg) pip install ...`
   # kept their prefix and the install after it was never recognized (caught in
   # review). A failed reading keeps the text it had and is recorded.
-  if unprefixed=$(shell_lex "${normalized}" "${view}" "${policy}" "safedeps:normalize_install_text"); then
+  if unprefixed=$(shell_lex "${normalized}" "${view}" "safedeps:normalize_install_text"); then
     normalized="${unprefixed}"
   fi
   printf '%s' "${normalized}"
@@ -1210,9 +1414,9 @@ normalize_install_text() {
 # whose command pipes into something. Both come from shell_lex.
 strip_heredoc_bodies() {
   if [[ "${2:-commands}" == "shell-bodies" ]]; then
-    shell_lex "$1" shell-bodies arith "safedeps:strip_heredoc_bodies"
+    shell_lex "$1" shell-bodies "safedeps:strip_heredoc_bodies"
   else
-    shell_lex "$1" code arith "safedeps:strip_heredoc_bodies"
+    shell_lex "$1" code "safedeps:strip_heredoc_bodies"
   fi
 }
 
@@ -1225,94 +1429,45 @@ strip_heredoc_bodies() {
 # written after one passed with no verdict (caught in review). Callers strip,
 # once.
 extract_shell_c_payloads() {
-  read_payload_words "$1" '(bash|sh|zsh)[[:space:]]+-[A-Za-z]*c[[:space:]]+'
+  read_payload_scripts "$1" S
 }
 
 extract_eval_payloads() {
-  read_payload_words "$1" '(^|[[:space:];|&])eval[[:space:]]+'
+  read_payload_scripts "$1" E
 }
 
-# The word after each <head> in <text>, read as a payload: a double-quoted word
-# up to its first `"`, or a single-quoted one up to its next `'`, printed one
-# per line.
+# The scripts <text> hands to `sh -c` (kind S) or to `eval` (kind E), one per
+# line, read off the lexer's cscripts view: the word the shell passes, quotes
+# removed and escapes applied, and recursively the scripts inside those.
 #
-# That is all this reader knows of the shell's quoting, so it says when the
-# word is something else. `sh -c "echo \"hi\"; pip install evil==1.0.0"` read
-# up to the first `"` is `echo \`, which installs nothing, and the install the
-# shell runs after it passed with no verdict -- and so did a word glued to more
-# quoting (`'echo hi'"; pip install ..."`), an ANSI-C word (`$'...'`) and an
-# unquoted word with escapes (`pip\ install\ evil==1.0.0`). A reader that cannot
-# read its input to the end marks a failed reading, and the gate settles it
-# (guard_settle_scan_failure): a command naming a package manager is then
-# UNDECIDED. Only a head in live code is held to this. A head inside quoted
-# text is data the shell does not run, and its payload is still read as before.
-#
-# Reading these words the way the shell does -- quotes removed, escapes
-# applied -- is the plan safedeps/command-words-read-as-the-shell-dequotes; this
-# is the floor under it.
-read_payload_words() {
-  local LC_ALL=C
-  local text="$1" head_re="$2" rest="$1" m pre off=0 word content after live="" unread
-  # Kept in variables: written inline, bash 3.2 and 5 read the backslashes
-  # differently.
-  local dq_re='^"([^"]*)"' sq_re="^'([^']*)'" odd_re='(^|[^\])(\\\\)*\\$' bare_re='^[^[:space:];&|)<>]*'
-  while [[ "${rest}" =~ ${head_re} ]]; do
-    m="${BASH_REMATCH[0]}"
-    pre="${rest%%"${m}"*}"
-    off=$(( off + ${#pre} + ${#m} ))
-    rest="${rest#*"${m}"}"
-    word="${rest}"
-    unread=false
-    content=""
-    after=""
-    case "${word:0:1}" in
-      '"')
-        if [[ "${word}" =~ ${dq_re} ]]; then
-          content="${BASH_REMATCH[1]}"
-          after="${word:${#BASH_REMATCH[0]}:1}"
-          # The `"` that ended it is escaped: the word goes on.
-          [[ "${content}" =~ ${odd_re} ]] && unread=true
-          printf '%s\n' "${content}"
-        else
-          unread=true
-        fi
-        ;;
-      "'")
-        if [[ "${word}" =~ ${sq_re} ]]; then
-          content="${BASH_REMATCH[1]}"
-          after="${word:${#BASH_REMATCH[0]}:1}"
-          printf '%s\n' "${content}"
-        else
-          unread=true
-        fi
-        ;;
-      '$') [[ "${word:1:1}" == "'" ]] && unread=true ;;
-      *)
-        [[ "${word}" =~ ${bare_re} ]]
-        [[ "${BASH_REMATCH[0]}" == *[\\\'\"]* ]] && unread=true
-        ;;
-    esac
-    # A quoted word glued to more of the same word.
-    case "${after}" in
-      ''|' '|$'\t'|$'\n'|';'|'&'|'|'|')'|'<'|'>') ;;
-      *) unread=true ;;
-    esac
-    [[ "${unread}" == true ]] || continue
-    if [[ -z "${live}" ]]; then
-      live=$(shell_lex "${text}" live arith "safedeps:read_payload_words"; printf 'X') || live="X"
-      live="${live%X}"
+# The reader this replaced took the word after `-c` up to its first matching
+# quote. `sh -c "echo \"hi\"; pip install evil==1.0.0"` read that way is
+# `echo \`, which installs nothing, and the install the shell runs after it
+# passed with no verdict -- as did glued quoting, an ANSI-C word and escaped
+# blanks. A floor that marked every such word unread made ordinary commands
+# UNDECIDED (`bash -c "cd \"$dir\" && npm run build"`, 24 of 30 measured), so
+# the word is read as the shell reads it instead, and only an escape the lexer
+# cannot name is a failed reading. A head inside quoted text is data: the
+# shell does not split that text into words, and neither does this.
+read_payload_scripts() {
+  local text="$1" kind="$2" depth="${3:-0}" out rec
+  out=$(shell_lex "${text}" cscripts "safedeps:read_payload_words") || return 0
+  while IFS= read -r -d $'\035' rec; do
+    if [[ "${rec}" == "!" ]]; then
+      guard_mark_reading_failed
+      continue
     fi
-    # The head is live code when the live view kept it.
-    [[ "${live:$(( off - ${#m} )):${#m}}" == "${m}" ]] || continue
-    guard_mark_reading_failed
-  done
+    [[ "${rec}" == "${kind}"* ]] && printf '%s\n' "${rec:1}"
+    # A script holding another: `sh -c 'sh -c "pip install ..."'`.
+    (( depth < 3 )) && read_payload_scripts "${rec:1}" "${kind}" $(( depth + 1 ))
+  done <<< "${out}"
 }
 
 extract_command_substitution_payloads() {
   # The bodies as the lexer delimits them. The string scan this replaced cut a
   # body at its first `)` (so a case pattern ended it) and did not unescape or
   # nest backticks, and it was a second parser of the command.
-  shell_lex "$1" substs arith "safedeps:extract_command_substitution_payloads"
+  shell_lex "$1" substs "safedeps:extract_command_substitution_payloads"
 }
 
 # Install text as the pipe checks search for it: a manager, then a verb
@@ -1484,12 +1639,13 @@ install_managers_blanked() {
       if (n % 2 == 0) exit 2
       L = (n - 1) / 2
       if (X[L + 1] != "\n") exit 2
-      # The view only blanks a byte, writes `_` for an escaped operator or an
-      # arithmetic one, or writes `;` for a statement start over a blank or the
-      # `)` that closes a case pattern.
+      # The view only blanks a byte, writes `_` for an escaped operator or a
+      # nested one, or writes `;` for a statement start: over a blank, over
+      # the `)` that closes a case pattern, or over the backslash or quote
+      # that a word glued to what is before it begins with (`f()\pip`).
       for (i = 1; i <= L; i++) {
         s = X[L + 1 + i]
-        if (s != X[i] && s != " " && s != "_" && !(s == ";" && X[i] ~ /[ \t)]/)) exit 2
+        if (s != X[i] && s != " " && s != "_" && !(s == ";" && X[i] ~ /[ \t)\\\047\042]/)) exit 2
       }
       # The first manager word inside each match, read on the scan text.
       mre = ENVIRON["SAFEDEPS_PIPE_MANAGER_RE"]
@@ -1545,20 +1701,9 @@ install_managers_blanked() {
 
 # The command as lines the shell reads as statements (the joined view): line
 # continuations removed, newlines inside quotes, heredoc bodies and comments
-# blanked. When the reading met an ambiguous arithmetic context it also hands
-# on the subshell reading, one after the other: a line either shell would run
-# is a line the gate reads.
+# blanked.
 join_line_continuations() {
-  local flags rc=0
-  flags=$(mktemp "${TMPDIR:-/tmp}/safedeps-lex.XXXXXX" 2>/dev/null) || flags=""
-  SAFEDEPS_LEX_FLAGS="${flags}" shell_lex "$1" joined arith "safedeps:join_line_continuations" || rc=1
-  local policy
-  for policy in $(lex_other_readings "${flags}"); do
-    printf '\n'
-    shell_lex "$1" joined "${policy}" "safedeps:join_line_continuations" || rc=1
-  done
-  [[ -z "${flags}" ]] || rm -f "${flags}"
-  return ${rc}
+  shell_lex "$1" joined "safedeps:join_line_continuations"
 }
 
 command_candidate_texts() {
@@ -1571,31 +1716,16 @@ command_candidate_texts() {
   command_payload_texts "${command}"
 }
 
-# The candidate texts as the install recognizers read them: the stmts view of
-# each, where every statement start is a separator. Each reading of the command
-# (the arith one, then whatever lex_other_readings names) is read whole, under
-# its own policy, and each payload on its own. Read one line at a time, the
-# second line of a case (`x) { pip install ...; };;`) is a case pattern with no
-# case before it, and its arm opened no statement (form X22 of the
-# statement-start judgment). Read as one text under one policy, the readings
-# run into each other: the zsh reading of an apostrophe in "${...}" sat inside
-# the quote the bash reading opened (shell-reading form P4).
+# The candidate texts as the install recognizers read them, in the current
+# reading: the stmts view of each, where every statement start is a separator.
+# The command is read whole and each payload on its own, since the inner shell
+# reads a payload from its start. Read one line at a time, the second line of a
+# case (`x) { pip install ...; };;`) is a case pattern with no case before it,
+# and its arm opened no statement (form X22 of the statement-start judgment).
 command_candidate_start_texts() {
-  local command="$1" flags policy
-  flags=$(mktemp "${TMPDIR:-/tmp}/safedeps-lex.XXXXXX" 2>/dev/null) || flags=""
-  command_reading_start_texts "$(SAFEDEPS_LEX_FLAGS="${flags}" shell_lex "${command}" joined arith "safedeps:join_line_continuations")" arith
-  for policy in $(lex_other_readings "${flags}"); do
-    command_reading_start_texts "$(shell_lex "${command}" joined "${policy}" "safedeps:join_line_continuations")" "${policy}"
-  done
-  [[ -z "${flags}" ]] || rm -f "${flags}"
-}
-
-# One reading's candidate texts (see command_candidate_start_texts). <joined> is
-# the joined view of the command under <policy>. A payload is a text of its
-# own, which the inner shell reads from the start.
-command_reading_start_texts() {
-  local joined="$1" policy="$2" payload
-  command_start_text "$(normalize_install_text "${joined}" "" "${policy}")" "${policy}"
+  local joined payload
+  joined=$(join_line_continuations "$1")
+  command_start_text "$(normalize_install_text "${joined}")"
   printf '\n'
   while IFS= read -r payload; do
     [[ -z "${payload}" ]] && continue
@@ -1682,7 +1812,7 @@ command_needs_inplace_inert() {
 # byte in place, so an offset there is the offset in <text>.
 inert_verb_ends() {
   local live matches
-  live=$(shell_lex "$1" live arith "safedeps:inert_offsets") || return 1
+  live=$(shell_lex "$1" live "safedeps:inert_offsets") || return 1
   # The grep and the awk run apart so that only "no match" reads as no verb: a
   # failed awk shared one `||` with grep's exit 1, and the rewrite was then
   # dropped as if there were nothing to rewrite.
@@ -1840,7 +1970,7 @@ inert_rewrite_in_place() {
 # the mark is what keeps a failure from reading as "no statements", which reads
 # as "no install".
 command_statements() {
-  local policy="${2:-arith}" raw_file scan_file
+  local raw_file scan_file
   raw_file=$(mktemp "${TMPDIR:-/tmp}/safedeps-stmt-raw.XXXXXX") \
     && scan_file=$(mktemp "${TMPDIR:-/tmp}/safedeps-stmt-scan.XXXXXX") || {
       rm -f "${raw_file:-}"
@@ -1854,7 +1984,7 @@ command_statements() {
   # where the `)` no longer closes a pattern, so the install was not at a
   # statement start: no spec and no record (caught when the lexer and the
   # extractor met in the release tree).
-  shell_lex "$1" stmts "${policy}" "safedeps:command_scan_text" > "${scan_file}"
+  shell_lex "$1" stmts "safedeps:command_scan_text" > "${scan_file}"
   if ! LC_ALL=C awk -v scan_file="${scan_file}" -v raw_file="${raw_file}" '
     # safedeps:command_statements (scripts/measure/scan-failure-census.sh and scripts/test/scan-contract.sh key on this line)
     function slurp(f,   out, line, count) {
@@ -2061,12 +2191,16 @@ guard_npmrc_unrecorded() {
 
 # Where each install statement in the command lands, one line per statement of
 # the command (command_statements), as `<kind>\035<dir>\035<why>\035<raw>`.
-# <kind> is `npm` for an npm CLI install that is not a runner, `other` for every
-# other install, `-` for a statement that is not an install (a `cd`, an
+# <kind> is `npm` for an npm CLI install that is not a runner,
+# `npm-unrecorded` for one no lockfile of the project records whatever lands
+# there (an .npmrc keeps it out of both lockfiles, or `npm link <pkg>` puts the
+# package in the global tree and only the link in the project), `other` for
+# every other install, `-` for a statement that is not an install (a `cd`, an
 # `echo`), whose <dir> and <why> are empty, and `?` when the statements could
 # not be read at all. <dir> is an absolute path,
-# `global`, or `?` when the text does not say. <why> is empty unless an .npmrc
-# keeps the install off the record, and then it names the file and the setting.
+# `global`, or `?` when the text does not say. <why> says why npm could not be
+# asked or answered `global`, or names the .npmrc file and setting that keep
+# the install off the record; it is empty otherwise.
 # <raw> is the statement as command_statements gives it.
 #
 # Every statement is listed, installs or not, because this is also the list of
@@ -2091,6 +2225,13 @@ guard_npmrc_unrecorded() {
 #     run time is `?`: a variable or substitution, a directory that does not
 #     exist yet, `popd`, a `cd` inside a group or subshell, and a `cd` beside a
 #     pipe or `&`, which run it in a subshell of its own.
+#     A `cd` that may not run at all is followed only as far as it provably
+#     ran. One after `&&` or `||`, or inside an if, while, until, for or case
+#     body, holds along the `&&` chain that follows it, where every statement
+#     runs only if the `cd` succeeded; past that chain the directory is the one
+#     before it. `false && cd sub; npm install x` installs in the cwd, and
+#     following that `cd` sent the gate to sub (validator round 3, G1). `cd sub
+#     || exit` is unconditional and is followed.
 #   - Global installs, which land in npm's global prefix and write no lockfile
 #     at all. Whether an install is global is npm's answer too: `npm root`
 #     names the global tree for it (lib/npm/ask.sh). A list of spellings
@@ -2108,41 +2249,62 @@ guard_npmrc_unrecorded() {
 #     builtin npmrc, and a file named only at run time, are outside what this
 #     reads; ARCHITECTURE.md states that boundary.
 #
-# Where bash and zsh read the command differently (shell_lex's axes), each
-# reading is resolved on its own, from the same cwd, and its statements follow
-# the first reading's. The readings used to be joined into one text and split
-# again under the first reading's policy, so a context the first reading left
-# open (`((` holding `<<`) swallowed the reading appended after it, and an
-# install only the zsh reading exposes yielded no statement, no spec and no
-# record (caught when the lexer and the extractor met in the release tree).
+# None of this decides whether the install was read. It decides where the
+# effect gate looks; the PostToolUse hook then looks for this command's install
+# trace there, and an install that left none is recorded UNGATED. A wrong
+# answer here costs a record, never a silent pass.
+#
+# This reads one reading of the command (SAFEDEPS_READING): the guard's
+# driver runs it once per reading and joins the lists. The readings used to be
+# joined into one text and split again under the first reading's rules, so a
+# context the first reading left open swallowed the reading appended after it,
+# and an install only the zsh reading exposes yielded no statement, no spec
+# and no record (caught when the lexer and the extractor met in the release
+# tree).
 resolve_install_targets() {
-  local cmd="$1" cwd="$2" stripped flags policy first
+  local cmd="$1" cwd="$2" stripped
   stripped=$(strip_heredoc_bodies "${cmd}")
-  if ! flags=$(mktemp "${TMPDIR:-/tmp}/safedeps-lex.XXXXXX" 2>/dev/null); then
-    flags=""
-    guard_mark_reading_failed
-  fi
-  first=$(SAFEDEPS_LEX_FLAGS="${flags}" shell_lex "${stripped}" joined arith "safedeps:join_line_continuations")
-  resolve_reading_targets "${first}" "${cwd}" arith
-  for policy in $(lex_other_readings "${flags}"); do
-    resolve_reading_targets "$(shell_lex "${stripped}" joined "${policy}" "safedeps:join_line_continuations")" "${cwd}" "${policy}"
-  done
-  [[ -z "${flags}" ]] || rm -f "${flags}"
+  resolve_reading_targets "$(join_line_continuations "${stripped}")" "${cwd}"
   return 0
 }
 
-# One reading's statements and where each lands (see resolve_install_targets).
-# <text> is the joined view of the command under <policy>.
+# Where npm says an install lands (lib/npm/ask.sh), asked once per run for each
+# question. Every reading resolves the statements it reads, and where the
+# readings agree they ask the same question; each ask costs two npm processes
+# and up to its deadline. The answer is kept in the run's private memo
+# directory under the whole question -- the directory, the npm word, the
+# environment words and the arguments, everything but the deadline -- and a
+# hit also requires the stored question to equal this one byte for byte.
+guard_npm_install_target() {
+  local question memo="" answer tmp
+  question=$(printf '%s\037' "$1" "${@:3}")
+  if [[ -n "${SAFEDEPS_LEX_CACHE:-}" && -d "${SAFEDEPS_LEX_CACHE}" ]]; then
+    memo="${SAFEDEPS_LEX_CACHE}/ask.$(printf '%s' "${question}" | cksum | tr ' ' '.')"
+    if [[ -f "${memo}.out" && -f "${memo}.in" ]] && [[ "$(cat "${memo}.in"; printf 'X')" == "${question}X" ]]; then
+      cat "${memo}.out"
+      return 0
+    fi
+  fi
+  answer=$(safedeps_npm_install_target "$@")
+  printf '%s\n' "${answer}"
+  if [[ -n "${memo}" ]] && tmp=$(mktemp "${memo}.XXXXXX" 2>/dev/null); then
+    { printf '%s\n' "${answer}" > "${tmp}" && mv -f "${tmp}" "${memo}.out" &&
+      printf '%s' "${question}" > "${tmp}" && mv -f "${tmp}" "${memo}.in"; } 2>/dev/null || rm -f "${tmp}"
+  fi
+}
+
+# The statements and where each lands (see resolve_install_targets). <text> is
+# the joined view of the command.
 resolve_reading_targets() {
-  local text="$1" cwd="$2" policy="${3:-arith}"
+  local text="$1" cwd="$2"
   local before stmt after words raw head target want kind manager tok value normalized in_env skip
   local user_rc cli_global_off why run_dir answer local_prefix npm_word npm_unknown i
   local dir="${cwd}" grouped=false env_userconfig=false exports_unknown=""
-  local npm_until=""
+  local npm_until="" here cond_dir="" depth=0 conditional
   local -a toks=() npm_env=() npm_args=() npm_exports=()
 
-  shell_lex "${text}" scan "${policy}" "safedeps:command_scan_text" | judge_grep -q '[(){}`]' && grouped=true
-  shell_lex "${text}" scan "${policy}" "safedeps:command_scan_text" | judge_grep -qEi 'npm_config_userconfig=' && env_userconfig=true
+  command_scan_text "${text}" | judge_grep -q '[(){}`]' && grouped=true
+  command_scan_text "${text}" | judge_grep -qEi 'npm_config_userconfig=' && env_userconfig=true
 
   while IFS=$'\035' read -r before stmt after words raw; do
     if [[ "${before}" == "?" ]]; then
@@ -2150,6 +2312,10 @@ resolve_reading_targets() {
       continue
     fi
     kind=- target="" why=""
+    # The directory a conditional `cd` entered holds only while every
+    # separator since it is `&&`.
+    [[ "${before}" == "&&" ]] || cond_dir=""
+    here="${cond_dir:-${dir}}"
     # One pass that `break` leaves early: every statement prints exactly one
     # line below, whichever test ends it.
     while :; do
@@ -2158,33 +2324,54 @@ resolve_reading_targets() {
       [[ ${#toks[@]} -gt 0 ]] || break
 
       # A statement may open with a group character glued to its command
-      # (`(cd x`). A reserved word before a command is a statement of its own
-      # here: the stmts view this splits on starts a statement at the command.
+      # (`(cd x`). A reserved word before a command is mostly a statement of
+      # its own here, since the stmts view this splits on starts a statement
+      # at the command; either way, a word that opens a compound command
+      # counts toward the depth a `cd` is conditional at.
       while [[ ${#toks[@]} -gt 0 ]]; do
         head="${toks[0]}"
         head="${head#"${head%%[!({!]*}"}"
         case "${head}" in
-          '') toks=("${toks[@]:1}") ;;
+          if|while|until) depth=$(( depth + 1 )); toks=("${toks[@]:1}") ;;
+          ''|then|do|else|elif|time) toks=("${toks[@]:1}") ;;
           *) toks[0]="${head}"; break ;;
         esac
       done
       [[ ${#toks[@]} -gt 0 ]] || break
+      case "${toks[0]}" in
+        for|select|case) depth=$(( depth + 1 )) ;;
+        fi|done|esac) (( depth == 0 )) || depth=$(( depth - 1 )) ;;
+      esac
 
       case "${toks[0]}" in
         cd|pushd|popd)
+          conditional=false
+          if [[ "${before}" == "&&" || "${before}" == "||" ]] || (( depth > 0 )); then
+            conditional=true
+          fi
           if [[ "${grouped}" == true || "${toks[0]}" == popd \
                 || "${before}" == "|" || "${before}" == "&" || "${after}" == "|" || "${after}" == "&" ]]; then
-            dir="?"
-            break
+            value="?"
+          else
+            value=""
+            for tok in "${toks[@]:1}"; do
+              case "${tok}" in -L|-P|-e|-@|-n) continue ;; esac
+              value="${tok}"
+              break
+            done
+            value=$(guard_literal_dir "${here}" "${value}")
+            [[ "${value}" == "?" || -d "${value}" ]] || value="?"
           fi
-          value=""
-          for tok in "${toks[@]:1}"; do
-            case "${tok}" in -L|-P|-e|-@|-n) continue ;; esac
-            value="${tok}"
-            break
-          done
-          dir=$(guard_literal_dir "${dir}" "${value}")
-          [[ "${dir}" == "?" || -d "${dir}" ]] || dir="?"
+          if [[ "${conditional}" == false ]]; then
+            dir="${value}"
+            cond_dir=""
+          elif [[ "${before}" == "||" ]]; then
+            # `a || cd sub && npm install x` runs npm without the cd when `a`
+            # succeeds, so not even the chain after it is known to be in sub.
+            cond_dir=""
+          else
+            cond_dir="${value}"
+          fi
           break
           ;;
         export)
@@ -2215,8 +2402,8 @@ resolve_reading_targets() {
       kind=other
       # The runner test is guard_segment_is_runner's, spelled out: that function
       # is defined further down, past the point where this one first runs.
-      if ! command_start_text "${normalized}" "${policy}" | grep -qEi "${SAFEDEPS_G_RUNNER_HEAD_RE}" \
-          && command_start_text "${normalized}" "${policy}" | grep -qEi "${SAFEDEPS_G_NPM_INSTALL_RE}"; then
+      if ! command_start_text "${normalized}" | grep -qEi "${SAFEDEPS_G_RUNNER_HEAD_RE}" \
+          && command_start_text "${normalized}" | grep -qEi "${SAFEDEPS_G_NPM_INSTALL_RE}"; then
         kind=npm
       fi
       manager=""
@@ -2231,8 +2418,8 @@ resolve_reading_targets() {
       # assignment. That is the directory npm runs in. The other managers'
       # relocation flags are read here too; npm's own (`--prefix`, `-C`) are
       # npm's to read, below.
-      run_dir="${dir}"
-      target="${dir}"
+      run_dir="${here}"
+      target="${here}"
       want=""
       skip=false
       in_env=false
@@ -2280,8 +2467,9 @@ resolve_reading_targets() {
       # `npm link <pkg>` installs a package the global tree lacks into npm's
       # global prefix from the registry (lib/commands/link.js linkInstall),
       # whatever the flags say: with `--global` npm refuses to run it at all.
-      if command_start_text "${normalized}" "${policy}" | grep -qEi "${SAFEDEPS_G_NPM_LINK_RE}"; then
+      if command_start_text "${normalized}" | grep -qEi "${SAFEDEPS_G_NPM_LINK_RE}"; then
         target=global
+        kind=npm-unrecorded
         why="npm link installs a package the global tree does not have into npm's global prefix, where no lockfile records it"
         break
       fi
@@ -2349,7 +2537,7 @@ resolve_reading_targets() {
         break
       fi
       [[ -n "${npm_until}" ]] || npm_until=$(( SECONDS + SAFEDEPS_NPM_ASK_PRE_SECONDS ))
-      answer=$(safedeps_npm_install_target "${run_dir}" "${npm_until}" "${npm_word}" \
+      answer=$(guard_npm_install_target "${run_dir}" "${npm_until}" "${npm_word}" \
         "${npm_env[@]+"${npm_env[@]}"}" -- "${npm_args[@]+"${npm_args[@]}"}")
       local_prefix=""
       case "${answer}" in
@@ -2401,17 +2589,202 @@ resolve_reading_targets() {
       case "${user_rc}" in
         '~/'*) user_rc="${HOME}/${user_rc#'~/'}" ;;
       esac
-      [[ "${user_rc}" == "?" ]] || user_rc=$(guard_literal_dir "${dir}" "${user_rc}")
+      [[ "${user_rc}" == "?" ]] || user_rc=$(guard_literal_dir "${here}" "${user_rc}")
       value=$(guard_npmrc_unrecorded "${local_prefix}" "${user_rc}" "${cli_global_off}")
       if [[ -n "${value}" ]]; then
         why="${value}"
+        kind=npm-unrecorded
         [[ "${target}" == global ]] || target="?"
       fi
       break
     done
     printf '%s\035%s\035%s\035%s\n' "${kind}" "${target}" "${why}" "${raw}"
-  done < <(command_statements "${text}" "${policy}")
+  done < <(command_statements "${text}")
   return 0
+}
+
+# Why an install trace in one directory cannot be credited to every npm
+# install in the command; nothing when it can.
+#
+# The PostToolUse hook decides whether an install was read by looking for this
+# command's install trace in the directory the gate read. One trace answers for
+# one npm statement. With two npm statements that write a lockfile, the first
+# one's trace hid the second one landing elsewhere: `npm install a; command cd
+# sub; npm install b` wrote both the cwd's lockfiles and sub's, and the gate read
+# the cwd, found a trace, and passed b unread (measured in the design judgment
+# for safedeps/effect-gate-blind-to-lockless-npm-installs, rows M1, M2, M4). So
+# two or more writers are credited to one trace only when nothing between them
+# can move the second, and no writer moves itself:
+#
+#   - Every statement between the first and the last writer is inert: echo,
+#     printf, tail, head, grep, ls, cat or true, with no substitution, group or
+#     redirection other than to /dev/null or another descriptor. Anything else
+#     may change the directory, the environment or the files npm reads, and
+#     cannot be told apart from text: `npm init -y` between two installs gave
+#     the second a package.json of its own.
+#   - No writer carries a relocation of its own: a directory or global flag, an
+#     npm_config_* setting in front of it, a wrapper word before `npm`, a group,
+#     or a word the shell decides at run time.
+#   - No npm install runs inside a `sh -c`, `eval` or `$(...)` payload, which
+#     the statements here do not show.
+#
+# A writer is an npm statement whose subcommand writes a lockfile or may:
+# everything but the subcommands below, which only read, run or publish. An
+# unknown subcommand is a writer, so a misreading costs a record.
+#
+# This judges one reading; the guard's driver asks every reading and takes the
+# first reason any gives. Counting across readings would count a statement
+# both readings share twice.
+guard_npm_writers_unattributable() {
+  local cmd="$1"
+  local stripped payload payloads=0
+  stripped=$(strip_heredoc_bodies "${cmd}")
+
+  while IFS= read -r payload; do
+    [[ -n "${payload}" ]] || continue
+    if command_start_text "${payload}" | judge_grep -qEi "${SAFEDEPS_G_NPM_INSTALL_RE}"; then
+      payloads=$(( payloads + 1 ))
+    fi
+  done < <(command_payload_texts "$(join_line_continuations "${stripped}")")
+
+  guard_reading_writers_unattributable "$(join_line_continuations "${stripped}")" "${payloads}"
+}
+
+# guard_npm_writers_unattributable over the joined view <text>, with
+# <payloads> npm installs found in the command's payloads.
+guard_reading_writers_unattributable() {
+  local text="$1" payloads="$2"
+  local before stmt words npm_at sub tok i scan writers=0
+  local first_writer="" pending_between="" between="" moved="" n=0
+  local -a toks=()
+
+  while IFS=$'\035' read -r before stmt _ words _; do
+    if [[ "${before}" == "?" ]]; then
+      printf 'the command could not be split into statements (awk failed)'
+      return 0
+    fi
+    [[ -n "${words}" ]] || continue
+    IFS=$'\037' read -ra toks <<< "${words}"
+    [[ ${#toks[@]} -gt 0 ]] || continue
+    n=$(( n + 1 ))
+
+    # The inert heads first: their arguments are text, `echo npm install` is
+    # not an install.
+    scan=$(printf '%s' "${stmt}" | sed -E 's#[0-9]*>>?[[:space:]]*/dev/null##g; s#[0-9]*>&[0-9-]##g') \
+      || { guard_mark_reading_failed; scan="?"; }
+    case "${toks[0]}" in
+      echo|printf|tail|head|grep|ls|cat|true)
+        if [[ "${scan}" != *[\<\>\(\)\{\}\`\$\?]* && "${words}" != *$'\001'* ]]; then
+          continue
+        fi
+        ;;
+    esac
+
+    npm_at=-1
+    for (( i = 0; i < ${#toks[@]}; i++ )); do
+      case "${toks[i]}" in
+        npm|*/npm) npm_at=${i}; break ;;
+      esac
+    done
+    sub=""
+    if (( npm_at >= 0 )); then
+      for (( i = npm_at + 1; i < ${#toks[@]}; i++ )); do
+        tok="${toks[i]}"
+        case "${tok}" in
+          -C|--prefix|-w|--workspace|--userconfig|--globalconfig|--cache|--registry|--location|--loglevel|--tag|--otp)
+            i=$(( i + 1 )); continue ;;
+          -*) continue ;;
+        esac
+        if [[ -z "${sub}" ]]; then
+          sub="${tok}"
+          [[ "${sub}" == audit ]] || break
+          continue
+        fi
+        # `audit fix` writes; `audit` alone reads.
+        [[ "${tok}" == fix ]] && sub="audit fix"
+        break
+      done
+      case "${sub}" in
+        ''|audit|run|run-script|rum|urn|test|tst|t|start|stop|restart|exec|x|init|create|innit|view|v|info|show|ls|list|ll|la|outdated|config|c|get|set|prefix|root|bin|query|explain|why|version|pack|publish|unpublish|help|help-search|doctor|ping|whoami|search|s|se|find|docs|home|repo|bugs|issues|fund|cache|completion|login|logout|adduser|add-user|token|profile|owner|team|access|deprecate|dist-tag|hook|org|star|stars|unstar|sbom|diff|pkg|set-script)
+          npm_at=-1 ;;
+      esac
+    fi
+
+    if (( npm_at < 0 )); then
+      # Not a writer. Between two writers it is a statement that may move the
+      # second one; it only counts once a writer has been seen.
+      if [[ -n "${first_writer}" && -z "${pending_between}" ]]; then
+        pending_between=$(printf '%s ' "${toks[@]}" | tr -d '\001')
+      fi
+      continue
+    fi
+
+    writers=$(( writers + 1 ))
+    [[ -n "${first_writer}" ]] || first_writer="${n}"
+    if [[ -n "${pending_between}" && -z "${between}" ]]; then
+      between="${pending_between}"
+    fi
+    pending_between=""
+    if [[ -z "${moved}" ]]; then
+      if [[ "${words}" == *$'\001'* || "${stmt}" == *[\(\)\{\}\`]* ]]; then
+        moved=$(printf '%s ' "${toks[@]}" | tr -d '\001')
+      else
+        for (( i = 0; i < ${#toks[@]}; i++ )); do
+          tok="${toks[i]}"
+          if (( i < npm_at )); then
+            case "${tok}" in
+              command|exec|time) continue ;;
+            esac
+            if [[ "${tok}" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] \
+                && [[ "$(printf '%s' "${tok%%=*}" | tr '[:upper:]' '[:lower:]')" != npm_config_* ]]; then
+              continue
+            fi
+            moved="${tok}"
+            break
+          fi
+          case "${tok}" in
+            -C|-C?*|--prefix|--prefix=*|-g|--global|--global=*|--no-global|--location|--location=*|--workspaces|--workspaces=*|--no-workspaces|--userconfig|--userconfig=*|--globalconfig|--globalconfig=*)
+              moved="${tok}"
+              break
+              ;;
+          esac
+        done
+      fi
+    fi
+  done < <(command_statements "${text}")
+
+  (( writers + payloads >= 2 )) || return 0
+  if (( payloads > 0 )); then
+    printf 'an npm install runs inside a `sh -c`, `eval` or `$(...)` payload beside another npm statement that writes a lockfile'
+  elif [[ -n "${between}" ]]; then
+    printf '%s npm statements write a lockfile, and `%s` runs between them' "${writers}" "${between% }"
+  elif [[ -n "${moved}" ]]; then
+    printf '%s npm statements write a lockfile, and one of them moves where it installs (`%s`)' "${writers}" "${moved% }"
+  fi
+  return 0
+}
+
+# True when the command runs an npm CLI install anywhere, payloads included:
+# the installs whose result the effect gate reads, and so the ones the
+# PostToolUse hook has to find a trace of.
+#
+# A grep that cannot answer counts as a match: the cost is a trace check on a
+# command that needed none, where the other direction skips the check.
+guard_command_has_npm_install() {
+  local texts rc=0
+  texts=$(command_candidate_start_texts "$1")
+  grep -qEi "${SAFEDEPS_G_NPM_INSTALL_RE}" <<< "${texts}" || rc=$?
+  (( rc == 1 )) || return 0
+  return 1
+}
+
+# The inode of <file>, or nothing when it is not there. `ls -i` is the one
+# spelling BSD and GNU share.
+guard_file_inode() {
+  local inode
+  [[ -e "$1" ]] || return 0
+  read -r inode _ < <(ls -di -- "$1" 2>/dev/null) || return 0
+  printf '%s' "${inode}"
 }
 
 snapshot_project_file() {
@@ -2989,278 +3362,23 @@ guard_settle_scan_failure() {
   export SAFEDEPS_GATE_PASSED=1
 }
 
-# Whether the command closes as the shell reads it. A command that ends inside
+# Whether the command closes in the current reading. A command that ends inside
 # a quote, a heredoc body or a nested context is one the lexer could not
 # finish, and whatever it swallowed went unread -- a comment apostrophe or an
-# unterminated string used to hide every line after it. That is recorded like
-# a failed reading, so the gate settles it: UNDECIDED when the command names a
-# package manager. A heredoc left without its terminator is the ordinary case
-# here, and the shell reads it to the end of input as data.
-# The readings besides the first that a lexing flagged as differing between
-# bash and zsh: one per combination of the axes it flagged (see shell_lex).
-lex_other_readings() {
-  local flags="$1" a=false q=false
-  [[ -n "${flags}" ]] || return 0
-  grep -q '^AMBIG_ARITH$' "${flags}" 2>/dev/null && a=true
-  grep -q '^AMBIG_DQQ$' "${flags}" 2>/dev/null && q=true
-  [[ "${a}" == true ]] && printf 'sub\n'
-  [[ "${q}" == true ]] && printf 'arith-zq\n'
-  [[ "${a}" == true && "${q}" == true ]] && printf 'sub-zq\n'
-  return 0
-}
-
+# unterminated string used to hide every line after it. Returns 1 then. A
+# heredoc left without its terminator is the ordinary case here, and the shell
+# reads it to the end of input as data.
 guard_check_command_reads() {
-  local flags
+  local flags rc=0
   if ! flags=$(mktemp "${TMPDIR:-/tmp}/safedeps-lex.XXXXXX" 2>/dev/null); then
-    [[ -z "${SAFEDEPS_SCAN_MARK:-}" ]] || printf 'failed\n' >> "${SAFEDEPS_SCAN_MARK}"
+    guard_mark_reading_failed
     return 0
   fi
-  SAFEDEPS_LEX_FLAGS="${flags}" shell_lex "${COMMAND}" scan arith "safedeps:command_reads" > /dev/null || true
-  if grep -q '^UNTERM$' "${flags}" 2>/dev/null; then
-    # Where the shells diverge, a command that closes under another reading is
-    # one that shell runs: it is read, not unread. Unread means no reading closes.
-    local policy others closed=false one
-    others=$(lex_other_readings "${flags}")
-    one=$(mktemp "${TMPDIR:-/tmp}/safedeps-lex.XXXXXX" 2>/dev/null) || one=""
-    for policy in ${others}; do
-      [[ -n "${one}" ]] || break
-      : > "${one}"
-      SAFEDEPS_LEX_FLAGS="${one}" shell_lex "${COMMAND}" scan "${policy}" "safedeps:command_reads" > /dev/null || true
-      grep -q '^UNTERM$' "${one}" 2>/dev/null || { closed=true; break; }
-    done
-    [[ -z "${one}" ]] || rm -f "${one}"
-    if [[ "${closed}" != true ]]; then
-      [[ -z "${SAFEDEPS_SCAN_MARK:-}" ]] || printf 'failed\n' >> "${SAFEDEPS_SCAN_MARK}"
-    fi
-  fi
+  SAFEDEPS_LEX_FLAGS="${flags}" shell_lex "${COMMAND}" scan "safedeps:command_reads" > /dev/null || true
+  grep -q '^UNTERM$' "${flags}" 2>/dev/null && rc=1
   rm -f "${flags}"
+  return ${rc}
 }
-guard_check_command_reads
-
-HIDDEN_DEPENDENCY_INSTALL=false
-PIPED_BESIDE_VISIBLE=false
-if ! command_is_dependency_install "${COMMAND}"; then
-  # Catch indirection patterns that hide install commands (V-002)
-  if command_hides_dependency_install "${COMMAND}"; then
-    HIDDEN_DEPENDENCY_INSTALL=true
-    : # Fall through — treat as install candidate
-  else
-    guard_settle_scan_failure
-    exit 0
-  fi
-elif command_pipes_unread_install_to_shell "${COMMAND}"; then
-  # A visible install used to switch the hidden-install check off. It is a
-  # hidden install like any other, and it is denied where the others are, after
-  # the snapshot: every path between here and there is a deny.
-  HIDDEN_DEPENDENCY_INSTALL=true
-  PIPED_BESIDE_VISIBLE=true
-fi
-
-# --- Reorg Guard Activated ---
-
-# Find lock files in common locations
-# Per Claude Code / Codex CLI hook spec, `cwd` is top-level. Fall back to `pwd`
-# only when the hook is invoked outside the engine (manual test, no stdin payload).
-CWD_DIR=$(echo "${INPUT}" | jq -r '.cwd // empty' 2>/dev/null)
-if [[ -z "${CWD_DIR}" ]]; then
-  CWD_DIR=$(pwd)
-fi
-
-# Resolve the actual install target: a relocation flag or an earlier `cd`
-# moves the install away from cwd (finding #3; resolve_install_targets says
-# which). Snapshot + effect-gate must follow the real target, while the
-# PostToolUse pending-key still keys on cwd (post-verify only knows cwd) — so
-# KEY_DIR_HASH (cwd) and DIR_HASH (install dir) are tracked separately below.
-# The first install statement with a known, non-global target decides; an
-# install that lands elsewhere is not read, and guard_effect_gate_reads says so.
-PROJECT_DIR="${CWD_DIR}"
-INSTALL_TARGETS=$(resolve_install_targets "${COMMAND}" "${CWD_DIR}")
-while IFS=$'\035' read -r _ install_target _ _; do
-  [[ -n "${install_target}" && "${install_target}" != "?" && "${install_target}" != global ]] || continue
-  PROJECT_DIR="${install_target}"
-  break
-done <<< "${INSTALL_TARGETS}"
-# An .npmrc that keeps an install off the record is not text in the command, so
-# the record has to say which file did it; the UNGATED line alone would point at
-# a command that looks like an ordinary project install.
-while IFS=$'\035' read -r _ _ install_why _; do
-  [[ -n "${install_why}" ]] || continue
-  log_advisory "pre-guard: ${install_why}. Command: ${COMMAND}"
-done <<< "${INSTALL_TARGETS}"
-if [[ "${PROJECT_DIR}" != "${CWD_DIR}" ]]; then
-  log_advisory "pre-guard: the install lands outside cwd — snapshotting/verifying ${PROJECT_DIR} instead of cwd (${CWD_DIR})."
-fi
-
-# Canonicalize to prevent path traversal (V-003)
-canonicalize_dir() {
-  if command -v realpath >/dev/null 2>&1; then
-    realpath "$1" 2>/dev/null || printf '%s' "$1"
-  elif command -v readlink >/dev/null 2>&1; then
-    readlink -f "$1" 2>/dev/null || printf '%s' "$1"
-  else
-    printf '%s' "$1"
-  fi
-}
-PROJECT_DIR=$(canonicalize_dir "${PROJECT_DIR}")
-CWD_DIR=$(canonicalize_dir "${CWD_DIR}")
-
-TIMESTAMP=$(date +%s)
-DIR_HASH=$(compute_dir_hash "${PROJECT_DIR}")
-# Pending-key hash keys on cwd so the PostToolUse hook (which only sees cwd) can
-# find this install's pending state even when the install dir was overridden.
-KEY_DIR_HASH=$(compute_dir_hash "${CWD_DIR}")
-SNAPSHOT_ID="${TIMESTAMP}_${DIR_HASH}"
-
-acquire_state_lock
-# EXIT only, deliberately. Trapping TERM here looks like cheap insurance against
-# a signalled child leaking the state lock, and it was committed as exactly that
-# — but naming a signal in `trap` REPLACES its default disposition, so the child
-# stopped dying at the deadline and ran its judgment to completion instead. The
-# budget above then measured nothing: a padded install answered at 38.9s against
-# a 30s runtime budget, which is the very fail-open this plan exists to close.
-# A leaked lock is bounded by the 60s stale-lock sweep in acquire_state_lock; a
-# defeated deadline is not bounded by anything.
-trap 'release_state_lock; rm -f "${SAFEDEPS_SCAN_MARK:-}"; rm -rf "${SAFEDEPS_LEX_CACHE:-}"' EXIT
-
-PARENT_SNAPSHOT_ID=""
-CONFIRMED_FILE="${GUARD_DIR}/confirmed_${DIR_HASH}"
-if [[ -f "${CONFIRMED_FILE}" ]]; then
-  PARENT_SNAPSHOT_ID=$(cat "${CONFIRMED_FILE}" 2>/dev/null || true)
-fi
-
-if [[ -n "${PARENT_SNAPSHOT_ID}" ]] && [[ ! -f "${SNAPSHOT_DIR}/${PARENT_SNAPSHOT_ID}_meta.json" ]]; then
-  # Fallback: check legacy global confirmed file for migration
-  if [[ -f "${GUARD_DIR}/confirmed" ]]; then
-    PARENT_SNAPSHOT_ID=$(cat "${GUARD_DIR}/confirmed" 2>/dev/null || true)
-    if [[ -n "${PARENT_SNAPSHOT_ID}" ]] && [[ ! -f "${SNAPSHOT_DIR}/${PARENT_SNAPSHOT_ID}_meta.json" ]]; then
-      PARENT_SNAPSHOT_ID=""
-    fi
-  else
-    PARENT_SNAPSHOT_ID=""
-  fi
-fi
-
-PARENT_SNAPSHOT_JSON=$(printf '%s' "${PARENT_SNAPSHOT_ID}" | jq -Rs 'if length == 0 then null else . end')
-
-# Snapshot lock and manifest files that define dependency truth.
-SNAPSHOTTED=false
-: > "${SNAPSHOT_DIR}/${SNAPSHOT_ID}_monitored_files.list"
-
-for lock_file in "${SAFEDEPS_LOCK_FILES[@]}"; do
-  snapshot_project_file "${lock_file}" "lock"
-done
-
-for manifest_file in "${SAFEDEPS_MANIFEST_FILES[@]}"; do
-  snapshot_project_file "${manifest_file}" "manifest"
-done
-
-while IFS= read -r csproj_file; do
-  snapshot_project_file "$(basename "${csproj_file}")" "manifest"
-done < <(find "${PROJECT_DIR}" -maxdepth 1 -type f -name "*.csproj" 2>/dev/null | sort)
-
-# A workspace install writes a member's package.json as well as the root's.
-# A snapshot that cannot keep them is a rollback that cannot undo the install,
-# so the install waits rather than running without one.
-if declare -F safedeps_npm_workspace_manifests >/dev/null; then
-  if ! MEMBERS_ERROR=$(snapshot_workspace_manifests 2>&1 >/dev/null); then
-    rm -rf "${SNAPSHOT_DIR}/${SNAPSHOT_ID}_${SAFEDEPS_SNAPSHOT_MEMBERS}"
-    rm -f "${SNAPSHOT_DIR}/${SNAPSHOT_ID}_"*
-    MEMBERS_ERROR=$(printf '%s' "${MEMBERS_ERROR}" | tr '\n' ' ')
-    log_advisory "pre-guard: could not snapshot the workspace members' package.json files in ${PROJECT_DIR} (${MEMBERS_ERROR% }). Command: ${COMMAND}"
-    jq -nc --arg reason "safedeps: undecided — safedeps could not keep a copy of the workspace members' package.json files in ${PROJECT_DIR} (${MEMBERS_ERROR% }), so it could not roll this install back. This is not a finding about the packages. Make the members' package.json files readable and retry." \
-      '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:$reason}}'
-    exit 0
-  fi
-fi
-
-# Save pre-install listings for diff-based detection (avoids mtime-based find -newer)
-if [[ -d "${PROJECT_DIR}/node_modules" ]]; then
-  find "${PROJECT_DIR}/node_modules" -maxdepth 3 -name "package.json" 2>/dev/null | sort > "${SNAPSHOT_DIR}/${SNAPSHOT_ID}_packages.list"
-  { ls "${PROJECT_DIR}/node_modules/.bin/" 2>/dev/null || true; } | sort > "${SNAPSHOT_DIR}/${SNAPSHOT_ID}_bins.list"
-else
-  touch "${SNAPSHOT_DIR}/${SNAPSHOT_ID}_packages.list"
-  touch "${SNAPSHOT_DIR}/${SNAPSHOT_ID}_bins.list"
-fi
-
-# Store metadata for PostToolUse verification
-cat > "${SNAPSHOT_DIR}/${SNAPSHOT_ID}_meta.json" << META_EOF
-{
-  "snapshot_id": "${SNAPSHOT_ID}",
-  "parent_snapshot_id": ${PARENT_SNAPSHOT_JSON},
-  "timestamp": ${TIMESTAMP},
-  "project_dir": $(printf '%s' "${PROJECT_DIR}" | jq -Rs .),
-  "command": $(printf '%s' "${COMMAND}" | jq -Rs .),
-  "ignore_scripts_injected": false,
-  "lock_files_found": ${SNAPSHOTTED}
-}
-META_EOF
-
-mark_ignore_scripts_injected() {
-  local meta_file="${SNAPSHOT_DIR}/${SNAPSHOT_ID}_meta.json"
-  local temp_file
-
-  [[ -f "${meta_file}" ]] || return 0
-  temp_file=$(mktemp "${SNAPSHOT_DIR}/.${SNAPSHOT_ID}_meta.XXXXXX") || return 0
-  if jq '.ignore_scripts_injected = true' "${meta_file}" > "${temp_file}"; then
-    mv -f "${temp_file}" "${meta_file}"
-  else
-    rm -f "${temp_file}"
-  fi
-}
-
-# --- Pre-flight security checks on the command itself ---
-
-SUSPICIOUS=false
-REASONS=()
-
-# Check for piped install from suspicious sources
-if echo "${COMMAND}" | judge_grep -qEi 'curl.*\|[[:space:]]*(bash|sh|node)'; then
-  SUSPICIOUS=true
-  REASONS+=("Command pipes remote content to shell execution")
-fi
-
-# Check for install with --ignore-scripts being removed (attacker might want scripts to run)
-if echo "${COMMAND}" | judge_grep -qEi 'npm[[:space:]]+config[[:space:]]+set[[:space:]]+ignore-scripts[[:space:]]+false'; then
-  SUSPICIOUS=true
-  REASONS+=("Command explicitly enables install scripts")
-fi
-
-# Check for registry override to unknown registry
-if echo "${COMMAND}" | judge_grep -qEi -- '--registry([=[:space:]]+)'; then
-  if ! echo "${COMMAND}" | judge_grep -qEi -- '--registry([=[:space:]]+)https?://(registry\.npmjs\.org|registry\.yarnpkg\.com)(/|[[:space:]]|$)'; then
-    SUSPICIOUS=true
-    REASONS+=("Command uses non-standard npm registry")
-  fi
-fi
-
-# Check for packages with suspicious naming patterns (typosquatting indicators)
-TYPOSQUAT_PATTERNS='(lod[bcdfghjklmnpqrstvwxyz]sh|lodahs|loadsh|lodashh|reacct|exprss|axois|babeel|webpackk|esliint|l0dash|m0ment|4xios|reqeusts|requets|djagno|numppy|panddas|pilliow|tensorfow|scikit-learnn|serde_jsonn|tokioo|reqwestt|clapp|github\.con/|githb\.com/|railss|sinatraa|nokogirri|log4jj|springframewrok|commons-collectionss|newtonsoft\.josn|serilogg|nunittt)'
-if echo "${COMMAND}" | judge_grep -qEi "${TYPOSQUAT_PATTERNS}"; then
-  SUSPICIOUS=true
-  REASONS+=("Package name matches known typosquatting patterns")
-fi
-
-if [[ "${SUSPICIOUS}" == "true" ]]; then
-  guard_undecided_if_scan_failed
-  REASON_STR=$(printf '%s; ' "${REASONS[@]}")
-  jq -nc --arg reason "safedeps: ${REASON_STR%%; }" \
-    '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:$reason}}'
-  exit 0
-fi
-
-# --- Phase 2 advisory gate — ledger enforcement -------------------------------
-# For commands that name specific packages, require an entry in the approved-
-# spec ledger. Miss/expired → block with a structured message that names a
-# runnable `safedeps check` command the caller (agent or human) should run
-# next — PATH command when present, else an absolute path, so the self-heal
-# loop never dead-ends on a missing PATH symlink.
-#
-# Conservative: only block when at least one pkg@spec token is parseable. Bare
-# `npm install` (lockfile install) falls through to the v1 reorg checks.
-
-SAFEDEPS_LEDGER_LIB="${SAFEDEPS_LEDGER_LIB:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/ledger/ledger.sh}"
-SAFEDEPS_NPM_CLOSURE_LIB="${SAFEDEPS_NPM_CLOSURE_LIB:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/npm/closure.sh}"
-SAFEDEPS_REPO_BIN="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/safedeps"
 
 # The ecosystem of ONE statement, read from the manager that starts it.
 guard_segment_ecosystem() {
@@ -3337,13 +3455,13 @@ guard_all_npm_installs_are_global() {
   # (`sh -c`, `eval`) is not in that list; its landing is decided inside the
   # payload, so the command stays project-scoped, the direction that can deny
   # an approved package but never drops the project's context from one.
-  local cmd="$1" kind target payload found=false
+  local cmd="$1" targets="$2" kind target payload found=false
 
   while IFS=$'\035' read -r kind target _ _; do
-    [[ "${kind}" == npm ]] || continue
+    [[ "${kind}" == npm || "${kind}" == npm-unrecorded ]] || continue
     found=true
     [[ "${target}" == global ]] || return 1
-  done <<< "${INSTALL_TARGETS}"
+  done <<< "${targets}"
   [[ "${found}" == true ]] || return 1
   while IFS= read -r payload; do
     command_start_text "${payload}" | judge_grep -qEi "${SAFEDEPS_G_NPM_INSTALL_RE}" && return 1
@@ -3704,9 +3822,9 @@ guard_names_package_without_spec() {
   # Statements are skipped whole in two cases. One whose ecosystem cannot be
   # read (the outer view of `bash -c '...'`, where the payload is blank) is
   # skipped as the extractor skips it; the payload is a candidate text of its
-  # own and is read there. And a statement the effect gate reads -- an npm CLI
-  # install that lands in the directory the gate reads -- is exempt; the rest of
-  # the command is not. A payload's install is never exempt, because where it
+  # own and is read there. And a statement the effect gate answers for -- an
+  # npm CLI install the lockfiles record, whose trace the PostToolUse hook
+  # looks for -- is exempt; the rest of the command is not. A payload's install is never exempt, because where it
   # lands is decided inside the payload.
   #
   # It reads GUARD_READINGS, the extractor's reading of the command that the
@@ -4119,11 +4237,19 @@ guard_extract_statement_text() {
   printf '%s' "${text}"
 }
 
-# The one answer to "does the effect gate read this install statement": an npm
-# CLI install, not a runner, that lands in the directory the gate reads. <kind>
-# and <target> are a statement's fields from resolve_install_targets, which is
-# also what chose PROJECT_DIR. An .npmrc that keeps the install off the record
-# has already turned <target> into `?` there.
+# The one answer to "does the effect gate answer for this install statement":
+# an npm CLI install, not a runner, that the lockfiles record. <kind> is a
+# statement's field from resolve_install_targets; an .npmrc that keeps the
+# install out of both lockfiles has made it `npm-unrecorded` there.
+#
+# Where the install lands is not asked here. It used to be: the statement had
+# to land in PROJECT_DIR, and a statement whose landing the text read wrong was
+# exempt and unread. Three validation rounds found such text, a `cd` that never
+# ran, `command cd`, a symlinked member, and each was a silent pass, because a
+# prediction that errs toward the exemption leaves nothing to notice it. So the
+# landing only picks where the effect gate looks, and the PostToolUse hook
+# records an install that left no trace there (settle_npm_trace)
+# (safedeps/effect-gate-blind-to-lockless-npm-installs).
 #
 # The UNGATED exemption asks this and nothing else. It used to have its own
 # answer, a list of flags that keep npm from writing package-lock.json
@@ -4134,10 +4260,7 @@ guard_extract_statement_text() {
 # install the gate does read, and a flag list would now record it as unread.
 # What the gate reads is decided in one place, and the record follows it.
 guard_effect_gate_reads() {
-  local kind="$1" target="$2"
-  [[ "${kind}" == npm ]] || return 1
-  [[ -n "${target}" && "${target}" != "?" && "${target}" != global ]] || return 1
-  [[ "$(canonicalize_dir "${target}")" == "${PROJECT_DIR}" ]]
+  [[ "$1" == npm ]]
 }
 
 # The statements the spec extractor reads, one piece per line as
@@ -4172,11 +4295,11 @@ guard_effect_gate_reads() {
 # that its reader could not finish must not run into the next.
 guard_extract_pieces() {
   local cmd="$1" targets="$2"
-  local kind target read_flags="" normalized pieces payload
+  local kind read_flags="" normalized pieces payload
 
-  while IFS=$'\035' read -r kind target _ _; do
+  while IFS=$'\035' read -r kind _ _ _; do
     [[ -n "${kind}" ]] || continue
-    if guard_effect_gate_reads "${kind}" "${target}"; then
+    if guard_effect_gate_reads "${kind}"; then
       read_flags+="1"
     else
       read_flags+="0"
@@ -4194,7 +4317,7 @@ guard_extract_pieces() {
   )" lines)
   # A failed lexer marks the failure itself; an escape it could not read is a
   # `!` line, marked here.
-  pieces=$(shell_lex "${normalized}" pieces arith "safedeps:extract_pieces") || pieces=""
+  pieces=$(shell_lex "${normalized}" pieces "safedeps:extract_pieces") || pieces=""
   if ! printf '%s\n' "${pieces}" | LC_ALL=C awk -F'\037' -v flags="${read_flags}" '
     # safedeps:extract_pieces (scripts/test/scan-contract.sh keys on this line)
     $0 == "!" { bad = 1; next }
@@ -4206,7 +4329,7 @@ guard_extract_pieces() {
 
   while IFS= read -r payload; do
     [[ "${payload}" =~ [^[:space:]] ]] || continue
-    pieces=$(shell_lex "${payload}" pieces arith "safedeps:payload_pieces") || pieces=""
+    pieces=$(shell_lex "${payload}" pieces "safedeps:payload_pieces") || pieces=""
     printf '%s\n' "${pieces}" | LC_ALL=C awk -F'\037' '
       # safedeps:payload_pieces (scripts/measure/scan-failure-census.sh keys on this line)
       $0 == "!" { bad = 1; next }
@@ -4268,26 +4391,442 @@ guard_extract_specs() {
   done < <(guard_extract_pieces "${cmd}" "${targets}")
 }
 
-LEDGER_ECOSYSTEM=$(guard_detect_ecosystem "${COMMAND}")
-LEDGER_SPECS=()
-# The extractor's one reading of the command. The gate keeps its spec lines;
-# the UNGATED record walks the whole reading (guard_names_package_without_spec),
-# so the two never parse the same statement twice or differently.
-GUARD_READINGS=""
-while IFS= read -r ledger_spec_line; do
-  [[ -z "${ledger_spec_line}" ]] && continue
-  GUARD_READINGS+="${ledger_spec_line}"$'\n'
-  case "${ledger_spec_line}" in
-    S$'\t'*|G$'\t'*|T$'\t'*|@$'\t'*) continue ;;
-  esac
-  if [[ ${#LEDGER_SPECS[@]} -gt 0 ]]; then
-    for existing_spec_line in "${LEDGER_SPECS[@]}"; do
-      [[ "${existing_spec_line}" == "${ledger_spec_line}" ]] && continue 2
-    done
+# How the current reading would make the command's npm installs inert, as one
+# value the readings can be compared on: none, append, downgrade, or `rewrite`
+# and the rewritten command on the next line.
+guard_reading_inert() {
+  local outcome=none updated="" rc=0
+  if command_is_injectable_npm_install "${COMMAND}" && \
+     ! command_has_ignore_scripts_flag "${COMMAND}"; then
+    if command_needs_inplace_inert "${COMMAND}"; then
+      # Insert `--ignore-scripts` immediately AFTER each npm-install verb so the
+      # flag stays inside its own statement. Appending to the end of the
+      # whole string would land it on the trailing statement (e.g.
+      # `npm install evil && npm run build --ignore-scripts`), leaving the install
+      # itself running lifecycle scripts (finding #7). `npm install --ignore-scripts <pkg>`
+      # is valid npm syntax (flags may precede operands).
+      # scripts/test/smoke.sh pins the landing spot. A failed rewrite marks the
+      # reading, so the gate settles it instead of reading it as nothing to do.
+      updated=$(inert_rewrite_in_place "${COMMAND}") || rc=$?
+      case "${rc}" in
+        0) ;;
+        3) updated="" ;;
+        *) guard_mark_reading_failed; updated="" ;;
+      esac
+      if [[ -z "${updated}" || "${updated}" == "${COMMAND}" ]]; then
+        # The rewrite did not land -- never blind-append to a compound command.
+        # Downgrade to detect-and-rollback (the effect gate still verifies the
+        # closure), recorded once the command is known to run: the inert
+        # guarantee is observably relaxed, never silently.
+        outcome=downgrade
+      else
+        outcome="rewrite"$'\n'"${updated}"
+      fi
+    else
+      outcome=append
+    fi
   fi
-  LEDGER_SPECS+=("${ledger_spec_line}")
-done < <(guard_extract_specs "${COMMAND}" "${INSTALL_TARGETS}" readings)
+  printf -v "GUARD_INERT_$1" '%s' "${outcome}"
+}
 
+guard_deny_inert_readings_differ() {
+  log_advisory "pre-guard DENY: the readings (${GUARD_READING_SET}) put this command's npm installs in different places, so no single --ignore-scripts rewrite is inert for every shell — undecided, fail-closed. Command: ${COMMAND}"
+  jq -nc '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:"safedeps: UNDECIDED, not unsafe — bash, zsh and dash read the npm installs in this command in different places (a quote, an arithmetic expression or a parameter default that one shell closes where another does not). safedeps makes an npm install inert by adding --ignore-scripts after it, and here no single edit lands on the install for every shell without changing text another shell reads as data. It is blocked fail-closed, and no finding is claimed. Rewrite the command so its quoting reads the same in every shell (for example, move the npm install onto its own line, away from the quote), then retry."}}'
+  exit 0
+}
+
+# --- The readings ---
+#
+# A reading is a shell: bash, zsh or dash (see shell_lex). Every reader of the
+# command below reads it under one reading at a time, and the gate judges the
+# command under every reading a shell could give it:
+#
+#   - The bash reading runs first. While it lexes, every place where the
+#     readings differ says DIVERGE. Only then do the zsh and dash readings run;
+#     the readings agree byte for byte up to the first such place, so a command
+#     that never reaches one reads the same in all three.
+#   - A finding in any reading is a finding: the install candidates, the hidden
+#     and piped installs, the targets and the specs are the union.
+#   - UNDECIDED needs a reading that failed a step, or no reading that closes.
+#   - Rewriting the command (`--ignore-scripts`) needs every reading to agree
+#     where the npm installs are (guard_reading_inert). A read-only side effect
+#     takes the union; a change to the text cannot be made for one shell
+#     without editing what another reads as data.
+#
+# The variable is set here and nowhere else. Splitting one reading's output and
+# lexing it again under another reading's rules is how a line zsh runs was
+# hidden again one step after the zsh reading had exposed it (form SL1); a
+# reader that asks for a reading of its own fails the reading instead.
+SAFEDEPS_READING=""
+
+# Per Claude Code / Codex CLI hook spec, `cwd` is top-level. Fall back to `pwd`
+# only when the hook is invoked outside the engine (manual test, no stdin payload).
+CWD_DIR=$(echo "${INPUT}" | jq -r '.cwd // empty' 2>/dev/null)
+if [[ -z "${CWD_DIR}" ]]; then
+  CWD_DIR=$(pwd)
+fi
+GUARD_IS_CODEX=false
+jq -e 'has("turn_id")' <<< "${INPUT}" >/dev/null 2>&1 && GUARD_IS_CODEX=true
+
+# Where the bash reading says DIVERGE. Without the file the gate cannot tell
+# whether the readings differ, so it reads all three.
+SAFEDEPS_LEX_DIVERGE=""
+if [[ -n "${SAFEDEPS_LEX_CACHE}" ]]; then
+  SAFEDEPS_LEX_DIVERGE="${SAFEDEPS_LEX_CACHE}/diverge"
+  : > "${SAFEDEPS_LEX_DIVERGE}" 2>/dev/null || SAFEDEPS_LEX_DIVERGE=""
+fi
+guard_readings_diverge() {
+  [[ -z "${SAFEDEPS_LEX_DIVERGE}" || -s "${SAFEDEPS_LEX_DIVERGE}" ]]
+}
+
+GUARD_READING_SET=""
+GUARD_READ_CLOSED=false
+GUARD_ANY_INSTALL=false
+PIPED_BESIDE_VISIBLE=false
+# Per reading, read through ${!name}.
+# shellcheck disable=SC2034
+GUARD_HIDDEN_bash=false GUARD_HIDDEN_zsh=false GUARD_HIDDEN_dash=false
+
+# The detection half of one reading: does the command close, and is it an
+# install the gate has to judge.
+guard_reading_detect() {
+  SAFEDEPS_READING="$1"
+  GUARD_READING_SET="${GUARD_READING_SET:+${GUARD_READING_SET} }$1"
+  guard_check_command_reads && GUARD_READ_CLOSED=true
+  if command_is_dependency_install "${COMMAND}"; then
+    GUARD_ANY_INSTALL=true
+    # A visible install used to switch the hidden-install check off. It is a
+    # hidden install like any other, and it is denied where the others are,
+    # after the snapshot: every path between here and there is a deny.
+    if command_pipes_unread_install_to_shell "${COMMAND}"; then
+      PIPED_BESIDE_VISIBLE=true
+      printf -v "GUARD_HIDDEN_$1" '%s' true
+    fi
+  # Catch indirection patterns that hide install commands (V-002)
+  elif command_hides_dependency_install "${COMMAND}"; then
+    GUARD_ANY_INSTALL=true
+    printf -v "GUARD_HIDDEN_$1" '%s' true
+  fi
+  SAFEDEPS_READING=""
+}
+
+INSTALL_TARGETS=""
+LEDGER_ECOSYSTEM=""
+LEDGER_SPECS=()
+GUARD_READINGS=""
+GUARD_HIDDEN_UNREDUCED=false
+GUARD_UNGATED=""
+GUARD_UNGATED_ECOSYSTEM=""
+GUARD_NPM_SEEN=false
+GUARD_NPM_ALL_GLOBAL=true
+NPM_TRACE_WANTED=false
+ATTRIBUTION=""
+# shellcheck disable=SC2034
+GUARD_INERT_bash="" GUARD_INERT_zsh="" GUARD_INERT_dash=""
+
+# The judging half of one reading: where its installs land, what they install,
+# and how it would make them inert. Each fact joins the others' the way its
+# consumer needs (see "The readings" above).
+guard_reading_facts() {
+  local reading="$1" targets eco line readings="" specs=0 existing hidden
+  SAFEDEPS_READING="${reading}"
+  targets=$(resolve_install_targets "${COMMAND}" "${CWD_DIR}")
+  [[ -z "${targets}" ]] || INSTALL_TARGETS+="${targets}"$'\n'
+  eco=$(guard_detect_ecosystem "${COMMAND}")
+  [[ -n "${LEDGER_ECOSYSTEM}" ]] || LEDGER_ECOSYSTEM="${eco}"
+  while IFS= read -r line; do
+    [[ -z "${line}" ]] && continue
+    readings+="${line}"$'\n'
+    case "${line}" in
+      S$'\t'*|G$'\t'*|T$'\t'*|@$'\t'*) continue ;;
+    esac
+    specs=$(( specs + 1 ))
+    if [[ ${#LEDGER_SPECS[@]} -gt 0 ]]; then
+      for existing in "${LEDGER_SPECS[@]}"; do
+        [[ "${existing}" == "${line}" ]] && continue 2
+      done
+    fi
+    LEDGER_SPECS+=("${line}")
+  done < <(guard_extract_specs "${COMMAND}" "${targets}" readings)
+  GUARD_READINGS+="${readings}"
+  printf -v "GUARD_READINGS_${reading}" '%s' "${readings}"
+  printf -v "GUARD_ECOSYSTEM_${reading}" '%s' "${eco}"
+
+  # A hidden install has to reduce to specs in the reading that hid it: the
+  # specs another reading found are not this one's.
+  hidden="GUARD_HIDDEN_${reading}"
+  if [[ "${!hidden}" == true ]] && [[ -z "${eco}" || ${specs} -eq 0 ]]; then
+    GUARD_HIDDEN_UNREDUCED=true
+  fi
+
+  # The npm context key leaves the project out only when every npm install in
+  # every reading is global.
+  if [[ $'\n'"${targets}" == *$'\n'npm$'\035'* || $'\n'"${targets}" == *$'\n'npm-unrecorded$'\035'* ]]; then
+    GUARD_NPM_SEEN=true
+    guard_all_npm_installs_are_global "${COMMAND}" "${targets}" || GUARD_NPM_ALL_GLOBAL=false
+  fi
+
+  [[ "${GUARD_IS_CODEX}" == true ]] || guard_reading_inert "${reading}"
+
+  if guard_command_has_npm_install "${COMMAND}"; then
+    NPM_TRACE_WANTED=true
+    [[ -n "${ATTRIBUTION}" ]] || ATTRIBUTION=$(guard_npm_writers_unattributable "${COMMAND}")
+  fi
+  SAFEDEPS_READING=""
+}
+
+# The UNGATED record walks one reading's statements, after PROJECT_DIR is
+# known: whether a runner's binary is local is asked there.
+guard_reading_ungated() {
+  local reading="$1" hidden="GUARD_HIDDEN_$1" readings="GUARD_READINGS_$1" eco="GUARD_ECOSYSTEM_$1"
+  [[ "${!hidden}" != true && -n "${!eco}" ]] || return 0
+  SAFEDEPS_READING="${reading}"
+  if GUARD_READINGS="${!readings}" guard_names_package_without_spec; then
+    [[ -n "${GUARD_UNGATED_ECOSYSTEM}" ]] || GUARD_UNGATED_ECOSYSTEM="${!eco}"
+    GUARD_UNGATED="${GUARD_UNGATED:+${GUARD_UNGATED}, }${UNGATED_OPERANDS}"
+  fi
+  SAFEDEPS_READING=""
+}
+
+guard_reading_detect bash
+if guard_readings_diverge; then
+  guard_reading_detect zsh
+  guard_reading_detect dash
+fi
+# Unread means no reading closes: a command that closes under another reading
+# is one that shell runs.
+[[ "${GUARD_READ_CLOSED}" == true ]] || guard_mark_reading_failed
+
+if [[ "${GUARD_ANY_INSTALL}" != true ]]; then
+  guard_settle_scan_failure
+  exit 0
+fi
+
+for guard_reading in ${GUARD_READING_SET}; do
+  guard_reading_facts "${guard_reading}"
+done
+# A place where the readings differ first met while judging (in a payload, say)
+# brings the other readings in now.
+if [[ "${GUARD_READING_SET}" == bash ]] && guard_readings_diverge; then
+  for guard_reading in zsh dash; do
+    guard_reading_detect "${guard_reading}"
+    guard_reading_facts "${guard_reading}"
+  done
+fi
+
+# --- Reorg Guard Activated ---
+
+# Resolve the actual install target: a relocation flag or an earlier `cd`
+# moves the install away from cwd (finding #3; resolve_install_targets says
+# which). Snapshot + effect-gate must follow the real target, while the
+# PostToolUse pending-key still keys on cwd (post-verify only knows cwd) — so
+# KEY_DIR_HASH (cwd) and DIR_HASH (install dir) are tracked separately below.
+# The first install statement with a known, non-global target decides. That is
+# where the effect gate looks; whether an npm install was there is the
+# PostToolUse hook's to say, from the trace it finds (settle_npm_trace).
+PROJECT_DIR="${CWD_DIR}"
+# `target` when a statement named the directory, `cwd` when none did and the
+# gate looks in the cwd for want of anything better.
+PROJECT_DIR_FROM=cwd
+while IFS=$'\035' read -r _ install_target _ _; do
+  [[ -n "${install_target}" && "${install_target}" != "?" && "${install_target}" != global ]] || continue
+  PROJECT_DIR="${install_target}"
+  PROJECT_DIR_FROM=target
+  break
+done <<< "${INSTALL_TARGETS}"
+# An .npmrc that keeps an install off the record is not text in the command, so
+# the record has to say which file did it; the UNGATED line alone would point at
+# a command that looks like an ordinary project install. Each reason once,
+# however many readings gave it.
+install_whys=$'\n'
+while IFS=$'\035' read -r _ _ install_why _; do
+  [[ -n "${install_why}" ]] || continue
+  [[ "${install_whys}" != *$'\n'"${install_why}"$'\n'* ]] || continue
+  install_whys+="${install_why}"$'\n'
+  log_advisory "pre-guard: ${install_why}. Command: ${COMMAND}"
+done <<< "${INSTALL_TARGETS}"
+if [[ "${PROJECT_DIR}" != "${CWD_DIR}" ]]; then
+  log_advisory "pre-guard: the install lands outside cwd — snapshotting/verifying ${PROJECT_DIR} instead of cwd (${CWD_DIR})."
+fi
+
+# Canonicalize to prevent path traversal (V-003)
+canonicalize_dir() {
+  if command -v realpath >/dev/null 2>&1; then
+    realpath "$1" 2>/dev/null || printf '%s' "$1"
+  elif command -v readlink >/dev/null 2>&1; then
+    readlink -f "$1" 2>/dev/null || printf '%s' "$1"
+  else
+    printf '%s' "$1"
+  fi
+}
+PROJECT_DIR=$(canonicalize_dir "${PROJECT_DIR}")
+CWD_DIR=$(canonicalize_dir "${CWD_DIR}")
+for guard_reading in ${GUARD_READING_SET}; do
+  guard_reading_ungated "${guard_reading}"
+done
+
+TIMESTAMP=$(date +%s)
+DIR_HASH=$(compute_dir_hash "${PROJECT_DIR}")
+# Pending-key hash keys on cwd so the PostToolUse hook (which only sees cwd) can
+# find this install's pending state even when the install dir was overridden.
+KEY_DIR_HASH=$(compute_dir_hash "${CWD_DIR}")
+SNAPSHOT_ID="${TIMESTAMP}_${DIR_HASH}"
+
+acquire_state_lock
+# EXIT only, deliberately. Trapping TERM here looks like cheap insurance against
+# a signalled child leaking the state lock, and it was committed as exactly that
+# — but naming a signal in `trap` REPLACES its default disposition, so the child
+# stopped dying at the deadline and ran its judgment to completion instead. The
+# budget above then measured nothing: a padded install answered at 38.9s against
+# a 30s runtime budget, which is the very fail-open this plan exists to close.
+# A leaked lock is bounded by the 60s stale-lock sweep in acquire_state_lock; a
+# defeated deadline is not bounded by anything.
+trap 'release_state_lock; rm -f "${SAFEDEPS_SCAN_MARK:-}"; rm -rf "${SAFEDEPS_LEX_CACHE:-}"' EXIT
+
+PARENT_SNAPSHOT_ID=""
+CONFIRMED_FILE="${GUARD_DIR}/confirmed_${DIR_HASH}"
+if [[ -f "${CONFIRMED_FILE}" ]]; then
+  PARENT_SNAPSHOT_ID=$(cat "${CONFIRMED_FILE}" 2>/dev/null || true)
+fi
+
+if [[ -n "${PARENT_SNAPSHOT_ID}" ]] && [[ ! -f "${SNAPSHOT_DIR}/${PARENT_SNAPSHOT_ID}_meta.json" ]]; then
+  # Fallback: check legacy global confirmed file for migration
+  if [[ -f "${GUARD_DIR}/confirmed" ]]; then
+    PARENT_SNAPSHOT_ID=$(cat "${GUARD_DIR}/confirmed" 2>/dev/null || true)
+    if [[ -n "${PARENT_SNAPSHOT_ID}" ]] && [[ ! -f "${SNAPSHOT_DIR}/${PARENT_SNAPSHOT_ID}_meta.json" ]]; then
+      PARENT_SNAPSHOT_ID=""
+    fi
+  else
+    PARENT_SNAPSHOT_ID=""
+  fi
+fi
+
+PARENT_SNAPSHOT_JSON=$(printf '%s' "${PARENT_SNAPSHOT_ID}" | jq -Rs 'if length == 0 then null else . end')
+
+# Snapshot lock and manifest files that define dependency truth.
+SNAPSHOTTED=false
+: > "${SNAPSHOT_DIR}/${SNAPSHOT_ID}_monitored_files.list"
+
+for lock_file in "${SAFEDEPS_LOCK_FILES[@]}"; do
+  snapshot_project_file "${lock_file}" "lock"
+done
+
+for manifest_file in "${SAFEDEPS_MANIFEST_FILES[@]}"; do
+  snapshot_project_file "${manifest_file}" "manifest"
+done
+
+while IFS= read -r csproj_file; do
+  snapshot_project_file "$(basename "${csproj_file}")" "manifest"
+done < <(find "${PROJECT_DIR}" -maxdepth 1 -type f -name "*.csproj" 2>/dev/null | sort)
+
+# A workspace install writes a member's package.json as well as the root's.
+# A snapshot that cannot keep them is a rollback that cannot undo the install,
+# so the install waits rather than running without one.
+if declare -F safedeps_npm_workspace_manifests >/dev/null; then
+  if ! MEMBERS_ERROR=$(snapshot_workspace_manifests 2>&1 >/dev/null); then
+    rm -rf "${SNAPSHOT_DIR}/${SNAPSHOT_ID}_${SAFEDEPS_SNAPSHOT_MEMBERS}"
+    rm -f "${SNAPSHOT_DIR}/${SNAPSHOT_ID}_"*
+    MEMBERS_ERROR=$(printf '%s' "${MEMBERS_ERROR}" | tr '\n' ' ')
+    log_advisory "pre-guard: could not snapshot the workspace members' package.json files in ${PROJECT_DIR} (${MEMBERS_ERROR% }). Command: ${COMMAND}"
+    jq -nc --arg reason "safedeps: undecided — safedeps could not keep a copy of the workspace members' package.json files in ${PROJECT_DIR} (${MEMBERS_ERROR% }), so it could not roll this install back. This is not a finding about the packages. Make the members' package.json files readable and retry." \
+      '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:$reason}}'
+    exit 0
+  fi
+fi
+
+# Save pre-install listings for diff-based detection (avoids mtime-based find -newer)
+if [[ -d "${PROJECT_DIR}/node_modules" ]]; then
+  find "${PROJECT_DIR}/node_modules" -maxdepth 3 -name "package.json" 2>/dev/null | sort > "${SNAPSHOT_DIR}/${SNAPSHOT_ID}_packages.list"
+  { ls "${PROJECT_DIR}/node_modules/.bin/" 2>/dev/null || true; } | sort > "${SNAPSHOT_DIR}/${SNAPSHOT_ID}_bins.list"
+else
+  touch "${SNAPSHOT_DIR}/${SNAPSHOT_ID}_packages.list"
+  touch "${SNAPSHOT_DIR}/${SNAPSHOT_ID}_bins.list"
+fi
+
+# Store metadata for PostToolUse verification
+cat > "${SNAPSHOT_DIR}/${SNAPSHOT_ID}_meta.json" << META_EOF
+{
+  "snapshot_id": "${SNAPSHOT_ID}",
+  "parent_snapshot_id": ${PARENT_SNAPSHOT_JSON},
+  "timestamp": ${TIMESTAMP},
+  "project_dir": $(printf '%s' "${PROJECT_DIR}" | jq -Rs .),
+  "command": $(printf '%s' "${COMMAND}" | jq -Rs .),
+  "ignore_scripts_injected": false,
+  "lock_files_found": ${SNAPSHOTTED}
+}
+META_EOF
+
+mark_ignore_scripts_injected() {
+  local meta_file="${SNAPSHOT_DIR}/${SNAPSHOT_ID}_meta.json"
+  local temp_file
+
+  [[ -f "${meta_file}" ]] || return 0
+  temp_file=$(mktemp "${SNAPSHOT_DIR}/.${SNAPSHOT_ID}_meta.XXXXXX") || return 0
+  if jq '.ignore_scripts_injected = true' "${meta_file}" > "${temp_file}"; then
+    mv -f "${temp_file}" "${meta_file}"
+  else
+    rm -f "${temp_file}"
+  fi
+}
+
+# --- Pre-flight security checks on the command itself ---
+
+SUSPICIOUS=false
+REASONS=()
+
+# Check for piped install from suspicious sources
+if echo "${COMMAND}" | judge_grep -qEi 'curl.*\|[[:space:]]*(bash|sh|node)'; then
+  SUSPICIOUS=true
+  REASONS+=("Command pipes remote content to shell execution")
+fi
+
+# Check for install with --ignore-scripts being removed (attacker might want scripts to run)
+if echo "${COMMAND}" | judge_grep -qEi 'npm[[:space:]]+config[[:space:]]+set[[:space:]]+ignore-scripts[[:space:]]+false'; then
+  SUSPICIOUS=true
+  REASONS+=("Command explicitly enables install scripts")
+fi
+
+# Check for registry override to unknown registry
+if echo "${COMMAND}" | judge_grep -qEi -- '--registry([=[:space:]]+)'; then
+  if ! echo "${COMMAND}" | judge_grep -qEi -- '--registry([=[:space:]]+)https?://(registry\.npmjs\.org|registry\.yarnpkg\.com)(/|[[:space:]]|$)'; then
+    SUSPICIOUS=true
+    REASONS+=("Command uses non-standard npm registry")
+  fi
+fi
+
+# Check for packages with suspicious naming patterns (typosquatting indicators)
+TYPOSQUAT_PATTERNS='(lod[bcdfghjklmnpqrstvwxyz]sh|lodahs|loadsh|lodashh|reacct|exprss|axois|babeel|webpackk|esliint|l0dash|m0ment|4xios|reqeusts|requets|djagno|numppy|panddas|pilliow|tensorfow|scikit-learnn|serde_jsonn|tokioo|reqwestt|clapp|github\.con/|githb\.com/|railss|sinatraa|nokogirri|log4jj|springframewrok|commons-collectionss|newtonsoft\.josn|serilogg|nunittt)'
+if echo "${COMMAND}" | judge_grep -qEi "${TYPOSQUAT_PATTERNS}"; then
+  SUSPICIOUS=true
+  REASONS+=("Package name matches known typosquatting patterns")
+fi
+
+if [[ "${SUSPICIOUS}" == "true" ]]; then
+  guard_undecided_if_scan_failed
+  REASON_STR=$(printf '%s; ' "${REASONS[@]}")
+  jq -nc --arg reason "safedeps: ${REASON_STR%%; }" \
+    '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:$reason}}'
+  exit 0
+fi
+
+# --- Phase 2 advisory gate — ledger enforcement -------------------------------
+# For commands that name specific packages, require an entry in the approved-
+# spec ledger. Miss/expired → block with a structured message that names a
+# runnable `safedeps check` command the caller (agent or human) should run
+# next — PATH command when present, else an absolute path, so the self-heal
+# loop never dead-ends on a missing PATH symlink.
+#
+# Conservative: only block when at least one pkg@spec token is parseable. Bare
+# `npm install` (lockfile install) falls through to the v1 reorg checks.
+
+SAFEDEPS_LEDGER_LIB="${SAFEDEPS_LEDGER_LIB:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/ledger/ledger.sh}"
+SAFEDEPS_NPM_CLOSURE_LIB="${SAFEDEPS_NPM_CLOSURE_LIB:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/npm/closure.sh}"
+SAFEDEPS_REPO_BIN="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/safedeps"
+
+# LEDGER_SPECS, LEDGER_ECOSYSTEM and GUARD_READINGS come from every reading
+# (guard_reading_facts). The gate keeps the spec lines; the UNGATED record
+# walked each reading's statements when that reading was judged, so the two
+# never parse the same statement twice or differently.
 LEDGER_HAS_NPM=false
 for ledger_spec_line in "${LEDGER_SPECS[@]+${LEDGER_SPECS[@]}}"; do
   [[ "${ledger_spec_line%%$'\t'*}" == "npm" ]] && LEDGER_HAS_NPM=true
@@ -4313,7 +4852,7 @@ if [[ ${#LEDGER_SPECS[@]} -gt 0 ]]; then
     jq -nc '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:"safedeps: the npm closure library is missing, so project-scoped approvals cannot be enforced. Install blocked fail-closed; reinstall safedeps."}}'
     exit 0
   fi
-  if [[ "${LEDGER_HAS_NPM}" == true ]] && ! guard_all_npm_installs_are_global "${COMMAND}"; then
+  if [[ "${LEDGER_HAS_NPM}" == true ]] && ! [[ "${GUARD_NPM_SEEN}" == true && "${GUARD_NPM_ALL_GLOBAL}" == true ]]; then
     # shellcheck source=../lib/npm/closure.sh
     source "${SAFEDEPS_NPM_CLOSURE_LIB}"
     LEDGER_CONTEXT_FILE=$(mktemp "${TMPDIR:-/tmp}/safedeps-pre-context.XXXXXX") || {
@@ -4426,9 +4965,11 @@ fi
 # install is a policy change (it would block ordinary `cargo add x` workflows)
 # and belongs to the repo owner, not to this gate. The record is what makes that
 # decision answerable with evidence instead of guesswork.
-if [[ "${HIDDEN_DEPENDENCY_INSTALL}" != "true" && -n "${LEDGER_ECOSYSTEM}" ]] \
-    && guard_names_package_without_spec; then
-  log_advisory "pre-guard UNGATED: ${LEDGER_ECOSYSTEM} install names a package with no version spec, so the ledger gate did not run. No effect gate reads the result of this install, so it is unverified. Unpinned: ${UNGATED_OPERANDS}. Command: ${COMMAND}"
+#
+# Each reading walked its own statements (guard_reading_facts); the line names
+# what any of them recorded.
+if [[ -n "${GUARD_UNGATED}" ]]; then
+  log_advisory "pre-guard UNGATED: ${GUARD_UNGATED_ECOSYSTEM} install names a package with no version spec, so the ledger gate did not run. No effect gate reads the result of this install, so it is unverified. Unpinned: ${GUARD_UNGATED}. Command: ${COMMAND}"
 fi
 
 # Specs are extracted from candidate texts only, and a pipe's producer is not
@@ -4443,53 +4984,46 @@ if [[ "${PIPED_BESIDE_VISIBLE}" == "true" ]]; then
   exit 0
 fi
 
-if [[ "${HIDDEN_DEPENDENCY_INSTALL}" == "true" && ( -z "${LEDGER_ECOSYSTEM}" || ${#LEDGER_SPECS[@]} -eq 0 ) ]]; then
+# Per reading: a hidden install another reading reduced to specs is not reduced
+# in the reading that hid it (guard_reading_facts).
+if [[ "${GUARD_HIDDEN_UNREDUCED}" == "true" ]]; then
   guard_undecided_if_scan_failed
   log_advisory "pre-guard DENY: hidden dependency install could not be reduced to an approved spec — fail-closed."
   jq -nc '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:"safedeps: hidden dependency install detected, but no package spec could be extracted for ledger approval — install blocked fail-closed."}}'
   exit 0
 fi
 
-# Decide the inert rewrite first: it reads the command (the injectable test,
-# the compound test), so it belongs before the gate like every other reading.
-# It used to sit after the last settle, where a failed scan made it skip the
-# rewrite or land it at the end of a compound command, and nothing noticed.
+# The inert rewrite was decided per reading (guard_reading_inert), before the
+# gate like every other reading. It used to sit after the last settle, where a
+# failed scan made it skip the rewrite or land it at the end of a compound
+# command, and nothing noticed. A rewrite changes the text every shell reads,
+# so it stands only when every reading made the same one; otherwise no single
+# text is inert for every shell, and the command is UNDECIDED (I2, I3: zsh ran
+# an `npm ci` that bash read as quoted text, with no flag and no record).
 UPDATED_COMMAND=""
 INERT_DOWNGRADED=false
-if ! jq -e 'has("turn_id")' <<< "${INPUT}" >/dev/null 2>&1 && \
-   command_is_injectable_npm_install "${COMMAND}" && \
-   ! command_has_ignore_scripts_flag "${COMMAND}"; then
-  if command_needs_inplace_inert "${COMMAND}"; then
-    # Insert `--ignore-scripts` immediately AFTER each npm-install verb so the
-    # flag stays inside its own statement. Appending to the end of the
-    # whole string would land it on the trailing statement (e.g.
-    # `npm install evil && npm run build --ignore-scripts`), leaving the install
-    # itself running lifecycle scripts (finding #7). `npm install --ignore-scripts <pkg>`
-    # is valid npm syntax (flags may precede operands).
-    # Groups: 1 = through the verb, 2-4 = the options, 5 = the verb, 6 = what
-    # follows it. scripts/test/smoke.sh pins the landing spot.
-    # A failed sed leaves UPDATED_COMMAND empty, which differs from COMMAND and
-    # so would skip both the rewrite and the downgrade record below; the mark
-    # makes the gate settle it instead.
-    inert_rc=0
-    UPDATED_COMMAND=$(inert_rewrite_in_place "${COMMAND}") || inert_rc=$?
-    case "${inert_rc}" in
-      0) ;;
-      3) UPDATED_COMMAND="" ;;
-      *) guard_mark_reading_failed ;;
-    esac
-    if [[ -z "${UPDATED_COMMAND}" || "${UPDATED_COMMAND}" == "${COMMAND}" ]]; then
-      # Rewrite did not land — never blind-append to a compound command. Downgrade
-      # to detect-and-rollback (the effect gate still verifies the closure) and
-      # record it below, once the command is known to run; the inert guarantee is
-      # observably relaxed, never silently.
-      UPDATED_COMMAND=""
-      INERT_DOWNGRADED=true
+if [[ "${GUARD_IS_CODEX}" != true ]]; then
+  inert_first="" inert_seen=false
+  for guard_reading in ${GUARD_READING_SET}; do
+    inert_var="GUARD_INERT_${guard_reading}"
+    if [[ "${inert_seen}" != true ]]; then
+      inert_first="${!inert_var}"
+      inert_seen=true
+    elif [[ "${!inert_var}" != "${inert_first}" ]]; then
+      guard_deny_inert_readings_differ
     fi
-  else
-    UPDATED_COMMAND="${COMMAND} --ignore-scripts"
-  fi
+  done
+  case "${inert_first}" in
+    append) UPDATED_COMMAND="${COMMAND} --ignore-scripts" ;;
+    downgrade) INERT_DOWNGRADED=true ;;
+    rewrite$'\n'*) UPDATED_COMMAND="${inert_first#rewrite$'\n'}" ;;
+  esac
 fi
+
+# What the PostToolUse hook needs to tell whether this command's npm installs
+# were read (NPM_TRACE_WANTED, ATTRIBUTION) was read per reading too
+# (guard_reading_facts). The trace baseline itself is written with the pending
+# state below.
 
 # The gate: every verdict from here on lets the command run, and nothing after
 # this line reads the command text. Pending state, the inert meta and the allow
@@ -4510,15 +5044,39 @@ mkdir -p "${PENDING_DIR}"
 # GC pending entries whose PostToolUse never fired (crash/no-op). 24h is well past
 # any real install, so this never deletes an in-flight one (a 60-min window could
 # have reaped a slow native build that was still running).
-find "${PENDING_DIR}" -name '*.json' -type f -mmin +1440 -delete 2>/dev/null || true
+find "${PENDING_DIR}" \( -name '*.json' -o -name '*.trace' \) -type f -mmin +1440 -delete 2>/dev/null || true
 # Key = (dir, normalized command); the snapshot id suffix makes the filename unique
 # per install, so even two identical concurrent commands keep separate state.
 PENDING_KEY=$(compute_pending_key "${KEY_DIR_HASH}" "${COMMAND}")
-CURRENT_STATE=$(jq -n --arg sid "${SNAPSHOT_ID}" --arg pdir "${PROJECT_DIR}" --arg dhash "${DIR_HASH}" \
-  '{snapshot_id: $sid, project_dir: $pdir, dir_hash: $dhash}')
 # $$ (this pre hook's PID) guarantees a unique filename even for two installs in
 # the same second (SNAPSHOT_ID has only 1s resolution).
-write_state_file "${PENDING_DIR}/${PENDING_KEY}__${SNAPSHOT_ID}_$$.json" "${CURRENT_STATE}"
+PENDING_BASE="${PENDING_DIR}/${PENDING_KEY}__${SNAPSHOT_ID}_$$"
+
+# The trace baseline: a file touched now, and the inode of each npm lockfile in
+# the directory the gate reads. npm rewrote node_modules/.package-lock.json on
+# every install that installed anything, a reinstall of what was already there
+# included, with the same content and a new mtime; `npm ci` replaced the file,
+# so the inode changed too (measured with npm 11.19.0 in the design judgment).
+# Content is no use for this, and neither is a whole-second mtime: a reinstall
+# that finishes within the second it started in shows nothing in either. So
+# the trace is a lockfile `find -newer` than this file, or one with another
+# inode (settle_npm_trace in the PostToolUse hook).
+#
+# It is written last, once the command is known to run, so the time between
+# the touch and the command is the hook's exit and nothing else.
+TRACE_JSON=null
+if [[ "${NPM_TRACE_WANTED}" == true ]]; then
+  TRACE_JSON=$(jq -nc --arg baseline "${PENDING_BASE}.trace" \
+    --arg lock "$(guard_file_inode "${PROJECT_DIR}/package-lock.json")" \
+    --arg hidden "$(guard_file_inode "${PROJECT_DIR}/node_modules/.package-lock.json")" \
+    '{baseline: $baseline, inodes: {"package-lock.json": $lock, "node_modules/.package-lock.json": $hidden}}')
+  : > "${PENDING_BASE}.trace"
+fi
+CURRENT_STATE=$(jq -n --arg sid "${SNAPSHOT_ID}" --arg pdir "${PROJECT_DIR}" --arg dhash "${DIR_HASH}" \
+  --arg from "${PROJECT_DIR_FROM}" --argjson trace "${TRACE_JSON}" --arg attribution "${ATTRIBUTION}" \
+  '{snapshot_id: $sid, project_dir: $pdir, dir_hash: $dhash, project_dir_from: $from,
+    npm_trace: $trace, npm_unattributable: $attribution}')
+write_state_file "${PENDING_BASE}.json" "${CURRENT_STATE}"
 
 if [[ -n "${UPDATED_COMMAND}" ]]; then
   mark_ignore_scripts_injected

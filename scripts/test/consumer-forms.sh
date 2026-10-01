@@ -164,17 +164,10 @@ expect_pass "a heredoc fed straight to sh"            $'sh <<EOF\npip install ev
 expect_pass "a shell built by xargs -I"               "echo 'pip install evil==1.0.0' | xargs -I{} sh -c '{}'"
 expect_pass "a shell built by xargs -0"               "printf 'pip install evil==1.0.0' | xargs -0 sh -c"
 expect_pass "a script written then run"               "printf 'pip install evil==1.0.0' > s.sh; sh s.sh"
-expect_pass "eval nested inside sh -c"                "sh -c 'eval \"pip install evil==1.0.0\"'"
 expect_pass "a top-level command substitution"        '$(echo pip install evil==1.0.0)'
 expect_pass "a pipe to a quoted shell name"           "printf 'pip install evil==1.0.0' | \"sh\""
 pass "command gate leaves the unenumerated carriers unjudged (documented boundary)"
 
-# A `sh -c` nested in a same-quoted one used to be in the list above: its
-# payload word is `'sh -c '\''pip ...'\'''`, which the payload reader reads only
-# up to the first `'`. A reader that cannot finish its word now says so
-# (section 10b), so the form is UNDECIDED. It is not judged as the install it
-# runs; that is the plan safedeps/command-words-read-as-the-shell-dequotes.
-expect_undecided "sh -c nested in a same-quoted sh -c"  "sh -c 'sh -c '\\''pip install evil==1.0.0'\\'''"
 
 # For npm the miss is DELAYED detection, not a miss: the effect gate's recognizer
 # is a raw grep with no carrier enumeration, so it fires on the same text the
@@ -267,11 +260,9 @@ do
   reaches_package_manager "${decoy}" \
     && fail "form is a decoy and must not be counted as a gap: ${decoy}"
 done
-# The first decoy costs an UNDECIDED all the same. Its payload word goes on
-# past the quote the reader stops at, and a reader that cannot finish its word
-# cannot tell this decoy from the forms in section 10b that do install. That is
-# the price of the floor, paid in the safe direction.
-expect_undecided "the doubly quoted sh -c decoy" 'sh -c "sh -c "pip install evil==1.0.0""'
+# Read as the shell reads it, the first decoy's script is `sh -c pip`, and the
+# rest are positional arguments: nothing is installed, and the gate says so.
+expect_pass "the doubly quoted sh -c decoy" 'sh -c "sh -c "pip install evil==1.0.0""'
 pass "decoy forms never reach a package manager (not gaps, nothing to catch)"
 
 # --- 4. The false-positive corpus stays allowed -------------------------------
@@ -567,45 +558,53 @@ expect_not_approved() {
   got=$(gate_reason "${command}")
   [[ "${got}" == "deny "*"install not approved"* ]] || fail "${label} is read as an install and its spec checked (got: ${got:0:120})"
 }
-for start_form in \
-  'case x in x) { pip install evil==1.0.0; };; esac' \
-  'case x in (x) { pip install evil==1.0.0; };; esac' \
-  'time -p { pip install evil==1.0.0; }' \
-  'for i (1) { pip install evil==1.0.0; }' \
-  'repeat 1 { pip install evil==1.0.0; }' \
-  'f g() { pip install evil==1.0.0; }; f' \
-  'function f g { pip install evil==1.0.0; }; f' \
-  '{ true; } always { pip install evil==1.0.0; }' \
-  'coproc foo { pip install evil==1.0.0; }; wait' \
-  $'foreach i (1)\npip install evil==1.0.0\nend' \
-  'for ((i=0;i<1;i++)) { pip install evil==1.0.0; }' \
-  'pip install evil==1.0.0' \
-  'f() { pip install evil==1.0.0; }; f' \
-  'for ((i=(0);i<1;i++)) { pip install evil==1.0.0; }' \
-  "repeat '1' { pip install evil==1.0.0; }" \
-  'for i ($(echo 1)) { pip install evil==1.0.0; }' \
-  'for i (1) pip install evil==1.0.0' \
-  'repeat 1 pip install evil==1.0.0' \
-  'while ((i++<1)) { pip install evil==1.0.0; }' \
-  'if [[ 1 ]] pip install evil==1.0.0' \
-  'case x in x) pip install evil==1.0.0;; esac' \
-  'case x in x) case y in y) { pip install evil==1.0.0; };; esac;; esac' \
-  'coproc { pip install evil==1.0.0; }; wait' \
-  'repeat 1 repeat 1 { pip install evil==1.0.0; }' \
-  'for i (1) for j (1) { pip install evil==1.0.0; }' \
-  'f g () pip install evil==1.0.0; f' \
-  'function f g () { pip install evil==1.0.0; }; f' \
-  'time -p pip install evil==1.0.0' \
-  'repeat $((1)) { pip install evil==1.0.0; }' \
-  "'f'() { pip install evil==1.0.0; }; f" \
-  $'for i (1) {\npip install evil==1.0.0\n}' \
-  $'case x in\nx) { pip install evil==1.0.0; };;\nesac' \
-  'for i in 1; { pip install evil==1.0.0; }' \
-  'if true; then { pip install evil==1.0.0; }; fi' \
-  'time { pip install evil==1.0.0; }' \
-  '! { pip install evil==1.0.0; }'
-do
-  expect_not_approved "an install at a statement start: ${start_form}" "${start_form}"
+# Each row: the form's id in the judgment grid, then whether each shell ran
+# its install (1) or not (0), in the order macOS bash 3.2, zsh 5.9, macOS sh,
+# dash, zsh through the agent's eval wrapper, Linux bash 5.2. Measured by
+# running each form in each shell with a marker in place of the install. The verdict is the union of the readings
+# (bash first, zsh and dash where it says DIVERGE), so a form only zsh runs is
+# denied through the zsh reading.
+start_rows=(
+  'N1|111111|case x in x) { pip install evil==1.0.0; };; esac'
+  'N2|111111|case x in (x) { pip install evil==1.0.0; };; esac'
+  'N3|101001|time -p { pip install evil==1.0.0; }'
+  'N5|010010|for i (1) { pip install evil==1.0.0; }'
+  'N6|010010|repeat 1 { pip install evil==1.0.0; }'
+  'N7|010010|f g() { pip install evil==1.0.0; }; f'
+  'N8|010010|function f g { pip install evil==1.0.0; }; f'
+  'N9|010010|{ true; } always { pip install evil==1.0.0; }'
+  'U1|000001|coproc foo { pip install evil==1.0.0; }; wait'
+  $'U4b|010010|foreach i (1)\npip install evil==1.0.0\nend'
+  'F1|111011|for ((i=0;i<1;i++)) { pip install evil==1.0.0; }'
+  'P0|111111|pip install evil==1.0.0'
+  'P1|111111|f() { pip install evil==1.0.0; }; f'
+  'X1|111011|for ((i=(0);i<1;i++)) { pip install evil==1.0.0; }'
+  "X2|010010|repeat '1' { pip install evil==1.0.0; }"
+  'X3|010010|for i ($(echo 1)) { pip install evil==1.0.0; }'
+  'X4|010010|for i (1) pip install evil==1.0.0'
+  'X5|010010|repeat 1 pip install evil==1.0.0'
+  'X6|010010|while ((i++<1)) { pip install evil==1.0.0; }'
+  'X7|010010|if [[ 1 ]] pip install evil==1.0.0'
+  'X8|111111|case x in x) pip install evil==1.0.0;; esac'
+  'X9|111111|case x in x) case y in y) { pip install evil==1.0.0; };; esac;; esac'
+  'X10|010011|coproc { pip install evil==1.0.0; }; wait'
+  'X11|010010|repeat 1 repeat 1 { pip install evil==1.0.0; }'
+  'X12|010010|for i (1) for j (1) { pip install evil==1.0.0; }'
+  'X15|010010|f g () pip install evil==1.0.0; f'
+  'X16|010010|function f g () { pip install evil==1.0.0; }; f'
+  'X17|101101|time -p pip install evil==1.0.0'
+  'X18|010010|repeat $((1)) { pip install evil==1.0.0; }'
+  "X20|010010|'f'() { pip install evil==1.0.0; }; f"
+  $'X21|010010|for i (1) {\npip install evil==1.0.0\n}'
+  $'X22|111111|case x in\nx) { pip install evil==1.0.0; };;\nesac'
+  'X23|111011|for i in 1; { pip install evil==1.0.0; }'
+  'X24|111111|if true; then { pip install evil==1.0.0; }; fi'
+  'X25|111011|time { pip install evil==1.0.0; }'
+  'X26|111111|! { pip install evil==1.0.0; }'
+)
+for start_row in "${start_rows[@]}"; do
+  start_ran="${start_row#*|}" start_ran="${start_ran%%|*}" start_form="${start_row#*|*|}"
+  expect_not_approved "an install at a statement start (${start_row%%|*}, ran ${start_ran}): ${start_form}" "${start_form}"
 done
 # zsh reads `case x {` as a case; the lexer reads a case that never closes, so
 # the gate cannot finish reading it and says so. Fail-closed, not a finding.
@@ -642,13 +641,25 @@ logged_ungated 'echo () pip install x' || fail "a zsh function named echo is rec
 
 # Four ways a statement-start reader went wrong while this was built, pinned.
 # An assignment is part of its command. A start between them took the
-# assignment off the install, and the UNGATED record of a global install went.
+# assignment off the install, and the record of a global install went: the
+# install read as one into the project. (That record was an UNGATED line when
+# the trap was found; a global npm install is now recorded as landing in the
+# global prefix, and the trace check is the PostToolUse hook's.)
+logged_global() {
+  local safe
+  safe=$(mktemp -d "${tmp_root}/safe-global.XXXXXX")
+  jq -nc --arg c "$1" --arg cwd "${project_dir}" \
+    '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
+    HOME="${tmp_root}/home-global" SAFEDEPS_HOME="${safe}" scripts/safedeps-pre-guard.sh >/dev/null 2>&1
+  grep -q 'npm installs this in its global prefix' "${safe}/advisory.log" 2>/dev/null
+}
+logged_global 'npm_config_global=true npm install evil' || fail "control: a global npm install is recorded as landing in the global prefix"
 for assigned in \
   'if true; then npm_config_global=true npm install evil; fi' \
   '{ npm_config_global=true npm install evil; }' \
   'f() { npm_config_global=true npm install evil; }; f'
 do
-  logged_ungated "${assigned}" || fail "an assignment stays with its install at a statement start: ${assigned}"
+  logged_global "${assigned}" || fail "an assignment stays with its install at a statement start: ${assigned}"
 done
 # A start is written into a view of its own, never over the bytes another
 # reader matches: written into the scan view, `| { sh; }` became `| {;sh; }`
@@ -664,9 +675,10 @@ expect_not_approved "a body after an arithmetic test" 'if ((1)) { pip install ev
 expect_not_approved "an empty arithmetic for" 'for (( ; ; )) { pip install evil==1.0.0; break; }'
 pass "statement starts are read from the shell grammar, and the same words in an argument open nothing"
 
-# The inert rewrite reaches an npm install at every new start. Measured on the
-# release before this: the zsh `for i (1)` form got no rewrite and no verdict,
-# so its lifecycle scripts ran.
+# The inert rewrite reaches an npm install at every new start, under the rule
+# every rewrite follows: the text changes only where every reading puts the
+# npm installs in the same place. Measured on the release before this: the zsh
+# `for i (1)` form got no rewrite and no verdict, so its lifecycle scripts ran.
 gate_rewrite() {
   local safe
   safe=$(mktemp -d "${tmp_root}/safe.XXXXXX")
@@ -675,17 +687,32 @@ gate_rewrite() {
     HOME="${tmp_root}/home" SAFEDEPS_HOME="${safe}" scripts/safedeps-pre-guard.sh 2>/dev/null |
     jq -r '.hookSpecificOutput.updatedInput.command // ""'
 }
+# Every reading parses these and reads the install at the same start.
 for inert_form in \
   'time -p { npm install evil; }' \
   'case x in x) { npm install evil; };; esac' \
-  'for i (1) { npm install evil; }' \
   'f() { npm install evil; }; f' \
-  'for ((i=0;i<1;i++)) { npm install evil; }'
+  'for i in 1; { npm install evil; }' \
+  'time { npm install evil; }' \
+  '! { npm install evil; }'
 do
   [[ "$(gate_rewrite "${inert_form}")" == "${inert_form/npm install/npm install --ignore-scripts}" ]] \
     || fail "an npm install at a statement start gets --ignore-scripts: ${inert_form} (got: $(gate_rewrite "${inert_form}"))"
 done
-pass "the inert rewrite reaches an npm install at every statement start"
+# Only some shells parse these, so a reading finds no install where another
+# does, and no single text is inert for every shell: UNDECIDED, with the
+# readings reason, never a rewrite for one shell.
+for inert_form in \
+  'for i (1) { npm install evil; }' \
+  'repeat 1 { npm install evil; }' \
+  'for ((i=0;i<1;i++)) { npm install evil; }' \
+  'coproc foo { npm install evil; }; wait'
+do
+  got=$(gate_reason "${inert_form}")
+  [[ "${got}" == "deny "*UNDECIDED*"read the npm installs in this command in different places"* ]] \
+    || fail "an npm install at a start only some shells read is UNDECIDED, not rewritten for one: ${inert_form} (got: ${got:0:120})"
+done
+pass "the inert rewrite reaches an npm install at every statement start the readings agree on, and is UNDECIDED where they do not"
 
 # An assignment prefix is one word however its value is quoted or nested. The
 # prefix stripper read a value as the bytes up to the first blank or quote, so
@@ -844,11 +871,6 @@ for no_effect_gate in \
   "pnpm i evil" \
   "yarn add evil" \
   "bun add evil" \
-  "npm install -g evil" \
-  "npm_config_global=true npm install evil" \
-  "NPM_CONFIG_GLOBAL=true npm install evil" \
-  "export npm_config_global=true; npm install evil" \
-  "npm_config_location=global npm install evil" \
   "npx evil" \
   "npm exec evil" \
   "pnpm dlx evil" \
@@ -860,31 +882,136 @@ do
   [[ "$(gate_decision "${no_effect_gate}")" != "deny" ]] \
     || fail "the UNGATED record must not change the verdict: ${no_effect_gate}"
 done
-pass "unpinned pnpm/yarn/bun, global npm, and runner installs are recorded"
+pass "unpinned pnpm/yarn/bun and runner installs are recorded"
 
-# The effect gate reads one directory, chosen before the command runs. An install
-# that lands somewhere the text does not let the gate follow is not read, so it
-# is recorded. A literal `cd` to a directory that exists, and npm's `-C`, are
-# followed; everything the shell decides at run time is not
+# The pending state the pre-guard leaves for the PostToolUse hook, as JSON.
+pending_of() { # command [codex]
+  local command="$1" safe turn='{}'
+  [[ "${2:-}" != codex ]] || turn='{turn_id:"t"}'
+  safe=$(mktemp -d "${tmp_root}/safe-pending.XXXXXX")
+  jq -nc --arg c "${command}" --arg cwd "${project_dir}" \
+    '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd} + '"${turn}" |
+    HOME="${tmp_root}/home-pending" SAFEDEPS_HOME="${safe}" scripts/safedeps-pre-guard.sh >/dev/null 2>&1
+  cat "${safe}"/pending/*.json 2>/dev/null || true
+}
+
+# Whether an npm install was read is the PostToolUse hook's to say, from the
+# install trace it finds where the gate looks (scripts/test/effect-trace-grid.sh
+# runs these end to end). So the pre-guard records none of these, whether the
+# text sends the install to npm's global prefix or somewhere it cannot name, and
+# every one leaves the post hook a trace baseline. The pre-guard used to record
+# them from the text, and text it read wrong was a silent pass
 # (safedeps/effect-gate-blind-to-lockless-npm-installs). `sub` has a
-# package.json of its own, so npm installs there and not in the project: npm
-# walks up from a directory without one.
+# package.json of its own.
 mkdir -p "${project_dir}/sub"
 printf '{}\n' > "${project_dir}/sub/package.json"
-for unfollowed in \
+for unread_by_text in \
+  "npm install -g evil" \
+  "npm_config_global=true npm install evil" \
+  "NPM_CONFIG_GLOBAL=true npm install evil" \
+  "export npm_config_global=true; npm install evil" \
+  "npm_config_location=global npm install evil" \
   'cd "$SUBDIR" && npm install evil' \
   'cd $(dirname x)/sub && npm install evil' \
   'cd no-such-dir && npm install evil' \
   '(cd sub && npm install evil)' \
   'cd sub | npm install evil' \
   'pushd sub && popd && npm install evil' \
-  'npm install evil --prefix=$HOME/x' \
-  'cd sub && npm install evil && cd .. && npm install other'
+  'npm install evil --prefix=$HOME/x'
 do
-  logged_ungated "${unfollowed}" \
-    || fail "an unpinned install that lands where the gate cannot follow is recorded: ${unfollowed}"
+  logged_ungated "${unread_by_text}" \
+    && fail "the pre-guard leaves the record of an npm install to the post hook: ${unread_by_text}"
+  state=$(pending_of "${unread_by_text}")
+  [[ -n "$(jq -r '.npm_trace.baseline // empty' <<< "${state}")" ]] \
+    || fail "the post hook gets a trace baseline: ${unread_by_text} (${state})"
+  [[ "$(jq -r '.project_dir_from' <<< "${state}")" == cwd ]] \
+    || fail "a directory the text cannot name falls back to the cwd, as a place to look: ${unread_by_text} ($(jq -c . <<< "${state}"))"
 done
-pass "an install relocated by run-time shell state, or split across directories, is recorded"
+pass "an npm install the text sends elsewhere, or cannot place, is left to the post hook's trace check"
+
+# A `cd` that may not run is followed only along the `&&` chain after it
+# (validator round 3, G1: `false && cd sub; npm install x` installs in the cwd).
+# `<form>|<directory the gate reads, relative to the project>`.
+for carrier in \
+  "false && cd sub; npm install evil|." \
+  "true || cd sub; npm install evil|." \
+  "if false; then cd sub; fi; npm install evil|." \
+  "[ -d sub ] && cd sub; npm install evil|." \
+  "x || cd sub && npm install evil|." \
+  "for d in sub; do cd sub; done; npm install evil|." \
+  "true && cd sub && npm install evil|sub" \
+  "if true; then cd sub && npm install evil; fi|sub" \
+  "cd sub || exit 1; npm install evil|sub" \
+  "cd sub; npm install evil|sub" \
+  "cd sub && npm install evil|sub"
+do
+  form="${carrier%|*}"
+  where="${project_dir}"
+  [[ "${carrier##*|}" == . ]] || where="${project_dir}/${carrier##*|}"
+  where=$(cd "${where}" && pwd -P)
+  state=$(pending_of "${form}")
+  [[ "$(jq -r '.project_dir' <<< "${state}")" == "${where}" ]] \
+    || fail "a conditional cd is followed only as far as it provably ran: ${form} (reads $(jq -r '.project_dir' <<< "${state}"), expected ${where})"
+done
+pass "a conditional cd holds along the && chain after it and no further; cd X || exit is followed"
+
+# Two lockfile writers credited to one trace. The post hook records the command
+# UNGATED when they cannot be (the reason is in the pending state); the cases
+# where they can stay quiet. `<expect>|<form>`, expect `one` or `split`.
+for carrier in \
+  "one|npm install evil && npm install other" \
+  "one|npm ci || npm install" \
+  "one|npm install evil 2>&1 | tail -3 && npm install other" \
+  "one|npm install evil; echo done; npm install other" \
+  "one|npm install evil && npm run build" \
+  "one|npm install evil && npm install other >/dev/null 2>&1" \
+  "split|npm install evil; command cd sub; npm install other" \
+  "split|npm install evil && npm init -y && npm install other" \
+  "split|npm prune; npm init -y; npm install other" \
+  "split|cd sub && npm install evil && cd .. && npm install other" \
+  "split|npm install evil && npm -C sub install other" \
+  "split|npm install evil && npm_config_global=true npm install other" \
+  "split|npm install evil; sh -c 'npm install other'" \
+  "split|npm install evil; echo global=true > .npmrc; npm install other" \
+  "split|npm install evil; npm config set global true; npm install other" \
+  "split|(cd sub; npm install evil); npm install other" \
+  "split|npm install evil; echo \$(rm package.json); npm install other"
+do
+  expect="${carrier%%|*}"
+  form="${carrier#*|}"
+  state=$(pending_of "${form}")
+  reason=$(jq -r '.npm_unattributable // empty' <<< "${state}")
+  if [[ "${expect}" == one ]]; then
+    [[ -z "${reason}" ]] || fail "lockfile writers with nothing between them share one trace: ${form} (${reason})"
+  else
+    [[ -n "${reason}" ]] || fail "lockfile writers that may land apart are not credited to one trace: ${form} ($(jq -c . <<< "${state}"))"
+  fi
+done
+pass "lockfile writers share a trace only with inert statements between them and no relocation of their own"
+
+# Where the shells read a command differently the gate judges each reading on
+# its own (resolve_install_targets, A1). A statement both readings share is one
+# statement, not two, so the one npm install below is one writer. That row has
+# no control: with the readings joined into one text (the reading this
+# replaced), the first reading's open `((` swallowed the second copy, so it was
+# not counted twice either (measured on a mutated copy). The second row is the
+# one that reading failed: the split only the zsh reading shows was swallowed
+# with it, and no reason came through. It runs as Codex: bash reads no npm
+# install there at all, zsh and dash read two, so a Claude call is UNDECIDED
+# before any pending state is written (the inert rule, guard_reading_inert),
+# which the row after it pins.
+diverge=$'((cat <<EOF > n.txt\nit\'s here\nEOF\n) )'
+state=$(pending_of "npm install evil"$'\n'"${diverge}")
+[[ -n "$(jq -r '.npm_trace.baseline // empty' <<< "${state}")" ]] \
+  || fail "a command the shells read two ways still leaves a trace baseline (${state})"
+[[ -z "$(jq -r '.npm_unattributable // empty' <<< "${state}")" ]] \
+  || fail "one npm install shared by two readings is one writer ($(jq -r .npm_unattributable <<< "${state}"))"
+state=$(pending_of "${diverge}"$'\n'"npm install evil; command cd sub; npm install other" codex)
+[[ -n "$(jq -r '.npm_unattributable // empty' <<< "${state}")" ]] \
+  || fail "two writers with a statement between them are reported from the reading that has them ($(jq -c . <<< "${state}"))"
+[[ -z "$(pending_of "${diverge}"$'\n'"npm install evil; command cd sub; npm install other")" ]] \
+  || fail "a Claude call whose readings put the npm installs in different places leaves no pending state"
+pass "the attribution rule counts each shell reading on its own"
 
 # The other side: forms the effect gate does read stay quiet. `--no-save` and
 # `--no-package-lock` leave package-lock.json alone but record the package in
@@ -1315,18 +1442,17 @@ expect_undecided "an ANSI-C \\u escape in a spec" $'pip install $\'ev\\u0069l==1
 expect_undecided "an ANSI-C NUL in a spec" $'pip install $\'evil\\0==1.0.0\''
 pass "an escape the extractor cannot name is a failed reading, not another word"
 
-# The floor under the payload readers. `sh -c` and `eval` payloads are read as
-# one quoted word, up to the first matching quote; a word that does not end
-# there -- an escaped quote inside it, more quoting glued to it, an ANSI-C word,
-# an unquoted word with escapes -- used to be read as far as it went, and the
+# `sh -c` and `eval` scripts are read as the word the shell passes: quotes
+# removed, escapes applied, words cut where the shell cuts them. The reader this
+# replaced took the word up to its first matching quote, so a word that did not
+# end there -- an escaped quote inside it, more quoting glued to it, an ANSI-C
+# word, an unquoted word with escapes -- was read as far as it went, and the
 # install the shell runs after it passed with no verdict (every form below was
-# measured, with a stand-in for the manager, to run the install). The reader
-# now marks the reading failed and the command is UNDECIDED. Reading those
-# words the way the shell does is the plan
-# safedeps/command-words-read-as-the-shell-dequotes.
+# measured, with a stand-in for the manager, to run the install). A floor that
+# marked such words unread made ordinary commands UNDECIDED, so each is now
+# judged as the install it runs.
 for payload_form in \
   'sh -c "echo \"hi\"; pip install evil==1.0.0"' \
-  'bash -c "x=\"a\"; cargo install evil --version 1.0.0"' \
   'eval "echo \"hi\"; pip install evil==1.0.0"' \
   $'sh -c \'echo hi\'"; pip install evil==1.0.0"' \
   $'sh -c $\'pip install evil==1.0.0\'' \
@@ -1334,14 +1460,63 @@ for payload_form in \
   'sh -c "pip install "evil==1.0.0' \
   $'bash -c \'echo \'\\\'\'hi\'\\\'\'; pip install evil==1.0.0\''
 do
-  expect_undecided "a payload word its reader cannot finish: ${payload_form}" "${payload_form}"
+  expect_prescription 'pypi evil@1.0.0;' "${payload_form}"
 done
-# Controls: a payload read to its end is judged as before, and a head inside
-# quoted text is data, not a payload the shell runs.
+expect_prescription 'crates.io evil@1.0.0;' 'bash -c "x=\"a\"; cargo install evil --version 1.0.0"'
+# Ordinary scripts with escaped quotes are not installs: under the floor they
+# were UNDECIDED (24 of 30 such commands, measured).
+for ordinary in \
+  'bash -c "cd \"$dir\" && npm run build"' \
+  'bash -c "npm test -- --grep \"parser\""' \
+  'bash -lc "nvm use 20 && npm run lint -- --fix \"src/**/*.ts\""' \
+  'bash -c "cargo build --features \"a b\""' \
+  'sh -c "git commit -m \"bump npm deps\""' \
+  $'sh -c $\'npm run build\\n\'' \
+  'bash -c npm\ run\ build' \
+  'for d in a b; do bash -c "cd \"$d\" && npm test"; done'
+do
+  expect_pass "an ordinary script handed to a shell: ${ordinary}" "${ordinary}"
+done
+# A script handed to a shell is read as the word the shell passes, and the
+# scripts inside it too, so a `sh -c` nested in a same-quoted one and an `eval`
+# inside `sh -c` are judged as the installs they run. Both used to be outside the
+# boundary: the payload reader stopped at the first matching quote.
+expect_prescription 'pypi evil@1.0.0;' "sh -c 'sh -c '\\''pip install evil==1.0.0'\\'''"
+expect_prescription 'pypi evil@1.0.0;' "sh -c 'eval \"pip install evil==1.0.0\"'"
+
+# Controls: a plain payload is judged, and a head inside quoted text is data.
 expect_prescription 'pypi evil@1.0.0;' 'sh -c "pip install evil==1.0.0"'
-expect_prescription 'pypi evil@1.0.0;' $'echo \'sh -c "pip install evil==1.0.0"\''
+expect_pass "a sh -c head inside quoted text is data" $'echo \'sh -c "pip install evil==1.0.0"\''
 expect_pass "a quoted mention of sh -c with escaped quotes" $'git commit -m \'run sh -c "npm test -- \\"x\\""\''
-pass "a payload word its reader cannot read to the end is UNDECIDED, not read as no install"
+pass "a script handed to a shell is read as the word the shell passes"
+
+# Any shell whose name ends in sh reads its -c script (macOS ships ksh, csh
+# and tcsh), and options may come before -c. Narrowing the shell names to four
+# passed `ksh -c "pip install ..."` with no verdict (caught in review).
+for shell_form in \
+  'ksh -c "pip install evil==1.0.0"' \
+  '/bin/ksh -c "pip install evil==1.0.0"' \
+  'csh -c "pip install evil==1.0.0"' \
+  'tcsh -c "pip install evil==1.0.0"' \
+  'fish -c "pip install evil==1.0.0"' \
+  'bash -o pipefail -c "pip install evil==1.0.0"' \
+  'bash -euo pipefail -c "pip install evil==1.0.0"' \
+  'bash -c -- "pip install evil==1.0.0"'
+do
+  expect_prescription 'pypi evil@1.0.0;' "${shell_form}"
+done
+# A statement ends only at a top-level separator: not inside a substitution,
+# an expansion or arithmetic, and not in a redirection operator. Cutting there
+# left the install's words behind (`>| f`, `2<&-`, `$(pwd | sed x)`).
+expect_prescription 'pypi evil@1.0.0;' 'pip install >| f evil==1.0.0'
+expect_prescription 'crates.io evil@1.0.0;' 'cargo install 2<&- evil --version 1.0.0'
+expect_prescription 'npm evil@1.0.0;' 'pnpm add --dir $(pwd | cat) evil@1.0.0'
+expect_prescription 'pypi evil@1.0.0;' 'pip install --cache-dir $(pwd | sed s/x/y/) evil==1.0.0'
+expect_prescription 'pypi evil@1.0.0;' 'pip install --retries $((1|2)) evil==1.0.0'
+expect_prescription 'pypi evil@1.0.0;' 'pip install --log ${X:-a|b} evil==1.0.0'
+expect_pass "a pipeline of ordinary commands" 'npm run build | tee out'
+expect_pass "a pipeline with no install" 'echo hi | grep h'
+pass "statement cuts and shell names are read the way the shell reads them"
 
 # `npm link` reads every argument with npm-package-arg and installs the
 # registry ones into the global prefix (lib/commands/link.js:92-104); a path,
@@ -1423,7 +1598,8 @@ operand_rows=(
   $'npm:left-pad\tpnpm add left-pad@1.0.0 && pnpm add left-pad'
   $'npm:left-pad\tyarn add left-pad@1.0.0 && yarn add left-pad'
   $'npm:left-pad\tbun add left-pad@1.0.0 && bun add left-pad'
-  $'npm:left-pad\tnpm i -g left-pad@1.0.0 && npm i -g left-pad'
+  # (`npm i -g left-pad@1.0.0 && npm i -g left-pad` is an npm CLI install, so
+  # its record is the PostToolUse hook's, below.)
   $'npm:left-pad\tyarn add left-pad@1.0.0 && yarn up left-pad'
   $'npm:left-pad\tpnpm add left-pad@1.0.0 && pnpm update left-pad --latest'
   $'npm:@scope/pkg\tpnpm add @scope/pkg@1.0.0 && pnpm add @scope/pkg'
@@ -1461,7 +1637,6 @@ operand_rows=(
   $'npm:left-pad\tpnpm add left-pad@1.0.0 && echo "$(pnpm add left-pad)"'
   # And inside one statement.
   $'npm:left-pad\tpnpm add left-pad@1.0.0 left-pad'
-  $'npm:left-pad\tnpm i -g left-pad@1.0.0 left-pad'
   $'go:example.com/m\tgo get example.com/m@v1.0.0 example.com/m'
   $'crates.io:ripgrep\tcargo install ripgrep@13.0.0 ripgrep'
   # Runners.
@@ -1543,26 +1718,22 @@ operand_rows=(
   $'\tnpm i --save=false left-pad'
   $'\tnpm install --no-package-lock left-pad'
   $'\tnpm install --package-lock=false left-pad'
-  # Recorded: the statement is the unit of the exemption, and its landing
-  # decides it. The gate reads one directory, the first one the command names.
+  # Recorded: the statement is the unit of the exemption.
   $'npm:right-pad\tnpm install --no-save left-pad && pnpm add right-pad'
-  $'npm:right-pad\tnpm install left-pad && cd sub && npm install right-pad'
-  $'npm:right-pad\tnpm install left-pad && npm install -g right-pad'
-  # Recorded: global however npm's option parser (nopt) spells it -- a short
-  # flag bundle, `=value` on a boolean, a negated `--no-` set to false, a unique
-  # abbreviation of `--location`. npm answers where each lands (`npm root`), so
-  # no spelling is listed in the guard; these read as project installs, and
-  # went unrecorded, while a regex decided it.
-  $'npm:left-pad\tnpm install -gf left-pad'
-  $'npm:left-pad\tnpm i -fg left-pad'
-  $'npm:left-pad\tnpm i -g=true left-pad'
-  $'npm:left-pad\tnpm i --locat=global left-pad'
-  $'npm:left-pad\tnpm i --no-global=false left-pad'
-  # Quiet: the last value nopt reads wins, so this one is a project install.
+  # Quiet here: an npm CLI install, wherever the text sends it. Whether it was
+  # read is the PostToolUse hook's record, from the install trace it finds where
+  # the gate looked (scripts/test/effect-trace-grid.sh; the attribution of two
+  # writers is pinned in section 9). Landing used to decide the exemption, and a
+  # landing read wrong was a silent pass.
+  $'\tnpm install left-pad && cd sub && npm install right-pad'
+  $'\tnpm install left-pad && npm install -g right-pad'
+  $'\tnpm install -gf left-pad'
   $'\tnpm i -g left-pad --global=false'
   # Recorded: `npm link <pkg>` installs a package the global tree lacks into
   # npm's global prefix from the registry (lib/commands/link.js linkInstall),
-  # whatever the flags say. A path or no argument links local code, quiet.
+  # whatever the flags say, and only the link lands in the project, so a trace
+  # there says nothing about the package. A path or no argument links local
+  # code, quiet.
   $'npm:left-pad\tnpm link left-pad'
   $'npm:@scope/pkg\tnpm ln @scope/pkg'
   $'npm:left-pad\tnpm link --save left-pad'
@@ -1643,6 +1814,38 @@ for row in "${operand_rows[@]}"; do
   row_index=$((row_index + 1))
 done
 pass "the UNGATED record names each unchecked operand, and only those (${#operand_rows[@]} rows)"
+
+# Global however npm's option parser (nopt) spells it -- a short flag bundle,
+# `=value` on a boolean, a negated `--no-` set to false, a unique abbreviation
+# of `--location`. npm answers where each lands (`npm root`), so no spelling is
+# listed in the guard; these read as project installs while a regex decided it.
+# The answer picks where the gate looks and is written down; the record of the
+# install is the PostToolUse hook's, which finds no trace in the project.
+# `<global|project>|<command>`.
+for carrier in \
+  "global|npm install -gf left-pad" \
+  "global|npm i -fg left-pad" \
+  "global|npm i -g=true left-pad" \
+  "global|npm i --locat=global left-pad" \
+  "global|npm i --no-global=false left-pad" \
+  "project|npm i -g left-pad --global=false"
+do
+  where="${carrier%%|*}"
+  form="${carrier#*|}"
+  safe=$(mktemp -d "${tmp_root}/global-answer.XXXXXX")
+  jq -nc --arg c "${form}" --arg cwd "${project_dir}" '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
+    HOME="${safe}/home" SAFEDEPS_HOME="${safe}" scripts/safedeps-pre-guard.sh >/dev/null 2>&1 || true
+  if [[ "${where}" == global ]]; then
+    grep -q 'npm installs this in its global prefix' "${safe}/advisory.log" 2>/dev/null \
+      || fail "npm answers that this install is global: ${form}"
+  else
+    grep -q 'npm installs this in its global prefix' "${safe}/advisory.log" 2>/dev/null \
+      && fail "the last value nopt reads wins, so this is a project install: ${form}"
+  fi
+  [[ -n "$(jq -r '.npm_trace.baseline // empty' "${safe}"/pending/*.json 2>/dev/null)" ]] \
+    || fail "the post hook gets a trace baseline for it: ${form}"
+done
+pass "every spelling npm's option parser reads as global is global to the gate, and left to the post hook's trace check"
 
 
 # --- A visible install does not switch the pipe check off ---------------------
@@ -1756,5 +1959,46 @@ pass "an install piped into a shell is denied beside a visible install, even an 
 [[ "$(beside_decision $'cat <<EOF > notes.md\nhello\nEOF\npip install requests==2.0.0 && eval "pip install evil==6.6.6"')" == "deny" ]] \
   || fail "an eval install after a heredoc beside a visible install is still read"
 pass "a visible install beside a pipe into a shell with nothing else to install keeps its verdict"
+
+# --- Ordinary commands that pass where the shells differ --------------------
+# The gate reads a command as bash, as zsh and as dash, and the zsh and dash
+# readings run only when the bash reading passes a place where the three
+# differ: `((`, `$((`, a quote in arithmetic, `$[`, an apostrophe in "${...}",
+# `$'...'`. Everyday commands pass such places all the time. Each of these
+# keeps the verdict it had when the gate read one fixed reading -- measured
+# against the release head before the readings were shells, with left-pad
+# approved: six allows, nineteen unjudged, nothing moved. A reading that made
+# them UNDECIDED, or an inert rewrite the readings disagree on, would show here.
+for ordinary in \
+  'pass|for ((i=0;i<3;i++)); do echo $i; done' \
+  'pass|n=$((n+1)); echo "count: ${n:-0}"' \
+  'allow|echo "${HOME:-/tmp}/x"; npm install left-pad@1.3.0' \
+  'allow|((count++)); npm ci' \
+  'allow|npm install left-pad@1.3.0 && echo "done $((1+2))"' \
+  "pass|echo \"\${x:-it's}\"" \
+  "pass|git commit -m \"fix: handle \${x:-'default'}\"" \
+  'pass|x=$(( $(wc -l < /etc/hosts) + 1 )); echo $x' \
+  'pass|echo $(( 1 << 4 ))' \
+  $'pass|cat <<EOF\n$((1+2))\nEOF' \
+  'pass|if (( $# > 0 )); then echo args; fi' \
+  'allow|while ((i < 3)); do ((i++)); done; npm install left-pad@1.3.0' \
+  "pass|echo \"\${PATH//:/ }\" | tr ' ' '\\n' | head" \
+  "pass|printf '%s\\n' \"\${arr[@]:-none}\"" \
+  'pass|x=${y:-$((2*3))}; echo $x' \
+  'allow|echo "${name#prefix}" && npm install left-pad@1.3.0' \
+  'pass|((1<<2)); echo shift' \
+  'pass|echo "$((x<<2))"; ls' \
+  'pass|case $x in (a) ((n++));; esac' \
+  'pass|time ((x=5)); echo $x' \
+  "pass|echo \"\${msg:-'quoted default'}\" > out.txt" \
+  'pass|for f in *.js; do echo "${f%.js}"; done' \
+  "allow|npm install left-pad@1.3.0; echo \"\${x:-'}\"" \
+  'pass|arr=(a b c); echo "${#arr[@]}"' \
+  'pass|echo $[1+1]'
+do
+  [[ "$(beside_decision "${ordinary#*|}")" == "${ordinary%%|*}" ]] \
+    || fail "an ordinary command where the shells differ keeps its verdict (${ordinary%%|*}): ${ordinary#*|} (got: $(beside_decision "${ordinary#*|}"))"
+done
+pass "ordinary commands where bash, zsh and dash read differently keep their verdicts (25)"
 
 printf 'consumer-forms passed\n'

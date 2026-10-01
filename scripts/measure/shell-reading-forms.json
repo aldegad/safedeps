@@ -8,7 +8,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -20,7 +25,12 @@
       "bash": "-",
       "zsh": "-",
       "sh": "-",
-      "agent": "-"
+      "agent": "-",
+      "dash": "-",
+      "linux": {
+        "bash": "-",
+        "dash": "-"
+      }
     }
   },
   {
@@ -32,7 +42,12 @@
       "bash": "-",
       "zsh": "-",
       "sh": "-",
-      "agent": "-"
+      "agent": "-",
+      "dash": "-",
+      "linux": {
+        "bash": "-",
+        "dash": "-"
+      }
     }
   },
   {
@@ -44,7 +59,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -56,7 +76,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -68,7 +93,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -80,7 +110,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -92,7 +127,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -104,7 +144,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -116,7 +161,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -128,7 +178,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -140,7 +195,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -152,7 +212,12 @@
       "bash": "-!",
       "zsh": "R",
       "sh": "-!",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -164,7 +229,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -176,7 +246,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -188,7 +263,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -200,7 +280,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -212,7 +297,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -224,7 +314,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -236,7 +331,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -248,7 +348,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -260,7 +365,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -272,7 +382,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -284,7 +399,12 @@
       "bash": "-!",
       "zsh": "R",
       "sh": "-!",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -296,7 +416,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -308,7 +433,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -320,7 +450,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -332,7 +467,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "-!",
+      "linux": {
+        "bash": "R",
+        "dash": "-!"
+      }
     }
   },
   {
@@ -344,7 +484,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -356,7 +501,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -368,7 +518,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -380,7 +535,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -392,7 +552,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -404,7 +569,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -416,7 +586,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "-",
+      "linux": {
+        "bash": "R",
+        "dash": "-"
+      }
     }
   },
   {
@@ -428,7 +603,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -440,7 +620,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "-",
+      "linux": {
+        "bash": "R",
+        "dash": "-"
+      }
     }
   },
   {
@@ -452,7 +637,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "-",
+      "linux": {
+        "bash": "R",
+        "dash": "-"
+      }
     }
   },
   {
@@ -464,7 +654,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -476,7 +671,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -488,7 +688,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -500,7 +705,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -512,7 +722,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "-!",
+      "linux": {
+        "bash": "R",
+        "dash": "-!"
+      }
     }
   },
   {
@@ -524,7 +739,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -536,7 +756,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -548,7 +773,12 @@
       "bash": "-!",
       "zsh": "R",
       "sh": "-!",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "-!",
+        "dash": "R"
+      }
     }
   },
   {
@@ -560,7 +790,12 @@
       "bash": "-!",
       "zsh": "-!",
       "sh": "-!",
-      "agent": "-!"
+      "agent": "-!",
+      "dash": "-!",
+      "linux": {
+        "bash": "R",
+        "dash": "-!"
+      }
     }
   },
   {
@@ -572,7 +807,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "-!",
+      "linux": {
+        "bash": "R",
+        "dash": "-!"
+      }
     }
   },
   {
@@ -584,7 +824,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -596,7 +841,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -608,7 +858,12 @@
       "bash": "-!",
       "zsh": "R",
       "sh": "-!",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -620,7 +875,12 @@
       "bash": "-!",
       "zsh": "R",
       "sh": "-!",
-      "agent": "R"
+      "agent": "R",
+      "dash": "-!",
+      "linux": {
+        "bash": "-!",
+        "dash": "-!"
+      }
     }
   },
   {
@@ -632,7 +892,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -644,7 +909,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -656,7 +926,12 @@
       "bash": "-!",
       "zsh": "R",
       "sh": "-!",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -668,7 +943,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -680,7 +960,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -692,7 +977,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -704,7 +994,12 @@
       "bash": "R",
       "zsh": "-!",
       "sh": "R",
-      "agent": "-!"
+      "agent": "-!",
+      "dash": "-!",
+      "linux": {
+        "bash": "R!",
+        "dash": "-!"
+      }
     }
   },
   {
@@ -716,7 +1011,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -728,7 +1028,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -740,7 +1045,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -752,7 +1062,12 @@
       "bash": "-",
       "zsh": "-",
       "sh": "-",
-      "agent": "-"
+      "agent": "-",
+      "dash": "-",
+      "linux": {
+        "bash": "-",
+        "dash": "-"
+      }
     },
     "gate": "pass"
   },
@@ -765,7 +1080,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -777,7 +1097,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -789,7 +1114,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -801,7 +1131,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -813,7 +1148,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -825,7 +1165,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -837,7 +1182,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "-!",
+      "linux": {
+        "bash": "R",
+        "dash": "-!"
+      }
     }
   },
   {
@@ -849,7 +1199,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -861,7 +1216,12 @@
       "bash": "-!",
       "zsh": "R",
       "sh": "-!",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -872,7 +1232,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -883,7 +1248,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -894,7 +1264,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "-",
+      "linux": {
+        "bash": "R",
+        "dash": "-"
+      }
     }
   },
   {
@@ -905,7 +1280,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "-",
+      "linux": {
+        "bash": "R",
+        "dash": "-"
+      }
     }
   },
   {
@@ -916,7 +1296,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "-",
+      "linux": {
+        "bash": "R",
+        "dash": "-"
+      }
     }
   },
   {
@@ -927,7 +1312,12 @@
       "bash": "-!",
       "zsh": "R",
       "sh": "-!",
-      "agent": "R"
+      "agent": "R",
+      "dash": "-!",
+      "linux": {
+        "bash": "R",
+        "dash": "-!"
+      }
     }
   },
   {
@@ -938,7 +1328,12 @@
       "bash": "-!",
       "zsh": "R",
       "sh": "-!",
-      "agent": "R"
+      "agent": "R",
+      "dash": "-!",
+      "linux": {
+        "bash": "R",
+        "dash": "-!"
+      }
     }
   },
   {
@@ -949,7 +1344,12 @@
       "bash": "R",
       "zsh": "-!",
       "sh": "R",
-      "agent": "-!"
+      "agent": "-!",
+      "dash": "-!",
+      "linux": {
+        "bash": "R",
+        "dash": "-!"
+      }
     }
   },
   {
@@ -960,7 +1360,12 @@
       "bash": "-",
       "zsh": "R",
       "sh": "-",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "-",
+        "dash": "R"
+      }
     }
   },
   {
@@ -971,7 +1376,12 @@
       "bash": "-",
       "zsh": "R",
       "sh": "-",
-      "agent": "R"
+      "agent": "R",
+      "dash": "-",
+      "linux": {
+        "bash": "-",
+        "dash": "-"
+      }
     }
   },
   {
@@ -982,7 +1392,12 @@
       "bash": "-",
       "zsh": "R",
       "sh": "-",
-      "agent": "R"
+      "agent": "R",
+      "dash": "-",
+      "linux": {
+        "bash": "-",
+        "dash": "-"
+      }
     }
   },
   {
@@ -993,7 +1408,12 @@
       "bash": "-",
       "zsh": "R",
       "sh": "-",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "-",
+        "dash": "R"
+      }
     }
   },
   {
@@ -1004,7 +1424,12 @@
       "bash": "-",
       "zsh": "R",
       "sh": "-",
-      "agent": "R"
+      "agent": "R",
+      "dash": "-",
+      "linux": {
+        "bash": "-",
+        "dash": "-"
+      }
     }
   },
   {
@@ -1015,7 +1440,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -1026,7 +1456,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "-",
+        "dash": "R"
+      }
     }
   },
   {
@@ -1037,7 +1472,12 @@
       "bash": "-!",
       "zsh": "R",
       "sh": "-!",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -1048,7 +1488,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "-",
+      "linux": {
+        "bash": "R",
+        "dash": "-"
+      }
     }
   },
   {
@@ -1059,7 +1504,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -1070,7 +1520,12 @@
       "bash": "R",
       "zsh": "-",
       "sh": "R",
-      "agent": "-"
+      "agent": "-",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "-"
+      }
     }
   },
   {
@@ -1081,7 +1536,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -1092,7 +1552,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -1103,7 +1568,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "-!",
+      "linux": {
+        "bash": "R",
+        "dash": "-!"
+      }
     }
   },
   {
@@ -1114,7 +1584,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "-",
+      "linux": {
+        "bash": "R",
+        "dash": "-"
+      }
     }
   },
   {
@@ -1125,7 +1600,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -1136,7 +1616,12 @@
       "bash": "-!",
       "zsh": "R",
       "sh": "-!",
-      "agent": "R"
+      "agent": "R",
+      "dash": "-!",
+      "linux": {
+        "bash": "R",
+        "dash": "-!"
+      }
     }
   },
   {
@@ -1147,7 +1632,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -1158,7 +1648,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -1169,7 +1664,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -1180,7 +1680,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -1191,7 +1696,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -1202,7 +1712,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -1213,7 +1728,12 @@
       "bash": "-",
       "zsh": "R",
       "sh": "-",
-      "agent": "R"
+      "agent": "R",
+      "dash": "-",
+      "linux": {
+        "bash": "-",
+        "dash": "-"
+      }
     }
   },
   {
@@ -1224,7 +1744,12 @@
       "bash": "-",
       "zsh": "R",
       "sh": "-",
-      "agent": "R"
+      "agent": "R",
+      "dash": "-",
+      "linux": {
+        "bash": "-",
+        "dash": "-"
+      }
     }
   },
   {
@@ -1235,7 +1760,12 @@
       "bash": "-",
       "zsh": "R",
       "sh": "-",
-      "agent": "R"
+      "agent": "R",
+      "dash": "-",
+      "linux": {
+        "bash": "-",
+        "dash": "-"
+      }
     }
   },
   {
@@ -1246,7 +1776,12 @@
       "bash": "-",
       "zsh": "R",
       "sh": "-",
-      "agent": "R"
+      "agent": "R",
+      "dash": "-",
+      "linux": {
+        "bash": "-",
+        "dash": "-"
+      }
     }
   },
   {
@@ -1257,7 +1792,12 @@
       "bash": "-!",
       "zsh": "R",
       "sh": "-!",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -1268,7 +1808,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -1279,7 +1824,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -1290,7 +1840,12 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -1301,7 +1856,12 @@
       "bash": "-!",
       "zsh": "R",
       "sh": "-!",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
     }
   },
   {
@@ -1312,7 +1872,12 @@
       "bash": "-!",
       "zsh": "R",
       "sh": "-!",
-      "agent": "R"
+      "agent": "R",
+      "dash": "-!",
+      "linux": {
+        "bash": "-!",
+        "dash": "-!"
+      }
     }
   },
   {
@@ -1323,7 +1888,12 @@
       "bash": "-!",
       "zsh": "R",
       "sh": "-!",
-      "agent": "R"
+      "agent": "R",
+      "dash": "-!",
+      "linux": {
+        "bash": "-!",
+        "dash": "-!"
+      }
     }
   },
   {
@@ -1334,7 +1904,556 @@
       "bash": "R",
       "zsh": "R",
       "sh": "R",
-      "agent": "R"
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "Z1",
+    "cls": "V",
+    "label": "(( a subshell to zsh, then an apostrophe in \"${...}\"",
+    "text": "((cat <<EOF\nit's\nEOF\n) )\necho \"${x:-'}\"\n@@TAIL@@\necho \"'}\"\n",
+    "measured": {
+      "bash": "-!",
+      "zsh": "R",
+      "sh": "-!",
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "-!",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "Z2",
+    "cls": "V",
+    "label": "$(( a subshell to zsh, then an apostrophe in \"${...}\"",
+    "text": "x=$((cat <<EOF\nit's\nEOF\n) )\necho \"${x:-'}\"\n@@TAIL@@\necho \"'}\"\n",
+    "measured": {
+      "bash": "-!",
+      "zsh": "R",
+      "sh": "-!",
+      "agent": "R",
+      "dash": "-!",
+      "linux": {
+        "bash": "-!",
+        "dash": "-!"
+      }
+    }
+  },
+  {
+    "id": "M1",
+    "cls": "V",
+    "label": "per site: zsh reads one (( as a subshell and the next as arithmetic",
+    "text": "((cat <<EOF\nit's\nEOF\n) )\n((1<<2))\n@@TAIL@@\n2\n# ' ))\n",
+    "measured": {
+      "bash": "-!",
+      "zsh": "R",
+      "sh": "-!",
+      "agent": "R",
+      "dash": "-",
+      "linux": {
+        "bash": "-!",
+        "dash": "-"
+      }
+    }
+  },
+  {
+    "id": "QM",
+    "cls": "V",
+    "label": "a quote inside zsh arithmetic is a character",
+    "text": "((1' ))\n@@TAIL@@\n# ' ))\n",
+    "measured": {
+      "bash": "-!",
+      "zsh": "R",
+      "sh": "-!",
+      "agent": "R",
+      "dash": "-",
+      "linux": {
+        "bash": "-!",
+        "dash": "-"
+      }
+    }
+  },
+  {
+    "id": "QM2",
+    "cls": "V",
+    "label": "a double quote inside zsh arithmetic is a character",
+    "text": "((1\" ))\n@@TAIL@@\n# \" ))\n",
+    "measured": {
+      "bash": "-!",
+      "zsh": "R",
+      "sh": "-!",
+      "agent": "R",
+      "dash": "-",
+      "linux": {
+        "bash": "-!",
+        "dash": "-"
+      }
+    }
+  },
+  {
+    "id": "B1",
+    "cls": "V",
+    "label": "per site: a (( only bash runs (its look-ahead honors quotes)",
+    "text": "((echo \"a))b\") )\n# it's\n((1<<2))\n@@TAIL@@\n2\n# ' ))\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "-",
+      "sh": "R",
+      "agent": "-",
+      "dash": "-",
+      "linux": {
+        "bash": "R",
+        "dash": "-"
+      }
+    }
+  },
+  {
+    "id": "SL1",
+    "cls": "V",
+    "label": "an apostrophe in \"${...}\" on one line, with ; (verdict S1)",
+    "text": "echo \"${x:-'}\"; @@TAIL@@; echo \"'}\"\n",
+    "measured": {
+      "bash": "-",
+      "zsh": "R",
+      "sh": "-",
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "-",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "SL2",
+    "cls": "V",
+    "label": "a quote in arithmetic on one line (verdict S2)",
+    "text": "((1' )); @@TAIL@@ # ' ))\n",
+    "measured": {
+      "bash": "-!",
+      "zsh": "R",
+      "sh": "-!",
+      "agent": "R",
+      "dash": "-",
+      "linux": {
+        "bash": "-!",
+        "dash": "-"
+      }
+    }
+  },
+  {
+    "id": "SL3",
+    "cls": "V",
+    "label": "an apostrophe in \"${...}\" on one line, with && (verdict S3)",
+    "text": "echo \"${x:-'}\" && @@TAIL@@ && echo \"'}\"\n",
+    "measured": {
+      "bash": "-",
+      "zsh": "R",
+      "sh": "-",
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "-",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "SL4",
+    "cls": "V",
+    "label": "a zsh subshell (( then the apostrophe on one line (verdict S4)",
+    "text": "((cat <<EOF\nit's\nEOF\n) ); echo \"${x:-'}\"; @@TAIL@@; echo \"'}\"\n",
+    "measured": {
+      "bash": "-!",
+      "zsh": "R",
+      "sh": "-!",
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "-!",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "T1",
+    "cls": "V",
+    "label": "three places: a per-site ((, an apostrophe in \"${...}\", a quote in arithmetic",
+    "text": "((cat <<EOF\nit's\nEOF\n) )\necho \"${x:-'}\"\n((1' ))\n@@TAIL@@\n# ' ))\necho \"'}\"\n",
+    "measured": {
+      "bash": "-!",
+      "zsh": "R",
+      "sh": "-!",
+      "agent": "R",
+      "dash": "-",
+      "linux": {
+        "bash": "-!",
+        "dash": "-"
+      }
+    }
+  },
+  {
+    "id": "T2",
+    "cls": "V",
+    "label": "three places: \"${...}\", a quote in arithmetic, a comment",
+    "text": "echo \"'}\"\necho \"${x:-'}\"\n# it's\n((1' ))\n@@TAIL@@\n# ' ))\necho \"${x#'}\"\n",
+    "measured": {
+      "bash": "-!",
+      "zsh": "R",
+      "sh": "-!",
+      "agent": "R",
+      "dash": "-!",
+      "linux": {
+        "bash": "-!",
+        "dash": "-!"
+      }
+    }
+  },
+  {
+    "id": "T3",
+    "cls": "V",
+    "label": "a zsh ;| arm and a quote in arithmetic",
+    "text": "case x in x) :;| *) :;; esac\necho \"'}\"\n((1' ))\n@@TAIL@@\ncase x in x) :;| *) :;; esac\n((1' ))\n",
+    "measured": {
+      "bash": "-!",
+      "zsh": "R",
+      "sh": "-!",
+      "agent": "R",
+      "dash": "-!",
+      "linux": {
+        "bash": "-!",
+        "dash": "-!"
+      }
+    }
+  },
+  {
+    "id": "T4",
+    "cls": "V",
+    "label": "bash reads ((1' as a subshell; every shell runs the line",
+    "text": "((1' ))\n((cat <<EOF\nit's\nEOF\n) )\n((1<<2))\n# '\n@@TAIL@@\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "dash": "-",
+      "linux": {
+        "bash": "R",
+        "dash": "-"
+      }
+    }
+  },
+  {
+    "id": "T5",
+    "cls": "V",
+    "label": "four places: ;|, a per-site ((, \"${...}\", a (( heredoc",
+    "text": "case x in x) :;| *) :;; esac\n((cat <<EOF\nit's\nEOF\n) )\necho \"${x:-'}\"\n((1<<2))\n@@TAIL@@\n2\necho \"'}\"\n",
+    "measured": {
+      "bash": "-!",
+      "zsh": "R",
+      "sh": "-!",
+      "agent": "R",
+      "dash": "-!",
+      "linux": {
+        "bash": "-!",
+        "dash": "-!"
+      }
+    }
+  },
+  {
+    "id": "D1",
+    "cls": "V",
+    "label": "only dash runs it: \"${...}\" then a (( dash reads as a subshell",
+    "text": "echo \"${x:-'}\"\n((echo \"a))b\") )\n@@TAIL@@\n",
+    "measured": {
+      "bash": "-!",
+      "zsh": "-",
+      "sh": "-!",
+      "agent": "-",
+      "dash": "R",
+      "linux": {
+        "bash": "-!",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "D2",
+    "cls": "V",
+    "label": "only dash runs it: D1 with EOF and 2 mixed in",
+    "text": "echo \"${x:-'}\"\nEOF\n((echo \"a))b\") )\n2\n@@TAIL@@\n",
+    "measured": {
+      "bash": "-!",
+      "zsh": "-",
+      "sh": "-!",
+      "agent": "-",
+      "dash": "R",
+      "linux": {
+        "bash": "-!",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "AC1",
+    "cls": "V",
+    "label": "dash has no $'...': its escaped quote closes the string",
+    "text": "echo $'x\\'\n@@TAIL@@\n'\n",
+    "measured": {
+      "bash": "-",
+      "zsh": "-",
+      "sh": "-",
+      "agent": "-",
+      "dash": "R!",
+      "linux": {
+        "bash": "-",
+        "dash": "R!"
+      }
+    }
+  },
+  {
+    "id": "AC2",
+    "cls": "V",
+    "label": "in $'...' an escaped quote does not close it (bash, zsh)",
+    "text": "echo $'x\\''\n@@TAIL@@\necho '\n",
+    "measured": {
+      "bash": "R!",
+      "zsh": "-",
+      "sh": "R!",
+      "agent": "-",
+      "dash": "-",
+      "linux": {
+        "bash": "R!",
+        "dash": "-"
+      }
+    }
+  },
+  {
+    "id": "KD1",
+    "cls": "V",
+    "label": "dash has no $[: a quote in it is a quote",
+    "text": "x=$[1' ]'\n@@TAIL@@\n# ' ]\n",
+    "measured": {
+      "bash": "-!",
+      "zsh": "-",
+      "sh": "-!",
+      "agent": "-",
+      "dash": "R",
+      "linux": {
+        "bash": "-!",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "KD2",
+    "cls": "V",
+    "label": "dash has no $[: a # in it starts a comment",
+    "text": "x=$[1 #]\n@@TAIL@@\n",
+    "measured": {
+      "bash": "R!",
+      "zsh": "-",
+      "sh": "-!",
+      "agent": "-",
+      "dash": "R",
+      "linux": {
+        "bash": "R!",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "KD3",
+    "cls": "V",
+    "label": "dash has no $[: << in it opens a heredoc",
+    "text": "x=$[1<<2]\n@@TAIL@@\n2]\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "dash": "-",
+      "linux": {
+        "bash": "R",
+        "dash": "-"
+      }
+    }
+  },
+  {
+    "id": "LA1",
+    "cls": "V",
+    "label": "the (( look-ahead steps over $(...) whole: arithmetic",
+    "text": "(( x = $(echo \")\" | wc -c) <<2 ))\n@@TAIL@@\n2\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "dash": "-",
+      "linux": {
+        "bash": "R",
+        "dash": "-"
+      }
+    }
+  },
+  {
+    "id": "LA2",
+    "cls": "V",
+    "label": "the (( look-ahead steps over $(...) whole: a subshell",
+    "text": "((echo $(echo \")\") <<2) )\n2\n@@TAIL@@\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "LA3",
+    "cls": "V",
+    "label": "the (( look-ahead steps over backticks whole: a subshell",
+    "text": "((echo `echo \")\"` <<2) )\n2\n@@TAIL@@\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "LA4",
+    "cls": "V",
+    "label": "the (( look-ahead steps over an escape: a subshell",
+    "text": "((echo \\) <<2) )\n2\n@@TAIL@@\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "LA5",
+    "cls": "V",
+    "label": "the (( look-ahead steps over ${...} whole: a subshell",
+    "text": "((echo ${x:-\")\"} <<2) )\n2\n@@TAIL@@\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "HC1",
+    "cls": "V",
+    "label": "bash ends a body in $(...) at the delimiter followed by )",
+    "text": "x=$(cat <<EOF\nhi\nEOF)\n@@TAIL@@\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "-!",
+      "sh": "R",
+      "agent": "-!",
+      "dash": "-!",
+      "linux": {
+        "bash": "R",
+        "dash": "-!"
+      }
+    }
+  },
+  {
+    "id": "HC2",
+    "cls": "V",
+    "label": "the same in \"$(...)\"",
+    "text": "x=\"$(cat <<EOF\nhi\nEOF)\"\n@@TAIL@@\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "-",
+      "sh": "R",
+      "agent": "-",
+      "dash": "-!",
+      "linux": {
+        "bash": "R",
+        "dash": "-!"
+      }
+    }
+  },
+  {
+    "id": "HC3",
+    "cls": "V",
+    "label": "the same in a subshell inside $(...)",
+    "text": "x=$( (cat <<EOF\nhi\nEOF) )\n@@TAIL@@\n",
+    "measured": {
+      "bash": "R!",
+      "zsh": "-!",
+      "sh": "R!",
+      "agent": "-!",
+      "dash": "-!",
+      "linux": {
+        "bash": "R",
+        "dash": "-!"
+      }
+    }
+  },
+  {
+    "id": "SL5",
+    "cls": "V",
+    "label": "an apostrophe in \"${...}\", then the tail behind an assignment prefix",
+    "text": "echo \"${x:-'}\"; FOO=1 @@TAIL@@; echo \"'}\"\n",
+    "measured": {
+      "bash": "-",
+      "zsh": "R",
+      "sh": "-",
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "-",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "SL6",
+    "cls": "V",
+    "label": "an apostrophe in \"${...}\", then the tail in a substitution inside double quotes",
+    "text": "echo \"${x:-'}\"; echo \"$(@@TAIL@@)\"; echo \"'}\"\n",
+    "measured": {
+      "bash": "-",
+      "zsh": "R",
+      "sh": "-",
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "-",
+        "dash": "R"
+      }
     }
   }
 ]

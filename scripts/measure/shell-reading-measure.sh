@@ -23,6 +23,14 @@
 #
 # The agent column is the Claude Code Bash tool's own wrapper (zsh -c with the
 # session's shell snapshot, then eval), measured only where a snapshot exists.
+#
+# The shells are the ones the platform has. On macOS: bash 3.2, zsh, /bin/sh
+# (bash in POSIX mode), the agent wrapper and /bin/dash, recorded as
+# measured.{bash,zsh,sh,agent,dash}. On Linux: bash and dash (which is /bin/sh
+# there, and what reads a `sh -c` script), recorded as measured.linux.{bash,dash}.
+# --record replaces only this platform's fields, so the record carries both
+# after one run on each. The gate reads the three shells as three readings, and
+# dash reads `((`, `$[`, `$'...'` and an apostrophe in "${...}" unlike bash.
 set -uo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
@@ -30,6 +38,7 @@ FORMS="${ROOT_DIR}/scripts/measure/shell-reading-forms.json"
 RECORD=false
 [[ "${1:-}" == "--record" ]] && RECORD=true
 
+PLATFORM=$(uname -s)
 work=$(mktemp -d "${TMPDIR:-/tmp}/safedeps-shell-reading.XXXXXX")
 trap 'rm -rf "${work}"' EXIT
 snapshot=$(ls -t "${HOME}"/.claude/shell-snapshots/snapshot-zsh-*.sh 2>/dev/null | head -1)
@@ -41,6 +50,11 @@ run_in() { # shell file -> R (ran the tail), - (did not), with ! when the shell 
     bash) out=$(cd "${dir}" && /bin/bash -c "$(cat "${file}")" 2>"${dir}/.err" </dev/null) ;;
     zsh)  out=$(cd "${dir}" && /bin/zsh -c "$(cat "${file}")" 2>"${dir}/.err" </dev/null) ;;
     sh)   out=$(cd "${dir}" && /bin/sh -c "$(cat "${file}")" 2>"${dir}/.err" </dev/null) ;;
+    dash)
+      local dash_bin; dash_bin=$(command -v dash 2>/dev/null || true)
+      [[ -n "${dash_bin}" ]] || { printf 'n/a'; return; }
+      out=$(cd "${dir}" && "${dash_bin}" -c "$(cat "${file}")" 2>"${dir}/.err" </dev/null) ;;
+    linux-bash) out=$(cd "${dir}" && bash -c "$(cat "${file}")" 2>"${dir}/.err" </dev/null) ;;
     agent)
       [[ -n "${snapshot}" ]] || { printf 'n/a'; return; }
       local q; q=$(sed "s/'/'\\\\''/g" "${file}")
@@ -59,26 +73,44 @@ for ((i = 0; i < n; i++)); do
   jq -j ".[${i}].text" "${FORMS}" \
     | sed -e 's/@@TAIL@@/echo REACHED/' -e 's/@@TAIL_SPLIT@@/ec\\\
 ho REACHED/' > "${work}/${id}.sh"
-  bash_v=$(run_in bash "${work}/${id}.sh")
-  zsh_v=$(run_in zsh "${work}/${id}.sh")
-  sh_v=$(run_in sh "${work}/${id}.sh")
-  agent_v=$(run_in agent "${work}/${id}.sh")
-  if [[ "${RECORD}" == "true" ]]; then
-    records+=("$(jq -c --argjson i "${i}" --arg b "${bash_v}" --arg z "${zsh_v}" --arg s "${sh_v}" --arg a "${agent_v}" \
-      '.[$i] + {measured: {bash: $b, zsh: $z, sh: $s, agent: $a}}' "${FORMS}")")
-    continue
+  if [[ "${PLATFORM}" == Linux ]]; then
+    lb=$(run_in linux-bash "${work}/${id}.sh")
+    ld=$(run_in dash "${work}/${id}.sh")
+    if [[ "${RECORD}" == "true" ]]; then
+      records+=("$(jq -c --argjson i "${i}" --arg b "${lb}" --arg d "${ld}" \
+        '.[$i] | .measured.linux = {bash: $b, dash: $d}' "${FORMS}")")
+      continue
+    fi
+    recorded=$(jq -r ".[${i}].measured.linux // {} | \"\(.bash) \(.dash)\"" "${FORMS}")
+    measured="${lb} ${ld}"
+  else
+    bash_v=$(run_in bash "${work}/${id}.sh")
+    zsh_v=$(run_in zsh "${work}/${id}.sh")
+    sh_v=$(run_in sh "${work}/${id}.sh")
+    agent_v=$(run_in agent "${work}/${id}.sh")
+    dash_v=$(run_in dash "${work}/${id}.sh")
+    if [[ "${RECORD}" == "true" ]]; then
+      records+=("$(jq -c --argjson i "${i}" --arg b "${bash_v}" --arg z "${zsh_v}" --arg s "${sh_v}" --arg a "${agent_v}" --arg d "${dash_v}" \
+        '.[$i] | .measured = ((.measured // {}) + {bash: $b, zsh: $z, sh: $s, agent: $a, dash: $d})' "${FORMS}")")
+      continue
+    fi
+    recorded=$(jq -r ".[${i}].measured | \"\(.bash) \(.zsh) \(.sh) \(.dash)\"" "${FORMS}")
+    measured="${bash_v} ${zsh_v} ${sh_v} ${dash_v}"
   fi
-  recorded=$(jq -r ".[${i}].measured | \"\(.bash) \(.zsh) \(.sh)\"" "${FORMS}")
-  if [[ "${recorded}" != "${bash_v} ${zsh_v} ${sh_v}" ]]; then
-    printf 'MISMATCH %s recorded [%s] measured [%s %s %s]\n' "${id}" "${recorded}" "${bash_v}" "${zsh_v}" "${sh_v}"
+  if [[ "${recorded}" != "${measured}" ]]; then
+    printf 'MISMATCH %s recorded [%s] measured [%s]\n' "${id}" "${recorded}" "${measured}"
     mismatches=$((mismatches + 1))
   else
-    printf 'ok %s %s %s %s agent=%s\n' "${id}" "${bash_v}" "${zsh_v}" "${sh_v}" "${agent_v}"
+    printf 'ok %s %s\n' "${id}" "${measured}"
   fi
 done
 if [[ "${RECORD}" == "true" ]]; then
   printf '%s\n' "${records[@]}" | jq -s '.'
   exit 0
 fi
-printf 'shells: %s; %d forms, %d mismatches\n' "$(/bin/bash --version | head -1 | cut -d' ' -f1-4); $(/bin/zsh --version)" "${n}" "${mismatches}"
+if [[ "${PLATFORM}" == Linux ]]; then
+  printf 'shells: %s; dash %s; %d forms, %d mismatches\n' "$(bash --version | head -1 | cut -d' ' -f1-4)" "$(dpkg-query -W -f='${Version}' dash 2>/dev/null || echo '?')" "${n}" "${mismatches}"
+else
+  printf 'shells: %s; %s; /bin/dash; %d forms, %d mismatches\n' "$(/bin/bash --version | head -1 | cut -d' ' -f1-4)" "$(/bin/zsh --version)" "${n}" "${mismatches}"
+fi
 [[ ${mismatches} -eq 0 ]]
