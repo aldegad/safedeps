@@ -936,13 +936,29 @@ git -C "${secret_repo}" config user.name safedeps-e2e
 if HOME="${tmp_root}/doc-home" "${ROOT_DIR}/bin/safedeps" doctor --root "${secret_repo}" >/dev/null 2>&1; then
   fail "doctor flags gaps on an unconfigured repo"
 fi
-HOME="${tmp_root}/doc-home" "${ROOT_DIR}/bin/safedeps" doctor --fix --root "${secret_repo}" >/dev/null
+# Without a scanner (gitleaks or docker) the lane has a gap that --fix cannot
+# close, and doctor exits non-zero for it. Under set -e that exit ended this
+# suite in silence, with no `not ok` line, on a machine without gitleaks; the
+# scaffold is still checked there, and the posture check says it was skipped.
+scanner_present=false
+if command -v gitleaks >/dev/null 2>&1 || command -v docker >/dev/null 2>&1; then
+  scanner_present=true
+fi
+fix_rc=0
+HOME="${tmp_root}/doc-home" "${ROOT_DIR}/bin/safedeps" doctor --fix --root "${secret_repo}" >/dev/null || fix_rc=$?
+if [[ "${scanner_present}" == true ]]; then
+  [[ ${fix_rc} -eq 0 ]] || fail "doctor --fix closes the secret lane when a scanner is present (rc=${fix_rc})"
+fi
 [[ -f "${secret_repo}/.gitleaks.toml" ]] || fail "doctor --fix scaffolds .gitleaks.toml"
 [[ -x "${secret_repo}/.githooks/pre-commit" ]] || fail "doctor --fix scaffolds executable pre-commit"
 [[ "$(git -C "${secret_repo}" config --get core.hooksPath)" == ".githooks" ]] || fail "doctor --fix activates core.hooksPath"
 [[ ! -d "${secret_repo}/.github/workflows" ]] || fail "doctor --fix does not create remote CI workflows"
-remote_json=$(HOME="${tmp_root}/doc-home" "${ROOT_DIR}/bin/safedeps" --json doctor --root "${secret_repo}")
-[[ "$(jq -r '.ok' <<< "${remote_json}")" == "true" ]] || fail "doctor remains OK after local lane fix even when remote is opt-in"
+remote_json=$(HOME="${tmp_root}/doc-home" "${ROOT_DIR}/bin/safedeps" --json doctor --root "${secret_repo}") || true
+if [[ "${scanner_present}" == true ]]; then
+  [[ "$(jq -r '.ok' <<< "${remote_json}")" == "true" ]] || fail "doctor remains OK after local lane fix even when remote is opt-in"
+else
+  printf 'ok - doctor posture after --fix SKIPPED (needs gitleaks or docker)\n'
+fi
 remote_gap_count=$(jq -r '[.checks[] | select(.lane == "remote" and .status == "gap")] | length' <<< "${remote_json}")
 [[ "${remote_gap_count}" -ge 1 ]] || fail "doctor reports missing remote workflow as opt-in gap"
 pass "doctor --fix scaffolds + activates the secret lane"
