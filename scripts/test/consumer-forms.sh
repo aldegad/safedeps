@@ -161,17 +161,10 @@ expect_pass "a heredoc fed straight to sh"            $'sh <<EOF\npip install ev
 expect_pass "a shell built by xargs -I"               "echo 'pip install evil==1.0.0' | xargs -I{} sh -c '{}'"
 expect_pass "a shell built by xargs -0"               "printf 'pip install evil==1.0.0' | xargs -0 sh -c"
 expect_pass "a script written then run"               "printf 'pip install evil==1.0.0' > s.sh; sh s.sh"
-expect_pass "eval nested inside sh -c"                "sh -c 'eval \"pip install evil==1.0.0\"'"
 expect_pass "a top-level command substitution"        '$(echo pip install evil==1.0.0)'
 expect_pass "a pipe to a quoted shell name"           "printf 'pip install evil==1.0.0' | \"sh\""
 pass "command gate leaves the unenumerated carriers unjudged (documented boundary)"
 
-# A `sh -c` nested in a same-quoted one used to be in the list above: its
-# payload word is `'sh -c '\''pip ...'\'''`, which the payload reader reads only
-# up to the first `'`. A reader that cannot finish its word now says so
-# (section 10b), so the form is UNDECIDED. It is not judged as the install it
-# runs; that is the plan safedeps/command-words-read-as-the-shell-dequotes.
-expect_undecided "sh -c nested in a same-quoted sh -c"  "sh -c 'sh -c '\\''pip install evil==1.0.0'\\'''"
 
 # For npm the miss is DELAYED detection, not a miss: the effect gate's recognizer
 # is a raw grep with no carrier enumeration, so it fires on the same text the
@@ -264,11 +257,9 @@ do
   reaches_package_manager "${decoy}" \
     && fail "form is a decoy and must not be counted as a gap: ${decoy}"
 done
-# The first decoy costs an UNDECIDED all the same. Its payload word goes on
-# past the quote the reader stops at, and a reader that cannot finish its word
-# cannot tell this decoy from the forms in section 10b that do install. That is
-# the price of the floor, paid in the safe direction.
-expect_undecided "the doubly quoted sh -c decoy" 'sh -c "sh -c "pip install evil==1.0.0""'
+# Read as the shell reads it, the first decoy's script is `sh -c pip`, and the
+# rest are positional arguments: nothing is installed, and the gate says so.
+expect_pass "the doubly quoted sh -c decoy" 'sh -c "sh -c "pip install evil==1.0.0""'
 pass "decoy forms never reach a package manager (not gaps, nothing to catch)"
 
 # --- 4. The false-positive corpus stays allowed -------------------------------
@@ -1242,18 +1233,17 @@ expect_undecided "an ANSI-C \\u escape in a spec" $'pip install $\'ev\\u0069l==1
 expect_undecided "an ANSI-C NUL in a spec" $'pip install $\'evil\\0==1.0.0\''
 pass "an escape the extractor cannot name is a failed reading, not another word"
 
-# The floor under the payload readers. `sh -c` and `eval` payloads are read as
-# one quoted word, up to the first matching quote; a word that does not end
-# there -- an escaped quote inside it, more quoting glued to it, an ANSI-C word,
-# an unquoted word with escapes -- used to be read as far as it went, and the
+# `sh -c` and `eval` scripts are read as the word the shell passes: quotes
+# removed, escapes applied, words cut where the shell cuts them. The reader this
+# replaced took the word up to its first matching quote, so a word that did not
+# end there -- an escaped quote inside it, more quoting glued to it, an ANSI-C
+# word, an unquoted word with escapes -- was read as far as it went, and the
 # install the shell runs after it passed with no verdict (every form below was
-# measured, with a stand-in for the manager, to run the install). The reader
-# now marks the reading failed and the command is UNDECIDED. Reading those
-# words the way the shell does is the plan
-# safedeps/command-words-read-as-the-shell-dequotes.
+# measured, with a stand-in for the manager, to run the install). A floor that
+# marked such words unread made ordinary commands UNDECIDED, so each is now
+# judged as the install it runs.
 for payload_form in \
   'sh -c "echo \"hi\"; pip install evil==1.0.0"' \
-  'bash -c "x=\"a\"; cargo install evil --version 1.0.0"' \
   'eval "echo \"hi\"; pip install evil==1.0.0"' \
   $'sh -c \'echo hi\'"; pip install evil==1.0.0"' \
   $'sh -c $\'pip install evil==1.0.0\'' \
@@ -1261,14 +1251,63 @@ for payload_form in \
   'sh -c "pip install "evil==1.0.0' \
   $'bash -c \'echo \'\\\'\'hi\'\\\'\'; pip install evil==1.0.0\''
 do
-  expect_undecided "a payload word its reader cannot finish: ${payload_form}" "${payload_form}"
+  expect_prescription 'pypi evil@1.0.0;' "${payload_form}"
 done
-# Controls: a payload read to its end is judged as before, and a head inside
-# quoted text is data, not a payload the shell runs.
+expect_prescription 'crates.io evil@1.0.0;' 'bash -c "x=\"a\"; cargo install evil --version 1.0.0"'
+# Ordinary scripts with escaped quotes are not installs: under the floor they
+# were UNDECIDED (24 of 30 such commands, measured).
+for ordinary in \
+  'bash -c "cd \"$dir\" && npm run build"' \
+  'bash -c "npm test -- --grep \"parser\""' \
+  'bash -lc "nvm use 20 && npm run lint -- --fix \"src/**/*.ts\""' \
+  'bash -c "cargo build --features \"a b\""' \
+  'sh -c "git commit -m \"bump npm deps\""' \
+  $'sh -c $\'npm run build\\n\'' \
+  'bash -c npm\ run\ build' \
+  'for d in a b; do bash -c "cd \"$d\" && npm test"; done'
+do
+  expect_pass "an ordinary script handed to a shell: ${ordinary}" "${ordinary}"
+done
+# A script handed to a shell is read as the word the shell passes, and the
+# scripts inside it too, so a `sh -c` nested in a same-quoted one and an `eval`
+# inside `sh -c` are judged as the installs they run. Both used to be outside the
+# boundary: the payload reader stopped at the first matching quote.
+expect_prescription 'pypi evil@1.0.0;' "sh -c 'sh -c '\\''pip install evil==1.0.0'\\'''"
+expect_prescription 'pypi evil@1.0.0;' "sh -c 'eval \"pip install evil==1.0.0\"'"
+
+# Controls: a plain payload is judged, and a head inside quoted text is data.
 expect_prescription 'pypi evil@1.0.0;' 'sh -c "pip install evil==1.0.0"'
-expect_prescription 'pypi evil@1.0.0;' $'echo \'sh -c "pip install evil==1.0.0"\''
+expect_pass "a sh -c head inside quoted text is data" $'echo \'sh -c "pip install evil==1.0.0"\''
 expect_pass "a quoted mention of sh -c with escaped quotes" $'git commit -m \'run sh -c "npm test -- \\"x\\""\''
-pass "a payload word its reader cannot read to the end is UNDECIDED, not read as no install"
+pass "a script handed to a shell is read as the word the shell passes"
+
+# Any shell whose name ends in sh reads its -c script (macOS ships ksh, csh
+# and tcsh), and options may come before -c. Narrowing the shell names to four
+# passed `ksh -c "pip install ..."` with no verdict (caught in review).
+for shell_form in \
+  'ksh -c "pip install evil==1.0.0"' \
+  '/bin/ksh -c "pip install evil==1.0.0"' \
+  'csh -c "pip install evil==1.0.0"' \
+  'tcsh -c "pip install evil==1.0.0"' \
+  'fish -c "pip install evil==1.0.0"' \
+  'bash -o pipefail -c "pip install evil==1.0.0"' \
+  'bash -euo pipefail -c "pip install evil==1.0.0"' \
+  'bash -c -- "pip install evil==1.0.0"'
+do
+  expect_prescription 'pypi evil@1.0.0;' "${shell_form}"
+done
+# A statement ends only at a top-level separator: not inside a substitution,
+# an expansion or arithmetic, and not in a redirection operator. Cutting there
+# left the install's words behind (`>| f`, `2<&-`, `$(pwd | sed x)`).
+expect_prescription 'pypi evil@1.0.0;' 'pip install >| f evil==1.0.0'
+expect_prescription 'crates.io evil@1.0.0;' 'cargo install 2<&- evil --version 1.0.0'
+expect_prescription 'npm evil@1.0.0;' 'pnpm add --dir $(pwd | cat) evil@1.0.0'
+expect_prescription 'pypi evil@1.0.0;' 'pip install --cache-dir $(pwd | sed s/x/y/) evil==1.0.0'
+expect_prescription 'pypi evil@1.0.0;' 'pip install --retries $((1|2)) evil==1.0.0'
+expect_prescription 'pypi evil@1.0.0;' 'pip install --log ${X:-a|b} evil==1.0.0'
+expect_pass "a pipeline of ordinary commands" 'npm run build | tee out'
+expect_pass "a pipeline with no install" 'echo hi | grep h'
+pass "statement cuts and shell names are read the way the shell reads them"
 
 # `npm link` reads every argument with npm-package-arg and installs the
 # registry ones into the global prefix (lib/commands/link.js:92-104); a path,
