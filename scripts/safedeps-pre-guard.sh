@@ -481,7 +481,7 @@ shell_lex() {
         for (j in sl) SPC[sl[j]] = 1
         SPC["\n"] = 1
         DQS["\\"] = 1; DQS["\042"] = 1; DQS["$"] = 1; DQS["`"] = 1
-        wantdep = (view == "unprefixed" || view == "unprefixed-lines" || view == "noredir" || view == "pieces")
+        wantdep = (view == "unprefixed" || view == "unprefixed-lines" || view == "noredir" || view == "pieces" || view == "cscripts")
         if (view == "pieces") {
           # The value of each one-letter escape in $\047...\047.
           AQV["a"] = "\007"; AQV["b"] = "\010"; AQV["e"] = "\033"; AQV["E"] = "\033"
@@ -659,9 +659,10 @@ shell_lex() {
         # The same holds for redirections: in a reading that never closes, a
         # stripped target changes how the rest reads, and the view stops
         # being idempotent (random inputs in scan-contract).
-        if ((view == "noredir" && !unterm) || view == "pieces") redirs()
+        if ((view == "noredir" && !unterm) || view == "pieces" || view == "cscripts") redirs()
         if (view == "substs") emit_substs()
         else if (view == "pieces") emit_pieces()
+        else if (view == "cscripts") emit_cscripts()
         else emit()
       }
 
@@ -916,6 +917,42 @@ shell_lex() {
         }
         nh++; HSTART[bs] = nh; HEND[nh] = be
       }
+      # The scripts the command hands to a shell. Words are cut where the shell
+      # cuts them (word_sep) and read after its quote removal, so a script word
+      # holding escaped quotes, blanks in quotes, glued quoting, an ANSI-C word or
+      # escaped blanks is the string the shell passes. Each record ends in \035:
+      # `S` and the word after `sh|bash|zsh|dash -...c`, or `E` and the words
+      # after `eval` joined by blanks. A $\047...\047 escape this cannot name
+      # adds a record `!`.
+      function emit_cscripts(   k, w, inw, n, W) {
+        buf = ""; held = 0; n = 0; w = ""; inw = 0
+        for (k = 1; k <= N + 1; k++) {
+          if (k > N || word_sep(k)) {
+            if (inw) { W[++n] = w; w = ""; inw = 0 }
+            if (k > N || C[k] == "p" || C[k] == "c" && DEP[k] == 1 && X[k] ~ /[\n;&|()]/) { cscripts_of(W, n); n = 0 }
+            continue
+          }
+          inw = 1
+          if (k in DROP) continue
+          if (k in VAL) w = w VAL[k]
+          else if (!RM[k]) w = w X[k]
+        }
+        if (aqbad) put("!\035")
+        printf "%s", buf
+      }
+      function cscripts_of(W, n,   j, m, base, args) {
+        for (j = 1; j <= n; j++) {
+          base = W[j]; sub(/.*\//, "", base)
+          if (base ~ /^(sh|bash|zsh|dash)$/ && j + 2 <= n && W[j+1] ~ /^-[A-Za-z]*c[A-Za-z]*$/) {
+            put("S" W[j+2] "\035"); j += 2; continue
+          }
+          if (W[j] == "eval" && j < n) {
+            args = ""
+            for (m = j + 1; m <= n; m++) args = args (m > j + 1 ? " " : "") W[m]
+            put("E" args "\035"); break
+          }
+        }
+      }
       function emit_substs(   k, a, z, t, b) {
         buf = ""; held = 0
         for (k = 1; k <= nsub; k++) {
@@ -1063,87 +1100,38 @@ strip_heredoc_bodies() {
 # written after one passed with no verdict (caught in review). Callers strip,
 # once.
 extract_shell_c_payloads() {
-  read_payload_words "$1" '(bash|sh|zsh)[[:space:]]+-[A-Za-z]*c[[:space:]]+'
+  read_payload_scripts "$1" S
 }
 
 extract_eval_payloads() {
-  read_payload_words "$1" '(^|[[:space:];|&])eval[[:space:]]+'
+  read_payload_scripts "$1" E
 }
 
-# The word after each <head> in <text>, read as a payload: a double-quoted word
-# up to its first `"`, or a single-quoted one up to its next `'`, printed one
-# per line.
+# The scripts <text> hands to `sh -c` (kind S) or to `eval` (kind E), one per
+# line, read off the lexer's cscripts view: the word the shell passes, quotes
+# removed and escapes applied, and recursively the scripts inside those.
 #
-# That is all this reader knows of the shell's quoting, so it says when the
-# word is something else. `sh -c "echo \"hi\"; pip install evil==1.0.0"` read
-# up to the first `"` is `echo \`, which installs nothing, and the install the
-# shell runs after it passed with no verdict -- and so did a word glued to more
-# quoting (`'echo hi'"; pip install ..."`), an ANSI-C word (`$'...'`) and an
-# unquoted word with escapes (`pip\ install\ evil==1.0.0`). A reader that cannot
-# read its input to the end marks a failed reading, and the gate settles it
-# (guard_settle_scan_failure): a command naming a package manager is then
-# UNDECIDED. Only a head in live code is held to this. A head inside quoted
-# text is data the shell does not run, and its payload is still read as before.
-#
-# Reading these words the way the shell does -- quotes removed, escapes
-# applied -- is the plan safedeps/command-words-read-as-the-shell-dequotes; this
-# is the floor under it.
-read_payload_words() {
-  local LC_ALL=C
-  local text="$1" head_re="$2" rest="$1" m pre off=0 word content after live="" unread
-  # Kept in variables: written inline, bash 3.2 and 5 read the backslashes
-  # differently.
-  local dq_re='^"([^"]*)"' sq_re="^'([^']*)'" odd_re='(^|[^\])(\\\\)*\\$' bare_re='^[^[:space:];&|)<>]*'
-  while [[ "${rest}" =~ ${head_re} ]]; do
-    m="${BASH_REMATCH[0]}"
-    pre="${rest%%"${m}"*}"
-    off=$(( off + ${#pre} + ${#m} ))
-    rest="${rest#*"${m}"}"
-    word="${rest}"
-    unread=false
-    content=""
-    after=""
-    case "${word:0:1}" in
-      '"')
-        if [[ "${word}" =~ ${dq_re} ]]; then
-          content="${BASH_REMATCH[1]}"
-          after="${word:${#BASH_REMATCH[0]}:1}"
-          # The `"` that ended it is escaped: the word goes on.
-          [[ "${content}" =~ ${odd_re} ]] && unread=true
-          printf '%s\n' "${content}"
-        else
-          unread=true
-        fi
-        ;;
-      "'")
-        if [[ "${word}" =~ ${sq_re} ]]; then
-          content="${BASH_REMATCH[1]}"
-          after="${word:${#BASH_REMATCH[0]}:1}"
-          printf '%s\n' "${content}"
-        else
-          unread=true
-        fi
-        ;;
-      '$') [[ "${word:1:1}" == "'" ]] && unread=true ;;
-      *)
-        [[ "${word}" =~ ${bare_re} ]]
-        [[ "${BASH_REMATCH[0]}" == *[\\\'\"]* ]] && unread=true
-        ;;
-    esac
-    # A quoted word glued to more of the same word.
-    case "${after}" in
-      ''|' '|$'\t'|$'\n'|';'|'&'|'|'|')'|'<'|'>') ;;
-      *) unread=true ;;
-    esac
-    [[ "${unread}" == true ]] || continue
-    if [[ -z "${live}" ]]; then
-      live=$(shell_lex "${text}" live arith "safedeps:read_payload_words"; printf 'X') || live="X"
-      live="${live%X}"
+# The reader this replaced took the word after `-c` up to its first matching
+# quote. `sh -c "echo \"hi\"; pip install evil==1.0.0"` read that way is
+# `echo \`, which installs nothing, and the install the shell runs after it
+# passed with no verdict -- as did glued quoting, an ANSI-C word and escaped
+# blanks. A floor that marked every such word unread made ordinary commands
+# UNDECIDED (`bash -c "cd \"$dir\" && npm run build"`, 24 of 30 measured), so
+# the word is read as the shell reads it instead, and only an escape the lexer
+# cannot name is a failed reading. A head inside quoted text is data: the
+# shell does not split that text into words, and neither does this.
+read_payload_scripts() {
+  local text="$1" kind="$2" depth="${3:-0}" out rec
+  out=$(shell_lex "${text}" cscripts arith "safedeps:read_payload_words") || return 0
+  while IFS= read -r -d $'\035' rec; do
+    if [[ "${rec}" == "!" ]]; then
+      guard_mark_reading_failed
+      continue
     fi
-    # The head is live code when the live view kept it.
-    [[ "${live:$(( off - ${#m} )):${#m}}" == "${m}" ]] || continue
-    guard_mark_reading_failed
-  done
+    [[ "${rec}" == "${kind}"* ]] && printf '%s\n' "${rec:1}"
+    # A script holding another: `sh -c 'sh -c "pip install ..."'`.
+    (( depth < 3 )) && read_payload_scripts "${rec:1}" "${kind}" $(( depth + 1 ))
+  done <<< "${out}"
 }
 
 extract_command_substitution_payloads() {
