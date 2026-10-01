@@ -539,6 +539,10 @@ cat > "${inert_project}/package-lock.json" <<'EOF'
   }
 }
 EOF
+# npm records the tree it built in the hidden lockfile, and the rebuild runs
+# only over a tree on record (lockless-forms.sh pins the case without one).
+mkdir -p "${inert_project}/node_modules"
+cp "${inert_project}/package-lock.json" "${inert_project}/node_modules/.package-lock.json"
 stub_bin="${tmp_root}/stub-bin"
 mkdir -p "${stub_bin}"
 cat > "${stub_bin}/npm" <<EOF
@@ -553,7 +557,8 @@ inert_post=$(
 EOF
 )
 [[ -z "${inert_post}" ]] || fail "post hook keeps verified inert rebuild success quiet"
-grep -qx 'rebuild' "${tmp_root}/npm-calls.log" || fail "post hook runs npm rebuild after verified injected install"
+grep -qx 'rebuild --global=false --location=project' "${tmp_root}/npm-calls.log" \
+  || fail "post hook runs npm rebuild, pinned to the project tree, after verified injected install"
 pass "post hook rebuilds after verified inert install"
 
 # Reorg must actually revert the on-disk lockfile, not just print the message. The

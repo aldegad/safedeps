@@ -597,29 +597,407 @@ command_is_compound() {
   printf '%s' "${scanned}" | grep -qE '[;&|]'
 }
 
-# Echo the install directory when the command redirects the install target away
-# from cwd via a tool-specific long flag — npm `--prefix`, pnpm `--dir`, yarn
-# `--cwd`, or `--install-dir`. Empty when there is no override. Without this, an
-# `npm install --prefix /other pkg` is snapshotted/effect-gated against cwd (which
-# never changed), so the effect gate falsely confirms cwd clean and even advances
-# the safe pointer while the real install lands in /other unverified (finding #3).
-# Operates on the quote-blanked text so a quoted occurrence is not misread; only
-# unambiguous long flags are honored to avoid colliding with other tools' `-C`.
-resolve_install_dir_override() {
-  local cmd="$1" scanned tok want=""
-  local -a toks=()
-  scanned=$(command_scan_text "${cmd}")
-  read -ra toks <<< "${scanned//$'\n'/ }"
-  for tok in "${toks[@]+${toks[@]}}"; do
-    if [[ -n "${want}" ]]; then printf '%s' "${tok}"; return 0; fi
-    case "${tok}" in
-      --prefix=*)      printf '%s' "${tok#--prefix=}"; return 0 ;;
-      --cwd=*)         printf '%s' "${tok#--cwd=}"; return 0 ;;
-      --dir=*)         printf '%s' "${tok#--dir=}"; return 0 ;;
-      --install-dir=*) printf '%s' "${tok#--install-dir=}"; return 0 ;;
-      --prefix|--cwd|--dir|--install-dir) want=1 ;;
-    esac
+# The statements of a command, one per line, as
+# `<before>\t<text>\t<after>\t<words>`. <before> and <after> are the separators
+# around the statement (`start`, `;`, `&&`, `||`, `|`, `&`, `end`) and <text> is
+# its quote-blanked text, so a separator inside quotes is not one. A newline
+# separates like `;`, and a redirection (`2>&1`, `&>`, `|&`) does not split a
+# statement.
+#
+# <words> is the statement split into words the way the shell splits it, read
+# from the raw text: quotes delimit and are removed, a backslash escapes, and
+# `"/tmp/x y"` is one word. Words are joined by \037. A word whose value the
+# shell decides at run time (a `$` or backquote outside single quotes, an
+# unquoted glob or leading tilde) ends in \001, which guard_literal_dir reads as
+# unknown. Reading the blanked text instead turned `--prefix "/tmp/x y" pkg`
+# into `--prefix pkg` and sent the gate to <cwd>/pkg (caught in review). The two
+# texts line up byte for byte because command_scan_text preserves length.
+command_statements() {
+  local raw_file scan_file
+  raw_file=$(mktemp "${TMPDIR:-/tmp}/safedeps-stmt-raw.XXXXXX") || return 0
+  scan_file=$(mktemp "${TMPDIR:-/tmp}/safedeps-stmt-scan.XXXXXX") || { rm -f "${raw_file}"; return 0; }
+  printf '%s' "$1" > "${raw_file}"
+  command_scan_text "$1" > "${scan_file}"
+  LC_ALL=C awk -v scan_file="${scan_file}" -v raw_file="${raw_file}" '
+    function slurp(f,   out, line, count) {
+      out = ""; count = 0
+      while ((getline line < f) > 0) out = out (count++ ? "\n" : "") line
+      close(f)
+      return out
+    }
+    function word_end() {
+      if (has) words = words (words == "" ? "" : "\037") word (dyn ? "\001" : "")
+      word = ""; has = 0; dyn = 0
+    }
+    function words_of(from, to,   i, ch, q) {
+      words = ""; word = ""; has = 0; dyn = 0; q = ""
+      for (i = from; i <= to; i++) {
+        ch = r[i]
+        if (q == "") {
+          if (ch == " " || ch == "\t" || ch == "\n") { word_end(); continue }
+          if (ch == "\\") { if (i < to) { i++; word = word r[i]; has = 1 }; continue }
+          if (ch == "\047") { q = "s"; has = 1; continue }
+          if (ch == "\"") { q = "d"; has = 1; continue }
+          if (ch == "$" || ch == "`" || ch == "*" || ch == "?" || ch == "[") dyn = 1
+          if (ch == "~" && !has) dyn = 1
+          word = word ch; has = 1
+          continue
+        }
+        if (q == "s") { if (ch == "\047") q = ""; else word = word ch; continue }
+        if (ch == "\\" && i < to && (r[i + 1] == "$" || r[i + 1] == "`" || r[i + 1] == "\"" || r[i + 1] == "\\")) {
+          i++; word = word r[i]; continue
+        }
+        if (ch == "\"") { q = ""; continue }
+        if (ch == "$" || ch == "`") dyn = 1
+        if (ch == "\n" || ch == "\t") ch = " "
+        word = word ch
+      }
+      word_end()
+      return words
+    }
+    function emit(nx, to) {
+      text = cur; gsub(/\t/, " ", text)
+      printf "%s\t%s\t%s\t%s\n", prev, text, nx, words_of(from, to)
+      prev = nx; cur = ""
+    }
+    BEGIN {
+      n = split(slurp(scan_file), c, "")
+      split(slurp(raw_file), r, "")
+      prev = "start"; cur = ""; from = 1
+      for (i = 1; i <= n; i++) {
+        ch = c[i]
+        if (ch == ";" || ch == "\n") { emit(";", i - 1); from = i + 1; continue }
+        if (ch == "&") {
+          if (c[i - 1] == ">" || c[i + 1] == ">") { cur = cur ch; continue }
+          if (c[i + 1] == "&") { emit("&&", i - 1); i++; from = i + 1; continue }
+          emit("&", i - 1); from = i + 1; continue
+        }
+        if (ch == "|") {
+          if (c[i + 1] == "|") { emit("||", i - 1); i++; from = i + 1; continue }
+          to = i - 1
+          if (c[i + 1] == "&") i++
+          emit("|", to); from = i + 1; continue
+        }
+        cur = cur ch
+      }
+      emit("end", n)
+    }'
+  rm -f "${raw_file}" "${scan_file}"
+}
+
+# The directory a literal path names from <dir>, or `?` when the text cannot
+# say: a variable, a substitution, a tilde or a glob is resolved by the shell at
+# run time, and a relative path from an unknown directory is unknown too.
+guard_literal_dir() {
+  local dir="$1" path="$2"
+  [[ -n "${path}" && "${path}" != -* ]] || { printf '?'; return 0; }
+  case "${path}" in
+    *$'\001'*) printf '?'; return 0 ;;
+    *'$'*|*'`'*|'~'*|*'*'*|*'?'*|*'['*) printf '?'; return 0 ;;
+    /*) printf '%s' "${path}"; return 0 ;;
+  esac
+  [[ "${dir}" != "?" ]] || { printf '?'; return 0; }
+  printf '%s/%s' "${dir%/}" "${path}"
+}
+
+# The last value an .npmrc gives <key>, prefixed with `=` so that a key set to
+# nothing still reads as set. Nothing at all when the file does not set it.
+#
+# Read the way npm 11.19.0 read it, measured against a real install
+# (safedeps/effect-gate-blind-to-lockless-npm-installs): keys are
+# case-sensitive (`GLOBAL=true` did nothing), the last line wins, a key with no
+# `=` is set, an unquoted value ends at `;` or `#`, and one pair of quotes is
+# removed. A key under a `[section]` header is not a top-level key.
+guard_npmrc_value() {
+  local file="$1" key="$2"
+  [[ -f "${file}" && -r "${file}" ]] || return 0
+  awk -v key="${key}" -v q="'" '
+    /^[[:space:]]*\[/ { exit }
+    {
+      line = $0
+      sub(/^[[:space:]]+/, "", line)
+      if (line == "" || line ~ /^[;#]/) next
+      eq = index(line, "=")
+      if (eq == 0) { k = line; v = "true" } else { k = substr(line, 1, eq - 1); v = substr(line, eq + 1) }
+      sub(/[[:space:]]+$/, "", k)
+      if (k != key) next
+      sub(/^[[:space:]]+/, "", v)
+      first = substr(v, 1, 1)
+      if ((first == "\"" || first == q) && index(substr(v, 2), first) > 0) {
+        v = substr(v, 2, index(substr(v, 2), first) - 1)
+      } else {
+        sub(/[;#].*$/, "", v)
+        sub(/[[:space:]]+$/, "", v)
+      }
+      found = 1
+      last = v
+    }
+    END { if (found) printf "=%s", last }
+  ' "${file}" 2>/dev/null || true
+}
+
+# The directory npm reads the project .npmrc from when it installs in <dir>: the
+# nearest directory at or above <dir> with a package.json or a node_modules, or
+# <dir> itself when there is none. `--prefix` names it outright. Measured: with
+# the .npmrc beside the project's package.json, an install from a subdirectory
+# followed it; with the .npmrc in a subdirectory that had no package.json, it
+# did not.
+guard_npm_local_prefix() {
+  local dir="$1" named="$2" probe
+  if [[ "${named}" == true ]]; then
+    printf '%s' "${dir}"
+    return 0
+  fi
+  probe="${dir}"
+  while [[ -n "${probe}" ]]; do
+    if [[ -e "${probe}/package.json" || -d "${probe}/node_modules" ]]; then
+      printf '%s' "${probe}"
+      return 0
+    fi
+    [[ "${probe}" != / ]] || break
+    probe=$(dirname "${probe}")
   done
+  printf '%s' "${dir}"
+}
+
+# Why an npm install into <dir> is not recorded where the effect gate reads it,
+# because of an .npmrc; nothing when the project and user .npmrc leave it alone.
+#
+# `global` and `location` decide it, each key on its own, and the project file
+# outranks the user file. Measured with npm 11.19.0 (the battery in
+# scripts/test/lockless-forms.sh pins the cases it names):
+#
+#   - `global=false` and `global=null` install in the project and record it.
+#     Every other value sent the package to the global prefix (`true`, `1`,
+#     `yes`, `off`, nothing) or put it in node_modules with no record at all
+#     (`0`). A `--global=false` or `--no-global` on the command overrides the
+#     file; `--location=project` does not.
+#   - `location=user` and `location=project` install in the project. `global`
+#     went to the global prefix. And no flag on the command undoes it:
+#     `--global=false` still went global, and `--location=project` put the
+#     package in node_modules with no record at all.
+#
+# So only the values measured to keep an install on record count as leaving it
+# alone. Anything else is read as not recorded, which costs an UNGATED line
+# where npm would have been harmless; the other direction costs a silent pass.
+guard_npmrc_unrecorded() {
+  local dir="$1" named="$2" user_rc="$3" cli_global_off="$4"
+  local project_rc key value source
+  project_rc="$(guard_npm_local_prefix "${dir}" "${named}")/.npmrc"
+  local undecided=false
+  for key in location global; do
+    source="${project_rc}"
+    value=$(guard_npmrc_value "${project_rc}" "${key}")
+    if [[ -z "${value}" ]]; then
+      if [[ "${user_rc}" == "?" ]]; then
+        undecided=true
+        continue
+      fi
+      source="${user_rc}"
+      value=$(guard_npmrc_value "${user_rc}" "${key}")
+    fi
+    [[ -n "${value}" ]] || continue
+    value="${value#=}"
+    case "${key}:${value}" in
+      location:user|location:project|global:false|global:null) continue ;;
+    esac
+    if [[ "${key}" == global && "${cli_global_off}" == true ]]; then
+      continue
+    fi
+    printf '%s sets %s=%s' "${source}" "${key}" "${value}"
+    return 0
+  done
+  if [[ "${undecided}" == true ]]; then
+    printf 'the user .npmrc is named by a value the shell decides at run time'
+  fi
+  return 0
+}
+
+# Where each install statement in the command lands, one line per statement, as
+# `<kind>\t<dir>\t<why>`. <kind> is `npm` for an npm CLI install that is not a
+# runner and `other` for every other install. <dir> is an absolute path,
+# `global`, or `?` when the text does not say. <why> is empty unless an .npmrc
+# keeps the install off the record, and then it names the file and the setting.
+#
+# The effect gate reads one directory, chosen here before the command runs. An
+# install that lands anywhere else is not read, whatever the gate says about the
+# directory it did read. Four things move an install, and each was measured with
+# a real npm against a local registry (safedeps/effect-gate-blind-to-lockless-npm-installs):
+#
+#   - A relocation flag on the install itself: `--prefix`, pnpm's `--dir`,
+#     yarn's and bun's `--cwd`, `--install-dir`, and `-C` where the manager
+#     documents it as one of those (npm: `--prefix`; pnpm: `--dir`). pip reads
+#     `-C` as `--config-settings`, so `-C` is honoured for npm and pnpm only.
+#     `npm -C sub install x` wrote sub/package-lock.json while the gate read the
+#     cwd lockfile and confirmed it clean.
+#   - A `cd` or `pushd` earlier in the command. `cd sub && npm install x` and
+#     `cd sub; npm install x` both wrote sub/package-lock.json. A literal path
+#     to a directory that exists now is followed. Anything the shell decides at
+#     run time is `?`: a variable or substitution, a directory that does not
+#     exist yet, `popd`, a `cd` inside a group or subshell, and a `cd` beside a
+#     pipe or `&`, which run it in a subshell of its own.
+#   - Global installs: `-g`, `--global`, `--location global`, and the same two
+#     settings given as `npm_config_global` / `npm_config_location` anywhere in
+#     the command, prefixed or exported. Those land in npm's global prefix and
+#     write no lockfile at all.
+#   - `npm_config_prefix` in the environment does NOT move a project install:
+#     measured, it landed in the cwd project and the gate rolled it back.
+#   - The same two settings in the project's or the user's .npmrc, which the
+#     command does not show. guard_npmrc_unrecorded reads both files; an install
+#     they keep off the record is `?` with the reason in <why>. The global and
+#     builtin npmrc, and a file named only at run time, are outside what this
+#     reads; ARCHITECTURE.md states that boundary.
+resolve_install_targets() {
+  local cmd="$1" cwd="$2"
+  local text before stmt after words head target want kind manager tok value normalized in_env skip
+  local named user_rc cli_global_off why
+  local dir="${cwd}" grouped=false env_global=false env_userconfig=false
+  local -a toks=()
+
+  text=$(join_line_continuations "$(strip_heredoc_bodies "${cmd}")")
+  command_scan_text "${text}" | grep -q '[(){}`]' && grouped=true
+  command_scan_text "${text}" \
+    | grep -qEi '(^|[[:space:];&|(])(export[[:space:]]+)?npm_config_(global|location)=' && env_global=true
+  command_scan_text "${text}" | grep -qEi 'npm_config_userconfig=' && env_userconfig=true
+
+  while IFS=$'\t' read -r before stmt after words; do
+    [[ -n "${words}" ]] || continue
+    IFS=$'\037' read -ra toks <<< "${words}"
+    [[ ${#toks[@]} -gt 0 ]] || continue
+
+    # A statement may open with a group or a reserved word; the command is
+    # what follows.
+    while [[ ${#toks[@]} -gt 0 ]]; do
+      head="${toks[0]}"
+      head="${head#"${head%%[!({!]*}"}"
+      case "${head}" in
+        ''|then|do|else|elif|if|while|until|time) toks=("${toks[@]:1}") ;;
+        *) toks[0]="${head}"; break ;;
+      esac
+    done
+    [[ ${#toks[@]} -gt 0 ]] || continue
+
+    case "${toks[0]}" in
+      cd|pushd|popd)
+        if [[ "${grouped}" == true || "${toks[0]}" == popd \
+              || "${before}" == "|" || "${before}" == "&" || "${after}" == "|" || "${after}" == "&" ]]; then
+          dir="?"
+          continue
+        fi
+        value=""
+        for tok in "${toks[@]:1}"; do
+          case "${tok}" in -L|-P|-e|-@|-n) continue ;; esac
+          value="${tok}"
+          break
+        done
+        dir=$(guard_literal_dir "${dir}" "${value}")
+        [[ "${dir}" == "?" || -d "${dir}" ]] || dir="?"
+        continue
+        ;;
+    esac
+
+    command_is_dependency_install "${stmt}" || continue
+
+    # Kind is read from the statement as the other recognizers read it, with
+    # `VAR=value` prefixes and `env` wrappers stripped: `npm_config_save=false
+    # npm install x` is an npm install.
+    normalized=$(normalize_install_text "${stmt}")
+    kind=other
+    # The runner test is guard_segment_is_runner's, spelled out: that function
+    # is defined further down, past the point where this one first runs.
+    if ! command_scan_text "${normalized}" | grep -qEi "${SAFEDEPS_G_RUNNER_HEAD_RE}" \
+        && printf '%s' "${normalized}" | grep -qEi "${SAFEDEPS_G_NPM_INSTALL_RE}"; then
+      kind=npm
+    fi
+    manager=""
+    if [[ "${kind}" == npm ]]; then
+      manager=npm
+    elif printf '%s' "${normalized}" | grep -qEi '(^|[[:space:]])pnpm([[:space:]]|$)'; then
+      manager=pnpm
+    fi
+
+    # `env -C <dir>` / `env --chdir <dir>` runs the command in <dir>; its
+    # options come before the first word that is neither an option nor an
+    # assignment.
+    target="${dir}"
+    want=""
+    skip=false
+    named=false
+    in_env=false
+    [[ "${toks[0]}" == env ]] && in_env=true
+    for tok in "${toks[@]:1}"; do
+      if [[ "${skip}" == true ]]; then skip=false; continue; fi
+      if [[ -n "${want}" ]]; then
+        target=$(guard_literal_dir "${target}" "${tok}")
+        want=""
+        continue
+      fi
+      if [[ "${in_env}" == true ]]; then
+        case "${tok}" in
+          -C|--chdir) want=1; continue ;;
+          --chdir=*) target=$(guard_literal_dir "${target}" "${tok#*=}"); continue ;;
+          -u|--unset) skip=true; continue ;;
+          -*|*=*) continue ;;
+          *) in_env=false ;;
+        esac
+      fi
+      case "${tok}" in
+        --prefix=*|--cwd=*|--dir=*|--install-dir=*)
+          target=$(guard_literal_dir "${target}" "${tok#*=}")
+          named=true
+          ;;
+        --prefix|--cwd|--dir|--install-dir) want=1; named=true ;;
+        -C)
+          if [[ -n "${manager}" ]]; then want=1; named=true; fi
+          ;;
+        -C?*)
+          if [[ -n "${manager}" ]]; then target="?"; fi
+          ;;
+      esac
+    done
+    if [[ -n "${want}" ]]; then target="?"; fi
+
+    if [[ "${kind}" == npm ]]; then
+      if [[ "${env_global}" == true ]] \
+          || printf '%s' "${stmt}" | grep -qEi -- '(^|[[:space:]])(-g|--global(=true)?|--location(=|[[:space:]]+)global)([[:space:]]|$)'; then
+        target=global
+      fi
+    fi
+
+    # An install the command keeps in a known directory can still be kept off
+    # the record by an .npmrc. The user file is the one npm would read: named
+    # by `--userconfig`, then by npm_config_userconfig, then ~/.npmrc.
+    why=""
+    if [[ "${kind}" == npm && "${target}" != global && "${target}" != "?" ]]; then
+      user_rc=""
+      cli_global_off=false
+      want=""
+      for tok in "${toks[@]}"; do
+        if [[ -n "${want}" ]]; then user_rc="${tok}"; want=""; continue; fi
+        case "${tok}" in
+          --userconfig) want=1 ;;
+          --userconfig=*) user_rc="${tok#*=}" ;;
+          --global=false|--no-global) cli_global_off=true ;;
+        esac
+      done
+      if [[ -n "${want}" ]]; then
+        user_rc="?"
+      elif [[ -z "${user_rc}" ]]; then
+        if [[ "${env_userconfig}" == true ]]; then
+          user_rc="?"
+        else
+          user_rc="${npm_config_userconfig:-${NPM_CONFIG_USERCONFIG:-${HOME}/.npmrc}}"
+        fi
+      fi
+      case "${user_rc}" in
+        '~/'*) user_rc="${HOME}/${user_rc#'~/'}" ;;
+      esac
+      [[ "${user_rc}" == "?" ]] || user_rc=$(guard_literal_dir "${dir}" "${user_rc}")
+      why=$(guard_npmrc_unrecorded "${target}" "${named}" "${user_rc}" "${cli_global_off}")
+      [[ -z "${why}" ]] || target="?"
+    fi
+    printf '%s\t%s\t%s\n' "${kind}" "${target}" "${why}"
+  done < <(command_statements "${text}")
   return 0
 }
 
@@ -1143,19 +1521,30 @@ if [[ -z "${CWD_DIR}" ]]; then
   CWD_DIR=$(pwd)
 fi
 
-# Resolve the actual install target: an `--prefix`/`--cwd`/`--dir`/`--install-dir`
-# override relocates the install away from cwd (finding #3). Snapshot + effect-gate
-# must follow the real target, while the PostToolUse pending-key still keys on cwd
-# (post-verify only knows cwd) — so KEY_DIR_HASH (cwd) and DIR_HASH (install dir)
-# are tracked separately below.
+# Resolve the actual install target: a relocation flag or an earlier `cd`
+# moves the install away from cwd (finding #3; resolve_install_targets says
+# which). Snapshot + effect-gate must follow the real target, while the
+# PostToolUse pending-key still keys on cwd (post-verify only knows cwd) — so
+# KEY_DIR_HASH (cwd) and DIR_HASH (install dir) are tracked separately below.
+# The first install statement with a known, non-global target decides; an
+# install that lands elsewhere is not read, and guard_effect_gate_reads_every_install
+# says so.
 PROJECT_DIR="${CWD_DIR}"
-INSTALL_DIR_OVERRIDE=$(resolve_install_dir_override "${COMMAND}")
-if [[ -n "${INSTALL_DIR_OVERRIDE}" ]]; then
-  case "${INSTALL_DIR_OVERRIDE}" in
-    /*) PROJECT_DIR="${INSTALL_DIR_OVERRIDE}" ;;
-    *)  PROJECT_DIR="${CWD_DIR%/}/${INSTALL_DIR_OVERRIDE}" ;;
-  esac
-  log_advisory "pre-guard: install dir override detected (${INSTALL_DIR_OVERRIDE}) — snapshotting/verifying ${PROJECT_DIR} instead of cwd (${CWD_DIR})."
+INSTALL_TARGETS=$(resolve_install_targets "${COMMAND}" "${CWD_DIR}")
+while IFS=$'\t' read -r _ install_target _; do
+  [[ -n "${install_target}" && "${install_target}" != "?" && "${install_target}" != global ]] || continue
+  PROJECT_DIR="${install_target}"
+  break
+done <<< "${INSTALL_TARGETS}"
+# An .npmrc that keeps an install off the record is not text in the command, so
+# the record has to say which file did it; the UNGATED line alone would point at
+# a command that looks like an ordinary project install.
+while IFS=$'\t' read -r _ _ install_why; do
+  [[ -n "${install_why}" ]] || continue
+  log_advisory "pre-guard: ${install_why}, so npm does not record this install where the effect gate reads it. Command: ${COMMAND}"
+done <<< "${INSTALL_TARGETS}"
+if [[ "${PROJECT_DIR}" != "${CWD_DIR}" ]]; then
+  log_advisory "pre-guard: the install lands outside cwd — snapshotting/verifying ${PROJECT_DIR} instead of cwd (${CWD_DIR})."
 fi
 
 # Canonicalize to prevent path traversal (V-003)
