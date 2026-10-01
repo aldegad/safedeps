@@ -2134,8 +2134,11 @@ guard_effect_gate_reads_every_install() {
     any=true
     guard_segment_is_runner "${seg}" && return 1
     scan=$(command_scan_text "${seg}")
-    printf '%s' "${scan}" | grep -qEi "${SAFEDEPS_G_NPM_INSTALL_RE}" || return 1
-    printf '%s' "${scan}" | grep -qEi -- '(^|[[:space:]])(-g|--global(=true)?|--location(=|[[:space:]]+)global|--no-package-lock|--package-lock=false)([[:space:]]|$)' && return 1
+    # Judgment greps: a grep that does not answer is recorded and settled by
+    # the gate. A plain grep here read a failure as "no global flag" and
+    # exempted the install from its UNGATED record.
+    printf '%s' "${scan}" | judge_grep -qEi "${SAFEDEPS_G_NPM_INSTALL_RE}" || return 1
+    printf '%s' "${scan}" | judge_grep -qEi -- '(^|[[:space:]])(-g|--global(=true)?|--location(=|[[:space:]]+)global|--no-package-lock|--package-lock=false)([[:space:]]|$)' && return 1
   done < <(command_candidate_texts "${cmd}" | tr ';|&' '\n')
   [[ "${any}" == true ]]
 }
