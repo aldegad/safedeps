@@ -1,0 +1,479 @@
+[
+  {
+    "id": "W1",
+    "label": "double-quoted spec",
+    "text": "@@M@@ install \"evil==1.0.0\"",
+    "argv": {
+      "bash": [
+        "install",
+        "evil==1.0.0"
+      ],
+      "zsh": [
+        "install",
+        "evil==1.0.0"
+      ]
+    }
+  },
+  {
+    "id": "W2",
+    "label": "single-quoted spec",
+    "text": "@@M@@ install 'evil==1.0.0'",
+    "argv": {
+      "bash": [
+        "install",
+        "evil==1.0.0"
+      ],
+      "zsh": [
+        "install",
+        "evil==1.0.0"
+      ]
+    }
+  },
+  {
+    "id": "W3",
+    "label": "backslash outside quotes",
+    "text": "@@M@@ install ev\\il==1.0.0",
+    "argv": {
+      "bash": [
+        "install",
+        "evil==1.0.0"
+      ],
+      "zsh": [
+        "install",
+        "evil==1.0.0"
+      ]
+    }
+  },
+  {
+    "id": "W4",
+    "label": "backslash inside double quotes before a plain byte",
+    "text": "@@M@@ install \"ev\\il==1.0.0\"",
+    "argv": {
+      "bash": [
+        "install",
+        "ev\\il==1.0.0"
+      ],
+      "zsh": [
+        "install",
+        "ev\\il==1.0.0"
+      ]
+    }
+  },
+  {
+    "id": "W5",
+    "label": "escaped double quote inside double quotes",
+    "text": "@@M@@ install \"ev\\\"il\"==1.0.0",
+    "argv": {
+      "bash": [
+        "install",
+        "ev\"il==1.0.0"
+      ],
+      "zsh": [
+        "install",
+        "ev\"il==1.0.0"
+      ]
+    }
+  },
+  {
+    "id": "W6",
+    "label": "ANSI-C word",
+    "text": "@@M@@ install $'evil==1.0.0'",
+    "argv": {
+      "bash": [
+        "install",
+        "evil==1.0.0"
+      ],
+      "zsh": [
+        "install",
+        "evil==1.0.0"
+      ]
+    }
+  },
+  {
+    "id": "W7",
+    "label": "ANSI-C hex escape",
+    "text": "@@M@@ install $'ev\\x69l==1.0.0'",
+    "argv": {
+      "bash": [
+        "install",
+        "evil==1.0.0"
+      ],
+      "zsh": [
+        "install",
+        "evil==1.0.0"
+      ]
+    }
+  },
+  {
+    "id": "W8",
+    "label": "ANSI-C octal escape",
+    "text": "@@M@@ install $'ev\\151l==1.0.0'",
+    "argv": {
+      "bash": [
+        "install",
+        "evil==1.0.0"
+      ],
+      "zsh": [
+        "install",
+        "evil==1.0.0"
+      ]
+    }
+  },
+  {
+    "id": "W9",
+    "label": "ANSI-C escaped quote",
+    "text": "@@M@@ install $'ev\\'il'==1.0.0",
+    "argv": {
+      "bash": [
+        "install",
+        "ev'il==1.0.0"
+      ],
+      "zsh": [
+        "install",
+        "ev'il==1.0.0"
+      ]
+    }
+  },
+  {
+    "id": "W10",
+    "label": "redirection glued to a word",
+    "text": "@@M@@ install evil==1.0.0>/dev/null",
+    "argv": {
+      "bash": [
+        "install",
+        "evil==1.0.0"
+      ],
+      "zsh": [
+        "install",
+        "evil==1.0.0"
+      ]
+    }
+  },
+  {
+    "id": "W11",
+    "label": "redirection glued to a closing quote",
+    "text": "@@M@@ install \"evil==1.0.0\">/dev/null",
+    "argv": {
+      "bash": [
+        "install",
+        "evil==1.0.0"
+      ],
+      "zsh": [
+        "install",
+        "evil==1.0.0"
+      ]
+    }
+  },
+  {
+    "id": "W12",
+    "label": "quoted redirection target with a blank",
+    "text": "@@M@@ install evil==1.0.0>\"x y\"",
+    "argv": {
+      "bash": [
+        "install",
+        "evil==1.0.0"
+      ],
+      "zsh": [
+        "install",
+        "evil==1.0.0"
+      ]
+    }
+  },
+  {
+    "id": "W13",
+    "label": "quoted > and apostrophe, then a real 2> with a quoted target",
+    "text": "@@M@@ install --log \"x>'\" evil==1.0.0 2>\"'\"",
+    "argv": {
+      "bash": [
+        "install",
+        "--log",
+        "x>'",
+        "evil==1.0.0"
+      ],
+      "zsh": [
+        "install",
+        "--log",
+        "x>'",
+        "evil==1.0.0"
+      ]
+    }
+  },
+  {
+    "id": "W14",
+    "label": "ANSI-C word holding an escaped quote and >",
+    "text": "@@M@@ install --log $'/tmp/x\\'>' evil==1.0.0",
+    "argv": {
+      "bash": [
+        "install",
+        "--log",
+        "/tmp/x'>",
+        "evil==1.0.0"
+      ],
+      "zsh": [
+        "install",
+        "--log",
+        "/tmp/x'>",
+        "evil==1.0.0"
+      ]
+    }
+  },
+  {
+    "id": "W15",
+    "label": "; inside double quotes",
+    "text": "@@M@@ install --log \"a;b\" evil==1.0.0",
+    "argv": {
+      "bash": [
+        "install",
+        "--log",
+        "a;b",
+        "evil==1.0.0"
+      ],
+      "zsh": [
+        "install",
+        "--log",
+        "a;b",
+        "evil==1.0.0"
+      ]
+    }
+  },
+  {
+    "id": "W16",
+    "label": "| inside single quotes",
+    "text": "@@M@@ install --log 'a|b' evil==1.0.0",
+    "argv": {
+      "bash": [
+        "install",
+        "--log",
+        "a|b",
+        "evil==1.0.0"
+      ],
+      "zsh": [
+        "install",
+        "--log",
+        "a|b",
+        "evil==1.0.0"
+      ]
+    }
+  },
+  {
+    "id": "W17",
+    "label": "& inside double quotes",
+    "text": "@@M@@ install --log \"a&b\" evil==1.0.0",
+    "argv": {
+      "bash": [
+        "install",
+        "--log",
+        "a&b",
+        "evil==1.0.0"
+      ],
+      "zsh": [
+        "install",
+        "--log",
+        "a&b",
+        "evil==1.0.0"
+      ]
+    }
+  },
+  {
+    "id": "W18",
+    "label": "a digit inside a word is not a descriptor",
+    "text": "@@M@@ install x2>f evil==1.0.0",
+    "argv": {
+      "bash": [
+        "install",
+        "x2",
+        "evil==1.0.0"
+      ],
+      "zsh": [
+        "install",
+        "x2",
+        "evil==1.0.0"
+      ]
+    }
+  },
+  {
+    "id": "W19",
+    "label": "descriptor redirections",
+    "text": "@@M@@ install evil==1.0.0 3>&- 2>&1",
+    "argv": {
+      "bash": [
+        "install",
+        "evil==1.0.0"
+      ],
+      "zsh": [
+        "install",
+        "evil==1.0.0"
+      ]
+    }
+  },
+  {
+    "id": "W20",
+    "label": "&> redirection",
+    "text": "@@M@@ install evil==1.0.0&>/dev/null",
+    "argv": {
+      "bash": [
+        "install",
+        "evil==1.0.0"
+      ],
+      "zsh": [
+        "install",
+        "evil==1.0.0"
+      ]
+    }
+  },
+  {
+    "id": "W21",
+    "label": "quoted version specifier",
+    "text": "@@M@@ install 'requests>=2.0'",
+    "argv": {
+      "bash": [
+        "install",
+        "requests>=2.0"
+      ],
+      "zsh": [
+        "install",
+        "requests>=2.0"
+      ]
+    }
+  },
+  {
+    "id": "W22",
+    "label": "escaped >",
+    "text": "@@M@@ install requests\\>=2.0",
+    "argv": {
+      "bash": [
+        "install",
+        "requests>=2.0"
+      ],
+      "zsh": [
+        "install",
+        "requests>=2.0"
+      ]
+    }
+  },
+  {
+    "id": "W23",
+    "label": "unquoted > is a redirection",
+    "text": "@@M@@ install requests>=2.0",
+    "argv": {
+      "bash": [
+        "install",
+        "requests"
+      ],
+      "zsh": []
+    }
+  },
+  {
+    "id": "W24",
+    "label": "adjacent quotes form one word",
+    "text": "@@M@@ install \"a\"'b'c",
+    "argv": {
+      "bash": [
+        "install",
+        "abc"
+      ],
+      "zsh": [
+        "install",
+        "abc"
+      ]
+    }
+  },
+  {
+    "id": "W25",
+    "label": "escaped backslash before a closing quote",
+    "text": "@@M@@ install --log \"a\\\\\" evil==1.0.0",
+    "argv": {
+      "bash": [
+        "install",
+        "--log",
+        "a\\",
+        "evil==1.0.0"
+      ],
+      "zsh": [
+        "install",
+        "--log",
+        "a\\",
+        "evil==1.0.0"
+      ]
+    }
+  },
+  {
+    "id": "W26",
+    "label": "escaped backslash then escaped quote",
+    "text": "@@M@@ install --log \"a\\\\\\\"b\" evil==1.0.0",
+    "argv": {
+      "bash": [
+        "install",
+        "--log",
+        "a\\\"b",
+        "evil==1.0.0"
+      ],
+      "zsh": [
+        "install",
+        "--log",
+        "a\\\"b",
+        "evil==1.0.0"
+      ]
+    }
+  },
+  {
+    "id": "W27",
+    "label": "herestring with a quoted target",
+    "text": "@@M@@ install evil==1.0.0 <<<'x y'",
+    "argv": {
+      "bash": [
+        "install",
+        "evil==1.0.0"
+      ],
+      "zsh": [
+        "install",
+        "evil==1.0.0"
+      ]
+    }
+  },
+  {
+    "id": "W28",
+    "label": "comment holding quote characters",
+    "text": "@@M@@ install evil==1.0.0 # >'x",
+    "argv": {
+      "bash": [
+        "install",
+        "evil==1.0.0"
+      ],
+      "zsh": [
+        "install",
+        "evil==1.0.0"
+      ]
+    }
+  },
+  {
+    "id": "W29",
+    "label": "dollar alone inside double quotes",
+    "text": "@@M@@ install \"$\"'x'",
+    "argv": {
+      "bash": [
+        "install",
+        "$x"
+      ],
+      "zsh": [
+        "install",
+        "$x"
+      ]
+    }
+  },
+  {
+    "id": "W30",
+    "label": "append and clobber redirections",
+    "text": "@@M@@ install evil==1.0.0 >>log >|other",
+    "argv": {
+      "bash": [
+        "install",
+        "evil==1.0.0"
+      ],
+      "zsh": [
+        "install",
+        "evil==1.0.0"
+      ]
+    }
+  }
+]
