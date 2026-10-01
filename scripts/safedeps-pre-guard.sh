@@ -579,15 +579,24 @@ payload_pipes_unread_install_text_to_shell() {
 # has a visible one.
 install_managers_blanked() {
   local text="$1"
-  local scan spans
+  local scan matches spans=""
 
   if ! scan=$(command_scan_text "${text}"); then
     return 1
   fi
   # `offset:match` per match, 0-based byte offsets. No match is not an error:
   # the text is then returned whole, which only keeps more install text in it.
-  spans=$(printf '%s\n' "${scan}" | LC_ALL=C grep -obEi "${SAFEDEPS_INSTALL_PATTERN}" |
-    LC_ALL=C awk '{ c = index($0, ":"); printf "%d:%d ", substr($0, 1, c - 1), length($0) - c }') || spans=""
+  # The grep and the awk run apart so that only "no match" reads as no spans: a
+  # failed awk used to be swallowed by the same `||`, and the visible install it
+  # should have blanked was then read as install text piped into a shell -- a
+  # finding drawn from a failed reading (caught in review).
+  matches=$(printf '%s\n' "${scan}" | LC_ALL=C grep -obEi "${SAFEDEPS_INSTALL_PATTERN}") || matches=""
+  if [[ -n "${matches}" ]] && ! spans=$(printf '%s\n' "${matches}" | LC_ALL=C awk '
+    # safedeps:install_match_spans (scripts/measure/scan-failure-census.sh keys on this line)
+    { c = index($0, ":"); printf "%d:%d ", substr($0, 1, c - 1), length($0) - c }'); then
+    [[ -z "${SAFEDEPS_SCAN_MARK:-}" ]] || printf 'failed\n' >> "${SAFEDEPS_SCAN_MARK}"
+    return 1
+  fi
 
   if ! { printf '%s\n' "${spans}"; printf '%s\n' "${text}"; printf '%s' "${scan}"; } |
     SAFEDEPS_PIPE_MANAGER_RE="${PIPE_MANAGER_RE}" LC_ALL=C awk '
