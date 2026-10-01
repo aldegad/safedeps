@@ -588,8 +588,11 @@ shell_lex() {
         for (k = 1; k <= N; k++) {
           cc = X[k]; cl = C[k]
           if (view == "scan") {
-            if (cl == "c") put(cc)
-            else if (cl == "e") put(cc ~ /[;&|()<>!{}#`]/ ? "_" : (cc == "\n" ? " " : cc))
+            # A code `#` is never a comment start here, and must not become one
+            # when the scan is read again: after a blanked region (`'x'#y`) it
+            # would follow a blank, which is where a comment starts.
+            if (cl == "c") put(cc == "#" && (k == 1 || C[k-1] != "c" && C[k-1] != "e") ? "_" : cc)
+            else if (cl == "e") put(index(";&|()<>!{}#`\042\047\\$", cc) ? "_" : (cc == "\n" ? " " : cc))
             else if (cl == "B") put(" ")
             else put(" ")
             continue

@@ -32,12 +32,15 @@
 #      made it linear; bytes are only what LC_ALL=C hands the split.
 #   2. Outside quotes, bytes pass through unchanged, except a backslash. A
 #      backslash is blanked and escapes the byte after it: that byte passes
-#      through as data and never opens a region (`\"` is a quote character,
-#      `\pip` is `pip`), and an escaped newline -- a line continuation, which
-#      the shell removes -- is blanked, so the two lines read as one. An
-#      escaped operator (`;&|()<>!{}#` or a backtick) passes as `_`: it is a
-#      literal character to the shell, and passed through as itself it would
-#      end a statement or open one for every predicate that reads the scan.
+#      through as data and never opens a region (`\pip` is `pip`), and an
+#      escaped newline -- a line continuation, which the shell removes -- is
+#      blanked, so the two lines read as one. An escaped operator
+#      (`;&|()<>!{}#` or a backtick) passes as `_`: it is a literal character
+#      to the shell, and passed through as itself it would end a statement or
+#      open one for every predicate that reads the scan. So does an escaped
+#      quote, backslash or dollar: as itself it would open a quote, an escape
+#      or a `$'` region when the scan is read again, and the scan view has to
+#      read the same the second time (caught by the view-property check).
 #   3. A quote character that opens or closes a region is itself blanked.
 #   4. Every byte inside a quoted region is blanked, newlines included.
 #   5. A single-quoted region ends at the next single quote, unconditionally.
@@ -135,7 +138,7 @@ reference_spec_scan_text() {
       if [[ ${dq} -gt 0 ]]; then output+=" "
       else
         case "${c}" in
-          ';'|'&'|'|'|'('|')'|'<'|'>'|'!'|'{'|'}'|'#'|'`') output+="_" ;;
+          ';'|'&'|'|'|'('|')'|'<'|'>'|'!'|'{'|'}'|'#'|'`'|'"'|"'"|\\|'$') output+="_" ;;
           *) output+="${c}" ;;
         esac
       fi
@@ -259,11 +262,15 @@ check "an escaped backslash then an escaped quote keeps the region open" \
 # rule 2: outside a region a backslash escapes the byte after it
 check "an escaped quote outside a region is data, not an opening quote" \
   'echo \"npm install evil\"' \
-  'echo  "npm install evil "'
+  'echo  _npm install evil _'
 
 check "an escaped single quote outside a region is data too" \
   "echo \' ; npm i x" \
-  "echo  ' ; npm i x"
+  "echo  _ ; npm i x"
+
+check "an escaped backslash or dollar passes as _, so the scan reads the same again" \
+  'echo \\\$ ; npm i x' \
+  'echo  _ _ ; npm i x'
 
 check "a backslash before a command name is blanked" \
   '\pip install evil' \
@@ -357,6 +364,60 @@ for ((c = 0; c < fuzz_cases; c++)); do
 done
 [[ ${control_hit} -gt 0 ]] || fail "control: a mutated spec produced no divergence, so the differential above measures nothing"
 pass "control: mutated spec diverges on ${control_hit}/${fuzz_cases} inputs, so the differential can fail"
+
+# --- view properties ------------------------------------------------------------
+# Every reader takes a view of the one lexing, and two views are read as offsets
+# into the command and may be read again: scan (what the predicates read) and
+# code (what the payload readers read, quotes kept). Both keep the byte length
+# of the command, so an offset found in a view is the offset in the command, and
+# both are idempotent, so a view read again is the view read once. Stripping a
+# heredoc twice is how its body once swallowed the line after it (caught in
+# review). The joined view is neither: it drops continuations on purpose.
+# Checked on every recorded shell form and on random input drawn from the
+# characters quotes, comments, heredocs and substitutions are made of.
+scan_view() { shell_lex "$1" scan arith "safedeps:scan-contract"; }
+code_view() { shell_lex "$1" code arith "safedeps:scan-contract"; }
+scan_view_sub() { shell_lex "$1" scan sub "safedeps:scan-contract"; }
+code_view_sub() { shell_lex "$1" code sub "safedeps:scan-contract"; }
+property_failures=0
+check_view_properties() { # input label
+  local x="$1" v once twice
+  for v in scan_view code_view scan_view_sub code_view_sub; do
+    # Not through capture: the outer $(...) would strip a trailing newline
+    # from the view and read as a length change the lexer did not make.
+    once=$("${v}" "${x}"; printf 'X'); once="${once%X}"
+    if [[ "$(byte_len "${once}")" != "$(byte_len "${x}")" ]]; then
+      printf 'length: %s changed the length of [%q] (%s)\n' "${v}" "${x}" "$2" >&2
+      property_failures=$((property_failures + 1))
+      continue
+    fi
+    [[ "${v}" == *_sub ]] && continue
+    twice=$("${v}" "${once}"; printf 'X'); twice="${twice%X}"
+    if [[ "${twice}" != "${once}" ]]; then
+      printf 'idempotence: %s read twice differs on [%q] (%s)\n  once  [%q]\n  twice [%q]\n' "${v}" "${x}" "$2" "${once}" "${twice}" >&2
+      property_failures=$((property_failures + 1))
+    fi
+  done
+}
+forms_file="${ROOT_DIR}/scripts/measure/shell-reading-forms.json"
+form_count=$(jq length "${forms_file}")
+for ((i = 0; i < form_count; i++)); do
+  form=$(jq -j ".[${i}].text" "${forms_file}" | sed -e 's/@@TAIL@@/pip install evil==6.6.6/' -e 's/@@TAIL_SPLIT@@/pi\\\
+p install evil==6.6.6/'; printf 'X')
+  check_view_properties "${form%X}" "$(jq -r ".[${i}].id" "${forms_file}")"
+done
+RANDOM="${fuzz_seed}"
+heredoc_alphabet=(\' \" \\ ' ' '<' '<' '-' '#' '`' '$' '(' ')' '{' '}' E O F p i $'\n' $'\n' $'\t' ';' '|' '&' '=' '1')
+for ((c = 0; c < fuzz_cases; c++)); do
+  len=$((RANDOM % 40))
+  input=""
+  for ((k = 0; k < len; k++)); do
+    input+="${heredoc_alphabet[RANDOM % ${#heredoc_alphabet[@]}]}"
+  done
+  check_view_properties "${input}" "random ${c}"
+done
+[[ ${property_failures} -eq 0 ]] || fail "view properties: ${property_failures} violation(s) (seed ${fuzz_seed})"
+pass "view properties: scan and code keep length and are idempotent on ${form_count} shell forms and ${fuzz_cases} random inputs"
 
 # --- when the scanner itself fails ----------------------------------------------
 # Every predicate reads this function's output inside a condition or a command
