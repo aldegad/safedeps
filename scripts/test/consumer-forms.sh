@@ -927,6 +927,24 @@ operand_rows=(
   # Quiet: the exemption is the statement's. The npm CLI install is read by the
   # effect gate; the pnpm one is pinned.
   $'\tnpm install left-pad && pnpm add right-pad@1.0.0'
+  # Quiet: npm leaves package-lock.json alone for these and records the
+  # package in node_modules/.package-lock.json, which the effect gate reads
+  # (measured with a real npm: scripts/test/lockless-forms.sh, section 1b). The
+  # exemption is where the install lands, not a list of flags, so none of them
+  # is spelled out in the guard.
+  $'\tnpm install --no-save left-pad'
+  $'\tnpm i --save=false left-pad'
+  $'\tnpm install --no-package-lock left-pad'
+  $'\tnpm install --package-lock=false left-pad'
+  # Recorded: the statement is the unit of the exemption, and its landing
+  # decides it. The gate reads one directory, the first one the command names.
+  $'npm:right-pad\tnpm install --no-save left-pad && pnpm add right-pad'
+  $'npm:right-pad\tnpm install left-pad && cd sub && npm install right-pad'
+  $'npm:right-pad\tnpm install left-pad && npm install -g right-pad'
+  # Recorded: a payload's npm install. Where it lands is decided inside the
+  # payload, and the landing does not read inside it.
+  $'npm:left-pad\tsh -c \'npm install left-pad\''
+  $'npm:right-pad\tnpm install left-pad && bash -c \'npm install right-pad\''
   # Declared: recorded, and harmless. pip resolves both operands to the pin;
   # the second install is a no-op at runtime; the local binary does not exist
   # yet when the gate reads the command; the record assumes an option it does

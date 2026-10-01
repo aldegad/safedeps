@@ -468,4 +468,33 @@ for row in "${sed_rows[@]}"; do
 done
 pass "a failed sed or tr in a spec reader denies the install as UNDECIDED (${#sed_rows[@]} readers, each against a working control)"
 
+# --- when the statement readers fail ---------------------------------------------
+# The extractor reads the command's statements from resolve_install_targets,
+# which reads them from command_statements, and cuts them into pieces in one
+# more awk. Either failing left no statements, no statements read as no spec,
+# and an unapproved pinned install would pass as if it named nothing.
+for reader in command_statements extract_pieces; do
+  mkdir -p "${fail_tmp}/statements-${reader}"
+  cat > "${fail_tmp}/statements-${reader}/awk" <<SHIM
+#!/usr/bin/env bash
+case "\$*" in *"safedeps:${reader}"*) exit 2 ;; esac
+exec '${real_awk}' "\$@"
+SHIM
+  chmod +x "${fail_tmp}/statements-${reader}/awk"
+  for failing_command in "pip install evil==1.0.0" "pnpm add evil@1.0.0 && echo done"; do
+    scanfail_guard "" "${failing_command}"
+    if [[ "${SCANFAIL_DECISION}" != "deny" ]] || grep -q 'UNDECIDED' <<< "${SCANFAIL_REASON}"; then
+      fail "control: working statement readers deny ${failing_command} as a finding (got: ${SCANFAIL_DECISION})"
+    fi
+    scanfail_guard "${fail_tmp}/statements-${reader}" "${failing_command}"
+    [[ "${SCANFAIL_DECISION}" == "deny" ]] \
+      || fail "a failed ${reader} does not turn ${failing_command} into a pass (got: ${SCANFAIL_DECISION})"
+    grep -q 'UNDECIDED' <<< "${SCANFAIL_REASON}" \
+      || fail "a failed ${reader} is reported as undecided: ${failing_command}"
+    grep -q 'scanner failed' <<< "${SCANFAIL_LOG}" \
+      || fail "a failed ${reader} is recorded in advisory.log: ${failing_command}"
+  done
+done
+pass "a failed statement reader denies the install as UNDECIDED (command_statements, extract_pieces, each against a working control)"
+
 printf 'scan-contract: all checks passed\n'

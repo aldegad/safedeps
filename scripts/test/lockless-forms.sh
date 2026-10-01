@@ -243,6 +243,51 @@ do
 done
 pass "installs that leave package-lock.json unchanged, or land in a sub-project, are read and rolled back"
 
+# --- 1b. Where npm records an install it does not save, and the record ---------
+# The UNGATED record is skipped for exactly the installs the effect gate reads,
+# and what the gate reads is decided by where each install lands
+# (guard_effect_gate_reads). A flag list decided it before, and it missed
+# `--no-save` and `--save=false`, so this measures each of those flags with a
+# real npm: where npm wrote the install, that the gate read it there, and that
+# no UNGATED line was written for it. The package is unpinned on purpose: an
+# unpinned install is the only kind the record exists for.
+#
+# <form>|<package-lock.json>|<hidden lockfile>|<package.json>
+snapshot_records() {
+  cp "${CASE_PROJECT}/package-lock.json" "${tmp_root}/lock-before.json"
+  cp "${CASE_PROJECT}/package.json" "${tmp_root}/manifest-before.json"
+}
+read_records() {
+  local project="$1"
+  if cmp -s "${tmp_root}/lock-before.json" "${project}/package-lock.json"; then RECORD_LOCK=unchanged; else RECORD_LOCK=changed; fi
+  if grep -q '"node_modules/sd-victim"' "${project}/node_modules/.package-lock.json" 2>/dev/null; then
+    RECORD_HIDDEN=recorded
+  else
+    RECORD_HIDDEN=absent
+  fi
+  if cmp -s "${tmp_root}/manifest-before.json" "${project}/package.json"; then RECORD_MANIFEST=unchanged; else RECORD_MANIFEST=changed; fi
+}
+for row in \
+  "npm install sd-victim --no-save|unchanged|recorded|unchanged" \
+  "npm install --no-save sd-victim|unchanged|recorded|unchanged" \
+  "npm install sd-victim --save=false|unchanged|recorded|unchanged" \
+  "npm i --save=false sd-victim|unchanged|recorded|unchanged" \
+  "npm install sd-victim --no-package-lock|unchanged|recorded|changed" \
+  "npm install --no-package-lock sd-victim|unchanged|recorded|changed"
+do
+  IFS='|' read -r form want_lock want_hidden want_manifest <<< "${row}"
+  new_project
+  snapshot_records
+  : > "${MARKS}"
+  run_install "${form}" claude read_records
+  [[ "${RECORD_LOCK}|${RECORD_HIDDEN}|${RECORD_MANIFEST}" == "${want_lock}|${want_hidden}|${want_manifest}" ]] \
+    || fail "npm records ${form} as measured (package-lock.json ${RECORD_LOCK}, hidden lockfile ${RECORD_HIDDEN}, package.json ${RECORD_MANIFEST}; want ${want_lock}, ${want_hidden}, ${want_manifest})"
+  rolled_back || fail "the effect gate reads the hidden lockfile and rolls back: ${form} (post: ${CASE_POST:-<quiet>})"
+  ungated && fail "an install the effect gate reads is not recorded UNGATED: ${form} ($(grep UNGATED "${CASE_HOME}/advisory.log"))"
+  victim_ran && fail "no script of the unverified package runs: ${form}"
+done
+pass "--no-save, --save=false and --no-package-lock leave package-lock.json alone and record the install in node_modules/.package-lock.json, the gate reads it there, and nothing is recorded UNGATED"
+
 # --- 2. Installs no effect gate reads are recorded -----------------------------------
 # A global install writes no lockfile anywhere, so there is nothing to read.
 # The gate says so in advisory.log. Nothing runs its scripts either: the rebuild
