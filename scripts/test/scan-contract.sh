@@ -347,7 +347,7 @@ pass "control: mutated spec diverges on ${control_hit}/${fuzz_cases} inputs, so 
 real_awk=$(command -v awk)
 fail_tmp=$(mktemp -d "${TMPDIR:-/tmp}/safedeps-scanfail.XXXXXX")
 trap 'rm -rf "${fail_tmp}"' EXIT
-mkdir -p "${fail_tmp}/scanner-only" "${fail_tmp}/all-awk" "${fail_tmp}/scanner-later" "${fail_tmp}/blanking-only" "${fail_tmp}/project"
+mkdir -p "${fail_tmp}/scanner-only" "${fail_tmp}/all-awk" "${fail_tmp}/scanner-later" "${fail_tmp}/blanking-only" "${fail_tmp}/spans-only" "${fail_tmp}/project"
 printf '{"dependencies":{}}\n' > "${fail_tmp}/project/package.json"
 cat > "${fail_tmp}/scanner-only/awk" <<SHIM
 #!/usr/bin/env bash
@@ -384,7 +384,21 @@ case "\$*" in
 esac
 exec '${real_awk}' "\$@"
 SHIM
-chmod +x "${fail_tmp}/scanner-only/awk" "${fail_tmp}/all-awk/awk" "${fail_tmp}/scanner-later/awk" "${fail_tmp}/blanking-only/awk"
+# The awk that turns the install matches into byte spans for that blanking
+# pass (install_match_spans). It ran under no marker and its failure was
+# swallowed with grep's "no match", so the visible install was not set aside
+# and was read as install text piped into a shell (caught in review).
+cat > "${fail_tmp}/spans-only/awk" <<SHIM
+#!/usr/bin/env bash
+case "\$*" in
+  *"safedeps:install_match_spans"*)
+    printf 'x' >> '${fail_tmp}/spans-only/count'
+    exit 2
+    ;;
+esac
+exec '${real_awk}' "\$@"
+SHIM
+chmod +x "${fail_tmp}/scanner-only/awk" "${fail_tmp}/all-awk/awk" "${fail_tmp}/scanner-later/awk" "${fail_tmp}/blanking-only/awk" "${fail_tmp}/spans-only/awk"
 
 # Runs the guard through the entry shim, the way the engines do. An optional
 # third argument, `<ecosystem> <name> <version>`, is approved first.
@@ -488,6 +502,19 @@ for tool in grep sed; do
   [[ "${SCANFAIL_DECISION}" == "pass" ]] || fail "a failed ${tool} does not block a command that names no package manager (got: ${SCANFAIL_DECISION})"
 done
 pass "a failed grep or sed on the judgment path denies install-looking commands as UNDECIDED"
+
+# Nothing is piped here but the word `ok`, so a finding about piped install text
+# could only come from the failed span reading.
+spans_beside="pip install requests==2.0.0 && echo ok | sh"
+scanfail_guard "" "${spans_beside}" "pypi requests 2.0.0"
+[[ "${SCANFAIL_DECISION}" == "pass" ]] || fail "control: an approved install beside a pipe that carries no install passes (got: ${SCANFAIL_DECISION})"
+rm -f "${fail_tmp}/spans-only/count"
+scanfail_guard "${fail_tmp}/spans-only" "${spans_beside}" "pypi requests 2.0.0"
+[[ -s "${fail_tmp}/spans-only/count" ]] || fail "the span shim was reached (otherwise this case tests nothing)"
+[[ "${SCANFAIL_DECISION}" == "deny" ]] || fail "a failed span awk is not a pass for a command that names a package manager (got: ${SCANFAIL_DECISION})"
+grep -q 'UNDECIDED' <<< "${SCANFAIL_REASON}" || fail "a failed span awk is reported as undecided, not as a piped-install finding"
+grep -q 'scanner failed' <<< "${SCANFAIL_LOG}" || fail "a failed span awk is recorded in advisory.log"
+pass "a failed span awk beside a visible install answers UNDECIDED, not a finding"
 
 scanfail_guard "${fail_tmp}/all-awk" "pip install requests==2.0.0"
 [[ "${SCANFAIL_DECISION}" == "deny" ]] || fail "with awk failing everywhere an install is still denied (got: ${SCANFAIL_DECISION})"
