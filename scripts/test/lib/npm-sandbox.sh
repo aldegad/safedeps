@@ -312,7 +312,7 @@ victim_ran() { grep -q '^sd-victim' "${MARKS}"; }
 # registry has no such package.
 npm_sandbox_registry_was_local() {
   [[ -s "${tmp_root}/registry.log" ]] || fail "the installs went through the fixture registry"
-  if grep -vE '^GET /sd-(victim|approved|swapped|nope)(/-/sd-(victim|approved|swapped)-1\.0\.[01]\.tgz)?$' "${tmp_root}/registry.log" | grep -q .; then
+  if grep -vE '^GET /sd-(victim|approved|approved-too|swapped|nope)(/-/sd-(victim|approved|approved-too|swapped)-1\.0\.[01]\.tgz)?$' "${tmp_root}/registry.log" | grep -q .; then
     fail "the fixture registry saw only the synthetic packages ($(sort -u "${tmp_root}/registry.log" | paste -sd, -))"
   fi
   pass "every request went to the local fixture registry, for the synthetic packages only"

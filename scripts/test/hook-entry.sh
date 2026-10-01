@@ -123,6 +123,30 @@ grep -q "unverified" <<< "${entry_err}" || fail "broken post hook: consequence i
 pass "broken post hook: silent fail-open becomes a loud, explained report"
 cp scripts/safedeps-post-verify.sh "${repo}/scripts/"
 
+# --- out of processes: an explained deny, not a non-blocking exit ----------
+# bash 3.2 ends a script at the first process it cannot start, with exit 128,
+# and both engines read 128 as a non-blocking hook failure: the call would run
+# with no gate. A process limit of 1 reproduces it for real, because this user
+# already runs more than one process, so every fork inside the shim fails. Root
+# is exempt from that limit, so the row says so when the limit does not bind.
+probe_rc=0
+bash -c 'ulimit -Su 1 2>/dev/null || exit 3; ( exit 0 )' 2>/dev/null || probe_rc=$?
+if [[ ${probe_rc} -eq 0 || ${probe_rc} -eq 3 ]]; then
+  printf 'ok - out-of-processes row SKIPPED (the process limit does not bind this user)\n'
+else
+  entry_rc=0
+  entry_out=$(payload "ls -la" |
+    HOME="${tmp_root}/home" SAFEDEPS_HOME="${tmp_root}/state" \
+    bash -c 'ulimit -Su 1; exec bash "$0" pre' "${repo}/scripts/safedeps-hook-entry.sh" 2>"${tmp_root}/err") || entry_rc=$?
+  entry_err=$(cat "${tmp_root}/err")
+  [[ ${entry_rc} -eq 2 ]] || fail "out of processes: the entry denies instead of exiting ${entry_rc}, which is non-blocking"
+  grep -q "could not start a process" <<< "${entry_err}" || fail "out of processes: the cause is named"
+  if grep -q "missing" <<< "${entry_err}"; then
+    fail "out of processes: not misreported as a missing hook"
+  fi
+  pass "out of processes: an explained deny, not a non-blocking 128 or a missing hook"
+fi
+
 # --- the shim's own failure mode: degrade to status quo, never wider --------
 
 awk 'NR==30{print "<<<<<<< HEAD"} {print} NR==33{print "======="; print ">>>>>>> other-branch"}' \

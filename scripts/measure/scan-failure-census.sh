@@ -179,8 +179,18 @@ case "\$*" in
   *"safedeps:install_match_spans"*) kind=spans ;;
   *"safedeps:extract_flagged_specs"*) kind=flag ;;
   *"safedeps:operand_specs_ecosystem"*) kind=eco ;;
+  *"safedeps:strip_heredoc_bodies"*) kind=strip ;;
+  *"safedeps:command_reads"*) kind=reads ;;
+  *"safedeps:inert_rewrite_in_place"*) kind=inert ;;
+  *"safedeps:inert_offsets"*) kind=offsets ;;
+  *"safedeps:normalize_install_text"*) kind=norm ;;
+  *"safedeps:extract_command_substitution_payloads"*) kind=subst ;;
   *"safedeps:command_statements"*) kind=stmts ;;
   *"safedeps:guard_npmrc_value"*) kind=npmrc ;;
+  *"safedeps:extract_pieces"*) kind=pieces ;;
+  *"safedeps:shell_dequote"*) kind=dequote ;;
+  *"safedeps:strip_redirections"*) kind=redirect ;;
+  *"safedeps:payload_pieces"*) kind=payload ;;
 esac
 if [[ -z "\${kind}" ]]; then
   # A call the census cannot name, counted so that it cannot hide: see
@@ -289,7 +299,7 @@ for n in $(seq 1 "${case_count}"); do
     printf '%s k %s\n' "${n}" "${k}" >> "${WORK}/jobs"
     [[ "${QUICK}" == "true" ]] || printf '%s from-k %s\n' "${n}" "${k}" >> "${WORK}/jobs"
   done
-  for mode in scan-all join-all blank-all spans-all flag-all eco-all stmts-all npmrc-all awk-all grep-all sed-all; do
+  for mode in scan-all join-all strip-all reads-all inert-all offsets-all norm-all subst-all blank-all spans-all flag-all eco-all stmts-all npmrc-all pieces-all dequote-all redirect-all payload-all awk-all grep-all sed-all; do
     printf '%s %s 0\n' "${n}" "${mode}" >> "${WORK}/jobs"
   done
 done

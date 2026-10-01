@@ -382,6 +382,17 @@ global_forms=(
   "npm install --global left-pad@1.3.0"
   "npm -g install left-pad@1.3.0"
   "npm --global install left-pad@1.3.0"
+  # npm's option parser (nopt) reads these as global too: a bundle of short
+  # flags, `=value` on a boolean, a negated `--no-` with `=false`, and a unique
+  # abbreviation of `--location`. Global is npm's answer (lib/npm/ask.sh), so
+  # the ledger context follows npm rather than a list of spellings.
+  "npm install -gf left-pad@1.3.0"
+  "npm i -fg left-pad@1.3.0"
+  "npm i -g=true left-pad@1.3.0"
+  "npm i --locat=global left-pad@1.3.0"
+  "npm i --no-global=false left-pad@1.3.0"
+  # npm link installs a package the global tree lacks into the global prefix.
+  "npm link left-pad@1.3.0"
 )
 for i in "${!global_forms[@]}"; do
   global_safe="${tmp_root}/safe-global-context-${i}"
@@ -414,6 +425,12 @@ SAFEDEPS_HOME="${mixed_safe}" lib/ledger/ledger.sh approve npm other-local 2.0.0
 mixed_context_output=$(run_hook_command "${tmp_root}/home-mixed-global-local-control" "${mixed_safe}" "npm install -g left-pad@1.3.0 && npm install other-local@2.0.0")
 [[ "$(jq -r '.hookSpecificOutput.permissionDecision' <<< "${mixed_context_output}")" == "deny" ]] \
   || fail "mixed global and local npm operations stay project-scoped"
+# A payload's install lands where the payload decides, which the landing does
+# not read, so it keeps the project's context (declared: the direction that
+# can deny an approved package, never one that drops the context).
+payload_context_output=$(run_hook_command "${tmp_root}/home-payload-global-control" "${local_context_safe}" "sh -c 'npm install -g left-pad@1.3.0'")
+[[ "$(jq -r '.hookSpecificOutput.permissionDecision' <<< "${payload_context_output}")" == "deny" ]] \
+  || fail "a global npm install inside a payload stays project-scoped"
 printf '{"dependencies":{}}\n' > "${project_dir}/package.json"
 pass "global npm approvals are context-free while local approvals remain project-scoped"
 
@@ -462,7 +479,9 @@ for inert_case in \
   "npm install left-pad@1.3.0 # rebuild the lockfile|npm install --ignore-scripts left-pad@1.3.0 # rebuild the lockfile" \
   $'npm install left-pad@1.3.0\necho done|npm install --ignore-scripts left-pad@1.3.0\necho done' \
   $'npm install left-pad@1.3.0 <<EOF\nyes\nEOF|npm install --ignore-scripts left-pad@1.3.0 <<EOF\nyes\nEOF' \
-  "npm install left-pad@1.3.0 --message 'a # b'|npm install left-pad@1.3.0 --message 'a # b' --ignore-scripts"
+  "npm install left-pad@1.3.0 --message 'a # b'|npm install left-pad@1.3.0 --message 'a # b' --ignore-scripts" \
+  'npm --userconfig "/tmp/a b/.npmrc" install left-pad@1.3.0 # then npm i later|npm --userconfig "/tmp/a b/.npmrc" install --ignore-scripts left-pad@1.3.0 # then npm i later' \
+  $'cat <<EOF > notes\nnpm i left-pad\nEOF\nnpm install left-pad@1.3.0|cat <<EOF > notes\nnpm i left-pad\nEOF\nnpm install --ignore-scripts left-pad@1.3.0'
 do
   inert_in="${inert_case%%|*}"
   inert_want="${inert_case#*|}"

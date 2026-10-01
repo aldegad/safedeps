@@ -1,0 +1,1340 @@
+[
+  {
+    "id": "K0",
+    "cls": "K",
+    "label": "tail alone",
+    "text": "@@TAIL@@",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "K1",
+    "cls": "K",
+    "label": "<<-EOF, terminator space-indented (unterminated)",
+    "text": "cat <<-EOF > n.txt\nit's here\n  EOF\n@@TAIL@@",
+    "measured": {
+      "bash": "-",
+      "zsh": "-",
+      "sh": "-",
+      "agent": "-"
+    }
+  },
+  {
+    "id": "K2",
+    "cls": "K",
+    "label": "terminator with trailing blank (unterminated)",
+    "text": "cat <<EOF > n.txt\nit's here\nEOF \n@@TAIL@@",
+    "measured": {
+      "bash": "-",
+      "zsh": "-",
+      "sh": "-",
+      "agent": "-"
+    }
+  },
+  {
+    "id": "H1",
+    "cls": "H",
+    "label": "<<EOF baseline + apostrophe body",
+    "text": "cat <<EOF > n.txt\nit's here\nEOF\n@@TAIL@@",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "H2",
+    "cls": "H",
+    "label": "<<1 digit delimiter (X1)",
+    "text": "cat <<1 > n.txt\nit's here\n1\n@@TAIL@@",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "H3",
+    "cls": "H",
+    "label": "<<\\EOF",
+    "text": "cat <<\\EOF > n.txt\nit's here\nEOF\n@@TAIL@@",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "H4",
+    "cls": "H",
+    "label": "<<E\"O\"F",
+    "text": "cat <<E\"O\"F > n.txt\nit's here\nEOF\n@@TAIL@@",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "H5",
+    "cls": "H",
+    "label": "<<-EOF tab-indented terminator",
+    "text": "cat <<-EOF > n.txt\n\tit's here\n\tEOF\n@@TAIL@@",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "H6",
+    "cls": "H",
+    "label": "<<'EOF'",
+    "text": "cat <<'EOF' > n.txt\nit's here\nEOF\n@@TAIL@@",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "H7",
+    "cls": "H",
+    "label": "<< EOF (blank before word)",
+    "text": "cat << EOF > n.txt\nit's here\nEOF\n@@TAIL@@",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "H8",
+    "cls": "H",
+    "label": "two heredocs on one line",
+    "text": "cat <<A > n.txt; cat <<B >> n.txt\nit's A\nA\nit's B\nB\n@@TAIL@@",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "H9",
+    "cls": "H",
+    "label": "multi-line string closes on the opening line (X2)",
+    "text": "git commit --dry-run -m \"subject\n\nbody\" >/dev/null 2>&1; cat <<EOF > n.txt\nit's here\nEOF\n@@TAIL@@",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "H10",
+    "cls": "H",
+    "label": "heredoc inside $( )",
+    "text": "x=$(cat <<EOF\nit's here\nEOF\n)\n@@TAIL@@",
+    "measured": {
+      "bash": "-!",
+      "zsh": "R",
+      "sh": "-!",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "H11",
+    "cls": "H",
+    "label": "fd-prefixed 3<<EOF",
+    "text": ": 3<<EOF\nit's here\nEOF\n@@TAIL@@",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "H12",
+    "cls": "H",
+    "label": "delimiter with a quoted blank <<'E O'",
+    "text": "cat <<'E O' > n.txt\nit's here\nE O\n@@TAIL@@",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "H13",
+    "cls": "H",
+    "label": "delimiter $x (literal)",
+    "text": "cat <<$x > n.txt\nit's here\n$x\n@@TAIL@@",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "H14",
+    "cls": "H",
+    "label": "operator after a backslash-newline",
+    "text": "cat \\\n<<EOF > n.txt\nit's here\nEOF\n@@TAIL@@",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "H15",
+    "cls": "H",
+    "label": "cat<<EOF glued",
+    "text": "cat<<EOF>n.txt\nit's here\nEOF\n@@TAIL@@",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "H16",
+    "cls": "H",
+    "label": "comment after the delimiter",
+    "text": "cat <<EOF > n.txt # note\nit's here\nEOF\n@@TAIL@@",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "H17",
+    "cls": "H",
+    "label": "a#<<EOF: # inside a word is not a comment",
+    "text": "cat a#<<EOF > n.txt 2>/dev/null\nit's here\nEOF\n@@TAIL@@",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "H18",
+    "cls": "H",
+    "label": "${#x} then <<EOF",
+    "text": "cat ${#x}<<EOF > n.txt 2>/dev/null\nit's here\nEOF\n@@TAIL@@",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "H19",
+    "cls": "H",
+    "label": "body backslash-newline swallows first terminator",
+    "text": "cat <<EOF > n.txt\nx\\\nEOF\nit's here\nEOF\n@@TAIL@@",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "H20",
+    "cls": "H",
+    "label": "same, quoted delimiter (no join)",
+    "text": "cat <<'EOF' > n.txt\nx\\\nEOF\n@@TAIL@@",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "H21",
+    "cls": "H",
+    "label": "heredoc in \"$( )\"",
+    "text": "echo \"$(cat <<EOF\nit's here\nEOF\n)\" > n.txt\n@@TAIL@@",
+    "measured": {
+      "bash": "-!",
+      "zsh": "R",
+      "sh": "-!",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "H22",
+    "cls": "H",
+    "label": "heredoc in function body",
+    "text": "f() { cat <<EOF > n.txt\nit's here\nEOF\n}; f\n@@TAIL@@",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "H23",
+    "cls": "H",
+    "label": "heredoc then pipe to sh on next line (P3)",
+    "text": "cat <<EOF |\necho body\nEOF\nsh >/dev/null\n@@TAIL@@",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "H24",
+    "cls": "H",
+    "label": "multi-line string with <<EOF inside, then real heredoc",
+    "text": "echo \"a\n<<Q\" > /dev/null; cat <<EOF > n.txt\nit's\nEOF\n@@TAIL@@",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "N1",
+    "cls": "N",
+    "label": "herestring <<<",
+    "text": "cat <<<\"hello\" > /dev/null\n@@TAIL@@",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "N2",
+    "cls": "N",
+    "label": "$((1<<2))",
+    "text": "echo $((1<<2)) > /dev/null\n@@TAIL@@",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "N3",
+    "cls": "N",
+    "label": "\"<<EOF\" double-quoted",
+    "text": "echo \"<<EOF\" > /dev/null\n@@TAIL@@",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "N4",
+    "cls": "N",
+    "label": "'<<EOF' single-quoted",
+    "text": "echo '<<EOF' > /dev/null\n@@TAIL@@",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "N5",
+    "cls": "N",
+    "label": "comment # <<EOF after a command",
+    "text": "echo x > /dev/null # <<EOF\n@@TAIL@@",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "N6",
+    "cls": "N",
+    "label": "comment line # <<EOF",
+    "text": "# <<EOF\n@@TAIL@@",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "N7",
+    "cls": "N",
+    "label": "<<EOF inside a multi-line string",
+    "text": "echo \"a\n<<EOF\" > /dev/null\n@@TAIL@@",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "N8",
+    "cls": "N",
+    "label": "(( x = 1<<2 ))",
+    "text": "(( x = 1<<2 ))\n@@TAIL@@",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "N9",
+    "cls": "N",
+    "label": "\\<<EOF escaped",
+    "text": "echo \\<<EOF > /dev/null 2>&1\n@@TAIL@@",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "N10",
+    "cls": "N",
+    "label": "$[1<<2] old arithmetic",
+    "text": "echo $[1<<2] > /dev/null\n@@TAIL@@",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "N11",
+    "cls": "N",
+    "label": "((1<<2)) arithmetic command",
+    "text": "((1<<2)) && :\n@@TAIL@@",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "N12",
+    "cls": "N",
+    "label": "<<EOF in a multi-line single-quoted string",
+    "text": "echo 'a\n<<EOF' > /dev/null\n@@TAIL@@",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "N13",
+    "cls": "N",
+    "label": "<<EOF in backticks' quoted arg",
+    "text": "x=`echo '<<EOF'`\n@@TAIL@@",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "N14",
+    "cls": "N",
+    "label": "$'..' containing <<EOF",
+    "text": "echo $'<<EOF' > /dev/null\n@@TAIL@@",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "C1",
+    "cls": "C",
+    "label": "apostrophe in a comment",
+    "text": "echo hi > /dev/null # don't\n@@TAIL@@",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "C2",
+    "cls": "C",
+    "label": "$'don\\'t' ANSI-C escape",
+    "text": "echo $'don\\'t' > /dev/null\n@@TAIL@@",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "C3",
+    "cls": "C",
+    "label": "comment line with apostrophe",
+    "text": "# it's a note\n@@TAIL@@",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "C4",
+    "cls": "C",
+    "label": "double quote in a comment",
+    "text": "echo hi > /dev/null # say \"hi\n@@TAIL@@",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "A1",
+    "cls": "A",
+    "label": "((cat <<EOF nested subshell",
+    "text": "((cat <<EOF > n.txt\nit's here\nEOF\n) )\n@@TAIL@@",
+    "measured": {
+      "bash": "-!",
+      "zsh": "R",
+      "sh": "-!",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "A2",
+    "cls": "A",
+    "label": "EOF) closes heredoc inside $( )",
+    "text": "x=$(cat <<EOF\nit's here\nEOF)\n@@TAIL@@",
+    "measured": {
+      "bash": "-!",
+      "zsh": "-!",
+      "sh": "-!",
+      "agent": "-!"
+    }
+  },
+  {
+    "id": "A3",
+    "cls": "A",
+    "label": "(( with << and no )) on the line, opens nothing",
+    "text": "(( 1 <<\n2 ))\n@@TAIL@@",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "A4",
+    "cls": "A",
+    "label": "$(( across lines with <<",
+    "text": "echo $((1\n<<2)) > /dev/null\n@@TAIL@@",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "A5",
+    "cls": "A",
+    "label": "comment char inside $( ) on a heredoc line",
+    "text": "x=$(echo a # <<EOF\n)\n@@TAIL@@",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "A6",
+    "cls": "A",
+    "label": "$( ( subshell ) ) containing heredoc",
+    "text": "x=$( (cat <<EOF\nit's\nEOF\n) )\n@@TAIL@@",
+    "measured": {
+      "bash": "-!",
+      "zsh": "R",
+      "sh": "-!",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "A7",
+    "cls": "A",
+    "label": "$((cat <<EOF  (arith vs subshell)",
+    "text": "x=$((cat <<EOF\nit's here\nEOF\n) )\n@@TAIL@@",
+    "measured": {
+      "bash": "-!",
+      "zsh": "R",
+      "sh": "-!",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "C5",
+    "cls": "C",
+    "label": "even apostrophes across comments hide a middle line",
+    "text": "# it's a note\n@@TAIL@@\n# don't forget",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "C6",
+    "cls": "C",
+    "label": "comment apostrophe, tail, then a quote-closing string",
+    "text": "echo a # it's\n@@TAIL@@\necho 'x'",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "H25",
+    "cls": "H",
+    "label": "heredoc in \"$( )\" whose body is a lone double quote",
+    "text": "echo \"$(cat <<'EOF'\n\"\nEOF\n)\" > n.txt\n@@TAIL@@",
+    "measured": {
+      "bash": "-!",
+      "zsh": "R",
+      "sh": "-!",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "H26",
+    "cls": "H",
+    "label": "heredoc in backticks",
+    "text": "x=`cat <<EOF\nit's here\nEOF\n`\n@@TAIL@@",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "H27",
+    "cls": "H",
+    "label": "body line ' EOF' (leading blank) is not the terminator",
+    "text": "cat <<EOF > n.txt\n EOF\nit's\nEOF\n@@TAIL@@",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "H28",
+    "cls": "H",
+    "label": "quoted then unquoted heredoc, join in the second",
+    "text": "cat <<'A' <<B > n.txt\nx\\\nA\ny\\\nB\nit's\nB\n@@TAIL@@",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "H29",
+    "cls": "H",
+    "label": "unbalanced $( in an unquoted body",
+    "text": "cat <<EOF > n.txt 2>/dev/null\n$(\nEOF\n@@TAIL@@",
+    "measured": {
+      "bash": "R",
+      "zsh": "-!",
+      "sh": "R",
+      "agent": "-!"
+    }
+  },
+  {
+    "id": "H30",
+    "cls": "H",
+    "label": "middle line hidden between two bodies' apostrophes",
+    "text": "cat <<1 > n.txt\nit's\n1\n@@TAIL@@\ncat <<2 > m.txt\ndon't\n2",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "E1",
+    "cls": "E",
+    "label": "command substitution in an unquoted heredoc body",
+    "text": "cat <<EOF\n$(@@TAIL@@)\nEOF",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "E2",
+    "cls": "E",
+    "label": "backticks in an unquoted heredoc body",
+    "text": "cat <<EOF\n`@@TAIL@@`\nEOF",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "E3",
+    "cls": "E",
+    "label": "command substitution in a quoted-delimiter body (data)",
+    "text": "cat <<'EOF'\n$(@@TAIL@@)\nEOF",
+    "measured": {
+      "bash": "-",
+      "zsh": "-",
+      "sh": "-",
+      "agent": "-"
+    },
+    "gate": "pass"
+  },
+  {
+    "id": "E4",
+    "cls": "E",
+    "label": "multi-line commit message, then a heredoc, then the tail (X2)",
+    "text": "git commit -m \"subject\n\nbody\" ; cat <<EOF > notes.txt\nit's here\nEOF\n@@TAIL@@",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "E5",
+    "cls": "E",
+    "label": "digit delimiter heredoc with an apostrophe body (X1)",
+    "text": "cat <<1 > notes.txt\nit's here\n1\n@@TAIL@@",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "E6",
+    "cls": "E",
+    "label": "sh -c after a heredoc (R1)",
+    "text": "cat <<EOF > notes.md\nhello\nEOF\nsh -c \"@@TAIL@@\"",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "E7",
+    "cls": "E",
+    "label": "eval after a heredoc (P2)",
+    "text": "cat <<EOF > notes.md\nhello\nEOF\neval \"@@TAIL@@\"",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "E8",
+    "cls": "E",
+    "label": "a pipe continued past a heredoc (P3)",
+    "text": "cat <<EOF |\n@@TAIL@@\nEOF\nsh",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "E9",
+    "cls": "E",
+    "label": "a line continuation inside the command word",
+    "text": "@@TAIL_SPLIT@@",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "E10",
+    "cls": "E",
+    "label": "a herestring, then the tail",
+    "text": "cat <<<\"hello\"\n@@TAIL@@",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "E11",
+    "cls": "E",
+    "label": "git commit heredoc message, then the tail",
+    "text": "git commit -F - <<'EOF'\nfix: it's done\nEOF\n@@TAIL@@",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "E12",
+    "cls": "E",
+    "label": "quoted command substitution holding a heredoc, then the tail",
+    "text": "echo \"$(cat <<'EOF'\nit's \"quoted\" here\nEOF\n)\" && @@TAIL@@",
+    "measured": {
+      "bash": "-!",
+      "zsh": "R",
+      "sh": "-!",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "P1",
+    "label": "backtick arith x=`((1<<2))`",
+    "text": "x=`((1<<2))`\n@@TAIL@@\n2\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "Q1",
+    "label": "dq backtick arith",
+    "text": "x=\"`((1<<2))`\"\n@@TAIL@@\n2\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "P2",
+    "label": "case pattern then ((1<<2))",
+    "text": "case x in x) ((1<<2));; esac\n@@TAIL@@\n2\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "Q4",
+    "label": "case x)(( no space",
+    "text": "case x in x)((1<<2));; esac\n@@TAIL@@\n2\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "Q5",
+    "label": "case (x) ((",
+    "text": "case x in (x) ((1<<2));; esac\n@@TAIL@@\n2\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "Q3",
+    "label": "case ;& then ((",
+    "text": "case x in x) :;& y) ((1<<2));; esac\n@@TAIL@@\n2\n",
+    "measured": {
+      "bash": "-!",
+      "zsh": "R",
+      "sh": "-!",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "P15",
+    "label": "coproc then ((",
+    "text": "coproc ((1<<2))\n@@TAIL@@\n2\n",
+    "measured": {
+      "bash": "-!",
+      "zsh": "R",
+      "sh": "-!",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "Q2",
+    "label": "time -p ((",
+    "text": "time -p ((1<<2))\n@@TAIL@@\n2\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "-!",
+      "sh": "R",
+      "agent": "-!"
+    }
+  },
+  {
+    "id": "P4",
+    "label": "dq param ${x:-'}",
+    "text": "echo \"${x:-'}\"\n@@TAIL@@\necho \"'}\"\n",
+    "measured": {
+      "bash": "-",
+      "zsh": "R",
+      "sh": "-",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "P13",
+    "label": "dq param ${x#'}",
+    "text": "echo \"${x#'}\"\n@@TAIL@@\necho \"'}\"\n",
+    "measured": {
+      "bash": "-",
+      "zsh": "R",
+      "sh": "-",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "Q6",
+    "label": "dq ${x/'/}",
+    "text": "echo \"${x/'/}\"\n@@TAIL@@\necho \"'}\"\n",
+    "measured": {
+      "bash": "-",
+      "zsh": "R",
+      "sh": "-",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "Q7",
+    "label": "dq ${x:+'}",
+    "text": "echo \"${x:+'}\"\n@@TAIL@@\necho \"'}\"\n",
+    "measured": {
+      "bash": "-",
+      "zsh": "R",
+      "sh": "-",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "Q8",
+    "label": "dq ${x%'}",
+    "text": "echo \"${x%'}\"\n@@TAIL@@\necho \"'}\"\n",
+    "measured": {
+      "bash": "-",
+      "zsh": "R",
+      "sh": "-",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "P3",
+    "label": "backtick starts with comment #'",
+    "text": "echo `#'`\n@@TAIL@@\necho '` # '\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "P7",
+    "label": "heredoc op inside $( ) closed on line",
+    "text": "x=$(cat <<EOF)\n@@TAIL@@\nEOF\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "P8",
+    "label": "dq subst holding case pattern",
+    "text": "echo \"$(case x in x) @@TAIL@@;; esac)\"\n",
+    "measured": {
+      "bash": "-!",
+      "zsh": "R",
+      "sh": "-!",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "P9",
+    "label": "exec -a name",
+    "text": "exec -a foo @@TAIL@@\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "P10",
+    "label": "command -p",
+    "text": "command -p @@TAIL@@\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "P12",
+    "label": "time -p",
+    "text": "time -p @@TAIL@@\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "-",
+      "sh": "R",
+      "agent": "-"
+    }
+  },
+  {
+    "id": "P19",
+    "label": "heredoc inside backticks, terminator before the closing backtick",
+    "text": "x=`cat <<EOF\nhello\nEOF`\n@@TAIL@@\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "R1",
+    "label": "control: backtick body with a statement before ((",
+    "text": "x=`:; ((1<<2))`\n@@TAIL@@\n2\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "R2",
+    "label": "control: $(( holding a nested (( then a space",
+    "text": "x=$(((1<<2)) )\n@@TAIL@@\n2\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "R3",
+    "label": "control: else then ((",
+    "text": "if false; then :; else ((1<<2)); fi\n@@TAIL@@\n2\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "R4",
+    "label": "control: $( then a spaced ((",
+    "text": "x=$( ((1<<2)) )\n@@TAIL@@\n2\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "R5",
+    "label": "control: |& then ((",
+    "text": "true |& ((1<<2))\n@@TAIL@@\n2\n",
+    "measured": {
+      "bash": "-!",
+      "zsh": "R",
+      "sh": "-!",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "S1",
+    "label": "comment holding an apostrophe, then the install",
+    "text": "# don't\n@@TAIL@@\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "S2",
+    "label": "trailing comment holding an apostrophe",
+    "text": "echo hi # it's\n@@TAIL@@\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "S3",
+    "label": "trailing comment holding a double quote",
+    "text": "echo hi # say \"hi\n@@TAIL@@\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "S4",
+    "label": "nested escaped backtick",
+    "text": "echo `echo \\`@@TAIL@@\\``\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "S5",
+    "label": "case arm",
+    "text": "case x in *) @@TAIL@@;; esac\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "S6",
+    "label": "case arm after a parenthesized pattern",
+    "text": "case x in (x) @@TAIL@@;; esac\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "X1",
+    "label": "dq-param quote then (( on the same line",
+    "text": "echo \"${x:-'}\" ; ((1<<2))\n@@TAIL@@\n2\necho \"'}\"\n",
+    "measured": {
+      "bash": "-",
+      "zsh": "R",
+      "sh": "-",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "X2",
+    "label": "dq-param quote then (( on the next line",
+    "text": "echo \"${x:-'}\"\n((1<<2))\n@@TAIL@@\n2\necho \"'}\"\n",
+    "measured": {
+      "bash": "-",
+      "zsh": "R",
+      "sh": "-",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "Y1",
+    "label": "cross: (( then the dq-param quote on the same line",
+    "text": "((1<<2)); echo \"${x:-'}\"\n@@TAIL@@\n2\necho \"'}\"\n",
+    "measured": {
+      "bash": "-",
+      "zsh": "R",
+      "sh": "-",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "Y2",
+    "label": "cross: (( then the dq-param quote on the next line",
+    "text": "((1<<2))\necho \"${x:-'}\"\n@@TAIL@@\n2\necho \"'}\"\n",
+    "measured": {
+      "bash": "-",
+      "zsh": "R",
+      "sh": "-",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "X3",
+    "label": "heredoc body: case pattern inside $( )",
+    "text": "cat <<EOF\n$(case x in x) @@TAIL@@;; esac)\nEOF\n",
+    "measured": {
+      "bash": "-!",
+      "zsh": "R",
+      "sh": "-!",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "X4",
+    "label": "heredoc body: substitution over lines",
+    "text": "cat <<EOF\n$(\n@@TAIL@@\n)\nEOF\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "X5",
+    "label": "heredoc body: escaped paren inside $( )",
+    "text": "cat <<EOF\n$(echo \\); @@TAIL@@)\nEOF\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "X6",
+    "label": "heredoc body: backtick over lines",
+    "text": "cat <<EOF\n`\n@@TAIL@@\n`\nEOF\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "X7",
+    "label": "dq subst: esac as a pattern word after |",
+    "text": "echo \"$(case x in *|esac) @@TAIL@@;; esac)\"\n",
+    "measured": {
+      "bash": "-!",
+      "zsh": "R",
+      "sh": "-!",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "X8",
+    "label": "dq subst: zsh ;| then *)",
+    "text": "echo \"$(case x in x) :;| *) @@TAIL@@;; esac)\"\n",
+    "measured": {
+      "bash": "-!",
+      "zsh": "R",
+      "sh": "-!",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "X9",
+    "label": "top: zsh ;| then *)",
+    "text": "case x in x) :;| *) @@TAIL@@;; esac\n",
+    "measured": {
+      "bash": "-!",
+      "zsh": "R",
+      "sh": "-!",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "X10",
+    "label": "heredoc body: comment inside $( ) then line",
+    "text": "cat <<EOF\n$(echo hi # )\n@@TAIL@@\n)\nEOF\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  }
+]
