@@ -516,16 +516,22 @@ do
 done
 pass "inert flag lands inside a script handed to a shell, and quoted data stays as written"
 
-# A script the rewrite cannot map -- double-quoted with an escape in it -- is a
-# recorded downgrade, never a command reported inert while an install in it
-# runs its scripts.
+# A script the rewrite cannot map -- double-quoted with a substitution in it --
+# is a recorded downgrade, never a command reported inert while an install in
+# it runs its scripts.
 downgrades_before=$(grep -c 'could not make every npm install in this command inert' "${tmp_root}/safe-compound/advisory.log" 2>/dev/null || true)
-inert_out=$(run_hook_command "${tmp_root}/home-compound" "${tmp_root}/safe-compound" 'npm install left-pad@1.3.0; sh -c "echo \"hi\"; npm install left-pad@1.3.0"')
+inert_out=$(run_hook_command "${tmp_root}/home-compound" "${tmp_root}/safe-compound" 'npm install left-pad@1.3.0; sh -c "echo $(date); npm install left-pad@1.3.0"')
 [[ -z "$(jq -r '.hookSpecificOutput.updatedInput.command // ""' <<< "${inert_out}")" ]] \
   || fail "a script the inert rewrite cannot map gets no partial rewrite"
 downgrades_after=$(grep -c 'could not make every npm install in this command inert' "${tmp_root}/safe-compound/advisory.log" 2>/dev/null || true)
 (( ${downgrades_after:-0} > ${downgrades_before:-0} )) || fail "a script the inert rewrite cannot map is recorded as a downgrade"
-pass "a script the inert rewrite cannot reach is a recorded downgrade"
+# One with an escaped quote in it is not read to its end by the payload reader
+# either, so the command is UNDECIDED before any rewrite is attempted.
+inert_out=$(run_hook_command "${tmp_root}/home-compound" "${tmp_root}/safe-compound" 'npm install left-pad@1.3.0; sh -c "echo \"hi\"; npm install left-pad@1.3.0"')
+[[ "$(jq -r '.hookSpecificOutput.permissionDecision // ""' <<< "${inert_out}")" == deny ]] \
+  && grep -q UNDECIDED <<< "${inert_out}" \
+  || fail "a script with an escaped quote the payload reader cannot finish is UNDECIDED"
+pass "a script the inert rewrite cannot reach is a recorded downgrade, or UNDECIDED when it cannot be read"
 
 # Finding #3: an `--prefix <dir>` install must be snapshotted/effect-gated against
 # the OVERRIDE dir, not cwd. The pending state's project_dir must be the prefix dir.

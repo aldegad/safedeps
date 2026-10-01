@@ -1054,33 +1054,86 @@ strip_heredoc_bodies() {
 # written after one passed with no verdict (caught in review). Callers strip,
 # once.
 extract_shell_c_payloads() {
-  local rest
-
-  rest="$1"
-  while [[ "${rest}" =~ (bash|sh|zsh)[[:space:]]+-[A-Za-z]*c[[:space:]]+\"([^\"]*)\" ]]; do
-    printf '%s\n' "${BASH_REMATCH[2]}"
-    rest="${rest#*"${BASH_REMATCH[0]}"}"
-  done
-
-  rest="$1"
-  while [[ "${rest}" =~ (bash|sh|zsh)[[:space:]]+-[A-Za-z]*c[[:space:]]+\'([^\']*)\' ]]; do
-    printf '%s\n' "${BASH_REMATCH[2]}"
-    rest="${rest#*"${BASH_REMATCH[0]}"}"
-  done
+  read_payload_words "$1" '(bash|sh|zsh)[[:space:]]+-[A-Za-z]*c[[:space:]]+'
 }
 
 extract_eval_payloads() {
-  local rest="$1"
+  read_payload_words "$1" '(^|[[:space:];|&])eval[[:space:]]+'
+}
 
-  while [[ "${rest}" =~ (^|[[:space:];|&])eval[[:space:]]+\"([^\"]*)\" ]]; do
-    printf '%s\n' "${BASH_REMATCH[2]}"
-    rest="${rest#*"${BASH_REMATCH[0]}"}"
-  done
-
-  rest="$1"
-  while [[ "${rest}" =~ (^|[[:space:];|&])eval[[:space:]]+\'([^\']*)\' ]]; do
-    printf '%s\n' "${BASH_REMATCH[2]}"
-    rest="${rest#*"${BASH_REMATCH[0]}"}"
+# The word after each <head> in <text>, read as a payload: a double-quoted word
+# up to its first `"`, or a single-quoted one up to its next `'`, printed one
+# per line.
+#
+# That is all this reader knows of the shell's quoting, so it says when the
+# word is something else. `sh -c "echo \"hi\"; pip install evil==1.0.0"` read
+# up to the first `"` is `echo \`, which installs nothing, and the install the
+# shell runs after it passed with no verdict -- and so did a word glued to more
+# quoting (`'echo hi'"; pip install ..."`), an ANSI-C word (`$'...'`) and an
+# unquoted word with escapes (`pip\ install\ evil==1.0.0`). A reader that cannot
+# read its input to the end marks a failed reading, and the gate settles it
+# (guard_settle_scan_failure): a command naming a package manager is then
+# UNDECIDED. Only a head in live code is held to this. A head inside quoted
+# text is data the shell does not run, and its payload is still read as before.
+#
+# Reading these words the way the shell does -- quotes removed, escapes
+# applied -- is the plan safedeps/command-words-read-as-the-shell-dequotes; this
+# is the floor under it.
+read_payload_words() {
+  local LC_ALL=C
+  local text="$1" head_re="$2" rest="$1" m pre off=0 word content after live="" unread
+  # Kept in variables: written inline, bash 3.2 and 5 read the backslashes
+  # differently.
+  local dq_re='^"([^"]*)"' sq_re="^'([^']*)'" odd_re='(^|[^\])(\\\\)*\\$' bare_re='^[^[:space:];&|)<>]*'
+  while [[ "${rest}" =~ ${head_re} ]]; do
+    m="${BASH_REMATCH[0]}"
+    pre="${rest%%"${m}"*}"
+    off=$(( off + ${#pre} + ${#m} ))
+    rest="${rest#*"${m}"}"
+    word="${rest}"
+    unread=false
+    content=""
+    after=""
+    case "${word:0:1}" in
+      '"')
+        if [[ "${word}" =~ ${dq_re} ]]; then
+          content="${BASH_REMATCH[1]}"
+          after="${word:${#BASH_REMATCH[0]}:1}"
+          # The `"` that ended it is escaped: the word goes on.
+          [[ "${content}" =~ ${odd_re} ]] && unread=true
+          printf '%s\n' "${content}"
+        else
+          unread=true
+        fi
+        ;;
+      "'")
+        if [[ "${word}" =~ ${sq_re} ]]; then
+          content="${BASH_REMATCH[1]}"
+          after="${word:${#BASH_REMATCH[0]}:1}"
+          printf '%s\n' "${content}"
+        else
+          unread=true
+        fi
+        ;;
+      '$') [[ "${word:1:1}" == "'" ]] && unread=true ;;
+      *)
+        [[ "${word}" =~ ${bare_re} ]]
+        [[ "${BASH_REMATCH[0]}" == *[\\\'\"]* ]] && unread=true
+        ;;
+    esac
+    # A quoted word glued to more of the same word.
+    case "${after}" in
+      ''|' '|$'\t'|$'\n'|';'|'&'|'|'|')'|'<'|'>') ;;
+      *) unread=true ;;
+    esac
+    [[ "${unread}" == true ]] || continue
+    if [[ -z "${live}" ]]; then
+      live=$(shell_lex "${text}" live arith "safedeps:read_payload_words"; printf 'X') || live="X"
+      live="${live%X}"
+    fi
+    # The head is live code when the live view kept it.
+    [[ "${live:$(( off - ${#m} )):${#m}}" == "${m}" ]] || continue
+    guard_mark_reading_failed
   done
 }
 

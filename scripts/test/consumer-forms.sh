@@ -158,7 +158,6 @@ pass "heredocs are stripped once and only real ones open"
 expect_pass "a herestring fed to sh"                  "sh <<< 'pip install evil==1.0.0'"
 expect_pass "a herestring fed to bash"                'bash <<<"pip install evil==1.0.0"'
 expect_pass "a heredoc fed straight to sh"            $'sh <<EOF\npip install evil==1.0.0\nEOF'
-expect_pass "sh -c nested in a same-quoted sh -c"     "sh -c 'sh -c '\\''pip install evil==1.0.0'\\'''"
 expect_pass "a shell built by xargs -I"               "echo 'pip install evil==1.0.0' | xargs -I{} sh -c '{}'"
 expect_pass "a shell built by xargs -0"               "printf 'pip install evil==1.0.0' | xargs -0 sh -c"
 expect_pass "a script written then run"               "printf 'pip install evil==1.0.0' > s.sh; sh s.sh"
@@ -166,6 +165,13 @@ expect_pass "eval nested inside sh -c"                "sh -c 'eval \"pip install
 expect_pass "a top-level command substitution"        '$(echo pip install evil==1.0.0)'
 expect_pass "a pipe to a quoted shell name"           "printf 'pip install evil==1.0.0' | \"sh\""
 pass "command gate leaves the unenumerated carriers unjudged (documented boundary)"
+
+# A `sh -c` nested in a same-quoted one used to be in the list above: its
+# payload word is `'sh -c '\''pip ...'\'''`, which the payload reader reads only
+# up to the first `'`. A reader that cannot finish its word now says so
+# (section 10b), so the form is UNDECIDED. It is not judged as the install it
+# runs; that is the plan safedeps/command-words-read-as-the-shell-dequotes.
+expect_undecided "sh -c nested in a same-quoted sh -c"  "sh -c 'sh -c '\\''pip install evil==1.0.0'\\'''"
 
 # For npm the miss is DELAYED detection, not a miss: the effect gate's recognizer
 # is a raw grep with no carrier enumeration, so it fires on the same text the
@@ -258,6 +264,11 @@ do
   reaches_package_manager "${decoy}" \
     && fail "form is a decoy and must not be counted as a gap: ${decoy}"
 done
+# The first decoy costs an UNDECIDED all the same. Its payload word goes on
+# past the quote the reader stops at, and a reader that cannot finish its word
+# cannot tell this decoy from the forms in section 10b that do install. That is
+# the price of the floor, paid in the safe direction.
+expect_undecided "the doubly quoted sh -c decoy" 'sh -c "sh -c "pip install evil==1.0.0""'
 pass "decoy forms never reach a package manager (not gaps, nothing to catch)"
 
 # --- 4. The false-positive corpus stays allowed -------------------------------
@@ -1128,6 +1139,34 @@ pass "quotes, redirections and statement cuts are read by the one lexer, and eac
 expect_undecided "an ANSI-C \\u escape in a spec" $'pip install $\'ev\\u0069l==1.0.0\''
 expect_undecided "an ANSI-C NUL in a spec" $'pip install $\'evil\\0==1.0.0\''
 pass "an escape the extractor cannot name is a failed reading, not another word"
+
+# The floor under the payload readers. `sh -c` and `eval` payloads are read as
+# one quoted word, up to the first matching quote; a word that does not end
+# there -- an escaped quote inside it, more quoting glued to it, an ANSI-C word,
+# an unquoted word with escapes -- used to be read as far as it went, and the
+# install the shell runs after it passed with no verdict (every form below was
+# measured, with a stand-in for the manager, to run the install). The reader
+# now marks the reading failed and the command is UNDECIDED. Reading those
+# words the way the shell does is the plan
+# safedeps/command-words-read-as-the-shell-dequotes.
+for payload_form in \
+  'sh -c "echo \"hi\"; pip install evil==1.0.0"' \
+  'bash -c "x=\"a\"; cargo install evil --version 1.0.0"' \
+  'eval "echo \"hi\"; pip install evil==1.0.0"' \
+  $'sh -c \'echo hi\'"; pip install evil==1.0.0"' \
+  $'sh -c $\'pip install evil==1.0.0\'' \
+  'sh -c pip\ install\ evil==1.0.0' \
+  'sh -c "pip install "evil==1.0.0' \
+  $'bash -c \'echo \'\\\'\'hi\'\\\'\'; pip install evil==1.0.0\''
+do
+  expect_undecided "a payload word its reader cannot finish: ${payload_form}" "${payload_form}"
+done
+# Controls: a payload read to its end is judged as before, and a head inside
+# quoted text is data, not a payload the shell runs.
+expect_prescription 'pypi evil@1.0.0;' 'sh -c "pip install evil==1.0.0"'
+expect_prescription 'pypi evil@1.0.0;' $'echo \'sh -c "pip install evil==1.0.0"\''
+expect_pass "a quoted mention of sh -c with escaped quotes" $'git commit -m \'run sh -c "npm test -- \\"x\\""\''
+pass "a payload word its reader cannot read to the end is UNDECIDED, not read as no install"
 
 # --- 11. The UNGATED record names each operand the gate did not check ---------
 # The record used to be a second parser: it read each statement on its own and
