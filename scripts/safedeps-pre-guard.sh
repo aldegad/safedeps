@@ -1285,15 +1285,18 @@ inert_verb_ends() {
 inert_payload_spans() {
   local command="$1" scan heads
   scan=$(command_scan_text "${command}") || return 1
+  # The grep and the awk run apart, as in inert_verb_ends: under pipefail a grep
+  # that found no head failed the pipeline, and "no script handed to a shell"
+  # read as a failed reading.
   heads=$(printf '%s\n' "${scan}" \
-    | LC_ALL=C judge_grep -obE "(^|[^[:alnum:]_.-])((bash|sh|zsh|dash)[[:space:]]+-[A-Za-z]*c|eval)([[:space:]]|\$)" \
-    | LC_ALL=C awk '
+    | LC_ALL=C judge_grep -obE "(^|[^[:alnum:]_.-])((bash|sh|zsh|dash)[[:space:]]+-[A-Za-z]*c|eval)([[:space:]]|\$)") || heads=""
+  [[ -n "${heads}" ]] || return 0
+  heads=$(printf '%s\n' "${heads}" | LC_ALL=C awk '
       # safedeps:inert_payload_spans (scripts/measure/scan-failure-census.sh keys on this line)
       { c = index($0, ":"); printf "%d ", substr($0, 1, c - 1) + length(substr($0, c + 1)) }') || {
     [[ -z "${SAFEDEPS_SCAN_MARK:-}" ]] || printf 'failed\n' >> "${SAFEDEPS_SCAN_MARK}"
     return 1
   }
-  [[ -n "${heads// /}" ]] || return 0
   if ! printf '%s' "${command}" | LC_ALL=C awk -v heads="${heads}" '
     # safedeps:inert_payload_spans (scripts/measure/scan-failure-census.sh keys on this line)
     { X = X (NR > 1 ? "\n" : "") $0 }
