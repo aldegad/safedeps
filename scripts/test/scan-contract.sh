@@ -393,10 +393,12 @@ code_view() { shell_lex "$1" code arith "safedeps:scan-contract"; }
 noredir_view() { shell_lex "$1" noredir arith "safedeps:scan-contract"; }
 scan_view_sub() { shell_lex "$1" scan sub "safedeps:scan-contract"; }
 code_view_sub() { shell_lex "$1" code sub "safedeps:scan-contract"; }
+stmts_view() { shell_lex "$1" stmts arith "safedeps:scan-contract"; }
+stmts_view_sub() { shell_lex "$1" stmts sub "safedeps:scan-contract"; }
 property_failures=0
 check_view_properties() { # input label
   local x="$1" v once twice
-  for v in scan_view code_view noredir_view scan_view_sub code_view_sub; do
+  for v in scan_view code_view noredir_view stmts_view scan_view_sub code_view_sub stmts_view_sub; do
     # Not through capture: the outer $(...) would strip a trailing newline
     # from the view and read as a length change the lexer did not make.
     once=$("${v}" "${x}"; printf 'X'); once="${once%X}"
@@ -431,7 +433,92 @@ for ((c = 0; c < fuzz_cases; c++)); do
   check_view_properties "${input}" "random ${c}"
 done
 [[ ${property_failures} -eq 0 ]] || fail "view properties: ${property_failures} violation(s) (seed ${fuzz_seed})"
-pass "view properties: scan, code and noredir keep length and are idempotent on ${form_count} shell forms and ${fuzz_cases} random inputs"
+pass "view properties: scan, code, noredir and stmts keep length and are idempotent on ${form_count} shell forms and ${fuzz_cases} random inputs"
+
+# --- the statement starts (the stmts view) ---------------------------------------
+# The install recognizers and command_statements read the stmts view, where
+# every place a command starts is a `;`: a case pattern close, and the blank
+# before a word that stands where the shell reads a command. The lexer decides
+# those from the shell grammar (starts() in shell_lex), so SAFEDEPS_G_START
+# knows only separators. The scan view is not touched: a prototype that wrote
+# the starts into it broke its idempotence, because a redirection target read
+# again stood at a command start. The rules, each as a literal:
+#
+#   1. Length is kept, and the view is idempotent (the property check above).
+#   2. Only a top-level blank becomes a start. None falls inside quotes, a
+#      substitution, an arithmetic context or a heredoc body.
+#   3. A `;` `&` `|` at the top of an arithmetic context is `_`: it ends no
+#      statement (`for ((i=0;i<1;i++)) {` was cut at its `;`, and the install in
+#      the body read as no statement start). Inside a `$(...)` there it is a
+#      command substitution's, and stays.
+#   4. An assignment or a redirection before a command is part of it, so no
+#      start falls between them and the command, and the word after a
+#      redirection operator is its target, never a command. Splitting
+#      `npm_config_global=true npm install x` there dropped its UNGATED record.
+#   5. Everything else is the scan view, byte for byte.
+check_stmts() { # label input expected
+  local got
+  got=$(capture stmts_view "$2")
+  [[ "${got}" == "$3" ]] || fail "stmts view: $1: [${got}] != expected [$3]"
+}
+check_stmts "a reserved word opens a statement" \
+  'if true; then pip i; fi' 'if;true; then;pip i; fi'
+check_stmts "a function head opens its body" \
+  'f() { pip i; }; f' 'f();{;pip i; }; f'
+check_stmts "a function with more than one name" \
+  'function f g { pip i; }' 'function f g {;pip i; }'
+check_stmts "coproc NAME opens its body" \
+  'coproc foo { pip i; }' 'coproc;foo {;pip i; }'
+check_stmts "a case pattern close is a start" \
+  'case x in x) { pip i; };; esac' 'case x in x; {;pip i; };; esac'
+check_stmts "time and its options" \
+  'time -p pip i' 'time -p;pip i'
+check_stmts "the zsh short forms" \
+  'for i (1) pip i; repeat 1 pip i; if [[ 1 ]] pip i' 'for i (1);pip i; repeat 1;pip i; if;[[ 1 ]];pip i'
+check_stmts "an argument that spells a reserved word opens nothing" \
+  'echo { pip i }; echo then pip i; echo ! pip i' 'echo { pip i }; echo then pip i; echo ! pip i'
+check_stmts "no start inside quotes" \
+  'echo "then pip i" '"'"'{ pip i'"'" "echo$(sp 23)"
+check_stmts "no start inside a substitution" \
+  'echo $(if x; then pip i; fi)' 'echo $(if x; then pip i; fi)'
+check_stmts "no start inside a heredoc body" \
+  $'cat <<E\nthen pip i\nE' $'cat    \n'"$(sp 12)"
+check_stmts "an arithmetic separator ends nothing" \
+  'for ((i=0;i<1;i++)) { pip i; }' 'for ((i=0_i<1_i++)) {;pip i; }'
+check_stmts "a substitution inside arithmetic keeps its separators" \
+  'echo $(( $(true; pip i) ))' 'echo $(( $(true; pip i) ))'
+check_stmts "an assignment stays with its command" \
+  'if FOO=1 BAR=2 pip i; fi' 'if;FOO=1 BAR=2 pip i; fi'
+check_stmts "a redirection stays with its command, and its target is no command" \
+  '! > then 2>&1 pip i' '! > then 2>&1 pip i'
+check_stmts "a process substitution opens a command, an argument after it does not" \
+  'cat <(echo hi) pip i' 'cat <(echo hi) pip i'
+pass "stmts view: statement starts follow the shell grammar, and nothing nested opens one"
+
+# Rule 5 on random input: where the stmts view differs from the scan view, the
+# byte is a start written over a blank or a case close, or an arithmetic
+# separator written as `_`.
+stmts_diffs=0
+RANDOM="${fuzz_seed}"
+for ((c = 0; c < fuzz_cases; c++)); do
+  len=$((RANDOM % 40))
+  input=""
+  for ((k = 0; k < len; k++)); do
+    input+="${heredoc_alphabet[RANDOM % ${#heredoc_alphabet[@]}]}"
+  done
+  sv=$(capture scan_view "${input}"); tv=$(capture stmts_view "${input}")
+  LC_ALL=C
+  for ((k = 0; k < ${#sv}; k++)); do
+    a="${sv:k:1}" b="${tv:k:1}" r="${input:k:1}"
+    [[ "${a}" == "${b}" ]] && continue
+    if [[ "${b}" == ";" && ( "${r}" == " " || "${r}" == $'\t' || "${r}" == ")" ) ]] || [[ "${b}" == "_" && "${a}" =~ [\;\&\|] ]]; then continue; fi
+    printf 'stmts differs from scan at %d of [%q]: scan [%q] stmts [%q]\n' "${k}" "${input}" "${a}" "${b}" >&2
+    stmts_diffs=$((stmts_diffs + 1))
+  done
+  unset LC_ALL
+done
+[[ ${stmts_diffs} -eq 0 ]] || fail "stmts view: ${stmts_diffs} byte(s) differ from the scan view outside the stated rules (seed ${fuzz_seed})"
+pass "stmts view: on ${fuzz_cases} random inputs it differs from the scan view only by starts and arithmetic separators"
 
 # --- the words the spec extractor reads -----------------------------------------
 # The pieces view hands the extractor each statement's words: redirections out,

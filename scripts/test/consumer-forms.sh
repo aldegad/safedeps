@@ -76,7 +76,10 @@ gate_reason() {
   out=$(jq -nc --arg c "$1" --arg cwd "${project_dir}" \
     '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
     HOME="${tmp_root}/home" SAFEDEPS_HOME="${safe}" scripts/safedeps-pre-guard.sh 2>/dev/null)
-  jq -r '(.hookSpecificOutput.permissionDecision // "pass") + " " + (.hookSpecificOutput.permissionDecisionReason // "")' <<< "${out:-{\}}"
+  # No output is a pass. Written as a `${out:-...}` default the empty object
+  # kept its backslash, and jq failed on the first pass it was handed.
+  [[ -n "${out}" ]] || out='{}'
+  jq -r '(.hookSpecificOutput.permissionDecision // "pass") + " " + (.hookSpecificOutput.permissionDecisionReason // "")' <<< "${out}"
 }
 
 # An UNDECIDED deny: the gate could not finish reading the command, and says so
@@ -519,6 +522,170 @@ do
   expect_deny "the install spelled ${grammar_form}" "${grammar_form}"
 done
 pass "aliases, options, versioned interpreters, runners, statement positions and quoted specs are all gated"
+
+# A function body opens a statement: `{` after `f()`, `f ()` or `function f`.
+# Narrowing `{` to statement starts dropped it (caught in review); `)` alone
+# still opens nothing.
+for fn in \
+  'f() { pip install evil==1.0.0; }; f' \
+  'function f { pip install evil==1.0.0; }; f' \
+  'function f() { pip install evil==1.0.0; }; f' \
+  'f () { cargo add serde@1.0.0; }; f' \
+  'f() { npm install evil@1.0.0; }; f' \
+  'if true; then f() { pip install evil==1.0.0; }; f; fi' \
+  'for i in 1; do f() { pip install evil==1.0.0; }; f; done' \
+  'while f() { pip install evil==1.0.0; }; f; do break; done' \
+  '{ f() { pip install evil==1.0.0; }; f; }' \
+  'f() { g() { pip install evil==1.0.0; }; g; }; f' \
+  'a/b() { pip install evil==1.0.0; }; a/b' \
+  'f@x() { pip install evil==1.0.0; }; f@x' \
+  'f ( ) { pip install evil==1.0.0; }; f' \
+  '() { pip install evil==1.0.0; }' \
+  'function { pip install evil==1.0.0; }' \
+  'f() pip install evil==1.0.0; f'
+do
+  expect_deny "an install in a function body: ${fn}" "${fn}"
+done
+expect_pass "a parenthesized value before a command name opens no statement" 'echo $(date) pip install x'
+expect_pass "a function definition echoed as text is data" 'echo "f() { pip install x; }"'
+expect_pass "a function body with no install" 'f() { npm run build; }; f'
+expect_pass "the word function as an argument opens nothing" 'echo function f { pip install x; }'
+expect_pass "a nameless function without its brace is no function" 'function pip install x'
+pass "an install in a function body is gated"
+
+# Where a statement starts is the lexer's to say (starts() in shell_lex), and
+# SAFEDEPS_G_START knows only separators. A regex chain of the words before a
+# command could not see the state that puts a command at a word, and three
+# review rounds each found the next form it missed. These are the forms the
+# judgment that replaced it measured (safedeps/statement-starts-from-the-lexer):
+# each runs its install in at least one of bash 3.2, bash 5, zsh, sh and dash,
+# and each must be read as an install whose spec is checked -- "not approved",
+# not a deny for some other reason, which would hide a statement start that was
+# never read.
+expect_not_approved() {
+  local label="$1" command="$2" got
+  got=$(gate_reason "${command}")
+  [[ "${got}" == "deny "*"install not approved"* ]] || fail "${label} is read as an install and its spec checked (got: ${got:0:120})"
+}
+for start_form in \
+  'case x in x) { pip install evil==1.0.0; };; esac' \
+  'case x in (x) { pip install evil==1.0.0; };; esac' \
+  'time -p { pip install evil==1.0.0; }' \
+  'for i (1) { pip install evil==1.0.0; }' \
+  'repeat 1 { pip install evil==1.0.0; }' \
+  'f g() { pip install evil==1.0.0; }; f' \
+  'function f g { pip install evil==1.0.0; }; f' \
+  '{ true; } always { pip install evil==1.0.0; }' \
+  'coproc foo { pip install evil==1.0.0; }; wait' \
+  $'foreach i (1)\npip install evil==1.0.0\nend' \
+  'for ((i=0;i<1;i++)) { pip install evil==1.0.0; }' \
+  'pip install evil==1.0.0' \
+  'f() { pip install evil==1.0.0; }; f' \
+  'for ((i=(0);i<1;i++)) { pip install evil==1.0.0; }' \
+  "repeat '1' { pip install evil==1.0.0; }" \
+  'for i ($(echo 1)) { pip install evil==1.0.0; }' \
+  'for i (1) pip install evil==1.0.0' \
+  'repeat 1 pip install evil==1.0.0' \
+  'while ((i++<1)) { pip install evil==1.0.0; }' \
+  'if [[ 1 ]] pip install evil==1.0.0' \
+  'case x in x) pip install evil==1.0.0;; esac' \
+  'case x in x) case y in y) { pip install evil==1.0.0; };; esac;; esac' \
+  'coproc { pip install evil==1.0.0; }; wait' \
+  'repeat 1 repeat 1 { pip install evil==1.0.0; }' \
+  'for i (1) for j (1) { pip install evil==1.0.0; }' \
+  'f g () pip install evil==1.0.0; f' \
+  'function f g () { pip install evil==1.0.0; }; f' \
+  'time -p pip install evil==1.0.0' \
+  'repeat $((1)) { pip install evil==1.0.0; }' \
+  "'f'() { pip install evil==1.0.0; }; f" \
+  $'for i (1) {\npip install evil==1.0.0\n}' \
+  $'case x in\nx) { pip install evil==1.0.0; };;\nesac' \
+  'for i in 1; { pip install evil==1.0.0; }' \
+  'if true; then { pip install evil==1.0.0; }; fi' \
+  'time { pip install evil==1.0.0; }' \
+  '! { pip install evil==1.0.0; }'
+do
+  expect_not_approved "an install at a statement start: ${start_form}" "${start_form}"
+done
+# zsh reads `case x {` as a case; the lexer reads a case that never closes, so
+# the gate cannot finish reading it and says so. Fail-closed, not a finding.
+expect_undecided "a zsh brace case" 'case x { (x) { pip install evil==1.0.0; } ;; }'
+expect_deny "a brace group echoed into a shell" 'echo { pip install evil\; } | sh'
+# The same words where no command starts. Each is data in every shell measured.
+for not_a_start in \
+  'echo "f() { pip install evil==1.0.0; }"' \
+  'echo $(date) pip install evil==1.0.0' \
+  'function pip install x' \
+  'echo { pip install x }' \
+  'echo repeat 1 pip install x' \
+  'echo time -p pip install x' \
+  'git commit -m "case x in x) { pip install x; };; esac"' \
+  'cat <(echo hi) pip install x' \
+  'echo always { pip install x }' \
+  "printf '%s\\n' 'for i (1) { pip install x; }'" \
+  'echo then pip install x' \
+  'echo function f { pip install x; }' \
+  'f() { npm run build; }; f' \
+  'echo ! pip install x' \
+  "grep -E '(a|b) { pip install' f" \
+  'echo for i in 1; do echo pip install x; done' \
+  'coproc foo pip install evil==1.0.0; wait'
+do
+  expect_pass "words that open no statement: ${not_a_start}" "${not_a_start}"
+  if logged_ungated "${not_a_start}"; then fail "words that open no statement leave no UNGATED record: ${not_a_start}"; fi
+done
+# zsh reads `echo () pip install x` as a definition of a function named echo,
+# so the install words are a function body there. It is recorded, as it was
+# before the lexer read statement starts.
+expect_pass "a zsh function named echo" 'echo () pip install x'
+logged_ungated 'echo () pip install x' || fail "a zsh function named echo is recorded"
+
+# Four ways a statement-start reader went wrong while this was built, pinned.
+# An assignment is part of its command. A start between them took the
+# assignment off the install, and the UNGATED record of a global install went.
+for assigned in \
+  'if true; then npm_config_global=true npm install evil; fi' \
+  '{ npm_config_global=true npm install evil; }' \
+  'f() { npm_config_global=true npm install evil; }; f'
+do
+  logged_ungated "${assigned}" || fail "an assignment stays with its install at a statement start: ${assigned}"
+done
+# A start is written into a view of its own, never over the bytes another
+# reader matches: written into the scan view, `| { sh; }` became `| {;sh; }`
+# and the pipe into a shell was no longer one.
+expect_deny "a pipe into a brace group in a function body" "f() { printf 'pip install evil==1.0.0' | { sh; }; }; f"
+# The `{` after a function name list is the start, however many names.
+expect_not_approved "a function with three names" 'function f g h { pip install evil==1.0.0; }; f'
+# The first `(` of an arithmetic word is a separator to the word walk, so the
+# word starts at the second one; matched as `((` the test before a body was
+# read as a command, and the body opened nothing. And a separator at the top of
+# the arithmetic cuts no statement.
+expect_not_approved "a body after an arithmetic test" 'if ((1)) { pip install evil==1.0.0; }'
+expect_not_approved "an empty arithmetic for" 'for (( ; ; )) { pip install evil==1.0.0; break; }'
+pass "statement starts are read from the shell grammar, and the same words in an argument open nothing"
+
+# The inert rewrite reaches an npm install at every new start. Measured on the
+# release before this: the zsh `for i (1)` form got no rewrite and no verdict,
+# so its lifecycle scripts ran.
+gate_rewrite() {
+  local safe
+  safe=$(mktemp -d "${tmp_root}/safe.XXXXXX")
+  jq -nc --arg c "$1" --arg cwd "${project_dir}" \
+    '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
+    HOME="${tmp_root}/home" SAFEDEPS_HOME="${safe}" scripts/safedeps-pre-guard.sh 2>/dev/null |
+    jq -r '.hookSpecificOutput.updatedInput.command // ""'
+}
+for inert_form in \
+  'time -p { npm install evil; }' \
+  'case x in x) { npm install evil; };; esac' \
+  'for i (1) { npm install evil; }' \
+  'f() { npm install evil; }; f' \
+  'for ((i=0;i<1;i++)) { npm install evil; }'
+do
+  [[ "$(gate_rewrite "${inert_form}")" == "${inert_form/npm install/npm install --ignore-scripts}" ]] \
+    || fail "an npm install at a statement start gets --ignore-scripts: ${inert_form} (got: $(gate_rewrite "${inert_form}"))"
+done
+pass "the inert rewrite reaches an npm install at every statement start"
 
 # An assignment prefix is one word however its value is quoted or nested. The
 # prefix stripper read a value as the bytes up to the first blank or quote, so
