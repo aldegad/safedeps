@@ -886,13 +886,24 @@ command_needs_inplace_inert() {
 # unknown. Reading the blanked text instead turned `--prefix "/tmp/x y" pkg`
 # into `--prefix pkg` and sent the gate to <cwd>/pkg (caught in review). The two
 # texts line up byte for byte because command_scan_text preserves length.
+#
+# When the statements cannot be read (awk failed, or no temp file), this says
+# so in SAFEDEPS_SCAN_MARK and adds a line whose <before> is `?`. The lines
+# before it may be a partial reading, so the caller treats the whole command as
+# landing somewhere it cannot name.
 command_statements() {
   local raw_file scan_file
-  raw_file=$(mktemp "${TMPDIR:-/tmp}/safedeps-stmt-raw.XXXXXX") || return 0
-  scan_file=$(mktemp "${TMPDIR:-/tmp}/safedeps-stmt-scan.XXXXXX") || { rm -f "${raw_file}"; return 0; }
+  raw_file=$(mktemp "${TMPDIR:-/tmp}/safedeps-stmt-raw.XXXXXX") \
+    && scan_file=$(mktemp "${TMPDIR:-/tmp}/safedeps-stmt-scan.XXXXXX") || {
+      rm -f "${raw_file:-}"
+      [[ -z "${SAFEDEPS_SCAN_MARK:-}" ]] || printf 'failed\n' >> "${SAFEDEPS_SCAN_MARK}"
+      printf '?\t\t\t\n'
+      return 0
+    }
   printf '%s' "$1" > "${raw_file}"
   command_scan_text "$1" > "${scan_file}"
-  LC_ALL=C awk -v scan_file="${scan_file}" -v raw_file="${raw_file}" '
+  if ! LC_ALL=C awk -v scan_file="${scan_file}" -v raw_file="${raw_file}" '
+    # safedeps:command_statements (scripts/measure/scan-failure-census.sh keys on this line)
     function slurp(f,   out, line, count) {
       out = ""; count = 0
       while ((getline line < f) > 0) out = out (count++ ? "\n" : "") line
@@ -955,7 +966,10 @@ command_statements() {
         cur = cur ch
       }
       emit("end", n)
-    }'
+    }'; then
+    [[ -z "${SAFEDEPS_SCAN_MARK:-}" ]] || printf 'failed\n' >> "${SAFEDEPS_SCAN_MARK}"
+    printf '?\t\t\t\n'
+  fi
   rm -f "${raw_file}" "${scan_file}"
 }
 
@@ -982,10 +996,15 @@ guard_literal_dir() {
 # case-sensitive (`GLOBAL=true` did nothing), the last line wins, a key with no
 # `=` is set, an unquoted value ends at `;` or `#`, and one pair of quotes is
 # removed. A key under a `[section]` header is not a top-level key.
+#
+# `?` when the file is there and could not be read: awk failed, which is also
+# written to SAFEDEPS_SCAN_MARK. An empty answer would read as "not set", and
+# that is the answer that lets an install off the record count as recorded.
 guard_npmrc_value() {
   local file="$1" key="$2"
   [[ -f "${file}" && -r "${file}" ]] || return 0
   awk -v key="${key}" -v q="'" '
+    # safedeps:guard_npmrc_value (scripts/measure/scan-failure-census.sh keys on this line)
     /^[[:space:]]*\[/ { exit }
     {
       line = $0
@@ -1007,7 +1026,10 @@ guard_npmrc_value() {
       last = v
     }
     END { if (found) printf "=%s", last }
-  ' "${file}" 2>/dev/null || true
+  ' "${file}" 2>/dev/null || {
+    [[ -z "${SAFEDEPS_SCAN_MARK:-}" ]] || printf 'failed\n' >> "${SAFEDEPS_SCAN_MARK}"
+    printf '?'
+  }
 }
 
 # Why an npm install into <dir> is not recorded where the effect gate reads it,
@@ -1040,6 +1062,10 @@ guard_npmrc_unrecorded() {
   for key in location global; do
     source="${project_rc}"
     value=$(guard_npmrc_value "${project_rc}" "${key}")
+    if [[ "${value}" == "?" ]]; then
+      printf '%s could not be read, so safedeps cannot tell whether npm records this install where the effect gate reads it' "${source}"
+      return 0
+    fi
     if [[ -z "${value}" ]]; then
       if [[ "${user_rc}" == "?" ]]; then
         undecided=true
@@ -1047,6 +1073,10 @@ guard_npmrc_unrecorded() {
       fi
       source="${user_rc}"
       value=$(guard_npmrc_value "${user_rc}" "${key}")
+      if [[ "${value}" == "?" ]]; then
+        printf '%s could not be read, so safedeps cannot tell whether npm records this install where the effect gate reads it' "${source}"
+        return 0
+      fi
     fi
     [[ -n "${value}" ]] || continue
     value="${value#=}"
@@ -1068,7 +1098,8 @@ guard_npmrc_unrecorded() {
 
 # Where each install statement in the command lands, one line per statement, as
 # `<kind>\t<dir>\t<why>`. <kind> is `npm` for an npm CLI install that is not a
-# runner and `other` for every other install. <dir> is an absolute path,
+# runner, `other` for every other install, and `?` when the statements could
+# not be read at all. <dir> is an absolute path,
 # `global`, or `?` when the text does not say. <why> is empty unless an .npmrc
 # keeps the install off the record, and then it names the file and the setting.
 #
@@ -1114,6 +1145,10 @@ resolve_install_targets() {
   command_scan_text "${text}" | grep -qEi 'npm_config_userconfig=' && env_userconfig=true
 
   while IFS=$'\t' read -r before stmt after words; do
+    if [[ "${before}" == "?" ]]; then
+      printf '?\t?\tthe command could not be split into statements (awk failed), so safedeps cannot tell where its installs land\n'
+      continue
+    fi
     [[ -n "${words}" ]] || continue
     IFS=$'\037' read -ra toks <<< "${words}"
     [[ ${#toks[@]} -gt 0 ]] || continue
