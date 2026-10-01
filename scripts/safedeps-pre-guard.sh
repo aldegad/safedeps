@@ -1354,7 +1354,7 @@ inert_rewrite_in_place() {
 # the mark is what keeps a failure from reading as "no statements", which reads
 # as "no install".
 command_statements() {
-  local raw_file scan_file
+  local policy="${2:-arith}" raw_file scan_file
   raw_file=$(mktemp "${TMPDIR:-/tmp}/safedeps-stmt-raw.XXXXXX") \
     && scan_file=$(mktemp "${TMPDIR:-/tmp}/safedeps-stmt-scan.XXXXXX") || {
       rm -f "${raw_file:-}"
@@ -1363,7 +1363,7 @@ command_statements() {
       return 0
     }
   printf '%s' "$1" > "${raw_file}"
-  command_scan_text "$1" > "${scan_file}"
+  shell_lex "$1" scan "${policy}" "safedeps:command_scan_text" > "${scan_file}"
   if ! LC_ALL=C awk -v scan_file="${scan_file}" -v raw_file="${raw_file}" '
     # safedeps:command_statements (scripts/measure/scan-failure-census.sh and scripts/test/scan-contract.sh key on this line)
     function slurp(f,   out, line, count) {
@@ -1632,17 +1632,42 @@ guard_npmrc_unrecorded() {
 # effect gate looks; the PostToolUse hook then looks for this command's install
 # trace there, and an install that left none is recorded UNGATED. A wrong
 # answer here costs a record, never a silent pass.
+#
+# Where bash and zsh read the command differently (shell_lex's axes), each
+# reading is resolved on its own, from the same cwd, and its statements follow
+# the first reading's. The readings used to be joined into one text and split
+# again under the first reading's policy, so a context the first reading left
+# open (`((` holding `<<`) swallowed the reading appended after it, and an
+# install only the zsh reading exposes yielded no statement, no spec and no
+# record (caught when the lexer and the extractor met in the release tree).
 resolve_install_targets() {
-  local cmd="$1" cwd="$2"
-  local text before stmt after words raw head target want kind manager tok value normalized in_env skip
+  local cmd="$1" cwd="$2" stripped flags policy first
+  stripped=$(strip_heredoc_bodies "${cmd}")
+  if ! flags=$(mktemp "${TMPDIR:-/tmp}/safedeps-lex.XXXXXX" 2>/dev/null); then
+    flags=""
+    guard_mark_reading_failed
+  fi
+  first=$(SAFEDEPS_LEX_FLAGS="${flags}" shell_lex "${stripped}" joined arith "safedeps:join_line_continuations")
+  resolve_reading_targets "${first}" "${cwd}" arith
+  for policy in $(lex_other_readings "${flags}"); do
+    resolve_reading_targets "$(shell_lex "${stripped}" joined "${policy}" "safedeps:join_line_continuations")" "${cwd}" "${policy}"
+  done
+  [[ -z "${flags}" ]] || rm -f "${flags}"
+  return 0
+}
+
+# One reading's statements and where each lands (see resolve_install_targets).
+# <text> is the joined view of the command under <policy>.
+resolve_reading_targets() {
+  local text="$1" cwd="$2" policy="${3:-arith}"
+  local before stmt after words raw head target want kind manager tok value normalized in_env skip
   local user_rc cli_global_off why run_dir answer local_prefix npm_word npm_unknown i
   local dir="${cwd}" grouped=false env_userconfig=false exports_unknown=""
   local npm_until="" here cond_dir="" depth=0 conditional
   local -a toks=() npm_env=() npm_args=() npm_exports=()
 
-  text=$(join_line_continuations "$(strip_heredoc_bodies "${cmd}")")
-  command_scan_text "${text}" | grep -q '[(){}`]' && grouped=true
-  command_scan_text "${text}" | grep -qEi 'npm_config_userconfig=' && env_userconfig=true
+  shell_lex "${text}" scan "${policy}" "safedeps:command_scan_text" | judge_grep -q '[(){}`]' && grouped=true
+  shell_lex "${text}" scan "${policy}" "safedeps:command_scan_text" | judge_grep -qEi 'npm_config_userconfig=' && env_userconfig=true
 
   while IFS=$'\035' read -r before stmt after words raw; do
     if [[ "${before}" == "?" ]]; then
@@ -1935,7 +1960,7 @@ resolve_install_targets() {
       break
     done
     printf '%s\035%s\035%s\035%s\n' "${kind}" "${target}" "${why}" "${raw}"
-  done < <(command_statements "${text}")
+  done < <(command_statements "${text}" "${policy}")
   return 0
 }
 
@@ -1967,20 +1992,49 @@ resolve_install_targets() {
 # A writer is an npm statement whose subcommand writes a lockfile or may:
 # everything but the subcommands below, which only read, run or publish. An
 # unknown subcommand is a writer, so a misreading costs a record.
+#
+# Where bash and zsh read the command differently, each reading is judged on
+# its own, the way resolve_install_targets resolves them, and the first reason
+# any reading gives is the answer. Counting across readings would count a
+# statement both readings share twice, and would split them under the first
+# reading's policy, which is the defect resolve_install_targets had (A1).
 guard_npm_writers_unattributable() {
   local cmd="$1"
-  local text before stmt words payload npm_at sub tok i scan writers=0 payloads=0
-  local first_writer="" pending_between="" between="" moved="" n=0
-  local -a toks=()
-
-  text=$(join_line_continuations "$(strip_heredoc_bodies "${cmd}")")
+  local stripped payload payloads=0 flags policy reason
+  stripped=$(strip_heredoc_bodies "${cmd}")
 
   while IFS= read -r payload; do
     [[ -n "${payload}" ]] || continue
     if command_scan_text "${payload}" | judge_grep -qEi "${SAFEDEPS_G_NPM_INSTALL_RE}"; then
       payloads=$(( payloads + 1 ))
     fi
-  done < <(command_payload_texts "${text}")
+  done < <(command_payload_texts "$(join_line_continuations "${stripped}")")
+
+  if ! flags=$(mktemp "${TMPDIR:-/tmp}/safedeps-lex.XXXXXX" 2>/dev/null); then
+    flags=""
+    guard_mark_reading_failed
+  fi
+  reason=$(guard_reading_writers_unattributable \
+    "$(SAFEDEPS_LEX_FLAGS="${flags}" shell_lex "${stripped}" joined arith "safedeps:join_line_continuations")" \
+    arith "${payloads}")
+  if [[ -z "${reason}" ]]; then
+    for policy in $(lex_other_readings "${flags}"); do
+      reason=$(guard_reading_writers_unattributable \
+        "$(shell_lex "${stripped}" joined "${policy}" "safedeps:join_line_continuations")" "${policy}" "${payloads}")
+      [[ -z "${reason}" ]] || break
+    done
+  fi
+  [[ -z "${flags}" ]] || rm -f "${flags}"
+  printf '%s' "${reason}"
+}
+
+# guard_npm_writers_unattributable over one reading: <text> under <policy>,
+# with <payloads> npm installs found in the command's payloads.
+guard_reading_writers_unattributable() {
+  local text="$1" policy="$2" payloads="$3"
+  local before stmt words npm_at sub tok i scan writers=0
+  local first_writer="" pending_between="" between="" moved="" n=0
+  local -a toks=()
 
   while IFS=$'\035' read -r before stmt _ words _; do
     if [[ "${before}" == "?" ]]; then
@@ -2075,7 +2129,7 @@ guard_npm_writers_unattributable() {
         done
       fi
     fi
-  done < <(command_statements "${text}")
+  done < <(command_statements "${text}" "${policy}")
 
   (( writers + payloads >= 2 )) || return 0
   if (( payloads > 0 )); then

@@ -757,6 +757,22 @@ do
 done
 pass "lockfile writers share a trace only with inert statements between them and no relocation of their own"
 
+# Where bash and zsh read a command differently the gate judges each reading on
+# its own (resolve_install_targets, A1). A statement both readings share is one
+# statement, not two: counted across readings, the one npm install below would
+# be two writers with the divergent group between them. And the reason a split
+# command gives still comes through when only one reading shows the split.
+diverge=$'((cat <<EOF > n.txt\nit\'s here\nEOF\n) )'
+state=$(pending_of "npm install evil"$'\n'"${diverge}")
+[[ -n "$(jq -r '.npm_trace.baseline // empty' <<< "${state}")" ]] \
+  || fail "a command the shells read two ways still leaves a trace baseline (${state})"
+[[ -z "$(jq -r '.npm_unattributable // empty' <<< "${state}")" ]] \
+  || fail "one npm install shared by two readings is one writer ($(jq -r .npm_unattributable <<< "${state}"))"
+state=$(pending_of "${diverge}"$'\n'"npm install evil; command cd sub; npm install other")
+[[ -n "$(jq -r '.npm_unattributable // empty' <<< "${state}")" ]] \
+  || fail "two writers with a statement between them are reported from the reading that has them ($(jq -c . <<< "${state}"))"
+pass "the attribution rule counts each shell reading on its own"
+
 # The other side: forms the effect gate does read stay quiet. `--no-save` and
 # `--no-package-lock` leave package-lock.json alone but record the package in
 # node_modules/.package-lock.json, which the gate reads; `cd` and `-C` are
