@@ -758,6 +758,13 @@ expect_prescription 'crates.io ripgrep@13.0.0;' 'cargo install --root /tmp/tools
 expect_prescription 'crates.io evil@13.0.0;' 'cargo install --root /tmp/tools evil --version 13.0.0' \
   crates.io /tmp/tools 13.0.0
 expect_prescription 'crates.io ripgrep@13.0.0;' 'cargo install ripgrep --version 13.0.0 2>&1'
+# A redirection and its target are the shell's, so a version flag does not
+# bind to them: these prescribed `check rubygems >/dev/null@13.0.0` beside the
+# package.
+expect_prescription 'rubygems rake@13.0.0;' 'gem install rake -v 13.0.0 >/dev/null'
+expect_prescription 'rubygems rake@13.0.0;' 'gem install rake -v 13.0.0 2>/dev/null'
+expect_prescription 'crates.io ripgrep@13.0.0;' 'cargo install ripgrep --version 13.0.0 >/dev/null'
+expect_prescription 'npm left-pad@1.0.0;' 'pnpm add left-pad@1.0.0 >out@2.0.0'
 expect_prescription 'nuget dotnet-ef@8.0.0;' 'dotnet tool install --tool-path /tmp/tools dotnet-ef --version 8.0.0'
 expect_prescription 'nuget evil@8.0.0;' 'dotnet tool install --tool-path /tmp/tools evil --version 8.0.0' \
   nuget /tmp/tools 8.0.0
@@ -993,6 +1000,20 @@ operand_rows=(
   $'pypi:requests\tpip install requests==2.0.0 && pip install requests'
   $'npm:cowsay\tpnpm add cowsay@1.0.0 && npx cowsay'
   $'pypi:requests\tpip install requests==2.0.0 --no-binary requests'
+  # A redirection and its target are the shell's, not operands. The record
+  # used to name `npm:>/dev/null` beside the package.
+  $'npm:left-pad\tpnpm add left-pad >/dev/null'
+  $'npm:left-pad\tpnpm add left-pad 2>err.log >out.log'
+  $'npm:left-pad\tpnpm add left-pad > /dev/null'
+  $'npm:left-pad\tpnpm add left-pad >>install.log'
+  $'npm:left-pad\tpnpm add left-pad <input.txt'
+  $'npm:left-pad\tpnpm add >/dev/null left-pad'
+  $'npm:left-pad\tpnpm add left-pad >out@1.0.0'
+  $'pypi:requests\tpip install requests >/dev/null'
+  $'npm:cowsay\tnpx >/dev/null cowsay'
+  $'\tpnpm add left-pad@1.0.0 >/dev/null'
+  # A quoted specifier starts with a quote, so it is not a redirection.
+  $'pypi:requests>=3\tpip install \'requests>=3\''
   # Controls: another name, and the npm CLI statement exempt on its own.
   $'npm:right-pad\tpnpm add left-pad@1.0.0 && pnpm add right-pad'
   $'npm:right-pad\tnpm install left-pad && pnpm add right-pad'

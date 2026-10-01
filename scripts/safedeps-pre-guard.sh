@@ -2218,15 +2218,9 @@ guard_walk_statement() {
       continue
     fi
 
-    # A comment ends the statement, and a redirection operator and its
-    # target belong to the shell, not to the manager. Only a bare operator
-    # is one: quotes are gone by now, so `requests>=3` is a specifier and a
-    # token that merely contains `>` has to stay an operand.
+    # A comment ends the statement. Redirections are gone already
+    # (guard_strip_redirections).
     [[ "${tok}" == \#* ]] && break
-    if [[ "${tok}" =~ ^[0-9]*[\<\>]+$ ]]; then
-      skip_next=true
-      continue
-    fi
 
     case "${tok}" in
       # A flag that takes a separate argument consumes exactly that argument —
@@ -2341,12 +2335,9 @@ guard_extract_flagged_specs() {
       nc = 0; nv = 0
       for (j = s; j <= NF; j++) {
         t = $j
-        # The shell, not the manager, owns these: a comment ends the statement,
-        # and a bare redirection operator and its target are not arguments at
-        # all. Binding `2>` as a package put a redirection into the prescribed
-        # command.
+        # A comment ends the statement; the shell owns it. Redirections are
+        # gone from the text already (guard_strip_redirections).
         if (t ~ /^#/) break
-        if (t ~ /^[0-9]*[<>]+&?$/) { if (j < NF) print "@\tconsumed\t" (base + j + 1); j++; continue }
         if (has(takes[tool], t) && j < NF) {
           print "@\tconsumed\t" (base + j + 1)
           if (has(vers[tool], t)) { v[++nv] = $(j + 1); vp[nv] = j + 1 }
@@ -2477,6 +2468,23 @@ guard_mark_scan_failed() {
   [[ -z "${SAFEDEPS_SCAN_MARK:-}" ]] || printf 'failed\n' >> "${SAFEDEPS_SCAN_MARK}"
 }
 
+# A statement without its redirections. A redirection belongs to the shell,
+# and so does its target: in `pnpm add left-pad >/dev/null` the shell opens
+# /dev/null and pnpm never sees it. Every reader of the statement used to see
+# it as an operand, so the record named `npm:>/dev/null` beside the package,
+# and a version flag bound to it: `gem install rake -v 13.0.0 >/dev/null`
+# prescribed `check rubygems >/dev/null@13.0.0`. The test runs on the text as
+# written, quotes still in place, because only an unquoted operator at the
+# start of a word is one: `'>=3'` is a version specifier. The target may be
+# attached or follow blanks, and it is one shell word: unquoted bytes, a
+# backslash escape, a double-quoted run (with its own escapes) and a
+# single-quoted run, in any order.
+SAFEDEPS_REDIRECT_TARGET_CHAR="([^[:space:]'\"\\\\]|\\\\.|\"([^\"\\\\]|\\\\.)*\"|'[^']*')"
+guard_strip_redirections() {
+  printf '%s' "$1" | sed -E \
+    "s#(^|[[:space:]])[0-9]*(<<<|>>|>[|&]|<[&>]|>|<)[[:space:]]*${SAFEDEPS_REDIRECT_TARGET_CHAR}*#\\1#g"
+}
+
 # One statement as the extractor reads it: a runner's package operands (one per
 # line), or the statement with its quotes removed and its grouping characters
 # blanked. Quotes delimit operands and are removed before matching: `pip install
@@ -2489,6 +2497,7 @@ guard_extract_statement_text() {
   # Each transform below is a spec reader, and a failed one leaves no text or
   # the wrong text, which reads as no spec. So a failure is marked the way
   # guard_operand_specs marks its own (the runner reader marks inside).
+  seg=$(guard_strip_redirections "${seg}") || guard_mark_scan_failed
   if [[ "${runner}" == true ]]; then
     text=$(guard_runner_operands "${seg}")
   else
