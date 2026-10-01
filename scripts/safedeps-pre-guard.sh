@@ -427,6 +427,29 @@ shell_lex() {
       #              removed: assignments (NAME=value, the value one word however
       #              it is quoted or nested), env with its options and
       #              assignments, command and exec. Not length-preserving.
+      #   view=noredir  every top-level redirection blanked: the operator, a file
+      #              descriptor number that is the whole word in front of it, and
+      #              the target word. An operator inside quotes, a substitution or
+      #              after a backslash is a character, and one in the middle of a
+      #              word still is an operator (`x==1>/dev/null`), as the shell
+      #              reads it. `<(` and `>(` are process substitutions and stay.
+      #              length-preserving
+      #   view=unprefixed-lines  unprefixed, for text holding one statement per
+      #              line, each line read from a fresh state like pieces: a case
+      #              left open by one statement no longer swallows the prefixes of
+      #              the next (caught in the release integration).
+      #   view=pieces  for text holding one statement per line, each line read
+      #              from a fresh state. One output line per piece, cut at
+      #              top-level `;` `&` `|`, newlines and case-pattern closes:
+      #              `<line>\037<raw>\037<words>`. <raw> is the piece as the noredir
+      #              view has it. <words> is the same bytes after the shell quote
+      #              removal: the quote characters go, and so does an escaping
+      #              backslash outside quotes or inside double quotes before
+      #              $ ` " \; a $\047...\047 escape is decoded; code nested in a
+      #              substitution is kept as written. A $\047...\047 escape whose
+      #              value this cannot name (\u, \U, \c, a NUL, a byte past 127)
+      #              adds a line `!`, so the reader can record the failure. For
+      #              the spec extractor.
       #
       # Two places where bash and zsh read the same text differently, each its
       # own axis: `((` / `$((` holding `<<` or a comment (arithmetic, or a
@@ -458,10 +481,27 @@ shell_lex() {
         for (j in sl) SPC[sl[j]] = 1
         SPC["\n"] = 1
         DQS["\\"] = 1; DQS["\042"] = 1; DQS["$"] = 1; DQS["`"] = 1
-        wantdep = (view == "unprefixed")
+        wantdep = (view == "unprefixed" || view == "unprefixed-lines" || view == "noredir" || view == "pieces")
+        if (view == "pieces") {
+          # The value of each one-letter escape in $\047...\047.
+          AQV["a"] = "\007"; AQV["b"] = "\010"; AQV["e"] = "\033"; AQV["E"] = "\033"
+          AQV["f"] = "\014"; AQV["n"] = "\n"; AQV["r"] = "\r"; AQV["t"] = "\t"; AQV["v"] = "\013"
+          AQV["\\"] = "\\"; AQV["\047"] = "\047"; AQV["\042"] = "\042"; AQV["?"] = "?"
+        }
         mode = ""; np = 0; ambig_a = 0; ambig_q = 0; unterm = 0; hn = 0; hstop = 0
         subp = (policy ~ /^sub/); zq = (policy ~ /-zq$/)
+        perline = (view == "pieces" || view == "unprefixed-lines")
         for (i = 1; i <= N; i++) {
+          # The pieces view reads one statement per line, and the statements
+          # come from more than one reading of the command (bash and zsh, see
+          # policy below). A line starts from nothing, so a quote that one
+          # reading left open on its line cannot run into the next: read as one
+          # text, a bash reading of an apostrophe in "${...}" swallowed the
+          # install the zsh reading had split out (caught by the verdict replay).
+          if (perline && X[i] == "\n") {
+            mode = ""; d = 1; dq = 0; dc = 1; hn = 0; np = 0; hstop = 0; par[1] = 0
+            C[i] = "c"; DEP[i] = 1; continue
+          }
           # An unquoted heredoc body ends where at_newline found its terminator
           # line: close what is open in it (a substitution left open there never
           # closes, as in the shell) and step over the terminator.
@@ -476,11 +516,14 @@ shell_lex() {
           if (i in HSTART) { push("H"); hstop = HEND[HSTART[i]] }
           c = X[i]
           if (wantdep) DEP[i] = (mode == "") ? dc : 99
-          if (mode == "SQ") { C[i] = "q"; if (c == "\047") mode = ""; continue }
+          # RM marks what the shell quote removal takes out of a top-level word
+          # (qtop: the quote was opened at the top level, not in a substitution
+          # or an expansion). Only the pieces view reads it.
+          if (mode == "SQ") { C[i] = "q"; if (c == "\047") { mode = ""; if (qtop) RM[i] = 1 }; continue }
           if (mode == "AQ") {
             C[i] = "q"
-            if (c == "\\") { i++; C[i] = "q" }
-            else if (c == "\047") mode = ""
+            if (c == "\\") { if (qtop) aq_escape(i); i++; C[i] = "q" }
+            else if (c == "\047") { mode = ""; if (qtop) RM[i] = 1 }
             continue
           }
           if (mode == "CM") {
@@ -496,10 +539,10 @@ shell_lex() {
             C[i] = "q"
             if (!(c in DQS)) continue
             if (c == "\\") {
-              if (X[i+1] == "\n") { C[i] = "l"; C[i+1] = "l"; i++ }
-              else { i++; C[i] = "q" }
+              if (X[i+1] == "\n") { C[i] = "l"; C[i+1] = "l"; if (dc == 2) { RM[i] = 1; RM[i+1] = 1 }; i++ }
+              else { if (dc == 2 && (X[i+1] in DQS)) RM[i] = 1; i++; C[i] = "q" }
             }
-            else if (c == "\042") { pop() }
+            else if (c == "\042") { if (dc == 2) RM[i] = 1; pop() }
             else if (c == "$" && X[i+1] == "(" && X[i+2] == "(") { C[i+1] = "q"; C[i+2] = "q"; arith_or_sub(i, 1) }
             else if (c == "$" && X[i+1] == "(") { C[i+1] = "q"; i++; push("S") }
             else if (c == "$" && X[i+1] == "{") { C[i+1] = "q"; i++; push("V") }
@@ -527,7 +570,7 @@ shell_lex() {
           C[i] = cls
           if (!(c in SPC) && !(top == "C" && cpat[d] == 1)) continue
           if (c == "\\") {
-            if (X[i+1] == "\n") { C[i] = "l"; C[i+1] = "l"; i++; continue }
+            if (X[i+1] == "\n") { C[i] = "l"; C[i+1] = "l"; if (dc == 1) { RM[i] = 1; RM[i+1] = 1 }; i++; continue }
             # Inside backticks an escaped backtick opens or closes a nested one.
             if (top == "B" && X[i+1] == "`") {
               C[i+1] = cls; i++
@@ -535,18 +578,21 @@ shell_lex() {
               continue
             }
             if (dq > 0) { i++; C[i] = "Q"; continue }
-            C[i] = "x"; if (i < N) { i++; C[i] = "e" }
+            C[i] = "x"; if (dc == 1) RM[i] = 1; if (i < N) { i++; C[i] = "e" }
             continue
           }
-          if (c == "$" && X[i+1] == "\047") { C[i] = "q"; C[i+1] = "q"; i++; mode = "AQ"; continue }
+          if (c == "$" && X[i+1] == "\047") {
+            C[i] = "q"; C[i+1] = "q"; qtop = (dc == 1); if (qtop) { RM[i] = 1; RM[i+1] = 1 }
+            i++; mode = "AQ"; continue
+          }
           if (c == "\047") {
             # Inside "${...}" bash opens a quote here and zsh reads a plain
             # character (forms P4, Q6). Both readings are judged: the second
             # policy is the zsh reading.
             if (top == "V" && dq > 0) { ambig_q = 1; if (zq) continue }
-            C[i] = "q"; mode = "SQ"; continue
+            C[i] = "q"; mode = "SQ"; qtop = (dc == 1); if (qtop) RM[i] = 1; continue
           }
-          if (c == "\042") { C[i] = "q"; push("D"); continue }
+          if (c == "\042") { C[i] = "q"; if (dc == 1) RM[i] = 1; push("D"); continue }
           # case ... esac: a pattern close `)` closes no substitution (form P8).
           if ((c == "c" || c == "e") && wordstart(i) && (i + 4 > N || X[i+4] ~ /[ \t\n;&|()<>]/)) {
             w4 = X[i] X[i+1] X[i+2] X[i+3]
@@ -609,9 +655,99 @@ shell_lex() {
         # the end of the input and take every line after it along (form A7, a
         # heredoc inside `$((` that bash reads as arithmetic). Such a command is
         # settled as UNDECIDED by guard_check_command_reads anyway.
-        if (view == "unprefixed" && !unterm) prefixes()
+        if ((view == "unprefixed" || view == "unprefixed-lines") && !unterm) prefixes()
+        # The same holds for redirections: in a reading that never closes, a
+        # stripped target changes how the rest reads, and the view stops
+        # being idempotent (random inputs in scan-contract).
+        if ((view == "noredir" && !unterm) || view == "pieces") redirs()
         if (view == "substs") emit_substs()
+        else if (view == "pieces") emit_pieces()
         else emit()
+      }
+
+      # One escape in a top-level $\047...\047 at byte j, read the way the shell
+      # reads it: the backslash goes, a one-letter escape and the first byte of
+      # a numeric one carry the value in VAL, and the rest of a numeric one
+      # goes. An unknown letter keeps its backslash. A value this cannot name
+      # as one plain byte sets aqbad.
+      function aq_escape(j,   e, k, v, h) {
+        RM[j] = 1; e = X[j+1]
+        if (e in AQV) { VAL[j+1] = AQV[e]; return }
+        if (e ~ /[0-7]/) {
+          v = 0
+          for (k = j + 1; k <= j + 3 && k <= N && X[k] ~ /[0-7]/; k++) { v = v * 8 + X[k]; if (k > j + 1) RM[k] = 1 }
+        } else if (e == "x") {
+          v = 0
+          for (k = j + 2; k <= j + 3 && k <= N && (h = index("0123456789abcdef", tolower(X[k]))) > 0; k++) { v = v * 16 + h - 1; RM[k] = 1 }
+          if (k == j + 2) v = 0
+        } else if (e == "u" || e == "U" || e == "c") { aqbad = 1; return }
+        else { RM[j] = 0; return }
+        if (v < 1 || v > 127) { aqbad = 1; return }
+        VAL[j+1] = sprintf("%c", v)
+      }
+
+      # The top-level redirections: DROP marks the operator, a file descriptor
+      # number that is the whole word in front of it, the blanks after it and
+      # its target word.
+      function redirs(   k, j, s) {
+        for (k = 1; k <= N; k++) {
+          if (C[k] != "c" || DEP[k] != 1) continue
+          if (X[k] == "&" && X[k+1] == ">" && C[k+1] == "c") j = k + 1
+          else if (X[k] == "<" || X[k] == ">") j = k
+          else continue
+          if (X[j+1] == "(") { k = j + 1; continue }
+          s = k
+          while (s > 1 && C[s-1] == "c" && DEP[s-1] == 1 && X[s-1] ~ /[0-9]/) s--
+          if (s == k || s > 1 && !word_sep(s - 1)) s = k
+          j++
+          while (j <= N && C[j] == "c" && X[j] ~ /[<>]/) j++
+          if (j <= N && C[j] == "c" && (X[j] == "&" || X[j] == "|")) j++
+          while (j <= N && C[j] == "c" && DEP[j] == 1 && (X[j] == " " || X[j] == "\t")) j++
+          while (j <= N && !word_sep(j)) j++
+          for (; s < j; s++) DROP[s] = 1
+          k = j - 1
+        }
+      }
+      function emit_pieces(   k, a, ln, pln) {
+        buf = ""; held = 0; ln = 1; a = 1; pln = 1
+        for (k = 1; k <= N; k++) {
+          if (!(k in DROP) && (C[k] == "p" || C[k] == "c" && DEP[k] == 1 && X[k] ~ /[;&|\n]/)) {
+            piece(a, k - 1, pln)
+            a = k + 1
+            if (X[k] == "\n") ln++
+            pln = ln
+            continue
+          }
+          if (X[k] == "\n") ln++
+        }
+        piece(a, N, pln)
+        if (aqbad) put("!\n")
+        printf "%s", buf
+      }
+      # A byte of a piece as one line can carry it: a newline inside the piece
+      # (code nested in a substitution) ends a command there, and the field
+      # separators and a tab read as a blank, as do a comment and a heredoc
+      # operator or body, which are not words.
+      function pbyte(k,   cc) {
+        if (k in DROP || C[k] == "m" || C[k] == "h" || C[k] == "b") return " "
+        cc = X[k]
+        if (cc == "\n") return (C[k] == "c" || C[k] == "Q" || C[k] == "B") ? ";" : " "
+        if (cc == "\037" || cc == "\036" || cc == "\t") return " "
+        return cc
+      }
+      function piece(a, z, n,   k, any) {
+        any = 0
+        for (k = a; k <= z; k++) if (!(k in DROP) && X[k] !~ /[ \t\n]/) { any = 1; break }
+        if (!any) return
+        put(n "\037")
+        for (k = a; k <= z; k++) put(pbyte(k))
+        put("\037")
+        for (k = a; k <= z; k++) {
+          if (k in DROP) put(" ")
+          else if (k in VAL) put(VAL[k] == "\n" || VAL[k] == "\t" || VAL[k] == "\037" || VAL[k] == "\036" ? " " : VAL[k])
+          else if (!RM[k]) put(pbyte(k))
+        }
+        put("\n")
       }
 
       # A byte that ends a word at the top level: unquoted blank or operator
@@ -814,6 +950,7 @@ shell_lex() {
         }
         for (k = 1; k <= N; k++) {
           cc = X[k]; cl = C[k]
+          if (view == "noredir") { put((k in DROP) ? " " : cc); continue }
           if (view == "scan" || view == "live" || view == "stmts") {
             # A code `#` is never a comment start here, and must not become one
             # when the scan is read again: after a blanked region (a quoted word
@@ -826,9 +963,9 @@ shell_lex() {
             else put(" ")
             continue
           }
-          if (view == "unprefixed") {
+          if (view == "unprefixed" || view == "unprefixed-lines") {
             if (!(k in A)) put(cl == "p" ? ";" : cc)
-            if (k == N && ambig) {
+            if (k == N && ambig && view == "unprefixed") {
               # Where bash and zsh read the text differently, the prefixes were
               # found on one reading only; hand on the text as written too.
               put("\n"); for (p = 1; p <= N; p++) put(X[p])
@@ -878,8 +1015,10 @@ command_scan_text() {
 }
 
 normalize_install_text() {
-  local text="$1"
+  local text="$1" view="unprefixed"
   local normalized unprefixed
+  # `lines`: <text> holds one statement per line, each read on its own.
+  [[ "${2:-}" != lines ]] || view="unprefixed-lines"
 
   # An absolute path before an executable reads as the executable.
   if ! normalized=$(printf '%s' "${text}" | sed -E \
@@ -898,7 +1037,7 @@ normalize_install_text() {
   # `FOO="a b" pip install evil==6.6.6` and `FOO=$(cmd arg) pip install ...`
   # kept their prefix and the install after it was never recognized (caught in
   # review). A failed reading keeps the text it had and is recorded.
-  if unprefixed=$(shell_lex "${normalized}" unprefixed arith "safedeps:normalize_install_text"); then
+  if unprefixed=$(shell_lex "${normalized}" "${view}" arith "safedeps:normalize_install_text"); then
     normalized="${unprefixed}"
   fi
   printf '%s' "${normalized}"
@@ -924,33 +1063,86 @@ strip_heredoc_bodies() {
 # written after one passed with no verdict (caught in review). Callers strip,
 # once.
 extract_shell_c_payloads() {
-  local rest
-
-  rest="$1"
-  while [[ "${rest}" =~ (bash|sh|zsh)[[:space:]]+-[A-Za-z]*c[[:space:]]+\"([^\"]*)\" ]]; do
-    printf '%s\n' "${BASH_REMATCH[2]}"
-    rest="${rest#*"${BASH_REMATCH[0]}"}"
-  done
-
-  rest="$1"
-  while [[ "${rest}" =~ (bash|sh|zsh)[[:space:]]+-[A-Za-z]*c[[:space:]]+\'([^\']*)\' ]]; do
-    printf '%s\n' "${BASH_REMATCH[2]}"
-    rest="${rest#*"${BASH_REMATCH[0]}"}"
-  done
+  read_payload_words "$1" '(bash|sh|zsh)[[:space:]]+-[A-Za-z]*c[[:space:]]+'
 }
 
 extract_eval_payloads() {
-  local rest="$1"
+  read_payload_words "$1" '(^|[[:space:];|&])eval[[:space:]]+'
+}
 
-  while [[ "${rest}" =~ (^|[[:space:];|&])eval[[:space:]]+\"([^\"]*)\" ]]; do
-    printf '%s\n' "${BASH_REMATCH[2]}"
-    rest="${rest#*"${BASH_REMATCH[0]}"}"
-  done
-
-  rest="$1"
-  while [[ "${rest}" =~ (^|[[:space:];|&])eval[[:space:]]+\'([^\']*)\' ]]; do
-    printf '%s\n' "${BASH_REMATCH[2]}"
-    rest="${rest#*"${BASH_REMATCH[0]}"}"
+# The word after each <head> in <text>, read as a payload: a double-quoted word
+# up to its first `"`, or a single-quoted one up to its next `'`, printed one
+# per line.
+#
+# That is all this reader knows of the shell's quoting, so it says when the
+# word is something else. `sh -c "echo \"hi\"; pip install evil==1.0.0"` read
+# up to the first `"` is `echo \`, which installs nothing, and the install the
+# shell runs after it passed with no verdict -- and so did a word glued to more
+# quoting (`'echo hi'"; pip install ..."`), an ANSI-C word (`$'...'`) and an
+# unquoted word with escapes (`pip\ install\ evil==1.0.0`). A reader that cannot
+# read its input to the end marks a failed reading, and the gate settles it
+# (guard_settle_scan_failure): a command naming a package manager is then
+# UNDECIDED. Only a head in live code is held to this. A head inside quoted
+# text is data the shell does not run, and its payload is still read as before.
+#
+# Reading these words the way the shell does -- quotes removed, escapes
+# applied -- is the plan safedeps/command-words-read-as-the-shell-dequotes; this
+# is the floor under it.
+read_payload_words() {
+  local LC_ALL=C
+  local text="$1" head_re="$2" rest="$1" m pre off=0 word content after live="" unread
+  # Kept in variables: written inline, bash 3.2 and 5 read the backslashes
+  # differently.
+  local dq_re='^"([^"]*)"' sq_re="^'([^']*)'" odd_re='(^|[^\])(\\\\)*\\$' bare_re='^[^[:space:];&|)<>]*'
+  while [[ "${rest}" =~ ${head_re} ]]; do
+    m="${BASH_REMATCH[0]}"
+    pre="${rest%%"${m}"*}"
+    off=$(( off + ${#pre} + ${#m} ))
+    rest="${rest#*"${m}"}"
+    word="${rest}"
+    unread=false
+    content=""
+    after=""
+    case "${word:0:1}" in
+      '"')
+        if [[ "${word}" =~ ${dq_re} ]]; then
+          content="${BASH_REMATCH[1]}"
+          after="${word:${#BASH_REMATCH[0]}:1}"
+          # The `"` that ended it is escaped: the word goes on.
+          [[ "${content}" =~ ${odd_re} ]] && unread=true
+          printf '%s\n' "${content}"
+        else
+          unread=true
+        fi
+        ;;
+      "'")
+        if [[ "${word}" =~ ${sq_re} ]]; then
+          content="${BASH_REMATCH[1]}"
+          after="${word:${#BASH_REMATCH[0]}:1}"
+          printf '%s\n' "${content}"
+        else
+          unread=true
+        fi
+        ;;
+      '$') [[ "${word:1:1}" == "'" ]] && unread=true ;;
+      *)
+        [[ "${word}" =~ ${bare_re} ]]
+        [[ "${BASH_REMATCH[0]}" == *[\\\'\"]* ]] && unread=true
+        ;;
+    esac
+    # A quoted word glued to more of the same word.
+    case "${after}" in
+      ''|' '|$'\t'|$'\n'|';'|'&'|'|'|')'|'<'|'>') ;;
+      *) unread=true ;;
+    esac
+    [[ "${unread}" == true ]] || continue
+    if [[ -z "${live}" ]]; then
+      live=$(shell_lex "${text}" live arith "safedeps:read_payload_words"; printf 'X') || live="X"
+      live="${live%X}"
+    fi
+    # The head is live code when the live view kept it.
+    [[ "${live:$(( off - ${#m} )):${#m}}" == "${m}" ]] || continue
+    guard_mark_reading_failed
   done
 }
 
@@ -3394,13 +3586,13 @@ guard_runner_operands() {
   # This stops an argument such as an email (`ops@example.test`) or a secret
   # value passed to `npx wrangler ...` from being misread as a `pkg@spec`.
   #
-  # Quotes are delimiters here, not data: `npx "cowsay@1.5.0"` runs cowsay@1.5.0.
+  # It reads the statement's words, quotes already removed by the lexer
+  # (guard_extract_pieces): `npx "cowsay@1.5.0"` runs cowsay@1.5.0.
   #
-  # A failed tr or sed here is a failed spec reader (see guard_operand_specs):
-  # it yields no operand, and no operand reads as nothing to check.
-  local text after head family names adds takes want tok key nopt last="" match option create=false
+  # A failed sed here is a failed spec reader (see guard_operand_specs): it
+  # yields no operand, and no operand reads as nothing to check.
+  local text="$1" after head family names adds takes want tok key nopt last="" match option create=false
   local -a toks=()
-  text=$(printf '%s\n' "$1" | guard_shell_dequote) || guard_mark_reading_failed
   # The runner itself is kept, ahead of \037, to choose the table. The first
   # line is taken here rather than by `head -n1`, which can close the pipe on a
   # sed that still has lines to write, and pipefail reads that SIGPIPE as a
@@ -3690,9 +3882,19 @@ guard_walk_statement() {
       continue
     fi
 
-    # A comment ends the statement. Redirections are gone already
-    # (guard_strip_redirections).
+    # A comment ends the statement. Redirections are gone already (the lexer
+    # pieces view).
     [[ "${tok}" == \#* ]] && break
+
+    # npm link reads each argument the way npm-package-arg does and installs
+    # every one that is not local code (lib/commands/link.js:92-104). A
+    # directory or a file is linked as written and names no package here; a
+    # git or URL argument is fetched, and is read here so it is recorded.
+    if [[ "${seg_ecosystem}" == npm && "${tok}" != -* ]] \
+        && [[ "${verb_tok}" =~ ^(${SAFEDEPS_G_NPM_LINK_VERBS})$ ]] \
+        && safedeps_npa_is_local "${tok}"; then
+      continue
+    fi
 
     case "${tok}" in
       # A flag that takes a separate argument consumes exactly that argument —
@@ -3722,8 +3924,9 @@ guard_walk_statement() {
         continue
         ;;
       -*) continue ;;
-      # Installing from the working tree is not a registry fetch.
-      .|..|./*|../*|/*) continue ;;
+      # Installing from the working tree is not a registry fetch, and a leading
+      # tilde is a path once the shell has expanded it.
+      .|..|./*|../*|/*|'~'|'~/'*) continue ;;
       *://*) found+="${tok}"$'\n'; continue ;;
     esac
 
@@ -3809,7 +4012,7 @@ guard_extract_flagged_specs() {
       for (j = s; j <= NF; j++) {
         t = $j
         # A comment ends the statement; the shell owns it. Redirections are
-        # gone from the text already (guard_strip_redirections).
+        # gone from the text already (the lexer pieces view).
         if (t ~ /^#/) break
         if (has(takes[tool], t) && j < NF) {
           print "@\tconsumed\t" (base + j + 1)
@@ -3938,146 +4141,25 @@ guard_operand_specs() {
   fi
 }
 
-# Text with its quoting removed the way the shell removes it, one line at a
-# time. Outside quotes a backslash vanishes and leaves the next byte as a plain
-# character; inside double quotes it does that only before `$`, a backquote,
-# `"` or a backslash; inside single quotes it is just a backslash. The quote
-# characters themselves go.
-#
-# The readers used to delete the quote characters and leave every backslash,
-# so `pip install ev\il==6.6.6`, which the shell runs as evil==6.6.6, read as
-# the unpinned operand `ev\il==6.6.6`: recorded, and never checked. Elsewhere
-# the backslash cut the name: `pnpm add ev\il@6.6.6` prescribed
-# `check npm il@6.6.6`, and `gem install ra\ke -v 13.0.0` prescribed
-# `ra\ke@13.0.0`, identities no advisory names, which approve and then let
-# the real package through. Blanks a quote held become plain blanks here, so a
-# quoted operand with a blank still splits in two, as it did before.
-guard_shell_dequote() {
-  LC_ALL=C awk '
-    # safedeps:shell_dequote (scripts/test/scan-contract.sh keys on this line)
-    {
-      out = ""; q = 0
-      n = split($0, c, "")
-      for (i = 1; i <= n; i++) {
-        ch = c[i]
-        if (q == 0) {
-          if (ch == "\\") { if (i < n) { i++; out = out c[i] }; continue }
-          if (ch == "\047") { q = 1; continue }
-          if (ch == "\"") { q = 2; continue }
-          out = out ch
-          continue
-        }
-        if (q == 1) { if (ch == "\047") q = 0; else out = out ch; continue }
-        if (ch == "\\" && i < n && (c[i + 1] == "$" || c[i + 1] == "`" || c[i + 1] == "\"" || c[i + 1] == "\\")) {
-          i++; out = out c[i]; continue
-        }
-        if (ch == "\"") { q = 0; continue }
-        out = out ch
-      }
-      print out
-    }'
-}
-
-# A statement without its redirections. A redirection belongs to the shell,
-# and so does its target: in `pnpm add left-pad >/dev/null` the shell opens
-# /dev/null and pnpm never sees it. Every reader of the statement used to see
-# it as an operand, so the record named `npm:>/dev/null` beside the package,
-# and a version flag bound to it: `gem install rake -v 13.0.0 >/dev/null`
-# prescribed `check rubygems >/dev/null@13.0.0`.
-#
-# bash reads `<` and `>` as operators wherever they stand outside quotes and
-# unescaped, in the middle of a word too: `pip install requests==2.19.0>/dev/null`
-# installs requests==2.19.0 and sends its output to /dev/null, and
-# `pip install requests>=2.0` installs requests and writes a file named `=2.0`.
-# A sed that took an operator only at the start of a word read those as the
-# operands `requests==2.19.0>/dev/null` and `requests>=2.0`: the pinned one was
-# recorded as unpinned and never checked. So this walks the text the way the
-# shell tokenizes it, quotes still in place: an operator inside quotes or after
-# a backslash is a character (`'>=3'` is a version specifier), and one outside
-# them ends the word in front of it. A file descriptor number is part of the
-# redirection only when it is that whole word (`2>`, not `x2>`). The operator
-# may be `&>`, `>>`, `>|`, `>&`, `<<`, `<<<`, `<<-`, `<>` or `<&`; `<(` and `>(`
-# are process substitutions and stay. The target is one shell word after
-# optional blanks: unquoted bytes, a backslash escape, a double-quoted run (with
-# its own escapes) and a single-quoted run, in any order. The redirection
-# becomes a blank, which is what it is to the shell: the end of a word.
-#
-# It reads stdin, a statement per line, so guard_extract_pieces runs it once
-# over every statement instead of once per statement: a 4KB command of short
-# installs is about 250 statements.
-guard_strip_redirections() {
-  LC_ALL=C awk '
-    # safedeps:strip_redirections (scripts/measure/scan-failure-census.sh keys on this line)
-    function word_char(ch) { return ch != " " && ch != "\t" && ch != ";" && ch != "|" && ch != "&" && ch != "<" && ch != ">" && ch != "(" && ch != ")" }
-    {
-      n = split($0, c, "")
-      out = ""; q = 0; ws = 1; digits = 1; wstart = 1
-      for (i = 1; i <= n; i++) {
-        ch = c[i]
-        if (q == 1) { out = out ch; if (ch == "\047") q = 0; continue }
-        if (q == 2) {
-          out = out ch
-          if (ch == "\\" && i < n) { i++; out = out c[i]; continue }
-          if (ch == "\"") q = 0
-          continue
-        }
-        if (ch == "\\" && i < n) { out = out ch c[i + 1]; i++; ws = 0; digits = 0; continue }
-        if (ch == "\047") { out = out ch; q = 1; ws = 0; digits = 0; continue }
-        if (ch == "\"") { out = out ch; q = 2; ws = 0; digits = 0; continue }
-        op = 0
-        if (ch == ">" || ch == "<") op = 1
-        else if (ch == "&" && i < n && c[i + 1] == ">") op = 1
-        if (op && i < n && c[i + 1] == "(") op = 0
-        if (!op) {
-          out = out ch
-          if (ch == " " || ch == "\t" || ch == ";" || ch == "|" || ch == "&" || ch == "(" || ch == ")") { ws = 1; digits = 1; wstart = length(out) + 1 }
-          else { if (ch !~ /[0-9]/) digits = 0; ws = 0 }
-          continue
-        }
-        # A file descriptor number is the whole word in front of the operator.
-        if (!ws && digits) out = substr(out, 1, wstart - 1)
-        # The operator: & > >> >| >& < << <<< <<- <> <&
-        j = i
-        if (c[j] == "&") j++
-        if (c[j] == ">") { j++; if (j <= n && (c[j] == ">" || c[j] == "|" || c[j] == "&")) j++ }
-        else { j++; if (j <= n && c[j] == "<") { j++; if (j <= n && (c[j] == "<" || c[j] == "-")) j++ } else if (j <= n && (c[j] == ">" || c[j] == "&")) j++ }
-        while (j <= n && (c[j] == " " || c[j] == "\t")) j++
-        # The target is one shell word: unquoted bytes, escapes and quoted runs.
-        tq = 0
-        while (j <= n) {
-          ch = c[j]
-          if (tq == 1) { if (ch == "\047") tq = 0; j++; continue }
-          if (tq == 2) { if (ch == "\\" && j < n) { j += 2; continue }; if (ch == "\"") tq = 0; j++; continue }
-          if (ch == "\\" && j < n) { j += 2; continue }
-          if (ch == "\047") { tq = 1; j++; continue }
-          if (ch == "\"") { tq = 2; j++; continue }
-          if (!word_char(ch)) break
-          j++
-        }
-        out = out " "
-        ws = 1; digits = 1; wstart = length(out) + 1
-        i = j - 1
-      }
-      print out
-    }'
-}
-
 # One statement as the extractor reads it: a runner's package operands (one per
-# line), or the statement with its quotes removed and its grouping characters
-# blanked. Quotes delimit operands and are removed before matching: `pip install
-# "requests==2.0.0"` pins requests, and the `==` reader used to miss it. Python
-# extras (`evil[x]==1.0.0`) select optional dependencies of the same package;
-# the package and its version are what the ledger judges. The UNGATED record
-# walks this same text, so that its token positions are the extractor's.
+# line), or the statement's words with their grouping characters blanked.
+# <words> is the statement after the shell's quote removal, from the lexer's
+# pieces view (guard_extract_pieces): quotes delimit operands and are removed
+# before matching, so `pip install "requests==2.0.0"` pins requests, and a
+# backslash outside quotes leaves the byte after it, so `pip install
+# ev\il==6.6.6` pins evil. Python extras (`evil[x]==1.0.0`) select optional
+# dependencies of the same package; the package and its version are what the
+# ledger judges. The UNGATED record walks this same text, so that its token
+# positions are the extractor's.
 guard_extract_statement_text() {
-  local eco="$1" seg="$2" runner="$3" text
+  local eco="$1" words="$2" runner="$3" text
   # Each transform below is a spec reader, and a failed one leaves no text or
   # the wrong text, which reads as no spec. So a failure is marked the way
   # guard_operand_specs marks its own (the runner reader marks inside).
   if [[ "${runner}" == true ]]; then
-    text=$(guard_runner_operands "${seg}")
+    text=$(guard_runner_operands "${words}")
   else
-    text=$(printf '%s\n' "${seg}" | guard_shell_dequote | tr '(){}' '    ') || guard_mark_reading_failed
+    text=$(printf '%s\n' "${words}" | tr '(){}' '    ') || guard_mark_reading_failed
   fi
   if [[ "${eco}" == "pypi" ]]; then
     text=$(printf '%s' "${text}" | sed -E 's/\[[^] ]*\]//g') || guard_mark_reading_failed
@@ -4120,24 +4202,38 @@ guard_effect_gate_reads() {
 }
 
 # The statements the spec extractor reads, one piece per line as
-# `<read>\t<piece>`. <read> is `true` when the effect gate reads the install the
-# piece belongs to (guard_effect_gate_reads), and `false` otherwise.
+# `<read>\t<piece>\037<words>`. <read> is `true` when the effect gate reads the
+# install the piece belongs to (guard_effect_gate_reads), and `false`
+# otherwise. <piece> is the statement as written, its redirections blanked, and
+# <words> the same after the shell's quote removal; both come from one reading
+# of the lexer (the pieces view of shell_lex).
 #
 # The command's own statements come from <targets>, resolve_install_targets'
 # list, so the extractor and the landing read the same statements and each one
 # carries its landing with it. Joining two separate readings of a command was
 # the defect behind three rounds of the UNGATED record (a pin found by name,
 # then by ecosystem and name), and a statement found by position in a second
-# split would be the same join. Each statement is normalized and then cut at
-# `;`, `|`, `&` and newlines as the whole command used to be, so the pieces,
-# and the specs read from them, are the ones the extractor read before.
+# split would be the same join. The statements are normalized together, one per
+# line, and the lexer cuts each at its own `;`, `|`, `&` and newlines, so line N
+# is statement N.
+#
+# The lexer reads the quotes, the redirections and the cuts. Each used to have a
+# reader of its own, and each reader had its own model of the shell's quoting:
+# an awk that knew `'...'`, `"..."` and a backslash took the `>` in
+# `pip install --log "$(echo ">'")" evil==1.0.0` for a redirection, and with it
+# everything to the end of the line, so the pinned install passed unchecked; a
+# sed before it read a redirection only at the start of a word, and missed
+# `"x >'" ... 2>"'"`; and the cut at `;` `|` `&` read no quotes at all, so
+# `pip install --log "a;b" evil==1.0.0` was two pieces and the second was not an
+# install. The shell reads all three with one set of rules, and so does this.
 #
 # Payloads (`sh -c`, `eval`, a command substitution) follow, with <read> false:
 # where a payload's install lands is decided inside the payload, and the
-# landing does not read inside it.
+# landing does not read inside it. Each payload is read on its own, since one
+# that its reader could not finish must not run into the next.
 guard_extract_pieces() {
   local cmd="$1" targets="$2"
-  local kind read_flags="" normalized
+  local kind read_flags="" normalized pieces payload
 
   while IFS=$'\035' read -r kind _ _ _; do
     [[ -n "${kind}" ]] || continue
@@ -4156,23 +4252,28 @@ guard_extract_pieces() {
       [[ -n "${kind}" ]] || continue
       printf '%s\n' "${raw}"
     done <<< "${targets}"
-  )")
-  normalized=$(printf '%s\n' "${normalized}" | guard_strip_redirections) || guard_mark_reading_failed
-  if ! printf '%s\n' "${normalized}" | LC_ALL=C awk -v flags="${read_flags}" -v nl=$'\036' '
+  )" lines)
+  # A failed lexer marks the failure itself; an escape it could not read is a
+  # `!` line, marked here.
+  pieces=$(shell_lex "${normalized}" pieces arith "safedeps:extract_pieces") || pieces=""
+  if ! printf '%s\n' "${pieces}" | LC_ALL=C awk -F'\037' -v flags="${read_flags}" '
     # safedeps:extract_pieces (scripts/test/scan-contract.sh keys on this line)
-    NR > length(flags) { exit }
-    {
-      reads = substr(flags, NR, 1) == "1" ? "true" : "false"
-      n = split($0, pieces, "[;|&" nl "]")
-      for (i = 1; i <= n; i++) printf "%s\t%s\n", reads, pieces[i]
-    }'; then
+    $0 == "!" { bad = 1; next }
+    NF < 3 || $1 > length(flags) { next }
+    { printf "%s\t%s\037%s\n", (substr(flags, $1, 1) == "1" ? "true" : "false"), $2, $3 }
+    END { exit bad ? 3 : 0 }'; then
     guard_mark_reading_failed
   fi
 
-  command_payload_texts "$(join_line_continuations "$(strip_heredoc_bodies "${cmd}")")" \
-    | guard_strip_redirections | tr ';|&' '\n' | awk '
+  while IFS= read -r payload; do
+    [[ "${payload}" =~ [^[:space:]] ]] || continue
+    pieces=$(shell_lex "${payload}" pieces arith "safedeps:payload_pieces") || pieces=""
+    printf '%s\n' "${pieces}" | LC_ALL=C awk -F'\037' '
       # safedeps:payload_pieces (scripts/measure/scan-failure-census.sh keys on this line)
-      { printf "false\t%s\n", $0 }' || guard_mark_reading_failed
+      $0 == "!" { bad = 1; next }
+      NF >= 3 { printf "false\t%s\037%s\n", $2, $3 }
+      END { exit bad ? 3 : 0 }' || guard_mark_reading_failed
+  done < <(command_payload_texts "$(join_line_continuations "$(strip_heredoc_bodies "${cmd}")")")
 }
 
 guard_extract_specs() {
@@ -4203,16 +4304,17 @@ guard_extract_specs() {
   # The spec lines are the same in both modes; the gate reads only those, so the
   # other lines cannot move a verdict.
   local cmd="$1" targets="$2" mode="${3:-}"
-  local seg eco text text_line runner gate_reads
+  local seg words eco text text_line runner gate_reads
 
-  while IFS=$'\t' read -r gate_reads seg; do
+  # The pieces carry no tab, so the tab and \037 cut the three fields.
+  while IFS=$'\t\037' read -r gate_reads seg words; do
     [[ "${seg}" =~ [^[:space:]] ]] || continue
     command_is_dependency_install "${seg}" || continue
     eco=$(guard_segment_ecosystem "${seg}")
     [[ -n "${eco}" ]] || continue
     runner=false
     guard_segment_is_runner "${seg}" && runner=true
-    text=$(guard_extract_statement_text "${eco}" "${seg}" "${runner}")
+    text=$(guard_extract_statement_text "${eco}" "${words}" "${runner}")
     if [[ "${mode}" != readings ]]; then
       guard_operand_specs "${eco}" "${text}"
       continue

@@ -15,8 +15,15 @@
 # accepts the camelCase form of every dashed spelling. Exit 1 when npm accepts a
 # spelling the grammar does not have.
 #
+# npm 9 and older (Ubuntu's apt npm is 9.2.0) keep this parser elsewhere, and
+# their cmd-list.js exports no `deref`. That npm cannot be asked, so the run
+# says it was skipped and exits 3: not 0, which would read as "every spelling
+# matches", and not 1, which would blame the grammar for the npm on PATH.
+#
 # Usage: scripts/measure/npm-verb-spellings.sh [--print]
 #   --print   print the measured lists without comparing
+# Exit: 0 every spelling is in the grammar, 1 one is missing, 2 no npm to ask,
+#       3 this npm's parser cannot be asked (skipped).
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
@@ -24,8 +31,11 @@ command -v npm >/dev/null 2>&1 || { echo "npm is not on PATH; nothing to measure
 npm_root=$(cd "$(dirname "$(readlink -f "$(command -v npm)" 2>/dev/null || command -v npm)")/.." && pwd)
 [[ -f "${npm_root}/lib/utils/cmd-list.js" ]] || { echo "cannot find npm's lib/utils/cmd-list.js under ${npm_root}" >&2; exit 2; }
 
+version=$(npm --version)
+skipped=3
 measured=$(cd "${npm_root}" && node -e '
 const { deref, commands, aliases } = require("./lib/utils/cmd-list.js")
+if (typeof deref !== "function") process.exit(3)
 // abbrev is resolved from cmd-list.js itself, so a distribution that unbundles
 // the dependencies of npm finds the copy npm uses.
 const abbrev = require(require.resolve("abbrev", { paths: [require("path").resolve("lib/utils")] }))
@@ -41,8 +51,15 @@ for (const [name, targets] of Object.entries(groups)) {
   const found = [...words].filter(w => targets.includes(deref(w))).sort()
   console.log(name + "=" + found.map(write).join("|"))
 }
-')
-version=$(npm --version)
+') || {
+  rc=$?
+  if [[ "${rc}" == "${skipped}" ]]; then
+    printf 'skipped: npm %s has no deref in lib/utils/cmd-list.js, so its command parser cannot be asked\n' "${version}"
+    exit "${skipped}"
+  fi
+  printf 'could not run npm %s command parser (node exited %s)\n' "${version}" "${rc}" >&2
+  exit 2
+}
 
 if [[ "${1:-}" == --print ]]; then
   printf 'npm %s\n%s\n' "${version}" "${measured}"

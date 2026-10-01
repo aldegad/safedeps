@@ -69,6 +69,24 @@ expect_pass() {
   [[ "${got}" == "pass" ]] || fail "command gate leaves ${label} unjudged as documented (got: ${got})"
 }
 
+# deny or allow or pass, then the reason, for one command.
+gate_reason() {
+  local safe out
+  safe=$(mktemp -d "${tmp_root}/safe.XXXXXX")
+  out=$(jq -nc --arg c "$1" --arg cwd "${project_dir}" \
+    '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
+    HOME="${tmp_root}/home" SAFEDEPS_HOME="${safe}" scripts/safedeps-pre-guard.sh 2>/dev/null)
+  jq -r '(.hookSpecificOutput.permissionDecision // "pass") + " " + (.hookSpecificOutput.permissionDecisionReason // "")' <<< "${out:-{\}}"
+}
+
+# An UNDECIDED deny: the gate could not finish reading the command, and says so
+# rather than claiming a finding.
+expect_undecided() {
+  local label="$1" command="$2" got
+  got=$(gate_reason "${command}")
+  [[ "${got}" == "deny "*UNDECIDED* ]] || fail "${label} is UNDECIDED (got: ${got:0:120})"
+}
+
 # --- 1. Carrier forms the command gate catches --------------------------------
 # Regression against narrowing. Tightening the gate for false positives must not
 # quietly shrink this set — that would be a trade, not a net gain.
@@ -140,7 +158,6 @@ pass "heredocs are stripped once and only real ones open"
 expect_pass "a herestring fed to sh"                  "sh <<< 'pip install evil==1.0.0'"
 expect_pass "a herestring fed to bash"                'bash <<<"pip install evil==1.0.0"'
 expect_pass "a heredoc fed straight to sh"            $'sh <<EOF\npip install evil==1.0.0\nEOF'
-expect_pass "sh -c nested in a same-quoted sh -c"     "sh -c 'sh -c '\\''pip install evil==1.0.0'\\'''"
 expect_pass "a shell built by xargs -I"               "echo 'pip install evil==1.0.0' | xargs -I{} sh -c '{}'"
 expect_pass "a shell built by xargs -0"               "printf 'pip install evil==1.0.0' | xargs -0 sh -c"
 expect_pass "a script written then run"               "printf 'pip install evil==1.0.0' > s.sh; sh s.sh"
@@ -148,6 +165,13 @@ expect_pass "eval nested inside sh -c"                "sh -c 'eval \"pip install
 expect_pass "a top-level command substitution"        '$(echo pip install evil==1.0.0)'
 expect_pass "a pipe to a quoted shell name"           "printf 'pip install evil==1.0.0' | \"sh\""
 pass "command gate leaves the unenumerated carriers unjudged (documented boundary)"
+
+# A `sh -c` nested in a same-quoted one used to be in the list above: its
+# payload word is `'sh -c '\''pip ...'\'''`, which the payload reader reads only
+# up to the first `'`. A reader that cannot finish its word now says so
+# (section 10b), so the form is UNDECIDED. It is not judged as the install it
+# runs; that is the plan safedeps/command-words-read-as-the-shell-dequotes.
+expect_undecided "sh -c nested in a same-quoted sh -c"  "sh -c 'sh -c '\\''pip install evil==1.0.0'\\'''"
 
 # For npm the miss is DELAYED detection, not a miss: the effect gate's recognizer
 # is a raw grep with no carrier enumeration, so it fires on the same text the
@@ -240,6 +264,11 @@ do
   reaches_package_manager "${decoy}" \
     && fail "form is a decoy and must not be counted as a gap: ${decoy}"
 done
+# The first decoy costs an UNDECIDED all the same. Its payload word goes on
+# past the quote the reader stops at, and a reader that cannot finish its word
+# cannot tell this decoy from the forms in section 10b that do install. That is
+# the price of the floor, paid in the safe direction.
+expect_undecided "the doubly quoted sh -c decoy" 'sh -c "sh -c "pip install evil==1.0.0""'
 pass "decoy forms never reach a package manager (not gaps, nothing to catch)"
 
 # --- 4. The false-positive corpus stays allowed -------------------------------
@@ -523,10 +552,18 @@ pass "an install behind an assignment prefix is gated however the value is quote
 # form of a dashed one (lib/utils/cmd-list.js deref). The grammar holds what
 # deref accepts, measured from npm; where an npm is on PATH, that measurement is
 # rerun here, so a newer npm that adds a spelling turns this red.
+# An npm whose parser cannot be asked (npm 9 and older have no deref), or no
+# npm at all, is a skip that says so, never a quiet pass.
 if command -v npm >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
-  scripts/measure/npm-verb-spellings.sh >/dev/null \
-    || fail "the grammar's npm verbs are what npm's own parser accepts ($(scripts/measure/npm-verb-spellings.sh 2>&1 | head -5 | tr '\n' ' '))"
-  pass "the grammar's npm command words are the ones npm's parser accepts (scripts/measure/npm-verb-spellings.sh, npm $(npm --version))"
+  spellings_rc=0
+  spellings_out=$(scripts/measure/npm-verb-spellings.sh 2>&1) || spellings_rc=$?
+  case "${spellings_rc}" in
+    0) pass "the grammar's npm command words are the ones npm's parser accepts (scripts/measure/npm-verb-spellings.sh, npm $(npm --version))" ;;
+    3) pass "the grammar's npm command words against npm's parser # SKIP ${spellings_out}" ;;
+    *) fail "the grammar's npm verbs are what npm's own parser accepts ($(head -5 <<< "${spellings_out}" | tr '\n' ' '))" ;;
+  esac
+else
+  pass "the grammar's npm command words against npm's parser # SKIP no npm and node on PATH to ask"
 fi
 
 # --- 7. A spec is checked as the package it names ------------------------------
@@ -1148,6 +1185,126 @@ expect_prescription 'npm create-create-evil@1.0.0;' 'bun c create-evil@1.0.0'
 expect_prescription 'npm @usr/create-foo@2.0.0;' 'bun create @usr/foo@2.0.0'
 pass "a create is checked as the package its manager rewrites the operand into"
 
+# --- 10b. One reader of quotes, redirections and cuts ---------------------------
+# The extractor's words, the redirections it drops and the cuts between
+# statements come from one lexing (the pieces view of shell_lex). Each had a
+# reader of its own, and each reader had its own model of the quoting. An awk
+# that knew `'...'`, `"..."` and a backslash read the `>` inside `"$(echo ">'")"`
+# and `$'...\'>'` as a redirection, took the rest of the line as its target, and
+# the pinned install after it passed unchecked; the sed before it read a
+# redirection only at the start of a word and kept a quoted target with a real
+# `2>` as operands; and the cut at `;` `|` `&` read no quotes at all, so
+# `--log "a;b" evil==1.0.0` left evil in a piece that was not an install. Every
+# form here is one bash and zsh run as the pinned install named in its
+# prescription (measured with a stand-in printing its argv in place of the
+# manager).
+for row in \
+  $'pypi evil@1.0.0;\tpip install --log "$(echo ">\'")" evil==1.0.0' \
+  $'pypi evil@1.0.0;\tpip install --log $\'/tmp/x\\\'>\' evil==1.0.0' \
+  $'pypi evil@1.0.0;\tpip install --log "`echo ">\'"`" evil==1.0.0' \
+  $'npm evil@1.0.0;\tpnpm add --reporter "$(echo ">\'")" evil@1.0.0' \
+  $'npm evil@1.0.0;\tnpm install --tag "$(echo ">\'")" evil@1.0.0' \
+  $'pypi evil@1.0.0;\tpip install --log "$(echo ">\'")" evil==1.0.0 2>"$(echo "\'")"' \
+  $'npm evil@1.0.0;\tnpm install --tag "$(echo ">\'")" evil@1.0.0 --foo "$(echo "\'")"' \
+  $'pypi evil@1.0.0;\tpip install --log "$(echo "a b>\'")" evil==1.0.0' \
+  $'pypi evil@1.0.0;\tpip install --log $\'\\\'\' --src \'>x\' evil==1.0.0' \
+  $'pypi evil@1.0.0;\tpip install --log "x >\'" evil==1.0.0 2>"\'"' \
+  $'npm evil@1.0.0;\tnpm install --tag "a >\'" evil@1.0.0 --foo "\'"' \
+  $'npm evil@1.0.0;\tpnpm add --reporter "a >\'" evil@1.0.0 --filter "\'"' \
+  $'pypi evil@1.0.0;\tpip install --log "a;b" evil==1.0.0' \
+  $'pypi evil@1.0.0;\tpip install --log \'a|b\' evil==1.0.0' \
+  $'pypi evil@1.0.0;\tpip install --log "a&b" evil==1.0.0' \
+  $'pypi requests@2.19.0;\tpip install $\'requests==2.19.0\'' \
+  $'pypi evil@1.0.0;\tpip install $\'ev\\x69l==1.0.0\'' \
+  $'pypi evil@1.0.0;\tpip install $\'ev\\151l==1.0.0\''
+do
+  expect_prescription "${row%%$'\t'*}" "${row#*$'\t'}"
+done
+# gem reads the value of `--document` as optional, so the version also binds
+# to the words of that value; the package gem installs is among them.
+for gem_form in \
+  $'gem install --document "$(echo ">\'")" rake -v 13.0.0' \
+  $'gem install --document "a >\'" rake -v 13.0.0 --no-user-install "\'"'
+do
+  got=$(prescription "${gem_form}")
+  [[ "${got}" == *'rubygems rake@13.0.0;'* ]] || fail "the deny for \`${gem_form}\` prescribes rubygems rake@13.0.0 (got: ${got})"
+done
+pass "quotes, redirections and statement cuts are read by the one lexer, and each pinned install is checked as its package"
+
+# The extractor still reads a word only as far as its quote removal goes. A
+# `$'...'` escape whose value depends on the locale or is not one plain byte
+# (`\u`, `\U`, `\c`, a NUL, a byte past 127) is not read as some other text: the
+# reading is marked failed, and the install is UNDECIDED.
+expect_undecided "an ANSI-C \\u escape in a spec" $'pip install $\'ev\\u0069l==1.0.0\''
+expect_undecided "an ANSI-C NUL in a spec" $'pip install $\'evil\\0==1.0.0\''
+pass "an escape the extractor cannot name is a failed reading, not another word"
+
+# The floor under the payload readers. `sh -c` and `eval` payloads are read as
+# one quoted word, up to the first matching quote; a word that does not end
+# there -- an escaped quote inside it, more quoting glued to it, an ANSI-C word,
+# an unquoted word with escapes -- used to be read as far as it went, and the
+# install the shell runs after it passed with no verdict (every form below was
+# measured, with a stand-in for the manager, to run the install). The reader
+# now marks the reading failed and the command is UNDECIDED. Reading those
+# words the way the shell does is the plan
+# safedeps/command-words-read-as-the-shell-dequotes.
+for payload_form in \
+  'sh -c "echo \"hi\"; pip install evil==1.0.0"' \
+  'bash -c "x=\"a\"; cargo install evil --version 1.0.0"' \
+  'eval "echo \"hi\"; pip install evil==1.0.0"' \
+  $'sh -c \'echo hi\'"; pip install evil==1.0.0"' \
+  $'sh -c $\'pip install evil==1.0.0\'' \
+  'sh -c pip\ install\ evil==1.0.0' \
+  'sh -c "pip install "evil==1.0.0' \
+  $'bash -c \'echo \'\\\'\'hi\'\\\'\'; pip install evil==1.0.0\''
+do
+  expect_undecided "a payload word its reader cannot finish: ${payload_form}" "${payload_form}"
+done
+# Controls: a payload read to its end is judged as before, and a head inside
+# quoted text is data, not a payload the shell runs.
+expect_prescription 'pypi evil@1.0.0;' 'sh -c "pip install evil==1.0.0"'
+expect_prescription 'pypi evil@1.0.0;' $'echo \'sh -c "pip install evil==1.0.0"\''
+expect_pass "a quoted mention of sh -c with escaped quotes" $'git commit -m \'run sh -c "npm test -- \\"x\\""\''
+pass "a payload word its reader cannot read to the end is UNDECIDED, not read as no install"
+
+# `npm link` reads every argument with npm-package-arg and installs the
+# registry ones into the global prefix (lib/commands/link.js:92-104); a path,
+# a tarball, a git or a URL argument is linked as written. Reading only the
+# first argument let a path in front hide the package after it: `npm link
+# ./lib evil@1.0.0` installed evil globally and ran its scripts with no verdict
+# and no record (measured against a fixture registry with a synthetic package).
+for link_form in \
+  'npm link ../lib evil@1.0.0' \
+  'npm ln ../lib evil@1.0.0' \
+  'npm link /tmp/x evil@1.0.0' \
+  'npm link ~/lib evil@1.0.0' \
+  'npm link ./a ./b evil@1.0.0' \
+  'npm link lib/ evil@1.0.0' \
+  'npm link evil@1.0.0 ../lib' \
+  'npm link --save-dev ../lib evil@1.0.0' \
+  'npm link evil@1.0.0' \
+  'npm link ../lib npm:evil@1.0.0'
+do
+  expect_prescription 'npm evil@1.0.0;' "${link_form}"
+done
+for local_link in 'npm link ../lib' 'npm link' 'npm link .' 'npm link ../lib file:../other' 'npm link ./x.tgz'; do
+  expect_pass "a link of local code: ${local_link}" "${local_link}"
+done
+# Which words npa reads as registry ones is npm's answer, rerun here against
+# the npm on PATH like the command words above.
+if command -v npm >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  link_rc=0
+  link_out=$(scripts/measure/npm-link-operands.sh 2>&1) || link_rc=$?
+  case "${link_rc}" in
+    0) pass "npm link arguments are read the way npm-package-arg reads them (scripts/measure/npm-link-operands.sh, npm $(npm --version))" ;;
+    3) pass "npm link arguments against npm-package-arg # SKIP ${link_out}" ;;
+    *) fail "npm link arguments are read the way npm-package-arg reads them ($(head -5 <<< "${link_out}" | tr '\n' ' '))" ;;
+  esac
+else
+  pass "npm link arguments against npm-package-arg # SKIP no npm and node on PATH to ask"
+fi
+pass "npm link reads each argument, and a registry one is checked wherever it stands"
+
 # --- 11. The UNGATED record names each operand the gate did not check ---------
 # The record used to be a second parser: it read each statement on its own and
 # asked the extractor "was this package pinned?" by name, so a pin on one
@@ -1332,6 +1489,16 @@ operand_rows=(
   $'npm:left-pad\tnpm run build && npm link left-pad'
   $'\tnpm link'
   $'\tnpm link ../my-lib'
+  # A path in front no longer hides the package; a path names none. A git or a
+  # URL argument is fetched and installed like a registry one, and carries no
+  # version the ledger can check, so it is recorded.
+  $'npm:left-pad\tnpm link ../lib left-pad'
+  $'npm:left-pad\tnpm link ~/lib left-pad'
+  $'npm:left-pad npm:user/repo\tnpm link ../lib user/repo left-pad'
+  $'npm:user/repo\tnpm link ../lib user/repo'
+  $'npm:user/repo\tnpm link user/repo'
+  $'npm:github:u/r\tnpm link github:u/r'
+  $'npm:https://example.test/x.tgz\tnpm link ../lib https://example.test/x.tgz'
   # Recorded: a payload's npm install. Where it lands is decided inside the
   # payload, and the landing does not read inside it.
   $'npm:left-pad\tsh -c \'npm install left-pad\''
