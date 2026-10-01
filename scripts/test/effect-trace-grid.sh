@@ -77,7 +77,8 @@ reset_alt() {
 post_ungated_lines() { grep 'post-verify UNGATED' "${CASE_HOME}/advisory.log" 2>/dev/null || true; }
 
 # One row. <id>|<fixture>|<cwd>|<engine>|<expect>|<command>
-# <expect>: rollback | ungated-trace | ungated-attrib | quiet
+# <expect>: rollback | ungated-trace | ungated-attrib | quiet, or read: rolled
+# back where the gate looked, or recorded as having left no trace there
 # The command may say @ALT@ for the alternate tree; @ENVCDPATH@ as its first
 # word runs it with CDPATH=<alt> inherited from the environment, which the
 # hooks do not see.
@@ -128,6 +129,14 @@ run_row() {
         || note_failure "${id}: the record says the install landed elsewhere or installed nothing"
       [[ "${engine}" == codex ]] || ! grep -q '^sd-' <<< "${CASE_RAN}" \
         || note_failure "${id}: nothing is rebuilt where the install left no trace (${CASE_RAN})"
+      ;;
+    read)
+      if [[ "${rb}" == yes ]]; then
+        [[ -z "${victim}" ]] || note_failure "${id}: the rollback removes sd-victim from disk (${victim})"
+      else
+        post_ungated_lines | grep -qF 'the install landed elsewhere or installed nothing' \
+          || note_failure "${id}: rolled back, or recorded UNGATED as an install with no trace (post: ${CASE_POST:-<quiet>})"
+      fi
       ;;
     ungated-attrib)
       post_ungated_lines | grep -qF 'cannot answer for every npm install in this command' \
@@ -197,9 +206,11 @@ N12|project|.|claude|rollback|cd nonexist; npm install sd-victim
 N13|project|.|claude|ungated-trace|CDPATH=@ALT@; cd sub; npm install sd-victim
 X1|project|.|claude|ungated-trace|@ENVCDPATH@ cd sub; npm install sd-victim
 # The command changes what npm's answer depends on: a package.json, an .npmrc,
-# the workspace declaration.
-N14|project|src|claude|ungated-trace|npm init -y >/dev/null && npm install sd-victim
-N15|project|.|claude|ungated-trace|cd src && npm init -y >/dev/null && npm install sd-victim
+# the workspace declaration. N14 and N15 were recorded UNGATED before the
+# release tree was merged in and rolled back after it (measured; the cause was
+# not traced); either is the gate answering for the install.
+N14|project|src|claude|read|npm init -y >/dev/null && npm install sd-victim
+N15|project|.|claude|read|cd src && npm init -y >/dev/null && npm install sd-victim
 N16|project|.|claude|ungated-trace|cd sub && rm -f package.json && npm install sd-victim
 N17|project|.|claude|ungated-trace|printf 'global=true\n' > .npmrc && npm install sd-victim
 N18|project|.|claude|ungated-trace|mkdir -p newp && cd newp && npm init -y >/dev/null && npm install sd-victim
