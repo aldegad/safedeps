@@ -25,7 +25,7 @@ cd "${ROOT_DIR}" || exit 2
 # <name>|<phase>|<command>, in the old chain's order.
 #
 # The second phase holds the batteries that a busy machine turns red without a
-# defect, and it starts only when the first is done:
+# defect:
 #
 #   self-budget        times the guard's answers against budgets of one to
 #                      twenty-five seconds. On its own it is nearly all sleep.
@@ -36,7 +36,11 @@ cd "${ROOT_DIR}" || exit 2
 #                      pre-guard in every try and the battery failed; on the
 #                      8-CPU Linux VM at load 17 it landed after 0.4s.
 #
-# Neither loads the machine much, so they share the phase.
+# Neither loads the machine much, so they share the phase. It starts when the
+# census finishes, not when the whole first phase does: the census runs a guard
+# per CPU and is the load these two cannot stand, while every other battery is
+# one process at a time. On the Mac the single-process batteries outlasted the
+# census by six minutes.
 BATTERIES=(
   "smoke|1|scripts/test/smoke.sh"
   "scan-contract|1|scripts/test/scan-contract.sh"
@@ -52,7 +56,13 @@ BATTERIES=(
   "effect-trace-grid|2|scripts/test/effect-trace-grid.sh"
   "e2e|1|scripts/test/e2e.sh"
 )
-PHASES=(1 2)
+PHASE_TWO_AFTER=census
+# Checked before anything starts: a second phase with nothing to wait for would
+# start at once, under the very load it exists to avoid.
+printf '%s\n' "${BATTERIES[@]}" | grep -qx "${PHASE_TWO_AFTER}|1|.*" || {
+  printf 'run-all: the second phase waits for %s, and no first-phase battery has that name\n' "${PHASE_TWO_AFTER}" >&2
+  exit 2
+}
 
 serial=false
 [[ "${SAFEDEPS_TEST_SERIAL:-}" == 1 ]] && serial=true
@@ -113,18 +123,22 @@ if [[ "${serial}" == true ]]; then
     wait "${pids[0]}"
   done
 else
-  for phase in "${PHASES[@]}"; do
-    pids=()
-    for entry in "${BATTERIES[@]}"; do
-      IFS='|' read -r name battery_phase command <<< "${entry}"
-      [[ "${battery_phase}" == "${phase}" ]] || continue
-      run_one "${name}" "${command}" &
-      pids+=("$!")
-    done
-    for pid in "${pids[@]}"; do
-      wait "${pid}"
-    done
+  gate_pid=""
+  for entry in "${BATTERIES[@]}"; do
+    IFS='|' read -r name battery_phase command <<< "${entry}"
+    [[ "${battery_phase}" == 1 ]] || continue
+    run_one "${name}" "${command}" &
+    pids+=("$!")
+    [[ "${name}" != "${PHASE_TWO_AFTER}" ]] || gate_pid=$!
   done
+  wait "${gate_pid}"
+  for entry in "${BATTERIES[@]}"; do
+    IFS='|' read -r name battery_phase command <<< "${entry}"
+    [[ "${battery_phase}" == 2 ]] || continue
+    run_one "${name}" "${command}" &
+    pids+=("$!")
+  done
+  wait
 fi
 pids=()
 suite_secs=$(( $(date +%s) - suite_start ))
