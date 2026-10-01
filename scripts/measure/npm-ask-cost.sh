@@ -9,7 +9,7 @@
 # can quote a measured number from the machine it was made on.
 #
 # Usage:
-#   scripts/measure/npm-ask-cost.sh [--runs R] [N...]
+#   scripts/measure/npm-ask-cost.sh [--runs R] [--query-only] [N...]
 #
 # N is the size of the synthetic tree: N packages in node_modules (a tenth of
 # them with a nested package of their own) for `npm query`, and N workspace
@@ -21,7 +21,9 @@
 # (1KB) is judged inline with no deadline of its own, so this is what the
 # runtime's 30s has to cover; a larger one runs under the self budget (20s by
 # default). The asks alone stop at 8s (lib/npm/ask.sh).
-# R runs per cell, the slowest and the median printed. The tree is written by
+# R runs per cell, the slowest and the median printed. --query-only skips the
+# workspace columns, which grow with the member count for reasons of their own
+# (the pre-guard snapshots every member's package.json). The tree is written by
 # hand: no install, no registry, no network.
 #
 # The query is timed twice. npm trusts node_modules/.package-lock.json when it
@@ -34,10 +36,12 @@
 set -uo pipefail
 
 RUNS=3
+QUERY_ONLY=false
 SIZES=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --runs) RUNS="${2:-3}"; shift 2 ;;
+    --query-only) QUERY_ONLY=true; shift ;;
     *) SIZES+=("$1"); shift ;;
   esac
 done
@@ -145,9 +149,12 @@ for n in "${SIZES[@]}"; do
   touch -t 200001010000 "${tree}/node_modules/.package-lock.json"
   walk=$(cd "${tree}" && time_runs npm query '*')
   ws="${T}/ws-${n}"
-  make_workspace "${n}" "${ws}"
-  member=$(cd "${ws}/packages/m$(( n - 1 ))" && time_runs npm prefix)
-  hook=$(time_runs pre_hook "${ws}/packages/m$(( n - 1 ))")
+  member=- hook=-
+  if [[ "${QUERY_ONLY}" == false ]]; then
+    make_workspace "${n}" "${ws}"
+    member=$(cd "${ws}/packages/m$(( n - 1 ))" && time_runs npm prefix)
+    hook=$(time_runs pre_hook "${ws}/packages/m$(( n - 1 ))")
+  fi
   printf '%-7s %-9s %-14s %-14s %-14s %-14s\n' "${n}" "${nodes}" "${hidden/ //}" "${walk/ //}" "${member/ //}" "${hook/ //}"
   rm -rf "${tree}" "${ws}"
 done
