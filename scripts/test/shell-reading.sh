@@ -14,6 +14,15 @@
 # herestring, a heredoc with a digit delimiter, a multi-line string closing on
 # the line that opens a heredoc, a substitution in an unquoted heredoc body).
 # A form marked `gate: pass` is data the shell never runs, and must stay data.
+#
+# The shells are bash, zsh and dash, as the agent wrapper and both platforms
+# run them (measured.{bash,zsh,sh,agent,dash} on macOS, measured.linux.{bash,
+# dash} on Linux). The lexer reads a command once per shell -- the bash, zsh
+# and dash readings -- and the gate judges the union. Before the gate is asked
+# anything, each reading is held to its own shell here: wherever a shell ran
+# the tail, that shell's reading must show it. The union would hide a reading
+# that drifted from its shell for as long as another reading happened to
+# cover the form, and the next form would not be covered.
 set -euo pipefail
 
 # `--count` tallies the decisions instead of stopping at the first miss, and
@@ -29,6 +38,9 @@ FORMS="scripts/measure/shell-reading-forms.json"
 
 pass() { printf 'ok - %s\n' "$1"; }
 fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
+
+# shell column -> the reading that stands for it
+SHELL_READINGS="bash:bash sh:bash linux.bash:bash zsh:zsh agent:zsh dash:dash linux.dash:dash"
 
 tmp_root=$(mktemp -d "${TMPDIR:-/tmp}/safedeps-shell-reading.XXXXXX")
 trap 'rm -rf "${tmp_root}"' EXIT
@@ -60,7 +72,44 @@ printf "echo 'pip install evil==6.6.6'" > "${tmp_root}/k.cmd"
 [[ "$(decision_of "${tmp_root}/k.cmd")" == "pass" ]] || fail "control: the quoted install is data"
 pass "control: the harness separates a judged install from data"
 
+# Each reading against its own shell. A reading shows the tail when its live
+# view (every byte the shell runs at the top level), the scripts it hands to
+# `sh -c` or `eval`, or the heredoc bodies it pipes to a shell hold it.
+lex_src=$(sed -n '/^shell_lex() {/,/^}/p' scripts/safedeps-pre-guard.sh)
+[[ "${lex_src}" == *"shell_lex() {"* ]] || fail "shell_lex not found in the guard (renamed? then update this battery)"
+eval "${lex_src}"
+reading_shows_tail() { # reading text
+  local v
+  for v in live cscripts shell-bodies; do
+    SAFEDEPS_READING="$1" shell_lex "$2" "${v}" "safedeps:shell-reading" | tr -d ' \t\n' \
+      | grep -q 'pipinstallevil==6\.6\.6' && return 0
+  done
+  return 1
+}
 n=$(jq length "${FORMS}")
+cells=0
+declare -a unfaithful=()
+for ((i = 0; i < n; i++)); do
+  id=$(jq -r ".[${i}].id" "${FORMS}")
+  text=$(jq -j ".[${i}].text" "${FORMS}" | sed -e 's/@@TAIL@@/pip install evil==6.6.6/' -e 's/@@TAIL_SPLIT@@/pi\\\
+p install evil==6.6.6/'; printf 'X'); text="${text%X}"
+  for pair in ${SHELL_READINGS}; do
+    column="${pair%%:*}"
+    [[ "$(jq -r ".[${i}].measured.${column} // \"\"" "${FORMS}")" == R* ]] || continue
+    cells=$((cells + 1))
+    reading_shows_tail "${pair#*:}" "${text}" || unfaithful+=("${id}:${column}")
+  done
+done
+if [[ ${#unfaithful[@]} -gt 0 ]]; then
+  if [[ "${COUNT}" == "true" ]]; then
+    printf 'reading not faithful to its shell:'; printf ' %s' "${unfaithful[@]}"; printf '\n'
+  else
+    fail "a shell ran the tail and its own reading does not show it: ${unfaithful[*]}"
+  fi
+else
+  pass "each reading shows the tail wherever its shell ran it (${cells} shell runs of ${n} forms)"
+fi
+
 ran=0 judged=0 data=0
 declare -a missed=()
 for ((i = 0; i < n; i++)); do
@@ -69,7 +118,7 @@ for ((i = 0; i < n; i++)); do
   jq -j ".[${i}].text" "${FORMS}" \
     | sed -e 's/@@TAIL@@/pip install evil==6.6.6/' -e 's/@@TAIL_SPLIT@@/pi\\\
 p install evil==6.6.6/' > "${tmp_root}/${id}.cmd"
-  shells=$(jq -r ".[${i}].measured | \"\(.bash) \(.zsh) \(.agent)\"" "${FORMS}")
+  shells=$(jq -r ".[${i}].measured | \"\(.bash) \(.zsh) \(.agent) \(.dash) \(.linux.bash) \(.linux.dash)\"" "${FORMS}")
   want=$(jq -r ".[${i}].gate // empty" "${FORMS}")
   got=$(decision_of "${tmp_root}/${id}.cmd")
   if [[ "${shells}" == *R* ]]; then
