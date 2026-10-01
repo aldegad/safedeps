@@ -1204,5 +1204,137 @@
       "sh": "R",
       "agent": "R"
     }
+  },
+  {
+    "id": "X1",
+    "label": "dq-param quote then (( on the same line",
+    "text": "echo \"${x:-'}\" ; ((1<<2))\n@@TAIL@@\n2\necho \"'}\"\n",
+    "measured": {
+      "bash": "-",
+      "zsh": "R",
+      "sh": "-",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "X2",
+    "label": "dq-param quote then (( on the next line",
+    "text": "echo \"${x:-'}\"\n((1<<2))\n@@TAIL@@\n2\necho \"'}\"\n",
+    "measured": {
+      "bash": "-",
+      "zsh": "R",
+      "sh": "-",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "Y1",
+    "label": "cross: (( then the dq-param quote on the same line",
+    "text": "((1<<2)); echo \"${x:-'}\"\n@@TAIL@@\n2\necho \"'}\"\n",
+    "measured": {
+      "bash": "-",
+      "zsh": "R",
+      "sh": "-",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "Y2",
+    "label": "cross: (( then the dq-param quote on the next line",
+    "text": "((1<<2))\necho \"${x:-'}\"\n@@TAIL@@\n2\necho \"'}\"\n",
+    "measured": {
+      "bash": "-",
+      "zsh": "R",
+      "sh": "-",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "X3",
+    "label": "heredoc body: case pattern inside $( )",
+    "text": "cat <<EOF\n$(case x in x) @@TAIL@@;; esac)\nEOF\n",
+    "measured": {
+      "bash": "-!",
+      "zsh": "R",
+      "sh": "-!",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "X4",
+    "label": "heredoc body: substitution over lines",
+    "text": "cat <<EOF\n$(\n@@TAIL@@\n)\nEOF\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "X5",
+    "label": "heredoc body: escaped paren inside $( )",
+    "text": "cat <<EOF\n$(echo \\); @@TAIL@@)\nEOF\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "X6",
+    "label": "heredoc body: backtick over lines",
+    "text": "cat <<EOF\n`\n@@TAIL@@\n`\nEOF\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "X7",
+    "label": "dq subst: esac as a pattern word after |",
+    "text": "echo \"$(case x in *|esac) @@TAIL@@;; esac)\"\n",
+    "measured": {
+      "bash": "-!",
+      "zsh": "R",
+      "sh": "-!",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "X8",
+    "label": "dq subst: zsh ;| then *)",
+    "text": "echo \"$(case x in x) :;| *) @@TAIL@@;; esac)\"\n",
+    "measured": {
+      "bash": "-!",
+      "zsh": "R",
+      "sh": "-!",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "X9",
+    "label": "top: zsh ;| then *)",
+    "text": "case x in x) :;| *) @@TAIL@@;; esac\n",
+    "measured": {
+      "bash": "-!",
+      "zsh": "R",
+      "sh": "-!",
+      "agent": "R"
+    }
+  },
+  {
+    "id": "X10",
+    "label": "heredoc body: comment inside $( ) then line",
+    "text": "cat <<EOF\n$(echo hi # )\n@@TAIL@@\n)\nEOF\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R"
+    }
   }
 ]

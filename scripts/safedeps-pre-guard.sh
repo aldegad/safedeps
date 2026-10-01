@@ -398,6 +398,14 @@ shell_lex() {
       #              it is quoted or nested), env with its options and
       #              assignments, command and exec. Not length-preserving.
       #
+      # Two places where bash and zsh read the same text differently, each its
+      # own axis: `((` / `$((` holding `<<` or a comment (arithmetic, or a
+      # subshell), and an apostrophe inside "${...}" (a quote to bash, a character to
+      # zsh). policy is "arith" or "sub" for the first, with "-zq" appended to
+      # read the second the zsh way: arith, sub, arith-zq, sub-zq. A command is
+      # judged under every combination of the axes it actually flags; tying the
+      # two to one switch left the reading zsh makes (arithmetic and a plain
+      # character) unjudged (caught in review).
       # policy=arith reads `((` and `$((` as arithmetic; policy=sub reads them as
       # subshells. The caller runs the second only when the first reports AMBIG.
       # Flags go to ENVIRON["SAFEDEPS_LEX_FLAGS"] when set: AMBIG (an arithmetic
@@ -421,8 +429,21 @@ shell_lex() {
         SPC["\n"] = 1
         DQS["\\"] = 1; DQS["\042"] = 1; DQS["$"] = 1; DQS["`"] = 1
         wantdep = (view == "unprefixed")
-        mode = ""; np = 0; ambig = 0; unterm = 0
+        mode = ""; np = 0; ambig_a = 0; ambig_q = 0; unterm = 0; hn = 0; hstop = 0
+        subp = (policy ~ /^sub/); zq = (policy ~ /-zq$/)
         for (i = 1; i <= N; i++) {
+          # An unquoted heredoc body ends where at_newline found its terminator
+          # line: close what is open in it (a substitution left open there never
+          # closes, as in the shell) and step over the terminator.
+          if (hn > 0 && i == hstop + 1) {
+            # A substitution left open in a body fails that one heredoc in the
+            # shell; the lines after it still run (form H29), so it is dropped,
+            # not counted as a command that never closes.
+            while (d > 1 && ctx[d] != "H") pop()
+            pop(); hstop = 0; mode = ""
+          }
+          if (i in JMP) { i = JMP[i]; continue }
+          if (i in HSTART) { push("H"); hstop = HEND[HSTART[i]] }
           c = X[i]
           if (wantdep) DEP[i] = (mode == "") ? dc : 99
           if (mode == "SQ") { C[i] = "q"; if (c == "\047") mode = ""; continue }
@@ -455,9 +476,26 @@ shell_lex() {
             else if (c == "`") push("B")
             continue
           }
-          cls = (dq > 0) ? "Q" : "c"
+          if (top == "H") {
+            # Body bytes are data. In an unquoted body the shell performs
+            # parameter, command and arithmetic substitution, and a backslash
+            # escapes only $, ` and \ -- the main loop reads those, so a
+            # substitution in a body is lexed by the same rules as anywhere else,
+            # across lines too (forms X3-X6, X10).
+            C[i] = "b"
+            if (!(c in DQS)) continue
+            if (c == "\\") { if (X[i+1] == "$" || X[i+1] == "`" || X[i+1] == "\\" || X[i+1] == "\n") { i++; C[i] = "b" } continue }
+            # An opener is live code like what it opens, so every view keeps the
+            # substitution whole (form E2).
+            if (c == "$" && X[i+1] == "(" && X[i+2] == "(") { C[i] = "B"; C[i+1] = "B"; C[i+2] = "B"; arith_or_sub(i, 1); continue }
+            if (c == "$" && X[i+1] == "(") { C[i] = "B"; C[i+1] = "B"; i++; push("S"); continue }
+            if (c == "$" && X[i+1] == "{") { C[i] = "B"; C[i+1] = "B"; i++; push("V"); continue }
+            if (c == "`") { C[i] = "B"; push("B"); continue }
+            continue
+          }
+          cls = (dq > 0) ? "Q" : (hn > 0 ? "B" : "c")
           C[i] = cls
-          if (!(c in SPC)) continue
+          if (!(c in SPC) && !(top == "C" && cpat[d] == 1)) continue
           if (c == "\\") {
             if (X[i+1] == "\n") { C[i] = "l"; C[i+1] = "l"; i++; continue }
             # Inside backticks an escaped backtick opens or closes a nested one.
@@ -475,7 +513,7 @@ shell_lex() {
             # Inside "${...}" bash opens a quote here and zsh reads a plain
             # character (forms P4, Q6). Both readings are judged: the second
             # policy is the zsh reading.
-            if (top == "V" && dq > 0) { ambig = 1; if (policy == "sub") continue }
+            if (top == "V" && dq > 0) { ambig_q = 1; if (zq) continue }
             C[i] = "q"; mode = "SQ"; continue
           }
           if (c == "\042") { C[i] = "q"; push("D"); continue }
@@ -483,24 +521,28 @@ shell_lex() {
           if ((c == "c" || c == "e") && wordstart(i) && (i + 4 > N || X[i+4] ~ /[ \t\n;&|()<>]/)) {
             w4 = X[i] X[i+1] X[i+2] X[i+3]
             if (w4 == "case" && cmdpos(i)) { C[i+1] = cls; C[i+2] = cls; C[i+3] = cls; i += 3; push("C"); continue }
-            if (w4 == "esac" && top == "C") { C[i+1] = cls; C[i+2] = cls; C[i+3] = cls; i += 3; pop(); continue }
+            # `esac` ends the case where a pattern list could start, not as a
+            # pattern word after `|` (`*|esac)`, form X7).
+            if (w4 == "esac" && top == "C" && !(cpat[d] == 1 && cpw[d])) { C[i+1] = cls; C[i+2] = cls; C[i+3] = cls; i += 3; pop(); continue }
           }
           # Inside case: after `in`, and after each `;;` `;&` `;;&`, a pattern
           # runs to its `)`, which ends the pattern -- class p, read by the
           # unprefixed view as a statement boundary, so the arm is judged.
           if (top == "C") {
-            if (cpat[d] == 0 && c == "i" && X[i+1] == "n" && wordstart(i) && (i + 2 > N || X[i+2] ~ /[ \t\n;&|()<>]/)) { C[i+1] = cls; i++; cpat[d] = 1; continue }
-            if (cpat[d] == 1 && c == "(") continue
+            if (cpat[d] == 0 && c == "i" && X[i+1] == "n" && wordstart(i) && (i + 2 > N || X[i+2] ~ /[ \t\n;&|()<>]/)) { C[i+1] = cls; i++; cpat[d] = 1; cpw[d] = 0; continue }
+            if (cpat[d] == 1 && c == "(" && !cpw[d]) continue
             if (cpat[d] == 1 && c == ")") { C[i] = "p"; cpat[d] = 2; continue }
-            if (cpat[d] == 2 && c == ";" && (X[i+1] == ";" || X[i+1] == "&")) {
+            if (cpat[d] == 1 && c !~ /[ \t\n]/) cpw[d] = 1
+            # An arm ends at `;;`, `;&`, `;;&`, or zsh `;|` (forms X8, X9).
+            if (cpat[d] == 2 && c == ";" && (X[i+1] == ";" || X[i+1] == "&" || X[i+1] == "|")) {
               C[i+1] = cls; i++
               if (X[i] == ";" && X[i+1] == "&") { C[i+1] = cls; i++ }
-              cpat[d] = 1; continue
+              cpat[d] = 1; cpw[d] = 0; continue
             }
           }
           if (top == "A" || top == "K") {
-            if (c == "<" && X[i+1] == "<" && X[i+2] != "<") ambig = 1
-            if (c == "#" && wordstart(i)) ambig = 1
+            if (c == "<" && X[i+1] == "<" && X[i+2] != "<") ambig_a = 1
+            if (c == "#" && wordstart(i)) ambig_a = 1
             if (top == "K") { if (c == "]") pop(); continue }
             if (c == "(") par[d]++
             else if (c == ")") { if (par[d] > 0) par[d]--; else if (X[i+1] == ")") { i++; C[i] = cls; pop() } }
@@ -526,8 +568,11 @@ shell_lex() {
         }
         if (mode == "SQ" || mode == "AQ" || d > 1 || np > 0) unterm = 1
         flagfile = ENVIRON["SAFEDEPS_LEX_FLAGS"]
+        ambig = ambig_a || ambig_q
         if (flagfile != "") {
           if (ambig) print "AMBIG" >> flagfile
+          if (ambig_a) print "AMBIG_ARITH" >> flagfile
+          if (ambig_q) print "AMBIG_DQQ" >> flagfile
           if (unterm) print "UNTERM" >> flagfile
         }
         # A reading that never closes strips nothing: a prefix word would run to
@@ -580,8 +625,9 @@ shell_lex() {
       }
 
       function push(k) {
-        d++; ctx[d] = k; par[d] = 0; pnp[d] = np; besc[d] = 0; cpat[d] = 0
+        d++; ctx[d] = k; par[d] = 0; pnp[d] = np; besc[d] = 0; cpat[d] = 0; cpw[d] = 0
         if (k == "D") dq++
+        if (k == "H") hn++
         if (k != "C") dc++
         if (k == "S" || k == "B") { nsub++; sbeg[nsub] = i + 1; send[nsub] = N; skind[nsub] = k; sid[d] = nsub }
       }
@@ -593,6 +639,7 @@ shell_lex() {
           if (ctx[d] == "S" || ctx[d] == "B") send[sid[d]] = besc[d] ? i - 2 : i - 1
           if ((ctx[d] == "S" || ctx[d] == "B") && np > pnp[d]) np = pnp[d]
           if (ctx[d] == "D") dq--
+          if (ctx[d] == "H") hn--
           if (ctx[d] != "C") dc--
           d--
         }
@@ -607,7 +654,7 @@ shell_lex() {
         return w ~ /^(if|then|else|elif|while|until|do|time)$/
       }
       function arith_or_sub(j, dollar) {
-        if (policy == "sub") {
+        if (subp) {
           if (dollar) { i = j + 1; push("S") }
           else { i = j + 1; par[d] += 2 }
           return
@@ -635,8 +682,14 @@ shell_lex() {
         return k - 1
       }
       # A newline that ends a line of code. Pending heredoc bodies start after it.
-      function at_newline(j,   p, s, e, line, t, done, lim, fed, kk, sawpipe) {
-        C[j] = (dq > 0) ? "Q" : "c"
+      # This finds where each body and its terminator line are, the way the
+      # shell does -- line by line, before anything in a body is expanded -- and
+      # leaves the bodies to the main loop: a quoted body is data and is stepped
+      # over; an unquoted one is walked as context H. There is no second reader
+      # of the body (a line-at-a-time scanner here missed multi-line
+      # substitutions and case patterns inside them; caught in review).
+      function at_newline(j,   p, s, e, line, t, done, fed, kk, bs) {
+        C[j] = (dq > 0) ? "Q" : (hn > 0 ? "B" : "c")
         if (np == 0) return j
         s = j + 1
         for (p = 1; p <= np; p++) {
@@ -644,15 +697,15 @@ shell_lex() {
           # operator on its line that is code and not `||`, or a line that ends
           # in one. Conservative on purpose: a body is searched for install text
           # only when it is fed to something.
-          fed = 0; sawpipe = 0
+          fed = 0
           for (kk = pstart[p]; kk < j; kk++) {
-            if (X[kk] == "|" && (C[kk] == "c" || C[kk] == "Q")) {
+            if (X[kk] == "|" && (C[kk] == "c" || C[kk] == "Q" || C[kk] == "B")) {
               if (X[kk+1] == "|" || X[kk-1] == "|") continue
               fed = 1
             }
           }
           pfed[p] = fed
-          done = 0
+          done = 0; bs = s
           while (s <= N) {
             e = s; line = ""
             while (1) {
@@ -665,53 +718,37 @@ shell_lex() {
             # closing backtick, which the main loop then reads as code (P19).
             if (pb[p] && index(t, pd[p] "`") == 1) {
               lead = length(line) - length(t)
+              body_region(bs, s - 1, p)
               for (kk = s; kk < s + lead + length(pd[p]); kk++) C[kk] = "b"
+              if (s + lead + length(pd[p]) - 1 >= s) JMP[s] = s + lead + length(pd[p]) - 1
               np = 0
-              return s + lead + length(pd[p]) - 1
+              return j
             }
             if (t == pd[p]) {
+              body_region(bs, s - 1, p)
               for (kk = s; kk < e; kk++) C[kk] = "b"
               if (e <= N) C[e] = "b"
+              JMP[s] = (e <= N) ? e : N
               s = e + 1; done = 1; break
             }
-            body_line(s, e, p)
-            if (e <= N) C[e] = "b"
             s = e + 1
           }
-          if (!done) unterm = 1
+          if (!done) { body_region(bs, N, p); unterm = 1 }
         }
         np = 0
-        return s - 1
+        return j
       }
-      # Body bytes are data, except command substitutions in a body whose
-      # delimiter was not quoted: the shell runs those.
-      function body_line(s, e, p,   kk, depth, q2) {
-        for (kk = s; kk < e; kk++) {
-          C[kk] = "b"; BF[kk] = p
+      # A body is bytes bs..be. A quoted one is data and stepped over; an
+      # unquoted one is walked by the main loop as context H.
+      function body_region(bs, be, p,   kk) {
+        if (be < bs) return
+        for (kk = bs; kk <= be; kk++) BF[kk] = p
+        if (pq[p]) {
+          for (kk = bs; kk <= be; kk++) C[kk] = "b"
+          JMP[bs] = be
+          return
         }
-        if (pq[p]) return
-        kk = s
-        while (kk < e) {
-          if (X[kk] == "\\") { kk += 2; continue }
-          if (X[kk] == "$" && X[kk+1] == "(" && X[kk+2] != "(") {
-            depth = 0; q2 = ""
-            for (; kk < e; kk++) {
-              C[kk] = "B"
-              if (q2 != "") { if (X[kk] == q2) q2 = ""; continue }
-              if (X[kk] == "\047" || X[kk] == "\042") { q2 = X[kk]; continue }
-              if (X[kk] == "(") depth++
-              else if (X[kk] == ")") { depth--; if (depth == 0) { kk++; break } }
-            }
-            continue
-          }
-          if (X[kk] == "`") {
-            C[kk] = "B"; kk++
-            while (kk < e && X[kk] != "`") { C[kk] = "B"; kk++ }
-            if (kk < e) { C[kk] = "B"; kk++ }
-            continue
-          }
-          kk++
-        }
+        nh++; HSTART[bs] = nh; HEND[nh] = be
       }
       function emit_substs(   k, a, z, t, b) {
         buf = ""; held = 0
@@ -736,11 +773,11 @@ shell_lex() {
         if (view == "shell-bodies") {
           first = 1
           for (k = 1; k <= N; k++) {
-            if (C[k] == "b" || C[k] == "B") {
+            if (k in BF) {
               p = BF[k]
-              if (p != "" && pfed[p]) put(X[k])
+              if (pfed[p]) put(X[k])
               else if (X[k] == "\n") put("\n")
-            }
+            } else if (C[k] == "b" && X[k] == "\n") put("\n")
           }
           printf "%s", buf
           return
@@ -1126,10 +1163,11 @@ join_line_continuations() {
   local flags rc=0
   flags=$(mktemp "${TMPDIR:-/tmp}/safedeps-lex.XXXXXX" 2>/dev/null) || flags=""
   SAFEDEPS_LEX_FLAGS="${flags}" shell_lex "$1" joined arith "safedeps:join_line_continuations" || rc=1
-  if [[ -n "${flags}" ]] && grep -q '^AMBIG$' "${flags}" 2>/dev/null; then
+  local policy
+  for policy in $(lex_other_readings "${flags}"); do
     printf '\n'
-    shell_lex "$1" joined sub "safedeps:join_line_continuations" || rc=1
-  fi
+    shell_lex "$1" joined "${policy}" "safedeps:join_line_continuations" || rc=1
+  done
   [[ -z "${flags}" ]] || rm -f "${flags}"
   return ${rc}
 }
@@ -1817,6 +1855,19 @@ guard_settle_scan_failure() {
 # a failed reading, so the gate settles it: UNDECIDED when the command names a
 # package manager. A heredoc left without its terminator is the ordinary case
 # here, and the shell reads it to the end of input as data.
+# The readings besides the first that a lexing flagged as differing between
+# bash and zsh: one per combination of the axes it flagged (see shell_lex).
+lex_other_readings() {
+  local flags="$1" a=false q=false
+  [[ -n "${flags}" ]] || return 0
+  grep -q '^AMBIG_ARITH$' "${flags}" 2>/dev/null && a=true
+  grep -q '^AMBIG_DQQ$' "${flags}" 2>/dev/null && q=true
+  [[ "${a}" == true ]] && printf 'sub\n'
+  [[ "${q}" == true ]] && printf 'arith-zq\n'
+  [[ "${a}" == true && "${q}" == true ]] && printf 'sub-zq\n'
+  return 0
+}
+
 guard_check_command_reads() {
   local flags
   if ! flags=$(mktemp "${TMPDIR:-/tmp}/safedeps-lex.XXXXXX" 2>/dev/null); then
@@ -1825,13 +1876,19 @@ guard_check_command_reads() {
   fi
   SAFEDEPS_LEX_FLAGS="${flags}" shell_lex "${COMMAND}" scan arith "safedeps:command_reads" > /dev/null || true
   if grep -q '^UNTERM$' "${flags}" 2>/dev/null; then
-    # Where the shells diverge, a command that closes under the other reading
-    # is one zsh runs: it is read, not unread.
-    if grep -q '^AMBIG$' "${flags}" 2>/dev/null; then
-      : > "${flags}"
-      SAFEDEPS_LEX_FLAGS="${flags}" shell_lex "${COMMAND}" scan sub "safedeps:command_reads" > /dev/null || true
-    fi
-    if grep -q '^UNTERM$' "${flags}" 2>/dev/null; then
+    # Where the shells diverge, a command that closes under another reading is
+    # one that shell runs: it is read, not unread. Unread means no reading closes.
+    local policy others closed=false one
+    others=$(lex_other_readings "${flags}")
+    one=$(mktemp "${TMPDIR:-/tmp}/safedeps-lex.XXXXXX" 2>/dev/null) || one=""
+    for policy in ${others}; do
+      [[ -n "${one}" ]] || break
+      : > "${one}"
+      SAFEDEPS_LEX_FLAGS="${one}" shell_lex "${COMMAND}" scan "${policy}" "safedeps:command_reads" > /dev/null || true
+      grep -q '^UNTERM$' "${one}" 2>/dev/null || { closed=true; break; }
+    done
+    [[ -z "${one}" ]] || rm -f "${one}"
+    if [[ "${closed}" != true ]]; then
       [[ -z "${SAFEDEPS_SCAN_MARK:-}" ]] || printf 'failed\n' >> "${SAFEDEPS_SCAN_MARK}"
     fi
   fi
