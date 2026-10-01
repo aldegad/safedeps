@@ -1168,6 +1168,45 @@ expect_prescription 'pypi evil@1.0.0;' $'echo \'sh -c "pip install evil==1.0.0"\
 expect_pass "a quoted mention of sh -c with escaped quotes" $'git commit -m \'run sh -c "npm test -- \\"x\\""\''
 pass "a payload word its reader cannot read to the end is UNDECIDED, not read as no install"
 
+# `npm link` reads every argument with npm-package-arg and installs the
+# registry ones into the global prefix (lib/commands/link.js:92-104); a path,
+# a tarball, a git or a URL argument is linked as written. Reading only the
+# first argument let a path in front hide the package after it: `npm link
+# ./lib evil@1.0.0` installed evil globally and ran its scripts with no verdict
+# and no record (measured against a fixture registry with a synthetic package).
+for link_form in \
+  'npm link ../lib evil@1.0.0' \
+  'npm ln ../lib evil@1.0.0' \
+  'npm link /tmp/x evil@1.0.0' \
+  'npm link ~/lib evil@1.0.0' \
+  'npm link ./a ./b evil@1.0.0' \
+  'npm link lib/ evil@1.0.0' \
+  'npm link evil@1.0.0 ../lib' \
+  'npm link --save-dev ../lib evil@1.0.0' \
+  'npm link evil@1.0.0' \
+  'npm link ../lib npm:evil@1.0.0'
+do
+  expect_prescription 'npm evil@1.0.0;' "${link_form}"
+done
+for local_link in 'npm link ../lib user/repo' 'npm link user/repo' 'npm link ../lib https://example.test/x.tgz' \
+  'npm link ../lib' 'npm link' 'npm link .' 'npm link ../lib file:../other'; do
+  expect_pass "a link of local code, a git or a URL argument: ${local_link}" "${local_link}"
+done
+# Which words npa reads as registry ones is npm's answer, rerun here against
+# the npm on PATH like the command words above.
+if command -v npm >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  link_rc=0
+  link_out=$(scripts/measure/npm-link-operands.sh 2>&1) || link_rc=$?
+  case "${link_rc}" in
+    0) pass "npm link arguments are read the way npm-package-arg reads them (scripts/measure/npm-link-operands.sh, npm $(npm --version))" ;;
+    3) pass "npm link arguments against npm-package-arg # SKIP ${link_out}" ;;
+    *) fail "npm link arguments are read the way npm-package-arg reads them ($(head -5 <<< "${link_out}" | tr '\n' ' '))" ;;
+  esac
+else
+  pass "npm link arguments against npm-package-arg # SKIP no npm and node on PATH to ask"
+fi
+pass "npm link reads each argument, and a registry one is checked wherever it stands"
+
 # --- 11. The UNGATED record names each operand the gate did not check ---------
 # The record used to be a second parser: it read each statement on its own and
 # asked the extractor "was this package pinned?" by name, so a pin on one
@@ -1356,6 +1395,12 @@ operand_rows=(
   $'npm:left-pad\tnpm run build && npm link left-pad'
   $'\tnpm link'
   $'\tnpm link ../my-lib'
+  # A path in front no longer hides the package; a path, a git or a URL
+  # argument names none.
+  $'npm:left-pad\tnpm link ../lib left-pad'
+  $'npm:left-pad\tnpm link ~/lib left-pad'
+  $'npm:left-pad\tnpm link ../lib user/repo left-pad'
+  $'\tnpm link ../lib user/repo'
   # Recorded: a payload's npm install. Where it lands is decided inside the
   # payload, and the landing does not read inside it.
   $'npm:left-pad\tsh -c \'npm install left-pad\''

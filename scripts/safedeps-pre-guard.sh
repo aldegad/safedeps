@@ -3627,6 +3627,15 @@ guard_walk_statement() {
     # pieces view).
     [[ "${tok}" == \#* ]] && break
 
+    # npm link reads each argument the way npm-package-arg does and installs
+    # only the registry ones (lib/commands/link.js:92-104). A path, a tarball,
+    # a git or a URL argument is linked as written, and names no package here.
+    if [[ "${seg_ecosystem}" == npm && "${tok}" != -* ]] \
+        && [[ "${verb_tok}" =~ ^(${SAFEDEPS_G_NPM_LINK_VERBS})$ ]] \
+        && ! safedeps_npa_is_registry "${tok}"; then
+      continue
+    fi
+
     case "${tok}" in
       # A flag that takes a separate argument consumes exactly that argument —
       # but WHICH flags take one is a property of the tool, not of the flag
@@ -3655,8 +3664,9 @@ guard_walk_statement() {
         continue
         ;;
       -*) continue ;;
-      # Installing from the working tree is not a registry fetch.
-      .|..|./*|../*|/*) continue ;;
+      # Installing from the working tree is not a registry fetch, and a leading
+      # tilde is a path once the shell has expanded it.
+      .|..|./*|../*|/*|'~'|'~/'*) continue ;;
       *://*) found+="${tok}"$'\n'; continue ;;
     esac
 
