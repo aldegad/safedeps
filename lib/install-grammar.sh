@@ -14,7 +14,7 @@
 # scope; adding a new carrier syntax is not. So this grammar knows each
 # manager's own documented aliases, any number of options between a manager and
 # its verb, version-suffixed interpreters (`pip3.11`), statement positions the
-# shell grammar defines (`(`, `{`, `!`, `then`, `do`, an indented line), and
+# shell grammar defines (read by the lexer, see SAFEDEPS_G_START), and
 # the runner commands that fetch and execute a package. It does not know
 # argv-passing wrappers such as `sudo`, `timeout`, `nohup` or `xargs`. Those
 # stay outside the boundary on purpose, and scripts/test/consumer-forms.sh pins
@@ -78,13 +78,18 @@ SAFEDEPS_G_ALL_VERBS="${SAFEDEPS_G_NPM_VERBS}|${SAFEDEPS_G_NPM_LINK_VERBS}|${SAF
 SAFEDEPS_G_EXECUTABLES='npm|npx|pnpm|pnpx|yarn|bun|bunx|pip[0-9.]*|python[0-9.]*|py|poetry|uv|uvx|pipx|pipenv|cargo|go|gem|bundle|mvn|dotnet'
 
 # --- building blocks ------------------------------------------------------------
-# Where a command starts: the beginning of a line (indented or not), after a
-# separator or an opening subshell, and after the reserved words that begin a
-# statement. A reserved word only counts where a statement starts, so `echo do
-# pip install` stays an echo. `!` and `{` are reserved words too, followed by a
-# blank: they used to open a statement anywhere, so `echo ! pip install x | sh`
-# read as a visible install instead of the piped one it is.
-SAFEDEPS_G_START='(^[[:space:]]*|[;&|(][[:space:]]*)(([!{]|then|do|else|elif|if|while|until|time|coproc)[[:space:]]+)*'
+# Where a command starts: the beginning of a line (indented or not), or after a
+# separator or an opening parenthesis. Nothing else, because the text these
+# patterns read is the lexer's stmts view (command_start_text), where every
+# other place a command starts is already written as `;`: after a reserved
+# word, a case pattern, a function head, `time` and its options, `coproc`, and
+# the zsh short forms. The shell decides those from its grammar state, and the
+# lexer follows that state (starts() in shell_lex); so `echo do pip install`
+# and `echo { pip install x }` stay echoes. This used to carry a chain of the
+# reserved words before a command, a second copy of that knowledge that could
+# not see the state: `f() { pip install x; }; f` passed, and so did every zsh
+# short form, `for ((...)) {`, and a function with more than one name.
+SAFEDEPS_G_START='(^[[:space:]]*|[;&|(][[:space:]]*)'
 
 # Options between a manager and its verb: any number, each with an optional
 # value, plus the bare `--` that ends them. A value can only be told from the verb by trying both readings, which
@@ -167,8 +172,8 @@ SAFEDEPS_G_INSTALL_BODY="${SAFEDEPS_G_NPM_INSTALL_BODY}\
 |dotnet${SAFEDEPS_G_O}[[:space:]]+tool${SAFEDEPS_G_O}[[:space:]]+(install|update)"
 
 # --- the patterns the gates read --------------------------------------------------
-# Anchored at a statement start. Run these on command_scan_text output, where
-# quoted text is already blanked.
+# Anchored at a statement start. Run these on command_start_text output, where
+# quoted text is already blanked and every statement start is a separator.
 SAFEDEPS_G_INSTALL_RE="${SAFEDEPS_G_START}(${SAFEDEPS_G_INSTALL_BODY})([[:space:]]|$)"
 SAFEDEPS_G_NPM_INSTALL_RE="${SAFEDEPS_G_START}(${SAFEDEPS_G_NPM_INSTALL_BODY})([[:space:]]|$)"
 # An npm link, which installs into the global prefix whatever its flags say.
