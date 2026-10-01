@@ -93,6 +93,15 @@ shipped_src=$(sed -n '/^shell_lex() {/,/^}/p; /^command_scan_text() {/,/^}/p' "$
 eval "${shipped_src}"
 declare -F command_scan_text > /dev/null || fail "extracted command_scan_text did not define the function"
 
+# The lexer is one awk program inside single quotes, so an apostrophe in it ends
+# the quoting. An odd count is a parse error; an even count splices the text
+# between the two into the program unquoted, and it runs with no error (a
+# comment that quoted a word did that, caught in review). Write \047 instead.
+lexer_program=$(sed -n '/^shell_lex() {/,/^}/p' "${GUARD}" | sed -n '/-v marker="${marker}" '"'"'$/,/^  '"'"'; then$/p' | sed '1d;$d')
+[[ -n "${lexer_program}" ]] || fail "the lexer program could not be extracted from ${GUARD}"
+[[ "${lexer_program}" != *"'"* ]] || fail "the lexer program holds an apostrophe, which ends its quoting; write \\047"
+pass "the lexer program holds no apostrophe"
+
 # --- the spec -----------------------------------------------------------------
 # Deliberately the slowest, most obvious statement of the seven rules. It is
 # read by this battery only, so its cost is irrelevant and its clarity is not.

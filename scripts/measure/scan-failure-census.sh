@@ -179,6 +179,7 @@ case "\$*" in
   *"safedeps:command_reads"*) kind=reads ;;
   *"safedeps:inert_rewrite_in_place"*) kind=inert ;;
   *"safedeps:inert_offsets"*) kind=offsets ;;
+  *"safedeps:normalize_install_text"*) kind=norm ;;
 esac
 if [[ -z "\${kind}" ]]; then
   # A call the census cannot name, counted so that it cannot hide: see
@@ -287,7 +288,7 @@ for n in $(seq 1 "${case_count}"); do
     printf '%s k %s\n' "${n}" "${k}" >> "${WORK}/jobs"
     [[ "${QUICK}" == "true" ]] || printf '%s from-k %s\n' "${n}" "${k}" >> "${WORK}/jobs"
   done
-  for mode in scan-all join-all strip-all reads-all inert-all offsets-all blank-all spans-all flag-all eco-all awk-all grep-all sed-all; do
+  for mode in scan-all join-all strip-all reads-all inert-all offsets-all norm-all blank-all spans-all flag-all eco-all awk-all grep-all sed-all; do
     printf '%s %s 0\n' "${n}" "${mode}" >> "${WORK}/jobs"
   done
 done

@@ -370,6 +370,10 @@ shell_lex() {
       #              in quotes becomes `;`); for text read one line at a time
       #   view=shell-bodies  the raw lines of heredoc bodies whose command pipes
       #              into something
+      #   view=unprefixed  the text with the prefixes a statement may start with
+      #              removed: assignments (NAME=value, the value one word however
+      #              it is quoted or nested), env with its options and
+      #              assignments, command and exec. Not length-preserving.
       #
       # policy=arith reads `((` and `$((` as arithmetic; policy=sub reads them as
       # subshells. The caller runs the second only when the first reports AMBIG.
@@ -389,6 +393,7 @@ shell_lex() {
         mode = ""; np = 0; ambig = 0; unterm = 0
         for (i = 1; i <= N; i++) {
           c = X[i]
+          DEP[i] = (mode == "") ? d : 99
           if (mode == "SQ") { C[i] = "q"; if (c == "\047") mode = ""; continue }
           if (mode == "AQ") {
             C[i] = "q"
@@ -454,7 +459,47 @@ shell_lex() {
           if (ambig) print "AMBIG" >> flagfile
           if (unterm) print "UNTERM" >> flagfile
         }
+        # A reading that never closes strips nothing: a prefix word would run to
+        # the end of the input and take every line after it along (form A7, a
+        # heredoc inside `$((` that bash reads as arithmetic). Such a command is
+        # settled as UNDECIDED by guard_check_command_reads anyway.
+        if (view == "unprefixed" && !unterm) prefixes()
         emit()
+      }
+
+      # A byte that ends a word at the top level: unquoted blank or operator
+      # in code that is not nested, or anything the shell does not read as a
+      # word (a comment, a heredoc operator or body).
+      function word_sep(k) {
+        if (C[k] == "m" || C[k] == "h" || C[k] == "b" || C[k] == "B") return 1
+        return C[k] == "c" && DEP[k] == 1 && X[k] ~ /[ \t\n;&|()<>]/
+      }
+      function mark(a, z,   k) { for (k = a; k <= z; k++) A[k] = 1 }
+      # Mark the prefixes each top-level statement starts with, and the blanks
+      # after each. A word is cut only by word_sep, so a quoted or nested value
+      # (FOO="a b", FOO=$(cmd arg), FOO=a\ b) stays one word -- the sed this
+      # replaced read a value as the bytes up to the first blank or quote.
+      function prefixes(   k, s, w, atstart, envmode, takes, hit) {
+        atstart = 1; envmode = 0; takes = 0; k = 1
+        while (k <= N) {
+          if (word_sep(k)) {
+            if (X[k] ~ /[\n;&|(]/) { atstart = 1; envmode = 0; takes = 0 }
+            k++; continue
+          }
+          s = k; w = ""
+          while (k <= N && !word_sep(k)) { w = w X[k]; k++ }
+          if (!atstart) continue
+          hit = 0
+          if (takes) { takes = 0; hit = 1 }
+          else if (envmode && w ~ /^-/) { if (w ~ /^(-u|--unset|-C|--chdir)$/) takes = 1; hit = 1 }
+          else if (w ~ /^[A-Za-z_][A-Za-z0-9_]*=/) hit = 1
+          else if (w == "env") { envmode = 1; hit = 1 }
+          else if (w == "command" || w == "exec") { envmode = 0; hit = 1 }
+          else if (w ~ /^(!|[{]|if|then|else|elif|while|until|do|time|coproc)$/) { envmode = 0; continue }
+          else { atstart = 0; envmode = 0; continue }
+          mark(s, k - 1)
+          while (k <= N && C[k] == "c" && DEP[k] == 1 && (X[k] == " " || X[k] == "\t")) { A[k] = 1; k++ }
+        }
       }
 
       function push(k) { d++; ctx[d] = k; par[d] = 0; if (k == "D") dq++ }
@@ -589,12 +634,22 @@ shell_lex() {
           cc = X[k]; cl = C[k]
           if (view == "scan") {
             # A code `#` is never a comment start here, and must not become one
-            # when the scan is read again: after a blanked region (`'x'#y`) it
-            # would follow a blank, which is where a comment starts.
+            # when the scan is read again: after a blanked region (a quoted word
+            # with a `#` glued to its closing quote) it would follow a blank,
+            # which is where a comment starts.
             if (cl == "c") put(cc == "#" && (k == 1 || C[k-1] != "c" && C[k-1] != "e") ? "_" : cc)
             else if (cl == "e") put(index(";&|()<>!{}#`\042\047\\$", cc) ? "_" : (cc == "\n" ? " " : cc))
             else if (cl == "B") put(" ")
             else put(" ")
+            continue
+          }
+          if (view == "unprefixed") {
+            if (!(k in A)) put(cc)
+            if (k == N && ambig) {
+              # Where bash and zsh read the text differently, the prefixes were
+              # found on one reading only; hand on the text as written too.
+              put("\n"); for (p = 1; p <= N; p++) put(X[p])
+            }
             continue
           }
           if (view == "code") {
@@ -633,22 +688,29 @@ command_scan_text() {
 
 normalize_install_text() {
   local text="$1"
+  local normalized unprefixed
 
-  local normalized
-  for _ in 1 2 3; do
-    if ! normalized=$(printf '%s' "${text}" | sed -E \
-      -e 's/^[[:space:]]+//' \
-      -e "s#(^|[[:space:];|&({!])(/[^[:space:];|&]+/)(${SAFEDEPS_G_EXECUTABLES}|sh|bash|zsh)([[:space:];|&]|\$)#\\1\\3\\4#g" \
-      -e 's#(^|[;&|({!][[:space:]]*|(then|do|else|elif|if|while|until|time|coproc)[[:space:]]+)(env([[:space:]]+(-i|--ignore-environment|-0|--null|-v|--debug|-u[[:space:]]*[^[:space:]]+|--unset(=|[[:space:]]+)[^[:space:]]+|-C[[:space:]]*[^[:space:]]+|--chdir(=|[[:space:]]+)[^[:space:]]+|[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]+))*[[:space:]]+|command[[:space:]]+|exec[[:space:]]+)#\1#g' \
-      -e 's#(^|[;&|({!][[:space:]]*|(then|do|else|elif|if|while|until|time|coproc)[[:space:]]+)([A-Za-z_][A-Za-z0-9_]*=[^[:space:]'\''"]*[[:space:]]+)+#\1#g'); then
-      # Empty text would read as "no install". Keep what there is and let the
-      # gate settle the failure.
-      guard_mark_reading_failed
-      break
-    fi
-    text="${normalized}"
-  done
-  printf '%s' "${text}"
+  # An absolute path before an executable reads as the executable.
+  if ! normalized=$(printf '%s' "${text}" | sed -E \
+    -e 's/^[[:space:]]+//' \
+    -e "s#(^|[[:space:];|&({!])(/[^[:space:];|&]+/)(${SAFEDEPS_G_EXECUTABLES}|sh|bash|zsh)([[:space:];|&]|\$)#\\1\\3\\4#g"); then
+    # Empty text would read as "no install". Keep what there is and let the
+    # gate settle the failure.
+    guard_mark_reading_failed
+    printf '%s' "${text}"
+    return
+  fi
+  # The prefixes a statement may start with -- assignments, env with its
+  # options and assignments, command, exec -- are removed by the lexer, which
+  # knows where a value ends however it is quoted or nested. The sed this
+  # replaced read a value as the bytes up to the first blank or quote, so
+  # `FOO="a b" pip install evil==6.6.6` and `FOO=$(cmd arg) pip install ...`
+  # kept their prefix and the install after it was never recognized (caught in
+  # review). A failed reading keeps the text it had and is recorded.
+  if unprefixed=$(shell_lex "${normalized}" unprefixed arith "safedeps:normalize_install_text"); then
+    normalized="${unprefixed}"
+  fi
+  printf '%s' "${normalized}"
 }
 
 # The command with heredoc operators, bodies and comments blanked and quotes
@@ -724,6 +786,13 @@ extract_command_substitution_payloads() {
 # Install text as the pipe checks search for it: a manager, then a verb
 # anywhere after it on the same line. Loose on purpose -- it reads text that is
 # data at its own quoting level, where no statement grammar applies.
+# The visible installs the blanking pass sets aside, found the way detection
+# finds them: detection strips assignment and env/command prefixes before it
+# matches, so the blanking pass has to step over them too. Read on the scan
+# view, where a quoted value is already blank. Without the prefix, an install
+# behind `PIP_INDEX_URL=x` was not set aside, and the pipe check read it as
+# install text piped into a shell (caught in review).
+BLANK_INSTALL_RE="${SAFEDEPS_G_START}((env|command)([[:space:]]+-[^[:space:]]*)*[[:space:]]+|[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*(${SAFEDEPS_G_INSTALL_BODY})([[:space:]]|\$)"
 PIPE_MANAGER_RE='(npm|npx|pnpm|pnpx|yarn|bun|bunx|pip[0-9.]*|(python[0-9.]*|py)[[:space:]]+-m[[:space:]]*pip|poetry|uv|uvx|pipx|pipenv|cargo|go|gem|bundle|mvn|dotnet)'
 PIPE_INSTALL_TEXT_RE="${PIPE_MANAGER_RE}.*(${SAFEDEPS_G_ALL_VERBS})"
 
@@ -859,7 +928,7 @@ install_managers_blanked() {
   # failed awk used to be swallowed by the same `||`, and the visible install it
   # should have blanked was then read as install text piped into a shell -- a
   # finding drawn from a failed reading (caught in review).
-  matches=$(printf '%s\n' "${scan}" | LC_ALL=C judge_grep -obEi "${SAFEDEPS_INSTALL_PATTERN}") || matches=""
+  matches=$(printf '%s\n' "${scan}" | LC_ALL=C judge_grep -obEi "${BLANK_INSTALL_RE}") || matches=""
   if [[ -n "${matches}" ]] && ! spans=$(printf '%s\n' "${matches}" | LC_ALL=C awk '
     # safedeps:install_match_spans (scripts/measure/scan-failure-census.sh keys on this line)
     { c = index($0, ":"); printf "%d:%d ", substr($0, 1, c - 1), length($0) - c }'); then
@@ -892,9 +961,38 @@ install_managers_blanked() {
         split(span[k], p, ":")
         str = ""
         for (i = p[1] + 1; i <= p[1] + p[2] && i <= L; i++) str = str X[L + 1 + i]
-        if (!match(tolower(str), mre)) continue
-        for (i = p[1] + RSTART; i < p[1] + RSTART + RLENGTH; i++)
+        # The manager word as a whole word: `pip` inside `PIP_INDEX_URL=x pip
+        # install` is no manager, and blanking it left the real install to be
+        # read as install text piped into a shell (caught in review).
+        s = tolower(str); slen = length(s); from = 1; at = 0
+        while (from <= slen && match(substr(s, from), mre)) {
+          a = from + RSTART - 1; z = a + RLENGTH
+          pre = (p[1] + a - 1 >= 1) ? tolower(X[L + 1 + p[1] + a - 1]) : ""
+          post = (z <= slen) ? substr(s, z, 1) : ""
+          if (pre !~ /[a-z0-9_]/ && post !~ /[a-z0-9_]/) { at = a; alen = RLENGTH; break }
+          from = a + 1
+        }
+        if (!at) continue
+        for (i = p[1] + at; i < p[1] + at + alen; i++)
           if (X[L + 1 + i] != " " && X[i] != "\n") X[i] = " "
+        # The assignment prefixes of the install are its arguments, not install
+        # text: `PIP_INDEX_URL=x` left `pip` at a word start for the loose
+        # search of the pipe check. A name is blanked always; it runs no code.
+        # A value is blanked only when it holds no `$`, backtick or
+        # parenthesis, so a substitution in it is still read.
+        j = 1
+        while (j < at) {
+          while (j < at && substr(s, j, 1) ~ /[ \t]/) j++
+          w0 = j
+          while (j < at && substr(s, j, 1) !~ /[ \t]/) j++
+          word = substr(s, w0, j - w0)
+          if (!match(word, /^[a-z_][a-z0-9_]*=/)) continue
+          e = (word ~ /[$`()]/) ? w0 + RLENGTH - 2 : j - 1
+          for (q = w0; q <= e; q++) {
+            i = p[1] + q
+            if (X[L + 1 + i] != " " && X[i] != "\n") X[i] = " "
+          }
+        }
       }
       buf = ""; held = 0
       for (i = 1; i <= L; i++) {
