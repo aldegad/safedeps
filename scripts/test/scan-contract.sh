@@ -97,7 +97,7 @@ declare -F command_scan_text > /dev/null || fail "extracted command_scan_text di
 # the quoting. An odd count is a parse error; an even count splices the text
 # between the two into the program unquoted, and it runs with no error (a
 # comment that quoted a word did that, caught in review). Write \047 instead.
-lexer_program=$(sed -n '/^shell_lex() {/,/^}/p' "${GUARD}" | sed -n '/-v marker="${marker}" '"'"'$/,/^  '"'"'; then$/p' | sed '1d;$d')
+lexer_program=$(sed -n '/^shell_lex() {/,/^}/p' "${GUARD}" | sed -n '/-v marker="${marker}" '"'"'$/,/^  '"'"'/p' | sed '1d;$d')
 [[ -n "${lexer_program}" ]] || fail "the lexer program could not be extracted from ${GUARD}"
 [[ "${lexer_program}" != *"'"* ]] || fail "the lexer program holds an apostrophe, which ends its quoting; write \\047"
 pass "the lexer program holds no apostrophe"
@@ -427,6 +427,37 @@ for ((c = 0; c < fuzz_cases; c++)); do
 done
 [[ ${property_failures} -eq 0 ]] || fail "view properties: ${property_failures} violation(s) (seed ${fuzz_seed})"
 pass "view properties: scan and code keep length and are idempotent on ${form_count} shell forms and ${fuzz_cases} random inputs"
+
+# --- the lexer memo -------------------------------------------------------------
+# Above 4KB a view is reused within one guard run. Its key is a checksum, which
+# the author of a command can collide on purpose, so a hit must also match the
+# stored text byte for byte. And the memo directory is made by the guard: one
+# named in the environment would be a place to plant a view for a command.
+memo_dir=$(mktemp -d "${TMPDIR:-/tmp}/safedeps-memo-test.XXXXXX")
+big_install="pip install evil==6.6.6; echo '$(printf 'x%.0s' $(seq 1 5000))'"
+memo_key="${memo_dir}/scan.arith.$(printf '%s' "${big_install}" | cksum | tr ' ' '.')"
+printf 'PLANTED' > "${memo_key}.out"; printf 'some other text' > "${memo_key}.in"
+got=$(SAFEDEPS_LEX_CACHE="${memo_dir}" shell_lex "${big_install}" scan arith "safedeps:scan-contract"; printf 'X'); got="${got%X}"
+[[ "${got}" != "PLANTED" && "${got}" == "pip install evil==6.6.6;"* ]] \
+  || fail "a memo entry under the right key but for other text is not returned"
+printf 'PLANTED' > "${memo_key}.out"; printf '%s' "${big_install}" > "${memo_key}.in"
+got=$(SAFEDEPS_LEX_CACHE="${memo_dir}" shell_lex "${big_install}" scan arith "safedeps:scan-contract"; printf 'X'); got="${got%X}"
+[[ "${got}" == "PLANTED" ]] || fail "an exact-text memo entry is returned, so the memo is in use"
+# The guard ignores a memo directory from the environment. Plant a blank view
+# for every view of the command; the install must still be judged.
+for v in scan code joined unprefixed; do
+  for pol in arith sub; do
+    k="${memo_dir}/${v}.${pol}.$(printf '%s' "${big_install}" | cksum | tr ' ' '.')"
+    printf '%*s' "${#big_install}" '' > "${k}.out"; printf '%s' "${big_install}" > "${k}.in"
+  done
+done
+planted_home=$(mktemp -d "${TMPDIR:-/tmp}/safedeps-memo-home.XXXXXX")
+planted_out=$(jq -nc --arg c "${big_install}" --arg cwd "${planted_home}" '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
+  SAFEDEPS_LEX_CACHE="${memo_dir}" HOME="${planted_home}" SAFEDEPS_HOME="${planted_home}/safe" scripts/safedeps-hook-entry.sh pre 2>/dev/null)
+[[ "$(jq -r '.hookSpecificOutput.permissionDecision // "pass"' <<< "${planted_out:-{\}}")" == "deny" ]] \
+  || fail "a memo directory planted through the environment does not hide an install"
+rm -rf "${memo_dir}" "${planted_home}"
+pass "the lexer memo returns a view only for the exact text, and only from the guard's own directory"
 
 # --- when the scanner itself fails ----------------------------------------------
 # Every predicate reads this function's output inside a condition or a command

@@ -5,6 +5,11 @@
 
 set -euo pipefail
 
+# The lexer memo (see shell_lex) is made fresh below, per run. A directory named
+# from outside would be a place to plant a view for a command, so a value from
+# the environment is dropped before anything can read it.
+SAFEDEPS_LEX_CACHE=""
+
 # Which half of the budget machinery this process is: the parent that keeps the
 # deadline, or the child it spawns to do the judging.
 #
@@ -350,8 +355,22 @@ command_pipes_unread_install_to_shell() {
 # cost is linear (see scripts/measure/scan-cost.sh). When awk fails it says so
 # in SAFEDEPS_SCAN_MARK and returns non-zero, as every reading does.
 shell_lex() {
-  local text="$1" view="$2" policy="${3:-arith}" marker="$4"
-  if ! printf '%s\n' "${text}" | LC_ALL=C awk -v view="${view}" -v policy="${policy}" -v marker="${marker}" '
+  local text="$1" view="$2" policy="${3:-arith}" marker="$4" memo="" out tmp
+  # One guard run reads the same text through the same view several times (25
+  # lexer calls for 11 distinct inputs on a 32KB install command, measured).
+  # Above 4KB, where a pass costs more than looking one up, a view is kept for
+  # the rest of the run. The key only picks the file: a hit also requires the
+  # stored text to equal this one byte for byte, because a checksum is easy to
+  # collide on purpose and the command is the attacker. A run that asks for
+  # flags is not memoized, since the flags are a side output.
+  if [[ -n "${SAFEDEPS_LEX_CACHE:-}" && -d "${SAFEDEPS_LEX_CACHE}" && -z "${SAFEDEPS_LEX_FLAGS:-}" && ${#text} -gt 4096 ]]; then
+    memo="${SAFEDEPS_LEX_CACHE}/${view}.${policy}.$(printf '%s' "${text}" | cksum | tr ' ' '.')"
+    if [[ -f "${memo}.out" && -f "${memo}.in" ]] && [[ "$(cat "${memo}.in"; printf 'X')" == "${text}X" ]]; then
+      cat "${memo}.out"
+      return 0
+    fi
+  fi
+  if ! out=$(printf '%s\n' "${text}" | LC_ALL=C awk -v view="${view}" -v policy="${policy}" -v marker="${marker}" '
       # One pass over the command as the shell lexes it. Every byte gets a class,
       # and each view is printed from the classes:
       #
@@ -390,10 +409,18 @@ shell_lex() {
       END {
         N = n
         d = 1; ctx[1] = "T"; par[1] = 0; dq = 0
+        # The bytes any rule below acts on. Every other byte keeps the class of
+        # its context and changes nothing, so it is classified without running
+        # the rules -- most of a long command is such bytes.
+        split("\\ $ \047 \042 # ( ) < ] } ` \n", sl, " ")
+        for (j in sl) SPC[sl[j]] = 1
+        SPC["\n"] = 1
+        DQS["\\"] = 1; DQS["\042"] = 1; DQS["$"] = 1; DQS["`"] = 1
+        wantdep = (view == "unprefixed")
         mode = ""; np = 0; ambig = 0; unterm = 0
         for (i = 1; i <= N; i++) {
           c = X[i]
-          DEP[i] = (mode == "") ? d : 99
+          if (wantdep) DEP[i] = (mode == "") ? d : 99
           if (mode == "SQ") { C[i] = "q"; if (c == "\047") mode = ""; continue }
           if (mode == "AQ") {
             C[i] = "q"
@@ -409,6 +436,7 @@ shell_lex() {
           top = ctx[d]
           if (top == "D") {
             C[i] = "q"
+            if (!(c in DQS)) continue
             if (c == "\\") {
               if (X[i+1] == "\n") { C[i] = "l"; C[i+1] = "l"; i++ }
               else { i++; C[i] = "q" }
@@ -422,6 +450,7 @@ shell_lex() {
           }
           cls = (dq > 0) ? "Q" : "c"
           C[i] = cls
+          if (!(c in SPC)) continue
           if (c == "\\") {
             if (X[i+1] == "\n") { C[i] = "l"; C[i+1] = "l"; i++; continue }
             if (dq > 0) { i++; C[i] = "Q"; continue }
@@ -671,9 +700,17 @@ shell_lex() {
         }
         printf "%s", buf
       }
-  '; then
+  ' && printf 'X'); then
     [[ -z "${SAFEDEPS_SCAN_MARK:-}" ]] || printf 'failed\n' >> "${SAFEDEPS_SCAN_MARK}"
     return 1
+  fi
+  out="${out%X}"
+  printf '%s' "${out}"
+  # The output is written before the text it belongs to, and each by rename, so
+  # a reader that finds the text also finds its view whole.
+  if [[ -n "${memo}" ]] && tmp=$(mktemp "${memo}.XXXXXX" 2>/dev/null); then
+    { printf '%s' "${out}" > "${tmp}" && mv -f "${tmp}" "${memo}.out" &&
+      printf '%s' "${text}" > "${tmp}" && mv -f "${tmp}" "${memo}.in"; } 2>/dev/null || rm -f "${tmp}"
   fi
 }
 
@@ -1627,7 +1664,10 @@ fi
 # mark could not be made, and guard_scan_failed treats that as a failure too:
 # a scanner nobody can hear from is not one to trust.
 SAFEDEPS_SCAN_MARK=$(mktemp "${TMPDIR:-/tmp}/safedeps-scan.XXXXXX" 2>/dev/null) || SAFEDEPS_SCAN_MARK=""
-trap 'rm -f "${SAFEDEPS_SCAN_MARK:-}"' EXIT
+# Private to this run (mktemp -d is 0700). Without it the lexer simply runs
+# every time.
+SAFEDEPS_LEX_CACHE=$(mktemp -d "${TMPDIR:-/tmp}/safedeps-lex.XXXXXX" 2>/dev/null) || SAFEDEPS_LEX_CACHE=""
+trap 'rm -f "${SAFEDEPS_SCAN_MARK:-}"; rm -rf "${SAFEDEPS_LEX_CACHE:-}"' EXIT
 
 # Set once the gate below has passed, and exported so that anything reading the
 # command after that point can be counted: scripts/measure/scan-failure-census.sh
@@ -1799,7 +1839,7 @@ acquire_state_lock
 # a 30s runtime budget, which is the very fail-open this plan exists to close.
 # A leaked lock is bounded by the 60s stale-lock sweep in acquire_state_lock; a
 # defeated deadline is not bounded by anything.
-trap 'release_state_lock; rm -f "${SAFEDEPS_SCAN_MARK:-}"' EXIT
+trap 'release_state_lock; rm -f "${SAFEDEPS_SCAN_MARK:-}"; rm -rf "${SAFEDEPS_LEX_CACHE:-}"' EXIT
 
 PARENT_SNAPSHOT_ID=""
 CONFIRMED_FILE="${GUARD_DIR}/confirmed_${DIR_HASH}"
