@@ -9,7 +9,7 @@
 #   command_is_injectable_npm_install  may --ignore-scripts be injected
 #   command_has_ignore_scripts_flag  is the flag already there
 #   command_needs_inplace_inert      may the flag be appended
-#   resolve_install_dir_override     where does the install land
+#   resolve_install_targets          where does each install land
 #   guard_detect_ecosystem           which ecosystem
 #   payload_pipes_install_text_to_shell  is the pipe in execution position
 #   guard_extract_specs (line loop)  which pkg@spec tokens are named
@@ -645,6 +645,86 @@ pass "a failed span awk beside a visible install answers UNDECIDED, not a findin
 scanfail_guard "${fail_tmp}/all-awk" "pip install requests==2.0.0"
 [[ "${SCANFAIL_DECISION}" == "deny" ]] || fail "with awk failing everywhere an install is still denied (got: ${SCANFAIL_DECISION})"
 pass "with awk failing everywhere an install is still denied"
+
+# --- when a spec reader's sed or tr fails ---------------------------------------
+# The spec readers rewrite a statement before reading it: quotes and grouping
+# characters are removed, extras are removed, an npm alias is replaced by its
+# target, a runner's operands are cut out. Each runs in a command substitution,
+# so a failed sed or tr left no text, no text read as no spec, and a pinned
+# install passed as if it named nothing to check. Each shim fails one reader
+# alone, keyed on its script.
+real_sed=$(command -v sed)
+real_tr=$(command -v tr)
+for reader in extras alias runner group; do
+  mkdir -p "${fail_tmp}/reader-${reader}"
+  tool=sed real="${real_sed}"
+  case "${reader}" in
+    extras) key='\[[^] ]*\]' ;;
+    alias) key='@npm:/' ;;
+    runner) key='(npx|pnpx|bunx|uvx)' ;;
+    group) key='(){}' tool=tr real="${real_tr}" ;;
+  esac
+  cat > "${fail_tmp}/reader-${reader}/${tool}" <<SHIM
+#!/usr/bin/env bash
+case "\$*" in *'${key}'*) exit 2 ;; esac
+exec '${real}' "\$@"
+SHIM
+  chmod +x "${fail_tmp}/reader-${reader}/${tool}"
+done
+
+# reader<TAB>command
+sed_rows=(
+  $'extras\tpip install \'evil[x]==1.0.0\''
+  $'alias\tpnpm add left-pad@npm:evil-pkg@1.0.0'
+  $'runner\tnpx evil@1.0.0'
+  $'group\tpip install evil==1.0.0'
+)
+for row in "${sed_rows[@]}"; do
+  reader="${row%%$'\t'*}" failing_command="${row#*$'\t'}"
+  # Control: with sed working the same command is denied as a finding.
+  scanfail_guard "" "${failing_command}"
+  if [[ "${SCANFAIL_DECISION}" != "deny" ]] || grep -q 'UNDECIDED' <<< "${SCANFAIL_REASON}"; then
+    fail "control: a working ${reader} reader denies ${failing_command} as a finding (got: ${SCANFAIL_DECISION})"
+  fi
+  scanfail_guard "${fail_tmp}/reader-${reader}" "${failing_command}"
+  [[ "${SCANFAIL_DECISION}" == "deny" ]] \
+    || fail "a failed ${reader} reader does not turn ${failing_command} into a pass (got: ${SCANFAIL_DECISION})"
+  grep -q 'UNDECIDED' <<< "${SCANFAIL_REASON}" \
+    || fail "a failed ${reader} reader is reported as undecided: ${failing_command}"
+  grep -q 'scanner failed' <<< "${SCANFAIL_LOG}" \
+    || fail "a failed ${reader} reader is recorded in advisory.log: ${failing_command}"
+done
+pass "a failed sed or tr in a spec reader denies the install as UNDECIDED (${#sed_rows[@]} readers, each against a working control)"
+
+# --- when the statement readers fail ---------------------------------------------
+# The extractor reads the command's statements from resolve_install_targets,
+# which reads them from command_statements, and cuts them into pieces in one
+# more awk. Either failing left no statements, no statements read as no spec,
+# and an unapproved pinned install would pass as if it named nothing.
+for reader in command_statements extract_pieces shell_dequote strip_redirections; do
+  mkdir -p "${fail_tmp}/statements-${reader}"
+  cat > "${fail_tmp}/statements-${reader}/awk" <<SHIM
+#!/usr/bin/env bash
+case "\$*" in *"safedeps:${reader}"*) exit 2 ;; esac
+exec '${real_awk}' "\$@"
+SHIM
+  chmod +x "${fail_tmp}/statements-${reader}/awk"
+  for failing_command in "pip install evil==1.0.0" "pnpm add evil@1.0.0 && echo done"; do
+    scanfail_guard "" "${failing_command}"
+    if [[ "${SCANFAIL_DECISION}" != "deny" ]] || grep -q 'UNDECIDED' <<< "${SCANFAIL_REASON}"; then
+      fail "control: working statement readers deny ${failing_command} as a finding (got: ${SCANFAIL_DECISION})"
+    fi
+    scanfail_guard "${fail_tmp}/statements-${reader}" "${failing_command}"
+    [[ "${SCANFAIL_DECISION}" == "deny" ]] \
+      || fail "a failed ${reader} does not turn ${failing_command} into a pass (got: ${SCANFAIL_DECISION})"
+    grep -q 'UNDECIDED' <<< "${SCANFAIL_REASON}" \
+      || fail "a failed ${reader} is reported as undecided: ${failing_command}"
+    grep -q 'scanner failed' <<< "${SCANFAIL_LOG}" \
+      || fail "a failed ${reader} is recorded in advisory.log: ${failing_command}"
+  done
+done
+pass "a failed statement reader denies the install as UNDECIDED (command_statements, extract_pieces, shell_dequote, strip_redirections, each against a working control)"
+
 
 # --- the discriminator the gate falls back on ---------------------------------
 # When a reading failed, the gate asks one question without reading the command:

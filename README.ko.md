@@ -53,7 +53,7 @@ GitHub 릴리스는 정식 스킬/훅 소스 트리를 기준 아티팩트로 �
 `safedeps`는 각 설치를 기준으로 두 단계로 동작합니다.
 
 - **이전 단계** — `safedeps check`가 패키지를 OSV(표준), CISA KEV, GitHub Advisory로 확인한 뒤 로컬 ledger에 승인 기록을 남깁니다. npm의 경우 패키지의 전체 의존성 폐쇄성을 해결해 모든 전이적 패키지도 검사합니다.
-- **이후 단계** — PostToolUse 훅이 실제 `package-lock.json`에 반영된 내용을 다시 읽고, ledger에 없는 항목이나 advisory DB에서 새로 위험으로 표시된 항목을 롤백(리오그)합니다.
+- **이후 단계** — PostToolUse 훅이 npm 이 쓰는 lockfile 에서 실제로 설치된 내용을 다시 읽고, ledger에 없는 항목이나 advisory DB에서 새로 위험으로 표시된 항목을 롤백(리오그)합니다.
 
 두 훅 이벤트에 등록되는 커맨드는 작은 엔트리 셔틀(`safedeps-hook-entry.sh`)입니다. 훅은 심링크를 거쳐 레포 체크아웃을 라이브로 실행하므로, 체크아웃이 일시적으로 깨진 상태(머지 진행 중, 저장이 덜 된 편집)에서는 종료코드에 따라 모든 Bash 호출이 문법 오류 한 줄로 막히거나 게이트가 조용히 꺼지곤 했습니다. 셔틀은 둘 다 설명이 붙은 fail-closed 거부로 바꿉니다. 무엇이 깨졌는지, 머지가 진행 중인지, 어떻게 복구하는지를 말합니다. 머신이 프로세스를 띄우지 못한 순간의 호출도 게이트 없이 통과시키지 않고 거부합니다. 상세: [ARCHITECTURE — Phase 0](./ARCHITECTURE.ko.md).
 
@@ -63,7 +63,7 @@ GitHub 릴리스는 정식 스킬/훅 소스 트리를 기준 아티팩트로 �
 
 PreToolUse 명령 훅은 빠른 advisory 안내 장치로서, 명백히 승인되지 않은 설치 및 위험한 명령 형태를 차단해 에이전트에게 즉시 피드백을 제공합니다. 하지만 npm에서는 실제 권한 판단이 설치 후 효과 게이트에 있으며, 실제로 설치된 결과를 기준으로 판단하므로 래핑되거나 난독화된 설치 명령으로 패키지를 우회할 수 없습니다.
 
-**스크립트 안전성(비활성 설치).** Claude Code에서는 PreToolUse 훅이 npm install에 `--ignore-scripts`를 추가해 설치를 **비활성(inert)** 상태로 실행합니다. 즉, 패키지는 디스크에 기록되지만 라이프사이클 스크립트는 아직 실행되지 않습니다. 이후 효과 게이트가 폐쇄성을 검증하고 통과 시에만 PostToolUse 훅이 `npm rebuild`를 실행해 검증된 스크립트를 실행합니다. 게이트가 거부한 패키지는 어떤 스크립트도 실행되기 전에 리오그됩니다. (이 기능은 Claude Code의 `updatedInput` capability를 사용합니다. Codex CLI는 이 기능을 노출하지 않으므로, Codex에서는 설치가 일반 실행되고 효과 게이트는 detect-and-rollback 방식입니다. 즉 악성 설치 스크립트가 롤백 전 1회 실행될 수 있습니다.)
+**스크립트 안전성(비활성 설치).** Claude Code에서는 PreToolUse 훅이 npm install에 `--ignore-scripts`를 추가해 설치를 **비활성(inert)** 상태로 실행합니다. 즉, 패키지는 디스크에 기록되지만 라이프사이클 스크립트는 아직 실행되지 않습니다. 이후 효과 게이트가 폐쇄성을 검증하고 통과 시에만 PostToolUse 훅이 `npm rebuild`를 실행해 검증된 스크립트를 실행합니다. 게이트가 거부한 패키지는 어떤 스크립트도 실행되기 전에 리오그됩니다. rebuild 는 게이트가 읽은 트리만 다룹니다. 게이트가 읽은 디렉터리에서 `--global=false --location=project` 로 돌기 때문에 프로젝트 `.npmrc` 가 rebuild 를 전역 트리로 돌릴 수 없습니다. `node_modules` 에 `.package-lock.json` 기록이 없거나, rebuild 가 돌 트리에 어느 lockfile 에도 기록되지 않은 패키지나 패키지 버전이 있다고 npm 이 답하면 경고와 함께 건너뜁니다. 이 질문은 `npm query '*'` 로 npm 에게 묻고, 이 질의는 `npm rebuild` 처럼 `file:` 의존성 안의 `node_modules` 까지 따라갑니다. npm 이 답하지 않아도 rebuild 를 건너뜁니다. (이 기능은 Claude Code의 `updatedInput` capability를 사용합니다. Codex CLI는 이 기능을 노출하지 않으므로, Codex에서는 설치가 일반 실행되고 효과 게이트는 detect-and-rollback 방식입니다. 즉 악성 설치 스크립트가 롤백 전 1회 실행될 수 있습니다.)
 
 이 효과 우선 모델은 현재 npm에만 적용됩니다. `pip`, `cargo`, `go`, `gem`, `maven`, `nuget`은 closure resolver가 추가될 때까지 v2.1 명령 게이트 + reorg 모델을 유지합니다.
 
@@ -122,7 +122,7 @@ Claude Code 또는 Codex CLI가 `npm install`, `pip install`, `cargo add`, `go g
 
 ledger 게이트나 사전 비행 체크에 실패하면 해당 명령은 실행 전에 **차단**됩니다. 명령 가드는 의도적으로 best-effort이며, 에이전트 루프를 개선하고 직접적인 누락을 잡는 데 초점을 둡니다. npm의 권한 판단은 설치 후 효과 게이트가 담당합니다.
 
-**명령 가드가 읽는 것.** 매니저가 문서화한 방식이나 셸이 허용하는 방식으로 쓴 설치입니다. 별칭(`npm i`, `pnpm i`, `bun a`), 동사 앞의 옵션(`pip --quiet install`), 버전이 붙은 인터프리터(`pip3.11`, `python3.11 -m pip`), 패키지를 받아 실행하는 실행기(`npx`, `npm exec`, `pnpm dlx`, `yarn dlx`, `bunx`, `uvx`, `pipx run`, `go run <모듈>@<버전>`), 묶음·제어문(`( ... )`, `if ...; then ...`), 따옴표로 감싼 spec, 줄 이음을 모두 읽습니다. 백슬래시와 따옴표도 셸과 같은 규칙으로 읽습니다. v2.18.0 전까지는 이 표기 대부분이 판정도 기록도 없이 가드를 통과했습니다.
+**명령 가드가 읽는 것.** 매니저가 문서화한 방식이나 셸이 허용하는 방식으로 쓴 설치입니다. 별칭(`npm i`, `pnpm i`, `bun a`)과 npm 파서가 받아들이는 모든 명령어 철자(`npm upd`, `npm installTest`), 동사 앞의 옵션(`pip --quiet install`), 버전이 붙은 인터프리터(`pip3.11`, `python3.11 -m pip`), 패키지를 받아 실행하는 실행기(`npx`, `npm exec`, `pnpm dlx`, `yarn dlx`, `bunx`, `uvx`, `pipx run`, `go run <모듈>@<버전>`), 매니저별 `create`(`npm create vite` 와 `npm init vite` 는 `create-vite` 를 실행하므로 검사하고 기록하는 패키지도 `create-vite` 입니다. `pnpm create`, `yarn create`, `bun create` 도 같습니다), 묶음·제어문(`( ... )`, `if ...; then ...`), 따옴표로 감싼 spec, 줄 이음을 모두 읽습니다. 백슬래시와 따옴표도 셸과 같은 규칙으로 읽습니다. v2.18.0 전까지는 이 표기 대부분이 판정도 기록도 없이 가드를 통과했습니다.
 
 **명령 가드가 못 보는 것과, 그 비용이 생태계마다 다르다는 것.** 셸에게 넘기는 텍스트는 가드가 열거한 형태에서만 인식합니다 — `sh -c`, `eval`, 명령 치환, 셸로 들어가는 파이프. 그 목록 바깥의 형태는 통과합니다: herestring, `xargs` 가 조립한 명령줄, 파일로 쓴 뒤 실행하는 스크립트. 설치를 인자 그대로 실행하는 래퍼(`sudo`, `timeout`, `nohup`, `nice`)도 통과합니다. npm 에서는 이것이 미탐이 아니라 **지연 탐지**입니다. 효과 게이트가 살아 있는 lockfile 을 읽어서 명령을 어떻게 썼든 결과를 잡기 때문입니다 — 단 게이트가 30초 훅 예산 안에서 끝날 때까지만이고, 그 범위는 주어진 것이 아니라 측정된 값입니다(아래 참고). `pip`, `cargo`, `go`, `gem`, `maven`, `nuget` 에는 가드 뒤에 closure resolver 가 없으므로 같은 형태가 **완전 미탐**입니다 — `~/.safedeps/advisory.log` 에 `UNVERIFIED` 로 기록되고 그걸로 끝입니다. "가드가 이 형태를 파싱하지 않는다" 를 npm 기준으로 읽지 마세요. 경계는 `scripts/test/consumer-forms.sh` 에 측정되어 고정돼 있고, 왜 경계를 넓히는 게 답이 아닌지는 `ARCHITECTURE.md` 가 설명합니다.
 
@@ -130,11 +130,13 @@ ledger 게이트나 사전 비행 체크에 실패하면 해당 명령은 실행
 
 **롤백이 도중에 끊기면 safedeps 가 그렇게 말합니다.** 게이트가 closure 를 거부하면 프로젝트를 되돌립니다 — lock 과 manifest 파일을 복원한 뒤 `node_modules` 를 다시 만듭니다. v2.16.0 이전에는 로그 기록과 보고가 맨 마지막이라, 롤백 도중에 죽은 훅은 아무 기록도 남기지 않았습니다. 어떤 경우에는 프로젝트가 이미 되돌아간 채였고, 그건 설치가 이유 없이 스스로 취소된 것처럼 보입니다. 이제 게이트는 무엇을 하려는지 행동 전에 적고, 롤백이 스스로를 보고한 뒤에 그 메모를 지웁니다. 자기 실행보다 오래 살아남은 메모가 곧 끝나지 않은 롤백입니다. 다음 명령이 그것을 한 번 보고하고, `~/.safedeps/rollback-incidents/` 에 기록하고, `~/.safedeps/reorg.log` 에 `REORG INTERRUPTED` 를 덧붙이고, 어느 단계까지 갔는지와 트리를 어떻게 복구하는지 알려줍니다.
 
-**버전을 안 적은 설치도 게이트를 안 거치며, 이제 그 사실이 기록됩니다.** 원장 검사는 파싱 가능한 `pkg@version` 피연산자에 대해서만 돕니다. `pip install evil`, `cargo add evil`, `go get example.com/evil`, `gem install evil` 은 패키지를 지목하지만 버전을 안 적으므로 spec 이 안 나오고 원장 게이트가 아예 안 돕니다. 여기엔 래핑도 필요 없습니다 — 버전을 안 적으면 됩니다. 효과 게이트가 결과를 읽는 곳, 즉 npm CLI 가 프로젝트 안에 설치해서 게이트가 읽는 `package-lock.json` 을 쓰는 경우에는 결과 lockfile 에서 계속 강제합니다. 그 밖에서는 그대로 미검증 설치가 됩니다. pip, cargo, go, gem, maven, nuget 이 그렇고, pnpm·yarn·bun, 전역 `npm i -g`, lockfile 을 건드리지 않고 패키지를 받아 오는 `npx` 같은 실행기도 그렇습니다. 이 경우가 이제 `~/.safedeps/advisory.log` 에 생태계와 명령과 함께 `UNGATED` 로 기록됩니다. 이 기록은 **차단하지 않습니다** — 버전 없는 설치를 전부 거부하는 것은 평범한 `cargo add x` 흐름을 막는 정책 변경이라 레포 소유자의 결정으로 남기고, 기록은 그 결정을 근거로 답할 수 있게 만드는 역할입니다. 평범한 설치가 로그에 안 남는 것도 의도이며, 기준은 어떤 플래그가 붙었는지가 아니라 패키지를 지목하는지입니다. 어떤 플래그가 값을 받는지는 도구마다 다르므로 — pip 의 `-t`·`-f` 는 값을 받고 go·gem 의 같은 철자는 안 받습니다 — 그 표도 생태계별로 갈라 둡니다. `pip install -r requirements.txt` 와 `npm install` 은 지목하지 않고, 작업 트리에서 빌드하는 `pip install . 프로젝트에 이미 있는 바이너리를 실행하는 `npx tsc` 같은 실행기는 아무것도 받아 오지 않으므로 역시 남지 않습니다.` 도 마찬가지입니다. 소스 플래그는 자기 인자만 소비하므로 `pip install -r requirements.txt evil` 은 여전히 `evil` 을 설치하고 그래서 기록됩니다. 모든 설치마다 찍히는 기록은 신호가 아니라 소음이지만, 플래그만 보이면 침묵하는 기록은 더 나쁩니다 — 없는 커버리지를 있는 것처럼 읽히게 하기 때문입니다.
+**버전을 안 적은 설치도 게이트를 안 거치며, 이제 그 사실이 기록됩니다.** 원장 검사는 파싱 가능한 `pkg@version` 피연산자에 대해서만 돕니다. `pip install evil`, `cargo add evil`, `go get example.com/evil`, `gem install evil` 은 패키지를 지목하지만 버전을 안 적으므로 spec 이 안 나오고 원장 게이트가 아예 안 돕니다. 여기엔 래핑도 필요 없습니다 — 버전을 안 적으면 됩니다. 효과 게이트가 결과를 읽는 곳에서는 결과에 대해 계속 강제합니다. 게이트가 읽는 한 디렉터리, 즉 cwd 나 `--prefix`·`-C`·리터럴 `cd` 가 가리키는 디렉터리에 npm CLI 가 하는 설치가 그렇습니다. npm 은 이런 설치를 `package-lock.json` 에 기록하고, 저장하지 말라는 설치(`--no-save`, `--no-package-lock`)는 `node_modules/.package-lock.json` 에만 기록하는데, 게이트는 둘 다 읽습니다. 그 밖에서는 그대로 미검증 설치가 됩니다. pip, cargo, go, gem, maven, nuget 이 그렇고, pnpm·yarn·bun, 전역 npm 설치(npm 이 읽는 그대로: `-g`, `-gf`, `--location=global`, 전역 트리에 없는 패키지를 설치하는 `npm link <pkg>`, 명령 안의 `npm_config_global=true`, 또는 프로젝트나 사용자 `.npmrc` 에 설정한 `global`·`location`. npm 에게 묻기 때문에 철자 목록이 정하지 않습니다), 셸이 실행 시점에 정하는 것으로 옮겨진 설치(`cd "$DIR"`), 떨어질 곳이 그 안에서 정해지는 `sh -c`·`eval` payload 안의 npm 설치, lockfile 을 건드리지 않고 패키지를 받아 오는 `npx` 같은 실행기도 그렇습니다. 이 경우가 이제 `~/.safedeps/advisory.log` 에 `UNGATED` 로 기록되고, 기록에는 명령과 함께 버전 없이 설치되는 패키지가 하나하나 적힙니다. 기록의 단위는 이름이 아니라 적힌 그대로의 패키지입니다. `pnpm add left-pad@1.0.0 && pnpm add left-pad` 는 앞의 설치만 고정하고 뒤의 설치는 고정하지 않으므로 뒤의 것이 기록됩니다. 기록은 게이트와 같은 방식으로 명령을 읽습니다. 그래서 플래그로 버전을 준 설치(`gem install rails -v 7.1.0`)는 고정된 것으로 치고, 게이트가 잘못 읽은 패키지는 사라지지 않고 기록에 드러납니다. 해가 없는 기록 몇 가지는 일부러 남깁니다. `pip install x==1 x` 를 pip 가 고정 버전으로 푸는 경우, 고정해서 설치한 패키지를 다시 설치해 아무것도 바뀌지 않는 경우, 명령 앞부분이 설치할 바이너리를 실행기가 부르는 경우, 기록이 모르는 플래그가 값을 받는 경우입니다. 이 기록은 **차단하지 않습니다** — 버전 없는 설치를 전부 거부하는 것은 평범한 `cargo add x` 흐름을 막는 정책 변경이라 레포 소유자의 결정으로 남기고, 기록은 그 결정을 근거로 답할 수 있게 만드는 역할입니다. 평범한 설치가 로그에 안 남는 것도 의도이며, 기준은 어떤 플래그가 붙었는지가 아니라 패키지를 지목하는지입니다. 어떤 플래그가 값을 받는지는 도구마다 다르므로 — pip 의 `-t`·`-f` 는 값을 받고 go·gem 의 같은 철자는 안 받습니다 — 그 표도 생태계별로 갈라 둡니다. `pip install -r requirements.txt` 와 `npm install` 은 지목하지 않고, 작업 트리에서 빌드하는 `pip install .` 도 마찬가지입니다. 프로젝트에 이미 있는 바이너리를 실행하는 `npx tsc` 같은 실행기는 아무것도 받아 오지 않으므로 역시 남지 않습니다. 소스 플래그는 자기 인자만 소비하므로 `pip install -r requirements.txt evil` 은 여전히 `evil` 을 설치하고 그래서 기록됩니다. 모든 설치마다 찍히는 기록은 신호가 아니라 소음이지만, 플래그만 보이면 침묵하는 기록은 더 나쁩니다 — 없는 커버리지를 있는 것처럼 읽히게 하기 때문입니다.
+
+**아무것도 저장하지 않는 npm 설치도 읽힙니다.** v2.18.0 전까지 효과 게이트는 명령이 시작된 디렉터리의 `package-lock.json` 만 읽었습니다. `npm install x --no-save`, `--package-lock=false`, 같은 설정을 환경변수나 `.npmrc` 로 준 경우, `npm -C sub install x`, `cd sub && npm install x` 는 모두 그 파일을 건드리지 않았고, 그래서 게이트는 전부 깨끗하다고 확인했습니다. Claude Code 에서는 그 확인이 `npm rebuild` 를 부르므로, 무실행 설치가 결국 검증 안 된 패키지의 설치 스크립트를 돌렸습니다. 로컬 레지스트리에 실제 npm 을 돌려 재 보니 npm 은 이 설치들을 전부 기록합니다. 저장하지 않는 설치는 `node_modules/.package-lock.json` 에, 옮겨진 설치는 그 디렉터리의 `package-lock.json` 에 남습니다. 이제 게이트는 숨은 lockfile 을 읽고 `-C` 와 리터럴 `cd` 를 따라가며, 이 형태들은 모두 롤백됩니다. 따라가는 곳은 npm 이 실제로 설치하는 디렉터리이고, 이름 붙은 디렉터리와 늘 같지는 않습니다. 그 디렉터리는 npm 에게 묻습니다(설치 명령 자신의 인자를 붙인 `npm prefix` 와 `npm root`). npm 은 `package.json` 이나 `node_modules` 가 있는 가장 가까운 디렉터리까지 올라가고, 워크스페이스 멤버라면 그 멤버를 선언한 루트까지 갑니다. 다만 심링크를 거쳐 닿은 멤버에서는 올라가지 않습니다. `src` 에 `package.json` 이 없을 때 `cd src && npm install x` 는 프로젝트의 lockfile 에 기록하고, 워크스페이스의 `packages/a` 안에서 돈 설치도 그렇습니다. 게이트는 그 lockfile 을 읽습니다. npm 의 규칙을 bash 로 옮긴 사본은 심링크 멤버에서 틀렸고, 그래서 이제는 npm 에게 묻습니다. npm 에게 물을 수 없거나 제때 답이 없으면, 또는 명령이 셸이 실행 시점에 정하는 값을 npm 에 넘기면, 그 설치를 `UNGATED` 로 기록하고 이유를 적습니다. 워크스페이스에서는 루트 lockfile 이 각 멤버를 경로로 기록합니다. 게이트는 더 이상 그 경로를 패키지 이름으로 읽지 않고, 롤백은 루트뿐 아니라 멤버의 `package.json` 도 복원합니다. 그래서 `npm install x -w packages/a` 도 디스크에서 되돌려집니다. `.npmrc` 가 설치를 두 기록 밖으로 보내는 경우는 따로이며, 아래 경계에서 다룹니다. `scripts/test/lockless-forms.sh` 가 이것들을 종단으로 돌립니다.
 
 ### Phase 3: Post-install Effect Enforcement (`safedeps-post-verify.sh` -- PostToolUse)
 
-설치 명령이 끝난 뒤 verify 훅이 변경 사항을 분석합니다. npm에서는 이것이 주요 집행 지점입니다. 실제 `package-lock.json` 폐쇄성을 읽고, 각 패키지를 승인된 direct entry와 해당 `transitive_specs`로 검증한 뒤 OSV 배치 조회를 다시 수행합니다.
+설치 명령이 끝난 뒤 verify 훅이 변경 사항을 분석합니다. npm에서는 이것이 주요 집행 지점입니다. `package-lock.json` 과 npm 의 숨은 `node_modules/.package-lock.json` 에서 실제 폐쇄성을 읽고, 각 패키지를 승인된 direct entry와 해당 `transitive_specs`로 검증한 뒤 OSV 배치 조회를 다시 수행합니다.
 
 1. **npm effect gate** — 잠금 파일의 어떤 패키지든 승인되지 않았거나 KEV 차단, 취약점 존재, 또는 fail-closed 검증 실패 시 reorg 수행.
 
@@ -157,7 +159,7 @@ ledger 게이트나 사전 비행 체크에 실패하면 해당 명령은 실행
 - **검사 실패 발생** — **reorg**가 트리거됩니다:
   1. lock file을 마지막 confirmed 스냅샷에서 복원
   2. 변경된 경우 `package.json` 복원
-  3. `npm ci`(실패 시 `npm install` 대체)로 `node_modules` 재구성해 악성 아티팩트 제거
+  3. 프로젝트 안에서 `node_modules` 를 재구성해 악성 아티팩트 제거. 복원한 lockfile 로 `npm ci` 를 돌리고, lockfile 이 없거나 `npm ci` 가 실패하면 `npm install --ignore-scripts` 로 대신합니다. 이 대체 설치는 `package.json` 을 다시 해석하는데 그 결과는 아무도 검증하지 않았으므로, 설치 스크립트를 돌리지 않고 메시지에 그렇게 알립니다.
   4. 이벤트를 `~/.safedeps/reorg.log`에 기록
   5. Claude Code에 탐지 위협과 롤백 동작을 상세히 담은 시스템 메시지 전달
 
@@ -189,7 +191,7 @@ ledger 게이트나 사전 비행 체크에 실패하면 해당 명령은 실행
 | Registry hijack | 비공식 소스에 대한 `--registry` 지정 | PreToolUse advisory guard | **차단** |
 | Script safety bypass | `npm config set ignore-scripts false` | PreToolUse advisory guard | **차단** |
 | Command indirection | `eval "npm install ..."`, 서브셸 확장, 변수 indirection | PreToolUse advisory guard | **Guard** |
-| npx/dlx execution | `npx`, `npm exec`, `pnpm dlx`, `yarn dlx`, `bunx`, `uvx`, `pipx run` 패키지 실행 | PreToolUse advisory guard | **Guard** |
+| npx/dlx execution | `npx`, `npm exec`, `pnpm dlx`, `yarn dlx`, `bunx`, `uvx`, `pipx run` 패키지 실행, 그리고 `npm create`/`npm init <initializer>`, `pnpm create`, `yarn create`, `bun create` | PreToolUse advisory guard | **Guard** |
 | 승인되지 않은 전이적 의존성 | npm `package-lock.json`에 있는 패키지가 직접 ledger 또는 `transitive_specs`에 없음 | PostToolUse npm primary effect gate | **Reorg** |
 | 취약한 closure 패키지 | OSV/KEV 적중이 있는 npm 직접/전이 패키지 | PostToolUse npm primary effect gate | **Reorg** |
 | 악성 설치 스크립트 | hooks 내 네트워크 호출, `eval`/`exec`, 민감 경로 접근 | PostToolUse effect verify | **Reorg** |
@@ -446,9 +448,10 @@ safedeps/
 
 매 설치 명령은 실행 전 빠른 advisory 피드백을 받으며, 매 npm 설치는 실행 후 closure 단위 집행을 받습니다. 사람이 PR 리뷰에서 의심 패키지를 잡을 시점 이전에 설치 시점에서 이미 잡히고, SaaS 의존성 없이 로컬 CLI와 공개 DB(OSV / KEV / GHSA)만 사용합니다.
 
-두 가지 솔직한 경계:
+세 가지 솔직한 경계:
 
 - **명령 훅은 휴리스틱이며 sandbox가 아닙니다.** 인자를 그대로 넘겨 실행하는 래퍼(`sudo`, `timeout`, `nohup`, `nice`, `xargs`), 가드가 열거하지 않은 형태로 인터프리터에 넘긴 텍스트(herestring, 스크립트 파일), 같은 사용자에 의한 로컬 `~/.safedeps` 상태 조작은 신뢰 경계 밖에 있습니다. npm effect 게이트가 backstop으로 이를 보완하며, command hook이 놓친 부분을 설치 결과를 기준으로 감지합니다. 즉 command-independent입니다. 설치로 보이는 명령이 보류 상태를 남기지 않고 끝나더라도(PreToolUse 파서가 인식 못한 경우), PostToolUse 훅은 여전히 실시간 `package-lock.json`에 대해 npm closure 검사를 수행합니다. 따라서 파서 블라인드 스팟이 backstop을 맹목적으로 만들지 않습니다. 다만 command-independent인 detection은 parser-missed install를 자동 롤백하려면 해당 프로젝트의 선행 confirmed-safe snapshot이 필요합니다. 최초 설치에서 베이스라인이 없으면 시스템 메시지와 advisory 로그로 강하게 경고되지만 자동 되돌리지는 않습니다.
+- **`.npmrc` 는 설치를 옮기거나 기록 밖에 둘 수 있습니다.** `.npmrc` 에 설정한 `global` 이나 `location` 은 평범한 `npm install x` 를 게이트가 읽는 기록 밖으로 보냅니다. 패키지는 npm 전역 prefix 에 놓이거나, `global=0` 이나 `--location=project` 와 함께 쓴 `location=global` 이면 아무 기록 없이 `node_modules` 에 놓입니다. 설치가 전역으로 가는지는 어느 `.npmrc` 가 정했든 npm 이 답하고, 설치 전 훅은 그런 설치를 `UNGATED` 로 기록합니다. 기록을 남기지 않으리라는 것은 npm 이 설치 전에 답할 수 없으므로, 그 질문에 한해 훅이 프로젝트와 사용자의 `.npmrc` 를 직접 읽어 설치를 기록하고 파일과 설정을 적습니다. 설치를 검사하지는 않고 기록만 합니다. 검사하려면 npm 이 놓은 곳에서 패키지를 이름으로 찾아야 하는데, 이는 경계로 남깁니다. 프로젝트 설치를 기록 밖에 두는 설정은 전역 npmrc 와 내장 npmrc 에서는 읽지 않으므로, 거기 둔 그런 설정은 기록되지 않습니다. 어느 경우든 패키지의 스크립트는 돌지 않습니다. 설치는 무실행이고, rebuild 가 돌 트리에 어느 lockfile 에도 기록되지 않은 패키지나 패키지 버전이 있으면 rebuild 를 건너뜁니다. 뒤의 조건이 중요합니다. 같은 설정이 기록된 패키지 위에 새 버전을 쓰고 기록은 그대로 둘 수 있기 때문입니다.
 - **효과 우선 집행은 현재 npm에서만 적용됩니다.** `pip`, `cargo`, `go`, `gem`, `maven`, `nuget`은 closure resolver가 도입될 때까지 v2.1 command-gate + reorg 모델을 유지합니다.
 
 ## Legacy / Migration: v1 `npm-reorg-guard`
