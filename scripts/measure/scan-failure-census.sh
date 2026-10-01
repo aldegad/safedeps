@@ -93,11 +93,15 @@ if [[ "${1:-}" == "--run" ]]; then
   [[ "${variant}" != "approved" ]] || cp -R "${WORK}/approved-home" "${T}/h/safe"
   codex=""
   [[ "${variant}" == "codex" ]] && codex=1
+  # The grep and sed shims are on PATH only in the mode that fails them; in
+  # every other mode they would only exec the real tool (see setup).
+  bin="${WORK}/bin"
+  [[ ! -d "${WORK}/bin-${mode}" ]] || bin="${WORK}/bin-${mode}"
   rc=0
   out=$(jq -nc --rawfile c "${WORK}/cases/${n}.cmd" --arg cwd "${T}/p" --arg codex "${codex}" \
       '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd} + (if $codex != "" then {turn_id:"t1",model:"m"} else {} end)' |
     ( cd "${ROOT_DIR}" && CENSUS_MODE="${mode}" CENSUS_K="${k}" CENSUS_STATE="${T}/st" \
-        PATH="${WORK}/bin:${PATH}" HOME="${T}/h" SAFEDEPS_HOME="${T}/h/safe" TMPDIR="${T}" \
+        PATH="${bin}:${PATH}" HOME="${T}/h" SAFEDEPS_HOME="${T}/h/safe" TMPDIR="${T}" \
         scripts/safedeps-hook-entry.sh pre 2>"${T}/stderr" )) || rc=$?
   decision="pass" class="-" updated="-"
   if [[ -n "${out}" ]]; then
@@ -160,23 +164,29 @@ trap 'rm -rf "${WORK}"' EXIT
 mkdir -p "${WORK}/bin" "${WORK}/cases" "${WORK}/results" "${WORK}/strays"
 
 real_awk=$(command -v awk)
+# The shims run as this bash, named by path: they run once per reading of every
+# run, and `/usr/bin/env bash` cost one more exec each time.
+shim_bash=$(command -v bash)
 # The shim counts the guard's readings and fails the chosen ones. Counting is
 # under a mkdir lock: readings can run concurrently inside one guard run (a
-# process substitution feeds a loop that reads too).
+# process substitution feeds a loop that reads too). The count is read with a
+# builtin and handed back in a variable rather than through a command
+# substitution and a cat: every reading of every run pays for each process the
+# shim starts, and the shims once cost as much as the guard runs they watch.
 cat > "${WORK}/bin/awk" <<SHIM
-#!/usr/bin/env bash
+#!${shim_bash}
 real='${real_awk}'
 state="\${CENSUS_STATE:-}"
 [[ -n "\${state}" ]] || exec "\${real}" "\$@"
 bump() {
-  local f="\${state}/\$1" n
+  local f="\${state}/\$1" n=0
   while ! mkdir "\${state}/lock" 2>/dev/null; do :; done
-  n=\$(( \$(cat "\${f}" 2>/dev/null || echo 0) + 1 ))
-  printf '%s' "\${n}" > "\${f}"
+  [[ ! -f "\${f}" ]] || read -r n < "\${f}" || true
+  BUMPED=\$(( \${n:-0} + 1 ))
+  printf '%s' "\${BUMPED}" > "\${f}"
   rmdir "\${state}/lock"
-  printf '%s' "\${n}"
 }
-[[ "\${CENSUS_MODE:-none}" == "awk-all" ]] && { bump failed >/dev/null; exit 127; }
+[[ "\${CENSUS_MODE:-none}" == "awk-all" ]] && { bump failed; exit 127; }
 kind=""
 case "\$*" in
   *"safedeps:command_scan_text"*) kind=scan ;;
@@ -202,15 +212,16 @@ if [[ -z "\${kind}" ]]; then
   # A call the census cannot name, counted so that it cannot hide: see
   # "unmarked" and "unlisted" in the header.
   case "\$*" in
-    *"safedeps:"*) bump unlisted >/dev/null ;;
-    *) bump unmarked >/dev/null ;;
+    *"safedeps:"*) bump unlisted ;;
+    *) bump unmarked ;;
   esac
   printf '%s\n' "\$*" | tr '\n' ' ' | cut -c1-160 >> "\${state}/strays"
   exec "\${real}" "\$@"
 fi
-n=\$(bump reads)
-[[ -z "\${SAFEDEPS_GATE_PASSED:-}" ]] || bump after-gate >/dev/null
-fail_it() { bump failed >/dev/null; exit 2; }
+bump reads
+n=\${BUMPED}
+[[ -z "\${SAFEDEPS_GATE_PASSED:-}" ]] || bump after-gate
+fail_it() { bump failed; exit 2; }
 case "\${CENSUS_MODE:-none}" in
   k)       [[ "\${n}" == "\${CENSUS_K}" ]] && fail_it ;;
   from-k)  (( n >= CENSUS_K )) && fail_it ;;
@@ -221,12 +232,17 @@ SHIM
 chmod +x "${WORK}/bin/awk"
 
 # grep and sed sit on the judgment path too. These fail every call in their
-# mode and pass everything through otherwise; a reading is not counted by
-# them, because the K-th-reading runs are about awk.
+# mode; a reading is not counted by them, because the K-th-reading runs are
+# about awk. Each lives in a directory of its own beside the awk shim, and a
+# run puts that directory on PATH only in the shim's mode. In any other mode
+# the shim would only exec the real tool, at the price of a bash start on
+# every grep and sed the guard runs.
 for tool in grep sed; do
   real_tool=$(command -v "${tool}")
-  cat > "${WORK}/bin/${tool}" <<SHIM
-#!/usr/bin/env bash
+  mkdir -p "${WORK}/bin-${tool}-all"
+  ln -s "${WORK}/bin/awk" "${WORK}/bin-${tool}-all/awk"
+  cat > "${WORK}/bin-${tool}-all/${tool}" <<SHIM
+#!${shim_bash}
 if [[ -n "\${CENSUS_STATE:-}" && "\${CENSUS_MODE:-none}" == "${tool}-all" ]]; then
   # Counted like the awk shim's failures, so the idle-mode check sees them.
   while ! mkdir "\${CENSUS_STATE}/lock" 2>/dev/null; do :; done
@@ -236,7 +252,7 @@ if [[ -n "\${CENSUS_STATE:-}" && "\${CENSUS_MODE:-none}" == "${tool}-all" ]]; th
 fi
 exec '${real_tool}' "\$@"
 SHIM
-  chmod +x "${WORK}/bin/${tool}"
+  chmod +x "${WORK}/bin-${tool}-all/${tool}"
 done
 
 # --- the approved ledger -------------------------------------------------------
