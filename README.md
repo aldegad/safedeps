@@ -155,7 +155,13 @@ After the install command completes, the verify hook analyzes what changed. For 
 
 ### Confirm or Reorg
 
-- **All checks pass** -- The snapshot is marked as **confirmed** in `~/.safedeps/confirmed`. This becomes the new safe baseline.
+- **All checks pass** -- The lock and manifest files, as the verified install left them, are recorded as a new snapshot, and that snapshot is marked **confirmed** in `~/.safedeps/confirmed_<dir hash>`. This becomes the new safe baseline, so a later rollback keeps this install.
+
+  The baseline used to be the snapshot taken *before* the verified install, which put it one install behind. Measured with a real npm against a local registry: an approved `npm install a`, then an unapproved `npm install b`, rolled the project back to one without `a` in `package.json`, the lockfile or `node_modules`. Now `a` stays and only `b` goes, on Claude Code and Codex alike (`scripts/test/lockless-forms.sh`).
+
+  The baseline is the files, not `node_modules`. The rollback rebuilds `node_modules` from the restored lockfile, so a verified install that saved nothing (`--no-save`) is not part of the baseline and does not survive a later rollback. If the verified state cannot be recorded, the baseline stays where it was and you are told that a later rollback would undo this install too.
+
+  The files are copied before the checks read them, and the copy becomes the baseline only if the project still holds the same bytes when the checks finish. If another install changed them in the meantime, what is there now was not checked, so the baseline does not move and you are told why.
 - **Any check fails** -- A **reorg** is triggered:
   1. Lock files are restored from the last confirmed snapshot.
   2. `package.json` is restored if it was modified.
@@ -177,7 +183,7 @@ Fast advisory feedback, observable rollback, and no hidden fallback. The command
 |---|---|
 | **Block candidate** | Snapshot taken before `npm install` |
 | **Block validation** | Post-install effect checks (npm closure, scripts, lock diff, binaries) |
-| **Finality / confirmation** | Snapshot ID written to `~/.safedeps/confirmed` |
+| **Finality / confirmation** | The verified post-install state, recorded as a snapshot and written to `~/.safedeps/confirmed_<dir hash>` |
 | **Chain reorganization** | Rollback to last confirmed snapshot + `node_modules` rebuild |
 | **Parent hash linking** | `parent_snapshot_id` in each snapshot's `_meta.json` |
 | **Chain pruning** | Old unconfirmed snapshots cleaned up, confirmed chain preserved |
@@ -394,7 +400,7 @@ cat ~/.safedeps/confirmed
 ls -la ~/.safedeps/snapshots/
 ```
 
-Old unconfirmed snapshots are automatically pruned (keeping the 10 most recent), while the confirmed snapshot chain is always preserved.
+Old unconfirmed snapshots are automatically pruned (keeping the 10 most recent), while the confirmed snapshot chain is always preserved. A run that was killed before it finished writing a snapshot leaves its files behind. They are never used as a baseline, and they are not pruned, because they look the same as a snapshot another run is still writing.
 
 ## Security Hardening
 

@@ -684,7 +684,165 @@ do
 done
 pass "approved installs, including --no-save, sub-project, subdirectory, workspace and symlinked-member forms, confirm quietly and rebuild where they landed"
 
-# --- 7. A rollback does not run scripts it did not verify -------------------------------
+# --- 7. A rollback keeps what was verified before it -----------------------------------
+# The rollback baseline is the state the last verified install left behind. It
+# used to be the state before that install, so the baseline ran one install
+# behind: an approved `npm install sd-approved` followed by an unapproved
+# `npm install sd-victim` rolled back to a project without sd-approved in
+# package.json, package-lock.json or node_modules. Each case below checks all
+# three, on both engines, and a second approved install pins the lag itself: the
+# package that goes missing is the last one verified, not the first.
+has_dependency() {
+  local package="$1"
+  jq -e --arg p "${package}" '.dependencies[$p] != null' "${CASE_PROJECT}/package.json" >/dev/null \
+    && jq -e --arg p "node_modules/${package}" '.packages[$p] != null' "${CASE_PROJECT}/package-lock.json" >/dev/null \
+    && [[ -e "${CASE_PROJECT}/node_modules/${package}" ]]
+}
+lacks_dependency() {
+  local package="$1"
+  ! jq -e --arg p "${package}" '.dependencies[$p] != null' "${CASE_PROJECT}/package.json" >/dev/null \
+    && ! jq -e --arg p "node_modules/${package}" '.packages[$p] != null' "${CASE_PROJECT}/package-lock.json" >/dev/null \
+    && [[ ! -e "${CASE_PROJECT}/node_modules/${package}" ]]
+}
+make_package sd-approved-too
+approve_too() {
+  ( export SAFEDEPS_HOME="${CASE_HOME}"
+    . lib/ledger/ledger.sh
+    safedeps_ledger_write_approved_spec npm sd-approved-too 1.0.0 >/dev/null ) \
+    || fail "the second fixture approval is written"
+}
+for engine in claude codex; do
+  new_project
+  approve_too
+  run_install "npm install sd-approved" "${engine}"
+  [[ -z "${CASE_POST}" ]] || fail "the first approved install is confirmed quietly on ${engine} (post: ${CASE_POST})"
+  : > "${MARKS}"
+  run_install "npm install sd-victim" "${engine}"
+  rolled_back || fail "an unapproved install after an approved one is rolled back on ${engine} (post: ${CASE_POST:-<quiet>})"
+  has_dependency sd-approved \
+    || fail "the rollback keeps the approved install verified just before it on ${engine} (package.json: $(jq -c .dependencies "${CASE_PROJECT}/package.json"))"
+  lacks_dependency sd-victim || fail "the rollback removes the unapproved install on ${engine}"
+  [[ "${engine}" == codex ]] || ! victim_ran || fail "no script of the unverified package runs on ${engine}"
+
+  run_install "npm install sd-approved-too" "${engine}"
+  [[ -z "${CASE_POST}" ]] || fail "the second approved install is confirmed quietly on ${engine} (post: ${CASE_POST})"
+  run_install "npm install sd-victim" "${engine}"
+  rolled_back || fail "a second unapproved install is rolled back on ${engine} (post: ${CASE_POST:-<quiet>})"
+  has_dependency sd-approved && has_dependency sd-approved-too \
+    || fail "the rollback keeps both verified installs on ${engine} (package.json: $(jq -c .dependencies "${CASE_PROJECT}/package.json"))"
+  lacks_dependency sd-victim || fail "the second rollback removes the unapproved install on ${engine}"
+done
+pass "a rollback returns to the state the last verified install left, on Claude Code and Codex"
+
+# If the verified state cannot be recorded, the baseline does not move, and the
+# user is told that a later rollback will undo this install too.
+#
+# The failure is a directory standing where the new snapshot's file list goes.
+# A read-only snapshots directory was tried first and held on macOS, but CI's
+# Linux image runs as root, which writes through it, and the case went red for
+# the harness rather than the gate.
+block_verified_snapshot() {
+  local sid
+  sid=$(jq -r '.snapshot_id' "${CASE_HOME}"/pending/*.json) || fail "the pending install names its snapshot"
+  mkdir "${CASE_HOME}/snapshots/verified-${sid}_monitored_files.list"
+}
+new_project
+approve_too
+run_install "npm install sd-approved"
+baseline=$(cat "${CASE_HOME}"/confirmed_*)
+run_install "npm install sd-approved-too" claude block_verified_snapshot
+rolled_back && fail "the unrecorded case is an approved install, confirmed rather than rolled back (post: ${CASE_POST})"
+[[ "$(cat "${CASE_HOME}"/confirmed_*)" == "${baseline}" ]] \
+  || fail "an unrecorded verified state leaves the baseline where it was"
+grep -q 'could not record the result as the new rollback baseline' <<< "${CASE_POST}" \
+  || fail "the user is told the baseline did not move (post: ${CASE_POST:-<quiet>})"
+grep -q 'rollback baseline was not moved' "${CASE_HOME}/advisory.log" \
+  || fail "advisory.log records that the baseline did not move"
+pass "a verified state that cannot be recorded leaves the baseline in place, and says so"
+
+# An unapproved install that finishes while an approved one is being verified.
+# The baseline used to be copied after the checks, from whatever the project
+# held by then. Measured: sd-victim, installed by a second Bash call between
+# sd-approved's closure check and that copy, went into the baseline. Its own
+# rollback then restored it, and the rollback's `npm ci` ran its install
+# scripts. The record is now copied before the checks and sealed only if the
+# project still holds those bytes afterwards.
+#
+# The schedule is pinned rather than hoped for: a PATH shim on npm lets
+# post-verify's real `npm rebuild` finish, then runs the second call (its
+# PreToolUse and its install) before handing control back. On Claude Code that
+# rebuild sits between the checks and the record. Codex has no rebuild there,
+# so this pins the Claude Code schedule only; the code path is the same one.
+new_project
+real_npm=$(command -v npm)
+race_dir=$(mktemp -d "${tmp_root}/race.XXXXXX")
+mkdir -p "${race_dir}/shim"
+cat > "${race_dir}/second-call.sh" <<RACE_EOF
+#!/usr/bin/env bash
+payload=\$(jq -nc --arg c "npm install sd-victim" --arg d "${CASE_PROJECT}" '{tool_name:"Bash",tool_input:{command:\$c},cwd:\$d}')
+pre=\$(printf '%s' "\${payload}" | SAFEDEPS_HOME="${CASE_HOME}" "${ROOT_DIR}/scripts/safedeps-hook-entry.sh" pre 2>/dev/null)
+cmd=\$(jq -r '.hookSpecificOutput.updatedInput.command // empty' <<< "\${pre}")
+printf '%s' "\${cmd}" > "${race_dir}/second.cmd"
+[[ -n "\${cmd}" ]] && (cd "${CASE_PROJECT}" && bash -c "\${cmd}") > "${race_dir}/second.log" 2>&1
+printf 'exit=%s\n' "\$?" >> "${race_dir}/second.log"
+RACE_EOF
+cat > "${race_dir}/shim/npm" <<RACE_EOF
+#!/usr/bin/env bash
+if [[ "\${1:-}" == rebuild && ! -e "${race_dir}/fired" ]]; then
+  touch "${race_dir}/fired"
+  "${real_npm}" "\$@"; rc=\$?
+  "${race_dir}/second-call.sh"
+  exit "\${rc}"
+fi
+exec "${real_npm}" "\$@"
+RACE_EOF
+chmod +x "${race_dir}/second-call.sh" "${race_dir}/shim/npm"
+
+: > "${MARKS}"
+payload=$(jq -nc --arg c "npm install sd-approved" --arg d "${CASE_PROJECT}" '{tool_name:"Bash",tool_input:{command:$c},cwd:$d}')
+pre=$(printf '%s' "${payload}" | SAFEDEPS_HOME="${CASE_HOME}" scripts/safedeps-hook-entry.sh pre 2>/dev/null)
+first_cmd=$(jq -r '.hookSpecificOutput.updatedInput.command // empty' <<< "${pre}")
+[[ "${first_cmd}" == *--ignore-scripts* ]] || fail "the approved install runs inert on Claude Code (pre: ${pre})"
+(cd "${CASE_PROJECT}" && bash -c "${first_cmd}" > "${race_dir}/first.log" 2>&1) || fail "the approved install succeeds"
+payload=$(jq -nc --arg c "${first_cmd}" --arg d "${CASE_PROJECT}" '{tool_name:"Bash",tool_input:{command:$c},cwd:$d}')
+first_post=$(printf '%s' "${payload}" | PATH="${race_dir}/shim:${PATH}" SAFEDEPS_HOME="${CASE_HOME}" \
+  scripts/safedeps-hook-entry.sh post 2>/dev/null)
+[[ -e "${race_dir}/fired" ]] || fail "the second call ran inside the first one's post-verify (post: ${first_post:-<quiet>})"
+second_cmd=$(cat "${race_dir}/second.cmd")
+[[ "${second_cmd}" == *--ignore-scripts* ]] || fail "the second call was let through inert to the effect gate"
+grep -qx 'exit=0' "${race_dir}/second.log" || fail "the second install succeeds ($(tail -3 "${race_dir}/second.log"))"
+jq -e '.dependencies["sd-victim"] != null' "${CASE_PROJECT}/package.json" >/dev/null \
+  || fail "the second install landed in the project while the first was verified"
+
+payload=$(jq -nc --arg c "${second_cmd}" --arg d "${CASE_PROJECT}" '{tool_name:"Bash",tool_input:{command:$c},cwd:$d}')
+CASE_POST=$(printf '%s' "${payload}" | SAFEDEPS_HOME="${CASE_HOME}" scripts/safedeps-hook-entry.sh post 2>/dev/null)
+rolled_back || fail "the unapproved install is rolled back (post: ${CASE_POST:-<quiet>})"
+lacks_dependency sd-victim \
+  || fail "the rollback removes the unapproved install that landed during verification (package.json: $(jq -c .dependencies "${CASE_PROJECT}/package.json"))"
+victim_ran && fail "no script of the unapproved package runs, in the rebuild or the rollback ($(cut -f1,2 "${MARKS}" | paste -sd, -))"
+for confirmed in "${CASE_HOME}"/confirmed_*; do
+  [[ -f "${confirmed}" ]] || continue
+  for recorded in "${CASE_HOME}/snapshots/$(cat "${confirmed}")"_package{,-lock}.json; do
+    [[ -f "${recorded}" ]] || continue
+    grep -q sd-victim "${recorded}" && fail "the baseline records the unapproved package ($(basename "${recorded}"))"
+  done
+done
+for meta in "${CASE_HOME}"/snapshots/*_meta.json; do
+  [[ -f "${meta}" ]] || continue
+  for recorded in "${meta%_meta.json}"_package{,-lock}.json; do
+    [[ -f "${recorded}" ]] || continue
+    grep -q sd-victim "${recorded}" && fail "no snapshot a rollback can take records the unapproved package ($(basename "${recorded}"))"
+  done
+done
+has_dependency sd-approved \
+  || fail "the approved install stays (package.json: $(jq -c .dependencies "${CASE_PROJECT}/package.json"))"
+grep -q 'changed while they were being verified' <<< "${first_post}" \
+  || fail "the first install says its baseline was not recorded because the files changed (post: ${first_post:-<quiet>})"
+grep -q 'changed while they were being verified' "${CASE_HOME}/advisory.log" \
+  || fail "advisory.log records why the baseline did not move"
+pass "an unapproved install that lands while an approved one is verified stays out of the baseline and is rolled back"
+
+# --- 8. A rollback does not run scripts it did not verify -------------------------------
 # The rollback restores node_modules from the confirmed snapshot. With a
 # package-lock.json that is `npm ci` of the baseline lock. Without one, npm has
 # to resolve package.json's ranges again, and whatever it resolves has not been
@@ -693,15 +851,9 @@ pass "approved installs, including --no-save, sub-project, subdirectory, workspa
 # Both reinstalls also have to stay in the project. A project .npmrc with
 # global=true sent a plain `npm ci` / `npm install` to the global prefix, which
 # emptied the project's node_modules and left it empty.
-#
-# A rollback returns to the confirmed snapshot, which is the state before the
-# last verified install. So each case below verifies one more `npm install`
-# after sd-approved, and the rollback then has sd-approved to restore.
 approve_baseline() {
   run_install "npm install sd-approved"
   [[ -z "${CASE_POST}" ]] || fail "an approved install stays quiet before the restore case (post: ${CASE_POST})"
-  run_install "npm install"
-  [[ -z "${CASE_POST}" ]] || fail "a bare install of the approved tree stays quiet (post: ${CASE_POST})"
 }
 new_project
 approve_baseline
@@ -735,7 +887,7 @@ grep -q 'install scripts were not run' <<< "${CASE_POST}" \
   || fail "the rollback says the reinstall ran without install scripts (post: ${CASE_POST})"
 pass "a rollback with no package-lock.json reinstalls without running install scripts, and says so"
 
-# --- 8. Workspaces: a member is not a package, and its manifest is rolled back ---------------
+# --- 9. Workspaces: a member is not a package, and its manifest is rolled back ---------------
 # The root lockfile keys each member by its path (`packages/a`). The closure
 # read that key as a package named `packages` and called it unapproved. And an
 # install into a member writes the member's package.json, which the snapshot did
@@ -755,7 +907,7 @@ grep -q 'install scripts were not run' <<< "${CASE_POST}" \
 victim_ran && fail "no script of the unverified package runs in a workspace rollback"
 pass "an unapproved workspace install is rolled back from disk, member manifest included, and no member is read as a package"
 
-# --- 9. A `file:` dependency's own node_modules is rebuilt with the project -----------------
+# --- 10. A `file:` dependency's own node_modules is rebuilt with the project -----------------
 # `npm rebuild` follows the link to a `file:` dependency and rebuilds what is
 # in the target's node_modules, which no lockfile of the project records. The
 # rebuild precondition walked the project's node_modules in bash and stopped at
@@ -786,7 +938,7 @@ ungated || fail "the install the .npmrc keeps off the record is recorded UNGATED
 victim_ran && fail "no script of the unrecorded package runs in step 1 ($(cut -f1,2 "${MARKS}" | paste -sd, -))"
 CASE_CWD="${CASE_PROJECT}"
 : > "${MARKS}"
-# Pinned: section 7 published an unapproved sd-approved@1.0.1.
+# Pinned: section 8 published an unapproved sd-approved@1.0.1.
 run_install "npm install sd-approved@1.0.0"
 [[ -e "${FILELINK_PARENT}/lib/node_modules/sd-victim" ]] || fail "sd-victim is still in the linked library for step 2"
 victim_ran && fail "an approved install in the project runs no script of the package in the linked library ($(cut -f1,3 "${MARKS}" | paste -sd, -))"
@@ -796,7 +948,7 @@ pass "a package in a file: dependency's node_modules that no lockfile records is
 
 # --- the fixture never left the machine ---------------------------------------------------
 [[ -s "${tmp_root}/registry.log" ]] || fail "the installs went through the fixture registry"
-if grep -vE '^GET /sd-(victim|approved|swapped)(/-/sd-(victim|approved|swapped)-1\.0\.[01]\.tgz)?$' "${tmp_root}/registry.log" | grep -q .; then
+if grep -vE '^GET /sd-(victim|approved|approved-too|swapped)(/-/sd-(victim|approved|approved-too|swapped)-1\.0\.[01]\.tgz)?$' "${tmp_root}/registry.log" | grep -q .; then
   fail "the fixture registry saw only the synthetic packages ($(sort -u "${tmp_root}/registry.log" | paste -sd, -))"
 fi
 pass "every request went to the local fixture registry, for the synthetic packages only"
