@@ -393,6 +393,31 @@ do
 done
 pass "--no-save, --save=false and --no-package-lock leave package-lock.json alone and record the install in node_modules/.package-lock.json, the gate reads it there, and nothing is recorded UNGATED"
 
+# --- 1c. `--prefix <dir>` with the value as its own word ------------------------
+# The grammar's regexes read `npm --prefix x install ...` as `npm x` (exec),
+# so the pre-guard skipped the ledger and recorded the package `install`; the
+# `--prefix=x` spelling was read as the install it is. npm reads both alike
+# (nopt, npm's option types), and the gate now does too. This measures what the
+# effect gate makes of the install with a real npm: it lands in x, the gate
+# reads x's lockfiles and rolls it back, no script runs, and nothing is
+# recorded UNGATED, since the gate does read it.
+for form in \
+  "npm --prefix x install sd-victim" \
+  "npm --prefix=x install sd-victim"
+do
+  new_project
+  mkdir -p "${CASE_PROJECT}/x"
+  printf '{"name":"x","version":"1.0.0"}\n' > "${CASE_PROJECT}/x/package.json"
+  : > "${MARKS}"
+  run_install "${form}"
+  rolled_back || fail "the effect gate reads the --prefix directory and rolls back: ${form} (post: ${CASE_POST:-<quiet>})"
+  victim_ran && fail "no script of the unverified package runs: ${form} ($(cut -f1,2 "${MARKS}" | paste -sd, -))"
+  [[ ! -e "${CASE_PROJECT}/x/node_modules/sd-victim" && ! -e "${CASE_PROJECT}/node_modules/sd-victim" ]] \
+    || fail "the rollback removes the unapproved package from the --prefix directory: ${form}"
+  ungated && fail "an install the effect gate reads is not recorded UNGATED: ${form} ($(grep UNGATED "${CASE_HOME}/advisory.log"))"
+done
+pass "npm --prefix x install, in both spellings, lands in x, is read there and rolled back, runs no script and is not recorded UNGATED"
+
 
 # npm does not install in the directory it runs in. It walks up to the nearest
 # package.json or node_modules, and from a workspace member on to the root that

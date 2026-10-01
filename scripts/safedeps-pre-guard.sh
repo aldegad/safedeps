@@ -1982,10 +1982,10 @@ resolve_install_targets() {
 resolve_reading_targets() {
   local text="$1" cwd="$2" policy="${3:-arith}"
   local before stmt after words raw head target want kind manager tok value normalized in_env skip
-  local user_rc cli_global_off why run_dir answer local_prefix npm_word npm_unknown i
+  local user_rc cli_global_off why run_dir answer local_prefix npm_word npm_unknown npm_led i
   local dir="${cwd}" grouped=false env_userconfig=false exports_unknown=""
   local npm_until=""
-  local -a toks=() npm_env=() npm_args=() npm_exports=()
+  local -a toks=() npm_env=() npm_args=() npm_exports=() npm_plain=()
 
   shell_lex "${text}" scan "${policy}" "safedeps:command_scan_text" | judge_grep -q '[(){}`]' && grouped=true
   shell_lex "${text}" scan "${policy}" "safedeps:command_scan_text" | judge_grep -qEi 'npm_config_userconfig=' && env_userconfig=true
@@ -2057,10 +2057,70 @@ resolve_reading_targets() {
       # `VAR=value` prefixes and `env` wrappers stripped: `npm_config_save=false
       # npm install x` is an npm install.
       normalized=$(normalize_install_text "${stmt}")
+      # The npm word and its arguments. The words before npm go to env(1) in
+      # front of it when npm is asked below, and the words after it are npm's
+      # arguments, unchanged.
+      npm_env=("${npm_exports[@]+"${npm_exports[@]}"}")
+      npm_args=()
+      npm_word=""
+      npm_led=true
+      npm_unknown="${exports_unknown}"
+      in_env=false
+      skip=false
+      want=""
+      for (( i = 0; i < ${#toks[@]}; i++ )); do
+        tok="${toks[i]}"
+        if [[ -n "${npm_word}" ]]; then
+          npm_args+=("${tok}")
+          [[ "${tok}" != *$'\001' ]] || npm_unknown="${tok%$'\001'}"
+          continue
+        fi
+        if [[ "${skip}" == true ]]; then
+          skip=false
+          if [[ "${want}" == u ]]; then npm_env+=("${tok}"); fi
+          want=""
+          continue
+        fi
+        [[ "${tok}" != *$'\001' ]] || { npm_unknown="${tok%$'\001'}"; npm_led=false; continue; }
+        case "${tok}" in
+          npm|*/npm) npm_word="${tok}"; continue ;;
+          env) in_env=true; continue ;;
+          command|exec) continue ;;
+        esac
+        if [[ "${in_env}" == true ]]; then
+          case "${tok}" in
+            -C|--chdir) skip=true; continue ;;
+            --chdir=*) continue ;;
+            -u|--unset) npm_env+=(-u); skip=true; want=u; continue ;;
+            --unset=*) npm_env+=(-u "${tok#*=}"); continue ;;
+            -i|--ignore-environment) npm_env+=(-i); continue ;;
+            -*) npm_unknown="env ${tok}"; continue ;;
+          esac
+        fi
+        if [[ "${tok}" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
+          npm_env+=("${tok}")
+          continue
+        fi
+        npm_unknown="${tok}"
+        npm_led=false
+      done
       kind=other
+      # npm's reading applies where npm is the statement's command: an npm word
+      # after another command (`bun x npm install`) is that command's argument.
+      if [[ -n "${npm_word}" && "${npm_led}" == true ]]; then
+        # Which command npm runs is npm's reading of its arguments
+        # (guard_npm_statement): the regexes read `npm --prefix x install` both
+        # as an install and as `npm x`, and the runner reading won.
+        npm_plain=()
+        for tok in "${npm_args[@]+"${npm_args[@]}"}"; do npm_plain+=("${tok%$'\001'}"); done
+        if safedeps_npm_command_kind "${npm_plain[@]+"${npm_plain[@]}"}"; then
+          case "${SAFEDEPS_G_NPM_KIND}" in install|link) kind=npm ;; esac
+        else
+          guard_mark_reading_failed
+        fi
       # The runner test is guard_segment_is_runner's, spelled out: that function
       # is defined further down, past the point where this one first runs.
-      if ! command_scan_text "${normalized}" | grep -qEi "${SAFEDEPS_G_RUNNER_HEAD_RE}" \
+      elif ! command_scan_text "${normalized}" | grep -qEi "${SAFEDEPS_G_RUNNER_HEAD_RE}" \
           && printf '%s' "${normalized}" | grep -qEi "${SAFEDEPS_G_NPM_INSTALL_RE}"; then
         kind=npm
       fi
@@ -2125,7 +2185,7 @@ resolve_reading_targets() {
       # `npm link <pkg>` installs a package the global tree lacks into npm's
       # global prefix from the registry (lib/commands/link.js linkInstall),
       # whatever the flags say: with `--global` npm refuses to run it at all.
-      if command_scan_text "${normalized}" | grep -qEi "${SAFEDEPS_G_NPM_LINK_RE}"; then
+      if [[ -n "${npm_word}" && "${SAFEDEPS_G_NPM_KIND}" == link ]]; then
         target=global
         why="npm link installs a package the global tree does not have into npm's global prefix, where no lockfile records it"
         break
@@ -2139,48 +2199,6 @@ resolve_reading_targets() {
       # no spelling of `--global` is read here.
       # The words before npm go to env(1) in front of it, and the words after
       # it are npm's arguments, unchanged.
-      npm_env=("${npm_exports[@]+"${npm_exports[@]}"}")
-      npm_args=()
-      npm_word=""
-      npm_unknown="${exports_unknown}"
-      in_env=false
-      skip=false
-      want=""
-      for (( i = 0; i < ${#toks[@]}; i++ )); do
-        tok="${toks[i]}"
-        if [[ -n "${npm_word}" ]]; then
-          npm_args+=("${tok}")
-          [[ "${tok}" != *$'\001' ]] || npm_unknown="${tok%$'\001'}"
-          continue
-        fi
-        if [[ "${skip}" == true ]]; then
-          skip=false
-          if [[ "${want}" == u ]]; then npm_env+=("${tok}"); fi
-          want=""
-          continue
-        fi
-        [[ "${tok}" != *$'\001' ]] || { npm_unknown="${tok%$'\001'}"; continue; }
-        case "${tok}" in
-          npm|*/npm) npm_word="${tok}"; continue ;;
-          env) in_env=true; continue ;;
-          command|exec) continue ;;
-        esac
-        if [[ "${in_env}" == true ]]; then
-          case "${tok}" in
-            -C|--chdir) skip=true; continue ;;
-            --chdir=*) continue ;;
-            -u|--unset) npm_env+=(-u); skip=true; want=u; continue ;;
-            --unset=*) npm_env+=(-u "${tok#*=}"); continue ;;
-            -i|--ignore-environment) npm_env+=(-i); continue ;;
-            -*) npm_unknown="env ${tok}"; continue ;;
-          esac
-        fi
-        if [[ "${tok}" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
-          npm_env+=("${tok}")
-          continue
-        fi
-        npm_unknown="${tok}"
-      done
       if [[ -z "${npm_word}" ]]; then
         target="?"
         why="safedeps could not find the npm word in this install statement, so it cannot ask npm where the install lands"
@@ -3157,10 +3175,72 @@ guard_runner_uses_local_bin() {
   command_scan_text "${seg}" | judge_grep -qEi "${SAFEDEPS_G_START}((npx|bunx)([[:space:]]|\$)|npm${SAFEDEPS_G_OPTS}[[:space:]]+(${SAFEDEPS_G_NPM_EXEC_VERBS}|${SAFEDEPS_G_NPM_INIT_VERBS})([[:space:]]|\$)|bun${SAFEDEPS_G_OPTS}[[:space:]]+(x|create|c)([[:space:]]|\$))"
 }
 
+# npm's own reading of a statement whose command is npm (lib/install-grammar.sh
+# safedeps_npm_command_kind). The arguments are the statement's words, one
+# shell word each (the lexer's pieces view). Returns 1 when its command is not
+# npm. Otherwise sets SAFEDEPS_G_NPM_KIND (install, link, exec, init, other,
+# none), GUARD_NPM_CMD_AT (the command word's index among <words>, -1 without
+# one) and GUARD_NPM_OPERANDS, the indexes of npm's positional words after the
+# command, each followed by `=<text>` when its text is not the whole word (the
+# value half of `--global=evil`, which nopt leaves positional).
+#
+# The install grammar's regexes try both readings of an option that may or may
+# not take a value, and where both match they cannot say which one npm makes.
+# This can: `npm --prefix x install evil@1.0.0` is an install into x, which the
+# regex read as `npm x` with `install` as the package to run.
+guard_npm_statement() {
+  local -a toks=("$@")
+  local first=-1 i k t
+  for (( i = 0; i < ${#toks[@]}; i++ )); do
+    t="${toks[i]}"
+    while :; do
+      case "${t}" in
+        '('*|'{'*|'!'*|$'\002'*) t="${t:1}" ;;
+        *) break ;;
+      esac
+    done
+    case "${t}" in
+      ''|then|do|else|elif|if|while|until|time|coproc) continue ;;
+      npm|*/npm) first=${i} ;;
+    esac
+    break
+  done
+  (( first >= 0 )) || return 1
+  GUARD_NPM_CMD_AT=-1 GUARD_NPM_OPERANDS=" "
+  if ! safedeps_npm_command_kind "${toks[@]:first+1}"; then
+    SAFEDEPS_G_NPM_KIND=none
+    guard_mark_reading_failed
+    return 0
+  fi
+  (( SAFEDEPS_G_NPM_CMD_AT < 0 )) || GUARD_NPM_CMD_AT=$(( first + 1 + SAFEDEPS_G_NPM_CMD_AT ))
+  for (( k = 1; k < ${#SAFEDEPS_G_NPM_AT[@]}; k++ )); do
+    i=$(( first + 1 + SAFEDEPS_G_NPM_AT[k] ))
+    if [[ "${SAFEDEPS_G_NPM_WORDS[k]}" == "${toks[i]}" ]]; then
+      GUARD_NPM_OPERANDS+="${i} "
+    else
+      GUARD_NPM_OPERANDS+="${i}=${SAFEDEPS_G_NPM_WORDS[k]} "
+    fi
+  done
+  return 0
+}
+
 # True when the statement is a runner: something that fetches a package and
 # executes it (npx, npm exec, pnpm dlx, bunx, uvx, pipx run, go run ...).
+# <words> is the statement's words; where the command is npm, npm's reading of
+# them decides (guard_npm_statement), since the regex can read an option's
+# value as the exec verb.
 guard_segment_is_runner() {
-  command_scan_text "$1" | judge_grep -qEi "${SAFEDEPS_G_RUNNER_HEAD_RE}"
+  local -a words=()
+  command_scan_text "$1" | judge_grep -qEi "${SAFEDEPS_G_RUNNER_HEAD_RE}" || return 1
+  set -f
+  # shellcheck disable=SC2206
+  words=( ${2:-} )
+  set +f
+  if [[ ${#words[@]} -gt 0 ]] && guard_npm_statement "${words[@]}"; then
+    [[ "${SAFEDEPS_G_NPM_KIND}" == exec || "${SAFEDEPS_G_NPM_KIND}" == init ]]
+    return
+  fi
+  return 0
 }
 
 guard_all_npm_installs_are_global() {
@@ -3392,6 +3472,24 @@ guard_runner_operands() {
   [[ "${after}" == *$'\037'* ]] || return 0
   head="${after%%$'\037'*}"
   after="${after#*$'\037'}"
+  # npm's command is npm's reading of its arguments (guard_npm_statement): the
+  # pattern can take an option's value for the exec verb.
+  if [[ "${head%%[[:space:]]*}" == npm ]]; then
+    set -f
+    # shellcheck disable=SC2206
+    toks=( ${text} )
+    set +f
+    if guard_npm_statement "${toks[@]+"${toks[@]}"}"; then
+      case "${SAFEDEPS_G_NPM_KIND}" in
+        exec|init)
+          head="npm ${toks[GUARD_NPM_CMD_AT]}"
+          after="${toks[*]:GUARD_NPM_CMD_AT+1}"
+          ;;
+        *) return 0 ;;
+      esac
+    fi
+    toks=()
+  fi
   [[ "${after}" =~ [^[:space:]] ]] || return 0
   nopt=false
   case "${head%%[[:space:]]*}" in
@@ -3483,6 +3581,12 @@ guard_runner_operands() {
         fi
         ;;
       *)
+        # go run fetches by name only a package with a version suffix (`go
+        # help run`); any other package is local code, and the words after it
+        # are its arguments. `go run ./cmd user@example.com` names no module.
+        if [[ "${family}" == go && "${tok}" != *@* ]]; then
+          break
+        fi
         # The executed package -- unless an option already named the package,
         # in which case this is the command it provides (`npx -p x@1 x-cli`).
         if [[ "${named_by_option}" != true ]]; then
@@ -3602,8 +3706,8 @@ guard_names_package_without_spec() {
 # are the caller's. A statement whose install the effect gate reads is exempt as
 # a whole (guard_effect_gate_reads, carried here as gate_reads).
 guard_walk_statement() {
-  local tok idx verb_seen verb_tok="" skip_next found=""
-  local -a toks=()
+  local tok idx verb_seen verb_tok="" skip_next found="" npm_ops="" entry
+  local -a toks=() npm_text=()
 
   [[ "${gate_reads}" == true ]] && return 0
 
@@ -3617,10 +3721,34 @@ guard_walk_statement() {
 
   verb_seen=false
   skip_next=false
+  # An npm statement's operands are npm's positional words after its command,
+  # as nopt reads them (guard_npm_statement), not the words after the first
+  # word that looks like a verb: in `npm --prefix x install left-pad` that word
+  # was the option value `x`, and `install` was recorded as the package.
+  if [[ "${runner}" != true && "${seg_ecosystem}" == npm ]] && guard_npm_statement "${toks[@]+"${toks[@]}"}"; then
+    case "${SAFEDEPS_G_NPM_KIND}" in
+      install|link) ;;
+      *) return 0 ;;
+    esac
+    verb_seen=true
+    verb_tok="${toks[GUARD_NPM_CMD_AT]}"
+    npm_ops=" "
+    set -f
+    for entry in ${GUARD_NPM_OPERANDS}; do
+      idx=$(( ${entry%%=*} + 1 ))
+      npm_ops+="${idx} "
+      [[ "${entry}" != *=* ]] || npm_text[idx]="${entry#*=}"
+    done
+    set +f
+  fi
   idx=0
   for tok in "${toks[@]+${toks[@]}}"; do
     idx=$((idx + 1))
     [[ "${bound}" == *" ${idx} "* || "${consumed}" == *" ${idx} "* ]] && continue
+    if [[ -n "${npm_ops}" ]]; then
+      [[ "${npm_ops}" == *" ${idx} "* ]] || continue
+      tok="${npm_text[idx]:-${tok}}"
+    fi
 
     if [[ "${runner}" == true ]]; then
       # A runner's text is its package operands only (guard_runner_operands).
@@ -3734,9 +3862,10 @@ guard_walk_statement() {
 # Add `<ecosystem>:<operand>` to UNGATED_OPERANDS once.
 guard_note_ungated() {
   local entry="$1:$2"
-  # An empty operand names nothing: `go run ./cmd user@example.com` runs a local
-  # package, and its reader leaves no module name behind.
-  [[ -n "$2" ]] || return 0
+  # An empty operand names nothing. Nor does one that is only the lexer's mark
+  # for blanks inside a word, which is what an empty word (`pnpm add ""
+  # left-pad`) reads as: it was recorded as `npm: `.
+  [[ -n "${2//[$'\002'[:space:]]/}" ]] || return 0
   [[ ", ${UNGATED_OPERANDS}, " == *", ${entry}, "* ]] && return 0
   UNGATED_OPERANDS="${UNGATED_OPERANDS:+${UNGATED_OPERANDS}, }${entry//$'\002'/ }"
 }
@@ -4123,7 +4252,7 @@ guard_extract_specs() {
     eco=$(guard_segment_ecosystem "${seg}")
     [[ -n "${eco}" ]] || continue
     runner=false
-    guard_segment_is_runner "${seg}" && runner=true
+    guard_segment_is_runner "${seg}" "${words}" && runner=true
     words=$(guard_words_as_read "${eco}" "${words}")
     text=$(guard_extract_statement_text "${eco}" "${words}" "${runner}")
     if [[ "${mode}" != readings ]]; then

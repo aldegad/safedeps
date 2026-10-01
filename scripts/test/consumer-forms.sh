@@ -1298,6 +1298,48 @@ else
 fi
 pass "npm link reads each argument, and a registry one is checked wherever it stands"
 
+# --- 10c. npm's command is npm's reading of its arguments -----------------------
+# The grammar's regexes try both readings of an option that may take a value.
+# Where both matched they picked one, and for `npm --prefix x install
+# evil@1.0.0` they picked `npm x` (exec): the pinned install was allowed with no
+# ledger check, rewritten with --ignore-scripts, and recorded as the package
+# `install`. main denied it, and `--prefix=x` was denied all along. npm reads
+# both spellings alike, as an install into x (nopt with npm's option types), and
+# so does the gate now. The directory exists so that the deny is the ledger's.
+mkdir -p "${project_dir}/x"
+printf '{"dependencies":{}}\n' > "${project_dir}/x/package.json"
+for prefix_form in \
+  'npm --prefix x install evil@1.0.0' \
+  'npm --prefix=x install evil@1.0.0' \
+  'npm -C x install evil@1.0.0' \
+  'npm --prefix x --silent install evil@1.0.0' \
+  'npm --cache x install evil@1.0.0' \
+  'npm --prefi x install evil@1.0.0' \
+  'npm -gC x install evil@1.0.0' \
+  'npm --silent x evil@1.0.0'
+do
+  expect_prescription 'npm evil@1.0.0;' "${prefix_form}"
+done
+# The same reading names a runner's package: an option npm does not know is a
+# boolean, so here the command is `x` (exec) and the package it runs is `exec`,
+# with evil@1.0.0 as that program's argument. The regex took `exec` for the
+# command and denied evil@1.0.0, which npm never fetches.
+expect_prescription 'no-deny;' 'npm --foo x exec evil@1.0.0'
+# Which words npm takes as option values is nopt's answer, rerun here against
+# the npm on PATH.
+if command -v npm >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  options_rc=0
+  options_out=$(scripts/measure/npm-option-reading.sh 2>&1) || options_rc=$?
+  case "${options_rc}" in
+    0) pass "npm's arguments are read the way nopt reads them (scripts/measure/npm-option-reading.sh, npm $(npm --version))" ;;
+    3) pass "npm's arguments against nopt # SKIP ${options_out}" ;;
+    *) fail "npm's arguments are read the way nopt reads them ($(head -5 <<< "${options_out}" | tr '\n' ' '))" ;;
+  esac
+else
+  pass "npm's arguments against nopt # SKIP no npm and node on PATH to ask"
+fi
+pass "an option's value never stands in for npm's command, in either spelling"
+
 # --- 11. The UNGATED record names each operand the gate did not check ---------
 # The record used to be a second parser: it read each statement on its own and
 # asked the extractor "was this package pinned?" by name, so a pin on one
@@ -1539,6 +1581,30 @@ operand_rows=(
   # Controls: another name, and the npm CLI statement exempt on its own.
   $'npm:right-pad\tpnpm add left-pad@1.0.0 && pnpm add right-pad'
   $'npm:right-pad\tnpm install left-pad && pnpm add right-pad'
+  # npm's command and operands are npm's reading of its arguments (10c): an
+  # option's value is neither. The regex read `--prefix x` as `npm x` and
+  # recorded `install`; the old operand walk recorded the value `x`.
+  $'\tnpm --prefix x install left-pad'
+  $'\tnpm --prefix x install evil@1.0.0'
+  $'\tnpm --prefix=x install evil@1.0.0'
+  $'npm:left-pad\tnpm -g --prefix x install left-pad'
+  $'npm:left-pad\tnpm install -g --prefix x left-pad'
+  $'npm:exec\tnpm --foo x exec evil@1.0.0'
+  # go run fetches by name only a package with a version suffix; anything else
+  # is local code and the words after it are its arguments, so these name no
+  # module. Each was recorded as its local package (`go:./cmd`).
+  $'\tgo run ./cmd user@example.com'
+  $'\tgo run . deploy@prod'
+  $'\tgo run main.go --email admin@example.com'
+  $'\tgo run ./cmd/migrate -database postgres://user:pass@localhost:5432/app up'
+  $'\tgo run ./cmd/clone git@github.com:org/repo.git'
+  $'\tgo run ./scripts/notify ops@example.com'
+  $'\tgo run ./cmd example.com/m@v1.0.0'
+  $'\tgo run -race ./cmd/api --db postgres://u@db/app'
+  # An empty word names nothing; it was recorded as the lexer's blank mark.
+  $'npm:left-pad\tpnpm add "" left-pad'
+  $'\tnpx "" evil@1.0.0'
+  $'\tuvx --python "" "" evil==1.0.0'
 )
 
 # The rows are independent sandboxes; run them eight at a time.

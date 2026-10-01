@@ -244,3 +244,289 @@ safedeps_npa_is_local() {
   [[ "${namepart}" != "${arg}" ]] || return 1
   safedeps_npa_spec_is_local "${spec}"
 }
+
+# --- npm's option reading ------------------------------------------------------
+# Which word is npm's command, and which words are its arguments, is decided by
+# nopt with the option types in @npmcli/config/lib/definitions: an option whose
+# type is not Boolean takes the next word as its value, a Boolean one takes it
+# only when it is `true` or `false`, and the rest are positional, the first of
+# them being the command. The install grammar's regexes cannot know which
+# options take a value, so they try both readings, and where both match the
+# regex picked one. It picked wrong for `npm --prefix x install evil@1.0.0`:
+# read as `npm x` (exec) with `install` as the package, the install was not
+# checked against the ledger, and the record named `npm:install`. npm reads it
+# as an install into x.
+#
+# So the words are read here the way nopt reads them, with npm's own table.
+# Each entry is `<option>:<class>`: `v` takes the next word as its value unless
+# that word is a dash run (`--`); `s` (String) takes it unless it also looks
+# like an option; `b` (Boolean) takes only `true` or `false`. A `+` marks a type
+# that lists several, and after it what else nopt takes where it reads the
+# option as a Boolean (always for `b+`, and for any option spelled `--no-...`):
+# `null` (n), a number (N), any word not starting with a single dash (S), or one
+# of the literals after the `=`. `@host` stands for the addresses of the machine
+# npm runs on (local-address), which no table can hold, so a reading that would
+# need them says it cannot tell. The shorthands are
+# npm's, expanded the way nopt expands them. Measured from npm 11.19.0 by
+# scripts/measure/npm-option-reading.sh, which also runs nopt itself on a corpus
+# of argument lists and fails on any word this reading places differently.
+SAFEDEPS_G_NPM_OPTIONS='
+  _auth:v+nS access:v+n=restricted,public,private all:b
+  allow-directory:v+=all,none,root allow-file:v+=all,none,root
+  allow-git:v+=all,none,root allow-remote:v+=all,none,root
+  allow-same-version:b allow-scripts-pending:b allow-scripts-pin:b
+  allow-scripts:v+S also:v+n=dev,development
+  audit-level:v+n=info,low,moderate,high,critical,none audit:b
+  auth-type:v+=legacy,web before:v+n bin-links:b browser:b+nS bypass-2fa:b
+  ca:v+nS cache-max:v cache-min:v cache:v cafile:v call:s cert:v+nS cidr:v+nS
+  color:b+=always commit-hooks:b cpu:v+nS dangerously-allow-all-scripts:b
+  depth:v+nN description:b dev:b diff-dst-prefix:s diff-ignore-all-space:b
+  diff-name-only:b diff-no-prefix:b diff-src-prefix:s diff-text:b
+  diff-unified:v diff:v+S dry-run:b editor:s engine-strict:b
+  expect-result-count:v+nN expect-results:b+n expires:v+nN fetch-retries:v
+  fetch-retry-factor:v fetch-retry-maxtimeout:v fetch-retry-mintimeout:v
+  fetch-timeout:v force:b foreground-scripts:b format-package-lock:b fund:b
+  git-tag-version:b git:s global-style:b global:b globalconfig:v heading:s
+  https-proxy:v+n if-present:b ignore-scripts:b include-attestations:b
+  include-staged:b include-workspace-root:b include:v+=prod,dev,optional,peer
+  init-author-email:s init-author-name:s init-author-url:v+= init-license:s
+  init-module:v init-private:b init-type:s init-version:v init.author.email:s
+  init.author.name:s init.author.url:v+= init.license:s init.module:v
+  init.version:v install-links:b
+  install-strategy:v+=hoisted,nested,shallow,linked json:b key:v+nS
+  legacy-bundling:b legacy-peer-deps:b libc:v+nS link:b
+  local-address:v+n=@host location:v+=global,user,project
+  lockfile-version:v+n=1,2,3
+  loglevel:v+=silent,error,warn,notice,http,info,verbose,silly logs-dir:v+n
+  logs-max:v long:b maxsockets:v message:s min-release-age-exclude:v+S
+  min-release-age:v+nN name:v+nS node-gyp:v node-options:v+nS noproxy:v+S
+  offline:b omit-lockfile-registry-resolved:b omit:v+=dev,optional,peer
+  only:v+n=prod,production optional:b+n
+  orgs-permission:v+n=read-only,read-write,no-access orgs:v+nS os:v+nS
+  otp:v+nS pack-destination:s package-lock-only:b package-lock:b package:v+S
+  packages-all:b
+  packages-and-scopes-permission:v+n=read-only,read-write,no-access
+  packages:v+nS parseable:b password:v+nS prefer-dedupe:b prefer-offline:b
+  prefer-online:b prefix:v preid:s production:b+n progress:b provenance-file:v
+  provenance:b proxy:v+n read-only:b rebuild-bundle:b registry:v
+  replace-registry-host:v+S=npmjs,never,always save-bundle:b save-dev:b
+  save-exact:b save-optional:b save-peer:b save-prefix:s save-prod:b save:b
+  sbom-format:v+=cyclonedx,spdx sbom-type:v+=library,application,framework
+  scope:s scopes:v+nS script-shell:v+nS searchexclude:s searchlimit:v
+  searchopts:s searchstaleness:v shell:s shrinkwrap:b sign-git-commit:b
+  sign-git-tag:b strict-allow-scripts:b strict-peer-deps:b strict-ssl:b
+  tag-version-prefix:s tag:s timing:b token-description:v+nS umask:v unicode:b
+  update-notifier:b usage:b user-agent:s userconfig:v version:b versions:b
+  viewer:s which:v+nN workspace:v+S workspaces-update:b workspaces:b+n yes:b+n
+'
+SAFEDEPS_G_NPM_SHORTHANDS='
+  enjoy-by=--before d=--loglevel,info dd=--loglevel,verbose
+  ddd=--loglevel,silly quiet=--loglevel,warn q=--loglevel,warn
+  s=--loglevel,silent silent=--loglevel,silent verbose=--loglevel,verbose
+  desc=--description help=--usage local=--no-global n=--no-yes no=--no-yes
+  porcelain=--parseable readonly=--read-only reg=--registry
+  iwr=--include-workspace-root ws=--workspaces a=--all c=--call f=--force
+  g=--global L=--location l=--long m=--message p=--parseable C=--prefix
+  S=--save B=--save-bundle D=--save-dev E=--save-exact O=--save-optional
+  P=--save-prod ?=--usage H=--usage h=--usage v=--version w=--workspace
+  y=--yes
+'
+SAFEDEPS_G_NPM_OPTIONS=" ${SAFEDEPS_G_NPM_OPTIONS//$'\n'/ } "
+SAFEDEPS_G_NPM_SHORTHANDS=" ${SAFEDEPS_G_NPM_SHORTHANDS//$'\n'/ } "
+
+# <word> as an ERE that matches it literally, in SAFEDEPS_G_ERE. The tables are
+# searched with =~, which is linear: bash's own pattern removal
+# (`${table#* "${key}":}`) is quadratic in the table's length, and these
+# lookups run for every option word of every npm statement.
+safedeps_ere_literal() {
+  local word="$1" i c
+  SAFEDEPS_G_ERE=""
+  for (( i = 0; i < ${#word}; i++ )); do
+    c="${word:i:1}"
+    case "${c}" in
+      [A-Za-z0-9_@,:=-]) SAFEDEPS_G_ERE+="${c}" ;;
+      '\'|'^') SAFEDEPS_G_ERE+="\\${c}" ;;
+      *) SAFEDEPS_G_ERE+="[${c}]" ;;
+    esac
+  done
+}
+
+# The entry of <list> (`<key><sep><value>` entries, <sep> `:` or `=`, blank
+# separated) whose key is <key>: its value in SAFEDEPS_G_VALUE, status 1 when
+# there is none.
+safedeps_npm_lookup() {
+  local re
+  safedeps_ere_literal "$1"
+  re=" ${SAFEDEPS_G_ERE}[:=]([^ ]*)"
+  [[ "$2" =~ ${re} ]] || return 1
+  SAFEDEPS_G_VALUE="${BASH_REMATCH[1]}"
+}
+
+# The one entry of <list> whose key starts with <prefix>, as abbrev(1) does for
+# nopt: its key in SAFEDEPS_G_PICKED, empty when none or more than one does.
+# <prefix> is never a whole key here.
+safedeps_npm_unique_prefix() {
+  local re
+  SAFEDEPS_G_PICKED=""
+  [[ -n "$1" ]] || return 0
+  safedeps_ere_literal "$1"
+  re=" ${SAFEDEPS_G_ERE}[^ ]* (.* )?${SAFEDEPS_G_ERE}"
+  [[ "$2" =~ ${re} ]] && return 0
+  re=" (${SAFEDEPS_G_ERE}[^ :=]*)[:=]"
+  [[ "$2" =~ ${re} ]] && SAFEDEPS_G_PICKED="${BASH_REMATCH[1]}"
+  return 0
+}
+
+# nopt's resolveShort: what an option word expands to, as SAFEDEPS_G_SHORT_SET
+# (true or false) and SAFEDEPS_G_SHORT (the expansion, comma separated, which
+# can be empty).
+safedeps_npm_short() {
+  local s="$1" k c
+  SAFEDEPS_G_SHORT_SET=false SAFEDEPS_G_SHORT=""
+  while [[ "${s}" == -* ]]; do s="${s#-}"; done
+  safedeps_npm_lookup "${s}" "${SAFEDEPS_G_NPM_OPTIONS}" && return 0
+  if safedeps_npm_lookup "${s}" "${SAFEDEPS_G_NPM_SHORTHANDS}"; then
+    SAFEDEPS_G_SHORT="${SAFEDEPS_G_VALUE}" SAFEDEPS_G_SHORT_SET=true
+    return 0
+  fi
+  # Every character a one-character shorthand (`-gC`), expanded in order.
+  c=""
+  for (( k = 0; k < ${#s}; k++ )); do
+    safedeps_npm_lookup "${s:k:1}" "${SAFEDEPS_G_NPM_SHORTHANDS}" || break
+    c="${c:+${c},}${SAFEDEPS_G_VALUE}"
+  done
+  if (( k == ${#s} )); then
+    SAFEDEPS_G_SHORT_SET=true SAFEDEPS_G_SHORT="${c}"
+    return 0
+  fi
+  safedeps_npm_unique_prefix "${s}" "${SAFEDEPS_G_NPM_OPTIONS}"
+  [[ -z "${SAFEDEPS_G_PICKED}" ]] || return 0
+  safedeps_npm_unique_prefix "${s}" "${SAFEDEPS_G_NPM_SHORTHANDS}"
+  [[ -n "${SAFEDEPS_G_PICKED}" ]] || return 0
+  safedeps_npm_lookup "${SAFEDEPS_G_PICKED}" "${SAFEDEPS_G_NPM_SHORTHANDS}"
+  SAFEDEPS_G_SHORT="${SAFEDEPS_G_VALUE}" SAFEDEPS_G_SHORT_SET=true
+}
+
+# True when JavaScript's isNaN(<word>) is false, which is nopt's test for a
+# number: decimal (with a fraction or an exponent), hex, octal or binary,
+# Infinity, each with blanks around it, and the blank or empty word, which is 0.
+safedeps_js_is_number() {
+  local w="$1"
+  w="${w#"${w%%[![:space:]]*}"}"
+  w="${w%"${w##*[![:space:]]}"}"
+  [[ -z "${w}" ]] && return 0
+  [[ "${w}" =~ ^[+-]?(Infinity|[0-9]+[.]?[0-9]*([eE][+-]?[0-9]+)?|[.][0-9]+([eE][+-]?[0-9]+)?)$ ]] && return 0
+  [[ "${w}" =~ ^0([xX][0-9a-fA-F]+|[oO][0-7]+|[bB][01]+)$ ]]
+}
+
+# npm's reading of the words after `npm`, as nopt reads them (nopt-lib.js
+# parse, nopt 9 in npm 11.19.0). Sets SAFEDEPS_G_NPM_AT and SAFEDEPS_G_NPM_WORDS,
+# the positional words in order with the index of the word each came from. The
+# first is npm's command; the rest are its arguments. A positional can be the
+# value half of a `--name=value` word whose option took no value
+# (`--global=evil` installs evil), so it carries that word's index and the text
+# after the `=`. No process is started: this runs once per statement. Returns 1
+# when the reading depends on something a table cannot hold (`@host`).
+safedeps_npm_read_args() {
+  local -a w=("$@") at=() exp=()
+  local i j n arg v s cls la la_set hadeq no key consumed flags lits steps=0
+  SAFEDEPS_G_NPM_AT=() SAFEDEPS_G_NPM_WORDS=()
+  for (( i = 0; i < ${#w[@]}; i++ )); do at[i]=${i}; done
+  i=0
+  while (( i < ${#w[@]} )); do
+    # Every step consumes a word or replaces one with npm's fixed expansions,
+    # which never expand again; the bound only keeps a defect from spinning.
+    (( ++steps <= 4 * ${#w[@]} + 64 )) || return 1
+    arg="${w[i]}"
+    if [[ "${arg}" =~ ^--+$ ]]; then
+      for (( j = i + 1; j < ${#w[@]}; j++ )); do
+        SAFEDEPS_G_NPM_AT+=("${at[j]}") SAFEDEPS_G_NPM_WORDS+=("${w[j]}")
+      done
+      return 0
+    fi
+    if [[ "${arg}" != -?* ]]; then
+      SAFEDEPS_G_NPM_AT+=("${at[i]}") SAFEDEPS_G_NPM_WORDS+=("${arg}")
+      i=$(( i + 1 ))
+      continue
+    fi
+    hadeq=false
+    if [[ "${arg}" == *=* ]]; then
+      hadeq=true
+      v="${arg#*=}" arg="${arg%%=*}"
+      w=("${w[@]:0:i}" "${arg}" "${v}" "${w[@]:i+1}")
+      at=("${at[@]:0:i}" "${at[i]}" "${at[@]:i}")
+    fi
+    safedeps_npm_short "${arg}"
+    if [[ "${SAFEDEPS_G_SHORT_SET}" == true ]]; then
+      exp=()
+      v="${SAFEDEPS_G_SHORT}"
+      while [[ -n "${v}" ]]; do
+        exp+=("${v%%,*}")
+        [[ "${v}" == *,* ]] && v="${v#*,}" || v=""
+      done
+      n=${#exp[@]}
+      w=("${w[@]:0:i}" "${exp[@]+"${exp[@]}"}" "${w[@]:i+1}")
+      v="${at[i]}"
+      at=("${at[@]:0:i}" "${at[@]:i+1}")
+      for (( j = 0; j < n; j++ )); do at=("${at[@]:0:i}" "${v}" "${at[@]:i}"); done
+      (( n > 0 )) && [[ "${arg}" == "${exp[0]}" ]] || continue
+    fi
+    s="${arg}"
+    while [[ "${s}" == -* ]]; do s="${s#-}"; done
+    no=""
+    while [[ "${s:0:3}" == [Nn][Oo]- ]]; do no="set"; s="${s:3}"; done
+    key="${s}" cls=""
+    if ! safedeps_npm_lookup "${key}" "${SAFEDEPS_G_NPM_OPTIONS}"; then
+      safedeps_npm_unique_prefix "${key}" "${SAFEDEPS_G_NPM_OPTIONS}"
+      [[ -z "${SAFEDEPS_G_PICKED}" ]] || key="${SAFEDEPS_G_PICKED}"
+    fi
+    safedeps_npm_lookup "${key}" "${SAFEDEPS_G_NPM_OPTIONS}" && cls="${SAFEDEPS_G_VALUE}"
+    la="" la_set=false
+    if (( i + 1 < ${#w[@]} )); then la="${w[i+1]}" la_set=true; fi
+    consumed=0
+    if [[ -n "${no}" || "${cls}" == b* || ( -z "${cls}" && "${hadeq}" == false ) ]]; then
+      if [[ "${la_set}" == true && ( "${la}" == true || "${la}" == false ) ]]; then
+        consumed=1 la_set=false
+      fi
+      if [[ "${cls}" == ?+* && "${la_set}" == true && -n "${la}" ]]; then
+        flags="${cls#?+}" lits=""
+        [[ "${flags}" != *=* ]] || { lits=",${flags#*=},"; flags="${flags%%=*}"; }
+        [[ "${lits}" != ",@host," ]] || return 1
+        if [[ -n "${lits}" && "${lits}" == *",${la},"* ]]; then
+          consumed=1
+        elif [[ "${la}" == null && "${flags}" == *n* ]]; then
+          consumed=1
+        elif [[ "${flags}" == *N* && ! "${la}" =~ ^--+[^-] ]] && safedeps_js_is_number "${la}"; then
+          consumed=1
+        elif [[ "${flags}" == *S* && ! "${la}" =~ ^-[^-] ]]; then
+          consumed=1
+        fi
+      fi
+    elif [[ "${la_set}" == true ]]; then
+      consumed=1
+      [[ "${cls}" == s && "${la}" =~ ^--?[^-] ]] && consumed=0
+      [[ "${la}" =~ ^--+$ ]] && consumed=0
+    fi
+    i=$(( i + 1 + consumed ))
+  done
+  return 0
+}
+
+# Which kind of command npm runs for <words> (the words after `npm`): `install`,
+# `link`, `exec` or `init` when its command word is one of the grammar's
+# spellings for it, `other` for any other command, `none` without one. The
+# index of the command word among <words> is SAFEDEPS_G_NPM_CMD_AT, -1 without
+# one, and the positional words after it are npm's operands.
+safedeps_npm_command_kind() {
+  local cmd
+  SAFEDEPS_G_NPM_KIND=none SAFEDEPS_G_NPM_CMD_AT=-1
+  safedeps_npm_read_args "$@" || return 1
+  [[ ${#SAFEDEPS_G_NPM_WORDS[@]} -gt 0 ]] || return 0
+  cmd="${SAFEDEPS_G_NPM_WORDS[0]}" SAFEDEPS_G_NPM_CMD_AT="${SAFEDEPS_G_NPM_AT[0]}"
+  if [[ "${cmd}" =~ ^(${SAFEDEPS_G_NPM_VERBS})$ ]]; then SAFEDEPS_G_NPM_KIND=install
+  elif [[ "${cmd}" =~ ^(${SAFEDEPS_G_NPM_LINK_VERBS})$ ]]; then SAFEDEPS_G_NPM_KIND="link"
+  elif [[ "${cmd}" =~ ^(${SAFEDEPS_G_NPM_EXEC_VERBS})$ ]]; then SAFEDEPS_G_NPM_KIND="exec"
+  elif [[ "${cmd}" =~ ^(${SAFEDEPS_G_NPM_INIT_VERBS})$ ]]; then SAFEDEPS_G_NPM_KIND=init
+  else SAFEDEPS_G_NPM_KIND=other
+  fi
+}
