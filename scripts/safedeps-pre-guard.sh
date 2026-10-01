@@ -1354,7 +1354,7 @@ inert_rewrite_in_place() {
 # the mark is what keeps a failure from reading as "no statements", which reads
 # as "no install".
 command_statements() {
-  local raw_file scan_file
+  local policy="${2:-arith}" raw_file scan_file
   raw_file=$(mktemp "${TMPDIR:-/tmp}/safedeps-stmt-raw.XXXXXX") \
     && scan_file=$(mktemp "${TMPDIR:-/tmp}/safedeps-stmt-scan.XXXXXX") || {
       rm -f "${raw_file:-}"
@@ -1363,7 +1363,7 @@ command_statements() {
       return 0
     }
   printf '%s' "$1" > "${raw_file}"
-  command_scan_text "$1" > "${scan_file}"
+  shell_lex "$1" scan "${policy}" "safedeps:command_scan_text" > "${scan_file}"
   if ! LC_ALL=C awk -v scan_file="${scan_file}" -v raw_file="${raw_file}" '
     # safedeps:command_statements (scripts/measure/scan-failure-census.sh and scripts/test/scan-contract.sh key on this line)
     function slurp(f,   out, line, count) {
@@ -1616,17 +1616,42 @@ guard_npmrc_unrecorded() {
 #     they keep off the record is `?` with the reason in <why>. The global and
 #     builtin npmrc, and a file named only at run time, are outside what this
 #     reads; ARCHITECTURE.md states that boundary.
+#
+# Where bash and zsh read the command differently (shell_lex's axes), each
+# reading is resolved on its own, from the same cwd, and its statements follow
+# the first reading's. The readings used to be joined into one text and split
+# again under the first reading's policy, so a context the first reading left
+# open (`((` holding `<<`) swallowed the reading appended after it, and an
+# install only the zsh reading exposes yielded no statement, no spec and no
+# record (caught when the lexer and the extractor met in the release tree).
 resolve_install_targets() {
-  local cmd="$1" cwd="$2"
-  local text before stmt after words raw head target want kind manager tok value normalized in_env skip
+  local cmd="$1" cwd="$2" stripped flags policy first
+  stripped=$(strip_heredoc_bodies "${cmd}")
+  if ! flags=$(mktemp "${TMPDIR:-/tmp}/safedeps-lex.XXXXXX" 2>/dev/null); then
+    flags=""
+    guard_mark_reading_failed
+  fi
+  first=$(SAFEDEPS_LEX_FLAGS="${flags}" shell_lex "${stripped}" joined arith "safedeps:join_line_continuations")
+  resolve_reading_targets "${first}" "${cwd}" arith
+  for policy in $(lex_other_readings "${flags}"); do
+    resolve_reading_targets "$(shell_lex "${stripped}" joined "${policy}" "safedeps:join_line_continuations")" "${cwd}" "${policy}"
+  done
+  [[ -z "${flags}" ]] || rm -f "${flags}"
+  return 0
+}
+
+# One reading's statements and where each lands (see resolve_install_targets).
+# <text> is the joined view of the command under <policy>.
+resolve_reading_targets() {
+  local text="$1" cwd="$2" policy="${3:-arith}"
+  local before stmt after words raw head target want kind manager tok value normalized in_env skip
   local user_rc cli_global_off why run_dir answer local_prefix npm_word npm_unknown i
   local dir="${cwd}" grouped=false env_userconfig=false exports_unknown=""
   local npm_until=""
   local -a toks=() npm_env=() npm_args=() npm_exports=()
 
-  text=$(join_line_continuations "$(strip_heredoc_bodies "${cmd}")")
-  command_scan_text "${text}" | grep -q '[(){}`]' && grouped=true
-  command_scan_text "${text}" | grep -qEi 'npm_config_userconfig=' && env_userconfig=true
+  shell_lex "${text}" scan "${policy}" "safedeps:command_scan_text" | judge_grep -q '[(){}`]' && grouped=true
+  shell_lex "${text}" scan "${policy}" "safedeps:command_scan_text" | judge_grep -qEi 'npm_config_userconfig=' && env_userconfig=true
 
   while IFS=$'\035' read -r before stmt after words raw; do
     if [[ "${before}" == "?" ]]; then
@@ -1893,7 +1918,7 @@ resolve_install_targets() {
       break
     done
     printf '%s\035%s\035%s\035%s\n' "${kind}" "${target}" "${why}" "${raw}"
-  done < <(command_statements "${text}")
+  done < <(command_statements "${text}" "${policy}")
   return 0
 }
 
