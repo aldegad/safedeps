@@ -555,9 +555,14 @@ mkdir -p "${inert_project}/node_modules"
 cp "${inert_project}/package-lock.json" "${inert_project}/node_modules/.package-lock.json"
 stub_bin="${tmp_root}/stub-bin"
 mkdir -p "${stub_bin}"
+# The rebuild runs only when npm says the tree it would rebuild is the one on
+# record, so the stub answers `npm query` with the tree the lockfile records.
 cat > "${stub_bin}/npm" <<EOF
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "${tmp_root}/npm-calls.log"
+if [[ "\$1" == query ]]; then
+  printf '%s\n' '[{"location":"","name":"inert-project"},{"location":"node_modules/fixture-parent","name":"fixture-parent","version":"1.0.0"},{"location":"node_modules/fixture-child","name":"fixture-child","version":"1.0.0"}]'
+fi
 exit 0
 EOF
 chmod +x "${stub_bin}/npm"
@@ -567,7 +572,7 @@ inert_post=$(
 EOF
 )
 [[ -z "${inert_post}" ]] || fail "post hook keeps verified inert rebuild success quiet"
-grep -qx 'rebuild --global=false --location=project' "${tmp_root}/npm-calls.log" \
+grep -qxE 'rebuild --global=false --location=project --prefix .*/inert-project' "${tmp_root}/npm-calls.log" \
   || fail "post hook runs npm rebuild, pinned to the project tree, after verified injected install"
 pass "post hook rebuilds after verified inert install"
 
