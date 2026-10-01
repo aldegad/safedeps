@@ -24,9 +24,19 @@ cd "${ROOT_DIR}" || exit 2
 
 # <name>|<phase>|<command>, in the old chain's order.
 #
-# self-budget runs alone, in the second phase. It asserts how long the guard
-# takes to answer against budgets of one to twenty-five seconds, so a saturated
-# machine can move its verdicts. On its own it is nearly all sleep.
+# The second phase holds the batteries that a busy machine turns red without a
+# defect, and it starts only when the first is done:
+#
+#   self-budget        times the guard's answers against budgets of one to
+#                      twenty-five seconds. On its own it is nearly all sleep.
+#   effect-trace-grid  needs at least one npm install, of twelve tries, to
+#                      write its lockfile inside the wall-clock second the
+#                      pre-guard ran in. Run in the first phase on a Mac at
+#                      load 120-200, the lockfile landed 0.6-5.7s after the
+#                      pre-guard in every try and the battery failed; on the
+#                      8-CPU Linux VM at load 17 it landed after 0.4s.
+#
+# Neither loads the machine much, so they share the phase.
 BATTERIES=(
   "smoke|1|scripts/test/smoke.sh"
   "scan-contract|1|scripts/test/scan-contract.sh"
@@ -39,7 +49,7 @@ BATTERIES=(
   "advisory-log-retention|1|scripts/test/advisory-log-retention.sh"
   "hook-entry|1|scripts/test/hook-entry.sh"
   "lockless-forms|1|scripts/test/lockless-forms.sh"
-  "effect-trace-grid|1|scripts/test/effect-trace-grid.sh"
+  "effect-trace-grid|2|scripts/test/effect-trace-grid.sh"
   "e2e|1|scripts/test/e2e.sh"
 )
 PHASES=(1 2)
