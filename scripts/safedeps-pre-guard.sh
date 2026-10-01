@@ -434,6 +434,10 @@ shell_lex() {
       #              word still is an operator (`x==1>/dev/null`), as the shell
       #              reads it. `<(` and `>(` are process substitutions and stay.
       #              length-preserving
+      #   view=unprefixed-lines  unprefixed, for text holding one statement per
+      #              line, each line read from a fresh state like pieces: a case
+      #              left open by one statement no longer swallows the prefixes of
+      #              the next (caught in the release integration).
       #   view=pieces  for text holding one statement per line, each line read
       #              from a fresh state. One output line per piece, cut at
       #              top-level `;` `&` `|`, newlines and case-pattern closes:
@@ -477,7 +481,7 @@ shell_lex() {
         for (j in sl) SPC[sl[j]] = 1
         SPC["\n"] = 1
         DQS["\\"] = 1; DQS["\042"] = 1; DQS["$"] = 1; DQS["`"] = 1
-        wantdep = (view == "unprefixed" || view == "noredir" || view == "pieces")
+        wantdep = (view == "unprefixed" || view == "unprefixed-lines" || view == "noredir" || view == "pieces")
         if (view == "pieces") {
           # The value of each one-letter escape in $\047...\047.
           AQV["a"] = "\007"; AQV["b"] = "\010"; AQV["e"] = "\033"; AQV["E"] = "\033"
@@ -486,7 +490,7 @@ shell_lex() {
         }
         mode = ""; np = 0; ambig_a = 0; ambig_q = 0; unterm = 0; hn = 0; hstop = 0
         subp = (policy ~ /^sub/); zq = (policy ~ /-zq$/)
-        perline = (view == "pieces")
+        perline = (view == "pieces" || view == "unprefixed-lines")
         for (i = 1; i <= N; i++) {
           # The pieces view reads one statement per line, and the statements
           # come from more than one reading of the command (bash and zsh, see
@@ -651,8 +655,11 @@ shell_lex() {
         # the end of the input and take every line after it along (form A7, a
         # heredoc inside `$((` that bash reads as arithmetic). Such a command is
         # settled as UNDECIDED by guard_check_command_reads anyway.
-        if (view == "unprefixed" && !unterm) prefixes()
-        if (view == "noredir" || view == "pieces") redirs()
+        if ((view == "unprefixed" || view == "unprefixed-lines") && !unterm) prefixes()
+        # The same holds for redirections: in a reading that never closes, a
+        # stripped target changes how the rest reads, and the view stops
+        # being idempotent (random inputs in scan-contract).
+        if ((view == "noredir" && !unterm) || view == "pieces") redirs()
         if (view == "substs") emit_substs()
         else if (view == "pieces") emit_pieces()
         else emit()
@@ -956,9 +963,9 @@ shell_lex() {
             else put(" ")
             continue
           }
-          if (view == "unprefixed") {
+          if (view == "unprefixed" || view == "unprefixed-lines") {
             if (!(k in A)) put(cl == "p" ? ";" : cc)
-            if (k == N && ambig) {
+            if (k == N && ambig && view == "unprefixed") {
               # Where bash and zsh read the text differently, the prefixes were
               # found on one reading only; hand on the text as written too.
               put("\n"); for (p = 1; p <= N; p++) put(X[p])
@@ -1008,8 +1015,10 @@ command_scan_text() {
 }
 
 normalize_install_text() {
-  local text="$1"
+  local text="$1" view="unprefixed"
   local normalized unprefixed
+  # `lines`: <text> holds one statement per line, each read on its own.
+  [[ "${2:-}" != lines ]] || view="unprefixed-lines"
 
   # An absolute path before an executable reads as the executable.
   if ! normalized=$(printf '%s' "${text}" | sed -E \
@@ -1028,7 +1037,7 @@ normalize_install_text() {
   # `FOO="a b" pip install evil==6.6.6` and `FOO=$(cmd arg) pip install ...`
   # kept their prefix and the install after it was never recognized (caught in
   # review). A failed reading keeps the text it had and is recorded.
-  if unprefixed=$(shell_lex "${normalized}" unprefixed arith "safedeps:normalize_install_text"); then
+  if unprefixed=$(shell_lex "${normalized}" "${view}" arith "safedeps:normalize_install_text"); then
     normalized="${unprefixed}"
   fi
   printf '%s' "${normalized}"
@@ -3988,7 +3997,7 @@ guard_extract_pieces() {
       [[ -n "${kind}" ]] || continue
       printf '%s\n' "${raw}"
     done <<< "${targets}"
-  )")
+  )" lines)
   # A failed lexer marks the failure itself; an escape it could not read is a
   # `!` line, marked here.
   pieces=$(shell_lex "${normalized}" pieces arith "safedeps:extract_pieces") || pieces=""
