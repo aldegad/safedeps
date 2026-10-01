@@ -47,16 +47,35 @@ done
 # equal to the paths npm reports.
 tmp_root=$(mktemp -d "${TMPDIR:-/tmp}/safedeps-lockless.XXXXXX")
 tmp_root=$(cd "${tmp_root}" && pwd)
-# The marker only this battery's children carry, so a sweep can name them. See
+# The marker this battery's children carry, so a sweep can name them. See
 # scripts/test/e2e.sh for why children are reaped three ways.
-CHILD_MARKER='safedeps-lockless-child'
+#
+# The marker carries this run's pid, and the sweep reaps only the children of a
+# run that is gone. A marker shared by every run let one run kill another's
+# fixture registry mid-test: measured twice in one validation round, on a
+# machine running several suites at once, and the victim went red with npm
+# errors that looked like a code defect.
+#
+# The name does not contain the old shared marker, `safedeps-lockless-child`.
+# A checkout that still sweeps by that substring would match a name containing
+# it and kill this run's children -- measured while this marker was being
+# written. Old-marker orphans are not this sweep's to reap.
+CHILD_MARKER_BASE='safedeps-lockless-owned'
+CHILD_MARKER="${CHILD_MARKER_BASE}:$$"
+battery_alive() { ps -o args= -p "$1" 2>/dev/null | grep -q 'lockless-forms\.sh'; }
 sweep_stale_children() {
-  local pid args
+  local pid args owner
   while read -r pid args; do
     [[ -n "${pid}" ]] || continue
     case "${args}" in
-      *"${CHILD_MARKER}"*) kill -9 "${pid}" 2>/dev/null || true ;;
+      *"${CHILD_MARKER_BASE}:"*) ;;
+      *) continue ;;
     esac
+    owner="${args#*"${CHILD_MARKER_BASE}:"}"
+    owner="${owner%%[!0-9]*}"
+    [[ -n "${owner}" ]] || continue
+    battery_alive "${owner}" && continue
+    kill -9 "${pid}" 2>/dev/null || true
   done < <(ps -Ao pid=,args= 2>/dev/null)
 }
 owned_children=()

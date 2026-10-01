@@ -25,35 +25,45 @@ tmp_root=$(mktemp -d "${TMPDIR:-/tmp}/safedeps-e2e.XXXXXX")
 # SIGCONT before SIGKILL: a stopped process never receives SIGTERM, and SIGKILL
 # is delivered regardless, so this order is what actually reaps one.
 # A marker only this suite's children carry, so a sweep can name them without
-# pattern-matching its way onto somebody else's process.
-#
-# Suite-unique, deliberately not run-unique. Two overlapping e2e runs mean the
-# later one's startup sweep reaps the earlier one's live children, which is a
-# real cost -- but it fails loud. The two owner-state blocks have an `else fail`,
-# and the fixture provider (the third marked child) is load-bearing enough that
-# killing it turns the suite red on its own -- measured, rather than assumed from
-# the two blocks that happened to be written first.
-# A run token would remove that, at the price of a run never being able to
-# recognise the orphans its own SIGKILLed predecessor left, which is the case
-# this sweep exists for. The tradeoff is chosen, not overlooked. It is the child's $0,
+# pattern-matching its way onto somebody else's process. It is the child's $0,
 # which means it shows up in `ps -o args=` and nowhere else.
-E2E_CHILD_MARKER='safedeps-e2e-child'
+#
+# It carries this run's pid, and the sweep reaps only the children of a run
+# that is gone. The marker used to be one string shared by every run, and the
+# tradeoff was argued as chosen: overlapping runs would kill each other's
+# children, but loudly, and a run token would leave a SIGKILLed predecessor's
+# orphans unrecognised. The pid answers both. A predecessor's orphans carry a
+# pid that no longer runs this suite, so they are still reaped, and a live run's
+# children are left alone. The cost of the shared string was measured, not
+# hypothetical: on a machine running several suites at once, one run's sweep
+# killed another's fixtures, and the victim's red read as a code defect.
+#
+# The name does not contain the old marker, `safedeps-e2e-child`. A checkout
+# that still sweeps by that substring would otherwise match it. Orphans that
+# carry the old marker are not this sweep's to reap.
+E2E_CHILD_MARKER_BASE='safedeps-e2e-owned'
+E2E_CHILD_MARKER="${E2E_CHILD_MARKER_BASE}:$$"
+e2e_run_alive() { ps -o args= -p "$1" 2>/dev/null | grep -q 'e2e\.sh'; }
 
 # Layer 2: SIGKILL defeats the EXIT trap, and "the runtime SIGKILLs the hook" is
 # this repo's whole subject rather than a hypothetical -- measured, a suite
 # killed inside the stopped-owner test leaves a suspended orphan behind. So each
-# run also clears any orphan a PREVIOUS run left. Only processes carrying the
-# marker are touched.
+# run also clears any orphan a PREVIOUS run left: a marked process whose run is
+# no longer alive.
 sweep_stale_children() {
-  local pid args
+  local pid args owner
   while read -r pid args; do
     [[ -n "${pid}" ]] || continue
     case "${args}" in
-      *"${E2E_CHILD_MARKER}"*)
-        kill -CONT "${pid}" 2>/dev/null || true
-        kill -9 "${pid}" 2>/dev/null || true
-        ;;
+      *"${E2E_CHILD_MARKER_BASE}:"*) ;;
+      *) continue ;;
     esac
+    owner="${args#*"${E2E_CHILD_MARKER_BASE}:"}"
+    owner="${owner%%[!0-9]*}"
+    [[ -n "${owner}" ]] || continue
+    e2e_run_alive "${owner}" && continue
+    kill -CONT "${pid}" 2>/dev/null || true
+    kill -9 "${pid}" 2>/dev/null || true
   done < <(ps -Ao pid=,args= 2>/dev/null)
 }
 
