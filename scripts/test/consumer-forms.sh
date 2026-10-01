@@ -682,11 +682,12 @@ done
 pass "unpinned pnpm/yarn/bun and runner installs are recorded"
 
 # The pending state the pre-guard leaves for the PostToolUse hook, as JSON.
-pending_of() {
-  local command="$1" safe
+pending_of() { # command [codex]
+  local command="$1" safe turn='{}'
+  [[ "${2:-}" != codex ]] || turn='{turn_id:"t"}'
   safe=$(mktemp -d "${tmp_root}/safe-pending.XXXXXX")
   jq -nc --arg c "${command}" --arg cwd "${project_dir}" \
-    '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
+    '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd} + '"${turn}" |
     HOME="${tmp_root}/home-pending" SAFEDEPS_HOME="${safe}" scripts/safedeps-pre-guard.sh >/dev/null 2>&1
   cat "${safe}"/pending/*.json 2>/dev/null || true
 }
@@ -785,23 +786,28 @@ do
 done
 pass "lockfile writers share a trace only with inert statements between them and no relocation of their own"
 
-# Where bash and zsh read a command differently the gate judges each reading on
+# Where the shells read a command differently the gate judges each reading on
 # its own (resolve_install_targets, A1). A statement both readings share is one
 # statement, not two, so the one npm install below is one writer. That row has
 # no control: with the readings joined into one text (the reading this
 # replaced), the first reading's open `((` swallowed the second copy, so it was
 # not counted twice either (measured on a mutated copy). The second row is the
 # one that reading failed: the split only the zsh reading shows was swallowed
-# with it, and no reason came through.
+# with it, and no reason came through. It runs as Codex: bash reads no npm
+# install there at all, zsh and dash read two, so a Claude call is UNDECIDED
+# before any pending state is written (the inert rule, guard_reading_inert),
+# which the row after it pins.
 diverge=$'((cat <<EOF > n.txt\nit\'s here\nEOF\n) )'
 state=$(pending_of "npm install evil"$'\n'"${diverge}")
 [[ -n "$(jq -r '.npm_trace.baseline // empty' <<< "${state}")" ]] \
   || fail "a command the shells read two ways still leaves a trace baseline (${state})"
 [[ -z "$(jq -r '.npm_unattributable // empty' <<< "${state}")" ]] \
   || fail "one npm install shared by two readings is one writer ($(jq -r .npm_unattributable <<< "${state}"))"
-state=$(pending_of "${diverge}"$'\n'"npm install evil; command cd sub; npm install other")
+state=$(pending_of "${diverge}"$'\n'"npm install evil; command cd sub; npm install other" codex)
 [[ -n "$(jq -r '.npm_unattributable // empty' <<< "${state}")" ]] \
   || fail "two writers with a statement between them are reported from the reading that has them ($(jq -c . <<< "${state}"))"
+[[ -z "$(pending_of "${diverge}"$'\n'"npm install evil; command cd sub; npm install other")" ]] \
+  || fail "a Claude call whose readings put the npm installs in different places leaves no pending state"
 pass "the attribution rule counts each shell reading on its own"
 
 # The other side: forms the effect gate does read stay quiet. `--no-save` and
@@ -1750,5 +1756,46 @@ pass "an install piped into a shell is denied beside a visible install, even an 
 [[ "$(beside_decision $'cat <<EOF > notes.md\nhello\nEOF\npip install requests==2.0.0 && eval "pip install evil==6.6.6"')" == "deny" ]] \
   || fail "an eval install after a heredoc beside a visible install is still read"
 pass "a visible install beside a pipe into a shell with nothing else to install keeps its verdict"
+
+# --- Ordinary commands that pass where the shells differ --------------------
+# The gate reads a command as bash, as zsh and as dash, and the zsh and dash
+# readings run only when the bash reading passes a place where the three
+# differ: `((`, `$((`, a quote in arithmetic, `$[`, an apostrophe in "${...}",
+# `$'...'`. Everyday commands pass such places all the time. Each of these
+# keeps the verdict it had when the gate read one fixed reading -- measured
+# against the release head before the readings were shells, with left-pad
+# approved: six allows, nineteen unjudged, nothing moved. A reading that made
+# them UNDECIDED, or an inert rewrite the readings disagree on, would show here.
+for ordinary in \
+  'pass|for ((i=0;i<3;i++)); do echo $i; done' \
+  'pass|n=$((n+1)); echo "count: ${n:-0}"' \
+  'allow|echo "${HOME:-/tmp}/x"; npm install left-pad@1.3.0' \
+  'allow|((count++)); npm ci' \
+  'allow|npm install left-pad@1.3.0 && echo "done $((1+2))"' \
+  "pass|echo \"\${x:-it's}\"" \
+  "pass|git commit -m \"fix: handle \${x:-'default'}\"" \
+  'pass|x=$(( $(wc -l < /etc/hosts) + 1 )); echo $x' \
+  'pass|echo $(( 1 << 4 ))' \
+  $'pass|cat <<EOF\n$((1+2))\nEOF' \
+  'pass|if (( $# > 0 )); then echo args; fi' \
+  'allow|while ((i < 3)); do ((i++)); done; npm install left-pad@1.3.0' \
+  "pass|echo \"\${PATH//:/ }\" | tr ' ' '\\n' | head" \
+  "pass|printf '%s\\n' \"\${arr[@]:-none}\"" \
+  'pass|x=${y:-$((2*3))}; echo $x' \
+  'allow|echo "${name#prefix}" && npm install left-pad@1.3.0' \
+  'pass|((1<<2)); echo shift' \
+  'pass|echo "$((x<<2))"; ls' \
+  'pass|case $x in (a) ((n++));; esac' \
+  'pass|time ((x=5)); echo $x' \
+  "pass|echo \"\${msg:-'quoted default'}\" > out.txt" \
+  'pass|for f in *.js; do echo "${f%.js}"; done' \
+  "allow|npm install left-pad@1.3.0; echo \"\${x:-'}\"" \
+  'pass|arr=(a b c); echo "${#arr[@]}"' \
+  'pass|echo $[1+1]'
+do
+  [[ "$(beside_decision "${ordinary#*|}")" == "${ordinary%%|*}" ]] \
+    || fail "an ordinary command where the shells differ keeps its verdict (${ordinary%%|*}): ${ordinary#*|} (got: $(beside_decision "${ordinary#*|}"))"
+done
+pass "ordinary commands where bash, zsh and dash read differently keep their verdicts (25)"
 
 printf 'consumer-forms passed\n'
