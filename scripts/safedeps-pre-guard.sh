@@ -2558,15 +2558,14 @@ guard_extract_pieces() {
     fi
   done <<< "${targets}"
 
-  # One normalization for every statement, as one line each. A sentinel line
-  # keeps the command substitution from dropping trailing empty statements,
-  # which would shift every flag after them.
+  # One normalization for every statement, as one line each, so line N is
+  # statement N. A command substitution drops only trailing empty lines, and
+  # an empty statement has nothing to read.
   normalized=$(normalize_install_text "$(
     while IFS=$'\035' read -r kind _ _ raw; do
       [[ -n "${kind}" ]] || continue
       printf '%s\n' "${raw}"
     done <<< "${targets}"
-    printf '.\n'
   )")
   if ! printf '%s\n' "${normalized}" | LC_ALL=C awk -v flags="${read_flags}" -v nl=$'\036' '
     # safedeps:extract_pieces (scripts/test/scan-contract.sh keys on this line)
