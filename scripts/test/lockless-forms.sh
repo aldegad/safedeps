@@ -457,13 +457,21 @@ pass "a rollback returns to the state the last verified install left, on Claude 
 
 # If the verified state cannot be recorded, the baseline does not move, and the
 # user is told that a later rollback will undo this install too.
-readonly_snapshots() { chmod a-w "${CASE_HOME}/snapshots"; }
+#
+# The failure is a directory standing where the new snapshot's file list goes.
+# A read-only snapshots directory was tried first and held on macOS, but CI's
+# Linux image runs as root, which writes through it, and the case went red for
+# the harness rather than the gate.
+block_verified_snapshot() {
+  local sid
+  sid=$(jq -r '.snapshot_id' "${CASE_HOME}"/pending/*.json) || fail "the pending install names its snapshot"
+  mkdir "${CASE_HOME}/snapshots/verified-${sid}_monitored_files.list"
+}
 new_project
 approve_too
 run_install "npm install sd-approved"
 baseline=$(cat "${CASE_HOME}"/confirmed_*)
-run_install "npm install sd-approved-too" claude readonly_snapshots
-chmod u+w "${CASE_HOME}/snapshots"
+run_install "npm install sd-approved-too" claude block_verified_snapshot
 rolled_back && fail "the unrecorded case is an approved install, confirmed rather than rolled back (post: ${CASE_POST})"
 [[ "$(cat "${CASE_HOME}"/confirmed_*)" == "${baseline}" ]] \
   || fail "an unrecorded verified state leaves the baseline where it was"

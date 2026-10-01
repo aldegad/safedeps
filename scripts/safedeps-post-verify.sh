@@ -304,7 +304,7 @@ confirm_verified_state() {
   fi
 
   if ! snapshot_verified_state "${verified_id}" "${parent_id}"; then
-    rm -f "${SNAPSHOT_DIR}/${verified_id}"_*
+    rm -f "${SNAPSHOT_DIR}/${verified_id}"_* 2>/dev/null || true
     log_advisory "post-verify: the verified state of ${PROJECT_DIR} could not be recorded, so the rollback baseline was not moved (still ${parent_id:-none})."
     ROLLBACK_WARNINGS+=("safedeps verified this install but could not record the result as the new rollback baseline, so a later rollback in ${PROJECT_DIR} returns to the baseline before it (${parent_id:-none}) and would undo this install too")
     return 0
