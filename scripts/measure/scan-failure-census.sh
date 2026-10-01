@@ -61,7 +61,7 @@
 #   scripts/measure/scan-failure-census.sh [--quick] [--jobs N] [--variants "claude codex padded"]
 #
 #   --quick      the subset npm test runs (the corpus's "quick" block)
-#   --jobs N     parallel runs (default 4)
+#   --jobs N     parallel runs (default: one per CPU, at most 16)
 #   --variants   payload shapes: claude (no turn_id), codex (turn_id, so no
 #                inert rewrite), padded (over 1KB, so the self-budget child
 #                judges it), approved (claude, against a ledger that approves
@@ -138,7 +138,13 @@ fi
 
 # --- setup ----------------------------------------------------------------------
 QUICK=false
-JOBS=4
+# One run per CPU. Every run is a guard judging one payload, CPU-bound and
+# independent of the others, so a fixed 4 left most of a larger machine idle
+# for the longest battery in npm test. The cap is the largest machine this
+# default was measured on (16 CPUs); past it the default would be a guess.
+cpus=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || printf '4')
+[[ "${cpus}" =~ ^[1-9][0-9]*$ ]] || cpus=4
+JOBS=$(( cpus > 16 ? 16 : cpus ))
 VARIANTS=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
