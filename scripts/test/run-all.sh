@@ -5,8 +5,9 @@
 # `&&` chain, so a full run cost the sum of thirteen batteries and stopped at
 # the first red. They do not share state: each makes its own mktemp root and
 # points HOME or SAFEDEPS_HOME into it, and every fixture server listens on a
-# port the kernel picks (or the closed port 9). So the batteries in one phase
-# run at the same time, and the phases run one after another.
+# port the kernel picks (or the closed port 9). So the batteries of a phase run
+# at the same time. The second phase waits for the census, not for the whole
+# first phase (see below).
 #
 # Every battery runs, whatever another one answered. Each writes one log. At the
 # end the runner prints every log in the order below, then one summary line per
