@@ -47,16 +47,35 @@ done
 # equal to the paths npm reports.
 tmp_root=$(mktemp -d "${TMPDIR:-/tmp}/safedeps-lockless.XXXXXX")
 tmp_root=$(cd "${tmp_root}" && pwd)
-# The marker only this battery's children carry, so a sweep can name them. See
+# The marker this battery's children carry, so a sweep can name them. See
 # scripts/test/e2e.sh for why children are reaped three ways.
-CHILD_MARKER='safedeps-lockless-child'
+#
+# The marker carries this run's pid, and the sweep reaps only the children of a
+# run that is gone. A marker shared by every run let one run kill another's
+# fixture registry mid-test: measured twice in one validation round, on a
+# machine running several suites at once, and the victim went red with npm
+# errors that looked like a code defect.
+#
+# The name does not contain the old shared marker, `safedeps-lockless-child`.
+# A checkout that still sweeps by that substring would match a name containing
+# it and kill this run's children -- measured while this marker was being
+# written. Old-marker orphans are not this sweep's to reap.
+CHILD_MARKER_BASE='safedeps-lockless-owned'
+CHILD_MARKER="${CHILD_MARKER_BASE}:$$"
+battery_alive() { ps -o args= -p "$1" 2>/dev/null | grep -q 'lockless-forms\.sh'; }
 sweep_stale_children() {
-  local pid args
+  local pid args owner
   while read -r pid args; do
     [[ -n "${pid}" ]] || continue
     case "${args}" in
-      *"${CHILD_MARKER}"*) kill -9 "${pid}" 2>/dev/null || true ;;
+      *"${CHILD_MARKER_BASE}:"*) ;;
+      *) continue ;;
     esac
+    owner="${args#*"${CHILD_MARKER_BASE}:"}"
+    owner="${owner%%[!0-9]*}"
+    [[ -n "${owner}" ]] || continue
+    battery_alive "${owner}" && continue
+    kill -9 "${pid}" 2>/dev/null || true
   done < <(ps -Ao pid=,args= 2>/dev/null)
 }
 owned_children=()
@@ -73,8 +92,8 @@ trap cleanup EXIT
 sweep_stale_children
 
 # --- synthetic packages --------------------------------------------------------
-# Every lifecycle phase appends `<package>\t<phase>\t<cwd>` to MARKS, so a line
-# in it is a script that ran and says where.
+# Every lifecycle phase appends `<package>@<version>\t<phase>\t<cwd>` to MARKS,
+# so a line in it is a script that ran and says which version ran it, and where.
 MARKS="${tmp_root}/marks.log"
 : > "${MARKS}"
 mkdir -p "${tmp_root}/tarballs"
@@ -85,7 +104,7 @@ make_package() {
   # heuristics read the script text, and a temp path under /home would read as
   # a script touching a sensitive path.
   cat > "${src}/mark.js" <<EOF
-require('fs').appendFileSync('${MARKS}', '${name}\t' + process.argv[2] + '\t' + process.cwd() + '\n');
+require('fs').appendFileSync('${MARKS}', '${name}@${version}\t' + process.argv[2] + '\t' + process.cwd() + '\n');
 EOF
   jq -n --arg name "${name}" --arg version "${version}" '{
     name: $name,
@@ -99,6 +118,11 @@ EOF
 # sd-victim is never approved. sd-approved is approved in every sandbox.
 make_package sd-victim
 make_package sd-approved
+# sd-swapped is approved at 1.0.0 and has an unapproved 1.0.1 from the start, so
+# its section can install one version over the other without changing what
+# `npm install sd-approved` resolves to anywhere else.
+make_package sd-swapped 1.0.0
+make_package sd-swapped 1.0.1
 
 # --- local registry and advisory provider ----------------------------------------
 ( cd "${tmp_root}" && exec -a "${CHILD_MARKER}" \
@@ -159,30 +183,111 @@ export SAFEDEPS_OSV_API_URL="${osv}/osv/v1/query" SAFEDEPS_OSV_BATCH_API_URL="${
 # Sets CASE_PROJECT, CASE_HOME, CASE_POST and CASE_RAN, the scripts that ran
 # after the command finished, which on Claude Code means the ones `npm rebuild`
 # ran. The optional third argument runs a hook between the command and
-# PostToolUse, with the project directory as its argument.
+# PostToolUse, with the project directory as its argument. The command runs in
+# CASE_CWD, which is the project unless a case sets it to a subdirectory: the
+# hook's cwd is wherever the agent's shell happens to be.
+#
+# The project has `sub`, a sub-project with a package.json of its own, and
+# `src`, a plain directory without one.
 new_project() {
   CASE_PROJECT=$(mktemp -d "${tmp_root}/project.XXXXXX")
-  mkdir -p "${CASE_PROJECT}/sub"
+  CASE_PROJECT=$(cd "${CASE_PROJECT}" && pwd -P)
+  CASE_CWD="${CASE_PROJECT}"
+  mkdir -p "${CASE_PROJECT}/sub" "${CASE_PROJECT}/src"
   printf '{"name":"proj","version":"1.0.0"}\n' > "${CASE_PROJECT}/package.json"
   printf '{"name":"sub","version":"1.0.0"}\n' > "${CASE_PROJECT}/sub/package.json"
   (cd "${CASE_PROJECT}" && npm install --ignore-scripts >/dev/null 2>&1) || fail "the fixture project installs"
+  new_safedeps_home
+}
+
+new_safedeps_home() {
   CASE_HOME=$(mktemp -d "${tmp_root}/safe.XXXXXX")
   ( export SAFEDEPS_HOME="${CASE_HOME}"
     . lib/ledger/ledger.sh
-    safedeps_ledger_write_approved_spec npm sd-approved 1.0.0 >/dev/null ) \
+    safedeps_ledger_write_approved_spec npm sd-approved 1.0.0 >/dev/null
+    safedeps_ledger_write_approved_spec npm sd-swapped 1.0.0 >/dev/null ) \
     || fail "the fixture approval is written"
+}
+
+# An npm workspace: the root declares `packages/*`, and `packages/a` is a member.
+# <workspaces> replaces the declaration.
+new_workspace() {
+  local workspaces="${1:-[\"packages/*\"]}"
+  CASE_PROJECT=$(mktemp -d "${tmp_root}/workspace.XXXXXX")
+  CASE_PROJECT=$(cd "${CASE_PROJECT}" && pwd -P)
+  CASE_CWD="${CASE_PROJECT}"
+  mkdir -p "${CASE_PROJECT}/packages/a"
+  printf '{"name":"root","version":"1.0.0","private":true,"workspaces":%s}\n' "${workspaces}" \
+    > "${CASE_PROJECT}/package.json"
+  printf '{"name":"a","version":"1.0.0"}\n' > "${CASE_PROJECT}/packages/a/package.json"
+  (cd "${CASE_PROJECT}" && npm install --ignore-scripts >/dev/null 2>&1) || fail "the fixture workspace installs"
+  new_safedeps_home
+}
+
+# A workspace whose member packages/a is a symlink to ../real/a. npm's glob
+# finds packages/a and compares that path, unresolved, with the physical
+# directory an install runs in, so from real/a npm installs in real/a, not at
+# the root.
+new_symws() {
+  CASE_PROJECT=$(mktemp -d "${tmp_root}/symws.XXXXXX")
+  CASE_PROJECT=$(cd "${CASE_PROJECT}" && pwd -P)
+  CASE_CWD="${CASE_PROJECT}"
+  mkdir -p "${CASE_PROJECT}/packages" "${CASE_PROJECT}/real/a"
+  printf '{"name":"root","version":"1.0.0","private":true,"workspaces":["packages/*"]}\n' > "${CASE_PROJECT}/package.json"
+  printf '{"name":"a","version":"1.0.0"}\n' > "${CASE_PROJECT}/real/a/package.json"
+  ln -s ../real/a "${CASE_PROJECT}/packages/a"
+  (cd "${CASE_PROJECT}" && npm install --ignore-scripts >/dev/null 2>&1) || fail "the fixture symlinked workspace installs"
+  new_safedeps_home
+}
+
+# A workspace that names its members with a negated pattern, which only npm's
+# own glob reads.
+new_negws() { new_workspace '["packages/*","!packages/b"]'; }
+
+# A PATH on which `npm` is a stub: <behaviour> `fail` exits 7 with an npm-style
+# error, `hang` never answers. <commands> are the npm commands it stubs, `|`
+# separated; anything else goes to the real npm. `missing` is a PATH with every
+# tool but npm. Stubs exec, so a deadline that kills the pid kills the stub.
+stub_npm_path() {
+  local behaviour="$1" commands="${2:-}" dir entry real
+  dir=$(mktemp -d "${tmp_root}/stub.XXXXXX")
+  real=$(command -v npm)
+  if [[ "${behaviour}" == missing ]]; then
+    local IFS=:
+    for entry in ${PATH}; do
+      for real in "${entry}"/*; do
+        [[ -x "${real}" && "${real##*/}" != npm && ! -e "${dir}/${real##*/}" ]] || continue
+        ln -s "${real}" "${dir}/${real##*/}"
+      done
+    done
+    printf '%s' "${dir}"
+    return 0
+  fi
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'case "$1" in\n'
+    printf '  %s)\n' "${commands}"
+    case "${behaviour}" in
+      fail) printf "    printf 'npm error code EFAKE\\nnpm error the stub refused\\n' >&2; exit 7 ;;\n" ;;
+      hang) printf "    exec sleep 60 ;;\n" ;;
+    esac
+    printf 'esac\n'
+    printf 'exec %q "$@"\n' "${real}"
+  } > "${dir}/npm"
+  chmod +x "${dir}/npm"
+  printf '%s:%s' "${dir}" "${PATH}"
 }
 
 run_install() {
   local command="$1" engine="${2:-claude}" between="${3:-}" payload pre exec_command marks_before
   rm -rf "${tmp_root}/global"
   if [[ "${engine}" == codex ]]; then
-    payload=$(jq -nc --arg c "${command}" --arg d "${CASE_PROJECT}" \
+    payload=$(jq -nc --arg c "${command}" --arg d "${CASE_CWD}" \
       '{tool_name:"Bash",tool_input:{command:$c},cwd:$d,turn_id:"turn-lockless",model:"codex-test"}')
   else
-    payload=$(jq -nc --arg c "${command}" --arg d "${CASE_PROJECT}" '{tool_name:"Bash",tool_input:{command:$c},cwd:$d}')
+    payload=$(jq -nc --arg c "${command}" --arg d "${CASE_CWD}" '{tool_name:"Bash",tool_input:{command:$c},cwd:$d}')
   fi
-  pre=$(printf '%s' "${payload}" | SAFEDEPS_HOME="${CASE_HOME}" scripts/safedeps-hook-entry.sh pre 2>/dev/null)
+  pre=$(printf '%s' "${payload}" | PATH="${CASE_PRE_PATH:-${PATH}}" SAFEDEPS_HOME="${CASE_HOME}" scripts/safedeps-hook-entry.sh pre 2>/dev/null)
   if [[ -n "${pre}" && "$(jq -r '.hookSpecificOutput.permissionDecision // empty' <<< "${pre}")" == deny ]]; then
     fail "the gate lets the install through to the effect gate: ${command}"
   fi
@@ -193,13 +298,13 @@ run_install() {
     fail "the install runs inert on Claude Code: ${command}"
   fi
 
-  (cd "${CASE_PROJECT}" && bash -c "${exec_command}" >"${tmp_root}/last-install.log" 2>&1) \
+  (cd "${CASE_CWD}" && bash -c "${exec_command}" >"${tmp_root}/last-install.log" 2>&1) \
     || fail "the install itself succeeds: ${exec_command} ($(tail -3 "${tmp_root}/last-install.log"))"
   [[ -z "${between}" ]] || "${between}" "${CASE_PROJECT}"
 
   marks_before=$(wc -l < "${MARKS}" | tr -d ' ')
-  payload=$(jq -nc --arg c "${exec_command}" --arg d "${CASE_PROJECT}" '{tool_name:"Bash",tool_input:{command:$c},cwd:$d}')
-  CASE_POST=$(printf '%s' "${payload}" | SAFEDEPS_HOME="${CASE_HOME}" scripts/safedeps-hook-entry.sh post 2>/dev/null)
+  payload=$(jq -nc --arg c "${exec_command}" --arg d "${CASE_CWD}" '{tool_name:"Bash",tool_input:{command:$c},cwd:$d}')
+  CASE_POST=$(printf '%s' "${payload}" | PATH="${CASE_POST_PATH:-${PATH}}" SAFEDEPS_HOME="${CASE_HOME}" scripts/safedeps-hook-entry.sh post 2>/dev/null)
   CASE_RAN=$(tail -n +"$((marks_before + 1))" "${MARKS}")
 }
 
@@ -288,6 +393,72 @@ do
 done
 pass "--no-save, --save=false and --no-package-lock leave package-lock.json alone and record the install in node_modules/.package-lock.json, the gate reads it there, and nothing is recorded UNGATED"
 
+
+# npm does not install in the directory it runs in. It walks up to the nearest
+# package.json or node_modules, and from a workspace member on to the root that
+# declares it. Each form below wrote the lockfiles of another directory than the
+# one the command names, while the gate read the named one and confirmed it
+# clean: the unapproved package stayed on disk and nothing was recorded.
+# `<fixture>|<cwd>|<engine>|<form>`, where <cwd> is the hook's cwd relative to
+# the project.
+#
+# The gate asks npm where (lib/npm/ask.sh). The rows after the first six are
+# where a copy of npm's rules in bash disagreed with npm: a member reached
+# through a symlink, where npm installs in real/a and the copy climbed to the
+# root (validator round 2, F1), and the spellings that turn workspaces off.
+for carrier in \
+  "project|.|claude|cd src && npm install sd-victim" \
+  "project|.|claude|cd src; npm install sd-victim --no-save" \
+  "project|src|claude|npm install sd-victim" \
+  "workspace|.|claude|cd packages/a && npm install sd-victim" \
+  "workspace|packages/a|claude|npm install sd-victim" \
+  "workspace|packages/a|claude|npm install sd-victim --no-save" \
+  "negws|.|claude|cd packages/a && npm install sd-victim" \
+  "symws|real/a|claude|npm install sd-victim" \
+  "symws|.|claude|cd packages/a && npm install sd-victim" \
+  "symws|.|claude|cd real/a && npm install sd-victim" \
+  "symws|packages/a|claude|npm install sd-victim --no-save" \
+  "symws|real/a|codex|npm install sd-victim" \
+  "workspace|packages/a|claude|npm install sd-victim --no-workspaces" \
+  "workspace|.|claude|cd packages/a && npm install sd-victim --workspaces false" \
+  "workspace|.|claude|cd packages/a && npm install sd-victim --workspaces=false"
+do
+  IFS='|' read -r fixture cwd engine form <<< "${carrier}"
+  "new_${fixture}"
+  CASE_CWD="${CASE_PROJECT}/${cwd}"
+  : > "${MARKS}"
+  run_install "${form}" "${engine}"
+  rolled_back || fail "the effect gate reads the directory npm installed in and rolls back: ${carrier} (post: ${CASE_POST:-<quiet>})"
+  ungated && fail "an install the effect gate reads is not recorded UNGATED: ${carrier}"
+  # Codex has no inert install, so there the scripts ran during the install.
+  [[ "${engine}" == codex ]] || ! victim_ran || fail "no script of the unverified package runs: ${carrier}"
+  [[ -z "$(cd "${CASE_PROJECT}" && find . -path '*/node_modules/sd-victim' -print 2>/dev/null)" ]] \
+    || fail "the rollback removes the unapproved package from disk: ${carrier}"
+  grep -q 'packages@' <<< "${CASE_POST}" && fail "a workspace member is not read as a package: ${carrier} (post: ${CASE_POST})"
+done
+pass "an install from a directory without a package.json, a workspace member, or a symlinked member is read where npm put it"
+
+# Where npm cannot be asked, or does not answer, the gate does not fall back to
+# a reading of its own: the install is recorded UNGATED with the reason. The
+# stub stands in for npm in the PreToolUse hook only; the install itself runs
+# the real npm. `<stub>|<commands>|<the reason the record gives>`.
+for carrier in \
+  "fail|prefix|root|npm prefix failed (exit 7: code EFAKE)" \
+  "hang|prefix|root|npm did not say where this install lands within" \
+  "missing|||npm is not on the PATH this hook runs with"
+do
+  IFS='|' read -r behaviour cmd1 cmd2 reason <<< "${carrier}"
+  new_project
+  : > "${MARKS}"
+  CASE_PRE_PATH=$(stub_npm_path "${behaviour}" "${cmd1}${cmd2:+|${cmd2}}")
+  run_install "npm install sd-victim"
+  CASE_PRE_PATH=""
+  ungated || fail "an install npm could not place is recorded UNGATED: ${behaviour}"
+  grep -qF "${reason}" "${CASE_HOME}/advisory.log" || fail "the record says why npm could not place it: ${behaviour} ($(grep pre-guard "${CASE_HOME}/advisory.log" | tail -2))"
+  victim_ran && fail "no script of the unverified package runs when npm could not place the install: ${behaviour}"
+done
+pass "an install npm could not be asked about, or did not answer for, is recorded UNGATED with the reason"
+
 # --- 2. Installs no effect gate reads are recorded -----------------------------------
 # A global install writes no lockfile anywhere, so there is nothing to read.
 # The gate says so in advisory.log. Nothing runs its scripts either: the rebuild
@@ -373,18 +544,51 @@ do
   victim_ran && fail "no script of the unverified package runs: ${carrier} ($(cut -f1,2 "${MARKS}" | paste -sd, -))"
   case "${lands}" in
     global)
-      grep -q '^sd-approved	install' <<< "${CASE_RAN}" || fail "npm rebuild still rebuilds the verified project tree: ${carrier}"
+      grep -q '^sd-approved@[^	]*	install' <<< "${CASE_RAN}" || fail "npm rebuild still rebuilds the verified project tree: ${carrier}"
       ;;
     unrecorded)
       # The unrecorded package sits in the tree a rebuild would run, so the
       # rebuild is skipped rather than narrowed, and the user is told.
       [[ -z "${CASE_RAN}" ]] || fail "npm rebuild does not run over a package no lockfile records: ${carrier} (${CASE_RAN})"
-      grep -q 'neither lockfile records (node_modules/sd-victim)' <<< "${CASE_POST}" \
+      grep -q 'neither lockfile records (node_modules/sd-victim (sd-victim@1.0.0, not in either lockfile))' <<< "${CASE_POST}" \
         || fail "the skipped rebuild names the unrecorded package: ${carrier} (post: ${CASE_POST:-<quiet>})"
       ;;
   esac
 done
 pass "an .npmrc that keeps installs off the record, project or user, is recorded UNGATED, and no rebuild runs what it put there"
+
+# The same settings can put a new version of a package over one that is on
+# record, and leave the record saying the old one. A key on record is then not
+# the package on disk: measured, the gate read the approved 1.0.0 in both
+# lockfiles, and `npm rebuild` ran the unapproved 1.0.1's scripts.
+# `<where>|<setting>|<command>`.
+for carrier in \
+  "project|global=0|npm install sd-swapped" \
+  "project|location=global|npm install --location=project sd-swapped" \
+  "user|location=global|npm install --location=project sd-swapped" \
+  "project|global=0|npm update sd-swapped"
+do
+  IFS='|' read -r where setting form <<< "${carrier}"
+  new_project
+  run_install "npm install sd-swapped@1.0.0"
+  [[ -z "${CASE_POST}" ]] || fail "the approved 1.0.0 installs quietly before the version case (post: ${CASE_POST})"
+  case "${where}" in
+    project) printf '%s\n' "${setting}" > "${CASE_PROJECT}/.npmrc" ;;
+    user) printf '%s\n%s\n' "${USER_NPMRC_BASE}" "${setting}" > "${npm_config_userconfig}" ;;
+  esac
+  : > "${MARKS}"
+  run_install "${form}"
+  printf '%s\n' "${USER_NPMRC_BASE}" > "${npm_config_userconfig}"
+  [[ "$(jq -r .version "${CASE_PROJECT}/node_modules/sd-swapped/package.json")" == 1.0.1 ]] \
+    && [[ "$(jq -r '.packages["node_modules/sd-swapped"].version' "${CASE_PROJECT}/package-lock.json")" == 1.0.0 ]] \
+    && [[ "$(jq -r '.packages["node_modules/sd-swapped"].version' "${CASE_PROJECT}/node_modules/.package-lock.json")" == 1.0.0 ]] \
+    || fail "the fixture puts 1.0.1 on disk and leaves both lockfiles at 1.0.0: ${carrier}"
+  grep -q '^sd-swapped@1.0.1' "${MARKS}" \
+    && fail "no script of the version no lockfile records runs: ${carrier} ($(cut -f1,2 "${MARKS}" | paste -sd, -))"
+  grep -q 'neither lockfile records (node_modules/sd-swapped (sd-swapped@1.0.1 on disk, the lockfile records sd-swapped@1.0.0))' \
+    <<< "${CASE_POST}" || fail "the skipped rebuild names the package and both versions: ${carrier} (post: ${CASE_POST:-<quiet>})"
+done
+pass "a version written over a recorded one is not rebuilt, and the warning names the key and both versions"
 
 # The same files can say the opposite, and the command outranks them. None of
 # these lands in the global prefix, so each is read and rolled back, and none
@@ -426,29 +630,55 @@ run_install "npm install sd-approved" claude drop_hidden_lockfile
 grep -q 'npm rebuild was not run' <<< "${CASE_POST}" || fail "the skipped rebuild is reported (post: ${CASE_POST:-<quiet>})"
 pass "a node_modules with no hidden lockfile is not rebuilt, and the user is told"
 
-# --- 6. Regression: approved installs still install, verify and rebuild -------------------
-for form in \
-  "npm install sd-approved" \
-  "npm install sd-approved@1.0.0" \
-  "npm install sd-approved --no-save" \
-  "cd sub && npm install sd-approved" \
-  "npm -C sub install sd-approved"
-do
+# Which packages a rebuild runs over is asked of npm (`npm query '*'`). When
+# npm does not answer, the tree is not known, so the rebuild is skipped rather
+# than run over a tree nobody compared with the record. The stub stands in for
+# npm's query in the PostToolUse hook only.
+for behaviour in fail hang; do
   new_project
   : > "${MARKS}"
-  run_install "${form}"
-  [[ -z "${CASE_POST}" ]] || fail "an approved install is confirmed quietly: ${form} (post: ${CASE_POST})"
-  ungated && fail "an install the effect gate reads is not recorded UNGATED: ${form}"
-  grep -q '^sd-approved	install' <<< "${CASE_RAN}" || fail "the verified inert install is rebuilt, so its scripts run: ${form}"
-  case "${form}" in
-    *sub*) where="${CASE_PROJECT}/sub" ;;
-    *) where="${CASE_PROJECT}" ;;
-  esac
-  where=$(cd "${where}" && pwd -P)
-  grep -q "	${where}/node_modules/sd-approved\$" <<< "${CASE_RAN}" \
-    || fail "the rebuild runs where the install landed: ${form} (${CASE_RAN})"
+  CASE_POST_PATH=$(stub_npm_path "${behaviour}" query)
+  run_install "npm install sd-approved"
+  CASE_POST_PATH=""
+  [[ -z "${CASE_RAN}" ]] || fail "npm rebuild does not run when npm did not say what it would rebuild: ${behaviour} (${CASE_RAN})"
+  grep -q 'npm rebuild was not run: safedeps asked npm which packages it would rebuild and got no answer' <<< "${CASE_POST}" \
+    || fail "the skipped rebuild says npm did not answer: ${behaviour} (post: ${CASE_POST:-<quiet>})"
 done
-pass "approved installs, including --no-save and sub-project forms, confirm quietly and rebuild where they landed"
+pass "when npm does not say what a rebuild would run over, the rebuild is skipped and the user is told"
+
+# --- 6. Regression: approved installs still install, verify and rebuild -------------------
+# `<fixture>|<cwd>|<form>|<where npm installs>`, directories relative to the
+# project.
+for carrier in \
+  "project|.|npm install sd-approved|." \
+  "project|.|npm install sd-approved@1.0.0|." \
+  "project|.|npm install sd-approved --no-save|." \
+  "project|.|cd sub && npm install sd-approved|sub" \
+  "project|.|npm -C sub install sd-approved|sub" \
+  "project|.|cd src && npm install sd-approved|." \
+  "project|src|npm install sd-approved|." \
+  "workspace|.|cd packages/a && npm install sd-approved|." \
+  "workspace|packages/a|npm install sd-approved|." \
+  "workspace|.|npm install sd-approved -w packages/a|." \
+  "workspace|packages/a|npm install sd-approved --no-workspaces|packages/a" \
+  "symws|real/a|npm install sd-approved|real/a" \
+  "symws|.|cd packages/a && npm install sd-approved|real/a" \
+  "symws|.|cd real/a && npm install sd-approved|real/a" \
+  "symws|packages/a|npm install sd-approved --no-save|real/a"
+do
+  IFS='|' read -r fixture cwd form where <<< "${carrier}"
+  "new_${fixture}"
+  CASE_CWD="${CASE_PROJECT}/${cwd}"
+  : > "${MARKS}"
+  run_install "${form}"
+  [[ -z "${CASE_POST}" ]] || fail "an approved install is confirmed quietly: ${carrier} (post: ${CASE_POST})"
+  ungated && fail "an install the effect gate reads is not recorded UNGATED: ${carrier}"
+  grep -q '^sd-approved@[^	]*	install' <<< "${CASE_RAN}" || fail "the verified inert install is rebuilt, so its scripts run: ${carrier}"
+  where=$(cd "${CASE_PROJECT}/${where}" && pwd -P)
+  grep -q "	${where}/node_modules/sd-approved\$" <<< "${CASE_RAN}" \
+    || fail "the rebuild runs where the install landed: ${carrier} (${CASE_RAN})"
+done
+pass "approved installs, including --no-save, sub-project, subdirectory, workspace and symlinked-member forms, confirm quietly and rebuild where they landed"
 
 # --- 7. A rollback does not run scripts it did not verify -------------------------------
 # The rollback restores node_modules from the confirmed snapshot. With a
@@ -501,9 +731,68 @@ grep -q 'install scripts were not run' <<< "${CASE_POST}" \
   || fail "the rollback says the reinstall ran without install scripts (post: ${CASE_POST})"
 pass "a rollback with no package-lock.json reinstalls without running install scripts, and says so"
 
+# --- 8. Workspaces: a member is not a package, and its manifest is rolled back ---------------
+# The root lockfile keys each member by its path (`packages/a`). The closure
+# read that key as a package named `packages` and called it unapproved. And an
+# install into a member writes the member's package.json, which the snapshot did
+# not keep: the rollback restored the root lockfile, `npm ci` then refused the
+# member's new dependency, and the fallback reinstall put the package back.
+new_workspace
+: > "${MARKS}"
+run_install "npm install sd-victim -w packages/a"
+rolled_back || fail "an unapproved install into a workspace member is rolled back (post: ${CASE_POST:-<quiet>})"
+grep -q 'packages@' <<< "${CASE_POST}" && fail "a workspace member is not read as a package (post: ${CASE_POST})"
+[[ "$(jq -c '.dependencies // {}' "${CASE_PROJECT}/packages/a/package.json")" == '{}' ]] \
+  || fail "the rollback restores the member's package.json ($(cat "${CASE_PROJECT}/packages/a/package.json"))"
+[[ -z "$(cd "${CASE_PROJECT}" && find . -path '*/node_modules/sd-victim' -print 2>/dev/null)" ]] \
+  || fail "the rollback removes the unapproved package from disk"
+grep -q 'install scripts were not run' <<< "${CASE_POST}" \
+  && fail "the rollback reinstalls from the restored lockfile, not by resolving again (post: ${CASE_POST})"
+victim_ran && fail "no script of the unverified package runs in a workspace rollback"
+pass "an unapproved workspace install is rolled back from disk, member manifest included, and no member is read as a package"
+
+# --- 9. A `file:` dependency's own node_modules is rebuilt with the project -----------------
+# `npm rebuild` follows the link to a `file:` dependency and rebuilds what is
+# in the target's node_modules, which no lockfile of the project records. The
+# rebuild precondition walked the project's node_modules in bash and stopped at
+# the link (validator round 2, F2): an approved install in the project then ran
+# the scripts of a package sitting unrecorded in the linked library.
+#
+# Step 1 puts sd-victim in lib/node_modules off the record: an .npmrc there
+# keeps npm from writing it down, so the install is recorded UNGATED and its
+# rebuild skipped. Step 2 is an approved install in the project that links lib.
+FILELINK_PARENT=$(mktemp -d "${tmp_root}/filelink.XXXXXX")
+FILELINK_PARENT=$(cd "${FILELINK_PARENT}" && pwd -P)
+mkdir -p "${FILELINK_PARENT}/project" "${FILELINK_PARENT}/lib"
+CASE_PROJECT="${FILELINK_PARENT}/project"
+printf '{"name":"lib","version":"1.0.0"}\n' > "${FILELINK_PARENT}/lib/package.json"
+printf '{"name":"proj","version":"1.0.0","dependencies":{"lib":"file:../lib"}}\n' > "${CASE_PROJECT}/package.json"
+# npm 9.0-9.3 (the CI image has 9.2.0) copy a `file:` dependency instead of
+# linking it unless told otherwise. The case here is the link.
+printf 'install-links=false\n' > "${CASE_PROJECT}/.npmrc"
+(cd "${CASE_PROJECT}" && npm install --ignore-scripts >/dev/null 2>&1) || fail "the fixture project with a file: dependency installs"
+[[ -L "${CASE_PROJECT}/node_modules/lib" ]] || fail "the fixture links lib into the project"
+new_safedeps_home
+printf 'global=0\n' > "${FILELINK_PARENT}/lib/.npmrc"
+CASE_CWD="${FILELINK_PARENT}/lib"
+: > "${MARKS}"
+run_install "npm install sd-victim"
+[[ -e "${FILELINK_PARENT}/lib/node_modules/sd-victim" ]] || fail "the fixture leaves sd-victim in lib/node_modules"
+ungated || fail "the install the .npmrc keeps off the record is recorded UNGATED"
+victim_ran && fail "no script of the unrecorded package runs in step 1 ($(cut -f1,2 "${MARKS}" | paste -sd, -))"
+CASE_CWD="${CASE_PROJECT}"
+: > "${MARKS}"
+# Pinned: section 7 published an unapproved sd-approved@1.0.1.
+run_install "npm install sd-approved@1.0.0"
+[[ -e "${FILELINK_PARENT}/lib/node_modules/sd-victim" ]] || fail "sd-victim is still in the linked library for step 2"
+victim_ran && fail "an approved install in the project runs no script of the package in the linked library ($(cut -f1,3 "${MARKS}" | paste -sd, -))"
+grep -q 'neither lockfile records (../lib/node_modules/sd-victim (sd-victim@1.0.0, not in either lockfile))' <<< "${CASE_POST}" \
+  || fail "the skipped rebuild names the package in the linked library (post: ${CASE_POST:-<quiet>})"
+pass "a package in a file: dependency's node_modules that no lockfile records is not rebuilt, and the warning names it"
+
 # --- the fixture never left the machine ---------------------------------------------------
 [[ -s "${tmp_root}/registry.log" ]] || fail "the installs went through the fixture registry"
-if grep -vE '^GET /sd-(victim|approved)(/-/sd-(victim|approved)-1\.0\.[01]\.tgz)?$' "${tmp_root}/registry.log" | grep -q .; then
+if grep -vE '^GET /sd-(victim|approved|swapped)(/-/sd-(victim|approved|swapped)-1\.0\.[01]\.tgz)?$' "${tmp_root}/registry.log" | grep -q .; then
   fail "the fixture registry saw only the synthetic packages ($(sort -u "${tmp_root}/registry.log" | paste -sd, -))"
 fi
 pass "every request went to the local fixture registry, for the synthetic packages only"

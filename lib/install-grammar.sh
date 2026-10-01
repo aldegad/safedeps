@@ -54,10 +54,12 @@ SAFEDEPS_G_EXECUTABLES='npm|npx|pnpm|pnpx|yarn|bun|bunx|pip[0-9.]*|python[0-9.]*
 
 # --- building blocks ------------------------------------------------------------
 # Where a command starts: the beginning of a line (indented or not), after a
-# separator or an opening group, and after the reserved words that begin a
-# statement. A keyword only counts where a statement starts, so `echo do pip
-# install` stays an echo.
-SAFEDEPS_G_START='(^[[:space:]]*|[;&|({!][[:space:]]*)((then|do|else|elif|if|while|until|time|coproc)[[:space:]]+)*'
+# separator or an opening subshell, and after the reserved words that begin a
+# statement. A reserved word only counts where a statement starts, so `echo do
+# pip install` stays an echo. `!` and `{` are reserved words too, followed by a
+# blank: they used to open a statement anywhere, so `echo ! pip install x | sh`
+# read as a visible install instead of the piped one it is.
+SAFEDEPS_G_START='(^[[:space:]]*|[;&|(][[:space:]]*)(([!{]|then|do|else|elif|if|while|until|time|coproc)[[:space:]]+)*'
 
 # Options between a manager and its verb: any number, each with an optional
 # value, plus the bare `--` that ends them. A value can only be told from the verb by trying both readings, which

@@ -33,7 +33,11 @@ safedeps_npm_lock_closure() {
       [
         .packages
         | to_entries[]
-        | select(.key != "")
+        # A key outside node_modules is a directory of the project: a
+        # workspace member (`packages/a`) or a `file:` dependency. Its path is
+        # not a package name. Read as one, `packages/a` was reported as an
+        # unapproved package `packages`.
+        | select(.key | test("(^|/)node_modules/"))
         | select((.value.version // "") != "")
         | {
             ecosystem: "npm",
