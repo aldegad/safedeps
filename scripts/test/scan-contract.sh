@@ -9,7 +9,7 @@
 #   command_is_injectable_npm_install  may --ignore-scripts be injected
 #   command_has_ignore_scripts_flag  is the flag already there
 #   command_needs_inplace_inert      may the flag be appended
-#   resolve_install_dir_override     where does the install land
+#   resolve_install_targets          where does each install land
 #   guard_detect_ecosystem           which ecosystem
 #   payload_pipes_install_text_to_shell  is the pipe in execution position
 #   guard_extract_specs (line loop)  which pkg@spec tokens are named
@@ -377,23 +377,26 @@ done
 pass "control: mutated spec diverges on ${control_hit}/${fuzz_cases} inputs, so the differential can fail"
 
 # --- view properties ------------------------------------------------------------
-# Every reader takes a view of the one lexing, and two views are read as offsets
-# into the command and may be read again: scan (what the predicates read) and
-# code (what the payload readers read, quotes kept). Both keep the byte length
-# of the command, so an offset found in a view is the offset in the command, and
-# both are idempotent, so a view read again is the view read once. Stripping a
-# heredoc twice is how its body once swallowed the line after it (caught in
-# review). The joined view is neither: it drops continuations on purpose.
-# Checked on every recorded shell form and on random input drawn from the
-# characters quotes, comments, heredocs and substitutions are made of.
+# Every reader takes a view of the one lexing, and three views are read as
+# offsets into the command or may be read again: scan (what the predicates
+# read), code (what the payload readers read, quotes kept) and noredir (the
+# command with its redirections blanked, what the spec extractor's pieces are
+# cut from). Each keeps the byte length of the command, so an offset found in a
+# view is the offset in the command, and each is idempotent, so a view read
+# again is the view read once. Stripping a heredoc twice is how its body once
+# swallowed the line after it (caught in review). The joined view is neither:
+# it drops continuations on purpose. Checked on every recorded shell form and on
+# random input drawn from the characters quotes, comments, heredocs,
+# substitutions and redirections are made of.
 scan_view() { shell_lex "$1" scan arith "safedeps:scan-contract"; }
 code_view() { shell_lex "$1" code arith "safedeps:scan-contract"; }
+noredir_view() { shell_lex "$1" noredir arith "safedeps:scan-contract"; }
 scan_view_sub() { shell_lex "$1" scan sub "safedeps:scan-contract"; }
 code_view_sub() { shell_lex "$1" code sub "safedeps:scan-contract"; }
 property_failures=0
 check_view_properties() { # input label
   local x="$1" v once twice
-  for v in scan_view code_view scan_view_sub code_view_sub; do
+  for v in scan_view code_view noredir_view scan_view_sub code_view_sub; do
     # Not through capture: the outer $(...) would strip a trailing newline
     # from the view and read as a length change the lexer did not make.
     once=$("${v}" "${x}"; printf 'X'); once="${once%X}"
@@ -418,7 +421,7 @@ p install evil==6.6.6/'; printf 'X')
   check_view_properties "${form%X}" "$(jq -r ".[${i}].id" "${forms_file}")"
 done
 RANDOM="${fuzz_seed}"
-heredoc_alphabet=(\' \" \\ ' ' '<' '<' '-' '#' '`' '$' '(' ')' '{' '}' E O F p i $'\n' $'\n' $'\t' ';' '|' '&' '=' '1')
+heredoc_alphabet=(\' \" \\ ' ' '<' '<' '>' '-' '#' '`' '$' '(' ')' '{' '}' E O F p i $'\n' $'\n' $'\t' ';' '|' '&' '=' '1')
 for ((c = 0; c < fuzz_cases; c++)); do
   len=$((RANDOM % 40))
   input=""
@@ -428,7 +431,48 @@ for ((c = 0; c < fuzz_cases; c++)); do
   check_view_properties "${input}" "random ${c}"
 done
 [[ ${property_failures} -eq 0 ]] || fail "view properties: ${property_failures} violation(s) (seed ${fuzz_seed})"
-pass "view properties: scan and code keep length and are idempotent on ${form_count} shell forms and ${fuzz_cases} random inputs"
+pass "view properties: scan, code and noredir keep length and are idempotent on ${form_count} shell forms and ${fuzz_cases} random inputs"
+
+# --- the words the spec extractor reads -----------------------------------------
+# The pieces view hands the extractor each statement's words: redirections out,
+# the shell's quote removal applied. Each form in word-reading-forms.json
+# carries the argv bash and zsh actually handed to a stand-in for the manager
+# (scripts/measure/word-reading-measure.sh re-measures them), and the words the
+# view reads must be that argv, for each shell that ran the form. A reader
+# with its own model of the quoting disagreed here: it took the `>` inside
+# "x>'" for a redirection and dropped the pinned spec after it.
+#
+# The boundary, stated so it is not mistaken for coverage: a blank a quote or
+# a backslash holds still splits a word in two (`"requests == 2.19.0"`), and a
+# substitution is kept as written; reading those as the shell does is the plan
+# safedeps/command-words-read-as-the-shell-dequotes. No form here has either.
+words_view_of() { # text -> the words field of its first piece, one per line
+  local line
+  line=$(shell_lex "$1" pieces arith "safedeps:scan-contract" | head -n1)
+  line="${line#*$'\037'}"; line="${line#*$'\037'}"
+  set -f
+  # shellcheck disable=SC2086
+  printf '%s\n' ${line}
+  set +f
+}
+words_forms="${ROOT_DIR}/scripts/measure/word-reading-forms.json"
+words_count=$(jq length "${words_forms}")
+words_checked=0
+for ((i = 0; i < words_count; i++)); do
+  id=$(jq -r ".[${i}].id" "${words_forms}")
+  text=$(jq -j ".[${i}].text" "${words_forms}" | sed 's/@@M@@/pip/'; printf 'X'); text="${text%X}"
+  got=$(words_view_of "${text}" | sed 1d | jq -Rsc 'split("\n") | .[:-1]')
+  ran=0
+  for shell in bash zsh; do
+    want=$(jq -c ".[${i}].argv.${shell}" "${words_forms}")
+    [[ "${want}" != "[]" ]] || continue
+    ran=$((ran + 1))
+    [[ "${got}" == "${want}" ]] || fail "words: ${id} reads ${got}; ${shell} handed the manager ${want}"
+  done
+  [[ ${ran} -gt 0 ]] || fail "words: ${id} ran under no shell, so it checks nothing (re-measure it)"
+  words_checked=$((words_checked + 1))
+done
+pass "words: the pieces view reads the argv bash and zsh hand the manager on ${words_checked} recorded forms"
 
 # --- the lexer memo -------------------------------------------------------------
 # Above 4KB a view is reused within one guard run. Its key is a checksum, which
@@ -645,6 +689,86 @@ pass "a failed span awk beside a visible install answers UNDECIDED, not a findin
 scanfail_guard "${fail_tmp}/all-awk" "pip install requests==2.0.0"
 [[ "${SCANFAIL_DECISION}" == "deny" ]] || fail "with awk failing everywhere an install is still denied (got: ${SCANFAIL_DECISION})"
 pass "with awk failing everywhere an install is still denied"
+
+# --- when a spec reader's sed or tr fails ---------------------------------------
+# The spec readers rewrite a statement before reading it: quotes and grouping
+# characters are removed, extras are removed, an npm alias is replaced by its
+# target, a runner's operands are cut out. Each runs in a command substitution,
+# so a failed sed or tr left no text, no text read as no spec, and a pinned
+# install passed as if it named nothing to check. Each shim fails one reader
+# alone, keyed on its script.
+real_sed=$(command -v sed)
+real_tr=$(command -v tr)
+for reader in extras alias runner group; do
+  mkdir -p "${fail_tmp}/reader-${reader}"
+  tool=sed real="${real_sed}"
+  case "${reader}" in
+    extras) key='\[[^] ]*\]' ;;
+    alias) key='@npm:/' ;;
+    runner) key='(npx|pnpx|bunx|uvx)' ;;
+    group) key='(){}' tool=tr real="${real_tr}" ;;
+  esac
+  cat > "${fail_tmp}/reader-${reader}/${tool}" <<SHIM
+#!/usr/bin/env bash
+case "\$*" in *'${key}'*) exit 2 ;; esac
+exec '${real}' "\$@"
+SHIM
+  chmod +x "${fail_tmp}/reader-${reader}/${tool}"
+done
+
+# reader<TAB>command
+sed_rows=(
+  $'extras\tpip install \'evil[x]==1.0.0\''
+  $'alias\tpnpm add left-pad@npm:evil-pkg@1.0.0'
+  $'runner\tnpx evil@1.0.0'
+  $'group\tpip install evil==1.0.0'
+)
+for row in "${sed_rows[@]}"; do
+  reader="${row%%$'\t'*}" failing_command="${row#*$'\t'}"
+  # Control: with sed working the same command is denied as a finding.
+  scanfail_guard "" "${failing_command}"
+  if [[ "${SCANFAIL_DECISION}" != "deny" ]] || grep -q 'UNDECIDED' <<< "${SCANFAIL_REASON}"; then
+    fail "control: a working ${reader} reader denies ${failing_command} as a finding (got: ${SCANFAIL_DECISION})"
+  fi
+  scanfail_guard "${fail_tmp}/reader-${reader}" "${failing_command}"
+  [[ "${SCANFAIL_DECISION}" == "deny" ]] \
+    || fail "a failed ${reader} reader does not turn ${failing_command} into a pass (got: ${SCANFAIL_DECISION})"
+  grep -q 'UNDECIDED' <<< "${SCANFAIL_REASON}" \
+    || fail "a failed ${reader} reader is reported as undecided: ${failing_command}"
+  grep -q 'scanner failed' <<< "${SCANFAIL_LOG}" \
+    || fail "a failed ${reader} reader is recorded in advisory.log: ${failing_command}"
+done
+pass "a failed sed or tr in a spec reader denies the install as UNDECIDED (${#sed_rows[@]} readers, each against a working control)"
+
+# --- when the statement readers fail ---------------------------------------------
+# The extractor reads the command's statements from resolve_install_targets,
+# which reads them from command_statements, and cuts them into pieces in one
+# more awk. Either failing left no statements, no statements read as no spec,
+# and an unapproved pinned install would pass as if it named nothing.
+for reader in command_statements extract_pieces; do
+  mkdir -p "${fail_tmp}/statements-${reader}"
+  cat > "${fail_tmp}/statements-${reader}/awk" <<SHIM
+#!/usr/bin/env bash
+case "\$*" in *"safedeps:${reader}"*) exit 2 ;; esac
+exec '${real_awk}' "\$@"
+SHIM
+  chmod +x "${fail_tmp}/statements-${reader}/awk"
+  for failing_command in "pip install evil==1.0.0" "pnpm add evil@1.0.0 && echo done"; do
+    scanfail_guard "" "${failing_command}"
+    if [[ "${SCANFAIL_DECISION}" != "deny" ]] || grep -q 'UNDECIDED' <<< "${SCANFAIL_REASON}"; then
+      fail "control: working statement readers deny ${failing_command} as a finding (got: ${SCANFAIL_DECISION})"
+    fi
+    scanfail_guard "${fail_tmp}/statements-${reader}" "${failing_command}"
+    [[ "${SCANFAIL_DECISION}" == "deny" ]] \
+      || fail "a failed ${reader} does not turn ${failing_command} into a pass (got: ${SCANFAIL_DECISION})"
+    grep -q 'UNDECIDED' <<< "${SCANFAIL_REASON}" \
+      || fail "a failed ${reader} is reported as undecided: ${failing_command}"
+    grep -q 'scanner failed' <<< "${SCANFAIL_LOG}" \
+      || fail "a failed ${reader} is recorded in advisory.log: ${failing_command}"
+  done
+done
+pass "a failed statement reader denies the install as UNDECIDED (command_statements, extract_pieces, each against a working control)"
+
 
 # --- the discriminator the gate falls back on ---------------------------------
 # When a reading failed, the gate asks one question without reading the command:

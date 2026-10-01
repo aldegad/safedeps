@@ -59,6 +59,10 @@ source "${SAFEDEPS_REPO_DIR}/lib/providers/providers.sh"
 source "${SAFEDEPS_REPO_DIR}/lib/npm/closure.sh"
 # shellcheck source=../lib/gates/rollback-journal.sh
 source "${SAFEDEPS_REPO_DIR}/lib/gates/rollback-journal.sh"
+# shellcheck source=../lib/npm/workspaces.sh
+source "${SAFEDEPS_REPO_DIR}/lib/npm/workspaces.sh"
+# shellcheck source=../lib/npm/ask.sh
+source "${SAFEDEPS_REPO_DIR}/lib/npm/ask.sh"
 
 acquire_state_lock() {
   local attempts=0
@@ -198,9 +202,11 @@ monitored_files() {
 restore_monitored_file() {
   local file_name="$1"
   local rollback_snapshot_id="$2"
-  local snapshot_file="${SNAPSHOT_DIR}/${rollback_snapshot_id}_${file_name}"
-  local missing_marker="${SNAPSHOT_DIR}/${rollback_snapshot_id}_${file_name}.missing"
-  local current_missing_marker="${SNAPSHOT_DIR}/${SNAPSHOT_ID}_${file_name}.missing"
+  local snapshot_name
+  snapshot_name=$(safedeps_snapshot_file_name "${file_name}")
+  local snapshot_file="${SNAPSHOT_DIR}/${rollback_snapshot_id}_${snapshot_name}"
+  local missing_marker="${SNAPSHOT_DIR}/${rollback_snapshot_id}_${snapshot_name}.missing"
+  local current_missing_marker="${SNAPSHOT_DIR}/${SNAPSHOT_ID}_${snapshot_name}.missing"
   local current_file="${PROJECT_DIR}/${file_name}"
 
   if [[ -f "${snapshot_file}" ]]; then
@@ -245,6 +251,130 @@ confirm_snapshot() {
     write_state_file "${GUARD_DIR}/confirmed" "${snapshot_id}"
   fi
   release_state_lock; STATE_LOCK_HELD=false
+}
+
+# The state this install left behind, recorded as a snapshot of its own so it
+# can be confirmed. The pre-install snapshot is the state before the verified
+# install, and confirming that one put the baseline one install behind:
+# measured, an approved `npm install a` followed by an unapproved
+# `npm install b` rolled back to a project without `a` in package.json, the
+# lockfile or node_modules (safedeps/confirmed-snapshot-lags-one-install).
+#
+# The record is copied before the checks read the project, and sealed after
+# they finish only if the project still holds the same bytes. Copying after the
+# checks recorded whatever was there by then: measured, an unapproved install
+# that finished between the closure check and the copy went into the baseline,
+# a later rollback could not remove it, and the rollback's `npm ci` ran its
+# install scripts (scripts/test/lockless-forms.sh, section 7). Equal bytes at
+# both ends is what is compared; a change undone to the same bytes in between is
+# not seen, and the bytes recorded are still the ones at both ends.
+#
+# The id must not start with `${SNAPSHOT_ID}_`, because cleanup_old_snapshots
+# removes a snapshot with `rm ${id}_*` and would take this one with it.
+VERIFIED_ID=""
+VERIFIED_STAGED=false
+
+verified_state_file_names() {
+  {
+    monitored_files
+    find "${PROJECT_DIR}" -maxdepth 1 -type f -name "*.csproj" -exec basename {} \; 2>/dev/null
+  } | sed '/^$/d' | sort -u
+}
+
+# Where the verified state keeps <file>: under the name every snapshot reader
+# uses (safedeps_snapshot_file_name), so a workspace member's
+# `packages/a/package.json` goes in the members tree that restore_monitored_file
+# reads. Copied to `<id>_packages/a/package.json` it failed for want of the
+# directory, and every verified install in a workspace left the baseline where
+# it was (measured, scripts/test/lockless-forms.sh section 6, once the
+# workspace snapshot and this record met in one tree).
+verified_state_path() {
+  printf '%s/%s_%s' "${SNAPSHOT_DIR}" "${VERIFIED_ID}" "$(safedeps_snapshot_file_name "$1")"
+}
+
+# Copies the files, without meta.json. Every reader requires meta.json, so
+# until it is written this is not a snapshot anything can roll back to.
+stage_verified_state() {
+  local file_name dest
+  local list_file="${SNAPSHOT_DIR}/${VERIFIED_ID}_monitored_files.list"
+
+  verified_state_file_names > "${list_file}" || return 1
+  while IFS= read -r file_name; do
+    dest=$(verified_state_path "${file_name}")
+    [[ "${file_name}" != */* ]] || mkdir -p "${dest%/*}" || return 1
+    if [[ -f "${PROJECT_DIR}/${file_name}" ]]; then
+      cp "${PROJECT_DIR}/${file_name}" "${dest}" || return 1
+    else
+      touch "${dest}.missing" || return 1
+    fi
+  done < "${list_file}"
+}
+
+# True when the project holds exactly the files that were staged.
+staged_state_matches_project() {
+  local file_name
+  local list_file="${SNAPSHOT_DIR}/${VERIFIED_ID}_monitored_files.list"
+
+  [[ "$(cat "${list_file}")" == "$(verified_state_file_names)" ]] || return 1
+  while IFS= read -r file_name; do
+    if [[ -f "$(verified_state_path "${file_name}")" ]]; then
+      files_differ "$(verified_state_path "${file_name}")" "${PROJECT_DIR}/${file_name}" && return 1
+    elif [[ -e "${PROJECT_DIR}/${file_name}" ]]; then
+      return 1
+    fi
+  done < "${list_file}"
+}
+
+# meta.json last, through a rename, so the snapshot appears whole or not at all.
+seal_verified_state() {
+  local parent_id="$1"
+  local temp_meta
+
+  temp_meta=$(mktemp "${SNAPSHOT_DIR}/.${VERIFIED_ID}_meta.XXXXXX") || return 1
+  if ! jq -n --arg id "${VERIFIED_ID}" --arg parent "${parent_id}" --arg from "${SNAPSHOT_ID}" \
+      --arg dir "${PROJECT_DIR}" --argjson ts "$(date +%s)" \
+      '{snapshot_id: $id, parent_snapshot_id: (if $parent == "" then null else $parent end),
+        verified_from: $from, timestamp: $ts, project_dir: $dir}' > "${temp_meta}"; then
+    rm -f "${temp_meta}"
+    return 1
+  fi
+  mv -f "${temp_meta}" "${SNAPSHOT_DIR}/${VERIFIED_ID}_meta.json"
+}
+
+discard_staged_state() {
+  rm -rf "${SNAPSHOT_DIR}/${VERIFIED_ID}_${SAFEDEPS_SNAPSHOT_MEMBERS:-members}" 2>/dev/null || true
+  rm -f "${SNAPSHOT_DIR}/${VERIFIED_ID}"_* 2>/dev/null || true
+}
+
+# Confirm what this install verified. If the post-install state cannot be
+# recorded, the baseline stays where it was and the user is told: an older
+# baseline rolls back too much, a partial or unread one would restore files
+# nobody verified.
+confirm_verified_state() {
+  local parent_id
+  local why=""
+
+  parent_id=$(read_confirmed_snapshot "${DIR_HASH}")
+  if [[ -n "${parent_id}" ]] && [[ ! -f "${SNAPSHOT_DIR}/${parent_id}_meta.json" ]]; then
+    parent_id=""
+  fi
+
+  if [[ "${VERIFIED_STAGED}" != "true" ]]; then
+    why="its files could not be copied"
+  elif ! staged_state_matches_project; then
+    why="the dependency files changed while they were being verified, so what they hold now was not read by this check"
+  elif ! seal_verified_state "${parent_id}"; then
+    why="its record could not be written"
+  fi
+
+  if [[ -n "${why}" ]]; then
+    discard_staged_state
+    log_advisory "post-verify: the verified state of ${PROJECT_DIR} could not be recorded (${why}), so the rollback baseline was not moved (still ${parent_id:-none})."
+    ROLLBACK_WARNINGS+=("safedeps verified this install but could not record the result as the new rollback baseline (${why}), so a later rollback in ${PROJECT_DIR} returns to the baseline before it (${parent_id:-none}) and would undo this install too")
+    return 0
+  fi
+
+  confirm_snapshot "${VERIFIED_ID}" "${DIR_HASH}"
 }
 
 collect_protected_snapshot_ids() {
@@ -298,6 +428,10 @@ snapshot_is_protected() {
   return 1
 }
 
+# Lists snapshots by meta.json only. Files without one are left alone: a run in
+# progress holds exactly that while its checks run, nothing on disk tells it
+# from a killed run's leftovers, and pruning it would let its meta.json land
+# over missing files. A killed run costs disk, never a baseline.
 cleanup_old_snapshots() {
   local protected_snapshot_ids=()
   local protected_snapshot_id
@@ -327,42 +461,188 @@ cleanup_old_snapshots() {
       continue
     fi
 
+    # The workspace members' manifests are a directory, which `rm -f` leaves.
+    [[ "${old_id}" != */* ]] && rm -rf "${SNAPSHOT_DIR}/${old_id}_${SAFEDEPS_SNAPSHOT_MEMBERS}"
     rm -f "${SNAPSHOT_DIR}/${old_id}"_*
   done < <(ls -t "${SNAPSHOT_DIR}"/*_meta.json 2>/dev/null || true)
 }
 
+# Every npm command safedeps runs itself stays in the project it read. `npm
+# rebuild` and the rollback's reinstall both read the project's own .npmrc, and
+# with `global=true` there both went to npm's global tree instead: the rebuild
+# ran the scripts of a globally installed package nobody had verified, and the
+# reinstall installed the project into the global prefix and left its own
+# node_modules empty (measured, scripts/test/lockless-forms.sh). `--global=false`
+# alone did not hold against `location=global`, and `--location=project` alone
+# did not hold against `global=true`; the pair held against both.
+#
+# Each of them also carries `--prefix "${PROJECT_DIR}"`, so npm works in the
+# directory the gate read and nowhere else. Without it npm walks up from there
+# the way an install does: measured, after `npm install x --no-workspaces` in a
+# workspace member, the gate read the member's lockfiles while `npm rebuild` in
+# the member would have run over the workspace root's tree.
+NPM_PROJECT_SCOPE=(--global=false --location=project)
+
+# The rollback's reinstall of node_modules.
+#
+# With a package-lock.json, `npm ci` installs exactly the tree the restored
+# lockfile records, so the scripts it runs belong to packages that were on
+# record before the command. It keeps them.
+#
+# Without one, npm resolves package.json's ranges again, and what it resolves
+# has not been read by anyone: measured, a range `^1.0.0` came back as a 1.0.1
+# published after the approval, and the reinstall ran its install scripts. So
+# that reinstall is inert, and the user is told to review and rebuild. The same
+# holds for the `npm install` retry after a failed `npm ci`, which also
+# resolves again.
 restore_node_modules() {
   if ! command -v npm >/dev/null 2>&1; then
     ROLLBACK_WARNINGS+=("npm is not installed; node_modules was not reinstalled")
     return
   fi
 
+  local why="there is no package-lock.json to install from"
   if [[ -f "${PROJECT_DIR}/package-lock.json" ]]; then
-    if (cd "${PROJECT_DIR}" && npm ci >/dev/null 2>&1); then
+    if (cd "${PROJECT_DIR}" && npm ci "${NPM_PROJECT_SCOPE[@]}" --prefix "${PROJECT_DIR}" >/dev/null 2>&1); then
       return
     fi
     ROLLBACK_WARNINGS+=("npm ci failed during rollback; retrying with npm install")
+    why="npm ci failed"
   fi
 
-  if (cd "${PROJECT_DIR}" && rm -rf node_modules && npm install >/dev/null 2>&1); then
+  if (cd "${PROJECT_DIR}" && rm -rf node_modules \
+      && npm install --ignore-scripts "${NPM_PROJECT_SCOPE[@]}" --prefix "${PROJECT_DIR}" >/dev/null 2>&1); then
+    log_advisory "post-verify: node_modules in ${PROJECT_DIR} was reinstalled with --ignore-scripts — ${why}, so npm resolved package.json again and nothing verified what it resolved."
+    ROLLBACK_WARNINGS+=("node_modules was reinstalled but its install scripts were not run: ${why}, so npm resolved package.json again and safedeps did not verify what it resolved. Review node_modules, then run \`npm rebuild\` yourself if it is what you expect")
     return
   fi
 
   ROLLBACK_WARNINGS+=("node_modules reinstall failed; review the project manually")
 }
 
+# `npm rebuild` runs the lifecycle scripts of every package in the tree it
+# rebuilds, so it may only rebuild the tree the effect gate just read. Two
+# things decide that, and both were measured:
+#
+#   - Every package the rebuild runs over has to be on record, at the version
+#     and under the name that is on disk. The closure above is read from
+#     package-lock.json and the hidden lockfile, so a package neither lockfile
+#     lists, or a version written over a recorded one, is something the gate
+#     never looked at. Then the rebuild is skipped and the user told.
+#   - The rebuild has to stay in the project (NPM_PROJECT_SCOPE above).
+#
+# Which packages the rebuild runs over is npm's to say. safedeps used to walk
+# the tree in bash, and twice it walked less than npm rebuilds: it took a key on
+# record for the package under it (`global=0` in an .npmrc put 1.0.1 over a
+# recorded 1.0.0), and it did not follow a `file:` link into its target, where
+# `npm rebuild` ran a package no lockfile records. So npm is asked: `npm query
+# '*'` loads the tree the way `npm rebuild` does, links followed into their
+# targets, and names every package by location, name and version. Each is
+# compared with what the two lockfiles record under its location. A link is not
+# a node of its own there; its target is.
+#
+# Prints what does not match, one per line, and returns 0. Returns 1 with the
+# reason when npm could not be asked or did not answer: then the tree is not
+# known, and the caller must not rebuild it.
+npm_rebuild_unrecorded() {
+  local dir="$1" tmp lockfile rc
+  local -a lockfiles=()
+  if ! command -v npm >/dev/null 2>&1; then
+    printf 'npm is not on the PATH this hook runs with\n'
+    return 1
+  fi
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/safedeps-post-query.XXXXXX") || {
+    printf 'safedeps could not make a scratch directory to ask npm\n'
+    return 1
+  }
+  safedeps_npm_ask_start "${tmp}/query" "${dir}" npm -- query '*' "${NPM_PROJECT_SCOPE[@]}" --prefix "${dir}"
+  if ! safedeps_npm_ask_wait $(( SECONDS + SAFEDEPS_NPM_ASK_POST_SECONDS )); then
+    printf 'npm query did not answer within %ss\n' "${SAFEDEPS_NPM_ASK_POST_SECONDS}"
+    rm -rf "${tmp}"
+    return 1
+  fi
+  rc="${SAFEDEPS_NPM_ASK_RCS[0]}"
+  if [[ "${rc}" != 0 ]]; then
+    printf 'npm query failed (exit %s: %s)\n' "${rc}" "$(safedeps_npm_ask_error "${tmp}/query")"
+    rm -rf "${tmp}"
+    return 1
+  fi
+
+  for lockfile in "${dir}/package-lock.json" "${dir}/${NPM_HIDDEN_LOCKFILE}"; do
+    [[ -f "${lockfile}" ]] && lockfiles+=("${lockfile}")
+  done
+  # The name a key records: its own `name`, or the last segment under
+  # node_modules. A key outside node_modules (a workspace member, a link
+  # target) is named by its package, which the lockfile may leave out; then
+  # there is no recorded name to compare.
+  if ! jq -rn --slurpfile query "${tmp}/query" '
+      def clean: tostring | sub("^[=v[:space:]]+"; "");
+      def recorded_name($key; $entry):
+        $entry.name // (if ($key | test("(^|/)node_modules/")) then $key | split("node_modules/") | last else null end);
+      ([inputs | (.packages // {}) | to_entries[] | select(.key != "")]
+        | group_by(.key) | map({key: .[0].key, value: map(.value)}) | from_entries) as $records
+      | if ($query | length) != 1 or ($query[0] | type) != "array" then error("npm query did not answer with a list") else . end
+      | $query[0][] | select(type == "object" and (.location // "") != "") as $node
+      | $node.location as $key
+      | ($records[$key] // []) as $recs
+      | "\($node.name // "?")@\($node.version // "?")" as $here
+      | if ($recs | length) == 0 then
+          "\($key) (\($here), not in either lockfile)"
+        elif any($recs[]; .link == true) then
+          "\($key) (\($here) on disk, the lockfile records a link)"
+        elif any($recs[]; ((.version // "") | clean) == (($node.version // "") | clean)
+                          and (recorded_name($key; .) as $n | $n == null or $n == $node.name)) then empty
+        else
+          "\($key) (\($here) on disk, the lockfile records \([$recs[] | "\(recorded_name($key; .) // "?")@\(.version // "?")"] | unique | join(" or ")))"
+        end
+    ' "${lockfiles[@]+"${lockfiles[@]}"}" < /dev/null 2>/dev/null; then
+    printf 'npm query answered with something safedeps could not compare with the lockfiles\n'
+    rm -rf "${tmp}"
+    return 1
+  fi
+  rm -rf "${tmp}"
+}
+
 run_verified_npm_rebuild_if_injected() {
-  local injected
+  local injected unrecorded
 
   injected=$(jq -r '.ignore_scripts_injected == true' "${META_FILE}" 2>/dev/null || printf 'false')
   [[ "${injected}" == "true" ]] || return 0
 
-  if ! command -v npm >/dev/null 2>&1; then
-    ROLLBACK_WARNINGS+=("npm is not installed; npm rebuild was not run after verified inert install")
+  # The install left no trace here, so this tree is not the one it built, and
+  # its scripts are not this install's to run (settle_npm_trace).
+  [[ "${NPM_TRACE_ABSENT}" != true ]] || return 0
+
+  # Nothing was installed into the project, so there is nothing to rebuild.
+  [[ -d "${PROJECT_DIR}/node_modules" ]] || return 0
+
+  if [[ ! -f "${PROJECT_DIR}/${NPM_HIDDEN_LOCKFILE}" ]]; then
+    log_advisory "post-verify: npm rebuild skipped in ${PROJECT_DIR} — node_modules has no .package-lock.json, so the tree it would rebuild is not the tree the effect gate read."
+    ROLLBACK_WARNINGS+=("npm rebuild was not run: ${PROJECT_DIR}/node_modules has no .package-lock.json, so safedeps could not read the tree it would rebuild. Install scripts have not run; review node_modules, then run \`npm rebuild\` yourself if it is what you expect")
     return 0
   fi
 
-  if (cd "${PROJECT_DIR}" && npm rebuild >/dev/null 2>&1); then
+  # The lockfiles are on record, but the tree can hold more than they record.
+  # Measured: `global=0` in the project .npmrc, and `location=global` there with
+  # `--location=project` on the command, put the package in node_modules and
+  # wrote it to neither lockfile, or wrote a new version over a recorded one and
+  # left the record saying the old one. And a `file:` dependency's own
+  # node_modules is rebuilt with the project's, though no lockfile of the
+  # project records it. The gate confirmed the records clean each time, and
+  # `npm rebuild` then ran the unrecorded scripts.
+  if ! unrecorded=$(npm_rebuild_unrecorded "${PROJECT_DIR}"); then
+    log_advisory "post-verify: npm rebuild skipped in ${PROJECT_DIR} — safedeps asked npm which packages a rebuild would run over and got no answer (${unrecorded}), so it cannot tell that tree is the one the effect gate read."
+    ROLLBACK_WARNINGS+=("npm rebuild was not run: safedeps asked npm which packages it would rebuild and got no answer (${unrecorded}), so it could not tell they are the ones it read. Install scripts have not run; review node_modules, then run \`npm rebuild\` yourself if it is what you expect")
+    return 0
+  fi
+  unrecorded=$(printf '%s' "${unrecorded}" | paste -sd';' - | sed 's/;/; /g')
+  if [[ -n "${unrecorded}" ]]; then
+    log_advisory "post-verify: npm rebuild skipped in ${PROJECT_DIR} — the tree npm would rebuild holds a package, or a version of one, that neither lockfile records (${unrecorded}), so it is not the tree the effect gate read."
+    ROLLBACK_WARNINGS+=("npm rebuild was not run: the tree npm would rebuild in ${PROJECT_DIR} holds a package, or a version of one, that neither lockfile records (${unrecorded}), so safedeps did not read it. Install scripts have not run; review it, then run \`npm rebuild\` yourself if it is what you expect")
+    return 0
+  fi
+
+  if (cd "${PROJECT_DIR}" && npm rebuild "${NPM_PROJECT_SCOPE[@]}" --prefix "${PROJECT_DIR}" >/dev/null 2>&1); then
     return 0
   fi
 
@@ -370,7 +650,23 @@ run_verified_npm_rebuild_if_injected() {
 }
 
 emit_confirm_warnings_if_any() {
-  local warning_str
+  local warning_str injected
+
+  # On Claude Code the install ran inert, so an install that landed elsewhere
+  # has had no scripts run and nobody will rebuild it: the user is told. On
+  # Codex its scripts ran during the install, and the record is all there is.
+  if [[ -n "${TRACE_NOTE}" ]]; then
+    injected=$(jq -r '.ignore_scripts_injected == true' "${META_FILE}" 2>/dev/null || printf 'false')
+    if [[ "${injected}" == "true" ]]; then
+      warning_str=""
+      [[ ${#ROLLBACK_WARNINGS[@]} -eq 0 ]] || warning_str=$(printf '%s; ' "${ROLLBACK_WARNINGS[@]}")
+      emit_system_message "safedeps: ${TRACE_NOTE}${warning_str:+
+
+Additional warnings:
+${warning_str%%; }}"
+      return 0
+    fi
+  fi
 
   [[ ${#ROLLBACK_WARNINGS[@]} -gt 0 ]] || return 0
 
@@ -382,7 +678,7 @@ emit_confirm_warnings_if_any() {
   Warnings: ${warning_str%%; }
 LOG_EOF
 
-  emit_system_message "safedeps: verified install completed, but npm rebuild warning(s) were recorded:
+  emit_system_message "safedeps: verified install completed, with warning(s):
 ${warning_str%%; }"
 }
 
@@ -556,6 +852,68 @@ fi
 SUSPICIOUS=false
 REASONS=()
 ROLLBACK_WARNINGS=()
+
+# Whether this command's npm install was read: the directory the gate reads has
+# to show this command's install trace. The pre-guard picked the directory and,
+# just before the command ran, touched a baseline file and noted the inode of
+# both npm lockfiles there. A lockfile `find -newer` than the baseline, or one
+# with another inode, is a trace.
+#
+# The pre-guard's choice is a prediction from the command text, and three
+# rounds of validation found text it read wrong: a `cd` that never ran, a `cd`
+# spelled `command cd`, a symlinked workspace member. Each time the gate read a
+# directory the install never touched, confirmed it clean, and passed the
+# install unread. So the directory is a place to look, and this decides what the
+# looking found (safedeps/effect-gate-blind-to-lockless-npm-installs).
+#
+# No trace means the install landed somewhere else or installed nothing, and
+# this cannot tell which: a `--dry-run` and an install that failed leave none
+# either. It is recorded UNGATED in those words, and nothing is rebuilt here.
+# Nothing below runs npm.
+#
+# The trace is the directory's, not the command's. A second npm in the same
+# directory during the command, or the command touching a lockfile itself,
+# leaves one too; ARCHITECTURE.md states that boundary.
+NPM_TRACE_ABSENT=false
+TRACE_NOTE=""
+npm_install_trace() {
+  local baseline="$1" rel file recorded inode newer
+  [[ -f "${baseline}" ]] || { printf 'its baseline file %s is gone' "${baseline}"; return 1; }
+  for rel in package-lock.json node_modules/.package-lock.json; do
+    file="${PROJECT_DIR}/${rel}"
+    [[ -e "${file}" ]] || continue
+    recorded=$(jq -r --arg rel "${rel}" '.npm_trace.inodes[$rel] // ""' <<< "${CURRENT_STATE}" 2>/dev/null) || recorded="?"
+    inode=""
+    read -r inode _ < <(ls -di -- "${file}" 2>/dev/null) || true
+    if [[ -n "${inode}" && "${inode}" != "${recorded}" ]]; then
+      printf '%s' "${rel}"
+      return 0
+    fi
+    if newer=$(find -H "${file}" -newer "${baseline}" -print 2>/dev/null) && [[ -n "${newer}" ]]; then
+      printf '%s' "${rel}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+settle_npm_trace() {
+  local baseline unattributable why
+  baseline=$(jq -r '.npm_trace.baseline // empty' <<< "${CURRENT_STATE:-}" 2>/dev/null) || baseline=""
+  unattributable=$(jq -r '.npm_unattributable // empty' <<< "${CURRENT_STATE:-}" 2>/dev/null) || unattributable=""
+  [[ -n "${baseline}" ]] || return 0
+
+  if why=$(npm_install_trace "${baseline}"); then
+    if [[ -n "${unattributable}" ]]; then
+      log_advisory "post-verify UNGATED: the install trace in ${PROJECT_DIR} cannot answer for every npm install in this command: ${unattributable}, so one of them may have landed elsewhere unread. Command: ${COMMAND}"
+    fi
+  else
+    NPM_TRACE_ABSENT=true
+    log_advisory "post-verify UNGATED: no install trace in ${PROJECT_DIR}: the install landed elsewhere or installed nothing. Neither npm lockfile there changed during this command${why:+ (${why})}, so the effect gate verified nothing this install wrote, and npm rebuild was not run. Command: ${COMMAND}"
+    TRACE_NOTE="no install trace in ${PROJECT_DIR}: the install landed elsewhere or installed nothing. safedeps verified nothing this install wrote and did not run npm rebuild; if it installed packages somewhere else, their install scripts have not run there. Recorded as UNGATED in ${GUARD_DIR}/advisory.log"
+  fi
+  rm -f "${baseline}"
+}
 
 redact_install_script_content() {
   local script_content="$1"
@@ -732,8 +1090,19 @@ check_binaries() {
   fi
 }
 
+# The npm CLI's two records of what a project install put on disk:
+# package-lock.json, and the hidden lockfile it writes into node_modules on
+# every install. They differ exactly when the install asked npm not to save:
+# `--no-save`, `--save=false`, `--no-package-lock`, `--package-lock=false`, the
+# same settings from the environment or an .npmrc. Measured with npm 11.19.0
+# against a local registry, each of those left package-lock.json byte-identical
+# and recorded the package in the hidden lockfile. Reading only
+# package-lock.json, this gate confirmed all of them clean, and the inert
+# rebuild below then ran the unverified package's install scripts
+# (safedeps/effect-gate-blind-to-lockless-npm-installs).
+NPM_HIDDEN_LOCKFILE="node_modules/.package-lock.json"
+
 check_npm_effect_closure() {
-  local lockfile="${PROJECT_DIR}/package-lock.json"
   local closure_file
   local provider_file
   local miss_file
@@ -742,8 +1111,21 @@ check_npm_effect_closure() {
   local miss_count
   local vulnerable_summary
   local kev_summary
+  local lockfile
+  local part_file
+  local -a lockfiles=()
 
-  [[ -f "${lockfile}" ]] || return 0
+  for lockfile in "${PROJECT_DIR}/package-lock.json" "${PROJECT_DIR}/${NPM_HIDDEN_LOCKFILE}"; do
+    [[ -f "${lockfile}" ]] && lockfiles+=("${lockfile}")
+  done
+  [[ ${#lockfiles[@]} -gt 0 ]] || return 0
+
+  # A tree with no hidden lockfile was not recorded by the npm that built it
+  # (npm 6 and older, or a tree built by hand). Its closure is read from
+  # package-lock.json alone, and that is on record rather than assumed.
+  if [[ -d "${PROJECT_DIR}/node_modules" && ! -f "${PROJECT_DIR}/${NPM_HIDDEN_LOCKFILE}" ]]; then
+    log_advisory "post-verify: ${PROJECT_DIR}/node_modules has no .package-lock.json, so the installed tree was read from package-lock.json only."
+  fi
 
   closure_file=$(mktemp "${TMPDIR:-/tmp}/safedeps-post-closure.XXXXXX") || return
   provider_file=$(mktemp "${TMPDIR:-/tmp}/safedeps-post-provider.XXXXXX") || {
@@ -754,14 +1136,26 @@ check_npm_effect_closure() {
     rm -f "${closure_file}" "${provider_file}"
     return
   }
-  : > "${miss_file}"
-
-  if ! safedeps_npm_lock_closure "${lockfile}" > "${closure_file}"; then
-    SUSPICIOUS=true
-    REASONS+=("npm package-lock closure could not be parsed")
+  part_file=$(mktemp "${TMPDIR:-/tmp}/safedeps-post-part.XXXXXX") || {
     rm -f "${closure_file}" "${provider_file}" "${miss_file}"
     return
-  fi
+  }
+  : > "${miss_file}"
+
+  # One closure over both records, each entry once.
+  printf '[]' > "${closure_file}"
+  for lockfile in "${lockfiles[@]}"; do
+    if ! safedeps_npm_lock_closure "${lockfile}" > "${part_file}" \
+        || ! jq -s 'add | unique_by(.ecosystem + "\u0000" + .package + "\u0000" + .version) | sort_by(.package, .version)' \
+          "${closure_file}" "${part_file}" > "${part_file}.merged" 2>/dev/null; then
+      SUSPICIOUS=true
+      REASONS+=("npm closure could not be parsed from ${lockfile#"${PROJECT_DIR}"/}")
+      rm -f "${closure_file}" "${provider_file}" "${miss_file}" "${part_file}" "${part_file}.merged"
+      return
+    fi
+    mv -f "${part_file}.merged" "${closure_file}"
+  done
+  rm -f "${part_file}"
 
   # One ledger read for the whole closure. The per-package form walked the whole
   # ledger directory for every package, which put the gate past its own hook
@@ -834,8 +1228,8 @@ run_command_independent_backstop() {
   # Detection is command-independent (the npm closure check reads the live
   # package-lock.json, not the command text); automatic rollback still needs a
   # prior confirmed-safe snapshot to restore from. Never silent — every path logs.
-  if [[ ! -f "${PROJECT_DIR}/package-lock.json" ]]; then
-    log_advisory "post-verify UNVERIFIED: install-looking command with no pending state and no package-lock.json in ${PROJECT_DIR} — nothing to closure-check."
+  if [[ ! -f "${PROJECT_DIR}/package-lock.json" && ! -f "${PROJECT_DIR}/${NPM_HIDDEN_LOCKFILE}" ]]; then
+    log_advisory "post-verify UNVERIFIED: install-looking command with no pending state and no package-lock.json or ${NPM_HIDDEN_LOCKFILE} in ${PROJECT_DIR} — nothing to closure-check."
     return 0
   fi
 
@@ -885,14 +1279,16 @@ There is no confirmed-safe snapshot for ${PROJECT_DIR} yet, so safedeps could NO
   safedeps_journal_stage "${journal_id}" "reinstalling-node-modules"
   restore_node_modules
 
-  local rolled_str=""
+  local rolled_str="" warning_str=""
   [[ ${#ROLLED_BACK[@]} -gt 0 ]] && rolled_str=$(printf '%s, ' "${ROLLED_BACK[@]}")
+  [[ ${#ROLLBACK_WARNINGS[@]} -gt 0 ]] && warning_str=$(printf '%s; ' "${ROLLBACK_WARNINGS[@]}")
   cat >> "${GUARD_DIR}/reorg.log" << LOG_EOF
 [$(date -u +"%Y-%m-%dT%H:%M:%SZ")] REORG executed (command-independent backstop)
   Rollback snapshot: ${rollback_id}
   Project: ${PROJECT_DIR}
   Reasons: ${reason_str%%; }
   Rolled back: ${rolled_str%, }
+  Rollback warnings: ${warning_str%%; }
 LOG_EOF
 
   # The rollback finished and is about to report itself, so there is nothing
@@ -905,7 +1301,10 @@ Detected:
 ${reason_str%%; }
 
 Rollback snapshot: ${rollback_id}
-Rolled-back files: ${rolled_str%, }"
+Rolled-back files: ${rolled_str%, }${warning_str:+
+
+Additional warnings:
+${warning_str%%; }}"
   return 0
 }
 
@@ -913,6 +1312,19 @@ if [[ "${BACKSTOP_INSTALL:-false}" == "true" ]]; then
   run_command_independent_backstop
   exit 0
 fi
+
+# Stage the record before anything reads the project (see stage_verified_state).
+VERIFIED_ID="verified-${SNAPSHOT_ID}"
+if stage_verified_state; then
+  VERIFIED_STAGED=true
+else
+  discard_staged_state
+fi
+
+# Whether the npm installs in this command were read at all is settled before
+# what was read is judged: a closure of a directory the install never touched
+# is clean and says nothing about the install. It reads only file metadata.
+settle_npm_trace
 
 # Run all checks
 check_npm_effect_closure
@@ -924,6 +1336,7 @@ check_binaries
 
 if [[ "${SUSPICIOUS}" == "true" ]]; then
   # REORG: Rollback to last confirmed safe snapshot
+  discard_staged_state
   ROLLBACK_SNAPSHOT_ID=$(read_confirmed_snapshot "${DIR_HASH}")
   if [[ -z "${ROLLBACK_SNAPSHOT_ID}" ]] || [[ ! -f "${SNAPSHOT_DIR}/${ROLLBACK_SNAPSHOT_ID}_meta.json" ]]; then
     ROLLBACK_SNAPSHOT_ID="${SNAPSHOT_ID}"
@@ -971,6 +1384,7 @@ if [[ "${SUSPICIOUS}" == "true" ]]; then
   safedeps_journal_stage "${JOURNAL_ID}" "reinstalling-node-modules"
   restore_node_modules
   cleanup_old_snapshots
+  [[ -z "${TRACE_NOTE}" ]] || ROLLBACK_WARNINGS+=("${TRACE_NOTE}")
 
   REASON_STR=""
   [[ ${#REASONS[@]} -gt 0 ]] && REASON_STR=$(printf '%s; ' "${REASONS[@]}")
@@ -1015,7 +1429,7 @@ Details log: ${GUARD_DIR}/reorg.log"
 fi
 
 run_verified_npm_rebuild_if_injected
-confirm_snapshot "${SNAPSHOT_ID}" "${DIR_HASH}"
+confirm_verified_state
 cleanup_old_snapshots
 emit_confirm_warnings_if_any
 

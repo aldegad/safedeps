@@ -23,6 +23,8 @@ bash -n bin/safedeps
 bash -n lib/providers/providers.sh
 bash -n lib/ledger/ledger.sh
 bash -n lib/npm/closure.sh
+bash -n lib/npm/ask.sh
+bash -n lib/npm/workspaces.sh
 bash -n scripts/safedeps-pre-guard.sh
 bash -n scripts/safedeps-post-verify.sh
 bash -n scripts/safedeps-recheck-alert.sh
@@ -380,6 +382,17 @@ global_forms=(
   "npm install --global left-pad@1.3.0"
   "npm -g install left-pad@1.3.0"
   "npm --global install left-pad@1.3.0"
+  # npm's option parser (nopt) reads these as global too: a bundle of short
+  # flags, `=value` on a boolean, a negated `--no-` with `=false`, and a unique
+  # abbreviation of `--location`. Global is npm's answer (lib/npm/ask.sh), so
+  # the ledger context follows npm rather than a list of spellings.
+  "npm install -gf left-pad@1.3.0"
+  "npm i -fg left-pad@1.3.0"
+  "npm i -g=true left-pad@1.3.0"
+  "npm i --locat=global left-pad@1.3.0"
+  "npm i --no-global=false left-pad@1.3.0"
+  # npm link installs a package the global tree lacks into the global prefix.
+  "npm link left-pad@1.3.0"
 )
 for i in "${!global_forms[@]}"; do
   global_safe="${tmp_root}/safe-global-context-${i}"
@@ -412,6 +425,12 @@ SAFEDEPS_HOME="${mixed_safe}" lib/ledger/ledger.sh approve npm other-local 2.0.0
 mixed_context_output=$(run_hook_command "${tmp_root}/home-mixed-global-local-control" "${mixed_safe}" "npm install -g left-pad@1.3.0 && npm install other-local@2.0.0")
 [[ "$(jq -r '.hookSpecificOutput.permissionDecision' <<< "${mixed_context_output}")" == "deny" ]] \
   || fail "mixed global and local npm operations stay project-scoped"
+# A payload's install lands where the payload decides, which the landing does
+# not read, so it keeps the project's context (declared: the direction that
+# can deny an approved package, never one that drops the context).
+payload_context_output=$(run_hook_command "${tmp_root}/home-payload-global-control" "${local_context_safe}" "sh -c 'npm install -g left-pad@1.3.0'")
+[[ "$(jq -r '.hookSpecificOutput.permissionDecision' <<< "${payload_context_output}")" == "deny" ]] \
+  || fail "a global npm install inside a payload stays project-scoped"
 printf '{"dependencies":{}}\n' > "${project_dir}/package.json"
 pass "global npm approvals are context-free while local approvals remain project-scoped"
 
@@ -497,16 +516,28 @@ do
 done
 pass "inert flag lands inside a script handed to a shell, and quoted data stays as written"
 
-# A script the rewrite cannot map -- double-quoted with an escape in it -- is a
-# recorded downgrade, never a command reported inert while an install in it
-# runs its scripts.
+# A script the rewrite cannot map -- double-quoted with a substitution in it --
+# is a recorded downgrade, never a command reported inert while an install in
+# it runs its scripts.
 downgrades_before=$(grep -c 'could not make every npm install in this command inert' "${tmp_root}/safe-compound/advisory.log" 2>/dev/null || true)
-inert_out=$(run_hook_command "${tmp_root}/home-compound" "${tmp_root}/safe-compound" 'npm install left-pad@1.3.0; sh -c "echo \"hi\"; npm install left-pad@1.3.0"')
+inert_out=$(run_hook_command "${tmp_root}/home-compound" "${tmp_root}/safe-compound" 'npm install left-pad@1.3.0; sh -c "echo $(date); npm install left-pad@1.3.0"')
 [[ -z "$(jq -r '.hookSpecificOutput.updatedInput.command // ""' <<< "${inert_out}")" ]] \
   || fail "a script the inert rewrite cannot map gets no partial rewrite"
 downgrades_after=$(grep -c 'could not make every npm install in this command inert' "${tmp_root}/safe-compound/advisory.log" 2>/dev/null || true)
 (( ${downgrades_after:-0} > ${downgrades_before:-0} )) || fail "a script the inert rewrite cannot map is recorded as a downgrade"
-pass "a script the inert rewrite cannot reach is a recorded downgrade"
+# One with an escaped quote in it is read to its end now (the payload reader
+# takes the word the shell passes), so the approved install inside it is judged
+# and allowed; the inert rewrite cannot map an escaped double-quoted script, so
+# it is a recorded downgrade, as above.
+downgrades_before=$(grep -c 'could not make every npm install in this command inert' "${tmp_root}/safe-compound/advisory.log" 2>/dev/null || true)
+inert_out=$(run_hook_command "${tmp_root}/home-compound" "${tmp_root}/safe-compound" 'npm install left-pad@1.3.0; sh -c "echo \"hi\"; npm install left-pad@1.3.0"')
+[[ "$(jq -r '.hookSpecificOutput.permissionDecision // "allow"' <<< "${inert_out}")" != deny ]] \
+  || fail "an approved install in a script with an escaped quote is read and allowed (got: ${inert_out:0:160})"
+[[ -z "$(jq -r '.hookSpecificOutput.updatedInput.command // ""' <<< "${inert_out}")" ]] \
+  || fail "a script with an escaped quote gets no partial inert rewrite"
+downgrades_after=$(grep -c 'could not make every npm install in this command inert' "${tmp_root}/safe-compound/advisory.log" 2>/dev/null || true)
+(( ${downgrades_after:-0} > ${downgrades_before:-0} )) || fail "a script with an escaped quote is recorded as an inert downgrade"
+pass "a script the inert rewrite cannot reach is a recorded downgrade, or UNDECIDED when it cannot be read"
 
 # Finding #3: an `--prefix <dir>` install must be snapshotted/effect-gated against
 # the OVERRIDE dir, not cwd. The pending state's project_dir must be the prefix dir.

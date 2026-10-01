@@ -85,6 +85,10 @@ if [[ "${1:-}" == "--run" ]]; then
   T=$(mktemp -d "${WORK}/run.XXXXXX")
   mkdir -p "${T}/p" "${T}/h" "${T}/st"
   printf '{"dependencies":{}}\n' > "${T}/p/package.json"
+  # An .npmrc that changes nothing, so every npm install reads it and the
+  # .npmrc reader is one of the readings failed. Without the file that reader
+  # never runs, and its failure mode would be idle.
+  printf 'fund=false\n' > "${T}/p/.npmrc"
   variant=$(cat "${WORK}/cases/${n}.variant")
   [[ "${variant}" != "approved" ]] || cp -R "${WORK}/approved-home" "${T}/h/safe"
   codex=""
@@ -182,6 +186,11 @@ case "\$*" in
   *"safedeps:inert_payload_spans"*) kind=payspans ;;
   *"safedeps:normalize_install_text"*) kind=norm ;;
   *"safedeps:extract_command_substitution_payloads"*) kind=subst ;;
+  *"safedeps:command_statements"*) kind=stmts ;;
+  *"safedeps:guard_npmrc_value"*) kind=npmrc ;;
+  *"safedeps:extract_pieces"*) kind=pieces ;;
+  *"safedeps:payload_pieces"*) kind=payload ;;
+  *"safedeps:read_payload_words"*) kind=paywords ;;
 esac
 if [[ -z "\${kind}" ]]; then
   # A call the census cannot name, counted so that it cannot hide: see
@@ -290,7 +299,7 @@ for n in $(seq 1 "${case_count}"); do
     printf '%s k %s\n' "${n}" "${k}" >> "${WORK}/jobs"
     [[ "${QUICK}" == "true" ]] || printf '%s from-k %s\n' "${n}" "${k}" >> "${WORK}/jobs"
   done
-  for mode in scan-all join-all strip-all reads-all inert-all offsets-all payspans-all norm-all subst-all blank-all spans-all flag-all eco-all awk-all grep-all sed-all; do
+  for mode in scan-all join-all strip-all reads-all inert-all offsets-all norm-all subst-all blank-all spans-all flag-all eco-all stmts-all npmrc-all pieces-all payload-all paywords-all payspans-all awk-all grep-all sed-all; do
     printf '%s %s 0\n' "${n}" "${mode}" >> "${WORK}/jobs"
   done
 done
