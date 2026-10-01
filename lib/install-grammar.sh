@@ -102,7 +102,7 @@ SAFEDEPS_G_OPERAND='[[:space:]]+[^-[:space:]][^[:space:]]*'
 # or a URL argument. One shape npa reads as a file still matches: a bare
 # tarball name (`x.tgz`), which the regex cannot tell from a package name. The
 # statement then reads as an install, gets `--ignore-scripts`, and the operand
-# walk, which reads each argument the way npa does (guard_npa_is_registry),
+# walk, which reads each argument the way npa does (safedeps_npa_is_local),
 # names nothing in it. scripts/measure/npm-link-operands.sh checks both
 # against the npa of the npm on PATH.
 SAFEDEPS_G_NPM_REGISTRY_OPERAND='([Nn][Pp][Mm]:[^[:space:]]+|(@[^/@[:space:]]+/[^/@[:space:]]+|[^-./~@:[:space:]][^/@:[:space:]]*)(@([Nn][Pp][Mm]:[^[:space:]]*|[^./:[:space:]][^/:[:space:]]*)?)?)'
@@ -187,10 +187,10 @@ safedeps_grammar_is_verb() {
   [[ "$1" =~ ^(${SAFEDEPS_G_ALL_VERBS})$ ]]
 }
 
-# True when npm-package-arg reads <arg> as a registry package (types range,
-# version, tag, alias) rather than a directory, a file, a git or a URL spec.
-# npm link reads each of its arguments this way and installs the registry ones
-# into the global prefix (lib/commands/link.js:92-104). The steps are npa.js's
+# How npm-package-arg (npa) reads an argument, as far as npm link needs it:
+# npm link reads each of its arguments this way (lib/commands/link.js:92-104),
+# links a directory or a file as written and installs everything else into the
+# global prefix (safedeps_npa_is_local below). The steps are npa.js's
 # own (npm-package-arg, in npm 11.19.0): a URL-shaped or scp-shaped argument
 # has no name; a name part with a `/` or a tarball suffix makes the whole
 # argument a spec; otherwise `name@spec` is split at its `@` and the spec
@@ -201,46 +201,6 @@ SAFEDEPS_G_NPA_SCP_RE='^[^@]+@[^:.]+[.][^:]+:.+$'
 SAFEDEPS_G_NPA_TARBALL_RE='[.]([Tt][Gg][Zz]|[Tt][Aa][Rr].[Gg][Zz]|[Tt][Aa][Rr])$'
 # hosted-git-info's `user/repo[#ref]` shorthand, which npa reads as git.
 SAFEDEPS_G_NPA_HOSTED_RE='^[^:@%/[:space:].-][^:@%/[:space:]]*/[^:@[:space:]/%]+(#.*)?$'
-safedeps_npa_is_registry() {
-  local arg="$1" rest namepart spec
-  [[ "${arg}" =~ ${SAFEDEPS_G_NPA_URL_RE} ]] && { safedeps_npa_spec_is_registry "${arg}"; return; }
-  [[ "${arg}" =~ ${SAFEDEPS_G_NPA_SCP_RE} ]] && return 1
-  if [[ "${arg}" == @* ]]; then
-    rest="${arg:1}"
-    if [[ "${rest}" == *@* ]]; then
-      namepart="@${rest%%@*}" spec="${rest#*@}"
-    else
-      namepart="${arg}" spec=""
-    fi
-  elif [[ "${arg}" == ?*@* ]]; then
-    namepart="${arg%%@*}" spec="${arg#*@}"
-  else
-    namepart="${arg}" spec=""
-  fi
-  if [[ "${namepart}" != @* ]]; then
-    [[ "${namepart}" == */* || "${namepart}" =~ ${SAFEDEPS_G_NPA_TARBALL_RE} ]] && return 1
-  fi
-  if [[ "${namepart}" == "${arg}" ]]; then
-    # A bare word: a scoped name is a name; anything else is a name unless
-    # npa reads it as a path (`.`, `..`).
-    [[ "${arg}" =~ ^@[^/@]+/[^/@]+$ ]] && return 0
-    spec="${arg}"
-  fi
-  safedeps_npa_spec_is_registry "${spec}"
-}
-# npa's resolve() on a spec: a file spec, then an alias, then a hosted git, a
-# URL, a path or a tarball; anything left is a registry range, version or tag.
-safedeps_npa_spec_is_registry() {
-  local spec="$1"
-  case "${spec}" in
-    '') return 0 ;;
-    [Ff][Ii][Ll][Ee]:*|.*|'~/'*|/*|[A-Za-z]:*) return 1 ;;
-    [Nn][Pp][Mm]:*) return 0 ;;
-  esac
-  [[ "${spec}" =~ ${SAFEDEPS_G_NPA_URL_RE} || "${spec}" == */* || "${spec}" =~ ${SAFEDEPS_G_NPA_TARBALL_RE} ]] && return 1
-  return 0
-}
-
 # Whether npa reads an argument as local code -- a directory or a file -- which
 # is what npm link links as written. Every other argument (registry, git, URL)
 # is fetched and installed into the global prefix (lib/commands/link.js:92-104),
