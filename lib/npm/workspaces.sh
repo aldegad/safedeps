@@ -1,37 +1,34 @@
 #!/usr/bin/env bash
-# safedeps: where npm installs, read the way npm reads it.
+# safedeps: the files a workspace install writes, for the snapshot.
 #
-# A project install does not land in the directory the command starts in. npm
-# walks up from there to the nearest directory with a package.json or a
-# node_modules, and if a package.json further up declares that directory as one
-# of its workspaces, npm installs at that workspace root instead. Both hooks
-# need the answer: the pre-guard to choose the directory the effect gate reads,
-# and the post-verify hook to know which trees `npm rebuild` would run over.
+# `npm install x -w packages/a` writes packages/a/package.json as well as the
+# root's lockfiles, so a rollback has to restore the member's manifest. This
+# file lists the members' manifests for the snapshot to keep, and names the
+# snapshot files.
 #
-# Read from npm 11.19.0's own source (@npmcli/config loadLocalPrefix and
-# @npmcli/map-workspaces) and measured with a real npm in
-# scripts/test/lockless-forms.sh:
+# It does NOT decide where an install lands or what `npm rebuild` runs over.
+# Both used to be decided here, by reading npm's source and doing the same in
+# bash, and both drifted from npm (safedeps/effect-gate-blind-to-lockless-npm-
+# installs): the member list resolved a symlinked member to its physical path,
+# where npm compares the path its glob found, and the gate climbed to a root npm
+# did not. Both questions are now asked of npm (lib/npm/ask.sh). What is left
+# here only chooses which files to copy before an install, so reading more
+# members than npm would costs a copy, and reading fewer costs a manifest the
+# rollback cannot restore. The lockfiles' member keys are read too, so a member
+# npm recorded is kept even where the glob below does not find it.
 #
-#   - The walk stops at the first directory with a package.json or a
-#     node_modules. That is the local prefix.
-#   - Every package.json above the local prefix is a candidate root, nearest
-#     first. The first one whose `workspaces` names the local prefix wins.
+# Read from npm 11.19.0's @npmcli/map-workspaces:
+#
 #   - `workspaces` is an array of glob patterns, or an object whose `packages`
 #     is one. A pattern names directories that hold a package.json, never one
 #     under node_modules, and `*` does not match a name that starts with a dot.
-#   - `--workspaces=false` on the command line stops the walk at the local
-#     prefix.
 #
-# Where npm would have to do something this file does not reproduce, the
-# answer is `?`, never a guess: a package.json that cannot be read or parsed, a
-# `workspaces` value npm would reject, and the glob features left out here
-# (negation, braces, extglob). npm skips an unparsable package.json above the
-# prefix, so `?` there is stricter than npm. It costs an UNGATED record where
-# npm would have been harmless; a guess costs a silent pass.
+# Where a pattern uses a glob feature left out here (negation, braces,
+# extglob), the answer is `?` and the lockfile keys are what remain.
 #
-# Sourced on every Bash call through the PreToolUse hook. A parse error here
-# takes that hook's npm target resolution down, so edit it in a worktree and
-# run `npm test` first. Bash 3.2 compatible.
+# Sourced by both hooks, on every Bash call through the PreToolUse hook. A
+# parse error here takes the snapshot of workspace manifests down, so edit it in
+# a worktree and run `npm test` first. Bash 3.2 compatible.
 
 # The workspace patterns <root>/package.json declares, one per line, after
 # `ok`. `none` when it declares none or there is no package.json, and `?<TAB><why>` when it cannot be read.
@@ -144,48 +141,6 @@ safedeps_npm_workspace_members() {
       *) (cd "${member}" 2>/dev/null && pwd -P) || printf '?\tcannot resolve %s\n' "${member}" ;;
     esac
   done | LC_ALL=C sort -u
-}
-
-# The directory npm installs into when it runs in <dir>, as a physical path, or
-# `?<TAB><why>` when that cannot be decided. <workspaces_off> is `true` when the
-# command line turns workspaces off.
-safedeps_npm_install_root() {
-  local dir="$1" workspaces_off="${2:-false}" prefix probe members
-  dir=$(cd "${dir}" 2>/dev/null && pwd -P) || { printf '?\t%s is not a directory npm can run in\n' "$1"; return 0; }
-  prefix="${dir}"
-  probe="${dir}"
-  while :; do
-    if [[ -e "${probe}/package.json" || -d "${probe}/node_modules" ]]; then
-      prefix="${probe}"
-      break
-    fi
-    if [[ "${probe}" == / ]]; then
-      printf '%s\n' "${dir}"
-      return 0
-    fi
-    probe=$(dirname "${probe}")
-  done
-  if [[ "${workspaces_off}" == true || "${prefix}" == / ]]; then
-    printf '%s\n' "${prefix}"
-    return 0
-  fi
-  probe=$(dirname "${prefix}")
-  while :; do
-    if [[ -e "${probe}/package.json" ]]; then
-      members=$(safedeps_npm_workspace_members "${probe}")
-      if grep -q '^?' <<< "${members}"; then
-        grep -m1 '^?' <<< "${members}"
-        return 0
-      fi
-      if grep -qxF -- "${prefix}" <<< "${members}"; then
-        printf '%s\n' "${probe}"
-        return 0
-      fi
-    fi
-    [[ "${probe}" != / ]] || break
-    probe=$(dirname "${probe}")
-  done
-  printf '%s\n' "${prefix}"
 }
 
 # The file name a snapshot keeps <path> under, for a path relative to the

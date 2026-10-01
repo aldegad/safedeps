@@ -23,6 +23,8 @@ bash -n bin/safedeps
 bash -n lib/providers/providers.sh
 bash -n lib/ledger/ledger.sh
 bash -n lib/npm/closure.sh
+bash -n lib/npm/ask.sh
+bash -n lib/npm/workspaces.sh
 bash -n scripts/safedeps-pre-guard.sh
 bash -n scripts/safedeps-post-verify.sh
 bash -n scripts/safedeps-recheck-alert.sh

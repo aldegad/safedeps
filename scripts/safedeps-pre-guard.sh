@@ -113,18 +113,27 @@ fi
 # shellcheck source=../lib/install-grammar.sh
 source "${SAFEDEPS_INSTALL_GRAMMAR_LIB}"
 
-# Where an npm install lands: the nearest package.json or node_modules, lifted
-# to the workspace root that declares it. Without this file that cannot be
-# decided, so every npm install target is `?` and the install is recorded
-# UNGATED rather than read in a directory npm may not have used.
+# Where an npm install lands is asked of npm (lib/npm/ask.sh). Without that
+# file it cannot be asked, so every npm install target is `?` and the install is
+# recorded UNGATED rather than read in a directory npm may not have used.
+SAFEDEPS_NPM_ASK_LIB="${BASH_SOURCE[0]%/*}/../lib/npm/ask.sh"
+if [[ -r "${SAFEDEPS_NPM_ASK_LIB}" ]]; then
+  # shellcheck source=../lib/npm/ask.sh
+  source "${SAFEDEPS_NPM_ASK_LIB}"
+else
+  SAFEDEPS_NPM_ASK_PRE_SECONDS=0
+  safedeps_npm_install_target() {
+    printf '?\tlib/npm/ask.sh is unreadable, so safedeps cannot ask npm where this install lands\n'
+  }
+fi
+
+# The workspace members' manifests, which a workspace install writes and a
+# rollback has to restore, and the names snapshots keep files under.
 SAFEDEPS_NPM_WORKSPACES_LIB="${BASH_SOURCE[0]%/*}/../lib/npm/workspaces.sh"
 if [[ -r "${SAFEDEPS_NPM_WORKSPACES_LIB}" ]]; then
   # shellcheck source=../lib/npm/workspaces.sh
   source "${SAFEDEPS_NPM_WORKSPACES_LIB}"
 else
-  safedeps_npm_install_root() {
-    printf '?\tlib/npm/workspaces.sh is unreadable\n'
-  }
   safedeps_snapshot_file_name() { printf '%s' "$1"; }
 fi
 
@@ -1134,9 +1143,10 @@ guard_npmrc_unrecorded() {
 resolve_install_targets() {
   local cmd="$1" cwd="$2"
   local text before stmt after words head target want kind manager tok value normalized in_env skip
-  local named user_rc cli_global_off why workspaces_off
-  local dir="${cwd}" grouped=false env_global=false env_userconfig=false
-  local -a toks=()
+  local user_rc cli_global_off why run_dir answer local_prefix npm_word npm_unknown i
+  local dir="${cwd}" grouped=false env_global=false env_userconfig=false exports_unknown=""
+  local npm_until=""
+  local -a toks=() npm_env=() npm_args=() npm_exports=()
 
   text=$(join_line_continuations "$(strip_heredoc_bodies "${cmd}")")
   command_scan_text "${text}" | grep -q '[(){}`]' && grouped=true
@@ -1182,6 +1192,23 @@ resolve_install_targets() {
         [[ "${dir}" == "?" || -d "${dir}" ]] || dir="?"
         continue
         ;;
+      export)
+        # An npm setting exported earlier reaches every later npm, so the ask
+        # carries it too. One the shell decides at run time, or one exported
+        # where it may not reach the install (a group, a subshell), makes every
+        # later npm install's directory unknown.
+        for tok in "${toks[@]:1}"; do
+          [[ "${tok}" == *=* ]] || continue
+          value="${tok%%=*}"
+          [[ "$(printf '%s' "${value}" | tr '[:upper:]' '[:lower:]')" == npm_config_* ]] || continue
+          if [[ "${grouped}" == true || "${tok}" == *$'\001'* ]]; then
+            exports_unknown="${tok%$'\001'}"
+          else
+            npm_exports+=("${tok}")
+          fi
+        done
+        continue
+        ;;
     esac
 
     command_is_dependency_install "${stmt}" || continue
@@ -1206,24 +1233,33 @@ resolve_install_targets() {
 
     # `env -C <dir>` / `env --chdir <dir>` runs the command in <dir>; its
     # options come before the first word that is neither an option nor an
-    # assignment.
+    # assignment. That is the directory npm runs in. The other managers'
+    # relocation flags are read here too; npm's own (`--prefix`, `-C`) are
+    # npm's to read, below.
+    run_dir="${dir}"
     target="${dir}"
     want=""
     skip=false
-    named=false
     in_env=false
     [[ "${toks[0]}" == env ]] && in_env=true
     for tok in "${toks[@]:1}"; do
       if [[ "${skip}" == true ]]; then skip=false; continue; fi
       if [[ -n "${want}" ]]; then
+        if [[ "${want}" == env ]]; then
+          run_dir=$(guard_literal_dir "${run_dir}" "${tok}")
+        fi
         target=$(guard_literal_dir "${target}" "${tok}")
         want=""
         continue
       fi
       if [[ "${in_env}" == true ]]; then
         case "${tok}" in
-          -C|--chdir) want=1; continue ;;
-          --chdir=*) target=$(guard_literal_dir "${target}" "${tok#*=}"); continue ;;
+          -C|--chdir) want=env; continue ;;
+          --chdir=*)
+            run_dir=$(guard_literal_dir "${run_dir}" "${tok#*=}")
+            target=$(guard_literal_dir "${target}" "${tok#*=}")
+            continue
+            ;;
           -u|--unset) skip=true; continue ;;
           -*|*=*) continue ;;
           *) in_env=false ;;
@@ -1232,95 +1268,145 @@ resolve_install_targets() {
       case "${tok}" in
         --prefix=*|--cwd=*|--dir=*|--install-dir=*)
           target=$(guard_literal_dir "${target}" "${tok#*=}")
-          named=true
           ;;
-        --prefix|--cwd|--dir|--install-dir) want=1; named=true ;;
+        --prefix|--cwd|--dir|--install-dir) want=1 ;;
         -C)
-          if [[ -n "${manager}" ]]; then want=1; named=true; fi
+          if [[ -n "${manager}" ]]; then want=1; fi
           ;;
         -C?*)
           if [[ -n "${manager}" ]]; then target="?"; fi
           ;;
       esac
     done
-    if [[ -n "${want}" ]]; then target="?"; fi
+    if [[ -n "${want}" ]]; then target="?"; run_dir="?"; fi
+    why=""
 
     if [[ "${kind}" == npm ]]; then
+      # Where an npm install lands is npm's to say, so npm is asked
+      # (lib/npm/ask.sh). Every copy of npm's rules in this file disagreed with
+      # npm somewhere, and each disagreement was a silent pass: a `cd` into a
+      # directory without a package.json, then a workspace member reached
+      # through a symlink, where npm installs in the member and the copy
+      # climbed to the root.
       if [[ "${env_global}" == true ]] \
           || printf '%s' "${stmt}" | grep -qEi -- '(^|[[:space:]])(-g|--global(=true)?|--location(=|[[:space:]]+)global)([[:space:]]|$)'; then
         target=global
-      fi
-    fi
-
-    # npm does not install in the directory it runs in. It walks up to the
-    # nearest package.json or node_modules, then to the workspace root that
-    # declares that directory (lib/npm/workspaces.sh). A `--prefix` or `-C`
-    # names the directory outright, and `--workspaces=false` stops the walk
-    # before the root. Measured: `cd src && npm install x`, with no
-    # package.json in src, wrote the project's lockfiles while the gate read
-    # src and confirmed it clean.
-    why=""
-    if [[ "${kind}" == npm && "${target}" != global && "${target}" != "?" && "${named}" != true ]]; then
-      workspaces_off=false
-      want=""
-      for tok in "${toks[@]}"; do
-        # nopt takes the next word as a boolean's value only when it is one.
-        if [[ -n "${want}" ]]; then
-          want=""
-          case "${tok}" in
-            false) workspaces_off=true; continue ;;
-            true) continue ;;
-          esac
-        fi
-        case "${tok}" in
-          --no-workspaces|--workspaces=false) workspaces_off=true ;;
-          --workspaces|--workspaces=true) want=1 ;;
-          --workspaces=*) workspaces_off="?" ;;
-        esac
-      done
-      if [[ "${workspaces_off}" == "?" ]]; then
-        target="?"
-        why="the command sets --workspaces to a value this gate does not read, so safedeps cannot tell where npm records this install"
       else
-        target=$(safedeps_npm_install_root "${target}" "${workspaces_off}")
-        if [[ "${target}" == "?"* ]]; then
-          why="${target#"?"}"
-          why="${why#$'\t'}, so safedeps cannot tell where npm records this install"
+        # The words before npm go to env(1) in front of it, and the words after
+        # it are npm's arguments, unchanged.
+        npm_env=("${npm_exports[@]+"${npm_exports[@]}"}")
+        npm_args=()
+        npm_word=""
+        npm_unknown="${exports_unknown}"
+        in_env=false
+        skip=false
+        want=""
+        for (( i = 0; i < ${#toks[@]}; i++ )); do
+          tok="${toks[i]}"
+          if [[ -n "${npm_word}" ]]; then
+            npm_args+=("${tok}")
+            [[ "${tok}" != *$'\001' ]] || npm_unknown="${tok%$'\001'}"
+            continue
+          fi
+          if [[ "${skip}" == true ]]; then
+            skip=false
+            if [[ "${want}" == u ]]; then npm_env+=("${tok}"); fi
+            want=""
+            continue
+          fi
+          [[ "${tok}" != *$'\001' ]] || { npm_unknown="${tok%$'\001'}"; continue; }
+          case "${tok}" in
+            npm|*/npm) npm_word="${tok}"; continue ;;
+            env) in_env=true; continue ;;
+            command|exec) continue ;;
+          esac
+          if [[ "${in_env}" == true ]]; then
+            case "${tok}" in
+              -C|--chdir) skip=true; continue ;;
+              --chdir=*) continue ;;
+              -u|--unset) npm_env+=(-u); skip=true; want=u; continue ;;
+              --unset=*) npm_env+=(-u "${tok#*=}"); continue ;;
+              -i|--ignore-environment) npm_env+=(-i); continue ;;
+              -*) npm_unknown="env ${tok}"; continue ;;
+            esac
+          fi
+          if [[ "${tok}" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
+            npm_env+=("${tok}")
+            continue
+          fi
+          npm_unknown="${tok}"
+        done
+        if [[ -z "${npm_word}" ]]; then
           target="?"
-        fi
-      fi
-    fi
-
-    # An install the command keeps in a known directory can still be kept off
-    # the record by an .npmrc. The user file is the one npm would read: named
-    # by `--userconfig`, then by npm_config_userconfig, then ~/.npmrc.
-    if [[ "${kind}" == npm && "${target}" != global && "${target}" != "?" ]]; then
-      user_rc=""
-      cli_global_off=false
-      want=""
-      for tok in "${toks[@]}"; do
-        if [[ -n "${want}" ]]; then user_rc="${tok}"; want=""; continue; fi
-        case "${tok}" in
-          --userconfig) want=1 ;;
-          --userconfig=*) user_rc="${tok#*=}" ;;
-          --global=false|--no-global) cli_global_off=true ;;
-        esac
-      done
-      if [[ -n "${want}" ]]; then
-        user_rc="?"
-      elif [[ -z "${user_rc}" ]]; then
-        if [[ "${env_userconfig}" == true ]]; then
-          user_rc="?"
+          why="safedeps could not find the npm word in this install statement, so it cannot ask npm where the install lands"
+        elif [[ -n "${npm_unknown}" ]]; then
+          target="?"
+          why="this npm install depends on ${npm_unknown}, which the shell decides at run time or this gate does not reproduce, so safedeps cannot ask npm where it lands"
+        elif [[ "${run_dir}" == "?" ]]; then
+          target="?"
         else
-          user_rc="${npm_config_userconfig:-${NPM_CONFIG_USERCONFIG:-${HOME}/.npmrc}}"
+          [[ -n "${npm_until}" ]] || npm_until=$(( SECONDS + SAFEDEPS_NPM_ASK_PRE_SECONDS ))
+          answer=$(safedeps_npm_install_target "${run_dir}" "${npm_until}" "${npm_word}" \
+            "${npm_env[@]+"${npm_env[@]}"}" -- "${npm_args[@]+"${npm_args[@]}"}")
+          local_prefix=""
+          case "${answer}" in
+            '?'*)
+              target="?"
+              why="${answer#"?"}"
+              why="${why#$'\t'}"
+              ;;
+            global*)
+              target=global
+              local_prefix="${answer#global}"
+              local_prefix="${local_prefix#$'\t'}"
+              why="npm installs this in its global prefix, where no lockfile records it"
+              ;;
+            *)
+              target="${answer}"
+              local_prefix="${answer}"
+              ;;
+          esac
+
+          # npm said where. Whether npm writes a record there is a different
+          # question, and two .npmrc settings answer it without moving the
+          # install: measured, `global=0` and `location=global` under a
+          # `--location=project` put the package in the project's node_modules
+          # and in neither lockfile. So the project and user .npmrc are read
+          # here, for that only. This reading can turn a gated install into a
+          # recorded one, never the other way, and it never chooses a directory.
+          if [[ -n "${local_prefix}" ]]; then
+            user_rc=""
+            cli_global_off=false
+            want=""
+            for tok in "${toks[@]}"; do
+              if [[ -n "${want}" ]]; then user_rc="${tok}"; want=""; continue; fi
+              case "${tok}" in
+                --userconfig) want=1 ;;
+                --userconfig=*) user_rc="${tok#*=}" ;;
+                --global=false|--no-global) cli_global_off=true ;;
+              esac
+            done
+            if [[ -n "${want}" ]]; then
+              user_rc="?"
+            elif [[ -z "${user_rc}" ]]; then
+              if [[ "${env_userconfig}" == true ]]; then
+                user_rc="?"
+              else
+                user_rc="${npm_config_userconfig:-${NPM_CONFIG_USERCONFIG:-${HOME}/.npmrc}}"
+              fi
+            fi
+            case "${user_rc}" in
+              '~/'*) user_rc="${HOME}/${user_rc#'~/'}" ;;
+            esac
+            [[ "${user_rc}" == "?" ]] || user_rc=$(guard_literal_dir "${dir}" "${user_rc}")
+            value=$(guard_npmrc_unrecorded "${local_prefix}" "${user_rc}" "${cli_global_off}")
+            if [[ -n "${value}" ]]; then
+              why="${value}"
+              [[ "${target}" == global ]] || target="?"
+            fi
+          fi
         fi
       fi
-      case "${user_rc}" in
-        '~/'*) user_rc="${HOME}/${user_rc#'~/'}" ;;
-      esac
-      [[ "${user_rc}" == "?" ]] || user_rc=$(guard_literal_dir "${dir}" "${user_rc}")
-      why=$(guard_npmrc_unrecorded "${target}" "${user_rc}" "${cli_global_off}")
-      [[ -z "${why}" ]] || target="?"
     fi
     printf '%s\t%s\t%s\n' "${kind}" "${target}" "${why}"
   done < <(command_statements "${text}")
