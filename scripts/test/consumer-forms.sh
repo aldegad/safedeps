@@ -1420,10 +1420,15 @@ for prefix_form in \
 do
   expect_prescription 'npm evil@1.0.0;' "${prefix_form}"
 done
-# The same reading names a runner's package: an option npm does not know is a
-# boolean, so here the command is `x` (exec) and the package it runs is `exec`,
-# with evil@1.0.0 as that program's argument. The regex took `exec` for the
-# command and denied evil@1.0.0, which npm never fetches.
+# The same reading names a runner's package. nopt reads an option npm does not
+# define as a Boolean when it has no `=value` (nopt-lib.js parse: `typeof
+# argType === 'undefined' && !hadEq`), so `x` is npm's command, and `x` is an
+# alias of exec (lib/utils/cmd-list.js, `x: 'exec'`). With no --package, exec
+# runs its first argument as the package (libnpmexec index.js:143,177:
+# `packages.push(args[0])`), so npm fetches and runs the package `exec`, with
+# evil@1.0.0 as that program's argument. The regex took `exec` for the command
+# and denied evil@1.0.0, which npm never fetches; the record names `exec` (11).
+# npm 11.19.0; scripts/measure/npm-option-reading.sh checks the nopt half.
 expect_prescription 'no-deny;' 'npm --foo x exec evil@1.0.0'
 # Which words npm takes as option values is nopt's answer, rerun here against
 # the npm on PATH.

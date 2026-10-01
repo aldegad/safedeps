@@ -270,6 +270,15 @@ safedeps_npa_is_local() {
 # npm's, expanded the way nopt expands them. Measured from npm 11.19.0 by
 # scripts/measure/npm-option-reading.sh, which also runs nopt itself on a corpus
 # of argument lists and fails on any word this reading places differently.
+#
+# The table is one npm's, and the npm a command runs may be another: npm adds,
+# drops and retypes options between releases. Against an npm of another
+# version the check names every option that npm defines differently and every
+# argument list it reads differently because of one; that is that npm's
+# boundary, reported as a skip with the names, never a quiet pass. A list read
+# differently through an option both define alike is this reading's defect,
+# and fails.
+SAFEDEPS_G_NPM_OPTIONS_FROM='11.19.0'
 SAFEDEPS_G_NPM_OPTIONS='
   _auth:v+nS access:v+n=restricted,public,private all:b
   allow-directory:v+=all,none,root allow-file:v+=all,none,root

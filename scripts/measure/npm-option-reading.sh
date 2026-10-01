@@ -21,10 +21,21 @@
 #      empty word), the positional words this reading finds are the words nopt
 #      leaves in argv.remain, in order.
 #
+# The table is the source of truth, and it is one npm's
+# (SAFEDEPS_G_NPM_OPTIONS_FROM). Against that npm version any difference
+# fails. Against another version, options that npm defines differently from
+# the table (added, dropped, retyped; shorthands likewise) are expected to
+# read differently, so they are named, and every argument list read
+# differently is attributed to one of them: when all are, the run is a skip
+# that names them, the boundary of the gate for that npm; when one is not, the
+# reading itself is wrong for an option both versions agree on, and the run
+# fails. Neither a quiet pass nor an unexplained red.
+#
 # Usage: scripts/measure/npm-option-reading.sh [--print]
 #   --print   print the table measured from npm, in the grammar's form
 # Exit: 0 both agree, 1 a disagreement (printed), 2 no npm to ask,
-#       3 this npm keeps its config definitions elsewhere (skipped).
+#       3 skipped: this npm keeps its config definitions elsewhere, or it is
+#         another version that reads only the named options differently.
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
@@ -109,6 +120,9 @@ for (const w of ["--", "---", "-", "--=x", "-=x", "--No-global", "--NO-yes", "x"
 add("--prefix", "x", "--silent", "--loglevel", "error", "--", "--yes")
 add("--yes", "false", "--cache", "-y", "--browser", "--x")
 add("--color", "always", "--global=install", "x")
+// An option npm does not define is a Boolean to nopt, so the word after it is
+// the command: `npm --foo x exec evil@1.0.0` runs `npm x`, which is exec.
+add("--foo", "x", "exec", "evil@1.0.0")
 const rows = lists.map(a => {
   const r = nopt(types, shorthands, ["node", "npm", ...a], 2)
   return a.join("\u001f") + "\u001e" + r.argv.remain.join("\u001f")
@@ -135,22 +149,42 @@ fi
 . "${ROOT_DIR}/lib/install-grammar.sh"
 
 rc=0
-# 1. The table.
-have_options=$(printf '%s\n' ${SAFEDEPS_G_NPM_OPTIONS} | sort)
+same_version=false
+[[ "${version}" == "${SAFEDEPS_G_NPM_OPTIONS_FROM}" ]] && same_version=true
+# 1. The table. The names whose entry differs, on either side, are the ones
+# another npm version may read differently.
+have_options=$(set -f; printf '%s\n' ${SAFEDEPS_G_NPM_OPTIONS} | sort)
 have_shorthands=$(set -f; printf '%s\n' ${SAFEDEPS_G_NPM_SHORTHANDS} | sort)
-if ! diff <(printf '%s\n' "${have_options}") <(sort "${work}/options") > "${work}/diff.options"; then
-  printf 'npm %s option classes differ from lib/install-grammar.sh (< grammar, > npm):\n' "${version}"
-  cat "${work}/diff.options"
-  rc=1
-fi
-if ! diff <(printf '%s\n' "${have_shorthands}") <(sort "${work}/shorthands") > "${work}/diff.shorthands"; then
-  printf 'npm %s shorthands differ from lib/install-grammar.sh (< grammar, > npm):\n' "${version}"
-  cat "${work}/diff.shorthands"
+comm -3 <(printf '%s\n' "${have_options}") <(sort "${work}/options") \
+  | sed -E 's/^[[:space:]]+//; s/:.*//' | sort -u > "${work}/differ.options"
+comm -3 <(printf '%s\n' "${have_shorthands}") <(sort "${work}/shorthands") \
+  | sed -E 's/^[[:space:]]+//; s/=.*//' | sort -u > "${work}/differ.shorthands"
+if [[ -s "${work}/differ.options" || -s "${work}/differ.shorthands" ]] && [[ "${same_version}" == true ]]; then
+  printf 'npm %s, the version the table is from, defines these differently from lib/install-grammar.sh: %s\n' \
+    "${version}" "$(cat "${work}/differ.options" "${work}/differ.shorthands" | paste -sd ' ' -)"
   rc=1
 fi
 
-# 2. The reading.
-total=0 wrong=0
+# 2. The reading. A list read differently is explained when one of its option
+# words names, abbreviates or bundles a name whose entry differs.
+differ_names=" $(cat "${work}/differ.options" "${work}/differ.shorthands" | paste -sd ' ' -) "
+explained_by() {
+  local word name s
+  for word in "$@"; do
+    [[ "${word}" == -?* ]] || continue
+    s="${word%%=*}"
+    while [[ "${s}" == -* ]]; do s="${s#-}"; done
+    while [[ "${s:0:3}" == [Nn][Oo]- ]]; do s="${s:3}"; done
+    [[ -n "${s}" ]] || continue
+    for name in ${differ_names}; do
+      [[ "${name}" == "${s}"* ]] && { printf '%s' "${name}"; return 0; }
+      # A bundle of one-character shorthands (`-gC`).
+      [[ ${#name} -eq 1 && "${word}" != --* && "${s}" == *"${name}"* ]] && { printf '%s' "${name}"; return 0; }
+    done
+  done
+  return 1
+}
+total=0 wrong=0 boundary=0
 while IFS=$'\036' read -r args want; do
   total=$((total + 1))
   # Split on \037 alone, with globbing off: a word may be empty or `?`.
@@ -173,6 +207,10 @@ while IFS=$'\036' read -r args want; do
     got="<no reading>"
   fi
   if [[ "${got}" != "${want}" ]]; then
+    if [[ "${same_version}" != true ]] && explained_by "${words[@]}" > /dev/null; then
+      boundary=$((boundary + 1))
+      continue
+    fi
     wrong=$((wrong + 1))
     if (( wrong <= 40 )); then
       printf 'npm %s reads [%s] as [%s]; this reading has [%s]\n' "${version}" \
@@ -183,6 +221,13 @@ done < "${work}/corpus"
 if (( wrong > 0 )); then
   printf '%s of %s argument lists read differently from npm %s\n' "${wrong}" "${total}" "${version}"
   rc=1
+fi
+if (( rc == 0 )) && [[ "${same_version}" != true ]] \
+    && [[ -s "${work}/differ.options" || -s "${work}/differ.shorthands" ]]; then
+  printf 'skipped: npm %s is not npm %s, which the table is from; it defines these differently: %s; %s of %s argument lists read differently, each through one of them, and the rest agree\n' \
+    "${version}" "${SAFEDEPS_G_NPM_OPTIONS_FROM}" \
+    "$(cat "${work}/differ.options" "${work}/differ.shorthands" | paste -sd ' ' -)" "${boundary}" "${total}"
+  exit "${skipped}"
 fi
 if (( rc == 0 )); then
   printf 'npm %s: %s option classes, %s shorthands and %s argument lists agree\n' "${version}" \
