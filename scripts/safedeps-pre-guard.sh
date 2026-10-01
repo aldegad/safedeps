@@ -4465,8 +4465,9 @@ CWD_DIR=$(echo "${INPUT}" | jq -r '.cwd // empty' 2>/dev/null)
 if [[ -z "${CWD_DIR}" ]]; then
   CWD_DIR=$(pwd)
 fi
+# Codex sends turn_id; Claude does not. Asked once the command is an install
+# candidate (below), so an ordinary command does not pay for one more jq.
 GUARD_IS_CODEX=false
-jq -e 'has("turn_id")' <<< "${INPUT}" >/dev/null 2>&1 && GUARD_IS_CODEX=true
 
 # Where the bash reading says DIVERGE. Without the file the gate cannot tell
 # whether the readings differ, so it reads all three.
@@ -4566,8 +4567,17 @@ guard_reading_facts() {
     guard_all_npm_installs_are_global "${COMMAND}" "${targets}" || GUARD_NPM_ALL_GLOBAL=false
   fi
 
-  [[ "${GUARD_IS_CODEX}" == true ]] || guard_reading_inert "${reading}"
+  SAFEDEPS_READING=""
+}
 
+# What only a command that gets past the ledger needs, per reading: how it
+# would be made inert, and what the PostToolUse hook needs to tell whether its
+# npm installs were read. Asked after the denies, as before the readings were
+# shells: asking it first made every denied npm install pay for a rewrite it
+# never got (measured, +15% on a denied install).
+guard_reading_effects() {
+  SAFEDEPS_READING="$1"
+  [[ "${GUARD_IS_CODEX}" == true ]] || guard_reading_inert "$1"
   if guard_command_has_npm_install "${COMMAND}"; then
     NPM_TRACE_WANTED=true
     [[ -n "${ATTRIBUTION}" ]] || ATTRIBUTION=$(guard_npm_writers_unattributable "${COMMAND}")
@@ -4602,6 +4612,7 @@ if [[ "${GUARD_ANY_INSTALL}" != true ]]; then
   exit 0
 fi
 
+jq -e 'has("turn_id")' <<< "${INPUT}" >/dev/null 2>&1 && GUARD_IS_CODEX=true
 for guard_reading in ${GUARD_READING_SET}; do
   guard_reading_facts "${guard_reading}"
 done
@@ -5000,6 +5011,16 @@ fi
 # so it stands only when every reading made the same one; otherwise no single
 # text is inert for every shell, and the command is UNDECIDED (I2, I3: zsh ran
 # an `npm ci` that bash read as quoted text, with no flag and no record).
+for guard_reading in ${GUARD_READING_SET}; do
+  guard_reading_effects "${guard_reading}"
+done
+# These read text the readings above already lexed, so a place where the shells
+# differ cannot first appear here. If one does, the other readings were never
+# judged, and the command is settled as unread rather than half judged.
+if [[ "${GUARD_READING_SET}" == bash ]] && guard_readings_diverge; then
+  log_advisory "pre-guard: a place where the shells read differently was first met while deciding the inert rewrite; the zsh and dash readings were not judged. Command: ${COMMAND}"
+  guard_mark_reading_failed
+fi
 UPDATED_COMMAND=""
 INERT_DOWNGRADED=false
 if [[ "${GUARD_IS_CODEX}" != true ]]; then
