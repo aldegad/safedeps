@@ -74,6 +74,16 @@ reset_alt() {
   printf '{"name":"alt-sub","version":"1.0.0"}\n' > "${ALT}/sub/package.json"
 }
 
+# The same fixtures under a directory named like a UUID. npm 11.19.0 masks anything
+# shaped like one in what it prints, the directory it names for an install
+# included, so the pre-guard has to read npm's answer through the mask
+# (lib/npm/ask.sh). An agent's scratch directory is often under a session UUID.
+UUID_DIR="${tmp_root}/3f944c98-33ca-4b92-9f2e-aab54047d1d6"
+UUID_OTHER="${tmp_root}/aab54047-33ca-4b92-9f2e-3f944c98aab5"
+mkdir -p "${UUID_DIR}" "${UUID_OTHER}"
+new_uuidproject() { CASE_PARENT="${UUID_DIR}"; new_project; CASE_PARENT=""; }
+new_uuidworkspace() { CASE_PARENT="${UUID_DIR}"; new_workspace; CASE_PARENT=""; }
+
 post_ungated_lines() { grep 'post-verify UNGATED' "${CASE_HOME}/advisory.log" 2>/dev/null || true; }
 
 # One row. <id>|<fixture>|<cwd>|<engine>|<expect>|<command>
@@ -234,6 +244,17 @@ E2|project|.|claude|ungated-trace|npm install sd-nope
 X2|project|.|claude|ungated-trace|@ENVCDPATH@ cd sub && npm install sd-approved
 # A bare install with no name, sent elsewhere: recorded whatever it names.
 X3|project|.|claude|ungated-trace|printf '{"name":"sub","version":"1.0.0","dependencies":{"sd-victim":"1.0.0"}}' > sub/package.json; command cd sub; npm install
+# Under a directory npm masks in its answers: the same installs, read where
+# npm put them. Before the mask was read, every one of these was denied or read
+# in a directory that does not exist.
+U1|uuidproject|.|claude|quiet|npm install sd-approved
+U2|uuidproject|src|claude|quiet|npm install sd-approved
+U3|uuidproject|.|claude|quiet|cd sub && npm install sd-approved
+U4|uuidproject|.|claude|rollback|npm install sd-victim
+U5|uuidproject|src|claude|rollback|npm install sd-victim
+U6|uuidproject|.|codex|rollback|cd sub && npm install sd-victim
+U7|uuidworkspace|packages/a|claude|quiet|npm install sd-approved
+U8|uuidworkspace|packages/a|claude|rollback|npm install sd-victim
 ROWS
 claude_silent=0
 for row in "${SILENT_ROWS[@]+"${SILENT_ROWS[@]}"}"; do
@@ -265,6 +286,49 @@ do
   grep -qF "no install trace in ${where}" <<< "${CASE_POST}" \
     || note_failure "the user is told, on Claude Code, that nothing was verified or rebuilt: ${form} (post: ${CASE_POST:-<quiet>})"
 done
+
+# --- 1c. Through npm's mask, to somewhere else ---------------------------------------------
+# The U rows read the mask only where npm masks, so that is measured first. An
+# npm that does not mask leaves them ordinary rows, and the line below says so.
+npm_masks=no
+[[ "$(cd "${UUID_DIR}" && npm prefix 2>/dev/null)" != *'***'* ]] || npm_masks=yes
+
+# A masked answer is read as the one directory from the cwd up that reads the
+# same. A `--prefix` elsewhere that reads the same as one of them sends the gate
+# to the wrong directory, and one that reads the same as none is `?`. Either
+# way the gate finds no trace of the install where it looks, and records it. On
+# an npm that does not mask, the gate reads where npm said and rolls it back.
+new_uuidproject
+leaf="${CASE_PROJECT##*/}"
+mkdir -p "${UUID_OTHER}/${leaf}" "${UUID_OTHER}/elsewhere"
+printf '{"name":"other","version":"1.0.0"}\n' > "${UUID_OTHER}/${leaf}/package.json"
+printf '{"name":"elsewhere","version":"1.0.0"}\n' > "${UUID_OTHER}/elsewhere/package.json"
+for carrier in \
+  "alike|npm install --prefix ../../${UUID_OTHER##*/}/${leaf} sd-victim|${UUID_OTHER}/${leaf}" \
+  "unlike|npm install --prefix ${UUID_OTHER}/elsewhere sd-victim|${UUID_OTHER}/elsewhere"
+do
+  IFS='|' read -r kind form landed <<< "${carrier}"
+  new_safedeps_home
+  rm -rf "${landed}/node_modules" "${landed}/package-lock.json"
+  : > "${MARKS}"
+  run_install "${form}"
+  [[ -z "${CASE_PRE_DENY}" ]] || note_failure "masked ${kind}: the gate lets the command through (deny: ${CASE_PRE_DENY:0:160})"
+  victim_ran && note_failure "masked ${kind}: no script of sd-victim runs ($(grep -c '^sd-victim' "${MARKS}"))"
+  if [[ "${npm_masks}" == no ]]; then
+    # npm said where, unmasked, so the gate read it there.
+    rolled_back && [[ ! -e "${landed}/node_modules/sd-victim" ]] \
+      || note_failure "masked ${kind}, on an npm that does not mask: rolled back where npm installed (post: ${CASE_POST:-<quiet>})"
+    continue
+  fi
+  [[ -e "${landed}/node_modules/sd-victim" ]] \
+    || note_failure "masked ${kind}: npm installed where the command named (${landed}), or this row tests nothing"
+  ungated || note_failure "masked ${kind}: an install that landed outside the directory the gate read is recorded UNGATED (post: ${CASE_POST:-<quiet>})"
+  if [[ "${kind}" == unlike ]]; then
+    grep -qF 'npm masked part of the directory it named' "${CASE_HOME}/advisory.log" \
+      || note_failure "masked ${kind}: the record says npm masked the directory it named ($(grep 'pre-guard' "${CASE_HOME}/advisory.log" | cut -f2 | tail -n 1 | head -c 200))"
+  fi
+done
+pass "under a UUID-named directory (npm masks it: ${npm_masks}), a --prefix elsewhere is recorded or rolled back whether or not it reads the same as the cwd"
 
 # --- 2. No false positives: installs that installed something left a trace ----------------
 # The design judgment's oracle: every form that installed anything rewrote a

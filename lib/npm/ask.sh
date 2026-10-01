@@ -128,14 +128,53 @@ safedeps_npm_ask_error() {
   printf '%s' "${line:-no output}"
 }
 
+# The one directory from <dir> up, as a physical path, that reads as <masked>
+# when each `***` in it stands for a hidden part of one path segment. Prints
+# nothing when none does, or when more than one does.
+#
+# Only the `***` is read as a wildcard, so this holds whatever npm masks: the
+# whole of a UUID, or what follows a token's `npm_`. Every other character is
+# matched as itself. It runs no external command.
+safedeps_npm_unmask() {
+  local masked="$1" dir="$2" re="" c here found="" count=0 i=0
+  while (( i < ${#masked} )); do
+    if [[ "${masked:i:3}" == '***' ]]; then
+      re+='[^/]+'
+      i=$(( i + 3 ))
+      continue
+    fi
+    c="${masked:i:1}"
+    case "${c}" in
+      '.'|'['|'$'|'('|')'|'|'|'*'|'+'|'?'|'{'|"\\"|'^') re+="\\${c}" ;;
+      ']') re+='[]]' ;;
+      '}') re+='[}]' ;;
+      *) re+="${c}" ;;
+    esac
+    i=$(( i + 1 ))
+  done
+  here=$(cd "${dir}" 2>/dev/null && pwd -P) || return 0
+  while :; do
+    if [[ "${here}" =~ ^${re}$ ]]; then
+      found="${here}"
+      count=$(( count + 1 ))
+    fi
+    [[ "${here}" != / ]] || break
+    here="${here%/*}"
+    here="${here:-/}"
+  done
+  [[ "${count}" != 1 ]] || printf '%s' "${found}"
+}
+
 # Where `npm <args>` installs when it runs in <dir>, asked of npm.
 #
 #   <dir>         the local prefix, a physical path: npm installs there and
 #                 records it in that directory's lockfiles.
 #   global<TAB><local prefix>
 #                 npm installs in its global prefix, which no lockfile records.
-#                 The local prefix is where the project .npmrc is read from.
-#   ?<TAB><why>   npm could not be asked, or did not answer.
+#                 The local prefix is where the project .npmrc is read from,
+#                 and empty when npm masked it beyond reading (below).
+#   ?<TAB><why>   npm could not be asked, did not answer, or masked the
+#                 directory it named beyond reading.
 #
 # Called as `<dir> <until> <npm> <env words> -- <args>`. The arguments are the
 # install's own; the words before `--` go to env(1) and <npm> is the npm word
@@ -228,8 +267,40 @@ safedeps_npm_install_target() {
       "${prefix:-<empty>}" "${root:-<empty>}"
     return 0
   fi
-  if [[ "${root}" != "${prefix%/}/node_modules" ]]; then
+  # npm masks what it prints. npm 11.19.0 sends every line of output through
+  # @npmcli/redact, which writes `***` over anything shaped like a UUID or an
+  # npm token, paths included, and no setting turns it off (read in its
+  # lib/utils/format.js). Measured with that npm under
+  # .../3f944c98-33ca-4b92-9f2e-aab54047d1d6/project: `npm prefix` printed
+  # .../***/project, and the gate went looking for a project there and denied
+  # an approved install. An agent's scratch directory is often under a session
+  # UUID.
+  #
+  # The masked answer is not a path, so it is never used as one. The local
+  # prefix npm finds by itself is the cwd or a directory above it, so the
+  # directories from <dir> up are the candidates, and the answer stands for one
+  # of them only when exactly one reads the same with each `***` taken as a
+  # hidden part of a single path segment. Comparing the two masked answers for
+  # local or global is still sound: the mask is the same over the shared part.
+  # Where no candidate reads the same (a masked `--prefix` anywhere but the
+  # cwd and above), npm has not said where, and the answer is `?`. A `--prefix`
+  # elsewhere that reads the same as a candidate sends the gate to the wrong
+  # directory, which then shows no trace of the install and is recorded
+  # UNGATED (scripts/test/effect-trace-grid.sh, section 1c).
+  local masked=""
+  if [[ "${prefix}" == *'***'* ]]; then
+    masked="${prefix}"
+    prefix=$(safedeps_npm_unmask "${masked}" "${dir}")
+  fi
+  if [[ "${root}" != "${masked:-${prefix%/}}/node_modules" ]]; then
+    # Global. The local prefix only says which project .npmrc to read. A
+    # masked one that no candidate reads the same as is left empty.
     printf 'global\t%s\n' "${prefix}"
+    return 0
+  fi
+  if [[ -n "${masked}" && -z "${prefix}" ]]; then
+    printf '?\tnpm masked part of the directory it named (%s), the way it masks anything shaped like a UUID or a token, and no directory from %s up reads the same, so safedeps cannot tell where this install lands\n' \
+      "${masked}" "${dir}"
     return 0
   fi
   # A `--prefix` that does not exist yet is created by the install. npm's path

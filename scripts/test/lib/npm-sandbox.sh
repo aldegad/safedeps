@@ -171,8 +171,11 @@ export SAFEDEPS_OSV_API_URL="${osv}/osv/v1/query" SAFEDEPS_OSV_BATCH_API_URL="${
 #
 # The project has `sub`, a sub-project with a package.json of its own, and
 # `src`, a plain directory without one.
+#
+# A fixture is made in CASE_PARENT when a battery sets it, and in the sandbox
+# root otherwise.
 new_project() {
-  CASE_PROJECT=$(mktemp -d "${tmp_root}/project.XXXXXX")
+  CASE_PROJECT=$(mktemp -d "${CASE_PARENT:-${tmp_root}}/project.XXXXXX")
   CASE_PROJECT=$(cd "${CASE_PROJECT}" && pwd -P)
   CASE_CWD="${CASE_PROJECT}"
   mkdir -p "${CASE_PROJECT}/sub" "${CASE_PROJECT}/src"
@@ -195,7 +198,7 @@ new_safedeps_home() {
 # <workspaces> replaces the declaration.
 new_workspace() {
   local workspaces="${1:-[\"packages/*\"]}"
-  CASE_PROJECT=$(mktemp -d "${tmp_root}/workspace.XXXXXX")
+  CASE_PROJECT=$(mktemp -d "${CASE_PARENT:-${tmp_root}}/workspace.XXXXXX")
   CASE_PROJECT=$(cd "${CASE_PROJECT}" && pwd -P)
   CASE_CWD="${CASE_PROJECT}"
   mkdir -p "${CASE_PROJECT}/packages/a"
