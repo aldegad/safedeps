@@ -152,8 +152,10 @@ if (( ${#failed[@]} == 0 )); then
   exit 0
 fi
 printf '# FAILED: %s\n' "${failed[*]}"
+# The tails are indented, so `ok` and `not ok` counted over the whole output
+# still add up to the logs above rather than counting these lines twice.
 for name in "${failed[@]}"; do
   printf '\n# ---- tail of %s (%s) ----\n' "${name}" "${log_dir}/${name}.log"
-  tail -n 25 "${log_dir}/${name}.log" 2>/dev/null
+  tail -n 25 "${log_dir}/${name}.log" 2>/dev/null | sed 's/^/  | /'
 done
 exit 1
