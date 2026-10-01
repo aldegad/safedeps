@@ -475,7 +475,7 @@ pass "a failed sed or tr in a spec reader denies the install as UNDECIDED (${#se
 # which reads them from command_statements, and cuts them into pieces in one
 # more awk. Either failing left no statements, no statements read as no spec,
 # and an unapproved pinned install would pass as if it named nothing.
-for reader in command_statements extract_pieces; do
+for reader in command_statements extract_pieces shell_dequote; do
   mkdir -p "${fail_tmp}/statements-${reader}"
   cat > "${fail_tmp}/statements-${reader}/awk" <<SHIM
 #!/usr/bin/env bash
@@ -497,6 +497,6 @@ SHIM
       || fail "a failed ${reader} is recorded in advisory.log: ${failing_command}"
   done
 done
-pass "a failed statement reader denies the install as UNDECIDED (command_statements, extract_pieces, each against a working control)"
+pass "a failed statement reader denies the install as UNDECIDED (command_statements, extract_pieces, shell_dequote, each against a working control)"
 
 printf 'scan-contract: all checks passed\n'

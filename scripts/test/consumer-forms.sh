@@ -835,6 +835,31 @@ expect_prescription 'npm evil@1.0.0;' 'npm exec --color always evil@1.0.0'
 expect_prescription 'no-deny;' 'npx --yes false evil@1.0.0'
 pass "a runner's own options are read as that runner reads them, so the prescription names the package it runs"
 
+# Outside quotes the shell drops a backslash and keeps the byte after it, so
+# `ev\il==6.6.6` installs evil 6.6.6. The readers left the backslash in: the pip
+# form read as an unpinned operand and was never checked, and the others
+# prescribed an identity no advisory names, which approves and then lets the
+# real package through. A row with the old misread approved asserts that it
+# still prescribes the package.
+for escaped in \
+  'pip install ev\il==6.6.6' \
+  'pip install evil\=\=6.6.6' \
+  'uvx ev\il==6.6.6'
+do
+  expect_deny "the escaped install ${escaped}" "${escaped}"
+done
+expect_prescription 'pypi evil@6.6.6;' 'pip install ev\il==6.6.6'
+expect_prescription 'npm evil@6.6.6;' 'pnpm add ev\il@6.6.6'
+expect_prescription 'npm evil@6.6.6;' 'pnpm add ev\il@6.6.6' npm il 6.6.6
+expect_prescription 'npm evil@6.6.6;' 'npx ev\il@6.6.6' npm il 6.6.6
+expect_prescription 'rubygems rake@13.0.0;' 'gem install ra\ke -v 13.0.0'
+expect_prescription 'rubygems rake@13.0.0;' 'gem install ra\ke -v 13.0.0' rubygems 'ra\ke' 13.0.0
+expect_prescription 'crates.io ripgrep@13.0.0;' 'cargo install rip\grep --version 13.0.0'
+# Inside quotes the shell keeps these backslashes, so the operand keeps them.
+expect_prescription 'no-deny;' "pip install 'ev\\il==6.6.6'"
+expect_prescription 'no-deny;' 'echo ev\il==6.6.6'
+pass "a backslash outside quotes is read as the shell reads it, so the escaped name is the package checked"
+
 # --- 11. The UNGATED record names each operand the gate did not check ---------
 # The record used to be a second parser: it read each statement on its own and
 # asked the extractor "was this package pinned?" by name, so a pin on one
@@ -1012,6 +1037,9 @@ operand_rows=(
   $'pypi:requests\tpip install requests >/dev/null'
   $'npm:cowsay\tnpx >/dev/null cowsay'
   $'\tpnpm add left-pad@1.0.0 >/dev/null'
+  # An escaped byte is a plain byte; an escaped name is the name.
+  $'npm:left-pad\tpnpm add left\\-pad'
+  $'\tpip install ev\\il==6.6.6'
   # A quoted specifier starts with a quote, so it is not a redirection.
   $'pypi:requests>=3\tpip install \'requests>=3\''
   # Controls: another name, and the npm CLI statement exempt on its own.

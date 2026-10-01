@@ -1953,7 +1953,7 @@ guard_runner_operands() {
   # it yields no operand, and no operand reads as nothing to check.
   local text after head family names adds takes want tok key nopt last="" match option
   local -a toks=()
-  text=$(printf '%s' "$1" | tr -d "\"'") || guard_mark_scan_failed
+  text=$(printf '%s\n' "$1" | guard_shell_dequote) || guard_mark_scan_failed
   # The runner itself is kept, ahead of \037, to choose the table. The first
   # line is taken here rather than by `head -n1`, which can close the pipe on a
   # sed that still has lines to write, and pipefail reads that SIGPIPE as a
@@ -2468,6 +2468,46 @@ guard_mark_scan_failed() {
   [[ -z "${SAFEDEPS_SCAN_MARK:-}" ]] || printf 'failed\n' >> "${SAFEDEPS_SCAN_MARK}"
 }
 
+# Text with its quoting removed the way the shell removes it, one line at a
+# time. Outside quotes a backslash vanishes and leaves the next byte as a plain
+# character; inside double quotes it does that only before `$`, a backquote,
+# `"` or a backslash; inside single quotes it is just a backslash. The quote
+# characters themselves go.
+#
+# The readers used to delete the quote characters and leave every backslash,
+# so `pip install ev\il==6.6.6`, which the shell runs as evil==6.6.6, read as
+# the unpinned operand `ev\il==6.6.6`: recorded, and never checked. Elsewhere
+# the backslash cut the name: `pnpm add ev\il@6.6.6` prescribed
+# `check npm il@6.6.6`, and `gem install ra\ke -v 13.0.0` prescribed
+# `ra\ke@13.0.0`, identities no advisory names, which approve and then let
+# the real package through. Blanks a quote held become plain blanks here, so a
+# quoted operand with a blank still splits in two, as it did before.
+guard_shell_dequote() {
+  LC_ALL=C awk '
+    # safedeps:shell_dequote (scripts/test/scan-contract.sh keys on this line)
+    {
+      out = ""; q = 0
+      n = split($0, c, "")
+      for (i = 1; i <= n; i++) {
+        ch = c[i]
+        if (q == 0) {
+          if (ch == "\\") { if (i < n) { i++; out = out c[i] }; continue }
+          if (ch == "\047") { q = 1; continue }
+          if (ch == "\"") { q = 2; continue }
+          out = out ch
+          continue
+        }
+        if (q == 1) { if (ch == "\047") q = 0; else out = out ch; continue }
+        if (ch == "\\" && i < n && (c[i + 1] == "$" || c[i + 1] == "`" || c[i + 1] == "\"" || c[i + 1] == "\\")) {
+          i++; out = out c[i]; continue
+        }
+        if (ch == "\"") { q = 0; continue }
+        out = out ch
+      }
+      print out
+    }'
+}
+
 # A statement without its redirections. A redirection belongs to the shell,
 # and so does its target: in `pnpm add left-pad >/dev/null` the shell opens
 # /dev/null and pnpm never sees it. Every reader of the statement used to see
@@ -2502,7 +2542,7 @@ guard_extract_statement_text() {
   if [[ "${runner}" == true ]]; then
     text=$(guard_runner_operands "${seg}")
   else
-    text=$(printf '%s' "${seg}" | tr -d "\"'" | tr '(){}' '    ') || guard_mark_scan_failed
+    text=$(printf '%s\n' "${seg}" | guard_shell_dequote | tr '(){}' '    ') || guard_mark_scan_failed
   fi
   if [[ "${eco}" == "pypi" ]]; then
     text=$(printf '%s' "${text}" | sed -E 's/\[[^] ]*\]//g') || guard_mark_scan_failed
