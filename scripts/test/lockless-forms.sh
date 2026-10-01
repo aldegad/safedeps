@@ -224,6 +224,60 @@ new_workspace() {
   new_safedeps_home
 }
 
+# A workspace whose member packages/a is a symlink to ../real/a. npm's glob
+# finds packages/a and compares that path, unresolved, with the physical
+# directory an install runs in, so from real/a npm installs in real/a, not at
+# the root.
+new_symws() {
+  CASE_PROJECT=$(mktemp -d "${tmp_root}/symws.XXXXXX")
+  CASE_PROJECT=$(cd "${CASE_PROJECT}" && pwd -P)
+  CASE_CWD="${CASE_PROJECT}"
+  mkdir -p "${CASE_PROJECT}/packages" "${CASE_PROJECT}/real/a"
+  printf '{"name":"root","version":"1.0.0","private":true,"workspaces":["packages/*"]}\n' > "${CASE_PROJECT}/package.json"
+  printf '{"name":"a","version":"1.0.0"}\n' > "${CASE_PROJECT}/real/a/package.json"
+  ln -s ../real/a "${CASE_PROJECT}/packages/a"
+  (cd "${CASE_PROJECT}" && npm install --ignore-scripts >/dev/null 2>&1) || fail "the fixture symlinked workspace installs"
+  new_safedeps_home
+}
+
+# A workspace that names its members with a negated pattern, which only npm's
+# own glob reads.
+new_negws() { new_workspace '["packages/*","!packages/b"]'; }
+
+# A PATH on which `npm` is a stub: <behaviour> `fail` exits 7 with an npm-style
+# error, `hang` never answers. <commands> are the npm commands it stubs, `|`
+# separated; anything else goes to the real npm. `missing` is a PATH with every
+# tool but npm. Stubs exec, so a deadline that kills the pid kills the stub.
+stub_npm_path() {
+  local behaviour="$1" commands="${2:-}" dir entry real
+  dir=$(mktemp -d "${tmp_root}/stub.XXXXXX")
+  real=$(command -v npm)
+  if [[ "${behaviour}" == missing ]]; then
+    local IFS=:
+    for entry in ${PATH}; do
+      for real in "${entry}"/*; do
+        [[ -x "${real}" && "${real##*/}" != npm && ! -e "${dir}/${real##*/}" ]] || continue
+        ln -s "${real}" "${dir}/${real##*/}"
+      done
+    done
+    printf '%s' "${dir}"
+    return 0
+  fi
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'case "$1" in\n'
+    printf '  %s)\n' "${commands}"
+    case "${behaviour}" in
+      fail) printf "    printf 'npm error code EFAKE\\nnpm error the stub refused\\n' >&2; exit 7 ;;\n" ;;
+      hang) printf "    exec sleep 60 ;;\n" ;;
+    esac
+    printf 'esac\n'
+    printf 'exec %q "$@"\n' "${real}"
+  } > "${dir}/npm"
+  chmod +x "${dir}/npm"
+  printf '%s:%s' "${dir}" "${PATH}"
+}
+
 run_install() {
   local command="$1" engine="${2:-claude}" between="${3:-}" payload pre exec_command marks_before
   rm -rf "${tmp_root}/global"
@@ -233,7 +287,7 @@ run_install() {
   else
     payload=$(jq -nc --arg c "${command}" --arg d "${CASE_CWD}" '{tool_name:"Bash",tool_input:{command:$c},cwd:$d}')
   fi
-  pre=$(printf '%s' "${payload}" | SAFEDEPS_HOME="${CASE_HOME}" scripts/safedeps-hook-entry.sh pre 2>/dev/null)
+  pre=$(printf '%s' "${payload}" | PATH="${CASE_PRE_PATH:-${PATH}}" SAFEDEPS_HOME="${CASE_HOME}" scripts/safedeps-hook-entry.sh pre 2>/dev/null)
   if [[ -n "${pre}" && "$(jq -r '.hookSpecificOutput.permissionDecision // empty' <<< "${pre}")" == deny ]]; then
     fail "the gate lets the install through to the effect gate: ${command}"
   fi
@@ -250,7 +304,7 @@ run_install() {
 
   marks_before=$(wc -l < "${MARKS}" | tr -d ' ')
   payload=$(jq -nc --arg c "${exec_command}" --arg d "${CASE_CWD}" '{tool_name:"Bash",tool_input:{command:$c},cwd:$d}')
-  CASE_POST=$(printf '%s' "${payload}" | SAFEDEPS_HOME="${CASE_HOME}" scripts/safedeps-hook-entry.sh post 2>/dev/null)
+  CASE_POST=$(printf '%s' "${payload}" | PATH="${CASE_POST_PATH:-${PATH}}" SAFEDEPS_HOME="${CASE_HOME}" scripts/safedeps-hook-entry.sh post 2>/dev/null)
   CASE_RAN=$(tail -n +"$((marks_before + 1))" "${MARKS}")
 }
 
@@ -296,41 +350,68 @@ pass "installs that leave package-lock.json unchanged, or land in a sub-project,
 
 # npm does not install in the directory it runs in. It walks up to the nearest
 # package.json or node_modules, and from a workspace member on to the root that
-# declares it. Each form below wrote the lockfiles of a directory above the one
-# the command names, while the gate read the named one and confirmed it clean:
-# the unapproved package stayed on disk and nothing was recorded. `<cwd>|<form>`,
-# where <cwd> is the hook's cwd relative to the project.
+# declares it. Each form below wrote the lockfiles of another directory than the
+# one the command names, while the gate read the named one and confirmed it
+# clean: the unapproved package stayed on disk and nothing was recorded.
+# `<fixture>|<cwd>|<engine>|<form>`, where <cwd> is the hook's cwd relative to
+# the project.
+#
+# The gate asks npm where (lib/npm/ask.sh). The rows after the first six are
+# where a copy of npm's rules in bash disagreed with npm: a member reached
+# through a symlink, where npm installs in real/a and the copy climbed to the
+# root (validator round 2, F1), and the spellings that turn workspaces off.
 for carrier in \
-  "project|.|cd src && npm install sd-victim" \
-  "project|.|cd src; npm install sd-victim --no-save" \
-  "project|src|npm install sd-victim" \
-  "workspace|.|cd packages/a && npm install sd-victim" \
-  "workspace|packages/a|npm install sd-victim" \
-  "workspace|packages/a|npm install sd-victim --no-save"
+  "project|.|claude|cd src && npm install sd-victim" \
+  "project|.|claude|cd src; npm install sd-victim --no-save" \
+  "project|src|claude|npm install sd-victim" \
+  "workspace|.|claude|cd packages/a && npm install sd-victim" \
+  "workspace|packages/a|claude|npm install sd-victim" \
+  "workspace|packages/a|claude|npm install sd-victim --no-save" \
+  "negws|.|claude|cd packages/a && npm install sd-victim" \
+  "symws|real/a|claude|npm install sd-victim" \
+  "symws|.|claude|cd packages/a && npm install sd-victim" \
+  "symws|.|claude|cd real/a && npm install sd-victim" \
+  "symws|packages/a|claude|npm install sd-victim --no-save" \
+  "symws|real/a|codex|npm install sd-victim" \
+  "workspace|packages/a|claude|npm install sd-victim --no-workspaces" \
+  "workspace|.|claude|cd packages/a && npm install sd-victim --workspaces false" \
+  "workspace|.|claude|cd packages/a && npm install sd-victim --workspaces=false"
 do
-  IFS='|' read -r fixture cwd form <<< "${carrier}"
+  IFS='|' read -r fixture cwd engine form <<< "${carrier}"
   "new_${fixture}"
   CASE_CWD="${CASE_PROJECT}/${cwd}"
   : > "${MARKS}"
-  run_install "${form}"
+  run_install "${form}" "${engine}"
   rolled_back || fail "the effect gate reads the directory npm installed in and rolls back: ${carrier} (post: ${CASE_POST:-<quiet>})"
-  victim_ran && fail "no script of the unverified package runs: ${carrier}"
+  ungated && fail "an install the effect gate reads is not recorded UNGATED: ${carrier}"
+  # Codex has no inert install, so there the scripts ran during the install.
+  [[ "${engine}" == codex ]] || ! victim_ran || fail "no script of the unverified package runs: ${carrier}"
   [[ -z "$(cd "${CASE_PROJECT}" && find . -path '*/node_modules/sd-victim' -print 2>/dev/null)" ]] \
     || fail "the rollback removes the unapproved package from disk: ${carrier}"
   grep -q 'packages@' <<< "${CASE_POST}" && fail "a workspace member is not read as a package: ${carrier} (post: ${CASE_POST})"
 done
-pass "an install from a directory without a package.json, or from a workspace member, is read where npm put it"
+pass "an install from a directory without a package.json, a workspace member, or a symlinked member is read where npm put it"
 
-# Where the gate cannot decide which directory npm installs in, it says so. A
-# negated workspace pattern is a glob this gate does not evaluate.
-new_workspace '["packages/*","!packages/b"]'
-: > "${MARKS}"
-run_install "cd packages/a && npm install sd-victim"
-ungated || fail "an install whose workspace root cannot be decided is recorded UNGATED"
-grep -q 'excludes workspaces with a negated pattern, so safedeps cannot tell where npm records this install' \
-  "${CASE_HOME}/advisory.log" || fail "the record says why the install directory was not decided"
-victim_ran && fail "no script of the unverified package runs when the install directory is undecided"
-pass "an install whose workspace root cannot be decided is recorded UNGATED, with the reason"
+# Where npm cannot be asked, or does not answer, the gate does not fall back to
+# a reading of its own: the install is recorded UNGATED with the reason. The
+# stub stands in for npm in the PreToolUse hook only; the install itself runs
+# the real npm. `<stub>|<commands>|<the reason the record gives>`.
+for carrier in \
+  "fail|prefix|root|npm prefix failed (exit 7: code EFAKE)" \
+  "hang|prefix|root|npm did not say where this install lands within" \
+  "missing|||npm is not on the PATH this hook runs with"
+do
+  IFS='|' read -r behaviour cmd1 cmd2 reason <<< "${carrier}"
+  new_project
+  : > "${MARKS}"
+  CASE_PRE_PATH=$(stub_npm_path "${behaviour}" "${cmd1}${cmd2:+|${cmd2}}")
+  run_install "npm install sd-victim"
+  CASE_PRE_PATH=""
+  ungated || fail "an install npm could not place is recorded UNGATED: ${behaviour}"
+  grep -qF "${reason}" "${CASE_HOME}/advisory.log" || fail "the record says why npm could not place it: ${behaviour} ($(grep pre-guard "${CASE_HOME}/advisory.log" | tail -2))"
+  victim_ran && fail "no script of the unverified package runs when npm could not place the install: ${behaviour}"
+done
+pass "an install npm could not be asked about, or did not answer for, is recorded UNGATED with the reason"
 
 # --- 2. Installs no effect gate reads are recorded -----------------------------------
 # A global install writes no lockfile anywhere, so there is nothing to read.
@@ -503,6 +584,22 @@ run_install "npm install sd-approved" claude drop_hidden_lockfile
 grep -q 'npm rebuild was not run' <<< "${CASE_POST}" || fail "the skipped rebuild is reported (post: ${CASE_POST:-<quiet>})"
 pass "a node_modules with no hidden lockfile is not rebuilt, and the user is told"
 
+# Which packages a rebuild runs over is asked of npm (`npm query '*'`). When
+# npm does not answer, the tree is not known, so the rebuild is skipped rather
+# than run over a tree nobody compared with the record. The stub stands in for
+# npm's query in the PostToolUse hook only.
+for behaviour in fail hang; do
+  new_project
+  : > "${MARKS}"
+  CASE_POST_PATH=$(stub_npm_path "${behaviour}" query)
+  run_install "npm install sd-approved"
+  CASE_POST_PATH=""
+  [[ -z "${CASE_RAN}" ]] || fail "npm rebuild does not run when npm did not say what it would rebuild: ${behaviour} (${CASE_RAN})"
+  grep -q 'npm rebuild was not run: safedeps asked npm which packages it would rebuild and got no answer' <<< "${CASE_POST}" \
+    || fail "the skipped rebuild says npm did not answer: ${behaviour} (post: ${CASE_POST:-<quiet>})"
+done
+pass "when npm does not say what a rebuild would run over, the rebuild is skipped and the user is told"
+
 # --- 6. Regression: approved installs still install, verify and rebuild -------------------
 # `<fixture>|<cwd>|<form>|<where npm installs>`, directories relative to the
 # project.
@@ -516,7 +613,12 @@ for carrier in \
   "project|src|npm install sd-approved|." \
   "workspace|.|cd packages/a && npm install sd-approved|." \
   "workspace|packages/a|npm install sd-approved|." \
-  "workspace|.|npm install sd-approved -w packages/a|."
+  "workspace|.|npm install sd-approved -w packages/a|." \
+  "workspace|packages/a|npm install sd-approved --no-workspaces|packages/a" \
+  "symws|real/a|npm install sd-approved|real/a" \
+  "symws|.|cd packages/a && npm install sd-approved|real/a" \
+  "symws|.|cd real/a && npm install sd-approved|real/a" \
+  "symws|packages/a|npm install sd-approved --no-save|real/a"
 do
   IFS='|' read -r fixture cwd form where <<< "${carrier}"
   "new_${fixture}"
@@ -530,7 +632,7 @@ do
   grep -q "	${where}/node_modules/sd-approved\$" <<< "${CASE_RAN}" \
     || fail "the rebuild runs where the install landed: ${carrier} (${CASE_RAN})"
 done
-pass "approved installs, including --no-save, sub-project, subdirectory and workspace forms, confirm quietly and rebuild where they landed"
+pass "approved installs, including --no-save, sub-project, subdirectory, workspace and symlinked-member forms, confirm quietly and rebuild where they landed"
 
 # --- 7. A rollback does not run scripts it did not verify -------------------------------
 # The rollback restores node_modules from the confirmed snapshot. With a
@@ -602,6 +704,42 @@ grep -q 'install scripts were not run' <<< "${CASE_POST}" \
   && fail "the rollback reinstalls from the restored lockfile, not by resolving again (post: ${CASE_POST})"
 victim_ran && fail "no script of the unverified package runs in a workspace rollback"
 pass "an unapproved workspace install is rolled back from disk, member manifest included, and no member is read as a package"
+
+# --- 9. A `file:` dependency's own node_modules is rebuilt with the project -----------------
+# `npm rebuild` follows the link to a `file:` dependency and rebuilds what is
+# in the target's node_modules, which no lockfile of the project records. The
+# rebuild precondition walked the project's node_modules in bash and stopped at
+# the link (validator round 2, F2): an approved install in the project then ran
+# the scripts of a package sitting unrecorded in the linked library.
+#
+# Step 1 puts sd-victim in lib/node_modules off the record: an .npmrc there
+# keeps npm from writing it down, so the install is recorded UNGATED and its
+# rebuild skipped. Step 2 is an approved install in the project that links lib.
+FILELINK_PARENT=$(mktemp -d "${tmp_root}/filelink.XXXXXX")
+FILELINK_PARENT=$(cd "${FILELINK_PARENT}" && pwd -P)
+mkdir -p "${FILELINK_PARENT}/project" "${FILELINK_PARENT}/lib"
+CASE_PROJECT="${FILELINK_PARENT}/project"
+printf '{"name":"lib","version":"1.0.0"}\n' > "${FILELINK_PARENT}/lib/package.json"
+printf '{"name":"proj","version":"1.0.0","dependencies":{"lib":"file:../lib"}}\n' > "${CASE_PROJECT}/package.json"
+(cd "${CASE_PROJECT}" && npm install --ignore-scripts >/dev/null 2>&1) || fail "the fixture project with a file: dependency installs"
+[[ -L "${CASE_PROJECT}/node_modules/lib" ]] || fail "the fixture links lib into the project"
+new_safedeps_home
+printf 'global=0\n' > "${FILELINK_PARENT}/lib/.npmrc"
+CASE_CWD="${FILELINK_PARENT}/lib"
+: > "${MARKS}"
+run_install "npm install sd-victim"
+[[ -e "${FILELINK_PARENT}/lib/node_modules/sd-victim" ]] || fail "the fixture leaves sd-victim in lib/node_modules"
+ungated || fail "the install the .npmrc keeps off the record is recorded UNGATED"
+victim_ran && fail "no script of the unrecorded package runs in step 1 ($(cut -f1,2 "${MARKS}" | paste -sd, -))"
+CASE_CWD="${CASE_PROJECT}"
+: > "${MARKS}"
+# Pinned: section 7 published an unapproved sd-approved@1.0.1.
+run_install "npm install sd-approved@1.0.0"
+[[ -e "${FILELINK_PARENT}/lib/node_modules/sd-victim" ]] || fail "sd-victim is still in the linked library for step 2"
+victim_ran && fail "an approved install in the project runs no script of the package in the linked library ($(cut -f1,3 "${MARKS}" | paste -sd, -))"
+grep -q 'neither lockfile records (../lib/node_modules/sd-victim (sd-victim@1.0.0, not in either lockfile))' <<< "${CASE_POST}" \
+  || fail "the skipped rebuild names the package in the linked library (post: ${CASE_POST:-<quiet>})"
+pass "a package in a file: dependency's node_modules that no lockfile records is not rebuilt, and the warning names it"
 
 # --- the fixture never left the machine ---------------------------------------------------
 [[ -s "${tmp_root}/registry.log" ]] || fail "the installs went through the fixture registry"
