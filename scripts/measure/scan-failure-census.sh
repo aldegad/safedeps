@@ -35,9 +35,23 @@
 #   idle-mode       a failure mode that failed no call in any run. Its rows are
 #                   all "same", which reads as a clean result and is none: the
 #                   flag mode once keyed on a marker the guard did not carry.
+#   unmarked        a clean run called awk with no `safedeps:` marker line. The
+#                   census can fail only what it can name, so a reading without
+#                   a marker is one it never fails, and its silence would read
+#                   as a pass. Twice a hand-kept list of marked readings missed
+#                   one, and the census reported zero over it (caught in review).
+#   unlisted        a clean run called awk with a `safedeps:` marker the shim
+#                   has no kind for: named, and still never failed.
+#   unstable        a failing run that failed no call and still answered
+#                   differently from its clean run. Nothing was injected, so
+#                   the difference is the guard's own: in practice a run over
+#                   1KB that met the self-budget deadline on a loaded machine,
+#                   on one side and not the other. It used to be counted as
+#                   mislabeled or weakened, which names a defect that was not
+#                   there; the case's comparison is void instead, and says so.
 #
 # Exit status is 0 only when weakened, mislabeled, error, after-gate,
-# pending-on-deny and idle-mode are all zero.
+# pending-on-deny, idle-mode, unmarked, unlisted and unstable are all zero.
 #
 # Every payload is judged, never executed. Runs happen with PATH led by an awk
 # shim that fails on cue; the guard keys each reading with a marker line in its
@@ -98,6 +112,9 @@ if [[ "${1:-}" == "--run" ]]; then
   reads=$(cat "${T}/st/reads" 2>/dev/null || printf '0')
   after=$(cat "${T}/st/after-gate" 2>/dev/null || printf '0')
   failed=$(cat "${T}/st/failed" 2>/dev/null || printf '0')
+  unmarked=$(cat "${T}/st/unmarked" 2>/dev/null || printf '0')
+  unlisted=$(cat "${T}/st/unlisted" 2>/dev/null || printf '0')
+  [[ ! -s "${T}/st/strays" ]] || cp "${T}/st/strays" "${WORK}/strays/${n}.${mode}.${k}"
   # Paths under the run's own temp root differ every run; compare them as T.
   # The guard resolves the project directory, so the root appears in its
   # physical spelling too (macOS: /var is /private/var).
@@ -107,8 +124,9 @@ if [[ "${1:-}" == "--run" ]]; then
   pending="${pending//${T_physical}/T}"
   pending="${pending//${T}/T}"
   updated="${updated//$'\n'/\\n}"
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "${n}" "${mode}" "${k}" "${rc}" "${decision}" "${class}" "${updated}" "${pending}" "${reads}" "${after}" "${failed}" \
+    "${unmarked}" "${unlisted}" \
     > "${WORK}/results/${n}.${mode}.${k}"
   rm -rf "${T}"
   exit 0
@@ -129,7 +147,7 @@ done
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/safedeps-census.XXXXXX")
 trap 'rm -rf "${WORK}"' EXIT
-mkdir -p "${WORK}/bin" "${WORK}/cases" "${WORK}/results"
+mkdir -p "${WORK}/bin" "${WORK}/cases" "${WORK}/results" "${WORK}/strays"
 
 real_awk=$(command -v awk)
 # The shim counts the guard's readings and fails the chosen ones. Counting is
@@ -154,6 +172,7 @@ case "\$*" in
   *"safedeps:command_scan_text"*) kind=scan ;;
   *"safedeps:join_line_continuations"*) kind=join ;;
   *"safedeps:install_managers_blanked"*) kind=blank ;;
+  *"safedeps:install_match_spans"*) kind=spans ;;
   *"safedeps:extract_flagged_specs"*) kind=flag ;;
   *"safedeps:operand_specs_ecosystem"*) kind=eco ;;
   *"safedeps:strip_heredoc_bodies"*) kind=strip ;;
@@ -161,7 +180,16 @@ case "\$*" in
   *"safedeps:inert_rewrite_in_place"*) kind=inert ;;
   *"safedeps:inert_offsets"*) kind=offsets ;;
 esac
-[[ -n "\${kind}" ]] || exec "\${real}" "\$@"
+if [[ -z "\${kind}" ]]; then
+  # A call the census cannot name, counted so that it cannot hide: see
+  # "unmarked" and "unlisted" in the header.
+  case "\$*" in
+    *"safedeps:"*) bump unlisted >/dev/null ;;
+    *) bump unmarked >/dev/null ;;
+  esac
+  printf '%s\n' "\$*" | tr '\n' ' ' | cut -c1-160 >> "\${state}/strays"
+  exec "\${real}" "\$@"
+fi
 n=\$(bump reads)
 [[ -z "\${SAFEDEPS_GATE_PASSED:-}" ]] || bump after-gate >/dev/null
 fail_it() { bump failed >/dev/null; exit 2; }
@@ -259,7 +287,7 @@ for n in $(seq 1 "${case_count}"); do
     printf '%s k %s\n' "${n}" "${k}" >> "${WORK}/jobs"
     [[ "${QUICK}" == "true" ]] || printf '%s from-k %s\n' "${n}" "${k}" >> "${WORK}/jobs"
   done
-  for mode in scan-all join-all strip-all reads-all inert-all offsets-all blank-all flag-all eco-all awk-all grep-all sed-all; do
+  for mode in scan-all join-all strip-all reads-all inert-all offsets-all blank-all spans-all flag-all eco-all awk-all grep-all sed-all; do
     printf '%s %s 0\n' "${n}" "${mode}" >> "${WORK}/jobs"
   done
 done
@@ -267,7 +295,7 @@ printf '  failing runs %d\n' "$(wc -l < "${WORK}/jobs" | tr -d ' ')"
 xargs -P "${JOBS}" -L 1 bash "${SELF}" --run "${WORK}" < "${WORK}/jobs"
 
 # --- verdict --------------------------------------------------------------------
-cat "${WORK}/results"/* | awk -F'\t' -v cases="${WORK}/cases" '
+cat "${WORK}/results"/* | awk -F'\t' -v cases="${WORK}/cases" -v strays="${WORK}/strays" '
   $2 == "none" { base[$1] = $5 "\t" $6 "\t" $7 "\t" $8 }
   { row[NR] = $0 }
   END {
@@ -277,16 +305,26 @@ cat "${WORK}/results"/* | awk -F'\t' -v cases="${WORK}/cases" '
       tuple = f[5] "\t" f[6] "\t" f[7] "\t" f[8]
       if (f[10] + 0 > 0) { count["after-gate"]++; bad[++nb] = "after-gate\t" row[i] }
       if (dec == "deny" && f[8] != "-") { count["pending-on-deny"]++; bad[++nb] = "pending-on-deny\t" row[i] }
-      if (mode == "none") { count["clean"]++; continue }
+      if (mode == "none") {
+        count["clean"]++
+        if (f[12] + f[13] > 0) {
+          sf = strays "/" n ".none.0"; first = ""
+          if ((getline first < sf) > 0) close(sf)
+          if (f[12] + 0 > 0) { count["unmarked"]++; bad[++nb] = "unmarked\tcase " n ": " f[12] " awk call(s) with no marker, first: " first }
+          if (f[13] + 0 > 0) { count["unlisted"]++; bad[++nb] = "unlisted\tcase " n ": " f[13] " awk call(s) with a marker the shim has no kind for, first: " first }
+        }
+        continue
+      }
       hits[mode] += f[11]
       split(base[n], b, "\t")
       if (rc != 0) verdict = "error"
       else if (tuple == base[n]) verdict = "same"
+      else if (f[11] + 0 == 0) verdict = "unstable"
       else if (dec == "deny" && cls == "undecided") verdict = "undecided"
       else if (dec == "deny") verdict = "mislabeled"
       else verdict = "weakened"
       count[verdict]++
-      if (verdict == "error" || verdict == "mislabeled" || verdict == "weakened") {
+      if (verdict == "error" || verdict == "mislabeled" || verdict == "weakened" || verdict == "unstable") {
         getline cmd < (cases "/" n ".cmd"); close(cases "/" n ".cmd")
         bad[++nb] = verdict "\t" row[i] "\tclean=" base[n] "\tcmd=" cmd
       }
@@ -295,10 +333,10 @@ cat "${WORK}/results"/* | awk -F'\t' -v cases="${WORK}/cases" '
     # rows: its zero says nothing. That is how a mode keyed on a marker the
     # guard did not carry went unnoticed (caught in review).
     for (m in hits) if (hits[m] == 0) { count["idle-mode"]++; bad[++nb] = "idle-mode\t" m " failed no call in any run" }
-    split("clean same undecided weakened mislabeled error after-gate pending-on-deny idle-mode", order, " ")
-    for (j = 1; j <= 9; j++) printf "  %-16s %d\n", order[j], count[order[j]] + 0
+    split("clean same undecided weakened mislabeled error after-gate pending-on-deny idle-mode unmarked unlisted unstable", order, " ")
+    for (j = 1; j <= 12; j++) printf "  %-16s %d\n", order[j], count[order[j]] + 0
     for (j = 1; j <= nb; j++) print "  " bad[j]
-    fail = count["weakened"] + count["mislabeled"] + count["error"] + count["after-gate"] + count["pending-on-deny"] + count["idle-mode"]
+    fail = count["weakened"] + count["mislabeled"] + count["error"] + count["after-gate"] + count["pending-on-deny"] + count["idle-mode"] + count["unmarked"] + count["unlisted"] + count["unstable"]
     exit (fail > 0 ? 1 : 0)
   }
 '
