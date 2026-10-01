@@ -108,8 +108,8 @@ pass "the lexer program holds no apostrophe"
 
 # A reading is picked in one place. shell_lex takes no reading argument, and
 # the variable it reads is set only by the guard's driver -- the functions that
-# run one reading's detection, judgment and UNGATED walk -- and cleared at the
-# top.
+# run one reading's detection, judgment, UNGATED walk and inert/trace effects
+# -- and cleared at the top.
 # Before this, call sites named their reading, and one that lexed text another
 # reading had produced under a fixed name hid a line zsh runs (form SL1).
 lex_calls=$(grep -nE '(^|[^_[:alnum:]])shell_lex[[:space:]]' "${GUARD}" | grep -vE '^[0-9]+:[[:space:]]*#' | grep -v 'shell_lex() {')
@@ -123,7 +123,7 @@ reading_sets=$(awk '
   /^[[:space:]]*#/ { next }
   /SAFEDEPS_READING=/ {
     if (fn == "" && $0 ~ /^SAFEDEPS_READING=""$/) next
-    if (fn ~ /^guard_reading_(detect|facts|ungated)$/) next
+    if (fn ~ /^guard_reading_(detect|facts|ungated|effects)$/) next
     if (fn == "shell_lex" && $0 !~ /SAFEDEPS_READING=[^:]/) next
     print FILENAME ":" NR ": " $0
   }' "${GUARD}")
