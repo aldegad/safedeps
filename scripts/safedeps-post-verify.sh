@@ -281,18 +281,31 @@ verified_state_file_names() {
   } | sed '/^$/d' | sort -u
 }
 
+# Where the verified state keeps <file>: under the name every snapshot reader
+# uses (safedeps_snapshot_file_name), so a workspace member's
+# `packages/a/package.json` goes in the members tree that restore_monitored_file
+# reads. Copied to `<id>_packages/a/package.json` it failed for want of the
+# directory, and every verified install in a workspace left the baseline where
+# it was (measured, scripts/test/lockless-forms.sh section 6, once the
+# workspace snapshot and this record met in one tree).
+verified_state_path() {
+  printf '%s/%s_%s' "${SNAPSHOT_DIR}" "${VERIFIED_ID}" "$(safedeps_snapshot_file_name "$1")"
+}
+
 # Copies the files, without meta.json. Every reader requires meta.json, so
 # until it is written this is not a snapshot anything can roll back to.
 stage_verified_state() {
-  local file_name
+  local file_name dest
   local list_file="${SNAPSHOT_DIR}/${VERIFIED_ID}_monitored_files.list"
 
   verified_state_file_names > "${list_file}" || return 1
   while IFS= read -r file_name; do
+    dest=$(verified_state_path "${file_name}")
+    [[ "${file_name}" != */* ]] || mkdir -p "${dest%/*}" || return 1
     if [[ -f "${PROJECT_DIR}/${file_name}" ]]; then
-      cp "${PROJECT_DIR}/${file_name}" "${SNAPSHOT_DIR}/${VERIFIED_ID}_${file_name}" || return 1
+      cp "${PROJECT_DIR}/${file_name}" "${dest}" || return 1
     else
-      touch "${SNAPSHOT_DIR}/${VERIFIED_ID}_${file_name}.missing" || return 1
+      touch "${dest}.missing" || return 1
     fi
   done < "${list_file}"
 }
@@ -304,8 +317,8 @@ staged_state_matches_project() {
 
   [[ "$(cat "${list_file}")" == "$(verified_state_file_names)" ]] || return 1
   while IFS= read -r file_name; do
-    if [[ -f "${SNAPSHOT_DIR}/${VERIFIED_ID}_${file_name}" ]]; then
-      files_differ "${SNAPSHOT_DIR}/${VERIFIED_ID}_${file_name}" "${PROJECT_DIR}/${file_name}" && return 1
+    if [[ -f "$(verified_state_path "${file_name}")" ]]; then
+      files_differ "$(verified_state_path "${file_name}")" "${PROJECT_DIR}/${file_name}" && return 1
     elif [[ -e "${PROJECT_DIR}/${file_name}" ]]; then
       return 1
     fi
@@ -329,6 +342,7 @@ seal_verified_state() {
 }
 
 discard_staged_state() {
+  rm -rf "${SNAPSHOT_DIR}/${VERIFIED_ID}_${SAFEDEPS_SNAPSHOT_MEMBERS:-members}" 2>/dev/null || true
   rm -f "${SNAPSHOT_DIR}/${VERIFIED_ID}"_* 2>/dev/null || true
 }
 
