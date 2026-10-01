@@ -1836,11 +1836,114 @@ guard_all_npm_installs_are_global() {
   [[ "${found}" == true ]]
 }
 
+# Each runner's options, from its own help, in three kinds: an option whose
+# value names the package to fetch (`npx --package x cmd`, `uvx --from x cmd`),
+# one whose value adds a package next to it (`uvx --with x ruff`), and one whose
+# value is anything else and so is not an operand. Only options that always take
+# a value are listed; one whose value is optional, or one the table does not
+# know, leaves the next token as an operand, which can only add a check. A
+# `--name=value` spelling carries its own value and is never in question.
+#
+# The tables exist because one shared reading did not fit any runner: every
+# unknown option was skipped and the next token taken as the package, so
+# `uvx --python 3.12 ruff==0.1.0` checked nothing and recorded `pypi:3.12`, and
+# `npx --cache /tmp/c evil@1.0.0` recorded `npm:/tmp/c`. And `-p` named the
+# package for every runner, though uv reads it as `--python`.
+#
+#   npm   npx, npm exec, npm x: every npm config whose type has no Boolean, and
+#         their short forms, from npm 11.19.0's own definitions
+#         (@npmcli/config/lib/definitions). `-p` is npx's `--package`.
+#         `npm exec` and `npm x` hand their arguments to nopt, which also lets
+#         an option written without `=` take a following `true` or `false`,
+#         `null` where its type allows null, `--color` take `always`, and
+#         `--browser` take anything that is not an option (measured against
+#         npm's nopt and types). npx does not: its own first pass puts `--` in
+#         front of the first token it reads as the package, so `npx --yes false
+#         x` runs the package `false` (bin/npx-cli.js), and the table alone is
+#         its whole reading. Both were measured by running npx's first pass
+#         and npm's nopt on the arguments, with the command itself stubbed out.
+#   pnpm  pnpx, pnpm dlx: `pnpm dlx --help` (10.28.1) and pnpm's global
+#         `--dir`/`-C`, `--filter`/`-F`, `--loglevel`. `-c` is `--shell-mode`, a
+#         boolean here. Whether pnpm, like nopt, lets a boolean take a
+#         following `true` is not measured (pnpm ships as one binary), so it is
+#         read as not taking it: if pnpm does, the record names `true` instead
+#         of hiding a package.
+#   yarn  yarn dlx: yarnpkg.com/cli/dlx (`-p,--package`, `-q`).
+#   bun   bunx, bun x: `bunx --help` (1.3.14).
+#   uv    uvx, uv tool run: `uvx --help` (0.10.11); the two list the same
+#         options. `-p` is `--python`, `-w` is `--with`.
+#   pipx  pipx run: `pipx run --help` (1.12.0). Its parser is argparse with
+#         abbreviations allowed, so `--pyth` is `--python`; a long option that
+#         is the start of exactly one of pipx run's options is read as that one.
+#   go    go run: `go help run` and `go help build` (go1.26.5). Go reads `-x`
+#         and `--x` alike.
+SAFEDEPS_RUNNER_NAMES_PACKAGE_npm=" -p --package "
+SAFEDEPS_RUNNER_ADDS_PACKAGE_npm=" "
+SAFEDEPS_RUNNER_TAKES_VALUE_npm="
+  --enjoy-by --reg -C -L -c -m -w --_auth --access --allow-directory
+  --allow-file --allow-git --allow-remote --allow-scripts --also
+  --audit-level --auth-type --before --ca --cache --cache-max --cache-min
+  --cafile --call --cert --cidr --cpu --depth --diff --diff-dst-prefix
+  --diff-src-prefix --diff-unified --editor --expect-result-count --expires
+  --fetch-retries --fetch-retry-factor --fetch-retry-maxtimeout
+  --fetch-retry-mintimeout --fetch-timeout --git --globalconfig --heading
+  --https-proxy --include --init-author-email --init-author-name
+  --init-author-url --init-license --init-module --init-type --init-version
+  --init.author.email --init.author.name --init.author.url --init.license
+  --init.module --init.version --install-strategy --key --libc
+  --local-address --location --lockfile-version --loglevel --logs-dir
+  --logs-max --maxsockets --message --min-release-age
+  --min-release-age-exclude --name --node-gyp --node-options --noproxy
+  --omit --only --orgs --orgs-permission --os --otp --pack-destination
+  --packages --packages-and-scopes-permission --password --prefix
+  --preid --provenance-file --proxy --registry --replace-registry-host
+  --save-prefix --sbom-format --sbom-type --scope --scopes --script-shell
+  --searchexclude --searchlimit --searchopts --searchstaleness --shell --tag
+  --tag-version-prefix --token-description --umask --user-agent --userconfig
+  --viewer --which --workspace "
+SAFEDEPS_RUNNER_NAMES_PACKAGE_pnpm=" --package "
+SAFEDEPS_RUNNER_ADDS_PACKAGE_pnpm=" "
+SAFEDEPS_RUNNER_TAKES_VALUE_pnpm=" --allow-build --reporter --dir -C --filter -F --loglevel "
+SAFEDEPS_RUNNER_NAMES_PACKAGE_yarn=" -p --package "
+SAFEDEPS_RUNNER_ADDS_PACKAGE_yarn=" "
+SAFEDEPS_RUNNER_TAKES_VALUE_yarn=" "
+SAFEDEPS_RUNNER_NAMES_PACKAGE_bun=" -p --package "
+SAFEDEPS_RUNNER_ADDS_PACKAGE_bun=" "
+SAFEDEPS_RUNNER_TAKES_VALUE_bun=" "
+SAFEDEPS_RUNNER_NAMES_PACKAGE_uv=" --from "
+SAFEDEPS_RUNNER_ADDS_PACKAGE_uv=" -w --with "
+SAFEDEPS_RUNNER_TAKES_VALUE_uv="
+  --with-editable --with-requirements -c --constraints -b --build-constraints
+  --overrides --env-file --python-platform --torch-backend --index
+  --default-index -i --index-url --extra-index-url -f --find-links
+  --index-strategy --keyring-provider -P --upgrade-package --resolution
+  --prerelease --fork-strategy --exclude-newer --exclude-newer-package
+  --no-sources-package --reinstall-package --link-mode -C --config-setting
+  --config-settings-package --no-build-isolation-package --no-build-package
+  --no-binary-package --cache-dir --refresh-package -p --python --color
+  --allow-insecure-host --directory --project --config-file "
+SAFEDEPS_RUNNER_NAMES_PACKAGE_pipx=" --spec "
+SAFEDEPS_RUNNER_ADDS_PACKAGE_pipx=" --with "
+SAFEDEPS_RUNNER_TAKES_VALUE_pipx=" --python --fetch-python -i --index-url --pip-args --backend "
+SAFEDEPS_RUNNER_LONG_OPTIONS_pipx=" --help --quiet --verbose --global --no-cache --path --pypackages --with
+  --spec --python --fetch-python --fetch-missing-python --system-site-packages --index-url
+  --editable --pip-args --backend "
+# Options whose type allows null, for nopt's `null` (npm exec only).
+SAFEDEPS_RUNNER_NOPT_NULL_npm=" --browser --expect-results --optional --production --workspaces --yes -y "
+SAFEDEPS_RUNNER_NAMES_PACKAGE_go=" "
+SAFEDEPS_RUNNER_ADDS_PACKAGE_go=" "
+SAFEDEPS_RUNNER_TAKES_VALUE_go="
+  -C -p -covermode -coverpkg -asmflags -buildmode -compiler -gccgoflags
+  -gcflags -installsuffix -ldflags -mod -modfile -overlay -pgo -pkgdir -tags
+  -toolexec -exec "
+
 guard_runner_operands() {
   # Runner forms (`npx`, `pnpm dlx`, `yarn dlx`, `bunx`, `uvx`, `pipx run`, ...)
   # EXECUTE a package; tokens after the executed package are arguments to that
-  # program, NOT package specs. Emit only the spec-bearing operands: any
-  # `-p/--package <pkg>` value plus the first bare token (the executed package).
+  # program, NOT package specs. Emit only the spec-bearing operands: the value
+  # of an option that names or adds a package, plus the first bare token (the
+  # executed package). Which options those are, and which take a value that is
+  # not a package, depends on the runner (the tables above).
   # This stops an argument such as an email (`ops@example.test`) or a secret
   # value passed to `npx wrangler ...` from being misread as a `pkg@spec`.
   #
@@ -1848,31 +1951,90 @@ guard_runner_operands() {
   #
   # A failed tr or sed here is a failed spec reader (see guard_operand_specs):
   # it yields no operand, and no operand reads as nothing to check.
-  local text after want_value tok
+  local text after head family names adds takes want tok key nopt last="" match option
   local -a toks=()
   text=$(printf '%s' "$1" | tr -d "\"'") || guard_mark_scan_failed
-  # The first line is taken here rather than by `head -n1`, which can close the
-  # pipe on a sed that still has lines to write, and pipefail reads that SIGPIPE
-  # as a failed reader.
+  # The runner itself is kept, ahead of \037, to choose the table. The first
+  # line is taken here rather than by `head -n1`, which can close the pipe on a
+  # sed that still has lines to write, and pipefail reads that SIGPIPE as a
+  # failed reader.
   after=$(printf '%s\n' "${text}" \
-    | sed -nE "s/^(.*[[:space:];&|({!])?(${SAFEDEPS_G_RUNNER_BODY})([[:space:]]|\$)//p") || guard_mark_scan_failed
+    | sed -nE "s/^(.*[[:space:];&|({!])?(${SAFEDEPS_G_RUNNER_BODY})([[:space:]]|\$)/\\2"$'\037'"/p") || guard_mark_scan_failed
   after="${after%%$'\n'*}"
+  [[ "${after}" == *$'\037'* ]] || return 0
+  head="${after%%$'\037'*}"
+  after="${after#*$'\037'}"
   [[ "${after}" =~ [^[:space:]] ]] || return 0
+  nopt=false
+  case "${head%%[[:space:]]*}" in
+    npx) family=npm ;;
+    npm) family=npm nopt=true ;;
+    pnpx|pnpm) family=pnpm ;;
+    yarn) family=yarn ;;
+    bunx|bun) family=bun ;;
+    uvx|uv) family=uv ;;
+    pipx) family=pipx ;;
+    go) family=go ;;
+    *) family=npm ;;
+  esac
+  key="SAFEDEPS_RUNNER_NAMES_PACKAGE_${family}"; names="${!key}"
+  key="SAFEDEPS_RUNNER_ADDS_PACKAGE_${family}"; adds="${!key}"
+  key="SAFEDEPS_RUNNER_TAKES_VALUE_${family}"; takes="${!key}"
+  takes=" ${takes//$'\n'/ } "
 
   local named_by_option=false
-  want_value=false
+  want=""
   read -ra toks <<< "${after}"
   for tok in "${toks[@]+${toks[@]}}"; do
-    if [[ "${want_value}" == true ]]; then
-      printf '%s\n' "${tok}"
-      want_value=false
-      named_by_option=true
-      continue
+    case "${want}" in
+      names) printf '%s\n' "${tok}"; named_by_option=true; want=""; continue ;;
+      adds) printf '%s\n' "${tok}"; want=""; continue ;;
+      takes) want=""; continue ;;
+      flag)
+        # nopt's reading of the token after an option that took no value.
+        want=""
+        case "${tok}" in
+          true|false) continue ;;
+          null) [[ "${family}" == npm && "${SAFEDEPS_RUNNER_NOPT_NULL_npm}" == *" ${last} "* ]] && continue ;;
+          always) [[ "${family}" == npm && "${last}" == --color ]] && continue ;;
+        esac
+        [[ "${family}" == npm && "${last}" == --browser && "${tok}" != -* ]] && continue
+        ;;
+    esac
+    # An abbreviated long option, where the runner's parser accepts one.
+    if [[ "${family}" == pipx && "${tok}" == --?* ]]; then
+      key="${tok%%=*}"
+      if [[ "${SAFEDEPS_RUNNER_LONG_OPTIONS_pipx}" != *" ${key} "* ]]; then
+        match=""
+        for option in ${SAFEDEPS_RUNNER_LONG_OPTIONS_pipx}; do
+          [[ "${option}" == "${key}"* ]] && match+="${option} "
+        done
+        [[ "${match}" == *" "?* || -z "${match}" ]] || tok="${match% }${tok#"${key}"}"
+      fi
     fi
     case "${tok}" in
-      -p|--package|--spec|--from) want_value=true ;;
-      --package=*|--spec=*|--from=*) printf '%s\n' "${tok#*=}"; named_by_option=true ;;
-      -*)           : ;;  # other flag (e.g. -y/--yes), skip
+      -*=*)
+        key="${tok%%=*}"
+        if [[ "${names}" == *" ${key} "* ]]; then
+          printf '%s\n' "${tok#*=}"
+          named_by_option=true
+        elif [[ "${adds}" == *" ${key} "* ]]; then
+          printf '%s\n' "${tok#*=}"
+        fi
+        ;;
+      -*)
+        if [[ "${names}" == *" ${tok} "* ]]; then
+          want=names
+        elif [[ "${adds}" == *" ${tok} "* ]]; then
+          want=adds
+        elif [[ "${takes}" == *" ${tok} "* ]] \
+            || [[ "${family}" == go && "${takes}" == *" ${tok#-} "* ]]; then
+          want=takes
+        elif [[ "${nopt}" == true && "${tok}" != -- ]]; then
+          want=flag
+          last="${tok}"
+        fi
+        ;;
       *)
         # The executed package -- unless an option already named the package,
         # in which case this is the command it provides (`npx -p x@1 x-cli`).

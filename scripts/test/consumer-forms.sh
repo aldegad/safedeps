@@ -797,6 +797,37 @@ expect_prescription 'pypi 3to2@1.1.1;' 'poetry add 3to2@1.1.1'
 expect_prescription 'pypi 3to2@1.1.1;' 'poetry add 3to2@1.1.1' pypi to2 1.1.1
 pass "an alias is checked as its target, and a name that starts with a digit is read whole"
 
+# A runner's options come before its package, and which of them take a value
+# is the runner's own. One shared reading skipped every option and took the
+# next token as the package, so the value was read instead and the pinned
+# package was never checked: `uvx --python 3.12 ruff==0.1.0` recorded
+# `pypi:3.12` and ran ruff unchecked. Each row asserts the prescription names
+# the package; a row with the old misread approved asserts that it still does.
+expect_prescription 'pypi ruff@0.1.0;' 'uvx --python 3.12 ruff==0.1.0'
+expect_prescription 'pypi ruff@0.1.0;' 'uvx --python 3.12 ruff==0.1.0' pypi 3.12 0.1.0
+expect_prescription 'pypi ruff@0.1.0;' 'uvx -p 3.12 ruff==0.1.0'
+expect_prescription 'pypi ruff@0.1.0;' 'uv tool run --python 3.12 ruff==0.1.0'
+expect_prescription 'npm evil@1.0.0;' 'npx --cache /tmp/c evil@1.0.0'
+expect_prescription 'npm evil@1.0.0;' 'npx --cache /tmp/c evil@1.0.0' npm /tmp/c 1.0.0
+expect_prescription 'npm evil@1.0.0;' 'npx --loglevel silent evil@1.0.0'
+expect_prescription 'pypi evil@1.0.0;' 'pipx run --python python3.11 evil==1.0.0'
+expect_prescription 'pypi evil@1.0.0;' 'pipx run --python python3.11 evil==1.0.0' pypi python3.11 1.0.0
+# pipx's parser accepts a unique abbreviation of a long option.
+expect_prescription 'pypi evil@1.0.0;' 'pipx run --pyth python3.11 evil==1.0.0'
+expect_prescription 'npm evil@1.0.0;' 'pnpm dlx --reporter silent evil@1.0.0'
+expect_prescription 'go example.com/m@v1.0.0;' 'go run -C sub example.com/m@v1.0.0'
+expect_prescription 'go example.com/m@v1.0.0;' 'go run --tags x example.com/m@v1.0.0'
+# `--with` adds a package beside the one that runs, so both are checked.
+expect_prescription 'pypi evil@1.0.0;pypi ruff@0.1.0;' 'uvx --with evil==1.0.0 ruff==0.1.0'
+expect_prescription 'pypi evil@1.0.0;pypi evil2@1.0.0;' 'pipx run --with evil==1.0.0 evil2==1.0.0'
+# npm exec reads its arguments with nopt, which lets a boolean take a
+# following `true` or `false` and `--color` take `always`. npx does not: its
+# own first pass makes that token the package, so it is the package here too.
+expect_prescription 'npm evil@1.0.0;' 'npm exec --yes false evil@1.0.0'
+expect_prescription 'npm evil@1.0.0;' 'npm exec --color always evil@1.0.0'
+expect_prescription 'no-deny;' 'npx --yes false evil@1.0.0'
+pass "a runner's own options are read as that runner reads them, so the prescription names the package it runs"
+
 # --- 11. The UNGATED record names each operand the gate did not check ---------
 # The record used to be a second parser: it read each statement on its own and
 # asked the extractor "was this package pinned?" by name, so a pin on one
@@ -882,6 +913,15 @@ operand_rows=(
   $'crates.io:ripgrep\tcargo install ripgrep@13.0.0 ripgrep'
   # Runners.
   $'npm:cowsay\tnpx cowsay@1.0.0 && npx cowsay'
+  $'pypi:evil\tuvx --with evil ruff==0.1.0'
+  $'pypi:evil\tpipx run --with evil evil2==1.0.0'
+  $'npm:false\tnpx --yes false evil@1.0.0'
+  # Quiet: a runner option's value is not an operand, once the package it runs
+  # is approved.
+  $'\tuvx --python 3.12 ruff==0.1.0'
+  $'\tnpx --cache /tmp/c evil@1.0.0'
+  $'\tpipx run --python python3.11 evil==1.0.0'
+  $'\tnpm exec --yes false evil@1.0.0'
   $'npm:cowsay\tnpx -p cowsay@1.0.0 -p cowsay cowsay'
   $'npm:cowsay\tnpx --package=cowsay@1.0.0 cowsay && npx --package=cowsay cowsay'
   $'pypi:ruff\tuvx ruff==0.1.0 && uvx ruff'
