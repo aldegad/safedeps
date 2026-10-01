@@ -158,7 +158,11 @@ any step is open.
    The notes cover every user-visible change since the previous tag (derive them
    from `git log <previous-tag>..vX.Y.Z` and the ROADMAP section): security
    fixes first, each with what could get past before and how it is verified
-   now, then fixes, then anything a user has to do.
+   now, then fixes, then anything a user has to do. Then read it back:
+   `gh release view vX.Y.Z --json isDraft,isPrerelease,tagName` must show
+   `false`, `false` and the tag, and `gh release view --json tagName` (the
+   latest release) must name it. A draft is not a release: users and
+   `releases/latest` never see it.
 10. **Publish to npm.** From a clean checkout of the tag, `npm whoami` (the
     owner logs in; publishing needs their 2FA), `npm publish --access public`,
     then confirm `npm view @aldegad/safedeps version` is X.Y.Z and that the
