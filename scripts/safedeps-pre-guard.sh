@@ -5,6 +5,11 @@
 
 set -euo pipefail
 
+# The lexer memo (see shell_lex) is made fresh below, per run. A directory named
+# from outside would be a place to plant a view for a command, so a value from
+# the environment is dropped before anything can read it.
+SAFEDEPS_LEX_CACHE=""
+
 # Which half of the budget machinery this process is: the parent that keeps the
 # deadline, or the child it spawns to do the judging.
 #
@@ -313,178 +318,570 @@ command_pipes_unread_install_to_shell() {
   return 1
 }
 
-# Blank every quoted region, delimiters included, and leave unquoted text
-# untouched. Every detection predicate below reads this instead of the raw
-# command, which is why `echo "npm install evil"` is not an install: the text is
-# there, but not in execution position. scripts/test/scan-contract.sh states the
-# rules and checks this implementation against them.
+# The shell, as far as the gate reads it: one pass over the command in awk that
+# follows the lexical state the shell keeps -- quotes (single, double, $'...'),
+# escapes, comments, heredoc operators and their bodies, arithmetic, command
+# and parameter substitution, backticks and line continuations -- and gives
+# every byte a class. Each view is printed from those classes, so every reader
+# of the command reads the same lexing:
 #
-# One awk pass. The bash character loop this replaces was quadratic because
-# `${input:i:1}` counts from the start of the string on every index, so the cost
-# of reading one character grew with its position. The first awk version kept
-# the same shape: `substr($0, i, 1)` re-measures the string on each call in BSD
-# awk (macOS), so one long line stayed quadratic (1MB took 28.5s; caught in
-# review). Splitting the record into an array once makes every read constant,
-# which is what makes the pass linear -- not the byte orientation, which is
-# only what LC_ALL=C gives the split. Measured on this host, an unquoted command
-# with no install text: 32KB went 36.2s -> 0.08s and 64KB went past two minutes
-# -> 0.28s (scripts/measure/scan-cost.sh). The PreToolUse timeout is 30s and
-# fails OPEN, so the old curve did not slow the gate down past ~29KB, it removed
-# it.
+#   scan    quoted text, comments, heredoc operators and bodies blanked; an
+#           escaped operator is `_`. What the detection predicates read.
+#   code    comments, heredoc operators and bodies blanked; quotes kept. What
+#           the payload readers read.
+#   joined  code, with line continuations removed and every newline that does
+#           not end a statement blanked. What is read one line at a time.
+#   shell-bodies  the bodies of heredocs whose command pipes into something.
 #
-# One thing changed, and it is the blank COUNT inside a quoted region: a
-# multibyte character used to blank to one space and now blanks to one space per
-# byte. Nothing else moves. Unquoted bytes pass through unchanged, so the output
-# is byte-identical wherever no multibyte character sits inside quotes; and the
-# three bytes the state machine tests (' " \) are ASCII, which no UTF-8
-# continuation byte can collide with. Every consumer reads this through
-# `grep -qE` or `read -ra`, and neither can tell one blank from three.
+# It replaced three state machines that ran one after another -- a line-based
+# heredoc regex, a line joiner and the quote scanner -- and had to agree. They
+# did not: across three review rounds a heredoc read twice, read where there
+# was none, or not read where there was one, and each time the lines after it
+# vanished from the gate (fail-open). A design review measured 60 forms against
+# bash and zsh: 31 hid a line the shell runs before this, 27 after the last
+# regex repair, 0 with this lexer. scan and code keep the input's byte length
+# and are idempotent, so reading a view again changes nothing -- which is why
+# stripping twice can no longer drop anything.
 #
-# When awk fails, this says so in SAFEDEPS_SCAN_MARK and returns non-zero. The
-# status alone is not enough: every caller tests this output inside a condition
-# or a command substitution, where `set -e` is off and a failed scan reads as
-# empty text, which reads as "no install". That turned a scanner failure into a
-# silent pass (caught in review), and the mark is what lets the top level see
-# it. guard_settle_scan_failure is where it is read.
-command_scan_text() {
-  if ! printf '%s\n' "$1" | LC_ALL=C awk '
-    # safedeps:command_scan_text (scripts/test/scan-contract.sh keys on this line)
-    BEGIN { q = 0; esc = 0; buf = ""; held = 0 }
-
-    # Emit through a bounded buffer. Appending to one string for the whole
-    # input would put a quadratic memcpy back in place of the quadratic loop.
-    function put(c) {
-      buf = buf c
-      if (++held >= 4096) { printf "%s", buf; buf = ""; held = 0 }
-    }
-
-    {
-      # The newline that ended the previous record is a character too: it
-      # survives outside a quoted region and blanks inside one. An escaped
-      # newline is a line continuation, which the shell removes, so it blanks
-      # everywhere and the two lines read as one. The trailing newline this
-      # function adds terminates the last record and so is never emitted, which
-      # is what keeps the output the same length as the input.
-      if (NR > 1) {
-        if (esc) { put(" "); esc = 0 }
-        else     { put(q == 0 ? "\n" : " ") }
+# `((` and `$((` read as arithmetic (policy=arith). A reading that met an
+# arithmetic context holding something the other reading takes differently
+# (`<<`, a comment) reports AMBIG, and join_line_continuations then also reads
+# it as a subshell (policy=sub) and hands on both: bash and zsh disagree there,
+# and the agent shell here is zsh. A reading that ends inside a quote, a body
+# or a context reports UNTERM; guard_check_command_reads records that as a
+# failed reading.
+#
+# One awk pass over a split array, emitted through a bounded buffer, so the
+# cost is linear (see scripts/measure/scan-cost.sh). When awk fails it says so
+# in SAFEDEPS_SCAN_MARK and returns non-zero, as every reading does.
+shell_lex() {
+  local text="$1" view="$2" policy="${3:-arith}" marker="$4" memo="" out tmp
+  # One guard run reads the same text through the same view several times (25
+  # lexer calls for 11 distinct inputs on a 32KB install command, measured).
+  # Above 4KB, where a pass costs more than looking one up, a view is kept for
+  # the rest of the run. The key only picks the file: a hit also requires the
+  # stored text to equal this one byte for byte, because a checksum is easy to
+  # collide on purpose and the command is the attacker. A run that asks for
+  # flags is not memoized, since the flags are a side output.
+  if [[ -n "${SAFEDEPS_LEX_CACHE:-}" && -d "${SAFEDEPS_LEX_CACHE}" && -z "${SAFEDEPS_LEX_FLAGS:-}" && ${#text} -gt 4096 ]]; then
+    memo="${SAFEDEPS_LEX_CACHE}/${view}.${policy}.$(printf '%s' "${text}" | cksum | tr ' ' '.')"
+    if [[ -f "${memo}.out" && -f "${memo}.in" ]] && [[ "$(cat "${memo}.in"; printf 'X')" == "${text}X" ]]; then
+      cat "${memo}.out"
+      return 0
+    fi
+  fi
+  if ! out=$(printf '%s\n' "${text}" | LC_ALL=C awk -v view="${view}" -v policy="${policy}" -v marker="${marker}" '
+      # One pass over the command as the shell lexes it. Every byte gets a class,
+      # and each view is printed from the classes:
+      #
+      #   c  code                        x  escaping backslash (outside quotes)
+      #   e  escaped byte (outside)      l  line continuation (backslash, newline)
+      #   q  quoted text                 Q  code nested inside quotes ("$(...)")
+      #   m  comment                     h  heredoc operator and delimiter word
+      #   b  heredoc body (data)         B  live code in an unquoted heredoc body
+      #
+      # view=scan    quoted text, comments, heredoc operators and bodies blanked;
+      #              an escaped operator is `_`; length-preserving
+      #   view=code    comments, heredoc operators and bodies blanked, quotes kept;
+      #              length-preserving
+      #   view=joined  code view with line continuations removed and every newline
+      #              that does not end a statement blanked (a newline in code nested
+      #              in quotes becomes `;`); for text read one line at a time
+      #   view=shell-bodies  the raw lines of heredoc bodies whose command pipes
+      #              into something
+      #   view=substs  the body of every command substitution, one after another,
+      #              as the shell delimits it: `$(...)` (case patterns inside close
+      #              nothing) and backticks, a backtick body unescaped the way the
+      #              shell unescapes it (`\`` nests). For the payload extractor.
+      #   view=unprefixed  the text with the prefixes a statement may start with
+      #              removed: assignments (NAME=value, the value one word however
+      #              it is quoted or nested), env with its options and
+      #              assignments, command and exec. Not length-preserving.
+      #
+      # Two places where bash and zsh read the same text differently, each its
+      # own axis: `((` / `$((` holding `<<` or a comment (arithmetic, or a
+      # subshell), and an apostrophe inside "${...}" (a quote to bash, a character to
+      # zsh). policy is "arith" or "sub" for the first, with "-zq" appended to
+      # read the second the zsh way: arith, sub, arith-zq, sub-zq. A command is
+      # judged under every combination of the axes it actually flags; tying the
+      # two to one switch left the reading zsh makes (arithmetic and a plain
+      # character) unjudged (caught in review).
+      # policy=arith reads `((` and `$((` as arithmetic; policy=sub reads them as
+      # subshells. The caller runs the second only when the first reports AMBIG.
+      # Flags go to ENVIRON["SAFEDEPS_LEX_FLAGS"] when set: AMBIG (an arithmetic
+      # context held something the other policy reads differently), UNTERM (the
+      # input ended inside a quote, a heredoc body or a nested context).
+      BEGIN { n = 0; started = 0 }
+      {
+        if (started) X[++n] = "\n"
+        started = 1
+        m = split($0, ch, "")
+        for (j = 1; j <= m; j++) X[++n] = ch[j]
+      }
+      END {
+        N = n
+        d = 1; ctx[1] = "T"; par[1] = 0; dq = 0; dc = 1
+        # The bytes any rule below acts on. Every other byte keeps the class of
+        # its context and changes nothing, so it is classified without running
+        # the rules -- most of a long command is such bytes.
+        split("\\ $ \047 \042 # ( ) < ] } ` c e i ;", sl, " ")
+        for (j in sl) SPC[sl[j]] = 1
+        SPC["\n"] = 1
+        DQS["\\"] = 1; DQS["\042"] = 1; DQS["$"] = 1; DQS["`"] = 1
+        wantdep = (view == "unprefixed")
+        mode = ""; np = 0; ambig_a = 0; ambig_q = 0; unterm = 0; hn = 0; hstop = 0
+        subp = (policy ~ /^sub/); zq = (policy ~ /-zq$/)
+        for (i = 1; i <= N; i++) {
+          # An unquoted heredoc body ends where at_newline found its terminator
+          # line: close what is open in it (a substitution left open there never
+          # closes, as in the shell) and step over the terminator.
+          if (hn > 0 && i == hstop + 1) {
+            # A substitution left open in a body fails that one heredoc in the
+            # shell; the lines after it still run (form H29), so it is dropped,
+            # not counted as a command that never closes.
+            while (d > 1 && ctx[d] != "H") pop()
+            pop(); hstop = 0; mode = ""
+          }
+          if (i in JMP) { i = JMP[i]; continue }
+          if (i in HSTART) { push("H"); hstop = HEND[HSTART[i]] }
+          c = X[i]
+          if (wantdep) DEP[i] = (mode == "") ? dc : 99
+          if (mode == "SQ") { C[i] = "q"; if (c == "\047") mode = ""; continue }
+          if (mode == "AQ") {
+            C[i] = "q"
+            if (c == "\\") { i++; C[i] = "q" }
+            else if (c == "\047") mode = ""
+            continue
+          }
+          if (mode == "CM") {
+            if (c == "\n") { mode = ""; i = at_newline(i) }
+            # A comment inside backticks ends at the closing backtick: the shell
+            # cuts the backtick body out before it reads the comment (form P3).
+            else if (c == "`" && ctx[d] == "B") { mode = ""; C[i] = (dq > 0) ? "Q" : "c"; pop() }
+            else C[i] = "m"
+            continue
+          }
+          top = ctx[d]
+          if (top == "D") {
+            C[i] = "q"
+            if (!(c in DQS)) continue
+            if (c == "\\") {
+              if (X[i+1] == "\n") { C[i] = "l"; C[i+1] = "l"; i++ }
+              else { i++; C[i] = "q" }
+            }
+            else if (c == "\042") { pop() }
+            else if (c == "$" && X[i+1] == "(" && X[i+2] == "(") { C[i+1] = "q"; C[i+2] = "q"; arith_or_sub(i, 1) }
+            else if (c == "$" && X[i+1] == "(") { C[i+1] = "q"; i++; push("S") }
+            else if (c == "$" && X[i+1] == "{") { C[i+1] = "q"; i++; push("V") }
+            else if (c == "`") push("B")
+            continue
+          }
+          if (top == "H") {
+            # Body bytes are data. In an unquoted body the shell performs
+            # parameter, command and arithmetic substitution, and a backslash
+            # escapes only $, ` and \ -- the main loop reads those, so a
+            # substitution in a body is lexed by the same rules as anywhere else,
+            # across lines too (forms X3-X6, X10).
+            C[i] = "b"
+            if (!(c in DQS)) continue
+            if (c == "\\") { if (X[i+1] == "$" || X[i+1] == "`" || X[i+1] == "\\" || X[i+1] == "\n") { i++; C[i] = "b" } continue }
+            # An opener is live code like what it opens, so every view keeps the
+            # substitution whole (form E2).
+            if (c == "$" && X[i+1] == "(" && X[i+2] == "(") { C[i] = "B"; C[i+1] = "B"; C[i+2] = "B"; arith_or_sub(i, 1); continue }
+            if (c == "$" && X[i+1] == "(") { C[i] = "B"; C[i+1] = "B"; i++; push("S"); continue }
+            if (c == "$" && X[i+1] == "{") { C[i] = "B"; C[i+1] = "B"; i++; push("V"); continue }
+            if (c == "`") { C[i] = "B"; push("B"); continue }
+            continue
+          }
+          cls = (dq > 0) ? "Q" : (hn > 0 ? "B" : "c")
+          C[i] = cls
+          if (!(c in SPC) && !(top == "C" && cpat[d] == 1)) continue
+          if (c == "\\") {
+            if (X[i+1] == "\n") { C[i] = "l"; C[i+1] = "l"; i++; continue }
+            # Inside backticks an escaped backtick opens or closes a nested one.
+            if (top == "B" && X[i+1] == "`") {
+              C[i+1] = cls; i++
+              if (besc[d]) pop(); else { push("B"); besc[d] = 1 }
+              continue
+            }
+            if (dq > 0) { i++; C[i] = "Q"; continue }
+            C[i] = "x"; if (i < N) { i++; C[i] = "e" }
+            continue
+          }
+          if (c == "$" && X[i+1] == "\047") { C[i] = "q"; C[i+1] = "q"; i++; mode = "AQ"; continue }
+          if (c == "\047") {
+            # Inside "${...}" bash opens a quote here and zsh reads a plain
+            # character (forms P4, Q6). Both readings are judged: the second
+            # policy is the zsh reading.
+            if (top == "V" && dq > 0) { ambig_q = 1; if (zq) continue }
+            C[i] = "q"; mode = "SQ"; continue
+          }
+          if (c == "\042") { C[i] = "q"; push("D"); continue }
+          # case ... esac: a pattern close `)` closes no substitution (form P8).
+          if ((c == "c" || c == "e") && wordstart(i) && (i + 4 > N || X[i+4] ~ /[ \t\n;&|()<>]/)) {
+            w4 = X[i] X[i+1] X[i+2] X[i+3]
+            if (w4 == "case" && cmdpos(i)) { C[i+1] = cls; C[i+2] = cls; C[i+3] = cls; i += 3; push("C"); continue }
+            # `esac` ends the case where a pattern list could start, not as a
+            # pattern word after `|` (`*|esac)`, form X7).
+            if (w4 == "esac" && top == "C" && !(cpat[d] == 1 && cpw[d])) { C[i+1] = cls; C[i+2] = cls; C[i+3] = cls; i += 3; pop(); continue }
+          }
+          # Inside case: after `in`, and after each `;;` `;&` `;;&`, a pattern
+          # runs to its `)`, which ends the pattern -- class p, read by the
+          # unprefixed view as a statement boundary, so the arm is judged.
+          if (top == "C") {
+            if (cpat[d] == 0 && c == "i" && X[i+1] == "n" && wordstart(i) && (i + 2 > N || X[i+2] ~ /[ \t\n;&|()<>]/)) { C[i+1] = cls; i++; cpat[d] = 1; cpw[d] = 0; continue }
+            if (cpat[d] == 1 && c == "(" && !cpw[d]) continue
+            if (cpat[d] == 1 && c == ")") { C[i] = "p"; cpat[d] = 2; continue }
+            if (cpat[d] == 1 && c !~ /[ \t\n]/) cpw[d] = 1
+            # An arm ends at `;;`, `;&`, `;;&`, or zsh `;|` (forms X8, X9).
+            if (cpat[d] == 2 && c == ";" && (X[i+1] == ";" || X[i+1] == "&" || X[i+1] == "|")) {
+              C[i+1] = cls; i++
+              if (X[i] == ";" && X[i+1] == "&") { C[i+1] = cls; i++ }
+              cpat[d] = 1; cpw[d] = 0; continue
+            }
+          }
+          if (top == "A" || top == "K") {
+            if (c == "<" && X[i+1] == "<" && X[i+2] != "<") ambig_a = 1
+            if (c == "#" && wordstart(i)) ambig_a = 1
+            if (top == "K") { if (c == "]") pop(); continue }
+            if (c == "(") par[d]++
+            else if (c == ")") { if (par[d] > 0) par[d]--; else if (X[i+1] == ")") { i++; C[i] = cls; pop() } }
+            else if (c == "\n") i = at_newline(i)
+            continue
+          }
+          if (c == "#" && (wordstart(i) || top == "B" && X[i-1] == "`") && top != "V") { C[i] = "m"; mode = "CM"; continue }
+          if (c == "$" && X[i+1] == "(" && X[i+2] == "(") { C[i+1] = cls; C[i+2] = cls; arith_or_sub(i, 1); continue }
+          # `((` reads as arithmetic in the first reading wherever it stands; a
+          # hand list of command positions missed backticks, case patterns,
+          # coproc and time -p (forms P1, P2, P15, Q2). Where it holds `<<` or a
+          # comment, AMBIG hands on the subshell reading too.
+          if (c == "(" && X[i+1] == "(") { C[i+1] = cls; arith_or_sub(i, 0); continue }
+          if (c == "$" && X[i+1] == "(") { C[i+1] = cls; i++; push("S"); continue }
+          if (c == "$" && X[i+1] == "[") { C[i+1] = cls; i++; push("K"); continue }
+          if (c == "$" && X[i+1] == "{") { C[i+1] = cls; i++; push("V"); continue }
+          if (c == "`") { if (top == "B") pop(); else push("B"); continue }
+          if (top == "V") { if (c == "}") pop(); continue }
+          if (c == "(") { par[d]++; continue }
+          if (c == ")") { if (par[d] > 0) par[d]--; else if (top == "S") pop(); continue }
+          if (c == "<" && X[i+1] == "<" && X[i+2] != "<" && X[i-1] != "<") { i = heredoc_op(i); continue }
+          if (c == "\n") { i = at_newline(i); continue }
+        }
+        if (mode == "SQ" || mode == "AQ" || d > 1 || np > 0) unterm = 1
+        flagfile = ENVIRON["SAFEDEPS_LEX_FLAGS"]
+        ambig = ambig_a || ambig_q
+        if (flagfile != "") {
+          if (ambig) print "AMBIG" >> flagfile
+          if (ambig_a) print "AMBIG_ARITH" >> flagfile
+          if (ambig_q) print "AMBIG_DQQ" >> flagfile
+          if (unterm) print "UNTERM" >> flagfile
+        }
+        # A reading that never closes strips nothing: a prefix word would run to
+        # the end of the input and take every line after it along (form A7, a
+        # heredoc inside `$((` that bash reads as arithmetic). Such a command is
+        # settled as UNDECIDED by guard_check_command_reads anyway.
+        if (view == "unprefixed" && !unterm) prefixes()
+        if (view == "substs") emit_substs()
+        else emit()
       }
 
-      n = split($0, ch, "")
-      for (i = 1; i <= n; i++) {
-        c = ch[i]
-        if (esc) {
-          # The escaped byte. Outside a region it is data: it passes through
-          # and never opens one (`\"` is a quote character). An escaped
-          # operator is data too, so it passes as `_`: `\;` is a semicolon
-          # argument to the shell, not the end of a statement, and read as one
-          # it made `echo x \; pip install y | sh` a visible install.
-          # Inside a double-quoted region it is blanked like everything else
-          # and never closes it.
-          if (q != 0)                     put(" ")
-          else if (c ~ /[;&|()<>!{}#`]/)  put("_")
-          else                            put(c)
-          esc = 0
-        }
-        else if (q == 0) {
-          if (c == "\\")        { esc = 1; put(" ") }
-          else if (c == "\047") { q = 1; put(" ") }
-          else if (c == "\042") { q = 2; put(" ") }
-          else                  { put(c) }
-        }
-        else if (q == 1) {
-          # No escapes inside single quotes.
-          if (c == "\047") q = 0
-          put(" ")
-        }
-        else {
-          if (c == "\\")        esc = 1
-          else if (c == "\042") q = 0
-          put(" ")
+      # A byte that ends a word at the top level: unquoted blank or operator
+      # in code that is not nested, or anything the shell does not read as a
+      # word (a comment, a heredoc operator or body).
+      function word_sep(k) {
+        if (C[k] == "m" || C[k] == "h" || C[k] == "b" || C[k] == "B" || C[k] == "p") return 1
+        return C[k] == "c" && DEP[k] == 1 && X[k] ~ /[ \t\n;&|()<>]/
+      }
+      function mark(a, z,   k) { for (k = a; k <= z; k++) A[k] = 1 }
+      # Mark the prefixes each top-level statement starts with, and the blanks
+      # after each. A word is cut only by word_sep, so a quoted or nested value
+      # (FOO="a b", FOO=$(cmd arg), FOO=a\ b) stays one word -- the sed this
+      # replaced read a value as the bytes up to the first blank or quote.
+      function prefixes(   k, s, w, atstart, envmode, takes, hit, execmode, cmdmode, timemode) {
+        atstart = 1; envmode = 0; takes = 0; execmode = 0; cmdmode = 0; timemode = 0; k = 1
+        while (k <= N) {
+          if (word_sep(k)) {
+            if (X[k] ~ /[\n;&|(]/ || C[k] == "p") { atstart = 1; envmode = 0; takes = 0; execmode = 0; cmdmode = 0; timemode = 0 }
+            k++; continue
+          }
+          s = k; w = ""
+          while (k <= N && !word_sep(k)) { w = w X[k]; k++ }
+          if (!atstart) continue
+          hit = 0
+          if (takes) { takes = 0; hit = 1 }
+          else if (envmode && w ~ /^-/) { if (w ~ /^(-u|--unset|-C|--chdir)$/) takes = 1; hit = 1 }
+          else if (execmode && w ~ /^-[a-z]+$/) { if (w ~ /a$/) takes = 1; hit = 1 }
+          else if (cmdmode && w == "-p") hit = 1
+          else if (timemode && w == "-p") hit = 1
+          else if (w ~ /^[A-Za-z_][A-Za-z0-9_]*=/) hit = 1
+          else if (w == "env") { envmode = 1; hit = 1 }
+          else if (w == "exec") { envmode = 0; execmode = 1; cmdmode = 0; hit = 1 }
+          else if (w == "command") { envmode = 0; cmdmode = 1; execmode = 0; hit = 1 }
+          else if (w == "time") { envmode = 0; timemode = 1; continue }
+          else if (w ~ /^(!|[{]|if|then|else|elif|while|until|do|coproc)$/) { envmode = 0; continue }
+          else { atstart = 0; envmode = 0; continue }
+          mark(s, k - 1)
+          while (k <= N && C[k] == "c" && DEP[k] == 1 && (X[k] == " " || X[k] == "\t")) { A[k] = 1; k++ }
         }
       }
-    }
 
-    END { printf "%s", buf }
-  '; then
+      function push(k) {
+        d++; ctx[d] = k; par[d] = 0; pnp[d] = np; besc[d] = 0; cpat[d] = 0; cpw[d] = 0
+        if (k == "D") dq++
+        if (k == "H") hn++
+        if (k != "C") dc++
+        if (k == "S" || k == "B") { nsub++; sbeg[nsub] = i + 1; send[nsub] = N; skind[nsub] = k; sid[d] = nsub }
+      }
+      # A substitution that closes on the line it opened drops the heredocs
+      # opened inside it: `x=$(cat <<EOF)` has no body, and every shell runs the
+      # next line as a command (form P7).
+      function pop() {
+        if (d > 1) {
+          if (ctx[d] == "S" || ctx[d] == "B") send[sid[d]] = besc[d] ? i - 2 : i - 1
+          if ((ctx[d] == "S" || ctx[d] == "B") && np > pnp[d]) np = pnp[d]
+          if (ctx[d] == "D") dq--
+          if (ctx[d] == "H") hn--
+          if (ctx[d] != "C") dc--
+          d--
+        }
+      }
+      function wordstart(j) { return j == 1 || X[j-1] ~ /[ \t\n;&|()<>]/ }
+      function cmdpos(j,   k, w) {
+        k = j - 1
+        while (k >= 1 && (X[k] == " " || X[k] == "\t")) k--
+        if (k < 1 || X[k] ~ /[\n;&|(!{)`]/) return 1
+        w = ""
+        while (k >= 1 && X[k] ~ /[a-z]/) { w = X[k] w; k-- }
+        return w ~ /^(if|then|else|elif|while|until|do|time)$/
+      }
+      function arith_or_sub(j, dollar) {
+        if (subp) {
+          if (dollar) { i = j + 1; push("S") }
+          else { i = j + 1; par[d] += 2 }
+          return
+        }
+        i = j + dollar + 1; push("A")
+      }
+      # `<<`, an optional `-`, blanks, then the delimiter word with its quoting
+      # removed. A quoted delimiter makes the body literal.
+      function heredoc_op(j,   k, strip, w, q, cc) {
+        k = j + 2; strip = 0
+        if (X[k] == "-") { strip = 1; k++ }
+        while (X[k] == " " || X[k] == "\t") k++
+        w = ""; q = 0
+        while (k <= N) {
+          cc = X[k]
+          if (cc ~ /[ \t\n;&|()<>]/) break
+          if (cc == "\\") { q = 1; w = w X[k+1]; k += 2; continue }
+          if (cc == "\047") { q = 1; k++; while (k <= N && X[k] != "\047") { w = w X[k]; k++ } k++; continue }
+          if (cc == "\042") { q = 1; k++; while (k <= N && X[k] != "\042") { if (X[k] == "\\") k++; w = w X[k]; k++ } k++; continue }
+          w = w cc; k++
+        }
+        if (w == "") { C[j] = cls; return j }
+        np++; pd[np] = w; ps[np] = strip; pq[np] = q; pstart[np] = j; pdq[np] = (dq > 0); pb[np] = (ctx[d] == "B")
+        for (mm = j; mm < k && mm <= N; mm++) C[mm] = "h"
+        return k - 1
+      }
+      # A newline that ends a line of code. Pending heredoc bodies start after it.
+      # This finds where each body and its terminator line are, the way the
+      # shell does -- line by line, before anything in a body is expanded -- and
+      # leaves the bodies to the main loop: a quoted body is data and is stepped
+      # over; an unquoted one is walked as context H. There is no second reader
+      # of the body (a line-at-a-time scanner here missed multi-line
+      # substitutions and case patterns inside them; caught in review).
+      function at_newline(j,   p, s, e, line, t, done, fed, kk, bs) {
+        C[j] = (dq > 0) ? "Q" : (hn > 0 ? "B" : "c")
+        if (np == 0) return j
+        s = j + 1
+        for (p = 1; p <= np; p++) {
+          # Does the command of this heredoc pipe into something? Any `|` after the
+          # operator on its line that is code and not `||`, or a line that ends
+          # in one. Conservative on purpose: a body is searched for install text
+          # only when it is fed to something.
+          fed = 0
+          for (kk = pstart[p]; kk < j; kk++) {
+            if (X[kk] == "|" && (C[kk] == "c" || C[kk] == "Q" || C[kk] == "B")) {
+              if (X[kk+1] == "|" || X[kk-1] == "|") continue
+              fed = 1
+            }
+          }
+          pfed[p] = fed
+          done = 0; bs = s
+          while (s <= N) {
+            e = s; line = ""
+            while (1) {
+              while (e <= N && X[e] != "\n") { line = line X[e]; e++ }
+              if (!pq[p] && e <= N && line ~ /(^|[^\\])(\\\\)*\\$/) { line = substr(line, 1, length(line) - 1); e++; continue }
+              break
+            }
+            t = line; if (ps[p]) sub(/^\t+/, "", t)
+            # Inside backticks the delimiter may be followed at once by the
+            # closing backtick, which the main loop then reads as code (P19).
+            if (pb[p] && index(t, pd[p] "`") == 1) {
+              lead = length(line) - length(t)
+              body_region(bs, s - 1, p)
+              for (kk = s; kk < s + lead + length(pd[p]); kk++) C[kk] = "b"
+              if (s + lead + length(pd[p]) - 1 >= s) JMP[s] = s + lead + length(pd[p]) - 1
+              np = 0
+              return j
+            }
+            if (t == pd[p]) {
+              body_region(bs, s - 1, p)
+              for (kk = s; kk < e; kk++) C[kk] = "b"
+              if (e <= N) C[e] = "b"
+              JMP[s] = (e <= N) ? e : N
+              s = e + 1; done = 1; break
+            }
+            s = e + 1
+          }
+          if (!done) { body_region(bs, N, p); unterm = 1 }
+        }
+        np = 0
+        return j
+      }
+      # A body is bytes bs..be. A quoted one is data and stepped over; an
+      # unquoted one is walked by the main loop as context H.
+      function body_region(bs, be, p,   kk) {
+        if (be < bs) return
+        for (kk = bs; kk <= be; kk++) BF[kk] = p
+        if (pq[p]) {
+          for (kk = bs; kk <= be; kk++) C[kk] = "b"
+          JMP[bs] = be
+          return
+        }
+        nh++; HSTART[bs] = nh; HEND[nh] = be
+      }
+      function emit_substs(   k, a, z, t, b) {
+        buf = ""; held = 0
+        for (k = 1; k <= nsub; k++) {
+          a = sbeg[k]; z = send[k]
+          for (t = a; t <= z; t++) {
+            b = X[t]
+            # The shell unescapes a backtick body before it reads it.
+            if (skind[k] == "B" && b == "\\" && t < z && (X[t+1] == "`" || X[t+1] == "\\" || X[t+1] == "$")) { t++; b = X[t] }
+            put(b)
+          }
+          put("\n")
+        }
+        printf "%s", buf
+      }
+      function put(s) {
+        buf = buf s
+        if (++held >= 4096) { printf "%s", buf; buf = ""; held = 0 }
+      }
+      function emit(   k, cc, cl, p, first) {
+        buf = ""; held = 0
+        if (view == "shell-bodies") {
+          first = 1
+          for (k = 1; k <= N; k++) {
+            if (k in BF) {
+              p = BF[k]
+              if (pfed[p]) put(X[k])
+              else if (X[k] == "\n") put("\n")
+            } else if (C[k] == "b" && X[k] == "\n") put("\n")
+          }
+          printf "%s", buf
+          return
+        }
+        for (k = 1; k <= N; k++) {
+          cc = X[k]; cl = C[k]
+          if (view == "scan") {
+            # A code `#` is never a comment start here, and must not become one
+            # when the scan is read again: after a blanked region (a quoted word
+            # with a `#` glued to its closing quote) it would follow a blank,
+            # which is where a comment starts.
+            if (cl == "c" || cl == "p") put(cc == "#" && (k == 1 || C[k-1] != "c" && C[k-1] != "e") ? "_" : cc)
+            else if (cl == "e") put(index(";&|()<>!{}#`\042\047\\$", cc) ? "_" : (cc == "\n" ? " " : cc))
+            else if (cl == "B") put(" ")
+            else put(" ")
+            continue
+          }
+          if (view == "unprefixed") {
+            if (!(k in A)) put(cl == "p" ? ";" : cc)
+            if (k == N && ambig) {
+              # Where bash and zsh read the text differently, the prefixes were
+              # found on one reading only; hand on the text as written too.
+              put("\n"); for (p = 1; p <= N; p++) put(X[p])
+            }
+            continue
+          }
+          if (view == "code") {
+            if (cl == "m" || cl == "h" || cl == "b") put(cc == "\n" && cl != "h" ? "\n" : " ")
+            else put(cc)
+            continue
+          }
+          # joined
+          if (cl == "l") continue
+          if (cl == "m" || cl == "h") { put(" "); continue }
+          if (cl == "b") { put(" "); continue }
+          if (cc == "\n") {
+            if (cl == "c") put("\n")
+            else if (cl == "Q" || cl == "B") put(";")
+            else put(" ")
+            continue
+          }
+          put(cc)
+        }
+        printf "%s", buf
+      }
+  ' && printf 'X'); then
     [[ -z "${SAFEDEPS_SCAN_MARK:-}" ]] || printf 'failed\n' >> "${SAFEDEPS_SCAN_MARK}"
     return 1
   fi
+  out="${out%X}"
+  printf '%s' "${out}"
+  # The output is written before the text it belongs to, and each by rename, so
+  # a reader that finds the text also finds its view whole.
+  if [[ -n "${memo}" ]] && tmp=$(mktemp "${memo}.XXXXXX" 2>/dev/null); then
+    { printf '%s' "${out}" > "${tmp}" && mv -f "${tmp}" "${memo}.out" &&
+      printf '%s' "${text}" > "${tmp}" && mv -f "${tmp}" "${memo}.in"; } 2>/dev/null || rm -f "${tmp}"
+  fi
+}
+
+# Every detection predicate reads this instead of the raw command, which is
+# why `echo "npm install evil"` is not an install: the text is there, but not
+# in execution position. scripts/test/scan-contract.sh states the rules and
+# checks this implementation against them. The marker names this reading for
+# the scan-failure census and the scan-contract shims.
+command_scan_text() {
+  shell_lex "$1" scan arith "safedeps:command_scan_text"
 }
 
 normalize_install_text() {
   local text="$1"
+  local normalized unprefixed
 
-  local normalized
-  for _ in 1 2 3; do
-    if ! normalized=$(printf '%s' "${text}" | sed -E \
-      -e 's/^[[:space:]]+//' \
-      -e "s#(^|[[:space:];|&({!])(/[^[:space:];|&]+/)(${SAFEDEPS_G_EXECUTABLES}|sh|bash|zsh)([[:space:];|&]|\$)#\\1\\3\\4#g" \
-      -e 's#(^|[;&|({!][[:space:]]*|(then|do|else|elif|if|while|until|time|coproc)[[:space:]]+)(env([[:space:]]+(-i|--ignore-environment|-0|--null|-v|--debug|-u[[:space:]]*[^[:space:]]+|--unset(=|[[:space:]]+)[^[:space:]]+|-C[[:space:]]*[^[:space:]]+|--chdir(=|[[:space:]]+)[^[:space:]]+|[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]+))*[[:space:]]+|command[[:space:]]+|exec[[:space:]]+)#\1#g' \
-      -e 's#(^|[;&|({!][[:space:]]*|(then|do|else|elif|if|while|until|time|coproc)[[:space:]]+)([A-Za-z_][A-Za-z0-9_]*=[^[:space:]'\''"]*[[:space:]]+)+#\1#g'); then
-      # Empty text would read as "no install". Keep what there is and let the
-      # gate settle the failure.
-      guard_mark_reading_failed
-      break
-    fi
-    text="${normalized}"
-  done
-  printf '%s' "${text}"
+  # An absolute path before an executable reads as the executable.
+  if ! normalized=$(printf '%s' "${text}" | sed -E \
+    -e 's/^[[:space:]]+//' \
+    -e "s#(^|[[:space:];|&({!])(/[^[:space:];|&]+/)(${SAFEDEPS_G_EXECUTABLES}|sh|bash|zsh)([[:space:];|&]|\$)#\\1\\3\\4#g"); then
+    # Empty text would read as "no install". Keep what there is and let the
+    # gate settle the failure.
+    guard_mark_reading_failed
+    printf '%s' "${text}"
+    return
+  fi
+  # The prefixes a statement may start with -- assignments, env with its
+  # options and assignments, command, exec -- are removed by the lexer, which
+  # knows where a value ends however it is quoted or nested. The sed this
+  # replaced read a value as the bytes up to the first blank or quote, so
+  # `FOO="a b" pip install evil==6.6.6` and `FOO=$(cmd arg) pip install ...`
+  # kept their prefix and the install after it was never recognized (caught in
+  # review). A failed reading keeps the text it had and is recorded.
+  if unprefixed=$(shell_lex "${normalized}" unprefixed arith "safedeps:normalize_install_text"); then
+    normalized="${unprefixed}"
+  fi
+  printf '%s' "${normalized}"
 }
 
-# Drop heredoc bodies and keep the command lines. With `shell-bodies` as the
-# second argument it keeps the other side instead: the body lines of every
-# heredoc whose opening line pipes into a shell (`cat <<EOF | sh`), and nothing
-# else. A body written to a file or read by any other program is data. The one
-# reading of where a body starts and ends serves both.
+# The command with heredoc operators, bodies and comments blanked and quotes
+# kept (the code view); with `shell-bodies`, only the raw bodies of heredocs
+# whose command pipes into something. Both come from shell_lex.
 strip_heredoc_bodies() {
-  local input="$1"
-  local keep="${2:-commands}"
-  local line
-  local delimiter=""
-  local feeds_shell=false
-  local opened scanned
-  # `<<` not next to another `<` (a herestring is `<<<`), then a delimiter
-  # word. A delimiter starting with a digit is not read as one: `1<<2` is a
-  # shift. The operator must also be unquoted and outside `((...))`, checked
-  # on the scan text below. Each of these used to open a heredoc with no
-  # terminator, and every line after it vanished from the gate (caught in
-  # review: a herestring, an arithmetic shift or a quoted `<<EOF`, then an
-  # install on the next line, passed with no verdict).
-  local heredoc_re="(^|[^<])<<-?[[:space:]]*[\"']?([A-Za-z_][A-Za-z0-9_.-]*)[\"']?"
-  # Bracket forms, not `\<`: GNU regex (Linux bash) reads `\<` as a word
-  # boundary. In variables, because `[[ ]]` parses a bare `<` as an operator.
-  local heredoc_operator_re='(^|[^<])[<][<]([^<]|$)'
-  local arithmetic_shift_re='[(][(][^)]*[<][<]'
-  local trailing_pipe_re='[|][[:space:]]*$'
-
-  while IFS= read -r line || [[ -n "${line}" ]]; do
-    if [[ -n "${delimiter}" ]]; then
-      if [[ "${line}" == "${delimiter}" ]]; then
-        delimiter=""
-      elif [[ "${keep}" == "shell-bodies" && "${feeds_shell}" == "true" ]]; then
-        printf '%s\n' "${line}"
-      fi
-      continue
-    fi
-
-    if [[ "${line}" =~ ${heredoc_re} ]]; then
-      opened="${BASH_REMATCH[2]}"
-      scanned=$(command_scan_text "${line}")
-      if [[ "${scanned}" =~ ${heredoc_operator_re} ]] \
-          && ! [[ "${scanned}" =~ ${arithmetic_shift_re} ]]; then
-        delimiter="${opened}"
-        feeds_shell=false
-        # A body goes to a shell when its opening line pipes into one, or ends
-        # in a pipe that the line after the terminator continues.
-        if [[ "${keep}" == "shell-bodies" ]] \
-            && { exec_text_pipes_to_shell "${line}" || [[ "${scanned}" =~ ${trailing_pipe_re} ]]; }; then
-          feeds_shell=true
-        fi
-      fi
-    fi
-    [[ "${keep}" == "shell-bodies" ]] || printf '%s\n' "${line}"
-  done <<< "${input}"
+  if [[ "${2:-commands}" == "shell-bodies" ]]; then
+    shell_lex "$1" shell-bodies arith "safedeps:strip_heredoc_bodies"
+  else
+    shell_lex "$1" code arith "safedeps:strip_heredoc_bodies"
+  fi
 }
 
 # The three payload readers below take text whose heredoc bodies are already
@@ -527,28 +924,22 @@ extract_eval_payloads() {
 }
 
 extract_command_substitution_payloads() {
-  local input="$1"
-  local rest
-
-  rest="${input}"
-  while [[ "${rest}" == *'$('* ]]; do
-    rest="${rest#*'$('}"
-    printf '%s\n' "${rest%%)*}"
-    rest="${rest#*)}"
-  done
-
-  rest="${input}"
-  while [[ "${rest}" == *'`'* ]]; do
-    rest="${rest#*\`}"
-    printf '%s\n' "${rest%%\`*}"
-    [[ "${rest}" == *'`'* ]] || break
-    rest="${rest#*\`}"
-  done
+  # The bodies as the lexer delimits them. The string scan this replaced cut a
+  # body at its first `)` (so a case pattern ended it) and did not unescape or
+  # nest backticks, and it was a second parser of the command.
+  shell_lex "$1" substs arith "safedeps:extract_command_substitution_payloads"
 }
 
 # Install text as the pipe checks search for it: a manager, then a verb
 # anywhere after it on the same line. Loose on purpose -- it reads text that is
 # data at its own quoting level, where no statement grammar applies.
+# The visible installs the blanking pass sets aside, found the way detection
+# finds them: detection strips assignment and env/command prefixes before it
+# matches, so the blanking pass has to step over them too. Read on the scan
+# view, where a quoted value is already blank. Without the prefix, an install
+# behind `PIP_INDEX_URL=x` was not set aside, and the pipe check read it as
+# install text piped into a shell (caught in review).
+BLANK_INSTALL_RE="${SAFEDEPS_G_START}((env|command)([[:space:]]+-[^[:space:]]*)*[[:space:]]+|[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*(${SAFEDEPS_G_INSTALL_BODY})([[:space:]]|\$)"
 PIPE_MANAGER_RE='(npm|npx|pnpm|pnpx|yarn|bun|bunx|pip[0-9.]*|(python[0-9.]*|py)[[:space:]]+-m[[:space:]]*pip|poetry|uv|uvx|pipx|pipenv|cargo|go|gem|bundle|mvn|dotnet)'
 PIPE_INSTALL_TEXT_RE="${PIPE_MANAGER_RE}.*(${SAFEDEPS_G_ALL_VERBS})"
 
@@ -684,7 +1075,7 @@ install_managers_blanked() {
   # failed awk used to be swallowed by the same `||`, and the visible install it
   # should have blanked was then read as install text piped into a shell -- a
   # finding drawn from a failed reading (caught in review).
-  matches=$(printf '%s\n' "${scan}" | LC_ALL=C judge_grep -obEi "${SAFEDEPS_INSTALL_PATTERN}") || matches=""
+  matches=$(printf '%s\n' "${scan}" | LC_ALL=C judge_grep -obEi "${BLANK_INSTALL_RE}") || matches=""
   if [[ -n "${matches}" ]] && ! spans=$(printf '%s\n' "${matches}" | LC_ALL=C awk '
     # safedeps:install_match_spans (scripts/measure/scan-failure-census.sh keys on this line)
     { c = index($0, ":"); printf "%d:%d ", substr($0, 1, c - 1), length($0) - c }'); then
@@ -717,9 +1108,38 @@ install_managers_blanked() {
         split(span[k], p, ":")
         str = ""
         for (i = p[1] + 1; i <= p[1] + p[2] && i <= L; i++) str = str X[L + 1 + i]
-        if (!match(tolower(str), mre)) continue
-        for (i = p[1] + RSTART; i < p[1] + RSTART + RLENGTH; i++)
+        # The manager word as a whole word: `pip` inside `PIP_INDEX_URL=x pip
+        # install` is no manager, and blanking it left the real install to be
+        # read as install text piped into a shell (caught in review).
+        s = tolower(str); slen = length(s); from = 1; at = 0
+        while (from <= slen && match(substr(s, from), mre)) {
+          a = from + RSTART - 1; z = a + RLENGTH
+          pre = (p[1] + a - 1 >= 1) ? tolower(X[L + 1 + p[1] + a - 1]) : ""
+          post = (z <= slen) ? substr(s, z, 1) : ""
+          if (pre !~ /[a-z0-9_]/ && post !~ /[a-z0-9_]/) { at = a; alen = RLENGTH; break }
+          from = a + 1
+        }
+        if (!at) continue
+        for (i = p[1] + at; i < p[1] + at + alen; i++)
           if (X[L + 1 + i] != " " && X[i] != "\n") X[i] = " "
+        # The assignment prefixes of the install are its arguments, not install
+        # text: `PIP_INDEX_URL=x` left `pip` at a word start for the loose
+        # search of the pipe check. A name is blanked always; it runs no code.
+        # A value is blanked only when it holds no `$`, backtick or
+        # parenthesis, so a substitution in it is still read.
+        j = 1
+        while (j < at) {
+          while (j < at && substr(s, j, 1) ~ /[ \t]/) j++
+          w0 = j
+          while (j < at && substr(s, j, 1) !~ /[ \t]/) j++
+          word = substr(s, w0, j - w0)
+          if (!match(word, /^[a-z_][a-z0-9_]*=/)) continue
+          e = (word ~ /[$`()]/) ? w0 + RLENGTH - 2 : j - 1
+          for (q = w0; q <= e; q++) {
+            i = p[1] + q
+            if (X[L + 1 + i] != " " && X[i] != "\n") X[i] = " "
+          }
+        }
       }
       buf = ""; held = 0
       for (i = 1; i <= L; i++) {
@@ -734,64 +1154,28 @@ install_managers_blanked() {
   fi
 }
 
-# Join what the shell reads as one line before anything splits the command
-# into lines.
-#
-# Every consumer reads the candidate texts one line at a time. Two kinds of
-# newline do not end a statement, and splitting at them broke the reading:
-#
-#   - An escaped newline. `pip \<newline>install x` was judged as two unrelated
-#     lines, neither of them an install. The shell removes it, so this does
-#     too: the backslash and the newline become two blanks.
-#   - A newline inside quotes. The line that closes a multi-line string was
-#     scanned alone, so its closing quote read as an OPENING one and blanked
-#     whatever followed -- `echo "a<newline>b" ; pip install x` passed. The
-#     other lines were scanned alone too, so a commit message whose second line
-#     mentions an install read as that install. The newline becomes a blank,
-#     which is what the scanner makes of it anyway.
-#
-# Both keep every byte where it was. What counts as escaped follows command_scan_text exactly -- backslashes
-# pair up, and there are no escapes inside single quotes -- because getting it
-# wrong in the other direction is worse: joining after `echo a\\` would make the
-# next line an argument to echo and hide it.
-#
-# awk failing here is recorded like a scanner failure (see command_scan_text),
-# and the text passes through unjoined.
+# The command as lines the shell reads as statements (the joined view): line
+# continuations removed, newlines inside quotes, heredoc bodies and comments
+# blanked. When the reading met an ambiguous arithmetic context it also hands
+# on the subshell reading, one after the other: a line either shell would run
+# is a line the gate reads.
 join_line_continuations() {
-  local joined
-  if joined=$(printf '%s\n' "$1" | LC_ALL=C awk '
-    # safedeps:join_line_continuations (scripts/measure/scan-failure-census.sh keys on this line)
-    BEGIN { q = 0; out = ""; open = 0 }
-    {
-      n = split($0, ch, "")
-      pending = 0
-      for (i = 1; i <= n; i++) {
-        c = ch[i]
-        if (pending)                 { out = out "\\" c; pending = 0; continue }
-        if (q == 1)                  { out = out c; if (c == "\047") q = 0; continue }
-        if (c == "\\")               { pending = 1; continue }
-        if (q == 0 && c == "\047")   q = 1
-        else if (c == "\042")        q = (q == 2 ? 0 : 2)
-        out = out c
-      }
-      if (pending)     { out = out "  "; open = 1 }
-      else if (q != 0) { out = out " "; open = 1 }
-      else             { print out; out = ""; open = 0 }
-    }
-    END { if (open) print out }
-  '); then
-    printf '%s' "${joined}"
-  else
-    [[ -z "${SAFEDEPS_SCAN_MARK:-}" ]] || printf 'failed\n' >> "${SAFEDEPS_SCAN_MARK}"
-    printf '%s' "$1"
-  fi
+  local flags rc=0
+  flags=$(mktemp "${TMPDIR:-/tmp}/safedeps-lex.XXXXXX" 2>/dev/null) || flags=""
+  SAFEDEPS_LEX_FLAGS="${flags}" shell_lex "$1" joined arith "safedeps:join_line_continuations" || rc=1
+  local policy
+  for policy in $(lex_other_readings "${flags}"); do
+    printf '\n'
+    shell_lex "$1" joined "${policy}" "safedeps:join_line_continuations" || rc=1
+  done
+  [[ -z "${flags}" ]] || rm -f "${flags}"
+  return ${rc}
 }
 
 command_candidate_texts() {
   local command="$1"
   local payload
 
-  command=$(strip_heredoc_bodies "${command}")
   command=$(join_line_continuations "${command}")
 
   normalize_install_text "${command}"
@@ -850,10 +1234,58 @@ command_has_ignore_scripts_flag() {
 # after the terminator. A `#` inside a word is not a comment, but the in-place
 # rewrite is correct there too, so no attempt is made to tell them apart.
 command_needs_inplace_inert() {
-  local scanned
+  local scanned code
   scanned=$(command_scan_text "$1")
   [[ "${scanned}" == *$'\n'* ]] && return 0
-  printf '%s' "${scanned}" | judge_grep -qE '[;&|#]'
+  printf '%s' "${scanned}" | judge_grep -qE '[;&|]' && return 0
+  # A comment or a heredoc: the code view blanks both, so it differs from the
+  # command wherever one is. The scan view blanks them too, which is why this
+  # cannot be read off the scan view the way `;&|` are.
+  code=$(strip_heredoc_bodies "$1")
+  [[ "${code}" != "$1" ]]
+}
+
+# The command with `--ignore-scripts` inserted right after every npm install
+# verb that is code -- found on the scan view, so an install named inside a
+# comment, a quoted string or a heredoc body is not one, and a quoted option
+# value (`--userconfig "/tmp/a b/.npmrc"`) does not hide the verb after it. The
+# scan view keeps every byte in place, so a match offset there is the offset in
+# the command. Prints nothing when no verb was found. A raw-text rewrite used
+# to land on an `npm i` inside a trailing comment and count that as done
+# (caught in review), and could not see past a quoted option value.
+inert_rewrite_in_place() {
+  local command="$1" scan matches offsets
+  scan=$(command_scan_text "${command}") || return 1
+  # The grep and the awk run apart so that only "no match" reads as no verb: a
+  # failed awk shared one `||` with grep's exit 1, and the rewrite was then
+  # dropped as if there were nothing to rewrite.
+  matches=$(printf '%s\n' "${scan}" \
+    | LC_ALL=C judge_grep -obE "npm${SAFEDEPS_G_OPTS}[[:space:]]+(${SAFEDEPS_G_NPM_VERBS})([[:space:]]|\$)") || matches=""
+  [[ -n "${matches}" ]] || return 0
+  if ! offsets=$(printf '%s\n' "${matches}" | LC_ALL=C awk '
+    # safedeps:inert_offsets (scripts/measure/scan-failure-census.sh keys on this line)
+    { c = index($0, ":"); m = substr($0, c + 1); e = substr($0, 1, c - 1) + length(m); if (m ~ /[[:space:]]$/) e--; printf "%d ", e }'); then
+    [[ -z "${SAFEDEPS_SCAN_MARK:-}" ]] || printf 'failed\n' >> "${SAFEDEPS_SCAN_MARK}"
+    return 1
+  fi
+  [[ -n "${offsets// /}" ]] || return 0
+  if ! { printf '%s\n' "${offsets}"; printf '%s' "${command}"; } | LC_ALL=C awk '
+    # safedeps:inert_rewrite_in_place (scripts/measure/scan-failure-census.sh keys on this line)
+    NR == 1 { k = split($0, at, " "); for (j = 1; j <= k; j++) want[at[j]] = 1; next }
+    { if (NR > 2) X[++n] = "\n"; m = split($0, c, ""); for (j = 1; j <= m; j++) X[++n] = c[j] }
+    END {
+      buf = ""; held = 0
+      for (i = 1; i <= n; i++) {
+        buf = buf X[i]
+        if (i in want) buf = buf " --ignore-scripts"
+        if (++held >= 4096) { printf "%s", buf; buf = ""; held = 0 }
+      }
+      printf "%s", buf
+    }
+  '; then
+    [[ -z "${SAFEDEPS_SCAN_MARK:-}" ]] || printf 'failed\n' >> "${SAFEDEPS_SCAN_MARK}"
+    return 1
+  fi
 }
 
 # Echo the install directory when the command redirects the install target away
@@ -1343,7 +1775,10 @@ fi
 # mark could not be made, and guard_scan_failed treats that as a failure too:
 # a scanner nobody can hear from is not one to trust.
 SAFEDEPS_SCAN_MARK=$(mktemp "${TMPDIR:-/tmp}/safedeps-scan.XXXXXX" 2>/dev/null) || SAFEDEPS_SCAN_MARK=""
-trap 'rm -f "${SAFEDEPS_SCAN_MARK:-}"' EXIT
+# Private to this run (mktemp -d is 0700). Without it the lexer simply runs
+# every time.
+SAFEDEPS_LEX_CACHE=$(mktemp -d "${TMPDIR:-/tmp}/safedeps-lex.XXXXXX" 2>/dev/null) || SAFEDEPS_LEX_CACHE=""
+trap 'rm -f "${SAFEDEPS_SCAN_MARK:-}"; rm -rf "${SAFEDEPS_LEX_CACHE:-}"' EXIT
 
 # Set once the gate below has passed, and exported so that anything reading the
 # command after that point can be counted: scripts/measure/scan-failure-census.sh
@@ -1386,7 +1821,7 @@ guard_looks_like_install_unscanned() {
 # wolf. $1 says which, for advisory.log.
 guard_deny_undecided_scan() {
   log_advisory "pre-guard DENY: the command scanner failed ($1) — undecided, fail-closed. Command: ${COMMAND}"
-  jq -nc '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:"safedeps: UNDECIDED, not unsafe — the command scanner (awk) failed while reading this command, so safedeps could not tell whether it installs a dependency or what it would install. It is blocked fail-closed, and no finding is claimed. Check that `echo x | awk 1` works, then retry."}}'
+  jq -nc '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:"safedeps: UNDECIDED, not unsafe — safedeps could not finish reading this command: a scanner step (awk, grep or sed) failed, or the command does not close (an open quote, a heredoc without its terminator). So it could not tell whether the command installs a dependency or what it would install. It is blocked fail-closed, and no finding is claimed. Close the command, or check that `echo x | awk 1` works, then retry."}}'
   exit 0
 }
 
@@ -1408,10 +1843,58 @@ guard_settle_scan_failure() {
       guard_deny_undecided_scan "the command names a package manager"
     fi
     log_advisory "pre-guard: the command scanner failed; the command names no package manager and was allowed. Command: ${COMMAND}"
-    printf 'safedeps: the command scanner (awk) failed, so this command could not be read. It names no package manager, so it was allowed. The failure is recorded in advisory.log.\n' >&2
+    printf 'safedeps: this command could not be fully read (a scanner step failed, or the command does not close). It names no package manager, so it was allowed. The failure is recorded in advisory.log.\n' >&2
   fi
   export SAFEDEPS_GATE_PASSED=1
 }
+
+# Whether the command closes as the shell reads it. A command that ends inside
+# a quote, a heredoc body or a nested context is one the lexer could not
+# finish, and whatever it swallowed went unread -- a comment apostrophe or an
+# unterminated string used to hide every line after it. That is recorded like
+# a failed reading, so the gate settles it: UNDECIDED when the command names a
+# package manager. A heredoc left without its terminator is the ordinary case
+# here, and the shell reads it to the end of input as data.
+# The readings besides the first that a lexing flagged as differing between
+# bash and zsh: one per combination of the axes it flagged (see shell_lex).
+lex_other_readings() {
+  local flags="$1" a=false q=false
+  [[ -n "${flags}" ]] || return 0
+  grep -q '^AMBIG_ARITH$' "${flags}" 2>/dev/null && a=true
+  grep -q '^AMBIG_DQQ$' "${flags}" 2>/dev/null && q=true
+  [[ "${a}" == true ]] && printf 'sub\n'
+  [[ "${q}" == true ]] && printf 'arith-zq\n'
+  [[ "${a}" == true && "${q}" == true ]] && printf 'sub-zq\n'
+  return 0
+}
+
+guard_check_command_reads() {
+  local flags
+  if ! flags=$(mktemp "${TMPDIR:-/tmp}/safedeps-lex.XXXXXX" 2>/dev/null); then
+    [[ -z "${SAFEDEPS_SCAN_MARK:-}" ]] || printf 'failed\n' >> "${SAFEDEPS_SCAN_MARK}"
+    return 0
+  fi
+  SAFEDEPS_LEX_FLAGS="${flags}" shell_lex "${COMMAND}" scan arith "safedeps:command_reads" > /dev/null || true
+  if grep -q '^UNTERM$' "${flags}" 2>/dev/null; then
+    # Where the shells diverge, a command that closes under another reading is
+    # one that shell runs: it is read, not unread. Unread means no reading closes.
+    local policy others closed=false one
+    others=$(lex_other_readings "${flags}")
+    one=$(mktemp "${TMPDIR:-/tmp}/safedeps-lex.XXXXXX" 2>/dev/null) || one=""
+    for policy in ${others}; do
+      [[ -n "${one}" ]] || break
+      : > "${one}"
+      SAFEDEPS_LEX_FLAGS="${one}" shell_lex "${COMMAND}" scan "${policy}" "safedeps:command_reads" > /dev/null || true
+      grep -q '^UNTERM$' "${one}" 2>/dev/null || { closed=true; break; }
+    done
+    [[ -z "${one}" ]] || rm -f "${one}"
+    if [[ "${closed}" != true ]]; then
+      [[ -z "${SAFEDEPS_SCAN_MARK:-}" ]] || printf 'failed\n' >> "${SAFEDEPS_SCAN_MARK}"
+    fi
+  fi
+  rm -f "${flags}"
+}
+guard_check_command_reads
 
 HIDDEN_DEPENDENCY_INSTALL=false
 PIPED_BESIDE_VISIBLE=false
@@ -1486,7 +1969,7 @@ acquire_state_lock
 # a 30s runtime budget, which is the very fail-open this plan exists to close.
 # A leaked lock is bounded by the 60s stale-lock sweep in acquire_state_lock; a
 # defeated deadline is not bounded by anything.
-trap 'release_state_lock; rm -f "${SAFEDEPS_SCAN_MARK:-}"' EXIT
+trap 'release_state_lock; rm -f "${SAFEDEPS_SCAN_MARK:-}"; rm -rf "${SAFEDEPS_LEX_CACHE:-}"' EXIT
 
 PARENT_SNAPSHOT_ID=""
 CONFIRMED_FILE="${GUARD_DIR}/confirmed_${DIR_HASH}"
@@ -2286,10 +2769,8 @@ if ! jq -e 'has("turn_id")' <<< "${INPUT}" >/dev/null 2>&1 && \
     # A failed sed leaves UPDATED_COMMAND empty, which differs from COMMAND and
     # so would skip both the rewrite and the downgrade record below; the mark
     # makes the gate settle it instead.
-    UPDATED_COMMAND=$(printf '%s' "${COMMAND}" | sed -E \
-      "s/(npm${SAFEDEPS_G_OPTS}[[:space:]]+(${SAFEDEPS_G_NPM_VERBS}))([[:space:]]|\$)/\\1 --ignore-scripts\\6/g") \
-      || guard_mark_reading_failed
-    if [[ "${UPDATED_COMMAND}" == "${COMMAND}" ]]; then
+    UPDATED_COMMAND=$(inert_rewrite_in_place "${COMMAND}") || guard_mark_reading_failed
+    if [[ -z "${UPDATED_COMMAND}" || "${UPDATED_COMMAND}" == "${COMMAND}" ]]; then
       # Rewrite did not land — never blind-append to a compound command. Downgrade
       # to detect-and-rollback (the effect gate still verifies the closure) and
       # record it below, once the command is known to run; the inert guarantee is

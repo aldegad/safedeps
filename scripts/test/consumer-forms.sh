@@ -455,6 +455,34 @@ do
 done
 pass "aliases, options, versioned interpreters, runners, statement positions and quoted specs are all gated"
 
+# An assignment prefix is one word however its value is quoted or nested. The
+# prefix stripper read a value as the bytes up to the first blank or quote, so
+# each of these kept its prefix and the install after it was never recognized:
+# a pinned install with no verdict and no record (caught in review).
+for prefixed in \
+  'FOO="a b" pip install evil==1.0.0' \
+  "FOO='a b' pip install evil==1.0.0" \
+  'FOO="a;b" pnpm add evil@1.0.0' \
+  'FOO=$(printf x) pip install evil==1.0.0' \
+  'FOO=`printf x` pip install evil==1.0.0' \
+  'FOO=a\ b pip install evil==1.0.0' \
+  'FOO=${BAR:-a b} pip install evil==1.0.0' \
+  'env FOO="a b" pip install evil==1.0.0' \
+  'env -u HOME FOO="a b" pip install evil==1.0.0' \
+  'A="1 2" B=$(echo x y) cargo install evil --version 1.0.0' \
+  'ls; FOO="a b" pip install evil==1.0.0' \
+  'if true; then FOO="a b" pip install evil==1.0.0; fi' \
+  'FOO="a b" pip install evil==1.0.0; echo $((1<<2))' \
+  'FOO="a b" pip install evil==1.0.0 '"'"
+do
+  expect_deny "an install behind a whitespace-valued assignment: ${prefixed}" "${prefixed}"
+done
+# What the prefix reader must not invent: an install named only inside a quoted
+# value is data, and an install inside a substitution in a value is still read.
+expect_pass "an install named only in an assignment value" 'FOO="pip install evil==1.0.0" echo hi'
+expect_deny "an install inside a substitution in an assignment value" 'FOO=$(pip install evil==1.0.0) ls'
+pass "an install behind an assignment prefix is gated however the value is quoted or nested"
+
 # --- 7. A spec is checked as the package it names ------------------------------
 # Both of these used to prescribe a `safedeps check` for the wrong package --
 # one that OSV knows nothing about, so it approves, and the retry then passes.
@@ -515,11 +543,48 @@ for wrapper_form in \
 do
   expect_pass "the wrapper ${wrapper_form%% *}" "${wrapper_form}"
 done
-# A case arm starts a statement after `pattern)`, and `)` cannot join the
-# statement-start set without reading `echo $(date) pip install x` as an
-# install. Pinned here as outside, with the wrappers.
-expect_pass "a case arm" 'case x in *) pip install evil==1.0.0;; esac'
 pass "argv-passing wrappers (sudo, timeout, nohup, nice) stay outside the command gate (documented boundary)"
+
+# A case arm is a statement. A grammar pattern cannot tell a pattern's `)` from
+# any other `)` (`echo $(date) pip install x` would read as an install), so case
+# arms were pinned outside the gate. The lexer knows where a pattern ends: it
+# reads `case ... in`, and the `)` that closes each pattern is a statement
+# boundary in the view the recognizers read.
+for arm in \
+  'case x in *) pip install evil==1.0.0;; esac' \
+  'case x in (x) pip install evil==1.0.0;; esac' \
+  'case x in a|b) ls;; *) pip install evil==1.0.0;; esac' \
+  'case x in x) :;& y) pip install evil==1.0.0;; esac' \
+  'case x in x) FOO="a b" pip install evil==1.0.0;; esac' \
+  'echo "$(case x in x) pip install evil==1.0.0;; esac)"' \
+  'x=$(case x in x) pip install evil==1.0.0;; esac)'
+do
+  expect_deny "an install in a case arm: ${arm}" "${arm}"
+done
+expect_pass "a case statement with no install" 'case x in *) echo hi;; esac'
+expect_pass "a parenthesized value next to a command name is not a case arm" 'echo $(date) pip install x'
+pass "an install in a case arm is gated, and a stray parenthesis still is not a statement start"
+
+# Substitution bodies come from the lexer: a nested escaped backtick is a
+# nested substitution, and a substitution that closes on its line drops the
+# heredoc it opened, so the next line is a command.
+expect_deny "an install in a nested backtick" 'echo `echo \`pip install evil==1.0.0\``'
+expect_deny "an install after a heredoc whose substitution closed on its line" $'x=$(cat <<EOF)\npip install evil==1.0.0\nEOF'
+pass "substitution bodies are read as the shell delimits them"
+
+# A quote inside a comment opens nothing (a line joiner that did not know
+# comments joined the next line and hid it; caught in review).
+for commented in \
+  $'# don\'t\npip install evil==1.0.0' \
+  $'echo hi # it\'s\npip install evil==1.0.0' \
+  $'echo hi # say "hi\npip install evil==1.0.0' \
+  $'# it\'s fine\ncargo add serde@1.0.0' \
+  $'# don\'t do this\nnpm install evil@1.0.0'
+do
+  expect_deny "an install after a comment holding a quote" "${commented}"
+done
+expect_pass "a # inside a word is no comment" $'echo a#\'b\npip install evil==1.0.0\n\''
+pass "a quote inside a comment hides nothing after it"
 
 # --- 9. UNGATED is keyed on the effect gate actually being there --------------
 # The exemption used to read "the ledger ecosystem is npm", which pnpm, yarn and
@@ -623,7 +688,13 @@ pass "an escaped backslash closes a region, an escaped quote opens none, and a c
 # really treats as data stays data. An escaped backslash then an escaped quote
 # leaves the region open, and `\<newline>` inside single quotes is not a
 # continuation.
-expect_pass "an install inside a region an escaped quote keeps open" 'echo "a\\\" ; pip install evil==1.0.0'
+# The region stays open to the end of the command, which the shell refuses to
+# run at all. The gate reads an input that never closes as unread and answers
+# UNDECIDED for it -- a line the lexer could not finish is not a line it read.
+unclosed_reason=$(jq -nc --arg c 'echo "a\\\" ; pip install evil==1.0.0' --arg cwd "${project_dir}" '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
+  HOME="${tmp_root}/home" SAFEDEPS_HOME="$(mktemp -d "${tmp_root}/safe.XXXXXX")" scripts/safedeps-pre-guard.sh 2>/dev/null |
+  jq -r '.hookSpecificOutput.permissionDecisionReason // ""')
+grep -q 'UNDECIDED' <<< "${unclosed_reason}" || fail "an install inside a region an escaped quote keeps open is undecided, not passed or claimed"
 expect_pass "an install inside single quotes across a backslash-newline" $'echo \'a\\\npip install evil==1.0.0\''
 pass "text the shell treats as data stays data"
 
@@ -722,7 +793,8 @@ for piped in \
   "pip install requests==2.0.0 && echo pip\\ install evil==6.6.6 | sh" \
   "pip install requests==2.0.0 && printf pip' install evil==6.6.6' | sh" \
   "pip install requests==2.0.0 && echo 'pipXinstall evil==6.6.6' | tr X ' ' | sh" \
-  "npm install left-pad@1.3.0 && printf 'pip%sinstall evil==6.6.6' ' ' | sh"
+  "npm install left-pad@1.3.0 && printf 'pip%sinstall evil==6.6.6' ' ' | sh" \
+  "PIP_INDEX_URL=x pip install requests==2.0.0 && printf 'pip install evil==6.6.6' | sh"
 do
   grep -q 'reads like an install into a shell' <<< "$(beside_reason "${piped}")" \
     || fail "a piped install beside a visible one is denied by the pipe rule: $(printf '%q' "${piped}")"
@@ -739,6 +811,13 @@ pass "an install piped into a shell is denied beside a visible install, even an 
   || fail "a visible install beside a heredoc with no install piped into sh keeps its verdict"
 [[ "$(beside_decision 'npm install left-pad@1.3.0 2>&1 | tee log')" == "allow" ]] \
   || fail "a visible install piped into a non-shell keeps its verdict"
+# The manager word is blanked as a whole word. `pip` inside an assignment
+# prefix's name came first, so the prefix lost three letters, the real install
+# stayed, and the pipe check read it as install text piped into a shell.
+[[ "$(beside_decision "PIP_INDEX_URL=x pip install requests==2.0.0 && printf 'hi' | zsh -s")" == "pass" ]] \
+  || fail "an assignment prefix naming a manager does not make a harmless pipe a piped install"
+[[ "$(beside_decision 'npm_config_loglevel=warn npm install left-pad@1.3.0 && cat setup.sh | sh')" == "allow" ]] \
+  || fail "an npm_config_ prefix beside a script piped into sh keeps its verdict"
 [[ "$(beside_decision 'pip install requests==2.0.0 && git commit -m "document the pip install x | sh idiom"')" == "pass" ]] \
   || fail "a quoted pipe idiom beside a visible install stays data"
 # What is left after the visible install is set aside is mostly its own

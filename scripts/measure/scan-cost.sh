@@ -58,7 +58,7 @@ printf '{"dependencies":{}}\n' > "${PROJECT}/package.json"
 
 # The scan is extracted rather than sourced: the guard is an executable hook
 # with no source guard, so sourcing it would run the whole judgment.
-scan_src=$(sed -n '/^command_scan_text() {/,/^}/p' scripts/safedeps-pre-guard.sh)
+scan_src=$(sed -n '/^shell_lex() {/,/^}/p; /^command_scan_text() {/,/^}/p' scripts/safedeps-pre-guard.sh)
 [[ -n "${scan_src}" ]] || { printf 'scan-cost: command_scan_text not found in the guard\n' >&2; exit 2; }
 eval "${scan_src}"
 

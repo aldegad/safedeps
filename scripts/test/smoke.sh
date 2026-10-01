@@ -460,7 +460,9 @@ for inert_case in \
   "npm install left-pad@1.3.0 # rebuild the lockfile|npm install --ignore-scripts left-pad@1.3.0 # rebuild the lockfile" \
   $'npm install left-pad@1.3.0\necho done|npm install --ignore-scripts left-pad@1.3.0\necho done' \
   $'npm install left-pad@1.3.0 <<EOF\nyes\nEOF|npm install --ignore-scripts left-pad@1.3.0 <<EOF\nyes\nEOF' \
-  "npm install left-pad@1.3.0 --message 'a # b'|npm install left-pad@1.3.0 --message 'a # b' --ignore-scripts"
+  "npm install left-pad@1.3.0 --message 'a # b'|npm install left-pad@1.3.0 --message 'a # b' --ignore-scripts" \
+  'npm --userconfig "/tmp/a b/.npmrc" install left-pad@1.3.0 # then npm i later|npm --userconfig "/tmp/a b/.npmrc" install --ignore-scripts left-pad@1.3.0 # then npm i later' \
+  $'cat <<EOF > notes\nnpm i left-pad\nEOF\nnpm install left-pad@1.3.0|cat <<EOF > notes\nnpm i left-pad\nEOF\nnpm install --ignore-scripts left-pad@1.3.0'
 do
   inert_in="${inert_case%%|*}"
   inert_want="${inert_case#*|}"

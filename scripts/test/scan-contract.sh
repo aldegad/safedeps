@@ -32,12 +32,15 @@
 #      made it linear; bytes are only what LC_ALL=C hands the split.
 #   2. Outside quotes, bytes pass through unchanged, except a backslash. A
 #      backslash is blanked and escapes the byte after it: that byte passes
-#      through as data and never opens a region (`\"` is a quote character,
-#      `\pip` is `pip`), and an escaped newline -- a line continuation, which
-#      the shell removes -- is blanked, so the two lines read as one. An
-#      escaped operator (`;&|()<>!{}#` or a backtick) passes as `_`: it is a
-#      literal character to the shell, and passed through as itself it would
-#      end a statement or open one for every predicate that reads the scan.
+#      through as data and never opens a region (`\pip` is `pip`), and an
+#      escaped newline -- a line continuation, which the shell removes -- is
+#      blanked, so the two lines read as one. An escaped operator
+#      (`;&|()<>!{}#` or a backtick) passes as `_`: it is a literal character
+#      to the shell, and passed through as itself it would end a statement or
+#      open one for every predicate that reads the scan. So does an escaped
+#      quote, backslash or dollar: as itself it would open a quote, an escape
+#      or a `$'` region when the scan is read again, and the scan view has to
+#      read the same the second time (caught by the view-property check).
 #   3. A quote character that opens or closes a region is itself blanked.
 #   4. Every byte inside a quoted region is blanked, newlines included.
 #   5. A single-quoted region ends at the next single quote, unconditionally.
@@ -84,49 +87,115 @@ fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
 # executable hook with no source guard, and sourcing it would run the whole
 # judgment. An empty extraction is a hard failure, never a skipped battery --
 # a rename must break this file loudly rather than quietly stop checking.
-shipped_src=$(sed -n '/^command_scan_text() {/,/^}/p' "${GUARD}")
-[[ -n "${shipped_src}" ]] || fail "command_scan_text not found in ${GUARD} (renamed? then update this battery)"
+shipped_src=$(sed -n '/^shell_lex() {/,/^}/p; /^command_scan_text() {/,/^}/p' "${GUARD}")
+[[ "${shipped_src}" == *"shell_lex() {"* && "${shipped_src}" == *"command_scan_text() {"* ]] \
+  || fail "shell_lex and command_scan_text not found in ${GUARD} (renamed? then update this battery)"
 eval "${shipped_src}"
 declare -F command_scan_text > /dev/null || fail "extracted command_scan_text did not define the function"
+
+# The lexer is one awk program inside single quotes, so an apostrophe in it ends
+# the quoting. An odd count is a parse error; an even count splices the text
+# between the two into the program unquoted, and it runs with no error (a
+# comment that quoted a word did that, caught in review). Write \047 instead.
+lexer_program=$(sed -n '/^shell_lex() {/,/^}/p' "${GUARD}" | sed -n '/-v marker="${marker}" '"'"'$/,/^  '"'"'/p' | sed '1d;$d')
+[[ -n "${lexer_program}" ]] || fail "the lexer program could not be extracted from ${GUARD}"
+[[ "${lexer_program}" != *"'"* ]] || fail "the lexer program holds an apostrophe, which ends its quoting; write \\047"
+pass "the lexer program holds no apostrophe"
 
 # --- the spec -----------------------------------------------------------------
 # Deliberately the slowest, most obvious statement of the seven rules. It is
 # read by this battery only, so its cost is irrelevant and its clarity is not.
-reference_scan_text() {
+reference_spec_scan_text() {
   local LC_ALL=C
-  local input="$1" output="" quote="" escaped="" char i
-  for ((i = 0; i < ${#input}; i++)); do
-    char="${input:i:1}"
-    if [[ -n "${escaped}" ]]; then
-      escaped=""
-      if [[ -z "${quote}" && "${char}" != $'\n' ]]; then
-        case "${char}" in
-          ';'|'&'|'|'|'('|')'|'<'|'>'|'!'|'{'|'}'|'#'|'`') output="${output}_" ;;
-          *) output="${output}${char}" ;;
-        esac
+  local input="$1" output="" i c n=${#1}
+  local mode="" sq_closes="${REF_SQ_CLOSES:-1}"
+  # The context stack: T top, D double quotes, S $( or subshell, A arithmetic,
+  # K $[, V ${. dq counts the D entries; par counts parentheses per level.
+  local -a ctx=(T) par=(0)
+  local d=0 dq=0
+  for ((i = 0; i < n; i++)); do
+    c="${input:i:1}"
+    if [[ "${mode}" == "SQ" ]]; then
+      output+=" "
+      [[ "${c}" == "'" && "${sq_closes}" == 1 ]] && mode=""
+      continue
+    fi
+    if [[ "${mode}" == "AQ" ]]; then
+      output+=" "
+      if [[ "${c}" == "\\" ]]; then ((i++)); [[ ${i} -lt ${n} ]] && output+=" "
+      elif [[ "${c}" == "'" ]]; then mode=""; fi
+      continue
+    fi
+    if [[ "${ctx[d]}" == "D" ]]; then
+      output+=" "
+      if [[ "${c}" == "\\" ]]; then ((i++)); [[ ${i} -lt ${n} ]] && output+=" "
+      elif [[ "${c}" == '"' ]]; then ((d--)); ((dq--))
+      elif [[ "${c}" == '$' && "${input:i+1:2}" == "((" ]]; then output+="  "; ((i += 2)); ((d++)); ctx[d]=A; par[d]=0
+      elif [[ "${c}" == '$' && "${input:i+1:1}" == "(" ]]; then output+=" "; ((i++)); ((d++)); ctx[d]=S; par[d]=0
+      elif [[ "${c}" == '$' && "${input:i+1:1}" == "{" ]]; then output+=" "; ((i++)); ((d++)); ctx[d]=V; par[d]=0
+      fi
+      continue
+    fi
+    # Code. Inside quotes (dq > 0) it is blanked like the quotes around it.
+    local keep="${c}" two="${input:i:2}" three="${input:i:3}"
+    [[ ${dq} -gt 0 ]] && { keep=" "; two="  "; three="   "; }
+    if [[ "${c}" == "\\" ]]; then
+      if [[ "${input:i+1:1}" == $'\n' ]]; then output+="  "; ((i++)); continue; fi
+      output+=" "
+      ((i++)); [[ ${i} -lt ${n} ]] || continue
+      c="${input:i:1}"
+      if [[ ${dq} -gt 0 ]]; then output+=" "
       else
-        output="${output} "
+        case "${c}" in
+          ';'|'&'|'|'|'('|')'|'<'|'>'|'!'|'{'|'}'|'#'|'`'|'"'|"'"|\\|'$') output+="_" ;;
+          *) output+="${c}" ;;
+        esac
       fi
-    elif [[ -z "${quote}" ]]; then
-      case "${char}" in
-        "\\") escaped=1; output="${output} " ;;
-        "'") quote="single"; output="${output} " ;;
-        '"') quote="double"; output="${output} " ;;
-        *)   output="${output}${char}" ;;
-      esac
-    elif [[ "${quote}" == "single" ]]; then
-      [[ "${char}" == "'" ]] && quote=""
-      output="${output} "
-    else
-      if [[ "${char}" == "\\" ]]; then
-        escaped=1
-      elif [[ "${char}" == '"' ]]; then
-        quote=""
+      continue
+    fi
+    if [[ "${c}" == '$' && "${input:i+1:1}" == "'" ]]; then output+="  "; ((i++)); mode=AQ; continue; fi
+    if [[ "${c}" == "'" ]]; then output+=" "; mode=SQ; continue; fi
+    if [[ "${c}" == '"' ]]; then output+=" "; ((d++)); ctx[d]=D; par[d]=0; ((dq++)); continue; fi
+    if [[ "${ctx[d]}" == "A" || "${ctx[d]}" == "K" ]]; then
+      output+="${keep}"
+      if [[ "${ctx[d]}" == "K" ]]; then [[ "${c}" == "]" ]] && ((d--)); continue; fi
+      if [[ "${c}" == "(" ]]; then ((par[d]++))
+      elif [[ "${c}" == ")" ]]; then
+        if [[ ${par[d]} -gt 0 ]]; then ((par[d]--))
+        elif [[ "${input:i+1:1}" == ")" ]]; then output+="${keep}"; ((i++)); ((d--)); fi
       fi
-      output="${output} "
+      continue
+    fi
+    if [[ "${c}" == '$' && "${input:i+1:2}" == "((" ]]; then output+="${three}"; ((i += 2)); ((d++)); ctx[d]=A; par[d]=0; continue; fi
+    # `((` is arithmetic wherever it stands (the subshell reading is the other
+    # policy, judged when the shells disagree).
+    if [[ "${c}" == "(" && "${input:i+1:1}" == "(" ]]; then
+      output+="${two}"; ((i++)); ((d++)); ctx[d]=A; par[d]=0; continue
+    fi
+    if [[ "${c}" == '$' && "${input:i+1:1}" == "(" ]]; then output+="${two}"; ((i++)); ((d++)); ctx[d]=S; par[d]=0; continue; fi
+    if [[ "${c}" == '$' && "${input:i+1:1}" == "[" ]]; then output+="${two}"; ((i++)); ((d++)); ctx[d]=K; par[d]=0; continue; fi
+    if [[ "${c}" == '$' && "${input:i+1:1}" == "{" ]]; then output+="${two}"; ((i++)); ((d++)); ctx[d]=V; par[d]=0; continue; fi
+    output+="${keep}"
+    if [[ "${ctx[d]}" == "V" ]]; then [[ "${c}" == "}" ]] && ((d--)); continue; fi
+    if [[ "${c}" == "(" ]]; then ((par[d]++))
+    elif [[ "${c}" == ")" ]]; then
+      if [[ ${par[d]} -gt 0 ]]; then ((par[d]--))
+      elif [[ "${ctx[d]}" == "S" ]]; then ((d--)); fi
     fi
   done
   printf '%s' "${output}"
+}
+
+reference_scan_text() { reference_spec_scan_text "$@"; }
+
+# `((` opens arithmetic only where a command starts.
+reference_cmdpos() {
+  local input="$1" k=$(( $2 - 1 )) w=""
+  while [[ ${k} -ge 0 && ( "${input:k:1}" == " " || "${input:k:1}" == $'\t' ) ]]; do ((k--)); done
+  [[ ${k} -lt 0 ]] && return 0
+  case "${input:k:1}" in $'\n'|';'|'&'|'|'|'('|'!'|'{') return 0 ;; esac
+  while [[ ${k} -ge 0 && "${input:k:1}" == [a-z] ]]; do w="${input:k:1}${w}"; ((k--)); done
+  [[ "${w}" =~ ^(if|then|else|elif|while|until|do|time)$ ]]
 }
 
 # Command substitution eats trailing newlines, and rule 4 turns a quoted newline
@@ -204,11 +273,15 @@ check "an escaped backslash then an escaped quote keeps the region open" \
 # rule 2: outside a region a backslash escapes the byte after it
 check "an escaped quote outside a region is data, not an opening quote" \
   'echo \"npm install evil\"' \
-  'echo  "npm install evil "'
+  'echo  _npm install evil _'
 
 check "an escaped single quote outside a region is data too" \
   "echo \' ; npm i x" \
-  "echo  ' ; npm i x"
+  "echo  _ ; npm i x"
+
+check "an escaped backslash or dollar passes as _, so the scan reads the same again" \
+  'echo \\\$ ; npm i x' \
+  'echo  _ _ ; npm i x'
 
 check "a backslash before a command name is blanked" \
   '\pip install evil' \
@@ -289,39 +362,7 @@ pass "randomized differential: ${fuzz_cases} inputs, seed ${fuzz_seed}, no diver
 # sees it. Without this, a broken harness and a clean run look identical.
 control_hit=0
 reference_scan_text() {
-  local LC_ALL=C
-  local input="$1" output="" quote="" escaped="" char i
-  for ((i = 0; i < ${#input}; i++)); do
-    char="${input:i:1}"
-    if [[ -n "${escaped}" ]]; then
-      escaped=""
-      if [[ -z "${quote}" && "${char}" != $'\n' ]]; then
-        case "${char}" in
-          ';'|'&'|'|'|'('|')'|'<'|'>'|'!'|'{'|'}'|'#'|'`') output="${output}_" ;;
-          *) output="${output}${char}" ;;
-        esac
-      else
-        output="${output} "
-      fi
-    elif [[ -z "${quote}" ]]; then
-      case "${char}" in
-        "\\") escaped=1; output="${output} " ;;
-        "'") quote="single"; output="${output} " ;;
-        '"') quote="double"; output="${output} " ;;
-        *)   output="${output}${char}" ;;
-      esac
-    elif [[ "${quote}" == "single" ]]; then
-      output="${output} "
-    else
-      if [[ "${char}" == "\\" ]]; then
-        escaped=1
-      elif [[ "${char}" == '"' ]]; then
-        quote=""
-      fi
-      output="${output} "
-    fi
-  done
-  printf '%s' "${output}"
+  REF_SQ_CLOSES=0 reference_spec_scan_text "$@"
 }
 RANDOM="${fuzz_seed}"
 for ((c = 0; c < fuzz_cases; c++)); do
@@ -334,6 +375,91 @@ for ((c = 0; c < fuzz_cases; c++)); do
 done
 [[ ${control_hit} -gt 0 ]] || fail "control: a mutated spec produced no divergence, so the differential above measures nothing"
 pass "control: mutated spec diverges on ${control_hit}/${fuzz_cases} inputs, so the differential can fail"
+
+# --- view properties ------------------------------------------------------------
+# Every reader takes a view of the one lexing, and two views are read as offsets
+# into the command and may be read again: scan (what the predicates read) and
+# code (what the payload readers read, quotes kept). Both keep the byte length
+# of the command, so an offset found in a view is the offset in the command, and
+# both are idempotent, so a view read again is the view read once. Stripping a
+# heredoc twice is how its body once swallowed the line after it (caught in
+# review). The joined view is neither: it drops continuations on purpose.
+# Checked on every recorded shell form and on random input drawn from the
+# characters quotes, comments, heredocs and substitutions are made of.
+scan_view() { shell_lex "$1" scan arith "safedeps:scan-contract"; }
+code_view() { shell_lex "$1" code arith "safedeps:scan-contract"; }
+scan_view_sub() { shell_lex "$1" scan sub "safedeps:scan-contract"; }
+code_view_sub() { shell_lex "$1" code sub "safedeps:scan-contract"; }
+property_failures=0
+check_view_properties() { # input label
+  local x="$1" v once twice
+  for v in scan_view code_view scan_view_sub code_view_sub; do
+    # Not through capture: the outer $(...) would strip a trailing newline
+    # from the view and read as a length change the lexer did not make.
+    once=$("${v}" "${x}"; printf 'X'); once="${once%X}"
+    if [[ "$(byte_len "${once}")" != "$(byte_len "${x}")" ]]; then
+      printf 'length: %s changed the length of [%q] (%s)\n' "${v}" "${x}" "$2" >&2
+      property_failures=$((property_failures + 1))
+      continue
+    fi
+    [[ "${v}" == *_sub ]] && continue
+    twice=$("${v}" "${once}"; printf 'X'); twice="${twice%X}"
+    if [[ "${twice}" != "${once}" ]]; then
+      printf 'idempotence: %s read twice differs on [%q] (%s)\n  once  [%q]\n  twice [%q]\n' "${v}" "${x}" "$2" "${once}" "${twice}" >&2
+      property_failures=$((property_failures + 1))
+    fi
+  done
+}
+forms_file="${ROOT_DIR}/scripts/measure/shell-reading-forms.json"
+form_count=$(jq length "${forms_file}")
+for ((i = 0; i < form_count; i++)); do
+  form=$(jq -j ".[${i}].text" "${forms_file}" | sed -e 's/@@TAIL@@/pip install evil==6.6.6/' -e 's/@@TAIL_SPLIT@@/pi\\\
+p install evil==6.6.6/'; printf 'X')
+  check_view_properties "${form%X}" "$(jq -r ".[${i}].id" "${forms_file}")"
+done
+RANDOM="${fuzz_seed}"
+heredoc_alphabet=(\' \" \\ ' ' '<' '<' '-' '#' '`' '$' '(' ')' '{' '}' E O F p i $'\n' $'\n' $'\t' ';' '|' '&' '=' '1')
+for ((c = 0; c < fuzz_cases; c++)); do
+  len=$((RANDOM % 40))
+  input=""
+  for ((k = 0; k < len; k++)); do
+    input+="${heredoc_alphabet[RANDOM % ${#heredoc_alphabet[@]}]}"
+  done
+  check_view_properties "${input}" "random ${c}"
+done
+[[ ${property_failures} -eq 0 ]] || fail "view properties: ${property_failures} violation(s) (seed ${fuzz_seed})"
+pass "view properties: scan and code keep length and are idempotent on ${form_count} shell forms and ${fuzz_cases} random inputs"
+
+# --- the lexer memo -------------------------------------------------------------
+# Above 4KB a view is reused within one guard run. Its key is a checksum, which
+# the author of a command can collide on purpose, so a hit must also match the
+# stored text byte for byte. And the memo directory is made by the guard: one
+# named in the environment would be a place to plant a view for a command.
+memo_dir=$(mktemp -d "${TMPDIR:-/tmp}/safedeps-memo-test.XXXXXX")
+big_install="pip install evil==6.6.6; echo '$(printf 'x%.0s' $(seq 1 5000))'"
+memo_key="${memo_dir}/scan.arith.$(printf '%s' "${big_install}" | cksum | tr ' ' '.')"
+printf 'PLANTED' > "${memo_key}.out"; printf 'some other text' > "${memo_key}.in"
+got=$(SAFEDEPS_LEX_CACHE="${memo_dir}" shell_lex "${big_install}" scan arith "safedeps:scan-contract"; printf 'X'); got="${got%X}"
+[[ "${got}" != "PLANTED" && "${got}" == "pip install evil==6.6.6;"* ]] \
+  || fail "a memo entry under the right key but for other text is not returned"
+printf 'PLANTED' > "${memo_key}.out"; printf '%s' "${big_install}" > "${memo_key}.in"
+got=$(SAFEDEPS_LEX_CACHE="${memo_dir}" shell_lex "${big_install}" scan arith "safedeps:scan-contract"; printf 'X'); got="${got%X}"
+[[ "${got}" == "PLANTED" ]] || fail "an exact-text memo entry is returned, so the memo is in use"
+# The guard ignores a memo directory from the environment. Plant a blank view
+# for every view of the command; the install must still be judged.
+for v in scan code joined unprefixed; do
+  for pol in arith sub; do
+    k="${memo_dir}/${v}.${pol}.$(printf '%s' "${big_install}" | cksum | tr ' ' '.')"
+    printf '%*s' "${#big_install}" '' > "${k}.out"; printf '%s' "${big_install}" > "${k}.in"
+  done
+done
+planted_home=$(mktemp -d "${TMPDIR:-/tmp}/safedeps-memo-home.XXXXXX")
+planted_out=$(jq -nc --arg c "${big_install}" --arg cwd "${planted_home}" '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
+  SAFEDEPS_LEX_CACHE="${memo_dir}" HOME="${planted_home}" SAFEDEPS_HOME="${planted_home}/safe" scripts/safedeps-hook-entry.sh pre 2>/dev/null)
+[[ "$(jq -r '.hookSpecificOutput.permissionDecision // "pass"' <<< "${planted_out:-{\}}")" == "deny" ]] \
+  || fail "a memo directory planted through the environment does not hide an install"
+rm -rf "${memo_dir}" "${planted_home}"
+pass "the lexer memo returns a view only for the exact text, and only from the guard's own directory"
 
 # --- when the scanner itself fails ----------------------------------------------
 # Every predicate reads this function's output inside a condition or a command
