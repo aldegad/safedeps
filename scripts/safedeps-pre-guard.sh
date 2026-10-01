@@ -332,6 +332,9 @@ command_pipes_unread_install_to_shell() {
 #   joined  code, with line continuations removed and every newline that does
 #           not end a statement blanked. What is read one line at a time.
 #   shell-bodies  the bodies of heredocs whose command pipes into something.
+#   live    scan, with code nested in quotes ("$(...)") and live code in an
+#           unquoted heredoc body kept: every byte the shell runs at this
+#           level. What the inert rewrite reads.
 #
 # It replaced three state machines that ran one after another -- a line-based
 # heredoc regex, a line joiner and the quote scanner -- and had to agree. They
@@ -784,14 +787,14 @@ shell_lex() {
         }
         for (k = 1; k <= N; k++) {
           cc = X[k]; cl = C[k]
-          if (view == "scan") {
+          if (view == "scan" || view == "live") {
             # A code `#` is never a comment start here, and must not become one
             # when the scan is read again: after a blanked region (a quoted word
             # with a `#` glued to its closing quote) it would follow a blank,
             # which is where a comment starts.
             if (cl == "c" || cl == "p") put(cc == "#" && (k == 1 || C[k-1] != "c" && C[k-1] != "e") ? "_" : cc)
             else if (cl == "e") put(index(";&|()<>!{}#`\042\047\\$", cc) ? "_" : (cc == "\n" ? " " : cc))
-            else if (cl == "B") put(" ")
+            else if (view == "live" && (cl == "Q" || cl == "B")) put(cc)
             else put(" ")
             continue
           }
@@ -1237,7 +1240,14 @@ command_needs_inplace_inert() {
   local scanned code
   scanned=$(command_scan_text "$1")
   [[ "${scanned}" == *$'\n'* ]] && return 0
-  printf '%s' "${scanned}" | judge_grep -qE '[;&|]' && return 0
+  # A group, a substitution or an expansion: the flag appended to the end lands
+  # outside it, or becomes an argument of what it expands to.
+  printf '%s' "${scanned}" | judge_grep -qE '[;&|()`$]' && return 0
+  # An install that is not the command's own code -- a script handed to
+  # `sh -c` or `eval` -- is not where an appended flag lands: it would become
+  # that script's $0.
+  printf '%s' "${scanned}" \
+    | judge_grep -qE "npm${SAFEDEPS_G_OPTS}[[:space:]]+(${SAFEDEPS_G_NPM_VERBS})([[:space:]]|\$)" || return 0
   # A comment or a heredoc: the code view blanks both, so it differs from the
   # command wherever one is. The scan view blanks them too, which is why this
   # cannot be read off the scan view the way `;&|` are.
@@ -1245,29 +1255,116 @@ command_needs_inplace_inert() {
   [[ "${code}" != "$1" ]]
 }
 
-# The command with `--ignore-scripts` inserted right after every npm install
-# verb that is code -- found on the scan view, so an install named inside a
-# comment, a quoted string or a heredoc body is not one, and a quoted option
-# value (`--userconfig "/tmp/a b/.npmrc"`) does not hide the verb after it. The
-# scan view keeps every byte in place, so a match offset there is the offset in
-# the command. Prints nothing when no verb was found. A raw-text rewrite used
-# to land on an `npm i` inside a trailing comment and count that as done
-# (caught in review), and could not see past a quoted option value.
-inert_rewrite_in_place() {
-  local command="$1" scan matches offsets
-  scan=$(command_scan_text "${command}") || return 1
+# Offsets just past each npm install verb in <text>, one per line, read on the
+# live view, so a verb in a comment, a quoted string or a heredoc body is not
+# one, and a verb in a substitution inside quotes is. The live view keeps every
+# byte in place, so an offset there is the offset in <text>.
+inert_verb_ends() {
+  local live matches
+  live=$(shell_lex "$1" live arith "safedeps:inert_offsets") || return 1
   # The grep and the awk run apart so that only "no match" reads as no verb: a
   # failed awk shared one `||` with grep's exit 1, and the rewrite was then
   # dropped as if there were nothing to rewrite.
-  matches=$(printf '%s\n' "${scan}" \
+  matches=$(printf '%s\n' "${live}" \
     | LC_ALL=C judge_grep -obE "npm${SAFEDEPS_G_OPTS}[[:space:]]+(${SAFEDEPS_G_NPM_VERBS})([[:space:]]|\$)") || matches=""
   [[ -n "${matches}" ]] || return 0
-  if ! offsets=$(printf '%s\n' "${matches}" | LC_ALL=C awk '
+  if ! printf '%s\n' "${matches}" | LC_ALL=C awk '
     # safedeps:inert_offsets (scripts/measure/scan-failure-census.sh keys on this line)
-    { c = index($0, ":"); m = substr($0, c + 1); e = substr($0, 1, c - 1) + length(m); if (m ~ /[[:space:]]$/) e--; printf "%d ", e }'); then
+    { c = index($0, ":"); m = substr($0, c + 1); e = substr($0, 1, c - 1) + length(m); if (m ~ /[[:space:]]$/) e--; print e }'; then
     [[ -z "${SAFEDEPS_SCAN_MARK:-}" ]] || printf 'failed\n' >> "${SAFEDEPS_SCAN_MARK}"
     return 1
   fi
+}
+
+# The scripts handed to `sh -c` (or bash, zsh, dash) and `eval` in <command>, as
+# `<start> <length>` in bytes, for each script whose bytes are the bytes the
+# inner shell reads: a single-quoted one, or a double-quoted one with no
+# escape and no substitution in it. Prints `?` instead when a double-quoted
+# script it cannot map has `npm` anywhere after its head, so the caller records
+# a downgrade rather than reporting the command inert.
+inert_payload_spans() {
+  local command="$1" scan heads
+  scan=$(command_scan_text "${command}") || return 1
+  heads=$(printf '%s\n' "${scan}" \
+    | LC_ALL=C judge_grep -obE "(^|[^[:alnum:]_.-])((bash|sh|zsh|dash)[[:space:]]+-[A-Za-z]*c|eval)([[:space:]]|\$)" \
+    | LC_ALL=C awk '
+      # safedeps:inert_payload_spans (scripts/measure/scan-failure-census.sh keys on this line)
+      { c = index($0, ":"); printf "%d ", substr($0, 1, c - 1) + length(substr($0, c + 1)) }') || {
+    [[ -z "${SAFEDEPS_SCAN_MARK:-}" ]] || printf 'failed\n' >> "${SAFEDEPS_SCAN_MARK}"
+    return 1
+  }
+  [[ -n "${heads// /}" ]] || return 0
+  if ! printf '%s' "${command}" | LC_ALL=C awk -v heads="${heads}" '
+    # safedeps:inert_payload_spans (scripts/measure/scan-failure-census.sh keys on this line)
+    { X = X (NR > 1 ? "\n" : "") $0 }
+    END {
+      n = split(heads, H, " ")
+      for (j = 1; j <= n; j++) {
+        p = H[j] + 1
+        while (substr(X, p, 1) == " " || substr(X, p, 1) == "\t") p++
+        q = substr(X, p, 1)
+        if (q != "\047" && q != "\042") continue
+        e = index(substr(X, p + 1), q)
+        body = e ? substr(X, p + 1, e - 1) : ""
+        if (q == "\042" && (!e || index(body, "\\") || index(body, "$(") || index(body, "`"))) {
+          if (index(substr(X, p), "npm")) print "?"
+          continue
+        }
+        if (e < 2) continue
+        printf "%d %d\n", p, e - 1
+      }
+    }'; then
+    [[ -z "${SAFEDEPS_SCAN_MARK:-}" ]] || printf 'failed\n' >> "${SAFEDEPS_SCAN_MARK}"
+    return 1
+  fi
+}
+
+# Offsets just past every npm install verb the shell runs in <text>: its own
+# code (the live view) and, recursively, the scripts it hands to a shell.
+# Returns 3 when an install sits where no offset can reach it.
+inert_offsets_of() {
+  local text="$1" depth="${2:-0}" spans start len body inner e
+  inert_verb_ends "${text}" || return 1
+  (( depth < 4 )) || return 0
+  spans=$(inert_payload_spans "${text}") || return 1
+  [[ "${spans}" != *"?"* ]] || return 3
+  while read -r start len; do
+    [[ -n "${start}" ]] || continue
+    body=$(printf '%s' "${text}" | LC_ALL=C awk -v s="${start}" -v l="${len}" '
+      # safedeps:inert_payload_spans (scripts/measure/scan-failure-census.sh keys on this line)
+      { X = X (NR > 1 ? "\n" : "") $0 } END { printf "%s", substr(X, s + 1, l) }') || {
+      [[ -z "${SAFEDEPS_SCAN_MARK:-}" ]] || printf 'failed\n' >> "${SAFEDEPS_SCAN_MARK}"
+      return 1
+    }
+    inner=$(inert_offsets_of "${body}" $(( depth + 1 ))) || return $?
+    for e in ${inner}; do
+      printf '%s\n' "$(( start + e ))"
+    done
+  done <<< "${spans}"
+}
+
+# The command with `--ignore-scripts` inserted right after every npm install
+# verb the shell runs: in the command's own code, in a substitution, and in a
+# script it hands to `sh -c` or `eval`. Prints nothing when no verb was found.
+# Returns 3, printing nothing, when an npm install sits where the rewrite cannot
+# reach it -- a double-quoted script with an escape or a substitution in it, a
+# heredoc piped into a shell -- so the caller records the downgrade instead of
+# reporting the command inert.
+#
+# A raw-text rewrite used to land on an `npm i` inside a trailing comment and
+# count that as done, and could not see past a quoted option value (caught in
+# review); the scan view that replaced it blanked quoted scripts, so an install
+# in `sh -c '...'` beside a visible one ran its lifecycle scripts with nothing
+# recorded (caught in the release integration).
+inert_rewrite_in_place() {
+  local command="$1" offsets rc=0
+  offsets=$(inert_offsets_of "${command}") || rc=$?
+  (( rc == 0 )) || return "${rc}"
+  if strip_heredoc_bodies "${command}" shell-bodies \
+      | LC_ALL=C judge_grep -qE "npm${SAFEDEPS_G_OPTS}[[:space:]]+(${SAFEDEPS_G_NPM_VERBS})([[:space:]]|\$)"; then
+    return 3
+  fi
+  offsets=$(printf '%s\n' "${offsets}" | LC_ALL=C sort -nu | tr '\n' ' ')
   [[ -n "${offsets// /}" ]] || return 0
   if ! { printf '%s\n' "${offsets}"; printf '%s' "${command}"; } | LC_ALL=C awk '
     # safedeps:inert_rewrite_in_place (scripts/measure/scan-failure-census.sh keys on this line)
@@ -2766,7 +2863,13 @@ if ! jq -e 'has("turn_id")' <<< "${INPUT}" >/dev/null 2>&1 && \
     # A failed sed leaves UPDATED_COMMAND empty, which differs from COMMAND and
     # so would skip both the rewrite and the downgrade record below; the mark
     # makes the gate settle it instead.
-    UPDATED_COMMAND=$(inert_rewrite_in_place "${COMMAND}") || guard_mark_reading_failed
+    inert_rc=0
+    UPDATED_COMMAND=$(inert_rewrite_in_place "${COMMAND}") || inert_rc=$?
+    case "${inert_rc}" in
+      0) ;;
+      3) UPDATED_COMMAND="" ;;
+      *) guard_mark_reading_failed ;;
+    esac
     if [[ -z "${UPDATED_COMMAND}" || "${UPDATED_COMMAND}" == "${COMMAND}" ]]; then
       # Rewrite did not land — never blind-append to a compound command. Downgrade
       # to detect-and-rollback (the effect gate still verifies the closure) and
@@ -2787,7 +2890,7 @@ fi
 guard_settle_scan_failure
 
 if [[ "${INERT_DOWNGRADED}" == "true" ]]; then
-  log_advisory "pre-guard: could not make compound npm install inert in-place; lifecycle scripts may run before the effect gate verifies (downgraded to detect-and-rollback). Command: ${COMMAND}"
+  log_advisory "pre-guard: could not make every npm install in this command inert in place (one is in a compound command the rewrite did not land in, or in a script handed to a shell that it cannot reach); lifecycle scripts may run before the effect gate verifies (downgraded to detect-and-rollback). Command: ${COMMAND}"
 fi
 
 # Write per-install pending state for PostToolUse, keyed by (dir_hash, normalized
