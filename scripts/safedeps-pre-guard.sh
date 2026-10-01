@@ -113,6 +113,21 @@ fi
 # shellcheck source=../lib/install-grammar.sh
 source "${SAFEDEPS_INSTALL_GRAMMAR_LIB}"
 
+# Where an npm install lands: the nearest package.json or node_modules, lifted
+# to the workspace root that declares it. Without this file that cannot be
+# decided, so every npm install target is `?` and the install is recorded
+# UNGATED rather than read in a directory npm may not have used.
+SAFEDEPS_NPM_WORKSPACES_LIB="${BASH_SOURCE[0]%/*}/../lib/npm/workspaces.sh"
+if [[ -r "${SAFEDEPS_NPM_WORKSPACES_LIB}" ]]; then
+  # shellcheck source=../lib/npm/workspaces.sh
+  source "${SAFEDEPS_NPM_WORKSPACES_LIB}"
+else
+  safedeps_npm_install_root() {
+    printf '?\tlib/npm/workspaces.sh is unreadable\n'
+  }
+  safedeps_snapshot_file_name() { printf '%s' "$1"; }
+fi
+
 # Loose, on purpose: this reads raw text nobody has parsed, for the two cases
 # where the precise recognizer cannot run (jq missing, the scanner failing).
 # A false positive there denies an install-looking command on a broken machine.
@@ -736,30 +751,6 @@ guard_npmrc_value() {
   ' "${file}" 2>/dev/null || true
 }
 
-# The directory npm reads the project .npmrc from when it installs in <dir>: the
-# nearest directory at or above <dir> with a package.json or a node_modules, or
-# <dir> itself when there is none. `--prefix` names it outright. Measured: with
-# the .npmrc beside the project's package.json, an install from a subdirectory
-# followed it; with the .npmrc in a subdirectory that had no package.json, it
-# did not.
-guard_npm_local_prefix() {
-  local dir="$1" named="$2" probe
-  if [[ "${named}" == true ]]; then
-    printf '%s' "${dir}"
-    return 0
-  fi
-  probe="${dir}"
-  while [[ -n "${probe}" ]]; do
-    if [[ -e "${probe}/package.json" || -d "${probe}/node_modules" ]]; then
-      printf '%s' "${probe}"
-      return 0
-    fi
-    [[ "${probe}" != / ]] || break
-    probe=$(dirname "${probe}")
-  done
-  printf '%s' "${dir}"
-}
-
 # Why an npm install into <dir> is not recorded where the effect gate reads it,
 # because of an .npmrc; nothing when the project and user .npmrc leave it alone.
 #
@@ -781,9 +772,11 @@ guard_npm_local_prefix() {
 # alone. Anything else is read as not recorded, which costs an UNGATED line
 # where npm would have been harmless; the other direction costs a silent pass.
 guard_npmrc_unrecorded() {
-  local dir="$1" named="$2" user_rc="$3" cli_global_off="$4"
+  local dir="$1" user_rc="$2" cli_global_off="$3"
   local project_rc key value source
-  project_rc="$(guard_npm_local_prefix "${dir}" "${named}")/.npmrc"
+  # <dir> is where npm installs, so its .npmrc is the project's: npm ignores a
+  # workspace member's own .npmrc and reads the root's.
+  project_rc="${dir}/.npmrc"
   local undecided=false
   for key in location global; do
     source="${project_rc}"
@@ -804,11 +797,12 @@ guard_npmrc_unrecorded() {
     if [[ "${key}" == global && "${cli_global_off}" == true ]]; then
       continue
     fi
-    printf '%s sets %s=%s' "${source}" "${key}" "${value}"
+    printf '%s sets %s=%s, so npm does not record this install where the effect gate reads it' \
+      "${source}" "${key}" "${value}"
     return 0
   done
   if [[ "${undecided}" == true ]]; then
-    printf 'the user .npmrc is named by a value the shell decides at run time'
+    printf 'the user .npmrc is named by a value the shell decides at run time, so safedeps cannot tell whether npm records this install where the effect gate reads it'
   fi
   return 0
 }
@@ -850,7 +844,7 @@ guard_npmrc_unrecorded() {
 resolve_install_targets() {
   local cmd="$1" cwd="$2"
   local text before stmt after words head target want kind manager tok value normalized in_env skip
-  local named user_rc cli_global_off why
+  local named user_rc cli_global_off why workspaces_off
   local dir="${cwd}" grouped=false env_global=false env_userconfig=false
   local -a toks=()
 
@@ -964,10 +958,48 @@ resolve_install_targets() {
       fi
     fi
 
+    # npm does not install in the directory it runs in. It walks up to the
+    # nearest package.json or node_modules, then to the workspace root that
+    # declares that directory (lib/npm/workspaces.sh). A `--prefix` or `-C`
+    # names the directory outright, and `--workspaces=false` stops the walk
+    # before the root. Measured: `cd src && npm install x`, with no
+    # package.json in src, wrote the project's lockfiles while the gate read
+    # src and confirmed it clean.
+    why=""
+    if [[ "${kind}" == npm && "${target}" != global && "${target}" != "?" && "${named}" != true ]]; then
+      workspaces_off=false
+      want=""
+      for tok in "${toks[@]}"; do
+        # nopt takes the next word as a boolean's value only when it is one.
+        if [[ -n "${want}" ]]; then
+          want=""
+          case "${tok}" in
+            false) workspaces_off=true; continue ;;
+            true) continue ;;
+          esac
+        fi
+        case "${tok}" in
+          --no-workspaces|--workspaces=false) workspaces_off=true ;;
+          --workspaces|--workspaces=true) want=1 ;;
+          --workspaces=*) workspaces_off="?" ;;
+        esac
+      done
+      if [[ "${workspaces_off}" == "?" ]]; then
+        target="?"
+        why="the command sets --workspaces to a value this gate does not read, so safedeps cannot tell where npm records this install"
+      else
+        target=$(safedeps_npm_install_root "${target}" "${workspaces_off}")
+        if [[ "${target}" == "?"* ]]; then
+          why="${target#"?"}"
+          why="${why#$'\t'}, so safedeps cannot tell where npm records this install"
+          target="?"
+        fi
+      fi
+    fi
+
     # An install the command keeps in a known directory can still be kept off
     # the record by an .npmrc. The user file is the one npm would read: named
     # by `--userconfig`, then by npm_config_userconfig, then ~/.npmrc.
-    why=""
     if [[ "${kind}" == npm && "${target}" != global && "${target}" != "?" ]]; then
       user_rc=""
       cli_global_off=false
@@ -993,7 +1025,7 @@ resolve_install_targets() {
         '~/'*) user_rc="${HOME}/${user_rc#'~/'}" ;;
       esac
       [[ "${user_rc}" == "?" ]] || user_rc=$(guard_literal_dir "${dir}" "${user_rc}")
-      why=$(guard_npmrc_unrecorded "${target}" "${named}" "${user_rc}" "${cli_global_off}")
+      why=$(guard_npmrc_unrecorded "${target}" "${user_rc}" "${cli_global_off}")
       [[ -z "${why}" ]] || target="?"
     fi
     printf '%s\t%s\t%s\n' "${kind}" "${target}" "${why}"
@@ -1005,7 +1037,8 @@ snapshot_project_file() {
   local relative_file="$1"
   local category="${2:-manifest}"
   local source_path="${PROJECT_DIR}/${relative_file}"
-  local snapshot_path="${SNAPSHOT_DIR}/${SNAPSHOT_ID}_${relative_file}"
+  local snapshot_path
+  snapshot_path="${SNAPSHOT_DIR}/${SNAPSHOT_ID}_$(safedeps_snapshot_file_name "${relative_file}")"
 
   printf '%s\n' "${relative_file}" >> "${SNAPSHOT_DIR}/${SNAPSHOT_ID}_monitored_files.list"
 
@@ -1541,7 +1574,7 @@ done <<< "${INSTALL_TARGETS}"
 # a command that looks like an ordinary project install.
 while IFS=$'\t' read -r _ _ install_why; do
   [[ -n "${install_why}" ]] || continue
-  log_advisory "pre-guard: ${install_why}, so npm does not record this install where the effect gate reads it. Command: ${COMMAND}"
+  log_advisory "pre-guard: ${install_why}. Command: ${COMMAND}"
 done <<< "${INSTALL_TARGETS}"
 if [[ "${PROJECT_DIR}" != "${CWD_DIR}" ]]; then
   log_advisory "pre-guard: the install lands outside cwd — snapshotting/verifying ${PROJECT_DIR} instead of cwd (${CWD_DIR})."
@@ -1613,6 +1646,14 @@ done
 while IFS= read -r csproj_file; do
   snapshot_project_file "$(basename "${csproj_file}")" "manifest"
 done < <(find "${PROJECT_DIR}" -maxdepth 1 -type f -name "*.csproj" 2>/dev/null | sort)
+
+# A workspace install writes a member's package.json as well as the root's.
+if declare -F safedeps_npm_workspace_manifests >/dev/null; then
+  while IFS= read -r member_manifest; do
+    [[ -n "${member_manifest}" ]] || continue
+    snapshot_project_file "${member_manifest}" "manifest"
+  done < <(safedeps_npm_workspace_manifests "${PROJECT_DIR}")
+fi
 
 # Save pre-install listings for diff-based detection (avoids mtime-based find -newer)
 if [[ -d "${PROJECT_DIR}/node_modules" ]]; then

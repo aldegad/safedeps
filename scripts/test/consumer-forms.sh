@@ -520,8 +520,11 @@ pass "unpinned pnpm/yarn/bun, global npm, and runner installs are recorded"
 # that lands somewhere the text does not let the gate follow is not read, so it
 # is recorded. A literal `cd` to a directory that exists, and npm's `-C`, are
 # followed; everything the shell decides at run time is not
-# (safedeps/effect-gate-blind-to-lockless-npm-installs).
+# (safedeps/effect-gate-blind-to-lockless-npm-installs). `sub` has a
+# package.json of its own, so npm installs there and not in the project: npm
+# walks up from a directory without one.
 mkdir -p "${project_dir}/sub"
+printf '{}\n' > "${project_dir}/sub/package.json"
 for unfollowed in \
   'cd "$SUBDIR" && npm install evil' \
   'cd $(dirname x)/sub && npm install evil' \
@@ -577,6 +580,7 @@ pending_project_dir() {
 }
 spaced="${tmp_root}/x y"
 mkdir -p "${spaced}" "${project_dir}/my dir"
+printf '{}\n' > "${project_dir}/my dir/package.json"
 spaced_real=$(cd "${spaced}" && pwd -P)
 project_real=$(cd "${project_dir}" && pwd -P)
 for form in \
@@ -592,6 +596,11 @@ for form in 'cd "my dir" && npm install left-pad' 'cd my\ dir && npm install lef
   got=$(pending_project_dir "${form}")
   [[ "${got}" == "${project_real}/my dir" ]] || fail "a quoted cd operand is one word: ${form} (verifies ${got})"
 done
+# npm installs where the nearest package.json is, not in the directory it runs
+# in: from a directory without one, the effect gate reads the project above it.
+mkdir -p "${project_dir}/plain"
+got=$(pending_project_dir 'cd plain && npm install left-pad')
+[[ "${got}" == "${project_real}" ]] || fail "an install from a directory with no package.json is read where npm walks up to (verifies ${got})"
 got=$(pending_project_dir 'echo "a; cd sub" && npm install left-pad')
 [[ "${got}" == "${project_real}" ]] || fail "a cd inside quotes is not a statement (verifies ${got})"
 # The yarn case denies either way here, because x@1.0.0 is not approved. What
