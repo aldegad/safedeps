@@ -552,10 +552,18 @@ pass "an install behind an assignment prefix is gated however the value is quote
 # form of a dashed one (lib/utils/cmd-list.js deref). The grammar holds what
 # deref accepts, measured from npm; where an npm is on PATH, that measurement is
 # rerun here, so a newer npm that adds a spelling turns this red.
+# An npm whose parser cannot be asked (npm 9 and older have no deref), or no
+# npm at all, is a skip that says so, never a quiet pass.
 if command -v npm >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
-  scripts/measure/npm-verb-spellings.sh >/dev/null \
-    || fail "the grammar's npm verbs are what npm's own parser accepts ($(scripts/measure/npm-verb-spellings.sh 2>&1 | head -5 | tr '\n' ' '))"
-  pass "the grammar's npm command words are the ones npm's parser accepts (scripts/measure/npm-verb-spellings.sh, npm $(npm --version))"
+  spellings_rc=0
+  spellings_out=$(scripts/measure/npm-verb-spellings.sh 2>&1) || spellings_rc=$?
+  case "${spellings_rc}" in
+    0) pass "the grammar's npm command words are the ones npm's parser accepts (scripts/measure/npm-verb-spellings.sh, npm $(npm --version))" ;;
+    3) pass "the grammar's npm command words against npm's parser # SKIP ${spellings_out}" ;;
+    *) fail "the grammar's npm verbs are what npm's own parser accepts ($(head -5 <<< "${spellings_out}" | tr '\n' ' '))" ;;
+  esac
+else
+  pass "the grammar's npm command words against npm's parser # SKIP no npm and node on PATH to ask"
 fi
 
 # --- 7. A spec is checked as the package it names ------------------------------
