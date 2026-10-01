@@ -525,12 +525,18 @@ inert_out=$(run_hook_command "${tmp_root}/home-compound" "${tmp_root}/safe-compo
   || fail "a script the inert rewrite cannot map gets no partial rewrite"
 downgrades_after=$(grep -c 'could not make every npm install in this command inert' "${tmp_root}/safe-compound/advisory.log" 2>/dev/null || true)
 (( ${downgrades_after:-0} > ${downgrades_before:-0} )) || fail "a script the inert rewrite cannot map is recorded as a downgrade"
-# One with an escaped quote in it is not read to its end by the payload reader
-# either, so the command is UNDECIDED before any rewrite is attempted.
+# One with an escaped quote in it is read to its end now (the payload reader
+# takes the word the shell passes), so the approved install inside it is judged
+# and allowed; the inert rewrite cannot map an escaped double-quoted script, so
+# it is a recorded downgrade, as above.
+downgrades_before=$(grep -c 'could not make every npm install in this command inert' "${tmp_root}/safe-compound/advisory.log" 2>/dev/null || true)
 inert_out=$(run_hook_command "${tmp_root}/home-compound" "${tmp_root}/safe-compound" 'npm install left-pad@1.3.0; sh -c "echo \"hi\"; npm install left-pad@1.3.0"')
-[[ "$(jq -r '.hookSpecificOutput.permissionDecision // ""' <<< "${inert_out}")" == deny ]] \
-  && grep -q UNDECIDED <<< "${inert_out}" \
-  || fail "a script with an escaped quote the payload reader cannot finish is UNDECIDED"
+[[ "$(jq -r '.hookSpecificOutput.permissionDecision // "allow"' <<< "${inert_out}")" != deny ]] \
+  || fail "an approved install in a script with an escaped quote is read and allowed (got: ${inert_out:0:160})"
+[[ -z "$(jq -r '.hookSpecificOutput.updatedInput.command // ""' <<< "${inert_out}")" ]] \
+  || fail "a script with an escaped quote gets no partial inert rewrite"
+downgrades_after=$(grep -c 'could not make every npm install in this command inert' "${tmp_root}/safe-compound/advisory.log" 2>/dev/null || true)
+(( ${downgrades_after:-0} > ${downgrades_before:-0} )) || fail "a script with an escaped quote is recorded as an inert downgrade"
 pass "a script the inert rewrite cannot reach is a recorded downgrade, or UNDECIDED when it cannot be read"
 
 # Finding #3: an `--prefix <dir>` install must be snapshotted/effect-gated against
