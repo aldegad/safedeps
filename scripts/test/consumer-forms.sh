@@ -274,7 +274,12 @@ for benign in \
   'dotnet package search Fabrikam.WebApi@1.2.3' \
   'python -m pytest' \
   'echo do pip install evil==1.0.0' \
-  'echo npm i evil@1.0.0'
+  'echo npm i evil@1.0.0' \
+  'npm init' \
+  'npm init -y' \
+  'npm init --scope @acme' \
+  'npm create' \
+  'echo npm create evil@1.0.0'
 do
   [[ "$(gate_decision "${benign}")" != "deny" ]] || fail "benign command is not denied: ${benign}"
 done
@@ -411,6 +416,16 @@ for grammar_form in \
   "npm installTest evil@1.0.0" \
   "npm si evil@1.0.0" \
   "npm exe evil@1.0.0" \
+  "npm create evil@1.0.0" \
+  "npm init evil@1.0.0" \
+  "npm innit evil@1.0.0" \
+  "npm cr evil@1.0.0" \
+  "npm init @usr/foo@2.0.0" \
+  "npm init -y evil@1.0.0 my-app" \
+  "pnpm create evil@1.0.0" \
+  "yarn create evil@1.0.0" \
+  "bun create evil@1.0.0" \
+  "bun c evil@1.0.0" \
   "yarn up evil@1.0.0" \
   "yarn global add evil@1.0.0" \
   "yarn workspace web add evil@1.0.0" \
@@ -930,6 +945,32 @@ expect_prescription 'no-deny;' "pip install 'ev\\il==6.6.6'"
 expect_prescription 'no-deny;' 'echo ev\il==6.6.6'
 pass "a backslash outside quotes is read as the shell reads it, so the escaped name is the package checked"
 
+# A `create` runs a package whose name the manager derives from its operand,
+# and that package is the one the ledger has to judge. Approving `vite@5.0.0`
+# must not pass `create-vite@5.0.0`: the prescription names the rewritten
+# package, and a row with the operand itself approved still prescribes it.
+# Each rewrite is the manager's own (guard_create_identity): npm's init.js,
+# pnpm's convertToCreateName, Yarn 2+'s create.ts and Yarn 1's create.js, and
+# bun's add_create_prefix.
+expect_prescription 'npm create-evil@1.0.0;' 'npm create evil@1.0.0'
+expect_prescription 'npm create-evil@1.0.0;' 'npm create evil@1.0.0' npm evil 1.0.0
+expect_prescription 'npm create-evil@1.0.0;' 'npm innit evil@1.0.0' npm evil 1.0.0
+expect_prescription 'npm create-evil@1.0.0;' 'npm cr evil@1.0.0'
+expect_prescription 'npm @usr/create-foo@2.0.0;' 'npm init @usr/foo@2.0.0' npm @usr/foo 2.0.0
+expect_prescription 'npm @usr/create@2.0.0;' 'npm init @usr@2.0.0'
+expect_prescription 'npm create-create-vite@5.0.0;' 'npm init create-vite@5.0.0'
+expect_prescription 'npm create-foo@1.0.0;' 'npm init --package evil@1.0.0 foo@1.0.0'
+expect_prescription 'npm create-evil@1.0.0;' 'pnpm create evil@1.0.0' npm evil 1.0.0
+expect_prescription 'npm create-evil@1.0.0;' 'pnpm create create-evil@1.0.0'
+expect_prescription 'npm @usr/create-foo@2.0.0;' 'pnpm create @usr/foo@2.0.0'
+expect_prescription 'npm create-evil@1.0.0;' 'yarn create evil@1.0.0' npm evil 1.0.0
+expect_prescription 'npm create-evil@1.0.0;npm create-create-evil@1.0.0;' 'yarn create create-evil@1.0.0'
+expect_prescription 'npm evil@1.0.0;' 'yarn create -p evil@1.0.0 foo'
+expect_prescription 'npm create-evil@1.0.0;' 'bun create evil@1.0.0' npm evil 1.0.0
+expect_prescription 'npm create-create-evil@1.0.0;' 'bun c create-evil@1.0.0'
+expect_prescription 'npm @usr/create-foo@2.0.0;' 'bun create @usr/foo@2.0.0'
+pass "a create is checked as the package its manager rewrites the operand into"
+
 # --- 11. The UNGATED record names each operand the gate did not check ---------
 # The record used to be a second parser: it read each statement on its own and
 # asked the extractor "was this package pinned?" by name, so a pin on one
@@ -1015,6 +1056,20 @@ operand_rows=(
   $'crates.io:ripgrep\tcargo install ripgrep@13.0.0 ripgrep'
   # Runners.
   $'npm:cowsay\tnpx cowsay@1.0.0 && npx cowsay'
+  $'npm:create-vite\tnpm create vite my-app'
+  $'npm:create-vite\tnpm init vite -- --template react'
+  $'npm:@usr/create\tnpm init @usr'
+  $'npm:create-vite\tpnpm create vite my-app'
+  $'npm:create-vite\tyarn create vite my-app'
+  $'npm:create-create-vite npm:create-vite\tyarn create create-vite my-app'
+  $'npm:create-vite\tbun create vite my-app'
+  $'npm:@bun-examples/elysia\tbun create elysia my-app'
+  # Quiet: a create that fetches nothing. npm init with no initializer writes a
+  # package.json; a path is a local template.
+  $'\tnpm init'
+  $'\tnpm init -y'
+  $'\tnpm init --scope @acme'
+  $'\tbun create ./Component.tsx'
   $'pypi:evil\tuvx --with evil ruff==0.1.0'
   $'pypi:evil\tpipx run --with evil evil2==1.0.0'
   $'npm:false\tnpx --yes false evil@1.0.0'

@@ -122,7 +122,7 @@ Claude Code 또는 Codex CLI가 `npm install`, `pip install`, `cargo add`, `go g
 
 ledger 게이트나 사전 비행 체크에 실패하면 해당 명령은 실행 전에 **차단**됩니다. 명령 가드는 의도적으로 best-effort이며, 에이전트 루프를 개선하고 직접적인 누락을 잡는 데 초점을 둡니다. npm의 권한 판단은 설치 후 효과 게이트가 담당합니다.
 
-**명령 가드가 읽는 것.** 매니저가 문서화한 방식이나 셸이 허용하는 방식으로 쓴 설치입니다. 별칭(`npm i`, `pnpm i`, `bun a`), 동사 앞의 옵션(`pip --quiet install`), 버전이 붙은 인터프리터(`pip3.11`, `python3.11 -m pip`), 패키지를 받아 실행하는 실행기(`npx`, `npm exec`, `pnpm dlx`, `yarn dlx`, `bunx`, `uvx`, `pipx run`, `go run <모듈>@<버전>`), 묶음·제어문(`( ... )`, `if ...; then ...`), 따옴표로 감싼 spec, 줄 이음을 모두 읽습니다. 백슬래시와 따옴표도 셸과 같은 규칙으로 읽습니다. v2.18.0 전까지는 이 표기 대부분이 판정도 기록도 없이 가드를 통과했습니다.
+**명령 가드가 읽는 것.** 매니저가 문서화한 방식이나 셸이 허용하는 방식으로 쓴 설치입니다. 별칭(`npm i`, `pnpm i`, `bun a`)과 npm 파서가 받아들이는 모든 명령어 철자(`npm upd`, `npm installTest`), 동사 앞의 옵션(`pip --quiet install`), 버전이 붙은 인터프리터(`pip3.11`, `python3.11 -m pip`), 패키지를 받아 실행하는 실행기(`npx`, `npm exec`, `pnpm dlx`, `yarn dlx`, `bunx`, `uvx`, `pipx run`, `go run <모듈>@<버전>`), 매니저별 `create`(`npm create vite` 와 `npm init vite` 는 `create-vite` 를 실행하므로 검사하고 기록하는 패키지도 `create-vite` 입니다. `pnpm create`, `yarn create`, `bun create` 도 같습니다), 묶음·제어문(`( ... )`, `if ...; then ...`), 따옴표로 감싼 spec, 줄 이음을 모두 읽습니다. 백슬래시와 따옴표도 셸과 같은 규칙으로 읽습니다. v2.18.0 전까지는 이 표기 대부분이 판정도 기록도 없이 가드를 통과했습니다.
 
 **명령 가드가 못 보는 것과, 그 비용이 생태계마다 다르다는 것.** 셸에게 넘기는 텍스트는 가드가 열거한 형태에서만 인식합니다 — `sh -c`, `eval`, 명령 치환, 셸로 들어가는 파이프. 그 목록 바깥의 형태는 통과합니다: herestring, `xargs` 가 조립한 명령줄, 파일로 쓴 뒤 실행하는 스크립트. 설치를 인자 그대로 실행하는 래퍼(`sudo`, `timeout`, `nohup`, `nice`)도 통과합니다. npm 에서는 이것이 미탐이 아니라 **지연 탐지**입니다. 효과 게이트가 살아 있는 lockfile 을 읽어서 명령을 어떻게 썼든 결과를 잡기 때문입니다 — 단 게이트가 30초 훅 예산 안에서 끝날 때까지만이고, 그 범위는 주어진 것이 아니라 측정된 값입니다(아래 참고). `pip`, `cargo`, `go`, `gem`, `maven`, `nuget` 에는 가드 뒤에 closure resolver 가 없으므로 같은 형태가 **완전 미탐**입니다 — `~/.safedeps/advisory.log` 에 `UNVERIFIED` 로 기록되고 그걸로 끝입니다. "가드가 이 형태를 파싱하지 않는다" 를 npm 기준으로 읽지 마세요. 경계는 `scripts/test/consumer-forms.sh` 에 측정되어 고정돼 있고, 왜 경계를 넓히는 게 답이 아닌지는 `ARCHITECTURE.md` 가 설명합니다.
 
@@ -191,7 +191,7 @@ ledger 게이트나 사전 비행 체크에 실패하면 해당 명령은 실행
 | Registry hijack | 비공식 소스에 대한 `--registry` 지정 | PreToolUse advisory guard | **차단** |
 | Script safety bypass | `npm config set ignore-scripts false` | PreToolUse advisory guard | **차단** |
 | Command indirection | `eval "npm install ..."`, 서브셸 확장, 변수 indirection | PreToolUse advisory guard | **Guard** |
-| npx/dlx execution | `npx`, `npm exec`, `pnpm dlx`, `yarn dlx`, `bunx`, `uvx`, `pipx run` 패키지 실행 | PreToolUse advisory guard | **Guard** |
+| npx/dlx execution | `npx`, `npm exec`, `pnpm dlx`, `yarn dlx`, `bunx`, `uvx`, `pipx run` 패키지 실행, 그리고 `npm create`/`npm init <initializer>`, `pnpm create`, `yarn create`, `bun create` | PreToolUse advisory guard | **Guard** |
 | 승인되지 않은 전이적 의존성 | npm `package-lock.json`에 있는 패키지가 직접 ledger 또는 `transitive_specs`에 없음 | PostToolUse npm primary effect gate | **Reorg** |
 | 취약한 closure 패키지 | OSV/KEV 적중이 있는 npm 직접/전이 패키지 | PostToolUse npm primary effect gate | **Reorg** |
 | 악성 설치 스크립트 | hooks 내 네트워크 호출, `eval`/`exec`, 민감 경로 접근 | PostToolUse effect verify | **Reorg** |

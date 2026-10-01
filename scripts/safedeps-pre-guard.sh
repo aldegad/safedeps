@@ -2294,13 +2294,14 @@ guard_detect_ecosystem() {
 }
 
 # True when <name> resolves to a binary the project already has AND the runner
-# is one that prefers it (npx, npm exec/x, bunx, bun x). pnpm dlx, yarn dlx,
-# uvx and pipx run always fetch.
+# is one that prefers it (npx, npm exec/x, bunx, bun x, and npm init and bun
+# create, which run through those). pnpm dlx, yarn dlx (and so pnpm create and
+# yarn create), uvx and pipx run always fetch.
 guard_runner_uses_local_bin() {
   local seg="$1" name="$2"
   [[ "${name}" =~ ^[A-Za-z0-9._-]+$ ]] || return 1
   [[ -x "${PROJECT_DIR:-.}/node_modules/.bin/${name}" ]] || return 1
-  command_scan_text "${seg}" | judge_grep -qEi "${SAFEDEPS_G_START}((npx|bunx)([[:space:]]|\$)|npm${SAFEDEPS_G_OPTS}[[:space:]]+(${SAFEDEPS_G_NPM_EXEC_VERBS})([[:space:]]|\$)|bun${SAFEDEPS_G_OPTS}[[:space:]]+x([[:space:]]|\$))"
+  command_scan_text "${seg}" | judge_grep -qEi "${SAFEDEPS_G_START}((npx|bunx)([[:space:]]|\$)|npm${SAFEDEPS_G_OPTS}[[:space:]]+(${SAFEDEPS_G_NPM_EXEC_VERBS}|${SAFEDEPS_G_NPM_INIT_VERBS})([[:space:]]|\$)|bun${SAFEDEPS_G_OPTS}[[:space:]]+(x|create|c)([[:space:]]|\$))"
 }
 
 # True when the statement is a runner: something that fetches a package and
@@ -2441,6 +2442,74 @@ SAFEDEPS_RUNNER_TAKES_VALUE_go="
   -gcflags -installsuffix -ldflags -mod -modfile -overlay -pgo -pkgdir -tags
   -toolexec -exec "
 
+# The package a `create` command fetches and runs, for the operand it names.
+# Each manager rewrites the initializer its own way, and the rewritten name is
+# the package the ledger has to judge: approving `vite@5.0.0` must not pass
+# `create-vite@5.0.0`. Read from each manager's source, not guessed:
+#
+#   npm   lib/commands/init.js execCreate (npm 11.19.0; npm-init.md lists the
+#         same table): `@usr` -> `@usr/create`, `@usr@2.0.0` ->
+#         `@usr/create@2.0.0`, `foo` -> `create-foo`, `@usr/foo` ->
+#         `@usr/create-foo`, the version kept. Always prefixed, so `npm init
+#         create-vite` runs `create-create-vite`. A hosted git shorthand
+#         `user/project` runs `user/create-project`.
+#   pnpm  convertToCreateName (pnpm 10.28.1): the same, except a name that
+#         already starts with `create-` is kept.
+#   yarn  Yarn 2+ plugin-dlx create.ts: a name matching ^create(-|$) is kept.
+#         Yarn 1 (create.js coerceCreatePackageName) always prefixes. Both are
+#         printed where they differ, since the command does not say which yarn.
+#   bun   bunx_command.rs add_create_prefix: always prefixed, scopes as npm.
+#         create_command.rs hands a name to bunx only when it is not in its
+#         built-in list and has no `/` outside a scope; `elysia`,
+#         `elysia-buchta` and `stric` come from `@bun-examples/<name>`, `react`
+#         and `next` only print a message, and `user/repo` is a GitHub
+#         download, read as written.
+#
+# A path names a local template or component, which is not a fetch, so it
+# prints nothing (npm refuses one as an unrecognized initializer). Anything else
+# (a URL) is printed as written.
+guard_create_identity() {
+  local family="$1" spec="$2" scope="" name="" version=""
+  case "${family}" in
+    bun)
+      case "${spec}" in
+        react|next) return 0 ;;
+        elysia|elysia-buchta|stric) printf '@bun-examples/%s\n' "${spec}"; return 0 ;;
+      esac
+      ;;
+  esac
+  case "${spec}" in
+    .*|/*|~*) return 0 ;;
+    *://*) printf '%s\n' "${spec}"; return 0 ;;
+  esac
+  if [[ "${spec}" =~ ^(@[^/@]+)(@.*)?$ ]]; then
+    printf '%s/create%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+    return 0
+  fi
+  if [[ "${spec}" =~ ^(@[^/@]+/)?([^/@]+)(@.*)?$ ]]; then
+    scope="${BASH_REMATCH[1]}" name="${BASH_REMATCH[2]}" version="${BASH_REMATCH[3]}"
+    case "${family}" in
+      pnpm)
+        [[ "${name}" == create-* ]] || name="create-${name}"
+        ;;
+      yarn)
+        if [[ "${name}" =~ ^create(-|$) ]]; then
+          printf '%s%s%s\n' "${scope}" "${name}" "${version}"
+        fi
+        name="create-${name}"
+        ;;
+      *) name="create-${name}" ;;
+    esac
+    printf '%s%s%s\n' "${scope}" "${name}" "${version}"
+    return 0
+  fi
+  if [[ "${family}" == npm && "${spec}" =~ ^((github|gitlab|bitbucket|gist):)?([^/:@]+)/([^/#:]+)(#.*)?$ ]]; then
+    printf '%s%s/create-%s%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[3]}" "${BASH_REMATCH[4]}" "${BASH_REMATCH[5]}"
+    return 0
+  fi
+  printf '%s\n' "${spec}"
+}
+
 guard_runner_operands() {
   # Runner forms (`npx`, `pnpm dlx`, `yarn dlx`, `bunx`, `uvx`, `pipx run`, ...)
   # EXECUTE a package; tokens after the executed package are arguments to that
@@ -2455,7 +2524,7 @@ guard_runner_operands() {
   #
   # A failed tr or sed here is a failed spec reader (see guard_operand_specs):
   # it yields no operand, and no operand reads as nothing to check.
-  local text after head family names adds takes want tok key nopt last="" match option
+  local text after head family names adds takes want tok key nopt last="" match option create=false
   local -a toks=()
   text=$(printf '%s\n' "$1" | guard_shell_dequote) || guard_mark_reading_failed
   # The runner itself is kept, ahead of \037, to choose the table. The first
@@ -2485,6 +2554,19 @@ guard_runner_operands() {
   key="SAFEDEPS_RUNNER_ADDS_PACKAGE_${family}"; adds="${!key}"
   key="SAFEDEPS_RUNNER_TAKES_VALUE_${family}"; takes="${!key}"
   takes=" ${takes//$'\n'/ } "
+  # A `create`: its first operand is rewritten into the package that runs. npm
+  # init hands its other options to nopt like any npm command and ignores
+  # `--package`, which is then just an option with a value. pnpm create and bun
+  # create name no package by option; yarn create passes `-p` on to dlx.
+  case "${family}:${head##*[[:space:]]}" in
+    npm:*)
+      if [[ "${head##*[[:space:]]}" =~ ^(${SAFEDEPS_G_NPM_INIT_VERBS})$ ]]; then
+        create=true names=" " takes="${takes}--package "
+      fi
+      ;;
+    pnpm:create|bun:create|bun:c) create=true names=" " ;;
+    yarn:create) create=true ;;
+  esac
 
   local named_by_option=false
   want=""
@@ -2505,6 +2587,12 @@ guard_runner_operands() {
         [[ "${family}" == npm && "${last}" == --browser && "${tok}" != -* ]] && continue
         ;;
     esac
+    # bun create takes as its template the first argument that does not start
+    # with `--` (create_command.rs), so a single-dash word is the template.
+    if [[ "${create}" == true && "${family}" == bun && "${tok}" == -[!-]* ]]; then
+      guard_create_identity bun "${tok}"
+      break
+    fi
     # An abbreviated long option, where the runner's parser accepts one.
     if [[ "${family}" == pipx && "${tok}" == --?* ]]; then
       key="${tok%%=*}"
@@ -2542,7 +2630,13 @@ guard_runner_operands() {
       *)
         # The executed package -- unless an option already named the package,
         # in which case this is the command it provides (`npx -p x@1 x-cli`).
-        [[ "${named_by_option}" == true ]] || printf '%s\n' "${tok}"
+        if [[ "${named_by_option}" != true ]]; then
+          if [[ "${create}" == true ]]; then
+            guard_create_identity "${family}" "${tok}"
+          else
+            printf '%s\n' "${tok}"
+          fi
+        fi
         break
         ;;
     esac

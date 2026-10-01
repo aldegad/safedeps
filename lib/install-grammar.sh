@@ -31,7 +31,8 @@
 #   npm install-test: it          npm update: u, up, upgrade, udpate
 #   npm ci: clean-install, ic, install-clean, isntall-clean
 #   npm install-ci-test: cit, clean-install-test, sit
-#   npm exec: x                   pnpm install: i
+#   npm exec: x                   npm init: create, innit
+#   pnpm install: i
 #   pnpm update: up, upgrade      pnpm install-test: it
 #   bun add: a, bun install: i (from `bun --help`)
 #   yarn up (Berry) moves an existing dependency to the given version.
@@ -54,6 +55,10 @@
 SAFEDEPS_G_NPM_VERBS='add|ci|cit|clean-?[iI]nstall|clean-?[iI]nstall-|clean-?[iI]nstall-?[tT]|clean-?[iI]nstall-?[tT]e|clean-?[iI]nstall-?[tT]es|clean-?[iI]nstall-?[tT]est|i|ic|in|ins|inst|insta|instal|install|install-?[cC]i|install-?[cC]i-|install-?[cC]i-?[tT]|install-?[cC]i-?[tT]e|install-?[cC]i-?[tT]es|install-?[cC]i-?[tT]est|install-?[cC]l|install-?[cC]le|install-?[cC]lea|install-?[cC]lean|install-?[tT]|install-?[tT]e|install-?[tT]es|install-?[tT]est|isnt|isnta|isntal|isntall|isntall-|isntall-?[cC]|isntall-?[cC]l|isntall-?[cC]le|isntall-?[cC]lea|isntall-?[cC]lean|it|si|sit|u|ud|udp|udpa|udpat|udpate|up|upd|upda|updat|update|upg|upgr|upgra|upgrad|upgrade'
 #   exec:
 SAFEDEPS_G_NPM_EXEC_VERBS='exe|exec|x'
+#   init, whose documented aliases are create and innit. With an initializer
+#   it is `npm exec create-<initializer>` (docs/content/commands/npm-init.md);
+#   without one it writes a package.json and fetches nothing.
+SAFEDEPS_G_NPM_INIT_VERBS='cr|cre|crea|creat|create|ini|init|inn|inni|innit'
 SAFEDEPS_G_PNPM_VERBS='add|install|i|install-test|it|update|up|upgrade'
 SAFEDEPS_G_YARN_VERBS='add|install|upgrade|up'
 SAFEDEPS_G_BUN_VERBS='add|a|install|i|update|upgrade'
@@ -91,11 +96,20 @@ SAFEDEPS_G_NPM_INSTALL_BODY="npm${SAFEDEPS_G_O}[[:space:]]+(${SAFEDEPS_G_NPM_VER
 # Runners fetch a package and execute it. Nothing reads a lockfile after them.
 # This ends AT the runner keyword. Options after it belong to the runner and can
 # carry the package (`npx -p x@1 cmd`), so the operand walk has to see them.
-SAFEDEPS_G_RUNNER_BODY="(npx|pnpx|bunx|uvx)|npm${SAFEDEPS_G_O}[[:space:]]+(${SAFEDEPS_G_NPM_EXEC_VERBS})|pnpm${SAFEDEPS_G_O}[[:space:]]+dlx|yarn${SAFEDEPS_G_O}[[:space:]]+dlx|bun${SAFEDEPS_G_O}[[:space:]]+x|pipx${SAFEDEPS_G_O}[[:space:]]+run|uv${SAFEDEPS_G_O}[[:space:]]+tool${SAFEDEPS_G_O}[[:space:]]+run|go${SAFEDEPS_G_O}[[:space:]]+run"
+#
+# Each manager's `create` is a runner too: it rewrites its first operand into a
+# package name (`vite` -> `create-vite`) and runs that the way its exec does.
+# `npm init` with an initializer, `pnpm create` (into `pnpm dlx`), `yarn create`
+# (into `yarn dlx`), and `bun create` / `bun c` (into `bunx`, for a name that is
+# not a local template or a GitHub repo). guard_create_identity has the
+# rewrites, each from that manager's source.
+SAFEDEPS_G_CREATE_BODY="npm${SAFEDEPS_G_O}[[:space:]]+(${SAFEDEPS_G_NPM_INIT_VERBS})|pnpm${SAFEDEPS_G_O}[[:space:]]+create|yarn${SAFEDEPS_G_O}[[:space:]]+create|bun${SAFEDEPS_G_O}[[:space:]]+(create|c)"
+SAFEDEPS_G_RUNNER_BODY="(npx|pnpx|bunx|uvx)|npm${SAFEDEPS_G_O}[[:space:]]+(${SAFEDEPS_G_NPM_EXEC_VERBS})|${SAFEDEPS_G_CREATE_BODY}|pnpm${SAFEDEPS_G_O}[[:space:]]+dlx|yarn${SAFEDEPS_G_O}[[:space:]]+dlx|bun${SAFEDEPS_G_O}[[:space:]]+x|pipx${SAFEDEPS_G_O}[[:space:]]+run|uv${SAFEDEPS_G_O}[[:space:]]+tool${SAFEDEPS_G_O}[[:space:]]+run|go${SAFEDEPS_G_O}[[:space:]]+run"
 
 SAFEDEPS_G_INSTALL_BODY="${SAFEDEPS_G_NPM_INSTALL_BODY}\
 |(npx|pnpx|bunx|uvx)${SAFEDEPS_G_O}${SAFEDEPS_G_OPERAND}\
 |npm${SAFEDEPS_G_O}[[:space:]]+(${SAFEDEPS_G_NPM_EXEC_VERBS})${SAFEDEPS_G_O}${SAFEDEPS_G_OPERAND}\
+|(${SAFEDEPS_G_CREATE_BODY})${SAFEDEPS_G_O}${SAFEDEPS_G_OPERAND}\
 |pnpm${SAFEDEPS_G_O}[[:space:]]+(${SAFEDEPS_G_PNPM_VERBS}|dlx)\
 |yarn${SAFEDEPS_G_O}([[:space:]]+(global|workspace[[:space:]]+[^[:space:]]+|workspaces[[:space:]]+foreach${SAFEDEPS_G_O}))?${SAFEDEPS_G_O}[[:space:]]+(${SAFEDEPS_G_YARN_VERBS}|dlx)\
 |bun${SAFEDEPS_G_O}[[:space:]]+(${SAFEDEPS_G_BUN_VERBS})\

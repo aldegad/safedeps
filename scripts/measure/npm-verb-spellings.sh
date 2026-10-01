@@ -33,6 +33,7 @@ const words = new Set([...Object.keys(abbrev(commands.concat(Object.keys(aliases
 const groups = {
   INSTALL: ["install", "ci", "install-test", "install-ci-test", "update"],
   EXEC: ["exec"],
+  INIT: ["init"],
 }
 const write = w => w.replace(/-([a-z])/g, (m, c) => "-?[" + c + c.toUpperCase() + "]")
 for (const [name, targets] of Object.entries(groups)) {
@@ -54,6 +55,7 @@ while IFS='=' read -r name want; do
   case "${name}" in
     INSTALL) have="${SAFEDEPS_G_NPM_VERBS}" ;;
     EXEC) have="${SAFEDEPS_G_NPM_EXEC_VERBS}" ;;
+    INIT) have="${SAFEDEPS_G_NPM_INIT_VERBS}" ;;
   esac
   missing=$(comm -13 <(tr '|' '\n' <<< "${have}" | sort) <(tr '|' '\n' <<< "${want}" | sort))
   extra=$(comm -23 <(tr '|' '\n' <<< "${have}" | sort) <(tr '|' '\n' <<< "${want}" | sort))
