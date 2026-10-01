@@ -856,6 +856,15 @@ expect_prescription 'rubygems rake@13.0.0;' 'gem install rake -v 13.0.0 >/dev/nu
 expect_prescription 'rubygems rake@13.0.0;' 'gem install rake -v 13.0.0 2>/dev/null'
 expect_prescription 'crates.io ripgrep@13.0.0;' 'cargo install ripgrep --version 13.0.0 >/dev/null'
 expect_prescription 'npm left-pad@1.0.0;' 'pnpm add left-pad@1.0.0 >out@2.0.0'
+# bash reads an unquoted `>` or `<` as an operator in the middle of a word too,
+# so these install the pinned package and redirect. The pinned spec read as
+# the operand `requests==2.19.0>/dev/null`, recorded unpinned and never checked.
+expect_prescription 'pypi requests@2.19.0;' 'pip install requests==2.19.0>/dev/null'
+expect_prescription 'pypi requests@2.19.0;' 'pip install requests==2.19.0 2>&1>/dev/null'
+expect_prescription 'npm left-pad@1.0.0;' 'pnpm add left-pad@1.0.0>>install.log'
+expect_prescription 'npm left-pad@1.0.0;' 'pnpm add left-pad@1.0.0&>/dev/null'
+expect_prescription 'rubygems rake@13.0.0;' 'gem install rake -v 13.0.0>/dev/null'
+expect_prescription 'npm evil@1.0.0;' 'npx evil@1.0.0</dev/null'
 expect_prescription 'nuget dotnet-ef@8.0.0;' 'dotnet tool install --tool-path /tmp/tools dotnet-ef --version 8.0.0'
 expect_prescription 'nuget evil@8.0.0;' 'dotnet tool install --tool-path /tmp/tools evil --version 8.0.0' \
   nuget /tmp/tools 8.0.0
@@ -1194,6 +1203,17 @@ operand_rows=(
   $'\tpip install ev\\il==6.6.6'
   # A quoted specifier starts with a quote, so it is not a redirection.
   $'pypi:requests>=3\tpip install \'requests>=3\''
+  # Inside quotes, or escaped, `>` is a character; outside them it is an
+  # operator wherever it stands, so unquoted `requests>=2.0` installs requests
+  # and writes a file named `=2.0`. A digit is a file descriptor only as a
+  # whole word: `x2>f` is the operand x2.
+  $'pypi:requests>=3\tpip install "requests>=3"'
+  $'pypi:requests>=3\tpip install requests\\>=3'
+  $'pypi:requests\tpip install requests>=2.0'
+  $'npm:left-pad\tpnpm add left-pad>/dev/null'
+  $'npm:left-pad\tpnpm add left-pad 2>/dev/null'
+  $'npm:x2\tpnpm add x2>/dev/null'
+  $'npm:left-pad\tpnpm add left-pad&>/dev/null'
   # Controls: another name, and the npm CLI statement exempt on its own.
   $'npm:right-pad\tpnpm add left-pad@1.0.0 && pnpm add right-pad'
   $'npm:right-pad\tnpm install left-pad && pnpm add right-pad'

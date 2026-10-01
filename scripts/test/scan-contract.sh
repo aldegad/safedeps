@@ -529,7 +529,7 @@ pass "with awk failing everywhere an install is still denied"
 # alone, keyed on its script.
 real_sed=$(command -v sed)
 real_tr=$(command -v tr)
-for reader in extras alias runner group redirect; do
+for reader in extras alias runner group; do
   mkdir -p "${fail_tmp}/reader-${reader}"
   tool=sed real="${real_sed}"
   case "${reader}" in
@@ -537,7 +537,6 @@ for reader in extras alias runner group redirect; do
     alias) key='@npm:/' ;;
     runner) key='(npx|pnpx|bunx|uvx)' ;;
     group) key='(){}' tool=tr real="${real_tr}" ;;
-    redirect) key='(<<<|>>|' ;;
   esac
   cat > "${fail_tmp}/reader-${reader}/${tool}" <<SHIM
 #!/usr/bin/env bash
@@ -553,7 +552,6 @@ sed_rows=(
   $'alias\tpnpm add left-pad@npm:evil-pkg@1.0.0'
   $'runner\tnpx evil@1.0.0'
   $'group\tpip install evil==1.0.0'
-  $'redirect\tpip install evil==1.0.0 >/dev/null'
 )
 for row in "${sed_rows[@]}"; do
   reader="${row%%$'\t'*}" failing_command="${row#*$'\t'}"
@@ -577,7 +575,7 @@ pass "a failed sed or tr in a spec reader denies the install as UNDECIDED (${#se
 # which reads them from command_statements, and cuts them into pieces in one
 # more awk. Either failing left no statements, no statements read as no spec,
 # and an unapproved pinned install would pass as if it named nothing.
-for reader in command_statements extract_pieces shell_dequote; do
+for reader in command_statements extract_pieces shell_dequote strip_redirections; do
   mkdir -p "${fail_tmp}/statements-${reader}"
   cat > "${fail_tmp}/statements-${reader}/awk" <<SHIM
 #!/usr/bin/env bash
@@ -599,7 +597,7 @@ SHIM
       || fail "a failed ${reader} is recorded in advisory.log: ${failing_command}"
   done
 done
-pass "a failed statement reader denies the install as UNDECIDED (command_statements, extract_pieces, shell_dequote, each against a working control)"
+pass "a failed statement reader denies the install as UNDECIDED (command_statements, extract_pieces, shell_dequote, strip_redirections, each against a working control)"
 
 
 # --- the discriminator the gate falls back on ---------------------------------

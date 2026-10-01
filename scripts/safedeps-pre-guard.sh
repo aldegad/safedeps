@@ -3117,18 +3117,83 @@ guard_shell_dequote() {
 # /dev/null and pnpm never sees it. Every reader of the statement used to see
 # it as an operand, so the record named `npm:>/dev/null` beside the package,
 # and a version flag bound to it: `gem install rake -v 13.0.0 >/dev/null`
-# prescribed `check rubygems >/dev/null@13.0.0`. The test runs on the text as
-# written, quotes still in place, because only an unquoted operator at the
-# start of a word is one: `'>=3'` is a version specifier. The target may be
-# attached or follow blanks, and it is one shell word: unquoted bytes, a
-# backslash escape, a double-quoted run (with its own escapes) and a
-# single-quoted run, in any order. It reads stdin, a statement per line, so
-# guard_extract_pieces runs it once over every statement instead of once per
-# statement: a 4KB command of short installs is about 250 statements.
-SAFEDEPS_REDIRECT_TARGET_CHAR="([^[:space:]'\"\\\\]|\\\\.|\"([^\"\\\\]|\\\\.)*\"|'[^']*')"
+# prescribed `check rubygems >/dev/null@13.0.0`.
+#
+# bash reads `<` and `>` as operators wherever they stand outside quotes and
+# unescaped, in the middle of a word too: `pip install requests==2.19.0>/dev/null`
+# installs requests==2.19.0 and sends its output to /dev/null, and
+# `pip install requests>=2.0` installs requests and writes a file named `=2.0`.
+# A sed that took an operator only at the start of a word read those as the
+# operands `requests==2.19.0>/dev/null` and `requests>=2.0`: the pinned one was
+# recorded as unpinned and never checked. So this walks the text the way the
+# shell tokenizes it, quotes still in place: an operator inside quotes or after
+# a backslash is a character (`'>=3'` is a version specifier), and one outside
+# them ends the word in front of it. A file descriptor number is part of the
+# redirection only when it is that whole word (`2>`, not `x2>`). The operator
+# may be `&>`, `>>`, `>|`, `>&`, `<<`, `<<<`, `<<-`, `<>` or `<&`; `<(` and `>(`
+# are process substitutions and stay. The target is one shell word after
+# optional blanks: unquoted bytes, a backslash escape, a double-quoted run (with
+# its own escapes) and a single-quoted run, in any order. The redirection
+# becomes a blank, which is what it is to the shell: the end of a word.
+#
+# It reads stdin, a statement per line, so guard_extract_pieces runs it once
+# over every statement instead of once per statement: a 4KB command of short
+# installs is about 250 statements.
 guard_strip_redirections() {
-  sed -E \
-    "s#(^|[[:space:]])[0-9]*(<<<|>>|>[|&]|<[&>]|>|<)[[:space:]]*${SAFEDEPS_REDIRECT_TARGET_CHAR}*#\\1#g"
+  LC_ALL=C awk '
+    # safedeps:strip_redirections (scripts/measure/scan-failure-census.sh keys on this line)
+    function word_char(ch) { return ch != " " && ch != "\t" && ch != ";" && ch != "|" && ch != "&" && ch != "<" && ch != ">" && ch != "(" && ch != ")" }
+    {
+      n = split($0, c, "")
+      out = ""; q = 0; ws = 1; digits = 1; wstart = 1
+      for (i = 1; i <= n; i++) {
+        ch = c[i]
+        if (q == 1) { out = out ch; if (ch == "\047") q = 0; continue }
+        if (q == 2) {
+          out = out ch
+          if (ch == "\\" && i < n) { i++; out = out c[i]; continue }
+          if (ch == "\"") q = 0
+          continue
+        }
+        if (ch == "\\" && i < n) { out = out ch c[i + 1]; i++; ws = 0; digits = 0; continue }
+        if (ch == "\047") { out = out ch; q = 1; ws = 0; digits = 0; continue }
+        if (ch == "\"") { out = out ch; q = 2; ws = 0; digits = 0; continue }
+        op = 0
+        if (ch == ">" || ch == "<") op = 1
+        else if (ch == "&" && i < n && c[i + 1] == ">") op = 1
+        if (op && i < n && c[i + 1] == "(") op = 0
+        if (!op) {
+          out = out ch
+          if (ch == " " || ch == "\t" || ch == ";" || ch == "|" || ch == "&" || ch == "(" || ch == ")") { ws = 1; digits = 1; wstart = length(out) + 1 }
+          else { if (ch !~ /[0-9]/) digits = 0; ws = 0 }
+          continue
+        }
+        # A file descriptor number is the whole word in front of the operator.
+        if (!ws && digits) out = substr(out, 1, wstart - 1)
+        # The operator: & > >> >| >& < << <<< <<- <> <&
+        j = i
+        if (c[j] == "&") j++
+        if (c[j] == ">") { j++; if (j <= n && (c[j] == ">" || c[j] == "|" || c[j] == "&")) j++ }
+        else { j++; if (j <= n && c[j] == "<") { j++; if (j <= n && (c[j] == "<" || c[j] == "-")) j++ } else if (j <= n && (c[j] == ">" || c[j] == "&")) j++ }
+        while (j <= n && (c[j] == " " || c[j] == "\t")) j++
+        # The target is one shell word: unquoted bytes, escapes and quoted runs.
+        tq = 0
+        while (j <= n) {
+          ch = c[j]
+          if (tq == 1) { if (ch == "\047") tq = 0; j++; continue }
+          if (tq == 2) { if (ch == "\\" && j < n) { j += 2; continue }; if (ch == "\"") tq = 0; j++; continue }
+          if (ch == "\\" && j < n) { j += 2; continue }
+          if (ch == "\047") { tq = 1; j++; continue }
+          if (ch == "\"") { tq = 2; j++; continue }
+          if (!word_char(ch)) break
+          j++
+        }
+        out = out " "
+        ws = 1; digits = 1; wstart = length(out) + 1
+        i = j - 1
+      }
+      print out
+    }'
 }
 
 # One statement as the extractor reads it: a runner's package operands (one per
@@ -3234,7 +3299,9 @@ guard_extract_pieces() {
   fi
 
   command_payload_texts "$(join_line_continuations "$(strip_heredoc_bodies "${cmd}")")" \
-    | guard_strip_redirections | tr ';|&' '\n' | awk '{ printf "false\t%s\n", $0 }' || guard_mark_reading_failed
+    | guard_strip_redirections | tr ';|&' '\n' | awk '
+      # safedeps:payload_pieces (scripts/measure/scan-failure-census.sh keys on this line)
+      { printf "false\t%s\n", $0 }' || guard_mark_reading_failed
 }
 
 guard_extract_specs() {
