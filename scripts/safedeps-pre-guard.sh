@@ -360,6 +360,8 @@ command_pipes_unread_install_to_shell() {
 #   live    scan, with code nested in quotes ("$(...)") and live code in an
 #           unquoted heredoc body kept: every byte the shell runs at this
 #           level. What the inert rewrite reads.
+#   stmts   scan, with the `)` that closes a case pattern read as `;`: where a
+#           statement ends. What command_statements splits on.
 #
 # It replaced three state machines that ran one after another -- a line-based
 # heredoc regex, a line joiner and the quote scanner -- and had to agree. They
@@ -812,12 +814,13 @@ shell_lex() {
         }
         for (k = 1; k <= N; k++) {
           cc = X[k]; cl = C[k]
-          if (view == "scan" || view == "live") {
+          if (view == "scan" || view == "live" || view == "stmts") {
             # A code `#` is never a comment start here, and must not become one
             # when the scan is read again: after a blanked region (a quoted word
             # with a `#` glued to its closing quote) it would follow a blank,
             # which is where a comment starts.
-            if (cl == "c" || cl == "p") put(cc == "#" && (k == 1 || C[k-1] != "c" && C[k-1] != "e") ? "_" : cc)
+            if (cl == "p" && view == "stmts") put(";")
+            else if (cl == "c" || cl == "p") put(cc == "#" && (k == 1 || C[k-1] != "c" && C[k-1] != "e") ? "_" : cc)
             else if (cl == "e") put(index(";&|()<>!{}#`\042\047\\$", cc) ? "_" : (cc == "\n" ? " " : cc))
             else if (view == "live" && (cl == "Q" || cl == "B")) put(cc)
             else put(" ")
@@ -1463,7 +1466,12 @@ command_statements() {
       return 0
     }
   printf '%s' "$1" > "${raw_file}"
-  shell_lex "$1" scan "${policy}" "safedeps:command_scan_text" > "${scan_file}"
+  # The stmts view ends a statement at a case pattern's `)` as well. On the
+  # scan view an arm after the first was split out as `*) pip install ...`,
+  # where the `)` no longer closes a pattern, so the install was not at a
+  # statement start: no spec and no record (caught when the lexer and the
+  # extractor met in the release tree).
+  shell_lex "$1" stmts "${policy}" "safedeps:command_scan_text" > "${scan_file}"
   if ! LC_ALL=C awk -v scan_file="${scan_file}" -v raw_file="${raw_file}" '
     # safedeps:command_statements (scripts/measure/scan-failure-census.sh and scripts/test/scan-contract.sh key on this line)
     function slurp(f,   out, line, count) {

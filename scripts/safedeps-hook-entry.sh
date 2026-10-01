@@ -17,9 +17,10 @@
 # names the cause and the recovery path. Fail-closed stays fail-closed — it
 # just stops being anonymous, and the fail-open forms stop being silent.
 #
-# The shim also answers for its own stops. bash 3.2 ends a script at the first
-# process it cannot start, with exit 128, and both engines read 128 as a
-# non-blocking hook failure: the tool call runs with no gate. That happens when
+# The shim also answers for its own stops. bash ends a script at the first
+# process it cannot start -- bash 3.2 at once with exit 128, bash 5 after about
+# 15 seconds of retries with exit 254 (both measured) -- and both engines read
+# either as a non-blocking hook failure: the tool call runs with no gate. That happens when
 # the machine is out of processes, and it once surfaced as "the hook is missing
 # from the checkout at /", because the failed fork inside `dirname` left the
 # shim resolving its own location to the filesystem root. So the shim finds its
@@ -50,8 +51,8 @@ answered=0
 on_unanswered_exit() {
   local rc=$?
   [ "${answered}" = 1 ] && return
-  if [ "${rc}" -eq 128 ]; then
-    printf 'safedeps: the hook entry for %s could not start a process (bash exits 128 when fork fails; the machine is likely out of processes for this user). This is transient and says nothing about the checkout or your work. Consequence: %s.\n' "${hook_name}" "${stop_consequence}" >&2
+  if [ "${rc}" -eq 128 ] || [ "${rc}" -eq 254 ]; then
+    printf 'safedeps: the hook entry for %s could not start a process (bash exits 128 or 254 when fork fails; the machine is likely out of processes for this user). This is transient and says nothing about the checkout or your work. Consequence: %s.\n' "${hook_name}" "${stop_consequence}" >&2
   else
     printf 'safedeps: the hook entry for %s stopped before it could judge (exit %s). Consequence: %s.\n' "${hook_name}" "${rc}" "${stop_consequence}" >&2
   fi
@@ -109,7 +110,7 @@ fi
 if ! bash -n "${hook_script}" 2>/dev/null; then
   explain "does not parse (syntax error — typically merge conflict markers left mid-merge; exit ${rc})"
 fi
-if [ "${rc}" -eq 128 ]; then
-  explain "stopped with exit 128 — bash exits 128 when it cannot start a process, so a machine that was out of processes a moment ago is the likely cause; the file itself parses"
+if [ "${rc}" -eq 128 ] || [ "${rc}" -eq 254 ]; then
+  explain "stopped with exit ${rc} — bash exits 128 or 254 when it cannot start a process, so a machine that was out of processes a moment ago is the likely cause; the file itself parses"
 fi
 explain "crashed with exit ${rc}"
