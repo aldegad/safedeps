@@ -721,6 +721,9 @@ mkdir -p "${FILELINK_PARENT}/project" "${FILELINK_PARENT}/lib"
 CASE_PROJECT="${FILELINK_PARENT}/project"
 printf '{"name":"lib","version":"1.0.0"}\n' > "${FILELINK_PARENT}/lib/package.json"
 printf '{"name":"proj","version":"1.0.0","dependencies":{"lib":"file:../lib"}}\n' > "${CASE_PROJECT}/package.json"
+# npm 9.0-9.3 (the CI image has 9.2.0) copy a `file:` dependency instead of
+# linking it unless told otherwise. The case here is the link.
+printf 'install-links=false\n' > "${CASE_PROJECT}/.npmrc"
 (cd "${CASE_PROJECT}" && npm install --ignore-scripts >/dev/null 2>&1) || fail "the fixture project with a file: dependency installs"
 [[ -L "${CASE_PROJECT}/node_modules/lib" ]] || fail "the fixture links lib into the project"
 new_safedeps_home
