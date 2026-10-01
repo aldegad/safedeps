@@ -124,9 +124,10 @@ pass "broken post hook: silent fail-open becomes a loud, explained report"
 cp scripts/safedeps-post-verify.sh "${repo}/scripts/"
 
 # --- out of processes: an explained deny, not a non-blocking exit ----------
-# bash 3.2 ends a script at the first process it cannot start, with exit 128,
-# and both engines read 128 as a non-blocking hook failure: the call would run
-# with no gate. A process limit of 1 reproduces it for real, because this user
+# bash ends a script at the first process it cannot start -- 3.2 at once with
+# exit 128, 5 after about 15 seconds of retries with exit 254 -- and both
+# engines read either as a non-blocking hook failure: the call would run with
+# no gate. A process limit of 1 reproduces it for real, because this user
 # already runs more than one process, so every fork inside the shim fails. Root
 # is exempt from that limit, so the row says so when the limit does not bind.
 probe_rc=0
