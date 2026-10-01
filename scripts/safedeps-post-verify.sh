@@ -333,6 +333,8 @@ cleanup_old_snapshots() {
       continue
     fi
 
+    # The workspace members' manifests are a directory, which `rm -f` leaves.
+    [[ "${old_id}" != */* ]] && rm -rf "${SNAPSHOT_DIR}/${old_id}_${SAFEDEPS_SNAPSHOT_MEMBERS}"
     rm -f "${SNAPSHOT_DIR}/${old_id}"_*
   done < <(ls -t "${SNAPSHOT_DIR}"/*_meta.json 2>/dev/null || true)
 }

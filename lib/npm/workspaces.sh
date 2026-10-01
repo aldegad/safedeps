@@ -17,6 +17,12 @@
 # rollback cannot restore. The lockfiles' member keys are read too, so a member
 # npm recorded is kept even where the glob below does not find it.
 #
+# Every member is kept, not the ones an install is expected to write: which
+# members `npm install` writes is npm's to decide, and guessing it here would be
+# one more copy of npm's rules in bash. What keeps that affordable is that
+# nothing below starts a process per member. The pre-guard copies all of them in
+# one go and hashes them in one go (scripts/test/workspace-snapshot-count.sh).
+#
 # Read from npm 11.19.0's @npmcli/map-workspaces:
 #
 #   - `workspaces` is an array of glob patterns, or an object whose `packages`
@@ -102,9 +108,10 @@ safedeps_npm_workspace_expand() {
   return 0
 }
 
-# The workspace members <root> declares, as physical paths, one per line after
-# `ok`. `none` when it declares no workspaces, `?<TAB><why>` when it cannot be
-# decided.
+# The workspace members <root> declares, one per line after `ok`, as the paths
+# the glob found. `none` when it declares no workspaces, `?<TAB><why>` when it
+# cannot be decided. A member reached through a symlink stays under the path
+# npm found it by, which is the path npm writes its package.json through.
 safedeps_npm_workspace_members() {
   local root="$1" patterns pattern bangs member
   local -a segs=()
@@ -135,24 +142,25 @@ safedeps_npm_workspace_members() {
       IFS=/ read -ra segs <<< "${pattern}"
       safedeps_npm_workspace_expand "${root}" "${segs[@]+"${segs[@]}"}"
     done < <(printf '%s\n' "${patterns}" | tail -n +2)
-  } | while IFS= read -r member; do
-    case "${member}" in
-      '?'*) printf '%s\n' "${member}" ;;
-      *) (cd "${member}" 2>/dev/null && pwd -P) || printf '?\tcannot resolve %s\n' "${member}" ;;
-    esac
-  done | LC_ALL=C sort -u
+  } | LC_ALL=C sort -u
 }
 
-# The file name a snapshot keeps <path> under, for a path relative to the
-# project. Snapshots are flat files named `<snapshot id>_<name>`, and a
-# workspace member's manifest (`packages/a/package.json`) has a slash in it, so
-# `%` and `/` are escaped. A top-level name comes back unchanged, so snapshots
-# written before members were kept still read the same. Both hooks name
-# snapshot files through this one function, and a disagreement would be a
-# restore that silently finds nothing.
+# The directory, beside a snapshot's flat files, that keeps the workspace
+# members' manifests as a tree: `<snapshot id>_members/packages/a/package.json`.
+# A tree is what one copy of every member can write, where flat names would
+# need one rename per member.
+SAFEDEPS_SNAPSHOT_MEMBERS=members
+
+# The name a snapshot keeps <path> under, for a path relative to the project,
+# after `<snapshot id>_`. A top-level file keeps its own name, as snapshots
+# always have. A member's manifest (`packages/a/package.json`) is under the
+# members tree. Both hooks name snapshot files through this one function, and a
+# disagreement would be a restore that silently finds nothing.
 safedeps_snapshot_file_name() {
-  local name="${1//%/%25}"
-  printf '%s' "${name//\//%2F}"
+  case "$1" in
+    */*) printf '%s/%s' "${SAFEDEPS_SNAPSHOT_MEMBERS}" "$1" ;;
+    *) printf '%s' "$1" ;;
+  esac
 }
 
 # The manifests of <root>'s workspace members, relative to <root>, one per line.

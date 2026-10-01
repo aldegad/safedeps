@@ -22,8 +22,10 @@
 # runtime's 30s has to cover; a larger one runs under the self budget (20s by
 # default). The asks alone stop at 8s (lib/npm/ask.sh).
 # R runs per cell, the slowest and the median printed. --query-only skips the
-# workspace columns, which grow with the member count for reasons of their own
-# (the pre-guard snapshots every member's package.json). The tree is written by
+# workspace columns. The pre-guard snapshots every member's package.json, in
+# one copy and one hash whatever the member count
+# (scripts/test/workspace-snapshot-count.sh counts the processes); what still
+# grows with members is reading them, and npm's own walk. The tree is written by
 # hand: no install, no registry, no network.
 #
 # The query is timed twice. npm trusts node_modules/.package-lock.json when it

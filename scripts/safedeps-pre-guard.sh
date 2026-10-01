@@ -134,6 +134,7 @@ if [[ -r "${SAFEDEPS_NPM_WORKSPACES_LIB}" ]]; then
   # shellcheck source=../lib/npm/workspaces.sh
   source "${SAFEDEPS_NPM_WORKSPACES_LIB}"
 else
+  SAFEDEPS_SNAPSHOT_MEMBERS=members
   safedeps_snapshot_file_name() { printf '%s' "$1"; }
 fi
 
@@ -1437,6 +1438,46 @@ snapshot_project_file() {
   fi
 }
 
+# Every workspace member's package.json, in one copy and one hash. A workspace
+# install writes a member's manifest as well as the root's, and a rollback has
+# to restore it. Which members an install writes is npm's to decide, so all of
+# them are kept rather than a guess. They used to be copied and hashed one by
+# one, two processes per member, and a workspace of 1000 members took 20-33s to
+# judge: past the runtime's 30s kill, which lets the command through unjudged.
+# Here the process count does not depend on the member count
+# (scripts/test/workspace-snapshot-count.sh).
+#
+# The copies go under <snapshot id>_members as a tree, through tar, because cp
+# cannot rename and flat names would need a rename per member. The hash list is
+# written from the copies with paths relative to the project, so
+# `shasum -c` run in the project compares the project with the snapshot.
+# Returns 1 when the copy or the hash failed, with the reason on stderr.
+snapshot_workspace_manifests() {
+  local member dest
+  local -a members=()
+  while IFS= read -r member; do
+    [[ -n "${member}" ]] && members+=("${member}")
+  done < <(safedeps_npm_workspace_manifests "${PROJECT_DIR}")
+  [[ ${#members[@]} -gt 0 ]] || return 0
+
+  dest="${SNAPSHOT_DIR}/${SNAPSHOT_ID}_${SAFEDEPS_SNAPSHOT_MEMBERS}"
+  # `./` keeps a name that starts with a dash from reading as an option. -h
+  # copies a member's package.json, not a symlink to it. COPYFILE_DISABLE keeps
+  # macOS tar from adding AppleDouble files beside each one.
+  printf './%s\0' "${members[@]}" > "${dest}.files"
+  mkdir "${dest}" || return 1
+  (cd "${PROJECT_DIR}" && COPYFILE_DISABLE=1 tar -chf - --null -T "${dest}.files") \
+    | tar -xf - -C "${dest}" || return 1
+  # xargs splits the list only past the system's argument limit, so one shasum
+  # covers every workspace short of tens of thousands of members.
+  if command -v shasum >/dev/null 2>&1; then
+    (cd "${dest}" && printf '%s\0' "${members[@]}" | xargs -0 shasum -a 256 --) > "${dest}.sha256" || return 1
+  else
+    (cd "${dest}" && printf '%s\0' "${members[@]}" | xargs -0 sha256sum --) > "${dest}.sha256" || return 1
+  fi
+  printf '%s\n' "${members[@]}" >> "${SNAPSHOT_DIR}/${SNAPSHOT_ID}_monitored_files.list"
+}
+
 # Read tool input from stdin
 INPUT=$(cat)
 
@@ -2068,11 +2109,18 @@ while IFS= read -r csproj_file; do
 done < <(find "${PROJECT_DIR}" -maxdepth 1 -type f -name "*.csproj" 2>/dev/null | sort)
 
 # A workspace install writes a member's package.json as well as the root's.
+# A snapshot that cannot keep them is a rollback that cannot undo the install,
+# so the install waits rather than running without one.
 if declare -F safedeps_npm_workspace_manifests >/dev/null; then
-  while IFS= read -r member_manifest; do
-    [[ -n "${member_manifest}" ]] || continue
-    snapshot_project_file "${member_manifest}" "manifest"
-  done < <(safedeps_npm_workspace_manifests "${PROJECT_DIR}")
+  if ! MEMBERS_ERROR=$(snapshot_workspace_manifests 2>&1 >/dev/null); then
+    rm -rf "${SNAPSHOT_DIR}/${SNAPSHOT_ID}_${SAFEDEPS_SNAPSHOT_MEMBERS}"
+    rm -f "${SNAPSHOT_DIR}/${SNAPSHOT_ID}_"*
+    MEMBERS_ERROR=$(printf '%s' "${MEMBERS_ERROR}" | tr '\n' ' ')
+    log_advisory "pre-guard: could not snapshot the workspace members' package.json files in ${PROJECT_DIR} (${MEMBERS_ERROR% }). Command: ${COMMAND}"
+    jq -nc --arg reason "safedeps: undecided — safedeps could not keep a copy of the workspace members' package.json files in ${PROJECT_DIR} (${MEMBERS_ERROR% }), so it could not roll this install back. This is not a finding about the packages. Make the members' package.json files readable and retry." \
+      '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:$reason}}'
+    exit 0
+  fi
 fi
 
 # Save pre-install listings for diff-based detection (avoids mtime-based find -newer)
