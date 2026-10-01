@@ -481,6 +481,10 @@ run_verified_npm_rebuild_if_injected() {
   injected=$(jq -r '.ignore_scripts_injected == true' "${META_FILE}" 2>/dev/null || printf 'false')
   [[ "${injected}" == "true" ]] || return 0
 
+  # The install left no trace here, so this tree is not the one it built, and
+  # its scripts are not this install's to run (settle_npm_trace).
+  [[ "${NPM_TRACE_ABSENT}" != true ]] || return 0
+
   # Nothing was installed into the project, so there is nothing to rebuild.
   [[ -d "${PROJECT_DIR}/node_modules" ]] || return 0
 
@@ -518,7 +522,23 @@ run_verified_npm_rebuild_if_injected() {
 }
 
 emit_confirm_warnings_if_any() {
-  local warning_str
+  local warning_str injected
+
+  # On Claude Code the install ran inert, so an install that landed elsewhere
+  # has had no scripts run and nobody will rebuild it: the user is told. On
+  # Codex its scripts ran during the install, and the record is all there is.
+  if [[ -n "${TRACE_NOTE}" ]]; then
+    injected=$(jq -r '.ignore_scripts_injected == true' "${META_FILE}" 2>/dev/null || printf 'false')
+    if [[ "${injected}" == "true" ]]; then
+      warning_str=""
+      [[ ${#ROLLBACK_WARNINGS[@]} -eq 0 ]] || warning_str=$(printf '%s; ' "${ROLLBACK_WARNINGS[@]}")
+      emit_system_message "safedeps: ${TRACE_NOTE}${warning_str:+
+
+Additional warnings:
+${warning_str%%; }}"
+      return 0
+    fi
+  fi
 
   [[ ${#ROLLBACK_WARNINGS[@]} -gt 0 ]] || return 0
 
@@ -704,6 +724,68 @@ fi
 SUSPICIOUS=false
 REASONS=()
 ROLLBACK_WARNINGS=()
+
+# Whether this command's npm install was read: the directory the gate reads has
+# to show this command's install trace. The pre-guard picked the directory and,
+# just before the command ran, touched a baseline file and noted the inode of
+# both npm lockfiles there. A lockfile `find -newer` than the baseline, or one
+# with another inode, is a trace.
+#
+# The pre-guard's choice is a prediction from the command text, and three
+# rounds of validation found text it read wrong: a `cd` that never ran, a `cd`
+# spelled `command cd`, a symlinked workspace member. Each time the gate read a
+# directory the install never touched, confirmed it clean, and passed the
+# install unread. So the directory is a place to look, and this decides what the
+# looking found (safedeps/effect-gate-blind-to-lockless-npm-installs).
+#
+# No trace means the install landed somewhere else or installed nothing, and
+# this cannot tell which: a `--dry-run` and an install that failed leave none
+# either. It is recorded UNGATED in those words, and nothing is rebuilt here.
+# Nothing below runs npm.
+#
+# The trace is the directory's, not the command's. A second npm in the same
+# directory during the command, or the command touching a lockfile itself,
+# leaves one too; ARCHITECTURE.md states that boundary.
+NPM_TRACE_ABSENT=false
+TRACE_NOTE=""
+npm_install_trace() {
+  local baseline="$1" rel file recorded inode newer
+  [[ -f "${baseline}" ]] || { printf 'its baseline file %s is gone' "${baseline}"; return 1; }
+  for rel in package-lock.json node_modules/.package-lock.json; do
+    file="${PROJECT_DIR}/${rel}"
+    [[ -e "${file}" ]] || continue
+    recorded=$(jq -r --arg rel "${rel}" '.npm_trace.inodes[$rel] // ""' <<< "${CURRENT_STATE}" 2>/dev/null) || recorded="?"
+    inode=""
+    read -r inode _ < <(ls -di -- "${file}" 2>/dev/null) || true
+    if [[ -n "${inode}" && "${inode}" != "${recorded}" ]]; then
+      printf '%s' "${rel}"
+      return 0
+    fi
+    if newer=$(find -H "${file}" -newer "${baseline}" -print 2>/dev/null) && [[ -n "${newer}" ]]; then
+      printf '%s' "${rel}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+settle_npm_trace() {
+  local baseline unattributable why
+  baseline=$(jq -r '.npm_trace.baseline // empty' <<< "${CURRENT_STATE:-}" 2>/dev/null) || baseline=""
+  unattributable=$(jq -r '.npm_unattributable // empty' <<< "${CURRENT_STATE:-}" 2>/dev/null) || unattributable=""
+  [[ -n "${baseline}" ]] || return 0
+
+  if why=$(npm_install_trace "${baseline}"); then
+    if [[ -n "${unattributable}" ]]; then
+      log_advisory "post-verify UNGATED: the install trace in ${PROJECT_DIR} cannot answer for every npm install in this command: ${unattributable}, so one of them may have landed elsewhere unread. Command: ${COMMAND}"
+    fi
+  else
+    NPM_TRACE_ABSENT=true
+    log_advisory "post-verify UNGATED: no install trace in ${PROJECT_DIR}: the install landed elsewhere or installed nothing. Neither npm lockfile there changed during this command${why:+ (${why})}, so the effect gate verified nothing this install wrote, and npm rebuild was not run. Command: ${COMMAND}"
+    TRACE_NOTE="no install trace in ${PROJECT_DIR}: the install landed elsewhere or installed nothing. safedeps verified nothing this install wrote and did not run npm rebuild; if it installed packages somewhere else, their install scripts have not run there. Recorded as UNGATED in ${GUARD_DIR}/advisory.log"
+  fi
+  rm -f "${baseline}"
+}
 
 redact_install_script_content() {
   local script_content="$1"
@@ -1103,6 +1185,11 @@ if [[ "${BACKSTOP_INSTALL:-false}" == "true" ]]; then
   exit 0
 fi
 
+# Whether the npm installs in this command were read at all is settled before
+# what was read is judged: a closure of a directory the install never touched
+# is clean and says nothing about the install.
+settle_npm_trace
+
 # Run all checks
 check_npm_effect_closure
 check_postinstall_scripts
@@ -1160,6 +1247,7 @@ if [[ "${SUSPICIOUS}" == "true" ]]; then
   safedeps_journal_stage "${JOURNAL_ID}" "reinstalling-node-modules"
   restore_node_modules
   cleanup_old_snapshots
+  [[ -z "${TRACE_NOTE}" ]] || ROLLBACK_WARNINGS+=("${TRACE_NOTE}")
 
   REASON_STR=""
   [[ ${#REASONS[@]} -gt 0 ]] && REASON_STR=$(printf '%s; ' "${REASONS[@]}")

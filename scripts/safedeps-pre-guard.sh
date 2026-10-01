@@ -1108,10 +1108,12 @@ guard_npmrc_unrecorded() {
 
 # Where each install statement in the command lands, one line per statement, as
 # `<kind>\t<dir>\t<why>`. <kind> is `npm` for an npm CLI install that is not a
-# runner, `other` for every other install, and `?` when the statements could
-# not be read at all. <dir> is an absolute path,
-# `global`, or `?` when the text does not say. <why> is empty unless an .npmrc
-# keeps the install off the record, and then it names the file and the setting.
+# runner, `npm-unrecorded` for one an .npmrc keeps out of both lockfiles,
+# `other` for every other install, and `?` when the statements could not be
+# read at all. <dir> is an absolute path,
+# `global`, or `?` when the text does not say. <why> says why npm could not be
+# asked or answered `global`, or names the .npmrc file and setting that keep
+# the install off the record; it is empty otherwise.
 #
 # The effect gate reads one directory, chosen here before the command runs. An
 # install that lands anywhere else is not read, whatever the gate says about the
@@ -1130,6 +1132,18 @@ guard_npmrc_unrecorded() {
 #     run time is `?`: a variable or substitution, a directory that does not
 #     exist yet, `popd`, a `cd` inside a group or subshell, and a `cd` beside a
 #     pipe or `&`, which run it in a subshell of its own.
+#     A `cd` that may not run at all is followed only as far as it provably
+#     ran. One after `&&` or `||`, or inside an if, while, until, for or case
+#     body, holds along the `&&` chain that follows it, where every statement
+#     runs only if the `cd` succeeded; past that chain the directory is the one
+#     before it. `false && cd sub; npm install x` installs in the cwd, and
+#     following that `cd` sent the gate to sub (validator round 3, G1). `cd sub
+#     || exit` is unconditional and is followed.
+#
+# None of this decides whether the install was read. It decides where the
+# effect gate looks; the PostToolUse hook then looks for this command's install
+# trace there, and an install that left none is recorded UNGATED. A wrong
+# answer here costs a record, never a silent pass.
 #   - Global installs: `-g`, `--global`, `--location global`, and the same two
 #     settings given as `npm_config_global` / `npm_config_location` anywhere in
 #     the command, prefixed or exported. Those land in npm's global prefix and
@@ -1146,7 +1160,7 @@ resolve_install_targets() {
   local text before stmt after words head target want kind manager tok value normalized in_env skip
   local user_rc cli_global_off why run_dir answer local_prefix npm_word npm_unknown i
   local dir="${cwd}" grouped=false env_global=false env_userconfig=false exports_unknown=""
-  local npm_until=""
+  local npm_until="" here cond_dir="" depth=0 conditional
   local -a toks=() npm_env=() npm_args=() npm_exports=()
 
   text=$(join_line_continuations "$(strip_heredoc_bodies "${cmd}")")
@@ -1160,37 +1174,61 @@ resolve_install_targets() {
       printf '?\t?\tthe command could not be split into statements (awk failed), so safedeps cannot tell where its installs land\n'
       continue
     fi
+    # The directory a conditional `cd` entered holds only while every
+    # separator since it is `&&`.
+    [[ "${before}" == "&&" ]] || cond_dir=""
+    here="${cond_dir:-${dir}}"
     [[ -n "${words}" ]] || continue
     IFS=$'\037' read -ra toks <<< "${words}"
     [[ ${#toks[@]} -gt 0 ]] || continue
 
     # A statement may open with a group or a reserved word; the command is
-    # what follows.
+    # what follows. A word that opens a compound command counts toward the
+    # depth a `cd` is conditional at.
     while [[ ${#toks[@]} -gt 0 ]]; do
       head="${toks[0]}"
       head="${head#"${head%%[!({!]*}"}"
       case "${head}" in
-        ''|then|do|else|elif|if|while|until|time) toks=("${toks[@]:1}") ;;
+        if|while|until) depth=$(( depth + 1 )); toks=("${toks[@]:1}") ;;
+        ''|then|do|else|elif|time) toks=("${toks[@]:1}") ;;
         *) toks[0]="${head}"; break ;;
       esac
     done
     [[ ${#toks[@]} -gt 0 ]] || continue
+    case "${toks[0]}" in
+      for|select|case) depth=$(( depth + 1 )) ;;
+      fi|done|esac) (( depth == 0 )) || depth=$(( depth - 1 )) ;;
+    esac
 
     case "${toks[0]}" in
       cd|pushd|popd)
+        conditional=false
+        if [[ "${before}" == "&&" || "${before}" == "||" ]] || (( depth > 0 )); then
+          conditional=true
+        fi
         if [[ "${grouped}" == true || "${toks[0]}" == popd \
               || "${before}" == "|" || "${before}" == "&" || "${after}" == "|" || "${after}" == "&" ]]; then
-          dir="?"
-          continue
+          value="?"
+        else
+          value=""
+          for tok in "${toks[@]:1}"; do
+            case "${tok}" in -L|-P|-e|-@|-n) continue ;; esac
+            value="${tok}"
+            break
+          done
+          value=$(guard_literal_dir "${here}" "${value}")
+          [[ "${value}" == "?" || -d "${value}" ]] || value="?"
         fi
-        value=""
-        for tok in "${toks[@]:1}"; do
-          case "${tok}" in -L|-P|-e|-@|-n) continue ;; esac
-          value="${tok}"
-          break
-        done
-        dir=$(guard_literal_dir "${dir}" "${value}")
-        [[ "${dir}" == "?" || -d "${dir}" ]] || dir="?"
+        if [[ "${conditional}" == false ]]; then
+          dir="${value}"
+          cond_dir=""
+        elif [[ "${before}" == "||" ]]; then
+          # `a || cd sub && npm install x` runs npm without the cd when `a`
+          # succeeds, so not even the chain after it is known to be in sub.
+          cond_dir=""
+        else
+          cond_dir="${value}"
+        fi
         continue
         ;;
       export)
@@ -1237,8 +1275,8 @@ resolve_install_targets() {
     # assignment. That is the directory npm runs in. The other managers'
     # relocation flags are read here too; npm's own (`--prefix`, `-C`) are
     # npm's to read, below.
-    run_dir="${dir}"
-    target="${dir}"
+    run_dir="${here}"
+    target="${here}"
     want=""
     skip=false
     in_env=false
@@ -1399,10 +1437,11 @@ resolve_install_targets() {
             case "${user_rc}" in
               '~/'*) user_rc="${HOME}/${user_rc#'~/'}" ;;
             esac
-            [[ "${user_rc}" == "?" ]] || user_rc=$(guard_literal_dir "${dir}" "${user_rc}")
+            [[ "${user_rc}" == "?" ]] || user_rc=$(guard_literal_dir "${here}" "${user_rc}")
             value=$(guard_npmrc_unrecorded "${local_prefix}" "${user_rc}" "${cli_global_off}")
             if [[ -n "${value}" ]]; then
               why="${value}"
+              kind=npm-unrecorded
               [[ "${target}" == global ]] || target="?"
             fi
           fi
@@ -1411,6 +1450,154 @@ resolve_install_targets() {
     fi
     printf '%s\t%s\t%s\n' "${kind}" "${target}" "${why}"
   done < <(command_statements "${text}")
+  return 0
+}
+
+# Why an install trace in one directory cannot be credited to every npm
+# install in the command; nothing when it can.
+#
+# The PostToolUse hook decides whether an install was read by looking for this
+# command's install trace in the directory the gate read. One trace answers for
+# one npm statement. With two npm statements that write a lockfile, the first
+# one's trace hid the second one landing elsewhere: `npm install a; command cd
+# sub; npm install b` wrote both the cwd's lockfiles and sub's, and the gate read
+# the cwd, found a trace, and passed b unread (measured in the design judgment
+# for safedeps/effect-gate-blind-to-lockless-npm-installs, rows M1, M2, M4). So
+# two or more writers are credited to one trace only when nothing between them
+# can move the second, and no writer moves itself:
+#
+#   - Every statement between the first and the last writer is inert: echo,
+#     printf, tail, head, grep, ls, cat or true, with no substitution, group or
+#     redirection other than to /dev/null or another descriptor. Anything else
+#     may change the directory, the environment or the files npm reads, and
+#     cannot be told apart from text: `npm init -y` between two installs gave
+#     the second a package.json of its own.
+#   - No writer carries a relocation of its own: a directory or global flag, an
+#     npm_config_* setting in front of it, a wrapper word before `npm`, a group,
+#     or a word the shell decides at run time.
+#   - No npm install runs inside a `sh -c`, `eval` or `$(...)` payload, which
+#     the statements here do not show.
+#
+# A writer is an npm statement whose subcommand writes a lockfile or may:
+# everything but the subcommands below, which only read, run or publish. An
+# unknown subcommand is a writer, so a misreading costs a record.
+guard_npm_writers_unattributable() {
+  local cmd="$1"
+  local text before stmt words payload npm_at sub tok i scan writers=0 payloads=0
+  local first_writer="" pending_between="" between="" moved="" n=0
+  local -a toks=()
+
+  text=$(join_line_continuations "$(strip_heredoc_bodies "${cmd}")")
+
+  while IFS= read -r payload; do
+    [[ -n "${payload}" ]] || continue
+    if command_scan_text "$(normalize_install_text "${payload}")" | grep -qEi "${SAFEDEPS_G_NPM_INSTALL_RE}"; then
+      payloads=$(( payloads + 1 ))
+    fi
+  done < <(extract_shell_c_payloads "${text}"; extract_eval_payloads "${text}"; extract_command_substitution_payloads "${text}")
+
+  while IFS=$'\t' read -r before stmt _ words; do
+    if [[ "${before}" == "?" ]]; then
+      printf 'the command could not be split into statements (awk failed)'
+      return 0
+    fi
+    [[ -n "${words}" ]] || continue
+    IFS=$'\037' read -ra toks <<< "${words}"
+    [[ ${#toks[@]} -gt 0 ]] || continue
+    n=$(( n + 1 ))
+
+    # The inert heads first: their arguments are text, `echo npm install` is
+    # not an install.
+    scan=$(printf '%s' "${stmt}" | sed -E 's#[0-9]*>>?[[:space:]]*/dev/null##g; s#[0-9]*>&[0-9-]##g') || scan="?"
+    case "${toks[0]}" in
+      echo|printf|tail|head|grep|ls|cat|true)
+        if [[ "${scan}" != *[\<\>\(\)\{\}\`\$\?]* && "${words}" != *$'\001'* ]]; then
+          continue
+        fi
+        ;;
+    esac
+
+    npm_at=-1
+    for (( i = 0; i < ${#toks[@]}; i++ )); do
+      case "${toks[i]}" in
+        npm|*/npm) npm_at=${i}; break ;;
+      esac
+    done
+    sub=""
+    if (( npm_at >= 0 )); then
+      for (( i = npm_at + 1; i < ${#toks[@]}; i++ )); do
+        tok="${toks[i]}"
+        case "${tok}" in
+          -C|--prefix|-w|--workspace|--userconfig|--globalconfig|--cache|--registry|--location|--loglevel|--tag|--otp)
+            i=$(( i + 1 )); continue ;;
+          -*) continue ;;
+        esac
+        if [[ -z "${sub}" ]]; then
+          sub="${tok}"
+          [[ "${sub}" == audit ]] || break
+          continue
+        fi
+        # `audit fix` writes; `audit` alone reads.
+        [[ "${tok}" == fix ]] && sub="audit fix"
+        break
+      done
+      case "${sub}" in
+        ''|audit|run|run-script|rum|urn|test|tst|t|start|stop|restart|exec|x|init|create|innit|view|v|info|show|ls|list|ll|la|outdated|config|c|get|set|prefix|root|bin|query|explain|why|version|pack|publish|unpublish|help|help-search|doctor|ping|whoami|search|s|se|find|docs|home|repo|bugs|issues|fund|cache|completion|login|logout|adduser|add-user|token|profile|owner|team|access|deprecate|dist-tag|hook|org|star|stars|unstar|sbom|diff|pkg|set-script)
+          npm_at=-1 ;;
+      esac
+    fi
+
+    if (( npm_at < 0 )); then
+      # Not a writer. Between two writers it is a statement that may move the
+      # second one; it only counts once a writer has been seen.
+      if [[ -n "${first_writer}" && -z "${pending_between}" ]]; then
+        pending_between=$(printf '%s ' "${toks[@]}" | tr -d '\001')
+      fi
+      continue
+    fi
+
+    writers=$(( writers + 1 ))
+    [[ -n "${first_writer}" ]] || first_writer="${n}"
+    if [[ -n "${pending_between}" && -z "${between}" ]]; then
+      between="${pending_between}"
+    fi
+    pending_between=""
+    if [[ -z "${moved}" ]]; then
+      if [[ "${words}" == *$'\001'* || "${stmt}" == *[\(\)\{\}\`]* ]]; then
+        moved=$(printf '%s ' "${toks[@]}" | tr -d '\001')
+      else
+        for (( i = 0; i < ${#toks[@]}; i++ )); do
+          tok="${toks[i]}"
+          if (( i < npm_at )); then
+            case "${tok}" in
+              command|exec|time) continue ;;
+            esac
+            if [[ "${tok}" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] \
+                && [[ "$(printf '%s' "${tok%%=*}" | tr '[:upper:]' '[:lower:]')" != npm_config_* ]]; then
+              continue
+            fi
+            moved="${tok}"
+            break
+          fi
+          case "${tok}" in
+            -C|-C?*|--prefix|--prefix=*|-g|--global|--global=*|--no-global|--location|--location=*|--workspaces|--workspaces=*|--no-workspaces|--userconfig|--userconfig=*|--globalconfig|--globalconfig=*)
+              moved="${tok}"
+              break
+              ;;
+          esac
+        done
+      fi
+    fi
+  done < <(command_statements "${text}")
+
+  (( writers + payloads >= 2 )) || return 0
+  if (( payloads > 0 )); then
+    printf 'an npm install runs inside a `sh -c`, `eval` or `$(...)` payload beside another npm statement that writes a lockfile'
+  elif [[ -n "${between}" ]]; then
+    printf '%s npm statements write a lockfile, and `%s` runs between them' "${writers}" "${between% }"
+  elif [[ -n "${moved}" ]]; then
+    printf '%s npm statements write a lockfile, and one of them moves where it installs (`%s`)' "${writers}" "${moved% }"
+  fi
   return 0
 }
 
@@ -2024,10 +2211,15 @@ fi
 # install that lands elsewhere is not read, and guard_effect_gate_reads_every_install
 # says so.
 PROJECT_DIR="${CWD_DIR}"
+# `target` when a statement named the directory, `cwd` when none did and the
+# gate looks in the cwd for want of anything better. Either way it is where to
+# look; the PostToolUse hook decides whether the install was there.
+PROJECT_DIR_FROM=cwd
 INSTALL_TARGETS=$(resolve_install_targets "${COMMAND}" "${CWD_DIR}")
 while IFS=$'\t' read -r _ install_target _; do
   [[ -n "${install_target}" && "${install_target}" != "?" && "${install_target}" != global ]] || continue
   PROJECT_DIR="${install_target}"
+  PROJECT_DIR_FROM=target
   break
 done <<< "${INSTALL_TARGETS}"
 # An .npmrc that keeps an install off the record is not text in the command, so
@@ -2798,25 +2990,54 @@ if [[ ${#LEDGER_SPECS[@]} -gt 0 ]]; then
   [[ -z "${LEDGER_CONTEXT_FILE}" ]] || rm -f "${LEDGER_CONTEXT_FILE}"
 fi
 
-# True only when the PostToolUse effect gate reads the result of EVERY install
-# statement in the command. That gate reads the npm CLI's two records of a
-# project install: package-lock.json and the hidden lockfile
-# node_modules/.package-lock.json. So pnpm, yarn and bun are not covered even
-# though their ledger ecosystem is npm; neither is a runner (npx, npm exec),
-# which changes no lockfile; neither is an install that lands outside the one
-# directory the gate reads (a global install, or a relocation
-# resolve_install_targets could not follow). The exemption below used to be
-# keyed on "the ledger ecosystem is npm", and that let an unpinned `pnpm add x`
-# through with no record at all (GitHub #22).
+# True when the command runs an npm CLI install anywhere, payloads included:
+# the installs whose result the effect gate reads, and so the ones the
+# PostToolUse hook has to find a trace of.
 #
-# `--no-save`, `--package-lock=false` and their environment spellings are
-# covered: measured with a real npm, each left package-lock.json untouched and
-# recorded the package in the hidden lockfile, which the gate now reads. Before
-# it did, the gate confirmed those installs clean and ran `npm rebuild` over
-# the unverified package (safedeps/effect-gate-blind-to-lockless-npm-installs).
+# A grep that cannot answer counts as a match: the cost is a trace check on a
+# command that needed none, where the other direction skips the check.
+guard_command_has_npm_install() {
+  local seg rc
+  while IFS= read -r seg; do
+    rc=0
+    command_scan_text "${seg}" | grep -qEi "${SAFEDEPS_G_NPM_INSTALL_RE}" || rc=$?
+    (( rc == 1 )) || return 0
+  done < <(command_candidate_texts "$1")
+  return 1
+}
+
+# The inode of <file>, or nothing when it is not there. `ls -i` is the one
+# spelling BSD and GNU share.
+guard_file_inode() {
+  local inode
+  [[ -e "$1" ]] || return 0
+  read -r inode _ < <(ls -di -- "$1" 2>/dev/null) || return 0
+  printf '%s' "${inode}"
+}
+
+# True when every install in the command is one the PostToolUse effect gate can
+# answer for, so the record of whether it was read belongs to that hook. That
+# gate reads the npm CLI's two records of a project install: package-lock.json
+# and the hidden lockfile node_modules/.package-lock.json. So pnpm, yarn and bun
+# are not covered even though their ledger ecosystem is npm; neither is a runner
+# (npx, npm exec), which changes no lockfile; neither is an npm install that an
+# .npmrc keeps out of both lockfiles, which leaves a trace in a lockfile that
+# does not name it. The exemption below used to be keyed on "the ledger
+# ecosystem is npm", and that let an unpinned `pnpm add x` through with no
+# record at all (GitHub #22).
+#
+# Where an npm install lands is not asked here. It used to be: an install whose
+# directory the text could not name was recorded here, and one it could was
+# exempt. Three validation rounds found text that named the wrong directory, a
+# `cd` that never ran, a symlinked member, a `cd` spelled `command cd`, and each
+# was a silent pass, because a prediction that is wrong in the exempting
+# direction leaves nothing to notice it. So the prediction only picks where the
+# effect gate looks. The PostToolUse hook records the install UNGATED when that
+# directory shows no trace of it, whatever the text said
+# (safedeps/effect-gate-blind-to-lockless-npm-installs).
 guard_effect_gate_reads_every_install() {
   local cmd="$1"
-  local seg any=false kind target
+  local seg any=false kind
 
   # Every install text the command carries, payloads included, must be an npm
   # CLI install. A payload install (`sh -c "pnpm add x"`) is not a statement of
@@ -2830,14 +3051,12 @@ guard_effect_gate_reads_every_install() {
   done < <(command_candidate_texts "${cmd}" | tr ';|&' '\n')
   [[ "${any}" == true ]] || return 1
 
-  # And every install statement lands in the directory the gate reads.
+  # And every install statement is an npm CLI install the lockfiles record.
   any=false
-  while IFS=$'\t' read -r kind target _; do
+  while IFS=$'\t' read -r kind _ _; do
     [[ -n "${kind}" ]] || continue
     any=true
     [[ "${kind}" == npm ]] || return 1
-    [[ "${target}" != "?" && "${target}" != global ]] || return 1
-    [[ "$(canonicalize_dir "${target}")" == "${PROJECT_DIR}" ]] || return 1
   done <<< "${INSTALL_TARGETS}"
   [[ "${any}" == true ]]
 }
@@ -2937,15 +3156,41 @@ mkdir -p "${PENDING_DIR}"
 # GC pending entries whose PostToolUse never fired (crash/no-op). 24h is well past
 # any real install, so this never deletes an in-flight one (a 60-min window could
 # have reaped a slow native build that was still running).
-find "${PENDING_DIR}" -name '*.json' -type f -mmin +1440 -delete 2>/dev/null || true
+find "${PENDING_DIR}" \( -name '*.json' -o -name '*.trace' \) -type f -mmin +1440 -delete 2>/dev/null || true
 # Key = (dir, normalized command); the snapshot id suffix makes the filename unique
 # per install, so even two identical concurrent commands keep separate state.
 PENDING_KEY=$(compute_pending_key "${KEY_DIR_HASH}" "${COMMAND}")
-CURRENT_STATE=$(jq -n --arg sid "${SNAPSHOT_ID}" --arg pdir "${PROJECT_DIR}" --arg dhash "${DIR_HASH}" \
-  '{snapshot_id: $sid, project_dir: $pdir, dir_hash: $dhash}')
 # $$ (this pre hook's PID) guarantees a unique filename even for two installs in
 # the same second (SNAPSHOT_ID has only 1s resolution).
-write_state_file "${PENDING_DIR}/${PENDING_KEY}__${SNAPSHOT_ID}_$$.json" "${CURRENT_STATE}"
+PENDING_BASE="${PENDING_DIR}/${PENDING_KEY}__${SNAPSHOT_ID}_$$"
+
+# What the PostToolUse hook needs to tell whether an npm install was read: a
+# file touched now, and the inode of each npm lockfile in the directory the gate
+# reads. npm rewrote node_modules/.package-lock.json on every install that
+# installed anything, a reinstall of what was already there included, with the
+# same content and a new mtime; `npm ci` replaced the file, so the inode
+# changed too (measured with npm 11.19.0 in the design judgment). Content is no
+# use for this, and neither is a whole-second mtime: a reinstall that finishes
+# within the second it started in shows nothing in either. So the trace is a
+# lockfile `find -newer` than this file, or one with another inode.
+#
+# This is written last, once the command is known to run, so the time between
+# the touch and the command is the hook's exit and nothing else.
+TRACE_JSON=null
+ATTRIBUTION=""
+if guard_command_has_npm_install "${COMMAND}"; then
+  ATTRIBUTION=$(guard_npm_writers_unattributable "${COMMAND}")
+  TRACE_JSON=$(jq -nc --arg baseline "${PENDING_BASE}.trace" \
+    --arg lock "$(guard_file_inode "${PROJECT_DIR}/package-lock.json")" \
+    --arg hidden "$(guard_file_inode "${PROJECT_DIR}/node_modules/.package-lock.json")" \
+    '{baseline: $baseline, inodes: {"package-lock.json": $lock, "node_modules/.package-lock.json": $hidden}}')
+  : > "${PENDING_BASE}.trace"
+fi
+CURRENT_STATE=$(jq -n --arg sid "${SNAPSHOT_ID}" --arg pdir "${PROJECT_DIR}" --arg dhash "${DIR_HASH}" \
+  --arg from "${PROJECT_DIR_FROM}" --argjson trace "${TRACE_JSON}" --arg attribution "${ATTRIBUTION}" \
+  '{snapshot_id: $sid, project_dir: $pdir, dir_hash: $dhash, project_dir_from: $from,
+    npm_trace: $trace, npm_unattributable: $attribution}')
+write_state_file "${PENDING_BASE}.json" "${CURRENT_STATE}"
 
 if [[ -n "${UPDATED_COMMAND}" ]]; then
   mark_ignore_scripts_injected
