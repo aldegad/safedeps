@@ -2300,7 +2300,7 @@ guard_runner_uses_local_bin() {
   local seg="$1" name="$2"
   [[ "${name}" =~ ^[A-Za-z0-9._-]+$ ]] || return 1
   [[ -x "${PROJECT_DIR:-.}/node_modules/.bin/${name}" ]] || return 1
-  command_scan_text "${seg}" | judge_grep -qEi "${SAFEDEPS_G_START}((npx|bunx)([[:space:]]|\$)|npm${SAFEDEPS_G_OPTS}[[:space:]]+(exec|x)([[:space:]]|\$)|bun${SAFEDEPS_G_OPTS}[[:space:]]+x([[:space:]]|\$))"
+  command_scan_text "${seg}" | judge_grep -qEi "${SAFEDEPS_G_START}((npx|bunx)([[:space:]]|\$)|npm${SAFEDEPS_G_OPTS}[[:space:]]+(${SAFEDEPS_G_NPM_EXEC_VERBS})([[:space:]]|\$)|bun${SAFEDEPS_G_OPTS}[[:space:]]+x([[:space:]]|\$))"
 }
 
 # True when the statement is a runner: something that fetches a package and

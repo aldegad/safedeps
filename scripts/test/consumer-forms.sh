@@ -405,6 +405,12 @@ for grammar_form in \
   "npm it evil@1.0.0" \
   "npm u evil@1.0.0" \
   "npm udpate evil@1.0.0" \
+  "npm upd evil@1.0.0" \
+  "npm upgra evil@1.0.0" \
+  "npm install-te evil@1.0.0" \
+  "npm installTest evil@1.0.0" \
+  "npm si evil@1.0.0" \
+  "npm exe evil@1.0.0" \
   "yarn up evil@1.0.0" \
   "yarn global add evil@1.0.0" \
   "yarn workspace web add evil@1.0.0" \
@@ -463,6 +469,16 @@ do
   expect_deny "the install spelled ${grammar_form}" "${grammar_form}"
 done
 pass "aliases, options, versioned interpreters, runners, statement positions and quoted specs are all gated"
+
+# npm takes any unique abbreviation of a command or alias, and the camelCase
+# form of a dashed one (lib/utils/cmd-list.js deref). The grammar holds what
+# deref accepts, measured from npm; where an npm is on PATH, that measurement is
+# rerun here, so a newer npm that adds a spelling turns this red.
+if command -v npm >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  scripts/measure/npm-verb-spellings.sh >/dev/null \
+    || fail "the grammar's npm verbs are what npm's own parser accepts ($(scripts/measure/npm-verb-spellings.sh 2>&1 | head -5 | tr '\n' ' '))"
+  pass "the grammar's npm command words are the ones npm's parser accepts (scripts/measure/npm-verb-spellings.sh, npm $(npm --version))"
+fi
 
 # --- 7. A spec is checked as the package it names ------------------------------
 # Both of these used to prescribe a `safedeps check` for the wrong package --

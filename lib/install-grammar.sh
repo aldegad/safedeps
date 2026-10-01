@@ -40,13 +40,26 @@
 #   dotnet package update [<pkg>[@<ver>]...]: .NET 10, moves a referenced
 #     package to <ver>, or to the newest one without it
 #     (learn.microsoft.com/dotnet/core/tools/dotnet-package-update).
-SAFEDEPS_G_NPM_VERBS='install|i|in|ins|inst|insta|instal|isnt|isnta|isntal|isntall|add|install-test|it|ci|clean-install|ic|install-clean|isntall-clean|install-ci-test|cit|clean-install-test|sit|update|u|up|upgrade|udpate'
+#
+# npm's own spellings are not a fixed list. npm reads its command word with
+# lib/utils/cmd-list.js `deref`: a camelCase word is read as dashed
+# (`installTest` is `install-test`), then an exact command or alias, then any
+# unique abbreviation of a command or an alias (`npm upd`, `npm install-te`,
+# `npm exe`). The npm lists below are what deref maps to each command, measured
+# from npm 11.19.0 by scripts/measure/npm-verb-spellings.sh, which also checks
+# them against the npm on PATH. A dash before a letter is written `-?[xX]`,
+# because deref accepts the camelCase form of every dashed spelling. A list
+# copied from the documented aliases missed every abbreviation.
+#   install, ci, install-test, install-ci-test, update:
+SAFEDEPS_G_NPM_VERBS='add|ci|cit|clean-?[iI]nstall|clean-?[iI]nstall-|clean-?[iI]nstall-?[tT]|clean-?[iI]nstall-?[tT]e|clean-?[iI]nstall-?[tT]es|clean-?[iI]nstall-?[tT]est|i|ic|in|ins|inst|insta|instal|install|install-?[cC]i|install-?[cC]i-|install-?[cC]i-?[tT]|install-?[cC]i-?[tT]e|install-?[cC]i-?[tT]es|install-?[cC]i-?[tT]est|install-?[cC]l|install-?[cC]le|install-?[cC]lea|install-?[cC]lean|install-?[tT]|install-?[tT]e|install-?[tT]es|install-?[tT]est|isnt|isnta|isntal|isntall|isntall-|isntall-?[cC]|isntall-?[cC]l|isntall-?[cC]le|isntall-?[cC]lea|isntall-?[cC]lean|it|si|sit|u|ud|udp|udpa|udpat|udpate|up|upd|upda|updat|update|upg|upgr|upgra|upgrad|upgrade'
+#   exec:
+SAFEDEPS_G_NPM_EXEC_VERBS='exe|exec|x'
 SAFEDEPS_G_PNPM_VERBS='add|install|i|install-test|it|update|up|upgrade'
 SAFEDEPS_G_YARN_VERBS='add|install|upgrade|up'
 SAFEDEPS_G_BUN_VERBS='add|a|install|i|update|upgrade'
 
 # Every token that can open an install's operand list, for the operand walks.
-SAFEDEPS_G_ALL_VERBS="${SAFEDEPS_G_NPM_VERBS}|${SAFEDEPS_G_PNPM_VERBS}|${SAFEDEPS_G_YARN_VERBS}|${SAFEDEPS_G_BUN_VERBS}|dlx|exec|x|get|run|inject|dependency:get|package"
+SAFEDEPS_G_ALL_VERBS="${SAFEDEPS_G_NPM_VERBS}|${SAFEDEPS_G_PNPM_VERBS}|${SAFEDEPS_G_YARN_VERBS}|${SAFEDEPS_G_BUN_VERBS}|${SAFEDEPS_G_NPM_EXEC_VERBS}|dlx|get|run|inject|dependency:get|package"
 
 # Executables the gate names. Used to strip an absolute path prefix, so that
 # `/usr/local/bin/pip3.11` is read as `pip3.11`.
@@ -78,11 +91,11 @@ SAFEDEPS_G_NPM_INSTALL_BODY="npm${SAFEDEPS_G_O}[[:space:]]+(${SAFEDEPS_G_NPM_VER
 # Runners fetch a package and execute it. Nothing reads a lockfile after them.
 # This ends AT the runner keyword. Options after it belong to the runner and can
 # carry the package (`npx -p x@1 cmd`), so the operand walk has to see them.
-SAFEDEPS_G_RUNNER_BODY="(npx|pnpx|bunx|uvx)|npm${SAFEDEPS_G_O}[[:space:]]+(exec|x)|pnpm${SAFEDEPS_G_O}[[:space:]]+dlx|yarn${SAFEDEPS_G_O}[[:space:]]+dlx|bun${SAFEDEPS_G_O}[[:space:]]+x|pipx${SAFEDEPS_G_O}[[:space:]]+run|uv${SAFEDEPS_G_O}[[:space:]]+tool${SAFEDEPS_G_O}[[:space:]]+run|go${SAFEDEPS_G_O}[[:space:]]+run"
+SAFEDEPS_G_RUNNER_BODY="(npx|pnpx|bunx|uvx)|npm${SAFEDEPS_G_O}[[:space:]]+(${SAFEDEPS_G_NPM_EXEC_VERBS})|pnpm${SAFEDEPS_G_O}[[:space:]]+dlx|yarn${SAFEDEPS_G_O}[[:space:]]+dlx|bun${SAFEDEPS_G_O}[[:space:]]+x|pipx${SAFEDEPS_G_O}[[:space:]]+run|uv${SAFEDEPS_G_O}[[:space:]]+tool${SAFEDEPS_G_O}[[:space:]]+run|go${SAFEDEPS_G_O}[[:space:]]+run"
 
 SAFEDEPS_G_INSTALL_BODY="${SAFEDEPS_G_NPM_INSTALL_BODY}\
 |(npx|pnpx|bunx|uvx)${SAFEDEPS_G_O}${SAFEDEPS_G_OPERAND}\
-|npm${SAFEDEPS_G_O}[[:space:]]+(exec|x)${SAFEDEPS_G_O}${SAFEDEPS_G_OPERAND}\
+|npm${SAFEDEPS_G_O}[[:space:]]+(${SAFEDEPS_G_NPM_EXEC_VERBS})${SAFEDEPS_G_O}${SAFEDEPS_G_OPERAND}\
 |pnpm${SAFEDEPS_G_O}[[:space:]]+(${SAFEDEPS_G_PNPM_VERBS}|dlx)\
 |yarn${SAFEDEPS_G_O}([[:space:]]+(global|workspace[[:space:]]+[^[:space:]]+|workspaces[[:space:]]+foreach${SAFEDEPS_G_O}))?${SAFEDEPS_G_O}[[:space:]]+(${SAFEDEPS_G_YARN_VERBS}|dlx)\
 |bun${SAFEDEPS_G_O}[[:space:]]+(${SAFEDEPS_G_BUN_VERBS})\
