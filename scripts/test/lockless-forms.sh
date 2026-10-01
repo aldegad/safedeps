@@ -462,7 +462,11 @@ pass "an install npm could not be asked about, or did not answer for, is recorde
 # --- 2. Installs no effect gate reads are recorded -----------------------------------
 # A global install writes no lockfile anywhere, so there is nothing to read.
 # The gate says so in advisory.log. Nothing runs its scripts either: the rebuild
-# stays in the project, and the package is not in the project.
+# stays in the project, and the package is not in the project. These five forms
+# are installed for real; whether a spelling is global is npm's answer, and the
+# spellings npm's option parser also reads as global (`-gf`, `-g=true`,
+# `--locat=global`, `--no-global=false`) are pinned as recorded in
+# scripts/test/consumer-forms.sh, section 11, which asks npm without installing.
 for form in \
   "npm_config_global=true npm install sd-victim" \
   "export npm_config_global=true; npm install sd-victim" \
@@ -477,7 +481,7 @@ do
   ungated || fail "an unpinned install the effect gate cannot read is recorded UNGATED: ${form}"
   victim_ran && fail "no script of the unverified global package runs: ${form}"
 done
-pass "global installs, however spelled in the command, are recorded as UNGATED and run no script"
+pass "global installs (-g, --location=global, npm_config_global/location prefixed or exported) are recorded as UNGATED and run no script"
 
 # --- 3. Codex: detect and rollback ------------------------------------------------------
 # Codex has no updatedInput, so the install is not inert and its scripts run

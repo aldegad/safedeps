@@ -1168,10 +1168,15 @@ guard_npmrc_unrecorded() {
 #     run time is `?`: a variable or substitution, a directory that does not
 #     exist yet, `popd`, a `cd` inside a group or subshell, and a `cd` beside a
 #     pipe or `&`, which run it in a subshell of its own.
-#   - Global installs: `-g`, `--global`, `--location global`, and the same two
-#     settings given as `npm_config_global` / `npm_config_location` anywhere in
-#     the command, prefixed or exported. Those land in npm's global prefix and
-#     write no lockfile at all.
+#   - Global installs, which land in npm's global prefix and write no lockfile
+#     at all. Whether an install is global is npm's answer too: `npm root`
+#     names the global tree for it (lib/npm/ask.sh). A list of spellings
+#     (`-g`, `--global`, `--location global`) used to decide it here, and npm
+#     reads more than any list: `-gf`, `-fg`, `-g=true`, `--no-global=false` and
+#     the abbreviation `--locat=global` are all global to npm's option parser
+#     (nopt), and each read as a project install. The same settings given as
+#     `npm_config_global` / `npm_config_location`, prefixed or exported, reach
+#     the ask the way they reach npm.
 #   - `npm_config_prefix` in the environment does NOT move a project install:
 #     measured, it landed in the cwd project and the gate rolled it back.
 #   - The same two settings in the project's or the user's .npmrc, which the
@@ -1183,14 +1188,12 @@ resolve_install_targets() {
   local cmd="$1" cwd="$2"
   local text before stmt after words raw head target want kind manager tok value normalized in_env skip
   local user_rc cli_global_off why run_dir answer local_prefix npm_word npm_unknown i
-  local dir="${cwd}" grouped=false env_global=false env_userconfig=false exports_unknown=""
+  local dir="${cwd}" grouped=false env_userconfig=false exports_unknown=""
   local npm_until=""
   local -a toks=() npm_env=() npm_args=() npm_exports=()
 
   text=$(join_line_continuations "$(strip_heredoc_bodies "${cmd}")")
   command_scan_text "${text}" | grep -q '[(){}`]' && grouped=true
-  command_scan_text "${text}" \
-    | grep -qEi '(^|[[:space:];&|(])(export[[:space:]]+)?npm_config_(global|location)=' && env_global=true
   command_scan_text "${text}" | grep -qEi 'npm_config_userconfig=' && env_userconfig=true
 
   while IFS=$'\035' read -r before stmt after words raw; do
@@ -1330,12 +1333,8 @@ resolve_install_targets() {
       # npm somewhere, and each disagreement was a silent pass: a `cd` into a
       # directory without a package.json, then a workspace member reached
       # through a symlink, where npm installs in the member and the copy
-      # climbed to the root.
-      if [[ "${env_global}" == true ]] \
-          || printf '%s' "${stmt}" | grep -qEi -- '(^|[[:space:]])(-g|--global(=true)?|--location(=|[[:space:]]+)global)([[:space:]]|$)'; then
-        target=global
-        break
-      fi
+      # climbed to the root. Whether it is global is part of that answer, so
+      # no spelling of `--global` is read here.
       # The words before npm go to env(1) in front of it, and the words after
       # it are npm's arguments, unchanged.
       npm_env=("${npm_exports[@]+"${npm_exports[@]}"}")
@@ -2317,22 +2316,28 @@ guard_all_npm_installs_are_global() {
   # because the agent session happens to be anchored in a project with
   # overrides. Keep mixed local+global compound commands project-scoped: one
   # context cannot safely represent both operations.
-  local cmd="$1"
-  local candidate seg scan
-  local found=false
+  #
+  # "Global" is the landing resolve_install_targets read from npm, the same one
+  # the record and the effect gate use. This used to be a second reading, a
+  # regex over `-g`/`--global`/`--location global`, so the ledger context and
+  # the record could disagree about one install, and every spelling npm reads
+  # that the regex did not (`-gf`, `-g=true`, `--locat=global`) was project
+  # scoped here while it installed globally. An npm install inside a payload
+  # (`sh -c`, `eval`) is not in that list; its landing is decided inside the
+  # payload, so the command stays project-scoped, the direction that can deny
+  # an approved package but never drops the project's context from one.
+  local cmd="$1" kind target payload found=false
 
-  while IFS= read -r candidate; do
-    while IFS= read -r seg; do
-      [[ "${seg}" =~ [^[:space:]] ]] || continue
-      scan=$(command_scan_text "${seg}")
-      echo "${scan}" | judge_grep -qEi '(^|[[:space:]])npm([[:space:]]|$)' || continue
-      echo "${scan}" | judge_grep -qEi "(^|[[:space:]])(${SAFEDEPS_G_NPM_VERBS})([[:space:]]|\$)" || continue
-      found=true
-      echo "${scan}" | judge_grep -qEi -- '(^|[[:space:]])(-g|--global(=true)?|--location(=|[[:space:]]+)global)([[:space:]]|$)' || return 1
-    done < <(printf '%s\n' "${candidate}" | tr ';|&' '\n')
-  done < <(command_candidate_texts "${cmd}")
-
-  [[ "${found}" == true ]]
+  while IFS=$'\035' read -r kind target _ _; do
+    [[ "${kind}" == npm ]] || continue
+    found=true
+    [[ "${target}" == global ]] || return 1
+  done <<< "${INSTALL_TARGETS}"
+  [[ "${found}" == true ]] || return 1
+  while IFS= read -r payload; do
+    command_scan_text "${payload}" | judge_grep -qEi "${SAFEDEPS_G_NPM_INSTALL_RE}" && return 1
+  done < <(command_payload_texts "$(join_line_continuations "$(strip_heredoc_bodies "${cmd}")")")
+  return 0
 }
 
 # Each runner's options, from its own help, in three kinds: an option whose

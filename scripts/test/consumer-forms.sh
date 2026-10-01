@@ -1067,6 +1067,18 @@ operand_rows=(
   $'npm:right-pad\tnpm install --no-save left-pad && pnpm add right-pad'
   $'npm:right-pad\tnpm install left-pad && cd sub && npm install right-pad'
   $'npm:right-pad\tnpm install left-pad && npm install -g right-pad'
+  # Recorded: global however npm's option parser (nopt) spells it -- a short
+  # flag bundle, `=value` on a boolean, a negated `--no-` set to false, a unique
+  # abbreviation of `--location`. npm answers where each lands (`npm root`), so
+  # no spelling is listed in the guard; these read as project installs, and
+  # went unrecorded, while a regex decided it.
+  $'npm:left-pad\tnpm install -gf left-pad'
+  $'npm:left-pad\tnpm i -fg left-pad'
+  $'npm:left-pad\tnpm i -g=true left-pad'
+  $'npm:left-pad\tnpm i --locat=global left-pad'
+  $'npm:left-pad\tnpm i --no-global=false left-pad'
+  # Quiet: the last value nopt reads wins, so this one is a project install.
+  $'\tnpm i -g left-pad --global=false'
   # Recorded: a payload's npm install. Where it lands is decided inside the
   # payload, and the landing does not read inside it.
   $'npm:left-pad\tsh -c \'npm install left-pad\''
