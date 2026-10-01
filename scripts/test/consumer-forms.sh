@@ -623,7 +623,13 @@ pass "an escaped backslash closes a region, an escaped quote opens none, and a c
 # really treats as data stays data. An escaped backslash then an escaped quote
 # leaves the region open, and `\<newline>` inside single quotes is not a
 # continuation.
-expect_pass "an install inside a region an escaped quote keeps open" 'echo "a\\\" ; pip install evil==1.0.0'
+# The region stays open to the end of the command, which the shell refuses to
+# run at all. The gate reads an input that never closes as unread and answers
+# UNDECIDED for it -- a line the lexer could not finish is not a line it read.
+unclosed_reason=$(jq -nc --arg c 'echo "a\\\" ; pip install evil==1.0.0' --arg cwd "${project_dir}" '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
+  HOME="${tmp_root}/home" SAFEDEPS_HOME="$(mktemp -d "${tmp_root}/safe.XXXXXX")" scripts/safedeps-pre-guard.sh 2>/dev/null |
+  jq -r '.hookSpecificOutput.permissionDecisionReason // ""')
+grep -q 'UNDECIDED' <<< "${unclosed_reason}" || fail "an install inside a region an escaped quote keeps open is undecided, not passed or claimed"
 expect_pass "an install inside single quotes across a backslash-newline" $'echo \'a\\\npip install evil==1.0.0\''
 pass "text the shell treats as data stays data"
 

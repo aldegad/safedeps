@@ -156,6 +156,10 @@ case "\$*" in
   *"safedeps:install_managers_blanked"*) kind=blank ;;
   *"safedeps:extract_flagged_specs"*) kind=flag ;;
   *"safedeps:operand_specs_ecosystem"*) kind=eco ;;
+  *"safedeps:strip_heredoc_bodies"*) kind=strip ;;
+  *"safedeps:command_reads"*) kind=reads ;;
+  *"safedeps:inert_rewrite_in_place"*) kind=inert ;;
+  *"safedeps:inert_offsets"*) kind=offsets ;;
 esac
 [[ -n "\${kind}" ]] || exec "\${real}" "\$@"
 n=\$(bump reads)
@@ -255,7 +259,7 @@ for n in $(seq 1 "${case_count}"); do
     printf '%s k %s\n' "${n}" "${k}" >> "${WORK}/jobs"
     [[ "${QUICK}" == "true" ]] || printf '%s from-k %s\n' "${n}" "${k}" >> "${WORK}/jobs"
   done
-  for mode in scan-all join-all blank-all flag-all eco-all awk-all grep-all sed-all; do
+  for mode in scan-all join-all strip-all reads-all inert-all offsets-all blank-all flag-all eco-all awk-all grep-all sed-all; do
     printf '%s %s 0\n' "${n}" "${mode}" >> "${WORK}/jobs"
   done
 done

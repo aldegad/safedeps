@@ -84,49 +84,104 @@ fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
 # executable hook with no source guard, and sourcing it would run the whole
 # judgment. An empty extraction is a hard failure, never a skipped battery --
 # a rename must break this file loudly rather than quietly stop checking.
-shipped_src=$(sed -n '/^command_scan_text() {/,/^}/p' "${GUARD}")
-[[ -n "${shipped_src}" ]] || fail "command_scan_text not found in ${GUARD} (renamed? then update this battery)"
+shipped_src=$(sed -n '/^shell_lex() {/,/^}/p; /^command_scan_text() {/,/^}/p' "${GUARD}")
+[[ "${shipped_src}" == *"shell_lex() {"* && "${shipped_src}" == *"command_scan_text() {"* ]] \
+  || fail "shell_lex and command_scan_text not found in ${GUARD} (renamed? then update this battery)"
 eval "${shipped_src}"
 declare -F command_scan_text > /dev/null || fail "extracted command_scan_text did not define the function"
 
 # --- the spec -----------------------------------------------------------------
 # Deliberately the slowest, most obvious statement of the seven rules. It is
 # read by this battery only, so its cost is irrelevant and its clarity is not.
-reference_scan_text() {
+reference_spec_scan_text() {
   local LC_ALL=C
-  local input="$1" output="" quote="" escaped="" char i
-  for ((i = 0; i < ${#input}; i++)); do
-    char="${input:i:1}"
-    if [[ -n "${escaped}" ]]; then
-      escaped=""
-      if [[ -z "${quote}" && "${char}" != $'\n' ]]; then
-        case "${char}" in
-          ';'|'&'|'|'|'('|')'|'<'|'>'|'!'|'{'|'}'|'#'|'`') output="${output}_" ;;
-          *) output="${output}${char}" ;;
-        esac
+  local input="$1" output="" i c n=${#1}
+  local mode="" sq_closes="${REF_SQ_CLOSES:-1}"
+  # The context stack: T top, D double quotes, S $( or subshell, A arithmetic,
+  # K $[, V ${. dq counts the D entries; par counts parentheses per level.
+  local -a ctx=(T) par=(0)
+  local d=0 dq=0
+  for ((i = 0; i < n; i++)); do
+    c="${input:i:1}"
+    if [[ "${mode}" == "SQ" ]]; then
+      output+=" "
+      [[ "${c}" == "'" && "${sq_closes}" == 1 ]] && mode=""
+      continue
+    fi
+    if [[ "${mode}" == "AQ" ]]; then
+      output+=" "
+      if [[ "${c}" == "\\" ]]; then ((i++)); [[ ${i} -lt ${n} ]] && output+=" "
+      elif [[ "${c}" == "'" ]]; then mode=""; fi
+      continue
+    fi
+    if [[ "${ctx[d]}" == "D" ]]; then
+      output+=" "
+      if [[ "${c}" == "\\" ]]; then ((i++)); [[ ${i} -lt ${n} ]] && output+=" "
+      elif [[ "${c}" == '"' ]]; then ((d--)); ((dq--))
+      elif [[ "${c}" == '$' && "${input:i+1:2}" == "((" ]]; then output+="  "; ((i += 2)); ((d++)); ctx[d]=A; par[d]=0
+      elif [[ "${c}" == '$' && "${input:i+1:1}" == "(" ]]; then output+=" "; ((i++)); ((d++)); ctx[d]=S; par[d]=0
+      elif [[ "${c}" == '$' && "${input:i+1:1}" == "{" ]]; then output+=" "; ((i++)); ((d++)); ctx[d]=V; par[d]=0
+      fi
+      continue
+    fi
+    # Code. Inside quotes (dq > 0) it is blanked like the quotes around it.
+    local keep="${c}" two="${input:i:2}" three="${input:i:3}"
+    [[ ${dq} -gt 0 ]] && { keep=" "; two="  "; three="   "; }
+    if [[ "${c}" == "\\" ]]; then
+      if [[ "${input:i+1:1}" == $'\n' ]]; then output+="  "; ((i++)); continue; fi
+      output+=" "
+      ((i++)); [[ ${i} -lt ${n} ]] || continue
+      c="${input:i:1}"
+      if [[ ${dq} -gt 0 ]]; then output+=" "
       else
-        output="${output} "
+        case "${c}" in
+          ';'|'&'|'|'|'('|')'|'<'|'>'|'!'|'{'|'}'|'#'|'`') output+="_" ;;
+          *) output+="${c}" ;;
+        esac
       fi
-    elif [[ -z "${quote}" ]]; then
-      case "${char}" in
-        "\\") escaped=1; output="${output} " ;;
-        "'") quote="single"; output="${output} " ;;
-        '"') quote="double"; output="${output} " ;;
-        *)   output="${output}${char}" ;;
-      esac
-    elif [[ "${quote}" == "single" ]]; then
-      [[ "${char}" == "'" ]] && quote=""
-      output="${output} "
-    else
-      if [[ "${char}" == "\\" ]]; then
-        escaped=1
-      elif [[ "${char}" == '"' ]]; then
-        quote=""
+      continue
+    fi
+    if [[ "${c}" == '$' && "${input:i+1:1}" == "'" ]]; then output+="  "; ((i++)); mode=AQ; continue; fi
+    if [[ "${c}" == "'" ]]; then output+=" "; mode=SQ; continue; fi
+    if [[ "${c}" == '"' ]]; then output+=" "; ((d++)); ctx[d]=D; par[d]=0; ((dq++)); continue; fi
+    if [[ "${ctx[d]}" == "A" || "${ctx[d]}" == "K" ]]; then
+      output+="${keep}"
+      if [[ "${ctx[d]}" == "K" ]]; then [[ "${c}" == "]" ]] && ((d--)); continue; fi
+      if [[ "${c}" == "(" ]]; then ((par[d]++))
+      elif [[ "${c}" == ")" ]]; then
+        if [[ ${par[d]} -gt 0 ]]; then ((par[d]--))
+        elif [[ "${input:i+1:1}" == ")" ]]; then output+="${keep}"; ((i++)); ((d--)); fi
       fi
-      output="${output} "
+      continue
+    fi
+    if [[ "${c}" == '$' && "${input:i+1:2}" == "((" ]]; then output+="${three}"; ((i += 2)); ((d++)); ctx[d]=A; par[d]=0; continue; fi
+    if [[ "${c}" == "(" && "${input:i+1:1}" == "(" ]] && reference_cmdpos "${input}" "${i}"; then
+      output+="${two}"; ((i++)); ((d++)); ctx[d]=A; par[d]=0; continue
+    fi
+    if [[ "${c}" == '$' && "${input:i+1:1}" == "(" ]]; then output+="${two}"; ((i++)); ((d++)); ctx[d]=S; par[d]=0; continue; fi
+    if [[ "${c}" == '$' && "${input:i+1:1}" == "[" ]]; then output+="${two}"; ((i++)); ((d++)); ctx[d]=K; par[d]=0; continue; fi
+    if [[ "${c}" == '$' && "${input:i+1:1}" == "{" ]]; then output+="${two}"; ((i++)); ((d++)); ctx[d]=V; par[d]=0; continue; fi
+    output+="${keep}"
+    if [[ "${ctx[d]}" == "V" ]]; then [[ "${c}" == "}" ]] && ((d--)); continue; fi
+    if [[ "${c}" == "(" ]]; then ((par[d]++))
+    elif [[ "${c}" == ")" ]]; then
+      if [[ ${par[d]} -gt 0 ]]; then ((par[d]--))
+      elif [[ "${ctx[d]}" == "S" ]]; then ((d--)); fi
     fi
   done
   printf '%s' "${output}"
+}
+
+reference_scan_text() { reference_spec_scan_text "$@"; }
+
+# `((` opens arithmetic only where a command starts.
+reference_cmdpos() {
+  local input="$1" k=$(( $2 - 1 )) w=""
+  while [[ ${k} -ge 0 && ( "${input:k:1}" == " " || "${input:k:1}" == $'\t' ) ]]; do ((k--)); done
+  [[ ${k} -lt 0 ]] && return 0
+  case "${input:k:1}" in $'\n'|';'|'&'|'|'|'('|'!'|'{') return 0 ;; esac
+  while [[ ${k} -ge 0 && "${input:k:1}" == [a-z] ]]; do w="${input:k:1}${w}"; ((k--)); done
+  [[ "${w}" =~ ^(if|then|else|elif|while|until|do|time)$ ]]
 }
 
 # Command substitution eats trailing newlines, and rule 4 turns a quoted newline
@@ -289,39 +344,7 @@ pass "randomized differential: ${fuzz_cases} inputs, seed ${fuzz_seed}, no diver
 # sees it. Without this, a broken harness and a clean run look identical.
 control_hit=0
 reference_scan_text() {
-  local LC_ALL=C
-  local input="$1" output="" quote="" escaped="" char i
-  for ((i = 0; i < ${#input}; i++)); do
-    char="${input:i:1}"
-    if [[ -n "${escaped}" ]]; then
-      escaped=""
-      if [[ -z "${quote}" && "${char}" != $'\n' ]]; then
-        case "${char}" in
-          ';'|'&'|'|'|'('|')'|'<'|'>'|'!'|'{'|'}'|'#'|'`') output="${output}_" ;;
-          *) output="${output}${char}" ;;
-        esac
-      else
-        output="${output} "
-      fi
-    elif [[ -z "${quote}" ]]; then
-      case "${char}" in
-        "\\") escaped=1; output="${output} " ;;
-        "'") quote="single"; output="${output} " ;;
-        '"') quote="double"; output="${output} " ;;
-        *)   output="${output}${char}" ;;
-      esac
-    elif [[ "${quote}" == "single" ]]; then
-      output="${output} "
-    else
-      if [[ "${char}" == "\\" ]]; then
-        escaped=1
-      elif [[ "${char}" == '"' ]]; then
-        quote=""
-      fi
-      output="${output} "
-    fi
-  done
-  printf '%s' "${output}"
+  REF_SQ_CLOSES=0 reference_spec_scan_text "$@"
 }
 RANDOM="${fuzz_seed}"
 for ((c = 0; c < fuzz_cases; c++)); do
