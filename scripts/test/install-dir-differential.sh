@@ -11,14 +11,22 @@
 #
 # For every layout below, the real pre-guard judges `npm install sd-victim`
 # with the hook's cwd in that layout, and the directory it chose (the pending
-# project_dir, or `?` when it recorded the install UNGATED) is compared with
+# project_dir, or `?` when no statement named one and it fell back to the cwd)
+# is compared with
 # `npm prefix` run in the same place. Where npm itself refuses a layout (a
 # `workspaces` value it rejects), the install would fail as well, and the gate
-# recording it UNGATED is the same answer. The layouts are the validator's
-# differential oracle from round 2 (diff-prefix.sh, 237 layouts): ordinary
-# workspaces, every glob spelling npm reads, dot directories, node_modules,
-# nested and distant roots, symlinked members and symlinked pattern parents, and
-# package.json files npm cannot read. A few command forms are added on top.
+# not placing it is the same answer.
+#
+# The choice is where the effect gate looks, not whether the install was read:
+# the PostToolUse hook records an install that left no trace there UNGATED. A
+# wrong choice here is a record rather than a silent pass, and this battery
+# keeps it from being a record npm could have avoided.
+#
+# The layouts are the validator's differential oracle from round 2
+# (diff-prefix.sh, 237 layouts): ordinary workspaces, every glob spelling npm
+# reads, dot directories, node_modules, nested and distant roots, symlinked
+# members and symlinked pattern parents, and package.json files npm cannot
+# read. A few command forms are added on top.
 #
 # No install runs. The pre-guard judges the command as a payload, and
 # `npm prefix` only loads npm's configuration. npm sees a sandbox of its own,
@@ -59,7 +67,7 @@ check_one() {
   home=$(mktemp -d "${T}/safe.XXXXXX")
   jq -nc --arg c "${command}" --arg d "${cwd}" '{tool_name:"Bash",tool_input:{command:$c},cwd:$d}' \
     | SAFEDEPS_HOME="${home}" scripts/safedeps-hook-entry.sh pre >/dev/null 2>&1 || true
-  if grep -q 'UNGATED' "${home}/advisory.log" 2>/dev/null; then
+  if [[ "$(jq -r '.project_dir_from // empty' "${home}"/pending/*.json 2>/dev/null | head -n 1)" == cwd ]]; then
     ours="?"
   else
     ours=$(cat "${home}"/pending/*.json 2>/dev/null | jq -r '.project_dir // empty' | head -n 1)
@@ -205,4 +213,4 @@ undecided=$(cat "${T}"/out/* | grep '^UNDEC' || true)
 (( layouts >= 237 )) || fail "the differential covers the validator's 237 layouts (${layouts})"
 [[ -z "${diffs}" ]] || fail "the gate reads the directory npm names, in every layout (${diffs//$'\n'/; })"
 [[ -z "${undecided}" ]] || fail "npm answered for every layout, so the gate decided every one (${undecided//$'\n'/; })"
-pass "the gate reads the directory npm names: ${same} of ${total} checks the same and ${both} refused by npm and recorded by the gate (${layouts} layouts, $((total - layouts)) command forms), DIFF 0"
+pass "the gate reads the directory npm names: ${same} of ${total} checks the same and ${both} refused by npm and not placed by the gate (${layouts} layouts, $((total - layouts)) command forms), DIFF 0"

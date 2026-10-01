@@ -529,11 +529,6 @@ for no_effect_gate in \
   "pnpm i evil" \
   "yarn add evil" \
   "bun add evil" \
-  "npm install -g evil" \
-  "npm_config_global=true npm install evil" \
-  "NPM_CONFIG_GLOBAL=true npm install evil" \
-  "export npm_config_global=true; npm install evil" \
-  "npm_config_location=global npm install evil" \
   "npx evil" \
   "npm exec evil" \
   "pnpm dlx evil" \
@@ -545,31 +540,111 @@ do
   [[ "$(gate_decision "${no_effect_gate}")" != "deny" ]] \
     || fail "the UNGATED record must not change the verdict: ${no_effect_gate}"
 done
-pass "unpinned pnpm/yarn/bun, global npm, and runner installs are recorded"
+pass "unpinned pnpm/yarn/bun and runner installs are recorded"
 
-# The effect gate reads one directory, chosen before the command runs. An install
-# that lands somewhere the text does not let the gate follow is not read, so it
-# is recorded. A literal `cd` to a directory that exists, and npm's `-C`, are
-# followed; everything the shell decides at run time is not
+# The pending state the pre-guard leaves for the PostToolUse hook, as JSON.
+pending_of() {
+  local command="$1" safe
+  safe=$(mktemp -d "${tmp_root}/safe-pending.XXXXXX")
+  jq -nc --arg c "${command}" --arg cwd "${project_dir}" \
+    '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
+    HOME="${tmp_root}/home-pending" SAFEDEPS_HOME="${safe}" scripts/safedeps-pre-guard.sh >/dev/null 2>&1
+  cat "${safe}"/pending/*.json 2>/dev/null || true
+}
+
+# Whether an npm install was read is the PostToolUse hook's to say, from the
+# install trace it finds where the gate looks (scripts/test/effect-trace-grid.sh
+# runs these end to end). So the pre-guard records none of these, whether the
+# text sends the install to npm's global prefix or somewhere it cannot name, and
+# every one leaves the post hook a trace baseline. The pre-guard used to record
+# them from the text, and text it read wrong was a silent pass
 # (safedeps/effect-gate-blind-to-lockless-npm-installs). `sub` has a
-# package.json of its own, so npm installs there and not in the project: npm
-# walks up from a directory without one.
+# package.json of its own.
 mkdir -p "${project_dir}/sub"
 printf '{}\n' > "${project_dir}/sub/package.json"
-for unfollowed in \
+for unread_by_text in \
+  "npm install -g evil" \
+  "npm_config_global=true npm install evil" \
+  "NPM_CONFIG_GLOBAL=true npm install evil" \
+  "export npm_config_global=true; npm install evil" \
+  "npm_config_location=global npm install evil" \
   'cd "$SUBDIR" && npm install evil' \
   'cd $(dirname x)/sub && npm install evil' \
   'cd no-such-dir && npm install evil' \
   '(cd sub && npm install evil)' \
   'cd sub | npm install evil' \
   'pushd sub && popd && npm install evil' \
-  'npm install evil --prefix=$HOME/x' \
-  'cd sub && npm install evil && cd .. && npm install other'
+  'npm install evil --prefix=$HOME/x'
 do
-  logged_ungated "${unfollowed}" \
-    || fail "an unpinned install that lands where the gate cannot follow is recorded: ${unfollowed}"
+  logged_ungated "${unread_by_text}" \
+    && fail "the pre-guard leaves the record of an npm install to the post hook: ${unread_by_text}"
+  state=$(pending_of "${unread_by_text}")
+  [[ -n "$(jq -r '.npm_trace.baseline // empty' <<< "${state}")" ]] \
+    || fail "the post hook gets a trace baseline: ${unread_by_text} (${state})"
+  [[ "$(jq -r '.project_dir_from' <<< "${state}")" == cwd ]] \
+    || fail "a directory the text cannot name falls back to the cwd, as a place to look: ${unread_by_text} ($(jq -c . <<< "${state}"))"
 done
-pass "an install relocated by run-time shell state, or split across directories, is recorded"
+pass "an npm install the text sends elsewhere, or cannot place, is left to the post hook's trace check"
+
+# A `cd` that may not run is followed only along the `&&` chain after it
+# (validator round 3, G1: `false && cd sub; npm install x` installs in the cwd).
+# `<form>|<directory the gate reads, relative to the project>`.
+for carrier in \
+  "false && cd sub; npm install evil|." \
+  "true || cd sub; npm install evil|." \
+  "if false; then cd sub; fi; npm install evil|." \
+  "[ -d sub ] && cd sub; npm install evil|." \
+  "x || cd sub && npm install evil|." \
+  "for d in sub; do cd sub; done; npm install evil|." \
+  "true && cd sub && npm install evil|sub" \
+  "if true; then cd sub && npm install evil; fi|sub" \
+  "cd sub || exit 1; npm install evil|sub" \
+  "cd sub; npm install evil|sub" \
+  "cd sub && npm install evil|sub"
+do
+  form="${carrier%|*}"
+  where="${project_dir}"
+  [[ "${carrier##*|}" == . ]] || where="${project_dir}/${carrier##*|}"
+  where=$(cd "${where}" && pwd -P)
+  state=$(pending_of "${form}")
+  [[ "$(jq -r '.project_dir' <<< "${state}")" == "${where}" ]] \
+    || fail "a conditional cd is followed only as far as it provably ran: ${form} (reads $(jq -r '.project_dir' <<< "${state}"), expected ${where})"
+done
+pass "a conditional cd holds along the && chain after it and no further; cd X || exit is followed"
+
+# Two lockfile writers credited to one trace. The post hook records the command
+# UNGATED when they cannot be (the reason is in the pending state); the cases
+# where they can stay quiet. `<expect>|<form>`, expect `one` or `split`.
+for carrier in \
+  "one|npm install evil && npm install other" \
+  "one|npm ci || npm install" \
+  "one|npm install evil 2>&1 | tail -3 && npm install other" \
+  "one|npm install evil; echo done; npm install other" \
+  "one|npm install evil && npm run build" \
+  "one|npm install evil && npm install other >/dev/null 2>&1" \
+  "split|npm install evil; command cd sub; npm install other" \
+  "split|npm install evil && npm init -y && npm install other" \
+  "split|npm prune; npm init -y; npm install other" \
+  "split|cd sub && npm install evil && cd .. && npm install other" \
+  "split|npm install evil && npm -C sub install other" \
+  "split|npm install evil && npm_config_global=true npm install other" \
+  "split|npm install evil; sh -c 'npm install other'" \
+  "split|npm install evil; echo global=true > .npmrc; npm install other" \
+  "split|npm install evil; npm config set global true; npm install other" \
+  "split|(cd sub; npm install evil); npm install other" \
+  "split|npm install evil; echo \$(rm package.json); npm install other"
+do
+  expect="${carrier%%|*}"
+  form="${carrier#*|}"
+  state=$(pending_of "${form}")
+  reason=$(jq -r '.npm_unattributable // empty' <<< "${state}")
+  if [[ "${expect}" == one ]]; then
+    [[ -z "${reason}" ]] || fail "lockfile writers with nothing between them share one trace: ${form} (${reason})"
+  else
+    [[ -n "${reason}" ]] || fail "lockfile writers that may land apart are not credited to one trace: ${form} ($(jq -c . <<< "${state}"))"
+  fi
+done
+pass "lockfile writers share a trace only with inert statements between them and no relocation of their own"
 
 # The other side: forms the effect gate does read stay quiet. `--no-save` and
 # `--no-package-lock` leave package-lock.json alone but record the package in
