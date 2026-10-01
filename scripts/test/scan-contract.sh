@@ -8,7 +8,7 @@
 #   command_is_dependency_install    is this an install command
 #   command_is_injectable_npm_install  may --ignore-scripts be injected
 #   command_has_ignore_scripts_flag  is the flag already there
-#   command_is_compound              may the flag be appended
+#   command_needs_inplace_inert      may the flag be appended
 #   resolve_install_targets          where does each install land
 #   guard_detect_ecosystem           which ecosystem
 #   payload_pipes_install_text_to_shell  is the pipe in execution position
@@ -34,7 +34,10 @@
 #      backslash is blanked and escapes the byte after it: that byte passes
 #      through as data and never opens a region (`\"` is a quote character,
 #      `\pip` is `pip`), and an escaped newline -- a line continuation, which
-#      the shell removes -- is blanked, so the two lines read as one.
+#      the shell removes -- is blanked, so the two lines read as one. An
+#      escaped operator (`;&|()<>!{}#` or a backtick) passes as `_`: it is a
+#      literal character to the shell, and passed through as itself it would
+#      end a statement or open one for every predicate that reads the scan.
 #   3. A quote character that opens or closes a region is itself blanked.
 #   4. Every byte inside a quoted region is blanked, newlines included.
 #   5. A single-quoted region ends at the next single quote, unconditionally.
@@ -97,7 +100,10 @@ reference_scan_text() {
     if [[ -n "${escaped}" ]]; then
       escaped=""
       if [[ -z "${quote}" && "${char}" != $'\n' ]]; then
-        output="${output}${char}"
+        case "${char}" in
+          ';'|'&'|'|'|'('|')'|'<'|'>'|'!'|'{'|'}'|'#'|'`') output="${output}_" ;;
+          *) output="${output}${char}" ;;
+        esac
       else
         output="${output} "
       fi
@@ -208,6 +214,14 @@ check "a backslash before a command name is blanked" \
   '\pip install evil' \
   ' pip install evil'
 
+check "an escaped semicolon is a character, not the end of a statement" \
+  'echo a \; pip install evil' \
+  'echo a  _ pip install evil'
+
+check "an escaped pipe is a character, not a pipe" \
+  'echo x \| sh' \
+  'echo x  _ sh'
+
 check "an escaped space outside a region passes through" \
   'echo a\ b' \
   'echo a  b'
@@ -282,7 +296,10 @@ reference_scan_text() {
     if [[ -n "${escaped}" ]]; then
       escaped=""
       if [[ -z "${quote}" && "${char}" != $'\n' ]]; then
-        output="${output}${char}"
+        case "${char}" in
+          ';'|'&'|'|'|'('|')'|'<'|'>'|'!'|'{'|'}'|'#'|'`') output="${output}_" ;;
+          *) output="${output}${char}" ;;
+        esac
       else
         output="${output} "
       fi
@@ -330,7 +347,7 @@ pass "control: mutated spec diverges on ${control_hit}/${fuzz_cases} inputs, so 
 real_awk=$(command -v awk)
 fail_tmp=$(mktemp -d "${TMPDIR:-/tmp}/safedeps-scanfail.XXXXXX")
 trap 'rm -rf "${fail_tmp}"' EXIT
-mkdir -p "${fail_tmp}/scanner-only" "${fail_tmp}/all-awk" "${fail_tmp}/scanner-later" "${fail_tmp}/project"
+mkdir -p "${fail_tmp}/scanner-only" "${fail_tmp}/all-awk" "${fail_tmp}/scanner-later" "${fail_tmp}/blanking-only" "${fail_tmp}/spans-only" "${fail_tmp}/project"
 printf '{"dependencies":{}}\n' > "${fail_tmp}/project/package.json"
 cat > "${fail_tmp}/scanner-only/awk" <<SHIM
 #!/usr/bin/env bash
@@ -354,12 +371,47 @@ case "\$*" in
 esac
 exec '${real_awk}' "\$@"
 SHIM
-chmod +x "${fail_tmp}/scanner-only/awk" "${fail_tmp}/all-awk/awk" "${fail_tmp}/scanner-later/awk"
+# The awk that sets a visible install aside before the pipe check reads the
+# rest (install_managers_blanked). It fails alone, and counts its calls so the
+# case below can show it was reached.
+cat > "${fail_tmp}/blanking-only/awk" <<SHIM
+#!/usr/bin/env bash
+case "\$*" in
+  *"safedeps:install_managers_blanked"*)
+    printf 'x' >> '${fail_tmp}/blanking-only/count'
+    exit 2
+    ;;
+esac
+exec '${real_awk}' "\$@"
+SHIM
+# The awk that turns the install matches into byte spans for that blanking
+# pass (install_match_spans). It ran under no marker and its failure was
+# swallowed with grep's "no match", so the visible install was not set aside
+# and was read as install text piped into a shell (caught in review).
+cat > "${fail_tmp}/spans-only/awk" <<SHIM
+#!/usr/bin/env bash
+case "\$*" in
+  *"safedeps:install_match_spans"*)
+    printf 'x' >> '${fail_tmp}/spans-only/count'
+    exit 2
+    ;;
+esac
+exec '${real_awk}' "\$@"
+SHIM
+chmod +x "${fail_tmp}/scanner-only/awk" "${fail_tmp}/all-awk/awk" "${fail_tmp}/scanner-later/awk" "${fail_tmp}/blanking-only/awk" "${fail_tmp}/spans-only/awk"
 
-# Runs the guard through the entry shim, the way the engines do.
+# Runs the guard through the entry shim, the way the engines do. An optional
+# third argument, `<ecosystem> <name> <version>`, is approved first.
 scanfail_guard() {
-  local bin="$1" command="$2" home
+  local bin="$1" command="$2" approve="${3:-}" home
   home=$(mktemp -d "${fail_tmp}/home.XXXXXX")
+  if [[ -n "${approve}" ]]; then
+    # shellcheck disable=SC2086 # three words on purpose
+    ( export SAFEDEPS_HOME="${home}/safe"
+      . lib/ledger/ledger.sh
+      safedeps_ledger_write_approved_spec ${approve} >/dev/null ) \
+      || fail "the scan-failure fixture approval could be written: ${approve}"
+  fi
   SCANFAIL_OUT=$(jq -nc --arg c "${command}" --arg cwd "${fail_tmp}/project" \
     '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
     PATH="${bin:+${bin}:}${PATH}" HOME="${home}" SAFEDEPS_HOME="${home}/safe" \
@@ -414,8 +466,94 @@ grep -q 'UNDECIDED' <<< "${SCANFAIL_REASON}" || fail "a scanner that fails after
 grep -q 'scanner failed' <<< "${SCANFAIL_LOG}" || fail "a scanner that fails after recognizing the install is recorded"
 pass "a scanner that fails after the install was recognized is settled before pending state is written"
 
+# Beside a visible install, the pipe check sets the install aside with its own
+# awk before reading the rest. When that awk fails the check has no answer, and
+# no answer must not read as "nothing piped": the settle turns it into
+# UNDECIDED. The visible spec is approved so that nothing else denies first.
+piped_beside="pip install requests==2.0.0 && printf 'pip install evil==6.6.6' | sh"
+scanfail_guard "" "${piped_beside}" "pypi requests 2.0.0"
+[[ "${SCANFAIL_DECISION}" == "deny" ]] || fail "control: a working pipe check denies an install piped beside an approved one (got: ${SCANFAIL_DECISION})"
+if grep -q 'UNDECIDED' <<< "${SCANFAIL_REASON}"; then fail "control: a working pipe check answers with a finding, not UNDECIDED"; fi
+rm -f "${fail_tmp}/blanking-only/count"
+scanfail_guard "${fail_tmp}/blanking-only" "${piped_beside}" "pypi requests 2.0.0"
+[[ -s "${fail_tmp}/blanking-only/count" ]] || fail "the blanking shim was reached (otherwise this case tests nothing)"
+[[ "${SCANFAIL_DECISION}" == "deny" ]] || fail "a failed blanking awk does not turn a piped install into a pass (got: ${SCANFAIL_DECISION})"
+grep -q 'UNDECIDED' <<< "${SCANFAIL_REASON}" || fail "a failed blanking awk is reported as undecided, not as a finding"
+grep -q 'scanner failed' <<< "${SCANFAIL_LOG}" || fail "a failed blanking awk is recorded in advisory.log"
+pass "a failed blanking awk beside a visible install answers UNDECIDED, not pass"
+
+# grep and sed sit on the judgment path too. A predicate that reads a grep or
+# sed that never answered as "no match" passed every one of these on the tree
+# before this check existed. They are recorded like a failed awk reading and
+# settled at the same gate.
+mkdir -p "${fail_tmp}/grep-all" "${fail_tmp}/sed-all"
+printf '#!/usr/bin/env bash\nexit 2\n' > "${fail_tmp}/grep-all/grep"
+printf '#!/usr/bin/env bash\nexit 2\n' > "${fail_tmp}/sed-all/sed"
+chmod +x "${fail_tmp}/grep-all/grep" "${fail_tmp}/sed-all/sed"
+for tool in grep sed; do
+  for failing_command in "pip install requests==2.0.0" "npm install left-pad@1.3.0" "cargo add serde@1.0.0"; do
+    scanfail_guard "${fail_tmp}/${tool}-all" "${failing_command}"
+    [[ "${SCANFAIL_DECISION}" == "deny" ]] \
+      || fail "a failed ${tool} does not turn an install into a pass: ${failing_command} (got: ${SCANFAIL_DECISION})"
+    grep -q 'UNDECIDED' <<< "${SCANFAIL_REASON}" \
+      || fail "a failed ${tool} is reported as undecided: ${failing_command}"
+  done
+  scanfail_guard "${fail_tmp}/${tool}-all" "ls -la"
+  [[ "${SCANFAIL_DECISION}" == "pass" ]] || fail "a failed ${tool} does not block a command that names no package manager (got: ${SCANFAIL_DECISION})"
+done
+pass "a failed grep or sed on the judgment path denies install-looking commands as UNDECIDED"
+
+# Nothing is piped here but the word `ok`, so a finding about piped install text
+# could only come from the failed span reading.
+spans_beside="pip install requests==2.0.0 && echo ok | sh"
+scanfail_guard "" "${spans_beside}" "pypi requests 2.0.0"
+[[ "${SCANFAIL_DECISION}" == "pass" ]] || fail "control: an approved install beside a pipe that carries no install passes (got: ${SCANFAIL_DECISION})"
+rm -f "${fail_tmp}/spans-only/count"
+scanfail_guard "${fail_tmp}/spans-only" "${spans_beside}" "pypi requests 2.0.0"
+[[ -s "${fail_tmp}/spans-only/count" ]] || fail "the span shim was reached (otherwise this case tests nothing)"
+[[ "${SCANFAIL_DECISION}" == "deny" ]] || fail "a failed span awk is not a pass for a command that names a package manager (got: ${SCANFAIL_DECISION})"
+grep -q 'UNDECIDED' <<< "${SCANFAIL_REASON}" || fail "a failed span awk is reported as undecided, not as a piped-install finding"
+grep -q 'scanner failed' <<< "${SCANFAIL_LOG}" || fail "a failed span awk is recorded in advisory.log"
+pass "a failed span awk beside a visible install answers UNDECIDED, not a finding"
+
 scanfail_guard "${fail_tmp}/all-awk" "pip install requests==2.0.0"
 [[ "${SCANFAIL_DECISION}" == "deny" ]] || fail "with awk failing everywhere an install is still denied (got: ${SCANFAIL_DECISION})"
 pass "with awk failing everywhere an install is still denied"
+
+# --- the discriminator the gate falls back on ---------------------------------
+# When a reading failed, the gate asks one question without reading the command:
+# does it name a package manager's executable anywhere? Two properties make
+# that answer trustworthy, and both are checked on the function as the guard
+# defines it, extracted from the script.
+discriminator=$(sed -n '/^guard_looks_like_install_unscanned() {$/,/^}$/p' scripts/safedeps-pre-guard.sh)
+[[ -n "${discriminator}" ]] || fail "the discriminator can be extracted from the guard"
+discriminate() {
+  # An empty PATH: any subprocess it tried to start would fail, and it must
+  # answer anyway, because the tools it stands in for are the ones failing.
+  env -i PATH= COMMAND="$1" /bin/bash -c '
+    source lib/install-grammar.sh
+    eval "$1"
+    guard_looks_like_install_unscanned' _ "${discriminator}"
+}
+discriminate "npm install left-pad@1.3.0" || fail "the discriminator answers with no PATH (no subprocess) for an install"
+if discriminate "ls -la"; then fail "the discriminator says no for a command that names no manager"; fi
+if discriminate "git commit -m 'fix'"; then fail "the discriminator says no for a plain commit"; fi
+discriminate "NPM INSTALL x" || fail "the discriminator ignores case"
+discriminate $'echo hi\npip3.11 install x' || fail "the discriminator reads every line"
+pass "the discriminator needs no subprocess and ignores case"
+
+# It must say yes to everything any recognizer could find. It is derived from
+# SAFEDEPS_G_EXECUTABLES rather than listed by hand; this checks the derivation
+# against every install form the failure census uses, and against every manager
+# the pipe check names.
+while IFS= read -r -d '' form; do
+  discriminate "${form}" || fail "the discriminator names every census form: ${form}"
+done < <(jq -j '.forms[], .extras[] | . + "\u0000"' scripts/measure/scan-failure-corpus.json)
+pipe_managers=$(sed -n "s/^PIPE_MANAGER_RE='(\(.*\))'\$/\1/p" scripts/safedeps-pre-guard.sh)
+[[ -n "${pipe_managers}" ]] || fail "the pipe check's manager list can be read"
+for manager in $(tr '|' '\n' <<< "${pipe_managers}" | sed -E 's/\[[^]]*\][*+]?//g; s/[()]//g' | grep -E '^[a-z]+$'); do
+  discriminate "${manager} install x" || fail "the discriminator names the pipe check's manager ${manager}"
+done
+pass "the discriminator names every census form and every manager the pipe check knows"
 
 printf 'scan-contract: all checks passed\n'

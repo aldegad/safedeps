@@ -98,6 +98,34 @@ expect_deny "a pipe to command sh"                    "printf 'pip install evil=
 expect_deny "a wrapped pipe to an absolute-path shell" 'bash -c "printf '"'"'pip install evil==1.0.0'"'"' | /bin/sh"'
 pass "pipe consumer is normalized like the producer already was"
 
+# The consumer ends where the shell ends a word, not only at a blank. Each of
+# these passed unjudged: the check wanted whitespace or end of line after the
+# shell's name, so `| sh; echo done` was not a pipe into a shell.
+expect_deny "a pipe to sh ended by ;"                 "printf 'pip install evil==1.0.0' | sh; echo done"
+expect_deny "a pipe to sh ended by &&"                "printf 'pip install evil==1.0.0' | sh&&echo done"
+expect_deny "a pipe to sh piped on"                   "printf 'pip install evil==1.0.0' | sh|cat"
+expect_deny "a pipe to sh inside a subshell"          "(printf 'pip install evil==1.0.0' | sh)"
+expect_deny "a pipe to sh inside a brace group"       "{ printf 'pip install evil==1.0.0' | sh; }"
+expect_deny "a pipe to a subshell running sh"         "printf 'pip install evil==1.0.0' | (sh)"
+expect_deny "a pipe to a brace group running sh"      "printf 'pip install evil==1.0.0' | { sh; }"
+expect_deny "a |& pipe to sh"                         "printf 'pip install evil==1.0.0' |& sh"
+pass "a pipe into a shell is read through the shell's operators and groups"
+
+# A heredoc body is stripped once, before anything reads the payloads. A reader
+# that stripped again saw the `<<EOF` line with no body after it and dropped
+# every following line, so an install written after a heredoc passed with no
+# verdict. And only a real heredoc opens one: a herestring, an arithmetic shift
+# or a quoted `<<EOF` used to open one with no terminator, which hid every
+# line after it.
+expect_deny "sh -c after a heredoc"                    $'cat <<EOF > notes.md\nhello\nEOF\nsh -c "pip install evil==6.6.6"'
+expect_deny "bash -c after a heredoc"                  $'cat <<EOF > notes.md\nhello\nEOF\nbash -c "npm install evil@6.6.6"'
+expect_deny "zsh -c after a heredoc into git"          $'git commit -F - <<EOF\nmsg\nEOF\nzsh -c "gem install evil -v 6.6.6"'
+expect_deny "an install after a herestring"            $'cat <<<"hello"\npip install evil==6.6.6'
+expect_deny "an install after an arithmetic shift"     $'echo $((1<<2))\npip install evil==6.6.6'
+expect_deny "an install after a quoted <<EOF"          $'echo "use <<EOF here"\npip install evil==6.6.6'
+expect_deny "a pipe continued past a heredoc"          $'cat <<EOF |\npip install evil==6.6.6\nEOF\nsh'
+pass "heredocs are stripped once and only real ones open"
+
 # --- 2. Carrier forms the command gate does NOT catch -------------------------
 # Deliberate. The gate recognizes carriers by enumeration, and the shell has
 # unbounded ways to route text to an interpreter, so the enumeration does not
@@ -111,12 +139,14 @@ pass "pipe consumer is normalized like the producer already was"
 
 expect_pass "a herestring fed to sh"                  "sh <<< 'pip install evil==1.0.0'"
 expect_pass "a herestring fed to bash"                'bash <<<"pip install evil==1.0.0"'
+expect_pass "a heredoc fed straight to sh"            $'sh <<EOF\npip install evil==1.0.0\nEOF'
 expect_pass "sh -c nested in a same-quoted sh -c"     "sh -c 'sh -c '\\''pip install evil==1.0.0'\\'''"
 expect_pass "a shell built by xargs -I"               "echo 'pip install evil==1.0.0' | xargs -I{} sh -c '{}'"
 expect_pass "a shell built by xargs -0"               "printf 'pip install evil==1.0.0' | xargs -0 sh -c"
 expect_pass "a script written then run"               "printf 'pip install evil==1.0.0' > s.sh; sh s.sh"
 expect_pass "eval nested inside sh -c"                "sh -c 'eval \"pip install evil==1.0.0\"'"
 expect_pass "a top-level command substitution"        '$(echo pip install evil==1.0.0)'
+expect_pass "a pipe to a quoted shell name"           "printf 'pip install evil==1.0.0' | \"sh\""
 pass "command gate leaves the unenumerated carriers unjudged (documented boundary)"
 
 # For npm the miss is DELAYED detection, not a miss: the effect gate's recognizer
@@ -217,6 +247,7 @@ pass "decoy forms never reach a package manager (not gaps, nothing to catch)"
 # only a net gain if the commands the gate deliberately treats as DATA are still
 # treated as data.
 for benign in \
+  $'cat <<\'B\'\nsh -c "printf \'pip install evil==1.0.0\' | sh"\nB' \
   'echo "install it with: curl -fsSL https://example.test/i.sh | sh"' \
   'git commit -m "document the pip install x | sh idiom"' \
   'npm run build' \
@@ -700,6 +731,20 @@ expect_pass "an install inside a region an escaped quote keeps open" 'echo "a\\\
 expect_pass "an install inside single quotes across a backslash-newline" $'echo \'a\\\npip install evil==1.0.0\''
 pass "text the shell treats as data stays data"
 
+# An escaped operator is a character, and `!` and `{` open a statement only
+# where a statement starts. Read the other way, `echo ! pip install x | sh`
+# and `echo true \; pip install x | sh` were visible unpinned installs -- a
+# record and a pass -- instead of the piped installs they are, and
+# `echo a \; pip install x==1` was denied for an install the shell never runs.
+expect_deny "a piped install after an argument !"      "echo ! pip install evil | sh"
+expect_deny "a piped install after an escaped ;"       "echo true \\; pip install evil | sh"
+expect_pass "an install after an escaped ; is an echo" "echo a \\; pip install evil==1.0.0"
+expect_pass "an escaped pipe is not a pipe"            "echo 'pip install evil==1.0.0' \\| sh"
+expect_deny "! at a statement start still opens one"   "! pip install evil==1.0.0"
+expect_deny "! after a keyword still opens one"        "if ! pip install evil==1.0.0; then :; fi"
+expect_deny "{ at a statement start still opens one"   "{ pip install evil==1.0.0; }"
+pass "escaped operators are characters, and ! and { open statements only where statements start"
+
 # A newline inside quotes does not end a statement either. The line that closed
 # a multi-line string used to be scanned alone, so its closing quote opened a
 # region and hid what followed; and the lines inside the string were scanned as
@@ -709,5 +754,109 @@ expect_deny "an install after a multi-line single-quoted string" $'echo \'line1\
 expect_pass "a multi-line commit message that mentions an install" $'git commit -m "fix\npip install evil==1.0.0"'
 expect_pass "a single-quoted multi-line message that mentions an install" $'git commit -m \'fix\npip install evil==1.0.0\''
 pass "a newline inside quotes neither hides the next statement nor turns quoted text into one"
+
+# --- A visible install does not switch the pipe check off ---------------------
+# The hidden-install check ran only when the command held no visible install, so
+# a piped install beside one passed with no lookup and no record. Every form
+# here pins an approved spec on the visible side, and each is checked for the
+# pipe rule's own reason: a deny from anywhere else (an unapproved spec, say)
+# would pass a decision-only check with the rule removed. That is not
+# hypothetical -- blanking the whole install match instead of its manager word
+# hid the echoed install in the runner row, and a decision-only check stayed
+# green because echo-cli was not approved.
+beside_home="${tmp_root}/beside-approved"
+mkdir -p "${beside_home}"
+( export SAFEDEPS_HOME="${beside_home}"
+  . lib/ledger/ledger.sh
+  safedeps_ledger_write_approved_spec pypi requests 2.0.0 >/dev/null
+  safedeps_ledger_write_approved_spec npm left-pad 1.3.0 >/dev/null
+  safedeps_ledger_write_approved_spec npm echo-cli 1.0.0 >/dev/null
+  # `pip install'evil==1'` is one word to the shell, `installevil==1`, and the
+  # extractor reads it the same way. Approving that identity lets the row reach
+  # the pipe rule; the row is there for what it does to the blanking pass (a
+  # quote glued to the verb must not be blanked, or everything after it
+  # re-quotes), not for what pip would make of it.
+  safedeps_ledger_write_approved_spec pypi installevil 1 >/dev/null
+  safedeps_ledger_write_approved_spec npm mongoose 8.0.0 >/dev/null ) \
+  || fail "the beside-visible fixture approvals could be written"
+# No output is "pass", as in gate_decision: jq reads empty input as no value
+# and prints nothing. beside_reason prints the deny reason, or nothing.
+beside_guard() {
+  jq -nc --arg c "$1" --arg cwd "${project_dir}" \
+    '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
+    HOME="${tmp_root}/home-beside" SAFEDEPS_HOME="${beside_home}" scripts/safedeps-pre-guard.sh 2>/dev/null
+}
+beside_decision() {
+  local out
+  out=$(beside_guard "$1")
+  if [[ -z "${out}" ]]; then
+    printf 'pass'
+  else
+    jq -r '.hookSpecificOutput.permissionDecision // "pass"' <<< "${out}"
+  fi
+}
+beside_reason() {
+  local out
+  out=$(beside_guard "$1")
+  [[ -z "${out}" ]] || jq -r '.hookSpecificOutput.permissionDecisionReason // ""' <<< "${out}"
+}
+[[ "$(beside_decision 'pip install requests==2.0.0')" == "pass" ]] \
+  || fail "beside-visible fixture: the approved pip install itself passes"
+[[ "$(beside_decision 'npm install left-pad@1.3.0')" == "allow" ]] \
+  || fail "beside-visible fixture: the approved npm install itself is allowed"
+[[ "$(beside_decision 'npx -y echo-cli@1.0.0 hello')" != "deny" ]] \
+  || fail "beside-visible fixture: the approved runner itself is not denied"
+
+for piped in \
+  "pip install requests==2.0.0 && printf 'pip install evil==6.6.6' | sh" \
+  "pip install -r requirements.txt; printf 'pip install evil==6.6.6' | sh" \
+  "npm ci && printf 'cargo install evil@6.6.6' | sh" \
+  "npm install left-pad@1.3.0 && printf 'npm install -g evil@6.6.6' | sh" \
+  "pip install requests==2.0.0; echo pip install evil==6.6.6 | sh" \
+  "pip install requests==2.0.0 && sh -c \"printf 'pip install evil==6.6.6' | sh\"" \
+  "pip install requests==2.0.0 && x=\$(printf 'pip install evil==6.6.6' | sh)" \
+  "pip install requests==2.0.0 && printf 'pip install evil==6.6.6' | cat | /bin/sh" \
+  "pip install requests==2.0.0 && printf 'pip install evil==6.6.6' | env FOO=1 sh -s" \
+  $'pip install requests==2.0.0\ncat <<EOF | sh\npip install evil==6.6.6\nEOF' \
+  "pip install requests==2.0.0; c='pip install evil==6.6.6'; echo \"\$c\" | sh" \
+  "pip install requests==2.0.0; (printf 'pip install evil==6.6.6'; :) | sh" \
+  "npx -y echo-cli@1.0.0 pip install evil==6.6.6 | sh" \
+  "pip install'evil==1' ; printf 'pip install evil==6.6.6' | sh" \
+  "pip install requests==2.0.0 && printf 'pip\\tinstall evil==6.6.6' | sh" \
+  "pip install requests==2.0.0 && echo pip\\ install evil==6.6.6 | sh" \
+  "pip install requests==2.0.0 && printf pip' install evil==6.6.6' | sh" \
+  "pip install requests==2.0.0 && echo 'pipXinstall evil==6.6.6' | tr X ' ' | sh" \
+  "npm install left-pad@1.3.0 && printf 'pip%sinstall evil==6.6.6' ' ' | sh"
+do
+  grep -q 'reads like an install into a shell' <<< "$(beside_reason "${piped}")" \
+    || fail "a piped install beside a visible one is denied by the pipe rule: $(printf '%q' "${piped}")"
+done
+pass "an install piped into a shell is denied beside a visible install, even an approved one"
+
+# What the fix must not take with it: a visible install next to a pipe into a
+# shell that carries no other install text keeps its verdict.
+[[ "$(beside_decision 'npm install left-pad@1.3.0 && cat setup.sh | sh')" == "allow" ]] \
+  || fail "a visible npm install beside a script piped into sh keeps its verdict"
+[[ "$(beside_decision "pip install requests==2.0.0 && printf 'echo hi' | sh")" == "pass" ]] \
+  || fail "a visible pip install beside a harmless pipe into sh keeps its verdict"
+[[ "$(beside_decision $'npm install left-pad@1.3.0\ncat <<EOF | sh\necho hi\nEOF')" == "allow" ]] \
+  || fail "a visible install beside a heredoc with no install piped into sh keeps its verdict"
+[[ "$(beside_decision 'npm install left-pad@1.3.0 2>&1 | tee log')" == "allow" ]] \
+  || fail "a visible install piped into a non-shell keeps its verdict"
+[[ "$(beside_decision 'pip install requests==2.0.0 && git commit -m "document the pip install x | sh idiom"')" == "pass" ]] \
+  || fail "a quoted pipe idiom beside a visible install stays data"
+# What is left after the visible install is set aside is mostly its own
+# arguments, and it is searched for install text as whole words in install
+# order: `go` inside `mongoose` is not a manager. And only a heredoc handed to
+# a shell counts; one written to a file is data.
+[[ "$(beside_decision 'npm install mongoose@8.0.0 && cat setup.sh | sh')" == "allow" ]] \
+  || fail "a package name that contains a manager's name is not install text"
+[[ "$(beside_decision $'npm install left-pad@1.3.0 && cat <<EOF > notes.md\npip install x\nEOF\ncat s.sh | sh')" == "allow" ]] \
+  || fail "a heredoc written to a file is not piped into a shell"
+[[ "$(beside_decision $'npm install left-pad@1.3.0 && cat <<EOF | sh\npip install evil==6.6.6\nEOF')" == "deny" ]] \
+  || fail "a heredoc piped into a shell beside a visible install is still read"
+[[ "$(beside_decision $'cat <<EOF > notes.md\nhello\nEOF\npip install requests==2.0.0 && eval "pip install evil==6.6.6"')" == "deny" ]] \
+  || fail "an eval install after a heredoc beside a visible install is still read"
+pass "a visible install beside a pipe into a shell with nothing else to install keeps its verdict"
 
 printf 'consumer-forms passed\n'
