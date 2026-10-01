@@ -4,17 +4,18 @@
 #
 # npm link reads every argument with npm-package-arg (npa) and installs the
 # ones the global tree does not have into the global prefix
-# (lib/commands/link.js:92-104). A registry argument -- npa types range,
-# version, tag and alias -- is fetched from the registry; a directory, a file,
-# a git or a URL argument is linked as written. The gate reads the same split
+# (lib/commands/link.js:92-104). A directory or a file -- npa types directory
+# and file -- is linked as written; every other argument (range, version, tag,
+# alias, git, remote) is fetched and installed. The gate reads the same split
 # twice: lib/install-grammar.sh recognizes a link as an install by the shape of
-# a registry word (SAFEDEPS_G_NPM_REGISTRY_OPERAND, a regex over the scan
-# view), and the operand walk asks safedeps_npa_is_registry of each argument.
+# a word npm fetches (SAFEDEPS_G_NPM_REGISTRY_OPERAND or
+# SAFEDEPS_G_NPM_REMOTE_OPERAND, regexes over the scan view), and the operand
+# walk asks safedeps_npa_is_local of each argument.
 #
 # This runs npa from the npm on PATH over a set of argument words and compares:
-#   - safedeps_npa_is_registry must agree with npa on every word;
+#   - safedeps_npa_is_local must agree with npa on every word;
 #   - `npm link ../lib <word>` must be recognized as an install for every word
-#     npa reads as a registry one. It may also be recognized for a bare tarball
+#     npa does not read as local. It may also be recognized for a bare tarball
 #     name (`x.tgz`), the one file shape the regex cannot tell from a name
 #     (stated in lib/install-grammar.sh); any other extra is a failure.
 # A word npa rejects (it throws) makes npm link fail before it installs
@@ -73,12 +74,12 @@ rc=0
 while IFS=$'\t' read -r word type; do
   [[ "${type}" == error ]] && continue
   case "${type}" in
-    range|version|tag|alias) registry=true ;;
-    *) registry=false ;;
+    directory|file) registry=false ;;
+    *) registry=true ;;
   esac
-  if safedeps_npa_is_registry "${word}"; then said=true; else said=false; fi
+  if safedeps_npa_is_local "${word}"; then said=false; else said=true; fi
   if [[ "${said}" != "${registry}" ]]; then
-    printf 'npm %s reads %s as %s; safedeps_npa_is_registry says registry=%s\n' "${version}" "${word}" "${type}" "${said}"
+    printf 'npm %s reads %s as %s; safedeps_npa_is_local says local=%s\n' "${version}" "${word}" "${type}" "$([[ "${said}" == true ]] && echo false || echo true)"
     rc=1
   fi
   if printf '%s\n' "npm link ../lib ${word}" | grep -qE "${SAFEDEPS_G_NPM_INSTALL_RE}"; then seen=true; else seen=false; fi

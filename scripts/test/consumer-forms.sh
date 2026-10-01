@@ -1196,9 +1196,8 @@ for link_form in \
 do
   expect_prescription 'npm evil@1.0.0;' "${link_form}"
 done
-for local_link in 'npm link ../lib user/repo' 'npm link user/repo' 'npm link ../lib https://example.test/x.tgz' \
-  'npm link ../lib' 'npm link' 'npm link .' 'npm link ../lib file:../other'; do
-  expect_pass "a link of local code, a git or a URL argument: ${local_link}" "${local_link}"
+for local_link in 'npm link ../lib' 'npm link' 'npm link .' 'npm link ../lib file:../other' 'npm link ./x.tgz'; do
+  expect_pass "a link of local code: ${local_link}" "${local_link}"
 done
 # Which words npa reads as registry ones is npm's answer, rerun here against
 # the npm on PATH like the command words above.
@@ -1403,12 +1402,16 @@ operand_rows=(
   $'npm:left-pad\tnpm run build && npm link left-pad'
   $'\tnpm link'
   $'\tnpm link ../my-lib'
-  # A path in front no longer hides the package; a path, a git or a URL
-  # argument names none.
+  # A path in front no longer hides the package; a path names none. A git or a
+  # URL argument is fetched and installed like a registry one, and carries no
+  # version the ledger can check, so it is recorded.
   $'npm:left-pad\tnpm link ../lib left-pad'
   $'npm:left-pad\tnpm link ~/lib left-pad'
-  $'npm:left-pad\tnpm link ../lib user/repo left-pad'
-  $'\tnpm link ../lib user/repo'
+  $'npm:left-pad npm:user/repo\tnpm link ../lib user/repo left-pad'
+  $'npm:user/repo\tnpm link ../lib user/repo'
+  $'npm:user/repo\tnpm link user/repo'
+  $'npm:github:u/r\tnpm link github:u/r'
+  $'npm:https://example.test/x.tgz\tnpm link ../lib https://example.test/x.tgz'
   # Recorded: a payload's npm install. Where it lands is decided inside the
   # payload, and the landing does not read inside it.
   $'npm:left-pad\tsh -c \'npm install left-pad\''

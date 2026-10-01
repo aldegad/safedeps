@@ -3628,11 +3628,12 @@ guard_walk_statement() {
     [[ "${tok}" == \#* ]] && break
 
     # npm link reads each argument the way npm-package-arg does and installs
-    # only the registry ones (lib/commands/link.js:92-104). A path, a tarball,
-    # a git or a URL argument is linked as written, and names no package here.
+    # every one that is not local code (lib/commands/link.js:92-104). A
+    # directory or a file is linked as written and names no package here; a
+    # git or URL argument is fetched, and is read here so it is recorded.
     if [[ "${seg_ecosystem}" == npm && "${tok}" != -* ]] \
         && [[ "${verb_tok}" =~ ^(${SAFEDEPS_G_NPM_LINK_VERBS})$ ]] \
-        && ! safedeps_npa_is_registry "${tok}"; then
+        && safedeps_npa_is_local "${tok}"; then
       continue
     fi
 
