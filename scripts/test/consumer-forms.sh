@@ -165,12 +165,6 @@ expect_pass "a top-level command substitution"        '$(echo pip install evil==
 expect_pass "a pipe to a quoted shell name"           "printf 'pip install evil==1.0.0' | \"sh\""
 pass "command gate leaves the unenumerated carriers unjudged (documented boundary)"
 
-# A script handed to a shell is read as the word the shell passes, and the
-# scripts inside it too, so a `sh -c` nested in a same-quoted one and an `eval`
-# inside `sh -c` are judged as the installs they run. Both used to be outside the
-# boundary: the payload reader stopped at the first matching quote.
-expect_prescription 'pypi evil@1.0.0;' "sh -c 'sh -c '\\''pip install evil==1.0.0'\\'''"
-expect_prescription 'pypi evil@1.0.0;' "sh -c 'eval \"pip install evil==1.0.0\"'"
 
 # For npm the miss is DELAYED detection, not a miss: the effect gate's recognizer
 # is a raw grep with no carrier enumeration, so it fires on the same text the
@@ -1180,6 +1174,13 @@ for ordinary in \
 do
   expect_pass "an ordinary script handed to a shell: ${ordinary}" "${ordinary}"
 done
+# A script handed to a shell is read as the word the shell passes, and the
+# scripts inside it too, so a `sh -c` nested in a same-quoted one and an `eval`
+# inside `sh -c` are judged as the installs they run. Both used to be outside the
+# boundary: the payload reader stopped at the first matching quote.
+expect_prescription 'pypi evil@1.0.0;' "sh -c 'sh -c '\\''pip install evil==1.0.0'\\'''"
+expect_prescription 'pypi evil@1.0.0;' "sh -c 'eval \"pip install evil==1.0.0\"'"
+
 # Controls: a plain payload is judged, and a head inside quoted text is data.
 expect_prescription 'pypi evil@1.0.0;' 'sh -c "pip install evil==1.0.0"'
 expect_pass "a sh -c head inside quoted text is data" $'echo \'sh -c "pip install evil==1.0.0"\''
