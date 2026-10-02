@@ -337,6 +337,7 @@ install done → safedeps-post-verify.sh
         └─ unapproved / vulnerable / suspicious ──► REORG:
                  • restore lockfile from the last confirmed snapshot
                  • rm -rf node_modules; reinstall to match the ledger
+                   (refused, and named, when the target is a symbolic link)
                  • append to reorg.log; message the agent
 ```
 

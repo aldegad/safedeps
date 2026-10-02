@@ -337,6 +337,7 @@ install 완료 → safedeps-post-verify.sh
         └─ 미승인 / 취약 / 의심 ──► REORG:
                  • lockfile ← 마지막 confirmed snapshot
                  • rm -rf node_modules; ledger 와 일치하게 재설치
+                   (대상이 심볼릭 링크면 거부하고 이름을 남긴다)
                  • reorg.log 기록; 에이전트에 경고
 ```
 
