@@ -747,12 +747,15 @@ v2.16.x 라운드가 남긴 것 셋과 그 라운드가 만든 것 하나.
 
 그래서 허가를 변화분에서 떼어 트리에 옮겼다.
 
-- rebuild 는 npm 이 rebuild 할 패키지가 전부 기록에 있고, `node_modules` 아래 패키지가 전부 공개 registry 의 https 출처로 기록돼 있거나(또는 그런 패키지 안에 묶여 있거나), 그 밖의 디렉터리가 전부 선언된 워크스페이스 멤버일 때만 돈다. 아니면 rebuild 전체를 건너뛰고, 경고가 패키지나 디렉터리마다 종류를 붙여 지목한다. 이것으로 롤백하지는 않는다.
-- 롤백은 언제나 `npm ci --ignore-scripts` 로 재설치하고, 확정 스냅샷을 복원했을 때만 같은 검사를 거쳐 rebuild 한다(CH3c). 확정 스냅샷이 없으면 스크립트가 돌지 않고, 메시지와 `reorg.log`, `advisory.log` 가 확정 스냅샷이 없었다는 것과 복원된 상태에 거부된 것이 남아 있을 수 있다는 것을 말한다.
+- rebuild 는 npm 이 rebuild 할 패키지가 전부 기록에 있고, `node_modules` 아래 패키지가 전부 공개 registry 의 https 출처로 기록돼 있거나(또는 부모가 묶은 것이거나), 그 밖의 디렉터리가 전부 선언된 워크스페이스 멤버일 때만 돈다. 아니면 rebuild 전체를 건너뛰고, 경고가 패키지나 디렉터리마다 종류를 붙여 지목한다. 이것으로 롤백하지는 않는다.
+- 묶음 여부는 트리에서 읽는다. 중첩된 패키지는 부모가 이 검사를 스스로 통과하고, 디스크에 있는 부모 자신의 `package.json` 이 그것을 묶고, 그 패키지의 어느 기록도 공개 밖 출처를 적지 않을 때만 묶음으로 친다. lockfile 의 `inBundle` 은 읽지 않는다. 커밋된 기록이 그 필드를 적을 수 있고, 루트 프로젝트가 묶은 것에는 npm 이 직접 적는다. 두 경우 모두 http URL 의 tarball 이 묶음으로 통과했다(NB1, NB2).
+- 롤백은 언제나 `npm ci --ignore-scripts` 로 재설치하고, 확정 스냅샷을 복원했을 때만 같은 검사를 거쳐 rebuild 한다(CH3c). 확정 스냅샷이 없으면 스크립트가 돌지 않고, 메시지와 `reorg.log`, `advisory.log` 가 확정 스냅샷이 없었다는 것과 복원된 상태에 거부된 것이 남아 있을 수 있다는 것을 말한다. Codex 에서는 설치를 무실행으로 만들 수 없으므로, 설치 자신의 스크립트가 이미 돌았다는 것도 말한다.
 
 사용자에게 보이는 변화: 트리에 공개 registry 에서 왔다고 기록되지 않은 패키지(사설 registry, git URL, tarball, `omit-lockfile-registry-resolved` 로 쓴 lockfile)나, 선언된 워크스페이스 멤버가 아닌 `file:` 디렉터리 의존성이 있는 프로젝트는 설치되지만 rebuild 되지 않는다. rebuild 는 전부 아니면 전무라서 승인된 패키지의 스크립트도 돌지 않는다. 경고가 무엇이 막았는지 지목하고, 사용자가 검토한 뒤 `npm rebuild` 를 돌린다. v2.17.2 에서는 커밋된 `file:` 디렉터리 의존성이 있는 프로젝트의 설치가 대신 롤백됐다(main 에서 npm 10.8.2 로 잼). 출처 승인과, 통과한 패키지만 rebuild 하는 것은 다음 릴리스로 남긴다.
 
 검증: `scripts/test/effect-trace-grid.sh` 1d 절, 실제 npm 과 로컬 레지스트리(리눅스, npm 10.8.2). RB1, RB2, CH2b 와 Codex RB1 은 스크립트 없이 롤백되고 세 기록 모두에 "no confirmed snapshot" 이라고 적는다. CH3c 와 Codex CH3c 는 확정 스냅샷으로 롤백한 뒤 rebuild 한다. CH1b, L1, L2, K4-K7, OM1 은 경고와 함께 남고 스크립트가 돌지 않는다. K8, K9, NS1 과 묶인 의존성을 가진 공개 패키지(BD1)는 조용히 rebuild 된다. 수정 전 트리에서는 RB1, RB1x, RB2, CH2b, CH1b, L1, L2 가 거부된 스크립트를 돌렸고, K4-K7 과 OM1 을 포함해 기대 47개가 실패했다. 변이 셋은 각자 자기 행을 빨갛게 만든다. 출처·디렉터리 검사 제거(CH1b, L1, L2), 롤백 `npm ci` 에 스크립트 켜기(RB1, RB1x, RB2, CH2b), 확정 스냅샷 없는 롤백 뒤 rebuild(RB1, RB1x, RB2, CH2b)다.
+
+트리에서 읽는 묶음 판정도 같은 방식으로 쟀다(macOS, npm 11.19.0). 커밋된 lockfile 이 중첩된 sd-swapped@1.0.0 을 http tarball 로 보내면, 그 기록이 `inBundle` 이라 하든(NB1) 루트가 그 부모를 묶든(`npm ci` 의 NB2, `npm install` 의 NB2i, `npm install --no-save` 의 NB2n) 경고와 함께 설치되고 스크립트는 돌지 않는다. 의존성을 묶은 공개 패키지는 `bundleDependencies`(BD1)든 `bundledDependencies: true`(BD2)든 조용히 rebuild 되고, 묶인 기록이 다른 출처를 적으면 rebuild 되지 않는다(NB3). Codex 롤백 행(RB1x)은 메시지가 설치 자신의 스크립트가 이미 돌았다고 말하게 고정한다. 수정 전 트리에서는 NB1, NB2, NB2i, NB2n 이 가짜 tarball 의 스크립트 셋을 돌렸고 이 절의 기대 17개가 실패했다. `inBundle` 을 다시 믿게 한 변이는 같은 넷과 NB3 를 빨갛게 만든다(기대 14개).
 
 ## v3 (미래)
 
