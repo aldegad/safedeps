@@ -12,6 +12,9 @@ STATE_LOCK_DIR="${GUARD_DIR}/state.lock"
 # nothing else, as advisory.log is: a path the environment could move apart
 # from the ledger would let the same environment drop the record.
 NPM_WITHHELD_DIR="${GUARD_DIR}/npm-withheld"
+# The tree records this hook judged, by project (npm_tree_record_observe). It
+# decides what the record above leaves out, so it is derived the same way.
+NPM_OBSERVED_DIR="${GUARD_DIR}/npm-observed"
 
 SAFEDEPS_LOCK_FILES=(
   "package-lock.json"
@@ -1268,10 +1271,15 @@ ROLLBACK_TARGET_CONFIRMED=false
 # The trace is the directory's, not the command's. A second npm in the same
 # directory during the command, or the command touching a lockfile itself,
 # leaves one too; ARCHITECTURE.md states that boundary.
+#
+# On a trace, it prints each lockfile that carries one, one per line: whether
+# the tree record itself was written during this command decides whether the
+# post hook may vouch for what it holds later (record_npm_withheld).
 NPM_TRACE_ABSENT=false
+NPM_TRACED_RECORDS=""
 TRACE_NOTE=""
 npm_install_trace() {
-  local baseline="$1" rel file recorded inode newer
+  local baseline="$1" rel file recorded inode newer traced=""
   [[ -f "${baseline}" ]] || { printf 'its baseline file %s is gone' "${baseline}"; return 1; }
   for rel in package-lock.json node_modules/.package-lock.json; do
     file="${PROJECT_DIR}/${rel}"
@@ -1280,15 +1288,13 @@ npm_install_trace() {
     inode=""
     read -r inode _ < <(ls -di -- "${file}" 2>/dev/null) || true
     if [[ -n "${inode}" && "${inode}" != "${recorded}" ]]; then
-      printf '%s' "${rel}"
-      return 0
-    fi
-    if newer=$(find -H "${file}" -newer "${baseline}" -print 2>/dev/null) && [[ -n "${newer}" ]]; then
-      printf '%s' "${rel}"
-      return 0
+      traced+="${rel}"$'\n'
+    elif newer=$(find -H "${file}" -newer "${baseline}" -print 2>/dev/null) && [[ -n "${newer}" ]]; then
+      traced+="${rel}"$'\n'
     fi
   done
-  return 1
+  [[ -n "${traced}" ]] || return 1
+  printf '%s' "${traced}"
 }
 
 settle_npm_trace() {
@@ -1298,6 +1304,7 @@ settle_npm_trace() {
   [[ -n "${baseline}" ]] || return 0
 
   if why=$(npm_install_trace "${baseline}"); then
+    NPM_TRACED_RECORDS="${why}"
     if [[ -n "${unattributable}" ]]; then
       log_advisory "post-verify UNGATED: the install trace in ${PROJECT_DIR} cannot answer for every npm install in this command: ${unattributable}, so one of them may have landed elsewhere unread. Command: ${COMMAND}"
     fi
@@ -1678,60 +1685,105 @@ npm_workspace_member_dirs() {
 # carries the bytes to other projects is; a per-project record missed another
 # project's `npm ci` of the same lockfile.
 #
-# "Held before" is read from the copy of the tree record the pre-guard kept,
-# never from the committed package-lock.json. npm refuses bytes that do not
-# match a recorded integrity, so bytes the tree already held are the bytes any
-# registry serves for it, and a gated fetch put them there under its own
-# judgment, recorded if it was not public. A committed lockfile is a record
-# nobody saw fetched: excluding its integrities let a clone's `npm ci` from a
-# configured impostor write nothing here, and the next command rebuilt the
-# impostor (the Q rows of effect-trace-grid.sh). The cost is the first `npm ci`
-# of a clone that installs from a company registry: its bytes are recorded,
-# and no tree that holds them is rebuilt automatically. What a clone carries
-# inside node_modules, a tree record included, is outside the gate, as the
-# bytes there are: the rebuild trusts them as it finds them.
+# "Held before" rests only on what the gate observed. The pre-guard keeps a
+# copy of the tree record, but the copy says only what the file said, and the
+# file is a record anyone can commit: a clone that carried a tree record naming
+# the impostor's integrity, and none of its bytes, had its first fetch from the
+# impostor left out of the record, and the next command rebuilt the impostor
+# (the H rows of effect-trace-grid.sh). The committed package-lock.json is a
+# record of the same kind (the Q rows). So the copy counts as "held before"
+# only where it is, byte for byte, a tree record this hook judged at the end of
+# an earlier install here (npm_tree_record_observed): every integrity in it was
+# then either recorded below, said by npm to come from the public registry in
+# the run that brought it in, or held before under the same rule. Any other
+# copy counts for nothing, and everything recorded now is new.
 #
-# The test is per hash, not per entry. npm checks bytes against the strongest
-# algorithm an integrity names and accepts any of its digests, so one digest
-# the tree held says nothing about another beside it: an entry that paired the
-# impostor's sha512 with a digest already in the tree was skipped whole. Each
-# digest the tree did not hold is recorded, and the lookup matches any digest.
+# Within an observed copy, an entry vouches for its integrity only when it
+# names one digest. npm checks bytes against the strongest algorithm an
+# integrity names and accepts a match with any digest of it, so an entry that
+# names two says nothing about which one the bytes matched: a pair of the
+# impostor's sha512 and the public one, installed from the public registry,
+# vouched for the impostor's (the M row).
+#
+# The cost falls on installs npm did not answer for, or answered with another
+# registry. Each digest such an install finds in a tree it has not observed is
+# recorded, public ones included: the first `npm ci` of a clone, the first such
+# install in a tree installed before this version or outside the hooks, and the
+# first one after anything else rewrote the tree record. A command npm cannot
+# be asked about (`source ./env.sh && npm ci`, the U rows) is the common one:
+# every package of that tree is then withheld on this machine, and no tree that
+# holds one of them is rebuilt automatically. An install npm answers for with
+# the public registry records nothing and leaves the tree observed, so the
+# install after it records only what it brings in.
+#
+# The test is per hash, not per entry. One digest the tree held says nothing
+# about another beside it: an entry that paired the impostor's sha512 with a
+# digest already in the tree was skipped whole. Each digest the tree did not
+# hold is recorded, and the lookup matches any digest.
 #
 # One file per run, written under a temporary name and renamed, so a reader
 # sees all of it or none of it and two runs never write the same file. Nothing
-# releases a record in this version. It starts two jq, and the post hook's
+# releases a record in this version. It starts a few jq, and the post hook's
 # question to npm about the registry only when the install brought in an
 # integrity, which the rebuild asks anyway.
 NPM_WITHHELD_RECORDED=()
 record_npm_withheld() {
-  local lockfile found recorded tmp inert
-  local -a files=()
+  local judged="" hidden="${PROJECT_DIR}/${NPM_HIDDEN_LOCKFILE}"
   # With no trace the records here are not this install's (settle_npm_trace).
   [[ "${NPM_TRACE_ABSENT}" != true ]] || return 0
-  for lockfile in "${PROJECT_DIR}/package-lock.json" "${PROJECT_DIR}/${NPM_HIDDEN_LOCKFILE}"; do
-    [[ -f "${lockfile}" ]] && files+=("${lockfile}")
-  done
-  [[ ${#files[@]} -gt 0 ]] || return 0
+  # The tree record is judged from a copy, so the hash written afterwards names
+  # exactly the bytes judged, whatever writes the file in between.
+  if [[ -f "${hidden}" ]] && judged=$(mktemp "${SNAPSHOT_DIR}/.${SNAPSHOT_ID}_judged.XXXXXX") \
+      && ! cp "${hidden}" "${judged}"; then
+    rm -f "${judged}"
+    judged=""
+  fi
+  NPM_WITHHELD_JUDGED=false
+  npm_withheld_judge "${judged:-${hidden}}"
+  if [[ "${NPM_WITHHELD_JUDGED}" == true && -n "${judged}" ]] \
+      && grep -qxF "${NPM_HIDDEN_LOCKFILE}" <<< "${NPM_TRACED_RECORDS}"; then
+    npm_tree_record_observe "${judged}"
+  fi
+  [[ -z "${judged}" ]] || rm -f "${judged}"
+  return 0
+}
+
+# <tree record>: the copy of the tree record judged. Sets NPM_WITHHELD_JUDGED
+# when every integrity in either record was judged and every one to record was
+# written; any other return leaves the tree unobserved.
+npm_withheld_judge() {
+  local tree="$1" lockfile found recorded tmp inert before=""
+  local -a files=()
+  [[ ! -f "${PROJECT_DIR}/package-lock.json" ]] || files+=("${PROJECT_DIR}/package-lock.json")
+  [[ ! -f "${tree}" ]] || files+=("${tree}")
+  [[ ${#files[@]} -gt 0 ]] || { NPM_WITHHELD_JUDGED=true; return 0; }
   lockfile="${SNAPSHOT_DIR}/${SNAPSHOT_ID}_${SAFEDEPS_SNAPSHOT_NPM_TREE}"
-  [[ ! -f "${lockfile}" ]] || files+=("${lockfile}")
+  if [[ -f "${lockfile}" ]]; then
+    if npm_tree_record_observed "${lockfile}"; then
+      before="${lockfile}"
+      files+=("${lockfile}")
+    else
+      log_advisory "post-verify: the tree record in ${PROJECT_DIR} before this command is not one safedeps judged at the end of an install here, so every integrity in it counts as brought in by this install."
+    fi
+  fi
 
   # shellcheck disable=SC2016 # a jq program: jq expands its $names
-  if ! found=$(jq -nc --arg earlier "${SNAPSHOT_DIR}/" '
+  if ! found=$(jq -nc --arg before "${before}" '
       def tokens: [.integrity | strings | splits("\\s+") | select(. != "")];
-      [inputs | (input_filename | startswith($earlier)) as $before
+      [inputs | (input_filename == $before) as $before
         | (.packages // {}) | objects | to_entries[]
         | select((.key | test("(^|/)node_modules/")) and (.value | type) == "object" and (.value.link // false) != true)
         | {before: $before, name: (.value.name // (.key | split("node_modules/") | last)),
            version: (.value.version // "?"), resolved: .value.resolved, tokens: (.value | tokens)}
         | select(.tokens | length > 0)] as $all
-      | ([$all[] | select(.before) | .tokens[] | {key: ., value: true}] | from_entries) as $seen
+      | ([$all[] | select(.before and (.tokens | length) == 1) | {key: .tokens[0], value: true}] | from_entries) as $seen
       | [$all[] | select(.before | not) | .tokens |= map(select($seen[.] == null)) | select(.tokens | length > 0)]
       | unique_by(.tokens)[]' "${files[@]}" < /dev/null 2>/dev/null); then
     log_advisory "post-verify: the npm records in ${PROJECT_DIR} could not be read for the bytes this install brought in, so none of them were recorded as withheld."
     ROLLBACK_WARNINGS+=("safedeps could not read which bytes this install brought into ${PROJECT_DIR}, so if npm fetched any of them from a registry that is not the public npm registry, it has not recorded them, and another project that receives the same bytes may rebuild them")
     return 0
   fi
-  [[ -n "${found}" ]] || return 0
+  [[ -n "${found}" ]] || { NPM_WITHHELD_JUDGED=true; return 0; }
 
   npm_fetch_facts_load
   inert=$(jq -r '.ignore_scripts_injected == true' "${META_FILE}" 2>/dev/null || printf 'false')
@@ -1759,7 +1811,7 @@ record_npm_withheld() {
     ROLLBACK_WARNINGS+=("safedeps could not tell where npm fetched the bytes this install brought into ${PROJECT_DIR}, so it has not recorded them as withheld, and another project that receives the same bytes may rebuild them")
     return 0
   fi
-  [[ -n "${recorded}" ]] || return 0
+  [[ -n "${recorded}" ]] || { NPM_WITHHELD_JUDGED=true; return 0; }
 
   if ! { mkdir -p "${NPM_WITHHELD_DIR}" \
       && tmp=$(mktemp "${NPM_WITHHELD_DIR}/.record.XXXXXX") \
@@ -1770,11 +1822,55 @@ record_npm_withheld() {
     ROLLBACK_WARNINGS+=("safedeps could not record the bytes this install fetched from a registry that is not the public npm registry (${NPM_WITHHELD_DIR}), so another project that receives the same bytes may rebuild them")
     return 0
   fi
+  NPM_WITHHELD_JUDGED=true
   local package
   while IFS= read -r package; do
     [[ -z "${package}" ]] || NPM_WITHHELD_RECORDED+=("${package}")
   done < <(jq -r '[.[] | .package] | unique[]' <<< "${recorded}" 2>/dev/null)
   log_advisory "post-verify: recorded as withheld on this machine, by integrity: $(jq -r '[.[] | "\(.package) from \(.origins | join(" or "))"] | unique | join("; ")' <<< "${recorded}" 2>/dev/null) (into ${PROJECT_DIR})."
+}
+
+# The tree records this hook judged, one file per project directory, holding
+# the sha256 of the last tree record it judged there: a record the install
+# wrote during the command (it carries this command's trace), every integrity
+# of which was judged and every one to record written. Derived from
+# SAFEDEPS_HOME and nothing else, like the record of withheld bytes, because
+# what it vouches for leaves bytes out of that record.
+npm_file_sha256() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 < "$1" | cut -d' ' -f1
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum < "$1" | cut -d' ' -f1
+  else
+    return 1
+  fi
+}
+
+npm_tree_record_observe() {
+  local hash tmp="" target
+  target="${NPM_OBSERVED_DIR}/$(compute_dir_hash "${PROJECT_DIR}").json"
+  if ! { hash=$(npm_file_sha256 "$1") && [[ "${hash}" =~ ^[0-9a-f]{64}$ ]] \
+      && mkdir -p "${NPM_OBSERVED_DIR}" \
+      && tmp=$(mktemp "${NPM_OBSERVED_DIR}/.observed.XXXXXX") \
+      && jq -nc --arg project "${PROJECT_DIR}" --arg tree "${hash}" --argjson at "$(date +%s)" \
+           '{project: $project, tree: $tree, at: $at}' > "${tmp}" \
+      && mv -f "${tmp}" "${target}"; }; then
+    [[ -z "${tmp}" ]] || rm -f "${tmp}"
+    log_advisory "post-verify: could not keep the hash of the tree record judged in ${PROJECT_DIR} (${NPM_OBSERVED_DIR}), so the next install there counts every integrity in it as new."
+  fi
+  return 0
+}
+
+# Whether <copy> is, byte for byte, the tree record this hook last judged in
+# PROJECT_DIR. Anything it cannot read answers no.
+npm_tree_record_observed() {
+  local hash observed
+  observed="${NPM_OBSERVED_DIR}/$(compute_dir_hash "${PROJECT_DIR}").json"
+  [[ -f "${observed}" ]] || return 1
+  hash=$(npm_file_sha256 "$1") || return 1
+  [[ "${hash}" =~ ^[0-9a-f]{64}$ ]] || return 1
+  jq -e --arg project "${PROJECT_DIR}" --arg tree "${hash}" \
+    '.project == $project and .tree == $tree' "${observed}" >/dev/null 2>&1
 }
 
 # Function: check the sources this install brought in, from either npm record

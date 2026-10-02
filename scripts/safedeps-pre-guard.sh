@@ -3288,6 +3288,9 @@ done < <(find "${PROJECT_DIR}" -maxdepth 1 -type f -name "*.csproj" 2>/dev/null 
 # that saves nothing leaves package-lock.json as it was and writes only this
 # file, so the effect gate's source and install-script checks need the version
 # from before to tell what the install brought in (collect_npm_new_records).
+# The copy is what the file said, and the file can be committed, so the record
+# of withheld bytes leaves nothing out on its word unless it is a tree record
+# the effect gate judged here (npm_tree_record_observed).
 #
 # Copied, never moved or touched: the trace below is this file's own mtime and
 # inode. The copy goes through a temporary name, so the effect gate reads all
