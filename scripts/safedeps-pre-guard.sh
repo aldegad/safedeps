@@ -1306,7 +1306,7 @@ extract_command_substitution_payloads() {
 # behind `PIP_INDEX_URL=x` was not set aside, and the pipe check read it as
 # install text piped into a shell (caught in review).
 BLANK_INSTALL_RE="${SAFEDEPS_G_START}((env|command)([[:space:]]+-[^[:space:]]*)*[[:space:]]+|[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*(${SAFEDEPS_G_INSTALL_BODY})([[:space:]]|\$)"
-PIPE_MANAGER_RE='(npm|npx|pnpm|pnpx|yarn|bun|bunx|pip[0-9.]*|(python[0-9.]*|py)[[:space:]]+-m[[:space:]]*pip|poetry|uv|uvx|pipx|pipenv|cargo|go|gem|bundle|mvn|dotnet)'
+PIPE_MANAGER_RE='(npm|npx|pnpm|pnpx|yarn|bun|bunx|pip[0-9.]*|(python[0-9.]*|py)[[:space:]]+-[A-Za-z0-9]*m[[:space:]]*pip|poetry|uv|uvx|pipx|pipenv|cargo|go|gem|bundle|mvn|dotnet)'
 PIPE_INSTALL_TEXT_RE="${PIPE_MANAGER_RE}.*(${SAFEDEPS_G_ALL_VERBS})"
 
 # The same, with the manager starting a word. Beside a visible install the text
@@ -3185,7 +3185,7 @@ guard_segment_ecosystem() {
   scan=$(command_scan_text "$1")
   if echo "${scan}" | judge_grep -qEi "${SAFEDEPS_G_START}(npm|pnpm|pnpx|yarn|npx|bun|bunx)([[:space:]]|\$)"; then
     printf 'npm'
-  elif echo "${scan}" | judge_grep -qEi "${SAFEDEPS_G_START}(pip[0-9.]*|poetry|uv|uvx|pipx|pipenv|(python[0-9.]*|py)${SAFEDEPS_G_OPTS}[[:space:]]+-m[[:space:]]*pip)([[:space:]]|\$)"; then
+  elif echo "${scan}" | judge_grep -qEi "${SAFEDEPS_G_START}(pip[0-9.]*|poetry|uv|uvx|pipx|pipenv|(python[0-9.]*|py)${SAFEDEPS_G_OPTS}[[:space:]]+-[A-Za-z0-9]*m[[:space:]]*pip)([[:space:]]|\$)"; then
     printf 'pypi'
   elif echo "${scan}" | judge_grep -qEi "${SAFEDEPS_G_START}cargo([[:space:]]|\$)"; then
     printf 'crates.io'
@@ -3574,6 +3574,10 @@ guard_word_as_read() {
 #          exact pin) after its extras are removed (`evil[x]==1.0.0` installs
 #          evil); a wildcard such as `==1.0.*` is no pin. `name@version` as
 #          poetry and uv write it.
+#   rubygems `name:version`, which gem reads as the name and a requirement
+#          (Gem::Command#extract_gem_name_and_version); a version alone, or
+#          after `=`, is a pin. Read as a name, it was recorded as one and
+#          the pin went unchecked.
 #   others `name@spec` and `@scope/name@spec`, and an npm alias
 #          (`left-pad@npm:evil-pkg@1`) read as its target, which is what is
 #          fetched. A name may start with a digit (`7zip-bin`, `3to2`). An
@@ -3594,6 +3598,10 @@ guard_word_specs() {
       GUARD_SPECS="${BASH_REMATCH[1]}"$'\t'"${BASH_REMATCH[2]}"
       return 0
     fi
+  fi
+  if [[ "${eco}" == rubygems && "${word}" =~ ^([A-Za-z0-9][A-Za-z0-9._-]*):=?([0-9]+([.][0-9A-Za-z]+)*(-[0-9A-Za-z-]+([.][0-9A-Za-z-]+)*)?)$ ]]; then
+    GUARD_SPECS="${BASH_REMATCH[1]}"$'\t'"${BASH_REMATCH[2]}"
+    return 0
   fi
   if [[ "${eco}" == npm && "${word}" =~ ^(@[A-Za-z0-9._~-]+/)?[A-Za-z0-9._~-]+@[Nn][Pp][Mm]:(.*)$ ]]; then
     word="${BASH_REMATCH[2]}"

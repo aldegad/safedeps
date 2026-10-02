@@ -155,7 +155,7 @@ SAFEDEPS_G_INSTALL_BODY="${SAFEDEPS_G_NPM_INSTALL_BODY}\
 |yarn${SAFEDEPS_G_O}([[:space:]]+(global|workspace[[:space:]]+[^[:space:]]+|workspaces[[:space:]]+foreach${SAFEDEPS_G_O}))?${SAFEDEPS_G_O}[[:space:]]+(${SAFEDEPS_G_YARN_VERBS}|dlx)\
 |bun${SAFEDEPS_G_O}[[:space:]]+(${SAFEDEPS_G_BUN_VERBS})\
 |bun${SAFEDEPS_G_O}[[:space:]]+x${SAFEDEPS_G_O}${SAFEDEPS_G_OPERAND}\
-|(pip[0-9.]*|(python[0-9.]*|py)${SAFEDEPS_G_O}[[:space:]]+-m[[:space:]]*pip)${SAFEDEPS_G_O}[[:space:]]+install\
+|(pip[0-9.]*|(python[0-9.]*|py)${SAFEDEPS_G_O}[[:space:]]+-[A-Za-z0-9]*m[[:space:]]*pip)${SAFEDEPS_G_O}[[:space:]]+install\
 |poetry${SAFEDEPS_G_O}[[:space:]]+add\
 |uv${SAFEDEPS_G_O}[[:space:]]+(add|pip${SAFEDEPS_G_O}[[:space:]]+install|tool${SAFEDEPS_G_O}[[:space:]]+install)\
 |uv${SAFEDEPS_G_O}[[:space:]]+tool${SAFEDEPS_G_O}[[:space:]]+run${SAFEDEPS_G_O}${SAFEDEPS_G_OPERAND}\
@@ -627,7 +627,8 @@ safedeps_npm_read_args() {
 #   pnpm   pnpm --help (10.28.1); pnpx is `pnpm dlx`.
 #   yarn   yarn --help (1.22.22) and yarnpkg.com/cli (Berry: up, dlx,
 #          workspace, workspaces foreach).
-#   bun    bun --help (1.3.14); bunx is `bun x`.
+#   bun    bun <command> --help (1.4.2); bunx is `bun x`. `bun upgrade` is
+#          bun's own upgrade, kept as an install: a spurious check at worst.
 #   pip    pip --help (26.1.2), also as `python -m pip`.
 #   uv     uv --help (0.10.11); uvx is `uv tool run`.
 #   pipx   pipx --help (1.12.0).
@@ -666,8 +667,10 @@ SAFEDEPS_G_COMMANDS='
 '
 
 # The options that take a value: `<family>/<scope>:<option>=<class>`. <scope>
-# is `*` for the manager's own options, which every command accepts, or a
-# command path. <class> says what the value is:
+# is `*` for the manager's own options, which every command accepts and which
+# are read before the command as well, or a command path, or several command
+# paths joined by `|`. A command path's entry is looked up first, so `*` never
+# stands in for what a command reads. <class> says what the value is:
 #   v  a value that names no package
 #   d  a directory the command runs in or installs into
 #   V  the version every operand of the command is pinned to
@@ -675,7 +678,21 @@ SAFEDEPS_G_COMMANDS='
 #   w  a package added beside the one that runs (uvx `--with`)
 # Only options that always take a value are listed. One whose value is
 # optional, or one that is not listed, takes none, so its value is read as an
-# operand: a spurious check or record, never a package skipped.
+# operand: a spurious check or record, never a package skipped. The other
+# direction is the one that hides a package: an entry for an option the manager
+# reads as a switch takes the package after it for its value. So each entry is
+# held against the manager's own reading where the manager can be asked
+# (scripts/measure/manager-option-reading.sh).
+#
+# bun has no `*` entry. It takes for its command the first word that does not
+# start with `-` (bun 1.4.2, measured: `bun --cwd x add y` runs `bun x add y`),
+# so no option takes a value before the command, and an option there is read
+# both ways (safedeps_manager_read). Its runtime options (`bun --help`:
+# --print, --eval, --preload, --port, ...) belong to `bun run` and to running
+# a file, which install nothing; in an install command bun reads them as
+# switches (`bun add --print x` installs x), so no scope here holds them.
+# `-c, --config` and `--catalog` take a value only after `=` (`bun add -c x`
+# installs x), and bunx reads `--cwd` as a switch.
 SAFEDEPS_G_VALUE_OPTIONS='
   pnpm/*:-C=d pnpm/*:--dir=d pnpm/*:--filter=v pnpm/*:-F=v pnpm/*:--filter-prod=v
   pnpm/*:--loglevel=v pnpm/*:--reporter=v pnpm/*:--test-pattern=v
@@ -695,17 +712,15 @@ SAFEDEPS_G_VALUE_OPTIONS='
   yarn/workspaces,foreach,dlx:--package=p
   yarn/workspaces,foreach:--include=v yarn/workspaces,foreach:--exclude=v
   yarn/workspaces,foreach:--from=v yarn/workspaces,foreach:-j=v yarn/workspaces,foreach:--jobs=v
-  bun/*:--cwd=d bun/*:-c=v bun/*:--config=v bun/*:--backend=v bun/*:--ca=v bun/*:--cache-dir=v
-  bun/*:--filter=v bun/*:-F=v bun/*:--conditions=v bun/*:--console-depth=v bun/*:--env-file=v
-  bun/*:--eval=v bun/*:-e=v bun/*:--print=v bun/*:-p=v bun/*:--import=v bun/*:--preload=v
-  bun/*:-r=v bun/*:--require=v bun/*:--shell=v bun/*:--title=v bun/*:--port=v bun/*:--user-agent=v
-  bun/*:--dns-result-order=v bun/*:--elide-lines=v bun/*:--max-http-header-size=v
-  bun/*:--fetch-preconnect=v bun/*:--cron-period=v bun/*:--cron-title=v bun/*:--cpu-prof-dir=v
-  bun/*:--cpu-prof-interval=v bun/*:--cpu-prof-name=v bun/*:--heap-prof-dir=v
-  bun/*:--heap-prof-name=v bun/*:--unhandled-rejections=v
-  bun/*:--cafile=v bun/*:--concurrent-scripts=v bun/*:--cpu=v bun/*:--linker=v
-  bun/*:--minimum-release-age=v bun/*:--network-concurrency=v bun/*:--omit=v bun/*:--os=v
-  bun/*:--registry=v bun/x:-p=p bun/x:--package=p bunx/*:-p=p bunx/*:--package=p bunx/*:--cwd=d
+  bun/add|a|install|i|update:--cwd=d bun/add|a|install|i|update:--backend=v
+  bun/add|a|install|i|update:--ca=v bun/add|a|install|i|update:--cafile=v
+  bun/add|a|install|i|update:--cache-dir=v bun/add|a|install|i|update:--registry=v
+  bun/add|a|install|i|update:--concurrent-scripts=v
+  bun/add|a|install|i|update:--network-concurrency=v bun/add|a|install|i|update:--omit=v
+  bun/add|a|install|i|update:--linker=v bun/add|a|install|i|update:--minimum-release-age=v
+  bun/add|a|install|i|update:--cpu=v bun/add|a|install|i|update:--os=v
+  bun/add|a|install|i|update:-F=v bun/add|a|install|i|update:--filter=v
+  bun/x:-p=p bun/x:--package=p bunx/*:-p=p bunx/*:--package=p
   pip/*:--python=v pip/*:--log=v pip/*:--keyring-provider=v pip/*:--proxy=v pip/*:--retries=v
   pip/*:--timeout=v pip/*:--exists-action=v pip/*:--trusted-host=v pip/*:--cert=v
   pip/*:--client-cert=v pip/*:--cache-dir=v pip/*:--use-feature=v pip/*:--use-deprecated=v
@@ -905,23 +920,46 @@ SAFEDEPS_G_PARSERS='
 # The tables are searched with =~ as one line, every entry between blanks.
 SAFEDEPS_G_COMMANDS=" ${SAFEDEPS_G_COMMANDS//$'\n'/ } "
 SAFEDEPS_G_VALUE_OPTIONS=" ${SAFEDEPS_G_VALUE_OPTIONS//$'\n'/ } "
+# An entry for several command paths becomes one entry per path, once, so a
+# lookup stays one match.
+safedeps_g_expand_scopes() {
+  local e family scopes rest out=" " noglob=false IFS=' '
+  [[ "$-" != *f* ]] || noglob=true
+  set -f
+  for e in ${SAFEDEPS_G_VALUE_OPTIONS}; do
+    if [[ "${e}" != */*'|'*:* ]]; then out+="${e} "; continue; fi
+    family="${e%%/*}" rest="${e#*/}"
+    scopes="${rest%%:*}|" rest="${rest#*:}"
+    while [[ -n "${scopes}" ]]; do
+      out+="${family}/${scopes%%|*}:${rest} "
+      scopes="${scopes#*|}"
+    done
+  done
+  [[ "${noglob}" == true ]] || set +f
+  SAFEDEPS_G_VALUE_OPTIONS="${out}"
+}
+[[ "${SAFEDEPS_G_VALUE_OPTIONS}" != *'|'* ]] || safedeps_g_expand_scopes
 SAFEDEPS_G_LONG_OPTIONS=" ${SAFEDEPS_G_LONG_OPTIONS//$'\n'/ } "
 SAFEDEPS_G_PARSERS=" ${SAFEDEPS_G_PARSERS//$'\n'/ } "
 
-# The class of <option> for <family> in command scope <path> (`*` always
-# applies): SAFEDEPS_G_VALUE, status 1 when it takes no value.
+# The class of <option> for <family> in command scope <path>, then in `*`:
+# SAFEDEPS_G_VALUE, status 1 when it takes no value. The command comes first:
+# what a command reads is the command's (`bun x -p pkg` names the package
+# where bun's runtime `-p` printed), and `*` only fills in what it does not
+# say.
 safedeps_manager_option_class() {
   local family="$1" path="$2" opt="$3" re
   # Go reads `--flag` as `-flag`.
   [[ "${family}" != go || "${opt}" != --?* ]] || opt="${opt#-}"
   safedeps_ere_literal "${opt}"
-  re=" ${family}/[*]:${SAFEDEPS_G_ERE}=([a-zA-Z])"
-  if [[ "${SAFEDEPS_G_VALUE_OPTIONS}" =~ ${re} ]]; then
-    SAFEDEPS_G_VALUE="${BASH_REMATCH[1]}"
-    return 0
+  if [[ -n "${path}" ]]; then
+    re=" ${family}/${path//\*/[*]}:${SAFEDEPS_G_ERE}=([a-zA-Z])"
+    if [[ "${SAFEDEPS_G_VALUE_OPTIONS}" =~ ${re} ]]; then
+      SAFEDEPS_G_VALUE="${BASH_REMATCH[1]}"
+      return 0
+    fi
   fi
-  [[ -n "${path}" ]] || return 1
-  re=" ${family}/${path//\*/[*]}:${SAFEDEPS_G_ERE}=([a-zA-Z])"
+  re=" ${family}/[*]:${SAFEDEPS_G_ERE}=([a-zA-Z])"
   [[ "${SAFEDEPS_G_VALUE_OPTIONS}" =~ ${re} ]] || return 1
   SAFEDEPS_G_VALUE="${BASH_REMATCH[1]}"
 }
@@ -1126,27 +1164,47 @@ safedeps_manager_read_once() {
   i=$(( i + 1 ))
 
   # python reads its own options up to `-m <module>`; with pip as the module,
-  # the rest is pip's.
+  # the rest is pip's. One-letter options cluster as getopt reads them: `-Im
+  # pip` is `-I -m pip`, and `-Impip` is `-I -m pip` too, since an option that
+  # takes a value takes the rest of its word when there is one. `-c` ends
+  # python's options with a program, and so does the first operand (a script).
   if [[ "${family}" == python ]]; then
     while (( i < n )); do
       t="${w[i]}"
-      if [[ "${t}" == -m ]]; then
-        SAFEDEPS_G_M_ROLE[i]=g
-        [[ "${w[i+1]:-}" == pip ]] || return 0
-        SAFEDEPS_G_M_ROLE[i+1]=m i=$(( i + 2 )) family=pip
-        break
-      elif [[ "${t}" == -mpip ]]; then
-        SAFEDEPS_G_M_ROLE[i]=m i=$(( i + 1 )) family=pip
-        break
-      elif [[ "${t}" == -* ]]; then
-        SAFEDEPS_G_M_ROLE[i]=g
+      SAFEDEPS_G_M_ROLE[i]=g
+      if [[ "${t}" == --?* ]]; then
         if [[ "${t}" != *=* ]] && safedeps_manager_option_class python "" "${t}"; then
           SAFEDEPS_G_M_ROLE[i+1]=v i=$(( i + 1 ))
         fi
         i=$(( i + 1 ))
-      else
+        continue
+      fi
+      if [[ "${t}" != -?* || "${t}" == -- ]]; then
+        SAFEDEPS_G_M_ROLE[i]=-
         return 0
       fi
+      for (( k = 1; k < ${#t}; k++ )); do
+        case "${t:k:1}" in
+          c) return 0 ;;
+          m)
+            val="${t:k+1}"
+            if [[ -z "${val}" ]]; then
+              i=$(( i + 1 ))
+              val="${w[i]:-}"
+            fi
+            [[ "${val}" == pip ]] || return 0
+            SAFEDEPS_G_M_ROLE[i]=m i=$(( i + 1 )) family=pip
+            break 2
+            ;;
+        esac
+        if safedeps_manager_option_class python "" "-${t:k:1}"; then
+          if (( k + 1 == ${#t} )); then
+            SAFEDEPS_G_M_ROLE[i+1]=v i=$(( i + 1 ))
+          fi
+          break
+        fi
+      done
+      i=$(( i + 1 ))
     done
     [[ "${family}" == pip ]] || return 0
   fi
