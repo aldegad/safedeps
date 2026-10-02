@@ -757,8 +757,9 @@ pass "stmts view: statement starts follow each shell grammar, and nothing nested
 # stmts walk finds, so the install recognizers see the command name at a
 # separator. A redirection left in place put a word between the start and the
 # install (`2>/dev/null pip install ...`, which every shell runs), and the
-# starts after `function NAME {` used to keep their assignments. Where the
-# redirection follows the command name it stays, and so does the text after.
+# starts after `function NAME {` used to keep their assignments. A
+# redirection anywhere else is blanked (the redirection rows below), and the
+# words after it stay what they were: after echo, arguments.
 check_unprefixed() { # readings label input expected
   local got reading
   for reading in $1; do
@@ -774,15 +775,15 @@ check_unprefixed "${all}" "redirections and assignments mixed, inside a group" \
   '{ FOO=1 </dev/null 2>&1 BAR=2 pip i; }' '{ pip i; }'
 check_unprefixed "${all}" "a start after function NAME drops its prefixes" \
   'function f { 2>&1 FOO=1 pip i; }' 'function f { pip i; }'
-check_unprefixed "${all}" "a redirection after the command name stays" \
-  'echo 2>/dev/null pip i' 'echo 2>/dev/null pip i'
-check_unprefixed "bash zsh" "a redirection after an argument stays" \
-  'echo a &>/dev/null pip i' 'echo a &>/dev/null pip i'
+check_unprefixed "${all}" "a redirection after the command name is blanked, and the words after it stay arguments" \
+  'echo 2>/dev/null pip i' "echo$(sp 13)pip i"
+check_unprefixed "bash zsh" "a redirection after an argument is blanked" \
+  'echo a &>/dev/null pip i' "echo a$(sp 13)pip i"
 check_unprefixed "dash" "after the & of &> a command starts, and its redirection goes" \
   'echo a &>/dev/null pip i' 'echo a &pip i'
 check_unprefixed "dash" "the same with &>> and a blank before the target" \
   'echo a &>> /dev/null FOO=1 pip i' 'echo a &pip i'
-pass "unprefixed view: the prefixes a command starts with go, redirections among them, and only at a start"
+pass "unprefixed view: the prefixes a command starts with go, redirections among them, and only at a start; a redirection elsewhere is blanked"
 
 # A redirection is read where the shell reads one, and every view that drops
 # it drops the same bytes: the operator, the descriptor word glued in front
