@@ -1670,14 +1670,32 @@ npm_workspace_member_dirs() {
 # So the fact is recorded here, keyed by integrity, the one value npm binds to
 # the bytes, and the rebuild's predicate looks it up (npm_rebuild_unrecorded).
 #
-# What is recorded: each integrity in either npm record that no record held
-# before the command (an integrity already on record is the same bytes from
-# any registry, or npm refuses them), where npm did not say the bytes came from
-# the public registry: a record on it that npm says it fetched from elsewhere
-# or could not say, a source off it, or no source, which npm fetches from the
-# registry it is configured with. Both engines record. Machine-wide, because
-# the cache that carries the bytes to other projects is; a per-project record
-# missed another project's `npm ci` of the same lockfile.
+# What is recorded: each integrity in either npm record that the tree did not
+# hold before the command, where npm did not say the bytes came from the public
+# registry: a record on it that npm says it fetched from elsewhere or could not
+# say, a source off it, or no source, which npm fetches from the registry it is
+# configured with. Both engines record. Machine-wide, because the cache that
+# carries the bytes to other projects is; a per-project record missed another
+# project's `npm ci` of the same lockfile.
+#
+# "Held before" is read from the copy of the tree record the pre-guard kept,
+# never from the committed package-lock.json. npm refuses bytes that do not
+# match a recorded integrity, so bytes the tree already held are the bytes any
+# registry serves for it, and a gated fetch put them there under its own
+# judgment, recorded if it was not public. A committed lockfile is a record
+# nobody saw fetched: excluding its integrities let a clone's `npm ci` from a
+# configured impostor write nothing here, and the next command rebuilt the
+# impostor (the Q rows of effect-trace-grid.sh). The cost is the first `npm ci`
+# of a clone that installs from a company registry: its bytes are recorded,
+# and no tree that holds them is rebuilt automatically. What a clone carries
+# inside node_modules, a tree record included, is outside the gate, as the
+# bytes there are: the rebuild trusts them as it finds them.
+#
+# The test is per hash, not per entry. npm checks bytes against the strongest
+# algorithm an integrity names and accepts any of its digests, so one digest
+# the tree held says nothing about another beside it: an entry that paired the
+# impostor's sha512 with a digest already in the tree was skipped whole. Each
+# digest the tree did not hold is recorded, and the lookup matches any digest.
 #
 # One file per run, written under a temporary name and renamed, so a reader
 # sees all of it or none of it and two runs never write the same file. Nothing
@@ -1694,9 +1712,8 @@ record_npm_withheld() {
     [[ -f "${lockfile}" ]] && files+=("${lockfile}")
   done
   [[ ${#files[@]} -gt 0 ]] || return 0
-  for lockfile in "${SNAPSHOT_DIR}/${SNAPSHOT_ID}_package-lock.json" "${SNAPSHOT_DIR}/${SNAPSHOT_ID}_${SAFEDEPS_SNAPSHOT_NPM_TREE}"; do
-    [[ -f "${lockfile}" ]] && files+=("${lockfile}")
-  done
+  lockfile="${SNAPSHOT_DIR}/${SNAPSHOT_ID}_${SAFEDEPS_SNAPSHOT_NPM_TREE}"
+  [[ ! -f "${lockfile}" ]] || files+=("${lockfile}")
 
   # shellcheck disable=SC2016 # a jq program: jq expands its $names
   if ! found=$(jq -nc --arg earlier "${SNAPSHOT_DIR}/" '
@@ -1708,7 +1725,7 @@ record_npm_withheld() {
            version: (.value.version // "?"), resolved: .value.resolved, tokens: (.value | tokens)}
         | select(.tokens | length > 0)] as $all
       | ([$all[] | select(.before) | .tokens[] | {key: ., value: true}] | from_entries) as $seen
-      | [$all[] | select((.before | not) and (any(.tokens[]; $seen[.] != null) | not))]
+      | [$all[] | select(.before | not) | .tokens |= map(select($seen[.] == null)) | select(.tokens | length > 0)]
       | unique_by(.tokens)[]' "${files[@]}" < /dev/null 2>/dev/null); then
     log_advisory "post-verify: the npm records in ${PROJECT_DIR} could not be read for the bytes this install brought in, so none of them were recorded as withheld."
     ROLLBACK_WARNINGS+=("safedeps could not read which bytes this install brought into ${PROJECT_DIR}, so if npm fetched any of them from a registry that is not the public npm registry, it has not recorded them, and another project that receives the same bytes may rebuild them")

@@ -574,6 +574,16 @@ ROWS
 #     matched and is not rebuilt (P7). The bytes leaving the tree releases it
 #     (P6), and P0 is two approved installs. The rebuild used to run EVIL for
 #     P1-P5, P1x, P7 and PU.
+#   Q1-Q5: the same, where the first command fetched bytes a committed
+#     lockfile already named, so only the tree from before the command says
+#     what was already there. A clone with the impostor's integrity in its
+#     lockfile, installed through a committed .npmrc that is then removed (Q1),
+#     or through a one-shot npm_config_registry and met again by an approved
+#     install (Q2), by `npm ci` from npm's cache (Q3), and by another project's
+#     `npm ci` of the same lockfile (Q4). Q5 pairs the impostor's digest with
+#     the public one the installed tree already holds. The record skipped the
+#     committed integrity and, for Q5, the whole entry, so the rebuild used to
+#     run EVIL for Q1-Q5.
 #
 # Marks a script must never leave: sd-victim, the EVIL tarball and directories,
 # and LIB directories, which stand for a committed directory dependency.
@@ -790,6 +800,30 @@ new_p7() {
   done
 }
 new_pu() { new_evilenvfile; withhold_first 'source ./npmenv.sh && npm install sd-approved@1.0.0'; }
+new_q1() { new_evilclone; withhold_first 'npm ci'; rm -f "${CASE_PROJECT}/.npmrc"; }
+new_q2() { new_evilclone_bare; withhold_first "npm_config_registry=${EVIL_REG} npm ci"; }
+new_q3() { new_q2; rm -rf "${CASE_PROJECT}/node_modules"; }
+new_q4() {
+  local first_home
+  new_q2; first_home="${CASE_HOME}"
+  new_project
+  CASE_HOME="${first_home}"
+  cp "${FIRST_PROJECT}/package.json" "${FIRST_PROJECT}/package-lock.json" "${CASE_PROJECT}/"
+  rm -rf "${CASE_PROJECT}/node_modules"
+}
+# The public sd-approved installed, then its committed integrity extended with
+# the impostor's digest. npm accepts bytes that match either, and the cache is
+# emptied so that it fetches them rather than finding the public ones by theirs.
+new_q5() {
+  local public
+  new_project; set_dependency sd-approved 1.0.0; fixture_install
+  public=$(jq -r '.packages["node_modules/sd-approved"].integrity' "${CASE_PROJECT}/package-lock.json")
+  [[ "${public}" == sha512-* && "${public}" != "${EVIL_INTEGRITY}" ]] || fail "the Q5 fixture records the public integrity"
+  edit_json package-lock.json --arg i "${EVIL_INTEGRITY} ${public}" '.packages["node_modules/sd-approved"].integrity = $i'
+  printf 'registry=%s\n' "${EVIL_REG}" > "${CASE_PROJECT}/.npmrc"
+  rm -rf "${npm_config_cache:?the sandbox sets the npm cache}"
+  withhold_first 'npm ci'; rm -f "${CASE_PROJECT}/.npmrc"
+}
 
 # <id>|<fixture>|<engine>|<expect>|<command>, where <expect> is
 #   fallback            rolled back with no confirmed snapshot, said in all three records
@@ -928,13 +962,18 @@ P5|p5|claude|kept:${WITHHELD_EVIL}|npm ci
 P6|p6|claude|quiet:sd-approved|npm install sd-approved@1.0.0
 P7|p7|claude|kept:a package recorded on the public registry with no integrity, so safedeps cannot tell its bytes from ones it withheld (node_modules/sd-approved (sd-approved@1.0.0))|npm install sd-swapped@1.0.0
 PU|pu|claude|kept:the bytes of sd-approved here are the ones an install in @FIRST@ first fetched from a registry safedeps could not name (an earlier statement (source) can change the environment npm runs with|npm install sd-swapped@1.0.0
+Q1|q1|claude|kept:${WITHHELD_EVIL}|npm install
+Q2|q2|claude|kept:${WITHHELD_EVIL}|npm install sd-swapped@1.0.0
+Q3|q3|claude|kept:${WITHHELD_EVIL}|npm ci
+Q4|q4|claude|kept:${WITHHELD_EVIL}|npm ci
+Q5|q5|claude|kept:${WITHHELD_EVIL}|npm install
 ROWS
 [[ ${#FAILURES[@]} -ne ${failures_before} ]] \
   || pass "install scripts run only over a tree on record from the public registry or a workspace, a package counts as bundled only where its parent's package.json bundles it, a record on the public registry counts only where npm says it fetched from there, a rollback runs none without a confirmed snapshot and says what ran on each engine, and K4-K7 are installed but not rebuilt"
 
 # LK1. Each lockfile field the rebuild's check reads vouches for less than it
 # seems to (ARCHITECTURE.md tables them), and every gap is held by a row:
-# `resolved` by RH1-RH8, L1 and L2, `integrity` by RH2, RH2w and P7, `inBundle`
+# `resolved` by RH1-RH8, L1 and L2, `integrity` by RH2, RH2w, P7 and Q1-Q5, `inBundle`
 # by NB1-NB2n, `version` by lockless-forms.sh (an .npmrc that writes 1.0.1
 # over a recorded 1.0.0), and `link` here. A link record says npm put a
 # symlink there, and nothing about what is there now: a real directory
