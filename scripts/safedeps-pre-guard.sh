@@ -557,7 +557,17 @@ shell_lex() {
           if (hn > 0 && i == hstop + 1) {
             # A substitution left open in a body fails that one heredoc in the
             # shell; the lines after it still run (form H29), so it is dropped,
-            # not counted as a command that never closes.
+            # not counted as a command that never closes. Its bytes become body
+            # data, from the opener on: they run nowhere, and left as live code
+            # a reader that lexes the joined lines again read them out of the
+            # body, where the open context ran on into the lines after it (an
+            # open arithmetic with a quote in it took the install after the
+            # body along, fuzz form F19).
+            if (d > 1 && ctx[d] != "H") {
+              for (kk = d; kk > 1 && ctx[kk-1] != "H"; kk--) ;
+              for (j = cst[kk]; j > 1 && (X[j-1] == "$" || X[j-1] == "(") && C[j-1] != "b"; j--) ;
+              for (; j < i; j++) C[j] = "b"
+            }
             while (d > 1 && ctx[d] != "H") pop()
             pop(); hstop = 0; mode = ""
           }
@@ -1044,7 +1054,7 @@ shell_lex() {
       }
 
       function push(k) {
-        d++; ctx[d] = k; par[d] = 0; pnp[d] = np; besc[d] = 0; cpat[d] = 0; cpw[d] = 0; adol[d] = 0; glc[d] = 0
+        d++; ctx[d] = k; par[d] = 0; pnp[d] = np; besc[d] = 0; cpat[d] = 0; cpw[d] = 0; adol[d] = 0; glc[d] = 0; cst[d] = i
         if (k == "D") dq++
         if (k == "H") hn++
         if (k != "C") dc++
