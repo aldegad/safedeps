@@ -346,6 +346,56 @@ budget_six=${GUARD_ELAPSED}
   || fail "a longer budget is still honoured rather than overrun (6s->${budget_six}s)"
 pass "answer time tracks the configured budget, not the judgment's natural length"
 
+# --- what every Bash call pays to start ---------------------------------------
+# Both hooks source these libraries on every Bash call, before they read the
+# command, so their load time is added to `ls` as much as to an install. The
+# install grammar once spent 0.9s here under macOS /bin/bash (bash 3.2), whose
+# `${table//$'\n'/ }` is quadratic in a table's length; bash 5 did not show it,
+# and neither did a measurement that timed installs instead of plain commands.
+# So each file is timed by itself, under the bash on PATH and under /bin/bash
+# when that is another one, as the fastest of five loads: a slow load measures
+# the machine, a fast one bounds the file. A healthy load is about 10ms.
+startup_libs=(lib/truth-sources.sh lib/install-grammar.sh lib/npm/ask.sh
+  lib/npm/workspaces.sh lib/ledger/ledger.sh lib/providers/providers.sh
+  lib/npm/closure.sh lib/gates/rollback-journal.sh)
+startup_shells=(bash)
+[[ ! -x /bin/bash || "$(command -v bash)" == /bin/bash ]] || startup_shells+=(/bin/bash)
+startup_bound_ms=250
+# The fastest of <tries> loads of <file> under <shell>, in ms, as LOAD_MS. The
+# shell's own `time` reads the clock, so the figure excludes starting the shell.
+load_ms() {
+  local sh="$1" file="$2" tries="$3" i t ms
+  LOAD_MS=""
+  for (( i = 0; i < tries; i++ )); do
+    # shellcheck disable=SC2016  # expanded by the shell under test
+    t=$("${sh}" -c 'TIMEFORMAT=%3R; { time source "$1" >/dev/null 2>&1; } 2>&1' load-cost "${file}") || true
+    [[ "${t}" =~ ^[0-9]+[.][0-9]{3}$ ]] \
+      || fail "loading ${file} under ${sh} is timed (got: '${t}')"
+    ms=$(( 10#${t/./} ))
+    [[ -n "${LOAD_MS}" ]] && (( ms >= LOAD_MS )) || LOAD_MS=${ms}
+  done
+}
+# The control: a file that takes 0.3s to load reads as over the bound, so a
+# clean result below is the clock's answer, not a reading that cannot fail.
+printf 'sleep 0.3\n' > "${tmp_root}/slow-load.sh"
+load_ms bash "${tmp_root}/slow-load.sh" 1
+(( LOAD_MS >= startup_bound_ms )) \
+  || fail "the load clock reads a 0.3s load as over ${startup_bound_ms}ms (read ${LOAD_MS}ms)"
+startup_note=""
+for sh in "${startup_shells[@]}"; do
+  for lib in "${startup_libs[@]}"; do
+    load_ms "${sh}" "${ROOT_DIR}/${lib}" 5
+    startup_note+=" ${lib##*/}=${LOAD_MS}"
+    (( LOAD_MS < startup_bound_ms )) \
+      || fail "${lib} loads in under ${startup_bound_ms}ms under ${sh} (fastest of 5: ${LOAD_MS}ms); every Bash call pays this, twice"
+  done
+  # shellcheck disable=SC2016  # expanded by the shell under test
+  printf '# note - load under %s (%s), fastest of 5, ms:%s\n' "${sh}" \
+    "$("${sh}" -c 'printf %s "${BASH_VERSION}"')" "${startup_note}"
+  startup_note=""
+done
+pass "every library the hooks load on every Bash call loads in under ${startup_bound_ms}ms, under each bash here"
+
 # --- a fast judgment is answered as fast as before ---------------------------
 # The rows after this one make the deadline read the clock. Doing that must not
 # cost the fast path anything: the parent still polls in steps that start at
@@ -396,6 +446,12 @@ fast_inline_ms=${FASTEST_MS}
 fastest_ms 1
 fast_engaged_ms=${FASTEST_MS}
 printf '# note - fast judgment, fastest of 3: engaged %sms, inline %sms\n' "${fast_engaged_ms}" "${fast_inline_ms}"
+# The whole guard on a plain command, inline. The rows above bound each file
+# it loads; this one bounds whatever else a change might add to every call.
+# About 140ms on an M1 at load 20; a second more is the regression it catches.
+(( fast_inline_ms < 1000 )) \
+  || fail "a plain command's guard answers in under a second, inline (fastest of 3: ${fast_inline_ms}ms)"
+pass "a plain command's guard answers in under a second"
 (( fast_engaged_ms - fast_inline_ms < 1000 )) \
   || fail "an engaged fast judgment adds less than a second to the inline one (engaged ${fast_engaged_ms}ms, inline ${fast_inline_ms}ms)"
 pass "an engaged fast judgment is answered without waiting out a whole second"
