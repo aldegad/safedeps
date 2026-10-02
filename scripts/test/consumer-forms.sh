@@ -2001,4 +2001,15 @@ do
 done
 pass "ordinary commands where bash, zsh and dash read differently keep their verdicts (25)"
 
+# A reader that lexes the joined lines again reads them out of the context of
+# the first lexing. Here live code in an unquoted heredoc body (the `$((` on the
+# second line, inside the body that `<<2` opens) lands on one joined line with
+# the install after the body, and lexed again at the top level its apostrophe
+# opens a quote that never closes. bash and zsh run the install (fuzz form F19,
+# seed 20261001, on macOS); the gate passed it. The second reading failed while
+# the first closed, so the gate cannot say "no install": UNDECIDED.
+joined_reread=$'((echo $(echo ")") <<2) )\nx=$((cat <<EOF\nit\'s\nEOF\n) )\n2\npip install evil==6.6.6\n'
+expect_undecided "an install after a heredoc body whose live code does not close when read again" "${joined_reread}"
+pass "a joined text that does not close when read again is a failed reading, not an empty one"
+
 printf 'consumer-forms passed\n'

@@ -2608,5 +2608,515 @@
         "dash": "R"
       }
     }
+  },
+  {
+    "id": "LC1",
+    "cls": null,
+    "label": "a continuation after a blank: the blank ends the token, so the `#` on the next line is a comment",
+    "text": "echo a \\\n#'\n@@TAIL@@\necho b #'\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "LC2",
+    "cls": null,
+    "label": "a continuation after an operator",
+    "text": "echo a;\\\n#'\n@@TAIL@@\necho b #'\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "LC3",
+    "cls": null,
+    "label": "a continuation at the start of a line",
+    "text": "echo a\n\\\n#'\n@@TAIL@@\necho b #'\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "LK1",
+    "cls": null,
+    "label": "LC1 with no continuation: the control",
+    "text": "echo a #'\n@@TAIL@@\necho b #'\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "LC5",
+    "cls": null,
+    "label": "`case` after an operator and a continuation opens a case",
+    "text": "echo a; \\\ncase x in x) @@TAIL@@ ;; esac\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "LC6",
+    "cls": null,
+    "label": "`in` after a continuation",
+    "text": "case x \\\nin x) @@TAIL@@ ;; esac\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "LC7",
+    "cls": null,
+    "label": "`case` after a word and a continuation is an argument",
+    "text": "echo \\\ncase x in x) @@TAIL@@ ;; esac\n",
+    "measured": {
+      "bash": "-!",
+      "zsh": "-!",
+      "sh": "-!",
+      "agent": "-!",
+      "dash": "-!",
+      "linux": {
+        "bash": "-!",
+        "dash": "-!"
+      }
+    }
+  },
+  {
+    "id": "ZG1",
+    "cls": null,
+    "label": "zsh reads `(a)` in an argument as a glob word, and the `#` after its `)` inside it",
+    "text": "echo \"$(echo (a)#x)\n\"'\nx' ; @@TAIL@@\necho \")\"\n",
+    "measured": {
+      "bash": "R!",
+      "zsh": "R",
+      "sh": "R!",
+      "agent": "R",
+      "dash": "-!",
+      "linux": {
+        "bash": "-!",
+        "dash": "-!"
+      }
+    }
+  },
+  {
+    "id": "WB1",
+    "cls": null,
+    "label": "a `#` after tab, then a quote: a comment runs the tail, a word quotes it",
+    "text": "echo a\t#'\n@@TAIL@@\necho b #'\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "WB2",
+    "cls": null,
+    "label": "a `#` after the start of the text, then a quote: a comment runs the tail, a word quotes it",
+    "text": "#'\n@@TAIL@@\necho b #'\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "WB3",
+    "cls": null,
+    "label": "a `#` after `&`, then a quote: a comment runs the tail, a word quotes it",
+    "text": "echo a&#'\n@@TAIL@@\necho b #'\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "WB4",
+    "cls": null,
+    "label": "a `#` after `|`, then a quote: a comment runs the tail, a word quotes it",
+    "text": "echo a|#'\n@@TAIL@@\necho b #'\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "WB5",
+    "cls": null,
+    "label": "a `#` after a subshell close, then a quote: a comment runs the tail, a word quotes it",
+    "text": "(echo a)#'\n@@TAIL@@\necho b #'\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "WB6",
+    "cls": null,
+    "label": "a `#` after an arithmetic command close, then a quote: a comment runs the tail, a word quotes it",
+    "text": "((1))#'\n@@TAIL@@\necho b #'\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "WB7",
+    "cls": null,
+    "label": "a `#` after an escaped blank, then a quote: a comment runs the tail, a word quotes it",
+    "text": "echo a\\ #'\n@@TAIL@@\necho b #'\n",
+    "measured": {
+      "bash": "-",
+      "zsh": "-",
+      "sh": "-",
+      "agent": "-",
+      "dash": "-",
+      "linux": {
+        "bash": "-",
+        "dash": "-"
+      }
+    }
+  },
+  {
+    "id": "WB8",
+    "cls": null,
+    "label": "a `#` after an escaped operator, then a quote: a comment runs the tail, a word quotes it",
+    "text": "echo a\\;#'\n@@TAIL@@\necho b #'\n",
+    "measured": {
+      "bash": "-",
+      "zsh": "-",
+      "sh": "-",
+      "agent": "-",
+      "dash": "-",
+      "linux": {
+        "bash": "-",
+        "dash": "-"
+      }
+    }
+  },
+  {
+    "id": "WB9",
+    "cls": null,
+    "label": "a `#` after a letter, then a quote: a comment runs the tail, a word quotes it",
+    "text": "echo a#'\n@@TAIL@@\necho b #'\n",
+    "measured": {
+      "bash": "-",
+      "zsh": "-",
+      "sh": "-",
+      "agent": "-",
+      "dash": "-",
+      "linux": {
+        "bash": "-",
+        "dash": "-"
+      }
+    }
+  },
+  {
+    "id": "WB10",
+    "cls": null,
+    "label": "a `#` after a double quote close, then a quote: a comment runs the tail, a word quotes it",
+    "text": "echo \"a\"#'\n@@TAIL@@\necho b #'\n",
+    "measured": {
+      "bash": "-",
+      "zsh": "-",
+      "sh": "-",
+      "agent": "-",
+      "dash": "-",
+      "linux": {
+        "bash": "-",
+        "dash": "-"
+      }
+    }
+  },
+  {
+    "id": "WB11",
+    "cls": null,
+    "label": "a `#` after a single quote close, then a quote: a comment runs the tail, a word quotes it",
+    "text": "echo 'a'#'\n@@TAIL@@\necho b #'\n",
+    "measured": {
+      "bash": "-",
+      "zsh": "-",
+      "sh": "-",
+      "agent": "-",
+      "dash": "-",
+      "linux": {
+        "bash": "-",
+        "dash": "-"
+      }
+    }
+  },
+  {
+    "id": "WB12",
+    "cls": null,
+    "label": "a `#` after the close of `$(...)`, then a quote: a comment runs the tail, a word quotes it",
+    "text": "echo $(echo a)#'\n@@TAIL@@\necho b #'\n",
+    "measured": {
+      "bash": "-",
+      "zsh": "-",
+      "sh": "-",
+      "agent": "-",
+      "dash": "-",
+      "linux": {
+        "bash": "-",
+        "dash": "-"
+      }
+    }
+  },
+  {
+    "id": "WB13",
+    "cls": null,
+    "label": "a `#` after the close of `$((...))`, then a quote: a comment runs the tail, a word quotes it",
+    "text": "echo $((1))#'\n@@TAIL@@\necho b #'\n",
+    "measured": {
+      "bash": "-",
+      "zsh": "-",
+      "sh": "-",
+      "agent": "-",
+      "dash": "-",
+      "linux": {
+        "bash": "-",
+        "dash": "-"
+      }
+    }
+  },
+  {
+    "id": "WB14",
+    "cls": null,
+    "label": "a `#` after a backtick close, then a quote: a comment runs the tail, a word quotes it",
+    "text": "echo `echo a`#'\n@@TAIL@@\necho b #'\n",
+    "measured": {
+      "bash": "-",
+      "zsh": "-",
+      "sh": "-",
+      "agent": "-",
+      "dash": "-",
+      "linux": {
+        "bash": "-",
+        "dash": "-"
+      }
+    }
+  },
+  {
+    "id": "WB15",
+    "cls": null,
+    "label": "a `#` after the close of `${...}`, then a quote: a comment runs the tail, a word quotes it",
+    "text": "echo ${x:-a}#'\n@@TAIL@@\necho b #'\n",
+    "measured": {
+      "bash": "-",
+      "zsh": "-",
+      "sh": "-",
+      "agent": "-",
+      "dash": "-",
+      "linux": {
+        "bash": "-",
+        "dash": "-"
+      }
+    }
+  },
+  {
+    "id": "WB16",
+    "cls": null,
+    "label": "a `#` after the close of a process substitution, then a quote: a comment runs the tail, a word quotes it",
+    "text": "cat <(echo a)#'\n@@TAIL@@\necho b #'\n",
+    "measured": {
+      "bash": "-",
+      "zsh": "-",
+      "sh": "-!",
+      "agent": "-",
+      "dash": "-!",
+      "linux": {
+        "bash": "-",
+        "dash": "-!"
+      }
+    }
+  },
+  {
+    "id": "WB17",
+    "cls": null,
+    "label": "a `#` after a continuation after a letter, then a quote: a comment runs the tail, a word quotes it",
+    "text": "echo a\\\n#'\n@@TAIL@@\necho b #'\n",
+    "measured": {
+      "bash": "-",
+      "zsh": "-",
+      "sh": "-",
+      "agent": "-",
+      "dash": "-",
+      "linux": {
+        "bash": "-",
+        "dash": "-"
+      }
+    }
+  },
+  {
+    "id": "WB18",
+    "cls": null,
+    "label": "a `#` after two continuations after a blank, then a quote: a comment runs the tail, a word quotes it",
+    "text": "echo a \\\n\\\n#'\n@@TAIL@@\necho b #'\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "WB19",
+    "cls": null,
+    "label": "a `#` after a continuation after an escaped blank, then a quote: a comment runs the tail, a word quotes it",
+    "text": "echo a\\ \\\n#'\n@@TAIL@@\necho b #'\n",
+    "measured": {
+      "bash": "-",
+      "zsh": "-",
+      "sh": "-",
+      "agent": "-",
+      "dash": "-",
+      "linux": {
+        "bash": "-",
+        "dash": "-"
+      }
+    }
+  },
+  {
+    "id": "WB20",
+    "cls": null,
+    "label": "a `#` after a continuation after the close of `$(...)`, then a quote: a comment runs the tail, a word quotes it",
+    "text": "echo $(echo a)\\\n#'\n@@TAIL@@\necho b #'\n",
+    "measured": {
+      "bash": "-",
+      "zsh": "-",
+      "sh": "-",
+      "agent": "-",
+      "dash": "-",
+      "linux": {
+        "bash": "-",
+        "dash": "-"
+      }
+    }
+  },
+  {
+    "id": "WB21",
+    "cls": null,
+    "label": "a `#` after a blank after the close of `$(...)`, then a quote: a comment runs the tail, a word quotes it",
+    "text": "echo $(echo a) #'\n@@TAIL@@\necho b #'\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "WB22",
+    "cls": null,
+    "label": "a `#` after the close of a zsh glob word at the top level, then a quote: a comment runs the tail, a word quotes it",
+    "text": "echo (a)#'\n@@TAIL@@\necho b #'\n",
+    "measured": {
+      "bash": "-!",
+      "zsh": "-",
+      "sh": "-!",
+      "agent": "-",
+      "dash": "-!",
+      "linux": {
+        "bash": "-!",
+        "dash": "-!"
+      }
+    }
   }
 ]

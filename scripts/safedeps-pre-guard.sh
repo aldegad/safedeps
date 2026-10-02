@@ -690,14 +690,9 @@ shell_lex() {
             continue
           }
           if (c == "#" && (wordstart(i) || top == "B" && X[i-1] == "`") && top != "V") {
-            # A `(` where an argument stands is no command. zsh reads it as the
-            # start of a glob word, so `echo (#i)x` holds no comment there, and
-            # bash 3.2 inside a substitution reads no comment either: it runs
-            # the line after the substitution (form G5). bash 5.2 and dash fail
-            # to parse it. So only the dash reading takes a comment, and the
-            # bash reading says DIVERGE. A `(` that opens a command, `$(`, `<(`
-            # or `>(` starts a comment in every shell.
-            if (X[i-1] == "(" && X[i-2] !~ /[$<>]/ && !cmdpos(i - 1)) { div = 1; if (!shd) continue }
+            # Inside a glob word (see GL below) a `#` is a glob operator, never
+            # a comment (form G5).
+            if (glc[d] > 0) { div = 1; continue }
             C[i] = "m"; mode = "CM"; continue
           }
           if (c == "$" && X[i+1] == "(" && X[i+2] == "(") { C[i+1] = cls; C[i+2] = cls; arith_or_sub(i, 1); continue }
@@ -714,9 +709,24 @@ shell_lex() {
           if (top == "V") { if (c == "}") pop(); continue }
           # A process substitution is a word like `$(...)`: its `)` ends no
           # token (PS marks the parenthesis level it opened, WC its close).
-          if (c == "(") { par[d]++; if (i > 1 && (X[i-1] == "<" || X[i-1] == ">") && C[i-1] == cls) PS[d, par[d]] = 1; else delete PS[d, par[d]]; continue }
+          # So is a glob word: zsh reads a `(` where an argument stands as the
+          # start of one, and inside a substitution bash 3.2 reads it the same
+          # way, so a `#` in it or after its `)` is no comment (forms G5,
+          # ZG1); bash 5.2 and dash fail to parse it. GL marks the level for
+          # the bash and zsh readings, glc counts the open ones, and the bash
+          # reading says DIVERGE. An empty `()` is a function head, not a glob.
+          if (c == "(") {
+            par[d]++
+            if (i > 1 && (X[i-1] == "<" || X[i-1] == ">") && C[i-1] == cls) PS[d, par[d]] = 1; else delete PS[d, par[d]]
+            if (!shd && X[i+1] != ")" && (i == 1 || X[i-1] !~ /[$<>]/) && !cmdpos(i)) { GL[d, par[d]] = 1; glc[d]++; div = 1 } else delete GL[d, par[d]]
+            continue
+          }
           if (c == ")") {
-            if (par[d] > 0) { if ((d, par[d]) in PS) { WC[i] = 1; delete PS[d, par[d]] }; par[d]-- }
+            if (par[d] > 0) {
+              if ((d, par[d]) in PS) { WC[i] = 1; delete PS[d, par[d]] }
+              if ((d, par[d]) in GL) { WC[i] = 1; delete GL[d, par[d]]; glc[d]-- }
+              par[d]--
+            }
             else if (top == "S") { WC[i] = 1; pop() }
             continue
           }
@@ -1034,7 +1044,7 @@ shell_lex() {
       }
 
       function push(k) {
-        d++; ctx[d] = k; par[d] = 0; pnp[d] = np; besc[d] = 0; cpat[d] = 0; cpw[d] = 0; adol[d] = 0
+        d++; ctx[d] = k; par[d] = 0; pnp[d] = np; besc[d] = 0; cpat[d] = 0; cpw[d] = 0; adol[d] = 0; glc[d] = 0
         if (k == "D") dq++
         if (k == "H") hn++
         if (k != "C") dc++
@@ -1055,20 +1065,27 @@ shell_lex() {
       }
       # Whether a word starts at byte j: the byte before it ends a token. That
       # is a question about the token, not the character: a blank or a newline
-      # ends one only unescaped and not as a line continuation, and a `)` only
-      # as an operator, never where it closes a `$(...)`, a `$((...))` or a
-      # process substitution, which are parts of a word. Read by the byte
-      # alone, `echo $(echo a)#b` opened a comment that every shell reads as
-      # the word a#b, and a comment that swallowed the close of a substitution
-      # hid the lines after it (forms G1-G4).
+      # ends one only unescaped, and a `)` only as an operator, never where it
+      # closes a `$(...)`, a `$((...))`, a process substitution or a glob
+      # word, which are parts of a word. Read by the byte alone, `echo $(echo
+      # a)#b` opened a comment that every shell reads as the word a#b, and a
+      # comment that swallowed the close of a substitution hid the lines after
+      # it (forms G1-G4). A line continuation is no byte at all: the shell
+      # removes it before it splits tokens, so the byte before it decides
+      # (`a \` then `#x` on the next line is a comment, `a\` then `#x` is the
+      # word a#x; forms LC1-LC3, G4). Read as a byte, the continuation turned
+      # that comment into a word whose quote hid the lines after it.
       function wordstart(j) {
+        while (j > 2 && C[j-1] == "l") j -= 2
         if (j == 1) return 1
         if (X[j-1] !~ /[ \t\n;&|()<>]/) return 0
         return C[j-1] != "e" && C[j-1] != "l" && !((j - 1) in ESC) && !((j - 1) in WC)
       }
+      # Whether byte j stands where a command starts, by the words before it.
+      # A line continuation is skipped like a blank: the shell removes it.
       function cmdpos(j,   k, w) {
         k = j - 1
-        while (k >= 1 && (X[k] == " " || X[k] == "\t")) k--
+        while (k >= 1 && (X[k] == " " || X[k] == "\t" || C[k] == "l")) k--
         if (k < 1 || X[k] ~ /[\n;&|(!{)`]/) return 1
         w = ""
         while (k >= 1 && X[k] ~ /[a-z]/) { w = X[k] w; k-- }
@@ -1088,7 +1105,7 @@ shell_lex() {
         }
         if (a) { i = j + dollar + 1; push("A"); adol[d] = dollar; return }
         if (dollar) { i = j + 1; push("S") }
-        else { i = j + 1; delete PS[d, par[d] + 1]; delete PS[d, par[d] + 2]; par[d] += 2 }
+        else { i = j + 1; delete PS[d, par[d] + 1]; delete PS[d, par[d] + 2]; delete GL[d, par[d] + 1]; delete GL[d, par[d] + 2]; par[d] += 2 }
       }
       # The look-ahead bash and zsh make at `((`: from byte k to the first `)`
       # not nested in a parenthesis. 1 when another `)` follows it
@@ -1329,8 +1346,9 @@ shell_lex() {
           if (view == "scan" || view == "live" || view == "stmts") {
             # A code `#` is never a comment start here, and must not become one
             # when the scan is read again: after a blanked region (a quoted word
-            # with a `#` glued to its closing quote) it would follow a blank,
-            # which is where a comment starts.
+            # with a `#` glued to its closing quote) or an escaped blank, which
+            # this view prints as a blank, it would follow a blank, which is
+            # where a comment starts (form WB7).
             if (view == "stmts" && (k in BND)) put(";")
             # A statement ends only at a top-level separator: not inside a
             # substitution, an expansion or arithmetic, and not in a
@@ -1338,7 +1356,7 @@ shell_lex() {
             # cut wherever these bytes were, so the words after
             # `$(pwd | sed x)` or `>| f` left the install (caught in review).
             else if (view == "stmts" && cl == "c" && (DEP[k] != 1 || (k in DROP)) && cc ~ /[;&|\n]/) put(cc == "\n" ? " " : "_")
-            else if (cl == "c" || cl == "p") put(cc == "#" && (k == 1 || C[k-1] != "c" && C[k-1] != "e") ? "_" : cc)
+            else if (cl == "c" || cl == "p") put(cc == "#" && (k == 1 || C[k-1] != "c" && C[k-1] != "e" || C[k-1] == "e" && X[k-1] ~ /[ \t]/) ? "_" : cc)
             else if (cl == "e") put(index(";&|()<>!{}#`\042\047\\$", cc) ? "_" : (cc == "\n" ? " " : cc))
             else if (view == "live" && (cl == "Q" || cl == "B")) put(cc)
             else put(" ")
@@ -1734,10 +1752,36 @@ join_line_continuations() {
   shell_lex "$1" joined "safedeps:join_line_continuations"
 }
 
+# The joined view of <text> in the current reading, read again. A reader that
+# lexes the joined lines again reads them out of the context the first lexing
+# had: live code in an unquoted heredoc body lands on one line with the code
+# after the body, and lexed again at the top level, a quote in that body code
+# (`$((cat <<EOF` then `it's` in a body) opened a quote that never closed and
+# took the install after the body along (fuzz form F19, seed 20261001). Where
+# <text> closes in this reading and its joined view does not, that second
+# reading failed, and the gate settles it as one (UNDECIDED), never as "no
+# install". Where <text> itself does not close, the reading already says so.
+join_line_continuations_checked() {
+  local f1 f2 joined
+  if ! f1=$(mktemp "${TMPDIR:-/tmp}/safedeps-lex.XXXXXX" 2>/dev/null) || ! f2=$(mktemp "${TMPDIR:-/tmp}/safedeps-lex.XXXXXX" 2>/dev/null); then
+    [[ -z "${f1:-}" ]] || rm -f "${f1}"
+    guard_mark_reading_failed
+    join_line_continuations "$1"
+    return
+  fi
+  joined=$(SAFEDEPS_LEX_FLAGS="${f1}" shell_lex "$1" joined "safedeps:join_line_continuations")
+  if ! grep -q '^UNTERM$' "${f1}" 2>/dev/null; then
+    SAFEDEPS_LEX_FLAGS="${f2}" shell_lex "${joined}" scan "safedeps:command_scan_text" > /dev/null
+    grep -q '^UNTERM$' "${f2}" 2>/dev/null && guard_mark_reading_failed
+  fi
+  rm -f "${f1}" "${f2}"
+  printf '%s' "${joined}"
+}
+
 command_candidate_texts() {
   local command="$1"
 
-  command=$(join_line_continuations "${command}")
+  command=$(join_line_continuations_checked "${command}")
 
   normalize_install_text "${command}"
   printf '\n'
@@ -1752,7 +1796,7 @@ command_candidate_texts() {
 # and its arm opened no statement (form X22 of the statement-start judgment).
 command_candidate_start_texts() {
   local joined payload
-  joined=$(join_line_continuations "$1")
+  joined=$(join_line_continuations_checked "$1")
   command_start_text "$(normalize_install_text "${joined}")"
   printf '\n'
   while IFS= read -r payload; do
