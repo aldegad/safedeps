@@ -1063,9 +1063,9 @@ shell_lex() {
       # CS gets the first byte of each command, its prefixes included: the
       # first word, or the redirection operator or file descriptor before it.
       # prefixes() starts there.
-      function starts(rs, B, CS,   k, s, w, op, st, pre, rd, fn, fr, inp, rp, dbr, cop, tm, cs, zr, br) {
+      function starts(rs, B, CS,   k, s, w, op, st, pre, rd, fn, fr, inp, rp, dbr, cop, tm, cs, zr, br, fh, j) {
         zr = (rs == "zsh"); br = (rs == "bash")
-        st = 1; pre = 0; rd = 0; fn = 0; fr = 0; inp = 0; rp = 0; dbr = 0; cop = 0; tm = 0; cs = 0; k = 1
+        st = 1; pre = 0; rd = 0; fn = 0; fr = 0; inp = 0; rp = 0; dbr = 0; cop = 0; tm = 0; cs = 0; fh = 0; k = 1
         while (k <= N) {
           if (word_sep(k)) {
             op = (C[k] == "c" && DEP[k] == 1) ? X[k] : ""
@@ -1073,7 +1073,7 @@ shell_lex() {
             # outside dash, before `>` (`&>`); in dash that one ends a command.
             if (op == "&" && (X[k+1] == ">" && rs != "dash" || k > 1 && (X[k-1] == ">" || X[k-1] == "<") && C[k-1] == "c")) op = ">"
             if (C[k] == "p" && DEP[k] == 1 || op ~ /[\n;&|]/) {
-              st = 1; pre = 0; rd = 0; fn = 0; fr = 0; inp = 0; rp = 0; dbr = 0; cop = 0; tm = 0
+              st = 1; pre = 0; rd = 0; fn = 0; fr = 0; inp = 0; rp = 0; dbr = 0; cop = 0; tm = 0; fh = 0
             }
             else if (op == "<" || op == ">") {
               # `<(` and `>(` are process substitutions, whose `(` opens a
@@ -1087,19 +1087,38 @@ shell_lex() {
               }
             }
             else if (op == "(") {
+              # A subshell that is a function body (`f() ( ... )`, `function
+              # f ( ... )`, and in bash `coproc NAME ( ... )`) starts a
+              # command after a word, so the start is marked before it, as
+              # before a `{`. Unmarked, the statement began at the function
+              # name, and the extractor read the install in the body as
+              # arguments of `f` (caught when the release met the lexer).
+              # The `(` of an empty `()` is the head itself, not a body. A
+              # body glued to the head (`f()(pip install x)`) has no blank to
+              # mark, so the `(` itself is the start, as a case close glued
+              # to its arm is.
+              if ((fh || fn == 2 || br && cop == 2) && !(X[k+1] == "(" && (k + 2) in AR)) {
+                for (j = k + 1; j <= N && (X[j] == " " || X[j] == "\t"); j++) ;
+                if (X[j] != ")") {
+                  CS[k] = 1
+                  if (X[k-1] == " " || X[k-1] == "\t") mark_start(k, B); else B[k] = 1
+                }
+              }
               if (X[k+1] == "(" && (k + 2) in AR) { }
               else if (zr && fr == 2) { inp = 1; fr = 0 }
               else { st = 1; pre = 0; rd = 0; fn = 0; fr = 0; rp = 0; cop = 0; tm = 0 }
+              fh = 0
             }
             else if (op == ")") {
               if (inp) { inp = 0; st = 1 }
-              else if (emptyparen(k)) { st = 1; fn = 0 }
+              else if (emptyparen(k)) { st = 1; fn = 0; fh = 1 }
               else if (cs == 3) st = 1
             }
             k++; continue
           }
           s = k; w = ""
           while (k <= N && !word_sep(k)) { w = w X[k]; k++ }
+          fh = 0
           if (inp) continue
           if (rd) { rd = 0; continue }
           if (dbr) { if (w == "]]") { dbr = 0; st = zr }; continue }
