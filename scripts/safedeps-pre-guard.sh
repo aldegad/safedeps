@@ -363,8 +363,10 @@ command_pipes_unread_install_to_shell() {
 #           not end a statement blanked. What is read one line at a time.
 #   shell-bodies  the bodies of heredocs whose command pipes into something.
 #   live    scan, with code nested in quotes ("$(...)") and live code in an
-#           unquoted heredoc body kept: every byte the shell runs at this
-#           level. What the inert rewrite reads.
+#           unquoted heredoc body kept, and every top-level redirection
+#           blanked but the body of a process substitution in its target:
+#           every byte the shell runs at this level, with nothing between a
+#           command and its arguments. What the inert rewrite reads.
 #   stmts   scan, with every statement start written as `;`: the blank before
 #           each word that stands where the shell of this reading reads a
 #           command (after a separator, a case pattern close, a reserved word,
@@ -469,19 +471,24 @@ shell_lex() {
       #   view=substs  the body of every command substitution, one after another,
       #              as the shell delimits it: `$(...)` (case patterns inside close
       #              nothing) and backticks, a backtick body unescaped the way the
-      #              shell unescapes it (`\`` nests). For the payload extractor.
+      #              shell unescapes it (`\`` nests), and the body of every
+      #              process substitution. For the payload extractor.
       #   view=unprefixed  the text with the prefixes a statement may start with
       #              removed: assignments (NAME=value, the value one word however
       #              it is quoted or nested), redirections with their targets,
       #              env with its options and assignments, command and exec, at
-      #              every place the stmts walk starts a command. Not
+      #              every place the stmts walk starts a command; and every other
+      #              top-level redirection blanked, as noredir blanks it. What
+      #              the install recognizers read, through the stmts view. Not
       #              length-preserving.
-      #   view=noredir  every top-level redirection blanked: the operator, a file
-      #              descriptor number that is the whole word in front of it, and
-      #              the target word. An operator inside quotes, a substitution or
-      #              after a backslash is a character, and one in the middle of a
-      #              word still is an operator (`x==1>/dev/null`), as the shell
-      #              reads it. `<(` and `>(` are process substitutions and stay.
+      #   view=noredir  every top-level redirection blanked: the operator, the
+      #              file descriptor word in front of it (a number or a {name}
+      #              that is the whole word), and the target word, a process
+      #              substitution whole. An operator inside quotes, a
+      #              substitution or after a backslash is a character, and one in
+      #              the middle of a word still is an operator
+      #              (`x==1>/dev/null`), as the shell reads it. A process
+      #              substitution that is an argument (`cat <(x)`) stays.
       #              length-preserving
       #   view=unprefixed-lines  unprefixed, for text holding one statement per
       #              line, each line read from a fresh state like pieces: a case
@@ -543,7 +550,7 @@ shell_lex() {
         for (j in sl) SPC[sl[j]] = 1
         SPC["\n"] = 1
         DQS["\\"] = 1; DQS["\042"] = 1; DQS["$"] = 1; DQS["`"] = 1
-        wantdep = (view == "unprefixed" || view == "unprefixed-lines" || view == "noredir" || view == "pieces" || view == "cscripts" || view == "stmts")
+        wantdep = (view == "unprefixed" || view == "unprefixed-lines" || view == "noredir" || view == "pieces" || view == "cscripts" || view == "stmts" || view == "live")
         wantar = (view == "stmts" || view == "unprefixed" || view == "unprefixed-lines")
         if (view == "pieces") {
           # The value of each one-letter escape in $\047...\047.
@@ -747,15 +754,21 @@ shell_lex() {
           # ZG1); bash 5.2 and dash fail to parse it. GL marks the level for
           # the bash and zsh readings, glc counts the open ones, and the bash
           # reading says DIVERGE. An empty `()` is a function head, not a glob.
+          # A process substitution runs its body like `$(...)` does, so the
+          # body is a payload too (substs): as the target of a redirection it
+          # is part of a word the redirection views blank (form W1).
           if (c == "(") {
             par[d]++
-            if (i > 1 && (X[i-1] == "<" || X[i-1] == ">") && C[i-1] == cls) PS[d, par[d]] = 1; else delete PS[d, par[d]]
+            if (i > 1 && (X[i-1] == "<" || X[i-1] == ">") && C[i-1] == cls) {
+              PS[d, par[d]] = 1
+              nsub++; sbeg[nsub] = i + 1; send[nsub] = N; skind[nsub] = "P"; PSN[i] = nsub; PSI[d, par[d]] = nsub
+            } else delete PS[d, par[d]]
             if (!shd && X[i+1] != ")" && (i == 1 || X[i-1] !~ /[$<>]/) && !cmdpos(i)) { GL[d, par[d]] = 1; glc[d]++; div = 1 } else delete GL[d, par[d]]
             continue
           }
           if (c == ")") {
             if (par[d] > 0) {
-              if ((d, par[d]) in PS) { WC[i] = 1; delete PS[d, par[d]] }
+              if ((d, par[d]) in PS) { WC[i] = 1; send[PSI[d, par[d]]] = i - 1; delete PS[d, par[d]] }
               if ((d, par[d]) in GL) { WC[i] = 1; delete GL[d, par[d]]; glc[d]-- }
               par[d]--
             }
@@ -777,14 +790,16 @@ shell_lex() {
         # same reason: a word walk through a quote or a body that never ends
         # marks starts the shell never reads.
         if (view == "stmts" && !unterm) starts_all()
+        # The same holds for redirections: in a reading that never closes, a
+        # stripped target changes how the rest reads, and the view stops
+        # being idempotent (random inputs in scan-contract).
+        if (((view == "noredir" || view == "live") && !unterm) || view == "pieces" || view == "cscripts" || view == "stmts") redirs()
+        # After redirs(), which says DIVERGE at a `!` only zsh reads as part
+        # of its operator.
         if (div) {
           if (divfile != "") print "DIVERGE" >> divfile
           if (divmemo != "") print "DIVERGE" > divmemo
         }
-        # The same holds for redirections: in a reading that never closes, a
-        # stripped target changes how the rest reads, and the view stops
-        # being idempotent (random inputs in scan-contract).
-        if ((view == "noredir" && !unterm) || view == "pieces" || view == "cscripts" || view == "stmts") redirs()
         if (view == "substs") emit_substs()
         else if (view == "pieces") emit_pieces()
         else if (view == "cscripts") emit_cscripts()
@@ -812,28 +827,77 @@ shell_lex() {
         VAL[j+1] = sprintf("%c", v)
       }
 
-      # The top-level redirections: DROP marks the operator, a file descriptor
-      # number that is the whole word in front of it, the blanks after it and
-      # its target word. In the dash reading `&>` is no operator: the `&`
-      # ends a command, and the `>` after it is read on its own.
-      function redirs(   k, j, s) {
+      # The top-level redirections: DROP marks the operator, the file
+      # descriptor word in front of it (fdword), the blanks after it and its
+      # target word (wordend). In the dash reading `&>` is no operator: the
+      # `&` ends a command, and the `>` after it is read on its own. zsh reads
+      # a `!` after `>`, `>>`, `>&` or `&>` as part of the operator (`>!`
+      # clobbers); bash and dash read it as the start of the target word. The
+      # two agree on the bytes unless a blank follows the `!`, where the word
+      # after it is the target to zsh alone, so the bash reading says DIVERGE
+      # there.
+      #
+      # KEEP marks what the live view keeps of a redirection: the body of a
+      # process substitution in its target, which is code the shell runs.
+      # A substitution in a target needs no mark, since its body is not
+      # top-level code.
+      function redirs(   k, j, s, m, e, z) {
         for (k = 1; k <= N; k++) {
           if (C[k] != "c" || DEP[k] != 1) continue
           if (X[k] == "&" && X[k+1] == ">" && C[k+1] == "c") { if (shd) continue; j = k + 1 }
           else if (X[k] == "<" || X[k] == ">") j = k
           else continue
           if (X[j+1] == "(") { k = j + 1; continue }
-          s = k
-          while (s > 1 && C[s-1] == "c" && DEP[s-1] == 1 && X[s-1] ~ /[0-9]/) s--
-          if (s == k || s > 1 && !word_sep(s - 1)) s = k
+          s = fdword(k)
           j++
           while (j <= N && C[j] == "c" && X[j] ~ /[<>]/) j++
-          if (j <= N && C[j] == "c" && (X[j] == "&" || X[j] == "|")) j++
+          if (j <= N && C[j] == "c" && X[j] == "&") j++
+          if (j <= N && C[j] == "c" && X[j] == "|") j++
+          else if (j <= N && C[j] == "c" && X[j] == "!" && X[j-1] != "<") {
+            if (j + 1 > N || word_sep(j + 1)) div = 1
+            if (shz) j++
+          }
           while (j <= N && C[j] == "c" && DEP[j] == 1 && (X[j] == " " || X[j] == "\t")) j++
-          while (j <= N && !word_sep(j)) j++
-          for (; s < j; s++) DROP[s] = 1
+          z = wordend(j)
+          for (m = j; m < z; m++) {
+            if (!((X[m] == "<" || X[m] == ">") && C[m] == "c" && (m + 1) in PSN)) continue
+            for (e = m + 2; e <= send[PSN[m+1]]; e++) KEEP[e] = 1
+            m = e
+          }
+          for (j = z; s < j; s++) DROP[s] = 1
           k = j - 1
         }
+      }
+      # The first byte of the file descriptor word glued in front of the
+      # redirection operator at byte j, or j when there is none: a number, or
+      # a name in braces, which bash 4.1 and later and zsh read as a variable
+      # the shell opens a descriptor into (`{fd}>/dev/null pip install x`
+      # runs the install in bash 5). Older bash and dash read `{fd}` as a
+      # word, the command name where it comes first; reading it as part of
+      # the redirection there can only show a command that does not run.
+      function fdword(j,   s) {
+        s = j
+        if (s > 1 && X[s-1] ~ /[0-9]/) {
+          while (s > 1 && X[s-1] ~ /[0-9]/ && C[s-1] == C[j]) s--
+        } else if (s > 3 && X[s-1] == "}" && C[s-1] == C[j]) {
+          s = j - 2
+          while (s > 1 && X[s] ~ /[A-Za-z0-9_]/ && C[s] == C[j]) s--
+          if (X[s] != "{" || C[s] != C[j] || X[s+1] !~ /[A-Za-z_]/) return j
+        }
+        if (s == j || !wordstart(s)) return j
+        return s
+      }
+      # The byte after the word that starts at byte j, cut where the shell
+      # cuts it (word_sep). A process substitution is one word whatever it
+      # holds: its blanks and parentheses end nothing, and a target read up
+      # to its first `<` was the empty word (form W1).
+      function wordend(j) {
+        while (j <= N) {
+          if ((X[j] == "<" || X[j] == ">") && C[j] == "c" && (j + 1) in PSN) { j = send[PSN[j+1]] + 2; continue }
+          if (word_sep(j)) break
+          j++
+        }
+        return (j > N + 1) ? N + 1 : j
       }
       function emit_pieces(   k, a, ln, pln) {
         buf = ""; held = 0; ln = 1; a = 1; pln = 1
@@ -1065,8 +1129,8 @@ shell_lex() {
           }
           if (tm && w ~ /^-/) continue
           tm = 0
-          # A file descriptor number glued to a redirection belongs to it.
-          if (w ~ /^[0-9]+$/ && (X[k] == "<" || X[k] == ">")) {
+          # A file descriptor word glued to a redirection belongs to it.
+          if ((X[k] == "<" || X[k] == ">") && C[k] == "c" && fdword(k) == s) {
             if (!pre) { CS[s] = 1; mark_start(s, B) }
             pre = 1
             continue
@@ -1276,7 +1340,11 @@ shell_lex() {
         return N + 1
       }
       # `<<`, an optional `-`, blanks, then the delimiter word with its quoting
-      # removed. A quoted delimiter makes the body literal.
+      # removed. A quoted delimiter makes the body literal. A file descriptor
+      # word glued in front (`0<<E`, `{fd}<<E`) is part of the operator, so
+      # every view that blanks the operator blanks it too: left as code, it
+      # stood where the command name stands, and the install after it was
+      # an argument to no recognizer.
       function heredoc_op(j,   k, strip, w, q, cc, sk) {
         k = j + 2; strip = 0
         if (X[k] == "-") { strip = 1; k++ }
@@ -1294,7 +1362,7 @@ shell_lex() {
         np++; pd[np] = w; ps[np] = strip; pq[np] = q; pstart[np] = j; pdq[np] = (dq > 0); pb[np] = (ctx[d] == "B")
         pS[np] = 0
         for (sk = d; sk > 1; sk--) if (ctx[sk] == "S") { pS[np] = 1; break }
-        for (mm = j; mm < k && mm <= N; mm++) C[mm] = "h"
+        for (mm = fdword(j); mm < k && mm <= N; mm++) C[mm] = "h"
         return k - 1
       }
       # A newline that ends a line of code. Pending heredoc bodies start after it.
@@ -1465,6 +1533,11 @@ shell_lex() {
             # this view prints as a blank, it would follow a blank, which is
             # where a comment starts (form WB7).
             if (view == "stmts" && (k in BND)) put(";")
+            # The live view blanks a redirection where it is top-level code,
+            # so the inert rewrite finds the verb of `npm 2>/dev/null
+            # install`; the body of a substitution in its target stays,
+            # since the shell runs it.
+            else if (view == "live" && (k in DROP) && !(k in KEEP) && (cl == "c" && DEP[k] == 1 || cl == "e")) put(" ")
             # A statement ends only at a top-level separator: not inside a
             # substitution, an expansion or arithmetic, and not in a
             # redirection operator (`>|`, `<&-`, `2>&1`). command_statements
@@ -1483,7 +1556,12 @@ shell_lex() {
             # but the text read again was then a case that never closes, and
             # the stmts view of it marked no start (`case x in x) { ... }`).
             # The stmts view writes the close as `;` itself.
-            if (!(k in A)) put(cc)
+            # A redirection anywhere else is blanked, as in noredir, so the
+            # recognizers read the statement the spec extractor reads: left
+            # in place, one between the manager and its verb (`pip
+            # 2>/dev/null install`) hid the install from every recognizer
+            # while the extractor read it.
+            if (!(k in A)) put((k in DROP) ? " " : cc)
             continue
           }
           if (view == "code") {
