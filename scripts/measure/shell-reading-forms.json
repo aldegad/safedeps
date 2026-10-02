@@ -3105,7 +3105,7 @@
   {
     "id": "WB22",
     "cls": null,
-    "label": "a `#` after the close of a zsh glob word at the top level, then a quote: a comment runs the tail, a word quotes it",
+    "label": "a `#` after the close of a zsh glob word at the top level, then a quote. No shell runs the tail: zsh reads the glob word with its quote and then finds no match, bash and dash fail to parse. The gate denies it anyway, through the dash reading, which reads the `#` as a comment and shows the tail: an over-reading toward deny, on a form that runs nothing",
     "text": "echo (a)#'\n@@TAIL@@\necho b #'\n",
     "measured": {
       "bash": "-!",
