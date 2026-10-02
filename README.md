@@ -149,7 +149,7 @@ After the install command completes, the verify hook analyzes what changed. For 
    - Obfuscated content (`base64`, `atob`, `Buffer.from`, hex/unicode escapes)
 
 3. **Lock file diff analysis** -- Compares the lock files with the copies taken before the command. For npm, the sources come from both records, and a source counts only when no record held it before the command:
-   - Resolved URLs pointing to non-standard registries
+   - Resolved URLs pointing to non-standard registries. Only a URL that starts with `https://registry.npmjs.org/` or `https://registry.yarnpkg.com/` is the public registry, and a directory dependency the install linked is a non-standard source too, unless it is one of the project's declared workspaces
    - Insecure protocols (`http://`, `git://`) in resolved URLs
    - Unusually large dependency additions (>50 new resolved entries in `package-lock.json`, indicating potential dependency confusion)
 
@@ -204,7 +204,7 @@ Fast advisory feedback, observable rollback, and no hidden fallback. The command
 | Vulnerable closure package | npm direct/transitive package with OSV/KEV hit | PostToolUse npm primary effect gate | **Reorg** |
 | Malicious install scripts | Network calls, `eval`/`exec`, sensitive path access in hooks | PostToolUse effect verify | **Reorg** |
 | Obfuscated code | Base64, hex encoding, `Buffer.from` in install scripts | PostToolUse effect verify | **Reorg** |
-| Non-standard sources | A resolved URL outside the public registries that the install brought in (a committed lockfile installs as recorded; see the boundaries) | PostToolUse effect verify | **Reorg** |
+| Non-standard sources | A resolved URL outside the public registries, or a linked directory that is not a declared workspace, that the install brought in (a committed lockfile installs as recorded; see the boundaries) | PostToolUse effect verify | **Reorg** |
 | Insecure protocols | An `http://` or `git://` resolved URL that the install brought in | PostToolUse effect verify | **Reorg** |
 | Dependency confusion | >50 new dependencies in a single install | PostToolUse effect verify | **Reorg** |
 | Native binaries | Compiled executables in `node_modules/.bin/` | PostToolUse effect verify | **Reorg** |

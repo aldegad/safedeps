@@ -149,7 +149,7 @@ ledger 게이트나 사전 비행 체크에 실패하면 해당 명령은 실행
    - 난독화된 내용 (`base64`, `atob`, `Buffer.from`, 16진수/유니코드 이스케이프)
 
 3. **Lock file diff analysis** — lock 파일을 명령 전에 떠 둔 사본과 비교합니다. npm 에서는 출처를 두 기록 모두에서 읽고, 명령 전 어느 기록에도 없던 출처만 셉니다:
-   - 비표준 registry를 가리키는 resolved URL
+   - 비표준 registry를 가리키는 resolved URL. `https://registry.npmjs.org/` 나 `https://registry.yarnpkg.com/` 으로 시작하는 URL 만 공개 registry 이고, 설치가 링크한 디렉터리 의존성도 프로젝트가 선언한 워크스페이스가 아니면 비표준 출처입니다
    - resolved URL의 보안 취약 프로토콜 (`http://`, `git://`)
    - 과도한 의존성 증가 (`package-lock.json` 의 신규 resolved 항목 50개 초과, 의존성 혼란 공격 가능성)
 
@@ -204,7 +204,7 @@ ledger 게이트나 사전 비행 체크에 실패하면 해당 명령은 실행
 | 취약한 closure 패키지 | OSV/KEV 적중이 있는 npm 직접/전이 패키지 | PostToolUse npm primary effect gate | **Reorg** |
 | 악성 설치 스크립트 | hooks 내 네트워크 호출, `eval`/`exec`, 민감 경로 접근 | PostToolUse effect verify | **Reorg** |
 | 난독화 코드 | 설치 스크립트의 Base64, hex 인코딩, `Buffer.from` | PostToolUse effect verify | **Reorg** |
-| 비표준 출처 | 설치가 새로 들인, 공개 registry 밖의 resolved URL (커밋된 lockfile 은 기록대로 설치됨, 경계 참고) | PostToolUse effect verify | **Reorg** |
+| 비표준 출처 | 설치가 새로 들인, 공개 registry 밖의 resolved URL 이나 선언된 워크스페이스가 아닌 링크 디렉터리 (커밋된 lockfile 은 기록대로 설치됨, 경계 참고) | PostToolUse effect verify | **Reorg** |
 | 비보안 프로토콜 | 설치가 새로 들인 `http://` 또는 `git://` resolved URL | PostToolUse effect verify | **Reorg** |
 | 의존성 혼란(Dependency confusion) | 단일 설치에서 50개 초과 신규 의존성 추가 | PostToolUse effect verify | **Reorg** |
 | 네이티브 바이너리 | `node_modules/.bin/`의 컴파일된 실행 파일 | PostToolUse effect verify | **Reorg** |
