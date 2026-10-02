@@ -340,8 +340,27 @@ SAFEDEPS_G_NPM_SHORTHANDS='
   P=--save-prod ?=--usage H=--usage h=--usage v=--version w=--workspace
   y=--yes
 '
-SAFEDEPS_G_NPM_OPTIONS=" ${SAFEDEPS_G_NPM_OPTIONS//$'\n'/ } "
-SAFEDEPS_G_NPM_SHORTHANDS=" ${SAFEDEPS_G_NPM_SHORTHANDS//$'\n'/ } "
+# Each table is searched with =~ as one line, every entry between single
+# blanks. The tables are written one entry per word over many lines, so each
+# is rewritten into that one line here, at load, by its variable's name. It is
+# split into words rather than substituted: bash 3.2's `${table//$'\n'/ }` is
+# quadratic in the table's length, and on the value-option table below it took
+# 0.85s (macOS /bin/bash, 2026-10-03) -- on every Bash call, since this file
+# is sourced by both hooks. scripts/test/self-budget.sh holds every load to a
+# bound, under bash 3.2 where the machine has one.
+safedeps_g_one_line() {
+  local noglob=false IFS=$' \t\n'
+  local -a words=()
+  [[ "$-" != *f* ]] || noglob=true
+  set -f
+  # shellcheck disable=SC2206  # split on blanks on purpose; globbing is off
+  words=( ${!1} )
+  [[ "${noglob}" == true ]] || set +f
+  IFS=' '
+  printf -v "$1" ' %s ' "${words[*]}"
+}
+safedeps_g_one_line SAFEDEPS_G_NPM_OPTIONS
+safedeps_g_one_line SAFEDEPS_G_NPM_SHORTHANDS
 
 # Where another npm the gate supports defines an option differently, a word
 # after that option is read both ways, and a statement is judged as the union:
@@ -365,7 +384,7 @@ SAFEDEPS_G_NPM_OTHER='
   packages-and-scopes-permission:- password:- scopes:-
   strict-allow-scripts:- token-description:-
 '
-SAFEDEPS_G_NPM_OTHER=" ${SAFEDEPS_G_NPM_OTHER//$'\n'/ } "
+safedeps_g_one_line SAFEDEPS_G_NPM_OTHER
 
 # <word> as an ERE that matches it literally, in SAFEDEPS_G_ERE. The tables are
 # searched with =~, which is linear: bash's own pattern removal
@@ -668,9 +687,11 @@ SAFEDEPS_G_COMMANDS='
 
 # The options that take a value: `<family>/<scope>:<option>=<class>`. <scope>
 # is `*` for the manager's own options, which every command accepts and which
-# are read before the command as well, or a command path, or several command
-# paths joined by `|`. A command path's entry is looked up first, so `*` never
-# stands in for what a command reads. <class> says what the value is:
+# are read before the command as well, or a command path. A command path's
+# entry is looked up first, so `*` never stands in for what a command reads.
+# An option several commands read is listed once per command (bun's below):
+# the table is read as written, with nothing expanded at load, because this
+# file loads on every Bash call. <class> says what the value is:
 #   v  a value that names no package
 #   d  a directory the command runs in or installs into
 #   V  the version every operand of the command is pinned to
@@ -712,14 +733,29 @@ SAFEDEPS_G_VALUE_OPTIONS='
   yarn/workspaces,foreach,dlx:--package=p
   yarn/workspaces,foreach:--include=v yarn/workspaces,foreach:--exclude=v
   yarn/workspaces,foreach:--from=v yarn/workspaces,foreach:-j=v yarn/workspaces,foreach:--jobs=v
-  bun/add|a|install|i|update:--cwd=d bun/add|a|install|i|update:--backend=v
-  bun/add|a|install|i|update:--ca=v bun/add|a|install|i|update:--cafile=v
-  bun/add|a|install|i|update:--cache-dir=v bun/add|a|install|i|update:--registry=v
-  bun/add|a|install|i|update:--concurrent-scripts=v
-  bun/add|a|install|i|update:--network-concurrency=v bun/add|a|install|i|update:--omit=v
-  bun/add|a|install|i|update:--linker=v bun/add|a|install|i|update:--minimum-release-age=v
-  bun/add|a|install|i|update:--cpu=v bun/add|a|install|i|update:--os=v
-  bun/add|a|install|i|update:-F=v bun/add|a|install|i|update:--filter=v
+  bun/add:--cwd=d bun/add:--backend=v bun/add:--ca=v bun/add:--cafile=v
+  bun/add:--cache-dir=v bun/add:--registry=v bun/add:--concurrent-scripts=v
+  bun/add:--network-concurrency=v bun/add:--omit=v bun/add:--linker=v
+  bun/add:--minimum-release-age=v bun/add:--cpu=v bun/add:--os=v bun/add:-F=v
+  bun/add:--filter=v
+  bun/a:--cwd=d bun/a:--backend=v bun/a:--ca=v bun/a:--cafile=v bun/a:--cache-dir=v
+  bun/a:--registry=v bun/a:--concurrent-scripts=v bun/a:--network-concurrency=v
+  bun/a:--omit=v bun/a:--linker=v bun/a:--minimum-release-age=v bun/a:--cpu=v bun/a:--os=v
+  bun/a:-F=v bun/a:--filter=v
+  bun/install:--cwd=d bun/install:--backend=v bun/install:--ca=v bun/install:--cafile=v
+  bun/install:--cache-dir=v bun/install:--registry=v bun/install:--concurrent-scripts=v
+  bun/install:--network-concurrency=v bun/install:--omit=v bun/install:--linker=v
+  bun/install:--minimum-release-age=v bun/install:--cpu=v bun/install:--os=v
+  bun/install:-F=v bun/install:--filter=v
+  bun/i:--cwd=d bun/i:--backend=v bun/i:--ca=v bun/i:--cafile=v bun/i:--cache-dir=v
+  bun/i:--registry=v bun/i:--concurrent-scripts=v bun/i:--network-concurrency=v
+  bun/i:--omit=v bun/i:--linker=v bun/i:--minimum-release-age=v bun/i:--cpu=v bun/i:--os=v
+  bun/i:-F=v bun/i:--filter=v
+  bun/update:--cwd=d bun/update:--backend=v bun/update:--ca=v bun/update:--cafile=v
+  bun/update:--cache-dir=v bun/update:--registry=v bun/update:--concurrent-scripts=v
+  bun/update:--network-concurrency=v bun/update:--omit=v bun/update:--linker=v
+  bun/update:--minimum-release-age=v bun/update:--cpu=v bun/update:--os=v bun/update:-F=v
+  bun/update:--filter=v
   bun/x:-p=p bun/x:--package=p bunx/*:-p=p bunx/*:--package=p
   pip/*:--python=v pip/*:--log=v pip/*:--keyring-provider=v pip/*:--proxy=v pip/*:--retries=v
   pip/*:--timeout=v pip/*:--exists-action=v pip/*:--trusted-host=v pip/*:--cert=v
@@ -917,30 +953,11 @@ SAFEDEPS_G_PARSERS='
   pnpm: yarn:e bun:e pip:ax uv:ae uvx:ae pipx:aex poetry:e pipenv:e cargo:ae go:s
   gem:aex bundle:e dotnet:ce mvn:a python:a env:a pnpx:
 '
-# The tables are searched with =~ as one line, every entry between blanks.
-SAFEDEPS_G_COMMANDS=" ${SAFEDEPS_G_COMMANDS//$'\n'/ } "
-SAFEDEPS_G_VALUE_OPTIONS=" ${SAFEDEPS_G_VALUE_OPTIONS//$'\n'/ } "
-# An entry for several command paths becomes one entry per path, once, so a
-# lookup stays one match.
-safedeps_g_expand_scopes() {
-  local e family scopes rest out=" " noglob=false IFS=' '
-  [[ "$-" != *f* ]] || noglob=true
-  set -f
-  for e in ${SAFEDEPS_G_VALUE_OPTIONS}; do
-    if [[ "${e}" != */*'|'*:* ]]; then out+="${e} "; continue; fi
-    family="${e%%/*}" rest="${e#*/}"
-    scopes="${rest%%:*}|" rest="${rest#*:}"
-    while [[ -n "${scopes}" ]]; do
-      out+="${family}/${scopes%%|*}:${rest} "
-      scopes="${scopes#*|}"
-    done
-  done
-  [[ "${noglob}" == true ]] || set +f
-  SAFEDEPS_G_VALUE_OPTIONS="${out}"
-}
-[[ "${SAFEDEPS_G_VALUE_OPTIONS}" != *'|'* ]] || safedeps_g_expand_scopes
-SAFEDEPS_G_LONG_OPTIONS=" ${SAFEDEPS_G_LONG_OPTIONS//$'\n'/ } "
-SAFEDEPS_G_PARSERS=" ${SAFEDEPS_G_PARSERS//$'\n'/ } "
+# The tables are searched with =~ as one line (safedeps_g_one_line).
+safedeps_g_one_line SAFEDEPS_G_COMMANDS
+safedeps_g_one_line SAFEDEPS_G_VALUE_OPTIONS
+safedeps_g_one_line SAFEDEPS_G_LONG_OPTIONS
+safedeps_g_one_line SAFEDEPS_G_PARSERS
 
 # The class of <option> for <family> in command scope <path>, then in `*`:
 # SAFEDEPS_G_VALUE, status 1 when it takes no value. The command comes first:
