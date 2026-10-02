@@ -2329,9 +2329,20 @@ resolve_reading_targets() {
         # Two kinds of statement do this, and the record of withheld bytes
         # tells them apart (env_setting below): code this gate does not read
         # (`source`, `.`, `eval`), and a setting it reads but cannot reproduce
-        # (`set -a`, `declare -x`, an npm_config_* assignment).
+        # (`set -a`, `declare -x`, an npm_config_* assignment). Code whose own
+        # text names an npm setting is the second kind: `eval "export
+        # npm_config_registry=..."`, or `.` of a here-string or a process
+        # substitution that says it. The setting is in the command, so the
+        # reason a record would protect nothing (the code came from somewhere
+        # this gate does not read) does not hold. The text is read with quotes
+        # and backslashes dropped, which can only find more.
         source|.|eval)
           env_changer="${toks[0]}"
+          value="${stmt} ${toks[*]}"
+          value="${value//[\"\'\\]/}"
+          if [[ "${value}" =~ [Nn][Pp][Mm]_[Cc][Oo][Nn][Ff][Ii][Gg]_[A-Za-z0-9_]* ]]; then
+            env_setting="${toks[0]} ${BASH_REMATCH[0]}"
+          fi
           break
           ;;
         set|declare|typeset)
@@ -2485,19 +2496,32 @@ resolve_reading_targets() {
         fetch="${fetch%%$'\n'*}"
         answer="${answer%%$'\n'*}"
       fi
-      if [[ -n "${env_changer}" ]]; then
-        # The cause `sourced` says the only reason is code the command runs
-        # from somewhere this gate does not read, and npm answered for
-        # everything the gate can read. The PostToolUse hook then withholds
-        # this install's scripts but records nothing machine-wide
-        # (record_npm_withheld): that code ran in the agent's shell and could
-        # already have run anything, so a record would protect nothing. A
-        # setting the gate reads, or an ask npm did not answer, keeps no cause
-        # and is recorded.
-        cause=""
-        if [[ -z "${env_setting}" ]] && jq -e 'type == "object" and .unknown == null' <<< "${fetch}" >/dev/null 2>&1; then
-          cause=sourced
-        fi
+      # The cause `sourced` says the only reason is code the command runs
+      # from somewhere this gate does not read, and npm answered the public
+      # registry for everything the gate can read. The PostToolUse hook then
+      # withholds this install's scripts but records nothing machine-wide
+      # (record_npm_withheld): whoever wrote that code already runs code in
+      # the agent's shell, so a record would protect nothing against them. A
+      # setting the gate reads, or an ask npm did not answer, keeps no cause
+      # and is recorded.
+      #
+      # Where npm named a registry that is not public, its answer stands as it
+      # is and is recorded like any other. That answer came from the
+      # command's own words, which the code cannot take back. The sourced
+      # unknown used to replace it, so `. /dev/null;
+      # npm_config_registry=<impostor> npm install x` recorded nothing, and
+      # the next approved install rebuilt the impostor's bytes (VB1-VB3).
+      cause=""
+      if [[ -n "${env_changer}" && -z "${env_setting}" ]]; then
+        # shellcheck disable=SC2016 # a jq program: jq expands its $names
+        cause=$(jq -rn --arg public "${SAFEDEPS_NPM_PUBLIC_REGISTRY_RE}" "${SAFEDEPS_NPM_FETCH_JQ:-}"'
+            input | . as $f
+            | if type != "object" or .unknown != null then ""
+              elif ($f.registry | sd_registry_public($f))
+                   and ([($f.scopes // {}) | objects | .[]] | all(sd_registry_public($f))) then "sourced"
+              else "answered" end' <<< "${fetch}" 2>/dev/null) || cause=""
+      fi
+      if [[ -n "${env_changer}" && "${cause}" != answered ]]; then
         fetch=$(jq -nc --arg w "$(if [[ -n "${env_setting}" ]]; then printf '%s' "${env_setting%$'\001'}"; else printf '%s' "${env_changer%$'\001'}"; fi)" --arg cause "${cause}" \
           '{unknown: "an earlier statement (\($w)) can change the environment npm runs with where the command does not show it, so safedeps cannot tell which registry this install fetches from"}
            + (if $cause == "" then {} else {cause: $cause} end)' 2>/dev/null) \
