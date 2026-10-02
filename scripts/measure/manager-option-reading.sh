@@ -74,6 +74,21 @@ trap 'rm -rf "${work}"' EXIT
 over=0 under=0 forms=0
 asked=() skipped=()
 
+# A form that hangs is cut at 20 seconds where `timeout` exists. Where it does
+# not (macOS), the forms end on their own: a version print, an offline install.
+bounded() {
+  if command -v timeout >/dev/null 2>&1; then timeout 20 "$@"; else "$@"; fi
+}
+
+# A manager that answered nothing would agree with everything, so each one is
+# first asked forms whose answers are known, and a wrong answer stops the run.
+control() {
+  local family="$1" want="$2" got="$3" form="$4"
+  [[ "${got}" == "${want}" ]] && return 0
+  printf 'could not ask %s: the control [%s] answered %s, want %s\n' "${family}" "${form}" "${got}" "${want}" >&2
+  return 2
+}
+
 # The grammar's reading of word <index> of a statement: a package role or not.
 grammar_role() {
   local k="$1"
@@ -154,7 +169,7 @@ ask_bun() {
       chmod +x "${b}/proj/node_modules/sdv/cli.sh"
       ln -s ../sdv/cli.sh "${b}/proj/node_modules/.bin/sdv"
     fi
-    (cd "${b}/proj" && timeout 20 "$@" < /dev/null > "${b}/out" 2>&1) || true
+    (cd "${b}/proj" && bounded "$@" < /dev/null > "${b}/out" 2>&1) || true
     case "${mode}" in
       install)
         if grep -q '"sdv"' "${b}/proj/package.json" || grep -q 'installed sdv@' "${b}/out"; then
@@ -173,6 +188,16 @@ ask_bun() {
         ;;
     esac > "${b}/answer"
   }
+
+  # Controls: a plain install installs its first operand, bunx runs its
+  # package, and `--cwd` takes the first operand for its value.
+  mkdir -p "${work}/bun.c1" "${work}/bun.c2" "${work}/bun.c3"
+  bun_form "${work}/bun.c1" install bun add ../sdv ../sdw
+  bun_form "${work}/bun.c2" run bunx sdv a1
+  bun_form "${work}/bun.c3" install bun add --cwd ../sdv ../sdw
+  control bun N "$(cat "${work}/bun.c1/answer")" 'bun add ../sdv ../sdw' || return 2
+  control bun N "$(cat "${work}/bun.c2/answer")" 'bunx sdv a1' || return 2
+  control bun V "$(cat "${work}/bun.c3/answer")" 'bun add --cwd ../sdv ../sdw' || return 2
 
   # <mode> <target index> <words after bun's own name...>, as `bun ...`.
   : > "${work}/bun.forms"
@@ -211,7 +236,7 @@ ask_bun() {
 ask_pip() {
   command -v python3 >/dev/null 2>&1 || return 3
   python3 -c 'import pip._internal.commands' 2>/dev/null || return 3
-  local version line k answer
+  local version line kind k answer
   version=$(python3 -c 'import pip; print(pip.__version__)')
   table_options pip | LC_ALL=C sort -u > "${work}/pip.table"
   # pip's answer for each form: in place (`pip install <opt> SDV SDW`) and
@@ -247,13 +272,18 @@ def read(argv, pre):
     if "SDV" in rest:
         return "N"
     return "V" if "SDW" in rest or pre else "X"
+print("control\t0\tpip\tinstall\tSDV\tSDW\t%s" % read(["SDV", "SDW"], False))
+print("control\t0\tpip\t--log\tSDV\tSDW\t%s" % read(["--log", "SDV", "SDW"], False))
 for w in sorted(words):
     if w in ("-h", "--help", "-V", "--version"):
         continue
     print("in\t3\tpip\tinstall\t%s\tSDV\tSDW\t%s" % (w, read([w, "SDV", "SDW"], False)))
     print("pre\t3\tpip\t%s\tinstall\tSDV\t%s" % (w, read([w, "install", "SDV"], True)))
 PY
-  while IFS=$'\t' read -r _ k line; do
+  control pip N "$(sed -n 1p "${work}/pip.forms" | awk -F'\t' '{ print $NF }')" 'pip install SDV SDW' || return 2
+  control pip V "$(sed -n 2p "${work}/pip.forms" | awk -F'\t' '{ print $NF }')" 'pip install --log SDV SDW' || return 2
+  while IFS=$'\t' read -r kind k line; do
+    [[ "${kind}" != control ]] || continue
     answer="${line##*$'\t'}"
     line="${line%$'\t'*}"
     IFS=$'\t' read -r -a words <<< "${line}"
@@ -277,13 +307,15 @@ ask_python() {
   printf '%s\n' "-m pip" "-mpip" "-W ignore -m pip" "-Wignore -m pip" "-W -m pip" "-X -I -m pip" \
     "-Xdev -Im pip" "--check-hash-based-pycs always -m pip" "-c pass -m pip" "-sEm pip" \
     "-E -s -m pip" "-Im json.tool" "-I script.py -m pip" >> "${work}/python.forms"
+  python_answer() {
+    if (cd "${work}" && bounded python3 "$@" --version < /dev/null 2>&1) | grep -q '^pip '; then echo N; else echo X; fi
+  }
+  control python N "$(python_answer -m pip)" 'python3 -m pip' || return 2
+  control python X "$(python_answer -c pass -m pip)" 'python3 -c pass -m pip' || return 2
   while IFS= read -r f; do
     # shellcheck disable=SC2086
     set -f; read -r -a words <<< "python3 ${f}"; set +f
-    answer=X
-    if (cd "${work}" && timeout 20 python3 "${words[@]:1}" --version < /dev/null 2>&1) | grep -q '^pip '; then
-      answer=N
-    fi
+    answer=$(python_answer "${words[@]:1}")
     judge python "${answer}" $(( ${#words[@]} + 1 )) "${words[@]}" install SDV
     n=$((n + 1))
   done < "${work}/python.forms"
@@ -311,10 +343,13 @@ clap_options() {
 }
 
 # <family> <help file> <command words...>: the forms for one command, from
-# its help and the table. An option the help does not print is refused.
+# its help and the table. An option the help does not print is refused. A help
+# that names no option taking a value and none that does not was not read.
 ask_clap_command() {
   local family="$1" help="$2" o cls answer
   shift 2
+  grep -q ' V$' "${help}" && grep -q ' N$' "${help}" \
+    || { printf 'could not ask %s: no options read from the help of [%s]\n' "${family}" "$*" >&2; return 2; }
   { awk '{ print $1 }' "${help}"; table_options "${family}"; } | LC_ALL=C sort -u | while IFS= read -r o; do
     [[ "${o}" != -h && "${o}" != --help && "${o}" != -V && "${o}" != --version ]] || continue
     cls=$(awk -v o="${o}" '$1 == o { print $2; exit }' "${help}")
@@ -324,6 +359,7 @@ ask_clap_command() {
   while IFS=$'\t' read -r answer o; do
     judge "${family}" "${answer}" $(( $# + 1 )) "$@" "${o}" SDV SDW
   done < "${work}/clap.forms"
+  return 0
 }
 
 ask_uv() {
@@ -334,11 +370,11 @@ ask_uv() {
   uv pip install --help | clap_options > "${work}/uv.pip"
   uv tool install --help | clap_options > "${work}/uv.tool"
   uv tool run --help | clap_options > "${work}/uv.run"
-  ask_clap_command uv "${work}/uv.add" uv add
-  ask_clap_command uv "${work}/uv.pip" uv pip install
-  ask_clap_command uv "${work}/uv.tool" uv tool install
-  ask_clap_command uv "${work}/uv.run" uv tool run
-  ask_clap_command uvx "${work}/uv.run" uvx
+  ask_clap_command uv "${work}/uv.add" uv add || return 2
+  ask_clap_command uv "${work}/uv.pip" uv pip install || return 2
+  ask_clap_command uv "${work}/uv.tool" uv tool install || return 2
+  ask_clap_command uv "${work}/uv.run" uv tool run || return 2
+  ask_clap_command uvx "${work}/uv.run" uvx || return 2
   # Before the command, only a global option is read, with its own arity.
   uv --help | clap_options > "${work}/uv.global"
   while IFS=' ' read -r o cls; do
@@ -354,8 +390,8 @@ ask_cargo() {
   version=$(cargo --version | awk '{ print $2 }')
   cargo install --help | clap_options > "${work}/cargo.install"
   cargo add --help | clap_options > "${work}/cargo.add"
-  ask_clap_command cargo "${work}/cargo.install" cargo install
-  ask_clap_command cargo "${work}/cargo.add" cargo add
+  ask_clap_command cargo "${work}/cargo.install" cargo install || return 2
+  ask_clap_command cargo "${work}/cargo.add" cargo add || return 2
   cargo --help | clap_options > "${work}/cargo.global"
   while IFS=' ' read -r o cls; do
     [[ "${cls}" == N && "${o}" != -h && "${o}" != --help && "${o}" != -V && "${o}" != --version ]] || continue
@@ -373,7 +409,9 @@ ask_go() {
   printf '%s\n' '-t N' '-u N' '-tool N' >> "${work}/go.get"
   cat "${work}/go.build" >> "${work}/go.get"
   cp "${work}/go.build" "${work}/go.run"
-  go help run | grep -q -- '-exec xprog' && printf '%s\n' '-exec V' >> "${work}/go.run"
+  grep -q ' V$' "${work}/go.build" && grep -q ' N$' "${work}/go.build" \
+    || { printf 'could not ask go: no flags read from go help build\n' >&2; return 2; }
+  if go help run | grep -q -- '-exec xprog'; then printf '%s\n' '-exec V' >> "${work}/go.run"; fi
   for c in get install run; do
     [[ -e "${work}/go.${c}" ]] || cp "${work}/go.build" "${work}/go.${c}"
     { awk '{ print $1 }' "${work}/go.${c}"; table_options go; } | LC_ALL=C sort -u | while IFS= read -r o; do
