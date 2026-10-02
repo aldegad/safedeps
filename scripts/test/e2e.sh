@@ -558,12 +558,16 @@ cp "${inert_project}/package-lock.json" "${inert_project}/node_modules/.package-
 stub_bin="${tmp_root}/stub-bin"
 mkdir -p "${stub_bin}"
 # The rebuild runs only when npm says the tree it would rebuild is the one on
-# record, so the stub answers `npm query` with the tree the lockfile records.
+# record, so the stub answers `npm query` with the tree the lockfile records,
+# and only when npm says it fetches from the public registry, so the stub
+# answers `npm config ls --json` with npm's defaults.
 cat > "${stub_bin}/npm" <<EOF
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "${tmp_root}/npm-calls.log"
 if [[ "\$1" == query ]]; then
   printf '%s\n' '[{"location":"","name":"inert-project"},{"location":"node_modules/fixture-parent","name":"fixture-parent","version":"1.0.0"},{"location":"node_modules/fixture-child","name":"fixture-child","version":"1.0.0"}]'
+elif [[ "\$1" == config ]]; then
+  printf '%s\n' '{"registry":"https://registry.npmjs.org/","replace-registry-host":"npmjs"}'
 fi
 exit 0
 EOF

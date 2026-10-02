@@ -129,6 +129,7 @@ else
   SAFEDEPS_NPM_ASK_PRE_SECONDS=0
   safedeps_npm_install_target() {
     printf '?\tlib/npm/ask.sh is unreadable, so safedeps cannot ask npm where this install lands\n'
+    printf '%s\n' '{"unknown":"lib/npm/ask.sh is unreadable, so safedeps cannot ask npm which registry this install fetches from"}'
   }
 fi
 
@@ -1870,7 +1871,8 @@ guard_npmrc_unrecorded() {
 }
 
 # Where each install statement in the command lands, one line per statement of
-# the command (command_statements), as `<kind>\035<dir>\035<why>\035<raw>`.
+# the command (command_statements), as
+# `<kind>\035<dir>\035<why>\035<fetch>\035<raw>`.
 # <kind> is `npm` for an npm CLI install that is not a runner,
 # `npm-unrecorded` for one no lockfile of the project records whatever lands
 # there (an .npmrc keeps it out of both lockfiles, or `npm link <pkg>` puts the
@@ -1881,6 +1883,9 @@ guard_npmrc_unrecorded() {
 # `global`, or `?` when the text does not say. <why> says why npm could not be
 # asked or answered `global`, or names the .npmrc file and setting that keep
 # the install off the record; it is empty otherwise.
+# <fetch> is an npm install's fetch facts, one line of JSON asked of npm with
+# the same words as <dir> (lib/npm/ask.sh): which registry it fetches from. It
+# is empty where npm was not asked, and the reason is then <why>.
 # <raw> is the statement as command_statements gives it.
 #
 # Every statement is listed, installs or not, because this is also the list of
@@ -1962,9 +1967,9 @@ resolve_install_targets() {
 resolve_reading_targets() {
   local text="$1" cwd="$2" policy="${3:-arith}"
   local before stmt after words raw head target want kind manager tok value normalized in_env skip
-  local user_rc cli_global_off why run_dir answer local_prefix npm_word npm_unknown i
+  local user_rc cli_global_off why run_dir answer local_prefix npm_word npm_unknown i fetch
   local dir="${cwd}" grouped=false env_userconfig=false exports_unknown=""
-  local npm_until="" here cond_dir="" depth=0 conditional
+  local npm_until="" here cond_dir="" depth=0 conditional env_changer=""
   local -a toks=() npm_env=() npm_args=() npm_exports=()
 
   shell_lex "${text}" scan "${policy}" "safedeps:command_scan_text" | judge_grep -q '[(){}`]' && grouped=true
@@ -1972,7 +1977,7 @@ resolve_reading_targets() {
 
   while IFS=$'\035' read -r before stmt after words raw; do
     if [[ "${before}" == "?" ]]; then
-      printf '?\035?\035the command could not be split into statements (awk failed), so safedeps cannot tell where its installs land\035\n'
+      printf '?\035?\035the command could not be split into statements (awk failed), so safedeps cannot tell where its installs land\035\035\n'
       continue
     fi
     kind=- target="" why=""
@@ -2053,7 +2058,39 @@ resolve_reading_targets() {
           done
           break
           ;;
+        # Which registry npm fetches from is asked with the environment this
+        # gate can see: the statement's own words and the exports above. A
+        # statement that changes the environment where the text does not show
+        # it makes that answer a guess, and a guess here has no trace to catch
+        # it the way a wrong directory does: `source env.sh; npm install x`
+        # with npm_config_registry in env.sh would get an answer that names
+        # the registry the hook sees, not the one npm used. So every later npm
+        # install's registry is unknown, which costs a skipped rebuild, never a
+        # rollback (lib/npm/ask.sh, the fetch facts).
+        source|.|eval)
+          env_changer="${toks[0]}"
+          break
+          ;;
+        set|declare|typeset)
+          for tok in "${toks[@]:1}"; do
+            case "${toks[0]}:${tok}" in
+              set:-*a*|set:allexport|declare:-*x*|typeset:-*x*) env_changer="${toks[0]} ${tok}"; break ;;
+            esac
+          done
+          break
+          ;;
       esac
+      # A statement of assignments alone sets shell variables, and one that
+      # names an npm setting changes npm's environment when the variable is
+      # already exported, as an inherited one is.
+      if [[ "${toks[0]}" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
+        value=""
+        for tok in "${toks[@]}"; do
+          [[ "${tok}" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || { value=""; break; }
+          [[ "$(printf '%s' "${tok%%=*}" | tr '[:upper:]' '[:lower:]')" != npm_config_* ]] || value="${tok%%=*}"
+        done
+        [[ -z "${value}" ]] || env_changer="${value}="
+      fi
 
       command_is_dependency_install "${stmt}" || break
 
@@ -2124,6 +2161,7 @@ resolve_reading_targets() {
       done
       if [[ -n "${want}" ]]; then target="?"; run_dir="?"; fi
       why=""
+      fetch=""
 
       [[ "${kind}" == npm ]] || break
       # `npm link <pkg>` installs a package the global tree lacks into npm's
@@ -2201,6 +2239,18 @@ resolve_reading_targets() {
       [[ -n "${npm_until}" ]] || npm_until=$(( SECONDS + SAFEDEPS_NPM_ASK_PRE_SECONDS ))
       answer=$(safedeps_npm_install_target "${run_dir}" "${npm_until}" "${npm_word}" \
         "${npm_env[@]+"${npm_env[@]}"}" -- "${npm_args[@]+"${npm_args[@]}"}")
+      # The second line is the install's fetch facts (lib/npm/ask.sh), asked
+      # in the same breath: which registry npm fetches this install from.
+      if [[ "${answer}" == *$'\n'* ]]; then
+        fetch="${answer#*$'\n'}"
+        fetch="${fetch%%$'\n'*}"
+        answer="${answer%%$'\n'*}"
+      fi
+      if [[ -n "${env_changer}" ]]; then
+        fetch=$(jq -nc --arg w "${env_changer%$'\001'}" \
+          '{unknown: "an earlier statement (\($w)) can change the environment npm runs with where the command does not show it, so safedeps cannot tell which registry this install fetches from"}' 2>/dev/null) \
+          || fetch=""
+      fi
       local_prefix=""
       case "${answer}" in
         '?'*)
@@ -2260,7 +2310,7 @@ resolve_reading_targets() {
       fi
       break
     done
-    printf '%s\035%s\035%s\035%s\n' "${kind}" "${target}" "${why}" "${raw}"
+    printf '%s\035%s\035%s\035%s\035%s\n' "${kind}" "${target}" "${why}" "${fetch}" "${raw}"
   done < <(command_statements "${text}" "${policy}")
   return 0
 }
@@ -3133,18 +3183,30 @@ PROJECT_DIR="${CWD_DIR}"
 # gate looks in the cwd for want of anything better.
 PROJECT_DIR_FROM=cwd
 INSTALL_TARGETS=$(resolve_install_targets "${COMMAND}" "${CWD_DIR}")
-while IFS=$'\035' read -r _ install_target _ _; do
+# Which registry the install that chose PROJECT_DIR fetches from, as npm
+# answered it beside where it lands (lib/npm/ask.sh, the fetch facts). The
+# PostToolUse hook reads it from the pending state: a source the lockfiles
+# record on the public registry is the public registry's only where npm says
+# it fetched from there.
+PROJECT_FETCH=""
+PROJECT_FETCH_WHY="no npm install in this command named where it lands"
+while IFS=$'\035' read -r _ install_target install_why install_fetch _; do
   [[ -n "${install_target}" && "${install_target}" != "?" && "${install_target}" != global ]] || continue
   PROJECT_DIR="${install_target}"
   PROJECT_DIR_FROM=target
+  PROJECT_FETCH="${install_fetch}"
+  PROJECT_FETCH_WHY="${install_why:-npm was not asked}"
   break
 done <<< "${INSTALL_TARGETS}"
 # An .npmrc that keeps an install off the record is not text in the command, so
 # the record has to say which file did it; the UNGATED line alone would point at
-# a command that looks like an ordinary project install.
-while IFS=$'\035' read -r _ _ install_why _; do
-  [[ -n "${install_why}" ]] || continue
-  log_advisory "pre-guard: ${install_why}. Command: ${COMMAND}"
+# a command that looks like an ordinary project install. npm's registry answer
+# says why it is missing the same way.
+while IFS=$'\035' read -r _ _ install_why install_fetch _; do
+  [[ -z "${install_why}" ]] || log_advisory "pre-guard: ${install_why}. Command: ${COMMAND}"
+  if [[ "${install_fetch}" == '{"unknown":'* ]]; then
+    log_advisory "pre-guard: $(jq -r '.unknown' <<< "${install_fetch}" 2>/dev/null || printf 'npm did not say which registry this install fetches from'). Command: ${COMMAND}"
+  fi
 done <<< "${INSTALL_TARGETS}"
 if [[ "${PROJECT_DIR}" != "${CWD_DIR}" ]]; then
   log_advisory "pre-guard: the install lands outside cwd — snapshotting/verifying ${PROJECT_DIR} instead of cwd (${CWD_DIR})."
@@ -3311,6 +3373,42 @@ if echo "${COMMAND}" | judge_grep -qEi -- '--registry([=[:space:]]+)'; then
   if ! echo "${COMMAND}" | judge_grep -qEi -- '--registry([=[:space:]]+)https?://(registry\.npmjs\.org|registry\.yarnpkg\.com)(/|[[:space:]]|$)'; then
     SUSPICIOUS=true
     REASONS+=("Command uses non-standard npm registry")
+  fi
+fi
+# The same question for every npm install, asked of npm rather than read from
+# the text: the registry npm fetches from is whatever its configuration says,
+# and `--registry` is one spelling of it among several. A committed .npmrc,
+# `npm_config_registry` in front of the command or exported earlier in it, and
+# the user's .npmrc each sent an approved name and version to another tarball
+# while the text showed no `--registry` at all (RH1-RH3,
+# safedeps/effect-gate-blind-to-lockless-npm-installs). The answer is npm's own
+# (resolve_install_targets asked it beside where the install lands), so there
+# is no second reading of .npmrc or the environment here to drift from npm's.
+# The text check above stays for what npm is not asked about: another package
+# manager's flag, and an npm install npm could not be asked for. The two can
+# only add denials to each other.
+#
+# A registry npm will not print (one holding a credential or an id) is not a
+# public one. An install npm could not be asked about is not judged here; the
+# PostToolUse hook then holds its sources unvouched (no rebuild), and
+# advisory.log already says why.
+if [[ -n "${SAFEDEPS_NPM_FETCH_JQ:-}" ]]; then
+  REGISTRY_FACTS=$(while IFS=$'\035' read -r install_kind _ _ install_fetch _; do
+    [[ "${install_kind}" == npm* && "${install_fetch}" == '{'* ]] || continue
+    printf '%s\n' "${install_fetch}"
+  done <<< "${INSTALL_TARGETS}")
+  if [[ -n "${REGISTRY_FACTS}" ]]; then
+    if REGISTRY_FOUND=$(jq -rn --arg public "${SAFEDEPS_NPM_PUBLIC_REGISTRY_RE}" "${SAFEDEPS_NPM_FETCH_JQ}"'
+        [inputs | select(.unknown == null) | . as $f | select(($f.registry | sd_registry_public($f)) | not)
+         | "registry=\($f.registry // "a value npm will not print")"] | unique | join(", ")' \
+        <<< "${REGISTRY_FACTS}" 2>/dev/null); then
+      if [[ -n "${REGISTRY_FOUND}" ]]; then
+        SUSPICIOUS=true
+        REASONS+=("Command uses non-standard npm registry: npm reads ${REGISTRY_FOUND} for this install from its configuration (an .npmrc or the environment)")
+      fi
+    else
+      guard_mark_reading_failed
+    fi
   fi
 fi
 
@@ -4271,7 +4369,7 @@ guard_extract_pieces() {
   # statement N. A command substitution drops only trailing empty lines, and
   # an empty statement has nothing to read.
   normalized=$(normalize_install_text "$(
-    while IFS=$'\035' read -r kind _ _ raw; do
+    while IFS=$'\035' read -r kind _ _ _ raw; do
       [[ -n "${kind}" ]] || continue
       printf '%s\n' "${raw}"
     done <<< "${targets}"
@@ -4634,10 +4732,20 @@ if [[ "${NPM_TRACE_WANTED}" == true ]]; then
     '{baseline: $baseline, inodes: {"package-lock.json": $lock, "node_modules/.package-lock.json": $hidden}}')
   : > "${PENDING_BASE}.trace"
 fi
+# The registry answer travels as npm gave it, or as the reason there is none.
+# Never as a default: an install npm was not asked about has no answer, and the
+# PostToolUse hook vouches for no source on the strength of a missing one.
+FETCH_JSON=null
+if [[ "${NPM_TRACE_WANTED}" == true ]]; then
+  FETCH_JSON=$(jq -ce 'select(type == "object")' <<< "${PROJECT_FETCH}" 2>/dev/null) \
+    || FETCH_JSON=$(jq -nc --arg why "${PROJECT_FETCH_WHY}" \
+      '{unknown: ("npm was not asked which registry this install fetches from: " + $why)}')
+fi
 CURRENT_STATE=$(jq -n --arg sid "${SNAPSHOT_ID}" --arg pdir "${PROJECT_DIR}" --arg dhash "${DIR_HASH}" \
   --arg from "${PROJECT_DIR_FROM}" --argjson trace "${TRACE_JSON}" --arg attribution "${ATTRIBUTION}" \
+  --argjson fetch "${FETCH_JSON}" \
   '{snapshot_id: $sid, project_dir: $pdir, dir_hash: $dhash, project_dir_from: $from,
-    npm_trace: $trace, npm_unattributable: $attribution}')
+    npm_trace: $trace, npm_unattributable: $attribution, npm_fetch: $fetch}')
 write_state_file "${PENDING_BASE}.json" "${CURRENT_STATE}"
 
 if [[ -n "${UPDATED_COMMAND}" ]]; then

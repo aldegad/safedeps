@@ -564,6 +564,38 @@ npm_bundled_names() {
     ' "${files[@]}" < /dev/null 2>/dev/null || printf '{}\n'
 }
 
+# Which registry the tree's bytes came from, as npm answers it: a JSON array of
+# two fetch facts (lib/npm/ask.sh). The first is the pre-guard's, asked with the
+# install's own arguments and environment before the command ran (the pending
+# state's npm_fetch). The second is asked here, of the directory the gate read,
+# after the command: an .npmrc the command itself wrote is not there for the
+# first ask, and the rollback's reinstall runs with this hook's environment, not
+# the command's. A source is vouched for only when both answers say the bytes
+# came from the public registry (sd_fetch_problems); a missing answer is a
+# reason of its own, never a default. A configuration that held only while the
+# command ran, written and removed inside it, is in neither: ARCHITECTURE.md
+# lists it among the boundaries.
+#
+# Asked once per run, in this shell, so the callers that read it from a
+# command substitution see it: the rebuild's predicate and the source check.
+NPM_FETCH_FACTS=""
+npm_fetch_facts_load() {
+  local pre post
+  [[ -z "${NPM_FETCH_FACTS}" ]] || return 0
+  pre=$(jq -ce '.npm_fetch | select(type == "object")' <<< "${CURRENT_STATE:-}" 2>/dev/null) \
+    || pre='{"unknown":"the pre-guard left no answer about which registry this install fetches from"}'
+  # Asked in PROJECT_DIR, which is the local prefix npm named for the install,
+  # so its project .npmrc is the one the install read. `--workspaces=false`
+  # keeps npm there: without it npm counts a workspace member as an implicit
+  # `--workspace` and refuses `config` (ENOWORKSPACES), which happens when the
+  # install itself said `--no-workspaces` and stayed in the member. Not
+  # `--prefix`: on the command line that also moves the global config file.
+  post=$(safedeps_npm_fetch_facts "${PROJECT_DIR}" $(( SECONDS + SAFEDEPS_NPM_ASK_POST_SECONDS )) npm -- \
+    --workspaces=false)
+  NPM_FETCH_FACTS=$(jq -cn --argjson pre "${pre}" --argjson post "${post}" '[$pre, $post]' 2>/dev/null) \
+    || NPM_FETCH_FACTS='[{"unknown":"safedeps could not read npm'"'"'s answers about which registry this install fetches from"}]'
+}
+
 # `npm rebuild` runs the lifecycle scripts of every package in the tree it
 # rebuilds, and so did the rollback's `npm ci`. Both run over the whole tree.
 # What allowed them used to be a judgment of the change: nothing this command
@@ -581,12 +613,20 @@ npm_bundled_names() {
 #     never looked at.
 #   - Every package under node_modules has to come from the public registry:
 #     each record of it names an https URL there
-#     (SAFEDEPS_NPM_PUBLIC_REGISTRY_RE), or it is bundled by the package it
-#     is nested under (below). A committed lockfile names its sources and
-#     nothing verified them: an approved name and version pointed at another
-#     tarball installed as recorded, and the rebuild ran that tarball's
-#     scripts. A record with no source, as `omit-lockfile-registry-resolved`
-#     writes, does not pass.
+#     (SAFEDEPS_NPM_PUBLIC_REGISTRY_RE) that npm fetches from there, or it is
+#     bundled by the package it is nested under (below). A committed lockfile
+#     names its sources and nothing verified them: an approved name and
+#     version pointed at another tarball installed as recorded, and the
+#     rebuild ran that tarball's scripts. A record with no source, as
+#     `omit-lockfile-registry-resolved` writes, does not pass. Nor does a
+#     public URL alone: npm's default `replace-registry-host=npmjs` fetches a
+#     registry.npmjs.org URL from whatever registry it is configured with and
+#     records the URL unchanged, so an .npmrc or `npm_config_registry` sent
+#     the approved name and version to another tarball under a record that
+#     read as public (RH1-RH3). Where npm fetched from is npm's answer, asked
+#     before the command with the install's own words and again after it
+#     (npm_fetch_facts_load); a record is vouched for only when both say the
+#     bytes came from the public registry, and not when either is missing.
 #   - Every directory outside node_modules (a link's target) has to be a
 #     member the project's package.json declares as a workspace. Any other
 #     directory is code nobody approved: a `file:` dependency, or one an
@@ -626,7 +666,8 @@ npm_bundled_names() {
 # project (NPM_PROJECT_SCOPE above).
 #
 # Prints what fails, one per line as `<kind><TAB><what>`: `unrecorded`,
-# `source` or `directory`. Returns 0. Returns 1 with the reason when npm could
+# `source`, `fetched` (recorded on the public registry, but npm fetches it from
+# somewhere else, or could not say) or `directory`. Returns 0. Returns 1 with the reason when npm could
 # not be asked or did not answer: then the tree is not known, and the caller
 # must not rebuild it. It starts one npm and one jq, plus two more jq when a
 # nested package has no public source of its own (to read what its parents
@@ -635,6 +676,10 @@ npm_bundled_names() {
 npm_rebuild_unrecorded() {
   local dir="$1" tmp lockfile rc
   local -a lockfiles=()
+  if [[ -z "${NPM_FETCH_FACTS}" ]]; then
+    printf 'safedeps did not ask npm which registry this tree came from\n'
+    return 1
+  fi
   if ! command -v npm >/dev/null 2>&1; then
     printf 'npm is not on the PATH this hook runs with\n'
     return 1
@@ -677,7 +722,9 @@ npm_rebuild_unrecorded() {
       def clean: tostring | sub("^[=v[:space:]]+"; "");
       def recorded_name($key; $entry):
         $entry.name // (if ($key | test("(^|/)node_modules/")) then $key | split("node_modules/") | last else null end);
-      def public_source: (.resolved | type) == "string" and (.resolved | test($public; "i"));
+      def public_url: (.resolved | type) == "string" and (.resolved | test($public; "i"));
+      def fetch_problems: if public_url then sd_fetch_problems($facts; .resolved) else [] end;
+      def public_source: public_url and (fetch_problems | length) == 0;
       ([inputs | (.packages // {}) | to_entries[] | select(.key != "")]
         | group_by(.key) | map({key: .[0].key, value: map(.value)}) | from_entries) as $records
       | if ($query | length) != 1 or ($query[0] | type) != "array" then error("npm query did not answer with a list") else . end
@@ -708,6 +755,8 @@ npm_rebuild_unrecorded() {
                      and all($recs[]; .resolved == null or public_source)
                      and any(($bundled[$at.parent] // [])[]; . == $at.name)
                      and verdict($at.parent) == null then null
+                elif all($recs[]; public_url) then
+                  "fetched\t\($key) (\($here) recorded at \([$recs[] | .resolved] | unique | join(" or ")), but \([$recs[] | fetch_problems[]] | unique | join("; ")))"
                 else
                   "source\t\($key) (\($here) from \([$recs[] | .resolved // "no recorded source" | tostring] | unique | join(" or ")))"
                 end
@@ -715,8 +764,9 @@ npm_rebuild_unrecorded() {
         $query[0][] | select(type == "object" and (.location // "") != "") | verdict(.location) | select(. != null)
     '
   printf 'null\n' > "${tmp}/bundles"
+  judge="${SAFEDEPS_NPM_FETCH_JQ}${judge}"
   if ! jq -rn --slurpfile query "${tmp}/query" --slurpfile bundles "${tmp}/bundles" \
-      --arg public "${SAFEDEPS_NPM_PUBLIC_REGISTRY_RE}" "${judge}" \
+      --arg public "${SAFEDEPS_NPM_PUBLIC_REGISTRY_RE}" --argjson facts "${NPM_FETCH_FACTS}" "${judge}" \
       "${lockfiles[@]+"${lockfiles[@]}"}" < /dev/null > "${tmp}/found" 2>/dev/null; then
     printf 'npm query answered with something safedeps could not compare with the lockfiles\n'
     rm -rf "${tmp}"
@@ -725,7 +775,7 @@ npm_rebuild_unrecorded() {
   if grep -q '^nested' "${tmp}/found"; then
     grep '^nested' "${tmp}/found" | cut -f2 | npm_bundled_names "${dir}" > "${tmp}/bundles"
     if ! jq -rn --slurpfile query "${tmp}/query" --slurpfile bundles "${tmp}/bundles" \
-        --arg public "${SAFEDEPS_NPM_PUBLIC_REGISTRY_RE}" "${judge}" \
+        --arg public "${SAFEDEPS_NPM_PUBLIC_REGISTRY_RE}" --argjson facts "${NPM_FETCH_FACTS}" "${judge}" \
         "${lockfiles[@]+"${lockfiles[@]}"}" < /dev/null > "${tmp}/found" 2>/dev/null; then
       printf 'npm query answered with something safedeps could not compare with the lockfiles\n'
       rm -rf "${tmp}"
@@ -763,12 +813,13 @@ npm_rebuild_unrecorded() {
 # What npm_rebuild_unrecorded found, as one clause per kind for a warning.
 describe_rebuild_blockers() {
   local kind clauses="" list
-  for kind in unrecorded source directory; do
+  for kind in unrecorded source fetched directory; do
     list=$(grep "^${kind}"$'\t' <<< "$1" | cut -f2- | paste -sd';' - | sed 's/;/; /g') || true
     [[ -n "${list}" ]] || continue
     case "${kind}" in
       unrecorded) list="a package, or a version of one, that neither lockfile records (${list})" ;;
       source) list="a package not recorded as coming from the public registry (${list})" ;;
+      fetched) list="a package recorded on the public registry that safedeps cannot tell npm fetched from there (${list})" ;;
       directory) list="a directory that is not a declared workspace member (${list})" ;;
     esac
     clauses+="${clauses:+, and }${list}"
@@ -781,6 +832,7 @@ describe_rebuild_blockers() {
 # what is recorded: after an install, or after a rollback.
 npm_rebuild_vouched() {
   local when="$1" blockers clauses
+  npm_fetch_facts_load
   if ! blockers=$(npm_rebuild_unrecorded "${PROJECT_DIR}"); then
     log_advisory "post-verify: npm rebuild ${when} skipped in ${PROJECT_DIR} — safedeps asked npm which packages a rebuild would run over and got no answer (${blockers}), so it cannot tell that tree is one it can vouch for."
     ROLLBACK_WARNINGS+=("npm rebuild was not run: safedeps asked npm which packages it would rebuild and got no answer (${blockers}), so it could not tell they are the ones it read. Install scripts have not run; review node_modules, then run \`npm rebuild\` yourself if it is what you expect")
@@ -1458,11 +1510,33 @@ check_npm_new_sources() {
   # Check for resolved URLs pointing to non-standard registries. Each entry is
   # `<record>: <resolved>`, and the value is read from its start
   # (safedeps_npm_public_registry_url).
-  local entry
+  local entry fetched=""
   nonstandard=""
   for entry in "${NPM_NEW_SOURCES[@]}"; do
-    safedeps_npm_public_registry_url "${entry#*: }" || nonstandard+="${entry}"$'\n'
+    if safedeps_npm_public_registry_url "${entry#*: }"; then
+      fetched+="${entry}"$'\n'
+    else
+      nonstandard+="${entry}"$'\n'
+    fi
   done
+  # A URL on the public registry is the public registry's only where npm
+  # fetched it from there (npm_fetch_facts_load). One npm says it fetched from
+  # another registry is a source outside the public registries like any other:
+  # a new project's first install of an approved name and version through an
+  # .npmrc the command wrote is rolled back here. Where npm could not be asked,
+  # nothing is rolled back for it: the rebuild check withholds the scripts, and
+  # a rollback for an answer that never came would undo ordinary installs.
+  if [[ -n "${fetched}" ]]; then
+    npm_fetch_facts_load
+    if ! fetched=$(jq -nrR --arg public "${SAFEDEPS_NPM_PUBLIC_REGISTRY_RE}" --argjson facts "${NPM_FETCH_FACTS}" \
+        "${SAFEDEPS_NPM_FETCH_JQ}"'
+        inputs | select(. != "") | . as $entry | ($entry | sub("^[^:]*: "; "")) as $url
+        | sd_fetch_known_problems($facts; $url) | select(length > 0)
+        | "\($entry), but \(join("; "))"' <<< "${fetched}" 2>/dev/null); then
+      fetched="npm records: the sources on the public registry could not be judged against npm's answer about where it fetched them"
+    fi
+    [[ -z "${fetched}" ]] || nonstandard+="${fetched}"$'\n'
+  fi
   nonstandard="${nonstandard%$'\n'}"
   if [[ -n "${nonstandard}" ]]; then
     SUSPICIOUS=true

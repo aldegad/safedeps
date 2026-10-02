@@ -536,6 +536,24 @@ ROWS
 #     before it: nothing on Claude Code, the install's own scripts on Codex.
 #   OM1: `omit-lockfile-registry-resolved` records no source, so nothing shows
 #     the package came from the public registry. Not rebuilt; a boundary.
+#   RH1-RH7: a record on registry.npmjs.org is not where the bytes came from.
+#     npm's default `replace-registry-host=npmjs` fetches such a URL from the
+#     configured registry and records it unchanged, so a second registry here
+#     ("evil", 127.0.0.1, its own port and request log) serves EVIL-sd-approved
+#     as sd-approved@1.0.0 and every record still reads as the public
+#     registry. Where npm says, before the command, that it fetches from
+#     there (a committed .npmrc in RH1 and the clone RH2, the command's own
+#     environment in RH3 and RH3e), the pre-guard denies the install, as it
+#     denies `--registry` (RH4). Where only the post hook's own ask after the
+#     command sees it (an .npmrc the command wrote), a new project's install is
+#     rolled back (RH1w) and a clone's committed records are installed and not
+#     rebuilt (RH2w). Where an earlier statement can change npm's environment
+#     unseen (`source`), nobody can say, and the rebuild is skipped (RH7).
+#     RH8 installs from a workspace member with the registry in the root's
+#     .npmrc, where npm will not answer `npm config` in the member itself.
+#     RH5 is the control: the sandbox registry, named by
+#     SAFEDEPS_NPM_TEST_REGISTRY, is rebuilt as before. The rebuild used to run
+#     EVIL for RH1-RH3.
 #
 # Marks a script must never leave: sd-victim, the EVIL tarball and directories,
 # and LIB directories, which stand for a committed directory dependency.
@@ -682,11 +700,47 @@ new_bundled_sourced() {
 }
 new_omit() { new_project; printf 'omit-lockfile-registry-resolved=true\n' > "${CASE_PROJECT}/.npmrc"; }
 
+# The evil registry: the same fixture server on its own port, serving only the
+# impostor sd-approved@1.0.0 (EVIL-sd-approved, from section 1a), and logging
+# every request on its own. It writes registry.npmjs.org tarball URLs, as the
+# sandbox registry does, so what npm records is indistinguishable.
+EVILREG_DIR="${tmp_root}/evilreg"
+mkdir -p "${EVILREG_DIR}/tarballs"
+cp "${EVIL_DIR}/sd-approved-1.0.0.tgz" "${EVILREG_DIR}/tarballs/sd-approved-1.0.0.tgz"
+cp "${EVIL_DIR}/src/package.json" "${EVILREG_DIR}/tarballs/sd-approved-1.0.0.tgz.json"
+( cd "${tmp_root}" && exec -a "${CHILD_MARKER}" \
+    node "${ROOT_DIR}/scripts/test/fixture-registry.mjs" \
+    "${EVILREG_DIR}/registry.port" "${EVILREG_DIR}/tarballs" "${EVILREG_DIR}/registry.log" ) &
+owned_children+=("$!")
+for _ in {1..50}; do [[ -s "${EVILREG_DIR}/registry.port" ]] && break; sleep 0.1; done
+[[ -s "${EVILREG_DIR}/registry.port" ]] || fail "the evil fixture registry starts"
+EVIL_REG="http://127.0.0.1:$(cat "${EVILREG_DIR}/registry.port")/"
+[[ "${EVIL_REG}" != "${SAFEDEPS_NPM_TEST_REGISTRY}" ]] || fail "the evil registry is not the one the sandbox names"
+NPMJS_APPROVED_URL="https://registry.npmjs.org/sd-approved/-/sd-approved-1.0.0.tgz"
+new_evilrc() { new_project; printf 'registry=%s\n' "${EVIL_REG}" > "${CASE_PROJECT}/.npmrc"; }
+# A clone: the committed lockfile was written from the sandbox registry, so it
+# records the npmjs URL, and its integrity is then set to the impostor's.
+new_evilclone_bare() {
+  new_project; set_dependency sd-approved 1.0.0; fixture_install
+  jq -e --arg u "${NPMJS_APPROVED_URL}" '.packages["node_modules/sd-approved"].resolved == $u' \
+    "${CASE_PROJECT}/package-lock.json" >/dev/null || fail "the clone fixture records the npmjs URL"
+  edit_json package-lock.json --arg i "${EVIL_INTEGRITY}" '.packages["node_modules/sd-approved"].integrity = $i'
+  rm -rf "${CASE_PROJECT}/node_modules"
+}
+new_evilclone() { new_evilclone_bare; printf 'registry=%s\n' "${EVIL_REG}" > "${CASE_PROJECT}/.npmrc"; }
+# A workspace whose root .npmrc names the evil registry, installed from inside
+# a member: npm reads the root's .npmrc there, and refuses `npm config` in a
+# member (ENOWORKSPACES), so the gate has to ask at the root npm names.
+new_evilws() { new_workspace; printf 'registry=%s\n' "${EVIL_REG}" > "${CASE_PROJECT}/.npmrc"; CASE_CWD="${CASE_PROJECT}/packages/a"; }
+new_evilenvfile() { new_project; printf 'export npm_config_registry=%s\n' "${EVIL_REG}" > "${CASE_PROJECT}/npmenv.sh"; }
+
 # <id>|<fixture>|<engine>|<expect>|<command>, where <expect> is
 #   fallback            rolled back with no confirmed snapshot, said in all three records
 #   rebuilt:<package>   rolled back to a confirmed snapshot and <package> rebuilt
 #   kept:<warning>      not rolled back, nothing rebuilt, the warning says <warning>
 #   quiet:<package>     confirmed quietly, and <package> rebuilt (`-`: nothing to check)
+#   denied:<reason>     the pre-guard denies it, saying <reason>; nothing is installed
+# A `fallback` may carry `:<text>` that the message must also say.
 printf '# install scripts over the whole tree (id engine command | outcome)\n'
 failures_before=${#FAILURES[@]}
 while IFS= read -r row; do
@@ -704,12 +758,21 @@ while IFS= read -r row; do
     "$(rolled_back && echo yes || echo no)" "$(grep -q UNGATED <<< "${advisory_new}" && echo yes || echo no)" \
     "$(cut -f1,2 <<< "${CASE_RAN}" | tr '\t' ':' | paste -sd, -)" \
     "$(jq -r '.systemMessage // empty' <<< "${CASE_POST}" 2>/dev/null | tr '\n' ' ' | head -c 300)"
+  if [[ "${expect}" == denied:* ]]; then
+    grep -qF "${expect#denied:}" <<< "${CASE_PRE_DENY}" \
+      || note_failure "${id}: the pre-guard denies it, saying ${expect#denied:} (deny: ${CASE_PRE_DENY:-<allowed>})"
+    [[ "${forbidden}" == 0 ]] || note_failure "${id}: no script of the EVIL tarball runs (${forbidden})"
+    [[ ! -e "${CASE_PROJECT}/node_modules/sd-approved" ]] || note_failure "${id}: nothing is installed"
+    continue
+  fi
   [[ -z "${CASE_PRE_DENY}" ]] || { note_failure "${id}: the gate lets the command through (deny: ${CASE_PRE_DENY:0:160})"; continue; }
   [[ "${CASE_INSTALL_RC}" == 0 ]] || { note_failure "${id}: the install itself succeeds (rc ${CASE_INSTALL_RC})"; continue; }
   [[ "${forbidden}" == 0 ]] || note_failure "${id}: no script of sd-victim, the EVIL tarball or a directory dependency runs after the command (${forbidden})"
   case "${expect}" in
-    fallback)
+    fallback|fallback:*)
       rolled_back || note_failure "${id}: rolled back (post: ${CASE_POST:-<quiet>})"
+      [[ "${expect}" == fallback ]] || grep -qF "${expect#fallback:}" <<< "${CASE_POST}" \
+        || note_failure "${id}: the message says ${expect#fallback:} (post: ${CASE_POST:0:400})"
       grep -qF 'no confirmed snapshot' <<< "${CASE_POST}" || note_failure "${id}: the message says there is no confirmed snapshot (post: ${CASE_POST:0:300})"
       grep -qF 'no confirmed snapshot' <<< "${reorg_new}" || note_failure "${id}: reorg.log says there is no confirmed snapshot (${reorg_new:0:300})"
       grep -qF 'REORG with no confirmed snapshot' <<< "${advisory_new}" || note_failure "${id}: advisory.log says there is no confirmed snapshot (${advisory_new:0:300})"
@@ -776,9 +839,44 @@ NB2i|nested_rootbundle|claude|kept:a package not recorded as coming from the pub
 NB2n|nested_rootbundle|claude|kept:a package not recorded as coming from the public registry (${NESTED_KEY} (sd-swapped@1.0.0 from |npm install --no-save sd-approved@1.0.0
 NB3|bundled_sourced|claude|kept:a package not recorded as coming from the public registry (node_modules/sd-bundler/node_modules/sd-bundled (sd-bundled@1.0.0 from |npm ci
 OM1|omit|claude|kept:a package not recorded as coming from the public registry (node_modules/sd-approved (sd-approved@1.0.0 from no recorded source))|npm install sd-approved@1.0.0
+RH1|evilrc|claude|denied:non-standard npm registry: npm reads registry=${EVIL_REG} for this install|npm install sd-approved@1.0.0
+RH2|evilclone|claude|denied:non-standard npm registry: npm reads registry=${EVIL_REG} for this install|npm ci
+RH3|project|claude|denied:non-standard npm registry: npm reads registry=${EVIL_REG} for this install|npm_config_registry=${EVIL_REG} npm install sd-approved@1.0.0
+RH3e|project|claude|denied:non-standard npm registry: npm reads registry=${EVIL_REG} for this install|export npm_config_registry=${EVIL_REG}; npm install sd-approved@1.0.0
+RH3x|project|codex|denied:non-standard npm registry: npm reads registry=${EVIL_REG} for this install|npm_config_registry=${EVIL_REG} npm install sd-approved@1.0.0
+RH4|project|claude|denied:Command uses non-standard npm registry|npm install --registry ${EVIL_REG} sd-approved@1.0.0
+RH5|project|claude|quiet:sd-approved|npm install sd-approved@1.0.0
+RH1w|project|claude|fallback:${NPMJS_APPROVED_URL}, but npm fetches it from the registry ${EVIL_REG}|printf 'registry=${EVIL_REG}\n' > .npmrc && npm install sd-approved@1.0.0
+RH2w|evilclone_bare|claude|kept:a package recorded on the public registry that safedeps cannot tell npm fetched from there (node_modules/sd-approved (sd-approved@1.0.0 recorded at ${NPMJS_APPROVED_URL}, but npm fetches it from the registry ${EVIL_REG}|printf 'registry=${EVIL_REG}\n' > .npmrc && npm ci
+RH8|evilws|claude|denied:non-standard npm registry: npm reads registry=${EVIL_REG} for this install|npm install sd-approved@1.0.0
+RH7|evilenvfile|claude|kept:but an earlier statement (source) can change the environment npm runs with|source ./npmenv.sh; npm install sd-approved@1.0.0
 ROWS
 [[ ${#FAILURES[@]} -ne ${failures_before} ]] \
-  || pass "install scripts run only over a tree on record from the public registry or a workspace, a package counts as bundled only where its parent's package.json bundles it, a rollback runs none without a confirmed snapshot and says what ran on each engine, and K4-K7 are installed but not rebuilt"
+  || pass "install scripts run only over a tree on record from the public registry or a workspace, a package counts as bundled only where its parent's package.json bundles it, a record on the public registry counts only where npm says it fetched from there, a rollback runs none without a confirmed snapshot and says what ran on each engine, and K4-K7 are installed but not rebuilt"
+
+# LK1. Each lockfile field the rebuild's check reads vouches for less than it
+# seems to (ARCHITECTURE.md tables them), and every gap is held by a row:
+# `resolved` by RH1-RH8, L1 and L2, `integrity` by RH2 and RH2w, `inBundle`
+# by NB1-NB2n, `version` by lockless-forms.sh (an .npmrc that writes 1.0.1
+# over a recorded 1.0.0), and `link` here. A link record says npm put a
+# symlink there, and nothing about what is there now: a real directory
+# sitting where a link is recorded is a node nobody read. npm does not leave
+# one, so it is put there between the command and the post hook, as a
+# concurrent writer could.
+swap_member_link() { rm -f "$1/node_modules/a"; make_evil_dir "$1/node_modules/a" a; }
+new_workspace
+[[ -L "${CASE_PROJECT}/node_modules/a" ]] || fail "the workspace fixture links its member"
+: > "${MARKS}"
+run_install 'npm install sd-approved@1.0.0' claude swap_member_link
+printf 'LK1  claude  npm install sd-approved@1.0.0 (a real directory where a link is recorded) | rollback=%s ran=[%s] post=[%s]\n' \
+  "$(rolled_back && echo yes || echo no)" "$(cut -f1,2 <<< "${CASE_RAN}" | tr '\t' ':' | paste -sd, -)" \
+  "$(jq -r '.systemMessage // empty' <<< "${CASE_POST}" 2>/dev/null | tr '\n' ' ' | head -c 300)"
+[[ -z "${CASE_PRE_DENY}" ]] || note_failure "LK1: the gate lets the command through (deny: ${CASE_PRE_DENY:0:160})"
+! rolled_back || note_failure "LK1: not rolled back (post: ${CASE_POST:0:300})"
+grep -qF 'node_modules/a (a@1.0.0 on disk, the lockfile records a link)' <<< "${CASE_POST}" \
+  || note_failure "LK1: the warning names the directory where a link is recorded (post: ${CASE_POST:-<quiet>})"
+grep -q '^EVIL' <<< "${CASE_RAN}" && note_failure "LK1: the skipped rebuild runs no script of the directory (${CASE_RAN})"
+[[ ${#FAILURES[@]} -ne ${failures_before} ]] || pass "a real directory where a link is recorded is named and not rebuilt"
 
 if [[ "${REPORT_ONLY}" == 1 ]]; then
   printf '# GRID_REPORT_ONLY: %s failure(s) not enforced\n' "${#FAILURES[@]}"
@@ -954,8 +1052,9 @@ pass "a no-op reinstall in the second the pre-guard ran in leaves a trace (${sam
 # --- 4. The trace check starts no npm -------------------------------------------------------
 # Deciding whether the install was read costs a `find` and two `ls`, never an
 # npm start. On a row with no trace the post hook has nothing else to ask npm
-# (no rebuild), so it starts none; on a row with a trace it starts the two the
-# rebuild needs (`npm query`, `npm rebuild`) and nothing more. The shim counts
+# (no rebuild), so it starts none; on a row with a trace it starts the three the
+# rebuild needs (`npm config` for the registry the tree came from, `npm query`,
+# `npm rebuild`) and nothing more. The shim counts
 # what reaches npm through the PATH the post hook runs with.
 count_dir="${tmp_root}/count-bin"
 mkdir -p "${count_dir}"
@@ -969,7 +1068,7 @@ chmod +x "${count_dir}/npm"
 for carrier in \
   "npm install --dry-run sd-victim|" \
   "command cd sub; npm install sd-approved|" \
-  "npm install sd-approved|query rebuild"
+  "npm install sd-approved|config query rebuild"
 do
   IFS='|' read -r form expected <<< "${carrier}"
   new_project
@@ -981,9 +1080,16 @@ do
   [[ "${calls}" == "${expected}" ]] \
     || note_failure "the post hook starts npm only for the rebuild: ${form} (started: ${calls:-none}; expected: ${expected:-none})"
 done
-pass "the trace check starts no npm: none on a row with no trace, query and rebuild only on a row with one"
+pass "the trace check starts no npm: none on a row with no trace, config, query and rebuild only on a row with one"
 
 npm_sandbox_registry_was_local
+# The evil registry is asked for the impostor only, and was asked at all: RH1w
+# and RH2w fetch through it.
+[[ -s "${EVILREG_DIR}/registry.log" ]] || fail "the RH rows went through the evil registry"
+if grep -vE '^GET /sd-approved(/-/sd-approved-1\.0\.0\.tgz)?$' "${EVILREG_DIR}/registry.log" | grep -q .; then
+  fail "the evil registry saw only sd-approved ($(sort -u "${EVILREG_DIR}/registry.log" | paste -sd, -))"
+fi
+pass "the evil registry saw only sd-approved@1.0.0"
 
 if [[ ${#FAILURES[@]} -gt 0 ]]; then
   printf 'not ok - %s\n' "${FAILURES[@]}" >&2

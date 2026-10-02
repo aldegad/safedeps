@@ -132,10 +132,19 @@ safedeps_npm_new_records() {
 # Scheme and host are matched without regard to case, as URLs compare them. It
 # runs once per new source, so it starts no process.
 #
-# The pattern is the one definition: post-verify's rebuild check reads every
-# node of the tree in one jq pass and applies the same pattern there, with
-# jq's "i" flag for the case. smoke.sh holds both readers to one table.
-SAFEDEPS_NPM_PUBLIC_REGISTRY_RE='^https://registry\.(npmjs\.org|yarnpkg\.com)/'
+# The pattern is the one definition, SAFEDEPS_NPM_PUBLIC_REGISTRY_RE in
+# lib/npm/ask.sh, which the pre-guard sources without this file: post-verify's
+# rebuild check reads every node of the tree in one jq pass and applies the same
+# pattern there, with jq's "i" flag for the case, and the pre-guard judges a
+# configured registry with it. smoke.sh holds both readers to one table.
+#
+# A URL on a public registry says where npm would fetch from with no registry
+# configured, not where it did (lib/npm/ask.sh, the fetch facts). Callers that
+# judge where bytes came from ask that as well.
+if [[ -z "${SAFEDEPS_NPM_PUBLIC_REGISTRY_RE:-}" ]]; then
+  # shellcheck source=ask.sh
+  source "${BASH_SOURCE[0]%/*}/ask.sh"
+fi
 safedeps_npm_public_registry_url() {
   local was_nocase=0 rc=1
   shopt -q nocasematch && was_nocase=1

@@ -156,6 +156,15 @@ export npm_config_cache="${tmp_root}/npm-cache" npm_config_audit=false npm_confi
 export SAFEDEPS_OSV_API_URL="${osv}/osv/v1/query" SAFEDEPS_OSV_BATCH_API_URL="${osv}/osv/v1/querybatch" \
   SAFEDEPS_KEV_CATALOG_URL="${osv}/kev.json" SAFEDEPS_GHSA_API_URL="${osv}/advisories" \
   SAFEDEPS_PROVIDER_CACHE_TTL_SECONDS=0
+# The fixture registry is not the public registry, and the gate knows it: npm
+# fetches every registry.npmjs.org URL the lockfiles record from here
+# (fixture-registry.mjs), and without this the pre-guard denies every install
+# for its non-standard registry and the rebuild vouches for nothing. This one
+# registry, by its exact URL, is let through by name (lib/npm/ask.sh
+# safedeps_npm_test_registry), and each hook run says so in advisory.log. Any
+# other registry, a second one on 127.0.0.1 included, is judged as it would be
+# anywhere.
+export SAFEDEPS_NPM_TEST_REGISTRY="http://127.0.0.1:$(cat "${tmp_root}/registry.port")/"
 
 # --- one install, end to end -------------------------------------------------------
 # A fresh project (with a sub-project) and a fresh SAFEDEPS_HOME in which
