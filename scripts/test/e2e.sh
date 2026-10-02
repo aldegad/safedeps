@@ -544,13 +544,15 @@ cat > "${inert_project}/package-lock.json" <<'EOF'
   "lockfileVersion": 3,
   "packages": {
     "": {"dependencies": {"fixture-parent": "1.0.0"}},
-    "node_modules/fixture-parent": {"version": "1.0.0", "dependencies": {"fixture-child": "1.0.0"}},
-    "node_modules/fixture-child": {"version": "1.0.0"}
+    "node_modules/fixture-parent": {"version": "1.0.0", "resolved": "https://registry.npmjs.org/fixture-parent/-/fixture-parent-1.0.0.tgz", "dependencies": {"fixture-child": "1.0.0"}},
+    "node_modules/fixture-child": {"version": "1.0.0", "resolved": "https://registry.npmjs.org/fixture-child/-/fixture-child-1.0.0.tgz"}
   }
 }
 EOF
 # npm records the tree it built in the hidden lockfile, and the rebuild runs
-# only over a tree on record (lockless-forms.sh pins the case without one).
+# only over a tree on record, every package from the public registry
+# (lockless-forms.sh pins the case without a hidden lockfile,
+# effect-trace-grid.sh section 1d the sources).
 mkdir -p "${inert_project}/node_modules"
 cp "${inert_project}/package-lock.json" "${inert_project}/node_modules/.package-lock.json"
 stub_bin="${tmp_root}/stub-bin"

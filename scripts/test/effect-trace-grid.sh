@@ -277,7 +277,9 @@ printf '# silent rows: %s, Claude %s (%s)\n' "${#SILENT_ROWS[@]}" "${claude_sile
 # before the command (collect_npm_new_records). A committed lockfile is one of
 # those earlier records, so a fresh clone's `npm ci` installs the sources it
 # names, a tarball among them, as recorded. That is a boundary, and the K rows
-# pin it from the side of the projects it protects.
+# pin it from the side of the projects it protects: no rollback. The rebuild
+# after it is a different question, asked of the whole tree (section 1d), so
+# a committed tarball is installed and not rebuilt (K2, K3).
 #
 # What the records hold is read entry by entry, and each kind left out or read
 # is a row: a directory dependency's link and target (A1-A4, rolled back as
@@ -454,6 +456,7 @@ while IFS= read -r row; do
     kept:*)
       ! rolled_back || note_failure "${id}: not rolled back (post: ${CASE_POST:0:300})"
       grep -qF "${expect#kept:}" <<< "${CASE_POST}" || note_failure "${id}: the warning says ${expect#kept:} (post: ${CASE_POST:-<quiet>})"
+      [[ "${engine}" != claude || -z "${CASE_RAN}" ]] || note_failure "${id}: the skipped rebuild runs no script (${CASE_RAN})"
       ;;
     rollback:*)
       rolled_back || note_failure "${id}: rolled back (post: ${CASE_POST:-<quiet>})"
@@ -477,8 +480,8 @@ C6|httpdep|claude|rollback:non-standard registries (node_modules/.package-lock.j
 H1|fetchy|claude|rollback:Package 'sd-fetchy' has install script with network access|npm install sd-fetchy@1.0.0
 H2|fetchy|claude|rollback:Package 'sd-fetchy' has install script with network access|npm install --no-save sd-fetchy@1.0.0
 K1|clone|claude|quiet:sd-approved|npm ci
-K2|clonetarball|claude|quiet:sd-approved|npm ci
-K3|pulled|claude|quiet:sd-swapped|npm ci
+K2|clonetarball|claude|kept:holds a package not recorded as coming from the public registry (node_modules/sd-approved (sd-approved@1.0.0 from file:vendor/sd-approved-1.0.0.tgz))|npm ci
+K3|pulled|claude|kept:holds a package not recorded as coming from the public registry (node_modules/sd-swapped (sd-swapped@1.0.0 from file:vendor/sd-swapped-1.0.0.tgz))|npm ci
 A1|linked|claude|rollback:non-standard registries (package-lock.json: ../evildir|npm install ../evildir
 A2|linked|claude|rollback:non-standard registries (node_modules/.package-lock.json: ../evildir)|npm install --no-save ../evildir
 A3|linkdep|claude|rollback:non-standard registries (package-lock.json: ../evildir|npm install
@@ -494,6 +497,189 @@ B3|regdep|claude|rollback:non-standard registries (node_modules/.package-lock.js
 ROWS
 [[ ${#FAILURES[@]} -ne ${failures_before} ]] \
   || pass "installs that save nothing have their sources and install scripts checked like saved ones, a directory dependency and a source that only names the registry are rolled back, a workspace member is not, and a committed lockfile installs as recorded"
+
+# --- 1d. Install scripts run only over a tree the gate can vouch for, whole ---------------
+# Install scripts run in two places, and both run over the whole tree: the
+# rebuild after an inert install, and the rollback's reinstall. What allowed
+# them was a judgment of the change, and three holes in that judgment in a row
+# became scripts that ran (safedeps/effect-gate-blind-to-lockless-npm-installs,
+# judgment C). The permission is now a predicate on the whole tree: every
+# package on record, every package under node_modules recorded with a
+# public-registry https source or bundled in one, every directory outside it a
+# declared workspace member. Otherwise the whole rebuild is skipped with a
+# warning that names the package, and nothing is rolled back. The rollback
+# reinstalls with --ignore-scripts and rebuilds only toward a confirmed
+# snapshot, through the same predicate; with no confirmed snapshot it says so
+# in the message, reorg.log and advisory.log.
+#
+#   RB1, RB2, CH2b: a rollback with no confirmed snapshot restores a lockfile
+#     that holds sd-victim. The reinstall used to run its scripts.
+#   CH3c: a rollback to a confirmed snapshot still rebuilds.
+#   CH1b, L1, L2: a tree that holds a directory or a source nobody approved,
+#     from an earlier unrecorded install or a committed lockfile, is installed
+#     and not rebuilt. The rebuild used to run it.
+#   K4-K7: committed `file:` directory dependencies. Installed, not rebuilt,
+#     named. This is what users see change: the rebuild used to run them.
+#   K8, K9, NS1, BD1: workspaces, the nested strategy and a public package's
+#     bundled dependency are rebuilt as before.
+#   OM1: `omit-lockfile-registry-resolved` records no source, so nothing shows
+#     the package came from the public registry. Not rebuilt; a boundary.
+#
+# Marks a script must never leave: sd-victim, the EVIL tarball and directories,
+# and LIB directories, which stand for a committed directory dependency.
+
+# <dir> package <name> whose three install scripts write <mark> lines; reused
+# from section 1a (make_dir_package).
+set_dependency() {
+  jq --arg n "$1" --arg s "$2" '.dependencies[$n] = $s' "${CASE_PROJECT}/package.json" > "${CASE_PROJECT}/package.json.new" \
+    && mv "${CASE_PROJECT}/package.json.new" "${CASE_PROJECT}/package.json"
+}
+line_count() { if [[ -f "$1" ]]; then wc -l < "$1" | tr -d ' '; else printf 0; fi; }
+fixture_install() { (cd "${CASE_PROJECT}" && npm install --ignore-scripts "$@" >/dev/null 2>&1) || fail "the fixture installs $*"; }
+
+# A public-registry package that bundles another: sd-bundler carries
+# sd-bundled in its own tarball, and the lockfile records sd-bundled as
+# `inBundle` with no source of its own. Both have install scripts.
+BUNDLER_SRC="${tmp_root}/src/sd-bundler-1.0.0"
+make_dir_package "${BUNDLER_SRC}" sd-bundler "sd-bundler@1.0.0"
+make_dir_package "${BUNDLER_SRC}/node_modules/sd-bundled" sd-bundled "sd-bundled@1.0.0"
+jq '.dependencies = {"sd-bundled": "1.0.0"} | .bundleDependencies = ["sd-bundled"]' "${BUNDLER_SRC}/package.json" \
+  > "${BUNDLER_SRC}/package.json.new" && mv "${BUNDLER_SRC}/package.json.new" "${BUNDLER_SRC}/package.json"
+(cd "${BUNDLER_SRC}" && npm pack --pack-destination "${tmp_root}/tarballs" >/dev/null 2>&1) || fail "npm pack builds sd-bundler"
+cp "${BUNDLER_SRC}/package.json" "${tmp_root}/tarballs/sd-bundler-1.0.0.tgz.json"
+EVIL_INTEGRITY="sha512-$(node -e 'process.stdout.write(require("crypto").createHash("sha512").update(require("fs").readFileSync(process.argv[1])).digest("base64"))' "${EVIL_DIR}/sd-approved-1.0.0.tgz")"
+
+new_rb_clone() { new_project; set_dependency sd-victim 1.0.0; fixture_install; rm -rf "${CASE_PROJECT}/node_modules"; }
+new_rb_has() { new_project; fixture_install sd-victim@1.0.0; }
+# CH1a, CH2a, CH3a-b: the commands before the row's, run through the hooks.
+new_ch1() {
+  new_project; fixture_install sd-approved@1.0.0
+  rm -rf "${CASE_PROJECT}/../evildir"; make_evil_dir "${CASE_PROJECT}/../evildir" evildir
+  run_install 'command cd sub; npm install ../../evildir'
+  ungated || fail "CH1a is recorded UNGATED"
+  CASE_CWD="${CASE_PROJECT}/sub"
+}
+new_ch2() {
+  new_project
+  run_install 'command cd sub; npm install sd-victim'
+  ungated || fail "CH2a is recorded UNGATED"
+  CASE_CWD="${CASE_PROJECT}/sub"
+}
+new_ch3() {
+  new_project
+  CASE_CWD="${CASE_PROJECT}/sub"; run_install 'npm install sd-approved@1.0.0'
+  [[ -z "${CASE_POST}" ]] || fail "CH3a confirms quietly (post: ${CASE_POST})"
+  CASE_CWD="${CASE_PROJECT}"; run_install 'command cd sub; npm install sd-victim'
+  ungated || fail "CH3b is recorded UNGATED"
+  CASE_CWD="${CASE_PROJECT}/sub"
+}
+# A committed lockfile whose entry for the approved sd-approved@1.0.0 resolves
+# to the EVIL tarball over http, with that tarball's integrity.
+new_tampered() {
+  new_project; set_dependency sd-approved '^1.0.0'; fixture_install
+  jq --arg u "${EVIL_URL}" --arg i "${EVIL_INTEGRITY}" \
+    '.packages["node_modules/sd-approved"].resolved = $u | .packages["node_modules/sd-approved"].integrity = $i' \
+    "${CASE_PROJECT}/package-lock.json" > "${CASE_PROJECT}/package-lock.json.new"
+  mv "${CASE_PROJECT}/package-lock.json.new" "${CASE_PROJECT}/package-lock.json"
+  rm -rf "${CASE_PROJECT}/node_modules"
+}
+# npm 9.0-9.3 copy a `file:` directory instead of linking it unless told
+# otherwise (lockless-forms.sh section 10). The case here is the link.
+new_hasfiledir() {
+  new_project; printf 'install-links=false\n' > "${CASE_PROJECT}/.npmrc"; rm -rf "${CASE_PROJECT}/../libdir"; make_dir_package "${CASE_PROJECT}/../libdir" libdir LIB-libdir
+  set_dependency libdir file:../libdir; fixture_install
+}
+new_clonefiledir() { new_hasfiledir; rm -rf "${CASE_PROJECT}/node_modules"; }
+new_cloneinside() {
+  new_project; printf 'install-links=false\n' > "${CASE_PROJECT}/.npmrc"; make_dir_package "${CASE_PROJECT}/local/lib" lib LIB-lib
+  set_dependency lib file:./local/lib; fixture_install; rm -rf "${CASE_PROJECT}/node_modules"
+}
+new_wsclone() { new_workspace; rm -rf "${CASE_PROJECT}/node_modules"; }
+new_bundler() {
+  new_project
+  ( export SAFEDEPS_HOME="${CASE_HOME}"
+    . lib/ledger/ledger.sh
+    safedeps_ledger_write_approved_spec npm sd-bundler 1.0.0 >/dev/null
+    safedeps_ledger_write_approved_spec npm sd-bundled 1.0.0 >/dev/null ) || fail "the fixture approves sd-bundler"
+}
+new_omit() { new_project; printf 'omit-lockfile-registry-resolved=true\n' > "${CASE_PROJECT}/.npmrc"; }
+
+# <id>|<fixture>|<engine>|<expect>|<command>, where <expect> is
+#   fallback            rolled back with no confirmed snapshot, said in all three records
+#   rebuilt:<package>   rolled back to a confirmed snapshot and <package> rebuilt
+#   kept:<warning>      not rolled back, nothing rebuilt, the warning says <warning>
+#   quiet:<package>     confirmed quietly, and <package> rebuilt (`-`: nothing to check)
+printf '# install scripts over the whole tree (id engine command | outcome)\n'
+failures_before=${#FAILURES[@]}
+while IFS= read -r row; do
+  [[ -n "${row}" && "${row}" != \#* ]] || continue
+  IFS='|' read -r id fixture engine expect form <<< "${row}"
+  "new_${fixture}"
+  : > "${MARKS}"
+  advisory_before=$(line_count "${CASE_HOME}/advisory.log")
+  reorg_before=$(line_count "${CASE_HOME}/reorg.log")
+  run_install "${form}" "${engine}"
+  advisory_new=$(tail -n +"$((advisory_before + 1))" "${CASE_HOME}/advisory.log" 2>/dev/null || true)
+  reorg_new=$(tail -n +"$((reorg_before + 1))" "${CASE_HOME}/reorg.log" 2>/dev/null || true)
+  forbidden=$(grep -cE '^(sd-victim|EVIL|LIB)' <<< "${CASE_RAN}" || true)
+  printf '%-4s %-7s %s | rollback=%s ungated=%s ran=[%s] post=[%s]\n' "${id}" "${engine}" "${form}" \
+    "$(rolled_back && echo yes || echo no)" "$(grep -q UNGATED <<< "${advisory_new}" && echo yes || echo no)" \
+    "$(cut -f1,2 <<< "${CASE_RAN}" | tr '\t' ':' | paste -sd, -)" \
+    "$(jq -r '.systemMessage // empty' <<< "${CASE_POST}" 2>/dev/null | tr '\n' ' ' | head -c 300)"
+  [[ -z "${CASE_PRE_DENY}" ]] || { note_failure "${id}: the gate lets the command through (deny: ${CASE_PRE_DENY:0:160})"; continue; }
+  [[ "${CASE_INSTALL_RC}" == 0 ]] || { note_failure "${id}: the install itself succeeds (rc ${CASE_INSTALL_RC})"; continue; }
+  [[ "${forbidden}" == 0 ]] || note_failure "${id}: no script of sd-victim, the EVIL tarball or a directory dependency runs after the command (${forbidden})"
+  case "${expect}" in
+    fallback)
+      rolled_back || note_failure "${id}: rolled back (post: ${CASE_POST:-<quiet>})"
+      grep -qF 'no confirmed snapshot' <<< "${CASE_POST}" || note_failure "${id}: the message says there is no confirmed snapshot (post: ${CASE_POST:0:300})"
+      grep -qF 'no confirmed snapshot' <<< "${reorg_new}" || note_failure "${id}: reorg.log says there is no confirmed snapshot (${reorg_new:0:300})"
+      grep -qF 'REORG with no confirmed snapshot' <<< "${advisory_new}" || note_failure "${id}: advisory.log says there is no confirmed snapshot (${advisory_new:0:300})"
+      grep -qF 'last confirmed safe snapshot' <<< "${CASE_POST}" && note_failure "${id}: the message does not claim a confirmed snapshot"
+      [[ -z "${CASE_RAN}" ]] || note_failure "${id}: the rollback runs no install script (${CASE_RAN})"
+      ;;
+    rebuilt:*)
+      rolled_back || note_failure "${id}: rolled back (post: ${CASE_POST:-<quiet>})"
+      grep -qF 'last confirmed safe snapshot' <<< "${CASE_POST}" || note_failure "${id}: rolled back to the confirmed snapshot (post: ${CASE_POST:0:300})"
+      [[ "$(grep -c "^${expect#rebuilt:}@" <<< "${CASE_RAN}" || true)" == 3 ]] \
+        || note_failure "${id}: the rollback rebuilds ${expect#rebuilt:}, all three scripts (${CASE_RAN:-nothing ran})"
+      ;;
+    kept:*)
+      ! rolled_back || note_failure "${id}: not rolled back (post: ${CASE_POST:0:300})"
+      grep -q UNGATED <<< "${advisory_new}" && note_failure "${id}: not recorded UNGATED"
+      grep -qF "${expect#kept:}" <<< "${CASE_POST}" || note_failure "${id}: the warning says ${expect#kept:} (post: ${CASE_POST:-<quiet>})"
+      [[ -z "${CASE_RAN}" ]] || note_failure "${id}: the skipped rebuild runs no script (${CASE_RAN})"
+      ;;
+    quiet:*)
+      [[ -z "${CASE_POST}" ]] || note_failure "${id}: confirmed quietly (post: ${CASE_POST:0:300})"
+      grep -q UNGATED <<< "${advisory_new}" && note_failure "${id}: not recorded UNGATED"
+      [[ "${expect#quiet:}" == - ]] || grep -q "^${expect#quiet:}@[^	]*	install" <<< "${CASE_RAN}" \
+        || note_failure "${id}: the verified install is rebuilt, so ${expect#quiet:}'s scripts run (${CASE_RAN:-nothing ran})"
+      ;;
+    *) fail "unknown expectation ${expect} in row ${id}" ;;
+  esac
+done <<ROWS
+RB1|rb_clone|claude|fallback|npm ci
+RB1x|rb_clone|codex|fallback|npm ci
+RB2|rb_has|claude|fallback|npm install sd-approved@1.0.0
+CH2b|ch2|claude|fallback|npm install sd-approved@1.0.0
+CH3c|ch3|claude|rebuilt:sd-approved|npm install sd-approved@1.0.0
+CH3x|ch3|codex|rebuilt:sd-approved|npm install sd-approved@1.0.0
+CH1b|ch1|claude|kept:a directory that is not a declared workspace member (../../evildir (evildir@1.0.0))|npm install sd-approved@1.0.0
+L1|tampered|claude|kept:a package not recorded as coming from the public registry (node_modules/sd-approved (sd-approved@1.0.0 from ${EVIL_URL}))|npm ci
+L2|tampered|claude|kept:a package not recorded as coming from the public registry (node_modules/sd-approved (sd-approved@1.0.0 from ${EVIL_URL}))|npm install
+K4|clonefiledir|claude|kept:a directory that is not a declared workspace member (../libdir (libdir@1.0.0))|npm ci
+K5|hasfiledir|claude|kept:a directory that is not a declared workspace member (../libdir (libdir@1.0.0))|npm install sd-approved@1.0.0
+K6|hasfiledir|claude|kept:a directory that is not a declared workspace member (../libdir (libdir@1.0.0))|npm install --no-save sd-approved@1.0.0
+K7|cloneinside|claude|kept:a directory that is not a declared workspace member (local/lib (lib@1.0.0))|npm ci
+K8|wsclone|claude|quiet:-|npm ci
+K9|workspace|claude|quiet:sd-approved|npm install sd-approved@1.0.0
+NS1|project|claude|quiet:sd-approved|npm install --install-strategy=nested sd-approved@1.0.0
+BD1|bundler|claude|quiet:sd-bundler|npm install sd-bundler@1.0.0
+OM1|omit|claude|kept:a package not recorded as coming from the public registry (node_modules/sd-approved (sd-approved@1.0.0 from no recorded source))|npm install sd-approved@1.0.0
+ROWS
+[[ ${#FAILURES[@]} -ne ${failures_before} ]] \
+  || pass "install scripts run only over a tree on record from the public registry or a workspace, a rollback runs none without a confirmed snapshot and says so, and K4-K7 are installed but not rebuilt"
 
 if [[ "${REPORT_ONLY}" == 1 ]]; then
   printf '# GRID_REPORT_ONLY: %s failure(s) not enforced\n' "${#FAILURES[@]}"

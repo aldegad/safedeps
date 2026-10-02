@@ -211,6 +211,9 @@ while IFS='|' read -r want url; do
   [[ -n "${url}" ]] || continue
   if bash -c 'source lib/npm/closure.sh; safedeps_npm_public_registry_url "$1"' _ "${url}"; then got=public; else got=other; fi
   [[ "${got}" == "${want}" ]] || fail "registry source ${url} reads as ${want} (got ${got})"
+  # The rebuild check reads the same pattern in jq (post-verify).
+  got=$(bash -c 'source lib/npm/closure.sh; jq -nr --arg re "${SAFEDEPS_NPM_PUBLIC_REGISTRY_RE}" --arg u "$1" "if (\$u | test(\$re; \"i\")) then \"public\" else \"other\" end"' _ "${url}")
+  [[ "${got}" == "${want}" ]] || fail "registry source ${url} reads as ${want} in jq too (got ${got})"
 done <<'URLS'
 public|https://registry.npmjs.org/sd-approved/-/sd-approved-1.0.0.tgz
 public|https://registry.yarnpkg.com/sd-approved/-/sd-approved-1.0.0.tgz

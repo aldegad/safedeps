@@ -12,10 +12,19 @@
 # installs): the member list resolved a symlinked member to its physical path,
 # where npm compares the path its glob found, and the gate climbed to a root npm
 # did not. Both questions are now asked of npm (lib/npm/ask.sh). What is left
-# here only chooses which files to copy before an install, so reading more
-# members than npm would costs a copy, and reading fewer costs a manifest the
-# rollback cannot restore. The lockfiles' member keys are read too, so a member
-# npm recorded is kept even where the glob below does not find it.
+# here chooses which files to copy before an install, so reading more members
+# than npm would costs a copy, and reading fewer costs a manifest the rollback
+# cannot restore. The lockfiles' member keys are read too, so a member npm
+# recorded is kept even where the glob below does not find it.
+#
+# post-verify reads the member list for one more question: which directories
+# outside node_modules are part of the project. npm still says which packages
+# `npm rebuild` runs over (`npm query`); a directory among them runs only when
+# it is a member listed here. In that question the costs turn around. Reading
+# fewer members skips a rebuild and says so; reading more would run the
+# scripts of a directory nobody approved. So a listing with a pattern this file
+# cannot read in full counts no member there (`?` below), and a member found
+# through `..` is not one.
 #
 # Every member is kept, not the ones an install is expected to write: which
 # members `npm install` writes is npm's to decide, and guessing it here would be

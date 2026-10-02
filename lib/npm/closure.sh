@@ -131,13 +131,16 @@ safedeps_npm_new_records() {
 #
 # Scheme and host are matched without regard to case, as URLs compare them. It
 # runs once per new source, so it starts no process.
+#
+# The pattern is the one definition: post-verify's rebuild check reads every
+# node of the tree in one jq pass and applies the same pattern there, with
+# jq's "i" flag for the case. smoke.sh holds both readers to one table.
+SAFEDEPS_NPM_PUBLIC_REGISTRY_RE='^https://registry\.(npmjs\.org|yarnpkg\.com)/'
 safedeps_npm_public_registry_url() {
   local was_nocase=0 rc=1
   shopt -q nocasematch && was_nocase=1
   shopt -s nocasematch
-  case "$1" in
-    https://registry.npmjs.org/*|https://registry.yarnpkg.com/*) rc=0 ;;
-  esac
+  [[ "$1" =~ ${SAFEDEPS_NPM_PUBLIC_REGISTRY_RE} ]] && rc=0
   [[ ${was_nocase} -eq 1 ]] || shopt -u nocasematch
   return "${rc}"
 }
