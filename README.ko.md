@@ -63,7 +63,7 @@ GitHub 릴리스는 정식 스킬/훅 소스 트리를 기준 아티팩트로 �
 
 PreToolUse 명령 훅은 빠른 advisory 안내 장치로서, 명백히 승인되지 않은 설치 및 위험한 명령 형태를 차단해 에이전트에게 즉시 피드백을 제공합니다. 하지만 npm에서는 실제 권한 판단이 설치 후 효과 게이트에 있으며, 실제로 설치된 결과를 기준으로 판단하므로 래핑되거나 난독화된 설치 명령으로 패키지를 우회할 수 없습니다.
 
-**스크립트 안전성(비활성 설치).** Claude Code에서는 PreToolUse 훅이 npm install에 `--ignore-scripts`를 추가해 설치를 **비활성(inert)** 상태로 실행합니다. 즉, 패키지는 디스크에 기록되지만 라이프사이클 스크립트는 아직 실행되지 않습니다. 이후 효과 게이트가 폐쇄성을 검증하고 통과 시에만 PostToolUse 훅이 `npm rebuild`를 실행해 검증된 스크립트를 실행합니다. 게이트가 거부한 패키지는 어떤 스크립트도 실행되기 전에 리오그됩니다. rebuild 는 게이트가 읽은 트리만 다룹니다. 게이트가 읽은 디렉터리에서 `--global=false --location=project` 로 돌기 때문에 프로젝트 `.npmrc` 가 rebuild 를 전역 트리로 돌릴 수 없습니다. rebuild 는 트리 전체에 대해 돌기 때문에, 이번 설치가 바꾼 것만이 아니라 트리 전체를 묻습니다. `node_modules` 에 `.package-lock.json` 기록이 없거나, rebuild 가 돌 트리에 다음 중 하나가 있다고 npm 이 답하면 그 패키지를 지목한 경고와 함께 건너뜁니다. 어느 lockfile 에도 기록되지 않은 패키지나 패키지 버전, lockfile 이 공개 registry 에서 왔다고 기록하지 않은 패키지(사설 registry, git URL, tarball), 선언된 워크스페이스 멤버가 아닌 디렉터리(`file:` 디렉터리 의존성)입니다. 이 질문은 `npm query '*'` 로 npm 에게 묻고, 이 질의는 `npm rebuild` 처럼 `file:` 의존성 안의 `node_modules` 까지 따라갑니다. npm 이 답하지 않아도 rebuild 를 건너뜁니다. (이 기능은 Claude Code의 `updatedInput` capability를 사용합니다. Codex CLI는 이 기능을 노출하지 않으므로, Codex에서는 설치가 일반 실행되고 효과 게이트는 detect-and-rollback 방식입니다. 즉 악성 설치 스크립트가 롤백 전 1회 실행될 수 있습니다.)
+**스크립트 안전성(비활성 설치).** Claude Code에서는 PreToolUse 훅이 npm install에 `--ignore-scripts`를 추가해 설치를 **비활성(inert)** 상태로 실행합니다. 즉, 패키지는 디스크에 기록되지만 라이프사이클 스크립트는 아직 실행되지 않습니다. 이후 효과 게이트가 폐쇄성을 검증하고 통과 시에만 PostToolUse 훅이 `npm rebuild`를 실행해 검증된 스크립트를 실행합니다. 게이트가 거부한 패키지는 어떤 스크립트도 실행되기 전에 리오그됩니다. rebuild 는 게이트가 읽은 트리만 다룹니다. 게이트가 읽은 디렉터리에서 `--global=false --location=project` 로 돌기 때문에 프로젝트 `.npmrc` 가 rebuild 를 전역 트리로 돌릴 수 없습니다. rebuild 는 트리 전체에 대해 돌기 때문에, 이번 설치가 바꾼 것만이 아니라 트리 전체를 묻습니다. `node_modules` 에 `.package-lock.json` 기록이 없거나, rebuild 가 돌 트리에 다음 중 하나가 있다고 npm 이 답하면 그 패키지를 지목한 경고와 함께 건너뜁니다. 어느 lockfile 에도 기록되지 않은 패키지나 패키지 버전, lockfile 이 공개 registry 에서 왔다고 기록하지 않은 패키지(사설 registry, git URL, tarball), 공개 registry 로 기록됐지만 npm 이 다른 registry 에서 받은 패키지, 선언된 워크스페이스 멤버가 아닌 디렉터리(`file:` 디렉터리 의존성)입니다. 이 질문은 `npm query '*'` 로 npm 에게 묻고, 이 질의는 `npm rebuild` 처럼 `file:` 의존성 안의 `node_modules` 까지 따라갑니다. npm 이 답하지 않아도 rebuild 를 건너뜁니다. `registry.npmjs.org` 기록은 바이트가 어디서 왔는지 말해 주지 않습니다. npm 의 기본값 `replace-registry-host=npmjs` 는 그 URL 을 npm 에 설정된 registry 에서 받고, 기록에는 URL 을 그대로 적습니다. 그래서 npm 이 어느 registry 에서 받는지도 `npm config ls --json` 으로 npm 에게 묻습니다. 명령 전에 설치 자신의 인자와 환경으로 한 번, 명령 뒤에 게이트가 읽은 디렉터리에서 한 번입니다. 두 답이 모두 공개 registry 라고 할 때만 그 기록을 공개 registry 의 것으로 칩니다. (이 기능은 Claude Code의 `updatedInput` capability를 사용합니다. Codex CLI는 이 기능을 노출하지 않으므로, Codex에서는 설치가 일반 실행되고 효과 게이트는 detect-and-rollback 방식입니다. 즉 악성 설치 스크립트가 롤백 전 1회 실행될 수 있습니다.)
 
 이 효과 우선 모델은 현재 npm에만 적용됩니다. `pip`, `cargo`, `go`, `gem`, `maven`, `nuget`은 closure resolver가 추가될 때까지 v2.1 명령 게이트 + reorg 모델을 유지합니다.
 
@@ -116,7 +116,7 @@ Claude Code 또는 Codex CLI가 `npm install`, `pip install`, `cargo add`, `go g
 4. 명시적 `pkg@version` 설치 명령에 대해 승인된 spec ledger를 **빠르게 확인**합니다.
 5. 사전 비행 체크를 수행하고 다음 조건을 감지하면 실행을 **차단**합니다.
    - 타이포스쿼팅 패키지명 (`lod_sh`, `reacct`, `axois` 등)
-   - 비표준 `--registry` URL(`registry.npmjs.org`, `registry.yarnpkg.com` 외부)
+   - 비표준 registry(`registry.npmjs.org`, `registry.yarnpkg.com` 외부). `--registry` 로 적었든 npm 이 `.npmrc` 나 `npm_config_registry` 에서 읽든 같습니다. npm 설치라면 설치 자신의 인자와 환경으로 npm 에게 묻습니다. 공개 registry 의 미러도 비표준입니다. 아직 registry 를 승인할 길이 없기 때문입니다
    - 파이프 기반 원격 실행 패턴 (`curl ... | bash`)
    - 설치 스크립트 안전성 명시적 비활성 (`npm config set ignore-scripts false`)
 
@@ -149,7 +149,7 @@ ledger 게이트나 사전 비행 체크에 실패하면 해당 명령은 실행
    - 난독화된 내용 (`base64`, `atob`, `Buffer.from`, 16진수/유니코드 이스케이프)
 
 3. **Lock file diff analysis** — lock 파일을 명령 전에 떠 둔 사본과 비교합니다. npm 에서는 출처를 두 기록 모두에서 읽고, 명령 전 어느 기록에도 없던 출처만 셉니다:
-   - 비표준 registry를 가리키는 resolved URL. `https://registry.npmjs.org/` 나 `https://registry.yarnpkg.com/` 으로 시작하는 URL 만 공개 registry 이고, 설치가 링크한 디렉터리 의존성도 프로젝트가 선언한 워크스페이스가 아니면 비표준 출처입니다
+   - 비표준 registry를 가리키는 resolved URL. `https://registry.npmjs.org/` 나 `https://registry.yarnpkg.com/` 으로 시작하는 URL 만 공개 registry 이고, 그것도 npm 이 실제로 거기서 받았다고 답할 때만입니다(`replace-registry-host` 가 `never` 가 아니면 npm 은 그런 URL 을 설정된 registry 에서 받습니다). 설치가 링크한 디렉터리 의존성도 프로젝트가 선언한 워크스페이스가 아니면 비표준 출처입니다
    - resolved URL의 보안 취약 프로토콜 (`http://`, `git://`)
    - 과도한 의존성 증가 (`package-lock.json` 의 신규 resolved 항목 50개 초과, 의존성 혼란 공격 가능성)
 
@@ -196,7 +196,7 @@ ledger 게이트나 사전 비행 체크에 실패하면 해당 명령은 실행
 |---|---|---|---|
 | Typosquatting | 유명 패키지의 알려진 오타 패턴 | PreToolUse advisory guard | **차단** |
 | Pipe execution | `curl \| bash`, `wget \| sh` | PreToolUse advisory guard | **차단** |
-| Registry hijack | 비공식 소스에 대한 `--registry` 지정 | PreToolUse advisory guard | **차단** |
+| Registry hijack | `--registry`, `.npmrc`, `npm_config_registry` 로 정한 공개 밖 registry (npm 에게 물음) | PreToolUse advisory guard | **차단** |
 | Script safety bypass | `npm config set ignore-scripts false` | PreToolUse advisory guard | **차단** |
 | Command indirection | `eval "npm install ..."`, 서브셸 확장, 변수 indirection | PreToolUse advisory guard | **Guard** |
 | npx/dlx execution | `npx`, `npm exec`, `pnpm dlx`, `yarn dlx`, `bunx`, `uvx`, `pipx run` 패키지 실행, 그리고 `npm create`/`npm init <initializer>`, `pnpm create`, `yarn create`, `bun create` | PreToolUse advisory guard | **Guard** |
@@ -456,13 +456,14 @@ safedeps/
 
 매 설치 명령은 실행 전 빠른 advisory 피드백을 받으며, 매 npm 설치는 실행 후 closure 단위 집행을 받습니다. 사람이 PR 리뷰에서 의심 패키지를 잡을 시점 이전에 설치 시점에서 이미 잡히고, SaaS 의존성 없이 로컬 CLI와 공개 DB(OSV / KEV / GHSA)만 사용합니다.
 
-여섯 가지 솔직한 경계:
+일곱 가지 솔직한 경계:
 
 - **명령 훅은 휴리스틱이며 sandbox가 아닙니다.** 인자를 그대로 넘겨 실행하는 래퍼(`sudo`, `timeout`, `nohup`, `nice`, `xargs`), 가드가 열거하지 않은 형태로 인터프리터에 넘긴 텍스트(herestring, 스크립트 파일), 같은 사용자에 의한 로컬 `~/.safedeps` 상태 조작은 신뢰 경계 밖에 있습니다. npm effect 게이트가 backstop으로 이를 보완하며, command hook이 놓친 부분을 설치 결과를 기준으로 감지합니다. 즉 command-independent입니다. 설치로 보이는 명령이 보류 상태를 남기지 않고 끝나더라도(PreToolUse 파서가 인식 못한 경우), PostToolUse 훅은 여전히 실시간 `package-lock.json`에 대해 npm closure 검사를 수행합니다. 따라서 파서 블라인드 스팟이 backstop을 맹목적으로 만들지 않습니다. 다만 command-independent인 detection은 parser-missed install를 자동 롤백하려면 해당 프로젝트의 선행 confirmed-safe snapshot이 필요합니다. 최초 설치에서 베이스라인이 없으면 시스템 메시지와 advisory 로그로 강하게 경고되지만 자동 되돌리지는 않습니다.
 - **`.npmrc` 는 설치를 옮기거나 기록 밖에 둘 수 있습니다.** `.npmrc` 에 설정한 `global` 이나 `location` 은 평범한 `npm install x` 를 게이트가 읽는 기록 밖으로 보냅니다. 패키지는 npm 전역 prefix 에 놓이거나, `global=0` 이나 `--location=project` 와 함께 쓴 `location=global` 이면 아무 기록 없이 `node_modules` 에 놓입니다. 전역으로 간 설치는 어느 `.npmrc` 가 정했든 게이트가 보는 곳에 흔적을 남기지 않으므로 `UNGATED` 로 기록됩니다. 기록을 남기지 않으리라는 것은 npm 이 설치 전에 답할 수 없으므로, 그 질문에 한해 훅이 프로젝트와 사용자의 `.npmrc` 를 직접 읽어 설치를 기록하고 파일과 설정을 적습니다. 설치를 검사하지는 않고 기록만 합니다. 검사하려면 npm 이 놓은 곳에서 패키지를 이름으로 찾아야 하는데, 이는 경계로 남깁니다. 프로젝트 설치를 기록 밖에 두는 설정은 전역 npmrc 와 내장 npmrc 에서는 읽지 않으므로, 거기 둔 그런 설정은 기록되지 않습니다. 어느 경우든 패키지의 스크립트는 돌지 않습니다. 설치는 무실행이고, rebuild 가 돌 트리에 어느 lockfile 에도 기록되지 않은 패키지나 패키지 버전이 있으면 rebuild 를 건너뜁니다. 뒤의 조건이 중요합니다. 같은 설정이 기록된 패키지 위에 새 버전을 쓰고 기록은 그대로 둘 수 있기 때문입니다.
 - **흔적은 명령의 것이 아니라 디렉터리의 것입니다.** 명령이 도는 동안 같은 디렉터리에 다른 npm 이 쓰면 설치가 남기지 않은 흔적이 생기고, 명령이 스스로 lockfile 을 건드려도 그렇습니다. 뒤의 것은 같은 사용자 공격자이며 원장과 같은 경계입니다. 초 단위 타임스탬프만 남기는 파일 시스템에서는 시작한 그 초 안에 끝난 설치가 흔적을 보이지 않아 `UNGATED` 로 기록됩니다. Codex CLI 에서는 흔적을 남기지 않은 설치가 떨어진 곳에서 이미 스크립트를 돌렸으므로, 남는 것은 기록뿐입니다.
-- **커밋된 lockfile 은 기록대로 설치됩니다.** 출처 검사는 설치가 새로 들인 것을 명령 전의 기록과 비교해 읽는데, 커밋된 `package-lock.json` 도 그 기록 중 하나입니다. 그래서 새로 clone 한 곳의 `npm ci`, 또는 lockfile 을 따르는 맨 `npm install` 은 lockfile 이 적은 출처를 그대로 설치합니다. 승인된 이름과 버전을 다른 tarball 로 보내도록 고친 출처도 마찬가지입니다. 커밋된 출처까지 검사하면 사설 registry, git URL, tarball 에서 설치하는 프로젝트는 모두 첫 `npm ci` 가 롤백됩니다. safedeps 에는 아직 출처를 승인할 길이 없으므로 이는 다음 릴리스로 남깁니다. 다만 그런 출처의 스크립트는 돌리지 않습니다. rebuild 가 트리 전체를 읽어 그 출처를 찾고 건너뜁니다(다음 항목). 설치 스크립트 검사도 설치가 새로 들인 것만 읽으므로, 이미 기록에 있는 승인된 공개 registry 패키지는 다시 읽지 않습니다. v2.17.2 에서도 그랬습니다. lockfile 도 설치된 트리도 없는 프로젝트에는 이전 기록이 없어서 첫 설치가 들인 것이 전부 새것이고, 공개 registry 밖의 출처는 롤백됩니다.
+- **커밋된 lockfile 은 기록대로 설치됩니다.** 출처 검사는 설치가 새로 들인 것을 명령 전의 기록과 비교해 읽는데, 커밋된 `package-lock.json` 도 그 기록 중 하나입니다. 그래서 새로 clone 한 곳의 `npm ci`, 또는 lockfile 을 따르는 맨 `npm install` 은 lockfile 이 적은 출처를 그대로 설치합니다. 승인된 이름과 버전을 다른 tarball 로 보내도록 고친 출처도 마찬가지입니다. 커밋된 출처까지 검사하면 사설 registry, git URL, tarball 에서 설치하는 프로젝트는 모두 첫 `npm ci` 가 롤백됩니다. safedeps 에는 아직 출처를 승인할 길이 없으므로 이는 다음 릴리스로 남깁니다. 다만 그런 출처의 스크립트는 돌리지 않습니다. rebuild 가 트리 전체를 읽어 그 출처를 찾고 건너뜁니다(다음 항목). 공개 registry 기록이라도 npm 이 다른 registry 에서 받았다고 답하면 마찬가지입니다. 설치 스크립트 검사도 설치가 새로 들인 것만 읽으므로, 이미 기록에 있는 승인된 공개 registry 패키지는 다시 읽지 않습니다. v2.17.2 에서도 그랬습니다. lockfile 도 설치된 트리도 없는 프로젝트에는 이전 기록이 없어서 첫 설치가 들인 것이 전부 새것이고, 공개 registry 밖의 출처는 롤백됩니다. npm 이 다른 registry 에서 받았다고 답한 공개 registry 기록도 롤백됩니다.
 - **아무도 승인하지 않은 출처나 디렉터리가 있으면 프로젝트 전체의 자동 rebuild 가 꺼집니다.** 트리에 lockfile 이 공개 registry 에서 왔다고 기록하지 않은 패키지나, 선언된 워크스페이스 멤버가 아닌 `file:` 디렉터리 의존성이 있으면 설치는 그대로 두고 아무것도 rebuild 하지 않습니다. rebuild 는 전부 아니면 전무라서 승인된 패키지의 스크립트도 돌지 않습니다. `.npmrc` 에 `omit-lockfile-registry-resolved` 를 둔 프로젝트도 같습니다. lockfile 이 출처를 아예 적지 않기 때문입니다. 경고가 rebuild 를 막은 패키지나 디렉터리를 하나하나 지목하니, 검토한 뒤 직접 `npm rebuild` 를 돌리세요. npm 10.8.2 로 잰 결과, v2.17.2 는 커밋된 `file:` 디렉터리 의존성이 있는 프로젝트의 설치를 롤백했습니다. 출처 승인이 생기면 rebuild 가 다시 돌 수 있고, 이는 다음 릴리스로 남깁니다.
+- **npm 이 어느 registry 에서 받았는지는 훅이 볼 수 있는 범위에서 npm 이 답합니다.** 명령 전에는 설치 자신의 인자와 환경으로, 명령 뒤에는 게이트가 읽은 디렉터리에서 npm 에게 묻습니다. 두 질의 어디에도 보이지 않는 곳에서 정한 registry 는 어느 답에도 없습니다. 에이전트 셸의 환경에는 있지만 훅 프로세스의 환경에는 없는 경우, 그리고 명령이 `.npmrc` 를 썼다가 다시 지우는 경우입니다. 이때 rebuild 는 그 registry 가 준 것을 그대로 돌립니다. 앞선 문장이 보이지 않게 npm 의 환경을 바꿀 수 있으면(`source`, `.`, `eval`, `set -a`, `declare -x`, 따로 선 `npm_config_*` 대입) 답은 모름이 됩니다. 모름은 경고와 함께 rebuild 를 건너뛰고, 롤백 사유는 되지 않습니다. 공개 registry 밖에서 받는 npm 설치는 차단되며, 공개 registry 의 미러도 마찬가지입니다. registry 승인은 다음 릴리스로 남깁니다.
 - **효과 우선 집행은 현재 npm에서만 적용됩니다.** `pip`, `cargo`, `go`, `gem`, `maven`, `nuget`은 closure resolver가 도입될 때까지 v2.1 command-gate + reorg 모델을 유지합니다.
 
 ## Legacy / Migration: v1 `npm-reorg-guard`
