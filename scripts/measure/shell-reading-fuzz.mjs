@@ -56,6 +56,12 @@ const GADGETS = [
   "((1))#'",
   "(true)#'",
   "echo (#i)'", // a glob word to zsh, so no comment there
+  "echo (a)#'", // and after the close of one
+  // A line continuation is removed before tokens are split: the byte before
+  // it decides, so after a blank or an operator the `#` is a comment.
+  "echo a \\\n#'",
+  "echo a;\\\n#'",
+  "\\\n#'",
 ];
 
 // mulberry32: small, seedable, the same on every node.

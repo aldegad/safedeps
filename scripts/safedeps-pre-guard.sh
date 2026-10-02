@@ -671,14 +671,9 @@ shell_lex() {
             continue
           }
           if (c == "#" && (wordstart(i) || top == "B" && X[i-1] == "`") && top != "V") {
-            # A `(` where an argument stands is no command. zsh reads it as the
-            # start of a glob word, so `echo (#i)x` holds no comment there, and
-            # bash 3.2 inside a substitution reads no comment either: it runs
-            # the line after the substitution (form G5). bash 5.2 and dash fail
-            # to parse it. So only the dash reading takes a comment, and the
-            # bash reading says DIVERGE. A `(` that opens a command, `$(`, `<(`
-            # or `>(` starts a comment in every shell.
-            if (X[i-1] == "(" && X[i-2] !~ /[$<>]/ && !cmdpos(i - 1)) { div = 1; if (!shd) continue }
+            # Inside a glob word (see GL below) a `#` is a glob operator, never
+            # a comment (form G5).
+            if (glc[d] > 0) { div = 1; continue }
             C[i] = "m"; mode = "CM"; continue
           }
           if (c == "$" && X[i+1] == "(" && X[i+2] == "(") { C[i+1] = cls; C[i+2] = cls; arith_or_sub(i, 1); continue }
@@ -695,9 +690,24 @@ shell_lex() {
           if (top == "V") { if (c == "}") pop(); continue }
           # A process substitution is a word like `$(...)`: its `)` ends no
           # token (PS marks the parenthesis level it opened, WC its close).
-          if (c == "(") { par[d]++; if (i > 1 && (X[i-1] == "<" || X[i-1] == ">") && C[i-1] == cls) PS[d, par[d]] = 1; else delete PS[d, par[d]]; continue }
+          # So is a glob word: zsh reads a `(` where an argument stands as the
+          # start of one, and inside a substitution bash 3.2 reads it the same
+          # way, so a `#` in it or after its `)` is no comment (forms G5,
+          # ZG1); bash 5.2 and dash fail to parse it. GL marks the level for
+          # the bash and zsh readings, glc counts the open ones, and the bash
+          # reading says DIVERGE. An empty `()` is a function head, not a glob.
+          if (c == "(") {
+            par[d]++
+            if (i > 1 && (X[i-1] == "<" || X[i-1] == ">") && C[i-1] == cls) PS[d, par[d]] = 1; else delete PS[d, par[d]]
+            if (!shd && X[i+1] != ")" && (i == 1 || X[i-1] !~ /[$<>]/) && !cmdpos(i)) { GL[d, par[d]] = 1; glc[d]++; div = 1 } else delete GL[d, par[d]]
+            continue
+          }
           if (c == ")") {
-            if (par[d] > 0) { if ((d, par[d]) in PS) { WC[i] = 1; delete PS[d, par[d]] }; par[d]-- }
+            if (par[d] > 0) {
+              if ((d, par[d]) in PS) { WC[i] = 1; delete PS[d, par[d]] }
+              if ((d, par[d]) in GL) { WC[i] = 1; delete GL[d, par[d]]; glc[d]-- }
+              par[d]--
+            }
             else if (top == "S") { WC[i] = 1; pop() }
             continue
           }
@@ -852,7 +862,7 @@ shell_lex() {
       }
 
       function push(k) {
-        d++; ctx[d] = k; par[d] = 0; pnp[d] = np; besc[d] = 0; cpat[d] = 0; cpw[d] = 0; adol[d] = 0
+        d++; ctx[d] = k; par[d] = 0; pnp[d] = np; besc[d] = 0; cpat[d] = 0; cpw[d] = 0; adol[d] = 0; glc[d] = 0
         if (k == "D") dq++
         if (k == "H") hn++
         if (k != "C") dc++
@@ -873,20 +883,27 @@ shell_lex() {
       }
       # Whether a word starts at byte j: the byte before it ends a token. That
       # is a question about the token, not the character: a blank or a newline
-      # ends one only unescaped and not as a line continuation, and a `)` only
-      # as an operator, never where it closes a `$(...)`, a `$((...))` or a
-      # process substitution, which are parts of a word. Read by the byte
-      # alone, `echo $(echo a)#b` opened a comment that every shell reads as
-      # the word a#b, and a comment that swallowed the close of a substitution
-      # hid the lines after it (forms G1-G4).
+      # ends one only unescaped, and a `)` only as an operator, never where it
+      # closes a `$(...)`, a `$((...))`, a process substitution or a glob
+      # word, which are parts of a word. Read by the byte alone, `echo $(echo
+      # a)#b` opened a comment that every shell reads as the word a#b, and a
+      # comment that swallowed the close of a substitution hid the lines after
+      # it (forms G1-G4). A line continuation is no byte at all: the shell
+      # removes it before it splits tokens, so the byte before it decides
+      # (`a \` then `#x` on the next line is a comment, `a\` then `#x` is the
+      # word a#x; forms LC1-LC3, G4). Read as a byte, the continuation turned
+      # that comment into a word whose quote hid the lines after it.
       function wordstart(j) {
+        while (j > 2 && C[j-1] == "l") j -= 2
         if (j == 1) return 1
         if (X[j-1] !~ /[ \t\n;&|()<>]/) return 0
         return C[j-1] != "e" && C[j-1] != "l" && !((j - 1) in ESC) && !((j - 1) in WC)
       }
+      # Whether byte j stands where a command starts, by the words before it.
+      # A line continuation is skipped like a blank: the shell removes it.
       function cmdpos(j,   k, w) {
         k = j - 1
-        while (k >= 1 && (X[k] == " " || X[k] == "\t")) k--
+        while (k >= 1 && (X[k] == " " || X[k] == "\t" || C[k] == "l")) k--
         if (k < 1 || X[k] ~ /[\n;&|(!{)`]/) return 1
         w = ""
         while (k >= 1 && X[k] ~ /[a-z]/) { w = X[k] w; k-- }
@@ -906,7 +923,7 @@ shell_lex() {
         }
         if (a) { i = j + dollar + 1; push("A"); adol[d] = dollar; return }
         if (dollar) { i = j + 1; push("S") }
-        else { i = j + 1; delete PS[d, par[d] + 1]; delete PS[d, par[d] + 2]; par[d] += 2 }
+        else { i = j + 1; delete PS[d, par[d] + 1]; delete PS[d, par[d] + 2]; delete GL[d, par[d] + 1]; delete GL[d, par[d] + 2]; par[d] += 2 }
       }
       # The look-ahead bash and zsh make at `((`: from byte k to the first `)`
       # not nested in a parenthesis. 1 when another `)` follows it
