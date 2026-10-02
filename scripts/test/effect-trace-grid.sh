@@ -825,7 +825,7 @@ new_q5() {
   withhold_first 'npm ci'; rm -f "${CASE_PROJECT}/.npmrc"
 }
 
-# The H rows: the Q clone, but what it commits is the tree record
+# The HL rows: the Q clone, but what it commits is the tree record
 # node_modules/.package-lock.json naming the impostor's integrity, and none of
 # the bytes. The pre-guard copies that file as the tree before the command, and
 # it is a record nobody saw written, as the committed package-lock.json is.
@@ -842,40 +842,40 @@ new_hclone_bare() {
   [[ "$(ls -A "${CASE_PROJECT}/node_modules")" == .package-lock.json ]] || fail "the H clone carries the tree record alone"
 }
 new_hclone() { new_hclone_bare; printf 'registry=%s\n' "${EVIL_REG}" > "${CASE_PROJECT}/.npmrc"; }
-new_h1() { new_hclone; withhold_first 'npm ci'; rm -f "${CASE_PROJECT}/.npmrc"; }
-new_h2() { new_hclone_bare; withhold_first "npm_config_registry=${EVIL_REG} npm ci"; }
-new_h3() { new_h2; rm -rf "${CASE_PROJECT}/node_modules"; }
-new_h4() {
+new_hl1() { new_hclone; withhold_first 'npm ci'; rm -f "${CASE_PROJECT}/.npmrc"; }
+new_hl2() { new_hclone_bare; withhold_first "npm_config_registry=${EVIL_REG} npm ci"; }
+new_hl3() { new_hl2; rm -rf "${CASE_PROJECT}/node_modules"; }
+new_hl4() {
   local first_home
-  new_h2; first_home="${CASE_HOME}"
+  new_hl2; first_home="${CASE_HOME}"
   new_project
   CASE_HOME="${first_home}"
   cp "${FIRST_PROJECT}/package.json" "${FIRST_PROJECT}/package-lock.json" "${CASE_PROJECT}/"
   rm -rf "${CASE_PROJECT}/node_modules"
 }
-# M1: a tree record the gate did observe, whose entry pairs the impostor's
+# DP1: a tree record the gate did observe, whose entry pairs the impostor's
 # sha512 with the public one. The public bytes were installed through the hooks,
 # so the tree is observed, and they match only the public digest: the entry
 # vouches for neither.
-new_m1() {
+new_dp1() {
   local public
   new_project; set_dependency sd-approved 1.0.0; fixture_install
   public=$(jq -r '.packages["node_modules/sd-approved"].integrity' "${CASE_PROJECT}/package-lock.json")
-  [[ "${public}" == sha512-* && "${public}" != "${EVIL_INTEGRITY}" ]] || fail "the M1 fixture records the public integrity"
+  [[ "${public}" == sha512-* && "${public}" != "${EVIL_INTEGRITY}" ]] || fail "the DP1 fixture records the public integrity"
   edit_json package-lock.json --arg i "${EVIL_INTEGRITY} ${public}" '.packages["node_modules/sd-approved"].integrity = $i'
   rm -rf "${CASE_PROJECT}/node_modules" "${npm_config_cache:?the sandbox sets the npm cache}"
   run_install 'npm ci'
-  [[ -z "${CASE_PRE_DENY}" && "${CASE_INSTALL_RC}" == 0 ]] && ! rolled_back || fail "M1's public npm ci is kept (post: ${CASE_POST:0:300})"
-  ! grep -q 'EVIL-sd-approved' "${CASE_PROJECT}/node_modules/sd-approved/mark.js" 2>/dev/null || fail "M1's public npm ci installs the public bytes"
+  [[ -z "${CASE_PRE_DENY}" && "${CASE_INSTALL_RC}" == 0 ]] && ! rolled_back || fail "DP1's public npm ci is kept (post: ${CASE_POST:0:300})"
+  ! grep -q 'EVIL-sd-approved' "${CASE_PROJECT}/node_modules/sd-approved/mark.js" 2>/dev/null || fail "DP1's public npm ci installs the public bytes"
   [[ "$(jq -r '.packages["node_modules/sd-approved"].integrity' "${CASE_PROJECT}/node_modules/.package-lock.json")" == "${EVIL_INTEGRITY} ${public}" ]] \
-    || fail "npm keeps both digests in the tree record, or M1 tests nothing"
+    || fail "npm keeps both digests in the tree record, or DP1 tests nothing"
   rm -rf "${npm_config_cache}"
   withhold_first "npm_config_registry=${EVIL_REG} npm ci"
 }
-# The U rows: what an install npm cannot be asked about records. Its answer is
+# The UK rows: what an install npm cannot be asked about records. Its answer is
 # unknown, so it records every integrity a tree it has not observed holds,
-# public ones included (U0: a tree installed outside the hooks, U1: a clone),
-# and only what it brings in to a tree the hooks observed (U2). The later
+# public ones included (UK0: a tree installed outside the hooks, UK1: a clone),
+# and only what it brings in to a tree the hooks observed (UK2). The later
 # command installs the public sd-approved in another project.
 new_benignenv() { printf 'export SD_BENIGN=1\n' > "${CASE_PROJECT}/sdenv.sh"; }
 unknown_first() {
@@ -887,11 +887,11 @@ unknown_first() {
   new_project
   CASE_HOME="${first_home}"
 }
-new_u0() { new_project; set_dependency sd-approved 1.0.0; fixture_install; unknown_first 'source ./sdenv.sh && npm install sd-swapped@1.0.0'; }
-new_u1() { new_project; set_dependency sd-approved 1.0.0; fixture_install; rm -rf "${CASE_PROJECT}/node_modules"; unknown_first 'source ./sdenv.sh && npm ci'; }
-new_u2() {
+new_uk0() { new_project; set_dependency sd-approved 1.0.0; fixture_install; unknown_first 'source ./sdenv.sh && npm install sd-swapped@1.0.0'; }
+new_uk1() { new_project; set_dependency sd-approved 1.0.0; fixture_install; rm -rf "${CASE_PROJECT}/node_modules"; unknown_first 'source ./sdenv.sh && npm ci'; }
+new_uk2() {
   new_project; run_install 'npm install sd-approved@1.0.0'
-  [[ -z "${CASE_POST}" ]] || fail "U2's first install confirms quietly (post: ${CASE_POST:0:300})"
+  [[ -z "${CASE_POST}" ]] || fail "UK2's first install confirms quietly (post: ${CASE_POST:0:300})"
   unknown_first 'source ./sdenv.sh && npm install sd-swapped@1.0.0'
 }
 
@@ -1037,21 +1037,21 @@ Q2|q2|claude|kept:${WITHHELD_EVIL}|npm install sd-swapped@1.0.0
 Q3|q3|claude|kept:${WITHHELD_EVIL}|npm ci
 Q4|q4|claude|kept:${WITHHELD_EVIL}|npm ci
 Q5|q5|claude|kept:${WITHHELD_EVIL}|npm install
-H1|h1|claude|kept:${WITHHELD_EVIL}|npm install
-H2|h2|claude|kept:${WITHHELD_EVIL}|npm install sd-swapped@1.0.0
-H3|h3|claude|kept:${WITHHELD_EVIL}|npm ci
-H4|h4|claude|kept:${WITHHELD_EVIL}|npm ci
-M1|m1|claude|kept:${WITHHELD_EVIL}|npm install
-U0|u0|claude|kept:the bytes of sd-approved here are the ones an install in @FIRST@ first fetched from a registry safedeps could not name (an earlier statement (source) can change the environment npm runs with|npm install sd-approved@1.0.0
-U1|u1|claude|kept:the bytes of sd-approved here are the ones an install in @FIRST@ first fetched from a registry safedeps could not name (an earlier statement (source) can change the environment npm runs with|npm install sd-approved@1.0.0
-U2|u2|claude|quiet:sd-approved|npm install sd-approved@1.0.0
+HL1|hl1|claude|kept:${WITHHELD_EVIL}|npm install
+HL2|hl2|claude|kept:${WITHHELD_EVIL}|npm install sd-swapped@1.0.0
+HL3|hl3|claude|kept:${WITHHELD_EVIL}|npm ci
+HL4|hl4|claude|kept:${WITHHELD_EVIL}|npm ci
+DP1|dp1|claude|kept:${WITHHELD_EVIL}|npm install
+UK0|uk0|claude|kept:the bytes of sd-approved here are the ones an install in @FIRST@ first fetched from a registry safedeps could not name (an earlier statement (source) can change the environment npm runs with|npm install sd-approved@1.0.0
+UK1|uk1|claude|kept:the bytes of sd-approved here are the ones an install in @FIRST@ first fetched from a registry safedeps could not name (an earlier statement (source) can change the environment npm runs with|npm install sd-approved@1.0.0
+UK2|uk2|claude|quiet:sd-approved|npm install sd-approved@1.0.0
 ROWS
 [[ ${#FAILURES[@]} -ne ${failures_before} ]] \
   || pass "install scripts run only over a tree on record from the public registry or a workspace, a package counts as bundled only where its parent's package.json bundles it, a record on the public registry counts only where npm says it fetched from there, a rollback runs none without a confirmed snapshot and says what ran on each engine, and K4-K7 are installed but not rebuilt"
 
 # LK1. Each lockfile field the rebuild's check reads vouches for less than it
 # seems to (ARCHITECTURE.md tables them), and every gap is held by a row:
-# `resolved` by RH1-RH8, L1 and L2, `integrity` by RH2, RH2w, P7, Q1-Q5, H1-H4 and M1,
+# `resolved` by RH1-RH8, L1 and L2, `integrity` by RH2, RH2w, P7, Q1-Q5, HL1-HL4 and DP1,
 # `inBundle` by NB1-NB2n, `version` by lockless-forms.sh (an .npmrc that writes 1.0.1
 # over a recorded 1.0.0), and `link` here. A link record says npm put a
 # symlink there, and nothing about what is there now: a real directory

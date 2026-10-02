@@ -1690,7 +1690,7 @@ npm_workspace_member_dirs() {
 # file is a record anyone can commit: a clone that carried a tree record naming
 # the impostor's integrity, and none of its bytes, had its first fetch from the
 # impostor left out of the record, and the next command rebuilt the impostor
-# (the H rows of effect-trace-grid.sh). The committed package-lock.json is a
+# (the HL rows of effect-trace-grid.sh). The committed package-lock.json is a
 # record of the same kind (the Q rows). So the copy counts as "held before"
 # only where it is, byte for byte, a tree record this hook judged at the end of
 # an earlier install here (npm_tree_record_observed): every integrity in it was
@@ -1703,14 +1703,14 @@ npm_workspace_member_dirs() {
 # integrity names and accepts a match with any digest of it, so an entry that
 # names two says nothing about which one the bytes matched: a pair of the
 # impostor's sha512 and the public one, installed from the public registry,
-# vouched for the impostor's (the M row).
+# vouched for the impostor's (the DP1 row).
 #
 # The cost falls on installs npm did not answer for, or answered with another
 # registry. Each digest such an install finds in a tree it has not observed is
 # recorded, public ones included: the first `npm ci` of a clone, the first such
 # install in a tree installed before this version or outside the hooks, and the
 # first one after anything else rewrote the tree record. A command npm cannot
-# be asked about (`source ./env.sh && npm ci`, the U rows) is the common one:
+# be asked about (`source ./env.sh && npm ci`, the UK rows) is the common one:
 # every package of that tree is then withheld on this machine, and no tree that
 # holds one of them is rebuilt automatically. An install npm answers for with
 # the public registry records nothing and leaves the tree observed, so the
