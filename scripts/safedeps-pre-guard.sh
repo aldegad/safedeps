@@ -1164,8 +1164,9 @@ shell_lex() {
           if (view == "scan" || view == "live" || view == "stmts") {
             # A code `#` is never a comment start here, and must not become one
             # when the scan is read again: after a blanked region (a quoted word
-            # with a `#` glued to its closing quote) it would follow a blank,
-            # which is where a comment starts.
+            # with a `#` glued to its closing quote) or an escaped blank, which
+            # this view prints as a blank, it would follow a blank, which is
+            # where a comment starts (form WB7).
             if (cl == "p" && view == "stmts") put(";")
             # A statement ends only at a top-level separator: not inside a
             # substitution, an expansion or arithmetic, and not in a
@@ -1173,7 +1174,7 @@ shell_lex() {
             # cut wherever these bytes were, so the words after
             # `$(pwd | sed x)` or `>| f` left the install (caught in review).
             else if (view == "stmts" && cl == "c" && (DEP[k] != 1 || (k in DROP)) && cc ~ /[;&|\n]/) put(cc == "\n" ? " " : "_")
-            else if (cl == "c" || cl == "p") put(cc == "#" && (k == 1 || C[k-1] != "c" && C[k-1] != "e") ? "_" : cc)
+            else if (cl == "c" || cl == "p") put(cc == "#" && (k == 1 || C[k-1] != "c" && C[k-1] != "e" || C[k-1] == "e" && X[k-1] ~ /[ \t]/) ? "_" : cc)
             else if (cl == "e") put(index(";&|()<>!{}#`\042\047\\$", cc) ? "_" : (cc == "\n" ? " " : cc))
             else if (view == "live" && (cl == "Q" || cl == "B")) put(cc)
             else put(" ")
@@ -1546,10 +1547,36 @@ join_line_continuations() {
   shell_lex "$1" joined "safedeps:join_line_continuations"
 }
 
+# The joined view of <text> in the current reading, read again. A reader that
+# lexes the joined lines again reads them out of the context the first lexing
+# had: live code in an unquoted heredoc body lands on one line with the code
+# after the body, and lexed again at the top level, a quote in that body code
+# (`$((cat <<EOF` then `it's` in a body) opened a quote that never closed and
+# took the install after the body along (fuzz form F19, seed 20261001). Where
+# <text> closes in this reading and its joined view does not, that second
+# reading failed, and the gate settles it as one (UNDECIDED), never as "no
+# install". Where <text> itself does not close, the reading already says so.
+join_line_continuations_checked() {
+  local f1 f2 joined
+  if ! f1=$(mktemp "${TMPDIR:-/tmp}/safedeps-lex.XXXXXX" 2>/dev/null) || ! f2=$(mktemp "${TMPDIR:-/tmp}/safedeps-lex.XXXXXX" 2>/dev/null); then
+    [[ -z "${f1:-}" ]] || rm -f "${f1}"
+    guard_mark_reading_failed
+    join_line_continuations "$1"
+    return
+  fi
+  joined=$(SAFEDEPS_LEX_FLAGS="${f1}" shell_lex "$1" joined "safedeps:join_line_continuations")
+  if ! grep -q '^UNTERM$' "${f1}" 2>/dev/null; then
+    SAFEDEPS_LEX_FLAGS="${f2}" shell_lex "${joined}" scan "safedeps:command_scan_text" > /dev/null
+    grep -q '^UNTERM$' "${f2}" 2>/dev/null && guard_mark_reading_failed
+  fi
+  rm -f "${f1}" "${f2}"
+  printf '%s' "${joined}"
+}
+
 command_candidate_texts() {
   local command="$1"
 
-  command=$(join_line_continuations "${command}")
+  command=$(join_line_continuations_checked "${command}")
 
   normalize_install_text "${command}"
   printf '\n'
