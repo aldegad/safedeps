@@ -601,6 +601,43 @@ start_rows=(
   'X24|111111|if true; then { pip install evil==1.0.0; }; fi'
   'X25|111011|time { pip install evil==1.0.0; }'
   'X26|111111|! { pip install evil==1.0.0; }'
+  # bash 5 reads `function WORD function_body` and `coproc WORD
+  # shell_command`: any compound command after the name is the body. bash 3.2,
+  # zsh, sh and dash fail to parse the function forms (bash 3.2 has no coproc),
+  # and `function f g if` fails in bash 5 too (one name). Measured on
+  # 2026-10-03 with a marker in place of the install, the bash 5 column on
+  # Linux bash 5.2.21 and again on a macOS build of GNU bash 5.2.37.
+  'FH1|000001|function f if pip install evil==1.0.0; then :; fi; f'
+  'FH2|000001|function f while pip install evil==1.0.0; do break; done; f'
+  'FH3|000001|function f until pip install evil==1.0.0; do break; done; f'
+  'FH4|000001|function f for i in 1; do pip install evil==1.0.0; done; f'
+  'FH5|000001|function f case x in x) pip install evil==1.0.0;; esac; f'
+  'FH6|000001|function f select i in 1; do pip install evil==1.0.0; break; done <<< 1; f'
+  'FH7|000001|function f ( pip install evil==1.0.0 ); f'
+  'CP1|000001|coproc foo if pip install evil==1.0.0; then :; fi; wait'
+  'CP2|000001|coproc foo while pip install evil==1.0.0; do break; done; wait'
+  'CP3|000001|coproc foo until pip install evil==1.0.0; do :; done; wait'
+  'CP4|000001|coproc foo for i in 1; do pip install evil==1.0.0; done; wait'
+  'CP5|000001|coproc foo case x in x) pip install evil==1.0.0;; esac; wait'
+  'CP6|000001|coproc foo ( pip install evil==1.0.0 ); wait'
+  # A redirection before the command name is a prefix like an assignment.
+  # Every shell runs these; the recognizers read none of them until the
+  # unprefixed view dropped the redirection at each start.
+  'RD1|111111|2>/dev/null pip install evil==1.0.0'
+  'RD2|111111|echo a; 2>/dev/null pip install evil==1.0.0'
+  'RD3|111111|f() { </dev/null pip install evil==1.0.0; }; f'
+  'RD4|111011|function f { 2>/dev/null pip install evil==1.0.0; }; f'
+  'RD5|111111|if 2>/dev/null pip install evil==1.0.0; then :; fi'
+  'RD6|111111|case x in x) 2>/dev/null pip install evil==1.0.0;; esac'
+  'RD7|111111|2>/dev/null >/dev/null </dev/null pip install evil==1.0.0'
+  'RD8|111111|2>/dev/null FOO=1 pip install evil==1.0.0'
+  'RD9|111111|FOO=1 2>/dev/null pip install evil==1.0.0'
+  'RD10|111111|time 2>/dev/null pip install evil==1.0.0'
+  'RD11|111011|&>/dev/null pip install evil==1.0.0'
+  'RD12|111111|2> /dev/null pip install evil==1.0.0'
+  'RD13|111111|{ >/dev/null pip install evil==1.0.0; }'
+  'RD14|111111|exec 2>/dev/null pip install evil==1.0.0'
+  'AS1|111011|function f { FOO=1 pip install evil==1.0.0; }; f'
 )
 for start_row in "${start_rows[@]}"; do
   start_ran="${start_row#*|}" start_ran="${start_ran%%|*}" start_form="${start_row#*|*|}"
@@ -628,7 +665,13 @@ for not_a_start in \
   'echo ! pip install x' \
   "grep -E '(a|b) { pip install' f" \
   'echo for i in 1; do echo pip install x; done' \
-  'coproc foo pip install evil==1.0.0; wait'
+  'coproc foo pip install evil==1.0.0; wait' \
+  'echo 2>/dev/null pip install evil==1.0.0' \
+  'echo a 2>/dev/null pip install evil==1.0.0' \
+  'function f g if pip install evil==1.0.0; then :; fi; g' \
+  'function f { :; }; f' \
+  'echo function f if pip install evil==1.0.0' \
+  'echo coproc foo if pip install evil==1.0.0'
 do
   expect_pass "words that open no statement: ${not_a_start}" "${not_a_start}"
   if logged_ungated "${not_a_start}"; then fail "words that open no statement leave no UNGATED record: ${not_a_start}"; fi
@@ -673,6 +716,9 @@ expect_not_approved "a function with three names" 'function f g h { pip install 
 # the arithmetic cuts no statement.
 expect_not_approved "a body after an arithmetic test" 'if ((1)) { pip install evil==1.0.0; }'
 expect_not_approved "an empty arithmetic for" 'for (( ; ; )) { pip install evil==1.0.0; break; }'
+# A pinned npm install behind a redirection is read and its spec checked.
+expect_not_approved "an npm install behind a redirection" '2>&1 npm install evil@1.0.0'
+expect_not_approved "an npm install in a loop after function NAME" 'function f while npm install evil@1.0.0; do break; done; f'
 pass "statement starts are read from the shell grammar, and the same words in an argument open nothing"
 
 # The inert rewrite reaches an npm install at every new start, under the rule
@@ -694,7 +740,9 @@ for inert_form in \
   'f() { npm install evil; }; f' \
   'for i in 1; { npm install evil; }' \
   'time { npm install evil; }' \
-  '! { npm install evil; }'
+  '! { npm install evil; }' \
+  '2>&1 npm install evil' \
+  'function f while npm install evil; do break; done; f'
 do
   [[ "$(gate_rewrite "${inert_form}")" == "${inert_form/npm install/npm install --ignore-scripts}" ]] \
     || fail "an npm install at a statement start gets --ignore-scripts: ${inert_form} (got: $(gate_rewrite "${inert_form}"))"
@@ -706,7 +754,8 @@ for inert_form in \
   'for i (1) { npm install evil; }' \
   'repeat 1 { npm install evil; }' \
   'for ((i=0;i<1;i++)) { npm install evil; }' \
-  'coproc foo { npm install evil; }; wait'
+  'coproc foo { npm install evil; }; wait' \
+  'coproc foo until npm install evil; do :; done; wait'
 do
   got=$(gate_reason "${inert_form}")
   [[ "${got}" == "deny "*UNDECIDED*"read the npm installs in this command in different places"* ]] \

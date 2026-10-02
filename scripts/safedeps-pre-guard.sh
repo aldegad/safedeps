@@ -462,8 +462,10 @@ shell_lex() {
       #              shell unescapes it (`\`` nests). For the payload extractor.
       #   view=unprefixed  the text with the prefixes a statement may start with
       #              removed: assignments (NAME=value, the value one word however
-      #              it is quoted or nested), env with its options and
-      #              assignments, command and exec. Not length-preserving.
+      #              it is quoted or nested), redirections with their targets,
+      #              env with its options and assignments, command and exec, at
+      #              every place the stmts walk starts a command. Not
+      #              length-preserving.
       #   view=noredir  every top-level redirection blanked: the operator, a file
       #              descriptor number that is the whole word in front of it, and
       #              the target word. An operator inside quotes, a substitution or
@@ -530,7 +532,7 @@ shell_lex() {
         SPC["\n"] = 1
         DQS["\\"] = 1; DQS["\042"] = 1; DQS["$"] = 1; DQS["`"] = 1
         wantdep = (view == "unprefixed" || view == "unprefixed-lines" || view == "noredir" || view == "pieces" || view == "cscripts" || view == "stmts")
-        wantar = (view == "stmts")
+        wantar = (view == "stmts" || view == "unprefixed" || view == "unprefixed-lines")
         if (view == "pieces") {
           # The value of each one-letter escape in $\047...\047.
           AQV["a"] = "\007"; AQV["b"] = "\010"; AQV["e"] = "\033"; AQV["E"] = "\033"
@@ -668,7 +670,7 @@ shell_lex() {
           # case ... esac: a pattern close `)` closes no substitution (form P8).
           if ((c == "c" || c == "e") && wordstart(i) && (i + 4 > N || X[i+4] ~ /[ \t\n;&|()<>]/)) {
             w4 = X[i] X[i+1] X[i+2] X[i+3]
-            if (w4 == "case" && cmdpos(i)) { C[i+1] = cls; C[i+2] = cls; C[i+3] = cls; i += 3; push("C"); continue }
+            if (w4 == "case" && (cmdpos(i) || namehead(i))) { C[i+1] = cls; C[i+2] = cls; C[i+3] = cls; i += 3; push("C"); continue }
             # `esac` ends the case where a pattern list could start, not as a
             # pattern word after `|` (`*|esac)`, form X7).
             if (w4 == "esac" && top == "C" && !(cpat[d] == 1 && cpw[d])) { C[i+1] = cls; C[i+2] = cls; C[i+3] = cls; i += 3; pop(); continue }
@@ -750,7 +752,7 @@ shell_lex() {
         # the end of the input and take every line after it along (form A7, a
         # heredoc inside `$((` that bash reads as arithmetic). Such a command is
         # settled as UNDECIDED by guard_check_command_reads anyway.
-        if ((view == "unprefixed" || view == "unprefixed-lines") && !unterm) prefixes()
+        if ((view == "unprefixed" || view == "unprefixed-lines") && !unterm) { redirs(); starts(policy, BU, CSW); prefixes() }
         # Statement starts are read only from a reading that closes, for the
         # same reason: a word walk through a quote or a body that never ends
         # marks starts the shell never reads.
@@ -866,10 +868,19 @@ shell_lex() {
       # after each. A word is cut only by word_sep, so a quoted or nested value
       # (FOO="a b", FOO=$(cmd arg), FOO=a\ b) stays one word -- the sed this
       # replaced read a value as the bytes up to the first blank or quote.
+      # A statement starts where starts() found a command (CSW), and a
+      # redirection there is a prefix like an assignment: redirs() has marked
+      # its operator, file descriptor and target in DROP. Left in place,
+      # `2>/dev/null pip install ...` put a word between the start and the
+      # install, and no recognizer read it (every shell runs it). Read from
+      # separators alone, the starts after `function NAME {` kept their
+      # assignments the same way.
       function prefixes(   k, s, w, atstart, envmode, takes, hit, execmode, cmdmode, timemode) {
         atstart = 1; envmode = 0; takes = 0; execmode = 0; cmdmode = 0; timemode = 0; k = 1
         while (k <= N) {
+          if (k in CSW) { atstart = 1; envmode = 0; takes = 0; execmode = 0; cmdmode = 0; timemode = 0 }
           if (word_sep(k)) {
+            if (k in DROP) { if (atstart) A[k] = 1; k++; continue }
             if (X[k] ~ /[\n;&|(]/ || C[k] == "p") { atstart = 1; envmode = 0; takes = 0; execmode = 0; cmdmode = 0; timemode = 0 }
             k++; continue
           }
@@ -877,7 +888,8 @@ shell_lex() {
           while (k <= N && !word_sep(k)) { w = w X[k]; k++ }
           if (!atstart) continue
           hit = 0
-          if (takes) { takes = 0; hit = 1 }
+          if (s in DROP) hit = 1
+          else if (takes) { takes = 0; hit = 1 }
           else if (envmode && w ~ /^-/) { if (w ~ /^(-u|--unset|-C|--chdir)$/) takes = 1; hit = 1 }
           else if (execmode && w ~ /^-[a-z]+$/) { if (w ~ /a$/) takes = 1; hit = 1 }
           else if (cmdmode && w == "-p") hit = 1
@@ -902,6 +914,9 @@ shell_lex() {
       # only zsh reads so: `}` closes a group wherever it stands, and
       # `always` opens the block after one.
       function opener(w) { return w ~ /^(!|[{]|if|then|else|elif|while|until|do)$/ }
+      # The words that open a compound command other than a group or a
+      # subshell: what may follow `function NAME` and `coproc NAME` as a body.
+      function cbody(w) { return w ~ /^(if|while|until|for|select|case|[[][[])$/ }
       function zopener(w) { return w == "}" || w == "always" }
       # A word that assigns. It stays with the command it prefixes.
       function assignword(w) { return w ~ /^[A-Za-z_][A-Za-z0-9_]*=/ }
@@ -910,25 +925,34 @@ shell_lex() {
       # next word stands where the shell reads a command name. The blank
       # before such a word is marked in B, and the view prints it as `;`.
       # Assignments and redirections before a command are part of it, so no
-      # mark falls between them and the command; the word after a
-      # redirection operator is its target, never a command.
+      # mark falls between them and the command, and a redirection that comes
+      # first takes the mark; the word after a redirection operator is its
+      # target, never a command.
       #
       # Every reading: after a separator or a case pattern, a reserved word, a
-      # function head (an empty `()`, or `function NAME... {`), `time` and its
-      # options, `coproc`, `for NAME... {` and `for ((...)) {`. A rule may be
-      # shared only when it adds starts: a shell that has no such form fails
-      # to parse the command, and runs none of it (measured per shell in
-      # scan-contract). zsh alone: `}` wherever it stands, `always`, the short
+      # function head (an empty `()`, `function NAME... {`, or `function NAME`
+      # before any other compound command: bash 5 reads `function WORD
+      # function_body`, so `function f if pip install x; then :; fi` defines a
+      # function that runs it), `time` and its options, `coproc`, `for
+      # NAME... {` and `for ((...)) {`. A rule may be shared only when it adds
+      # starts: a shell that has no such form fails to parse the command, and
+      # runs none of it (measured per shell in scan-contract). zsh alone: `}` wherever it stands, `always`, the short
       # forms `for NAME (WORDS)`, `foreach`, `repeat WORD`, `[[ ... ]]` and an
       # arithmetic `((...))` before a body, and `case WORD {`. bash alone:
-      # `coproc NAME {`. These take starts away from what the shared walk
-      # reads (the words in `for i (1)`) or only one shell runs them, so the
-      # reading that is not that shell does not read them; the bash reading
-      # walks all three and says DIVERGE where they differ (see starts_all).
+      # `coproc NAME` before a compound command (`coproc WORD shell_command`:
+      # `{`, `if`, `while` and the rest of cbody). These take starts away from
+      # what the shared walk reads (the words in `for i (1)`) or only one shell
+      # runs them, so the reading that is not that shell does not read them;
+      # the bash reading walks all three and says DIVERGE where they differ
+      # (see starts_all).
       #
       # The arithmetic word is read as such: its first `(` is a separator to
       # the word walk, so the word starts at the second one, with AR after it.
-      function starts(rs, B,   k, s, w, op, st, pre, rd, fn, fr, inp, rp, dbr, cop, tm, cs, zr, br) {
+      #
+      # CS gets the first byte of each command, its prefixes included: the
+      # first word, or the redirection operator or file descriptor before it.
+      # prefixes() starts there.
+      function starts(rs, B, CS,   k, s, w, op, st, pre, rd, fn, fr, inp, rp, dbr, cop, tm, cs, zr, br) {
         zr = (rs == "zsh"); br = (rs == "bash")
         st = 1; pre = 0; rd = 0; fn = 0; fr = 0; inp = 0; rp = 0; dbr = 0; cop = 0; tm = 0; cs = 0; k = 1
         while (k <= N) {
@@ -941,7 +965,13 @@ shell_lex() {
             else if (op == "<" || op == ">") {
               # `<(` and `>(` are process substitutions, whose `(` opens a
               # command; anything else is a redirection.
-              if (X[k+1] != "(") { rd = 1; if (st) pre = 1; if (op == ">" && X[k+1] == "|") k++ }
+              # A redirection that comes first is the start of its command.
+              if (X[k+1] != "(") {
+                rd = 1
+                if (st && !pre) { CS[k] = 1; mark_start(k, B) }
+                if (st) pre = 1
+                if (op == ">" && X[k+1] == "|") k++
+              }
             }
             else if (op == "(") {
               if (X[k+1] == "(" && (k + 2) in AR) { }
@@ -960,7 +990,14 @@ shell_lex() {
           if (inp) continue
           if (rd) { rd = 0; continue }
           if (dbr) { if (w == "]]") { dbr = 0; st = zr }; continue }
-          if (fn) { if (w == "{") { fn = 0; st = 1 }; continue }
+          # fn counts the words after `function`: 2 right after the name,
+          # where bash reads a body; 3 after more names, where only `{` opens
+          # one (zsh).
+          if (fn) {
+            if (w == "{") { fn = 0; st = 1; continue }
+            if (fn != 2 || !cbody(w)) { fn = (fn == 1) ? 2 : 3; continue }
+            fn = 0; st = 1
+          }
           if (fr == 1) { fr = 2; continue }
           if (fr == 2) {
             if (w == "in") { fr = 0; st = 0 }
@@ -970,6 +1007,7 @@ shell_lex() {
           if (rp) { rp = 0; st = 1; continue }
           if (cs == 1) { cs = 2; continue }
           if (cs == 2) { cs = (zr && w == "{") ? 3 : 0; continue }
+          if (!st && br && cop == 2 && cbody(w)) { st = 1; cop = 0 }
           if (!st) {
             if (br && cop == 2 && w == "{") st = 1
             else if (zr && w == "}") st = 1
@@ -979,8 +1017,12 @@ shell_lex() {
           if (tm && w ~ /^-/) continue
           tm = 0
           # A file descriptor number glued to a redirection belongs to it.
-          if (w ~ /^[0-9]+$/ && (X[k] == "<" || X[k] == ">")) continue
-          if (!pre) mark_start(s, B)
+          if (w ~ /^[0-9]+$/ && (X[k] == "<" || X[k] == ">")) {
+            if (!pre) { CS[s] = 1; mark_start(s, B) }
+            pre = 1
+            continue
+          }
+          if (!pre) { CS[s] = 1; mark_start(s, B) }
           pre = 0
           # The word after `coproc` is a command to zsh and to bash, unless
           # bash reads it as the NAME of a `coproc NAME {`. It is marked, and
@@ -1100,6 +1142,20 @@ shell_lex() {
         w = ""
         while (k >= 1 && X[k] ~ /[a-z]/) { w = X[k] w; k-- }
         return w ~ /^(if|then|else|elif|while|until|do|time)$/
+      }
+      # Whether byte j follows the NAME of `function NAME` or `coproc NAME`,
+      # where bash 5 reads a compound command (see cbody). Asked where a
+      # `case` opens, so that `function f case x in x) ...` has its arms: the
+      # walk reads the body, and the pattern close is a start like any other.
+      function namehead(j,   k, w) {
+        k = j - 1
+        while (k >= 1 && (X[k] == " " || X[k] == "\t" || C[k] == "l")) k--
+        if (k < 1 || X[k] ~ /[ \t\n;&|()<>]/) return 0
+        while (k >= 1 && X[k] !~ /[ \t\n;&|()<>]/) k--
+        while (k >= 1 && (X[k] == " " || X[k] == "\t" || C[k] == "l")) k--
+        w = ""
+        while (k >= 1 && X[k] ~ /[a-z]/) { w = X[k] w; k-- }
+        return (w == "function" || w == "coproc") && (k < 1 || X[k] ~ /[ \t\n;&|(!{)`]/)
       }
       # `((` (dollar=0) or `$((` (dollar=1) at byte j, decided the way this
       # reading decides it (see the table above). The bash reading also asks

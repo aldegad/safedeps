@@ -516,6 +516,7 @@ scan_view() { shell_lex "$1" scan "safedeps:scan-contract"; }
 code_view() { shell_lex "$1" code "safedeps:scan-contract"; }
 noredir_view() { shell_lex "$1" noredir "safedeps:scan-contract"; }
 stmts_view() { shell_lex "$1" stmts "safedeps:scan-contract"; }
+unprefixed_view() { shell_lex "$1" unprefixed "safedeps:scan-contract"; }
 property_failures=0
 stmts_unterm=0
 stmts_added=0
@@ -642,11 +643,14 @@ pass "view properties: scan, code, noredir and stmts keep length and are idempot
 #      start falls between them and the command, and the word after a
 #      redirection operator is its target, never a command. Splitting
 #      `npm_config_global=true npm install x` there dropped its UNGATED record.
+#      A redirection that comes first takes the start.
 #   5. A rule is the reading's whose shell has it. A rule every reading shares
-#      only adds starts, at a form the shells without it fail to parse. zsh
+#      only adds starts, at a form the shells without it fail to parse, such
+#      as a compound command right after `function NAME` (bash 5 alone). zsh
 #      alone: `}` wherever it stands, `always`, `for NAME (WORDS)`, `foreach`,
 #      `repeat`, `[[ ... ]]` or an arithmetic `((...))` before a body, `case
-#      WORD {`, and `;|` ending an arm. bash alone: `coproc NAME {` and `;;&`.
+#      WORD {`, and `;|` ending an arm. bash alone: `coproc NAME` before a
+#      compound command, and `;;&`.
 #      The bash reading says DIVERGE at each, so the reading that reads it
 #      runs.
 #   6. Everything else is the scan view, byte for byte.
@@ -672,6 +676,20 @@ check_stmts "bash" "coproc NAME opens its body in bash" \
   'coproc foo { pip i; }' 'coproc;foo {;pip i; }'
 check_stmts "zsh dash" "coproc NAME opens nothing outside bash" \
   'coproc foo { pip i; }' 'coproc;foo { pip i; }'
+check_stmts "${all}" "a compound command right after function NAME is its body" \
+  'function f if pip i; then :; fi' 'function f;if;pip i; then;:; fi'
+check_stmts "${all}" "a loop right after function NAME is its body" \
+  'function f while pip i; do :; done' 'function f;while;pip i; do;:; done'
+check_stmts "${all}" "a case right after function NAME opens its arms" \
+  'function f case x in x) pip i;; esac' 'function f;case x in x);pip i;_ esac'
+check_stmts "${all}" "after a second name only a brace opens a body" \
+  'function f g if pip i; then :; fi' 'function f g if pip i; then;:; fi'
+check_stmts "bash" "coproc NAME before a compound command opens it in bash" \
+  'coproc foo if pip i; then :; fi' 'coproc;foo;if;pip i; then;:; fi'
+check_stmts "zsh dash" "coproc NAME before a compound command opens nothing outside bash" \
+  'coproc foo if pip i; then :; fi' 'coproc;foo if pip i; then;:; fi'
+check_stmts "bash" "a case after coproc NAME opens its arms in bash" \
+  'coproc foo case x in x) pip i;; esac' 'coproc;foo;case x in x);pip i;_ esac'
 check_stmts "${all}" "a case pattern close is a start, written after the close" \
   'case x in x) { pip i; };; esac' 'case x in x);{;pip i; };_ esac'
 check_stmts "${all}" "an arm glued to its pattern close starts at the close" \
@@ -713,12 +731,42 @@ check_stmts "${all}" "a substitution inside arithmetic is nested, and ends nothi
 check_stmts "${all}" "an assignment stays with its command" \
   'if FOO=1 BAR=2 pip i; fi' 'if;FOO=1 BAR=2 pip i; fi'
 check_stmts "${all}" "a redirection stays with its command, and its target is no command" \
-  '! > then 2>&1 pip i' '! > then 2>_1 pip i'
+  '! > then 2>&1 pip i' '!;> then 2>_1 pip i'
+check_stmts "${all}" "a redirection that comes first takes its command's start" \
+  '{ 2>/dev/null pip i; }; if >f pip i; then :; fi' '{;2>/dev/null pip i; }; if;>f pip i; then;:; fi'
 check_stmts "${all}" "a command glued to a function head starts at the blank the view prints" \
   'f()\pip i' 'f();pip i'
 check_stmts "${all}" "a process substitution opens a command, an argument after it does not" \
   'cat <(echo hi) pip i' 'cat <(echo hi) pip i'
 pass "stmts view: statement starts follow each shell grammar, and nothing nested opens one"
+
+# The unprefixed view drops what a command starts with before its name --
+# assignments, env, command, exec, and redirections -- at every start the
+# stmts walk finds, so the install recognizers see the command name at a
+# separator. A redirection left in place put a word between the start and the
+# install (`2>/dev/null pip install ...`, which every shell runs), and the
+# starts after `function NAME {` used to keep their assignments. Where the
+# redirection follows the command name it stays, and so does the text after.
+check_unprefixed() { # readings label input expected
+  local got reading
+  for reading in $1; do
+    got=$(SAFEDEPS_READING="${reading}" capture unprefixed_view "$3")
+    [[ "${got}" == "$4" ]] || fail "unprefixed view (${reading}): $2: [${got}] != expected [$4]"
+  done
+}
+check_unprefixed "${all}" "a redirection before the command name goes, with its target" \
+  '2>/dev/null pip i' 'pip i'
+check_unprefixed "${all}" "a redirection with a blank before its target, after a separator" \
+  'echo a; 2> /dev/null pip i' 'echo a; pip i'
+check_unprefixed "${all}" "redirections and assignments mixed, inside a group" \
+  '{ FOO=1 </dev/null 2>&1 BAR=2 pip i; }' '{ pip i; }'
+check_unprefixed "${all}" "a start after function NAME drops its prefixes" \
+  'function f { 2>&1 FOO=1 pip i; }' 'function f { pip i; }'
+check_unprefixed "${all}" "a redirection after the command name stays" \
+  'echo 2>/dev/null pip i' 'echo 2>/dev/null pip i'
+check_unprefixed "bash zsh" "a redirection after an argument stays" \
+  'echo a &>/dev/null pip i' 'echo a &>/dev/null pip i'
+pass "unprefixed view: the prefixes a command starts with go, redirections among them, and only at a start"
 
 # Rule 5's other half: a form whose starts differ between the readings makes
 # the bash reading say DIVERGE, and a form every shell reads the same way does
@@ -735,11 +783,12 @@ stmts_diverges() { # text -> 0 when the bash stmts reading says DIVERGE
 }
 for form in 'repeat 1 { pip i; }' 'for i (1) pip i' 'foreach i (1) pip i; end' 'if [[ 1 ]] pip i' \
     'while ((i++<1)) { pip i; }' '{ true; } always { pip i; }' 'coproc foo { pip i; }' \
-    'case x in x) true;| x) pip i;; esac' 'case x in x) true;;& x) pip i;; esac'; do
+    'case x in x) true;| x) pip i;; esac' 'case x in x) true;;& x) pip i;; esac' 'coproc foo if pip i; then :; fi'; do
   stmts_diverges "${form}" || fail "stmts view: the bash reading of [${form}] says no DIVERGE, and the starts there are not the same in every shell"
 done
 for form in 'if true; then pip i; fi' 'f() { pip i; }; f' 'time -p pip i' 'function f g { pip i; }' \
-    'case x in x) { pip i; };; esac' 'echo { pip i }; echo then pip i' 'FOO=1 pip i > out'; do
+    'case x in x) { pip i; };; esac' 'echo { pip i }; echo then pip i' 'FOO=1 pip i > out' \
+    'function f if pip i; then :; fi' '{ 2>/dev/null pip i; }'; do
   stmts_diverges "${form}" && fail "stmts view: the bash reading of [${form}] says DIVERGE, and every shell reads its starts the same way"
 done
 pass "stmts view: the bash reading says DIVERGE where the shells start commands differently, and only there"
@@ -772,6 +821,14 @@ stmts_shell_rows=(
   'f() echo RAN; f|-RR-R'
   'f g () { echo RAN; }; g|-R---'
   'time -p echo RAN 2>/dev/null|R-RR-'
+  'function f if echo RAN; then :; fi; f|---R-'
+  'function f while echo RAN; do break; done; f|---R-'
+  'function f case x in x) echo RAN;; esac; f|---R-'
+  'function f g if echo RAN; then :; fi; g|-----'
+  'coproc foo if echo RAN >&2; then :; fi; wait|---R-'
+  'coproc foo while echo RAN >&2; do break; done; wait|---R-'
+  '2>/dev/null echo RAN|RRRRR'
+  '{ 2>/dev/null echo RAN; }|RRRRR'
 )
 if [[ "${SAFEDEPS_STMTS_MEASURE:-}" == 1 ]]; then
   stmts_col() { case "$(uname -s)" in Darwin) printf '%s' "${1:0:3}" ;; *) printf '%s%s' "${1:3:1}" "${1:4:1}" ;; esac; }
