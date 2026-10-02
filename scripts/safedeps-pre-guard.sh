@@ -690,11 +690,14 @@ shell_lex() {
             continue
           }
           if (c == "#" && (wordstart(i) || top == "B" && X[i-1] == "`") && top != "V") {
-            # zsh reads a `(` where an argument stands as the start of a glob
-            # word, so `echo (#i)x` holds no comment there; bash and dash fail
-            # to parse it (form G5). A `(` that opens a command, `$(`, `<(` or
-            # `>(` starts a comment in every shell.
-            if (X[i-1] == "(" && X[i-2] !~ /[$<>]/ && !cmdpos(i - 1)) { div = 1; if (shz) continue }
+            # A `(` where an argument stands is no command. zsh reads it as the
+            # start of a glob word, so `echo (#i)x` holds no comment there, and
+            # bash 3.2 inside a substitution reads no comment either: it runs
+            # the line after the substitution (form G5). bash 5.2 and dash fail
+            # to parse it. So only the dash reading takes a comment, and the
+            # bash reading says DIVERGE. A `(` that opens a command, `$(`, `<(`
+            # or `>(` starts a comment in every shell.
+            if (X[i-1] == "(" && X[i-2] !~ /[$<>]/ && !cmdpos(i - 1)) { div = 1; if (!shd) continue }
             C[i] = "m"; mode = "CM"; continue
           }
           if (c == "$" && X[i+1] == "(" && X[i+2] == "(") { C[i+1] = cls; C[i+2] = cls; arith_or_sub(i, 1); continue }
