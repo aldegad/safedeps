@@ -12,10 +12,14 @@ verdict	*	^npx --cwd=(\./cmd|a\\ b) evil@1\.0\.0 	^deny	npx and nopt read `--cwd
 verdict	*	^pnpm add left-pad --install-dir=x@y$	^deny	`x@y` is the value of the option word `--install-dir=x@y`, not a package; the deny named a package that is never installed
 verdict	*	^pnpm add left-pad >out@1\.0\.0$	^deny	`out@1.0.0` is the target of a redirection, the shell's, not an operand; the deny named a package that is never installed
 verdict	*	^pnpm add left-pad@npm:evil-pkg$	^deny	an unpinned npm alias installs its target, evil-pkg, with no version to check; the deny prescribed `left-pad@npm`, which names no package and could never approve, so it is recorded as evil-pkg instead
+verdict	*	^(bunx|bun x) --cwd [^=]	^deny .* => pass	bunx reads `--cwd` as a switch (bun 1.4.2, measured by scripts/measure/manager-option-reading.sh), so the word after it is the package bunx fetches and runs, and evil@1.0.0 is that program's argument; the gate records that package and no longer checks an argument nothing fetches
 verdict	*	(sh -c|bash -c|eval) .*pip install	^deny .* => pass	text the shell only prints or quotes (`echo 'sh -c "pip install ..."'`) is data, and an escaped-quote decoy closes before the install; neither runs an install
 #
 # --- Records the npm CLI install leaves to the PostToolUse hook -----------------
 verdict	*	(^|[;&|] *|cd sub && |bash -c ')npm (install|i) 	^allow \|  \| [^ ].* => allow \|  \| $	an npm CLI install is read by the effect gate where it leaves a trace, and its record is the PostToolUse hook's (no install trace, or global); the pre-guard no longer writes one for it
+#
+# --- Records bun's own command choice adds ------------------------------------
+missing	*	^bun -[^ =]+ x add 	=> deny \| npm evil@1\.0\.0; \| npm:add$	bun takes for its command the first word that does not start with `-` (bun 1.4.2, measured by scripts/measure/manager-option-reading.sh), so `bun <option> x add ...` runs `bun x add ...`, which fetches the package `add` with no pin; the record now names it, and the install reading is still judged
 #
 # --- Prescriptions that now name the package installed --------------------------
 false	*	.	^deny \| [^|]+; \| [^|]* => deny \| [^|]+; \|	the prescription named a token that is no package (an option, its value, a redirection target, a truncated name, an alias name), or missed the package; it now names what the manager installs, read with that manager's own grammar

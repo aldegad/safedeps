@@ -1326,5 +1326,477 @@
  {
   "category": "forms",
   "command": "yarn workspaces foreach -A add evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun add -p evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun i -p evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun install -p evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun a -p evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun -p add evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun add --print evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun i --print evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun install --print evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun a --print evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun --print add evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun add -e evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun i -e evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun install -e evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun a -e evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun -e add evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun add --eval evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun i --eval evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun install --eval evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun a --eval evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun --eval add evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun add -r evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun i -r evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun install -r evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun a -r evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun -r add evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun add --preload evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun i --preload evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun install --preload evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun a --preload evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun --preload add evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun add --require evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun i --require evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun install --require evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun a --require evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun --require add evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun add --import evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun i --import evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun install --import evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun a --import evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun --import add evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun add -c evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun i -c evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun install -c evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun a -c evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun -c add evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun add --config evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun i --config evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun install --config evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun a --config evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun --config add evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun add --catalog evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun i --catalog evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun install --catalog evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun a --catalog evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun --catalog add evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun add -d evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun i -d evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun install -d evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun a -d evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun -d add evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun add --define evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun i --define evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun install --define evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun a --define evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun --define add evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun add --port evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun i --port evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun install --port evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun a --port evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun --port add evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun add --title evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun i --title evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun install --title evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun a --title evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun --title add evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun add --env-file evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun i --env-file evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun install --env-file evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun a --env-file evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun --env-file add evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun add --conditions evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun i --conditions evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun install --conditions evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun a --conditions evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun --conditions add evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun add --shell evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun i --shell evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun install --shell evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun a --shell evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun --shell add evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun add -E -p evil@1.0.0 left-pad"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun add --print evil@1.0.0 left-pad"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun add --print left-pad"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun add --print=x evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun add --production evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun add -F evil@1.0.0 left-pad"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun add --cwd x evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun x -p evil@1.0.0 evil"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun x --package evil@1.0.0 evil"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bunx -p evil@1.0.0 evil"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bunx --cwd evil@1.0.0 x"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun x --cwd x evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun x --print evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun --cwd=x add evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun --cache-dir x add evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun update -p evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "python3 -Im pip install evil==1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "python3 -Impip install evil==1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "python3 -IW ignore -m pip install evil==1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "python3 -sEm pip install evil==1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "python3 -Ic pass -m pip install evil==1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "python3 -Im pip install left-pad"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "python3 -W -m pip install evil==1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "python -bbm pip install evil==1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "gem install evil:1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "gem install evil:=1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "gem install 'evil:~>1.0'"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "gem install evil:1.0.0 rake"
  }
 ]
