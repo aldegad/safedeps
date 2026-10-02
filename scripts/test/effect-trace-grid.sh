@@ -520,8 +520,20 @@ ROWS
 #     and not rebuilt. The rebuild used to run it.
 #   K4-K7: committed `file:` directory dependencies. Installed, not rebuilt,
 #     named. This is what users see change: the rebuild used to run them.
-#   K8, K9, NS1, BD1: workspaces, the nested strategy and a public package's
-#     bundled dependency are rebuilt as before.
+#   K8, K9, NS1, BD1, BD2: workspaces, the nested strategy and a public
+#     package's bundled dependency are rebuilt as before. BD2 spells it
+#     `bundledDependencies: true`.
+#   NB0-NB2n: a committed lockfile sends the nested sd-swapped@1.0.0 under
+#     sd-nester to the EVIL-sd-swapped tarball. NB1 also marks that record
+#     `inBundle`, NB2 has the root project bundle sd-nester, and npm then
+#     writes `inBundle` into the hidden lockfile itself. Bundling is read from
+#     the parent's package.json on disk, so all of them are installed and not
+#     rebuilt. The rebuild used to run EVIL for NB1-NB2n.
+#   NB3: a public package does bundle the nested package, and its committed
+#     record names another source. Not rebuilt: a bundled package has no
+#     source of its own.
+#   RB1, RB1x: the rollback runs no script, and the message says what ran
+#     before it: nothing on Claude Code, the install's own scripts on Codex.
 #   OM1: `omit-lockfile-registry-resolved` records no source, so nothing shows
 #     the package came from the public registry. Not rebuilt; a boundary.
 #
@@ -547,7 +559,36 @@ jq '.dependencies = {"sd-bundled": "1.0.0"} | .bundleDependencies = ["sd-bundled
   > "${BUNDLER_SRC}/package.json.new" && mv "${BUNDLER_SRC}/package.json.new" "${BUNDLER_SRC}/package.json"
 (cd "${BUNDLER_SRC}" && npm pack --pack-destination "${tmp_root}/tarballs" >/dev/null 2>&1) || fail "npm pack builds sd-bundler"
 cp "${BUNDLER_SRC}/package.json" "${tmp_root}/tarballs/sd-bundler-1.0.0.tgz.json"
-EVIL_INTEGRITY="sha512-$(node -e 'process.stdout.write(require("crypto").createHash("sha512").update(require("fs").readFileSync(process.argv[1])).digest("base64"))' "${EVIL_DIR}/sd-approved-1.0.0.tgz")"
+integrity_of() { printf 'sha512-%s' "$(node -e 'process.stdout.write(require("crypto").createHash("sha512").update(require("fs").readFileSync(process.argv[1])).digest("base64"))' "$1")"; }
+EVIL_INTEGRITY=$(integrity_of "${EVIL_DIR}/sd-approved-1.0.0.tgz")
+
+# The same bundle, declared as `bundledDependencies: true`, which npm reads as
+# every name in dependencies.
+BUNDLERT_SRC="${tmp_root}/src/sd-bundlert-1.0.0"
+make_dir_package "${BUNDLERT_SRC}" sd-bundlert "sd-bundlert@1.0.0"
+make_dir_package "${BUNDLERT_SRC}/node_modules/sd-bundled" sd-bundled "sd-bundled@1.0.0"
+jq '.dependencies = {"sd-bundled": "1.0.0"} | .bundledDependencies = true' "${BUNDLERT_SRC}/package.json" \
+  > "${BUNDLERT_SRC}/package.json.new" && mv "${BUNDLERT_SRC}/package.json.new" "${BUNDLERT_SRC}/package.json"
+(cd "${BUNDLERT_SRC}" && npm pack --pack-destination "${tmp_root}/tarballs" >/dev/null 2>&1) || fail "npm pack builds sd-bundlert"
+cp "${BUNDLERT_SRC}/package.json" "${tmp_root}/tarballs/sd-bundlert-1.0.0.tgz.json"
+
+# sd-nester@1.0.0 depends on sd-swapped@1.0.0, so a project that depends on
+# sd-swapped@1.0.1 nests sd-swapped@1.0.0 under it. EVIL-sd-swapped is a
+# tarball named sd-swapped@1.0.0 whose scripts write EVIL lines, served as
+# sd-evilswap so an http URL fetches it.
+NESTER_SRC="${tmp_root}/src/sd-nester-1.0.0"
+make_dir_package "${NESTER_SRC}" sd-nester "sd-nester@1.0.0"
+jq '.dependencies = {"sd-swapped": "1.0.0"}' "${NESTER_SRC}/package.json" \
+  > "${NESTER_SRC}/package.json.new" && mv "${NESTER_SRC}/package.json.new" "${NESTER_SRC}/package.json"
+(cd "${NESTER_SRC}" && npm pack --pack-destination "${tmp_root}/tarballs" >/dev/null 2>&1) || fail "npm pack builds sd-nester"
+cp "${NESTER_SRC}/package.json" "${tmp_root}/tarballs/sd-nester-1.0.0.tgz.json"
+make_dir_package "${EVIL_DIR}/swap" sd-swapped "EVIL-sd-swapped@1.0.0"
+(cd "${EVIL_DIR}/swap" && npm pack --pack-destination "${EVIL_DIR}" >/dev/null 2>&1) || fail "npm pack builds the impostor sd-swapped"
+cp "${EVIL_DIR}/sd-swapped-1.0.0.tgz" "${tmp_root}/tarballs/sd-evilswap-1.0.0.tgz"
+cp "${EVIL_DIR}/swap/package.json" "${tmp_root}/tarballs/sd-evilswap-1.0.0.tgz.json"
+EVIL_SWAP_URL="http://127.0.0.1:$(cat "${tmp_root}/registry.port")/sd-evilswap/-/sd-evilswap-1.0.0.tgz"
+EVIL_SWAP_INTEGRITY=$(integrity_of "${EVIL_DIR}/sd-swapped-1.0.0.tgz")
+NESTED_KEY=node_modules/sd-nester/node_modules/sd-swapped
 
 new_rb_clone() { new_project; set_dependency sd-victim 1.0.0; fixture_install; rm -rf "${CASE_PROJECT}/node_modules"; }
 new_rb_has() { new_project; fixture_install sd-victim@1.0.0; }
@@ -602,6 +643,43 @@ new_bundler() {
     safedeps_ledger_write_approved_spec npm sd-bundler 1.0.0 >/dev/null
     safedeps_ledger_write_approved_spec npm sd-bundled 1.0.0 >/dev/null ) || fail "the fixture approves sd-bundler"
 }
+new_bundlert() {
+  new_project
+  ( export SAFEDEPS_HOME="${CASE_HOME}"
+    . lib/ledger/ledger.sh
+    safedeps_ledger_write_approved_spec npm sd-bundlert 1.0.0 >/dev/null
+    safedeps_ledger_write_approved_spec npm sd-bundled 1.0.0 >/dev/null ) || fail "the fixture approves sd-bundlert"
+}
+# <file> edited by <jq filter> in the project.
+edit_json() {
+  local file="${CASE_PROJECT}/$1"; shift
+  jq "$@" "${file}" > "${file}.new" && mv "${file}.new" "${file}"
+}
+# A clone whose committed lockfile nests sd-swapped@1.0.0 under sd-nester and
+# sends it to the EVIL-sd-swapped tarball.
+new_nested() {
+  new_project
+  ( export SAFEDEPS_HOME="${CASE_HOME}"
+    . lib/ledger/ledger.sh
+    safedeps_ledger_write_approved_spec npm sd-nester 1.0.0 >/dev/null
+    safedeps_ledger_write_approved_spec npm sd-swapped 1.0.1 >/dev/null ) || fail "the fixture approves sd-nester"
+  set_dependency sd-nester 1.0.0; set_dependency sd-swapped 1.0.1; fixture_install
+  jq -e --arg k "${NESTED_KEY}" '.packages[$k].version == "1.0.0"' "${CASE_PROJECT}/package-lock.json" >/dev/null \
+    || fail "the fixture nests sd-swapped@1.0.0 under sd-nester"
+  edit_json package-lock.json --arg k "${NESTED_KEY}" --arg u "${EVIL_SWAP_URL}" --arg i "${EVIL_SWAP_INTEGRITY}" \
+    '.packages[$k].resolved = $u | .packages[$k].integrity = $i'
+  rm -rf "${CASE_PROJECT}/node_modules"
+}
+new_nested_flagged() { new_nested; edit_json package-lock.json --arg k "${NESTED_KEY}" '.packages[$k].inBundle = true'; }
+new_nested_rootbundle() { new_nested; edit_json package.json '.bundleDependencies = ["sd-nester"]'; }
+# A clone of a project that depends on sd-bundler, whose committed record of
+# the bundled sd-bundled names the EVIL tarball as its source.
+new_bundled_sourced() {
+  new_bundler; set_dependency sd-bundler 1.0.0; fixture_install
+  edit_json package-lock.json --arg u "${EVIL_URL}" --arg i "${EVIL_INTEGRITY}" \
+    '.packages["node_modules/sd-bundler/node_modules/sd-bundled"] += {resolved: $u, integrity: $i}'
+  rm -rf "${CASE_PROJECT}/node_modules"
+}
 new_omit() { new_project; printf 'omit-lockfile-registry-resolved=true\n' > "${CASE_PROJECT}/.npmrc"; }
 
 # <id>|<fixture>|<engine>|<expect>|<command>, where <expect> is
@@ -637,6 +715,20 @@ while IFS= read -r row; do
       grep -qF 'REORG with no confirmed snapshot' <<< "${advisory_new}" || note_failure "${id}: advisory.log says there is no confirmed snapshot (${advisory_new:0:300})"
       grep -qF 'last confirmed safe snapshot' <<< "${CASE_POST}" && note_failure "${id}: the message does not claim a confirmed snapshot"
       [[ -z "${CASE_RAN}" ]] || note_failure "${id}: the rollback runs no install script (${CASE_RAN})"
+      # What ran before the rollback differs by engine, and so must the words.
+      if [[ "${engine}" == codex ]]; then
+        grep -q '^sd-victim' "${MARKS}" || note_failure "${id}: on Codex the install itself runs sd-victim's scripts, or this row tests nothing"
+        grep -qF "the install's own scripts already ran, the rejected package's included" <<< "${CASE_POST}" \
+          || note_failure "${id}: the message says the install's own scripts already ran (post: ${CASE_POST:0:400})"
+        grep -qF 'and no install script was run' <<< "${CASE_POST}" && note_failure "${id}: the message does not say no install script was run"
+        grep -qF 'its own scripts ran unless the command said --ignore-scripts' <<< "${advisory_new}" \
+          || note_failure "${id}: advisory.log says the install's own scripts ran (${advisory_new:0:300})"
+      else
+        grep -qF 'and no install script was run' <<< "${CASE_POST}" \
+          || note_failure "${id}: the message says no install script was run (post: ${CASE_POST:0:400})"
+        grep -qF 'install scripts were not run' <<< "${advisory_new}" \
+          || note_failure "${id}: advisory.log says install scripts were not run (${advisory_new:0:300})"
+      fi
       ;;
     rebuilt:*)
       rolled_back || note_failure "${id}: rolled back (post: ${CASE_POST:-<quiet>})"
@@ -676,10 +768,17 @@ K8|wsclone|claude|quiet:-|npm ci
 K9|workspace|claude|quiet:sd-approved|npm install sd-approved@1.0.0
 NS1|project|claude|quiet:sd-approved|npm install --install-strategy=nested sd-approved@1.0.0
 BD1|bundler|claude|quiet:sd-bundler|npm install sd-bundler@1.0.0
+BD2|bundlert|claude|quiet:sd-bundlert|npm install sd-bundlert@1.0.0
+NB0|nested|claude|kept:a package not recorded as coming from the public registry (${NESTED_KEY} (sd-swapped@1.0.0 from ${EVIL_SWAP_URL}|npm ci
+NB1|nested_flagged|claude|kept:a package not recorded as coming from the public registry (${NESTED_KEY} (sd-swapped@1.0.0 from ${EVIL_SWAP_URL}|npm ci
+NB2|nested_rootbundle|claude|kept:a package not recorded as coming from the public registry (${NESTED_KEY} (sd-swapped@1.0.0 from |npm ci
+NB2i|nested_rootbundle|claude|kept:a package not recorded as coming from the public registry (${NESTED_KEY} (sd-swapped@1.0.0 from |npm install
+NB2n|nested_rootbundle|claude|kept:a package not recorded as coming from the public registry (${NESTED_KEY} (sd-swapped@1.0.0 from |npm install --no-save sd-approved@1.0.0
+NB3|bundled_sourced|claude|kept:a package not recorded as coming from the public registry (node_modules/sd-bundler/node_modules/sd-bundled (sd-bundled@1.0.0 from |npm ci
 OM1|omit|claude|kept:a package not recorded as coming from the public registry (node_modules/sd-approved (sd-approved@1.0.0 from no recorded source))|npm install sd-approved@1.0.0
 ROWS
 [[ ${#FAILURES[@]} -ne ${failures_before} ]] \
-  || pass "install scripts run only over a tree on record from the public registry or a workspace, a rollback runs none without a confirmed snapshot and says so, and K4-K7 are installed but not rebuilt"
+  || pass "install scripts run only over a tree on record from the public registry or a workspace, a package counts as bundled only where its parent's package.json bundles it, a rollback runs none without a confirmed snapshot and says what ran on each engine, and K4-K7 are installed but not rebuilt"
 
 if [[ "${REPORT_ONLY}" == 1 ]]; then
   printf '# GRID_REPORT_ONLY: %s failure(s) not enforced\n' "${#FAILURES[@]}"

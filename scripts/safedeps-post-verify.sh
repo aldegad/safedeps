@@ -529,6 +529,41 @@ restore_node_modules() {
   ROLLBACK_WARNINGS+=("node_modules reinstall failed; review the project manually")
 }
 
+# Reads, for each nested package key on stdin, what every package above it
+# under node_modules bundles, from that package's own package.json on disk.
+# Prints one JSON object, key -> names, the way npm reads the field
+# (@npmcli/package-json normalize): bundleDependencies, or
+# bundledDependencies when the first is absent; `true` is every name in
+# dependencies; an object is its keys; anything else is nothing. A package.json
+# that is missing bundles nothing, and one jq cannot read makes the whole
+# answer `{}`: nothing is bundled, and the rebuild is skipped with the nested
+# packages named.
+npm_bundled_names() {
+  local dir="$1" key rest
+  local -a files=()
+  while IFS= read -r key; do
+    rest="${key}"
+    while [[ "${rest}" == */node_modules/* ]]; do
+      rest="${rest%/node_modules/*}"
+      [[ "${rest}" == *node_modules/* ]] || break
+      [[ -f "${dir}/${rest}/package.json" ]] && files+=("${dir}/${rest}/package.json")
+    done
+  done
+  if [[ ${#files[@]} -eq 0 ]]; then
+    printf '{}\n'
+    return 0
+  fi
+  jq -cn --arg dir "${dir}/" '
+      reduce inputs as $pkg ({};
+        .[input_filename | ltrimstr($dir) | rtrimstr("/package.json")] =
+          ((if ($pkg | has("bundleDependencies")) then $pkg.bundleDependencies else $pkg.bundledDependencies end) as $bd
+           | if $bd == true then ($pkg.dependencies | if type == "object" then keys else [] end)
+             elif ($bd | type) == "array" then [$bd[] | strings]
+             elif ($bd | type) == "object" then ($bd | keys)
+             else [] end))
+    ' "${files[@]}" < /dev/null 2>/dev/null || printf '{}\n'
+}
+
 # `npm rebuild` runs the lifecycle scripts of every package in the tree it
 # rebuilds, and so did the rollback's `npm ci`. Both run over the whole tree.
 # What allowed them used to be a judgment of the change: nothing this command
@@ -546,16 +581,33 @@ restore_node_modules() {
 #     never looked at.
 #   - Every package under node_modules has to come from the public registry:
 #     each record of it names an https URL there
-#     (SAFEDEPS_NPM_PUBLIC_REGISTRY_RE), or it is bundled inside a package
-#     that is checked itself (`inBundle`, nested under another package). A
-#     committed lockfile names its sources and nothing verified them: an
-#     approved name and version pointed at another tarball installed as
-#     recorded, and the rebuild ran that tarball's scripts. A record with no
-#     source, as `omit-lockfile-registry-resolved` writes, does not pass.
+#     (SAFEDEPS_NPM_PUBLIC_REGISTRY_RE), or it is bundled by the package it
+#     is nested under (below). A committed lockfile names its sources and
+#     nothing verified them: an approved name and version pointed at another
+#     tarball installed as recorded, and the rebuild ran that tarball's
+#     scripts. A record with no source, as `omit-lockfile-registry-resolved`
+#     writes, does not pass.
 #   - Every directory outside node_modules (a link's target) has to be a
 #     member the project's package.json declares as a workspace. Any other
 #     directory is code nobody approved: a `file:` dependency, or one an
 #     earlier unrecorded install linked.
+#
+# A bundled package has no source of its own: it came inside its parent's
+# tarball. Which packages are bundled is read from the tree, never from a
+# lockfile's `inBundle`. A committed lockfile sets that field as it likes, and
+# npm writes it into the hidden lockfile for whatever the root project's own
+# bundleDependencies names. Either way an approved name and version from an
+# http tarball passed as bundled and the rebuild ran its scripts (measured,
+# npm 10.8.2). So a package nested under another, at
+# <parent>/node_modules/<name>, is bundled when three things hold: the parent
+# is under node_modules and passes this check itself, the parent's own
+# package.json on disk names <name> in bundleDependencies (or
+# bundledDependencies, or `true` with <name> in its dependencies, as npm
+# reads them), and no record of the nested package names a source other than
+# the public registry. The root project and its workspace members bundle
+# nothing here: what they bundle is installed like any other dependency. A
+# package nested inside a bundled one that its own parent does not name is not
+# bundled here, though npm counts it; its rebuild is skipped with a warning.
 #
 # When any of them fails, the whole rebuild is skipped and the user is told
 # which package and why. Nothing is rolled back: the install itself passed,
@@ -576,8 +628,10 @@ restore_node_modules() {
 # Prints what fails, one per line as `<kind><TAB><what>`: `unrecorded`,
 # `source` or `directory`. Returns 0. Returns 1 with the reason when npm could
 # not be asked or did not answer: then the tree is not known, and the caller
-# must not rebuild it. It starts one npm and one jq, plus one subshell and the
-# workspace reader when the tree holds a directory outside node_modules.
+# must not rebuild it. It starts one npm and one jq, plus two more jq when a
+# nested package has no public source of its own (to read what its parents
+# bundle, and to judge again with that), and one subshell and the workspace
+# reader when the tree holds a directory outside node_modules.
 npm_rebuild_unrecorded() {
   local dir="$1" tmp lockfile rc
   local -a lockfiles=()
@@ -613,7 +667,13 @@ npm_rebuild_unrecorded() {
   # A directory is printed as `candidate<TAB><key><TAB><what>`, and the loop
   # below keeps the ones that are not workspace members: which directories are
   # members is read from package.json, outside jq.
-  if ! jq -rn --slurpfile query "${tmp}/query" --arg public "${SAFEDEPS_NPM_PUBLIC_REGISTRY_RE}" '
+  # The judgment, run once with no bundle declarations read ($bundles null):
+  # a nested package with no public source is then printed as
+  # `nested<TAB><key>` instead of judged. When there are any, the package.json
+  # of each package above them is read and the judgment runs again with what
+  # they bundle (npm_bundled_names).
+  # shellcheck disable=SC2016 # a jq program: jq expands its $names
+  local judge='
       def clean: tostring | sub("^[=v[:space:]]+"; "");
       def recorded_name($key; $entry):
         $entry.name // (if ($key | test("(^|/)node_modules/")) then $key | split("node_modules/") | last else null end);
@@ -621,28 +681,56 @@ npm_rebuild_unrecorded() {
       ([inputs | (.packages // {}) | to_entries[] | select(.key != "")]
         | group_by(.key) | map({key: .[0].key, value: map(.value)}) | from_entries) as $records
       | if ($query | length) != 1 or ($query[0] | type) != "array" then error("npm query did not answer with a list") else . end
-      | $query[0][] | select(type == "object" and (.location // "") != "") as $node
-      | $node.location as $key
-      | ($records[$key] // []) as $recs
-      | "\($node.name // "?")@\($node.version // "?")" as $here
-      | if ($recs | length) == 0 then
-          "unrecorded\t\($key) (\($here), not in either lockfile)"
-        elif any($recs[]; .link == true) then
-          "unrecorded\t\($key) (\($here) on disk, the lockfile records a link)"
-        elif any($recs[]; ((.version // "") | clean) == (($node.version // "") | clean)
-                          and (recorded_name($key; .) as $n | $n == null or $n == $node.name)) | not then
-          "unrecorded\t\($key) (\($here) on disk, the lockfile records \([$recs[] | "\(recorded_name($key; .) // "?")@\(.version // "?")"] | unique | join(" or ")))"
-        elif ($key | test("(^|/)node_modules/") | not) then
-          "candidate\t\($key)\t\($key) (\($here))"
-        elif all($recs[]; public_source) then empty
-        elif ($key | test("node_modules/.+/node_modules/")) and any($recs[]; .inBundle == true) then empty
-        else
-          "source\t\($key) (\($here) from \([$recs[] | .resolved // "no recorded source" | tostring] | unique | join(" or ")))"
-        end
-    ' "${lockfiles[@]+"${lockfiles[@]}"}" < /dev/null > "${tmp}/found" 2>/dev/null; then
+      | ([$query[0][] | select(type == "object" and (.location // "") != "") | {key: .location, value: .}] | from_entries) as $nodes
+      | ($bundles[0]) as $bundled
+      # What fails at <key>, as one line, or null when it passes.
+      | def verdict($key):
+          $nodes[$key] as $node
+          | ($records[$key] // []) as $recs
+          | "\($node.name // "?")@\($node.version // "?")" as $here
+          | if $node == null then
+              "unrecorded\t\($key) (npm did not name it)"
+            elif ($recs | length) == 0 then
+              "unrecorded\t\($key) (\($here), not in either lockfile)"
+            elif any($recs[]; .link == true) then
+              "unrecorded\t\($key) (\($here) on disk, the lockfile records a link)"
+            elif any($recs[]; ((.version // "") | clean) == (($node.version // "") | clean)
+                              and (recorded_name($key; .) as $n | $n == null or $n == $node.name)) | not then
+              "unrecorded\t\($key) (\($here) on disk, the lockfile records \([$recs[] | "\(recorded_name($key; .) // "?")@\(.version // "?")"] | unique | join(" or ")))"
+            elif ($key | test("(^|/)node_modules/") | not) then
+              "candidate\t\($key)\t\($key) (\($here))"
+            elif all($recs[]; public_source) then null
+            else
+              ([$key | capture("^(?<parent>.*node_modules/.+)/node_modules/(?<name>(@[^/]+/)?[^/]+)$")] | first) as $at
+              | if $at != null and $bundled == null then
+                  "nested\t\($key)"
+                elif $at != null
+                     and all($recs[]; .resolved == null or public_source)
+                     and any(($bundled[$at.parent] // [])[]; . == $at.name)
+                     and verdict($at.parent) == null then null
+                else
+                  "source\t\($key) (\($here) from \([$recs[] | .resolved // "no recorded source" | tostring] | unique | join(" or ")))"
+                end
+            end;
+        $query[0][] | select(type == "object" and (.location // "") != "") | verdict(.location) | select(. != null)
+    '
+  printf 'null\n' > "${tmp}/bundles"
+  if ! jq -rn --slurpfile query "${tmp}/query" --slurpfile bundles "${tmp}/bundles" \
+      --arg public "${SAFEDEPS_NPM_PUBLIC_REGISTRY_RE}" "${judge}" \
+      "${lockfiles[@]+"${lockfiles[@]}"}" < /dev/null > "${tmp}/found" 2>/dev/null; then
     printf 'npm query answered with something safedeps could not compare with the lockfiles\n'
     rm -rf "${tmp}"
     return 1
+  fi
+  if grep -q '^nested' "${tmp}/found"; then
+    grep '^nested' "${tmp}/found" | cut -f2 | npm_bundled_names "${dir}" > "${tmp}/bundles"
+    if ! jq -rn --slurpfile query "${tmp}/query" --slurpfile bundles "${tmp}/bundles" \
+        --arg public "${SAFEDEPS_NPM_PUBLIC_REGISTRY_RE}" "${judge}" \
+        "${lockfiles[@]+"${lockfiles[@]}"}" < /dev/null > "${tmp}/found" 2>/dev/null; then
+      printf 'npm query answered with something safedeps could not compare with the lockfiles\n'
+      rm -rf "${tmp}"
+      return 1
+    fi
   fi
 
   if grep -q '^candidate' "${tmp}/found"; then
@@ -1705,10 +1793,24 @@ if [[ "${SUSPICIOUS}" == "true" ]]; then
   # Where the rollback went, said the same way in all three records. Without a
   # confirmed snapshot it is not "the last confirmed safe snapshot", and saying
   # so was the record of a rollback that had just run the rejected package.
+  #
+  # The rollback runs no install script either way, but whether any ran is a
+  # question about the install too. On Claude Code safedeps made it inert; on
+  # Codex it cannot rewrite the command, so the install ran its scripts, the
+  # rejected package's among them, before this hook saw anything. Saying "no
+  # install script was run" there told a Codex user the rejected package never
+  # ran.
   ROLLBACK_TARGET_LINE="the last confirmed safe snapshot"
   if [[ "${ROLLBACK_TARGET_CONFIRMED}" != true ]]; then
-    ROLLBACK_TARGET_LINE="the state before this command, because there is no confirmed snapshot for ${PROJECT_DIR} yet. That state may still hold what was rejected, named below, and no install script was run. Review node_modules, then run \`npm rebuild\` yourself if it is what you expect"
-    log_advisory "post-verify REORG with no confirmed snapshot in ${PROJECT_DIR}: restored the state before this command, which may still hold what was rejected (${REASON_STR%%; }); install scripts were not run."
+    if [[ "$(jq -r '.ignore_scripts_injected == true' "${META_FILE}" 2>/dev/null || printf 'false')" == true ]]; then
+      scripts_line="no install script was run"
+      scripts_log="install scripts were not run"
+    else
+      scripts_line="the rollback ran no install script. safedeps did not make the install itself inert (on Codex it cannot), so unless the command said --ignore-scripts, the install's own scripts already ran, the rejected package's included"
+      scripts_log="the rollback ran no install script; the install was not made inert, so its own scripts ran unless the command said --ignore-scripts"
+    fi
+    ROLLBACK_TARGET_LINE="the state before this command, because there is no confirmed snapshot for ${PROJECT_DIR} yet. That state may still hold what was rejected, named below, and ${scripts_line}. Review node_modules, then run \`npm rebuild\` yourself if it is what you expect"
+    log_advisory "post-verify REORG with no confirmed snapshot in ${PROJECT_DIR}: restored the state before this command, which may still hold what was rejected (${REASON_STR%%; }); ${scripts_log}."
   fi
 
   # Log the reorg event
