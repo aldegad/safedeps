@@ -991,7 +991,13 @@ shell_lex() {
         while (k <= N) {
           if (k in CSW) { atstart = 1; envmode = 0; takes = 0; execmode = 0; cmdmode = 0; timemode = 0 }
           if (word_sep(k)) {
-            if (k in DROP) { if (atstart) A[k] = 1; k++; continue }
+            # A redirection that ends in an operator byte (the `)` of a
+            # process substitution target) takes the blanks after it along,
+            # as one that ends in a word does below.
+            if (k in DROP) {
+              if (atstart) { A[k] = 1; if (!((k + 1) in DROP)) while (k + 1 <= N && C[k+1] == "c" && DEP[k+1] == 1 && (X[k+1] == " " || X[k+1] == "\t")) { k++; A[k] = 1 } }
+              k++; continue
+            }
             if (X[k] ~ /[\n;&|(]/ || C[k] == "p") { atstart = 1; envmode = 0; takes = 0; execmode = 0; cmdmode = 0; timemode = 0 }
             k++; continue
           }
