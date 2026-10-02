@@ -61,7 +61,8 @@
 #   scripts/measure/scan-failure-census.sh [--quick] [--jobs N] [--variants "claude codex padded"]
 #
 #   --quick      the subset npm test runs (the corpus's "quick" block)
-#   --jobs N     parallel runs (default: one per CPU, at most 16)
+#   --jobs N     parallel runs (default: SAFEDEPS_TEST_JOBS when it is set,
+#                otherwise half the CPUs rounded up, at most 16)
 #   --variants   payload shapes: claude (no turn_id), codex (turn_id, so no
 #                inert rewrite), padded (over 1KB, so the self-budget child
 #                judges it), approved (claude, against a ledger that approves
@@ -142,13 +143,23 @@ fi
 
 # --- setup ----------------------------------------------------------------------
 QUICK=false
-# One run per CPU. Every run is a guard judging one payload, CPU-bound and
-# independent of the others, so a fixed 4 left most of a larger machine idle
-# for the longest battery in npm test. The cap is the largest machine this
-# default was measured on (16 CPUs); past it the default would be a guess.
+# Every run is a guard judging one payload, CPU-bound and independent of the
+# others, so the runs scale with CPUs. A fixed 4 left most of a larger machine
+# idle; one run per CPU took a shared 16-CPU Mac already at load 100 past 300.
+# So the default is half the CPUs, rounded up, and SAFEDEPS_TEST_JOBS (which
+# scripts/test/run-all.sh sets for the whole suite) moves it. The cap is the
+# largest machine the default was measured on (16 CPUs).
 cpus=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || printf '4')
 [[ "${cpus}" =~ ^[1-9][0-9]*$ ]] || cpus=4
-JOBS=$(( cpus > 16 ? 16 : cpus ))
+JOBS=$(( (cpus + 1) / 2 ))
+(( JOBS <= 16 )) || JOBS=16
+if [[ -n "${SAFEDEPS_TEST_JOBS:-}" ]]; then
+  [[ "${SAFEDEPS_TEST_JOBS}" =~ ^[1-9][0-9]*$ ]] || {
+    printf 'census: SAFEDEPS_TEST_JOBS must be a whole number of at least 1 (got %s)\n' "${SAFEDEPS_TEST_JOBS:0:40}" >&2
+    exit 2
+  }
+  JOBS="${SAFEDEPS_TEST_JOBS}"
+fi
 VARIANTS=""
 while [[ $# -gt 0 ]]; do
   case "$1" in

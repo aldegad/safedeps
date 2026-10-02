@@ -14,6 +14,10 @@
 # battery, then the tail of each failed battery's log. It exits non-zero when
 # any battery exited non-zero or printed a `not ok` line, and names them.
 #
+# The runner never takes the whole machine by default. At most SAFEDEPS_TEST_JOBS
+# batteries run at once, and the census runs that many guards; the default is
+# half the CPUs, rounded up. Developer machines are shared: an uncapped run on a
+# 16-CPU Mac already at load 100 took it past 300 and starved other sessions.
 # SAFEDEPS_TEST_SERIAL=1 runs the batteries one at a time, in the order below,
 # which is the order of the old chain. Use it to tell a defect from contention.
 # SAFEDEPS_TEST_LOG_DIR=<dir> keeps the logs there instead of a fresh mktemp
@@ -58,6 +62,10 @@ BATTERIES=(
   "e2e|1|scripts/test/e2e.sh"
 )
 PHASE_TWO_AFTER=census
+# The batteries that start first when slots are short, longest first (alone on
+# the 8-CPU Linux VM: census 431s, consumer-forms 373s, lockless-forms 313s,
+# effect-trace-grid 214s). The rest follow in the order above.
+START_FIRST=(census consumer-forms lockless-forms effect-trace-grid)
 # Checked before anything starts: a second phase with nothing to wait for would
 # start at once, under the very load it exists to avoid.
 printf '%s\n' "${BATTERIES[@]}" | grep -qx "${PHASE_TWO_AFTER}|1|.*" || {
@@ -65,8 +73,29 @@ printf '%s\n' "${BATTERIES[@]}" | grep -qx "${PHASE_TWO_AFTER}|1|.*" || {
   exit 2
 }
 
+for first in "${START_FIRST[@]}"; do
+  printf '%s\n' "${BATTERIES[@]}" | grep -q "^${first}|" || {
+    printf 'run-all: START_FIRST names %s, which is not a battery\n' "${first}" >&2
+    exit 2
+  }
+done
+
 serial=false
 [[ "${SAFEDEPS_TEST_SERIAL:-}" == 1 ]] && serial=true
+
+cpus=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || printf '2')
+[[ "${cpus}" =~ ^[1-9][0-9]*$ ]] || cpus=2
+if [[ -n "${SAFEDEPS_TEST_JOBS:-}" ]]; then
+  [[ "${SAFEDEPS_TEST_JOBS}" =~ ^[1-9][0-9]*$ ]] || {
+    printf 'run-all: SAFEDEPS_TEST_JOBS must be a whole number of at least 1 (got %s)\n' "${SAFEDEPS_TEST_JOBS:0:40}" >&2
+    exit 2
+  }
+  jobs="${SAFEDEPS_TEST_JOBS}"
+else
+  jobs=$(( (cpus + 1) / 2 ))
+fi
+# The census reads the same value, so one variable sets both.
+export SAFEDEPS_TEST_JOBS="${jobs}"
 
 if [[ -n "${SAFEDEPS_TEST_LOG_DIR:-}" ]]; then
   log_dir="${SAFEDEPS_TEST_LOG_DIR}"
@@ -76,6 +105,14 @@ else
   log_dir=$(mktemp -d "${tmp_base%/}/safedeps-test.XXXXXX") \
     || { printf 'run-all: cannot create a log directory\n' >&2; exit 2; }
 fi
+
+# A reused log directory must not hand a battery the exit status of an earlier
+# run: the scheduler reads a battery's .rc file as "this one is done".
+for entry in "${BATTERIES[@]}"; do
+  IFS='|' read -r name _ _ <<< "${entry}"
+  rm -f "${log_dir}/${name}.log" "${log_dir}/${name}.rc" "${log_dir}/${name}.secs" \
+    "${log_dir}/${name}.load-start" "${log_dir}/${name}.load-end"
+done
 
 # The load averages, without the platform's framing (macOS prints "load
 # averages: a b c", Linux "load average: a, b, c").
@@ -112,9 +149,9 @@ stop_batteries() {
 trap stop_batteries INT TERM
 
 suite_start=$(date +%s)
-printf '# safedeps npm test: %s, logs in %s, load %s, %s CPUs\n' \
+printf '# safedeps npm test: %s, logs in %s, load %s, %s CPUs, %s jobs\n' \
   "$([[ "${serial}" == true ]] && printf serial || printf parallel)" "${log_dir}" "$(load_now)" \
-  "$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || printf '?')"
+  "${cpus}" "${jobs}"
 
 if [[ "${serial}" == true ]]; then
   for entry in "${BATTERIES[@]}"; do
@@ -124,20 +161,47 @@ if [[ "${serial}" == true ]]; then
     wait "${pids[0]}"
   done
 else
-  gate_pid=""
+  # Start order: START_FIRST, then the rest in the order of BATTERIES.
+  pending=("${START_FIRST[@]}")
   for entry in "${BATTERIES[@]}"; do
-    IFS='|' read -r name battery_phase command <<< "${entry}"
-    [[ "${battery_phase}" == 1 ]] || continue
-    run_one "${name}" "${command}" &
-    pids+=("$!")
-    [[ "${name}" != "${PHASE_TWO_AFTER}" ]] || gate_pid=$!
+    IFS='|' read -r name _ _ <<< "${entry}"
+    case " ${START_FIRST[*]} " in *" ${name} "*) ;; *) pending+=("${name}") ;; esac
   done
-  wait "${gate_pid}"
-  for entry in "${BATTERIES[@]}"; do
-    IFS='|' read -r name battery_phase command <<< "${entry}"
-    [[ "${battery_phase}" == 2 ]] || continue
-    run_one "${name}" "${command}" &
-    pids+=("$!")
+  # A battery is done when its .rc file exists: run_one writes it last. bash
+  # 3.2 (macOS) has no `wait -n`, so the slots are polled once a second.
+  running=()
+  gate_open=false
+  while (( ${#pending[@]} > 0 || ${#running[@]} > 0 )); do
+    still=()
+    for name in ${running[@]+"${running[@]}"}; do
+      if [[ -e "${log_dir}/${name}.rc" ]]; then
+        [[ "${name}" != "${PHASE_TWO_AFTER}" ]] || gate_open=true
+      else
+        still+=("${name}")
+      fi
+    done
+    running=(${still[@]+"${still[@]}"})
+    while (( ${#running[@]} < jobs )); do
+      pick=""
+      left=()
+      for name in ${pending[@]+"${pending[@]}"}; do
+        entry=$(printf '%s\n' "${BATTERIES[@]}" | grep "^${name}|")
+        IFS='|' read -r _ battery_phase command <<< "${entry}"
+        if [[ -z "${pick}" ]] && { [[ "${battery_phase}" == 1 ]] || [[ "${gate_open}" == true ]]; }; then
+          pick="${name}"
+          pick_command="${command}"
+        else
+          left+=("${name}")
+        fi
+      done
+      [[ -n "${pick}" ]] || break
+      pending=(${left[@]+"${left[@]}"})
+      run_one "${pick}" "${pick_command}" &
+      pids+=("$!")
+      running+=("${pick}")
+    done
+    (( ${#pending[@]} > 0 || ${#running[@]} > 0 )) || break
+    sleep 1
   done
   wait
 fi
