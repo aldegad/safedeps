@@ -118,11 +118,18 @@ if [[ "${1:-}" == "--run" ]]; then
     [[ -f "${f}" ]] || continue
     pending=$(jq -r '.project_dir' "${f}" 2>/dev/null || printf 'unreadable')
   done
-  reads=$(cat "${T}/st/reads" 2>/dev/null || printf '0')
-  after=$(cat "${T}/st/after-gate" 2>/dev/null || printf '0')
-  failed=$(cat "${T}/st/failed" 2>/dev/null || printf '0')
-  unmarked=$(cat "${T}/st/unmarked" 2>/dev/null || printf '0')
-  unlisted=$(cat "${T}/st/unlisted" 2>/dev/null || printf '0')
+  # Every counter is a tally file with one line per event (see the shim).
+  tally_count() {
+    local n=0 line
+    [[ -f "$1" ]] || { printf '0'; return 0; }
+    while IFS= read -r line; do n=$(( n + 1 )); done < "$1"
+    printf '%s' "${n}"
+  }
+  reads=$(tally_count "${T}/st/reads")
+  after=$(tally_count "${T}/st/after-gate")
+  failed=$(tally_count "${T}/st/failed")
+  unmarked=$(tally_count "${T}/st/unmarked")
+  unlisted=$(tally_count "${T}/st/unlisted")
   [[ ! -s "${T}/st/strays" ]] || cp "${T}/st/strays" "${WORK}/strays/${n}.${mode}.${k}"
   # Paths under the run's own temp root differ every run; compare them as T.
   # The guard resolves the project directory, so the root appears in its
@@ -178,26 +185,25 @@ real_awk=$(command -v awk)
 # The shims run as this bash, named by path: they run once per reading of every
 # run, and `/usr/bin/env bash` cost one more exec each time.
 shim_bash=$(command -v bash)
-# The shim counts the guard's readings and fails the chosen ones. Counting is
-# under a mkdir lock: readings can run concurrently inside one guard run (a
-# process substitution feeds a loop that reads too). The count is read with a
-# builtin and handed back in a variable rather than through a command
-# substitution and a cat: every reading of every run pays for each process the
-# shim starts, and the shims once cost as much as the guard runs they watch.
+# The shim counts the guard's readings and fails the chosen ones. Readings can
+# run concurrently inside one guard run (a process substitution feeds a loop
+# that reads too), so the counters are tally files: one line appended per
+# event. A short line appended to a file opened O_APPEND is one write, so
+# concurrent shims neither lose nor split one, and nothing is locked. A
+# reading's ordinal is the line its own token landed on.
+#
+# The counters used to be numbers under a mkdir lock, taken in a busy loop with
+# no way to tell a dead holder from a slow one. A shim killed between the mkdir
+# and the rmdir (the self-budget deadline kills the judgment's whole tree)
+# left every later shim of that run spinning at full CPU forever: orphans in
+# that state ran for over two hours on a shared Mac and fed a load-300 incident.
 cat > "${WORK}/bin/awk" <<SHIM
 #!${shim_bash}
 real='${real_awk}'
 state="\${CENSUS_STATE:-}"
 [[ -n "\${state}" ]] || exec "\${real}" "\$@"
-bump() {
-  local f="\${state}/\$1" n=0
-  while ! mkdir "\${state}/lock" 2>/dev/null; do :; done
-  [[ ! -f "\${f}" ]] || read -r n < "\${f}" || true
-  BUMPED=\$(( \${n:-0} + 1 ))
-  printf '%s' "\${BUMPED}" > "\${f}"
-  rmdir "\${state}/lock"
-}
-[[ "\${CENSUS_MODE:-none}" == "awk-all" ]] && { bump failed; exit 127; }
+tally() { printf '%s\n' "\$2" >> "\${state}/\$1"; }
+[[ "\${CENSUS_MODE:-none}" == "awk-all" ]] && { tally failed x; exit 127; }
 kind=""
 case "\$*" in
   *"safedeps:command_scan_text"*) kind=scan ;;
@@ -223,16 +229,21 @@ if [[ -z "\${kind}" ]]; then
   # A call the census cannot name, counted so that it cannot hide: see
   # "unmarked" and "unlisted" in the header.
   case "\$*" in
-    *"safedeps:"*) bump unlisted ;;
-    *) bump unmarked ;;
+    *"safedeps:"*) tally unlisted x ;;
+    *) tally unmarked x ;;
   esac
   printf '%s\n' "\$*" | tr '\n' ' ' | cut -c1-160 >> "\${state}/strays"
   exec "\${real}" "\$@"
 fi
-bump reads
-n=\${BUMPED}
-[[ -z "\${SAFEDEPS_GATE_PASSED:-}" ]] || bump after-gate
-fail_it() { bump failed; exit 2; }
+token="\$\$.\${RANDOM}\${RANDOM}"
+tally reads "\${token}"
+n=0
+while IFS= read -r line; do
+  n=\$(( n + 1 ))
+  [[ "\${line}" != "\${token}" ]] || break
+done < "\${state}/reads"
+[[ -z "\${SAFEDEPS_GATE_PASSED:-}" ]] || tally after-gate x
+fail_it() { tally failed x; exit 2; }
 case "\${CENSUS_MODE:-none}" in
   k)       [[ "\${n}" == "\${CENSUS_K}" ]] && fail_it ;;
   from-k)  (( n >= CENSUS_K )) && fail_it ;;
@@ -256,9 +267,7 @@ for tool in grep sed; do
 #!${shim_bash}
 if [[ -n "\${CENSUS_STATE:-}" && "\${CENSUS_MODE:-none}" == "${tool}-all" ]]; then
   # Counted like the awk shim's failures, so the idle-mode check sees them.
-  while ! mkdir "\${CENSUS_STATE}/lock" 2>/dev/null; do :; done
-  printf '%s' "\$(( \$(cat "\${CENSUS_STATE}/failed" 2>/dev/null || echo 0) + 1 ))" > "\${CENSUS_STATE}/failed"
-  rmdir "\${CENSUS_STATE}/lock"
+  printf 'x\n' >> "\${CENSUS_STATE}/failed"
   exit 2
 fi
 exec '${real_tool}' "\$@"
