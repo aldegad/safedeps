@@ -3118,5 +3118,39 @@
         "dash": "-!"
       }
     }
+  },
+  {
+    "id": "AM1",
+    "cls": "V",
+    "label": "dash has no &>: the & ends the command, and the next one starts at the >",
+    "text": "echo a &>/dev/stdout @@TAIL@@\n",
+    "measured": {
+      "bash": "-",
+      "zsh": "-",
+      "sh": "-",
+      "agent": "-",
+      "dash": "R",
+      "linux": {
+        "bash": "-",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "AM2",
+    "cls": "V",
+    "label": "the same with &>>, which bash 3.2 does not parse",
+    "text": "echo a &>>/dev/stdout @@TAIL@@\n",
+    "measured": {
+      "bash": "-!",
+      "zsh": "-",
+      "sh": "-!",
+      "agent": "-",
+      "dash": "R",
+      "linux": {
+        "bash": "-",
+        "dash": "R"
+      }
+    }
   }
 ]

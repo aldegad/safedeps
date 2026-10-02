@@ -30,7 +30,7 @@
 # there, and what reads a `sh -c` script), recorded as measured.linux.{bash,dash}.
 # --record replaces only this platform's fields, so the record carries both
 # after one run on each. The gate reads the three shells as three readings, and
-# dash reads `((`, `$[`, `$'...'` and an apostrophe in "${...}" unlike bash.
+# dash reads `((`, `$[`, `$'...'`, an apostrophe in "${...}" and `&>` unlike bash.
 set -uo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)

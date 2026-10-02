@@ -638,6 +638,27 @@ start_rows=(
   'RD13|111111|{ >/dev/null pip install evil==1.0.0; }'
   'RD14|111111|exec 2>/dev/null pip install evil==1.0.0'
   'AS1|111011|function f { FOO=1 pip install evil==1.0.0; }; f'
+  # `&>` is one redirection operator to bash and zsh. dash has none: it ends
+  # the command at the `&` and starts the next one at the `>`, so each of
+  # these runs its install in dash alone (also Linux dash 0.5.12, the /bin/sh
+  # of Debian and Ubuntu; Linux bash 5.2.37 ran none). Measured on 2026-10-03
+  # with a marker in place of the install. Every reading read `&>` as a
+  # redirection, said no DIVERGE, and all of these passed.
+  'AR1|000100|echo a &>/dev/null pip install evil==1.0.0'
+  'AR2|000100|echo a &>>/dev/null pip install evil==1.0.0'
+  'AR3|000100|echo a&>/dev/null pip install evil==1.0.0'
+  'AR4|000100|echo a &> /dev/null pip install evil==1.0.0'
+  'AR5|000100|true; echo a &>/dev/null pip install evil==1.0.0'
+  'AR6|000100|{ echo a &>/dev/null pip install evil==1.0.0; }'
+  'AR7|000100|f() { echo a &>/dev/null pip install evil==1.0.0; }; f'
+  'AR8|000100|echo $(echo a &>/dev/null pip install evil==1.0.0)'
+  'AR9|000100|echo a 2>&1 &>/dev/null pip install evil==1.0.0'
+  'AR10|000100|if true; then echo a &>/dev/null pip install evil==1.0.0; fi'
+  'AR11|000100|echo a &>|/dev/null pip install evil==1.0.0'
+  'AR12|000100|echo a &>/dev/null FOO=1 pip install evil==1.0.0'
+  'AR13|000100|true &>/dev/null pip install evil==1.0.0'
+  'AR15|000100|echo a &>/dev/null env pip install evil==1.0.0'
+  'AN1|000100|echo a &>/dev/null npm install evil@1.0.0'
 )
 for start_row in "${start_rows[@]}"; do
   start_ran="${start_row#*|}" start_ran="${start_ran%%|*}" start_form="${start_row#*|*|}"
@@ -671,7 +692,12 @@ for not_a_start in \
   'function f g if pip install evil==1.0.0; then :; fi; g' \
   'function f { :; }; f' \
   'echo function f if pip install evil==1.0.0' \
-  'echo coproc foo if pip install evil==1.0.0'
+  'echo coproc foo if pip install evil==1.0.0' \
+  'echo pip install evil==1.0.0 &>/dev/null' \
+  'echo "a &>/dev/null pip install evil==1.0.0"' \
+  'echo a \&>/dev/null pip install evil==1.0.0' \
+  'echo a >&/dev/null pip install evil==1.0.0' \
+  'ls &>/dev/null'
 do
   expect_pass "words that open no statement: ${not_a_start}" "${not_a_start}"
   if logged_ungated "${not_a_start}"; then fail "words that open no statement leave no UNGATED record: ${not_a_start}"; fi
@@ -719,6 +745,10 @@ expect_not_approved "an empty arithmetic for" 'for (( ; ; )) { pip install evil=
 # A pinned npm install behind a redirection is read and its spec checked.
 expect_not_approved "an npm install behind a redirection" '2>&1 npm install evil@1.0.0'
 expect_not_approved "an npm install in a loop after function NAME" 'function f while npm install evil@1.0.0; do break; done; f'
+# An install with `&>` after it is one in every shell, judged as before the
+# dash reading split it there.
+expect_not_approved "an install with &> at its end" 'pip install evil==1.0.0 &>/dev/null'
+expect_not_approved "an install after a command ended by &> and ;" 'echo a &>/dev/null; pip install evil==1.0.0'
 pass "statement starts are read from the shell grammar, and the same words in an argument open nothing"
 
 # The inert rewrite reaches an npm install at every new start, under the rule
@@ -742,11 +772,16 @@ for inert_form in \
   'time { npm install evil; }' \
   '! { npm install evil; }' \
   '2>&1 npm install evil' \
-  'function f while npm install evil; do break; done; f'
+  'function f while npm install evil; do break; done; f' \
+  'npm install evil &>/dev/null'
 do
   [[ "$(gate_rewrite "${inert_form}")" == "${inert_form/npm install/npm install --ignore-scripts}" ]] \
     || fail "an npm install at a statement start gets --ignore-scripts: ${inert_form} (got: $(gate_rewrite "${inert_form}"))"
 done
+# dash ends the install at the `&` of `&>`, and the rewrite lands after the
+# verb in every reading, so the edit is the same one it was.
+[[ "$(gate_rewrite 'npm ci &>/dev/null && npm run build')" == 'npm ci --ignore-scripts &>/dev/null && npm run build' ]] \
+  || fail "an npm ci with &> after it gets --ignore-scripts (got: $(gate_rewrite 'npm ci &>/dev/null && npm run build'))"
 # Only some shells parse these, so a reading finds no install where another
 # does, and no single text is inert for every shell: UNDECIDED, with the
 # readings reason, never a rewrite for one shell.
@@ -755,7 +790,8 @@ for inert_form in \
   'repeat 1 { npm install evil; }' \
   'for ((i=0;i<1;i++)) { npm install evil; }' \
   'coproc foo { npm install evil; }; wait' \
-  'coproc foo until npm install evil; do :; done; wait'
+  'coproc foo until npm install evil; do :; done; wait' \
+  'echo a &>/dev/null npm install evil'
 do
   got=$(gate_reason "${inert_form}")
   [[ "${got}" == "deny "*UNDECIDED*"read the npm installs in this command in different places"* ]] \

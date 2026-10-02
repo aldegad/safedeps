@@ -382,7 +382,7 @@ command_pipes_unread_install_to_shell() {
 # A reading is a shell: bash, zsh or dash, named by SAFEDEPS_READING. The three
 # lex the same text differently in a few places (ARCHITECTURE.md has the table:
 # `((`, `$((`, quotes inside arithmetic, `$[`, an apostrophe inside "${...}",
-# `$'...'`), and a command is judged under every reading a shell could give it.
+# `$'...'`, `&>`), and a command is judged under every reading a shell could give it.
 # Nothing here picks a reading: the guard's driver sets the variable, once per
 # reading, and every reader of the command lexes under it, including a reader
 # that lexes text another reader handed it. A reading picked per call was how
@@ -507,6 +507,8 @@ shell_lex() {
       #   `\047` inside "${...}": a quote to bash, a character to zsh and dash.
       #   `$\047...\047`  bash and zsh: an ANSI-C string, where \\047 does not
       #                close it; dash: `$` and a single-quoted string.
+      #   `&>`         bash and zsh: a redirection of both outputs; dash: `&`,
+      #                which ends a command, then `>` before the next one.
       #
       # Each site is decided per shell where it stands: zsh read one `((` as a
       # subshell and the next as arithmetic in one command (form M1), which no
@@ -527,7 +529,7 @@ shell_lex() {
         # The bytes any rule below acts on. Every other byte keeps the class of
         # its context and changes nothing, so it is classified without running
         # the rules -- most of a long command is such bytes.
-        split("\\ $ \047 \042 # ( ) < ] } ` c e i ;", sl, " ")
+        split("\\ $ \047 \042 # ( ) < ] } ` c e i ; &", sl, " ")
         for (j in sl) SPC[sl[j]] = 1
         SPC["\n"] = 1
         DQS["\\"] = 1; DQS["\042"] = 1; DQS["$"] = 1; DQS["`"] = 1
@@ -719,6 +721,14 @@ shell_lex() {
           if (c == "$" && X[i+1] == "{") { C[i+1] = cls; i++; push("V"); continue }
           if (c == "`") { if (top == "B") pop(); else push("B"); continue }
           if (top == "V") { if (c == "}") pop(); continue }
+          # `&>` is one redirection operator to bash and zsh. dash has none:
+          # the `&` ends the command before it, and the `>` is a redirection
+          # that the next command starts with (forms AR1-AR13), so
+          # `echo a &>/dev/null pip install x` runs the install in dash
+          # alone. redirs() and starts() read it per reading, and the bash
+          # reading says DIVERGE here. After `>` or `<` the `&` belongs to a
+          # duplication (`2>&1`) in every shell.
+          if (c == "&") { if (X[i+1] == ">" && !(i > 1 && X[i-1] ~ /[<>]/ && C[i-1] == cls)) div = 1; continue }
           # A process substitution is a word like `$(...)`: its `)` ends no
           # token (PS marks the parenthesis level it opened, WC its close).
           # So is a glob word: zsh reads a `(` where an argument stands as the
@@ -794,11 +804,12 @@ shell_lex() {
 
       # The top-level redirections: DROP marks the operator, a file descriptor
       # number that is the whole word in front of it, the blanks after it and
-      # its target word.
+      # its target word. In the dash reading `&>` is no operator: the `&`
+      # ends a command, and the `>` after it is read on its own.
       function redirs(   k, j, s) {
         for (k = 1; k <= N; k++) {
           if (C[k] != "c" || DEP[k] != 1) continue
-          if (X[k] == "&" && X[k+1] == ">" && C[k+1] == "c") j = k + 1
+          if (X[k] == "&" && X[k+1] == ">" && C[k+1] == "c") { if (shd) continue; j = k + 1 }
           else if (X[k] == "<" || X[k] == ">") j = k
           else continue
           if (X[j+1] == "(") { k = j + 1; continue }
@@ -958,7 +969,9 @@ shell_lex() {
         while (k <= N) {
           if (word_sep(k)) {
             op = (C[k] == "c" && DEP[k] == 1) ? X[k] : ""
-            if (op == "&" && (X[k+1] == ">" || k > 1 && (X[k-1] == ">" || X[k-1] == "<"))) op = ">"
+            # An `&` is part of a redirection after `>` or `<` (`2>&1`) and,
+            # outside dash, before `>` (`&>`); in dash that one ends a command.
+            if (op == "&" && (X[k+1] == ">" && rs != "dash" || k > 1 && (X[k-1] == ">" || X[k-1] == "<") && C[k-1] == "c")) op = ">"
             if (C[k] == "p" && DEP[k] == 1 || op ~ /[\n;&|]/) {
               st = 1; pre = 0; rd = 0; fn = 0; fr = 0; inp = 0; rp = 0; dbr = 0; cop = 0; tm = 0
             }
@@ -2083,8 +2096,11 @@ inert_rewrite_in_place() {
 # its quote-blanked text, so a separator inside quotes is not one. Fields are
 # split on \035 rather than a tab because `read` merges adjacent tabs, and an
 # empty field (a statement with no words) then shifted the next one into it. A newline
-# separates like `;`, and a redirection (`2>&1`, `&>`, `|&`) does not split a
-# statement.
+# separates like `;`. A redirection (`2>&1`, `&>`) does not split a statement:
+# the stmts view writes its `&` as `_` in a reading whose shell reads one
+# there. This used to decide `&>` by itself, by the byte after the `&`, and
+# kept the statement whole in the dash reading too, where the `&` ends the
+# command and the next one starts at the `>`.
 #
 # <words> is the statement split into words the way the shell splits it, read
 # from the raw text: quotes delimit and are removed, a backslash escapes, and
@@ -2184,7 +2200,6 @@ command_statements() {
         ch = c[i]
         if (ch == ";" || ch == "\n") { emit(";", i - 1); from = i + 1; continue }
         if (ch == "&") {
-          if (c[i - 1] == ">" || c[i + 1] == ">") { cur = cur ch; continue }
           if (c[i + 1] == "&") { emit("&&", i - 1); i++; from = i + 1; continue }
           emit("&", i - 1); from = i + 1; continue
         }

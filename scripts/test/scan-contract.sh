@@ -650,7 +650,9 @@ pass "view properties: scan, code, noredir and stmts keep length and are idempot
 #      alone: `}` wherever it stands, `always`, `for NAME (WORDS)`, `foreach`,
 #      `repeat`, `[[ ... ]]` or an arithmetic `((...))` before a body, `case
 #      WORD {`, and `;|` ending an arm. bash alone: `coproc NAME` before a
-#      compound command, and `;;&`.
+#      compound command, and `;;&`. dash alone: the `&` of `&>` ends a
+#      command, and the next starts at the `>` (bash and zsh read one
+#      redirection there).
 #      The bash reading says DIVERGE at each, so the reading that reads it
 #      runs.
 #   6. Everything else is the scan view, byte for byte.
@@ -734,6 +736,16 @@ check_stmts "${all}" "a redirection stays with its command, and its target is no
   '! > then 2>&1 pip i' '!;> then 2>_1 pip i'
 check_stmts "${all}" "a redirection that comes first takes its command's start" \
   '{ 2>/dev/null pip i; }; if >f pip i; then :; fi' '{;2>/dev/null pip i; }; if;>f pip i; then;:; fi'
+check_stmts "bash zsh" "&> is one redirection operator outside dash" \
+  'echo a &>/dev/null pip i; pip i &>f' 'echo a _>/dev/null pip i; pip i _>f'
+check_stmts "dash" "dash ends a command at the & of &>, and the next starts at the >" \
+  'echo a &>/dev/null pip i; pip i &>f' 'echo a &>/dev/null pip i; pip i &>f'
+check_stmts "dash" "the command dash starts at the > reads its words as at any start" \
+  'echo a &>/dev/null time pip i' 'echo a &>/dev/null time;pip i'
+check_stmts "bash zsh" "after &> the same words are arguments" \
+  'echo a &>/dev/null time pip i' 'echo a _>/dev/null time pip i'
+check_stmts "${all}" "after > the & of a duplication is the operator in every shell" \
+  'echo a >&/dev/null pip i; echo a 2>&1 pip i' 'echo a >_/dev/null pip i; echo a 2>_1 pip i'
 check_stmts "${all}" "a command glued to a function head starts at the blank the view prints" \
   'f()\pip i' 'f();pip i'
 check_stmts "${all}" "a process substitution opens a command, an argument after it does not" \
@@ -766,7 +778,34 @@ check_unprefixed "${all}" "a redirection after the command name stays" \
   'echo 2>/dev/null pip i' 'echo 2>/dev/null pip i'
 check_unprefixed "bash zsh" "a redirection after an argument stays" \
   'echo a &>/dev/null pip i' 'echo a &>/dev/null pip i'
+check_unprefixed "dash" "after the & of &> a command starts, and its redirection goes" \
+  'echo a &>/dev/null pip i' 'echo a &pip i'
+check_unprefixed "dash" "the same with &>> and a blank before the target" \
+  'echo a &>> /dev/null FOO=1 pip i' 'echo a &pip i'
 pass "unprefixed view: the prefixes a command starts with go, redirections among them, and only at a start"
+
+# The statement split (command_statements) reads the stmts view and keeps no
+# rule of its own for `&>`. It used to keep an `&` next to `>` inside the
+# statement in every reading, so in the dash reading of `echo a &>/dev/null
+# npm install` the install was a word of `echo a`, and its landing was read
+# from that statement.
+statements_src=$(sed -n '/^command_statements() {/,/^}/p' "${GUARD}")
+[[ "${statements_src}" == *"command_statements() {"* ]] || fail "command_statements not found in ${GUARD} (renamed? then update this battery)"
+eval "${statements_src}"
+check_statements() { # readings label input expected-count
+  local got reading
+  for reading in $1; do
+    got=$(SAFEDEPS_READING="${reading}" command_statements "$3" | wc -l | tr -d ' ')
+    [[ "${got}" == "$4" ]] || fail "statement split (${reading}): $2: ${got} statements, expected $4"
+  done
+}
+check_statements "bash zsh" "&> splits no statement outside dash" \
+  'echo a &>/dev/null pip i; pip i &>f' 2
+check_statements "dash" "dash splits at the & of &>" \
+  'echo a &>/dev/null pip i; pip i &>f' 4
+check_statements "${all}" "a duplication splits no statement in any shell" \
+  'echo a 2>&1 pip i; echo a >&2 pip i' 2
+pass "statement split: &> ends a statement in the dash reading alone"
 
 # Rule 5's other half: a form whose starts differ between the readings makes
 # the bash reading say DIVERGE, and a form every shell reads the same way does
@@ -783,12 +822,14 @@ stmts_diverges() { # text -> 0 when the bash stmts reading says DIVERGE
 }
 for form in 'repeat 1 { pip i; }' 'for i (1) pip i' 'foreach i (1) pip i; end' 'if [[ 1 ]] pip i' \
     'while ((i++<1)) { pip i; }' '{ true; } always { pip i; }' 'coproc foo { pip i; }' \
-    'case x in x) true;| x) pip i;; esac' 'case x in x) true;;& x) pip i;; esac' 'coproc foo if pip i; then :; fi'; do
+    'case x in x) true;| x) pip i;; esac' 'case x in x) true;;& x) pip i;; esac' 'coproc foo if pip i; then :; fi' \
+    'echo a &>/dev/null pip i' 'pip i &>/dev/null' 'echo $(echo a &>f pip i)'; do
   stmts_diverges "${form}" || fail "stmts view: the bash reading of [${form}] says no DIVERGE, and the starts there are not the same in every shell"
 done
 for form in 'if true; then pip i; fi' 'f() { pip i; }; f' 'time -p pip i' 'function f g { pip i; }' \
     'case x in x) { pip i; };; esac' 'echo { pip i }; echo then pip i' 'FOO=1 pip i > out' \
-    'function f if pip i; then :; fi' '{ 2>/dev/null pip i; }'; do
+    'function f if pip i; then :; fi' '{ 2>/dev/null pip i; }' \
+    'echo a 2>&1 pip i' 'echo a >&/dev/null pip i' 'echo a \&>/dev/null pip i' 'echo "a &>f" pip i'; do
   stmts_diverges "${form}" && fail "stmts view: the bash reading of [${form}] says DIVERGE, and every shell reads its starts the same way"
 done
 pass "stmts view: the bash reading says DIVERGE where the shells start commands differently, and only there"
@@ -829,6 +870,8 @@ stmts_shell_rows=(
   'coproc foo while echo RAN >&2; do break; done; wait|---R-'
   '2>/dev/null echo RAN|RRRRR'
   '{ 2>/dev/null echo RAN; }|RRRRR'
+  'echo a &>/dev/null echo RAN >&2|--R-R'
+  'echo a &>>/dev/null echo RAN >&2|--R-R'
 )
 if [[ "${SAFEDEPS_STMTS_MEASURE:-}" == 1 ]]; then
   stmts_col() { case "$(uname -s)" in Darwin) printf '%s' "${1:0:3}" ;; *) printf '%s%s' "${1:3:1}" "${1:4:1}" ;; esac; }
