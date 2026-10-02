@@ -3375,40 +3375,38 @@ if echo "${COMMAND}" | judge_grep -qEi -- '--registry([=[:space:]]+)'; then
     REASONS+=("Command uses non-standard npm registry")
   fi
 fi
-# The same question for every npm install, asked of npm rather than read from
-# the text: the registry npm fetches from is whatever its configuration says,
-# and `--registry` is one spelling of it among several. A committed .npmrc,
-# `npm_config_registry` in front of the command or exported earlier in it, and
-# the user's .npmrc each sent an approved name and version to another tarball
-# while the text showed no `--registry` at all (RH1-RH3,
-# safedeps/effect-gate-blind-to-lockless-npm-installs). The answer is npm's own
-# (resolve_install_targets asked it beside where the install lands), so there
-# is no second reading of .npmrc or the environment here to drift from npm's.
-# The text check above stays for what npm is not asked about: another package
-# manager's flag, and an npm install npm could not be asked for. The two can
-# only add denials to each other.
+# The same question for every npm install is asked of npm rather than read
+# from the text: the registry npm fetches from is whatever its configuration
+# says, and `--registry` is one spelling of it among several. A committed
+# .npmrc, `npm_config_registry` in front of the command or exported earlier in
+# it, and the user's .npmrc each sent an approved name and version to another
+# tarball while the text showed no `--registry` at all (RH1-RH3,
+# safedeps/effect-gate-blind-to-lockless-npm-installs).
 #
-# A registry npm will not print (one holding a credential or an id) is not a
-# public one. An install npm could not be asked about is not judged here; the
-# PostToolUse hook then holds its sources unvouched (no rebuild), and
-# advisory.log already says why.
+# npm's answer does not deny the install. A company registry, a mirror and a
+# proxy are configured exactly this way, and safedeps has no path yet to
+# approve one, so a deny here blocked those users with nothing they could do
+# about it. The answer travels in the pending state instead, and the
+# PostToolUse hook keeps the install but runs no install script of bytes npm
+# fetched from a registry that is not public, and says which registry, so a
+# person decides whether to trust it. The text check above stays a deny: a
+# `--registry` the command itself spells out is a choice made in the command,
+# not the project's standing configuration. Only the record is written here,
+# so a run whose answer named another registry says so in advisory.log even on
+# Codex, where the install's own scripts run before any hook can withhold them.
 if [[ -n "${SAFEDEPS_NPM_FETCH_JQ:-}" ]]; then
   REGISTRY_FACTS=$(while IFS=$'\035' read -r install_kind _ _ install_fetch _; do
     [[ "${install_kind}" == npm* && "${install_fetch}" == '{'* ]] || continue
     printf '%s\n' "${install_fetch}"
   done <<< "${INSTALL_TARGETS}")
   if [[ -n "${REGISTRY_FACTS}" ]]; then
-    if REGISTRY_FOUND=$(jq -rn --arg public "${SAFEDEPS_NPM_PUBLIC_REGISTRY_RE}" "${SAFEDEPS_NPM_FETCH_JQ}"'
+    REGISTRY_FOUND=$(jq -rn --arg public "${SAFEDEPS_NPM_PUBLIC_REGISTRY_RE}" "${SAFEDEPS_NPM_FETCH_JQ}"'
         [inputs | select(.unknown == null) | . as $f | select(($f.registry | sd_registry_public($f)) | not)
          | "registry=\($f.registry // "a value npm will not print")"] | unique | join(", ")' \
-        <<< "${REGISTRY_FACTS}" 2>/dev/null); then
-      if [[ -n "${REGISTRY_FOUND}" ]]; then
-        SUSPICIOUS=true
-        REASONS+=("Command uses non-standard npm registry: npm reads ${REGISTRY_FOUND} for this install from its configuration (an .npmrc or the environment)")
-      fi
-    else
-      guard_mark_reading_failed
-    fi
+        <<< "${REGISTRY_FACTS}" 2>/dev/null) \
+      || REGISTRY_FOUND="a registry safedeps could not read from npm's answer"
+    [[ -z "${REGISTRY_FOUND}" ]] \
+      || log_advisory "pre-guard: npm reads ${REGISTRY_FOUND} for this install from its configuration (an .npmrc or the environment), which is not the public npm registry. That alone does not deny the install; safedeps will not rebuild what npm fetched from there (on Codex the install runs its own scripts before any hook can withhold them). Command: ${COMMAND}"
   fi
 fi
 

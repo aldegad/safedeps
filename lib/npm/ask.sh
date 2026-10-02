@@ -124,10 +124,16 @@ safedeps_npm_test_registry() {
 #       problem of its own, and so is an answer that is missing.
 #   sd_fetch_known_problems($facts; $url)  the same, from the answers npm
 #       gave only: a registry npm named that is not public. A missing answer
-#       is not one, so a caller that rolls back reads this, and a caller that
-#       only withholds scripts reads the first.
+#       is not one, so a caller that reports where the bytes came from reads
+#       this, and a caller that withholds scripts reads the first.
 #   sd_registry_public($f)  whether the registry URL in `.` is public under
 #       the facts $f (the test registry counts).
+#   sd_fetch_origins($facts; $url)  the same as sd_fetch_problems, as objects
+#       a message can name the registry from: {registry, replace} or
+#       {registry, replace, scope} for a registry npm named that is not public
+#       (registry null when npm will not print it), {unknown: why} for a
+#       missing answer. A warning that asks a person to trust a registry has
+#       to say which one.
 # shellcheck disable=SC2016 # jq programs: jq expands their $names
 SAFEDEPS_NPM_FETCH_JQ='
   def sd_host: ((capture("^[A-Za-z][A-Za-z0-9+.-]*://([^@/?#]*@)?(?<h>\\[[^\\]]*\\]|[^/:?#]*)") // {h: ""}).h | ascii_downcase);
@@ -135,9 +141,9 @@ SAFEDEPS_NPM_FETCH_JQ='
     (type == "string")
     and ((if endswith("/") then . else . + "/" end) as $s
          | ($s | test($public; "i")) or ($f.test_registry != null and $s == $f.test_registry));
-  def sd_fetch_problem($f; $url):
-    if ($f | type) != "object" then "safedeps has no answer from npm about the registry"
-    elif $f.unknown != null then ($f.unknown | tostring)
+  def sd_fetch_origin($f; $url):
+    if ($f | type) != "object" then {unknown: "safedeps has no answer from npm about the registry"}
+    elif $f.unknown != null then {unknown: ($f.unknown | tostring)}
     else
       ($url | sd_host) as $h
       | ($f.replace // null) as $r
@@ -147,17 +153,29 @@ SAFEDEPS_NPM_FETCH_JQ='
                elif ($r | test("://")) then ($r | sd_host)
                else ($r | ascii_downcase) end) == $h
          end) as $swapped
-      | if ($swapped | not) then ""
+      | if ($swapped | not) then null
         elif ($f.registry | sd_registry_public($f)) | not then
-          "npm fetches it from the registry \($f.registry // "it will not print") (replace-registry-host=\($r // "not printed"))"
+          {registry: $f.registry, replace: $r}
         else
           ([$url | capture("^[^:]+://[^/]+/(?<s>@[^/]+)/") | .s] | first) as $scope
           | if $scope != null and ($f.scopes[$scope] // null) != null
                and (($f.scopes[$scope] | sd_registry_public($f)) | not) then
-              "npm has \($scope):registry=\($f.scopes[$scope]) (replace-registry-host=\($r))"
-            else "" end
+              {registry: $f.scopes[$scope], replace: $r, scope: $scope}
+            else null end
         end
     end;
+  def sd_fetch_problem($f; $url):
+    sd_fetch_origin($f; $url) as $o
+    | if $o == null then ""
+      elif $o.unknown != null then $o.unknown
+      elif $o.scope != null then
+        "npm has \($o.scope):registry=\($o.registry) (replace-registry-host=\($o.replace // "not printed"))"
+      else
+        "npm fetches it from the registry \($o.registry // "it will not print") (replace-registry-host=\($o.replace // "not printed"))"
+      end;
+  def sd_fetch_origins($facts; $url):
+    if ($facts | type) != "array" or ($facts | length) == 0 then [{unknown: "safedeps has no answer from npm about the registry"}]
+    else [$facts[] | sd_fetch_origin(.; $url) | select(. != null)] | unique end;
   def sd_fetch_problems($facts; $url):
     if ($facts | type) != "array" or ($facts | length) == 0 then ["safedeps has no answer from npm about the registry"]
     else [$facts[] | sd_fetch_problem(.; $url) | select(. != "")] | unique end;

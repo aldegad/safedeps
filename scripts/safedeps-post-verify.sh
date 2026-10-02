@@ -667,7 +667,9 @@ npm_fetch_facts_load() {
 #
 # Prints what fails, one per line as `<kind><TAB><what>`: `unrecorded`,
 # `source`, `fetched` (recorded on the public registry, but npm fetches it from
-# somewhere else, or could not say) or `directory`. Returns 0. Returns 1 with the reason when npm could
+# somewhere else, or could not say) or `directory`. Each `fetched` is followed
+# by `origin<TAB><name><TAB><registry>` lines that name where npm fetched it
+# from, or `?<why>` where npm did not say. Returns 0. Returns 1 with the reason when npm could
 # not be asked or did not answer: then the tree is not known, and the caller
 # must not rebuild it. It starts one npm and one jq, plus two more jq when a
 # nested package has no public source of its own (to read what its parents
@@ -761,7 +763,18 @@ npm_rebuild_unrecorded() {
                   "source\t\($key) (\($here) from \([$recs[] | .resolved // "no recorded source" | tostring] | unique | join(" or ")))"
                 end
             end;
-        $query[0][] | select(type == "object" and (.location // "") != "") | verdict(.location) | select(. != null)
+      # Where npm fetched a `fetched` package from, one line per answer, as
+      # `origin<TAB><name><TAB><registry>`, or `?<why>` where npm did not say:
+      # the warning names the registry a person is asked to trust.
+      def origins($key):
+          ($nodes[$key].name // "?") as $name
+          | [($records[$key] // [])[] | sd_fetch_origins($facts; .resolved)[]] | unique[]
+          | "origin\t\($name)\t\(if .unknown != null then "?" + (.unknown | tostring)
+              elif .scope != null then "\(.registry) (npm'"'"'s \(.scope):registry)"
+              else .registry // "a registry npm will not print" end)";
+        $query[0][] | select(type == "object" and (.location // "") != "") | .location as $loc
+        | verdict($loc) | select(. != null)
+        | ., (if startswith("fetched\t") then origins($loc) else empty end)
     '
   printf 'null\n' > "${tmp}/bundles"
   judge="${SAFEDEPS_NPM_FETCH_JQ}${judge}"
@@ -789,13 +802,15 @@ npm_rebuild_unrecorded() {
     # (npm_workspace_member_dirs).
     PROJECT_DIR="${dir}" npm_workspace_member_dirs > "${tmp}/members" 2>/dev/null || : > "${tmp}/members"
     (
-      local members kind key what
+      local members line kind key what
       members=$'\n'"$(cat "${tmp}/members")"$'\n'
-      while IFS=$'\t' read -r kind key what; do
+      while IFS= read -r line; do
+        kind="${line%%$'\t'*}"
         if [[ "${kind}" != candidate ]]; then
-          printf '%s\t%s\n' "${kind}" "${key}"
+          printf '%s\n' "${line}"
           continue
         fi
+        IFS=$'\t' read -r _ key what <<< "${line}"
         if cd -P "${dir}/${key}" 2>/dev/null; then
           case "${members}" in
             *$'\n'"${PWD}"$'\n'*) continue ;;
@@ -827,6 +842,25 @@ describe_rebuild_blockers() {
   printf '%s' "${clauses}"
 }
 
+# The warning for the `fetched` packages npm_rebuild_unrecorded found: which
+# registry npm fetched them from, or why npm could not say, and that a person
+# decides whether to trust it before anyone rebuilds.
+describe_fetched_elsewhere() {
+  local names registries unknown where trust="that registry"
+  names=$(grep '^origin'$'\t' <<< "$1" | cut -f2 | sort -u | paste -sd' ' -) || true
+  registries=$(grep '^origin'$'\t' <<< "$1" | cut -f3- | grep -v '^?' | sort -u | paste -sd';' - | sed 's/;/, /g') || true
+  unknown=$(grep '^origin'$'\t' <<< "$1" | cut -f3- | grep '^?' | cut -c2- | sort -u | paste -sd';' - | sed 's/;/; /g') || true
+  [[ -n "${names}" ]] || names=$(grep '^fetched'$'\t' <<< "$1" | cut -f2- | sed 's/ (.*//; s|.*node_modules/||' | sort -u | paste -sd' ' -) || true
+  if [[ -n "${registries}" ]]; then
+    where="this install fetched ${names} from ${registries}, which is not the public npm registry"
+    [[ -z "${unknown}" ]] || where+=" (one of npm's answers is missing as well: ${unknown})"
+  else
+    where="safedeps could not tell which registry this install fetched ${names} from (${unknown:-npm did not say}), so it cannot tell they came from the public npm registry"
+    trust="where they came from"
+  fi
+  printf '%s' "install scripts were not run in ${PROJECT_DIR} because ${where}. The install is kept. If you trust ${trust}, confirm with the user before running \`npm rebuild ${names}\` yourself; do not rebuild without asking"
+}
+
 # Runs `npm rebuild` in PROJECT_DIR when npm_rebuild_unrecorded finds nothing in
 # the tree, and tells the user why not otherwise. <when> names the rebuild in
 # what is recorded: after an install, or after a rollback.
@@ -841,6 +875,16 @@ npm_rebuild_vouched() {
   if [[ -n "${blockers}" ]]; then
     clauses=$(describe_rebuild_blockers "${blockers}")
     log_advisory "post-verify: npm rebuild ${when} skipped in ${PROJECT_DIR} — the tree npm would rebuild holds ${clauses}."
+    # Bytes from a registry that is not public are kept, not rolled back: a
+    # company registry, a mirror and a proxy all look like this, and safedeps
+    # has no way yet to approve one. Whether to trust that registry is a
+    # person's call, so the warning names it and says to ask rather than to
+    # rebuild: an agent reading "run npm rebuild yourself" would otherwise
+    # run the very scripts this check withheld.
+    grep -q '^fetched' <<< "${blockers}" && ROLLBACK_WARNINGS+=("$(describe_fetched_elsewhere "${blockers}")")
+    clauses=$(grep -v '^fetched' <<< "${blockers}" | grep -v '^origin' || true)
+    [[ -z "${clauses}" ]] && return 0
+    clauses=$(describe_rebuild_blockers "${clauses}")
     ROLLBACK_WARNINGS+=("npm rebuild was not run: the tree npm would rebuild in ${PROJECT_DIR} holds ${clauses}. safedeps runs install scripts only over a tree whose every package is on record and comes from the public registry or a declared workspace member. Install scripts have not run; review it, then run \`npm rebuild\` yourself if it is what you expect")
     return 0
   fi
@@ -1521,11 +1565,15 @@ check_npm_new_sources() {
   done
   # A URL on the public registry is the public registry's only where npm
   # fetched it from there (npm_fetch_facts_load). One npm says it fetched from
-  # another registry is a source outside the public registries like any other:
-  # a new project's first install of an approved name and version through an
-  # .npmrc the command wrote is rolled back here. Where npm could not be asked,
-  # nothing is rolled back for it: the rebuild check withholds the scripts, and
-  # a rollback for an answer that never came would undo ordinary installs.
+  # another registry is not rolled back: a company registry, a mirror and a
+  # proxy are configured exactly so, and safedeps has no path yet to approve
+  # one, so a rollback would undo every install those users make. The bytes
+  # stay; their install scripts are what is withheld. On Claude Code the
+  # rebuild check does that and says which registry (npm_rebuild_vouched). On
+  # Codex the install is not inert and its own scripts ran before this hook,
+  # so the record says that instead. Where npm could not be asked, the
+  # rebuild check withholds the scripts as well, and advisory.log already says
+  # why.
   if [[ -n "${fetched}" ]]; then
     npm_fetch_facts_load
     if ! fetched=$(jq -nrR --arg public "${SAFEDEPS_NPM_PUBLIC_REGISTRY_RE}" --argjson facts "${NPM_FETCH_FACTS}" \
@@ -1533,9 +1581,15 @@ check_npm_new_sources() {
         inputs | select(. != "") | . as $entry | ($entry | sub("^[^:]*: "; "")) as $url
         | sd_fetch_known_problems($facts; $url) | select(length > 0)
         | "\($entry), but \(join("; "))"' <<< "${fetched}" 2>/dev/null); then
-      fetched="npm records: the sources on the public registry could not be judged against npm's answer about where it fetched them"
+      log_advisory "post-verify: the sources on the public registry in ${PROJECT_DIR} could not be judged against npm's answer about where it fetched them; the rebuild check judges them again and withholds what it cannot vouch for."
+      fetched=""
     fi
-    [[ -z "${fetched}" ]] || nonstandard+="${fetched}"$'\n'
+    if [[ -n "${fetched}" ]]; then
+      log_advisory "post-verify: kept in ${PROJECT_DIR}, fetched from a registry that is not the public npm registry ($(name_sources "${fetched}")); not rolled back, and safedeps runs none of their install scripts."
+      if [[ "$(jq -r '.ignore_scripts_injected == true' "${META_FILE}" 2>/dev/null || printf 'false')" != true ]]; then
+        ROLLBACK_WARNINGS+=("this install fetched packages from a registry that is not the public npm registry ($(name_sources "${fetched}")). safedeps did not make the install inert (on Codex it cannot), so unless the command said --ignore-scripts, their install scripts already ran during the install. The install is kept; confirm with the user that they trust that registry")
+      fi
+    fi
   fi
   nonstandard="${nonstandard%$'\n'}"
   if [[ -n "${nonstandard}" ]]; then
