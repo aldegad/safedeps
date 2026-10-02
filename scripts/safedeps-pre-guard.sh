@@ -1967,9 +1967,9 @@ resolve_install_targets() {
 resolve_reading_targets() {
   local text="$1" cwd="$2" policy="${3:-arith}"
   local before stmt after words raw head target want kind manager tok value normalized in_env skip
-  local user_rc cli_global_off why run_dir answer local_prefix npm_word npm_unknown i fetch
+  local user_rc cli_global_off why run_dir answer local_prefix npm_word npm_unknown i fetch cause
   local dir="${cwd}" grouped=false env_userconfig=false exports_unknown=""
-  local npm_until="" here cond_dir="" depth=0 conditional env_changer=""
+  local npm_until="" here cond_dir="" depth=0 conditional env_changer="" env_setting=""
   local -a toks=() npm_env=() npm_args=() npm_exports=()
 
   shell_lex "${text}" scan "${policy}" "safedeps:command_scan_text" | judge_grep -q '[(){}`]' && grouped=true
@@ -2072,6 +2072,11 @@ resolve_reading_targets() {
         # the registry the hook sees, not the one npm used. So every later npm
         # install's registry is unknown, which costs a skipped rebuild, never a
         # rollback (lib/npm/ask.sh, the fetch facts).
+        #
+        # Two kinds of statement do this, and the record of withheld bytes
+        # tells them apart (env_setting below): code this gate does not read
+        # (`source`, `.`, `eval`), and a setting it reads but cannot reproduce
+        # (`set -a`, `declare -x`, an npm_config_* assignment).
         source|.|eval)
           env_changer="${toks[0]}"
           break
@@ -2079,7 +2084,8 @@ resolve_reading_targets() {
         set|declare|typeset)
           for tok in "${toks[@]:1}"; do
             case "${toks[0]}:${tok}" in
-              set:-*a*|set:allexport|declare:-*x*|typeset:-*x*) env_changer="${toks[0]} ${tok}"; break ;;
+              set:-*a*|set:allexport|declare:-*x*|typeset:-*x*)
+                env_changer="${toks[0]} ${tok}"; env_setting="${env_changer}"; break ;;
             esac
           done
           break
@@ -2094,7 +2100,7 @@ resolve_reading_targets() {
           [[ "${tok}" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || { value=""; break; }
           [[ "$(printf '%s' "${tok%%=*}" | tr '[:upper:]' '[:lower:]')" != npm_config_* ]] || value="${tok%%=*}"
         done
-        [[ -z "${value}" ]] || env_changer="${value}="
+        [[ -z "${value}" ]] || { env_changer="${value}="; env_setting="${env_changer}"; }
       fi
 
       command_is_dependency_install "${stmt}" || break
@@ -2252,8 +2258,21 @@ resolve_reading_targets() {
         answer="${answer%%$'\n'*}"
       fi
       if [[ -n "${env_changer}" ]]; then
-        fetch=$(jq -nc --arg w "${env_changer%$'\001'}" \
-          '{unknown: "an earlier statement (\($w)) can change the environment npm runs with where the command does not show it, so safedeps cannot tell which registry this install fetches from"}' 2>/dev/null) \
+        # The cause `sourced` says the only reason is code the command runs
+        # from somewhere this gate does not read, and npm answered for
+        # everything the gate can read. The PostToolUse hook then withholds
+        # this install's scripts but records nothing machine-wide
+        # (record_npm_withheld): that code ran in the agent's shell and could
+        # already have run anything, so a record would protect nothing. A
+        # setting the gate reads, or an ask npm did not answer, keeps no cause
+        # and is recorded.
+        cause=""
+        if [[ -z "${env_setting}" ]] && jq -e 'type == "object" and .unknown == null' <<< "${fetch}" >/dev/null 2>&1; then
+          cause=sourced
+        fi
+        fetch=$(jq -nc --arg w "$(if [[ -n "${env_setting}" ]]; then printf '%s' "${env_setting%$'\001'}"; else printf '%s' "${env_changer%$'\001'}"; fi)" --arg cause "${cause}" \
+          '{unknown: "an earlier statement (\($w)) can change the environment npm runs with where the command does not show it, so safedeps cannot tell which registry this install fetches from"}
+           + (if $cause == "" then {} else {cause: $cause} end)' 2>/dev/null) \
           || fetch=""
       fi
       local_prefix=""

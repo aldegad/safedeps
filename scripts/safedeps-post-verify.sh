@@ -604,6 +604,16 @@ npm_fetch_facts_load() {
     || NPM_FETCH_FACTS='[{"unknown":"safedeps could not read npm'"'"'s answers about which registry this install fetches from"}]'
 }
 
+# Whether the pre-guard's answer is unknown only because the command ran code
+# this gate does not read (`source`, `.`, `eval`) ahead of the install, with
+# npm answering for everything else (resolve_reading_targets). That code ran
+# in the agent's shell and could already run anything, so this install's
+# scripts are withheld but its bytes are not recorded machine-wide
+# (record_npm_withheld), and its tree is not left observed.
+npm_fetch_sourced() {
+  jq -e '.npm_fetch | type == "object" and .cause == "sourced"' <<< "${CURRENT_STATE:-}" >/dev/null 2>&1
+}
+
 # An origin from sd_fetch_origins as one line of text: the registry, or
 # `?<why>` where npm did not say. The rebuild's warning and the record of
 # withheld bytes name it the same way.
@@ -938,7 +948,10 @@ describe_fetched_elsewhere() {
     where="safedeps could not tell which registry this install fetched ${names} from (${unknown:-npm did not say}), so it cannot tell they came from the public npm registry"
     trust="where they came from"
   fi
-  printf '%s' "install scripts were not run in ${PROJECT_DIR} because ${where}. The install is kept. If you trust ${trust}, confirm with the user before running \`npm rebuild ${names}\` yourself; do not rebuild without asking"
+  printf '%s' "install scripts were not run in ${PROJECT_DIR} because ${where}. The install is kept"
+  [[ -n "${registries}" ]] || ! npm_fetch_sourced \
+    || printf '. %s' "safedeps did not run them this time because code the command ran first can change npm's environment where safedeps cannot see it. It has not recorded these bytes as withheld: that code ran in this shell and could already have run anything, so a record would protect nothing. The next install npm says fetches from the public npm registry rebuilds them as usual"
+  printf '. %s' "If you trust ${trust}, confirm with the user before running \`npm rebuild ${names}\` yourself; do not rebuild without asking"
   [[ ${#NPM_WITHHELD_RECORDED[@]} -eq 0 ]] || printf '. %s' "$(npm_withheld_scope)"
 }
 
@@ -1740,6 +1753,9 @@ record_npm_withheld() {
   fi
   NPM_WITHHELD_JUDGED=false
   npm_withheld_judge "${judged:-${hidden}}"
+  # A tree an install after sourced code wrote is not one safedeps judged: what
+  # it holds was not recorded, so the next install here counts all of it as new.
+  npm_fetch_sourced && NPM_WITHHELD_JUDGED=false
   if [[ "${NPM_WITHHELD_JUDGED}" == true && -n "${judged}" ]] \
       && grep -qxF "${NPM_HIDDEN_LOCKFILE}" <<< "${NPM_TRACED_RECORDS}"; then
     npm_tree_record_observe "${judged}"
@@ -1752,7 +1768,7 @@ record_npm_withheld() {
 # when every integrity in either record was judged and every one to record was
 # written; any other return leaves the tree unobserved.
 npm_withheld_judge() {
-  local tree="$1" lockfile found recorded tmp inert before=""
+  local tree="$1" lockfile found recorded tmp inert facts before=""
   local -a files=()
   [[ ! -f "${PROJECT_DIR}/package-lock.json" ]] || files+=("${PROJECT_DIR}/package-lock.json")
   [[ ! -f "${tree}" ]] || files+=("${tree}")
@@ -1786,9 +1802,18 @@ npm_withheld_judge() {
   [[ -n "${found}" ]] || { NPM_WITHHELD_JUDGED=true; return 0; }
 
   npm_fetch_facts_load
+  facts="${NPM_FETCH_FACTS}"
+  # The pre-guard's answer is left out where it is unknown only because of
+  # sourced code (npm_fetch_sourced). The post hook's own answer still counts:
+  # a project .npmrc naming another registry is recorded as before.
+  if npm_fetch_sourced; then
+    facts=$(jq -c '[.[] | select((type == "object" and .cause == "sourced") | not)]' <<< "${facts}" 2>/dev/null) \
+      || facts="${NPM_FETCH_FACTS}"
+    log_advisory "post-verify: not recording the bytes this install brought into ${PROJECT_DIR} as withheld for want of npm's answer: the command ran code (source, . or eval) before the install that could already run anything. Their install scripts were not run this time."
+  fi
   inert=$(jq -r '.ignore_scripts_injected == true' "${META_FILE}" 2>/dev/null || printf 'false')
   # shellcheck disable=SC2016 # a jq program: jq expands its $names
-  if ! recorded=$(jq -nc --arg public "${SAFEDEPS_NPM_PUBLIC_REGISTRY_RE}" --argjson facts "${NPM_FETCH_FACTS}" \
+  if ! recorded=$(jq -nc --arg public "${SAFEDEPS_NPM_PUBLIC_REGISTRY_RE}" --argjson facts "${facts}" \
       --arg project "${PROJECT_DIR}" --argjson at "$(date +%s)" --argjson inert "${inert}" \
       "${SAFEDEPS_NPM_FETCH_JQ}${NPM_ORIGIN_TEXT_JQ}"'
       [inputs
