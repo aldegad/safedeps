@@ -379,9 +379,9 @@ pass "the parent still polls from a 50ms first step, capped at 1s"
 # The fastest of three runs, because a slow run measures the machine, not the
 # path. Inline is the baseline: it is the same judgment without the machinery.
 fastest_ms() {
-  local engage="$1" i
+  local engage="$1" _
   FASTEST_MS=""
-  for i in 1 2 3; do
+  for _ in 1 2 3; do
     GUARD_CLOCK_MS=1
     guard "ls -la" 20 "${engage}"
     GUARD_CLOCK_MS=""
