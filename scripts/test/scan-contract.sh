@@ -841,55 +841,36 @@ scanfail_guard "${fail_tmp}/all-awk" "pip install requests==2.0.0"
 [[ "${SCANFAIL_DECISION}" == "deny" ]] || fail "with awk failing everywhere an install is still denied (got: ${SCANFAIL_DECISION})"
 pass "with awk failing everywhere an install is still denied"
 
-# --- when a spec reader's sed or tr fails ---------------------------------------
-# The spec readers rewrite a statement before reading it: quotes and grouping
-# characters are removed, extras are removed, an npm alias is replaced by its
-# target, a runner's operands are cut out. Each runs in a command substitution,
-# so a failed sed or tr left no text, no text read as no spec, and a pinned
-# install passed as if it named nothing to check. Each shim fails one reader
-# alone, keyed on its script.
-real_sed=$(command -v sed)
-real_tr=$(command -v tr)
-for reader in extras alias runner group; do
-  mkdir -p "${fail_tmp}/reader-${reader}"
-  tool=sed real="${real_sed}"
-  case "${reader}" in
-    extras) key='\[[^] ]*\]' ;;
-    alias) key='@npm:/' ;;
-    runner) key='(npx|pnpx|bunx|uvx)' ;;
-    group) key='(){}' tool=tr real="${real_tr}" ;;
-  esac
-  cat > "${fail_tmp}/reader-${reader}/${tool}" <<SHIM
-#!/usr/bin/env bash
-case "\$*" in *'${key}'*) exit 2 ;; esac
-exec '${real}' "\$@"
-SHIM
-  chmod +x "${fail_tmp}/reader-${reader}/${tool}"
-done
-
-# reader<TAB>command
-sed_rows=(
-  $'extras\tpip install \'evil[x]==1.0.0\''
-  $'alias\tpnpm add left-pad@npm:evil-pkg@1.0.0'
-  $'runner\tnpx evil@1.0.0'
-  $'group\tpip install evil==1.0.0'
+# --- the spec readers start no process ------------------------------------------
+# The spec readers used to rewrite a statement with sed and tr before reading it
+# -- extras, an npm alias, a runner's operands, grouping characters -- and each
+# ran in a command substitution, so a failed one left no text, no text read as
+# no spec, and a pinned install passed as if it named nothing to check. Each
+# had to carry a failure mark. They are now the manager's grammar
+# (safedeps_manager_read) and per-word readers that run in the guard's own
+# shell, which cannot fail that way, so the mark has nothing left to cover.
+# This holds that: none of them starts sed, tr, awk or grep.
+grammar_src="${ROOT_DIR}/lib/install-grammar.sh"
+reader_bodies=$(
+  for fn in guard_extract_specs guard_word_specs guard_word_as_read guard_names_package_without_spec guard_record_statement; do
+    sed -n "/^${fn}() {/,/^}/p" "${GUARD}"
+  done
+  for fn in safedeps_manager_read safedeps_manager_read_npm safedeps_manager_read_npm_once safedeps_manager_read_mvn \
+      safedeps_npx_first_pass safedeps_npm_read_args safedeps_manager_option_class safedeps_manager_command \
+      safedeps_manager_npm_at safedeps_manager_long_option; do
+    sed -n "/^${fn}() {/,/^}/p" "${grammar_src}"
+  done
 )
-for row in "${sed_rows[@]}"; do
-  reader="${row%%$'\t'*}" failing_command="${row#*$'\t'}"
-  # Control: with sed working the same command is denied as a finding.
-  scanfail_guard "" "${failing_command}"
-  if [[ "${SCANFAIL_DECISION}" != "deny" ]] || grep -q 'UNDECIDED' <<< "${SCANFAIL_REASON}"; then
-    fail "control: a working ${reader} reader denies ${failing_command} as a finding (got: ${SCANFAIL_DECISION})"
-  fi
-  scanfail_guard "${fail_tmp}/reader-${reader}" "${failing_command}"
-  [[ "${SCANFAIL_DECISION}" == "deny" ]] \
-    || fail "a failed ${reader} reader does not turn ${failing_command} into a pass (got: ${SCANFAIL_DECISION})"
-  grep -q 'UNDECIDED' <<< "${SCANFAIL_REASON}" \
-    || fail "a failed ${reader} reader is reported as undecided: ${failing_command}"
-  grep -q 'scanner failed' <<< "${SCANFAIL_LOG}" \
-    || fail "a failed ${reader} reader is recorded in advisory.log: ${failing_command}"
+[[ "${reader_bodies}" == *"safedeps_manager_read() {"* && "${reader_bodies}" == *"guard_extract_specs() {"* ]] \
+  || fail "the spec readers are where this battery looks for them (renamed? then update this battery)"
+for fn in guard_create_identity guard_family_ecosystem; do
+  reader_bodies+=$'\n'"$(sed -n "/^${fn}() {/,/^}/p" "${GUARD}")"
 done
-pass "a failed sed or tr in a spec reader denies the install as UNDECIDED (${#sed_rows[@]} readers, each against a working control)"
+if grep -nE '(^|[|$(;&[:space:]])(sed|tr|awk|grep|judge_grep)[[:space:]]|[$][(][^(]|`' \
+    <<< "$(grep -v '^[[:space:]]*#' <<< "${reader_bodies}")"; then
+  fail "a spec reader starts a process, which can fail and read as no spec"
+fi
+pass "the spec readers run in the guard's shell: no sed, tr, awk, grep or substitution to fail and read as no spec"
 
 # --- when the statement readers fail ---------------------------------------------
 # The extractor reads the command's statements from resolve_install_targets,

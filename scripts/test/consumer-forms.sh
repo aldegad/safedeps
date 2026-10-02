@@ -397,14 +397,18 @@ do
 done
 pass "the record stays quiet on file-only, working-tree, bare-lockfile, npm, and already-pinned installs"
 
-# A KNOWN spurious record, pinned rather than fixed. An unknown flag is assumed
-# to take no value, so `--proxy <url>` leaks its URL into the operand walk. The
-# assumption is deliberate: guessing the other way drops the install this record
-# exists to catch. Widening the value table instead is the enumeration this
-# lineage was burned by four times. Pinned so the line reads as a declared
-# trade-off rather than a defect.
+# A KNOWN spurious record, pinned rather than fixed. An option the manager's
+# table does not list is read as taking no value, so a value option the table
+# lacks leaks its value into the operands. The assumption is deliberate:
+# guessing the other way drops the install this record exists to catch. pip's
+# own value options are in its table now, from its help (`--proxy` among them),
+# so the stand-in here is an option the table does not know, as an option a
+# newer pip adds would be. Pinned so the line reads as a declared trade-off
+# rather than a defect.
+logged_ungated "pip install --unlisted-proxy https://proxy.example:8080 -r requirements.txt" \
+  || fail "a value option the table does not know still leaks a spurious record (declared trade-off)"
 logged_ungated "pip install --proxy https://proxy.example:8080 -r requirements.txt" \
-  || fail "the known --proxy spurious record is still produced (declared trade-off)"
+  && fail "pip's own --proxy takes its value: no spurious record"
 pass "an unknown value-taking flag still leaks a spurious record (declared, not a defect)"
 
 # `mvn -Dartifact=… dependency:get` puts the flag BEFORE the goal. This used to
@@ -1444,6 +1448,32 @@ else
   pass "npm's arguments against nopt # SKIP no npm and node on PATH to ask"
 fi
 pass "an option's value never stands in for npm's command, in either spelling"
+
+# --- 10d. Every manager's words are read with its own option table -------------
+# The same question for the other managers, answered by safedeps_manager_read
+# from each manager's table. Each row passed with no check before the tables:
+# the value of a manager option before its command was read as the command or
+# the package, a version attached to its option was not read as one, and an
+# abbreviation or a `:` value was not read at all. scripts/test/manager-variants.sh
+# holds the places a value stands by spelling; these are the spellings of the
+# options themselves.
+expect_prescription 'npm evil@1.0.0;' 'bun --cwd x add evil@1.0.0'
+expect_prescription 'npm evil@1.0.0;' 'pnpm --dir x add evil@1.0.0'
+expect_prescription 'crates.io evil@1.0.0;' 'cargo --config x install evil --version 1.0.0'
+expect_prescription 'rubygems rake@13.0.0;' 'gem install rake -v13.0.0'
+expect_prescription 'rubygems rake@13.0.0;' 'gem install rake --vers 13.0.0'
+expect_prescription 'rubygems rake@13.0.0;' 'gem install --inst x rake -v 13.0.0'
+expect_prescription 'nuget dotnet-ef@8.0.0;' 'dotnet tool install dotnet-ef --version:8.0.0'
+expect_prescription 'maven g:a@1.0;' 'mvn -D artifact=g:a:1.0 dependency:get'
+expect_prescription 'pypi evil@1.0.0;' 'pip install --ta dir evil==1.0.0'
+expect_prescription 'pypi evil@1.0.0;' 'pip --cache-dir x install evil==1.0.0'
+expect_prescription 'pypi evil@1.0.0;' 'uv --directory x add evil==1.0.0'
+expect_prescription 'go example.com/m@v1.0.0;' 'go run --C x example.com/m@v1.0.0'
+# npm 10.8.2 does not define --min-release-age, so to it the word after the
+# option is npm's command, and the install runs there (SAFEDEPS_G_NPM_OTHER).
+expect_prescription 'npm evil@1.0.0;' 'npm --min-release-age install evil@1.0.0'
+expect_prescription 'npm evil@1.0.0;' 'npx --min-release-age 3 evil@1.0.0'
+pass "every manager's options are read with its own table: values, attached and abbreviated spellings, and both npm versions"
 
 # --- 11. The UNGATED record names each operand the gate did not check ---------
 # The record used to be a second parser: it read each statement on its own and

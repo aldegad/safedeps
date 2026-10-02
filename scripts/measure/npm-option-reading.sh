@@ -23,7 +23,10 @@
 #
 # The table is the source of truth, and it is one npm's
 # (SAFEDEPS_G_NPM_OPTIONS_FROM). Against that npm version any difference
-# fails. Against another version, options that npm defines differently from
+# fails. Against npm 10.8.2 (SAFEDEPS_G_NPM_OTHER_FROM), whose differences are
+# tabled and read as a second reading, the differences must be exactly that
+# table and the reading through it must agree with nopt everywhere. Against
+# any other version, options that npm defines differently from
 # the table (added, dropped, retyped; shorthands likewise) are expected to
 # read differently, so they are named, and every argument list read
 # differently is attributed to one of them: when all are, the run is a skip
@@ -35,7 +38,7 @@
 #   --print   print the table measured from npm, in the grammar's form
 # Exit: 0 both agree, 1 a disagreement (printed), 2 no npm to ask,
 #       3 skipped: this npm keeps its config definitions elsewhere, or it is
-#         another version that reads only the named options differently.
+#         an untabled version that reads only the named options differently.
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
@@ -51,7 +54,8 @@ trap 'rm -rf "${work}"' EXIT
 # The table and the corpus, from npm's own modules. nopt and the definitions
 # are resolved from npm's install, so a distribution that unbundles npm's
 # dependencies finds the copies npm uses.
-if ! (cd "${npm_root}" && node -e '
+node_rc=0
+(cd "${npm_root}" && node -e '
 const path = require("path")
 const fs = require("fs")
 const from = { paths: [path.resolve(".")] }
@@ -128,13 +132,13 @@ const rows = lists.map(a => {
   return a.join("\u001f") + "\u001e" + r.argv.remain.join("\u001f")
 })
 fs.writeFileSync(out + "/corpus", rows.join("\n") + "\n")
-' "${work}"); then
-  rc=$?
-  if [[ "${rc}" == "${skipped}" ]]; then
+' "${work}") || node_rc=$?
+if (( node_rc != 0 )); then
+  if [[ "${node_rc}" == "${skipped}" ]]; then
     printf 'skipped: npm %s keeps no @npmcli/config/lib/definitions or nopt where this looks\n' "${version}"
     exit "${skipped}"
   fi
-  printf 'could not ask npm %s option parser (node exited %s)\n' "${version}" "${rc}" >&2
+  printf 'could not ask npm %s option parser (node exited %s)\n' "${version}" "${node_rc}" >&2
   exit 2
 fi
 
@@ -151,6 +155,11 @@ fi
 rc=0
 same_version=false
 [[ "${version}" == "${SAFEDEPS_G_NPM_OPTIONS_FROM}" ]] && same_version=true
+# The other npm the grammar reads as well (SAFEDEPS_G_NPM_OTHER_FROM): its
+# differences are tabled, so against it the reading through that table must
+# agree with nopt everywhere, and the table must be exactly its differences.
+other_version=false
+[[ "${version}" == "${SAFEDEPS_G_NPM_OTHER_FROM}" ]] && other_version=true
 # 1. The table. The names whose entry differs, on either side, are the ones
 # another npm version may read differently.
 have_options=$(set -f; printf '%s\n' ${SAFEDEPS_G_NPM_OPTIONS} | sort)
@@ -163,6 +172,21 @@ if [[ -s "${work}/differ.options" || -s "${work}/differ.shorthands" ]] && [[ "${
   printf 'npm %s, the version the table is from, defines these differently from lib/install-grammar.sh: %s\n' \
     "${version}" "$(cat "${work}/differ.options" "${work}/differ.shorthands" | paste -sd ' ' -)"
   rc=1
+fi
+
+if [[ "${other_version}" == true ]]; then
+  want_other=$(
+    while IFS= read -r key; do
+      entry=$(grep -E "^${key//./[.]}:" "${work}/options" || true)
+      printf '%s\n' "${entry:-${key}:-}"
+    done < "${work}/differ.options" | sort)
+  have_other=$(set -f; printf '%s\n' ${SAFEDEPS_G_NPM_OTHER} | sort)
+  if [[ "${want_other}" != "${have_other}" || -s "${work}/differ.shorthands" ]]; then
+    printf 'npm %s differs from the table otherwise than SAFEDEPS_G_NPM_OTHER says: want [%s], have [%s], shorthands [%s]\n' \
+      "${version}" "$(paste -sd ' ' - <<< "${want_other}")" "$(paste -sd ' ' - <<< "${have_other}")" \
+      "$(paste -sd ' ' - < "${work}/differ.shorthands")"
+    rc=1
+  fi
 fi
 
 # 2. The reading. A list read differently is explained when one of its option
@@ -201,13 +225,18 @@ while IFS=$'\036' read -r args want; do
     total=$((total - 1))
     continue
   fi
-  if safedeps_npm_read_args "${words[@]}"; then
+  if [[ "${other_version}" == true ]]; then
+    reader=(safedeps_npm_as_other safedeps_npm_read_args)
+  else
+    reader=(safedeps_npm_read_args)
+  fi
+  if "${reader[@]}" "${words[@]}"; then
     got=$(IFS=$'\037'; printf '%s' "${SAFEDEPS_G_NPM_WORDS[*]+"${SAFEDEPS_G_NPM_WORDS[*]}"}")
   else
     got="<no reading>"
   fi
   if [[ "${got}" != "${want}" ]]; then
-    if [[ "${same_version}" != true ]] && explained_by "${words[@]}" > /dev/null; then
+    if [[ "${same_version}" != true && "${other_version}" != true ]] && explained_by "${words[@]}" > /dev/null; then
       boundary=$((boundary + 1))
       continue
     fi
@@ -222,12 +251,17 @@ if (( wrong > 0 )); then
   printf '%s of %s argument lists read differently from npm %s\n' "${wrong}" "${total}" "${version}"
   rc=1
 fi
-if (( rc == 0 )) && [[ "${same_version}" != true ]] \
+if (( rc == 0 )) && [[ "${same_version}" != true && "${other_version}" != true ]] \
     && [[ -s "${work}/differ.options" || -s "${work}/differ.shorthands" ]]; then
   printf 'skipped: npm %s is not npm %s, which the table is from; it defines these differently: %s; %s of %s argument lists read differently, each through one of them, and the rest agree\n' \
     "${version}" "${SAFEDEPS_G_NPM_OPTIONS_FROM}" \
     "$(cat "${work}/differ.options" "${work}/differ.shorthands" | paste -sd ' ' -)" "${boundary}" "${total}"
   exit "${skipped}"
+fi
+if (( rc == 0 )) && [[ "${other_version}" == true ]]; then
+  printf 'npm %s: read through the table of its differences (SAFEDEPS_G_NPM_OTHER, %s options), %s argument lists agree\n' \
+    "${version}" "$(wc -l < "${work}/differ.options" | tr -d ' ')" "${total}"
+  exit 0
 fi
 if (( rc == 0 )); then
   printf 'npm %s: %s option classes, %s shorthands and %s argument lists agree\n' "${version}" \

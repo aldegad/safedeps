@@ -117,7 +117,14 @@ SAFEDEPS_G_NPM_REGISTRY_OPERAND='([Nn][Pp][Mm]:[^[:space:]]+|(@[^/@[:space:]]+/[
 SAFEDEPS_G_NPM_REMOTE_SPEC='((git[+][A-Za-z]+|git|github|gitlab|bitbucket|gist|https?):[^[:space:]]+|[^:@%/[:space:].~-][^:@%/[:space:]]*/[^:@[:space:]/%]+(#[^[:space:]]*)?)'
 SAFEDEPS_G_NPM_REMOTE_OPERAND="(${SAFEDEPS_G_NPM_REMOTE_SPEC}|[^@[:space:]]+@[^:.[:space:]]+[.][^:[:space:]]+:[^[:space:]]+|(@[^/@[:space:]]+/[^/@[:space:]]+|[^-./~@:[:space:]][^/@:[:space:]]*)@${SAFEDEPS_G_NPM_REMOTE_SPEC})"
 
-SAFEDEPS_G_O="${SAFEDEPS_G_OPTS}"
+# The same, as the recognizers read it: an option's value may run over several
+# words of the scan view, as a substitution or an escaped blank does there
+# (`--prefix $(echo a b)`), but never past a `;`, `&` or `|`. The recognizers
+# only say that a statement may be an install; which word is the command is
+# the manager's grammar (safedeps_manager_read), so this can only be wider than
+# the installs it finds, never narrower. The inert rewrite anchors on the
+# narrow form above.
+SAFEDEPS_G_O='([[:space:]]+(--|--?[A-Za-z0-9][A-Za-z0-9_.-]*(=[^[:space:]]*)?([[:space:]]+[^-[:space:];&|][^[:space:];&|]*)*))*'
 
 # npm-CLI installs only. The effect gate reads package-lock.json, which only the
 # npm CLI writes, so this is also the set the `--ignore-scripts` rewrite targets.
@@ -129,8 +136,8 @@ SAFEDEPS_G_O="${SAFEDEPS_G_OPTS}"
 SAFEDEPS_G_NPM_INSTALL_BODY="npm${SAFEDEPS_G_O}[[:space:]]+(${SAFEDEPS_G_NPM_VERBS})|npm${SAFEDEPS_G_O}[[:space:]]+(${SAFEDEPS_G_NPM_LINK_VERBS})([[:space:]]+[^[:space:]]+)*[[:space:]]+(${SAFEDEPS_G_NPM_REGISTRY_OPERAND}|${SAFEDEPS_G_NPM_REMOTE_OPERAND})"
 
 # Runners fetch a package and execute it. Nothing reads a lockfile after them.
-# This ends AT the runner keyword. Options after it belong to the runner and can
-# carry the package (`npx -p x@1 cmd`), so the operand walk has to see them.
+# Which word is the package (`npx -p x@1 cmd` names it by option) is the
+# manager's grammar below, not this pattern's.
 #
 # Each manager's `create` is a runner too: it rewrites its first operand into a
 # package name (`vite` -> `create-vite`) and runs that the way its exec does.
@@ -139,7 +146,6 @@ SAFEDEPS_G_NPM_INSTALL_BODY="npm${SAFEDEPS_G_O}[[:space:]]+(${SAFEDEPS_G_NPM_VER
 # not a local template or a GitHub repo). guard_create_identity has the
 # rewrites, each from that manager's source.
 SAFEDEPS_G_CREATE_BODY="npm${SAFEDEPS_G_O}[[:space:]]+(${SAFEDEPS_G_NPM_INIT_VERBS})|pnpm${SAFEDEPS_G_O}[[:space:]]+create|yarn${SAFEDEPS_G_O}[[:space:]]+create|bun${SAFEDEPS_G_O}[[:space:]]+(create|c)"
-SAFEDEPS_G_RUNNER_BODY="(npx|pnpx|bunx|uvx)|npm${SAFEDEPS_G_O}[[:space:]]+(${SAFEDEPS_G_NPM_EXEC_VERBS})|${SAFEDEPS_G_CREATE_BODY}|pnpm${SAFEDEPS_G_O}[[:space:]]+dlx|yarn${SAFEDEPS_G_O}[[:space:]]+dlx|bun${SAFEDEPS_G_O}[[:space:]]+x|pipx${SAFEDEPS_G_O}[[:space:]]+run|uv${SAFEDEPS_G_O}[[:space:]]+tool${SAFEDEPS_G_O}[[:space:]]+run|go${SAFEDEPS_G_O}[[:space:]]+run"
 
 SAFEDEPS_G_INSTALL_BODY="${SAFEDEPS_G_NPM_INSTALL_BODY}\
 |(npx|pnpx|bunx|uvx)${SAFEDEPS_G_O}${SAFEDEPS_G_OPERAND}\
@@ -171,10 +177,6 @@ SAFEDEPS_G_INSTALL_BODY="${SAFEDEPS_G_NPM_INSTALL_BODY}\
 # quoted text is already blanked.
 SAFEDEPS_G_INSTALL_RE="${SAFEDEPS_G_START}(${SAFEDEPS_G_INSTALL_BODY})([[:space:]]|$)"
 SAFEDEPS_G_NPM_INSTALL_RE="${SAFEDEPS_G_START}(${SAFEDEPS_G_NPM_INSTALL_BODY})([[:space:]]|$)"
-# An npm link, which installs into the global prefix whatever its flags say.
-SAFEDEPS_G_NPM_LINK_RE="${SAFEDEPS_G_START}npm${SAFEDEPS_G_O}[[:space:]]+(${SAFEDEPS_G_NPM_LINK_VERBS})([[:space:]]|$)"
-# Ends at the runner keyword; what follows it is the runner's operand list.
-SAFEDEPS_G_RUNNER_HEAD_RE="${SAFEDEPS_G_START}(${SAFEDEPS_G_RUNNER_BODY})([[:space:]]|$)"
 
 # Unanchored, for raw text nobody has parsed: the jq-missing fail-closed check
 # and the PostToolUse backstop. A false positive there costs a closure diff or a
@@ -182,10 +184,6 @@ SAFEDEPS_G_RUNNER_HEAD_RE="${SAFEDEPS_G_START}(${SAFEDEPS_G_RUNNER_BODY})([[:spa
 # alternatives are the pre-grammar forms, kept so this can only widen.
 SAFEDEPS_G_RAW_INSTALL_RE="(^|[^A-Za-z0-9_./-])(${SAFEDEPS_G_INSTALL_BODY})([^A-Za-z0-9_-]|$)|(npm|pnpm|yarn|bun)([^\"]*)(install|add|dlx)|pip[0-9]*[[:space:]]+install|cargo[[:space:]]+(add|install)|go[[:space:]]+(get|install)|gem[[:space:]]+install|bundle[[:space:]]+add|poetry[[:space:]]+add|uv[[:space:]]+(add|pip)|pipenv[[:space:]]+install|mvn([^\"]*)dependency:get|dotnet[[:space:]]+add[[:space:]]+package"
 
-# True when <token> can open an install's operand list.
-safedeps_grammar_is_verb() {
-  [[ "$1" =~ ^(${SAFEDEPS_G_ALL_VERBS})$ ]]
-}
 
 # How npm-package-arg (npa) reads an argument, as far as npm link needs it:
 # npm link reads each of its arguments this way (lib/commands/link.js:92-104),
@@ -272,12 +270,14 @@ safedeps_npa_is_local() {
 # of argument lists and fails on any word this reading places differently.
 #
 # The table is one npm's, and the npm a command runs may be another: npm adds,
-# drops and retypes options between releases. Against an npm of another
-# version the check names every option that npm defines differently and every
-# argument list it reads differently because of one; that is that npm's
-# boundary, reported as a skip with the names, never a quiet pass. A list read
-# differently through an option both define alike is this reading's defect,
-# and fails.
+# drops and retypes options between releases. npm 10.8.2's differences are
+# tabled below (SAFEDEPS_G_NPM_OTHER), a statement that names one of them is
+# read both ways, and the check holds that reading to npm 10.8.2's nopt. Against
+# any other version the check names every option that npm defines differently
+# and every argument list it reads differently because of one; that is that
+# npm's boundary, reported as a skip with the names, never a quiet pass. A list
+# read differently through an option both define alike is this reading's
+# defect, and fails.
 SAFEDEPS_G_NPM_OPTIONS_FROM='11.19.0'
 SAFEDEPS_G_NPM_OPTIONS='
   _auth:v+nS access:v+n=restricted,public,private all:b
@@ -343,6 +343,30 @@ SAFEDEPS_G_NPM_SHORTHANDS='
 SAFEDEPS_G_NPM_OPTIONS=" ${SAFEDEPS_G_NPM_OPTIONS//$'\n'/ } "
 SAFEDEPS_G_NPM_SHORTHANDS=" ${SAFEDEPS_G_NPM_SHORTHANDS//$'\n'/ } "
 
+# Where another npm the gate supports defines an option differently, a word
+# after that option is read both ways, and a statement is judged as the union:
+# an install under either reading is judged. The table above is npm 11.19.0's;
+# npm 10.8.2 (node 20, which GitHub CI and many machines run) does not define
+# the options marked `-` below, so to it each is an unknown Boolean and the
+# word after it is npm's command or an operand: `npm --min-release-age install
+# evil@1.0.0` installs evil under npm 10 and runs a command named evil@1.0.0
+# under npm 11. Judging only the npm 11 reading let that pass unchecked. Only
+# these options start the second reading, so a command without one costs
+# nothing more. scripts/measure/npm-option-reading.sh checks this list, and
+# the reading under it, against an npm 10.8.2 on PATH.
+SAFEDEPS_G_NPM_OTHER_FROM='10.8.2'
+SAFEDEPS_G_NPM_OTHER='
+  access:v+n=restricted,public allow-directory:- allow-file:- allow-git:-
+  allow-remote:- allow-scripts:- allow-scripts-pending:-
+  allow-scripts-pin:- bypass-2fa:- dangerously-allow-all-scripts:-
+  expires:- include-attestations:- init-private:- init-type:-
+  min-release-age:- min-release-age-exclude:- name:- node-gyp:- orgs:-
+  orgs-permission:- packages:- packages-all:-
+  packages-and-scopes-permission:- password:- scopes:-
+  strict-allow-scripts:- token-description:-
+'
+SAFEDEPS_G_NPM_OTHER=" ${SAFEDEPS_G_NPM_OTHER//$'\n'/ } "
+
 # <word> as an ERE that matches it literally, in SAFEDEPS_G_ERE. The tables are
 # searched with =~, which is linear: bash's own pattern removal
 # (`${table#* "${key}":}`) is quadratic in the table's length, and these
@@ -384,6 +408,50 @@ safedeps_npm_unique_prefix() {
   re=" (${SAFEDEPS_G_ERE}[^ :=]*)[:=]"
   [[ "$2" =~ ${re} ]] && SAFEDEPS_G_PICKED="${BASH_REMATCH[1]}"
   return 0
+}
+
+# True when an option word among the arguments names, abbreviates or negates
+# an option the other npm defines differently (SAFEDEPS_G_NPM_OTHER), so the
+# arguments have a second reading.
+safedeps_npm_other_applies() {
+  local word s re
+  for word in "$@"; do
+    [[ "${word}" == -?* ]] || continue
+    s="${word%%=*}"
+    while [[ "${s}" == -* ]]; do s="${s#-}"; done
+    while [[ "${s:0:3}" == [Nn][Oo]- ]]; do s="${s:3}"; done
+    [[ -n "${s}" ]] || continue
+    safedeps_ere_literal "${s}"
+    re=" ${SAFEDEPS_G_ERE}[^ :]*:"
+    [[ "${SAFEDEPS_G_NPM_OTHER}" =~ ${re} ]] && return 0
+  done
+  return 1
+}
+
+# Runs "$@" with npm's option table as the other npm defines it. The table is
+# built once per process, by splitting it into words: bash's own substitution
+# on a table this long is quadratic.
+SAFEDEPS_G_NPM_OPTIONS_AS_OTHER=""
+safedeps_npm_as_other() {
+  local saved="${SAFEDEPS_G_NPM_OPTIONS}" entry key rc=0
+  local -a entries=()
+  if [[ -z "${SAFEDEPS_G_NPM_OPTIONS_AS_OTHER}" ]]; then
+    read -ra entries <<< "${SAFEDEPS_G_NPM_OPTIONS}"
+    SAFEDEPS_G_NPM_OPTIONS_AS_OTHER=" "
+    for entry in "${entries[@]}"; do
+      key="${entry%%:*}"
+      case "${SAFEDEPS_G_NPM_OTHER}" in *" ${key}:"*) continue ;; esac
+      SAFEDEPS_G_NPM_OPTIONS_AS_OTHER+="${entry} "
+    done
+    read -ra entries <<< "${SAFEDEPS_G_NPM_OTHER}"
+    for entry in "${entries[@]}"; do
+      [[ "${entry#*:}" == - ]] || SAFEDEPS_G_NPM_OPTIONS_AS_OTHER+="${entry} "
+    done
+  fi
+  SAFEDEPS_G_NPM_OPTIONS="${SAFEDEPS_G_NPM_OPTIONS_AS_OTHER}"
+  "$@" || rc=$?
+  SAFEDEPS_G_NPM_OPTIONS="${saved}"
+  return "${rc}"
 }
 
 # nopt's resolveShort: what an option word expands to, as SAFEDEPS_G_SHORT_SET
@@ -429,7 +497,8 @@ safedeps_js_is_number() {
 }
 
 # npm's reading of the words after `npm`, as nopt reads them (nopt-lib.js
-# parse, nopt 9 in npm 11.19.0). Sets SAFEDEPS_G_NPM_AT and SAFEDEPS_G_NPM_WORDS,
+# parse, nopt 9 in npm 11.19.0). Sets SAFEDEPS_G_NPM_AT and SAFEDEPS_G_NPM_WORDS
+# (and SAFEDEPS_G_NPM_VALUES, each option value it took),
 # the positional words in order with the index of the word each came from. The
 # first is npm's command; the rest are its arguments. A positional can be the
 # value half of a `--name=value` word whose option took no value
@@ -439,7 +508,7 @@ safedeps_js_is_number() {
 safedeps_npm_read_args() {
   local -a w=("$@") at=() exp=()
   local i j n arg v s cls la la_set hadeq no key consumed flags lits steps=0
-  SAFEDEPS_G_NPM_AT=() SAFEDEPS_G_NPM_WORDS=()
+  SAFEDEPS_G_NPM_AT=() SAFEDEPS_G_NPM_WORDS=() SAFEDEPS_G_NPM_VALUES=()
   for (( i = 0; i < ${#w[@]}; i++ )); do at[i]=${i}; done
   i=0
   while (( i < ${#w[@]} )); do
@@ -516,26 +585,785 @@ safedeps_npm_read_args() {
       [[ "${cls}" == s && "${la}" =~ ^--?[^-] ]] && consumed=0
       [[ "${la}" =~ ^--+$ ]] && consumed=0
     fi
+    # Each value taken, as `<word index>\037<option>\037<value>`: a runner's
+    # `--package` names the package it runs.
+    if (( consumed )); then
+      SAFEDEPS_G_NPM_VALUES+=("${at[i+1]}"$'\037'"${key}"$'\037'"${w[i+1]}")
+    fi
     i=$(( i + 1 + consumed ))
   done
   return 0
 }
 
-# Which kind of command npm runs for <words> (the words after `npm`): `install`,
-# `link`, `exec` or `init` when its command word is one of the grammar's
-# spellings for it, `other` for any other command, `none` without one. The
-# index of the command word among <words> is SAFEDEPS_G_NPM_CMD_AT, -1 without
-# one, and the positional words after it are npm's operands.
-safedeps_npm_command_kind() {
-  local cmd
-  SAFEDEPS_G_NPM_KIND=none SAFEDEPS_G_NPM_CMD_AT=-1
-  safedeps_npm_read_args "$@" || return 1
-  [[ ${#SAFEDEPS_G_NPM_WORDS[@]} -gt 0 ]] || return 0
-  cmd="${SAFEDEPS_G_NPM_WORDS[0]}" SAFEDEPS_G_NPM_CMD_AT="${SAFEDEPS_G_NPM_AT[0]}"
+
+# --- The manager word grammar ---------------------------------------------------
+# One reader of a statement's words for every manager: which word is the
+# manager, which words name its command, which words are option values (and of
+# what kind), and which are the operands it installs or the package it runs.
+# The spec extractor, the UNGATED record, the landing of a non-npm install and
+# the runner reader all read its roles and nothing else.
+#
+# It replaced four readers that each approximated the same grammar: the
+# recognizer regexes picked a verb by trying both readings of an option that
+# may take a value (`npm --prefix x install` read as `npm x`); the extractor's
+# awk knew value options for gem, bundle, cargo and dotnet only, so `pip
+# --cache-dir x install evil==1.0.0` recorded `pypi:install` and `cargo
+# --config x install evil --version 1.0.0` passed unchecked; the record walk
+# took the first word that looked like a verb (`pnpm --dir x add` recorded
+# `npm:add`); and the landing read `--prefix|--cwd|--dir|--install-dir`
+# wherever it stood. Each disagreed with the manager somewhere, and the
+# disagreement was a silent pass or a false record.
+#
+# The tables below are each manager's own, from its help or source as noted. A
+# value option not in a table is read as taking no value, which can only turn
+# its value into an extra operand -- a check or a record, never a skipped
+# package. The recognizer regexes stay as a filter that says whether a
+# statement may be an install; they decide no position.
+
+# What each command path of a manager is: `<family>:<path>=<kind>`. <path> is
+# the command words after the manager, joined by `,`, where `*` stands for any
+# one word (dotnet's project file). <kind> is install, runner or create. npm's
+# commands come from its own reading (safedeps_manager_read_npm).
+#   pnpm   pnpm --help (10.28.1); pnpx is `pnpm dlx`.
+#   yarn   yarn --help (1.22.22) and yarnpkg.com/cli (Berry: up, dlx,
+#          workspace, workspaces foreach).
+#   bun    bun --help (1.3.14); bunx is `bun x`.
+#   pip    pip --help (26.1.2), also as `python -m pip`.
+#   uv     uv --help (0.10.11); uvx is `uv tool run`.
+#   pipx   pipx --help (1.12.0).
+#   poetry python-poetry.org/docs/cli (2.x; not installed where measured).
+#   pipenv pipenv.pypa.io/en/latest/cli (not installed where measured).
+#   cargo  cargo --help (1.94.0); `cargo add --vers` is cargo-edit's, which
+#          older toolchains still run, read as the pin it is there.
+#          go: go help (go1.26.5).
+#   gem    gem help install (3.0.3.1).  bundle: bundler.io/man/bundle-add.
+#   dotnet learn.microsoft.com/dotnet/core/tools (.NET 10 SDK).
+#   mvn    maven.apache.org/ref/current/maven-embedder/cli.html; the install
+#          is the dependency:get goal, read apart (safedeps_manager_read).
+SAFEDEPS_G_COMMANDS='
+  pnpm:add=install pnpm:install=install pnpm:i=install pnpm:install-test=install
+  pnpm:it=install pnpm:update=install pnpm:up=install pnpm:upgrade=install
+  pnpm:dlx=runner pnpm:create=create pnpx:=runner
+  yarn:add=install yarn:install=install yarn:upgrade=install yarn:up=install
+  yarn:dlx=runner yarn:create=create
+  yarn:global,add=install yarn:global,upgrade=install
+  yarn:workspace,*,add=install yarn:workspace,*,up=install yarn:workspace,*,upgrade=install
+  yarn:workspaces,foreach,add=install yarn:workspaces,foreach,install=install
+  yarn:workspaces,foreach,up=install yarn:workspaces,foreach,upgrade=install
+  yarn:workspaces,foreach,dlx=runner
+  bun:add=install bun:a=install bun:install=install bun:i=install bun:update=install
+  bun:upgrade=install bun:x=runner bun:create=create bun:c=create bunx:=runner
+  pip:install=install
+  uv:add=install uv:pip,install=install uv:tool,install=install uv:tool,run=runner
+  uvx:=runner
+  pipx:install=install pipx:inject=install pipx:run=runner
+  poetry:add=install pipenv:install=install
+  cargo:add=install cargo:install=install
+  go:get=install go:install=install go:run=runner
+  gem:install=install bundle:add=install
+  dotnet:add,package=install dotnet:add,*,package=install dotnet:package,add=install
+  dotnet:package,update=install dotnet:tool,install=install dotnet:tool,update=install
+'
+
+# The options that take a value: `<family>/<scope>:<option>=<class>`. <scope>
+# is `*` for the manager's own options, which every command accepts, or a
+# command path. <class> says what the value is:
+#   v  a value that names no package
+#   d  a directory the command runs in or installs into
+#   V  the version every operand of the command is pinned to
+#   p  the package itself (a runner's `--package`, pip's `-e`)
+#   w  a package added beside the one that runs (uvx `--with`)
+# Only options that always take a value are listed. One whose value is
+# optional, or one that is not listed, takes none, so its value is read as an
+# operand: a spurious check or record, never a package skipped.
+SAFEDEPS_G_VALUE_OPTIONS='
+  pnpm/*:-C=d pnpm/*:--dir=d pnpm/*:--filter=v pnpm/*:-F=v pnpm/*:--filter-prod=v
+  pnpm/*:--loglevel=v pnpm/*:--reporter=v pnpm/*:--test-pattern=v
+  pnpm/*:--changed-files-ignore-pattern=v pnpm/*:--store-dir=v pnpm/*:--virtual-store-dir=v
+  pnpm/*:--modules-dir=v pnpm/*:--lockfile-dir=v pnpm/*:--global-dir=v
+  pnpm/*:--child-concurrency=v pnpm/*:--network-concurrency=v pnpm/*:--hoist-pattern=v
+  pnpm/*:--public-hoist-pattern=v pnpm/*:--trust-policy-exclude=v
+  pnpm/*:--trust-policy-ignore-after=v pnpm/*:--allow-build=v
+  pnpm/dlx:--package=p pnpx/*:--package=p pnpx/*:--allow-build=v
+  pnpx/*:-C=d pnpx/*:--dir=d pnpx/*:--filter=v pnpx/*:-F=v pnpx/*:--loglevel=v pnpx/*:--reporter=v
+  yarn/*:--cwd=d yarn/*:--cache-folder=v yarn/*:--global-folder=v yarn/*:--link-folder=v
+  yarn/*:--modules-folder=v yarn/*:--mutex=v yarn/*:--network-concurrency=v
+  yarn/*:--network-timeout=v yarn/*:--otp=v yarn/*:--preferred-cache-folder=v yarn/*:--proxy=v
+  yarn/*:--https-proxy=v yarn/*:--registry=v yarn/*:--use-yarnrc=v
+  yarn/dlx:-p=p yarn/dlx:--package=p yarn/create:-p=w yarn/create:--package=w
+  yarn/workspaces,foreach,dlx:-p=p
+  yarn/workspaces,foreach,dlx:--package=p
+  yarn/workspaces,foreach:--include=v yarn/workspaces,foreach:--exclude=v
+  yarn/workspaces,foreach:--from=v yarn/workspaces,foreach:-j=v yarn/workspaces,foreach:--jobs=v
+  bun/*:--cwd=d bun/*:-c=v bun/*:--config=v bun/*:--backend=v bun/*:--ca=v bun/*:--cache-dir=v
+  bun/*:--cafile=v bun/*:--concurrent-scripts=v bun/*:--cpu=v bun/*:--linker=v
+  bun/*:--minimum-release-age=v bun/*:--network-concurrency=v bun/*:--omit=v bun/*:--os=v
+  bun/*:--registry=v bun/x:-p=p bun/x:--package=p bunx/*:-p=p bunx/*:--package=p bunx/*:--cwd=d
+  pip/*:--python=v pip/*:--log=v pip/*:--keyring-provider=v pip/*:--proxy=v pip/*:--retries=v
+  pip/*:--timeout=v pip/*:--exists-action=v pip/*:--trusted-host=v pip/*:--cert=v
+  pip/*:--client-cert=v pip/*:--cache-dir=v pip/*:--use-feature=v pip/*:--use-deprecated=v
+  pip/*:--resume-retries=v
+  pip/install:-r=v pip/install:--requirement=v pip/install:-c=v pip/install:--constraint=v
+  pip/install:--build-constraint=v pip/install:--requirements-from-script=v
+  pip/install:-e=p pip/install:--editable=p pip/install:-t=d pip/install:--target=d
+  pip/install:--platform=v pip/install:--python-version=v pip/install:--implementation=v
+  pip/install:--abi=v pip/install:--root=d pip/install:--prefix=d pip/install:--src=v
+  pip/install:--upgrade-strategy=v pip/install:-C=v pip/install:--config-settings=v
+  pip/install:--progress-bar=v pip/install:--root-user-action=v pip/install:--report=v
+  pip/install:--group=v pip/install:--all-releases=v pip/install:--only-final=v
+  pip/install:--no-binary=v pip/install:--only-binary=v pip/install:-i=v
+  pip/install:--index-url=v pip/install:--extra-index-url=v pip/install:-f=v
+  pip/install:--find-links=v pip/install:--uploaded-prior-to=v
+  uv/*:--cache-dir=v uv/*:--color=v uv/*:--allow-insecure-host=v uv/*:--directory=d
+  uv/*:--project=d uv/*:--config-file=v uv/*:-p=v uv/*:--python=v
+  uv/*:-i=v uv/*:--index=v uv/*:--default-index=v uv/*:--index-url=v uv/*:--extra-index-url=v
+  uv/*:-f=v uv/*:--find-links=v uv/*:--index-strategy=v uv/*:--keyring-provider=v
+  uv/*:-P=v uv/*:--upgrade-package=v uv/*:--resolution=v uv/*:--prerelease=v
+  uv/*:--fork-strategy=v uv/*:--exclude-newer=v uv/*:--exclude-newer-package=v
+  uv/*:--no-sources-package=v uv/*:--reinstall-package=v uv/*:--link-mode=v
+  uv/*:-C=v uv/*:--config-setting=v uv/*:--config-settings-package=v
+  uv/*:--no-build-isolation-package=v uv/*:--no-build-package=v uv/*:--no-binary-package=v
+  uv/*:--refresh-package=v uv/*:-c=v uv/*:--constraints=v uv/*:--overrides=v uv/*:--excludes=v
+  uv/*:-b=v uv/*:--build-constraints=v uv/*:--python-platform=v uv/*:--torch-backend=v
+  uv/*:--env-file=v
+  uv/add:-r=v uv/add:--requirements=v uv/add:-m=v uv/add:--marker=v uv/add:--optional=v
+  uv/add:--group=v uv/add:--bounds=v uv/add:--rev=v uv/add:--tag=v uv/add:--branch=v
+  uv/add:--extra=v uv/add:--package=v uv/add:--script=v uv/add:--no-install-package=v
+  uv/pip,install:-r=v uv/pip,install:--requirements=v uv/pip,install:-e=p
+  uv/pip,install:--editable=p uv/pip,install:--extra=v uv/pip,install:--group=v
+  uv/pip,install:-t=d uv/pip,install:--target=d uv/pip,install:--prefix=d
+  uv/pip,install:--no-binary=v uv/pip,install:--only-binary=v uv/pip,install:--python-version=v
+  uv/tool,install:-w=w uv/tool,install:--with=w uv/tool,install:--with-requirements=v
+  uv/tool,install:--with-editable=w uv/tool,install:--with-executables-from=w
+  uv/tool,run:--from=p uv/tool,run:-w=w uv/tool,run:--with=w uv/tool,run:--with-editable=v
+  uv/tool,run:--with-requirements=v
+  uvx/*:--from=p uvx/*:-w=w uvx/*:--with=w uvx/*:--with-editable=v uvx/*:--with-requirements=v
+  uvx/*:-c=v uvx/*:--constraints=v uvx/*:-b=v uvx/*:--build-constraints=v uvx/*:--overrides=v
+  uvx/*:--env-file=v uvx/*:--python-platform=v uvx/*:--torch-backend=v uvx/*:--index=v
+  uvx/*:--default-index=v uvx/*:-i=v uvx/*:--index-url=v uvx/*:--extra-index-url=v uvx/*:-f=v
+  uvx/*:--find-links=v uvx/*:--index-strategy=v uvx/*:--keyring-provider=v uvx/*:-P=v
+  uvx/*:--upgrade-package=v uvx/*:--resolution=v uvx/*:--prerelease=v uvx/*:--fork-strategy=v
+  uvx/*:--exclude-newer=v uvx/*:--exclude-newer-package=v uvx/*:--no-sources-package=v
+  uvx/*:--reinstall-package=v uvx/*:--link-mode=v uvx/*:-C=v uvx/*:--config-setting=v
+  uvx/*:--config-settings-package=v uvx/*:--no-build-isolation-package=v
+  uvx/*:--no-build-package=v uvx/*:--no-binary-package=v uvx/*:--cache-dir=v
+  uvx/*:--refresh-package=v uvx/*:-p=v uvx/*:--python=v uvx/*:--color=v
+  uvx/*:--allow-insecure-host=v uvx/*:--directory=d uvx/*:--project=d uvx/*:--config-file=v
+  pipx/run:--spec=p pipx/run:--with=w pipx/*:--python=v pipx/*:--fetch-python=v pipx/*:-i=v
+  pipx/*:--index-url=v pipx/*:--pip-args=v pipx/*:--backend=v pipx/install:--suffix=v
+  pipx/install:--preinstall=w pipx/inject:-r=v pipx/inject:--requirement=v
+  poetry/*:-C=d poetry/*:--directory=d poetry/*:-P=d poetry/*:--project=d
+  poetry/add:-G=v poetry/add:--group=v poetry/add:-E=v poetry/add:--extras=v
+  poetry/add:--optional=v poetry/add:--python=v poetry/add:--platform=v poetry/add:--markers=v
+  poetry/add:--source=v
+  pipenv/*:--python=v pipenv/*:--pypi-mirror=v pipenv/install:--categories=v
+  pipenv/install:--extra-pip-args=v pipenv/install:-r=v pipenv/install:--requirements=v
+  pipenv/install:-e=p pipenv/install:--editable=p pipenv/install:-i=v pipenv/install:--index=v
+  cargo/*:--color=v cargo/*:--config=v cargo/*:-Z=v cargo/*:-C=d cargo/*:--explain=v
+  cargo/*:--lockfile-path=v cargo/*:-F=v cargo/*:--features=v cargo/*:--registry=v
+  cargo/*:--git=v cargo/*:--branch=v cargo/*:--tag=v cargo/*:--rev=v cargo/*:--path=v
+  cargo/install:--version=V cargo/install:--vers=V cargo/install:--index=v
+  cargo/install:--root=d cargo/install:--message-format=v cargo/install:-j=v
+  cargo/install:--jobs=v cargo/install:--profile=v cargo/install:--target-dir=v
+  cargo/add:--rename=v cargo/add:--manifest-path=v cargo/add:--base=v cargo/add:--target=v
+  cargo/add:--vers=V cargo/add:--version=V
+  go/*:-C=d go/*:-p=v go/*:-covermode=v go/*:-coverpkg=v go/*:-asmflags=v go/*:-buildmode=v
+  go/*:-compiler=v go/*:-gccgoflags=v go/*:-gcflags=v go/*:-installsuffix=v go/*:-ldflags=v
+  go/*:-mod=v go/*:-modfile=v go/*:-overlay=v go/*:-pgo=v go/*:-pkgdir=v go/*:-tags=v
+  go/*:-toolexec=v go/run:-exec=v
+  gem/*:--config-file=v
+  gem/install:-v=V gem/install:--version=V gem/install:--platform=v gem/install:-i=d
+  gem/install:--install-dir=d gem/install:-n=v gem/install:--bindir=v gem/install:--build-root=v
+  gem/install:-P=v gem/install:--trust-policy=v gem/install:--without=v gem/install:-B=v
+  gem/install:--bulk-threshold=v gem/install:-s=v gem/install:--source=v
+  bundle/add:-v=V bundle/add:--version=V bundle/add:-g=v bundle/add:--group=v bundle/add:-s=v
+  bundle/add:--source=v bundle/add:-r=v bundle/add:--require=v bundle/add:--path=v
+  bundle/add:--git=v bundle/add:--github=v bundle/add:--branch=v bundle/add:--ref=v
+  bundle/add:--glob=v
+  dotnet/add,package:-v=V dotnet/add,package:--version=V dotnet/add,package:-f=v
+  dotnet/add,package:--framework=v dotnet/add,package:-s=v dotnet/add,package:--source=v
+  dotnet/add,package:--package-directory=v dotnet/add,*,package:-v=V
+  dotnet/add,*,package:--version=V dotnet/add,*,package:-f=v dotnet/add,*,package:--framework=v
+  dotnet/add,*,package:-s=v dotnet/add,*,package:--source=v
+  dotnet/add,*,package:--package-directory=v
+  dotnet/package,add:-v=V dotnet/package,add:--version=V dotnet/package,add:-f=v
+  dotnet/package,add:--framework=v dotnet/package,add:-s=v dotnet/package,add:--source=v
+  dotnet/package,add:--package-directory=v dotnet/package,add:--project=v
+  dotnet/package,update:-v=v dotnet/package,update:--verbosity=v dotnet/package,update:--project=v
+  dotnet/tool,install:--version=V dotnet/tool,install:-v=v dotnet/tool,install:--verbosity=v
+  dotnet/tool,install:-a=v dotnet/tool,install:--arch=v dotnet/tool,install:--add-source=v
+  dotnet/tool,install:--configfile=v dotnet/tool,install:--framework=v
+  dotnet/tool,install:--source=v dotnet/tool,install:--tool-manifest=v
+  dotnet/tool,install:--tool-path=d
+  dotnet/tool,update:--version=V dotnet/tool,update:-v=v dotnet/tool,update:--verbosity=v
+  dotnet/tool,update:-a=v dotnet/tool,update:--arch=v dotnet/tool,update:--add-source=v
+  dotnet/tool,update:--configfile=v dotnet/tool,update:--framework=v
+  dotnet/tool,update:--source=v dotnet/tool,update:--tool-manifest=v
+  dotnet/tool,update:--tool-path=d
+  mvn/*:-f=v mvn/*:--file=v mvn/*:-s=v mvn/*:--settings=v mvn/*:-gs=v mvn/*:--global-settings=v
+  mvn/*:-t=v mvn/*:--toolchains=v mvn/*:-gt=v mvn/*:--global-toolchains=v mvn/*:-P=v
+  mvn/*:--activate-profiles=v mvn/*:-pl=v mvn/*:--projects=v mvn/*:-rf=v mvn/*:--resume-from=v
+  mvn/*:-T=v mvn/*:--threads=v mvn/*:-l=v mvn/*:--log-file=v mvn/*:-b=v mvn/*:--builder=v
+  mvn/*:-D=v mvn/*:--define=v
+  python/*:-W=v python/*:-X=v python/*:--check-hash-based-pycs=v
+  env/*:-C=d env/*:--chdir=d env/*:-u=v env/*:--unset=v env/*:-P=v
+'
+
+# Every long option of a parser that takes a unique abbreviation of one (`x`
+# below): pip's optparse, pipx's argparse and gem's OptionParser read
+# `--pyth` as `--python` and `--vers` as `--version`. Booleans are listed too,
+# since an abbreviation is unique only among all of them. From each help text
+# named above (pipx run's, measured against its parser).
+SAFEDEPS_G_LONG_OPTIONS='
+  pip/*:--cache-dir pip/*:--cert pip/*:--client-cert pip/*:--debug
+  pip/*:--disable-pip-version-check pip/*:--exists-action pip/*:--help
+  pip/*:--isolated pip/*:--keyring-provider pip/*:--log pip/*:--no-cache-dir
+  pip/*:--no-color pip/*:--no-input pip/*:--proxy pip/*:--python
+  pip/*:--quiet pip/*:--require-virtualenv pip/*:--resume-retries
+  pip/*:--retries pip/*:--timeout pip/*:--trusted-host pip/*:--use-deprecated
+  pip/*:--use-feature pip/*:--verbose pip/*:--version pip/install:--abi
+  pip/install:--all-releases pip/install:--break-system-packages
+  pip/install:--build-constraint pip/install:--check-build-dependencies
+  pip/install:--compile pip/install:--config-settings
+  pip/install:--constraint pip/install:--dry-run pip/install:--editable
+  pip/install:--extra-index-url pip/install:--find-links
+  pip/install:--force-reinstall pip/install:--group
+  pip/install:--ignore-installed pip/install:--ignore-requires-python
+  pip/install:--implementation pip/install:--index-url
+  pip/install:--no-binary pip/install:--no-build-isolation
+  pip/install:--no-clean pip/install:--no-compile pip/install:--no-deps
+  pip/install:--no-index pip/install:--no-warn-conflicts
+  pip/install:--no-warn-script-location pip/install:--only-binary
+  pip/install:--only-final pip/install:--platform pip/install:--pre
+  pip/install:--prefer-binary pip/install:--prefix pip/install:--progress-bar
+  pip/install:--python-version pip/install:--report
+  pip/install:--require-hashes pip/install:--requirement
+  pip/install:--requirements-from-script pip/install:--root
+  pip/install:--root-user-action pip/install:--src pip/install:--target
+  pip/install:--upgrade pip/install:--upgrade-strategy
+  pip/install:--uploaded-prior-to pip/install:--user pipx/run:--help
+  pipx/run:--quiet pipx/run:--verbose pipx/run:--global pipx/run:--no-cache
+  pipx/run:--path pipx/run:--pypackages pipx/run:--with pipx/run:--spec
+  pipx/run:--python pipx/run:--fetch-python pipx/run:--fetch-missing-python
+  pipx/run:--system-site-packages pipx/run:--index-url pipx/run:--editable
+  pipx/run:--pip-args pipx/run:--backend pipx/install:--help
+  pipx/install:--quiet pipx/install:--verbose pipx/install:--global
+  pipx/install:--include-deps pipx/install:--force pipx/install:--suffix
+  pipx/install:--python pipx/install:--fetch-python
+  pipx/install:--fetch-missing-python pipx/install:--preinstall
+  pipx/install:--system-site-packages pipx/install:--index-url
+  pipx/install:--editable pipx/install:--pip-args pipx/install:--backend
+  pipx/inject:--help pipx/inject:--quiet pipx/inject:--verbose
+  pipx/inject:--global pipx/inject:--requirement pipx/inject:--include-apps
+  pipx/inject:--include-deps pipx/inject:--system-site-packages
+  pipx/inject:--index-url pipx/inject:--editable pipx/inject:--pip-args
+  pipx/inject:--force pipx/inject:--with-suffix pipx/inject:--backend
+  gem/install:--backtrace gem/install:--bindir gem/install:--both
+  gem/install:--build-flags gem/install:--build-root
+  gem/install:--bulk-threshold gem/install:--clear-sources
+  gem/install:--config-file gem/install:--conservative gem/install:--debug
+  gem/install:--default gem/install:--development
+  gem/install:--development-all gem/install:--document
+  gem/install:--no-document gem/install:--env-shebang
+  gem/install:--no-env-shebang gem/install:--explain gem/install:--file
+  gem/install:--force gem/install:--no-force gem/install:--format-executable
+  gem/install:--no-format-executable gem/install:--help
+  gem/install:--http-proxy gem/install:--no-http-proxy
+  gem/install:--ignore-dependencies gem/install:--install-dir
+  gem/install:--local gem/install:--lock gem/install:--no-lock
+  gem/install:--minimal-deps gem/install:--norc gem/install:--platform
+  gem/install:--post-install-message gem/install:--no-post-install-message
+  gem/install:--prerelease gem/install:--no-prerelease gem/install:--quiet
+  gem/install:--remote gem/install:--silent gem/install:--source
+  gem/install:--suggestions gem/install:--no-suggestions
+  gem/install:--trust-policy gem/install:--update-sources
+  gem/install:--no-update-sources gem/install:--user-install
+  gem/install:--no-user-install gem/install:--vendor gem/install:--verbose
+  gem/install:--no-verbose gem/install:--version gem/install:--without
+  gem/install:--wrappers gem/install:--no-wrappers
+'
+
+# How each manager's parser reads an option word, beyond `--name=value`:
+#   a  a one-letter option carries its value attached (`-tdir`, `-v1.0`)
+#   c  `:` separates a value as well as `=` (`--version:1.0`)
+#   s  options end at the first operand (Go's flag package)
+#   e  a word starting with `-` is never a value (clap, argparse, optparse,
+#      OptionParser and the .NET parser treat it as the next option)
+#   x  a unique abbreviation of a long option is that option
+#      (SAFEDEPS_G_LONG_OPTIONS)
+SAFEDEPS_G_PARSERS='
+  pnpm: yarn:e bun:e pip:ax uv:ae uvx:ae pipx:aex poetry:e pipenv:e cargo:ae go:s
+  gem:aex bundle:e dotnet:ce mvn:a python:a env:a pnpx:
+'
+# The tables are searched with =~ as one line, every entry between blanks.
+SAFEDEPS_G_COMMANDS=" ${SAFEDEPS_G_COMMANDS//$'\n'/ } "
+SAFEDEPS_G_VALUE_OPTIONS=" ${SAFEDEPS_G_VALUE_OPTIONS//$'\n'/ } "
+SAFEDEPS_G_LONG_OPTIONS=" ${SAFEDEPS_G_LONG_OPTIONS//$'\n'/ } "
+SAFEDEPS_G_PARSERS=" ${SAFEDEPS_G_PARSERS//$'\n'/ } "
+
+# The class of <option> for <family> in command scope <path> (`*` always
+# applies): SAFEDEPS_G_VALUE, status 1 when it takes no value.
+safedeps_manager_option_class() {
+  local family="$1" path="$2" opt="$3" re
+  # Go reads `--flag` as `-flag`.
+  [[ "${family}" != go || "${opt}" != --?* ]] || opt="${opt#-}"
+  safedeps_ere_literal "${opt}"
+  re=" ${family}/[*]:${SAFEDEPS_G_ERE}=([a-zA-Z])"
+  if [[ "${SAFEDEPS_G_VALUE_OPTIONS}" =~ ${re} ]]; then
+    SAFEDEPS_G_VALUE="${BASH_REMATCH[1]}"
+    return 0
+  fi
+  [[ -n "${path}" ]] || return 1
+  re=" ${family}/${path//\*/[*]}:${SAFEDEPS_G_ERE}=([a-zA-Z])"
+  [[ "${SAFEDEPS_G_VALUE_OPTIONS}" =~ ${re} ]] || return 1
+  SAFEDEPS_G_VALUE="${BASH_REMATCH[1]}"
+}
+
+# The long option <opt> abbreviates for <family> in scope <path>, as
+# SAFEDEPS_G_VALUE: itself when it is one, the one option it is a unique prefix
+# of, or itself when it is a prefix of none or of several.
+safedeps_manager_long_option() {
+  local family="$1" path="$2" opt="$3" scopes re first
+  SAFEDEPS_G_VALUE="${opt}"
+  safedeps_ere_literal "${opt}"
+  scopes="[*]"
+  [[ -z "${path}" ]] || scopes="([*]|${path//\*/[*]})"
+  re=" ${family}/${scopes}:${SAFEDEPS_G_ERE}( |$)"
+  [[ "${SAFEDEPS_G_LONG_OPTIONS}" =~ ${re} ]] && return 0
+  re=" ${family}/${scopes}:(${SAFEDEPS_G_ERE}[^ ]*)"
+  [[ "${SAFEDEPS_G_LONG_OPTIONS}" =~ ${re} ]] || return 0
+  first="${BASH_REMATCH[2]}"
+  [[ -n "${first}" ]] || first="${BASH_REMATCH[1]}"
+  re=" ${family}/${scopes}:${SAFEDEPS_G_ERE}[^ ]* (.* )?${family}/${scopes}:${SAFEDEPS_G_ERE}[^ ]*"
+  [[ "${SAFEDEPS_G_LONG_OPTIONS}" =~ ${re} ]] && return 0
+  SAFEDEPS_G_VALUE="${first}"
+}
+
+# What <family> does with the command path <path>: SAFEDEPS_G_VALUE is the kind
+# when the path is complete, `more` when a longer path starts with it, and
+# status 1 when no path does. A literal word is preferred to `*`, so
+# `dotnet add package X` is not `add <project> package`.
+safedeps_manager_command() {
+  local family="$1" path re
+  safedeps_ere_literal "$2"
+  path="${SAFEDEPS_G_ERE}"
+  re=" ${family}:${path}=([a-z]+)"
+  if [[ "${SAFEDEPS_G_COMMANDS}" =~ ${re} ]]; then
+    SAFEDEPS_G_VALUE="${BASH_REMATCH[1]}"
+    return 0
+  fi
+  re=" ${family}:${path},[^ =]*="
+  if [[ "${SAFEDEPS_G_COMMANDS}" =~ ${re} ]]; then
+    SAFEDEPS_G_VALUE=more
+    return 0
+  fi
+  return 1
+}
+
+# npx's first pass over its arguments (bin/npx-cli.js, npm 11.19.0), ahead of
+# npm's: an option it does not know as a switch takes the next word unless that
+# word starts with `-`, `-p` and `--shell` are renamed, npm's shorthands are
+# expanded, and `--` goes in front of the first positional word. npm then reads
+# the result as `npm exec ...` (nopt). Sets SAFEDEPS_G_NPX_WORDS and
+# SAFEDEPS_G_NPX_AT (the index each word came from).
+safedeps_npx_first_pass() {
+  local -a w=("$@") at=() exp=()
+  local i j n arg key v hasv steps=0
+  for (( i = 0; i < ${#w[@]}; i++ )); do at[i]=${i}; done
+  i=0
+  while (( i < ${#w[@]} )); do
+    (( ++steps <= 4 * ${#w[@]} + 64 )) || return 1
+    arg="${w[i]}"
+    [[ "${arg}" != -- ]] || break
+    if [[ "${arg}" != -* ]]; then
+      w=("${w[@]:0:i}" "--" "${w[@]:i}")
+      at=("${at[@]:0:i}" "${at[i]}" "${at[@]:i}")
+      break
+    fi
+    key="${arg}"
+    while [[ "${key}" == -* ]]; do key="${key#-}"; done
+    hasv=false v=""
+    if [[ "${key}" == *=* ]]; then hasv=true v="${key#*=}" key="${key%%=*}"; fi
+    case "${key}" in
+      p) w[i]="--package${v:+=${v}}"; [[ "${hasv}" == false ]] || w[i]="--package=${v}" ;;
+      shell) w[i]="--script-shell"; [[ "${hasv}" == false ]] || w[i]="--script-shell=${v}" ;;
+      no-install) w[i]="--yes=false" ;;
+      *)
+        if safedeps_npm_lookup "${key}" "${SAFEDEPS_G_NPM_SHORTHANDS}"; then
+          exp=()
+          v="${SAFEDEPS_G_VALUE}"
+          while [[ -n "${v}" ]]; do exp+=("${v%%,*}"); [[ "${v}" == *,* ]] && v="${v#*,}" || v=""; done
+          [[ "${hasv}" == false ]] || exp+=("${arg#*=}")
+          n=${#exp[@]}
+          w=("${w[@]:0:i}" "${exp[@]+"${exp[@]}"}" "${w[@]:i+1}")
+          v="${at[i]}"
+          at=("${at[@]:0:i}" "${at[@]:i+1}")
+          for (( j = 0; j < n; j++ )); do at=("${at[@]:0:i}" "${v}" "${at[@]:i}"); done
+          continue
+        fi
+        ;;
+    esac
+    # A switch takes no value: npm's Booleans and npx's own.
+    if [[ "${hasv}" == false ]]; then
+      case " no-install quiet q version v help h always-spawn ignore-existing shell-auto-fallback " in
+        *" ${key} "*) ;;
+        *)
+          safedeps_npm_lookup "${key}" "${SAFEDEPS_G_NPM_OPTIONS}" && [[ "${SAFEDEPS_G_VALUE}" == b* ]] \
+            || {
+              case " package p call c shell npm node-arg n cache userconfig " in
+                *" ${key} "*) i=$(( i + 1 )) ;;
+                *) (( i + 1 < ${#w[@]} )) && [[ "${w[i+1]}" != -* ]] && i=$(( i + 1 )) ;;
+              esac
+            }
+          ;;
+      esac
+    fi
+    i=$(( i + 1 ))
+  done
+  SAFEDEPS_G_NPX_WORDS=("${w[@]+"${w[@]}"}") SAFEDEPS_G_NPX_AT=("${at[@]+"${at[@]}"}")
+}
+
+# One statement's words as its package manager reads them. The arguments are
+# the statement's words, one shell word each (the lexer's pieces view, quotes
+# removed). Sets:
+#   SAFEDEPS_G_M_FAMILY  the manager (npm, npx, pnpm, ..., none)
+#   SAFEDEPS_G_M_KIND    install, link, runner, create, or none for a statement
+#                        that installs nothing (no manager, or a command that
+#                        is not one of the manager's installs or runners)
+#   SAFEDEPS_G_M_ROLE    one role per word: - (before the manager, or nothing
+#                        to the manager), m (the manager), c (a command word),
+#                        g (an option), v d V p w (an option value, by class),
+#                        o (an operand the command installs), r (the package a
+#                        runner runs), C (a create's initializer), a (a runner's
+#                        program and its arguments), D (maven's artifact define)
+#   SAFEDEPS_G_M_TEXT    a role's text where it is not the whole word: the
+#                        value of `--name=value`, `-xvalue`, `--name:value`
+#   SAFEDEPS_G_M_LOCALBIN  true for a runner that runs a binary the project
+#                        already has without fetching (npx, npm exec, bunx)
+# No process is started: this runs once per statement.
+safedeps_manager_read() {
+  local -a w=("$@")
+  local n=$# i=0 t family="" base kind="" path="" traits="" endopts=false named=false
+  local opt val cls j k unknown=false
+  SAFEDEPS_G_M_FAMILY=none SAFEDEPS_G_M_KIND=none SAFEDEPS_G_M_LOCALBIN=false
+  SAFEDEPS_G_M_ROLE=() SAFEDEPS_G_M_TEXT=()
+  for (( j = 0; j < n; j++ )); do SAFEDEPS_G_M_ROLE[j]=-; SAFEDEPS_G_M_TEXT[j]=""; done
+
+  # The command word: past grouping, reserved words, assignments, and the
+  # prefixes the shell runs the command through (`command`, `exec`, and env
+  # with its own options).
+  while (( i < n )); do
+    t="${w[i]}"
+    while :; do
+      case "${t}" in
+        '('*|'{'*|'!'*|$'\002'*) t="${t:1}" ;;
+        *) break ;;
+      esac
+    done
+    case "${t}" in
+      ''|then|do|else|elif|if|while|until|time|coproc|command|exec) i=$(( i + 1 )); continue ;;
+    esac
+    if [[ "${t}" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then i=$(( i + 1 )); continue; fi
+    if [[ "${t}" == env || "${t}" == */env ]]; then
+      i=$(( i + 1 ))
+      while (( i < n )) && [[ "${w[i]}" == -?* ]]; do
+        if [[ "${w[i]}" != *=* ]] && safedeps_manager_option_class env "" "${w[i]}"; then
+          SAFEDEPS_G_M_ROLE[i]=g SAFEDEPS_G_M_ROLE[i+1]="${SAFEDEPS_G_VALUE}"
+          i=$(( i + 2 ))
+        else
+          i=$(( i + 1 ))
+        fi
+      done
+      continue
+    fi
+    break
+  done
+  (( i < n )) || return 0
+  w[i]="${t}"
+  base="${t##*/}"
+  case "${base}" in
+    npm|npx|pnpm|pnpx|yarn|bun|bunx|uv|uvx|pipx|poetry|pipenv|cargo|go|gem|bundle|mvn|dotnet) family="${base}" ;;
+    pip|pip[0-9]*) family=pip ;;
+    python|python[0-9]*|py) family=python ;;
+    *) return 0 ;;
+  esac
+  SAFEDEPS_G_M_ROLE[i]=m
+  i=$(( i + 1 ))
+
+  # python reads its own options up to `-m <module>`; with pip as the module,
+  # the rest is pip's.
+  if [[ "${family}" == python ]]; then
+    while (( i < n )); do
+      t="${w[i]}"
+      if [[ "${t}" == -m ]]; then
+        SAFEDEPS_G_M_ROLE[i]=g
+        [[ "${w[i+1]:-}" == pip ]] || return 0
+        SAFEDEPS_G_M_ROLE[i+1]=m i=$(( i + 2 )) family=pip
+        break
+      elif [[ "${t}" == -mpip ]]; then
+        SAFEDEPS_G_M_ROLE[i]=m i=$(( i + 1 )) family=pip
+        break
+      elif [[ "${t}" == -* ]]; then
+        SAFEDEPS_G_M_ROLE[i]=g
+        if [[ "${t}" != *=* ]] && safedeps_manager_option_class python "" "${t}"; then
+          SAFEDEPS_G_M_ROLE[i+1]=v i=$(( i + 1 ))
+        fi
+        i=$(( i + 1 ))
+      else
+        return 0
+      fi
+    done
+    [[ "${family}" == pip ]] || return 0
+  fi
+  SAFEDEPS_G_M_FAMILY="${family}"
+
+  case "${family}" in
+    npm|npx) safedeps_manager_read_npm "${i}" "${w[@]}"; return ;;
+    mvn) safedeps_manager_read_mvn "${i}" "${w[@]}"; return ;;
+  esac
+  # cargo's toolchain override comes first (`cargo +nightly install`).
+  if [[ "${family}" == cargo && "${w[i]:-}" == +* ]]; then SAFEDEPS_G_M_ROLE[i]=g; i=$(( i + 1 )); fi
+
+  case "${SAFEDEPS_G_PARSERS}" in *" ${family}:"*) traits="${SAFEDEPS_G_PARSERS#* "${family}":}"; traits="${traits%% *}" ;; esac
+  case "${family}" in bunx) SAFEDEPS_G_M_LOCALBIN=true ;; esac
+  if safedeps_manager_command "${family}" "" && [[ "${SAFEDEPS_G_VALUE}" != more ]]; then
+    kind="${SAFEDEPS_G_VALUE}"
+  fi
+
+  while (( i < n )); do
+    t="${w[i]}"
+    if [[ "${endopts}" == false && "${t}" =~ ^--+$ ]]; then
+      SAFEDEPS_G_M_ROLE[i]=g endopts=true i=$(( i + 1 ))
+      continue
+    fi
+    if [[ "${endopts}" == false && "${t}" == -?* ]]; then
+      SAFEDEPS_G_M_ROLE[i]=g
+      opt="${t}" val="" cls="" unknown=false
+      if [[ "${t}" == --*=* || ( "${t}" == -[!-]*=* ) ]]; then
+        opt="${t%%=*}" val="${t#*=}"
+      elif [[ "${traits}" == *c* && "${t}" == -*:* ]]; then
+        opt="${t%%:*}" val="${t#*:}"
+      fi
+      if [[ "${traits}" == *x* && "${opt}" == --?* ]]; then
+        safedeps_manager_long_option "${family}" "${path}" "${opt}"
+        if [[ "${SAFEDEPS_G_VALUE}" != "${opt}" ]]; then
+          [[ "${opt}" == "${t}" ]] && t="${SAFEDEPS_G_VALUE}"
+          opt="${SAFEDEPS_G_VALUE}"
+        fi
+      fi
+      if [[ "${opt}" != "${t}" ]]; then
+        # The value is in the word.
+        if safedeps_manager_option_class "${family}" "${path}" "${opt}"; then
+          SAFEDEPS_G_M_ROLE[i]="${SAFEDEPS_G_VALUE}" SAFEDEPS_G_M_TEXT[i]="${val}"
+        fi
+      elif safedeps_manager_option_class "${family}" "${path}" "${t}"; then
+        cls="${SAFEDEPS_G_VALUE}"
+        if (( i + 1 < n )) && ! [[ "${traits}" == *e* && "${w[i+1]}" == -?* ]]; then
+          SAFEDEPS_G_M_ROLE[i+1]="${cls}"
+          [[ "${cls}" != p ]] || named=true
+          i=$(( i + 1 ))
+        fi
+      elif [[ "${traits}" == *a* && "${t}" =~ ^-[A-Za-z0-9]. ]] \
+          && safedeps_manager_option_class "${family}" "${path}" "${t:0:2}"; then
+        SAFEDEPS_G_M_ROLE[i]="${SAFEDEPS_G_VALUE}" SAFEDEPS_G_M_TEXT[i]="${t:2}"
+      else
+        unknown=true
+      fi
+      [[ "${SAFEDEPS_G_M_ROLE[i]}" != p ]] || named=true
+      i=$(( i + 1 ))
+      continue
+    fi
+    # A positional word: the command path first, then what the command reads.
+    if [[ -z "${kind}" ]]; then
+      SAFEDEPS_G_M_ROLE[i]=c
+      if safedeps_manager_command "${family}" "${path:+${path},}${t}"; then
+        path="${path:+${path},}${t}"
+      elif safedeps_manager_command "${family}" "${path:+${path},}*"; then
+        path="${path:+${path},}*"
+      elif [[ "${unknown}" == true ]]; then
+        # An option the table does not know, and then a word that is no
+        # command: the manager may read the word as that option's value, and
+        # a table that misses a value option must not hide the install after
+        # it. If the manager reads the word as its command instead, that
+        # command is no install of its, so reading it as a value adds nothing.
+        SAFEDEPS_G_M_ROLE[i]=v unknown=false i=$(( i + 1 ))
+        continue
+      else
+        SAFEDEPS_G_M_ROLE[i]=-
+        return 0
+      fi
+      [[ "${SAFEDEPS_G_VALUE}" == more ]] || kind="${SAFEDEPS_G_VALUE}"
+      case "${family}:${path}" in bun:x) SAFEDEPS_G_M_LOCALBIN=true ;; esac
+      unknown=false i=$(( i + 1 ))
+      continue
+    fi
+    [[ "${traits}" != *s* ]] || endopts=true
+    case "${kind}" in
+      install) SAFEDEPS_G_M_ROLE[i]=o ;;
+      runner|create)
+        # The package a runner fetches is its first operand, unless an
+        # option named it; everything after is the program's.
+        if [[ "${named}" == false ]]; then
+          if [[ "${kind}" == create ]]; then
+            SAFEDEPS_G_M_ROLE[i]=C
+          elif [[ "${family}" == go && "${t}" != *@* ]]; then
+            # go run fetches by name only a package with a version suffix
+            # (`go help run`); any other is local code.
+            SAFEDEPS_G_M_ROLE[i]=a
+          else
+            SAFEDEPS_G_M_ROLE[i]=r
+          fi
+        else
+          SAFEDEPS_G_M_ROLE[i]=a
+        fi
+        for (( j = i + 1; j < n; j++ )); do SAFEDEPS_G_M_ROLE[j]=a; done
+        i=${n}
+        break
+        ;;
+    esac
+    i=$(( i + 1 ))
+  done
+  [[ -n "${kind}" ]] && SAFEDEPS_G_M_KIND="${kind}"
+  return 0
+}
+
+# npm and npx, read with npm's own parser (safedeps_npm_read_args), npx after
+# its first pass. <start> is the index of the first word after the manager.
+safedeps_manager_read_npm() {
+  local start="$1" k r
+  local -a role=() text=()
+  local kind localbin
+  safedeps_manager_read_npm_once "$@" || return 1
+  shift
+  safedeps_npm_other_applies "${@:start+1}" || return 0
+  # The union with the other npm's reading: a word either reading gives a
+  # package role keeps it, and a statement either reads as an install is one.
+  role=("${SAFEDEPS_G_M_ROLE[@]}") text=("${SAFEDEPS_G_M_TEXT[@]}")
+  kind="${SAFEDEPS_G_M_KIND}" localbin="${SAFEDEPS_G_M_LOCALBIN}"
+  SAFEDEPS_G_M_KIND=none SAFEDEPS_G_M_LOCALBIN=false
+  safedeps_npm_as_other safedeps_manager_read_npm_once "${start}" "$@" || return 1
+  for (( k = 0; k < ${#role[@]}; k++ )); do
+    r="${role[k]}"
+    case "${r}" in
+      o|r|C|p) SAFEDEPS_G_M_ROLE[k]="${r}" SAFEDEPS_G_M_TEXT[k]="${text[k]}" ;;
+    esac
+  done
+  [[ "${kind}" == none ]] || SAFEDEPS_G_M_KIND="${kind}"
+  [[ "${localbin}" != true ]] || SAFEDEPS_G_M_LOCALBIN=true
+}
+
+safedeps_manager_read_npm_once() {
+  local start="$1" k at key text cmd_at=-1 named=false call=false
+  shift
+  local -a w=("$@") args=()
+  args=("${w[@]:start}")
+  if [[ "${SAFEDEPS_G_M_FAMILY}" == npx ]]; then
+    safedeps_npx_first_pass "${args[@]+"${args[@]}"}" || return 1
+    # npx runs `npm exec` on the words it passed.
+    safedeps_npm_read_args exec "${SAFEDEPS_G_NPX_WORDS[@]+"${SAFEDEPS_G_NPX_WORDS[@]}"}" || return 1
+  else
+    safedeps_npm_read_args "${args[@]+"${args[@]}"}" || return 1
+  fi
+  # Every word npm read as an option or its value.
+  for (( k = start; k < ${#w[@]}; k++ )); do SAFEDEPS_G_M_ROLE[k]=g SAFEDEPS_G_M_TEXT[k]=""; done
+  (( ${#SAFEDEPS_G_NPM_WORDS[@]} > 0 )) || return 0
+  case "${SAFEDEPS_G_NPM_WORDS[0]}" in
+    exec) [[ "${SAFEDEPS_G_M_FAMILY}" == npx ]] && SAFEDEPS_G_NPM_KIND=exec || safedeps_npm_kind_of "${SAFEDEPS_G_NPM_WORDS[0]}" ;;
+    *) safedeps_npm_kind_of "${SAFEDEPS_G_NPM_WORDS[0]}" ;;
+  esac
+  if [[ "${SAFEDEPS_G_M_FAMILY}" != npx ]]; then
+    safedeps_manager_npm_at "${start}" "${SAFEDEPS_G_NPM_AT[0]}"
+    SAFEDEPS_G_M_ROLE[SAFEDEPS_G_AT]=c
+  fi
+  for k in "${SAFEDEPS_G_NPM_VALUES[@]+"${SAFEDEPS_G_NPM_VALUES[@]}"}"; do
+    at="${k%%$'\037'*}" k="${k#*$'\037'}" key="${k%%$'\037'*}" text="${k#*$'\037'}"
+    safedeps_manager_npm_at "${start}" "${at}"
+    at="${SAFEDEPS_G_AT}"
+    (( at >= 0 )) || continue
+    case "${key}" in
+      package)
+        if [[ "${SAFEDEPS_G_NPM_KIND}" == exec ]]; then
+          SAFEDEPS_G_M_ROLE[at]=p named=true
+          [[ "${text}" == "${w[at]}" ]] || SAFEDEPS_G_M_TEXT[at]="${text}"
+        fi
+        ;;
+      call) call=true ;;
+    esac
+  done
+  case "${SAFEDEPS_G_NPM_KIND}" in
+    install|link) SAFEDEPS_G_M_KIND="${SAFEDEPS_G_NPM_KIND}" ;;
+    exec) SAFEDEPS_G_M_KIND=runner SAFEDEPS_G_M_LOCALBIN=true ;;
+    init) SAFEDEPS_G_M_KIND=create SAFEDEPS_G_M_LOCALBIN=true ;;
+    *) return 0 ;;
+  esac
+  for (( k = 1; k < ${#SAFEDEPS_G_NPM_WORDS[@]}; k++ )); do
+    safedeps_manager_npm_at "${start}" "${SAFEDEPS_G_NPM_AT[k]}"
+    at="${SAFEDEPS_G_AT}"
+    (( at >= 0 )) || continue
+    case "${SAFEDEPS_G_M_KIND}" in
+      install|link) SAFEDEPS_G_M_ROLE[at]=o ;;
+      runner|create)
+        if (( k == 1 )) && [[ "${named}" == false && "${call}" == false ]]; then
+          [[ "${SAFEDEPS_G_M_KIND}" == create ]] && SAFEDEPS_G_M_ROLE[at]=C || SAFEDEPS_G_M_ROLE[at]=r
+        else
+          SAFEDEPS_G_M_ROLE[at]=a
+        fi
+        ;;
+    esac
+    [[ "${SAFEDEPS_G_NPM_WORDS[k]}" == "${w[at]}" ]] || SAFEDEPS_G_M_TEXT[at]="${SAFEDEPS_G_NPM_WORDS[k]}"
+  done
+}
+
+# The index in the statement's words of a word npm read at <index> in the
+# list it was given, the words after the manager starting at <start>: through
+# npx's first pass for npx, whose list starts with the `exec` it adds.
+# SAFEDEPS_G_AT, -1 for that `exec`.
+safedeps_manager_npm_at() {
+  local start="$1" a="$2"
+  if [[ "${SAFEDEPS_G_M_FAMILY}" == npx ]]; then
+    if (( a <= 0 )); then SAFEDEPS_G_AT=-1; return 0; fi
+    a="${SAFEDEPS_G_NPX_AT[a-1]}"
+  fi
+  SAFEDEPS_G_AT=$(( start + a ))
+}
+
+# What kind of command npm's command word is, by the grammar's spellings for it.
+safedeps_npm_kind_of() {
+  local cmd="$1"
   if [[ "${cmd}" =~ ^(${SAFEDEPS_G_NPM_VERBS})$ ]]; then SAFEDEPS_G_NPM_KIND=install
   elif [[ "${cmd}" =~ ^(${SAFEDEPS_G_NPM_LINK_VERBS})$ ]]; then SAFEDEPS_G_NPM_KIND="link"
   elif [[ "${cmd}" =~ ^(${SAFEDEPS_G_NPM_EXEC_VERBS})$ ]]; then SAFEDEPS_G_NPM_KIND="exec"
   elif [[ "${cmd}" =~ ^(${SAFEDEPS_G_NPM_INIT_VERBS})$ ]]; then SAFEDEPS_G_NPM_KIND=init
   else SAFEDEPS_G_NPM_KIND=other
   fi
+}
+
+# Maven has no command word: its goals are positional, and the install is the
+# dependency plugin's get goal, which fetches the coordinate in `-Dartifact=`.
+safedeps_manager_read_mvn() {
+  local start="$1" k t install=false
+  shift
+  local -a w=("$@")
+  for (( k = start; k < ${#w[@]}; k++ )); do
+    t="${w[k]}"
+    if [[ "${t}" == -D?* ]]; then
+      SAFEDEPS_G_M_ROLE[k]=g
+      [[ "${t}" == -Dartifact=* ]] && { SAFEDEPS_G_M_ROLE[k]=D SAFEDEPS_G_M_TEXT[k]="${t#-D}"; }
+    elif [[ "${t}" == -?* ]]; then
+      SAFEDEPS_G_M_ROLE[k]=g
+      if [[ "${t}" != *=* ]] && safedeps_manager_option_class mvn "" "${t}"; then
+        k=$(( k + 1 ))
+        if [[ "${t}" == -D || "${t}" == --define ]] && [[ "${w[k]:-}" == artifact=* ]]; then
+          SAFEDEPS_G_M_ROLE[k]=D
+        else
+          SAFEDEPS_G_M_ROLE[k]=v
+        fi
+      fi
+    else
+      SAFEDEPS_G_M_ROLE[k]=c
+      [[ "${t}" == dependency:get || "${t}" == *maven-dependency-plugin*:get ]] && install=true
+    fi
+  done
+  [[ "${install}" == true ]] && SAFEDEPS_G_M_KIND=install
+  return 0
 }
