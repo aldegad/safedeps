@@ -22,6 +22,9 @@
 #          quadratic loop punished for nothing.
 #   loud   the same size with a real install at the end. Runs the full
 #          predicate set, not just the scan.
+#   split  loud, opened with `((n++))`: a place where bash, zsh and dash read
+#          differently, so the guard reads the command three times instead of
+#          once (gate column only).
 #
 # Usage:
 #   scripts/measure/scan-cost.sh [SIZE_BYTES...]        # default sweep
@@ -61,6 +64,9 @@ printf '{"dependencies":{}}\n' > "${PROJECT}/package.json"
 scan_src=$(sed -n '/^shell_lex() {/,/^}/p; /^command_scan_text() {/,/^}/p' scripts/safedeps-pre-guard.sh)
 [[ -n "${scan_src}" ]] || { printf 'scan-cost: command_scan_text not found in the guard\n' >&2; exit 2; }
 eval "${scan_src}"
+# The scan column times one reading, the bash one: the guard's first, and the
+# only one a command reaches unless it passes a place where the shells differ.
+SAFEDEPS_READING=bash
 
 now() { python3 -c 'import time; print(time.time())'; }
 elapsed() { python3 -c "print(f'{$2 - $1:.3f}')"; }
@@ -76,6 +82,7 @@ make_input() {
   case "${shape}" in
     quiet) python3 -c "print('echo ' + 'x' * max(0, ${size} - 5), end='')" ;;
     loud)  python3 -c "print('echo ' + 'x' * max(0, ${size} - 40) + ' ; npm install left-pad@1.0.0', end='')" ;;
+    split) python3 -c "print('((n++)); echo ' + 'x' * max(0, ${size} - 50) + ' ; npm install left-pad@1.0.0', end='')" ;;
   esac
 }
 
@@ -113,17 +120,19 @@ printf 'sees. With the deadline on, an over-budget command is denied UNDECIDED i
 printf 'about the budget. Quoting a gate number as "how long the hook takes" is\n'
 printf 'wrong, and it was misread that way within an hour of this file existing.\n'
 printf 'bash %s, awk %s\n\n' "${BASH_VERSION}" "$(awk --version 2>/dev/null | head -1 || echo 'BWK awk (no --version)')"
-printf '%-10s %-12s %-12s %-12s %-12s\n' 'size' 'scan quiet' 'scan loud' 'gate quiet' 'gate loud'
+printf '%-10s %-12s %-12s %-12s %-12s %-12s\n' 'size' 'scan quiet' 'scan loud' 'gate quiet' 'gate loud' 'gate split'
 
 for size in "${SIZES[@]}"; do
   quiet=$(make_input "${size}" quiet)
   loud=$(make_input "${size}" loud)
-  printf '%-10s %-12s %-12s %-12s %-12s\n' \
+  split=$(make_input "${size}" split)
+  printf '%-10s %-12s %-12s %-12s %-12s %-12s\n' \
     "${size}B" \
     "$(time_scan "${quiet}")s" \
     "$(time_scan "${loud}")s" \
     "$(time_gate "${quiet}")s" \
-    "$(time_gate "${loud}")s"
+    "$(time_gate "${loud}")s" \
+    "$(time_gate "${split}")s"
 done
 
 printf '\nload average %s at finish\n' "$(load_now)"

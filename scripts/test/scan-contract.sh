@@ -92,15 +92,44 @@ shipped_src=$(sed -n '/^shell_lex() {/,/^}/p; /^command_scan_text() {/,/^}/p' "$
   || fail "shell_lex and command_scan_text not found in ${GUARD} (renamed? then update this battery)"
 eval "${shipped_src}"
 declare -F command_scan_text > /dev/null || fail "extracted command_scan_text did not define the function"
+# This battery is a driver of its own: the reference below states the bash
+# reading, so that is the reading it checks the shipped lexer under. The zsh
+# and dash readings are checked by the view properties further down.
+SAFEDEPS_READING=bash
 
 # The lexer is one awk program inside single quotes, so an apostrophe in it ends
 # the quoting. An odd count is a parse error; an even count splices the text
 # between the two into the program unquoted, and it runs with no error (a
 # comment that quoted a word did that, caught in review). Write \047 instead.
-lexer_program=$(sed -n '/^shell_lex() {/,/^}/p' "${GUARD}" | sed -n '/-v marker="${marker}" '"'"'$/,/^  '"'"'/p' | sed '1d;$d')
+lexer_program=$(sed -n '/^shell_lex() {/,/^}/p' "${GUARD}" | sed -n '/LC_ALL=C awk -v view=.*'"'"'$/,/^  '"'"'/p' | sed '1d;$d')
 [[ -n "${lexer_program}" ]] || fail "the lexer program could not be extracted from ${GUARD}"
 [[ "${lexer_program}" != *"'"* ]] || fail "the lexer program holds an apostrophe, which ends its quoting; write \\047"
 pass "the lexer program holds no apostrophe"
+
+# A reading is picked in one place. shell_lex takes no reading argument, and
+# the variable it reads is set only by the guard's driver -- the functions that
+# run one reading's detection, judgment, UNGATED walk and inert/trace effects
+# -- and cleared at the top.
+# Before this, call sites named their reading, and one that lexed text another
+# reading had produced under a fixed name hid a line zsh runs (form SL1).
+lex_calls=$(grep -nE '(^|[^_[:alnum:]])shell_lex[[:space:]]' "${GUARD}" | grep -vE '^[0-9]+:[[:space:]]*#' | grep -v 'shell_lex() {')
+[[ -n "${lex_calls}" ]] || fail "no shell_lex call sites found in ${GUARD} (renamed? then update this check)"
+bad_calls=$(printf '%s\n' "${lex_calls}" | grep -vE 'shell_lex "[^"]+" ("\$\{view\}"|[a-z-]+) "safedeps:[a-z_]+"' || true)
+[[ -z "${bad_calls}" ]] || fail "shell_lex call sites that do not read <text> <view> <marker>:
+${bad_calls}"
+reading_sets=$(awk '
+  /^[a-z_]+\(\) \{/ { fn = $1; sub(/\(\).*/, "", fn) }
+  /^\}/ { fn = "" }
+  /^[[:space:]]*#/ { next }
+  /SAFEDEPS_READING=/ {
+    if (fn == "" && $0 ~ /^SAFEDEPS_READING=""$/) next
+    if (fn ~ /^guard_reading_(detect|facts|ungated|effects)$/) next
+    if (fn == "shell_lex" && $0 !~ /SAFEDEPS_READING=[^:]/) next
+    print FILENAME ":" NR ": " $0
+  }' "${GUARD}")
+[[ -z "${reading_sets}" ]] || fail "SAFEDEPS_READING is set outside the driver:
+${reading_sets}"
+pass "shell_lex call sites name no reading, and only the driver sets one ($(printf '%s\n' "${lex_calls}" | wc -l | tr -d ' ') call sites)"
 
 # --- the spec -----------------------------------------------------------------
 # Deliberately the slowest, most obvious statement of the seven rules. It is
@@ -130,7 +159,9 @@ reference_spec_scan_text() {
       output+=" "
       if [[ "${c}" == "\\" ]]; then ((i++)); [[ ${i} -lt ${n} ]] && output+=" "
       elif [[ "${c}" == '"' ]]; then ((d--)); ((dq--))
-      elif [[ "${c}" == '$' && "${input:i+1:2}" == "((" ]]; then output+="  "; ((i += 2)); ((d++)); ctx[d]=A; par[d]=0
+      elif [[ "${c}" == '$' && "${input:i+1:2}" == "((" ]]; then
+        if reference_la "${input}" $((i + 3)); then output+="  "; ((i += 2)); ((d++)); ctx[d]=A; par[d]=0
+        else output+=" "; ((i++)); ((d++)); ctx[d]=S; par[d]=0; fi
       elif [[ "${c}" == '$' && "${input:i+1:1}" == "(" ]]; then output+=" "; ((i++)); ((d++)); ctx[d]=S; par[d]=0
       elif [[ "${c}" == '$' && "${input:i+1:1}" == "{" ]]; then output+=" "; ((i++)); ((d++)); ctx[d]=V; par[d]=0
       fi
@@ -166,11 +197,18 @@ reference_spec_scan_text() {
       fi
       continue
     fi
-    if [[ "${c}" == '$' && "${input:i+1:2}" == "((" ]]; then output+="${three}"; ((i += 2)); ((d++)); ctx[d]=A; par[d]=0; continue; fi
-    # `((` is arithmetic wherever it stands (the subshell reading is the other
-    # policy, judged when the shells disagree).
+    # `((` and `$((` are decided where they stand, by the look-ahead bash
+    # makes (reference_la): arithmetic, or a subshell -- `$(` and a `(`.
+    if [[ "${c}" == '$' && "${input:i+1:2}" == "((" ]]; then
+      if reference_la "${input}" $((i + 3)); then output+="${three}"; ((i += 2)); ((d++)); ctx[d]=A; par[d]=0
+      else output+="${two}"; ((i++)); ((d++)); ctx[d]=S; par[d]=0; fi
+      continue
+    fi
     if [[ "${c}" == "(" && "${input:i+1:1}" == "(" ]]; then
-      output+="${two}"; ((i++)); ((d++)); ctx[d]=A; par[d]=0; continue
+      output+="${two}"; ((i++))
+      if reference_la "${input}" $((i + 1)); then ((d++)); ctx[d]=A; par[d]=0
+      else par[d]=$((par[d] + 2)); fi
+      continue
     fi
     if [[ "${c}" == '$' && "${input:i+1:1}" == "(" ]]; then output+="${two}"; ((i++)); ((d++)); ctx[d]=S; par[d]=0; continue; fi
     if [[ "${c}" == '$' && "${input:i+1:1}" == "[" ]]; then output+="${two}"; ((i++)); ((d++)); ctx[d]=K; par[d]=0; continue; fi
@@ -187,6 +225,83 @@ reference_spec_scan_text() {
 }
 
 reference_scan_text() { reference_spec_scan_text "$@"; }
+
+# The look-ahead bash makes at `((` (or `$((`), from offset k: to the first `)`
+# not nested in a parenthesis, stepping over quotes, an escape, `$(...)`,
+# `${...}` and backticks whole. Arithmetic (status 0) when another `)` follows
+# it or when there is none; a subshell (status 1) otherwise. Measured cells:
+# forms B1, LA1-LA5 in scripts/measure/shell-reading-forms.json.
+reference_la() {
+  local LC_ALL=C
+  local input="$1" k="$2" n=${#1} depth=0 c
+  while (( k < n )); do
+    c="${input:k:1}"
+    case "${c}" in
+      \\) ((k += 2)); continue ;;
+      "'") k=$(reference_la_sq "${input}" $((k + 1))); continue ;;
+      '"') k=$(reference_la_dq "${input}" $((k + 1))); continue ;;
+      '`') k=$(reference_la_bq "${input}" $((k + 1))); continue ;;
+      '$')
+        if [[ "${input:k+1:1}" == "(" ]]; then k=$(reference_la_close "${input}" $((k + 2)) ")"); continue; fi
+        if [[ "${input:k+1:1}" == "{" ]]; then k=$(reference_la_close "${input}" $((k + 2)) "}"); continue; fi
+        ;;
+      "(") ((depth++)) ;;
+      ")")
+        if (( depth > 0 )); then ((depth--))
+        else [[ "${input:k+1:1}" == ")" ]]; return; fi
+        ;;
+    esac
+    ((k++))
+  done
+  return 0
+}
+reference_la_sq() { local LC_ALL=C k="$2"; while (( k < ${#1} )) && [[ "${1:k:1}" != "'" ]]; do ((k++)); done; printf '%s' $((k + 1)); }
+reference_la_bq() {
+  local LC_ALL=C k="$2"
+  while (( k < ${#1} )); do
+    case "${1:k:1}" in \\) ((k += 2)); continue ;; '`') printf '%s' $((k + 1)); return ;; esac
+    ((k++))
+  done
+  printf '%s' $((k + 1))
+}
+reference_la_dq() {
+  local LC_ALL=C input="$1" k="$2"
+  while (( k < ${#input} )); do
+    case "${input:k:1}" in
+      \\) ((k += 2)); continue ;;
+      '"') printf '%s' $((k + 1)); return ;;
+      '`') k=$(reference_la_bq "${input}" $((k + 1))); continue ;;
+      '$')
+        if [[ "${input:k+1:1}" == "(" ]]; then k=$(reference_la_close "${input}" $((k + 2)) ")"); continue; fi
+        if [[ "${input:k+1:1}" == "{" ]]; then k=$(reference_la_close "${input}" $((k + 2)) "}"); continue; fi
+        ;;
+    esac
+    ((k++))
+  done
+  printf '%s' $((k + 1))
+}
+reference_la_close() {
+  local LC_ALL=C input="$1" k="$2" closer="$3" depth=0 c
+  while (( k < ${#input} )); do
+    c="${input:k:1}"
+    case "${c}" in
+      \\) ((k += 2)); continue ;;
+      "'") k=$(reference_la_sq "${input}" $((k + 1))); continue ;;
+      '"') k=$(reference_la_dq "${input}" $((k + 1))); continue ;;
+      '`') k=$(reference_la_bq "${input}" $((k + 1))); continue ;;
+      '$')
+        if [[ "${input:k+1:1}" == "(" ]]; then k=$(reference_la_close "${input}" $((k + 2)) ")"); continue; fi
+        if [[ "${input:k+1:1}" == "{" ]]; then k=$(reference_la_close "${input}" $((k + 2)) "}"); continue; fi
+        ;;
+    esac
+    if [[ "${closer}" == ")" && "${c}" == "(" ]]; then ((depth++))
+    elif [[ "${c}" == "${closer}" ]]; then
+      if (( depth > 0 )); then ((depth--)); else printf '%s' $((k + 1)); return; fi
+    fi
+    ((k++))
+  done
+  printf '%s' $((k + 1))
+}
 
 # `((` opens arithmetic only where a command starts.
 reference_cmdpos() {
@@ -388,27 +503,46 @@ pass "control: mutated spec diverges on ${control_hit}/${fuzz_cases} inputs, so 
 # it drops continuations on purpose. Checked on every recorded shell form and on
 # random input drawn from the characters quotes, comments, heredocs,
 # substitutions and redirections are made of.
-scan_view() { shell_lex "$1" scan arith "safedeps:scan-contract"; }
-code_view() { shell_lex "$1" code arith "safedeps:scan-contract"; }
-noredir_view() { shell_lex "$1" noredir arith "safedeps:scan-contract"; }
-scan_view_sub() { shell_lex "$1" scan sub "safedeps:scan-contract"; }
-code_view_sub() { shell_lex "$1" code sub "safedeps:scan-contract"; }
+#
+# Each property holds within each reading (bash, zsh, dash): a view is read
+# again only under the reading that made it. And one property holds across
+# them: where the bash reading says no DIVERGE, the zsh and dash views are the
+# bash views, byte for byte. That is what lets the guard skip the other two
+# readings, so a place where the shells differ that the lexer does not report
+# shows here as a reading that moved without a DIVERGE.
+scan_view() { shell_lex "$1" scan "safedeps:scan-contract"; }
+code_view() { shell_lex "$1" code "safedeps:scan-contract"; }
+noredir_view() { shell_lex "$1" noredir "safedeps:scan-contract"; }
 property_failures=0
+diverge_file=$(mktemp "${TMPDIR:-/tmp}/safedeps-diverge.XXXXXX")
 check_view_properties() { # input label
-  local x="$1" v once twice
-  for v in scan_view code_view noredir_view scan_view_sub code_view_sub; do
-    # Not through capture: the outer $(...) would strip a trailing newline
-    # from the view and read as a length change the lexer did not make.
-    once=$("${v}" "${x}"; printf 'X'); once="${once%X}"
-    if [[ "$(byte_len "${once}")" != "$(byte_len "${x}")" ]]; then
-      printf 'length: %s changed the length of [%q] (%s)\n' "${v}" "${x}" "$2" >&2
-      property_failures=$((property_failures + 1))
-      continue
-    fi
-    [[ "${v}" == *_sub ]] && continue
-    twice=$("${v}" "${once}"; printf 'X'); twice="${twice%X}"
-    if [[ "${twice}" != "${once}" ]]; then
-      printf 'idempotence: %s read twice differs on [%q] (%s)\n  once  [%q]\n  twice [%q]\n' "${v}" "${x}" "$2" "${once}" "${twice}" >&2
+  local x="$1" v once twice reading bash_views="" views
+  for reading in bash zsh dash; do
+    views=""
+    for v in scan_view code_view noredir_view; do
+      # Not through capture: the outer $(...) would strip a trailing newline
+      # from the view and read as a length change the lexer did not make.
+      once=$(SAFEDEPS_READING="${reading}" "${v}" "${x}"; printf 'X'); once="${once%X}"
+      views+="${once}"$'\036'
+      if [[ "$(byte_len "${once}")" != "$(byte_len "${x}")" ]]; then
+        printf 'length: %s (%s) changed the length of [%q] (%s)\n' "${v}" "${reading}" "${x}" "$2" >&2
+        property_failures=$((property_failures + 1))
+        continue
+      fi
+      twice=$(SAFEDEPS_READING="${reading}" "${v}" "${once}"; printf 'X'); twice="${twice%X}"
+      if [[ "${twice}" != "${once}" ]]; then
+        printf 'idempotence: %s (%s) read twice differs on [%q] (%s)\n  once  [%q]\n  twice [%q]\n' "${v}" "${reading}" "${x}" "$2" "${once}" "${twice}" >&2
+        property_failures=$((property_failures + 1))
+      fi
+    done
+    if [[ "${reading}" == bash ]]; then
+      bash_views="${views}"
+      : > "${diverge_file}"
+      SAFEDEPS_READING=bash SAFEDEPS_LEX_DIVERGE="${diverge_file}" scan_view "${x}" > /dev/null
+      SAFEDEPS_READING=bash SAFEDEPS_LEX_DIVERGE="${diverge_file}" code_view "${x}" > /dev/null
+      SAFEDEPS_READING=bash SAFEDEPS_LEX_DIVERGE="${diverge_file}" noredir_view "${x}" > /dev/null
+    elif [[ ! -s "${diverge_file}" && "${views}" != "${bash_views}" ]]; then
+      printf 'diverge: the %s reading of [%q] differs from bash, and the bash reading said no DIVERGE (%s)\n' "${reading}" "${x}" "$2" >&2
       property_failures=$((property_failures + 1))
     fi
   done
@@ -421,7 +555,7 @@ p install evil==6.6.6/'; printf 'X')
   check_view_properties "${form%X}" "$(jq -r ".[${i}].id" "${forms_file}")"
 done
 RANDOM="${fuzz_seed}"
-heredoc_alphabet=(\' \" \\ ' ' '<' '<' '>' '-' '#' '`' '$' '(' ')' '{' '}' E O F p i $'\n' $'\n' $'\t' ';' '|' '&' '=' '1')
+heredoc_alphabet=(\' \" \\ ' ' '<' '<' '>' '-' '#' '`' '$' '(' '(' ')' ')' '{' '}' '[' ']' E O F p i $'\n' $'\n' $'\t' ';' '|' '&' '=' '1')
 for ((c = 0; c < fuzz_cases; c++)); do
   len=$((RANDOM % 40))
   input=""
@@ -431,7 +565,8 @@ for ((c = 0; c < fuzz_cases; c++)); do
   check_view_properties "${input}" "random ${c}"
 done
 [[ ${property_failures} -eq 0 ]] || fail "view properties: ${property_failures} violation(s) (seed ${fuzz_seed})"
-pass "view properties: scan, code and noredir keep length and are idempotent on ${form_count} shell forms and ${fuzz_cases} random inputs"
+rm -f "${diverge_file}"
+pass "view properties: scan, code and noredir keep length and are idempotent in the bash, zsh and dash readings, and read as bash wherever bash says no DIVERGE, on ${form_count} shell forms and ${fuzz_cases} random inputs"
 
 # --- the words the spec extractor reads -----------------------------------------
 # The pieces view hands the extractor each statement's words: redirections out,
@@ -448,7 +583,7 @@ pass "view properties: scan, code and noredir keep length and are idempotent on 
 # safedeps/command-words-read-as-the-shell-dequotes. No form here has either.
 words_view_of() { # text -> the words field of its first piece, one per line
   local line
-  line=$(shell_lex "$1" pieces arith "safedeps:scan-contract" | head -n1)
+  line=$(shell_lex "$1" pieces "safedeps:scan-contract" | head -n1)
   line="${line#*$'\037'}"; line="${line#*$'\037'}"
   set -f
   # shellcheck disable=SC2086
@@ -481,18 +616,28 @@ pass "words: the pieces view reads the argv bash and zsh hand the manager on ${w
 # named in the environment would be a place to plant a view for a command.
 memo_dir=$(mktemp -d "${TMPDIR:-/tmp}/safedeps-memo-test.XXXXXX")
 big_install="pip install evil==6.6.6; echo '$(printf 'x%.0s' $(seq 1 5000))'"
-memo_key="${memo_dir}/scan.arith.$(printf '%s' "${big_install}" | cksum | tr ' ' '.')"
+memo_key="${memo_dir}/scan.bash.$(printf '%s' "${big_install}" | cksum | tr ' ' '.')"
 printf 'PLANTED' > "${memo_key}.out"; printf 'some other text' > "${memo_key}.in"
-got=$(SAFEDEPS_LEX_CACHE="${memo_dir}" shell_lex "${big_install}" scan arith "safedeps:scan-contract"; printf 'X'); got="${got%X}"
+got=$(SAFEDEPS_LEX_CACHE="${memo_dir}" shell_lex "${big_install}" scan "safedeps:scan-contract"; printf 'X'); got="${got%X}"
 [[ "${got}" != "PLANTED" && "${got}" == "pip install evil==6.6.6;"* ]] \
   || fail "a memo entry under the right key but for other text is not returned"
 printf 'PLANTED' > "${memo_key}.out"; printf '%s' "${big_install}" > "${memo_key}.in"
-got=$(SAFEDEPS_LEX_CACHE="${memo_dir}" shell_lex "${big_install}" scan arith "safedeps:scan-contract"; printf 'X'); got="${got%X}"
+got=$(SAFEDEPS_LEX_CACHE="${memo_dir}" shell_lex "${big_install}" scan "safedeps:scan-contract"; printf 'X'); got="${got%X}"
 [[ "${got}" == "PLANTED" ]] || fail "an exact-text memo entry is returned, so the memo is in use"
+# A hit still reports DIVERGE: the guard reads only bash when nothing says the
+# readings differ, so a memo that dropped the flag would drop zsh and dash.
+diverging="((1' ))"$'\n'"pip install evil==6.6.6"$'\n'"# $(printf 'x%.0s' $(seq 1 5000)) ' ))"
+memo_diverge=$(mktemp "${TMPDIR:-/tmp}/safedeps-memo-div.XXXXXX")
+SAFEDEPS_LEX_CACHE="${memo_dir}" SAFEDEPS_LEX_DIVERGE="${memo_diverge}" shell_lex "${diverging}" scan "safedeps:scan-contract" > /dev/null
+[[ -s "${memo_diverge}" ]] || fail "a diverging text says DIVERGE when it fills the memo"
+: > "${memo_diverge}"
+SAFEDEPS_LEX_CACHE="${memo_dir}" SAFEDEPS_LEX_DIVERGE="${memo_diverge}" shell_lex "${diverging}" scan "safedeps:scan-contract" > /dev/null
+[[ -s "${memo_diverge}" ]] || fail "a memo hit on a diverging text still says DIVERGE"
+rm -f "${memo_diverge}"
 # The guard ignores a memo directory from the environment. Plant a blank view
 # for every view of the command; the install must still be judged.
 for v in scan code joined unprefixed; do
-  for pol in arith sub; do
+  for pol in bash zsh dash; do
     k="${memo_dir}/${v}.${pol}.$(printf '%s' "${big_install}" | cksum | tr ' ' '.')"
     printf '%*s' "${#big_install}" '' > "${k}.out"; printf '%s' "${big_install}" > "${k}.in"
   done
