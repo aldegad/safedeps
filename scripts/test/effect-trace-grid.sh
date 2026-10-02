@@ -279,6 +279,15 @@ printf '# silent rows: %s, Claude %s (%s)\n' "${#SILENT_ROWS[@]}" "${claude_sile
 # names, a tarball among them, as recorded. That is a boundary, and the K rows
 # pin it from the side of the projects it protects.
 #
+# What the records hold is read entry by entry, and each kind left out or read
+# is a row: a directory dependency's link and target (A1-A4, rolled back as
+# they were before the records were read), a workspace pattern that leaves the
+# project (A5), a workspace member, which is part of the project (W1, W2), a
+# member list the gate cannot read in full, which counts no member (W3), and
+# the project's own entry (X0). A source is on the public registry only when
+# its value starts with that registry's https URL, not when it merely names it
+# (B1-B3).
+#
 # EVIL-sd-approved is a tarball named sd-approved@1.0.0, the approved name and
 # version, whose scripts write EVIL lines. sd-fetchy@1.0.0 is approved, and its
 # postinstall names `fetch`, which the heuristics read as network access.
@@ -345,10 +354,82 @@ new_pulled() {
   [[ ! -e "${CASE_PROJECT}/node_modules/sd-swapped" ]] || fail "the pulled fixture leaves the tree as it was"
 }
 
+# Directory dependencies. npm records one as a link and its target, keyed by
+# the directory (`node_modules/evildir {resolved: "../evildir", link: true}` and
+# `../evildir {version}`), in both records, saved or not, and `npm rebuild` runs
+# the target's install scripts through the link. Reading neither entry let the
+# rebuild run them (validator round 5: A1-A4); the lockfile diff that came
+# before rolled the saved forms back. evildir and local/inner are packages
+# whose scripts write EVIL lines.
+
+# <dir>: a package named <name> whose three install scripts write <mark> lines.
+make_dir_package() {
+  mkdir -p "$1"
+  cat > "$1/mark.js" <<EOF
+require('fs').appendFileSync('${MARKS}', '$3\t' + process.argv[2] + '\t' + process.cwd() + '\n');
+EOF
+  jq -n --arg name "$2" '{name: $name, version: "1.0.0",
+    scripts: {preinstall: "node mark.js preinstall", install: "node mark.js install", postinstall: "node mark.js postinstall"}}' \
+    > "$1/package.json"
+}
+make_evil_dir() { make_dir_package "$1" "$2" "EVIL-$2"; }
+# A workspace member's scripts are the project's own, and run in the rebuild.
+make_member_dir() { make_dir_package "$1" "$2" "$2@1.0.0"; }
+new_linked() {
+  new_project
+  (cd "${CASE_PROJECT}" && npm install sd-approved@1.0.0 --ignore-scripts >/dev/null 2>&1) || fail "the fixture installs sd-approved"
+  rm -rf "${CASE_PROJECT}/../evildir"
+  make_evil_dir "${CASE_PROJECT}/../evildir" evildir
+  make_evil_dir "${CASE_PROJECT}/local/inner" inner
+}
+new_linkdep() { new_linked; declare_dependency evildir file:../evildir; }
+# A workspace whose patterns reach out of the project: npm links ../evildir as a
+# member, and the gate does not count a directory outside the project as one.
+new_wsout() {
+  new_workspace
+  rm -rf "${CASE_PROJECT}/../evildir"
+  make_evil_dir "${CASE_PROJECT}/../evildir" evildir
+  jq '.workspaces += ["../evildir"]' "${CASE_PROJECT}/package.json" > "${CASE_PROJECT}/package.json.new"
+  mv "${CASE_PROJECT}/package.json.new" "${CASE_PROJECT}/package.json"
+}
+# A workspace gaining a member: packages/b, and the same member reached
+# through a symlink (packages/b -> ../real/b) in wsadd_linked. That one is not
+# rolled back either, but its rebuild is skipped with a warning: npm records
+# the member as packages/b and `npm query` answers real/b, so the rebuild
+# precondition finds the member unrecorded (measured, npm 10.8.2; the same
+# before this change). W2 pins both: no rollback, and that warning.
+new_wsadd() { new_workspace; make_member_dir "${CASE_PROJECT}/packages/b" sd-member; }
+new_wsadd_linked() {
+  new_workspace
+  make_member_dir "${CASE_PROJECT}/real/b" sd-member
+  ln -s ../real/b "${CASE_PROJECT}/packages/b"
+}
+# A workspace that negates a pattern, which the gate does not read, gaining a
+# member: no directory there counts as a member, so the new link is rolled back
+# and advisory.log says why (W3). A member list read past the negation would be
+# longer than npm's.
+new_wsneg_add() { new_negws; make_member_dir "${CASE_PROJECT}/packages/c" sd-member; }
+# A project that has never installed anything, whose own postinstall says
+# `fetch`. With no earlier record, all of its first install is new, and the
+# project's own entry is not part of that.
+new_rootscript() {
+  CASE_PROJECT=$(mktemp -d "${tmp_root}/project.XXXXXX")
+  CASE_PROJECT=$(cd "${CASE_PROJECT}" && pwd -P)
+  CASE_CWD="${CASE_PROJECT}"
+  jq -n '{name: "proj", version: "1.0.0", scripts: {postinstall: "node -e 0 # fetch"}}' > "${CASE_PROJECT}/package.json"
+  new_safedeps_home
+}
+# The impostor sd-approved under a directory named registry.npmjs.org. The
+# source `file:registry.npmjs.org/sd-approved-1.0.0.tgz` contains the public
+# registry's name, which a substring test read as the registry (B1-B3).
+new_regdir() { new_project; mkdir -p "${CASE_PROJECT}/registry.npmjs.org"; cp "${EVIL_DIR}/sd-approved-1.0.0.tgz" "${CASE_PROJECT}/registry.npmjs.org/"; }
+new_regdep() { new_regdir; declare_dependency sd-approved file:registry.npmjs.org/sd-approved-1.0.0.tgz; }
+
 # <id>|<fixture>|<engine>|<expect>|<command>, where <expect> is `quiet:<package>`
-# (confirmed quietly and <package> rebuilt) or `rollback:<reason>` (rolled back
+# (confirmed quietly and <package> rebuilt), `rollback:<reason>` (rolled back
 # with a reason that says <reason>, and on Claude Code no script of the
-# impostor or of sd-fetchy ran at all, the rollback's own reinstall included).
+# impostor or of sd-fetchy ran at all, the rollback's own reinstall included),
+# or `kept:<warning>` (not rolled back, with a warning that says <warning>).
 printf '# what an install brought in (id engine command | outcome)\n'
 failures_before=${#FAILURES[@]}
 while IFS= read -r row; do
@@ -369,6 +450,10 @@ while IFS= read -r row; do
       [[ -z "${CASE_POST}" ]] || note_failure "${id}: confirmed quietly (post: ${CASE_POST:0:300})"
       grep -q "^${expect#quiet:}@[^	]*	install" <<< "${CASE_RAN}" \
         || note_failure "${id}: the verified install is rebuilt, so ${expect#quiet:}'s scripts run (${CASE_RAN:-nothing ran})"
+      ;;
+    kept:*)
+      ! rolled_back || note_failure "${id}: not rolled back (post: ${CASE_POST:0:300})"
+      grep -qF "${expect#kept:}" <<< "${CASE_POST}" || note_failure "${id}: the warning says ${expect#kept:} (post: ${CASE_POST:-<quiet>})"
       ;;
     rollback:*)
       rolled_back || note_failure "${id}: rolled back (post: ${CASE_POST:-<quiet>})"
@@ -394,9 +479,21 @@ H2|fetchy|claude|rollback:Package 'sd-fetchy' has install script with network ac
 K1|clone|claude|quiet:sd-approved|npm ci
 K2|clonetarball|claude|quiet:sd-approved|npm ci
 K3|pulled|claude|quiet:sd-swapped|npm ci
+A1|linked|claude|rollback:non-standard registries (package-lock.json: ../evildir|npm install ../evildir
+A2|linked|claude|rollback:non-standard registries (node_modules/.package-lock.json: ../evildir)|npm install --no-save ../evildir
+A3|linkdep|claude|rollback:non-standard registries (package-lock.json: ../evildir|npm install
+A4|linked|claude|rollback:non-standard registries (package-lock.json: local/inner|npm install ./local/inner
+A5|wsout|claude|rollback:non-standard registries (package-lock.json: ../evildir|npm install
+W1|wsadd|claude|quiet:sd-member|npm install
+W2|wsadd_linked|claude|kept:holds a package, or a version of one, that neither lockfile records (real/b (sd-member@1.0.0|npm install
+W3|wsneg_add|claude|rollback:non-standard registries (package-lock.json: packages/c|npm install
+X0|rootscript|claude|quiet:sd-approved|npm install sd-approved@1.0.0
+B1|regdir|claude|rollback:non-standard registries (node_modules/.package-lock.json: file:registry.npmjs.org/sd-approved-1.0.0.tgz)|npm install --no-save ./registry.npmjs.org/sd-approved-1.0.0.tgz
+B2|regdir|claude|rollback:non-standard registries (package-lock.json: file:registry.npmjs.org/sd-approved-1.0.0.tgz|npm install ./registry.npmjs.org/sd-approved-1.0.0.tgz
+B3|regdep|claude|rollback:non-standard registries (node_modules/.package-lock.json: file:registry.npmjs.org/sd-approved-1.0.0.tgz)|npm_config_save=false npm install
 ROWS
 [[ ${#FAILURES[@]} -ne ${failures_before} ]] \
-  || pass "installs that save nothing have their sources and install scripts checked like saved ones, and a committed lockfile installs as recorded"
+  || pass "installs that save nothing have their sources and install scripts checked like saved ones, a directory dependency and a source that only names the registry are rolled back, a workspace member is not, and a committed lockfile installs as recorded"
 
 if [[ "${REPORT_ONLY}" == 1 ]]; then
   printf '# GRID_REPORT_ONLY: %s failure(s) not enforced\n' "${#FAILURES[@]}"

@@ -203,6 +203,60 @@ mtime_val=$(bash -c 'source lib/providers/providers.sh; f=$(mktemp); safedeps_fi
 [[ "${mtime_val}" =~ ^[0-9]+$ ]] || fail "safedeps_file_mtime returns a bare integer (got: ${mtime_val})"
 pass "file mtime is a portable integer"
 
+# The public registry is a scheme and a host at the start of a source, not a
+# name anywhere in it. A tarball under a directory named registry.npmjs.org
+# passed the substring test as the registry (effect-trace-grid B1-B3); the
+# https host forms have no TLS fixture to install from, so they are pinned here.
+while IFS='|' read -r want url; do
+  [[ -n "${url}" ]] || continue
+  if bash -c 'source lib/npm/closure.sh; safedeps_npm_public_registry_url "$1"' _ "${url}"; then got=public; else got=other; fi
+  [[ "${got}" == "${want}" ]] || fail "registry source ${url} reads as ${want} (got ${got})"
+done <<'URLS'
+public|https://registry.npmjs.org/sd-approved/-/sd-approved-1.0.0.tgz
+public|https://registry.yarnpkg.com/sd-approved/-/sd-approved-1.0.0.tgz
+public|HTTPS://Registry.NPMJS.org/sd-approved/-/sd-approved-1.0.0.tgz
+other|file:registry.npmjs.org/sd-approved-1.0.0.tgz
+other|https://registry.npmjs.org.example/sd-approved/-/sd-approved-1.0.0.tgz
+other|https://registry.npmjs.org@evil.example/sd-approved-1.0.0.tgz
+other|https://evil.example/registry.npmjs.org/sd-approved-1.0.0.tgz
+other|http://registry.npmjs.org/sd-approved/-/sd-approved-1.0.0.tgz
+other|git+https://registry.npmjs.org/sd-approved.git
+other|../registry.npmjs.org
+URLS
+pass "a source is on the public registry only when it starts with the registry's https URL"
+
+# What an npm record holds that the earlier ones did not, entry by entry. A
+# link and its target are read (the rebuild runs the target's scripts), and so
+# is a directory outside node_modules; the project's own entry is not.
+rec_dir=$(mktemp -d "${tmp_root}/records.XXXXXX")
+jq -n '{lockfileVersion: 3, packages: {
+  "": {name: "proj", version: "1.0.0"},
+  "node_modules/sd-approved": {version: "1.0.0", resolved: "https://registry.npmjs.org/sd-approved/-/sd-approved-1.0.0.tgz"}}}' \
+  > "${rec_dir}/before.json"
+jq -n '{lockfileVersion: 3, packages: {
+  "": {name: "proj", version: "1.0.1"},
+  "node_modules/sd-approved": {version: "1.0.0", resolved: "https://registry.npmjs.org/sd-approved/-/sd-approved-1.0.0.tgz"},
+  "node_modules/evildir": {resolved: "../evildir", link: true},
+  "../evildir": {name: "evildir", version: "1.0.0"},
+  "node_modules/b": {resolved: "packages/b", link: true},
+  "packages/b": {name: "b", version: "1.0.0"},
+  "node_modules/bare": {link: true},
+  "node_modules/sd-victim": {version: "1.0.0", resolved: "file:vendor/sd-victim-1.0.0.tgz"}}}' \
+  > "${rec_dir}/after.json"
+rec_out=$(bash -c 'source lib/npm/closure.sh; safedeps_npm_new_records "$1" "$2"' _ "${rec_dir}/after.json" "${rec_dir}/before.json" | LC_ALL=C sort)
+rec_want=$(printf '%s\n' \
+  $'L\tnode_modules/b\tpackages/b' \
+  $'L\tnode_modules/bare\t' \
+  $'L\tnode_modules/evildir\t../evildir' \
+  $'N\tnode_modules/sd-victim' \
+  $'S\tfile:vendor/sd-victim-1.0.0.tgz' \
+  $'T\t../evildir' \
+  $'T\tpackages/b' | LC_ALL=C sort)
+[[ "${rec_out}" == "${rec_want}" ]] || fail "the npm record reader reports links, their targets and fetched packages, and not the project's own entry (got: ${rec_out})"
+rec_none=$(bash -c 'source lib/npm/closure.sh; safedeps_npm_new_records "$1" "$1"' _ "${rec_dir}/after.json")
+[[ -z "${rec_none}" ]] || fail "a record read against itself holds nothing new (got: ${rec_none})"
+pass "the npm record reader reports links, their targets and fetched packages, and not the project's own entry"
+
 # Repo-override awareness: the npm closure probe must resolve transitive deps
 # through the consuming repo's `overrides`, so a transitive the repo has pinned
 # to a patched version is not false-flagged. Unit-test the discovery + filter.

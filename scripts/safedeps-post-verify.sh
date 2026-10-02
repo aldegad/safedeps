@@ -1135,10 +1135,15 @@ NPM_HIDDEN_LOCKFILE="node_modules/.package-lock.json"
 # neither existed, everything recorded now is new. A source the committed
 # package-lock.json already named is not new, so `npm ci` installs it as
 # recorded; that is a boundary, documented as one.
+#
+# A new link is a new source, its target directory is a new package for the
+# install-script heuristics, and so is any other directory outside node_modules
+# whose record changed. The exception is a workspace member, which is part of
+# the project (collect_npm_new_directories).
 NPM_NEW_SOURCES=()
 NPM_NEW_NODES=()
 collect_npm_new_records() {
-  local record kind value new
+  local record kind value target new directories=""
   local -a earlier=()
 
   for record in "package-lock.json" "${SAFEDEPS_SNAPSHOT_NPM_TREE}"; do
@@ -1152,13 +1157,112 @@ collect_npm_new_records() {
       REASONS+=("npm record ${record} could not be compared with the records before the command; fail-closed")
       continue
     fi
-    while IFS=$'\t' read -r kind value; do
+    while IFS=$'\t' read -r kind value target; do
       case "${kind}" in
         S) NPM_NEW_SOURCES+=("${record}: ${value}") ;;
         N) NPM_NEW_NODES+=("${value}") ;;
+        L) directories+="L"$'\t'"${record}"$'\t'"${value}"$'\t'"${target}"$'\n' ;;
+        T) directories+="T"$'\t'"${record}"$'\t'"${value}"$'\t'"${value}"$'\n' ;;
       esac
     done <<< "${new}"
   done
+
+  [[ -z "${directories}" ]] || collect_npm_new_directories "${directories}"
+}
+
+# <directories>: the new links and the new directories outside node_modules
+# that collect_npm_new_records found, one per line as
+# `L|T<TAB><record><TAB><key><TAB><directory npm keyed>`.
+#
+# A workspace member is the one directory left out. npm links each member the
+# root's package.json declares, in the same shape as a `file:` dependency, and
+# the rebuild runs the member's scripts as `npm install` would. They are the
+# project's own, so a member added to a workspace is not rolled back (W1, W2).
+# Any other link is a directory this install brought in, inside the project or
+# not. It is a source outside the public registries, so it is rolled back
+# (A1-A4), as it was when the lockfile diff was read. Its directory, and any
+# other directory whose record changed, goes to the install-script heuristics.
+#
+# A member is a directory the declared patterns find inside the project, the
+# way npm's glob finds it. It is compared with the link's target as a directory
+# on disk, so a member reached through a symlink matches the target npm keys by
+# where it resolves (W2). A pattern that leaves the project names no member
+# (A5). Where the patterns cannot be read in full (a negation, a glob this gate
+# does not read), no directory counts as a member, and advisory.log says so: a
+# member list longer than npm's would pass a directory npm did not treat as one
+# (W3).
+#
+# A fresh workspace links every member at once, so this runs a fixed number of
+# processes, never one per directory.
+collect_npm_new_directories() {
+  local members="" kept kind record key dir
+
+  if [[ -f "${PROJECT_DIR}/package.json" ]]; then
+    members=$(npm_workspace_member_dirs) || members=""
+  fi
+  if ! kept=$(printf '%s' "$1" | npm_with_physical_dirs | jq -nRr --arg members "${members}" '
+      ($members | split("\n") | map(select(. != "") | {key: ., value: true}) | from_entries) as $m
+      | inputs | split("\t") | select((.[4] // "") == "" or ($m[.[4]] | not)) | .[0:4] | join("\t")'); then
+    SUSPICIOUS=true
+    REASONS+=("npm records: the directories this install linked could not be compared with the workspace members; fail-closed")
+    return 0
+  fi
+
+  while IFS=$'\t' read -r kind record key dir; do
+    case "${kind}" in
+      L)
+        if [[ -z "${dir}" ]]; then
+          NPM_NEW_SOURCES+=("${record}: ${key} (a link that records no target)")
+        else
+          NPM_NEW_SOURCES+=("${record}: ${dir}")
+          NPM_NEW_NODES+=("${dir}")
+        fi
+        ;;
+      T) NPM_NEW_NODES+=("${dir}") ;;
+    esac
+  done <<< "${kept}"
+}
+
+# Each line on stdin, with a tab and its fourth field as a directory on disk
+# appended: empty when it is not one. The field is a path npm keyed relative to
+# the project's real directory, so `..` is resolved after the symlinks in front
+# of it (`cd -P`, which also leaves PWD physical). One subshell for every line.
+npm_with_physical_dirs() {
+  (
+    local line kind record key dir physical
+    while IFS= read -r line; do
+      [[ -n "${line}" ]] || continue
+      IFS=$'\t' read -r kind record key dir <<< "${line}"
+      physical=""
+      if [[ -n "${dir}" ]] && cd -P "${PROJECT_DIR}/${dir}" 2>/dev/null; then
+        physical="${PWD}"
+      fi
+      printf '%s\t%s\n' "${line}" "${physical}"
+    done
+  )
+}
+
+# The workspace members of PROJECT_DIR, one directory on disk per line, or
+# nothing when it declares none or its patterns cannot be read in full.
+npm_workspace_member_dirs() {
+  local listing
+  listing=$(safedeps_npm_workspace_members "${PROJECT_DIR}") || return 1
+  [[ "${listing%%$'\n'*}" == ok ]] || return 0
+  if grep -q '^?' <<< "${listing}"; then
+    log_advisory "post-verify: the workspace patterns in ${PROJECT_DIR}/package.json cannot be read in full ($(grep '^?' <<< "${listing}" | head -1 | cut -f2)), so no directory this install linked there counts as a workspace member."
+    return 0
+  fi
+  (
+    local member
+    while IFS= read -r member; do
+      [[ -n "${member}" ]] || continue
+      case "/${member#"${PROJECT_DIR}"}/" in
+        */../*) continue ;;
+      esac
+      cd -P "${member}" 2>/dev/null && printf '%s\n' "${PWD}"
+    done
+    return 0
+  ) <<< "${listing#ok}"
 }
 
 # Function: check the sources this install brought in, from either npm record
@@ -1166,8 +1270,15 @@ check_npm_new_sources() {
   local nonstandard insecure
   [[ ${#NPM_NEW_SOURCES[@]} -gt 0 ]] || return 0
 
-  # Check for resolved URLs pointing to non-standard registries
-  nonstandard=$(printf '%s\n' "${NPM_NEW_SOURCES[@]}" | grep -viE 'registry\.npmjs\.org|registry\.yarnpkg\.com' || true)
+  # Check for resolved URLs pointing to non-standard registries. Each entry is
+  # `<record>: <resolved>`, and the value is read from its start
+  # (safedeps_npm_public_registry_url).
+  local entry
+  nonstandard=""
+  for entry in "${NPM_NEW_SOURCES[@]}"; do
+    safedeps_npm_public_registry_url "${entry#*: }" || nonstandard+="${entry}"$'\n'
+  done
+  nonstandard="${nonstandard%$'\n'}"
   if [[ -n "${nonstandard}" ]]; then
     SUSPICIOUS=true
     REASONS+=("Lock file contains resolved URLs from non-standard registries ($(name_sources "${nonstandard}"))")

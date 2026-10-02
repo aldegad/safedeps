@@ -56,10 +56,16 @@ safedeps_npm_lock_closure() {
 }
 
 # What the npm record <current> holds that none of the <earlier> records did.
-# Prints `S<TAB><resolved>` for each source no earlier record names, and
-# `N<TAB><key>` for each installed package whose key, version, resolved URL or
-# integrity no earlier record has. With no earlier record, all of <current> is
-# new.
+# Prints, for what is new:
+#
+#   S<TAB><resolved>       a source no earlier record names
+#   N<TAB><key>            an installed package whose key, version, resolved
+#                          URL or integrity no earlier record has
+#   L<TAB><key><TAB><dir>  a link, and the directory it points at as npm keys
+#                          it (empty when the link records none)
+#   T<TAB><key>            a directory outside node_modules: a link's target
+#
+# With no earlier record, all of <current> is new.
 #
 # Earlier records are read together rather than in turn. package-lock.json can
 # name a source the installed tree never had: an optional package for another
@@ -67,10 +73,27 @@ safedeps_npm_lock_closure() {
 # it. Read against the tree record alone, every install in such a project
 # would bring that source in again.
 #
-# A link is left out (its `resolved` is a directory of the project, not where
-# anything was fetched from), and so is a key outside node_modules, which is a
-# directory of the project as well. lockfileVersion 1 nests its packages under
-# `dependencies`, and its keys are rebuilt as the paths later versions use.
+# What is read, entry by entry, against what npm records and what `npm
+# rebuild` then runs. Each kind is a row in scripts/test/effect-trace-grid.sh
+# section 1a.
+#
+#   - A key under node_modules that is not a link is a package fetched from
+#     its `resolved`, and the rebuild runs its scripts.
+#   - A link (`node_modules/x {resolved: "../x", link: true}`) is what npm
+#     records for a directory dependency, a workspace member included, and its
+#     target is keyed by the directory (`../x {version, ...}`). Both records
+#     hold both entries, whether or not the install saved. The rebuild runs the
+#     target's install scripts (and `prepare`) through the link: arborist's
+#     rebuild queues `node.target`'s scripts for every link in the tree. So
+#     both are reported, L and T, and the caller decides which links are part
+#     of the project (A1-A5, W1-W3). Leaving them out let a directory
+#     dependency pass unread while the rebuild ran its scripts.
+#   - The root key `""` is left out. It is the project itself, not something an
+#     install brought in. The rebuild runs its scripts too, as `npm install`
+#     does, and they are the project's own (X0).
+#
+# lockfileVersion 1 nests its packages under `dependencies`, and its keys are
+# rebuilt as the paths later versions use.
 safedeps_npm_new_records() {
   local current="$1"
   shift
@@ -83,17 +106,40 @@ safedeps_npm_new_records() {
       | {key: $key, value: .value}, (.value | objects | v1($key + "/"));
     def nodes:
       (if ((.packages // null) | type) == "object" then .packages | to_entries[] else v1("") end)
-      | select((.key | test("(^|/)node_modules/")) and (.value | type) == "object"
-          and (.value.link // false) != true);
+      | select(.key != "" and (.value | type) == "object");
+    def in_tree: .key | test("(^|/)node_modules/");
+    def link: (.value.link // false) == true;
     def tuple: [.key, (.value.version // ""), (.value.resolved // ""), (.value.integrity // "")] | tojson;
 
     [inputs | nodes] as $before
     | ($before | map({key: tuple, value: true}) | from_entries) as $seen
-    | ($before | map(.value.resolved | strings | {key: ., value: true}) | from_entries) as $sources
-    | [$now[0] | nodes] as $after
-    | ([$after[] | .value.resolved | strings | select($sources[.] | not)] | unique[] | "S\t" + .),
-      ($after[] | select(tuple as $t | $seen[$t] | not) | "N\t" + .key)
+    | ($before | map(select(link | not) | .value.resolved | strings | {key: ., value: true}) | from_entries) as $sources
+    | [$now[0] | nodes | select(tuple as $t | $seen[$t] | not)] as $new
+    | [$now[0] | nodes | select(in_tree and (link | not))] as $fetched
+    | ([$fetched[] | .value.resolved | strings | select($sources[.] | not)] | unique[] | "S\t" + .),
+      ($new[] | select(in_tree and (link | not)) | "N\t" + .key),
+      ($new[] | select(in_tree and link) | "L\t" + .key + "\t" + (if (.value.resolved | type) == "string" then .value.resolved else "" end)),
+      ($new[] | select(in_tree | not) | "T\t" + .key)
   ' "$@" /dev/null
+}
+
+# Whether <url> is on a public registry: npm's or Yarn's, over https, read as a
+# scheme and a host at the start of the value. A substring test passed any
+# source that merely contained one of those names, so a tarball at
+# `file:registry.npmjs.org/x.tgz` read as the public registry, and so would
+# `https://registry.npmjs.org.example/`.
+#
+# Scheme and host are matched without regard to case, as URLs compare them. It
+# runs once per new source, so it starts no process.
+safedeps_npm_public_registry_url() {
+  local was_nocase=0 rc=1
+  shopt -q nocasematch && was_nocase=1
+  shopt -s nocasematch
+  case "$1" in
+    https://registry.npmjs.org/*|https://registry.yarnpkg.com/*) rc=0 ;;
+  esac
+  [[ ${was_nocase} -eq 1 ]] || shopt -u nocasematch
+  return "${rc}"
 }
 
 safedeps_npm_fixture_closure() {
