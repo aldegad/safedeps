@@ -728,6 +728,19 @@ The cause is still unknown, and the `mktemp` change may or may not have removed 
 
 `AGENTS.md` gains a Verification hygiene section: mutate on a copy rather than in the plan worktree (a validator and an author both hold write access there, and a `git checkout --` restore discards the author's uncommitted work silently), and three rules for citing a zero. All three were measured the wrong way first — a zero from a harness with no control, a trial whose condition was inferred rather than measured, and a label that hardened as it passed between two people while nothing at its origin had been measured. The failure mode behind them: elaboration feels like verification.
 
+### v2.18.0 (in integration) — an install that saves nothing has its sources and install scripts checked
+
+The effect gate's source check (non-standard and insecure resolved URLs) and its install-script heuristics ran only when `package-lock.json` or `package.json` changed. An install that saves nothing changes neither: `npm install --no-save`, `npm_config_save=false npm install`, a tarball named on the command line. So a tarball carrying an approved name and version, from a `file:` path or an http URL, passed both, and on Claude Code the inert install's rebuild ran its scripts; so did an approved package whose install script the heuristics flag when it is saved. The closure check read the hidden lockfile already, but it names packages by name and version, which the impostor shares.
+
+Both checks now read what either npm record holds that no record held before the command. The pre-guard keeps a copy of `node_modules/.package-lock.json` beside the one of `package-lock.json`, and the post hook compares both records with both copies, read together. A rollback names the source that caused it: the record and the resolved URL, up to three of them.
+
+Two behaviour changes come with it:
+
+- A project with no lockfile and no installed tree has no earlier record, so everything its first install brings in is new. A source outside the public registries (a private registry, a git URL, a tarball) is now rolled back there, as it already was when added to a project that had a lockfile. It used to pass only because there was no snapshot to compare with.
+- A committed lockfile is installed as recorded. `npm ci` in a fresh clone, or a bare `npm install` that follows the lockfile, installs the sources the lockfile names, an edited one included. Checking committed sources would roll back the first `npm ci` of every project that installs from a private registry, a git URL or a tarball, with no way to approve a source. That is left for a later release, and README and ARCHITECTURE state it as a boundary.
+
+Verification: `scripts/test/effect-trace-grid.sh` section 1a, against a real npm and the local registry. The unsaved forms (C1, C3, C5, C6, H2) are rolled back with no impostor script run, and red on the tree before the change (Linux, npm 10.8.2: 17 failed expectations across those rows and a Codex C5); the saved controls (C2, C4, H1) and the quiet rows (C0, a fresh clone's `npm ci` with a registry and with a tarball dependency, an installed tree with a pulled lockfile) hold on both. The 50-entry count stays on `package-lock.json`, because with no earlier record every first install of a project with more than 50 dependencies would cross it.
+
 ## v3 (future)
 
 ### Ledger tamper resistance
