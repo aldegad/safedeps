@@ -816,19 +816,45 @@ shell_lex() {
         if (cc == "\037" || cc == "\036" || cc == "\t") return " "
         return cc
       }
-      function piece(a, z, n,   k, any) {
+      # The words field: the piece after quote removal by the shell, one word
+      # per blank-separated token. A word whose every byte was a quote is the
+      # empty word, which the shell passes, so it is \002 too. Dropped, it
+      # moved each later word up one place: `uvx --python "" evil==1.0.0` runs
+      # evil (uv 0.10.11 reads the empty value as no preference), and
+      # --python took evil==1.0.0 as its value.
+      function piece(a, z, n,   k, any, w) {
         any = 0
         for (k = a; k <= z; k++) if (!(k in DROP) && X[k] !~ /[ \t\n]/) { any = 1; break }
         if (!any) return
         put(n "\037")
         for (k = a; k <= z; k++) put(pbyte(k))
         put("\037")
+        w = 0
         for (k = a; k <= z; k++) {
-          if (k in DROP) put(" ")
-          else if (k in VAL) put(VAL[k] == "\n" || VAL[k] == "\t" || VAL[k] == "\037" || VAL[k] == "\036" ? " " : VAL[k])
-          else if (!RM[k]) put(pbyte(k))
+          if ((k in DROP) || !(k in VAL) && !RM[k] && word_sep(k)) {
+            if (w == 1) put("\002")
+            w = 0
+            put((k in DROP) ? " " : pbyte(k))
+            continue
+          }
+          if (w == 0) w = 1
+          if (k in VAL) {
+            if (VAL[k] != "") { put(VAL[k] ~ /^[ \t\n(){}\036\037]$/ ? "\002" : VAL[k]); w = 2 }
+          } else if (!RM[k]) { put(wbyte(k)); w = 2 }
         }
+        if (w == 1) put("\002")
         put("\n")
+      }
+      # A byte inside a word, for the words field: one the extractor would cut
+      # the word at -- a blank, which splits its tokens, or a grouping
+      # character, which it blanks (guard_extract_statement_text) -- is \002,
+      # so a quoted value or an unquoted substitution stays one word. Split on
+      # blanks, `--python $(which python3) ruff==0.1.0` gave the option half a
+      # word and read `python3)` as the package, and the real pin went
+      # unchecked (caught in review). An operator inside a word is data: the
+      # statement is already cut, and `requests>=3` is a version range.
+      function wbyte(k) {
+        return (X[k] ~ /^[ \t\n(){}\036\037]$/) ? "\002" : X[k]
       }
 
       # A byte that ends a word at the top level: unquoted blank or operator
@@ -1336,7 +1362,7 @@ extract_command_substitution_payloads() {
 # behind `PIP_INDEX_URL=x` was not set aside, and the pipe check read it as
 # install text piped into a shell (caught in review).
 BLANK_INSTALL_RE="${SAFEDEPS_G_START}((env|command)([[:space:]]+-[^[:space:]]*)*[[:space:]]+|[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*(${SAFEDEPS_G_INSTALL_BODY})([[:space:]]|\$)"
-PIPE_MANAGER_RE='(npm|npx|pnpm|pnpx|yarn|bun|bunx|pip[0-9.]*|(python[0-9.]*|py)[[:space:]]+-m[[:space:]]*pip|poetry|uv|uvx|pipx|pipenv|cargo|go|gem|bundle|mvn|dotnet)'
+PIPE_MANAGER_RE='(npm|npx|pnpm|pnpx|yarn|bun|bunx|pip[0-9.]*|(python[0-9.]*|py)[[:space:]]+-[A-Za-z0-9]*m[[:space:]]*pip|poetry|uv|uvx|pipx|pipenv|cargo|go|gem|bundle|mvn|dotnet)'
 PIPE_INSTALL_TEXT_RE="${PIPE_MANAGER_RE}.*(${SAFEDEPS_G_ALL_VERBS})"
 
 # The same, with the manager starting a word. Beside a visible install the text
@@ -2167,13 +2193,26 @@ resolve_reading_targets() {
   local before stmt after words raw head target want kind manager tok value normalized in_env skip
   local user_rc cli_global_off why run_dir answer local_prefix npm_word npm_unknown i
   local dir="${cwd}" grouped=false env_userconfig=false exports_unknown=""
-  local npm_until="" here cond_dir="" depth=0 conditional
-  local -a toks=() npm_env=() npm_args=() npm_exports=()
+  local npm_until="" here cond_dir="" depth=0 conditional statements pieces piece_at pw n=0 m k role
+  local -a toks=() npm_env=() npm_args=() npm_exports=() stmt_words=() mw=()
 
   command_scan_text "${text}" | judge_grep -q '[(){}`]' && grouped=true
   command_scan_text "${text}" | judge_grep -qEi 'npm_config_userconfig=' && env_userconfig=true
 
+  # Each statement's words as the shell splits them (the lexer's pieces view),
+  # for the manager's grammar below: line N of the pieces is statement N.
+  statements=$(command_statements "${text}")
+  raw=""
+  while IFS=$'\035' read -r _ _ _ _ value; do raw+="${value}"$'\n'; done <<< "${statements}"
+  pieces=$(shell_lex "${raw}" pieces "safedeps:extract_pieces") || pieces=""
+  while IFS=$'\037' read -r piece_at _ pw; do
+    if [[ "${piece_at}" == "!" ]]; then guard_mark_reading_failed; continue; fi
+    [[ "${piece_at}" =~ ^[0-9]+$ ]] || continue
+    stmt_words[piece_at]="${stmt_words[piece_at]:+${stmt_words[piece_at]} }${pw}"
+  done <<< "${pieces}"
+
   while IFS=$'\035' read -r before stmt after words raw; do
+    n=$(( n + 1 ))
     if [[ "${before}" == "?" ]]; then
       printf '?\035?\035the command could not be split into statements (awk failed), so safedeps cannot tell where its installs land\035\n'
       continue
@@ -2264,89 +2303,9 @@ resolve_reading_targets() {
       # `VAR=value` prefixes and `env` wrappers stripped: `npm_config_save=false
       # npm install x` is an npm install.
       normalized=$(normalize_install_text "${stmt}")
-      kind=other
-      # The runner test is guard_segment_is_runner's, spelled out: that function
-      # is defined further down, past the point where this one first runs.
-      if ! command_scan_text "${normalized}" | grep -qEi "${SAFEDEPS_G_RUNNER_HEAD_RE}" \
-          && printf '%s' "${normalized}" | grep -qEi "${SAFEDEPS_G_NPM_INSTALL_RE}"; then
-        kind=npm
-      fi
-      manager=""
-      if [[ "${kind}" == npm ]]; then
-        manager=npm
-      elif printf '%s' "${normalized}" | grep -qEi '(^|[[:space:]])pnpm([[:space:]]|$)'; then
-        manager=pnpm
-      fi
-
-      # `env -C <dir>` / `env --chdir <dir>` runs the command in <dir>; its
-      # options come before the first word that is neither an option nor an
-      # assignment. That is the directory npm runs in. The other managers'
-      # relocation flags are read here too; npm's own (`--prefix`, `-C`) are
-      # npm's to read, below.
-      run_dir="${here}"
-      target="${here}"
-      want=""
-      skip=false
-      in_env=false
-      [[ "${toks[0]}" == env ]] && in_env=true
-      for tok in "${toks[@]:1}"; do
-        if [[ "${skip}" == true ]]; then skip=false; continue; fi
-        if [[ -n "${want}" ]]; then
-          if [[ "${want}" == env ]]; then
-            run_dir=$(guard_literal_dir "${run_dir}" "${tok}")
-          fi
-          target=$(guard_literal_dir "${target}" "${tok}")
-          want=""
-          continue
-        fi
-        if [[ "${in_env}" == true ]]; then
-          case "${tok}" in
-            -C|--chdir) want=env; continue ;;
-            --chdir=*)
-              run_dir=$(guard_literal_dir "${run_dir}" "${tok#*=}")
-              target=$(guard_literal_dir "${target}" "${tok#*=}")
-              continue
-              ;;
-            -u|--unset) skip=true; continue ;;
-            -*|*=*) continue ;;
-            *) in_env=false ;;
-          esac
-        fi
-        case "${tok}" in
-          --prefix=*|--cwd=*|--dir=*|--install-dir=*)
-            target=$(guard_literal_dir "${target}" "${tok#*=}")
-            ;;
-          --prefix|--cwd|--dir|--install-dir) want=1 ;;
-          -C)
-            if [[ -n "${manager}" ]]; then want=1; fi
-            ;;
-          -C?*)
-            if [[ -n "${manager}" ]]; then target="?"; fi
-            ;;
-        esac
-      done
-      if [[ -n "${want}" ]]; then target="?"; run_dir="?"; fi
-      why=""
-
-      [[ "${kind}" == npm ]] || break
-      # `npm link <pkg>` installs a package the global tree lacks into npm's
-      # global prefix from the registry (lib/commands/link.js linkInstall),
-      # whatever the flags say: with `--global` npm refuses to run it at all.
-      if command_scan_text "${normalized}" | grep -qEi "${SAFEDEPS_G_NPM_LINK_RE}"; then
-        target=global
-        kind=npm-unrecorded
-        why="npm link installs a package the global tree does not have into npm's global prefix, where no lockfile records it"
-        break
-      fi
-      # Where an npm install lands is npm's to say, so npm is asked
-      # (lib/npm/ask.sh). Every copy of npm's rules in this file disagreed with
-      # npm somewhere, and each disagreement was a silent pass: a `cd` into a
-      # directory without a package.json, then a workspace member reached
-      # through a symlink, where npm installs in the member and the copy
-      # climbed to the root. Whether it is global is part of that answer, so
-      # no spelling of `--global` is read here.
-      # The words before npm go to env(1) in front of it, and the words after
-      # it are npm's arguments, unchanged.
+      # The npm word and its arguments. The words before npm go to env(1) in
+      # front of it when npm is asked below, and the words after it are npm's
+      # arguments, unchanged.
       npm_env=("${npm_exports[@]+"${npm_exports[@]}"}")
       npm_args=()
       npm_word=""
@@ -2389,6 +2348,61 @@ resolve_reading_targets() {
         fi
         npm_unknown="${tok}"
       done
+      # What the statement's command is, and the directories its words name,
+      # are the manager's grammar (safedeps_manager_read): `npm --prefix x
+      # install` is an install, which the regexes read as `npm x`, and only
+      # an option the manager reads as a directory moves the install: pnpm's
+      # `-C` is one, pip's is not.
+      set -f
+      # shellcheck disable=SC2206
+      pw="${stmt_words[n]:-}"
+      mw=( ${pw//[(){\}]/ } )
+      set +f
+      kind=other
+      run_dir="${here}"
+      target="${here}"
+      if [[ ${#mw[@]} -gt 0 ]]; then
+        safedeps_manager_read "${mw[@]}" || guard_mark_reading_failed
+        case "${SAFEDEPS_G_M_FAMILY}:${SAFEDEPS_G_M_KIND}" in
+          npm:install|npm:link) kind=npm ;;
+        esac
+        m=-1
+        for (( k = 0; k < ${#mw[@]}; k++ )); do
+          role="${SAFEDEPS_G_M_ROLE[k]}"
+          [[ "${role}" != m ]] || m=${k}
+          [[ "${role}" == d ]] || continue
+          # The word as the manager reads it: an empty word is the lexer's
+          # blank mark alone, which names no directory (`--dir ""`).
+          guard_word_as_read "" "${SAFEDEPS_G_M_TEXT[k]:-${mw[k]}}"
+          value="${GUARD_WORD}"
+          [[ "${value}" != $'\002' ]] || value=""
+          value="${value//$'\002'/ }"
+          # env's directory, before the manager, is where the command runs.
+          (( m >= 0 )) || run_dir=$(guard_literal_dir "${run_dir}" "${value}")
+          target=$(guard_literal_dir "${target}" "${value}")
+        done
+      fi
+      why=""
+
+      [[ "${kind}" == npm ]] || break
+      # `npm link <pkg>` installs a package the global tree lacks into npm's
+      # global prefix from the registry (lib/commands/link.js linkInstall),
+      # whatever the flags say: with `--global` npm refuses to run it at all.
+      if [[ "${SAFEDEPS_G_M_KIND}" == link ]]; then
+        target=global
+        kind=npm-unrecorded
+        why="npm link installs a package the global tree does not have into npm's global prefix, where no lockfile records it"
+        break
+      fi
+      # Where an npm install lands is npm's to say, so npm is asked
+      # (lib/npm/ask.sh). Every copy of npm's rules in this file disagreed with
+      # npm somewhere, and each disagreement was a silent pass: a `cd` into a
+      # directory without a package.json, then a workspace member reached
+      # through a symlink, where npm installs in the member and the copy
+      # climbed to the root. Whether it is global is part of that answer, so
+      # no spelling of `--global` is read here.
+      # The words before npm go to env(1) in front of it, and the words after
+      # it are npm's arguments, unchanged.
       if [[ -z "${npm_word}" ]]; then
         target="?"
         why="safedeps could not find the npm word in this install statement, so it cannot ask npm where the install lands"
@@ -2464,7 +2478,7 @@ resolve_reading_targets() {
       break
     done
     printf '%s\035%s\035%s\035%s\n' "${kind}" "${target}" "${why}" "${raw}"
-  done < <(command_statements "${text}")
+  done <<< "${statements}"
   return 0
 }
 
@@ -3253,7 +3267,7 @@ guard_segment_ecosystem() {
   scan=$(command_scan_text "$1")
   if echo "${scan}" | judge_grep -qEi "${SAFEDEPS_G_START}(npm|pnpm|pnpx|yarn|npx|bun|bunx)([[:space:]]|\$)"; then
     printf 'npm'
-  elif echo "${scan}" | judge_grep -qEi "${SAFEDEPS_G_START}(pip[0-9.]*|poetry|uv|uvx|pipx|pipenv|(python[0-9.]*|py)${SAFEDEPS_G_OPTS}[[:space:]]+-m[[:space:]]*pip)([[:space:]]|\$)"; then
+  elif echo "${scan}" | judge_grep -qEi "${SAFEDEPS_G_START}(pip[0-9.]*|poetry|uv|uvx|pipx|pipenv|(python[0-9.]*|py)${SAFEDEPS_G_OPTS}[[:space:]]+-[A-Za-z0-9]*m[[:space:]]*pip)([[:space:]]|\$)"; then
     printf 'pypi'
   elif echo "${scan}" | judge_grep -qEi "${SAFEDEPS_G_START}cargo([[:space:]]|\$)"; then
     printf 'crates.io'
@@ -3291,17 +3305,12 @@ guard_detect_ecosystem() {
 # create, which run through those). pnpm dlx, yarn dlx (and so pnpm create and
 # yarn create), uvx and pipx run always fetch.
 guard_runner_uses_local_bin() {
-  local seg="$1" name="$2"
+  local name="$1"
   [[ "${name}" =~ ^[A-Za-z0-9._-]+$ ]] || return 1
-  [[ -x "${PROJECT_DIR:-.}/node_modules/.bin/${name}" ]] || return 1
-  command_scan_text "${seg}" | judge_grep -qEi "${SAFEDEPS_G_START}((npx|bunx)([[:space:]]|\$)|npm${SAFEDEPS_G_OPTS}[[:space:]]+(${SAFEDEPS_G_NPM_EXEC_VERBS}|${SAFEDEPS_G_NPM_INIT_VERBS})([[:space:]]|\$)|bun${SAFEDEPS_G_OPTS}[[:space:]]+(x|create|c)([[:space:]]|\$))"
+  [[ -x "${PROJECT_DIR:-.}/node_modules/.bin/${name}" ]]
 }
 
-# True when the statement is a runner: something that fetches a package and
-# executes it (npx, npm exec, pnpm dlx, bunx, uvx, pipx run, go run ...).
-guard_segment_is_runner() {
-  command_scan_text "$1" | judge_grep -qEi "${SAFEDEPS_G_RUNNER_HEAD_RE}"
-}
+
 
 guard_all_npm_installs_are_global() {
   # A global npm operation resolves into npm's global prefix, not the cwd
@@ -3334,107 +3343,6 @@ guard_all_npm_installs_are_global() {
   return 0
 }
 
-# Each runner's options, from its own help, in three kinds: an option whose
-# value names the package to fetch (`npx --package x cmd`, `uvx --from x cmd`),
-# one whose value adds a package next to it (`uvx --with x ruff`), and one whose
-# value is anything else and so is not an operand. Only options that always take
-# a value are listed; one whose value is optional, or one the table does not
-# know, leaves the next token as an operand, which can only add a check. A
-# `--name=value` spelling carries its own value and is never in question.
-#
-# The tables exist because one shared reading did not fit any runner: every
-# unknown option was skipped and the next token taken as the package, so
-# `uvx --python 3.12 ruff==0.1.0` checked nothing and recorded `pypi:3.12`, and
-# `npx --cache /tmp/c evil@1.0.0` recorded `npm:/tmp/c`. And `-p` named the
-# package for every runner, though uv reads it as `--python`.
-#
-#   npm   npx, npm exec, npm x: every npm config whose type has no Boolean, and
-#         their short forms, from npm 11.19.0's own definitions
-#         (@npmcli/config/lib/definitions). `-p` is npx's `--package`.
-#         `npm exec` and `npm x` hand their arguments to nopt, which also lets
-#         an option written without `=` take a following `true` or `false`,
-#         `null` where its type allows null, `--color` take `always`, and
-#         `--browser` take anything that is not an option (measured against
-#         npm's nopt and types). npx does not: its own first pass puts `--` in
-#         front of the first token it reads as the package, so `npx --yes false
-#         x` runs the package `false` (bin/npx-cli.js), and the table alone is
-#         its whole reading. Both were measured by running npx's first pass
-#         and npm's nopt on the arguments, with the command itself stubbed out.
-#   pnpm  pnpx, pnpm dlx: `pnpm dlx --help` (10.28.1) and pnpm's global
-#         `--dir`/`-C`, `--filter`/`-F`, `--loglevel`. `-c` is `--shell-mode`, a
-#         boolean here. Whether pnpm, like nopt, lets a boolean take a
-#         following `true` is not measured (pnpm ships as one binary), so it is
-#         read as not taking it: if pnpm does, the record names `true` instead
-#         of hiding a package.
-#   yarn  yarn dlx: yarnpkg.com/cli/dlx (`-p,--package`, `-q`).
-#   bun   bunx, bun x: `bunx --help` (1.3.14).
-#   uv    uvx, uv tool run: `uvx --help` (0.10.11); the two list the same
-#         options. `-p` is `--python`, `-w` is `--with`.
-#   pipx  pipx run: `pipx run --help` (1.12.0). Its parser is argparse with
-#         abbreviations allowed, so `--pyth` is `--python`; a long option that
-#         is the start of exactly one of pipx run's options is read as that one.
-#   go    go run: `go help run` and `go help build` (go1.26.5). Go reads `-x`
-#         and `--x` alike.
-SAFEDEPS_RUNNER_NAMES_PACKAGE_npm=" -p --package "
-SAFEDEPS_RUNNER_ADDS_PACKAGE_npm=" "
-SAFEDEPS_RUNNER_TAKES_VALUE_npm="
-  --enjoy-by --reg -C -L -c -m -w --_auth --access --allow-directory
-  --allow-file --allow-git --allow-remote --allow-scripts --also
-  --audit-level --auth-type --before --ca --cache --cache-max --cache-min
-  --cafile --call --cert --cidr --cpu --depth --diff --diff-dst-prefix
-  --diff-src-prefix --diff-unified --editor --expect-result-count --expires
-  --fetch-retries --fetch-retry-factor --fetch-retry-maxtimeout
-  --fetch-retry-mintimeout --fetch-timeout --git --globalconfig --heading
-  --https-proxy --include --init-author-email --init-author-name
-  --init-author-url --init-license --init-module --init-type --init-version
-  --init.author.email --init.author.name --init.author.url --init.license
-  --init.module --init.version --install-strategy --key --libc
-  --local-address --location --lockfile-version --loglevel --logs-dir
-  --logs-max --maxsockets --message --min-release-age
-  --min-release-age-exclude --name --node-gyp --node-options --noproxy
-  --omit --only --orgs --orgs-permission --os --otp --pack-destination
-  --packages --packages-and-scopes-permission --password --prefix
-  --preid --provenance-file --proxy --registry --replace-registry-host
-  --save-prefix --sbom-format --sbom-type --scope --scopes --script-shell
-  --searchexclude --searchlimit --searchopts --searchstaleness --shell --tag
-  --tag-version-prefix --token-description --umask --user-agent --userconfig
-  --viewer --which --workspace "
-SAFEDEPS_RUNNER_NAMES_PACKAGE_pnpm=" --package "
-SAFEDEPS_RUNNER_ADDS_PACKAGE_pnpm=" "
-SAFEDEPS_RUNNER_TAKES_VALUE_pnpm=" --allow-build --reporter --dir -C --filter -F --loglevel "
-SAFEDEPS_RUNNER_NAMES_PACKAGE_yarn=" -p --package "
-SAFEDEPS_RUNNER_ADDS_PACKAGE_yarn=" "
-SAFEDEPS_RUNNER_TAKES_VALUE_yarn=" "
-SAFEDEPS_RUNNER_NAMES_PACKAGE_bun=" -p --package "
-SAFEDEPS_RUNNER_ADDS_PACKAGE_bun=" "
-SAFEDEPS_RUNNER_TAKES_VALUE_bun=" "
-SAFEDEPS_RUNNER_NAMES_PACKAGE_uv=" --from "
-SAFEDEPS_RUNNER_ADDS_PACKAGE_uv=" -w --with "
-SAFEDEPS_RUNNER_TAKES_VALUE_uv="
-  --with-editable --with-requirements -c --constraints -b --build-constraints
-  --overrides --env-file --python-platform --torch-backend --index
-  --default-index -i --index-url --extra-index-url -f --find-links
-  --index-strategy --keyring-provider -P --upgrade-package --resolution
-  --prerelease --fork-strategy --exclude-newer --exclude-newer-package
-  --no-sources-package --reinstall-package --link-mode -C --config-setting
-  --config-settings-package --no-build-isolation-package --no-build-package
-  --no-binary-package --cache-dir --refresh-package -p --python --color
-  --allow-insecure-host --directory --project --config-file "
-SAFEDEPS_RUNNER_NAMES_PACKAGE_pipx=" --spec "
-SAFEDEPS_RUNNER_ADDS_PACKAGE_pipx=" --with "
-SAFEDEPS_RUNNER_TAKES_VALUE_pipx=" --python --fetch-python -i --index-url --pip-args --backend "
-SAFEDEPS_RUNNER_LONG_OPTIONS_pipx=" --help --quiet --verbose --global --no-cache --path --pypackages --with
-  --spec --python --fetch-python --fetch-missing-python --system-site-packages --index-url
-  --editable --pip-args --backend "
-# Options whose type allows null, for nopt's `null` (npm exec only).
-SAFEDEPS_RUNNER_NOPT_NULL_npm=" --browser --expect-results --optional --production --workspaces --yes -y "
-SAFEDEPS_RUNNER_NAMES_PACKAGE_go=" "
-SAFEDEPS_RUNNER_ADDS_PACKAGE_go=" "
-SAFEDEPS_RUNNER_TAKES_VALUE_go="
-  -C -p -covermode -coverpkg -asmflags -buildmode -compiler -gccgoflags
-  -gcflags -installsuffix -ldflags -mod -modfile -overlay -pgo -pkgdir -tags
-  -toolexec -exec "
-
 # The package a `create` command fetches and runs, for the operand it names.
 # Each manager rewrites the initializer its own way, and the rewritten name is
 # the package the ledger has to judge: approving `vite@5.0.0` must not pass
@@ -3458,25 +3366,28 @@ SAFEDEPS_RUNNER_TAKES_VALUE_go="
 #         and `next` only print a message, and `user/repo` is a GitHub
 #         download, read as written.
 #
+# The names are left one per line in GUARD_CREATED, set in this shell rather
+# than printed into a substitution, whose fork could fail and read as no name.
 # A path names a local template or component, which is not a fetch, so it
-# prints nothing (npm refuses one as an unrecognized initializer). Anything else
+# names nothing (npm refuses one as an unrecognized initializer). Anything else
 # (a URL) is printed as written.
 guard_create_identity() {
   local family="$1" spec="$2" scope="" name="" version=""
+  GUARD_CREATED=""
   case "${family}" in
     bun)
       case "${spec}" in
         react|next) return 0 ;;
-        elysia|elysia-buchta|stric) printf '@bun-examples/%s\n' "${spec}"; return 0 ;;
+        elysia|elysia-buchta|stric) GUARD_CREATED+="@bun-examples/${spec}"$'\n'; return 0 ;;
       esac
       ;;
   esac
   case "${spec}" in
     .*|/*|~*) return 0 ;;
-    *://*) printf '%s\n' "${spec}"; return 0 ;;
+    *://*) GUARD_CREATED+="${spec}"$'\n'; return 0 ;;
   esac
   if [[ "${spec}" =~ ^(@[^/@]+)(@.*)?$ ]]; then
-    printf '%s/create%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+    GUARD_CREATED+="${BASH_REMATCH[1]}/create${BASH_REMATCH[2]}"$'\n'
     return 0
   fi
   if [[ "${spec}" =~ ^(@[^/@]+/)?([^/@]+)(@.*)?$ ]]; then
@@ -3487,620 +3398,120 @@ guard_create_identity() {
         ;;
       yarn)
         if [[ "${name}" =~ ^create(-|$) ]]; then
-          printf '%s%s%s\n' "${scope}" "${name}" "${version}"
+          GUARD_CREATED+="${scope}${name}${version}"$'\n'
         fi
         name="create-${name}"
         ;;
       *) name="create-${name}" ;;
     esac
-    printf '%s%s%s\n' "${scope}" "${name}" "${version}"
+    GUARD_CREATED+="${scope}${name}${version}"$'\n'
     return 0
   fi
   if [[ "${family}" == npm && "${spec}" =~ ^((github|gitlab|bitbucket|gist):)?([^/:@]+)/([^/#:]+)(#.*)?$ ]]; then
-    printf '%s%s/create-%s%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[3]}" "${BASH_REMATCH[4]}" "${BASH_REMATCH[5]}"
+    GUARD_CREATED+="${BASH_REMATCH[1]}${BASH_REMATCH[3]}/create-${BASH_REMATCH[4]}${BASH_REMATCH[5]}"$'\n'
     return 0
   fi
-  printf '%s\n' "${spec}"
+  GUARD_CREATED+="${spec}"$'\n'
 }
 
-guard_runner_operands() {
-  # Runner forms (`npx`, `pnpm dlx`, `yarn dlx`, `bunx`, `uvx`, `pipx run`, ...)
-  # EXECUTE a package; tokens after the executed package are arguments to that
-  # program, NOT package specs. Emit only the spec-bearing operands: the value
-  # of an option that names or adds a package, plus the first bare token (the
-  # executed package). Which options those are, and which take a value that is
-  # not a package, depends on the runner (the tables above).
-  # This stops an argument such as an email (`ops@example.test`) or a secret
-  # value passed to `npx wrangler ...` from being misread as a `pkg@spec`.
-  #
-  # It reads the statement's words, quotes already removed by the lexer
-  # (guard_extract_pieces): `npx "cowsay@1.5.0"` runs cowsay@1.5.0.
-  #
-  # A failed sed here is a failed spec reader (see guard_operand_specs): it
-  # yields no operand, and no operand reads as nothing to check.
-  local text="$1" after head family names adds takes want tok key nopt last="" match option create=false
-  local -a toks=()
-  # The runner itself is kept, ahead of \037, to choose the table. The first
-  # line is taken here rather than by `head -n1`, which can close the pipe on a
-  # sed that still has lines to write, and pipefail reads that SIGPIPE as a
-  # failed reader.
-  after=$(printf '%s\n' "${text}" \
-    | sed -nE "s/^(.*[[:space:];&|({!])?(${SAFEDEPS_G_RUNNER_BODY})([[:space:]]|\$)/\\2"$'\037'"/p") || guard_mark_reading_failed
-  after="${after%%$'\n'*}"
-  [[ "${after}" == *$'\037'* ]] || return 0
-  head="${after%%$'\037'*}"
-  after="${after#*$'\037'}"
-  [[ "${after}" =~ [^[:space:]] ]] || return 0
-  nopt=false
-  case "${head%%[[:space:]]*}" in
-    npx) family=npm ;;
-    npm) family=npm nopt=true ;;
-    pnpx|pnpm) family=pnpm ;;
-    yarn) family=yarn ;;
-    bunx|bun) family=bun ;;
-    uvx|uv) family=uv ;;
-    pipx) family=pipx ;;
-    go) family=go ;;
-    *) family=npm ;;
-  esac
-  key="SAFEDEPS_RUNNER_NAMES_PACKAGE_${family}"; names="${!key}"
-  key="SAFEDEPS_RUNNER_ADDS_PACKAGE_${family}"; adds="${!key}"
-  key="SAFEDEPS_RUNNER_TAKES_VALUE_${family}"; takes="${!key}"
-  takes=" ${takes//$'\n'/ } "
-  # A `create`: its first operand is rewritten into the package that runs. npm
-  # init hands its other options to nopt like any npm command and ignores
-  # `--package`, which is then just an option with a value. pnpm create and bun
-  # create name no package by option; yarn create passes `-p` on to dlx.
-  case "${family}:${head##*[[:space:]]}" in
-    npm:*)
-      if [[ "${head##*[[:space:]]}" =~ ^(${SAFEDEPS_G_NPM_INIT_VERBS})$ ]]; then
-        create=true names=" " takes="${takes}--package "
-      fi
-      ;;
-    pnpm:create|bun:create|bun:c) create=true names=" " ;;
-    yarn:create) create=true ;;
-  esac
-
-  local named_by_option=false
-  want=""
-  read -ra toks <<< "${after}"
-  for tok in "${toks[@]+${toks[@]}}"; do
-    case "${want}" in
-      names) printf '%s\n' "${tok}"; named_by_option=true; want=""; continue ;;
-      adds) printf '%s\n' "${tok}"; want=""; continue ;;
-      takes) want=""; continue ;;
-      flag)
-        # nopt's reading of the token after an option that took no value.
-        want=""
-        case "${tok}" in
-          true|false) continue ;;
-          null) [[ "${family}" == npm && "${SAFEDEPS_RUNNER_NOPT_NULL_npm}" == *" ${last} "* ]] && continue ;;
-          always) [[ "${family}" == npm && "${last}" == --color ]] && continue ;;
-        esac
-        [[ "${family}" == npm && "${last}" == --browser && "${tok}" != -* ]] && continue
-        ;;
-    esac
-    # bun create takes as its template the first argument that does not start
-    # with `--` (create_command.rs), so a single-dash word is the template.
-    if [[ "${create}" == true && "${family}" == bun && "${tok}" == -[!-]* ]]; then
-      guard_create_identity bun "${tok}"
-      break
-    fi
-    # An abbreviated long option, where the runner's parser accepts one.
-    if [[ "${family}" == pipx && "${tok}" == --?* ]]; then
-      key="${tok%%=*}"
-      if [[ "${SAFEDEPS_RUNNER_LONG_OPTIONS_pipx}" != *" ${key} "* ]]; then
-        match=""
-        for option in ${SAFEDEPS_RUNNER_LONG_OPTIONS_pipx}; do
-          [[ "${option}" == "${key}"* ]] && match+="${option} "
-        done
-        [[ "${match}" == *" "?* || -z "${match}" ]] || tok="${match% }${tok#"${key}"}"
-      fi
-    fi
-    case "${tok}" in
-      -*=*)
-        key="${tok%%=*}"
-        if [[ "${names}" == *" ${key} "* ]]; then
-          printf '%s\n' "${tok#*=}"
-          named_by_option=true
-        elif [[ "${adds}" == *" ${key} "* ]]; then
-          printf '%s\n' "${tok#*=}"
-        fi
-        ;;
-      -*)
-        if [[ "${names}" == *" ${tok} "* ]]; then
-          want=names
-        elif [[ "${adds}" == *" ${tok} "* ]]; then
-          want=adds
-        elif [[ "${takes}" == *" ${tok} "* ]] \
-            || [[ "${family}" == go && "${takes}" == *" ${tok#-} "* ]]; then
-          want=takes
-        elif [[ "${nopt}" == true && "${tok}" != -- ]]; then
-          want=flag
-          last="${tok}"
-        fi
-        ;;
-      *)
-        # The executed package -- unless an option already named the package,
-        # in which case this is the command it provides (`npx -p x@1 x-cli`).
-        if [[ "${named_by_option}" != true ]]; then
-          if [[ "${create}" == true ]]; then
-            guard_create_identity "${family}" "${tok}"
-          else
-            printf '%s\n' "${tok}"
-          fi
-        fi
-        break
-        ;;
-    esac
-  done
-}
 
 guard_names_package_without_spec() {
   # True when an install NAMES a package but carries no version spec, so the
-  # ledger gate never ran for it. Used only to make that fact observable — it
+  # ledger gate never ran for it. Used only to make that fact observable -- it
   # changes no verdict. Every such operand is left in UNGATED_OPERANDS as
   # `<ecosystem>:<operand>`, for the record to name.
   #
-  # The unit is the operand, and it is read through the same parse the gate
-  # reads (guard_operand_specs over guard_extract_statement_text). Three rounds
-  # of review each found a record missing because this walk used to be a second
-  # parser: it read the statement on its own, then asked the extractor "was this
-  # package pinned?" by name. Each round narrowed the name (token shape, then
-  # name, then ecosystem and name) and each round a collision survived:
-  # `pnpm add x@1 && pnpm add x` quieted the second install because the first
-  # pinned the same name. The same split ran the other way too: the walk did not
-  # know which tokens the extractor had consumed as a flag's value, so
-  # `gem install rails -v 7.1.0` was gated AND recorded as unpinned, on `7.1.0`.
-  # There is no name join now. An operand is pinned when the extractor bound
-  # THIS token: its position is one the extractor reports, or its text is the
-  # text of a spec the extractor produced from this statement.
+  # The unit is the operand, and it is the extractor's operand: the manager's
+  # own grammar (safedeps_manager_read) gave it its role, and the extractor
+  # wrote it down with its position (`O` lines) beside the positions it read a
+  # spec from (`@ bound`). Nothing is parsed here. Three rounds of review each
+  # found a record missing because this walk used to be a second parser that
+  # asked the extractor "was this package pinned?" by name, and a fourth found
+  # it recording a local package as a module because it read the words after a
+  # runner itself. An operand is pinned when the extractor bound THIS word.
   #
   # So an extractor misreading shows up here instead of being buried: when it
-  # reads `left-pad@npm:evil-pkg` as `left-pad@npm`, the token is not that text
-  # and is recorded.
+  # reads `left-pad@npm:evil-pkg` as something else, the word is still
+  # recorded.
   #
   # The boundary is what keeps this record readable. A record that fires on
-  # routine installs becomes background noise, and background noise is the same
-  # as no record. So a token is a named package only if it survives these
-  # tests, each of which exists because getting it wrong hides a real install
-  # or invents one:
+  # routine installs becomes background noise, and background noise is the
+  # same as no record. So an operand is left out when it is a local path (`.`,
+  # `./x`, `/x`, `~/x`: the working tree, not a registry), a word that starts
+  # with `-`, or a runner's package that the project already has as a binary
+  # (`npx tsc`). A URL names a package and pins nothing, whatever `@` it
+  # carries, and is recorded.
   #
-  #   1. It is not a flag, and not the VALUE of a flag. A source flag consumes
-  #      its own argument and nothing more — `-r requirements.txt` names no
-  #      package, but `-r requirements.txt evil` still installs `evil`.
-  #      Silencing the whole command on sight of `-r`/`-c`/`-e` hid that, and
-  #      `-c` is not even a source flag: a constraint file only bounds versions
-  #      while the install target still arrives on the command line. `-e`
-  #      consumes nothing here either — its argument is judged like any other
-  #      token, so `-e .` falls out as a working-tree build while
-  #      `-e git+ssh://…` stays the fetch it is. A version flag's value is
-  #      known from the extractor, which consumed it.
-  #   2. It is not a local path (`.`, `..`, `./x`, `/x`). Those install from the
-  #      working tree, not from a registry. A module path like
-  #      `example.com/evil` is NOT a local path and stays reportable.
-  #   3. A URL names a package and pins nothing, whatever `@` it carries:
-  #      `git+ssh://git@host/evil.git` is no more pinned than
-  #      `git+https://host/evil.git`.
-  #   4. The extractor did not bind it (above).
-  #
-  # Statements are skipped whole in two cases. One whose ecosystem cannot be
-  # read (the outer view of `bash -c '...'`, where the payload is blank) is
-  # skipped as the extractor skips it; the payload is a candidate text of its
-  # own and is read there. And a statement the effect gate answers for -- an
-  # npm CLI install the lockfiles record, whose trace the PostToolUse hook
-  # looks for -- is exempt; the rest of the command is not. A payload's install is never exempt, because where it
-  # lands is decided inside the payload.
+  # A statement the effect gate reads -- an npm CLI install, whose record is
+  # the PostToolUse hook's -- is exempt; the rest of the command is not.
   #
   # It reads GUARD_READINGS, the extractor's reading of the command that the
-  # gate took its specs from (guard_extract_specs ... readings): per statement
-  # the ecosystem, whether it is a runner, the statement, the text it parsed,
-  # and its spec and position lines. Parsing the command again here, even once,
-  # doubled the guard's cost on a many-statement command and put a 4KB one past
-  # the self-budget.
-  local line seg seg_ecosystem text runner gate_reads f1 f2 f3 pinned bound consumed
+  # gate took its specs from (guard_extract_specs ... readings).
+  local line f1 f2 f3 eco="" localbin=false gate_reads=false bound=" " ops=""
   local open=false
   UNGATED_OPERANDS=""
 
   while IFS= read -r line; do
     case "${line}" in
       S$'\t'*)
-        [[ "${open}" == true ]] && guard_walk_statement
+        [[ "${open}" == true ]] && guard_record_statement
         # Fields are cut with expansions, not `read <<<`: bash 3.2 writes a
         # temp file for every here-string, and this loop runs per line.
         line="${line#S$'\t'}"
-        seg_ecosystem="${line%%$'\t'*}"
-        line="${line#*$'\t'}"
-        runner="${line%%$'\t'*}"
-        gate_reads="${line#*$'\t'}"
-        seg="" text="" pinned=$'\n' bound=" " consumed=" " open=true
+        eco="${line%%$'\t'*}"; line="${line#*$'\t'}"
+        localbin="${line%%$'\t'*}"; line="${line#*$'\t'}"
+        gate_reads="${line%%$'\t'*}"
+        bound=" " ops="" open=true
         ;;
-      G$'\t'*) seg="${line#G$'\t'}" ;;
-      T$'\t'*) text="${line#T$'\t'}" ;;
-      *)
-        f1="${line%%$'\t'*}"
-        line="${line#*$'\t'}"
-        f2="${line%%$'\t'*}"
-        f3="${line#*$'\t'}"
-        if [[ "${f1}" == "@" ]]; then
-          [[ "${f2}" == bound ]] && bound+="${f3} "
-          [[ "${f2}" == consumed ]] && consumed+="${f3} "
-        elif [[ -n "${f2}" ]]; then
-          pinned+="${f2}@${f3}"$'\n'
-        fi
-        ;;
+      @$'\t'bound$'\t'*) bound+="${line##*$'\t'} " ;;
+      O$'\t'*) ops+="${line#O$'\t'}"$'\n' ;;
     esac
   done <<< "${GUARD_READINGS}"
-  [[ "${open}" == true ]] && guard_walk_statement
+  [[ "${open}" == true ]] && guard_record_statement
   [[ -n "${UNGATED_OPERANDS}" ]]
 }
 
-# The operand walk over one statement, as guard_names_package_without_spec read
-# it: seg, seg_ecosystem, runner, gate_reads, text, pinned, bound and consumed
-# are the caller's. A statement whose install the effect gate reads is exempt as
-# a whole (guard_effect_gate_reads, carried here as gate_reads).
-guard_walk_statement() {
-  local tok idx verb_seen verb_tok="" skip_next found=""
-  local -a toks=()
-
+# The record of one statement, as guard_names_package_without_spec read it:
+# eco, localbin, gate_reads, bound and ops are the caller's. <ops> holds one
+# `<position><TAB><role><TAB><text>` per operand.
+guard_record_statement() {
+  local op at role text
   [[ "${gate_reads}" == true ]] && return 0
-
-  # Split the way awk splits the same text, so a position means one token on
-  # both sides: on blanks, with globbing off so that a token such as `x==1.*`
-  # stays itself.
-  set -f
-  # shellcheck disable=SC2206
-  toks=( ${text} )
-  set +f
-
-  verb_seen=false
-  skip_next=false
-  idx=0
-  for tok in "${toks[@]+${toks[@]}}"; do
-    idx=$((idx + 1))
-    [[ "${bound}" == *" ${idx} "* || "${consumed}" == *" ${idx} "* ]] && continue
-
-    if [[ "${runner}" == true ]]; then
-      # A runner's text is its package operands only (guard_runner_operands).
-      [[ "${pinned}" == *$'\n'"${tok}"$'\n'* ]] && continue
-      # npx, npm exec and bunx run a binary the project already has without
-      # fetching anything, so `npx tsc` in a TypeScript project is not an
-      # install. Only a name with no local binary is fetched, and only that
-      # is worth a record; recording every `npx tsc` would bury the ones that
-      # matter.
-      guard_runner_uses_local_bin "${seg}" "${tok}" && continue
-      found+="${tok}"$'\n'
-      continue
-    fi
-
-    # Maven's coordinate flag may sit on either side of the goal
-    # (`mvn -Dartifact=g:x dependency:get`), so it is tested outside the verb
-    # gate that orders the operand walk. One the extractor bound was skipped
-    # above; any other names a package with no version it could read
-    # (`g:evil`, `g:evil:`). Whether Maven accepts a versionless coordinate is
-    # unverified (no maven on the measuring machine), and for a RECORD the
-    # unresolved case resolves toward reporting: a spurious line costs a line,
-    # a missing one costs the invariant this layer exists to keep.
-    case "${tok}" in
-      -Dartifact=*) found+="${tok}"$'\n'; continue ;;
+  while IFS= read -r op; do
+    [[ -n "${op}" ]] || continue
+    at="${op%%$'\t'*}"; op="${op#*$'\t'}"
+    role="${op%%$'\t'*}"; text="${op#*$'\t'}"
+    [[ "${bound}" == *" ${at} "* ]] && continue
+    # Maven's coordinate keeps its `-D` spelling in the record.
+    [[ "${role}" == D ]] || case "${text}" in
+      -*|.|..|./*|../*|/*|'~'|'~/'*) continue ;;
     esac
-
-    if [[ "${verb_seen}" != true ]]; then
-      safedeps_grammar_is_verb "${tok}" && { verb_seen=true; verb_tok="${tok}"; }
+    # npx, npm exec, bunx and their kin run a binary the project already has
+    # without fetching anything, so `npx tsc` in a TypeScript project is not
+    # an install. Recording every `npx tsc` would bury the ones that matter.
+    if [[ "${role}" == r && "${localbin}" == true ]] && guard_runner_uses_local_bin "${text}"; then
       continue
     fi
-
-    # `dotnet add [<project>] package <id>`: the keyword and the project file
-    # are not packages. The .NET 10 spellings, `dotnet package add <id>` and
-    # `dotnet package update <id>[@<version>]`, open the walk at `package`, and
-    # their first operand is the verb.
-    if [[ "${seg_ecosystem}" == "nuget" ]]; then
-      if [[ "${verb_tok}" == package ]]; then
-        verb_tok=""
-        [[ "${tok}" == add || "${tok}" == update ]] && continue
-      fi
-      case "${tok}" in
-        package|*.csproj|*.fsproj|*.vbproj|*.sln|*.slnx) continue ;;
-      esac
-    fi
-
-    if [[ "${skip_next}" == true ]]; then
-      skip_next=false
-      continue
-    fi
-
-    # A comment ends the statement. Redirections are gone already (the lexer
-    # pieces view).
-    [[ "${tok}" == \#* ]] && break
-
-    # npm link reads each argument the way npm-package-arg does and installs
-    # every one that is not local code (lib/commands/link.js:92-104). A
-    # directory or a file is linked as written and names no package here; a
-    # git or URL argument is fetched, and is read here so it is recorded.
-    if [[ "${seg_ecosystem}" == npm && "${tok}" != -* ]] \
-        && [[ "${verb_tok}" =~ ^(${SAFEDEPS_G_NPM_LINK_VERBS})$ ]] \
-        && safedeps_npa_is_local "${tok}"; then
-      continue
-    fi
-
-    case "${tok}" in
-      # A flag that takes a separate argument consumes exactly that argument —
-      # but WHICH flags take one is a property of the tool, not of the flag
-      # spelling. `-t` and `-f` take a value for pip and are booleans for go
-      # (`go get -t`), gem (`-f` = --force), and cargo. Applying pip's table
-      # everywhere ate the package that followed, so `go get -t example.com/x`
-      # went silent while `gem install --force x` stayed reported: one install
-      # split by which spelling the author used. That is the same mistake as
-      # filing `-c` with `-r` — grouping flags by shape instead of meaning.
-      #
-      # An unknown flag is therefore assumed NOT to take a value. Guessing
-      # wrong in that direction costs a spurious line; guessing wrong the other
-      # way drops the install this record exists to catch.
-      -r|--requirement|-c|--constraint|-t|--target|-f|--find-links|-i|--index-url|--extra-index-url)
-        # Every one of these takes a value for pip and is a boolean somewhere
-        # else: gem's `-r` is `--remote`, go's `-t` includes test deps, gem and
-        # cargo spell `--force` as `-f`. Only the pypi family consumes an
-        # argument here.
-        #
-        # `-i` is the short form of `--index-url`. Leaving it out did not hide
-        # an install — it invented one: the mirror URL read as an operand, so
-        # `pip install -i <mirror> -r requirements.txt` filed a spurious
-        # record. Same defect as the silences above, pointing the other way,
-        # which is why both directions belong in the battery.
-        [[ "${seg_ecosystem}" == "pypi" ]] && { skip_next=true; continue; }
-        continue
-        ;;
-      -*) continue ;;
-      # Installing from the working tree is not a registry fetch, and a leading
-      # tilde is a path once the shell has expanded it.
-      .|..|./*|../*|/*|'~'|'~/'*) continue ;;
-      *://*) found+="${tok}"$'\n'; continue ;;
-    esac
-
-    [[ "${pinned}" == *$'\n'"${tok}"$'\n'* ]] && continue
-    found+="${tok}"$'\n'
-  done
-  [[ -n "${found}" ]] || return 0
-  set -f
-  for tok in ${found}; do
-    guard_note_ungated "${seg_ecosystem}" "${tok}"
-  done
-  set +f
+    guard_note_ungated "${eco}" "${text}"
+  done <<< "${ops}"
   return 0
 }
+
 
 # Add `<ecosystem>:<operand>` to UNGATED_OPERANDS once.
 guard_note_ungated() {
   local entry="$1:$2"
+  # An empty operand names nothing. Nor does one that is only the lexer's mark
+  # for blanks inside a word, which is what an empty word (`pnpm add ""
+  # left-pad`) reads as: it was recorded as `npm: `.
+  [[ -n "${2//[$'\002'[:space:]]/}" ]] || return 0
   [[ ", ${UNGATED_OPERANDS}, " == *", ${entry}, "* ]] && return 0
-  UNGATED_OPERANDS="${UNGATED_OPERANDS:+${UNGATED_OPERANDS}, }${entry}"
+  UNGATED_OPERANDS="${UNGATED_OPERANDS:+${UNGATED_OPERANDS}, }${entry//$'\002'/ }"
 }
 
-guard_extract_flagged_specs() {
-  # Specs carried by a flag rather than by `pkg@version`: pip's `name==version`,
-  # gem's `-v`, cargo's `--vers`, bundle's and dotnet's `--version`, maven's
-  # `-Dartifact` coordinate. The verb is found past any options between it and
-  # the manager (`gem --norc install x -v 1`, `cargo +nightly add x`,
-  # `dotnet add App.csproj package X`), which the adjacent-token reading missed.
-  #
-  # Which operand a version flag pins is the part that has to be right, because
-  # the deny message prescribes `safedeps check` on it and an agent runs the
-  # prescription by itself. It used to be the first token after the verb that
-  # was not a flag, so a value-taking option in front of the package put its
-  # VALUE there: `gem install --source https://rubygems.org rake -v 13.0.0`
-  # prescribed `check rubygems https://rubygems.org@13.0.0`, which approves (no
-  # advisory names a URL), and from then on any gem at 13.0.0 installed with
-  # that source passed. Now the version binds to EVERY operand of the verb.
-  # An option's value is not an operand when the manager's own help says the
-  # option takes one (the tables below: `gem help install`, `bundle add
-  # --help`, `cargo install --help`, `cargo add --help`, and the .NET CLI
-  # reference for `dotnet add package`, its .NET 10 spelling `dotnet package
-  # add`, `dotnet package update`, and `dotnet tool install|update`). Only
-  # mandatory values are listed.
-  # An option whose value is optional, or one the table does not know, leaves
-  # its value as an operand, and that can only add a check -- never skip the
-  # package the manager installs.
-  #
-  # Two kinds of line come out. A spec line is `<pkg><TAB><spec>`, and it is all
-  # the gate reads (guard_operand_specs keeps two-field lines). A position line
-  # is `@<TAB>bound<TAB><n>` for the token a spec was read from, or
-  # `@<TAB>consumed<TAB><n>` for an option value, counting tokens across the
-  # whole text. The UNGATED record reads those, so that "pinned" and "is an
-  # operand" come from the one reading that produced the spec -- the same
-  # branch prints both, and there is no second copy of it to drift.
-  awk '
-    # safedeps:extract_flagged_specs (scripts/measure/scan-failure-census.sh keys on this line)
-    BEGIN {
-      takes["gem"]    = " -v --version --vers --platform -i --install-dir -n --bindir --build-root -P --trust-policy --without -B --bulk-threshold -s --source --config-file "
-      takes["bundle"] = " -v --version -g --group -s --source -r --retry "
-      takes["cargo"]  = " --version --vers --index --registry --git --branch --tag --rev --path --root --message-format --color --config -Z --lockfile-path -F --features -j --jobs --profile --target-dir --rename --manifest-path --base "
-      takes["dotnet-add"]  = " -v --version -f --framework -s --source --package-directory --project "
-      takes["dotnet-tool"] = " -v --verbosity --version -a --arch --add-source --configfile --framework --source --tool-manifest --tool-path "
-      takes["dotnet-update"] = " -v --verbosity --project "
-      # Which of those carry the version.
-      vers["gem"]    = " -v --version --vers "
-      vers["bundle"] = " -v --version --vers "
-      vers["cargo"]  = " --version --vers "
-      vers["dotnet-add"]  = " -v --version --vers "
-      vers["dotnet-tool"] = " --version --vers "
-    }
-    function verb_after(s, want,   j) {
-      for (j = s; j <= NF; j++) {
-        if ($j == want) return j
-        if ($j !~ /^-/ && $j !~ /^[+]/) return 0
-      }
-      return 0
-    }
-    function has(set, t) { return index(set, " " t " ") > 0 }
-    # Read tokens s..NF for one manager: bind every version found to every
-    # operand, and report every option value as consumed.
-    function operands(tool, s,   j, nc, nv, c, v, vp, t, x, y) {
-      nc = 0; nv = 0
-      for (j = s; j <= NF; j++) {
-        t = $j
-        # A comment ends the statement; the shell owns it. Redirections are
-        # gone from the text already (the lexer pieces view).
-        if (t ~ /^#/) break
-        if (has(takes[tool], t) && j < NF) {
-          print "@\tconsumed\t" (base + j + 1)
-          if (has(vers[tool], t)) { v[++nv] = $(j + 1); vp[nv] = j + 1 }
-          j++
-          continue
-        }
-        if (t ~ /^--(vers|version)=/ && (has(vers[tool], "--version") || has(vers[tool], "--vers"))) {
-          sub(/^--(vers|version)=/, "", t); v[++nv] = t; vp[nv] = 0
-          continue
-        }
-        if (t ~ /^-/ || t ~ /^[+]/) continue
-        c[++nc] = j
-      }
-      for (x = 1; x <= nc; x++)
-        for (y = 1; y <= nv; y++) {
-          print $(c[x]) "\t" v[y]
-          print "@\tbound\t" (base + c[x])
-        }
-    }
-    {
-      for (i = 1; i <= NF; i++) {
-        # `name==version`, and `name===version` (arbitrary equality, also an
-        # exact pin). A wildcard such as `==1.0.*` is not a pin and stays out.
-        # A name may start with a digit (`3to2`); requiring a letter read no
-        # spec at all for those, so the install went unchecked.
-        if ($i ~ /^[A-Za-z0-9][A-Za-z0-9._-]*===?[A-Za-z0-9][A-Za-z0-9._+!~-]*$/) {
-          split($i, parts, /===?/)
-          print parts[1] "\t" parts[2]
-          print "@\tbound\t" (base + i)
-        }
 
-        # maven-dependency-plugin: -Dartifact=groupId:artifactId:version[:packaging[:classifier]].
-        # OSV names a Maven package groupId:artifactId. A two-field coordinate
-        # pins nothing and is left to the UNGATED record.
-        if ($i ~ /^-Dartifact=[^:]+:[^:]+:[^:]+/) {
-          c0 = $i; sub(/^-Dartifact=/, "", c0); split(c0, m, ":")
-          print m[1] ":" m[2] "\t" m[3]
-          print "@\tbound\t" (base + i)
-        }
 
-        if ($i == "gem" && (k = verb_after(i + 1, "install"))) operands("gem", k + 1)
-        if ($i == "cargo" && ((k = verb_after(i + 1, "add")) || (k = verb_after(i + 1, "install")))) operands("cargo", k + 1)
-        if ($i == "bundle" && (k = verb_after(i + 1, "add"))) operands("bundle", k + 1)
 
-        if ($i == "dotnet" && (k = verb_after(i + 1, "add"))) {
-          for (j = k + 1; j <= NF; j++) if ($j == "package") break
-          if (j < NF) operands("dotnet-add", j + 1)
-        }
-        # .NET 10 spells the same command noun first, with the same arguments:
-        # `dotnet package add <id> [--project <p>] [-v <version>]`.
-        if ($i == "dotnet" && (k = verb_after(i + 1, "package")) && (k2 = verb_after(k + 1, "add")))
-          operands("dotnet-add", k2 + 1)
-        # `dotnet package update [<id>[@<version>]...]` (.NET 10) has no version
-        # option: its `-v` is --verbosity. A version travels as `<id>@<version>`,
-        # which the generic reader takes. Only the option values are read here,
-        # so that `-v q` and `--project src/App` are not operands.
-        if ($i == "dotnet" && (k = verb_after(i + 1, "package")) && (k2 = verb_after(k + 1, "update")))
-          operands("dotnet-update", k2 + 1)
-
-        if ($i == "dotnet" && (k = verb_after(i + 1, "tool"))) {
-          if ($(k + 1) == "install" || $(k + 1) == "update") operands("dotnet-tool", k + 2)
-        }
-      }
-      base += NF
-    }
-  '
-}
-
-# Emit "<ecosystem><TAB><package><TAB><spec>" for every operand of one statement.
-# With `positions` as the third argument, the flag reader's position lines
-# (`@<TAB>bound|consumed<TAB><n>`) come through as well, for the UNGATED record.
-# The gate never asks for them, so they cannot move a verdict.
-#
-# Every reader here is on the verdict path, and every caller reads this through
-# a process substitution where a failed stage is invisible: a failed grep or awk
-# yields no spec, and no spec reads as "nothing to check". So a failure is
-# written to SAFEDEPS_SCAN_MARK, which the top level settles before any allow
-# (guard_settle_scan_failure), the same contract as command_scan_text.
-guard_operand_specs() {
-  local eco="$1" text="$2" mode="${3:-}" token pkg spec rc
-
-  if [[ "${eco}" == "go" ]]; then
-    # A Go package is its whole module path. The generic pattern below keeps
-    # only the last path element, so `go get example.com/x@v1` was checked as
-    # `x@v1` and the deny message prescribed `safedeps check go x@v1`, which
-    # approves (no advisory names a bare `x`) and then lets any `.../x@v1`
-    # through. The path is kept whole here.
-    { printf '%s\n' "${text}" | grep -oE '(^|[[:space:]])[A-Za-z0-9][A-Za-z0-9._~/-]*@[A-Za-z0-9._+~-]+' \
-        || { rc=$?; (( rc <= 1 )) || guard_mark_reading_failed; }; } \
-      | while read -r token; do
-          [[ -n "${token}" ]] || continue
-          printf '%s\t%s\t%s\n' "${eco}" "${token%@*}" "${token##*@}"
-        done
-  else
-    # A name may start with a digit (`7zip-bin`, `3to2`). Requiring a letter did
-    # not drop the spec -- `grep -o` matched from the first letter, so
-    # `pnpm add 7zip-bin@5.2.0` was checked as `zip-bin@5.2.0`, another package.
-    { printf '%s\n' "${text}" \
-      | grep -oE '(@[a-zA-Z0-9._/-]+/)?[a-zA-Z0-9][a-zA-Z0-9._-]*@[a-zA-Z0-9._^~|<>=*+-]+' \
-        || { rc=$?; (( rc <= 1 )) || guard_mark_reading_failed; }; } \
-      | while IFS= read -r token; do
-          # An email / host operand (user@domain.tld) is never a package spec.
-          if [[ "${token}" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]; then
-            continue
-          fi
-          if [[ "${token}" =~ ^(@[^@]+)@(.+)$ ]]; then
-            pkg="${BASH_REMATCH[1]}"
-            spec="${BASH_REMATCH[2]}"
-          else
-            pkg="${token%@*}"
-            spec="${token##*@}"
-          fi
-          printf '%s\t%s\t%s\n' "${eco}" "${pkg}" "${spec}"
-        done
-  fi
-  # A pipeline in an `if`: this runs in a subshell under `set -e`, which would
-  # otherwise end it on the failure before the mark is written.
-  if ! printf '%s\n' "${text}" | guard_extract_flagged_specs \
-    | awk -F'\t' -v eco="${eco}" -v positions="${mode}" '
-        # safedeps:operand_specs_ecosystem (scripts/measure/scan-failure-census.sh keys on this line)
-        NF == 2 { print eco "\t" $1 "\t" $2 }
-        NF == 3 && $1 == "@" && positions == "positions" { print }
-      '; then
-    guard_mark_reading_failed
-  fi
-}
-
-# One statement as the extractor reads it: a runner's package operands (one per
-# line), or the statement's words with their grouping characters blanked.
-# <words> is the statement after the shell's quote removal, from the lexer's
-# pieces view (guard_extract_pieces): quotes delimit operands and are removed
-# before matching, so `pip install "requests==2.0.0"` pins requests, and a
-# backslash outside quotes leaves the byte after it, so `pip install
-# ev\il==6.6.6` pins evil. Python extras (`evil[x]==1.0.0`) select optional
-# dependencies of the same package; the package and its version are what the
-# ledger judges. The UNGATED record walks this same text, so that its token
-# positions are the extractor's.
-guard_extract_statement_text() {
-  local eco="$1" words="$2" runner="$3" text
-  # Each transform below is a spec reader, and a failed one leaves no text or
-  # the wrong text, which reads as no spec. So a failure is marked the way
-  # guard_operand_specs marks its own (the runner reader marks inside).
-  if [[ "${runner}" == true ]]; then
-    text=$(guard_runner_operands "${words}")
-  else
-    text=$(printf '%s\n' "${words}" | tr '(){}' '    ') || guard_mark_reading_failed
-  fi
-  if [[ "${eco}" == "pypi" ]]; then
-    text=$(printf '%s' "${text}" | sed -E 's/\[[^] ]*\]//g') || guard_mark_reading_failed
-  fi
-  # An npm alias installs its target under another name: `left-pad@npm:evil-pkg`
-  # fetches evil-pkg. Read as written it prescribed `check npm left-pad@npm`,
-  # which names neither package and can never approve. The alias name is
-  # dropped, so the target is what the ledger judges, pinned or not.
-  if [[ "${eco}" == "npm" ]]; then
-    text=$(printf '%s' "${text}" | sed -E 's/(^|[[:space:]=])(@[A-Za-z0-9._~-]+\/)?[A-Za-z0-9._~-]+@npm:/\1/g') \
-      || guard_mark_reading_failed
-  fi
-  printf '%s' "${text}"
-}
 
 # The one answer to "does the effect gate answer for this install statement":
 # an npm CLI install, not a runner, that the lockfiles record. <kind> is a
@@ -4203,56 +3614,213 @@ guard_extract_pieces() {
   done < <(command_payload_texts "$(join_line_continuations "$(strip_heredoc_bodies "${cmd}")")")
 }
 
+# The ecosystem a manager installs from, in GUARD_ECO (empty for none).
+guard_family_ecosystem() {
+  GUARD_ECO=""
+  case "$1" in
+    npm|npx|pnpm|pnpx|yarn|bun|bunx) GUARD_ECO=npm ;;
+    pip|uv|uvx|pipx|poetry|pipenv) GUARD_ECO=pypi ;;
+    cargo) GUARD_ECO=crates.io ;;
+    go) GUARD_ECO=go ;;
+    gem|bundle) GUARD_ECO=rubygems ;;
+    mvn) GUARD_ECO=maven ;;
+    dotnet) GUARD_ECO=nuget ;;
+  esac
+}
+
+# A word as its package manager reads it. A blank or a grouping character
+# inside a word is \002 (the lexer's pieces view), and the empty word is \002
+# alone. A manager reads past the blanks at the ends of an argument (`pip
+# install "evil==1.0.0 "` pins evil), and a Python requirement reads past every
+# blank in it: PEP 508 allows `evil ==1.0.0`, and pip's parser (packaging,
+# measured) reads it as a pin. Read as written, each was an unpinned name and
+# the pin passed unchecked. Sets GUARD_WORD.
+guard_word_as_read() {
+  local eco="$1" word="$2"
+  if [[ "${eco}" == pypi ]]; then
+    word="${word//$'\002'/}"
+  else
+    while [[ "${word}" == $'\002'* ]]; do word="${word#$'\002'}"; done
+    while [[ "${word}" == *$'\002' ]]; do word="${word%$'\002'}"; done
+  fi
+  [[ -n "${word}" ]] || word=$'\002'
+  GUARD_WORD="${word}"
+}
+
+# The specs one operand carries, as `<pkg><TAB><spec>` lines in GUARD_SPECS:
+# the reading of a package name with its version, per ecosystem.
+#   go     a module path with its version, whole: `go get example.com/x@v1` is
+#          `example.com/x`, never `x` (which approves, and then lets any
+#          `.../x@v1` through).
+#   pypi   `name==version` and `name===version` (arbitrary equality, also an
+#          exact pin) after its extras are removed (`evil[x]==1.0.0` installs
+#          evil); a wildcard such as `==1.0.*` is no pin. `name@version` as
+#          poetry and uv write it.
+#   rubygems `name:version`, which gem reads as the name and a requirement
+#          (Gem::Command#extract_gem_name_and_version); a version alone, or
+#          after `=`, is a pin. Read as a name, it was recorded as one and
+#          the pin went unchecked.
+#   others `name@spec` and `@scope/name@spec`, and an npm alias
+#          (`left-pad@npm:evil-pkg@1`) read as its target, which is what is
+#          fetched. A name may start with a digit (`7zip-bin`, `3to2`). An
+#          email-shaped word (`user@domain.tld`) is no spec.
+# Every one runs in this shell: a reader that is a process can fail, and a
+# failed reader reads as "no spec".
+guard_word_specs() {
+  local eco="$1" word="$2" rest token pkg spec
+  GUARD_SPECS=""
+  if [[ "${eco}" == go ]]; then
+    [[ "${word}" =~ ^[A-Za-z0-9][A-Za-z0-9._~/-]*@[A-Za-z0-9._+~-]+$ ]] || return 0
+    GUARD_SPECS="${word%@*}"$'\t'"${word##*@}"
+    return 0
+  fi
+  if [[ "${eco}" == pypi ]]; then
+    while [[ "${word}" =~ \[[^]\ ]*\] ]]; do word="${word/"${BASH_REMATCH[0]}"/}"; done
+    if [[ "${word}" =~ ^([A-Za-z0-9][A-Za-z0-9._-]*)===?([A-Za-z0-9][A-Za-z0-9._+!~-]*)$ ]]; then
+      GUARD_SPECS="${BASH_REMATCH[1]}"$'\t'"${BASH_REMATCH[2]}"
+      return 0
+    fi
+  fi
+  if [[ "${eco}" == rubygems && "${word}" =~ ^([A-Za-z0-9][A-Za-z0-9._-]*):=?([0-9]+([.][0-9A-Za-z]+)*(-[0-9A-Za-z-]+([.][0-9A-Za-z-]+)*)?)$ ]]; then
+    GUARD_SPECS="${BASH_REMATCH[1]}"$'\t'"${BASH_REMATCH[2]}"
+    return 0
+  fi
+  if [[ "${eco}" == npm && "${word}" =~ ^(@[A-Za-z0-9._~-]+/)?[A-Za-z0-9._~-]+@[Nn][Pp][Mm]:(.*)$ ]]; then
+    word="${BASH_REMATCH[2]}"
+  fi
+  rest="${word}"
+  while [[ "${rest}" =~ (@[a-zA-Z0-9._/-]+/)?[a-zA-Z0-9][a-zA-Z0-9._-]*@[a-zA-Z0-9._^~|\<\>=*+-]+ ]]; do
+    token="${BASH_REMATCH[0]}"
+    rest="${rest#*"${token}"}"
+    [[ "${token}" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]] && continue
+    if [[ "${token}" =~ ^(@[^@]+)@(.+)$ ]]; then
+      pkg="${BASH_REMATCH[1]}" spec="${BASH_REMATCH[2]}"
+    else
+      pkg="${token%@*}" spec="${token##*@}"
+    fi
+    GUARD_SPECS+="${GUARD_SPECS:+$'\n'}${pkg}"$'\t'"${spec}"
+  done
+  return 0
+}
+
 guard_extract_specs() {
   # Echo one "eco<TAB>pkg<TAB>spec" line per operand genuinely being installed.
-  # Handles @scope/name@spec and bare-name@spec. Precision rules keep non-package
-  # "@" tokens from being misread as an install:
-  #   1. Only a statement that is itself an install contributes. A non-install
-  #      statement (an echo, a path, a comment that merely MENTIONS a
-  #      pkg@version) is data -- extracting it would falsely flag
-  #      `echo "bumped left-pad@1.0.0"; npm install`.
-  #   2. Runner statements (npx / npm exec / pnpm dlx / bunx / uvx ...)
-  #      contribute ONLY their executed package -- trailing tokens are program
-  #      arguments, so `npx wrangler ... ops@example.test` is never a spec.
-  #   3. Email / host operands (user@domain.tld) are never package specs.
-  # Each spec carries the ecosystem of the statement it came from. It used to
-  # take the command's first ecosystem, so `npm run x && pip install evil==1`
-  # checked evil as an npm package, prescribed `safedeps check npm evil@1`, and
-  # passed once that approved.
+  # Which words are operands is the manager's grammar (safedeps_manager_read in
+  # lib/install-grammar.sh): a statement it does not read as an install, a
+  # runner or a create contributes nothing, an option's value is never an
+  # operand, a runner contributes the package it runs and the packages its
+  # options name, never the program's arguments (`npx wrangler ...
+  # ops@example.test`), and a version option (`gem install rake -v 13.0.0`)
+  # pins every operand of its command. Each spec carries the ecosystem of the
+  # statement it came from: `npm run x && pip install evil==1` checks evil as a
+  # PyPI package.
   #
   # <targets> is resolve_install_targets' list for <cmd>; the statements are
   # read from it (guard_extract_pieces).
   #
   # With `readings` as the third argument, each statement it reads is also
-  # described for the UNGATED record, which walks exactly these statements and
-  # nothing else: `S<TAB><eco><TAB><runner><TAB><read>`, `G<TAB><statement>`,
-  # `T<TAB><parsed text>`, then the spec lines and the flag reader's position
-  # lines. <read> says whether the effect gate reads the statement's install.
-  # The spec lines are the same in both modes; the gate reads only those, so the
-  # other lines cannot move a verdict.
+  # described for the UNGATED record: `S<TAB><eco><TAB><localbin><TAB><read>`,
+  # then an `O<TAB><position><TAB><role><TAB><text>` line per operand and an
+  # `@<TAB>bound<TAB><position>` line per operand a spec was read from, beside
+  # the spec lines. <read> says whether the effect gate reads the statement's
+  # install. The spec lines are the same in both modes; the gate reads only
+  # those, so the other lines cannot move a verdict.
   local cmd="$1" targets="$2" mode="${3:-}"
-  local seg words eco text text_line runner gate_reads
+  local seg words gate_reads eco family k role text out line versions spec_line created
+  local -a w=() roles=() texts=()
 
   # The pieces carry no tab, so the tab and \037 cut the three fields.
   while IFS=$'\t\037' read -r gate_reads seg words; do
     [[ "${seg}" =~ [^[:space:]] ]] || continue
     command_is_dependency_install "${seg}" || continue
-    eco=$(guard_segment_ecosystem "${seg}")
+    # Grouping characters are the shell's (`(npm i x)`, `{ pip install y; }`).
+    words="${words//[(){\}]/ }"
+    set -f
+    # shellcheck disable=SC2206
+    w=( ${words} )
+    set +f
+    [[ ${#w[@]} -gt 0 ]] || continue
+    safedeps_manager_read "${w[@]}" || guard_mark_reading_failed
+    [[ "${SAFEDEPS_G_M_KIND}" != none ]] || continue
+    family="${SAFEDEPS_G_M_FAMILY}"
+    guard_family_ecosystem "${family}"
+    eco="${GUARD_ECO}"
     [[ -n "${eco}" ]] || continue
-    runner=false
-    guard_segment_is_runner "${seg}" && runner=true
-    text=$(guard_extract_statement_text "${eco}" "${words}" "${runner}")
-    if [[ "${mode}" != readings ]]; then
-      guard_operand_specs "${eco}" "${text}"
-      continue
-    fi
-    # A runner's operands are one per line; on one line they number the same,
-    # since the flag reader counts tokens across lines. Only a runner's text
-    # has newlines, and it is short: a bash 3.2 substitution over a long string
-    # is what made the blank-segment test quadratic.
-    [[ "${runner}" == true ]] && text_line="${text//$'\n'/ }" || text_line="${text}"
-    printf 'S\t%s\t%s\t%s\nG\t%s\nT\t%s\n' "${eco}" "${runner}" "${gate_reads}" "${seg}" "${text_line}"
-    guard_operand_specs "${eco}" "${text}" positions
+    roles=("${SAFEDEPS_G_M_ROLE[@]}") texts=("${SAFEDEPS_G_M_TEXT[@]}")
+    out="" versions=""
+    [[ "${mode}" != readings ]] || out="S"$'\t'"${eco}"$'\t'"${SAFEDEPS_G_M_LOCALBIN}"$'\t'"${gate_reads}"$'\n'
+    for (( k = 0; k < ${#w[@]}; k++ )); do
+      [[ "${roles[k]}" == V ]] || continue
+      guard_word_as_read "${eco}" "${texts[k]:-${w[k]}}"
+      versions+="${GUARD_WORD}"$'\n'
+    done
+    for (( k = 0; k < ${#w[@]}; k++ )); do
+      role="${roles[k]}"
+      case "${role}" in o|r|C|p|w|D) ;; *) continue ;; esac
+      guard_word_as_read "${eco}" "${texts[k]:-${w[k]}}"
+      text="${GUARD_WORD}"
+      # The package a word names, for the record as for the spec: a Python
+      # requirement without its extras (`requests[socks]` installs requests),
+      # an npm alias as its target (`left-pad@npm:evil-pkg` fetches evil-pkg).
+      if [[ "${eco}" == pypi ]]; then
+        while [[ "${text}" =~ \[[^]\ ]*\] ]]; do text="${text/"${BASH_REMATCH[0]}"/}"; done
+      elif [[ "${eco}" == npm && "${text}" =~ ^(@[A-Za-z0-9._~-]+/)?[A-Za-z0-9._~-]+@[Nn][Pp][Mm]:(.+)$ ]]; then
+        text="${BASH_REMATCH[2]}"
+      fi
+      # npm link links a directory or a file as written and installs every
+      # other argument (lib/commands/link.js:92-104, read with npa).
+      if [[ "${SAFEDEPS_G_M_KIND}" == link ]] && safedeps_npa_is_local "${text}"; then
+        continue
+      fi
+      if [[ "${role}" == D ]]; then
+        # -Dartifact=groupId:artifactId:version[:packaging[:classifier]]; OSV
+        # names a Maven package groupId:artifactId. Two fields pin nothing.
+        text="-D${text}"
+        if [[ "${text}" =~ ^-Dartifact=([^:]+):([^:]+):([^:]+) ]]; then
+          out+="${eco}"$'\t'"${BASH_REMATCH[1]}:${BASH_REMATCH[2]}"$'\t'"${BASH_REMATCH[3]}"$'\n'
+          [[ "${mode}" != readings ]] || out+="@"$'\t'"bound"$'\t'"${k}"$'\n'
+        fi
+        [[ "${mode}" != readings ]] || out+="O"$'\t'"${k}"$'\t'"${role}"$'\t'"${text}"$'\n'
+        continue
+      fi
+      # A create runs the initializer under the name its manager gives it.
+      if [[ "${role}" == C ]]; then
+        case "${family}" in
+          npm|npx) guard_create_identity npm "${text}" ;;
+          pnpm|pnpx) guard_create_identity pnpm "${text}" ;;
+          bun|bunx) guard_create_identity bun "${text}" ;;
+          *) guard_create_identity "${family}" "${text}" ;;
+        esac
+        created="${GUARD_CREATED}"
+        while IFS= read -r line; do
+          [[ -n "${line}" ]] || continue
+          guard_word_specs "${eco}" "${line}"
+          while IFS= read -r spec_line; do
+            [[ -n "${spec_line}" ]] || continue
+            out+="${eco}"$'\t'"${spec_line}"$'\n'
+            [[ "${mode}" != readings ]] || out+="@"$'\t'"bound"$'\t'"${k}"$'\n'
+          done <<< "${GUARD_SPECS}"
+          [[ "${mode}" != readings ]] || out+="O"$'\t'"${k}"$'\t'r$'\t'"${line}"$'\n'
+        done <<< "${created}"
+        continue
+      fi
+      guard_word_specs "${eco}" "${text}"
+      while IFS= read -r spec_line; do
+        [[ -n "${spec_line}" ]] || continue
+        out+="${eco}"$'\t'"${spec_line}"$'\n'
+        [[ "${mode}" != readings ]] || out+="@"$'\t'"bound"$'\t'"${k}"$'\n'
+      done <<< "${GUARD_SPECS}"
+      # A version option pins every operand of its command.
+      if [[ "${role}" == o && -n "${versions}" ]]; then
+        while IFS= read -r line; do
+          [[ -n "${line}" ]] || continue
+          out+="${eco}"$'\t'"${text}"$'\t'"${line}"$'\n'
+          [[ "${mode}" != readings ]] || out+="@"$'\t'"bound"$'\t'"${k}"$'\n'
+        done <<< "${versions}"
+      fi
+      [[ "${mode}" != readings ]] || out+="O"$'\t'"${k}"$'\t'"${role}"$'\t'"${text}"$'\n'
+    done
+    printf '%s' "${out}"
   done < <(guard_extract_pieces "${cmd}" "${targets}")
 }
 
@@ -4404,7 +3972,7 @@ guard_reading_facts() {
     [[ -z "${line}" ]] && continue
     readings+="${line}"$'\n'
     case "${line}" in
-      S$'\t'*|G$'\t'*|T$'\t'*|@$'\t'*) continue ;;
+      S$'\t'*|O$'\t'*|@$'\t'*) continue ;;
     esac
     specs=$(( specs + 1 ))
     if [[ ${#LEDGER_SPECS[@]} -gt 0 ]]; then
@@ -4783,7 +4351,7 @@ if [[ ${#LEDGER_SPECS[@]} -gt 0 ]]; then
     [[ "${eco}" == "npm" ]] && spec_context="${LEDGER_CONTEXT_HASH}"
     if ! safedeps_ledger_check "${eco}" "${pkg}" "${spec}" "${spec_context}" 2>/dev/null \
         | jq -e '.approved == true' >/dev/null 2>&1; then
-      GUARD_BLOCKED_CMDS+=("${SAFEDEPS_INVOKE} check ${eco} ${pkg}@${spec}")
+      GUARD_BLOCKED_CMDS+=("${SAFEDEPS_INVOKE} check ${eco} ${pkg//$'\002'/ }@${spec//$'\002'/ }")
       case ",${GUARD_BLOCKED_ECOSYSTEMS}," in
         *",${eco},"*) : ;;
         *) GUARD_BLOCKED_ECOSYSTEMS="${GUARD_BLOCKED_ECOSYSTEMS:+${GUARD_BLOCKED_ECOSYSTEMS},}${eco}" ;;

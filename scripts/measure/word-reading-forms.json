@@ -475,5 +475,77 @@
         "evil==1.0.0"
       ]
     }
+  },
+  {
+    "id": "W31",
+    "label": "blanks inside double quotes stay in the word",
+    "text": "@@M@@ install \"requests == 2.19.0\"",
+    "argv": {
+      "bash": [
+        "install",
+        "requests == 2.19.0"
+      ],
+      "zsh": [
+        "install",
+        "requests == 2.19.0"
+      ]
+    }
+  },
+  {
+    "id": "W32",
+    "label": "an empty word is a word",
+    "text": "@@M@@ install --log \"\" evil==1.0.0",
+    "argv": {
+      "bash": [
+        "install",
+        "--log",
+        "",
+        "evil==1.0.0"
+      ],
+      "zsh": [
+        "install",
+        "--log",
+        "",
+        "evil==1.0.0"
+      ]
+    }
+  },
+  {
+    "id": "W33",
+    "label": "a blank a backslash holds stays in the word",
+    "text": "@@M@@ install --log a\\ b evil==1.0.0",
+    "argv": {
+      "bash": [
+        "install",
+        "--log",
+        "a b",
+        "evil==1.0.0"
+      ],
+      "zsh": [
+        "install",
+        "--log",
+        "a b",
+        "evil==1.0.0"
+      ]
+    }
+  },
+  {
+    "id": "W34",
+    "label": "a parenthesis and blank inside single quotes",
+    "text": "@@M@@ install 'requests (>=3)' --log \"a\tb\"",
+    "argv": {
+      "bash": [
+        "install",
+        "requests (>=3)",
+        "--log",
+        "a\tb"
+      ],
+      "zsh": [
+        "install",
+        "requests (>=3)",
+        "--log",
+        "a\tb"
+      ]
+    }
   }
 ]

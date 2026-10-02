@@ -1,0 +1,1802 @@
+[
+ {
+  "category": "forms",
+  "command": "pnpm add left-pad@1.0.0 && pnpm add left-pad"
+ },
+ {
+  "category": "forms",
+  "command": "yarn add left-pad@1.0.0 && yarn add left-pad"
+ },
+ {
+  "category": "forms",
+  "command": "bun add left-pad@1.0.0 && bun add left-pad"
+ },
+ {
+  "category": "forms",
+  "command": "yarn add left-pad@1.0.0 && yarn up left-pad"
+ },
+ {
+  "category": "forms",
+  "command": "pnpm add left-pad@1.0.0 && pnpm update left-pad --latest"
+ },
+ {
+  "category": "forms",
+  "command": "pnpm add @scope/pkg@1.0.0 && pnpm add @scope/pkg"
+ },
+ {
+  "category": "forms",
+  "command": "pip install requests==2.0.0 && pip install -U requests"
+ },
+ {
+  "category": "forms",
+  "command": "pip install requests==2.0.0 && pip install 'requests>=3'"
+ },
+ {
+  "category": "forms",
+  "command": "pip install requests==2.0.0 && pip install 'requests==3.*'"
+ },
+ {
+  "category": "forms",
+  "command": "pip install 'requests[socks]==2.0.0' && pip install -U 'requests[socks]'"
+ },
+ {
+  "category": "forms",
+  "command": "pip install requests==2.0.0 && pip install --force-reinstall requests"
+ },
+ {
+  "category": "forms",
+  "command": "pip install requests==2.0.0 && uv add requests"
+ },
+ {
+  "category": "forms",
+  "command": "pip install requests==2.0.0 && uv pip install -U requests"
+ },
+ {
+  "category": "forms",
+  "command": "pipx install ruff==0.1.0 && pipx install --force ruff"
+ },
+ {
+  "category": "forms",
+  "command": "go get example.com/m@v1.0.0 && go get -u example.com/m"
+ },
+ {
+  "category": "forms",
+  "command": "go get example.com/m@v1.0.0 && go get example.com/m"
+ },
+ {
+  "category": "forms",
+  "command": "gem install rake -v 13.0.0 && gem install rake"
+ },
+ {
+  "category": "forms",
+  "command": "cargo install ripgrep@13.0.0 && cargo install --force ripgrep"
+ },
+ {
+  "category": "forms",
+  "command": "cargo install ripgrep --version 13.0.0 && cargo install --force ripgrep"
+ },
+ {
+  "category": "forms",
+  "command": "dotnet add package Newtonsoft.Json --version 13.0.1 && dotnet add package Newtonsoft.Json"
+ },
+ {
+  "category": "forms",
+  "command": "dotnet tool install -g dotnet-ef --version 7.0.0 && dotnet tool update -g dotnet-ef"
+ },
+ {
+  "category": "forms",
+  "command": "dotnet package add Newtonsoft.Json --version 13.0.1 && dotnet package add Newtonsoft.Json"
+ },
+ {
+  "category": "forms",
+  "command": "dotnet package add Serilog --project App.csproj"
+ },
+ {
+  "category": "forms",
+  "command": "dotnet package update Contoso.Utilities Fabrikam.WebApi@1.2.3"
+ },
+ {
+  "category": "forms",
+  "command": "dotnet package update Fabrikam.WebApi@1.2.3 && dotnet package update Fabrikam.WebApi"
+ },
+ {
+  "category": "forms",
+  "command": "dotnet package update --project src/App -v q Contoso.Utilities"
+ },
+ {
+  "category": "forms",
+  "command": "dotnet package update Evil -v 1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "pnpm add left-pad@1.0.0 || pnpm add left-pad"
+ },
+ {
+  "category": "forms",
+  "command": "pnpm add left-pad@1.0.0; pnpm add left-pad"
+ },
+ {
+  "category": "forms",
+  "command": "pnpm add left-pad@1.0.0\npnpm add left-pad"
+ },
+ {
+  "category": "forms",
+  "command": "pnpm add left-pad@1.0.0 & pnpm add left-pad"
+ },
+ {
+  "category": "forms",
+  "command": "(pnpm add left-pad@1.0.0) && (pnpm add left-pad)"
+ },
+ {
+  "category": "forms",
+  "command": "if true; then pnpm add left-pad@1.0.0; fi; pnpm add left-pad"
+ },
+ {
+  "category": "forms",
+  "command": "pnpm add left-pad@1.0.0 && bash -c 'pnpm add left-pad'"
+ },
+ {
+  "category": "forms",
+  "command": "bash -c 'pnpm add left-pad@1.0.0' && pnpm add left-pad"
+ },
+ {
+  "category": "forms",
+  "command": "pnpm add left-pad@1.0.0 && eval 'pnpm add left-pad'"
+ },
+ {
+  "category": "forms",
+  "command": "pnpm add left-pad@1.0.0 && echo \"$(pnpm add left-pad)\""
+ },
+ {
+  "category": "forms",
+  "command": "pnpm add left-pad@1.0.0 left-pad"
+ },
+ {
+  "category": "forms",
+  "command": "go get example.com/m@v1.0.0 example.com/m"
+ },
+ {
+  "category": "forms",
+  "command": "cargo install ripgrep@13.0.0 ripgrep"
+ },
+ {
+  "category": "forms",
+  "command": "npx cowsay@1.0.0 && npx cowsay"
+ },
+ {
+  "category": "forms",
+  "command": "npm create vite my-app"
+ },
+ {
+  "category": "forms",
+  "command": "npm init vite -- --template react"
+ },
+ {
+  "category": "forms",
+  "command": "npm init @usr"
+ },
+ {
+  "category": "forms",
+  "command": "pnpm create vite my-app"
+ },
+ {
+  "category": "forms",
+  "command": "yarn create vite my-app"
+ },
+ {
+  "category": "forms",
+  "command": "yarn create create-vite my-app"
+ },
+ {
+  "category": "forms",
+  "command": "bun create vite my-app"
+ },
+ {
+  "category": "forms",
+  "command": "bun create elysia my-app"
+ },
+ {
+  "category": "forms",
+  "command": "npm init"
+ },
+ {
+  "category": "forms",
+  "command": "npm init -y"
+ },
+ {
+  "category": "forms",
+  "command": "npm init --scope @acme"
+ },
+ {
+  "category": "forms",
+  "command": "bun create ./Component.tsx"
+ },
+ {
+  "category": "forms",
+  "command": "uvx --with evil ruff==0.1.0"
+ },
+ {
+  "category": "forms",
+  "command": "pipx run --with evil evil2==1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "npx --yes false evil@1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "uvx --python 3.12 ruff==0.1.0"
+ },
+ {
+  "category": "forms",
+  "command": "npx --cache /tmp/c evil@1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "pipx run --python python3.11 evil==1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "npm exec --yes false evil@1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "npx -p cowsay@1.0.0 -p cowsay cowsay"
+ },
+ {
+  "category": "forms",
+  "command": "npx --package=cowsay@1.0.0 cowsay && npx --package=cowsay cowsay"
+ },
+ {
+  "category": "forms",
+  "command": "uvx ruff==0.1.0 && uvx ruff"
+ },
+ {
+  "category": "forms",
+  "command": "uvx --from ruff==0.1.0 ruff && uvx --from ruff ruff"
+ },
+ {
+  "category": "forms",
+  "command": "pnpm add left-pad@npm:evil-pkg"
+ },
+ {
+  "category": "forms",
+  "command": "mvn dependency:get -Dartifact=g:evil:"
+ },
+ {
+  "category": "forms",
+  "command": "mvn dependency:get -Dartifact=g:evil::jar"
+ },
+ {
+  "category": "forms",
+  "command": "pip install requests===2.0.0 && pip install -U requests"
+ },
+ {
+  "category": "forms",
+  "command": "pip3.11 install requests==2.0.0 && python3 -m pip install -U requests"
+ },
+ {
+  "category": "forms",
+  "command": "go run example.com/m@v1.0.0 && go get example.com/m"
+ },
+ {
+  "category": "forms",
+  "command": "gem install rails -v 7.1.0"
+ },
+ {
+  "category": "forms",
+  "command": "gem install rails --version 7.1.0"
+ },
+ {
+  "category": "forms",
+  "command": "gem install rails --version=7.1.0"
+ },
+ {
+  "category": "forms",
+  "command": "bundle add rails --version 7.1.0"
+ },
+ {
+  "category": "forms",
+  "command": "bundle add rails --version 7.1.0 --source https://rubygems.org"
+ },
+ {
+  "category": "forms",
+  "command": "cargo install ripgrep --version 13.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "cargo install ripgrep --version=13.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "cargo add serde@1.0.0 --features derive"
+ },
+ {
+  "category": "forms",
+  "command": "dotnet add package Serilog --version 3.1.1"
+ },
+ {
+  "category": "forms",
+  "command": "dotnet add App.csproj package Serilog --version 3.1.1"
+ },
+ {
+  "category": "forms",
+  "command": "dotnet package add Serilog --version 3.1.1"
+ },
+ {
+  "category": "forms",
+  "command": "dotnet package add Serilog -v 3.1.1 --project App.csproj"
+ },
+ {
+  "category": "forms",
+  "command": "dotnet package update Fabrikam.WebApi@1.2.3"
+ },
+ {
+  "category": "forms",
+  "command": "dotnet package update --verbosity minimal --project src/App Fabrikam.WebApi@1.2.3"
+ },
+ {
+  "category": "forms",
+  "command": "dotnet tool install --global dotnet-ef --version 8.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "gem install --source https://rubygems.org rake -v 13.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "pip install 3to2==1.1.1"
+ },
+ {
+  "category": "forms",
+  "command": "pnpm add left-pad@npm:evil-pkg@1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "dotnet package update"
+ },
+ {
+  "category": "forms",
+  "command": "dotnet package update --vulnerable"
+ },
+ {
+  "category": "forms",
+  "command": "bash -c 'pip install requests==2.31.0'"
+ },
+ {
+  "category": "forms",
+  "command": "eval 'pip install requests==2.31.0'"
+ },
+ {
+  "category": "forms",
+  "command": "echo \"$(pip install requests==2.31.0)\""
+ },
+ {
+  "category": "forms",
+  "command": "npm install left-pad && pnpm add right-pad@1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "npm install --no-save left-pad"
+ },
+ {
+  "category": "forms",
+  "command": "npm i --save=false left-pad"
+ },
+ {
+  "category": "forms",
+  "command": "npm install --no-package-lock left-pad"
+ },
+ {
+  "category": "forms",
+  "command": "npm install --package-lock=false left-pad"
+ },
+ {
+  "category": "forms",
+  "command": "npm install --no-save left-pad && pnpm add right-pad"
+ },
+ {
+  "category": "forms",
+  "command": "npm install left-pad && cd sub && npm install right-pad"
+ },
+ {
+  "category": "forms",
+  "command": "npm install left-pad && npm install -g right-pad"
+ },
+ {
+  "category": "forms",
+  "command": "npm install -gf left-pad"
+ },
+ {
+  "category": "forms",
+  "command": "npm i -g left-pad --global=false"
+ },
+ {
+  "category": "forms",
+  "command": "npm link left-pad"
+ },
+ {
+  "category": "forms",
+  "command": "npm ln @scope/pkg"
+ },
+ {
+  "category": "forms",
+  "command": "npm link --save left-pad"
+ },
+ {
+  "category": "forms",
+  "command": "npm run build && npm link left-pad"
+ },
+ {
+  "category": "forms",
+  "command": "npm link"
+ },
+ {
+  "category": "forms",
+  "command": "npm link ../my-lib"
+ },
+ {
+  "category": "forms",
+  "command": "npm link ../lib left-pad"
+ },
+ {
+  "category": "forms",
+  "command": "npm link ~/lib left-pad"
+ },
+ {
+  "category": "forms",
+  "command": "npm link ../lib user/repo left-pad"
+ },
+ {
+  "category": "forms",
+  "command": "npm link ../lib user/repo"
+ },
+ {
+  "category": "forms",
+  "command": "npm link user/repo"
+ },
+ {
+  "category": "forms",
+  "command": "npm link github:u/r"
+ },
+ {
+  "category": "forms",
+  "command": "npm link ../lib https://example.test/x.tgz"
+ },
+ {
+  "category": "forms",
+  "command": "sh -c 'npm install left-pad'"
+ },
+ {
+  "category": "forms",
+  "command": "npm install left-pad && bash -c 'npm install right-pad'"
+ },
+ {
+  "category": "forms",
+  "command": "pip install requests==2.0.0 requests"
+ },
+ {
+  "category": "forms",
+  "command": "pip install requests==2.0.0 && pip install requests"
+ },
+ {
+  "category": "forms",
+  "command": "pnpm add cowsay@1.0.0 && npx cowsay"
+ },
+ {
+  "category": "forms",
+  "command": "pip install requests==2.0.0 --no-binary requests"
+ },
+ {
+  "category": "forms",
+  "command": "pnpm add left-pad >/dev/null"
+ },
+ {
+  "category": "forms",
+  "command": "pnpm add left-pad 2>err.log >out.log"
+ },
+ {
+  "category": "forms",
+  "command": "pnpm add left-pad > /dev/null"
+ },
+ {
+  "category": "forms",
+  "command": "pnpm add left-pad >>install.log"
+ },
+ {
+  "category": "forms",
+  "command": "pnpm add left-pad <input.txt"
+ },
+ {
+  "category": "forms",
+  "command": "pnpm add >/dev/null left-pad"
+ },
+ {
+  "category": "forms",
+  "command": "pnpm add left-pad >out@1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "pip install requests >/dev/null"
+ },
+ {
+  "category": "forms",
+  "command": "npx >/dev/null cowsay"
+ },
+ {
+  "category": "forms",
+  "command": "pnpm add left-pad@1.0.0 >/dev/null"
+ },
+ {
+  "category": "forms",
+  "command": "pnpm add left\\-pad"
+ },
+ {
+  "category": "forms",
+  "command": "pip install ev\\il==6.6.6"
+ },
+ {
+  "category": "forms",
+  "command": "pip install 'requests>=3'"
+ },
+ {
+  "category": "forms",
+  "command": "pip install \"requests>=3\""
+ },
+ {
+  "category": "forms",
+  "command": "pip install requests\\>=3"
+ },
+ {
+  "category": "forms",
+  "command": "pip install requests>=2.0"
+ },
+ {
+  "category": "forms",
+  "command": "pnpm add left-pad>/dev/null"
+ },
+ {
+  "category": "forms",
+  "command": "pnpm add left-pad 2>/dev/null"
+ },
+ {
+  "category": "forms",
+  "command": "pnpm add x2>/dev/null"
+ },
+ {
+  "category": "forms",
+  "command": "pnpm add left-pad&>/dev/null"
+ },
+ {
+  "category": "forms",
+  "command": "pnpm add left-pad@1.0.0 && pnpm add right-pad"
+ },
+ {
+  "category": "forms",
+  "command": "npm install left-pad && pnpm add right-pad"
+ },
+ {
+  "category": "forms",
+  "command": "npm --prefix x install left-pad"
+ },
+ {
+  "category": "forms",
+  "command": "npm --prefix x install evil@1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "npm --prefix=x install evil@1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "npm -g --prefix x install left-pad"
+ },
+ {
+  "category": "forms",
+  "command": "npm install -g --prefix x left-pad"
+ },
+ {
+  "category": "forms",
+  "command": "npm --foo x exec evil@1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "go run ./cmd user@example.com"
+ },
+ {
+  "category": "forms",
+  "command": "go run . deploy@prod"
+ },
+ {
+  "category": "forms",
+  "command": "go run main.go --email admin@example.com"
+ },
+ {
+  "category": "forms",
+  "command": "go run ./cmd/migrate -database postgres://user:pass@localhost:5432/app up"
+ },
+ {
+  "category": "forms",
+  "command": "go run ./cmd/clone git@github.com:org/repo.git"
+ },
+ {
+  "category": "forms",
+  "command": "go run ./scripts/notify ops@example.com"
+ },
+ {
+  "category": "forms",
+  "command": "go run ./cmd example.com/m@v1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "go run -race ./cmd/api --db postgres://u@db/app"
+ },
+ {
+  "category": "forms",
+  "command": "pnpm add \"\" left-pad"
+ },
+ {
+  "category": "forms",
+  "command": "npx \"\" evil@1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "uvx --python \"\" \"\" evil==1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "gem install --source https://rubygems.org evil -v 13.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "gem install -s https://rubygems.org rake -v 13.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "gem install -v 13.0.0 rake"
+ },
+ {
+  "category": "forms",
+  "command": "gem install rake --vers 13.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "bundle add rails --source https://rubygems.org --version 7.1.0"
+ },
+ {
+  "category": "forms",
+  "command": "cargo install --root /tmp/tools ripgrep --version 13.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "cargo install --root /tmp/tools evil --version 13.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "cargo install ripgrep --version 13.0.0 2>&1"
+ },
+ {
+  "category": "forms",
+  "command": "gem install rake -v 13.0.0 >/dev/null"
+ },
+ {
+  "category": "forms",
+  "command": "gem install rake -v 13.0.0 2>/dev/null"
+ },
+ {
+  "category": "forms",
+  "command": "cargo install ripgrep --version 13.0.0 >/dev/null"
+ },
+ {
+  "category": "forms",
+  "command": "pnpm add left-pad@1.0.0 >out@2.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "pip install requests==2.19.0>/dev/null"
+ },
+ {
+  "category": "forms",
+  "command": "pip install requests==2.19.0 2>&1>/dev/null"
+ },
+ {
+  "category": "forms",
+  "command": "pnpm add left-pad@1.0.0>>install.log"
+ },
+ {
+  "category": "forms",
+  "command": "pnpm add left-pad@1.0.0&>/dev/null"
+ },
+ {
+  "category": "forms",
+  "command": "gem install rake -v 13.0.0>/dev/null"
+ },
+ {
+  "category": "forms",
+  "command": "npx evil@1.0.0</dev/null"
+ },
+ {
+  "category": "forms",
+  "command": "dotnet tool install --tool-path /tmp/tools dotnet-ef --version 8.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "dotnet tool install --tool-path /tmp/tools evil --version 8.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "dotnet add package -s https://api.nuget.org/v3/index.json Serilog -v 3.1.1"
+ },
+ {
+  "category": "forms",
+  "command": "dotnet package add Serilog --project App.csproj --version 3.1.1"
+ },
+ {
+  "category": "forms",
+  "command": "dotnet package add evil --project App.csproj --version 3.1.1"
+ },
+ {
+  "category": "forms",
+  "command": "dotnet package add Serilog --version 3.1.1 --project App.csproj"
+ },
+ {
+  "category": "forms",
+  "command": "dotnet package add Serilog -v 3.1.1"
+ },
+ {
+  "category": "forms",
+  "command": "dotnet package update -v q --project src/App Fabrikam.WebApi@1.2.3"
+ },
+ {
+  "category": "forms",
+  "command": "gem install rake --document rdoc -v 13.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "npm install left-pad@npm:@scope/evil@1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "pnpm add 7zip-bin@5.2.0"
+ },
+ {
+  "category": "forms",
+  "command": "poetry add 3to2@1.1.1"
+ },
+ {
+  "category": "forms",
+  "command": "uvx -p 3.12 ruff==0.1.0"
+ },
+ {
+  "category": "forms",
+  "command": "uv tool run --python 3.12 ruff==0.1.0"
+ },
+ {
+  "category": "forms",
+  "command": "npx --loglevel silent evil@1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "pipx run --pyth python3.11 evil==1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "pnpm dlx --reporter silent evil@1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "go run -C sub example.com/m@v1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "go run --tags x example.com/m@v1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "uvx --with evil==1.0.0 ruff==0.1.0"
+ },
+ {
+  "category": "forms",
+  "command": "pipx run --with evil==1.0.0 evil2==1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "npm exec --color always evil@1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "pnpm add ev\\il@6.6.6"
+ },
+ {
+  "category": "forms",
+  "command": "npx ev\\il@6.6.6"
+ },
+ {
+  "category": "forms",
+  "command": "gem install ra\\ke -v 13.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "cargo install rip\\grep --version 13.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "echo ev\\il==6.6.6"
+ },
+ {
+  "category": "forms",
+  "command": "npm create evil@1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "npm innit evil@1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "npm cr evil@1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "npm init @usr/foo@2.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "npm init @usr@2.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "npm init create-vite@5.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "npm init --package evil@1.0.0 foo@1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "pnpm create evil@1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "pnpm create create-evil@1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "pnpm create @usr/foo@2.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "yarn create evil@1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "yarn create create-evil@1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "yarn create -p evil@1.0.0 foo"
+ },
+ {
+  "category": "forms",
+  "command": "bun create evil@1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "bun c create-evil@1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "bun create @usr/foo@2.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "bash -c \"x=\\\"a\\\"; cargo install evil --version 1.0.0\""
+ },
+ {
+  "category": "forms",
+  "command": "sh -c \"pip install evil==1.0.0\""
+ },
+ {
+  "category": "forms",
+  "command": "pip install >| f evil==1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "cargo install 2<&- evil --version 1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "pnpm add --dir $(pwd | cat) evil@1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "pip install --cache-dir $(pwd | sed s/x/y/) evil==1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "pip install --retries $((1|2)) evil==1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "pip install --log ${X:-a|b} evil==1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "uvx --python $(which python3) ruff==0.1.0"
+ },
+ {
+  "category": "forms",
+  "command": "uvx -p $(command -v python3) ruff==0.1.0"
+ },
+ {
+  "category": "forms",
+  "command": "uv tool run --python $(which python3) ruff==0.1.0"
+ },
+ {
+  "category": "forms",
+  "command": "pipx run --python $(which python3.11) black==24.1.0"
+ },
+ {
+  "category": "forms",
+  "command": "npx --cache $(mktemp -d /tmp/x.XXXX) evil@1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "pnpm dlx --dir $(git rev-parse --show-toplevel) evil@1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "bunx --cwd $(git rev-parse --show-toplevel) evil@1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "go run -C $(git rev-parse --show-toplevel) example.com/m@v1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "uvx --python `which python3` ruff==0.1.0"
+ },
+ {
+  "category": "forms",
+  "command": "uvx --python \"$(which python3)\" ruff==0.1.0"
+ },
+ {
+  "category": "forms",
+  "command": "gem install --install-dir $(gem env gemdir) rake -v 13.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "uvx --python \"/opt/my python/bin/python3\" ruff==0.1.0"
+ },
+ {
+  "category": "forms",
+  "command": "uvx --python \"\" evil==1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "pip install --log a\\ b evil==1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "pip install \"evil==1.0.0 \""
+ },
+ {
+  "category": "forms",
+  "command": "pip install \"evil ==1.0.0\""
+ },
+ {
+  "category": "forms",
+  "command": "pip install \"requests == 2.19.0\""
+ },
+ {
+  "category": "forms",
+  "command": "npm install \"evil@1.0.0 \""
+ },
+ {
+  "category": "forms",
+  "command": "(npm i evil@1)"
+ },
+ {
+  "category": "forms",
+  "command": "FOO=1 command pip install evil==1"
+ },
+ {
+  "category": "forms",
+  "command": "bun --cwd x add evil@1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "bun x evil@1.0.0 --foo"
+ },
+ {
+  "category": "forms",
+  "command": "bunx --cwd x evil@1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "cargo +nightly install ripgrep"
+ },
+ {
+  "category": "forms",
+  "command": "cargo --config x install evil --version 1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "cargo add serde@1.0"
+ },
+ {
+  "category": "forms",
+  "command": "cargo install --root /t ripgrep --vers 13.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "dotnet add App.csproj package Serilog -v 3.1.1"
+ },
+ {
+  "category": "forms",
+  "command": "dotnet package add Serilog --project P"
+ },
+ {
+  "category": "forms",
+  "command": "dotnet package update Fabrikam.WebApi@1.2.3 -v q"
+ },
+ {
+  "category": "forms",
+  "command": "dotnet tool install dotnet-ef --version:8.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "echo npm install x"
+ },
+ {
+  "category": "forms",
+  "command": "env -C x FOO=1 npm install evil@1"
+ },
+ {
+  "category": "forms",
+  "command": "gem --config-file c install rake"
+ },
+ {
+  "category": "forms",
+  "command": "gem install --install-dir x rake -v 13.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "gem install rake -v13.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "go get -t example.com/x@v1"
+ },
+ {
+  "category": "forms",
+  "command": "go install example.com/cmd@latest"
+ },
+ {
+  "category": "forms",
+  "command": "go run -C x example.com/m@v1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "go run example.com/m@v1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "go run main.go --email a@b"
+ },
+ {
+  "category": "forms",
+  "command": "mvn -D artifact=g:a:1.0 dependency:get"
+ },
+ {
+  "category": "forms",
+  "command": "mvn -Dartifact=g:a:1.0 dependency:get"
+ },
+ {
+  "category": "forms",
+  "command": "mvn -f pom.xml dependency:get -Dartifact=g:a"
+ },
+ {
+  "category": "forms",
+  "command": "mvn clean install"
+ },
+ {
+  "category": "forms",
+  "command": "npm --access restricted install evil@1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "npm --global=install evil@1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "npm --loglevel install x evil@1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "npm --min-rel install evil@1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "npm --min-release-age 3 install evil@1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "npm --min-release-age install evil@1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "npm --no-min-release-age install evil@1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "npm --prefix sub --silent install evil@1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "npm --prefix x exec evil@1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "npm --silent run install"
+ },
+ {
+  "category": "forms",
+  "command": "npm --silent x evil@1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "npm --yes x evil@1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "npm -C x install evil@1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "npm exec --package evil@1 -- cmd arg"
+ },
+ {
+  "category": "forms",
+  "command": "npm exec evil@1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "npm i -g --prefix x left-pad"
+ },
+ {
+  "category": "forms",
+  "command": "npm i -g left-pad"
+ },
+ {
+  "category": "forms",
+  "command": "npm init vite@5"
+ },
+ {
+  "category": "forms",
+  "command": "npm install --min-release-age x evil@1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "npm install --prefix x left-pad"
+ },
+ {
+  "category": "forms",
+  "command": "npm install evil@1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "npm link ../lib evil@1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "npm run build"
+ },
+ {
+  "category": "forms",
+  "command": "npm run install"
+ },
+ {
+  "category": "forms",
+  "command": "npx --cache x evil@1.0.0 arg@x"
+ },
+ {
+  "category": "forms",
+  "command": "npx --foo x evil"
+ },
+ {
+  "category": "forms",
+  "command": "npx --min-release-age 3 evil@1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "npx --yes false x"
+ },
+ {
+  "category": "forms",
+  "command": "npx -p evil@1 cmd"
+ },
+ {
+  "category": "forms",
+  "command": "npx evil@1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "pip --cache-dir x install evil==1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "pip install --log x evil==1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "pip install -e git+https://x/y.git"
+ },
+ {
+  "category": "forms",
+  "command": "pip install -tdir evil==1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "pipenv install --python 3.11 evil==1"
+ },
+ {
+  "category": "forms",
+  "command": "pipx install evil"
+ },
+ {
+  "category": "forms",
+  "command": "pipx run --python x black==24 arg"
+ },
+ {
+  "category": "forms",
+  "command": "pipx run --spec evil==1 cmd"
+ },
+ {
+  "category": "forms",
+  "command": "pnpm --dir x add evil@1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "pnpm -C x add evil@1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "pnpm add left-pad"
+ },
+ {
+  "category": "forms",
+  "command": "pnpm create vite"
+ },
+ {
+  "category": "forms",
+  "command": "pnpm dlx --package evil@1 cmd"
+ },
+ {
+  "category": "forms",
+  "command": "pnpx evil@1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "poetry -C x add evil@1.0"
+ },
+ {
+  "category": "forms",
+  "command": "python3 -I -m pip install evil==1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "python3 -mpip install evil"
+ },
+ {
+  "category": "forms",
+  "command": "uv --directory x add evil==1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "uv pip install -t x evil==1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "uv tool install --with a==1 evil==1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "uvx --from evil==1 cmd"
+ },
+ {
+  "category": "forms",
+  "command": "uvx --python x ruff==0.1.0 --help"
+ },
+ {
+  "category": "forms",
+  "command": "yarn --cwd x add evil@1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "yarn dlx -p evil@1 cmd"
+ },
+ {
+  "category": "forms",
+  "command": "yarn global add evil"
+ },
+ {
+  "category": "forms",
+  "command": "yarn workspace web add evil@1.0.0"
+ },
+ {
+  "category": "forms",
+  "command": "yarn workspaces foreach -A add evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun add -p evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun i -p evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun install -p evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun a -p evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun -p add evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun add --print evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun i --print evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun install --print evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun a --print evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun --print add evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun add -e evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun i -e evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun install -e evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun a -e evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun -e add evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun add --eval evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun i --eval evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun install --eval evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun a --eval evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun --eval add evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun add -r evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun i -r evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun install -r evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun a -r evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun -r add evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun add --preload evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun i --preload evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun install --preload evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun a --preload evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun --preload add evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun add --require evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun i --require evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun install --require evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun a --require evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun --require add evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun add --import evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun i --import evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun install --import evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun a --import evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun --import add evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun add -c evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun i -c evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun install -c evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun a -c evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun -c add evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun add --config evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun i --config evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun install --config evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun a --config evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun --config add evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun add --catalog evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun i --catalog evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun install --catalog evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun a --catalog evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun --catalog add evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun add -d evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun i -d evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun install -d evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun a -d evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun -d add evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun add --define evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun i --define evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun install --define evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun a --define evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun --define add evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun add --port evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun i --port evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun install --port evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun a --port evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun --port add evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun add --title evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun i --title evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun install --title evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun a --title evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun --title add evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun add --env-file evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun i --env-file evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun install --env-file evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun a --env-file evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun --env-file add evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun add --conditions evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun i --conditions evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun install --conditions evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun a --conditions evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun --conditions add evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun add --shell evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun i --shell evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun install --shell evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun a --shell evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun --shell add evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun add -E -p evil@1.0.0 left-pad"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun add --print evil@1.0.0 left-pad"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun add --print left-pad"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun add --print=x evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun add --production evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun add -F evil@1.0.0 left-pad"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun add --cwd x evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun x -p evil@1.0.0 evil"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun x --package evil@1.0.0 evil"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bunx -p evil@1.0.0 evil"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bunx --cwd evil@1.0.0 x"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun x --cwd x evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun x --print evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun --cwd=x add evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun --cache-dir x add evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun update -p evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "python3 -Im pip install evil==1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "python3 -Impip install evil==1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "python3 -IW ignore -m pip install evil==1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "python3 -sEm pip install evil==1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "python3 -Ic pass -m pip install evil==1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "python3 -Im pip install left-pad"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "python3 -W -m pip install evil==1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "python -bbm pip install evil==1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "gem install evil:1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "gem install evil:=1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "gem install 'evil:~>1.0'"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "gem install evil:1.0.0 rake"
+ }
+]
