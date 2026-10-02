@@ -400,14 +400,18 @@ do
 done
 pass "the record stays quiet on file-only, working-tree, bare-lockfile, npm, and already-pinned installs"
 
-# A KNOWN spurious record, pinned rather than fixed. An unknown flag is assumed
-# to take no value, so `--proxy <url>` leaks its URL into the operand walk. The
-# assumption is deliberate: guessing the other way drops the install this record
-# exists to catch. Widening the value table instead is the enumeration this
-# lineage was burned by four times. Pinned so the line reads as a declared
-# trade-off rather than a defect.
+# A KNOWN spurious record, pinned rather than fixed. An option the manager's
+# table does not list is read as taking no value, so a value option the table
+# lacks leaks its value into the operands. The assumption is deliberate:
+# guessing the other way drops the install this record exists to catch. pip's
+# own value options are in its table now, from its help (`--proxy` among them),
+# so the stand-in here is an option the table does not know, as an option a
+# newer pip adds would be. Pinned so the line reads as a declared trade-off
+# rather than a defect.
+logged_ungated "pip install --unlisted-proxy https://proxy.example:8080 -r requirements.txt" \
+  || fail "a value option the table does not know still leaks a spurious record (declared trade-off)"
 logged_ungated "pip install --proxy https://proxy.example:8080 -r requirements.txt" \
-  || fail "the known --proxy spurious record is still produced (declared trade-off)"
+  && fail "pip's own --proxy takes its value: no spurious record"
 pass "an unknown value-taking flag still leaks a spurious record (declared, not a defect)"
 
 # `mvn -Dartifact=… dependency:get` puts the flag BEFORE the goal. This used to
@@ -906,6 +910,20 @@ do
   expect_pass "the wrapper ${wrapper_form%% *}" "${wrapper_form}"
 done
 pass "argv-passing wrappers (sudo, timeout, nohup, nice) stay outside the command gate (documented boundary)"
+
+# A command word or a runner's package that the shell assembles from quotes is
+# not recognized: the recognizers read the scan view, where a quoted word is
+# blank. v2.17.2 behaved the same. Pinned so README can name the forms, and so
+# the plan that reads them the way the shell does has rows to turn
+# (safedeps/command-words-read-as-the-shell-dequotes).
+for quoted_form in \
+  "'pip' install evil==1.0.0" \
+  'npx "evil@1.0.0"' \
+  'uvx "ruff==0.1.0" --help'
+do
+  expect_pass "the quoted form ${quoted_form}" "${quoted_form}"
+done
+pass "a command word or a runner package assembled from quotes stays unrecognized (documented boundary)"
 
 # A case arm is a statement. A grammar pattern cannot tell a pattern's `)` from
 # any other `)` (`echo $(date) pip install x` would read as an install), so case
@@ -1603,6 +1621,37 @@ expect_pass "a pipeline of ordinary commands" 'npm run build | tee out'
 expect_pass "a pipeline with no install" 'echo hi | grep h'
 pass "statement cuts and shell names are read the way the shell reads them"
 
+# A word is cut where the shell cuts it: a blank inside quotes or an unquoted
+# substitution does not split it. Split on blanks, a value option took half of
+# `$(which python3)` and the rest read as the package, so the real pin went
+# unchecked (caught in review).
+expect_prescription 'pypi ruff@0.1.0;' 'uvx --python $(which python3) ruff==0.1.0'
+expect_prescription 'pypi ruff@0.1.0;' 'uvx -p $(command -v python3) ruff==0.1.0'
+expect_prescription 'pypi ruff@0.1.0;' 'uv tool run --python $(which python3) ruff==0.1.0'
+expect_prescription 'pypi black@24.1.0;' 'pipx run --python $(which python3.11) black==24.1.0'
+expect_prescription 'npm evil@1.0.0;' 'npx --cache $(mktemp -d /tmp/x.XXXX) evil@1.0.0'
+expect_prescription 'npm evil@1.0.0;' 'pnpm dlx --dir $(git rev-parse --show-toplevel) evil@1.0.0'
+expect_prescription 'npm evil@1.0.0;' 'bun add --cwd $(git rev-parse --show-toplevel) evil@1.0.0'
+expect_prescription 'go example.com/m@v1.0.0;' 'go run -C $(git rev-parse --show-toplevel) example.com/m@v1.0.0'
+expect_prescription 'pypi ruff@0.1.0;' 'uvx --python `which python3` ruff==0.1.0'
+expect_prescription 'pypi ruff@0.1.0;' 'uvx --python "$(which python3)" ruff==0.1.0'
+expect_prescription 'rubygems rake@13.0.0;' 'gem install --install-dir $(gem env gemdir) rake -v 13.0.0'
+expect_pass "go run of a local package with an @ argument" 'go run ./cmd user@example.com'
+# The same for a quoted or escaped blank, and for the empty word, which the
+# shell passes: uv 0.10.11 reads `--python ""` as no preference and runs the
+# package after it.
+expect_prescription 'pypi ruff@0.1.0;' 'uvx --python "/opt/my python/bin/python3" ruff==0.1.0'
+expect_prescription 'pypi evil@1.0.0;' 'uvx --python "" evil==1.0.0'
+expect_prescription 'pypi evil@1.0.0;' 'pip install --log a\ b evil==1.0.0'
+# A manager reads past the blanks at the ends of an argument, and pip past
+# every blank in a requirement (PEP 508; pip's parser, measured), so a word
+# kept whole is still the pin it names.
+expect_prescription 'pypi evil@1.0.0;' 'pip install "evil==1.0.0 "'
+expect_prescription 'pypi evil@1.0.0;' 'pip install "evil ==1.0.0"'
+expect_prescription 'pypi requests@2.19.0;' 'pip install "requests == 2.19.0"'
+expect_prescription 'npm evil@1.0.0;' 'npm install "evil@1.0.0 "'
+pass "a word is cut where the shell cuts it, so a value option takes the whole value"
+
 # `npm link` reads every argument with npm-package-arg and installs the
 # registry ones into the global prefix (lib/commands/link.js:92-104); a path,
 # a tarball, a git or a URL argument is linked as written. Reading only the
@@ -1640,6 +1689,118 @@ else
   pass "npm link arguments against npm-package-arg # SKIP no npm and node on PATH to ask"
 fi
 pass "npm link reads each argument, and a registry one is checked wherever it stands"
+
+# --- 10c. npm's command is npm's reading of its arguments -----------------------
+# The grammar's regexes try both readings of an option that may take a value.
+# Where both matched they picked one, and for `npm --prefix x install
+# evil@1.0.0` they picked `npm x` (exec): the pinned install was allowed with no
+# ledger check, rewritten with --ignore-scripts, and recorded as the package
+# `install`. main denied it, and `--prefix=x` was denied all along. npm reads
+# both spellings alike, as an install into x (nopt with npm's option types), and
+# so does the gate now. The directory exists so that the deny is the ledger's.
+mkdir -p "${project_dir}/x"
+printf '{"dependencies":{}}\n' > "${project_dir}/x/package.json"
+for prefix_form in \
+  'npm --prefix x install evil@1.0.0' \
+  'npm --prefix=x install evil@1.0.0' \
+  'npm -C x install evil@1.0.0' \
+  'npm --prefix x --silent install evil@1.0.0' \
+  'npm --cache x install evil@1.0.0' \
+  'npm --prefi x install evil@1.0.0' \
+  'npm -gC x install evil@1.0.0' \
+  'npm --silent x evil@1.0.0'
+do
+  expect_prescription 'npm evil@1.0.0;' "${prefix_form}"
+done
+# The same reading names a runner's package. nopt reads an option npm does not
+# define as a Boolean when it has no `=value` (nopt-lib.js parse: `typeof
+# argType === 'undefined' && !hadEq`), so `x` is npm's command, and `x` is an
+# alias of exec (lib/utils/cmd-list.js, `x: 'exec'`). With no --package, exec
+# runs its first argument as the package (libnpmexec index.js:143,177:
+# `packages.push(args[0])`), so npm fetches and runs the package `exec`, with
+# evil@1.0.0 as that program's argument. The regex took `exec` for the command
+# and denied evil@1.0.0, which npm never fetches; the record names `exec` (11).
+# npm 11.19.0; scripts/measure/npm-option-reading.sh checks the nopt half.
+expect_prescription 'no-deny;' 'npm --foo x exec evil@1.0.0'
+# Which words npm takes as option values is nopt's answer, rerun here against
+# the npm on PATH.
+if command -v npm >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  options_rc=0
+  options_out=$(scripts/measure/npm-option-reading.sh 2>&1) || options_rc=$?
+  case "${options_rc}" in
+    0) pass "npm's arguments are read the way nopt reads them (scripts/measure/npm-option-reading.sh, npm $(npm --version))" ;;
+    3) pass "npm's arguments against nopt # SKIP ${options_out}" ;;
+    *) fail "npm's arguments are read the way nopt reads them ($(head -5 <<< "${options_out}" | tr '\n' ' '))" ;;
+  esac
+else
+  pass "npm's arguments against nopt # SKIP no npm and node on PATH to ask"
+fi
+pass "an option's value never stands in for npm's command, in either spelling"
+
+# --- 10d. Every manager's words are read with its own option table -------------
+# The same question for the other managers, answered by safedeps_manager_read
+# from each manager's table. Each row passed with no check before the tables:
+# the value of a manager option before its command was read as the command or
+# the package, a version attached to its option was not read as one, and an
+# abbreviation or a `:` value was not read at all. scripts/test/manager-variants.sh
+# holds the places a value stands by spelling; these are the spellings of the
+# options themselves.
+# bun takes the first word that does not start with `-` for its command, so
+# this runs `bun x add evil@1.0.0` (bun 1.4.2, measured); both readings are
+# judged.
+expect_prescription 'npm evil@1.0.0;' 'bun --cwd x add evil@1.0.0'
+expect_prescription 'npm evil@1.0.0;' 'pnpm --dir x add evil@1.0.0'
+expect_prescription 'crates.io evil@1.0.0;' 'cargo --config x install evil --version 1.0.0'
+expect_prescription 'rubygems rake@13.0.0;' 'gem install rake -v13.0.0'
+expect_prescription 'rubygems rake@13.0.0;' 'gem install rake --vers 13.0.0'
+expect_prescription 'rubygems rake@13.0.0;' 'gem install --inst x rake -v 13.0.0'
+expect_prescription 'nuget dotnet-ef@8.0.0;' 'dotnet tool install dotnet-ef --version:8.0.0'
+expect_prescription 'maven g:a@1.0;' 'mvn -D artifact=g:a:1.0 dependency:get'
+expect_prescription 'pypi evil@1.0.0;' 'pip install --ta dir evil==1.0.0'
+expect_prescription 'pypi evil@1.0.0;' 'pip --cache-dir x install evil==1.0.0'
+expect_prescription 'pypi evil@1.0.0;' 'uv --directory x add evil==1.0.0'
+expect_prescription 'go example.com/m@v1.0.0;' 'go run --C x example.com/m@v1.0.0'
+# npm 10.8.2 does not define --min-release-age, so to it the word after the
+# option is npm's command, and the install runs there (SAFEDEPS_G_NPM_OTHER).
+expect_prescription 'npm evil@1.0.0;' 'npm --min-release-age install evil@1.0.0'
+expect_prescription 'npm evil@1.0.0;' 'npx --min-release-age 3 evil@1.0.0'
+# The table lists an option only where the manager reads a value for it. bun's
+# runtime options were listed for every bun command, and bun reads them as
+# switches where it installs, so the package after one was taken for its value
+# and passed unchecked. `bun x -p` names the package, an entry `*` hid until a
+# command's entry was looked up first. bunx reads `--cwd` as a switch. bun
+# 1.4.2, measured: scripts/measure/manager-option-reading.sh.
+expect_prescription 'npm evil@1.0.0;' 'bun add --print evil@1.0.0'
+expect_prescription 'npm evil@1.0.0;' 'bun add -p evil@1.0.0'
+expect_prescription 'npm evil@1.0.0;' 'bun i -c evil@1.0.0'
+expect_prescription 'npm evil@1.0.0;' 'bun install --preload evil@1.0.0'
+expect_prescription 'npm evil@1.0.0;' 'bun add -E -p evil@1.0.0 left-pad'
+expect_prescription 'npm evil@1.0.0;' 'bun x -p evil@1.0.0 evil'
+expect_prescription 'npm evil@1.0.0;' 'bunx --cwd evil@1.0.0 x'
+expect_prescription 'no-deny;' 'bun add -F evil@1.0.0 left-pad'
+# python reads one-letter options as getopt clusters them: `-Im pip` is `-I -m
+# pip`, and an option that takes a value takes the rest of its word, so
+# `-Impip` is too. `-c` ends python's options with a program.
+expect_prescription 'pypi evil@1.0.0;' 'python3 -Im pip install evil==1.0.0'
+expect_prescription 'pypi evil@1.0.0;' 'python3 -Impip install evil==1.0.0'
+expect_prescription 'pypi evil@1.0.0;' 'python3 -IW ignore -m pip install evil==1.0.0'
+expect_prescription 'pypi evil@1.0.0;' 'python3 -sEm pip install evil==1.0.0'
+expect_prescription 'no-deny;' 'python3 -Ic pass -m pip install evil==1.0.0'
+# RubyGems reads `name:version` as the name and a requirement, and a bare or
+# `=` version is a pin (Gem::Command#extract_gem_name_and_version).
+expect_prescription 'rubygems evil@1.0.0;' 'gem install evil:1.0.0'
+expect_prescription 'rubygems evil@1.0.0;' 'gem install evil:=1.0.0'
+pass "every manager's options are read with its own table: values, attached and abbreviated spellings, and both npm versions"
+# Which words a manager takes as option values is the manager's answer, asked
+# of every one on PATH but npm (npm is asked above). A table entry the manager
+# does not read as a value fails; a manager not on PATH is skipped by name.
+manager_rc=0
+manager_out=$(scripts/measure/manager-option-reading.sh 2>&1) || manager_rc=$?
+case "${manager_rc}" in
+  0) pass "every manager on PATH reads its options the way the table says ($(grep -E '^asked:' <<< "${manager_out}" | cut -c1-200))" ;;
+  3) pass "the managers' option reading # SKIP $(grep -E '^skipped:' <<< "${manager_out}" | cut -c1-200)" ;;
+  *) fail "every manager on PATH reads its options the way the table says ($(grep -E '^OVER|forms,' <<< "${manager_out}" | head -5 | tr '\n' ' '))" ;;
+esac
 
 # --- 11. The UNGATED record names each operand the gate did not check ---------
 # The record used to be a second parser: it read each statement on its own and
@@ -1841,12 +2002,15 @@ operand_rows=(
   $'npm:right-pad\tnpm install left-pad && bash -c \'npm install right-pad\''
   # Declared: recorded, and harmless. pip resolves both operands to the pin;
   # the second install is a no-op at runtime; the local binary does not exist
-  # yet when the gate reads the command; the record assumes an option it does
-  # not know takes no value, and `--no-binary` takes one.
+  # yet when the gate reads the command.
   $'pypi:requests\tpip install requests==2.0.0 requests'
   $'pypi:requests\tpip install requests==2.0.0 && pip install requests'
   $'npm:cowsay\tpnpm add cowsay@1.0.0 && npx cowsay'
-  $'pypi:requests\tpip install requests==2.0.0 --no-binary requests'
+  # `--no-binary` takes a value (pip's help: `--no-binary <format_control>`),
+  # and it is in pip's table now, so its value is no operand. This row used
+  # to record `pypi:requests` as a declared trade-off of a table that did not
+  # know the option.
+  $'\tpip install requests==2.0.0 --no-binary requests'
   # A redirection and its target are the shell's, not operands. The record
   # used to name `npm:>/dev/null` beside the package.
   $'npm:left-pad\tpnpm add left-pad >/dev/null'
@@ -1878,6 +2042,39 @@ operand_rows=(
   # Controls: another name, and the npm CLI statement exempt on its own.
   $'npm:right-pad\tpnpm add left-pad@1.0.0 && pnpm add right-pad'
   $'npm:right-pad\tnpm install left-pad && pnpm add right-pad'
+  # npm's command and operands are npm's reading of its arguments (10c): an
+  # option's value is neither. The regex read `--prefix x` as `npm x` and
+  # recorded `install`; the old operand walk recorded the value `x`.
+  $'\tnpm --prefix x install left-pad'
+  $'\tnpm --prefix x install evil@1.0.0'
+  $'\tnpm --prefix=x install evil@1.0.0'
+  # A global npm install's record is the PostToolUse hook's (below), so the
+  # pre-guard names no operand for these; it named `install` and `x`.
+  $'\tnpm -g --prefix x install left-pad'
+  $'\tnpm install -g --prefix x left-pad'
+  $'npm:exec\tnpm --foo x exec evil@1.0.0'
+  # go run fetches by name only a package with a version suffix; anything else
+  # is local code and the words after it are its arguments, so these name no
+  # module. Each was recorded as its local package (`go:./cmd`).
+  $'\tgo run ./cmd user@example.com'
+  $'\tgo run . deploy@prod'
+  $'\tgo run main.go --email admin@example.com'
+  $'\tgo run ./cmd/migrate -database postgres://user:pass@localhost:5432/app up'
+  $'\tgo run ./cmd/clone git@github.com:org/repo.git'
+  $'\tgo run ./scripts/notify ops@example.com'
+  $'\tgo run ./cmd example.com/m@v1.0.0'
+  $'\tgo run -race ./cmd/api --db postgres://u@db/app'
+  # An empty word names nothing; it was recorded as the lexer's blank mark.
+  $'npm:left-pad\tpnpm add "" left-pad'
+  $'\tnpx "" evil@1.0.0'
+  $'\tuvx --python "" "" evil==1.0.0'
+  # A version after `:` pins a gem.
+  $'\tgem install evil:1.0.0'
+  # Every operand of a cluster that ends in python's -m.
+  $'pypi:left-pad\tpython3 -Im pip install left-pad'
+  # The runtime option before bun's package takes no value, so the package is
+  # the record (it passed with none).
+  $'npm:left-pad\tbun add --print left-pad'
 )
 
 # The rows are independent sandboxes; run them eight at a time.
@@ -1913,6 +2110,8 @@ for carrier in \
   "global|npm i -g=true left-pad" \
   "global|npm i --locat=global left-pad" \
   "global|npm i --no-global=false left-pad" \
+  "global|npm -g --prefix x install left-pad" \
+  "global|npm install -g --prefix x left-pad" \
   "project|npm i -g left-pad --global=false"
 do
   where="${carrier%%|*}"
