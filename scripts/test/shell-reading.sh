@@ -34,13 +34,15 @@ COUNT=false
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "${ROOT_DIR}"
-FORMS="scripts/measure/shell-reading-forms.json"
+# SAFEDEPS_SHELL_FORMS names another corpus in the same format: the
+# redirection grid (scripts/measure/redirection-grid.sh) is judged that way.
+FORMS="${SAFEDEPS_SHELL_FORMS:-scripts/measure/shell-reading-forms.json}"
 
 pass() { printf 'ok - %s\n' "$1"; }
 fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
 
 # shell column -> the reading that stands for it
-SHELL_READINGS="bash:bash sh:bash linux.bash:bash zsh:zsh agent:zsh dash:dash linux.dash:dash"
+SHELL_READINGS="bash:bash sh:bash bash5:bash linux.bash:bash zsh:zsh agent:zsh dash:dash linux.dash:dash"
 
 tmp_root=$(mktemp -d "${TMPDIR:-/tmp}/safedeps-shell-reading.XXXXXX")
 trap 'rm -rf "${tmp_root}"' EXIT
@@ -91,7 +93,7 @@ cells=0
 declare -a unfaithful=()
 for ((i = 0; i < n; i++)); do
   id=$(jq -r ".[${i}].id" "${FORMS}")
-  text=$(jq -j ".[${i}].text" "${FORMS}" | sed -e 's/@@TAIL@@/pip install evil==6.6.6/' -e 's/@@TAIL_SPLIT@@/pi\\\
+  text=$(jq -j ".[${i}].text" "${FORMS}" | sed -e 's/@@TAIL@@/pip install evil==6.6.6/' -e 's/@@HEAD@@/pip/g' -e 's/@@TAIL_SPLIT@@/pi\\\
 p install evil==6.6.6/'; printf 'X'); text="${text%X}"
   for pair in ${SHELL_READINGS}; do
     column="${pair%%:*}"
@@ -116,9 +118,9 @@ for ((i = 0; i < n; i++)); do
   id=$(jq -r ".[${i}].id" "${FORMS}")
   label=$(jq -r ".[${i}].label" "${FORMS}")
   jq -j ".[${i}].text" "${FORMS}" \
-    | sed -e 's/@@TAIL@@/pip install evil==6.6.6/' -e 's/@@TAIL_SPLIT@@/pi\\\
+    | sed -e 's/@@TAIL@@/pip install evil==6.6.6/' -e 's/@@HEAD@@/pip/g' -e 's/@@TAIL_SPLIT@@/pi\\\
 p install evil==6.6.6/' > "${tmp_root}/${id}.cmd"
-  shells=$(jq -r ".[${i}].measured | \"\(.bash) \(.zsh) \(.agent) \(.dash) \(.linux.bash) \(.linux.dash)\"" "${FORMS}")
+  shells=$(jq -r ".[${i}].measured | \"\(.bash) \(.zsh) \(.agent) \(.dash) \(.bash5 // \"\") \(.linux.bash) \(.linux.dash)\"" "${FORMS}")
   want=$(jq -r ".[${i}].gate // empty" "${FORMS}")
   got=$(decision_of "${tmp_root}/${id}.cmd")
   if [[ "${shells}" == *R* ]]; then

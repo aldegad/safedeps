@@ -595,7 +595,7 @@ check_view_properties() { # input label
 forms_file="${ROOT_DIR}/scripts/measure/shell-reading-forms.json"
 form_count=$(jq length "${forms_file}")
 for ((i = 0; i < form_count; i++)); do
-  form=$(jq -j ".[${i}].text" "${forms_file}" | sed -e 's/@@TAIL@@/pip install evil==6.6.6/' -e 's/@@TAIL_SPLIT@@/pi\\\
+  form=$(jq -j ".[${i}].text" "${forms_file}" | sed -e 's/@@TAIL@@/pip install evil==6.6.6/' -e 's/@@HEAD@@/pip/g' -e 's/@@TAIL_SPLIT@@/pi\\\
 p install evil==6.6.6/'; printf 'X')
   check_view_properties "${form%X}" "$(jq -r ".[${i}].id" "${forms_file}")"
 done
@@ -784,6 +784,85 @@ check_unprefixed "dash" "the same with &>> and a blank before the target" \
   'echo a &>> /dev/null FOO=1 pip i' 'echo a &pip i'
 pass "unprefixed view: the prefixes a command starts with go, redirections among them, and only at a start"
 
+# A redirection is read where the shell reads one, and every view that drops
+# it drops the same bytes: the operator, the descriptor word glued in front
+# (a number, or bash's {varname}), and the target word as the shell cuts it.
+# The recognizers read the unprefixed view, which blanks a redirection
+# wherever it stands, so they read the statement the spec extractor reads
+# (noredir). Three readings disagreed with the shell here, and each hid an
+# install every shell of its kind runs:
+#
+#   - a target that is a process substitution was cut at its `<`, the empty
+#     word, so `< <(true) pip install x` kept `<(true)` where the command
+#     name stands (bash 3.2, bash 5, zsh);
+#   - `{fd}>/dev/null pip install x` read `{fd}` as the command (bash 5);
+#   - a redirection between the manager and its verb was left in the
+#     recognizers' text, so `pip 2>/dev/null install x` was no install to
+#     them while the extractor read one (every shell).
+#
+# A process substitution runs its body, so the body is a payload, like
+# `$(...)`; the live view keeps it where the target is blanked. zsh reads a
+# `!` after `>` as part of the operator; bash and dash read it as the target,
+# and the bash reading says DIVERGE where that moves the target.
+check_view() { # view readings label input expected
+  local got reading
+  for reading in $2; do
+    got=$(SAFEDEPS_READING="${reading}" capture "$1" "$4")
+    [[ "${got}" == "$5" ]] || fail "$1 (${reading}): $3: [${got}] != expected [$5]"
+  done
+}
+live_view() { shell_lex "$1" live "safedeps:scan-contract"; }
+substs_view() { shell_lex "$1" substs "safedeps:scan-contract"; }
+check_view noredir_view "${all}" "a process substitution target is one word" \
+  '< <(true) pip i' "$(sp 10)pip i"
+check_view noredir_view "${all}" "a process substitution target with a blank and a redirection inside" \
+  'cat > >(sort >/dev/null) x' "cat$(sp 22)x"
+check_view noredir_view "${all}" "a {varname} descriptor is part of its redirection" \
+  '{fd}>/dev/null pip i; pip {a}<&0 i' "$(sp 15)pip i; pip$(sp 8)i"
+check_view noredir_view "${all}" "a number glued after a word is no descriptor, nor is a brace expansion" \
+  'echo a2>f {a,b}>g' 'echo a2   {a,b}  '
+check_view noredir_view "${all}" "a process substitution that is an argument stays" \
+  'cat <(pip i) >(pip i)' 'cat <(pip i) >(pip i)'
+check_view noredir_view "bash dash" "bash and dash read the ! after > as the target" \
+  '>! f pip i' '   f pip i'
+check_view noredir_view "zsh" "zsh reads >! as the operator" \
+  '>! f pip i' "$(sp 5)pip i"
+check_view noredir_view "${all}" "a ! glued to its target is the same bytes in every shell" \
+  '>!f pip i' '    pip i'
+check_view scan_view "${all}" "a descriptor number glued to a heredoc operator is part of it" \
+  $'0<<E pip i\nx\nE' "$(sp 5)pip i"$'\n'"$(sp 3)"
+check_view scan_view "${all}" "so is a {varname}" \
+  $'{fd}<<E pip i\nx\nE' "$(sp 8)pip i"$'\n'"$(sp 3)"
+check_view unprefixed_view "${all}" "a redirection between the manager and its verb is blanked" \
+  'pip 2>/dev/null i' "pip$(sp 13)i"
+check_view unprefixed_view "${all}" "a process substitution target before the command goes" \
+  '< <(true) pip i' 'pip i'
+check_view unprefixed_view "${all}" "a {varname} redirection before the command goes, after an assignment, exec and !" \
+  'FOO=1 {fd}>/dev/null pip i; exec {fd}>&2 pip i; ! {fd}<&0 pip i' 'pip i; pip i; ! pip i'
+check_view unprefixed_view "${all}" "after echo the words stay arguments" \
+  'echo {fd}>/dev/null pip i' "echo$(sp 16)pip i"
+check_view live_view "${all}" "the live view blanks a redirection, so the inert rewrite finds the verb" \
+  'npm 2>/dev/null install x' "npm$(sp 13)install x"
+check_view live_view "${all}" "and keeps the body of a process substitution in its target, which runs" \
+  'npm i > >(npm i x)' "npm i$(sp 5)npm i x "
+check_view substs_view "${all}" "a process substitution body is a payload, an argument or a target" \
+  'cat <(pip i) > >(npm i)' $'pip i\nnpm i\n'
+check_view substs_view "${all}" "nested in a substitution, both bodies" \
+  'cat <(echo $(pip i))' $'echo $(pip i)\npip i\n'
+for form in '>! f pip i' 'pip >! f i' 'echo a >>! f'; do
+  f=$(mktemp "${TMPDIR:-/tmp}/safedeps-diverge.XXXXXX")
+  SAFEDEPS_READING=bash SAFEDEPS_LEX_DIVERGE="${f}" noredir_view "${form}" > /dev/null
+  [[ -s "${f}" ]] || fail "noredir view: the bash reading of [${form}] says no DIVERGE, and zsh reads the word after the blank as the target"
+  rm -f "${f}"
+done
+for form in '>!f pip i' 'pip >/dev/null i' '{fd}>&2 pip i' '< <(true) pip i'; do
+  f=$(mktemp "${TMPDIR:-/tmp}/safedeps-diverge.XXXXXX")
+  SAFEDEPS_READING=bash SAFEDEPS_LEX_DIVERGE="${f}" noredir_view "${form}" > /dev/null
+  [[ ! -s "${f}" ]] || fail "noredir view: the bash reading of [${form}] says DIVERGE, and every shell drops the same bytes"
+  rm -f "${f}"
+done
+pass "redirections: a process substitution target is one word whose body is a payload, a {varname} or number glued in front is part of the operator, a heredoc's too, and the recognizers read them blanked wherever they stand"
+
 # The statement split (command_statements) reads the stmts view and keeps no
 # rule of its own for `&>`. It used to keep an `&` next to `>` inside the
 # statement in every reading, so in the dash reading of `echo a &>/dev/null
@@ -872,6 +951,17 @@ stmts_shell_rows=(
   '{ 2>/dev/null echo RAN; }|RRRRR'
   'echo a &>/dev/null echo RAN >&2|--R-R'
   'echo a &>>/dev/null echo RAN >&2|--R-R'
+  # The redirection reads (measured 2026-10-03): a process substitution
+  # target is one word before the command (dash has none), `{fd}` opens a
+  # descriptor in bash 5 alone where it comes first and in zsh after exec, and
+  # a descriptor word glued to a heredoc is part of it everywhere.
+  '< <(true) echo RAN|RR-R-'
+  '> >(cat) echo RAN >&2|RR-R-'
+  'cat <(echo RAN)|RR-R-'
+  '{fd}>/dev/null echo RAN|---R-'
+  'exec {fd}>/dev/null echo RAN|-R-R-'
+  $'0<<E echo RAN\nx\nE|RRRRR'
+  $'{fd}<<E echo RAN\nx\nE|---R-'
 )
 if [[ "${SAFEDEPS_STMTS_MEASURE:-}" == 1 ]]; then
   stmts_col() { case "$(uname -s)" in Darwin) printf '%s' "${1:0:3}" ;; *) printf '%s%s' "${1:3:1}" "${1:4:1}" ;; esac; }

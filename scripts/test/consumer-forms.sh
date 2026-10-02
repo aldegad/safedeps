@@ -663,6 +663,60 @@ start_rows=(
   'AR13|000100|true &>/dev/null pip install evil==1.0.0'
   'AR15|000100|echo a &>/dev/null env pip install evil==1.0.0'
   'AN1|000100|echo a &>/dev/null npm install evil@1.0.0'
+  # A redirection read the way the shell reads it (measured 2026-10-03, the
+  # shell-reading forms of the same ids; the bash 5 column again on a macOS
+  # build of GNU bash 5.2.37). Its target is one word as the shell cuts it,
+  # a process substitution whole, so the command starts after `<(true)`.
+  # bash 4.1 and later read `{fd}` as a descriptor variable, zsh too after
+  # exec and command; bash 3.2, sh and dash run `{fd}` as a command. Each
+  # passed with no verdict.
+  'W1|110011|< <(true) pip install evil==1.0.0'
+  'W6|110011|> >(cat) pip install evil==1.0.0'
+  'V1|000001|{fd}>/dev/null pip install evil==1.0.0'
+  'V2|000001|{fd}>&2 pip install evil==1.0.0'
+  'V3|000001|{a}>/dev/null {b}>/dev/null pip install evil==1.0.0'
+  'V4|000001|{fd}<&0 pip install evil==1.0.0'
+  'V5|000001|{fd}>>/dev/null pip install evil==1.0.0'
+  'W2|000001|{fd}<<<x pip install evil==1.0.0'
+  'V6|000001|echo a; {fd}>/dev/null pip install evil==1.0.0'
+  'V7|000001|f() { {fd}>/dev/null pip install evil==1.0.0; }; f'
+  'V31|000001|FOO=1 {fd}>/dev/null pip install evil==1.0.0'
+  'V32|000001|! {fd}>/dev/null pip install evil==1.0.0'
+  'V33|000001|{fd}>/dev/null npm_config_global=true pip install evil==1.0.0'
+  'W12|000001|{fd}>/dev/null env pip install evil==1.0.0'
+  'W9|010011|exec {fd}>/dev/null pip install evil==1.0.0'
+  'W10|010011|command {fd}>/dev/null pip install evil==1.0.0'
+  $'HD1|111111|0<<E pip install evil==1.0.0\nx\nE'
+  $'HD2|000001|{fd}<<E pip install evil==1.0.0\nx\nE'
+  'VN1|000001|{fd}>/dev/null npm install evil@1.0.0'
+  'VN6|000001|echo a; {fd}>/dev/null npm install evil@1.0.0'
+  # A redirection between the manager and its arguments. Every shell passes
+  # the arguments unchanged (a stub that marks only the exact arguments ran
+  # in each), and the recognizers read the redirection where it stood, in
+  # every ecosystem. zsh alone reads `>! /dev/null` as one redirection.
+  'RM1|111111|pip 2>/dev/null install evil==1.0.0'
+  'RM1b|111111|pip3 2>/dev/null install evil==1.0.0'
+  'RM2|010011|pip {fd}>/dev/null install evil==1.0.0'
+  'RM3|111111|pip </dev/null install evil==1.0.0'
+  'RM4|111111|npm >/dev/null install evil@1.0.0'
+  'RM5|111111|npm 2>&1 install evil@1.0.0'
+  'RM5b|111111|npm 2>/dev/null install evil@1.0.0'
+  'RM2b|010011|npm {fd}>/dev/null install evil@1.0.0'
+  'RM5c|111111|cargo 2>&1 add evil@1.0.0'
+  'RM4b|111111|gem >/dev/null install evil -v 1.0.0'
+  'RM1c|111111|pnpm 2>/dev/null add evil@1.0.0'
+  'RM1d|111111|go 2>/dev/null get example.test/evil@v1.0.0'
+  'ZB1|010010|pip >! /dev/null install evil==1.0.0'
+  # A process substitution runs its body. The recognizer read the install
+  # in it, and the spec extractor never saw it, so each of these passed with
+  # no ledger check on main and on v2.18.0 (the npm form with only
+  # --ignore-scripts). dash and sh have no process substitution.
+  'PA1|110011|cat <(pip install evil==1.0.0)'
+  'PA2|110011|tee >(pip install evil==1.0.0) </dev/null'
+  'PA3|110011|diff <(cargo add evil@1.0.0) /dev/null'
+  'PA4|110011|cat <(true; pip install evil==1.0.0)'
+  'PA5|110011|cat <(npm install evil@1.0.0)'
+  'PA6|110011|cat < <(pip install evil==1.0.0)'
 )
 for start_row in "${start_rows[@]}"; do
   start_ran="${start_row#*|}" start_ran="${start_ran%%|*}" start_form="${start_row#*|*|}"
@@ -802,6 +856,55 @@ do
     || fail "an npm install at a start only some shells read is UNDECIDED, not rewritten for one: ${inert_form} (got: ${got:0:120})"
 done
 pass "the inert rewrite reaches an npm install at every statement start the readings agree on, and is UNDECIDED where they do not"
+
+# A redirection between npm and its verb, a {varname} or a process
+# substitution target before it: the rewrite finds the verb in the live view,
+# where the redirection is blank, and puts the flag after it in the command as
+# written. Before, none of these was an install to the recognizers, and npm
+# ran the lifecycle scripts. A process substitution body is code the shell
+# runs, so its npm install gets the flag where it stands.
+for rewrite_row in \
+  'npm 2>/dev/null install evil|npm 2>/dev/null install --ignore-scripts evil' \
+  'npm >/dev/null install evil|npm >/dev/null install --ignore-scripts evil' \
+  'npm {fd}>/dev/null install evil|npm {fd}>/dev/null install --ignore-scripts evil' \
+  '< <(true) npm install evil|< <(true) npm install --ignore-scripts evil' \
+  '> >(cat) npm install evil|> >(cat) npm install --ignore-scripts evil' \
+  '{fd}>/dev/null npm install evil|{fd}>/dev/null npm install evil --ignore-scripts' \
+  'cat <(npm install evil)|cat <(npm install --ignore-scripts evil)' \
+  'npm install evil > >(npm install other)|npm install --ignore-scripts evil > >(npm install --ignore-scripts other)'
+do
+  got=$(gate_rewrite "${rewrite_row%%|*}")
+  [[ "${got}" == "${rewrite_row#*|}" ]] || fail "the rewrite lands after the verb: ${rewrite_row%%|*} (got: ${got})"
+done
+# A redirection target is no flag. `--ignore-scripts` as the file stdout goes
+# to read as an install that already had the flag, so it got no rewrite and
+# npm ran the lifecycle scripts (v2.18.0 and before). The flag is appended,
+# after the target, where npm reads it.
+got=$(gate_rewrite 'npm install evil > --ignore-scripts')
+[[ "${got}" == 'npm install evil > --ignore-scripts --ignore-scripts' ]] \
+  || fail "a redirection target named --ignore-scripts is not the flag (got: ${got})"
+pass "the inert rewrite finds an npm verb behind a redirection, and a redirection target is not the flag"
+
+# Plain process substitutions and redirections around commands that install
+# nothing stay unjudged and unrecorded, as before.
+for plain in \
+  'diff <(sort a) <(sort b)' \
+  'while read l; do echo "$l"; done < <(ls)' \
+  'tee >(wc -l) < /dev/null' \
+  'cat < <(printf "%s\n" "pip install evil==1.0.0")' \
+  'echo pip 2>/dev/null install evil==1.0.0' \
+  'echo {fd}>/dev/null pip install evil==1.0.0' \
+  'echo a2>/dev/null pip install evil==1.0.0' \
+  'grep -r "npm install" . 2>/dev/null' \
+  'npm run build 2>&1' \
+  'pip --version 2>/dev/null' \
+  'echo "2>/dev/null pip install evil==1.0.0"' \
+  $'cat <<EOF\npip install evil==1.0.0\nEOF'
+do
+  expect_pass "a redirection or a process substitution with no install: ${plain}" "${plain}"
+  if logged_ungated "${plain}"; then fail "no UNGATED record for ${plain}"; fi
+done
+pass "plain process substitutions and redirections stay unjudged and unrecorded"
 
 # An assignment prefix is one word however its value is quoted or nested. The
 # prefix stripper read a value as the bytes up to the first blank or quote, so
