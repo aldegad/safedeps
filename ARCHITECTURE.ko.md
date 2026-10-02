@@ -383,7 +383,9 @@ install 완료 → safedeps-post-verify.sh
    실제 closure 읽기: package-lock.json + node_modules/.package-lock.json
    모든 pkg@version 을 ledger(direct entry + transitive_specs)와 대조
    전체 closure 를 OSV batch 로 재조회
-   install script + native binary 검사 (v1 reorg-guard 로직)
+   설치가 두 기록 중 어디에든 새로 들인 것을 명령 전 기록과 대조해
+     검사: install script, resolved 출처 (v1 reorg-guard 로직)
+   native binary 검사
         │
         ├─ 전부 승인·clean·무의심 ──► CONFIRM (새 안전 baseline)
         └─ 미승인 / 취약 / 의심 ──► REORG:
@@ -446,6 +448,12 @@ rebuild 는 게이트가 읽은 트리만 다룬다. `--global=false --location=
 
 그리고 `node_modules` 에 `.package-lock.json` 이 없거나, npm 이 rebuild 할 트리에 어느 lockfile 에도 기록되지 않은 패키지나 패키지 버전이 있으면 rebuild 를 경고와 함께 건너뛴다. 그 트리에 무엇이 있는지는 같은 플래그로 npm 에게 묻는다. `npm query '*'` 는 `npm rebuild` 와 같은 방식으로 트리를 읽어 모든 패키지를 위치·이름·버전으로 답하고, 각각을 두 lockfile 이 그 위치에 기록한 것과 대조한다. 이것은 bash 로 `node_modules` 를 걷던 방식을 대신했는데, 그 방식은 두 번 npm 이 rebuild 하는 것보다 적게 걸었다. 하나는 기록된 키를 그 아래 패키지로 여긴 것이다. 프로젝트 `.npmrc` 에 `global=0` 이 있을 때 `npm install x` 는 기록된 1.0.0 위에 1.0.1 을 쓰고 두 lockfile 은 1.0.0 으로 남겼다. 그래서 게이트는 승인된 버전을 읽었고, `npm rebuild` 는 다른 버전의 스크립트를 돌렸다. 다른 하나는 링크에서 멈춘 것이다. `npm rebuild` 는 `file:` 의존성을 따라 그 대상의 `node_modules` 까지 rebuild 하는데, 프로젝트의 어느 lockfile 도 그것을 기록하지 않는다. 그래서 프로젝트의 승인된 설치가 링크된 라이브러리에 기록 없이 놓인 패키지의 스크립트를 돌렸다(검증 2회차, F2). npm 의 질의는 그 패키지를 `../lib/node_modules/x` 로 답하고, 경고가 그것을 지목한다. 링크는 거기서 노드가 아니고, 그 대상이 노드다. 이름은 lockfile 이 이름을 기록했거나 위치가 이름을 함의할 때 대조하며, `npm:` 별칭에 그것이 필요하다. 질의가 실패하거나 10초 안에 답하지 않아도 rebuild 를 건너뛴다. 그때는 트리를 모른다. `npm query` 는 npm 8.16 이상이 필요하고, 그보다 오래된 npm 에서는 모든 rebuild 가 그 경고와 함께 건너뛰어진다. 건너뛴 rebuild 는 경고이지 롤백이 아니다. 기록 밖의 설치는 이미 `UNGATED` 로 기록돼 있고, 이런 설치에 집행을 걸지는 따로 정할 일이다.
 
+**출처 검사와 설치 스크립트 검사는 설치가 새로 들인 것을 두 기록 모두에서 읽는다.** 두 검사는 예전에 `package-lock.json` 이나 `package.json` 이 바뀔 때만 돌았고, 숨은 lockfile 을 읽는 것은 closure 검사뿐이었다. 아무것도 저장하지 않는 설치는 두 파일 모두 바꾸지 않는다. 그래서 승인된 이름과 버전을 단 tarball 이 `file:` 경로, http URL, 또는 tarball 인자에서 `--no-save` 나 `npm_config_save=false` 와 함께 오면 두 검사를 통과했고, 무실행 rebuild 가 그 스크립트를 돌렸다. 저장했다면 휴리스틱이 걸러 냈을 설치 스크립트를 가진 승인 패키지도 마찬가지였다(검증자 4회차). closure 는 도움이 되지 않았다. closure 는 패키지를 이름과 버전으로 가리키고, rebuild 전제조건도 그렇기 때문이다.
+
+이제 두 검사는 두 기록 중 하나가 담고 있지만 명령 전 어느 기록에도 없던 것을 읽는다(`collect_npm_new_records`, `safedeps_npm_new_records`). pre-guard 는 원래 떠 두던 `package-lock.json` 사본 옆에 `node_modules/.package-lock.json` 사본도 떠 둔다. 임시 이름을 거쳐 복사하고 원본은 건드리지 않는다. 원본의 mtime 과 inode 가 설치 흔적이기 때문이다. 출처는 이전 기록 어디에도 그 resolved URL 이 없을 때 새것이다. 설치된 패키지는 이전 기록 어디에도 같은 키에 같은 버전·resolved URL·integrity 로 없을 때 새것이다. 그래서 승인된 설치 위에 같은 경로로 덮어쓴 tarball 도 새것으로 센다. 새 출처는 비표준·비보안 URL 검사로 가고, 새 패키지의 `package.json` 은 설치 스크립트 휴리스틱으로 간다. 이 파일들은 `jq` 한 번으로 읽는다. 50개 기준 개수 검사는 `package-lock.json` 에만 남는다. 이전 기록이 없으면 의존성이 50개를 넘는 프로젝트의 첫 설치가 모두 그 기준을 넘기 때문이다.
+
+이전 기록 둘은 차례로가 아니라 함께 읽는다. 트리 기록을 먼저 대조하면 `package-lock.json` 이 다른 플랫폼용으로 적어 둔 선택 패키지를 설치할 때마다 다시 들이는 것으로 읽힌다. 그리고 동료에게서 pull 한 lockfile 의 새 출처가 다음 `npm ci` 에서 새것으로 읽히는데, 이는 아래의 커밋된 lockfile 경우다. 링크는 뺀다. 링크의 `resolved` 는 프로젝트의 디렉터리를 가리키기 때문이다. lockfile 도 설치된 트리도 없는 프로젝트에는 이전 기록이 없으므로, 첫 설치가 들인 것은 전부 새것이다.
+
 워크스페이스에서는 루트 lockfile 이 각 멤버를 경로(`packages/a`)로 기록한다. 폐쇄성은 `node_modules` 밖의 키를 모두 건너뛴다. 그 키들은 패키지 이름이 아니라 프로젝트의 디렉터리이기 때문이다. 패키지 이름으로 읽으면 `packages/a` 가 미승인 패키지 `packages` 가 됐다. 그리고 멤버에 설치하면 멤버의 `package.json` 이 바뀌므로, 스냅샷은 모든 멤버의 manifest 를 보관한다. 그게 없을 때 `npm install x -w packages/a` 의 롤백은 루트 lockfile 을 복원했고, `npm ci` 가 멤버의 새 의존성 때문에 거부했으며, 대체 재설치가 `x` 를 다시 놓았다.
 
 스냅샷은 설치가 쓸 것 같은 멤버가 아니라 모든 멤버를 보관한다. `npm install` 이 어느 멤버를 쓰는지는 npm 이 정할 일이고, 그것을 추측하면 npm 규칙을 bash 로 옮긴 사본이 하나 더 생긴다. 그 비용을 감당하게 하는 것은 프로세스 수다. 모든 manifest 가 `tar` 복사 한 번으로 `<snapshot id>_members/` 에 들어가고 `shasum` 한 번으로 해시된다. 그래서 훅은 멤버 10개에서도 1000개에서도 같은 프로세스를 띄운다. `scripts/test/workspace-snapshot-count.sh` 가 `PATH` 의 모든 명령에 심을 끼워 그 수를 센다. 시간과 달리 이 수는 부하에 흔들리지 않는다. 멤버마다 `cp` 와 `shasum` 을 하나씩 돌리던 때는 멤버 1000개 워크스페이스의 판정에 20-33초가 걸렸다. 런타임의 30초 kill 을 넘는 시간이고, 그러면 명령이 판정 없이 실행된다. 한 머신(macOS arm64, npm 11.19.0)에서 `scripts/measure/npm-ask-cost.sh` 로 잰 pre-guard 전체 시간은 바꾸기 전 멤버 100·300·1000개에서 2.7초·5.5초·19.5초(부하 18-21), 바꾼 뒤 중앙값 0.9초·1.0초·1.7초(부하 22-31)였다. 다른 곳에 인용하기 전에 다시 재야 한다. 복사가 실패하면 되돌릴 방법 없이 설치를 돌리지 않고, 판정 불가로 거부한다.
@@ -459,6 +467,7 @@ rebuild 는 게이트가 읽은 트리만 다룬다. `--global=false --location=
 - `.npmrc` 가 옮기거나 기록 밖에 둔 설치. 그런 설치는 `UNGATED` 로 기록하되 검사하지는 않는다. npm 이 읽는 어느 `.npmrc` 에서든 전역 트리는 npm 이 답하고, 프로젝트 설치를 기록 밖에 두는 설정은 프로젝트와 사용자의 `.npmrc` 에서 읽는다. 전역 npmrc 와 내장 npmrc 의 그런 설정은 읽지 않으므로, 거기서 기록 밖에 둔 설치는 기록되지 않는다. 어느 쪽이든 패키지와 바이너리는 검증 없이 놓인다. 스크립트는 돌지 않는다. 설치는 무실행이고, npm 이 rebuild 할 트리에 어느 lockfile 에도 기록되지 않은 패키지나 패키지 버전이 있으면 rebuild 를 건너뛴다.
 - 게이트가 본 곳에 흔적을 남기지 않은 npm 설치. 텍스트에 드러나지 않은 무언가가 다른 곳으로 보낸 설치, 그리고 설치 디렉터리를 npm 에게 물을 수 없었는데(훅의 `PATH` 에 npm 이 없거나, 실패하거나, 8초 안에 답하지 않거나, 셸이 실행 시점에 정하는 값을 받은 경우) cwd 에 떨어지지 않은 설치다. `UNGATED` 로 기록하되 검사하지는 않는다. dry run 과 실패한 설치도 같은 기록이 된다. 흔적으로는 둘을 구별할 수 없기 때문이다.
 - 설치가 남기지 않은 흔적. 흔적은 명령의 것이 아니라 디렉터리의 것이다. 명령이 도는 동안 같은 디렉터리에 다른 npm 이 쓰면 흔적이 생기고, 명령이 스스로 lockfile 을 건드려도 생긴다. 뒤의 것은 같은 사용자 공격자이고, 원장의 경계와 같은 경계다. 초 단위 mtime 만 남기는 파일 시스템에서는 기준 파일의 초 안에 쓰인 lockfile 이 흔적으로 보이지 않으므로, 거기서는 그 설치가 `UNGATED` 로 기록된다. 소음이지 통과가 아니다.
+- 커밋된 lockfile 의 출처. 출처 검사는 설치가 새로 들인 것을 명령 전의 기록과 대조해 읽고, 커밋된 `package-lock.json` 도 그 기록 중 하나다. 그래서 새로 clone 한 곳의 `npm ci`, 또는 lockfile 을 따르는 맨 `npm install` 은 lockfile 이 적은 출처를 그대로 설치한다. 승인된 이름과 버전을 다른 tarball 로 보내도록 고친 출처도 포함되고, 무실행 rebuild 가 그 tarball 의 스크립트를 돌린다. 없는 이전 기록을 빈 기록으로 읽으면 이것을 잡지만, 사설 registry, git URL, tarball 에서 설치하는 모든 프로젝트의 첫 `npm ci` 도 롤백된다. 출처를 승인할 길이 아직 없으므로 그것은 사용자에게 보이는 정책 변경이고, 다음 릴리스로 남긴다.
 - lockfile 을 쓰는 npm 문장 둘 사이에 무언가가 있으면, 둘 다 게이트가 본 곳에 떨어졌더라도 `UNGATED` 로 기록된다. 규칙은 그 둘을 구별하지 못하고, 기록 쪽으로 틀린다.
 - Codex CLI 에서는 흔적을 남기지 않은 설치가 떨어진 곳에서 이미 스크립트를 돌렸다. 남는 것은 기록뿐이다(기존 Codex 비대칭).
 - 설정된 Claude/Codex hook 경로 밖에서 사람이 직접 실행한 package-manager install. 이런 변경은 release-time gate 가 backstop 으로 잡을 수 있지만, install-time approval 을 증명하지는 않는다.
