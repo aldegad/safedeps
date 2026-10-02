@@ -7,6 +7,11 @@ set -euo pipefail
 GUARD_DIR="${SAFEDEPS_HOME:-${HOME}/.safedeps}"
 SNAPSHOT_DIR="${GUARD_DIR}/snapshots"
 STATE_LOCK_DIR="${GUARD_DIR}/state.lock"
+# The bytes whose install scripts safedeps withholds, by integrity, for every
+# project on this machine (record_npm_withheld). Derived from SAFEDEPS_HOME and
+# nothing else, as advisory.log is: a path the environment could move apart
+# from the ledger would let the same environment drop the record.
+NPM_WITHHELD_DIR="${GUARD_DIR}/npm-withheld"
 
 SAFEDEPS_LOCK_FILES=(
   "package-lock.json"
@@ -596,6 +601,38 @@ npm_fetch_facts_load() {
     || NPM_FETCH_FACTS='[{"unknown":"safedeps could not read npm'"'"'s answers about which registry this install fetches from"}]'
 }
 
+# An origin from sd_fetch_origins as one line of text: the registry, or
+# `?<why>` where npm did not say. The rebuild's warning and the record of
+# withheld bytes name it the same way.
+NPM_ORIGIN_TEXT_JQ='
+  def sd_origin_text:
+    if .unknown != null then "?" + (.unknown | tostring)
+    elif .scope != null then "\(.registry) (npm'"'"'s \(.scope):registry)"
+    else .registry // "a registry npm will not print" end;
+'
+
+# The record of withheld bytes (record_npm_withheld), read into <out> as one
+# JSON object: integrity -> {package, origins, project, at, inert}, the earliest
+# record of each. Returns 1 with the reason when the record is there and
+# cannot be read in full: then nothing can say a tree holds none of those
+# bytes, and the caller does not rebuild. One find, one cat and one jq, and
+# none of them when nothing was ever withheld.
+npm_withheld_read() {
+  local out="$1"
+  if [[ ! -e "${NPM_WITHHELD_DIR}" ]]; then
+    printf '{}\n' > "${out}"
+    return 0
+  fi
+  if [[ ! -d "${NPM_WITHHELD_DIR}" ]] \
+      || ! find "${NPM_WITHHELD_DIR}" -maxdepth 1 -type f -name '*.json' -exec cat {} + 2>/dev/null \
+        | jq -cs 'reduce (.[] | to_entries[]) as $e ({};
+            if .[$e.key] == null or ((.[$e.key].at // 0) > ($e.value.at // 0)) then .[$e.key] = $e.value else . end)' \
+          > "${out}" 2>/dev/null; then
+    printf 'safedeps could not read its record of the bytes it withheld in %s\n' "${NPM_WITHHELD_DIR}"
+    return 1
+  fi
+}
+
 # `npm rebuild` runs the lifecycle scripts of every package in the tree it
 # rebuilds, and so did the rollback's `npm ci`. Both run over the whole tree.
 # What allowed them used to be a judgment of the change: nothing this command
@@ -631,6 +668,21 @@ npm_fetch_facts_load() {
 #     member the project's package.json declares as a workspace. Any other
 #     directory is code nobody approved: a `file:` dependency, or one an
 #     earlier unrecorded install linked.
+#   - No package under node_modules may hold bytes safedeps withheld: bytes an
+#     earlier install fetched where npm did not say it fetched from the public
+#     registry, recorded by integrity when that install was seen
+#     (record_npm_withheld). npm's answer about this command says nothing
+#     about an earlier fetch, and three readings that answered "where did these
+#     bytes come from" with something other than the bytes failed in a row:
+#     the lockfile's `inBundle`, its `resolved`, and the configuration at
+#     rebuild time. Once the configuration that fetched them was gone (a
+#     one-shot environment, a removed .npmrc), an approved install, a bare
+#     `npm install`, an `npm ci` from npm's cache, a rollback to a snapshot
+#     confirmed with them in it, and another project's `npm ci` of the same
+#     lockfile each rebuilt them and ran their scripts. Integrity is the one
+#     value npm binds to the bytes: it checks them against it and its cache
+#     is keyed by it. So a record on the public registry with no integrity
+#     does not pass either: nothing can match it against the record.
 #
 # A bundled package has no source of its own: it came inside its parent's
 # tarball. Which packages are bundled is read from the tree, never from a
@@ -665,18 +717,22 @@ npm_fetch_facts_load() {
 # a node of its own there; its target is. The rebuild also has to stay in the
 # project (NPM_PROJECT_SCOPE above).
 #
+# <withheld> is the record of withheld bytes as npm_withheld_read wrote it.
 # Prints what fails, one per line as `<kind><TAB><what>`: `unrecorded`,
 # `source`, `fetched` (recorded on the public registry, but npm fetches it from
-# somewhere else, or could not say) or `directory`. Each `fetched` is followed
-# by `origin<TAB><name><TAB><registry>` lines that name where npm fetched it
-# from, or `?<why>` where npm did not say. Returns 0. Returns 1 with the reason when npm could
+# somewhere else, or could not say), `withheld` (bytes safedeps withheld),
+# `nointegrity` (recorded on the public registry with no integrity) or
+# `directory`. Each `fetched` is followed by `origin<TAB><name><TAB><registry>`
+# lines that name where npm fetched it from, or `?<why>` where npm did not say,
+# and each `withheld` by `held<TAB><name><TAB><where from><TAB><project>` lines
+# from the record. Returns 0. Returns 1 with the reason when npm could
 # not be asked or did not answer: then the tree is not known, and the caller
 # must not rebuild it. It starts one npm and one jq, plus two more jq when a
 # nested package has no public source of its own (to read what its parents
 # bundle, and to judge again with that), and one subshell and the workspace
 # reader when the tree holds a directory outside node_modules.
 npm_rebuild_unrecorded() {
-  local dir="$1" tmp lockfile rc
+  local dir="$1" withheld="$2" tmp lockfile rc
   local -a lockfiles=()
   if [[ -z "${NPM_FETCH_FACTS}" ]]; then
     printf 'safedeps did not ask npm which registry this tree came from\n'
@@ -727,11 +783,13 @@ npm_rebuild_unrecorded() {
       def public_url: (.resolved | type) == "string" and (.resolved | test($public; "i"));
       def fetch_problems: if public_url then sd_fetch_problems($facts; .resolved) else [] end;
       def public_source: public_url and (fetch_problems | length) == 0;
+      def tokens: [.integrity | strings | splits("\\s+") | select(. != "")];
       ([inputs | (.packages // {}) | to_entries[] | select(.key != "")]
         | group_by(.key) | map({key: .[0].key, value: map(.value)}) | from_entries) as $records
       | if ($query | length) != 1 or ($query[0] | type) != "array" then error("npm query did not answer with a list") else . end
       | ([$query[0][] | select(type == "object" and (.location // "") != "") | {key: .location, value: .}] | from_entries) as $nodes
       | ($bundles[0]) as $bundled
+      | ($withheld[0]) as $wh
       # What fails at <key>, as one line, or null when it passes.
       | def verdict($key):
           $nodes[$key] as $node
@@ -748,7 +806,17 @@ npm_rebuild_unrecorded() {
               "unrecorded\t\($key) (\($here) on disk, the lockfile records \([$recs[] | "\(recorded_name($key; .) // "?")@\(.version // "?")"] | unique | join(" or ")))"
             elif ($key | test("(^|/)node_modules/") | not) then
               "candidate\t\($key)\t\($key) (\($here))"
-            elif all($recs[]; public_source) then null
+            elif all($recs[]; public_source) then
+              # On the public registry by every record and by what npm said
+              # about this command. Where the bytes were first fetched from is
+              # not in either: it is what safedeps recorded when it saw them
+              # (record_npm_withheld), keyed by the integrity npm checks them
+              # against, and it is looked up rather than inferred again.
+              if any($recs[]; tokens[] | $wh[.] != null) then
+                "withheld\t\($key) (\($here))"
+              elif any($recs[]; tokens | length == 0) then
+                "nointegrity\t\($key) (\($here))"
+              else null end
             else
               ([$key | capture("^(?<parent>.*node_modules/.+)/node_modules/(?<name>(@[^/]+/)?[^/]+)$")] | first) as $at
               | if $at != null and $bundled == null then
@@ -769,16 +837,23 @@ npm_rebuild_unrecorded() {
       def origins($key):
           ($nodes[$key].name // "?") as $name
           | [($records[$key] // [])[] | sd_fetch_origins($facts; .resolved)[]] | unique[]
-          | "origin\t\($name)\t\(if .unknown != null then "?" + (.unknown | tostring)
-              elif .scope != null then "\(.registry) (npm'"'"'s \(.scope):registry)"
-              else .registry // "a registry npm will not print" end)";
+          | "origin\t\($name)\t\(sd_origin_text)";
+      # The bytes safedeps withheld that are at <key>, one line per record, as
+      # `held<TAB><name><TAB><where from><TAB><first project>`.
+      def held($key):
+          ($nodes[$key].name // "?") as $name
+          | [($records[$key] // [])[] | tokens[] | $wh[.] // empty
+             | {project: (.project // "?" | tostring)} + (.origins // ["?the record does not say"] | if type == "array" then .[] else . end | {origin: tostring})]
+          | unique[]
+          | "held\t\($name)\t\(.origin)\t\(.project)";
         $query[0][] | select(type == "object" and (.location // "") != "") | .location as $loc
         | verdict($loc) | select(. != null)
-        | ., (if startswith("fetched\t") then origins($loc) else empty end)
+        | ., (if startswith("fetched\t") then origins($loc)
+              elif startswith("withheld\t") then held($loc) else empty end)
     '
   printf 'null\n' > "${tmp}/bundles"
-  judge="${SAFEDEPS_NPM_FETCH_JQ}${judge}"
-  if ! jq -rn --slurpfile query "${tmp}/query" --slurpfile bundles "${tmp}/bundles" \
+  judge="${SAFEDEPS_NPM_FETCH_JQ}${NPM_ORIGIN_TEXT_JQ}${judge}"
+  if ! jq -rn --slurpfile query "${tmp}/query" --slurpfile bundles "${tmp}/bundles" --slurpfile withheld "${withheld}" \
       --arg public "${SAFEDEPS_NPM_PUBLIC_REGISTRY_RE}" --argjson facts "${NPM_FETCH_FACTS}" "${judge}" \
       "${lockfiles[@]+"${lockfiles[@]}"}" < /dev/null > "${tmp}/found" 2>/dev/null; then
     printf 'npm query answered with something safedeps could not compare with the lockfiles\n'
@@ -787,7 +862,7 @@ npm_rebuild_unrecorded() {
   fi
   if grep -q '^nested' "${tmp}/found"; then
     grep '^nested' "${tmp}/found" | cut -f2 | npm_bundled_names "${dir}" > "${tmp}/bundles"
-    if ! jq -rn --slurpfile query "${tmp}/query" --slurpfile bundles "${tmp}/bundles" \
+    if ! jq -rn --slurpfile query "${tmp}/query" --slurpfile bundles "${tmp}/bundles" --slurpfile withheld "${withheld}" \
         --arg public "${SAFEDEPS_NPM_PUBLIC_REGISTRY_RE}" --argjson facts "${NPM_FETCH_FACTS}" "${judge}" \
         "${lockfiles[@]+"${lockfiles[@]}"}" < /dev/null > "${tmp}/found" 2>/dev/null; then
       printf 'npm query answered with something safedeps could not compare with the lockfiles\n'
@@ -828,13 +903,15 @@ npm_rebuild_unrecorded() {
 # What npm_rebuild_unrecorded found, as one clause per kind for a warning.
 describe_rebuild_blockers() {
   local kind clauses="" list
-  for kind in unrecorded source fetched directory; do
+  for kind in unrecorded source fetched withheld nointegrity directory; do
     list=$(grep "^${kind}"$'\t' <<< "$1" | cut -f2- | paste -sd';' - | sed 's/;/; /g') || true
     [[ -n "${list}" ]] || continue
     case "${kind}" in
       unrecorded) list="a package, or a version of one, that neither lockfile records (${list})" ;;
       source) list="a package not recorded as coming from the public registry (${list})" ;;
       fetched) list="a package recorded on the public registry that safedeps cannot tell npm fetched from there (${list})" ;;
+      withheld) list="a package whose bytes safedeps withheld when an earlier install fetched them (${list})" ;;
+      nointegrity) list="a package recorded on the public registry with no integrity, so safedeps cannot tell its bytes from ones it withheld (${list})" ;;
       directory) list="a directory that is not a declared workspace member (${list})" ;;
     esac
     clauses+="${clauses:+, and }${list}"
@@ -859,19 +936,54 @@ describe_fetched_elsewhere() {
     trust="where they came from"
   fi
   printf '%s' "install scripts were not run in ${PROJECT_DIR} because ${where}. The install is kept. If you trust ${trust}, confirm with the user before running \`npm rebuild ${names}\` yourself; do not rebuild without asking"
+  [[ ${#NPM_WITHHELD_RECORDED[@]} -eq 0 ]] || printf '. %s' "$(npm_withheld_scope)"
+}
+
+# What a record of withheld bytes means, said the same way wherever a warning
+# names one: there is no way to release it in this version.
+npm_withheld_scope() {
+  printf '%s' "safedeps has recorded these bytes and withholds their install scripts in every project on this machine. This version has no way to release them: no tree that holds them is rebuilt automatically until a later release can approve a registry"
+}
+
+# The warning for the `withheld` packages npm_rebuild_unrecorded found: where
+# the record says their bytes were first fetched from, and into which project.
+describe_withheld() {
+  local names registries unknown projects where trust="that registry"
+  names=$(grep '^held'$'\t' <<< "$1" | cut -f2 | sort -u | paste -sd' ' -) || true
+  registries=$(grep '^held'$'\t' <<< "$1" | cut -f3 | grep -v '^?' | sort -u | paste -sd';' - | sed 's/;/, /g') || true
+  unknown=$(grep '^held'$'\t' <<< "$1" | cut -f3 | grep '^?' | cut -c2- | sort -u | paste -sd';' - | sed 's/;/; /g') || true
+  projects=$(grep '^held'$'\t' <<< "$1" | cut -f4 | sort -u | paste -sd';' - | sed 's/;/, /g') || true
+  if [[ -n "${registries}" ]]; then
+    where="from ${registries}, which is not the public npm registry"
+    [[ -z "${unknown}" ]] || where+=", or from a registry safedeps could not name (${unknown})"
+  else
+    where="from a registry safedeps could not name (${unknown:-the record does not say})"
+    trust="where they came from"
+  fi
+  printf '%s' "install scripts were not run in ${PROJECT_DIR} because the bytes of ${names} here are the ones an install in ${projects} first fetched ${where}. They are kept. $(npm_withheld_scope). If you trust ${trust}, confirm with the user before running \`npm rebuild ${names}\` yourself; do not rebuild without asking"
 }
 
 # Runs `npm rebuild` in PROJECT_DIR when npm_rebuild_unrecorded finds nothing in
 # the tree, and tells the user why not otherwise. <when> names the rebuild in
 # what is recorded: after an install, or after a rollback.
 npm_rebuild_vouched() {
-  local when="$1" blockers clauses
+  local when="$1" blockers clauses withheld
   npm_fetch_facts_load
-  if ! blockers=$(npm_rebuild_unrecorded "${PROJECT_DIR}"); then
+  withheld=$(mktemp "${TMPDIR:-/tmp}/safedeps-post-withheld.XXXXXX") || withheld=""
+  if [[ -z "${withheld}" ]] || ! blockers=$(npm_withheld_read "${withheld}"); then
+    blockers="${blockers:-safedeps could not make a scratch file to read it}"
+    [[ -z "${withheld}" ]] || rm -f "${withheld}"
+    log_advisory "post-verify: npm rebuild ${when} skipped in ${PROJECT_DIR} — ${blockers}, so it cannot tell that tree holds none of them."
+    ROLLBACK_WARNINGS+=("npm rebuild was not run: ${blockers}, so it could not tell that the tree holds none of them. Install scripts have not run; review node_modules, then run \`npm rebuild\` yourself if it is what you expect")
+    return 0
+  fi
+  if ! blockers=$(npm_rebuild_unrecorded "${PROJECT_DIR}" "${withheld}"); then
+    rm -f "${withheld}"
     log_advisory "post-verify: npm rebuild ${when} skipped in ${PROJECT_DIR} — safedeps asked npm which packages a rebuild would run over and got no answer (${blockers}), so it cannot tell that tree is one it can vouch for."
     ROLLBACK_WARNINGS+=("npm rebuild was not run: safedeps asked npm which packages it would rebuild and got no answer (${blockers}), so it could not tell they are the ones it read. Install scripts have not run; review node_modules, then run \`npm rebuild\` yourself if it is what you expect")
     return 0
   fi
+  rm -f "${withheld}"
   if [[ -n "${blockers}" ]]; then
     clauses=$(describe_rebuild_blockers "${blockers}")
     log_advisory "post-verify: npm rebuild ${when} skipped in ${PROJECT_DIR} — the tree npm would rebuild holds ${clauses}."
@@ -882,7 +994,8 @@ npm_rebuild_vouched() {
     # rebuild: an agent reading "run npm rebuild yourself" would otherwise
     # run the very scripts this check withheld.
     grep -q '^fetched' <<< "${blockers}" && ROLLBACK_WARNINGS+=("$(describe_fetched_elsewhere "${blockers}")")
-    clauses=$(grep -v '^fetched' <<< "${blockers}" | grep -v '^origin' || true)
+    grep -q '^withheld' <<< "${blockers}" && ROLLBACK_WARNINGS+=("$(describe_withheld "${blockers}")")
+    clauses=$(grep -vE '^(fetched|origin|withheld|held)'$'\t' <<< "${blockers}" || true)
     [[ -z "${clauses}" ]] && return 0
     clauses=$(describe_rebuild_blockers "${clauses}")
     ROLLBACK_WARNINGS+=("npm rebuild was not run: the tree npm would rebuild in ${PROJECT_DIR} holds ${clauses}. safedeps runs install scripts only over a tree whose every package is on record and comes from the public registry or a declared workspace member. Install scripts have not run; review it, then run \`npm rebuild\` yourself if it is what you expect")
@@ -1546,6 +1659,107 @@ npm_workspace_member_dirs() {
   ) <<< "${listing#ok}"
 }
 
+# Bytes npm did not say it fetched from the public registry are kept and their
+# install scripts withheld (check_npm_new_sources, npm_rebuild_vouched). Where
+# bytes came from is a fact of the fetch, and only the run that saw the fetch
+# can know it. The next command reads the same records under another
+# configuration, and npm's cache hands the same bytes, by integrity, to any
+# project on this machine. Inferring it again later is what failed: once the
+# configuration that fetched them was gone, the next approved install rebuilt
+# them and ran their scripts (safedeps/effect-gate-blind-to-lockless-npm-installs).
+# So the fact is recorded here, keyed by integrity, the one value npm binds to
+# the bytes, and the rebuild's predicate looks it up (npm_rebuild_unrecorded).
+#
+# What is recorded: each integrity in either npm record that no record held
+# before the command (an integrity already on record is the same bytes from
+# any registry, or npm refuses them), where npm did not say the bytes came from
+# the public registry: a record on it that npm says it fetched from elsewhere
+# or could not say, a source off it, or no source, which npm fetches from the
+# registry it is configured with. Both engines record. Machine-wide, because
+# the cache that carries the bytes to other projects is; a per-project record
+# missed another project's `npm ci` of the same lockfile.
+#
+# One file per run, written under a temporary name and renamed, so a reader
+# sees all of it or none of it and two runs never write the same file. Nothing
+# releases a record in this version. It starts two jq, and the post hook's
+# question to npm about the registry only when the install brought in an
+# integrity, which the rebuild asks anyway.
+NPM_WITHHELD_RECORDED=()
+record_npm_withheld() {
+  local lockfile found recorded tmp inert
+  local -a files=()
+  # With no trace the records here are not this install's (settle_npm_trace).
+  [[ "${NPM_TRACE_ABSENT}" != true ]] || return 0
+  for lockfile in "${PROJECT_DIR}/package-lock.json" "${PROJECT_DIR}/${NPM_HIDDEN_LOCKFILE}"; do
+    [[ -f "${lockfile}" ]] && files+=("${lockfile}")
+  done
+  [[ ${#files[@]} -gt 0 ]] || return 0
+  for lockfile in "${SNAPSHOT_DIR}/${SNAPSHOT_ID}_package-lock.json" "${SNAPSHOT_DIR}/${SNAPSHOT_ID}_${SAFEDEPS_SNAPSHOT_NPM_TREE}"; do
+    [[ -f "${lockfile}" ]] && files+=("${lockfile}")
+  done
+
+  # shellcheck disable=SC2016 # a jq program: jq expands its $names
+  if ! found=$(jq -nc --arg earlier "${SNAPSHOT_DIR}/" '
+      def tokens: [.integrity | strings | splits("\\s+") | select(. != "")];
+      [inputs | (input_filename | startswith($earlier)) as $before
+        | (.packages // {}) | objects | to_entries[]
+        | select((.key | test("(^|/)node_modules/")) and (.value | type) == "object" and (.value.link // false) != true)
+        | {before: $before, name: (.value.name // (.key | split("node_modules/") | last)),
+           version: (.value.version // "?"), resolved: .value.resolved, tokens: (.value | tokens)}
+        | select(.tokens | length > 0)] as $all
+      | ([$all[] | select(.before) | .tokens[] | {key: ., value: true}] | from_entries) as $seen
+      | [$all[] | select((.before | not) and (any(.tokens[]; $seen[.] != null) | not))]
+      | unique_by(.tokens)[]' "${files[@]}" < /dev/null 2>/dev/null); then
+    log_advisory "post-verify: the npm records in ${PROJECT_DIR} could not be read for the bytes this install brought in, so none of them were recorded as withheld."
+    ROLLBACK_WARNINGS+=("safedeps could not read which bytes this install brought into ${PROJECT_DIR}, so if npm fetched any of them from a registry that is not the public npm registry, it has not recorded them, and another project that receives the same bytes may rebuild them")
+    return 0
+  fi
+  [[ -n "${found}" ]] || return 0
+
+  npm_fetch_facts_load
+  inert=$(jq -r '.ignore_scripts_injected == true' "${META_FILE}" 2>/dev/null || printf 'false')
+  # shellcheck disable=SC2016 # a jq program: jq expands its $names
+  if ! recorded=$(jq -nc --arg public "${SAFEDEPS_NPM_PUBLIC_REGISTRY_RE}" --argjson facts "${NPM_FETCH_FACTS}" \
+      --arg project "${PROJECT_DIR}" --argjson at "$(date +%s)" --argjson inert "${inert}" \
+      "${SAFEDEPS_NPM_FETCH_JQ}${NPM_ORIGIN_TEXT_JQ}"'
+      [inputs
+        | (if (.resolved | type) == "string" then
+             if (.resolved | test($public; "i")) then [sd_fetch_origins($facts; .resolved)[] | sd_origin_text]
+             else [.resolved] end
+           else
+             # No source: npm fetched it from the registry it is configured
+             # with, whatever replace-registry-host says.
+             [sd_fetch_origins([$facts[] | if type == "object" and .unknown == null then .replace = "always" else . end];
+                               "https://registry.npmjs.org/\(.name)/-/\(.name | split("/") | last)-\(.version).tgz")[]
+              | sd_origin_text]
+           end) as $from
+        | select($from | length > 0)
+        | . as $r | .tokens[]
+        | {key: ., value: {package: "\($r.name)@\($r.version)", origins: ($from | unique),
+                           project: $project, at: $at, inert: $inert}}]
+      | from_entries | select(length > 0)' <<< "${found}" 2>/dev/null); then
+    log_advisory "post-verify: safedeps could not tell where npm fetched the bytes this install brought into ${PROJECT_DIR}, so none of them were recorded as withheld."
+    ROLLBACK_WARNINGS+=("safedeps could not tell where npm fetched the bytes this install brought into ${PROJECT_DIR}, so it has not recorded them as withheld, and another project that receives the same bytes may rebuild them")
+    return 0
+  fi
+  [[ -n "${recorded}" ]] || return 0
+
+  if ! { mkdir -p "${NPM_WITHHELD_DIR}" \
+      && tmp=$(mktemp "${NPM_WITHHELD_DIR}/.record.XXXXXX") \
+      && printf '%s\n' "${recorded}" > "${tmp}" \
+      && mv -f "${tmp}" "${NPM_WITHHELD_DIR}/$(date +%s)-$$-${tmp##*.}.json"; }; then
+    [[ -z "${tmp:-}" ]] || rm -f "${tmp}"
+    log_advisory "post-verify: could not write the record of withheld bytes to ${NPM_WITHHELD_DIR}: $(jq -r '[.[] | "\(.package) from \(.origins | join(" or "))"] | unique | join("; ")' <<< "${recorded}" 2>/dev/null)."
+    ROLLBACK_WARNINGS+=("safedeps could not record the bytes this install fetched from a registry that is not the public npm registry (${NPM_WITHHELD_DIR}), so another project that receives the same bytes may rebuild them")
+    return 0
+  fi
+  local package
+  while IFS= read -r package; do
+    [[ -z "${package}" ]] || NPM_WITHHELD_RECORDED+=("${package}")
+  done < <(jq -r '[.[] | .package] | unique[]' <<< "${recorded}" 2>/dev/null)
+  log_advisory "post-verify: recorded as withheld on this machine, by integrity: $(jq -r '[.[] | "\(.package) from \(.origins | join(" or "))"] | unique | join("; ")' <<< "${recorded}" 2>/dev/null) (into ${PROJECT_DIR})."
+}
+
 # Function: check the sources this install brought in, from either npm record
 check_npm_new_sources() {
   local nonstandard insecure
@@ -1587,7 +1801,7 @@ check_npm_new_sources() {
     if [[ -n "${fetched}" ]]; then
       log_advisory "post-verify: kept in ${PROJECT_DIR}, fetched from a registry that is not the public npm registry ($(name_sources "${fetched}")); not rolled back, and safedeps runs none of their install scripts."
       if [[ "$(jq -r '.ignore_scripts_injected == true' "${META_FILE}" 2>/dev/null || printf 'false')" != true ]]; then
-        ROLLBACK_WARNINGS+=("this install fetched packages from a registry that is not the public npm registry ($(name_sources "${fetched}")). safedeps did not make the install inert (on Codex it cannot), so unless the command said --ignore-scripts, their install scripts already ran during the install. The install is kept; confirm with the user that they trust that registry")
+        ROLLBACK_WARNINGS+=("this install fetched packages from a registry that is not the public npm registry ($(name_sources "${fetched}")). safedeps did not make the install inert (on Codex it cannot), so unless the command said --ignore-scripts, their install scripts already ran during the install. The install is kept; confirm with the user that they trust that registry${NPM_WITHHELD_RECORDED[0]:+. $(npm_withheld_scope)}")
       fi
     fi
   fi
@@ -1844,6 +2058,7 @@ collect_npm_new_records
 check_npm_effect_closure
 check_postinstall_scripts
 check_lockfile_diff
+record_npm_withheld
 check_npm_new_sources
 check_binaries
 

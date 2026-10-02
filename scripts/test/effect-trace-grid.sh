@@ -437,7 +437,9 @@ failures_before=${#FAILURES[@]}
 while IFS= read -r row; do
   [[ -n "${row}" && "${row}" != \#* ]] || continue
   IFS='|' read -r id fixture engine expect form <<< "${row}"
+  FIRST_PROJECT=""
   "new_${fixture}"
+  expect="${expect//@FIRST@/${FIRST_PROJECT}}"
   : > "${MARKS}"
   run_install "${form}" "${engine}"
   reason=$(jq -r '.systemMessage // empty' <<< "${CASE_POST}" 2>/dev/null | sed -n '/^Detected problems:/,/^Rollback snapshot:/p' | sed '1d;$d' | paste -sd' ' -)
@@ -556,6 +558,22 @@ ROWS
 #     command spells out stays denied (RH4). RH5 is the control: the sandbox
 #     registry, named by SAFEDEPS_NPM_TEST_REGISTRY, is rebuilt as before. The
 #     rebuild used to run EVIL for RH1-RH3.
+#   P0-P7, P1x, PU: the impostor an earlier command fetched, met again by a
+#     later one once whatever fetched it is gone. Where bytes came from is a
+#     fact of that fetch, so the post hook records it by integrity in
+#     SAFEDEPS_HOME, machine-wide, and the whole-tree check looks it up. The
+#     later command is kept, not rebuilt, and the warning names the registry
+#     and the project that first fetched it: an approved install after a
+#     one-shot npm_config_registry (P1, and P1x after a Codex install), a bare
+#     `npm install` after the .npmrc is removed (P2), `npm ci` from npm's cache
+#     (P3), a rollback to a snapshot confirmed with the impostor (P4, rolled
+#     back with nothing rebuilt), and another project's `npm ci` of the same
+#     lockfile with the same SAFEDEPS_HOME and cache (P5). An install after a
+#     `source` that npm could not be asked about is recorded too, under its
+#     reason (PU). A record on the public registry with no integrity cannot be
+#     matched and is not rebuilt (P7). The bytes leaving the tree releases it
+#     (P6), and P0 is two approved installs. The rebuild used to run EVIL for
+#     P1-P5, P1x, P7 and PU.
 #
 # Marks a script must never leave: sd-victim, the EVIL tarball and directories,
 # and LIB directories, which stand for a committed directory dependency.
@@ -735,20 +753,62 @@ new_evilclone() { new_evilclone_bare; printf 'registry=%s\n' "${EVIL_REG}" > "${
 # member (ENOWORKSPACES), so the gate has to ask at the root npm names.
 new_evilws() { new_workspace; printf 'registry=%s\n' "${EVIL_REG}" > "${CASE_PROJECT}/.npmrc"; CASE_CWD="${CASE_PROJECT}/packages/a"; }
 new_evilenvfile() { new_project; printf 'export npm_config_registry=%s\n' "${EVIL_REG}" > "${CASE_PROJECT}/npmenv.sh"; }
+# The P rows: bytes withheld by one command, met again by a later one after
+# whatever fetched them is gone. <form> is run first, through the hooks, on
+# <engine>, and must be kept without a rebuild. FIRST_PROJECT is where it ran,
+# which the later warning has to name (@FIRST@ in the rows).
+withhold_first() {
+  local form="$1" engine="${2:-claude}"
+  run_install "${form}" "${engine}"
+  [[ -z "${CASE_PRE_DENY}" && "${CASE_INSTALL_RC}" == 0 ]] || fail "the first command of the row is let through and succeeds: ${form}"
+  ! rolled_back || fail "the first command of the row is kept: ${form} (post: ${CASE_POST:0:300})"
+  grep -q 'EVIL-sd-approved' "${CASE_PROJECT}/node_modules/sd-approved/mark.js" 2>/dev/null \
+    || fail "the first command of the row installs the impostor: ${form}"
+  FIRST_PROJECT="${CASE_PROJECT}"
+}
+RH3_FORM="npm_config_registry=${EVIL_REG} npm install sd-approved@1.0.0"
+new_p0() { new_project; run_install 'npm install sd-approved@1.0.0'; [[ -z "${CASE_POST}" ]] || fail "P0's first install confirms quietly (post: ${CASE_POST:0:300})"; }
+new_p1() { new_project; withhold_first "${RH3_FORM}"; }
+new_p1x() { new_project; withhold_first "${RH3_FORM}" codex; }
+new_p2() { new_evilrc; withhold_first 'npm install sd-approved@1.0.0'; rm -f "${CASE_PROJECT}/.npmrc"; }
+new_p3() { new_p1; rm -rf "${CASE_PROJECT}/node_modules"; }
+new_p4() { new_p1; }
+new_p5() {
+  local first_home
+  new_p1; first_home="${CASE_HOME}"
+  new_project
+  CASE_HOME="${first_home}"
+  cp "${FIRST_PROJECT}/package.json" "${FIRST_PROJECT}/package-lock.json" "${CASE_PROJECT}/"
+  rm -rf "${CASE_PROJECT}/node_modules"
+}
+new_p6() { new_p1; rm -rf "${CASE_PROJECT}/node_modules" "${CASE_PROJECT}/package-lock.json"; }
+new_p7() {
+  new_p1
+  local f
+  for f in package-lock.json node_modules/.package-lock.json; do
+    edit_json "${f}" 'del(.packages[]?.integrity)'
+  done
+}
+new_pu() { new_evilenvfile; withhold_first 'source ./npmenv.sh && npm install sd-approved@1.0.0'; }
 
 # <id>|<fixture>|<engine>|<expect>|<command>, where <expect> is
 #   fallback            rolled back with no confirmed snapshot, said in all three records
 #   rebuilt:<package>   rolled back to a confirmed snapshot and <package> rebuilt
+#   held:<warning>      rolled back to a confirmed snapshot, nothing rebuilt, the warning says <warning>
 #   kept:<warning>      not rolled back, nothing rebuilt, the warning says <warning>
 #   quiet:<package>     confirmed quietly, and <package> rebuilt (`-`: nothing to check)
 #   denied:<reason>     the pre-guard denies it, saying <reason>; nothing is installed
 # A `fallback` may carry `:<text>` that the message must also say.
+# The warning a later command gets for the impostor an earlier one fetched.
+WITHHELD_EVIL="the bytes of sd-approved here are the ones an install in @FIRST@ first fetched from ${EVIL_REG}, which is not the public npm registry. They are kept. safedeps has recorded these bytes and withholds their install scripts in every project on this machine. This version has no way to release them: no tree that holds them is rebuilt automatically until a later release can approve a registry. If you trust that registry, confirm with the user before running \`npm rebuild sd-approved\` yourself; do not rebuild without asking"
 printf '# install scripts over the whole tree (id engine command | outcome)\n'
 failures_before=${#FAILURES[@]}
 while IFS= read -r row; do
   [[ -n "${row}" && "${row}" != \#* ]] || continue
   IFS='|' read -r id fixture engine expect form <<< "${row}"
+  FIRST_PROJECT=""
   "new_${fixture}"
+  expect="${expect//@FIRST@/${FIRST_PROJECT}}"
   : > "${MARKS}"
   advisory_before=$(line_count "${CASE_HOME}/advisory.log")
   reorg_before=$(line_count "${CASE_HOME}/reorg.log")
@@ -794,6 +854,12 @@ while IFS= read -r row; do
         grep -qF 'install scripts were not run' <<< "${advisory_new}" \
           || note_failure "${id}: advisory.log says install scripts were not run (${advisory_new:0:300})"
       fi
+      ;;
+    held:*)
+      rolled_back || note_failure "${id}: rolled back (post: ${CASE_POST:-<quiet>})"
+      grep -qF 'last confirmed safe snapshot' <<< "${CASE_POST}" || note_failure "${id}: rolled back to the confirmed snapshot (post: ${CASE_POST:0:300})"
+      grep -qF "${expect#held:}" <<< "${CASE_POST}" || note_failure "${id}: the warning says ${expect#held:} (post: ${CASE_POST:-<quiet>})"
+      [[ -z "${CASE_RAN}" ]] || note_failure "${id}: the rollback rebuilds nothing (${CASE_RAN})"
       ;;
     rebuilt:*)
       rolled_back || note_failure "${id}: rolled back (post: ${CASE_POST:-<quiet>})"
@@ -852,13 +918,23 @@ RH1w|project|claude|kept:because this install fetched sd-approved from ${EVIL_RE
 RH2w|evilclone_bare|claude|kept:because this install fetched sd-approved from ${EVIL_REG}, which is not the public npm registry. The install is kept. If you trust that registry, confirm with the user before running|printf 'registry=${EVIL_REG}\n' > .npmrc && npm ci
 RH8|evilws|claude|kept:because this install fetched sd-approved from ${EVIL_REG}, which is not the public npm registry. The install is kept. If you trust that registry, confirm with the user before running|npm install sd-approved@1.0.0
 RH7|evilenvfile|claude|kept:could not tell which registry this install fetched sd-approved from (an earlier statement (source) can change the environment npm runs with|source ./npmenv.sh; npm install sd-approved@1.0.0
+P0|p0|claude|quiet:sd-approved|npm install sd-swapped@1.0.0
+P1|p1|claude|kept:${WITHHELD_EVIL}|npm install sd-swapped@1.0.0
+P1x|p1x|claude|kept:${WITHHELD_EVIL}|npm install sd-swapped@1.0.0
+P2|p2|claude|kept:${WITHHELD_EVIL}|npm install
+P3|p3|claude|kept:${WITHHELD_EVIL}|npm ci
+P4|p4|claude|held:${WITHHELD_EVIL}|npm install sd-victim
+P5|p5|claude|kept:${WITHHELD_EVIL}|npm ci
+P6|p6|claude|quiet:sd-approved|npm install sd-approved@1.0.0
+P7|p7|claude|kept:a package recorded on the public registry with no integrity, so safedeps cannot tell its bytes from ones it withheld (node_modules/sd-approved (sd-approved@1.0.0))|npm install sd-swapped@1.0.0
+PU|pu|claude|kept:the bytes of sd-approved here are the ones an install in @FIRST@ first fetched from a registry safedeps could not name (an earlier statement (source) can change the environment npm runs with|npm install sd-swapped@1.0.0
 ROWS
 [[ ${#FAILURES[@]} -ne ${failures_before} ]] \
   || pass "install scripts run only over a tree on record from the public registry or a workspace, a package counts as bundled only where its parent's package.json bundles it, a record on the public registry counts only where npm says it fetched from there, a rollback runs none without a confirmed snapshot and says what ran on each engine, and K4-K7 are installed but not rebuilt"
 
 # LK1. Each lockfile field the rebuild's check reads vouches for less than it
 # seems to (ARCHITECTURE.md tables them), and every gap is held by a row:
-# `resolved` by RH1-RH8, L1 and L2, `integrity` by RH2 and RH2w, `inBundle`
+# `resolved` by RH1-RH8, L1 and L2, `integrity` by RH2, RH2w and P7, `inBundle`
 # by NB1-NB2n, `version` by lockless-forms.sh (an .npmrc that writes 1.0.1
 # over a recorded 1.0.0), and `link` here. A link record says npm put a
 # symlink there, and nothing about what is there now: a real directory
