@@ -38,6 +38,10 @@ cd "${TREE}"
 
 pass() { printf 'ok - %s\n' "$1"; }
 fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
+# A class that fails is reported and the next one still runs, so a control
+# shows every class it breaks; the battery fails at the end.
+failed=0
+not_ok() { printf 'not ok - %s\n' "$1" >&2; failed=1; }
 
 for tool in jq; do
   command -v "${tool}" >/dev/null 2>&1 || fail "${tool} is required"
@@ -106,7 +110,6 @@ templates=(
   'manager|npm %V% install evil@1.0.0|--prefix|deny | npm evil@1.0.0; | '
   'manager|pnpm %V% add evil@1.0.0|--dir|deny | npm evil@1.0.0; | '
   'manager|yarn %V% add evil@1.0.0|--cwd|deny | npm evil@1.0.0; | '
-  'manager|bun %V% add evil@1.0.0|--cwd|deny | npm evil@1.0.0; | '
   'manager|pip %V% install evil==1.0.0|--cache-dir|deny | pypi evil@1.0.0; | '
   'manager|uv %V% add evil==1.0.0|--directory|deny | pypi evil@1.0.0; | '
   'manager|cargo %V% install evil --version 1.0.0|--config|deny | crates.io evil@1.0.0; | '
@@ -128,7 +131,6 @@ templates=(
   'runner|go run %V% example.com/m@v1.0.0|-C|deny | go example.com/m@v1.0.0; | '
   'runner|pipx run %V% black==24.1.0|--python|deny | pypi black@24.1.0; | '
   'runner|pnpm dlx %V% evil@1.0.0|--dir|deny | npm evil@1.0.0; | '
-  'runner|bunx %V% evil@1.0.0|--cwd|deny | npm evil@1.0.0; | '
   # 4. The program's arguments, after the package a runner runs.
   'program|npx evil@1.0.0 %V%||deny | npm evil@1.0.0; | '
   'program|uvx ruff==0.1.0 %V%||deny | pypi ruff@0.1.0; | '
@@ -146,6 +148,16 @@ templates=(
   'declared|pnpm add "" left-pad||pass |  | npm:left-pad'
   'declared|npx "" evil@1.0.0||pass |  | '
   'declared|uvx --python "" "" evil==1.0.0||pass |  | '
+  # bun takes for its command the first word that does not start with `-`, so
+  # an option before the command takes no value: `bun --cwd x add evil@1.0.0`
+  # runs `bun x add evil@1.0.0`, which fetches the package `add` (bun 1.4.2,
+  # measured). The word is judged both ways; bun's own reading is the record.
+  'declared|bun --cwd x add evil@1.0.0||deny | npm evil@1.0.0; | npm:add'
+  'declared|bun --cwd=x add evil@1.0.0||deny | npm evil@1.0.0; | '
+  # bunx reads `--cwd` as a switch, so `x` is the package it fetches and runs,
+  # and evil@1.0.0 is that program's argument (bun 1.4.2, measured).
+  'declared|bunx --cwd x evil@1.0.0||pass |  | npm:x'
+  'declared|bunx --cwd=x evil@1.0.0||deny | npm evil@1.0.0; | '
 )
 
 # One command per template, spelling and form; judged eight at a time.
@@ -205,5 +217,96 @@ for t in "${templates[@]}"; do
     printf '# RED %s: %s (declared: [%s])\n%s' "${class}" "${template}" "${want}" "${rows}" >&2
   fi
 done
-(( red == 0 )) || fail "the gate's answers depend on how a value is spelled (${red} of ${#templates[@]} templates, ${n} commands)"
-pass "verdict, prescription and record do not depend on how a value is spelled (${#templates[@]} templates, ${#spellings[@]} spellings, ${n} commands)"
+if (( red > 0 )); then
+  not_ok "the gate's answers depend on how a value is spelled (${red} of ${#templates[@]} templates, ${n} commands)"
+else
+  pass "verdict, prescription and record do not depend on how a value is spelled (${#templates[@]} templates, ${#spellings[@]} spellings, ${n} commands)"
+fi
+
+# --- A manager's runtime option where it installs --------------------------------
+# bun's `--help` lists options that take a value when bun runs a file: --print,
+# --eval, --preload, --port and the rest. In an install command bun reads each
+# of them as a switch, and `-c, --config` and `--catalog` take a value only
+# after `=` (bun 1.4.2, measured: `bun add --print x` installs x). The table
+# once listed them for every bun command, so the package after one was read as
+# its value: `bun add --print evil@1.0.0` passed with no check and no record.
+# Before the command bun reads no option's value at all. Each option stands
+# right before the package, in every install spelling and before the command,
+# with the package spelled three ways; the answer is the same denial each time.
+runtime_options=(
+  -p --print -e --eval -r --preload --require --import -c --config --catalog -d --define
+  -l --loader --port --title --env-file --conditions --shell --elide-lines --watch-kill-signal
+  --inspect --inspect-wait --inspect-brk --install --fetch-preconnect --max-http-header-size
+  --dns-result-order --redirect-warnings --disable-warning --unhandled-rejections
+  --console-depth --user-agent --cron-title --cron-period --main-fields --extension-order
+  --tsconfig-override --drop --feature --jsx-factory --jsx-fragment --jsx-import-source
+  --jsx-runtime --cpu-prof-name --cpu-prof-dir --cpu-prof-interval --heap-prof-name
+  --heap-prof-dir --heap-prof-interval
+)
+packages=('evil@1.0.0' '"evil@1.0.0"' 'ev"il"@1.0.0')
+want_runtime='deny | npm evil@1.0.0; | '
+jobs_dir="${tmp_root}/runtime"
+mkdir -p "${jobs_dir}"
+n=0
+for option in "${runtime_options[@]}"; do
+  for package in "${packages[@]}"; do
+    for command in "bun add ${option} ${package}" "bun i ${option} ${package}" \
+        "bun install ${option} ${package}" "bun ${option} add ${package}"; do
+      printf '%s\n' "${command}" > "${jobs_dir}/${n}.cmd"
+      ( tuple "${command}" > "${jobs_dir}/${n}.out" ) &
+      n=$((n + 1))
+      (( n % 8 == 0 )) && wait
+    done
+  done
+done
+wait
+red=0
+for (( k = 0; k < n; k++ )); do
+  got=$(cat "${jobs_dir}/${k}.out")
+  [[ "${got}" == "${want_runtime}" ]] && continue
+  red=$((red + 1))
+  printf '# RED [%s] %s\n' "${got}" "$(cat "${jobs_dir}/${k}.cmd")" >&2
+done
+if (( red > 0 )); then
+  not_ok "a runtime option of bun hides the package after it (${red} of ${n} commands)"
+else
+  pass "bun's runtime options take no value where bun installs (${#runtime_options[@]} options, ${#packages[@]} spellings, ${n} commands)"
+fi
+
+# --- The table itself ----------------------------------------------------------
+# A command's entry is looked up before `*`: with `*` first, `bun x -p` was
+# read as bun's runtime `-p` and the package it names was never checked.
+# A synthetic table holds the order: one option, two classes.
+order=$(
+  # shellcheck source=../../lib/install-grammar.sh
+  source "${TREE}/lib/install-grammar.sh"
+  SAFEDEPS_G_VALUE_OPTIONS+=" zz/*:-q=v zz/run:-q=p "
+  safedeps_manager_option_class zz run -q && printf '%s' "${SAFEDEPS_G_VALUE}"
+  safedeps_manager_option_class zz "" -q && printf ' %s' "${SAFEDEPS_G_VALUE}"
+  true
+)
+[[ "${order}" == "p v" ]] || not_ok "a command's own entry is read before \`*\` (got [${order}], want [p v])"
+# No option is listed both for `*` and for a command of the same manager: the
+# command's entry would silently decide one reading and `*` the other. And
+# every scope names a command path the manager has, or no lookup reaches it.
+table_faults=$(
+  # shellcheck source=../../lib/install-grammar.sh
+  source "${TREE}/lib/install-grammar.sh"
+  set -f
+  for e in ${SAFEDEPS_G_VALUE_OPTIONS}; do
+    family="${e%%/*}" scope="${e#*/}" scope="${scope%%:*}" option="${e#*:}" option="${option%=*}"
+    if [[ "${scope}" == '*' ]]; then
+      for f in ${SAFEDEPS_G_VALUE_OPTIONS}; do
+        [[ "${f}" == "${family}/"* && "${f}" != "${family}/*:"* && "${f#*:}" == "${option}="* ]] \
+          && printf 'both %s and %s\n' "${e}" "${f}"
+      done
+    elif ! safedeps_manager_command "${family}" "${scope}"; then
+      printf 'no command path %s:%s for %s\n' "${family}" "${scope}" "${e}"
+    fi
+  done
+  true
+)
+[[ -z "${table_faults}" ]] || not_ok "the value table has an entry no lookup reads as written: ${table_faults//$'\n'/; }"
+[[ "${order}" != "p v" || -n "${table_faults}" ]] \
+  || pass "the value table reads a command's entry first, lists no option for both \`*\` and a command, and every scope is a command path"
+exit "${failed}"

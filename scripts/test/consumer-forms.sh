@@ -1343,7 +1343,7 @@ expect_prescription 'pypi ruff@0.1.0;' 'uv tool run --python $(which python3) ru
 expect_prescription 'pypi black@24.1.0;' 'pipx run --python $(which python3.11) black==24.1.0'
 expect_prescription 'npm evil@1.0.0;' 'npx --cache $(mktemp -d /tmp/x.XXXX) evil@1.0.0'
 expect_prescription 'npm evil@1.0.0;' 'pnpm dlx --dir $(git rev-parse --show-toplevel) evil@1.0.0'
-expect_prescription 'npm evil@1.0.0;' 'bunx --cwd $(git rev-parse --show-toplevel) evil@1.0.0'
+expect_prescription 'npm evil@1.0.0;' 'bun add --cwd $(git rev-parse --show-toplevel) evil@1.0.0'
 expect_prescription 'go example.com/m@v1.0.0;' 'go run -C $(git rev-parse --show-toplevel) example.com/m@v1.0.0'
 expect_prescription 'pypi ruff@0.1.0;' 'uvx --python `which python3` ruff==0.1.0'
 expect_prescription 'pypi ruff@0.1.0;' 'uvx --python "$(which python3)" ruff==0.1.0'
@@ -1457,6 +1457,9 @@ pass "an option's value never stands in for npm's command, in either spelling"
 # abbreviation or a `:` value was not read at all. scripts/test/manager-variants.sh
 # holds the places a value stands by spelling; these are the spellings of the
 # options themselves.
+# bun takes the first word that does not start with `-` for its command, so
+# this runs `bun x add evil@1.0.0` (bun 1.4.2, measured); both readings are
+# judged.
 expect_prescription 'npm evil@1.0.0;' 'bun --cwd x add evil@1.0.0'
 expect_prescription 'npm evil@1.0.0;' 'pnpm --dir x add evil@1.0.0'
 expect_prescription 'crates.io evil@1.0.0;' 'cargo --config x install evil --version 1.0.0'
@@ -1473,7 +1476,43 @@ expect_prescription 'go example.com/m@v1.0.0;' 'go run --C x example.com/m@v1.0.
 # option is npm's command, and the install runs there (SAFEDEPS_G_NPM_OTHER).
 expect_prescription 'npm evil@1.0.0;' 'npm --min-release-age install evil@1.0.0'
 expect_prescription 'npm evil@1.0.0;' 'npx --min-release-age 3 evil@1.0.0'
+# The table lists an option only where the manager reads a value for it. bun's
+# runtime options were listed for every bun command, and bun reads them as
+# switches where it installs, so the package after one was taken for its value
+# and passed unchecked. `bun x -p` names the package, an entry `*` hid until a
+# command's entry was looked up first. bunx reads `--cwd` as a switch. bun
+# 1.4.2, measured: scripts/measure/manager-option-reading.sh.
+expect_prescription 'npm evil@1.0.0;' 'bun add --print evil@1.0.0'
+expect_prescription 'npm evil@1.0.0;' 'bun add -p evil@1.0.0'
+expect_prescription 'npm evil@1.0.0;' 'bun i -c evil@1.0.0'
+expect_prescription 'npm evil@1.0.0;' 'bun install --preload evil@1.0.0'
+expect_prescription 'npm evil@1.0.0;' 'bun add -E -p evil@1.0.0 left-pad'
+expect_prescription 'npm evil@1.0.0;' 'bun x -p evil@1.0.0 evil'
+expect_prescription 'npm evil@1.0.0;' 'bunx --cwd evil@1.0.0 x'
+expect_prescription 'no-deny;' 'bun add -F evil@1.0.0 left-pad'
+# python reads one-letter options as getopt clusters them: `-Im pip` is `-I -m
+# pip`, and an option that takes a value takes the rest of its word, so
+# `-Impip` is too. `-c` ends python's options with a program.
+expect_prescription 'pypi evil@1.0.0;' 'python3 -Im pip install evil==1.0.0'
+expect_prescription 'pypi evil@1.0.0;' 'python3 -Impip install evil==1.0.0'
+expect_prescription 'pypi evil@1.0.0;' 'python3 -IW ignore -m pip install evil==1.0.0'
+expect_prescription 'pypi evil@1.0.0;' 'python3 -sEm pip install evil==1.0.0'
+expect_prescription 'no-deny;' 'python3 -Ic pass -m pip install evil==1.0.0'
+# RubyGems reads `name:version` as the name and a requirement, and a bare or
+# `=` version is a pin (Gem::Command#extract_gem_name_and_version).
+expect_prescription 'rubygems evil@1.0.0;' 'gem install evil:1.0.0'
+expect_prescription 'rubygems evil@1.0.0;' 'gem install evil:=1.0.0'
 pass "every manager's options are read with its own table: values, attached and abbreviated spellings, and both npm versions"
+# Which words a manager takes as option values is the manager's answer, asked
+# of every one on PATH but npm (npm is asked above). A table entry the manager
+# does not read as a value fails; a manager not on PATH is skipped by name.
+manager_rc=0
+manager_out=$(scripts/measure/manager-option-reading.sh 2>&1) || manager_rc=$?
+case "${manager_rc}" in
+  0) pass "every manager on PATH reads its options the way the table says ($(grep -E '^asked:' <<< "${manager_out}" | cut -c1-200))" ;;
+  3) pass "the managers' option reading # SKIP $(grep -E '^skipped:' <<< "${manager_out}" | cut -c1-200)" ;;
+  *) fail "every manager on PATH reads its options the way the table says ($(grep -E '^OVER|forms,' <<< "${manager_out}" | head -5 | tr '\n' ' '))" ;;
+esac
 
 # --- 11. The UNGATED record names each operand the gate did not check ---------
 # The record used to be a second parser: it read each statement on its own and
@@ -1741,6 +1780,13 @@ operand_rows=(
   $'npm:left-pad\tpnpm add "" left-pad'
   $'\tnpx "" evil@1.0.0'
   $'\tuvx --python "" "" evil==1.0.0'
+  # A version after `:` pins a gem.
+  $'\tgem install evil:1.0.0'
+  # Every operand of a cluster that ends in python's -m.
+  $'pypi:left-pad\tpython3 -Im pip install left-pad'
+  # The runtime option before bun's package takes no value, so the package is
+  # the record (it passed with none).
+  $'npm:left-pad\tbun add --print left-pad'
 )
 
 # The rows are independent sandboxes; run them eight at a time.
