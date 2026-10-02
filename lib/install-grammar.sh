@@ -697,6 +697,14 @@ SAFEDEPS_G_COMMANDS='
 #   V  the version every operand of the command is pinned to
 #   p  the package itself (a runner's `--package`, pip's `-e`)
 #   w  a package added beside the one that runs (uvx `--with`)
+#   b  a value that names no package to one version of the manager, and a
+#      switch to another, so the word after it is the value to one and an
+#      operand to the other. The statement is read both ways and judged as the
+#      union (safedeps_manager_read), as npm's are across npm 10.8.2 and 11.
+#      poetry 2.x reads `add --optional <extra>`; poetry 1.8.5 reads
+#      `--optional` as a switch (src/poetry/console/commands/add.py, option
+#      "optional" at both tags), so `poetry add --optional evil==1.0.0` adds
+#      evil under 1.8.5.
 # Only options that always take a value are listed. One whose value is
 # optional, or one that is not listed, takes none, so its value is read as an
 # operand: a spurious check or record, never a package skipped. The other
@@ -812,7 +820,7 @@ SAFEDEPS_G_VALUE_OPTIONS='
   pipx/install:--preinstall=w pipx/inject:-r=v pipx/inject:--requirement=v
   poetry/*:-C=d poetry/*:--directory=d poetry/*:-P=d poetry/*:--project=d
   poetry/add:-G=v poetry/add:--group=v poetry/add:-E=v poetry/add:--extras=v
-  poetry/add:--optional=v poetry/add:--python=v poetry/add:--platform=v poetry/add:--markers=v
+  poetry/add:--optional=b poetry/add:--python=v poetry/add:--platform=v poetry/add:--markers=v
   poetry/add:--source=v
   pipenv/*:--python=v pipenv/*:--pypi-mirror=v pipenv/install:--categories=v
   pipenv/install:--extra-pip-args=v pipenv/install:-r=v pipenv/install:--requirements=v
@@ -1104,23 +1112,43 @@ safedeps_npx_first_pass() {
 #                        already has without fetching (npx, npm exec, bunx)
 # No process is started: this runs once per statement.
 safedeps_manager_read() {
-  local -a role=() text=()
-  local kind localbin k
+  local ambiguous
   SAFEDEPS_G_M_AMBIGUOUS=-1 SAFEDEPS_G_M_FORCE_VALUE=-1
+  SAFEDEPS_G_M_OTHER=false SAFEDEPS_G_M_OTHER_SEEN=false
   safedeps_manager_read_once "$@"
+  # An option one version of the manager reads as a switch and another as an
+  # option with a value (class b): the other version's reading is judged too.
+  if [[ "${SAFEDEPS_G_M_OTHER_SEEN}" == true ]]; then
+    SAFEDEPS_G_M_OTHER=true
+    safedeps_manager_read_union "$@"
+    SAFEDEPS_G_M_OTHER=false
+  fi
   (( SAFEDEPS_G_M_AMBIGUOUS >= 0 )) || return 0
   # An option the table does not know, and then a word that is one of the
   # manager's commands (`bun --filter x add evil@1.0.0`, where `bun x` is a
   # runner): the manager may read the word as the option's value or as its
   # command, so both readings are judged, as the union.
-  role=("${SAFEDEPS_G_M_ROLE[@]}") text=("${SAFEDEPS_G_M_TEXT[@]}")
-  kind="${SAFEDEPS_G_M_KIND}" localbin="${SAFEDEPS_G_M_LOCALBIN}"
-  SAFEDEPS_G_M_FORCE_VALUE="${SAFEDEPS_G_M_AMBIGUOUS}"
-  safedeps_manager_read_once "$@"
+  ambiguous="${SAFEDEPS_G_M_AMBIGUOUS}"
+  SAFEDEPS_G_M_FORCE_VALUE="${ambiguous}" SAFEDEPS_G_M_OTHER_SEEN=false
+  safedeps_manager_read_union "$@"
+  if [[ "${SAFEDEPS_G_M_OTHER_SEEN}" == true ]]; then
+    SAFEDEPS_G_M_OTHER=true
+    safedeps_manager_read_union "$@"
+    SAFEDEPS_G_M_OTHER=false
+  fi
   SAFEDEPS_G_M_FORCE_VALUE=-1
-  # A role either reading gives a word that the other reads as nothing
-  # particular is kept: a package, a version that pins the operands, a
-  # directory.
+  return 0
+}
+
+# Reads the statement again and keeps the union with the reading already made.
+# A role either reading gives a word that the other reads as nothing
+# particular is kept: a package, a version that pins the operands, a
+# directory. A statement that either reading takes for an install or a runner
+# is one.
+safedeps_manager_read_union() {
+  local -a role=("${SAFEDEPS_G_M_ROLE[@]}") text=("${SAFEDEPS_G_M_TEXT[@]}")
+  local kind="${SAFEDEPS_G_M_KIND}" localbin="${SAFEDEPS_G_M_LOCALBIN}" k
+  safedeps_manager_read_once "$@"
   for (( k = 0; k < ${#role[@]}; k++ )); do
     case "${role[k]}:${SAFEDEPS_G_M_ROLE[k]}" in
       [orCpwDVd]:[-gcva]) SAFEDEPS_G_M_ROLE[k]="${role[k]}" SAFEDEPS_G_M_TEXT[k]="${text[k]}" ;;
@@ -1263,19 +1291,25 @@ safedeps_manager_read_once() {
       fi
       if [[ "${opt}" != "${t}" ]]; then
         # The value is in the word.
+        # A version that reads the option as a switch refuses a value in
+        # its word, so only the value reading installs anything.
         if safedeps_manager_option_class "${family}" "${path}" "${opt}"; then
-          SAFEDEPS_G_M_ROLE[i]="${SAFEDEPS_G_VALUE}" SAFEDEPS_G_M_TEXT[i]="${val}"
+          SAFEDEPS_G_M_ROLE[i]="${SAFEDEPS_G_VALUE/#b/v}" SAFEDEPS_G_M_TEXT[i]="${val}"
         fi
       elif safedeps_manager_option_class "${family}" "${path}" "${t}"; then
         cls="${SAFEDEPS_G_VALUE}"
-        if (( i + 1 < n )) && ! [[ "${traits}" == *e* && "${w[i+1]}" == -?* ]]; then
+        if [[ "${cls}" == b ]]; then
+          SAFEDEPS_G_M_OTHER_SEEN=true cls=v
+          [[ "${SAFEDEPS_G_M_OTHER}" == false ]] || cls=""
+        fi
+        if [[ -n "${cls}" ]] && (( i + 1 < n )) && ! [[ "${traits}" == *e* && "${w[i+1]}" == -?* ]]; then
           SAFEDEPS_G_M_ROLE[i+1]="${cls}"
           [[ "${cls}" != p ]] || named=true
           i=$(( i + 1 ))
         fi
       elif [[ "${traits}" == *a* && "${t}" =~ ^-[A-Za-z0-9]. ]] \
           && safedeps_manager_option_class "${family}" "${path}" "${t:0:2}"; then
-        SAFEDEPS_G_M_ROLE[i]="${SAFEDEPS_G_VALUE}" SAFEDEPS_G_M_TEXT[i]="${t:2}"
+        SAFEDEPS_G_M_ROLE[i]="${SAFEDEPS_G_VALUE/#b/v}" SAFEDEPS_G_M_TEXT[i]="${t:2}"
       else
         unknown=true
       fi

@@ -855,7 +855,7 @@ reader_bodies=$(
   for fn in guard_extract_specs guard_word_specs guard_word_as_read guard_names_package_without_spec guard_record_statement; do
     sed -n "/^${fn}() {/,/^}/p" "${GUARD}"
   done
-  for fn in safedeps_manager_read safedeps_manager_read_once safedeps_manager_read_npm safedeps_manager_read_npm_once safedeps_manager_read_mvn \
+  for fn in safedeps_manager_read safedeps_manager_read_union safedeps_manager_read_once safedeps_manager_read_npm safedeps_manager_read_npm_once safedeps_manager_read_mvn \
       safedeps_npx_first_pass safedeps_npm_read_args safedeps_manager_option_class safedeps_manager_command \
       safedeps_manager_npm_at safedeps_manager_long_option; do
     sed -n "/^${fn}() {/,/^}/p" "${grammar_src}"

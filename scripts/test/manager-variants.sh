@@ -16,12 +16,14 @@
 # reader that takes part of a value, or a value for an operand, or an operand
 # for a value, gives one spelling a different answer.
 #
-# A fifth class holds the options npm 10.8.2 does not define and npm 11.19.0
-# does (SAFEDEPS_G_NPM_OTHER): there the word after the option is a value to
-# one npm and the command or an operand to the other, and the gate judges the
-# union. Its answers do depend on the spelling, because the value is a package
-# to one npm; its oracle is that the pinned install is judged under every
-# spelling.
+# A fifth class holds the options two versions of a manager define
+# differently: those npm 10.8.2 does not define and npm 11.19.0 does
+# (SAFEDEPS_G_NPM_OTHER), and poetry's `add --optional`, a switch in 1.8.5 that
+# takes a value in 2.x (class b). There the word after the option is a value
+# to one version and the command or an operand to the other, and the gate
+# judges the union. Its answers do depend on the spelling, because the value
+# is a package to one version; its oracle is that the pinned install is judged
+# under every spelling.
 #
 # Commands are fed to the guard as payloads; nothing here runs them.
 #
@@ -138,11 +140,19 @@ templates=(
   'program|bunx evil@1.0.0 %V%||deny | npm evil@1.0.0; | '
   'program|go run ./cmd %V%||pass |  | '
   'program|go run main.go --email %V%||pass |  | '
-  # 5. npm 10.8.2 defines no such option: the word after it is a value to one
-  #    npm and a command or an operand to the other.
-  'npm10|npm %V% install evil@1.0.0|--min-release-age|'
-  'npm10|npm install %V% evil@1.0.0|--min-release-age|'
-  'npm10|npx %V% evil@1.0.0|--min-release-age|'
+  # 5. Two versions of the manager define the option differently: the word
+  #    after it is a value to one and a command or an operand to the other.
+  #    npm 10.8.2 defines no `--min-release-age`; poetry 1.8.5 reads
+  #    `add --optional` as a switch, poetry 2.x as an option with a value.
+  'version|npm %V% install evil@1.0.0|--min-release-age|'
+  'version|npm install %V% evil@1.0.0|--min-release-age|'
+  'version|npx %V% evil@1.0.0|--min-release-age|'
+  'version|poetry add %V% evil==1.0.0|--optional|'
+  #    The package as the word after `--optional`: poetry 1.8.5 adds it.
+  #    In the option's own word it is a value to 2.x, and 1.8.5 refuses a
+  #    value for a switch, so nothing is added.
+  'declared|poetry add --optional evil==1.0.0||deny | pypi evil@1.0.0; | '
+  'declared|poetry add --optional=evil==1.0.0||pass |  | '
   # 6. Declared rows: an empty word in an operand's place names nothing, so it
   #    is neither checked nor recorded; the record names the real package.
   'declared|pnpm add "" left-pad||pass |  | npm:left-pad'
@@ -200,8 +210,8 @@ for t in "${templates[@]}"; do
       got=$(cat "${jobs_dir}/${k}.out") cmd=$(cat "${jobs_dir}/${k}.cmd")
       k=$((k + 1))
       rows+="    [${got}] ${cmd}"$'\n'
-      if [[ "${class}" == npm10 ]]; then
-        # The union: the pinned install is judged whichever npm runs it.
+      if [[ "${class}" == version ]]; then
+        # The union: the pinned install is judged whichever version runs it.
         [[ "${got}" == deny\ \|*"evil@1.0.0;"* ]] || bad=true
         continue
       fi
