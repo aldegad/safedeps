@@ -61,7 +61,8 @@
 #   scripts/measure/scan-failure-census.sh [--quick] [--jobs N] [--variants "claude codex padded"]
 #
 #   --quick      the subset npm test runs (the corpus's "quick" block)
-#   --jobs N     parallel runs (default 4)
+#   --jobs N     parallel runs (default: SAFEDEPS_TEST_JOBS when it is set,
+#                otherwise half the CPUs rounded up, at most 16)
 #   --variants   payload shapes: claude (no turn_id), codex (turn_id, so no
 #                inert rewrite), padded (over 1KB, so the self-budget child
 #                judges it), approved (claude, against a ledger that approves
@@ -93,11 +94,15 @@ if [[ "${1:-}" == "--run" ]]; then
   [[ "${variant}" != "approved" ]] || cp -R "${WORK}/approved-home" "${T}/h/safe"
   codex=""
   [[ "${variant}" == "codex" ]] && codex=1
+  # The grep and sed shims are on PATH only in the mode that fails them; in
+  # every other mode they would only exec the real tool (see setup).
+  bin="${WORK}/bin"
+  [[ ! -d "${WORK}/bin-${mode}" ]] || bin="${WORK}/bin-${mode}"
   rc=0
   out=$(jq -nc --rawfile c "${WORK}/cases/${n}.cmd" --arg cwd "${T}/p" --arg codex "${codex}" \
       '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd} + (if $codex != "" then {turn_id:"t1",model:"m"} else {} end)' |
     ( cd "${ROOT_DIR}" && CENSUS_MODE="${mode}" CENSUS_K="${k}" CENSUS_STATE="${T}/st" \
-        PATH="${WORK}/bin:${PATH}" HOME="${T}/h" SAFEDEPS_HOME="${T}/h/safe" TMPDIR="${T}" \
+        PATH="${bin}:${PATH}" HOME="${T}/h" SAFEDEPS_HOME="${T}/h/safe" TMPDIR="${T}" \
         scripts/safedeps-hook-entry.sh pre 2>"${T}/stderr" )) || rc=$?
   decision="pass" class="-" updated="-"
   if [[ -n "${out}" ]]; then
@@ -113,11 +118,18 @@ if [[ "${1:-}" == "--run" ]]; then
     [[ -f "${f}" ]] || continue
     pending=$(jq -r '.project_dir' "${f}" 2>/dev/null || printf 'unreadable')
   done
-  reads=$(cat "${T}/st/reads" 2>/dev/null || printf '0')
-  after=$(cat "${T}/st/after-gate" 2>/dev/null || printf '0')
-  failed=$(cat "${T}/st/failed" 2>/dev/null || printf '0')
-  unmarked=$(cat "${T}/st/unmarked" 2>/dev/null || printf '0')
-  unlisted=$(cat "${T}/st/unlisted" 2>/dev/null || printf '0')
+  # Every counter is a tally file with one line per event (see the shim).
+  tally_count() {
+    local n=0 line
+    [[ -f "$1" ]] || { printf '0'; return 0; }
+    while IFS= read -r line; do n=$(( n + 1 )); done < "$1"
+    printf '%s' "${n}"
+  }
+  reads=$(tally_count "${T}/st/reads")
+  after=$(tally_count "${T}/st/after-gate")
+  failed=$(tally_count "${T}/st/failed")
+  unmarked=$(tally_count "${T}/st/unmarked")
+  unlisted=$(tally_count "${T}/st/unlisted")
   [[ ! -s "${T}/st/strays" ]] || cp "${T}/st/strays" "${WORK}/strays/${n}.${mode}.${k}"
   # Paths under the run's own temp root differ every run; compare them as T.
   # The guard resolves the project directory, so the root appears in its
@@ -138,7 +150,23 @@ fi
 
 # --- setup ----------------------------------------------------------------------
 QUICK=false
-JOBS=4
+# Every run is a guard judging one payload, CPU-bound and independent of the
+# others, so the runs scale with CPUs. A fixed 4 left most of a larger machine
+# idle; one run per CPU took a shared 16-CPU Mac already at load 100 past 300.
+# So the default is half the CPUs, rounded up, and SAFEDEPS_TEST_JOBS (which
+# scripts/test/run-all.sh sets for the whole suite) moves it. The cap is the
+# largest machine the default was measured on (16 CPUs).
+cpus=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || printf '4')
+[[ "${cpus}" =~ ^[1-9][0-9]*$ ]] || cpus=4
+JOBS=$(( (cpus + 1) / 2 ))
+(( JOBS <= 16 )) || JOBS=16
+if [[ -n "${SAFEDEPS_TEST_JOBS:-}" ]]; then
+  [[ "${SAFEDEPS_TEST_JOBS}" =~ ^[1-9][0-9]*$ ]] || {
+    printf 'census: SAFEDEPS_TEST_JOBS must be a whole number of at least 1 (got %s)\n' "${SAFEDEPS_TEST_JOBS:0:40}" >&2
+    exit 2
+  }
+  JOBS="${SAFEDEPS_TEST_JOBS}"
+fi
 VARIANTS=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -154,23 +182,28 @@ trap 'rm -rf "${WORK}"' EXIT
 mkdir -p "${WORK}/bin" "${WORK}/cases" "${WORK}/results" "${WORK}/strays"
 
 real_awk=$(command -v awk)
-# The shim counts the guard's readings and fails the chosen ones. Counting is
-# under a mkdir lock: readings can run concurrently inside one guard run (a
-# process substitution feeds a loop that reads too).
+# The shims run as this bash, named by path: they run once per reading of every
+# run, and `/usr/bin/env bash` cost one more exec each time.
+shim_bash=$(command -v bash)
+# The shim counts the guard's readings and fails the chosen ones. Readings can
+# run concurrently inside one guard run (a process substitution feeds a loop
+# that reads too), so the counters are tally files: one line appended per
+# event. A short line appended to a file opened O_APPEND is one write, so
+# concurrent shims neither lose nor split one, and nothing is locked. A
+# reading's ordinal is the line its own token landed on.
+#
+# The counters used to be numbers under a mkdir lock, taken in a busy loop with
+# no way to tell a dead holder from a slow one. A shim killed between the mkdir
+# and the rmdir (the self-budget deadline kills the judgment's whole tree)
+# left every later shim of that run spinning at full CPU forever: orphans in
+# that state ran for over two hours on a shared Mac and fed a load-300 incident.
 cat > "${WORK}/bin/awk" <<SHIM
-#!/usr/bin/env bash
+#!${shim_bash}
 real='${real_awk}'
 state="\${CENSUS_STATE:-}"
 [[ -n "\${state}" ]] || exec "\${real}" "\$@"
-bump() {
-  local f="\${state}/\$1" n
-  while ! mkdir "\${state}/lock" 2>/dev/null; do :; done
-  n=\$(( \$(cat "\${f}" 2>/dev/null || echo 0) + 1 ))
-  printf '%s' "\${n}" > "\${f}"
-  rmdir "\${state}/lock"
-  printf '%s' "\${n}"
-}
-[[ "\${CENSUS_MODE:-none}" == "awk-all" ]] && { bump failed >/dev/null; exit 127; }
+tally() { printf '%s\n' "\$2" >> "\${state}/\$1"; }
+[[ "\${CENSUS_MODE:-none}" == "awk-all" ]] && { tally failed x; exit 127; }
 kind=""
 case "\$*" in
   *"safedeps:command_scan_text"*) kind=scan ;;
@@ -194,15 +227,21 @@ if [[ -z "\${kind}" ]]; then
   # A call the census cannot name, counted so that it cannot hide: see
   # "unmarked" and "unlisted" in the header.
   case "\$*" in
-    *"safedeps:"*) bump unlisted >/dev/null ;;
-    *) bump unmarked >/dev/null ;;
+    *"safedeps:"*) tally unlisted x ;;
+    *) tally unmarked x ;;
   esac
   printf '%s\n' "\$*" | tr '\n' ' ' | cut -c1-160 >> "\${state}/strays"
   exec "\${real}" "\$@"
 fi
-n=\$(bump reads)
-[[ -z "\${SAFEDEPS_GATE_PASSED:-}" ]] || bump after-gate >/dev/null
-fail_it() { bump failed >/dev/null; exit 2; }
+token="\$\$.\${RANDOM}\${RANDOM}"
+tally reads "\${token}"
+n=0
+while IFS= read -r line; do
+  n=\$(( n + 1 ))
+  [[ "\${line}" != "\${token}" ]] || break
+done < "\${state}/reads"
+[[ -z "\${SAFEDEPS_GATE_PASSED:-}" ]] || tally after-gate x
+fail_it() { tally failed x; exit 2; }
 case "\${CENSUS_MODE:-none}" in
   k)       [[ "\${n}" == "\${CENSUS_K}" ]] && fail_it ;;
   from-k)  (( n >= CENSUS_K )) && fail_it ;;
@@ -213,22 +252,25 @@ SHIM
 chmod +x "${WORK}/bin/awk"
 
 # grep and sed sit on the judgment path too. These fail every call in their
-# mode and pass everything through otherwise; a reading is not counted by
-# them, because the K-th-reading runs are about awk.
+# mode; a reading is not counted by them, because the K-th-reading runs are
+# about awk. Each lives in a directory of its own beside the awk shim, and a
+# run puts that directory on PATH only in the shim's mode. In any other mode
+# the shim would only exec the real tool, at the price of a bash start on
+# every grep and sed the guard runs.
 for tool in grep sed; do
   real_tool=$(command -v "${tool}")
-  cat > "${WORK}/bin/${tool}" <<SHIM
-#!/usr/bin/env bash
+  mkdir -p "${WORK}/bin-${tool}-all"
+  ln -s "${WORK}/bin/awk" "${WORK}/bin-${tool}-all/awk"
+  cat > "${WORK}/bin-${tool}-all/${tool}" <<SHIM
+#!${shim_bash}
 if [[ -n "\${CENSUS_STATE:-}" && "\${CENSUS_MODE:-none}" == "${tool}-all" ]]; then
   # Counted like the awk shim's failures, so the idle-mode check sees them.
-  while ! mkdir "\${CENSUS_STATE}/lock" 2>/dev/null; do :; done
-  printf '%s' "\$(( \$(cat "\${CENSUS_STATE}/failed" 2>/dev/null || echo 0) + 1 ))" > "\${CENSUS_STATE}/failed"
-  rmdir "\${CENSUS_STATE}/lock"
+  printf 'x\n' >> "\${CENSUS_STATE}/failed"
   exit 2
 fi
 exec '${real_tool}' "\$@"
 SHIM
-  chmod +x "${WORK}/bin/${tool}"
+  chmod +x "${WORK}/bin-${tool}-all/${tool}"
 done
 
 # --- the approved ledger -------------------------------------------------------
