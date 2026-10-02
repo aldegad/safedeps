@@ -127,7 +127,7 @@ This replaced a reading per divergence ("axes") collected from the first reading
 | `'` inside `"${...}"` | a quote | a character | a character | P4, SL1, SL3, D1 |
 | `$'...'` | an ANSI-C string, where `\'` does not close it | an ANSI-C string | `$` and a single-quoted string | AC1, AC2 |
 | a heredoc delimiter followed by `)` inside `$(...)` | ends the body, and the `)` is code | body | body | A2, HC1-HC3 |
-| `#` right after a `(` that stands as an argument | a parse error | a glob word, no comment | a parse error | G5 |
+| `#` right after a `(` that stands as an argument | no comment: inside a substitution bash 3.2 runs the line after it, bash 5.2 fails to parse | a glob word, no comment | a parse error | G5 |
 
 Each look-ahead steps over an escape, `$(...)`, `${...}` and backticks whole, each read with its own quoting. Each cell has forms in `scripts/measure/shell-reading-forms.json`, measured on macOS (bash 3.2, zsh 5.9, `/bin/sh`, `/bin/dash` and the agent's own wrapper) and on Linux (bash 5.2 and dash 0.5.12). `scripts/test/shell-reading.sh` holds each reading to its shell: wherever a shell ran a form's last line, that shell's reading must show it. It also holds the gate to a verdict on the form. `scripts/test/scan-contract.sh` checks that wherever the bash reading reports no divergence, the other two readings produce the bash views byte for byte, on the recorded forms and on random input. `scripts/measure/shell-reading-fuzz.sh` runs seeded random forms built from these places under the real shells.
 
