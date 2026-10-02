@@ -1167,18 +1167,27 @@ check_npm_new_sources() {
   [[ ${#NPM_NEW_SOURCES[@]} -gt 0 ]] || return 0
 
   # Check for resolved URLs pointing to non-standard registries
-  nonstandard=$(printf '%s\n' "${NPM_NEW_SOURCES[@]}" | grep -viE 'registry\.npmjs\.org|registry\.yarnpkg\.com' | head -3 || true)
+  nonstandard=$(printf '%s\n' "${NPM_NEW_SOURCES[@]}" | grep -viE 'registry\.npmjs\.org|registry\.yarnpkg\.com' || true)
   if [[ -n "${nonstandard}" ]]; then
     SUSPICIOUS=true
-    REASONS+=("Lock file contains resolved URLs from non-standard registries ($(paste -sd ';' - <<< "${nonstandard}"))")
+    REASONS+=("Lock file contains resolved URLs from non-standard registries ($(name_sources "${nonstandard}"))")
   fi
 
   # Check for git:// or http:// (non-https) resolved URLs
-  insecure=$(printf '%s\n' "${NPM_NEW_SOURCES[@]}" | grep -iE '(git://|http://)' | head -3 || true)
+  insecure=$(printf '%s\n' "${NPM_NEW_SOURCES[@]}" | grep -iE '(git://|http://)' || true)
   if [[ -n "${insecure}" ]]; then
     SUSPICIOUS=true
-    REASONS+=("Lock file contains insecure (non-HTTPS) resolved URLs ($(paste -sd ';' - <<< "${insecure}"))")
+    REASONS+=("Lock file contains insecure (non-HTTPS) resolved URLs ($(name_sources "${insecure}"))")
   fi
+}
+
+# The first three of <lines>, `;`-separated, and how many more there were. A
+# rollback has to say which source caused it, and a cut list says so too.
+name_sources() {
+  local count
+  count=$(grep -c . <<< "$1")
+  printf '%s' "$(head -3 <<< "$1" | paste -sd ';' -)"
+  [[ ${count} -le 3 ]] || printf '; and %s more' "$((count - 3))"
 }
 
 check_npm_effect_closure() {
