@@ -920,7 +920,9 @@ new_uk2() {
 # ordinary install in the same project, which npm answers for, and which
 # rebuilds the tree.
 SOURCED_SAYS="It has not recorded these bytes as withheld: that code ran in this shell and could already have run anything, so a record would protect nothing. The next install npm says fetches from the public npm registry rebuilds them as usual"
-home_records() { (cd "${CASE_HOME}" && find npm-withheld npm-observed -type f -exec cksum {} + 2>/dev/null | sort); }
+# Either directory may not exist yet, and find then fails, which under
+# pipefail would end the battery: an absent directory is an empty one here.
+home_records() { (cd "${CASE_HOME}" && { find npm-withheld npm-observed -type f -exec cksum {} + 2>/dev/null || true; } | sort); }
 sourced_first() {
   local id="$1" form="$2" before
   new_benignenv
