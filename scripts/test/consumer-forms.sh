@@ -1675,12 +1675,15 @@ operand_rows=(
   $'npm:right-pad\tnpm install left-pad && bash -c \'npm install right-pad\''
   # Declared: recorded, and harmless. pip resolves both operands to the pin;
   # the second install is a no-op at runtime; the local binary does not exist
-  # yet when the gate reads the command; the record assumes an option it does
-  # not know takes no value, and `--no-binary` takes one.
+  # yet when the gate reads the command.
   $'pypi:requests\tpip install requests==2.0.0 requests'
   $'pypi:requests\tpip install requests==2.0.0 && pip install requests'
   $'npm:cowsay\tpnpm add cowsay@1.0.0 && npx cowsay'
-  $'pypi:requests\tpip install requests==2.0.0 --no-binary requests'
+  # `--no-binary` takes a value (pip's help: `--no-binary <format_control>`),
+  # and it is in pip's table now, so its value is no operand. This row used
+  # to record `pypi:requests` as a declared trade-off of a table that did not
+  # know the option.
+  $'\tpip install requests==2.0.0 --no-binary requests'
   # A redirection and its target are the shell's, not operands. The record
   # used to name `npm:>/dev/null` beside the package.
   $'npm:left-pad\tpnpm add left-pad >/dev/null'

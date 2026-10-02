@@ -696,6 +696,13 @@ SAFEDEPS_G_VALUE_OPTIONS='
   yarn/workspaces,foreach:--include=v yarn/workspaces,foreach:--exclude=v
   yarn/workspaces,foreach:--from=v yarn/workspaces,foreach:-j=v yarn/workspaces,foreach:--jobs=v
   bun/*:--cwd=d bun/*:-c=v bun/*:--config=v bun/*:--backend=v bun/*:--ca=v bun/*:--cache-dir=v
+  bun/*:--filter=v bun/*:-F=v bun/*:--conditions=v bun/*:--console-depth=v bun/*:--env-file=v
+  bun/*:--eval=v bun/*:-e=v bun/*:--print=v bun/*:-p=v bun/*:--import=v bun/*:--preload=v
+  bun/*:-r=v bun/*:--require=v bun/*:--shell=v bun/*:--title=v bun/*:--port=v bun/*:--user-agent=v
+  bun/*:--dns-result-order=v bun/*:--elide-lines=v bun/*:--max-http-header-size=v
+  bun/*:--fetch-preconnect=v bun/*:--cron-period=v bun/*:--cron-title=v bun/*:--cpu-prof-dir=v
+  bun/*:--cpu-prof-interval=v bun/*:--cpu-prof-name=v bun/*:--heap-prof-dir=v
+  bun/*:--heap-prof-name=v bun/*:--unhandled-rejections=v
   bun/*:--cafile=v bun/*:--concurrent-scripts=v bun/*:--cpu=v bun/*:--linker=v
   bun/*:--minimum-release-age=v bun/*:--network-concurrency=v bun/*:--omit=v bun/*:--os=v
   bun/*:--registry=v bun/x:-p=p bun/x:--package=p bunx/*:-p=p bunx/*:--package=p bunx/*:--cwd=d
@@ -1042,6 +1049,34 @@ safedeps_npx_first_pass() {
 #                        already has without fetching (npx, npm exec, bunx)
 # No process is started: this runs once per statement.
 safedeps_manager_read() {
+  local -a role=() text=()
+  local kind localbin k
+  SAFEDEPS_G_M_AMBIGUOUS=-1 SAFEDEPS_G_M_FORCE_VALUE=-1
+  safedeps_manager_read_once "$@"
+  (( SAFEDEPS_G_M_AMBIGUOUS >= 0 )) || return 0
+  # An option the table does not know, and then a word that is one of the
+  # manager's commands (`bun --filter x add evil@1.0.0`, where `bun x` is a
+  # runner): the manager may read the word as the option's value or as its
+  # command, so both readings are judged, as the union.
+  role=("${SAFEDEPS_G_M_ROLE[@]}") text=("${SAFEDEPS_G_M_TEXT[@]}")
+  kind="${SAFEDEPS_G_M_KIND}" localbin="${SAFEDEPS_G_M_LOCALBIN}"
+  SAFEDEPS_G_M_FORCE_VALUE="${SAFEDEPS_G_M_AMBIGUOUS}"
+  safedeps_manager_read_once "$@"
+  SAFEDEPS_G_M_FORCE_VALUE=-1
+  # A role either reading gives a word that the other reads as nothing
+  # particular is kept: a package, a version that pins the operands, a
+  # directory.
+  for (( k = 0; k < ${#role[@]}; k++ )); do
+    case "${role[k]}:${SAFEDEPS_G_M_ROLE[k]}" in
+      [orCpwDVd]:[-gcva]) SAFEDEPS_G_M_ROLE[k]="${role[k]}" SAFEDEPS_G_M_TEXT[k]="${text[k]}" ;;
+    esac
+  done
+  [[ "${SAFEDEPS_G_M_KIND}" != none ]] || SAFEDEPS_G_M_KIND="${kind}"
+  [[ "${localbin}" != true ]] || SAFEDEPS_G_M_LOCALBIN=true
+  return 0
+}
+
+safedeps_manager_read_once() {
   local -a w=("$@")
   local n=$# i=0 t family="" base kind="" path="" traits="" endopts=false named=false
   local opt val cls j k unknown=false
@@ -1175,6 +1210,13 @@ safedeps_manager_read() {
     fi
     # A positional word: the command path first, then what the command reads.
     if [[ -z "${kind}" ]]; then
+      if (( i == SAFEDEPS_G_M_FORCE_VALUE )); then
+        SAFEDEPS_G_M_ROLE[i]=v unknown=false i=$(( i + 1 ))
+        continue
+      fi
+      if [[ "${unknown}" == true ]] && (( SAFEDEPS_G_M_AMBIGUOUS < 0 && SAFEDEPS_G_M_FORCE_VALUE < 0 )); then
+        SAFEDEPS_G_M_AMBIGUOUS=${i}
+      fi
       SAFEDEPS_G_M_ROLE[i]=c
       if safedeps_manager_command "${family}" "${path:+${path},}${t}"; then
         path="${path:+${path},}${t}"
@@ -1287,7 +1329,10 @@ safedeps_manager_read_npm_once() {
           [[ "${text}" == "${w[at]}" ]] || SAFEDEPS_G_M_TEXT[at]="${text}"
         fi
         ;;
-      call) call=true ;;
+      # libnpmexec runs the call instead of a package only when it is not
+      # empty (`if (call && args.length)`); `--cwd`, which nopt expands into
+      # `--call --workspace --loglevel info`, leaves it empty.
+      call) [[ -z "${text}" ]] || call=true ;;
     esac
   done
   case "${SAFEDEPS_G_NPM_KIND}" in
@@ -1306,6 +1351,9 @@ safedeps_manager_read_npm_once() {
         if (( k == 1 )) && [[ "${named}" == false && "${call}" == false ]]; then
           [[ "${SAFEDEPS_G_M_KIND}" == create ]] && SAFEDEPS_G_M_ROLE[at]=C || SAFEDEPS_G_M_ROLE[at]=r
         else
+          # One word can give npm several positionals (`--cwd=x` expands to
+          # `--call --workspace --loglevel info x`); the package keeps it.
+          [[ "${SAFEDEPS_G_M_ROLE[at]}" == g ]] || continue
           SAFEDEPS_G_M_ROLE[at]=a
         fi
         ;;
