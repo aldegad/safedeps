@@ -71,6 +71,73 @@ exec '${real_awk}' "\$@"
 SHIM
 chmod +x "${slow_bin}/awk"
 
+# --- a loaded machine, on demand ---------------------------------------------
+# The deadline used to add up the sleeps it asked for, and on a loaded machine
+# a sleep takes longer than it asks for. `loaded_bin` holds a `sleep` that
+# stretches every sleep by the factor in a file: 3 stands in for load, and 1
+# only records. Either way it writes down what it was asked and its own pid.
+# Unlike the awk shim, it sits on the PARENT's path on purpose, because the
+# parent keeps the deadline with `sleep` and that is the clock under test. It
+# also stretches the awk shim's sleep, which only makes the judgment longer.
+# Like the awk shim it sleeps from `/`, and it execs the real sleep, so the pid
+# it records is the sleeper's own.
+real_sleep=$(command -v sleep)
+loaded_bin="${tmp_root}/loaded-bin"
+loaded_factor_file="${tmp_root}/loaded-factor"
+loaded_log="${tmp_root}/loaded-log"
+loaded_pids="${tmp_root}/loaded-pids"
+mkdir -p "${loaded_bin}"
+{
+  printf '#!/usr/bin/env bash\n'
+  printf "real_sleep='%s'\nfactor_file='%s'\nlog='%s'\npids='%s'\n" \
+    "${real_sleep}" "${loaded_factor_file}" "${loaded_log}" "${loaded_pids}"
+  cat <<'SHIM'
+arg="${1:-}"
+printf '%s\n' "${arg}" >> "${log}"
+printf '%s\n' "$$" >> "${pids}"
+factor=""
+IFS= read -r factor < "${factor_file}" || true
+[[ "${factor}" =~ ^[0-9]+$ ]] || factor=1
+number='^([0-9]+)(\.([0-9]{1,3}))?$'
+if [[ "${arg}" =~ ${number} ]]; then
+  frac="${BASH_REMATCH[3]}000"
+  ms=$(( (10#${BASH_REMATCH[1]} * 1000 + 10#${frac:0:3}) * factor ))
+  printf -v arg '%d.%03d' $(( ms / 1000 )) $(( ms % 1000 ))
+fi
+cd / || exit 1
+exec "${real_sleep}" "${arg}"
+SHIM
+} > "${loaded_bin}/sleep"
+chmod +x "${loaded_bin}/sleep"
+
+# Puts the loaded `sleep` in front of the next guard run, with every sleep
+# stretched <factor> times, and starts its records fresh.
+LOADED_PATH=""
+load_machine() {
+  printf '%s\n' "$1" > "${loaded_factor_file}"
+  : > "${loaded_log}"
+  : > "${loaded_pids}"
+  LOADED_PATH="${loaded_bin}:"
+}
+
+# True once every sleep the loaded shim ran is gone, waiting up to two seconds
+# for each to be reaped, as slow_sleeper_gone does.
+loaded_sleepers_gone() {
+  local pid tries
+  while IFS= read -r pid; do
+    [[ -n "${pid}" ]] || continue
+    tries=0
+    while kill -0 "${pid}" 2>/dev/null; do
+      (( tries++ < 40 )) || return 1
+      sleep 0.05
+    done
+  done < "${loaded_pids}"
+}
+
+# A millisecond clock that bash 3.2 lacks, as scripts/measure/npm-ask-cost.sh
+# reads it. Only the runs that ask for it pay for the two node starts.
+now_ms() { node -e 'process.stdout.write(String(Date.now()))'; }
+
 # Long enough that nothing but the deadline can answer inside the runtime's 30s.
 never=60
 
@@ -78,6 +145,10 @@ never=60
 # one, and how long the answer took.
 GUARD_PATH=""
 GUARD_IGNORE_TERM=""
+# A SECONDS value for the guard's environment, which bash seeds its clock from.
+GUARD_SECONDS=""
+# Set to also time the run in milliseconds, into GUARD_ELAPSED_MS.
+GUARD_CLOCK_MS=""
 guard() {
   local command="$1" budget="${2:-2}" engage="${3:-1024}" disabled="${4:-}" legacy_child="${5:-}"
   # mktemp for the same reason as consumer-forms.sh: `$$` is constant within a
@@ -93,7 +164,14 @@ guard() {
     # or reset it, so every process in the judgment inherits a deaf TERM.
     launch=(bash -c 'trap "" TERM; exec "$@"' ignore-term scripts/safedeps-pre-guard.sh)
   fi
+  if [[ -n "${GUARD_SECONDS}" ]]; then
+    # Through env, because an assignment in front of a command would be read
+    # by this shell's own SECONDS.
+    launch=(env "SECONDS=${GUARD_SECONDS}" "${launch[@]}")
+  fi
+  local start_ms=0 end_ms=0
   start=$(date +%s)
+  [[ -z "${GUARD_CLOCK_MS}" ]] || start_ms=$(now_ms)
   GUARD_OUT=$(jq -nc --arg c "${command}" --arg cwd "${project_dir}" \
     '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
     PATH="${GUARD_PATH:-${PATH}}" \
@@ -103,9 +181,11 @@ guard() {
     SAFEDEPS_BUDGET_DISABLED="${disabled}" \
     SAFEDEPS_BUDGET_CHILD="${legacy_child}" \
     "${launch[@]}" 2>"${tmp_root}/stderr") || rc=$?
+  [[ -z "${GUARD_CLOCK_MS}" ]] || end_ms=$(now_ms)
   GUARD_STDERR=$(cat "${tmp_root}/stderr" 2>/dev/null || printf '')
   end=$(date +%s)
   GUARD_ELAPSED=$(( end - start ))
+  GUARD_ELAPSED_MS=$(( end_ms - start_ms ))
   # The hook exits 0 on every designed path, so anything else means it never
   # answered. Reading that as an empty answer reads it as `pass`, and that is
   # how a Linux launch failure (E2BIG) passed for a verdict in CI.
@@ -126,9 +206,18 @@ slow_guard() {
   printf '%s' "${delay}" > "${slow_delay_file}"
   rm -f "${slow_pid_file}"
   rmdir "${slow_once_dir}" 2>/dev/null || true
-  GUARD_PATH="${slow_bin}:${PATH}"
+  GUARD_PATH="${slow_bin}:${LOADED_PATH}${PATH}"
   guard "$@"
   GUARD_PATH=""
+  LOADED_PATH=""
+}
+
+# `guard`, on the loaded machine load_machine set up.
+loaded_guard() {
+  GUARD_PATH="${LOADED_PATH}${PATH}"
+  guard "$@"
+  GUARD_PATH=""
+  LOADED_PATH=""
 }
 
 # True once the process the shim ran as is gone. A killed process can sit as a
@@ -148,8 +237,9 @@ big=$(pad 12288)
 # Comfortably inside any budget.
 small=$(pad 256)
 
-# The deadline is checked between polls, and the last poll is 1s, so the
-# effective fire time is the budget plus up to one second.
+# The deadline is checked between polls on a whole-second clock that starts
+# with the guard, so it fires up to a second early and at most one poll step
+# late, and the longest step is 1s.
 tiny_budget=1
 
 # --- past the budget: the gate answers instead of being killed --------------
@@ -255,6 +345,106 @@ budget_six=${GUARD_ELAPSED}
 (( budget_six <= 9 )) \
   || fail "a longer budget is still honoured rather than overrun (6s->${budget_six}s)"
 pass "answer time tracks the configured budget, not the judgment's natural length"
+
+# --- a fast judgment is answered as fast as before ---------------------------
+# The rows after this one make the deadline read the clock. Doing that must not
+# cost the fast path anything: the parent still polls in steps that start at
+# 50ms, so a judgment that finishes inside the first step is answered at 50ms.
+# A clock-only loop that slept a whole second per check would pass every
+# deadline row below and add up to a second to every engaged call.
+#
+# Two rows, because a time measurement alone cannot tell that apart from a slow
+# machine. The schedule row reads the sleeps the parent asked for, through the
+# loaded shim at factor 1, and fails on a coarse first step on any machine. The
+# timing row measures it in real time, engaged against inline on the same
+# command, and fails when the engaged path adds a second or more on top of the
+# child it spawns. "ls -la" engages at 1 byte and reaches no package manager,
+# so the judgment is as short as the guard makes one.
+command -v node >/dev/null 2>&1 || fail "node is on PATH for the millisecond clock"
+
+load_machine 1
+loaded_guard "ls -la" 20 1
+[[ "${GUARD_DECISION}" == "pass" ]] || fail "an engaged fast judgment passes (got: ${GUARD_DECISION})"
+fast_first_step=$(head -n 1 "${loaded_log}")
+[[ "${fast_first_step}" == "0.050" ]] \
+  || fail "the parent's first poll is the 50ms step (asked for: '${fast_first_step}'; sleeps: $(tr '\n' ' ' < "${loaded_log}"))"
+while IFS= read -r fast_step; do
+  case "${fast_step}" in
+    0.*|1.000) ;;
+    *) fail "no poll step is longer than 1s (asked for: ${fast_step})" ;;
+  esac
+done < "${loaded_log}"
+pass "the parent still polls from a 50ms first step, capped at 1s"
+
+# The fastest of three runs, because a slow run measures the machine, not the
+# path. Inline is the baseline: it is the same judgment without the machinery.
+fastest_ms() {
+  local engage="$1" i
+  FASTEST_MS=""
+  for i in 1 2 3; do
+    GUARD_CLOCK_MS=1
+    guard "ls -la" 20 "${engage}"
+    GUARD_CLOCK_MS=""
+    [[ "${GUARD_DECISION}" == "pass" ]] || fail "a fast judgment passes, engage ${engage} (got: ${GUARD_DECISION})"
+    if [[ -z "${FASTEST_MS}" ]] || (( GUARD_ELAPSED_MS < FASTEST_MS )); then
+      FASTEST_MS=${GUARD_ELAPSED_MS}
+    fi
+  done
+}
+fastest_ms 1024
+fast_inline_ms=${FASTEST_MS}
+fastest_ms 1
+fast_engaged_ms=${FASTEST_MS}
+printf '# note - fast judgment, fastest of 3: engaged %sms, inline %sms\n' "${fast_engaged_ms}" "${fast_inline_ms}"
+(( fast_engaged_ms - fast_inline_ms < 1000 )) \
+  || fail "an engaged fast judgment adds less than a second to the inline one (engaged ${fast_engaged_ms}ms, inline ${fast_inline_ms}ms)"
+pass "an engaged fast judgment is answered without waiting out a whole second"
+
+# --- the deadline is read from the clock, not added up from its sleeps -------
+# The deadline used to count the time its sleeps asked for. On a loaded machine
+# a sleep takes longer than it asks, so the real wait ran past the budget by
+# whatever load added to every step: at three times per sleep, a 4s budget
+# answered after about 14s. Past the runtime's 30s the hook is killed and the
+# install proceeds unjudged.
+#
+# The loaded shim stretches every sleep threefold, and the awk shim holds the
+# judgment so nothing but the deadline answers. The margin is one stretched 1s
+# step (3s), plus a second for the grace, the reap and jq. It does not grow
+# with the budget, because only the last step is late.
+loaded_budget=4
+loaded_margin=4
+load_machine 3
+GUARD_CLOCK_MS=1
+slow_guard "${never}" "pip install requests==2.31.0 # ${big}" "${loaded_budget}"
+GUARD_CLOCK_MS=""
+[[ "${GUARD_DECISION}" == "deny" ]] || fail "on a loaded machine the stuck judgment is denied (got: ${GUARD_DECISION})"
+grep -q 'UNDECIDED' <<< "${GUARD_REASON}" || fail "on a loaded machine the deny is the undecided one"
+printf '# note - loaded machine, sleeps x3: UNDECIDED after %sms against a %ss budget\n' "${GUARD_ELAPSED_MS}" "${loaded_budget}"
+(( GUARD_ELAPSED_MS <= (loaded_budget + loaded_margin) * 1000 )) \
+  || fail "on a loaded machine the answer lands within the ${loaded_budget}s budget plus ${loaded_margin}s (took ${GUARD_ELAPSED_MS}ms; a deadline that adds up its sleeps lands about three budgets in)"
+pass "on a loaded machine the deadline holds in wall-clock time"
+
+slow_sleeper_gone \
+  || fail "on a loaded machine the deadline still takes the blocked command down"
+loaded_sleepers_gone \
+  || fail "no sleep the loaded run started outlives the answer"
+pass "on a loaded machine the deadline leaves no sleeper behind"
+
+# Bash seeds SECONDS from the environment. A deadline that compared SECONDS
+# itself, rather than its distance from the guard's start, would never arrive
+# under an exported SECONDS=-1000000, and only the requested-sleep bound would
+# end the wait: the late answer above, through a different door.
+load_machine 3
+GUARD_CLOCK_MS=1
+GUARD_SECONDS=-1000000
+slow_guard "${never}" "pip install requests==2.31.0 # ${big}" "${loaded_budget}"
+GUARD_SECONDS=""
+GUARD_CLOCK_MS=""
+[[ "${GUARD_DECISION}" == "deny" ]] || fail "an exported SECONDS does not turn the deadline into a pass (got: ${GUARD_DECISION})"
+grep -q 'UNDECIDED' <<< "${GUARD_REASON}" || fail "an exported SECONDS still ends in the undecided deny"
+(( GUARD_ELAPSED_MS <= (loaded_budget + loaded_margin) * 1000 )) \
+  || fail "an exported SECONDS does not move the deadline (took ${GUARD_ELAPSED_MS}ms against the ${loaded_budget}s budget plus ${loaded_margin}s)"
+pass "an exported SECONDS does not move the deadline"
 
 # --- the budget is tunable only downward ------------------------------------
 # A self budget at or above the runtime's hook budget is not a budget: the
@@ -528,8 +718,10 @@ pass "unapproved npm install still denies"
 
 # Engaged but comfortably inside the budget: the machinery must be transparent,
 # including the Claude-only inert-install rewrite that travels in the same
-# payload. This is the case a naive budget breaks.
-guard "echo ${small}" 2 128
+# payload. This is the case a naive budget breaks. The budget is 3s, not 2s,
+# because the whole-second clock can end a budget up to a second early. 3s
+# still leaves the judgment more than 2s, as this row always has.
+guard "echo ${small}" 3 128
 [[ "${GUARD_DECISION}" == "pass" ]] || fail "engaged in-budget benign command still passes (got: ${GUARD_DECISION})"
 pass "engaged but in-budget benign command still passes"
 
