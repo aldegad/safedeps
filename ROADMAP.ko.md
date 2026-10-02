@@ -774,6 +774,20 @@ rebuild 의 트리 전체 검사와 출처 검사는 `https://registry.npmjs.org
 
 검증: `scripts/test/effect-trace-grid.sh` 1d 절. 가짜를 내주는 두 번째 fixture registry 를 127.0.0.1 에 띄웠다(macOS 15.6.1, npm 11.19.0). RH1, RH2, RH3, RH3e, RH8(루트 `.npmrc` 아래의 워크스페이스 멤버), RH1w(명령이 쓴 `.npmrc`), RH2w 는 설치가 유지되고, 롤백되지 않으며, 스크립트가 돌지 않는다. 경고는 가짜 registry 를 이름 대고 rebuild 전에 사용자에게 확인하라고 말한다. Codex RH3 은 설치 자신의 스크립트가 이미 돌았다는 경고와 함께 유지된다. RH7(`source`)은 모름을 이름 대는 경고와 함께 유지된다. RH4(명령줄 `--registry`)는 아무것도 설치되기 전에 차단된다. 샌드박스 registry 에서 받는 승인된 설치 RH5 는 rebuild 된다. 최종 트리에서 격자는 부하 5–6 에서 379초에 통과하고, smoke 와 lockless-forms 도 함께 통과한다. 바뀌기 전, 새 행을 얹은 3e22fbc 에서는 RH1, RH2, RH3, RH3e, RH8, RH1w, RH2w, RH7 이 각각 가짜의 스크립트 셋을 돌렸다(기대 32개 실패). 먼저 나온 차단 설계(5566cc0)를 이 행들에 돌리면 기대 10개가 실패한다. RH1, RH2, RH3, RH3e, RH8, Codex RH3 을 차단하고, RH1w 를 롤백하며, RH1w·RH2w·RH7 의 경고가 registry 를 이름 대지도 사용자에게 물으라고 하지도 않는다. npm 의 답을 무시하고 공개 URL 만 믿게 하면 유지 행 여덟이 모두 다시 빨갛다. rebuild 가 각 행에서 가짜의 스크립트를 돌리고, Codex RH3 은 경고를 잃는다(기대 25개 실패). 대조와 변이는 나란히, 부하 4–12 에서 돌렸다. 이 변경의 첫 차단 버전은 같은 호스트에서 e2e 와 install-dir-differential 도 통과했다. 이번 라운드는 건드린 배터리만 돌렸다. 리눅스와 npm 10.8.2 는 재지 않았다.
 
+#### 바이트가 어디서 왔는지는 받을 때 기록한다
+
+위 변경은 바이트를 받은 그 명령을 판정할 뿐, 다음 명령에는 아무것도 알려 주지 않았다. 가짜를 받아 온 설정이 사라지면 다음 명령이 그것을 rebuild 해 스크립트를 돌렸다. 한 번만 쓴 `npm_config_registry` 뒤의 승인 설치(P1), `.npmrc` 를 지운 뒤의 맨 `npm install`(P2), `node_modules` 를 지운 뒤 npm 캐시가 integrity 로 내준 `npm ci`(P3), 가짜가 든 채 확정된 스냅샷으로의 롤백(P4), 같은 머신에서 같은 lockfile 로 다른 프로젝트가 돌린 `npm ci`(P5)다. 두 lockfile 에서 `integrity` 를 지워도 그랬다(P7). 같은 종류의 반례가 세 번 연달아 나온 것이다. `inBundle`, `resolved`, rebuild 시점의 설정이 각각 "이 바이트는 어디서 왔나"를 바이트에 묶이지 않은 값으로 답했다.
+
+- 이제 post 훅이 받는 것을 볼 때 그 사실을 기록한다. 설치가 두 lockfile 중 어디에든 새로 들인 integrity 가운데 npm 이 공개 registry 에서 받았다고 답하지 않은 것을 패키지, 받은 곳, 처음 받은 프로젝트와 함께 `~/.safedeps/npm-withheld` 에 적는다. 두 엔진 모두 롤백보다 먼저 적는다. npm 캐시가 integrity 로 바이트를 다른 프로젝트에 나르므로 기록은 머신 전역이고, 경로는 `SAFEDEPS_HOME` 에서만 나온다.
+- 트리 전체 검사는 기록된 integrity 를 지닌 패키지와, integrity 가 없는 공개 registry 기록을 거부한다. rebuild 를 건너뛰고 롤백은 하지 않으며, 경고는 registry 와 처음 받은 프로젝트를 이름 대고 rebuild 전에 사용자에게 물으라고 말한다. 기록을 읽지 못하면 이유와 함께 rebuild 를 건너뛴다.
+- 기록은 바이트가 트리를 떠날 때만 풀린다(P6). 이 버전에는 기록을 푸는 명령이 없다.
+
+사용자에게 보이는 변화: 공개 밖 registry 로 한 번 받은 패키지는, 미러라도, 머신의 어느 프로젝트에서도 자동 rebuild 되지 않는다. 미러는 공개 registry 와 같은 바이트를 내주기 때문이다. 막는 것은 없다. registry 승인은 다음 릴리스에 두며, 기록된 integrity 를 공개 registry 의 `dist.integrity` 와 비교하는 검사와 함께 이 비용을 없앤다.
+
+경계: 게이트가 판정한 적 없는 fetch 로 들어온 바이트. 훅 밖에서 돈 설치, 명령 훅이 알아보지 못했거나 `UNGATED` 로 기록된 설치, npm 의 두 답이 보지 못하는 registry 는 기록 없이 npm 캐시에 바이트를 넣고, 그 integrity 를 적은 lockfile 은 거기서 그것을 설치한다.
+
+검증: `scripts/test/effect-trace-grid.sh` 1d 절. 실제 npm, 샌드박스 registry, 가짜를 내주는 두 번째 픽스처 registry 로 돌렸다. 트리는 macOS 15.6.1, node v26.7.0, npm 11.19.0 에서 `nice` 로 돌렸고 load 는 3.8 에서 17.8 이었다. P1-P5, P1x(Codex 설치 뒤 Claude 설치), PU(`source` 뒤 설치)는 rebuild 없이 유지되고, 경고가 registry(또는 모름의 이유)와 처음 받은 프로젝트를 이름 댄다. P4 는 확정 스냅샷으로 롤백하고 아무것도 rebuild 하지 않는다. P7 은 integrity 없음 경고와 함께 유지된다. P0, P6 은 조용히 rebuild 된다. grid 는 실패 0(477초), lockless-forms 는 실패 0(340초), smoke 는 통과했다. 변경 전 트리(104a2fa)에 새 배터리를 넣으면 기대 24개가 실패했다. P1, P1x, P2, P3, P4, P5, P7, PU 에서 셋씩이고, 모두 가짜의 스크립트 셋을 돌렸다. P0, P6 은 통과했다. 변이 셋은 각각 예상한 곳에서만 빨갛다. 기록 조회를 빼면 P1-P5, P1x, PU(21), integrity 없음 조건을 빼면 P7(3), 기록을 프로젝트별 키로 하면 P5(3)다. 리눅스(bash 5.2.37, node v20.20.2, npm 10.8.2, load 2 미만)에서 grid 와 lockless-forms 는 각각 실패 0 으로 통과했다. 그 실행이 먼저 앞선 변경이 들인 pre-guard 크래시를 찾았다. 문장별 리더가 일찍 끝난 문장, 예컨대 `printf 'save=false\n' > .npmrc && npm install x` 의 `printf` 에서 `fetch` 를 비워 두지 않고 설정 안 된 채로 남겼다. bash 5 는 `set -u` 아래 설정 안 된 변수에서 멈추므로 그런 명령은 모두 fail-closed 로 거부됐고, 두 배터리는 첫 그런 형태에서 죽었다. macOS 의 bash 3.2 는 그 값을 빈 값으로 읽었다. 이제 문장의 다른 필드와 함께 초기화한다.
+
 ## v3 (미래)
 
 ### Ledger 변조 내성
