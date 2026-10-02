@@ -1980,7 +1980,12 @@ resolve_reading_targets() {
       printf '?\035?\035the command could not be split into statements (awk failed), so safedeps cannot tell where its installs land\035\035\n'
       continue
     fi
-    kind=- target="" why=""
+    # Every field a statement prints starts empty here. `fetch` was reset only
+    # after the early `break`s, so a statement that left before it (a `printf`
+    # ahead of `npm install`) printed an unset variable, which bash 5 under
+    # `set -u` aborts on: every such command was denied fail-closed. bash 3.2
+    # read it as empty, or as the statement before's.
+    kind=- target="" why="" fetch=""
     # The directory a conditional `cd` entered holds only while every
     # separator since it is `&&`.
     [[ "${before}" == "&&" ]] || cond_dir=""
