@@ -70,10 +70,13 @@ correctly, overlapping into a wrong result.
   both hold write access to one tree. Worse, if a mutation is restored with
   `git checkout -- <file>`, it discards *every* uncommitted change to that file,
   including the author's, and the file returns to a HEAD state that looks
-  correct. Copy the tree (`git worktree add /tmp/mut-<id> HEAD`), mutate there,
-  and throw it away -- not restoring is the safest restore there is. "The
+  correct. Copy the tree (`git archive HEAD | tar -x -C "$(mktemp -d)"`), mutate
+  there, and throw it away -- not restoring is the safest restore there is. "The
   worktree belongs to the validator" is a discipline someone has to remember;
-  mutating a copy is a structure with nothing to remember.
+  mutating a copy is a structure with nothing to remember. Use an archive, not
+  `git worktree add`: a worktree is registered in the repository and stays
+  listed until someone removes it, so copies made that way pile up beside the
+  plan worktrees.
 - **Sandbox names come from `mktemp`, not from `$$-$RANDOM`.** `$$` is constant
   within a run, so isolation rests on `RANDOM` alone, and `mkdir -p` succeeds on
   an existing directory -- a collision is undetectable rather than merely
