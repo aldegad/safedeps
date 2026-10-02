@@ -122,7 +122,7 @@ table_options() {
 
 ask_bun() {
   command -v bun >/dev/null 2>&1 || return 3
-  local version c o b out dir n=0 answer
+  local version c o b n=0 answer
   version=$(bun --version)
   while IFS= read -r v; do unset "${v}"; done < <(env | LC_ALL=C sed -nE 's/^((npm_config_|NPM_CONFIG_|BUN_)[A-Za-z0-9_]*)=.*/\1/p')
   export HOME="${work}/home" BUN_INSTALL="${work}/bun-install" BUN_INSTALL_CACHE_DIR="${work}/bun-cache" \
@@ -211,7 +211,7 @@ ask_bun() {
 ask_pip() {
   command -v python3 >/dev/null 2>&1 || return 3
   python3 -c 'import pip._internal.commands' 2>/dev/null || return 3
-  local version line kind k answer
+  local version line k answer
   version=$(python3 -c 'import pip; print(pip.__version__)')
   table_options pip | LC_ALL=C sort -u > "${work}/pip.table"
   # pip's answer for each form: in place (`pip install <opt> SDV SDW`) and
@@ -253,7 +253,7 @@ for w in sorted(words):
     print("in\t3\tpip\tinstall\t%s\tSDV\tSDW\t%s" % (w, read([w, "SDV", "SDW"], False)))
     print("pre\t3\tpip\t%s\tinstall\tSDV\t%s" % (w, read([w, "install", "SDV"], True)))
 PY
-  while IFS=$'\t' read -r kind k line; do
+  while IFS=$'\t' read -r _ k line; do
     answer="${line##*$'\t'}"
     line="${line%$'\t'*}"
     IFS=$'\t' read -r -a words <<< "${line}"
