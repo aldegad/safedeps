@@ -403,8 +403,9 @@ pass "an engaged fast judgment is answered without waiting out a whole second"
 # --- the deadline is read from the clock, not added up from its sleeps -------
 # The deadline used to count the time its sleeps asked for. On a loaded machine
 # a sleep takes longer than it asks, so the real wait ran past the budget by
-# whatever load added to every step: at three times per sleep, a 4s budget
-# answered after about 14s. Past the runtime's 30s the hook is killed and the
+# whatever load added to every step. Against the 4s budget below, that loop
+# stops once its requests add up to 4.55s, which at three times per sleep is
+# about 13.7s of real time. Past the runtime's 30s the hook is killed and the
 # install proceeds unjudged.
 #
 # The loaded shim stretches every sleep threefold, and the awk shim holds the
@@ -421,7 +422,7 @@ GUARD_CLOCK_MS=""
 grep -q 'UNDECIDED' <<< "${GUARD_REASON}" || fail "on a loaded machine the deny is the undecided one"
 printf '# note - loaded machine, sleeps x3: UNDECIDED after %sms against a %ss budget\n' "${GUARD_ELAPSED_MS}" "${loaded_budget}"
 (( GUARD_ELAPSED_MS <= (loaded_budget + loaded_margin) * 1000 )) \
-  || fail "on a loaded machine the answer lands within the ${loaded_budget}s budget plus ${loaded_margin}s (took ${GUARD_ELAPSED_MS}ms; a deadline that adds up its sleeps lands about three budgets in)"
+  || fail "on a loaded machine the answer lands within the ${loaded_budget}s budget plus ${loaded_margin}s (took ${GUARD_ELAPSED_MS}ms; a deadline that adds up its sleeps lands near three times the budget)"
 pass "on a loaded machine the deadline holds in wall-clock time"
 
 slow_sleeper_gone \
