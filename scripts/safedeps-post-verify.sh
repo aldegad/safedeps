@@ -941,38 +941,72 @@ redact_install_script_content() {
     "${suffix}"
 }
 
+# The package.json files, among <files>, that declare a preinstall, install or
+# postinstall script. One jq reads them all; most packages declare none, and a
+# jq per package cost seconds on an install of a few hundred. A file jq cannot
+# parse stops that one run, so then every file is handed on and the per-package
+# reading below decides, as it did before.
+packages_with_install_scripts() {
+  local listed
+  [[ $# -gt 0 ]] || return 0
+  if listed=$(printf '%s\0' "$@" | xargs -0 jq -r '
+      select(type == "object")
+      | select(((.scripts? // {}) | if type == "object" then [.preinstall, .install, .postinstall] else [] end
+          | map(select(. != null and . != false and . != "")) | length) > 0)
+      | input_filename' 2>/dev/null); then
+    [[ -z "${listed}" ]] || printf '%s\n' "${listed}"
+  else
+    printf '%s\n' "$@"
+  fi
+}
+
 # Function: check for suspicious postinstall scripts in new/changed dependencies
+#
+# Two lists of packages are read. The first is the old one: when a lockfile or
+# package.json changed, the package.json files in node_modules that were not
+# there before. The second is what npm's records say this install brought in
+# (collect_npm_new_records), whether or not any of those files changed. An
+# install that saves nothing changes neither, so before the second list the
+# heuristics never ran on it, and the inert install's rebuild then ran the
+# scripts they exist to catch.
 check_postinstall_scripts() {
   local pkg_json="${PROJECT_DIR}/package.json"
   local changed_lock=false
   local lock_file
+  local key
+  local script_packages=""
+  local -a candidates=()
 
-  if [[ ! -f "${pkg_json}" ]]; then
-    return
+  if [[ -f "${pkg_json}" ]]; then
+    for lock_file in "${SAFEDEPS_LOCK_FILES[@]}"; do
+      if files_differ "${SNAPSHOT_DIR}/${SNAPSHOT_ID}_${lock_file}" "${PROJECT_DIR}/${lock_file}"; then
+        changed_lock=true
+        break
+      fi
+    done
+
+    # Check node_modules for new packages with install scripts
+    if [[ -d "${PROJECT_DIR}/node_modules" ]] \
+        && { [[ "${changed_lock}" == "true" ]] || files_differ "${SNAPSHOT_DIR}/${SNAPSHOT_ID}_package.json" "${pkg_json}"; }; then
+      local old_pkg_listing="${SNAPSHOT_DIR}/${SNAPSHOT_ID}_packages.list"
+      if [[ -f "${old_pkg_listing}" ]]; then
+        script_packages=$(find "${PROJECT_DIR}/node_modules" -maxdepth 3 -name "package.json" 2>/dev/null | sort | comm -13 "${old_pkg_listing}" - | head -50)
+      else
+        script_packages=$(find "${PROJECT_DIR}/node_modules" -maxdepth 3 -name "package.json" 2>/dev/null | head -50)
+      fi
+    fi
   fi
 
-  for lock_file in "${SAFEDEPS_LOCK_FILES[@]}"; do
-    if files_differ "${SNAPSHOT_DIR}/${SNAPSHOT_ID}_${lock_file}" "${PROJECT_DIR}/${lock_file}"; then
-      changed_lock=true
-      break
-    fi
+  while IFS= read -r key; do
+    [[ -n "${key}" ]] && candidates+=("${key}")
+  done <<< "${script_packages}"
+  for key in ${NPM_NEW_NODES[@]+"${NPM_NEW_NODES[@]}"}; do
+    [[ -f "${PROJECT_DIR}/${key}/package.json" ]] && candidates+=("${PROJECT_DIR}/${key}/package.json")
   done
+  [[ ${#candidates[@]} -gt 0 ]] || return 0
+  script_packages=$(packages_with_install_scripts "${candidates[@]}" | LC_ALL=C sort -u)
 
-  if [[ "${changed_lock}" != "true" ]] && ! files_differ "${SNAPSHOT_DIR}/${SNAPSHOT_ID}_package.json" "${pkg_json}"; then
-    return
-  fi
-
-  # Check node_modules for new packages with install scripts
-  if [[ -d "${PROJECT_DIR}/node_modules" ]]; then
-    # Find packages with postinstall/preinstall scripts
-    local script_packages
-    local old_pkg_listing="${SNAPSHOT_DIR}/${SNAPSHOT_ID}_packages.list"
-    if [[ -f "${old_pkg_listing}" ]]; then
-      script_packages=$(find "${PROJECT_DIR}/node_modules" -maxdepth 3 -name "package.json" 2>/dev/null | sort | comm -13 "${old_pkg_listing}" - | head -50)
-    else
-      script_packages=$(find "${PROJECT_DIR}/node_modules" -maxdepth 3 -name "package.json" 2>/dev/null | head -50)
-    fi
-
+  if [[ -n "${script_packages}" ]]; then
     while IFS= read -r pkg; do
       [[ -z "${pkg}" ]] && continue
       # Check for suspicious install hooks
@@ -1036,25 +1070,11 @@ check_lockfile_diff() {
       continue
     fi
 
-    # Lock file changed — analyze the diff
+    # Lock file changed — analyze the diff. The resolved URLs of both npm
+    # records are read by check_npm_new_sources, whether or not this file
+    # changed.
     if [[ "${lock_file}" == "package-lock.json" ]]; then
-      local suspicious_urls
-      local insecure_urls
       local new_deps
-
-      # Check for resolved URLs pointing to non-standard registries
-      suspicious_urls=$(diff "${snapshot}" "${current}" 2>/dev/null | grep '^>' | grep '"resolved"' | grep -viE 'registry\.npmjs\.org|registry\.yarnpkg\.com' | head -5 || true)
-      if [[ -n "${suspicious_urls}" ]]; then
-        SUSPICIOUS=true
-        REASONS+=("Lock file contains resolved URLs from non-standard registries")
-      fi
-
-      # Check for git:// or http:// (non-https) resolved URLs
-      insecure_urls=$(diff "${snapshot}" "${current}" 2>/dev/null | grep '^>' | grep '"resolved"' | grep -iE '(git://|http://)' | head -5 || true)
-      if [[ -n "${insecure_urls}" ]]; then
-        SUSPICIOUS=true
-        REASONS+=("Lock file contains insecure (non-HTTPS) resolved URLs")
-      fi
 
       # Check for a very large number of new dependencies (potential dependency confusion)
       new_deps=$(diff "${snapshot}" "${current}" 2>/dev/null | grep '^>' | grep -c '"resolved"' || true)
@@ -1101,6 +1121,65 @@ check_binaries() {
 # rebuild below then ran the unverified package's install scripts
 # (safedeps/effect-gate-blind-to-lockless-npm-installs).
 NPM_HIDDEN_LOCKFILE="node_modules/.package-lock.json"
+
+# What this install brought in, as npm recorded it: the sources and the
+# installed packages that npm's two records now hold and that neither record
+# held before the command. The closure check reads both records, but the
+# source and install-script checks used to run only when package-lock.json or
+# package.json changed. An install that saves nothing changes neither, so a
+# tarball with an approved name and version, fetched from anywhere, passed both
+# and the rebuild ran its scripts (validator round 4).
+#
+# The earlier records are the copies the pre-guard kept of package-lock.json
+# and of the tree record, read together (safedeps_npm_new_records). Where
+# neither existed, everything recorded now is new. A source the committed
+# package-lock.json already named is not new, so `npm ci` installs it as
+# recorded; that is a boundary, documented as one.
+NPM_NEW_SOURCES=()
+NPM_NEW_NODES=()
+collect_npm_new_records() {
+  local record kind value new
+  local -a earlier=()
+
+  for record in "package-lock.json" "${SAFEDEPS_SNAPSHOT_NPM_TREE}"; do
+    [[ -f "${SNAPSHOT_DIR}/${SNAPSHOT_ID}_${record}" ]] && earlier+=("${SNAPSHOT_DIR}/${SNAPSHOT_ID}_${record}")
+  done
+
+  for record in "package-lock.json" "${NPM_HIDDEN_LOCKFILE}"; do
+    [[ -f "${PROJECT_DIR}/${record}" ]] || continue
+    if ! new=$(safedeps_npm_new_records "${PROJECT_DIR}/${record}" ${earlier[@]+"${earlier[@]}"}); then
+      SUSPICIOUS=true
+      REASONS+=("npm record ${record} could not be compared with the records before the command; fail-closed")
+      continue
+    fi
+    while IFS=$'\t' read -r kind value; do
+      case "${kind}" in
+        S) NPM_NEW_SOURCES+=("${record}: ${value}") ;;
+        N) NPM_NEW_NODES+=("${value}") ;;
+      esac
+    done <<< "${new}"
+  done
+}
+
+# Function: check the sources this install brought in, from either npm record
+check_npm_new_sources() {
+  local nonstandard insecure
+  [[ ${#NPM_NEW_SOURCES[@]} -gt 0 ]] || return 0
+
+  # Check for resolved URLs pointing to non-standard registries
+  nonstandard=$(printf '%s\n' "${NPM_NEW_SOURCES[@]}" | grep -viE 'registry\.npmjs\.org|registry\.yarnpkg\.com' | head -3 || true)
+  if [[ -n "${nonstandard}" ]]; then
+    SUSPICIOUS=true
+    REASONS+=("Lock file contains resolved URLs from non-standard registries ($(paste -sd ';' - <<< "${nonstandard}"))")
+  fi
+
+  # Check for git:// or http:// (non-https) resolved URLs
+  insecure=$(printf '%s\n' "${NPM_NEW_SOURCES[@]}" | grep -iE '(git://|http://)' | head -3 || true)
+  if [[ -n "${insecure}" ]]; then
+    SUSPICIOUS=true
+    REASONS+=("Lock file contains insecure (non-HTTPS) resolved URLs ($(paste -sd ';' - <<< "${insecure}"))")
+  fi
+}
 
 check_npm_effect_closure() {
   local closure_file
@@ -1327,9 +1406,11 @@ fi
 settle_npm_trace
 
 # Run all checks
+collect_npm_new_records
 check_npm_effect_closure
 check_postinstall_scripts
 check_lockfile_diff
+check_npm_new_sources
 check_binaries
 
 # --- Reorg Decision ---

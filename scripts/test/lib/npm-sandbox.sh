@@ -312,10 +312,12 @@ victim_ran() { grep -q '^sd-victim' "${MARKS}"; }
 
 # Every request went to the local fixture registry, for the synthetic packages
 # only. sd-nope is the name a battery asks for to see an install fail; the
-# registry has no such package.
+# registry has no such package. sd-fetchy and sd-evilsrc are packed by
+# effect-trace-grid.sh, the second fetched only by its tarball URL.
 npm_sandbox_registry_was_local() {
   [[ -s "${tmp_root}/registry.log" ]] || fail "the installs went through the fixture registry"
-  if grep -vE '^GET /sd-(victim|approved|approved-too|swapped|nope)(/-/sd-(victim|approved|approved-too|swapped)-1\.0\.[01]\.tgz)?$' "${tmp_root}/registry.log" | grep -q .; then
+  if grep -vE '^GET /sd-(victim|approved|approved-too|swapped|fetchy|nope)(/-/sd-(victim|approved|approved-too|swapped|fetchy)-1\.0\.[01]\.tgz)?$' "${tmp_root}/registry.log" \
+      | grep -vE '^GET /sd-evilsrc/-/sd-evilsrc-1\.0\.0\.tgz$' | grep -q .; then
     fail "the fixture registry saw only the synthetic packages ($(sort -u "${tmp_root}/registry.log" | paste -sd, -))"
   fi
   pass "every request went to the local fixture registry, for the synthetic packages only"

@@ -262,6 +262,142 @@ for row in "${SILENT_ROWS[@]+"${SILENT_ROWS[@]}"}"; do
 done
 printf '# silent rows: %s, Claude %s (%s)\n' "${#SILENT_ROWS[@]}" "${claude_silent}" "${SILENT_ROWS[*]:-none}"
 
+# --- 1a. What an install brought in is read from the record it wrote -------------------
+# The rows above ask whether an install was read. These ask whether every check
+# read it. The closure check reads both npm records, but the source check and
+# the install-script heuristics ran only when package-lock.json or package.json
+# changed, and an install that saves nothing changes neither. So a tarball with
+# the approved name and version, fetched from a file or an http URL, passed
+# both, and the rebuild ran its scripts; so did an approved package whose
+# install script the heuristics flag when it is saved (validator round 4: C1,
+# C3, C5, C6, H2). The saved forms (C2, C4, H1) were rolled back all along and
+# are the controls.
+#
+# Both checks now read what the install's records hold that no record held
+# before the command (collect_npm_new_records). A committed lockfile is one of
+# those earlier records, so a fresh clone's `npm ci` installs the sources it
+# names, a tarball among them, as recorded. That is a boundary, and the K rows
+# pin it from the side of the projects it protects.
+#
+# EVIL-sd-approved is a tarball named sd-approved@1.0.0, the approved name and
+# version, whose scripts write EVIL lines. sd-fetchy@1.0.0 is approved, and its
+# postinstall names `fetch`, which the heuristics read as network access.
+EVIL_DIR="${tmp_root}/evil"
+mkdir -p "${EVIL_DIR}/src"
+cat > "${EVIL_DIR}/src/mark.js" <<EOF
+require('fs').appendFileSync('${MARKS}', 'EVIL-sd-approved@1.0.0\t' + process.argv[2] + '\t' + process.cwd() + '\n');
+EOF
+jq -n '{name: "sd-approved", version: "1.0.0",
+  scripts: {preinstall: "node mark.js preinstall", install: "node mark.js install", postinstall: "node mark.js postinstall"}}' \
+  > "${EVIL_DIR}/src/package.json"
+(cd "${EVIL_DIR}/src" && npm pack --pack-destination "${EVIL_DIR}" >/dev/null 2>&1) || fail "npm pack builds the impostor sd-approved"
+# Served under another name, so an http URL can fetch it from the fixture registry.
+cp "${EVIL_DIR}/sd-approved-1.0.0.tgz" "${tmp_root}/tarballs/sd-evilsrc-1.0.0.tgz"
+cp "${EVIL_DIR}/src/package.json" "${tmp_root}/tarballs/sd-evilsrc-1.0.0.tgz.json"
+EVIL_URL="http://127.0.0.1:$(cat "${tmp_root}/registry.port")/sd-evilsrc/-/sd-evilsrc-1.0.0.tgz"
+
+mkdir -p "${tmp_root}/src/sd-fetchy-1.0.0"
+cat > "${tmp_root}/src/sd-fetchy-1.0.0/mark.js" <<EOF
+require('fs').appendFileSync('${MARKS}', 'sd-fetchy@1.0.0\t' + process.argv[2] + '\t' + process.cwd() + '\n');
+EOF
+jq -n '{name: "sd-fetchy", version: "1.0.0", scripts: {postinstall: "node mark.js postinstall # fetch"}}' \
+  > "${tmp_root}/src/sd-fetchy-1.0.0/package.json"
+(cd "${tmp_root}/src/sd-fetchy-1.0.0" && npm pack --pack-destination "${tmp_root}/tarballs" >/dev/null 2>&1) \
+  || fail "npm pack builds sd-fetchy"
+cp "${tmp_root}/src/sd-fetchy-1.0.0/package.json" "${tmp_root}/tarballs/sd-fetchy-1.0.0.tgz.json"
+
+# <dependency> into package.json, as a project that declares it would have it,
+# without installing it.
+declare_dependency() {
+  jq --arg name "$1" --arg spec "$2" '.dependencies[$name] = $spec' "${CASE_PROJECT}/package.json" > "${CASE_PROJECT}/package.json.new"
+  mv "${CASE_PROJECT}/package.json.new" "${CASE_PROJECT}/package.json"
+}
+vendor() { mkdir -p "${CASE_PROJECT}/vendor"; cp "$1" "${CASE_PROJECT}/vendor/"; }
+# The fixtures. `clone*` are a project as a repository holds it: a committed
+# lockfile and no node_modules. `pulled` has an installed tree and a lockfile
+# that has moved on from it, as after a pull that added a dependency.
+new_filedep() { new_project; vendor "${EVIL_DIR}/sd-approved-1.0.0.tgz"; declare_dependency sd-approved file:vendor/sd-approved-1.0.0.tgz; }
+new_httpdep() { new_project; declare_dependency sd-approved "${EVIL_URL}"; }
+new_vendored() { new_project; vendor "${EVIL_DIR}/sd-approved-1.0.0.tgz"; }
+new_fetchy() {
+  new_project
+  ( export SAFEDEPS_HOME="${CASE_HOME}"
+    . lib/ledger/ledger.sh
+    safedeps_ledger_write_approved_spec npm sd-fetchy 1.0.0 >/dev/null ) || fail "the fixture approves sd-fetchy"
+}
+new_clone() {
+  new_project
+  declare_dependency sd-approved 1.0.0
+  (cd "${CASE_PROJECT}" && npm install --ignore-scripts >/dev/null 2>&1 && rm -rf node_modules) || fail "the fixture clone is made"
+}
+new_clonetarball() {
+  new_project
+  vendor "${tmp_root}/tarballs/sd-approved-1.0.0.tgz"
+  declare_dependency sd-approved file:vendor/sd-approved-1.0.0.tgz
+  (cd "${CASE_PROJECT}" && npm install --ignore-scripts >/dev/null 2>&1 && rm -rf node_modules) || fail "the fixture clone with a tarball dependency is made"
+}
+new_pulled() {
+  new_project
+  (cd "${CASE_PROJECT}" && npm install sd-approved@1.0.0 --ignore-scripts >/dev/null 2>&1) || fail "the fixture installs sd-approved"
+  vendor "${tmp_root}/tarballs/sd-swapped-1.0.0.tgz"
+  declare_dependency sd-swapped file:vendor/sd-swapped-1.0.0.tgz
+  (cd "${CASE_PROJECT}" && npm install --package-lock-only --ignore-scripts >/dev/null 2>&1) || fail "the fixture lockfile moves on from the tree"
+  [[ ! -e "${CASE_PROJECT}/node_modules/sd-swapped" ]] || fail "the pulled fixture leaves the tree as it was"
+}
+
+# <id>|<fixture>|<engine>|<expect>|<command>, where <expect> is `quiet:<package>`
+# (confirmed quietly and <package> rebuilt) or `rollback:<reason>` (rolled back
+# with a reason that says <reason>, and on Claude Code no script of the
+# impostor or of sd-fetchy ran at all, the rollback's own reinstall included).
+printf '# what an install brought in (id engine command | outcome)\n'
+failures_before=${#FAILURES[@]}
+while IFS= read -r row; do
+  [[ -n "${row}" && "${row}" != \#* ]] || continue
+  IFS='|' read -r id fixture engine expect form <<< "${row}"
+  "new_${fixture}"
+  : > "${MARKS}"
+  run_install "${form}" "${engine}"
+  reason=$(jq -r '.systemMessage // empty' <<< "${CASE_POST}" 2>/dev/null | sed -n '/^Detected problems:/,/^Rollback snapshot:/p' | sed '1d;$d' | paste -sd' ' -)
+  printf '%-4s %-7s %s | rollback=%s ungated=%s ran=[%s] reason=[%s]\n' "${id}" "${engine}" "${form}" \
+    "$(rolled_back && echo yes || echo no)" "$(ungated && echo yes || echo no)" \
+    "$(cut -f1,2 "${MARKS}" | tr '\t' ':' | paste -sd, -)" "${reason:0:200}"
+  [[ -z "${CASE_PRE_DENY}" ]] || { note_failure "${id}: the gate lets the command through (deny: ${CASE_PRE_DENY:0:160})"; continue; }
+  [[ "${CASE_INSTALL_RC}" == 0 ]] || { note_failure "${id}: the install itself succeeds (rc ${CASE_INSTALL_RC})"; continue; }
+  ungated && note_failure "${id}: an install that left its trace is not recorded UNGATED ($(post_ungated_lines | cut -f2 | head -c 200))"
+  case "${expect}" in
+    quiet:*)
+      [[ -z "${CASE_POST}" ]] || note_failure "${id}: confirmed quietly (post: ${CASE_POST:0:300})"
+      grep -q "^${expect#quiet:}@[^	]*	install" <<< "${CASE_RAN}" \
+        || note_failure "${id}: the verified install is rebuilt, so ${expect#quiet:}'s scripts run (${CASE_RAN:-nothing ran})"
+      ;;
+    rollback:*)
+      rolled_back || note_failure "${id}: rolled back (post: ${CASE_POST:-<quiet>})"
+      grep -qF "${expect#rollback:}" <<< "${CASE_POST}" || note_failure "${id}: the reason says ${expect#rollback:} (${reason:-none})"
+      if [[ "${engine}" == claude ]]; then
+        ! grep -q '^EVIL-' "${MARKS}" || note_failure "${id}: no script of the impostor runs ($(grep -c '^EVIL-' "${MARKS}"))"
+        ! grep -q '^sd-fetchy' "${MARKS}" || note_failure "${id}: the flagged install script does not run ($(grep -c '^sd-fetchy' "${MARKS}"))"
+      fi
+      ;;
+    *) fail "unknown expectation ${expect} in row ${id}" ;;
+  esac
+done <<ROWS
+C0|project|claude|quiet:sd-approved|npm install sd-approved@1.0.0
+C1|filedep|claude|rollback:non-standard registries (node_modules/.package-lock.json: file:vendor/sd-approved-1.0.0.tgz)|npm install --no-save
+C2|filedep|claude|rollback:non-standard registries|npm install
+C3|httpdep|claude|rollback:insecure (non-HTTPS) resolved URLs (node_modules/.package-lock.json: ${EVIL_URL})|npm install --no-save
+C4|httpdep|claude|rollback:non-standard registries|npm install
+C5|vendored|claude|rollback:non-standard registries (node_modules/.package-lock.json: file:vendor/sd-approved-1.0.0.tgz)|npm install --no-save ./vendor/sd-approved-1.0.0.tgz
+C5x|vendored|codex|rollback:non-standard registries|npm install --no-save ./vendor/sd-approved-1.0.0.tgz
+C6|httpdep|claude|rollback:non-standard registries (node_modules/.package-lock.json: ${EVIL_URL})|npm_config_save=false npm install
+H1|fetchy|claude|rollback:Package 'sd-fetchy' has install script with network access|npm install sd-fetchy@1.0.0
+H2|fetchy|claude|rollback:Package 'sd-fetchy' has install script with network access|npm install --no-save sd-fetchy@1.0.0
+K1|clone|claude|quiet:sd-approved|npm ci
+K2|clonetarball|claude|quiet:sd-approved|npm ci
+K3|pulled|claude|quiet:sd-swapped|npm ci
+ROWS
+[[ ${#FAILURES[@]} -ne ${failures_before} ]] \
+  || pass "installs that save nothing have their sources and install scripts checked like saved ones, and a committed lockfile installs as recorded"
+
 if [[ "${REPORT_ONLY}" == 1 ]]; then
   printf '# GRID_REPORT_ONLY: %s failure(s) not enforced\n' "${#FAILURES[@]}"
   exit 0

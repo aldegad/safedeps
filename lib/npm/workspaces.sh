@@ -151,6 +151,12 @@ safedeps_npm_workspace_members() {
 # need one rename per member.
 SAFEDEPS_SNAPSHOT_MEMBERS=members
 
+# The name, after `<snapshot id>_`, of npm's record of the installed tree
+# (node_modules/.package-lock.json) as it was before the command. The effect
+# gate compares this install's records with it. It is not a monitored file: a
+# rollback reinstalls node_modules and never copies this back.
+SAFEDEPS_SNAPSHOT_NPM_TREE=npm-tree-record.json
+
 # The name a snapshot keeps <path> under, for a path relative to the project,
 # after `<snapshot id>_`. A top-level file keeps its own name, as snapshots
 # always have. A member's manifest (`packages/a/package.json`) is under the

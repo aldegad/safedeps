@@ -55,6 +55,47 @@ safedeps_npm_lock_closure() {
   ' "${lockfile}"
 }
 
+# What the npm record <current> holds that none of the <earlier> records did.
+# Prints `S<TAB><resolved>` for each source no earlier record names, and
+# `N<TAB><key>` for each installed package whose key, version, resolved URL or
+# integrity no earlier record has. With no earlier record, all of <current> is
+# new.
+#
+# Earlier records are read together rather than in turn. package-lock.json can
+# name a source the installed tree never had: an optional package for another
+# platform, or a dependency a pulled lockfile added before anything installed
+# it. Read against the tree record alone, every install in such a project
+# would bring that source in again.
+#
+# A link is left out (its `resolved` is a directory of the project, not where
+# anything was fetched from), and so is a key outside node_modules, which is a
+# directory of the project as well. lockfileVersion 1 nests its packages under
+# `dependencies`, and its keys are rebuilt as the paths later versions use.
+safedeps_npm_new_records() {
+  local current="$1"
+  shift
+
+  safedeps_npm_require_jq || return 1
+  jq -nr --slurpfile now "${current}" '
+    def v1($prefix):
+      (.dependencies // {}) | objects | to_entries[]
+      | ($prefix + "node_modules/" + .key) as $key
+      | {key: $key, value: .value}, (.value | objects | v1($key + "/"));
+    def nodes:
+      (if ((.packages // null) | type) == "object" then .packages | to_entries[] else v1("") end)
+      | select((.key | test("(^|/)node_modules/")) and (.value | type) == "object"
+          and (.value.link // false) != true);
+    def tuple: [.key, (.value.version // ""), (.value.resolved // ""), (.value.integrity // "")] | tojson;
+
+    [inputs | nodes] as $before
+    | ($before | map({key: tuple, value: true}) | from_entries) as $seen
+    | ($before | map(.value.resolved | strings | {key: ., value: true}) | from_entries) as $sources
+    | [$now[0] | nodes] as $after
+    | ([$after[] | .value.resolved | strings | select($sources[.] | not)] | unique[] | "S\t" + .),
+      ($after[] | select(tuple as $t | $seen[$t] | not) | "N\t" + .key)
+  ' "$@" /dev/null
+}
+
 safedeps_npm_fixture_closure() {
   local package_name="$1"
   local version="$2"

@@ -140,6 +140,7 @@ if [[ -r "${SAFEDEPS_NPM_WORKSPACES_LIB}" ]]; then
   source "${SAFEDEPS_NPM_WORKSPACES_LIB}"
 else
   SAFEDEPS_SNAPSHOT_MEMBERS=members
+  SAFEDEPS_SNAPSHOT_NPM_TREE=npm-tree-record.json
   safedeps_snapshot_file_name() { printf '%s' "$1"; }
 fi
 
@@ -3215,6 +3216,28 @@ done
 while IFS= read -r csproj_file; do
   snapshot_project_file "$(basename "${csproj_file}")" "manifest"
 done < <(find "${PROJECT_DIR}" -maxdepth 1 -type f -name "*.csproj" 2>/dev/null | sort)
+
+# npm's record of the installed tree as it is before the command. An install
+# that saves nothing leaves package-lock.json as it was and writes only this
+# file, so the effect gate's source and install-script checks need the version
+# from before to tell what the install brought in (collect_npm_new_records).
+#
+# Copied, never moved or touched: the trace below is this file's own mtime and
+# inode. The copy goes through a temporary name, so the effect gate reads all
+# of it or none of it. A copy that fails costs a smaller baseline, and a
+# smaller baseline makes more of the tree read as new, so the failure errs
+# toward checking more. It is recorded, because what it can cost is a rollback
+# of an install that brought nothing new in.
+NPM_TREE_RECORD="${PROJECT_DIR}/node_modules/.package-lock.json"
+if [[ -f "${NPM_TREE_RECORD}" ]]; then
+  NPM_TREE_COPY=""
+  if ! { NPM_TREE_COPY=$(mktemp "${SNAPSHOT_DIR}/.${SNAPSHOT_ID}_tree.XXXXXX") \
+      && cp "${NPM_TREE_RECORD}" "${NPM_TREE_COPY}" \
+      && mv -f "${NPM_TREE_COPY}" "${SNAPSHOT_DIR}/${SNAPSHOT_ID}_${SAFEDEPS_SNAPSHOT_NPM_TREE}"; }; then
+    rm -f "${NPM_TREE_COPY}"
+    log_advisory "pre-guard: could not keep a copy of ${NPM_TREE_RECORD}, so the effect gate will compare this install with package-lock.json alone and may read packages already installed as new. Command: ${COMMAND}"
+  fi
+fi
 
 # A workspace install writes a member's package.json as well as the root's.
 # A snapshot that cannot keep them is a rollback that cannot undo the install,
