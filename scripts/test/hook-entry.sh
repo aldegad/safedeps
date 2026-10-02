@@ -39,11 +39,16 @@ payload() {
 }
 
 run_entry() {
-  local command="$1" target="${2:-pre}"
+  local command="$1" target="${2:-pre}" input
   entry_rc=0
-  entry_out=$(payload "${command}" |
-    HOME="${tmp_root}/home" SAFEDEPS_HOME="${tmp_root}/state" \
-    bash "${repo}/scripts/safedeps-hook-entry.sh" "${target}" 2>"${tmp_root}/err") || entry_rc=$?
+  # The payload is built first and handed over whole, not piped from jq. Some
+  # rows answer without reading stdin (a missing install grammar denies before
+  # the payload is read), and under pipefail a jq still writing then dies of
+  # SIGPIPE and its 141 becomes the row's exit status. A slow jq reproduces it
+  # every time; a loaded machine reproduced it in npm test.
+  input=$(payload "${command}")
+  entry_out=$(HOME="${tmp_root}/home" SAFEDEPS_HOME="${tmp_root}/state" \
+    bash "${repo}/scripts/safedeps-hook-entry.sh" "${target}" <<< "${input}" 2>"${tmp_root}/err") || entry_rc=$?
   entry_err=$(cat "${tmp_root}/err")
 }
 
