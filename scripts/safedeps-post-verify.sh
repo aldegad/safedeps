@@ -195,6 +195,47 @@ monitored_files() {
   done
 }
 
+# A rollback acts on the project it read and nowhere else. A target that is a
+# symbolic link resolves somewhere else: some worktree layouts link node_modules
+# to another checkout's, and `npm ci` empties whatever its node_modules resolves
+# to before it installs, so a rollback there deletes the other checkout's
+# packages. So every destructive step checks its target here first, and a
+# target that is a link is refused and named, never followed.
+#
+# rollback_target_outside <path>: prints why <path> must not be touched, or
+# nothing when it may be. Every target is a name directly inside PROJECT_DIR,
+# so what can lead outside is the target itself being a link.
+rollback_target_outside() {
+  local target="$1"
+
+  if ! (cd -P "${PROJECT_DIR}" 2>/dev/null); then
+    printf 'the project directory %s cannot be resolved' "${PROJECT_DIR}"
+    return 0
+  fi
+  if [[ -L "${target}" ]]; then
+    printf '%s is a symbolic link to %s' "${target}" "$(readlink "${target}" 2>/dev/null || printf 'an unreadable target')"
+  fi
+}
+
+# Records a refused step everywhere a rollback reports: the warnings the reorg
+# message and its reorg.log entry carry, a REORG REFUSED entry of its own in
+# reorg.log, and advisory.log.
+ROLLBACK_REFUSED=$'\n'
+record_rollback_refusal() {
+  local step="$1" why="$2"
+
+  # The manifest loop and the package.json step can both reach one file.
+  [[ "${ROLLBACK_REFUSED}" != *$'\n'"${step}"$'\n'* ]] || return 0
+  ROLLBACK_REFUSED+="${step}"$'\n'
+  ROLLBACK_WARNINGS+=("REFUSED ${step}: ${why}. safedeps does not follow a link or write outside the project it read")
+  log_advisory "post-verify REORG REFUSED (${step}): ${why} -- project ${PROJECT_DIR}"
+  cat >> "${GUARD_DIR}/reorg.log" << LOG_EOF
+[$(date -u +"%Y-%m-%dT%H:%M:%SZ")] REORG REFUSED ${step}
+  Project: ${PROJECT_DIR}
+  Reason: ${why}
+LOG_EOF
+}
+
 restore_monitored_file() {
   local file_name="$1"
   local rollback_snapshot_id="$2"
@@ -202,6 +243,18 @@ restore_monitored_file() {
   local missing_marker="${SNAPSHOT_DIR}/${rollback_snapshot_id}_${file_name}.missing"
   local current_missing_marker="${SNAPSHOT_DIR}/${SNAPSHOT_ID}_${file_name}.missing"
   local current_file="${PROJECT_DIR}/${file_name}"
+  local outside
+
+  outside=$(rollback_target_outside "${current_file}")
+  if [[ -n "${outside}" ]]; then
+    # Only a step that would write or remove is refused; a file that already
+    # matches the snapshot needs nothing.
+    if { [[ -f "${snapshot_file}" ]] && files_differ "${snapshot_file}" "${current_file}"; } \
+      || { [[ ! -f "${snapshot_file}" ]] && { [[ -f "${missing_marker}" ]] || [[ -f "${current_missing_marker}" ]]; } && [[ -e "${current_file}" || -L "${current_file}" ]]; }; then
+      record_rollback_refusal "restore of ${file_name}" "${outside}"
+    fi
+    return
+  fi
 
   if [[ -f "${snapshot_file}" ]]; then
     if files_differ "${snapshot_file}" "${current_file}"; then
@@ -332,6 +385,19 @@ cleanup_old_snapshots() {
 }
 
 restore_node_modules() {
+  local outside
+
+  # `npm ci` empties the directory node_modules resolves to, and the fallback
+  # removes it, so neither runs on a node_modules that is a link or lives
+  # outside the project.
+  if [[ -e "${PROJECT_DIR}/node_modules" || -L "${PROJECT_DIR}/node_modules" ]]; then
+    outside=$(rollback_target_outside "${PROJECT_DIR}/node_modules")
+    if [[ -n "${outside}" ]]; then
+      record_rollback_refusal "node_modules reinstall" "${outside}; npm ci empties the directory node_modules resolves to, so following it would delete another checkout's packages. Reinstall in the directory that owns it, or replace the link with a real directory and run npm ci there"
+      return
+    fi
+  fi
+
   if ! command -v npm >/dev/null 2>&1; then
     ROLLBACK_WARNINGS+=("npm is not installed; node_modules was not reinstalled")
     return
@@ -356,6 +422,18 @@ run_verified_npm_rebuild_if_injected() {
 
   injected=$(jq -r '.ignore_scripts_injected == true' "${META_FILE}" 2>/dev/null || printf 'false')
   [[ "${injected}" == "true" ]] || return 0
+
+  # A rebuild through a linked node_modules runs another checkout's install
+  # scripts, which this install neither wrote nor verified.
+  local outside
+  if [[ -e "${PROJECT_DIR}/node_modules" || -L "${PROJECT_DIR}/node_modules" ]]; then
+    outside=$(rollback_target_outside "${PROJECT_DIR}/node_modules")
+    if [[ -n "${outside}" ]]; then
+      ROLLBACK_WARNINGS+=("npm rebuild skipped after verified inert install: ${outside}; a rebuild there would run another checkout's install scripts")
+      log_advisory "post-verify rebuild skipped: ${outside} -- project ${PROJECT_DIR}"
+      return 0
+    fi
+  fi
 
   if ! command -v npm >/dev/null 2>&1; then
     ROLLBACK_WARNINGS+=("npm is not installed; npm rebuild was not run after verified inert install")
@@ -861,23 +939,30 @@ There is no confirmed-safe snapshot for ${PROJECT_DIR} yet, so safedeps could NO
     restore_monitored_file "${monitored_file}" "${rollback_id}"
   done < <(monitored_files)
 
-  local rb_pkg="${SNAPSHOT_DIR}/${rollback_id}_package.json"
+  local rb_pkg="${SNAPSHOT_DIR}/${rollback_id}_package.json" pkg_outside
   if [[ -f "${rb_pkg}" ]] && files_differ "${rb_pkg}" "${PROJECT_DIR}/package.json"; then
-    cp "${rb_pkg}" "${PROJECT_DIR}/package.json"
-    ROLLED_BACK+=("package.json")
+    pkg_outside=$(rollback_target_outside "${PROJECT_DIR}/package.json")
+    if [[ -n "${pkg_outside}" ]]; then
+      record_rollback_refusal "restore of package.json" "${pkg_outside}"
+    else
+      cp "${rb_pkg}" "${PROJECT_DIR}/package.json"
+      ROLLED_BACK+=("package.json")
+    fi
   fi
 
   safedeps_journal_stage "${journal_id}" "reinstalling-node-modules"
   restore_node_modules
 
-  local rolled_str=""
+  local rolled_str="" warning_str=""
   [[ ${#ROLLED_BACK[@]} -gt 0 ]] && rolled_str=$(printf '%s, ' "${ROLLED_BACK[@]}")
+  [[ ${#ROLLBACK_WARNINGS[@]} -gt 0 ]] && warning_str=$(printf '%s; ' "${ROLLBACK_WARNINGS[@]}")
   cat >> "${GUARD_DIR}/reorg.log" << LOG_EOF
 [$(date -u +"%Y-%m-%dT%H:%M:%SZ")] REORG executed (command-independent backstop)
   Rollback snapshot: ${rollback_id}
   Project: ${PROJECT_DIR}
   Reasons: ${reason_str%%; }
   Rolled back: ${rolled_str%, }
+  Rollback warnings: ${warning_str%%; }
 LOG_EOF
 
   # The rollback finished and is about to report itself, so there is nothing
@@ -890,7 +975,10 @@ Detected:
 ${reason_str%%; }
 
 Rollback snapshot: ${rollback_id}
-Rolled-back files: ${rolled_str%, }"
+Rolled-back files: ${rolled_str%, }${warning_str:+
+
+Additional warnings:
+${warning_str%%; }}"
   return 0
 }
 
@@ -949,8 +1037,13 @@ if [[ "${SUSPICIOUS}" == "true" ]]; then
   rollback_package_json="${SNAPSHOT_DIR}/${ROLLBACK_SNAPSHOT_ID}_package.json"
   current_package_json="${PROJECT_DIR}/package.json"
   if [[ -f "${rollback_package_json}" ]] && files_differ "${rollback_package_json}" "${current_package_json}"; then
-    cp "${rollback_package_json}" "${current_package_json}"
-    ROLLED_BACK+=("package.json")
+    PKG_OUTSIDE=$(rollback_target_outside "${current_package_json}")
+    if [[ -n "${PKG_OUTSIDE}" ]]; then
+      record_rollback_refusal "restore of package.json" "${PKG_OUTSIDE}"
+    else
+      cp "${rollback_package_json}" "${current_package_json}"
+      ROLLED_BACK+=("package.json")
+    fi
   fi
 
   safedeps_journal_stage "${JOURNAL_ID}" "reinstalling-node-modules"

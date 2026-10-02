@@ -581,6 +581,124 @@ grep -q 'suspicious dependency change detected' <<< "${revert_post}" || fail "re
 cmp -s "${revert_project}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "reorg restores the exact safe lockfile content on disk"
 pass "reorg reverts a tampered lockfile to safe content on disk"
 
+# A rollback never acts outside the project it read. Some worktree layouts link
+# node_modules to another checkout's, and `npm ci` empties whatever node_modules
+# resolves to before it installs. This stub npm does what that first step of
+# `npm ci` does -- it empties node_modules through any link -- so a rollback
+# that follows the link shows up as a missing marker in the linked-to
+# directory.
+emptying_bin="${tmp_root}/emptying-npm-bin"
+mkdir -p "${emptying_bin}"
+cat > "${emptying_bin}/npm" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "${tmp_root}/emptying-npm-calls.log"
+case "\$1" in
+  ci) rm -rf node_modules/* ;;
+esac
+exit 0
+EOF
+chmod +x "${emptying_bin}/npm"
+tampered_lock='{
+  "name": "linked-project",
+  "lockfileVersion": 3,
+  "packages": {
+    "": {"dependencies": {"fixture-parent": "1.0.0"}},
+    "node_modules/fixture-parent": {"version": "1.0.0", "dependencies": {"fixture-child": "1.0.0"}},
+    "node_modules/fixture-child": {"version": "1.0.0"},
+    "node_modules/fixture-evil": {"version": "6.6.6", "resolved": "git://evil.example.com/fixture-evil.git"}
+  }
+}'
+reorg_log="${SAFEDEPS_HOME:-${HOME}/.safedeps}/reorg.log"
+
+link_main="${tmp_root}/link-main"
+link_wt="${tmp_root}/link-wt"
+mkdir -p "${link_main}/node_modules/kept-package" "${link_wt}"
+printf '{"name":"kept-package","version":"1.0.0"}\n' > "${link_main}/node_modules/kept-package/package.json"
+ln -s "${link_main}/node_modules" "${link_wt}/node_modules"
+printf '{"dependencies":{"fixture-parent":"1.0.0"}}\n' > "${link_wt}/package.json"
+cp "${tmp_root}/revert-safe-lock.json" "${link_wt}/package-lock.json"
+scripts/safedeps-pre-guard.sh > /dev/null <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${link_wt}"}
+EOF
+printf '%s\n' "${tampered_lock}" > "${link_wt}/package-lock.json"
+link_post=$(
+  PATH="${emptying_bin}:${PATH}" scripts/safedeps-post-verify.sh <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${link_wt}"}
+EOF
+)
+grep -q 'suspicious dependency change detected' <<< "${link_post}" || fail "reorg fires in a project whose node_modules is a link"
+[[ -f "${link_main}/node_modules/kept-package/package.json" ]] || fail "a rollback never empties the directory a linked node_modules points to"
+grep -q 'REFUSED node_modules reinstall' <<< "${link_post}" || fail "the reorg message names the refused node_modules reinstall"
+grep -q 'REORG REFUSED node_modules reinstall' "${reorg_log}" || fail "reorg.log records the refused node_modules reinstall"
+if grep -qx 'ci' "${tmp_root}/emptying-npm-calls.log" 2>/dev/null; then
+  fail "npm ci never runs on a node_modules that links outside the project"
+fi
+cmp -s "${link_wt}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "the lockfile inside the project is still restored next to a linked node_modules"
+pass "a rollback refuses to reinstall a node_modules that links outside the project"
+
+# The same holds for a file the rollback would write back: a package.json that
+# links to another checkout's is not written through.
+link_pkg_wt="${tmp_root}/link-pkg-wt"
+link_pkg_outside="${tmp_root}/link-pkg-outside"
+mkdir -p "${link_pkg_wt}" "${link_pkg_outside}"
+printf '{"dependencies":{"fixture-parent":"1.0.0"}}\n' > "${link_pkg_outside}/package.json"
+ln -s "${link_pkg_outside}/package.json" "${link_pkg_wt}/package.json"
+cp "${tmp_root}/revert-safe-lock.json" "${link_pkg_wt}/package-lock.json"
+scripts/safedeps-pre-guard.sh > /dev/null <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${link_pkg_wt}"}
+EOF
+printf '{"dependencies":{"fixture-parent":"1.0.0","fixture-evil":"6.6.6"}}\n' > "${link_pkg_outside}/package.json"
+cp "${link_pkg_outside}/package.json" "${tmp_root}/link-pkg-expected.json"
+printf '%s\n' "${tampered_lock}" > "${link_pkg_wt}/package-lock.json"
+link_pkg_post=$(
+  PATH="${stub_bin}:${PATH}" scripts/safedeps-post-verify.sh <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${link_pkg_wt}"}
+EOF
+)
+grep -q 'suspicious dependency change detected' <<< "${link_pkg_post}" || fail "reorg fires in a project whose package.json is a link"
+cmp -s "${link_pkg_outside}/package.json" "${tmp_root}/link-pkg-expected.json" || fail "a rollback never writes through a package.json that links outside the project"
+[[ -L "${link_pkg_wt}/package.json" ]] || fail "a rollback leaves the linked package.json a link"
+[[ "$(grep -o 'REFUSED restore of package.json' <<< "${link_pkg_post}" | wc -l | tr -d ' ')" == 1 ]] || fail "the reorg message names the refused package.json restore once"
+grep -q 'REORG REFUSED restore of package.json' "${reorg_log}" || fail "reorg.log records the refused package.json restore"
+cmp -s "${link_pkg_wt}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "the lockfile inside the project is still restored next to a linked package.json"
+pass "a rollback refuses to write back a file that links outside the project"
+
+# A verified inert install still skips the rebuild through a linked node_modules:
+# that would run another checkout's install scripts.
+link_inert_main="${tmp_root}/link-inert-main"
+link_inert_wt="${tmp_root}/link-inert-wt"
+mkdir -p "${link_inert_main}/node_modules" "${link_inert_wt}"
+ln -s "${link_inert_main}/node_modules" "${link_inert_wt}/node_modules"
+printf '{"dependencies":{}}\n' > "${link_inert_wt}/package.json"
+link_inert_pre=$(
+  scripts/safedeps-pre-guard.sh <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${link_inert_wt}"}
+EOF
+)
+[[ "$(jq -r '.hookSpecificOutput.updatedInput.command' <<< "${link_inert_pre}")" == "npm install fixture-parent@1.0.0 --ignore-scripts" ]] || fail "linked inert pre hook injects ignore-scripts"
+cat > "${link_inert_wt}/package-lock.json" <<'EOF'
+{
+  "name": "link-inert-wt",
+  "lockfileVersion": 3,
+  "packages": {
+    "": {"dependencies": {"fixture-parent": "1.0.0"}},
+    "node_modules/fixture-parent": {"version": "1.0.0", "dependencies": {"fixture-child": "1.0.0"}},
+    "node_modules/fixture-child": {"version": "1.0.0"}
+  }
+}
+EOF
+: > "${tmp_root}/emptying-npm-calls.log"
+link_inert_post=$(
+  PATH="${emptying_bin}:${PATH}" scripts/safedeps-post-verify.sh <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0 --ignore-scripts"},"cwd":"${link_inert_wt}"}
+EOF
+)
+if grep -q 'rebuild' "${tmp_root}/emptying-npm-calls.log" 2>/dev/null; then
+  fail "npm rebuild never runs through a node_modules that links outside the project"
+fi
+grep -q 'npm rebuild skipped after verified inert install' <<< "${link_inert_post}" || fail "the skipped rebuild is reported"
+pass "a verified inert install skips the rebuild through a linked node_modules"
+
 export SAFEDEPS_HOME="${tmp_root}/safe-missing-transitive"
 export SAFEDEPS_OSV_API_URL="http://127.0.0.1:${port}/osv/v1/query"
 export SAFEDEPS_OSV_BATCH_API_URL="http://127.0.0.1:${port}/osv/v1/querybatch"
