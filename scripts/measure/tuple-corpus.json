@@ -1798,5 +1798,29 @@
  {
   "category": "manager-runtime-options",
   "command": "gem install evil:1.0.0 rake"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "pipenv install --categories evil==1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "gem install -B evil -v 1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "bun i -F evil@1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "poetry add --optional evil==1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "poetry add --optional=evil==1.0.0"
+ },
+ {
+  "category": "manager-runtime-options",
+  "command": "poetry add --optional grp evil==1.0.0"
  }
 ]
