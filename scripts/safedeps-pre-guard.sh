@@ -617,7 +617,7 @@ shell_lex() {
               if (besc[d]) pop(); else { push("B"); besc[d] = 1 }
               continue
             }
-            if (dq > 0) { i++; C[i] = "Q"; continue }
+            if (dq > 0) { i++; C[i] = "Q"; ESC[i] = 1; continue }
             C[i] = "x"; if (dc == 1) RM[i] = 1; if (i < N) { i++; C[i] = "e" }
             continue
           }
@@ -666,11 +666,18 @@ shell_lex() {
           if (top == "A" || top == "K") {
             if (top == "K") { if (c == "]") pop(); continue }
             if (c == "(") par[d]++
-            else if (c == ")") { if (par[d] > 0) par[d]--; else if (X[i+1] == ")") { i++; C[i] = cls; pop() } }
+            else if (c == ")") { if (par[d] > 0) par[d]--; else if (X[i+1] == ")") { i++; C[i] = cls; if (adol[d]) WC[i] = 1; pop() } }
             else if (c == "\n") i = at_newline(i)
             continue
           }
-          if (c == "#" && (wordstart(i) || top == "B" && X[i-1] == "`") && top != "V") { C[i] = "m"; mode = "CM"; continue }
+          if (c == "#" && (wordstart(i) || top == "B" && X[i-1] == "`") && top != "V") {
+            # zsh reads a `(` where an argument stands as the start of a glob
+            # word, so `echo (#i)x` holds no comment there; bash and dash fail
+            # to parse it (form G5). A `(` that opens a command, `$(`, `<(` or
+            # `>(` starts a comment in every shell.
+            if (X[i-1] == "(" && X[i-2] !~ /[$<>]/ && !cmdpos(i - 1)) { div = 1; if (shz) continue }
+            C[i] = "m"; mode = "CM"; continue
+          }
           if (c == "$" && X[i+1] == "(" && X[i+2] == "(") { C[i+1] = cls; C[i+2] = cls; arith_or_sub(i, 1); continue }
           # `((` is decided wherever it stands, not only where a command starts:
           # a hand list of command positions missed backticks, case patterns,
@@ -683,8 +690,14 @@ shell_lex() {
           if (c == "$" && X[i+1] == "{") { C[i+1] = cls; i++; push("V"); continue }
           if (c == "`") { if (top == "B") pop(); else push("B"); continue }
           if (top == "V") { if (c == "}") pop(); continue }
-          if (c == "(") { par[d]++; continue }
-          if (c == ")") { if (par[d] > 0) par[d]--; else if (top == "S") pop(); continue }
+          # A process substitution is a word like `$(...)`: its `)` ends no
+          # token (PS marks the parenthesis level it opened, WC its close).
+          if (c == "(") { par[d]++; if (i > 1 && (X[i-1] == "<" || X[i-1] == ">") && C[i-1] == cls) PS[d, par[d]] = 1; else delete PS[d, par[d]]; continue }
+          if (c == ")") {
+            if (par[d] > 0) { if ((d, par[d]) in PS) { WC[i] = 1; delete PS[d, par[d]] }; par[d]-- }
+            else if (top == "S") { WC[i] = 1; pop() }
+            continue
+          }
           if (c == "<" && X[i+1] == "<" && X[i+2] != "<" && X[i-1] != "<") { i = heredoc_op(i); continue }
           if (c == "\n") { i = at_newline(i); continue }
         }
@@ -836,7 +849,7 @@ shell_lex() {
       }
 
       function push(k) {
-        d++; ctx[d] = k; par[d] = 0; pnp[d] = np; besc[d] = 0; cpat[d] = 0; cpw[d] = 0
+        d++; ctx[d] = k; par[d] = 0; pnp[d] = np; besc[d] = 0; cpat[d] = 0; cpw[d] = 0; adol[d] = 0
         if (k == "D") dq++
         if (k == "H") hn++
         if (k != "C") dc++
@@ -855,7 +868,19 @@ shell_lex() {
           d--
         }
       }
-      function wordstart(j) { return j == 1 || X[j-1] ~ /[ \t\n;&|()<>]/ }
+      # Whether a word starts at byte j: the byte before it ends a token. That
+      # is a question about the token, not the character: a blank or a newline
+      # ends one only unescaped and not as a line continuation, and a `)` only
+      # as an operator, never where it closes a `$(...)`, a `$((...))` or a
+      # process substitution, which are parts of a word. Read by the byte
+      # alone, `echo $(echo a)#b` opened a comment that every shell reads as
+      # the word a#b, and a comment that swallowed the close of a substitution
+      # hid the lines after it (forms G1-G4).
+      function wordstart(j) {
+        if (j == 1) return 1
+        if (X[j-1] !~ /[ \t\n;&|()<>]/) return 0
+        return C[j-1] != "e" && C[j-1] != "l" && !((j - 1) in ESC) && !((j - 1) in WC)
+      }
       function cmdpos(j,   k, w) {
         k = j - 1
         while (k >= 1 && (X[k] == " " || X[k] == "\t")) k--
@@ -876,9 +901,9 @@ shell_lex() {
           if (ab != az || az != dollar) div = 1
           a = ab
         }
-        if (a) { i = j + dollar + 1; push("A"); return }
+        if (a) { i = j + dollar + 1; push("A"); adol[d] = dollar; return }
         if (dollar) { i = j + 1; push("S") }
-        else { i = j + 1; par[d] += 2 }
+        else { i = j + 1; delete PS[d, par[d] + 1]; delete PS[d, par[d] + 2]; par[d] += 2 }
       }
       # The look-ahead bash and zsh make at `((`: from byte k to the first `)`
       # not nested in a parenthesis. 1 when another `)` follows it

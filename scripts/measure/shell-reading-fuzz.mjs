@@ -8,7 +8,8 @@
 // with a few gadgets before it and after it. A gadget is a line a shell reads
 // one way and another shell another way -- `((` decided per site, a quote in
 // arithmetic, an apostrophe in "${...}", `$'...'` and `$[` that dash does not
-// know, a zsh case arm -- or a line that closes what one of them opened.
+// know, a zsh case arm, a `#` in the middle of a word -- or a line that closes
+// what one of them opened.
 // Stacking them is how the verdict that made the readings shells found the
 // forms no fixed reading caught (bogeuli-20261001-234308, F47 F81 F144 F342).
 //
@@ -42,6 +43,19 @@ const GADGETS = [
   "2]",
   "((echo $(echo \")\") <<2) )", // the look-ahead steps over $(...) whole
   "(( x = $(echo \")\" | wc -c) <<2 ))",
+  // A `#` inside a word is a byte of it, in every shell: after the `)` of a
+  // substitution, an arithmetic expansion or a process substitution, after an
+  // escaped byte and after a line continuation. Each is followed by a quote,
+  // which the shell opens and a reading of a comment would not.
+  "echo $(echo a)#'",
+  "echo $((1))#'",
+  "cat <(echo a)#'",
+  "echo a\\)#'",
+  "echo a\\\n#'",
+  // And where one is a comment: after an arithmetic command or a subshell.
+  "((1))#'",
+  "(true)#'",
+  "echo (#i)'", // a glob word to zsh, so no comment there
 ];
 
 // mulberry32: small, seedable, the same on every node.

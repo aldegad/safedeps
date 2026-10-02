@@ -2455,5 +2455,158 @@
         "dash": "R"
       }
     }
+  },
+  {
+    "id": "G1",
+    "cls": null,
+    "label": "a `#` glued to the `)` of a `$(...)`: a word byte, not a comment",
+    "text": "echo \"$(echo $(echo a)#x)\n\"'\nx' ; @@TAIL@@\necho \")\"\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "G2",
+    "cls": null,
+    "label": "a `#` glued to the `))` of a `$((...))`",
+    "text": "echo \"$(echo $((1))#x)\n\"'\nx' ; @@TAIL@@\necho \")\"\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "G3",
+    "cls": null,
+    "label": "a `#` after an escaped `)`",
+    "text": "echo \"$(echo a\\)#x)\n\"'\nx' ; @@TAIL@@\necho \")\"\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "G4",
+    "cls": null,
+    "label": "a `#` after a line continuation",
+    "text": "echo \"$(echo a\\\n#x)\n\"'\nx' ; @@TAIL@@\necho \")\"\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "G5",
+    "cls": null,
+    "label": "zsh reads `(` in an argument as a glob, so `(#i)` holds no comment",
+    "text": "echo \"$(echo (#i)x)\n\"'\nx' ; @@TAIL@@\necho \"))\"\n",
+    "measured": {
+      "bash": "R!",
+      "zsh": "R",
+      "sh": "R!",
+      "agent": "R",
+      "dash": "-!",
+      "linux": {
+        "bash": "-!",
+        "dash": "-!"
+      }
+    }
+  },
+  {
+    "id": "G6",
+    "cls": null,
+    "label": "a `#` glued to the `)` of a process substitution",
+    "text": "echo \"$(cat <(echo a)#x)\n\"'\nx' ; @@TAIL@@\necho \")\"\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R!",
+      "agent": "R",
+      "dash": "-!",
+      "linux": {
+        "bash": "R",
+        "dash": "-!"
+      }
+    }
+  },
+  {
+    "id": "G7",
+    "cls": null,
+    "label": "a `#` after an arithmetic command is a comment in every shell",
+    "text": "((1))#'\n@@TAIL@@\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "G8",
+    "cls": null,
+    "label": "a `#` after a subshell close is a comment in every shell",
+    "text": "(true)#'\n@@TAIL@@\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "GK1",
+    "cls": null,
+    "label": "G1 with no `#`: the control",
+    "text": "echo \"$(echo $(echo a)x)\n\"'\nx' ; @@TAIL@@\necho \")\"\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "dash": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
   }
 ]
