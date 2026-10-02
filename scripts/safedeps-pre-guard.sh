@@ -5,6 +5,16 @@
 
 set -euo pipefail
 
+# When this script started, on bash's own clock. The self budget (see "Self
+# budget" below) is measured from here, not from the spawn of its child,
+# because the runtime's timer is already running when the hook starts.
+# SECONDS counts whole seconds and costs no process to read, and it exists in
+# bash 3.2, which is what macOS runs hooks under. Bash seeds it from the
+# environment, so the deadline reads the difference from this value and never
+# the value itself: compared bare, an exported SECONDS=-100000 would be one more
+# off switch.
+SAFEDEPS_GUARD_STARTED_SECONDS=${SECONDS}
+
 # The lexer memo (see shell_lex) is made fresh below, per run. A directory named
 # from outside would be a place to plant a view for a command, so a value from
 # the environment is dropped before anything can read it.
@@ -2807,16 +2817,23 @@ fi
 SAFEDEPS_RUNTIME_BUDGET_SECONDS=30
 
 # The ceiling is the runtime's budget minus what the guard spends OUTSIDE the
-# budget window, plus slack. The cost outside the window is structural, not
-# proportional to the command:
-#   - up to 1.0s waiting out the final poll step (the step doubles and caps at 1s)
-#   - up to 0.5s of TERM grace before the KILL (10 polls x 50ms)
-#   - reap, jq, process start and payload parse: ~0.1s
-# That is a 1.6s structural worst case. Measured end-to-end overshoot past the
-# budget was 0.73-1.05s and flat from 4KB to 256KB of command text (2026-08-04,
-# same machine as the 30s kill measurement). 30 - 25 = 5s of headroom, i.e.
-# ~3x the structural worst case and ~5x the measured one, which is what a
-# loaded machine needs before an on-time answer becomes a late one.
+# budget window, plus slack. The window opens when this script starts, so
+# reading the payload and the knobs is inside it. The cost outside the window
+# is structural, not proportional to the command:
+#   - up to one poll step past the deadline: 1.0s asked for (the step doubles
+#     and caps at 1s), plus whatever a loaded machine adds to that one sleep
+#   - up to 0.5s of TERM grace before the KILL (10 polls x 50ms), stretched the
+#     same way on a loaded machine, and spent in full only when TERM is ignored
+#   - the entry shim and bash starting this script, then reap and jq: ~0.1s
+# That is a 1.6s structural worst case on an idle machine. The deadline reads a
+# whole-second clock, so it can also fire up to a second early, which only adds
+# headroom. Measured end-to-end overshoot past the budget was 0.73-1.05s and
+# flat from 4KB to 256KB of command text (2026-08-04, same machine as the 30s
+# kill measurement, before the deadline read the clock). 30 - 25 = 5s of
+# headroom, i.e. ~3x the structural worst case and ~5x the measured one, which
+# is what a loaded machine needs before an on-time answer becomes a late one.
+# Load stretches only the last step and the grace now. While the deadline added
+# up the sleeps it asked for, load stretched every step of the wait.
 SAFEDEPS_SELF_BUDGET_MAX_SECONDS=25
 
 SAFEDEPS_SELF_BUDGET_DEFAULT_SECONDS=20
@@ -3074,14 +3091,36 @@ if [[ -z "${SAFEDEPS_BUDGET_DISABLED}" ]] && [[ "${SAFEDEPS_BUDGET_ROLE}" == "pa
   # — measured, that rounded every engaged call up to the next whole second
   # (a 788ms judgment took 1050ms). It would also outlive this process by up to
   # one step, holding a PID it might no longer own. Polling here costs one
-  # `sleep` per step and starts fine-grained, so a fast judgment is delayed by
-  # at most the first 50ms step while a long one still coasts on 1s steps.
+  # `sleep` per step and starts fine-grained: a judgment that finishes inside
+  # the first 50ms step is answered at 50ms, any judgment is answered at most
+  # one step after it finishes, and a long one still coasts on 1s steps.
+  #
+  # The deadline is read from the clock, not added up from the sleeps. It used
+  # to count the time each step asked for. On a loaded machine a sleep takes
+  # longer than it asks for, and each step also forked to format its argument.
+  # The real wait then ran past the budget by whatever load added to every
+  # step, and past the runtime's 30s the hook is killed and the install runs
+  # unjudged. The clock is SECONDS, measured from this script's
+  # start (see SAFEDEPS_GUARD_STARTED_SECONDS): bash 3.2 has no finer clock
+  # that costs no process. Whole seconds can fire the deadline up to a second
+  # early, never late, and early only denies sooner. Late is bounded by one
+  # poll step, however many steps came before it.
+  #
+  # The sum of the requested sleeps stays as a second bound because it does not
+  # read the wall clock: if the clock is stepped back, SECONDS stalls and the
+  # sum still ends the wait. It can only be late, never early, so it no longer
+  # decides on its own. The step lengths are written out in advance, so a step
+  # forks nothing but its `sleep`.
+  budget_step_ms=(50 100 200 400 800 1000)
+  budget_step_arg=(0.050 0.100 0.200 0.400 0.800 1.000)
+  budget_step_last=$(( ${#budget_step_ms[@]} - 1 ))
+  budget_step=0
   budget_waited_ms=0
-  budget_step_ms=50
   budget_timed_out=false
   budget_deadline_ms=$(( SAFEDEPS_SELF_BUDGET_SECONDS * 1000 ))
   while kill -0 "${budget_child}" 2>/dev/null; do
-    if (( budget_waited_ms >= budget_deadline_ms )); then
+    if (( SECONDS - SAFEDEPS_GUARD_STARTED_SECONDS >= SAFEDEPS_SELF_BUDGET_SECONDS )) \
+      || (( budget_waited_ms >= budget_deadline_ms )); then
       # Signal the child AND whatever it is currently blocked in. A bash script
       # does not act on a signal while a foreground external command is running,
       # and the expensive part of the judgment is exactly such a command — so a
@@ -3104,6 +3143,13 @@ if [[ -z "${SAFEDEPS_BUDGET_DISABLED}" ]] && [[ "${SAFEDEPS_BUDGET_ROLE}" == "pa
         done
         kill "-${signal}" "${root}" 2>/dev/null || true
       }
+      #
+      # TERM first, so a judgment that hears it stops at once. Then a grace of
+      # up to 10 polls of 50ms for the child to go, which ends early when it
+      # does. Then KILL. The grace is a count of polls rather than a clock
+      # reading, because SECONDS is too coarse for half a second; a loaded
+      # machine stretches it like any sleep, and only a child that ignores TERM
+      # waits it out.
       budget_kill_tree TERM "${budget_child}"
       budget_grace=0
       while kill -0 "${budget_child}" 2>/dev/null && (( budget_grace < 10 )); do
@@ -3114,13 +3160,12 @@ if [[ -z "${SAFEDEPS_BUDGET_DISABLED}" ]] && [[ "${SAFEDEPS_BUDGET_ROLE}" == "pa
       budget_timed_out=true
       break
     fi
-    sleep "$(printf '%d.%03d' $(( budget_step_ms / 1000 )) $(( budget_step_ms % 1000 )))"
-    budget_waited_ms=$(( budget_waited_ms + budget_step_ms ))
+    sleep "${budget_step_arg[budget_step]}"
+    budget_waited_ms=$(( budget_waited_ms + budget_step_ms[budget_step] ))
     # Plain `if`, not `(( ... )) && assign`: under `set -e` a false arithmetic
     # test makes the whole && list fail and takes the guard down with it.
-    budget_step_ms=$(( budget_step_ms * 2 ))
-    if (( budget_step_ms > 1000 )); then
-      budget_step_ms=1000
+    if (( budget_step < budget_step_last )); then
+      budget_step=$(( budget_step + 1 ))
     fi
   done
 
