@@ -22,8 +22,21 @@ command for the flag, so neither does this file.
       One line per entry directly in the directory, sorted: the name, a tab,
       and what it is: l:<link target>, d, f:<sha256 of the bytes>, or o. A
       directory that cannot be read prints nothing.
+
+  string <JSON file> <key>...
+      The string at that path of keys, its bytes and nothing else. Exit 1
+      when there is no string there, 3 when the file is not JSON.
+
+  wrote <snapshot meta file>
+      The command a pre-guard record says safedeps wrote: updated_command,
+      when ignore_scripts_injected is true. Exit 1 when the record says it
+      wrote none, 3 when the file cannot be read or says it wrote one and
+      holds no string. The hooks read these records with jq; the oracle reads
+      them here (bamdori r18: the oracle found the record the way the hook
+      did, and both said "did not add" of a command safedeps had written).
 """
 import hashlib
+import json
 import os
 import sys
 
@@ -78,7 +91,50 @@ def listing(directory):
         print("%s\t%s" % (entry.name, kind))
 
 
+def load(path):
+    try:
+        with open(path, "rb") as handle:
+            return json.loads(handle.read().decode("utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def emit(text):
+    sys.stdout.buffer.write(text.encode("utf-8", "surrogatepass"))
+
+
+def string(path, keys):
+    value = load(path)
+    if value is None:
+        return 3
+    for key in keys:
+        if not isinstance(value, dict) or key not in value:
+            return 1
+        value = value[key]
+    if not isinstance(value, str):
+        return 1
+    emit(value)
+    return 0
+
+
+def wrote(path):
+    meta = load(path)
+    if not isinstance(meta, dict):
+        return 3
+    if meta.get("ignore_scripts_injected") is not True:
+        return 1
+    command = meta.get("updated_command")
+    if not isinstance(command, str):
+        return 3
+    emit(command)
+    return 0
+
+
 def main():
+    if sys.argv[1] == "string":
+        return string(sys.argv[2], sys.argv[3:])
+    if sys.argv[1] == "wrote":
+        return wrote(sys.argv[2])
     if sys.argv[1] == "packages":
         packages(sys.argv[2])
         return 0

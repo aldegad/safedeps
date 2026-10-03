@@ -34,10 +34,21 @@
 #
 # Neither reads the command for --ignore-scripts. The hook says "added" only
 # where the command it received is, byte for byte, the command the pre-guard
-# recorded writing, and the oracle checks that with cmp over the two strings
-# jq prints, not with jq's own comparison. Three rounds in a row, a reader of
-# the command here and one in the hook shared a model of shell statements and
-# were wrong on the same commands.
+# recorded writing, and the oracle checks that with cmp. Three rounds in a row,
+# a reader of the command here and one in the hook shared a model of shell
+# statements and were wrong on the same commands.
+#
+# Which record is this command's, and what it says, the oracle does not learn
+# the hook's way either. The hook finds the record by the pending key and reads
+# it with jq; when the key missed (bamdori r18: `sh -c 'npm ci'`, rewritten),
+# the oracle found the same nothing and agreed with a false "did not add". So
+# the record is read here in Python (report-oracle-read.py), "did not add" is
+# red when a record no call has used yet, found by what it holds, says
+# safedeps wrote exactly the command this hook received, an --ignore-scripts
+# line is red in a message from a hook that
+# found no record, and each record is checked when it is written: the rewrite
+# the pre-guard printed is read from its stdout (oracle_pre) and must be, byte
+# for byte, the command the record says it wrote.
 #
 # What a rollback changed on disk is read too: the oracle lists the project's
 # top-level entries before the hook runs, and after a rollback every entry that
@@ -281,20 +292,95 @@ oracle_path_fact() {
 
 # oracle_inert_holds <added|asked|none>: the pre-guard's record that it
 # rewrote the command, and whether the command this hook received is the one
-# it wrote. The two strings are printed by jq raw and compared by cmp.
+# it wrote. Both strings are read in Python and compared by cmp.
 oracle_inert_holds() {
-  local asked=false same=false
-  [[ -n "${O_META}" && "$(jq -r '.ignore_scripts_injected == true' "${O_META}" 2>/dev/null)" == true ]] && asked=true
-  if [[ "${asked}" == true ]] \
-    && jq -ej '.updated_command | strings' "${O_META}" > "${O_CALL}/inert.wrote" 2>/dev/null \
-    && jq -ej '.tool_input.command | strings' <<< "${O_PAYLOAD}" > "${O_CALL}/inert.received" 2>/dev/null \
-    && cmp -s "${O_CALL}/inert.wrote" "${O_CALL}/inert.received"; then
-    same=true
+  local asked=false same=false rc=0 meta pending
+  printf '%s' "${O_PAYLOAD}" > "${O_CALL}/inert.payload"
+  python3 "${ORACLE_READ}" string "${O_CALL}/inert.payload" tool_input command > "${O_CALL}/inert.received" 2>/dev/null \
+    || { oracle_red "the hook input carries no command"; return; }
+  if [[ -n "${O_META}" && -f "${O_META}" ]]; then
+    python3 "${ORACLE_READ}" wrote "${O_META}" > "${O_CALL}/inert.wrote" 2>/dev/null || rc=$?
+    case "${rc}" in
+      0) asked=true; cmp -s "${O_CALL}/inert.wrote" "${O_CALL}/inert.received" && same=true ;;
+      1) ;;
+      *) oracle_red "a pre-guard record cannot be read: ${O_META}"; return ;;
+    esac
   fi
   case "$1:${asked}:${same}" in
     added:true:true|asked:true:false|none:false:*) ;;
     *) oracle_red "the pre-guard's record says it rewrote the command: ${asked}; the command this hook received is the one it wrote: ${same}" ;;
   esac
+  # "did not add" is a claim about every record no call has used yet, not
+  # only the one the hook found: an outstanding record that says safedeps
+  # wrote exactly this command makes it false, however the hook missed it. The
+  # records are those of the pending states noted before the hook ran, found
+  # by what they hold, not by the hook's key. A record an earlier call used is
+  # not this call's: e2e's Codex row that carries the flag itself sends the
+  # bytes an earlier Claude rewrite wrote, and its "did not add" is true
+  # (measured: scanning every record turned that row red).
+  [[ "$1" == none && "${O_DIRECT}" != 1 ]] || return 0
+  for pending in "${O_CALL}/pending"/*.json; do
+    [[ -f "${pending}" ]] || continue
+    meta="${O_HOME}/snapshots/$(python3 "${ORACLE_READ}" string "${pending}" snapshot_id 2>/dev/null)_meta.json"
+    [[ -f "${meta}" ]] || continue
+    python3 "${ORACLE_READ}" wrote "${meta}" > "${O_CALL}/inert.any" 2>/dev/null || continue
+    if cmp -s "${O_CALL}/inert.any" "${O_CALL}/inert.received"; then
+      oracle_red "did not add, and a pre-guard record no call has used says safedeps wrote this command: ${meta}"
+      return
+    fi
+  done
+}
+
+# An --ignore-scripts line speaks from the pre-guard's record of this command,
+# and the backstop's message is the one a hook that found no record prints.
+oracle_inert_line() {
+  oracle_count "$1"; O_SAW_INERT=1
+  case "${O_BLOCK}" in
+    backstop-*) oracle_red "an --ignore-scripts line from a hook that found no record of this command"; return ;;
+  esac
+  oracle_inert_holds "$2"
+}
+
+# The pre-guard's record, checked when it is written. oracle_pre_before notes
+# the snapshot records before the pre-guard runs; oracle_pre <call dir> <hook
+# stdout> reads the rewrite the pre-guard printed, if any, from its stdout and
+# holds every record the call wrote against it: a call that printed a rewrite
+# wrote exactly one record that says safedeps wrote those bytes, and a call
+# that printed none wrote no record that says it wrote anything.
+oracle_pre_before() {
+  local home="${SAFEDEPS_HOME:-${HOME}/.safedeps}"
+  mkdir -p "$1"
+  : > "$1/marker"
+  cksum "${home}/snapshots"/*_meta.json > "$1/metas.before" 2>/dev/null || true
+}
+oracle_pre() {
+  local call="$1" home="${SAFEDEPS_HOME:-${HOME}/.safedeps}" printed=false n=0 meta rc
+  O_LINE="pre-guard: $(head -c 200 <<< "$2")"
+  printf '%s' "$2" > "${call}/pre.out"
+  python3 "${ORACLE_READ}" string "${call}/pre.out" hookSpecificOutput updatedInput command > "${call}/pre.wrote" 2>/dev/null \
+    && printed=true
+  cksum "${home}/snapshots"/*_meta.json > "${call}/metas.after" 2>/dev/null || true
+  # A record is this call's when it is new, its bytes changed, or it was
+  # written after the marker (a rewrite in the same second can leave the same
+  # bytes under the same snapshot id).
+  { grep -vxFf "${call}/metas.before" "${call}/metas.after" | awk '{ sub(/^[^ ]+ [^ ]+ /, ""); print }'
+    find "${home}/snapshots" -maxdepth 1 -name '*_meta.json' -newer "${call}/marker" 2>/dev/null
+  } | sort -u > "${call}/metas.written"
+  while IFS= read -r meta; do
+    [[ -n "${meta}" ]] || continue
+    rc=0
+    python3 "${ORACLE_READ}" wrote "${meta}" > "${call}/meta.wrote" 2>/dev/null || rc=$?
+    case "${rc}" in
+      0) n=$((n + 1))
+         [[ "${printed}" == true ]] || oracle_red "a record says safedeps wrote a command, from a pre-guard call that printed no rewrite: ${meta}"
+         [[ "${printed}" != true ]] || cmp -s "${call}/meta.wrote" "${call}/pre.wrote" \
+           || oracle_red "the command a record says safedeps wrote is not the rewrite the pre-guard printed: ${meta}" ;;
+      1) ;;
+      *) oracle_red "a pre-guard record cannot be read: ${meta}" ;;
+    esac
+  done < "${call}/metas.written"
+  [[ "${printed}" != true || "${n}" == 1 ]] || oracle_red "the pre-guard printed a rewrite and no single record says it wrote one (${n} do)"
+  [[ "${ORACLE_FAILED}" == 0 ]]
 }
 
 # The fact a skipped rebuild gives as its reason.
@@ -395,7 +481,9 @@ oracle_block_end() {
   case "${O_BLOCK}" in
     rollback|backstop-rollback)
       [[ -n "${O_SNAP}" ]] || { O_LINE="${O_HEAD}"; oracle_red "a rollback message with no snapshot line"; }
-      [[ "${O_SAW_INERT}" == 1 ]] || { O_LINE="${O_HEAD}"; oracle_red "a rollback message with no --ignore-scripts line"; }
+      # Only the rollback that consumed this command's record says what
+      # safedeps did; the backstop found none (oracle_inert_line).
+      [[ "${O_BLOCK}" != rollback || "${O_SAW_INERT}" == 1 ]] || { O_LINE="${O_HEAD}"; oracle_red "a rollback message with no --ignore-scripts line"; }
       [[ "${O_SAW_DETAILS}" == 1 ]] || { O_LINE="${O_HEAD}"; oracle_red "a rollback message with no Details log line"; }
       if [[ "${O_CHANGED}" == 0 && "${O_SAW_NOTHING}" != 1 ]]; then
         O_LINE="${O_HEAD}"; oracle_red "no step line and no 'The rollback changed nothing.'"
@@ -620,9 +708,9 @@ oracle_line() {
     '') return 0 ;;
     'safedeps: suspicious dependency change detected. A rollback ran.')
       oracle_block_end; O_BLOCK=rollback; O_HEAD="${line}"; oracle_count head-rollback; return 0 ;;
-    'safedeps: suspicious dependency change detected after a command the command gate did not recognize. A rollback ran.')
+    'safedeps: suspicious dependency change detected; this hook found no record of this command from before it ran. A rollback ran.')
       oracle_block_end; O_BLOCK=backstop-rollback; O_HEAD="${line}"; oracle_count head-backstop-rollback; return 0 ;;
-    'safedeps: suspicious dependency change detected after a command the command gate did not recognize. No rollback ran.')
+    'safedeps: suspicious dependency change detected; this hook found no record of this command from before it ran. No rollback ran.')
       oracle_block_end; O_BLOCK=backstop-none; O_HEAD="${line}"; oracle_count head-backstop-none; return 0 ;;
     'safedeps: this install was not rolled back.')
       oracle_block_end; O_BLOCK=confirm; O_HEAD="${line}"; oracle_count head-confirm; return 0 ;;
@@ -903,14 +991,11 @@ oracle_line() {
     oracle_after_asked_line
     grep -q "^rebuild.*"$'\t'"rc=${BASH_REMATCH[1]}\$" "${O_NPM_LOG}" 2>/dev/null || oracle_red "no npm rebuild with that exit status was run"
   elif [[ "${line}" == 'safedeps added --ignore-scripts to this install' ]]; then
-    oracle_count inert-added; O_SAW_INERT=1
-    oracle_inert_holds added
+    oracle_inert_line inert-added added
   elif [[ "${line}" == 'safedeps asked for --ignore-scripts on this install; the command this hook received is not the one safedeps wrote' ]]; then
-    oracle_count inert-asked; O_SAW_INERT=1
-    oracle_inert_holds asked
+    oracle_inert_line inert-asked asked
   elif [[ "${line}" == 'safedeps did not add --ignore-scripts to this install' ]]; then
-    oracle_count inert-none; O_SAW_INERT=1
-    oracle_inert_holds none
+    oracle_inert_line inert-none none
   elif [[ "${line}" =~ ${re_file_absent} ]]; then
     oracle_count file-line-absent; O_SAW_DETAILS=1
     [[ "${BASH_REMATCH[1]}" == "Details log" && "${O_BLOCK}" != confirm ]] || oracle_red "this file line does not belong in this message"

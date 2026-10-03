@@ -59,6 +59,19 @@ post_hook() {
   printf '%s' "${out}"
   oracle_message "${call}" "${payload}" "${out}" || exit 1
 }
+# Every pre-guard call goes through here too, so the oracle reads the rewrite
+# the pre-guard printed and holds the record it wrote against it
+# (oracle_pre). Output and status pass through unchanged.
+pre_hook() {
+  local payload out call rc=0
+  payload=$(cat)
+  call=$(mktemp -d "${ORACLE_DIR}/pre.XXXXXX")
+  oracle_pre_before "${call}"
+  out=$(printf '%s' "${payload}" | "${ROOT_DIR}/scripts/safedeps-pre-guard.sh") || rc=$?
+  printf '%s' "${out}"
+  oracle_pre "${call}" "${out}" || exit 1
+  return "${rc}"
+}
 # Children the owner-state tests spawn, so an exit anywhere can reap them. The
 # stopped-owner test suspends a process and resumes it, and a run that dies in
 # between leaves a permanently stopped orphan -- measured: four of them, up to
@@ -330,13 +343,13 @@ set -e
 [[ "$(jq -r '.closure_source.type' <<< "${yarn_absent_json}")" == "fixture" ]] || fail "absent resolutions keep published closure source"
 
 yarn_safe_hook=$(
-  SAFEDEPS_HOME="${yarn_safe_home}" scripts/safedeps-pre-guard.sh <<EOF
+  SAFEDEPS_HOME="${yarn_safe_home}" pre_hook <<EOF
 {"tool_name":"Bash","tool_input":{"command":"yarn add next@16.2.11"},"cwd":"${yarn_safe_project}","turn_id":"turn-yarn-safe","model":"codex-test"}
 EOF
 )
 [[ -z "${yarn_safe_hook}" ]] || fail "Yarn command gate accepts matching project-scoped approval"
 yarn_unsafe_hook=$(
-  SAFEDEPS_HOME="${yarn_safe_home}" scripts/safedeps-pre-guard.sh <<EOF
+  SAFEDEPS_HOME="${yarn_safe_home}" pre_hook <<EOF
 {"tool_name":"Bash","tool_input":{"command":"yarn add next@16.2.11"},"cwd":"${yarn_unsafe_project}","turn_id":"turn-yarn-unsafe","model":"codex-test"}
 EOF
 )
@@ -502,7 +515,7 @@ if find "${tmp_root}/safe-yarn-candidate-failure/approved-specs" -name '*.json' 
 fi
 
 printf '%s\n' '# context drift' >> "${candidate_safe_project}/yarn.lock"
-candidate_context_mismatch_hook=$(SAFEDEPS_HOME="${candidate_safe_home}" scripts/safedeps-pre-guard.sh <<EOF
+candidate_context_mismatch_hook=$(SAFEDEPS_HOME="${candidate_safe_home}" pre_hook <<EOF
 {"tool_name":"Bash","tool_input":{"command":"yarn add next@16.2.11"},"cwd":"${candidate_safe_project}","turn_id":"turn-yarn-candidate-context-drift","model":"codex-test"}
 EOF
 )
@@ -537,7 +550,7 @@ project_dir="${tmp_root}/project"
 mkdir -p "${project_dir}"
 printf '{"dependencies":{}}\n' > "${project_dir}/package.json"
 hook_allow=$(
-  scripts/safedeps-pre-guard.sh <<EOF
+  pre_hook <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-vuln@1.0.1"},"cwd":"${project_dir}","turn_id":"turn-e2e","model":"codex-test"}
 EOF
 )
@@ -549,7 +562,7 @@ mkdir -p "${effect_project}"
 printf '{"dependencies":{}}\n' > "${effect_project}/package.json"
 
 effect_clean_pre=$(
-  scripts/safedeps-pre-guard.sh <<EOF
+  pre_hook <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${effect_project}","turn_id":"turn-e2e","model":"codex-test"}
 EOF
 )
@@ -577,7 +590,7 @@ inert_project="${tmp_root}/inert-project"
 mkdir -p "${inert_project}"
 printf '{"dependencies":{}}\n' > "${inert_project}/package.json"
 inert_pre=$(
-  scripts/safedeps-pre-guard.sh <<EOF
+  pre_hook <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${inert_project}"}
 EOF
 )
@@ -648,7 +661,7 @@ cat > "${revert_project}/package-lock.json" <<'EOF'
 }
 EOF
 cp "${revert_project}/package-lock.json" "${tmp_root}/revert-safe-lock.json"
-scripts/safedeps-pre-guard.sh > /dev/null <<EOF
+pre_hook > /dev/null <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${revert_project}"}
 EOF
 cat > "${revert_project}/package-lock.json" <<'EOF'
@@ -712,7 +725,7 @@ printf '{"name":"kept-package","version":"1.0.0"}\n' > "${link_main}/node_module
 ln -s "${link_main}/node_modules" "${link_wt}/node_modules"
 printf '{"dependencies":{"fixture-parent":"1.0.0"}}\n' > "${link_wt}/package.json"
 cp "${tmp_root}/revert-safe-lock.json" "${link_wt}/package-lock.json"
-scripts/safedeps-pre-guard.sh > /dev/null <<EOF
+pre_hook > /dev/null <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${link_wt}"}
 EOF
 printf '%s\n' "${tampered_lock}" > "${link_wt}/package-lock.json"
@@ -740,7 +753,7 @@ mkdir -p "${link_pkg_wt}" "${link_pkg_outside}"
 printf '{"dependencies":{"fixture-parent":"1.0.0"}}\n' > "${link_pkg_outside}/package.json"
 ln -s "${link_pkg_outside}/package.json" "${link_pkg_wt}/package.json"
 cp "${tmp_root}/revert-safe-lock.json" "${link_pkg_wt}/package-lock.json"
-scripts/safedeps-pre-guard.sh > /dev/null <<EOF
+pre_hook > /dev/null <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${link_pkg_wt}"}
 EOF
 printf '{"dependencies":{"fixture-parent":"1.0.0","fixture-evil":"6.6.6"}}\n' > "${link_pkg_outside}/package.json"
@@ -768,7 +781,7 @@ mkdir -p "${link_inert_main}/node_modules" "${link_inert_wt}"
 ln -s "${link_inert_main}/node_modules" "${link_inert_wt}/node_modules"
 printf '{"dependencies":{}}\n' > "${link_inert_wt}/package.json"
 link_inert_pre=$(
-  scripts/safedeps-pre-guard.sh <<EOF
+  pre_hook <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${link_inert_wt}"}
 EOF
 )
@@ -833,7 +846,7 @@ make_enclosing "${walk_main}"
 walk_wt="${walk_main}/nested/worktree"
 mkdir -p "${walk_wt}"
 cp "${tmp_root}/revert-safe-lock.json" "${walk_wt}/package-lock.json"
-scripts/safedeps-pre-guard.sh > /dev/null <<EOF
+pre_hook > /dev/null <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${walk_wt}"}
 EOF
 printf '%s\n' "${tampered_lock}" > "${walk_wt}/package-lock.json"
@@ -859,7 +872,7 @@ walk2_main="${tmp_root}/walk2-main"
 make_enclosing "${walk2_main}"
 walk2_wt="${walk2_main}/nested/worktree"
 mkdir -p "${walk2_wt}/node_modules"
-scripts/safedeps-pre-guard.sh > /dev/null <<EOF
+pre_hook > /dev/null <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${walk2_wt}"}
 EOF
 printf '{"dependencies":{"fixture-parent":"1.0.0"}}\n' > "${walk2_wt}/package.json"
@@ -901,7 +914,7 @@ mkdir -p "${linklock_wt}" "${linklock_outside}"
 printf '{"dependencies":{"fixture-parent":"1.0.0"}}\n' > "${linklock_wt}/package.json"
 cp "${tmp_root}/revert-safe-lock.json" "${linklock_outside}/package-lock.json"
 ln -s "${linklock_outside}/package-lock.json" "${linklock_wt}/package-lock.json"
-scripts/safedeps-pre-guard.sh > /dev/null <<EOF
+pre_hook > /dev/null <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${linklock_wt}"}
 EOF
 printf '%s\n' "${tampered_lock}" > "${linklock_outside}/package-lock.json"
@@ -942,7 +955,7 @@ printf '{"name":"shared","version":"1.0.0"}\n' > "${ws_outside}/package.json"
 printf '{"name":"kept-package","version":"1.0.0"}\n' > "${ws_outside}/node_modules/kept-package/package.json"
 printf '{"name":"ws","workspaces":["../ws-outside"],"dependencies":{"fixture-parent":"1.0.0"}}\n' > "${ws_wt}/package.json"
 cp "${tmp_root}/revert-safe-lock.json" "${ws_wt}/package-lock.json"
-scripts/safedeps-pre-guard.sh > /dev/null <<EOF
+pre_hook > /dev/null <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${ws_wt}"}
 EOF
 printf '%s\n' "${tampered_lock}" > "${ws_wt}/package-lock.json"
@@ -976,7 +989,7 @@ printf '{"name":"kept-package","version":"1.0.0"}\n' > "${own_outside}/kept-pack
 ln -s "${own_outside}/kept-package" "${own_wt}/node_modules/linked-package"
 printf '{"dependencies":{"fixture-parent":"1.0.0"}}\n' > "${own_wt}/package.json"
 cp "${tmp_root}/revert-safe-lock.json" "${own_wt}/package-lock.json"
-scripts/safedeps-pre-guard.sh > /dev/null <<EOF
+pre_hook > /dev/null <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${own_wt}"}
 EOF
 printf '%s\n' "${tampered_lock}" > "${own_wt}/package-lock.json"
@@ -1009,7 +1022,7 @@ mkdir -p "${nochange_wt}/node_modules/installed-package" "${nochange_wt}/node_mo
 printf '{"name":"installed-package","version":"1.0.0"}\n' > "${nochange_wt}/node_modules/installed-package/package.json"
 printf '{"dependencies":{"fixture-parent":"1.0.0"}}\n' > "${nochange_wt}/package.json"
 printf '%s\n' "${tampered_lock}" > "${nochange_wt}/package-lock.json"
-scripts/safedeps-pre-guard.sh > /dev/null <<EOF
+pre_hook > /dev/null <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${nochange_wt}"}
 EOF
 : > "${tmp_root}/emptying-npm-calls.log"
@@ -1034,7 +1047,7 @@ pass "a rollback with nothing to roll back leaves node_modules in place"
 # touching a lockfile: the tree is no longer the one the pre-guard listed, and
 # it is removed.
 mkdir -p "${nochange_wt}/node_modules/written-package"
-scripts/safedeps-pre-guard.sh > /dev/null <<EOF
+pre_hook > /dev/null <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${nochange_wt}"}
 EOF
 printf '{"name":"written-later","version":"1.0.0"}\n' > "${nochange_wt}/node_modules/written-package/package.json"
@@ -1057,7 +1070,7 @@ for reason_case in bin newer; do
   printf '{"name":"installed-package","version":"1.0.0"}\n' > "${reason_wt}/node_modules/installed-package/package.json"
   printf '{"dependencies":{"fixture-parent":"1.0.0"}}\n' > "${reason_wt}/package.json"
   printf '%s\n' "${tampered_lock}" > "${reason_wt}/package-lock.json"
-  scripts/safedeps-pre-guard.sh > /dev/null <<EOF
+  pre_hook > /dev/null <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${reason_wt}"}
 EOF
   case "${reason_case}" in
@@ -1089,7 +1102,7 @@ printf '{"name":"installed-package","version":"1.0.0"}\n' > "${inplace_wt}/node_
 printf '{"name":"inplace-wt","lockfileVersion":3,"packages":{}}\n' > "${inplace_wt}/node_modules/.package-lock.json"
 printf '{"dependencies":{"fixture-parent":"1.0.0"}}\n' > "${inplace_wt}/package.json"
 printf '%s\n' "${tampered_lock}" > "${inplace_wt}/package-lock.json"
-scripts/safedeps-pre-guard.sh > /dev/null <<EOF
+pre_hook > /dev/null <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm ci"},"cwd":"${inplace_wt}"}
 EOF
 printf '{"name":"inplace-wt","lockfileVersion":3,"packages":{"node_modules/installed-package":{"version":"2.0.0"}}}\n' > "${inplace_wt}/node_modules/.package-lock.json"
@@ -1112,7 +1125,7 @@ mkdir -p "${lag_wt}/node_modules/installed-package" "${lag_wt}/node_modules/.bin
 printf '{"name":"installed-package","version":"1.0.0"}\n' > "${lag_wt}/node_modules/installed-package/package.json"
 printf '{"dependencies":{"fixture-parent":"1.0.0"}}\n' > "${lag_wt}/package.json"
 cp "${tmp_root}/revert-safe-lock.json" "${lag_wt}/package-lock.json"
-scripts/safedeps-pre-guard.sh > /dev/null <<EOF
+pre_hook > /dev/null <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${lag_wt}"}
 EOF
 lag_first_post=$(
@@ -1124,7 +1137,7 @@ if grep -q 'suspicious dependency change detected' <<< "${lag_first_post}"; then
   fail "the approved install that sets the confirmed snapshot is not rolled back"
 fi
 printf '%s\n' "${tampered_lock}" > "${lag_wt}/package-lock.json"
-scripts/safedeps-pre-guard.sh > /dev/null <<EOF
+pre_hook > /dev/null <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm ci"},"cwd":"${lag_wt}"}
 EOF
 lag_post=$(
@@ -1147,7 +1160,7 @@ yarn_wt="${tmp_root}/yarn-wt"
 mkdir -p "${yarn_wt}/node_modules/installed-package"
 printf '{"dependencies":{}}\n' > "${yarn_wt}/package.json"
 : > "${yarn_wt}/yarn.lock"
-scripts/safedeps-pre-guard.sh > /dev/null <<EOF
+pre_hook > /dev/null <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${yarn_wt}"}
 EOF
 printf '%s\n' "${tampered_lock}" > "${yarn_wt}/package-lock.json"
@@ -1176,7 +1189,7 @@ if [[ "$(id -u)" != 0 ]]; then
   mkdir -p "${stuck_wt}/node_modules/removable-package"
   printf '{"dependencies":{"fixture-parent":"1.0.0"}}\n' > "${stuck_wt}/package.json"
   cp "${tmp_root}/revert-safe-lock.json" "${stuck_wt}/package-lock.json"
-  scripts/safedeps-pre-guard.sh > /dev/null <<EOF
+  pre_hook > /dev/null <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${stuck_wt}"}
 EOF
   printf '%s\n' "${tampered_lock}" > "${stuck_wt}/package-lock.json"
@@ -1207,7 +1220,7 @@ fi
 # npm project to the rollback, and its node_modules is removed.
 nosave_wt="${tmp_root}/nosave-wt"
 mkdir -p "${nosave_wt}"
-scripts/safedeps-pre-guard.sh > /dev/null <<EOF
+pre_hook > /dev/null <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install --no-save fixture-parent@1.0.0"},"cwd":"${nosave_wt}"}
 EOF
 mkdir -p "${nosave_wt}/node_modules/.bin" "${nosave_wt}/node_modules/fixture-parent"
@@ -1241,7 +1254,7 @@ mkdir -p "${nosave_link_wt}" "${nosave_link_target}/.bin"
 # the reader's directory, so the message names the physical path instead.
 ln -s ../nosave-link-target "${nosave_link_wt}/node_modules"
 nosave_link_physical=$(cd -P "${nosave_link_target}" && pwd -P)
-scripts/safedeps-pre-guard.sh > /dev/null <<EOF
+pre_hook > /dev/null <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install --no-save fixture-parent@1.0.0"},"cwd":"${nosave_link_wt}"}
 EOF
 printf '{"name":"nosave-link-wt","lockfileVersion":3,"packages":{}}\n' > "${nosave_link_target}/.package-lock.json"
@@ -1264,12 +1277,12 @@ pass "a rollback names a linked node_modules a --no-save install wrote through"
 # row here that makes the hook print it. A row asserts the phrase it is about;
 # whether the line is true is the oracle's to say, in post_hook.
 grammar_pre() {
-  scripts/safedeps-pre-guard.sh <<EOF
+  pre_hook <<EOF
 {"tool_name":"Bash","tool_input":{"command":"$2"},"cwd":"$1"}
 EOF
 }
 grammar_pre_codex() {
-  scripts/safedeps-pre-guard.sh <<EOF
+  pre_hook <<EOF
 {"tool_name":"Bash","tool_input":{"command":"$2"},"cwd":"$1","turn_id":"turn-e2e","model":"codex-test"}
 EOF
 }
@@ -1303,19 +1316,48 @@ grep -q '^safedeps added --ignore-scripts to this install$' <<< "$(post_message 
 cmp -s "${confirmed_wt}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "the rollback restores the confirmed lockfile"
 pass "a rollback to a confirmed snapshot says so, and says the install ran with --ignore-scripts"
 
-# The same project, the same rejected lockfile, and no pre-guard: the command
-# gate did not recognize the command, and the backstop rolls back to the
-# confirmed snapshot. It has no record of asking for --ignore-scripts.
+# The same project, the same rejected lockfile, and no pre-guard: the post
+# hook finds no record of the command, and the backstop rolls back to the
+# confirmed snapshot. With no record it says nothing about --ignore-scripts.
 printf '%s\n' "${tampered_lock}" > "${confirmed_wt}/package-lock.json"
 mkdir -p "${confirmed_wt}/node_modules/installed-package"
 backstop_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${confirmed_wt}" "npm install fixture-parent@1.0.0")
 grep -A1 -x 'this rollback has no snapshot from before the command' <<< "$(post_message "${backstop_post}")" | grep -q '^removed .*/confirmed-wt/node_modules$' \
   || fail "the backstop says why it removed node_modules, right before it says so (${backstop_post})"
-grep -q 'after a command the command gate did not recognize. A rollback ran\.' <<< "${backstop_post}" || fail "the backstop rolls back to the confirmed snapshot"
-grep -q '^safedeps did not add --ignore-scripts to this install$' <<< "$(post_message "${backstop_post}")" \
-  || fail "the backstop says it did not add --ignore-scripts"
+grep -q 'this hook found no record of this command from before it ran. A rollback ran\.' <<< "${backstop_post}" || fail "the backstop rolls back to the confirmed snapshot"
+! grep -q -- '--ignore-scripts' <<< "$(post_message "${backstop_post}")" \
+  || fail "the backstop, which found no record of the command, says nothing about --ignore-scripts"
 cmp -s "${confirmed_wt}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "the backstop restores the confirmed lockfile"
 pass "the backstop's rollback speaks the same lines"
+
+# A command the pre-guard rewrote, whose record the post hook does not find
+# (bamdori r18 F4): the rewrite puts --ignore-scripts before a closing quote,
+# the post hook's key for the rewritten command is not the pre-guard's key for
+# the command, and the backstop rolls back. It used to say "safedeps did not
+# add --ignore-scripts" there, of a command safedeps had written. These rows
+# hold the line true whether or not the key is ever fixed: the backstop says
+# nothing about --ignore-scripts, and the oracle reads every record.
+for r18_form in "sh -c 'npm ci'" 'bash -c "npm ci"' "eval 'npm ci'"; do
+  r18_wt=$(mktemp -d "${tmp_root}/r18-wt.XXXXXX")
+  grammar_project "${r18_wt}"
+  grammar_pre "${r18_wt}" "npm install fixture-parent@1.0.0" > /dev/null
+  touch "${r18_wt}/package-lock.json"
+  r18_first=$(PATH="${stub_bin}:${PATH}" grammar_post "${r18_wt}" "npm install fixture-parent@1.0.0 --ignore-scripts")
+  [[ -z "${r18_first}" ]] || fail "the project of ${r18_form} has a confirmed snapshot (${r18_first})"
+  r18_wrote=$(jq -nc --arg c "${r18_form}" --arg d "${r18_wt}" '{tool_name:"Bash",tool_input:{command:$c},cwd:$d}' \
+    | pre_hook | jq -r '.hookSpecificOutput.updatedInput.command // empty')
+  [[ -n "${r18_wrote}" ]] || fail "the pre-guard rewrites ${r18_form}"
+  printf '%s\n' "${tampered_lock}" > "${r18_wt}/package-lock.json"
+  r18_post=$(jq -nc --arg c "${r18_wrote}" --arg d "${r18_wt}" '{tool_name:"Bash",tool_input:{command:$c},cwd:$d}' \
+    | PATH="${stub_bin}:${PATH}" post_hook)
+  grep -q 'this hook found no record of this command from before it ran. A rollback ran\.' <<< "${r18_post}" \
+    || fail "${r18_wrote}: the backstop rolls back, and says it found no record of the command (${r18_post})"
+  ! grep -q -- '--ignore-scripts' <<< "$(post_message "${r18_post}")" \
+    || fail "${r18_wrote}: the backstop says nothing about --ignore-scripts (${r18_post})"
+  cmp -s "${r18_wt}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "${r18_wrote}: the backstop restores the confirmed lockfile"
+  rm -f "$(grammar_pending "${r18_wt}")"
+done
+pass "a rewritten command whose record the post hook does not find gets no --ignore-scripts line"
 
 # The backstop with nothing to roll back to: no confirmed record, and a
 # confirmed record that names a snapshot with no meta file.
@@ -1618,7 +1660,7 @@ mkdir -p "${missing_project}"
 printf '{"dependencies":{}}\n' > "${missing_project}/package.json"
 SAFEDEPS_HOME="${SAFEDEPS_HOME}" lib/ledger/ledger.sh approve npm fixture-parent 1.0.0 1.0.0 direct-only >/dev/null
 missing_pre=$(
-  scripts/safedeps-pre-guard.sh <<EOF
+  pre_hook <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${missing_project}","turn_id":"turn-e2e","model":"codex-test"}
 EOF
 )
