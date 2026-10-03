@@ -1414,12 +1414,11 @@ shell_lex() {
           }
           # A command glued to the `)` that closes a head (zsh `for i
           # (1)pip install x`, `for ((...))pip install x`, `if ((1))pip ...`)
-          # stands where a command does with no byte before it to carry the
-          # start: a `;` written over the `)` would leave the view unclosed.
-          # The reading is failed there (UNDECIDED), never passed: in its own
-          # walk only: in the zsh walk the bash reading runs for comparison
-          # it says DIVERGE instead, which brings the zsh reading in.
-          if (!pre && s > 1 && X[s-1] == ")" && (s - 1) in HC && !opener(w) && !(zr && zopener(w)) && w != "do") { if (rs == policy) smfail(); else div = 1 }
+          # stands where a command does with no blank before it: the start
+          # is written over that `)`. Read again, the `;` ends the head (the
+          # list, or the arithmetic read as a subshell), and the same start
+          # stands there, so the view is the same.
+          if (!pre && s > 1 && X[s-1] == ")" && (s - 1) in HC && !opener(w) && !(zr && zopener(w)) && w != "do") { CS[s] = 1; B[s-1] = 1; pre = 1 }
           if (!pre) { CS[s] = 1; mark_start(s, B) }
           pre = 0
           # The word after `coproc` is a command to zsh and to bash, unless
