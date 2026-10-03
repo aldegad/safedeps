@@ -1159,7 +1159,9 @@ shell_lex() {
           # command, it hid the install after it in every shell that runs
           # `command --` or `exec --`.
           else if ((execmode || cmdmode) && w == "--") { execmode = 0; cmdmode = 0; hit = 1 }
-          else if (envmode && w ~ /^-/) { if (w ~ /^(-u|--unset|-C|--chdir)$/) takes = 1; hit = 1 }
+          # env takes a value after -u, -C and -P (macOS and GNU env; -S is
+          # read by the payload reader, see cscripts_of).
+          else if (envmode && w ~ /^-/) { if (w ~ /^(-[0iv]*[uCP]|--unset|--chdir)$/) takes = 1; hit = 1 }
           # exec takes `-c`, `-l` and `-a NAME` (bash and zsh), clustered as
           # getopt reads them: the first `a` takes the rest of its word as
           # the name, or the next word when it ends the word. `-aa` is the
@@ -1846,9 +1848,42 @@ shell_lex() {
       # by a regex open on the left, and narrowing it to four names passed
       # `ksh -c "pip install ..."` with no verdict (caught in review). Options
       # may stand before -c: -o and +o take a name, -- ends the options.
-      function cscripts_of(W, n,   j, m, s, base, args) {
+      #
+      # env -S STRING (and --split-string) splits STRING into words and runs
+      # them with the words after it, so STRING and those words are a script
+      # like the words after eval: an E record. Its splitting is not the
+      # shell (no operators), so reading it as a script can only find more.
+      # A STRING whose value is decided at run time cannot be read: a `!`
+      # record, which the reader records as a failed reading.
+      function cscripts_of(W, n,   j, m, s, base, args, c, q, sv, rest) {
         for (j = 1; j <= n; j++) {
           base = W[j]; sub(/.*\//, "", base)
+          if (base == "env" && j < n) {
+            sv = ""; rest = 0
+            for (m = j + 1; m <= n && !rest; m++) {
+              if (W[m] == "--" || W[m] !~ /^-/ && W[m] !~ /^[A-Za-z_][A-Za-z0-9_]*=/) break
+              if (W[m] ~ /^--split-string=/) { sv = substr(W[m], 16); rest = m + 1; break }
+              if (W[m] == "--split-string") { if (m < n) { sv = W[m+1]; rest = m + 2 }; break }
+              if (W[m] ~ /^--/ || W[m] !~ /^-/) continue
+              for (q = 2; q <= length(W[m]); q++) {
+                c = substr(W[m], q, 1)
+                if (c ~ /[uCP]/) { if (q == length(W[m])) m++; break }
+                if (c == "S") {
+                  if (q < length(W[m])) { sv = substr(W[m], q + 1); rest = m + 1 }
+                  else if (m < n) { sv = W[m+1]; rest = m + 2 }
+                  break
+                }
+              }
+              if (rest) break
+            }
+            if (rest) {
+              if (sv ~ /[$`]/) { put("!\035"); break }
+              args = sv
+              for (m = rest; m <= n; m++) args = args " " W[m]
+              put("E" args "\035"); break
+            }
+            continue
+          }
           if (base ~ /sh$/ && j < n) {
             for (m = j + 1; m <= n; m++) {
               # -o, or a cluster ending in o (-euo), takes the next word as an option name

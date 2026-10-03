@@ -1062,6 +1062,28 @@ for decoy in 'echo .venv/bin/pip install evil==1.0.0' 'ls /usr/bin/pip' '/opt/pi
 done
 pass "a manager named by any path is read as that manager at every command start"
 
+# env reads its own options before the command: -u, -C and -P take a value,
+# and -S (--split-string in GNU env) splits its string into the command and
+# runs it with the words after it. `env -P /usr/bin pip install x` read
+# /usr/bin as the command, and every -S form passed; each runs in macOS bash
+# 3.2, zsh 5.9, sh and dash (measured with touch in place of the install;
+# --split-string is GNU only, and the Linux columns of the grid hold it). The
+# -S string is read as a script, like the words after eval; one whose value
+# is decided at run time cannot be, and is a recorded failed reading.
+for env_form in \
+  'env -P /usr/bin pip install evil==1.0.0' "env -S 'pip install evil==1.0.0'" "env -S'pip install evil==1.0.0'" \
+  "env -iS 'pip install evil==1.0.0'" "env -S 'pip install' evil==1.0.0" "/usr/bin/env -S 'pip install evil==1.0.0'" \
+  "env --split-string='pip install evil==1.0.0'" 'env -u X pip install evil==1.0.0' 'env -i -- pip install evil==1.0.0' \
+  '/usr/bin/env -- pip install evil==1.0.0' 'env -uS pip install evil==1.0.0'
+do
+  expect_not_approved "env with its options before an install: ${env_form}" "${env_form}"
+done
+expect_undecided "an env -S string decided at run time, beside a manager" 'env -S "$X" pip'
+got=$(gate_reason 'env -S "$X"')
+[[ "${got}" == "pass"* ]] || fail "an env -S string decided at run time with no manager named runs, recorded (got: ${got:0:80})"
+pass "env reads its options before the command, and its -S string is read as a script"
+
+
 # Plain process substitutions and redirections around commands that install
 # nothing stay unjudged and unrecorded, as before.
 for plain in \
