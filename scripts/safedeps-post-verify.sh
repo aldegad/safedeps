@@ -1086,6 +1086,22 @@ describe_rebuild_blockers() {
   printf '%s' "${clauses}"
 }
 
+# Whether safedeps read that npm keeps the --ignore-scripts it put in this
+# install (the pre-guard's ignore_scripts_verified). A statement holding a word
+# the shell decides at run time gets the flag unread, and the words after it
+# can undo it, so its scripts may have run during the install: the warnings say
+# none ran only when the flag was read. A meta without the field reads as unread.
+# Prints <read> when it was read, and <unread> (by default, that safedeps ran
+# none and the install's own may have run) otherwise.
+SCRIPTS_UNREAD="safedeps ran no install script, but it could not read whether npm kept the --ignore-scripts it put in this install, so the install's own scripts may have run"
+scripts_not_run() {
+  if [[ "$(jq -r '.ignore_scripts_injected == true and .ignore_scripts_verified == true' "${META_FILE}" 2>/dev/null)" == true ]]; then
+    printf '%s' "$1"
+  else
+    printf '%s' "${2:-${SCRIPTS_UNREAD}}"
+  fi
+}
+
 # The warning for the `fetched` packages npm_rebuild_unrecorded found: which
 # registry npm fetched them from, or why npm could not say, and that a person
 # decides whether to trust it before anyone rebuilds.
@@ -1102,7 +1118,7 @@ describe_fetched_elsewhere() {
     where="safedeps could not tell which registry this install fetched ${names} from (${unknown:-npm did not say}), so it cannot tell they came from the public npm registry"
     trust="where they came from"
   fi
-  printf '%s' "install scripts were not run in ${PROJECT_DIR} because ${where}. The install is kept"
+  printf '%s' "$(scripts_not_run "install scripts were not run" "npm rebuild was not run") in ${PROJECT_DIR} because ${where}$(scripts_not_run "" ". ${SCRIPTS_UNREAD}"). The install is kept"
   [[ -n "${registries}" ]] || ! npm_fetch_sourced \
     || printf '. %s' "safedeps did not run them this time because the command runs code safedeps does not read or run (a file it sources, an eval, or npm under a PATH or NODE_OPTIONS of its own), and that code can change npm's environment where safedeps cannot see it. It has not recorded these bytes as withheld: whoever controls that code already runs code in this shell, so a record would protect nothing against them. The next install npm says fetches from the public npm registry rebuilds them as usual"
   printf '. %s' "If you trust ${trust}, confirm with the user before running \`npm rebuild ${names}\` yourself; do not rebuild without asking"
@@ -1130,7 +1146,7 @@ describe_withheld() {
     where="from a registry safedeps could not name (${unknown:-the record does not say})"
     trust="where they came from"
   fi
-  printf '%s' "install scripts were not run in ${PROJECT_DIR} because the bytes of ${names} here are the ones an install in ${projects} first fetched ${where}. They are kept. $(npm_withheld_scope). If you trust ${trust}, confirm with the user before running \`npm rebuild ${names}\` yourself; do not rebuild without asking"
+  printf '%s' "$(scripts_not_run "install scripts were not run" "npm rebuild was not run") in ${PROJECT_DIR} because the bytes of ${names} here are the ones an install in ${projects} first fetched ${where}$(scripts_not_run "" ". ${SCRIPTS_UNREAD}"). They are kept. $(npm_withheld_scope). If you trust ${trust}, confirm with the user before running \`npm rebuild ${names}\` yourself; do not rebuild without asking"
 }
 
 # Runs `npm rebuild` in PROJECT_DIR when npm_rebuild_unrecorded finds nothing in
@@ -1144,13 +1160,13 @@ npm_rebuild_vouched() {
     blockers="${blockers:-safedeps could not make a scratch file to read it}"
     [[ -z "${withheld}" ]] || rm -f "${withheld}"
     log_advisory "post-verify: npm rebuild ${when} skipped in ${PROJECT_DIR} — ${blockers}, so it cannot tell that tree holds none of them."
-    ROLLBACK_WARNINGS+=("npm rebuild was not run: ${blockers}, so it could not tell that the tree holds none of them. Install scripts have not run; review node_modules, then run \`npm rebuild\` yourself if it is what you expect")
+    ROLLBACK_WARNINGS+=("npm rebuild was not run: ${blockers}, so it could not tell that the tree holds none of them. $(scripts_not_run "Install scripts have not run"); review node_modules, then run \`npm rebuild\` yourself if it is what you expect")
     return 0
   fi
   if ! blockers=$(npm_rebuild_unrecorded "${PROJECT_DIR}" "${withheld}"); then
     rm -f "${withheld}"
     log_advisory "post-verify: npm rebuild ${when} skipped in ${PROJECT_DIR} — safedeps asked npm which packages a rebuild would run over and got no answer (${blockers}), so it cannot tell that tree is one it can vouch for."
-    ROLLBACK_WARNINGS+=("npm rebuild was not run: safedeps asked npm which packages it would rebuild and got no answer (${blockers}), so it could not tell they are the ones it read. Install scripts have not run; review node_modules, then run \`npm rebuild\` yourself if it is what you expect")
+    ROLLBACK_WARNINGS+=("npm rebuild was not run: safedeps asked npm which packages it would rebuild and got no answer (${blockers}), so it could not tell they are the ones it read. $(scripts_not_run "Install scripts have not run"); review node_modules, then run \`npm rebuild\` yourself if it is what you expect")
     return 0
   fi
   rm -f "${withheld}"
@@ -1168,7 +1184,7 @@ npm_rebuild_vouched() {
     clauses=$(grep -vE '^(fetched|origin|withheld|held)'$'\t' <<< "${blockers}" || true)
     [[ -z "${clauses}" ]] && return 0
     clauses=$(describe_rebuild_blockers "${clauses}")
-    ROLLBACK_WARNINGS+=("npm rebuild was not run: the tree npm would rebuild in ${PROJECT_DIR} holds ${clauses}. safedeps runs install scripts only over a tree whose every package is on record and comes from the public registry or a declared workspace member. Install scripts have not run; review it, then run \`npm rebuild\` yourself if it is what you expect")
+    ROLLBACK_WARNINGS+=("npm rebuild was not run: the tree npm would rebuild in ${PROJECT_DIR} holds ${clauses}. safedeps runs install scripts only over a tree whose every package is on record and comes from the public registry or a declared workspace member. $(scripts_not_run "Install scripts have not run"); review it, then run \`npm rebuild\` yourself if it is what you expect")
     return 0
   fi
 
@@ -1196,14 +1212,14 @@ run_verified_npm_rebuild_if_injected() {
   local outside
   outside=$(project_npm_blocker)
   if [[ -n "${outside}" ]]; then
-    ROLLBACK_WARNINGS+=("npm rebuild skipped after verified inert install: ${outside}. safedeps rebuilds only where package.json, the lockfiles and node_modules at the project root are not links. The verified packages' install scripts have not run")
+    ROLLBACK_WARNINGS+=("npm rebuild skipped after verified inert install: ${outside}. safedeps rebuilds only where package.json, the lockfiles and node_modules at the project root are not links. $(scripts_not_run "The verified packages' install scripts have not run")")
     log_advisory "post-verify rebuild skipped: ${outside} -- project ${PROJECT_DIR}"
     return 0
   fi
 
   if [[ ! -f "${PROJECT_DIR}/${NPM_HIDDEN_LOCKFILE}" ]]; then
     log_advisory "post-verify: npm rebuild skipped in ${PROJECT_DIR} — node_modules has no .package-lock.json, so the tree it would rebuild is not the tree the effect gate read."
-    ROLLBACK_WARNINGS+=("npm rebuild was not run: ${PROJECT_DIR}/node_modules has no .package-lock.json, so safedeps could not read the tree it would rebuild. Install scripts have not run; review node_modules, then run \`npm rebuild\` yourself if it is what you expect")
+    ROLLBACK_WARNINGS+=("npm rebuild was not run: ${PROJECT_DIR}/node_modules has no .package-lock.json, so safedeps could not read the tree it would rebuild. $(scripts_not_run "Install scripts have not run"); review node_modules, then run \`npm rebuild\` yourself if it is what you expect")
     return 0
   fi
 
@@ -1487,7 +1503,7 @@ settle_npm_trace() {
   else
     NPM_TRACE_ABSENT=true
     log_advisory "post-verify UNGATED: no install trace in ${PROJECT_DIR}: the install landed elsewhere or installed nothing. Neither npm lockfile there changed during this command${why:+ (${why})}, so the effect gate verified nothing this install wrote, and npm rebuild was not run. Command: ${COMMAND}"
-    TRACE_NOTE="no install trace in ${PROJECT_DIR}: the install landed elsewhere or installed nothing. safedeps verified nothing this install wrote and did not run npm rebuild; if it installed packages somewhere else, their install scripts have not run there. Recorded as UNGATED in ${GUARD_DIR}/advisory.log"
+    TRACE_NOTE="no install trace in ${PROJECT_DIR}: the install landed elsewhere or installed nothing. safedeps verified nothing this install wrote and did not run npm rebuild; if it installed packages somewhere else, $(scripts_not_run "their install scripts have not run there" "safedeps ran none of their install scripts there, but it could not read whether npm kept the --ignore-scripts it put in this install, so they may have run during the install"). Recorded as UNGATED in ${GUARD_DIR}/advisory.log"
   fi
   rm -f "${baseline}"
 }
@@ -1972,7 +1988,7 @@ npm_withheld_judge() {
   if npm_fetch_sourced; then
     facts=$(jq -c '[.[] | select((type == "object" and .cause == "sourced") | not)]' <<< "${facts}" 2>/dev/null) \
       || facts="${NPM_FETCH_FACTS}"
-    log_advisory "post-verify: not recording the bytes this install brought into ${PROJECT_DIR} as withheld for want of npm's answer: the command runs code safedeps does not read or run (source, . or eval before the install, or npm under a PATH or NODE_OPTIONS of its own), and whoever controls that code already runs code in this shell. Their install scripts were not run this time."
+    log_advisory "post-verify: not recording the bytes this install brought into ${PROJECT_DIR} as withheld for want of npm's answer: the command runs code safedeps does not read or run (source, . or eval before the install, or npm under a PATH or NODE_OPTIONS of its own), and whoever controls that code already runs code in this shell. $(scripts_not_run "Their install scripts were not run this time" "safedeps ran none of their install scripts, but it could not read whether npm kept the --ignore-scripts it put in this install, so they may have run during the install")."
   fi
   inert=$(jq -r '.ignore_scripts_injected == true' "${META_FILE}" 2>/dev/null || printf 'false')
   # shellcheck disable=SC2016 # a jq program: jq expands its $names
@@ -2462,8 +2478,8 @@ if [[ "${SUSPICIOUS}" == "true" ]]; then
   ROLLBACK_TARGET_LINE="the last confirmed safe snapshot"
   if [[ "${ROLLBACK_TARGET_CONFIRMED}" != true ]]; then
     if [[ "$(jq -r '.ignore_scripts_injected == true' "${META_FILE}" 2>/dev/null || printf 'false')" == true ]]; then
-      scripts_line="no install script was run"
-      scripts_log="install scripts were not run"
+      scripts_line=$(scripts_not_run "no install script was run" "the rollback ran no install script. safedeps put --ignore-scripts in the install but could not read whether npm kept it, so the install's own scripts may have run, the rejected package's included")
+      scripts_log=$(scripts_not_run "install scripts were not run" "the rollback ran no install script; safedeps could not read whether npm kept the --ignore-scripts it put in the install, so its own scripts may have run")
     else
       scripts_line="the rollback ran no install script. safedeps did not make the install itself inert (on Codex it cannot), so unless the command said --ignore-scripts, the install's own scripts already ran, the rejected package's included"
       scripts_log="the rollback ran no install script; the install was not made inert, so its own scripts ran unless the command said --ignore-scripts"

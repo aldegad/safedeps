@@ -1702,59 +1702,68 @@ inert_verb_ends() {
   fi
 }
 
-# Whether the shell can change the words of a statement when it runs it:
-# whether any of its expansions can act on them. The rules are the expansions
-# themselves, in the order bash's manual gives them ("Shell Expansions"), each
-# with what zsh and dash do at that step under their default options, so a kind
-# of expansion is missed only if a step is. A list of characters was missed one
-# kind at a time: it knew `$`, backquotes and globs and not the tilde, so
-# `HOME=--cache; npm install x ~` handed npm `--cache` as its last word, the
-# flag after it became the cache directory, and the install ran its scripts
-# with nothing recorded.
+# Bytes that no shell expansion acts on, in bash, zsh or dash under their
+# default options. A word is one the shell leaves as written only when every
+# byte of it outside quotes is one of these and it does not start with `~` or
+# `=` (shell_expands).
+SAFEDEPS_SHELL_INERT_BYTES='abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._/@:+,=%-'
+
+# Whether the shell can change the words of a statement when it runs it. The
+# answer is an allow-list, not a list of what expands: a word is left as
+# written only when every byte of it outside quotes is in
+# SAFEDEPS_SHELL_INERT_BYTES and it does not start with `~` or `=`; any other
+# byte, wherever it stands, makes the word one the shell decides at run time.
+# Two deny-lists stood here and each missed a kind of expansion one at a time:
+# `$`, backquotes and globs without the tilde (`HOME=--cache; npm install x ~`
+# handed npm `--cache` before the trailing flag, and the install ran its
+# scripts with nothing recorded), then a list of the expansions that still
+# missed zsh's named directories (`~c` after `hash -d`), its alternation glob
+# `(--cache|zz)` and bash's extglob `@(--cache)` once a command turns it on.
 #
-# Each step reads the quoting it acts in. <live> is the statement with quoted
-# text blanked (the lexer's live view of it), for the steps that act only
-# outside quotes. <words> is its words after quote removal (the pieces view),
-# for the steps that also act inside double quotes; a `$` in single quotes
-# counts there too, which costs a record, never a pass. A blank stands where a
-# quote was in <live>, so a rule must not need to see past one: `a='x':~` reads
-# as `a=` and `:~`, which is why the colon rule does not ask for the `=`. A
-# view that marks the quoted bytes of each word can replace both arguments
-# with no change to the rules.
+# The set is what is left after the expansions bash's manual lists, in its
+# order, with what zsh and dash add, each step naming the bytes it needs:
 #
-#   brace          bash, zsh, outside quotes: `{a,b}`, `{1..3}`. dash has none.
-#   tilde          all three, outside quotes: a `~` that starts a word (`~`,
-#                  `~user`, `~+`, `~-`, and zsh's `~1`), and one right after an
-#                  `=` or a `:` (an assignment's value; bash expands both in an
-#                  argument like `a=x:~` too, measured). zsh's `=cmd` (a word
-#                  that starts with `=`) is the same step.
+#   brace          `{` (bash, zsh: `{a,b}`, `{1..3}`)
+#   tilde          `~` (a word's start: `~`, `~user`, `~+`, `~-`, zsh's `~1`
+#                  and named directories `~name`; after `=` or `:` in a word
+#                  shaped like an assignment, `a=x:~`, measured in bash)
 #   parameter, command, arithmetic
-#                  all three, outside single quotes: `$` and a backquote.
+#                  `$` and a backquote
 #   process substitution
-#                  bash, zsh, outside quotes: `<(`, `>(`, and zsh's `=(`. A
-#                  parenthesis counts wherever it stands, which also takes zsh's
-#                  glob groups and qualifiers (`(a|b)`, `x(.)`) and bash's
-#                  extended globs.
-#   word splitting splits only the results of the steps above, so it adds no
-#                  rule of its own.
-#   pathname       all three, outside quotes: `*`, `?`, `[`.
+#                  `<(`, `>(`, zsh's `=(`
+#   word splitting splits only what the steps above produced
+#   pathname       `*`, `?`, `[`; bash's extglob `?(`, `*(`, `+(`, `@(`, `!(`;
+#                  zsh's alternation `(a|b)`, qualifiers `x(.)`, numeric ranges
+#                  `<1-3>`, and with extendedglob `^`, `#` and `~` in a word
+#   zsh's `=cmd`   `=` at a word's start
+#   history        `!` and `^` (only in an interactive shell)
 #
-# History expansion (`!`) runs only in an interactive shell, and the agent's is
-# not. A shell option that turns on more (zsh's extendedglob takes `^`, `#` and
-# a `~` inside a word) is outside these rules, and so is zsh's numeric glob
-# `<1-3>`, which the lexer reads as a redirection. An npm install still gets the
-# flag right after its verb as well (inert_flag_offsets), so a word missed here
-# leaves the install where the flag after the verb alone left it.
+# None of those bytes is in the set, and `=` only past a word's start, so a
+# kind of expansion the table forgot still makes its word dynamic. A byte the
+# set leaves out that expands nothing (`~` inside a version range like
+# `foo@~1.2.3`, `^` in `foo@^1.2.3`, a `}` the shell hands npm as a word) costs
+# a record, never a pass.
+#
+# Each byte is read in the quoting the shell reads it in. <live> is the
+# statement with redirections, comments and quoted text blanked (the lexer's
+# noredir view, then its live view), so a quoted byte is never judged by the
+# set; a blank stands where a quote was, which only splits a word and can only
+# add a word start. <words> is its words after quote removal (the pieces view),
+# for `$` and backquotes, which act inside double quotes too; a `$` in single
+# quotes counts there as well, which costs a record. A view that marks the
+# quoted bytes of each word can replace both arguments with no change to the
+# rule.
+#
+# An npm install still gets the flag right after its verb as well
+# (inert_flag_offsets), so a word read as written that the shell changes
+# anyway leaves the install where the flag after the verb alone left it.
 shell_expands() {
   local live="$1" words="$2" w
   local -a live_words=()
   [[ "${words}" != *[\$\`]* ]] || return 0
   IFS=$' \t\n' read -r -d '' -a live_words <<< "${live}" || true
   for w in "${live_words[@]+"${live_words[@]}"}"; do
-    [[ "${w}" != *'{'* ]] || return 0
-    [[ "${w}" != '~'* && "${w}" != *[=:]'~'* && "${w}" != '='?* ]] || return 0
-    [[ "${w}" != *[\(\)]* ]] || return 0
-    [[ "${w}" != *[\*\?\[]* ]] || return 0
+    [[ "${w}" != [~=]* && "${w}" != *[!"${SAFEDEPS_SHELL_INERT_BYTES}"]* ]] || return 0
   done
   return 1
 }
@@ -1797,7 +1806,8 @@ inert_statement_reads() {
   done <<< "${pieces}"
   INERT_READ_KIND=dynamic
   [[ "${dynamic}" == false ]] || return 0
-  live=$(shell_lex "${joined}" live "safedeps:inert_offsets") || return 1
+  live=$(shell_lex "${joined}" noredir "safedeps:inert_offsets") || return 1
+  live=$(shell_lex "${live}" live "safedeps:inert_offsets") || return 1
   ! shell_expands "${live}" "${argv[*]+"${argv[*]}"}" || return 0
   for k in plain other; do
     if [[ "${k}" == other ]]; then
@@ -4919,17 +4929,24 @@ cat > "${SNAPSHOT_DIR}/${SNAPSHOT_ID}_meta.json" << META_EOF
   "project_dir": $(printf '%s' "${PROJECT_DIR}" | jq -Rs .),
   "command": $(printf '%s' "${COMMAND}" | jq -Rs .),
   "ignore_scripts_injected": false,
+  "ignore_scripts_verified": false,
   "lock_files_found": ${SNAPSHOTTED}
 }
 META_EOF
 
+# Records that the command was rewritten with --ignore-scripts, and whether
+# every install in it was read with the flag in place (ignore_scripts_verified).
+# An install holding a word the shell decides at run time was not
+# (INERT_UNVERIFIED): the words around its flags can undo them, so the post
+# hook does not say its scripts did not run.
 mark_ignore_scripts_injected() {
   local meta_file="${SNAPSHOT_DIR}/${SNAPSHOT_ID}_meta.json"
-  local temp_file
+  local temp_file verified=true
 
   [[ -f "${meta_file}" ]] || return 0
+  [[ "${INERT_UNVERIFIED}" != true ]] || verified=false
   temp_file=$(mktemp "${SNAPSHOT_DIR}/.${SNAPSHOT_ID}_meta.XXXXXX") || return 0
-  if jq '.ignore_scripts_injected = true' "${meta_file}" > "${temp_file}"; then
+  if jq --argjson verified "${verified}" '.ignore_scripts_injected = true | .ignore_scripts_verified = $verified' "${meta_file}" > "${temp_file}"; then
     mv -f "${temp_file}" "${meta_file}"
   else
     rm -f "${temp_file}"
