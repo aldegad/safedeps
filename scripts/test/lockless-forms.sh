@@ -227,9 +227,9 @@ pass "an install npm could not be asked about, or did not answer for, is recorde
 # while the gate was still judging the command: three times per judgment, and
 # just the same when the gate then denied it. Here a fake npm first on a PATH
 # and a NODE_OPTIONS preload each append to CX_MARKS. Each form is only judged,
-# never run: an unapproved spec must be denied and an approved one let through,
-# and neither judgment may leave a line in CX_MARKS. The rows are the forms
-# that ran the code before: a PATH in front of npm, literal or not, or
+# never run: an unapproved pinned spec must be denied and an approved one let
+# through, and neither judgment may leave a line in CX_MARKS. The rows are the
+# forms that ran the code before: a PATH in front of npm, literal or not, or
 # exported, through env(1), a NODE_OPTIONS in each of those positions, and npm
 # named by its path.
 CX_MARKS="${tmp_root}/cx-marks"
@@ -256,7 +256,7 @@ for form in \
   "export NODE_OPTIONS=--require=${tmp_root}/cx-preload.js; npm install @SPEC@" \
   "env NODE_OPTIONS=--require=${tmp_root}/cx-preload.js npm install @SPEC@"
 do
-  for spec in sd-victim sd-approved@1.0.0; do
+  for spec in sd-victim@1.0.0 sd-approved@1.0.0; do
     new_project
     : > "${CX_MARKS}"
     cmd="${form//@SPEC@/${spec}}"
@@ -264,7 +264,7 @@ do
       | SAFEDEPS_HOME="${CASE_HOME}" scripts/safedeps-hook-entry.sh pre 2>/dev/null \
       | jq -r '.hookSpecificOutput.permissionDecision // "allow"')
     want=allow
-    [[ "${spec}" != sd-victim ]] || want=deny
+    [[ "${spec}" != sd-victim@* ]] || want=deny
     marks=$(wc -l < "${CX_MARKS}" | tr -d ' ')
     printf '   CX %-5s %s | marks=%s\n' "${decision}" "${cmd}" "${marks}"
     [[ "${decision}" == "${want}" ]] || cx_failures+=("the gate answers ${want}, not ${decision}: ${cmd}")
