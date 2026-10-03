@@ -715,7 +715,9 @@ rollback_node_tree_facts() {
   for found in "${packages}" "${bins}"; do
     [[ -f "${found}" ]] || { printf '%s\n' "$(fact_path "${found}")"; return 1; }
   done
-  found=$(find "${node_modules}" -maxdepth 3 -name "package.json" 2>/dev/null | sort | comm -13 "${packages}" - | head -1)
+  # -H follows node_modules itself when it is a link, as the pre-guard's
+  # listing does; without it both listings of a linked node_modules were empty.
+  found=$(find -H "${node_modules}" -maxdepth 3 -name "package.json" 2>/dev/null | sort | comm -13 "${packages}" - | head -1)
   if [[ -n "${found}" ]]; then
     printf '%s lists %s, which the pre-command snapshot %s does not\n' "${node_modules}" "${found}" "${pre}"
     return 1
@@ -734,6 +736,8 @@ rollback_node_tree_facts() {
 
   [[ -e "${node_modules}" || -L "${node_modules}" ]] || return 0
   printf 'kept %s\n' "${node_modules}"
+  # A kept link is said as one: the lines below read what it leads to.
+  [[ ! -L "${node_modules}" ]] || printf '%s\n' "$(fact_path "${node_modules}")"
   printf '%s\n' "${TRACE_LINE}"
   printf 'when this rollback began, none of %s in %s differed from the pre-command snapshot %s\n' "${ROLLBACK_NODE_FILES_COMPARED}" "${PROJECT_DIR}" "${pre}"
   printf '%s lists no package.json the pre-command snapshot %s lacks\n' "${node_modules}" "${pre}"
@@ -1503,6 +1507,9 @@ fi
 SUSPICIOUS=false
 REASONS=()
 ROLLBACK_WARNINGS=()
+# Warnings that hold only for an install that is kept, added to the message
+# after the reorg decision.
+CONFIRM_ONLY_WARNINGS=()
 
 # Whether this command's npm install was read: the directory the gate reads has
 # to show this command's install trace. The pre-guard picked the directory and,
@@ -2195,7 +2202,11 @@ check_npm_new_sources() {
     if [[ -n "${fetched}" ]]; then
       log_advisory "post-verify: kept in ${PROJECT_DIR}, fetched from a registry that is not the public npm registry ($(name_sources "${fetched}")); not rolled back, and safedeps runs none of their install scripts."
       if [[ "$(jq -r '.ignore_scripts_injected == true' "${META_FILE}" 2>/dev/null || printf 'false')" != true ]]; then
-        ROLLBACK_WARNINGS+=("this install fetched packages from a registry that is not the public npm registry ($(name_sources "${fetched}")). safedeps did not make the install inert (on Codex it cannot), so unless the command said --ignore-scripts, their install scripts already ran during the install. The install is kept; confirm with the user that they trust that registry${NPM_WITHHELD_RECORDED[0]:+. $(npm_withheld_scope)}")
+        # Said only if the install is kept: a check after this one can still
+        # roll it back, and "The install is kept" in a rollback message was
+        # false (the report oracle allows this sentence in the kept message
+        # only).
+        CONFIRM_ONLY_WARNINGS+=("this install fetched packages from a registry that is not the public npm registry ($(name_sources "${fetched}")). safedeps did not make the install inert (on Codex it cannot), so unless the command said --ignore-scripts, their install scripts already ran during the install. The install is kept; confirm with the user that they trust that registry${NPM_WITHHELD_RECORDED[0]:+. $(npm_withheld_scope)}")
       fi
     fi
   fi
@@ -2582,6 +2593,7 @@ if [[ "${SUSPICIOUS}" == "true" ]]; then
   exit 0
 fi
 
+ROLLBACK_WARNINGS+=(${CONFIRM_ONLY_WARNINGS[@]+"${CONFIRM_ONLY_WARNINGS[@]}"})
 run_verified_npm_rebuild_if_injected
 confirm_verified_state
 cleanup_old_snapshots

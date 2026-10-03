@@ -283,6 +283,35 @@ safedeps_journal_project_facts() {
   done < <(sort -u "${list}")
 }
 
+# The snapshot line of the report, with what the project's confirmed record
+# says now: the same distinction the rollback message makes, since a rollback
+# with no confirmed snapshot returns to a state nothing verified. Read the way
+# the post hook reads it (read_confirmed_snapshot): the project's record, else
+# the legacy one. Where the project's record cannot be named, the line names
+# the snapshot and nothing more.
+#
+# safedeps_journal_snapshot_line <project dir> <snapshot id>
+safedeps_journal_snapshot_line() {
+  local dir="$1" snap="$2" record="" confirmed=""
+  if declare -F compute_dir_hash >/dev/null && [[ "${dir}" == /* ]]; then
+    record="${SAFEDEPS_JOURNAL_HOME}/confirmed_$(compute_dir_hash "${dir}")"
+  fi
+  if [[ -z "${record}" ]]; then
+    printf 'Rollback snapshot: %s' "${snap}"
+    return 0
+  fi
+  if [[ -f "${record}" ]]; then
+    confirmed=$(cat "${record}" 2>/dev/null || true)
+  elif [[ -f "${SAFEDEPS_JOURNAL_HOME}/confirmed" ]]; then
+    confirmed=$(cat "${SAFEDEPS_JOURNAL_HOME}/confirmed" 2>/dev/null || true)
+  fi
+  if [[ -n "${confirmed}" && "${confirmed}" == "${snap}" ]]; then
+    printf 'Rollback snapshot: %s, a confirmed snapshot' "${snap}"
+  else
+    printf 'Rollback snapshot: %s; no confirmed snapshot names it' "${snap}"
+  fi
+}
+
 # Any journal entry still on disk belongs to a rollback that did not finish.
 # Move each one to the incident directory (so it is reported once, not on every
 # command from here on), append a line to the same reorg.log the finished
@@ -368,8 +397,9 @@ safedeps_journal_report_unfinished() {
       headline="has not finished"
     fi
 
-    local journal_line incident_line
+    local journal_line incident_line snapshot_line
     journal_line="Journal: ${journal_id}, opened ${opened_at}; last recorded stage ${stage}${stage_detail}"
+    snapshot_line=$(safedeps_journal_snapshot_line "${project_dir}" "${rollback_snapshot}")
     incident_line=$(fact_file "Incident record" "${SAFEDEPS_INCIDENT_DIR}/${journal_id}.json")
 
     cat >> "${reorg_log}" << LOG_EOF 2>/dev/null
@@ -377,7 +407,7 @@ safedeps_journal_report_unfinished() {
   ${journal_line}
   Owner: ${owner_fact}
   Project: ${project_dir}
-  Rollback snapshot: ${rollback_snapshot}
+  ${snapshot_line}
   Reasons: ${reasons}
   ${incident_line}
 LOG_EOF
@@ -387,7 +417,7 @@ LOG_EOF
 
 ${journal_line}
 Owner: ${owner_fact}
-Rollback snapshot: ${rollback_snapshot}
+${snapshot_line}
 Recorded reasons:
 ${reasons}
 
