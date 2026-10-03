@@ -1181,6 +1181,8 @@ for rewrite_row in \
   'x=$(case a in a) echo f;; esac) npm install evil|x=$(case a in a) echo f;; esac) npm install --ignore-scripts evil' \
   '>$(case a in a) echo f;; esac) npm install evil|>$(case a in a) echo f;; esac) npm install --ignore-scripts evil' \
   '< =(true) npm install evil|< =(true) npm install --ignore-scripts evil' \
+  '>/dev/null(N) npm install evil|>/dev/null(N) npm install --ignore-scripts evil' \
+  '>/dev/(null) npm install evil|>/dev/(null) npm install --ignore-scripts evil' \
   'cat =(npm install evil)|cat =(npm install --ignore-scripts evil)'
 do
   got=$(gate_rewrite "${rewrite_row%%|*}")
@@ -1188,10 +1190,15 @@ do
 done
 # Where only some shells read the word that way the readings put the install
 # in different places: UNDECIDED, never a rewrite for one shell.
+# (`>/dev/null(N) npm install x` runs in zsh alone, `>/dev/(null) npm
+# install x` in the agent's zsh wrapper alone; bash and dash fail to parse
+# either. Their readings once found no install there and the answer was
+# UNDECIDED. Now that the close of a subshell is a place a command starts,
+# dash reads the group left after the redirection as one, and the install
+# after it where zsh does: every reading agrees, and the rewrite above is
+# the one zsh runs.)
 for inert_form in \
   'a[1 + 1]=x npm install evil' \
-  '>/dev/null(N) npm install evil' \
-  '>/dev/(null) npm install evil' \
   'noglob npm install evil'
 do
   got=$(gate_reason "${inert_form}")
