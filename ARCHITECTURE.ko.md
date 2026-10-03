@@ -336,11 +336,9 @@ install 완료 → safedeps-post-verify.sh
         ├─ 전부 승인·clean·무의심 ──► CONFIRM (새 안전 baseline)
         └─ 미승인 / 취약 / 의심 ──► REORG:
                  • lockfile ← 마지막 confirmed snapshot
-                 • rm -rf node_modules; ledger 와 일치하게 재설치
-                   (대상이 심볼릭 링크면 거부하고 이름을 남긴다;
-                    npm 은 프로젝트 밖에 닿을 수 없을 때만 돈다:
-                    루트 파일 링크 없음, package.json 있음, workspaces 없음;
-                    그리고 --prefix 로 고정)
+                 • 프로젝트 자신의 node_modules(실제 디렉터리)를 지움;
+                   패키지 매니저는 돌지 않는다 — 다음 설치가 게이트를 지나
+                   다시 깐다(심볼릭 링크면 거부하고 이름을 남긴다)
                  • reorg.log 기록; 에이전트에 경고
 ```
 

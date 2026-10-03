@@ -336,11 +336,9 @@ install done → safedeps-post-verify.sh
         ├─ all approved, clean, no suspicion ──► CONFIRM (new safe baseline)
         └─ unapproved / vulnerable / suspicious ──► REORG:
                  • restore lockfile from the last confirmed snapshot
-                 • rm -rf node_modules; reinstall to match the ledger
-                   (refused, and named, when the target is a symbolic link;
-                    npm runs only when it cannot reach past the project:
-                    no linked root file, a package.json, no workspaces;
-                    and it is pinned with --prefix)
+                 • remove the project's own node_modules (a real directory);
+                   no package manager runs -- the next install reinstalls,
+                   through the gate (a symbolic link is refused and named)
                  • append to reorg.log; message the agent
 ```
 

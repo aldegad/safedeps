@@ -153,8 +153,8 @@ After the install command completes, the verify hook analyzes what changed. For 
 - **Any check fails** -- A **reorg** is triggered:
   1. Lock files are restored from the last confirmed snapshot.
   2. `package.json` is restored if it was modified.
-  3. `node_modules` is rebuilt via `npm ci` (or `npm install` as fallback) to purge any malicious artifacts.
-     A rollback never follows a symbolic link out of the project. When `node_modules`, `package.json` or a lockfile is a link to another directory, that step is refused and named in the message and in `reorg.log` (`REORG REFUSED`), because `npm ci` empties whatever `node_modules` points to. Reinstall in the directory that owns it. The reinstall itself is skipped, and named, when npm could reach past the project: a linked `package.json`, lockfile or `node_modules`, no `package.json` (npm would work in an enclosing project), or a `package.json` that declares workspaces (`npm ci` empties every workspace's `node_modules`, and a workspace can lie elsewhere). Reinstall those by hand. Every npm command the rollback does run is pinned to the project with `--prefix`.
+  3. The project's own `node_modules` is removed to purge any malicious artifacts. The rollback runs no package manager: run `npm ci` afterwards to reinstall, and the gate checks that install like any other.
+     A rollback never follows a symbolic link out of the project. When `node_modules`, `package.json` or a lockfile is a link to another directory, that step is refused and named in the message and in `reorg.log` (`REORG REFUSED`). Clean up in the directory that owns it.
   4. The event is logged to `~/.safedeps/reorg.log`.
   5. Claude Code receives a system message detailing the detected threats and rollback actions.
 
