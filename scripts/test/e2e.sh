@@ -534,7 +534,7 @@ inert_post=$(
 EOF
 )
 [[ -z "${inert_post}" ]] || fail "post hook keeps verified inert rebuild success quiet"
-grep -qx "rebuild --global=false --location=project --prefix ${inert_project}" "${tmp_root}/npm-calls.log" || fail "post hook runs npm rebuild, pinned to the project, after verified injected install"
+grep -qE '^rebuild --global=false --location=project --prefix .*/inert-project$' "${tmp_root}/npm-calls.log" || fail "post hook runs npm rebuild, pinned to the project, after verified injected install"
 pass "post hook rebuilds after verified inert install"
 
 # Reorg must actually revert the on-disk lockfile, not just print the message. The
@@ -705,7 +705,8 @@ pass "a verified inert install skips the rebuild through a linked node_modules"
 # that checkout. This stub npm does the same walk unless --prefix names the
 # directory, and empties the node_modules it lands on for ci and install, so a
 # reinstall that is not pinned to the project shows up as a missing marker in
-# the enclosing one.
+# the enclosing one. The flag checks match the end of the path, because the
+# hooks resolve the project directory (/var and /private/var on macOS).
 walkup_bin="${tmp_root}/walkup-npm-bin"
 mkdir -p "${walkup_bin}"
 cat > "${walkup_bin}/npm" <<EOF
@@ -747,7 +748,7 @@ EOF
 )
 grep -q 'suspicious dependency change detected' <<< "${walk_post}" || fail "reorg fires in a project nested inside another"
 [[ -f "${walk_main}/node_modules/kept-package/package.json" ]] || fail "a rollback's npm ci never walks up to empty the enclosing project's node_modules"
-grep -qx "ci --global=false --location=project --prefix ${walk_wt}" "${tmp_root}/walkup-npm-calls.log" || fail "the rollback's npm ci is pinned to the project"
+grep -qE '^ci --global=false --location=project --prefix .*/walk-main/nested/worktree$' "${tmp_root}/walkup-npm-calls.log" || fail "the rollback's npm ci is pinned to the project"
 pass "a rollback's npm ci stays in a project nested inside another"
 
 # The install path: the install created package.json and the lockfile, the
@@ -770,7 +771,7 @@ EOF
 )
 grep -q 'suspicious dependency change detected' <<< "${walk2_post}" || fail "reorg fires in a fresh project nested inside another"
 [[ -f "${walk2_main}/node_modules/kept-package/package.json" ]] || fail "a rollback's npm install never walks up to prune the enclosing project's node_modules"
-grep -qx "install --global=false --location=project --prefix ${walk2_wt}" "${tmp_root}/walkup-npm-calls.log" || fail "the rollback's npm install is pinned to the project"
+grep -qE '^install --global=false --location=project --prefix .*/walk2-main/nested/worktree$' "${tmp_root}/walkup-npm-calls.log" || fail "the rollback's npm install is pinned to the project"
 pass "a rollback's npm install stays in a project nested inside another"
 
 export SAFEDEPS_HOME="${tmp_root}/safe-missing-transitive"
