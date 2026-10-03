@@ -142,19 +142,45 @@ report_changed_nothing() {
 # on Codex safedeps cannot add the flag, and a command can carry its own.
 
 # fact_inert <meta file> <hook input>: the line. The comparison is jq's, of the
-# command the record holds and the one in the hook's input.
+# command the record holds and the one in the hook's input. No record file is
+# "did not add". A record file that is there and cannot be read prints nothing
+# and returns 1: it used to fall through to "did not add", which is false
+# whenever the record it could not read says safedeps wrote the command.
 fact_inert() {
-  local said
-  said=$(printf '%s' "$2" | jq -r --slurpfile meta "$1" '
-    ($meta[0] // {}) as $m
-    | if $m.ignore_scripts_injected != true then "none"
-      elif (.tool_input.command | type) == "string" and .tool_input.command == $m.updated_command then "added"
-      else "asked" end' 2>/dev/null) || said=none
+  local said=none
+  if [[ -e "$1" || -L "$1" ]]; then
+    said=$(printf '%s' "$2" | jq -r --slurpfile meta "$1" '
+      ($meta[0] // {}) as $m
+      | if $m.ignore_scripts_injected != true then "none"
+        elif (.tool_input.command | type) == "string" and .tool_input.command == $m.updated_command then "added"
+        else "asked" end' 2>/dev/null) || return 1
+  fi
   case "${said}" in
     added) printf 'safedeps added --ignore-scripts to this install' ;;
     asked) printf 'safedeps asked for --ignore-scripts on this install; the command this hook received is not the one safedeps wrote' ;;
-    *) printf 'safedeps did not add --ignore-scripts to this install' ;;
+    none) printf 'safedeps did not add --ignore-scripts to this install' ;;
+    *) return 1 ;;
   esac
+}
+
+# What is said instead when fact_inert cannot read the record: nothing in the
+# message, and one line in advisory.log, as the backstop says nothing for want
+# of a record.
+report_inert_unread() {
+  log_advisory "post-verify: could not read the pre-guard's record of this command in $1, so no --ignore-scripts line was said"
+}
+
+# report_inert <meta file> <hook input>: says the line and keeps it in
+# REPORT_INERT for the advisory.log entry of the same rollback, which repeats
+# it rather than reading the record again.
+REPORT_INERT=""
+report_inert() {
+  if REPORT_INERT=$(fact_inert "$1" "$2"); then
+    report_say "${REPORT_INERT}"
+  else
+    REPORT_INERT=""
+    report_inert_unread "$1"
+  fi
 }
 
 # The rebuild after an install the pre-guard asked to be inert.
@@ -163,8 +189,10 @@ fact_inert() {
 # did_rebuild <meta file> <hook input> <exit status>
 report_rebuild() {
   local inert
-  inert=$(fact_inert "$1" "$2")
-  if [[ "${inert}" == 'safedeps added --ignore-scripts to this install' ]]; then
+  if ! inert=$(fact_inert "$1" "$2"); then
+    report_inert_unread "$1"
+    report_say "safedeps $3"
+  elif [[ "${inert}" == 'safedeps added --ignore-scripts to this install' ]]; then
     report_say "${inert} and $3"
   else
     report_say "${inert}"

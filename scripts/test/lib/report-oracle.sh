@@ -25,7 +25,8 @@
 # be exactly those. A line only the log carries, a refusal only the log
 # carries, and reasons that differ between the two are all red. advisory.log is
 # an operational log in free form and is not read, except its two rollback
-# lines, which must repeat lines of the message.
+# lines, which must repeat lines of the message, and the line that says the
+# pre-guard's record could not be read.
 #
 # The package.json listing of node_modules is read by a method that is not the
 # hook's, because the hook and the oracle once ran the same wrong check and
@@ -49,6 +50,13 @@
 # found no record, and each record is checked when it is written: the rewrite
 # the pre-guard printed is read from its stdout (oracle_pre) and must be, byte
 # for byte, the command the record says it wrote.
+#
+# A hook whose read of that record failed says no --ignore-scripts line: "did
+# not add" used to be said in its place. The oracle learns that the read
+# failed from the row, not from the hook: a row that makes it fail leaves
+# record-unread in the call's directory (ORACLE_CALL). Such a call has no
+# --ignore-scripts line, and says once in advisory.log that it could not read
+# the record; a call whose read did not fail does not say that.
 #
 # What a rollback changed on disk is read too: the oracle lists the project's
 # top-level entries before the hook runs, and after a rollback every entry that
@@ -86,7 +94,7 @@ backstop-no-confirmed backstop-no-meta
 journal owner-not-running owner-zombie owner-stopped owner-later owner-no-pid owner-no-start owner-bad-start owner-bad-opened
 journal-differs journal-gone journal-extra journal-no-list
 file-line file-line-absent
-log-rollback log-backstop log-confirm log-refused log-journal
+log-rollback log-backstop log-confirm log-refused log-journal log-inert-unread
 "
 
 # The effect gate's prose: id | the blocks it may appear in | the most lines
@@ -295,6 +303,10 @@ oracle_path_fact() {
 # it wrote. Both strings are read in Python and compared by cmp.
 oracle_inert_holds() {
   local asked=false same=false rc=0 meta pending
+  if [[ "${O_RECORD_UNREAD}" == 1 ]]; then
+    oracle_red "an --ignore-scripts line from a hook whose read of the pre-guard's record failed"
+    return
+  fi
   printf '%s' "${O_PAYLOAD}" > "${O_CALL}/inert.payload"
   python3 "${ORACLE_READ}" string "${O_CALL}/inert.payload" tool_input command > "${O_CALL}/inert.received" 2>/dev/null \
     || { oracle_red "the hook input carries no command"; return; }
@@ -412,6 +424,7 @@ oracle_skip_fact() {
 # that says the pre-guard asked for the flag and the command this hook received
 # is not the one it wrote.
 oracle_after_asked_line() {
+  [[ "${O_RECORD_UNREAD}" == 1 ]] && return 0
   [[ "${O_PREV}" == 'safedeps asked for --ignore-scripts on this install; the command this hook received is not the one safedeps wrote' ]] \
     || oracle_red "not said after the line that the pre-guard asked for --ignore-scripts and the command this hook received is not the one it wrote"
 }
@@ -483,7 +496,7 @@ oracle_block_end() {
       [[ -n "${O_SNAP}" ]] || { O_LINE="${O_HEAD}"; oracle_red "a rollback message with no snapshot line"; }
       # Only the rollback that consumed this command's record says what
       # safedeps did; the backstop found none (oracle_inert_line).
-      [[ "${O_BLOCK}" != rollback || "${O_SAW_INERT}" == 1 ]] || { O_LINE="${O_HEAD}"; oracle_red "a rollback message with no --ignore-scripts line"; }
+      [[ "${O_BLOCK}" != rollback || "${O_SAW_INERT}" == 1 || "${O_RECORD_UNREAD}" == 1 ]] || { O_LINE="${O_HEAD}"; oracle_red "a rollback message with no --ignore-scripts line"; }
       [[ "${O_SAW_DETAILS}" == 1 ]] || { O_LINE="${O_HEAD}"; oracle_red "a rollback message with no Details log line"; }
       if [[ "${O_CHANGED}" == 0 && "${O_SAW_NOTHING}" != 1 ]]; then
         O_LINE="${O_HEAD}"; oracle_red "no step line and no 'The rollback changed nothing.'"
@@ -612,10 +625,11 @@ oracle_collect() {
 }
 
 # oracle_check_logs: the reorg.log entries the hook appended are exactly the
-# ones its message calls for, and its two rollback lines in advisory.log repeat
-# lines of the message.
+# ones its message calls for, its two rollback lines in advisory.log repeat
+# lines of the message, and it says it could not read the record exactly when
+# its read failed.
 oracle_check_logs() {
-  local size actual expected="" e kind a line re_adv
+  local size actual expected="" e kind a line re_adv re_adv_bare re_unread unread=0
   size=$(cat "${O_CALL}/reorg.size" 2>/dev/null); size="${size:-0}"
   # Each entry starts with a timestamped headline; the frame and the lines are
   # indented by two spaces.
@@ -634,6 +648,8 @@ oracle_check_logs() {
   fi
   size=$(cat "${O_CALL}/advisory.size" 2>/dev/null); size="${size:-0}"
   re_adv='^post-verify REORG with no confirmed snapshot in (/[^:]*): (Rollback snapshot: .*); (safedeps [^.]*)\. Reasons: (.*)$'
+  re_adv_bare='^post-verify REORG with no confirmed snapshot in (/[^:]*): (Rollback snapshot: .*)\. Reasons: (.*)$'
+  re_unread="^post-verify: could not read the pre-guard's record of this command in (.*), so no --ignore-scripts line was said$"
   while IFS=$'\t' read -r _ a; do
     O_LINE="advisory.log: ${a}"
     if [[ "${a}" == 'post-verify REORG REFUSED: '* ]]; then
@@ -642,10 +658,21 @@ oracle_check_logs() {
     elif [[ "${a}" =~ ${re_adv} ]]; then
       grep -qxF -- "${BASH_REMATCH[2]}" <<< "${O_ALL_LINES}" || oracle_red "advisory.log carries a snapshot line the message does not"
       grep -qxF -- "${BASH_REMATCH[3]}" <<< "${O_ALL_LINES}" || oracle_red "advisory.log carries an --ignore-scripts line the message does not"
+    elif [[ "${a}" =~ ${re_adv_bare} ]]; then
+      grep -qxF -- "${BASH_REMATCH[2]}" <<< "${O_ALL_LINES}" || oracle_red "advisory.log carries a snapshot line the message does not"
+      [[ "${O_RECORD_UNREAD}" == 1 ]] || oracle_red "an advisory.log rollback line with no --ignore-scripts line from a hook that read the record"
+    elif [[ "${a}" =~ ${re_unread} ]]; then
+      oracle_count log-inert-unread; unread=$(( unread + 1 ))
+      [[ "${O_RECORD_UNREAD}" == 1 ]] || oracle_red "advisory.log says the record could not be read, and the hook's read of it did not fail"
+      [[ "${BASH_REMATCH[1]}" == "${O_META}" ]] || oracle_red "advisory.log names another record than this call's (${O_META})"
     elif [[ "${a}" == 'post-verify REORG with no confirmed snapshot'* ]]; then
       oracle_red "an advisory.log rollback line outside its form"
     fi
   done < <(tail -c +"$(( size + 1 ))" "${O_HOME}/advisory.log" 2>/dev/null)
+  if [[ "${O_RECORD_UNREAD}" == 1 && "${unread}" != 1 ]]; then
+    O_LINE="advisory.log"
+    oracle_red "a hook whose read of the pre-guard's record failed said so in advisory.log ${unread} times, not once"
+  fi
 }
 
 oracle_line() {
@@ -1077,7 +1104,8 @@ oracle_message() {
     oracle_red "reorg.log grew by $(( now - size )) bytes in a call that printed no message"
     return 1
   fi
-  O_CALL="${call}" O_DIRECT=0
+  O_CALL="${call}" O_DIRECT=0 O_RECORD_UNREAD=0
+  [[ ! -e "${call}/record-unread" ]] || O_RECORD_UNREAD=1
   O_NPM_LOG="${call}/npm.log"
   O_PAYLOAD="${payload}"
   O_CMD=$(jq -r '.tool_input.command // empty' <<< "${payload}")
@@ -1117,7 +1145,7 @@ oracle_message() {
 # reaches. They are read as the lines of a confirm block, with no reorg.log.
 oracle_direct() {
   local line
-  O_CALL="${ORACLE_DIR}" O_DIRECT=1 O_HOME="${SAFEDEPS_HOME:-${HOME}/.safedeps}" O_NPM_LOG=/dev/null
+  O_CALL="${ORACLE_DIR}" O_DIRECT=1 O_RECORD_UNREAD=0 O_HOME="${SAFEDEPS_HOME:-${HOME}/.safedeps}" O_NPM_LOG=/dev/null
   O_META="$1" O_PAYLOAD="$2" O_CMD=$(jq -r '.tool_input.command // empty' <<< "$2") O_PROJECT="" O_PRE="" O_TRACE="unread" O_NODE_FILES="" O_TREE="" O_DIR_HASH=""
   oracle_reset
   O_BLOCK=confirm

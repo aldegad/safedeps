@@ -54,7 +54,7 @@ post_hook() {
   # hook that has one.
   local path="${PATH}"
   command -v npm >/dev/null 2>&1 && path="${ORACLE_DIR}/bin:${PATH}"
-  out=$(printf '%s' "${payload}" | ORACLE_NPM_LOG="${call}/npm.log" PATH="${path}" \
+  out=$(printf '%s' "${payload}" | ORACLE_NPM_LOG="${call}/npm.log" ORACLE_CALL="${call}" PATH="${path}" \
     "${ROOT_DIR}/scripts/safedeps-post-verify.sh")
   printf '%s' "${out}"
   oracle_message "${call}" "${payload}" "${out}" || exit 1
@@ -1382,6 +1382,38 @@ markfail_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${markfail_wt}" "npm in
 grep -qx 'safedeps did not add --ignore-scripts to this install' <<< "$(post_message "${markfail_post}")" \
   || fail "the install whose rewrite was withheld says safedeps did not add --ignore-scripts (${markfail_post})"
 pass "a rewrite whose record cannot be written is not sent, and the rollback says safedeps did not add the flag"
+
+# A record the post hook cannot read gets no --ignore-scripts line. A failed
+# read used to fall through to "did not add", which was false of this command:
+# safedeps had rewritten it. A jq that fails only that read stands in for a
+# read that fails, and leaves record-unread for the oracle, which learns of the
+# failure from the row and not from the hook.
+markread_wt=$(mktemp -d "${tmp_root}/markread-wt.XXXXXX")
+markread_bin=$(mktemp -d "${tmp_root}/markread-bin.XXXXXX")
+grammar_project "${markread_wt}"
+cat > "${markread_bin}/jq" <<SHIM
+#!/usr/bin/env bash
+for a in "\$@"; do
+  if [[ "\${a}" == *'ignore_scripts_injected != true'* ]]; then
+    [[ -z "\${ORACLE_CALL:-}" ]] || : > "\${ORACLE_CALL}/record-unread"
+    exit 5
+  fi
+done
+exec "$(command -v jq)" "\$@"
+SHIM
+chmod +x "${markread_bin}/jq"
+markread_pre=$(grammar_pre "${markread_wt}" "npm install fixture-parent@1.0.0")
+[[ "$(jq -r '.hookSpecificOutput.updatedInput.command // empty' <<< "${markread_pre:-{\}}")" == 'npm install fixture-parent@1.0.0 --ignore-scripts' ]] \
+  || fail "the install whose record the post hook will not read is rewritten (${markread_pre})"
+printf '%s\n' "${tampered_lock}" > "${markread_wt}/package-lock.json"
+markread_post=$(PATH="${markread_bin}:${stub_bin}:${PATH}" grammar_post "${markread_wt}" "npm install fixture-parent@1.0.0")
+grep -q 'A rollback ran\.' <<< "$(post_message "${markread_post}")" \
+  || fail "the install whose record the post hook cannot read is rolled back (${markread_post})"
+! grep -q -- '--ignore-scripts' <<< "$(post_message "${markread_post}")" \
+  || fail "a record the post hook cannot read gets no --ignore-scripts line (${markread_post})"
+grep -q "post-verify: could not read the pre-guard's record of this command in .*, so no --ignore-scripts line was said" "${SAFEDEPS_HOME}/advisory.log" \
+  || fail "a record the post hook cannot read is said in advisory.log"
+pass "a record the post hook cannot read gets no --ignore-scripts line, and advisory.log says so"
 
 # The backstop with nothing to roll back to: no confirmed record, and a
 # confirmed record that names a snapshot with no meta file.
