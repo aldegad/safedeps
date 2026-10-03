@@ -1432,6 +1432,38 @@ acquire_state_lock
 # every run that reaches this far.
 trap '[ "${STATE_LOCK_HELD:-}" = "true" ] && release_state_lock; STATE_LOCK_HELD=false; emit_unfinished_report_if_unsent' EXIT
 
+# read_record_object <file>: reads the pre-guard's record into CURRENT_STATE,
+# SNAPSHOT_ID, PROJECT_DIR and DIR_HASH, each only when it is a string, so a
+# number or an object reads as empty, as the oracle reads it (a snapshot_id of
+# 5 was "5", and went looking for 5_meta.json). Returns 1, setting none of
+# them, when the file is not one JSON object. Its fields used to be read with jq under
+# set -e, so a record that was not an object ended the hook, and the record,
+# left in place, ended it again for the same command for 24 hours; the entry
+# shim then blamed the checkout.
+read_record_object() {
+  local state
+  state=$(jq -c --slurp 'if length == 1 and (.[0] | type) == "object" then .[0] else error("not one record") end' "$1" 2>/dev/null) \
+    || return 1
+  CURRENT_STATE="${state}"
+  SNAPSHOT_ID=$(jq -r '.snapshot_id | strings' <<< "${state}")
+  PROJECT_DIR=$(jq -r '.project_dir | strings' <<< "${state}")
+  DIR_HASH=$(jq -r '.dir_hash | strings' <<< "${state}")
+}
+
+# set_unread_record_aside: the record at RECORD_PATH is not one JSON object.
+# advisory.log names it, the caller removes it, and the backstop judges the
+# command in the directory it ran in, with a head that says a record was found
+# and is not one JSON object. Like the two below, it used to end the hook.
+set_unread_record_aside() {
+  log_advisory "post-verify: the pre-guard's record ${RECORD_PATH} is not one JSON object; this hook set the record aside"
+  CURRENT_STATE=""
+  SNAPSHOT_ID=""
+  PROJECT_DIR=""
+  DIR_HASH=""
+  BACKSTOP_INSTALL=true
+  BACKSTOP_RECORD_UNREAD=true
+}
+
 # Resolve THIS install's pending state by its per-install key (issue #5). The
 # filename also carries a snapshot id, so identical concurrent commands produce
 # several files; consume exactly one (they verify the same closure), leaving the
@@ -1443,23 +1475,25 @@ for pending_candidate in "${PENDING_PREFIX}"*.json; do
   [[ -f "${pending_candidate}" ]] && { PENDING_FILE="${pending_candidate}"; break; }
 done
 if [[ -n "${PENDING_FILE}" ]]; then
-  CURRENT_STATE=$(cat "${PENDING_FILE}")
-  SNAPSHOT_ID=$(echo "${CURRENT_STATE}" | jq -r '.snapshot_id // empty')
-  PROJECT_DIR=$(echo "${CURRENT_STATE}" | jq -r '.project_dir // empty')
-  DIR_HASH=$(echo "${CURRENT_STATE}" | jq -r '.dir_hash // empty')
   RECORD_PATH="${PENDING_FILE}"
+  if ! read_record_object "${PENDING_FILE}"; then
+    set_unread_record_aside
+  fi
   rm -f "${PENDING_FILE}"
 elif [[ -f "${GUARD_DIR}/current_state" ]]; then
-  CURRENT_STATE=$(cat "${GUARD_DIR}/current_state")
-  SNAPSHOT_ID=$(echo "${CURRENT_STATE}" | jq -r '.snapshot_id // empty')
-  PROJECT_DIR=$(echo "${CURRENT_STATE}" | jq -r '.project_dir // empty')
-  DIR_HASH=$(echo "${CURRENT_STATE}" | jq -r '.dir_hash // empty')
-  if ! legacy_pending_matches_post_context "${PROJECT_DIR}" "${DIR_HASH}"; then
+  RECORD_PATH="${GUARD_DIR}/current_state"
+  if ! read_record_object "${RECORD_PATH}"; then
+    # A legacy record that cannot be read cannot say whose it is either, so
+    # it goes to the backstop only for a command that looks like an install.
+    set_unread_record_aside
+    rm -f "${RECORD_PATH}"
+    post_command_looks_like_install "${COMMAND}" || exit 0
+  elif ! legacy_pending_matches_post_context "${PROJECT_DIR}" "${DIR_HASH}"; then
     log_advisory "post-verify SKIP: legacy current_state did not match this Bash command/cwd (post_cwd=${POST_CWD}, pending_project=${PROJECT_DIR:-unknown}) — bounded no-op."
     exit 0
+  else
+    rm -f "${RECORD_PATH}"
   fi
-  RECORD_PATH="${GUARD_DIR}/current_state"
-  rm -f "${GUARD_DIR}/current_state"
 elif [[ -f "${GUARD_DIR}/current_snapshot_id" ]]; then
   SNAPSHOT_ID=$(cat "${GUARD_DIR}/current_snapshot_id")
   PROJECT_DIR=$(cat "${GUARD_DIR}/current_project_dir" 2>/dev/null || pwd)
@@ -1499,8 +1533,15 @@ if [[ "${BACKSTOP_INSTALL:-false}" != "true" && -z "${SNAPSHOT_ID}" ]]; then
   BACKSTOP_INSTALL=true
   BACKSTOP_RECORD_EMPTY=true
 fi
+# A record with no project_dir is judged in the directory the command ran in,
+# which the payload names, and its hash is that directory's too: the project
+# and the hash that picks its confirmed snapshot always name one directory.
+# The hook's own working directory, used before with the record's hash, sent
+# the judgment there and could restore another project's confirmed snapshot
+# into it and remove its node_modules.
 if [[ -z "${PROJECT_DIR}" ]]; then
-  PROJECT_DIR=$(pwd)
+  PROJECT_DIR="${POST_CWD}"
+  DIR_HASH=$(compute_dir_hash "${PROJECT_DIR}")
 fi
 if [[ -z "${DIR_HASH:-}" ]]; then
   DIR_HASH=$(compute_dir_hash "${PROJECT_DIR}")
@@ -2390,14 +2431,33 @@ check_npm_effect_closure() {
 # Why the backstop rolled nothing back, from the two tests it ran.
 # What the backstop's head says about the record of this command: none was
 # found, or one was and the snapshot it names has no meta file, or one was and
-# it names no snapshot. The last two are what sent it here.
+# it names no snapshot, or a record was found and is not one JSON object. The
+# last three are what sent it here. The last does not say "of this command":
+# an unreadable legacy current_state cannot say whose it is.
 backstop_record_clause() {
   if [[ "${BACKSTOP_RECORD_GONE:-false}" == true ]]; then
     printf 'this hook found a record of this command from before it ran, and the snapshot it names has no meta file'
   elif [[ "${BACKSTOP_RECORD_EMPTY:-false}" == true ]]; then
     printf 'this hook found a record of this command from before it ran, and the record names no snapshot'
+  elif [[ "${BACKSTOP_RECORD_UNREAD:-false}" == true ]]; then
+    printf 'this hook found a pre-guard record, and the record is not one JSON object'
   else
     printf 'this hook found no record of this command from before it ran'
+  fi
+}
+
+# What advisory.log says the backstop judged, by the path that sent it there.
+# "a parser-missed install" and "no pending state" were said on every path,
+# and were false where a record was found.
+backstop_log_subject() {
+  if [[ "${BACKSTOP_RECORD_GONE:-false}" == true ]]; then
+    printf 'a command whose pre-guard record names a snapshot with no meta file'
+  elif [[ "${BACKSTOP_RECORD_EMPTY:-false}" == true ]]; then
+    printf 'a command whose pre-guard record names no snapshot'
+  elif [[ "${BACKSTOP_RECORD_UNREAD:-false}" == true ]]; then
+    printf 'a command with a pre-guard record that is not one JSON object'
+  else
+    printf 'install-looking command with no pending state'
   fi
 }
 
@@ -2486,20 +2546,21 @@ ${details}"
 
 run_command_independent_backstop() {
   # Reached when PreToolUse left no pending state for an install-looking command,
-  # or left one whose snapshot has no meta file (BACKSTOP_RECORD_GONE) or that
-  # names no snapshot (BACKSTOP_RECORD_EMPTY).
+  # or left one whose snapshot has no meta file (BACKSTOP_RECORD_GONE), that
+  # names no snapshot (BACKSTOP_RECORD_EMPTY), or that is not one JSON object
+  # (BACKSTOP_RECORD_UNREAD).
   # Detection is command-independent (the npm closure check reads the live
   # package-lock.json, not the command text); automatic rollback still needs a
   # prior confirmed-safe snapshot to restore from. Never silent — every path logs.
   if [[ ! -f "${PROJECT_DIR}/package-lock.json" && ! -f "${PROJECT_DIR}/${NPM_HIDDEN_LOCKFILE}" ]]; then
-    log_advisory "post-verify UNVERIFIED: install-looking command with no pending state and no package-lock.json or ${NPM_HIDDEN_LOCKFILE} in ${PROJECT_DIR} — nothing to closure-check."
+    log_advisory "post-verify UNVERIFIED: $(backstop_log_subject) and no package-lock.json or ${NPM_HIDDEN_LOCKFILE} in ${PROJECT_DIR} — nothing to closure-check."
     return 0
   fi
 
   check_npm_effect_closure
 
   if [[ "${SUSPICIOUS}" != "true" ]]; then
-    log_advisory "post-verify BACKSTOP clean: a parser-missed install in ${PROJECT_DIR} passed the command-independent npm closure check."
+    log_advisory "post-verify BACKSTOP clean: $(backstop_log_subject); the npm closure in ${PROJECT_DIR} passed the command-independent npm closure check."
     return 0
   fi
 
@@ -2510,7 +2571,7 @@ run_command_independent_backstop() {
   rollback_id=$(read_confirmed_snapshot "${DIR_HASH}")
   if [[ -z "${rollback_id}" ]] || [[ ! -f "${SNAPSHOT_DIR}/${rollback_id}_meta.json" ]]; then
     # Detected, but no known-good baseline to restore — fail LOUD, never silent.
-    log_advisory "post-verify BACKSTOP FLAGGED (no baseline): parser-missed install in ${PROJECT_DIR} — ${reason_str%%; }. No confirmed snapshot to roll back to; left in place."
+    log_advisory "post-verify BACKSTOP FLAGGED (no baseline): $(backstop_log_subject); the npm closure in ${PROJECT_DIR} failed the command-independent npm closure check — ${reason_str%%; }. No confirmed snapshot to roll back to; left in place."
     emit_system_message "safedeps: suspicious dependency change detected; $(backstop_record_clause). No rollback ran.
 
 Detected problems:

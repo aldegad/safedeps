@@ -1539,7 +1539,7 @@ gone_a_line=$(gone_line_of "${gone_a_pending}")
 gone_a_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${gone_a_wt}" "npm install fixture-parent@1.0.0 --ignore-scripts")
 [[ "$(grep -cF "${gone_a_line}" "${SAFEDEPS_HOME}/advisory.log")" == 1 ]] \
   || fail "A: advisory.log names the record whose snapshot has no meta file once"
-grep -qF "post-verify BACKSTOP clean: a parser-missed install in $(cd -P "${gone_a_wt}" && pwd -P) passed" "${SAFEDEPS_HOME}/advisory.log" \
+grep -qF "post-verify BACKSTOP clean: a command whose pre-guard record names a snapshot with no meta file; the npm closure in $(cd -P "${gone_a_wt}" && pwd -P) passed" "${SAFEDEPS_HOME}/advisory.log" \
   || fail "A: the backstop judges the install and says it passed (${gone_a_post})"
 [[ ! -e "${gone_a_pending}" ]] || fail "A: the record is set aside"
 pass "a record whose snapshot has no meta file is named in advisory.log, and the backstop judges the install"
@@ -1563,7 +1563,7 @@ grep -qx 'safedeps: suspicious dependency change detected; this hook found a rec
   || fail "B: the backstop flags the unapproved lockfile, and says the record was found and its snapshot has no meta file (${gone_b_post})"
 [[ "$(grep -cF "${gone_b_line}" "${SAFEDEPS_HOME}/advisory.log")" == 1 ]] \
   || fail "B: advisory.log names the record whose snapshot has no meta file once"
-grep -qF "post-verify BACKSTOP FLAGGED (no baseline): parser-missed install in $(cd -P "${gone_b_wt}" && pwd -P)" "${SAFEDEPS_HOME}/advisory.log" \
+grep -qF "post-verify BACKSTOP FLAGGED (no baseline): a command whose pre-guard record names a snapshot with no meta file; the npm closure in $(cd -P "${gone_b_wt}" && pwd -P) failed" "${SAFEDEPS_HOME}/advisory.log" \
   || fail "B: advisory.log says the backstop flagged the install"
 [[ ! -e "${gone_b_pending}" ]] || fail "B: the record is set aside"
 for gone_b_left in $(grep -lF "\"$(cd -P "${gone_b_wt}" && pwd -P)\"" "${SAFEDEPS_HOME}/pending"/*.json); do rm -f "${gone_b_left}"; done
@@ -1637,6 +1637,141 @@ grep -qx 'safedeps: suspicious dependency change detected; this hook found a rec
   || fail "E: advisory.log names the legacy record that names no snapshot once"
 [[ ! -e "${SAFEDEPS_HOME}/current_snapshot_id" && ! -e "${SAFEDEPS_HOME}/current_project_dir" ]] || fail "E: the legacy record is set aside"
 pass "an empty legacy current_snapshot_id goes to the backstop, which flags an unapproved lockfile"
+
+# A record that is not one JSON object. Its fields were read with jq under
+# set -e, so the post hook died there, and the record, left in place, killed it
+# again for the same command for 24 hours while the entry shim blamed the
+# checkout. Now advisory.log names the record, the record is set aside, and the
+# backstop judges the command in the directory the payload names, with a head
+# that says a record was found and is not one JSON object. The oracle holds the
+# advisory line once per such call and each head to the record it claims.
+unread_line_of() {
+  printf "post-verify: the pre-guard's record %s is not one JSON object; this hook set the record aside" "$1"
+}
+# unread_row <label> <record contents> <confirmed: yes|no> <lockfile: tampered|safe>
+unread_row() {
+  local wt pending post first
+  wt=$(mktemp -d "${tmp_root}/unread-$1-wt.XXXXXX")
+  grammar_project "${wt}"
+  if [[ "$3" == yes ]]; then
+    grammar_pre "${wt}" "npm install fixture-parent@1.0.0" > /dev/null
+    touch "${wt}/package-lock.json"
+    first=$(PATH="${stub_bin}:${PATH}" grammar_post "${wt}" "npm install fixture-parent@1.0.0 --ignore-scripts")
+    [[ -z "${first}" ]] || fail "$1: the project has a confirmed snapshot (${first})"
+  fi
+  grammar_pre "${wt}" "npm install fixture-parent@1.0.0" > /dev/null
+  pending=$(grammar_pending "${wt}")
+  printf '%s' "$2" > "${pending}"
+  [[ "$4" != tampered ]] || printf '%s\n' "${tampered_lock}" > "${wt}/package-lock.json"
+  post=$(PATH="${stub_bin}:${PATH}" grammar_post "${wt}" "npm install fixture-parent@1.0.0 --ignore-scripts")
+  [[ "$(grep -cF "$(unread_line_of "${pending}")" "${SAFEDEPS_HOME}/advisory.log")" == 1 ]] \
+    || fail "$1: advisory.log names the record that is not one JSON object once"
+  [[ ! -e "${pending}" ]] || fail "$1: the record is set aside"
+  UNREAD_WT=$(cd -P "${wt}" && pwd -P) UNREAD_POST="${post}"
+}
+
+# U1: garbage, an unapproved lockfile and a confirmed snapshot. The backstop
+# rolls back to it.
+unread_row U1 'not json {' yes tampered
+grep -qx 'safedeps: suspicious dependency change detected; this hook found a pre-guard record, and the record is not one JSON object. A rollback ran.' <<< "$(post_message "${UNREAD_POST}")" \
+  || fail "U1: the backstop rolls back, and says the record was found and is not one JSON object (${UNREAD_POST})"
+cmp -s "${UNREAD_WT}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "U1: the backstop restores the confirmed lockfile"
+pass "a pending state that is not JSON goes to the backstop, which rolls back to a confirmed snapshot"
+
+# U2: an array, an unapproved lockfile and no confirmed snapshot. The backstop
+# flags the install.
+unread_row U2 '[{"snapshot_id":"x"}]' no tampered
+grep -qx 'safedeps: suspicious dependency change detected; this hook found a pre-guard record, and the record is not one JSON object. No rollback ran.' <<< "$(post_message "${UNREAD_POST}")" \
+  || fail "U2: the backstop flags the unapproved lockfile, and says the record is not one JSON object (${UNREAD_POST})"
+grep -qF "post-verify BACKSTOP FLAGGED (no baseline): a command with a pre-guard record that is not one JSON object; the npm closure in ${UNREAD_WT} failed" "${SAFEDEPS_HOME}/advisory.log" \
+  || fail "U2: advisory.log says the backstop flagged the install, and why it ran"
+pass "a pending state that is a JSON array goes to the backstop, which flags an unapproved lockfile"
+
+# U3: a JSON string and an approved lockfile. The backstop judges it clean,
+# and the next call of the same command is not killed by the same record.
+unread_row U3 '"a string"' no safe
+[[ -z "${UNREAD_POST}" ]] || fail "U3: the backstop passes an approved lockfile quietly (${UNREAD_POST})"
+grep -qF "post-verify BACKSTOP clean: a command with a pre-guard record that is not one JSON object; the npm closure in ${UNREAD_WT} passed" "${SAFEDEPS_HOME}/advisory.log" \
+  || fail "U3: advisory.log says the backstop judged the install clean, and why it ran"
+pass "a pending state that is a JSON string goes to the backstop, which judges an approved lockfile clean"
+
+# F: a record with no project_dir, and a hook whose own working directory is
+# another project with an unapproved lockfile. The hook judged and rolled back
+# its working directory (`PROJECT_DIR=$(pwd)`), which is wherever the runtime
+# started it. It judges and rolls back the directory the payload names.
+nodir_wt=$(mktemp -d "${tmp_root}/nodir-wt.XXXXXX")
+nodir_other=$(mktemp -d "${tmp_root}/nodir-other.XXXXXX")
+grammar_project "${nodir_wt}"
+grammar_project "${nodir_other}"
+grammar_pre "${nodir_wt}" "npm install fixture-parent@1.0.0" > /dev/null
+nodir_pending=$(grammar_pending "${nodir_wt}")
+jq '.project_dir = ""' "${nodir_pending}" > "${nodir_pending}.edit" && mv "${nodir_pending}.edit" "${nodir_pending}"
+printf '%s\n' "${tampered_lock}" > "${nodir_wt}/package-lock.json"
+printf '%s\n' "${tampered_lock}" > "${nodir_other}/package-lock.json"
+mkdir -p "${nodir_other}/node_modules/keep-me"
+nodir_post=$(cd "${nodir_other}" && PATH="${stub_bin}:${PATH}" grammar_post "${nodir_wt}" "npm install fixture-parent@1.0.0 --ignore-scripts")
+grep -qx 'safedeps: suspicious dependency change detected. A rollback ran.' <<< "$(post_message "${nodir_post}")" \
+  || fail "F: the install in the payload's directory is rolled back (${nodir_post})"
+grep -q "^Project: $(cd -P "${nodir_wt}" && pwd -P)\$" <<< "$(tail -n 20 "${SAFEDEPS_HOME}/reorg.log" | sed 's/^  //')" \
+  || fail "F: reorg.log names the payload's directory as the project"
+cmp -s "${nodir_wt}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "F: the payload's directory gets its lockfile from before the command back"
+[[ "$(cat "${nodir_other}/package-lock.json")" == "${tampered_lock}" && -d "${nodir_other}/node_modules/keep-me" ]] \
+  || fail "F: the hook's working directory is not touched"
+pass "a record with no project_dir is judged and rolled back in the payload's directory, not the hook's"
+
+# F2: the same through the backstop, with the record's hash naming the other
+# project. A record that names no snapshot and no project_dir, whose dir_hash
+# is that of Y, the hook's working directory; X and Y each have a confirmed
+# snapshot, and Y an unapproved lockfile and a node_modules. The project and
+# the hash that picks its confirmed snapshot come from one directory, the
+# payload's: X is rolled back to X's confirmed snapshot, and Y is not judged,
+# restored or emptied. Before, the hook judged Y with the record's hash, and a
+# hash taken from the record beside the payload's directory would have
+# restored Y's snapshot into X.
+nodir2_x=$(mktemp -d "${tmp_root}/nodir2-x.XXXXXX")
+nodir2_y=$(mktemp -d "${tmp_root}/nodir2-y.XXXXXX")
+for nodir2_p in "${nodir2_x}" "${nodir2_y}"; do
+  grammar_project "${nodir2_p}"
+  grammar_pre "${nodir2_p}" "npm install fixture-parent@1.0.0" > /dev/null
+  [[ "${nodir2_p}" != "${nodir2_y}" ]] || nodir2_y_hash=$(jq -r '.dir_hash' "$(grammar_pending "${nodir2_y}")")
+  touch "${nodir2_p}/package-lock.json"
+  nodir2_first=$(PATH="${stub_bin}:${PATH}" grammar_post "${nodir2_p}" "npm install fixture-parent@1.0.0 --ignore-scripts")
+  [[ -z "${nodir2_first}" ]] || fail "F2: ${nodir2_p} has a confirmed snapshot (${nodir2_first})"
+done
+grammar_pre "${nodir2_x}" "npm install fixture-parent@1.0.0" > /dev/null
+nodir2_pending=$(grammar_pending "${nodir2_x}")
+nodir2_x_hash=$(jq -r '.dir_hash' "${nodir2_pending}")
+[[ "${nodir2_x_hash}" != "${nodir2_y_hash}" ]] || fail "F2: X and Y have different hashes"
+jq --arg h "${nodir2_y_hash}" '.snapshot_id = "" | .project_dir = "" | .dir_hash = $h' "${nodir2_pending}" > "${nodir2_pending}.edit" \
+  && mv "${nodir2_pending}.edit" "${nodir2_pending}"
+printf '%s\n' "${tampered_lock}" > "${nodir2_x}/package-lock.json"
+printf '%s\n' "${tampered_lock}" > "${nodir2_y}/package-lock.json"
+mkdir -p "${nodir2_y}/node_modules/keep-me"
+nodir2_post=$(cd "${nodir2_y}" && PATH="${stub_bin}:${PATH}" grammar_post "${nodir2_x}" "npm install fixture-parent@1.0.0 --ignore-scripts")
+grep -qx 'safedeps: suspicious dependency change detected; this hook found a record of this command from before it ran, and the record names no snapshot. A rollback ran.' <<< "$(post_message "${nodir2_post}")" \
+  || fail "F2: the backstop rolls back the payload's directory (${nodir2_post})"
+grep -qx "Rollback snapshot: $(cat "${SAFEDEPS_HOME}/confirmed_${nodir2_x_hash}"), a confirmed snapshot" <<< "$(post_message "${nodir2_post}")" \
+  || fail "F2: the rollback restores X's confirmed snapshot, not Y's (${nodir2_post})"
+cmp -s "${nodir2_x}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "F2: the payload's directory gets its confirmed lockfile back"
+[[ "$(cat "${nodir2_y}/package-lock.json")" == "${tampered_lock}" && -d "${nodir2_y}/node_modules/keep-me" ]] \
+  || fail "F2: the hook's working directory is not judged, restored or emptied"
+pass "a record with no project_dir and another project's hash is judged with the payload directory's own hash"
+
+# G: a record whose snapshot_id is the number 5. The hook read it as "5" and
+# looked for 5_meta.json, while the oracle reads a non-string as no snapshot.
+# Both read the record's fields only as strings, so it names no snapshot.
+num_wt=$(mktemp -d "${tmp_root}/num-wt.XXXXXX")
+grammar_project "${num_wt}"
+grammar_pre "${num_wt}" "npm install fixture-parent@1.0.0" > /dev/null
+num_pending=$(grammar_pending "${num_wt}")
+jq '.snapshot_id = 5' "${num_pending}" > "${num_pending}.edit" && mv "${num_pending}.edit" "${num_pending}"
+printf '%s\n' "${tampered_lock}" > "${num_wt}/package-lock.json"
+num_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${num_wt}" "npm install fixture-parent@1.0.0 --ignore-scripts")
+grep -qx 'safedeps: suspicious dependency change detected; this hook found a record of this command from before it ran, and the record names no snapshot. No rollback ran.' <<< "$(post_message "${num_post}")" \
+  || fail "G: a snapshot_id that is a number names no snapshot (${num_post})"
+[[ "$(grep -cF "$(empty_line_of "${num_pending}")" "${SAFEDEPS_HOME}/advisory.log")" == 1 ]] \
+  || fail "G: advisory.log names the record that names no snapshot once"
+pass "a pending state whose snapshot_id is a number names no snapshot, for the hook and the oracle alike"
 
 # Two pre-guard calls in one project within one second have a snapshot each.
 # The id was `${TIMESTAMP}_${DIR_HASH}`, the same for both, so the second call

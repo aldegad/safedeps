@@ -27,8 +27,9 @@
 # an operational log in free form and is not read, except its two rollback
 # lines, which must repeat lines of the message, the line that says the
 # pre-guard's record could not be read, and the line that names a consumed
-# record that names no snapshot or whose snapshot has no meta file, which
-# every such call says once, with a message or without one.
+# record that names no snapshot, whose snapshot has no meta file, or that is
+# not one JSON object, which every such call says once, with a message or
+# without one.
 #
 # The package.json listing of node_modules is read by a method that is not the
 # hook's, because the hook and the oracle once ran the same wrong check and
@@ -90,7 +91,7 @@ ORACLE_FAILED=0
 
 # Forms the suite must show at least once.
 ORACLE_FORMS="
-head-rollback head-backstop-rollback head-backstop-none head-gone-rollback head-gone-none head-empty-rollback head-empty-none head-confirm head-journal-gone head-journal-stopped
+head-rollback head-backstop-rollback head-backstop-none head-gone-rollback head-gone-none head-empty-rollback head-empty-none head-unread-rollback head-unread-none head-confirm head-journal-gone head-journal-stopped
 snapshot-confirmed snapshot-pre snapshot-journal-confirmed snapshot-journal-pre
 restored not-restored-differs not-restored-absent not-restored-not-file removed not-removed
 refused-restore-link refused-removal-link refused-unresolved
@@ -105,7 +106,7 @@ backstop-no-confirmed backstop-no-meta
 journal owner-not-running owner-zombie owner-stopped owner-later owner-no-pid owner-no-start owner-bad-start owner-bad-opened
 journal-differs journal-gone journal-extra journal-no-list
 file-line file-line-absent
-log-rollback log-backstop log-confirm log-refused log-journal log-inert-unread log-inert-unstated log-record-gone log-record-empty
+log-rollback log-backstop log-confirm log-refused log-journal log-inert-unread log-inert-unstated log-record-gone log-record-empty log-record-unread
 "
 
 # The effect gate's prose: id | the blocks it may appear in | the most lines
@@ -185,7 +186,8 @@ oracle_owner_state() {
 oracle_trace_state() {
   local pending="$1" baseline project rel file recorded inode
   baseline=$(jq -r '.npm_trace.baseline // empty' "${pending}" 2>/dev/null)
-  project=$(jq -r '.project_dir // empty' "${pending}" 2>/dev/null)
+  project=$(jq -r '.project_dir | strings' "${pending}" 2>/dev/null)
+  [[ -n "${project}" ]] || project="${2:-}"
   [[ -n "${baseline}" ]] || { printf 'unset'; return; }
   [[ -f "${baseline}" ]] || { printf 'gone'; return; }
   for rel in package-lock.json node_modules/.package-lock.json; do
@@ -206,8 +208,9 @@ oracle_trace_state() {
 # names that snapshot answers for, then `same` or `differs`.
 oracle_node_files_state() {
   local pending="$1" snap project name copy names="" verdict=same differing=""
-  snap=$(jq -r '.snapshot_id // empty' "${pending}" 2>/dev/null)
-  project=$(jq -r '.project_dir // empty' "${pending}" 2>/dev/null)
+  snap=$(jq -r '.snapshot_id | strings' "${pending}" 2>/dev/null)
+  project=$(jq -r '.project_dir | strings' "${pending}" 2>/dev/null)
+  [[ -n "${project}" ]] || project="${2:-}"
   for name in package.json package-lock.json npm-shrinkwrap.json pnpm-lock.yaml yarn.lock bun.lock bun.lockb; do
     copy="${SAFEDEPS_HOME:-${HOME}/.safedeps}/snapshots/${snap}_${name}"
     if [[ -f "${copy}" ]]; then
@@ -227,8 +230,9 @@ oracle_node_files_state() {
 # The package.json files are listed by Python's walk, not by the hook's find.
 oracle_tree_state() {
   local pending="$1" snap project nm home="${SAFEDEPS_HOME:-${HOME}/.safedeps}" path
-  snap=$(jq -r '.snapshot_id // empty' "${pending}" 2>/dev/null)
-  project=$(jq -r '.project_dir // empty' "${pending}" 2>/dev/null)
+  snap=$(jq -r '.snapshot_id | strings' "${pending}" 2>/dev/null)
+  project=$(jq -r '.project_dir | strings' "${pending}" 2>/dev/null)
+  [[ -n "${project}" ]] || project="${2:-}"
   nm="${project}/node_modules"
   [[ -f "${home}/snapshots/${snap}_packages.list" ]] && oracle_packages_lacking "${nm}" "${home}/snapshots/${snap}_packages.list" | sed 's/^/package /'
   [[ -f "${home}/snapshots/${snap}_bins.list" ]] && { ls "${nm}/.bin/" 2>/dev/null || true; } | sort | comm -13 "${home}/snapshots/${snap}_bins.list" - | sed 's/^/bin /'
@@ -258,20 +262,21 @@ oracle_note_listing() {
 
 # oracle_before <call dir> [payload]: notes what the hook is about to consume.
 oracle_before() {
-  local call="$1" home="${SAFEDEPS_HOME:-${HOME}/.safedeps}" file id cwd
+  local call="$1" home="${SAFEDEPS_HOME:-${HOME}/.safedeps}" file id cwd=""
   mkdir -p "${call}/pending" "${call}/journal"
   wc -c < "${home}/reorg.log" 2>/dev/null | tr -d ' ' > "${call}/reorg.size" || true
   wc -c < "${home}/advisory.log" 2>/dev/null | tr -d ' ' > "${call}/advisory.size" || true
   if [[ -n "${2:-}" ]]; then
     cwd=$(jq -r '.cwd // empty' <<< "$2")
-    [[ -z "${cwd}" ]] || oracle_note_listing "${call}" "$(oracle_phys "${cwd}")"
+    [[ -z "${cwd}" ]] || { cwd=$(oracle_phys "${cwd}"); oracle_note_listing "${call}" "${cwd}"; }
   fi
   for file in "${home}/pending"/*.json; do
     [[ -f "${file}" ]] || continue
     cp "${file}" "${call}/pending/${file##*/}"
-    oracle_trace_state "${file}" > "${call}/pending/${file##*/}.trace"
-    oracle_node_files_state "${file}" > "${call}/pending/${file##*/}.nodefiles"
-    oracle_tree_state "${file}" > "${call}/pending/${file##*/}.tree"
+    # A record with no project_dir is judged in the payload's directory.
+    oracle_trace_state "${file}" "${cwd}" > "${call}/pending/${file##*/}.trace"
+    oracle_node_files_state "${file}" "${cwd}" > "${call}/pending/${file##*/}.nodefiles"
+    oracle_tree_state "${file}" "${cwd}" > "${call}/pending/${file##*/}.tree"
     oracle_note_listing "${call}" "$(jq -r '.project_dir // empty' "${file}" 2>/dev/null)"
   done
   # The records a pre-#5 pre-guard left, which the hook still reads.
@@ -542,6 +547,15 @@ oracle_block_end() {
           done <<< "${changes}"
         fi
       fi
+      # A rollback acts in the project this call judged: the record's
+      # project_dir, or the directory the payload says the command ran in.
+      # A record with no project_dir once sent the hook to its own working
+      # directory, and a rollback there acted on another project.
+      while IFS= read -r path; do
+        [[ -n "${path}" ]] || continue
+        [[ "${path}" == "${O_PROJECT}" || "${path}" == "${O_PROJECT}/"* ]] && continue
+        O_LINE="${path}"; oracle_red "a step line names a path outside ${O_PROJECT}"
+      done <<< "${O_STEP_PATHS}"
       ;;
     journal)
       local expected reported
@@ -814,6 +828,12 @@ oracle_line() {
     'safedeps: suspicious dependency change detected; this hook found a record of this command from before it ran, and the record names no snapshot. No rollback ran.')
       oracle_block_end; O_BLOCK=backstop-none; O_HEAD="${line}"; oracle_count head-empty-none
       oracle_record_empty_head; return 0 ;;
+    'safedeps: suspicious dependency change detected; this hook found a pre-guard record, and the record is not one JSON object. A rollback ran.')
+      oracle_block_end; O_BLOCK=backstop-rollback; O_HEAD="${line}"; oracle_count head-unread-rollback
+      oracle_record_unread_head; return 0 ;;
+    'safedeps: suspicious dependency change detected; this hook found a pre-guard record, and the record is not one JSON object. No rollback ran.')
+      oracle_block_end; O_BLOCK=backstop-none; O_HEAD="${line}"; oracle_count head-unread-none
+      oracle_record_unread_head; return 0 ;;
     'safedeps: this install was not rolled back.')
       oracle_block_end; O_BLOCK=confirm; O_HEAD="${line}"; oracle_count head-confirm; return 0 ;;
     'Detected problems:')
@@ -1164,29 +1184,36 @@ oracle_read_lines() {
 }
 
 # oracle_record_gone <consumed record or empty> <its path in the home> <json|text>:
-# a record of the pre-guard the hook consumed that names no snapshot, or whose
-# snapshot has no meta file. The hook used to end there with nothing said
-# (bamdori r23), so the install was never judged. It now says so once in
-# advisory.log, whether or not a message follows, and the backstop judges the
-# command. The id and the meta are read in Python, not with the hook's jq, cat
-# and -f. A legacy current_snapshot_id is text, read as `$(cat)` reads it.
+# a record of the pre-guard the hook consumed that names no snapshot, whose
+# snapshot has no meta file, or that is not one JSON object. The hook used to
+# end there with nothing said (bamdori r23), so the install was never judged,
+# or, for the last, die under set -e on every call of the command for 24
+# hours. It now says so once in advisory.log, whether or not a message
+# follows, and the backstop judges the command. The record, the id and the
+# meta are read in Python, not with the hook's jq, cat and -f. A legacy
+# current_snapshot_id is text, read as `$(cat)` reads it.
 oracle_record_gone() {
   local snap meta n=0 want a size form what
-  O_CONSUMED="$1" O_GONE=0 O_EMPTY=0
+  O_CONSUMED="$1" O_GONE=0 O_EMPTY=0 O_UNREAD=0
   [[ -n "$1" ]] || return 0
-  if [[ "$3" == text ]]; then
-    snap=$(python3 -c 'import sys; sys.stdout.write(open(sys.argv[1], "rb").read().decode().rstrip("\n"))' "$1" 2>/dev/null)
+  if [[ "$3" == json ]] && ! python3 "${ORACLE_READ}" object "$1"; then
+    O_UNREAD=1 form=log-record-unread what="a record that is not one JSON object"
+    want="post-verify: the pre-guard's record $2 is not one JSON object; this hook set the record aside"
   else
-    snap=$(python3 "${ORACLE_READ}" string "$1" snapshot_id 2>/dev/null)
-  fi
-  if [[ -z "${snap}" ]]; then
-    O_EMPTY=1 form=log-record-empty what="a record that names no snapshot"
-    want="post-verify: the pre-guard's record $2 names no snapshot; this hook set the record aside, and the command goes to the command-independent backstop"
-  else
-    meta="${O_HOME}/snapshots/${snap}_meta.json"
-    python3 -c 'import os, sys; sys.exit(0 if os.path.isfile(sys.argv[1]) else 1)' "${meta}" && return 0
-    O_GONE=1 form=log-record-gone what="a pending state whose snapshot has no meta file"
-    want="post-verify: the pre-guard's record $2 names the snapshot ${snap}, and ${meta} is not a file; this hook set the record aside, and the command goes to the command-independent backstop"
+    if [[ "$3" == text ]]; then
+      snap=$(python3 -c 'import sys; sys.stdout.write(open(sys.argv[1], "rb").read().decode().rstrip("\n"))' "$1" 2>/dev/null)
+    else
+      snap=$(python3 "${ORACLE_READ}" string "$1" snapshot_id 2>/dev/null)
+    fi
+    if [[ -z "${snap}" ]]; then
+      O_EMPTY=1 form=log-record-empty what="a record that names no snapshot"
+      want="post-verify: the pre-guard's record $2 names no snapshot; this hook set the record aside, and the command goes to the command-independent backstop"
+    else
+      meta="${O_HOME}/snapshots/${snap}_meta.json"
+      python3 -c 'import os, sys; sys.exit(0 if os.path.isfile(sys.argv[1]) else 1)' "${meta}" && return 0
+      O_GONE=1 form=log-record-gone what="a pending state whose snapshot has no meta file"
+      want="post-verify: the pre-guard's record $2 names the snapshot ${snap}, and ${meta} is not a file; this hook set the record aside, and the command goes to the command-independent backstop"
+    fi
   fi
   size=$(cat "${O_CALL}/advisory.size" 2>/dev/null); size="${size:-0}"
   while IFS=$'\t' read -r _ a; do
@@ -1199,9 +1226,9 @@ oracle_record_gone() {
     oracle_red "${what} was consumed, and advisory.log names it ${n} times, not once"
   fi
 }
-# The backstop's three heads: one says no record of the command was found, and
+# The backstop's four heads: one says no record of the command was found, and
 # none was consumed; the others say one was, and its snapshot has no meta file,
-# or it names no snapshot.
+# or it names no snapshot, or it is not one JSON object.
 oracle_record_none() {
   [[ -z "${O_CONSUMED}" ]] || oracle_red "the head says no record was found, and the hook consumed ${O_CONSUMED##*/}"
 }
@@ -1211,10 +1238,13 @@ oracle_record_gone_head() {
 oracle_record_empty_head() {
   [[ "${O_EMPTY}" == 1 ]] || oracle_red "the head says the record names no snapshot, and the hook consumed no such record"
 }
+oracle_record_unread_head() {
+  [[ "${O_UNREAD}" == 1 ]] || oracle_red "the head says the record is not one JSON object, and the hook consumed no such record"
+}
 
 # oracle_message <call dir> <payload> <hook stdout>: reads every line.
 oracle_message() {
-  local call="$1" payload="$2" out="$3" message line file consumed="" size now
+  local call="$1" payload="$2" out="$3" message line file consumed="" size now project
   O_HOME="${SAFEDEPS_HOME:-${HOME}/.safedeps}"
   O_CALL="${call}"
   for file in "${call}/pending"/*.json; do
@@ -1251,14 +1281,21 @@ oracle_message() {
   O_PROJECT=$(jq -r '.cwd // empty' <<< "${payload}")
   O_PROJECT=$(oracle_phys "${O_PROJECT}")
   O_PRE="" O_META="" O_TRACE="unread" O_NODE_FILES="" O_TREE="" O_DIR_HASH=""
-  if [[ -n "${consumed}" ]]; then
-    O_PRE=$(jq -r '.snapshot_id // empty' "${consumed}")
-    O_PROJECT=$(jq -r '.project_dir // empty' "${consumed}")
+  if [[ -n "${consumed}" && "${O_UNREAD}" != 1 ]]; then
+    # The record's fields count only as strings, as the hook reads them; read
+    # in Python, not with the hook's jq.
+    O_PRE=$(python3 "${ORACLE_READ}" string "${consumed}" snapshot_id 2>/dev/null) || O_PRE=""
+    # A record with no project_dir is judged in the directory the payload
+    # names, and with that directory's hash, as the hook does.
+    project=$(python3 "${ORACLE_READ}" string "${consumed}" project_dir 2>/dev/null) || project=""
     O_META="${O_HOME}/snapshots/${O_PRE}_meta.json"
     O_TRACE=$(cat "${consumed}.trace")
     O_NODE_FILES=$(cat "${consumed}.nodefiles")
     O_TREE=$(cat "${consumed}.tree")
-    O_DIR_HASH=$(jq -r '.dir_hash // empty' "${consumed}")
+    if [[ -n "${project}" ]]; then
+      O_PROJECT="${project}"
+      O_DIR_HASH=$(python3 "${ORACLE_READ}" string "${consumed}" dir_hash 2>/dev/null) || O_DIR_HASH=""
+    fi
     # A snapshot with no meta file is not one the backstop restores from or
     # compares with, so the call has no snapshot from before the command.
     [[ "${O_GONE}" != 1 ]] || O_PRE=""
@@ -1283,7 +1320,7 @@ oracle_message() {
 # reaches. They are read as the lines of a confirm block, with no reorg.log.
 oracle_direct() {
   local line
-  O_CALL="${ORACLE_DIR}" O_DIRECT=1 O_RECORD_UNREAD=0 O_CONSUMED="" O_GONE=0 O_EMPTY=0 O_HOME="${SAFEDEPS_HOME:-${HOME}/.safedeps}" O_NPM_LOG=/dev/null
+  O_CALL="${ORACLE_DIR}" O_DIRECT=1 O_RECORD_UNREAD=0 O_CONSUMED="" O_GONE=0 O_EMPTY=0 O_UNREAD=0 O_HOME="${SAFEDEPS_HOME:-${HOME}/.safedeps}" O_NPM_LOG=/dev/null
   O_META="$1" O_PAYLOAD="$2" O_CMD=$(jq -r '.tool_input.command // empty' <<< "$2") O_PROJECT="" O_PRE="" O_TRACE="unread" O_NODE_FILES="" O_TREE="" O_DIR_HASH=""
   oracle_reset
   oracle_verdict
