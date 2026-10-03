@@ -934,6 +934,221 @@ expect_pass "an install named only in an assignment value" 'FOO="pip install evi
 expect_deny "an install inside a substitution in an assignment value" 'FOO=$(pip install evil==1.0.0) ls'
 pass "an install behind an assignment prefix is gated however the value is quoted or nested"
 
+# Where a word ends is the lexer walk's depth and nothing else. The shell's
+# grammar puts parentheses inside words -- an array value, a glob group or
+# qualifier, a process substitution, zsh `=(...)` -- and the walk reads each
+# as a context, so a blank or an operator inside ends nothing, and the `)` of
+# a case pattern ends a word only at the top level. A reader that cut words
+# by a byte set of its own cut each of these short, and what followed was a
+# statement no recognizer read: `a=(x) pip install ...` ran in bash and zsh
+# with `x)` as the command to the gate (denied on main, passed from the day
+# the lexer read the prefixes).
+#
+# Each row: an id, then whether each shell ran its install (1) or not (0), in
+# the order macOS bash 3.2, zsh 5.9, macOS sh, dash, the agent's wrapper as
+# it is now (zsh, the shell snapshot, `setopt NO_EXTENDED_GLOB
+# NO_BARE_GLOB_QUAL`, eval), that wrapper without the setopt, GNU bash 5.2.
+# Measured on 2026-10-03 by running each form in each shell with a stub in
+# the manager's place that marks only an argument naming the package.
+word_rows=(
+  # An array value, an append and an array element are assignment words
+  # (bash Arrays, zsh Array Parameters). Blanks, comments, newlines, quotes and
+  # substitutions among the elements end no word. dash has no arrays. A blank
+  # inside a subscript is part of the word to bash alone (WA18), as are keys
+  # in an array value (WA12).
+  'WA1|1110111|a=(x) pip install evil==1.0.0'
+  'WA2|1110111|a=(x) 2>/dev/null pip install evil==1.0.0'
+  'WA3|1110111|a=(x y) b=1 pip install evil==1.0.0'
+  'WA4|1110111|a=() pip install evil==1.0.0'
+  'WA5|1110111|a+=(x) pip install evil==1.0.0'
+  'WA6|1110111|a=(x) npm install evil@1.0.0'
+  'WA7|1110111|a[1]=x pip install evil==1.0.0'
+  'WA8|1110111|a[1]=x 2>/dev/null pip install evil==1.0.0'
+  'WA9|1110111|a=( x y ) pip install evil==1.0.0'
+  $'WA10|1110111|a=(x # c\ny) pip install evil==1.0.0'
+  $'WA11|1110111|a=(\nx\n) pip install evil==1.0.0'
+  'WA12|1010001|a=([0]=x [1]=y) pip install evil==1.0.0'
+  'WA13|1110111|a=($(echo x)) pip install evil==1.0.0'
+  $'WA14|1110111|a=("x y" \'z\') pip install evil==1.0.0'
+  'WA15|1110111|a+=x pip install evil==1.0.0'
+  'WA16|1110111|a[1]+=x pip install evil==1.0.0'
+  'WA17|1110111|a[$(echo 1)]=x pip install evil==1.0.0'
+  'WA18|1010001|a[1 + 1]=x pip install evil==1.0.0'
+  'WA19|1110111|a=(x) b+=(y) c[2]=z pip install evil==1.0.0'
+  'WA20|1110111|echo a; a=(x) pip install evil==1.0.0'
+  'WA21|1110111|f() { a=(x) pip install evil==1.0.0; }; f'
+  $'WA22|1110111|a=(x)\\\n pip install evil==1.0.0'
+  'WA23|1110111|a=(x) command pip install evil==1.0.0'
+  'WA24|1110111|x=(a b) pip install evil==1.0.0'
+  'WA25|1110111|a=(x);pip install evil==1.0.0'
+  # The `)` of a case pattern inside a substitution ends no word: the value
+  # or the target runs on to the close of the substitution. bash 3.2 does
+  # not parse an unparenthesized pattern there; it runs the ones that are
+  # quoted, parenthesized or in backquotes.
+  'WC1|0101111|echo $(case a in a) echo f;; esac); pip install evil==1.0.0'
+  'WC2|0101111|x=$(case a in a) echo f;; esac) pip install evil==1.0.0'
+  'WC3|0101111|>$(case a in a) echo f;; esac) pip install evil==1.0.0'
+  'WC4|0101111|2>$(case a in a) echo /dev/null;; esac) pip install evil==1.0.0'
+  'WC5|0101111|pip >$(case a in a) echo f;; esac) install evil==1.0.0'
+  'WC6|1111111|>"$(case a in a) echo f;; esac)" pip install evil==1.0.0'
+  'WC7|1111111|x="$(case a in a) echo f;; esac)" pip install evil==1.0.0'
+  'WC8|1111111|>$(case a in (a) echo f;; esac) pip install evil==1.0.0'
+  'WC9|0101111|echo $(case a in a) echo f;; esac) && pip install evil==1.0.0'
+  'WC10|1111111|>`case a in a) echo f;; esac` pip install evil==1.0.0'
+  'WC11|0100111|< <(case a in a) true;; esac) pip install evil==1.0.0'
+  'WC12|0100111|cat <(case a in a) pip install evil==1.0.0;; esac)'
+  'WC13|0101111|>$(case a in a) echo f;; esac) npm install evil@1.0.0'
+  'WC14|0000001|{fd}>$(case a in a) echo f;; esac) pip install evil==1.0.0'
+  'WC15|0101111|x=$(case a in a) echo;; esac)$(case b in b) echo;; esac) pip install evil==1.0.0'
+  'WC16|1111111|x=${y:-$(case a in a) echo;; esac)} pip install evil==1.0.0'
+  'WC17|0100111|<<<$(case a in a) echo;; esac) pip install evil==1.0.0'
+  'WC18|1111111|x=`case a in a) echo;; esac` pip install evil==1.0.0'
+  'WC19|0101111|x=$(case a in *) echo;; esac) npm install evil@1.0.0'
+  # zsh `=(...)` is a process substitution through a temporary file, a word
+  # wherever a word may stand, and its body runs.
+  'WZ1|0100110|< =(true) pip install evil==1.0.0'
+  'WZ2|0100110|cat =(pip install evil==1.0.0)'
+  'WZ3|0100110|> =(true) pip install evil==1.0.0'
+  'WZ4|0100110|2>/dev/null =(true) ; pip install evil==1.0.0'
+  'WZ5|0100110|cat =(true; pip install evil==1.0.0)'
+  'WZ6|0100110|>=(true) pip install evil==1.0.0'
+  'WZ7|0100110|>>=(true) pip install evil==1.0.0'
+  'WZ8|0100110|exec 3<=(true) pip install evil==1.0.0'
+  'WZ9|0100110|cat =(echo x) =(echo y); pip install evil==1.0.0'
+  # A glob group or qualifier glued to a redirection target is part of the
+  # word in zsh. The agent wrapper turns bare qualifiers off, and then runs
+  # the group form zsh without the setopt does not (WG4).
+  'WG1|0100010|>/dev/null(N) pip install evil==1.0.0'
+  'WG2|0100010|2>/dev/nul*(N) pip install evil==1.0.0'
+  'WG3|0100010|</dev/null(N) pip install evil==1.0.0'
+  'WG4|0000100|>/dev/(null) pip install evil==1.0.0'
+  'WG5|0100110|2>/dev/(null|zero) pip install evil==1.0.0'
+  'WG6|0100010|>/dev/null(N) npm install evil@1.0.0'
+  'WG7|0100010|pip >/dev/null(N) install evil==1.0.0'
+  'WG8|0100010|echo a; >/dev/null(N) pip install evil==1.0.0'
+  'WG9|0100010|f() { >/dev/null(N) pip install evil==1.0.0; }; f'
+  'WG10|0100110|> /dev/(nul|null) pip install evil==1.0.0'
+  'WG11|0100010|2>/dev/null(N) 1>/dev/null(N) pip install evil==1.0.0'
+  # bash extglob after `shopt -s extglob` on a line of its own: the group is
+  # part of the word, and a `!` glued inside a word is no reserved word.
+  $'WE1|1010001|shopt -s extglob\n>f@(x|y) pip install evil==1.0.0'
+  $'WE2|1010001|shopt -s extglob\npip >f!(x) install evil==1.0.0'
+  $'WE3|1110111|shopt -s extglob\nx=@(a) pip install evil==1.0.0'
+  # zsh precommand modifiers stand before a command and are none.
+  'WK1|0100110|noglob pip install evil==1.0.0'
+  'WK2|0100110|nocorrect pip install evil==1.0.0'
+  'WK3|0000110|- pip install evil==1.0.0'
+  'WK4|0100110|echo a; noglob pip install evil==1.0.0'
+  'WK5|0100110|noglob npm install evil@1.0.0'
+  'WK6|0100110|noglob 2>/dev/null pip install evil==1.0.0'
+  'WK7|0100110|f() { noglob pip install evil==1.0.0; }; f'
+  'WK8|0100110|nocorrect command pip install evil==1.0.0'
+  'WK9|0100110|noglob pip3 install evil==1.0.0'
+  'WK10|0100110|noglob python3 -m pip install evil==1.0.0'
+  'WK11|0000110|- noglob pip install evil==1.0.0'
+  'WK12|0100110|nocorrect noglob - pip install evil==1.0.0'
+  'WK13|0100110|exec - pip install evil==1.0.0'
+  'WK14|0100110|builtin noglob pip install evil==1.0.0'
+  # A value with an escaped blank, an ANSI-C string, quoted and escaped
+  # parentheses is one word, as it was.
+  'WV1|1111111|a=b\ c pip install evil==1.0.0'
+  $'WV2|1111111|a=$\'x y\' pip install evil==1.0.0'
+  'WV3|1111111|a="(x)" pip install evil==1.0.0'
+  'WV4|1111111|a=x\(y\) pip install evil==1.0.0'
+)
+for word_row in "${word_rows[@]}"; do
+  word_ran="${word_row#*|}" word_ran="${word_ran%%|*}" word_form="${word_row#*|*|}"
+  expect_not_approved "an install after a word the shell reads whole (${word_row%%|*}, ran ${word_ran}): ${word_form}" "${word_form}"
+done
+# The same words where they are data: no shell measured ran an install in any
+# of these, and each stays unjudged and unrecorded. An array of the install
+# words is a value (denied before the walk read the array as one word).
+for word_data in \
+  'echo "2>/dev/null pip install evil==1.0.0"' \
+  "grep -r 'pip >/dev/null(N) install' ." \
+  'echo >/dev/null(N) pip install evil==1.0.0' \
+  'cat =(echo pip install evil==1.0.0)' \
+  'echo noglob pip install evil==1.0.0' \
+  'echo a=(x) pip install evil==1.0.0' \
+  'echo =(true) pip install evil==1.0.0' \
+  'echo >/dev/(null) pip install evil==1.0.0' \
+  'ls *(N) pip install evil==1.0.0' \
+  'a=(pip install evil==1.0.0)' \
+  'x="$(case a in a) echo pip install evil==1.0.0;; esac)"' \
+  'echo $(case a in a) echo f;; esac) pip install evil==1.0.0' \
+  "printf '%s\\n' a=(x) pip install evil==1.0.0" \
+  'pip a=(x) install evil==1.0.0'
+do
+  expect_pass "a word the shell reads whole, with the install words as data: ${word_data}" "${word_data}"
+  if logged_ungated "${word_data}"; then fail "no UNGATED record for ${word_data}"; fi
+done
+# Ordinary commands that hold the same words keep their verdicts.
+for word_plain in \
+  'files=(src/*.ts); npm run lint -- "${files[@]}"' \
+  'ARGS=(--verbose); pytest "${ARGS[@]}"' \
+  'for f in *.py(N); do python3 -m py_compile "$f"; done' \
+  'ls -la src/*.ts(N)' \
+  'arr[0]=x; echo "${arr[0]}"' \
+  'os=$(case $(uname) in Darwin) echo mac;; *) echo linux;; esac) && go build ./...' \
+  'builtin cd /tmp && ls' \
+  "git log --format='%h (%an)' -3" \
+  "find . -name '*.py' -o \\( -name x \\)" \
+  'echo a (b)'
+do
+  expect_pass "an ordinary command with a word parenthesis: ${word_plain}" "${word_plain}"
+  if logged_ungated "${word_plain}"; then fail "no UNGATED record for ${word_plain}"; fi
+done
+# Declared, not a defect: the precommand list and the glob reading are the
+# manuals', not each shell's behaviour for every combination, so these are
+# read as installs though no shell measured ran them.
+for word_over in \
+  'noglob nocorrect pip install evil==1.0.0' \
+  'command noglob pip install evil==1.0.0' \
+  'a=(x)(N) pip install evil==1.0.0'
+do
+  expect_not_approved "a form no shell measured runs is still read as an install: ${word_over}" "${word_over}"
+done
+# The npm forms get the inert flag where every reading puts the install in
+# the same place, after the verb or at the end as for any assignment prefix.
+# `a=(x) npm install x` got neither a verdict nor the flag.
+for rewrite_row in \
+  'a=(x) npm install evil|a=(x) npm install --ignore-scripts evil' \
+  'a+=(x) npm install evil|a+=(x) npm install --ignore-scripts evil' \
+  'a[1]=x npm install evil|a[1]=x npm install evil --ignore-scripts' \
+  'x=$(case a in a) echo f;; esac) npm install evil|x=$(case a in a) echo f;; esac) npm install --ignore-scripts evil' \
+  '>$(case a in a) echo f;; esac) npm install evil|>$(case a in a) echo f;; esac) npm install --ignore-scripts evil' \
+  '< =(true) npm install evil|< =(true) npm install --ignore-scripts evil' \
+  'cat =(npm install evil)|cat =(npm install --ignore-scripts evil)'
+do
+  got=$(gate_rewrite "${rewrite_row%%|*}")
+  [[ "${got}" == "${rewrite_row#*|}" ]] || fail "an npm install after a word the shell reads whole gets --ignore-scripts: ${rewrite_row%%|*} (got: ${got})"
+done
+# Where only some shells read the word that way the readings put the install
+# in different places: UNDECIDED, never a rewrite for one shell.
+for inert_form in \
+  'a[1 + 1]=x npm install evil' \
+  '>/dev/null(N) npm install evil' \
+  '>/dev/(null) npm install evil' \
+  'noglob npm install evil'
+do
+  got=$(gate_reason "${inert_form}")
+  [[ "${got}" == "deny "*UNDECIDED*"read the npm installs in this command in different places"* ]] \
+    || fail "an npm install after a word only some shells read whole is UNDECIDED, not rewritten for one: ${inert_form} (got: ${got:0:120})"
+done
+# The walk checks its own answers: a `(` it reads as an operator where none
+# of its three walks has a command, and a word parenthesis inside a command
+# name, fail the reading. No shell measured runs the first; without the check
+# it passed, with `install` behind a subshell the shell never opens. zsh runs
+# the second when a file of that name is in the directory (the qualifier
+# keeps the name), and it passed too.
+expect_undecided "an operator parenthesis where no command stands" 'pip ((x) y) install evil==1.0.0'
+expect_undecided "a word parenthesis inside the command name" 'pip(N) install evil==1.0.0'
+# A reserved word is one only as a word of its own. Read by its letters, the
+# `do` in a target took the glob qualifier after it for a subshell, and the
+# verb went with it: zsh runs this install when the file is there.
+expect_not_approved "a target that ends in a reserved word's letters" 'pip >f-do(.) install evil==1.0.0'
+pass "a word ends where the shell ends it: array values, case patterns in substitutions, zsh =(...) and glob groups, extglob, subscripts and precommand modifiers (${#word_rows[@]} forms a shell runs)"
+
 # npm takes any unique abbreviation of a command or alias, and the camelCase
 # form of a dashed one (lib/utils/cmd-list.js deref). The grammar holds what
 # deref accepts, measured from npm; where an npm is on PATH, that measurement is

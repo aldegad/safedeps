@@ -449,7 +449,7 @@ shell_lex() {
     fi
     div="${memo}.div"
   fi
-  if ! out=$(printf '%s\n' "${text}" | LC_ALL=C awk -v view="${view}" -v policy="${policy}" -v marker="${marker}" -v divfile="${SAFEDEPS_LEX_DIVERGE:-}" -v divmemo="${div}" '
+  if ! out=$(printf '%s\n' "${text}" | LC_ALL=C awk -v view="${view}" -v policy="${policy}" -v marker="${marker}" -v divfile="${SAFEDEPS_LEX_DIVERGE:-}" -v divmemo="${div}" -v smark="${SAFEDEPS_SCAN_MARK:-}" '
       # One pass over the command as the shell lexes it. Every byte gets a class,
       # and each view is printed from the classes:
       #
@@ -530,6 +530,17 @@ shell_lex() {
       #                close it; dash: `$` and a single-quoted string.
       #   `&>`         bash and zsh: a redirection of both outputs; dash: `&`,
       #                which ends a command, then `>` before the next one.
+      #   `(` glued to a word, or where an argument stands: bash and zsh read
+      #                a glob group or qualifier, part of the word (zsh runs
+      #                it; bash 5 fails to parse it without extglob); dash:
+      #                an operator.
+      #   `NAME[...]=` bash pairs the brackets, so a blank inside is part of
+      #                the assignment word; zsh and dash end the word there.
+      #   `<N-M>`      zsh: a glob for a range of numbers, bytes of a word;
+      #                bash and dash: two redirections.
+      #   `noglob` `nocorrect` `-` `builtin` before a command: zsh reads a
+      #                precommand modifier and the command after it; bash
+      #                and dash read a command and its arguments.
       #
       # Each site is decided per shell where it stands: zsh read one `((` as a
       # subshell and the next as arithmetic in one command (form M1), which no
@@ -550,7 +561,7 @@ shell_lex() {
         # The bytes any rule below acts on. Every other byte keeps the class of
         # its context and changes nothing, so it is classified without running
         # the rules -- most of a long command is such bytes.
-        split("\\ $ \047 \042 # ( ) < ] } ` c e i ; &", sl, " ")
+        split("\\ $ \047 \042 # ( ) < [ ] } ` c e i ; &", sl, " ")
         for (j in sl) SPC[sl[j]] = 1
         SPC["\n"] = 1
         DQS["\\"] = 1; DQS["\042"] = 1; DQS["$"] = 1; DQS["`"] = 1
@@ -599,7 +610,10 @@ shell_lex() {
           if (i in JMP) { i = JMP[i]; continue }
           if (i in HSTART) { push("H"); hstop = HEND[HSTART[i]] }
           c = X[i]
-          if (wantdep) DEP[i] = (mode == "") ? dc : 99
+          # A comment has the depth of the context it stands in: one among the
+          # elements of an array value, or inside a substitution, is nested
+          # with them and ends no word at the top level.
+          if (wantdep) DEP[i] = (mode == "" || mode == "CM") ? dc : 99
           # RM marks what the shell quote removal takes out of a top-level word
           # (qtop: the quote was opened at the top level, not in a substitution
           # or an expansion). Only the pieces view reads it.
@@ -658,6 +672,9 @@ shell_lex() {
           # and end no statement. Not inside its parentheses: there `$(...)`
           # is still a command substitution the shell runs.
           if (wantar && (top == "K" || top == "A" && par[d] == 0)) AR[i] = 1
+          # A blank or an operator inside the subscript of an assignment word is
+          # part of the word to bash alone (see the `[` rule below).
+          if (top == "W" && wkind[d] == "s" && c ~ /[ \t\n;&|()<>]/) div = 1
           if (!(c in SPC) && !(top == "C" && cpat[d] == 1)) continue
           if (c == "\\") {
             if (X[i+1] == "\n") { C[i] = "l"; C[i+1] = "l"; if (dc == 1) { RM[i] = 1; RM[i+1] = 1 }; i++; continue }
@@ -703,8 +720,8 @@ shell_lex() {
           # stmts view as a statement boundary, so the arm is judged.
           if (top == "C") {
             if (cpat[d] == 0 && c == "i" && X[i+1] == "n" && wordstart(i) && (i + 2 > N || X[i+2] ~ /[ \t\n;&|()<>]/)) { C[i+1] = cls; i++; cpat[d] = 1; cpw[d] = 0; continue }
-            if (cpat[d] == 1 && c == "(" && !cpw[d]) continue
-            if (cpat[d] == 1 && c == ")") { C[i] = "p"; cpat[d] = 2; continue }
+            if (cpat[d] == 1 && c == "(" && !cpw[d]) { CPO[i] = 1; continue }
+            if (cpat[d] == 1 && c == ")") { if (dc == 1) C[i] = "p"; cpat[d] = 2; continue }
             if (cpat[d] == 1 && c !~ /[ \t\n]/) cpw[d] = 1
             # An arm ends at `;;` or `;&` (forms X8, X9), at `;;&` in bash and
             # at `;|` in zsh. The other shells fail to parse those two, so
@@ -724,9 +741,11 @@ shell_lex() {
             else if (c == "\n") i = at_newline(i)
             continue
           }
-          if (c == "#" && (wordstart(i) || top == "B" && X[i-1] == "`") && top != "V") {
+          if (c == "#" && (wordstart(i) || top == "B" && X[i-1] == "`") && top != "V" && !(top == "W" && wkind[d] != "a")) {
             # Inside a glob word (see GL below) a `#` is a glob operator, never
-            # a comment (form G5).
+            # a comment (form G5); inside a subscript it is a character. Among
+            # the elements of an array value it opens a comment as anywhere
+            # (form WA10).
             if (glc[d] > 0) { div = 1; continue }
             C[i] = "m"; mode = "CM"; continue
           }
@@ -750,34 +769,91 @@ shell_lex() {
           # reading says DIVERGE here. After `>` or `<` the `&` belongs to a
           # duplication (`2>&1`) in every shell.
           if (c == "&") { if (X[i+1] == ">" && !(i > 1 && X[i-1] ~ /[<>]/ && C[i-1] == cls)) div = 1; continue }
-          # A process substitution is a word like `$(...)`: its `)` ends no
-          # token (PS marks the parenthesis level it opened, WC its close).
-          # So is a glob word: zsh reads a `(` where an argument stands as the
-          # start of one, and inside a substitution bash 3.2 reads it the same
-          # way, so a `#` in it or after its `)` is no comment (forms G5,
-          # ZG1); bash 5.2 and dash fail to parse it. GL marks the level for
-          # the bash and zsh readings, glc counts the open ones, and the bash
-          # reading says DIVERGE. An empty `()` is a function head, not a glob.
-          # A process substitution runs its body like `$(...)` does, so the
-          # body is a payload too (substs): as the target of a redirection it
-          # is part of a word the redirection views blank (form W1).
+          # A subscript glued to a name at the start of a word, with `=` or
+          # `+=` after its `]`, is part of an assignment word (SUBC holds its
+          # close). bash reads the brackets as a pair wherever a command may
+          # start, whatever they hold, so a blank inside ends no word there
+          # (`a[1 + 1]=x pip install x` runs the install in bash alone, form
+          # WA18): a context in the bash reading, which says DIVERGE at a blank
+          # or an operator inside. zsh and dash cut the word at the blank.
+          if (c == "[") {
+            if (top == "W" && wkind[d] == "s") { sbr[d]++; continue }
+            if (subname(i) && (wk = la_sub(i + 1)) && (X[wk] == "=" || X[wk] == "+" && X[wk+1] == "=")) {
+              SUBC[i] = wk - 1
+              if (shb) { push("W"); wkind[d] = "s"; sbr[d] = 0; if (wantdep) DEP[i] = dc }
+            }
+            continue
+          }
+          if (c == "]") {
+            if (top == "W" && wkind[d] == "s") { if (sbr[d] > 0) sbr[d]--; else { SUBC[cst[d]] = i; pop() } }
+            continue
+          }
+          # A parenthesis the shell reads as part of a word opens a context,
+          # like `$(...)`, so every byte up to its `)` is nested: no blank or
+          # operator in it ends the word, and no reader has to know why
+          # (word_sep reads the depth). wparen() says which one this is:
+          #
+          #   a  the value of an array assignment, `NAME=(`, `NAME+=(` (bash,
+          #      zsh). Its elements are words, so comments, quotes and
+          #      substitutions read as anywhere (W, kind a).
+          #   z  zsh `=(...)` at the start of a word: a process substitution
+          #      through a temporary file. Its body runs, so it is a payload
+          #      like `$(...)` (S, in substs).
+          #   g  a glob group or qualifier glued to a word (zsh, and bash 3.2
+          #      inside a substitution): a `#` in it is no comment (form G5).
+          #      bash 5.2 and dash fail to parse it, so the bash reading says
+          #      DIVERGE (W, kind g).
+          #
+          # `<(` and `>(` open a process substitution, in a word or as one:
+          # its body runs and is a payload too (kind P), and the `<` or `>`
+          # that opens it is a byte of that word, not an operator, so it
+          # takes the depth of the body. Read at the top level, the opener
+          # ended the word before it and three readers each needed a rule of
+          # their own for the word after it (form W1).
+          #
+          # Any other `(` is an operator: a subshell, a function head, or in
+          # zsh a glob word that starts where an argument stands (`ls
+          # (a|b)*`). GL marks that level for the bash and zsh readings, glc
+          # counts the open ones so that a `#` in it or after its `)` is no
+          # comment (form ZG1), and the bash reading says DIVERGE. GLO marks
+          # one the walk reads as that glob, for the consistency check in
+          # starts().
           if (c == "(") {
-            par[d]++
+            wk = wparen(i)
+            if (wk == "z") { push("S"); if (wantdep) DEP[i] = dc; continue }
+            if (wk == "a" || wk == "g") { if (wk == "g") div = 1; push("W"); wkind[d] = wk; WPO[i] = 1; if (wantdep) DEP[i] = dc; continue }
             if (i > 1 && (X[i-1] == "<" || X[i-1] == ">") && C[i-1] == cls) {
-              PS[d, par[d]] = 1
-              nsub++; sbeg[nsub] = i + 1; send[nsub] = N; skind[nsub] = "P"; PSN[i] = nsub; PSI[d, par[d]] = nsub
-            } else delete PS[d, par[d]]
-            if (!shd && X[i+1] != ")" && (i == 1 || X[i-1] !~ /[$<>]/) && !cmdpos(i)) { GL[d, par[d]] = 1; glc[d]++; div = 1 } else delete GL[d, par[d]]
+              push("S"); skind[nsub] = "P"; PSN[i] = nsub
+              if (wantdep) { DEP[i] = dc; DEP[i-1] = dc }
+              continue
+            }
+            par[d]++
+            if (!shd && X[i+1] != ")" && (i == 1 || X[i-1] !~ /[$<>]/) && !cmdpos(i)) { GL[d, par[d]] = 1; GLO[i] = 1; glc[d]++; div = 1 } else delete GL[d, par[d]]
             continue
           }
           if (c == ")") {
             if (par[d] > 0) {
-              if ((d, par[d]) in PS) { WC[i] = 1; send[PSI[d, par[d]]] = i - 1; delete PS[d, par[d]] }
               if ((d, par[d]) in GL) { WC[i] = 1; delete GL[d, par[d]]; glc[d]-- }
               par[d]--
             }
-            else if (top == "S") { WC[i] = 1; pop() }
+            else if (top == "S" || top == "W" && wkind[d] != "s") { WC[i] = 1; pop() }
             continue
+          }
+          if (top == "W" && wkind[d] == "s") continue
+          # zsh reads `<N-M>`, with either number left out, as a glob for a
+          # range of numbers: bytes of a word, where bash and dash read two
+          # redirections (`pip >f<1-2> install x` runs the install in zsh
+          # alone when a file matches; to bash `install` is a target). In the
+          # zsh reading the `<` and `>` are characters, as escaped ones are,
+          # and the bash reading says DIVERGE.
+          if (c == "<" && cls == "c" && (wk = numglob(i))) {
+            div = 1
+            if (shz) {
+              C[i] = "e"
+              for (i++; i < wk; i++) { C[i] = cls; if (wantdep) DEP[i] = dc }
+              C[i] = "e"; if (wantdep) DEP[i] = dc
+              continue
+            }
           }
           if (c == "<" && X[i+1] == "<" && X[i+2] != "<" && X[i-1] != "<") { i = heredoc_op(i); continue }
           if (c == "\n") { i = at_newline(i); continue }
@@ -789,7 +865,11 @@ shell_lex() {
         # the end of the input and take every line after it along (form A7, a
         # heredoc inside `$((` that bash reads as arithmetic). Such a command is
         # settled as UNDECIDED by guard_check_command_reads anyway.
-        if ((view == "unprefixed" || view == "unprefixed-lines") && !unterm) { redirs(); starts(policy, BU, CSW); prefixes() }
+        if ((view == "unprefixed" || view == "unprefixed-lines") && !unterm) {
+          redirs(); starts(policy, BU, CSW)
+          if (shb) { starts("zsh", BZ); starts("dash", BD); walks_fail() }
+          prefixes()
+        }
         # Statement starts are read only from a reading that closes, for the
         # same reason: a word walk through a quote or a body that never ends
         # marks starts the shell never reads.
@@ -843,7 +923,9 @@ shell_lex() {
       #
       # KEEP marks what the live view keeps of a redirection: the body of a
       # process substitution in its target, which is code the shell runs.
-      # A substitution in a target needs no mark, since its body is not
+      # PSB marks the bytes that open and close it, which the live view
+      # blanks with the rest of the redirection though they are nested. A
+      # substitution in a target needs no mark, since its body is not
       # top-level code.
       function redirs(   k, j, s, m, e, z) {
         for (k = 1; k <= N; k++) {
@@ -871,6 +953,7 @@ shell_lex() {
           for (m = j; m < z; m++) {
             if (!((X[m] == "<" || X[m] == ">") && C[m] == "c" && (m + 1) in PSN)) continue
             for (e = m + 2; e <= send[PSN[m+1]]; e++) KEEP[e] = 1
+            PSB[m] = 1; PSB[m+1] = 1; PSB[e] = 1
             m = e
           }
           for (j = z; s < j; s++) DROP[s] = 1
@@ -897,21 +980,15 @@ shell_lex() {
         return s
       }
       # The byte after the word that starts at byte j, cut where the shell
-      # cuts it (word_sep). A process substitution is one word whatever it
-      # holds: its blanks and parentheses end nothing, and a target read up
-      # to its first `<` was the empty word (form W1).
+      # cuts it (word_sep).
       function wordend(j) {
-        while (j <= N) {
-          if ((X[j] == "<" || X[j] == ">") && C[j] == "c" && (j + 1) in PSN) { j = send[PSN[j+1]] + 2; continue }
-          if (word_sep(j)) break
-          j++
-        }
-        return (j > N + 1) ? N + 1 : j
+        while (j <= N && !word_sep(j)) j++
+        return j
       }
       function emit_pieces(   k, a, ln, pln) {
         buf = ""; held = 0; ln = 1; a = 1; pln = 1
         for (k = 1; k <= N; k++) {
-          if (!(k in DROP) && (C[k] == "p" || C[k] == "c" && DEP[k] == 1 && X[k] ~ /[;&|\n]/)) {
+          if (!(k in DROP) && (C[k] == "p" && DEP[k] == 1 || C[k] == "c" && DEP[k] == 1 && X[k] ~ /[;&|\n]/)) {
             piece(a, k - 1, pln)
             a = k + 1
             if (X[k] == "\n") ln++
@@ -978,9 +1055,19 @@ shell_lex() {
 
       # A byte that ends a word at the top level: unquoted blank or operator
       # in code that is not nested, or anything the shell does not read as a
-      # word (a comment, a heredoc operator or body).
+      # word (a comment, a heredoc operator or body). Whether a byte is
+      # nested is the depth of the walk (DEP) and nothing else: every
+      # parenthesis the shell reads as part of a word is a context there (an
+      # array value, a glob group, a process substitution, the subscript of
+      # an assignment in bash), and a case pattern close ends a word only at
+      # the top level. This function used to answer from the byte alone, and
+      # each word it cut where the walk did not was a statement no
+      # recognizer read: `a=(x) pip install x` ran with `x)` as the command,
+      # and the `)` of a case pattern inside `>$(case a in a) echo f;; esac)`
+      # ended the target there (forms WA1, WC3).
       function word_sep(k) {
-        if (C[k] == "m" || C[k] == "h" || C[k] == "b" || C[k] == "B" || C[k] == "p") return 1
+        if (C[k] == "h" || C[k] == "b" || C[k] == "B") return 1
+        if (C[k] == "m" || C[k] == "p") return DEP[k] == 1
         return C[k] == "c" && DEP[k] == 1 && X[k] ~ /[ \t\n;&|()<>]/
       }
       function mark(a, z,   k) { for (k = a; k <= z; k++) A[k] = 1 }
@@ -1020,11 +1107,12 @@ shell_lex() {
           else if (execmode && w ~ /^-[a-z]+$/) { if (w ~ /a$/) takes = 1; hit = 1 }
           else if (cmdmode && w == "-p") hit = 1
           else if (timemode && w == "-p") hit = 1
-          else if (assignword(w)) hit = 1
+          else if (assignat(s, k)) hit = 1
           else if (w == "env") { envmode = 1; hit = 1 }
           else if (w == "exec") { envmode = 0; execmode = 1; cmdmode = 0; hit = 1 }
           else if (w == "command") { envmode = 0; cmdmode = 1; execmode = 0; hit = 1 }
           else if (w == "time") { envmode = 0; timemode = 1; continue }
+          else if (shz && zprecmd(w)) { envmode = 0; hit = 1 }
           else if (opener(w) || shz && zopener(w) || w == "coproc") { envmode = 0; continue }
           else { atstart = 0; envmode = 0; continue }
           mark(s, k - 1)
@@ -1044,8 +1132,25 @@ shell_lex() {
       # subshell: what may follow `function NAME` and `coproc NAME` as a body.
       function cbody(w) { return w ~ /^(if|while|until|for|select|case|[[][[])$/ }
       function zopener(w) { return w == "}" || w == "always" }
-      # A word that assigns. It stays with the command it prefixes.
-      function assignword(w) { return w ~ /^[A-Za-z_][A-Za-z0-9_]*=/ }
+      # The precommand modifiers only zsh reads: a word before a command that
+      # changes how it is run and is no command itself (`noglob pip install
+      # x` runs the install). The manual lists six; `command` and `exec` are
+      # read in every reading, with their options, in prefixes().
+      function zprecmd(w) { return w == "-" || w == "builtin" || w == "nocorrect" || w == "noglob" }
+      # Whether the word at bytes s..k-1 assigns: the byte after its `=`, or
+      # 0. A name, a subscript whose close the lexing found (SUBC), `=` or
+      # `+=`. An assignment stays with the command it prefixes. A regex over
+      # the word read `a[b[1]]=x` and `a["]"]=x` as commands, and `a+=x` and
+      # `a[1]=x` were not listed at all, so the install after each was an
+      # argument (forms WA7, WA15-WA17).
+      function assignat(s, k,   p) {
+        p = s
+        if (X[p] !~ /[A-Za-z_]/) return 0
+        while (p < k && X[p] ~ /[A-Za-z0-9_]/) p++
+        if (p < k && X[p] == "[") { if (!(p in SUBC) || SUBC[p] >= k) return 0; p = SUBC[p] + 1 }
+        if (p < k && X[p] == "+") p++
+        return (p < k && X[p] == "=") ? p + 1 : 0
+      }
       # Where each command starts, for the stmts view, in the reading rs. The
       # walk follows the shell grammar word by word and keeps st set while the
       # next word stands where the shell reads a command name. The blank
@@ -1092,17 +1197,17 @@ shell_lex() {
             }
             else if (op == "<" || op == ">") {
               fh = 0
-              # `<(` and `>(` are process substitutions, whose `(` opens a
-              # command; anything else is a redirection.
               # A redirection that comes first is the start of its command.
-              if (X[k+1] != "(") {
-                rd = 1
-                if (st && !pre) { CS[k] = 1; mark_start(k, B) }
-                if (st) pre = 1
-                if (op == ">" && X[k+1] == "|") k++
-              }
+              # (The `<` or `>` that opens a process substitution is no
+              # operator: it is nested, with the word it starts.)
+              rd = 1
+              if (st && !pre) { CS[k] = 1; mark_start(k, B) }
+              if (st) pre = 1
+              if (op == ">" && X[k+1] == "|") k++
             }
             else if (op == "(") {
+              for (j = k + 1; j <= N && (X[j] == " " || X[j] == "\t"); j++) ;
+              if (!(st && !pre) && !fh && fn != 2 && cop != 2 && !(zr && fr == 2) && X[j] != ")" && !(X[k+1] == "(" && (k + 2) in AR) && !(k in CPO) && !(k in GLO)) BSF[rs]++
               # A subshell that is a function body (`f() ( ... )`, `function
               # f ( ... )`, and in bash `coproc NAME ( ... )`) starts a
               # command after a word, so the start is marked before it, as
@@ -1113,7 +1218,7 @@ shell_lex() {
               # body glued to the head (`f()(pip install x)`) has no blank to
               # mark, so the `(` itself is the start, as a case close glued
               # to its arm is.
-              if ((fh || fn == 2 || br && cop == 2) && !(X[k+1] == "(" && (k + 2) in AR) && X[k-1] != "<" && X[k-1] != ">") {
+              if ((fh || fn == 2 || br && cop == 2) && !(X[k+1] == "(" && (k + 2) in AR)) {
                 for (j = k + 1; j <= N && (X[j] == " " || X[j] == "\t"); j++) ;
                 if (X[j] != ")") {
                   CS[k] = 1
@@ -1178,8 +1283,9 @@ shell_lex() {
           # the mark is a separator, reads it the same way.
           if (cop == 1) cop = (w == "{") ? 0 : 2
           if (opener(w) || zr && zopener(w)) { cop = 0; continue }
-          if (assignword(w)) { pre = 1; continue }
+          if (assignat(s, k)) { pre = 1; continue }
           if (w == "time") { tm = 1; continue }
+          if (zr && zprecmd(w)) continue
           if (w == "function") { fn = 1; continue }
           if (w == "for" || w == "select" || zr && w == "foreach") { fr = 1; continue }
           if (zr && w == "repeat") { rp = 1; continue }
@@ -1187,6 +1293,7 @@ shell_lex() {
           if (w == "coproc") { cop = 1; continue }
           if (w == "case") { cs = 1; st = 0; continue }
           if (zr && substr(w, 1, 1) == "(" && (s + 1) in AR) continue
+          for (j = s; j < k; j++) if (j in WPO) { BSF[rs]++; break }
           st = 0
         }
       }
@@ -1197,8 +1304,10 @@ shell_lex() {
       # the lexing has said DIVERGE already.
       function starts_all(   j) {
         starts(policy, BND)
-        if (!shb || div) return
+        if (!shb) return
         starts("zsh", BZ); starts("dash", BD)
+        walks_fail()
+        if (div) return
         for (j in BZ) if (!(j in BND)) { div = 1; return }
         for (j in BD) if (!(j in BND)) { div = 1; return }
         for (j in BND) if (!(j in BZ) || !(j in BD)) { div = 1; return }
@@ -1235,6 +1344,86 @@ shell_lex() {
         if (k < 1) return
         if (C[k] == "c" && DEP[k] == 1 && X[k] ~ /[\n;&|(]/) return
         B[t] = 1
+      }
+      # The walk checks its own answers. The lexing decides which `(` is part
+      # of a word, and partly by the bytes before it (cmdpos, namehead,
+      # wordstart); the walk decides where a command may start from the
+      # grammar. Where the two disagree, one of them misread the command, and
+      # which one cannot be told from here. BSF counts, per walk, the two
+      # ways they can: a `(` the lexing left an operator where the walk has
+      # no command position, no function head and no short-form list, and a
+      # word parenthesis inside the word the walk reads as a command name.
+      # (An arithmetic `((`, a case pattern `(` and a zsh glob word the
+      # lexing marked are operators the walk expects, CPO and GLO.) Only the
+      # bash reading asks, and only when its three walks all count one: a
+      # `(` that zsh alone reads where a command stands (`foreach i (1)`) is
+      # a form of that shell, not a misreading. Then the reading is failed --
+      # the mark the guard settles as UNDECIDED for a command that names a
+      # package manager -- never guessed. This closes nothing by itself: each
+      # form found this way got its own rule (the `!` in cmdpos), and the
+      # check stays for the next one.
+      function walks_fail() { if (BSF["bash"] && BSF["zsh"] && BSF["dash"]) smfail() }
+      function smfail() { if (smark != "" && !smdone) { print "failed" >> smark; smdone = 1 } }
+      # Which word the `(` at byte j is part of: "a" an array value, "z" a
+      # zsh `=(...)`, "g" a glob group or qualifier, "" none -- an operator
+      # (see the `(` rule in the main loop). A `(` is part of a word only
+      # glued to one: after a byte that ends no token. A line continuation is
+      # no byte. An escaped byte, a closing quote and the close of a
+      # substitution are bytes of a word whatever they are, so the `(` after
+      # one is a glob (zsh; no other shell parses it): read by the byte
+      # alone, `\)(` was an operator after a separator, and the view read
+      # again, where the escape is `_`, was a word (random input in
+      # scan-contract). An empty `()` is a function head, never a glob.
+      function wparen(j,   k, p, pc, s) {
+        k = j
+        while (k > 2 && C[k-1] == "l") k -= 2
+        if (k < 2) return ""
+        p = X[k-1]; pc = C[k-1]
+        if (pc == "e" || pc == "q" || (k - 1) in WC) return (shd || X[j+1] == ")") ? "" : "g"
+        if (pc != C[j] || p ~ /[ \t\n;&|()<>]/) return ""
+        if (p == "=") {
+          if (wordstart(k - 1)) return "z"
+          for (s = k - 1; s > 1 && C[s-1] == C[j] && X[s-1] !~ /[ \t\n;&|()<>]/; s--) ;
+          if (assignat(s, k) == k) return "a"
+        }
+        if (!shd && X[j+1] != ")" && p != "$" && !cmdpos(j)) return "g"
+        return ""
+      }
+      # The `>` that closes a zsh numeric range glob opened by the `<` at byte
+      # j, the way zsh looks ahead for one: digits, `-`, digits, `>`. 0 when
+      # the bytes are not one.
+      function numglob(j,   k) {
+        k = j + 1
+        while (k <= N && X[k] ~ /[0-9]/) k++
+        if (X[k] != "-") return 0
+        k++
+        while (k <= N && X[k] ~ /[0-9]/) k++
+        return (k <= N && X[k] == ">") ? k : 0
+      }
+      # Whether the `[` at byte j follows a name that starts a word: `NAME[`.
+      function subname(j,   k) {
+        k = j - 1
+        while (k >= 1 && X[k] ~ /[A-Za-z0-9_]/ && C[k] == C[j]) k--
+        return k < j - 1 && X[k+1] ~ /[A-Za-z_]/ && wordstart(k + 1)
+      }
+      # The byte after the `]` that closes the subscript opened just before
+      # k, the way bash pairs them: nested brackets count, and an escape, a
+      # quote, `$(...)`, `${...}` and backticks are stepped over whole. 0
+      # when there is none.
+      function la_sub(k,   depth, cc) {
+        depth = 0
+        while (k <= N) {
+          cc = X[k]
+          if (cc == "\\") { k += 2; continue }
+          if (cc == "\047") { k = la_sq(k + 1); continue }
+          if (cc == "\042") { k = la_dq(k + 1); continue }
+          if (cc == "`") { k = la_bq(k + 1); continue }
+          if (cc == "$" && (X[k+1] == "(" || X[k+1] == "{")) { k = la_close(k + 2, X[k+1] == "(" ? ")" : "}"); continue }
+          if (cc == "[") depth++
+          else if (cc == "]") { if (depth > 0) depth--; else return k + 1 }
+          k++
+        }
+        return 0
       }
       # The `)` at k closes an empty `()`: a function head.
       function emptyparen(k,   j) {
@@ -1283,13 +1472,18 @@ shell_lex() {
       }
       # Whether byte j stands where a command starts, by the words before it.
       # A line continuation is skipped like a blank: the shell removes it.
+      # A reserved word is one only as a word of its own: read by the byte,
+      # the `!` of `f!(x)` put a command after it, and the extglob target
+      # `>f!(x)` between `pip` and `install` was an operator `(` that took
+      # the verb away (form WE2); the `do` of `>f-do(.)` did the same.
       function cmdpos(j,   k, w) {
         k = j - 1
         while (k >= 1 && (X[k] == " " || X[k] == "\t" || C[k] == "l")) k--
-        if (k < 1 || X[k] ~ /[\n;&|(!{)`]/) return 1
+        if (k < 1 || X[k] ~ /[\n;&|()`]/) return 1
+        if (X[k] ~ /[!{]/) return wordstart(k)
         w = ""
         while (k >= 1 && X[k] ~ /[a-z]/) { w = X[k] w; k-- }
-        return w ~ /^(if|then|else|elif|while|until|do|time)$/
+        return w ~ /^(if|then|else|elif|while|until|do|time)$/ && wordstart(k + 1)
       }
       # Whether byte j follows the NAME of `function NAME` or `coproc NAME`,
       # where bash 5 reads a compound command (see cbody). Asked where a
@@ -1319,7 +1513,7 @@ shell_lex() {
         }
         if (a) { i = j + dollar + 1; push("A"); adol[d] = dollar; return }
         if (dollar) { i = j + 1; push("S") }
-        else { i = j + 1; delete PS[d, par[d] + 1]; delete PS[d, par[d] + 2]; delete GL[d, par[d] + 1]; delete GL[d, par[d] + 2]; par[d] += 2 }
+        else { i = j + 1; delete GL[d, par[d] + 1]; delete GL[d, par[d] + 2]; par[d] += 2 }
       }
       # The look-ahead bash and zsh make at `((`: from byte k to the first `)`
       # not nested in a parenthesis. 1 when another `)` follows it
@@ -1572,7 +1766,7 @@ shell_lex() {
             # so the inert rewrite finds the verb of `npm 2>/dev/null
             # install`; the body of a substitution in its target stays,
             # since the shell runs it.
-            else if (view == "live" && (k in DROP) && !(k in KEEP) && (cl == "c" && DEP[k] == 1 || cl == "e")) put(" ")
+            else if (view == "live" && (k in DROP) && !(k in KEEP) && (cl == "c" && (DEP[k] == 1 || (k in PSB)) || cl == "e")) put(" ")
             # A statement ends only at a top-level separator: not inside a
             # substitution, an expansion or arithmetic, and not in a
             # redirection operator (`>|`, `<&-`, `2>&1`). command_statements

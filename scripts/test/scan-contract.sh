@@ -875,6 +875,143 @@ for form in '>!f pip i' 'pip >/dev/null i' '{fd}>&2 pip i' '< <(true) pip i'; do
 done
 pass "redirections: a process substitution target is one word whose body is a payload, a {varname} or number glued in front is part of the operator, a heredoc's too, and the recognizers read them blanked wherever they stand"
 
+# Where a word ends is one answer: the depth of the lexer walk. The shell's
+# grammar puts parentheses inside words, and each is a context on the walk's
+# stack, so every byte up to its close is nested and no reader keeps a byte
+# set of its own:
+#
+#   - the value of an array assignment, `NAME=(...)`, `NAME+=(...)`, its
+#     elements read as words anywhere are (comments, quotes, substitutions);
+#   - zsh `=(...)` at the start of a word, whose body runs and is a payload;
+#   - a process substitution, with the `<` or `>` that opens it;
+#   - a glob group or qualifier glued to a word (zsh; bash 3.2 inside a
+#     substitution), where the bash reading says DIVERGE: dash reads an
+#     operator there;
+#   - in the bash reading, the subscript of an assignment word, `NAME[...]=`:
+#     bash pairs the brackets whatever they hold, zsh and dash end the word
+#     at a blank inside, and the bash reading says DIVERGE at one.
+#
+# A case pattern close ends a word only at the top level: inside a
+# substitution it is nested with the rest of the body. An assignment word is
+# a name, a subscript and `=` or `+=`. The zsh precommand modifiers are
+# prefixes and starts in the zsh reading alone.
+#
+# Each of these was read short by a reader with its own byte set, and the
+# word after it was a command no recognizer read: `a=(x) pip install x` ran
+# with `x)` in the command's place.
+word_inner='b;c|d&e f'
+word_inner_nested='b_c_d_e f'
+check_word_nested() { # readings label prefix suffix
+  local reading got inner
+  for reading in $1; do
+    got=$(SAFEDEPS_READING="${reading}" capture stmts_view "$3${word_inner}$4")
+    inner="${got:${#3}:${#word_inner}}"
+    [[ "${inner}" == "${word_inner_nested}" ]] || fail "word depth (${reading}): $2: the bytes inside [$3...$4] read as [${inner}], and every separator there is nested (expected [${word_inner_nested}])"
+  done
+}
+check_word_nested "${all}" "an array value" 'a=(' ') pip i'
+check_word_nested "${all}" "an array append" 'a+=(' ') pip i'
+check_word_nested "${all}" "an array value after a subscript" 'a[1,2]=(' ') pip i'
+check_word_nested "${all}" "an array value that is an argument" 'declare -a a=(' ')'
+check_word_nested "${all}" "zsh =(...)" 'cat =(' ') x'
+check_word_nested "${all}" "a process substitution" 'cat <(' ') x'
+check_word_nested "${all}" "a process substitution that is a target" 'pip > >(' ') i'
+check_word_nested "bash zsh" "a glob group glued to a word" 'ls x(' ')'
+check_word_nested "bash zsh" "a glob group after a closing quote" "ls 'x'(" ')'
+check_word_nested "bash zsh" "a glob group after an escaped byte" 'ls \)(' ')'
+check_word_nested "bash zsh" "a glob group after a substitution" 'ls $(x)(' ')'
+check_word_nested "bash" "a subscript in bash" 'a[' ']=x pip i'
+# What is not a word parenthesis keeps its separators at the top level.
+check_stmts "${all}" "a subshell is no word" \
+  '(b;c) | (d&e)' '(b;c) | (d&e)'
+check_stmts "dash" "dash has no glob group: the ( is an operator" \
+  'ls x(b;c)' 'ls x(b;c)'
+check_stmts "zsh dash" "a blank inside a subscript ends the word outside bash" \
+  'a[b;c]=x' 'a[b;c]=x'
+check_stmts "${all}" "a # among array elements opens a comment, and the value closes after it" \
+  $'a=(x # c)\ny) pip i' "a=(x$(sp 6)y) pip i"
+check_stmts "bash zsh" "a # inside a glob group glued to a word is none" \
+  'ls x(a #b) # c' "ls x(a #b)$(sp 4)"
+check_stmts "bash" "a # inside a bash subscript is none" \
+  'a[1 #2]=x pip i' 'a[1 #2]=x pip i'
+check_stmts "${all}" "a case pattern close inside a substitution starts nothing" \
+  'x=$(case a in a) b;; esac) pip i' 'x=$(case a in a) b__ esac) pip i'
+check_stmts "${all}" "and at the top level it still does" \
+  'case a in a) pip i;; esac' 'case a in a);pip i;_ esac'
+check_unprefixed "${all}" "an array value is a prefix, blanks and all" \
+  'a=( x y ) b+=(z) pip i' 'pip i'
+check_unprefixed "${all}" "an array value with a comment and a newline inside" \
+  $'a=(x # c\ny) pip i' 'pip i'
+check_unprefixed "${all}" "an append, an element and a nested subscript are assignments" \
+  'a+=x b[1]=y c[d[1]]+=z e["]"]=w pip i' 'pip i'
+check_unprefixed "bash" "a subscript with a blank is one word in bash" \
+  'a[1 + 1]=x pip i' 'pip i'
+check_unprefixed "zsh dash" "and the command, cut at the blank, in zsh and dash" \
+  'a[1 + 1]=x pip i' 'a[1 + 1]=x pip i'
+check_unprefixed "${all}" "a name with a subscript and no = assigns nothing" \
+  'a[1] pip i' 'a[1] pip i'
+check_unprefixed "${all}" "a value that holds a case runs on to the close of its substitution" \
+  'x=$(case a in a) echo f;; esac) pip i' 'pip i'
+check_unprefixed "${all}" "so does a target, and a target that is a process substitution" \
+  '>$(case a in a) echo f;; esac) < <(case a in a) true;; esac) pip i' 'pip i'
+check_unprefixed "${all}" "a target between a command and its arguments" \
+  'pip >$(case a in a) echo f;; esac) i' "pip$(sp 32)i"
+check_unprefixed "${all}" "zsh =(...) is one word, here a target" \
+  '< =(true; true) pip i' 'pip i'
+check_view substs_view "${all}" "and its body is a payload" \
+  'cat =(pip i) > =(npm i)' $'pip i\nnpm i\n'
+check_unprefixed "bash zsh" "a glob qualifier glued to a target is part of it" \
+  '>/dev/null(N) pip i' 'pip i'
+check_unprefixed "dash" "to dash the ( after the target is an operator" \
+  '>/dev/null(N) pip i' '(N) pip i'
+check_unprefixed "bash zsh" "a group glued behind a ! or a reserved word's letters is part of the word" \
+  'pip >f!(x) i; pip >f-do(.) i' "pip$(sp 8)i; pip$(sp 10)i"
+check_unprefixed "zsh" "the zsh precommand modifiers go, in any order, after exec too" \
+  'noglob pip i; - nocorrect pip i; builtin pip i; exec - pip i' 'pip i; pip i; pip i; pip i'
+check_unprefixed "bash dash" "and are commands outside zsh" \
+  'noglob pip i; - nocorrect pip i; builtin pip i' 'noglob pip i; - nocorrect pip i; builtin pip i'
+check_stmts "zsh" "a zsh precommand modifier is followed by a start" \
+  'noglob pip i; echo noglob pip i' 'noglob;pip i; echo noglob pip i'
+for form in 'a[1 + 1]=x pip i' '>/dev/null(N) pip i' 'pip >f!(x) i' 'noglob pip i' '- pip i' "ls 'x'(N)"; do
+  stmts_diverges "${form}" || fail "word depth: the bash reading of [${form}] says no DIVERGE, and the shells do not read that word the same way"
+done
+for form in 'a=(x y) pip i' 'a[1]=x pip i' 'a+=x pip i' 'x=$(case a in a) echo f;; esac) pip i' '< =(true) pip i' 'cat <(a; b)' 'ls file[0-9].txt'; do
+  stmts_diverges "${form}" && fail "word depth: the bash reading of [${form}] says DIVERGE, and every reading reads that word the same way"
+done
+
+# The walk checks its own answers (walks_fail in the lexer): a `(` the lexing
+# left an operator where none of the bash reading's three walks has a
+# command, and a word parenthesis inside the word the walks read as the
+# command name, fail the reading. The mark is the one a failed scanner
+# leaves, so the guard settles it as UNDECIDED for a command that names a
+# package manager. The forms that must not fail are every place the shells
+# do read a `(`: a subshell where a command stands, a function head and
+# body, the zsh short forms, a case pattern, arithmetic, a glob word.
+walk_fails() { # text -> 0 when the bash reading of the view marks the scan failed
+  local f rc=1
+  f=$(mktemp "${TMPDIR:-/tmp}/safedeps-walk.XXXXXX")
+  SAFEDEPS_READING=bash SAFEDEPS_SCAN_MARK="${f}" "$1" "$2" > /dev/null
+  [[ -s "${f}" ]] && rc=0
+  rm -f "${f}"
+  return "${rc}"
+}
+for form in 'pip ((x) y) i' 'echo a ((b) c)' '(a) (pip i)' 'pip(N) i' 'x(a) pip i'; do
+  for v in stmts_view unprefixed_view; do
+    walk_fails "${v}" "${form}" || fail "walk check (${v}): the bash reading of [${form}] is not failed, and its walks have no command where that ( stands"
+  done
+done
+for form in '(pip i)' 'a && (pip i)' '! (pip i)' 'time (pip i)' '{ (pip i) }' 'if (true) then pip i; fi' \
+    'f() ( pip i )' 'f()(pip i)' 'function f ( pip i )' 'coproc foo ( pip i )' 'coproc (pip i)' \
+    'for i (1) pip i' 'foreach i (1) pip i; end' 'for ((i=0;i<1;i++)) { pip i; }' 'if ((1)) { pip i; }' \
+    'case x in (x) pip i;; esac' 'case x in x) (pip i);; esac' 'x=$( (a) (b) )' 'echo a (b)' 'ls *(N) x(N)' \
+    '[[ a == (a|b) ]] && pip i' '[[ a =~ ^(a|b)$ ]] && pip i' 'declare -a a=(x y)' 'a=(x) pip i' \
+    'cat <(a) >(b)' 'cat =(a)' 'f () { pip i; }' 'pip >f!(x) i' 'echo fix(scope): x'; do
+  for v in stmts_view unprefixed_view; do
+    walk_fails "${v}" "${form}" && fail "walk check (${v}): the bash reading of [${form}] is failed, and a shell reads that ( where it stands"
+  done
+done
+pass "words: every parenthesis the shell puts inside a word is nested in the walk, a case pattern close ends a word only at the top level, assignment words and zsh precommand modifiers are read as such, and the walk fails a reading whose ( it cannot place"
+
 # The statement split (command_statements) reads the stmts view and keeps no
 # rule of its own for `&>`. It used to keep an `&` next to `>` inside the
 # statement in every reading, so in the dash reading of `echo a &>/dev/null
