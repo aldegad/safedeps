@@ -70,7 +70,19 @@
     "cat <<EOF | sh\npip install evil==6.6.6\nEOF",
     "printf 'pip install evil==1.0.0' | sh; echo done",
     "npx -y echo-cli@1.0.0 pip install evil==6.6.6 | sh",
-    "sh -c \"echo \\\"a\\\"; pip install requests==2.0.0\""
+    "sh -c \"echo \\\"a\\\"; pip install requests==2.0.0\"",
+    ".venv/bin/pip install requests==2.0.0",
+    "$VENV/bin/pip install requests==2.0.0",
+    "\"$VENV\"/bin/pip install requests==2.0.0",
+    "case x in x)/usr/bin/pip install requests==2.0.0;; esac",
+    "/usr/bin/pip>/dev/null install requests==2.0.0",
+    "/usr/bin/env pip install requests==2.0.0",
+    "/usr/bin/env -i ./.venv/bin/pip install requests==2.0.0",
+    "node_modules/.bin/npm install left-pad@1.3.0",
+    "npm ci;",
+    "(cd sub && npm install)",
+    "env -S 'pip install requests==2.0.0'",
+    "printf 'pip install evil==6.6.6' | dash"
   ],
   "controls": [
     "ls -la",
@@ -106,7 +118,10 @@
       "npm install --prefix ../other left-pad@1.3.0",
       "npm ci",
       "npm ci # rebuild the lockfile",
-      "sh -c \"echo \\\"a\\\"; pip install requests==2.0.0\""
+      "sh -c \"echo \\\"a\\\"; pip install requests==2.0.0\"",
+      ".venv/bin/pip install requests==2.0.0",
+      "/usr/bin/env pip install requests==2.0.0",
+      "npm ci;"
     ],
     "controls": [
       "ls -la",
@@ -115,7 +130,9 @@
     "variants": [
       "npm install left-pad@1.3.0 && npm run build",
       "pip install requests==2.0.0",
-      "npm install left-pad@1.3.0", "eval \"npm install left-pad@1.3.0\""]
+      "npm install left-pad@1.3.0",
+      "eval \"npm install left-pad@1.3.0\""
+    ]
   },
   "approvals": [
     [
