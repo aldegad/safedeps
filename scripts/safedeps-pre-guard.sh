@@ -1267,7 +1267,7 @@ shell_lex() {
       # CS gets the first byte of each command, its prefixes included: the
       # first word, or the redirection operator or file descriptor before it.
       # prefixes() starts there.
-      function starts(rs, B, CS,   k, s, w, op, st, pre, rd, fn, fr, fra, inp, rp, dbr, cop, tm, cs, zr, br, fh, j, pn, PST, body, HC, cw, PCOND) {
+      function starts(rs, B, CS,   k, s, w, op, st, pre, rd, fn, fr, fra, inp, rp, dbr, cop, tm, cs, zr, br, fh, j, pn, PST, body, HC, cw, PCOND, pcw, acond) {
         zr = (rs == "zsh"); br = (rs == "bash")
         st = 1; pre = 0; rd = 0; fn = 0; fr = 0; fra = 0; inp = 0; rp = 0; dbr = 0; cop = 0; tm = 0; cs = 0; fh = 0; k = 1; pn = 0
         while (k <= N) {
@@ -1334,8 +1334,7 @@ shell_lex() {
                 if (X[k-1] == " " || X[k-1] == "\t") mark_start(k, B)
                 else if (k > 1 && ((fh || fn == 2 || br && cop == 2 || (k - 1) in HC) && X[k-1] == ")" || C[k-1] == "p" || !word_sep(k - 1))) B[k] = 1
               }
-              if (!(X[k+1] == "(" && (k + 2) in AR)) { PST[++pn] = body; PCOND[pn] = cw }
-              cw = 0
+              if (!(X[k+1] == "(" && (k + 2) in AR)) { PST[++pn] = body; PCOND[pn] = cw; cw = 0 }
               if (X[k+1] == "(" && (k + 2) in AR) { }
               else if (zr && fr == 2 && !fra) { inp = 1; fr = 0 }
               else { st = 1; pre = 0; rd = 0; fn = 0; fr = 0; rp = 0; cop = 0; tm = 0 }
@@ -1347,7 +1346,9 @@ shell_lex() {
               # In zsh the condition of `if`, `elif`, `while` and `until` may
               # be an arithmetic command or a subshell with the body right
               # after it (the short forms), so its close is a head close too.
-              if (k in ACL) { if (fr == 2 && fra || zr) HC[k] = 1 }
+              # Only there: an arithmetic command elsewhere closes no head
+              # (`((echo "a))b") )`, where zsh closes it early, runs nothing).
+              if (k in ACL) { if (fr == 2 && fra || zr && acond) HC[k] = 1; acond = 0 }
               else if (inp) { inp = 0; st = 1; HC[k] = 1 }
               else if (emptyparen(k)) { st = 1; fn = 0; fh = 1 }
               else if (cs == 3) st = 1
@@ -1415,8 +1416,10 @@ shell_lex() {
           # (1)pip install x`, `for ((...))pip install x`, `if ((1))pip ...`)
           # stands where a command does with no byte before it to carry the
           # start: a `;` written over the `)` would leave the view unclosed.
-          # The reading is failed there (UNDECIDED), never passed.
-          if (!pre && s > 1 && X[s-1] == ")" && ((s - 1) in HC || (s - 1) in ACL) && !opener(w) && !(zr && zopener(w)) && w != "do") smfail()
+          # The reading is failed there (UNDECIDED), never passed: in its own
+          # walk only: in the zsh walk the bash reading runs for comparison
+          # it says DIVERGE instead, which brings the zsh reading in.
+          if (!pre && s > 1 && X[s-1] == ")" && (s - 1) in HC && !opener(w) && !(zr && zopener(w)) && w != "do") { if (rs == policy) smfail(); else div = 1 }
           if (!pre) { CS[s] = 1; mark_start(s, B) }
           pre = 0
           # The word after `coproc` is a command to zsh and to bash, unless
@@ -1424,7 +1427,7 @@ shell_lex() {
           # read on as at any other start, so that the view read again, where
           # the mark is a separator, reads it the same way.
           if (cop == 1) cop = (w == "{") ? 0 : 2
-          cw = 0
+          pcw = cw; cw = 0
           if (opener(w) || zr && zopener(w)) { cop = 0; cw = (w ~ /^(if|elif|while|until)$/); continue }
           if (assignat(s, k)) { pre = 1; continue }
           if (w == "time") { tm = 1; continue }
@@ -1435,7 +1438,7 @@ shell_lex() {
           if (w == "[[") { dbr = 1; continue }
           if (w == "coproc") { cop = 1; continue }
           if (w == "case") { cs = 1; st = 0; continue }
-          if (zr && substr(w, 1, 1) == "(" && (s + 1) in AR) continue
+          if (zr && substr(w, 1, 1) == "(" && (s + 1) in AR) { acond = pcw; continue }
           for (j = s; j < k; j++) if (j in WPO) { BSF[rs]++; break }
           st = 0
         }

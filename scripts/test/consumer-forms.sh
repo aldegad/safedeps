@@ -1148,6 +1148,11 @@ expect_not_approved "a subshell glued to a short if's subshell condition" 'if (t
 expect_undecided "a command glued to a short if's subshell condition" 'if (true)pip install evil==1.0.0'
 expect_not_approved "then glued to a subshell condition" 'if (true)then pip install evil==1.0.0; fi'
 pass "the condition of a zsh short if closes a head"
+# An arithmetic command that is no head closes none: zsh closes
+# `((echo "a))b") )` early and parses none of it, while bash runs the line
+# after it. Failing zsh's reading there made the whole command UNDECIDED
+# (shell-reading form B1 caught it).
+expect_not_approved "an install after a (( only bash reads" $'((echo "a))b") )\n# it\'s\n((1<<2))\npip install evil==1.0.0\n2\n# \' ))'
 
 # More places the review of 83de40c found: more places
 # after a closed head, a subshell first in more process substitutions, more
