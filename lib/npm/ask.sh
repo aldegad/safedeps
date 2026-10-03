@@ -211,28 +211,28 @@ safedeps_npm_fetch_read() {
 }
 
 # The fetch facts of `npm <args>` run in <dir>, asked of npm, as one line of
-# JSON. Called as `<dir> <until> <npm> <env words> -- <args>`, like
+# JSON. Called as `<dir> <until> <env words> -- <args>`, like
 # safedeps_npm_install_target, which asks the same question beside its own
 # for an install statement. The post-verify hook asks it again after the
 # command, of the directory it read.
 safedeps_npm_fetch_facts() {
-  local dir="$1" until="$2" npm="$3" tmp
+  local dir="$1" until="$2" tmp
   local -a env_words=()
-  shift 3
+  shift 2
   while [[ $# -gt 0 && "$1" != -- ]]; do
     env_words+=("$1")
     shift
   done
   [[ $# -gt 0 ]] && shift
-  if ! command -v "${npm}" >/dev/null 2>&1; then
-    jq -nc --arg why "${npm} is not on the PATH this hook runs with, so safedeps cannot ask npm which registry it fetches from" '{unknown: $why}'
+  if ! command -v npm >/dev/null 2>&1; then
+    jq -nc --arg why "npm is not on the PATH this hook runs with, so safedeps cannot ask npm which registry it fetches from" '{unknown: $why}'
     return 0
   fi
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/safedeps-npm-ask.XXXXXX") || {
     jq -nc '{unknown: "safedeps could not make a scratch directory to ask npm which registry it fetches from"}'
     return 0
   }
-  safedeps_npm_ask_start "${tmp}/config" "${dir}" "${npm}" "${env_words[@]+"${env_words[@]}"}" -- \
+  safedeps_npm_ask_start "${tmp}/config" "${dir}" "${env_words[@]+"${env_words[@]}"}" -- \
     config ls "$@" --json
   if ! safedeps_npm_ask_wait "${until}"; then
     jq -nc '{unknown: "npm did not say which registry it fetches from before the deadline"}'
@@ -243,24 +243,78 @@ safedeps_npm_fetch_facts() {
   rm -rf "${tmp}"
 }
 
-# Starts `<npm> <args>` in <dir>, in the background. <npm> is the npm word the
-# command uses (`npm`, or a path to one). <out> gets stdout and <out>.err
-# stderr. The words before `--` go to env(1) in front of npm, so
+# Whether <name>, in the environment npm starts with, chooses code that runs
+# when npm starts. An ask never carries one, whatever the command says
+# (safedeps_npm_ask_start), and the pre-guard counts a command that sets or
+# unsets one with code it runs from a file (scripts/safedeps-pre-guard.sh,
+# code_changer).
+#
+# Each name is in the set because it runs code in npm or node at start, not
+# because of what it is called (measured with node 26.7.0 and npm 11.19.0):
+#
+#   PATH                 which npm runs, and which node npm's `#!/usr/bin/env
+#                        node` starts. A fake npm first on it ran three times
+#                        per judgment before this.
+#   NODE_OPTIONS         `--require` and `--import` load a module before npm.
+#   NODE_PATH            a module npm requires and does not find beside it.
+#   OPENSSL_CONF,        node reads OpenSSL's configuration at start, and a
+#   OPENSSL_MODULES      provider it names is a shared library node loads.
+#   LD_*, DYLD_*         the dynamic loader's preloads and library paths.
+#   BASH_ENV             a file bash runs first, where npm is a bash shim
+#                        (asdf's is).
+#   npm_config_node_options
+#                        npm passes it to the scripts it runs as NODE_OPTIONS
+#                        (@npmcli/config set-envs.js). The asks run no
+#                        script, so it is here so that nothing depends on that.
+#
+# NODE_ENV is not one: node does not read it. NODE_EXTRA_CA_CERTS and the TLS
+# settings change whom npm trusts on the network, and the asks do not fetch.
+safedeps_npm_code_name() {
+  case "$1" in
+    PATH|NODE_OPTIONS|NODE_PATH|OPENSSL_CONF|OPENSSL_MODULES|LD_*|DYLD_*|BASH_ENV) return 0 ;;
+  esac
+  # npm reads its environment settings in any case.
+  [[ "$1" =~ ^[Nn][Pp][Mm]_[Cc][Oo][Nn][Ff][Ii][Gg]_[Nn][Oo][Dd][Ee]_[Oo][Pp][Tt][Ii][Oo][Nn][Ss]$ ]]
+}
+
+# Starts `npm <args>` in <dir>, in the background. <out> gets stdout and
+# <out>.err stderr. The words before `--` go to env(1) in front of npm, so
 # `NAME=value`, `-u NAME` and `-i` reach npm the way the command would have
 # given them. The pid is appended to SAFEDEPS_NPM_ASK_PIDS.
 #
+# The npm is always this hook's own, found on this hook's PATH, and it starts
+# with none of the command's code names (safedeps_npm_code_name): an
+# assignment or an `-u` of one is dropped, and this hook's PATH goes last, so
+# it holds under `-i` too. The ask used to carry the command's own: `PATH=<dir>
+# npm install x`, `NODE_OPTIONS=--require=<file> npm install x` and
+# `<dir>/npm install x` each ran the code the command chose while the gate was
+# still judging it, three times per judgment, and a command the gate then
+# denied ran it all the same (measured). The gate must not run a command's code
+# to decide whether to let it run. What the answer then misses is the
+# command's own npm, and the pre-guard says so (code_changer).
+#
 # `exec`, so the pid is npm's own and the deadline can stop it.
 safedeps_npm_ask_start() {
-  local out="$1" dir="$2" npm="$3"
+  local out="$1" dir="$2" word
   local -a env_words=()
-  shift 3
+  shift 2
   while [[ $# -gt 0 && "$1" != -- ]]; do
-    env_words+=("$1")
+    word="$1"
     shift
+    if [[ "${word}" == -u && $# -gt 0 && "$1" != -- ]]; then
+      safedeps_npm_code_name "$1" || env_words+=(-u "$1")
+      shift
+      continue
+    fi
+    if [[ "${word}" == *=* && "${word}" != -* ]] && safedeps_npm_code_name "${word%%=*}"; then
+      continue
+    fi
+    env_words+=("${word}")
   done
   [[ $# -gt 0 ]] && shift
+  [[ -z "${PATH+x}" ]] || env_words+=("PATH=${PATH}")
   ( cd "${dir}" 2>/dev/null || { printf 'cannot enter %s\n' "${dir}" >&2; exit 126; }
-    exec env "${env_words[@]+"${env_words[@]}"}" "${npm}" "$@" "${SAFEDEPS_NPM_ASK_QUIET[@]}"
+    exec env "${env_words[@]+"${env_words[@]}"}" npm "$@" "${SAFEDEPS_NPM_ASK_QUIET[@]}"
   ) > "${out}" 2> "${out}.err" &
   SAFEDEPS_NPM_ASK_PIDS+=("$!")
 }
@@ -374,9 +428,9 @@ safedeps_npm_unmask() {
 # ls --json` asked beside the two below, in parallel and under the same
 # deadline. One answer that is `?` does not make the other one `?`.
 #
-# Called as `<dir> <until> <npm> <env words> -- <args>`. The arguments are the
-# install's own; the words before `--` go to env(1) and <npm> is the npm word
-# (safedeps_npm_ask_start). <until> is a $SECONDS value shared by every install
+# Called as `<dir> <until> <env words> -- <args>`. The arguments are the
+# install's own, and the words before `--` go to env(1) in front of this
+# hook's npm (safedeps_npm_ask_start). <until> is a $SECONDS value shared by every install
 # in one command.
 #
 # Two asks, in parallel, with the same arguments:
@@ -399,9 +453,9 @@ safedeps_npm_unmask() {
 # loadLocalPrefix reads `workspaces` only to stop at a false, and never reads
 # `workspace`. A false is kept.
 safedeps_npm_install_target() {
-  local dir="$1" until="$2" npm="$3" tmp prefix root why word fetch config_refused_workspace
+  local dir="$1" until="$2" tmp prefix root why word fetch config_refused_workspace
   local -a env_words=() args=()
-  shift 3
+  shift 2
   while [[ $# -gt 0 && "$1" != -- ]]; do
     env_words+=("$1")
     shift
@@ -430,9 +484,9 @@ safedeps_npm_install_target() {
     args+=("${word}")
   done
 
-  if ! command -v "${npm}" >/dev/null 2>&1; then
-    printf '?\t%s is not on the PATH this hook runs with, so safedeps cannot ask npm where this install lands\n' "${npm}"
-    jq -nc --arg why "${npm} is not on the PATH this hook runs with, so safedeps cannot ask npm which registry this install fetches from" '{unknown: $why}'
+  if ! command -v npm >/dev/null 2>&1; then
+    printf '?\tnpm is not on the PATH this hook runs with, so safedeps cannot ask npm where this install lands\n'
+    jq -nc --arg why "npm is not on the PATH this hook runs with, so safedeps cannot ask npm which registry this install fetches from" '{unknown: $why}'
     return 0
   fi
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/safedeps-npm-ask.XXXXXX") || {
@@ -440,11 +494,11 @@ safedeps_npm_install_target() {
     jq -nc '{unknown: "safedeps could not make a scratch directory to ask npm which registry this install fetches from"}'
     return 0
   }
-  safedeps_npm_ask_start "${tmp}/prefix" "${dir}" "${npm}" "${env_words[@]+"${env_words[@]}"}" -- \
+  safedeps_npm_ask_start "${tmp}/prefix" "${dir}" "${env_words[@]+"${env_words[@]}"}" -- \
     prefix "${args[@]+"${args[@]}"}" --global=false --location=project
-  safedeps_npm_ask_start "${tmp}/root" "${dir}" "${npm}" "${env_words[@]+"${env_words[@]}"}" -- \
+  safedeps_npm_ask_start "${tmp}/root" "${dir}" "${env_words[@]+"${env_words[@]}"}" -- \
     root "${args[@]+"${args[@]}"}"
-  safedeps_npm_ask_start "${tmp}/config" "${dir}" "${npm}" "${env_words[@]+"${env_words[@]}"}" -- \
+  safedeps_npm_ask_start "${tmp}/config" "${dir}" "${env_words[@]+"${env_words[@]}"}" -- \
     config ls "${args[@]+"${args[@]}"}" --json
   if ! safedeps_npm_ask_wait "${until}"; then
     printf '?\tnpm did not say where this install lands within %ss\n' "${SAFEDEPS_NPM_ASK_PRE_SECONDS}"
@@ -522,7 +576,7 @@ safedeps_npm_install_target() {
   # at the member and read the member's .npmrc, and `--prefix` would move the
   # global config file with it; either answers a different install.
   if [[ "${config_refused_workspace}" == true ]]; then
-    fetch=$(safedeps_npm_fetch_facts "${prefix}" "${until}" "${npm}" "${env_words[@]+"${env_words[@]}"}" -- \
+    fetch=$(safedeps_npm_fetch_facts "${prefix}" "${until}" "${env_words[@]+"${env_words[@]}"}" -- \
       "${args[@]+"${args[@]}"}")
   fi
   # A `--prefix` that does not exist yet is created by the install. npm's path

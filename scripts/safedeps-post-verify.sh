@@ -598,16 +598,17 @@ npm_fetch_facts_load() {
   # `--workspace` and refuses `config` (ENOWORKSPACES), which happens when the
   # install itself said `--no-workspaces` and stayed in the member. Not
   # `--prefix`: on the command line that also moves the global config file.
-  post=$(safedeps_npm_fetch_facts "${PROJECT_DIR}" $(( SECONDS + SAFEDEPS_NPM_ASK_POST_SECONDS )) npm -- \
+  post=$(safedeps_npm_fetch_facts "${PROJECT_DIR}" $(( SECONDS + SAFEDEPS_NPM_ASK_POST_SECONDS )) -- \
     --workspaces=false)
   NPM_FETCH_FACTS=$(jq -cn --argjson pre "${pre}" --argjson post "${post}" '[$pre, $post]' 2>/dev/null) \
     || NPM_FETCH_FACTS='[{"unknown":"safedeps could not read npm'"'"'s answers about which registry this install fetches from"}]'
 }
 
 # Whether the pre-guard's answer is unknown only because the command ran code
-# this gate does not read (`source`, `.`, `eval`) ahead of the install, with
-# npm answering the public registry for everything else
-# (resolve_reading_targets). Whoever controls that code already runs code in
+# this gate does not read (`source`, `.`, `eval`) ahead of the install, or
+# code the command chooses for npm to run with (a PATH or NODE_OPTIONS of its
+# own, an npm named by its path), with npm answering the public registry for
+# everything else (resolve_reading_targets). Whoever controls that code already runs code in
 # the agent's shell, so this install's scripts are withheld but its bytes are
 # not recorded machine-wide (record_npm_withheld), and its tree is not left
 # observed. Where npm named another registry the pre-guard keeps that answer,
@@ -761,7 +762,7 @@ npm_rebuild_unrecorded() {
     printf 'safedeps could not make a scratch directory to ask npm\n'
     return 1
   }
-  safedeps_npm_ask_start "${tmp}/query" "${dir}" npm -- query '*' "${NPM_PROJECT_SCOPE[@]}" --prefix "${dir}"
+  safedeps_npm_ask_start "${tmp}/query" "${dir}" -- query '*' "${NPM_PROJECT_SCOPE[@]}" --prefix "${dir}"
   if ! safedeps_npm_ask_wait $(( SECONDS + SAFEDEPS_NPM_ASK_POST_SECONDS )); then
     printf 'npm query did not answer within %ss\n' "${SAFEDEPS_NPM_ASK_POST_SECONDS}"
     rm -rf "${tmp}"
@@ -952,7 +953,7 @@ describe_fetched_elsewhere() {
   fi
   printf '%s' "install scripts were not run in ${PROJECT_DIR} because ${where}. The install is kept"
   [[ -n "${registries}" ]] || ! npm_fetch_sourced \
-    || printf '. %s' "safedeps did not run them this time because code the command ran first can change npm's environment where safedeps cannot see it. It has not recorded these bytes as withheld: whoever controls that code already runs code in this shell, so a record would protect nothing against them. The next install npm says fetches from the public npm registry rebuilds them as usual"
+    || printf '. %s' "safedeps did not run them this time because the command runs code safedeps does not read or run (a file it sources, an eval, or npm under a PATH or NODE_OPTIONS of its own), and that code can change npm's environment where safedeps cannot see it. It has not recorded these bytes as withheld: whoever controls that code already runs code in this shell, so a record would protect nothing against them. The next install npm says fetches from the public npm registry rebuilds them as usual"
   printf '. %s' "If you trust ${trust}, confirm with the user before running \`npm rebuild ${names}\` yourself; do not rebuild without asking"
   [[ ${#NPM_WITHHELD_RECORDED[@]} -eq 0 ]] || printf '. %s' "$(npm_withheld_scope)"
 }
@@ -1811,7 +1812,7 @@ npm_withheld_judge() {
   if npm_fetch_sourced; then
     facts=$(jq -c '[.[] | select((type == "object" and .cause == "sourced") | not)]' <<< "${facts}" 2>/dev/null) \
       || facts="${NPM_FETCH_FACTS}"
-    log_advisory "post-verify: not recording the bytes this install brought into ${PROJECT_DIR} as withheld for want of npm's answer: the command ran code (source, . or eval) before the install, and whoever controls that code already runs code in this shell. Their install scripts were not run this time."
+    log_advisory "post-verify: not recording the bytes this install brought into ${PROJECT_DIR} as withheld for want of npm's answer: the command runs code safedeps does not read or run (source, . or eval before the install, or npm under a PATH or NODE_OPTIONS of its own), and whoever controls that code already runs code in this shell. Their install scripts were not run this time."
   fi
   inert=$(jq -r '.ignore_scripts_injected == true' "${META_FILE}" 2>/dev/null || printf 'false')
   # shellcheck disable=SC2016 # a jq program: jq expands its $names
