@@ -1479,13 +1479,14 @@ EOF
 chmod +x "${bs_slow_bin}/find"
 sleep 3
 
-bs_entries() { find "$1/pending/backstop" -type f 2>/dev/null | wc -l | tr -d ' '; }
+bs_entries() { { find "$1/pending/backstop" -type f 2>/dev/null || true; } | wc -l | tr -d ' '; }
 bs_entries_before=$(bs_entries "${SAFEDEPS_HOME}")
 bs_lock_pre=$(grammar_pre "${bs_lock_wt}" "${bs_grep}")
 [[ -z "${bs_lock_pre}" ]] || fail "the pre-guard lets a grep run (${bs_lock_pre})"
-[[ "$(bs_entries "${SAFEDEPS_HOME}")" == "$(( bs_entries_before + 2 ))" ]] || fail "the pre-guard leaves a trace entry and its baseline for a grep the backstop pattern matches"
+bs_entries_pre=$(bs_entries "${SAFEDEPS_HOME}")
 bs_lock_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${bs_lock_wt}" "${bs_grep}")
 bs_assert_untraced "${bs_lock_wt}" "${bs_lock_post}" "a grep after a lockfile change outside the gate"
+[[ "${bs_entries_pre}" == "$(( bs_entries_before + 2 ))" ]] || fail "the pre-guard leaves a trace entry and its baseline for a grep the backstop pattern matches"
 [[ "$(bs_entries "${SAFEDEPS_HOME}")" == "${bs_entries_before}" ]] || fail "the backstop removes the trace entry and its baseline it read"
 grammar_pre "${bs_lock_wt}" "ls -la" > /dev/null
 [[ "$(bs_entries "${SAFEDEPS_HOME}")" == "${bs_entries_before}" ]] || fail "the pre-guard leaves no trace entry for a command the backstop pattern does not match"

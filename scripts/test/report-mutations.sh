@@ -257,7 +257,7 @@ $4; node_modules was restored from the confirmed snapshot
       M_NEW='    printf '"'"'the trace baseline %s does not exist'"'"' "${baseline}"
     return 0
   fi
-  printf '"'"'no trace in %s'"'"' "${PROJECT_DIR}"; return 1'
+  printf '"'"'no trace in %s: the mutant checked nothing'"'"' "${PROJECT_DIR}"; return 1'
       ;;
     TraceAlways)
       M_FILE=scripts/safedeps-post-verify.sh
