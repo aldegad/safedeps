@@ -182,25 +182,30 @@ ledger 게이트나 사전 비행 체크에 실패하면 해당 명령은 실행
 | `Rollback snapshot: <id>, taken before this command; no confirmed snapshot names it` | 프로젝트에 확정 스냅샷이 없었습니다. 파일은 명령 전 상태로 돌아갔습니다. 그 상태는 아무도 검증하지 않았고, 거부된 패키지가 남아 있을 수 있습니다. |
 | `restored <path>` / `removed <path>` | 파일이 이제 스냅샷과 같거나, 경로가 없습니다. safedeps 가 행동한 뒤에 확인했습니다. |
 | `not restored <path>: cp exit <n>; ...` / `not removed <path>: rm exit <n>; <path> exists` | 그 단계가 실패했습니다. 줄은 종료 코드와 그 경로를 검사한 결과를 말합니다. 디렉터리 안에 무엇이 남았는지는 말하지 않습니다. `rm -rf` 는 지울 수 있는 것을 지운 뒤에 실패합니다. |
+| `not restored <path>: <path> exists and is not a regular file` | 그 경로가 디렉터리이거나 다른 종류의 파일이라서 safedeps 가 그 위에 복사하지 않았습니다. 디렉터리에 `cp` 하면 그 안에 파일을 씁니다. |
 | `refused restore of <path>: ...` / `refused removal of <path>: ...` | 그 경로가 심볼릭 링크이고, 줄이 링크가 가리키는 곳을 말합니다. safedeps 는 링크를 따라가지 않고, 읽은 프로젝트 밖에 쓰지 않습니다. |
-| `kept <path>` 와 그 아래 검사 줄 | 명령이 `node_modules` 에 썼다는 것을 어떤 검사도 보이지 못해서 지우지 않았습니다. 아래 줄들이 그 검사입니다. |
+| `kept <path>` 와 그 아래 검사 줄 | 명령이 `node_modules` 에 썼다는 것을 어떤 검사도 보이지 못해서 지우지 않았습니다. 아래 줄들이 그 검사입니다. `node_modules` 가 심볼릭 링크면 다음 줄이 그 사실과 링크가 가리키는 곳을 말하고, 검사는 링크가 가리키는 곳을 읽습니다. |
 | 이유 줄 하나, 그 다음 `removed <path>/node_modules` | 명령이 `node_modules` 에 썼다는 것을 처음 보인 검사입니다. 설치 흔적, 명령 직전 스냅샷과 달랐던 node manifest·lockfile, 그 스냅샷의 목록에 없는 항목, 그 스냅샷보다 새로운 것, 또는 명령 전 스냅샷이 아예 없음 가운데 하나입니다. |
 | `<path> exists` / `<path> does not exist` / `<path>/package.json has the key workspaces` | 롤백 뒤 프로젝트 루트에 있는 것입니다. safedeps 는 패키지를 재설치하지 않고, 재설치가 어디에 쓸지 판단하지 않습니다. 프로젝트 자신의 `node_modules` 만 지우고, 워크스페이스 멤버의 것은 지우지 않습니다. |
-| `The rollback changed nothing.` | 어떤 단계도 쓰거나 지우지 않았습니다. |
+| `The rollback changed nothing.` | 어떤 단계도 `cp` 나 `rm` 을 돌리지 않았습니다. 돌다가 실패한 단계는 바꾼 것이 없다고 하지 않습니다. `rm -rf` 는 지울 수 있는 것을 지운 뒤에 실패합니다. |
 | `no install trace in <dir>: ...` | 그 디렉터리의 npm lockfile 둘 다 명령 동안 바뀌지 않았습니다. 거기에는 이 설치의 흔적이 없습니다. |
 | `safedeps added --ignore-scripts to this install` | pre-guard 가 플래그를 요청했고, post 훅이 받은 명령에 그 플래그가 있습니다. 설치 중에 npm 은 설치 스크립트를 돌리지 않았습니다. |
 | `safedeps asked for --ignore-scripts on this install; the command this hook received does not carry it` | 런타임이 고쳐 쓰기를 적용하지 않았습니다. 설치의 스크립트가 돌았다고 보십시오. |
+| `safedeps did not add --ignore-scripts to this install; the command this hook received carries it` | safedeps 는 플래그를 요청하지 않았고(Codex 에서는 할 수 없습니다), 명령의 모든 npm 설치가 스스로 그 플래그를 답니다. 설치 중에 npm 은 설치 스크립트를 돌리지 않았습니다. |
 | `safedeps did not add --ignore-scripts to this install; the command this hook received does not carry it` | 설치가 무실행이 아니었습니다(Codex 에서는 그렇게 만들 수 없습니다). 명령 중에 npm 이 설치 자신의 스크립트를 돌렸고, 거부된 패키지의 것도 포함됩니다. |
+| `... and did not tell whether the command this hook received carries it` | safedeps 가 명령에서 플래그를 읽어 내지 못했습니다. 설치에 플래그가 붙은 것을 직접 보지 않는 한 설치 스크립트가 돌았다고 보십시오. |
 | `... did not run npm rebuild: <fact>` | safedeps 는 프로젝트 루트의 `package.json`·lockfile·`node_modules` 가 링크가 아니고 이 설치의 흔적이 있는 디렉터리에서만 rebuild 합니다. 이 줄은 safedeps 가 한 일을 말합니다. 설치 스크립트가 돌았는지는 말하지 않습니다. 명령이 스스로 rebuild 했다면 스크립트는 이미 돌았습니다. |
 | `... ran npm rebuild: exit <n>` | safedeps 가 돌린 rebuild 가 그 종료 코드로 실패했습니다. |
 
-끝나지 않은 롤백의 보고도 같은 모양입니다. `Owner:` 는 그 프로세스가 일하고 있지 않다는 것을 보인 검사입니다. 돌고 있지 않거나, 좀비이거나, 그 pid 가 나중에 시작한 다른 프로세스의 것이거나, 멈춰 있습니다. 멈춘 프로세스는 죽지 않았습니다. 프로세스를 다시 이어 주면 롤백도 이어지므로, 프로젝트를 고치기 전에 그 프로세스를 어떻게 할지 먼저 정하십시오. `Checked at the time of this report` 아래에는 `node_modules` 가 무엇인지와, 감시 대상 파일 가운데 스냅샷과 다른 것만 적힙니다. 그 파일들을 확인한 뒤에 재설치하십시오.
+"Carries it" 는 명령 어딘가의 글자가 아니라 명령의 npm 설치마다 읽습니다. npm 이 그 설치 자신의 단어에서 `ignore-scripts` 를 참으로 읽으면, 즉 `--ignore-scripts` 나 `--ignore-scripts=true` 로 적혀 있으면 그 설치가 플래그를 단 것입니다. `--ignore-scripts=false` 는 플래그를 단 것이 아니고, 설치 뒤의 `echo --ignore-scripts` 나 주석도 그렇습니다. safedeps 는 셸이 정할 것이 없는 명령만 이렇게 읽습니다. 따옴표, `$`, glob, 주석, heredoc 이 없어야 합니다. 그 밖의 명령이나 설치끼리 답이 갈리는 명령에서는 줄이 safedeps 가 판정하지 않았다고 말합니다.
+
+끝나지 않은 롤백의 보고도 같은 모양입니다. 그 `Rollback snapshot:` 줄은 보고를 쓰는 시점에 프로젝트의 confirmed 기록이 그 스냅샷을 가리키는지를 롤백 메시지처럼 말합니다. `Owner:` 는 그 프로세스가 일하고 있지 않다는 것을 보인 검사입니다. 돌고 있지 않거나, 좀비이거나, 그 pid 가 나중에 시작한 다른 프로세스의 것이거나, 멈춰 있습니다. 멈춘 프로세스는 죽지 않았습니다. 프로세스를 다시 이어 주면 롤백도 이어지므로, 프로젝트를 고치기 전에 그 프로세스를 어떻게 할지 먼저 정하십시오. `Checked at the time of this report` 아래에는 `node_modules` 가 무엇인지와, 감시 대상 파일 가운데 스냅샷과 다른 것만 적힙니다. 그 파일들을 확인한 뒤에 재설치하십시오.
 
 공개 레지스트리가 아닌 레지스트리에 대한 경고와 safedeps 가 rebuild 하지 않은 트리에 대한 경고는 지금도 문장입니다. rebuild 하기 전에 사용자에게 확인하라고 말하며, 그것은 의도입니다.
 
 ## Why "reorg"?
 
-이름은 블록체인에서 **reorganization(reorg)**, 즉 확인되지 않은 블록열을 무효화하고 마지막으로 확인된 안전 상태로 체인을 되돌리는 개념에서 가져왔습니다. `safedeps`도 모든 설치를 동일하게 취급합니다. 확인되지 않은 블록 후보처럼, 공급망 점검 배터리를 통과할 때까지 설치는 잠정 상태에 머뭅니다. 실제 설치 결과가 다르면 툴이 **reorg**를 실행해 lock file 과 `package.json` 을 마지막 안전 스냅샷으로 되돌리고 `node_modules` 를 지웁니다. 다음 설치가 게이트를 지나 다시 깝니다.
+이름은 블록체인에서 **reorganization(reorg)**, 즉 확인되지 않은 블록열을 무효화하고 마지막으로 확인된 안전 상태로 체인을 되돌리는 개념에서 가져왔습니다. `safedeps`도 모든 설치를 동일하게 취급합니다. 확인되지 않은 블록 후보처럼, 공급망 점검 배터리를 통과할 때까지 설치는 잠정 상태에 머뭅니다. 실제 설치 결과가 다르면 툴이 **reorg**를 실행합니다. lock file 과 `package.json` 을 마지막 안전 스냅샷으로, 프로젝트에 아직 그것이 없으면 명령 직전 상태로 되돌립니다. 명령이 `node_modules` 에 쓴 것이 보이면 `node_modules` 를 지우고, 다음 설치가 게이트를 지나 다시 깝니다.
 
 하지만 reorg는 **최후의 방어선(backstop)**이지 최전선이 아닙니다. 대부분의 위험한 설치는 여기까지 오기 전에 멈춥니다. 사전 승인 게이트가 승인되지 않았거나 의심 패키지를 실행 전에 차단하고, Claude Code에서는 설치를 **비활성**(`--ignore-scripts`) 모드로 실행해 closure가 깨끗함을 확인할 때까지 라이프사이클 스크립트를 실행하지 않기 때문입니다. reorg는 잔여 케이스(승인된 직접 패키지가 승인되지 않았거나 취약한 전이적 패키지를 끌어오거나, advisory 계층을 우회해 래핑된 명령이 넘어왔을 때)에만 동작하며, 이 경우에도 스크립트가 실행되기 전에 파일을 되돌립니다.
 
@@ -213,7 +218,7 @@ ledger 게이트나 사전 비행 체크에 실패하면 해당 명령은 실행
 | **블록 후보(Block candidate)** | `npm install` 이전에 찍힌 스냅샷 |
 | **블록 검증(Block validation)** | 설치 후 효과 검사 (npm closure, scripts, lock diff, binaries) |
 | **최종 확정 / confirmation** | 검증된 설치 후 상태를 스냅샷으로 기록해 `~/.safedeps/confirmed_<dir hash>`에 쓴 것 |
-| **체인 재구성(Chain reorganization)** | 마지막 confirmed 스냅샷으로 rollback + `node_modules` 제거 |
+| **체인 재구성(Chain reorganization)** | 마지막 confirmed 스냅샷으로, 없으면 명령 직전 상태로 rollback, 명령이 `node_modules` 에 썼으면 `node_modules` 제거 |
 | **부모 해시 연결(Parent hash linking)** | 각 스냅샷 `_meta.json`의 `parent_snapshot_id` |
 | **체인 가지치기(Chain pruning)** | 오래된 미확정 스냅샷 정리, confirmed chain은 보존 |
 
