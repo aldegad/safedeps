@@ -1588,6 +1588,56 @@ grep -qx 'safedeps: suspicious dependency change detected; this hook found a rec
 cmp -s "${gone_c_wt}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "C: the backstop restores the confirmed lockfile"
 pass "a record whose snapshot has no meta file goes to the backstop, which rolls back to a confirmed snapshot"
 
+# A record that names no snapshot. The pre-guard always writes one, so an empty
+# id is a damaged pending state or an empty legacy current_snapshot_id. The
+# post hook used to exit there with nothing said, as it did for a missing meta.
+# Now advisory.log names the record, the record is set aside, and the backstop
+# judges the command, with a head that says the record was found and names no
+# snapshot. The oracle holds the advisory line once per such call and each
+# head to the record it claims.
+empty_line_of() {
+  printf "post-verify: the pre-guard's record %s names no snapshot; this hook set the record aside, and the command goes to the command-independent backstop" "$1"
+}
+
+# D: a pending state whose snapshot_id is "", an unapproved lockfile, and a
+# confirmed snapshot. The backstop rolls back to it.
+empty_wt=$(mktemp -d "${tmp_root}/empty-wt.XXXXXX")
+grammar_project "${empty_wt}"
+grammar_pre "${empty_wt}" "npm install fixture-parent@1.0.0" > /dev/null
+touch "${empty_wt}/package-lock.json"
+empty_first=$(PATH="${stub_bin}:${PATH}" grammar_post "${empty_wt}" "npm install fixture-parent@1.0.0 --ignore-scripts")
+[[ -z "${empty_first}" ]] || fail "D: the project has a confirmed snapshot (${empty_first})"
+grammar_pre "${empty_wt}" "npm install fixture-parent@1.0.0" > /dev/null
+empty_pending=$(grammar_pending "${empty_wt}")
+jq '.snapshot_id = ""' "${empty_pending}" > "${empty_pending}.edit" && mv "${empty_pending}.edit" "${empty_pending}"
+empty_line=$(empty_line_of "${empty_pending}")
+printf '%s\n' "${tampered_lock}" > "${empty_wt}/package-lock.json"
+empty_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${empty_wt}" "npm install fixture-parent@1.0.0 --ignore-scripts")
+grep -qx 'safedeps: suspicious dependency change detected; this hook found a record of this command from before it ran, and the record names no snapshot. A rollback ran.' <<< "$(post_message "${empty_post}")" \
+  || fail "D: the backstop rolls back, and says the record was found and names no snapshot (${empty_post})"
+[[ "$(grep -cF "${empty_line}" "${SAFEDEPS_HOME}/advisory.log")" == 1 ]] \
+  || fail "D: advisory.log names the record that names no snapshot once"
+[[ ! -e "${empty_pending}" ]] || fail "D: the record is set aside"
+cmp -s "${empty_wt}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "D: the backstop restores the confirmed lockfile"
+pass "a pending state that names no snapshot goes to the backstop, which rolls back to a confirmed snapshot"
+
+# E: the legacy record a pre-#5 pre-guard left, which the post hook still
+# reads: an empty current_snapshot_id for this project, an unapproved
+# lockfile, and no confirmed snapshot. The backstop flags the install.
+legacy_wt=$(mktemp -d "${tmp_root}/legacy-wt.XXXXXX")
+grammar_project "${legacy_wt}"
+: > "${SAFEDEPS_HOME}/current_snapshot_id"
+printf '%s\n' "$(cd -P "${legacy_wt}" && pwd -P)" > "${SAFEDEPS_HOME}/current_project_dir"
+legacy_line=$(empty_line_of "${SAFEDEPS_HOME}/current_snapshot_id")
+printf '%s\n' "${tampered_lock}" > "${legacy_wt}/package-lock.json"
+legacy_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${legacy_wt}" "npm install fixture-parent@1.0.0")
+grep -qx 'safedeps: suspicious dependency change detected; this hook found a record of this command from before it ran, and the record names no snapshot. No rollback ran.' <<< "$(post_message "${legacy_post}")" \
+  || fail "E: the backstop flags the unapproved lockfile, and says the record was found and names no snapshot (${legacy_post})"
+[[ "$(grep -cF "${legacy_line}" "${SAFEDEPS_HOME}/advisory.log")" == 1 ]] \
+  || fail "E: advisory.log names the legacy record that names no snapshot once"
+[[ ! -e "${SAFEDEPS_HOME}/current_snapshot_id" && ! -e "${SAFEDEPS_HOME}/current_project_dir" ]] || fail "E: the legacy record is set aside"
+pass "an empty legacy current_snapshot_id goes to the backstop, which flags an unapproved lockfile"
+
 # Two pre-guard calls in one project within one second have a snapshot each.
 # The id was `${TIMESTAMP}_${DIR_HASH}`, the same for both, so the second call
 # wrote its record and its copy of the lockfile over the first's: the first

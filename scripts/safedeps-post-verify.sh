@@ -1487,8 +1487,17 @@ else
   fi
 fi
 
+# A record that names no snapshot. The pre-guard always writes one
+# (claim_snapshot_id), so an empty id comes from a damaged pending state or an
+# empty legacy current_snapshot_id: a record exists and cannot be used. That
+# used to end the hook here with nothing said, as the missing meta below did,
+# so it goes the same way: advisory.log names the record, which is already
+# removed, and the backstop judges the command, with a head that says the
+# record was found and names no snapshot.
 if [[ "${BACKSTOP_INSTALL:-false}" != "true" && -z "${SNAPSHOT_ID}" ]]; then
-  exit 0
+  log_advisory "post-verify: the pre-guard's record ${RECORD_PATH} names no snapshot; this hook set the record aside, and the command goes to the command-independent backstop"
+  BACKSTOP_INSTALL=true
+  BACKSTOP_RECORD_EMPTY=true
 fi
 if [[ -z "${PROJECT_DIR}" ]]; then
   PROJECT_DIR=$(pwd)
@@ -2380,11 +2389,13 @@ check_npm_effect_closure() {
 
 # Why the backstop rolled nothing back, from the two tests it ran.
 # What the backstop's head says about the record of this command: none was
-# found, or one was and the snapshot it names has no meta file, which is what
-# sent it here.
+# found, or one was and the snapshot it names has no meta file, or one was and
+# it names no snapshot. The last two are what sent it here.
 backstop_record_clause() {
   if [[ "${BACKSTOP_RECORD_GONE:-false}" == true ]]; then
     printf 'this hook found a record of this command from before it ran, and the snapshot it names has no meta file'
+  elif [[ "${BACKSTOP_RECORD_EMPTY:-false}" == true ]]; then
+    printf 'this hook found a record of this command from before it ran, and the record names no snapshot'
   else
     printf 'this hook found no record of this command from before it ran'
   fi
@@ -2419,7 +2430,8 @@ report_snapshot_line() {
 #
 # The last one is said only where this hook found the pre-guard's record of
 # this command. The backstop runs because it found none, or found a pending
-# state whose snapshot, the record that line reads, has no meta file. "did not add"
+# state that names no snapshot or whose snapshot, the record that line reads,
+# has no meta file. "did not add"
 # said there was false whenever the record existed under a key this hook did
 # not compute (`sh -c 'npm ci'`, rewritten, kept its pending state under
 # another key; bamdori r18 F4). Without the record there is nothing to say
@@ -2474,7 +2486,8 @@ ${details}"
 
 run_command_independent_backstop() {
   # Reached when PreToolUse left no pending state for an install-looking command,
-  # or left one whose snapshot has no meta file (BACKSTOP_RECORD_GONE).
+  # or left one whose snapshot has no meta file (BACKSTOP_RECORD_GONE) or that
+  # names no snapshot (BACKSTOP_RECORD_EMPTY).
   # Detection is command-independent (the npm closure check reads the live
   # package-lock.json, not the command text); automatic rollback still needs a
   # prior confirmed-safe snapshot to restore from. Never silent — every path logs.
