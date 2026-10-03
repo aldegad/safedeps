@@ -139,7 +139,10 @@ else
   SAFEDEPS_NPM_ASK_PRE_SECONDS=0
   safedeps_npm_install_target() {
     printf '?\tlib/npm/ask.sh is unreadable, so safedeps cannot ask npm where this install lands\n'
+    printf '%s\n' '{"unknown":"lib/npm/ask.sh is unreadable, so safedeps cannot ask npm which registry this install fetches from"}'
   }
+  # Every answer is already unknown, and no cause is given to one.
+  safedeps_npm_code_name() { return 1; }
 fi
 
 # The workspace members' manifests, which a workspace install writes and a
@@ -150,6 +153,7 @@ if [[ -r "${SAFEDEPS_NPM_WORKSPACES_LIB}" ]]; then
   source "${SAFEDEPS_NPM_WORKSPACES_LIB}"
 else
   SAFEDEPS_SNAPSHOT_MEMBERS=members
+  SAFEDEPS_SNAPSHOT_NPM_TREE=npm-tree-record.json
   safedeps_snapshot_file_name() { printf '%s' "$1"; }
 fi
 
@@ -2488,7 +2492,8 @@ guard_npmrc_unrecorded() {
 }
 
 # Where each install statement in the command lands, one line per statement of
-# the command (command_statements), as `<kind>\035<dir>\035<why>\035<raw>`.
+# the command (command_statements), as
+# `<kind>\035<dir>\035<why>\035<fetch>\035<raw>`.
 # <kind> is `npm` for an npm CLI install that is not a runner,
 # `npm-unrecorded` for one no lockfile of the project records whatever lands
 # there (an .npmrc keeps it out of both lockfiles, or `npm link <pkg>` puts the
@@ -2499,6 +2504,9 @@ guard_npmrc_unrecorded() {
 # `global`, or `?` when the text does not say. <why> says why npm could not be
 # asked or answered `global`, or names the .npmrc file and setting that keep
 # the install off the record; it is empty otherwise.
+# <fetch> is an npm install's fetch facts, one line of JSON asked of npm with
+# the same words as <dir> (lib/npm/ask.sh): which registry it fetches from. It
+# is empty where npm was not asked, and the reason is then <why>.
 # <raw> is the statement as command_statements gives it.
 #
 # Every statement is listed, installs or not, because this is also the list of
@@ -2570,8 +2578,8 @@ resolve_install_targets() {
 # question. Every reading resolves the statements it reads, and where the
 # readings agree they ask the same question; each ask costs two npm processes
 # and up to its deadline. The answer is kept in the run's private memo
-# directory under the whole question -- the directory, the npm word, the
-# environment words and the arguments, everything but the deadline -- and a
+# directory under the whole question -- the directory, the environment words
+# and the arguments, everything but the deadline -- and a
 # hit also requires the stored question to equal this one byte for byte.
 guard_npm_install_target() {
   local question memo="" answer tmp
@@ -2591,15 +2599,141 @@ guard_npm_install_target() {
   fi
 }
 
+# Whether assignment word <word> holds the text the shell assigns: nothing the
+# shell decides at run time (the lexer's mark), and no tilde, which the shell
+# expands in an assignment's value at its start and after a colon.
+guard_assignment_literal() {
+  local value="${1#*=}"
+  [[ "$1" != *$'\001'* && "${value}" != '~'* && "${value}" != *':~'* ]]
+}
+
+# Whether <name> is exported in the environment this hook runs with, which is
+# the one the agent's shell inherits too.
+guard_name_inherited() {
+  local flags
+  flags=$(declare -p "$1" 2>/dev/null) || return 1
+  flags="${flags#declare -}"
+  [[ "${flags%% *}" == *x* ]]
+}
+
+# Carries assignment word <word> to every later npm install the caller
+# (resolve_reading_targets) asks npm about, in its npm_exports. The last value
+# a name was given stands. Fails, carrying nothing, when the value is not
+# literal or the command has a group or a subshell, where the assignment may
+# not reach the install.
+guard_carry_setting() {
+  local entry
+  local -a kept=()
+  [[ "${grouped}" != true ]] && guard_assignment_literal "$1" || return 1
+  for entry in "${npm_exports[@]+"${npm_exports[@]}"}"; do
+    [[ "${entry%%=*}" == "${1%%=*}" ]] || kept+=("${entry}")
+  done
+  npm_exports=("${kept[@]+"${kept[@]}"}" "$1")
+  npm_unsets="${npm_unsets// ${1%%=*} / }"
+}
+
+# Carries `unset <name>` to every later npm install the caller asks npm about,
+# as env(1)'s `-u <name>` (npm_unsets), and forgets what the command assigned
+# or exported to it before. Fails, carrying nothing, where guard_carry_setting
+# does: a group or a subshell, where the unset may not reach the install.
+guard_carry_unset() {
+  local name="$1" entry
+  local -a kept=()
+  [[ "${grouped}" != true ]] || return 1
+  for entry in "${npm_exports[@]+"${npm_exports[@]}"}"; do
+    [[ "${entry%%=*}" == "${name}" ]] || kept+=("${entry}")
+  done
+  npm_exports=("${kept[@]+"${kept[@]}"}")
+  kept=()
+  for entry in "${assigned_words[@]+"${assigned_words[@]}"}"; do
+    [[ "${entry%%=*}" == "${name}" ]] || kept+=("${entry}")
+  done
+  assigned_words=("${kept[@]+"${kept[@]}"}")
+  exported_names="${exported_names// ${name} / }"
+  [[ "${npm_unsets}" == *" ${name} "* ]] || npm_unsets+="${name} "
+}
+
+# Whether npm word <word>, in a statement run in <dir>, is this hook's own npm:
+# the one `command -v npm` finds here, by its directory as a physical path.
+guard_npm_word_is_hooks() {
+  local word="$1" dir="$2" hook here there
+  hook=$(command -v npm 2>/dev/null) || return 1
+  [[ "${hook}" == /* ]] || return 1
+  [[ "${word}" != "${hook}" ]] || return 0
+  here=$(cd "${dir}" 2>/dev/null && cd "${word%/*}/" 2>/dev/null && pwd -P) || return 1
+  there=$(cd "${hook%/*}/" 2>/dev/null && pwd -P) || return 1
+  [[ "${here}" == "${there}" ]]
+}
+
+# One assignment the caller's shell makes outside a command's own prefix:
+# <word>, exported by the statement when <exporting> is true, with a value the
+# statement keeps as written when <literal> is true. It sets the caller's
+# npm_exports, exports_unknown, exported_names, assigned_words, env_changer
+# and env_setting.
+#
+# Every name counts, whatever it names, because npm reads more of its
+# environment than npm_config_*: `export HOME=<dir>` sends npm to
+# <dir>/.npmrc, and so does the same assignment in front of npm, which the
+# statement's own reading below carries to the ask. The export branch carried
+# only npm_config_*, so `export HOME=<dir>; npm install x` was asked about
+# under the hook's HOME and fetched from <dir>/.npmrc's registry unseen.
+#
+# An exported value the gate cannot reproduce makes every later npm install's
+# directory unknown (exports_unknown). An assignment the statement does not
+# export reaches npm when the name is already exported, which the gate cannot
+# always tell. It is carried all the same: if it does not reach npm, npm runs
+# with the hook's environment, and the PostToolUse hook asks npm again with
+# exactly that, so one of the two answers is npm's either way. One whose value
+# is not literal is unknown where the name is exported here, and an
+# npm_config_* assignment is unknown as before (env_setting).
+guard_shell_assignment() {
+  local word="$1" exporting="$2" literal="$3" name="${1%%=*}" i
+  # A name that chooses npm's code is never carried, whatever its value: the
+  # ask runs this hook's own npm (code_changer).
+  if safedeps_npm_code_name "${name}"; then
+    [[ "${word}" != *=* ]] || code_changer="${name}="
+    return 0
+  fi
+  [[ "${literal}" == true ]] || word="${word%$'\001'}"$'\001'
+  if [[ "${word}" != *=* ]]; then
+    [[ "${exporting}" == true ]] || return 0
+    exported_names+="${name} "
+    # A name exported bare carries the value an assignment earlier in the
+    # command gave it: `HOME=<dir>; export HOME`.
+    word=""
+    for (( i = ${#assigned_words[@]} - 1; i >= 0; i-- )); do
+      [[ "${assigned_words[i]%%=*}" != "${name}" ]] || { word="${assigned_words[i]}"; break; }
+    done
+    [[ -n "${word}" ]] || return 0
+  else
+    assigned_words+=("${word}")
+    [[ "${exporting}" != true ]] || exported_names+="${name} "
+  fi
+  if [[ "${exported_names}" == *" ${name} "* ]]; then
+    guard_carry_setting "${word}" || exports_unknown="${word%$'\001'}"
+    return 0
+  fi
+  if ! guard_carry_setting "${word}" && guard_name_inherited "${name}"; then
+    env_changer="${name}="; env_setting="${env_changer}"
+  fi
+  if [[ "$(printf '%s' "${name}" | tr '[:upper:]' '[:lower:]')" == npm_config_* ]]; then
+    env_changer="${name}="; env_setting="${env_changer}"
+  fi
+  return 0
+}
+
 # The statements and where each lands (see resolve_install_targets). <text> is
 # the joined view of the command.
 resolve_reading_targets() {
   local text="$1" cwd="$2"
   local before stmt after words raw head target want kind manager tok value normalized in_env skip
-  local user_rc cli_global_off why run_dir answer local_prefix npm_word npm_unknown i
-  local dir="${cwd}" grouped=false env_userconfig=false exports_unknown=""
-  local npm_until="" here cond_dir="" depth=0 conditional statements pieces piece_at pw n=0 m k role
-  local -a toks=() npm_env=() npm_args=() npm_exports=() stmt_words=() mw=()
+  local user_rc cli_global_off why run_dir answer local_prefix npm_word npm_unknown i fetch cause
+  local dir="${cwd}" grouped=false env_userconfig=false exports_unknown="" exported_names=" "
+  local npm_until="" here cond_dir="" depth=0 conditional env_changer="" env_setting="" statements pieces piece_at pw n=0 m k role
+  local opts exporting literal ignore_env unset_names rc_home
+  local code_changer="" stmt_code changer npm_unsets=" "
+  local -a toks=() npm_env=() npm_args=() npm_exports=() stmt_words=() mw=() assigned_words=()
+  local -a env_opts=() env_inherit=() env_after=()
 
   command_scan_text "${text}" | judge_grep -q '[(){}`]' && grouped=true
   command_scan_text "${text}" | judge_grep -qEi 'npm_config_userconfig=' && env_userconfig=true
@@ -2619,10 +2753,15 @@ resolve_reading_targets() {
   while IFS=$'\035' read -r before stmt after words raw; do
     n=$(( n + 1 ))
     if [[ "${before}" == "?" ]]; then
-      printf '?\035?\035the command could not be split into statements (awk failed), so safedeps cannot tell where its installs land\035\n'
+      printf '?\035?\035the command could not be split into statements (awk failed), so safedeps cannot tell where its installs land\035\035\n'
       continue
     fi
-    kind=- target="" why=""
+    # Every field a statement prints starts empty here. `fetch` was reset only
+    # after the early `break`s, so a statement that left before it (a `printf`
+    # ahead of `npm install`) printed an unset variable, which bash 5 under
+    # `set -u` aborts on: every such command was denied fail-closed. bash 3.2
+    # read it as empty, or as the statement before's.
+    kind=- target="" why="" fetch=""
     # The directory a conditional `cd` entered holds only while every
     # separator since it is `&&`.
     [[ "${before}" == "&&" ]] || cond_dir=""
@@ -2685,24 +2824,138 @@ resolve_reading_targets() {
           fi
           break
           ;;
-        export)
-          # An npm setting exported earlier reaches every later npm, so the ask
-          # carries it too. One the shell decides at run time, or one exported
-          # where it may not reach the install (a group, a subshell), makes every
-          # later npm install's directory unknown.
-          for tok in "${toks[@]:1}"; do
-            [[ "${tok}" == *=* ]] || continue
-            value="${tok%%=*}"
-            [[ "$(printf '%s' "${value}" | tr '[:upper:]' '[:lower:]')" == npm_config_* ]] || continue
-            if [[ "${grouped}" == true || "${tok}" == *$'\001'* ]]; then
-              exports_unknown="${tok%$'\001'}"
+        export|declare|typeset|local|readonly)
+          # What a statement like this exports or assigns reaches every later
+          # npm, so the ask carries it too (guard_shell_assignment). Options
+          # come first. One that unexports (`export -n`, `declare +x`) or
+          # changes the value the shell stores (`declare -xi`, `-l`, `-u`)
+          # is a setting the gate reads but does not reproduce.
+          opts=""
+          for (( i = 1; i < ${#toks[@]}; i++ )); do
+            case "${toks[i]}" in
+              --) i=$(( i + 1 )); break ;;
+              [-+]?*) opts+="${toks[i]%$'\001'}" ;;
+              *) break ;;
+            esac
+          done
+          exporting=false
+          literal=true
+          [[ "${toks[0]}" != export ]] || exporting=true
+          case "${toks[0]}:${opts}" in
+            export:|export:-p|*:-x|*:-xr|*:-rx|*:-x-r|*:-r-x) exporting=true ;;
+            export:*|*:*+*|*:*x*)
+              env_changer="${toks[0]} ${opts}"; env_setting="${env_changer}"
+              break
+              ;;
+            *:|*:-r|*:-g|*:-rg|*:-gr|*:-r-g|*:-g-r) ;;
+            *) literal=false ;;
+          esac
+          for (( ; i < ${#toks[@]}; i++ )); do
+            tok="${toks[i]}"
+            # `export PATH+=:<dir>`: a code name is the ask's never to carry.
+            if [[ "${tok}" =~ ^([A-Za-z_][A-Za-z0-9_]*)\+= ]] && safedeps_npm_code_name "${BASH_REMATCH[1]}"; then
+              code_changer="${BASH_REMATCH[1]}+="
+              continue
+            fi
+            if [[ ! "${tok}" =~ ^[A-Za-z_][A-Za-z0-9_]*(=|$) || ( "${tok}" != *=* && "${tok}" == *$'\001' ) ]]; then
+              # A name the shell decides at run time, an append (`+=`), an
+              # array element: the value the install sees is not in the text.
+              if [[ "${exporting}" == true ]]; then
+                exports_unknown="${tok%$'\001'}"
+              else
+                env_changer="${toks[0]} ${tok%$'\001'}"; env_setting="${env_changer}"
+              fi
+              continue
+            fi
+            guard_shell_assignment "${tok}" "${exporting}" "${literal}"
+          done
+          break
+          ;;
+        # `unset NAME` reaches every later npm, so the ask carries it as `-u
+        # NAME` for every name it would carry an assignment of. An unset of a
+        # name that chooses npm's code is code the command chooses, like
+        # setting one (code_changer). `-f` unsets functions, which npm does not
+        # read. A name the shell decides at run time is unknown, as an export
+        # of one is.
+        unset)
+          opts=""
+          for (( i = 1; i < ${#toks[@]}; i++ )); do
+            case "${toks[i]}" in
+              --) i=$(( i + 1 )); break ;;
+              -?*) opts+="${toks[i]%$'\001'}" ;;
+              *) break ;;
+            esac
+          done
+          [[ "${opts}" != *f* ]] || break
+          for (( ; i < ${#toks[@]}; i++ )); do
+            tok="${toks[i]}"
+            if [[ ! "${tok}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+              exports_unknown="unset ${tok%$'\001'}"
+            elif safedeps_npm_code_name "${tok}"; then
+              code_changer="unset ${tok}"
             else
-              npm_exports+=("${tok}")
+              guard_carry_unset "${tok}" || exports_unknown="unset ${tok}"
             fi
           done
           break
           ;;
+        # Which registry npm fetches from is asked with the environment this
+        # gate can see: the statement's own words and the exports above. A
+        # statement that changes the environment where the text does not show
+        # it makes that answer a guess, and a guess here has no trace to catch
+        # it the way a wrong directory does: `source env.sh; npm install x`
+        # with npm_config_registry in env.sh would get an answer that names
+        # the registry the hook sees, not the one npm used. So every later npm
+        # install's registry is unknown, which costs a skipped rebuild, never a
+        # rollback (lib/npm/ask.sh, the fetch facts).
+        #
+        # Two kinds of statement do this, and the record of withheld bytes
+        # tells them apart (env_setting below): code this gate does not read
+        # (`source`, `.`, `eval`), and a setting it reads but cannot reproduce
+        # (`set -a`, `declare -x`, an npm_config_* assignment). Code whose own
+        # text names an npm setting is the second kind: `eval "export
+        # npm_config_registry=..."`, or `.` of a here-string or a process
+        # substitution that says it. The setting is in the command, so the
+        # reason a record would protect nothing (the code came from somewhere
+        # this gate does not read) does not hold. The text is read with quotes
+        # and backslashes dropped, which can only find more.
+        source|.|eval)
+          env_changer="${toks[0]}"
+          value="${stmt} ${toks[*]}"
+          value="${value//[\"\'\\]/}"
+          if [[ "${value}" =~ [Nn][Pp][Mm]_[Cc][Oo][Nn][Ff][Ii][Gg]_[A-Za-z0-9_]* ]]; then
+            env_setting="${toks[0]} ${BASH_REMATCH[0]}"
+          fi
+          break
+          ;;
+        set)
+          for tok in "${toks[@]:1}"; do
+            case "${tok}" in
+              -*a*|allexport)
+                env_changer="${toks[0]} ${tok}"; env_setting="${env_changer}"; break ;;
+            esac
+          done
+          break
+          ;;
       esac
+      # A statement of assignments alone sets shell variables, which reach
+      # npm when the name is exported (guard_shell_assignment).
+      # An append (`PATH+=:<dir>`) keeps a value the text does not show.
+      if [[ "${toks[0]}" =~ ^[A-Za-z_][A-Za-z0-9_]*\+?= ]]; then
+        value=true
+        for tok in "${toks[@]}"; do
+          [[ "${tok}" =~ ^[A-Za-z_][A-Za-z0-9_]*\+?= ]] || { value=false; break; }
+        done
+        if [[ "${value}" == true ]]; then
+          for tok in "${toks[@]}"; do
+            if [[ "${tok}" =~ ^([A-Za-z_][A-Za-z0-9_]*)\+=(.*)$ ]]; then
+              tok="${BASH_REMATCH[1]}=${BASH_REMATCH[2]%$'\001'}"$'\001'
+            fi
+            guard_shell_assignment "${tok}" false true
+          done
+          break
+        fi
+      fi
 
       command_is_dependency_install "${stmt}" || break
 
@@ -2711,11 +2964,21 @@ resolve_reading_targets() {
       # npm install x` is an npm install.
       normalized=$(normalize_install_text "${stmt}")
       # The npm word and its arguments. The words before npm go to env(1) in
-      # front of it when npm is asked below, and the words after it are npm's
-      # arguments, unchanged.
-      npm_env=("${npm_exports[@]+"${npm_exports[@]}"}")
+      # front of npm when npm is asked below, and the words after it are npm's
+      # arguments, unchanged. env(1) reads its options before any assignment,
+      # so they go first, and what the shell exports, or assigns in front of
+      # `env`, is passed only where `-i` and `-u` leave it. The npm asked is
+      # this hook's own, never the npm word, and a word that chooses npm's code
+      # is not passed (stmt_code, code_changer).
+      npm_env=()
+      env_opts=()
+      env_inherit=("${npm_exports[@]+"${npm_exports[@]}"}")
+      env_after=()
+      ignore_env=false
+      unset_names=" "
       npm_args=()
       npm_word=""
+      stmt_code=""
       npm_unknown="${exports_unknown}"
       in_env=false
       skip=false
@@ -2729,13 +2992,27 @@ resolve_reading_targets() {
         fi
         if [[ "${skip}" == true ]]; then
           skip=false
-          if [[ "${want}" == u ]]; then npm_env+=("${tok}"); fi
+          if [[ "${want}" == u ]]; then
+            env_opts+=(-u "${tok}"); unset_names+="${tok} "
+            ! safedeps_npm_code_name "${tok}" || stmt_code="env -u ${tok}"
+          fi
           want=""
+          continue
+        fi
+        # An assignment to a name that chooses npm's code is not carried, whatever
+        # its value: the ask runs this hook's own npm (code_changer).
+        if [[ "${tok}" =~ ^([A-Za-z_][A-Za-z0-9_]*)\+?= ]] && safedeps_npm_code_name "${BASH_REMATCH[1]}"; then
+          stmt_code="${BASH_REMATCH[1]}="
           continue
         fi
         [[ "${tok}" != *$'\001' ]] || { npm_unknown="${tok%$'\001'}"; continue; }
         case "${tok}" in
-          npm|*/npm) npm_word="${tok}"; continue ;;
+          npm) npm_word="${tok}"; continue ;;
+          */npm)
+            npm_word="${tok}"
+            guard_npm_word_is_hooks "${tok}" "${here}" || stmt_code="${tok}"
+            continue
+            ;;
           env) in_env=true; continue ;;
           command|exec) continue ;;
         esac
@@ -2743,18 +3020,37 @@ resolve_reading_targets() {
           case "${tok}" in
             -C|--chdir) skip=true; continue ;;
             --chdir=*) continue ;;
-            -u|--unset) npm_env+=(-u); skip=true; want=u; continue ;;
-            --unset=*) npm_env+=(-u "${tok#*=}"); continue ;;
-            -i|--ignore-environment) npm_env+=(-i); continue ;;
+            -u|--unset) skip=true; want=u; continue ;;
+            --unset=*)
+              env_opts+=(-u "${tok#*=}"); unset_names+="${tok#*=} "
+              ! safedeps_npm_code_name "${tok#*=}" || stmt_code="env ${tok}"
+              continue
+              ;;
+            # Without its environment, env finds npm on a PATH of its own.
+            -i|--ignore-environment) env_opts+=(-i); ignore_env=true; stmt_code="env ${tok}"; continue ;;
             -*) npm_unknown="env ${tok}"; continue ;;
           esac
         fi
         if [[ "${tok}" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
-          npm_env+=("${tok}")
+          # A tilde in the value is the shell's to expand, and the ask would
+          # hand npm the tilde.
+          guard_assignment_literal "${tok}" || { npm_unknown="${tok}"; continue; }
+          if [[ "${in_env}" == true ]]; then env_after+=("${tok}"); else env_inherit+=("${tok}"); fi
           continue
         fi
         npm_unknown="${tok}"
       done
+      npm_env=()
+      if [[ "${ignore_env}" != true ]]; then
+        for tok in ${npm_unsets}; do npm_env+=(-u "${tok}"); done
+      fi
+      npm_env+=("${env_opts[@]+"${env_opts[@]}"}")
+      if [[ "${ignore_env}" != true ]]; then
+        for tok in "${env_inherit[@]+"${env_inherit[@]}"}"; do
+          [[ "${unset_names}" == *" ${tok%%=*} "* ]] || npm_env+=("${tok}")
+        done
+      fi
+      npm_env+=("${env_after[@]+"${env_after[@]}"}")
       # What the statement's command is, and the directories its words name,
       # are the manager's grammar (safedeps_manager_read): `npm --prefix x
       # install` is an install, which the regexes read as `npm x`, and only
@@ -2790,6 +3086,7 @@ resolve_reading_targets() {
         done
       fi
       why=""
+      fetch=""
 
       [[ "${kind}" == npm ]] || break
       # `npm link <pkg>` installs a package the global tree lacks into npm's
@@ -2808,8 +3105,8 @@ resolve_reading_targets() {
       # through a symlink, where npm installs in the member and the copy
       # climbed to the root. Whether it is global is part of that answer, so
       # no spelling of `--global` is read here.
-      # The words before npm go to env(1) in front of it, and the words after
-      # it are npm's arguments, unchanged.
+      # The words before npm go to env(1) in front of this hook's npm, and
+      # the words after it are npm's arguments, unchanged.
       if [[ -z "${npm_word}" ]]; then
         target="?"
         why="safedeps could not find the npm word in this install statement, so it cannot ask npm where the install lands"
@@ -2823,8 +3120,65 @@ resolve_reading_targets() {
         break
       fi
       [[ -n "${npm_until}" ]] || npm_until=$(( SECONDS + SAFEDEPS_NPM_ASK_PRE_SECONDS ))
-      answer=$(guard_npm_install_target "${run_dir}" "${npm_until}" "${npm_word}" \
+      answer=$(guard_npm_install_target "${run_dir}" "${npm_until}" \
         "${npm_env[@]+"${npm_env[@]}"}" -- "${npm_args[@]+"${npm_args[@]}"}")
+      # The second line is the install's fetch facts (lib/npm/ask.sh), asked
+      # in the same breath: which registry npm fetches this install from.
+      if [[ "${answer}" == *$'\n'* ]]; then
+        fetch="${answer#*$'\n'}"
+        fetch="${fetch%%$'\n'*}"
+        answer="${answer%%$'\n'*}"
+      fi
+      # The cause `sourced` says the only reason is code the command runs
+      # from somewhere this gate does not read, and npm answered the public
+      # registry for everything the gate can read. The PostToolUse hook then
+      # withholds this install's scripts but records nothing machine-wide
+      # (record_npm_withheld): whoever wrote that code already runs code in
+      # the agent's shell, so a record would protect nothing against them. A
+      # setting the gate reads, or an ask npm did not answer, keeps no cause
+      # and is recorded.
+      #
+      # Where npm named a registry that is not public, its answer stands as it
+      # is and is recorded like any other. That answer came from the
+      # command's own words, which the code cannot take back. The sourced
+      # unknown used to replace it, so `. /dev/null;
+      # npm_config_registry=<impostor> npm install x` recorded nothing, and
+      # the next approved install rebuilt the impostor's bytes (VB1-VB3).
+      #
+      # Code the command chooses for npm to run is the same kind of reason.
+      # A PATH, NODE_OPTIONS or other code name (safedeps_npm_code_name) the
+      # command sets or unsets, `env -i`, or an npm named by a path that is
+      # not this hook's own, each picks which npm runs or what it loads first.
+      # The ask never runs that code (lib/npm/ask.sh), so its answer is this
+      # hook's npm's, not the command's. Whoever chose that code already runs
+      # it in the agent's shell, the way sourced code does. Before this,
+      # `export PATH="<dir>:$PATH" && npm ci` was an unknown with no cause,
+      # which recorded every package of a tree the hooks had not observed,
+      # machine-wide.
+      cause=""
+      changer="${env_changer:-${stmt_code:-${code_changer}}}"
+      if [[ -n "${changer}" && -z "${env_setting}" ]]; then
+        # shellcheck disable=SC2016 # a jq program: jq expands its $names
+        cause=$(jq -rn --arg public "${SAFEDEPS_NPM_PUBLIC_REGISTRY_RE}" "${SAFEDEPS_NPM_FETCH_JQ:-}"'
+            input | . as $f
+            | if type != "object" or .unknown != null then ""
+              elif ($f.registry | sd_registry_public($f))
+                   and ([($f.scopes // {}) | objects | .[]] | all(sd_registry_public($f))) then "sourced"
+              else "answered" end' <<< "${fetch}" 2>/dev/null) || cause=""
+      fi
+      if [[ -n "${changer}" && "${cause}" != answered ]]; then
+        if [[ -n "${env_setting}" ]]; then
+          value="an earlier statement (${env_setting%$'\001'}) can change the environment npm runs with where the command does not show it"
+        elif [[ -n "${env_changer}" ]]; then
+          value="an earlier statement (${env_changer%$'\001'}) can change the environment npm runs with where the command does not show it"
+        else
+          value="the command chooses the code npm runs with (${changer%$'\001'}), and safedeps asks only its own npm and never runs that code"
+        fi
+        fetch=$(jq -nc --arg w "${value}" --arg cause "${cause}" \
+          '{unknown: "\($w), so safedeps cannot tell which registry this install fetches from"}
+           + (if $cause == "" then {} else {cause: $cause} end)' 2>/dev/null) \
+          || fetch=""
+      fi
       local_prefix=""
       case "${answer}" in
         '?'*)
@@ -2855,6 +3209,11 @@ resolve_reading_targets() {
       user_rc=""
       cli_global_off=false
       want=""
+      # npm's home is the HOME it runs with, which the command may set.
+      rc_home="${HOME}"
+      for tok in "${npm_env[@]+"${npm_env[@]}"}"; do
+        [[ "${tok}" != HOME=* ]] || rc_home="${tok#HOME=}"
+      done
       for tok in "${toks[@]}"; do
         if [[ -n "${want}" ]]; then user_rc="${tok}"; want=""; continue; fi
         case "${tok}" in
@@ -2869,11 +3228,11 @@ resolve_reading_targets() {
         if [[ "${env_userconfig}" == true ]]; then
           user_rc="?"
         else
-          user_rc="${npm_config_userconfig:-${NPM_CONFIG_USERCONFIG:-${HOME}/.npmrc}}"
+          user_rc="${npm_config_userconfig:-${NPM_CONFIG_USERCONFIG:-${rc_home}/.npmrc}}"
         fi
       fi
       case "${user_rc}" in
-        '~/'*) user_rc="${HOME}/${user_rc#'~/'}" ;;
+        '~/'*) user_rc="${rc_home}/${user_rc#'~/'}" ;;
       esac
       [[ "${user_rc}" == "?" ]] || user_rc=$(guard_literal_dir "${here}" "${user_rc}")
       value=$(guard_npmrc_unrecorded "${local_prefix}" "${user_rc}" "${cli_global_off}")
@@ -2884,7 +3243,7 @@ resolve_reading_targets() {
       fi
       break
     done
-    printf '%s\035%s\035%s\035%s\n' "${kind}" "${target}" "${why}" "${raw}"
+    printf '%s\035%s\035%s\035%s\035%s\n' "${kind}" "${target}" "${why}" "${fetch}" "${raw}"
   done <<< "${statements}"
   return 0
 }
@@ -4028,7 +4387,7 @@ guard_extract_pieces() {
   # statement N. A command substitution drops only trailing empty lines, and
   # an empty statement has nothing to read.
   normalized=$(normalize_install_text "$(
-    while IFS=$'\035' read -r kind _ _ raw; do
+    while IFS=$'\035' read -r kind _ _ _ raw; do
       [[ -n "${kind}" ]] || continue
       printf '%s\n' "${raw}"
     done <<< "${targets}"
@@ -4514,22 +4873,38 @@ PROJECT_DIR="${CWD_DIR}"
 # `target` when a statement named the directory, `cwd` when none did and the
 # gate looks in the cwd for want of anything better.
 PROJECT_DIR_FROM=cwd
-while IFS=$'\035' read -r _ install_target _ _; do
+# Which registry the install that chose PROJECT_DIR fetches from, as npm
+# answered it beside where it lands (lib/npm/ask.sh, the fetch facts). The
+# PostToolUse hook reads it from the pending state: a source the lockfiles
+# record on the public registry is the public registry's only where npm says
+# it fetched from there.
+PROJECT_FETCH=""
+PROJECT_FETCH_WHY="no npm install in this command named where it lands"
+while IFS=$'\035' read -r _ install_target install_why install_fetch _; do
   [[ -n "${install_target}" && "${install_target}" != "?" && "${install_target}" != global ]] || continue
   PROJECT_DIR="${install_target}"
   PROJECT_DIR_FROM=target
+  PROJECT_FETCH="${install_fetch}"
+  PROJECT_FETCH_WHY="${install_why:-npm was not asked}"
   break
 done <<< "${INSTALL_TARGETS}"
 # An .npmrc that keeps an install off the record is not text in the command, so
 # the record has to say which file did it; the UNGATED line alone would point at
 # a command that looks like an ordinary project install. Each reason once,
-# however many readings gave it.
+# however many readings gave it. npm's registry answer says why it is missing
+# the same way.
 install_whys=$'\n'
-while IFS=$'\035' read -r _ _ install_why _; do
+while IFS=$'\035' read -r _ _ install_why install_fetch _; do
+  if [[ "${install_fetch}" == '{"unknown":'* ]]; then
+    install_why="${install_why:+${install_why}$'\n'}$(jq -r '.unknown' <<< "${install_fetch}" 2>/dev/null || printf 'npm did not say which registry this install fetches from')"
+  fi
   [[ -n "${install_why}" ]] || continue
-  [[ "${install_whys}" != *$'\n'"${install_why}"$'\n'* ]] || continue
-  install_whys+="${install_why}"$'\n'
-  log_advisory "pre-guard: ${install_why}. Command: ${COMMAND}"
+  while IFS= read -r install_why; do
+    [[ -n "${install_why}" ]] || continue
+    [[ "${install_whys}" != *$'\n'"${install_why}"$'\n'* ]] || continue
+    install_whys+="${install_why}"$'\n'
+    log_advisory "pre-guard: ${install_why}. Command: ${COMMAND}"
+  done <<< "${install_why}"
 done <<< "${INSTALL_TARGETS}"
 if [[ "${PROJECT_DIR}" != "${CWD_DIR}" ]]; then
   log_advisory "pre-guard: the install lands outside cwd — snapshotting/verifying ${PROJECT_DIR} instead of cwd (${CWD_DIR})."
@@ -4605,6 +4980,31 @@ while IFS= read -r csproj_file; do
   snapshot_project_file "$(basename "${csproj_file}")" "manifest"
 done < <(find "${PROJECT_DIR}" -maxdepth 1 -type f -name "*.csproj" 2>/dev/null | sort)
 
+# npm's record of the installed tree as it is before the command. An install
+# that saves nothing leaves package-lock.json as it was and writes only this
+# file, so the effect gate's source and install-script checks need the version
+# from before to tell what the install brought in (collect_npm_new_records).
+# The copy is what the file said, and the file can be committed, so the record
+# of withheld bytes leaves nothing out on its word unless it is a tree record
+# the effect gate judged here (npm_tree_record_observed).
+#
+# Copied, never moved or touched: the trace below is this file's own mtime and
+# inode. The copy goes through a temporary name, so the effect gate reads all
+# of it or none of it. A copy that fails costs a smaller baseline, and a
+# smaller baseline makes more of the tree read as new, so the failure errs
+# toward checking more. It is recorded, because what it can cost is a rollback
+# of an install that brought nothing new in.
+NPM_TREE_RECORD="${PROJECT_DIR}/node_modules/.package-lock.json"
+if [[ -f "${NPM_TREE_RECORD}" ]]; then
+  NPM_TREE_COPY=""
+  if ! { NPM_TREE_COPY=$(mktemp "${SNAPSHOT_DIR}/.${SNAPSHOT_ID}_tree.XXXXXX") \
+      && cp "${NPM_TREE_RECORD}" "${NPM_TREE_COPY}" \
+      && mv -f "${NPM_TREE_COPY}" "${SNAPSHOT_DIR}/${SNAPSHOT_ID}_${SAFEDEPS_SNAPSHOT_NPM_TREE}"; }; then
+    rm -f "${NPM_TREE_COPY}"
+    log_advisory "pre-guard: could not keep a copy of ${NPM_TREE_RECORD}, so the effect gate will compare this install with package-lock.json alone and may read packages already installed as new. Command: ${COMMAND}"
+  fi
+fi
+
 # A workspace install writes a member's package.json as well as the root's.
 # A snapshot that cannot keep them is a rollback that cannot undo the install,
 # so the install waits rather than running without one.
@@ -4677,6 +5077,40 @@ if echo "${COMMAND}" | judge_grep -qEi -- '--registry([=[:space:]]+)'; then
   if ! echo "${COMMAND}" | judge_grep -qEi -- '--registry([=[:space:]]+)https?://(registry\.npmjs\.org|registry\.yarnpkg\.com)(/|[[:space:]]|$)'; then
     SUSPICIOUS=true
     REASONS+=("Command uses non-standard npm registry")
+  fi
+fi
+# The same question for every npm install is asked of npm rather than read
+# from the text: the registry npm fetches from is whatever its configuration
+# says, and `--registry` is one spelling of it among several. A committed
+# .npmrc, `npm_config_registry` in front of the command or exported earlier in
+# it, and the user's .npmrc each sent an approved name and version to another
+# tarball while the text showed no `--registry` at all (RH1-RH3,
+# safedeps/effect-gate-blind-to-lockless-npm-installs).
+#
+# npm's answer does not deny the install. A company registry, a mirror and a
+# proxy are configured exactly this way, and safedeps has no path yet to
+# approve one, so a deny here blocked those users with nothing they could do
+# about it. The answer travels in the pending state instead, and the
+# PostToolUse hook keeps the install but runs no install script of bytes npm
+# fetched from a registry that is not public, and says which registry, so a
+# person decides whether to trust it. The text check above stays a deny: a
+# `--registry` the command itself spells out is a choice made in the command,
+# not the project's standing configuration. Only the record is written here,
+# so a run whose answer named another registry says so in advisory.log even on
+# Codex, where the install's own scripts run before any hook can withhold them.
+if [[ -n "${SAFEDEPS_NPM_FETCH_JQ:-}" ]]; then
+  REGISTRY_FACTS=$(while IFS=$'\035' read -r install_kind _ _ install_fetch _; do
+    [[ "${install_kind}" == npm* && "${install_fetch}" == '{'* ]] || continue
+    printf '%s\n' "${install_fetch}"
+  done <<< "${INSTALL_TARGETS}")
+  if [[ -n "${REGISTRY_FACTS}" ]]; then
+    REGISTRY_FOUND=$(jq -rn --arg public "${SAFEDEPS_NPM_PUBLIC_REGISTRY_RE}" "${SAFEDEPS_NPM_FETCH_JQ}"'
+        [inputs | select(.unknown == null) | . as $f | select(($f.registry | sd_registry_public($f)) | not)
+         | "registry=\($f.registry // "a value npm will not print")"] | unique | join(", ")' \
+        <<< "${REGISTRY_FACTS}" 2>/dev/null) \
+      || REGISTRY_FOUND="a registry safedeps could not read from npm's answer"
+    [[ -z "${REGISTRY_FOUND}" ]] \
+      || log_advisory "pre-guard: npm reads ${REGISTRY_FOUND} for this install from its configuration (an .npmrc or the environment), which is not the public npm registry. That alone does not deny the install; safedeps will not rebuild what npm fetched from there (on Codex the install runs its own scripts before any hook can withhold them). Command: ${COMMAND}"
   fi
 fi
 
@@ -4968,10 +5402,20 @@ if [[ "${NPM_TRACE_WANTED}" == true ]]; then
     '{baseline: $baseline, inodes: {"package-lock.json": $lock, "node_modules/.package-lock.json": $hidden}}')
   : > "${PENDING_BASE}.trace"
 fi
+# The registry answer travels as npm gave it, or as the reason there is none.
+# Never as a default: an install npm was not asked about has no answer, and the
+# PostToolUse hook vouches for no source on the strength of a missing one.
+FETCH_JSON=null
+if [[ "${NPM_TRACE_WANTED}" == true ]]; then
+  FETCH_JSON=$(jq -ce 'select(type == "object")' <<< "${PROJECT_FETCH}" 2>/dev/null) \
+    || FETCH_JSON=$(jq -nc --arg why "${PROJECT_FETCH_WHY}" \
+      '{unknown: ("npm was not asked which registry this install fetches from: " + $why)}')
+fi
 CURRENT_STATE=$(jq -n --arg sid "${SNAPSHOT_ID}" --arg pdir "${PROJECT_DIR}" --arg dhash "${DIR_HASH}" \
   --arg from "${PROJECT_DIR_FROM}" --argjson trace "${TRACE_JSON}" --arg attribution "${ATTRIBUTION}" \
+  --argjson fetch "${FETCH_JSON}" \
   '{snapshot_id: $sid, project_dir: $pdir, dir_hash: $dhash, project_dir_from: $from,
-    npm_trace: $trace, npm_unattributable: $attribution}')
+    npm_trace: $trace, npm_unattributable: $attribution, npm_fetch: $fetch}')
 write_state_file "${PENDING_BASE}.json" "${CURRENT_STATE}"
 
 if [[ -n "${UPDATED_COMMAND}" ]]; then

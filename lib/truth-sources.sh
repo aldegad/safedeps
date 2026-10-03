@@ -38,6 +38,7 @@ safedeps_truth_sources_possibly_moved() {
   [[ -n "${SAFEDEPS_RECHECK_FIXTURE_JSON:-}" ]] && return 0
   [[ -n "${SAFEDEPS_LEDGER_DEFAULT_TTL_DAYS:-}" ]] && return 0
   [[ -n "${SAFEDEPS_ADVISORY_LOG:-}" ]] && return 0
+  [[ -n "${SAFEDEPS_NPM_TEST_REGISTRY:-}" ]] && return 0
   return 1
 }
 
@@ -67,5 +68,10 @@ safedeps_truth_sources_moved_list() {
   # retires that promise without retiring the sentence that makes it.
   [[ "${SAFEDEPS_LEDGER_DEFAULT_TTL_DAYS:-${SAFEDEPS_DEFAULT_LEDGER_TTL_DAYS}}" == "${SAFEDEPS_DEFAULT_LEDGER_TTL_DAYS}" ]] \
     || moved+=("ledger-ttl-days=${SAFEDEPS_LEDGER_DEFAULT_TTL_DAYS}")
+  # Not an advisory source either, but it moves which bytes count as the public
+  # registry's: an npm configured with this local registry is taken to fetch
+  # from a public one (lib/npm/ask.sh safedeps_npm_test_registry, which takes
+  # a loopback URL only). A test battery needs it; a run that used it must say so.
+  [[ -z "${SAFEDEPS_NPM_TEST_REGISTRY:-}" ]] || moved+=("npm-test-registry=${SAFEDEPS_NPM_TEST_REGISTRY}")
   printf '%s' "${moved[*]:-}"
 }

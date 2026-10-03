@@ -193,6 +193,45 @@ add 'workspaces false @ packages/a' "${r}" packages/a --workspaces false
 add 'no-workspaces @ symlinked member' "${T}/symws" packages/a --no-workspaces
 add 'prefix named @ root' "${r}" . --prefix packages/b
 add '-C named @ root' "${r}" . -C packages/b
+
+# Under a directory named like a UUID. npm 11.19.0 masks anything shaped like one in
+# what it prints, so its answer there reads `.../***/proj`, and the gate has to
+# read it through the mask (lib/npm/ask.sh). npm cannot be asked for the
+# unmasked answer, so each layout is built twice, under the UUID and under a
+# plain name, and npm's answer for the plain twin is the expected one.
+UU="${T}/3f944c98-33ca-4b92-9f2e-aab54047d1d6"
+TW="${T}/uuidtwin"
+for base in "${UU}" "${TW}"; do
+  mkdir -p "${base}/proj/src" "${base}/proj/sub" "${base}/ws/packages/a/src"
+  printf '{"name":"proj","version":"1.0.0"}\n' > "${base}/proj/package.json"
+  printf '{"name":"sub","version":"1.0.0"}\n' > "${base}/proj/sub/package.json"
+  printf '{"name":"root","version":"1.0.0","private":true,"workspaces":["packages/*"]}\n' > "${base}/ws/package.json"
+  printf '{"name":"a","version":"1.0.0"}\n' > "${base}/ws/packages/a/package.json"
+done
+npm_masks=no
+[[ "$(cd "${UU}/proj" && npm prefix 2>/dev/null)" != *'***'* ]] || npm_masks=yes
+# <label> <cwd relative to the base> <command> <where npm is asked, relative to
+# the base> [npm flags...]: the hook's cwd is the first, and npm is asked in the
+# twin of the second. `?` there is the gate's own answer, where npm's masked
+# one reads the same as no directory from the cwd up: a `--prefix` below the
+# cwd, on an npm that masks. The gate then reads the cwd, finds no trace and
+# records the install (scripts/test/effect-trace-grid.sh, section 1c).
+add_masked() {
+  local label="$1" rel="$2" command="$3" asked="$4" theirs="?"
+  shift 4
+  [[ "${asked}" == "?" ]] || theirs=$(npm_names "${TW}/${asked}" "$@")
+  printf '%s\t%s\t%s\t%s\n' "masked: ${label}" "${UU}/${rel}" "${command}" "${theirs/#"${TW}"/${UU}}" >> "${CHECKS}"
+}
+add_masked 'project' proj 'npm install sd-victim' proj
+add_masked 'directory without a package.json' proj/src 'npm install sd-victim' proj/src
+add_masked 'sub-project' proj/sub 'npm install sd-victim' proj/sub
+add_masked 'cd into a sub-project' proj 'cd sub && npm install sd-victim' proj/sub
+add_masked 'cd into a directory without a package.json' proj 'cd src && npm install sd-victim' proj/src
+add_masked 'workspace member' ws/packages/a 'npm install sd-victim' ws/packages/a
+add_masked 'workspace member subdirectory' ws/packages/a/src 'npm install sd-victim' ws/packages/a/src
+below='?'
+[[ "${npm_masks}" == yes ]] || below=proj
+add_masked 'prefix named below the cwd' proj 'npm install sd-victim --prefix sub' "${below}" --prefix sub
 total=$(wc -l < "${CHECKS}" | tr -d ' ')
 
 # The checks are independent, so they run a few at a time.
@@ -213,4 +252,6 @@ undecided=$(cat "${T}"/out/* | grep '^UNDEC' || true)
 (( layouts >= 237 )) || fail "the differential covers the validator's 237 layouts (${layouts})"
 [[ -z "${diffs}" ]] || fail "the gate reads the directory npm names, in every layout (${diffs//$'\n'/; })"
 [[ -z "${undecided}" ]] || fail "npm answered for every layout, so the gate decided every one (${undecided//$'\n'/; })"
-pass "the gate reads the directory npm names: ${same} of ${total} checks the same and ${both} refused by npm and not placed by the gate (${layouts} layouts, $((total - layouts)) command forms), DIFF 0"
+masked=$(cat "${T}"/out/* | grep -c '^same  masked: ' || true)
+(( masked == 8 )) || fail "the gate reads npm's masked answers under a UUID-named directory (${masked} of 8)"
+pass "the gate reads the directory npm names: ${same} of ${total} checks the same and ${both} refused by npm and not placed by the gate (${layouts} layouts, $((total - layouts)) command forms, ${masked} of them under a UUID-named directory npm masks: ${npm_masks}), DIFF 0"
