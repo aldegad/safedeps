@@ -1094,8 +1094,16 @@ shell_lex() {
       # recognizer read: `a=(x) pip install x` ran with `x)` as the command,
       # and the `)` of a case pattern inside `>$(case a in a) echo f;; esac)`
       # ended the target there (forms WA1, WC3).
+      #
+      # A heredoc operator, body or terminator ends a word where the heredoc
+      # stands at the top level. One opened inside a substitution is part of
+      # that word, as the rest of the substitution is (WD, the depth the
+      # outermost heredoc stands at): read as a word end, it cut the target
+      # of `npm >$(cat <<E ... E) install x` at the `<<`, and the verb was
+      # never beside npm for the rewrite (no --ignore-scripts, no record).
       function word_sep(k) {
-        if (C[k] == "h" || C[k] == "b" || C[k] == "B" || C[k] == "p") return 1
+        if (C[k] == "h" || C[k] == "b" || C[k] == "B") return !(k in WD) || WD[k] <= 1
+        if (C[k] == "p") return 1
         if (C[k] == "m") return DEP[k] == 1
         return C[k] == "c" && DEP[k] == 1 && X[k] ~ /[ \t\n;&|()<>]/
       }
@@ -1530,7 +1538,7 @@ shell_lex() {
       function push(k) {
         d++; ctx[d] = k; par[d] = 0; pnp[d] = np; besc[d] = 0; cpat[d] = 0; cpw[d] = 0; adol[d] = 0; glc[d] = 0; cst[d] = i
         if (k == "D") dq++
-        if (k == "H") hn++
+        if (k == "H") { hn++; if (hn == 1) hb1 = dc }
         if (k != "C") dc++
         if (k == "S" || k == "B") { nsub++; sbeg[nsub] = i + 1; send[nsub] = N; skind[nsub] = k; sid[d] = nsub }
       }
@@ -1584,6 +1592,10 @@ shell_lex() {
         while (k >= 1 && X[k] ~ /[a-z]/) { w = X[k] w; k-- }
         return w ~ /^(if|then|else|elif|while|until|do|time|coproc)$/ && wordstart(k + 1)
       }
+      # The depth a heredoc stands at: the depth of the line its operator is on, or
+      # inside a body, the depth the outermost heredoc stands at -- every byte
+      # of a body at the top level is no word of the command.
+      function hdepth() { return hn > 0 ? hb1 : dc }
       # Whether the `(` at byte j opens the word list of zsh `for NAME... (`
       # or `foreach NAME... (`: an operator of that head, never a glob word.
       # Read as a glob, its `)` made a subshell glued after it a glob
@@ -1707,7 +1719,7 @@ shell_lex() {
         np++; pd[np] = w; ps[np] = strip; pq[np] = q; pstart[np] = j; pdq[np] = (dq > 0); pb[np] = (ctx[d] == "B")
         pS[np] = 0
         for (sk = d; sk > 1; sk--) if (ctx[sk] == "S") { pS[np] = 1; break }
-        for (mm = fdword(j); mm < k && mm <= N; mm++) C[mm] = "h"
+        for (mm = fdword(j); mm < k && mm <= N; mm++) { C[mm] = "h"; WD[mm] = hdepth() }
         return k - 1
       }
       # A newline that ends a line of code. Pending heredoc bodies start after it.
@@ -1752,15 +1764,15 @@ shell_lex() {
             if (pb[p] && index(t, pd[p] "`") == 1 || shb && pS[p] && index(t, pd[p] ")") == 1) {
               lead = length(line) - length(t)
               body_region(bs, s - 1, p)
-              for (kk = s; kk < s + lead + length(pd[p]); kk++) C[kk] = "b"
+              for (kk = s; kk < s + lead + length(pd[p]); kk++) { C[kk] = "b"; WD[kk] = hdepth() }
               if (s + lead + length(pd[p]) - 1 >= s) JMP[s] = s + lead + length(pd[p]) - 1
               np = 0
               return j
             }
             if (t == pd[p]) {
               body_region(bs, s - 1, p)
-              for (kk = s; kk < e; kk++) C[kk] = "b"
-              if (e <= N) C[e] = "b"
+              for (kk = s; kk < e; kk++) { C[kk] = "b"; WD[kk] = hdepth() }
+              if (e <= N) { C[e] = "b"; WD[e] = hdepth() }
               JMP[s] = (e <= N) ? e : N
               s = e + 1; done = 1; break
             }
@@ -1775,7 +1787,7 @@ shell_lex() {
       # unquoted one is walked by the main loop as context H.
       function body_region(bs, be, p,   kk) {
         if (be < bs) return
-        for (kk = bs; kk <= be; kk++) BF[kk] = p
+        for (kk = bs; kk <= be; kk++) { BF[kk] = p; WD[kk] = hdepth() }
         if (pq[p]) {
           for (kk = bs; kk <= be; kk++) C[kk] = "b"
           JMP[bs] = be

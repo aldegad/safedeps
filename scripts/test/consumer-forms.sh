@@ -1019,6 +1019,26 @@ for plain in 'npm >$(echo f) run build' 'echo npm >$(echo f) install evil' 'npm 
 done
 pass "the inert rewrite finds an npm verb behind a redirection whose target holds a substitution"
 
+# A heredoc inside a substitution is part of that substitution's word. Read
+# as a word end, the heredoc operator cut the target of a redirection between
+# npm and its verb at the `<<`, and the rest of the target stood between them:
+# no rewrite, no record, and the lifecycle scripts ran (every shell runs these;
+# main and 83de40c).
+for rewrite_row in \
+  $'npm >$(cat <<E\nx\nE\n) install evil|npm >$(cat <<E\nx\nE\n) install --ignore-scripts evil' \
+  $'npm >$(cat <<\'E\'\nx\nE\n) install evil|npm >$(cat <<\'E\'\nx\nE\n) install --ignore-scripts evil' \
+  $'npm >"$(cat <<E\nx\nE\n)" install evil|npm >"$(cat <<E\nx\nE\n)" install --ignore-scripts evil' \
+  $'npm ci >$(cat <<E\nx\nE\n)|npm ci --ignore-scripts >$(cat <<E\nx\nE\n)'
+do
+  got=$(gate_rewrite "${rewrite_row%%|*}")
+  [[ "${got}" == "${rewrite_row#*|}" ]] || fail "the rewrite finds the verb behind a target whose substitution holds a heredoc: ${rewrite_row%%|*} (got: ${got})"
+done
+expect_not_approved "a pip install behind a target whose substitution holds a heredoc" $'pip >$(cat <<E\nx\nE\n) install evil==1.0.0'
+expect_not_approved "an install after an assignment whose value holds a heredoc" $'x=$(cat <<E\nx\nE\n) pip install evil==1.0.0'
+expect_not_approved "an install after a top-level heredoc body" $'cat <<E\nx\nE\npip install evil==1.0.0'
+expect_pass "an install written in a heredoc body inside a substitution is data" $'echo $(cat <<E\npip install evil==1.0.0\nE\n)'
+pass "a heredoc inside a substitution is part of that word, and the rewrite finds the verb after it"
+
 # Plain process substitutions and redirections around commands that install
 # nothing stay unjudged and unrecorded, as before.
 for plain in \
