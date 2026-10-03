@@ -24,10 +24,13 @@
 
 set -uo pipefail
 
-# The report names a linked node_modules by where it leads, the way the
-# rollback does (safedeps_link_target).
+# The report says what the rollback says, in the same closed set of lines
+# (report-facts.sh), and names a linked node_modules by where it leads
+# (safedeps_link_target).
 # shellcheck source=./npm-reach.sh
 source "$(dirname "${BASH_SOURCE[0]}")/npm-reach.sh"
+# shellcheck source=./report-facts.sh
+source "$(dirname "${BASH_SOURCE[0]}")/report-facts.sh"
 
 SAFEDEPS_JOURNAL_HOME="${SAFEDEPS_HOME:-${HOME}/.safedeps}"
 SAFEDEPS_JOURNAL_DIR="${SAFEDEPS_JOURNAL_DIR:-${SAFEDEPS_JOURNAL_HOME}/rollback-journal}"
@@ -144,7 +147,12 @@ safedeps_journal_close() {
 # into safe or unsafe. The three call for three different human actions: repair
 # the tree, wait, or resume-or-kill and then repair.
 #
-# Exit status: 0 running, 1 gone, 2 stopped.
+# Exit status: 0 running, 1 gone, 2 stopped. Whatever the answer, the test
+# that gave it is left in SAFEDEPS_JOURNAL_OWNER_FACT, and the report prints
+# that and nothing else about the owner: "gone" is five different findings (no
+# such process, a zombie, a start time ps does not give or that cannot be
+# parsed, a process that started after the entry was opened), and a report that
+# called all of them "not running" was false for a recycled pid.
 #
 # pid reuse is the trap. A recycled pid belonging to some unrelated process
 # would make a genuinely interrupted rollback look alive forever, which is the
@@ -152,12 +160,15 @@ safedeps_journal_close() {
 # before it wrote the entry, and a pid can only be recycled after its previous
 # holder died — so anything that started after the entry was opened is a
 # different process, and no other check is needed to know that.
+SAFEDEPS_JOURNAL_OWNER_FACT=""
 safedeps_journal_owner_state() {
   local pid="$1"
   local opened_at="$2"
   local started_epoch opened_epoch
 
+  SAFEDEPS_JOURNAL_OWNER_FACT="the journal records no pid"
   [[ "${pid}" =~ ^[0-9]+$ ]] || return 1
+  SAFEDEPS_JOURNAL_OWNER_FACT="pid ${pid} is not running"
   kill -0 "${pid}" 2>/dev/null || return 1
 
   # A zombie is not running, but it passes every other test here: it keeps its
@@ -177,26 +188,33 @@ safedeps_journal_owner_state() {
   # stale the first time a platform grew one.
   local proc_stat
   proc_stat=$(ps -o stat= -p "${pid}" 2>/dev/null)
+  proc_stat="${proc_stat//[[:space:]]/}"
   case "${proc_stat}" in
-    *Z*) return 1 ;;
+    *Z*)
+      SAFEDEPS_JOURNAL_OWNER_FACT="pid ${pid} is a zombie (ps state ${proc_stat})"
+      return 1 ;;
   esac
 
   # Without a start time this stays fail-loud (treated as dead), so a platform
   # that cannot answer reports rather than goes quiet.
   local lstart
+  SAFEDEPS_JOURNAL_OWNER_FACT="ps gives no start time for pid ${pid}"
   lstart=$(ps -o lstart= -p "${pid}" 2>/dev/null)
   [[ -n "${lstart}" ]] || return 1
   # GNU (`date -d`) first, then BSD/macOS (`date -j -f`), matching how the state
   # lock reads mtime from either stat.
+  SAFEDEPS_JOURNAL_OWNER_FACT="the start time ps gives for pid ${pid} cannot be parsed"
   started_epoch=$(date -d "${lstart}" +%s 2>/dev/null) || \
     started_epoch=$(date -j -f '%a %b %d %T %Y' "${lstart}" +%s 2>/dev/null) || return 1
   [[ -n "${started_epoch}" ]] || return 1
+  SAFEDEPS_JOURNAL_OWNER_FACT="the opening time of the journal cannot be parsed"
   opened_epoch=$(safedeps_journal_epoch "${opened_at}") || return 1
   [[ -n "${opened_epoch}" ]] || return 1
   # No slack. Both timestamps come from the same system clock at second
   # resolution, and the owner necessarily started before it wrote its entry, so
   # equality is the widest this needs to be. Slack here would only buy a window
   # in which a recycled pid suppresses a real report.
+  SAFEDEPS_JOURNAL_OWNER_FACT="pid ${pid} started after the journal was opened"
   (( started_epoch <= opened_epoch )) || return 1
 
   # Stopped is judged only AFTER the pid is confirmed to be this entry's owner.
@@ -213,39 +231,56 @@ safedeps_journal_owner_state() {
   # Linux marks a debugger-stopped process `t`, macOS uses `T`; neither uses the
   # other letter as a flag, so both are matched.
   case "${proc_stat}" in
-    *T*|*t*) return 2 ;;
+    *T*|*t*)
+      SAFEDEPS_JOURNAL_OWNER_FACT="pid ${pid} is stopped (ps state ${proc_stat})"
+      return 2 ;;
   esac
 
+  SAFEDEPS_JOURNAL_OWNER_FACT="pid ${pid} is running"
   return 0
 }
 
-# What a project holds at report time, said as facts. The report gives no
-# command: where a reinstall would write is npm's to decide -- a bare npm ci in
-# a workspace member empties the workspace root's node_modules -- and safedeps
-# does not predict it.
+# What a project holds at report time, one line per test run here. The report
+# gives no command and no cause: where a reinstall would write is npm's to
+# decide -- a bare npm ci in a workspace member empties the workspace root's
+# node_modules -- and why the rollback stopped is not something this hook saw.
+#
+# It says what node_modules is, and then only the monitored files that are not
+# what the snapshot holds. A file that matches is not a line: twenty lines of
+# "the same" hid the two that were not. The names come from the snapshot's own
+# list of monitored files, never from the snapshot's directory, whose other
+# files (the package and binary listings, the meta record) are not project
+# files and read as missing ones when they were listed.
+#
+# safedeps_journal_project_facts <project dir> <snapshot id>
 safedeps_journal_project_facts() {
-  local dir="$1" facts
+  local dir="$1" snap="$2" name stored
+  local snapdir="${SAFEDEPS_JOURNAL_HOME}/snapshots"
+  local list="${snapdir}/${snap}_monitored_files.list"
 
-  if [[ -L "${dir}/node_modules" ]]; then
-    facts="${dir}/node_modules is a symbolic link to $(safedeps_link_target "${dir}/node_modules")."
-  elif [[ -d "${dir}/node_modules" ]]; then
-    facts="${dir}/node_modules is a real directory."
-  else
-    facts="${dir} has no node_modules."
+  printf '%s\n' "$(fact_path "${dir}/node_modules")"
+  if [[ ! -f "${list}" ]]; then
+    printf 'the snapshot %s has no list of monitored files\n' "${snap}"
+    return 0
   fi
-  if [[ -f "${dir}/package.json" ]]; then
-    if [[ -f "${dir}/package-lock.json" || -f "${dir}/npm-shrinkwrap.json" ]]; then
-      facts="${facts} It has a package.json and an npm lockfile."
-    else
-      facts="${facts} It has a package.json and neither package-lock.json nor npm-shrinkwrap.json."
+  while IFS= read -r name; do
+    [[ -n "${name}" ]] || continue
+    case "${name}" in
+      */*) stored="${snapdir}/${snap}_${SAFEDEPS_SNAPSHOT_MEMBERS:-members}/${name}" ;;
+      *) stored="${snapdir}/${snap}_${name}" ;;
+    esac
+    if [[ -L "${dir}/${name}" ]]; then
+      printf '%s\n' "$(fact_path "${dir}/${name}")"
+    elif [[ -f "${stored}" ]]; then
+      if [[ ! -e "${dir}/${name}" ]]; then
+        printf '%s does not exist; the snapshot %s has it\n' "${dir}/${name}" "${snap}"
+      elif ! report_same_bytes "${stored}" "${dir}/${name}"; then
+        printf '%s differs from the snapshot %s\n' "${dir}/${name}" "${snap}"
+      fi
+    elif [[ -f "${stored}.missing" && -e "${dir}/${name}" ]]; then
+      printf '%s exists; the snapshot %s recorded it as absent\n' "${dir}/${name}" "${snap}"
     fi
-    if jq -e 'type == "object" and has("workspaces")' "${dir}/package.json" >/dev/null 2>&1; then
-      facts="${facts} Its package.json declares workspaces."
-    fi
-  else
-    facts="${facts} It has no package.json."
-  fi
-  printf '%s\n%s' "${facts}" "safedeps does not reinstall packages, and it does not judge where a reinstall would write; the gate checks the next install like any other."
+  done < <(sort -u "${list}")
 }
 
 # Any journal entry still on disk belongs to a rollback that did not finish.
@@ -282,10 +317,7 @@ safedeps_journal_report_unfinished() {
     if [[ ${owner_state} -eq 0 ]]; then
       continue
     fi
-    local owner_stopped=0
-    if [[ ${owner_state} -eq 2 ]]; then
-      owner_stopped=1
-    fi
+    local owner_fact="${SAFEDEPS_JOURNAL_OWNER_FACT}"
 
     found=0
 
@@ -328,53 +360,42 @@ safedeps_journal_report_unfinished() {
     mkdir -p "${SAFEDEPS_INCIDENT_DIR}" 2>/dev/null
     mv -f "${entry}" "${SAFEDEPS_INCIDENT_DIR}/${journal_id}.json" 2>/dev/null || rm -f "${entry}"
 
-    local log_headline='REORG INTERRUPTED'
-    if [[ ${owner_stopped} -eq 1 ]]; then
-      log_headline="REORG STOPPED (owner pid ${entry_pid} is suspended, not dead)"
+    # A stopped owner is its own headline in the log and in the report: it has
+    # not died, so "did not finish" would be said of a rollback SIGCONT resumes.
+    local log_headline='REORG INTERRUPTED' headline="did not finish"
+    if [[ ${owner_state} -eq 2 ]]; then
+      log_headline='REORG STOPPED'
+      headline="has not finished"
     fi
+
+    local journal_line incident_line
+    journal_line="Journal: ${journal_id}, opened ${opened_at}; last recorded stage ${stage}${stage_detail}"
+    incident_line=$(fact_file "Incident record" "${SAFEDEPS_INCIDENT_DIR}/${journal_id}.json")
 
     cat >> "${reorg_log}" << LOG_EOF 2>/dev/null
 [$(safedeps_journal_now_iso)] ${log_headline}
-  Journal: ${journal_id} (opened ${opened_at}, reached stage: ${stage}${stage_detail})
+  ${journal_line}
+  Owner: ${owner_fact}
   Project: ${project_dir}
   Rollback snapshot: ${rollback_snapshot}
   Reasons: ${reasons}
-  Incident record: ${SAFEDEPS_INCIDENT_DIR}/${journal_id}.json
+  ${incident_line}
 LOG_EOF
 
-    local headline body_cause body_first_move
-    if [[ ${owner_stopped} -eq 1 ]]; then
-      headline="A safedeps rollback of ${project_dir} is stopped, not finished."
-      body_cause="The process running it (pid ${entry_pid}) is suspended — it has not died, and
-it is not progressing. Something sent it SIGSTOP or SIGTSTP, or it was stopped
-from a shell job control."
-      body_first_move="First decide what to do with that process. \`kill -CONT ${entry_pid}\` lets the
-rollback finish on its own; killing it leaves the tree mixed and you repair it
-as below. Until one of those happens, nothing about this project is settled."
-    else
-      headline="A safedeps rollback of ${project_dir} did not finish."
-      body_cause="The rollback was cut off — most likely the hook hit the runtime's timeout
-mid-rollback."
-      body_first_move="Check that the lockfile and package.json in ${project_dir} are the ones you
-expect before you trust them. At the time of this report:
-$(safedeps_journal_project_facts "${project_dir}")"
-    fi
+    report="${report}${report:+
+}safedeps: a rollback of ${project_dir} ${headline}.
 
-    report="${report}${headline}
-
-safedeps found a suspicious dependency closure and started rolling the project
-back to snapshot ${rollback_snapshot}, reaching stage '${stage}'
-(started ${opened_at}${stage_detail}). ${body_cause}
-
-Why it was rolled back:
+${journal_line}
+Owner: ${owner_fact}
+Rollback snapshot: ${rollback_snapshot}
+Recorded reasons:
 ${reasons}
 
-What this means for the project: the dependency files and node_modules may be
-in a mixed state — partly the rejected install, partly the snapshot.
-${body_first_move}
+Checked at the time of this report:
+$(safedeps_journal_project_facts "${project_dir}" "${rollback_snapshot}")
 
-Incident record: ${SAFEDEPS_INCIDENT_DIR}/${journal_id}.json
-Rollback log: ${reorg_log}
+${incident_line}
+$(fact_file "Rollback log" "${reorg_log}")
 "
   done
 

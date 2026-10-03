@@ -315,7 +315,7 @@ run_install() {
   CASE_RAN=$(tail -n +"$((marks_before + 1))" "${MARKS}")
 }
 
-rolled_back() { grep -q 'rolled back' <<< "${CASE_POST}"; }
+rolled_back() { grep -q 'A rollback ran\.' <<< "${CASE_POST}"; }
 ungated() { grep -q 'UNGATED' "${CASE_HOME}/advisory.log" 2>/dev/null; }
 victim_ran() { grep -q '^sd-victim' "${MARKS}"; }
 

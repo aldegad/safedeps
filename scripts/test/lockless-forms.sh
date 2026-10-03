@@ -563,7 +563,7 @@ records_dependency() {
     && jq -e --arg p "node_modules/${package}" '.packages[$p] != null' "${CASE_PROJECT}/package-lock.json" >/dev/null
 }
 rollback_removed_node_modules() {
-  [[ ! -e "${CASE_PROJECT}/node_modules" ]] && grep -q 'node_modules was removed' <<< "${CASE_POST}"
+  [[ ! -e "${CASE_PROJECT}/node_modules" ]] && jq -r '.systemMessage // empty' <<< "${CASE_POST}" | grep -qx 'removed .*/node_modules'
 }
 lacks_dependency() {
   local package="$1"
@@ -774,8 +774,10 @@ grep -q 'packages@' <<< "${CASE_POST}" && fail "a workspace member is not read a
   || fail "the rollback removes the unapproved package from disk"
 [[ ! -e "${CASE_PROJECT}/node_modules" ]] \
   || fail "the rollback removes the workspace root's own node_modules"
-grep -q 'declares workspaces; the node_modules directories of its workspace members were not removed' <<< "${CASE_POST}" \
-  || fail "the rollback says it left the workspace members' node_modules in place (post: ${CASE_POST})"
+jq -r '.systemMessage // empty' <<< "${CASE_POST}" | grep -qx '.*/package\.json has the key workspaces' \
+  || fail "the rollback says the root package.json has the key workspaces (post: ${CASE_POST})"
+[[ "$(jq -r '.systemMessage // empty' <<< "${CASE_POST}" | grep -c '^removed .*/node_modules$')" == 1 ]] \
+  || fail "the rollback names the one node_modules it removed, the workspace root's (post: ${CASE_POST})"
 victim_ran && fail "no script of the unverified package runs in a workspace rollback"
 pass "an unapproved workspace install is rolled back from disk, member manifest included, and no member is read as a package"
 

@@ -22,25 +22,38 @@ assert_gives_no_command() {
     fail "$2"
   fi
 }
-# A skipped rebuild says a fact read from disk and the rule safedeps applied.
-# The message names the rebuild it skipped, so those two phrases are taken out
+# A skipped rebuild says what safedeps did and the fact it read from disk. The
+# line names the rebuild safedeps did not run, so that phrase is taken out
 # before the same pattern is applied; a check for three fixed phrases stayed
-# green when review appended "Finish it with npm rebuild --prefix <dir>". The
-# reason must not say what npm would do either: two reasons that did were
-# wrong where a real npm did otherwise.
+# green when review appended "Finish it with npm rebuild --prefix <dir>".
 assert_skipped_rebuild_states_facts() {
   local post="$1" label="$2" rest
-  grep -q 'npm rebuild skipped after verified inert install' <<< "${post}" || fail "${label}: the skipped rebuild is reported"
-  grep -q "install scripts have not run" <<< "${post}" || fail "${label}: the skipped rebuild says the install scripts have not run"
-  rest="${post//npm rebuild skipped/}"
-  rest="${rest//npm rebuild warning(s) were recorded/}"
+  grep -q 'safedeps added --ignore-scripts to this install and did not run npm rebuild: ' <<< "${post}" || fail "${label}: the skipped rebuild is reported"
+  rest="${post//did not run npm rebuild/}"
   assert_gives_no_command "${rest}" "${label}: the skipped rebuild names no place to run npm"
-  if grep -qiE 'npm would|npm will|would work in|npm ci empties' <<< "${post}"; then
-    fail "${label}: the reason is what was read from disk, not what npm would do"
-  fi
 }
 
 tmp_root=$(mktemp -d "${TMPDIR:-/tmp}/safedeps-e2e.XXXXXX")
+
+# Every post hook run in this suite goes through post_hook, and post_hook hands
+# every line the hook printed to the report oracle (lib/report-oracle.sh). A
+# row does not choose which of its messages are read: the phrase checks below
+# say what a row is about, and the oracle says whether each line is a form
+# safedeps may print and whether it is true on disk.
+# shellcheck source=./lib/report-oracle.sh
+source "${ROOT_DIR}/scripts/test/lib/report-oracle.sh"
+oracle_init "${tmp_root}/report-oracle"
+post_message() { jq -r '.systemMessage // empty' <<< "$1"; }
+post_hook() {
+  local payload out call
+  payload=$(cat)
+  call=$(mktemp -d "${ORACLE_DIR}/call.XXXXXX")
+  oracle_before "${call}"
+  out=$(printf '%s' "${payload}" | ORACLE_NPM_LOG="${call}/npm.log" PATH="${ORACLE_DIR}/bin:${PATH}" \
+    "${ROOT_DIR}/scripts/safedeps-post-verify.sh")
+  printf '%s' "${out}"
+  oracle_message "${call}" "${payload}" "${out}" || exit 1
+}
 # Children the owner-state tests spawn, so an exit anywhere can reap them. The
 # stopped-owner test suspends a process and resumes it, and a run that dies in
 # between leaves a permanently stopped orphan -- measured: four of them, up to
@@ -548,7 +561,7 @@ cat > "${effect_project}/package-lock.json" <<'EOF'
 }
 EOF
 effect_clean_post=$(
-  scripts/safedeps-post-verify.sh <<EOF
+  post_hook <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${effect_project}"}
 EOF
 )
@@ -601,7 +614,7 @@ exit 0
 EOF
 chmod +x "${stub_bin}/npm"
 inert_post=$(
-  PATH="${stub_bin}:${PATH}" scripts/safedeps-post-verify.sh <<EOF
+  PATH="${stub_bin}:${PATH}" post_hook <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0 --ignore-scripts"},"cwd":"${inert_project}"}
 EOF
 )
@@ -646,7 +659,7 @@ cat > "${revert_project}/package-lock.json" <<'EOF'
 }
 EOF
 revert_post=$(
-  PATH="${stub_bin}:${PATH}" scripts/safedeps-post-verify.sh <<EOF
+  PATH="${stub_bin}:${PATH}" post_hook <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${revert_project}"}
 EOF
 )
@@ -699,15 +712,15 @@ scripts/safedeps-pre-guard.sh > /dev/null <<EOF
 EOF
 printf '%s\n' "${tampered_lock}" > "${link_wt}/package-lock.json"
 link_post=$(
-  PATH="${emptying_bin}:${PATH}" scripts/safedeps-post-verify.sh <<EOF
+  PATH="${emptying_bin}:${PATH}" post_hook <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${link_wt}"}
 EOF
 )
 grep -q 'suspicious dependency change detected' <<< "${link_post}" || fail "reorg fires in a project whose node_modules is a link"
 [[ -f "${link_main}/node_modules/kept-package/package.json" ]] || fail "a rollback never empties the directory a linked node_modules points to"
-grep -q 'REFUSED node_modules removal' <<< "${link_post}" || fail "the reorg message names the refused node_modules removal"
+grep -q "refused removal of .*/link-wt/node_modules: .*/link-wt/node_modules is a symbolic link to " <<< "${link_post}" || fail "the reorg message names the refused node_modules removal"
 assert_gives_no_command "${link_post}" "the rollback next to a linked node_modules gives no command"
-grep -q 'REORG REFUSED node_modules removal' "${reorg_log}" || fail "reorg.log records the refused node_modules removal"
+grep -A2 'REORG REFUSED$' "${reorg_log}" | grep -q '^  refused removal of .*/link-wt/node_modules: ' || fail "reorg.log records the refused node_modules removal"
 if grep -q '^ci' "${tmp_root}/emptying-npm-calls.log" 2>/dev/null; then
   fail "npm ci never runs on a node_modules that links outside the project"
 fi
@@ -729,15 +742,15 @@ printf '{"dependencies":{"fixture-parent":"1.0.0","fixture-evil":"6.6.6"}}\n' > 
 cp "${link_pkg_outside}/package.json" "${tmp_root}/link-pkg-expected.json"
 printf '%s\n' "${tampered_lock}" > "${link_pkg_wt}/package-lock.json"
 link_pkg_post=$(
-  PATH="${stub_bin}:${PATH}" scripts/safedeps-post-verify.sh <<EOF
+  PATH="${stub_bin}:${PATH}" post_hook <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${link_pkg_wt}"}
 EOF
 )
 grep -q 'suspicious dependency change detected' <<< "${link_pkg_post}" || fail "reorg fires in a project whose package.json is a link"
 cmp -s "${link_pkg_outside}/package.json" "${tmp_root}/link-pkg-expected.json" || fail "a rollback never writes through a package.json that links outside the project"
 [[ -L "${link_pkg_wt}/package.json" ]] || fail "a rollback leaves the linked package.json a link"
-[[ "$(grep -o 'REFUSED restore of package.json' <<< "${link_pkg_post}" | wc -l | tr -d ' ')" == 1 ]] || fail "the reorg message names the refused package.json restore once"
-grep -q 'REORG REFUSED restore of package.json' "${reorg_log}" || fail "reorg.log records the refused package.json restore"
+[[ "$(grep -o 'refused restore of [^ ]*/link-pkg-wt/package.json: ' <<< "${link_pkg_post}" | wc -l | tr -d ' ')" == 1 ]] || fail "the reorg message names the refused package.json restore once"
+grep -A2 'REORG REFUSED$' "${reorg_log}" | grep -q '^  refused restore of .*/link-pkg-wt/package.json: ' || fail "reorg.log records the refused package.json restore"
 assert_gives_no_command "${link_pkg_post}" "the rollback next to a linked package.json gives no command"
 cmp -s "${link_pkg_wt}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "the lockfile inside the project is still restored next to a linked package.json"
 pass "a rollback refuses to write back a file that links outside the project"
@@ -768,7 +781,7 @@ cat > "${link_inert_wt}/package-lock.json" <<'EOF'
 EOF
 : > "${tmp_root}/emptying-npm-calls.log"
 link_inert_post=$(
-  PATH="${emptying_bin}:${PATH}" scripts/safedeps-post-verify.sh <<EOF
+  PATH="${emptying_bin}:${PATH}" post_hook <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0 --ignore-scripts"},"cwd":"${link_inert_wt}"}
 EOF
 )
@@ -820,7 +833,7 @@ scripts/safedeps-pre-guard.sh > /dev/null <<EOF
 EOF
 printf '%s\n' "${tampered_lock}" > "${walk_wt}/package-lock.json"
 walk_post=$(
-  PATH="${walkup_bin}:${PATH}" scripts/safedeps-post-verify.sh <<EOF
+  PATH="${walkup_bin}:${PATH}" post_hook <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${walk_wt}"}
 EOF
 )
@@ -848,7 +861,7 @@ printf '{"dependencies":{"fixture-parent":"1.0.0"}}\n' > "${walk2_wt}/package.js
 printf '%s\n' "${tampered_lock}" > "${walk2_wt}/package-lock.json"
 : > "${tmp_root}/walkup-npm-calls.log"
 walk2_post=$(
-  PATH="${walkup_bin}:${PATH}" scripts/safedeps-post-verify.sh <<EOF
+  PATH="${walkup_bin}:${PATH}" post_hook <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${walk2_wt}"}
 EOF
 )
@@ -858,7 +871,7 @@ if grep -q '^install' "${tmp_root}/walkup-npm-calls.log" 2>/dev/null; then
   fail "a rollback runs no npm install once it has removed the package.json the install created"
 fi
 [[ ! -e "${walk2_wt}/node_modules" ]] || fail "a rollback removes the project's own node_modules"
-grep -q 'after the restore, .* has no package.json' <<< "${walk2_post}" || fail "the rollback says the restore left no package.json"
+grep -q '/nested/worktree/package.json does not exist' <<< "${walk2_post}" || fail "the rollback says the restore left no package.json"
 assert_gives_no_command "${walk2_post}" "the rollback gives no reinstall command"
 pass "a rollback runs no npm install where npm would walk up to an enclosing project"
 
@@ -889,7 +902,7 @@ EOF
 printf '%s\n' "${tampered_lock}" > "${linklock_outside}/package-lock.json"
 cp "${linklock_outside}/package-lock.json" "${tmp_root}/linklock-expected.json"
 linklock_post=$(
-  PATH="${lockwrite_bin}:${PATH}" scripts/safedeps-post-verify.sh <<EOF
+  PATH="${lockwrite_bin}:${PATH}" post_hook <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${linklock_wt}"}
 EOF
 )
@@ -898,7 +911,7 @@ cmp -s "${linklock_outside}/package-lock.json" "${tmp_root}/linklock-expected.js
 if grep -qE '^(ci|install)' "${tmp_root}/lockwrite-npm-calls.log" 2>/dev/null; then
   fail "a rollback runs no npm in a project whose lockfile is a link"
 fi
-grep -q 'REFUSED restore of package-lock.json' <<< "${linklock_post}" || fail "the refused lockfile restore is named"
+grep -q 'refused restore of .*/linklock-wt/package-lock.json: ' <<< "${linklock_post}" || fail "the refused lockfile restore is named"
 assert_gives_no_command "${linklock_post}" "the rollback next to a linked lockfile gives no command"
 pass "a rollback writes nothing through a lockfile that links outside the project"
 
@@ -929,7 +942,7 @@ scripts/safedeps-pre-guard.sh > /dev/null <<EOF
 EOF
 printf '%s\n' "${tampered_lock}" > "${ws_wt}/package-lock.json"
 ws_post=$(
-  PATH="${ws_bin}:${PATH}" scripts/safedeps-post-verify.sh <<EOF
+  PATH="${ws_bin}:${PATH}" post_hook <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${ws_wt}"}
 EOF
 )
@@ -939,7 +952,8 @@ if grep -q '^ci' "${tmp_root}/ws-npm-calls.log" 2>/dev/null; then
   fail "a rollback runs no npm ci in a project that declares workspaces"
 fi
 [[ ! -e "${ws_wt}/node_modules" ]] || fail "a rollback removes a workspace project's own node_modules"
-grep -q 'declares workspaces; the node_modules directories of its workspace members were not removed' <<< "${ws_post}" || fail "the rollback says a workspace member's node_modules is left in place"
+grep -q '/ws-wt/package.json has the key workspaces' <<< "${ws_post}" || fail "the rollback says the project's package.json has the key workspaces"
+grep -q 'removed .*/ws-wt/node_modules$' <<< "$(post_message "${ws_post}")" || fail "the rollback names the one node_modules it removed"
 assert_gives_no_command "${ws_post}" "the rollback in a workspace project gives no command"
 if grep -q 'remove them' <<< "${ws_post}"; then
   fail "the rollback in a workspace project sends no removal anywhere"
@@ -949,7 +963,7 @@ pass "a rollback leaves a workspace outside the project alone"
 
 # The rollback's own node_modules step: a real directory is removed, links
 # inside it are removed without being followed, and the message says which
-# directory was removed and that safedeps does not reinstall.
+# directory was removed and what the project root holds after it.
 own_wt="${tmp_root}/own-wt"
 own_outside="${tmp_root}/own-outside"
 mkdir -p "${own_wt}/node_modules/installed-package" "${own_outside}/kept-package"
@@ -963,15 +977,16 @@ EOF
 printf '%s\n' "${tampered_lock}" > "${own_wt}/package-lock.json"
 : > "${tmp_root}/emptying-npm-calls.log"
 own_post=$(
-  PATH="${emptying_bin}:${PATH}" scripts/safedeps-post-verify.sh <<EOF
+  PATH="${emptying_bin}:${PATH}" post_hook <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${own_wt}"}
 EOF
 )
 grep -q 'suspicious dependency change detected' <<< "${own_post}" || fail "reorg fires in an ordinary npm project"
 [[ ! -e "${own_wt}/node_modules" ]] || fail "a rollback removes the project's own node_modules"
 [[ -f "${own_outside}/kept-package/package.json" ]] || fail "removing node_modules does not follow a link inside it"
-grep -qF "/own-wt/node_modules was removed" <<< "${own_post}" || fail "the rollback says which node_modules it removed"
-grep -q 'safedeps does not reinstall packages' <<< "${own_post}" || fail "the rollback says it does not reinstall"
+grep -q 'removed .*/own-wt/node_modules$' <<< "$(post_message "${own_post}")" || fail "the rollback says which node_modules it removed"
+grep -q '/own-wt/package-lock.json exists$' <<< "$(post_message "${own_post}")" || fail "the rollback says the lockfile is there after the restore"
+grep -q '/own-wt/npm-shrinkwrap.json does not exist$' <<< "$(post_message "${own_post}")" || fail "the rollback says there is no npm-shrinkwrap.json"
 assert_gives_no_command "${own_post}" "the rollback gives no reinstall command in an ordinary project either"
 if grep -qE '^(ci|install)' "${tmp_root}/emptying-npm-calls.log" 2>/dev/null; then
   fail "a rollback runs no npm in an ordinary project either"
@@ -994,20 +1009,20 @@ scripts/safedeps-pre-guard.sh > /dev/null <<EOF
 EOF
 : > "${tmp_root}/emptying-npm-calls.log"
 nochange_post=$(
-  PATH="${emptying_bin}:${PATH}" scripts/safedeps-post-verify.sh <<EOF
+  PATH="${emptying_bin}:${PATH}" post_hook <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${nochange_wt}"}
 EOF
 )
 grep -q 'suspicious dependency change detected' <<< "${nochange_post}" || fail "the gate still rejects an unapproved closure the command did not change"
 [[ -f "${nochange_wt}/node_modules/installed-package/package.json" ]] || fail "a rollback with nothing to roll back leaves the project's node_modules in place"
-grep -q "/nochange-wt/node_modules was not removed" <<< "${nochange_post}" || fail "the rollback says node_modules was not removed, and why"
+grep -q 'kept .*/nochange-wt/node_modules$' <<< "$(post_message "${nochange_post}")" || fail "the rollback says node_modules was kept"
+grep -q '/nochange-wt/node_modules lists no package.json the pre-command snapshot ' <<< "${nochange_post}" || fail "the rollback says what it looked at before keeping node_modules"
+grep -q 'The rollback changed nothing\.' <<< "${nochange_post}" || fail "a rollback that wrote and removed nothing says so"
 grep -q 'no install trace in .*/nochange-wt' <<< "${nochange_post}" || fail "the same message says the directory shows no install trace"
 if grep -qE '^(ci|install)' "${tmp_root}/emptying-npm-calls.log" 2>/dev/null; then
   fail "a rollback with nothing to roll back runs no npm"
 fi
-# The no-trace note names the rebuild safedeps did not run; that is its own
-# act, not a command for the reader.
-assert_gives_no_command "${nochange_post//did not run npm rebuild/}" "the rollback with nothing to roll back gives no command"
+assert_gives_no_command "${nochange_post}" "the rollback with nothing to roll back gives no command"
 pass "a rollback with nothing to roll back leaves node_modules in place"
 
 # The same project once the command has written into node_modules without
@@ -1019,13 +1034,13 @@ scripts/safedeps-pre-guard.sh > /dev/null <<EOF
 EOF
 printf '{"name":"written-later","version":"1.0.0"}\n' > "${nochange_wt}/node_modules/written-package/package.json"
 written_post=$(
-  PATH="${emptying_bin}:${PATH}" scripts/safedeps-post-verify.sh <<EOF
+  PATH="${emptying_bin}:${PATH}" post_hook <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${nochange_wt}"}
 EOF
 )
 grep -q 'suspicious dependency change detected' <<< "${written_post}" || fail "the gate rejects the unapproved closure again"
 [[ ! -e "${nochange_wt}/node_modules" ]] || fail "a node_modules the command wrote into is removed"
-grep -q "/nochange-wt/node_modules was removed" <<< "${written_post}" || fail "the rollback says node_modules was removed"
+grep -q 'removed .*/nochange-wt/node_modules$' <<< "$(post_message "${written_post}")" || fail "the rollback says node_modules was removed"
 pass "a rollback removes node_modules once the command has written into it"
 
 # A project that keeps another manager's lockfile. After the restore it has a
@@ -1040,13 +1055,13 @@ scripts/safedeps-pre-guard.sh > /dev/null <<EOF
 EOF
 printf '%s\n' "${tampered_lock}" > "${yarn_wt}/package-lock.json"
 yarn_post=$(
-  PATH="${emptying_bin}:${PATH}" scripts/safedeps-post-verify.sh <<EOF
+  PATH="${emptying_bin}:${PATH}" post_hook <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${yarn_wt}"}
 EOF
 )
 grep -q 'suspicious dependency change detected' <<< "${yarn_post}" || fail "reorg fires in a project that keeps a yarn.lock"
 [[ -f "${yarn_wt}/yarn.lock" ]] || fail "the rollback leaves the yarn.lock it found"
-grep -qF "/yarn-wt has a package.json and neither package-lock.json nor npm-shrinkwrap.json" <<< "${yarn_post}" \
+grep -q '/yarn-wt/package-lock.json does not exist$' <<< "$(post_message "${yarn_post}")" && grep -q '/yarn-wt/npm-shrinkwrap.json does not exist$' <<< "$(post_message "${yarn_post}")" \
   || fail "the rollback names the npm lockfiles it looked for"
 if grep -q 'no lockfile' <<< "${yarn_post}"; then
   fail "the rollback does not call a yarn project lockless"
@@ -1061,6 +1076,7 @@ if [[ "$(id -u)" != 0 ]]; then
   stuck_wt="${tmp_root}/stuck-wt"
   mkdir -p "${stuck_wt}/node_modules/locked-package"
   : > "${stuck_wt}/node_modules/locked-package/index.js"
+  mkdir -p "${stuck_wt}/node_modules/removable-package"
   printf '{"dependencies":{"fixture-parent":"1.0.0"}}\n' > "${stuck_wt}/package.json"
   cp "${tmp_root}/revert-safe-lock.json" "${stuck_wt}/package-lock.json"
   scripts/safedeps-pre-guard.sh > /dev/null <<EOF
@@ -1069,14 +1085,21 @@ EOF
   printf '%s\n' "${tampered_lock}" > "${stuck_wt}/package-lock.json"
   chmod 555 "${stuck_wt}/node_modules/locked-package"
   stuck_post=$(
-    PATH="${emptying_bin}:${PATH}" scripts/safedeps-post-verify.sh <<EOF
+    PATH="${emptying_bin}:${PATH}" post_hook <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${stuck_wt}"}
 EOF
   )
   chmod 755 "${stuck_wt}/node_modules/locked-package"
   grep -q 'suspicious dependency change detected' <<< "${stuck_post}" || fail "reorg fires where node_modules cannot be removed"
-  grep -q "node_modules could not be removed: .*/stuck-wt/node_modules is still there" <<< "${stuck_post}" \
+  [[ ! -e "${stuck_wt}/node_modules/removable-package" && -e "${stuck_wt}/node_modules/locked-package/index.js" ]] \
+    || fail "this row removes part of node_modules and leaves part, or it does not test what the line may say"
+  grep -qE 'not removed .*/stuck-wt/node_modules: rm exit [1-9][0-9]*; .*/stuck-wt/node_modules exists$' <<< "$(post_message "${stuck_post}")" \
     || fail "the rollback says the node_modules it could not remove is still there"
+  # rm -rf removes what it can before it fails, so the line says the path
+  # exists and nothing about what is left in it.
+  if grep -q 'whatever this install wrote' <<< "${stuck_post}"; then
+    fail "the rollback does not say what is left in a node_modules it could not remove"
+  fi
   assert_gives_no_command "${stuck_post}" "the rollback that could not remove node_modules gives no command"
   cmp -s "${stuck_wt}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "the lockfile is still restored where node_modules cannot be removed"
   pass "a rollback that cannot remove node_modules says so and gives no command"
@@ -1095,13 +1118,13 @@ printf '{"name":"nosave-wt","lockfileVersion":3,"packages":{}}\n' > "${nosave_wt
 printf '{"name":"fixture-parent","version":"1.0.0"}\n' > "${nosave_wt}/node_modules/fixture-parent/package.json"
 cp /bin/echo "${nosave_wt}/node_modules/.bin/native-drop"
 nosave_post=$(
-  PATH="${emptying_bin}:${PATH}" scripts/safedeps-post-verify.sh <<EOF
+  PATH="${emptying_bin}:${PATH}" post_hook <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install --no-save fixture-parent@1.0.0"},"cwd":"${nosave_wt}"}
 EOF
 )
 grep -q 'suspicious dependency change detected' <<< "${nosave_post}" || fail "reorg fires on a native binary in a --no-save install"
 [[ ! -e "${nosave_wt}/node_modules" ]] || fail "a rollback removes the node_modules of a --no-save install with no package.json"
-grep -q 'after the restore, .* has no package.json' <<< "${nosave_post}" || fail "the --no-save rollback says there is no package.json"
+grep -q '/nosave-wt/package.json does not exist$' <<< "$(post_message "${nosave_post}")" || fail "the --no-save rollback says there is no package.json"
 # The restore target is the last confirmed snapshot, which can be older than
 # this install, so what the project held "before this install" is not
 # something the rollback knows. It states only what is there now.
@@ -1127,16 +1150,267 @@ EOF
 printf '{"name":"nosave-link-wt","lockfileVersion":3,"packages":{}}\n' > "${nosave_link_target}/.package-lock.json"
 cp /bin/echo "${nosave_link_target}/.bin/native-drop"
 nosave_link_post=$(
-  PATH="${emptying_bin}:${PATH}" scripts/safedeps-post-verify.sh <<EOF
+  PATH="${emptying_bin}:${PATH}" post_hook <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install --no-save fixture-parent@1.0.0"},"cwd":"${nosave_link_wt}"}
 EOF
 )
 grep -q 'suspicious dependency change detected' <<< "${nosave_link_post}" || fail "reorg fires on a native binary through a linked node_modules"
-grep -q 'REFUSED node_modules removal' <<< "${nosave_link_post}" || fail "the rollback names the linked node_modules it will not remove"
-grep -qF "symbolic link to ${nosave_link_physical};" <<< "${nosave_link_post}" || fail "a refused relative link is named by its physical path"
+grep -q 'refused removal of .*/nosave-link-wt/node_modules: ' <<< "${nosave_link_post}" || fail "the rollback names the linked node_modules it will not remove"
+grep -qx "refused removal of .*/nosave-link-wt/node_modules: .*/nosave-link-wt/node_modules is a symbolic link to ${nosave_link_physical}" <<< "$(jq -r '.systemMessage' <<< "${nosave_link_post}")" || fail "a refused relative link is named by its physical path"
 assert_gives_no_command "${nosave_link_post}" "the rollback through a linked node_modules gives no command"
 [[ -f "${nosave_link_target}/.package-lock.json" ]] || fail "a rollback leaves the target of a linked node_modules alone"
 pass "a rollback names a linked node_modules a --no-save install wrote through"
+
+# --- The report grammar: one row per line form the rows above do not reach ----
+#
+# The oracle's form table fails on a form no line matched, so each form has a
+# row here that makes the hook print it. A row asserts the phrase it is about;
+# whether the line is true is the oracle's to say, in post_hook.
+grammar_pre() {
+  scripts/safedeps-pre-guard.sh <<EOF
+{"tool_name":"Bash","tool_input":{"command":"$2"},"cwd":"$1"}
+EOF
+}
+grammar_pre_codex() {
+  scripts/safedeps-pre-guard.sh <<EOF
+{"tool_name":"Bash","tool_input":{"command":"$2"},"cwd":"$1","turn_id":"turn-e2e","model":"codex-test"}
+EOF
+}
+grammar_post() {
+  post_hook <<EOF
+{"tool_name":"Bash","tool_input":{"command":"$2"},"cwd":"$1"}
+EOF
+}
+grammar_project() {
+  mkdir -p "$1"
+  printf '{"dependencies":{"fixture-parent":"1.0.0"}}\n' > "$1/package.json"
+  cp "${tmp_root}/revert-safe-lock.json" "$1/package-lock.json"
+}
+# The pending state the pre-guard left for a project.
+grammar_pending() { grep -lF "\"$(cd -P "$1" && pwd -P)\"" "${SAFEDEPS_HOME}/pending"/*.json | head -1; }
+
+# A rollback to a confirmed snapshot, after an install safedeps made inert:
+# the verified install confirms its own state, and the next one is rejected.
+confirmed_wt="${tmp_root}/confirmed-wt"
+grammar_project "${confirmed_wt}"
+grammar_pre "${confirmed_wt}" "npm install fixture-parent@1.0.0" > /dev/null
+touch "${confirmed_wt}/package-lock.json"
+confirmed_first=$(PATH="${stub_bin}:${PATH}" grammar_post "${confirmed_wt}" "npm install fixture-parent@1.0.0 --ignore-scripts")
+[[ -z "${confirmed_first}" ]] || fail "a verified install with nothing to rebuild is confirmed quietly (${confirmed_first})"
+grammar_pre "${confirmed_wt}" "npm install fixture-parent@1.0.0" > /dev/null
+printf '%s\n' "${tampered_lock}" > "${confirmed_wt}/package-lock.json"
+confirmed_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${confirmed_wt}" "npm install fixture-parent@1.0.0 --ignore-scripts")
+grep -q ', a confirmed snapshot$' <<< "$(post_message "${confirmed_post}")" || fail "a rollback to a confirmed snapshot says the snapshot is a confirmed one"
+grep -q '^safedeps added --ignore-scripts to this install$' <<< "$(post_message "${confirmed_post}")" \
+  || fail "a rollback after an inert install says safedeps added --ignore-scripts"
+cmp -s "${confirmed_wt}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "the rollback restores the confirmed lockfile"
+pass "a rollback to a confirmed snapshot says so, and says the install ran with --ignore-scripts"
+
+# The same project, the same rejected lockfile, and no pre-guard: the command
+# gate did not recognize the command, and the backstop rolls back to the
+# confirmed snapshot. It has no record of asking for --ignore-scripts.
+printf '%s\n' "${tampered_lock}" > "${confirmed_wt}/package-lock.json"
+backstop_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${confirmed_wt}" "npm install fixture-parent@1.0.0")
+grep -q 'after a command the command gate did not recognize. A rollback ran\.' <<< "${backstop_post}" || fail "the backstop rolls back to the confirmed snapshot"
+grep -q '^safedeps did not add --ignore-scripts to this install; the command this hook received does not carry it$' <<< "$(post_message "${backstop_post}")" \
+  || fail "the backstop says it did not add --ignore-scripts"
+cmp -s "${confirmed_wt}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "the backstop restores the confirmed lockfile"
+pass "the backstop's rollback speaks the same lines"
+
+# The backstop with nothing to roll back to: no confirmed record, and a
+# confirmed record that names a snapshot with no meta file.
+backstop_none_wt="${tmp_root}/backstop-none-wt"
+mkdir -p "${backstop_none_wt}"
+printf '{"dependencies":{"fixture-parent":"1.0.0"}}\n' > "${backstop_none_wt}/package.json"
+printf '%s\n' "${tampered_lock}" > "${backstop_none_wt}/package-lock.json"
+backstop_none_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${backstop_none_wt}" "npm install fixture-parent@1.0.0")
+grep -q 'No rollback ran\.' <<< "${backstop_none_post}" || fail "the backstop says no rollback ran where there is no confirmed snapshot"
+grep -q "no confirmed snapshot is recorded for .*/backstop-none-wt$" <<< "$(post_message "${backstop_none_post}")" || fail "the backstop says no confirmed snapshot is recorded"
+grep -q "fixture-evil" "${backstop_none_wt}/package-lock.json" || fail "the backstop changes nothing where it rolls nothing back"
+assert_gives_no_command "${backstop_none_post}" "the backstop that rolls nothing back gives no command"
+printf 'ghost-snapshot\n' > "${SAFEDEPS_HOME}/confirmed_$(oracle_dir_hash "$(cd -P "${backstop_none_wt}" && pwd -P)")"
+backstop_ghost_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${backstop_none_wt}" "npm install fixture-parent@1.0.0")
+grep -q "the confirmed snapshot ghost-snapshot of .*/backstop-none-wt: .*/snapshots/ghost-snapshot_meta.json does not exist$" <<< "$(post_message "${backstop_ghost_post}")" \
+  || fail "the backstop names the confirmed snapshot whose meta file is missing"
+pass "the backstop that rolls nothing back says which record it looked for"
+
+# On Codex safedeps cannot add --ignore-scripts; a command that carries its own
+# is said to carry it.
+carried_wt="${tmp_root}/carried-wt"
+grammar_project "${carried_wt}"
+grammar_pre_codex "${carried_wt}" "npm install fixture-parent@1.0.0 --ignore-scripts" > /dev/null
+printf '%s\n' "${tampered_lock}" > "${carried_wt}/package-lock.json"
+carried_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${carried_wt}" "npm install fixture-parent@1.0.0 --ignore-scripts")
+grep -q '^safedeps did not add --ignore-scripts to this install; the command this hook received carries it$' <<< "$(post_message "${carried_post}")" \
+  || fail "a command that carries its own --ignore-scripts is said to carry it"
+pass "the --ignore-scripts line is the pre-guard's record and the command this hook received, nothing more"
+
+# A restore whose copy fails is a line, and the rollback goes on: under set -e
+# the bare cp ended the hook there, with the rejected lockfile in place,
+# node_modules untouched and the journal entry left for the next hook to call
+# an interrupted rollback. This cp fails for one target on every platform; the
+# read-only lockfile below is the same failure from a real cp, where the user
+# is not root.
+cpfail_bin="${tmp_root}/cpfail-bin"
+mkdir -p "${cpfail_bin}"
+cat > "${cpfail_bin}/cp" <<EOF
+#!/usr/bin/env bash
+case "\$*" in *"/cpfail-wt/package-lock.json"|*"/cpgone-wt/package-lock.json") exit 1 ;; esac
+exec "$(command -v cp)" "\$@"
+EOF
+chmod +x "${cpfail_bin}/cp"
+cpfail_wt="${tmp_root}/cpfail-wt"
+grammar_project "${cpfail_wt}"
+mkdir -p "${cpfail_wt}/node_modules/installed-package"
+grammar_pre "${cpfail_wt}" "npm install fixture-parent@1.0.0" > /dev/null
+printf '%s\n' "${tampered_lock}" > "${cpfail_wt}/package-lock.json"
+cpfail_post=$(PATH="${cpfail_bin}:${emptying_bin}:${PATH}" grammar_post "${cpfail_wt}" "npm install fixture-parent@1.0.0")
+grep -qE '^not restored .*/cpfail-wt/package-lock.json: cp exit 1; .*/cpfail-wt/package-lock.json differs from the snapshot$' <<< "$(post_message "${cpfail_post}")" \
+  || fail "a restore whose copy failed is reported with cp's exit status"
+[[ ! -e "${cpfail_wt}/node_modules" ]] || fail "the rollback goes on to node_modules after a restore that failed"
+[[ -z "$(find "${SAFEDEPS_HOME}/rollback-journal" -maxdepth 1 -name '*.json' 2>/dev/null)" ]] \
+  || fail "a rollback that reported a failed restore closes its journal entry"
+# The same with the file gone: the command removed the lockfile, and the copy
+# that would put it back fails.
+cpgone_wt="${tmp_root}/cpgone-wt"
+grammar_project "${cpgone_wt}"
+grammar_pre "${cpgone_wt}" "npm install fixture-parent@1.0.0" > /dev/null
+rm -f "${cpgone_wt}/package-lock.json"
+mkdir -p "${cpgone_wt}/node_modules/.bin" "${cpgone_wt}/node_modules/fixture-parent"
+printf '{"name":"fixture-parent","version":"1.0.0"}\n' > "${cpgone_wt}/node_modules/fixture-parent/package.json"
+cp /bin/echo "${cpgone_wt}/node_modules/.bin/native-drop"
+cpgone_post=$(PATH="${cpfail_bin}:${emptying_bin}:${PATH}" grammar_post "${cpgone_wt}" "npm install fixture-parent@1.0.0")
+grep -qE '^not restored .*/cpgone-wt/package-lock.json: cp exit 1; .*/cpgone-wt/package-lock.json does not exist$' <<< "$(post_message "${cpgone_post}")" \
+  || fail "a restore that failed over a missing file says the file does not exist (${cpgone_post})"
+if [[ "$(id -u)" != 0 ]]; then
+  readonly_wt="${tmp_root}/readonly-wt"
+  grammar_project "${readonly_wt}"
+  mkdir -p "${readonly_wt}/node_modules/installed-package"
+  grammar_pre "${readonly_wt}" "npm install fixture-parent@1.0.0" > /dev/null
+  printf '%s\n' "${tampered_lock}" > "${readonly_wt}/package-lock.json"
+  chmod 444 "${readonly_wt}/package-lock.json"
+  readonly_post=$(PATH="${emptying_bin}:${PATH}" grammar_post "${readonly_wt}" "npm install fixture-parent@1.0.0")
+  chmod 644 "${readonly_wt}/package-lock.json"
+  grep -qE '^not restored .*/readonly-wt/package-lock.json: cp exit [1-9][0-9]*; ' <<< "$(post_message "${readonly_post}")" \
+    || fail "a read-only lockfile is reported as not restored (${readonly_post})"
+  [[ ! -e "${readonly_wt}/node_modules" ]] || fail "the rollback goes on to node_modules past a read-only lockfile"
+fi
+pass "a restore that fails is a line of the rollback, not the end of the hook"
+
+# A removal that fails on every platform (the read-only directory above stops
+# rm only for a user who is not root).
+rmfail_bin="${tmp_root}/rmfail-bin"
+mkdir -p "${rmfail_bin}"
+cat > "${rmfail_bin}/rm" <<EOF
+#!/usr/bin/env bash
+case "\$*" in *"/rmfail-wt/node_modules") exit 1 ;; esac
+exec "$(command -v rm)" "\$@"
+EOF
+chmod +x "${rmfail_bin}/rm"
+rmfail_wt="${tmp_root}/rmfail-wt"
+grammar_project "${rmfail_wt}"
+mkdir -p "${rmfail_wt}/node_modules/installed-package"
+grammar_pre "${rmfail_wt}" "npm install fixture-parent@1.0.0" > /dev/null
+printf '%s\n' "${tampered_lock}" > "${rmfail_wt}/package-lock.json"
+rmfail_post=$(PATH="${rmfail_bin}:${emptying_bin}:${PATH}" grammar_post "${rmfail_wt}" "npm install fixture-parent@1.0.0")
+grep -qE '^not removed .*/rmfail-wt/node_modules: rm exit 1; .*/rmfail-wt/node_modules exists$' <<< "$(post_message "${rmfail_post}")" \
+  || fail "a removal that failed is reported with rm's exit status and what a test of the path returned"
+pass "a removal that fails says the exit status and that the path exists"
+
+# The install trace, where the baseline file the pre-guard touched is gone, and
+# where the pending state names none.
+gone_wt="${tmp_root}/baseline-gone-wt"
+mkdir -p "${gone_wt}/node_modules"
+printf '{"dependencies":{}}\n' > "${gone_wt}/package.json"
+grammar_pre "${gone_wt}" "npm install fixture-parent@1.0.0" > /dev/null
+rm -f "$(jq -r '.npm_trace.baseline' "$(grammar_pending "${gone_wt}")")"
+cp "${tmp_root}/revert-safe-lock.json" "${gone_wt}/package-lock.json"
+gone_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${gone_wt}" "npm install fixture-parent@1.0.0 --ignore-scripts")
+grep -q 'did not run npm rebuild: no install trace in .*/baseline-gone-wt: the baseline file .* does not exist$' <<< "$(post_message "${gone_post}")" \
+  || fail "an install whose trace baseline is gone is reported as that, not as an install that changed nothing (${gone_post})"
+unset_wt="${tmp_root}/baseline-unset-wt"
+mkdir -p "${unset_wt}/node_modules/installed-package"
+printf '{"dependencies":{"fixture-parent":"1.0.0"}}\n' > "${unset_wt}/package.json"
+printf '%s\n' "${tampered_lock}" > "${unset_wt}/package-lock.json"
+grammar_pre "${unset_wt}" "npm install fixture-parent@1.0.0" > /dev/null
+unset_pending=$(grammar_pending "${unset_wt}")
+jq -c 'del(.npm_trace)' "${unset_pending}" > "${unset_pending}.tmp" && mv "${unset_pending}.tmp" "${unset_pending}"
+unset_post=$(PATH="${emptying_bin}:${PATH}" grammar_post "${unset_wt}" "npm install fixture-parent@1.0.0")
+grep -q '^the pending state of this command names no install-trace baseline$' <<< "$(post_message "${unset_post}")" \
+  || fail "a node_modules kept without a trace baseline says there was none to read (${unset_post})"
+[[ -d "${unset_wt}/node_modules/installed-package" ]] || fail "node_modules is kept where no check shows the command wrote it"
+pass "a missing install trace is said as the check that found none"
+
+# A rebuild that fails says its exit status. With the flag on the command this
+# hook received, safedeps added it; without it, safedeps asked for it and the
+# command does not carry it (a runtime that does not apply the rewrite).
+rebuildfail_bin="${tmp_root}/rebuildfail-bin"
+mkdir -p "${rebuildfail_bin}"
+cat > "${rebuildfail_bin}/npm" <<EOF
+#!/usr/bin/env bash
+[[ "\$1" != rebuild ]] || exit 3
+exec "${stub_bin}/npm" "\$@"
+EOF
+chmod +x "${rebuildfail_bin}/npm"
+for rebuildfail_case in "added| --ignore-scripts" "asked|"; do
+  rebuildfail_wt="${tmp_root}/rebuildfail-${rebuildfail_case%%|*}-wt"
+  mkdir -p "${rebuildfail_wt}/node_modules"
+  printf '{"dependencies":{}}\n' > "${rebuildfail_wt}/package.json"
+  grammar_pre "${rebuildfail_wt}" "npm install fixture-parent@1.0.0" > /dev/null
+  cp "${inert_project}/package-lock.json" "${rebuildfail_wt}/package-lock.json"
+  cp "${inert_project}/package-lock.json" "${rebuildfail_wt}/node_modules/.package-lock.json"
+  rebuildfail_post=$(PATH="${rebuildfail_bin}:${PATH}" grammar_post "${rebuildfail_wt}" "npm install fixture-parent@1.0.0${rebuildfail_case#*|}")
+  if [[ "${rebuildfail_case%%|*}" == added ]]; then
+    grep -q '^safedeps added --ignore-scripts to this install and ran npm rebuild: exit 3$' <<< "$(post_message "${rebuildfail_post}")" \
+      || fail "a failed rebuild says its exit status (${rebuildfail_post})"
+  else
+    grep -q '^safedeps ran npm rebuild: exit 3$' <<< "$(post_message "${rebuildfail_post}")" \
+      || fail "a failed rebuild says its exit status where the command did not carry the flag (${rebuildfail_post})"
+    grep -q '^safedeps asked for --ignore-scripts on this install; the command this hook received does not carry it$' <<< "$(post_message "${rebuildfail_post}")" \
+      || fail "safedeps does not say it added a flag the command this hook received does not carry"
+  fi
+done
+pass "a rebuild that fails says its exit status, and 'added' only where the command carries the flag"
+
+# The command's own second segment rebuilds: whether install scripts ran is not
+# something this hook saw, so the skipped rebuild says what safedeps did and
+# nothing about the scripts.
+segment_main="${tmp_root}/segment-main"
+segment_wt="${tmp_root}/segment-wt"
+mkdir -p "${segment_main}/node_modules" "${segment_wt}"
+ln -s "${segment_main}/node_modules" "${segment_wt}/node_modules"
+printf '{"dependencies":{}}\n' > "${segment_wt}/package.json"
+segment_pre=$(grammar_pre "${segment_wt}" "npm install fixture-parent@1.0.0 && npm rebuild")
+segment_command=$(jq -r '.hookSpecificOutput.updatedInput.command // empty' <<< "${segment_pre:-{\}}")
+[[ "${segment_command}" == *--ignore-scripts* ]] || fail "the pre-guard makes an install inert when the command rebuilds after it (${segment_pre})"
+cp "${tmp_root}/revert-safe-lock.json" "${segment_wt}/package-lock.json"
+: > "${segment_main}/node_modules/script-ran.txt"
+segment_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${segment_wt}" "${segment_command}")
+grep -q 'safedeps added --ignore-scripts to this install and did not run npm rebuild: ' <<< "${segment_post}" || fail "the skipped rebuild is reported (${segment_post})"
+if grep -qi 'scripts have not run' <<< "${segment_post}"; then
+  fail "a skipped rebuild does not say install scripts have not run: the command's own rebuild may have run them"
+fi
+pass "a skipped rebuild says what safedeps did, not whether install scripts ran"
+
+# The two facts no hook run here reaches, a project directory that does not
+# resolve, are read from the functions that print them.
+unresolved_dir="${tmp_root}/no-such-project"
+unresolved_meta="${tmp_root}/unresolved-meta.json"
+printf '{"ignore_scripts_injected":true}\n' > "${unresolved_meta}"
+unresolved_lines=$(
+  # shellcheck source=../../lib/gates/npm-reach.sh
+  source "${ROOT_DIR}/lib/gates/npm-reach.sh"
+  # shellcheck source=../../lib/gates/report-facts.sh
+  source "${ROOT_DIR}/lib/gates/report-facts.sh"
+  ROLLBACK_WARNINGS=()
+  report_say "$(did_refuse restore "${unresolved_dir}/package-lock.json" "$(fact_outside "${unresolved_dir}" "${unresolved_dir}/package-lock.json")")"
+  did_not_rebuild "${unresolved_meta}" "npm install x --ignore-scripts" "$(safedeps_npm_reach_blocker "${unresolved_dir}")"
+  printf '%s\n' "${ROLLBACK_WARNINGS[@]}"
+)
+oracle_direct "${unresolved_meta}" "npm install x --ignore-scripts" "${unresolved_lines}" || exit 1
+grep -q "^refused restore of ${unresolved_dir}/package-lock.json: the project directory ${unresolved_dir} cannot be resolved$" <<< "${unresolved_lines}" \
+  || fail "a restore in a directory that does not resolve is refused with that as the reason"
+pass "a project directory that does not resolve is the reason, in the same words"
 
 export SAFEDEPS_HOME="${tmp_root}/safe-missing-transitive"
 export SAFEDEPS_OSV_API_URL="http://127.0.0.1:${port}/osv/v1/query"
@@ -1167,7 +1441,7 @@ cat > "${missing_project}/package-lock.json" <<'EOF'
 }
 EOF
 missing_post=$(
-  scripts/safedeps-post-verify.sh <<EOF
+  post_hook <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${missing_project}"}
 EOF
 )
@@ -1431,7 +1705,7 @@ cat > "${legacy_skip_safe}/snapshots/${legacy_sid}_meta.json" <<EOF
 {"snapshot_id":"${legacy_sid}","project_dir":"${legacy_pending_project}"}
 EOF
 legacy_skip_out=$(
-  SAFEDEPS_HOME="${legacy_skip_safe}" scripts/safedeps-post-verify.sh <<EOF
+  SAFEDEPS_HOME="${legacy_skip_safe}" post_hook <<EOF
 {"tool_name":"Bash","tool_input":{"command":"echo done"},"cwd":"${legacy_post_project}"}
 EOF
 )
@@ -1856,7 +2130,7 @@ jq -c --arg pid "${journal_dead_pid}" '.pid = $pid' "${journal_entry_file}" \
   > "${journal_entry_file}.tmp" && mv "${journal_entry_file}.tmp" "${journal_entry_file}"
 
 journal_report=$(
-  SAFEDEPS_HOME="${journal_home}" scripts/safedeps-post-verify.sh <<EOF
+  SAFEDEPS_HOME="${journal_home}" post_hook <<EOF
 {"tool_name":"Bash","tool_input":{"command":"echo unrelated"},"cwd":"${journal_project}"}
 EOF
 )
@@ -1872,8 +2146,11 @@ assert_gives_no_command "${journal_report}" "the unfinished-rollback report give
 if grep -q 'no lockfile' <<< "${journal_report}"; then
   fail "the unfinished-rollback report does not call a yarn project lockless"
 fi
-grep -q 'neither package-lock.json nor npm-shrinkwrap.json' <<< "${journal_report}" \
-  || fail "the unfinished-rollback report names the npm lockfiles it looked for"
+grep -q 'the snapshot snap-baseline has no list of monitored files' <<< "${journal_report}" \
+  || fail "the unfinished-rollback report says the snapshot it names has no list to compare against"
+if grep -qiE 'most likely|may be in a mixed state|timeout' <<< "${journal_report}"; then
+  fail "the unfinished-rollback report gives no cause and no guess about the tree"
+fi
 grep -q 'REORG INTERRUPTED' "${journal_home}/reorg.log" \
   || fail "an interrupted rollback lands in the same log the finished ones use"
 [[ -f "${journal_home}/rollback-incidents/test-interrupted.json" ]] \
@@ -1883,7 +2160,7 @@ grep -q 'REORG INTERRUPTED' "${journal_home}/reorg.log" \
 
 # Reported once, not on every command from here on.
 journal_repeat=$(
-  SAFEDEPS_HOME="${journal_home}" scripts/safedeps-post-verify.sh <<EOF
+  SAFEDEPS_HOME="${journal_home}" post_hook <<EOF
 {"tool_name":"Bash","tool_input":{"command":"echo unrelated"},"cwd":"${journal_project}"}
 EOF
 )
@@ -1936,7 +2213,7 @@ race_write_entry() {
 }
 
 race_report() {
-  SAFEDEPS_HOME="${race_home}" scripts/safedeps-post-verify.sh <<EOF
+  SAFEDEPS_HOME="${race_home}" post_hook <<EOF
 {"tool_name":"Bash","tool_input":{"command":"echo unrelated"},"cwd":"${race_project}"}
 EOF
 }
@@ -1972,8 +2249,10 @@ race_reused_stopped=$(race_report)
 kill -CONT "${race_owner_pid}" 2>/dev/null
 grep -q 'did not finish' <<< "${race_reused_stopped}" \
   || fail "a recycled pid that is stopped is still reported as an unfinished rollback"
-grep -q 'is stopped, not finished' <<< "${race_reused_stopped}" \
-  && fail "a recycled pid that is stopped must not be reported as a resumable rollback"
+grep -q 'has not finished' <<< "${race_reused_stopped}" \
+  && fail "a recycled pid that is stopped must not be reported as a stopped rollback"
+grep -q "Owner: pid ${race_owner_pid} started after the journal was opened" <<< "${race_reused_stopped}" \
+  || fail "a recycled pid is reported as the process it is: one that started after the journal was opened"
 
 # 3. The owner dies mid-rollback — the case the journal exists for.
 kill -9 "${race_owner_pid}" 2>/dev/null
@@ -2022,8 +2301,9 @@ if [[ -n "${race_zombie_pid}" ]] && [[ "$(ps -o stat= -p "${race_zombie_pid}" 2>
 #    is not progressing. Folding it into the pair is wrong both ways: called
 #    gone, a resumable rollback is reported as unfinished (the false-report
 #    defect); called running, a rollback stopped forever is never reported (the
-#    zombie defect). So it is its own answer, and the report says so, because
-#    the human's first move is different — resume or kill, then repair.
+#    zombie defect). So it is its own answer, and the report says the owner pid
+#    is stopped. It gives no command: what to do with that process is the
+#    reader's call, and the README says how to read the line.
 ( cd "${tmp_root}" && exec bash -c 'exec -a "$0" sleep 120' "${E2E_CHILD_MARKER}" ) >/dev/null 2>&1 &
 race_stopped_pid=$!
 owned_children+=("${race_stopped_pid}")
@@ -2033,10 +2313,13 @@ sleep 0.3
 if [[ "$(ps -o stat= -p "${race_stopped_pid}" 2>/dev/null)" == *T* ]]; then
   race_write_entry "${race_stopped_pid}" "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
   race_stopped_out=$(race_report)
-  grep -q 'is stopped, not finished' <<< "${race_stopped_out}" \
-    || fail "a stopped owner is reported as stopped, not as an unfinished rollback"
-  grep -q 'kill -CONT' <<< "${race_stopped_out}" \
-    || fail "the stopped report names the move that resumes the rollback"
+  grep -q 'has not finished' <<< "${race_stopped_out}" \
+    || fail "a stopped owner is reported as a rollback that has not finished, not as one that did not"
+  grep -q "Owner: pid ${race_stopped_pid} is stopped (ps state " <<< "${race_stopped_out}" \
+    || fail "the stopped report says the owner pid is stopped"
+  if grep -qE 'kill -|SIGCONT|resume' <<< "${race_stopped_out}"; then
+    fail "the stopped report gives no command"
+  fi
   grep -q 'REORG STOPPED' "${race_home}/reorg.log" \
     || fail "a stopped rollback is logged as stopped rather than interrupted"
   printf 'ok - a stopped owner gets its own answer, not dead and not running\n'
@@ -2099,6 +2382,97 @@ race_zreap=0
 while kill -0 "${race_zombie_parent}" 2>/dev/null && (( race_zreap < 100 )); do
   sleep 0.05; race_zreap=$((race_zreap + 1))
 done
+
+# --- the unfinished-rollback report: the rest of its line forms ---------------
+#
+# What the owner is comes from the test that answered, and a monitored file is
+# a line only when it is not what the snapshot holds.
+forms_home="${tmp_root}/journal-forms-home"
+forms_project="${tmp_root}/journal-forms-project"
+mkdir -p "${forms_home}/snapshots" "${forms_home}/rollback-journal" "${forms_project}/node_modules"
+forms_entry() {
+  jq -nc --arg pid "$1" --arg opened_at "$2" \
+    '{journal_id:"test-forms", project_dir:"'"${forms_project}"'",
+      rollback_snapshot:"snap-forms", reasons:"npm closure contains 1 unapproved package(s): fixture-evil@9.9.9",
+      stage:"restoring-files", opened_at:$opened_at, pid:$pid}' \
+    > "${forms_home}/rollback-journal/test-forms.json"
+}
+forms_report() {
+  SAFEDEPS_HOME="${forms_home}" post_hook <<EOF
+{"tool_name":"Bash","tool_input":{"command":"echo unrelated"},"cwd":"${forms_project}"}
+EOF
+}
+# The snapshot holds package.json, package-lock.json and pnpm-lock.yaml, and
+# recorded yarn.lock as absent. The project has another package.json, no
+# package-lock.json, the same pnpm-lock.yaml and a yarn.lock.
+printf '%s\n' package.json package-lock.json pnpm-lock.yaml yarn.lock > "${forms_home}/snapshots/snap-forms_monitored_files.list"
+printf '{"name":"before"}\n' > "${forms_home}/snapshots/snap-forms_package.json"
+printf '{"lockfileVersion":3}\n' > "${forms_home}/snapshots/snap-forms_package-lock.json"
+printf 'lockfileVersion: 9\n' > "${forms_home}/snapshots/snap-forms_pnpm-lock.yaml"
+: > "${forms_home}/snapshots/snap-forms_yarn.lock.missing"
+: > "${forms_home}/snapshots/snap-forms_bins.list"
+: > "${forms_home}/snapshots/snap-forms_packages.list"
+printf '{"snapshot_id":"snap-forms"}\n' > "${forms_home}/snapshots/snap-forms_meta.json"
+printf '{"name":"after"}\n' > "${forms_project}/package.json"
+printf 'lockfileVersion: 9\n' > "${forms_project}/pnpm-lock.yaml"
+: > "${forms_project}/yarn.lock"
+
+forms_entry "" "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+forms_out=$(post_message "$(forms_report)")
+grep -q '^Owner: the journal records no pid$' <<< "${forms_out}" || fail "an entry with no pid is reported as that"
+grep -q "^${forms_project}/package.json differs from the snapshot snap-forms$" <<< "${forms_out}" || fail "a monitored file that differs from the snapshot is a line"
+grep -q "^${forms_project}/package-lock.json does not exist; the snapshot snap-forms has it$" <<< "${forms_out}" || fail "a monitored file that is gone is a line"
+grep -q "^${forms_project}/yarn.lock exists; the snapshot snap-forms recorded it as absent$" <<< "${forms_out}" || fail "a file the snapshot recorded as absent is a line"
+grep -q "^${forms_project}/node_modules exists$" <<< "${forms_out}" || fail "the report says what node_modules is"
+if grep -q 'pnpm-lock.yaml' <<< "${forms_out}"; then
+  fail "a monitored file that matches the snapshot is not a line"
+fi
+if grep -qE 'bins\.list|packages\.list|meta\.json|monitored_files' <<< "${forms_out}"; then
+  fail "the snapshot's own files are not reported as project files"
+fi
+printf 'ok - the unfinished-rollback report lists only the monitored files that are not what the snapshot holds\n'
+
+# An owner that is alive, where a later test cannot place it: the journal's
+# opening time does not parse, ps gives no start time, ps gives one that does
+# not parse. Each is reported as the test that answered.
+( cd "${tmp_root}" && exec bash -c 'exec -a "$0" sleep 120' "${E2E_CHILD_MARKER}" ) >/dev/null 2>&1 &
+forms_owner_pid=$!
+owned_children+=("${forms_owner_pid}")
+sleep 0.3
+forms_entry "${forms_owner_pid}" "not-a-date"
+grep -q '^Owner: the opening time of the journal cannot be parsed$' <<< "$(post_message "$(forms_report)")" \
+  || fail "an entry whose opening time does not parse is reported as that"
+forms_real_ps=$(command -v ps)
+for forms_ps_case in "empty|ps gives no start time for pid ${forms_owner_pid}" "garbage|the start time ps gives for pid ${forms_owner_pid} cannot be parsed"; do
+  forms_ps_bin="${tmp_root}/ps-${forms_ps_case%%|*}-bin"
+  mkdir -p "${forms_ps_bin}"
+  cat > "${forms_ps_bin}/ps" <<EOF
+#!/usr/bin/env bash
+case "\$*" in
+  *lstart=*) [[ "${forms_ps_case%%|*}" == empty ]] || printf 'no date here\n'; exit 0 ;;
+esac
+exec "${forms_real_ps}" "\$@"
+EOF
+  chmod +x "${forms_ps_bin}/ps"
+  forms_entry "${forms_owner_pid}" "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  grep -q "^Owner: ${forms_ps_case#*|}\$" <<< "$(post_message "$(PATH="${forms_ps_bin}:${PATH}" forms_report)")" \
+    || fail "an owner ps cannot place is reported as the test that answered (${forms_ps_case%%|*})"
+done
+kill -9 "${forms_owner_pid}" 2>/dev/null
+forms_reap=0
+while kill -0 "${forms_owner_pid}" 2>/dev/null && (( forms_reap < 100 )); do
+  sleep 0.05; forms_reap=$((forms_reap + 1))
+done
+printf 'ok - an owner that cannot be placed is reported as the test that could not place it\n'
+
+# An incident record that could not be written is said as that: the report
+# names the file only after looking for it.
+: > "${tmp_root}/not-a-directory"
+forms_entry "${forms_owner_pid}" "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+forms_noincident=$(post_message "$(SAFEDEPS_INCIDENT_DIR="${tmp_root}/not-a-directory/incidents" forms_report)")
+grep -q "^Incident record: ${tmp_root}/not-a-directory/incidents/test-forms.json is not a file$" <<< "${forms_noincident}" \
+  || fail "an incident record that was not written is reported as not a file (${forms_noincident})"
+printf 'ok - the report names a record file only after looking for it\n'
 
 # --- ledger batch: could-not-run is not "nothing is unapproved" --------------
 #
@@ -2206,5 +2580,10 @@ idx_lines=$(
 printf 'ok - one unreadable ledger entry does not empty the index\n'
 
 printf '%s\n' '{"vulnerable":[]}' > "${state_file}"
+
+# Every form the report grammar has was read at least once above, or the
+# oracle's green says nothing about that form.
+oracle_table || exit 1
+printf 'ok - every line the post hook printed is a known form whose claim held on disk, and every form appeared\n'
 
 printf 'e2e passed\n'
