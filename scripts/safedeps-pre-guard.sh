@@ -4534,7 +4534,6 @@ DIR_HASH=$(compute_dir_hash "${PROJECT_DIR}")
 # Pending-key hash keys on cwd so the PostToolUse hook (which only sees cwd) can
 # find this install's pending state even when the install dir was overridden.
 KEY_DIR_HASH=$(compute_dir_hash "${CWD_DIR}")
-SNAPSHOT_ID="${TIMESTAMP}_${DIR_HASH}"
 
 acquire_state_lock
 # EXIT only, deliberately. Trapping TERM here looks like cheap insurance against
@@ -4567,9 +4566,30 @@ fi
 
 PARENT_SNAPSHOT_JSON=$(printf '%s' "${PARENT_SNAPSHOT_ID}" | jq -Rs 'if length == 0 then null else . end')
 
+# The snapshot id is this call's own. The pending state and the post hook find
+# the snapshot by it, and `${TIMESTAMP}_${DIR_HASH}` alone was the same for two
+# calls in one project within one second: the second wrote its meta and its copy
+# of the lockfiles over the first's, so one post hook read the other call's
+# record and a rollback restored the other call's files (bamdori r19, SAME). The
+# pid tells live calls apart; the exclusive create below tells apart a pid used
+# again within the second, and a leftover of a killed run. The suffix is joined
+# with `-`, not `_`, so no id is the start of another id's `${id}_*` files
+# (cleanup removes a snapshot with that glob). The timestamp stays first, so ids
+# still sort by time.
+claim_snapshot_id() {
+  local base="${TIMESTAMP}_${DIR_HASH}-$$" id n=0
+  id="${base}"
+  while ! ( set -C; : > "${SNAPSHOT_DIR}/${id}_monitored_files.list" ) 2>/dev/null; do
+    [[ -e "${SNAPSHOT_DIR}/${id}_monitored_files.list" ]] || return 1
+    n=$((n + 1))
+    id="${base}-${n}"
+  done
+  printf '%s' "${id}"
+}
+SNAPSHOT_ID=$(claim_snapshot_id)
+
 # Snapshot lock and manifest files that define dependency truth.
 SNAPSHOTTED=false
-: > "${SNAPSHOT_DIR}/${SNAPSHOT_ID}_monitored_files.list"
 
 for lock_file in "${SAFEDEPS_LOCK_FILES[@]}"; do
   snapshot_project_file "${lock_file}" "lock"
@@ -4990,9 +5010,8 @@ find "${PENDING_DIR}" \( -name '*.json' -o -name '*.trace' \) -type f -mmin +144
 # Key = (dir, normalized command); the snapshot id suffix makes the filename unique
 # per install, so even two identical concurrent commands keep separate state.
 PENDING_KEY=$(compute_pending_key "${KEY_DIR_HASH}" "${COMMAND}")
-# $$ (this pre hook's PID) guarantees a unique filename even for two installs in
-# the same second (SNAPSHOT_ID has only 1s resolution).
-PENDING_BASE="${PENDING_DIR}/${PENDING_KEY}__${SNAPSHOT_ID}_$$"
+# The snapshot id is unique per call (claim_snapshot_id), so the filename is too.
+PENDING_BASE="${PENDING_DIR}/${PENDING_KEY}__${SNAPSHOT_ID}"
 
 # The trace baseline: a file touched now, and the inode of each npm lockfile in
 # the directory the gate reads. npm rewrote node_modules/.package-lock.json on
