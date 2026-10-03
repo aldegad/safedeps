@@ -583,7 +583,9 @@ pass "inert flag lands inside a script handed to a shell, and quoted data stays 
 # right after the verb, the flag lost to a later `--no-ignore-scripts`, to an
 # abbreviation npm expands (`--no-ignore`, `--ign=false`) and to a word the
 # shell expands at run time. A `--` ends npm's options, so the flag goes before
-# it: after it, `npm ci` ignores the flag and runs the scripts.
+# it: after it, `npm ci` ignores the flag and runs the scripts. The words are
+# read as the shell joins them, so a quoted line that reads like the flag is
+# part of an option's value, not the flag.
 for inert_case in \
   "npm install left-pad@1.3.0 --ignore-scripts=false|npm install left-pad@1.3.0 --ignore-scripts=false --ignore-scripts" \
   "npm install left-pad@1.3.0 --no-ignore-scripts|npm install left-pad@1.3.0 --no-ignore-scripts --ignore-scripts" \
@@ -601,7 +603,9 @@ for inert_case in \
   "npm ci --no-ignore-scripts '--' x|npm ci --no-ignore-scripts --ignore-scripts '--' x" \
   "sh -c 'npm install left-pad@1.3.0 --ignore-scripts=false'|sh -c 'npm install left-pad@1.3.0 --ignore-scripts=false --ignore-scripts'" \
   'echo "$(npm install left-pad@1.3.0 --no-ignore-scripts)"|echo "$(npm install left-pad@1.3.0 --no-ignore-scripts --ignore-scripts)"' \
-  "(npm install left-pad@1.3.0 --ignore-scripts=false) && echo ok|(npm install left-pad@1.3.0 --ignore-scripts=false --ignore-scripts) && echo ok"
+  "(npm install left-pad@1.3.0 --ignore-scripts=false) && echo ok|(npm install left-pad@1.3.0 --ignore-scripts=false --ignore-scripts) && echo ok" \
+  $'npm install left-pad@1.3.0 --message "a\n--ignore-scripts"|npm install left-pad@1.3.0 --message "a\n--ignore-scripts" --ignore-scripts' \
+  "npm install left-pad@1.3.0 --ignore-scripts } --no-ignore-scripts|npm install left-pad@1.3.0 --ignore-scripts } --no-ignore-scripts --ignore-scripts"
 do
   inert_in="${inert_case%%|*}"
   inert_want="${inert_case#*|}"
@@ -620,7 +624,8 @@ for inert_in in \
   "npm install left-pad@1.3.0 \"--ignore-scripts\"" \
   "npm install left-pad@1.3.0 --no-no-ignore-scripts" \
   "npm install left-pad@1.3.0 --message --ignore-scripts" \
-  "npm install left-pad@1.3.0 --ignore-scripts && npm run build"
+  "npm install left-pad@1.3.0 --ignore-scripts && npm run build" \
+  $'npm install left-pad@1.3.0 --ignore-scripts --message "a\nb"'
 do
   inert_out=$(run_hook_command "${tmp_root}/home-compound" "${tmp_root}/safe-compound" "${inert_in}")
   [[ -z "${inert_out}" ]] || fail "an install that already carries the flag is not rewritten: $(printf '%q' "${inert_in}") (got: ${inert_out:0:200})"

@@ -1702,9 +1702,15 @@ inert_verb_ends() {
 # dashes, which ends npm's options. A word the shell decides at run time could
 # be any option, so a statement holding one is never settled.
 inert_statement_reads() {
-  local pieces line words w dynamic=false asked=false last k ends=""
+  local joined pieces line words w dynamic=false asked=false last k ends=""
   local -a argv=() line_words=()
-  pieces=$(shell_lex "$1" pieces "safedeps:inert_offsets") || return 1
+  # The pieces view reads one statement per line, so the statement goes in as
+  # the joined view: a newline inside quotes, a continuation and a comment
+  # read as the shell reads them. Fed as written, `--message "a<newline>
+  # --ignore-scripts"` put the quoted line on a line of its own, where it read
+  # as the flag, and the install ran its scripts unrewritten.
+  joined=$(shell_lex "$1" joined "safedeps:inert_offsets") || return 1
+  pieces=$(shell_lex "${joined}" pieces "safedeps:inert_offsets") || return 1
   while IFS= read -r line; do
     [[ -n "${line}" ]] || continue
     if [[ "${line}" == "!" ]]; then dynamic=true; continue; fi
@@ -1799,12 +1805,14 @@ inert_flag_offsets() {
           if (j > n) { unsure = 1; break }
           k = j; continue
         }
+        # A `}` is not an end: to bash it is an argument (`npm i x } --no-ignore`
+        # hands both words to npm), and zsh, which closes a group with it, will
+        # not parse a word after it, so a flag there runs nothing.
         if (c == "(") { depth++; continue }
         if (c == ")") { if (!depth) { b = k; break }; depth--; continue }
         if (c == "$" && L[k + 1] == "{") { brace++; k++; continue }
         if (c == "}" && brace) { brace--; continue }
         if (depth || brace) continue
-        if (c == "}" && blank(L[k - 1]) && (k == n || blank(L[k + 1]) || sep(k + 1))) { b = k; break }
         if (c == "\n" || c == ";") { b = k; break }
         if (c == "&") { if (L[k - 1] == ">" || L[k - 1] == "<" || L[k + 1] == ">") continue; b = k; break }
         if (c == "|") { if (L[k - 1] == ">") continue; b = k; break }
