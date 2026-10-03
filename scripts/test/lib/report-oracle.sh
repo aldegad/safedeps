@@ -373,13 +373,20 @@ oracle_pre() {
     && printed=true
   cksum "${home}/snapshots"/*_meta.json > "${call}/metas.after" 2>/dev/null || true
   # A record is this call's when it is new, its bytes changed, or it was
-  # written after the marker (a rewrite in the same second can leave the same
-  # bytes under the same snapshot id).
+  # written after the marker. Only a new one may be: each call claims a snapshot
+  # id of its own, and a record that was there before the call is another
+  # call's. Two calls in one project within one second used to share an id, and
+  # the second wrote over the first's record, so the first call's post hook
+  # spoke from the second call's record (bamdori r19, SAME). The record still
+  # agreed with the hook that read it, so only this check sees it.
   { grep -vxFf "${call}/metas.before" "${call}/metas.after" | awk '{ sub(/^[^ ]+ [^ ]+ /, ""); print }'
     find "${home}/snapshots" -maxdepth 1 -name '*_meta.json' -newer "${call}/marker" 2>/dev/null
   } | sort -u > "${call}/metas.written"
+  awk '{ sub(/^[^ ]+ [^ ]+ /, ""); print }' "${call}/metas.before" > "${call}/metas.before.names"
   while IFS= read -r meta; do
     [[ -n "${meta}" ]] || continue
+    ! grep -qxF -- "${meta}" "${call}/metas.before.names" \
+      || oracle_red "a pre-guard call wrote over a record that was there before it ran: ${meta}"
     rc=0
     python3 "${ORACLE_READ}" wrote "${meta}" > "${call}/meta.wrote" 2>/dev/null || rc=$?
     case "${rc}" in

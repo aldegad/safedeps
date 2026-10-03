@@ -1415,6 +1415,51 @@ grep -q "post-verify: could not read the pre-guard's record of this command in .
   || fail "a record the post hook cannot read is said in advisory.log"
 pass "a record the post hook cannot read gets no --ignore-scripts line, and advisory.log says so"
 
+# Two pre-guard calls in one project within one second have a snapshot each.
+# The id was `${TIMESTAMP}_${DIR_HASH}`, the same for both, so the second call
+# wrote its record and its copy of the lockfile over the first's: the first
+# call's post hook spoke from the second call's record, and its rollback
+# restored the second call's files (bamdori r19, SAME). A `date` that answers
+# one second for `+%s` puts both calls in it every time; the lockfile changes
+# between them, as an install in progress would change it.
+same_wt=$(mktemp -d "${tmp_root}/same-wt.XXXXXX")
+same_bin=$(mktemp -d "${tmp_root}/same-bin.XXXXXX")
+grammar_project "${same_wt}"
+cat > "${same_bin}/date" <<SHIM
+#!/usr/bin/env bash
+[[ "\$#" == 1 && "\$1" == +%s ]] && { printf '%s\\n' "$(date +%s)"; exit 0; }
+exec "$(command -v date)" "\$@"
+SHIM
+chmod +x "${same_bin}/date"
+same_first=$(PATH="${same_bin}:${PATH}" grammar_pre "${same_wt}" "npm install fixture-parent@1.0.0")
+cp "${same_wt}/package-lock.json" "${tmp_root}/same-first-lock.json"
+jq -c . "${tmp_root}/same-first-lock.json" > "${same_wt}/package-lock.json"
+cmp -s "${same_wt}/package-lock.json" "${tmp_root}/same-first-lock.json" && fail "the second call sees a lockfile with other bytes"
+cp "${same_wt}/package-lock.json" "${tmp_root}/same-second-lock.json"
+same_second=$(PATH="${same_bin}:${PATH}" grammar_pre "${same_wt}" "npm ci")
+same_first_cmd=$(jq -r '.hookSpecificOutput.updatedInput.command // empty' <<< "${same_first:-{\}}")
+same_second_cmd=$(jq -r '.hookSpecificOutput.updatedInput.command // empty' <<< "${same_second:-{\}}")
+[[ "${same_first_cmd}" == 'npm install fixture-parent@1.0.0 --ignore-scripts' && "${same_second_cmd}" == 'npm ci --ignore-scripts' ]] \
+  || fail "both calls in one second are rewritten (${same_first}; ${same_second})"
+same_ids=$(for f in $(grep -lF "\"$(cd -P "${same_wt}" && pwd -P)\"" "${SAFEDEPS_HOME}/pending"/*.json); do jq -r .snapshot_id "${f}"; done | sort -u)
+[[ "$(grep -c . <<< "${same_ids}")" == 2 ]] || fail "two calls in one project within one second have a snapshot id each (${same_ids})"
+for same_id in ${same_ids}; do
+  [[ -f "${SAFEDEPS_HOME}/snapshots/${same_id}_meta.json" ]] || fail "each call in one second keeps its own record (${same_id})"
+done
+printf '%s\n' "${tampered_lock}" > "${same_wt}/package-lock.json"
+same_first_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${same_wt}" "${same_first_cmd}")
+grep -qx 'safedeps added --ignore-scripts to this install' <<< "$(post_message "${same_first_post}")" \
+  || fail "the first call in one second speaks from its own record (${same_first_post})"
+cmp -s "${same_wt}/package-lock.json" "${tmp_root}/same-first-lock.json" \
+  || fail "the first call in one second is rolled back to its own snapshot"
+printf '%s\n' "${tampered_lock}" > "${same_wt}/package-lock.json"
+same_second_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${same_wt}" "${same_second_cmd}")
+grep -qx 'safedeps added --ignore-scripts to this install' <<< "$(post_message "${same_second_post}")" \
+  || fail "the second call in one second speaks from its own record (${same_second_post})"
+cmp -s "${same_wt}/package-lock.json" "${tmp_root}/same-second-lock.json" \
+  || fail "the second call in one second is rolled back to its own snapshot"
+pass "two pre-guard calls in one project within one second keep a record and a snapshot each"
+
 # The backstop with nothing to roll back to: no confirmed record, and a
 # confirmed record that names a snapshot with no meta file.
 backstop_none_wt="${tmp_root}/backstop-none-wt"
