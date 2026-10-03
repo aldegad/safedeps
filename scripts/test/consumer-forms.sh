@@ -858,6 +858,37 @@ for decoy in 'command -v pip install evil==1.0.0' 'command -V pip install evil==
 done
 pass "the options of command and exec end where the manuals end them, and the command after them is read"
 
+# What follows the `))` of an arithmetic command or a `for ((...))` header is
+# a word of its own: bash and zsh read `((...))` as a token. A `{`, a `do` or
+# a subshell glued to it was read as more of the header, and the install in
+# the body passed with no check. zsh runs a subshell glued to the word list of
+# `for NAME (WORDS)` too, which the lexer read as a glob qualifier, and bash
+# and zsh run a subshell first inside a process substitution, which the lexer
+# read as `((` arithmetic. All in main and 83de40c. The bits are macOS bash
+# 3.2, zsh 5.9, sh and dash, measured with a marker function in place of pip;
+# the generated grid holds the places (RC, RZ and RF forms).
+for close_row in \
+  '1110|for ((i=0;i<1;i++)){ pip install evil==1.0.0;}' \
+  '1110|for ((i=0;i<1;i++))do pip install evil==1.0.0; done' \
+  '1110|for ((i=0;i<1;i++)){(pip install evil==1.0.0);}' \
+  '0100|for ((i=0;i<1;i++)) pip install evil==1.0.0' \
+  '0100|for i (1)(pip install evil==1.0.0)' \
+  '1100|cat <((pip install evil==1.0.0))'
+do
+  expect_not_approved "${close_row#*|} (${close_row%%|*})" "${close_row#*|}"
+done
+for inert_form in 'for ((i=0;i<1;i++)){(npm ci);}' 'for i (1)(npm ci)' 'cat <((npm ci))'; do
+  [[ "$(gate_rewrite "${inert_form}")" == "${inert_form/npm ci/npm ci --ignore-scripts}" ]] \
+    || fail "an npm install after a closed head gets --ignore-scripts: ${inert_form} (got: $(gate_rewrite "${inert_form}"))"
+done
+# dash reads `((` as two subshells, so it puts these installs elsewhere, and no
+# one rewrite is inert for every shell: UNDECIDED, as for the other forms only
+# some shells parse.
+expect_undecided "an npm install after for ((...)){" 'for ((i=0;i<1;i++)){ npm ci;}'
+expect_pass "an arithmetic expansion before an install's words" 'echo $((1+2)) pip install evil==1.0.0'
+expect_pass "for ((...)) as an argument" 'echo for ((i=0;i<1;i++)) pip install evil==1.0.0'
+pass "a word glued after a closed arithmetic head, list or process substitution is read as the body"
+
 # The inert rewrite reaches an npm install at every new start, under the rule
 # every rewrite follows: the text changes only where every reading puts the
 # npm installs in the same place. Measured on the release before this: the zsh

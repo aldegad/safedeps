@@ -756,7 +756,13 @@ shell_lex() {
           if (top == "A" || top == "K") {
             if (top == "K") { if (c == "]") pop(); continue }
             if (c == "(") par[d]++
-            else if (c == ")") { if (par[d] > 0) par[d]--; else if (X[i+1] == ")") { i++; C[i] = cls; if (adol[d]) WC[i] = 1; pop() } }
+            # The `))` that closes an arithmetic command ends its word, as the
+            # `((` that opens it starts one: bash and zsh read `((...))` as a
+            # token of its own, so a reserved word or a group glued after it
+            # is a word of its own (`for ((i=0;i<1;i++)){ pip install x; }`,
+            # `for ((...))do`). ACL marks it for the walk. The close of `$((`
+            # is a byte of the word it stands in.
+            else if (c == ")") { if (par[d] > 0) par[d]--; else if (X[i+1] == ")") { i++; C[i] = cls; if (adol[d]) WC[i] = 1; else ACL[i] = 1; pop(); if ((i in ACL) && wantdep) DEP[i] = dc } }
             else if (c == "\n") i = at_newline(i)
             continue
           }
@@ -772,7 +778,11 @@ shell_lex() {
           # `((` is decided wherever it stands, not only where a command starts:
           # a hand list of command positions missed backticks, case patterns,
           # coproc and time -p (forms P1, P2, P15, Q2).
-          if (c == "(" && X[i+1] == "(") { C[i+1] = cls; arith_or_sub(i, 0); continue }
+          # Not where the first `(` opens a process substitution (`<((pip
+          # install x))`, a subshell inside one, which bash and zsh run, form
+          # PS1) or zsh `=(`: the shell reads that opener before it looks for
+          # arithmetic, and the `(` rule below reads it.
+          if (c == "(" && X[i+1] == "(" && !(i > 1 && (X[i-1] == "<" || X[i-1] == ">") && C[i-1] == cls) && wparen(i) != "z") { C[i+1] = cls; arith_or_sub(i, 0); continue }
           if (c == "$" && X[i+1] == "(") { C[i+1] = cls; i++; push("S"); continue }
           # dash has no `$[`: the bytes are a word, quotes and comments in it
           # read as anywhere else (forms K1, K2).
@@ -847,7 +857,7 @@ shell_lex() {
               continue
             }
             par[d]++
-            if (!shd && !emptyahead(i) && (i == 1 || X[i-1] !~ /[$<>]/) && !cmdpos(i)) { GL[d, par[d]] = 1; GLO[i] = 1; glc[d]++; div = 1 } else delete GL[d, par[d]]
+            if (!shd && !emptyahead(i) && (i == 1 || X[i-1] !~ /[$<>]/) && !cmdpos(i) && !forlist(i)) { GL[d, par[d]] = 1; GLO[i] = 1; glc[d]++; div = 1 } else delete GL[d, par[d]]
             continue
           }
           if (c == ")") {
@@ -1215,9 +1225,9 @@ shell_lex() {
       # CS gets the first byte of each command, its prefixes included: the
       # first word, or the redirection operator or file descriptor before it.
       # prefixes() starts there.
-      function starts(rs, B, CS,   k, s, w, op, st, pre, rd, fn, fr, inp, rp, dbr, cop, tm, cs, zr, br, fh, j, pn, PST, body) {
+      function starts(rs, B, CS,   k, s, w, op, st, pre, rd, fn, fr, fra, inp, rp, dbr, cop, tm, cs, zr, br, fh, j, pn, PST, body, HC) {
         zr = (rs == "zsh"); br = (rs == "bash")
-        st = 1; pre = 0; rd = 0; fn = 0; fr = 0; inp = 0; rp = 0; dbr = 0; cop = 0; tm = 0; cs = 0; fh = 0; k = 1; pn = 0
+        st = 1; pre = 0; rd = 0; fn = 0; fr = 0; fra = 0; inp = 0; rp = 0; dbr = 0; cop = 0; tm = 0; cs = 0; fh = 0; k = 1; pn = 0
         while (k <= N) {
           if (word_sep(k)) {
             op = (C[k] == "c" && DEP[k] == 1) ? X[k] : ""
@@ -1267,20 +1277,29 @@ shell_lex() {
               #
               # PST remembers, for each open `(`, whether it opened such a
               # subshell, so that its `)` can say a command ended there.
-              body = ((fh || fn == 2 || br && cop == 2 || st && !pre && !fn && !fr && !rp && !dbr && !(k in CPO)) && !(X[k+1] == "(" && (k + 2) in AR) && !emptyahead(k))
+              #
+              # After the header of an arithmetic `for ((...))` the `(` is
+              # the body (zsh runs `for ((...)) (pip install x)`), and so it
+              # is after the word list of zsh `for NAME (WORDS)`: HC marks
+              # the `)` that closed such a head, and a subshell glued to it
+              # has no blank to carry the start either.
+              body = ((fh || fn == 2 || br && cop == 2 || fr == 2 && fra || st && !pre && !fn && !fr && !rp && !dbr && !(k in CPO)) && !(X[k+1] == "(" && (k + 2) in AR) && !emptyahead(k))
               if (body) {
                 CS[k] = 1
                 if (X[k-1] == " " || X[k-1] == "\t") mark_start(k, B)
-                else if (k > 1 && ((fh || fn == 2 || br && cop == 2) && X[k-1] == ")" || !word_sep(k - 1))) B[k] = 1
+                else if (k > 1 && ((fh || fn == 2 || br && cop == 2 || (k - 1) in HC) && X[k-1] == ")" || !word_sep(k - 1))) B[k] = 1
               }
               if (!(X[k+1] == "(" && (k + 2) in AR)) PST[++pn] = body
               if (X[k+1] == "(" && (k + 2) in AR) { }
-              else if (zr && fr == 2) { inp = 1; fr = 0 }
+              else if (zr && fr == 2 && !fra) { inp = 1; fr = 0 }
               else { st = 1; pre = 0; rd = 0; fn = 0; fr = 0; rp = 0; cop = 0; tm = 0 }
               fh = 0
             }
             else if (op == ")") {
-              if (inp) { inp = 0; st = 1 }
+              # The `))` of an arithmetic command or header ends its word and
+              # nothing else: the `((` opened no subshell.
+              if (k in ACL) { if (fr == 2 && fra) HC[k] = 1 }
+              else if (inp) { inp = 0; st = 1; HC[k] = 1 }
               else if (emptyparen(k)) { st = 1; fn = 0; fh = 1 }
               else if (cs == 3) st = 1
               # The close of a subshell ends a command, so a reserved word
@@ -1288,7 +1307,7 @@ shell_lex() {
               # shell measured runs). A `(` that opened none -- a glob
               # word, a stray one among the arguments -- closes nothing.
               else if (pn > 0 && PST[pn]) { st = 1; pre = 0 }
-              if (pn > 0) pn--
+              if (pn > 0 && !(k in ACL)) pn--
             }
             k++; continue
           }
@@ -1306,11 +1325,16 @@ shell_lex() {
             if (fn != 2 || !cbody(w)) { fn = (fn == 1) ? 2 : 3; continue }
             fn = 0; st = 1
           }
-          if (fr == 1) { fr = 2; continue }
+          # fra is set when the head is arithmetic, `for ((...))`: then the
+          # word after it is the body, a `do`, a `{` or, in zsh, a command
+          # (the short form `for ((...)) sublist`; bash fails to parse it, so
+          # the start is shared).
+          if (fr == 1) { fr = 2; fra = (substr(w, 1, 1) == "(" && (s + 1) in AR); continue }
           if (fr == 2) {
             if (w == "in") { fr = 0; st = 0 }
             else if (w == "do" || w == "{") { fr = 0; st = 1 }
-            continue
+            else if (fra) { fr = 0; st = 1; fra = 0 }
+            if (fr == 2 || w == "in" || w == "do" || w == "{") continue
           }
           if (rp) { rp = 0; st = 1; continue }
           if (cs == 1) { cs = 2; continue }
@@ -1559,6 +1583,23 @@ shell_lex() {
         w = ""
         while (k >= 1 && X[k] ~ /[a-z]/) { w = X[k] w; k-- }
         return w ~ /^(if|then|else|elif|while|until|do|time|coproc)$/ && wordstart(k + 1)
+      }
+      # Whether the `(` at byte j opens the word list of zsh `for NAME... (`
+      # or `foreach NAME... (`: an operator of that head, never a glob word.
+      # Read as a glob, its `)` made a subshell glued after it a glob
+      # qualifier, and `for i (1)(pip install x)`, which zsh runs, had no
+      # command in it.
+      function forlist(j,   k, w, n) {
+        k = j - 1; n = 0
+        while (1) {
+          while (k >= 1 && (X[k] == " " || X[k] == "\t") && C[k] == C[j]) k--
+          w = ""
+          while (k >= 1 && X[k] ~ /[A-Za-z0-9_]/ && C[k] == C[j]) { w = X[k] w; k-- }
+          if (w == "") return 0
+          if ((w == "for" || w == "foreach") && n > 0) return wordstart(k + 1) && cmdpos(k + 1)
+          n++
+          if (k >= 1 && X[k] !~ /[ \t]/) return 0
+        }
       }
       # Whether byte j follows the NAME of `function NAME` or `coproc NAME`,
       # where bash 5 reads a compound command (see cbody). Asked where a
