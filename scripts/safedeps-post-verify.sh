@@ -67,6 +67,8 @@ source "${SAFEDEPS_REPO_DIR}/lib/providers/providers.sh"
 source "${SAFEDEPS_REPO_DIR}/lib/npm/closure.sh"
 # shellcheck source=../lib/gates/npm-reach.sh
 source "${SAFEDEPS_REPO_DIR}/lib/gates/npm-reach.sh"
+# shellcheck source=../lib/gates/report-facts.sh
+source "${SAFEDEPS_REPO_DIR}/lib/gates/report-facts.sh"
 # shellcheck source=../lib/gates/rollback-journal.sh
 source "${SAFEDEPS_REPO_DIR}/lib/gates/rollback-journal.sh"
 # shellcheck source=../lib/npm/workspaces.sh
@@ -221,15 +223,7 @@ monitored_files() {
 # so a target can lead outside only by being a link. The rollback runs no npm
 # (rollback_node_modules below).
 rollback_target_outside() {
-  local target="$1"
-
-  if ! (cd -P "${PROJECT_DIR}" 2>/dev/null); then
-    printf 'the project directory %s cannot be resolved' "${PROJECT_DIR}"
-    return 0
-  fi
-  if [[ -L "${target}" ]]; then
-    printf '%s is a symbolic link to %s' "${target}" "$(safedeps_link_target "${target}")"
-  fi
+  fact_outside "${PROJECT_DIR}" "$1"
 }
 
 # The rebuild after a verified inert install runs only where npm cannot reach
@@ -238,24 +232,31 @@ project_npm_blocker() {
   safedeps_npm_reach_blocker "${PROJECT_DIR}"
 }
 
-# Records a refused step everywhere a rollback reports: the warnings the reorg
-# message and its reorg.log entry carry, a REORG REFUSED entry of its own in
-# reorg.log, and advisory.log.
+# Records a refused step everywhere a rollback reports, in the same words: the
+# line the reorg message and its reorg.log entry carry, a REORG REFUSED entry
+# of its own in reorg.log, and advisory.log.
+#
+# record_rollback_refusal <restore|removal> <path> <fact>
 ROLLBACK_REFUSED=$'\n'
 record_rollback_refusal() {
-  local step="$1" why="$2"
+  local kind="$1" path="$2" why="$3" line
 
   # The manifest loop and the package.json step can both reach one file.
-  [[ "${ROLLBACK_REFUSED}" != *$'\n'"${step}"$'\n'* ]] || return 0
-  ROLLBACK_REFUSED+="${step}"$'\n'
-  ROLLBACK_WARNINGS+=("REFUSED ${step}: ${why}. safedeps does not follow a link or write outside the project it read")
-  log_advisory "post-verify REORG REFUSED (${step}): ${why} -- project ${PROJECT_DIR}"
+  [[ "${ROLLBACK_REFUSED}" != *$'\n'"${kind} of ${path}"$'\n'* ]] || return 0
+  ROLLBACK_REFUSED+="${kind} of ${path}"$'\n'
+  line=$(did_refuse "${kind}" "${path}" "${why}")
+  report_say "${line}"
+  log_advisory "post-verify REORG REFUSED: ${line} -- project ${PROJECT_DIR}"
   cat >> "${GUARD_DIR}/reorg.log" << LOG_EOF
-[$(date -u +"%Y-%m-%dT%H:%M:%SZ")] REORG REFUSED ${step}
+[$(date -u +"%Y-%m-%dT%H:%M:%SZ")] REORG REFUSED
   Project: ${PROJECT_DIR}
-  Reason: ${why}
+  ${line}
 LOG_EOF
 }
+
+# The monitored files this rollback took a step over, one name per line,
+# whatever came of the step.
+ROLLBACK_DIFFERED=$'\n'
 
 restore_monitored_file() {
   local file_name="$1"
@@ -272,24 +273,46 @@ restore_monitored_file() {
   if [[ -n "${outside}" ]]; then
     # Only a step that would write or remove is refused; a file that already
     # matches the snapshot needs nothing.
-    if { [[ -f "${snapshot_file}" ]] && files_differ "${snapshot_file}" "${current_file}"; } \
-      || { [[ ! -f "${snapshot_file}" ]] && { [[ -f "${missing_marker}" ]] || [[ -f "${current_missing_marker}" ]]; } && [[ -e "${current_file}" || -L "${current_file}" ]]; }; then
-      record_rollback_refusal "restore of ${file_name}" "${outside}"
+    if [[ -f "${snapshot_file}" ]] && files_differ "${snapshot_file}" "${current_file}"; then
+      ROLLBACK_DIFFERED+="${file_name}"$'\n'
+      record_rollback_refusal restore "${current_file}" "${outside}"
+    elif [[ ! -f "${snapshot_file}" ]] && { [[ -f "${missing_marker}" ]] || [[ -f "${current_missing_marker}" ]]; } && [[ -e "${current_file}" || -L "${current_file}" ]]; then
+      ROLLBACK_DIFFERED+="${file_name}"$'\n'
+      record_rollback_refusal removal "${current_file}" "${outside}"
     fi
     return
   fi
 
   if [[ -f "${snapshot_file}" ]]; then
     if files_differ "${snapshot_file}" "${current_file}"; then
-      cp "${snapshot_file}" "${current_file}"
-      ROLLED_BACK+=("${file_name}")
+      ROLLBACK_DIFFERED+="${file_name}"$'\n'
+      did_restore "${snapshot_file}" "${current_file}"
     fi
     return
   fi
 
   if { [[ -f "${missing_marker}" ]] || [[ -f "${current_missing_marker}" ]]; } && [[ -f "${current_file}" ]]; then
-    rm -f "${current_file}"
-    ROLLED_BACK+=("${file_name}")
+    ROLLBACK_DIFFERED+="${file_name}"$'\n'
+    did_remove "${current_file}"
+  fi
+}
+
+# The package.json step both rollbacks run after the monitored files: the
+# manifest loop reaches package.json too, and this is the same step over the
+# same file, so a refusal it already recorded is not recorded twice and a file
+# it already restored no longer differs.
+restore_package_json() {
+  local snapshot_file="${SNAPSHOT_DIR}/$1_package.json" current_file="${PROJECT_DIR}/package.json" outside
+
+  # The manifest loop already took this step, whatever came of it.
+  [[ "${ROLLBACK_DIFFERED}" != *$'\n'"package.json"$'\n'* ]] || return 0
+  [[ -f "${snapshot_file}" ]] && files_differ "${snapshot_file}" "${current_file}" || return 0
+  ROLLBACK_DIFFERED+="package.json"$'\n'
+  outside=$(rollback_target_outside "${current_file}")
+  if [[ -n "${outside}" ]]; then
+    record_rollback_refusal restore "${current_file}" "${outside}"
+  else
+    did_restore "${snapshot_file}" "${current_file}"
   fi
 }
 
@@ -583,12 +606,12 @@ rollback_note_npm_project() {
 # manager that differs from the snapshot the pre-guard took just before the
 # command, or a node_modules that differs from what the pre-guard listed then.
 # Removing node_modules purges what a rejected install wrote; when the command
-# wrote nothing there is nothing of its to purge. The closure is judged
-# whether or not the command changed it (no install trace means UNGATED and no
-# rebuild, not no judgment), so a command misread as an install, in a project
-# whose closure was never approved, reaches the rollback with nothing to roll
-# back -- and the removal then took the project's dependencies with it. The
-# reinstall the rollback used to run had been hiding that.
+# wrote nothing there is nothing of its to purge. The closure is judged whether
+# or not the command changed it (no install trace means UNGATED and no rebuild,
+# not no judgment), so a command misread as an install, in a project whose
+# closure was never approved, reaches the rollback with nothing to roll back --
+# and the removal then took the project's dependencies with it. The reinstall
+# the rollback used to run had been hiding that.
 #
 # The files are compared before the restore and against the snapshot from
 # before this command, not by what the restore put back: the restore goes to
@@ -600,15 +623,27 @@ rollback_note_npm_project() {
 # inside the second the snapshot was taken in (measured in review: seven runs
 # of eight left the rejected version on disk).
 #
+# Each check that finds nothing is one line of the report, so the reason
+# node_modules stayed is the list of what was looked at. One check that finds
+# something ends the list: the command counts as having written, nothing is
+# printed, and node_modules is removed.
+#
 # With no snapshot from before the command (the backstop has none) there is
 # nothing to compare against, and the command counts as having written.
 ROLLBACK_NODE_FILES="package.json package-lock.json npm-shrinkwrap.json pnpm-lock.yaml yarn.lock bun.lock bun.lockb"
 ROLLBACK_PRE_SNAPSHOT_ID=""
 ROLLBACK_COMMAND_WROTE_NODE_FILE=unknown
+# The node files the snapshot from before the command holds a copy of, or
+# recorded as absent: the ones the comparison could answer for.
+ROLLBACK_NODE_FILES_COMPARED=""
+# The first node file that differed from that snapshot, when one did.
+ROLLBACK_NODE_FILE_DIFFERED=""
 rollback_note_command_writes() {
   local pre="$1" name copy
   ROLLBACK_PRE_SNAPSHOT_ID="${pre}"
   ROLLBACK_COMMAND_WROTE_NODE_FILE=unknown
+  ROLLBACK_NODE_FILES_COMPARED=""
+  ROLLBACK_NODE_FILE_DIFFERED=""
   [[ -n "${pre}" && -f "${SNAPSHOT_DIR}/${pre}_meta.json" ]] || return 0
 
   # The trace is read by inode and against a baseline file, so it also sees a
@@ -622,70 +657,130 @@ rollback_note_command_writes() {
   for name in ${ROLLBACK_NODE_FILES}; do
     copy="${SNAPSHOT_DIR}/${pre}_${name}"
     if [[ -f "${copy}" ]]; then
+      ROLLBACK_NODE_FILES_COMPARED+="${ROLLBACK_NODE_FILES_COMPARED:+, }${name}"
       if files_differ "${copy}" "${PROJECT_DIR}/${name}"; then
         ROLLBACK_COMMAND_WROTE_NODE_FILE=true
+        ROLLBACK_NODE_FILE_DIFFERED="${name}"
         return 0
       fi
-    elif [[ -f "${copy}.missing" ]] && [[ -e "${PROJECT_DIR}/${name}" || -L "${PROJECT_DIR}/${name}" ]]; then
-      ROLLBACK_COMMAND_WROTE_NODE_FILE=true
-      return 0
+    elif [[ -f "${copy}.missing" ]]; then
+      ROLLBACK_NODE_FILES_COMPARED+="${ROLLBACK_NODE_FILES_COMPARED:+, }${name}"
+      if [[ -e "${PROJECT_DIR}/${name}" || -L "${PROJECT_DIR}/${name}" ]]; then
+        ROLLBACK_COMMAND_WROTE_NODE_FILE=true
+        ROLLBACK_NODE_FILE_DIFFERED="${name}"
+        return 0
+      fi
     fi
   done
 }
 
-rollback_command_wrote_node_tree() {
+# rollback_node_tree_facts: when no check shows the command wrote the node
+# tree, prints `kept <node_modules>` and one line per check, and returns 0.
+# Otherwise prints the first check that showed a write, as one line, and
+# returns 1: why node_modules was removed is a line the same way as why it
+# was kept.
+rollback_node_tree_facts() {
   local node_modules="${PROJECT_DIR}/node_modules"
-
-  [[ "${ROLLBACK_COMMAND_WROTE_NODE_FILE}" == false ]] || return 0
-
   local pre="${ROLLBACK_PRE_SNAPSHOT_ID}"
   local meta="${SNAPSHOT_DIR}/${pre}_meta.json"
   local packages="${SNAPSHOT_DIR}/${pre}_packages.list"
   local bins="${SNAPSHOT_DIR}/${pre}_bins.list"
-  [[ -f "${meta}" && -f "${packages}" && -f "${bins}" ]] || return 0
+  local rel found
 
-  [[ -z "$(find "${node_modules}" -maxdepth 3 -name "package.json" 2>/dev/null | sort | comm -13 "${packages}" - | head -1)" ]] || return 0
-  [[ -z "$({ ls "${node_modules}/.bin/" 2>/dev/null || true; } | sort | comm -13 "${bins}" - | head -1)" ]] || return 0
-  [[ -z "$(find -H "${node_modules}/.package-lock.json" -prune -newer "${meta}" 2>/dev/null)" ]] || return 0
-  [[ -z "$(find -H "${node_modules}" -prune -newer "${meta}" 2>/dev/null)" ]] || return 0
-  return 1
+  # The trace is read by inode and against a baseline file, so it also sees a
+  # reinstall of the same tree inside one second, which the listings cannot.
+  if [[ -n "${NPM_TRACED_RECORDS:-}" ]]; then
+    rel=$(head -1 <<< "${NPM_TRACED_RECORDS}")
+    printf '%s/%s is newer than the baseline taken before this command or has another inode\n' "${PROJECT_DIR}" "${rel}"
+    return 1
+  fi
+  # With no snapshot from before the command there is nothing to compare
+  # against, and the command counts as having written.
+  if [[ -z "${pre}" ]]; then
+    printf 'this rollback has no snapshot from before the command\n'
+    return 1
+  fi
+  if [[ ! -f "${meta}" ]]; then
+    printf '%s\n' "$(fact_path "${meta}")"
+    return 1
+  fi
+  if [[ -n "${ROLLBACK_NODE_FILE_DIFFERED}" ]]; then
+    printf '%s/%s differed from the pre-command snapshot %s when this rollback began\n' "${PROJECT_DIR}" "${ROLLBACK_NODE_FILE_DIFFERED}" "${pre}"
+    return 1
+  fi
+  if [[ "${ROLLBACK_COMMAND_WROTE_NODE_FILE}" != false || -z "${ROLLBACK_NODE_FILES_COMPARED}" ]]; then
+    printf '%s\n' "$(fact_path "${SNAPSHOT_DIR}/${pre}_package.json")"
+    return 1
+  fi
+  for found in "${packages}" "${bins}"; do
+    [[ -f "${found}" ]] || { printf '%s\n' "$(fact_path "${found}")"; return 1; }
+  done
+  # -H follows node_modules itself when it is a link, as the pre-guard's
+  # listing does; without it both listings of a linked node_modules were empty.
+  found=$(find -H "${node_modules}" -maxdepth 3 -name "package.json" 2>/dev/null | sort | comm -13 "${packages}" - | head -1)
+  if [[ -n "${found}" ]]; then
+    printf '%s lists %s, which the pre-command snapshot %s does not\n' "${node_modules}" "${found}" "${pre}"
+    return 1
+  fi
+  found=$({ ls "${node_modules}/.bin/" 2>/dev/null || true; } | sort | comm -13 "${bins}" - | head -1)
+  if [[ -n "${found}" ]]; then
+    printf '%s/.bin lists %s, which the pre-command snapshot %s does not\n' "${node_modules}" "${found}" "${pre}"
+    return 1
+  fi
+  for found in "${node_modules}/.package-lock.json" "${node_modules}"; do
+    if [[ -n "$(find -H "${found}" -prune -newer "${meta}" 2>/dev/null)" ]]; then
+      printf '%s is newer than the pre-command snapshot %s\n' "${found}" "${pre}"
+      return 1
+    fi
+  done
+
+  [[ -e "${node_modules}" || -L "${node_modules}" ]] || return 0
+  printf 'kept %s\n' "${node_modules}"
+  # A kept link is said as one: the lines below read what it leads to.
+  [[ ! -L "${node_modules}" ]] || printf '%s\n' "$(fact_path "${node_modules}")"
+  printf '%s\n' "${TRACE_LINE}"
+  printf 'when this rollback began, none of %s in %s differed from the pre-command snapshot %s\n' "${ROLLBACK_NODE_FILES_COMPARED}" "${PROJECT_DIR}" "${pre}"
+  printf '%s lists no package.json the pre-command snapshot %s lacks\n' "${node_modules}" "${pre}"
+  printf '%s/.bin lists no entry the pre-command snapshot %s lacks\n' "${node_modules}" "${pre}"
+  if [[ -e "${node_modules}/.package-lock.json" ]]; then
+    printf '%s/.package-lock.json is not newer than the pre-command snapshot %s\n' "${node_modules}" "${pre}"
+  else
+    printf '%s\n' "$(fact_path "${node_modules}/.package-lock.json")"
+  fi
+  printf '%s is not newer than the pre-command snapshot %s\n' "${node_modules}" "${pre}"
 }
 
 rollback_node_modules() {
-  local node_modules="${PROJECT_DIR}/node_modules"
+  local node_modules="${PROJECT_DIR}/node_modules" facts line
 
   # Only an npm project's node_modules is the rollback's to remove.
   [[ "${ROLLBACK_NPM_PROJECT}" == true ]] || return 0
-  if ! rollback_command_wrote_node_tree; then
-    [[ -e "${node_modules}" || -L "${node_modules}" ]] || return 0
-    ROLLBACK_WARNINGS+=("${node_modules} was not removed: when this rollback began, ${PROJECT_DIR} showed no install trace, none of the project's node manifest or lock files differed from the snapshot taken before this command; node_modules lists no package or binary that snapshot did not list; and neither node_modules nor its .package-lock.json is newer than that snapshot")
+  if facts=$(rollback_node_tree_facts); then
+    [[ -n "${facts}" ]] || return 0
+    while IFS= read -r line; do
+      report_say "${line}"
+    done <<< "${facts}"
+    TRACE_LINE_SAID=true
     return 0
   fi
+  # A node_modules that is not there has nothing to remove, and the reason a
+  # removal would have had is not said.
+  [[ -e "${node_modules}" || -L "${node_modules}" ]] || return 0
+  report_say "${facts}"
   if [[ -L "${node_modules}" ]]; then
-    local target
-    target=$(safedeps_link_target "${node_modules}")
-    record_rollback_refusal "node_modules removal" "${node_modules} is a symbolic link to ${target}; safedeps removed nothing there, so whatever this install wrote through the link is still there"
+    record_rollback_refusal removal "${node_modules}" "$(fact_path "${node_modules}")"
     return 0
   fi
   [[ -d "${node_modules}" ]] || return 0
-  if ! rm -rf "${node_modules}"; then
-    ROLLBACK_WARNINGS+=("node_modules could not be removed: ${node_modules} is still there, with whatever this install wrote in it")
-    return 0
-  fi
-  ROLLED_BACK+=("node_modules (removed)")
+  did_remove "${node_modules}"
   # The rollback says what it did and what the restore left, and gives no
   # command: where a reinstall would write is npm's to decide (a bare npm ci in
   # a workspace member empties the workspace root's node_modules), and a
   # judgment that is silent when it does not block reads as "go ahead".
-  ROLLBACK_WARNINGS+=("${node_modules} was removed. safedeps does not reinstall packages, and it does not judge where a reinstall would write; the gate checks the next install like any other install")
-  if [[ ! -f "${PROJECT_DIR}/package.json" ]]; then
-    ROLLBACK_WARNINGS+=("after the restore, ${PROJECT_DIR} has no package.json")
-  elif [[ ! -f "${PROJECT_DIR}/package-lock.json" && ! -f "${PROJECT_DIR}/npm-shrinkwrap.json" ]]; then
-    ROLLBACK_WARNINGS+=("after the restore, ${PROJECT_DIR} has a package.json and neither package-lock.json nor npm-shrinkwrap.json")
-  fi
-  if jq -e 'type == "object" and has("workspaces")' "${PROJECT_DIR}/package.json" >/dev/null 2>&1; then
-    ROLLBACK_WARNINGS+=("${PROJECT_DIR}/package.json declares workspaces; the node_modules directories of its workspace members were not removed")
-  fi
+  report_path "${PROJECT_DIR}/package.json"
+  report_path "${PROJECT_DIR}/package-lock.json"
+  report_path "${PROJECT_DIR}/npm-shrinkwrap.json"
+  report_workspaces_key "${PROJECT_DIR}"
 }
 
 # Reads, for each nested package key on stdin, what every package above it
@@ -1160,13 +1255,13 @@ npm_rebuild_vouched() {
     blockers="${blockers:-safedeps could not make a scratch file to read it}"
     [[ -z "${withheld}" ]] || rm -f "${withheld}"
     log_advisory "post-verify: npm rebuild ${when} skipped in ${PROJECT_DIR} — ${blockers}, so it cannot tell that tree holds none of them."
-    ROLLBACK_WARNINGS+=("npm rebuild was not run: ${blockers}, so it could not tell that the tree holds none of them. $(scripts_not_run "Install scripts have not run"); review node_modules, then run \`npm rebuild\` yourself if it is what you expect")
+    ROLLBACK_WARNINGS+=("npm rebuild was not run: ${blockers}, so it could not tell that the tree holds none of them. safedeps did not run npm rebuild; review node_modules, then run \`npm rebuild\` yourself if it is what you expect")
     return 0
   fi
   if ! blockers=$(npm_rebuild_unrecorded "${PROJECT_DIR}" "${withheld}"); then
     rm -f "${withheld}"
     log_advisory "post-verify: npm rebuild ${when} skipped in ${PROJECT_DIR} — safedeps asked npm which packages a rebuild would run over and got no answer (${blockers}), so it cannot tell that tree is one it can vouch for."
-    ROLLBACK_WARNINGS+=("npm rebuild was not run: safedeps asked npm which packages it would rebuild and got no answer (${blockers}), so it could not tell they are the ones it read. $(scripts_not_run "Install scripts have not run"); review node_modules, then run \`npm rebuild\` yourself if it is what you expect")
+    ROLLBACK_WARNINGS+=("npm rebuild was not run: safedeps asked npm which packages it would rebuild and got no answer (${blockers}), so it could not tell they are the ones it read. safedeps did not run npm rebuild; review node_modules, then run \`npm rebuild\` yourself if it is what you expect")
     return 0
   fi
   rm -f "${withheld}"
@@ -1184,14 +1279,13 @@ npm_rebuild_vouched() {
     clauses=$(grep -vE '^(fetched|origin|withheld|held)'$'\t' <<< "${blockers}" || true)
     [[ -z "${clauses}" ]] && return 0
     clauses=$(describe_rebuild_blockers "${clauses}")
-    ROLLBACK_WARNINGS+=("npm rebuild was not run: the tree npm would rebuild in ${PROJECT_DIR} holds ${clauses}. safedeps runs install scripts only over a tree whose every package is on record and comes from the public registry or a declared workspace member. $(scripts_not_run "Install scripts have not run"); review it, then run \`npm rebuild\` yourself if it is what you expect")
+    ROLLBACK_WARNINGS+=("npm rebuild was not run: the tree npm would rebuild in ${PROJECT_DIR} holds ${clauses}. safedeps runs install scripts only over a tree whose every package is on record and comes from the public registry or a declared workspace member. safedeps did not run npm rebuild; review it, then run \`npm rebuild\` yourself if it is what you expect")
     return 0
   fi
 
-  if (cd "${PROJECT_DIR}" && npm rebuild "${NPM_PROJECT_SCOPE[@]}" --prefix "${PROJECT_DIR}" >/dev/null 2>&1); then
-    return 0
-  fi
-  ROLLBACK_WARNINGS+=("npm rebuild failed ${when}; lifecycle scripts may need manual review")
+  local rebuild_rc=0
+  (cd "${PROJECT_DIR}" && npm rebuild "${NPM_PROJECT_SCOPE[@]}" --prefix "${PROJECT_DIR}" >/dev/null 2>&1) || rebuild_rc=$?
+  [[ ${rebuild_rc} -eq 0 ]] || did_rebuild "${META_FILE}" "${INPUT}" "${rebuild_rc}"
 }
 
 run_verified_npm_rebuild_if_injected() {
@@ -1202,7 +1296,11 @@ run_verified_npm_rebuild_if_injected() {
 
   # The install left no trace here, so this tree is not the one it built, and
   # its scripts are not this install's to run (settle_npm_trace).
-  [[ "${NPM_TRACE_ABSENT}" != true ]] || return 0
+  if [[ "${NPM_TRACE_ABSENT}" == true ]]; then
+    did_not_rebuild "${META_FILE}" "${INPUT}" "${TRACE_LINE}"
+    TRACE_LINE_SAID=true
+    return 0
+  fi
 
   # Nothing was installed into the project, so there is nothing to rebuild.
   [[ -d "${PROJECT_DIR}/node_modules" ]] || return 0
@@ -1212,14 +1310,14 @@ run_verified_npm_rebuild_if_injected() {
   local outside
   outside=$(project_npm_blocker)
   if [[ -n "${outside}" ]]; then
-    ROLLBACK_WARNINGS+=("npm rebuild skipped after verified inert install: ${outside}. safedeps rebuilds only where package.json, the lockfiles and node_modules at the project root are not links. $(scripts_not_run "The verified packages' install scripts have not run")")
+    did_not_rebuild "${META_FILE}" "${INPUT}" "${outside}"
     log_advisory "post-verify rebuild skipped: ${outside} -- project ${PROJECT_DIR}"
     return 0
   fi
 
   if [[ ! -f "${PROJECT_DIR}/${NPM_HIDDEN_LOCKFILE}" ]]; then
     log_advisory "post-verify: npm rebuild skipped in ${PROJECT_DIR} — node_modules has no .package-lock.json, so the tree it would rebuild is not the tree the effect gate read."
-    ROLLBACK_WARNINGS+=("npm rebuild was not run: ${PROJECT_DIR}/node_modules has no .package-lock.json, so safedeps could not read the tree it would rebuild. $(scripts_not_run "Install scripts have not run"); review node_modules, then run \`npm rebuild\` yourself if it is what you expect")
+    ROLLBACK_WARNINGS+=("npm rebuild was not run: ${PROJECT_DIR}/node_modules has no .package-lock.json, so safedeps could not read the tree it would rebuild. safedeps did not run npm rebuild; review node_modules, then run \`npm rebuild\` yourself if it is what you expect")
     return 0
   fi
 
@@ -1235,37 +1333,23 @@ run_verified_npm_rebuild_if_injected() {
   npm_rebuild_vouched "after the install"
 }
 
+# What a run that rolled nothing back has to say: one line per element, under a
+# headline that states only that.
 emit_confirm_warnings_if_any() {
-  local warning_str injected
-
-  # On Claude Code the install ran inert, so an install that landed elsewhere
-  # has had no scripts run and nobody will rebuild it: the user is told. On
-  # Codex its scripts ran during the install, and the record is all there is.
-  if [[ -n "${TRACE_NOTE}" ]]; then
-    injected=$(jq -r '.ignore_scripts_injected == true' "${META_FILE}" 2>/dev/null || printf 'false')
-    if [[ "${injected}" == "true" ]]; then
-      warning_str=""
-      [[ ${#ROLLBACK_WARNINGS[@]} -eq 0 ]] || warning_str=$(printf '%s; ' "${ROLLBACK_WARNINGS[@]}")
-      emit_system_message "safedeps: ${TRACE_NOTE}${warning_str:+
-
-Additional warnings:
-${warning_str%%; }}"
-      return 0
-    fi
-  fi
+  local warning_str
 
   [[ ${#ROLLBACK_WARNINGS[@]} -gt 0 ]] || return 0
 
-  warning_str=$(printf '%s; ' "${ROLLBACK_WARNINGS[@]}")
+  warning_str=$(printf '  %s\n' "${ROLLBACK_WARNINGS[@]}")
   cat >> "${GUARD_DIR}/reorg.log" << LOG_EOF
 [$(date -u +"%Y-%m-%dT%H:%M:%SZ")] CONFIRM warnings
   Snapshot: ${SNAPSHOT_ID}
   Project: ${PROJECT_DIR}
-  Warnings: ${warning_str%%; }
+${warning_str}
 LOG_EOF
 
-  emit_system_message "safedeps: verified install completed, with warning(s):
-${warning_str%%; }"
+  emit_system_message "safedeps: this install was not rolled back.
+$(printf '%s\n' "${ROLLBACK_WARNINGS[@]}")"
 }
 
 # The loose install recognizer from lib/install-grammar.sh: this backstop runs
@@ -1321,6 +1405,7 @@ emit_system_message() {
 
   if [[ -n "${UNFINISHED_REPORT}" ]]; then
     body="${UNFINISHED_REPORT}
+
 ${body}"
     UNFINISHED_REPORT=""
   fi
@@ -1438,9 +1523,9 @@ fi
 SUSPICIOUS=false
 REASONS=()
 ROLLBACK_WARNINGS=()
-# Whether a rollback restores a confirmed snapshot. The rollback message says
-# which target it restored; until a rollback sets this, it is not one.
-ROLLBACK_TARGET_CONFIRMED=false
+# Warnings that hold only for an install that is kept, added to the message
+# after the reorg decision.
+CONFIRM_ONLY_WARNINGS=()
 
 # Whether this command's npm install was read: the directory the gate reads has
 # to show this command's install trace. The pre-guard picked the directory and,
@@ -1457,8 +1542,9 @@ ROLLBACK_TARGET_CONFIRMED=false
 #
 # No trace means the install landed somewhere else or installed nothing, and
 # this cannot tell which: a `--dry-run` and an install that failed leave none
-# either. It is recorded UNGATED in those words, and nothing is rebuilt here.
-# Nothing below runs npm.
+# either. So the record does not guess. It is recorded UNGATED as the check
+# that found nothing (TRACE_LINE), and nothing is rebuilt here. Nothing below
+# runs npm.
 #
 # The trace is the directory's, not the command's. A second npm in the same
 # directory during the command, or the command touching a lockfile itself,
@@ -1469,10 +1555,16 @@ ROLLBACK_TARGET_CONFIRMED=false
 # post hook may vouch for what it holds later (record_npm_withheld).
 NPM_TRACE_ABSENT=false
 NPM_TRACED_RECORDS=""
-TRACE_NOTE=""
+# What the trace check found when it found no trace, as the line every record
+# carries. Empty when a trace was found, and in the backstop, which has no
+# baseline to read one against.
+TRACE_LINE=""
+TRACE_LINE_SAID=false
+# npm_install_trace <baseline>: prints the lockfiles that carry a trace and
+# returns 0; returns 1 when neither does, 2 when the baseline file is gone.
 npm_install_trace() {
   local baseline="$1" rel file recorded inode newer traced=""
-  [[ -f "${baseline}" ]] || { printf 'its baseline file %s is gone' "${baseline}"; return 1; }
+  [[ -f "${baseline}" ]] || return 2
   for rel in package-lock.json node_modules/.package-lock.json; do
     file="${PROJECT_DIR}/${rel}"
     [[ -e "${file}" ]] || continue
@@ -1490,20 +1582,28 @@ npm_install_trace() {
 }
 
 settle_npm_trace() {
-  local baseline unattributable why
+  local baseline unattributable traced trace_rc=0
   baseline=$(jq -r '.npm_trace.baseline // empty' <<< "${CURRENT_STATE:-}" 2>/dev/null) || baseline=""
   unattributable=$(jq -r '.npm_unattributable // empty' <<< "${CURRENT_STATE:-}" 2>/dev/null) || unattributable=""
-  [[ -n "${baseline}" ]] || return 0
+  if [[ -z "${baseline}" ]]; then
+    TRACE_LINE="the pending state of this command names no install-trace baseline"
+    return 0
+  fi
 
-  if why=$(npm_install_trace "${baseline}"); then
-    NPM_TRACED_RECORDS="${why}"
+  traced=$(npm_install_trace "${baseline}") || trace_rc=$?
+  if [[ ${trace_rc} -eq 0 ]]; then
+    NPM_TRACED_RECORDS="${traced}"
     if [[ -n "${unattributable}" ]]; then
       log_advisory "post-verify UNGATED: the install trace in ${PROJECT_DIR} cannot answer for every npm install in this command: ${unattributable}, so one of them may have landed elsewhere unread. Command: ${COMMAND}"
     fi
   else
     NPM_TRACE_ABSENT=true
-    log_advisory "post-verify UNGATED: no install trace in ${PROJECT_DIR}: the install landed elsewhere or installed nothing. Neither npm lockfile there changed during this command${why:+ (${why})}, so the effect gate verified nothing this install wrote, and npm rebuild was not run. Command: ${COMMAND}"
-    TRACE_NOTE="no install trace in ${PROJECT_DIR}: the install landed elsewhere or installed nothing. safedeps verified nothing this install wrote and did not run npm rebuild; if it installed packages somewhere else, $(scripts_not_run "their install scripts have not run there" "safedeps ran none of their install scripts there, but it could not read whether npm kept the --ignore-scripts it put in this install, so they may have run during the install"). Recorded as UNGATED in ${GUARD_DIR}/advisory.log"
+    if [[ ${trace_rc} -eq 1 ]]; then
+      TRACE_LINE="no install trace in ${PROJECT_DIR}: neither npm lockfile there is newer than the baseline taken before this command or has another inode"
+    else
+      TRACE_LINE="no install trace in ${PROJECT_DIR}: the baseline file ${baseline} does not exist"
+    fi
+    log_advisory "post-verify UNGATED: ${TRACE_LINE}. Command: ${COMMAND}"
   fi
   rm -f "${baseline}"
 }
@@ -2117,8 +2217,20 @@ check_npm_new_sources() {
     fi
     if [[ -n "${fetched}" ]]; then
       log_advisory "post-verify: kept in ${PROJECT_DIR}, fetched from a registry that is not the public npm registry ($(name_sources "${fetched}")); not rolled back, and safedeps runs none of their install scripts."
-      if [[ "$(jq -r '.ignore_scripts_injected == true' "${META_FILE}" 2>/dev/null || printf 'false')" != true ]]; then
-        ROLLBACK_WARNINGS+=("this install fetched packages from a registry that is not the public npm registry ($(name_sources "${fetched}")). safedeps did not make the install inert (on Codex it cannot), so unless the command said --ignore-scripts, their install scripts already ran during the install. The install is kept; confirm with the user that they trust that registry${NPM_WITHHELD_RECORDED[0]:+. $(npm_withheld_scope)}")
+      if [[ "$(fact_inert "${META_FILE}" "${INPUT}" 2>/dev/null)" != 'safedeps added --ignore-scripts to this install' ]]; then
+        # Left out only where the rollback line would say "added": the
+        # record says safedeps wrote a command and this hook received exactly
+        # it. That the record says safedeps rewrote a command is not enough:
+        # a record no call names can be another call's (an overlapping one,
+        # or one that never reached its post hook), and a Codex install of the
+        # same command without the flag then lost this warning while its
+        # scripts had run. The rebuild above still reads the record's own
+        # field; one reading of the record for all three is a later plan's.
+        # Said only if the install is kept: a check after this one can still
+        # roll it back, and "The install is kept" in a rollback message was
+        # false (the report oracle allows this sentence in the kept message
+        # only).
+        CONFIRM_ONLY_WARNINGS+=("this install fetched packages from a registry that is not the public npm registry ($(name_sources "${fetched}")). safedeps did not make the install inert (on Codex it cannot), so unless the command said --ignore-scripts, their install scripts already ran during the install. The install is kept; confirm with the user that they trust that registry${NPM_WITHHELD_RECORDED[0]:+. $(npm_withheld_scope)}")
       fi
     fi
   fi
@@ -2266,6 +2378,88 @@ check_npm_effect_closure() {
   rm -f "${closure_file}" "${provider_file}" "${miss_file}"
 }
 
+# Why the backstop rolled nothing back, from the two tests it ran.
+backstop_no_baseline_line() {
+  if [[ -z "$1" ]]; then
+    printf 'no confirmed snapshot is recorded for %s' "${PROJECT_DIR}"
+  else
+    printf 'the confirmed snapshot %s of %s: %s' "$1" "${PROJECT_DIR}" "$(fact_path "${SNAPSHOT_DIR}/$1_meta.json")"
+  fi
+}
+
+# report_snapshot_line <id>: which snapshot a rollback restores, and what the
+# confirmed record of this project says about it, read here. A rollback with no
+# confirmed snapshot restores the state from before the command, which nothing
+# verified, and "the last confirmed safe snapshot" was said over that too.
+report_snapshot_line() {
+  if [[ -n "$1" && "$(read_confirmed_snapshot "${DIR_HASH}")" == "$1" ]]; then
+    printf 'Rollback snapshot: %s, a confirmed snapshot' "$1"
+  elif [[ -n "$1" && "$1" == "${ROLLBACK_PRE_SNAPSHOT_ID}" ]]; then
+    printf 'Rollback snapshot: %s, taken before this command; no confirmed snapshot names it' "$1"
+  else
+    printf 'Rollback snapshot: %s' "$1"
+  fi
+}
+
+# The lines both rollbacks end with, after the node_modules step: that nothing
+# changed, when nothing did; a missing install trace, unless the node_modules
+# step already said it; and whether the install ran without its scripts, as
+# far as this hook saw.
+#
+# The last one is said only where this hook found the pre-guard's record of
+# this command. The backstop runs because it found none, and "did not add"
+# said there was false whenever the record existed under a key this hook did
+# not compute (`sh -c 'npm ci'`, rewritten, kept its pending state under
+# another key; bamdori r18 F4). Without the record there is nothing to say
+# about what safedeps did, so nothing is said.
+report_rollback_tail() {
+  report_changed_nothing
+  if [[ "${NPM_TRACE_ABSENT}" == true && "${TRACE_LINE_SAID}" != true ]]; then
+    report_say "${TRACE_LINE}"
+    TRACE_LINE_SAID=true
+  fi
+  [[ "${BACKSTOP_INSTALL:-false}" == true ]] || report_inert "${META_FILE}" "${INPUT}"
+}
+
+# The reorg.log entry and the message of a rollback, from the same lines.
+#
+# report_rollback <log headline> <message headline> <rollback snapshot> <reasons>
+report_rollback() {
+  local snapshot_line lines details
+  snapshot_line=$(report_snapshot_line "$3")
+  lines=$(printf '%s\n' "${ROLLBACK_WARNINGS[@]}")
+
+  # The backstop has no snapshot from before the command, so its entry names
+  # the project first.
+  cat >> "${GUARD_DIR}/reorg.log" << LOG_EOF
+[$(date -u +"%Y-%m-%dT%H:%M:%SZ")] $1${ROLLBACK_PRE_SNAPSHOT_ID:+
+  Snapshot: ${ROLLBACK_PRE_SNAPSHOT_ID}}
+  Project: ${PROJECT_DIR}
+  Reasons: $4
+  ${snapshot_line}
+$(printf '  %s\n' "${ROLLBACK_WARNINGS[@]}")
+LOG_EOF
+  # Only the rollback that consumed this command's record writes this line. The
+  # backstop restores a confirmed snapshot, so its snapshot line names one,
+  # unless another call confirmed this project while it ran; the second test
+  # keeps that case from writing a line with no record behind it.
+  if [[ "${snapshot_line}" != *', a confirmed snapshot' && "${BACKSTOP_INSTALL:-false}" != true ]]; then
+    log_advisory "post-verify REORG with no confirmed snapshot in ${PROJECT_DIR}: ${snapshot_line}${REPORT_INERT:+; ${REPORT_INERT}}. Reasons: $4"
+  fi
+  details=$(fact_file "Details log" "${GUARD_DIR}/reorg.log")
+
+  ROLLBACK_MESSAGE="$2
+
+Detected problems:
+$4
+
+${snapshot_line}
+What the rollback did and what it found:
+${lines}
+
+${details}"
+}
+
 run_command_independent_backstop() {
   # Reached when PreToolUse left no pending state for an install-looking command.
   # Detection is command-independent (the npm closure check reads the live
@@ -2291,10 +2485,12 @@ run_command_independent_backstop() {
   if [[ -z "${rollback_id}" ]] || [[ ! -f "${SNAPSHOT_DIR}/${rollback_id}_meta.json" ]]; then
     # Detected, but no known-good baseline to restore — fail LOUD, never silent.
     log_advisory "post-verify BACKSTOP FLAGGED (no baseline): parser-missed install in ${PROJECT_DIR} — ${reason_str%%; }. No confirmed snapshot to roll back to; left in place."
-    emit_system_message "safedeps: an install the command gate did not recognize produced a suspicious closure:
+    emit_system_message "safedeps: suspicious dependency change detected; this hook found no record of this command from before it ran. No rollback ran.
+
+Detected problems:
 ${reason_str%%; }
 
-There is no confirmed-safe snapshot for ${PROJECT_DIR} yet, so safedeps could NOT roll it back automatically. Review and revert manually, then run \`safedeps check\` for the intended versions."
+$(backstop_no_baseline_line "${rollback_id}")"
     return 0
   fi
 
@@ -2309,54 +2505,27 @@ There is no confirmed-safe snapshot for ${PROJECT_DIR} yet, so safedeps could NO
   rollback_note_command_writes ""
 
   SNAPSHOT_ID="${rollback_id}"   # so monitored_files() reads the baseline's list
-  ROLLBACK_TARGET_CONFIRMED=true
-  ROLLED_BACK=()
+  ROLLBACK_SNAPSHOT_ID="${rollback_id}"
   local monitored_file
   while IFS= read -r monitored_file; do
     [[ -z "${monitored_file}" ]] && continue
     restore_monitored_file "${monitored_file}" "${rollback_id}"
   done < <(monitored_files)
-
-  local rb_pkg="${SNAPSHOT_DIR}/${rollback_id}_package.json" pkg_outside
-  if [[ -f "${rb_pkg}" ]] && files_differ "${rb_pkg}" "${PROJECT_DIR}/package.json"; then
-    pkg_outside=$(rollback_target_outside "${PROJECT_DIR}/package.json")
-    if [[ -n "${pkg_outside}" ]]; then
-      record_rollback_refusal "restore of package.json" "${pkg_outside}"
-    else
-      cp "${rb_pkg}" "${PROJECT_DIR}/package.json"
-      ROLLED_BACK+=("package.json")
-    fi
-  fi
+  restore_package_json "${rollback_id}"
 
   safedeps_journal_stage "${journal_id}" "removing-node-modules"
   rollback_node_modules
+  report_rollback_tail
 
-  local rolled_str="" warning_str=""
-  [[ ${#ROLLED_BACK[@]} -gt 0 ]] && rolled_str=$(printf '%s, ' "${ROLLED_BACK[@]}")
-  [[ ${#ROLLBACK_WARNINGS[@]} -gt 0 ]] && warning_str=$(printf '%s; ' "${ROLLBACK_WARNINGS[@]}")
-  cat >> "${GUARD_DIR}/reorg.log" << LOG_EOF
-[$(date -u +"%Y-%m-%dT%H:%M:%SZ")] REORG executed (command-independent backstop)
-  Rollback snapshot: ${rollback_id}
-  Project: ${PROJECT_DIR}
-  Reasons: ${reason_str%%; }
-  Rolled back: ${rolled_str%, }
-  Rollback warnings: ${warning_str%%; }
-LOG_EOF
+  report_rollback "REORG executed (command-independent backstop)" \
+    "safedeps: suspicious dependency change detected; this hook found no record of this command from before it ran. A rollback ran." \
+    "${rollback_id}" "${reason_str%%; }"
 
   # The rollback finished and is about to report itself, so there is nothing
   # unfinished left to warn about.
   safedeps_journal_close "${journal_id}"
 
-  emit_system_message "safedeps: a dependency install the command gate did not recognize introduced a suspicious closure — rolled back to the last confirmed safe snapshot.
-
-Detected:
-${reason_str%%; }
-
-Rollback snapshot: ${rollback_id}
-Rolled-back files: ${rolled_str%, }${warning_str:+
-
-Additional warnings:
-${warning_str%%; }}"
+  emit_system_message "${ROLLBACK_MESSAGE}"
   return 0
 }
 
@@ -2390,22 +2559,18 @@ check_binaries
 # --- Reorg Decision ---
 
 if [[ "${SUSPICIOUS}" == "true" ]]; then
-  # REORG: Rollback to last confirmed safe snapshot
+  # REORG: roll back to the confirmed snapshot, or to the state before this
+  # command when there is none.
   discard_staged_state
   # With no confirmed snapshot the rollback restores the state from before this
   # command. Nothing verified that state, and it can hold the very package the
   # gate rejected: a fresh clone's committed lockfile, or a lockfile that held
-  # the package before this install. So it is restored without install scripts,
-  # and every record says that is what happened (ROLLBACK_TARGET_CONFIRMED).
+  # the package before this install. So every record says which snapshot it was
+  # and whether a confirmed record names it (report_snapshot_line).
   ROLLBACK_SNAPSHOT_ID=$(read_confirmed_snapshot "${DIR_HASH}")
   if [[ -z "${ROLLBACK_SNAPSHOT_ID}" ]] || [[ ! -f "${SNAPSHOT_DIR}/${ROLLBACK_SNAPSHOT_ID}_meta.json" ]]; then
     ROLLBACK_SNAPSHOT_ID="${SNAPSHOT_ID}"
-    ROLLBACK_TARGET_CONFIRMED=false
-  else
-    ROLLBACK_TARGET_CONFIRMED=true
   fi
-
-  ROLLED_BACK=()
 
   # Everything from here to the reorg.log write below is destructive. The
   # journal records the intent first so an interrupted rollback leaves a record
@@ -2439,89 +2604,31 @@ if [[ "${SUSPICIOUS}" == "true" ]]; then
   done < <(find "${SNAPSHOT_DIR}" -maxdepth 1 -type f -name "${ROLLBACK_SNAPSHOT_ID}_*.csproj.missing" -exec basename {} \; 2>/dev/null | sed "s/^${ROLLBACK_SNAPSHOT_ID}_//; s/\\.missing$//" | sort)
 
   # Restore package.json if it was modified
-  rollback_package_json="${SNAPSHOT_DIR}/${ROLLBACK_SNAPSHOT_ID}_package.json"
-  current_package_json="${PROJECT_DIR}/package.json"
-  if [[ -f "${rollback_package_json}" ]] && files_differ "${rollback_package_json}" "${current_package_json}"; then
-    PKG_OUTSIDE=$(rollback_target_outside "${current_package_json}")
-    if [[ -n "${PKG_OUTSIDE}" ]]; then
-      record_rollback_refusal "restore of package.json" "${PKG_OUTSIDE}"
-    else
-      cp "${rollback_package_json}" "${current_package_json}"
-      ROLLED_BACK+=("package.json")
-    fi
-  fi
+  restore_package_json "${ROLLBACK_SNAPSHOT_ID}"
 
   safedeps_journal_stage "${JOURNAL_ID}" "removing-node-modules"
   rollback_node_modules
   cleanup_old_snapshots
-  [[ -z "${TRACE_NOTE}" ]] || ROLLBACK_WARNINGS+=("${TRACE_NOTE}")
+  report_rollback_tail
 
   REASON_STR=""
   [[ ${#REASONS[@]} -gt 0 ]] && REASON_STR=$(printf '%s; ' "${REASONS[@]}")
-  ROLLED_BACK_STR=""
-  [[ ${#ROLLED_BACK[@]} -gt 0 ]] && ROLLED_BACK_STR=$(printf '%s, ' "${ROLLED_BACK[@]}")
-  WARNING_STR=""
-  if [[ ${#ROLLBACK_WARNINGS[@]} -gt 0 ]]; then
-    WARNING_STR=$(printf '%s; ' "${ROLLBACK_WARNINGS[@]}")
-  fi
 
-  # Where the rollback went, said the same way in all three records. Without a
-  # confirmed snapshot it is not "the last confirmed safe snapshot", and saying
-  # so was the record of a rollback that had just run the rejected package.
-  #
-  # The rollback runs no install script either way, but whether any ran is a
-  # question about the install too. On Claude Code safedeps made it inert; on
-  # Codex it cannot rewrite the command, so the install ran its scripts, the
-  # rejected package's among them, before this hook saw anything. Saying "no
-  # install script was run" there told a Codex user the rejected package never
-  # ran.
-  ROLLBACK_TARGET_LINE="the last confirmed safe snapshot"
-  if [[ "${ROLLBACK_TARGET_CONFIRMED}" != true ]]; then
-    if [[ "$(jq -r '.ignore_scripts_injected == true' "${META_FILE}" 2>/dev/null || printf 'false')" == true ]]; then
-      scripts_line=$(scripts_not_run "no install script was run" "the rollback ran no install script. safedeps put --ignore-scripts in the install but could not read whether npm kept it, so the install's own scripts may have run, the rejected package's included")
-      scripts_log=$(scripts_not_run "install scripts were not run" "the rollback ran no install script; safedeps could not read whether npm kept the --ignore-scripts it put in the install, so its own scripts may have run")
-    else
-      scripts_line="the rollback ran no install script. safedeps did not make the install itself inert (on Codex it cannot), so unless the command said --ignore-scripts, the install's own scripts already ran, the rejected package's included"
-      scripts_log="the rollback ran no install script; the install was not made inert, so its own scripts ran unless the command said --ignore-scripts"
-    fi
-    ROLLBACK_TARGET_LINE="the state before this command, because there is no confirmed snapshot for ${PROJECT_DIR} yet. That state may still hold what was rejected, named below, and ${scripts_line}"
-    log_advisory "post-verify REORG with no confirmed snapshot in ${PROJECT_DIR}: restored the state before this command, which may still hold what was rejected (${REASON_STR%%; }); ${scripts_log}."
-  fi
-
-  # Log the reorg event
-  cat >> "${GUARD_DIR}/reorg.log" << LOG_EOF
-[$(date -u +"%Y-%m-%dT%H:%M:%SZ")] REORG executed
-  Snapshot: ${SNAPSHOT_ID}
-  Rollback snapshot: ${ROLLBACK_SNAPSHOT_ID}
-  Rolled back to: ${ROLLBACK_TARGET_LINE}
-  Project: ${PROJECT_DIR}
-  Reasons: ${REASON_STR%%; }
-  Rolled back: ${ROLLED_BACK_STR%, }
-  Rollback warnings: ${WARNING_STR%%; }
-LOG_EOF
+  # What the rollback did, said the same way in all three records: every line
+  # of the message is a line of the reorg.log entry, and the snapshot line and
+  # the script line are in advisory.log when no confirmed snapshot was restored.
+  report_rollback "REORG executed" \
+    "safedeps: suspicious dependency change detected. A rollback ran." \
+    "${ROLLBACK_SNAPSHOT_ID}" "${REASON_STR%%; }"
 
   # Recorded and about to be reported — nothing unfinished remains.
   safedeps_journal_close "${JOURNAL_ID}"
 
-  ROLLBACK_MESSAGE="safedeps: suspicious dependency change detected — rolled back to ${ROLLBACK_TARGET_LINE}.
-
-Detected problems:
-${REASON_STR%%; }
-
-Rollback snapshot: ${ROLLBACK_SNAPSHOT_ID}
-Rolled-back files: ${ROLLED_BACK_STR%, }"
-  if [[ -n "${WARNING_STR%%; }" ]]; then
-    ROLLBACK_MESSAGE="${ROLLBACK_MESSAGE}
-
-Additional warnings:
-${WARNING_STR%%; }"
-  fi
-  emit_system_message "${ROLLBACK_MESSAGE}
-
-Details log: ${GUARD_DIR}/reorg.log"
+  emit_system_message "${ROLLBACK_MESSAGE}"
   exit 0
 fi
 
+ROLLBACK_WARNINGS+=(${CONFIRM_ONLY_WARNINGS[@]+"${CONFIRM_ONLY_WARNINGS[@]}"})
 run_verified_npm_rebuild_if_injected
 confirm_verified_state
 cleanup_old_snapshots

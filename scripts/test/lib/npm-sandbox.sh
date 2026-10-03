@@ -293,8 +293,11 @@ run_install() {
     CASE_PRE_DENY=$(jq -r '.hookSpecificOutput.permissionDecisionReason // ""' <<< "${pre}")
     return 0
   fi
+  # Engine `crossed`: the pre-guard is Claude Code's and records the rewrite it
+  # prints, and the command runs as given, as a Codex call of the same command
+  # in the same directory would run it and consume that record (bamdori r19 X1).
   exec_command=""
-  [[ -z "${pre}" ]] || exec_command=$(jq -r '.hookSpecificOutput.updatedInput.command // empty' <<< "${pre}")
+  [[ -z "${pre}" || "${engine}" == crossed ]] || exec_command=$(jq -r '.hookSpecificOutput.updatedInput.command // empty' <<< "${pre}")
   [[ -n "${exec_command}" ]] || exec_command="${command}"
   CASE_EXEC="${exec_command}"
   if [[ "${engine}" == claude && "${exec_command}" != *--ignore-scripts* ]]; then
@@ -315,7 +318,7 @@ run_install() {
   CASE_RAN=$(tail -n +"$((marks_before + 1))" "${MARKS}")
 }
 
-rolled_back() { grep -q 'rolled back' <<< "${CASE_POST}"; }
+rolled_back() { grep -q 'A rollback ran\.' <<< "${CASE_POST}"; }
 ungated() { grep -q 'UNGATED' "${CASE_HOME}/advisory.log" 2>/dev/null; }
 victim_ran() { grep -q '^sd-victim' "${MARKS}"; }
 

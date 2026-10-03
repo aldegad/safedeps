@@ -4822,7 +4822,6 @@ DIR_HASH=$(compute_dir_hash "${PROJECT_DIR}")
 # Pending-key hash keys on cwd so the PostToolUse hook (which only sees cwd) can
 # find this install's pending state even when the install dir was overridden.
 KEY_DIR_HASH=$(compute_dir_hash "${CWD_DIR}")
-SNAPSHOT_ID="${TIMESTAMP}_${DIR_HASH}"
 
 acquire_state_lock
 # EXIT only, deliberately. Trapping TERM here looks like cheap insurance against
@@ -4855,9 +4854,30 @@ fi
 
 PARENT_SNAPSHOT_JSON=$(printf '%s' "${PARENT_SNAPSHOT_ID}" | jq -Rs 'if length == 0 then null else . end')
 
+# The snapshot id is this call's own. The pending state and the post hook find
+# the snapshot by it, and `${TIMESTAMP}_${DIR_HASH}` alone was the same for two
+# calls in one project within one second: the second wrote its meta and its copy
+# of the lockfiles over the first's, so one post hook read the other call's
+# record and a rollback restored the other call's files (bamdori r19, SAME). The
+# pid tells live calls apart; the exclusive create below tells apart a pid used
+# again within the second, and a leftover of a killed run. The suffix is joined
+# with `-`, not `_`, so no id is the start of another id's `${id}_*` files
+# (cleanup removes a snapshot with that glob). The timestamp stays first, so ids
+# still sort by time.
+claim_snapshot_id() {
+  local base="${TIMESTAMP}_${DIR_HASH}-$$" id n=0
+  id="${base}"
+  while ! ( set -C; : > "${SNAPSHOT_DIR}/${id}_monitored_files.list" ) 2>/dev/null; do
+    [[ -e "${SNAPSHOT_DIR}/${id}_monitored_files.list" ]] || return 1
+    n=$((n + 1))
+    id="${base}-${n}"
+  done
+  printf '%s' "${id}"
+}
+SNAPSHOT_ID=$(claim_snapshot_id)
+
 # Snapshot lock and manifest files that define dependency truth.
 SNAPSHOTTED=false
-: > "${SNAPSHOT_DIR}/${SNAPSHOT_ID}_monitored_files.list"
 
 for lock_file in "${SAFEDEPS_LOCK_FILES[@]}"; do
   snapshot_project_file "${lock_file}" "lock"
@@ -4911,46 +4931,62 @@ if declare -F safedeps_npm_workspace_manifests >/dev/null; then
   fi
 fi
 
-# Save pre-install listings for diff-based detection (avoids mtime-based find -newer)
+# Save pre-install listings for diff-based detection (avoids mtime-based find -newer).
+# -H follows node_modules itself when it is a link and no link below it: the
+# post hook lists the same way, and without -H both listings of a linked
+# node_modules were empty, so "lists no package.json the snapshot lacks" held
+# without looking at anything.
 if [[ -d "${PROJECT_DIR}/node_modules" ]]; then
-  find "${PROJECT_DIR}/node_modules" -maxdepth 3 -name "package.json" 2>/dev/null | sort > "${SNAPSHOT_DIR}/${SNAPSHOT_ID}_packages.list"
+  find -H "${PROJECT_DIR}/node_modules" -maxdepth 3 -name "package.json" 2>/dev/null | sort > "${SNAPSHOT_DIR}/${SNAPSHOT_ID}_packages.list"
   { ls "${PROJECT_DIR}/node_modules/.bin/" 2>/dev/null || true; } | sort > "${SNAPSHOT_DIR}/${SNAPSHOT_ID}_bins.list"
 else
   touch "${SNAPSHOT_DIR}/${SNAPSHOT_ID}_packages.list"
   touch "${SNAPSHOT_DIR}/${SNAPSHOT_ID}_bins.list"
 fi
 
-# Store metadata for PostToolUse verification
+# Store metadata for PostToolUse verification. "record": 2 names what its
+# fields mean: ignore_scripts_injected false here means safedeps sent no
+# rewrite, because a rewrite whose record cannot be written is not sent
+# (mark_ignore_scripts_injected). A v2.17.2 record held the same field and
+# sent the rewrite anyway, so the post hook says an --ignore-scripts line only
+# from a record that names this version (fact_inert).
 cat > "${SNAPSHOT_DIR}/${SNAPSHOT_ID}_meta.json" << META_EOF
 {
+  "record": 2,
   "snapshot_id": "${SNAPSHOT_ID}",
   "parent_snapshot_id": ${PARENT_SNAPSHOT_JSON},
   "timestamp": ${TIMESTAMP},
   "project_dir": $(printf '%s' "${PROJECT_DIR}" | jq -Rs .),
   "command": $(printf '%s' "${COMMAND}" | jq -Rs .),
   "ignore_scripts_injected": false,
-  "ignore_scripts_verified": false,
+  "ignore_scripts_unread": false,
   "lock_files_found": ${SNAPSHOTTED}
 }
 META_EOF
 
-# Records that the command was rewritten with --ignore-scripts, and whether
-# every install in it was read with the flag in place (ignore_scripts_verified).
-# An install holding a word the shell decides at run time was not
-# (INERT_UNVERIFIED): the words around its flags can undo them, so the post
-# hook does not say its scripts did not run.
+# mark_ignore_scripts_injected <the command safedeps wrote>: the PostToolUse
+# hook says "added" only where the command it receives is these bytes. Returns
+# non-zero when the record was not written, and the caller then writes no
+# rewrite: a rewrite with no record made the post hook's "did not add" false.
+# ignore_scripts_unread says an install in it holds a word the shell decides
+# at run time (INERT_UNVERIFIED), so nobody read where npm keeps the flag: a
+# reason for the post hook to add a warning, never a permission to say the
+# scripts did not run. A record that lacks it loses that warning and claims
+# nothing more.
 mark_ignore_scripts_injected() {
   local meta_file="${SNAPSHOT_DIR}/${SNAPSHOT_ID}_meta.json"
-  local temp_file verified=true
+  local temp_file unread=false
 
-  [[ -f "${meta_file}" ]] || return 0
-  [[ "${INERT_UNVERIFIED}" != true ]] || verified=false
-  temp_file=$(mktemp "${SNAPSHOT_DIR}/.${SNAPSHOT_ID}_meta.XXXXXX") || return 0
-  if jq --argjson verified "${verified}" '.ignore_scripts_injected = true | .ignore_scripts_verified = $verified' "${meta_file}" > "${temp_file}"; then
-    mv -f "${temp_file}" "${meta_file}"
-  else
-    rm -f "${temp_file}"
+  [[ -f "${meta_file}" ]] || return 1
+  [[ "${INERT_UNVERIFIED}" != true ]] || unread=true
+  temp_file=$(mktemp "${SNAPSHOT_DIR}/.${SNAPSHOT_ID}_meta.XXXXXX") || return 1
+  if jq --arg command "$1" --argjson unread "${unread}" \
+      '.ignore_scripts_injected = true | .updated_command = $command | .ignore_scripts_unread = $unread' "${meta_file}" > "${temp_file}" \
+    && mv -f "${temp_file}" "${meta_file}"; then
+    return 0
   fi
+  rm -f "${temp_file}"
+  return 1
 }
 
 # --- Pre-flight security checks on the command itself ---
@@ -5288,9 +5324,8 @@ find "${PENDING_DIR}" \( -name '*.json' -o -name '*.trace' \) -type f -mmin +144
 # Key = (dir, normalized command); the snapshot id suffix makes the filename unique
 # per install, so even two identical concurrent commands keep separate state.
 PENDING_KEY=$(compute_pending_key "${KEY_DIR_HASH}" "${COMMAND}")
-# $$ (this pre hook's PID) guarantees a unique filename even for two installs in
-# the same second (SNAPSHOT_ID has only 1s resolution).
-PENDING_BASE="${PENDING_DIR}/${PENDING_KEY}__${SNAPSHOT_ID}_$$"
+# The snapshot id is unique per call (claim_snapshot_id), so the filename is too.
+PENDING_BASE="${PENDING_DIR}/${PENDING_KEY}__${SNAPSHOT_ID}"
 
 # The trace baseline: a file touched now, and the inode of each npm lockfile in
 # the directory the gate reads. npm rewrote node_modules/.package-lock.json on
@@ -5329,10 +5364,12 @@ CURRENT_STATE=$(jq -n --arg sid "${SNAPSHOT_ID}" --arg pdir "${PROJECT_DIR}" --a
 write_state_file "${PENDING_BASE}.json" "${CURRENT_STATE}"
 
 if [[ -n "${UPDATED_COMMAND}" ]]; then
-  mark_ignore_scripts_injected
-  jq -nc --arg command "${UPDATED_COMMAND}" \
-    '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"allow",updatedInput:{command:$command}}}'
-  exit 0
+  if mark_ignore_scripts_injected "${UPDATED_COMMAND}"; then
+    jq -nc --arg command "${UPDATED_COMMAND}" \
+      '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"allow",updatedInput:{command:$command}}}'
+    exit 0
+  fi
+  log_advisory "pre-guard: could not record the command safedeps would write in ${SNAPSHOT_DIR}/${SNAPSHOT_ID}_meta.json, so it was not rewritten: the install runs as given, without --ignore-scripts, and the effect gate falls back to detect-and-rollback. Command: ${COMMAND}"
 fi
 
 # Allow the command to proceed — PostToolUse will verify the result
