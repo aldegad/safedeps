@@ -979,6 +979,55 @@ fi
 cmp -s "${own_wt}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "the lockfile is restored before node_modules is removed"
 pass "a rollback removes the project's own node_modules and runs no npm"
 
+# A command that wrote nothing. The closure on disk was never approved, and
+# the gate judges the whole closure whether or not the command changed it: no
+# install trace means UNGATED and no rebuild, not no judgment. So a command
+# misread as an install reaches the rollback with nothing to roll back. The
+# project's node_modules is not this command's and stays.
+nochange_wt="${tmp_root}/nochange-wt"
+mkdir -p "${nochange_wt}/node_modules/installed-package" "${nochange_wt}/node_modules/.bin"
+printf '{"name":"installed-package","version":"1.0.0"}\n' > "${nochange_wt}/node_modules/installed-package/package.json"
+printf '{"dependencies":{"fixture-parent":"1.0.0"}}\n' > "${nochange_wt}/package.json"
+printf '%s\n' "${tampered_lock}" > "${nochange_wt}/package-lock.json"
+scripts/safedeps-pre-guard.sh > /dev/null <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${nochange_wt}"}
+EOF
+: > "${tmp_root}/emptying-npm-calls.log"
+nochange_post=$(
+  PATH="${emptying_bin}:${PATH}" scripts/safedeps-post-verify.sh <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${nochange_wt}"}
+EOF
+)
+grep -q 'suspicious dependency change detected' <<< "${nochange_post}" || fail "the gate still rejects an unapproved closure the command did not change"
+[[ -f "${nochange_wt}/node_modules/installed-package/package.json" ]] || fail "a rollback with nothing to roll back leaves the project's node_modules in place"
+grep -q "/nochange-wt/node_modules was not removed" <<< "${nochange_post}" || fail "the rollback says node_modules was not removed, and why"
+grep -q 'no install trace in .*/nochange-wt' <<< "${nochange_post}" || fail "the same message says the directory shows no install trace"
+if grep -qE '^(ci|install)' "${tmp_root}/emptying-npm-calls.log" 2>/dev/null; then
+  fail "a rollback with nothing to roll back runs no npm"
+fi
+# The no-trace note names the rebuild safedeps did not run; that is its own
+# act, not a command for the reader.
+assert_gives_no_command "${nochange_post//did not run npm rebuild/}" "the rollback with nothing to roll back gives no command"
+pass "a rollback with nothing to roll back leaves node_modules in place"
+
+# The same project once the command has written into node_modules without
+# touching a lockfile: the tree is no longer the one the pre-guard listed, and
+# it is removed.
+mkdir -p "${nochange_wt}/node_modules/written-package"
+scripts/safedeps-pre-guard.sh > /dev/null <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${nochange_wt}"}
+EOF
+printf '{"name":"written-later","version":"1.0.0"}\n' > "${nochange_wt}/node_modules/written-package/package.json"
+written_post=$(
+  PATH="${emptying_bin}:${PATH}" scripts/safedeps-post-verify.sh <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${nochange_wt}"}
+EOF
+)
+grep -q 'suspicious dependency change detected' <<< "${written_post}" || fail "the gate rejects the unapproved closure again"
+[[ ! -e "${nochange_wt}/node_modules" ]] || fail "a node_modules the command wrote into is removed"
+grep -q "/nochange-wt/node_modules was removed" <<< "${written_post}" || fail "the rollback says node_modules was removed"
+pass "a rollback removes node_modules once the command has written into it"
+
 # A project that keeps another manager's lockfile. After the restore it has a
 # package.json and no npm lockfile, and the rollback says exactly that: "no
 # lockfile" would be false next to a yarn.lock.
