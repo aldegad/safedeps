@@ -1138,7 +1138,7 @@ failures_before=${#FAILURES[@]}
 new_evilenvfile
 vb4_before=$(home_records)
 run_install '. ./npmenv.sh && npm install sd-approved@1.0.0'
-vb4_first_ran="${CASE_RAN}" vb4_first_post="${CASE_POST}"
+vb4_first_ran="${CASE_RAN}" vb4_first_post="${CASE_POST}" vb4_after=$(home_records)
 grep -q 'EVIL-sd-approved' "${CASE_PROJECT}/node_modules/sd-approved/mark.js" 2>/dev/null \
   || note_failure "VB4: the first command installs the impostor, or the row tests nothing"
 : > "${MARKS}"
@@ -1149,7 +1149,7 @@ printf 'VB4  claude  . ./npmenv.sh && npm install sd-approved@1.0.0, then npm in
 [[ -z "${vb4_first_ran}" ]] || note_failure "VB4: the first command rebuilds nothing (${vb4_first_ran})"
 grep -qF "${SOURCED_SAYS}" <<< "${vb4_first_post}" \
   || note_failure "VB4: the first command's warning says why nothing is recorded (post: ${vb4_first_post:0:400})"
-[[ "$(home_records)" == "${vb4_before}" ]] || note_failure "VB4: the first command records nothing withheld ($(home_records | paste -sd' ' -))"
+[[ "${vb4_after}" == "${vb4_before}" ]] || note_failure "VB4: the first command records nothing withheld and leaves no tree observed ($(paste -sd' ' - <<< "${vb4_after}"))"
 [[ -z "${CASE_PRE_DENY}" && "${CASE_INSTALL_RC}" == 0 ]] && ! rolled_back \
   || note_failure "VB4: the next approved install is kept (deny: ${CASE_PRE_DENY:0:160}, rc ${CASE_INSTALL_RC}, post: ${CASE_POST:0:300})"
 [[ -z "${CASE_POST}" ]] || note_failure "VB4: the next approved install confirms quietly, as the boundary stands (post: ${CASE_POST:0:300})"
