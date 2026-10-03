@@ -466,7 +466,7 @@ run_verified_npm_rebuild_if_injected() {
   local outside
   outside=$(project_npm_blocker)
   if [[ -n "${outside}" ]]; then
-    ROLLBACK_WARNINGS+=("npm rebuild skipped after verified inert install: ${outside}. The verified packages' install scripts have not run. safedeps does not run npm where it can reach past the project, and it does not judge where a rebuild would write")
+    ROLLBACK_WARNINGS+=("npm rebuild skipped after verified inert install: ${outside}. The verified packages' install scripts have not run. safedeps runs npm only where it cannot reach past the project, and it does not judge where a rebuild would write")
     log_advisory "post-verify rebuild skipped: ${outside} -- project ${PROJECT_DIR}"
     return 0
   fi

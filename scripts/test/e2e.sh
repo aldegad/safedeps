@@ -714,7 +714,7 @@ if grep -q 'rebuild' "${tmp_root}/emptying-npm-calls.log" 2>/dev/null; then
 fi
 grep -q 'npm rebuild skipped after verified inert install' <<< "${link_inert_post}" || fail "the skipped rebuild is reported"
 grep -q "install scripts have not run" <<< "${link_inert_post}" || fail "the skipped rebuild says the install scripts have not run"
-if grep -qiE 'by hand|run npm' <<< "${link_inert_post}"; then
+if grep -qiE 'by hand|where the files belong|run npm rebuild' <<< "${link_inert_post}"; then
   fail "the skipped rebuild names no place to run npm"
 fi
 pass "a verified inert install skips the rebuild through a linked node_modules"
