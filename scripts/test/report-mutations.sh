@@ -3,19 +3,22 @@
 #
 # The oracle's green is a claim that no line the post hook printed is false or
 # outside the grammar. A check that cannot fail says nothing, so this script
-# makes it fail nine ways: each mutation below puts into the hook the kind of
-# line three review rounds found by reading -- a clause behind a true fact, a
-# claim with no check, a line built outside the fact functions, a guessed
-# cause -- and e2e must turn red on it, at the oracle, with the reason named
-# here. Two of them (P2, R3) passed the whole suite while the check was a list
-# of forbidden words.
+# makes it fail eighteen ways: each mutation below puts into the hook the kind
+# of line review found by reading -- a clause behind a true fact, a claim with
+# no check, a line built outside the fact functions, a guessed cause, prose in
+# a rollback, a line only reorg.log carries, a line left out, and the two
+# checks the hook and the oracle once shared (F1, F2) -- and e2e must turn red
+# on it, at the oracle, with the reason named here. Two of them (P2, R3) passed
+# the whole suite while the check was a list of forbidden words; seven more
+# (Prose to RefuseSilent, bamdori r16) passed the oracle before it read
+# reorg.log entries, prose per block and the disk around a rollback.
 #
 # Each mutation runs on a copy of the tree, never in the checkout: the copy is
 # made with `git archive HEAD` (or, outside a git checkout, by copying the
 # files), mutated, run and thrown away. The unmutated copy runs first and must
 # be green, so a red below is the mutation's and not the machine's.
 #
-# This is ten e2e runs, so it is not part of `npm test`. Run it when a line the
+# This is nineteen e2e runs, so it is not part of `npm test`. Run it when a line the
 # hook prints, a fact function or the oracle changes.
 #
 #   scripts/test/report-mutations.sh            every mutation
@@ -29,9 +32,12 @@ trap 'rm -rf "${WORK}"' EXIT
 # mutation <name> sets the file, what the mutation is, the reason the oracle
 # must give, and the text to find and to put in its place. The text to find
 # occurs exactly once in the file, or the mutation is reported as not applying.
-MUTATIONS=(P2 R3 K Lie Bypass Head NoCheck Snap Cause)
+MUTATIONS=(P2 R3 K Lie Bypass Head NoCheck Snap Cause Prose LogOnly Reasons Kept Silent JOmit RefuseSilent F1 F2)
+
+# A mutation can change a second file too (M_FILE2, M_OLD2, M_NEW2).
 
 mutation() {
+  M_FILE2=""
   case "$1" in
     P2)
       M_FILE=lib/gates/report-facts.sh
@@ -98,13 +104,101 @@ mutation() {
       M_RED='a line outside the grammar'
       M_OLD='${journal_line}
 Owner: ${owner_fact}
-Rollback snapshot: ${rollback_snapshot}
+${snapshot_line}
 Recorded reasons:'
       M_NEW='${journal_line}
 Owner: ${owner_fact}
 The rollback was cut off, most likely by the runtime'"'"'s timeout.
-Rollback snapshot: ${rollback_snapshot}
+${snapshot_line}
 Recorded reasons:'
+      ;;
+    Prose)
+      M_FILE=scripts/safedeps-post-verify.sh
+      M_WHY='effect-gate prose appended to every rollback'
+      M_RED='effect-gate prose in a block it is not said in'
+      M_OLD='report_rollback_tail() {
+  report_changed_nothing
+'
+      M_NEW='report_rollback_tail() {
+  report_changed_nothing
+  report_say "install scripts were not run in ${PROJECT_DIR}"
+'
+      ;;
+    LogOnly)
+      M_FILE=scripts/safedeps-post-verify.sh
+      M_WHY='a line only the reorg.log entry carries'
+      M_RED='the reorg.log entries this hook appended are not the ones its message calls for'
+      M_OLD='  Reasons: $4
+  ${snapshot_line}
+'
+      M_NEW='  Reasons: $4
+  ${snapshot_line}
+  the rejected package'"'"'s install scripts did not run
+'
+      ;;
+    Reasons)
+      M_FILE=scripts/safedeps-post-verify.sh
+      M_WHY='a clause added to the reasons of the message only'
+      M_RED='the reorg.log entries this hook appended are not the ones its message calls for'
+      M_OLD='Detected problems:
+$4
+'
+      M_NEW='Detected problems:
+$4; node_modules was restored from the confirmed snapshot
+'
+      ;;
+    Kept)
+      M_FILE=lib/gates/report-facts.sh
+      M_WHY='a failed removal reported as kept'
+      M_RED='kept, right after a reason to remove it'
+      M_OLD='report_say "not removed $1: rm exit ${rc}; $(fact_path "$1")"'
+      M_NEW='report_say "kept $1"'
+      ;;
+    Silent)
+      M_FILE=scripts/safedeps-post-verify.sh
+      M_WHY='node_modules removed outside the fact functions, with no line'
+      M_RED='this entry of the project changed on disk, and no step line names it'
+      M_OLD='  [[ -d "${node_modules}" ]] || return 0
+  did_remove "${node_modules}"
+'
+      M_NEW='  [[ -d "${node_modules}" ]] || return 0
+  rm -rf "${node_modules}"
+'
+      ;;
+    JOmit)
+      M_FILE=lib/gates/rollback-journal.sh
+      M_WHY='the unfinished-rollback report leaves out what node_modules is'
+      M_RED='an unfinished-rollback report with no node_modules line'
+      M_OLD='  printf '"'"'%s\n'"'"' "$(fact_path "${dir}/node_modules")"
+'
+      M_NEW=''
+      ;;
+    RefuseSilent)
+      M_FILE=scripts/safedeps-post-verify.sh
+      M_WHY='a refusal left out of the message, kept in reorg.log'
+      M_RED='the reorg.log entries this hook appended are not the ones its message calls for'
+      M_OLD='  line=$(did_refuse "${kind}" "${path}" "${why}")
+  report_say "${line}"
+'
+      M_NEW='  line=$(did_refuse "${kind}" "${path}" "${why}")
+'
+      ;;
+    F1)
+      M_FILE=scripts/safedeps-post-verify.sh
+      M_WHY='both listings of node_modules stop at a link again'
+      M_RED='kept, but before the hook ran node_modules showed a write'
+      M_OLD='  found=$(find -H "${node_modules}" -maxdepth 3'
+      M_NEW='  found=$(find "${node_modules}" -maxdepth 3'
+      M_FILE2=scripts/safedeps-pre-guard.sh
+      M_OLD2='  find -H "${PROJECT_DIR}/node_modules" -maxdepth 3'
+      M_NEW2='  find "${PROJECT_DIR}/node_modules" -maxdepth 3'
+      ;;
+    F2)
+      M_FILE=lib/gates/report-facts.sh
+      M_WHY='"carries it" read as a substring of the command again'
+      M_RED='the command this hook received: '
+      M_OLD='  carried=$(fact_command_ignore_scripts "$2")'
+      M_NEW='  [[ "$2" == *--ignore-scripts* ]] && carried=carries || carried=lacks'
       ;;
     *) return 1 ;;
   esac
@@ -153,7 +247,8 @@ for name in "${names[@]}"; do
     continue
   fi
   copy_tree "${WORK}/m${name}"
-  if ! replace_once "${WORK}/m${name}/${M_FILE}" "${M_OLD}" "${M_NEW}" 2> "${WORK}/m${name}.mutate"; then
+  if ! replace_once "${WORK}/m${name}/${M_FILE}" "${M_OLD}" "${M_NEW}" 2> "${WORK}/m${name}.mutate" \
+    || { [[ -n "${M_FILE2}" ]] && ! replace_once "${WORK}/m${name}/${M_FILE2}" "${M_OLD2}" "${M_NEW2}" 2> "${WORK}/m${name}.mutate"; }; then
     printf 'not ok - m%s: the mutation does not apply (%s)\n' "${name}" "$(cat "${WORK}/m${name}.mutate")"
     failures=$((failures + 1))
     continue

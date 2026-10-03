@@ -19,13 +19,35 @@
 #     cannot fail in this suite is not counted as checked. A fact that has two
 #     values (exists / does not exist, confirmed / not) is two forms.
 #
+# Each message has a reorg.log entry, and the entry is read with the same
+# grammar: the oracle builds the entries the message's lines call for (a frame
+# and the message's own lines, in order) and the entries the hook appended must
+# be exactly those. A line only the log carries, a refusal only the log
+# carries, and reasons that differ between the two are all red. advisory.log is
+# an operational log in free form and is not read, except its two rollback
+# lines, which must repeat lines of the message.
+#
+# Two facts are read by a method that is not the hook's, because twice the
+# hook and the oracle ran the same wrong check and agreed: the package.json
+# listing of node_modules (Python's directory walk, which follows a linked
+# node_modules) and whether the command carries --ignore-scripts (Python's
+# shlex and npm's own option parser). lib/report-oracle-read.py holds both.
+#
+# What a rollback changed on disk is read too: the oracle lists the project's
+# top-level entries before the hook runs, and after a rollback every entry that
+# changed must be named by a step line, "The rollback changed nothing." needs
+# an unchanged listing, and "kept" needs a listing where node_modules is still
+# what it was, the checks of the install from before the hook all showing no
+# write, and the check lines the form is made of right after it.
+#
 # The effect gate's own warnings are prose, owned by a follow-up plan, and
 # their bytes are not checked here. They are listed in ORACLE_PROSE by exact
-# prefix and counted in the table, so the hole is a named one with a size.
+# prefix, with the blocks each may appear in and the most lines this suite may
+# show of it, so the hole is a named one with a size that is enforced.
 #
 # Scripts that change a line or add one change the form here in the same
-# commit: scripts/test/report-mutations.sh turns nine such changes into
-# failures of this file.
+# commit: scripts/test/report-mutations.sh turns such changes into failures of
+# this file.
 
 ORACLE_DIR=""
 ORACLE_FAILED=0
@@ -33,37 +55,55 @@ ORACLE_FAILED=0
 # Forms the suite must show at least once.
 ORACLE_FORMS="
 head-rollback head-backstop-rollback head-backstop-none head-confirm head-journal-gone head-journal-stopped
-snapshot-confirmed snapshot-pre snapshot-journal
-restored not-restored-differs not-restored-absent removed not-removed
+snapshot-confirmed snapshot-pre snapshot-journal-confirmed snapshot-journal-pre
+restored not-restored-differs not-restored-absent not-restored-not-file removed not-removed
 refused-restore-link refused-removal-link refused-unresolved
 path-exists path-absent path-link workspaces-key changed-nothing
 kept kept-files kept-packages kept-bins kept-not-newer
 reason-trace reason-file reason-package reason-bin reason-newer reason-no-snapshot
 trace-none trace-baseline-gone trace-no-baseline
-inert-added inert-asked inert-carried inert-none
+inert-added inert-asked inert-asked-unread inert-carried inert-none inert-unread
 rebuild-skipped-added rebuild-ran-added rebuild-skipped rebuild-ran
 skip-fact-link skip-fact-unresolved skip-fact-trace
 backstop-no-confirmed backstop-no-meta
 journal owner-not-running owner-zombie owner-stopped owner-later owner-no-pid owner-no-start owner-bad-start owner-bad-opened
 journal-differs journal-gone journal-extra journal-no-list
 file-line file-line-absent
+log-rollback log-backstop log-confirm log-refused log-journal
 "
 
-# The effect gate's prose, by the exact prefix each sentence starts with.
+# The effect gate's prose: id | the blocks it may appear in | the most lines
+# of it this suite may show | the exact prefix the sentence starts with. The
+# rebuild warnings and "the install is kept" are said only of an install that
+# was kept; the three about recording withheld bytes are written before the
+# reorg decision and may precede a rollback.
 ORACLE_PROSE=(
-  "prose-rebuild-not-run|npm rebuild was not run: "
-  "prose-scripts-not-run|install scripts were not run in "
-  "prose-baseline-not-moved|safedeps verified this install but could not record the result as the new rollback baseline ("
-  "prose-bytes-unread|safedeps could not read which bytes this install brought into "
-  "prose-fetch-unknown|safedeps could not tell where npm fetched the bytes this install brought into "
-  "prose-record-failed|safedeps could not record the bytes this install fetched from a registry that is not the public npm registry ("
-  "prose-fetched-elsewhere|this install fetched packages from a registry that is not the public npm registry ("
+  "prose-rebuild-not-run|confirm|0|npm rebuild was not run: "
+  "prose-scripts-not-run|confirm|0|install scripts were not run in "
+  "prose-baseline-not-moved|confirm|0|safedeps verified this install but could not record the result as the new rollback baseline ("
+  "prose-bytes-unread|rollback confirm|0|safedeps could not read which bytes this install brought into "
+  "prose-fetch-unknown|rollback confirm|0|safedeps could not tell where npm fetched the bytes this install brought into "
+  "prose-record-failed|rollback confirm|0|safedeps could not record the bytes this install fetched from a registry that is not the public npm registry ("
+  "prose-fetched-elsewhere|confirm|0|this install fetched packages from a registry that is not the public npm registry ("
 )
+oracle_prose_field() {
+  local entry="$1" n="$2"
+  while (( n > 1 )); do entry="${entry#*|}"; n=$(( n - 1 )); done
+  [[ "$2" == 4 ]] && printf '%s' "${entry}" || printf '%s' "${entry%%|*}"
+}
+
+ORACLE_READ="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/report-oracle-read.py"
 
 oracle_init() {
   ORACLE_DIR="$1"
-  mkdir -p "${ORACLE_DIR}/bin"
+  mkdir -p "${ORACLE_DIR}/bin" "${ORACLE_DIR}/npm-readings"
   : > "${ORACLE_DIR}/forms.log"
+  # The npm that reads a command's words for the --ignore-scripts check: the
+  # one on PATH when the suite starts, before any row puts its stub first.
+  ORACLE_REAL_NPM=$(command -v npm 2>/dev/null || true)
+  # And the PATH it runs under: an npm can be a wrapper that finds the next
+  # npm on PATH, and a row's PATH starts with the row's stub.
+  ORACLE_PATH="${PATH}"
   # Every npm the hook runs is noted, with its exit status, and then handed to
   # the npm the row put on PATH. "safedeps did not run npm rebuild" is checked
   # against this, not against the row's own stub.
@@ -154,12 +194,13 @@ oracle_node_files_state() {
 # What node_modules of a pending install's project holds that the pre-command
 # listings lack, and what in it is newer than the snapshot, read before the
 # hook removes it: one `package <path>`, `bin <name>` or `newer <path>` per line.
+# The package.json files are listed by Python's walk, not by the hook's find.
 oracle_tree_state() {
   local pending="$1" snap project nm home="${SAFEDEPS_HOME:-${HOME}/.safedeps}" path
   snap=$(jq -r '.snapshot_id // empty' "${pending}" 2>/dev/null)
   project=$(jq -r '.project_dir // empty' "${pending}" 2>/dev/null)
   nm="${project}/node_modules"
-  [[ -f "${home}/snapshots/${snap}_packages.list" ]] && find "${nm}" -maxdepth 3 -name package.json 2>/dev/null | sort | comm -13 "${home}/snapshots/${snap}_packages.list" - | sed 's/^/package /'
+  [[ -f "${home}/snapshots/${snap}_packages.list" ]] && oracle_packages_lacking "${nm}" "${home}/snapshots/${snap}_packages.list" | sed 's/^/package /'
   [[ -f "${home}/snapshots/${snap}_bins.list" ]] && { ls "${nm}/.bin/" 2>/dev/null || true; } | sort | comm -13 "${home}/snapshots/${snap}_bins.list" - | sed 's/^/bin /'
   for path in "${nm}/.package-lock.json" "${nm}"; do
     [[ -n "$(find -H "${path}" -prune -newer "${home}/snapshots/${snap}_meta.json" 2>/dev/null)" ]] && printf 'newer %s\n' "${path}"
@@ -167,16 +208,41 @@ oracle_tree_state() {
   return 0
 }
 
-# oracle_before <call dir>: notes what the hook is about to consume.
+# The package.json files under <node_modules> (Python's walk) that the listing
+# file <list> does not hold, one per line. Red when the walk fails.
+oracle_packages_lacking() {
+  local walked
+  walked=$(python3 "${ORACLE_READ}" packages "$1") || { O_LINE="$1"; oracle_red "the oracle's walk of node_modules failed"; return 0; }
+  [[ -n "${walked}" ]] || return 0
+  printf '%s\n' "${walked}" | LC_ALL=C sort | LC_ALL=C comm -13 <(LC_ALL=C sort "$2") -
+}
+
+# oracle_note_listing <call dir> <dir>: the top-level entries of <dir> before
+# the hook runs, kept under a name made from the path.
+oracle_note_listing() {
+  local dir="$2"
+  [[ -n "${dir}" && -d "${dir}" ]] || return 0
+  mkdir -p "$1/listing"
+  python3 "${ORACLE_READ}" listing "${dir}" > "$1/listing/$(oracle_dir_hash "${dir}")" 2>/dev/null || true
+}
+
+# oracle_before <call dir> [payload]: notes what the hook is about to consume.
 oracle_before() {
-  local call="$1" home="${SAFEDEPS_HOME:-${HOME}/.safedeps}" file id
+  local call="$1" home="${SAFEDEPS_HOME:-${HOME}/.safedeps}" file id cwd
   mkdir -p "${call}/pending" "${call}/journal"
+  wc -c < "${home}/reorg.log" 2>/dev/null | tr -d ' ' > "${call}/reorg.size" || true
+  wc -c < "${home}/advisory.log" 2>/dev/null | tr -d ' ' > "${call}/advisory.size" || true
+  if [[ -n "${2:-}" ]]; then
+    cwd=$(jq -r '.cwd // empty' <<< "$2")
+    [[ -z "${cwd}" ]] || oracle_note_listing "${call}" "$(oracle_phys "${cwd}")"
+  fi
   for file in "${home}/pending"/*.json; do
     [[ -f "${file}" ]] || continue
     cp "${file}" "${call}/pending/${file##*/}"
     oracle_trace_state "${file}" > "${call}/pending/${file##*/}.trace"
     oracle_node_files_state "${file}" > "${call}/pending/${file##*/}.nodefiles"
     oracle_tree_state "${file}" > "${call}/pending/${file##*/}.tree"
+    oracle_note_listing "${call}" "$(jq -r '.project_dir // empty' "${file}" 2>/dev/null)"
   done
   for file in "${SAFEDEPS_JOURNAL_DIR:-${home}/rollback-journal}"/*.json; do
     [[ -f "${file}" ]] || continue
@@ -213,11 +279,24 @@ oracle_path_fact() {
   fi
 }
 
+# oracle_inert_holds <asked>:<carries|lacks|unread>: the pre-guard's record,
+# and the claim about the command read by Python's shlex and npm's own parser
+# (lib/report-oracle-read.py). "did not tell" claims nothing about the command.
 oracle_inert_holds() {
-  local asked=false carried=false
+  local asked=false why
   [[ -n "${O_META}" && "$(jq -r '.ignore_scripts_injected == true' "${O_META}" 2>/dev/null)" == true ]] && asked=true
-  [[ "${O_CMD}" == *--ignore-scripts* ]] && carried=true
-  [[ "$1" == "${asked}:${carried}" ]]
+  if [[ "${1%%:*}" != "${asked}" ]]; then
+    oracle_red "the pre-guard's record says it asked for --ignore-scripts: ${asked}"
+    return 0
+  fi
+  case "${1#*:}" in
+    unread) return 0 ;;
+    carries|lacks)
+      [[ -n "${ORACLE_REAL_NPM}" ]] || { oracle_red "no npm to read the command with"; return 0; }
+      why=$(PATH="${ORACLE_PATH}" python3 "${ORACLE_READ}" inert "${1#*:}" "${O_CMD}" "${ORACLE_REAL_NPM}" "${ORACLE_DIR}/npm-readings") \
+        || oracle_red "the command this hook received: ${why:-the reading failed}"
+      ;;
+  esac
 }
 
 # The fact a skipped rebuild gives as its reason.
@@ -243,6 +322,16 @@ oracle_skip_fact() {
       oracle_red "the reason is not a fact form that holds on disk"
     fi
   fi
+}
+
+# A rebuild line that does not start with "safedeps added" follows the line
+# that says what the pre-guard asked and what the command carries.
+oracle_after_asked_line() {
+  case "${O_PREV}" in
+    'safedeps asked for --ignore-scripts on this install; the command this hook received does not carry it'|\
+    'safedeps asked for --ignore-scripts on this install and did not tell whether the command this hook received carries it') ;;
+    *) oracle_red "not said after the line that the pre-guard asked for --ignore-scripts and the command does not carry it, or was not read" ;;
+  esac
 }
 
 oracle_rebuild_calls() {
@@ -274,8 +363,39 @@ oracle_journal_expected() {
   done < <(sort -u "${list}")
 }
 
+# Which of the kept form's check lines <line> is, if any.
+oracle_kept_token() {
+  local nm="${O_PROJECT}/node_modules"
+  case "$1" in
+    "${nm} is a symbolic link to "*) printf 'link'; return ;;
+    'the pending state of this command names no install-trace baseline'|'no install trace in '*) printf 'trace'; return ;;
+    'when this rollback began, none of '*) printf 'kept-files'; return ;;
+    "${nm} lists no package.json the pre-command snapshot "*) printf 'kept-packages'; return ;;
+    "${nm}/.bin lists no entry the pre-command snapshot "*) printf 'kept-bins'; return ;;
+    "${nm}/.package-lock.json is not newer than the pre-command snapshot "*|"${nm}/.package-lock.json does not exist") printf 'lockfile'; return ;;
+    "${nm} is not newer than the pre-command snapshot "*) printf 'kept-not-newer'; return ;;
+  esac
+  printf 'other'
+}
+
+# oracle_disk_changes: the top-level entries of the project that differ from
+# the listing taken before the hook, one path per line.
+oracle_disk_changes() {
+  local before after
+  before="${O_CALL}/listing/$(oracle_dir_hash "${O_PROJECT}")"
+  [[ -f "${before}" ]] || { printf 'unknown\n'; return 0; }
+  after=$(python3 "${ORACLE_READ}" listing "${O_PROJECT}" 2>/dev/null) || { printf 'unknown\n'; return 0; }
+  # The names whose line is in one listing and not the other.
+  LC_ALL=C comm -3 <(LC_ALL=C sort "${before}") <(printf '%s\n' "${after}" | sed '/^$/d' | LC_ALL=C sort) \
+    | awk -F'\t' -v dir="${O_PROJECT}" '{ print dir "/" ($1 == "" ? $2 : $1) }' | LC_ALL=C sort -u
+}
+
 # What a block must hold once all its lines are read.
 oracle_block_end() {
+  local changes path
+  if [[ -n "${O_KEPT_EXPECT}" ]]; then
+    O_LINE="${O_HEAD}"; oracle_red "kept is not followed by all its check lines (missing: ${O_KEPT_EXPECT})"
+  fi
   case "${O_BLOCK}" in
     rollback|backstop-rollback)
       [[ -n "${O_SNAP}" ]] || { O_LINE="${O_HEAD}"; oracle_red "a rollback message with no snapshot line"; }
@@ -283,6 +403,21 @@ oracle_block_end() {
       [[ "${O_SAW_DETAILS}" == 1 ]] || { O_LINE="${O_HEAD}"; oracle_red "a rollback message with no Details log line"; }
       if [[ "${O_CHANGED}" == 0 && "${O_SAW_NOTHING}" != 1 ]]; then
         O_LINE="${O_HEAD}"; oracle_red "no step line and no 'The rollback changed nothing.'"
+      fi
+      # Every top-level entry the rollback changed is named by a step line, and
+      # "The rollback changed nothing." needs a listing that did not change.
+      if [[ "${O_DIRECT}" != 1 ]]; then
+        changes=$(oracle_disk_changes)
+        if [[ "${changes}" == unknown ]]; then
+          O_LINE="${O_HEAD}"; oracle_red "no listing of ${O_PROJECT} from before the hook"
+        else
+          while IFS= read -r path; do
+            [[ -n "${path}" ]] || continue
+            O_LINE="${path}"
+            [[ "${O_SAW_NOTHING}" != 1 ]] || oracle_red "'The rollback changed nothing.', and this entry of the project changed on disk"
+            grep -qxF -- "${path}" <<< "${O_STEP_PATHS}" || oracle_red "this entry of the project changed on disk, and no step line names it"
+          done <<< "${changes}"
+        fi
       fi
       ;;
     journal)
@@ -294,10 +429,13 @@ oracle_block_end() {
         oracle_red "the files reported are not the monitored files that differ (expected: ${expected//$'\n'/ | })"
       fi
       [[ "${O_SAW_OWNER}" == 1 ]] || { O_LINE="${O_HEAD}"; oracle_red "an unfinished-rollback report with no Owner line"; }
+      [[ "${O_SAW_JNM}" == 1 ]] || { O_LINE="${O_HEAD}"; oracle_red "an unfinished-rollback report with no node_modules line"; }
       ;;
   esac
+  oracle_expect_log
   O_BLOCK="" O_SNAP="" O_SAW_INERT=0 O_SAW_DETAILS=0 O_SAW_NOTHING=0 O_CHANGED=0 O_SKIP=0
   O_JOURNAL_PROJECT="" O_JOURNAL_LINES="" O_JOURNAL_ID="" O_SAW_OWNER=0 O_SECTION=""
+  O_KEPT_EXPECT="" O_STEP_PATHS="" O_SAW_JNM=0 O_BODY="" O_REASONS="" O_REFUSED="" O_JFIELDS=""
 }
 
 # A line of a rollback, a confirm or a backstop block must also be a line of
@@ -317,9 +455,113 @@ oracle_nm_step() {
   oracle_is_reason "${O_PREV}" || oracle_red "a node_modules step with no reason line before it"
 }
 
-oracle_in_reorg_log() {
-  [[ "${O_DIRECT}" == 1 ]] && return 0
-  grep -qxF -- "  $1" "${O_HOME}/reorg.log" 2>/dev/null || oracle_red "reorg.log does not carry this line"
+# The reorg.log entries a block's lines call for, in the order the hook writes
+# them: the frame each kind of entry has, then the block's own lines.
+oracle_expect_log() {
+  local l
+  [[ "${O_DIRECT}" != 1 ]] || return 0
+  case "${O_BLOCK}" in
+    rollback|backstop-rollback)
+      while IFS= read -r l; do
+        [[ -n "${l}" ]] || continue
+        O_EXPECT+="log-refused"$'\037'"REORG REFUSED"$'\n'"  Project: ${O_PROJECT}"$'\n'"  ${l}"$'\036'
+      done <<< "${O_REFUSED}"
+      if [[ "${O_BLOCK}" == rollback ]]; then
+        O_EXPECT+="log-rollback"$'\037'"REORG executed"$'\n'"  Snapshot: ${O_PRE}"$'\n'
+      else
+        O_EXPECT+="log-backstop"$'\037'"REORG executed (command-independent backstop)"$'\n'
+      fi
+      O_EXPECT+="  Project: ${O_PROJECT}"$'\n'"  Reasons: ${O_REASONS}"
+      while IFS= read -r l; do
+        [[ -n "${l}" ]] && O_EXPECT+=$'\n'"  ${l}"
+      done <<< "${O_BODY}"
+      O_EXPECT+=$'\036'
+      ;;
+    confirm)
+      O_EXPECT+="log-confirm"$'\037'"CONFIRM warnings"$'\n'"  Snapshot: ${O_PRE}"$'\n'"  Project: ${O_PROJECT}"
+      while IFS= read -r l; do
+        [[ -n "${l}" ]] && O_EXPECT+=$'\n'"  ${l}"
+      done <<< "${O_BODY}"
+      O_EXPECT+=$'\036'
+      ;;
+    journal)
+      local head='REORG INTERRUPTED'
+      [[ "${O_JOURNAL_HEAD}" != stopped ]] || head='REORG STOPPED'
+      O_EXPECT+="log-journal"$'\037'"${head}${O_JFIELDS}"$'\036'
+      ;;
+  esac
+}
+
+# Collects what oracle_expect_log needs from a line already read.
+#
+# oracle_collect <line> <whether it was the line under a reasons header>
+oracle_collect() {
+  local line="$1"
+  case "${O_BLOCK}" in
+    rollback|backstop-rollback)
+      if [[ "$2" == 1 ]]; then
+        O_REASONS="${line}"
+      elif [[ "${line}" == 'Rollback snapshot: '* ]]; then
+        O_BODY="${line}"$'\n'
+      elif [[ -n "${O_BODY}" && -n "${line}" && "${line}" != 'What the rollback did and what it found:' && "${line}" != 'Details log: '* ]]; then
+        O_BODY+="${line}"$'\n'
+        [[ "${line}" != 'refused '* ]] || O_REFUSED+="${line}"$'\n'
+      fi
+      ;;
+    confirm)
+      [[ -z "${line}" || "${line}" == "${O_HEAD}" ]] || O_BODY+="${line}"$'\n'
+      ;;
+    journal)
+      if [[ "$2" == 1 ]]; then
+        O_JREASONS="${line}"
+      fi
+      case "${line}" in
+        'Journal: '*) O_JFIELDS+=$'\n'"  ${line}" ;;
+        'Owner: '*) O_JFIELDS+=$'\n'"  ${line}"$'\n'"  Project: ${O_JOURNAL_PROJECT}" ;;
+        'Rollback snapshot: '*) O_JFIELDS+=$'\n'"  ${line}" ;;
+        'Checked at the time of this report:') O_JFIELDS+=$'\n'"  Reasons: ${O_JREASONS}" ;;
+        'Incident record: '*) O_JFIELDS+=$'\n'"  ${line}" ;;
+      esac
+      ;;
+  esac
+  [[ -z "${line}" ]] || O_ALL_LINES+="${line}"$'\n'
+}
+
+# oracle_check_logs: the reorg.log entries the hook appended are exactly the
+# ones its message calls for, and its two rollback lines in advisory.log repeat
+# lines of the message.
+oracle_check_logs() {
+  local size actual expected="" e kind a line re_adv
+  size=$(cat "${O_CALL}/reorg.size" 2>/dev/null); size="${size:-0}"
+  # Each entry starts with a timestamped headline; the frame and the lines are
+  # indented by two spaces.
+  actual=$(tail -c +"$(( size + 1 ))" "${O_HOME}/reorg.log" 2>/dev/null | awk '
+    /^\[[0-9TZ:-]+\] / { if (n++) printf "\036"; sub(/^\[[0-9TZ:-]+\] /, ""); printf "%s", $0; next }
+    { printf "\n%s", $0 }
+    END { if (n) printf "\036" }')
+  while IFS= read -r -d $'\036' e; do
+    kind="${e%%$'\037'*}"
+    expected+="${e#*$'\037'}"$'\036'
+    oracle_count "${kind}"
+  done < <(printf '%s' "${O_EXPECT}")
+  if [[ "${actual}" != "${expected}" ]]; then
+    O_LINE="reorg.log"
+    oracle_red "the reorg.log entries this hook appended are not the ones its message calls for -- appended: [${actual//$'\036'/ || }] -- called for: [${expected//$'\036'/ || }]"
+  fi
+  size=$(cat "${O_CALL}/advisory.size" 2>/dev/null); size="${size:-0}"
+  re_adv='^post-verify REORG with no confirmed snapshot in (/[^:]*): (Rollback snapshot: .*); (safedeps [^.]*)\. Reasons: (.*)$'
+  while IFS=$'\t' read -r _ a; do
+    O_LINE="advisory.log: ${a}"
+    if [[ "${a}" == 'post-verify REORG REFUSED: '* ]]; then
+      line="${a#post-verify REORG REFUSED: }"; line="${line% -- project *}"
+      grep -qxF -- "${line}" <<< "${O_ALL_LINES}" || oracle_red "advisory.log carries a refusal the message does not"
+    elif [[ "${a}" =~ ${re_adv} ]]; then
+      grep -qxF -- "${BASH_REMATCH[2]}" <<< "${O_ALL_LINES}" || oracle_red "advisory.log carries a snapshot line the message does not"
+      grep -qxF -- "${BASH_REMATCH[3]}" <<< "${O_ALL_LINES}" || oracle_red "advisory.log carries an --ignore-scripts line the message does not"
+    elif [[ "${a}" == 'post-verify REORG with no confirmed snapshot'* ]]; then
+      oracle_red "an advisory.log rollback line outside its form"
+    fi
+  done < <(tail -c +"$(( size + 1 ))" "${O_HOME}/advisory.log" 2>/dev/null)
 }
 
 oracle_line() {
@@ -329,10 +571,11 @@ oracle_line() {
   local re_journal_head='^safedeps: a rollback of (/.+) (did not finish|has not finished)\.$'
   local re_snap_confirmed='^Rollback snapshot: ([^ ,]+), a confirmed snapshot$'
   local re_snap_pre='^Rollback snapshot: ([^ ,]+), taken before this command; no confirmed snapshot names it$'
-  local re_snap_plain='^Rollback snapshot: ([^ ,]+)$'
+  local re_snap_journal_pre='^Rollback snapshot: ([^ ,;]+); no confirmed snapshot names it$'
   local re_restored='^restored (/.+)$'
   local re_not_restored_differs='^not restored (/.+): cp exit ([0-9]+); (/.+) differs from the snapshot$'
   local re_not_restored_absent='^not restored (/.+): cp exit ([0-9]+); (/.+) does not exist$'
+  local re_not_restored_not_file='^not restored (/.+): (/.+) exists and is not a regular file$'
   local re_removed='^removed (/.+)$'
   local re_not_removed='^not removed (/.+): rm exit ([0-9]+); (.+)$'
   local re_refused='^refused (restore|removal) of (/.+): (.+)$'
@@ -410,11 +653,11 @@ oracle_line() {
   fi
   [[ -n "${O_BLOCK}" ]] || { oracle_red "a line before any headline"; return 0; }
 
-  # The effect gate's prose, by exact prefix.
+  # The effect gate's prose, by exact prefix, in the blocks it is said in.
   for entry in "${ORACLE_PROSE[@]}"; do
-    prose="${entry#*|}"
+    prose=$(oracle_prose_field "${entry}" 4)
     if [[ "${line:0:${#prose}}" == "${prose}" ]]; then
-      [[ "${O_BLOCK}" != journal && "${O_BLOCK}" != backstop-none ]] || oracle_red "effect-gate prose inside a report that has none"
+      [[ " $(oracle_prose_field "${entry}" 2) " == *" ${O_BLOCK} "* ]] || oracle_red "effect-gate prose in a block it is not said in (${O_BLOCK})"
       oracle_count "${entry%%|*}"
       return 0
     fi
@@ -432,7 +675,6 @@ oracle_line() {
         [[ "$(( $(oracle_epoch "${entered}") - $(oracle_epoch "${opened}") ))" == "${into}" ]] || oracle_red "the seconds are not the distance between the two stamps"
       fi
       [[ "$(jq -r '.project_dir // "unknown"' "${copy}" 2>/dev/null)" == "${O_JOURNAL_PROJECT}" ]] || oracle_red "the journal entry names another project"
-      oracle_in_reorg_log "${line}"
     elif [[ "${line}" =~ ${re_owner} ]]; then
       local fact="${BASH_REMATCH[1]}" state expected=""
       O_SAW_OWNER=1
@@ -456,12 +698,19 @@ oracle_line() {
       else
         [[ "${O_JOURNAL_HEAD}" == gone ]] || oracle_red "an owner that is not stopped under a headline that says it has not finished"
       fi
-      oracle_in_reorg_log "${line}"
-    elif [[ "${line}" =~ ${re_snap_plain} ]]; then
-      oracle_count snapshot-journal
+    elif [[ "${line}" =~ ${re_snap_confirmed} || "${line}" =~ ${re_snap_journal_pre} ]]; then
       O_SNAP="${BASH_REMATCH[1]}"
       [[ "$(jq -r '.rollback_snapshot // "unknown"' "${O_CALL}/journal/${O_JOURNAL_ID}.json" 2>/dev/null)" == "${O_SNAP}" ]] || oracle_red "the journal entry names another snapshot"
-      oracle_in_reorg_log "${line}"
+      local jrec jconf=""
+      jrec="${O_HOME}/confirmed_$(oracle_dir_hash "${O_JOURNAL_PROJECT}")"
+      if [[ -f "${jrec}" ]]; then jconf=$(cat "${jrec}"); elif [[ -f "${O_HOME}/confirmed" ]]; then jconf=$(cat "${O_HOME}/confirmed"); fi
+      if [[ "${line}" =~ ${re_snap_confirmed} ]]; then
+        oracle_count snapshot-journal-confirmed
+        [[ "${jconf}" == "${O_SNAP}" ]] || oracle_red "the project's confirmed record does not name this snapshot"
+      else
+        oracle_count snapshot-journal-pre
+        [[ "${jconf}" != "${O_SNAP}" ]] || oracle_red "the project's confirmed record names this snapshot"
+      fi
     elif [[ "${line}" =~ ${re_j_gone} ]]; then
       oracle_count journal-gone; O_JOURNAL_LINES+="${line}"$'\n'
     elif [[ "${line}" =~ ${re_j_extra} ]]; then
@@ -478,15 +727,14 @@ oracle_line() {
       oracle_count file-line
       [[ "${BASH_REMATCH[1]}" != "Details log" ]] || oracle_red "a Details log line in an unfinished-rollback report"
       [[ -f "${BASH_REMATCH[2]}" ]] || oracle_red "no such file"
-      [[ "${BASH_REMATCH[1]}" != "Incident record" ]] || oracle_in_reorg_log "${line}"
-    else
+      else
       oracle_path_fact "${line}" || rc=$?
       if [[ ${rc} -eq 2 || "${O_SECTION}" != checked ]]; then
         oracle_red "a line outside the grammar"
       elif [[ ${rc} -ne 0 ]]; then
         oracle_red "the stated fact does not hold on disk"
       elif [[ "${O_FACT_PATH}" == "${O_JOURNAL_PROJECT}/node_modules" ]]; then
-        oracle_count "path-${O_FACT_KIND}"
+        oracle_count "path-${O_FACT_KIND}"; O_SAW_JNM=1
       elif [[ "${O_FACT_KIND}" == link ]]; then
         oracle_count path-link; O_JOURNAL_LINES+="${line}"$'\n'
       else
@@ -515,45 +763,47 @@ oracle_line() {
   if [[ "${line}" =~ ${re_snap_confirmed} ]]; then
     oracle_count snapshot-confirmed; O_SNAP="${BASH_REMATCH[1]}"
     [[ "$(cat "${O_HOME}/confirmed_${O_DIR_HASH}" 2>/dev/null || cat "${O_HOME}/confirmed" 2>/dev/null)" == "${O_SNAP}" ]] || oracle_red "the confirmed record of the project does not name this snapshot"
-    oracle_in_reorg_log "${line}"
   elif [[ "${line}" =~ ${re_snap_pre} ]]; then
     oracle_count snapshot-pre; O_SNAP="${BASH_REMATCH[1]}"
     [[ "${O_SNAP}" == "${O_PRE}" ]] || oracle_red "the snapshot the pre-guard took for this command is '${O_PRE}'"
     ! grep -qsxF -- "${O_SNAP}" "${O_HOME}"/confirmed "${O_HOME}"/confirmed_* 2>/dev/null || oracle_red "a confirmed record names this snapshot"
-    oracle_in_reorg_log "${line}"
   elif [[ "${line}" == 'The rollback changed nothing.' ]]; then
     oracle_count changed-nothing; O_SAW_NOTHING=1
     [[ "${O_CHANGED}" == 0 ]] || oracle_red "said next to a restored or removed line"
-    oracle_in_reorg_log "${line}"
+  elif [[ "${line}" =~ ${re_not_restored_not_file} ]]; then
+    oracle_count not-restored-not-file
+    [[ "${BASH_REMATCH[1]}" == "${BASH_REMATCH[2]}" ]] || oracle_red "two paths"
+    [[ -e "${BASH_REMATCH[1]}" && ! -L "${BASH_REMATCH[1]}" && ! -f "${BASH_REMATCH[1]}" ]] || oracle_red "it is a regular file, a link, or not there"
+    O_STEP_PATHS+="${BASH_REMATCH[1]}"$'\n'
   elif [[ "${line}" =~ ${re_not_restored_differs} ]]; then
-    oracle_count not-restored-differs
+    oracle_count not-restored-differs; O_CHANGED=1
+    O_STEP_PATHS+="${BASH_REMATCH[1]}"$'\n'
     [[ "${BASH_REMATCH[1]}" == "${BASH_REMATCH[3]}" ]] || oracle_red "two paths"
     [[ "${BASH_REMATCH[2]}" != 0 ]] || oracle_red "cp exit 0"
     { [[ -e "${BASH_REMATCH[1]}" ]] && ! cmp -s "$(oracle_stored "${O_SNAP}" "${BASH_REMATCH[1]#"${O_PROJECT}/"}")" "${BASH_REMATCH[1]}"; } || oracle_red "the file is gone, or equals the snapshot"
-    oracle_in_reorg_log "${line}"
   elif [[ "${line}" =~ ${re_not_restored_absent} ]]; then
-    oracle_count not-restored-absent
+    oracle_count not-restored-absent; O_CHANGED=1
+    O_STEP_PATHS+="${BASH_REMATCH[1]}"$'\n'
     [[ "${BASH_REMATCH[1]}" == "${BASH_REMATCH[3]}" ]] || oracle_red "two paths"
     [[ ! -e "${BASH_REMATCH[1]}" && ! -L "${BASH_REMATCH[1]}" ]] || oracle_red "the file exists"
-    oracle_in_reorg_log "${line}"
   elif [[ "${line}" =~ ${re_restored} ]]; then
     oracle_count restored; O_CHANGED=1
+    O_STEP_PATHS+="${BASH_REMATCH[1]}"$'\n'
     cmp -s "$(oracle_stored "${O_SNAP}" "${BASH_REMATCH[1]#"${O_PROJECT}/"}")" "${BASH_REMATCH[1]}" || oracle_red "the file does not equal the snapshot"
-    oracle_in_reorg_log "${line}"
   elif [[ "${line}" =~ ${re_not_removed} ]]; then
-    oracle_count not-removed
+    oracle_count not-removed; O_CHANGED=1
     local nr_path="${BASH_REMATCH[1]}" nr_rc="${BASH_REMATCH[2]}" nr_fact="${BASH_REMATCH[3]}"
+    O_STEP_PATHS+="${nr_path}"$'\n'
     oracle_nm_step "${nr_path}"
     oracle_path_fact "${nr_fact}" || rc=$?
     [[ ${rc} -eq 0 && "${O_FACT_PATH}" == "${nr_path}" && "${O_FACT_KIND}" != absent ]] || oracle_red "the path is gone, or the fact names another path"
     [[ "${nr_rc}" != 0 ]] || oracle_red "rm exit 0"
-    oracle_in_reorg_log "${line}"
   elif [[ "${line}" =~ ${re_removed} ]]; then
     oracle_count removed; O_CHANGED=1
     local rm_path="${BASH_REMATCH[1]}"
+    O_STEP_PATHS+="${rm_path}"$'\n'
     oracle_nm_step "${rm_path}"
     [[ ! -e "${rm_path}" && ! -L "${rm_path}" ]] || oracle_red "the path is still there"
-    oracle_in_reorg_log "${line}"
   elif [[ "${line}" =~ ${re_refused} ]]; then
     local rf_kind="${BASH_REMATCH[1]}" rf_path="${BASH_REMATCH[2]}" rf_fact="${BASH_REMATCH[3]}"
     [[ "${rf_kind}" != removal ]] || oracle_nm_step "${rf_path}"
@@ -566,116 +816,114 @@ oracle_line() {
       oracle_path_fact "${rf_fact}" || rc=$?
       [[ ${rc} -eq 0 && "${O_FACT_KIND}" == link && "${O_FACT_PATH}" == "${rf_path}" ]] || oracle_red "not a link to that place, or the fact names another path"
     fi
-    oracle_in_reorg_log "${line}"
   elif [[ "${line}" =~ ${re_wskey} ]]; then
     oracle_count workspaces-key
     jq -e 'type == "object" and has("workspaces")' "${BASH_REMATCH[1]}/package.json" >/dev/null 2>&1 || oracle_red "no workspaces key"
-    oracle_in_reorg_log "${line}"
   elif [[ "${line}" == 'this rollback has no snapshot from before the command' ]]; then
     oracle_count reason-no-snapshot
     [[ "${O_BLOCK}" == backstop-rollback && -z "${O_PRE}" ]] || oracle_red "said outside the backstop, or a pending state was consumed for this command"
-    oracle_in_reorg_log "${line}"
   elif [[ "${line}" =~ ${re_reason_trace} ]]; then
     oracle_count reason-trace
     [[ "${O_TRACE}" == present ]] || oracle_red "the trace this file read before the hook is '${O_TRACE}'"
     [[ "${BASH_REMATCH[1]}" == "${O_PROJECT}/package-lock.json" || "${BASH_REMATCH[1]}" == "${O_PROJECT}/node_modules/.package-lock.json" ]] || oracle_red "not one of the project's two npm lockfiles"
-    oracle_in_reorg_log "${line}"
   elif [[ "${line}" =~ ${re_reason_file} ]]; then
     oracle_count reason-file
     [[ "${BASH_REMATCH[1]}" == "${O_PROJECT}" && "${BASH_REMATCH[3]}" == "${O_PRE}" ]] || oracle_red "another project or another snapshot"
     [[ " $(sed -n 3p <<< "${O_NODE_FILES}") " == *" ${BASH_REMATCH[2]} "* ]] || oracle_red "before the hook ran, ${BASH_REMATCH[2]} did not differ from the snapshot"
-    oracle_in_reorg_log "${line}"
   elif [[ "${line}" =~ ${re_reason_bin} ]]; then
     oracle_count reason-bin
     [[ "${BASH_REMATCH[1]}" == "${O_PROJECT}/node_modules" && "${BASH_REMATCH[3]}" == "${O_PRE}" ]] || oracle_red "another directory or another snapshot"
     grep -qxF -- "bin ${BASH_REMATCH[2]}" <<< "${O_TREE}" || oracle_red "before the hook ran, .bin did not list that entry, or the snapshot did"
-    oracle_in_reorg_log "${line}"
   elif [[ "${line}" =~ ${re_reason_package} ]]; then
     oracle_count reason-package
     [[ "${BASH_REMATCH[1]}" == "${O_PROJECT}/node_modules" && "${BASH_REMATCH[2]}" == "${BASH_REMATCH[1]}"/* && "${BASH_REMATCH[3]}" == "${O_PRE}" ]] || oracle_red "another directory or another snapshot"
     grep -qxF -- "package ${BASH_REMATCH[2]}" <<< "${O_TREE}" || oracle_red "before the hook ran, node_modules did not list that file, or the snapshot did"
-    oracle_in_reorg_log "${line}"
   elif [[ "${line}" =~ ${re_reason_newer} ]]; then
     oracle_count reason-newer
     [[ "${BASH_REMATCH[2]}" == "${O_PRE}" ]] || oracle_red "another snapshot"
     grep -qxF -- "newer ${BASH_REMATCH[1]}" <<< "${O_TREE}" || oracle_red "before the hook ran, that path was not newer than the snapshot"
-    oracle_in_reorg_log "${line}"
   elif [[ "${line}" =~ ${re_kept_files} ]]; then
     oracle_count kept-files
     [[ "${BASH_REMATCH[2]}" == "${O_PROJECT}" && "${BASH_REMATCH[3]}" == "${O_PRE}" ]] || oracle_red "another project or another snapshot"
     [[ "${O_NODE_FILES}" == "${BASH_REMATCH[1]}"$'\n'"same"$'\n' || "${O_NODE_FILES}" == "${BASH_REMATCH[1]}"$'\n'"same" ]] || oracle_red "before the hook ran this file read: ${O_NODE_FILES//$'\n'/ -> }"
-    oracle_in_reorg_log "${line}"
   elif [[ "${line}" =~ ${re_kept_bins} ]]; then
     oracle_count kept-bins
     [[ "${BASH_REMATCH[2]}" == "${O_PRE}" && "${BASH_REMATCH[1]}" == "${O_PROJECT}/node_modules" ]] || oracle_red "another snapshot or another directory"
     [[ -z "$({ ls "${BASH_REMATCH[1]}/.bin/" 2>/dev/null || true; } | sort | comm -13 "${O_HOME}/snapshots/${O_PRE}_bins.list" - 2>&1)" ]] || oracle_red ".bin lists an entry the snapshot lacks, or the snapshot has no list"
-    oracle_in_reorg_log "${line}"
   elif [[ "${line}" =~ ${re_kept_packages} ]]; then
     oracle_count kept-packages
     [[ "${BASH_REMATCH[2]}" == "${O_PRE}" && "${BASH_REMATCH[1]}" == "${O_PROJECT}/node_modules" ]] || oracle_red "another snapshot or another directory"
-    [[ -z "$(find "${BASH_REMATCH[1]}" -maxdepth 3 -name package.json 2>/dev/null | sort | comm -13 "${O_HOME}/snapshots/${O_PRE}_packages.list" - 2>&1)" ]] || oracle_red "node_modules lists a package.json the snapshot lacks, or the snapshot has no list"
-    oracle_in_reorg_log "${line}"
+    if [[ ! -f "${O_HOME}/snapshots/${O_PRE}_packages.list" ]]; then
+      oracle_red "the snapshot has no list of package.json files"
+    else
+      local lacking
+      lacking=$(oracle_packages_lacking "${BASH_REMATCH[1]}" "${O_HOME}/snapshots/${O_PRE}_packages.list")
+      [[ -z "${lacking}" ]] || oracle_red "node_modules holds a package.json the snapshot lacks: ${lacking//$'\n'/ }"
+    fi
   elif [[ "${line}" =~ ${re_kept_newer} ]]; then
     oracle_count kept-not-newer
     [[ "${BASH_REMATCH[2]}" == "${O_PRE}" ]] || oracle_red "another snapshot"
     [[ -e "${BASH_REMATCH[1]}" && -f "${O_HOME}/snapshots/${O_PRE}_meta.json" && -z "$(find -H "${BASH_REMATCH[1]}" -prune -newer "${O_HOME}/snapshots/${O_PRE}_meta.json" 2>/dev/null)" ]] || oracle_red "it is newer than the snapshot, or one of the two is missing"
-    oracle_in_reorg_log "${line}"
   elif [[ "${line}" =~ ${re_kept} ]]; then
     oracle_count kept
-    [[ -e "${BASH_REMATCH[1]}" || -L "${BASH_REMATCH[1]}" ]] || oracle_red "the path is gone"
-    oracle_in_reorg_log "${line}"
+    local kp="${BASH_REMATCH[1]}"
+    [[ "${kp}" == "${O_PROJECT}/node_modules" ]] || oracle_red "kept names a path other than the project's node_modules"
+    [[ -e "${kp}" || -L "${kp}" ]] || oracle_red "the path is gone"
+    oracle_is_reason "${O_PREV}" && oracle_red "kept, right after a reason to remove it"
+    # Before the hook ran, every check of the install showed no write.
+    [[ "${O_TRACE}" != present ]] || oracle_red "kept, but before the hook ran the install trace was present"
+    [[ "$(sed -n 2p <<< "${O_NODE_FILES}")" == same ]] || oracle_red "kept, but before the hook ran a node file differed from the snapshot: ${O_NODE_FILES//$'\n'/ -> }"
+    [[ -z "${O_TREE}" ]] || oracle_red "kept, but before the hook ran node_modules showed a write: ${O_TREE//$'\n'/ | }"
+    # The form is the line and the checks that follow it, in this order.
+    O_KEPT_EXPECT="link trace kept-files kept-packages kept-bins lockfile kept-not-newer"
+    [[ -L "${kp}" ]] || O_KEPT_EXPECT="${O_KEPT_EXPECT#link }"
   elif [[ "${line}" =~ ${re_trace_none} ]]; then
     oracle_count trace-none
     [[ "${O_TRACE}" == none && "${BASH_REMATCH[1]}" == "${O_PROJECT}" ]] || oracle_red "the trace this file read before the hook is '${O_TRACE}' in ${O_PROJECT}"
-    oracle_in_reorg_log "${line}"
   elif [[ "${line}" =~ ${re_trace_gone} ]]; then
     oracle_count trace-baseline-gone
     [[ "${O_TRACE}" == gone && "${BASH_REMATCH[1]}" == "${O_PROJECT}" ]] || oracle_red "the trace this file read before the hook is '${O_TRACE}'"
-    oracle_in_reorg_log "${line}"
   elif [[ "${line}" == 'the pending state of this command names no install-trace baseline' ]]; then
     oracle_count trace-no-baseline
     [[ "${O_TRACE}" == unset ]] || oracle_red "the trace this file read before the hook is '${O_TRACE}'"
-    oracle_in_reorg_log "${line}"
   elif [[ "${line}" =~ ${re_skip_added} ]]; then
     oracle_count rebuild-skipped-added
     local sk_fact="${BASH_REMATCH[1]}"
-    oracle_inert_holds true:true || oracle_red "the pre-guard did not ask for --ignore-scripts, or the command this hook received does not carry it"
+    oracle_inert_holds true:carries
     [[ "$(oracle_rebuild_calls)" == 0 ]] || oracle_red "the hook ran npm rebuild"
     oracle_skip_fact "${sk_fact}"
-    oracle_in_reorg_log "${line}"
   elif [[ "${line}" =~ ${re_ran_added} ]]; then
     oracle_count rebuild-ran-added
-    oracle_inert_holds true:true || oracle_red "the pre-guard did not ask for --ignore-scripts, or the command this hook received does not carry it"
+    oracle_inert_holds true:carries
     grep -q "^rebuild.*"$'\t'"rc=${BASH_REMATCH[1]}\$" "${O_NPM_LOG}" 2>/dev/null || oracle_red "no npm rebuild with that exit status was run"
-    oracle_in_reorg_log "${line}"
   elif [[ "${line}" =~ ${re_skip} ]]; then
     oracle_count rebuild-skipped
     local sp_fact="${BASH_REMATCH[1]}"
-    [[ "${O_PREV}" == 'safedeps asked for --ignore-scripts on this install; the command this hook received does not carry it' ]] || oracle_red "not said after the line that the command does not carry --ignore-scripts"
+    oracle_after_asked_line
     [[ "$(oracle_rebuild_calls)" == 0 ]] || oracle_red "the hook ran npm rebuild"
     oracle_skip_fact "${sp_fact}"
-    oracle_in_reorg_log "${line}"
   elif [[ "${line}" =~ ${re_ran} ]]; then
     oracle_count rebuild-ran
-    [[ "${O_PREV}" == 'safedeps asked for --ignore-scripts on this install; the command this hook received does not carry it' ]] || oracle_red "not said after the line that the command does not carry --ignore-scripts"
+    oracle_after_asked_line
     grep -q "^rebuild.*"$'\t'"rc=${BASH_REMATCH[1]}\$" "${O_NPM_LOG}" 2>/dev/null || oracle_red "no npm rebuild with that exit status was run"
-    oracle_in_reorg_log "${line}"
   elif [[ "${line}" == 'safedeps added --ignore-scripts to this install' ]]; then
     oracle_count inert-added; O_SAW_INERT=1
-    oracle_inert_holds true:true || oracle_red "the pre-guard did not ask for it, or the command this hook received does not carry it"
-    oracle_in_reorg_log "${line}"
+    oracle_inert_holds true:carries
   elif [[ "${line}" == 'safedeps asked for --ignore-scripts on this install; the command this hook received does not carry it' ]]; then
     oracle_count inert-asked; O_SAW_INERT=1
-    oracle_inert_holds true:false || oracle_red "the pre-guard did not ask for it, or the command carries it"
-    oracle_in_reorg_log "${line}"
+    oracle_inert_holds true:lacks
+  elif [[ "${line}" == 'safedeps asked for --ignore-scripts on this install and did not tell whether the command this hook received carries it' ]]; then
+    oracle_count inert-asked-unread; O_SAW_INERT=1
+    oracle_inert_holds true:unread
   elif [[ "${line}" == 'safedeps did not add --ignore-scripts to this install; the command this hook received carries it' ]]; then
     oracle_count inert-carried; O_SAW_INERT=1
-    oracle_inert_holds false:true || oracle_red "the pre-guard asked for it, or the command does not carry it"
-    oracle_in_reorg_log "${line}"
+    oracle_inert_holds false:carries
   elif [[ "${line}" == 'safedeps did not add --ignore-scripts to this install; the command this hook received does not carry it' ]]; then
     oracle_count inert-none; O_SAW_INERT=1
-    oracle_inert_holds false:false || oracle_red "the pre-guard asked for it, or the command carries it"
-    oracle_in_reorg_log "${line}"
+    oracle_inert_holds false:lacks
+  elif [[ "${line}" == 'safedeps did not add --ignore-scripts to this install and did not tell whether the command this hook received carries it' ]]; then
+    oracle_count inert-unread; O_SAW_INERT=1
+    oracle_inert_holds false:unread
   elif [[ "${line}" =~ ${re_file_absent} ]]; then
     oracle_count file-line-absent; O_SAW_DETAILS=1
     [[ "${BASH_REMATCH[1]}" == "Details log" && "${O_BLOCK}" != confirm ]] || oracle_red "this file line does not belong in this message"
@@ -692,7 +940,6 @@ oracle_line() {
       oracle_red "the stated fact does not hold on disk"
     else
       oracle_count "path-${O_FACT_KIND}"
-      oracle_in_reorg_log "${line}"
     fi
   fi
 }
@@ -706,6 +953,40 @@ oracle_dir_hash() {
 oracle_reset() {
   O_BLOCK="" O_HEAD="" O_SNAP="" O_SAW_INERT=0 O_SAW_DETAILS=0 O_SAW_NOTHING=0 O_CHANGED=0 O_SKIP=0
   O_JOURNAL_PROJECT="" O_JOURNAL_LINES="" O_JOURNAL_ID="" O_JOURNAL_HEAD="" O_SAW_OWNER=0 O_SECTION="" O_PREV="" O_LINE=""
+  O_KEPT_EXPECT="" O_STEP_PATHS="" O_SAW_JNM=0 O_BODY="" O_REASONS="" O_REFUSED="" O_JFIELDS="" O_JREASONS=""
+  O_EXPECT="" O_ALL_LINES=""
+}
+
+# One line of the kept form's sequence: after `kept`, the next lines are its
+# checks in order, and nothing else.
+oracle_kept_step() {
+  local want token
+  [[ -n "${O_KEPT_EXPECT}" ]] || return 0
+  want="${O_KEPT_EXPECT%% *}"
+  token=$(oracle_kept_token "$1")
+  O_LINE="$1"
+  if [[ "${token}" != "${want}" ]]; then
+    oracle_red "kept is not followed by its check lines in order (expected ${want})"
+    O_KEPT_EXPECT=""
+  elif [[ "${O_KEPT_EXPECT}" == *" "* ]]; then
+    O_KEPT_EXPECT="${O_KEPT_EXPECT#* }"
+  else
+    O_KEPT_EXPECT=""
+  fi
+}
+
+# Reads the lines of a message: each through the grammar, then into what the
+# reorg.log entries must hold.
+oracle_read_lines() {
+  local line skip
+  while IFS= read -r line; do
+    skip="${O_SKIP}"
+    oracle_kept_step "${line}"
+    oracle_line "${line}"
+    oracle_collect "${line}" "${skip}"
+    [[ -z "${line}" ]] || O_PREV="${line}"
+  done <<< "$1"
+  oracle_block_end
 }
 
 # oracle_message <call dir> <payload> <hook stdout>: reads every line.
@@ -742,11 +1023,8 @@ oracle_message() {
     O_LINE="${out:0:200}"; oracle_red "the hook's stdout is not one object with a systemMessage"
     return 1
   fi
-  while IFS= read -r line; do
-    oracle_line "${line}"
-    [[ -z "${line}" ]] || O_PREV="${line}"
-  done <<< "${message}"
-  oracle_block_end
+  oracle_read_lines "${message}"
+  oracle_check_logs
   [[ "${ORACLE_FAILED}" == 0 ]]
 }
 
@@ -759,29 +1037,29 @@ oracle_direct() {
   O_META="$1" O_CMD="$2" O_PROJECT="" O_PRE="" O_TRACE="unread" O_NODE_FILES="" O_TREE="" O_DIR_HASH=""
   oracle_reset
   O_BLOCK=confirm
-  while IFS= read -r line; do
-    oracle_line "${line}"
-    [[ -z "${line}" ]] || O_PREV="${line}"
-  done <<< "$3"
+  oracle_read_lines "$3"
   O_BLOCK=""
   [[ "${ORACLE_FAILED}" == 0 ]]
 }
 
 # The form table: every form with the number of lines that matched it. A form
-# no line matched fails the run; the effect gate's prose is counted and may be
-# zero.
+# no line matched fails the run; the effect gate's prose is counted, may be
+# zero, and fails the run above the most lines its row allows.
 oracle_table() {
-  local form count entry missing=""
+  local form count entry missing="" over="" cap
   printf '# report forms (lines read by the oracle, per form)\n'
   for form in ${ORACLE_FORMS}; do
     count=$(grep -cxF -- "${form}" "${ORACLE_DIR}/forms.log" || true)
     printf '#   %-26s %s\n' "${form}" "${count}"
     [[ "${count}" != 0 ]] || missing+=" ${form}"
   done
-  printf '# effect-gate prose, out of this grammar (owned by a follow-up plan), by exact prefix\n'
+  printf '# effect-gate prose, out of this grammar (owned by a follow-up plan), by exact prefix: lines / most allowed\n'
   for entry in "${ORACLE_PROSE[@]}"; do
     count=$(grep -cxF -- "${entry%%|*}" "${ORACLE_DIR}/forms.log" || true)
-    printf '#   %-26s %s\n' "${entry%%|*}" "${count}"
+    cap=$(oracle_prose_field "${entry}" 3)
+    printf '#   %-26s %s / %s\n' "${entry%%|*}" "${count}" "${cap}"
+    (( count <= cap )) || over+=" ${entry%%|*}"
   done
   [[ -z "${missing}" ]] || { printf 'not ok - report oracle: no line of the suite matched the form(s):%s\n' "${missing}" >&2; return 1; }
+  [[ -z "${over}" ]] || { printf 'not ok - report oracle: more lines of effect-gate prose than this suite shows:%s\n' "${over}" >&2; return 1; }
 }

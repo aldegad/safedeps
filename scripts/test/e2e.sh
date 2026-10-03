@@ -48,7 +48,7 @@ post_hook() {
   local payload out call
   payload=$(cat)
   call=$(mktemp -d "${ORACLE_DIR}/call.XXXXXX")
-  oracle_before "${call}"
+  oracle_before "${call}" "${payload}"
   # The npm shim goes on PATH only where the row has an npm: on a PATH with
   # none, the shim would be the npm the hook finds, and the row would test a
   # hook that has one.
@@ -1345,6 +1345,77 @@ grep -q '^safedeps did not add --ignore-scripts to this install; the command thi
   || fail "a command that carries its own --ignore-scripts is said to carry it"
 pass "the --ignore-scripts line is the pre-guard's record and the command this hook received, nothing more"
 
+# "Carries it" is read per npm install statement, never as a substring
+# (F2, bamdori r16): an install that sets the option to false, and a flag that
+# belongs to another statement, do not carry it; a command whose statements
+# this hook does not read (quotes) is said as not read.
+inert_none='safedeps did not add --ignore-scripts to this install; the command this hook received does not carry it'
+inert_unread='safedeps did not add --ignore-scripts to this install and did not tell whether the command this hook received carries it'
+for inert_case in \
+  "false|npm install fixture-parent@1.0.0 --ignore-scripts=false|${inert_none}" \
+  "echo|npm install fixture-parent@1.0.0 && echo --ignore-scripts|${inert_none}" \
+  "quoted|npm install 'fixture-parent@1.0.0' --ignore-scripts|${inert_unread}"; do
+  inert_name="${inert_case%%|*}" inert_rest="${inert_case#*|}"
+  inert_cmd="${inert_rest%%|*}" inert_said="${inert_rest#*|}"
+  inert_wt="${tmp_root}/inert-${inert_name}-wt"
+  grammar_project "${inert_wt}"
+  grammar_pre_codex "${inert_wt}" "${inert_cmd}" > /dev/null
+  printf '%s\n' "${tampered_lock}" > "${inert_wt}/package-lock.json"
+  inert_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${inert_wt}" "${inert_cmd}")
+  grep -qxF "${inert_said}" <<< "$(post_message "${inert_post}")" \
+    || fail "${inert_name}: the --ignore-scripts line says '${inert_said}' (${inert_post})"
+done
+pass "a command carries --ignore-scripts only where npm reads it on the install, and a command not read is said as not read"
+
+# A node_modules that is a link is listed through the link, before the command
+# and in the rollback (F1, bamdori r16 LK1). The command writes a package into
+# the directory the link leads to and leaves both lockfiles alone: the listing
+# shows it, and the removal of the link is refused. Without the write,
+# node_modules is kept, and the kept line says it is a link.
+for lk_case in write keep; do
+  lk_target="${tmp_root}/lk-${lk_case}-target"
+  lk_wt="${tmp_root}/lk-${lk_case}-wt"
+  mkdir -p "${lk_target}/node_modules/@s/a" "${lk_wt}"
+  printf '{"name":"@s/a","version":"1.0.0"}\n' > "${lk_target}/node_modules/@s/a/package.json"
+  ln -s "${lk_target}/node_modules" "${lk_wt}/node_modules"
+  printf '{"dependencies":{"fixture-parent":"1.0.0"}}\n' > "${lk_wt}/package.json"
+  printf '%s\n' "${tampered_lock}" > "${lk_wt}/package-lock.json"
+  grammar_pre "${lk_wt}" "npm install fixture-parent@1.0.0" > /dev/null
+  if [[ "${lk_case}" == write ]]; then
+    mkdir -p "${lk_target}/node_modules/@s/evil"
+    printf '{"name":"@s/evil","version":"1.0.0"}\n' > "${lk_target}/node_modules/@s/evil/package.json"
+  fi
+  lk_post=$(PATH="${emptying_bin}:${PATH}" grammar_post "${lk_wt}" "npm install fixture-parent@1.0.0 --ignore-scripts")
+  lk_message=$(post_message "${lk_post}")
+  if [[ "${lk_case}" == write ]]; then
+    grep -qx ".*/lk-write-wt/node_modules lists .*/lk-write-wt/node_modules/@s/evil/package.json, which the pre-command snapshot .* does not" <<< "${lk_message}" \
+      || fail "a package written through a linked node_modules is the reason line (${lk_post})"
+    grep -q '^refused removal of .*/lk-write-wt/node_modules: ' <<< "${lk_message}" || fail "the removal of the linked node_modules is refused"
+    [[ -f "${lk_target}/node_modules/@s/evil/package.json" ]] || fail "a rollback leaves the target of a linked node_modules alone"
+  else
+    grep -A1 -x 'kept .*/lk-keep-wt/node_modules' <<< "${lk_message}" | grep -q '/lk-keep-wt/node_modules is a symbolic link to ' \
+      || fail "a kept node_modules that is a link is said as one, right after the kept line (${lk_post})"
+    [[ -f "${lk_target}/node_modules/@s/a/package.json" ]] || fail "a kept linked node_modules keeps what it holds"
+  fi
+done
+pass "a linked node_modules is listed through the link, and a kept one is said as a link"
+
+# A restore over a target that is not a regular file is not attempted: cp into
+# a directory writes a file inside it and exits 0 (CP2, bamdori r16).
+cpdir_wt="${tmp_root}/cpdir-wt"
+grammar_project "${cpdir_wt}"
+mkdir -p "${cpdir_wt}/node_modules/installed-package"
+grammar_pre "${cpdir_wt}" "npm install fixture-parent@1.0.0" > /dev/null
+rm -f "${cpdir_wt}/package-lock.json"
+mkdir "${cpdir_wt}/package-lock.json" "${cpdir_wt}/node_modules/.bin"
+# A native binary is what rejects this install; the lockfile is a directory.
+cp /bin/echo "${cpdir_wt}/node_modules/.bin/native-drop"
+cpdir_post=$(PATH="${emptying_bin}:${PATH}" grammar_post "${cpdir_wt}" "npm install fixture-parent@1.0.0 --ignore-scripts")
+grep -qx 'not restored .*/cpdir-wt/package-lock.json: .*/cpdir-wt/package-lock.json exists and is not a regular file' <<< "$(post_message "${cpdir_post}")" \
+  || fail "a restore target that is a directory is said as one (${cpdir_post})"
+[[ -z "$(ls -A "${cpdir_wt}/package-lock.json")" ]] || fail "the rollback writes nothing inside a directory where the lockfile was"
+pass "a restore target that is not a regular file is named and left alone"
+
 # A restore whose copy fails is a line, and the rollback goes on: under set -e
 # the bare cp ended the hook there, with the rejected lockfile in place,
 # node_modules untouched and the journal entry left for the next hook to call
@@ -1470,6 +1541,17 @@ for rebuildfail_case in "added| --ignore-scripts" "asked|"; do
       || fail "safedeps does not say it added a flag the command this hook received does not carry"
   fi
 done
+# The same where the command is not one this hook reads for the flag (a quoted
+# word): safedeps asked for it and says it did not tell whether it is there.
+rebuildunread_wt="${tmp_root}/rebuildfail-unread-wt"
+mkdir -p "${rebuildunread_wt}/node_modules"
+printf '{"dependencies":{}}\n' > "${rebuildunread_wt}/package.json"
+grammar_pre "${rebuildunread_wt}" "npm install 'fixture-parent@1.0.0'" > /dev/null
+cp "${inert_project}/package-lock.json" "${rebuildunread_wt}/package-lock.json"
+cp "${inert_project}/package-lock.json" "${rebuildunread_wt}/node_modules/.package-lock.json"
+rebuildunread_post=$(PATH="${rebuildfail_bin}:${PATH}" grammar_post "${rebuildunread_wt}" "npm install 'fixture-parent@1.0.0' --ignore-scripts")
+grep -qx 'safedeps asked for --ignore-scripts on this install and did not tell whether the command this hook received carries it' <<< "$(post_message "${rebuildunread_post}")" \
+  || fail "a command this hook does not read is not said to carry the flag (${rebuildunread_post})"
 pass "a rebuild that fails says its exit status, and 'added' only where the command carries the flag"
 
 # The command's own second segment rebuilds: whether install scripts ran is not
@@ -2531,6 +2613,15 @@ if grep -qE 'bins\.list|packages\.list|meta\.json|monitored_files' <<< "${forms_
   fail "the snapshot's own files are not reported as project files"
 fi
 printf 'ok - the unfinished-rollback report lists only the monitored files that are not what the snapshot holds\n'
+grep -q '^Rollback snapshot: snap-forms; no confirmed snapshot names it$' <<< "${forms_out}" \
+  || fail "the report says no confirmed snapshot names the rollback snapshot"
+# The same entry where the project's confirmed record names the snapshot.
+printf 'snap-forms\n' > "${forms_home}/confirmed_$(oracle_dir_hash "${forms_project}")"
+forms_entry "" "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+grep -q '^Rollback snapshot: snap-forms, a confirmed snapshot$' <<< "$(post_message "$(forms_report)")" \
+  || fail "the report says the rollback snapshot is a confirmed one where the project's record names it"
+rm -f "${forms_home}/confirmed_$(oracle_dir_hash "${forms_project}")"
+printf 'ok - the unfinished-rollback report says whether a confirmed record names the rollback snapshot\n'
 
 # An owner that is alive, where a later test cannot place it: the journal's
 # opening time does not parse, ps gives no start time, ps gives one that does
