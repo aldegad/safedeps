@@ -554,11 +554,16 @@ pass "approved installs, including --no-save, sub-project, subdirectory, workspa
 # package.json, package-lock.json or node_modules. Each case below checks all
 # three, on both engines, and a second approved install pins the lag itself: the
 # package that goes missing is the last one verified, not the first.
-has_dependency() {
+# What a rollback keeps is what the files it restored record. It runs no
+# package manager and removes the project's own node_modules, so nothing is
+# installed until the next install.
+records_dependency() {
   local package="$1"
   jq -e --arg p "${package}" '.dependencies[$p] != null' "${CASE_PROJECT}/package.json" >/dev/null \
-    && jq -e --arg p "node_modules/${package}" '.packages[$p] != null' "${CASE_PROJECT}/package-lock.json" >/dev/null \
-    && [[ -e "${CASE_PROJECT}/node_modules/${package}" ]]
+    && jq -e --arg p "node_modules/${package}" '.packages[$p] != null' "${CASE_PROJECT}/package-lock.json" >/dev/null
+}
+rollback_removed_node_modules() {
+  [[ ! -e "${CASE_PROJECT}/node_modules" ]] && grep -q 'node_modules was removed' <<< "${CASE_POST}"
 }
 lacks_dependency() {
   local package="$1"
@@ -581,16 +586,18 @@ for engine in claude codex; do
   : > "${MARKS}"
   run_install "npm install sd-victim" "${engine}"
   rolled_back || fail "an unapproved install after an approved one is rolled back on ${engine} (post: ${CASE_POST:-<quiet>})"
-  has_dependency sd-approved \
+  records_dependency sd-approved \
     || fail "the rollback keeps the approved install verified just before it on ${engine} (package.json: $(jq -c .dependencies "${CASE_PROJECT}/package.json"))"
   lacks_dependency sd-victim || fail "the rollback removes the unapproved install on ${engine}"
+  rollback_removed_node_modules \
+    || fail "the rollback removes node_modules and says so on ${engine} (post: ${CASE_POST:0:300})"
   [[ "${engine}" == codex ]] || ! victim_ran || fail "no script of the unverified package runs on ${engine}"
 
   run_install "npm install sd-approved-too" "${engine}"
   [[ -z "${CASE_POST}" ]] || fail "the second approved install is confirmed quietly on ${engine} (post: ${CASE_POST})"
   run_install "npm install sd-victim" "${engine}"
   rolled_back || fail "a second unapproved install is rolled back on ${engine} (post: ${CASE_POST:-<quiet>})"
-  has_dependency sd-approved && has_dependency sd-approved-too \
+  records_dependency sd-approved && records_dependency sd-approved-too \
     || fail "the rollback keeps both verified installs on ${engine} (package.json: $(jq -c .dependencies "${CASE_PROJECT}/package.json"))"
   lacks_dependency sd-victim || fail "the second rollback removes the unapproved install on ${engine}"
 done
@@ -626,8 +633,8 @@ pass "a verified state that cannot be recorded leaves the baseline in place, and
 # The baseline used to be copied after the checks, from whatever the project
 # held by then. Measured: sd-victim, installed by a second Bash call between
 # sd-approved's closure check and that copy, went into the baseline. Its own
-# rollback then restored it, and the rollback's `npm ci` ran its install
-# scripts. The record is now copied before the checks and sealed only if the
+# rollback then restored it, and the `npm ci` the rollback ran at the time ran
+# its install scripts. The record is now copied before the checks and sealed only if the
 # project still holds those bytes afterwards.
 #
 # The schedule is pinned rather than hoped for: a PATH shim on npm lets
@@ -696,7 +703,7 @@ for meta in "${CASE_HOME}"/snapshots/*_meta.json; do
     grep -q sd-victim "${recorded}" && fail "no snapshot a rollback can take records the unapproved package ($(basename "${recorded}"))"
   done
 done
-has_dependency sd-approved \
+records_dependency sd-approved \
   || fail "the approved install stays (package.json: $(jq -c .dependencies "${CASE_PROJECT}/package.json"))"
 grep -q 'changed while they were being verified' <<< "${first_post}" \
   || fail "the first install says its baseline was not recorded because the files changed (post: ${first_post:-<quiet>})"
@@ -704,15 +711,14 @@ grep -q 'changed while they were being verified' "${CASE_HOME}/advisory.log" \
   || fail "advisory.log records why the baseline did not move"
 pass "an unapproved install that lands while an approved one is verified stays out of the baseline and is rolled back"
 
-# --- 8. A rollback does not run scripts it did not verify -------------------------------
-# The rollback restores node_modules from the confirmed snapshot. With a
-# package-lock.json that is `npm ci` of the baseline lock. Without one, npm has
-# to resolve package.json's ranges again, and whatever it resolves has not been
-# read by anyone, so that reinstall must not run install scripts.
-#
-# Both reinstalls also have to stay in the project. A project .npmrc with
-# global=true sent a plain `npm ci` / `npm install` to the global prefix, which
-# emptied the project's node_modules and left it empty.
+# --- 8. A rollback runs no package manager ------------------------------------------------
+# The rollback restores the files it snapshotted and removes the project's own
+# node_modules. It used to reinstall, and each reinstall went somewhere nobody
+# had checked: a project .npmrc with global=true sent a plain `npm ci` to the
+# global prefix, and a project with no package-lock.json had its ranges
+# resolved again, to a version published after the approval, whose install
+# scripts then ran. With no npm in the rollback neither can happen; the next
+# install is the reinstall, and the gate checks it like any other.
 approve_baseline() {
   run_install "npm install sd-approved"
   [[ -z "${CASE_POST}" ]] || fail "an approved install stays quiet before the restore case (post: ${CASE_POST})"
@@ -723,16 +729,17 @@ printf 'global=true\n' > "${CASE_PROJECT}/.npmrc"
 : > "${MARKS}"
 run_install "npm install --global=false sd-victim"
 rolled_back || fail "an unapproved install beside a global .npmrc is rolled back (post: ${CASE_POST:-<quiet>})"
-[[ -e "${CASE_PROJECT}/node_modules/sd-approved" ]] \
-  || fail "the rollback restores the project's own tree, not the global one (node_modules: $(ls "${CASE_PROJECT}/node_modules" 2>&1 | paste -sd, -))"
+rollback_removed_node_modules \
+  || fail "the rollback removes the project's own node_modules and says so (node_modules: $(ls "${CASE_PROJECT}/node_modules" 2>&1 | paste -sd, -))"
+records_dependency sd-approved || fail "the restored files still record the approved install"
 [[ ! -e "${tmp_root}/global/lib/node_modules" ]] \
   || fail "the rollback installs nothing into the global prefix ($(ls "${tmp_root}/global/lib/node_modules" | paste -sd, -))"
-victim_ran && fail "no script of the unverified package runs during the rollback"
-pass "the rollback reinstalls the project's tree in the project when the project .npmrc says global=true"
+[[ ! -s "${MARKS}" ]] || fail "the rollback runs no install script ($(cut -f1,2 "${MARKS}" | paste -sd, -))"
+pass "the rollback runs no npm when the project .npmrc says global=true, and installs nothing into the global prefix"
 
 # A project that keeps no package-lock.json. sd-approved@1.0.0 is approved and
-# installed, and then 1.0.1 is published, which nobody approved. The rollback's
-# reinstall resolves `^1.0.0` to 1.0.1.
+# installed, and then 1.0.1 is published, which nobody approved. A reinstall
+# would resolve `^1.0.0` to 1.0.1; the rollback does not reinstall.
 new_project
 rm -f "${CASE_PROJECT}/package-lock.json"
 printf 'package-lock=false\n' > "${CASE_PROJECT}/.npmrc"
@@ -742,19 +749,20 @@ make_package sd-approved 1.0.1
 : > "${MARKS}"
 run_install "npm install sd-victim"
 rolled_back || fail "an unapproved install in a project with no package-lock.json is rolled back (post: ${CASE_POST:-<quiet>})"
-[[ "$(jq -r .version "${CASE_PROJECT}/node_modules/sd-approved/package.json" 2>/dev/null)" == 1.0.1 ]] \
-  || fail "the fixture reinstall resolves the range to the unapproved 1.0.1"
-[[ ! -s "${MARKS}" ]] || fail "the reinstall runs no install script ($(cut -f1,2 "${MARKS}" | paste -sd, -))"
-grep -q 'install scripts were not run' <<< "${CASE_POST}" \
-  || fail "the rollback says the reinstall ran without install scripts (post: ${CASE_POST})"
-pass "a rollback with no package-lock.json reinstalls without running install scripts, and says so"
+rollback_removed_node_modules \
+  || fail "the rollback resolves nothing again: node_modules is removed, not reinstalled (node_modules: $(ls "${CASE_PROJECT}/node_modules" 2>&1 | paste -sd, -))"
+[[ ! -s "${MARKS}" ]] || fail "the rollback runs no install script ($(cut -f1,2 "${MARKS}" | paste -sd, -))"
+grep -q 'has a package.json and neither package-lock.json nor npm-shrinkwrap.json' <<< "${CASE_POST}" \
+  || fail "the rollback says the project has no npm lockfile (post: ${CASE_POST})"
+pass "a rollback with no package-lock.json resolves nothing again and runs no install script"
 
 # --- 9. Workspaces: a member is not a package, and its manifest is rolled back ---------------
 # The root lockfile keys each member by its path (`packages/a`). The closure
 # read that key as a package named `packages` and called it unapproved. And an
 # install into a member writes the member's package.json, which the snapshot did
-# not keep: the rollback restored the root lockfile, `npm ci` then refused the
-# member's new dependency, and the fallback reinstall put the package back.
+# not keep: the rollback restored the root lockfile, the `npm ci` it ran at the
+# time refused the member's new dependency, and its fallback reinstall put the
+# package back.
 new_workspace
 : > "${MARKS}"
 run_install "npm install sd-victim -w packages/a"
@@ -764,8 +772,10 @@ grep -q 'packages@' <<< "${CASE_POST}" && fail "a workspace member is not read a
   || fail "the rollback restores the member's package.json ($(cat "${CASE_PROJECT}/packages/a/package.json"))"
 [[ -z "$(cd "${CASE_PROJECT}" && find . -path '*/node_modules/sd-victim' -print 2>/dev/null)" ]] \
   || fail "the rollback removes the unapproved package from disk"
-grep -q 'install scripts were not run' <<< "${CASE_POST}" \
-  && fail "the rollback reinstalls from the restored lockfile, not by resolving again (post: ${CASE_POST})"
+[[ ! -e "${CASE_PROJECT}/node_modules" ]] \
+  || fail "the rollback removes the workspace root's own node_modules"
+grep -q 'declares workspaces; the node_modules directories of its workspace members were not removed' <<< "${CASE_POST}" \
+  || fail "the rollback says it left the workspace members' node_modules in place (post: ${CASE_POST})"
 victim_ran && fail "no script of the unverified package runs in a workspace rollback"
 pass "an unapproved workspace install is rolled back from disk, member manifest included, and no member is read as a package"
 
