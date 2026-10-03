@@ -585,7 +585,11 @@ pass "inert flag lands inside a script handed to a shell, and quoted data stays 
 # shell expands at run time. A `--` ends npm's options, so the flag goes before
 # it: after it, `npm ci` ignores the flag and runs the scripts. The words are
 # read as the shell joins them, so a quoted line that reads like the flag is
-# part of an option's value, not the flag.
+# part of an option's value, not the flag. A place stands only where npm reads
+# the placed flag as true: after a trailing `--cache` or `-C` it became the
+# option's value, so the flag goes before that word. A word the shell decides
+# at run time can be either kind, so such an install gets the flag after the
+# verb and after its last argument.
 for inert_case in \
   "npm install left-pad@1.3.0 --ignore-scripts=false|npm install left-pad@1.3.0 --ignore-scripts=false --ignore-scripts" \
   "npm install left-pad@1.3.0 --no-ignore-scripts|npm install left-pad@1.3.0 --no-ignore-scripts --ignore-scripts" \
@@ -597,7 +601,14 @@ for inert_case in \
   "X=--ignore-scripts npm install left-pad@1.3.0|X=--ignore-scripts npm install left-pad@1.3.0 --ignore-scripts" \
   "npm ci --ignore-scripts && npm install left-pad@1.3.0|npm ci --ignore-scripts && npm install left-pad@1.3.0 --ignore-scripts" \
   "npm install left-pad@1.3.0 --cache --ignore-scripts|npm install left-pad@1.3.0 --cache --ignore-scripts --ignore-scripts" \
-  "npm install left-pad@1.3.0 \$FLAGS|npm install left-pad@1.3.0 \$FLAGS --ignore-scripts" \
+  "npm install left-pad@1.3.0 \$FLAGS|npm install --ignore-scripts left-pad@1.3.0 \$FLAGS --ignore-scripts" \
+  "npm install left-pad@1.3.0 --cache && echo ok|npm install left-pad@1.3.0 --ignore-scripts --cache && echo ok" \
+  "npm install left-pad@1.3.0 --cache|npm install left-pad@1.3.0 --ignore-scripts --cache" \
+  "npm install left-pad@1.3.0 -C|npm install left-pad@1.3.0 --ignore-scripts -C" \
+  "npm install --no-ignore-scripts left-pad@1.3.0 --reg|npm install --no-ignore-scripts left-pad@1.3.0 --ignore-scripts --reg" \
+  "npm install left-pad@1.3.0 --message 'a b' --fetch-retries|npm install left-pad@1.3.0 --message 'a b' --ignore-scripts --fetch-retries" \
+  "npm ci \$(printf -- --)|npm ci --ignore-scripts \$(printf -- --) --ignore-scripts" \
+  "npm install left-pad@1.3.0>install.log|npm install left-pad@1.3.0 --ignore-scripts>install.log" \
   "npm install left-pad@1.3.0 --ignore-scripts=false > log 2>&1|npm install left-pad@1.3.0 --ignore-scripts=false --ignore-scripts > log 2>&1" \
   "npm ci -- x|npm ci --ignore-scripts -- x" \
   "npm ci --no-ignore-scripts '--' x|npm ci --no-ignore-scripts --ignore-scripts '--' x" \
@@ -636,11 +647,28 @@ asked_before=$(grep -c 'sets ignore-scripts false; safedeps put --ignore-scripts
 run_hook_command "${tmp_root}/home-compound" "${tmp_root}/safe-compound" "npm install left-pad@1.3.0 --ignore-scripts=false" >/dev/null
 asked_after=$(grep -c 'sets ignore-scripts false; safedeps put --ignore-scripts after it' "${tmp_root}/safe-compound/advisory.log" 2>/dev/null || true)
 (( ${asked_after:-0} > ${asked_before:-0} )) || fail "an install that asked for its scripts is recorded when the flag overrides it"
+# An install whose flag nobody could read is recorded rather than reported
+# inert in silence.
+unverified_before=$(grep -c 'holds a word the shell decides at run time' "${tmp_root}/safe-compound/advisory.log" 2>/dev/null || true)
+run_hook_command "${tmp_root}/home-compound" "${tmp_root}/safe-compound" 'npm ci $(printf -- --)' >/dev/null
+unverified_after=$(grep -c 'holds a word the shell decides at run time' "${tmp_root}/safe-compound/advisory.log" 2>/dev/null || true)
+(( ${unverified_after:-0} > ${unverified_before:-0} )) || fail "an install holding a run-time word is recorded as one whose flag nobody read"
+# Asking npm where an install lands puts the ask's own flags after the
+# install's words. After a trailing `--cache` npm took the first as the cache
+# directory and created it in the project; npm is not asked then.
+run_hook_command "${tmp_root}/home-compound" "${tmp_root}/safe-compound" "npm install left-pad@1.3.0 --cache" >/dev/null
+[[ -z "$(find "${project_dir}" -maxdepth 1 -name '-*' -print -quit)" ]] \
+  || fail "asking npm about an install with a trailing value option makes nothing in the project ($(find "${project_dir}" -maxdepth 1 -name '-*' | paste -sd, -))"
+grep -q "the install's last option takes the next word as its value" "${tmp_root}/safe-compound/advisory.log" \
+  || fail "an install npm is not asked about records why"
 # The PostToolUse hook finds the pending state by a key with the flag stripped
 # from the command it receives, which is the rewritten one. The flag can now
 # follow one the command already carried, and a strip that took the blank
 # between them with the first left the second, so the keys differed: the post
-# hook found no pending state and the verified install was never rebuilt.
+# hook found no pending state and the verified install was never rebuilt. A
+# strip that listed the bytes allowed after the flag missed `>` and `<`, so
+# `x>log` keyed apart from `x --ignore-scripts>log`, and an unapproved lockfile
+# was flagged but not rolled back.
 post_key_src=$(sed -n '/^compute_pending_key() {/,/^}/p' scripts/safedeps-post-verify.sh)
 [[ "${post_key_src}" == *"compute_pending_key() {"* ]] || fail "compute_pending_key is found in the post hook (renamed? then update this check)"
 key_safe=$(mktemp -d "${tmp_root}/safe-key.XXXXXX")
@@ -648,7 +676,11 @@ SAFEDEPS_HOME="${key_safe}" lib/ledger/ledger.sh approve npm left-pad 1.3.0 1.3.
 for key_in in \
   "npm install left-pad@1.3.0 --cache --ignore-scripts" \
   "npm install left-pad@1.3.0 --ignore-scripts=false" \
-  "sh -c 'npm install left-pad@1.3.0'"
+  "sh -c 'npm install left-pad@1.3.0'" \
+  "npm install left-pad@1.3.0>install.log" \
+  "npm install left-pad@1.3.0<input" \
+  "npm install left-pad@1.3.0 --cache" \
+  'npm ci $(printf -- --)'
 do
   rm -rf "${key_safe}/pending"
   key_out=$(run_hook_command "${tmp_root}/home-key" "${key_safe}" "${key_in}")

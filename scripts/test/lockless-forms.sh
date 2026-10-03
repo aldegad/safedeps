@@ -874,6 +874,74 @@ do
 done
 pass "an approved install that asks npm for its scripts runs none during the install, wherever the request stands, and one that carries the flag runs as written"
 
+# --- 11b. The flag stands where npm reads it as true -------------------------------------
+# After the last argument is where npm reads the flag last, but not always as
+# the flag: an install whose last word is an option that takes the next word
+# as its value (`--cache`, `-C`) took the flag as that value and ran its
+# scripts, and a run-time word that turned out to be `--` made it an operand.
+# The pre-guard now reads the placed statement the way npm does and keeps a
+# place only where ignore-scripts comes out true. Where a word is decided at
+# run time it puts the flag after the verb and after the last argument, and
+# records that nobody read which one npm keeps. npm is not asked about these
+# installs (the ask's own flags would be taken the same way, or the words are
+# not known), so the rebuild is withheld with a warning; the install stays
+# inert either way. And a flag placed right before a `>` with no blank still
+# finds the pending state, so an unapproved package in the lockfile is rolled
+# back, not only flagged.
+lock_approved() { (cd "${CASE_PROJECT}" && npm install sd-approved@1.0.0 --ignore-scripts >/dev/null 2>&1 && rm -rf node_modules); }
+lock_victim() { (cd "${CASE_PROJECT}" && npm install sd-victim@1.0.0 --ignore-scripts >/dev/null 2>&1 && rm -rf node_modules); }
+for row in \
+  "npm install sd-approved@1.0.0 --cache && echo ok|withheld||" \
+  "npm install sd-approved@1.0.0 --cache|withheld||" \
+  "npm install sd-approved@1.0.0 -C|withheld||" \
+  "npm ci \$(printf -- --)|unverified|lock_approved|" \
+  "npm install sd-approved@1.0.0 \$FLAGS|unverified||FLAGS=--no-ignore-scripts" \
+  "npm install sd-approved@1.0.0 \$FLAGS|unverified||FLAGS=--cache" \
+  "npm install sd-approved@1.0.0>install.log|rebuilt||" \
+  "npm install sd-approved@1.0.0>install.log|rolled back|lock_victim|"
+do
+  IFS='|' read -r form want setup cmd_env <<< "${row}"
+  new_project
+  [[ -z "${setup}" ]] || "${setup}"
+  : > "${MARKS}"
+  INSTALL_MARKS=""
+  CASE_CMD_ENV=()
+  [[ -z "${cmd_env}" ]] || CASE_CMD_ENV=("${cmd_env}")
+  run_install "${form}" claude count_install_marks
+  CASE_CMD_ENV=()
+  [[ "${INSTALL_MARKS}" == 0 ]] \
+    || fail "an approved install runs no script during the install: ${form} ${cmd_env} (ran: $(cut -f1,2 "${MARKS}" | paste -sd, -); command: ${CASE_EXEC})"
+  [[ "${CASE_EXEC}" != "${form}" ]] || fail "the install is rewritten: ${form}"
+  # The ask's own flags after a trailing `--cache` became the cache directory,
+  # created in the project while the gate judged the command. (Under
+  # FLAGS=--cache the install itself takes the trailing flag as its cache,
+  # which is the command's doing and the reason the flag is also after the
+  # verb.)
+  if [[ "${want}" == withheld ]]; then
+    [[ -z "$(find "${CASE_PROJECT}" -maxdepth 1 -name '-*' -print -quit)" ]] \
+      || fail "asking npm about the install makes nothing in the project: ${form} ($(find "${CASE_PROJECT}" -maxdepth 1 -name '-*' | paste -sd, -))"
+  fi
+  case "${want}" in
+    withheld|unverified)
+      [[ -z "${CASE_RAN}" ]] && grep -q 'install scripts were not run' <<< "${CASE_POST}" \
+        || fail "an inert install npm was not asked about is not rebuilt, and the user is told: ${form} (post: ${CASE_POST:-<quiet>})"
+      ;;
+    rebuilt)
+      grep -q '^sd-approved@[^	]*	install' <<< "${CASE_RAN}" \
+        || fail "the verified install is rebuilt, so its scripts run after the check: ${form} (post: ${CASE_POST:-<quiet>})"
+      ;;
+    "rolled back")
+      rolled_back && [[ ! -e "${CASE_PROJECT}/node_modules/sd-victim" ]] && ! victim_ran \
+        || fail "an install whose lockfile holds an unapproved package is rolled back: ${form} (post: ${CASE_POST:-<quiet>})"
+      ;;
+  esac
+  if [[ "${want}" == unverified ]]; then
+    grep -q 'holds a word the shell decides at run time' "${CASE_HOME}/advisory.log" \
+      || fail "an install whose flag nobody could read is recorded in advisory.log: ${form}"
+  fi
+done
+pass "the flag stands where npm reads it as true: not as a trailing option's value, not after a run-time --, and the pending state is found before a > with no blank"
+
 # --- the fixture never left the machine ---------------------------------------------------
 npm_sandbox_registry_was_local
 
