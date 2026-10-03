@@ -808,7 +808,9 @@ pass "unprefixed view: the prefixes a command starts with go, redirections among
 check_view() { # view readings label input expected
   local got reading
   for reading in $2; do
-    got=$(SAFEDEPS_READING="${reading}" capture "$1" "$4")
+    # The sentinel again: the substs view ends in a newline, which a bare
+    # $(...) here would strip.
+    got=$(SAFEDEPS_READING="${reading}" capture "$1" "$4"; printf 'X'); got="${got%X}"
     [[ "${got}" == "$5" ]] || fail "$1 (${reading}): $3: [${got}] != expected [$5]"
   done
 }
