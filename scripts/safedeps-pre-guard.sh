@@ -1414,6 +1414,11 @@ shell_lex() {
         if (k < 2 || emptyahead(j)) return ""
         p = X[k-1]; pc = C[k-1]
         if (pc == "e" || pc == "q" || (k - 1) in WC) return shd ? "" : "g"
+        # The `&` of a duplication (`<&(`, `>&(`) is an operator byte the stmts
+        # view prints as `_`, a word byte when the view is read again. No
+        # shell parses a `(` there, so it is read the way the second reading
+        # will read it.
+        if (pc == C[j] && p == "&" && k > 2 && X[k-2] ~ /[<>]/ && C[k-2] == C[j]) return shd ? "" : "g"
         if (pc != C[j] || p ~ /[ \t\n;&|()<>]/) return ""
         if (p == "=") {
           if (wordstart(k - 1)) return "z"
