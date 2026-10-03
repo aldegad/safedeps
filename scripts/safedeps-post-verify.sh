@@ -2462,8 +2462,13 @@ ${details}"
 # finds nothing visits every entry, and the hook still has the closure check
 # and a rollback to do inside the runtime's timeout; a hook the runtime kills
 # rolls nothing back. So a walk that does not finish counts as a trace. The
-# value is measured (scripts/measure/backstop-walk-cost.sh). It can be lowered,
-# which only makes more commands read as traced, and not raised.
+# value is measured (scripts/measure/backstop-walk-cost.sh, warm cache, a walk
+# that finds nothing): on an M1 Mac under bash 3.2, 250k entries took 1.4s,
+# 500k 3.0s and 1M 14s; on a Linux VM, 1M took 2.4s. A walk that finds nothing
+# runs nothing after it, and one past the deadline leaves 25s for the closure
+# check and the rollback. The clock is SECONDS, so the deadline falls between
+# 4s and 5s. It can be lowered, which only makes more commands read as traced,
+# and not raised.
 SAFEDEPS_BACKSTOP_WALK_MAX_SECONDS=5
 SAFEDEPS_BACKSTOP_WALK_SECONDS="${SAFEDEPS_BACKSTOP_WALK_SECONDS:-${SAFEDEPS_BACKSTOP_WALK_MAX_SECONDS}}"
 if [[ ! "${SAFEDEPS_BACKSTOP_WALK_SECONDS}" =~ ^[0-9]+$ ]] \
