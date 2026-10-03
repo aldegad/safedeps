@@ -246,11 +246,13 @@ safedeps_npm_fetch_facts() {
 # Whether <name>, in the environment npm starts with, chooses code that runs
 # when npm starts. An ask never carries one, whatever the command says
 # (safedeps_npm_ask_start), and the pre-guard counts a command that sets or
-# unsets one with code it runs from a file (scripts/safedeps-pre-guard.sh,
+# unsets one the way it counts `source` (scripts/safedeps-pre-guard.sh,
 # code_changer).
 #
 # Each name is in the set because it runs code in npm or node at start, not
-# because of what it is called (measured with node 26.7.0 and npm 11.19.0):
+# because of what it is called. PATH, NODE_OPTIONS, NODE_PATH and
+# OPENSSL_CONF were measured with node 26.7.0 and npm 11.19.0; the others are
+# what the dynamic loader, OpenSSL and bash document:
 #
 #   PATH                 which npm runs, and which node npm's `#!/usr/bin/env
 #                        node` starts. A fake npm first on it ran three times
@@ -260,8 +262,7 @@ safedeps_npm_fetch_facts() {
 #   OPENSSL_CONF,        node reads OpenSSL's configuration at start, and a
 #   OPENSSL_MODULES      provider it names is a shared library node loads.
 #   LD_*, DYLD_*         the dynamic loader's preloads and library paths.
-#   BASH_ENV             a file bash runs first, where npm is a bash shim
-#                        (asdf's is).
+#   BASH_ENV             a file bash runs first, where npm is a bash script.
 #   npm_config_node_options
 #                        npm passes it to the scripts it runs as NODE_OPTIONS
 #                        (@npmcli/config set-envs.js). The asks run no
