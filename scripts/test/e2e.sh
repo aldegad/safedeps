@@ -1350,10 +1350,17 @@ for r18_form in "sh -c 'npm ci'" 'bash -c "npm ci"' "eval 'npm ci'"; do
   printf '%s\n' "${tampered_lock}" > "${r18_wt}/package-lock.json"
   r18_post=$(jq -nc --arg c "${r18_wrote}" --arg d "${r18_wt}" '{tool_name:"Bash",tool_input:{command:$c},cwd:$d}' \
     | PATH="${stub_bin}:${PATH}" post_hook)
-  grep -q 'this hook found no record of this command from before it ran. A rollback ran\.' <<< "${r18_post}" \
-    || fail "${r18_wrote}: the backstop rolls back, and says it found no record of the command (${r18_post})"
-  ! grep -q -- '--ignore-scripts' <<< "$(post_message "${r18_post}")" \
-    || fail "${r18_wrote}: the backstop says nothing about --ignore-scripts (${r18_post})"
+  # Where the post hook's key finds the record (the pending key strips every
+  # --ignore-scripts the rewrite put in, a quote after it included), the
+  # rollback says what the record states; where it does not, the backstop
+  # says nothing about the flag. Either way no line says "did not add".
+  if grep -q 'this hook found no record of this command from before it ran. A rollback ran\.' <<< "${r18_post}"; then
+    ! grep -q -- '--ignore-scripts' <<< "$(post_message "${r18_post}")" \
+      || fail "${r18_wrote}: the backstop says nothing about --ignore-scripts (${r18_post})"
+  else
+    grep -qx 'safedeps added --ignore-scripts to this install' <<< "$(post_message "${r18_post}")" \
+      || fail "${r18_wrote}: a rollback that found the record says safedeps added --ignore-scripts (${r18_post})"
+  fi
   cmp -s "${r18_wt}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "${r18_wrote}: the backstop restores the confirmed lockfile"
   rm -f "$(grammar_pending "${r18_wt}")"
 done

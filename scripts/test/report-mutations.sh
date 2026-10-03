@@ -230,8 +230,8 @@ $4; node_modules was restored from the confirmed snapshot
       M_FILE=scripts/safedeps-pre-guard.sh
       M_WHY='the record of the rewrite holds the command as given, not the one safedeps wrote'
       M_RED='the command a record says safedeps wrote is not the rewrite the pre-guard printed'
-      M_OLD='  if jq --arg command "$1" '"'"'.ignore_scripts_injected = true'
-      M_NEW='  if jq --arg command "${COMMAND}" '"'"'.ignore_scripts_injected = true'
+      M_OLD='  if jq --arg command "$1" --argjson unread "${unread}" \'
+      M_NEW='  if jq --arg command "${COMMAND}" --argjson unread "${unread}" \'
       ;;
     MarkSkip)
       M_FILE=scripts/safedeps-pre-guard.sh

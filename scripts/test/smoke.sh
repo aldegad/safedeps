@@ -648,15 +648,27 @@ do
   [[ "${inert_got}" == "${inert_want}" ]] \
     || fail "the inert flag goes after the install's last argument, wherever --ignore-scripts appears otherwise: $(printf '%q' "${inert_in}") (got: $(printf '%q' "${inert_got}"))"
 done
-# An install whose own arguments already leave the option true runs as written.
+# An install whose own arguments already leave the option true runs as written,
+# where the release left it as written too: it did wherever the text
+# `--ignore-scripts` stood unquoted. Where it did not (a quoted flag,
+# `--no-no-ignore-scripts`), the release rewrote it, and so does the floor.
+for inert_case in \
+  "npm install left-pad@1.3.0 \"--ignore-scripts\"|npm install --ignore-scripts left-pad@1.3.0 \"--ignore-scripts\" --ignore-scripts" \
+  "npm install left-pad@1.3.0 --no-no-ignore-scripts|npm install --ignore-scripts left-pad@1.3.0 --no-no-ignore-scripts --ignore-scripts"
+do
+  inert_in="${inert_case%%|*}"
+  inert_want="${inert_case#*|}"
+  inert_out=$(run_hook_command "${tmp_root}/home-compound" "${tmp_root}/safe-compound" "${inert_in}")
+  inert_got=$(jq -r '.hookSpecificOutput.updatedInput.command' <<< "${inert_out}")
+  [[ "${inert_got}" == "${inert_want}" ]] \
+    || fail "an install already true that the release rewrote keeps the release's rewrite: $(printf '%q' "${inert_in}") (got: $(printf '%q' "${inert_got}"))"
+done
 for inert_in in \
   "npm install left-pad@1.3.0 --ignore-scripts" \
   "npm install left-pad@1.3.0 --ignore-scripts=true" \
   "npm install left-pad@1.3.0 --ignore-scripts true" \
   "npm install --ignore-scripts left-pad@1.3.0 --save" \
   "npm --ignore-scripts install left-pad@1.3.0" \
-  "npm install left-pad@1.3.0 \"--ignore-scripts\"" \
-  "npm install left-pad@1.3.0 --no-no-ignore-scripts" \
   "npm install left-pad@1.3.0 --message --ignore-scripts" \
   "npm install left-pad@1.3.0 --ignore-scripts && npm run build" \
   $'npm install left-pad@1.3.0 --ignore-scripts --message "a\nb"'
