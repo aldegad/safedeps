@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Since v2.18.0 the rollback runs no package manager: it removes the
+# The rollback now runs no package manager: it removes the
 # project's own node_modules instead of reinstalling it, so the npm ci window
 # this script aimed its kills at no longer exists. It stays as the record of
 # the measurement that put the journal entry ahead of the first destructive act.

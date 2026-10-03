@@ -321,9 +321,10 @@ as below. Until one of those happens, nothing about this project is settled."
       headline="A safedeps rollback of ${project_dir} did not finish."
       body_cause="The rollback was cut off — most likely the hook hit the runtime's timeout
 mid-rollback."
-      body_first_move="Run \`npm ci\` in ${project_dir} to rebuild the tree from whichever lockfile is
-there now, and check that the lockfile is the one you expect before you trust
-it."
+      body_first_move="Check that the lockfile and package.json in ${project_dir} are the ones you
+expect, then remove its node_modules if it is a real directory (not a link)
+and reinstall with \`npm ci\` there -- only if ${project_dir} has a package.json,
+because npm walks up to an enclosing project from a directory without one."
     fi
 
     report="${report}${headline}

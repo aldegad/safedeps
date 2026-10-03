@@ -438,10 +438,14 @@ cleanup_old_snapshots() {
 # Whether this is an npm project is read before the files are restored: an
 # install that created package.json and its lockfile has both removed by the
 # restore, and its node_modules is still the rollback's to remove.
+# npm's hidden lockfile counts as well: `npm install --no-save <pkg>` in a
+# directory without package.json writes node_modules and nothing else.
 ROLLBACK_NPM_PROJECT=false
 rollback_note_npm_project() {
   ROLLBACK_NPM_PROJECT=false
   if [[ -f "${PROJECT_DIR}/package.json" || -f "${PROJECT_DIR}/package-lock.json" ]]; then
+    ROLLBACK_NPM_PROJECT=true
+  elif [[ -d "${PROJECT_DIR}/node_modules" && ! -L "${PROJECT_DIR}/node_modules" && -f "${PROJECT_DIR}/node_modules/.package-lock.json" ]]; then
     ROLLBACK_NPM_PROJECT=true
   fi
 }
@@ -456,11 +460,21 @@ rollback_node_modules() {
     return 0
   fi
   [[ -d "${node_modules}" ]] || return 0
-  if rm -rf "${node_modules}"; then
-    ROLLED_BACK+=("node_modules (removed)")
-    ROLLBACK_WARNINGS+=("node_modules was removed, not reinstalled: run npm ci to reinstall it, and the gate checks that install like any other")
-  else
+  if ! rm -rf "${node_modules}"; then
     ROLLBACK_WARNINGS+=("node_modules could not be removed; remove ${node_modules} by hand before using the project")
+    return 0
+  fi
+  ROLLED_BACK+=("node_modules (removed)")
+  # What to do next depends on what the restore left: without a package.json
+  # there was nothing npm owned here before this install, and an npm ci here
+  # would walk up to an enclosing project.
+  if [[ -f "${PROJECT_DIR}/package.json" ]]; then
+    ROLLBACK_WARNINGS+=("node_modules was removed, not reinstalled: run npm ci in ${PROJECT_DIR} to reinstall it, and the gate checks that install like any other")
+  else
+    ROLLBACK_WARNINGS+=("node_modules was removed; ${PROJECT_DIR} has no package.json after the restore, so there is nothing to reinstall. Do not run npm ci there: npm would work in an enclosing project")
+  fi
+  if jq -e 'type == "object" and has("workspaces")' "${PROJECT_DIR}/package.json" >/dev/null 2>&1; then
+    ROLLBACK_WARNINGS+=("${PROJECT_DIR}/package.json declares workspaces; the members' own node_modules directories were left in place -- remove them before you reinstall")
   fi
 }
 

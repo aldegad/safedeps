@@ -776,6 +776,10 @@ if grep -q '^install' "${tmp_root}/walkup-npm-calls.log" 2>/dev/null; then
   fail "a rollback runs no npm install once it has removed the package.json the install created"
 fi
 [[ ! -e "${walk2_wt}/node_modules" ]] || fail "a rollback removes the project's own node_modules"
+grep -q 'nothing to reinstall. Do not run npm ci there' <<< "${walk2_post}" || fail "with no package.json left, the rollback says not to run npm ci there"
+if grep -q 'run npm ci in' <<< "${walk2_post}"; then
+  fail "the rollback does not hand the walk up to the user as an npm ci instruction"
+fi
 pass "a rollback runs no npm install where npm would walk up to an enclosing project"
 
 # A lockfile that links to another checkout's: the restore of it is refused,
@@ -854,6 +858,7 @@ if grep -q '^ci' "${tmp_root}/ws-npm-calls.log" 2>/dev/null; then
   fail "a rollback runs no npm ci in a project that declares workspaces"
 fi
 [[ ! -e "${ws_wt}/node_modules" ]] || fail "a rollback removes a workspace project's own node_modules"
+grep -q "members' own node_modules directories were left in place" <<< "${ws_post}" || fail "the rollback says a workspace member's node_modules is left in place"
 cmp -s "${ws_wt}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "the lockfile of a workspace project is still restored"
 pass "a rollback leaves a workspace outside the project alone"
 
@@ -886,6 +891,28 @@ if grep -qE '^(ci|install)' "${tmp_root}/emptying-npm-calls.log" 2>/dev/null; th
 fi
 cmp -s "${own_wt}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "the lockfile is restored before node_modules is removed"
 pass "a rollback removes the project's own node_modules and runs no npm"
+
+# `npm install --no-save <pkg>` in a directory without package.json writes
+# node_modules (with npm's hidden lockfile) and nothing else. That is still an
+# npm project to the rollback, and its node_modules is removed.
+nosave_wt="${tmp_root}/nosave-wt"
+mkdir -p "${nosave_wt}"
+scripts/safedeps-pre-guard.sh > /dev/null <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install --no-save fixture-parent@1.0.0"},"cwd":"${nosave_wt}"}
+EOF
+mkdir -p "${nosave_wt}/node_modules/.bin" "${nosave_wt}/node_modules/fixture-parent"
+printf '{"name":"nosave-wt","lockfileVersion":3,"packages":{}}\n' > "${nosave_wt}/node_modules/.package-lock.json"
+printf '{"name":"fixture-parent","version":"1.0.0"}\n' > "${nosave_wt}/node_modules/fixture-parent/package.json"
+cp /bin/echo "${nosave_wt}/node_modules/.bin/native-drop"
+nosave_post=$(
+  PATH="${emptying_bin}:${PATH}" scripts/safedeps-post-verify.sh <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install --no-save fixture-parent@1.0.0"},"cwd":"${nosave_wt}"}
+EOF
+)
+grep -q 'suspicious dependency change detected' <<< "${nosave_post}" || fail "reorg fires on a native binary in a --no-save install"
+[[ ! -e "${nosave_wt}/node_modules" ]] || fail "a rollback removes the node_modules of a --no-save install with no package.json"
+grep -q 'nothing to reinstall. Do not run npm ci there' <<< "${nosave_post}" || fail "the --no-save rollback says there is nothing to reinstall"
+pass "a rollback removes the node_modules a --no-save install wrote without a package.json"
 
 export SAFEDEPS_HOME="${tmp_root}/safe-missing-transitive"
 export SAFEDEPS_OSV_API_URL="http://127.0.0.1:${port}/osv/v1/query"
