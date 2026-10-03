@@ -371,6 +371,11 @@ command_pipes_unread_install_to_shell() {
 #           blanked but the body of a process substitution in its target:
 #           every byte the shell runs at this level, with nothing between a
 #           command and its arguments. What the inert rewrite reads.
+#   flat    live, with every top-level redirection blanked whole, the body of
+#           a substitution in its target too. The inert rewrite reads it
+#           beside the live view: there a command and its arguments are side
+#           by side when a redirection whose target holds a substitution
+#           stands between them (`npm >$(echo f) install x`).
 #   stmts   scan, with every statement start written as `;`: the blank before
 #           each word that stands where the shell of this reading reads a
 #           command (after a separator, a case pattern close, a reserved word,
@@ -565,7 +570,7 @@ shell_lex() {
         for (j in sl) SPC[sl[j]] = 1
         SPC["\n"] = 1
         DQS["\\"] = 1; DQS["\042"] = 1; DQS["$"] = 1; DQS["`"] = 1
-        wantdep = (view == "unprefixed" || view == "unprefixed-lines" || view == "noredir" || view == "pieces" || view == "cscripts" || view == "stmts" || view == "live")
+        wantdep = (view == "unprefixed" || view == "unprefixed-lines" || view == "noredir" || view == "pieces" || view == "cscripts" || view == "stmts" || view == "live" || view == "flat")
         wantar = (view == "stmts" || view == "unprefixed" || view == "unprefixed-lines")
         if (view == "pieces") {
           # The value of each one-letter escape in $\047...\047.
@@ -877,7 +882,7 @@ shell_lex() {
         # The same holds for redirections: in a reading that never closes, a
         # stripped target changes how the rest reads, and the view stops
         # being idempotent (random inputs in scan-contract).
-        if (((view == "noredir" || view == "live") && !unterm) || view == "pieces" || view == "cscripts" || view == "stmts") redirs()
+        if (((view == "noredir" || view == "live" || view == "flat") && !unterm) || view == "pieces" || view == "cscripts" || view == "stmts") redirs()
         # After redirs(), which says DIVERGE at a `!` only zsh reads as part
         # of its operator.
         if (div) {
@@ -1755,7 +1760,7 @@ shell_lex() {
         for (k = 1; k <= N; k++) {
           cc = X[k]; cl = C[k]
           if (view == "noredir") { put((k in DROP) ? " " : cc); continue }
-          if (view == "scan" || view == "live" || view == "stmts") {
+          if (view == "scan" || view == "live" || view == "flat" || view == "stmts") {
             # A code `#` is never a comment start here, and must not become one
             # when the scan is read again: after a blanked region (a quoted word
             # with a `#` glued to its closing quote) or an escaped blank, which
@@ -1767,6 +1772,9 @@ shell_lex() {
             # install`; the body of a substitution in its target stays,
             # since the shell runs it.
             else if (view == "live" && (k in DROP) && !(k in KEEP) && (cl == "c" && (DEP[k] == 1 || (k in PSB)) || cl == "e")) put(" ")
+            # The flat view blanks the whole redirection: a body in its
+            # target is read in the live view, where it stands.
+            else if (view == "flat" && (k in DROP)) put(" ")
             # A statement ends only at a top-level separator: not inside a
             # substitution, an expansion or arithmetic, and not in a
             # redirection operator (`>|`, `<&-`, `2>&1`). command_statements
@@ -1775,7 +1783,7 @@ shell_lex() {
             else if (view == "stmts" && cl == "c" && (DEP[k] != 1 || (k in DROP)) && cc ~ /[;&|\n]/) put(cc == "\n" ? " " : "_")
             else if (cl == "c" || cl == "p") put(cc == "#" && (k == 1 || C[k-1] != "c" && C[k-1] != "e" || C[k-1] == "e" && X[k-1] ~ /[ \t]/) ? "_" : cc)
             else if (cl == "e") put(index(";&|()<>!{}#`\042\047\\$", cc) ? "_" : (cc == "\n" ? " " : cc))
-            else if (view == "live" && (cl == "Q" || cl == "B")) put(cc)
+            else if ((view == "live" || view == "flat") && (cl == "Q" || cl == "B")) put(cc)
             else put(" ")
             continue
           }
@@ -2304,14 +2312,29 @@ command_needs_inplace_inert() {
 # live view, so a verb in a comment, a quoted string or a heredoc body is not
 # one, and a verb in a substitution inside quotes is. The live view keeps every
 # byte in place, so an offset there is the offset in <text>.
+#
+# The live view keeps the body of a substitution in a redirection target,
+# because the shell runs it and an npm install in it needs the flag where it
+# stands. So a redirection with such a target between npm and its verb left
+# the body between them, no verb was found, and the rewrite ended as if there
+# were nothing to rewrite: `npm >$(echo f) install x` ran its lifecycle
+# scripts with no flag and no record (every shell runs it). The flat view
+# blanks the redirection whole, so the verb is found there; the two views
+# keep the same offsets, and a verb both find is one offset.
 inert_verb_ends() {
-  local live matches
+  local live flat matches more
   live=$(shell_lex "$1" live "safedeps:inert_offsets") || return 1
+  flat=$(shell_lex "$1" flat "safedeps:inert_offsets") || return 1
   # The grep and the awk run apart so that only "no match" reads as no verb: a
   # failed awk shared one `||` with grep's exit 1, and the rewrite was then
   # dropped as if there were nothing to rewrite.
   matches=$(printf '%s\n' "${live}" \
     | LC_ALL=C judge_grep -obE "npm${SAFEDEPS_G_OPTS}[[:space:]]+(${SAFEDEPS_G_NPM_VERBS}|${SAFEDEPS_G_NPM_LINK_VERBS})([[:space:]]|\$)") || matches=""
+  if [[ "${flat}" != "${live}" ]]; then
+    more=$(printf '%s\n' "${flat}" \
+      | LC_ALL=C judge_grep -obE "npm${SAFEDEPS_G_OPTS}[[:space:]]+(${SAFEDEPS_G_NPM_VERBS}|${SAFEDEPS_G_NPM_LINK_VERBS})([[:space:]]|\$)") || more=""
+    if [[ -n "${more}" && -n "${matches}" ]]; then matches+=$'\n'"${more}"; elif [[ -n "${more}" ]]; then matches="${more}"; fi
+  fi
   [[ -n "${matches}" ]] || return 0
   if ! printf '%s\n' "${matches}" | LC_ALL=C awk '
     # safedeps:inert_offsets (scripts/measure/scan-failure-census.sh keys on this line)

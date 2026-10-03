@@ -857,6 +857,18 @@ check_view live_view "${all}" "the live view blanks a redirection, so the inert 
   'npm 2>/dev/null install x' "npm$(sp 13)install x"
 check_view live_view "${all}" "and keeps the body of a process substitution in its target, which runs" \
   'npm i > >(npm i x)' "npm i$(sp 5)npm i x "
+# The flat view is the live view with every redirection blanked whole. The
+# inert rewrite reads both: the live view keeps a body in a target, which
+# stands between a command and its arguments there.
+flat_view() { shell_lex "$1" flat "safedeps:scan-contract"; }
+check_view live_view "${all}" "the live view keeps the body of a substitution in a target" \
+  'npm >$(echo f) i x' "npm$(sp 3)(echo f) i x"
+check_view flat_view "${all}" "the flat view blanks it with the redirection, so the verb follows the command" \
+  'npm >$(echo f) i x' "npm$(sp 12)i x"
+check_view flat_view "${all}" "and a process substitution in a target, body and all" \
+  'npm i > >(npm i x)' "npm i$(sp 13)"
+check_view flat_view "${all}" "a substitution that is no target stays, as in the live view" \
+  'npm i "$(echo x)" >f' "npm i$(sp 4)echo x)$(sp 4)"
 check_view substs_view "${all}" "a process substitution body is a payload, an argument or a target" \
   'cat <(pip i) > >(npm i)' $'pip i\nnpm i\n'
 check_view substs_view "${all}" "nested in a substitution, both bodies" \

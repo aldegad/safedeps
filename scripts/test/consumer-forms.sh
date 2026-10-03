@@ -885,6 +885,37 @@ got=$(gate_rewrite 'npm install evil > --ignore-scripts')
   || fail "a redirection target named --ignore-scripts is not the flag (got: ${got})"
 pass "the inert rewrite finds an npm verb behind a redirection, and a redirection target is not the flag"
 
+# A redirection whose target holds a substitution, between npm and its verb.
+# The rewrite read only the live view, which keeps the body of that
+# substitution because the shell runs it, so npm and its verb were not side
+# by side, no verb was found, and the command passed as written: no flag, no
+# record, and the lifecycle scripts ran (every shell measured runs each of
+# these; main and v2.18.0 before this). The rewrite now also reads the view
+# with the redirection blanked whole. An npm install inside the body still
+# gets its own flag, and another manager's install there is still a payload.
+for rewrite_row in \
+  'npm >$(echo f) install evil|npm >$(echo f) install --ignore-scripts evil' \
+  'npm >`echo f` install evil|npm >`echo f` install --ignore-scripts evil' \
+  'npm >"$(echo f)" install evil|npm >"$(echo f)" install --ignore-scripts evil' \
+  'npm 2>$(echo f) install evil|npm 2>$(echo f) install --ignore-scripts evil' \
+  'npm >$(echo f) ci|npm >$(echo f) ci --ignore-scripts' \
+  'npm 2>/dev/null install evil|npm 2>/dev/null install --ignore-scripts evil' \
+  'x=$(echo f) npm >$(echo g) install evil|x=$(echo f) npm >$(echo g) install --ignore-scripts evil' \
+  'npm >$(echo f) install evil && npm >$(echo g) ci|npm >$(echo f) install --ignore-scripts evil && npm >$(echo g) ci --ignore-scripts' \
+  'npm >$(npm install y) install x|npm >$(npm install --ignore-scripts y) install --ignore-scripts x' \
+  'npm install x >$(npm install y)|npm install --ignore-scripts x >$(npm install --ignore-scripts y)'
+do
+  got=$(gate_rewrite "${rewrite_row%%|*}")
+  [[ "${got}" == "${rewrite_row#*|}" ]] || fail "the rewrite finds the verb behind a redirection whose target is a substitution: ${rewrite_row%%|*} (got: ${got})"
+done
+expect_not_approved "a pip install behind a redirection whose target is a substitution" 'pip >$(echo f) install evil==1.0.0'
+expect_not_approved "an install inside the target's substitution is still a payload" 'npm >$(pip install evil==1.0.0) install x'
+for plain in 'npm >$(echo f) run build' 'echo npm >$(echo f) install evil' 'npm >$(echo f) install --ignore-scripts evil'; do
+  expect_pass "no install to rewrite behind a substitution target: ${plain}" "${plain}"
+  [[ -z "$(gate_rewrite "${plain}")" ]] || fail "no rewrite for ${plain} (got: $(gate_rewrite "${plain}"))"
+done
+pass "the inert rewrite finds an npm verb behind a redirection whose target holds a substitution"
+
 # Plain process substitutions and redirections around commands that install
 # nothing stay unjudged and unrecorded, as before.
 for plain in \
