@@ -1963,7 +1963,11 @@ inert_flag_offsets() {
       continue
     fi
     if [[ " ${INERT_READ_LAST}" != *" "[!t]* ]]; then
-      printf -- '-\n'
+      # Its own arguments leave the option true. The caller still writes the
+      # floor here where the release rewrote the command, which it did unless
+      # the text `--ignore-scripts` stood unquoted in it (inert_release_skips):
+      # a quoted `"--ignore-scripts"` and `--no-no-ignore-scripts` it rewrote.
+      printf '%s settled\n' "${verb}"
       continue
     fi
     note=""
@@ -2101,22 +2105,26 @@ inert_offsets_of() {
 # in `sh -c '...'` beside a visible one ran its lifecycle scripts with nothing
 # recorded (caught in the release integration).
 inert_rewrite_in_place() {
-  local command="$1" lines offsets="" e note settled=false asked=false unverified=false floor=false rc=0 append=0
+  local command="$1" lines offsets="" e note settled=false asked=false unverified=false floor=false rc=0 append=0 release_rewrote=false
   lines=$(inert_offsets_of "${command}") || rc=$?
   (( rc == 0 )) || return "${rc}"
   if strip_heredoc_bodies "${command}" shell-bodies \
       | LC_ALL=C judge_grep -qE "npm${SAFEDEPS_G_OPTS}[[:space:]]+(${SAFEDEPS_G_NPM_VERBS}|${SAFEDEPS_G_NPM_LINK_VERBS})([[:space:]]|\$)"; then
     return 3
   fi
+  inert_release_skips "${command}" || release_rewrote=true
   while read -r e note; do
     [[ -n "${e}" ]] || continue
-    if [[ "${e}" == - ]]; then settled=true; continue; fi
+    if [[ "${e}" == - || "${note}" == settled ]]; then
+      settled=true
+      [[ "${note}" == settled && "${release_rewrote}" == true ]] || continue
+    fi
     [[ "${note}" != asked ]] || asked=true
     [[ "${note}" != unverified ]] || unverified=true
     [[ "${note}" != floor ]] || floor=true
     offsets+="${e}"$'\n'
   done <<< "${lines}"
-  ! inert_release_appends "${command}" || append=1
+  [[ -z "${offsets}" ]] || ! inert_release_appends "${command}" || append=1
   if [[ -z "${offsets}" ]]; then
     [[ "${settled}" == true ]] && return 4
     return 0
@@ -2149,6 +2157,18 @@ inert_rewrite_in_place() {
   (( rc == 0 )) || return $(( rc + 4 ))
 }
 
+# Whether the release (7d66f8c) left <command> as written: it did whenever the
+# text `--ignore-scripts` stood in the scan view of the command or of a script
+# it hands to a shell (its command_has_ignore_scripts_flag), whatever npm made
+# of it.
+inert_release_skips() {
+  local text
+  while IFS= read -r text; do
+    command_scan_text "${text}" | judge_grep -qE -- '(^|[[:space:]])--ignore-scripts([=[:space:]]|$)' && return 0
+  done < <(command_candidate_texts "$1")
+  return 1
+}
+
 # Whether the release (7d66f8c) appended `--ignore-scripts` to the end of
 # <command> rather than inserting it after each verb: it did for a command of
 # one line whose scan view holds none of `;&|()`$`, shows the verb, and has no
@@ -2163,7 +2183,7 @@ inert_release_appends() {
   scanned=$(command_scan_text "$1") || return 1
   [[ "${scanned}" != *$'\n'* ]] || return 1
   ! printf '%s' "${scanned}" | judge_grep -qE '[;&|()`$]' || return 1
-  ! printf '%s' "${scanned}" | judge_grep -qE -- '(^|[[:space:]])--ignore-scripts([=[:space:]]|$)' || return 1
+  ! inert_release_skips "$1" || return 1
   printf '%s' "${scanned}" \
     | judge_grep -qE "npm${SAFEDEPS_G_OPTS}[[:space:]]+(${SAFEDEPS_G_NPM_VERBS}|${SAFEDEPS_G_NPM_LINK_VERBS})([[:space:]]|\$)" || return 1
   code=$(strip_heredoc_bodies "$1")
