@@ -838,7 +838,7 @@ shell_lex() {
               continue
             }
             par[d]++
-            if (!shd && X[i+1] != ")" && (i == 1 || X[i-1] !~ /[$<>]/) && !cmdpos(i)) { GL[d, par[d]] = 1; GLO[i] = 1; glc[d]++; div = 1 } else delete GL[d, par[d]]
+            if (!shd && !emptyahead(i) && (i == 1 || X[i-1] !~ /[$<>]/) && !cmdpos(i)) { GL[d, par[d]] = 1; GLO[i] = 1; glc[d]++; div = 1 } else delete GL[d, par[d]]
             continue
           }
           if (c == ")") {
@@ -1193,9 +1193,9 @@ shell_lex() {
       # CS gets the first byte of each command, its prefixes included: the
       # first word, or the redirection operator or file descriptor before it.
       # prefixes() starts there.
-      function starts(rs, B, CS,   k, s, w, op, st, pre, rd, fn, fr, inp, rp, dbr, cop, tm, cs, zr, br, fh, j) {
+      function starts(rs, B, CS,   k, s, w, op, st, pre, rd, fn, fr, inp, rp, dbr, cop, tm, cs, zr, br, fh, j, pn, PST, body) {
         zr = (rs == "zsh"); br = (rs == "bash")
-        st = 1; pre = 0; rd = 0; fn = 0; fr = 0; inp = 0; rp = 0; dbr = 0; cop = 0; tm = 0; cs = 0; fh = 0; k = 1
+        st = 1; pre = 0; rd = 0; fn = 0; fr = 0; inp = 0; rp = 0; dbr = 0; cop = 0; tm = 0; cs = 0; fh = 0; k = 1; pn = 0
         while (k <= N) {
           if (word_sep(k)) {
             op = (C[k] == "c" && DEP[k] == 1) ? X[k] : ""
@@ -1228,13 +1228,27 @@ shell_lex() {
               # body glued to the head (`f()(pip install x)`) has no blank to
               # mark, so the `(` itself is the start, as a case close glued
               # to its arm is.
-              if ((fh || fn == 2 || br && cop == 2) && !(X[k+1] == "(" && (k + 2) in AR)) {
-                for (j = k + 1; j <= N && (X[j] == " " || X[j] == "\t"); j++) ;
-                if (X[j] != ")") {
-                  CS[k] = 1
-                  if (X[k-1] == " " || X[k-1] == "\t") mark_start(k, B); else if (X[k-1] == ")") B[k] = 1
-                }
+              #
+              # The same holds for any subshell where a command stands with
+              # words of its statement before it: `function f { (pip install
+              # x); }`, `for i do (pip install x); done`, and glued to a
+              # reserved word, `if(true)then(pip install x)fi`. No word
+              # follows the `{` or the `do` to carry the start, so the
+              # statement began at `function` or `for` and the extractor
+              # read no manager in it (every shell that has the form runs
+              # it, and each passed). After a separator the `(` needs no
+              # mark; in zsh `for NAME (WORDS)` it opens the list, and in a
+              # case pattern it belongs to the pattern.
+              #
+              # PST remembers, for each open `(`, whether it opened such a
+              # subshell, so that its `)` can say a command ended there.
+              body = ((fh || fn == 2 || br && cop == 2 || st && !pre && !(zr && fr == 2) && !(k in CPO)) && !(X[k+1] == "(" && (k + 2) in AR) && !emptyahead(k))
+              if (body) {
+                CS[k] = 1
+                if (X[k-1] == " " || X[k-1] == "\t") mark_start(k, B)
+                else if (k > 1 && (X[k-1] == ")" || !word_sep(k - 1))) B[k] = 1
               }
+              if (!(X[k+1] == "(" && (k + 2) in AR)) PST[++pn] = body
               if (X[k+1] == "(" && (k + 2) in AR) { }
               else if (zr && fr == 2) { inp = 1; fr = 0 }
               else { st = 1; pre = 0; rd = 0; fn = 0; fr = 0; rp = 0; cop = 0; tm = 0 }
@@ -1244,6 +1258,12 @@ shell_lex() {
               if (inp) { inp = 0; st = 1 }
               else if (emptyparen(k)) { st = 1; fn = 0; fh = 1 }
               else if (cs == 3) st = 1
+              # The close of a subshell ends a command, so a reserved word
+              # may follow it at once (`if (true) then ...`, which every
+              # shell measured runs). A `(` that opened none -- a glob
+              # word, a stray one among the arguments -- closes nothing.
+              else if (pn > 0 && PST[pn]) { st = 1; pre = 0 }
+              if (pn > 0) pn--
             }
             k++; continue
           }
@@ -1383,21 +1403,29 @@ shell_lex() {
       # one is a glob (zsh; no other shell parses it): read by the byte
       # alone, `\)(` was an operator after a separator, and the view read
       # again, where the escape is `_`, was a word (random input in
-      # scan-contract). An empty `()` is a function head, never a glob.
+      # scan-contract). An empty `()` is a function head, never a glob, with
+      # blanks inside it too: bash, sh and dash run `f( ) { pip install x; }`.
       function wparen(j,   k, p, pc, s) {
         k = j
         while (k > 2 && C[k-1] == "l") k -= 2
-        if (k < 2) return ""
+        if (k < 2 || emptyahead(j)) return ""
         p = X[k-1]; pc = C[k-1]
-        if (pc == "e" || pc == "q" || (k - 1) in WC) return (shd || X[j+1] == ")") ? "" : "g"
+        if (pc == "e" || pc == "q" || (k - 1) in WC) return shd ? "" : "g"
         if (pc != C[j] || p ~ /[ \t\n;&|()<>]/) return ""
         if (p == "=") {
           if (wordstart(k - 1)) return "z"
           for (s = k - 1; s > 1 && C[s-1] == C[j] && X[s-1] !~ /[ \t\n;&|()<>]/; s--) ;
           if (assignat(s, k) == k) return "a"
         }
-        if (!shd && X[j+1] != ")" && p != "$" && !cmdpos(j)) return "g"
+        if (!shd && p != "$" && !cmdpos(j)) return "g"
         return ""
+      }
+      # Whether the `(` at byte j is the `(` of an empty `()`, with or without
+      # blanks inside.
+      function emptyahead(j) {
+        j++
+        while (j <= N && (X[j] == " " || X[j] == "\t")) j++
+        return X[j] == ")"
       }
       # The `>` that closes a zsh numeric range glob opened by the `<` at byte
       # j, the way zsh looks ahead for one: digits, `-`, digits, `>`. 0 when
@@ -1485,15 +1513,19 @@ shell_lex() {
       # A reserved word is one only as a word of its own: read by the byte,
       # the `!` of `f!(x)` put a command after it, and the extglob target
       # `>f!(x)` between `pip` and `install` was an operator `(` that took
-      # the verb away (form WE2); the `do` of `>f-do(.)` did the same.
+      # the verb away (form WE2); the `do` of `>f-do(.)` did the same. And
+      # `!` and `{` are reserved only where a command may start themselves:
+      # the `!` of the extglob argument in `rm !(keep)` is a byte of that
+      # word. bash 5 runs a subshell glued to `coproc`.
       function cmdpos(j,   k, w) {
         k = j - 1
         while (k >= 1 && (X[k] == " " || X[k] == "\t" || C[k] == "l")) k--
         if (k < 1 || X[k] ~ /[\n;&|()`]/) return 1
-        if (X[k] ~ /[!{]/) return wordstart(k)
+        if (X[k] == "!") return wordstart(k) && cmdpos(k)
+        if (X[k] == "{") return wordstart(k) && (cmdpos(k) || namehead(k))
         w = ""
         while (k >= 1 && X[k] ~ /[a-z]/) { w = X[k] w; k-- }
-        return w ~ /^(if|then|else|elif|while|until|do|time)$/ && wordstart(k + 1)
+        return w ~ /^(if|then|else|elif|while|until|do|time|coproc)$/ && wordstart(k + 1)
       }
       # Whether byte j follows the NAME of `function NAME` or `coproc NAME`,
       # where bash 5 reads a compound command (see cbody). Asked where a

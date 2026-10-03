@@ -755,6 +755,20 @@ check_stmts "${all}" "after > the & of a duplication is the operator in every sh
   'echo a >&/dev/null pip i; echo a 2>&1 pip i' 'echo a >_/dev/null pip i; echo a 2>_1 pip i'
 check_stmts "${all}" "a command glued to a function head starts at the blank the view prints" \
   'f()\pip i' 'f();pip i'
+check_stmts "${all}" "a subshell where a command stands, with words of its statement before it, is a start" \
+  'function f { (pip i); }; f' 'function f {;(pip i); }; f'
+check_stmts "${all}" "after do, glued to it or not" \
+  'for i do (pip i); done; for i do(pip i); done' 'for i do;(pip i); done; for i do;pip i); done'
+check_stmts "${all}" "the close of a subshell ends a command, so a reserved word may follow it" \
+  'if (true) then (pip i) fi' 'if;(true);then;(pip i);fi'
+check_stmts "${all}" "the same glued: the start is written over the (" \
+  'if(true)then(pip i)fi' 'if;true)then;pip i)fi'
+check_stmts "${all}" "an empty () with a blank inside is a function head" \
+  'f( ) { pip i; }; f( )( pip i )' 'f( );{;pip i; }; f( ); pip i )'
+check_stmts "${all}" "a subshell after a separator needs no start" \
+  'a && (pip i); (pip i) | (pip i)' 'a && (pip i); (pip i) | (pip i)'
+check_stmts "${all}" "a ( among the arguments opens no subshell, and its close ends no command" \
+  'echo a (b) pip i' 'echo a (b) pip i'
 check_stmts "${all}" "a process substitution opens a command, an argument after it does not" \
   'cat <(echo hi) pip i' 'cat <(echo hi) pip i'
 pass "stmts view: statement starts follow each shell grammar, and nothing nested opens one"
@@ -1027,7 +1041,7 @@ walk_fails() { # text -> 0 when the bash reading of the view marks the scan fail
   rm -f "${f}"
   return "${rc}"
 }
-for form in 'pip ((x) y) i' 'echo a ((b) c)' '(a) (pip i)' 'pip(N) i' 'x(a) pip i'; do
+for form in 'pip ((x) y) i' 'echo a ((b) c)' 'X=1 ((a) b)' 'pip(N) i' 'x(a) pip i'; do
   for v in stmts_view unprefixed_view; do
     walk_fails "${v}" "${form}" || fail "walk check (${v}): the bash reading of [${form}] is not failed, and its walks have no command where that ( stands"
   done
@@ -1037,7 +1051,9 @@ for form in '(pip i)' 'a && (pip i)' '! (pip i)' 'time (pip i)' '{ (pip i) }' 'i
     'for i (1) pip i' 'foreach i (1) pip i; end' 'for ((i=0;i<1;i++)) { pip i; }' 'if ((1)) { pip i; }' \
     'case x in (x) pip i;; esac' 'case x in x) (pip i);; esac' 'x=$( (a) (b) )' 'echo a (b)' 'ls *(N) x(N)' \
     '[[ a == (a|b) ]] && pip i' '[[ a =~ ^(a|b)$ ]] && pip i' 'declare -a a=(x y)' 'a=(x) pip i' \
-    'cat <(a) >(b)' 'cat =(a)' 'f () { pip i; }' 'pip >f!(x) i' 'echo fix(scope): x'; do
+    'cat <(a) >(b)' 'cat =(a)' 'f () { pip i; }' 'pip >f!(x) i' 'echo fix(scope): x' \
+    'f( ) { pip i; }' 'f( )( pip i )' 'if(true)then(pip i)fi' 'if (true) then (pip i) fi' 'coproc(pip i)' \
+    'function f { (pip i); }' 'for i do(pip i); done' 'rm !(keep) x' 'echo {(a)} b' '(a) (pip i)'; do
   for v in stmts_view unprefixed_view; do
     walk_fails "${v}" "${form}" && fail "walk check (${v}): the bash reading of [${form}] is failed, and a shell reads that ( where it stands"
   done
@@ -1148,6 +1164,15 @@ stmts_shell_rows=(
   '>/dev/null(N) echo RAN >&2|-R---'
   '2>/dev/fd/<2-2> echo RAN|-R---'
   'noglob echo RAN|-R---'
+  # A subshell where a command stands (measured 2026-10-03): after a function
+  # name list, after do and then, glued or not, and a function head with a
+  # blank inside its parentheses.
+  'function f { (echo RAN); }; f|RR-R-'
+  'set -- a; for i do (echo RAN); done|RRRRR'
+  'set -- a; for i do(echo RAN); done|R-RRR'
+  'if (true) then (echo RAN) fi|RRRRR'
+  'if(true)then(echo RAN)fi|R-RRR'
+  'f( ) { echo RAN; }; f|R-RRR'
 )
 if [[ "${SAFEDEPS_STMTS_MEASURE:-}" == 1 ]]; then
   stmts_col() { case "$(uname -s)" in Darwin) printf '%s' "${1:0:3}" ;; *) printf '%s%s' "${1:3:1}" "${1:4:1}" ;; esac; }
@@ -1169,8 +1194,9 @@ fi
 # blank). A start is written over a backslash or a quote only where a word is
 # glued to what is before it (`}\pip`): the view prints that byte blank, and
 # read again it is the blank before the word. A start is written over a `(`
-# only where a subshell body is glued to its function head (`f()(pip i)`),
-# which has no blank to carry it, like an arm glued to its case close.
+# only where a subshell is glued to what is before it (`f()(pip i)`,
+# `do(pip i)`), which has no blank to carry it, like an arm glued to its case
+# close.
 stmts_diffs=0
 for reading in bash zsh dash; do
   RANDOM="${fuzz_seed}"
@@ -1185,7 +1211,7 @@ for reading in bash zsh dash; do
     for ((k = 0; k < ${#sv}; k++)); do
       a="${sv:k:1}" b="${tv:k:1}" r="${input:k:1}"
       [[ "${a}" == "${b}" ]] && continue
-      if [[ "${b}" == ";" && ( "${a}" == " " || "${a}" == $'\t' || "${r}" == ")" || "${r}" == "(" && "${input:k-2:2}" == "()" ) ]] || [[ "${b}" == "_" && "${a}" =~ [\;\&\|] ]] \
+      if [[ "${b}" == ";" && ( "${a}" == " " || "${a}" == $'\t' || "${r}" == ")" || "${r}" == "(" && k -gt 0 && "${input:k-1:1}" != [$' \t\n;&|(<>'] ) ]] || [[ "${b}" == "_" && "${a}" =~ [\;\&\|] ]] \
           || [[ "${b}" == " " && "${a}" == $'\n' ]]; then continue; fi
       printf 'stmts (%s) differs from scan at %d of [%q]: scan [%q] stmts [%q]\n' "${reading}" "${k}" "${input}" "${a}" "${b}" >&2
       stmts_diffs=$((stmts_diffs + 1))

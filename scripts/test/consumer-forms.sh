@@ -717,6 +717,24 @@ start_rows=(
   'PA4|110011|cat <(true; pip install evil==1.0.0)'
   'PA5|110011|cat <(npm install evil@1.0.0)'
   'PA6|110011|cat < <(pip install evil==1.0.0)'
+  # A subshell where a command stands, with words of its statement before
+  # it. No word follows the `{`, the `do` or the `then` to carry the start,
+  # so the statement began at `function`, `for` or `if` and no manager was
+  # read in it: each of SB1-SB6 passed on main with no verdict. The close of
+  # a subshell ends a command, so `then` and `do` may follow it at once. A
+  # function head may hold a blank between its parentheses (SB7, SB8), and
+  # bash 5 runs a subshell glued to `coproc` (SB9); both were read until a
+  # `(` glued to a word became part of that word, and are read again.
+  'SB1|111011|function f { (pip install evil==1.0.0); }; f'
+  'SB2|111011|function f { ( pip install evil==1.0.0 ) }; f'
+  'SB3|111111|set -- a; for i do (pip install evil==1.0.0); done'
+  'SB4|101101|set -- a; for i do(pip install evil==1.0.0); done'
+  'SB5|111111|if (true) then (pip install evil==1.0.0) fi'
+  'SB6|111111|while (true) do (pip install evil==1.0.0); break; done'
+  'SB6b|101101|if(true)then(pip install evil==1.0.0)fi'
+  'SB7|101101|f( ) { pip install evil==1.0.0; }; f'
+  'SB8|101101|f( )( pip install evil==1.0.0 ); f'
+  'SB9|000001|coproc(pip install evil==1.0.0); wait'
 )
 for start_row in "${start_rows[@]}"; do
   start_ran="${start_row#*|}" start_ran="${start_ran%%|*}" start_form="${start_row#*|*|}"
@@ -753,6 +771,9 @@ for not_a_start in \
   'echo coproc foo if pip install evil==1.0.0' \
   'echo pip install evil==1.0.0 &>/dev/null' \
   'echo "a &>/dev/null pip install evil==1.0.0"' \
+  'echo a (b) pip install evil==1.0.0' \
+  $'shopt -s extglob\nls !(zz) pip install evil==1.0.0' \
+  $'shopt -s extglob\nrm -rf !(node_modules) && npm run build' \
   'echo a \&>/dev/null pip install evil==1.0.0' \
   'echo a >&/dev/null pip install evil==1.0.0' \
   'ls &>/dev/null'
@@ -823,6 +844,7 @@ gate_rewrite() {
 }
 # Every reading parses these and reads the install at the same start.
 for inert_form in \
+  'function f { (npm install evil); }; f' \
   'time -p { npm install evil; }' \
   'case x in x) { npm install evil; };; esac' \
   'f() { npm install evil; }; f' \
@@ -1188,6 +1210,28 @@ expect_undecided "a word parenthesis inside the command name" 'pip(N) install ev
 # `do` in a target took the glob qualifier after it for a subshell, and the
 # verb went with it: zsh runs this install when the file is there.
 expect_not_approved "a target that ends in a reserved word's letters" 'pip >f-do(.) install evil==1.0.0'
+# And `!` is reserved only where a command may start. Read wherever it stood,
+# the `!` of a bash extglob argument put a subshell after it, which the
+# walk's check then failed: an ordinary `rm !(keep)` was a reading that
+# "could not be fully read", and UNDECIDED when the command named a manager.
+logged_scan_failure() {
+  local safe
+  safe=$(mktemp -d "${tmp_root}/safe-scanfail.XXXXXX")
+  jq -nc --arg c "$1" --arg cwd "${project_dir}" \
+    '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
+    HOME="${tmp_root}/home-scanfail" SAFEDEPS_HOME="${safe}" scripts/safedeps-pre-guard.sh >/dev/null 2>&1
+  grep -q 'the command scanner failed' "${safe}/advisory.log" 2>/dev/null
+}
+logged_scan_failure 'pip ((x) y) install evil==1.0.0' || fail "control: a failed reading is recorded as a scanner failure"
+for extglob_form in \
+  $'shopt -s extglob\nrm -rf !(keep)' \
+  $'shopt -s extglob\nrm -rf !(node_modules) && npm run build' \
+  $'shopt -s extglob\ncp -r !(dist|node_modules) /tmp/out; pip --version' \
+  'ls !(x) && npm test'
+do
+  expect_pass "an extglob argument is a word, not a negated subshell: ${extglob_form}" "${extglob_form}"
+  if logged_scan_failure "${extglob_form}"; then fail "an extglob argument fails no reading: ${extglob_form}"; fi
+done
 pass "a word ends where the shell ends it: array values, case patterns in substitutions, zsh =(...) and glob groups, extglob, subscripts and precommand modifiers (${#word_rows[@]} forms a shell runs)"
 
 # npm takes any unique abbreviation of a command or alias, and the camelCase
