@@ -850,7 +850,12 @@ shell_lex() {
           if (X[j+1] == "(") { k = j + 1; continue }
           s = fdword(k)
           j++
-          while (j <= N && C[j] == "c" && X[j] ~ /[<>]/) j++
+          # A `<` or `>` whose `(` opens a process substitution starts the
+          # target, not more operator: `><(x)`, `>>(x)` and `<<(x)` are an
+          # operator and a process substitution to zsh (and `><(x)` to bash),
+          # and read as one operator they left `(x)` where the command
+          # stands (the redirection grid, forms RT-ps*-mid).
+          while (j <= N && C[j] == "c" && X[j] ~ /[<>]/ && !((j + 1) in PSN)) j++
           if (j <= N && C[j] == "c" && X[j] == "&") j++
           if (j <= N && C[j] == "c" && X[j] == "|") j++
           else if (j <= N && C[j] == "c" && X[j] == "!" && X[j-1] != "<") {

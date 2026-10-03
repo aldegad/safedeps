@@ -831,6 +831,8 @@ check_view noredir_view "${all}" "a {varname} descriptor is part of its redirect
   '{fd}>/dev/null pip i; pip {a}<&0 i' "$(sp 15)pip i; pip$(sp 8)i"
 check_view noredir_view "${all}" "a number glued after a word is no descriptor, nor is a brace expansion" \
   'echo a2>f {a,b}>g' 'echo a2   {a,b}  '
+check_view noredir_view "${all}" "an operator stops before the \`<\` or \`>\` that opens a process substitution" \
+  'pip ><(true) i; pip >>(cat) i; pip <<(true) i' "pip$(sp 10)i; pip$(sp 9)i; pip$(sp 10)i"
 check_view noredir_view "${all}" "a process substitution that is an argument stays" \
   'cat <(pip i) >(pip i)' 'cat <(pip i) >(pip i)'
 check_view noredir_view "bash dash" "bash and dash read the ! after > as the target" \
