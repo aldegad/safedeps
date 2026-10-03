@@ -218,8 +218,11 @@ $4; node_modules was restored from the confirmed snapshot
       ;;
     F4)
       M_FILE=scripts/safedeps-post-verify.sh
-      M_WHY='the backstop, which found no record of the command, says whether safedeps added --ignore-scripts'
-      M_RED='an --ignore-scripts line from a hook that found no record of this command'
+      # Since the version 2 rule the backstop's missing record says no line by
+      # itself, so this mutant is caught by the advisory.log line it writes
+      # from a message that carries no --ignore-scripts line.
+      M_WHY='the backstop, which found no record of the command, reads one for an --ignore-scripts line'
+      M_RED='a hook whose record states no --ignore-scripts line said so in advisory.log 1 times, not 0'
       M_OLD='  [[ "${BACKSTOP_INSTALL:-false}" == true ]] || report_inert "${META_FILE}" "${INPUT}"'
       M_NEW='  report_inert "${META_FILE}" "${INPUT}"'
       ;;
