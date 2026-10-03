@@ -825,7 +825,8 @@ pass "a package in a file: dependency's node_modules that no lockfile records is
 # with its scripts, and the meta said nothing was injected. Each form here is
 # an approved install that asks npm, one way or another, to run its scripts. It
 # must run none during the install, and the rebuild after the closure verifies
-# runs them. The last two rows already carry a true flag: the command runs as
+# runs them; for the install inside `sh -c`, which npm is not asked about, the
+# rebuild is withheld with a warning instead. The last two rows already carry a true flag: the command runs as
 # written and runs no script at all.
 count_install_marks() { INSTALL_MARKS=$(grep -c '^sd-approved' "${MARKS}" || true); }
 for row in \
@@ -838,7 +839,7 @@ for row in \
   "X=--ignore-scripts npm install sd-approved@1.0.0|rebuilt" \
   "npm install sd-approved@1.0.0 --cache --ignore-scripts|rebuilt" \
   "npm install sd-approved@1.0.0 --prefix . --ignore-scripts=false > install.log 2>&1|asked" \
-  "sh -c 'npm install sd-approved@1.0.0 --ignore-scripts=false'|asked" \
+  "sh -c 'npm install sd-approved@1.0.0 --ignore-scripts=false'|asked-withheld" \
   "npm install sd-approved@1.0.0 --ignore-scripts|as written" \
   "npm install --ignore-scripts=true sd-approved@1.0.0 --save|as written"
 do
@@ -852,9 +853,17 @@ do
   [[ -e "${CASE_PROJECT}/node_modules/sd-approved" ]] || fail "the approved install installs: ${form}"
   if [[ "${want}" != "as written" ]]; then
     [[ "${CASE_EXEC}" != "${form}" ]] || fail "the install is rewritten: ${form}"
-    grep -q '^sd-approved@[^	]*	install' <<< "${CASE_RAN}" \
-      || fail "the verified install is rebuilt, so its scripts run after the check: ${form} (post: ${CASE_POST:-<quiet>})"
-    if [[ "${want}" == asked ]]; then
+    if [[ "${want}" == asked-withheld ]]; then
+      # npm is not asked which registry an install inside `sh -c` fetches
+      # from, so the rebuild is withheld with a warning; the install stays
+      # inert either way.
+      [[ -z "${CASE_RAN}" ]] && grep -q 'install scripts were not run' <<< "${CASE_POST}" \
+        || fail "an inert install the gate cannot ask npm about is not rebuilt, and the user is told: ${form} (post: ${CASE_POST:-<quiet>})"
+    else
+      grep -q '^sd-approved@[^	]*	install' <<< "${CASE_RAN}" \
+        || fail "the verified install is rebuilt, so its scripts run after the check: ${form} (post: ${CASE_POST:-<quiet>})"
+    fi
+    if [[ "${want}" == asked* ]]; then
       grep -q 'sets ignore-scripts false; safedeps put --ignore-scripts after it' "${CASE_HOME}/advisory.log" \
         || fail "an install that asked for its scripts is recorded in advisory.log: ${form}"
     fi

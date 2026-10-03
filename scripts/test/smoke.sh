@@ -641,6 +641,8 @@ asked_after=$(grep -c 'sets ignore-scripts false; safedeps put --ignore-scripts 
 # follow one the command already carried, and a strip that took the blank
 # between them with the first left the second, so the keys differed: the post
 # hook found no pending state and the verified install was never rebuilt.
+post_key_src=$(sed -n '/^compute_pending_key() {/,/^}/p' scripts/safedeps-post-verify.sh)
+[[ "${post_key_src}" == *"compute_pending_key() {"* ]] || fail "compute_pending_key is found in the post hook (renamed? then update this check)"
 key_safe=$(mktemp -d "${tmp_root}/safe-key.XXXXXX")
 SAFEDEPS_HOME="${key_safe}" lib/ledger/ledger.sh approve npm left-pad 1.3.0 1.3.0 smoke >/dev/null
 for key_in in \
@@ -653,7 +655,7 @@ do
   key_cmd=$(jq -r '.hookSpecificOutput.updatedInput.command // empty' <<< "${key_out}")
   [[ -n "${key_cmd}" ]] || fail "the key case is rewritten: ${key_in}"
   key_pre=$(find "${key_safe}/pending" -name '*.json' | sed -E 's#.*/##; s/__.*//')
-  key_post=$(bash -c 'eval "$(sed -n "/^compute_pending_key() {/,/^}/p" scripts/safedeps-post-verify.sh)"; compute_pending_key "$1" "$2"' _ "${key_pre%%_*}" "${key_cmd}")
+  key_post=$(eval "${post_key_src}"; compute_pending_key "${key_pre%%_*}" "${key_cmd}")
   [[ -n "${key_pre}" && "${key_pre}" == "${key_post}" ]] \
     || fail "the post hook derives the pre hook's pending key from the rewritten command: ${key_in} (pre ${key_pre}, post ${key_post})"
 done
