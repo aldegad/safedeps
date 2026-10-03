@@ -636,11 +636,14 @@ ROLLBACK_COMMAND_WROTE_NODE_FILE=unknown
 # The node files the snapshot from before the command holds a copy of, or
 # recorded as absent: the ones the comparison could answer for.
 ROLLBACK_NODE_FILES_COMPARED=""
+# The first node file that differed from that snapshot, when one did.
+ROLLBACK_NODE_FILE_DIFFERED=""
 rollback_note_command_writes() {
   local pre="$1" name copy
   ROLLBACK_PRE_SNAPSHOT_ID="${pre}"
   ROLLBACK_COMMAND_WROTE_NODE_FILE=unknown
   ROLLBACK_NODE_FILES_COMPARED=""
+  ROLLBACK_NODE_FILE_DIFFERED=""
   [[ -n "${pre}" && -f "${SNAPSHOT_DIR}/${pre}_meta.json" ]] || return 0
 
   # The trace is read by inode and against a baseline file, so it also sees a
@@ -657,38 +660,77 @@ rollback_note_command_writes() {
       ROLLBACK_NODE_FILES_COMPARED+="${ROLLBACK_NODE_FILES_COMPARED:+, }${name}"
       if files_differ "${copy}" "${PROJECT_DIR}/${name}"; then
         ROLLBACK_COMMAND_WROTE_NODE_FILE=true
+        ROLLBACK_NODE_FILE_DIFFERED="${name}"
         return 0
       fi
     elif [[ -f "${copy}.missing" ]]; then
       ROLLBACK_NODE_FILES_COMPARED+="${ROLLBACK_NODE_FILES_COMPARED:+, }${name}"
       if [[ -e "${PROJECT_DIR}/${name}" || -L "${PROJECT_DIR}/${name}" ]]; then
         ROLLBACK_COMMAND_WROTE_NODE_FILE=true
+        ROLLBACK_NODE_FILE_DIFFERED="${name}"
         return 0
       fi
     fi
   done
 }
 
-# rollback_kept_facts: prints the lines and returns 0 when no check shows the
-# command wrote the node tree; returns 1 otherwise.
-rollback_kept_facts() {
+# rollback_node_tree_facts: when no check shows the command wrote the node
+# tree, prints `kept <node_modules>` and one line per check, and returns 0.
+# Otherwise prints the first check that showed a write, as one line, and
+# returns 1: why node_modules was removed is a line the same way as why it
+# was kept.
+rollback_node_tree_facts() {
   local node_modules="${PROJECT_DIR}/node_modules"
   local pre="${ROLLBACK_PRE_SNAPSHOT_ID}"
   local meta="${SNAPSHOT_DIR}/${pre}_meta.json"
   local packages="${SNAPSHOT_DIR}/${pre}_packages.list"
   local bins="${SNAPSHOT_DIR}/${pre}_bins.list"
+  local rel found
 
   # The trace is read by inode and against a baseline file, so it also sees a
   # reinstall of the same tree inside one second, which the listings cannot.
-  [[ -z "${NPM_TRACED_RECORDS:-}" && -n "${TRACE_LINE}" ]] || return 1
-
-  [[ "${ROLLBACK_COMMAND_WROTE_NODE_FILE}" == false && -n "${ROLLBACK_NODE_FILES_COMPARED}" ]] || return 1
-
-  [[ -f "${meta}" && -f "${packages}" && -f "${bins}" ]] || return 1
-  [[ -z "$(find "${node_modules}" -maxdepth 3 -name "package.json" 2>/dev/null | sort | comm -13 "${packages}" - | head -1)" ]] || return 1
-  [[ -z "$({ ls "${node_modules}/.bin/" 2>/dev/null || true; } | sort | comm -13 "${bins}" - | head -1)" ]] || return 1
-  [[ -z "$(find -H "${node_modules}/.package-lock.json" -prune -newer "${meta}" 2>/dev/null)" ]] || return 1
-  [[ -z "$(find -H "${node_modules}" -prune -newer "${meta}" 2>/dev/null)" ]] || return 1
+  if [[ -n "${NPM_TRACED_RECORDS:-}" ]]; then
+    rel=$(head -1 <<< "${NPM_TRACED_RECORDS}")
+    printf '%s/%s is newer than the baseline taken before this command or has another inode\n' "${PROJECT_DIR}" "${rel}"
+    return 1
+  fi
+  # With no snapshot from before the command there is nothing to compare
+  # against, and the command counts as having written.
+  if [[ -z "${pre}" ]]; then
+    printf 'this rollback has no snapshot from before the command\n'
+    return 1
+  fi
+  if [[ ! -f "${meta}" ]]; then
+    printf '%s\n' "$(fact_path "${meta}")"
+    return 1
+  fi
+  if [[ -n "${ROLLBACK_NODE_FILE_DIFFERED}" ]]; then
+    printf '%s/%s differed from the pre-command snapshot %s when this rollback began\n' "${PROJECT_DIR}" "${ROLLBACK_NODE_FILE_DIFFERED}" "${pre}"
+    return 1
+  fi
+  if [[ "${ROLLBACK_COMMAND_WROTE_NODE_FILE}" != false || -z "${ROLLBACK_NODE_FILES_COMPARED}" ]]; then
+    printf '%s\n' "$(fact_path "${SNAPSHOT_DIR}/${pre}_package.json")"
+    return 1
+  fi
+  for found in "${packages}" "${bins}"; do
+    [[ -f "${found}" ]] || { printf '%s\n' "$(fact_path "${found}")"; return 1; }
+  done
+  found=$(find "${node_modules}" -maxdepth 3 -name "package.json" 2>/dev/null | sort | comm -13 "${packages}" - | head -1)
+  if [[ -n "${found}" ]]; then
+    printf '%s lists %s, which the pre-command snapshot %s does not\n' "${node_modules}" "${found}" "${pre}"
+    return 1
+  fi
+  found=$({ ls "${node_modules}/.bin/" 2>/dev/null || true; } | sort | comm -13 "${bins}" - | head -1)
+  if [[ -n "${found}" ]]; then
+    printf '%s/.bin lists %s, which the pre-command snapshot %s does not\n' "${node_modules}" "${found}" "${pre}"
+    return 1
+  fi
+  for found in "${node_modules}/.package-lock.json" "${node_modules}"; do
+    if [[ -n "$(find -H "${found}" -prune -newer "${meta}" 2>/dev/null)" ]]; then
+      printf '%s is newer than the pre-command snapshot %s\n' "${found}" "${pre}"
+      return 1
+    fi
+  done
 
   [[ -e "${node_modules}" || -L "${node_modules}" ]] || return 0
   printf 'kept %s\n' "${node_modules}"
@@ -705,18 +747,22 @@ rollback_kept_facts() {
 }
 
 rollback_node_modules() {
-  local node_modules="${PROJECT_DIR}/node_modules" kept line
+  local node_modules="${PROJECT_DIR}/node_modules" facts line
 
   # Only an npm project's node_modules is the rollback's to remove.
   [[ "${ROLLBACK_NPM_PROJECT}" == true ]] || return 0
-  if kept=$(rollback_kept_facts); then
-    [[ -n "${kept}" ]] || return 0
+  if facts=$(rollback_node_tree_facts); then
+    [[ -n "${facts}" ]] || return 0
     while IFS= read -r line; do
       report_say "${line}"
-    done <<< "${kept}"
+    done <<< "${facts}"
     TRACE_LINE_SAID=true
     return 0
   fi
+  # A node_modules that is not there has nothing to remove, and the reason a
+  # removal would have had is not said.
+  [[ -e "${node_modules}" || -L "${node_modules}" ]] || return 0
+  report_say "${facts}"
   if [[ -L "${node_modules}" ]]; then
     record_rollback_refusal removal "${node_modules}" "$(fact_path "${node_modules}")"
     return 0

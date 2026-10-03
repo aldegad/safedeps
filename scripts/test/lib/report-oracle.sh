@@ -38,6 +38,7 @@ restored not-restored-differs not-restored-absent removed not-removed
 refused-restore-link refused-removal-link refused-unresolved
 path-exists path-absent path-link workspaces-key changed-nothing
 kept kept-files kept-packages kept-bins kept-not-newer
+reason-trace reason-file reason-package reason-bin reason-newer reason-no-snapshot
 trace-none trace-baseline-gone trace-no-baseline
 inert-added inert-asked inert-carried inert-none
 rebuild-skipped-added rebuild-ran-added rebuild-skipped rebuild-ran
@@ -134,20 +135,36 @@ oracle_trace_state() {
 # snapshot the pre-guard took, read before the hook restores anything: the
 # names that snapshot answers for, then `same` or `differs`.
 oracle_node_files_state() {
-  local pending="$1" snap project name copy names="" verdict=same
+  local pending="$1" snap project name copy names="" verdict=same differing=""
   snap=$(jq -r '.snapshot_id // empty' "${pending}" 2>/dev/null)
   project=$(jq -r '.project_dir // empty' "${pending}" 2>/dev/null)
   for name in package.json package-lock.json npm-shrinkwrap.json pnpm-lock.yaml yarn.lock bun.lock bun.lockb; do
     copy="${SAFEDEPS_HOME:-${HOME}/.safedeps}/snapshots/${snap}_${name}"
     if [[ -f "${copy}" ]]; then
       names+="${names:+, }${name}"
-      cmp -s "${copy}" "${project}/${name}" || verdict=differs
+      cmp -s "${copy}" "${project}/${name}" || { verdict=differs; differing+=" ${name}"; }
     elif [[ -f "${copy}.missing" ]]; then
       names+="${names:+, }${name}"
-      [[ ! -e "${project}/${name}" && ! -L "${project}/${name}" ]] || verdict=differs
+      [[ ! -e "${project}/${name}" && ! -L "${project}/${name}" ]] || { verdict=differs; differing+=" ${name}"; }
     fi
   done
-  printf '%s\n%s\n' "${names}" "${verdict}"
+  printf '%s\n%s\n%s\n' "${names}" "${verdict}" "${differing# }"
+}
+
+# What node_modules of a pending install's project holds that the pre-command
+# listings lack, and what in it is newer than the snapshot, read before the
+# hook removes it: one `package <path>`, `bin <name>` or `newer <path>` per line.
+oracle_tree_state() {
+  local pending="$1" snap project nm home="${SAFEDEPS_HOME:-${HOME}/.safedeps}" path
+  snap=$(jq -r '.snapshot_id // empty' "${pending}" 2>/dev/null)
+  project=$(jq -r '.project_dir // empty' "${pending}" 2>/dev/null)
+  nm="${project}/node_modules"
+  [[ -f "${home}/snapshots/${snap}_packages.list" ]] && find "${nm}" -maxdepth 3 -name package.json 2>/dev/null | sort | comm -13 "${home}/snapshots/${snap}_packages.list" - | sed 's/^/package /'
+  [[ -f "${home}/snapshots/${snap}_bins.list" ]] && { ls "${nm}/.bin/" 2>/dev/null || true; } | sort | comm -13 "${home}/snapshots/${snap}_bins.list" - | sed 's/^/bin /'
+  for path in "${nm}/.package-lock.json" "${nm}"; do
+    [[ -n "$(find -H "${path}" -prune -newer "${home}/snapshots/${snap}_meta.json" 2>/dev/null)" ]] && printf 'newer %s\n' "${path}"
+  done
+  return 0
 }
 
 # oracle_before <call dir>: notes what the hook is about to consume.
@@ -159,6 +176,7 @@ oracle_before() {
     cp "${file}" "${call}/pending/${file##*/}"
     oracle_trace_state "${file}" > "${call}/pending/${file##*/}.trace"
     oracle_node_files_state "${file}" > "${call}/pending/${file##*/}.nodefiles"
+    oracle_tree_state "${file}" > "${call}/pending/${file##*/}.tree"
   done
   for file in "${SAFEDEPS_JOURNAL_DIR:-${home}/rollback-journal}"/*.json; do
     [[ -f "${file}" ]] || continue
@@ -284,6 +302,21 @@ oracle_block_end() {
 
 # A line of a rollback, a confirm or a backstop block must also be a line of
 # the reorg.log entry: the records say the same thing in the same words.
+# Whether a line is one of the reasons a node_modules step is taken for.
+oracle_is_reason() {
+  [[ "$1" == 'this rollback has no snapshot from before the command' ]] && return 0
+  [[ "$1" =~ ^/.+\ is\ newer\ than\ (the\ baseline|the\ pre-command\ snapshot) ]] && return 0
+  [[ "$1" =~ \ differed\ from\ the\ pre-command\ snapshot\ .+\ when\ this\ rollback\ began$ ]] && return 0
+  [[ "$1" =~ ,\ which\ the\ pre-command\ snapshot\ [^\ ]+\ does\ not$ ]] && return 0
+  [[ "$1" =~ ^/.+\ does\ not\ exist$ ]] && return 0
+  return 1
+}
+# A step over node_modules is said right after its reason.
+oracle_nm_step() {
+  [[ "$1" == */node_modules ]] || return 0
+  oracle_is_reason "${O_PREV}" || oracle_red "a node_modules step with no reason line before it"
+}
+
 oracle_in_reorg_log() {
   [[ "${O_DIRECT}" == 1 ]] && return 0
   grep -qxF -- "  $1" "${O_HOME}/reorg.log" 2>/dev/null || oracle_red "reorg.log does not carry this line"
@@ -310,6 +343,11 @@ oracle_line() {
   local re_kept_packages='^(/.+) lists no package\.json the pre-command snapshot ([^ ]+) lacks$'
   local re_kept_bins='^(/.+)/\.bin lists no entry the pre-command snapshot ([^ ]+) lacks$'
   local re_kept_newer='^(/.+) is not newer than the pre-command snapshot ([^ ]+)$'
+  local re_reason_trace='^(/.+) is newer than the baseline taken before this command or has another inode$'
+  local re_reason_file='^(/.+)/([^/]+) differed from the pre-command snapshot ([^ ]+) when this rollback began$'
+  local re_reason_bin='^(/.+)/\.bin lists ([^/]+), which the pre-command snapshot ([^ ]+) does not$'
+  local re_reason_package='^(/.+) lists (/.+), which the pre-command snapshot ([^ ]+) does not$'
+  local re_reason_newer='^(/.+) is newer than the pre-command snapshot ([^ ]+)$'
   local re_trace_none='^no install trace in (/.*): neither npm lockfile there is newer than the baseline taken before this command or has another inode$'
   local re_trace_gone='^no install trace in (/.*): the baseline file (/.+) does not exist$'
   local re_skip_added='^safedeps added --ignore-scripts to this install and did not run npm rebuild: (.+)$'
@@ -505,16 +543,20 @@ oracle_line() {
   elif [[ "${line}" =~ ${re_not_removed} ]]; then
     oracle_count not-removed
     local nr_path="${BASH_REMATCH[1]}" nr_rc="${BASH_REMATCH[2]}" nr_fact="${BASH_REMATCH[3]}"
+    oracle_nm_step "${nr_path}"
     oracle_path_fact "${nr_fact}" || rc=$?
     [[ ${rc} -eq 0 && "${O_FACT_PATH}" == "${nr_path}" && "${O_FACT_KIND}" != absent ]] || oracle_red "the path is gone, or the fact names another path"
     [[ "${nr_rc}" != 0 ]] || oracle_red "rm exit 0"
     oracle_in_reorg_log "${line}"
   elif [[ "${line}" =~ ${re_removed} ]]; then
     oracle_count removed; O_CHANGED=1
-    [[ ! -e "${BASH_REMATCH[1]}" && ! -L "${BASH_REMATCH[1]}" ]] || oracle_red "the path is still there"
+    local rm_path="${BASH_REMATCH[1]}"
+    oracle_nm_step "${rm_path}"
+    [[ ! -e "${rm_path}" && ! -L "${rm_path}" ]] || oracle_red "the path is still there"
     oracle_in_reorg_log "${line}"
   elif [[ "${line}" =~ ${re_refused} ]]; then
     local rf_kind="${BASH_REMATCH[1]}" rf_path="${BASH_REMATCH[2]}" rf_fact="${BASH_REMATCH[3]}"
+    [[ "${rf_kind}" != removal ]] || oracle_nm_step "${rf_path}"
     if [[ "${rf_fact}" =~ ${re_unresolved} ]]; then
       oracle_count refused-unresolved
       ! (cd -P "${BASH_REMATCH[1]}" 2>/dev/null) || oracle_red "the directory resolves"
@@ -529,10 +571,39 @@ oracle_line() {
     oracle_count workspaces-key
     jq -e 'type == "object" and has("workspaces")' "${BASH_REMATCH[1]}/package.json" >/dev/null 2>&1 || oracle_red "no workspaces key"
     oracle_in_reorg_log "${line}"
+  elif [[ "${line}" == 'this rollback has no snapshot from before the command' ]]; then
+    oracle_count reason-no-snapshot
+    [[ "${O_BLOCK}" == backstop-rollback && -z "${O_PRE}" ]] || oracle_red "said outside the backstop, or a pending state was consumed for this command"
+    oracle_in_reorg_log "${line}"
+  elif [[ "${line}" =~ ${re_reason_trace} ]]; then
+    oracle_count reason-trace
+    [[ "${O_TRACE}" == present ]] || oracle_red "the trace this file read before the hook is '${O_TRACE}'"
+    [[ "${BASH_REMATCH[1]}" == "${O_PROJECT}/package-lock.json" || "${BASH_REMATCH[1]}" == "${O_PROJECT}/node_modules/.package-lock.json" ]] || oracle_red "not one of the project's two npm lockfiles"
+    oracle_in_reorg_log "${line}"
+  elif [[ "${line}" =~ ${re_reason_file} ]]; then
+    oracle_count reason-file
+    [[ "${BASH_REMATCH[1]}" == "${O_PROJECT}" && "${BASH_REMATCH[3]}" == "${O_PRE}" ]] || oracle_red "another project or another snapshot"
+    [[ " $(sed -n 3p <<< "${O_NODE_FILES}") " == *" ${BASH_REMATCH[2]} "* ]] || oracle_red "before the hook ran, ${BASH_REMATCH[2]} did not differ from the snapshot"
+    oracle_in_reorg_log "${line}"
+  elif [[ "${line}" =~ ${re_reason_bin} ]]; then
+    oracle_count reason-bin
+    [[ "${BASH_REMATCH[1]}" == "${O_PROJECT}/node_modules" && "${BASH_REMATCH[3]}" == "${O_PRE}" ]] || oracle_red "another directory or another snapshot"
+    grep -qxF -- "bin ${BASH_REMATCH[2]}" <<< "${O_TREE}" || oracle_red "before the hook ran, .bin did not list that entry, or the snapshot did"
+    oracle_in_reorg_log "${line}"
+  elif [[ "${line}" =~ ${re_reason_package} ]]; then
+    oracle_count reason-package
+    [[ "${BASH_REMATCH[1]}" == "${O_PROJECT}/node_modules" && "${BASH_REMATCH[2]}" == "${BASH_REMATCH[1]}"/* && "${BASH_REMATCH[3]}" == "${O_PRE}" ]] || oracle_red "another directory or another snapshot"
+    grep -qxF -- "package ${BASH_REMATCH[2]}" <<< "${O_TREE}" || oracle_red "before the hook ran, node_modules did not list that file, or the snapshot did"
+    oracle_in_reorg_log "${line}"
+  elif [[ "${line}" =~ ${re_reason_newer} ]]; then
+    oracle_count reason-newer
+    [[ "${BASH_REMATCH[2]}" == "${O_PRE}" ]] || oracle_red "another snapshot"
+    grep -qxF -- "newer ${BASH_REMATCH[1]}" <<< "${O_TREE}" || oracle_red "before the hook ran, that path was not newer than the snapshot"
+    oracle_in_reorg_log "${line}"
   elif [[ "${line}" =~ ${re_kept_files} ]]; then
     oracle_count kept-files
     [[ "${BASH_REMATCH[2]}" == "${O_PROJECT}" && "${BASH_REMATCH[3]}" == "${O_PRE}" ]] || oracle_red "another project or another snapshot"
-    [[ "${O_NODE_FILES}" == "${BASH_REMATCH[1]}"$'\n'"same" ]] || oracle_red "before the hook ran this file read: ${O_NODE_FILES//$'\n'/ -> }"
+    [[ "${O_NODE_FILES}" == "${BASH_REMATCH[1]}"$'\n'"same"$'\n' || "${O_NODE_FILES}" == "${BASH_REMATCH[1]}"$'\n'"same" ]] || oracle_red "before the hook ran this file read: ${O_NODE_FILES//$'\n'/ -> }"
     oracle_in_reorg_log "${line}"
   elif [[ "${line}" =~ ${re_kept_bins} ]]; then
     oracle_count kept-bins
@@ -647,7 +718,7 @@ oracle_message() {
   O_CMD=$(jq -r '.tool_input.command // empty' <<< "${payload}")
   O_PROJECT=$(jq -r '.cwd // empty' <<< "${payload}")
   O_PROJECT=$(oracle_phys "${O_PROJECT}")
-  O_PRE="" O_META="" O_TRACE="unread" O_NODE_FILES="" O_DIR_HASH=""
+  O_PRE="" O_META="" O_TRACE="unread" O_NODE_FILES="" O_TREE="" O_DIR_HASH=""
   for file in "${call}/pending"/*.json; do
     [[ -f "${file}" && ! -e "${O_HOME}/pending/${file##*/}" ]] || continue
     consumed="${file}"
@@ -659,6 +730,7 @@ oracle_message() {
     O_META="${O_HOME}/snapshots/${O_PRE}_meta.json"
     O_TRACE=$(cat "${consumed}.trace")
     O_NODE_FILES=$(cat "${consumed}.nodefiles")
+    O_TREE=$(cat "${consumed}.tree")
     O_DIR_HASH=$(jq -r '.dir_hash // empty' "${consumed}")
   fi
   [[ -n "${O_DIR_HASH}" ]] || O_DIR_HASH=$(oracle_dir_hash "${O_PROJECT}")
@@ -684,7 +756,7 @@ oracle_message() {
 oracle_direct() {
   local line
   O_CALL="${ORACLE_DIR}" O_DIRECT=1 O_HOME="${SAFEDEPS_HOME:-${HOME}/.safedeps}" O_NPM_LOG=/dev/null
-  O_META="$1" O_CMD="$2" O_PROJECT="" O_PRE="" O_TRACE="unread" O_NODE_FILES="" O_DIR_HASH=""
+  O_META="$1" O_CMD="$2" O_PROJECT="" O_PRE="" O_TRACE="unread" O_NODE_FILES="" O_TREE="" O_DIR_HASH=""
   oracle_reset
   O_BLOCK=confirm
   while IFS= read -r line; do

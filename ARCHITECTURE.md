@@ -534,6 +534,7 @@ The snapshot keeps every member, not the ones an install is expected to write. W
 | `<path> exists` / `<path> does not exist` / `<path> is a symbolic link to <physical path>` | a test of the path |
 | `<dir>/package.json has the key workspaces` | `jq` over the file |
 | `kept <path>` and the lines after it | no install trace, no node manifest or lockfile that differed from the pre-command snapshot when the rollback began, no entry in `node_modules` or `.bin` that the pre-command listing lacks, and nothing newer than the pre-command snapshot: one line per check |
+| a reason line, then `removed <path>/node_modules` | the first of the same checks that showed a write, as one line: the lockfile that carries the install trace, the node file that differed, the package or `.bin` entry the listing lacks, the path newer than the snapshot, or no snapshot from before the command |
 | `The rollback changed nothing.` | no step wrote or removed |
 | `no install trace in <dir>: ...` | the lockfiles against the baseline, or the baseline file is gone |
 | `safedeps added --ignore-scripts to this install` and its three other values | the pre-guard's record, and the command the post hook received |

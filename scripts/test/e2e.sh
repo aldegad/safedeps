@@ -1043,6 +1043,37 @@ grep -q 'suspicious dependency change detected' <<< "${written_post}" || fail "t
 grep -q 'removed .*/nochange-wt/node_modules$' <<< "$(post_message "${written_post}")" || fail "the rollback says node_modules was removed"
 pass "a rollback removes node_modules once the command has written into it"
 
+# The other two reasons a node_modules is removed, each as the line that says
+# it: a .bin entry the pre-command listing lacks, and a node_modules modified
+# after the snapshot with nothing new listed.
+for reason_case in bin newer; do
+  reason_wt="${tmp_root}/reason-${reason_case}-wt"
+  mkdir -p "${reason_wt}/node_modules/installed-package" "${reason_wt}/node_modules/.bin"
+  printf '{"name":"installed-package","version":"1.0.0"}\n' > "${reason_wt}/node_modules/installed-package/package.json"
+  printf '{"dependencies":{"fixture-parent":"1.0.0"}}\n' > "${reason_wt}/package.json"
+  printf '%s\n' "${tampered_lock}" > "${reason_wt}/package-lock.json"
+  scripts/safedeps-pre-guard.sh > /dev/null <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${reason_wt}"}
+EOF
+  case "${reason_case}" in
+    bin) : > "${reason_wt}/node_modules/.bin/new-entry" ;;
+    newer) sleep 1; : > "${reason_wt}/node_modules/.yarn-integrity" ;;
+  esac
+  reason_post=$(
+    PATH="${emptying_bin}:${PATH}" post_hook <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${reason_wt}"}
+EOF
+  )
+  [[ ! -e "${reason_wt}/node_modules" ]] || fail "a node_modules the command wrote into is removed (${reason_case})"
+  case "${reason_case}" in
+    bin) grep -q '/node_modules/.bin lists new-entry, which the pre-command snapshot .* does not$' <<< "$(post_message "${reason_post}")" \
+           || fail "the removal says which .bin entry the snapshot lacks (${reason_post})" ;;
+    newer) grep -q '/reason-newer-wt/node_modules is newer than the pre-command snapshot ' <<< "$(post_message "${reason_post}")" \
+           || fail "the removal says node_modules is newer than the snapshot (${reason_post})" ;;
+  esac
+done
+pass "every removal of node_modules says the first check that showed the command wrote it"
+
 # A write that lists nothing new and finishes at once: the hidden lockfile is
 # rewritten in place right after the pre-guard, the way a fast `npm ci` that
 # replaces a package does. The shell's -nt compares whole seconds on bash 3.2
@@ -1271,7 +1302,10 @@ pass "a rollback to a confirmed snapshot says so, and says the install ran with 
 # gate did not recognize the command, and the backstop rolls back to the
 # confirmed snapshot. It has no record of asking for --ignore-scripts.
 printf '%s\n' "${tampered_lock}" > "${confirmed_wt}/package-lock.json"
+mkdir -p "${confirmed_wt}/node_modules/installed-package"
 backstop_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${confirmed_wt}" "npm install fixture-parent@1.0.0")
+grep -A1 -x 'this rollback has no snapshot from before the command' <<< "$(post_message "${backstop_post}")" | grep -q '^removed .*/confirmed-wt/node_modules$' \
+  || fail "the backstop says why it removed node_modules, right before it says so (${backstop_post})"
 grep -q 'after a command the command gate did not recognize. A rollback ran\.' <<< "${backstop_post}" || fail "the backstop rolls back to the confirmed snapshot"
 grep -q '^safedeps did not add --ignore-scripts to this install; the command this hook received does not carry it$' <<< "$(post_message "${backstop_post}")" \
   || fail "the backstop says it did not add --ignore-scripts"

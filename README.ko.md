@@ -184,6 +184,7 @@ ledger 게이트나 사전 비행 체크에 실패하면 해당 명령은 실행
 | `not restored <path>: cp exit <n>; ...` / `not removed <path>: rm exit <n>; <path> exists` | 그 단계가 실패했습니다. 줄은 종료 코드와 그 경로를 검사한 결과를 말합니다. 디렉터리 안에 무엇이 남았는지는 말하지 않습니다. `rm -rf` 는 지울 수 있는 것을 지운 뒤에 실패합니다. |
 | `refused restore of <path>: ...` / `refused removal of <path>: ...` | 그 경로가 심볼릭 링크이고, 줄이 링크가 가리키는 곳을 말합니다. safedeps 는 링크를 따라가지 않고, 읽은 프로젝트 밖에 쓰지 않습니다. |
 | `kept <path>` 와 그 아래 검사 줄 | 명령이 `node_modules` 에 썼다는 것을 어떤 검사도 보이지 못해서 지우지 않았습니다. 아래 줄들이 그 검사입니다. |
+| 이유 줄 하나, 그 다음 `removed <path>/node_modules` | 명령이 `node_modules` 에 썼다는 것을 처음 보인 검사입니다. 설치 흔적, 명령 직전 스냅샷과 달랐던 node manifest·lockfile, 그 스냅샷의 목록에 없는 항목, 그 스냅샷보다 새로운 것, 또는 명령 전 스냅샷이 아예 없음 가운데 하나입니다. |
 | `<path> exists` / `<path> does not exist` / `<path>/package.json has the key workspaces` | 롤백 뒤 프로젝트 루트에 있는 것입니다. safedeps 는 패키지를 재설치하지 않고, 재설치가 어디에 쓸지 판단하지 않습니다. 프로젝트 자신의 `node_modules` 만 지우고, 워크스페이스 멤버의 것은 지우지 않습니다. |
 | `The rollback changed nothing.` | 어떤 단계도 쓰거나 지우지 않았습니다. |
 | `no install trace in <dir>: ...` | 그 디렉터리의 npm lockfile 둘 다 명령 동안 바뀌지 않았습니다. 거기에는 이 설치의 흔적이 없습니다. |

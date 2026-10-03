@@ -534,6 +534,7 @@ rebuild 검사가 읽는 lockfile 필드가 각각 무엇을 보증하고 무엇
 | `<path> exists` / `<path> does not exist` / `<path> is a symbolic link to <physical path>` | 경로 검사 |
 | `<dir>/package.json has the key workspaces` | 그 파일에 대한 `jq` |
 | `kept <path>` 와 그 아래 줄 | 설치 흔적 없음, 롤백이 시작될 때 명령 전 스냅샷과 다른 node manifest·lockfile 없음, 명령 전 목록에 없는 `node_modules`·`.bin` 항목 없음, 명령 전 스냅샷보다 새로운 것 없음. 검사 하나가 줄 하나다 |
+| 이유 줄 하나, 그 다음 `removed <path>/node_modules` | 같은 검사 가운데 쓰기를 처음 보인 것 하나를 한 줄로: 설치 흔적이 있는 lockfile, 달랐던 node 파일, 목록에 없는 패키지나 `.bin` 항목, 스냅샷보다 새로운 경로, 또는 명령 전 스냅샷이 없음 |
 | `The rollback changed nothing.` | 어떤 단계도 쓰거나 지우지 않았다 |
 | `no install trace in <dir>: ...` | lockfile 을 기준 파일과 비교했거나, 기준 파일이 없다 |
 | `safedeps added --ignore-scripts to this install` 과 나머지 세 값 | pre-guard 의 기록과 post 훅이 받은 명령 |
