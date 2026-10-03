@@ -1140,6 +1140,14 @@ done
 expect_not_approved "then glued to an arithmetic head is still a reserved word" 'if ((1))then pip install evil==1.0.0; fi'
 expect_pass "a word glued to an arithmetic expansion" 'echo $((1))x'
 pass "a command glued to a closed head fails its reading rather than passing"
+# zsh reads a subshell or an arithmetic command as the condition of a short
+# `if` with the body right after it, so its close is a head close too (0100):
+# a subshell glued there is a start, a command glued there fails the reading.
+expect_not_approved "a subshell glued to a short if's arithmetic condition" 'if ((1))(pip install evil==1.0.0)'
+expect_not_approved "a subshell glued to a short if's subshell condition" 'if (true)(pip install evil==1.0.0)'
+expect_undecided "a command glued to a short if's subshell condition" 'if (true)pip install evil==1.0.0'
+expect_not_approved "then glued to a subshell condition" 'if (true)then pip install evil==1.0.0; fi'
+pass "the condition of a zsh short if closes a head"
 
 # More places the review of 83de40c found: more places
 # after a closed head, a subshell first in more process substitutions, more

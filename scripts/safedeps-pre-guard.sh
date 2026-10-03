@@ -1267,7 +1267,7 @@ shell_lex() {
       # CS gets the first byte of each command, its prefixes included: the
       # first word, or the redirection operator or file descriptor before it.
       # prefixes() starts there.
-      function starts(rs, B, CS,   k, s, w, op, st, pre, rd, fn, fr, fra, inp, rp, dbr, cop, tm, cs, zr, br, fh, j, pn, PST, body, HC) {
+      function starts(rs, B, CS,   k, s, w, op, st, pre, rd, fn, fr, fra, inp, rp, dbr, cop, tm, cs, zr, br, fh, j, pn, PST, body, HC, cw, PCOND) {
         zr = (rs == "zsh"); br = (rs == "bash")
         st = 1; pre = 0; rd = 0; fn = 0; fr = 0; fra = 0; inp = 0; rp = 0; dbr = 0; cop = 0; tm = 0; cs = 0; fh = 0; k = 1; pn = 0
         while (k <= N) {
@@ -1334,7 +1334,8 @@ shell_lex() {
                 if (X[k-1] == " " || X[k-1] == "\t") mark_start(k, B)
                 else if (k > 1 && ((fh || fn == 2 || br && cop == 2 || (k - 1) in HC) && X[k-1] == ")" || C[k-1] == "p" || !word_sep(k - 1))) B[k] = 1
               }
-              if (!(X[k+1] == "(" && (k + 2) in AR)) PST[++pn] = body
+              if (!(X[k+1] == "(" && (k + 2) in AR)) { PST[++pn] = body; PCOND[pn] = cw }
+              cw = 0
               if (X[k+1] == "(" && (k + 2) in AR) { }
               else if (zr && fr == 2 && !fra) { inp = 1; fr = 0 }
               else { st = 1; pre = 0; rd = 0; fn = 0; fr = 0; rp = 0; cop = 0; tm = 0 }
@@ -1343,7 +1344,10 @@ shell_lex() {
             else if (op == ")") {
               # The `))` of an arithmetic command or header ends its word and
               # nothing else: the `((` opened no subshell.
-              if (k in ACL) { if (fr == 2 && fra) HC[k] = 1 }
+              # In zsh the condition of `if`, `elif`, `while` and `until` may
+              # be an arithmetic command or a subshell with the body right
+              # after it (the short forms), so its close is a head close too.
+              if (k in ACL) { if (fr == 2 && fra || zr) HC[k] = 1 }
               else if (inp) { inp = 0; st = 1; HC[k] = 1 }
               else if (emptyparen(k)) { st = 1; fn = 0; fh = 1 }
               else if (cs == 3) st = 1
@@ -1351,7 +1355,7 @@ shell_lex() {
               # may follow it at once (`if (true) then ...`, which every
               # shell measured runs). A `(` that opened none -- a glob
               # word, a stray one among the arguments -- closes nothing.
-              else if (pn > 0 && PST[pn]) { st = 1; pre = 0 }
+              else if (pn > 0 && PST[pn]) { st = 1; pre = 0; if (zr && PCOND[pn]) HC[k] = 1 }
               if (pn > 0 && !(k in ACL)) pn--
             }
             k++; continue
@@ -1420,7 +1424,8 @@ shell_lex() {
           # read on as at any other start, so that the view read again, where
           # the mark is a separator, reads it the same way.
           if (cop == 1) cop = (w == "{") ? 0 : 2
-          if (opener(w) || zr && zopener(w)) { cop = 0; continue }
+          cw = 0
+          if (opener(w) || zr && zopener(w)) { cop = 0; cw = (w ~ /^(if|elif|while|until)$/); continue }
           if (assignat(s, k)) { pre = 1; continue }
           if (w == "time") { tm = 1; continue }
           if (zr && zprecmd(w)) continue
