@@ -256,13 +256,18 @@ compute_dir_hash() {
 # the inert-install rewrite normalized out, so PreToolUse (original command) and
 # PostToolUse (possibly `--ignore-scripts`-appended) of the SAME install resolve to
 # the same key. This keeps concurrent installs in one project on separate pending
-# files instead of clobbering a single global one. The strip loops: the flag
-# can now follow one the command already carried (`--cache --ignore-scripts`
-# then ours), and a /g pass took the blank between them with the first, so the
-# second stayed and the PostToolUse hook found no pending state.
+# files instead of clobbering a single global one. Every ` --ignore-scripts`
+# that is a whole word goes, whatever byte follows it. The flag is placed after
+# a word, so the byte after it never continues it. A list of the bytes allowed
+# to follow it missed `>` and `<` (`x>log` became `x --ignore-scripts>log`),
+# the keys differed, and the PostToolUse hook found no pending state: no
+# rebuild, and no rollback of an unapproved lockfile. The
+# strip loops, because the flag can follow one the command already carried
+# (`--cache --ignore-scripts` then ours) and a /g pass took the blank between
+# them with the first.
 compute_pending_key() {
   local dir_hash="$1" command="$2" norm cmd_hash
-  norm=$(printf '%s' "${command}" | sed -E -e ':a' -e 's/[[:space:]]+--ignore-scripts([;&|)}`"'"'"'])/\1/' -e 'ta' -e ':b' -e 's/[[:space:]]+--ignore-scripts([[:space:]]|$)/ /' -e 'tb' -e 's/[[:space:]]+/ /g; s/^ //; s/ $//')
+  norm=$(printf '%s' "${command}" | sed -E -e ':a' -e 's/[[:space:]]+--ignore-scripts([^=[:alnum:]_-]|$)/\1/' -e 'ta' -e 's/[[:space:]]+/ /g; s/^ //; s/ $//')
   if command -v md5sum >/dev/null 2>&1; then
     cmd_hash=$(printf '%s' "${norm}" | md5sum | cut -d' ' -f1)
   elif command -v md5 >/dev/null 2>&1; then
@@ -1697,16 +1702,22 @@ inert_verb_ends() {
   fi
 }
 
-# Whether the npm statement <text> (from its `npm` to where it ends) already
-# leaves ignore-scripts true, read the way npm reads its arguments
-# (safedeps_npm_read_args, both npm versions where they differ). Prints
-# `settled` when it does, `asked` when the last word that sets it sets it
-# false, and `open` otherwise, followed by ` ends` when a word in it is only
-# dashes, which ends npm's options. A word the shell decides at run time could
-# be any option, so a statement holding one is never settled.
+# How npm reads the npm statement <text> (from its `npm` to where it ends),
+# read the way npm reads its arguments (safedeps_npm_read_args, both npm
+# versions where they differ). Sets INERT_READ_KIND to `read`, or to `dynamic`
+# when a word in it is one the shell decides at run time (it could be any
+# option, or a `--`) or the reading depends on something no table holds;
+# INERT_READ_ENDS to true when a word in it is only dashes, which ends npm's
+# options; INERT_READ_LAST to the last value ignore-scripts takes in each
+# reading (`unset` when none sets it); and INERT_READ_REST to everything else
+# the reading found: the positional words, the option values and the other
+# switches. Two statements with the same INERT_READ_REST differ at most in
+# ignore-scripts, which is how a placement of the flag is checked: it must
+# leave ignore-scripts true and change nothing else npm reads.
 inert_statement_reads() {
-  local joined pieces line words w dynamic=false asked=false last k ends=""
+  local joined pieces line words w k last rest dynamic=false
   local -a argv=() line_words=()
+  INERT_READ_KIND="" INERT_READ_ENDS=false INERT_READ_LAST="" INERT_READ_REST=""
   # The pieces view reads one statement per line, so the statement goes in as
   # the joined view: a newline inside quotes, a continuation and a comment
   # read as the shell reads them. Fed as written, `--message "a<newline>
@@ -1723,46 +1734,48 @@ inert_statement_reads() {
     for w in "${line_words[@]+"${line_words[@]}"}"; do
       [[ "${w}" == $'\002' ]] && w="" || w="${w//$'\002'/ }"
       case "${w}" in *[\$\`*?[{]*) dynamic=true ;; esac
-      [[ ! "${w}" =~ ^--+$ ]] || ends=" ends"
+      [[ ! "${w}" =~ ^--+$ ]] || INERT_READ_ENDS=true
       argv+=("${w}")
     done
   done <<< "${pieces}"
-  (( ${#argv[@]} > 1 )) || { printf 'open%s\n' "${ends}"; return 0; }
-  [[ "${dynamic}" == false ]] || { printf 'open%s\n' "${ends}"; return 0; }
+  INERT_READ_KIND=dynamic
+  [[ "${dynamic}" == false ]] || return 0
   for k in plain other; do
     if [[ "${k}" == other ]]; then
       safedeps_npm_other_applies "${argv[@]:1}" || break
-      safedeps_npm_as_other safedeps_npm_read_args "${argv[@]:1}" || { printf 'open%s\n' "${ends}"; return 0; }
+      safedeps_npm_as_other safedeps_npm_read_args "${argv[@]:1}" || return 0
     else
-      safedeps_npm_read_args "${argv[@]:1}" || { printf 'open%s\n' "${ends}"; return 0; }
+      safedeps_npm_read_args "${argv[@]:1}" || return 0
     fi
-    last=""
+    last=unset rest="${k}"
     for w in "${SAFEDEPS_G_NPM_SWITCHES[@]+"${SAFEDEPS_G_NPM_SWITCHES[@]}"}"; do
-      [[ "${w}" != ignore-scripts=* ]] || last="${w#*=}"
+      if [[ "${w}" == ignore-scripts=* ]]; then last="${w#*=}"; else rest+=$'\036'"s:${w}"; fi
     done
-    [[ "${last}" != false ]] || asked=true
-    if [[ "${last}" != true ]]; then
-      [[ "${asked}" == true ]] && printf 'asked%s\n' "${ends}" || printf 'open%s\n' "${ends}"
-      return 0
-    fi
+    for w in "${SAFEDEPS_G_NPM_WORDS[@]+"${SAFEDEPS_G_NPM_WORDS[@]}"}"; do rest+=$'\036'"w:${w}"; done
+    for w in "${SAFEDEPS_G_NPM_VALUES[@]+"${SAFEDEPS_G_NPM_VALUES[@]}"}"; do rest+=$'\036'"v:${w#*$'\037'}"; done
+    INERT_READ_LAST+="${last} " INERT_READ_REST+="${rest}"$'\035'
   done
-  printf 'settled%s\n' "${ends}"
+  INERT_READ_KIND=read
 }
 
 # Where `--ignore-scripts` goes for each npm install verb in <text>: one line
-# per verb, the offset just past the last word of that statement's own
-# arguments, before a `--` that ends its options, a redirection, a comment, a
-# heredoc operator or the separator that ends it. npm keeps the last value an
-# option is given (measured on npm 11.19.0: `--ignore-scripts=false`,
+# per verb, the offset of the byte the flag goes after. npm keeps the last
+# value an option is given (measured on npm 11.19.0: `--ignore-scripts=false`,
 # `--no-ignore-scripts`, `--no-ignore` and `--ign=false` after the flag each
-# ran the install scripts), so the flag has to come after every word that
-# could set it, including a word the shell expands at run time. Placed right
-# after the verb, it lost to all of them. A statement whose arguments already
-# leave the option true prints `-`, and one that asked for the scripts prints
-# its offset and ` asked`. Returns 3 when the end of a statement cannot be
-# found, so the caller records a downgrade.
+# ran the install scripts), so the first place tried is just past the last
+# word of the statement's own arguments, before a `--` that ends its options,
+# a redirection, a comment, a heredoc operator or the separator that ends it.
+# Placed right after the verb, it lost to all of them. A place stands only
+# when the statement read with the flag there leaves ignore-scripts true and
+# reads the same otherwise (inert_statement_reads), so an option that takes the
+# next word as its value cannot take the flag. A statement whose arguments
+# already leave the option true prints `-`, one that asked for the scripts
+# prints its offset and ` asked`, and one holding a word the shell decides at
+# run time prints two offsets, after the verb and after the last argument, each
+# with ` unverified`. Returns 3 when the end of a statement cannot be found or
+# no place leaves the option true, so the caller records a downgrade.
 inert_flag_offsets() {
-  local text="$1" pairs dir ends start bound at verdict stmt
+  local text="$1" pairs dir ends start bound at stmt cands p note want placed
   pairs=$(inert_verb_ends "${text}") || return 1
   [[ -n "${pairs}" ]] || return 0
   dir=$(mktemp -d "${TMPDIR:-/tmp}/safedeps-inert.XXXXXX") || {
@@ -1833,26 +1846,64 @@ inert_flag_offsets() {
       if (!b) b = n + 1
       at = b - 1
       while (at > e && (blank(C[at]) || blank(R[at]) || (T[at] == "\\" && T[at + 1] == "\n"))) at--
-      print s, b, at, (dd ? "dd" : "-")
+      # Every other place the flag could go, from the last argument back to the
+      # verb: the end of each word. A blank inside quotes reads as a word end
+      # here too; the reading of the placed flag rejects it, since it changes
+      # a value npm reads.
+      cands = at
+      for (k = at - 1; k > e; k--)
+        if (!blank(T[k]) && !blank(C[k]) && !blank(R[k]) && blank(T[k + 1])) cands = cands "," k
+      if (e < at) cands = cands "," e
+      print s, b, at, (dd ? "dd" : "-"), cands
     }') || [[ -z "${ends}" ]]; then
     [[ -z "${SAFEDEPS_SCAN_MARK:-}" ]] || printf 'failed\n' >> "${SAFEDEPS_SCAN_MARK}"
     rm -rf "${dir}"
     return 1
   fi
   rm -rf "${dir}"
-  while read -r start bound at _; do
+  while read -r start bound at _ cands; do
     [[ "${start}" != "?" ]] || return 3
     stmt="${text:start:bound-1-start}"
-    verdict=$(inert_statement_reads "${stmt}") || return 1
+    inert_statement_reads "${stmt}" || return 1
     # The statement stops before the `--` the end finder saw. A `--` its words
     # still show is one the flag would land after: one the finder could not
     # read, or one before the verb (`npm -- ci -- x`).
-    [[ "${verdict}" != *" ends" ]] || return 3
-    case "${verdict%% *}" in
-      settled) printf -- '-\n' ;;
-      asked) printf '%s asked\n' "${at}" ;;
-      *) printf '%s\n' "${at}" ;;
-    esac
+    [[ "${INERT_READ_ENDS}" != true ]] || return 3
+    if [[ "${INERT_READ_KIND}" != read ]]; then
+      # A word the shell decides at run time can be an option that sets
+      # ignore-scripts, one that takes the next word as its value, or a `--`.
+      # The flag goes both after the verb, where only a later word can undo
+      # it, and after the last argument, where only a word before it can, and
+      # the install is recorded as one whose flag nobody read.
+      printf '%s unverified\n' "${at}"
+      (( ${cands##*,} == at )) || printf '%s unverified\n' "${cands##*,}"
+      continue
+    fi
+    if [[ " ${INERT_READ_LAST}" != *" "[!t]* ]]; then
+      printf -- '-\n'
+      continue
+    fi
+    note=""
+    [[ " ${INERT_READ_LAST}" != *" false "* ]] || note=" asked"
+    want="${INERT_READ_REST}" placed=""
+    # The flag goes at the first place, from the last argument back, where npm
+    # reads the placed statement with ignore-scripts true and everything else
+    # as before. After the last argument it outlasts every word that sets the
+    # option; it fails there when the last word is an option that takes the
+    # next word as its value (`--cache`, `-C`, `--reg`), which then takes the
+    # flag instead (measured on npm 11.19.0: the install ran its scripts).
+    for p in ${cands//,/ }; do
+      inert_statement_reads "${stmt:0:p-start}"" --ignore-scripts""${stmt:p-start}" || return 1
+      [[ "${INERT_READ_KIND}" == read && "${INERT_READ_ENDS}" != true ]] || continue
+      [[ " ${INERT_READ_LAST}" != *" "[!t]* && "${INERT_READ_REST}" == "${want}" ]] || continue
+      placed="${p}"
+      break
+    done
+    # No place in the statement leaves the option true without changing what
+    # npm reads (`--no-ignore-scripts x --cache`): the caller records the
+    # downgrade.
+    [[ -n "${placed}" ]] || return 3
+    printf '%s%s\n' "${placed}" "${note}"
   done <<< "${ends}"
 }
 
@@ -1933,8 +1984,10 @@ inert_offsets_of() {
 # npm install the shell runs: in the command's own code, in a substitution, and
 # in a script it hands to `sh -c` or `eval`. Prints nothing when no verb was
 # found. Returns 4, printing nothing, when every install already leaves
-# ignore-scripts true, and 5, with the rewrite printed, when an install asked
-# for its scripts and the flag now overrides it. Returns 3, printing nothing,
+# ignore-scripts true. With the rewrite printed, it returns 5 when an install
+# asked for its scripts and the flag now overrides it, 6 when an install holds
+# a word the shell decides at run time, so nobody read whether the flag holds,
+# and 7 for both. Returns 3, printing nothing,
 # when an npm install sits where the rewrite cannot reach it -- a double-quoted
 # script with an escape or a substitution in it, a heredoc piped into a shell,
 # a statement whose end cannot be found -- so the caller records the downgrade
@@ -1946,7 +1999,7 @@ inert_offsets_of() {
 # in `sh -c '...'` beside a visible one ran its lifecycle scripts with nothing
 # recorded (caught in the release integration).
 inert_rewrite_in_place() {
-  local command="$1" lines offsets="" e note settled=false asked=false rc=0
+  local command="$1" lines offsets="" e note settled=false asked=false unverified=false rc=0
   lines=$(inert_offsets_of "${command}") || rc=$?
   (( rc == 0 )) || return "${rc}"
   if strip_heredoc_bodies "${command}" shell-bodies \
@@ -1957,6 +2010,7 @@ inert_rewrite_in_place() {
     [[ -n "${e}" ]] || continue
     if [[ "${e}" == - ]]; then settled=true; continue; fi
     [[ "${note}" != asked ]] || asked=true
+    [[ "${note}" != unverified ]] || unverified=true
     offsets+="${e}"$'\n'
   done <<< "${lines}"
   if [[ -z "${offsets}" ]]; then
@@ -1981,7 +2035,10 @@ inert_rewrite_in_place() {
     [[ -z "${SAFEDEPS_SCAN_MARK:-}" ]] || printf 'failed\n' >> "${SAFEDEPS_SCAN_MARK}"
     return 1
   fi
-  [[ "${asked}" != true ]] || return 5
+  rc=0
+  [[ "${asked}" != true ]] || rc=$(( rc + 1 ))
+  [[ "${unverified}" != true ]] || rc=$(( rc + 2 ))
+  (( rc == 0 )) || return $(( rc + 4 ))
 }
 
 # The statements of a command, one per line, as
@@ -4367,8 +4424,9 @@ guard_extract_specs() {
 }
 
 # How the current reading would make the command's npm installs inert, as one
-# value the readings can be compared on: none, append, downgrade, or `rewrite`
-# and the rewritten command on the next line.
+# value the readings can be compared on: none, downgrade, or `rewrite` (with
+# ` asked` and ` unverified` when they apply) and the rewritten command on the
+# next line.
 guard_reading_inert() {
   local outcome=none updated="" rc=0
   if command_is_injectable_npm_install "${COMMAND}"; then
@@ -4386,7 +4444,7 @@ guard_reading_inert() {
     # nothing to do.
     updated=$(inert_rewrite_in_place "${COMMAND}") || rc=$?
     case "${rc}" in
-      0|5) ;;
+      0|5|6|7) ;;
       3|4) updated="" ;;
       *) guard_mark_reading_failed; updated="" ;;
     esac
@@ -4398,10 +4456,11 @@ guard_reading_inert() {
       # closure), recorded once the command is known to run: the inert
       # guarantee is observably relaxed, never silently.
       outcome=downgrade
-    elif (( rc == 5 )); then
-      outcome="asked"$'\n'"${updated}"
     else
-      outcome="rewrite"$'\n'"${updated}"
+      outcome=rewrite
+      (( rc != 5 && rc != 7 )) || outcome+=" asked"
+      (( rc != 6 && rc != 7 )) || outcome+=" unverified"
+      outcome+=$'\n'"${updated}"
     fi
   fi
   printf -v "GUARD_INERT_$1" '%s' "${outcome}"
@@ -5077,6 +5136,7 @@ fi
 UPDATED_COMMAND=""
 INERT_DOWNGRADED=false
 INERT_ASKED=false
+INERT_UNVERIFIED=false
 if [[ "${GUARD_IS_CODEX}" != true ]]; then
   inert_first="" inert_seen=false
   for guard_reading in ${GUARD_READING_SET}; do
@@ -5090,8 +5150,12 @@ if [[ "${GUARD_IS_CODEX}" != true ]]; then
   done
   case "${inert_first}" in
     downgrade) INERT_DOWNGRADED=true ;;
-    rewrite$'\n'*) UPDATED_COMMAND="${inert_first#rewrite$'\n'}" ;;
-    asked$'\n'*) UPDATED_COMMAND="${inert_first#asked$'\n'}" INERT_ASKED=true ;;
+    rewrite*$'\n'*)
+      UPDATED_COMMAND="${inert_first#*$'\n'}"
+      inert_first="${inert_first%%$'\n'*}"
+      [[ "${inert_first}" != *" asked"* ]] || INERT_ASKED=true
+      [[ "${inert_first}" != *" unverified"* ]] || INERT_UNVERIFIED=true
+      ;;
   esac
 fi
 
@@ -5111,6 +5175,9 @@ if [[ "${INERT_DOWNGRADED}" == "true" ]]; then
 fi
 if [[ "${INERT_ASKED}" == "true" ]]; then
   log_advisory "pre-guard: an npm install in this command sets ignore-scripts false; safedeps put --ignore-scripts after it, where npm reads it last, so the install runs none of its scripts, and they run only if the rebuild after the closure verifies runs them. Command: ${COMMAND}"
+fi
+if [[ "${INERT_UNVERIFIED}" == "true" ]]; then
+  log_advisory "pre-guard: an npm install in this command holds a word the shell decides at run time (\$x, \$(...), a glob), which can set ignore-scripts, take the next word as its value, or end npm's options; safedeps put --ignore-scripts both right after the verb and after the last argument, and could not read whether npm keeps it true, so the install's scripts may run before the effect gate verifies. Command: ${COMMAND}"
 fi
 
 # Write per-install pending state for PostToolUse, keyed by (dir_hash, normalized

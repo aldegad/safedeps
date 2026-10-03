@@ -142,7 +142,7 @@ compute_dir_hash() {
 # dir hash + a hash of the command with the inert-install rewrite normalized out.
 compute_pending_key() {
   local dir_hash="$1" command="$2" norm cmd_hash
-  norm=$(printf '%s' "${command}" | sed -E -e ':a' -e 's/[[:space:]]+--ignore-scripts([;&|)}`"'"'"'])/\1/' -e 'ta' -e ':b' -e 's/[[:space:]]+--ignore-scripts([[:space:]]|$)/ /' -e 'tb' -e 's/[[:space:]]+/ /g; s/^ //; s/ $//')
+  norm=$(printf '%s' "${command}" | sed -E -e ':a' -e 's/[[:space:]]+--ignore-scripts([^=[:alnum:]_-]|$)/\1/' -e 'ta' -e 's/[[:space:]]+/ /g; s/^ //; s/ $//')
   if command -v md5sum >/dev/null 2>&1; then
     cmd_hash=$(printf '%s' "${norm}" | md5sum | cut -d' ' -f1)
   elif command -v md5 >/dev/null 2>&1; then
