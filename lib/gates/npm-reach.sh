@@ -34,8 +34,12 @@ safedeps_link_target() {
   fi
 }
 
-# safedeps_npm_reach_blocker <dir>: prints why npm run in <dir> could reach
-# past it, or nothing when it cannot.
+# safedeps_npm_reach_blocker <dir>: prints the fact about <dir> that keeps
+# safedeps from running npm there, or nothing. The answer goes into a message
+# as the reason, so it states only what was read from disk. What npm would do
+# with that fact is the reasoning in this header, never part of the answer:
+# two answers that carried a prediction ("npm would work in an enclosing
+# project", where a real npm stayed put) were each wrong somewhere.
 safedeps_npm_reach_blocker() {
   local dir="$1" name
 
@@ -50,7 +54,7 @@ safedeps_npm_reach_blocker() {
     fi
   done
   if [[ ! -f "${dir}/package.json" ]]; then
-    printf '%s has no package.json, so npm would work in an enclosing project' "${dir}"
+    printf '%s has no package.json' "${dir}"
     return 0
   fi
   if ! jq -e 'type == "object"' "${dir}/package.json" >/dev/null 2>&1; then
@@ -58,6 +62,6 @@ safedeps_npm_reach_blocker() {
     return 0
   fi
   if jq -e 'has("workspaces")' "${dir}/package.json" >/dev/null 2>&1; then
-    printf '%s/package.json declares workspaces; npm ci empties every workspace'"'"'s node_modules, and a workspace may lie outside the project' "${dir}"
+    printf '%s/package.json declares workspaces' "${dir}"
   fi
 }
