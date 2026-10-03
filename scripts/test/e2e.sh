@@ -1410,7 +1410,7 @@ exec "$(command -v jq)" "\$@"
 SHIM
 chmod +x "${markread_bin}/jq"
 markread_pre=$(grammar_pre "${markread_wt}" "npm install fixture-parent@1.0.0")
-[[ "$(jq -r '.hookSpecificOutput.updatedInput.command // empty' <<< "${markread_pre:-{\}}")" == 'npm install fixture-parent@1.0.0 --ignore-scripts' ]] \
+[[ "$(jq -r '.hookSpecificOutput.updatedInput.command // empty' <<< "${markread_pre:-{\}}")" == 'npm install --ignore-scripts fixture-parent@1.0.0 --ignore-scripts' ]] \
   || fail "the install whose record the post hook will not read is rewritten (${markread_pre})"
 printf '%s\n' "${tampered_lock}" > "${markread_wt}/package-lock.json"
 markread_post=$(PATH="${markread_bin}:${stub_bin}:${PATH}" grammar_post "${markread_wt}" "npm install fixture-parent@1.0.0")
@@ -1437,7 +1437,7 @@ for unstated_shape in v2172-true v2172-false string-true null-command record-3; 
   unstated_wt=$(mktemp -d "${tmp_root}/unstated-${unstated_shape}-wt.XXXXXX")
   grammar_project "${unstated_wt}"
   unstated_pre=$(grammar_pre "${unstated_wt}" "npm install fixture-parent@1.0.0")
-  [[ "$(jq -r '.hookSpecificOutput.updatedInput.command // empty' <<< "${unstated_pre:-{\}}")" == 'npm install fixture-parent@1.0.0 --ignore-scripts' ]] \
+  [[ "$(jq -r '.hookSpecificOutput.updatedInput.command // empty' <<< "${unstated_pre:-{\}}")" == 'npm install --ignore-scripts fixture-parent@1.0.0 --ignore-scripts' ]] \
     || fail "${unstated_shape}: the install is rewritten (${unstated_pre})"
   unstated_meta="${SAFEDEPS_HOME}/snapshots/$(jq -r '.snapshot_id' "$(grammar_pending "${unstated_wt}")")_meta.json"
   case "${unstated_shape}" in
@@ -1539,7 +1539,7 @@ cp "${same_wt}/package-lock.json" "${tmp_root}/same-second-lock.json"
 same_second=$(PATH="${same_bin}:${PATH}" grammar_pre "${same_wt}" "npm ci")
 same_first_cmd=$(jq -r '.hookSpecificOutput.updatedInput.command // empty' <<< "${same_first:-{\}}")
 same_second_cmd=$(jq -r '.hookSpecificOutput.updatedInput.command // empty' <<< "${same_second:-{\}}")
-[[ "${same_first_cmd}" == 'npm install fixture-parent@1.0.0 --ignore-scripts' && "${same_second_cmd}" == 'npm ci --ignore-scripts' ]] \
+[[ "${same_first_cmd}" == 'npm install --ignore-scripts fixture-parent@1.0.0 --ignore-scripts' && "${same_second_cmd}" == 'npm ci --ignore-scripts' ]] \
   || fail "both calls in one second are rewritten (${same_first}; ${same_second})"
 same_ids=$(for f in $(grep -lF "\"$(cd -P "${same_wt}" && pwd -P)\"" "${SAFEDEPS_HOME}/pending"/*.json); do jq -r .snapshot_id "${f}"; done | sort -u)
 [[ "$(grep -c . <<< "${same_ids}")" == 2 ]] || fail "two calls in one project within one second have a snapshot id each (${same_ids})"
