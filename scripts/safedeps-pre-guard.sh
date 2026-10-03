@@ -1082,6 +1082,7 @@ shell_lex() {
               st = 1; pre = 0; rd = 0; fn = 0; fr = 0; inp = 0; rp = 0; dbr = 0; cop = 0; tm = 0; fh = 0
             }
             else if (op == "<" || op == ">") {
+              fh = 0
               # `<(` and `>(` are process substitutions, whose `(` opens a
               # command; anything else is a redirection.
               # A redirection that comes first is the start of its command.
@@ -1103,11 +1104,11 @@ shell_lex() {
               # body glued to the head (`f()(pip install x)`) has no blank to
               # mark, so the `(` itself is the start, as a case close glued
               # to its arm is.
-              if ((fh || fn == 2 || br && cop == 2) && !(X[k+1] == "(" && (k + 2) in AR)) {
+              if ((fh || fn == 2 || br && cop == 2) && !(X[k+1] == "(" && (k + 2) in AR) && X[k-1] != "<" && X[k-1] != ">") {
                 for (j = k + 1; j <= N && (X[j] == " " || X[j] == "\t"); j++) ;
                 if (X[j] != ")") {
                   CS[k] = 1
-                  if (X[k-1] == " " || X[k-1] == "\t") mark_start(k, B); else B[k] = 1
+                  if (X[k-1] == " " || X[k-1] == "\t") mark_start(k, B); else if (X[k-1] == ")") B[k] = 1
                 }
               }
               if (X[k+1] == "(" && (k + 2) in AR) { }
