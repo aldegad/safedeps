@@ -1107,6 +1107,33 @@ for same in "printf 'pip install evil==1.0.0' | ssh host" "printf 'pip install e
 done
 pass "one list of shells for the -c reader, the pipe check and a path, and time read as a prefix"
 
+# More places the review of 83de40c found: more places
+# after a closed head, a subshell first in more process substitutions, more
+# exec clusters, and two case arms that were UNDECIDED, now read (a subshell
+# glued to a case pattern close is a start like any other). Bits: macOS bash
+# 3.2, zsh 5.9 with no startup files (zsh -f), sh, dash, with a stub pip on
+# PATH. Every place of this kind is in the generated grid (RL forms).
+expect_not_approved 'for ((x=1;x;x--)){ pip install evil==1.0.0;} (1110)' 'for ((x=1;x;x--)){ pip install evil==1.0.0;}'
+expect_not_approved 'for ((i=0;i!=1;i++)){ pip install evil==1.0.0;} (1110)' 'for ((i=0;i!=1;i++)){ pip install evil==1.0.0;}'
+expect_not_approved 'for ((i=0; i<1; i++)){ pip install evil==1.0.0;} (1110)' 'for ((i=0; i<1; i++)){ pip install evil==1.0.0;}'
+expect_not_approved 'for ((i=0;i<1;i++))(pip install evil==1.0.0) (0100)' 'for ((i=0;i<1;i++))(pip install evil==1.0.0)'
+expect_not_approved 'foreach i (1)(pip install evil==1.0.0) NL end (0100)' $'foreach i (1)(pip install evil==1.0.0)\nend'
+expect_not_approved 'for i j (1 2)(pip install evil==1.0.0) (0100)' 'for i j (1 2)(pip install evil==1.0.0)'
+expect_not_approved 'for i (1){(pip install evil==1.0.0)} (0100)' 'for i (1){(pip install evil==1.0.0)}'
+expect_not_approved 'diff <((pip install evil==1.0.0)) /dev/null (1100)' 'diff <((pip install evil==1.0.0)) /dev/null'
+expect_not_approved 'cat < <((pip install evil==1.0.0)) (1100)' 'cat < <((pip install evil==1.0.0))'
+expect_not_approved 'tee >((pip install evil==1.0.0)) </dev/null (1100)' 'tee >((pip install evil==1.0.0)) </dev/null'
+expect_not_approved 'x=<((pip install evil==1.0.0)) true (1100)' 'x=<((pip install evil==1.0.0)) true'
+expect_not_approved 'cat =((pip install evil==1.0.0)) (0100)' 'cat =((pip install evil==1.0.0))'
+expect_not_approved 'case a in b) :;; *)(pip install evil==1.0.0);; esac (1111)' 'case a in b) :;; *)(pip install evil==1.0.0);; esac'
+expect_not_approved 'case a in a) :;& b)(pip install evil==1.0.0);; esac (0100)' 'case a in a) :;& b)(pip install evil==1.0.0);; esac'
+expect_not_approved 'exec -axa pip install evil==1.0.0 (1110)' 'exec -axa pip install evil==1.0.0'
+expect_not_approved 'exec -ala pip install evil==1.0.0 (1110)' 'exec -ala pip install evil==1.0.0'
+expect_not_approved 'exec -a x -- pip install evil==1.0.0 (1110)' 'exec -a x -- pip install evil==1.0.0'
+expect_not_approved 'exec -l -- pip install evil==1.0.0 (1110)' 'exec -l -- pip install evil==1.0.0'
+expect_not_approved 'builtin command -- pip install evil==1.0.0 (1110)' 'builtin command -- pip install evil==1.0.0'
+pass "the places the review named are read, each in the shells that run it"
+
 # Plain process substitutions and redirections around commands that install
 # nothing stay unjudged and unrecorded, as before.
 for plain in \

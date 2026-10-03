@@ -1320,12 +1320,15 @@ shell_lex() {
               # the body (zsh runs `for ((...)) (pip install x)`), and so it
               # is after the word list of zsh `for NAME (WORDS)`: HC marks
               # the `)` that closed such a head, and a subshell glued to it
-              # has no blank to carry the start either.
+              # has no blank to carry the start either. Nor has one glued to
+              # a case pattern close (`*)(pip install x);;`): the start goes
+              # on the `(`, not on the close, which read again would let the
+              # pattern run on to the close of the subshell.
               body = ((fh || fn == 2 || br && cop == 2 || fr == 2 && fra || st && !pre && !fn && !fr && !rp && !dbr && !(k in CPO)) && !(X[k+1] == "(" && (k + 2) in AR) && !emptyahead(k))
               if (body) {
                 CS[k] = 1
                 if (X[k-1] == " " || X[k-1] == "\t") mark_start(k, B)
-                else if (k > 1 && ((fh || fn == 2 || br && cop == 2 || (k - 1) in HC) && X[k-1] == ")" || !word_sep(k - 1))) B[k] = 1
+                else if (k > 1 && ((fh || fn == 2 || br && cop == 2 || (k - 1) in HC) && X[k-1] == ")" || C[k-1] == "p" || !word_sep(k - 1))) B[k] = 1
               }
               if (!(X[k+1] == "(" && (k + 2) in AR)) PST[++pn] = body
               if (X[k+1] == "(" && (k + 2) in AR) { }
