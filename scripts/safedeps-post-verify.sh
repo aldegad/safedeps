@@ -1181,20 +1181,17 @@ describe_rebuild_blockers() {
   printf '%s' "${clauses}"
 }
 
-# Whether safedeps read that npm keeps the --ignore-scripts it put in this
-# install (the pre-guard's ignore_scripts_verified). A statement holding a word
-# the shell decides at run time gets the flag unread, and the words after it
-# can undo it, so its scripts may have run during the install: the warnings say
-# none ran only when the flag was read. A meta without the field reads as unread.
-# Prints <read> when it was read, and <unread> (by default, that safedeps ran
-# none and the install's own may have run) otherwise.
-SCRIPTS_UNREAD="safedeps ran no install script, but it could not read whether npm kept the --ignore-scripts it put in this install, so the install's own scripts may have run"
-scripts_not_run() {
-  if [[ "$(jq -r '.ignore_scripts_injected == true and .ignore_scripts_verified == true' "${META_FILE}" 2>/dev/null)" == true ]]; then
-    printf '%s' "$1"
-  else
-    printf '%s' "${2:-${SCRIPTS_UNREAD}}"
-  fi
+# What a warning adds about the install's own scripts: nothing, or the
+# pre-guard's unread warning (fact_inert_unread, the same line the rollback and
+# rebuild lines say). A warning says what safedeps did, never that no script
+# ran: where npm keeps the flag is decided by shell state the command text does
+# not hold (a function or alias from the agent's shell snapshot, .zshenv,
+# BASH_ENV), so that is not safedeps' to claim. A record that lacks the field
+# loses the warning and claims nothing more.
+inert_unread_note() {
+  local unread
+  unread=$(fact_inert_unread "${META_FILE}") || return 0
+  printf '. %s' "${unread}"
 }
 
 # The warning for the `fetched` packages npm_rebuild_unrecorded found: which
@@ -1213,7 +1210,7 @@ describe_fetched_elsewhere() {
     where="safedeps could not tell which registry this install fetched ${names} from (${unknown:-npm did not say}), so it cannot tell they came from the public npm registry"
     trust="where they came from"
   fi
-  printf '%s' "$(scripts_not_run "install scripts were not run" "npm rebuild was not run") in ${PROJECT_DIR} because ${where}$(scripts_not_run "" ". ${SCRIPTS_UNREAD}"). The install is kept"
+  printf '%s' "safedeps did not run npm rebuild in ${PROJECT_DIR} because ${where}$(inert_unread_note). The install is kept"
   [[ -n "${registries}" ]] || ! npm_fetch_sourced \
     || printf '. %s' "safedeps did not run them this time because the command runs code safedeps does not read or run (a file it sources, an eval, or npm under a PATH or NODE_OPTIONS of its own), and that code can change npm's environment where safedeps cannot see it. It has not recorded these bytes as withheld: whoever controls that code already runs code in this shell, so a record would protect nothing against them. The next install npm says fetches from the public npm registry rebuilds them as usual"
   printf '. %s' "If you trust ${trust}, confirm with the user before running \`npm rebuild ${names}\` yourself; do not rebuild without asking"
@@ -1241,7 +1238,7 @@ describe_withheld() {
     where="from a registry safedeps could not name (${unknown:-the record does not say})"
     trust="where they came from"
   fi
-  printf '%s' "$(scripts_not_run "install scripts were not run" "npm rebuild was not run") in ${PROJECT_DIR} because the bytes of ${names} here are the ones an install in ${projects} first fetched ${where}$(scripts_not_run "" ". ${SCRIPTS_UNREAD}"). They are kept. $(npm_withheld_scope). If you trust ${trust}, confirm with the user before running \`npm rebuild ${names}\` yourself; do not rebuild without asking"
+  printf '%s' "safedeps did not run npm rebuild in ${PROJECT_DIR} because the bytes of ${names} here are the ones an install in ${projects} first fetched ${where}$(inert_unread_note). They are kept. $(npm_withheld_scope). If you trust ${trust}, confirm with the user before running \`npm rebuild ${names}\` yourself; do not rebuild without asking"
 }
 
 # Runs `npm rebuild` in PROJECT_DIR when npm_rebuild_unrecorded finds nothing in
@@ -2088,7 +2085,7 @@ npm_withheld_judge() {
   if npm_fetch_sourced; then
     facts=$(jq -c '[.[] | select((type == "object" and .cause == "sourced") | not)]' <<< "${facts}" 2>/dev/null) \
       || facts="${NPM_FETCH_FACTS}"
-    log_advisory "post-verify: not recording the bytes this install brought into ${PROJECT_DIR} as withheld for want of npm's answer: the command runs code safedeps does not read or run (source, . or eval before the install, or npm under a PATH or NODE_OPTIONS of its own), and whoever controls that code already runs code in this shell. $(scripts_not_run "Their install scripts were not run this time" "safedeps ran none of their install scripts, but it could not read whether npm kept the --ignore-scripts it put in this install, so they may have run during the install")."
+    log_advisory "post-verify: not recording the bytes this install brought into ${PROJECT_DIR} as withheld for want of npm's answer: the command runs code safedeps does not read or run (source, . or eval before the install, or npm under a PATH or NODE_OPTIONS of its own), and whoever controls that code already runs code in this shell. safedeps did not run npm rebuild for them this time$(inert_unread_note)."
   fi
   inert=$(jq -r '.ignore_scripts_injected == true' "${META_FILE}" 2>/dev/null || printf 'false')
   # shellcheck disable=SC2016 # a jq program: jq expands its $names
