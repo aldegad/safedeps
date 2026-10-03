@@ -1837,13 +1837,14 @@ inert_flag_offsets() {
     return 1
   fi
   rm -rf "${dir}"
-  while read -r start bound at dd; do
+  while read -r start bound at _; do
     [[ "${start}" != "?" ]] || return 3
     stmt="${text:start:bound-1-start}"
     verdict=$(inert_statement_reads "${stmt}") || return 1
-    # A `--` the words show and the end finder did not is a terminator the flag
-    # would land after.
-    [[ "${dd}" == dd || "${verdict}" != *" ends" ]] || return 3
+    # The statement stops before the `--` the end finder saw. A `--` its words
+    # still show is one the flag would land after: one the finder could not
+    # read, or one before the verb (`npm -- ci -- x`).
+    [[ "${verdict}" != *" ends" ]] || return 3
     case "${verdict%% *}" in
       settled) printf -- '-\n' ;;
       asked) printf '%s asked\n' "${at}" ;;

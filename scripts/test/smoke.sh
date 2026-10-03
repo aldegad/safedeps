@@ -636,6 +636,14 @@ asked_before=$(grep -c 'sets ignore-scripts false; safedeps put --ignore-scripts
 run_hook_command "${tmp_root}/home-compound" "${tmp_root}/safe-compound" "npm install left-pad@1.3.0 --ignore-scripts=false" >/dev/null
 asked_after=$(grep -c 'sets ignore-scripts false; safedeps put --ignore-scripts after it' "${tmp_root}/safe-compound/advisory.log" 2>/dev/null || true)
 (( ${asked_after:-0} > ${asked_before:-0} )) || fail "an install that asked for its scripts is recorded when the flag overrides it"
+# A `--` before the verb leaves no place where npm reads the flag as an option:
+# the command is not rewritten, and the downgrade is recorded.
+downgrades_before=$(grep -c 'could not make every npm install in this command inert' "${tmp_root}/safe-compound/advisory.log" 2>/dev/null || true)
+inert_out=$(run_hook_command "${tmp_root}/home-compound" "${tmp_root}/safe-compound" "npm -- ci -- x")
+[[ -z "$(jq -r '.hookSpecificOutput.updatedInput.command // ""' <<< "${inert_out}")" ]] \
+  || fail "an install with a -- before its verb gets no rewrite that lands among npm's operands (got: ${inert_out:0:200})"
+downgrades_after=$(grep -c 'could not make every npm install in this command inert' "${tmp_root}/safe-compound/advisory.log" 2>/dev/null || true)
+(( ${downgrades_after:-0} > ${downgrades_before:-0} )) || fail "an install with a -- before its verb is recorded as an inert downgrade"
 pass "the inert flag is read from each install's own arguments and goes where npm reads it last; one already true is left as written"
 
 # A script the rewrite cannot map -- double-quoted with a substitution in it --
