@@ -428,7 +428,9 @@ rollback_node_modules() {
   # Only an npm project's node_modules is the rollback's to remove.
   [[ "${ROLLBACK_NPM_PROJECT}" == true ]] || return 0
   if [[ -L "${node_modules}" ]]; then
-    record_rollback_refusal "node_modules removal" "${node_modules} is a symbolic link to $(readlink "${node_modules}" 2>/dev/null || printf 'an unreadable target'); the packages the install wrote through it are still there. Remove them in the directory that owns them"
+    local target
+    target=$(readlink "${node_modules}" 2>/dev/null || printf 'an unreadable target')
+    record_rollback_refusal "node_modules removal" "${node_modules} is a symbolic link to ${target}; the packages this install wrote through the link are still in ${target}"
     return 0
   fi
   [[ -d "${node_modules}" ]] || return 0
@@ -437,19 +439,18 @@ rollback_node_modules() {
     return 0
   fi
   ROLLED_BACK+=("node_modules (removed)")
-  # The advice asks the same judgment the rebuild does, so it never tells the
-  # user to run an npm the gate would refuse to run itself.
-  local reach
-  reach=$(safedeps_npm_reach_blocker "${PROJECT_DIR}")
-  if [[ -n "${reach}" ]]; then
-    ROLLBACK_WARNINGS+=("node_modules was removed; do not run npm ci in ${PROJECT_DIR}: ${reach}. Reinstall by hand in a way that stays inside the project")
+  # The rollback says what it did and what the restore left, and gives no
+  # command: where a reinstall would write is npm's to decide (a bare npm ci in
+  # a workspace member empties the workspace root's node_modules), and a
+  # judgment that is silent when it does not block reads as "go ahead".
+  ROLLBACK_WARNINGS+=("node_modules was removed. Nothing is installed in ${PROJECT_DIR} until the next install. safedeps does not reinstall packages, and it does not judge where a reinstall would write; the gate checks the next install's packages like any other install")
+  if [[ ! -f "${PROJECT_DIR}/package.json" ]]; then
+    ROLLBACK_WARNINGS+=("after the restore, ${PROJECT_DIR} has no package.json: it had no npm manifest before this install")
   elif [[ ! -f "${PROJECT_DIR}/package-lock.json" && ! -f "${PROJECT_DIR}/npm-shrinkwrap.json" ]]; then
-    ROLLBACK_WARNINGS+=("node_modules was removed; ${PROJECT_DIR} has no lockfile after the restore, so npm ci cannot reinstall it -- npm install resolves package.json again, and the gate checks that install")
-  else
-    ROLLBACK_WARNINGS+=("node_modules was removed, not reinstalled: run npm ci in ${PROJECT_DIR} to reinstall it, and the gate checks that install like any other")
+    ROLLBACK_WARNINGS+=("after the restore, ${PROJECT_DIR} has a package.json and no lockfile")
   fi
   if jq -e 'type == "object" and has("workspaces")' "${PROJECT_DIR}/package.json" >/dev/null 2>&1; then
-    ROLLBACK_WARNINGS+=("the workspace members' own node_modules directories were not removed")
+    ROLLBACK_WARNINGS+=("${PROJECT_DIR}/package.json declares workspaces; the node_modules directories of its workspace members were not removed")
   fi
 }
 

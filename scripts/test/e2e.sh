@@ -776,9 +776,9 @@ if grep -q '^install' "${tmp_root}/walkup-npm-calls.log" 2>/dev/null; then
   fail "a rollback runs no npm install once it has removed the package.json the install created"
 fi
 [[ ! -e "${walk2_wt}/node_modules" ]] || fail "a rollback removes the project's own node_modules"
-grep -q 'do not run npm ci in .*has no package.json' <<< "${walk2_post}" || fail "with no package.json left, the rollback says not to run npm ci there"
-if grep -q 'to reinstall it, and the gate checks that install like any other' <<< "${walk2_post}"; then
-  fail "the rollback does not hand the walk up to the user as an npm ci instruction"
+grep -q 'after the restore, .* has no package.json' <<< "${walk2_post}" || fail "the rollback says the restore left no package.json"
+if grep -q 'npm ci' <<< "${walk2_post}"; then
+  fail "the rollback gives no reinstall command"
 fi
 pass "a rollback runs no npm install where npm would walk up to an enclosing project"
 
@@ -858,10 +858,9 @@ if grep -q '^ci' "${tmp_root}/ws-npm-calls.log" 2>/dev/null; then
   fail "a rollback runs no npm ci in a project that declares workspaces"
 fi
 [[ ! -e "${ws_wt}/node_modules" ]] || fail "a rollback removes a workspace project's own node_modules"
-grep -q "members' own node_modules directories were not removed" <<< "${ws_post}" || fail "the rollback says a workspace member's node_modules is left in place"
-grep -q 'do not run npm ci in .*declares workspaces' <<< "${ws_post}" || fail "the rollback does not tell the user to run npm ci where a workspace may lie outside"
-if grep -qE 'to reinstall it, and the gate checks|remove them before you reinstall' <<< "${ws_post}"; then
-  fail "the rollback's advice in a workspace project sends no npm and no removal outside"
+grep -q 'declares workspaces; the node_modules directories of its workspace members were not removed' <<< "${ws_post}" || fail "the rollback says a workspace member's node_modules is left in place"
+if grep -qE 'npm ci|remove them' <<< "${ws_post}"; then
+  fail "the rollback in a workspace project sends no npm and no removal anywhere"
 fi
 cmp -s "${ws_wt}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "the lockfile of a workspace project is still restored"
 pass "a rollback leaves a workspace outside the project alone"
@@ -889,7 +888,10 @@ EOF
 grep -q 'suspicious dependency change detected' <<< "${own_post}" || fail "reorg fires in an ordinary npm project"
 [[ ! -e "${own_wt}/node_modules" ]] || fail "a rollback removes the project's own node_modules"
 [[ -f "${own_outside}/kept-package/package.json" ]] || fail "removing node_modules does not follow a link inside it"
-grep -q 'node_modules was removed, not reinstalled: run npm ci' <<< "${own_post}" || fail "the rollback says to reinstall with npm ci"
+grep -q 'Nothing is installed in .* until the next install' <<< "${own_post}" || fail "the rollback says nothing is installed until the next install"
+if grep -q 'npm ci' <<< "${own_post}"; then
+  fail "the rollback gives no reinstall command in an ordinary project either"
+fi
 if grep -qE '^(ci|install)' "${tmp_root}/emptying-npm-calls.log" 2>/dev/null; then
   fail "a rollback runs no npm in an ordinary project either"
 fi
@@ -915,7 +917,7 @@ EOF
 )
 grep -q 'suspicious dependency change detected' <<< "${nosave_post}" || fail "reorg fires on a native binary in a --no-save install"
 [[ ! -e "${nosave_wt}/node_modules" ]] || fail "a rollback removes the node_modules of a --no-save install with no package.json"
-grep -q 'do not run npm ci in .*has no package.json' <<< "${nosave_post}" || fail "the --no-save rollback says not to run npm ci there"
+grep -q 'after the restore, .* has no package.json' <<< "${nosave_post}" || fail "the --no-save rollback says there is no package.json"
 pass "a rollback removes the node_modules a --no-save install wrote without a package.json"
 
 # The same --no-save install through a node_modules that links elsewhere: the
@@ -1650,8 +1652,11 @@ grep -q 'removing-node-modules' <<< "${journal_report}" \
   || fail "the unfinished-rollback report names the stage it was cut off at"
 grep -q 'fixture-evil@9.9.9' <<< "${journal_report}" \
   || fail "the unfinished-rollback report says why the rollback was started"
-grep -q 'Do not run `npm ci` there: .*node_modules is a symbolic link' <<< "${journal_report}" \
-  || fail "the unfinished-rollback report does not send npm ci into a linked node_modules"
+grep -q 'node_modules is a symbolic link to' <<< "${journal_report}" \
+  || fail "the unfinished-rollback report says the node_modules is a link"
+if grep -q 'npm ci' <<< "${journal_report}"; then
+  fail "the unfinished-rollback report gives no reinstall command"
+fi
 grep -q 'REORG INTERRUPTED' "${journal_home}/reorg.log" \
   || fail "an interrupted rollback lands in the same log the finished ones use"
 [[ -f "${journal_home}/rollback-incidents/test-interrupted.json" ]] \

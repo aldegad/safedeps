@@ -221,6 +221,35 @@ safedeps_journal_owner_state() {
 #
 # Prints nothing and returns 1 when there is nothing to report, so a caller can
 # use it as a condition.
+# What a project holds at report time, said as facts. The report gives no
+# command: where a reinstall would write is npm's to decide -- a bare npm ci in
+# a workspace member empties the workspace root's node_modules -- and safedeps
+# does not predict it.
+safedeps_journal_project_facts() {
+  local dir="$1" facts
+
+  if [[ -L "${dir}/node_modules" ]]; then
+    facts="${dir}/node_modules is a symbolic link to $(readlink "${dir}/node_modules" 2>/dev/null || printf 'an unreadable target')."
+  elif [[ -d "${dir}/node_modules" ]]; then
+    facts="${dir}/node_modules is a real directory."
+  else
+    facts="${dir} has no node_modules."
+  fi
+  if [[ -f "${dir}/package.json" ]]; then
+    if [[ -f "${dir}/package-lock.json" || -f "${dir}/npm-shrinkwrap.json" ]]; then
+      facts="${facts} It has a package.json and a lockfile."
+    else
+      facts="${facts} It has a package.json and no lockfile."
+    fi
+    if jq -e 'type == "object" and has("workspaces")' "${dir}/package.json" >/dev/null 2>&1; then
+      facts="${facts} Its package.json declares workspaces."
+    fi
+  else
+    facts="${facts} It has no package.json."
+  fi
+  printf '%s\n%s' "${facts}" "safedeps does not reinstall packages, and it does not judge where a reinstall would write; the gate checks the next install like any other."
+}
+
 safedeps_journal_report_unfinished() {
   local reorg_log="${1:-${SAFEDEPS_JOURNAL_HOME}/reorg.log}"
   local entry
@@ -321,22 +350,9 @@ as below. Until one of those happens, nothing about this project is settled."
       headline="A safedeps rollback of ${project_dir} did not finish."
       body_cause="The rollback was cut off — most likely the hook hit the runtime's timeout
 mid-rollback."
-      # The advice asks the judgment the rollback's own advice asks
-      # (lib/gates/npm-reach.sh, loaded by the hook before this file).
-      local reach="safedeps could not check whether npm can reach past ${project_dir}"
-      if declare -F safedeps_npm_reach_blocker >/dev/null 2>&1; then
-        reach=$(safedeps_npm_reach_blocker "${project_dir}")
-      fi
-      if [[ -n "${reach}" ]]; then
-        body_first_move="Check that the lockfile and package.json in ${project_dir} are the ones you
-expect. Do not run \`npm ci\` there: ${reach}. Remove its node_modules only
-if it is a real directory, and reinstall by hand in a way that stays inside
-the project."
-      else
-        body_first_move="Check that the lockfile and package.json in ${project_dir} are the ones you
-expect, then remove its node_modules (a real directory) and reinstall with
-\`npm ci\` there."
-      fi
+      body_first_move="Check that the lockfile and package.json in ${project_dir} are the ones you
+expect before you trust them. At the time of this report:
+$(safedeps_journal_project_facts "${project_dir}")"
     fi
 
     report="${report}${headline}

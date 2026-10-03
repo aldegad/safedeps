@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # One judgment of whether npm, run in a directory, can reach past it. The
-# rebuild after a verified inert install runs npm only where this answers
-# nothing, and every message that tells the user to run npm ci asks it first,
-# so the advice never hands back what the gate refuses to do itself.
+# rebuild after a verified inert install -- the one place safedeps still runs
+# npm itself -- runs only where this answers nothing. No message uses it to
+# tell the user what to run: it lists the ways it knows, and a silence from it
+# is not a promise (a workspace member's bare npm ci reaches the workspace
+# root, and a file: dependency's bin links reach its target).
 #
 # npm reaches past the files it is pointed at in these ways, each measured:
 # - it reads and writes package.json, the lockfiles and node_modules at the
