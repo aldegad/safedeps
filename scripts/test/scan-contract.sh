@@ -1283,22 +1283,26 @@ wordends_view() { shell_lex "$1" wordends "safedeps:scan-contract"; }
 word_end_failures=0
 word_end_checked=0
 check_word_ends() { # input label
-  local x="$1" reading mask tv k b LC_ALL=C
+  local x="$1" reading mask tv k b v LC_ALL=C
   for reading in bash zsh dash; do
     mask=$(SAFEDEPS_READING="${reading}" wordends_view "${x}"; printf 'X'); mask="${mask%X}"
-    tv=$(SAFEDEPS_READING="${reading}" stmts_view "${x}"; printf 'X'); tv="${tv%X}"
     if [[ ${#mask} -ne ${#x} ]]; then
       printf 'wordends (%s) changed the length of [%q] (%s)\n' "${reading}" "${x}" "$2" >&2
       word_end_failures=$((word_end_failures + 1))
       continue
     fi
-    for ((k = 0; k < ${#mask}; k++)); do
-      [[ "${mask:k:1}" == 1 ]] || continue
-      word_end_checked=$((word_end_checked + 1))
-      b="${tv:k:1}"
-      [[ "${b}" =~ ^${SAFEDEPS_G_WORD_END_CLASS}$ ]] && continue
-      printf 'word end (%s) at %d of [%q] (%s) is [%q] in the stmts view\n' "${reading}" "${k}" "${x}" "$2" "${b}" >&2
-      word_end_failures=$((word_end_failures + 1))
+    # The recognizers read the stmts view; the inert rewrite finds its verbs
+    # with the same tail on the live and flat views.
+    for v in stmts live flat; do
+      tv=$(SAFEDEPS_READING="${reading}" shell_lex "${x}" "${v}" "safedeps:scan-contract"; printf 'X'); tv="${tv%X}"
+      for ((k = 0; k < ${#mask}; k++)); do
+        [[ "${mask:k:1}" == 1 ]] || continue
+        word_end_checked=$((word_end_checked + 1))
+        b="${tv:k:1}"
+        [[ "${b}" =~ ^${SAFEDEPS_G_WORD_END_CLASS}$ ]] && continue
+        printf 'word end (%s) at %d of [%q] (%s) is [%q] in the %s view\n' "${reading}" "${k}" "${x}" "$2" "${b}" "${v}" >&2
+        word_end_failures=$((word_end_failures + 1))
+      done
     done
   done
 }
@@ -1335,7 +1339,7 @@ for got in "npm ci;" "(npm install)" "npm ci&>log"; do
   SAFEDEPS_READING=bash stmts_view "${got}" | grep -qE "${SAFEDEPS_G_NPM_INSTALL_RE}" \
     || fail "word ends: the npm recognizer reads [${got}] as an install"
 done
-pass "word ends: every byte where the lexer ends a word prints as a word end SAFEDEPS_G_END reads, on ${word_end_checked} word ends of the shell forms, rows, $((fuzz_cases * 2)) random inputs, in bash, zsh and dash"
+pass "word ends: every byte where the lexer ends a word prints as a word end SAFEDEPS_G_END reads in the stmts, live and flat views, on ${word_end_checked} word ends of the shell forms, rows, $((fuzz_cases * 2)) random inputs, in bash, zsh and dash"
 
 # --- one list of executables and one of shells ------------------------------------
 # A word is a manager or a shell by one list each in the grammar. The other
