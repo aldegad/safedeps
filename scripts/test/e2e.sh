@@ -1028,6 +1028,64 @@ grep -q 'suspicious dependency change detected' <<< "${written_post}" || fail "t
 grep -q "/nochange-wt/node_modules was removed" <<< "${written_post}" || fail "the rollback says node_modules was removed"
 pass "a rollback removes node_modules once the command has written into it"
 
+# A write that lists nothing new and finishes at once: the hidden lockfile is
+# rewritten in place right after the pre-guard, the way a fast `npm ci` that
+# replaces a package does. The shell's -nt compares whole seconds on bash 3.2
+# and called this unwritten; find compares the full timestamp.
+inplace_wt="${tmp_root}/inplace-wt"
+mkdir -p "${inplace_wt}/node_modules/installed-package" "${inplace_wt}/node_modules/.bin"
+printf '{"name":"installed-package","version":"1.0.0"}\n' > "${inplace_wt}/node_modules/installed-package/package.json"
+printf '{"name":"inplace-wt","lockfileVersion":3,"packages":{}}\n' > "${inplace_wt}/node_modules/.package-lock.json"
+printf '{"dependencies":{"fixture-parent":"1.0.0"}}\n' > "${inplace_wt}/package.json"
+printf '%s\n' "${tampered_lock}" > "${inplace_wt}/package-lock.json"
+scripts/safedeps-pre-guard.sh > /dev/null <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm ci"},"cwd":"${inplace_wt}"}
+EOF
+printf '{"name":"inplace-wt","lockfileVersion":3,"packages":{"node_modules/installed-package":{"version":"2.0.0"}}}\n' > "${inplace_wt}/node_modules/.package-lock.json"
+inplace_post=$(
+  PATH="${emptying_bin}:${PATH}" scripts/safedeps-post-verify.sh <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm ci"},"cwd":"${inplace_wt}"}
+EOF
+)
+grep -q 'suspicious dependency change detected' <<< "${inplace_post}" || fail "the gate rejects the unapproved closure after an in-place write"
+[[ ! -e "${inplace_wt}/node_modules" ]] || fail "a node_modules rewritten in place within the snapshot's second is removed"
+pass "a rollback sees a write that finished within the second the snapshot was taken in"
+
+# A confirmed snapshot older than what the command found. An approved install
+# is confirmed, the lockfile then changes outside the gate (a pull, a
+# checkout), and a command that writes nothing is read as an install. The
+# restore goes to the older snapshot, so it puts files back; the command still
+# wrote none of them, and node_modules stays.
+lag_wt="${tmp_root}/lag-wt"
+mkdir -p "${lag_wt}/node_modules/installed-package" "${lag_wt}/node_modules/.bin"
+printf '{"name":"installed-package","version":"1.0.0"}\n' > "${lag_wt}/node_modules/installed-package/package.json"
+printf '{"dependencies":{"fixture-parent":"1.0.0"}}\n' > "${lag_wt}/package.json"
+cp "${tmp_root}/revert-safe-lock.json" "${lag_wt}/package-lock.json"
+scripts/safedeps-pre-guard.sh > /dev/null <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${lag_wt}"}
+EOF
+lag_first_post=$(
+  PATH="${emptying_bin}:${PATH}" scripts/safedeps-post-verify.sh <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${lag_wt}"}
+EOF
+)
+if grep -q 'suspicious dependency change detected' <<< "${lag_first_post}"; then
+  fail "the approved install that sets the confirmed snapshot is not rolled back"
+fi
+printf '%s\n' "${tampered_lock}" > "${lag_wt}/package-lock.json"
+scripts/safedeps-pre-guard.sh > /dev/null <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm ci"},"cwd":"${lag_wt}"}
+EOF
+lag_post=$(
+  PATH="${emptying_bin}:${PATH}" scripts/safedeps-post-verify.sh <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm ci"},"cwd":"${lag_wt}"}
+EOF
+)
+grep -q 'suspicious dependency change detected' <<< "${lag_post}" || fail "the gate rejects the closure that changed outside it"
+[[ -f "${lag_wt}/node_modules/installed-package/package.json" ]] || fail "a file the restore put back from an older snapshot does not count as written by the command"
+grep -q "/lag-wt/node_modules was not removed" <<< "${lag_post}" || fail "the rollback says node_modules was not removed after restoring from an older snapshot"
+pass "a rollback to an older confirmed snapshot leaves node_modules in place when the command wrote nothing"
+
 # A project that keeps another manager's lockfile. After the restore it has a
 # package.json and no npm lockfile, and the rollback says exactly that: "no
 # lockfile" would be false next to a yarn.lock.
