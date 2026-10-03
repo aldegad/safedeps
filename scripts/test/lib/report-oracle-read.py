@@ -28,12 +28,25 @@ command for the flag, so neither does this file.
       when there is no string there, 3 when the file is not JSON.
 
   wrote <snapshot meta file>
-      The command a pre-guard record says safedeps wrote: updated_command,
-      when ignore_scripts_injected is true. Exit 1 when the record says it
-      wrote none, 3 when the file cannot be read or says it wrote one and
-      holds no string. The hooks read these records with jq; the oracle reads
-      them here (bamdori r18: the oracle found the record the way the hook
-      did, and both said "did not add" of a command safedeps had written).
+      The command a pre-guard record says safedeps wrote: updated_command.
+      Exit 1 when the record says it wrote none, 3 when the file is not one
+      JSON object, 4 when there is no file or the record does not state
+      either (see record). The hooks read these records with jq; the oracle
+      reads them here (bamdori r18: the oracle found the record the way the
+      hook did, and both said "did not add" of a command safedeps had
+      written).
+
+  said <snapshot meta file> <file holding the command the hook received>
+      The --ignore-scripts line the record allows: added, asked, none,
+      unstated (no line, the record does not state the fact), or unreadable
+      (no line, the file is not one JSON object).
+
+A record states a fact only as version 2 ("record": 2): ignore_scripts_injected
+false (the JSON false) is "safedeps wrote none", and true with updated_command a
+string is "safedeps wrote this command". Every other shape states neither: no
+file, a record of another version or none (v2.17.2's false did not mean no
+rewrite, and its true held no command), a string "true", a null command. That
+rule is read here from the parsed record, not with the hook's jq program.
 """
 import hashlib
 import json
@@ -117,16 +130,44 @@ def string(path, keys):
     return 0
 
 
-def wrote(path):
+def record(path):
+    """What a pre-guard record states: ("wrote", command), ("none", None),
+    ("unstated", None) or ("unreadable", None)."""
+    if not os.path.lexists(path):
+        return ("unstated", None)
     meta = load(path)
     if not isinstance(meta, dict):
-        return 3
-    if meta.get("ignore_scripts_injected") is not True:
-        return 1
+        return ("unreadable", None)
+    version = meta.get("record")
+    if isinstance(version, bool) or not isinstance(version, (int, float)) or version != 2:
+        return ("unstated", None)
+    injected = meta.get("ignore_scripts_injected")
     command = meta.get("updated_command")
-    if not isinstance(command, str):
-        return 3
-    emit(command)
+    if injected is False:
+        return ("none", None)
+    if injected is True and isinstance(command, str):
+        return ("wrote", command)
+    return ("unstated", None)
+
+
+def wrote(path):
+    kind, command = record(path)
+    if kind == "wrote":
+        emit(command)
+        return 0
+    return {"none": 1, "unreadable": 3}.get(kind, 4)
+
+
+def said(path, received_path):
+    kind, command = record(path)
+    if kind == "wrote":
+        try:
+            with open(received_path, "rb") as handle:
+                received = handle.read()
+        except OSError:
+            return 3
+        kind = "added" if command.encode("utf-8", "surrogatepass") == received else "asked"
+    emit(kind + "\n")
     return 0
 
 
@@ -135,6 +176,8 @@ def main():
         return string(sys.argv[2], sys.argv[3:])
     if sys.argv[1] == "wrote":
         return wrote(sys.argv[2])
+    if sys.argv[1] == "said":
+        return said(sys.argv[2], sys.argv[3])
     if sys.argv[1] == "packages":
         packages(sys.argv[2])
         return 0

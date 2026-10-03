@@ -3,7 +3,7 @@
 #
 # The oracle's green is a claim that no line the post hook printed is false or
 # outside the grammar. A check that cannot fail says nothing, so this script
-# makes it fail twenty-four ways: each mutation below puts into the hook the kind
+# makes it fail twenty-six ways: each mutation below puts into the hook the kind
 # of line review found by reading -- a clause behind a true fact, a claim with
 # no check, a line built outside the fact functions, a guessed cause, prose in
 # a rollback, a line only reorg.log carries, a line left out, a reorg.log entry
@@ -12,8 +12,10 @@
 # not the one safedeps wrote (F2), an --ignore-scripts line from the backstop,
 # which found no record of the command (F4), and a record of the rewrite that
 # holds the command as given (MarkOrig) or is not written (MarkSkip), and a
-# record the hook could not read said as "did not add" (Unread), and two
-# calls in one second given one snapshot id again (Same) -- and
+# record the hook could not read said as "did not add" (Unread), two
+# calls in one second given one snapshot id again (Same), a record that does
+# not state a fact answered by a default again (Default), and a record of
+# another version read as this one (Version) -- and
 # e2e must turn red on it, at the
 # oracle, with the reason named here. Two of them (P2, R3) passed
 # the whole suite while the check was a list of forbidden words; seven more
@@ -25,7 +27,7 @@
 # files), mutated, run and thrown away. The unmutated copy runs first and must
 # be green, so a red below is the mutation's and not the machine's.
 #
-# This is twenty-five e2e runs, so it is not part of `npm test`. Run it when a line the
+# This is twenty-seven e2e runs, so it is not part of `npm test`. Run it when a line the
 # hook prints, a fact function or the oracle changes.
 #
 #   scripts/test/report-mutations.sh            every mutation
@@ -39,7 +41,7 @@ trap 'rm -rf "${WORK}"' EXIT
 # mutation <name> sets the file, what the mutation is, the reason the oracle
 # must give, and the text to find and to put in its place. The text to find
 # occurs exactly once in the file, or the mutation is reported as not applying.
-MUTATIONS=(P2 R3 K Lie Bypass Head NoCheck Snap Cause Prose LogOnly Reasons Kept Silent JOmit RefuseSilent F1 F2 LogSilent F4 MarkOrig MarkSkip Unread Same)
+MUTATIONS=(P2 R3 K Lie Bypass Head NoCheck Snap Cause Prose LogOnly Reasons Kept Silent JOmit RefuseSilent F1 F2 LogSilent F4 MarkOrig MarkSkip Unread Same Default Version)
 
 # A mutation can change a second file too (M_FILE2, M_OLD2, M_NEW2).
 
@@ -204,8 +206,8 @@ $4; node_modules was restored from the confirmed snapshot
       M_FILE=lib/gates/report-facts.sh
       M_WHY='"added" said where the command this hook received is not the one safedeps wrote'
       M_RED="the pre-guard's record says it rewrote the command: true; the command this hook received is the one it wrote: false"
-      M_OLD='        elif (.tool_input.command | type) == "string" and .tool_input.command == $m.updated_command then "added"'
-      M_NEW='        elif (.tool_input.command | type) == "string" then "added"'
+      M_OLD='          (if .tool_input.command == $m.updated_command then "added"'
+      M_NEW='          (if true then "added"'
       ;;
     LogSilent)
       M_FILE=scripts/safedeps-post-verify.sh
@@ -241,8 +243,8 @@ $4; node_modules was restored from the confirmed snapshot
       M_FILE=lib/gates/report-facts.sh
       M_WHY='a record the hook could not read said as "did not add"'
       M_RED="an --ignore-scripts line from a hook whose read of the pre-guard's record failed"
-      M_OLD="        else \"asked\" end' 2>/dev/null) || return 1"
-      M_NEW="        else \"asked\" end' 2>/dev/null) || said=none"
+      M_OLD="        else \"unstated\" end' 2>/dev/null) || return 1"
+      M_NEW="        else \"unstated\" end' 2>/dev/null) || said=none"
       ;;
     Same)
       M_FILE=scripts/safedeps-pre-guard.sh
@@ -253,6 +255,25 @@ $4; node_modules was restored from the confirmed snapshot
       M_FILE2=scripts/safedeps-pre-guard.sh
       M_OLD2='PENDING_BASE="${PENDING_DIR}/${PENDING_KEY}__${SNAPSHOT_ID}"'
       M_NEW2='PENDING_BASE="${PENDING_DIR}/${PENDING_KEY}__${SNAPSHOT_ID}_$$"'
+      ;;
+    Default)
+      M_FILE=lib/gates/report-facts.sh
+      M_WHY='a record that does not state whether safedeps rewrote the command, and no record file, said as "did not add" by default'
+      M_RED="an --ignore-scripts line, and the pre-guard's record does not state it as a version 2 record"
+      M_OLD='  [[ -e "$1" || -L "$1" ]] || return 2
+'
+      M_NEW='  [[ -e "$1" || -L "$1" ]] || { printf '"'"'safedeps did not add --ignore-scripts to this install'"'"'; return 0; }
+'
+      M_FILE2=lib/gates/report-facts.sh
+      M_OLD2='    unstated) return 2 ;;'
+      M_NEW2='    unstated) printf '"'"'safedeps did not add --ignore-scripts to this install'"'"' ;;'
+      ;;
+    Version)
+      M_FILE=lib/gates/report-facts.sh
+      M_WHY='a record of another version, or of none, read as a version 2 record'
+      M_RED="an --ignore-scripts line, and the pre-guard's record does not state it as a version 2 record"
+      M_OLD='      | if $m.record != 2 then "unstated"'
+      M_NEW='      | if false then "unstated"'
       ;;
     *) return 1 ;;
   esac
