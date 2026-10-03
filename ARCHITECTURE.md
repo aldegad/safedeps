@@ -336,7 +336,8 @@ install done → safedeps-post-verify.sh
         ├─ all approved, clean, no suspicion ──► CONFIRM (new safe baseline)
         └─ unapproved / vulnerable / suspicious ──► REORG:
                  • restore lockfile from the last confirmed snapshot
-                 • remove the project's own node_modules (a real directory);
+                 • remove the project's own node_modules (a real directory,
+                   and only when the command wrote the project's node tree);
                    no package manager runs -- the next install reinstalls,
                    through the gate (a symbolic link is refused and named)
                  • append to reorg.log; message the agent

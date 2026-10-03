@@ -336,7 +336,8 @@ install 완료 → safedeps-post-verify.sh
         ├─ 전부 승인·clean·무의심 ──► CONFIRM (새 안전 baseline)
         └─ 미승인 / 취약 / 의심 ──► REORG:
                  • lockfile ← 마지막 confirmed snapshot
-                 • 프로젝트 자신의 node_modules(실제 디렉터리)를 지움;
+                 • 프로젝트 자신의 node_modules(실제 디렉터리)를 지움,
+                   명령이 프로젝트의 node 트리에 쓴 것이 있을 때만;
                    패키지 매니저는 돌지 않는다 — 다음 설치가 게이트를 지나
                    다시 깐다(심볼릭 링크면 거부하고 이름을 남긴다)
                  • reorg.log 기록; 에이전트에 경고
