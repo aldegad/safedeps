@@ -1106,6 +1106,14 @@ for same in "printf 'pip install evil==1.0.0' | ssh host" "printf 'pip install e
   expect_pass "${same}" "${same}"
 done
 pass "one list of shells for the -c reader, the pipe check and a path, and time read as a prefix"
+# time's options: `-p` to the reserved word, and in dash, where time is
+# /usr/bin/time, its options up to `--`, with -o and -f taking a value. Read
+# as a prefix that dropped only `-p`, `time -- pip install x` put `--` where
+# the command stands. Bits: macOS bash 3.2, zsh -f, sh, dash.
+for time_row in '0001|time --' '0001|time -p --' '0001|time -o out' '0001|time -l' '1011|time -p'; do
+  expect_not_approved "${time_row#*|} before an install (${time_row%%|*})" "${time_row#*|} pip install evil==1.0.0"
+done
+pass "time reads its options as the walk does"
 
 # More places the review of 83de40c found: more places
 # after a closed head, a subshell first in more process substitutions, more

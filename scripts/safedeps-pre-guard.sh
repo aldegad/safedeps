@@ -1173,7 +1173,11 @@ shell_lex() {
           # takes the switch any number of times (`-pp`). `-v` and `-V` only
           # say what the word is, so the install after them does not run.
           else if (cmdmode && w ~ /^-p+$/) hit = 1
-          else if (timemode && w == "-p") hit = 1
+          # time takes `-p` as the reserved word (bash, zsh), and in dash it is
+          # /usr/bin/time, whose options end at `--` and where -o and -f take
+          # a value; the walk skips every `-` word after time, and so does this.
+          else if (timemode && w == "--") { timemode = 0; hit = 1 }
+          else if (timemode && w ~ /^-/) { if (w ~ /^-[a-z]*[of]$/) takes = 1; hit = 1 }
           else if (assignat(s, k)) hit = 1
           else if (bw == "env") { envmode = 1; hit = 1 }
           else if (w == "exec") { envmode = 0; execmode = 1; cmdmode = 0; hit = 1 }
@@ -1387,7 +1391,10 @@ shell_lex() {
             cop = 0
             continue
           }
-          if (tm && w ~ /^-/) continue
+          # The options of time: `-p`, and in dash those of /usr/bin/time,
+          # where -o and -f take the next word (prefixes() reads the same).
+          if (tm == 2) { tm = 1; continue }
+          if (tm && w ~ /^-/) { if (w ~ /^-[a-z]*[of]$/) tm = 2; continue }
           tm = 0
           # A file descriptor word glued to a redirection belongs to it.
           if ((X[k] == "<" || X[k] == ">") && C[k] == "c" && fdword(k) == s) {
