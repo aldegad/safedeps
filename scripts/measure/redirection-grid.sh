@@ -60,6 +60,29 @@
 #              blank or glued, where the close has to end the command for the
 #              reserved word to be read. Three data forms: a `(` among the
 #              arguments, a bash extglob argument, and an array value.
+#   precommands  the words a command may stand behind and their options, as
+#              the manuals list them: bash `command [-pVv]`, `exec [-cl] [-a
+#              name]` and the reserved word `time [-p]`; zsh `command
+#              [-pvV]`, `exec [-cl] [-a argv0]` and the precommand modifiers
+#              `-`, `builtin`, `noglob`, `nocorrect`; dash `command [-p]
+#              [-vV]` and `exec`. Each option set, with `--` after it, and
+#              two of the words in a row; at the start, in a function body,
+#              and as data (arguments of echo).
+#   productions  every place a command list stands in the compound commands
+#              of the manuals -- bash Compound Commands (grouping,
+#              conditional and looping constructs, the arithmetic for), Shell
+#              Functions, Coprocesses and Pipelines (`!`, `time`); the zsh
+#              Complex Commands and their Alternate Forms (`for NAME (WORDS)`,
+#              `foreach`, `repeat`, the `{ }` bodies of `if` and `while`,
+#              `always`, anonymous and multi-name functions); Command and
+#              Process Substitution and zsh `=(...)` -- one row per production
+#              with %L where the list goes, crossed with what may stand first
+#              in that list (the command, a subshell, a group, `!`) and with
+#              a blank or nothing (%_) before it. The subshell table above
+#              was picked by hand and the next review found the places it
+#              left out (a `{` glued to `for ((...))`, a subshell glued to a
+#              case pattern close or to `for i (1)`, a subshell first inside
+#              a process substitution); this one is read off the grammars.
 #
 # Each form names its command word @@HEAD@@ and its arguments
 # `install evil==6.6.6` (see scripts/measure/shell-reading-measure.sh): the
@@ -343,6 +366,154 @@ data-stray	one	echo a (b) %H	true
 data-extglob	one	shopt -s extglob@NL@ls !(zz) %H	true
 data-array	one	a=(%H)	true'
 
+# id <TAB> the prefix. A prefix runs the command after it or does not; the
+# shells say which.
+PRECOMMANDS='cmd	command
+cmd-p	command -p
+cmd-pp	command -pp
+cmd-p-p	command -p -p
+cmd-dd	command --
+cmd-p-dd	command -p --
+cmd-v	command -v
+cmd-V	command -V
+cmd-pv	command -pv
+exec	exec
+exec-c	exec -c
+exec-l	exec -l
+exec-cl	exec -cl
+exec-lc	exec -lc
+exec-a	exec -a x
+exec-ax	exec -ax
+exec-aa	exec -aa
+exec-ca	exec -ca x
+exec-cax	exec -cax
+exec-a-c	exec -a x -c
+exec-la	exec -la x
+exec-dd	exec --
+exec-c-dd	exec -c --
+exec-a-dd	exec -a x --
+exec-a-ddname	exec -a -- --
+time	time
+time-p	time -p
+time-p-dd	time -p --
+time-dd	time --
+z-dash	-
+z-builtin	builtin
+z-noglob	noglob
+z-nocorrect	nocorrect
+env	env
+env-i	env -i
+env-u	env -u X
+env-uglued	env -uX
+env-assign	env X=1
+env-dd	env --
+env-i-dd	env -i --
+env-C	env -C /
+env-P	env -P /usr/bin
+env-v	env -v
+env-unset	env --unset=X
+env-chdir	env --chdir=/
+env-path	/usr/bin/env
+env-path-i	/usr/bin/env -i
+env-path-dd	/usr/bin/env --'
+# env -S STRING (GNU --split-string) runs the words of STRING and those after
+# it: id <TAB> template, %H the install, %C its command word, %A its arguments.
+ENV_SPLITS='S	env -S '"'"'%H'"'"'
+S-glued	env -S'"'"'%H'"'"'
+iS	env -iS '"'"'%H'"'"'
+S-rest	env -S '"'"'%C install'"'"' evil==6.6.6
+split-string	env --split-string='"'"'%H'"'"'
+path-S	/usr/bin/env -S '"'"'%H'"'"''
+# The words two prefixes in a row are drawn from (the first, then the second).
+PRECOMMAND_FIRSTS='command|command -p|command --|exec|exec -c|exec --|noglob|-|nocorrect|time -p'
+PRECOMMAND_SECONDS='command|command -p|command --|exec|exec -a x|exec --|noglob|-|env|time'
+# id <TAB> template (%P the prefix, %H the install) <TAB> data?
+PRECOMMAND_PLACES='start	%P %H	false
+func	f() { %P %H; }; f	false
+data	echo %P %H	true'
+
+# id <TAB> manual section <TAB> template: %L is the list slot, %_ a blank or
+# nothing, @NL@ a newline. Every loop ends after one round whatever the
+# install does, and nothing reads standard input.
+PRODUCTIONS='group	bash: Command Grouping	{%_%L; }
+subshell	bash: Command Grouping	(%_%L)
+if-cond	bash: Conditional Constructs	if%_%L; then :; fi
+if-then	bash: Conditional Constructs	if true; then%_%L; fi
+elif-cond	bash: Conditional Constructs	if false; then :; elif%_%L; then :; fi
+elif-then	bash: Conditional Constructs	if false; then :; elif true; then%_%L; fi
+else	bash: Conditional Constructs	if false; then :; else%_%L; fi
+while-cond	bash: Looping Constructs	while%_%L; do break; done
+while-do	bash: Looping Constructs	while true; do%_%L; break; done
+until-cond	bash: Looping Constructs	until%_%L; do break; done
+until-do	bash: Looping Constructs	until false; do%_%L; break; done
+for-in-do	bash: Looping Constructs	for i in 1; do%_%L; done
+for-args-do	bash: Looping Constructs	set -- a; for i do%_%L; done
+for-in-brace	bash: Looping Constructs	for i in 1; {%_%L; }
+arith-for-do	bash: Looping Constructs	for ((i=0;i<1;i++)); do%_%L; done
+arith-for-close-do	bash: Looping Constructs	for ((i=0;i<1;i++))%_do %L; done
+arith-for-close-brace	bash: Looping Constructs	for ((i=0;i<1;i++))%_{ %L; }
+arith-for-brace	bash: Looping Constructs	for ((i=0;i<1;i++)) {%_%L; }
+arith-for-spaced	bash: Looping Constructs	for (( i = 0 ; i < 1 ; i++ ))%_{ %L; }
+arith-for-down	bash: Looping Constructs	for ((x=1;x;x--))%_do %L; done
+arith-for-close-semi	bash: Looping Constructs	for ((i=0;i<1;i++))%_; do %L; done
+case-arm	bash: Conditional Constructs	case x in x)%_%L;; esac
+case-arm-paren	bash: Conditional Constructs	case x in (x)%_%L;; esac
+case-second	bash: Conditional Constructs	case a in b) :;; *)%_%L;; esac
+case-fall	bash: Conditional Constructs	case a in a) :;&%_b)%_%L;; esac
+case-test	bash: Conditional Constructs	case a in a) :;;&%_*)%_%L;; esac
+arith-and	bash: Conditional Constructs	((1))%_&& %L
+arith-semi	bash: Conditional Constructs	((1))%_; %L
+dbr-and	bash: Conditional Constructs	[[ -n x ]]%_&& %L
+sub-then	bash: Conditional Constructs	if (true)%_then %L; fi
+fn	bash: Shell Functions	f()%_{ %L; }; f
+fn-first	bash: Shell Functions	f() {%_%L; }; f
+fn-sub	bash: Shell Functions	f()%_(%L); f
+fn-keyword	bash: Shell Functions	function f%_{ %L; }; f
+fn-keyword-paren	bash: Shell Functions	function f()%_{ %L; }; f
+fn-keyword-if	bash: Shell Functions	function f if%_%L; then :; fi; f
+coproc	bash: Coprocesses	coproc%_%L; wait
+coproc-named	bash: Coprocesses	coproc c {%_%L; }; wait
+bang	bash: Pipelines	!%_%L
+time	bash: Pipelines	time%_%L
+time-p	bash: Pipelines	time -p%_%L
+and	bash: Lists of Commands	true &&%_%L
+or	bash: Lists of Commands	false ||%_%L
+pipe	bash: Pipelines	true |%_%L
+seq	bash: Lists of Commands	true;%_%L
+bg	bash: Lists of Commands	true &%_%L; wait
+newline	bash: Lists of Commands	true@NL@%L
+z-for-list	zsh: Alternate Forms	for i (1)%_%L
+z-for-list-two	zsh: Alternate Forms	for i j (1 2)%_%L
+z-foreach	zsh: Alternate Forms	foreach i (1)%_%L@NL@end
+z-for-in-short	zsh: Alternate Forms	for i in 1;%_%L
+z-arith-for-short	zsh: Alternate Forms	for ((i=0;i<1;i++))%_%L
+z-repeat	zsh: Alternate Forms	repeat 1%_%L
+z-repeat-brace	zsh: Alternate Forms	repeat 1 {%_%L; }
+z-if-brace	zsh: Alternate Forms	if [[ -n x ]] {%_%L; }
+z-if-dbr	zsh: Alternate Forms	if [[ -n x ]]%_%L
+z-if-arith	zsh: Alternate Forms	if ((1))%_%L
+z-if-sub	zsh: Alternate Forms	if (true)%_%L
+z-while-brace	zsh: Alternate Forms	i=; while [[ -z $i ]] {%_%L; i=1; }
+z-always	zsh: Complex Commands	{ : } always {%_%L; }
+z-try	zsh: Complex Commands	{%_%L; } always { : }
+z-anon	zsh: Functions	() {%_%L; }
+z-fn-two	zsh: Functions	f g () {%_%L; }; f
+cs	bash: Command Substitution	echo $(%_%L)
+cs-dq	bash: Command Substitution	echo "$(%_%L)"
+bq	bash: Command Substitution	echo `%_%L`
+ps-in	bash: Process Substitution	cat <(%_%L)
+ps-in-redir	bash: Process Substitution	cat < <(%_%L)
+ps-out	bash: Process Substitution	tee >(%_%L) </dev/null
+ps-assign	bash: Process Substitution	x=<(%_%L) true
+z-eq	zsh: Process Substitution	cat =(%_%L)
+data-sq	bash: Single Quotes	echo '"'"'if true; then%_%L; fi'"'"'
+data-dq	bash: Double Quotes	echo "{%_%L; }"'
+# id <TAB> what stands first in the list, %H the install
+FILLERS='cmd	%H
+sub	(%H)
+group	{ %H; }
+bang	! %H'
+
 # The heredoc bodies a form needs: one per delimiter B, in order.
 bodies() { # count
   local k out=""
@@ -388,8 +559,20 @@ subshell_form() {
     '{id: $id, cls: "S", label: $label, text: $text} + (if $data then {data: true} else {} end)'
 }
 
+# One form of the later tables: <id> <label> <template> <glue> <data?>, where
+# %S is a subshell running the install, %H the install and %_ the glue.
+place_form() {
+  local id="$1" label="$2" text="$3" glue="$4" data="$5"
+  text="${text//%S/(%H)}"
+  text="${text//%H/@@HEAD@@ ${ARGS}}"
+  text="${text//%_/${glue}}"
+  text="${text//@NL@/$'\n'}"$'\n'
+  jq -nc --arg id "${id}" --arg label "${label}" --arg text "${text}" --argjson data "${data}" \
+    '{id: $id, cls: "P", label: $label, text: $text} + (if $data then {data: true} else {} end)'
+}
+
 generate() {
-  local op spell target place tpl redir pid tid ttext wid kind manual setup word kinds data sid glue
+  local op spell target place tpl redir pid tid ttext wid kind manual setup word kinds data sid glue pre a b cid ctpl xid xtext tbl
   {
     while IFS=$'\t' read -r op spell target; do
       redir="${spell//T/${target}}"
@@ -427,6 +610,33 @@ generate() {
         subshell_form "RS-${sid}" "subshell at ${sid}" "${tpl}" " " "${data}"
       fi
     done <<< "${SUBSHELLS}"
+    while IFS=$'\t' read -r pid pre; do
+      while IFS=$'\t' read -r sid tpl data; do
+        place_form "RP-${pid}-${sid}" "prefix ${pre} at ${sid}" "${tpl//%P/${pre}}" " " "${data}"
+      done <<< "${PRECOMMAND_PLACES}"
+    done <<< "${PRECOMMANDS}"
+    while IFS= read -r a; do
+      while IFS= read -r b; do
+        [[ "${a}" != "${b}" ]] || continue
+        pid="${a// /_}+${b// /_}"
+        place_form "RP2-${pid}" "prefixes ${a} then ${b}" "${a} ${b} %H" " " false
+      done < <(tr '|' '\n' <<< "${PRECOMMAND_SECONDS}")
+    done < <(tr '|' '\n' <<< "${PRECOMMAND_FIRSTS}")
+    while IFS=$'\t' read -r pid tpl; do
+      place_form "RE-${pid}" "env ${pid}" "${tpl//%C/@@HEAD@@}" " " false
+    done <<< "${ENV_SPLITS}"
+    while IFS=$'\t' read -r pid manual tpl; do
+      data=false
+      [[ "${pid}" != data-* ]] || data=true
+      while IFS=$'\t' read -r xid xtext; do
+        if [[ "${tpl}" == *%_* ]]; then
+          place_form "RL-${pid}-${xid}-blank" "${xid} in ${pid} (${manual}), after a blank" "${tpl//%L/${xtext}}" " " "${data}"
+          place_form "RL-${pid}-${xid}-glued" "${xid} in ${pid} (${manual}), glued" "${tpl//%L/${xtext}}" "" "${data}"
+        else
+          place_form "RL-${pid}-${xid}" "${xid} in ${pid} (${manual})" "${tpl//%L/${xtext}}" " " "${data}"
+        fi
+      done <<< "${FILLERS}"
+    done <<< "${PRODUCTIONS}"
   } | jq -s '.'
 }
 
