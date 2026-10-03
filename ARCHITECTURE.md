@@ -424,7 +424,8 @@ install done → safedeps-post-verify.sh
         └─ unapproved / vulnerable / suspicious ──► REORG:
                  • restore lockfile from the last confirmed snapshot, or from
                    just before the command when there is none (and say so)
-                 • remove the project's own node_modules (a real directory);
+                 • remove the project's own node_modules (a real directory,
+                   and only when the command wrote the project's node tree);
                    no package manager runs -- the next install reinstalls,
                    through the gate (a symbolic link is refused and named)
                  • append to reorg.log; message the agent
