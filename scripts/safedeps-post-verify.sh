@@ -2405,13 +2405,20 @@ report_snapshot_line() {
 # changed, when nothing did; a missing install trace, unless the node_modules
 # step already said it; and whether the install ran without its scripts, as
 # far as this hook saw.
+#
+# The last one is said only where this hook found the pre-guard's record of
+# this command. The backstop runs because it found none, and "did not add"
+# said there was false whenever the record existed under a key this hook did
+# not compute (`sh -c 'npm ci'`, rewritten, kept its pending state under
+# another key; bamdori r18 F4). Without the record there is nothing to say
+# about what safedeps did, so nothing is said.
 report_rollback_tail() {
   report_changed_nothing
   if [[ "${NPM_TRACE_ABSENT}" == true && "${TRACE_LINE_SAID}" != true ]]; then
     report_say "${TRACE_LINE}"
     TRACE_LINE_SAID=true
   fi
-  report_say "$(fact_inert "${META_FILE}" "${INPUT}")"
+  [[ "${BACKSTOP_INSTALL:-false}" == true ]] || report_say "$(fact_inert "${META_FILE}" "${INPUT}")"
 }
 
 # The reorg.log entry and the message of a rollback, from the same lines.
@@ -2432,7 +2439,9 @@ report_rollback() {
   ${snapshot_line}
 $(printf '  %s\n' "${ROLLBACK_WARNINGS[@]}")
 LOG_EOF
-  if [[ "${snapshot_line}" != *', a confirmed snapshot' ]]; then
+  # Only the rollback that consumed this command's record reaches this: the
+  # backstop restores a confirmed snapshot and has no record to speak from.
+  if [[ "${snapshot_line}" != *', a confirmed snapshot' && "${BACKSTOP_INSTALL:-false}" != true ]]; then
     log_advisory "post-verify REORG with no confirmed snapshot in ${PROJECT_DIR}: ${snapshot_line}; $(fact_inert "${META_FILE}" "${INPUT}"). Reasons: $4"
   fi
   details=$(fact_file "Details log" "${GUARD_DIR}/reorg.log")
@@ -2610,7 +2619,7 @@ run_command_independent_backstop() {
   if [[ -z "${rollback_id}" ]] || [[ ! -f "${SNAPSHOT_DIR}/${rollback_id}_meta.json" ]]; then
     # Detected, but no known-good baseline to restore — fail LOUD, never silent.
     log_advisory "post-verify BACKSTOP FLAGGED (no baseline): parser-missed install in ${PROJECT_DIR} — ${reason_str%%; }. No confirmed snapshot to roll back to; left in place."
-    emit_system_message "safedeps: suspicious dependency change detected after a command the command gate did not recognize. No rollback ran.
+    emit_system_message "safedeps: suspicious dependency change detected; this hook found no install record of this command from before it ran. No rollback ran.
 
 Detected problems:
 ${reason_str%%; }
@@ -2643,7 +2652,7 @@ $(backstop_no_baseline_line "${rollback_id}")"
   report_rollback_tail
 
   report_rollback "REORG executed (command-independent backstop)" \
-    "safedeps: suspicious dependency change detected after a command the command gate did not recognize. A rollback ran." \
+    "safedeps: suspicious dependency change detected; this hook found no install record of this command from before it ran. A rollback ran." \
     "${rollback_id}" "${reason_str%%; }"
 
   # The rollback finished and is about to report itself, so there is nothing

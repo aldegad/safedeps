@@ -4695,18 +4695,21 @@ cat > "${SNAPSHOT_DIR}/${SNAPSHOT_ID}_meta.json" << META_EOF
 META_EOF
 
 # mark_ignore_scripts_injected <the command safedeps wrote>: the PostToolUse
-# hook says "added" only where the command it receives is these bytes.
+# hook says "added" only where the command it receives is these bytes. Returns
+# non-zero when the record was not written, and the caller then writes no
+# rewrite: a rewrite with no record made the post hook's "did not add" false.
 mark_ignore_scripts_injected() {
   local meta_file="${SNAPSHOT_DIR}/${SNAPSHOT_ID}_meta.json"
   local temp_file
 
-  [[ -f "${meta_file}" ]] || return 0
-  temp_file=$(mktemp "${SNAPSHOT_DIR}/.${SNAPSHOT_ID}_meta.XXXXXX") || return 0
-  if jq --arg command "$1" '.ignore_scripts_injected = true | .updated_command = $command' "${meta_file}" > "${temp_file}"; then
-    mv -f "${temp_file}" "${meta_file}"
-  else
-    rm -f "${temp_file}"
+  [[ -f "${meta_file}" ]] || return 1
+  temp_file=$(mktemp "${SNAPSHOT_DIR}/.${SNAPSHOT_ID}_meta.XXXXXX") || return 1
+  if jq --arg command "$1" '.ignore_scripts_injected = true | .updated_command = $command' "${meta_file}" > "${temp_file}" \
+    && mv -f "${temp_file}" "${meta_file}"; then
+    return 0
   fi
+  rm -f "${temp_file}"
+  return 1
 }
 
 # --- Pre-flight security checks on the command itself ---
@@ -5073,10 +5076,12 @@ CURRENT_STATE=$(jq -n --arg sid "${SNAPSHOT_ID}" --arg pdir "${PROJECT_DIR}" --a
 write_state_file "${PENDING_BASE}.json" "${CURRENT_STATE}"
 
 if [[ -n "${UPDATED_COMMAND}" ]]; then
-  mark_ignore_scripts_injected "${UPDATED_COMMAND}"
-  jq -nc --arg command "${UPDATED_COMMAND}" \
-    '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"allow",updatedInput:{command:$command}}}'
-  exit 0
+  if mark_ignore_scripts_injected "${UPDATED_COMMAND}"; then
+    jq -nc --arg command "${UPDATED_COMMAND}" \
+      '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"allow",updatedInput:{command:$command}}}'
+    exit 0
+  fi
+  log_advisory "pre-guard: could not record the command safedeps would write in ${SNAPSHOT_DIR}/${SNAPSHOT_ID}_meta.json, so it was not rewritten: the install runs as given, without --ignore-scripts, and the effect gate falls back to detect-and-rollback. Command: ${COMMAND}"
 fi
 
 # Allow the command to proceed — PostToolUse will verify the result
