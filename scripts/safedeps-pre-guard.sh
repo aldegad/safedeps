@@ -4623,9 +4623,13 @@ if declare -F safedeps_npm_workspace_manifests >/dev/null; then
   fi
 fi
 
-# Save pre-install listings for diff-based detection (avoids mtime-based find -newer)
+# Save pre-install listings for diff-based detection (avoids mtime-based find -newer).
+# -H follows node_modules itself when it is a link and no link below it: the
+# post hook lists the same way, and without -H both listings of a linked
+# node_modules were empty, so "lists no package.json the snapshot lacks" held
+# without looking at anything.
 if [[ -d "${PROJECT_DIR}/node_modules" ]]; then
-  find "${PROJECT_DIR}/node_modules" -maxdepth 3 -name "package.json" 2>/dev/null | sort > "${SNAPSHOT_DIR}/${SNAPSHOT_ID}_packages.list"
+  find -H "${PROJECT_DIR}/node_modules" -maxdepth 3 -name "package.json" 2>/dev/null | sort > "${SNAPSHOT_DIR}/${SNAPSHOT_ID}_packages.list"
   { ls "${PROJECT_DIR}/node_modules/.bin/" 2>/dev/null || true; } | sort > "${SNAPSHOT_DIR}/${SNAPSHOT_ID}_bins.list"
 else
   touch "${SNAPSHOT_DIR}/${SNAPSHOT_ID}_packages.list"
