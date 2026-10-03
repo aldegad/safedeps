@@ -44,6 +44,10 @@ GUARD="scripts/safedeps-pre-guard.sh"
 src=$(sed -n '/^shell_lex() {/,/^}/p' "${GUARD}")
 [[ "${src}" == *"shell_lex() {"* ]] || { printf 'shell_lex not found in %s\n' "${GUARD}" >&2; exit 2; }
 eval "${src}"
+# The lexer reads the lists of the grammar (the shells, the executables), as
+# it does in the guard.
+# shellcheck source=lib/install-grammar.sh
+source lib/install-grammar.sh
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/safedeps-fuzz.XXXXXX")
 trap 'rm -rf "${work}"' EXIT

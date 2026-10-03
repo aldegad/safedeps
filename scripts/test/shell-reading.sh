@@ -85,6 +85,10 @@ pass "control: the harness separates a judged install from data"
 lex_src=$(sed -n '/^shell_lex() {/,/^}/p' scripts/safedeps-pre-guard.sh)
 [[ "${lex_src}" == *"shell_lex() {"* ]] || fail "shell_lex not found in the guard (renamed? then update this battery)"
 eval "${lex_src}"
+# The lexer reads the lists of the grammar (the shells, the executables), as
+# it does in the guard.
+# shellcheck source=lib/install-grammar.sh
+source lib/install-grammar.sh
 reading_shows_tail() { # reading text
   local v
   for v in live cscripts shell-bodies unprefixed; do

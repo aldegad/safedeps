@@ -1083,6 +1083,29 @@ got=$(gate_reason 'env -S "$X"')
 [[ "${got}" == "pass"* ]] || fail "an env -S string decided at run time with no manager named runs, recorded (got: ${got:0:80})"
 pass "env reads its options before the command, and its -S string is read as a script"
 
+# Whether a word is a shell is one closed list (SAFEDEPS_G_SHELLS), read by
+# the `-c` script reader, the pipe check and the path in front of a shell. The
+# pipe check knew bash, sh and zsh, and did not read `time`, so these passed
+# while every shell measured (macOS bash 3.2, zsh 5.9, sh, dash; touch in
+# place of the install) runs them; `| time -p sh` runs in all but zsh. The
+# `-c` reader took any name ending in sh, ssh among them; the list keeps it
+# out, and the ssh forms read as they did.
+for pipe_form in \
+  "printf 'pip install evil==1.0.0' | dash" "printf 'pip install evil==1.0.0' | ksh" \
+  "printf 'pip install evil==1.0.0' | csh" "printf 'pip install evil==1.0.0' | /bin/dash" \
+  "printf 'pip install evil==1.0.0' | time sh" "printf 'pip install evil==1.0.0' | time -p sh"
+do
+  [[ "$(gate_decision "${pipe_form}")" == deny ]] || fail "install text piped into a shell is denied: ${pipe_form}"
+done
+for shell_c in ksh csh tcsh fish zsh /bin/dash; do
+  expect_not_approved "${shell_c} -c with an install" "${shell_c} -c 'pip install evil==1.0.0'"
+done
+expect_not_approved "a shell -c behind ssh, read as before" "ssh host sh -c 'pip install evil==1.0.0'"
+for same in "printf 'pip install evil==1.0.0' | ssh host" "printf 'pip install evil==1.0.0' | ssh host sh" \
+  "ssh -c aes128-ctr host 'pip install evil==1.0.0'" "echo hello | sh"; do
+  expect_pass "${same}" "${same}"
+done
+pass "one list of shells for the -c reader, the pipe check and a path, and time read as a prefix"
 
 # Plain process substitutions and redirections around commands that install
 # nothing stay unjudged and unrecorded, as before.

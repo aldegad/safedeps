@@ -92,6 +92,10 @@ shipped_src=$(sed -n '/^shell_lex() {/,/^}/p; /^command_scan_text() {/,/^}/p' "$
   || fail "shell_lex and command_scan_text not found in ${GUARD} (renamed? then update this battery)"
 eval "${shipped_src}"
 declare -F command_scan_text > /dev/null || fail "extracted command_scan_text did not define the function"
+# The lexer reads the lists of the grammar (the shells, the executables), as
+# it does in the guard.
+# shellcheck source=lib/install-grammar.sh
+source "${ROOT_DIR}/lib/install-grammar.sh"
 # This battery is a driver of its own: the reference below states the bash
 # reading, so that is the reading it checks the shipped lexer under. The zsh
 # and dash readings are checked by the view properties further down.
@@ -1274,8 +1278,6 @@ pass "stmts view: idempotent and length-preserving on ${grammar_closed} closed r
 # are held to it in every reading. The tails used to be `([[:space:]]|$)`, a
 # set of the recognizers' own: `npm ci;`, `(npm install)` and `then npm ci;
 # fi` were no install to any of them.
-# shellcheck source=lib/install-grammar.sh
-source "${ROOT_DIR}/lib/install-grammar.sh"
 wordends_view() { shell_lex "$1" wordends "safedeps:scan-contract"; }
 word_end_failures=0
 word_end_checked=0
@@ -1333,6 +1335,33 @@ for got in "npm ci;" "(npm install)" "npm ci&>log"; do
     || fail "word ends: the npm recognizer reads [${got}] as an install"
 done
 pass "word ends: every byte where the lexer ends a word prints as a word end SAFEDEPS_G_END reads, on ${word_end_checked} word ends of the shell forms, rows, $((fuzz_cases * 2)) random inputs, in bash, zsh and dash"
+
+# --- one list of executables and one of shells ------------------------------------
+# A word is a manager or a shell by one list each in the grammar. The other
+# places that name managers -- the install body, the ecosystem of a
+# statement, the pipe check's install text -- must agree with it on every
+# spelling, or a path the lexer reads as a manager is one no recognizer reads
+# (or the other way round).
+guard_src_lists=$(sed -n '/^PIPE_MANAGER_RE=/p' "${GUARD}")
+eval "${guard_src_lists}"
+[[ -n "${PIPE_MANAGER_RE:-}" ]] || fail "PIPE_MANAGER_RE not found in ${GUARD}"
+for name in npm npx pnpm pnpx yarn bun bunx pip pip3 pip3.11 poetry uv uvx pipx pipenv cargo go gem bundle mvn dotnet PIP Npm; do
+  [[ "$(tr '[:upper:]' '[:lower:]' <<< "${name}")" =~ ^(${SAFEDEPS_G_EXECUTABLES})$ ]] \
+    || fail "${name} is an executable of the grammar"
+  grep -qiE "^${PIPE_MANAGER_RE}\$" <<< "${name}" || fail "${name} is a manager to the pipe check too"
+  grep -qiE "(^|[^[:alnum:]])${name}([^[:alnum:]]|\$)" <<< "${SAFEDEPS_G_INSTALL_BODY//\\/}" \
+    || [[ "${name}" == pip3* || "${name}" == PIP || "${name}" == Npm ]] || fail "${name} has an install body"
+done
+for name in npm.cmd pipx-foo pips gox; do
+  [[ ! "${name}" =~ ^(${SAFEDEPS_G_EXECUTABLES})$ ]] || fail "${name} is no executable of the grammar"
+done
+for name in sh bash dash ksh mksh yash posh zsh csh tcsh fish; do
+  [[ "${name}" =~ ^(${SAFEDEPS_G_SHELLS})$ ]] || fail "${name} is a shell of the grammar"
+done
+for name in ssh sshd bash5 shx; do
+  [[ ! "${name}" =~ ^(${SAFEDEPS_G_SHELLS})$ ]] || fail "${name} is no shell of the grammar"
+done
+pass "one list of executables, matched whole and ignoring case, and one closed list of shells"
 
 # --- the words the spec extractor reads -----------------------------------------
 # The pieces view hands the extractor each statement's words: redirections out,

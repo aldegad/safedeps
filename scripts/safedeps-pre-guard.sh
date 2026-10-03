@@ -454,12 +454,14 @@ shell_lex() {
     fi
     div="${memo}.div"
   fi
-  # The executables the grammar names, for the unprefixed view: a command
-  # word that is a path to one of them reads as the bare name (see prefixes()
-  # in the awk). Empty where the grammar is not loaded.
-  local exre=""
-  [[ -z "${SAFEDEPS_G_EXECUTABLES:-}" ]] || exre="^(${SAFEDEPS_G_EXECUTABLES}|sh|bash|zsh)\$"
-  if ! out=$(printf '%s\n' "${text}" | LC_ALL=C awk -v view="${view}" -v policy="${policy}" -v marker="${marker}" -v divfile="${SAFEDEPS_LEX_DIVERGE:-}" -v divmemo="${div}" -v smark="${SAFEDEPS_SCAN_MARK:-}" -v exre="${exre}" '
+  # The executables and the shells the grammar names: a command word that is
+  # a path to one of them reads as the bare name (prefixes() in the awk), and
+  # a shell word hands the script after -c to the payload reader (cscripts).
+  # Empty where the grammar is not loaded; every reader of the views loads it.
+  local exre="" shre=""
+  [[ -z "${SAFEDEPS_G_EXECUTABLES:-}" ]] || exre="^(${SAFEDEPS_G_EXECUTABLES}|${SAFEDEPS_G_SHELLS})\$"
+  [[ -z "${SAFEDEPS_G_SHELLS:-}" ]] || shre="^(${SAFEDEPS_G_SHELLS})\$"
+  if ! out=$(printf '%s\n' "${text}" | LC_ALL=C awk -v view="${view}" -v policy="${policy}" -v marker="${marker}" -v divfile="${SAFEDEPS_LEX_DIVERGE:-}" -v divmemo="${div}" -v smark="${SAFEDEPS_SCAN_MARK:-}" -v exre="${exre}" -v shre="${shre}" '
       # One pass over the command as the shell lexes it. Every byte gets a class,
       # and each view is printed from the classes:
       #
@@ -1176,7 +1178,10 @@ shell_lex() {
           else if (bw == "env") { envmode = 1; hit = 1 }
           else if (w == "exec") { envmode = 0; execmode = 1; cmdmode = 0; hit = 1 }
           else if (w == "command") { envmode = 0; cmdmode = 1; execmode = 0; hit = 1 }
-          else if (w == "time") { envmode = 0; timemode = 1; continue }
+          # The reserved word `time` goes like the other prefixes, so a reader
+          # of this view finds the command after it (`| time sh`, the pipe
+          # check).
+          else if (w == "time") { envmode = 0; timemode = 1; hit = 1 }
           else if (shz && zprecmd(w)) { envmode = 0; hit = 1 }
           else if (opener(w) || shz && zopener(w) || w == "coproc") { envmode = 0; continue }
           else {
@@ -1187,7 +1192,7 @@ shell_lex() {
             # absolute path, after a byte of its own start set and before a
             # byte of its own end set, so `x)/usr/bin/pip install x` (a case
             # arm) and `/usr/bin/pip>/dev/null install x` passed unjudged.
-            if (sl > 0 && exre != "" && bw ~ exre) mark(s, sl)
+            if (sl > 0 && exre != "" && tolower(bw) ~ exre) mark(s, sl)
             atstart = 0; envmode = 0; continue
           }
           mark(s, k - 1)
@@ -1843,11 +1848,11 @@ shell_lex() {
         if (aqbad) put("!\035")
         printf "%s", buf
       }
-      # A shell is any command word whose name ends in sh (ksh, csh, tcsh, fish
-      # as well as sh, bash, zsh, dash): the reader it replaced matched those
-      # by a regex open on the left, and narrowing it to four names passed
-      # `ksh -c "pip install ..."` with no verdict (caught in review). Options
-      # may stand before -c: -o and +o take a name, -- ends the options.
+      # A shell is a command word in the closed list of the grammar
+      # (SAFEDEPS_G_SHELLS, passed in as shre): the reader it replaced matched
+      # four names and passed `ksh -c "pip install ..."` (caught in review),
+      # and the suffix rule after it read ssh as a shell. Options may stand
+      # before -c: -o and +o take a name, -- ends the options.
       #
       # env -S STRING (and --split-string) splits STRING into words and runs
       # them with the words after it, so STRING and those words are a script
@@ -1884,7 +1889,7 @@ shell_lex() {
             }
             continue
           }
-          if (base ~ /sh$/ && j < n) {
+          if (shre != "" && base ~ shre && j < n) {
             for (m = j + 1; m <= n; m++) {
               # -o, or a cluster ending in o (-euo), takes the next word as an option name
               if (W[m] ~ /^[-+][A-Za-z]*o$/) { m++; continue }
@@ -2161,7 +2166,7 @@ PIPE_INSTALL_WORD_START_RE="(^|[^[:alnum:]_.-])${PIPE_MANAGER_RE}.*(${SAFEDEPS_G
 # consumer as `| sh `. `|&` pipes stderr as well, and a group opener before the
 # shell (`| (sh)`, `| { sh; }`) still hands it the input. Each of these used to
 # pass unjudged.
-PIPE_SHELL_CONSUMER_RE='\|&?[[:space:]]*([({][[:space:]]*)*(bash|sh|zsh)([[:space:];&|)}<>`]|$)'
+PIPE_SHELL_CONSUMER_RE="\\|&?[[:space:]]*([({][[:space:]]*)*(${SAFEDEPS_G_SHELLS})([[:space:];&|)}<>\`]|\$)"
 
 text_has_install_words() {
   printf '%s\n' "$1" | judge_grep -qEi "${PIPE_INSTALL_TEXT_RE}"
