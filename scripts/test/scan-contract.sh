@@ -521,11 +521,16 @@ property_failures=0
 stmts_unterm=0
 stmts_added=0
 diverge_file=$(mktemp "${TMPDIR:-/tmp}/safedeps-diverge.XXXXXX")
-# Every `;` in <once> is a `;` in <twice>.
-stmts_keeps_starts() {
-  local LC_ALL=C k
+# <twice> is <once> with starts added and nothing else changed: a byte that
+# differs is a `;` written over a blank, or over the `(` of a subshell glued
+# to the word before it, the two bytes a start is written over.
+stmts_adds_starts_only() {
+  local LC_ALL=C k a b
+  [[ ${#1} -eq ${#2} ]] || return 1
   for ((k = 0; k < ${#1}; k++)); do
-    [[ "${1:k:1}" != ";" || "${2:k:1}" == ";" ]] || return 1
+    a="${1:k:1}" b="${2:k:1}"
+    [[ "${a}" == "${b}" ]] && continue
+    [[ "${b}" == ";" && ( "${a}" == " " || "${a}" == $'\t' || "${a}" == "(" ) ]] || return 1
   done
 }
 # Whether the lexer finishes reading <text> in the current reading: an open
@@ -567,10 +572,11 @@ check_view_properties() { # input label
       # The view prints an escape or a quote as a blank, so read again a word
       # that holds one is two words, or none (`}\x` is `} x`). There a reading
       # again may find a start the first did not; it must keep every start
-      # and change no other byte. Without an escape or a quote it is
-      # idempotent.
+      # and change no other byte (a start is written over a blank, or over
+      # the `(` of a subshell glued to a word). Without an escape or a quote
+      # it is idempotent.
       if [[ "${v}" == stmts_view && "${twice}" != "${once}" && "${x}" == *[\\\'\"]* ]]; then
-        if [[ "${twice//;/ }" == "${once//;/ }" ]] && stmts_keeps_starts "${once}" "${twice}"; then
+        if stmts_adds_starts_only "${once}" "${twice}"; then
           stmts_added=$((stmts_added + 1))
           continue
         fi
@@ -703,8 +709,8 @@ check_stmts "${all}" "a case pattern close is a start, written after the close" 
   'case x in x) { pip i; };; esac' 'case x in x);{;pip i; };_ esac'
 check_stmts "${all}" "an arm glued to its pattern close starts at the close" \
   'case x in x)pip i;; esac' 'case x in x;pip i;_ esac'
-check_stmts "${all}" "a parenthesis in an arm is not the pattern close read again" \
-  'case x in x) (echo hi);; esac' 'case x in x) (echo hi);_ esac'
+check_stmts "${all}" "a subshell in an arm starts on the blank after the pattern close, and is not that close read again" \
+  'case x in x) (echo hi);; esac' 'case x in x);(echo hi);_ esac'
 check_stmts "${all}" "time and its options" \
   'time -p pip i' 'time -p;pip i'
 check_stmts "zsh" "the zsh short forms" \
@@ -769,6 +775,10 @@ check_stmts "${all}" "a subshell after a separator needs no start" \
   'a && (pip i); (pip i) | (pip i)' 'a && (pip i); (pip i) | (pip i)'
 check_stmts "${all}" "a ( among the arguments opens no subshell, and its close ends no command" \
   'echo a (b) pip i' 'echo a (b) pip i'
+check_stmts "${all}" "inside [[ ... ]] a ( groups a test and starts nothing" \
+  '[[ ( -n x ) ]] && pip i' '[[ ( -n x ) ]] && pip i'
+check_stmts "${all}" "a subshell right after another one closes is no start written over its (" \
+  '(a)(pip i); (a) (pip i)' '(a)(pip i); (a);(pip i)'
 check_stmts "${all}" "a process substitution opens a command, an argument after it does not" \
   'cat <(echo hi) pip i' 'cat <(echo hi) pip i'
 pass "stmts view: statement starts follow each shell grammar, and nothing nested opens one"

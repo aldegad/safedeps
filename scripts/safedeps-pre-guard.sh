@@ -1237,16 +1237,19 @@ shell_lex() {
               # statement began at `function` or `for` and the extractor
               # read no manager in it (every shell that has the form runs
               # it, and each passed). After a separator the `(` needs no
-              # mark; in zsh `for NAME (WORDS)` it opens the list, and in a
-              # case pattern it belongs to the pattern.
+              # mark. Where the walk is still reading a head -- the names
+              # after `for`, `function` or `repeat`, the words of `[[ ... ]]`
+              # -- no command stands yet (zsh `for NAME (WORDS)` opens its
+              # list there), and in a case pattern the `(` belongs to the
+              # pattern.
               #
               # PST remembers, for each open `(`, whether it opened such a
               # subshell, so that its `)` can say a command ended there.
-              body = ((fh || fn == 2 || br && cop == 2 || st && !pre && !(zr && fr == 2) && !(k in CPO)) && !(X[k+1] == "(" && (k + 2) in AR) && !emptyahead(k))
+              body = ((fh || fn == 2 || br && cop == 2 || st && !pre && !fn && !fr && !rp && !dbr && !(k in CPO)) && !(X[k+1] == "(" && (k + 2) in AR) && !emptyahead(k))
               if (body) {
                 CS[k] = 1
                 if (X[k-1] == " " || X[k-1] == "\t") mark_start(k, B)
-                else if (k > 1 && (X[k-1] == ")" || !word_sep(k - 1))) B[k] = 1
+                else if (k > 1 && ((fh || fn == 2 || br && cop == 2) && X[k-1] == ")" || !word_sep(k - 1))) B[k] = 1
               }
               if (!(X[k+1] == "(" && (k + 2) in AR)) PST[++pn] = body
               if (X[k+1] == "(" && (k + 2) in AR) { }
