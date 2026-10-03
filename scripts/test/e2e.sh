@@ -1359,6 +1359,30 @@ for r18_form in "sh -c 'npm ci'" 'bash -c "npm ci"' "eval 'npm ci'"; do
 done
 pass "a rewritten command whose record the post hook does not find gets no --ignore-scripts line"
 
+# A rewrite whose record cannot be written is not sent. The record write used
+# to fail quietly and the rewrite went out anyway, so the post hook said "did
+# not add" of a command safedeps had written. A jq that fails only that write
+# stands in for a write that fails.
+markfail_wt=$(mktemp -d "${tmp_root}/markfail-wt.XXXXXX")
+markfail_bin=$(mktemp -d "${tmp_root}/markfail-bin.XXXXXX")
+grammar_project "${markfail_wt}"
+cat > "${markfail_bin}/jq" <<SHIM
+#!/usr/bin/env bash
+for a in "\$@"; do [[ "\${a}" == *'.ignore_scripts_injected = true'* ]] && exit 5; done
+exec "$(command -v jq)" "\$@"
+SHIM
+chmod +x "${markfail_bin}/jq"
+markfail_pre=$(PATH="${markfail_bin}:${PATH}" grammar_pre "${markfail_wt}" "npm install fixture-parent@1.0.0")
+[[ -z "$(jq -r '.hookSpecificOutput.updatedInput.command // empty' <<< "${markfail_pre:-{\}}")" ]] \
+  || fail "a rewrite whose record could not be written is not sent (${markfail_pre})"
+grep -q 'pre-guard: could not record the command safedeps would write in .*, so it was not rewritten' "${SAFEDEPS_HOME}/advisory.log" \
+  || fail "a rewrite withheld for a failed record is said in advisory.log"
+printf '%s\n' "${tampered_lock}" > "${markfail_wt}/package-lock.json"
+markfail_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${markfail_wt}" "npm install fixture-parent@1.0.0")
+grep -qx 'safedeps did not add --ignore-scripts to this install' <<< "$(post_message "${markfail_post}")" \
+  || fail "the install whose rewrite was withheld says safedeps did not add --ignore-scripts (${markfail_post})"
+pass "a rewrite whose record cannot be written is not sent, and the rollback says safedeps did not add the flag"
+
 # The backstop with nothing to roll back to: no confirmed record, and a
 # confirmed record that names a snapshot with no meta file.
 backstop_none_wt="${tmp_root}/backstop-none-wt"
