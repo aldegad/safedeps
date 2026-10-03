@@ -1638,63 +1638,6 @@ grep -qx 'safedeps: suspicious dependency change detected; this hook found a rec
 [[ ! -e "${SAFEDEPS_HOME}/current_snapshot_id" && ! -e "${SAFEDEPS_HOME}/current_project_dir" ]] || fail "E: the legacy record is set aside"
 pass "an empty legacy current_snapshot_id goes to the backstop, which flags an unapproved lockfile"
 
-# A record that is not one JSON object. Its fields were read with jq under
-# set -e, so the post hook died there, and the record, left in place, killed it
-# again for the same command for 24 hours while the entry shim blamed the
-# checkout. Now advisory.log names the record, the record is set aside, and the
-# backstop judges the command in the directory the payload names, with a head
-# that says a record was found and is not one JSON object. The oracle holds the
-# advisory line once per such call and each head to the record it claims.
-unread_line_of() {
-  printf "post-verify: the pre-guard's record %s is not one JSON object; this hook set the record aside" "$1"
-}
-# unread_row <label> <record contents> <confirmed: yes|no> <lockfile: tampered|safe>
-unread_row() {
-  local wt pending post first
-  wt=$(mktemp -d "${tmp_root}/unread-$1-wt.XXXXXX")
-  grammar_project "${wt}"
-  if [[ "$3" == yes ]]; then
-    grammar_pre "${wt}" "npm install fixture-parent@1.0.0" > /dev/null
-    touch "${wt}/package-lock.json"
-    first=$(PATH="${stub_bin}:${PATH}" grammar_post "${wt}" "npm install fixture-parent@1.0.0 --ignore-scripts")
-    [[ -z "${first}" ]] || fail "$1: the project has a confirmed snapshot (${first})"
-  fi
-  grammar_pre "${wt}" "npm install fixture-parent@1.0.0" > /dev/null
-  pending=$(grammar_pending "${wt}")
-  printf '%s' "$2" > "${pending}"
-  [[ "$4" != tampered ]] || printf '%s\n' "${tampered_lock}" > "${wt}/package-lock.json"
-  post=$(PATH="${stub_bin}:${PATH}" grammar_post "${wt}" "npm install fixture-parent@1.0.0 --ignore-scripts")
-  [[ "$(grep -cF "$(unread_line_of "${pending}")" "${SAFEDEPS_HOME}/advisory.log")" == 1 ]] \
-    || fail "$1: advisory.log names the record that is not one JSON object once"
-  [[ ! -e "${pending}" ]] || fail "$1: the record is set aside"
-  UNREAD_WT=$(cd -P "${wt}" && pwd -P) UNREAD_POST="${post}"
-}
-
-# U1: garbage, an unapproved lockfile and a confirmed snapshot. The backstop
-# rolls back to it.
-unread_row U1 'not json {' yes tampered
-grep -qx 'safedeps: suspicious dependency change detected; this hook found a pre-guard record, and the record is not one JSON object. A rollback ran.' <<< "$(post_message "${UNREAD_POST}")" \
-  || fail "U1: the backstop rolls back, and says the record was found and is not one JSON object (${UNREAD_POST})"
-cmp -s "${UNREAD_WT}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "U1: the backstop restores the confirmed lockfile"
-pass "a pending state that is not JSON goes to the backstop, which rolls back to a confirmed snapshot"
-
-# U2: an array, an unapproved lockfile and no confirmed snapshot. The backstop
-# flags the install.
-unread_row U2 '[{"snapshot_id":"x"}]' no tampered
-grep -qx 'safedeps: suspicious dependency change detected; this hook found a pre-guard record, and the record is not one JSON object. No rollback ran.' <<< "$(post_message "${UNREAD_POST}")" \
-  || fail "U2: the backstop flags the unapproved lockfile, and says the record is not one JSON object (${UNREAD_POST})"
-grep -qF "post-verify BACKSTOP FLAGGED (no baseline): a command with a pre-guard record that is not one JSON object; the npm closure in ${UNREAD_WT} failed" "${SAFEDEPS_HOME}/advisory.log" \
-  || fail "U2: advisory.log says the backstop flagged the install, and why it ran"
-pass "a pending state that is a JSON array goes to the backstop, which flags an unapproved lockfile"
-
-# U3: a JSON string and an approved lockfile. The backstop judges it clean,
-# and the next call of the same command is not killed by the same record.
-unread_row U3 '"a string"' no safe
-[[ -z "${UNREAD_POST}" ]] || fail "U3: the backstop passes an approved lockfile quietly (${UNREAD_POST})"
-grep -qF "post-verify BACKSTOP clean: a command with a pre-guard record that is not one JSON object; the npm closure in ${UNREAD_WT} passed" "${SAFEDEPS_HOME}/advisory.log" \
-  || fail "U3: advisory.log says the backstop judged the install clean, and why it ran"
-pass "a pending state that is a JSON string goes to the backstop, which judges an approved lockfile clean"
-
 # F: a record with no project_dir, and a hook whose own working directory is
 # another project with an unapproved lockfile. The hook judged and rolled back
 # its working directory (`PROJECT_DIR=$(pwd)`), which is wherever the runtime
@@ -1756,6 +1699,63 @@ cmp -s "${nodir2_x}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fa
 [[ "$(cat "${nodir2_y}/package-lock.json")" == "${tampered_lock}" && -d "${nodir2_y}/node_modules/keep-me" ]] \
   || fail "F2: the hook's working directory is not judged, restored or emptied"
 pass "a record with no project_dir and another project's hash is judged with the payload directory's own hash"
+
+# A record that is not one JSON object. Its fields were read with jq under
+# set -e, so the post hook died there, and the record, left in place, killed it
+# again for the same command for 24 hours while the entry shim blamed the
+# checkout. Now advisory.log names the record, the record is set aside, and the
+# backstop judges the command in the directory the payload names, with a head
+# that says a record was found and is not one JSON object. The oracle holds the
+# advisory line once per such call and each head to the record it claims.
+unread_line_of() {
+  printf "post-verify: the pre-guard's record %s is not one JSON object; this hook set the record aside" "$1"
+}
+# unread_row <label> <record contents> <confirmed: yes|no> <lockfile: tampered|safe>
+unread_row() {
+  local wt pending post first
+  wt=$(mktemp -d "${tmp_root}/unread-$1-wt.XXXXXX")
+  grammar_project "${wt}"
+  if [[ "$3" == yes ]]; then
+    grammar_pre "${wt}" "npm install fixture-parent@1.0.0" > /dev/null
+    touch "${wt}/package-lock.json"
+    first=$(PATH="${stub_bin}:${PATH}" grammar_post "${wt}" "npm install fixture-parent@1.0.0 --ignore-scripts")
+    [[ -z "${first}" ]] || fail "$1: the project has a confirmed snapshot (${first})"
+  fi
+  grammar_pre "${wt}" "npm install fixture-parent@1.0.0" > /dev/null
+  pending=$(grammar_pending "${wt}")
+  printf '%s' "$2" > "${pending}"
+  [[ "$4" != tampered ]] || printf '%s\n' "${tampered_lock}" > "${wt}/package-lock.json"
+  post=$(PATH="${stub_bin}:${PATH}" grammar_post "${wt}" "npm install fixture-parent@1.0.0 --ignore-scripts")
+  [[ "$(grep -cF "$(unread_line_of "${pending}")" "${SAFEDEPS_HOME}/advisory.log")" == 1 ]] \
+    || fail "$1: advisory.log names the record that is not one JSON object once"
+  [[ ! -e "${pending}" ]] || fail "$1: the record is set aside"
+  UNREAD_WT=$(cd -P "${wt}" && pwd -P) UNREAD_POST="${post}"
+}
+
+# U1: garbage, an unapproved lockfile and a confirmed snapshot. The backstop
+# rolls back to it.
+unread_row U1 'not json {' yes tampered
+grep -qx 'safedeps: suspicious dependency change detected; this hook found a pre-guard record, and the record is not one JSON object. A rollback ran.' <<< "$(post_message "${UNREAD_POST}")" \
+  || fail "U1: the backstop rolls back, and says the record was found and is not one JSON object (${UNREAD_POST})"
+cmp -s "${UNREAD_WT}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "U1: the backstop restores the confirmed lockfile"
+pass "a pending state that is not JSON goes to the backstop, which rolls back to a confirmed snapshot"
+
+# U2: an array, an unapproved lockfile and no confirmed snapshot. The backstop
+# flags the install.
+unread_row U2 '[{"snapshot_id":"x"}]' no tampered
+grep -qx 'safedeps: suspicious dependency change detected; this hook found a pre-guard record, and the record is not one JSON object. No rollback ran.' <<< "$(post_message "${UNREAD_POST}")" \
+  || fail "U2: the backstop flags the unapproved lockfile, and says the record is not one JSON object (${UNREAD_POST})"
+grep -qF "post-verify BACKSTOP FLAGGED (no baseline): a command with a pre-guard record that is not one JSON object; the npm closure in ${UNREAD_WT} failed" "${SAFEDEPS_HOME}/advisory.log" \
+  || fail "U2: advisory.log says the backstop flagged the install, and why it ran"
+pass "a pending state that is a JSON array goes to the backstop, which flags an unapproved lockfile"
+
+# U3: a JSON string and an approved lockfile. The backstop judges it clean,
+# and the next call of the same command is not killed by the same record.
+unread_row U3 '"a string"' no safe
+[[ -z "${UNREAD_POST}" ]] || fail "U3: the backstop passes an approved lockfile quietly (${UNREAD_POST})"
+grep -qF "post-verify BACKSTOP clean: a command with a pre-guard record that is not one JSON object; the npm closure in ${UNREAD_WT} passed" "${SAFEDEPS_HOME}/advisory.log" \
+  || fail "U3: advisory.log says the backstop judged the install clean, and why it ran"
+pass "a pending state that is a JSON string goes to the backstop, which judges an approved lockfile clean"
 
 # G: a record whose snapshot_id is the number 5. The hook read it as "5" and
 # looked for 5_meta.json, while the oracle reads a non-string as no snapshot.
