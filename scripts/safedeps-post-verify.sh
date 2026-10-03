@@ -620,7 +620,8 @@ rollback_note_npm_project() {
 #
 # The times are compared with find, not with the shell's -nt. bash 3.2 compares
 # whole seconds, and a real `npm ci` that replaced a package in place finished
-# inside the second the snapshot was taken in.
+# inside the second the snapshot was taken in (measured in review: seven runs
+# of eight left the rejected version on disk).
 #
 # Each check that finds nothing is one line of the report, so the reason
 # node_modules stayed is the list of what was looked at. One check that finds
@@ -641,6 +642,13 @@ rollback_note_command_writes() {
   ROLLBACK_COMMAND_WROTE_NODE_FILE=unknown
   ROLLBACK_NODE_FILES_COMPARED=""
   [[ -n "${pre}" && -f "${SNAPSHOT_DIR}/${pre}_meta.json" ]] || return 0
+
+  # The trace is read by inode and against a baseline file, so it also sees a
+  # reinstall of the same tree inside one second, which the listings cannot.
+  if [[ -n "${NPM_TRACED_RECORDS:-}" ]]; then
+    ROLLBACK_COMMAND_WROTE_NODE_FILE=true
+    return 0
+  fi
 
   ROLLBACK_COMMAND_WROTE_NODE_FILE=false
   for name in ${ROLLBACK_NODE_FILES}; do
