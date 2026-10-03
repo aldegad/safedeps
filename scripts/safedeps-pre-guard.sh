@@ -454,7 +454,12 @@ shell_lex() {
     fi
     div="${memo}.div"
   fi
-  if ! out=$(printf '%s\n' "${text}" | LC_ALL=C awk -v view="${view}" -v policy="${policy}" -v marker="${marker}" -v divfile="${SAFEDEPS_LEX_DIVERGE:-}" -v divmemo="${div}" -v smark="${SAFEDEPS_SCAN_MARK:-}" '
+  # The executables the grammar names, for the unprefixed view: a command
+  # word that is a path to one of them reads as the bare name (see prefixes()
+  # in the awk). Empty where the grammar is not loaded.
+  local exre=""
+  [[ -z "${SAFEDEPS_G_EXECUTABLES:-}" ]] || exre="^(${SAFEDEPS_G_EXECUTABLES}|sh|bash|zsh)\$"
+  if ! out=$(printf '%s\n' "${text}" | LC_ALL=C awk -v view="${view}" -v policy="${policy}" -v marker="${marker}" -v divfile="${SAFEDEPS_LEX_DIVERGE:-}" -v divmemo="${div}" -v smark="${SAFEDEPS_SCAN_MARK:-}" -v exre="${exre}" '
       # One pass over the command as the shell lexes it. Every byte gets a class,
       # and each view is printed from the classes:
       #
@@ -1119,7 +1124,7 @@ shell_lex() {
       # install, and no recognizer read it (every shell runs it). Read from
       # separators alone, the starts after `function NAME {` kept their
       # assignments the same way.
-      function prefixes(   k, s, w, atstart, envmode, takes, hit, execmode, cmdmode, timemode) {
+      function prefixes(   k, s, w, atstart, envmode, takes, hit, execmode, cmdmode, timemode, sl, j, bw) {
         atstart = 1; envmode = 0; takes = 0; execmode = 0; cmdmode = 0; timemode = 0; k = 1
         while (k <= N) {
           if (k in CSW) { atstart = 1; envmode = 0; takes = 0; execmode = 0; cmdmode = 0; timemode = 0 }
@@ -1137,6 +1142,14 @@ shell_lex() {
           s = k; w = ""
           while (k <= N && !word_sep(k)) { w = w X[k]; k++ }
           if (!atstart) continue
+          # A word that is a path, with its last part plain: bw is that part.
+          # `/usr/bin/env` is env as `/usr/bin/pip` is pip.
+          sl = 0; bw = w
+          for (j = s; j < k; j++) if (X[j] == "/" && C[j] == "c" && DEP[j] == 1) sl = j
+          if (sl > 0) {
+            for (j = sl + 1; j < k && C[j] == "c" && DEP[j] == 1; j++) ;
+            if (j == k && sl < k - 1) bw = substr(w, sl - s + 2); else sl = 0
+          }
           hit = 0
           if (s in DROP) hit = 1
           else if (takes) { takes = 0; hit = 1 }
@@ -1158,13 +1171,23 @@ shell_lex() {
           else if (cmdmode && w ~ /^-p+$/) hit = 1
           else if (timemode && w == "-p") hit = 1
           else if (assignat(s, k)) hit = 1
-          else if (w == "env") { envmode = 1; hit = 1 }
+          else if (bw == "env") { envmode = 1; hit = 1 }
           else if (w == "exec") { envmode = 0; execmode = 1; cmdmode = 0; hit = 1 }
           else if (w == "command") { envmode = 0; cmdmode = 1; execmode = 0; hit = 1 }
           else if (w == "time") { envmode = 0; timemode = 1; continue }
           else if (shz && zprecmd(w)) { envmode = 0; hit = 1 }
           else if (opener(w) || shz && zopener(w) || w == "coproc") { envmode = 0; continue }
-          else { atstart = 0; envmode = 0; continue }
+          else {
+            # The command word. A path before an executable the grammar
+            # names reads as that executable, wherever the path points:
+            # `/usr/bin/pip`, `.venv/bin/pip` and `$VENV/bin/pip` run a pip
+            # (exre, the list in the grammar). The sed this replaced read only an
+            # absolute path, after a byte of its own start set and before a
+            # byte of its own end set, so `x)/usr/bin/pip install x` (a case
+            # arm) and `/usr/bin/pip>/dev/null install x` passed unjudged.
+            if (sl > 0 && exre != "" && bw ~ exre) mark(s, sl)
+            atstart = 0; envmode = 0; continue
+          }
           mark(s, k - 1)
           while (k <= N && C[k] == "c" && DEP[k] == 1 && (X[k] == " " || X[k] == "\t")) { A[k] = 1; k++ }
         }
@@ -1991,10 +2014,9 @@ normalize_install_text() {
   # `lines`: <text> holds one statement per line, each read on its own.
   [[ "${2:-}" != lines ]] || view="unprefixed-lines"
 
-  # An absolute path before an executable reads as the executable.
-  if ! normalized=$(printf '%s' "${text}" | sed -E \
-    -e 's/^[[:space:]]+//' \
-    -e "s#(^|[[:space:];|&({!])(/[^[:space:];|&]+/)(${SAFEDEPS_G_EXECUTABLES}|sh|bash|zsh)([[:space:];|&]|\$)#\\1\\3\\4#g"); then
+  # A path before an executable reads as the executable: the lexer reads that
+  # at each command start (prefixes() in shell_lex).
+  if ! normalized=$(printf '%s' "${text}" | sed -E -e 's/^[[:space:]]+//'); then
     # Empty text would read as "no install". Keep what there is and let the
     # gate settle the failure.
     guard_mark_reading_failed

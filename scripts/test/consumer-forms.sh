@@ -1039,6 +1039,29 @@ expect_not_approved "an install after a top-level heredoc body" $'cat <<E\nx\nE\
 expect_pass "an install written in a heredoc body inside a substitution is data" $'echo $(cat <<E\npip install evil==1.0.0\nE\n)'
 pass "a heredoc inside a substitution is part of that word, and the rewrite finds the verb after it"
 
+# A path before an executable reads as the executable, wherever the path
+# points and whatever stands around the word: the lexer reads it at each
+# command start. A sed read only an absolute path, after a byte of its own
+# start set and before a byte of its own end set, so each of these passed with
+# no check (main and 83de40c); a relative path was never read at all. Every
+# one runs its install in macOS bash 3.2, zsh 5.9, sh and dash, measured with
+# a stub pip in a .venv of the test directory.
+for path_form in \
+  '.venv/bin/pip install evil==1.0.0' '$VENV/bin/pip install evil==1.0.0' '"$VENV"/bin/pip install evil==1.0.0' \
+  'case x in x)./.venv/bin/pip install evil==1.0.0;; esac' './.venv/bin/pip>/dev/null install evil==1.0.0' \
+  '/usr/bin/env .venv/bin/pip install evil==1.0.0' '/usr/bin/env pip install evil==1.0.0' \
+  'case x in x)/usr/bin/pip install evil==1.0.0;; esac' '/usr/bin/pip>/dev/null install evil==1.0.0' \
+  '../x/npm install evil@1.0.0'
+do
+  expect_not_approved "a manager named by a path: ${path_form}" "${path_form}"
+done
+[[ "$(gate_rewrite 'node_modules/.bin/npm ci')" == 'node_modules/.bin/npm ci --ignore-scripts' ]] \
+  || fail "an npm named by a relative path gets --ignore-scripts (got: $(gate_rewrite 'node_modules/.bin/npm ci'))"
+for decoy in 'echo .venv/bin/pip install evil==1.0.0' 'ls /usr/bin/pip' '/opt/pip/bin/tool install x' '.venv/bin/pipx-foo install x'; do
+  expect_pass "${decoy}" "${decoy}"
+done
+pass "a manager named by any path is read as that manager at every command start"
+
 # Plain process substitutions and redirections around commands that install
 # nothing stay unjudged and unrecorded, as before.
 for plain in \
