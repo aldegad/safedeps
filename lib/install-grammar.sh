@@ -183,6 +183,11 @@ SAFEDEPS_G_NPM_INSTALL_RE="${SAFEDEPS_G_START}(${SAFEDEPS_G_NPM_INSTALL_BODY})([
 # deny on a machine without jq, so these stay loose on purpose. The substring
 # alternatives are the pre-grammar forms, kept so this can only widen.
 SAFEDEPS_G_RAW_INSTALL_RE="(^|[^A-Za-z0-9_./-])(${SAFEDEPS_G_INSTALL_BODY})([^A-Za-z0-9_-]|$)|(npm|pnpm|yarn|bun)([^\"]*)(install|add|dlx)|pip[0-9]*[[:space:]]+install|cargo[[:space:]]+(add|install)|go[[:space:]]+(get|install)|gem[[:space:]]+install|bundle[[:space:]]+add|poetry[[:space:]]+add|uv[[:space:]]+(add|pip)|pipenv[[:space:]]+install|mvn([^\"]*)dependency:get|dotnet[[:space:]]+add[[:space:]]+package"
+# The PostToolUse backstop's pattern, read case-insensitively with grep -E. The
+# pre-guard reads the same one to decide which commands it did not read as an
+# install still get a trace baseline, so the two cannot disagree on which
+# commands the backstop judges.
+SAFEDEPS_G_BACKSTOP_RE="${SAFEDEPS_G_RAW_INSTALL_RE}|(^|[^a-zA-Z0-9_-])npx[[:space:]]+(@?[A-Za-z0-9._-])"
 
 
 # How npm-package-arg (npa) reads an argument, as far as npm link needs it:

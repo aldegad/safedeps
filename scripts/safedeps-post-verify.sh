@@ -1350,11 +1350,34 @@ fi
 post_command_looks_like_install() {
   local command="$1"
 
-  if [[ -z "${SAFEDEPS_G_RAW_INSTALL_RE:-}" ]]; then
+  if [[ -z "${SAFEDEPS_G_BACKSTOP_RE:-}" ]]; then
     log_advisory "post-verify: lib/install-grammar.sh is unreadable — treating the command as install-looking so the backstop still runs."
     return 0
   fi
-  printf '%s' "${command}" | grep -qiE "${SAFEDEPS_G_RAW_INSTALL_RE}|(^|[^a-zA-Z0-9_-])npx[[:space:]]+(@?[A-Za-z0-9._-])"
+  printf '%s' "${command}" | grep -qiE "${SAFEDEPS_G_BACKSTOP_RE}"
+}
+
+# The trace baseline the pre-guard left for a command it did not read as an
+# install (guard_backstop_trace_baseline). Identical commands in one cwd share a
+# key, so there can be more than one; this takes the oldest. Its baseline is the
+# earliest, so it shows the most as written, and a leftover from a call whose
+# PostToolUse never ran can only make a command read as traced. Empty when there
+# is none.
+BACKSTOP_TRACE_ENTRY=""
+backstop_take_trace_entry() {
+  local candidate at oldest="" oldest_at=""
+  for candidate in "${GUARD_DIR}/pending/backstop/$(compute_pending_key "${POST_DIR_HASH}" "${COMMAND}")__"*.json; do
+    [[ -f "${candidate}" ]] || continue
+    at=$(jq -r '.at // empty' "${candidate}" 2>/dev/null) || at=""
+    [[ "${at}" =~ ^[0-9]+$ ]] || at=0
+    if [[ -z "${oldest}" ]] || (( at < oldest_at )); then
+      oldest="${candidate}"
+      oldest_at="${at}"
+    fi
+  done
+  [[ -n "${oldest}" ]] || return 0
+  BACKSTOP_TRACE_ENTRY=$(cat "${oldest}" 2>/dev/null) || BACKSTOP_TRACE_ENTRY=""
+  rm -f "${oldest}"
 }
 
 legacy_pending_matches_post_context() {
@@ -1479,6 +1502,7 @@ else
     SNAPSHOT_ID=""
     PROJECT_DIR="${POST_CWD}"
     DIR_HASH="${POST_DIR_HASH}"
+    backstop_take_trace_entry
   else
     exit 0
   fi
@@ -2425,6 +2449,128 @@ ${lines}
 ${details}"
 }
 
+# How long the backstop's walk of node_modules may take, in seconds. A walk that
+# finds nothing visits every entry, and the hook still has the closure check
+# and a rollback to do inside the runtime's timeout; a hook the runtime kills
+# rolls nothing back. So a walk that does not finish counts as a trace. The
+# value is measured (scripts/measure/backstop-walk-cost.sh). It can be lowered,
+# which only makes more commands read as traced, and not raised.
+SAFEDEPS_BACKSTOP_WALK_MAX_SECONDS=5
+SAFEDEPS_BACKSTOP_WALK_SECONDS="${SAFEDEPS_BACKSTOP_WALK_SECONDS:-${SAFEDEPS_BACKSTOP_WALK_MAX_SECONDS}}"
+if [[ ! "${SAFEDEPS_BACKSTOP_WALK_SECONDS}" =~ ^[0-9]+$ ]] \
+  || (( SAFEDEPS_BACKSTOP_WALK_SECONDS > SAFEDEPS_BACKSTOP_WALK_MAX_SECONDS )); then
+  SAFEDEPS_BACKSTOP_WALK_SECONDS="${SAFEDEPS_BACKSTOP_WALK_MAX_SECONDS}"
+fi
+
+# Whether this command left a trace in the project's node tree, read against
+# the baseline the pre-guard took just before it (backstop_take_trace_entry).
+# It prints what it found and returns 0 on a trace, and prints the check that
+# found none and returns 1 when there is none.
+#
+# The backstop judges commands the pre-guard did not read as an install, and
+# its pattern also matches commands that install nothing: `grep -n "npm
+# install" README.md`, `git log --grep="npm install"`, `npm run shell:install`.
+# Where the closure was approved once and is not now (a pull, a checkout, a
+# ledger entry that expired), each of those rolled the project back and removed
+# its node_modules. So the backstop asks whether the command wrote the tree
+# before it asks what the tree holds, the way the rollback asks whether a
+# command wrote node_modules before it removes it.
+#
+# A trace is an npm lockfile or node_modules with another inode than before
+# the command, one that existed then and does not now, or anything there whose
+# status changed after the baseline. The walk covers what the closure check
+# does not read: a manager that writes no npm lockfile (bun, pnpm) and files
+# written inside a package. Everything this cannot settle counts as a trace,
+# which is what the backstop did before it asked: no entry, an entry it cannot
+# read, a baseline file that is gone, a walk that fails or does not finish. A
+# trace is the directory's, not the command's, so another process writing
+# node_modules during the command (a dev server's cache) leaves one too.
+backstop_trace() {
+  local baseline lock hidden tree rel recorded file inode found walk rc
+  if [[ -z "${BACKSTOP_TRACE_ENTRY}" ]]; then
+    printf 'the pre-guard left no trace baseline for this command'
+    return 0
+  fi
+  { IFS= read -r baseline; IFS= read -r lock; IFS= read -r hidden; IFS= read -r tree; } < <(
+    jq -r '.baseline // "", .inodes["package-lock.json"] // "", .inodes["node_modules/.package-lock.json"] // "", .inodes.node_modules // ""' \
+      <<< "${BACKSTOP_TRACE_ENTRY}" 2>/dev/null)
+  if [[ -z "${baseline}" ]]; then
+    printf 'the trace entry for this command names no baseline'
+    return 0
+  fi
+  if [[ ! -f "${baseline}" ]]; then
+    printf 'the trace baseline %s does not exist' "${baseline}"
+    return 0
+  fi
+  for rel in package-lock.json "${NPM_HIDDEN_LOCKFILE}" node_modules; do
+    case "${rel}" in
+      package-lock.json) recorded="${lock}" ;;
+      node_modules) recorded="${tree}" ;;
+      *) recorded="${hidden}" ;;
+    esac
+    file="${PROJECT_DIR}/${rel}"
+    if [[ ! -e "${file}" && ! -L "${file}" ]]; then
+      if [[ -n "${recorded}" ]]; then
+        printf '%s existed before this command and does not exist now' "${file}"
+        return 0
+      fi
+      continue
+    fi
+    if [[ -z "${recorded}" ]]; then
+      printf '%s did not exist before this command and exists now' "${file}"
+      return 0
+    fi
+    inode=""
+    read -r inode _ < <(ls -di -- "${file}" 2>/dev/null) || true
+    if [[ "${inode}" != "${recorded}" ]]; then
+      printf '%s has another inode than before this command' "${file}"
+      return 0
+    fi
+    [[ "${rel}" == node_modules ]] && continue
+    if found=$(find -H "${file}" -cnewer "${baseline}" -print 2>/dev/null) && [[ -n "${found}" ]]; then
+      printf '%s changed after the baseline taken before this command' "${file}"
+      return 0
+    fi
+  done
+  [[ -e "${PROJECT_DIR}/node_modules" ]] || {
+    printf 'no trace in %s: neither npm lockfile nor node_modules there has another inode or changed after the baseline taken before this command' "${PROJECT_DIR}"
+    return 1
+  }
+  if ! walk=$(mktemp "${TMPDIR:-/tmp}/safedeps-backstop-walk.XXXXXX"); then
+    printf 'safedeps could not make a scratch file to walk %s/node_modules' "${PROJECT_DIR}"
+    return 0
+  fi
+  find -H "${PROJECT_DIR}/node_modules" -cnewer "${baseline}" -print -quit > "${walk}" 2>/dev/null &
+  SAFEDEPS_NPM_ASK_PIDS=("$!")
+  if ! safedeps_npm_ask_wait $(( SECONDS + SAFEDEPS_BACKSTOP_WALK_SECONDS )); then
+    rm -f "${walk}"
+    printf 'the walk of %s/node_modules did not finish within %ss' "${PROJECT_DIR}" "${SAFEDEPS_BACKSTOP_WALK_SECONDS}"
+    return 0
+  fi
+  rc="${SAFEDEPS_NPM_ASK_RCS[0]}"
+  found=$(head -n 1 "${walk}")
+  rm -f "${walk}"
+  if [[ -n "${found}" ]]; then
+    printf '%s changed after the baseline taken before this command' "${found}"
+    return 0
+  fi
+  if [[ "${rc}" != 0 ]]; then
+    printf 'the walk of %s/node_modules failed (find exit %s)' "${PROJECT_DIR}" "${rc}"
+    return 0
+  fi
+  printf 'no trace in %s: neither npm lockfile nor node_modules there has another inode, and nothing there changed after the baseline taken before this command' "${PROJECT_DIR}"
+  return 1
+}
+
+# The baseline file goes with the entry it belongs to, and only a file where
+# the pre-guard writes baselines is removed.
+backstop_drop_baseline() {
+  local baseline
+  baseline=$(jq -r '.baseline // empty' <<< "${BACKSTOP_TRACE_ENTRY}" 2>/dev/null) || baseline=""
+  [[ "${baseline}" == "${GUARD_DIR}/pending/backstop/"*.trace ]] && rm -f "${baseline}"
+  return 0
+}
+
 run_command_independent_backstop() {
   # Reached when PreToolUse left no pending state for an install-looking command.
   # Detection is command-independent (the npm closure check reads the live
@@ -2432,6 +2578,20 @@ run_command_independent_backstop() {
   # prior confirmed-safe snapshot to restore from. Never silent — every path logs.
   if [[ ! -f "${PROJECT_DIR}/package-lock.json" && ! -f "${PROJECT_DIR}/${NPM_HIDDEN_LOCKFILE}" ]]; then
     log_advisory "post-verify UNVERIFIED: install-looking command with no pending state and no package-lock.json or ${NPM_HIDDEN_LOCKFILE} in ${PROJECT_DIR} — nothing to closure-check."
+    backstop_drop_baseline
+    return 0
+  fi
+
+  # A command that left no trace in the node tree is not judged by what the
+  # tree holds: nothing it did is there to judge, and a rollback would undo
+  # what other commands did.
+  local trace
+  if trace=$(backstop_trace); then
+    backstop_drop_baseline
+    log_advisory "post-verify BACKSTOP traced: ${trace}. Command: ${COMMAND}"
+  else
+    backstop_drop_baseline
+    log_advisory "post-verify BACKSTOP UNTRACED: ${trace}. No closure check ran and nothing was rolled back. Command: ${COMMAND}"
     return 0
   fi
 

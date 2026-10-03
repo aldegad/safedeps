@@ -4444,8 +4444,53 @@ fi
 # is one that shell runs.
 [[ "${GUARD_READ_CLOSED}" == true ]] || guard_mark_reading_failed
 
+# The PostToolUse backstop judges commands this hook did not read as an install
+# but that match the backstop's pattern (SAFEDEPS_G_BACKSTOP_RE): `npm run
+# deps:install`, and also `grep -n "npm install" README.md`. Its rollback
+# removes node_modules, so it rolls back only where it sees this command's trace
+# in the project's node tree, and for that it needs a baseline from just before
+# the command: a file touched now and set two seconds back, so a filesystem that
+# keeps whole seconds cannot hide a write in the same second, and the inode of
+# each npm lockfile and of node_modules in the cwd. The entry is keyed like a
+# pending state, and kept in a directory of its own so that nothing reading
+# pending states reads it.
+#
+# This decides no verdict and runs after the gate. Anything that fails here
+# leaves no entry, and the backstop counts a command with no entry as traced,
+# which is what it did before there were entries. So the grep is not a judgment
+# reading (judge_grep), and there is nothing for the gate to settle.
+guard_backstop_trace_baseline() {
+  local dir dir_hash entry_dir base at stamp entry
+  [[ -n "${SAFEDEPS_G_BACKSTOP_RE:-}" ]] || return 0
+  printf '%s' "${COMMAND}" | grep -qiE "${SAFEDEPS_G_BACKSTOP_RE}" 2>/dev/null || return 0
+  # The cwd as the PostToolUse hook resolves it, so the key is the one it builds.
+  dir="${CWD_DIR}"
+  if command -v realpath >/dev/null 2>&1; then
+    dir=$(realpath "${dir}" 2>/dev/null || printf '%s' "${dir}")
+  elif command -v readlink >/dev/null 2>&1; then
+    dir=$(readlink -f "${dir}" 2>/dev/null || printf '%s' "${dir}")
+  fi
+  dir_hash=$(compute_dir_hash "${dir}")
+  entry_dir="${GUARD_DIR}/pending/backstop"
+  mkdir -p "${entry_dir}" 2>/dev/null || return 0
+  find "${entry_dir}" -type f -mmin +1440 -delete 2>/dev/null || true
+  base="${entry_dir}/$(compute_pending_key "${dir_hash}" "${COMMAND}")__$$"
+  at=$(( $(date +%s) - 2 ))
+  stamp=$(date -r "${at}" +%Y%m%d%H%M.%S 2>/dev/null || date -d "@${at}" +%Y%m%d%H%M.%S 2>/dev/null) || return 0
+  touch -t "${stamp}" "${base}.trace" 2>/dev/null || return 0
+  entry=$(jq -nc --arg baseline "${base}.trace" --arg at "${at}" \
+    --arg lock "$(guard_file_inode "${dir}/package-lock.json")" \
+    --arg hidden "$(guard_file_inode "${dir}/node_modules/.package-lock.json")" \
+    --arg tree "$(guard_file_inode "${dir}/node_modules")" \
+    '{baseline: $baseline, at: ($at | tonumber),
+      inodes: {"package-lock.json": $lock, "node_modules/.package-lock.json": $hidden, node_modules: $tree}}' 2>/dev/null) \
+    && write_state_file "${base}.json" "${entry}" 2>/dev/null \
+    || rm -f "${base}.trace"
+}
+
 if [[ "${GUARD_ANY_INSTALL}" != true ]]; then
   guard_settle_scan_failure
+  guard_backstop_trace_baseline || true
   exit 0
 fi
 
