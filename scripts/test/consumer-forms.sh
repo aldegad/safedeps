@@ -1117,6 +1117,17 @@ for time_row in '0001|time --' '0001|time -p --' '0001|time -o out' '0001|time -
   expect_not_approved "${time_row#*|} before an install (${time_row%%|*})" "${time_row#*|} pip install evil==1.0.0"
 done
 pass "time reads its options as the walk does"
+# zsh reads a `{` glued to the first word of a command as the group opener:
+# `{pip install x; }` runs the install in zsh alone (0100: macOS bash 3.2,
+# zsh -f, sh, dash); bash reads one word `{pip` and fails. A brace expansion
+# and a `{` inside a word stay words.
+for brace_form in '{pip install evil==1.0.0; }' '{pip install evil==1.0.0;}' '{{ pip install evil==1.0.0; }; }' '{! pip install evil==1.0.0; }'; do
+  expect_not_approved "a zsh group glued to its first word: ${brace_form}" "${brace_form}"
+done
+for decoy in 'x{pip install evil==1.0.0; }' 'echo {pip,x}'; do
+  expect_pass "${decoy}" "${decoy}"
+done
+pass "a group glued to its first word is read in the zsh reading"
 
 # More places the review of 83de40c found: more places
 # after a closed head, a subshell first in more process substitutions, more

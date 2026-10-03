@@ -1396,6 +1396,11 @@ shell_lex() {
           if (tm == 2) { tm = 1; continue }
           if (tm && w ~ /^-/) { if (w ~ /^-[a-z]*[of]$/) tm = 2; continue }
           tm = 0
+          # zsh reads a `{` glued to the first word of a command as the
+          # group opener (`{pip install x; }` runs the install in zsh alone).
+          # The start goes on the `{`, which has no blank before the word,
+          # and the rest of the word is read again as the command.
+          if (zr && !pre && length(w) > 1 && substr(w, 1, 1) == "{" && C[s] == "c" && DEP[s] == 1) { B[s] = 1; k = s + 1; continue }
           # A file descriptor word glued to a redirection belongs to it.
           if ((X[k] == "<" || X[k] == ">") && C[k] == "c" && fdword(k) == s) {
             if (!pre) { CS[s] = 1; mark_start(s, B) }

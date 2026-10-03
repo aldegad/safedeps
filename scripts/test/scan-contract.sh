@@ -534,7 +534,7 @@ stmts_adds_starts_only() {
   for ((k = 0; k < ${#1}; k++)); do
     a="${1:k:1}" b="${2:k:1}"
     [[ "${a}" == "${b}" ]] && continue
-    [[ "${b}" == ";" && ( "${a}" == " " || "${a}" == $'\t' || "${a}" == "(" ) ]] || return 1
+    [[ "${b}" == ";" && ( "${a}" == " " || "${a}" == $'\t' || "${a}" == "(" || "${a}" == "{" ) ]] || return 1
   done
 }
 # Whether the lexer finishes reading <text> in the current reading: an open
@@ -1210,7 +1210,8 @@ fi
 # read again it is the blank before the word. A start is written over a `(`
 # only where a subshell is glued to what is before it (`f()(pip i)`,
 # `do(pip i)`), which has no blank to carry it, like an arm glued to its case
-# close.
+# close. In the zsh reading a start is written over a `{` glued to the first
+# word of a command, which zsh reads as the group opener (`{pip i; }`).
 stmts_diffs=0
 for reading in bash zsh dash; do
   RANDOM="${fuzz_seed}"
@@ -1225,7 +1226,7 @@ for reading in bash zsh dash; do
     for ((k = 0; k < ${#sv}; k++)); do
       a="${sv:k:1}" b="${tv:k:1}" r="${input:k:1}"
       [[ "${a}" == "${b}" ]] && continue
-      if [[ "${b}" == ";" && ( "${a}" == " " || "${a}" == $'\t' || "${r}" == ")" || "${r}" == "(" && k -gt 0 && "${input:k-1:1}" != [$' \t\n;&|(<>'] ) ]] || [[ "${b}" == "_" && "${a}" =~ [\;\&\|] ]] \
+      if [[ "${b}" == ";" && ( "${a}" == " " || "${a}" == $'\t' || "${r}" == ")" || "${r}" == "(" && k -gt 0 && "${input:k-1:1}" != [$' \t\n;&|(<>'] || "${r}" == "{" && "${reading}" == zsh ) ]] || [[ "${b}" == "_" && "${a}" =~ [\;\&\|] ]] \
           || [[ "${b}" == " " && "${a}" == $'\n' ]] || [[ "${b}" == " " && "${a}" == "&" && "${sv:k+1:1}" == ">" ]]; then continue; fi
       printf 'stmts (%s) differs from scan at %d of [%q]: scan [%q] stmts [%q]\n' "${reading}" "${k}" "${input}" "${a}" "${b}" >&2
       stmts_diffs=$((stmts_diffs + 1))
