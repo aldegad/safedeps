@@ -75,8 +75,8 @@ mutation() {
       M_FILE=scripts/safedeps-post-verify.sh
       M_WHY='a line added to the message outside the fact functions'
       M_RED='a line outside the grammar'
-      M_OLD='    did_not_rebuild "${META_FILE}" "${COMMAND}" "${outside}"'
-      M_NEW='    did_not_rebuild "${META_FILE}" "${COMMAND}" "${outside}"
+      M_OLD='    did_not_rebuild "${META_FILE}" "${INPUT}" "${outside}"'
+      M_NEW='    did_not_rebuild "${META_FILE}" "${INPUT}" "${outside}"
     ROLLBACK_WARNINGS=("${ROLLBACK_WARNINGS[@]}" "The verified packages'"'"' install scripts have not run")'
       ;;
     Head)
