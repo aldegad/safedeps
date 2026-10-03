@@ -1411,8 +1411,16 @@ shell_lex() {
       function wparen(j,   k, p, pc, s) {
         k = j
         while (k > 2 && C[k-1] == "l") k -= 2
-        if (k < 2 || emptyahead(j)) return ""
+        if (k < 2) return ""
         p = X[k-1]; pc = C[k-1]
+        if (p == "=" && pc == C[j] && !((k - 1) in WC)) {
+          if (wordstart(k - 1)) return "z"
+          for (s = k - 1; s > 1 && C[s-1] == C[j] && X[s-1] !~ /[ \t\n;&|()<>]/; s--) ;
+          if (assignat(s, k) == k) return "a"
+        }
+        # An empty `()` is a function head, never a glob; an array value may
+        # be empty (`a=()`), which is decided above.
+        if (emptyahead(j)) return ""
         if (pc == "e" || pc == "q" || (k - 1) in WC) return shd ? "" : "g"
         # The `&` of a duplication (`<&(`, `>&(`) is an operator byte the stmts
         # view prints as `_`, a word byte when the view is read again. No
@@ -1420,11 +1428,6 @@ shell_lex() {
         # will read it.
         if (pc == C[j] && p == "&" && k > 2 && X[k-2] ~ /[<>]/ && C[k-2] == C[j]) return shd ? "" : "g"
         if (pc != C[j] || p ~ /[ \t\n;&|()<>]/) return ""
-        if (p == "=") {
-          if (wordstart(k - 1)) return "z"
-          for (s = k - 1; s > 1 && C[s-1] == C[j] && X[s-1] !~ /[ \t\n;&|()<>]/; s--) ;
-          if (assignat(s, k) == k) return "a"
-        }
         if (!shd && p != "$" && !cmdpos(j)) return "g"
         return ""
       }
