@@ -544,24 +544,30 @@ cat > "${inert_project}/package-lock.json" <<'EOF'
   "lockfileVersion": 3,
   "packages": {
     "": {"dependencies": {"fixture-parent": "1.0.0"}},
-    "node_modules/fixture-parent": {"version": "1.0.0", "dependencies": {"fixture-child": "1.0.0"}},
-    "node_modules/fixture-child": {"version": "1.0.0"}
+    "node_modules/fixture-parent": {"version": "1.0.0", "resolved": "https://registry.npmjs.org/fixture-parent/-/fixture-parent-1.0.0.tgz", "dependencies": {"fixture-child": "1.0.0"}},
+    "node_modules/fixture-child": {"version": "1.0.0", "resolved": "https://registry.npmjs.org/fixture-child/-/fixture-child-1.0.0.tgz"}
   }
 }
 EOF
 # npm records the tree it built in the hidden lockfile, and the rebuild runs
-# only over a tree on record (lockless-forms.sh pins the case without one).
+# only over a tree on record, every package from the public registry
+# (lockless-forms.sh pins the case without a hidden lockfile,
+# effect-trace-grid.sh section 1d the sources).
 mkdir -p "${inert_project}/node_modules"
 cp "${inert_project}/package-lock.json" "${inert_project}/node_modules/.package-lock.json"
 stub_bin="${tmp_root}/stub-bin"
 mkdir -p "${stub_bin}"
 # The rebuild runs only when npm says the tree it would rebuild is the one on
-# record, so the stub answers `npm query` with the tree the lockfile records.
+# record, so the stub answers `npm query` with the tree the lockfile records,
+# and only when npm says it fetches from the public registry, so the stub
+# answers `npm config ls --json` with npm's defaults.
 cat > "${stub_bin}/npm" <<EOF
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "${tmp_root}/npm-calls.log"
 if [[ "\$1" == query ]]; then
   printf '%s\n' '[{"location":"","name":"inert-project"},{"location":"node_modules/fixture-parent","name":"fixture-parent","version":"1.0.0"},{"location":"node_modules/fixture-child","name":"fixture-child","version":"1.0.0"}]'
+elif [[ "\$1" == config ]]; then
+  printf '%s\n' '{"registry":"https://registry.npmjs.org/","replace-registry-host":"npmjs"}'
 fi
 exit 0
 EOF

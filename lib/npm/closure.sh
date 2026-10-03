@@ -55,6 +55,105 @@ safedeps_npm_lock_closure() {
   ' "${lockfile}"
 }
 
+# What the npm record <current> holds that none of the <earlier> records did.
+# Prints, for what is new:
+#
+#   S<TAB><resolved>       a source no earlier record names
+#   N<TAB><key>            an installed package whose key, version, resolved
+#                          URL or integrity no earlier record has
+#   L<TAB><key><TAB><dir>  a link, and the directory it points at as npm keys
+#                          it (empty when the link records none)
+#   T<TAB><key>            a directory outside node_modules: a link's target
+#
+# With no earlier record, all of <current> is new.
+#
+# Earlier records are read together rather than in turn. package-lock.json can
+# name a source the installed tree never had: an optional package for another
+# platform, or a dependency a pulled lockfile added before anything installed
+# it. Read against the tree record alone, every install in such a project
+# would bring that source in again.
+#
+# What is read, entry by entry, against what npm records and what `npm
+# rebuild` then runs. Each kind is a row in scripts/test/effect-trace-grid.sh
+# section 1a.
+#
+#   - A key under node_modules that is not a link is a package fetched from
+#     its `resolved`, and the rebuild runs its scripts.
+#   - A link (`node_modules/x {resolved: "../x", link: true}`) is what npm
+#     records for a directory dependency, a workspace member included, and its
+#     target is keyed by the directory (`../x {version, ...}`). Both records
+#     hold both entries, whether or not the install saved. The rebuild runs the
+#     target's install scripts (and `prepare`) through the link: arborist's
+#     rebuild queues `node.target`'s scripts for every link in the tree. So
+#     both are reported, L and T, and the caller decides which links are part
+#     of the project (A1-A5, W1-W3). Leaving them out let a directory
+#     dependency pass unread while the rebuild ran its scripts.
+#   - The root key `""` is left out. It is the project itself, not something an
+#     install brought in. The rebuild runs its scripts too, as `npm install`
+#     does, and they are the project's own (X0).
+#
+# lockfileVersion 1 nests its packages under `dependencies`, and its keys are
+# rebuilt as the paths later versions use.
+safedeps_npm_new_records() {
+  local current="$1"
+  shift
+
+  safedeps_npm_require_jq || return 1
+  jq -nr --slurpfile now "${current}" '
+    def v1($prefix):
+      (.dependencies // {}) | objects | to_entries[]
+      | ($prefix + "node_modules/" + .key) as $key
+      | {key: $key, value: .value}, (.value | objects | v1($key + "/"));
+    def nodes:
+      (if ((.packages // null) | type) == "object" then .packages | to_entries[] else v1("") end)
+      | select(.key != "" and (.value | type) == "object");
+    def in_tree: .key | test("(^|/)node_modules/");
+    def link: (.value.link // false) == true;
+    def tuple: [.key, (.value.version // ""), (.value.resolved // ""), (.value.integrity // "")] | tojson;
+
+    [inputs | nodes] as $before
+    | ($before | map({key: tuple, value: true}) | from_entries) as $seen
+    | ($before | map(select(link | not) | .value.resolved | strings | {key: ., value: true}) | from_entries) as $sources
+    | [$now[0] | nodes | select(tuple as $t | $seen[$t] | not)] as $new
+    | [$now[0] | nodes | select(in_tree and (link | not))] as $fetched
+    | ([$fetched[] | .value.resolved | strings | select($sources[.] | not)] | unique[] | "S\t" + .),
+      ($new[] | select(in_tree and (link | not)) | "N\t" + .key),
+      ($new[] | select(in_tree and link) | "L\t" + .key + "\t" + (if (.value.resolved | type) == "string" then .value.resolved else "" end)),
+      ($new[] | select(in_tree | not) | "T\t" + .key)
+  ' "$@" /dev/null
+}
+
+# Whether <url> is on a public registry: npm's or Yarn's, over https, read as a
+# scheme and a host at the start of the value. A substring test passed any
+# source that merely contained one of those names, so a tarball at
+# `file:registry.npmjs.org/x.tgz` read as the public registry, and so would
+# `https://registry.npmjs.org.example/`.
+#
+# Scheme and host are matched without regard to case, as URLs compare them. It
+# runs once per new source, so it starts no process.
+#
+# The pattern is the one definition, SAFEDEPS_NPM_PUBLIC_REGISTRY_RE in
+# lib/npm/ask.sh, which the pre-guard sources without this file: post-verify's
+# rebuild check reads every node of the tree in one jq pass and applies the same
+# pattern there, with jq's "i" flag for the case, and the pre-guard judges a
+# configured registry with it. smoke.sh holds both readers to one table.
+#
+# A URL on a public registry says where npm would fetch from with no registry
+# configured, not where it did (lib/npm/ask.sh, the fetch facts). Callers that
+# judge where bytes came from ask that as well.
+if [[ -z "${SAFEDEPS_NPM_PUBLIC_REGISTRY_RE:-}" ]]; then
+  # shellcheck source=ask.sh
+  source "${BASH_SOURCE[0]%/*}/ask.sh"
+fi
+safedeps_npm_public_registry_url() {
+  local was_nocase=0 rc=1
+  shopt -q nocasematch && was_nocase=1
+  shopt -s nocasematch
+  [[ "$1" =~ ${SAFEDEPS_NPM_PUBLIC_REGISTRY_RE} ]] && rc=0
+  [[ ${was_nocase} -eq 1 ]] || shopt -u nocasematch
+  return "${rc}"
+}
+
 safedeps_npm_fixture_closure() {
   local package_name="$1"
   local version="$2"

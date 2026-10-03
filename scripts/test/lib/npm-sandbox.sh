@@ -156,6 +156,15 @@ export npm_config_cache="${tmp_root}/npm-cache" npm_config_audit=false npm_confi
 export SAFEDEPS_OSV_API_URL="${osv}/osv/v1/query" SAFEDEPS_OSV_BATCH_API_URL="${osv}/osv/v1/querybatch" \
   SAFEDEPS_KEV_CATALOG_URL="${osv}/kev.json" SAFEDEPS_GHSA_API_URL="${osv}/advisories" \
   SAFEDEPS_PROVIDER_CACHE_TTL_SECONDS=0
+# The fixture registry is not the public registry, and the gate knows it: npm
+# fetches every registry.npmjs.org URL the lockfiles record from here
+# (fixture-registry.mjs), and without this the rebuild vouches for nothing:
+# every install would be kept with its scripts withheld. This one
+# registry, by its exact URL, is let through by name (lib/npm/ask.sh
+# safedeps_npm_test_registry), and each hook run says so in advisory.log. Any
+# other registry, a second one on 127.0.0.1 included, is judged as it would be
+# anywhere.
+export SAFEDEPS_NPM_TEST_REGISTRY="http://127.0.0.1:$(cat "${tmp_root}/registry.port")/"
 
 # --- one install, end to end -------------------------------------------------------
 # A fresh project (with a sub-project) and a fresh SAFEDEPS_HOME in which
@@ -171,8 +180,11 @@ export SAFEDEPS_OSV_API_URL="${osv}/osv/v1/query" SAFEDEPS_OSV_BATCH_API_URL="${
 #
 # The project has `sub`, a sub-project with a package.json of its own, and
 # `src`, a plain directory without one.
+#
+# A fixture is made in CASE_PARENT when a battery sets it, and in the sandbox
+# root otherwise.
 new_project() {
-  CASE_PROJECT=$(mktemp -d "${tmp_root}/project.XXXXXX")
+  CASE_PROJECT=$(mktemp -d "${CASE_PARENT:-${tmp_root}}/project.XXXXXX")
   CASE_PROJECT=$(cd "${CASE_PROJECT}" && pwd -P)
   CASE_CWD="${CASE_PROJECT}"
   mkdir -p "${CASE_PROJECT}/sub" "${CASE_PROJECT}/src"
@@ -195,7 +207,7 @@ new_safedeps_home() {
 # <workspaces> replaces the declaration.
 new_workspace() {
   local workspaces="${1:-[\"packages/*\"]}"
-  CASE_PROJECT=$(mktemp -d "${tmp_root}/workspace.XXXXXX")
+  CASE_PROJECT=$(mktemp -d "${CASE_PARENT:-${tmp_root}}/workspace.XXXXXX")
   CASE_PROJECT=$(cd "${CASE_PROJECT}" && pwd -P)
   CASE_CWD="${CASE_PROJECT}"
   mkdir -p "${CASE_PROJECT}/packages/a"
@@ -309,10 +321,13 @@ victim_ran() { grep -q '^sd-victim' "${MARKS}"; }
 
 # Every request went to the local fixture registry, for the synthetic packages
 # only. sd-nope is the name a battery asks for to see an install fail; the
-# registry has no such package.
+# registry has no such package. sd-fetchy, sd-bundler, sd-bundlert, sd-nester,
+# sd-evilsrc and sd-evilswap are packed by effect-trace-grid.sh, the last two
+# fetched only by their tarball URL.
 npm_sandbox_registry_was_local() {
   [[ -s "${tmp_root}/registry.log" ]] || fail "the installs went through the fixture registry"
-  if grep -vE '^GET /sd-(victim|approved|approved-too|swapped|nope)(/-/sd-(victim|approved|approved-too|swapped)-1\.0\.[01]\.tgz)?$' "${tmp_root}/registry.log" | grep -q .; then
+  if grep -vE '^GET /sd-(victim|approved|approved-too|swapped|fetchy|bundler|bundlert|nester|nope)(/-/sd-(victim|approved|approved-too|swapped|fetchy|bundler|bundlert|nester)-1\.0\.[01]\.tgz)?$' "${tmp_root}/registry.log" \
+      | grep -vE '^GET /sd-evil(src|swap)/-/sd-evil(src|swap)-1\.0\.0\.tgz$' | grep -q .; then
     fail "the fixture registry saw only the synthetic packages ($(sort -u "${tmp_root}/registry.log" | paste -sd, -))"
   fi
   pass "every request went to the local fixture registry, for the synthetic packages only"
