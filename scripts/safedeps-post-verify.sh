@@ -204,7 +204,10 @@ monitored_files() {
 #
 # rollback_target_outside <path>: prints why <path> must not be touched, or
 # nothing when it may be. Every target is a name directly inside PROJECT_DIR,
-# so what can lead outside is the target itself being a link.
+# so a target can lead outside only by being a link. npm can lead outside on
+# its own: in a directory with no package.json and no node_modules it walks up
+# to the enclosing project and works there. Every npm the rollback runs is
+# therefore pinned to the project (SAFEDEPS_NPM_PROJECT_FLAGS below).
 rollback_target_outside() {
   local target="$1"
 
@@ -221,6 +224,10 @@ rollback_target_outside() {
 # message and its reorg.log entry carry, a REORG REFUSED entry of its own in
 # reorg.log, and advisory.log.
 ROLLBACK_REFUSED=$'\n'
+# --prefix stops npm's walk up to an enclosing project, and --global=false
+# --location=project stop a project .npmrc from sending the command to the
+# global tree.
+SAFEDEPS_NPM_PROJECT_FLAGS=(--global=false --location=project)
 record_rollback_refusal() {
   local step="$1" why="$2"
 
@@ -404,13 +411,13 @@ restore_node_modules() {
   fi
 
   if [[ -f "${PROJECT_DIR}/package-lock.json" ]]; then
-    if (cd "${PROJECT_DIR}" && npm ci >/dev/null 2>&1); then
+    if (cd "${PROJECT_DIR}" && npm ci "${SAFEDEPS_NPM_PROJECT_FLAGS[@]}" --prefix "${PROJECT_DIR}" >/dev/null 2>&1); then
       return
     fi
     ROLLBACK_WARNINGS+=("npm ci failed during rollback; retrying with npm install")
   fi
 
-  if (cd "${PROJECT_DIR}" && rm -rf node_modules && npm install >/dev/null 2>&1); then
+  if (cd "${PROJECT_DIR}" && rm -rf node_modules && npm install "${SAFEDEPS_NPM_PROJECT_FLAGS[@]}" --prefix "${PROJECT_DIR}" >/dev/null 2>&1); then
     return
   fi
 
@@ -440,7 +447,7 @@ run_verified_npm_rebuild_if_injected() {
     return 0
   fi
 
-  if (cd "${PROJECT_DIR}" && npm rebuild >/dev/null 2>&1); then
+  if (cd "${PROJECT_DIR}" && npm rebuild "${SAFEDEPS_NPM_PROJECT_FLAGS[@]}" --prefix "${PROJECT_DIR}" >/dev/null 2>&1); then
     return 0
   fi
 

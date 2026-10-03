@@ -534,7 +534,7 @@ inert_post=$(
 EOF
 )
 [[ -z "${inert_post}" ]] || fail "post hook keeps verified inert rebuild success quiet"
-grep -qx 'rebuild' "${tmp_root}/npm-calls.log" || fail "post hook runs npm rebuild after verified injected install"
+grep -qx "rebuild --global=false --location=project --prefix ${inert_project}" "${tmp_root}/npm-calls.log" || fail "post hook runs npm rebuild, pinned to the project, after verified injected install"
 pass "post hook rebuilds after verified inert install"
 
 # Reorg must actually revert the on-disk lockfile, not just print the message. The
@@ -630,7 +630,7 @@ grep -q 'suspicious dependency change detected' <<< "${link_post}" || fail "reor
 [[ -f "${link_main}/node_modules/kept-package/package.json" ]] || fail "a rollback never empties the directory a linked node_modules points to"
 grep -q 'REFUSED node_modules reinstall' <<< "${link_post}" || fail "the reorg message names the refused node_modules reinstall"
 grep -q 'REORG REFUSED node_modules reinstall' "${reorg_log}" || fail "reorg.log records the refused node_modules reinstall"
-if grep -qx 'ci' "${tmp_root}/emptying-npm-calls.log" 2>/dev/null; then
+if grep -q '^ci' "${tmp_root}/emptying-npm-calls.log" 2>/dev/null; then
   fail "npm ci never runs on a node_modules that links outside the project"
 fi
 cmp -s "${link_wt}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "the lockfile inside the project is still restored next to a linked node_modules"
@@ -698,6 +698,80 @@ if grep -q 'rebuild' "${tmp_root}/emptying-npm-calls.log" 2>/dev/null; then
 fi
 grep -q 'npm rebuild skipped after verified inert install' <<< "${link_inert_post}" || fail "the skipped rebuild is reported"
 pass "a verified inert install skips the rebuild through a linked node_modules"
+
+# npm leads outside without any link: in a directory with no package.json and
+# no node_modules it walks up to the enclosing project and works there. A
+# worktree nested inside another checkout then sends a rollback's reinstall to
+# that checkout. This stub npm does the same walk unless --prefix names the
+# directory, and empties the node_modules it lands on for ci and install, so a
+# reinstall that is not pinned to the project shows up as a missing marker in
+# the enclosing one.
+walkup_bin="${tmp_root}/walkup-npm-bin"
+mkdir -p "${walkup_bin}"
+cat > "${walkup_bin}/npm" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "${tmp_root}/walkup-npm-calls.log"
+target="" prev=""
+for a in "\$@"; do [ "\$prev" = "--prefix" ] && target="\$a"; prev="\$a"; done
+if [ -z "\$target" ]; then
+  target="\$PWD"
+  while [ "\$target" != / ] && [ ! -e "\$target/package.json" ] && [ ! -e "\$target/node_modules" ]; do target="\${target%/*}"; [ -n "\$target" ] || target=/; done
+fi
+case "\$1" in
+  ci|install) rm -rf "\$target"/node_modules/* ;;
+esac
+exit 0
+EOF
+chmod +x "${walkup_bin}/npm"
+make_enclosing() {
+  mkdir -p "$1/node_modules/kept-package"
+  printf '{"name":"enclosing","version":"1.0.0"}\n' > "$1/package.json"
+  printf '{"name":"kept-package","version":"1.0.0"}\n' > "$1/node_modules/kept-package/package.json"
+}
+
+# The ci path: the project has its lockfile but neither package.json nor
+# node_modules.
+walk_main="${tmp_root}/walk-main"
+make_enclosing "${walk_main}"
+walk_wt="${walk_main}/nested/worktree"
+mkdir -p "${walk_wt}"
+cp "${tmp_root}/revert-safe-lock.json" "${walk_wt}/package-lock.json"
+scripts/safedeps-pre-guard.sh > /dev/null <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${walk_wt}"}
+EOF
+printf '%s\n' "${tampered_lock}" > "${walk_wt}/package-lock.json"
+walk_post=$(
+  PATH="${walkup_bin}:${PATH}" scripts/safedeps-post-verify.sh <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${walk_wt}"}
+EOF
+)
+grep -q 'suspicious dependency change detected' <<< "${walk_post}" || fail "reorg fires in a project nested inside another"
+[[ -f "${walk_main}/node_modules/kept-package/package.json" ]] || fail "a rollback's npm ci never walks up to empty the enclosing project's node_modules"
+grep -qx "ci --global=false --location=project --prefix ${walk_wt}" "${tmp_root}/walkup-npm-calls.log" || fail "the rollback's npm ci is pinned to the project"
+pass "a rollback's npm ci stays in a project nested inside another"
+
+# The install path: the install created package.json and the lockfile, the
+# rollback removes both, and the reinstall falls back to npm install in a
+# directory left with neither.
+walk2_main="${tmp_root}/walk2-main"
+make_enclosing "${walk2_main}"
+walk2_wt="${walk2_main}/nested/worktree"
+mkdir -p "${walk2_wt}/node_modules"
+scripts/safedeps-pre-guard.sh > /dev/null <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${walk2_wt}"}
+EOF
+printf '{"dependencies":{"fixture-parent":"1.0.0"}}\n' > "${walk2_wt}/package.json"
+printf '%s\n' "${tampered_lock}" > "${walk2_wt}/package-lock.json"
+: > "${tmp_root}/walkup-npm-calls.log"
+walk2_post=$(
+  PATH="${walkup_bin}:${PATH}" scripts/safedeps-post-verify.sh <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${walk2_wt}"}
+EOF
+)
+grep -q 'suspicious dependency change detected' <<< "${walk2_post}" || fail "reorg fires in a fresh project nested inside another"
+[[ -f "${walk2_main}/node_modules/kept-package/package.json" ]] || fail "a rollback's npm install never walks up to prune the enclosing project's node_modules"
+grep -qx "install --global=false --location=project --prefix ${walk2_wt}" "${tmp_root}/walkup-npm-calls.log" || fail "the rollback's npm install is pinned to the project"
+pass "a rollback's npm install stays in a project nested inside another"
 
 export SAFEDEPS_HOME="${tmp_root}/safe-missing-transitive"
 export SAFEDEPS_OSV_API_URL="http://127.0.0.1:${port}/osv/v1/query"
