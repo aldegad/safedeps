@@ -4736,9 +4736,15 @@ else
   touch "${SNAPSHOT_DIR}/${SNAPSHOT_ID}_bins.list"
 fi
 
-# Store metadata for PostToolUse verification
+# Store metadata for PostToolUse verification. "record": 2 names what its
+# fields mean: ignore_scripts_injected false here means safedeps sent no
+# rewrite, because a rewrite whose record cannot be written is not sent
+# (mark_ignore_scripts_injected). A v2.17.2 record held the same field and
+# sent the rewrite anyway, so the post hook says an --ignore-scripts line only
+# from a record that names this version (fact_inert).
 cat > "${SNAPSHOT_DIR}/${SNAPSHOT_ID}_meta.json" << META_EOF
 {
+  "record": 2,
   "snapshot_id": "${SNAPSHOT_ID}",
   "parent_snapshot_id": ${PARENT_SNAPSHOT_JSON},
   "timestamp": ${TIMESTAMP},

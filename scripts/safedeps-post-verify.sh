@@ -2239,7 +2239,15 @@ check_npm_new_sources() {
     fi
     if [[ -n "${fetched}" ]]; then
       log_advisory "post-verify: kept in ${PROJECT_DIR}, fetched from a registry that is not the public npm registry ($(name_sources "${fetched}")); not rolled back, and safedeps runs none of their install scripts."
-      if [[ "$(jq -r '.ignore_scripts_injected == true' "${META_FILE}" 2>/dev/null || printf 'false')" != true ]]; then
+      if [[ "$(fact_inert "${META_FILE}" "${INPUT}" 2>/dev/null)" != 'safedeps added --ignore-scripts to this install' ]]; then
+        # Left out only where the rollback line would say "added": the
+        # record says safedeps wrote a command and this hook received exactly
+        # it. That the record says safedeps rewrote a command is not enough:
+        # a record no call names can be another call's (an overlapping one,
+        # or one that never reached its post hook), and a Codex install of the
+        # same command without the flag then lost this warning while its
+        # scripts had run. The rebuild above still reads the record's own
+        # field; one reading of the record for all three is a later plan's.
         # Said only if the install is kept: a check after this one can still
         # roll it back, and "The install is kept" in a rollback message was
         # false (the report oracle allows this sentence in the kept message

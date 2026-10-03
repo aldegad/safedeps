@@ -1400,7 +1400,7 @@ grammar_project "${markread_wt}"
 cat > "${markread_bin}/jq" <<SHIM
 #!/usr/bin/env bash
 for a in "\$@"; do
-  if [[ "\${a}" == *'ignore_scripts_injected != true'* ]]; then
+  if [[ "\${a}" == *'(if (\$meta | length) == 1'* ]]; then
     [[ -z "\${ORACLE_CALL:-}" ]] || : > "\${ORACLE_CALL}/record-unread"
     exit 5
   fi
@@ -1420,6 +1420,99 @@ grep -q 'A rollback ran\.' <<< "$(post_message "${markread_post}")" \
 grep -q "post-verify: could not read the pre-guard's record of this command in .*, so no --ignore-scripts line was said" "${SAFEDEPS_HOME}/advisory.log" \
   || fail "a record the post hook cannot read is said in advisory.log"
 pass "a record the post hook cannot read gets no --ignore-scripts line, and advisory.log says so"
+
+# A line is said only from a fact the record states as version 2. Each shape
+# below is a record that lacks the fact a line needs, and each used to be
+# answered by its missing field: a v2.17.2 record of a rewrite holds no
+# updated_command and was compared with null ("asked", bamdori r22 U3); a
+# v2.17.2 false does not mean no rewrite, since its write could fail and the
+# rewrite went out (U3b, koon judgment); and a string "true", a null command
+# and another version went to "did not add" or "asked". The
+# pre-guard writes a version 2 record and the row rewrites it into the shape,
+# as an upgrade or a damaged file would leave it. The post hook receives the
+# command safedeps wrote. Each says no --ignore-scripts line, and advisory.log
+# names the record once.
+for unstated_shape in v2172-true v2172-false string-true null-command record-3; do
+  unstated_wt=$(mktemp -d "${tmp_root}/unstated-${unstated_shape}-wt.XXXXXX")
+  grammar_project "${unstated_wt}"
+  unstated_pre=$(grammar_pre "${unstated_wt}" "npm install fixture-parent@1.0.0")
+  [[ "$(jq -r '.hookSpecificOutput.updatedInput.command // empty' <<< "${unstated_pre:-{\}}")" == 'npm install fixture-parent@1.0.0 --ignore-scripts' ]] \
+    || fail "${unstated_shape}: the install is rewritten (${unstated_pre})"
+  unstated_meta="${SAFEDEPS_HOME}/snapshots/$(jq -r '.snapshot_id' "$(grammar_pending "${unstated_wt}")")_meta.json"
+  case "${unstated_shape}" in
+    v2172-true) unstated_jq='del(.record, .updated_command)' ;;
+    v2172-false) unstated_jq='del(.record, .updated_command) | .ignore_scripts_injected = false' ;;
+    string-true) unstated_jq='.ignore_scripts_injected = "true"' ;;
+    null-command) unstated_jq='.updated_command = null' ;;
+    record-3) unstated_jq='.record = 3' ;;
+  esac
+  jq "${unstated_jq}" "${unstated_meta}" > "${unstated_meta}.tmp" && mv -f "${unstated_meta}.tmp" "${unstated_meta}"
+  printf '%s\n' "${tampered_lock}" > "${unstated_wt}/package-lock.json"
+  unstated_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${unstated_wt}" "npm install fixture-parent@1.0.0 --ignore-scripts")
+  grep -q 'A rollback ran\.' <<< "$(post_message "${unstated_post}")" \
+    || fail "${unstated_shape}: the install is rolled back (${unstated_post})"
+  ! grep -q -- '--ignore-scripts' <<< "$(post_message "${unstated_post}")" \
+    || fail "${unstated_shape}: a record that does not state the fact gets no --ignore-scripts line (${unstated_post})"
+  [[ "$(grep -cF "post-verify: ${unstated_meta} is not a version 2 pre-guard record that states whether safedeps rewrote this command, so no --ignore-scripts line was said" "${SAFEDEPS_HOME}/advisory.log")" == 1 ]] \
+    || fail "${unstated_shape}: advisory.log names the record once"
+  rm -f "$(grammar_pending "${unstated_wt}")"
+done
+pass "a record that does not state, as version 2, whether safedeps rewrote the command gets no --ignore-scripts line (v2.17.2 true and false, a string, a null command, another version)"
+
+# No record file at all says no line either; it used to be "did not add". The
+# post hook exits quietly when the meta is missing as it starts, so only a
+# record that goes between that check and the report reaches the fact
+# functions without one; the row calls them directly, as the unresolved
+# directory row does.
+nofile_meta="${tmp_root}/nofile-meta.json"
+nofile_log="${tmp_root}/nofile-advisory.log"
+nofile_input='{"tool_name":"Bash","tool_input":{"command":"npm install x --ignore-scripts"}}'
+nofile_lines=$(
+  log_advisory() { printf '%s\n' "$1" >> "${nofile_log}"; }
+  # shellcheck source=../../lib/gates/report-facts.sh
+  source "${ROOT_DIR}/lib/gates/report-facts.sh"
+  ROLLBACK_WARNINGS=()
+  did_not_rebuild "${nofile_meta}" "${nofile_input}" "the directory ${tmp_root}/no-such-project cannot be resolved"
+  printf '%s\n' "${ROLLBACK_WARNINGS[@]}"
+)
+oracle_direct "${nofile_meta}" "${nofile_input}" "${nofile_lines}" || exit 1
+! grep -q -- '--ignore-scripts' <<< "${nofile_lines}" || fail "no record file gets no --ignore-scripts line (${nofile_lines})"
+[[ "$(cat "${nofile_log}" 2>/dev/null)" == "post-verify: ${nofile_meta} is not a version 2 pre-guard record that states whether safedeps rewrote this command, so no --ignore-scripts line was said" ]] \
+  || fail "no record file is named once in advisory.log ($(cat "${nofile_log}" 2>/dev/null))"
+pass "no record file gets no --ignore-scripts line, and advisory.log names the record"
+
+# A record that is not one JSON object is one the hook cannot read (7b8eb0e):
+# here two objects, the first of which would say "did not add". The row marks
+# record-unread for the oracle, as the row of a failed read does, and the jq
+# that reads it is the real one.
+twoobj_wt=$(mktemp -d "${tmp_root}/twoobj-wt.XXXXXX")
+twoobj_bin=$(mktemp -d "${tmp_root}/twoobj-bin.XXXXXX")
+grammar_project "${twoobj_wt}"
+cat > "${twoobj_bin}/jq" <<SHIM
+#!/usr/bin/env bash
+for a in "\$@"; do
+  if [[ "\${a}" == *'(if (\$meta | length) == 1'* ]]; then
+    [[ -z "\${ORACLE_CALL:-}" ]] || : > "\${ORACLE_CALL}/record-unread"
+  fi
+done
+exec "$(command -v jq)" "\$@"
+SHIM
+chmod +x "${twoobj_bin}/jq"
+twoobj_pre=$(grammar_pre "${twoobj_wt}" "npm install fixture-parent@1.0.0")
+[[ -n "$(jq -r '.hookSpecificOutput.updatedInput.command // empty' <<< "${twoobj_pre:-{\}}")" ]] \
+  || fail "the install whose record becomes two objects is rewritten (${twoobj_pre})"
+twoobj_meta="${SAFEDEPS_HOME}/snapshots/$(jq -r '.snapshot_id' "$(grammar_pending "${twoobj_wt}")")_meta.json"
+{ printf '{"record":2,"ignore_scripts_injected":false}\n'; cat "${twoobj_meta}"; } > "${twoobj_meta}.tmp" && mv -f "${twoobj_meta}.tmp" "${twoobj_meta}"
+printf '%s\n' "${tampered_lock}" > "${twoobj_wt}/package-lock.json"
+twoobj_post=$(PATH="${twoobj_bin}:${stub_bin}:${PATH}" grammar_post "${twoobj_wt}" "npm install fixture-parent@1.0.0 --ignore-scripts")
+grep -q 'A rollback ran\.' <<< "$(post_message "${twoobj_post}")" \
+  || fail "the install whose record is two objects is rolled back (${twoobj_post})"
+! grep -q -- '--ignore-scripts' <<< "$(post_message "${twoobj_post}")" \
+  || fail "a record that is two objects gets no --ignore-scripts line (${twoobj_post})"
+[[ "$(grep -cF "post-verify: could not read the pre-guard's record of this command in ${twoobj_meta}, so no --ignore-scripts line was said" "${SAFEDEPS_HOME}/advisory.log")" == 1 ]] \
+  || fail "a record that is two objects is said in advisory.log once"
+rm -f "$(grammar_pending "${twoobj_wt}")"
+pass "a record that is not one JSON object gets no --ignore-scripts line, and advisory.log says it could not be read"
 
 # Two pre-guard calls in one project within one second have a snapshot each.
 # The id was `${TIMESTAMP}_${DIR_HASH}`, the same for both, so the second call
@@ -1942,7 +2035,7 @@ pass "a skipped rebuild says what safedeps did, not whether install scripts ran"
 # resolve, are read from the functions that print them.
 unresolved_dir="${tmp_root}/no-such-project"
 unresolved_meta="${tmp_root}/unresolved-meta.json"
-printf '{"ignore_scripts_injected":true,"updated_command":"npm install x --ignore-scripts"}\n' > "${unresolved_meta}"
+printf '{"record":2,"ignore_scripts_injected":true,"updated_command":"npm install x --ignore-scripts"}\n' > "${unresolved_meta}"
 unresolved_input='{"tool_name":"Bash","tool_input":{"command":"npm install x --ignore-scripts"}}'
 unresolved_lines=$(
   # shellcheck source=../../lib/gates/npm-reach.sh
@@ -2959,7 +3052,7 @@ printf 'lockfileVersion: 9\n' > "${forms_home}/snapshots/snap-forms_pnpm-lock.ya
 : > "${forms_home}/snapshots/snap-forms_yarn.lock.missing"
 : > "${forms_home}/snapshots/snap-forms_bins.list"
 : > "${forms_home}/snapshots/snap-forms_packages.list"
-printf '{"snapshot_id":"snap-forms"}\n' > "${forms_home}/snapshots/snap-forms_meta.json"
+printf '{"record":2,"snapshot_id":"snap-forms"}\n' > "${forms_home}/snapshots/snap-forms_meta.json"
 printf '{"name":"after"}\n' > "${forms_project}/package.json"
 printf 'lockfileVersion: 9\n' > "${forms_project}/pnpm-lock.yaml"
 : > "${forms_project}/yarn.lock"

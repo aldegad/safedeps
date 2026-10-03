@@ -127,11 +127,11 @@ report_changed_nothing() {
 # records the command it wrote (mark_ignore_scripts_injected), and the line is
 # one of three:
 #
-#   added        the record is there, and the command this hook received is
-#                the command safedeps wrote, byte for byte;
-#   asked        the record is there, and the command this hook received is
-#                not that command;
-#   did not add  there is no such record.
+#   added        the record says safedeps wrote a command, and the command
+#                this hook received is that command, byte for byte;
+#   asked        the record says safedeps wrote a command, and the command
+#                this hook received is not that command;
+#   did not add  the record says safedeps wrote none.
 #
 # Reading the command for the flag was tried and taken out. This hook and the
 # report oracle each read the shell's statements with the same model, and
@@ -140,38 +140,52 @@ report_changed_nothing() {
 # npm_config_ignore_scripts and a project .npmrc. Comparing two strings
 # leaves nothing to read. "did not add" says nothing about whether scripts ran:
 # on Codex safedeps cannot add the flag, and a command can carry its own.
+#
+# Each line is said only from a fact the record states. The record has to be
+# version 2 ("record": 2), whose ignore_scripts_injected false means safedeps
+# sent no rewrite; "did not add" needs that false, and "added" or "asked" need
+# true and the command safedeps wrote as a string. Every other shape says no
+# line. Four review rounds in a row found a record that lacked the fact a line
+# needed, answered by the missing field: no record read, a record that failed
+# to read, a file that is not one object, and a v2.17.2 record with no
+# updated_command, compared with null and said as "asked". A v2.17.2 record's
+# false does not mean no rewrite either: its write could fail and the rewrite
+# went out. So no branch that says a line is reached by a default.
 
 # fact_inert <meta file> <hook input>: the line. The comparison is jq's, of the
-# command the record holds and the one in the hook's input. No record file is
-# "did not add". A record file that is there and cannot be read prints nothing
-# and returns 1: it used to fall through to "did not add", which is false
-# whenever the record it could not read says safedeps wrote the command. A file
-# that does not hold exactly one JSON object is one that cannot be read: an
-# empty one, which `--slurpfile` reads as no value at all, went to "did not add"
-# the same way.
+# command the record holds and the one in the hook's input. Returns 1 and
+# prints nothing when the record file is there and is not one JSON object, or
+# jq fails; returns 2 and prints nothing when there is no record file, or the
+# record is not version 2 or does not state the fact a line needs.
 fact_inert() {
-  local said=none
-  if [[ -e "$1" || -L "$1" ]]; then
-    said=$(printf '%s' "$2" | jq -r --slurpfile meta "$1" '
+  local said
+  [[ -e "$1" || -L "$1" ]] || return 2
+  said=$(printf '%s' "$2" | jq -r --slurpfile meta "$1" '
       (if ($meta | length) == 1 and ($meta[0] | type) == "object" then $meta[0]
        else error("not one record") end) as $m
-      | if $m.ignore_scripts_injected != true then "none"
-        elif (.tool_input.command | type) == "string" and .tool_input.command == $m.updated_command then "added"
-        else "asked" end' 2>/dev/null) || return 1
-  fi
+      | if $m.record != 2 then "unstated"
+        elif $m.ignore_scripts_injected == false then "none"
+        elif $m.ignore_scripts_injected == true and ($m.updated_command | type) == "string" then
+          (if .tool_input.command == $m.updated_command then "added" else "asked" end)
+        else "unstated" end' 2>/dev/null) || return 1
   case "${said}" in
     added) printf 'safedeps added --ignore-scripts to this install' ;;
     asked) printf 'safedeps asked for --ignore-scripts on this install; the command this hook received is not the one safedeps wrote' ;;
     none) printf 'safedeps did not add --ignore-scripts to this install' ;;
+    unstated) return 2 ;;
     *) return 1 ;;
   esac
 }
 
-# What is said instead when fact_inert cannot read the record: nothing in the
-# message, and one line in advisory.log, as the backstop says nothing for want
-# of a record.
-report_inert_unread() {
-  log_advisory "post-verify: could not read the pre-guard's record of this command in $1, so no --ignore-scripts line was said"
+# What is said instead when fact_inert says no line: nothing in the message,
+# and one line in advisory.log with which of the two it was, as the backstop
+# says nothing for want of a record.
+report_inert_unsaid() {
+  if [[ "$2" == 2 ]]; then
+    log_advisory "post-verify: $1 is not a version 2 pre-guard record that states whether safedeps rewrote this command, so no --ignore-scripts line was said"
+  else
+    log_advisory "post-verify: could not read the pre-guard's record of this command in $1, so no --ignore-scripts line was said"
+  fi
 }
 
 # report_inert <meta file> <hook input>: says the line and keeps it in
@@ -179,11 +193,13 @@ report_inert_unread() {
 # it rather than reading the record again.
 REPORT_INERT=""
 report_inert() {
-  if REPORT_INERT=$(fact_inert "$1" "$2"); then
+  local rc=0
+  REPORT_INERT=$(fact_inert "$1" "$2") || rc=$?
+  if [[ ${rc} -eq 0 ]]; then
     report_say "${REPORT_INERT}"
   else
     REPORT_INERT=""
-    report_inert_unread "$1"
+    report_inert_unsaid "$1" "${rc}"
   fi
 }
 
@@ -192,9 +208,10 @@ report_inert() {
 # did_not_rebuild <meta file> <hook input> <fact>
 # did_rebuild <meta file> <hook input> <exit status>
 report_rebuild() {
-  local inert
-  if ! inert=$(fact_inert "$1" "$2"); then
-    report_inert_unread "$1"
+  local inert rc=0
+  inert=$(fact_inert "$1" "$2") || rc=$?
+  if [[ ${rc} -ne 0 ]]; then
+    report_inert_unsaid "$1" "${rc}"
     report_say "safedeps $3"
   elif [[ "${inert}" == 'safedeps added --ignore-scripts to this install' ]]; then
     report_say "${inert} and $3"
