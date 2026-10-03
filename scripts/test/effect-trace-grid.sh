@@ -430,7 +430,7 @@ new_regdep() { new_regdir; declare_dependency sd-approved file:registry.npmjs.or
 # <id>|<fixture>|<engine>|<expect>|<command>, where <expect> is `quiet:<package>`
 # (confirmed quietly and <package> rebuilt), `rollback:<reason>` (rolled back
 # with a reason that says <reason>, and on Claude Code no script of the
-# impostor or of sd-fetchy ran at all, the rollback's own reinstall included),
+# impostor or of sd-fetchy ran at all; the rollback itself runs no npm),
 # or `kept:<warning>` (not rolled back, with a warning that says <warning>).
 printf '# what an install brought in (id engine command | outcome)\n'
 failures_before=${#FAILURES[@]}
@@ -501,22 +501,22 @@ ROWS
   || pass "installs that save nothing have their sources and install scripts checked like saved ones, a directory dependency and a source that only names the registry are rolled back, a workspace member is not, and a committed lockfile installs as recorded"
 
 # --- 1d. Install scripts run only over a tree the gate can vouch for, whole ---------------
-# Install scripts run in two places, and both run over the whole tree: the
-# rebuild after an inert install, and the rollback's reinstall. What allowed
-# them was a judgment of the change, and three holes in that judgment in a row
-# became scripts that ran (safedeps/effect-gate-blind-to-lockless-npm-installs,
-# judgment C). The permission is now a predicate on the whole tree: every
-# package on record, every package under node_modules recorded with a
-# public-registry https source or bundled in one, every directory outside it a
-# declared workspace member. Otherwise the whole rebuild is skipped with a
-# warning that names the package, and nothing is rolled back. The rollback
-# reinstalls with --ignore-scripts and rebuilds only toward a confirmed
-# snapshot, through the same predicate; with no confirmed snapshot it says so
-# in the message, reorg.log and advisory.log.
+# Install scripts ran in two places, and both ran over the whole tree: the
+# rebuild after an inert install, and the reinstall the rollback used to run.
+# What allowed them was a judgment of the change, and three holes in that
+# judgment in a row became scripts that ran. The rebuild's permission is now a
+# predicate on the whole tree: every package on record, every package under
+# node_modules recorded with a public-registry https source or bundled in one,
+# every directory outside it a declared workspace member. Otherwise the whole
+# rebuild is skipped with a warning that names the package, and nothing is
+# rolled back. The rollback runs no package manager at all: it restores the
+# files and removes the project's node_modules, and with no confirmed snapshot
+# it says so in the message, reorg.log and advisory.log.
 #
 #   RB1, RB2, CH2b: a rollback with no confirmed snapshot restores a lockfile
 #     that holds sd-victim. The reinstall used to run its scripts.
-#   CH3c: a rollback to a confirmed snapshot still rebuilds.
+#   CH3c: a rollback to a confirmed snapshot removes node_modules and runs
+#     nothing.
 #   CH1b, L1, L2: a tree that holds a directory or a source nobody approved,
 #     from an earlier unrecorded install or a committed lockfile, is installed
 #     and not rebuilt. The rebuild used to run it.
@@ -567,7 +567,7 @@ ROWS
 #     one-shot npm_config_registry (P1, and P1x after a Codex install), a bare
 #     `npm install` after the .npmrc is removed (P2), `npm ci` from npm's cache
 #     (P3), a rollback to a snapshot confirmed with the impostor (P4, rolled
-#     back with nothing rebuilt), and another project's `npm ci` of the same
+#     back with node_modules removed and no script run), and another project's `npm ci` of the same
 #     lockfile with the same SAFEDEPS_HOME and cache (P5). An exported
 #     npm_config_registry is one-shot the same way (EXP1). A record on the
 #     public registry with no integrity cannot be matched and is not rebuilt
@@ -1034,8 +1034,7 @@ new_un1() { new_project; quiet_first "unset npm_config_userconfig; HOME=${XH_HOM
 
 # <id>|<fixture>|<engine>|<expect>|<command>, where <expect> is
 #   fallback            rolled back with no confirmed snapshot, said in all three records
-#   rebuilt:<package>   rolled back to a confirmed snapshot and <package> rebuilt
-#   held:<warning>      rolled back to a confirmed snapshot, nothing rebuilt, the warning says <warning>
+#   removed             rolled back to a confirmed snapshot: node_modules removed, no script run
 #   kept:<warning>      not rolled back, nothing rebuilt, the warning says <warning>
 #   quiet:<package>     confirmed quietly, and <package> rebuilt (`-`: nothing to check)
 #   denied:<reason>     the pre-guard denies it, saying <reason>; nothing is installed
@@ -1096,17 +1095,12 @@ while IFS= read -r row; do
           || note_failure "${id}: advisory.log says install scripts were not run (${advisory_new:0:300})"
       fi
       ;;
-    held:*)
+    removed)
       rolled_back || note_failure "${id}: rolled back (post: ${CASE_POST:-<quiet>})"
       grep -qF 'last confirmed safe snapshot' <<< "${CASE_POST}" || note_failure "${id}: rolled back to the confirmed snapshot (post: ${CASE_POST:0:300})"
-      grep -qF "${expect#held:}" <<< "${CASE_POST}" || note_failure "${id}: the warning says ${expect#held:} (post: ${CASE_POST:-<quiet>})"
-      [[ -z "${CASE_RAN}" ]] || note_failure "${id}: the rollback rebuilds nothing (${CASE_RAN})"
-      ;;
-    rebuilt:*)
-      rolled_back || note_failure "${id}: rolled back (post: ${CASE_POST:-<quiet>})"
-      grep -qF 'last confirmed safe snapshot' <<< "${CASE_POST}" || note_failure "${id}: rolled back to the confirmed snapshot (post: ${CASE_POST:0:300})"
-      [[ "$(grep -c "^${expect#rebuilt:}@" <<< "${CASE_RAN}" || true)" == 3 ]] \
-        || note_failure "${id}: the rollback rebuilds ${expect#rebuilt:}, all three scripts (${CASE_RAN:-nothing ran})"
+      [[ -z "${CASE_RAN}" ]] || note_failure "${id}: the rollback runs no install script (${CASE_RAN})"
+      [[ ! -e "${CASE_PROJECT}/node_modules" ]] || note_failure "${id}: the rollback removes the project's node_modules ($(ls "${CASE_PROJECT}/node_modules" 2>&1 | paste -sd, -))"
+      grep -qF 'node_modules was removed' <<< "${CASE_POST}" || note_failure "${id}: the message says node_modules was removed (post: ${CASE_POST:0:400})"
       ;;
     kept:*)
       ! rolled_back || note_failure "${id}: not rolled back (post: ${CASE_POST:0:300})"
@@ -1127,8 +1121,8 @@ RB1|rb_clone|claude|fallback|npm ci
 RB1x|rb_clone|codex|fallback|npm ci
 RB2|rb_has|claude|fallback|npm install sd-approved@1.0.0
 CH2b|ch2|claude|fallback|npm install sd-approved@1.0.0
-CH3c|ch3|claude|rebuilt:sd-approved|npm install sd-approved@1.0.0
-CH3x|ch3|codex|rebuilt:sd-approved|npm install sd-approved@1.0.0
+CH3c|ch3|claude|removed|npm install sd-approved@1.0.0
+CH3x|ch3|codex|removed|npm install sd-approved@1.0.0
 CH1b|ch1|claude|kept:a directory that is not a declared workspace member (../../evildir (evildir@1.0.0))|npm install sd-approved@1.0.0
 L1|tampered|claude|kept:a package not recorded as coming from the public registry (node_modules/sd-approved (sd-approved@1.0.0 from ${EVIL_URL}))|npm ci
 L2|tampered|claude|kept:a package not recorded as coming from the public registry (node_modules/sd-approved (sd-approved@1.0.0 from ${EVIL_URL}))|npm install
@@ -1164,7 +1158,7 @@ P1|p1|claude|kept:${WITHHELD_EVIL}|npm install sd-swapped@1.0.0
 P1x|p1x|claude|kept:${WITHHELD_EVIL}|npm install sd-swapped@1.0.0
 P2|p2|claude|kept:${WITHHELD_EVIL}|npm install
 P3|p3|claude|kept:${WITHHELD_EVIL}|npm ci
-P4|p4|claude|held:${WITHHELD_EVIL}|npm install sd-victim
+P4|p4|claude|removed|npm install sd-victim
 P5|p5|claude|kept:${WITHHELD_EVIL}|npm ci
 P6|p6|claude|quiet:sd-approved|npm install sd-approved@1.0.0
 P7|p7|claude|kept:a package recorded on the public registry with no integrity, so safedeps cannot tell its bytes from ones it withheld (node_modules/sd-approved (sd-approved@1.0.0))|npm install sd-swapped@1.0.0

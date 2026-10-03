@@ -24,6 +24,11 @@
 
 set -uo pipefail
 
+# The report names a linked node_modules by where it leads, the way the
+# rollback does (safedeps_link_target).
+# shellcheck source=./npm-reach.sh
+source "$(dirname "${BASH_SOURCE[0]}")/npm-reach.sh"
+
 SAFEDEPS_JOURNAL_HOME="${SAFEDEPS_HOME:-${HOME}/.safedeps}"
 SAFEDEPS_JOURNAL_DIR="${SAFEDEPS_JOURNAL_DIR:-${SAFEDEPS_JOURNAL_HOME}/rollback-journal}"
 SAFEDEPS_INCIDENT_DIR="${SAFEDEPS_INCIDENT_DIR:-${SAFEDEPS_JOURNAL_HOME}/rollback-incidents}"
@@ -214,6 +219,35 @@ safedeps_journal_owner_state() {
   return 0
 }
 
+# What a project holds at report time, said as facts. The report gives no
+# command: where a reinstall would write is npm's to decide -- a bare npm ci in
+# a workspace member empties the workspace root's node_modules -- and safedeps
+# does not predict it.
+safedeps_journal_project_facts() {
+  local dir="$1" facts
+
+  if [[ -L "${dir}/node_modules" ]]; then
+    facts="${dir}/node_modules is a symbolic link to $(safedeps_link_target "${dir}/node_modules")."
+  elif [[ -d "${dir}/node_modules" ]]; then
+    facts="${dir}/node_modules is a real directory."
+  else
+    facts="${dir} has no node_modules."
+  fi
+  if [[ -f "${dir}/package.json" ]]; then
+    if [[ -f "${dir}/package-lock.json" || -f "${dir}/npm-shrinkwrap.json" ]]; then
+      facts="${facts} It has a package.json and an npm lockfile."
+    else
+      facts="${facts} It has a package.json and neither package-lock.json nor npm-shrinkwrap.json."
+    fi
+    if jq -e 'type == "object" and has("workspaces")' "${dir}/package.json" >/dev/null 2>&1; then
+      facts="${facts} Its package.json declares workspaces."
+    fi
+  else
+    facts="${facts} It has no package.json."
+  fi
+  printf '%s\n%s' "${facts}" "safedeps does not reinstall packages, and it does not judge where a reinstall would write; the gate checks the next install like any other."
+}
+
 # Any journal entry still on disk belongs to a rollback that did not finish.
 # Move each one to the incident directory (so it is reported once, not on every
 # command from here on), append a line to the same reorg.log the finished
@@ -321,9 +355,9 @@ as below. Until one of those happens, nothing about this project is settled."
       headline="A safedeps rollback of ${project_dir} did not finish."
       body_cause="The rollback was cut off — most likely the hook hit the runtime's timeout
 mid-rollback."
-      body_first_move="Run \`npm ci\` in ${project_dir} to rebuild the tree from whichever lockfile is
-there now, and check that the lockfile is the one you expect before you trust
-it."
+      body_first_move="Check that the lockfile and package.json in ${project_dir} are the ones you
+expect before you trust them. At the time of this report:
+$(safedeps_journal_project_facts "${project_dir}")"
     fi
 
     report="${report}${headline}

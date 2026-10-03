@@ -13,6 +13,16 @@ fail() {
   exit 1
 }
 
+# A rollback and its interrupted-rollback report give no command. The pattern
+# is broad on purpose: a check for "npm ci" alone stayed green when review put
+# "To reinstall, run npm install in <dir>" into both messages.
+ROLLBACK_COMMAND_RE='(npm|yarn|pnpm|bun|npx)( +[a-z-]+)? +(ci|install|i|add|rebuild|prune|dedupe|update)([^a-z]|$)|reinstall (with|by)|run (npm|yarn|pnpm|bun)|safe to|by hand'
+assert_gives_no_command() {
+  if grep -qiE "${ROLLBACK_COMMAND_RE}" <<< "$1"; then
+    fail "$2"
+  fi
+}
+
 tmp_root=$(mktemp -d "${TMPDIR:-/tmp}/safedeps-e2e.XXXXXX")
 # Children the owner-state tests spawn, so an exit anywhere can reap them. The
 # stopped-owner test suspends a process and resumes it, and a run that dies in
@@ -544,15 +554,16 @@ cat > "${inert_project}/package-lock.json" <<'EOF'
   "lockfileVersion": 3,
   "packages": {
     "": {"dependencies": {"fixture-parent": "1.0.0"}},
-    "node_modules/fixture-parent": {"version": "1.0.0", "resolved": "https://registry.npmjs.org/fixture-parent/-/fixture-parent-1.0.0.tgz", "dependencies": {"fixture-child": "1.0.0"}},
-    "node_modules/fixture-child": {"version": "1.0.0", "resolved": "https://registry.npmjs.org/fixture-child/-/fixture-child-1.0.0.tgz"}
+    "node_modules/fixture-parent": {"version": "1.0.0", "resolved": "https://registry.npmjs.org/fixture-parent/-/fixture-parent-1.0.0.tgz", "integrity": "sha512-fixtureParent100", "dependencies": {"fixture-child": "1.0.0"}},
+    "node_modules/fixture-child": {"version": "1.0.0", "resolved": "https://registry.npmjs.org/fixture-child/-/fixture-child-1.0.0.tgz", "integrity": "sha512-fixtureChild100"}
   }
 }
 EOF
 # npm records the tree it built in the hidden lockfile, and the rebuild runs
-# only over a tree on record, every package from the public registry
+# only over a tree on record, every package from the public registry and
+# recorded with an integrity, so its bytes can be told from withheld ones
 # (lockless-forms.sh pins the case without a hidden lockfile,
-# effect-trace-grid.sh section 1d the sources).
+# effect-trace-grid.sh section 1d the sources and the integrity).
 mkdir -p "${inert_project}/node_modules"
 cp "${inert_project}/package-lock.json" "${inert_project}/node_modules/.package-lock.json"
 stub_bin="${tmp_root}/stub-bin"
@@ -624,7 +635,390 @@ EOF
 )
 grep -q 'suspicious dependency change detected' <<< "${revert_post}" || fail "reorg fires on a tampered lockfile"
 cmp -s "${revert_project}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "reorg restores the exact safe lockfile content on disk"
+if grep -qE '^(ci|install)' "${tmp_root}/npm-calls.log" 2>/dev/null; then
+  fail "a rollback runs no npm: the reinstall is the next install"
+fi
+assert_gives_no_command "${revert_post}" "the rollback of a tampered lockfile gives no command"
 pass "reorg reverts a tampered lockfile to safe content on disk"
+
+# A rollback never acts outside the project it read. Some worktree layouts link
+# node_modules to another checkout's, and `npm ci` empties whatever node_modules
+# resolves to before it installs. This stub npm does what that first step of
+# `npm ci` does -- it empties node_modules through any link -- so a rollback
+# that follows the link shows up as a missing marker in the linked-to
+# directory.
+emptying_bin="${tmp_root}/emptying-npm-bin"
+mkdir -p "${emptying_bin}"
+cat > "${emptying_bin}/npm" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "${tmp_root}/emptying-npm-calls.log"
+case "\$1" in
+  ci) rm -rf node_modules/* ;;
+esac
+exit 0
+EOF
+chmod +x "${emptying_bin}/npm"
+tampered_lock='{
+  "name": "linked-project",
+  "lockfileVersion": 3,
+  "packages": {
+    "": {"dependencies": {"fixture-parent": "1.0.0"}},
+    "node_modules/fixture-parent": {"version": "1.0.0", "dependencies": {"fixture-child": "1.0.0"}},
+    "node_modules/fixture-child": {"version": "1.0.0"},
+    "node_modules/fixture-evil": {"version": "6.6.6", "resolved": "git://evil.example.com/fixture-evil.git"}
+  }
+}'
+reorg_log="${SAFEDEPS_HOME:-${HOME}/.safedeps}/reorg.log"
+
+link_main="${tmp_root}/link-main"
+link_wt="${tmp_root}/link-wt"
+mkdir -p "${link_main}/node_modules/kept-package" "${link_wt}"
+printf '{"name":"kept-package","version":"1.0.0"}\n' > "${link_main}/node_modules/kept-package/package.json"
+ln -s "${link_main}/node_modules" "${link_wt}/node_modules"
+printf '{"dependencies":{"fixture-parent":"1.0.0"}}\n' > "${link_wt}/package.json"
+cp "${tmp_root}/revert-safe-lock.json" "${link_wt}/package-lock.json"
+scripts/safedeps-pre-guard.sh > /dev/null <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${link_wt}"}
+EOF
+printf '%s\n' "${tampered_lock}" > "${link_wt}/package-lock.json"
+link_post=$(
+  PATH="${emptying_bin}:${PATH}" scripts/safedeps-post-verify.sh <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${link_wt}"}
+EOF
+)
+grep -q 'suspicious dependency change detected' <<< "${link_post}" || fail "reorg fires in a project whose node_modules is a link"
+[[ -f "${link_main}/node_modules/kept-package/package.json" ]] || fail "a rollback never empties the directory a linked node_modules points to"
+grep -q 'REFUSED node_modules removal' <<< "${link_post}" || fail "the reorg message names the refused node_modules removal"
+assert_gives_no_command "${link_post}" "the rollback next to a linked node_modules gives no command"
+grep -q 'REORG REFUSED node_modules removal' "${reorg_log}" || fail "reorg.log records the refused node_modules removal"
+if grep -q '^ci' "${tmp_root}/emptying-npm-calls.log" 2>/dev/null; then
+  fail "npm ci never runs on a node_modules that links outside the project"
+fi
+cmp -s "${link_wt}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "the lockfile inside the project is still restored next to a linked node_modules"
+pass "a rollback leaves a node_modules that links outside the project, and names it"
+
+# The same holds for a file the rollback would write back: a package.json that
+# links to another checkout's is not written through.
+link_pkg_wt="${tmp_root}/link-pkg-wt"
+link_pkg_outside="${tmp_root}/link-pkg-outside"
+mkdir -p "${link_pkg_wt}" "${link_pkg_outside}"
+printf '{"dependencies":{"fixture-parent":"1.0.0"}}\n' > "${link_pkg_outside}/package.json"
+ln -s "${link_pkg_outside}/package.json" "${link_pkg_wt}/package.json"
+cp "${tmp_root}/revert-safe-lock.json" "${link_pkg_wt}/package-lock.json"
+scripts/safedeps-pre-guard.sh > /dev/null <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${link_pkg_wt}"}
+EOF
+printf '{"dependencies":{"fixture-parent":"1.0.0","fixture-evil":"6.6.6"}}\n' > "${link_pkg_outside}/package.json"
+cp "${link_pkg_outside}/package.json" "${tmp_root}/link-pkg-expected.json"
+printf '%s\n' "${tampered_lock}" > "${link_pkg_wt}/package-lock.json"
+link_pkg_post=$(
+  PATH="${stub_bin}:${PATH}" scripts/safedeps-post-verify.sh <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${link_pkg_wt}"}
+EOF
+)
+grep -q 'suspicious dependency change detected' <<< "${link_pkg_post}" || fail "reorg fires in a project whose package.json is a link"
+cmp -s "${link_pkg_outside}/package.json" "${tmp_root}/link-pkg-expected.json" || fail "a rollback never writes through a package.json that links outside the project"
+[[ -L "${link_pkg_wt}/package.json" ]] || fail "a rollback leaves the linked package.json a link"
+[[ "$(grep -o 'REFUSED restore of package.json' <<< "${link_pkg_post}" | wc -l | tr -d ' ')" == 1 ]] || fail "the reorg message names the refused package.json restore once"
+grep -q 'REORG REFUSED restore of package.json' "${reorg_log}" || fail "reorg.log records the refused package.json restore"
+assert_gives_no_command "${link_pkg_post}" "the rollback next to a linked package.json gives no command"
+cmp -s "${link_pkg_wt}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "the lockfile inside the project is still restored next to a linked package.json"
+pass "a rollback refuses to write back a file that links outside the project"
+
+# A verified inert install still skips the rebuild through a linked node_modules:
+# that would run another checkout's install scripts.
+link_inert_main="${tmp_root}/link-inert-main"
+link_inert_wt="${tmp_root}/link-inert-wt"
+mkdir -p "${link_inert_main}/node_modules" "${link_inert_wt}"
+ln -s "${link_inert_main}/node_modules" "${link_inert_wt}/node_modules"
+printf '{"dependencies":{}}\n' > "${link_inert_wt}/package.json"
+link_inert_pre=$(
+  scripts/safedeps-pre-guard.sh <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${link_inert_wt}"}
+EOF
+)
+[[ "$(jq -r '.hookSpecificOutput.updatedInput.command' <<< "${link_inert_pre}")" == "npm install fixture-parent@1.0.0 --ignore-scripts" ]] || fail "linked inert pre hook injects ignore-scripts"
+cat > "${link_inert_wt}/package-lock.json" <<'EOF'
+{
+  "name": "link-inert-wt",
+  "lockfileVersion": 3,
+  "packages": {
+    "": {"dependencies": {"fixture-parent": "1.0.0"}},
+    "node_modules/fixture-parent": {"version": "1.0.0", "dependencies": {"fixture-child": "1.0.0"}},
+    "node_modules/fixture-child": {"version": "1.0.0"}
+  }
+}
+EOF
+: > "${tmp_root}/emptying-npm-calls.log"
+link_inert_post=$(
+  PATH="${emptying_bin}:${PATH}" scripts/safedeps-post-verify.sh <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0 --ignore-scripts"},"cwd":"${link_inert_wt}"}
+EOF
+)
+if grep -q 'rebuild' "${tmp_root}/emptying-npm-calls.log" 2>/dev/null; then
+  fail "npm rebuild never runs through a node_modules that links outside the project"
+fi
+grep -q 'npm rebuild skipped after verified inert install' <<< "${link_inert_post}" || fail "the skipped rebuild is reported"
+grep -q "install scripts have not run" <<< "${link_inert_post}" || fail "the skipped rebuild says the install scripts have not run"
+if grep -qiE 'by hand|where the files belong|run npm rebuild' <<< "${link_inert_post}"; then
+  fail "the skipped rebuild names no place to run npm"
+fi
+pass "a verified inert install skips the rebuild through a linked node_modules"
+
+# npm leads outside without any link: in a directory with no package.json and
+# no node_modules it walks up to the enclosing project and works there. The
+# rollback runs no npm at all; this stub, which does the same walk and empties
+# the node_modules it lands on, is the trap that shows it if one ever runs.
+walkup_bin="${tmp_root}/walkup-npm-bin"
+mkdir -p "${walkup_bin}"
+cat > "${walkup_bin}/npm" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "${tmp_root}/walkup-npm-calls.log"
+target="" prev=""
+for a in "\$@"; do [ "\$prev" = "--prefix" ] && target="\$a"; prev="\$a"; done
+if [ -z "\$target" ]; then
+  target="\$PWD"
+  while [ "\$target" != / ] && [ ! -e "\$target/package.json" ] && [ ! -e "\$target/node_modules" ]; do target="\${target%/*}"; [ -n "\$target" ] || target=/; done
+fi
+case "\$1" in
+  ci|install) rm -rf "\$target"/node_modules/* ;;
+esac
+exit 0
+EOF
+chmod +x "${walkup_bin}/npm"
+make_enclosing() {
+  mkdir -p "$1/node_modules/kept-package"
+  printf '{"name":"enclosing","version":"1.0.0"}\n' > "$1/package.json"
+  printf '{"name":"kept-package","version":"1.0.0"}\n' > "$1/node_modules/kept-package/package.json"
+}
+
+# A directory with a lockfile but neither package.json nor node_modules: npm
+# works in the enclosing project from here, and the gate reads where npm says
+# the install lands. Nothing there shows this install, so it is recorded
+# UNGATED, nothing is rolled back, and no npm runs.
+walk_main="${tmp_root}/walk-main"
+make_enclosing "${walk_main}"
+walk_wt="${walk_main}/nested/worktree"
+mkdir -p "${walk_wt}"
+cp "${tmp_root}/revert-safe-lock.json" "${walk_wt}/package-lock.json"
+scripts/safedeps-pre-guard.sh > /dev/null <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${walk_wt}"}
+EOF
+printf '%s\n' "${tampered_lock}" > "${walk_wt}/package-lock.json"
+walk_post=$(
+  PATH="${walkup_bin}:${PATH}" scripts/safedeps-post-verify.sh <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${walk_wt}"}
+EOF
+)
+grep -q 'no install trace in .*/walk-main' <<< "${walk_post}" || fail "the gate reads the enclosing project npm works in, and records the install UNGATED"
+if grep -q 'suspicious dependency change detected' <<< "${walk_post}"; then
+  fail "nothing is rolled back where the gate read no install"
+fi
+[[ -f "${walk_main}/node_modules/kept-package/package.json" ]] || fail "the enclosing project's node_modules is left alone"
+if grep -qE '^(ci|install|rebuild)' "${tmp_root}/walkup-npm-calls.log" 2>/dev/null; then
+  fail "no npm ci, install or rebuild runs where npm would walk up to an enclosing project"
+fi
+pass "no rollback and no npm where npm would walk up to an enclosing project"
+
+# The install path: the install created package.json and the lockfile, the
+# rollback removes both, and the reinstall falls back to npm install in a
+# directory left with neither.
+walk2_main="${tmp_root}/walk2-main"
+make_enclosing "${walk2_main}"
+walk2_wt="${walk2_main}/nested/worktree"
+mkdir -p "${walk2_wt}/node_modules"
+scripts/safedeps-pre-guard.sh > /dev/null <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${walk2_wt}"}
+EOF
+printf '{"dependencies":{"fixture-parent":"1.0.0"}}\n' > "${walk2_wt}/package.json"
+printf '%s\n' "${tampered_lock}" > "${walk2_wt}/package-lock.json"
+: > "${tmp_root}/walkup-npm-calls.log"
+walk2_post=$(
+  PATH="${walkup_bin}:${PATH}" scripts/safedeps-post-verify.sh <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${walk2_wt}"}
+EOF
+)
+grep -q 'suspicious dependency change detected' <<< "${walk2_post}" || fail "reorg fires in a fresh project nested inside another"
+[[ -f "${walk2_main}/node_modules/kept-package/package.json" ]] || fail "a rollback's npm install never walks up to prune the enclosing project's node_modules"
+if grep -q '^install' "${tmp_root}/walkup-npm-calls.log" 2>/dev/null; then
+  fail "a rollback runs no npm install once it has removed the package.json the install created"
+fi
+[[ ! -e "${walk2_wt}/node_modules" ]] || fail "a rollback removes the project's own node_modules"
+grep -q 'after the restore, .* has no package.json' <<< "${walk2_post}" || fail "the rollback says the restore left no package.json"
+assert_gives_no_command "${walk2_post}" "the rollback gives no reinstall command"
+pass "a rollback runs no npm install where npm would walk up to an enclosing project"
+
+# A lockfile that links to another checkout's: the restore of it is refused,
+# and no npm runs to save it through the link (a fallback npm install used to).
+# This stub fails ci and writes the lockfile on install -- the trap.
+lockwrite_bin="${tmp_root}/lockwrite-npm-bin"
+mkdir -p "${lockwrite_bin}"
+cat > "${lockwrite_bin}/npm" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "${tmp_root}/lockwrite-npm-calls.log"
+case "\$1" in
+  ci) exit 1 ;;
+  install) printf 'REWRITTEN\n' > package-lock.json ;;
+esac
+exit 0
+EOF
+chmod +x "${lockwrite_bin}/npm"
+linklock_wt="${tmp_root}/linklock-wt"
+linklock_outside="${tmp_root}/linklock-outside"
+mkdir -p "${linklock_wt}" "${linklock_outside}"
+printf '{"dependencies":{"fixture-parent":"1.0.0"}}\n' > "${linklock_wt}/package.json"
+cp "${tmp_root}/revert-safe-lock.json" "${linklock_outside}/package-lock.json"
+ln -s "${linklock_outside}/package-lock.json" "${linklock_wt}/package-lock.json"
+scripts/safedeps-pre-guard.sh > /dev/null <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${linklock_wt}"}
+EOF
+printf '%s\n' "${tampered_lock}" > "${linklock_outside}/package-lock.json"
+cp "${linklock_outside}/package-lock.json" "${tmp_root}/linklock-expected.json"
+linklock_post=$(
+  PATH="${lockwrite_bin}:${PATH}" scripts/safedeps-post-verify.sh <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${linklock_wt}"}
+EOF
+)
+grep -q 'suspicious dependency change detected' <<< "${linklock_post}" || fail "reorg fires in a project whose lockfile is a link"
+cmp -s "${linklock_outside}/package-lock.json" "${tmp_root}/linklock-expected.json" || fail "a rollback never writes the lockfile a link points to, by restore or by reinstall"
+if grep -qE '^(ci|install)' "${tmp_root}/lockwrite-npm-calls.log" 2>/dev/null; then
+  fail "a rollback runs no npm in a project whose lockfile is a link"
+fi
+grep -q 'REFUSED restore of package-lock.json' <<< "${linklock_post}" || fail "the refused lockfile restore is named"
+assert_gives_no_command "${linklock_post}" "the rollback next to a linked lockfile gives no command"
+pass "a rollback writes nothing through a lockfile that links outside the project"
+
+# A workspace may lie outside the project, and npm ci empties every
+# workspace's node_modules. The rollback runs no npm and removes only the
+# project's own node_modules. This stub empties the declared workspace on ci --
+# the trap.
+ws_bin="${tmp_root}/ws-npm-bin"
+mkdir -p "${ws_bin}"
+cat > "${ws_bin}/npm" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "${tmp_root}/ws-npm-calls.log"
+case "\$1" in
+  ci) rm -rf ../ws-outside/node_modules/* ;;
+esac
+exit 0
+EOF
+chmod +x "${ws_bin}/npm"
+ws_wt="${tmp_root}/ws-wt"
+ws_outside="${tmp_root}/ws-outside"
+mkdir -p "${ws_wt}/node_modules/installed-package" "${ws_outside}/node_modules/kept-package"
+printf '{"name":"shared","version":"1.0.0"}\n' > "${ws_outside}/package.json"
+printf '{"name":"kept-package","version":"1.0.0"}\n' > "${ws_outside}/node_modules/kept-package/package.json"
+printf '{"name":"ws","workspaces":["../ws-outside"],"dependencies":{"fixture-parent":"1.0.0"}}\n' > "${ws_wt}/package.json"
+cp "${tmp_root}/revert-safe-lock.json" "${ws_wt}/package-lock.json"
+scripts/safedeps-pre-guard.sh > /dev/null <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${ws_wt}"}
+EOF
+printf '%s\n' "${tampered_lock}" > "${ws_wt}/package-lock.json"
+ws_post=$(
+  PATH="${ws_bin}:${PATH}" scripts/safedeps-post-verify.sh <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${ws_wt}"}
+EOF
+)
+grep -q 'suspicious dependency change detected' <<< "${ws_post}" || fail "reorg fires in a project that declares workspaces"
+[[ -f "${ws_outside}/node_modules/kept-package/package.json" ]] || fail "a rollback never empties a workspace outside the project"
+if grep -q '^ci' "${tmp_root}/ws-npm-calls.log" 2>/dev/null; then
+  fail "a rollback runs no npm ci in a project that declares workspaces"
+fi
+[[ ! -e "${ws_wt}/node_modules" ]] || fail "a rollback removes a workspace project's own node_modules"
+grep -q 'declares workspaces; the node_modules directories of its workspace members were not removed' <<< "${ws_post}" || fail "the rollback says a workspace member's node_modules is left in place"
+assert_gives_no_command "${ws_post}" "the rollback in a workspace project gives no command"
+if grep -q 'remove them' <<< "${ws_post}"; then
+  fail "the rollback in a workspace project sends no removal anywhere"
+fi
+cmp -s "${ws_wt}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "the lockfile of a workspace project is still restored"
+pass "a rollback leaves a workspace outside the project alone"
+
+# The rollback's own node_modules step: a real directory is removed, links
+# inside it are removed without being followed, and the message says nothing
+# is installed until the next install.
+own_wt="${tmp_root}/own-wt"
+own_outside="${tmp_root}/own-outside"
+mkdir -p "${own_wt}/node_modules/installed-package" "${own_outside}/kept-package"
+printf '{"name":"kept-package","version":"1.0.0"}\n' > "${own_outside}/kept-package/package.json"
+ln -s "${own_outside}/kept-package" "${own_wt}/node_modules/linked-package"
+printf '{"dependencies":{"fixture-parent":"1.0.0"}}\n' > "${own_wt}/package.json"
+cp "${tmp_root}/revert-safe-lock.json" "${own_wt}/package-lock.json"
+scripts/safedeps-pre-guard.sh > /dev/null <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${own_wt}"}
+EOF
+printf '%s\n' "${tampered_lock}" > "${own_wt}/package-lock.json"
+: > "${tmp_root}/emptying-npm-calls.log"
+own_post=$(
+  PATH="${emptying_bin}:${PATH}" scripts/safedeps-post-verify.sh <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${own_wt}"}
+EOF
+)
+grep -q 'suspicious dependency change detected' <<< "${own_post}" || fail "reorg fires in an ordinary npm project"
+[[ ! -e "${own_wt}/node_modules" ]] || fail "a rollback removes the project's own node_modules"
+[[ -f "${own_outside}/kept-package/package.json" ]] || fail "removing node_modules does not follow a link inside it"
+grep -q 'Nothing is installed in .* until the next install' <<< "${own_post}" || fail "the rollback says nothing is installed until the next install"
+assert_gives_no_command "${own_post}" "the rollback gives no reinstall command in an ordinary project either"
+if grep -qE '^(ci|install)' "${tmp_root}/emptying-npm-calls.log" 2>/dev/null; then
+  fail "a rollback runs no npm in an ordinary project either"
+fi
+cmp -s "${own_wt}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "the lockfile is restored before node_modules is removed"
+pass "a rollback removes the project's own node_modules and runs no npm"
+
+# `npm install --no-save <pkg>` in a directory without package.json writes
+# node_modules (with npm's hidden lockfile) and nothing else. That is still an
+# npm project to the rollback, and its node_modules is removed.
+nosave_wt="${tmp_root}/nosave-wt"
+mkdir -p "${nosave_wt}"
+scripts/safedeps-pre-guard.sh > /dev/null <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install --no-save fixture-parent@1.0.0"},"cwd":"${nosave_wt}"}
+EOF
+mkdir -p "${nosave_wt}/node_modules/.bin" "${nosave_wt}/node_modules/fixture-parent"
+printf '{"name":"nosave-wt","lockfileVersion":3,"packages":{}}\n' > "${nosave_wt}/node_modules/.package-lock.json"
+printf '{"name":"fixture-parent","version":"1.0.0"}\n' > "${nosave_wt}/node_modules/fixture-parent/package.json"
+cp /bin/echo "${nosave_wt}/node_modules/.bin/native-drop"
+nosave_post=$(
+  PATH="${emptying_bin}:${PATH}" scripts/safedeps-post-verify.sh <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install --no-save fixture-parent@1.0.0"},"cwd":"${nosave_wt}"}
+EOF
+)
+grep -q 'suspicious dependency change detected' <<< "${nosave_post}" || fail "reorg fires on a native binary in a --no-save install"
+[[ ! -e "${nosave_wt}/node_modules" ]] || fail "a rollback removes the node_modules of a --no-save install with no package.json"
+grep -q 'after the restore, .* has no package.json' <<< "${nosave_post}" || fail "the --no-save rollback says there is no package.json"
+# The restore target is the last confirmed snapshot, which can be older than
+# this install, so what the project held "before this install" is not
+# something the rollback knows. It states only what is there now.
+if grep -q 'before this install' <<< "${nosave_post}"; then
+  fail "the rollback does not infer what the project held before this install"
+fi
+assert_gives_no_command "${nosave_post}" "the --no-save rollback gives no command"
+pass "a rollback removes the node_modules a --no-save install wrote without a package.json"
+
+# The same --no-save install through a node_modules that links elsewhere: the
+# hidden lockfile is read through the link, the project is an npm project, and
+# the removal is refused and named rather than reported as nothing.
+nosave_link_wt="${tmp_root}/nosave-link-wt"
+nosave_link_target="${tmp_root}/nosave-link-target"
+mkdir -p "${nosave_link_wt}" "${nosave_link_target}/.bin"
+# A relative link: its text ("../nosave-link-target") does not resolve from
+# the reader's directory, so the message names the physical path instead.
+ln -s ../nosave-link-target "${nosave_link_wt}/node_modules"
+nosave_link_physical=$(cd -P "${nosave_link_target}" && pwd -P)
+scripts/safedeps-pre-guard.sh > /dev/null <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install --no-save fixture-parent@1.0.0"},"cwd":"${nosave_link_wt}"}
+EOF
+printf '{"name":"nosave-link-wt","lockfileVersion":3,"packages":{}}\n' > "${nosave_link_target}/.package-lock.json"
+cp /bin/echo "${nosave_link_target}/.bin/native-drop"
+nosave_link_post=$(
+  PATH="${emptying_bin}:${PATH}" scripts/safedeps-post-verify.sh <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install --no-save fixture-parent@1.0.0"},"cwd":"${nosave_link_wt}"}
+EOF
+)
+grep -q 'suspicious dependency change detected' <<< "${nosave_link_post}" || fail "reorg fires on a native binary through a linked node_modules"
+grep -q 'REFUSED node_modules removal' <<< "${nosave_link_post}" || fail "the rollback names the linked node_modules it will not remove"
+grep -qF "symbolic link to ${nosave_link_physical};" <<< "${nosave_link_post}" || fail "a refused relative link is named by its physical path"
+assert_gives_no_command "${nosave_link_post}" "the rollback through a linked node_modules gives no command"
+[[ -f "${nosave_link_target}/.package-lock.json" ]] || fail "a rollback leaves the target of a linked node_modules alone"
+pass "a rollback names a linked node_modules a --no-save install wrote through"
 
 export SAFEDEPS_HOME="${tmp_root}/safe-missing-transitive"
 export SAFEDEPS_OSV_API_URL="http://127.0.0.1:${port}/osv/v1/query"
@@ -1305,7 +1699,13 @@ printf 'ok - pre-guard derives the same overrides approval key as the check\n'
 
 journal_home="${tmp_root}/journal-home"
 journal_project="${tmp_root}/journal-project"
-mkdir -p "${journal_home}" "${journal_project}"
+mkdir -p "${journal_home}" "${journal_project}" "${tmp_root}/journal-linked-modules"
+# The project's node_modules links to another checkout's, so the report's
+# advice must not send npm ci there (npm ci empties what node_modules resolves to).
+printf '{"name":"journal-project","version":"1.0.0"}\n' > "${journal_project}/package.json"
+ln -s "${tmp_root}/journal-linked-modules" "${journal_project}/node_modules"
+# A yarn project: it has a lockfile, just not npm's, so "no lockfile" is false.
+: > "${journal_project}/yarn.lock"
 
 # An unfinished rollback, written the way the gate writes it before it starts
 # restoring files.
@@ -1313,7 +1713,7 @@ mkdir -p "${journal_home}" "${journal_project}"
   . "${ROOT_DIR}/lib/gates/rollback-journal.sh"
   safedeps_journal_open 'test-interrupted' "${journal_project}" 'snap-baseline' \
     'npm closure contains 1 unapproved package(s): fixture-evil@9.9.9' \
-    'reinstalling-node-modules' )
+    'removing-node-modules' )
 
 # ...and its owner has to be genuinely gone, because "interrupted" now means
 # "the process that opened this is not running". `safedeps_journal_open` stamps
@@ -1344,10 +1744,18 @@ EOF
 )
 grep -q 'did not finish' <<< "${journal_report}" \
   || fail "an unfinished rollback is reported on the next Bash call"
-grep -q 'reinstalling-node-modules' <<< "${journal_report}" \
+grep -q 'removing-node-modules' <<< "${journal_report}" \
   || fail "the unfinished-rollback report names the stage it was cut off at"
 grep -q 'fixture-evil@9.9.9' <<< "${journal_report}" \
   || fail "the unfinished-rollback report says why the rollback was started"
+grep -q 'node_modules is a symbolic link to' <<< "${journal_report}" \
+  || fail "the unfinished-rollback report says the node_modules is a link"
+assert_gives_no_command "${journal_report}" "the unfinished-rollback report gives no reinstall command"
+if grep -q 'no lockfile' <<< "${journal_report}"; then
+  fail "the unfinished-rollback report does not call a yarn project lockless"
+fi
+grep -q 'neither package-lock.json nor npm-shrinkwrap.json' <<< "${journal_report}" \
+  || fail "the unfinished-rollback report names the npm lockfiles it looked for"
 grep -q 'REORG INTERRUPTED' "${journal_home}/reorg.log" \
   || fail "an interrupted rollback lands in the same log the finished ones use"
 [[ -f "${journal_home}/rollback-incidents/test-interrupted.json" ]] \
@@ -1405,7 +1813,7 @@ race_write_entry() {
   jq -nc --arg pid "${pid}" --arg opened_at "${opened_at}" \
     '{journal_id:"test-race", project_dir:"'"${race_project}"'",
       rollback_snapshot:"snap-baseline", reasons:"npm closure contains 1 unapproved package(s): fixture-evil@9.9.9",
-      stage:"reinstalling-node-modules", opened_at:$opened_at, pid:$pid}' \
+      stage:"removing-node-modules", opened_at:$opened_at, pid:$pid}' \
     > "${race_home}/rollback-journal/test-race.json"
 }
 
@@ -1538,7 +1946,7 @@ mkdir -p "${race_home}/rollback-journal"
 jq -nc --arg pid "${stage_at_pid}" \
   '{journal_id:"test-race", project_dir:"'"${race_project}"'",
     rollback_snapshot:"snap-baseline", reasons:"npm closure contains 1 unapproved package(s): fixture-evil@9.9.9",
-    stage:"reinstalling-node-modules",
+    stage:"removing-node-modules",
     opened_at:"2026-08-05T00:00:00Z", stage_at:"2026-08-05T00:00:07Z", pid:$pid}' \
   > "${race_home}/rollback-journal/test-race.json"
 stage_at_out=$(race_report)
