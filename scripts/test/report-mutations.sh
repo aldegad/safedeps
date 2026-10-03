@@ -25,15 +25,18 @@
 # files), mutated, run and thrown away. The unmutated copy runs first and must
 # be green, so a red below is the mutation's and not the machine's.
 #
-# Three more mutations are not lines: they break the backstop's trace check,
+# Five more mutations are not lines: they break the backstop's trace check,
 # which decides whether the backstop judges a command at all, and e2e must turn
 # red at the row named here rather than at the oracle. TraceNever finds no
 # trace in any baseline, and the install the pre-guard did not read is kept;
 # TraceAlways finds one in every baseline, and a grep rolls the project back;
 # WalkOff drops the walk of node_modules, and a write only there (bun, pnpm, a
-# file inside a package) is kept.
+# file inside a package) is kept; PullAlways sets the baseline two seconds back
+# on every filesystem, and a grep right after a pull rolls the project back;
+# Oldest keeps entries by project and command and reads the oldest, and a
+# failed call's entry makes a later grep roll the project back.
 #
-# This is twenty-eight e2e runs, so it is not part of `npm test`. Run it when a
+# This is thirty e2e runs, so it is not part of `npm test`. Run it when a
 # line the hook prints, a fact function, the oracle or the trace check changes.
 #
 #   scripts/test/report-mutations.sh            every mutation
@@ -48,7 +51,7 @@ trap 'rm -rf "${WORK}"' EXIT
 # must give, and the text to find and to put in its place. The text to find
 # occurs exactly once in the file, or the mutation is reported as not applying.
 MUTATIONS=(P2 R3 K Lie Bypass Head NoCheck Snap Cause Prose LogOnly Reasons Kept Silent JOmit RefuseSilent F1 F2 LogSilent F4 MarkOrig MarkSkip Unread Same
-  TraceNever TraceAlways WalkOff)
+  TraceNever TraceAlways WalkOff PullAlways Oldest)
 
 # A mutation can change a second file too (M_FILE2, M_OLD2, M_NEW2). M_AT is
 # where its red must show: the oracle, or (empty) any e2e row.
@@ -272,11 +275,30 @@ $4; node_modules was restored from the confirmed snapshot
       M_FILE=scripts/safedeps-post-verify.sh
       M_WHY='a trace check that finds a trace in every baseline'
       M_AT=""
-      M_RED='a grep after a lockfile change outside the gate: the backstop says nothing'
+      M_RED='a grep right after a pull outside the gate: the backstop says nothing'
       M_OLD='  if [[ -z "${BACKSTOP_TRACE_ENTRY}" ]]; then
-    printf '"'"'the pre-guard left no trace baseline for this command'"'"''
+    printf '"'"'%s'"'"' "${BACKSTOP_TRACE_NONE:-the pre-guard left no trace entry for this call}"'
       M_NEW='  if true; then
-    printf '"'"'the pre-guard left no trace baseline for this command'"'"''
+    printf '"'"'%s'"'"' "${BACKSTOP_TRACE_NONE:-the pre-guard left no trace entry for this call}"'
+      ;;
+    PullAlways)
+      M_FILE=scripts/safedeps-pre-guard.sh
+      M_WHY='a baseline set two seconds back on every filesystem, the rule before it was measured'
+      M_AT=""
+      M_RED='a grep right after a pull outside the gate: the backstop says nothing'
+      M_OLD='  if [[ "${project_subsecond}" == true ]] \'
+      M_NEW='  if false && [[ "${project_subsecond}" == true ]] \'
+      ;;
+    Oldest)
+      M_FILE=scripts/safedeps-pre-guard.sh
+      M_WHY='entries kept by project and command and the oldest one read, the rule before entries belonged to a call'
+      M_AT=""
+      M_RED='a grep after a failed grep and a pull: the backstop says nothing'
+      M_OLD='  base=$(safedeps_backstop_entry_base "${entry_dir}" "${id}") || return 0'
+      M_NEW='  base=$(safedeps_backstop_entry_base "${entry_dir}" "$(compute_pending_key "${dir_hash}" "${COMMAND}")_$$") || return 0'
+      M_FILE2=scripts/safedeps-post-verify.sh
+      M_OLD2='  if ! base=$(safedeps_backstop_entry_base "${GUARD_DIR}/pending/backstop" "${id}"); then'
+      M_NEW2='  if ! base=$(ls -tr "${GUARD_DIR}/pending/backstop/id-$(compute_pending_key "${POST_DIR_HASH}" "${COMMAND}")_"*.json 2>/dev/null | head -n 1 | sed '"'"'s/\.json$//'"'"' | grep .); then'
       ;;
     WalkOff)
       M_FILE=scripts/safedeps-post-verify.sh

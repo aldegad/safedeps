@@ -1276,9 +1276,13 @@ pass "a rollback names a linked node_modules a --no-save install wrote through"
 # The oracle's form table fails on a form no line matched, so each form has a
 # row here that makes the hook print it. A row asserts the phrase it is about;
 # whether the line is true is the oracle's to say, in post_hook.
+# A third argument is the call's tool_use_id, which both hooks of one call
+# receive; the backstop's trace entry is kept under it.
 grammar_pre() {
+  local id_field=""
+  [[ -z "${3:-}" ]] || id_field=",\"tool_use_id\":\"$3\""
   pre_hook <<EOF
-{"tool_name":"Bash","tool_input":{"command":"$2"},"cwd":"$1"}
+{"tool_name":"Bash","tool_input":{"command":"$2"},"cwd":"$1"${id_field}}
 EOF
 }
 grammar_pre_codex() {
@@ -1287,8 +1291,10 @@ grammar_pre_codex() {
 EOF
 }
 grammar_post() {
+  local id_field=""
+  [[ -z "${3:-}" ]] || id_field=",\"tool_use_id\":\"$3\""
   post_hook <<EOF
-{"tool_name":"Bash","tool_input":{"command":"$2"},"cwd":"$1"}
+{"tool_name":"Bash","tool_input":{"command":"$2"},"cwd":"$1"${id_field}}
 EOF
 }
 grammar_project() {
@@ -1486,9 +1492,10 @@ pass "the backstop that rolls nothing back says which record it looked for"
 # ledger entries that approved it expired. A grep the pattern matched then
 # rolled the project back and removed its node_modules.
 #
-# The pre-guard takes the baseline two seconds back, so every fixture is
-# finished before the one wait below, and nothing written before it counts as
-# the command's.
+# No row waits. The pre-guard used to set its baseline two seconds back, and
+# these rows passed only because they waited three seconds after the change
+# outside the gate; a pull 0.3 seconds before the grep was counted as the
+# grep's, and two Bash calls in one message are 0.16 seconds apart (lumi r1 R1).
 bs_project() {
   grammar_project "$1"
   grammar_pre "$1" "npm install fixture-parent@1.0.0" > /dev/null
@@ -1497,6 +1504,11 @@ bs_project() {
     || fail "the backstop fixture ${1##*/} is confirmed quietly"
   mkdir -p "$1/node_modules/installed-package"
   printf '{"name":"installed-package","version":"1.0.0"}\n' > "$1/node_modules/installed-package/package.json"
+}
+# A pull: the lockfile replaced by a new file, the way git writes one.
+bs_pull() {
+  printf '%s\n' "${tampered_lock}" > "$1/.package-lock.json.pull"
+  mv -f "$1/.package-lock.json.pull" "$1/package-lock.json"
 }
 # A backstop row that rolled nothing back: no message, the project as it was,
 # and the check that found no trace in advisory.log.
@@ -1516,11 +1528,47 @@ bs_assert_rollback() {
   grep -qF "post-verify BACKSTOP traced: ${trace}" "${home}/advisory.log" || fail "${label}: advisory.log says what the trace was"
 }
 bs_grep='grep -n \"npm install\" README.md'
+bs_entries() { { find "$1/pending/backstop" -type f 2>/dev/null || true; } | wc -l | tr -d ' '; }
+bs_entry() { printf '%s/pending/backstop/id-%s.json' "${2:-${SAFEDEPS_HOME}}" "$1"; }
+bs_untraced_count() {
+  { grep -cF "post-verify BACKSTOP UNTRACED: no trace in $(cd -P "$1" && pwd -P): " "${SAFEDEPS_HOME}/advisory.log" || true; }
+}
 
-# The lockfile changed outside the gate.
+# A pull, and the grep right after it (R1).
 bs_lock_wt="${tmp_root}/bs-lock-wt"
 bs_project "${bs_lock_wt}"
+bs_pull "${bs_lock_wt}"
+bs_entries_before=$(bs_entries "${SAFEDEPS_HOME}")
+bs_lock_pre=$(grammar_pre "${bs_lock_wt}" "${bs_grep}" toolu_bs_lock)
+[[ -z "${bs_lock_pre}" ]] || fail "the pre-guard lets a grep run (${bs_lock_pre})"
+[[ "$(bs_entries "${SAFEDEPS_HOME}")" == "$(( bs_entries_before + 2 ))" ]] \
+  || fail "the pre-guard leaves a trace entry and its baseline for a grep the backstop pattern matches"
+[[ "$(jq -r .resolution "$(bs_entry toolu_bs_lock)")" == subsecond ]] \
+  || fail "on a filesystem that keeps time below one second the baseline is not set back ($(cat "$(bs_entry toolu_bs_lock)"))"
+bs_lock_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${bs_lock_wt}" "${bs_grep}" toolu_bs_lock)
+bs_assert_untraced "${bs_lock_wt}" "${bs_lock_post}" "a grep right after a pull outside the gate"
+[[ "$(bs_entries "${SAFEDEPS_HOME}")" == "${bs_entries_before}" ]] || fail "the backstop removes the trace entry and its baseline it read"
+# The same, with the lockfile written in place rather than replaced.
 printf '%s\n' "${tampered_lock}" > "${bs_lock_wt}/package-lock.json"
+grammar_pre "${bs_lock_wt}" "${bs_grep}" toolu_bs_lock_inplace > /dev/null
+bs_lock_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${bs_lock_wt}" "${bs_grep}" toolu_bs_lock_inplace)
+bs_assert_untraced "${bs_lock_wt}" "${bs_lock_post}" "a grep right after the lockfile was written in place"
+grammar_pre "${bs_lock_wt}" "ls -la" toolu_bs_ls > /dev/null
+[[ "$(bs_entries "${SAFEDEPS_HOME}")" == "${bs_entries_before}" ]] || fail "the pre-guard leaves no trace entry for a command the backstop pattern does not match"
+pass "a grep right after a lockfile change outside the gate rolls nothing back"
+
+# An install the pre-guard did not read (`npm run deps:install` running an
+# install), and a write it did not make itself.
+bs_t4_wt="${tmp_root}/bs-t4-wt"
+bs_project "${bs_t4_wt}"
+grammar_pre "${bs_t4_wt}" "npm run deps:install" toolu_bs_t4 > /dev/null
+printf '%s\n' "${tampered_lock}" > "${bs_t4_wt}/package-lock.json"
+mkdir -p "${bs_t4_wt}/node_modules/fixture-evil"
+bs_t4_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${bs_t4_wt}" "npm run deps:install" toolu_bs_t4)
+bs_assert_rollback "${bs_t4_wt}" "${bs_t4_post}" "an install the pre-guard did not read" \
+  "$(cd -P "${bs_t4_wt}" && pwd -P)/package-lock.json has another status change time than the one recorded before this command"
+pass "an install the pre-guard did not read is rolled back"
+
 # The ledger entries that approved the closure expired. The ledger is this
 # suite's, so the row reads a copy of it.
 bs_ttl_wt="${tmp_root}/bs-ttl-wt"
@@ -1530,20 +1578,99 @@ cp -R "${SAFEDEPS_HOME}" "${bs_ttl_home}"
 for bs_spec in "${bs_ttl_home}/approved-specs"/*.json; do
   jq '.expires_at = "2020-01-01T00:00:00Z"' "${bs_spec}" > "${bs_spec}.new" && mv "${bs_spec}.new" "${bs_spec}"
 done
-# An install the pre-guard did not read (`npm run deps:install` running an
-# install), and a write it did not make itself.
-bs_t4_wt="${tmp_root}/bs-t4-wt"
-bs_project "${bs_t4_wt}"
-# A baseline left by an earlier call whose PostToolUse never ran, and the
-# lockfile changed after it.
-bs_stale_wt="${tmp_root}/bs-stale-wt"
-bs_project "${bs_stale_wt}"
-grammar_pre "${bs_stale_wt}" "${bs_grep}" > /dev/null
-printf '%s\n' "${tampered_lock}" > "${bs_stale_wt}/package-lock.json"
+bs_ttl_cmd='git log --grep=\"npm install\"'
+SAFEDEPS_HOME="${bs_ttl_home}" grammar_pre "${bs_ttl_wt}" "${bs_ttl_cmd}" toolu_bs_ttl > /dev/null
+bs_ttl_post=$(PATH="${stub_bin}:${PATH}" SAFEDEPS_HOME="${bs_ttl_home}" grammar_post "${bs_ttl_wt}" "${bs_ttl_cmd}" toolu_bs_ttl)
+cmp -s "${bs_ttl_wt}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "the ledger row leaves the confirmed lockfile"
+[[ -z "${bs_ttl_post}" && -f "${bs_ttl_wt}/node_modules/installed-package/package.json" ]] \
+  || fail "a git log after the ledger expired rolls nothing back (${bs_ttl_post})"
+grep -qF "post-verify BACKSTOP UNTRACED: no trace in $(cd -P "${bs_ttl_wt}" && pwd -P): " "${bs_ttl_home}/advisory.log" \
+  || fail "a git log after the ledger expired is recorded as untraced"
+# The same project, a command that writes only into node_modules (a manager
+# that writes no npm lockfile): the walk finds it, and the expired ledger is
+# why the closure check rejects it.
+SAFEDEPS_HOME="${bs_ttl_home}" grammar_pre "${bs_ttl_wt}" "npm run deps:add" toolu_bs_tree > /dev/null
+printf 'x\n' > "${bs_ttl_wt}/node_modules/installed-package/added.js"
+bs_tree_post=$(PATH="${stub_bin}:${PATH}" SAFEDEPS_HOME="${bs_ttl_home}" grammar_post "${bs_ttl_wt}" "npm run deps:add" toolu_bs_tree)
+grep -q 'A rollback ran\.' <<< "${bs_tree_post}" || fail "a write only into node_modules is a trace (${bs_tree_post})"
+[[ ! -e "${bs_ttl_wt}/node_modules" ]] || fail "the rollback after a write only into node_modules removes node_modules"
+grep -qF "post-verify BACKSTOP traced: $(cd -P "${bs_ttl_wt}" && pwd -P)/node_modules" "${bs_ttl_home}/advisory.log" \
+  || fail "advisory.log names what the walk found"
+pass "after the ledger expired, a git log rolls nothing back and a write into node_modules rolls back"
+
+# A call whose post hook never ran: Claude Code runs no PostToolUse for a Bash
+# call that ended in an error, so its entry stays (lumi r1 P1). It is that
+# call's, and the next call reads only its own: a pull and a grep after it is
+# untraced, and the failed call's entry is still there for the age sweep.
+bs_p1_wt="${tmp_root}/bs-p1-wt"
+bs_project "${bs_p1_wt}"
+grammar_pre "${bs_p1_wt}" "${bs_grep}" toolu_bs_p1_failed > /dev/null
+bs_pull "${bs_p1_wt}"
+grammar_pre "${bs_p1_wt}" "${bs_grep}" toolu_bs_p1 > /dev/null
+bs_p1_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${bs_p1_wt}" "${bs_grep}" toolu_bs_p1)
+bs_assert_untraced "${bs_p1_wt}" "${bs_p1_post}" "a grep after a failed grep and a pull"
+[[ -f "$(bs_entry toolu_bs_p1_failed)" && ! -e "$(bs_entry toolu_bs_p1)" ]] \
+  || fail "the failed call's entry stays and the read one is gone"
+pass "an entry a failed call left is not read by the next call"
+
+# And it stays that way (P1b): once a failed call left an entry, a clean call
+# used to read that one and leave its own, so every later call of the command
+# was judged from the call before it.
+bs_p1b_wt="${tmp_root}/bs-p1b-wt"
+bs_project "${bs_p1b_wt}"
+grammar_pre "${bs_p1b_wt}" "${bs_grep}" toolu_bs_p1b_failed > /dev/null
+grammar_pre "${bs_p1b_wt}" "${bs_grep}" toolu_bs_p1b_clean > /dev/null
+bs_p1b_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${bs_p1b_wt}" "${bs_grep}" toolu_bs_p1b_clean)
+[[ -z "${bs_p1b_post}" && "$(bs_untraced_count "${bs_p1b_wt}")" == 1 ]] \
+  || fail "a grep after a failed grep, with nothing changed: the backstop says nothing (${bs_p1b_post})"
+bs_pull "${bs_p1b_wt}"
+grammar_pre "${bs_p1b_wt}" "${bs_grep}" toolu_bs_p1b > /dev/null
+bs_p1b_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${bs_p1b_wt}" "${bs_grep}" toolu_bs_p1b)
+bs_assert_untraced "${bs_p1b_wt}" "${bs_p1b_post}" "a grep after a failed grep, a clean grep and a pull"
+[[ "$(bs_untraced_count "${bs_p1b_wt}")" == 2 ]] || fail "each grep after the failed one is recorded as untraced"
+pass "a failed call's entry moves no later call's baseline"
+
+# A payload with no tool_use_id: no entry is written or read, so the command
+# counts as traced, which is what the backstop did before it asked.
+bs_noid_wt="${tmp_root}/bs-noid-wt"
+bs_project "${bs_noid_wt}"
+bs_pull "${bs_noid_wt}"
+bs_entries_before=$(bs_entries "${SAFEDEPS_HOME}")
+grammar_pre "${bs_noid_wt}" "${bs_grep}" > /dev/null
+[[ "$(bs_entries "${SAFEDEPS_HOME}")" == "${bs_entries_before}" ]] || fail "the pre-guard writes no trace entry for a call with no tool_use_id"
+bs_noid_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${bs_noid_wt}" "${bs_grep}")
+bs_assert_rollback "${bs_noid_wt}" "${bs_noid_post}" "a grep with no tool_use_id" \
+  "this hook's input names no tool_use_id, so no trace entry belongs to this call"
+pass "a call with no tool_use_id is judged as before: a trace"
+
+# A filesystem that keeps whole seconds, simulated: a touch that drops the part
+# below the second. A write in the second the baseline is touched in would not
+# be newer than it, so there the baseline is set two seconds back, and a pull
+# just before the grep is counted as the grep's.
+bs_sec_wt="${tmp_root}/bs-sec-wt"
+bs_project "${bs_sec_wt}"
+bs_sec_bin="${tmp_root}/bs-sec-bin"
+mkdir -p "${bs_sec_bin}"
+cat > "${bs_sec_bin}/touch" <<EOF
+#!/usr/bin/env bash
+"$(command -v touch)" "\$@" || exit
+[[ "\$#" == 1 ]] && exec "$(command -v touch)" -t "\$(date +%Y%m%d%H%M.%S)" "\$1"
+exit 0
+EOF
+chmod +x "${bs_sec_bin}/touch"
+printf '%s\n' "${tampered_lock}" > "${bs_sec_wt}/package-lock.json"
+PATH="${bs_sec_bin}:${PATH}" grammar_pre "${bs_sec_wt}" "${bs_grep}" toolu_bs_sec > /dev/null
+[[ "$(jq -r .resolution "$(bs_entry toolu_bs_sec)")" == seconds ]] \
+  || fail "a baseline with no part below the second is set back ($(cat "$(bs_entry toolu_bs_sec)"))"
+bs_sec_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${bs_sec_wt}" "${bs_grep}" toolu_bs_sec)
+bs_assert_rollback "${bs_sec_wt}" "${bs_sec_post}" "a grep on a whole-second filesystem" \
+  "$(cd -P "${bs_sec_wt}" && pwd -P)/package-lock.json changed after the baseline taken before this command"
+pass "on a filesystem that keeps whole seconds the baseline is set two seconds back"
+
 # A walk that does not finish within its deadline: a find that never answers.
 bs_slow_wt="${tmp_root}/bs-slow-wt"
 bs_project "${bs_slow_wt}"
-printf '%s\n' "${tampered_lock}" > "${bs_slow_wt}/package-lock.json"
+bs_pull "${bs_slow_wt}"
 bs_slow_bin="${tmp_root}/bs-slow-bin"
 mkdir -p "${bs_slow_bin}"
 cat > "${bs_slow_bin}/find" <<EOF
@@ -1554,57 +1681,8 @@ esac
 exec $(command -v find) "\$@"
 EOF
 chmod +x "${bs_slow_bin}/find"
-sleep 3
-
-bs_entries() { { find "$1/pending/backstop" -type f 2>/dev/null || true; } | wc -l | tr -d ' '; }
-bs_entries_before=$(bs_entries "${SAFEDEPS_HOME}")
-bs_lock_pre=$(grammar_pre "${bs_lock_wt}" "${bs_grep}")
-[[ -z "${bs_lock_pre}" ]] || fail "the pre-guard lets a grep run (${bs_lock_pre})"
-bs_entries_pre=$(bs_entries "${SAFEDEPS_HOME}")
-bs_lock_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${bs_lock_wt}" "${bs_grep}")
-bs_assert_untraced "${bs_lock_wt}" "${bs_lock_post}" "a grep after a lockfile change outside the gate"
-[[ "${bs_entries_pre}" == "$(( bs_entries_before + 2 ))" ]] || fail "the pre-guard leaves a trace entry and its baseline for a grep the backstop pattern matches"
-[[ "$(bs_entries "${SAFEDEPS_HOME}")" == "${bs_entries_before}" ]] || fail "the backstop removes the trace entry and its baseline it read"
-grammar_pre "${bs_lock_wt}" "ls -la" > /dev/null
-[[ "$(bs_entries "${SAFEDEPS_HOME}")" == "${bs_entries_before}" ]] || fail "the pre-guard leaves no trace entry for a command the backstop pattern does not match"
-pass "a grep after a lockfile change outside the gate rolls nothing back"
-
-grammar_pre "${bs_t4_wt}" "npm run deps:install" > /dev/null
-printf '%s\n' "${tampered_lock}" > "${bs_t4_wt}/package-lock.json"
-mkdir -p "${bs_t4_wt}/node_modules/fixture-evil"
-bs_t4_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${bs_t4_wt}" "npm run deps:install")
-bs_assert_rollback "${bs_t4_wt}" "${bs_t4_post}" "an install the pre-guard did not read" \
-  "$(cd -P "${bs_t4_wt}" && pwd -P)/package-lock.json "
-pass "an install the pre-guard did not read is rolled back"
-
-bs_ttl_cmd='git log --grep=\"npm install\"'
-SAFEDEPS_HOME="${bs_ttl_home}" grammar_pre "${bs_ttl_wt}" "${bs_ttl_cmd}" > /dev/null
-bs_ttl_post=$(PATH="${stub_bin}:${PATH}" SAFEDEPS_HOME="${bs_ttl_home}" grammar_post "${bs_ttl_wt}" "${bs_ttl_cmd}")
-cmp -s "${bs_ttl_wt}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "the ledger row leaves the confirmed lockfile"
-[[ -z "${bs_ttl_post}" && -f "${bs_ttl_wt}/node_modules/installed-package/package.json" ]] \
-  || fail "a git log after the ledger expired rolls nothing back (${bs_ttl_post})"
-grep -qF "post-verify BACKSTOP UNTRACED: no trace in $(cd -P "${bs_ttl_wt}" && pwd -P): " "${bs_ttl_home}/advisory.log" \
-  || fail "a git log after the ledger expired is recorded as untraced"
-# The same project, a command that writes only into node_modules (a manager
-# that writes no npm lockfile): the walk finds it, and the expired ledger is
-# why the closure check rejects it.
-SAFEDEPS_HOME="${bs_ttl_home}" grammar_pre "${bs_ttl_wt}" "npm run deps:add" > /dev/null
-printf 'x\n' > "${bs_ttl_wt}/node_modules/installed-package/added.js"
-bs_tree_post=$(PATH="${stub_bin}:${PATH}" SAFEDEPS_HOME="${bs_ttl_home}" grammar_post "${bs_ttl_wt}" "npm run deps:add")
-grep -q 'A rollback ran\.' <<< "${bs_tree_post}" || fail "a write only into node_modules is a trace (${bs_tree_post})"
-[[ ! -e "${bs_ttl_wt}/node_modules" ]] || fail "the rollback after a write only into node_modules removes node_modules"
-grep -qF "post-verify BACKSTOP traced: $(cd -P "${bs_ttl_wt}" && pwd -P)/node_modules" "${bs_ttl_home}/advisory.log" \
-  || fail "advisory.log names what the walk found"
-pass "after the ledger expired, a git log rolls nothing back and a write into node_modules rolls back"
-
-grammar_pre "${bs_stale_wt}" "${bs_grep}" > /dev/null
-bs_stale_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${bs_stale_wt}" "${bs_grep}")
-bs_assert_rollback "${bs_stale_wt}" "${bs_stale_post}" "a baseline left by an earlier call" \
-  "$(cd -P "${bs_stale_wt}" && pwd -P)/package-lock.json changed after the baseline"
-pass "the backstop reads the oldest baseline for a command, so a leftover one counts what came after it"
-
-grammar_pre "${bs_slow_wt}" "${bs_grep}" > /dev/null
-bs_slow_post=$(PATH="${bs_slow_bin}:${stub_bin}:${PATH}" SAFEDEPS_BACKSTOP_WALK_SECONDS=1 grammar_post "${bs_slow_wt}" "${bs_grep}")
+grammar_pre "${bs_slow_wt}" "${bs_grep}" toolu_bs_slow > /dev/null
+bs_slow_post=$(PATH="${bs_slow_bin}:${stub_bin}:${PATH}" SAFEDEPS_BACKSTOP_WALK_SECONDS=1 grammar_post "${bs_slow_wt}" "${bs_grep}" toolu_bs_slow)
 bs_assert_rollback "${bs_slow_wt}" "${bs_slow_post}" "a walk past its deadline" \
   "the walk of $(cd -P "${bs_slow_wt}" && pwd -P)/node_modules did not finish within 1s"
 pass "a walk that does not finish within its deadline counts as a trace"
