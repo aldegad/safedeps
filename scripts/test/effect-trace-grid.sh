@@ -1473,6 +1473,51 @@ do
 done
 pass "the trace check starts no npm: none on a row with no trace, config, query and rebuild only on a row with one"
 
+# --- 5. The backstop rolls back only a command that left a trace -----------------------
+# The PostToolUse backstop judges commands the pre-guard did not read as an
+# install but whose text its pattern matches, `npm run deps:install` among
+# them. Each project here was confirmed by a verified install of sd-approved.
+# BT1's script installs nothing, and the ledger entry that approved the closure
+# has expired, which makes the confirmed closure unapproved with nothing changed
+# on disk: the backstop used to roll the project back and remove its
+# node_modules. BT2's script installs sd-victim, an install the pre-guard did
+# not read, and it is rolled back. Real npm runs both scripts.
+bs_confirmed() {
+  new_project
+  run_install 'npm install sd-approved@1.0.0'
+  [[ -z "${CASE_POST}" ]] || fail "the backstop fixture is confirmed quietly (post: ${CASE_POST})"
+  edit_json package.json --arg s "$1" '.scripts["deps:install"] = $s'
+}
+bs_confirmed 'echo nothing to install'
+for spec in "${CASE_HOME}/approved-specs"/*.json; do
+  jq '.expires_at = "2020-01-01T00:00:00Z"' "${spec}" > "${spec}.new" && mv "${spec}.new" "${spec}"
+done
+cp "${CASE_PROJECT}/package-lock.json" "${tmp_root}/bt1-lock.json"
+# The pre-guard's baseline is set two seconds back.
+sleep 3
+run_install 'npm run deps:install'
+printf 'BT1  claude  npm run deps:install (installs nothing, ledger expired) | rollback=%s post=[%s]\n' \
+  "$(rolled_back && echo yes || echo no)" "${CASE_POST:0:120}"
+[[ -z "${CASE_PRE_DENY}" ]] || note_failure "BT1: the gate lets npm run through (deny: ${CASE_PRE_DENY:0:160})"
+[[ -z "${CASE_POST}" ]] || note_failure "BT1: the backstop says nothing about a script that installed nothing (post: ${CASE_POST})"
+[[ -f "${CASE_PROJECT}/node_modules/sd-approved/package.json" ]] || note_failure "BT1: node_modules is left in place"
+cmp -s "${CASE_PROJECT}/package-lock.json" "${tmp_root}/bt1-lock.json" || note_failure "BT1: the lockfile is left as it was"
+grep -qF "post-verify BACKSTOP UNTRACED: no trace in ${CASE_PROJECT}: " "${CASE_HOME}/advisory.log" \
+  || note_failure "BT1: advisory.log says which check found no trace"
+
+bs_confirmed 'npm install sd-victim@1.0.0'
+: > "${MARKS}"
+run_install 'npm run deps:install'
+victim=$(victim_on_disk)
+printf 'BT2  claude  npm run deps:install (installs sd-victim) | rollback=%s victim=[%s]\n' \
+  "$(rolled_back && echo yes || echo no)" "${victim}"
+[[ -z "${CASE_PRE_DENY}" ]] || note_failure "BT2: the gate lets npm run through (deny: ${CASE_PRE_DENY:0:160})"
+rolled_back || note_failure "BT2: an install the pre-guard did not read is rolled back (post: ${CASE_POST:-<quiet>})"
+[[ -z "${victim}" ]] || note_failure "BT2: the rollback removes sd-victim from disk (${victim})"
+grep -qF "post-verify BACKSTOP traced: ${CASE_PROJECT}/" "${CASE_HOME}/advisory.log" \
+  || note_failure "BT2: advisory.log says what the trace was"
+pass "the backstop rolls back an npm run that installed (BT2) and nothing after one that did not (BT1)"
+
 npm_sandbox_registry_was_local
 # The evil registry is asked for the impostor only, and was asked at all: every
 # RH row but RH4 and RH5 fetches through it.

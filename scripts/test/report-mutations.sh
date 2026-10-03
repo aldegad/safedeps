@@ -20,8 +20,16 @@
 # files), mutated, run and thrown away. The unmutated copy runs first and must
 # be green, so a red below is the mutation's and not the machine's.
 #
-# This is twenty e2e runs, so it is not part of `npm test`. Run it when a line the
-# hook prints, a fact function or the oracle changes.
+# Three more mutations are not lines: they break the backstop's trace check,
+# which decides whether the backstop judges a command at all, and e2e must turn
+# red at the row named here rather than at the oracle. TraceNever finds no
+# trace in any baseline, and the install the pre-guard did not read is kept;
+# TraceAlways finds one in every baseline, and a grep rolls the project back;
+# WalkOff drops the walk of node_modules, and a write only there (bun, pnpm, a
+# file inside a package) is kept.
+#
+# This is twenty-three e2e runs, so it is not part of `npm test`. Run it when a
+# line the hook prints, a fact function, the oracle or the trace check changes.
 #
 #   scripts/test/report-mutations.sh            every mutation
 #   scripts/test/report-mutations.sh K Snap     only those
@@ -34,12 +42,15 @@ trap 'rm -rf "${WORK}"' EXIT
 # mutation <name> sets the file, what the mutation is, the reason the oracle
 # must give, and the text to find and to put in its place. The text to find
 # occurs exactly once in the file, or the mutation is reported as not applying.
-MUTATIONS=(P2 R3 K Lie Bypass Head NoCheck Snap Cause Prose LogOnly Reasons Kept Silent JOmit RefuseSilent F1 F2 LogSilent)
+MUTATIONS=(P2 R3 K Lie Bypass Head NoCheck Snap Cause Prose LogOnly Reasons Kept Silent JOmit RefuseSilent F1 F2 LogSilent
+  TraceNever TraceAlways WalkOff)
 
-# A mutation can change a second file too (M_FILE2, M_OLD2, M_NEW2).
+# A mutation can change a second file too (M_FILE2, M_OLD2, M_NEW2). M_AT is
+# where its red must show: the oracle, or (empty) any e2e row.
 
 mutation() {
   M_FILE2=""
+  M_AT="report oracle: "
   case "$1" in
     P2)
       M_FILE=lib/gates/report-facts.sh
@@ -209,6 +220,37 @@ $4; node_modules was restored from the confirmed snapshot
       M_OLD='  [[ ${#ROLLBACK_WARNINGS[@]} -gt 0 ]] || return 0'
       M_NEW='  [[ ${#ROLLBACK_WARNINGS[@]} -gt 0 ]] || { printf '"'"'[%s] CONFIRM warnings\n  restored %s/package-lock.json\n'"'"' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${PROJECT_DIR}" >> "${GUARD_DIR}/reorg.log"; return 0; }'
       ;;
+    TraceNever)
+      M_FILE=scripts/safedeps-post-verify.sh
+      M_WHY='a trace check that finds no trace in any baseline'
+      M_AT=""
+      M_RED='an install the pre-guard did not read: the backstop rolls back'
+      M_OLD='    printf '"'"'the trace baseline %s does not exist'"'"' "${baseline}"
+    return 0
+  fi'
+      M_NEW='    printf '"'"'the trace baseline %s does not exist'"'"' "${baseline}"
+    return 0
+  fi
+  printf '"'"'no trace in %s'"'"' "${PROJECT_DIR}"; return 1'
+      ;;
+    TraceAlways)
+      M_FILE=scripts/safedeps-post-verify.sh
+      M_WHY='a trace check that finds a trace in every baseline'
+      M_AT=""
+      M_RED='a grep after a lockfile change outside the gate: the backstop says nothing'
+      M_OLD='  if [[ -z "${BACKSTOP_TRACE_ENTRY}" ]]; then
+    printf '"'"'the pre-guard left no trace baseline for this command'"'"''
+      M_NEW='  if true; then
+    printf '"'"'the pre-guard left no trace baseline for this command'"'"''
+      ;;
+    WalkOff)
+      M_FILE=scripts/safedeps-post-verify.sh
+      M_WHY='a trace check that does not walk node_modules'
+      M_AT=""
+      M_RED='a write only into node_modules is a trace'
+      M_OLD='  find -H "${PROJECT_DIR}/node_modules" -cnewer "${baseline}" -print -quit > "${walk}" 2>/dev/null &'
+      M_NEW='  true > "${walk}" 2>/dev/null &'
+      ;;
     *) return 1 ;;
   esac
 }
@@ -265,8 +307,8 @@ for name in "${names[@]}"; do
   rc=0
   (cd "${WORK}/m${name}" && bash scripts/test/e2e.sh > "${WORK}/m${name}.log" 2>&1) || rc=$?
   reds=$(grep -c '^not ok - report oracle: ' "${WORK}/m${name}.log" || true)
-  if [[ ${rc} -ne 0 ]] && grep -qF "not ok - report oracle: ${M_RED}" "${WORK}/m${name}.log"; then
-    printf 'ok - m%s is red at the oracle: %s (%s; %s oracle line(s), e2e exit %s)\n' "${name}" "${M_RED}" "${M_WHY}" "${reds}" "${rc}"
+  if [[ ${rc} -ne 0 ]] && grep -qF "not ok - ${M_AT}${M_RED}" "${WORK}/m${name}.log"; then
+    printf 'ok - m%s is red %s: %s (%s; %s oracle line(s), e2e exit %s)\n' "${name}" "$([[ -n "${M_AT}" ]] && printf 'at the oracle' || printf 'at its row')" "${M_RED}" "${M_WHY}" "${reds}" "${rc}"
   else
     printf 'not ok - m%s: %s was not caught as "%s" (e2e exit %s, %s oracle line(s))\n' "${name}" "${M_WHY}" "${M_RED}" "${rc}" "${reds}"
     grep '^not ok' "${WORK}/m${name}.log" | head -3 | cut -c1-300 | sed 's/^/#   /'
