@@ -562,6 +562,17 @@ expect_not_approved() {
   got=$(gate_reason "${command}")
   [[ "${got}" == "deny "*"install not approved"* ]] || fail "${label} is read as an install and its spec checked (got: ${got:0:120})"
 }
+
+# The command after the inert rewrite, or nothing when the gate did not
+# rewrite it.
+gate_rewrite() {
+  local safe
+  safe=$(mktemp -d "${tmp_root}/safe.XXXXXX")
+  jq -nc --arg c "$1" --arg cwd "${project_dir}" \
+    '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
+    HOME="${tmp_root}/home" SAFEDEPS_HOME="${safe}" scripts/safedeps-pre-guard.sh 2>/dev/null |
+    jq -r '.hookSpecificOutput.updatedInput.command // ""'
+}
 # Each row: the form's id in the judgment grid, then whether each shell ran
 # its install (1) or not (0), in the order macOS bash 3.2, zsh 5.9, macOS sh,
 # dash, zsh through the agent's eval wrapper, Linux bash 5.2. Measured by
@@ -893,14 +904,6 @@ pass "a word glued after a closed arithmetic head, list or process substitution 
 # every rewrite follows: the text changes only where every reading puts the
 # npm installs in the same place. Measured on the release before this: the zsh
 # `for i (1)` form got no rewrite and no verdict, so its lifecycle scripts ran.
-gate_rewrite() {
-  local safe
-  safe=$(mktemp -d "${tmp_root}/safe.XXXXXX")
-  jq -nc --arg c "$1" --arg cwd "${project_dir}" \
-    '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
-    HOME="${tmp_root}/home" SAFEDEPS_HOME="${safe}" scripts/safedeps-pre-guard.sh 2>/dev/null |
-    jq -r '.hookSpecificOutput.updatedInput.command // ""'
-}
 # Every reading parses these and reads the install at the same start.
 for inert_form in \
   'function f { (npm install evil); }; f' \
