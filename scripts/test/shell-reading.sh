@@ -76,13 +76,17 @@ pass "control: the harness separates a judged install from data"
 
 # Each reading against its own shell. A reading shows the tail when its live
 # view (every byte the shell runs at the top level), the scripts it hands to
-# `sh -c` or `eval`, or the heredoc bodies it pipes to a shell hold it.
+# `sh -c` or `eval`, the heredoc bodies it pipes to a shell, or the statement
+# the recognizers read (the unprefixed view, every redirection blank) hold it.
+# The last is the one for a redirection between a command and its arguments
+# whose target holds a substitution: the live view keeps that body, which
+# runs, so there the command and its arguments are not side by side.
 lex_src=$(sed -n '/^shell_lex() {/,/^}/p' scripts/safedeps-pre-guard.sh)
 [[ "${lex_src}" == *"shell_lex() {"* ]] || fail "shell_lex not found in the guard (renamed? then update this battery)"
 eval "${lex_src}"
 reading_shows_tail() { # reading text
   local v
-  for v in live cscripts shell-bodies; do
+  for v in live cscripts shell-bodies unprefixed; do
     SAFEDEPS_READING="$1" shell_lex "$2" "${v}" "safedeps:shell-reading" | tr -d ' \t\n' \
       | grep -q 'pipinstallevil==6\.6\.6' && return 0
   done
