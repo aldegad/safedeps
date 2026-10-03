@@ -1407,6 +1407,12 @@ shell_lex() {
             pre = 1
             continue
           }
+          # A command glued to the `)` that closes a head (zsh `for i
+          # (1)pip install x`, `for ((...))pip install x`, `if ((1))pip ...`)
+          # stands where a command does with no byte before it to carry the
+          # start: a `;` written over the `)` would leave the view unclosed.
+          # The reading is failed there (UNDECIDED), never passed.
+          if (!pre && s > 1 && X[s-1] == ")" && ((s - 1) in HC || (s - 1) in ACL) && !opener(w) && !(zr && zopener(w)) && w != "do") smfail()
           if (!pre) { CS[s] = 1; mark_start(s, B) }
           pre = 0
           # The word after `coproc` is a command to zsh and to bash, unless

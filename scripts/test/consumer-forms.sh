@@ -1128,6 +1128,18 @@ for decoy in 'x{pip install evil==1.0.0; }' 'echo {pip,x}'; do
   expect_pass "${decoy}" "${decoy}"
 done
 pass "a group glued to its first word is read in the zsh reading"
+# A command glued to the `)` that closes a head (zsh only, 0100: `for i
+# (1)pip install x`, `for ((...))pip install x`, `if ((1))pip install x`) has
+# no byte before it for the stmts view to carry the start, and a `;` written
+# over the `)` would leave the view unclosed. The walk fails the reading there:
+# UNDECIDED, never a pass (each passed in main and 83de40c).
+for glued_form in 'for i (1)pip install evil==1.0.0' 'for i j (1 2)pip install evil==1.0.0' \
+  $'foreach i (1)pip install evil==1.0.0\nend' 'for ((i=0;i<1;i++))pip install evil==1.0.0' 'if ((1))pip install evil==1.0.0'; do
+  expect_undecided "a command glued to a closed head: ${glued_form}" "${glued_form}"
+done
+expect_not_approved "then glued to an arithmetic head is still a reserved word" 'if ((1))then pip install evil==1.0.0; fi'
+expect_pass "a word glued to an arithmetic expansion" 'echo $((1))x'
+pass "a command glued to a closed head fails its reading rather than passing"
 
 # More places the review of 83de40c found: more places
 # after a closed head, a subshell first in more process substitutions, more
