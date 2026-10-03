@@ -75,6 +75,8 @@ source "${SAFEDEPS_REPO_DIR}/lib/gates/rollback-journal.sh"
 source "${SAFEDEPS_REPO_DIR}/lib/npm/workspaces.sh"
 # shellcheck source=../lib/npm/ask.sh
 source "${SAFEDEPS_REPO_DIR}/lib/npm/ask.sh"
+# shellcheck source=../lib/gates/backstop-trace.sh
+source "${SAFEDEPS_REPO_DIR}/lib/gates/backstop-trace.sh"
 
 acquire_state_lock() {
   local attempts=0
@@ -1357,27 +1359,39 @@ post_command_looks_like_install() {
   printf '%s' "${command}" | grep -qiE "${SAFEDEPS_G_BACKSTOP_RE}"
 }
 
-# The trace baseline the pre-guard left for a command it did not read as an
-# install (guard_backstop_trace_baseline). Identical commands in one cwd share a
-# key, so there can be more than one; this takes the oldest. Its baseline is the
-# earliest, so it shows the most as written, and a leftover from a call whose
-# PostToolUse never ran can only make a command read as traced. Empty when there
-# is none.
+# The trace entry the pre-guard left for this tool call
+# (guard_backstop_trace_baseline), read once and removed. Only this call's
+# entry is read: it is named by the call's tool_use_id, which no other call
+# carries. An entry left by a call whose post hook never ran is not this one,
+# and the age sweep removes it. Empty when there is none, and
+# BACKSTOP_TRACE_NONE says why.
 BACKSTOP_TRACE_ENTRY=""
+BACKSTOP_TRACE_NONE=""
 backstop_take_trace_entry() {
-  local candidate at oldest="" oldest_at=""
-  for candidate in "${GUARD_DIR}/pending/backstop/$(compute_pending_key "${POST_DIR_HASH}" "${COMMAND}")__"*.json; do
-    [[ -f "${candidate}" ]] || continue
-    at=$(jq -r '.at // empty' "${candidate}" 2>/dev/null) || at=""
-    [[ "${at}" =~ ^[0-9]+$ ]] || at=0
-    if [[ -z "${oldest}" ]] || (( at < oldest_at )); then
-      oldest="${candidate}"
-      oldest_at="${at}"
-    fi
-  done
-  [[ -n "${oldest}" ]] || return 0
-  BACKSTOP_TRACE_ENTRY=$(cat "${oldest}" 2>/dev/null) || BACKSTOP_TRACE_ENTRY=""
-  rm -f "${oldest}"
+  local id base
+  id=$(jq -r 'if (.tool_use_id | type) == "string" then .tool_use_id else empty end' <<< "${INPUT}" 2>/dev/null) || id=""
+  if ! base=$(safedeps_backstop_entry_base "${GUARD_DIR}/pending/backstop" "${id}"); then
+    BACKSTOP_TRACE_NONE="this hook's input names no tool_use_id, so no trace entry belongs to this call"
+    return 0
+  fi
+  if [[ ! -f "${base}.json" ]]; then
+    BACKSTOP_TRACE_NONE="the pre-guard left no trace entry for this call"
+    return 0
+  fi
+  BACKSTOP_TRACE_ENTRY=$(cat "${base}.json" 2>/dev/null) || BACKSTOP_TRACE_ENTRY=""
+  rm -f "${base}.json"
+  if [[ -z "${BACKSTOP_TRACE_ENTRY}" ]]; then
+    BACKSTOP_TRACE_NONE="the trace entry for this call could not be read"
+    rm -f "${base}.trace"
+    return 0
+  fi
+  # The entry must be this command's in this directory; the call that wrote it
+  # read the same input, so anything else is an entry this hook cannot vouch for.
+  if [[ "$(jq -r '.key // empty' <<< "${BACKSTOP_TRACE_ENTRY}" 2>/dev/null)" != "$(compute_pending_key "${POST_DIR_HASH}" "${COMMAND}")" ]]; then
+    BACKSTOP_TRACE_NONE="the trace entry for this call was taken for another directory or command"
+    rm -f "${base}.trace"
+    BACKSTOP_TRACE_ENTRY=""
+  fi
 }
 
 legacy_pending_matches_post_context() {
@@ -2479,8 +2493,8 @@ if [[ ! "${SAFEDEPS_BACKSTOP_WALK_SECONDS}" =~ ^[0-9]+$ ]] \
 fi
 
 # Whether this command left a trace in the project's node tree, read against
-# the baseline the pre-guard took just before it (backstop_take_trace_entry).
-# It prints what it found and returns 0 on a trace, and prints the check that
+# the record the pre-guard took just before it (backstop_take_trace_entry). It
+# prints what it found and returns 0 on a trace, and prints the check that
 # found none and returns 1 when there is none.
 #
 # The backstop judges commands the pre-guard did not read as an install, and
@@ -2493,25 +2507,35 @@ fi
 # command wrote node_modules before it removes it.
 #
 # A trace is an npm lockfile or node_modules with another inode than before
-# the command, one that existed then and does not now, or anything there whose
-# status changed after the baseline. The walk covers what the closure check
-# does not read: a manager that writes no npm lockfile (bun, pnpm) and files
-# written inside a package. Everything this cannot settle counts as a trace,
-# which is what the backstop did before it asked: no entry, an entry it cannot
-# read, a baseline file that is gone, a walk that fails or does not finish. A
-# trace is the directory's, not the command's, so another process writing
-# node_modules during the command (a dev server's cache) leaves one too.
+# the command, one that existed then and does not now or the other way round,
+# an npm lockfile whose status change time is not the one recorded, or
+# anything in node_modules whose status changed after the baseline. The
+# lockfiles are compared with their own recorded times, not with the baseline:
+# a baseline set back two seconds counted a pull made just before the command
+# as the command's (lumi r1 R1). Where the entry says the filesystem keeps
+# whole seconds, a write in the second the record was taken in leaves the same
+# time, so there a lockfile newer than the baseline set back two seconds is a
+# trace too. The walk covers what the closure check does not read: a manager
+# that writes no npm lockfile (bun, pnpm) and files written inside a package.
+# Everything this cannot settle counts as a trace, which is what the backstop
+# did before it asked: no entry, an entry it cannot read, a baseline file that
+# is gone, a walk that fails or does not finish. A trace is the directory's,
+# not the command's, so another process writing node_modules during the
+# command (a dev server's cache) leaves one too.
 backstop_trace() {
-  local baseline lock hidden tree rel recorded file inode found walk rc
+  local baseline resolution lock hidden tree lock_clock hidden_clock rel recorded recorded_clock file inode found walk rc
   if [[ -z "${BACKSTOP_TRACE_ENTRY}" ]]; then
-    printf 'the pre-guard left no trace baseline for this command'
+    printf '%s' "${BACKSTOP_TRACE_NONE:-the pre-guard left no trace entry for this call}"
     return 0
   fi
-  { IFS= read -r baseline; IFS= read -r lock; IFS= read -r hidden; IFS= read -r tree; } < <(
-    jq -r '.baseline // "", .inodes["package-lock.json"] // "", .inodes["node_modules/.package-lock.json"] // "", .inodes.node_modules // ""' \
+  { IFS= read -r baseline; IFS= read -r resolution; IFS= read -r lock; IFS= read -r hidden; IFS= read -r tree
+    IFS= read -r lock_clock; IFS= read -r hidden_clock; } < <(
+    jq -r '.baseline // "", .resolution // "",
+      .inodes["package-lock.json"] // "", .inodes["node_modules/.package-lock.json"] // "", .inodes.node_modules // "",
+      .clocks["package-lock.json"] // "", .clocks["node_modules/.package-lock.json"] // ""' \
       <<< "${BACKSTOP_TRACE_ENTRY}" 2>/dev/null)
   if [[ -z "${baseline}" ]]; then
-    printf 'the trace entry for this command names no baseline'
+    printf 'the trace entry for this call names no baseline'
     return 0
   fi
   if [[ ! -f "${baseline}" ]]; then
@@ -2520,9 +2544,9 @@ backstop_trace() {
   fi
   for rel in package-lock.json "${NPM_HIDDEN_LOCKFILE}" node_modules; do
     case "${rel}" in
-      package-lock.json) recorded="${lock}" ;;
-      node_modules) recorded="${tree}" ;;
-      *) recorded="${hidden}" ;;
+      package-lock.json) recorded="${lock}"; recorded_clock="${lock_clock}" ;;
+      node_modules) recorded="${tree}"; recorded_clock="" ;;
+      *) recorded="${hidden}"; recorded_clock="${hidden_clock}" ;;
     esac
     file="${PROJECT_DIR}/${rel}"
     if [[ ! -e "${file}" && ! -L "${file}" ]]; then
@@ -2543,13 +2567,18 @@ backstop_trace() {
       return 0
     fi
     [[ "${rel}" == node_modules ]] && continue
-    if found=$(find -H "${file}" -cnewer "${baseline}" -print 2>/dev/null) && [[ -n "${found}" ]]; then
+    if [[ -z "${recorded_clock}" || "$(safedeps_file_clock "${file}" c)" != "${recorded_clock}" ]]; then
+      printf '%s has another status change time than the one recorded before this command' "${file}"
+      return 0
+    fi
+    if [[ "${resolution}" != subsecond ]] \
+      && found=$(find -H "${file}" -cnewer "${baseline}" -print 2>/dev/null) && [[ -n "${found}" ]]; then
       printf '%s changed after the baseline taken before this command' "${file}"
       return 0
     fi
   done
   [[ -e "${PROJECT_DIR}/node_modules" ]] || {
-    printf 'no trace in %s: neither npm lockfile nor node_modules there has another inode or changed after the baseline taken before this command' "${PROJECT_DIR}"
+    printf 'no trace in %s: neither npm lockfile nor node_modules there has another inode, and neither lockfile changed after the record taken before this command' "${PROJECT_DIR}"
     return 1
   }
   if ! walk=$(mktemp "${TMPDIR:-/tmp}/safedeps-backstop-walk.XXXXXX"); then
@@ -2574,7 +2603,7 @@ backstop_trace() {
     printf 'the walk of %s/node_modules failed (find exit %s)' "${PROJECT_DIR}" "${rc}"
     return 0
   fi
-  printf 'no trace in %s: neither npm lockfile nor node_modules there has another inode, and nothing there changed after the baseline taken before this command' "${PROJECT_DIR}"
+  printf 'no trace in %s: neither npm lockfile nor node_modules there has another inode, neither lockfile changed after the record taken before this command, and nothing in node_modules changed after the baseline' "${PROJECT_DIR}"
   return 1
 }
 

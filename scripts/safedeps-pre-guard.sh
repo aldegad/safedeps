@@ -4448,21 +4448,36 @@ fi
 # but that match the backstop's pattern (SAFEDEPS_G_BACKSTOP_RE): `npm run
 # deps:install`, and also `grep -n "npm install" README.md`. Its rollback
 # removes node_modules, so it rolls back only where it sees this command's trace
-# in the project's node tree, and for that it needs a baseline from just before
-# the command: a file touched now and set two seconds back, so a filesystem that
-# keeps whole seconds cannot hide a write in the same second, and the inode of
-# each npm lockfile and of node_modules in the cwd. The entry is keyed like a
-# pending state, and kept in a directory of its own so that nothing reading
-# pending states reads it.
+# in the project's node tree, and for that it needs a record from just before
+# the command: the inode and status change time of each npm lockfile, the inode
+# of node_modules, and a baseline file touched now for the walk of node_modules.
+#
+# The baseline is not set back where the filesystems keep time below one
+# second. Set back two seconds, it counted a pull made 0.3 seconds before a
+# grep as the grep's trace, and the grep removed node_modules (lumi r1 R1); two
+# Bash calls in one message are 0.16 seconds apart. Where the baseline file or
+# the project's node tree keeps whole seconds, a write in the second the
+# baseline was touched in would not be newer than it, so there the baseline is
+# set two seconds back as before. Which one applied is in the entry.
+#
+# The entry belongs to this tool call (safedeps_backstop_entry_base), and only
+# this call's post hook reads it. A call whose post hook never runs (Claude
+# Code runs none for a Bash call that ended in an error) leaves its entry to
+# the age sweep, and no other call reads it.
 #
 # This decides no verdict and runs after the gate. Anything that fails here
 # leaves no entry, and the backstop counts a command with no entry as traced,
 # which is what it did before there were entries. So the grep is not a judgment
 # reading (judge_grep), and there is nothing for the gate to settle.
 guard_backstop_trace_baseline() {
-  local dir dir_hash entry_dir base at stamp entry
+  local dir dir_hash entry_dir base id at stamp entry rel clock resolution=seconds lock hidden tree
   [[ -n "${SAFEDEPS_G_BACKSTOP_RE:-}" ]] || return 0
   printf '%s' "${COMMAND}" | grep -qiE "${SAFEDEPS_G_BACKSTOP_RE}" 2>/dev/null || return 0
+  local lib="${BASH_SOURCE[0]%/*}/../lib/gates/backstop-trace.sh"
+  [[ -r "${lib}" ]] || return 0
+  # shellcheck source=../lib/gates/backstop-trace.sh
+  source "${lib}" || return 0
+  id=$(jq -r 'if (.tool_use_id | type) == "string" then .tool_use_id else empty end' <<< "${INPUT}" 2>/dev/null) || return 0
   # The cwd as the PostToolUse hook resolves it, so the key is the one it builds.
   dir="${CWD_DIR}"
   if command -v realpath >/dev/null 2>&1; then
@@ -4472,18 +4487,38 @@ guard_backstop_trace_baseline() {
   fi
   dir_hash=$(compute_dir_hash "${dir}")
   entry_dir="${GUARD_DIR}/pending/backstop"
+  base=$(safedeps_backstop_entry_base "${entry_dir}" "${id}") || return 0
   mkdir -p "${entry_dir}" 2>/dev/null || return 0
   find "${entry_dir}" -type f -mmin +1440 -delete 2>/dev/null || true
-  base="${entry_dir}/$(compute_pending_key "${dir_hash}" "${COMMAND}")__$$"
-  at=$(( $(date +%s) - 2 ))
-  stamp=$(date -r "${at}" +%Y%m%d%H%M.%S 2>/dev/null || date -d "@${at}" +%Y%m%d%H%M.%S 2>/dev/null) || return 0
-  touch -t "${stamp}" "${base}.trace" 2>/dev/null || return 0
-  entry=$(jq -nc --arg baseline "${base}.trace" --arg at "${at}" \
-    --arg lock "$(guard_file_inode "${dir}/package-lock.json")" \
-    --arg hidden "$(guard_file_inode "${dir}/node_modules/.package-lock.json")" \
-    --arg tree "$(guard_file_inode "${dir}/node_modules")" \
-    '{baseline: $baseline, at: ($at | tonumber),
-      inodes: {"package-lock.json": $lock, "node_modules/.package-lock.json": $hidden, node_modules: $tree}}' 2>/dev/null) \
+  lock=$(guard_file_inode "${dir}/package-lock.json")
+  hidden=$(guard_file_inode "${dir}/node_modules/.package-lock.json")
+  tree=$(guard_file_inode "${dir}/node_modules")
+  # Whether the project's node tree keeps time below one second, read from what
+  # is there: a whole-second filesystem prints zeros below the second.
+  local project_subsecond=false
+  for rel in package-lock.json node_modules/.package-lock.json node_modules; do
+    [[ -e "${dir}/${rel}" ]] || continue
+    clock=$(safedeps_file_clock "${dir}/${rel}" c)
+    safedeps_clock_has_subsecond "${clock}" && project_subsecond=true
+  done
+  touch "${base}.trace" 2>/dev/null || return 0
+  if [[ "${project_subsecond}" == true ]] \
+    && safedeps_clock_has_subsecond "$(safedeps_file_clock "${base}.trace" m)"; then
+    resolution=subsecond
+  else
+    at=$(( $(date +%s) - 2 ))
+    stamp=$(date -r "${at}" +%Y%m%d%H%M.%S 2>/dev/null || date -d "@${at}" +%Y%m%d%H%M.%S 2>/dev/null) \
+      && touch -t "${stamp}" "${base}.trace" 2>/dev/null \
+      || { rm -f "${base}.trace"; return 0; }
+  fi
+  entry=$(jq -nc --arg key "$(compute_pending_key "${dir_hash}" "${COMMAND}")" \
+    --arg baseline "${base}.trace" --arg resolution "${resolution}" \
+    --arg lock "${lock}" --arg hidden "${hidden}" --arg tree "${tree}" \
+    --arg lock_clock "$(safedeps_file_clock "${dir}/package-lock.json" c)" \
+    --arg hidden_clock "$(safedeps_file_clock "${dir}/node_modules/.package-lock.json" c)" \
+    '{key: $key, baseline: $baseline, resolution: $resolution,
+      inodes: {"package-lock.json": $lock, "node_modules/.package-lock.json": $hidden, node_modules: $tree},
+      clocks: {"package-lock.json": $lock_clock, "node_modules/.package-lock.json": $hidden_clock}}' 2>/dev/null) \
     && write_state_file "${base}.json" "${entry}" 2>/dev/null \
     || rm -f "${base}.trace"
 }
