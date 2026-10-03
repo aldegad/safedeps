@@ -37163,5 +37163,1170 @@
       }
     },
     "gate": "pass"
+  },
+  {
+    "id": "RS-start",
+    "cls": "S",
+    "label": "subshell at start",
+    "text": "(@@HEAD@@ install evil==6.6.6)\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "agent-noset": "R",
+      "dash": "R",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "RS-sep-blank",
+    "cls": "S",
+    "label": "subshell at sep, after a blank",
+    "text": "true; (@@HEAD@@ install evil==6.6.6)\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "agent-noset": "R",
+      "dash": "R",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "RS-sep-glued",
+    "cls": "S",
+    "label": "subshell at sep, glued",
+    "text": "true;(@@HEAD@@ install evil==6.6.6)\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "agent-noset": "R",
+      "dash": "R",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "RS-and-blank",
+    "cls": "S",
+    "label": "subshell at and, after a blank",
+    "text": "true && (@@HEAD@@ install evil==6.6.6)\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "agent-noset": "R",
+      "dash": "R",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "RS-and-glued",
+    "cls": "S",
+    "label": "subshell at and, glued",
+    "text": "true &&(@@HEAD@@ install evil==6.6.6)\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "agent-noset": "R",
+      "dash": "R",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "RS-pipe-blank",
+    "cls": "S",
+    "label": "subshell at pipe, after a blank",
+    "text": "true | (@@HEAD@@ install evil==6.6.6)\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "agent-noset": "R",
+      "dash": "R",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "RS-pipe-glued",
+    "cls": "S",
+    "label": "subshell at pipe, glued",
+    "text": "true |(@@HEAD@@ install evil==6.6.6)\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "agent-noset": "R",
+      "dash": "R",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "RS-brace-blank",
+    "cls": "S",
+    "label": "subshell at brace, after a blank",
+    "text": "{ (@@HEAD@@ install evil==6.6.6); }\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "agent-noset": "R",
+      "dash": "R",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "RS-brace-glued",
+    "cls": "S",
+    "label": "subshell at brace, glued",
+    "text": "{(@@HEAD@@ install evil==6.6.6); }\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "agent-noset": "R",
+      "dash": "R",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "RS-fn-blank",
+    "cls": "S",
+    "label": "subshell at fn, after a blank",
+    "text": "f() { (@@HEAD@@ install evil==6.6.6); }; f\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "agent-noset": "R",
+      "dash": "R",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "RS-fn-glued",
+    "cls": "S",
+    "label": "subshell at fn, glued",
+    "text": "f() {(@@HEAD@@ install evil==6.6.6); }; f\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "agent-noset": "R",
+      "dash": "R",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "RS-fn-keyword-blank",
+    "cls": "S",
+    "label": "subshell at fn-keyword, after a blank",
+    "text": "function f { (@@HEAD@@ install evil==6.6.6); }; f\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "agent-noset": "R",
+      "dash": "-!",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "-!"
+      }
+    }
+  },
+  {
+    "id": "RS-fn-keyword-glued",
+    "cls": "S",
+    "label": "subshell at fn-keyword, glued",
+    "text": "function f {(@@HEAD@@ install evil==6.6.6); }; f\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "-!",
+      "sh": "R",
+      "agent": "-!",
+      "agent-noset": "-!",
+      "dash": "-!",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "-!"
+      }
+    }
+  },
+  {
+    "id": "RS-fn-body-blank",
+    "cls": "S",
+    "label": "subshell at fn-body, after a blank",
+    "text": "f() (@@HEAD@@ install evil==6.6.6); f\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "agent-noset": "R",
+      "dash": "R",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "RS-fn-body-glued",
+    "cls": "S",
+    "label": "subshell at fn-body, glued",
+    "text": "f()(@@HEAD@@ install evil==6.6.6); f\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "agent-noset": "R",
+      "dash": "R",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "RS-do-blank",
+    "cls": "S",
+    "label": "subshell at do, after a blank",
+    "text": "for i in 1; do (@@HEAD@@ install evil==6.6.6); done\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "agent-noset": "R",
+      "dash": "R",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "RS-do-glued",
+    "cls": "S",
+    "label": "subshell at do, glued",
+    "text": "for i in 1; do(@@HEAD@@ install evil==6.6.6); done\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "-!",
+      "sh": "R",
+      "agent": "-!",
+      "agent-noset": "-!",
+      "dash": "R",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "RS-do-args-blank",
+    "cls": "S",
+    "label": "subshell at do-args, after a blank",
+    "text": "set -- a; for i do (@@HEAD@@ install evil==6.6.6); done\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "agent-noset": "R",
+      "dash": "R",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "RS-do-args-glued",
+    "cls": "S",
+    "label": "subshell at do-args, glued",
+    "text": "set -- a; for i do(@@HEAD@@ install evil==6.6.6); done\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "-!",
+      "sh": "R",
+      "agent": "-!",
+      "agent-noset": "-!",
+      "dash": "R",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "RS-while-do-blank",
+    "cls": "S",
+    "label": "subshell at while-do, after a blank",
+    "text": "while true; do (@@HEAD@@ install evil==6.6.6); break; done\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "agent-noset": "R",
+      "dash": "R",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "RS-while-do-glued",
+    "cls": "S",
+    "label": "subshell at while-do, glued",
+    "text": "while true; do(@@HEAD@@ install evil==6.6.6); break; done\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "-!",
+      "sh": "R",
+      "agent": "-!",
+      "agent-noset": "-!",
+      "dash": "R",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "RS-then-blank",
+    "cls": "S",
+    "label": "subshell at then, after a blank",
+    "text": "if true; then (@@HEAD@@ install evil==6.6.6); fi\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "agent-noset": "R",
+      "dash": "R",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "RS-then-glued",
+    "cls": "S",
+    "label": "subshell at then, glued",
+    "text": "if true; then(@@HEAD@@ install evil==6.6.6); fi\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "-!",
+      "sh": "R",
+      "agent": "-!",
+      "agent-noset": "-!",
+      "dash": "R",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "RS-else-blank",
+    "cls": "S",
+    "label": "subshell at else, after a blank",
+    "text": "if false; then :; else (@@HEAD@@ install evil==6.6.6); fi\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "agent-noset": "R",
+      "dash": "R",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "RS-else-glued",
+    "cls": "S",
+    "label": "subshell at else, glued",
+    "text": "if false; then :; else(@@HEAD@@ install evil==6.6.6); fi\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "-",
+      "sh": "R",
+      "agent": "-",
+      "agent-noset": "-",
+      "dash": "R",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "RS-elif-then-blank",
+    "cls": "S",
+    "label": "subshell at elif-then, after a blank",
+    "text": "if false; then :; elif true; then (@@HEAD@@ install evil==6.6.6); fi\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "agent-noset": "R",
+      "dash": "R",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "RS-elif-then-glued",
+    "cls": "S",
+    "label": "subshell at elif-then, glued",
+    "text": "if false; then :; elif true; then(@@HEAD@@ install evil==6.6.6); fi\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "-!",
+      "sh": "R",
+      "agent": "-!",
+      "agent-noset": "-!",
+      "dash": "R",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "RS-bang-blank",
+    "cls": "S",
+    "label": "subshell at bang, after a blank",
+    "text": "! (@@HEAD@@ install evil==6.6.6)\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "agent-noset": "R",
+      "dash": "R",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "RS-bang-glued",
+    "cls": "S",
+    "label": "subshell at bang, glued",
+    "text": "!(@@HEAD@@ install evil==6.6.6)\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "-",
+      "sh": "R",
+      "agent": "-",
+      "agent-noset": "-",
+      "dash": "R",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "RS-time-blank",
+    "cls": "S",
+    "label": "subshell at time, after a blank",
+    "text": "time (@@HEAD@@ install evil==6.6.6)\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "agent-noset": "R",
+      "dash": "-!",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "-!"
+      }
+    }
+  },
+  {
+    "id": "RS-time-glued",
+    "cls": "S",
+    "label": "subshell at time, glued",
+    "text": "time(@@HEAD@@ install evil==6.6.6)\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "-",
+      "sh": "R",
+      "agent": "-",
+      "agent-noset": "-",
+      "dash": "-!",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "-!"
+      }
+    }
+  },
+  {
+    "id": "RS-coproc-blank",
+    "cls": "S",
+    "label": "subshell at coproc, after a blank",
+    "text": "coproc (@@HEAD@@ install evil==6.6.6); wait\n",
+    "measured": {
+      "bash": "-!",
+      "zsh": "R",
+      "sh": "-!",
+      "agent": "R",
+      "agent-noset": "R",
+      "dash": "-!",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "-!"
+      }
+    }
+  },
+  {
+    "id": "RS-coproc-glued",
+    "cls": "S",
+    "label": "subshell at coproc, glued",
+    "text": "coproc(@@HEAD@@ install evil==6.6.6); wait\n",
+    "measured": {
+      "bash": "-!",
+      "zsh": "-",
+      "sh": "-!",
+      "agent": "-",
+      "agent-noset": "-",
+      "dash": "-!",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "-!"
+      }
+    }
+  },
+  {
+    "id": "RS-case-arm-blank",
+    "cls": "S",
+    "label": "subshell at case-arm, after a blank",
+    "text": "case x in x) (@@HEAD@@ install evil==6.6.6);; esac\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "agent-noset": "R",
+      "dash": "R",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "RS-case-arm-glued",
+    "cls": "S",
+    "label": "subshell at case-arm, glued",
+    "text": "case x in x)(@@HEAD@@ install evil==6.6.6);; esac\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "agent-noset": "R",
+      "dash": "R",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "RS-if-blank",
+    "cls": "S",
+    "label": "subshell at if, after a blank",
+    "text": "if (@@HEAD@@ install evil==6.6.6); then :; fi\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "agent-noset": "R",
+      "dash": "R",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "RS-if-glued",
+    "cls": "S",
+    "label": "subshell at if, glued",
+    "text": "if(@@HEAD@@ install evil==6.6.6); then :; fi\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "-!",
+      "sh": "R",
+      "agent": "-!",
+      "agent-noset": "-!",
+      "dash": "R",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "RS-while-blank",
+    "cls": "S",
+    "label": "subshell at while, after a blank",
+    "text": "while (@@HEAD@@ install evil==6.6.6); do break; done\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "agent-noset": "R",
+      "dash": "R",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "RS-while-glued",
+    "cls": "S",
+    "label": "subshell at while, glued",
+    "text": "while(@@HEAD@@ install evil==6.6.6); do break; done\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "-!",
+      "sh": "R",
+      "agent": "-!",
+      "agent-noset": "-!",
+      "dash": "R",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "RS-until-blank",
+    "cls": "S",
+    "label": "subshell at until, after a blank",
+    "text": "until (@@HEAD@@ install evil==6.6.6); do :; done\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "agent-noset": "R",
+      "dash": "R",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "RS-until-glued",
+    "cls": "S",
+    "label": "subshell at until, glued",
+    "text": "until(@@HEAD@@ install evil==6.6.6); do :; done\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "-!",
+      "sh": "R",
+      "agent": "-!",
+      "agent-noset": "-!",
+      "dash": "R",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "RS-close-then-blank",
+    "cls": "S",
+    "label": "subshell at close-then, after a blank",
+    "text": "if (@@HEAD@@ install evil==6.6.6) then :; fi\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "agent-noset": "R",
+      "dash": "R",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "RS-close-then-glued",
+    "cls": "S",
+    "label": "subshell at close-then, glued",
+    "text": "if (@@HEAD@@ install evil==6.6.6)then :; fi\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "agent-noset": "R",
+      "dash": "R",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "RS-close-do-blank",
+    "cls": "S",
+    "label": "subshell at close-do, after a blank",
+    "text": "while (@@HEAD@@ install evil==6.6.6) do break; done\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "agent-noset": "R",
+      "dash": "R",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "RS-close-do-glued",
+    "cls": "S",
+    "label": "subshell at close-do, glued",
+    "text": "while (@@HEAD@@ install evil==6.6.6)do break; done\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "agent-noset": "R",
+      "dash": "R",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "RS-close-fi-blank",
+    "cls": "S",
+    "label": "subshell at close-fi, after a blank",
+    "text": "if true; then (@@HEAD@@ install evil==6.6.6) fi\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "agent-noset": "R",
+      "dash": "R",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "RS-close-fi-glued",
+    "cls": "S",
+    "label": "subshell at close-fi, glued",
+    "text": "if true; then (@@HEAD@@ install evil==6.6.6)fi\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "agent-noset": "R",
+      "dash": "R",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "RS-close-done-blank",
+    "cls": "S",
+    "label": "subshell at close-done, after a blank",
+    "text": "for i in 1; do (@@HEAD@@ install evil==6.6.6) done\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "agent-noset": "R",
+      "dash": "R",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "RS-close-done-glued",
+    "cls": "S",
+    "label": "subshell at close-done, glued",
+    "text": "for i in 1; do (@@HEAD@@ install evil==6.6.6)done\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "agent-noset": "R",
+      "dash": "R",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "RS-close-brace-blank",
+    "cls": "S",
+    "label": "subshell at close-brace, after a blank",
+    "text": "{ (@@HEAD@@ install evil==6.6.6) }\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "agent-noset": "R",
+      "dash": "R",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "RS-close-brace-glued",
+    "cls": "S",
+    "label": "subshell at close-brace, glued",
+    "text": "{ (@@HEAD@@ install evil==6.6.6)}\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "agent-noset": "R",
+      "dash": "R",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "RS-close-esac-blank",
+    "cls": "S",
+    "label": "subshell at close-esac, after a blank",
+    "text": "case x in x) (@@HEAD@@ install evil==6.6.6) esac\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "agent-noset": "R",
+      "dash": "R",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "RS-close-esac-glued",
+    "cls": "S",
+    "label": "subshell at close-esac, glued",
+    "text": "case x in x) (@@HEAD@@ install evil==6.6.6)esac\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "agent-noset": "R",
+      "dash": "R",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "RS-close-else-blank",
+    "cls": "S",
+    "label": "subshell at close-else, after a blank",
+    "text": "if false; then (:) else (@@HEAD@@ install evil==6.6.6); fi\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "agent-noset": "R",
+      "dash": "R",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "RS-close-else-glued",
+    "cls": "S",
+    "label": "subshell at close-else, glued",
+    "text": "if false; then (:)else (@@HEAD@@ install evil==6.6.6); fi\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "agent-noset": "R",
+      "dash": "R",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "RS-close-both-blank",
+    "cls": "S",
+    "label": "subshell at close-both, after a blank",
+    "text": "if (true) then (@@HEAD@@ install evil==6.6.6) fi\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "agent-noset": "R",
+      "dash": "R",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "RS-close-both-glued",
+    "cls": "S",
+    "label": "subshell at close-both, glued",
+    "text": "if (true)then (@@HEAD@@ install evil==6.6.6)fi\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "agent-noset": "R",
+      "dash": "R",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "RS-close-cmd",
+    "cls": "S",
+    "label": "subshell at close-cmd",
+    "text": "(true); @@HEAD@@ install evil==6.6.6\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "agent-noset": "R",
+      "dash": "R",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      }
+    }
+  },
+  {
+    "id": "RS-data-stray",
+    "cls": "S",
+    "label": "subshell at data-stray",
+    "text": "echo a (b) @@HEAD@@ install evil==6.6.6\n",
+    "data": true,
+    "measured": {
+      "bash": "-!",
+      "zsh": "-",
+      "sh": "-!",
+      "agent": "-",
+      "agent-noset": "-",
+      "dash": "-!",
+      "bash5": "-!",
+      "linux": {
+        "bash": "-!",
+        "dash": "-!"
+      }
+    },
+    "gate": "pass"
+  },
+  {
+    "id": "RS-data-extglob",
+    "cls": "S",
+    "label": "subshell at data-extglob",
+    "text": "shopt -s extglob\nls !(zz) @@HEAD@@ install evil==6.6.6\n",
+    "data": true,
+    "measured": {
+      "bash": "-",
+      "zsh": "-",
+      "sh": "-",
+      "agent": "-",
+      "agent-noset": "-",
+      "dash": "-!",
+      "bash5": "-",
+      "linux": {
+        "bash": "-",
+        "dash": "-!"
+      }
+    },
+    "gate": "pass"
+  },
+  {
+    "id": "RS-data-array",
+    "cls": "S",
+    "label": "subshell at data-array",
+    "text": "a=(@@HEAD@@ install evil==6.6.6)\n",
+    "data": true,
+    "measured": {
+      "bash": "-",
+      "zsh": "-",
+      "sh": "-",
+      "agent": "-",
+      "agent-noset": "-",
+      "dash": "-!",
+      "bash5": "-",
+      "linux": {
+        "bash": "-",
+        "dash": "-!"
+      }
+    },
+    "gate": "pass"
   }
 ]

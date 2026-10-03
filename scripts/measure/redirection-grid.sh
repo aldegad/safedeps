@@ -49,6 +49,17 @@
 #              before the command, before a redirection, between the command
 #              word and its arguments, after a separator, in a function
 #              body, and as an argument of echo.
+#   subshells  where a subshell stands when it stands where a command does.
+#              A statement start is written before a word, and a subshell
+#              is none, so each word the grammar lets a subshell follow is a
+#              place of its own: after `{`, a function head, `do`, `then`,
+#              `else`, `!`, `time`, `coproc`, a case arm, `if`, `while` and
+#              `until`, and after a separator. Each with a blank before the
+#              `(` and glued to what is before it. And what may follow its
+#              `)`: `then`, `do`, `fi`, `done`, `}`, `esac`, `else`, with a
+#              blank or glued, where the close has to end the command for the
+#              reserved word to be read. Three data forms: a `(` among the
+#              arguments, a bash extglob argument, and an array value.
 #
 # Each form names its command word @@HEAD@@ and its arguments
 # `install evil==6.6.6` (see scripts/measure/shell-reading-measure.sh): the
@@ -295,6 +306,43 @@ sep	ap	true; %W %H	false
 func	ap	f() { %W %H; }; f	false
 data	ap	echo %W %H	true'
 
+# id <TAB> glue: both (a form with a blank before the subshell and one
+# without), or one <TAB> template. %S is the subshell that runs the install,
+# %_ the blank that the glued form leaves out. <TAB> data?
+SUBSHELLS='start	one	%S	false
+sep	both	true;%_%S	false
+and	both	true &&%_%S	false
+pipe	both	true |%_%S	false
+brace	both	{%_%S; }	false
+fn	both	f() {%_%S; }; f	false
+fn-keyword	both	function f {%_%S; }; f	false
+fn-body	both	f()%_%S; f	false
+do	both	for i in 1; do%_%S; done	false
+do-args	both	set -- a; for i do%_%S; done	false
+while-do	both	while true; do%_%S; break; done	false
+then	both	if true; then%_%S; fi	false
+else	both	if false; then :; else%_%S; fi	false
+elif-then	both	if false; then :; elif true; then%_%S; fi	false
+bang	both	!%_%S	false
+time	both	time%_%S	false
+coproc	both	coproc%_%S; wait	false
+case-arm	both	case x in x)%_%S;; esac	false
+if	both	if%_%S; then :; fi	false
+while	both	while%_%S; do break; done	false
+until	both	until%_%S; do :; done	false
+close-then	both	if %S%_then :; fi	false
+close-do	both	while %S%_do break; done	false
+close-fi	both	if true; then %S%_fi	false
+close-done	both	for i in 1; do %S%_done	false
+close-brace	both	{ %S%_}	false
+close-esac	both	case x in x) %S%_esac	false
+close-else	both	if false; then (:)%_else %S; fi	false
+close-both	both	if (true)%_then %S%_fi	false
+close-cmd	one	(true); %H	false
+data-stray	one	echo a (b) %H	true
+data-extglob	one	shopt -s extglob@NL@ls !(zz) %H	true
+data-array	one	a=(%H)	true'
+
 # The heredoc bodies a form needs: one per delimiter B, in order.
 bodies() { # count
   local k out=""
@@ -329,8 +377,19 @@ word_form() {
     '{id: $id, cls: "W", label: $label, manual: $manual, text: $text} + (if $data then {data: true} else {} end)'
 }
 
+# One subshell form: <id> <label> <template> <the glue blank or nothing> <data?>
+subshell_form() {
+  local id="$1" label="$2" text="$3" glue="$4" data="$5"
+  text="${text//%S/(%H)}"
+  text="${text//%H/@@HEAD@@ ${ARGS}}"
+  text="${text//%_/${glue}}"
+  text="${text//@NL@/$'\n'}"$'\n'
+  jq -nc --arg id "${id}" --arg label "${label}" --arg text "${text}" --argjson data "${data}" \
+    '{id: $id, cls: "S", label: $label, text: $text} + (if $data then {data: true} else {} end)'
+}
+
 generate() {
-  local op spell target place tpl redir pid tid ttext wid kind manual setup word kinds data
+  local op spell target place tpl redir pid tid ttext wid kind manual setup word kinds data sid glue
   {
     while IFS=$'\t' read -r op spell target; do
       redir="${spell//T/${target}}"
@@ -360,6 +419,14 @@ generate() {
         word_form "RW-${wid}-${pid}" "word ${wid} at ${pid}" "${manual}" "${setup}" "${word}" "${tpl}" "${data}"
       done <<< "${WORD_PLACES}"
     done <<< "${WORDS}"
+    while IFS=$'\t' read -r sid glue tpl data; do
+      if [[ "${glue}" == both ]]; then
+        subshell_form "RS-${sid}-blank" "subshell at ${sid}, after a blank" "${tpl}" " " "${data}"
+        subshell_form "RS-${sid}-glued" "subshell at ${sid}, glued" "${tpl}" "" "${data}"
+      else
+        subshell_form "RS-${sid}" "subshell at ${sid}" "${tpl}" " " "${data}"
+      fi
+    done <<< "${SUBSHELLS}"
   } | jq -s '.'
 }
 
