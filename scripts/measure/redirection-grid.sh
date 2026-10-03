@@ -27,6 +27,28 @@
 #              (with a blank inside, a quoted parenthesis, a redirection of
 #              its own), the empty word. Crossed with four operators and
 #              three places.
+#   words      what the manuals say a word may be made of, one row per
+#              production, each with the manual section it comes from. The
+#              targets above were picked by hand, and the next review found
+#              the words nobody had picked: an array value, a case pattern
+#              inside a substitution, zsh `=(...)`, a glob group. So this
+#              table is read off the manuals instead: bash Quoting, Brace
+#              Expansion, Tilde Expansion, Shell Parameter Expansion, Command
+#              Substitution, Arithmetic Expansion, Process Substitution,
+#              Pattern Matching, Arrays and Shell Parameters; zsh Array
+#              Parameters, Process Substitution, Filename Generation, Glob
+#              Qualifiers and Precommand Modifiers. A row is a value (v: a
+#              word that stands for a file name), an assignment (a: a word
+#              that is one whole assignment) or a precommand (p: words that
+#              stand before a command and are none).
+#   word places  where such a word stands. A value: as the value of an
+#              assignment prefix, as a redirection target (glued, after a
+#              blank, between the command word and its arguments, after a
+#              separator, in a function body), and as data (an argument of
+#              echo, and a target of echo). An assignment or a precommand:
+#              before the command, before a redirection, between the command
+#              word and its arguments, after a separator, in a function
+#              body, and as an argument of echo.
 #
 # Each form names its command word @@HEAD@@ and its arguments
 # `install evil==6.6.6` (see scripts/measure/shell-reading-measure.sh): the
@@ -155,6 +177,124 @@ empty	""'
 TARGET_OPS='out in n-out v-out'
 TARGET_PLACES='pre mid sep'
 
+# id <TAB> kind <TAB> manual section <TAB> setup line or - <TAB> the word
+# (@NL@ is a newline inside it). A value word names a file the form can
+# create or open where it runs: `f` in the throwaway directory, or /dev/null.
+#
+# Not in the table: a word the shell removes when it runs the command. zsh
+# `a=(x)(N)` is a glob that matches nothing and goes, so between the command
+# word and its arguments it leaves the install behind (measured: zsh ran it).
+# That is not where a word ends but which word is the command, the boundary
+# consumer-forms pins with `pip $x install ...`, and the plan that owns it is
+# safedeps/command-words-read-as-the-shell-dequotes. The row was taken out
+# because the grid holds every form a shell runs to a verdict, and this one
+# has none yet.
+read -r -d '' WORDS <<'EOT' || true
+q-ansi	v	bash: ANSI-C Quoting	-	$'f'
+q-ansi-blank	v	bash: ANSI-C Quoting	-	$'f g'
+q-locale	v	bash: Locale-Specific Translation	-	$"f"
+q-esc-blank	v	bash: Escape Character	-	f\ g
+q-esc-paren	v	bash: Escape Character	-	f\(g\)
+q-dq-paren	v	bash: Double Quotes	-	"(f)"
+q-mixed	v	bash: Quoting	-	f"g h"'i j'
+brace	v	bash: Brace Expansion	-	f{1,2}
+brace-seq	v	bash: Brace Expansion	-	f{1..2}
+brace-one	v	bash: Brace Expansion	-	f{1}
+tilde	v	bash: Tilde Expansion	-	~+/f
+param	v	bash: Shell Parameter Expansion	-	${nope:-f}
+param-blank	v	bash: Shell Parameter Expansion	-	${nope:-f g}
+param-paren	v	bash: Shell Parameter Expansion	-	${nope:-(f)}
+param-subst	v	bash: Shell Parameter Expansion	-	${nope:-$(echo f)}
+param-case	v	bash: Shell Parameter Expansion	-	${nope:-$(case a in a) echo f;; esac)}
+cs-list	v	bash: Command Substitution	-	$(true; echo f)
+cs-nested	v	bash: Command Substitution	-	$(echo $(echo f))
+cs-subshell	v	bash: Command Substitution	-	$( (echo f) )
+cs-comment	v	bash: Command Substitution	-	$(echo f # )@NL@)
+cs-case	v	bash: Command Substitution	-	$(case a in a) echo f;; esac)
+cs-case-paren	v	bash: Command Substitution	-	$(case a in (a) echo f;; esac)
+cs-case-dq	v	bash: Command Substitution	-	"$(case a in a) echo f;; esac)"
+cs-case-two	v	bash: Command Substitution	-	$(case a in a) echo f;; esac)$(case b in b) echo g;; esac)
+cs-case-bq	v	bash: Command Substitution	-	`case a in a) echo f;; esac`
+arith	v	bash: Arithmetic Expansion	-	$((1+1))
+arith-paren	v	bash: Arithmetic Expansion	-	$(( (1+1) ))
+arith-old	v	bash: Arithmetic Expansion	-	$[1+1]
+ps-case	v	bash: Process Substitution	-	<(case a in a) true;; esac)
+ps-nested	v	bash: Process Substitution	-	<(cat <(true))
+glob-one	v	bash: Pattern Matching	-	/dev/nul?
+glob-any	v	bash: Pattern Matching	-	/dev/nul*
+glob-class	v	bash: Pattern Matching	-	/dev/[n]ull
+ext-at	v	bash: Pattern Matching (extglob)	shopt -s extglob	/dev/@(null)
+ext-alt	v	bash: Pattern Matching (extglob)	shopt -s extglob	/dev/@(null|nope)
+ext-not	v	bash: Pattern Matching (extglob)	shopt -s extglob	f!(x)
+ext-star	v	bash: Pattern Matching (extglob)	shopt -s extglob	f*(x)
+ext-plus	v	bash: Pattern Matching (extglob)	shopt -s extglob	f+(x)
+ext-opt	v	bash: Pattern Matching (extglob)	shopt -s extglob	f?(x)
+z-eq	v	zsh: Process Substitution	-	=(true)
+z-eq-list	v	zsh: Process Substitution	-	=(true; true)
+z-eq-case	v	zsh: Process Substitution	-	=(case a in a) true;; esac)
+z-group	v	zsh: Filename Generation	-	/dev/(null)
+z-group-tail	v	zsh: Filename Generation	-	/dev/nul(l)
+z-alt	v	zsh: Filename Generation	-	/dev/(null|nope)
+z-numeric	v	zsh: Filename Generation	-	/dev/fd/<1-1>
+z-numeric-open	v	zsh: Filename Generation	-	/dev/fd/<1->
+z-exclude	v	zsh: Filename Generation	-	f~x
+z-repeat	v	zsh: Filename Generation	-	/dev/nul#l
+z-flag	v	zsh: Globbing Flags	-	/dev/(#i)null
+z-qual	v	zsh: Glob Qualifiers	-	/dev/null(N)
+z-qual-any	v	zsh: Glob Qualifiers	-	/dev/nul*(N)
+z-qual-type	v	zsh: Glob Qualifiers	-	/dev/null(N%c)
+z-qual-q	v	zsh: Glob Qualifiers	-	/dev/null(#qN)
+arr	a	bash: Arrays	-	a=(x)
+arr-blank	a	bash: Arrays	-	a=( x y )
+arr-empty	a	bash: Arrays	-	a=()
+arr-append	a	bash: Arrays	-	a+=(x)
+arr-keys	a	bash: Arrays	-	a=([0]=x [1]=y)
+arr-subst	a	bash: Arrays	-	a=($(echo x))
+arr-case	a	bash: Arrays	-	a=($(case a in a) echo x;; esac))
+arr-quoted	a	bash: Arrays	-	a=("x y" 'z')
+arr-comment	a	bash: Arrays	-	a=(x # c@NL@y)
+arr-newline	a	bash: Arrays	-	a=(@NL@x@NL@)
+elem	a	bash: Arrays	-	a[1]=x
+elem-append	a	bash: Arrays	-	a[1]+=x
+elem-blank	a	bash: Arrays	-	a[1 + 1]=x
+elem-subst	a	bash: Arrays	-	a[$(echo 1)]=x
+elem-nested	a	bash: Arrays	-	a[b[1]]=x
+elem-dq	a	bash: Arrays	-	a["1"]=x
+append	a	bash: Shell Parameters	-	a+=x
+three	a	bash: Shell Parameters	-	a=(x) b+=(y) c[2]=z
+z-slice	a	zsh: Array Parameters	-	a[1,2]=(x y)
+pre-dash	p	zsh: Precommand Modifiers	-	-
+pre-builtin	p	zsh: Precommand Modifiers	-	builtin
+pre-command	p	zsh: Precommand Modifiers	-	command
+pre-exec	p	zsh: Precommand Modifiers	-	exec
+pre-nocorrect	p	zsh: Precommand Modifiers	-	nocorrect
+pre-noglob	p	zsh: Precommand Modifiers	-	noglob
+pre-two	p	zsh: Precommand Modifiers	-	noglob nocorrect
+pre-dash-noglob	p	zsh: Precommand Modifiers	-	- noglob
+pre-three	p	zsh: Precommand Modifiers	-	nocorrect noglob -
+pre-exec-dash	p	zsh: Precommand Modifiers	-	exec -
+pre-exec-name	p	zsh: Precommand Modifiers	-	exec -a x
+pre-command-p	p	zsh: Precommand Modifiers	-	command -p
+pre-builtin-noglob	p	zsh: Precommand Modifiers	-	builtin noglob
+pre-command-noglob	p	zsh: Precommand Modifiers	-	command noglob
+EOT
+
+# id <TAB> the kinds it holds <TAB> template (%W is the word) <TAB> data?
+WORD_PLACES='assign	v	X=%W %H	false
+target	v	>%W %H	false
+targetblank	v	> %W %H	false
+mid	v	%C >%W %A	false
+sep	v	true; >%W %H	false
+func	v	f() { >%W %H; }; f	false
+data	v	echo %W %H	true
+datatarget	v	echo >%W %H	true
+prefix	ap	%W %H	false
+redir	ap	%W 2>/dev/null %H	false
+mid	ap	%C %W %A	false
+sep	ap	true; %W %H	false
+func	ap	f() { %W %H; }; f	false
+data	ap	echo %W %H	true'
+
 # The heredoc bodies a form needs: one per delimiter B, in order.
 bodies() { # count
   local k out=""
@@ -175,8 +315,22 @@ form() {
     '{id: $id, cls: "R", label: $label, text: $text} + (if $data then {data: true} else {} end)'
 }
 
+# One word form: <id> <label> <manual section> <setup> <word> <place template> <data?>
+word_form() {
+  local id="$1" label="$2" manual="$3" setup="$4" word="$5" place="$6" data="$7" text
+  text="${place//%H/%C %A}"
+  text="${text//%A/${ARGS}}"
+  text="${text//%C/@@HEAD@@}"
+  text="${text//%W/${word}}"
+  text="${text//@NL@/$'\n'}"
+  [[ "${setup}" == "-" ]] || text="${setup}"$'\n'"${text}"
+  text="${text}"$'\n'
+  jq -nc --arg id "${id}" --arg label "${label}" --arg manual "${manual}" --arg text "${text}" --argjson data "${data}" \
+    '{id: $id, cls: "W", label: $label, manual: $manual, text: $text} + (if $data then {data: true} else {} end)'
+}
+
 generate() {
-  local op spell target place tpl redir pid tid ttext
+  local op spell target place tpl redir pid tid ttext wid kind manual setup word kinds data
   {
     while IFS=$'\t' read -r op spell target; do
       redir="${spell//T/${target}}"
@@ -200,6 +354,12 @@ generate() {
         done
       done
     done <<< "${TARGETS}"
+    while IFS=$'\t' read -r wid kind manual setup word; do
+      while IFS=$'\t' read -r pid kinds tpl data; do
+        [[ "${kinds}" == *"${kind}"* ]] || continue
+        word_form "RW-${wid}-${pid}" "word ${wid} at ${pid}" "${manual}" "${setup}" "${word}" "${tpl}" "${data}"
+      done <<< "${WORD_PLACES}"
+    done <<< "${WORDS}"
   } | jq -s '.'
 }
 
