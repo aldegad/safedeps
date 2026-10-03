@@ -56,7 +56,7 @@ Safedeps 는 **개발 의존성 install** (npm / pip / cargo / go / gem / maven 
 
 ### 릴리즈 메모
 
-- npm 패키지 version 은 `package.json` 이 SSoT. `bin/safedeps` `SAFEDEPS_VERSION` 이 이를 따라가고, smoke 테스트는 `package.json` 을 읽어 대조한다 (현재 v2.17.1).
+- npm 패키지 version 은 `package.json` 이 SSoT. `bin/safedeps` `SAFEDEPS_VERSION` 이 이를 따라가고, smoke 테스트는 `package.json` 을 읽어 대조한다 (현재 v2.18.0).
 - `npm test` 는 release smoke suite 를 실행한다. full fixture E2E 는 `v2.1-tests` 에 있다.
 - daily re-check 는 LLM 토큰을 쓰지 않는다. opt-in 이며, macOS `launchd` user agent 가 매일 `safedeps re-check --json` 을 실행한다 (`install-safedeps-recheck-agent.mjs` 로 atomic install). `~/.safedeps/recheck.log` 와 `~/.safedeps/recheck-alerts.jsonl` 를 쓰고, 새 CVE/KEV/revoke/provider-skip/위조-의심 시 macOS notification 을 띄운다. 네트워크는 OSV / CISA / GHSA query 에만 쓴다.
 
@@ -728,7 +728,114 @@ v2.16.x 라운드가 남긴 것 셋과 그 라운드가 만든 것 하나.
 
 `AGENTS.md` 에 검증 위생 절이 붙었다 — 뮤테이션은 플랜 워크트리가 아니라 사본에서 돌린다(검증자와 작성자가 같은 트리에 동시 쓰기를 하고, `git checkout --` 복원은 작성자의 미커밋 변경을 조용히 날린다), 그리고 0건을 인용하는 규칙 셋. 셋 다 먼저 틀린 방식으로 측정됐다 — 대조군 없는 하네스의 0건, 조건을 재지 않고 추정한 시행, 그리고 두 사람 사이를 오가며 단단해졌지만 출발점에는 측정이 없던 라벨. 그 뒤에 있는 실패 형태는 하나다: **정교화는 검증처럼 느껴진다.**
 
-### v2.18.0 (통합 중) — 아무것도 저장하지 않는 설치도 출처와 설치 스크립트를 검사받는다
+### v2.17.2 — 되돌릴 파일이 없는 롤백에서 post 훅이 죽지 않는다 (v2.17.1 패치)
+
+*v2.18.0 에서 기록했다. v2.17.2 는 기록 없이 나갔다.*
+
+- **`post-verify` 가 빈 배열에서 죽었다.** 게이트가 롤백할 이유는 있는데 되돌릴 파일이 없으면 빈 `ROLLED_BACK` 배열을 펼쳤고, bash 3.2 는 `set -u` 에서 이를 unbound 로 본다. 훅이 보고하는 대신 죽었고, 머신의 모든 세션에서 그랬다. 같은 파일이 다른 곳에서 이미 쓰던 방식으로 그 펼침을 막았다.
+- **v2.16.0 부터 v2.17.1 까지의 변경도 이때 함께 나갔다.** 그 버전들은 태그도, 릴리즈도, npm 게시도 없었고 npm 은 2.15.8 에 머물러 있었다. `AGENTS.md` 의 배포 절차는 이 일 때문에 생겼다.
+
+---
+
+## v2.18.0 — 커맨드 게이트가 설치를 어떻게 쓰든 읽는다 (shipped)
+
+바깥에서 온 보고 둘(GitHub #21·#22, @Seung-zedd)과 8월부터 멈춰 있던 플랜 하나 때문에, 커맨드 게이트를 패키지 매니저가 문서화한 표기와 셸이 허용하는 표기에 대고 쟀다. 대부분이 판정도 기록도 없이 통과했다. pip·cargo·go·gem·maven·nuget 에서는 커맨드 게이트가 유일한 관문이라 하나하나가 완전한 우회였다. npm 에서는 `--ignore-scripts` 재작성이 빠지는 비용이었다. 나중에 효과 게이트가 거부할 패키지가 이미 설치 스크립트를 돌린 뒤였다.
+
+### 게이트가 알아보지 못하던 설치
+
+v2.17.2 에 대고 쟀을 때, 승인되지 않은 버전을 박은 다음 형태가 모두 통과했다.
+
+- **문서화된 별칭**: `pnpm i|upgrade|it`, `npm in|ins|inst|insta|instal|isnt|isntall|it|u|udpate|ic|cit|sit`, `yarn up`, `bun a`.
+- **하위 명령과 옵션**: `yarn global add`, `yarn workspace <ws> add`, 동사 앞에 옵션이 둘 이상인 형태(`pip --quiet install`, `npm --silent --loglevel error install`, `cargo --locked install`, `gem --norc install`).
+- **버전이 붙은 인터프리터**: `pip3.11 install`, `python3.11 -m pip install`, `py -3.11 -m pip install`.
+- **실행기**: `npx <pkg>@<ver>`(6월부터 패턴이 한 글자 이름만 받았다), `npm exec|x`, `pnpx`, `bunx`, `bun x`, `uvx`, `uv tool install|run`, `pipx install|run`, `go run <모듈>@<버전>`, `dotnet tool install`, `cargo +<툴체인>`. 실행기마다 옵션을 그 실행기의 help 에서 가져오므로, 옵션 값을 패키지로 읽지 않는다. 값이 명령 치환이든, 공백 든 따옴표 경로든, 빈 값이든 통째로 읽는다(`uvx --python $(which python3) x==1`, `uvx --python "" x==1`). `bunx --help` 에는 없는 bun 의 `--cwd` 도 값을 받는 옵션으로 읽는다.
+- **문장 위치**: `( ... )`, `{ ...; }`, `if ...; then ...`, `for ...; do ...`, `!`, `time`, `coproc`, `exec`, `env -i`, 그리고 이 키워드들 뒤의 `env`·`command`·변수 할당.
+- **따옴표 안이나 플래그로 넘긴 spec**: `pip install "requests==2.0.0"`, 공백 든 요구사항(`pip install "requests == 2.0.0"`, pip 는 이것을 핀으로 읽는다), extras(`evil[x]==1.0.0`), `===`, `cargo install x --version 1`, `bundle add x --version 1`, `dotnet add <프로젝트> package X --version 1`, maven `-Dartifact=g:a:v`.
+- **npm 자신의 줄임**: npm 은 명령이나 별칭의 고유한 줄임과 대시 붙은 명령의 camelCase 형태를 모두 받는다. 그래서 문서의 별칭 표는 처음부터 불완전했다: `npm upd x@1`, `npm install-te`, `npm installTest`, `npm si`. 이제 문법은 npm 파서(`lib/utils/cmd-list.js`)가 받는 집합을 담고, `scripts/measure/npm-verb-spellings.sh` 가 PATH 의 npm 으로 그 집합을 다시 만들어 문법에 없는 표기가 있으면 실패한다.
+- **initializer**: `npm create|init <pkg>` 와 `pnpm|yarn|bun create` 는 매니저가 스스로 이름 붙인 패키지(대개 `create-<pkg>`)를 실행한다. 이제 이들은 실행기이고, 검사는 매니저마다 소스대로 실제로 실행되는 패키지를 가리킨다. 전에는 `pnpm create evil@1.0.0` 이 `evil` 승인만으로 통과했다. `npm init`·`npm init -y` 는 조용하다.
+- **`npm link <pkg>`** 는 패키지를 전역으로 설치하므로 이제 전역 설치로 판정한다. 경로 인자는 로컬 디렉터리를 잇는 것이라 조용하다.
+- **spec 에 붙은 리다이렉트**: `pip install requests==2.19.0>/dev/null` 은 `>/dev/null` 까지 버전으로 읽혔다. 이제 리다이렉트를 셸이 토큰을 나누는 방식대로 떼어 낸다.
+
+동사 목록은 손으로 관리하는 사본이 일곱 벌이었고 서로 어긋나 있었다. 이제 `lib/install-grammar.sh` 가 문법을 한 번 정의하고, 두 훅의 모든 인식기가 그것을 읽는다. ARCHITECTURE.md 의 규칙은 그대로다. 매니저 자신의 표기와 셸의 문장 문법은 안에 있고, 인자를 그대로 실행하는 래퍼(`sudo`, `timeout`, `nohup`, `nice`, `xargs`)는 밖에 있으며, `scripts/test/consumer-forms.sh` 가 이들을 판정하지 않는 형태로 고정한다. `case` 갈래는 아래 렉서 전까지 이 목록에 있었고, 지금은 판정한다. `mvn -Dartifact=... dependency:get` 은 목표 앞의 옵션을 carrier 열거로 보는 해석 때문에 밖으로 고정돼 있었다. 옵션은 carrier 가 아니므로 이제 인식한다.
+
+### 엉뚱한 신원으로 받은 승인
+
+거부 메시지는 실행할 `safedeps check` 를 알려 주고, 에이전트는 그것을 스스로 실행한다. 세 가지 읽기가 엉뚱한 패키지를 가리켰다. 그래서 처방이 어떤 권고에도 나오지 않는 이름을 승인했고, 재시도가 통과했다.
+
+- **Go 모듈 경로가 마지막 조각만 남았다.** `go get example.com/x@v1` 이 `check go x@v1` 을 처방했고, 그게 승인되면 `.../x@v1` 이면 무엇이든 통과했다.
+- **모듈 아래 Go import 경로를 쓴 그대로 검사했다.** OSV 는 Go 권고를 모듈 경로로 저장하므로, `go install golang.org/x/text/cmd/gotext@v0.3.7` 은 깨끗하다고 나왔지만 `golang.org/x/text` v0.3.7 은 취약하다. 이제 check 가 경로의 모든 접두사를 OSV 에 묻고 답을 합친다.
+- **모든 spec 이 명령에서 처음 나온 생태계로 검사됐다.** `npm run build && pip install evil==1` 은 `evil` 을 npm 패키지로 검사했다. 이제 각 spec 은 자신이 나온 문장의 생태계를 가진다.
+
+### 따옴표와 백슬래시
+
+스캐너는 따옴표 안을 공백으로 지우므로, 따옴표를 잘못 읽으면 그 뒤가 모든 판정 함수에게서 한꺼번에 사라진다. 네 가지 읽기가 그렇게 했다. `"a\\"` 를 이스케이프된 따옴표로 읽었고, 따옴표 밖 `\"` 를 여는 따옴표로 읽었고, 줄 이음(`pip \<줄바꿈>install ...`)을 두 줄로 판정했고, 여러 줄 따옴표 문자열을 줄마다 따로 스캔해 닫는 따옴표가 새 구역을 열었다. 마지막 것은 반대 방향으로도 작동해서, 둘째 줄에 설치 문구가 있는 커밋 메시지를 그 설치로 읽었다. 이제 백슬래시와 따옴표를 셸과 같은 규칙으로 읽고, 별칭 우회 관용구 `\pip install` 도 평범한 설치로 읽는다.
+
+### 셸로 넘기는 파이프, 설치 옆에서 그리고 그 뒤에서
+
+파이프 carrier 의 구멍 둘. 둘 다 v2.17.2 에 대고 쟀고, 커맨드 게이트가 권위인 생태계에서는 완전한 우회였다.
+
+- **보이는 설치가 파이프 검사를 껐다.** 숨은 설치 검사는 게이트가 읽을 수 있는 설치가 명령에 하나도 없을 때만 돌았다. 그래서 `requests` 를 승인한 뒤 `pip install requests==2.0.0 && printf 'pip install evil==6.6.6' | sh` 는 `requests` 를 검사하고 `evil` 은 조회도 기록도 없이 실행했다. `npm ci && printf 'cargo install evil@6.6.6' | sh` 도 같았다. 이제 보이는 설치가 있어도 검사가 돈다. 게이트가 읽은 설치마다 매니저 단어를 지우고 남은 텍스트에 파이프 질문을 하므로, 보이는 설치가 숨은 설치로 세지지 않는다. 파이프로 넘긴 설치는 옆에 아무것도 없을 때와 똑같이 fail-closed 로 거부된다. 보이는 설치 옆에서 다른 설치 없이 스크립트를 셸로 넘기는 명령은 판정이 그대로다.
+- **소비자 뒤에 공백이 있어야 했다.** `printf 'pip install evil' | sh; echo done` 이 판정 없이 통과했고, `| sh&&…`, `| sh|cat`, `(… | sh)`, `{ … | sh; }`, `| (sh)`, `| { sh; }`, `|& sh` 도 그랬다. 이제 소비자를 셸의 연산자와 그룹을 거쳐 읽는다. 따옴표로 감싼 셸 이름(`| "sh"`)은 경계 밖에 두고 그 자리에 고정했다.
+
+### 이스케이프된 연산자와 문장 시작
+
+이스케이프된 연산자는 셸에게 문자인데, 스캐너는 그것을 문법으로 넘겼다. 그래서 `echo true \; pip install evil | sh` 가 숨은 파이프 설치가 아니라 보이는 무버전 설치로 읽혀 기록 후 통과했고, `echo a \; pip install evil==6.6.6` 은 셸이 실행하지도 않는 설치로 거부됐다. 문법도 `!` 와 `{` 를 어디서나 문장 시작으로 쳐서 `echo ! pip install evil | sh` 가 같은 오독이었다. 이제 이스케이프된 연산자는 평범한 문자로 스캔되고, `!` 와 `{` 는 문장이 시작하는 자리에서만 문장을 연다.
+
+### 실패한 스캐너는 빈 스캐너가 아니다
+
+모든 판정 함수는 `set -e` 가 꺼진 조건이나 명령 치환 안에서 스캔을 읽는다. 그래서 실패한 `awk` 는 빈 텍스트를 돌려주었고, 빈 텍스트는 "설치 아님" 으로 읽혔다. 첫 수리는 실패를 기록하고 허용 출구 두 곳에서 두 번째 인식기로 다시 판정했다. 리뷰가 세 번 거부했고, 설계 판정이 이유를 쟀다. 두 번째 인식기는 `grep`·`sed`·join `awk` 를 거쳐서 대신 서야 할 도구와 함께 조용해졌다. raw 정규식은 스캔을 거친 인식기가 찾는 것을 다 찾을 수 없다. inert 재작성은 마지막 정산 뒤에서 명령을 읽었다. 읽기마다 하나씩 실패를 주입하자 통합 트리에서 3,530회 중 43회가 약해졌다.
+
+이제 설계는 관문 하나다. 명령을 실행시키는 모든 경로는 마지막 읽기 뒤, 첫 부수효과(pending 상태, inert meta, allow) 앞에서 이 관문을 한 번 지난다. 읽기가 하나라도 실패했다면, 패키지 매니저 실행파일 이름이 대소문자 무관하게 어디든 있는 명령은 `UNDECIDED` 로 거부하고, 나머지는 실패를 stderr 와 `advisory.log` 에 남긴 채 실행한다. 판별은 문법의 실행파일 목록(`SAFEDEPS_G_EXECUTABLES`)에 대한 bash 자체 정규식이고 서브프로세스가 없다. 읽기가 실패한 뒤 적발을 보고할 deny 는 대신 `UNDECIDED` 를 보고한다. 일부가 빠진 텍스트에서 읽은 적발은 적발이 아니기 때문이다. inert 재작성은 관문 앞에서 정하고, 관문이 거부한 명령에는 아무것도 쓰지 않는다.
+
+`scripts/measure/scan-failure-census.sh` 가 이것을 논증이 아니라 측정으로 만든다. 읽기를 하나씩, 그 읽기부터 끝까지, 종류별로, 그리고 `awk` 전부를 실패시킨 뒤, 각 실행을 무실패 실행과 비교해 약해진 판정, 잘못 표기된 판정, 관문 뒤의 읽기, deny 가 남긴 pending 상태를 센다. `npm test` 는 축약판을 돈다. CENSUS_NUMBERS
+
+`grep` 과 `sed` 에도 같은 클래스가 있었고, 이번 릴리즈보다 오래됐다. 판정 함수가 답하지 못한 grep·sed 를 "매치 없음" 으로 읽었다. 둘 중 하나가 실패하면 `pip install requests==2.0.0`, `npm install left-pad@1.3.0`, `cargo add serde@1.0.0` 가 판정 없이 통과했다. 이제 판정용 grep 은 "매치 없음"(1)과 "답하지 못함"(2 이상)을 가르는 래퍼 하나를 거치고, 뒤의 것을 기록한다. 정규화·러너 읽기·inert 재작성의 `sed` 실패도 기록한다. 관문은 이것들을 실패한 `awk` 와 똑같이 정산한다.
+
+### 명령을 한 번에, 셸이 어휘를 나누는 방식대로 읽는다
+
+상태기계 셋이 차례로 명령을 읽었고 서로 맞아야 했다. 줄 단위 heredoc 패턴, 줄 이음 처리, 따옴표 스캐너다. 리뷰 세 라운드 동안 셋은 맞지 않았다. heredoc 을 두 번 벗겼고, heredoc 이 아닌 곳에서 열었고(herestring, 산술 시프트, 따옴표 안 `<<EOF`), heredoc 인 곳에서 열지 않았다(숫자 구분자, heredoc 을 여는 줄에서 닫히는 여러 줄 문자열). 그때마다 그 뒤의 줄이 전부 게이트에서 사라졌다. 아래 115 형태 가운데 111 개는 bash, zsh 또는 에이전트 자신의 셸이 마지막 줄을 실행한다. v2.17.2 는 그 111 개 가운데 60 개를 판정 없이 통과시켰다. 지금은 0 이다. 각 수는 배터리와 형태 파일을 그 트리의 체크아웃에 복사해 `bash scripts/test/shell-reading.sh --count` 로 잰 값이다. 같은 클래스가 heredoc 옆에도 있었다. 주석 안 아포스트로피, `$'don\'t'` 이다. 따옴표 없는 구분자의 heredoc 본문 안 명령 치환은 셸이 실행하는 코드인데, 본문과 함께 지워졌다. `cat <<EOF`, 본문 줄 `$(pip install evil==6.6.6)`, `EOF` 가 판정 없이 통과했다.
+
+이제 읽는 것은 `shell_lex` 하나다. 셸이 유지하는 어휘 상태를 따라가며 모든 바이트에 분류를 매기는 `awk` 한 패스다. 다른 리더는 모두 이 패스의 뷰를 받는다. 판정 함수는 따옴표 안·주석·heredoc 본문을 비운 scan 뷰를, payload 리더는 따옴표를 남긴 code 뷰를, 줄 단위 리더는 줄 이음을 없앤 joined 뷰를 읽는다. bash 와 zsh 가 다르게 읽는 곳은 갈림마다 축을 따로 두고, 명령이 세운 축의 모든 조합으로 판정한다. 두 갈림을 스위치 하나에 묶었을 때는 네 조합 중 둘만 판정했고, zsh 가 실제로 하는 읽기가 빠졌다(리뷰에서 잡힘). heredoc 본문도 같은 렉서가 걷는다. 그래서 본문 속 치환이 여러 줄에 걸치거나, 중첩되거나, `case` 를 담아도 읽힌다. 끝내 닫히지 않는 명령은 실패한 읽기라서, 패키지 매니저를 부르면 `UNDECIDED` 다. inert 재작성도 이제 scan 뷰에서 바이트 위치로 `--ignore-scripts` 를 놓는다. 리더가 scan·code 뷰에서 오프셋을 가져오고 뷰를 다시 읽기도 하므로, scan-contract 는 두 뷰가 명령의 바이트 길이를 지키고 두 번째로 읽어도 같은지를 기록된 모든 형태와 무작위 입력에서 확인한다. 이 검사가 scan 뷰가 두 번째 읽기에서 달라지는 두 경우를 찾았고, 둘 다 고쳤다. 이스케이프된 따옴표가 맨 따옴표로 남는 경우와, 비워진 구간 뒤의 `#` 이 주석이 되는 경우다.
+
+`scripts/measure/shell-reading-forms.json` 은 형태마다 bash·zsh·sh·에이전트 자신의 zsh 래퍼가 낸 값을 기록한다. `npm test` 안의 `scripts/test/shell-reading.sh` 는 셸이 마지막 줄까지 실행하는 모든 형태에 적발을 요구하고, 데이터인 한 형태는 데이터로 남기를 요구한다. 리뷰 중에 분석기 규칙을 하나씩 빼 보았고, 변이마다 배터리 하나가 빨강을 냈다. 주석·따옴표·본문 상태, 두 산술 읽기, 두 갈림 축, 구분자 따옴표, `<<-` 탭, 숫자 구분자, 겹따옴표 안 중첩, heredoc 본문, case 패턴, 닫히지 않음 백스톱(이것은 consumer-forms 가 잡는다)이다. LEXER_NUMBERS
+
+### 읽기 하나가 셸 하나다: bash, zsh, dash
+
+분석기는 명령을 셸 하나로 읽고, 거기서 표시한 갈림마다 읽기를 하나씩 더했는데, 그 집합은 닫힐 수 없었다. zsh 는 `((` 를 자리마다 정하므로 한 명령 안에 서브셸 `((` 와 산술 `((` 가 함께 있었다. 이어 붙이기 뒤의 리더들은 zsh 읽기를 bash 규칙으로 다시 분석해 그 줄을 한 번 더 숨겼다. zsh 와 에이전트 래퍼가 실행하는 `echo "${x:-'}"; <install>; echo "'}"` 가 판정 없이 통과했고, v2.17.2 는 이것을 거부했다. 리눅스에서 `sh -c` script 를 읽는 dash 는 `((` 는 bash 처럼, 아포스트로피는 zsh 처럼 읽는다. 이제 읽기 하나가 셸 하나이고, 명령을 읽는 모든 곳은 한 읽기 안에서 읽으며, 게이트는 합집합으로 판정한다. zsh·dash 읽기는 bash 읽기가 셸들이 다르게 읽는 자리를 지날 때만 돈다. `--ignore-scripts` 는 세 읽기가 npm 설치를 같은 자리에 둘 때만 넣고, 그렇지 않으면 명령은 `UNDECIDED` 다. 그 자리들의 표는 ARCHITECTURE.ko.md 에 있다.
+
+검증: `scripts/measure/shell-reading-forms.json` 의 형태(186개)마다 macOS(bash 3.2, zsh 5.9, sh, dash, 에이전트 래퍼)와 리눅스(bash 5.2, dash 0.5.12)에서 잰 값이 있다. 셸이 형태의 마지막 줄을 실행한 곳마다 그 셸의 읽기에 그 줄이 보이고(셸 실행 925회), 게이트가 판정한다. 시드 고정 무작위 형태 400개(`scripts/measure/shell-reading-fuzz.sh`, 시드 20261001)에서 셸이 실행한 줄을 모든 읽기가 놓친 경우는 macOS(그런 형태 220개)와 리눅스(187개) 모두 0이고, 게이트가 통과시킨 것도 0이다. 주석 경계를 고친 뒤로 팔레트에 낱말 중간 `#`, `#` 앞의 줄 이음, glob 닫힘이 들어 있어서, 이 숫자가 그 전 팔레트의 249개·190개를 대신한다. 이 팔레트가 뽑은 형태 하나(heredoc 본문에서 열린 채 끝나는 산술 뒤의 설치)는 본문 끝에서 열린 맥락을 본문 데이터로 바꾸기 전까지 게이트를 통과했다. 읽기를 바꾼 변이 열 가지를 각각 사본에서 돌렸고, 모두 노린 행에서 배터리가 빨갛게 됐다. 판정 코퍼스와 무작위 명령 200개(시드 둘)를 이전 트리와 재생하면 판정 17개가 움직였고, 모두 pass 에서 deny 로 간 이름 있는 형태다. deny 에서 pass 로 간 것은 없다.
+
+비용(리눅스 VM 의 `scripts/measure/scan-cost.sh`, 5회 중 최솟값, 부하 0.03–7.2, 이전 트리 대비): 설치가 없는 명령은 1–5% 안이다(부하가 오르는 중 한 칸 +11%). 셸들이 다르게 읽는 자리가 없는 거부된 설치는 3–9% 빠르다. 그런 자리가 있는 설치는 세 번 읽으므로 100B 1.8배, 8KB 2.0배, 32KB 2.3배, 128KB 2.7배가 든다(128KB 에서 17.0s 로 자체 예산 20s 안이다. 더 큰 명령은 전보다 일찍 예산을 넘고, 거기서는 `UNDECIDED` 다).
+
+### 단어가 끝나는 자리, 명령이 시작하는 자리
+
+S4_SECTION
+
+### 대입 접두 뒤의 설치
+
+`FOO="a b" pip install evil==6.6.6` 은 v2.17.2 에서도, 이 릴리스의 모든 브랜치에서도 발견될 때까지 판정도 기록도 없이 통과했다. `FOO='a b'`, `FOO=$(printf x)`, 백틱, `FOO=a\ b`, `FOO=${BAR:-a b}`, `env FOO="a b"` 뒤의 같은 설치도 그랬다. 명령 게이트가 권위인 생태계에서는 완전한 우회였다. 접두를 벗기는 코드가 대입 값을 첫 공백이나 따옴표까지의 바이트로 읽었기 때문이다. 그래서 값에 공백이 있으면 접두가 설치 앞에 남았고, 설치는 끝내 인식되지 않았다. 이제 대입, `env`, `command`, `exec` 접두는 분석기에서 읽는다. 거기서는 값이 어떻게 따옴표를 치거나 중첩해도 한 단어다. 값 안의 치환에 든 설치는 여전히 읽고, 따옴표 친 값 안에서 이름만 나오는 설치는 데이터다.
+
+파이프 옆에서는 같은 접두가 반대 방향의 오류를 냈다. `PIP_INDEX_URL=x pip install requests==2.0.0 && printf 'hi' | zsh -s` 는 `requests` 가 승인돼 있는데도 셸로 넘기는 설치로 거부됐다. 이제 blanking 단계는 접두를 건너뛰고, 매니저 단어를 온전한 단어로만 잡고, 그 설치 자신의 대입 이름과 평범한 값을 비운다.
+
+### inert 플래그가 주석 안에 들어갔다
+
+`npm ci # rebuild the lockfile` 이 `npm ci # rebuild the lockfile --ignore-scripts` 가 됐다. 셸은 주석을 버리므로 npm 은 플래그를 보지 못했고 lifecycle 스크립트가 돌았는데, meta 에는 억제됐다고 적혔다. heredoc 이나 둘째 줄도 같았다. 플래그가 종료 표시 뒤나 마지막 줄에 붙었다. 이제 명령에 따옴표 밖 `#`, 둘째 줄, 연결된 문장이 있으면 재작성을 설치 동사 바로 뒤에 넣는다. 첫 inert 릴리즈부터 그랬고, 위 설계 판정 중에 발견됐다.
+
+동사는 셸이 실행하는 코드의 렉서 뷰에서 찾는다. 그래서 주석, 따옴표 안 문자열, heredoc 본문의 동사는 고쳐 쓰지 않는다. 그 뷰는 처음에 명령이 셸에 넘기는 script 를 빠뜨렸다. 보이는 설치 옆 `sh -c '...'` 안의 설치는, 보이는 설치가 inert 가 되는 동안 lifecycle 스크립트를 돌렸다(통합 중에 잡힘). 이제 플래그는 안쪽 셸이 읽는 바이트가 그대로인 `sh -c`, `bash -c`, `eval` script 안에도, 따옴표 안 치환 안에도 들어간다. 릴리스 이전부터 있던 틈도 함께 닫힌다. 단독 `sh -c 'npm install x'` 는 append 경로로 가서 플래그가 script 의 `$0` 이 됐다. 재작성이 닿지 못하는 npm 설치(이스케이프가 있는 겹따옴표 script, 셸로 파이프되는 heredoc)는 detect-and-rollback 으로의 다운그레이드로 기록한다.
+
+### 효과 게이트가 보지 못하던 npm 설치
+
+효과 게이트는 프로젝트의 `package-lock.json` 을 읽고, `UNGATED` 기록 면제는 프로젝트 안의 모든 npm CLI 설치가 거기에 기록된다고 가정했다. 실제 npm 과 lifecycle 스크립트가 흔적을 남기는 합성 패키지를 로컬 레지스트리에 붙여 종단으로 재 보니 그렇지 않은 형태가 여럿이었다.
+
+- `--no-save`, `--save=false`, `npm_config_save=false`, `--package-lock false`, `npm_config_package_lock=false` 는 lockfile 을 그대로 두고 설치를 `node_modules/.package-lock.json` 에만 기록한다. 게이트는 프로젝트를 깨끗하다고 판정했고, 깨끗한 판정 뒤에 도는 inert rebuild 가 검증되지 않은 패키지의 preinstall·install·postinstall 을 실행했다.
+- `-C <dir>` 과 `cd <dir> && npm install` 은 다른 디렉터리의 lockfile 에 기록하고, 게이트는 그것을 읽지 않았다.
+- `npm_config_global=true` 는 전역에 설치하고, lockfile 도 기록도 없었다.
+
+이제 게이트는 closure 를 lockfile 과 숨은 lockfile 의 합집합에서 읽고, 숨은 lockfile 이 있을 때만 프로젝트에 고정해(`--global=false --location=project`) rebuild 한다. 그래서 프로젝트 `.npmrc` 의 `global=true` 가 rebuild 를 전역으로 돌리지 못한다. 설치 전 게이트는 설치 문장마다 착지 위치를 따라가고(`-C`, 리터럴 `cd`·`pushd`, `env -C`), 따라가지 못하는 것은 기록한다. 기록 면제는 모든 설치 문장이 게이트가 읽는 곳에 떨어질 때만이다. 따옴표로 감싼 `--prefix`·`--cwd` 값은 셸처럼 읽는다. `scripts/test/lockless-forms.sh` 가 로컬 레지스트리에 대고 이 전부를 고정한다.
+
+그 뒤 설치가 어디에 떨어질지 예측하는 방식이 리뷰 세 라운드에서 매번 조용한 통과를 남겼다. 실행되지 않은 `cd`, `command cd`, 심볼릭 링크로 걸린 워크스페이스 멤버다. 두 가지가 예측을 대신했다. 디렉터리는 npm 에게 물어 정한다. `npm prefix` 와 `npm root` 를 명령이 npm 을 돌리는 자리에서, 그 문장 자신의 인자와 환경으로 돌린다. 그 질문은 명령의 코드를 돌리지 않는다(아래). 그리고 설치는 그 디렉터리에 이번 호출의 설치 흔적이 있을 때만 읽은 것으로 친다. 명령 직전에 pre-guard 가 기준 파일을 touch 하고 그곳 두 lockfile 의 inode 를 적어 둔다. post 훅은 기준 파일보다 `find -newer` 한 lockfile, 또는 inode 가 바뀐 lockfile 을 흔적으로 친다. 둘 다 없으면 설치를 `UNGATED`("no install trace in <dir>")로 기록하고 그곳에서는 rebuild 하지 않는다. 그래서 틀린 예측은 조용한 통과가 아니라 기록이 된다. `scripts/test/install-dir-differential.sh` 가 237 가지 배치에서 게이트를 `npm prefix` 에 묶고, `scripts/test/effect-trace-grid.sh` 가 흔적을 종단으로 돌린다.
+
+### 아무것도 저장하지 않는 설치도 출처와 설치 스크립트를 검사받는다
 
 효과 게이트의 출처 검사(비표준·비보안 resolved URL)와 설치 스크립트 휴리스틱은 `package-lock.json` 이나 `package.json` 이 바뀔 때만 돌았다. 아무것도 저장하지 않는 설치는 둘 다 바꾸지 않는다: `npm install --no-save`, `npm_config_save=false npm install`, 명령줄에 이름을 댄 tarball. 그래서 승인된 이름과 버전을 단 tarball 이 `file:` 경로나 http URL 에서 오면 두 검사를 통과했고, Claude Code 에서는 무실행 설치 뒤 rebuild 가 그 스크립트를 돌렸다. 저장했다면 휴리스틱이 걸러 냈을 설치 스크립트를 가진 승인 패키지도 마찬가지였다. closure 검사는 이미 숨은 lockfile 을 읽었지만, 패키지를 이름과 버전으로 가리키고 사칭 패키지는 그 둘을 공유한다.
 
@@ -741,7 +848,7 @@ v2.16.x 라운드가 남긴 것 셋과 그 라운드가 만든 것 하나.
 
 검증: `scripts/test/effect-trace-grid.sh` 1a 절, 실제 npm 과 로컬 레지스트리. 저장하지 않는 형태(C1, C3, C5, C6, H2)는 사칭 스크립트가 하나도 돌지 않고 롤백되며, 수정 전 트리에서는 빨강이다(리눅스, npm 10.8.2: 그 행들과 Codex C5 에서 기대 17개 실패). 저장하는 대조(C2, C4, H1)와 롤백되면 안 되는 행(C0, registry 의존성과 tarball 의존성을 가진 새 clone 의 `npm ci`, pull 한 lockfile 을 가진 설치된 트리)은 양쪽에서 그대로다. 50개 기준 개수 검사는 `package-lock.json` 에만 남는다. 이전 기록이 없으면 의존성이 50개를 넘는 프로젝트의 첫 설치가 모두 그 기준을 넘기 때문이다.
 
-#### 설치 스크립트는 트리 전체 검사로 허가된다
+### 설치 스크립트는 트리 전체 검사로 허가된다
 
 설치 스크립트는 두 곳에서 돌았고, 둘 다 트리 전체에 대해 돌았다. 무실행 설치 뒤의 rebuild 와, 롤백이 돌리던 재설치다. 둘 다 "이번 명령이 들인 것 중 거부된 것이 없다"는 판정으로 허가됐고, 그 판정의 구멍 셋이 연달아 스크립트 실행이 되었다. 마지막 것은 롤백이었다. 확정 스냅샷이 없는 프로젝트는 명령 전 상태로 롤백되는데, 그 상태에 거부된 패키지가 있으면 롤백의 `npm ci` 가 그 스크립트를 돌렸다. 커밋된 lockfile 에 그 패키지가 있는 새 clone(RB1), 승인 설치 전부터 lockfile 에 있던 경우(RB2), 앞선 `UNGATED` 설치가 써 넣은 경우(CH2b)다. 그래도 메시지는 "마지막 확정 안전 스냅샷으로 롤백했다"고 말했다. 같은 판정 때문에 rebuild 는 고쳐진 커밋된 lockfile 의 tarball(`npm ci` 의 L1, 맨 `npm install` 의 L2)과 앞선 `UNGATED` 설치가 링크한 디렉터리(CH1b)도 돌렸다.
 
@@ -757,7 +864,7 @@ v2.16.x 라운드가 남긴 것 셋과 그 라운드가 만든 것 하나.
 
 트리에서 읽는 묶음 판정도 같은 방식으로 쟀다(macOS, npm 11.19.0). 커밋된 lockfile 이 중첩된 sd-swapped@1.0.0 을 http tarball 로 보내면, 그 기록이 `inBundle` 이라 하든(NB1) 루트가 그 부모를 묶든(`npm ci` 의 NB2, `npm install` 의 NB2i, `npm install --no-save` 의 NB2n) 경고와 함께 설치되고 스크립트는 돌지 않는다. 의존성을 묶은 공개 패키지는 `bundleDependencies`(BD1)든 `bundledDependencies: true`(BD2)든 조용히 rebuild 되고, 묶인 기록이 다른 출처를 적으면 rebuild 되지 않는다(NB3). Codex 롤백 행(RB1x)은 메시지가 설치 자신의 스크립트가 이미 돌았다고 말하게 고정한다. 수정 전 트리에서는 NB1, NB2, NB2i, NB2n 이 가짜 tarball 의 스크립트 셋을 돌렸고 이 절의 기대 17개가 실패했다. `inBundle` 을 다시 믿게 한 변이는 같은 넷과 NB3 를 빨갛게 만든다(기대 14개).
 
-#### 공개 registry 기록은 바이트가 온 곳이 아니다
+### 공개 registry 기록은 바이트가 온 곳이 아니다
 
 rebuild 의 트리 전체 검사와 출처 검사는 `https://registry.npmjs.org/` 위의 `resolved` URL 을 공개 registry 로 쳤다. npm 의 기본값 `replace-registry-host=npmjs` 는 그런 URL 을 npm 에 설정된 registry 에서 받고, 기록에는 URL 을 그대로 적는다. 그래서 커밋된 `.npmrc` 의 `registry=<아무 곳>` 이 승인된 이름과 버전을 다른 tarball 로 보냈다. 새 프로젝트(RH1)에서도, 커밋된 lockfile 에 가짜의 integrity 만 적힌 clone(RH2)에서도 그랬다. 명령 앞의 `npm_config_registry`(RH3)도 같았다. 두 lockfile 모두 공개 URL 을 적었고, 롤백도 경고도 없었으며, 무실행 설치의 rebuild 가 가짜의 스크립트를 돌렸다. 위에서 말한 "새 프로젝트의 첫 설치에서 사설 registry 출처는 롤백된다" 는 이 경우에 성립하지 않았다.
 
@@ -774,7 +881,7 @@ rebuild 의 트리 전체 검사와 출처 검사는 `https://registry.npmjs.org
 
 검증: `scripts/test/effect-trace-grid.sh` 1d 절. 가짜를 내주는 두 번째 fixture registry 를 127.0.0.1 에 띄웠다(macOS 15.6.1, npm 11.19.0). RH1, RH2, RH3, RH3e, RH8(루트 `.npmrc` 아래의 워크스페이스 멤버), RH1w(명령이 쓴 `.npmrc`), RH2w 는 설치가 유지되고, 롤백되지 않으며, 스크립트가 돌지 않는다. 경고는 가짜 registry 를 이름 대고 rebuild 전에 사용자에게 확인하라고 말한다. Codex RH3 은 설치 자신의 스크립트가 이미 돌았다는 경고와 함께 유지된다. RH7(`source`)은 모름을 이름 대는 경고와 함께 유지된다. RH4(명령줄 `--registry`)는 아무것도 설치되기 전에 차단된다. 샌드박스 registry 에서 받는 승인된 설치 RH5 는 rebuild 된다. 최종 트리에서 격자는 부하 5–6 에서 379초에 통과하고, smoke 와 lockless-forms 도 함께 통과한다. 바뀌기 전, 새 행을 얹은 3e22fbc 에서는 RH1, RH2, RH3, RH3e, RH8, RH1w, RH2w, RH7 이 각각 가짜의 스크립트 셋을 돌렸다(기대 32개 실패). 먼저 나온 차단 설계(5566cc0)를 이 행들에 돌리면 기대 10개가 실패한다. RH1, RH2, RH3, RH3e, RH8, Codex RH3 을 차단하고, RH1w 를 롤백하며, RH1w·RH2w·RH7 의 경고가 registry 를 이름 대지도 사용자에게 물으라고 하지도 않는다. npm 의 답을 무시하고 공개 URL 만 믿게 하면 유지 행 여덟이 모두 다시 빨갛다. rebuild 가 각 행에서 가짜의 스크립트를 돌리고, Codex RH3 은 경고를 잃는다(기대 25개 실패). 대조와 변이는 나란히, 부하 4–12 에서 돌렸다. 이 변경의 첫 차단 버전은 같은 호스트에서 e2e 와 install-dir-differential 도 통과했다. 이번 라운드는 건드린 배터리만 돌렸다. 리눅스와 npm 10.8.2 는 재지 않았다.
 
-#### 바이트가 어디서 왔는지는 받을 때 기록한다
+### 바이트가 어디서 왔는지는 받을 때 기록한다
 
 위 변경은 바이트를 받은 그 명령을 판정할 뿐, 다음 명령에는 아무것도 알려 주지 않았다. 가짜를 받아 온 설정이 사라지면 다음 명령이 그것을 rebuild 해 스크립트를 돌렸다. 한 번만 쓴 `npm_config_registry` 뒤의 승인 설치(P1), `.npmrc` 를 지운 뒤의 맨 `npm install`(P2), `node_modules` 를 지운 뒤 npm 캐시가 integrity 로 내준 `npm ci`(P3), 가짜가 든 채 확정된 스냅샷으로의 롤백(P4), 같은 머신에서 같은 lockfile 로 다른 프로젝트가 돌린 `npm ci`(P5)다. 두 lockfile 에서 `integrity` 를 지워도 그랬다(P7). 같은 종류의 반례가 세 번 연달아 나온 것이다. `inBundle`, `resolved`, rebuild 시점의 설정이 각각 "이 바이트는 어디서 왔나"를 바이트에 묶이지 않은 값으로 답했다.
 
@@ -806,7 +913,7 @@ export 가 싣는 것의 검증: 1d 절의 XH1-XH5, XC1-XC3, XU1 행과 UK1d. �
 
 npm 에게 묻는 일이 명령의 코드를 돌리지 않는다는 것의 검증: lockless-forms 1e 절(CX)과 effect-trace-grid 1d 절의 PX1-PX4, UN1 행. CX 행은 열 가지 꼴을 판정한다. 꼴마다 거부되어야 하는 미승인 고정 spec 과 통과되어야 하는 승인 spec 이 하나씩 있다. 꼴은 가짜 npm 을 `PATH` 앞에 두거나(npm 앞, 글자 그대로든 아니든, export, env(1)), 그 경로로 적거나, `NODE_OPTIONS` 로 네 자리에서 모듈을 먼저 불러온다. 두 코드 모두 돌면 파일에 한 줄을 남긴다. 수리한 트리는 판정 20번 어디에도 줄을 남기지 않았다. 바꾸기 전 트리(3b4eee9)에 새 행을 붙이면 그중 16번이 질의마다 한 줄씩 세 줄을 남겼고, 거부와 통과가 같았다. 줄이 없던 넷은 `$PATH` 꼴이다. 값이 실행할 때 정해져서 옛 질의가 아예 돌리지 않았다. 변이 둘은 기대한 곳에서만 실패했다. 코드 이름과 훅 자신의 `PATH` 를 둘 다 빼면(A2) 글자 그대로의 `PATH` 꼴 셋과 `NODE_OPTIONS` 꼴 넷이 실패했다(판정 14번). 경로로 적은 npm 은 거기서도 깨끗하다. pre-guard 가 더는 npm 단어를 질의에 넘기지 않기 때문이다. 코드 이름만 빼면(A) `NODE_OPTIONS` 꼴만 실패했다(판정 8번). 질의 끝에 붙는 훅의 `PATH` 가 혼자서 `PATH` 꼴을 막는다. lockless-forms 는 macOS(bash 3.2.57, node v26.7.0, npm 11.19.0)에서 돌았다. 수리본은 두 기계에서 24 ok 로 367s(load 7.4–11.0), 391s(load 8.7–13.2)에 통과했고, 대조와 변이는 load 5–10 에서 돌았다. Linux(Debian 13, bash 5.2.37, node v20.20.2, npm 10.8.2)에서는 수리본이 24 ok 로 426s 에 통과했고, 대조는 같은 판정 16번, A2 는 같은 14번에 줄을 남겼다(load 0.9–2.6). grid 에서 PX1(`export PATH="<dir>:$PATH" && npm ci`), PX2(npm 앞의 같은 것), PX3(`NODE_OPTIONS=--max-old-space-size=4096 npm ci`)은 첫 명령에서 아무것도 rebuild 하지 않고 이유를 말하며 기록과 관측 해시를 그대로 두고, 다음 평범한 설치가 rebuild 한다. PX4 는 export 한 `PATH` 옆에 사칭 registry 를 적고 기록된다. UN1 은 샌드박스의 `npm_config_userconfig` 를 unset 하고 기록된다. 수리한 트리는 macOS(bash 3.2.57, node v26.7.0, npm 11.19.0; 694s, load 1.7–8.7)와 Linux(Debian 13, bash 5.2.37, node v20.20.2, npm 10.8.2; 823s, load 0.9–1.8)에서 grid 전체를 실패 0 으로 통과했다. macOS 에서 바꾸기 전 트리에 새 행을 붙이면 기대 16개가 실패했다. PX1 과 PX2 각 4(기록되고 다음 설치가 rebuild 되지 않음), PX3 3(옛 질의가 `NODE_OPTIONS` 를 실어 첫 명령이 rebuild 함), PX4 1(모름으로 기록되어 경고가 registry 를 이름 대지 않음), UN1 4(두 명령 모두 사칭의 스크립트 셋이 돎)다. pre-guard 가 코드 이름을 보통 이름으로 읽고 질의는 여전히 그것을 빼면(B) PX1-PX4 만 실패했다(12, load 8–16). 첫 macOS 기계에서 smoke(54 ok), install-dir-differential(1 ok), scan-contract(43 ok)가 통과했다. Linux 에서는 smoke(54 ok), consumer-forms(61 ok)가 통과했고, quick census 는 weakened·mislabeled·after-gate·pending-on-deny 를 0 으로 셌다(load 0.9–2.6). e2e 는 첫 macOS 기계에서 검사 하나("post hook keeps verified inert rebuild success quiet")가 3b4eee9 에서도 실패하고, 원인은 모른다.
 
-#### 롤백은 패키지 매니저를 부르지 않는다
+### 롤백은 패키지 매니저를 부르지 않는다
 
 롤백은 예전에 `node_modules` 재설치로 끝났다. 복원한 lockfile 이 있으면 `npm ci`, 없으면 `rm -rf node_modules && npm install` 이었다. 워크트리 구성 중에는 프로젝트의 `node_modules` 를 다른 체크아웃의 것에 링크해 두는 것이 있고, `npm ci` 는 설치 전에 `node_modules` 가 가리키는 곳을 비운다. 그런 워크트리에서 롤백이 다른 체크아웃의 패키지를 지웠다.
 
@@ -816,19 +923,47 @@ npm 에게 묻는 일이 명령의 코드를 돌리지 않는다는 것의 검�
 
 - 스냅샷으로 뜬 lock·manifest 파일을 복원하고, 프로젝트 자신의 `node_modules` 가 실제 디렉터리면 지운다. 실제 디렉터리를 지우면 그 안의 링크가 지워질 뿐, 링크가 가리키는 것은 지워지지 않는다.
 - 대상이 심볼릭 링크면 거부하고 이름을 남긴다. 메시지와 `reorg.log`(`REORG REFUSED`)가 어느 단계를 거부했는지와 링크가 어디로 가는지를 물리 경로로 말한다. 롤백은 나머지 단계를 계속한다.
+- `node_modules` 는 명령이 프로젝트의 node 트리에 쓴 것이 보일 때만 지운다. 설치 흔적이 있거나, node 매니페스트·lockfile 이 명령 직전에 뜬 스냅샷과 다르거나, `node_modules` 에 그 스냅샷에 없던 패키지·바이너리가 있거나 그보다 새로울 때다. closure 는 명령이 바꿨든 아니든 판정되므로, 설치로 잘못 읽힌 명령이 closure 가 한 번도 승인되지 않은 프로젝트에서 되돌릴 것 없는 롤백에 이르렀고, 지우기가 프로젝트의 의존성을 함께 가져갔다. 롤백이 돌리던 재설치가 그것을 가리고 있었다. 시각은 `find -newer` 로 비교한다. bash 3.2 의 `-nt` 는 초 단위라, 패키지를 제자리에서 바꾼 실제 `npm ci` 가 스냅샷을 뜬 그 초 안에 끝났기 때문이다.
 - 재설치는 다음 설치가 하고, 그 설치는 다른 설치처럼 게이트를 지난다.
 - 메시지는 롤백이 무엇을 했는지와 지금 파일이 어떤 상태인지를 말하고, 명령은 주지 않는다. 안내도 재설치와 같은 식으로 틀렸다. 리뷰 세 라운드가 매번 안내된 `npm ci` 가 밖에 닿는 꼴을 찾았고, 마지막은 워크스페이스 멤버에서였다. 거기서 맨 `npm ci` 는 워크스페이스 루트를 비운다. 중단된 롤백의 보고도 같은 규칙을 따른다.
 - 모든 문장은 디스크에서 읽은 사실이거나 safedeps 가 적용한 규칙이다. `yarn.lock` 옆에서 말한 "lockfile 없음" 과, 실제 npm 이 제자리에 머문 곳에서 말한 "npm 이 상위 프로젝트에서 일할 것" 은 둘 다 사실에 예측을 덧붙인 문장이었고, 둘 다 틀렸다.
 
 사용자에게 달라지는 것: 롤백 뒤 프로젝트에는 다음 설치 전까지 `node_modules` 가 없다. 검증된 무실행 설치 뒤의 rebuild 는 safedeps 가 여전히 npm 을 부르는 유일한 자리이고, 프로젝트 루트의 `package.json`·lockfile·`node_modules` 가 링크면 그 링크를 사유로 대고 건너뛴다.
 
-### v2.18.0 (통합 중) — 명령을 bash, zsh, dash 가 각자 읽는 대로 읽는다
+### 롤백이 하는 말은 디스크에 대고 검사한다
 
-분석기는 명령을 셸 하나로 읽고, 거기서 표시한 갈림마다 읽기를 하나씩 더했는데, 그 집합은 닫힐 수 없었다. zsh 는 `((` 를 자리마다 정하므로 한 명령 안에 서브셸 `((` 와 산술 `((` 가 함께 있었다. 이어 붙이기 뒤의 리더들은 zsh 읽기를 bash 규칙으로 다시 분석해 그 줄을 한 번 더 숨겼다. zsh 와 에이전트 래퍼가 실행하는 `echo "${x:-'}"; <install>; echo "'}"` 가 판정 없이 통과했고, v2.17.2 는 이것을 거부했다. 리눅스에서 `sh -c` script 를 읽는 dash 는 `((` 는 bash 처럼, 아포스트로피는 zsh 처럼 읽는다. 이제 읽기 하나가 셸 하나이고, 명령을 읽는 모든 곳은 한 읽기 안에서 읽으며, 게이트는 합집합으로 판정한다. zsh·dash 읽기는 bash 읽기가 셸들이 다르게 읽는 자리를 지날 때만 돈다. `--ignore-scripts` 는 세 읽기가 npm 설치를 같은 자리에 둘 때만 넣고, 그렇지 않으면 명령은 `UNDECIDED` 다. 그 자리들의 표는 ARCHITECTURE.ko.md 에 있다.
+GRAMMAR_SECTION
 
-검증: `scripts/measure/shell-reading-forms.json` 의 형태(186개)마다 macOS(bash 3.2, zsh 5.9, sh, dash, 에이전트 래퍼)와 리눅스(bash 5.2, dash 0.5.12)에서 잰 값이 있다. 셸이 형태의 마지막 줄을 실행한 곳마다 그 셸의 읽기에 그 줄이 보이고(셸 실행 925회), 게이트가 판정한다. 시드 고정 무작위 형태 400개(`scripts/measure/shell-reading-fuzz.sh`, 시드 20261001)에서 셸이 실행한 줄을 모든 읽기가 놓친 경우는 macOS(그런 형태 220개)와 리눅스(187개) 모두 0이고, 게이트가 통과시킨 것도 0이다. 주석 경계를 고친 뒤로 팔레트에 낱말 중간 `#`, `#` 앞의 줄 이음, glob 닫힘이 들어 있어서, 이 숫자가 그 전 팔레트의 249개·190개를 대신한다. 이 팔레트가 뽑은 형태 하나(heredoc 본문에서 열린 채 끝나는 산술 뒤의 설치)는 본문 끝에서 열린 맥락을 본문 데이터로 바꾸기 전까지 게이트를 통과했다. 읽기를 바꾼 변이 열 가지를 각각 사본에서 돌렸고, 모두 노린 행에서 배터리가 빨갛게 됐다. 판정 코퍼스와 무작위 명령 200개(시드 둘)를 이전 트리와 재생하면 판정 17개가 움직였고, 모두 pass 에서 deny 로 간 이름 있는 형태다. deny 에서 pass 로 간 것은 없다.
+### Windows: overrides 조회가 드라이브 루트에서 끝난다 (#21)
 
-비용(리눅스 VM 의 `scripts/measure/scan-cost.sh`, 5회 중 최솟값, 부하 0.03–7.2, 이전 트리 대비): 설치가 없는 명령은 1–5% 안이다(부하가 오르는 중 한 칸 +11%). 셸들이 다르게 읽는 자리가 없는 거부된 설치는 3–9% 빠르다. 그런 자리가 있는 설치는 세 번 읽으므로 100B 1.8배, 8KB 2.0배, 32KB 2.3배, 128KB 2.7배가 든다(128KB 에서 17.0s 로 자체 예산 20s 안이다. 더 큰 명령은 전보다 일찍 예산을 넘고, 거기서는 `UNDECIDED` 다).
+npm `overrides` 조회는 프로젝트에서 위로 올라가다 `/` 나 `.git` 에서만 멈췄다. Git Bash 에서 `dirname C:` 은 `C:` 이므로, Git 레포 밖에서는 루프가 끝나지 않았고 훅은 타임아웃에 죽었으며 설치는 그대로 진행됐다. 이제 `dirname` 이 자기 입력을 돌려주는 곳에서 멈춘다. Yarn 쪽 탐색이 이미 쓰던 검사다. POSIX 에서는 같은 고정점이 `.` 이고, 함수 단위 시험이 두 형태를 모두 고정한다. Windows 는 여전히 CI 밖이고, Windows 동작의 근거는 보고서의 추적이다.
+
+### UNGATED 는 효과 게이트가 실제로 있는지를 기준으로 한다 (#22)
+
+버전 없는 설치의 기록은 원장 생태계가 npm 이면 생략됐다. pnpm·yarn·bun 은 그 생태계를 공유하지만 효과 게이트가 읽는 `package-lock.json` 은 쓰지 않으므로, 버전 없는 `pnpm add x` 는 흔적을 남기지 않았다. 이제 면제 기준은 "효과 게이트가 결과를 읽는가", 즉 npm CLI 가 프로젝트 안에 하는 설치다. pnpm·yarn·bun, `npm i -g`, `--no-package-lock`, 패키지를 받아 오는 실행기는 기록되고, 프로젝트에 이미 있는 바이너리를 실행하는 실행기(`npx tsc`)는 받아 오는 게 없으므로 조용하다. 추출기가 spec 을 낸 패키지만 고정된 것으로 치고, 그 대조는 생태계와 이름을 함께 쓴다. 그래서 한 패키지는 고정하고 다른 패키지는 고정하지 않은 명령도, 한 생태계에서 고정한 이름을 다른 생태계에서 버전 없이 설치하는 명령도 기록된다.
+
+### 빨라진 것
+
+- **커맨드 스캐너가 선형이다.** 명령 길이의 제곱으로 느는 bash 문자 루프였다. 개발 머신에서 잰 값(부하 46, 데드라인 끔): 설치 문구 없는 명령의 게이트 전체 비용이 8KB 0.21초, 32KB 0.43초, 64KB 0.92초다. v2.17.2 는 32KB 에서 스캔만 36.2초를 써서 30초 훅 예산을 넘겼다.
+- **설치가 든 명령이 더는 제곱으로 늘지 않는다.** "이 문장이 비었나" 를 보는 여섯 곳이 bash 패턴 치환을 썼고, 훅이 도는 macOS `/bin/bash` 3.2 에서 이 치환은 텍스트보다 훨씬 빨리 늘었다(2,000바이트 한 번에 4.99초). 통합 트리에서 npm 설치가 든 4KB 명령이 수리 전 43초, 수리 뒤 1초였다. 데드라인을 끄고 재면 설치가 든 명령은 8KB 1.2초, 32KB 2.2초, 64KB 5.4초다. 256KB 에서는 여전히 1분쯤 걸리지만, 런타임이 죽이기 한참 전에 가드 자신의 예산이 `UNDECIDED` 로 답한다.
+
+### 리눅스와 CI
+
+ubuntu CI 작업은 2026-08-04 부터 빨간색이었고 macOS 작업은 초록이었다. 그래서 리눅스에서만 나는 결함 넷이 첫 결함 뒤에 숨어 있었다.
+
+- self-budget 배터리는 스캔이 얼마나 느린지로 입력 크기를 정했는데, 선형 스캐너와 더 빠른 러너가 둘 다 그 전제를 무너뜨렸다. 이제 `PATH` 맨 앞에 둔 `awk` 로 판정을 붙잡고, 가드를 `TERM` 이 무시된 상태로 띄워 `KILL` 격상만 제때 답할 수 있게 한다. 배터리가 그 격상을 한 번도 시험하지 않은 채 통과해 왔다는 사실은 변이로 찾았다.
+- 리눅스는 128KB 를 넘는 환경 문자열 하나를 거부하므로, 50만 자 예산 케이스는 가드를 띄우지도 못했고 하네스는 그 실행 실패를 `pass` 로 읽었다.
+- advisory 로그의 오래된 잠금 검사가 BSD `stat -f` 를 먼저 물었다. 리눅스에서는 이것이 파일시스템 정보를 찍고 0 으로 끝나며, 그 뒤 산술식이 `set -u` 에서 죽었다.
+- 원장 색인은 원장 파일 하나가 깨져 있으면 파일시스템의 디렉터리 순서에 따라 항목을 두 번 찍었다.
+
+### 이 릴리즈에 함께 들어간 것
+
+- **advisory 로그 크기를 압축으로 제한한다.** 더는 끝없이 자라지 않는다. `re-check` 가 진짜 승인과 위조를 가르려고 읽는 증거 줄은 온전히 남기고, 추적 줄은 보관한 뒤 정리한다.
+- **전역 npm 승인이 프로젝트와 무관하다.** 세션이 `overrides` 가 있는 프로젝트에 있다는 이유로 승인된 전역 설치가 거부되지 않는다.
+
+### 검증
+
+VERIFICATION_PARAGRAPH
 
 ## v3 (미래)
 
