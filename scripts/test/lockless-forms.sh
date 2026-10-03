@@ -942,6 +942,65 @@ do
 done
 pass "the flag stands where npm reads it as true: not as a trailing option's value, not after a run-time --, and the pending state is found before a > with no blank"
 
+# --- 11c. A word any shell expansion decides --------------------------------------------
+# Which words the shell decides at run time is read from its expansions, step by
+# step. The list it replaced knew `$`, backquotes and globs and not the tilde:
+# `HOME=--cache; npm install x ~` read `~` as written, the flag went after it
+# alone, the shell handed npm `--cache` there, and npm took the flag as the
+# cache directory and ran the install's scripts, with nothing recorded. One row
+# per step that can hand npm a word it does not show: tilde (`~`, `~-`), brace,
+# arithmetic, process substitution and pathname (a glob that matches a file
+# named `--cache`); parameter and command substitution are the rows of 11b. The
+# assignment tilde and zsh's `=cmd` cannot make an option, and these rows run
+# under bash, where `=npm` is a word as written; they hold the reading and the
+# record. Each install runs no script while it installs, and is recorded as one
+# whose flag nobody read.
+plant_cache_file() { : > "${CASE_PROJECT}/--cache"; }
+for row in \
+  "HOME=--cache; npm install sd-approved@1.0.0 ~|" \
+  "OLDPWD=--cache; npm install sd-approved@1.0.0 ~-|" \
+  "npm install sd-approved@1.0.0 --fetch-retries {1,--cache}|" \
+  "npm install sd-approved@1.0.0 --fetch-retries \$((1))|" \
+  "npm install sd-approved@1.0.0 --message <(true)|" \
+  "npm install sd-approved@1.0.0 --cach?|plant_cache_file" \
+  "npm install sd-approved@1.0.0 --message a=~|" \
+  "npm install sd-approved@1.0.0 --message =npm|"
+do
+  IFS='|' read -r form setup <<< "${row}"
+  new_project
+  [[ -z "${setup}" ]] || "${setup}"
+  : > "${MARKS}"
+  INSTALL_MARKS=""
+  run_install "${form}" claude count_install_marks
+  [[ "${INSTALL_MARKS}" == 0 ]] \
+    || fail "an approved install runs no script during the install: ${form} (ran: $(cut -f1,2 "${MARKS}" | paste -sd, -); command: ${CASE_EXEC})"
+  [[ -e "${CASE_PROJECT}/node_modules/sd-approved" ]] || fail "the approved install installs: ${form}"
+  grep -q 'holds a word the shell decides at run time' "${CASE_HOME}/advisory.log" \
+    || fail "an install holding a word the shell expands is recorded in advisory.log: ${form}"
+done
+pass "an install holding a word any shell expansion decides runs no script while it installs, and is recorded"
+
+# --- 11d. The flag after the verb is a floor under the reading --------------------------
+# Every rewritten install also gets the flag right after its verb, where the
+# release put it. A word the reading misses as one the shell expands can take
+# the flag after the last argument as its value; the flag after the verb still
+# stands. npm reads the two flags as one: an install that carries both runs no
+# script and installs.
+for form in \
+  "npm install --ignore-scripts sd-approved@1.0.0 --ignore-scripts" \
+  "npm install --ignore-scripts sd-approved@1.0.0 --no-ignore-scripts --ignore-scripts" \
+  "npm install --ignore-scripts sd-approved@1.0.0 --cache --ignore-scripts"
+do
+  new_project
+  : > "${MARKS}"
+  INSTALL_MARKS=""
+  run_install "${form}" claude count_install_marks
+  [[ "${INSTALL_MARKS}" == 0 ]] \
+    || fail "an install that carries the flag after its verb and after its last argument runs no script: ${form} (ran: $(cut -f1,2 "${MARKS}" | paste -sd, -))"
+  [[ -e "${CASE_PROJECT}/node_modules/sd-approved" ]] || fail "an install that carries the flag twice installs: ${form}"
+done
+pass "npm reads the flag after the verb and the flag after the last argument as one, and the one after the verb stands when a later word takes the other"
+
 # --- the fixture never left the machine ---------------------------------------------------
 npm_sandbox_registry_was_local
 

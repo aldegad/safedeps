@@ -564,7 +564,7 @@ inert_pre=$(
 EOF
 )
 [[ "$(jq -r '.hookSpecificOutput.permissionDecision' <<< "${inert_pre}")" == "allow" ]] || fail "inert pre hook emits Claude allow"
-[[ "$(jq -r '.hookSpecificOutput.updatedInput.command' <<< "${inert_pre}")" == "npm install fixture-parent@1.0.0 --ignore-scripts" ]] || fail "inert pre hook injects ignore-scripts"
+[[ "$(jq -r '.hookSpecificOutput.updatedInput.command' <<< "${inert_pre}")" == "npm install --ignore-scripts fixture-parent@1.0.0 --ignore-scripts" ]] || fail "inert pre hook injects ignore-scripts"
 cat > "${inert_project}/package-lock.json" <<'EOF'
 {
   "name": "inert-project",
@@ -602,7 +602,7 @@ EOF
 chmod +x "${stub_bin}/npm"
 inert_post=$(
   PATH="${stub_bin}:${PATH}" scripts/safedeps-post-verify.sh <<EOF
-{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0 --ignore-scripts"},"cwd":"${inert_project}"}
+{"tool_name":"Bash","tool_input":{"command":"npm install --ignore-scripts fixture-parent@1.0.0 --ignore-scripts"},"cwd":"${inert_project}"}
 EOF
 )
 [[ -z "${inert_post}" ]] || fail "post hook keeps verified inert rebuild success quiet"
@@ -754,7 +754,7 @@ link_inert_pre=$(
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${link_inert_wt}"}
 EOF
 )
-[[ "$(jq -r '.hookSpecificOutput.updatedInput.command' <<< "${link_inert_pre}")" == "npm install fixture-parent@1.0.0 --ignore-scripts" ]] || fail "linked inert pre hook injects ignore-scripts"
+[[ "$(jq -r '.hookSpecificOutput.updatedInput.command' <<< "${link_inert_pre}")" == "npm install --ignore-scripts fixture-parent@1.0.0 --ignore-scripts" ]] || fail "linked inert pre hook injects ignore-scripts"
 cat > "${link_inert_wt}/package-lock.json" <<'EOF'
 {
   "name": "link-inert-wt",
@@ -769,7 +769,7 @@ EOF
 : > "${tmp_root}/emptying-npm-calls.log"
 link_inert_post=$(
   PATH="${emptying_bin}:${PATH}" scripts/safedeps-post-verify.sh <<EOF
-{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0 --ignore-scripts"},"cwd":"${link_inert_wt}"}
+{"tool_name":"Bash","tool_input":{"command":"npm install --ignore-scripts fixture-parent@1.0.0 --ignore-scripts"},"cwd":"${link_inert_wt}"}
 EOF
 )
 if grep -q 'rebuild' "${tmp_root}/emptying-npm-calls.log" 2>/dev/null; then

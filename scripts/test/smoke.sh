@@ -424,7 +424,7 @@ allow_output=$(
   run_hook_command "${tmp_root}/home-hook-allow" "${tmp_root}/safe-hook-allow" "npm install left-pad@1.3.0"
 )
 [[ "$(jq -r '.hookSpecificOutput.permissionDecision' <<< "${allow_output}")" == "allow" ]] || fail "hook emits Claude allow decision for approved install"
-[[ "$(jq -r '.hookSpecificOutput.updatedInput.command' <<< "${allow_output}")" == "npm install left-pad@1.3.0 --ignore-scripts" ]] || fail "hook injects --ignore-scripts for Claude npm install"
+[[ "$(jq -r '.hookSpecificOutput.updatedInput.command' <<< "${allow_output}")" == "npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts" ]] || fail "hook injects --ignore-scripts for Claude npm install"
 allow_sid=$(jq -r '.snapshot_id' "${tmp_root}/safe-hook-allow/pending/"*.json)
 jq -e '.ignore_scripts_injected == true' "${tmp_root}/safe-hook-allow/snapshots/${allow_sid}_meta.json" >/dev/null || fail "hook records injected meta flag"
 pass "hook injects --ignore-scripts for Claude approved install"
@@ -525,7 +525,7 @@ mkdir -p "${tmp_root}/safe-compound"
 SAFEDEPS_HOME="${tmp_root}/safe-compound" lib/ledger/ledger.sh approve npm left-pad 1.3.0 1.3.0 smoke >/dev/null
 compound_out=$(run_hook_command "${tmp_root}/home-compound" "${tmp_root}/safe-compound" "npm install left-pad@1.3.0 && npm run build")
 compound_cmd=$(jq -r '.hookSpecificOutput.updatedInput.command' <<< "${compound_out}")
-[[ "${compound_cmd}" == "npm install left-pad@1.3.0 --ignore-scripts && npm run build" ]] || fail "compound inert-install injects --ignore-scripts on the install, not the trailing command (got: ${compound_cmd})"
+[[ "${compound_cmd}" == "npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts && npm run build" ]] || fail "compound inert-install injects --ignore-scripts on the install, not the trailing command (got: ${compound_cmd})"
 pass "compound install puts --ignore-scripts on the npm install, after its last argument (finding #7)"
 
 # The same holds for a trailing comment, a heredoc and a second line: appending
@@ -534,12 +534,12 @@ pass "compound install puts --ignore-scripts on the npm install, after its last 
 # the last line. Each must land on the install; the quoted `#` is data and stays
 # on the append path.
 for inert_case in \
-  "npm install left-pad@1.3.0 # rebuild the lockfile|npm install left-pad@1.3.0 --ignore-scripts # rebuild the lockfile" \
-  $'npm install left-pad@1.3.0\necho done|npm install left-pad@1.3.0 --ignore-scripts\necho done' \
-  $'npm install left-pad@1.3.0 <<EOF\nyes\nEOF|npm install left-pad@1.3.0 --ignore-scripts <<EOF\nyes\nEOF' \
-  "npm install left-pad@1.3.0 --message 'a # b'|npm install left-pad@1.3.0 --message 'a # b' --ignore-scripts" \
-  'npm --userconfig "/tmp/a b/.npmrc" install left-pad@1.3.0 # then npm i later|npm --userconfig "/tmp/a b/.npmrc" install left-pad@1.3.0 --ignore-scripts # then npm i later' \
-  $'cat <<EOF > notes\nnpm i left-pad\nEOF\nnpm install left-pad@1.3.0|cat <<EOF > notes\nnpm i left-pad\nEOF\nnpm install left-pad@1.3.0 --ignore-scripts'
+  "npm install left-pad@1.3.0 # rebuild the lockfile|npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts # rebuild the lockfile" \
+  $'npm install left-pad@1.3.0\necho done|npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts\necho done' \
+  $'npm install left-pad@1.3.0 <<EOF\nyes\nEOF|npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts <<EOF\nyes\nEOF' \
+  "npm install left-pad@1.3.0 --message 'a # b'|npm install --ignore-scripts left-pad@1.3.0 --message 'a # b' --ignore-scripts" \
+  'npm --userconfig "/tmp/a b/.npmrc" install left-pad@1.3.0 # then npm i later|npm --userconfig "/tmp/a b/.npmrc" install --ignore-scripts left-pad@1.3.0 --ignore-scripts # then npm i later' \
+  $'cat <<EOF > notes\nnpm i left-pad\nEOF\nnpm install left-pad@1.3.0|cat <<EOF > notes\nnpm i left-pad\nEOF\nnpm install --ignore-scripts left-pad@1.3.0 --ignore-scripts'
 do
   inert_in="${inert_case%%|*}"
   inert_want="${inert_case#*|}"
@@ -558,12 +558,12 @@ pass "inert flag lands on the install before a comment, a heredoc or a second li
 # no answer either: after `sh -c '...'` the flag becomes the script's $0. Quoted
 # data stays as written.
 for inert_case in \
-  "sh -c 'npm install left-pad@1.3.0'|sh -c 'npm install left-pad@1.3.0 --ignore-scripts'" \
-  "npm install left-pad@1.3.0; sh -c 'cd sub && npm install left-pad@1.3.0'|npm install left-pad@1.3.0 --ignore-scripts; sh -c 'cd sub && npm install left-pad@1.3.0 --ignore-scripts'" \
-  'bash -lc "npm install left-pad@1.3.0"|bash -lc "npm install left-pad@1.3.0 --ignore-scripts"' \
-  "eval 'npm install left-pad@1.3.0'|eval 'npm install left-pad@1.3.0 --ignore-scripts'" \
-  'echo "$(npm install left-pad@1.3.0)"|echo "$(npm install left-pad@1.3.0 --ignore-scripts)"' \
-  "npm install left-pad@1.3.0 && echo 'npm install left-pad@1.3.0'|npm install left-pad@1.3.0 --ignore-scripts && echo 'npm install left-pad@1.3.0'"
+  "sh -c 'npm install left-pad@1.3.0'|sh -c 'npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts'" \
+  "npm install left-pad@1.3.0; sh -c 'cd sub && npm install left-pad@1.3.0'|npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts; sh -c 'cd sub && npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts'" \
+  'bash -lc "npm install left-pad@1.3.0"|bash -lc "npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts"' \
+  "eval 'npm install left-pad@1.3.0'|eval 'npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts'" \
+  'echo "$(npm install left-pad@1.3.0)"|echo "$(npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts)"' \
+  "npm install left-pad@1.3.0 && echo 'npm install left-pad@1.3.0'|npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts && echo 'npm install left-pad@1.3.0'"
 do
   inert_in="${inert_case%%|*}"
   inert_want="${inert_case#*|}"
@@ -589,34 +589,39 @@ pass "inert flag lands inside a script handed to a shell, and quoted data stays 
 # the placed flag as true: after a trailing `--cache` or `-C` it became the
 # option's value, so the flag goes before that word. A word the shell decides
 # at run time can be either kind, so such an install gets the flag after the
-# verb and after its last argument.
+# verb and after its last argument. Every other install gets it after the verb
+# too, as a floor under the reading: a word the reading misses as one the shell
+# expands can take the flag after the last argument, and the flag after the
+# verb, where the release put it, still stands. It is left off where it would
+# change what npm reads (`npm install true` makes `true` its value).
 for inert_case in \
-  "npm install left-pad@1.3.0 --ignore-scripts=false|npm install left-pad@1.3.0 --ignore-scripts=false --ignore-scripts" \
-  "npm install left-pad@1.3.0 --no-ignore-scripts|npm install left-pad@1.3.0 --no-ignore-scripts --ignore-scripts" \
-  "npm install left-pad@1.3.0 --ignore-scripts false|npm install left-pad@1.3.0 --ignore-scripts false --ignore-scripts" \
-  "npm install left-pad@1.3.0 --no-ignore|npm install left-pad@1.3.0 --no-ignore --ignore-scripts" \
-  "npm install left-pad@1.3.0 -no-ignore-scripts|npm install left-pad@1.3.0 -no-ignore-scripts --ignore-scripts" \
-  "npm install --ignore-scripts left-pad@1.3.0 --ign=false|npm install --ignore-scripts left-pad@1.3.0 --ign=false --ignore-scripts" \
-  "npm install left-pad@1.3.0 && echo --ignore-scripts|npm install left-pad@1.3.0 --ignore-scripts && echo --ignore-scripts" \
-  "X=--ignore-scripts npm install left-pad@1.3.0|X=--ignore-scripts npm install left-pad@1.3.0 --ignore-scripts" \
-  "npm ci --ignore-scripts && npm install left-pad@1.3.0|npm ci --ignore-scripts && npm install left-pad@1.3.0 --ignore-scripts" \
-  "npm install left-pad@1.3.0 --cache --ignore-scripts|npm install left-pad@1.3.0 --cache --ignore-scripts --ignore-scripts" \
+  "npm install left-pad@1.3.0 --ignore-scripts=false|npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts=false --ignore-scripts" \
+  "npm install left-pad@1.3.0 --no-ignore-scripts|npm install --ignore-scripts left-pad@1.3.0 --no-ignore-scripts --ignore-scripts" \
+  "npm install left-pad@1.3.0 --ignore-scripts false|npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts false --ignore-scripts" \
+  "npm install left-pad@1.3.0 --no-ignore|npm install --ignore-scripts left-pad@1.3.0 --no-ignore --ignore-scripts" \
+  "npm install left-pad@1.3.0 -no-ignore-scripts|npm install --ignore-scripts left-pad@1.3.0 -no-ignore-scripts --ignore-scripts" \
+  "npm install --ignore-scripts left-pad@1.3.0 --ign=false|npm install --ignore-scripts --ignore-scripts left-pad@1.3.0 --ign=false --ignore-scripts" \
+  "npm install left-pad@1.3.0 && echo --ignore-scripts|npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts && echo --ignore-scripts" \
+  "X=--ignore-scripts npm install left-pad@1.3.0|X=--ignore-scripts npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts" \
+  "npm ci --ignore-scripts && npm install left-pad@1.3.0|npm ci --ignore-scripts && npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts" \
+  "npm install left-pad@1.3.0 --cache --ignore-scripts|npm install --ignore-scripts left-pad@1.3.0 --cache --ignore-scripts --ignore-scripts" \
   "npm install left-pad@1.3.0 \$FLAGS|npm install --ignore-scripts left-pad@1.3.0 \$FLAGS --ignore-scripts" \
-  "npm install left-pad@1.3.0 --cache && echo ok|npm install left-pad@1.3.0 --ignore-scripts --cache && echo ok" \
-  "npm install left-pad@1.3.0 --cache|npm install left-pad@1.3.0 --ignore-scripts --cache" \
-  "npm install left-pad@1.3.0 -C|npm install left-pad@1.3.0 --ignore-scripts -C" \
-  "npm install --no-ignore-scripts left-pad@1.3.0 --reg|npm install --no-ignore-scripts left-pad@1.3.0 --ignore-scripts --reg" \
-  "npm install left-pad@1.3.0 --message 'a b' --fetch-retries|npm install left-pad@1.3.0 --message 'a b' --ignore-scripts --fetch-retries" \
+  "npm install left-pad@1.3.0 --cache && echo ok|npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts --cache && echo ok" \
+  "npm install left-pad@1.3.0 --cache|npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts --cache" \
+  "npm install left-pad@1.3.0 -C|npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts -C" \
+  "npm install --no-ignore-scripts left-pad@1.3.0 --reg|npm install --ignore-scripts --no-ignore-scripts left-pad@1.3.0 --ignore-scripts --reg" \
+  "npm install left-pad@1.3.0 --message 'a b' --fetch-retries|npm install --ignore-scripts left-pad@1.3.0 --message 'a b' --ignore-scripts --fetch-retries" \
   "npm ci \$(printf -- --)|npm ci --ignore-scripts \$(printf -- --) --ignore-scripts" \
-  "npm install left-pad@1.3.0>install.log|npm install left-pad@1.3.0 --ignore-scripts>install.log" \
-  "npm install left-pad@1.3.0 --ignore-scripts=false > log 2>&1|npm install left-pad@1.3.0 --ignore-scripts=false --ignore-scripts > log 2>&1" \
+  "npm install left-pad@1.3.0>install.log|npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts>install.log" \
+  "npm install left-pad@1.3.0 --ignore-scripts=false > log 2>&1|npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts=false --ignore-scripts > log 2>&1" \
   "npm ci -- x|npm ci --ignore-scripts -- x" \
-  "npm ci --no-ignore-scripts '--' x|npm ci --no-ignore-scripts --ignore-scripts '--' x" \
-  "sh -c 'npm install left-pad@1.3.0 --ignore-scripts=false'|sh -c 'npm install left-pad@1.3.0 --ignore-scripts=false --ignore-scripts'" \
-  'echo "$(npm install left-pad@1.3.0 --no-ignore-scripts)"|echo "$(npm install left-pad@1.3.0 --no-ignore-scripts --ignore-scripts)"' \
-  "(npm install left-pad@1.3.0 --ignore-scripts=false) && echo ok|(npm install left-pad@1.3.0 --ignore-scripts=false --ignore-scripts) && echo ok" \
-  $'npm install left-pad@1.3.0 --message "a\n--ignore-scripts"|npm install left-pad@1.3.0 --message "a\n--ignore-scripts" --ignore-scripts' \
-  "npm install left-pad@1.3.0 --ignore-scripts } --no-ignore-scripts|npm install left-pad@1.3.0 --ignore-scripts } --no-ignore-scripts --ignore-scripts"
+  "npm ci --no-ignore-scripts '--' x|npm ci --ignore-scripts --no-ignore-scripts --ignore-scripts '--' x" \
+  "sh -c 'npm install left-pad@1.3.0 --ignore-scripts=false'|sh -c 'npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts=false --ignore-scripts'" \
+  'echo "$(npm install left-pad@1.3.0 --no-ignore-scripts)"|echo "$(npm install --ignore-scripts left-pad@1.3.0 --no-ignore-scripts --ignore-scripts)"' \
+  "(npm install left-pad@1.3.0 --ignore-scripts=false) && echo ok|(npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts=false --ignore-scripts) && echo ok" \
+  $'npm install left-pad@1.3.0 --message "a\n--ignore-scripts"|npm install --ignore-scripts left-pad@1.3.0 --message "a\n--ignore-scripts" --ignore-scripts' \
+  "npm install left-pad@1.3.0 --ignore-scripts } --no-ignore-scripts|npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts } --no-ignore-scripts --ignore-scripts" \
+  "npm install true|npm install true --ignore-scripts"
 do
   inert_in="${inert_case%%|*}"
   inert_want="${inert_case#*|}"
@@ -653,6 +658,62 @@ unverified_before=$(grep -c 'holds a word the shell decides at run time' "${tmp_
 run_hook_command "${tmp_root}/home-compound" "${tmp_root}/safe-compound" 'npm ci $(printf -- --)' >/dev/null
 unverified_after=$(grep -c 'holds a word the shell decides at run time' "${tmp_root}/safe-compound/advisory.log" 2>/dev/null || true)
 (( ${unverified_after:-0} > ${unverified_before:-0} )) || fail "an install holding a run-time word is recorded as one whose flag nobody read"
+# Which words the shell decides at run time is read from its expansions, step
+# by step, not from a list of characters: the list knew `$`, backquotes and
+# globs and not the tilde, so `HOME=--cache; npm install x ~` read `~` as
+# written, put the flag after it alone, and the shell handed npm `--cache`
+# there, which took the flag as its value. One row per step: brace, tilde (at a
+# word's start, after `=`, after `:`, and zsh's `=cmd`), parameter, command,
+# arithmetic, process substitution and pathname, each with the flag after the
+# verb and after the last argument, and recorded. The same characters inside
+# quotes expand nothing (a `$` in double quotes does), and those installs are
+# read as written.
+for inert_in in \
+  'HOME=--cache; npm install left-pad@1.3.0 ~' \
+  'OLDPWD=--cache; npm install left-pad@1.3.0 ~-' \
+  'npm install left-pad@1.3.0 ~+' \
+  'npm install left-pad@1.3.0 ~root' \
+  'npm install left-pad@1.3.0 --message a=~' \
+  'npm install left-pad@1.3.0 --message a=x:~' \
+  "npm install left-pad@1.3.0 --message a='x':~" \
+  'npm install left-pad@1.3.0 {x,--cache}' \
+  'npm install left-pad@1.3.0 --message {1..2}' \
+  'npm install left-pad@1.3.0 --message =npm' \
+  'npm install left-pad@1.3.0 "$FLAGS"' \
+  'npm install left-pad@1.3.0 `printf -- --cache`' \
+  'npm install left-pad@1.3.0 --message $((1))' \
+  'npm install left-pad@1.3.0 --message <(true)' \
+  'npm install left-pad@1.3.0 --message x(.)' \
+  'npm install left-pad@1.3.0 --c?che' \
+  'npm install left-pad@1.3.0 --[c]ache'
+do
+  inert_want="${inert_in/install /install --ignore-scripts }"" --ignore-scripts"
+  unverified_before=$(grep -c 'holds a word the shell decides at run time' "${tmp_root}/safe-compound/advisory.log" 2>/dev/null || true)
+  inert_out=$(run_hook_command "${tmp_root}/home-compound" "${tmp_root}/safe-compound" "${inert_in}")
+  unverified_after=$(grep -c 'holds a word the shell decides at run time' "${tmp_root}/safe-compound/advisory.log" 2>/dev/null || true)
+  inert_got=$(jq -r '.hookSpecificOutput.updatedInput.command' <<< "${inert_out}")
+  [[ "${inert_got}" == "${inert_want}" ]] \
+    || fail "an install holding a word the shell expands gets the flag after the verb and after its last argument: $(printf '%q' "${inert_in}") (got: $(printf '%q' "${inert_got}"))"
+  (( ${unverified_after:-0} > ${unverified_before:-0} )) \
+    || fail "an install holding a word the shell expands is recorded as one whose flag nobody read: ${inert_in}"
+done
+for inert_in in \
+  "npm install left-pad@1.3.0 --message '~ {a,b} (c) * ? [d] =e'" \
+  'npm install left-pad@1.3.0 --message "~ {a,b} (c) * ? [d] =e"' \
+  'npm install left-pad@1.3.0 --message x~y' \
+  'npm install left-pad@1.3.0 --message a^b'
+do
+  inert_want="${inert_in/install /install --ignore-scripts }"" --ignore-scripts"
+  unverified_before=$(grep -c 'holds a word the shell decides at run time' "${tmp_root}/safe-compound/advisory.log" 2>/dev/null || true)
+  inert_out=$(run_hook_command "${tmp_root}/home-compound" "${tmp_root}/safe-compound" "${inert_in}")
+  unverified_after=$(grep -c 'holds a word the shell decides at run time' "${tmp_root}/safe-compound/advisory.log" 2>/dev/null || true)
+  inert_got=$(jq -r '.hookSpecificOutput.updatedInput.command' <<< "${inert_out}")
+  [[ "${inert_got}" == "${inert_want}" ]] \
+    || fail "an install whose words the shell leaves as written is read, and gets the flag after the verb and after its last argument: $(printf '%q' "${inert_in}") (got: $(printf '%q' "${inert_got}"))"
+  (( ${unverified_after:-0} == ${unverified_before:-0} )) \
+    || fail "an install whose words the shell leaves as written is not recorded as unread: ${inert_in}"
+done
+pass "a word the shell expands at any of its steps makes the install unread and recorded, and quoted text does not"
 # Asking npm where an install lands puts the ask's own flags after the
 # install's words. After a trailing `--cache` npm took the first as the cache
 # directory and created it in the project; npm is not asked then.
@@ -680,7 +741,8 @@ for key_in in \
   "npm install left-pad@1.3.0>install.log" \
   "npm install left-pad@1.3.0<input" \
   "npm install left-pad@1.3.0 --cache" \
-  'npm ci $(printf -- --)'
+  'npm ci $(printf -- --)' \
+  'HOME=--cache; npm install left-pad@1.3.0 ~'
 do
   rm -rf "${key_safe}/pending"
   key_out=$(run_hook_command "${tmp_root}/home-key" "${key_safe}" "${key_in}")
