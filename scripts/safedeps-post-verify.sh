@@ -216,24 +216,25 @@ rollback_target_outside() {
     return 0
   fi
   if [[ -L "${target}" ]]; then
-    printf '%s is a symbolic link to %s' "${target}" "$(readlink "${target}" 2>/dev/null || printf 'an unreadable target')"
+    printf '%s is a symbolic link to %s' "${target}" "$(safedeps_link_target "${target}")"
   fi
+}
+
+# --prefix stops npm's walk up to an enclosing project, and --global=false
+# --location=project stop a project .npmrc from sending the command to the
+# global tree.
+SAFEDEPS_NPM_PROJECT_FLAGS=(--global=false --location=project)
+
+# The rebuild after a verified inert install runs only where npm cannot reach
+# past the project (lib/gates/npm-reach.sh).
+project_npm_blocker() {
+  safedeps_npm_reach_blocker "${PROJECT_DIR}"
 }
 
 # Records a refused step everywhere a rollback reports: the warnings the reorg
 # message and its reorg.log entry carry, a REORG REFUSED entry of its own in
 # reorg.log, and advisory.log.
 ROLLBACK_REFUSED=$'\n'
-# --prefix stops npm's walk up to an enclosing project, and --global=false
-# --location=project stop a project .npmrc from sending the command to the
-# global tree.
-SAFEDEPS_NPM_PROJECT_FLAGS=(--global=false --location=project)
-
-# The rebuild after a verified inert install asks the same judgment the
-# rollback's advice asks (lib/gates/npm-reach.sh).
-project_npm_blocker() {
-  safedeps_npm_reach_blocker "${PROJECT_DIR}"
-}
 record_rollback_refusal() {
   local step="$1" why="$2"
 
@@ -429,7 +430,7 @@ rollback_node_modules() {
   [[ "${ROLLBACK_NPM_PROJECT}" == true ]] || return 0
   if [[ -L "${node_modules}" ]]; then
     local target
-    target=$(readlink "${node_modules}" 2>/dev/null || printf 'an unreadable target')
+    target=$(safedeps_link_target "${node_modules}")
     record_rollback_refusal "node_modules removal" "${node_modules} is a symbolic link to ${target}; the packages this install wrote through the link are still in ${target}"
     return 0
   fi
@@ -465,7 +466,7 @@ run_verified_npm_rebuild_if_injected() {
   local outside
   outside=$(project_npm_blocker)
   if [[ -n "${outside}" ]]; then
-    ROLLBACK_WARNINGS+=("npm rebuild skipped after verified inert install: ${outside}. safedeps does not run npm where it can reach past the project, and it does not judge where a rebuild would write")
+    ROLLBACK_WARNINGS+=("npm rebuild skipped after verified inert install: ${outside}. The verified packages' install scripts have not run. safedeps does not run npm where it can reach past the project, and it does not judge where a rebuild would write")
     log_advisory "post-verify rebuild skipped: ${outside} -- project ${PROJECT_DIR}"
     return 0
   fi

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # One judgment of whether npm, run in a directory, can reach past it. The
 # rebuild after a verified inert install -- the one place safedeps still runs
-# npm itself -- runs only where this answers nothing. No message uses it to
-# tell the user what to run: it lists the ways it knows, and a silence from it
-# is not a promise (a workspace member's bare npm ci reaches the workspace
+# npm itself -- runs only where this answers nothing. A skipped rebuild reports
+# its answer as the reason, never as a place to run npm: it lists the ways it
+# knows, and a silence from it is not a promise (a workspace member's bare npm ci reaches the workspace
 # root, and a file: dependency's bin links reach its target).
 #
 # npm reaches past the files it is pointed at in these ways, each measured:
@@ -16,6 +16,24 @@
 #   cannot say before the tree is installed, so a project that declares
 #   workspaces is answered as one npm may reach past.
 
+# safedeps_link_target <path>: prints where the link <path> leads, as a
+# physical path. readlink alone prints the link's own text, and a relative one
+# ("../main/node_modules") does not resolve from the reader's directory, so a
+# message naming it would name the wrong place.
+safedeps_link_target() {
+  local path="$1" raw dir
+
+  raw=$(readlink "${path}" 2>/dev/null) || { printf 'an unreadable target'; return 0; }
+  [[ "${raw}" == /* ]] || raw="$(dirname "${path}")/${raw}"
+  if [[ -d "${raw}" ]] && dir=$(cd -P "${raw}" 2>/dev/null && pwd -P); then
+    printf '%s' "${dir}"
+  elif dir=$(cd -P "$(dirname "${raw}")" 2>/dev/null && pwd -P); then
+    printf '%s/%s' "${dir}" "$(basename "${raw}")"
+  else
+    printf '%s' "${raw}"
+  fi
+}
+
 # safedeps_npm_reach_blocker <dir>: prints why npm run in <dir> could reach
 # past it, or nothing when it cannot.
 safedeps_npm_reach_blocker() {
@@ -27,7 +45,7 @@ safedeps_npm_reach_blocker() {
   fi
   for name in package.json package-lock.json npm-shrinkwrap.json node_modules; do
     if [[ -L "${dir}/${name}" ]]; then
-      printf '%s/%s is a symbolic link to %s' "${dir}" "${name}" "$(readlink "${dir}/${name}" 2>/dev/null || printf 'an unreadable target')"
+      printf '%s/%s is a symbolic link to %s' "${dir}" "${name}" "$(safedeps_link_target "${dir}/${name}")"
       return 0
     fi
   done
