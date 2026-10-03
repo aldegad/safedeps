@@ -1269,7 +1269,7 @@ npm_rebuild_vouched() {
 
   local rebuild_rc=0
   (cd "${PROJECT_DIR}" && npm rebuild "${NPM_PROJECT_SCOPE[@]}" --prefix "${PROJECT_DIR}" >/dev/null 2>&1) || rebuild_rc=$?
-  [[ ${rebuild_rc} -eq 0 ]] || did_rebuild "${META_FILE}" "${COMMAND}" "${rebuild_rc}"
+  [[ ${rebuild_rc} -eq 0 ]] || did_rebuild "${META_FILE}" "${INPUT}" "${rebuild_rc}"
 }
 
 run_verified_npm_rebuild_if_injected() {
@@ -1281,7 +1281,7 @@ run_verified_npm_rebuild_if_injected() {
   # The install left no trace here, so this tree is not the one it built, and
   # its scripts are not this install's to run (settle_npm_trace).
   if [[ "${NPM_TRACE_ABSENT}" == true ]]; then
-    did_not_rebuild "${META_FILE}" "${COMMAND}" "${TRACE_LINE}"
+    did_not_rebuild "${META_FILE}" "${INPUT}" "${TRACE_LINE}"
     TRACE_LINE_SAID=true
     return 0
   fi
@@ -1294,7 +1294,7 @@ run_verified_npm_rebuild_if_injected() {
   local outside
   outside=$(project_npm_blocker)
   if [[ -n "${outside}" ]]; then
-    did_not_rebuild "${META_FILE}" "${COMMAND}" "${outside}"
+    did_not_rebuild "${META_FILE}" "${INPUT}" "${outside}"
     log_advisory "post-verify rebuild skipped: ${outside} -- project ${PROJECT_DIR}"
     return 0
   fi
@@ -2387,7 +2387,7 @@ report_rollback_tail() {
     report_say "${TRACE_LINE}"
     TRACE_LINE_SAID=true
   fi
-  report_say "$(fact_inert "${META_FILE}" "${COMMAND}")"
+  report_say "$(fact_inert "${META_FILE}" "${INPUT}")"
 }
 
 # The reorg.log entry and the message of a rollback, from the same lines.
@@ -2409,7 +2409,7 @@ report_rollback() {
 $(printf '  %s\n' "${ROLLBACK_WARNINGS[@]}")
 LOG_EOF
   if [[ "${snapshot_line}" != *', a confirmed snapshot' ]]; then
-    log_advisory "post-verify REORG with no confirmed snapshot in ${PROJECT_DIR}: ${snapshot_line}; $(fact_inert "${META_FILE}" "${COMMAND}"). Reasons: $4"
+    log_advisory "post-verify REORG with no confirmed snapshot in ${PROJECT_DIR}: ${snapshot_line}; $(fact_inert "${META_FILE}" "${INPUT}"). Reasons: $4"
   fi
   details=$(fact_file "Details log" "${GUARD_DIR}/reorg.log")
 

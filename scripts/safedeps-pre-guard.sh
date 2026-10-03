@@ -4649,13 +4649,15 @@ cat > "${SNAPSHOT_DIR}/${SNAPSHOT_ID}_meta.json" << META_EOF
 }
 META_EOF
 
+# mark_ignore_scripts_injected <the command safedeps wrote>: the PostToolUse
+# hook says "added" only where the command it receives is these bytes.
 mark_ignore_scripts_injected() {
   local meta_file="${SNAPSHOT_DIR}/${SNAPSHOT_ID}_meta.json"
   local temp_file
 
   [[ -f "${meta_file}" ]] || return 0
   temp_file=$(mktemp "${SNAPSHOT_DIR}/.${SNAPSHOT_ID}_meta.XXXXXX") || return 0
-  if jq '.ignore_scripts_injected = true' "${meta_file}" > "${temp_file}"; then
+  if jq --arg command "$1" '.ignore_scripts_injected = true | .updated_command = $command' "${meta_file}" > "${temp_file}"; then
     mv -f "${temp_file}" "${meta_file}"
   else
     rm -f "${temp_file}"
@@ -5026,7 +5028,7 @@ CURRENT_STATE=$(jq -n --arg sid "${SNAPSHOT_ID}" --arg pdir "${PROJECT_DIR}" --a
 write_state_file "${PENDING_BASE}.json" "${CURRENT_STATE}"
 
 if [[ -n "${UPDATED_COMMAND}" ]]; then
-  mark_ignore_scripts_injected
+  mark_ignore_scripts_injected "${UPDATED_COMMAND}"
   jq -nc --arg command "${UPDATED_COMMAND}" \
     '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"allow",updatedInput:{command:$command}}}'
   exit 0
