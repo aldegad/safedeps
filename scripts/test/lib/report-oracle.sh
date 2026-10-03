@@ -27,11 +27,17 @@
 # an operational log in free form and is not read, except its two rollback
 # lines, which must repeat lines of the message.
 #
-# Two facts are read by a method that is not the hook's, because twice the
-# hook and the oracle ran the same wrong check and agreed: the package.json
-# listing of node_modules (Python's directory walk, which follows a linked
-# node_modules) and whether the command carries --ignore-scripts (Python's
-# shlex and npm's own option parser). lib/report-oracle-read.py holds both.
+# The package.json listing of node_modules is read by a method that is not the
+# hook's, because the hook and the oracle once ran the same wrong check and
+# agreed (F1): Python's directory walk, which follows a linked node_modules, in
+# lib/report-oracle-read.py.
+#
+# Neither reads the command for --ignore-scripts. The hook says "added" only
+# where the command it received is, byte for byte, the command the pre-guard
+# recorded writing, and the oracle checks that with cmp over the two strings
+# jq prints, not with jq's own comparison. Three rounds in a row, a reader of
+# the command here and one in the hook shared a model of shell statements and
+# were wrong on the same commands.
 #
 # What a rollback changed on disk is read too: the oracle lists the project's
 # top-level entries before the hook runs, and after a rollback every entry that
@@ -62,7 +68,7 @@ path-exists path-absent path-link workspaces-key changed-nothing
 kept kept-files kept-packages kept-bins kept-not-newer
 reason-trace reason-file reason-package reason-bin reason-newer reason-no-snapshot
 trace-none trace-baseline-gone trace-no-baseline
-inert-added inert-asked inert-asked-unread inert-carried inert-none inert-unread
+inert-added inert-asked inert-none
 rebuild-skipped-added rebuild-ran-added rebuild-skipped rebuild-ran
 skip-fact-link skip-fact-unresolved skip-fact-trace
 backstop-no-confirmed backstop-no-meta
@@ -96,14 +102,8 @@ ORACLE_READ="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/report-oracle-read.py
 
 oracle_init() {
   ORACLE_DIR="$1"
-  mkdir -p "${ORACLE_DIR}/bin" "${ORACLE_DIR}/npm-readings"
+  mkdir -p "${ORACLE_DIR}/bin"
   : > "${ORACLE_DIR}/forms.log"
-  # The npm that reads a command's words for the --ignore-scripts check: the
-  # one on PATH when the suite starts, before any row puts its stub first.
-  ORACLE_REAL_NPM=$(command -v npm 2>/dev/null || true)
-  # And the PATH it runs under: an npm can be a wrapper that finds the next
-  # npm on PATH, and a row's PATH starts with the row's stub.
-  ORACLE_PATH="${PATH}"
   # Every npm the hook runs is noted, with its exit status, and then handed to
   # the npm the row put on PATH. "safedeps did not run npm rebuild" is checked
   # against this, not against the row's own stub.
@@ -279,23 +279,21 @@ oracle_path_fact() {
   fi
 }
 
-# oracle_inert_holds <asked>:<carries|lacks|unread>: the pre-guard's record,
-# and the claim about the command read by Python's shlex and npm's own parser
-# (lib/report-oracle-read.py). "did not tell" claims nothing about the command.
+# oracle_inert_holds <added|asked|none>: the pre-guard's record that it
+# rewrote the command, and whether the command this hook received is the one
+# it wrote. The two strings are printed by jq raw and compared by cmp.
 oracle_inert_holds() {
-  local asked=false why
+  local asked=false same=false
   [[ -n "${O_META}" && "$(jq -r '.ignore_scripts_injected == true' "${O_META}" 2>/dev/null)" == true ]] && asked=true
-  if [[ "${1%%:*}" != "${asked}" ]]; then
-    oracle_red "the pre-guard's record says it asked for --ignore-scripts: ${asked}"
-    return 0
+  if [[ "${asked}" == true ]] \
+    && jq -ej '.updated_command | strings' "${O_META}" > "${O_CALL}/inert.wrote" 2>/dev/null \
+    && jq -ej '.tool_input.command | strings' <<< "${O_PAYLOAD}" > "${O_CALL}/inert.received" 2>/dev/null \
+    && cmp -s "${O_CALL}/inert.wrote" "${O_CALL}/inert.received"; then
+    same=true
   fi
-  case "${1#*:}" in
-    unread) return 0 ;;
-    carries|lacks)
-      [[ -n "${ORACLE_REAL_NPM}" ]] || { oracle_red "no npm to read the command with"; return 0; }
-      why=$(PATH="${ORACLE_PATH}" python3 "${ORACLE_READ}" inert "${1#*:}" "${O_CMD}" "${ORACLE_REAL_NPM}" "${ORACLE_DIR}/npm-readings") \
-        || oracle_red "the command this hook received: ${why:-the reading failed}"
-      ;;
+  case "$1:${asked}:${same}" in
+    added:true:true|asked:true:false|none:false:*) ;;
+    *) oracle_red "the pre-guard's record says it rewrote the command: ${asked}; the command this hook received is the one it wrote: ${same}" ;;
   esac
 }
 
@@ -325,13 +323,11 @@ oracle_skip_fact() {
 }
 
 # A rebuild line that does not start with "safedeps added" follows the line
-# that says what the pre-guard asked and what the command carries.
+# that says the pre-guard asked for the flag and the command this hook received
+# is not the one it wrote.
 oracle_after_asked_line() {
-  case "${O_PREV}" in
-    'safedeps asked for --ignore-scripts on this install; the command this hook received does not carry it'|\
-    'safedeps asked for --ignore-scripts on this install and did not tell whether the command this hook received carries it') ;;
-    *) oracle_red "not said after the line that the pre-guard asked for --ignore-scripts and the command does not carry it, or was not read" ;;
-  esac
+  [[ "${O_PREV}" == 'safedeps asked for --ignore-scripts on this install; the command this hook received is not the one safedeps wrote' ]] \
+    || oracle_red "not said after the line that the pre-guard asked for --ignore-scripts and the command this hook received is not the one it wrote"
 }
 
 oracle_rebuild_calls() {
@@ -889,12 +885,12 @@ oracle_line() {
   elif [[ "${line}" =~ ${re_skip_added} ]]; then
     oracle_count rebuild-skipped-added
     local sk_fact="${BASH_REMATCH[1]}"
-    oracle_inert_holds true:carries
+    oracle_inert_holds added
     [[ "$(oracle_rebuild_calls)" == 0 ]] || oracle_red "the hook ran npm rebuild"
     oracle_skip_fact "${sk_fact}"
   elif [[ "${line}" =~ ${re_ran_added} ]]; then
     oracle_count rebuild-ran-added
-    oracle_inert_holds true:carries
+    oracle_inert_holds added
     grep -q "^rebuild.*"$'\t'"rc=${BASH_REMATCH[1]}\$" "${O_NPM_LOG}" 2>/dev/null || oracle_red "no npm rebuild with that exit status was run"
   elif [[ "${line}" =~ ${re_skip} ]]; then
     oracle_count rebuild-skipped
@@ -908,22 +904,13 @@ oracle_line() {
     grep -q "^rebuild.*"$'\t'"rc=${BASH_REMATCH[1]}\$" "${O_NPM_LOG}" 2>/dev/null || oracle_red "no npm rebuild with that exit status was run"
   elif [[ "${line}" == 'safedeps added --ignore-scripts to this install' ]]; then
     oracle_count inert-added; O_SAW_INERT=1
-    oracle_inert_holds true:carries
-  elif [[ "${line}" == 'safedeps asked for --ignore-scripts on this install; the command this hook received does not carry it' ]]; then
+    oracle_inert_holds added
+  elif [[ "${line}" == 'safedeps asked for --ignore-scripts on this install; the command this hook received is not the one safedeps wrote' ]]; then
     oracle_count inert-asked; O_SAW_INERT=1
-    oracle_inert_holds true:lacks
-  elif [[ "${line}" == 'safedeps asked for --ignore-scripts on this install and did not tell whether the command this hook received carries it' ]]; then
-    oracle_count inert-asked-unread; O_SAW_INERT=1
-    oracle_inert_holds true:unread
-  elif [[ "${line}" == 'safedeps did not add --ignore-scripts to this install; the command this hook received carries it' ]]; then
-    oracle_count inert-carried; O_SAW_INERT=1
-    oracle_inert_holds false:carries
-  elif [[ "${line}" == 'safedeps did not add --ignore-scripts to this install; the command this hook received does not carry it' ]]; then
+    oracle_inert_holds asked
+  elif [[ "${line}" == 'safedeps did not add --ignore-scripts to this install' ]]; then
     oracle_count inert-none; O_SAW_INERT=1
-    oracle_inert_holds false:lacks
-  elif [[ "${line}" == 'safedeps did not add --ignore-scripts to this install and did not tell whether the command this hook received carries it' ]]; then
-    oracle_count inert-unread; O_SAW_INERT=1
-    oracle_inert_holds false:unread
+    oracle_inert_holds none
   elif [[ "${line}" =~ ${re_file_absent} ]]; then
     oracle_count file-line-absent; O_SAW_DETAILS=1
     [[ "${BASH_REMATCH[1]}" == "Details log" && "${O_BLOCK}" != confirm ]] || oracle_red "this file line does not belong in this message"
@@ -991,11 +978,23 @@ oracle_read_lines() {
 
 # oracle_message <call dir> <payload> <hook stdout>: reads every line.
 oracle_message() {
-  local call="$1" payload="$2" out="$3" message line file consumed=""
-  [[ -n "${out}" ]] || return 0
-  O_CALL="${call}" O_DIRECT=0
+  local call="$1" payload="$2" out="$3" message line file consumed="" size now
   O_HOME="${SAFEDEPS_HOME:-${HOME}/.safedeps}"
+  # A call that printed nothing appended nothing to reorg.log. The post hook
+  # writes an entry in four places (a rollback, a refused step, the confirm
+  # warnings, an unfinished rollback's report), and each of them prints a
+  # message, so an entry from a quiet call is one nobody was told about.
+  if [[ -z "${out}" ]]; then
+    size=$(cat "${call}/reorg.size" 2>/dev/null); size="${size:-0}"
+    now=$(wc -c < "${O_HOME}/reorg.log" 2>/dev/null | tr -d ' '); now="${now:-0}"
+    [[ "${now}" == "${size}" ]] && return 0
+    O_LINE=$(tail -c +"$(( size + 1 ))" "${O_HOME}/reorg.log" 2>/dev/null | head -1)
+    oracle_red "reorg.log grew by $(( now - size )) bytes in a call that printed no message"
+    return 1
+  fi
+  O_CALL="${call}" O_DIRECT=0
   O_NPM_LOG="${call}/npm.log"
+  O_PAYLOAD="${payload}"
   O_CMD=$(jq -r '.tool_input.command // empty' <<< "${payload}")
   O_PROJECT=$(jq -r '.cwd // empty' <<< "${payload}")
   O_PROJECT=$(oracle_phys "${O_PROJECT}")
@@ -1028,13 +1027,13 @@ oracle_message() {
   [[ "${ORACLE_FAILED}" == 0 ]]
 }
 
-# oracle_direct <meta file> <command> <lines>: lines a fact function printed
+# oracle_direct <meta file> <hook input> <lines>: lines a fact function printed
 # when a row called it directly, for the facts no hook run in this suite
 # reaches. They are read as the lines of a confirm block, with no reorg.log.
 oracle_direct() {
   local line
   O_CALL="${ORACLE_DIR}" O_DIRECT=1 O_HOME="${SAFEDEPS_HOME:-${HOME}/.safedeps}" O_NPM_LOG=/dev/null
-  O_META="$1" O_CMD="$2" O_PROJECT="" O_PRE="" O_TRACE="unread" O_NODE_FILES="" O_TREE="" O_DIR_HASH=""
+  O_META="$1" O_PAYLOAD="$2" O_CMD=$(jq -r '.tool_input.command // empty' <<< "$2") O_PROJECT="" O_PRE="" O_TRACE="unread" O_NODE_FILES="" O_TREE="" O_DIR_HASH=""
   oracle_reset
   O_BLOCK=confirm
   oracle_read_lines "$3"

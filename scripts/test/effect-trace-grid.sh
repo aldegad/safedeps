@@ -1086,11 +1086,11 @@ while IFS= read -r row; do
       grep -qF ', a confirmed snapshot' <<< "${CASE_POST}" && note_failure "${id}: the message does not claim a confirmed snapshot"
       [[ -z "${CASE_RAN}" ]] || note_failure "${id}: the rollback runs no install script (${CASE_RAN})"
       # What ran before the rollback differs by engine, and so must the words.
-      # The line says what the hook saw, the pre-guard's own record and the
-      # command it received, in all three records.
+      # The line says what safedeps did: on Claude the command it wrote is the
+      # one the post hook received, on Codex it wrote none. In all three records.
       if [[ "${engine}" == codex ]]; then
         grep -q '^sd-victim' "${MARKS}" || note_failure "${id}: on Codex the install itself runs sd-victim's scripts, or this row tests nothing"
-        scripts_line='safedeps did not add --ignore-scripts to this install; the command this hook received does not carry it'
+        scripts_line='safedeps did not add --ignore-scripts to this install'
       else
         scripts_line='safedeps added --ignore-scripts to this install'
       fi

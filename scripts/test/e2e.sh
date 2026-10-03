@@ -1312,7 +1312,7 @@ backstop_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${confirmed_wt}" "npm i
 grep -A1 -x 'this rollback has no snapshot from before the command' <<< "$(post_message "${backstop_post}")" | grep -q '^removed .*/confirmed-wt/node_modules$' \
   || fail "the backstop says why it removed node_modules, right before it says so (${backstop_post})"
 grep -q 'after a command the command gate did not recognize. A rollback ran\.' <<< "${backstop_post}" || fail "the backstop rolls back to the confirmed snapshot"
-grep -q '^safedeps did not add --ignore-scripts to this install; the command this hook received does not carry it$' <<< "$(post_message "${backstop_post}")" \
+grep -q '^safedeps did not add --ignore-scripts to this install$' <<< "$(post_message "${backstop_post}")" \
   || fail "the backstop says it did not add --ignore-scripts"
 cmp -s "${confirmed_wt}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "the backstop restores the confirmed lockfile"
 pass "the backstop's rollback speaks the same lines"
@@ -1334,38 +1334,46 @@ grep -q "the confirmed snapshot ghost-snapshot of .*/backstop-none-wt: .*/snapsh
   || fail "the backstop names the confirmed snapshot whose meta file is missing"
 pass "the backstop that rolls nothing back says which record it looked for"
 
-# On Codex safedeps cannot add --ignore-scripts; a command that carries its own
-# is said to carry it.
-carried_wt="${tmp_root}/carried-wt"
-grammar_project "${carried_wt}"
-grammar_pre_codex "${carried_wt}" "npm install fixture-parent@1.0.0 --ignore-scripts" > /dev/null
-printf '%s\n' "${tampered_lock}" > "${carried_wt}/package-lock.json"
-carried_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${carried_wt}" "npm install fixture-parent@1.0.0 --ignore-scripts")
-grep -q '^safedeps did not add --ignore-scripts to this install; the command this hook received carries it$' <<< "$(post_message "${carried_post}")" \
-  || fail "a command that carries its own --ignore-scripts is said to carry it"
-pass "the --ignore-scripts line is the pre-guard's record and the command this hook received, nothing more"
-
-# "Carries it" is read per npm install statement, never as a substring
-# (F2, bamdori r16): an install that sets the option to false, and a flag that
-# belongs to another statement, do not carry it; a command whose statements
-# this hook does not read (quotes) is said as not read.
-inert_none='safedeps did not add --ignore-scripts to this install; the command this hook received does not carry it'
-inert_unread='safedeps did not add --ignore-scripts to this install and did not tell whether the command this hook received carries it'
+# The --ignore-scripts line reads no command. It is the pre-guard's record of
+# the command it wrote, and whether the command this hook received is that
+# command, byte for byte. On Codex there is no such record, whatever the command
+# carries: its own flag, `=false` (F2), a flag of another statement, a quoted
+# word, an assignment of npm_config_ignore_scripts (F3). On Claude the command
+# the pre-guard wrote is "added" with a quoted word in it too, and a command that
+# carries the flag somewhere else is not the one safedeps wrote.
+#
+# Fields: engine | name | command | the command the post hook receives ("" for
+# the same command, "=" for the one the pre-guard wrote) | the line.
+inert_none='safedeps did not add --ignore-scripts to this install'
+inert_asked='safedeps asked for --ignore-scripts on this install; the command this hook received is not the one safedeps wrote'
+inert_added='safedeps added --ignore-scripts to this install'
 for inert_case in \
-  "false|npm install fixture-parent@1.0.0 --ignore-scripts=false|${inert_none}" \
-  "echo|npm install fixture-parent@1.0.0 && echo --ignore-scripts|${inert_none}" \
-  "quoted|npm install 'fixture-parent@1.0.0' --ignore-scripts|${inert_unread}"; do
-  inert_name="${inert_case%%|*}" inert_rest="${inert_case#*|}"
-  inert_cmd="${inert_rest%%|*}" inert_said="${inert_rest#*|}"
-  inert_wt="${tmp_root}/inert-${inert_name}-wt"
+  "codex|carried|npm install fixture-parent@1.0.0 --ignore-scripts||${inert_none}" \
+  "codex|false|npm install fixture-parent@1.0.0 --ignore-scripts=false||${inert_none}" \
+  "codex|echo|npm install fixture-parent@1.0.0 && echo --ignore-scripts||${inert_none}" \
+  "codex|quoted|npm install 'fixture-parent@1.0.0' --ignore-scripts||${inert_none}" \
+  "codex|assigned|npm_config_ignore_scripts=true npm install fixture-parent@1.0.0||${inert_none}" \
+  "claude|quoted|npm install 'fixture-parent@1.0.0'|=|${inert_added}" \
+  "claude|moved|npm install fixture-parent@1.0.0|npm install --ignore-scripts fixture-parent@1.0.0|${inert_asked}"; do
+  IFS='|' read -r inert_engine inert_name inert_cmd inert_received inert_said <<< "${inert_case}"
+  inert_wt="${tmp_root}/inert-${inert_engine}-${inert_name}-wt"
   grammar_project "${inert_wt}"
-  grammar_pre_codex "${inert_wt}" "${inert_cmd}" > /dev/null
+  if [[ "${inert_engine}" == codex ]]; then
+    inert_pre=$(grammar_pre_codex "${inert_wt}" "${inert_cmd}")
+  else
+    inert_pre=$(grammar_pre "${inert_wt}" "${inert_cmd}")
+  fi
+  case "${inert_received}" in
+    '') inert_received="${inert_cmd}" ;;
+    =) inert_received=$(jq -r '.hookSpecificOutput.updatedInput.command // empty' <<< "${inert_pre:-{\}}")
+       [[ "${inert_received}" == *--ignore-scripts* ]] || fail "${inert_name}: the pre-guard rewrites the command on Claude (${inert_pre})" ;;
+  esac
   printf '%s\n' "${tampered_lock}" > "${inert_wt}/package-lock.json"
-  inert_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${inert_wt}" "${inert_cmd}")
+  inert_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${inert_wt}" "${inert_received}")
   grep -qxF "${inert_said}" <<< "$(post_message "${inert_post}")" \
-    || fail "${inert_name}: the --ignore-scripts line says '${inert_said}' (${inert_post})"
+    || fail "${inert_engine} ${inert_name}: the --ignore-scripts line says '${inert_said}' (${inert_post})"
 done
-pass "a command carries --ignore-scripts only where npm reads it on the install, and a command not read is said as not read"
+pass "the --ignore-scripts line is the pre-guard's record and a comparison of bytes, and reads no command"
 
 # A node_modules that is a link is listed through the link, before the command
 # and in the rollback (F1, bamdori r16 LK1). The command writes a package into
@@ -1512,9 +1520,9 @@ grep -q '^the pending state of this command names no install-trace baseline$' <<
 [[ -d "${unset_wt}/node_modules/installed-package" ]] || fail "node_modules is kept where no check shows the command wrote it"
 pass "a missing install trace is said as the check that found none"
 
-# A rebuild that fails says its exit status. With the flag on the command this
-# hook received, safedeps added it; without it, safedeps asked for it and the
-# command does not carry it (a runtime that does not apply the rewrite).
+# A rebuild that fails says its exit status. Where the command this hook
+# received is the one the pre-guard wrote, safedeps added the flag; where it is
+# not (a runtime that does not apply the rewrite), safedeps asked for it.
 rebuildfail_bin="${tmp_root}/rebuildfail-bin"
 mkdir -p "${rebuildfail_bin}"
 cat > "${rebuildfail_bin}/npm" <<EOF
@@ -1537,22 +1545,25 @@ for rebuildfail_case in "added| --ignore-scripts" "asked|"; do
   else
     grep -q '^safedeps ran npm rebuild: exit 3$' <<< "$(post_message "${rebuildfail_post}")" \
       || fail "a failed rebuild says its exit status where the command did not carry the flag (${rebuildfail_post})"
-    grep -q '^safedeps asked for --ignore-scripts on this install; the command this hook received does not carry it$' <<< "$(post_message "${rebuildfail_post}")" \
-      || fail "safedeps does not say it added a flag the command this hook received does not carry"
+    grep -q '^safedeps asked for --ignore-scripts on this install; the command this hook received is not the one safedeps wrote$' <<< "$(post_message "${rebuildfail_post}")" \
+      || fail "safedeps does not say it added a flag to a command this hook did not receive"
   fi
 done
-# The same where the command is not one this hook reads for the flag (a quoted
-# word): safedeps asked for it and says it did not tell whether it is there.
-rebuildunread_wt="${tmp_root}/rebuildfail-unread-wt"
-mkdir -p "${rebuildunread_wt}/node_modules"
-printf '{"dependencies":{}}\n' > "${rebuildunread_wt}/package.json"
-grammar_pre "${rebuildunread_wt}" "npm install 'fixture-parent@1.0.0'" > /dev/null
-cp "${inert_project}/package-lock.json" "${rebuildunread_wt}/package-lock.json"
-cp "${inert_project}/package-lock.json" "${rebuildunread_wt}/node_modules/.package-lock.json"
-rebuildunread_post=$(PATH="${rebuildfail_bin}:${PATH}" grammar_post "${rebuildunread_wt}" "npm install 'fixture-parent@1.0.0' --ignore-scripts")
-grep -qx 'safedeps asked for --ignore-scripts on this install and did not tell whether the command this hook received carries it' <<< "$(post_message "${rebuildunread_post}")" \
-  || fail "a command this hook does not read is not said to carry the flag (${rebuildunread_post})"
-pass "a rebuild that fails says its exit status, and 'added' only where the command carries the flag"
+# The same with a quoted word, where the command this hook received is the one
+# the pre-guard wrote: added. A reader of the command used to say it could not
+# tell here, on the path safedeps rewrites most.
+rebuildquoted_wt="${tmp_root}/rebuildfail-quoted-wt"
+mkdir -p "${rebuildquoted_wt}/node_modules"
+printf '{"dependencies":{}}\n' > "${rebuildquoted_wt}/package.json"
+rebuildquoted_pre=$(grammar_pre "${rebuildquoted_wt}" "npm install 'fixture-parent@1.0.0'")
+rebuildquoted_cmd=$(jq -r '.hookSpecificOutput.updatedInput.command // empty' <<< "${rebuildquoted_pre:-{\}}")
+[[ "${rebuildquoted_cmd}" == *--ignore-scripts* ]] || fail "the pre-guard rewrites a quoted install on Claude (${rebuildquoted_pre})"
+cp "${inert_project}/package-lock.json" "${rebuildquoted_wt}/package-lock.json"
+cp "${inert_project}/package-lock.json" "${rebuildquoted_wt}/node_modules/.package-lock.json"
+rebuildquoted_post=$(PATH="${rebuildfail_bin}:${PATH}" grammar_post "${rebuildquoted_wt}" "${rebuildquoted_cmd}")
+grep -qx 'safedeps added --ignore-scripts to this install and ran npm rebuild: exit 3' <<< "$(post_message "${rebuildquoted_post}")" \
+  || fail "the command the pre-guard wrote is said as added, quoted words and all (${rebuildquoted_post})"
+pass "a rebuild that fails says its exit status, and 'added' only where the command this hook received is the one safedeps wrote"
 
 # The command's own second segment rebuilds: whether install scripts ran is not
 # something this hook saw, so the skipped rebuild says what safedeps did and
@@ -1578,7 +1589,8 @@ pass "a skipped rebuild says what safedeps did, not whether install scripts ran"
 # resolve, are read from the functions that print them.
 unresolved_dir="${tmp_root}/no-such-project"
 unresolved_meta="${tmp_root}/unresolved-meta.json"
-printf '{"ignore_scripts_injected":true}\n' > "${unresolved_meta}"
+printf '{"ignore_scripts_injected":true,"updated_command":"npm install x --ignore-scripts"}\n' > "${unresolved_meta}"
+unresolved_input='{"tool_name":"Bash","tool_input":{"command":"npm install x --ignore-scripts"}}'
 unresolved_lines=$(
   # shellcheck source=../../lib/gates/npm-reach.sh
   source "${ROOT_DIR}/lib/gates/npm-reach.sh"
@@ -1586,10 +1598,10 @@ unresolved_lines=$(
   source "${ROOT_DIR}/lib/gates/report-facts.sh"
   ROLLBACK_WARNINGS=()
   report_say "$(did_refuse restore "${unresolved_dir}/package-lock.json" "$(fact_outside "${unresolved_dir}" "${unresolved_dir}/package-lock.json")")"
-  did_not_rebuild "${unresolved_meta}" "npm install x --ignore-scripts" "$(safedeps_npm_reach_blocker "${unresolved_dir}")"
+  did_not_rebuild "${unresolved_meta}" "${unresolved_input}" "$(safedeps_npm_reach_blocker "${unresolved_dir}")"
   printf '%s\n' "${ROLLBACK_WARNINGS[@]}"
 )
-oracle_direct "${unresolved_meta}" "npm install x --ignore-scripts" "${unresolved_lines}" || exit 1
+oracle_direct "${unresolved_meta}" "${unresolved_input}" "${unresolved_lines}" || exit 1
 grep -q "^refused restore of ${unresolved_dir}/package-lock.json: the project directory ${unresolved_dir} cannot be resolved$" <<< "${unresolved_lines}" \
   || fail "a restore in a directory that does not resolve is refused with that as the reason"
 pass "a project directory that does not resolve is the reason, in the same words"
