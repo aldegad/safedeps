@@ -1636,10 +1636,13 @@ bs_lock_pre=$(grammar_pre "${bs_lock_wt}" "${bs_grep}" toolu_bs_lock)
 [[ -z "${bs_lock_pre}" ]] || fail "the pre-guard lets a grep run (${bs_lock_pre})"
 [[ "$(bs_entries "${SAFEDEPS_HOME}")" == "$(( bs_entries_before + 2 ))" ]] \
   || fail "the pre-guard leaves a trace entry and its baseline for a grep the backstop pattern matches"
-[[ "$(jq -r .resolution "$(bs_entry toolu_bs_lock)")" == subsecond ]] \
-  || fail "on a filesystem that keeps time below one second the baseline is not set back ($(cat "$(bs_entry toolu_bs_lock)"))"
+# The entry the pre-guard just wrote, read before the post hook removes it and
+# checked after the row's own assertion, so a mutation is red at the row first.
+bs_lock_entry=$(cat "$(ls -t "${SAFEDEPS_HOME}/pending/backstop/"*.json | head -n 1)" 2>/dev/null || true)
 bs_lock_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${bs_lock_wt}" "${bs_grep}" toolu_bs_lock)
 bs_assert_untraced "${bs_lock_wt}" "${bs_lock_post}" "a grep right after a pull outside the gate"
+[[ "$(jq -r .resolution <<< "${bs_lock_entry:-null}")" == subsecond ]] \
+  || fail "on a filesystem that keeps time below one second the baseline is not set back (${bs_lock_entry})"
 [[ "$(bs_entries "${SAFEDEPS_HOME}")" == "${bs_entries_before}" ]] || fail "the backstop removes the trace entry and its baseline it read"
 # The same, with the lockfile written in place rather than replaced.
 printf '%s\n' "${tampered_lock}" > "${bs_lock_wt}/package-lock.json"
