@@ -1122,9 +1122,22 @@ shell_lex() {
           hit = 0
           if (s in DROP) hit = 1
           else if (takes) { takes = 0; hit = 1 }
+          # `--` ends the options of `command` and `exec`: the word after it
+          # is read afresh, as the command or another prefix (`exec --
+          # noglob pip install x` runs the install in zsh). Read as the
+          # command, it hid the install after it in every shell that runs
+          # `command --` or `exec --`.
+          else if ((execmode || cmdmode) && w == "--") { execmode = 0; cmdmode = 0; hit = 1 }
           else if (envmode && w ~ /^-/) { if (w ~ /^(-u|--unset|-C|--chdir)$/) takes = 1; hit = 1 }
-          else if (execmode && w ~ /^-[a-z]+$/) { if (w ~ /a$/) takes = 1; hit = 1 }
-          else if (cmdmode && w == "-p") hit = 1
+          # exec takes `-c`, `-l` and `-a NAME` (bash and zsh), clustered as
+          # getopt reads them: the first `a` takes the rest of its word as
+          # the name, or the next word when it ends the word. `-aa` is the
+          # name `a`; read as `-a` before a name, it took the command.
+          else if (execmode && w ~ /^-[a-z]+$/) { if (index(w, "a") == length(w)) takes = 1; hit = 1 }
+          # `command -p` runs the command from the default path; getopt
+          # takes the switch any number of times (`-pp`). `-v` and `-V` only
+          # say what the word is, so the install after them does not run.
+          else if (cmdmode && w ~ /^-p+$/) hit = 1
           else if (timemode && w == "-p") hit = 1
           else if (assignat(s, k)) hit = 1
           else if (w == "env") { envmode = 1; hit = 1 }

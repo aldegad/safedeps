@@ -830,6 +830,34 @@ expect_not_approved "an install with &> at its end" 'pip install evil==1.0.0 &>/
 expect_not_approved "an install after a command ended by &> and ;" 'echo a &>/dev/null; pip install evil==1.0.0'
 pass "statement starts are read from the shell grammar, and the same words in an argument open nothing"
 
+# A prefix's own options, as the manuals give them: `--` ends the options of
+# `command` and `exec`, and exec clusters `-c`, `-l` and `-a NAME` the way
+# getopt does, so `-aa` is the name `a`. The word after `--` was read as the
+# command, and `-aa` took the command as its name: each passed with no check
+# (main and 83de40c). The bits are macOS bash 3.2, zsh 5.9, sh and dash,
+# measured with touch in place of the install (exec -c clears PATH, and
+# command -p looks on the default path, so a stub on PATH says nothing); the
+# generated grid holds every option set (scripts/measure/redirection-grid.sh,
+# the RP forms).
+for precmd_row in \
+  '1111|command --' '1111|command -p --' '1111|command -pp' '1110|exec --' '1110|exec -aa' \
+  '1110|exec -c --' '1110|exec -a x --' '1110|exec -a -- --' '1111|command -- command' \
+  '1011|command -- exec' '1111|exec command --' '1110|exec -- env' '0100|exec -- noglob' \
+  '0100|noglob command --' '1011|time -p command --'
+do
+  expect_not_approved "${precmd_row#*|} before an install (${precmd_row%%|*})" "${precmd_row#*|} pip install evil==1.0.0"
+done
+for inert_form in 'command -- npm ci' 'exec -- npm ci' 'exec -aa npm ci' 'command -pp npm ci'; do
+  [[ "$(gate_rewrite "${inert_form}")" == "${inert_form} --ignore-scripts" ]] \
+    || fail "an npm install behind ${inert_form% npm ci} gets --ignore-scripts (got: $(gate_rewrite "${inert_form}"))"
+done
+# `command -v` and `-V` only say what the word is (0000 measured).
+for decoy in 'command -v pip install evil==1.0.0' 'command -V pip install evil==1.0.0' \
+  'echo command -- pip install evil==1.0.0' 'echo exec -aa pip install evil==1.0.0'; do
+  expect_pass "${decoy}" "${decoy}"
+done
+pass "the options of command and exec end where the manuals end them, and the command after them is read"
+
 # The inert rewrite reaches an npm install at every new start, under the rule
 # every rewrite follows: the text changes only where every reading puts the
 # npm installs in the same place. Measured on the release before this: the zsh
