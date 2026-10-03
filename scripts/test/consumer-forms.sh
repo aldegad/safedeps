@@ -858,6 +858,28 @@ do
   [[ "$(gate_rewrite "${inert_form}")" == "${inert_form/npm install/npm install --ignore-scripts}" ]] \
     || fail "an npm install at a statement start gets --ignore-scripts: ${inert_form} (got: $(gate_rewrite "${inert_form}"))"
 done
+# A verb ends where the shell ends its word, which is the lexer's to say
+# (SAFEDEPS_G_END): a `;`, an operator or a parenthesis right after it ends
+# it as a blank does. The recognizers ended a verb only at a blank or the end
+# of the text, so each of these was no install at all: no check, no
+# --ignore-scripts, no pending state (v2.17.2 to 83de40c). Each runs `npm ci`
+# in macOS bash 3.2, zsh 5.9, sh and dash, measured with a function in place
+# of npm that writes a marker file.
+for inert_form in \
+  'npm ci;' 'npm ci;echo' 'npm ci&&echo' 'npm ci||echo' 'npm ci|cat' 'npm ci&' 'npm ci&wait' \
+  '(npm ci)' '{ npm ci;}' 'if true; then npm ci; fi' 'while npm ci;do break; done' \
+  'npm ci>/dev/null' 'npm ci</dev/null' 'npm ci&>/dev/null' 'npm ci>&2' 'case x in x) npm ci;; esac' \
+  'x=$(npm ci)' 'echo $(npm ci)'
+do
+  [[ "$(gate_rewrite "${inert_form}")" == "${inert_form/npm ci/npm ci --ignore-scripts}" ]] \
+    || fail "an npm verb ended by what follows it gets --ignore-scripts: ${inert_form} (got: $(gate_rewrite "${inert_form}"))"
+done
+expect_not_approved "an npm install ended by ; is checked" 'npm install evil@1.0.0;'
+expect_not_approved "an npm install ended by ) is checked" '(npm install evil@1.0.0)'
+expect_not_approved "a yarn add ended by ) is checked" '(yarn add evil@1.0.0)'
+for decoy in 'echo npm ci;' 'echo "npm ci;"' 'npm cix;' 'npm ci_x' "echo 'npm ci&&x'"; do
+  expect_pass "${decoy}" "${decoy}"
+done
 # dash ends the install at the `&` of `&>`, and the rewrite lands after the
 # verb in every reading, so the edit is the same one it was.
 [[ "$(gate_rewrite 'npm ci &>/dev/null && npm run build')" == 'npm ci --ignore-scripts &>/dev/null && npm run build' ]] \

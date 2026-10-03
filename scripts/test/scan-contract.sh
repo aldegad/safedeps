@@ -750,13 +750,13 @@ check_stmts "${all}" "a redirection stays with its command, and its target is no
 check_stmts "${all}" "a redirection that comes first takes its command's start" \
   '{ 2>/dev/null pip i; }; if >f pip i; then :; fi' '{;2>/dev/null pip i; }; if;>f pip i; then;:; fi'
 check_stmts "bash zsh" "&> is one redirection operator outside dash" \
-  'echo a &>/dev/null pip i; pip i &>f' 'echo a _>/dev/null pip i; pip i _>f'
+  'echo a &>/dev/null pip i; pip i &>f' 'echo a  >/dev/null pip i; pip i  >f'
 check_stmts "dash" "dash ends a command at the & of &>, and the next starts at the >" \
   'echo a &>/dev/null pip i; pip i &>f' 'echo a &>/dev/null pip i; pip i &>f'
 check_stmts "dash" "the command dash starts at the > reads its words as at any start" \
   'echo a &>/dev/null time pip i' 'echo a &>/dev/null time;pip i'
 check_stmts "bash zsh" "after &> the same words are arguments" \
-  'echo a &>/dev/null time pip i' 'echo a _>/dev/null time pip i'
+  'echo a &>/dev/null time pip i' 'echo a  >/dev/null time pip i'
 check_stmts "${all}" "after > the & of a duplication is the operator in every shell" \
   'echo a >&/dev/null pip i; echo a 2>&1 pip i' 'echo a >_/dev/null pip i; echo a 2>_1 pip i'
 check_stmts "${all}" "a command glued to a function head starts at the blank the view prints" \
@@ -1222,7 +1222,7 @@ for reading in bash zsh dash; do
       a="${sv:k:1}" b="${tv:k:1}" r="${input:k:1}"
       [[ "${a}" == "${b}" ]] && continue
       if [[ "${b}" == ";" && ( "${a}" == " " || "${a}" == $'\t' || "${r}" == ")" || "${r}" == "(" && k -gt 0 && "${input:k-1:1}" != [$' \t\n;&|(<>'] ) ]] || [[ "${b}" == "_" && "${a}" =~ [\;\&\|] ]] \
-          || [[ "${b}" == " " && "${a}" == $'\n' ]]; then continue; fi
+          || [[ "${b}" == " " && "${a}" == $'\n' ]] || [[ "${b}" == " " && "${a}" == "&" && "${sv:k+1:1}" == ">" ]]; then continue; fi
       printf 'stmts (%s) differs from scan at %d of [%q]: scan [%q] stmts [%q]\n' "${reading}" "${k}" "${input}" "${a}" "${b}" >&2
       stmts_diffs=$((stmts_diffs + 1))
     done
@@ -1264,6 +1264,75 @@ done
 [[ ${grammar_failures} -eq 0 ]] || fail "stmts view: ${grammar_failures} of ${grammar_closed} closed readings of grammar words not idempotent (seed ${fuzz_seed})"
 [[ ${grammar_closed} -gt $((fuzz_cases * 3 / 4)) ]] || fail "stmts view: only ${grammar_closed} of $((fuzz_cases * 3)) grammar-word readings closed, too few to say anything"
 pass "stmts view: idempotent and length-preserving on ${grammar_closed} closed readings of $((fuzz_cases * 3)) random grammar-word inputs (bash, zsh, dash)"
+
+# --- where a word ends (SAFEDEPS_G_END) ------------------------------------------
+# The recognizers end a manager and a verb with SAFEDEPS_G_END, read on the
+# stmts view. That is the lexer's answer only if the view prints every byte
+# where the lexer ends a word as one of the bytes SAFEDEPS_G_END reads as a
+# word end. The wordends view is the lexer's own answer, as a mask over the
+# same bytes, so each recorded shell form, the grammar words and random input
+# are held to it in every reading. The tails used to be `([[:space:]]|$)`, a
+# set of the recognizers' own: `npm ci;`, `(npm install)` and `then npm ci;
+# fi` were no install to any of them.
+# shellcheck source=lib/install-grammar.sh
+source "${ROOT_DIR}/lib/install-grammar.sh"
+wordends_view() { shell_lex "$1" wordends "safedeps:scan-contract"; }
+word_end_failures=0
+word_end_checked=0
+check_word_ends() { # input label
+  local x="$1" reading mask tv k b LC_ALL=C
+  for reading in bash zsh dash; do
+    mask=$(SAFEDEPS_READING="${reading}" wordends_view "${x}"; printf 'X'); mask="${mask%X}"
+    tv=$(SAFEDEPS_READING="${reading}" stmts_view "${x}"; printf 'X'); tv="${tv%X}"
+    if [[ ${#mask} -ne ${#x} ]]; then
+      printf 'wordends (%s) changed the length of [%q] (%s)\n' "${reading}" "${x}" "$2" >&2
+      word_end_failures=$((word_end_failures + 1))
+      continue
+    fi
+    for ((k = 0; k < ${#mask}; k++)); do
+      [[ "${mask:k:1}" == 1 ]] || continue
+      word_end_checked=$((word_end_checked + 1))
+      b="${tv:k:1}"
+      [[ "${b}" =~ ^${SAFEDEPS_G_WORD_END_CLASS}$ ]] && continue
+      printf 'word end (%s) at %d of [%q] (%s) is [%q] in the stmts view\n' "${reading}" "${k}" "${x}" "$2" "${b}" >&2
+      word_end_failures=$((word_end_failures + 1))
+    done
+  done
+}
+for ((i = 0; i < form_count; i++)); do
+  form=$(jq -j ".[${i}].text" "${forms_file}" | sed -e 's/@@TAIL@@/pip install evil==6.6.6/' -e 's/@@HEAD@@/pip/g' -e 's/@@TAIL_SPLIT@@/pi\\\
+p install evil==6.6.6/'; printf 'X')
+  check_word_ends "${form%X}" "$(jq -r ".[${i}].id" "${forms_file}")"
+done
+for form in 'npm ci;' '(npm install)' 'if true; then npm ci; fi' 'npm ci&>log' 'npm ci&&echo' 'npm ci|cat' \
+  'npm ci&' "npm 'ci';" 'x)npm ci;;' 'npm ci 2>&1' 'case x in x) npm ci;; esac' 'npm ci<<E
+x
+E'; do
+  check_word_ends "${form}" "row"
+done
+RANDOM="${fuzz_seed}"
+for ((c = 0; c < fuzz_cases; c++)); do
+  len=$((RANDOM % 40))
+  input=""
+  for ((k = 0; k < len; k++)); do
+    input+="${heredoc_alphabet[RANDOM % ${#heredoc_alphabet[@]}]}"
+  done
+  check_word_ends "${input}" "random ${c}"
+  len=$((RANDOM % 12 + 1))
+  input=""
+  for ((k = 0; k < len; k++)); do
+    input+="${grammar_words[RANDOM % ${#grammar_words[@]}]}"
+    (( RANDOM % 4 )) && input+=" "
+  done
+  check_word_ends "${input}" "grammar ${c}"
+done
+[[ ${word_end_failures} -eq 0 ]] || fail "word ends: ${word_end_failures} byte(s) where the lexer ends a word print as a byte SAFEDEPS_G_END does not read as one (seed ${fuzz_seed})"
+[[ ${word_end_checked} -gt 1000 ]] || fail "word ends: only ${word_end_checked} word ends checked, too few to say anything"
+for got in "npm ci;" "(npm install)" "npm ci&>log"; do
+  SAFEDEPS_READING=bash stmts_view "${got}" | grep -qE "${SAFEDEPS_G_NPM_INSTALL_RE}" \
+    || fail "word ends: the npm recognizer reads [${got}] as an install"
+done
+pass "word ends: every byte where the lexer ends a word prints as a word end SAFEDEPS_G_END reads, on ${word_end_checked} word ends of the shell forms, rows, $((fuzz_cases * 2)) random inputs, in bash, zsh and dash"
 
 # --- the words the spec extractor reads -----------------------------------------
 # The pieces view hands the extractor each statement's words: redirections out,

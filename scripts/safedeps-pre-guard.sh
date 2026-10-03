@@ -470,6 +470,9 @@ shell_lex() {
       #              word in command position in this reading (BND, from starts
       #              below), or the byte a glued word starts after; a nested
       #              `;` `&` `|` as `_`; length-preserving
+      #   view=wordends  the stmts view as a mask: 1 at each byte where the
+      #              lexer ends a word that a word byte stands before, 0
+      #              elsewhere; length-preserving. For scan-contract.
       #   view=code    comments, heredoc operators and bodies blanked, quotes kept;
       #              length-preserving
       #   view=joined  code view with line continuations removed and every newline
@@ -562,6 +565,12 @@ shell_lex() {
       }
       END {
         N = n
+        # The wordends view is the stmts view read as a mask: `1` where the
+        # lexer ends a word at the byte (word_sep, with a word byte before
+        # it), `0` elsewhere. scan-contract holds the stmts view to printing
+        # each such byte as one SAFEDEPS_G_END reads as a word end.
+        wends = (view == "wordends")
+        if (wends) view = "stmts"
         d = 1; ctx[1] = "T"; par[1] = 0; dq = 0; dc = 1
         # The bytes any rule below acts on. Every other byte keeps the class of
         # its context and changes nothing, so it is classified without running
@@ -1807,6 +1816,7 @@ shell_lex() {
         }
         for (k = 1; k <= N; k++) {
           cc = X[k]; cl = C[k]
+          if (wends) { put((k > 1 && word_sep(k) && !word_sep(k - 1)) ? "1" : "0"); continue }
           if (view == "noredir") { put((k in DROP) ? " " : cc); continue }
           if (view == "scan" || view == "live" || view == "flat" || view == "stmts") {
             # A code `#` is never a comment start here, and must not become one
@@ -1828,6 +1838,11 @@ shell_lex() {
             # redirection operator (`>|`, `<&-`, `2>&1`). command_statements
             # cut wherever these bytes were, so the words after
             # `$(pwd | sed x)` or `>| f` left the install (caught in review).
+            # The `&` that opens `&>` ends the word before it, as the `>` of
+            # any other redirection does, so it is a blank: written `_`, it
+            # was a byte of that word to the recognizers, and `npm ci&>log`
+            # was no install (SAFEDEPS_G_END in lib/install-grammar.sh).
+            else if (view == "stmts" && cl == "c" && (k in DROP) && cc == "&" && X[k+1] == ">") put(" ")
             else if (view == "stmts" && cl == "c" && (DEP[k] != 1 || (k in DROP)) && cc ~ /[;&|\n]/) put(cc == "\n" ? " " : "_")
             else if (cl == "c" || cl == "p") put(cc == "#" && (k == 1 || C[k-1] != "c" && C[k-1] != "e" || C[k-1] == "e" && X[k-1] ~ /[ \t]/) ? "_" : cc)
             else if (cl == "e") put(index(";&|()<>!{}#`\042\047\\$", cc) ? "_" : (cc == "\n" ? " " : cc))
@@ -2003,7 +2018,7 @@ extract_command_substitution_payloads() {
 # view, where a quoted value is already blank. Without the prefix, an install
 # behind `PIP_INDEX_URL=x` was not set aside, and the pipe check read it as
 # install text piped into a shell (caught in review).
-BLANK_INSTALL_RE="${SAFEDEPS_G_START}((env|command)([[:space:]]+-[^[:space:]]*)*[[:space:]]+|[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*(${SAFEDEPS_G_INSTALL_BODY})([[:space:]]|\$)"
+BLANK_INSTALL_RE="${SAFEDEPS_G_START}((env|command)([[:space:]]+-[^[:space:]]*)*[[:space:]]+|[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*(${SAFEDEPS_G_INSTALL_BODY})${SAFEDEPS_G_END}"
 PIPE_MANAGER_RE='(npm|npx|pnpm|pnpx|yarn|bun|bunx|pip[0-9.]*|(python[0-9.]*|py)[[:space:]]+-[A-Za-z0-9]*m[[:space:]]*pip|poetry|uv|uvx|pipx|pipenv|cargo|go|gem|bundle|mvn|dotnet)'
 PIPE_INSTALL_TEXT_RE="${PIPE_MANAGER_RE}.*(${SAFEDEPS_G_ALL_VERBS})"
 
@@ -2377,16 +2392,18 @@ inert_verb_ends() {
   # failed awk shared one `||` with grep's exit 1, and the rewrite was then
   # dropped as if there were nothing to rewrite.
   matches=$(printf '%s\n' "${live}" \
-    | LC_ALL=C judge_grep -obE "npm${SAFEDEPS_G_OPTS}[[:space:]]+(${SAFEDEPS_G_NPM_VERBS}|${SAFEDEPS_G_NPM_LINK_VERBS})([[:space:]]|\$)") || matches=""
+    | LC_ALL=C judge_grep -obE "npm${SAFEDEPS_G_OPTS}[[:space:]]+(${SAFEDEPS_G_NPM_VERBS}|${SAFEDEPS_G_NPM_LINK_VERBS})${SAFEDEPS_G_END}") || matches=""
   if [[ "${flat}" != "${live}" ]]; then
     more=$(printf '%s\n' "${flat}" \
-      | LC_ALL=C judge_grep -obE "npm${SAFEDEPS_G_OPTS}[[:space:]]+(${SAFEDEPS_G_NPM_VERBS}|${SAFEDEPS_G_NPM_LINK_VERBS})([[:space:]]|\$)") || more=""
+      | LC_ALL=C judge_grep -obE "npm${SAFEDEPS_G_OPTS}[[:space:]]+(${SAFEDEPS_G_NPM_VERBS}|${SAFEDEPS_G_NPM_LINK_VERBS})${SAFEDEPS_G_END}") || more=""
     if [[ -n "${more}" && -n "${matches}" ]]; then matches+=$'\n'"${more}"; elif [[ -n "${more}" ]]; then matches="${more}"; fi
   fi
   [[ -n "${matches}" ]] || return 0
-  if ! printf '%s\n' "${matches}" | LC_ALL=C awk '
+  # The match ends in the byte that ended the verb, unless the verb ended the
+  # line; no verb ends in one of those bytes.
+  if ! printf '%s\n' "${matches}" | LC_ALL=C awk -v endre="${SAFEDEPS_G_WORD_END_CLASS}\$" '
     # safedeps:inert_offsets (scripts/measure/scan-failure-census.sh keys on this line)
-    { c = index($0, ":"); m = substr($0, c + 1); e = substr($0, 1, c - 1) + length(m); if (m ~ /[[:space:]]$/) e--; print e }'; then
+    { c = index($0, ":"); m = substr($0, c + 1); e = substr($0, 1, c - 1) + length(m); if (m ~ endre) e--; print e }'; then
     [[ -z "${SAFEDEPS_SCAN_MARK:-}" ]] || printf 'failed\n' >> "${SAFEDEPS_SCAN_MARK}"
     return 1
   fi
@@ -2480,7 +2497,7 @@ inert_rewrite_in_place() {
   offsets=$(inert_offsets_of "${command}") || rc=$?
   (( rc == 0 )) || return "${rc}"
   if strip_heredoc_bodies "${command}" shell-bodies \
-      | LC_ALL=C judge_grep -qE "npm${SAFEDEPS_G_OPTS}[[:space:]]+(${SAFEDEPS_G_NPM_VERBS}|${SAFEDEPS_G_NPM_LINK_VERBS})([[:space:]]|\$)"; then
+      | LC_ALL=C judge_grep -qE "npm${SAFEDEPS_G_OPTS}[[:space:]]+(${SAFEDEPS_G_NPM_VERBS}|${SAFEDEPS_G_NPM_LINK_VERBS})${SAFEDEPS_G_END}"; then
     return 3
   fi
   offsets=$(printf '%s\n' "${offsets}" | LC_ALL=C sort -nu | tr '\n' ' ')
@@ -4329,19 +4346,19 @@ guard_check_command_reads() {
 guard_segment_ecosystem() {
   local scan
   scan=$(command_start_text "$1")
-  if echo "${scan}" | judge_grep -qEi "${SAFEDEPS_G_START}(npm|pnpm|pnpx|yarn|npx|bun|bunx)([[:space:]]|\$)"; then
+  if echo "${scan}" | judge_grep -qEi "${SAFEDEPS_G_START}(npm|pnpm|pnpx|yarn|npx|bun|bunx)${SAFEDEPS_G_END}"; then
     printf 'npm'
-  elif echo "${scan}" | judge_grep -qEi "${SAFEDEPS_G_START}(pip[0-9.]*|poetry|uv|uvx|pipx|pipenv|(python[0-9.]*|py)${SAFEDEPS_G_OPTS}[[:space:]]+-[A-Za-z0-9]*m[[:space:]]*pip)([[:space:]]|\$)"; then
+  elif echo "${scan}" | judge_grep -qEi "${SAFEDEPS_G_START}(pip[0-9.]*|poetry|uv|uvx|pipx|pipenv|(python[0-9.]*|py)${SAFEDEPS_G_OPTS}[[:space:]]+-[A-Za-z0-9]*m[[:space:]]*pip)${SAFEDEPS_G_END}"; then
     printf 'pypi'
-  elif echo "${scan}" | judge_grep -qEi "${SAFEDEPS_G_START}cargo([[:space:]]|\$)"; then
+  elif echo "${scan}" | judge_grep -qEi "${SAFEDEPS_G_START}cargo${SAFEDEPS_G_END}"; then
     printf 'crates.io'
-  elif echo "${scan}" | judge_grep -qEi "${SAFEDEPS_G_START}go([[:space:]]|\$)"; then
+  elif echo "${scan}" | judge_grep -qEi "${SAFEDEPS_G_START}go${SAFEDEPS_G_END}"; then
     printf 'go'
-  elif echo "${scan}" | judge_grep -qEi "${SAFEDEPS_G_START}(gem|bundle)([[:space:]]|\$)"; then
+  elif echo "${scan}" | judge_grep -qEi "${SAFEDEPS_G_START}(gem|bundle)${SAFEDEPS_G_END}"; then
     printf 'rubygems'
-  elif echo "${scan}" | judge_grep -qEi "${SAFEDEPS_G_START}mvn([[:space:]]|\$)"; then
+  elif echo "${scan}" | judge_grep -qEi "${SAFEDEPS_G_START}mvn${SAFEDEPS_G_END}"; then
     printf 'maven'
-  elif echo "${scan}" | judge_grep -qEi "${SAFEDEPS_G_START}dotnet([[:space:]]|\$)"; then
+  elif echo "${scan}" | judge_grep -qEi "${SAFEDEPS_G_START}dotnet${SAFEDEPS_G_END}"; then
     printf 'nuget'
   fi
 }

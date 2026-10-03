@@ -91,6 +91,23 @@ SAFEDEPS_G_EXECUTABLES='npm|npx|pnpm|pnpx|yarn|bun|bunx|pip[0-9.]*|python[0-9.]*
 # short form, `for ((...)) {`, and a function with more than one name.
 SAFEDEPS_G_START='(^[[:space:]]*|[;&|(][[:space:]]*)'
 
+# Where a word ends, on the same view: before a byte the view prints where the
+# lexer ends a word at the top level, or at the end of the text. The lexer
+# decides it (word_sep in shell_lex, from the depth of its walk), and the view
+# prints every such byte as one of these: a blank or a newline, `;` `&` `|`
+# (which it prints nowhere else, see SAFEDEPS_G_START), or `(` `)` `<` `>`.
+# scripts/test/scan-contract.sh checks that on the recorded forms and on random
+# input, against the lexer's own answer (the wordends view). The converse does
+# not hold, and is not needed: a blank the view prints for quoted or escaped
+# text, and a `(` `)` `<` `>` nested in a word, read as a word end too, which
+# can only make a recognizer wider. Every recognizer ends a manager or a verb
+# with this, never with a set of its own: the tails used to be
+# `([[:space:]]|$)`, which is not where the shell ends a word, so `npm ci;`,
+# `(npm install)` and `then npm ci; fi` were no install to any recognizer --
+# no check, no `--ignore-scripts`, no pending state.
+SAFEDEPS_G_WORD_END_CLASS='[[:space:];&|()<>]'
+SAFEDEPS_G_END="(${SAFEDEPS_G_WORD_END_CLASS}|\$)"
+
 # Options between a manager and its verb: any number, each with an optional
 # value, plus the bare `--` that ends them. A value can only be told from the verb by trying both readings, which
 # the regex engine does.
@@ -180,8 +197,8 @@ SAFEDEPS_G_INSTALL_BODY="${SAFEDEPS_G_NPM_INSTALL_BODY}\
 # --- the patterns the gates read --------------------------------------------------
 # Anchored at a statement start. Run these on command_start_text output, where
 # quoted text is already blanked and every statement start is a separator.
-SAFEDEPS_G_INSTALL_RE="${SAFEDEPS_G_START}(${SAFEDEPS_G_INSTALL_BODY})([[:space:]]|$)"
-SAFEDEPS_G_NPM_INSTALL_RE="${SAFEDEPS_G_START}(${SAFEDEPS_G_NPM_INSTALL_BODY})([[:space:]]|$)"
+SAFEDEPS_G_INSTALL_RE="${SAFEDEPS_G_START}(${SAFEDEPS_G_INSTALL_BODY})${SAFEDEPS_G_END}"
+SAFEDEPS_G_NPM_INSTALL_RE="${SAFEDEPS_G_START}(${SAFEDEPS_G_NPM_INSTALL_BODY})${SAFEDEPS_G_END}"
 
 # Unanchored, for raw text nobody has parsed: the jq-missing fail-closed check
 # and the PostToolUse backstop. A false positive there costs a closure diff or a
