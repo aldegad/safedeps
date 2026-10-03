@@ -517,7 +517,9 @@ safedeps_js_is_number() {
 
 # npm's reading of the words after `npm`, as nopt reads them (nopt-lib.js
 # parse, nopt 9 in npm 11.19.0). Sets SAFEDEPS_G_NPM_AT and SAFEDEPS_G_NPM_WORDS
-# (and SAFEDEPS_G_NPM_VALUES, each option value it took),
+# (and SAFEDEPS_G_NPM_VALUES, each option value it took, and
+# SAFEDEPS_G_NPM_SWITCHES, each switch it set, as `<option>=true|false` in the
+# order npm reads them, so the last one for an option is the value npm keeps),
 # the positional words in order with the index of the word each came from. The
 # first is npm's command; the rest are its arguments. A positional can be the
 # value half of a `--name=value` word whose option took no value
@@ -526,8 +528,8 @@ safedeps_js_is_number() {
 # when the reading depends on something a table cannot hold (`@host`).
 safedeps_npm_read_args() {
   local -a w=("$@") at=() exp=()
-  local i j n arg v s cls la la_set hadeq no key consumed flags lits steps=0
-  SAFEDEPS_G_NPM_AT=() SAFEDEPS_G_NPM_WORDS=() SAFEDEPS_G_NPM_VALUES=()
+  local i j n arg v s cls la la_set hadeq no neg key consumed flags lits steps=0
+  SAFEDEPS_G_NPM_AT=() SAFEDEPS_G_NPM_WORDS=() SAFEDEPS_G_NPM_VALUES=() SAFEDEPS_G_NPM_SWITCHES=()
   for (( i = 0; i < ${#w[@]}; i++ )); do at[i]=${i}; done
   i=0
   while (( i < ${#w[@]} )); do
@@ -570,8 +572,11 @@ safedeps_npm_read_args() {
     fi
     s="${arg}"
     while [[ "${s}" == -* ]]; do s="${s#-}"; done
-    no=""
-    while [[ "${s:0:3}" == [Nn][Oo]- ]]; do no="set"; s="${s:3}"; done
+    no="" neg=false
+    while [[ "${s:0:3}" == [Nn][Oo]- ]]; do
+      no="set" s="${s:3}"
+      [[ "${neg}" == true ]] && neg=false || neg=true
+    done
     key="${s}" cls=""
     if ! safedeps_npm_lookup "${key}" "${SAFEDEPS_G_NPM_OPTIONS}"; then
       safedeps_npm_unique_prefix "${key}" "${SAFEDEPS_G_NPM_OPTIONS}"
@@ -608,6 +613,17 @@ safedeps_npm_read_args() {
     # `--package` names the package it runs.
     if (( consumed )); then
       SAFEDEPS_G_NPM_VALUES+=("${at[i+1]}"$'\037'"${key}"$'\037'"${w[i+1]}")
+    fi
+    # A switch is true unless a `no-` (an odd number of them) or a `true` or
+    # `false` after it says otherwise; nopt reads `--x false` as `--x=false`.
+    if [[ -n "${no}" || "${cls}" == b* ]]; then
+      v=true
+      (( consumed )) && [[ "${w[i+1]}" == false ]] && v=false
+      if [[ "${neg}" == true ]]; then
+        [[ "${v}" == true ]] && v=false || v=true
+      fi
+      (( consumed )) && [[ "${w[i+1]}" != true && "${w[i+1]}" != false ]] && v=""
+      [[ -z "${v}" ]] || SAFEDEPS_G_NPM_SWITCHES+=("${key}=${v}")
     fi
     i=$(( i + 1 + consumed ))
   done
