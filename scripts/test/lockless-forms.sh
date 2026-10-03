@@ -752,7 +752,8 @@ rolled_back || fail "an unapproved install in a project with no package-lock.jso
 rollback_removed_node_modules \
   || fail "the rollback resolves nothing again: node_modules is removed, not reinstalled (node_modules: $(ls "${CASE_PROJECT}/node_modules" 2>&1 | paste -sd, -))"
 [[ ! -s "${MARKS}" ]] || fail "the rollback runs no install script ($(cut -f1,2 "${MARKS}" | paste -sd, -))"
-grep -q 'has a package.json and neither package-lock.json nor npm-shrinkwrap.json' <<< "${CASE_POST}" \
+jq -r '.systemMessage // empty' <<< "${CASE_POST}" | grep -qx '.*/package-lock\.json does not exist' \
+  && jq -r '.systemMessage // empty' <<< "${CASE_POST}" | grep -qx '.*/npm-shrinkwrap\.json does not exist' \
   || fail "the rollback says the project has no npm lockfile (post: ${CASE_POST})"
 pass "a rollback with no package-lock.json resolves nothing again and runs no install script"
 
