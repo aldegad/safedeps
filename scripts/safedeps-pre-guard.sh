@@ -2202,15 +2202,100 @@ guard_npm_install_target() {
   fi
 }
 
+# Whether assignment word <word> holds the text the shell assigns: nothing the
+# shell decides at run time (the lexer's mark), and no tilde, which the shell
+# expands in an assignment's value at its start and after a colon.
+guard_assignment_literal() {
+  local value="${1#*=}"
+  [[ "$1" != *$'\001'* && "${value}" != '~'* && "${value}" != *':~'* ]]
+}
+
+# Whether <name> is exported in the environment this hook runs with, which is
+# the one the agent's shell inherits too.
+guard_name_inherited() {
+  local flags
+  flags=$(declare -p "$1" 2>/dev/null) || return 1
+  flags="${flags#declare -}"
+  [[ "${flags%% *}" == *x* ]]
+}
+
+# Carries assignment word <word> to every later npm install the caller
+# (resolve_reading_targets) asks npm about, in its npm_exports. The last value
+# a name was given stands. Fails, carrying nothing, when the value is not
+# literal or the command has a group or a subshell, where the assignment may
+# not reach the install.
+guard_carry_setting() {
+  local entry
+  local -a kept=()
+  [[ "${grouped}" != true ]] && guard_assignment_literal "$1" || return 1
+  for entry in "${npm_exports[@]+"${npm_exports[@]}"}"; do
+    [[ "${entry%%=*}" == "${1%%=*}" ]] || kept+=("${entry}")
+  done
+  npm_exports=("${kept[@]+"${kept[@]}"}" "$1")
+}
+
+# One assignment the caller's shell makes outside a command's own prefix:
+# <word>, exported by the statement when <exporting> is true, with a value the
+# statement keeps as written when <literal> is true. It sets the caller's
+# npm_exports, exports_unknown, exported_names, assigned_words, env_changer
+# and env_setting.
+#
+# Every name counts, whatever it names, because npm reads more of its
+# environment than npm_config_*: `export HOME=<dir>` sends npm to
+# <dir>/.npmrc, and so does the same assignment in front of npm, which the
+# statement's own reading below carries to the ask. The export branch carried
+# only npm_config_*, so `export HOME=<dir>; npm install x` was asked about
+# under the hook's HOME and fetched from <dir>/.npmrc's registry unseen.
+#
+# An exported value the gate cannot reproduce makes every later npm install's
+# directory unknown (exports_unknown). An assignment the statement does not
+# export reaches npm when the name is already exported, which the gate cannot
+# always tell. It is carried all the same: if it does not reach npm, npm runs
+# with the hook's environment, and the PostToolUse hook asks npm again with
+# exactly that, so one of the two answers is npm's either way. One whose value
+# is not literal is unknown where the name is exported here, and an
+# npm_config_* assignment is unknown as before (env_setting).
+guard_shell_assignment() {
+  local word="$1" exporting="$2" literal="$3" name="${1%%=*}" i
+  [[ "${literal}" == true ]] || word="${word%$'\001'}"$'\001'
+  if [[ "${word}" != *=* ]]; then
+    [[ "${exporting}" == true ]] || return 0
+    exported_names+="${name} "
+    # A name exported bare carries the value an assignment earlier in the
+    # command gave it: `HOME=<dir>; export HOME`.
+    word=""
+    for (( i = ${#assigned_words[@]} - 1; i >= 0; i-- )); do
+      [[ "${assigned_words[i]%%=*}" != "${name}" ]] || { word="${assigned_words[i]}"; break; }
+    done
+    [[ -n "${word}" ]] || return 0
+  else
+    assigned_words+=("${word}")
+    [[ "${exporting}" != true ]] || exported_names+="${name} "
+  fi
+  if [[ "${exported_names}" == *" ${name} "* ]]; then
+    guard_carry_setting "${word}" || exports_unknown="${word%$'\001'}"
+    return 0
+  fi
+  if ! guard_carry_setting "${word}" && guard_name_inherited "${name}"; then
+    env_changer="${name}="; env_setting="${env_changer}"
+  fi
+  if [[ "$(printf '%s' "${name}" | tr '[:upper:]' '[:lower:]')" == npm_config_* ]]; then
+    env_changer="${name}="; env_setting="${env_changer}"
+  fi
+  return 0
+}
+
 # The statements and where each lands (see resolve_install_targets). <text> is
 # the joined view of the command.
 resolve_reading_targets() {
   local text="$1" cwd="$2"
   local before stmt after words raw head target want kind manager tok value normalized in_env skip
   local user_rc cli_global_off why run_dir answer local_prefix npm_word npm_unknown i fetch cause
-  local dir="${cwd}" grouped=false env_userconfig=false exports_unknown=""
+  local dir="${cwd}" grouped=false env_userconfig=false exports_unknown="" exported_names=" "
   local npm_until="" here cond_dir="" depth=0 conditional env_changer="" env_setting="" statements pieces piece_at pw n=0 m k role
-  local -a toks=() npm_env=() npm_args=() npm_exports=() stmt_words=() mw=()
+  local opts exporting literal ignore_env unset_names rc_home
+  local -a toks=() npm_env=() npm_args=() npm_exports=() stmt_words=() mw=() assigned_words=()
+  local -a env_opts=() env_inherit=() env_after=()
 
   command_scan_text "${text}" | judge_grep -q '[(){}`]' && grouped=true
   command_scan_text "${text}" | judge_grep -qEi 'npm_config_userconfig=' && env_userconfig=true
@@ -2299,20 +2384,45 @@ resolve_reading_targets() {
           fi
           break
           ;;
-        export)
-          # An npm setting exported earlier reaches every later npm, so the ask
-          # carries it too. One the shell decides at run time, or one exported
-          # where it may not reach the install (a group, a subshell), makes every
-          # later npm install's directory unknown.
-          for tok in "${toks[@]:1}"; do
-            [[ "${tok}" == *=* ]] || continue
-            value="${tok%%=*}"
-            [[ "$(printf '%s' "${value}" | tr '[:upper:]' '[:lower:]')" == npm_config_* ]] || continue
-            if [[ "${grouped}" == true || "${tok}" == *$'\001'* ]]; then
-              exports_unknown="${tok%$'\001'}"
-            else
-              npm_exports+=("${tok}")
+        export|declare|typeset|local|readonly)
+          # What a statement like this exports or assigns reaches every later
+          # npm, so the ask carries it too (guard_shell_assignment). Options
+          # come first. One that unexports (`export -n`, `declare +x`) or
+          # changes the value the shell stores (`declare -xi`, `-l`, `-u`)
+          # is a setting the gate reads but does not reproduce.
+          opts=""
+          for (( i = 1; i < ${#toks[@]}; i++ )); do
+            case "${toks[i]}" in
+              --) i=$(( i + 1 )); break ;;
+              [-+]?*) opts+="${toks[i]%$'\001'}" ;;
+              *) break ;;
+            esac
+          done
+          exporting=false
+          literal=true
+          [[ "${toks[0]}" != export ]] || exporting=true
+          case "${toks[0]}:${opts}" in
+            export:|export:-p|*:-x|*:-xr|*:-rx|*:-x-r|*:-r-x) exporting=true ;;
+            export:*|*:*+*|*:*x*)
+              env_changer="${toks[0]} ${opts}"; env_setting="${env_changer}"
+              break
+              ;;
+            *:|*:-r|*:-g|*:-rg|*:-gr|*:-r-g|*:-g-r) ;;
+            *) literal=false ;;
+          esac
+          for (( ; i < ${#toks[@]}; i++ )); do
+            tok="${toks[i]}"
+            if [[ ! "${tok}" =~ ^[A-Za-z_][A-Za-z0-9_]*(=|$) || ( "${tok}" != *=* && "${tok}" == *$'\001' ) ]]; then
+              # A name the shell decides at run time, an append (`+=`), an
+              # array element: the value the install sees is not in the text.
+              if [[ "${exporting}" == true ]]; then
+                exports_unknown="${tok%$'\001'}"
+              else
+                env_changer="${toks[0]} ${tok%$'\001'}"; env_setting="${env_changer}"
+              fi
+              continue
             fi
+            guard_shell_assignment "${tok}" "${exporting}" "${literal}"
           done
           break
           ;;
@@ -2345,26 +2455,29 @@ resolve_reading_targets() {
           fi
           break
           ;;
-        set|declare|typeset)
+        set)
           for tok in "${toks[@]:1}"; do
-            case "${toks[0]}:${tok}" in
-              set:-*a*|set:allexport|declare:-*x*|typeset:-*x*)
+            case "${tok}" in
+              -*a*|allexport)
                 env_changer="${toks[0]} ${tok}"; env_setting="${env_changer}"; break ;;
             esac
           done
           break
           ;;
       esac
-      # A statement of assignments alone sets shell variables, and one that
-      # names an npm setting changes npm's environment when the variable is
-      # already exported, as an inherited one is.
+      # A statement of assignments alone sets shell variables, which reach
+      # npm when the name is exported (guard_shell_assignment).
       if [[ "${toks[0]}" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
-        value=""
+        value=true
         for tok in "${toks[@]}"; do
-          [[ "${tok}" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || { value=""; break; }
-          [[ "$(printf '%s' "${tok%%=*}" | tr '[:upper:]' '[:lower:]')" != npm_config_* ]] || value="${tok%%=*}"
+          [[ "${tok}" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || { value=false; break; }
         done
-        [[ -z "${value}" ]] || { env_changer="${value}="; env_setting="${env_changer}"; }
+        if [[ "${value}" == true ]]; then
+          for tok in "${toks[@]}"; do
+            guard_shell_assignment "${tok}" false true
+          done
+          break
+        fi
       fi
 
       command_is_dependency_install "${stmt}" || break
@@ -2375,8 +2488,15 @@ resolve_reading_targets() {
       normalized=$(normalize_install_text "${stmt}")
       # The npm word and its arguments. The words before npm go to env(1) in
       # front of it when npm is asked below, and the words after it are npm's
-      # arguments, unchanged.
-      npm_env=("${npm_exports[@]+"${npm_exports[@]}"}")
+      # arguments, unchanged. env(1) reads its options before any assignment,
+      # so they go first, and what the shell exports, or assigns in front of
+      # `env`, is passed only where `-i` and `-u` leave it.
+      npm_env=()
+      env_opts=()
+      env_inherit=("${npm_exports[@]+"${npm_exports[@]}"}")
+      env_after=()
+      ignore_env=false
+      unset_names=" "
       npm_args=()
       npm_word=""
       npm_unknown="${exports_unknown}"
@@ -2392,7 +2512,7 @@ resolve_reading_targets() {
         fi
         if [[ "${skip}" == true ]]; then
           skip=false
-          if [[ "${want}" == u ]]; then npm_env+=("${tok}"); fi
+          if [[ "${want}" == u ]]; then env_opts+=(-u "${tok}"); unset_names+="${tok} "; fi
           want=""
           continue
         fi
@@ -2406,18 +2526,28 @@ resolve_reading_targets() {
           case "${tok}" in
             -C|--chdir) skip=true; continue ;;
             --chdir=*) continue ;;
-            -u|--unset) npm_env+=(-u); skip=true; want=u; continue ;;
-            --unset=*) npm_env+=(-u "${tok#*=}"); continue ;;
-            -i|--ignore-environment) npm_env+=(-i); continue ;;
+            -u|--unset) skip=true; want=u; continue ;;
+            --unset=*) env_opts+=(-u "${tok#*=}"); unset_names+="${tok#*=} "; continue ;;
+            -i|--ignore-environment) env_opts+=(-i); ignore_env=true; continue ;;
             -*) npm_unknown="env ${tok}"; continue ;;
           esac
         fi
         if [[ "${tok}" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
-          npm_env+=("${tok}")
+          # A tilde in the value is the shell's to expand, and the ask would
+          # hand npm the tilde.
+          guard_assignment_literal "${tok}" || { npm_unknown="${tok}"; continue; }
+          if [[ "${in_env}" == true ]]; then env_after+=("${tok}"); else env_inherit+=("${tok}"); fi
           continue
         fi
         npm_unknown="${tok}"
       done
+      npm_env=("${env_opts[@]+"${env_opts[@]}"}")
+      if [[ "${ignore_env}" != true ]]; then
+        for tok in "${env_inherit[@]+"${env_inherit[@]}"}"; do
+          [[ "${unset_names}" == *" ${tok%%=*} "* ]] || npm_env+=("${tok}")
+        done
+      fi
+      npm_env+=("${env_after[@]+"${env_after[@]}"}")
       # What the statement's command is, and the directories its words name,
       # are the manager's grammar (safedeps_manager_read): `npm --prefix x
       # install` is an install, which the regexes read as `npm x`, and only
@@ -2557,6 +2687,11 @@ resolve_reading_targets() {
       user_rc=""
       cli_global_off=false
       want=""
+      # npm's home is the HOME it runs with, which the command may set.
+      rc_home="${HOME}"
+      for tok in "${npm_env[@]+"${npm_env[@]}"}"; do
+        [[ "${tok}" != HOME=* ]] || rc_home="${tok#HOME=}"
+      done
       for tok in "${toks[@]}"; do
         if [[ -n "${want}" ]]; then user_rc="${tok}"; want=""; continue; fi
         case "${tok}" in
@@ -2571,11 +2706,11 @@ resolve_reading_targets() {
         if [[ "${env_userconfig}" == true ]]; then
           user_rc="?"
         else
-          user_rc="${npm_config_userconfig:-${NPM_CONFIG_USERCONFIG:-${HOME}/.npmrc}}"
+          user_rc="${npm_config_userconfig:-${NPM_CONFIG_USERCONFIG:-${rc_home}/.npmrc}}"
         fi
       fi
       case "${user_rc}" in
-        '~/'*) user_rc="${HOME}/${user_rc#'~/'}" ;;
+        '~/'*) user_rc="${rc_home}/${user_rc#'~/'}" ;;
       esac
       [[ "${user_rc}" == "?" ]] || user_rc=$(guard_literal_dir "${here}" "${user_rc}")
       value=$(guard_npmrc_unrecorded "${local_prefix}" "${user_rc}" "${cli_global_off}")
