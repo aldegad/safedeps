@@ -672,6 +672,13 @@ check_stmts "${all}" "a reserved word opens a statement" \
   'if true; then pip i; fi' 'if;true; then;pip i; fi'
 check_stmts "${all}" "a function head opens its body" \
   'f() { pip i; }; f' 'f();{;pip i; }; f'
+check_stmts "${all}" "a subshell function body starts after its head, or on its \`(\` when glued" \
+  'f() ( pip i ); f; f()(pip i); function f ( pip i ); function f () ( pip i )' \
+  'f();( pip i ); f; f();pip i); function f;( pip i ); function f ();( pip i )'
+check_stmts "bash" "a subshell after coproc NAME is its body in bash" \
+  'coproc foo ( pip i )' 'coproc;foo;( pip i )'
+check_stmts "zsh dash" "and nothing outside bash" \
+  'coproc foo ( pip i )' 'coproc;foo ( pip i )'
 check_stmts "${all}" "a function with more than one name" \
   'function f g { pip i; }' 'function f g {;pip i; }'
 check_stmts "bash" "coproc NAME opens its body in bash" \
@@ -985,7 +992,9 @@ fi
 # or a case close, or a nested separator written as `_` (a nested newline as a
 # blank). A start is written over a backslash or a quote only where a word is
 # glued to what is before it (`}\pip`): the view prints that byte blank, and
-# read again it is the blank before the word.
+# read again it is the blank before the word. A start is written over a `(`
+# only where a subshell body is glued to its function head (`f()(pip i)`),
+# which has no blank to carry it, like an arm glued to its case close.
 stmts_diffs=0
 for reading in bash zsh dash; do
   RANDOM="${fuzz_seed}"
@@ -1000,7 +1009,7 @@ for reading in bash zsh dash; do
     for ((k = 0; k < ${#sv}; k++)); do
       a="${sv:k:1}" b="${tv:k:1}" r="${input:k:1}"
       [[ "${a}" == "${b}" ]] && continue
-      if [[ "${b}" == ";" && ( "${a}" == " " || "${a}" == $'\t' || "${r}" == ")" ) ]] || [[ "${b}" == "_" && "${a}" =~ [\;\&\|] ]] \
+      if [[ "${b}" == ";" && ( "${a}" == " " || "${a}" == $'\t' || "${r}" == ")" || "${r}" == "(" && "${input:k-2:2}" == "()" ) ]] || [[ "${b}" == "_" && "${a}" =~ [\;\&\|] ]] \
           || [[ "${b}" == " " && "${a}" == $'\n' ]]; then continue; fi
       printf 'stmts (%s) differs from scan at %d of [%q]: scan [%q] stmts [%q]\n' "${reading}" "${k}" "${input}" "${a}" "${b}" >&2
       stmts_diffs=$((stmts_diffs + 1))
