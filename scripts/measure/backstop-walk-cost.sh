@@ -98,11 +98,14 @@ if [[ " ${WHAT} " == *" pre "* ]]; then
   mkdir -p "${project}/node_modules"
   printf '{"name":"walk-cost","version":"1.0.0"}\n' > "${project}/package.json"
   printf 'run npm install to set up\n' > "${project}/README.md"
+  printf '{"name":"walk-cost","version":"1.0.0","lockfileVersion":3,"packages":{}}\n' > "${project}/package-lock.json"
   export SAFEDEPS_HOME="${WORK}/home"
   mkdir -p "${SAFEDEPS_HOME}"
   printf '# pre (%s): command, seconds min / median / max over %s reps\n' "$(git -C "${REPO_DIR}" rev-parse --short HEAD 2>/dev/null || printf 'no git')" "${REPS}"
   for command in 'ls -la' 'grep -n \"npm install\" README.md'; do
-    payload=$(printf '{"tool_name":"Bash","tool_input":{"command":"%s"},"cwd":"%s"}' "${command}" "${project}")
+    # With a tool_use_id, as both engines send one: the pre-guard keeps the
+    # trace entry under it and writes none without it.
+    payload=$(printf '{"tool_name":"Bash","tool_input":{"command":"%s"},"cwd":"%s","tool_use_id":"toolu_walk_cost"}' "${command}" "${project}")
     times=$(for _ in $(seq 1 "${REPS}"); do
       seconds_of sh -c 'printf "%s" "$1" | "$2" pre' sh "${payload}" "${REPO_DIR}/scripts/safedeps-hook-entry.sh"
     done)
