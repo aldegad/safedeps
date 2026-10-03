@@ -199,6 +199,8 @@ These three lines say what safedeps did, not what the command carries. safedeps 
 
 Each of the three is said only where the post hook found the pre-guard's record of this command. A rollback by the backstop has none of them: the backstop runs because the post hook found no such record, and its headline says so ("this hook found no record of this command from before it ran"). The record may still exist under a key the post hook did not compute, so the backstop does not say what safedeps did.
 
+A rollback whose record the post hook found but could not read has none of them either. A failed read used to be reported as "did not add", which was false whenever the record said safedeps had rewritten the command. The post hook now says nothing about the flag and writes to `advisory.log` that it could not read the record.
+
 The report of an unfinished rollback has the same shape. Its `Rollback snapshot:` line says whether the project's confirmed record names that snapshot when the report is written, as the rollback message does. `Owner:` is the test that showed the process is not at work: it is not running, it is a zombie, its pid belongs to a process that started later, or it is stopped. A stopped owner has not died. The rollback resumes if the process is continued, so decide what to do with that process before you repair the project. Under `Checked at the time of this report` the report says what `node_modules` is and lists only the monitored files that are not what the snapshot holds. Check those files before you trust them, then reinstall.
 
 Warnings about a registry that is not the public one, and about a tree safedeps would not rebuild, are still sentences. They tell you to confirm with the user before you rebuild, and that is on purpose.
