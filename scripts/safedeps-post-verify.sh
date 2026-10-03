@@ -2439,8 +2439,10 @@ report_rollback() {
   ${snapshot_line}
 $(printf '  %s\n' "${ROLLBACK_WARNINGS[@]}")
 LOG_EOF
-  # Only the rollback that consumed this command's record reaches this: the
-  # backstop restores a confirmed snapshot and has no record to speak from.
+  # Only the rollback that consumed this command's record writes this line. The
+  # backstop restores a confirmed snapshot, so its snapshot line names one,
+  # unless another call confirmed this project while it ran; the second test
+  # keeps that case from writing a line with no record behind it.
   if [[ "${snapshot_line}" != *', a confirmed snapshot' && "${BACKSTOP_INSTALL:-false}" != true ]]; then
     log_advisory "post-verify REORG with no confirmed snapshot in ${PROJECT_DIR}: ${snapshot_line}${REPORT_INERT:+; ${REPORT_INERT}}. Reasons: $4"
   fi

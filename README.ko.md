@@ -189,9 +189,9 @@ ledger 게이트나 사전 비행 체크에 실패하면 해당 명령은 실행
 | `<path> exists` / `<path> does not exist` / `<path>/package.json has the key workspaces` | 롤백 뒤 프로젝트 루트에 있는 것입니다. safedeps 는 패키지를 재설치하지 않고, 재설치가 어디에 쓸지 판단하지 않습니다. 프로젝트 자신의 `node_modules` 만 지우고, 워크스페이스 멤버의 것은 지우지 않습니다. |
 | `The rollback changed nothing.` | 어떤 단계도 `cp` 나 `rm` 을 돌리지 않았습니다. 돌다가 실패한 단계는 바꾼 것이 없다고 하지 않습니다. `rm -rf` 는 지울 수 있는 것을 지운 뒤에 실패합니다. |
 | `no install trace in <dir>: ...` | 그 디렉터리의 npm lockfile 둘 다 명령 동안 바뀌지 않았습니다. 거기에는 이 설치의 흔적이 없습니다. |
-| `safedeps added --ignore-scripts to this install` | pre-guard 가 설치를 플래그를 달아 고쳐 썼고, post 훅이 받은 명령이 바이트 하나 다르지 않게 그 명령입니다. 설치는 플래그를 달고 돌았습니다. 명령이 스스로 `npm rebuild` 를 돌리면 설치 스크립트는 그래도 돕니다. rebuild 건너뜀 줄과 같습니다. |
-| `safedeps asked for --ignore-scripts on this install; the command this hook received is not the one safedeps wrote` | pre-guard 가 명령을 고쳐 썼는데, post 훅은 다른 명령을 받았습니다. 런타임이 safedeps 가 쓴 그대로 돌리지 않았습니다. 설치의 스크립트가 돌았다고 보십시오. |
-| `safedeps did not add --ignore-scripts to this install` | 이 명령에 대한 pre-guard 의 기록이 safedeps 가 명령을 고쳐 쓰지 않았다고 말합니다. Codex 에서는 할 수 없습니다. 기록을 쓰지 못한 pre-guard 는 명령을 고쳐 쓰지 않고, 그 사실을 `advisory.log` 에 남깁니다. |
+| `safedeps added --ignore-scripts to this install` | 이 훅이 쓴 pre-guard 기록이 safedeps 가 설치를 플래그를 달아 고쳐 썼다고 말하고, post 훅이 받은 명령이 바이트 하나 다르지 않게 그 기록에 담긴 명령입니다. 같은 명령의 두 호출이 프로젝트에서 겹치지 않았다면 그 기록은 이 호출의 것입니다(아래). 설치는 플래그를 달고 돌았습니다. 명령이 스스로 `npm rebuild` 를 돌리면 설치 스크립트는 그래도 돕니다. rebuild 건너뜀 줄과 같습니다. |
+| `safedeps asked for --ignore-scripts on this install; the command this hook received is not the one safedeps wrote` | 이 훅이 쓴 pre-guard 기록이 safedeps 가 명령을 고쳐 썼다고 말하는데, post 훅은 다른 명령을 받았습니다. 같은 명령의 두 호출이 프로젝트에서 겹치지 않았다면 그 기록은 이 호출의 것이고(아래), 그렇다면 런타임이 safedeps 가 쓴 그대로 돌리지 않았습니다. 설치의 스크립트가 돌았다고 보십시오. |
+| `safedeps did not add --ignore-scripts to this install` | 이 훅이 쓴 pre-guard 기록이 safedeps 가 명령을 고쳐 쓰지 않았다고 말합니다. Codex 에서는 할 수 없습니다. 기록을 쓰지 못한 pre-guard 는 명령을 고쳐 쓰지 않고, 그 사실을 `advisory.log` 에 남깁니다. |
 | `... did not run npm rebuild: <fact>` | safedeps 는 프로젝트 루트의 `package.json`·lockfile·`node_modules` 가 링크가 아니고 이 설치의 흔적이 있는 디렉터리에서만 rebuild 합니다. 이 줄은 safedeps 가 한 일을 말합니다. 설치 스크립트가 돌았는지는 말하지 않습니다. 명령이 스스로 rebuild 했다면 스크립트는 이미 돌았습니다. |
 | `... ran npm rebuild: exit <n>` | safedeps 가 돌린 rebuild 가 그 종료 코드로 실패했습니다. |
 
@@ -200,6 +200,8 @@ ledger 게이트나 사전 비행 체크에 실패하면 해당 명령은 실행
 세 줄은 모두 post 훅이 이 명령에 대한 pre-guard 의 기록을 찾았을 때만 나옵니다. backstop 의 롤백에는 셋 다 없습니다. backstop 은 post 훅이 그 기록을 찾지 못해서 돌고, 머리말이 그렇게 말합니다("this hook found no install record of this command from before it ran"). 기록이 post 훅이 계산하지 않은 키 아래에 있을 수 있으므로, backstop 은 safedeps 가 한 일을 말하지 않습니다.
 
 post 훅이 기록을 찾았지만 읽지 못한 롤백에도 셋 다 없습니다. 예전에는 읽기에 실패하면 "did not add" 라고 말했고, 기록이 safedeps 가 명령을 고쳐 썼다고 말하는 경우에는 그 말이 거짓이었습니다. 이제 post 훅은 플래그에 대해 아무것도 말하지 않고, 기록을 읽지 못했다는 사실을 `advisory.log` 에 남깁니다.
+
+**post 훅이 쓰는 기록은 호출이 아니라 프로젝트와 명령으로 찾습니다.** 명령은 `--ignore-scripts` 와 공백을 빼고 비교합니다. 호출을 하나씩 차례로 돌리면 호출마다 자기 기록을 씁니다. 두 세션이 한 프로젝트에서 같은 명령을 동시에 돌리거나, 그 명령의 앞선 호출이 post 훅에 닿지 못했으면(pre-guard 가 통과시킨 뒤 거부된 호출), post 훅은 다른 호출의 기록을 쓸 수 있습니다. 그러면 그 기록에서 나온 줄은 모두 다른 호출에 관한 것일 수 있습니다. 위의 세 줄, 스냅샷 줄의 `taken before this command`, `kept` 줄과 사유 줄의 명령 전 스냅샷, 설치 흔적 줄의 기준선이 그렇습니다. 확정 스냅샷이 없는 롤백은 그때 다른 호출의 스냅샷으로 되돌립니다. 테스트는 호출을 하나씩 돌리므로 이 경우를 검사하지 않습니다. 기록을 각자의 호출에 묶는 일은 다음 릴리스에서 할 예정입니다.
 
 끝나지 않은 롤백의 보고도 같은 모양입니다. 그 `Rollback snapshot:` 줄은 보고를 쓰는 시점에 프로젝트의 confirmed 기록이 그 스냅샷을 가리키는지를 롤백 메시지처럼 말합니다. `Owner:` 는 그 프로세스가 일하고 있지 않다는 것을 보인 검사입니다. 돌고 있지 않거나, 좀비이거나, 그 pid 가 나중에 시작한 다른 프로세스의 것이거나, 멈춰 있습니다. 멈춘 프로세스는 죽지 않았습니다. 프로세스를 다시 이어 주면 롤백도 이어지므로, 프로젝트를 고치기 전에 그 프로세스를 어떻게 할지 먼저 정하십시오. `Checked at the time of this report` 아래에는 `node_modules` 가 무엇인지와, 감시 대상 파일 가운데 스냅샷과 다른 것만 적힙니다. 그 파일들을 확인한 뒤에 재설치하십시오.
 

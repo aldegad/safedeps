@@ -3,7 +3,7 @@
 #
 # The oracle's green is a claim that no line the post hook printed is false or
 # outside the grammar. A check that cannot fail says nothing, so this script
-# makes it fail twenty-three ways: each mutation below puts into the hook the kind
+# makes it fail twenty-four ways: each mutation below puts into the hook the kind
 # of line review found by reading -- a clause behind a true fact, a claim with
 # no check, a line built outside the fact functions, a guessed cause, prose in
 # a rollback, a line only reorg.log carries, a line left out, a reorg.log entry
@@ -12,7 +12,8 @@
 # not the one safedeps wrote (F2), an --ignore-scripts line from the backstop,
 # which found no record of the command (F4), and a record of the rewrite that
 # holds the command as given (MarkOrig) or is not written (MarkSkip), and a
-# record the hook could not read said as "did not add" (Unread) -- and
+# record the hook could not read said as "did not add" (Unread), and two
+# calls in one second given one snapshot id again (Same) -- and
 # e2e must turn red on it, at the
 # oracle, with the reason named here. Two of them (P2, R3) passed
 # the whole suite while the check was a list of forbidden words; seven more
@@ -32,7 +33,7 @@
 # WalkOff drops the walk of node_modules, and a write only there (bun, pnpm, a
 # file inside a package) is kept.
 #
-# This is twenty-seven e2e runs, so it is not part of `npm test`. Run it when a
+# This is twenty-eight e2e runs, so it is not part of `npm test`. Run it when a
 # line the hook prints, a fact function, the oracle or the trace check changes.
 #
 #   scripts/test/report-mutations.sh            every mutation
@@ -46,7 +47,7 @@ trap 'rm -rf "${WORK}"' EXIT
 # mutation <name> sets the file, what the mutation is, the reason the oracle
 # must give, and the text to find and to put in its place. The text to find
 # occurs exactly once in the file, or the mutation is reported as not applying.
-MUTATIONS=(P2 R3 K Lie Bypass Head NoCheck Snap Cause Prose LogOnly Reasons Kept Silent JOmit RefuseSilent F1 F2 LogSilent F4 MarkOrig MarkSkip Unread
+MUTATIONS=(P2 R3 K Lie Bypass Head NoCheck Snap Cause Prose LogOnly Reasons Kept Silent JOmit RefuseSilent F1 F2 LogSilent F4 MarkOrig MarkSkip Unread Same
   TraceNever TraceAlways WalkOff)
 
 # A mutation can change a second file too (M_FILE2, M_OLD2, M_NEW2). M_AT is
@@ -284,6 +285,16 @@ $4; node_modules was restored from the confirmed snapshot
       M_RED='a write only into node_modules is a trace'
       M_OLD='  find -H "${PROJECT_DIR}/node_modules" -cnewer "${baseline}" -print -quit > "${walk}" 2>/dev/null &'
       M_NEW='  true > "${walk}" 2>/dev/null &'
+      ;;
+    Same)
+      M_FILE=scripts/safedeps-pre-guard.sh
+      M_WHY='two pre-guard calls in one project within one second given one snapshot id, the format before it was claimed per call'
+      M_RED='a pre-guard call wrote over a record that was there before it ran'
+      M_OLD='SNAPSHOT_ID=$(claim_snapshot_id)'
+      M_NEW='SNAPSHOT_ID="${TIMESTAMP}_${DIR_HASH}"; : > "${SNAPSHOT_DIR}/${SNAPSHOT_ID}_monitored_files.list"'
+      M_FILE2=scripts/safedeps-pre-guard.sh
+      M_OLD2='PENDING_BASE="${PENDING_DIR}/${PENDING_KEY}__${SNAPSHOT_ID}"'
+      M_NEW2='PENDING_BASE="${PENDING_DIR}/${PENDING_KEY}__${SNAPSHOT_ID}_$$"'
       ;;
     *) return 1 ;;
   esac

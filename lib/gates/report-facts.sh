@@ -145,12 +145,16 @@ report_changed_nothing() {
 # command the record holds and the one in the hook's input. No record file is
 # "did not add". A record file that is there and cannot be read prints nothing
 # and returns 1: it used to fall through to "did not add", which is false
-# whenever the record it could not read says safedeps wrote the command.
+# whenever the record it could not read says safedeps wrote the command. A file
+# that does not hold exactly one JSON object is one that cannot be read: an
+# empty one, which `--slurpfile` reads as no value at all, went to "did not add"
+# the same way.
 fact_inert() {
   local said=none
   if [[ -e "$1" || -L "$1" ]]; then
     said=$(printf '%s' "$2" | jq -r --slurpfile meta "$1" '
-      ($meta[0] // {}) as $m
+      (if ($meta | length) == 1 and ($meta[0] | type) == "object" then $meta[0]
+       else error("not one record") end) as $m
       | if $m.ignore_scripts_injected != true then "none"
         elif (.tool_input.command | type) == "string" and .tool_input.command == $m.updated_command then "added"
         else "asked" end' 2>/dev/null) || return 1
