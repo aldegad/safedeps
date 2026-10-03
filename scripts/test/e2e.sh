@@ -1421,12 +1421,15 @@ pass "a record the post hook cannot read gets no --ignore-scripts line, and advi
 # updated_command and was compared with null ("asked", bamdori r22 U3); a
 # v2.17.2 false does not mean no rewrite, since its write could fail and the
 # rewrite went out (U3b, koon judgment); and a string "true", a null command
-# and another version went to "did not add" or "asked". The
+# and another version went to "did not add" or "asked". A version written as
+# the string "2" and a command that is a number are not version 2 facts
+# either; no pre-guard writes them, and these rows hold the code to that
+# (bamdori r23 XStr2 passed the suite before them). The
 # pre-guard writes a version 2 record and the row rewrites it into the shape,
 # as an upgrade or a damaged file would leave it. The post hook receives the
 # command safedeps wrote. Each says no --ignore-scripts line, and advisory.log
 # names the record once.
-for unstated_shape in v2172-true v2172-false string-true null-command record-3; do
+for unstated_shape in v2172-true v2172-false string-true null-command number-command record-3 record-str2; do
   unstated_wt=$(mktemp -d "${tmp_root}/unstated-${unstated_shape}-wt.XXXXXX")
   grammar_project "${unstated_wt}"
   unstated_pre=$(grammar_pre "${unstated_wt}" "npm install fixture-parent@1.0.0")
@@ -1438,7 +1441,9 @@ for unstated_shape in v2172-true v2172-false string-true null-command record-3; 
     v2172-false) unstated_jq='del(.record, .updated_command) | .ignore_scripts_injected = false' ;;
     string-true) unstated_jq='.ignore_scripts_injected = "true"' ;;
     null-command) unstated_jq='.updated_command = null' ;;
+    number-command) unstated_jq='.updated_command = 5' ;;
     record-3) unstated_jq='.record = 3' ;;
+    record-str2) unstated_jq='.record = "2"' ;;
   esac
   jq "${unstated_jq}" "${unstated_meta}" > "${unstated_meta}.tmp" && mv -f "${unstated_meta}.tmp" "${unstated_meta}"
   printf '%s\n' "${tampered_lock}" > "${unstated_wt}/package-lock.json"
@@ -1451,7 +1456,7 @@ for unstated_shape in v2172-true v2172-false string-true null-command record-3; 
     || fail "${unstated_shape}: advisory.log names the record once"
   rm -f "$(grammar_pending "${unstated_wt}")"
 done
-pass "a record that does not state, as version 2, whether safedeps rewrote the command gets no --ignore-scripts line (v2.17.2 true and false, a string, a null command, another version)"
+pass "a record that does not state, as version 2, whether safedeps rewrote the command gets no --ignore-scripts line (v2.17.2 true and false, a string, a null or number command, another version, the version as a string)"
 
 # No record file at all says no line either; it used to be "did not add". The
 # post hook exits quietly when the meta is missing as it starts, so only a
