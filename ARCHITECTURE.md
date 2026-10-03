@@ -338,7 +338,9 @@ install done → safedeps-post-verify.sh
                  • restore lockfile from the last confirmed snapshot
                  • rm -rf node_modules; reinstall to match the ledger
                    (refused, and named, when the target is a symbolic link;
-                    npm pinned with --prefix so it cannot walk up)
+                    npm runs only when it cannot reach past the project:
+                    no linked root file, a package.json, no workspaces;
+                    and it is pinned with --prefix)
                  • append to reorg.log; message the agent
 ```
 

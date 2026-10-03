@@ -338,7 +338,9 @@ install 완료 → safedeps-post-verify.sh
                  • lockfile ← 마지막 confirmed snapshot
                  • rm -rf node_modules; ledger 와 일치하게 재설치
                    (대상이 심볼릭 링크면 거부하고 이름을 남긴다;
-                    npm 은 --prefix 로 고정해 상위로 올라가지 않는다)
+                    npm 은 프로젝트 밖에 닿을 수 없을 때만 돈다:
+                    루트 파일 링크 없음, package.json 있음, workspaces 없음;
+                    그리고 --prefix 로 고정)
                  • reorg.log 기록; 에이전트에 경고
 ```
 
