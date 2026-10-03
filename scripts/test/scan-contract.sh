@@ -1135,6 +1135,19 @@ stmts_shell_rows=(
   'exec {fd}>/dev/null echo RAN|-R-R-'
   $'0<<E echo RAN\nx\nE|RRRRR'
   $'{fd}<<E echo RAN\nx\nE|---R-'
+  # The word reads (measured 2026-10-03): an array value and a subscript are
+  # prefixes where the shell has arrays, a blank in the subscript in bash
+  # alone, a case pattern inside a substitution ends no value (bash 3.2 does
+  # not parse it there), and zsh alone reads `=(...)`, a glob qualifier in a
+  # target, a numeric range glob and a precommand modifier.
+  'a=(x y) echo RAN|RR-R-'
+  'a[1]=x echo RAN|RR-R-'
+  'a[1 + 1]=x echo RAN|R--R-'
+  'x=$(case a in a) echo f;; esac) echo RAN|-RRRR'
+  '< =(true) echo RAN|-R---'
+  '>/dev/null(N) echo RAN >&2|-R---'
+  '2>/dev/fd/<2-2> echo RAN|-R---'
+  'noglob echo RAN|-R---'
 )
 if [[ "${SAFEDEPS_STMTS_MEASURE:-}" == 1 ]]; then
   stmts_col() { case "$(uname -s)" in Darwin) printf '%s' "${1:0:3}" ;; *) printf '%s%s' "${1:3:1}" "${1:4:1}" ;; esac; }
