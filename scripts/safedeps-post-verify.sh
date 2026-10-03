@@ -435,11 +435,22 @@ cleanup_old_snapshots() {
 # a linked lockfile, a workspace outside, a file: dependency's scripts and bin
 # links -- so the rollback no longer asks npm where its hands go. `rm -rf` of a
 # real directory removes the links inside it, never what they point to.
+# Whether this is an npm project is read before the files are restored: an
+# install that created package.json and its lockfile has both removed by the
+# restore, and its node_modules is still the rollback's to remove.
+ROLLBACK_NPM_PROJECT=false
+rollback_note_npm_project() {
+  ROLLBACK_NPM_PROJECT=false
+  if [[ -f "${PROJECT_DIR}/package.json" || -f "${PROJECT_DIR}/package-lock.json" ]]; then
+    ROLLBACK_NPM_PROJECT=true
+  fi
+}
+
 rollback_node_modules() {
   local node_modules="${PROJECT_DIR}/node_modules"
 
   # Only an npm project's node_modules is the rollback's to remove.
-  [[ -f "${PROJECT_DIR}/package.json" || -f "${PROJECT_DIR}/package-lock.json" ]] || return 0
+  [[ "${ROLLBACK_NPM_PROJECT}" == true ]] || return 0
   if [[ -L "${node_modules}" ]]; then
     record_rollback_refusal "node_modules removal" "${node_modules} is a symbolic link to $(readlink "${node_modules}" 2>/dev/null || printf 'an unreadable target'); the packages the install wrote through it are still there. Remove them in the directory that owns them"
     return 0
@@ -964,6 +975,7 @@ There is no confirmed-safe snapshot for ${PROJECT_DIR} yet, so safedeps could NO
   local journal_id="backstop-${rollback_id}-$$"
   safedeps_journal_open "${journal_id}" "${PROJECT_DIR}" "${rollback_id}" \
     "${reason_str%%; }" "restoring-files"
+  rollback_note_npm_project
 
   SNAPSHOT_ID="${rollback_id}"   # so monitored_files() reads the baseline's list
   ROLLED_BACK=()
@@ -1046,6 +1058,7 @@ if [[ "${SUSPICIOUS}" == "true" ]]; then
   JOURNAL_ID="reorg-${SNAPSHOT_ID}-$$"
   safedeps_journal_open "${JOURNAL_ID}" "${PROJECT_DIR}" "${ROLLBACK_SNAPSHOT_ID}" \
     "${REASON_STR_FOR_JOURNAL%%; }" "restoring-files"
+  rollback_note_npm_project
 
   while IFS= read -r monitored_file; do
     [[ -z "${monitored_file}" ]] && continue
