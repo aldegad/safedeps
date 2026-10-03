@@ -25,8 +25,10 @@
 # be exactly those. A line only the log carries, a refusal only the log
 # carries, and reasons that differ between the two are all red. advisory.log is
 # an operational log in free form and is not read, except its two rollback
-# lines, which must repeat lines of the message, and the line that says the
-# pre-guard's record could not be read.
+# lines, which must repeat lines of the message, the line that says the
+# pre-guard's record could not be read, and the line that names a consumed
+# pending state whose snapshot has no meta file, which every such call says
+# once, with a message or without one.
 #
 # The package.json listing of node_modules is read by a method that is not the
 # hook's, because the hook and the oracle once ran the same wrong check and
@@ -88,7 +90,7 @@ ORACLE_FAILED=0
 
 # Forms the suite must show at least once.
 ORACLE_FORMS="
-head-rollback head-backstop-rollback head-backstop-none head-confirm head-journal-gone head-journal-stopped
+head-rollback head-backstop-rollback head-backstop-none head-gone-rollback head-gone-none head-confirm head-journal-gone head-journal-stopped
 snapshot-confirmed snapshot-pre snapshot-journal-confirmed snapshot-journal-pre
 restored not-restored-differs not-restored-absent not-restored-not-file removed not-removed
 refused-restore-link refused-removal-link refused-unresolved
@@ -103,7 +105,7 @@ backstop-no-confirmed backstop-no-meta
 journal owner-not-running owner-zombie owner-stopped owner-later owner-no-pid owner-no-start owner-bad-start owner-bad-opened
 journal-differs journal-gone journal-extra journal-no-list
 file-line file-line-absent
-log-rollback log-backstop log-confirm log-refused log-journal log-inert-unread log-inert-unstated
+log-rollback log-backstop log-confirm log-refused log-journal log-inert-unread log-inert-unstated log-record-gone
 "
 
 # The effect gate's prose: id | the blocks it may appear in | the most lines
@@ -789,9 +791,17 @@ oracle_line() {
     'safedeps: suspicious dependency change detected. A rollback ran.')
       oracle_block_end; O_BLOCK=rollback; O_HEAD="${line}"; oracle_count head-rollback; return 0 ;;
     'safedeps: suspicious dependency change detected; this hook found no record of this command from before it ran. A rollback ran.')
-      oracle_block_end; O_BLOCK=backstop-rollback; O_HEAD="${line}"; oracle_count head-backstop-rollback; return 0 ;;
+      oracle_block_end; O_BLOCK=backstop-rollback; O_HEAD="${line}"; oracle_count head-backstop-rollback
+      oracle_record_none; return 0 ;;
     'safedeps: suspicious dependency change detected; this hook found no record of this command from before it ran. No rollback ran.')
-      oracle_block_end; O_BLOCK=backstop-none; O_HEAD="${line}"; oracle_count head-backstop-none; return 0 ;;
+      oracle_block_end; O_BLOCK=backstop-none; O_HEAD="${line}"; oracle_count head-backstop-none
+      oracle_record_none; return 0 ;;
+    'safedeps: suspicious dependency change detected; this hook found a record of this command from before it ran, and the snapshot it names has no meta file. A rollback ran.')
+      oracle_block_end; O_BLOCK=backstop-rollback; O_HEAD="${line}"; oracle_count head-gone-rollback
+      oracle_record_gone_head; return 0 ;;
+    'safedeps: suspicious dependency change detected; this hook found a record of this command from before it ran, and the snapshot it names has no meta file. No rollback ran.')
+      oracle_block_end; O_BLOCK=backstop-none; O_HEAD="${line}"; oracle_count head-gone-none
+      oracle_record_gone_head; return 0 ;;
     'safedeps: this install was not rolled back.')
       oracle_block_end; O_BLOCK=confirm; O_HEAD="${line}"; oracle_count head-confirm; return 0 ;;
     'Detected problems:')
@@ -1141,10 +1151,52 @@ oracle_read_lines() {
   oracle_block_end
 }
 
+# oracle_record_gone <consumed pending or empty>: a pending state the hook
+# consumed whose snapshot has no meta file. The hook used to end there with
+# nothing said (bamdori r23), so the install was never judged. It now says so
+# once in advisory.log, whether or not a message follows, and the backstop
+# judges the command. The meta is tested in Python, not with the hook's -f.
+oracle_record_gone() {
+  local snap meta n=0 want a size
+  O_CONSUMED="$1" O_GONE=0
+  [[ -n "$1" ]] || return 0
+  snap=$(python3 "${ORACLE_READ}" string "$1" snapshot_id 2>/dev/null)
+  meta="${O_HOME}/snapshots/${snap}_meta.json"
+  python3 -c 'import os, sys; sys.exit(0 if os.path.isfile(sys.argv[1]) else 1)' "${meta}" && return 0
+  O_GONE=1
+  want="post-verify: the pre-guard's record ${O_HOME}/pending/${1##*/} names the snapshot ${snap}, and ${meta} is not a file; this hook set the record aside, and the command goes to the command-independent backstop"
+  size=$(cat "${O_CALL}/advisory.size" 2>/dev/null); size="${size:-0}"
+  while IFS=$'\t' read -r _ a; do
+    [[ "${a}" == "${want}" ]] && n=$(( n + 1 ))
+  done < <(tail -c +"$(( size + 1 ))" "${O_HOME}/advisory.log" 2>/dev/null)
+  O_LINE="advisory.log: ${want}"
+  if [[ "${n}" == 1 ]]; then
+    oracle_count log-record-gone
+  else
+    oracle_red "a pending state whose snapshot has no meta file was consumed, and advisory.log names it ${n} times, not once"
+  fi
+}
+# The backstop's two heads: one says no record of the command was found, and
+# no pending state was consumed; the other says one was, and its snapshot has
+# no meta file.
+oracle_record_none() {
+  [[ -z "${O_CONSUMED}" ]] || oracle_red "the head says no record was found, and the hook consumed ${O_CONSUMED##*/}"
+}
+oracle_record_gone_head() {
+  [[ "${O_GONE}" == 1 ]] || oracle_red "the head says the record's snapshot has no meta file, and the hook consumed no such record"
+}
+
 # oracle_message <call dir> <payload> <hook stdout>: reads every line.
 oracle_message() {
   local call="$1" payload="$2" out="$3" message line file consumed="" size now
   O_HOME="${SAFEDEPS_HOME:-${HOME}/.safedeps}"
+  O_CALL="${call}"
+  for file in "${call}/pending"/*.json; do
+    [[ -f "${file}" && ! -e "${O_HOME}/pending/${file##*/}" ]] || continue
+    consumed="${file}"
+    break
+  done
+  oracle_record_gone "${consumed}"
   # A call that printed nothing appended nothing to reorg.log. The post hook
   # writes an entry in four places (a rollback, a refused step, the confirm
   # warnings, an unfinished rollback's report), and each of them prints a
@@ -1152,12 +1204,12 @@ oracle_message() {
   if [[ -z "${out}" ]]; then
     size=$(cat "${call}/reorg.size" 2>/dev/null); size="${size:-0}"
     now=$(wc -c < "${O_HOME}/reorg.log" 2>/dev/null | tr -d ' '); now="${now:-0}"
-    [[ "${now}" == "${size}" ]] && return 0
+    [[ "${now}" == "${size}" ]] && { [[ "${ORACLE_FAILED}" == 0 ]]; return; }
     O_LINE=$(tail -c +"$(( size + 1 ))" "${O_HOME}/reorg.log" 2>/dev/null | head -1)
     oracle_red "reorg.log grew by $(( now - size )) bytes in a call that printed no message"
     return 1
   fi
-  O_CALL="${call}" O_DIRECT=0 O_RECORD_UNREAD=0
+  O_DIRECT=0 O_RECORD_UNREAD=0
   [[ ! -e "${call}/record-unread" ]] || O_RECORD_UNREAD=1
   O_NPM_LOG="${call}/npm.log"
   O_PAYLOAD="${payload}"
@@ -1165,11 +1217,6 @@ oracle_message() {
   O_PROJECT=$(jq -r '.cwd // empty' <<< "${payload}")
   O_PROJECT=$(oracle_phys "${O_PROJECT}")
   O_PRE="" O_META="" O_TRACE="unread" O_NODE_FILES="" O_TREE="" O_DIR_HASH=""
-  for file in "${call}/pending"/*.json; do
-    [[ -f "${file}" && ! -e "${O_HOME}/pending/${file##*/}" ]] || continue
-    consumed="${file}"
-    break
-  done
   if [[ -n "${consumed}" ]]; then
     O_PRE=$(jq -r '.snapshot_id // empty' "${consumed}")
     O_PROJECT=$(jq -r '.project_dir // empty' "${consumed}")
@@ -1178,6 +1225,9 @@ oracle_message() {
     O_NODE_FILES=$(cat "${consumed}.nodefiles")
     O_TREE=$(cat "${consumed}.tree")
     O_DIR_HASH=$(jq -r '.dir_hash // empty' "${consumed}")
+    # A snapshot with no meta file is not one the backstop restores from or
+    # compares with, so the call has no snapshot from before the command.
+    [[ "${O_GONE}" != 1 ]] || O_PRE=""
   fi
   [[ -n "${O_DIR_HASH}" ]] || O_DIR_HASH=$(oracle_dir_hash "${O_PROJECT}")
   oracle_reset
@@ -1199,7 +1249,7 @@ oracle_message() {
 # reaches. They are read as the lines of a confirm block, with no reorg.log.
 oracle_direct() {
   local line
-  O_CALL="${ORACLE_DIR}" O_DIRECT=1 O_RECORD_UNREAD=0 O_HOME="${SAFEDEPS_HOME:-${HOME}/.safedeps}" O_NPM_LOG=/dev/null
+  O_CALL="${ORACLE_DIR}" O_DIRECT=1 O_RECORD_UNREAD=0 O_CONSUMED="" O_GONE=0 O_HOME="${SAFEDEPS_HOME:-${HOME}/.safedeps}" O_NPM_LOG=/dev/null
   O_META="$1" O_PAYLOAD="$2" O_CMD=$(jq -r '.tool_input.command // empty' <<< "$2") O_PROJECT="" O_PRE="" O_TRACE="unread" O_NODE_FILES="" O_TREE="" O_DIR_HASH=""
   oracle_reset
   oracle_verdict

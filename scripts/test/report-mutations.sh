@@ -3,7 +3,7 @@
 #
 # The oracle's green is a claim that no line the post hook printed is false or
 # outside the grammar. A check that cannot fail says nothing, so this script
-# makes it fail twenty-seven ways: each mutation below puts into the hook the kind
+# makes it fail twenty-eight ways: each mutation below puts into the hook the kind
 # of line review found by reading -- a clause behind a true fact, a claim with
 # no check, a line built outside the fact functions, a guessed cause, prose in
 # a rollback, a line only reorg.log carries, a line left out, a reorg.log entry
@@ -15,8 +15,9 @@
 # record the hook could not read said as "did not add" (Unread), two
 # calls in one second given one snapshot id again (Same), a record that does
 # not state a fact answered by a default again (Default), a record of
-# another version read as this one (Version), and the version read as a string
-# (XStr2, bamdori r23) -- and
+# another version read as this one (Version), the version read as a string
+# (XStr2, bamdori r23), and a pending state whose snapshot has no meta file
+# ending the hook with nothing said again (Gone) -- and
 # e2e must turn red on it, at the
 # oracle, with the reason named here. Two of them (P2, R3) passed
 # the whole suite while the check was a list of forbidden words; seven more
@@ -28,7 +29,7 @@
 # files), mutated, run and thrown away. The unmutated copy runs first and must
 # be green, so a red below is the mutation's and not the machine's.
 #
-# This is twenty-eight e2e runs, so it is not part of `npm test`. Run it when a line the
+# This is twenty-nine e2e runs, so it is not part of `npm test`. Run it when a line the
 # hook prints, a fact function or the oracle changes.
 #
 #   scripts/test/report-mutations.sh            every mutation
@@ -42,7 +43,7 @@ trap 'rm -rf "${WORK}"' EXIT
 # mutation <name> sets the file, what the mutation is, the reason the oracle
 # must give, and the text to find and to put in its place. The text to find
 # occurs exactly once in the file, or the mutation is reported as not applying.
-MUTATIONS=(P2 R3 K Lie Bypass Head NoCheck Snap Cause Prose LogOnly Reasons Kept Silent JOmit RefuseSilent F1 F2 LogSilent F4 MarkOrig MarkSkip Unread Same Default Version XStr2)
+MUTATIONS=(P2 R3 K Lie Bypass Head NoCheck Snap Cause Prose LogOnly Reasons Kept Silent JOmit RefuseSilent F1 F2 LogSilent F4 MarkOrig MarkSkip Unread Same Default Version XStr2 Gone)
 
 # A mutation can change a second file too (M_FILE2, M_OLD2, M_NEW2).
 
@@ -285,6 +286,19 @@ $4; node_modules was restored from the confirmed snapshot
       M_RED="an --ignore-scripts line, and the pre-guard's record does not state it as a version 2 record"
       M_OLD='      | if $m.record != 2 then "unstated"'
       M_NEW='      | if ($m.record | tostring) != "2" then "unstated"'
+      ;;
+    Gone)
+      M_FILE=scripts/safedeps-post-verify.sh
+      M_WHY='a pending state whose snapshot has no meta file ends the hook with nothing said, as it did from e315244'
+      M_RED='a pending state whose snapshot has no meta file was consumed, and advisory.log names it 0 times, not once'
+      M_OLD='  BACKSTOP_INSTALL=true
+  BACKSTOP_RECORD_GONE=true
+'
+      M_NEW='  exit 0
+'
+      M_FILE2=scripts/safedeps-post-verify.sh
+      M_OLD2='  log_advisory "post-verify: the pre-guard'"'"'s record ${RECORD_PATH} names the snapshot'
+      M_NEW2='  : "post-verify: the pre-guard'"'"'s record ${RECORD_PATH} names the snapshot'
       ;;
     *) return 1 ;;
   esac

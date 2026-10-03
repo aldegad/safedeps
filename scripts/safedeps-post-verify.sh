@@ -1447,6 +1447,7 @@ if [[ -n "${PENDING_FILE}" ]]; then
   SNAPSHOT_ID=$(echo "${CURRENT_STATE}" | jq -r '.snapshot_id // empty')
   PROJECT_DIR=$(echo "${CURRENT_STATE}" | jq -r '.project_dir // empty')
   DIR_HASH=$(echo "${CURRENT_STATE}" | jq -r '.dir_hash // empty')
+  RECORD_PATH="${PENDING_FILE}"
   rm -f "${PENDING_FILE}"
 elif [[ -f "${GUARD_DIR}/current_state" ]]; then
   CURRENT_STATE=$(cat "${GUARD_DIR}/current_state")
@@ -1457,6 +1458,7 @@ elif [[ -f "${GUARD_DIR}/current_state" ]]; then
     log_advisory "post-verify SKIP: legacy current_state did not match this Bash command/cwd (post_cwd=${POST_CWD}, pending_project=${PROJECT_DIR:-unknown}) — bounded no-op."
     exit 0
   fi
+  RECORD_PATH="${GUARD_DIR}/current_state"
   rm -f "${GUARD_DIR}/current_state"
 elif [[ -f "${GUARD_DIR}/current_snapshot_id" ]]; then
   SNAPSHOT_ID=$(cat "${GUARD_DIR}/current_snapshot_id")
@@ -1466,6 +1468,7 @@ elif [[ -f "${GUARD_DIR}/current_snapshot_id" ]]; then
     log_advisory "post-verify SKIP: legacy current_snapshot_id did not match this Bash command/cwd (post_cwd=${POST_CWD}, pending_project=${PROJECT_DIR:-unknown}) — bounded no-op."
     exit 0
   fi
+  RECORD_PATH="${GUARD_DIR}/current_snapshot_id"
   rm -f "${GUARD_DIR}/current_snapshot_id" "${GUARD_DIR}/current_project_dir"
 else
   # No pending state for this command (PreToolUse never recognized it — a parser
@@ -1495,11 +1498,24 @@ if [[ -z "${DIR_HASH:-}" ]]; then
 fi
 release_state_lock; STATE_LOCK_HELD=false
 
-# Verify snapshot exists (skipped in command-independent backstop mode, which has
-# no pre-install snapshot — it diffs the live closure against the confirmed baseline).
+# The snapshot the record names. The backstop has none: it diffs the live
+# closure against the confirmed baseline.
+#
+# A record whose snapshot has no meta file used to end the hook here, with no
+# message and no log line, so the install it recorded was never judged (bamdori
+# r23: an unapproved lockfile passed with exit 0 and nothing said). The pending
+# state outlives the snapshot: pending files last 24 hours, and the snapshot
+# cleanup prunes metas past the ten newest. So the record, already removed
+# above, is set aside, advisory.log names it, and the backstop judges the
+# command as it judges one with no record. Its message says which: the record
+# was found, and its snapshot has no meta file.
 META_FILE="${SNAPSHOT_DIR}/${SNAPSHOT_ID}_meta.json"
 if [[ "${BACKSTOP_INSTALL:-false}" != "true" && ! -f "${META_FILE}" ]]; then
-  exit 0
+  log_advisory "post-verify: the pre-guard's record ${RECORD_PATH} names the snapshot ${SNAPSHOT_ID}, and ${META_FILE} is not a file; this hook set the record aside, and the command goes to the command-independent backstop"
+  BACKSTOP_INSTALL=true
+  BACKSTOP_RECORD_GONE=true
+  SNAPSHOT_ID=""
+  META_FILE="${SNAPSHOT_DIR}/_meta.json"
 fi
 
 # --- Begin Reorg Verification ---
@@ -2363,6 +2379,17 @@ check_npm_effect_closure() {
 }
 
 # Why the backstop rolled nothing back, from the two tests it ran.
+# What the backstop's head says about the record of this command: none was
+# found, or one was and the snapshot it names has no meta file, which is what
+# sent it here.
+backstop_record_clause() {
+  if [[ "${BACKSTOP_RECORD_GONE:-false}" == true ]]; then
+    printf 'this hook found a record of this command from before it ran, and the snapshot it names has no meta file'
+  else
+    printf 'this hook found no record of this command from before it ran'
+  fi
+}
+
 backstop_no_baseline_line() {
   if [[ -z "$1" ]]; then
     printf 'no confirmed snapshot is recorded for %s' "${PROJECT_DIR}"
@@ -2391,7 +2418,8 @@ report_snapshot_line() {
 # far as this hook saw.
 #
 # The last one is said only where this hook found the pre-guard's record of
-# this command. The backstop runs because it found none, and "did not add"
+# this command. The backstop runs because it found none, or found a pending
+# state whose snapshot, the record that line reads, has no meta file. "did not add"
 # said there was false whenever the record existed under a key this hook did
 # not compute (`sh -c 'npm ci'`, rewritten, kept its pending state under
 # another key; bamdori r18 F4). Without the record there is nothing to say
@@ -2445,7 +2473,8 @@ ${details}"
 }
 
 run_command_independent_backstop() {
-  # Reached when PreToolUse left no pending state for an install-looking command.
+  # Reached when PreToolUse left no pending state for an install-looking command,
+  # or left one whose snapshot has no meta file (BACKSTOP_RECORD_GONE).
   # Detection is command-independent (the npm closure check reads the live
   # package-lock.json, not the command text); automatic rollback still needs a
   # prior confirmed-safe snapshot to restore from. Never silent — every path logs.
@@ -2469,7 +2498,7 @@ run_command_independent_backstop() {
   if [[ -z "${rollback_id}" ]] || [[ ! -f "${SNAPSHOT_DIR}/${rollback_id}_meta.json" ]]; then
     # Detected, but no known-good baseline to restore — fail LOUD, never silent.
     log_advisory "post-verify BACKSTOP FLAGGED (no baseline): parser-missed install in ${PROJECT_DIR} — ${reason_str%%; }. No confirmed snapshot to roll back to; left in place."
-    emit_system_message "safedeps: suspicious dependency change detected; this hook found no record of this command from before it ran. No rollback ran.
+    emit_system_message "safedeps: suspicious dependency change detected; $(backstop_record_clause). No rollback ran.
 
 Detected problems:
 ${reason_str%%; }
@@ -2502,7 +2531,7 @@ $(backstop_no_baseline_line "${rollback_id}")"
   report_rollback_tail
 
   report_rollback "REORG executed (command-independent backstop)" \
-    "safedeps: suspicious dependency change detected; this hook found no record of this command from before it ran. A rollback ran." \
+    "safedeps: suspicious dependency change detected; $(backstop_record_clause). A rollback ran." \
     "${rollback_id}" "${reason_str%%; }"
 
   # The rollback finished and is about to report itself, so there is nothing

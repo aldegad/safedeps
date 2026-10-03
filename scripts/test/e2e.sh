@@ -1459,10 +1459,10 @@ done
 pass "a record that does not state, as version 2, whether safedeps rewrote the command gets no --ignore-scripts line (v2.17.2 true and false, a string, a null or number command, another version, the version as a string)"
 
 # No record file at all says no line either; it used to be "did not add". The
-# post hook exits quietly when the meta is missing as it starts, so only a
-# record that goes between that check and the report reaches the fact
-# functions without one; the row calls them directly, as the unresolved
-# directory row does.
+# post hook sends a pending state whose meta is missing as it starts to the
+# backstop, which says no --ignore-scripts line, so only a record that goes
+# between that check and the report reaches the fact functions without one;
+# the row calls them directly, as the unresolved directory row does.
 nofile_meta="${tmp_root}/nofile-meta.json"
 nofile_log="${tmp_root}/nofile-advisory.log"
 nofile_input='{"tool_name":"Bash","tool_input":{"command":"npm install x --ignore-scripts"}}'
@@ -1512,6 +1512,81 @@ grep -q 'A rollback ran\.' <<< "$(post_message "${twoobj_post}")" \
   || fail "a record that is two objects is said in advisory.log once"
 rm -f "$(grammar_pending "${twoobj_wt}")"
 pass "a record that is not one JSON object gets no --ignore-scripts line, and advisory.log says it could not be read"
+
+# A pending state whose snapshot has no meta file. The post hook used to exit
+# there with nothing said, so the install was never judged (bamdori r23, as
+# old as e315244): an unapproved lockfile passed with exit 0, no output and no
+# advisory.log line. Pending files last 24 hours and the snapshot cleanup
+# prunes metas past the ten newest, so the shape is a real one. Now
+# advisory.log names the record, the record is set aside, and the backstop
+# judges the command, with a head that says the record was found and its
+# snapshot has no meta file. The oracle holds the advisory line once per such
+# call and each head to the record it claims.
+gone_meta_of() { printf '%s/snapshots/%s_meta.json' "${SAFEDEPS_HOME}" "$(jq -r '.snapshot_id' "$1")"; }
+gone_line_of() {
+  printf "post-verify: the pre-guard's record %s names the snapshot %s, and %s is not a file; this hook set the record aside, and the command goes to the command-independent backstop" \
+    "$1" "$(jq -r '.snapshot_id' "$1")" "$(gone_meta_of "$1")"
+}
+
+# A: the meta goes after the pre-guard, and the install changed nothing the
+# backstop rejects. It is judged clean, and advisory.log says both.
+gone_a_wt=$(mktemp -d "${tmp_root}/gone-a-wt.XXXXXX")
+grammar_project "${gone_a_wt}"
+grammar_pre "${gone_a_wt}" "npm install fixture-parent@1.0.0" > /dev/null
+gone_a_pending=$(grammar_pending "${gone_a_wt}")
+rm -f "$(gone_meta_of "${gone_a_pending}")"
+gone_a_line=$(gone_line_of "${gone_a_pending}")
+gone_a_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${gone_a_wt}" "npm install fixture-parent@1.0.0 --ignore-scripts")
+[[ "$(grep -cF "${gone_a_line}" "${SAFEDEPS_HOME}/advisory.log")" == 1 ]] \
+  || fail "A: advisory.log names the record whose snapshot has no meta file once"
+grep -qF "post-verify BACKSTOP clean: a parser-missed install in $(cd -P "${gone_a_wt}" && pwd -P) passed" "${SAFEDEPS_HOME}/advisory.log" \
+  || fail "A: the backstop judges the install and says it passed (${gone_a_post})"
+[[ ! -e "${gone_a_pending}" ]] || fail "A: the record is set aside"
+pass "a record whose snapshot has no meta file is named in advisory.log, and the backstop judges the install"
+
+# B: two pre-guard calls of the same command in one project, the first
+# record's meta gone, and an unapproved lockfile. The post hook consumes the
+# first record, as the glob orders it. With no confirmed snapshot the backstop
+# flags the install and rolls nothing back; it used to pass with nothing said.
+gone_b_wt=$(mktemp -d "${tmp_root}/gone-b-wt.XXXXXX")
+grammar_project "${gone_b_wt}"
+grammar_pre "${gone_b_wt}" "npm install fixture-parent@1.0.0" > /dev/null
+grammar_pre "${gone_b_wt}" "npm install fixture-parent@1.0.0" > /dev/null
+gone_b_pending=$(grammar_pending "${gone_b_wt}")
+[[ "$(grep -lF "\"$(cd -P "${gone_b_wt}" && pwd -P)\"" "${SAFEDEPS_HOME}/pending"/*.json | wc -l | tr -d ' ')" == 2 ]] \
+  || fail "B: the two pre-guard calls leave a record each"
+rm -f "$(gone_meta_of "${gone_b_pending}")"
+gone_b_line=$(gone_line_of "${gone_b_pending}")
+printf '%s\n' "${tampered_lock}" > "${gone_b_wt}/package-lock.json"
+gone_b_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${gone_b_wt}" "npm install fixture-parent@1.0.0 --ignore-scripts")
+grep -qx 'safedeps: suspicious dependency change detected; this hook found a record of this command from before it ran, and the snapshot it names has no meta file. No rollback ran.' <<< "$(post_message "${gone_b_post}")" \
+  || fail "B: the backstop flags the unapproved lockfile, and says the record was found and its snapshot has no meta file (${gone_b_post})"
+[[ "$(grep -cF "${gone_b_line}" "${SAFEDEPS_HOME}/advisory.log")" == 1 ]] \
+  || fail "B: advisory.log names the record whose snapshot has no meta file once"
+grep -qF "post-verify BACKSTOP FLAGGED (no baseline): parser-missed install in $(cd -P "${gone_b_wt}" && pwd -P)" "${SAFEDEPS_HOME}/advisory.log" \
+  || fail "B: advisory.log says the backstop flagged the install"
+[[ ! -e "${gone_b_pending}" ]] || fail "B: the record is set aside"
+for gone_b_left in $(grep -lF "\"$(cd -P "${gone_b_wt}" && pwd -P)\"" "${SAFEDEPS_HOME}/pending"/*.json); do rm -f "${gone_b_left}"; done
+pass "a record whose snapshot has no meta file goes to the backstop, which flags an unapproved lockfile"
+
+# B with a confirmed snapshot: the backstop rolls back to it, under the same head.
+gone_c_wt=$(mktemp -d "${tmp_root}/gone-c-wt.XXXXXX")
+grammar_project "${gone_c_wt}"
+grammar_pre "${gone_c_wt}" "npm install fixture-parent@1.0.0" > /dev/null
+touch "${gone_c_wt}/package-lock.json"
+gone_c_first=$(PATH="${stub_bin}:${PATH}" grammar_post "${gone_c_wt}" "npm install fixture-parent@1.0.0 --ignore-scripts")
+[[ -z "${gone_c_first}" ]] || fail "C: the project has a confirmed snapshot (${gone_c_first})"
+grammar_pre "${gone_c_wt}" "npm install fixture-parent@1.0.0" > /dev/null
+gone_c_pending=$(grammar_pending "${gone_c_wt}")
+rm -f "$(gone_meta_of "${gone_c_pending}")"
+printf '%s\n' "${tampered_lock}" > "${gone_c_wt}/package-lock.json"
+gone_c_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${gone_c_wt}" "npm install fixture-parent@1.0.0 --ignore-scripts")
+grep -qx 'safedeps: suspicious dependency change detected; this hook found a record of this command from before it ran, and the snapshot it names has no meta file. A rollback ran.' <<< "$(post_message "${gone_c_post}")" \
+  || fail "C: the backstop rolls back, and says the record was found and its snapshot has no meta file (${gone_c_post})"
+! grep -q -- '--ignore-scripts' <<< "$(post_message "${gone_c_post}")" \
+  || fail "C: the backstop says nothing about --ignore-scripts (${gone_c_post})"
+cmp -s "${gone_c_wt}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "C: the backstop restores the confirmed lockfile"
+pass "a record whose snapshot has no meta file goes to the backstop, which rolls back to a confirmed snapshot"
 
 # Two pre-guard calls in one project within one second have a snapshot each.
 # The id was `${TIMESTAMP}_${DIR_HASH}`, the same for both, so the second call
