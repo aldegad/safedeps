@@ -298,6 +298,10 @@ run_install() {
   # in the same directory would run it and consume that record (bamdori r19 X1).
   exec_command=""
   [[ -z "${pre}" || "${engine}" == crossed ]] || exec_command=$(jq -r '.hookSpecificOutput.updatedInput.command // empty' <<< "${pre}")
+  # The release floor (lib/release-floor.sh), for a battery that asks for it.
+  if [[ "${NPM_SANDBOX_RELEASE_FLOOR:-false}" == true && "${engine}" == claude ]]; then
+    release_floor_check "${payload}" "${exec_command}" "${CASE_HOME}" "${tmp_root}" || true
+  fi
   [[ -n "${exec_command}" ]] || exec_command="${command}"
   CASE_EXEC="${exec_command}"
   if [[ "${engine}" == claude && "${exec_command}" != *--ignore-scripts* ]]; then

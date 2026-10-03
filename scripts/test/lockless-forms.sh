@@ -44,6 +44,11 @@ NPM_SANDBOX_NAME=lockless
 NPM_SANDBOX_SCRIPT_RE='lockless-forms\.sh'
 # shellcheck source=lib/npm-sandbox.sh
 source "${ROOT_DIR}/scripts/test/lib/npm-sandbox.sh"
+# shellcheck source=lib/release-floor.sh
+source "${ROOT_DIR}/scripts/test/lib/release-floor.sh"
+NPM_SANDBOX_RELEASE_FLOOR=true
+RELEASE_FLOOR_FAILS="${tmp_root}/release-floor.fails"
+: > "${RELEASE_FLOOR_FAILS}"
 
 
 # --- 1. Installs the effect gate now reads ------------------------------------
@@ -860,7 +865,7 @@ do
       # npm is not asked which registry an install inside `sh -c` fetches
       # from, so the rebuild is withheld with a warning; the install stays
       # inert either way.
-      [[ -z "${CASE_RAN}" ]] && grep -q 'install scripts were not run' <<< "${CASE_POST}" \
+      [[ -z "${CASE_RAN}" ]] && grep -q 'did not run npm rebuild' <<< "${CASE_POST}" \
         || fail "an inert install the gate cannot ask npm about is not rebuilt, and the user is told: ${form} (post: ${CASE_POST:-<quiet>})"
     else
       grep -q '^sd-approved@[^	]*	install' <<< "${CASE_RAN}" \
@@ -896,7 +901,7 @@ lock_victim() { (cd "${CASE_PROJECT}" && npm install sd-victim@1.0.0 --ignore-sc
 for row in \
   "npm install sd-approved@1.0.0 --cache && echo ok|withheld||" \
   "npm install sd-approved@1.0.0 --cache|withheld||" \
-  "npm install sd-approved@1.0.0 -C|withheld||" \
+  "npm install sd-approved@1.0.0 -C|elsewhere||" \
   "npm ci \$(printf -- --)|unverified|lock_approved|" \
   "npm install sd-approved@1.0.0 \$FLAGS|unverified||FLAGS=--no-ignore-scripts" \
   "npm install sd-approved@1.0.0 \$FLAGS|unverified||FLAGS=--cache" \
@@ -919,20 +924,31 @@ do
   # created in the project while the gate judged the command. (Under
   # FLAGS=--cache the install itself takes the trailing flag as its cache,
   # which is the command's doing and the reason the flag is also after the
-  # verb.)
+  # verb.) A one-statement command also keeps the release's flag at its end,
+  # and after a trailing `--cache` the install takes that flag as its cache
+  # directory and makes `--ignore-scripts` in the project, as the release's
+  # rewrite did: that one is the install's, not the ask's.
   if [[ "${want}" == withheld ]]; then
-    [[ -z "$(find "${CASE_PROJECT}" -maxdepth 1 -name '-*' -print -quit)" ]] \
-      || fail "asking npm about the install makes nothing in the project: ${form} ($(find "${CASE_PROJECT}" -maxdepth 1 -name '-*' | paste -sd, -))"
+    [[ -z "$(find "${CASE_PROJECT}" -maxdepth 1 -name '-*' ! -name '--ignore-scripts' -print -quit)" ]] \
+      || fail "asking npm about the install makes nothing in the project: ${form} ($(find "${CASE_PROJECT}" -maxdepth 1 -name '-*' ! -name '--ignore-scripts' | paste -sd, -))"
   fi
   case "${want}" in
+    elsewhere)
+      # The release's flag at the end of a one-statement command is `-C`'s
+      # value, so npm installs into ./--ignore-scripts, as the release's
+      # rewrite did. No script runs (the flags before it stand), and the gate,
+      # which reads the project, says it saw no install trace there.
+      [[ -z "${CASE_RAN}" ]] && grep -q 'did not run npm rebuild: no install trace in' <<< "${CASE_POST}" \
+        || fail "an install the release's flag sends elsewhere runs no script and is reported as leaving no trace: ${form} (post: ${CASE_POST:-<quiet>})"
+      ;;
     withheld)
-      [[ -z "${CASE_RAN}" ]] && grep -q 'install scripts were not run' <<< "${CASE_POST}" \
+      [[ -z "${CASE_RAN}" ]] && grep -q 'did not run npm rebuild' <<< "${CASE_POST}" \
         || fail "an inert install npm was not asked about is not rebuilt, and the user is told: ${form} (post: ${CASE_POST:-<quiet>})"
       ;;
     unverified)
       # Nobody read whether npm kept the flag, so the post hook does not say
       # the install's scripts did not run.
-      [[ -z "${CASE_RAN}" ]] && grep -q 'could not read whether npm kept the --ignore-scripts' <<< "${CASE_POST}" \
+      [[ -z "${CASE_RAN}" ]] && grep -q 'could not read where npm keeps the --ignore-scripts it added' <<< "${CASE_POST}" \
         && ! grep -q 'install scripts were not run' <<< "${CASE_POST}" \
         || fail "an install whose flag nobody read is not rebuilt, and the user is told its scripts may have run: ${form} (post: ${CASE_POST:-<quiet>})"
       ;;
@@ -999,9 +1015,10 @@ pass "an install holding a word any shell expansion decides runs no script while
 # the words around the flags undo both: here the substitution splits into an
 # override and a value option that takes the trailing flag. The record says so
 # before the command runs; the post hook said "install scripts were not run",
-# and a rollback with no confirmed snapshot said "no install script was run",
-# because the meta recorded only that the flag was put in. It now records
-# whether the flag was read, and the post hook says the scripts may have run.
+# and a rollback with no confirmed snapshot said "no install script was run".
+# No line says that any more: a line says what safedeps did. The meta records
+# that the flag went in unread (ignore_scripts_unread), and that adds the one
+# warning that the install's own scripts may have run.
 # The meta is read between the install and the post hook, which consumes it.
 capture_meta() { CASE_META=$(cat "${CASE_HOME}"/snapshots/*_meta.json 2>/dev/null) || CASE_META=""; }
 for row in \
@@ -1014,19 +1031,19 @@ do
   : > "${MARKS}"
   CASE_META=""
   run_install "${form}" claude capture_meta
-  jq -e '.ignore_scripts_injected == true and .ignore_scripts_verified == false' <<< "${CASE_META}" >/dev/null \
+  jq -e '.ignore_scripts_injected == true and .ignore_scripts_unread == true' <<< "${CASE_META}" >/dev/null \
     || fail "the meta records that nobody read the flag: ${form} (${setup}) (meta: ${CASE_META:-<none>})"
   ! grep -qE 'install scripts were not run|no install script was run' <<< "${CASE_POST}" \
     || fail "the post hook does not say no install script ran: ${form} (${setup}) (post: ${CASE_POST})"
   if [[ "${setup}" == lock_victim ]]; then
-    rolled_back && grep -q "the install's own scripts may have run, the rejected package's included" <<< "${CASE_POST}" \
-      || fail "the rollback says the rejected package's scripts may have run: ${form} (post: ${CASE_POST})"
+    rolled_back && grep -q "could not read where npm keeps the --ignore-scripts it added" <<< "${CASE_POST}" \
+      || fail "the rollback says the install's own scripts may have run: ${form} (post: ${CASE_POST})"
   else
-    grep -q 'could not read whether npm kept the --ignore-scripts' <<< "${CASE_POST}" \
+    grep -q 'could not read where npm keeps the --ignore-scripts it added' <<< "${CASE_POST}" \
       || fail "the post hook says the install's scripts may have run: ${form} (post: ${CASE_POST:-<quiet>})"
   fi
 done
-pass "the post hook says no install script ran only when the flag was read; otherwise it says they may have run"
+pass "no post hook line says no install script ran, and one whose flag went in unread says its scripts may have run"
 
 # --- 11d. The flag after the verb is a floor under the reading --------------------------
 # Every rewritten install also gets the flag right after its verb, where the
@@ -1048,6 +1065,10 @@ do
   [[ -e "${CASE_PROJECT}/node_modules/sd-approved" ]] || fail "an install that carries the flag twice installs: ${form}"
 done
 pass "npm reads the flag after the verb and the flag after the last argument as one, and the one after the verb stands when a later word takes the other"
+
+# --- every rewrite holds the release's -------------------------------------------------
+release_floor_settle
+pass "deleting flags the hook inserted gives the release's rewrite, for every install this battery rewrites"
 
 # --- the fixture never left the machine ---------------------------------------------------
 npm_sandbox_registry_was_local

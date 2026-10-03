@@ -171,7 +171,19 @@ def said(path, received_path):
     return 0
 
 
+def unread(path):
+    """1 when a version 2 record says safedeps rewrote the command and an
+    install in it holds a word the shell decides at run time
+    (ignore_scripts_unread, the JSON true); 0 otherwise."""
+    kind, _ = record(path)
+    meta = load(path) if kind == "wrote" else None
+    emit("1\n" if isinstance(meta, dict) and meta.get("ignore_scripts_unread") is True else "0\n")
+    return 0
+
+
 def main():
+    if sys.argv[1] == "unread":
+        return unread(sys.argv[2])
     if sys.argv[1] == "string":
         return string(sys.argv[2], sys.argv[3:])
     if sys.argv[1] == "wrote":
