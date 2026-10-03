@@ -5312,7 +5312,6 @@
     "cls": "R",
     "label": "operator &>T (both) at data-echo",
     "text": "echo &>/dev/null @@HEAD@@ install evil==6.6.6\n",
-    "data": true,
     "measured": {
       "bash": "-",
       "zsh": "-",
@@ -5331,7 +5330,6 @@
     "cls": "R",
     "label": "operator &>T (both) at data-lead",
     "text": "&>/dev/null echo @@HEAD@@ install evil==6.6.6\n",
-    "data": true,
     "measured": {
       "bash": "-",
       "zsh": "-",
@@ -5343,8 +5341,7 @@
         "bash": "-",
         "dash": "-!"
       }
-    },
-    "gate": "pass"
+    }
   },
   {
     "id": "RG-bothappend-pre",
@@ -5693,7 +5690,6 @@
     "cls": "R",
     "label": "operator &>>T (bothappend) at data-echo",
     "text": "echo &>>/dev/null @@HEAD@@ install evil==6.6.6\n",
-    "data": true,
     "measured": {
       "bash": "-!",
       "zsh": "-",
@@ -5712,7 +5708,6 @@
     "cls": "R",
     "label": "operator &>>T (bothappend) at data-lead",
     "text": "&>>/dev/null echo @@HEAD@@ install evil==6.6.6\n",
-    "data": true,
     "measured": {
       "bash": "-!",
       "zsh": "-",
@@ -5724,8 +5719,7 @@
         "bash": "-",
         "dash": "-!"
       }
-    },
-    "gate": "pass"
+    }
   },
   {
     "id": "RG-n-out-pre",
@@ -15242,7 +15236,6 @@
     "cls": "R",
     "label": "operator &>|T (z-bothbar) at data-echo",
     "text": "echo &>|/dev/null @@HEAD@@ install evil==6.6.6\n",
-    "data": true,
     "measured": {
       "bash": "-!",
       "zsh": "-",
@@ -15261,7 +15254,6 @@
     "cls": "R",
     "label": "operator &>|T (z-bothbar) at data-lead",
     "text": "&>|/dev/null echo @@HEAD@@ install evil==6.6.6\n",
-    "data": true,
     "measured": {
       "bash": "-!",
       "zsh": "-",
@@ -15273,8 +15265,7 @@
         "bash": "-!",
         "dash": "-!"
       }
-    },
-    "gate": "pass"
+    }
   },
   {
     "id": "RG-z-bothbang-pre",
@@ -15623,7 +15614,6 @@
     "cls": "R",
     "label": "operator &>!T (z-bothbang) at data-echo",
     "text": "echo &>!/dev/null @@HEAD@@ install evil==6.6.6\n",
-    "data": true,
     "measured": {
       "bash": "-",
       "zsh": "-",
@@ -15635,15 +15625,13 @@
         "bash": "-",
         "dash": "-"
       }
-    },
-    "gate": "pass"
+    }
   },
   {
     "id": "RG-z-bothbang-data-lead",
     "cls": "R",
     "label": "operator &>!T (z-bothbang) at data-lead",
     "text": "&>!/dev/null echo @@HEAD@@ install evil==6.6.6\n",
-    "data": true,
     "measured": {
       "bash": "-",
       "zsh": "-",
@@ -15655,8 +15643,7 @@
         "bash": "-",
         "dash": "-!"
       }
-    },
-    "gate": "pass"
+    }
   },
   {
     "id": "RG-z-dupbar-pre",
@@ -17915,7 +17902,6 @@
     "cls": "R",
     "label": "operator &>>|T (z-bothappendbar) at data-echo",
     "text": "echo &>>|/dev/null @@HEAD@@ install evil==6.6.6\n",
-    "data": true,
     "measured": {
       "bash": "-!",
       "zsh": "-",
@@ -17927,15 +17913,13 @@
         "bash": "-!",
         "dash": "-!"
       }
-    },
-    "gate": "pass"
+    }
   },
   {
     "id": "RG-z-bothappendbar-data-lead",
     "cls": "R",
     "label": "operator &>>|T (z-bothappendbar) at data-lead",
     "text": "&>>|/dev/null echo @@HEAD@@ install evil==6.6.6\n",
-    "data": true,
     "measured": {
       "bash": "-!",
       "zsh": "-",
@@ -17947,8 +17931,7 @@
         "bash": "-!",
         "dash": "-!"
       }
-    },
-    "gate": "pass"
+    }
   },
   {
     "id": "RG-z-bothappendbang-pre",
@@ -18297,7 +18280,6 @@
     "cls": "R",
     "label": "operator &>>!T (z-bothappendbang) at data-echo",
     "text": "echo &>>!/dev/null @@HEAD@@ install evil==6.6.6\n",
-    "data": true,
     "measured": {
       "bash": "-!",
       "zsh": "-",
@@ -18309,15 +18291,13 @@
         "bash": "-",
         "dash": "-"
       }
-    },
-    "gate": "pass"
+    }
   },
   {
     "id": "RG-z-bothappendbang-data-lead",
     "cls": "R",
     "label": "operator &>>!T (z-bothappendbang) at data-lead",
     "text": "&>>!/dev/null echo @@HEAD@@ install evil==6.6.6\n",
-    "data": true,
     "measured": {
       "bash": "-!",
       "zsh": "-",
@@ -18329,8 +18309,7 @@
         "bash": "-",
         "dash": "-!"
       }
-    },
-    "gate": "pass"
+    }
   },
   {
     "id": "RG-z-bang-blank-pre",

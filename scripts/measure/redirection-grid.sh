@@ -182,8 +182,12 @@ generate() {
       redir="${spell//T/${target}}"
       redir="${redir//B/E}"
       while IFS=$'\t' read -r pid tpl; do
+        # An operator that starts with `&>` is no data place in dash, which
+        # ends the command at the `&` and reads the install as the next one:
+        # held to a pass, `echo &>!/dev/null pip install x` would demand that
+        # the gate not read a command dash runs whenever the target lets it.
         form "RG-${op}-${pid}" "operator ${spell} (${op}) at ${pid}" "${redir}" "${tpl}" \
-          "$([[ "${pid}" == data-* ]] && echo true || echo false)"
+          "$([[ "${pid}" == data-* && "${spell}" != '&>'* ]] && echo true || echo false)"
       done <<< "${PLACES}"
     done <<< "${OPERATORS}"
     while IFS=$'\t' read -r tid ttext; do
