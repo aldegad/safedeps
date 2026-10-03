@@ -33,6 +33,7 @@ bash -n lib/gates/scan.sh
 bash -n lib/gates/audit.sh
 bash -n lib/gates/hooks.sh
 bash -n lib/gates/doctor.sh
+bash -n lib/gates/npm-reach.sh
 pass "bash syntax"
 
 node --check scripts/install/install-safedeps-hooks.mjs >/dev/null

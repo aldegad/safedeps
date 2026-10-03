@@ -57,6 +57,8 @@ source "${SAFEDEPS_REPO_DIR}/lib/ledger/ledger.sh"
 source "${SAFEDEPS_REPO_DIR}/lib/providers/providers.sh"
 # shellcheck source=../lib/npm/closure.sh
 source "${SAFEDEPS_REPO_DIR}/lib/npm/closure.sh"
+# shellcheck source=../lib/gates/npm-reach.sh
+source "${SAFEDEPS_REPO_DIR}/lib/gates/npm-reach.sh"
 # shellcheck source=../lib/gates/rollback-journal.sh
 source "${SAFEDEPS_REPO_DIR}/lib/gates/rollback-journal.sh"
 
@@ -227,42 +229,10 @@ ROLLBACK_REFUSED=$'\n'
 # global tree.
 SAFEDEPS_NPM_PROJECT_FLAGS=(--global=false --location=project)
 
-# project_npm_blocker: prints why the rebuild after a verified inert install
-# must not run npm in the project, or nothing when it may. npm reaches past the
-# files it is pointed at in these ways, and each one is refused here rather
-# than predicted:
-# - it reads and writes package.json, the lockfiles and node_modules at the
-#   root, and follows a link among them (a fallback `npm install` rewrote a
-#   linked lockfile after the restore of that lockfile had been refused);
-# - without a package.json it walks up and works in an enclosing project;
-# - `npm ci` empties the node_modules of every workspace, and a workspace may
-#   lie outside the project (`"workspaces": ["../shared"]`). Which directories
-#   those are is npm's to say, and npm cannot say before the tree is installed,
-#   so a project that declares workspaces is not reinstalled automatically.
+# The rebuild after a verified inert install asks the same judgment the
+# rollback's advice asks (lib/gates/npm-reach.sh).
 project_npm_blocker() {
-  local name
-
-  if ! (cd -P "${PROJECT_DIR}" 2>/dev/null); then
-    printf 'the project directory %s cannot be resolved' "${PROJECT_DIR}"
-    return 0
-  fi
-  for name in package.json package-lock.json npm-shrinkwrap.json node_modules; do
-    if [[ -L "${PROJECT_DIR}/${name}" ]]; then
-      printf '%s/%s is a symbolic link to %s' "${PROJECT_DIR}" "${name}" "$(readlink "${PROJECT_DIR}/${name}" 2>/dev/null || printf 'an unreadable target')"
-      return 0
-    fi
-  done
-  if [[ ! -f "${PROJECT_DIR}/package.json" ]]; then
-    printf '%s has no package.json, so npm would work in an enclosing project' "${PROJECT_DIR}"
-    return 0
-  fi
-  if ! jq -e 'type == "object"' "${PROJECT_DIR}/package.json" >/dev/null 2>&1; then
-    printf '%s/package.json cannot be read as an object' "${PROJECT_DIR}"
-    return 0
-  fi
-  if jq -e 'has("workspaces")' "${PROJECT_DIR}/package.json" >/dev/null 2>&1; then
-    printf '%s/package.json declares workspaces; npm ci empties every workspace'"'"'s node_modules, and a workspace may lie outside the project' "${PROJECT_DIR}"
-  fi
+  safedeps_npm_reach_blocker "${PROJECT_DIR}"
 }
 record_rollback_refusal() {
   local step="$1" why="$2"
@@ -439,13 +409,15 @@ cleanup_old_snapshots() {
 # install that created package.json and its lockfile has both removed by the
 # restore, and its node_modules is still the rollback's to remove.
 # npm's hidden lockfile counts as well: `npm install --no-save <pkg>` in a
-# directory without package.json writes node_modules and nothing else.
+# directory without package.json writes node_modules and nothing else. It is
+# read through a linked node_modules too -- reading is not following a write,
+# and the removal step then refuses the link and names it.
 ROLLBACK_NPM_PROJECT=false
 rollback_note_npm_project() {
   ROLLBACK_NPM_PROJECT=false
   if [[ -f "${PROJECT_DIR}/package.json" || -f "${PROJECT_DIR}/package-lock.json" ]]; then
     ROLLBACK_NPM_PROJECT=true
-  elif [[ -d "${PROJECT_DIR}/node_modules" && ! -L "${PROJECT_DIR}/node_modules" && -f "${PROJECT_DIR}/node_modules/.package-lock.json" ]]; then
+  elif [[ -f "${PROJECT_DIR}/node_modules/.package-lock.json" ]]; then
     ROLLBACK_NPM_PROJECT=true
   fi
 }
@@ -465,16 +437,19 @@ rollback_node_modules() {
     return 0
   fi
   ROLLED_BACK+=("node_modules (removed)")
-  # What to do next depends on what the restore left: without a package.json
-  # there was nothing npm owned here before this install, and an npm ci here
-  # would walk up to an enclosing project.
-  if [[ -f "${PROJECT_DIR}/package.json" ]]; then
-    ROLLBACK_WARNINGS+=("node_modules was removed, not reinstalled: run npm ci in ${PROJECT_DIR} to reinstall it, and the gate checks that install like any other")
+  # The advice asks the same judgment the rebuild does, so it never tells the
+  # user to run an npm the gate would refuse to run itself.
+  local reach
+  reach=$(safedeps_npm_reach_blocker "${PROJECT_DIR}")
+  if [[ -n "${reach}" ]]; then
+    ROLLBACK_WARNINGS+=("node_modules was removed; do not run npm ci in ${PROJECT_DIR}: ${reach}. Reinstall by hand in a way that stays inside the project")
+  elif [[ ! -f "${PROJECT_DIR}/package-lock.json" && ! -f "${PROJECT_DIR}/npm-shrinkwrap.json" ]]; then
+    ROLLBACK_WARNINGS+=("node_modules was removed; ${PROJECT_DIR} has no lockfile after the restore, so npm ci cannot reinstall it -- npm install resolves package.json again, and the gate checks that install")
   else
-    ROLLBACK_WARNINGS+=("node_modules was removed; ${PROJECT_DIR} has no package.json after the restore, so there is nothing to reinstall. Do not run npm ci there: npm would work in an enclosing project")
+    ROLLBACK_WARNINGS+=("node_modules was removed, not reinstalled: run npm ci in ${PROJECT_DIR} to reinstall it, and the gate checks that install like any other")
   fi
   if jq -e 'type == "object" and has("workspaces")' "${PROJECT_DIR}/package.json" >/dev/null 2>&1; then
-    ROLLBACK_WARNINGS+=("${PROJECT_DIR}/package.json declares workspaces; the members' own node_modules directories were left in place -- remove them before you reinstall")
+    ROLLBACK_WARNINGS+=("the workspace members' own node_modules directories were not removed")
   fi
 }
 

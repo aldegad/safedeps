@@ -776,8 +776,8 @@ if grep -q '^install' "${tmp_root}/walkup-npm-calls.log" 2>/dev/null; then
   fail "a rollback runs no npm install once it has removed the package.json the install created"
 fi
 [[ ! -e "${walk2_wt}/node_modules" ]] || fail "a rollback removes the project's own node_modules"
-grep -q 'nothing to reinstall. Do not run npm ci there' <<< "${walk2_post}" || fail "with no package.json left, the rollback says not to run npm ci there"
-if grep -q 'run npm ci in' <<< "${walk2_post}"; then
+grep -q 'do not run npm ci in .*has no package.json' <<< "${walk2_post}" || fail "with no package.json left, the rollback says not to run npm ci there"
+if grep -q 'to reinstall it, and the gate checks that install like any other' <<< "${walk2_post}"; then
   fail "the rollback does not hand the walk up to the user as an npm ci instruction"
 fi
 pass "a rollback runs no npm install where npm would walk up to an enclosing project"
@@ -858,7 +858,11 @@ if grep -q '^ci' "${tmp_root}/ws-npm-calls.log" 2>/dev/null; then
   fail "a rollback runs no npm ci in a project that declares workspaces"
 fi
 [[ ! -e "${ws_wt}/node_modules" ]] || fail "a rollback removes a workspace project's own node_modules"
-grep -q "members' own node_modules directories were left in place" <<< "${ws_post}" || fail "the rollback says a workspace member's node_modules is left in place"
+grep -q "members' own node_modules directories were not removed" <<< "${ws_post}" || fail "the rollback says a workspace member's node_modules is left in place"
+grep -q 'do not run npm ci in .*declares workspaces' <<< "${ws_post}" || fail "the rollback does not tell the user to run npm ci where a workspace may lie outside"
+if grep -qE 'to reinstall it, and the gate checks|remove them before you reinstall' <<< "${ws_post}"; then
+  fail "the rollback's advice in a workspace project sends no npm and no removal outside"
+fi
 cmp -s "${ws_wt}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "the lockfile of a workspace project is still restored"
 pass "a rollback leaves a workspace outside the project alone"
 
@@ -911,8 +915,30 @@ EOF
 )
 grep -q 'suspicious dependency change detected' <<< "${nosave_post}" || fail "reorg fires on a native binary in a --no-save install"
 [[ ! -e "${nosave_wt}/node_modules" ]] || fail "a rollback removes the node_modules of a --no-save install with no package.json"
-grep -q 'nothing to reinstall. Do not run npm ci there' <<< "${nosave_post}" || fail "the --no-save rollback says there is nothing to reinstall"
+grep -q 'do not run npm ci in .*has no package.json' <<< "${nosave_post}" || fail "the --no-save rollback says not to run npm ci there"
 pass "a rollback removes the node_modules a --no-save install wrote without a package.json"
+
+# The same --no-save install through a node_modules that links elsewhere: the
+# hidden lockfile is read through the link, the project is an npm project, and
+# the removal is refused and named rather than reported as nothing.
+nosave_link_wt="${tmp_root}/nosave-link-wt"
+nosave_link_target="${tmp_root}/nosave-link-target"
+mkdir -p "${nosave_link_wt}" "${nosave_link_target}/.bin"
+ln -s "${nosave_link_target}" "${nosave_link_wt}/node_modules"
+scripts/safedeps-pre-guard.sh > /dev/null <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install --no-save fixture-parent@1.0.0"},"cwd":"${nosave_link_wt}"}
+EOF
+printf '{"name":"nosave-link-wt","lockfileVersion":3,"packages":{}}\n' > "${nosave_link_target}/.package-lock.json"
+cp /bin/echo "${nosave_link_target}/.bin/native-drop"
+nosave_link_post=$(
+  PATH="${emptying_bin}:${PATH}" scripts/safedeps-post-verify.sh <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install --no-save fixture-parent@1.0.0"},"cwd":"${nosave_link_wt}"}
+EOF
+)
+grep -q 'suspicious dependency change detected' <<< "${nosave_link_post}" || fail "reorg fires on a native binary through a linked node_modules"
+grep -q 'REFUSED node_modules removal' <<< "${nosave_link_post}" || fail "the rollback names the linked node_modules it will not remove"
+[[ -f "${nosave_link_target}/.package-lock.json" ]] || fail "a rollback leaves the target of a linked node_modules alone"
+pass "a rollback names a linked node_modules a --no-save install wrote through"
 
 export SAFEDEPS_HOME="${tmp_root}/safe-missing-transitive"
 export SAFEDEPS_OSV_API_URL="http://127.0.0.1:${port}/osv/v1/query"
@@ -1577,7 +1603,11 @@ printf 'ok - pre-guard derives the same overrides approval key as the check\n'
 
 journal_home="${tmp_root}/journal-home"
 journal_project="${tmp_root}/journal-project"
-mkdir -p "${journal_home}" "${journal_project}"
+mkdir -p "${journal_home}" "${journal_project}" "${tmp_root}/journal-linked-modules"
+# The project's node_modules links to another checkout's, so the report's
+# advice must not send npm ci there (npm ci empties what node_modules resolves to).
+printf '{"name":"journal-project","version":"1.0.0"}\n' > "${journal_project}/package.json"
+ln -s "${tmp_root}/journal-linked-modules" "${journal_project}/node_modules"
 
 # An unfinished rollback, written the way the gate writes it before it starts
 # restoring files.
@@ -1620,6 +1650,8 @@ grep -q 'removing-node-modules' <<< "${journal_report}" \
   || fail "the unfinished-rollback report names the stage it was cut off at"
 grep -q 'fixture-evil@9.9.9' <<< "${journal_report}" \
   || fail "the unfinished-rollback report says why the rollback was started"
+grep -q 'Do not run `npm ci` there: .*node_modules is a symbolic link' <<< "${journal_report}" \
+  || fail "the unfinished-rollback report does not send npm ci into a linked node_modules"
 grep -q 'REORG INTERRUPTED' "${journal_home}/reorg.log" \
   || fail "an interrupted rollback lands in the same log the finished ones use"
 [[ -f "${journal_home}/rollback-incidents/test-interrupted.json" ]] \

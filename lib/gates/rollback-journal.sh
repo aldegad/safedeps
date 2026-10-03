@@ -321,10 +321,22 @@ as below. Until one of those happens, nothing about this project is settled."
       headline="A safedeps rollback of ${project_dir} did not finish."
       body_cause="The rollback was cut off — most likely the hook hit the runtime's timeout
 mid-rollback."
-      body_first_move="Check that the lockfile and package.json in ${project_dir} are the ones you
-expect, then remove its node_modules if it is a real directory (not a link)
-and reinstall with \`npm ci\` there -- only if ${project_dir} has a package.json,
-because npm walks up to an enclosing project from a directory without one."
+      # The advice asks the judgment the rollback's own advice asks
+      # (lib/gates/npm-reach.sh, loaded by the hook before this file).
+      local reach="safedeps could not check whether npm can reach past ${project_dir}"
+      if declare -F safedeps_npm_reach_blocker >/dev/null 2>&1; then
+        reach=$(safedeps_npm_reach_blocker "${project_dir}")
+      fi
+      if [[ -n "${reach}" ]]; then
+        body_first_move="Check that the lockfile and package.json in ${project_dir} are the ones you
+expect. Do not run \`npm ci\` there: ${reach}. Remove its node_modules only
+if it is a real directory, and reinstall by hand in a way that stays inside
+the project."
+      else
+        body_first_move="Check that the lockfile and package.json in ${project_dir} are the ones you
+expect, then remove its node_modules (a real directory) and reinstall with
+\`npm ci\` there."
+      fi
     fi
 
     report="${report}${headline}
