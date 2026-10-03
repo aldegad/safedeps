@@ -427,6 +427,7 @@ allow_output=$(
 [[ "$(jq -r '.hookSpecificOutput.updatedInput.command' <<< "${allow_output}")" == "npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts" ]] || fail "hook injects --ignore-scripts for Claude npm install"
 allow_sid=$(jq -r '.snapshot_id' "${tmp_root}/safe-hook-allow/pending/"*.json)
 jq -e '.ignore_scripts_injected == true' "${tmp_root}/safe-hook-allow/snapshots/${allow_sid}_meta.json" >/dev/null || fail "hook records injected meta flag"
+jq -e '.ignore_scripts_verified == true' "${tmp_root}/safe-hook-allow/snapshots/${allow_sid}_meta.json" >/dev/null || fail "hook records that it read the injected flag as true"
 pass "hook injects --ignore-scripts for Claude approved install"
 
 # Global npm installs resolve into npm's global prefix and must not inherit the
@@ -685,7 +686,15 @@ for inert_in in \
   'npm install left-pad@1.3.0 --message <(true)' \
   'npm install left-pad@1.3.0 --message x(.)' \
   'npm install left-pad@1.3.0 --c?che' \
-  'npm install left-pad@1.3.0 --[c]ache'
+  'npm install left-pad@1.3.0 --[c]ache' \
+  'npm install left-pad@1.3.0 {--cache,}' \
+  'hash -d c=--cache; npm install left-pad@1.3.0 ~c' \
+  'npm install left-pad@1.3.0 (--cache|zz)' \
+  $'shopt -s extglob\nnpm install left-pad@1.3.0 @(--cache)' \
+  'npm install left-pad@1.3.0 --message x~y' \
+  'npm install left-pad@1.3.0 --message a^b' \
+  'npm install left-pad@1.3.0 --message a#b' \
+  'npm install left-pad@1.3.0 \~'
 do
   inert_want="${inert_in/install /install --ignore-scripts }"" --ignore-scripts"
   unverified_before=$(grep -c 'holds a word the shell decides at run time' "${tmp_root}/safe-compound/advisory.log" 2>/dev/null || true)
@@ -700,10 +709,16 @@ done
 for inert_in in \
   "npm install left-pad@1.3.0 --message '~ {a,b} (c) * ? [d] =e'" \
   'npm install left-pad@1.3.0 --message "~ {a,b} (c) * ? [d] =e"' \
-  'npm install left-pad@1.3.0 --message x~y' \
-  'npm install left-pad@1.3.0 --message a^b'
+  'npm install left-pad@1.3.0 --message a%b+c,d:e/f@g=h_i.j-k' \
+  'npm install left-pad@1.3.0 > install.log 2>&1' \
+  'npm install left-pad@1.3.0 # ~ {a,b} *'
 do
-  inert_want="${inert_in/install /install --ignore-scripts }"" --ignore-scripts"
+  inert_want="${inert_in/install /install --ignore-scripts }"
+  case "${inert_want}" in
+    *' > '*) inert_want="${inert_want/ > / --ignore-scripts > }" ;;
+    *' # '*) inert_want="${inert_want/ # / --ignore-scripts # }" ;;
+    *) inert_want+=" --ignore-scripts" ;;
+  esac
   unverified_before=$(grep -c 'holds a word the shell decides at run time' "${tmp_root}/safe-compound/advisory.log" 2>/dev/null || true)
   inert_out=$(run_hook_command "${tmp_root}/home-compound" "${tmp_root}/safe-compound" "${inert_in}")
   unverified_after=$(grep -c 'holds a word the shell decides at run time' "${tmp_root}/safe-compound/advisory.log" 2>/dev/null || true)
@@ -713,6 +728,32 @@ do
   (( ${unverified_after:-0} == ${unverified_before:-0} )) \
     || fail "an install whose words the shell leaves as written is not recorded as unread: ${inert_in}"
 done
+# The rows above are judged by the hook; this is what bash itself makes of the
+# words, with an echo in place of npm and a file named `--cache` where a glob
+# can find it. Each one hands npm `--cache`, which the text never shows. (zsh's
+# `~c` after `hash -d c=--cache` and `(--cache|zz)` do the same in zsh 5.9,
+# measured the same way; the batteries do not require zsh.)
+echo_dir=$(mktemp -d "${tmp_root}/echo.XXXXXX")
+: > "${echo_dir}/--cache"
+for echo_form in \
+  'HOME=--cache; npm install x ~' \
+  'OLDPWD=--cache; npm install x ~-' \
+  'npm install x {--cache,}' \
+  $'shopt -s extglob\nnpm install x @(--cache)' \
+  'npm install x --cach?'
+do
+  echo_argv=$(cd "${echo_dir}" && bash -c "npm() { printf '%s\\n' \"\$@\"; }; ${echo_form}" 2>&1) || true
+  grep -qx -- '--cache' <<< "${echo_argv}" \
+    || fail "bash hands npm a word the text does not show: $(printf '%q' "${echo_form}") (argv: $(paste -sd' ' - <<< "${echo_argv}"))"
+done
+# An install whose flag nobody read says so in the meta, so the post hook does
+# not say its scripts did not run.
+dyn_safe=$(mktemp -d "${tmp_root}/safe-dyn.XXXXXX")
+SAFEDEPS_HOME="${dyn_safe}" lib/ledger/ledger.sh approve npm left-pad 1.3.0 1.3.0 smoke >/dev/null
+run_hook_command "${tmp_root}/home-dyn" "${dyn_safe}" 'HOME=--cache; npm install left-pad@1.3.0 ~' >/dev/null
+dyn_sid=$(jq -r '.snapshot_id' "${dyn_safe}/pending/"*.json)
+jq -e '.ignore_scripts_injected == true and .ignore_scripts_verified == false' "${dyn_safe}/snapshots/${dyn_sid}_meta.json" >/dev/null \
+  || fail "an install whose flag nobody read is recorded as injected and not verified"
 pass "a word the shell expands at any of its steps makes the install unread and recorded, and quoted text does not"
 # Asking npm where an install lands puts the ask's own flags after the
 # install's words. After a trailing `--cache` npm took the first as the cache

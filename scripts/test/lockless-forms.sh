@@ -922,9 +922,16 @@ do
       || fail "asking npm about the install makes nothing in the project: ${form} ($(find "${CASE_PROJECT}" -maxdepth 1 -name '-*' | paste -sd, -))"
   fi
   case "${want}" in
-    withheld|unverified)
+    withheld)
       [[ -z "${CASE_RAN}" ]] && grep -q 'install scripts were not run' <<< "${CASE_POST}" \
         || fail "an inert install npm was not asked about is not rebuilt, and the user is told: ${form} (post: ${CASE_POST:-<quiet>})"
+      ;;
+    unverified)
+      # Nobody read whether npm kept the flag, so the post hook does not say
+      # the install's scripts did not run.
+      [[ -z "${CASE_RAN}" ]] && grep -q 'could not read whether npm kept the --ignore-scripts' <<< "${CASE_POST}" \
+        && ! grep -q 'install scripts were not run' <<< "${CASE_POST}" \
+        || fail "an install whose flag nobody read is not rebuilt, and the user is told its scripts may have run: ${form} (post: ${CASE_POST:-<quiet>})"
       ;;
     rebuilt)
       grep -q '^sd-approved@[^	]*	install' <<< "${CASE_RAN}" \
@@ -959,14 +966,17 @@ plant_cache_file() { : > "${CASE_PROJECT}/--cache"; }
 for row in \
   "HOME=--cache; npm install sd-approved@1.0.0 ~|" \
   "OLDPWD=--cache; npm install sd-approved@1.0.0 ~-|" \
+  "npm install sd-approved@1.0.0 {--cache,}|" \
   "npm install sd-approved@1.0.0 --fetch-retries {1,--cache}|" \
+  $'shopt -s extglob\nnpm install sd-approved@1.0.0 @(--cache)|plant_cache_file' \
   "npm install sd-approved@1.0.0 --fetch-retries \$((1))|" \
   "npm install sd-approved@1.0.0 --message <(true)|" \
   "npm install sd-approved@1.0.0 --cach?|plant_cache_file" \
   "npm install sd-approved@1.0.0 --message a=~|" \
   "npm install sd-approved@1.0.0 --message =npm|"
 do
-  IFS='|' read -r form setup <<< "${row}"
+  # The extglob form spans two lines, which `read` would cut at the first.
+  form="${row%|*}" setup="${row##*|}"
   new_project
   [[ -z "${setup}" ]] || "${setup}"
   : > "${MARKS}"
@@ -977,8 +987,43 @@ do
   [[ -e "${CASE_PROJECT}/node_modules/sd-approved" ]] || fail "the approved install installs: ${form}"
   grep -q 'holds a word the shell decides at run time' "${CASE_HOME}/advisory.log" \
     || fail "an install holding a word the shell expands is recorded in advisory.log: ${form}"
+  ! grep -qE 'install scripts were not run|no install script was run' <<< "${CASE_POST}" \
+    || fail "the post hook does not say the scripts of an install whose flag nobody read did not run: ${form} (post: ${CASE_POST})"
 done
 pass "an install holding a word any shell expansion decides runs no script while it installs, and is recorded"
+
+# An install whose flag nobody read has its scripts run during the install when
+# the words around the flags undo both: here the substitution splits into an
+# override and a value option that takes the trailing flag. The record says so
+# before the command runs; the post hook said "install scripts were not run",
+# and a rollback with no confirmed snapshot said "no install script was run",
+# because the meta recorded only that the flag was put in. It now records
+# whether the flag was read, and the post hook says the scripts may have run.
+# The meta is read between the install and the post hook, which consumes it.
+capture_meta() { CASE_META=$(cat "${CASE_HOME}"/snapshots/*_meta.json 2>/dev/null) || CASE_META=""; }
+for row in \
+  'npm ci $(printf -- "--no-ignore-scripts --cache")|lock_approved' \
+  'npm ci $(printf -- "--no-ignore-scripts --cache")|lock_victim'
+do
+  IFS='|' read -r form setup <<< "${row}"
+  new_project
+  "${setup}"
+  : > "${MARKS}"
+  CASE_META=""
+  run_install "${form}" claude capture_meta
+  jq -e '.ignore_scripts_injected == true and .ignore_scripts_verified == false' <<< "${CASE_META}" >/dev/null \
+    || fail "the meta records that nobody read the flag: ${form} (${setup}) (meta: ${CASE_META:-<none>})"
+  ! grep -qE 'install scripts were not run|no install script was run' <<< "${CASE_POST}" \
+    || fail "the post hook does not say no install script ran: ${form} (${setup}) (post: ${CASE_POST})"
+  if [[ "${setup}" == lock_victim ]]; then
+    rolled_back && grep -q "the install's own scripts may have run, the rejected package's included" <<< "${CASE_POST}" \
+      || fail "the rollback says the rejected package's scripts may have run: ${form} (post: ${CASE_POST})"
+  else
+    grep -q 'could not read whether npm kept the --ignore-scripts' <<< "${CASE_POST}" \
+      || fail "the post hook says the install's scripts may have run: ${form} (post: ${CASE_POST:-<quiet>})"
+  fi
+done
+pass "the post hook says no install script ran only when the flag was read; otherwise it says they may have run"
 
 # --- 11d. The flag after the verb is a floor under the reading --------------------------
 # Every rewritten install also gets the flag right after its verb, where the
