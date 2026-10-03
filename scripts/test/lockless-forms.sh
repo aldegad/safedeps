@@ -221,6 +221,59 @@ do
 done
 pass "an install npm could not be asked about, or did not answer for, is recorded with the reason and read where it left its trace"
 
+# --- 1e. Asking npm runs none of the command's code ---------------------------------
+# The PreToolUse hook asks npm where an install lands. It used to ask with the
+# command's own PATH, NODE_OPTIONS and npm word, so the code those chose ran
+# while the gate was still judging the command: three times per judgment, and
+# just the same when the gate then denied it. Here a fake npm first on a PATH
+# and a NODE_OPTIONS preload each append to CX_MARKS. Each form is only judged,
+# never run: an unapproved spec must be denied and an approved one let through,
+# and neither judgment may leave a line in CX_MARKS. The rows are the forms
+# that ran the code before: a PATH in front of npm, literal or not, or
+# exported, through env(1), a NODE_OPTIONS in each of those positions, and npm
+# named by its path.
+CX_MARKS="${tmp_root}/cx-marks"
+CX_BIN="${tmp_root}/cx-bin"
+mkdir -p "${CX_BIN}"
+printf '#!/bin/sh\necho "fake npm $*" >> %q\nexit 1\n' "${CX_MARKS}" > "${CX_BIN}/npm"
+chmod +x "${CX_BIN}/npm"
+printf "require('fs').appendFileSync(%s, 'preload\\\\n')\n" "$(jq -Rn --arg p "${CX_MARKS}" '$p')" > "${tmp_root}/cx-preload.js"
+# The fixture works, or the rows test nothing: each one writes a mark when run.
+: > "${CX_MARKS}"
+"${CX_BIN}/npm" --version >/dev/null 2>&1 || true
+NODE_OPTIONS="--require=${tmp_root}/cx-preload.js" node -e 1
+[[ "$(wc -l < "${CX_MARKS}" | tr -d ' ')" == 2 ]] || fail "the fake npm and the preload each leave a mark when they run ($(cat "${CX_MARKS}"))"
+cx_failures=()
+for form in \
+  "PATH=${CX_BIN}:\$PATH npm install @SPEC@" \
+  "PATH=${CX_BIN}:/usr/bin:/bin npm install @SPEC@" \
+  "export PATH=${CX_BIN}:/usr/bin:/bin; npm install @SPEC@" \
+  "export PATH=\"${CX_BIN}:\$PATH\" && npm install @SPEC@" \
+  "env PATH=${CX_BIN}:/usr/bin:/bin npm install @SPEC@" \
+  "${CX_BIN}/npm install @SPEC@" \
+  "NODE_OPTIONS=--require=${tmp_root}/cx-preload.js npm install @SPEC@" \
+  "NODE_OPTIONS='--require ${tmp_root}/cx-preload.js' npm install @SPEC@" \
+  "export NODE_OPTIONS=--require=${tmp_root}/cx-preload.js; npm install @SPEC@" \
+  "env NODE_OPTIONS=--require=${tmp_root}/cx-preload.js npm install @SPEC@"
+do
+  for spec in sd-victim sd-approved@1.0.0; do
+    new_project
+    : > "${CX_MARKS}"
+    cmd="${form//@SPEC@/${spec}}"
+    decision=$(jq -nc --arg c "${cmd}" --arg d "${CASE_CWD}" '{tool_name:"Bash",tool_input:{command:$c},cwd:$d}' \
+      | SAFEDEPS_HOME="${CASE_HOME}" scripts/safedeps-hook-entry.sh pre 2>/dev/null \
+      | jq -r '.hookSpecificOutput.permissionDecision // "allow"')
+    want=allow
+    [[ "${spec}" != sd-victim ]] || want=deny
+    marks=$(wc -l < "${CX_MARKS}" | tr -d ' ')
+    printf '   CX %-5s %s | marks=%s\n' "${decision}" "${cmd}" "${marks}"
+    [[ "${decision}" == "${want}" ]] || cx_failures+=("the gate answers ${want}, not ${decision}: ${cmd}")
+    [[ "${marks}" == 0 ]] || cx_failures+=("judging runs none of the command's code (${marks} marks: $(paste -sd'|' - < "${CX_MARKS}")): ${cmd}")
+  done
+done
+[[ ${#cx_failures[@]} -eq 0 ]] || fail "$(printf '%s; ' "${cx_failures[@]}")"
+pass "judging an install runs none of the code its PATH, NODE_OPTIONS or npm path chooses, whether the gate denies it or lets it through"
+
 # --- 2. Installs no effect gate reads are recorded -----------------------------------
 # A global install writes no lockfile anywhere, so there is nothing to read.
 # The gate says so in advisory.log. Nothing runs its scripts either: the rebuild

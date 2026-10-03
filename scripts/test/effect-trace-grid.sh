@@ -1002,6 +1002,35 @@ new_xc1() { home_first "HOME=${XH_HOME} npm install sd-approved@1.0.0" XC1; }
 new_xc2() { home_first "env HOME=${XH_HOME} npm install sd-approved@1.0.0" XC2; }
 new_xc3() { home_first "export NPM_CONFIG_REGISTRY=${EVIL_REG}; npm install sd-approved@1.0.0" XC3; }
 new_xu1() { home_first "export HOME=\"\$PWD/../xh-home\"; npm install sd-approved@1.0.0" XU1; }
+# The PX rows: a command that chooses the code npm runs with, by a PATH or a
+# NODE_OPTIONS of its own. The pre-guard asks only its own npm and never runs
+# that code (scripts/test/lockless-forms.sh, section 1e), so its answer is
+# not the command's npm's, the way an answer after `source` is not. They are
+# the same kind and get the same rule: where npm answers the public registry,
+# the first command rebuilds nothing, says why, and records nothing (PX1-PX3,
+# through sourced_first), so the next ordinary install rebuilds. PX1 is the
+# form a version manager writes; it used to be an unknown with no cause, which
+# recorded every package of the tree machine-wide. PX3 is the cost that stays:
+# an ordinary NODE_OPTIONS in front of npm withholds that command's scripts.
+# Where the command's own words name another registry, npm's answer stands and
+# is recorded (PX4), and the first command runs none of the impostor's scripts.
+#
+# UN1: `unset` reaches every later npm, so the ask carries it. The sandbox
+# exports npm_config_userconfig, which outranks HOME; the command unsets it, so
+# npm reads <HOME>/.npmrc and fetches from the registry it names. An ask that
+# kept the hook's userconfig answered the public registry, and so did the
+# PostToolUse hook's, and the first command rebuilt the impostor.
+PX_BIN="${tmp_root}/px-bin"
+mkdir -p "${PX_BIN}"
+quiet_first() {
+  withhold_first "$1"
+  [[ -z "${CASE_RAN}" ]] || note_failure "$2: the first command rebuilds nothing, so no script of the impostor runs (${CASE_RAN})"
+}
+new_px1() { new_clone; sourced_first PX1 "export PATH=\"${PX_BIN}:\$PATH\" && npm ci"; }
+new_px2() { new_project; sourced_first PX2 "PATH=${PX_BIN}:\$PATH npm install sd-approved@1.0.0"; }
+new_px3() { new_clone; sourced_first PX3 'NODE_OPTIONS=--max-old-space-size=4096 npm ci'; }
+new_px4() { new_project; quiet_first "export PATH=\"${PX_BIN}:\$PATH\"; ${RH3_FORM}" PX4; }
+new_un1() { new_project; quiet_first "unset npm_config_userconfig; HOME=${XH_HOME} npm install sd-approved@1.0.0" UN1; }
 
 # <id>|<fixture>|<engine>|<expect>|<command>, where <expect> is
 #   fallback            rolled back with no confirmed snapshot, said in all three records
@@ -1174,6 +1203,11 @@ XC1|xc1|claude|kept:${WITHHELD_EVIL}|npm install sd-swapped@1.0.0
 XC2|xc2|claude|kept:${WITHHELD_EVIL}|npm install sd-swapped@1.0.0
 XC3|xc3|claude|kept:${WITHHELD_EVIL}|npm install sd-swapped@1.0.0
 XU1|xu1|claude|kept:the bytes of sd-approved here are the ones an install in @FIRST@ first fetched from a registry safedeps could not name (|npm install sd-swapped@1.0.0
+PX1|px1|claude|quiet:sd-approved|npm install sd-approved@1.0.0
+PX2|px2|claude|quiet:sd-approved|npm install sd-approved@1.0.0
+PX3|px3|claude|quiet:sd-approved|npm install sd-approved@1.0.0
+PX4|px4|claude|kept:${WITHHELD_EVIL}|npm install sd-swapped@1.0.0
+UN1|un1|claude|kept:${WITHHELD_EVIL}|npm install sd-swapped@1.0.0
 ROWS
 [[ ${#FAILURES[@]} -ne ${failures_before} ]] \
   || pass "install scripts run only over a tree on record from the public registry or a workspace, a package counts as bundled only where its parent's package.json bundles it, a record on the public registry counts only where npm says it fetched from there, a rollback runs none without a confirmed snapshot and says what ran on each engine, and K4-K7 are installed but not rebuilt"
