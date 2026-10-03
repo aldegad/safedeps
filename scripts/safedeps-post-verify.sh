@@ -204,10 +204,8 @@ monitored_files() {
 #
 # rollback_target_outside <path>: prints why <path> must not be touched, or
 # nothing when it may be. Every target is a name directly inside PROJECT_DIR,
-# so a target can lead outside only by being a link. npm can lead outside on
-# its own, which rollback_npm_blocker below answers for every npm the rollback
-# runs, and each of those is also pinned to the project
-# (SAFEDEPS_NPM_PROJECT_FLAGS).
+# so a target can lead outside only by being a link. The rollback runs no npm
+# (rollback_node_modules below).
 rollback_target_outside() {
   local target="$1"
 
@@ -229,9 +227,10 @@ ROLLBACK_REFUSED=$'\n'
 # global tree.
 SAFEDEPS_NPM_PROJECT_FLAGS=(--global=false --location=project)
 
-# rollback_npm_blocker: prints why the rollback must not run npm in the
-# project, or nothing when it may. npm reaches past the files it is pointed at
-# in three ways, and each one is refused here rather than predicted:
+# project_npm_blocker: prints why the rebuild after a verified inert install
+# must not run npm in the project, or nothing when it may. npm reaches past the
+# files it is pointed at in these ways, and each one is refused here rather
+# than predicted:
 # - it reads and writes package.json, the lockfiles and node_modules at the
 #   root, and follows a link among them (a fallback `npm install` rewrote a
 #   linked lockfile after the restore of that lockfile had been refused);
@@ -240,7 +239,7 @@ SAFEDEPS_NPM_PROJECT_FLAGS=(--global=false --location=project)
 #   lie outside the project (`"workspaces": ["../shared"]`). Which directories
 #   those are is npm's to say, and npm cannot say before the tree is installed,
 #   so a project that declares workspaces is not reinstalled automatically.
-rollback_npm_blocker() {
+project_npm_blocker() {
   local name
 
   if ! (cd -P "${PROJECT_DIR}" 2>/dev/null); then
@@ -428,35 +427,30 @@ cleanup_old_snapshots() {
   done < <(ls -t "${SNAPSHOT_DIR}"/*_meta.json 2>/dev/null || true)
 }
 
-restore_node_modules() {
-  local outside
+# A rollback runs no package manager. It restores the files it snapshotted and
+# removes the project's own node_modules when that is a real directory; the
+# reinstall is the next install, which the gate checks like any other. Every
+# npm a rollback used to run reached past the project some way the gate had
+# not predicted -- a linked node_modules, the walk up to an enclosing project,
+# a linked lockfile, a workspace outside, a file: dependency's scripts and bin
+# links -- so the rollback no longer asks npm where its hands go. `rm -rf` of a
+# real directory removes the links inside it, never what they point to.
+rollback_node_modules() {
+  local node_modules="${PROJECT_DIR}/node_modules"
 
-  # The reinstall runs only in a project npm cannot reach past
-  # (rollback_npm_blocker). A refusal leaves node_modules as it is and says how
-  # to finish by hand.
-  outside=$(rollback_npm_blocker)
-  if [[ -n "${outside}" ]]; then
-    record_rollback_refusal "node_modules reinstall" "${outside}. Reinstall by hand, in the directory that owns the files"
-    return
+  # Only an npm project's node_modules is the rollback's to remove.
+  [[ -f "${PROJECT_DIR}/package.json" || -f "${PROJECT_DIR}/package-lock.json" ]] || return 0
+  if [[ -L "${node_modules}" ]]; then
+    record_rollback_refusal "node_modules removal" "${node_modules} is a symbolic link to $(readlink "${node_modules}" 2>/dev/null || printf 'an unreadable target'); the packages the install wrote through it are still there. Remove them in the directory that owns them"
+    return 0
   fi
-
-  if ! command -v npm >/dev/null 2>&1; then
-    ROLLBACK_WARNINGS+=("npm is not installed; node_modules was not reinstalled")
-    return
+  [[ -d "${node_modules}" ]] || return 0
+  if rm -rf "${node_modules}"; then
+    ROLLED_BACK+=("node_modules (removed)")
+    ROLLBACK_WARNINGS+=("node_modules was removed, not reinstalled: run npm ci to reinstall it, and the gate checks that install like any other")
+  else
+    ROLLBACK_WARNINGS+=("node_modules could not be removed; remove ${node_modules} by hand before using the project")
   fi
-
-  if [[ -f "${PROJECT_DIR}/package-lock.json" ]]; then
-    if (cd "${PROJECT_DIR}" && npm ci "${SAFEDEPS_NPM_PROJECT_FLAGS[@]}" --prefix "${PROJECT_DIR}" >/dev/null 2>&1); then
-      return
-    fi
-    ROLLBACK_WARNINGS+=("npm ci failed during rollback; retrying with npm install")
-  fi
-
-  if (cd "${PROJECT_DIR}" && rm -rf node_modules && npm install "${SAFEDEPS_NPM_PROJECT_FLAGS[@]}" --prefix "${PROJECT_DIR}" >/dev/null 2>&1); then
-    return
-  fi
-
-  ROLLBACK_WARNINGS+=("node_modules reinstall failed; review the project manually")
 }
 
 run_verified_npm_rebuild_if_injected() {
@@ -468,7 +462,7 @@ run_verified_npm_rebuild_if_injected() {
   # A rebuild where npm can reach past the project runs install scripts in
   # another checkout's tree, which this install neither wrote nor verified.
   local outside
-  outside=$(rollback_npm_blocker)
+  outside=$(project_npm_blocker)
   if [[ -n "${outside}" ]]; then
     ROLLBACK_WARNINGS+=("npm rebuild skipped after verified inert install: ${outside}; run npm rebuild by hand where the files belong")
     log_advisory "post-verify rebuild skipped: ${outside} -- project ${PROJECT_DIR}"
@@ -990,8 +984,8 @@ There is no confirmed-safe snapshot for ${PROJECT_DIR} yet, so safedeps could NO
     fi
   fi
 
-  safedeps_journal_stage "${journal_id}" "reinstalling-node-modules"
-  restore_node_modules
+  safedeps_journal_stage "${journal_id}" "removing-node-modules"
+  rollback_node_modules
 
   local rolled_str="" warning_str=""
   [[ ${#ROLLED_BACK[@]} -gt 0 ]] && rolled_str=$(printf '%s, ' "${ROLLED_BACK[@]}")
@@ -1086,8 +1080,8 @@ if [[ "${SUSPICIOUS}" == "true" ]]; then
     fi
   fi
 
-  safedeps_journal_stage "${JOURNAL_ID}" "reinstalling-node-modules"
-  restore_node_modules
+  safedeps_journal_stage "${JOURNAL_ID}" "removing-node-modules"
+  rollback_node_modules
   cleanup_old_snapshots
 
   REASON_STR=""

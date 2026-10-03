@@ -579,7 +579,9 @@ EOF
 )
 grep -q 'suspicious dependency change detected' <<< "${revert_post}" || fail "reorg fires on a tampered lockfile"
 cmp -s "${revert_project}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "reorg restores the exact safe lockfile content on disk"
-grep -qE '^ci --global=false --location=project --prefix .*/revert-project$' "${tmp_root}/npm-calls.log" || fail "the rollback's npm ci is pinned to the project"
+if grep -qE '^(ci|install)' "${tmp_root}/npm-calls.log" 2>/dev/null; then
+  fail "a rollback runs no npm: the reinstall is the next install"
+fi
 pass "reorg reverts a tampered lockfile to safe content on disk"
 
 # A rollback never acts outside the project it read. Some worktree layouts link
@@ -629,13 +631,13 @@ EOF
 )
 grep -q 'suspicious dependency change detected' <<< "${link_post}" || fail "reorg fires in a project whose node_modules is a link"
 [[ -f "${link_main}/node_modules/kept-package/package.json" ]] || fail "a rollback never empties the directory a linked node_modules points to"
-grep -q 'REFUSED node_modules reinstall' <<< "${link_post}" || fail "the reorg message names the refused node_modules reinstall"
-grep -q 'REORG REFUSED node_modules reinstall' "${reorg_log}" || fail "reorg.log records the refused node_modules reinstall"
+grep -q 'REFUSED node_modules removal' <<< "${link_post}" || fail "the reorg message names the refused node_modules removal"
+grep -q 'REORG REFUSED node_modules removal' "${reorg_log}" || fail "reorg.log records the refused node_modules removal"
 if grep -q '^ci' "${tmp_root}/emptying-npm-calls.log" 2>/dev/null; then
   fail "npm ci never runs on a node_modules that links outside the project"
 fi
 cmp -s "${link_wt}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "the lockfile inside the project is still restored next to a linked node_modules"
-pass "a rollback refuses to reinstall a node_modules that links outside the project"
+pass "a rollback leaves a node_modules that links outside the project, and names it"
 
 # The same holds for a file the rollback would write back: a package.json that
 # links to another checkout's is not written through.
@@ -701,13 +703,9 @@ grep -q 'npm rebuild skipped after verified inert install' <<< "${link_inert_pos
 pass "a verified inert install skips the rebuild through a linked node_modules"
 
 # npm leads outside without any link: in a directory with no package.json and
-# no node_modules it walks up to the enclosing project and works there. A
-# worktree nested inside another checkout then sends a rollback's reinstall to
-# that checkout. This stub npm does the same walk unless --prefix names the
-# directory, and empties the node_modules it lands on for ci and install, so a
-# reinstall that is not pinned to the project shows up as a missing marker in
-# the enclosing one. The flag checks match the end of the path, because the
-# hooks resolve the project directory (/var and /private/var on macOS).
+# no node_modules it walks up to the enclosing project and works there. The
+# rollback runs no npm at all; this stub, which does the same walk and empties
+# the node_modules it lands on, is the trap that shows it if one ever runs.
 walkup_bin="${tmp_root}/walkup-npm-bin"
 mkdir -p "${walkup_bin}"
 cat > "${walkup_bin}/npm" <<EOF
@@ -752,7 +750,6 @@ grep -q 'suspicious dependency change detected' <<< "${walk_post}" || fail "reor
 if grep -q '^ci' "${tmp_root}/walkup-npm-calls.log" 2>/dev/null; then
   fail "a rollback runs no npm in a project with no package.json"
 fi
-grep -q 'REFUSED node_modules reinstall: .*has no package.json' <<< "${walk_post}" || fail "the refused reinstall says the project has no package.json"
 pass "a rollback runs no npm where npm would walk up to an enclosing project"
 
 # The install path: the install created package.json and the lockfile, the
@@ -778,12 +775,12 @@ grep -q 'suspicious dependency change detected' <<< "${walk2_post}" || fail "reo
 if grep -q '^install' "${tmp_root}/walkup-npm-calls.log" 2>/dev/null; then
   fail "a rollback runs no npm install once it has removed the package.json the install created"
 fi
+[[ ! -e "${walk2_wt}/node_modules" ]] || fail "a rollback removes the project's own node_modules"
 pass "a rollback runs no npm install where npm would walk up to an enclosing project"
 
 # A lockfile that links to another checkout's: the restore of it is refused,
-# and the reinstall is refused too, because a fallback npm install saves the
-# lockfile through the link. This stub fails ci, as npm does when the linked
-# lockfile no longer matches package.json, and writes the lockfile on install.
+# and no npm runs to save it through the link (a fallback npm install used to).
+# This stub fails ci and writes the lockfile on install -- the trap.
 lockwrite_bin="${tmp_root}/lockwrite-npm-bin"
 mkdir -p "${lockwrite_bin}"
 cat > "${lockwrite_bin}/npm" <<EOF
@@ -817,13 +814,13 @@ cmp -s "${linklock_outside}/package-lock.json" "${tmp_root}/linklock-expected.js
 if grep -qE '^(ci|install)' "${tmp_root}/lockwrite-npm-calls.log" 2>/dev/null; then
   fail "a rollback runs no npm in a project whose lockfile is a link"
 fi
-grep -q 'REFUSED node_modules reinstall: .*package-lock.json is a symbolic link' <<< "${linklock_post}" || fail "the refused reinstall names the linked lockfile"
-pass "a rollback refuses the reinstall when the lockfile links outside the project"
+grep -q 'REFUSED restore of package-lock.json' <<< "${linklock_post}" || fail "the refused lockfile restore is named"
+pass "a rollback writes nothing through a lockfile that links outside the project"
 
 # A workspace may lie outside the project, and npm ci empties every
-# workspace's node_modules. npm cannot list the workspaces before the tree is
-# installed, so a project that declares workspaces is not reinstalled by the
-# rollback at all. This stub empties the declared workspace on ci.
+# workspace's node_modules. The rollback runs no npm and removes only the
+# project's own node_modules. This stub empties the declared workspace on ci --
+# the trap.
 ws_bin="${tmp_root}/ws-npm-bin"
 mkdir -p "${ws_bin}"
 cat > "${ws_bin}/npm" <<EOF
@@ -837,7 +834,7 @@ EOF
 chmod +x "${ws_bin}/npm"
 ws_wt="${tmp_root}/ws-wt"
 ws_outside="${tmp_root}/ws-outside"
-mkdir -p "${ws_wt}" "${ws_outside}/node_modules/kept-package"
+mkdir -p "${ws_wt}/node_modules/installed-package" "${ws_outside}/node_modules/kept-package"
 printf '{"name":"shared","version":"1.0.0"}\n' > "${ws_outside}/package.json"
 printf '{"name":"kept-package","version":"1.0.0"}\n' > "${ws_outside}/node_modules/kept-package/package.json"
 printf '{"name":"ws","workspaces":["../ws-outside"],"dependencies":{"fixture-parent":"1.0.0"}}\n' > "${ws_wt}/package.json"
@@ -856,9 +853,39 @@ grep -q 'suspicious dependency change detected' <<< "${ws_post}" || fail "reorg 
 if grep -q '^ci' "${tmp_root}/ws-npm-calls.log" 2>/dev/null; then
   fail "a rollback runs no npm ci in a project that declares workspaces"
 fi
-grep -q 'REFUSED node_modules reinstall: .*declares workspaces' <<< "${ws_post}" || fail "the refused reinstall says the project declares workspaces"
+[[ ! -e "${ws_wt}/node_modules" ]] || fail "a rollback removes a workspace project's own node_modules"
 cmp -s "${ws_wt}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "the lockfile of a workspace project is still restored"
-pass "a rollback refuses the reinstall in a project that declares workspaces"
+pass "a rollback leaves a workspace outside the project alone"
+
+# The rollback's own node_modules step: a real directory is removed, links
+# inside it are removed without being followed, and the message says to
+# reinstall with npm ci.
+own_wt="${tmp_root}/own-wt"
+own_outside="${tmp_root}/own-outside"
+mkdir -p "${own_wt}/node_modules/installed-package" "${own_outside}/kept-package"
+printf '{"name":"kept-package","version":"1.0.0"}\n' > "${own_outside}/kept-package/package.json"
+ln -s "${own_outside}/kept-package" "${own_wt}/node_modules/linked-package"
+printf '{"dependencies":{"fixture-parent":"1.0.0"}}\n' > "${own_wt}/package.json"
+cp "${tmp_root}/revert-safe-lock.json" "${own_wt}/package-lock.json"
+scripts/safedeps-pre-guard.sh > /dev/null <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${own_wt}"}
+EOF
+printf '%s\n' "${tampered_lock}" > "${own_wt}/package-lock.json"
+: > "${tmp_root}/emptying-npm-calls.log"
+own_post=$(
+  PATH="${emptying_bin}:${PATH}" scripts/safedeps-post-verify.sh <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${own_wt}"}
+EOF
+)
+grep -q 'suspicious dependency change detected' <<< "${own_post}" || fail "reorg fires in an ordinary npm project"
+[[ ! -e "${own_wt}/node_modules" ]] || fail "a rollback removes the project's own node_modules"
+[[ -f "${own_outside}/kept-package/package.json" ]] || fail "removing node_modules does not follow a link inside it"
+grep -q 'node_modules was removed, not reinstalled: run npm ci' <<< "${own_post}" || fail "the rollback says to reinstall with npm ci"
+if grep -qE '^(ci|install)' "${tmp_root}/emptying-npm-calls.log" 2>/dev/null; then
+  fail "a rollback runs no npm in an ordinary project either"
+fi
+cmp -s "${own_wt}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "the lockfile is restored before node_modules is removed"
+pass "a rollback removes the project's own node_modules and runs no npm"
 
 export SAFEDEPS_HOME="${tmp_root}/safe-missing-transitive"
 export SAFEDEPS_OSV_API_URL="http://127.0.0.1:${port}/osv/v1/query"
@@ -1531,7 +1558,7 @@ mkdir -p "${journal_home}" "${journal_project}"
   . "${ROOT_DIR}/lib/gates/rollback-journal.sh"
   safedeps_journal_open 'test-interrupted' "${journal_project}" 'snap-baseline' \
     'npm closure contains 1 unapproved package(s): fixture-evil@9.9.9' \
-    'reinstalling-node-modules' )
+    'removing-node-modules' )
 
 # ...and its owner has to be genuinely gone, because "interrupted" now means
 # "the process that opened this is not running". `safedeps_journal_open` stamps
@@ -1562,7 +1589,7 @@ EOF
 )
 grep -q 'did not finish' <<< "${journal_report}" \
   || fail "an unfinished rollback is reported on the next Bash call"
-grep -q 'reinstalling-node-modules' <<< "${journal_report}" \
+grep -q 'removing-node-modules' <<< "${journal_report}" \
   || fail "the unfinished-rollback report names the stage it was cut off at"
 grep -q 'fixture-evil@9.9.9' <<< "${journal_report}" \
   || fail "the unfinished-rollback report says why the rollback was started"
@@ -1623,7 +1650,7 @@ race_write_entry() {
   jq -nc --arg pid "${pid}" --arg opened_at "${opened_at}" \
     '{journal_id:"test-race", project_dir:"'"${race_project}"'",
       rollback_snapshot:"snap-baseline", reasons:"npm closure contains 1 unapproved package(s): fixture-evil@9.9.9",
-      stage:"reinstalling-node-modules", opened_at:$opened_at, pid:$pid}' \
+      stage:"removing-node-modules", opened_at:$opened_at, pid:$pid}' \
     > "${race_home}/rollback-journal/test-race.json"
 }
 
@@ -1756,7 +1783,7 @@ mkdir -p "${race_home}/rollback-journal"
 jq -nc --arg pid "${stage_at_pid}" \
   '{journal_id:"test-race", project_dir:"'"${race_project}"'",
     rollback_snapshot:"snap-baseline", reasons:"npm closure contains 1 unapproved package(s): fixture-evil@9.9.9",
-    stage:"reinstalling-node-modules",
+    stage:"removing-node-modules",
     opened_at:"2026-08-05T00:00:00Z", stage_at:"2026-08-05T00:00:07Z", pid:$pid}' \
   > "${race_home}/rollback-journal/test-race.json"
 stage_at_out=$(race_report)
