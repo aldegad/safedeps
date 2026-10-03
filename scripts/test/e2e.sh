@@ -730,7 +730,7 @@ if grep -q 'rebuild' "${tmp_root}/emptying-npm-calls.log" 2>/dev/null; then
   fail "npm rebuild never runs through a node_modules that links outside the project"
 fi
 assert_skipped_rebuild_states_facts "${link_inert_post}" "linked node_modules"
-grep -qF "${link_inert_wt}/node_modules is a symbolic link to" <<< "${link_inert_post}" || fail "the skipped rebuild names the linked node_modules"
+grep -qF "/link-inert-wt/node_modules is a symbolic link to" <<< "${link_inert_post}" || fail "the skipped rebuild names the linked node_modules"
 pass "a verified inert install skips the rebuild through a linked node_modules"
 
 # The rebuild is skipped the same way where the directory has no package.json
@@ -761,7 +761,7 @@ if grep -q 'rebuild' "${tmp_root}/emptying-npm-calls.log" 2>/dev/null; then
   fail "npm rebuild never runs in a directory with no package.json"
 fi
 assert_skipped_rebuild_states_facts "${nopkg_inert_post}" "no package.json"
-grep -qF "${nopkg_inert} has no package.json. safedeps rebuilds only" <<< "${nopkg_inert_post}" || fail "the skipped rebuild says the directory has no package.json, and nothing more about it"
+grep -qF "/nopkg-inert-enclosing/sub has no package.json. safedeps rebuilds only" <<< "${nopkg_inert_post}" || fail "the skipped rebuild says the directory has no package.json, and nothing more about it"
 
 ws_inert="${tmp_root}/ws-inert"
 mkdir -p "${ws_inert}/node_modules"
@@ -780,7 +780,7 @@ if grep -q 'rebuild' "${tmp_root}/emptying-npm-calls.log" 2>/dev/null; then
   fail "npm rebuild never runs in a project that declares workspaces"
 fi
 assert_skipped_rebuild_states_facts "${ws_inert_post}" "declared workspaces"
-grep -qF "${ws_inert}/package.json declares workspaces. safedeps rebuilds only" <<< "${ws_inert_post}" || fail "the skipped rebuild says the project declares workspaces, and nothing more about it"
+grep -qF "/ws-inert/package.json declares workspaces. safedeps rebuilds only" <<< "${ws_inert_post}" || fail "the skipped rebuild says the project declares workspaces, and nothing more about it"
 pass "a skipped rebuild gives the fact it read as the reason, without a command or a prediction"
 
 # npm leads outside without any link: in a directory with no package.json and
@@ -970,7 +970,7 @@ EOF
 grep -q 'suspicious dependency change detected' <<< "${own_post}" || fail "reorg fires in an ordinary npm project"
 [[ ! -e "${own_wt}/node_modules" ]] || fail "a rollback removes the project's own node_modules"
 [[ -f "${own_outside}/kept-package/package.json" ]] || fail "removing node_modules does not follow a link inside it"
-grep -qF "${own_wt}/node_modules was removed" <<< "${own_post}" || fail "the rollback says which node_modules it removed"
+grep -qF "/own-wt/node_modules was removed" <<< "${own_post}" || fail "the rollback says which node_modules it removed"
 grep -q 'safedeps does not reinstall packages' <<< "${own_post}" || fail "the rollback says it does not reinstall"
 assert_gives_no_command "${own_post}" "the rollback gives no reinstall command in an ordinary project either"
 if grep -qE '^(ci|install)' "${tmp_root}/emptying-npm-calls.log" 2>/dev/null; then
@@ -997,7 +997,7 @@ EOF
 )
 grep -q 'suspicious dependency change detected' <<< "${yarn_post}" || fail "reorg fires in a project that keeps a yarn.lock"
 [[ -f "${yarn_wt}/yarn.lock" ]] || fail "the rollback leaves the yarn.lock it found"
-grep -qF "${yarn_wt} has a package.json and neither package-lock.json nor npm-shrinkwrap.json" <<< "${yarn_post}" \
+grep -qF "/yarn-wt has a package.json and neither package-lock.json nor npm-shrinkwrap.json" <<< "${yarn_post}" \
   || fail "the rollback names the npm lockfiles it looked for"
 if grep -q 'no lockfile' <<< "${yarn_post}"; then
   fail "the rollback does not call a yarn project lockless"
@@ -1026,7 +1026,7 @@ EOF
   )
   chmod 755 "${stuck_wt}/node_modules/locked-package"
   grep -q 'suspicious dependency change detected' <<< "${stuck_post}" || fail "reorg fires where node_modules cannot be removed"
-  grep -qF "node_modules could not be removed: ${stuck_wt}/node_modules is still there" <<< "${stuck_post}" \
+  grep -q "node_modules could not be removed: .*/stuck-wt/node_modules is still there" <<< "${stuck_post}" \
     || fail "the rollback says the node_modules it could not remove is still there"
   assert_gives_no_command "${stuck_post}" "the rollback that could not remove node_modules gives no command"
   cmp -s "${stuck_wt}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "the lockfile is still restored where node_modules cannot be removed"
