@@ -237,9 +237,9 @@ safedeps_journal_project_facts() {
   fi
   if [[ -f "${dir}/package.json" ]]; then
     if [[ -f "${dir}/package-lock.json" || -f "${dir}/npm-shrinkwrap.json" ]]; then
-      facts="${facts} It has a package.json and a lockfile."
+      facts="${facts} It has a package.json and an npm lockfile."
     else
-      facts="${facts} It has a package.json and no lockfile."
+      facts="${facts} It has a package.json and neither package-lock.json nor npm-shrinkwrap.json."
     fi
     if jq -e 'type == "object" and has("workspaces")' "${dir}/package.json" >/dev/null 2>&1; then
       facts="${facts} Its package.json declares workspaces."

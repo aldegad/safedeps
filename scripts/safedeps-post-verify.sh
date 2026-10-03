@@ -445,9 +445,9 @@ rollback_node_modules() {
   # judgment that is silent when it does not block reads as "go ahead".
   ROLLBACK_WARNINGS+=("node_modules was removed. Nothing is installed in ${PROJECT_DIR} until the next install. safedeps does not reinstall packages, and it does not judge where a reinstall would write; the gate checks the next install's packages like any other install")
   if [[ ! -f "${PROJECT_DIR}/package.json" ]]; then
-    ROLLBACK_WARNINGS+=("after the restore, ${PROJECT_DIR} has no package.json: it had no npm manifest before this install")
+    ROLLBACK_WARNINGS+=("after the restore, ${PROJECT_DIR} has no package.json")
   elif [[ ! -f "${PROJECT_DIR}/package-lock.json" && ! -f "${PROJECT_DIR}/npm-shrinkwrap.json" ]]; then
-    ROLLBACK_WARNINGS+=("after the restore, ${PROJECT_DIR} has a package.json and no lockfile")
+    ROLLBACK_WARNINGS+=("after the restore, ${PROJECT_DIR} has a package.json and neither package-lock.json nor npm-shrinkwrap.json")
   fi
   if jq -e 'type == "object" and has("workspaces")' "${PROJECT_DIR}/package.json" >/dev/null 2>&1; then
     ROLLBACK_WARNINGS+=("${PROJECT_DIR}/package.json declares workspaces; the node_modules directories of its workspace members were not removed")
@@ -465,7 +465,7 @@ run_verified_npm_rebuild_if_injected() {
   local outside
   outside=$(project_npm_blocker)
   if [[ -n "${outside}" ]]; then
-    ROLLBACK_WARNINGS+=("npm rebuild skipped after verified inert install: ${outside}; run npm rebuild by hand where the files belong")
+    ROLLBACK_WARNINGS+=("npm rebuild skipped after verified inert install: ${outside}. safedeps does not run npm where it can reach past the project, and it does not judge where a rebuild would write")
     log_advisory "post-verify rebuild skipped: ${outside} -- project ${PROJECT_DIR}"
     return 0
   fi

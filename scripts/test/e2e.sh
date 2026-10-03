@@ -918,6 +918,12 @@ EOF
 grep -q 'suspicious dependency change detected' <<< "${nosave_post}" || fail "reorg fires on a native binary in a --no-save install"
 [[ ! -e "${nosave_wt}/node_modules" ]] || fail "a rollback removes the node_modules of a --no-save install with no package.json"
 grep -q 'after the restore, .* has no package.json' <<< "${nosave_post}" || fail "the --no-save rollback says there is no package.json"
+# The restore target is the last confirmed snapshot, which can be older than
+# this install, so what the project held "before this install" is not
+# something the rollback knows. It states only what is there now.
+if grep -q 'before this install' <<< "${nosave_post}"; then
+  fail "the rollback does not infer what the project held before this install"
+fi
 pass "a rollback removes the node_modules a --no-save install wrote without a package.json"
 
 # The same --no-save install through a node_modules that links elsewhere: the
@@ -1610,6 +1616,8 @@ mkdir -p "${journal_home}" "${journal_project}" "${tmp_root}/journal-linked-modu
 # advice must not send npm ci there (npm ci empties what node_modules resolves to).
 printf '{"name":"journal-project","version":"1.0.0"}\n' > "${journal_project}/package.json"
 ln -s "${tmp_root}/journal-linked-modules" "${journal_project}/node_modules"
+# A yarn project: it has a lockfile, just not npm's, so "no lockfile" is false.
+: > "${journal_project}/yarn.lock"
 
 # An unfinished rollback, written the way the gate writes it before it starts
 # restoring files.
@@ -1657,6 +1665,11 @@ grep -q 'node_modules is a symbolic link to' <<< "${journal_report}" \
 if grep -q 'npm ci' <<< "${journal_report}"; then
   fail "the unfinished-rollback report gives no reinstall command"
 fi
+if grep -q 'no lockfile' <<< "${journal_report}"; then
+  fail "the unfinished-rollback report does not call a yarn project lockless"
+fi
+grep -q 'neither package-lock.json nor npm-shrinkwrap.json' <<< "${journal_report}" \
+  || fail "the unfinished-rollback report names the npm lockfiles it looked for"
 grep -q 'REORG INTERRUPTED' "${journal_home}/reorg.log" \
   || fail "an interrupted rollback lands in the same log the finished ones use"
 [[ -f "${journal_home}/rollback-incidents/test-interrupted.json" ]] \
