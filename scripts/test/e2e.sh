@@ -22,6 +22,23 @@ assert_gives_no_command() {
     fail "$2"
   fi
 }
+# A skipped rebuild says a fact read from disk and the rule safedeps applied.
+# The message names the rebuild it skipped, so those two phrases are taken out
+# before the same pattern is applied; a check for three fixed phrases stayed
+# green when review appended "Finish it with npm rebuild --prefix <dir>". The
+# reason must not say what npm would do either: two reasons that did were
+# wrong where a real npm did otherwise.
+assert_skipped_rebuild_states_facts() {
+  local post="$1" label="$2" rest
+  grep -q 'npm rebuild skipped after verified inert install' <<< "${post}" || fail "${label}: the skipped rebuild is reported"
+  grep -q "install scripts have not run" <<< "${post}" || fail "${label}: the skipped rebuild says the install scripts have not run"
+  rest="${post//npm rebuild skipped/}"
+  rest="${rest//npm rebuild warning(s) were recorded/}"
+  assert_gives_no_command "${rest}" "${label}: the skipped rebuild names no place to run npm"
+  if grep -qiE 'npm would|npm will|would work in|npm ci empties' <<< "${post}"; then
+    fail "${label}: the reason is what was read from disk, not what npm would do"
+  fi
+}
 
 tmp_root=$(mktemp -d "${TMPDIR:-/tmp}/safedeps-e2e.XXXXXX")
 # Children the owner-state tests spawn, so an exit anywhere can reap them. The
@@ -758,11 +775,8 @@ EOF
 if grep -q 'rebuild' "${tmp_root}/emptying-npm-calls.log" 2>/dev/null; then
   fail "npm rebuild never runs through a node_modules that links outside the project"
 fi
-grep -q 'npm rebuild skipped after verified inert install' <<< "${link_inert_post}" || fail "the skipped rebuild is reported"
-grep -q "install scripts have not run" <<< "${link_inert_post}" || fail "the skipped rebuild says the install scripts have not run"
-if grep -qiE 'by hand|where the files belong|run npm rebuild' <<< "${link_inert_post}"; then
-  fail "the skipped rebuild names no place to run npm"
-fi
+assert_skipped_rebuild_states_facts "${link_inert_post}" "linked node_modules"
+grep -qF "/link-inert-wt/node_modules is a symbolic link to" <<< "${link_inert_post}" || fail "the skipped rebuild names the linked node_modules"
 pass "a verified inert install skips the rebuild through a linked node_modules"
 
 # npm leads outside without any link: in a directory with no package.json and
@@ -934,8 +948,8 @@ cmp -s "${ws_wt}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail 
 pass "a rollback leaves a workspace outside the project alone"
 
 # The rollback's own node_modules step: a real directory is removed, links
-# inside it are removed without being followed, and the message says nothing
-# is installed until the next install.
+# inside it are removed without being followed, and the message says which
+# directory was removed and that safedeps does not reinstall.
 own_wt="${tmp_root}/own-wt"
 own_outside="${tmp_root}/own-outside"
 mkdir -p "${own_wt}/node_modules/installed-package" "${own_outside}/kept-package"
@@ -956,13 +970,68 @@ EOF
 grep -q 'suspicious dependency change detected' <<< "${own_post}" || fail "reorg fires in an ordinary npm project"
 [[ ! -e "${own_wt}/node_modules" ]] || fail "a rollback removes the project's own node_modules"
 [[ -f "${own_outside}/kept-package/package.json" ]] || fail "removing node_modules does not follow a link inside it"
-grep -q 'Nothing is installed in .* until the next install' <<< "${own_post}" || fail "the rollback says nothing is installed until the next install"
+grep -qF "/own-wt/node_modules was removed" <<< "${own_post}" || fail "the rollback says which node_modules it removed"
+grep -q 'safedeps does not reinstall packages' <<< "${own_post}" || fail "the rollback says it does not reinstall"
 assert_gives_no_command "${own_post}" "the rollback gives no reinstall command in an ordinary project either"
 if grep -qE '^(ci|install)' "${tmp_root}/emptying-npm-calls.log" 2>/dev/null; then
   fail "a rollback runs no npm in an ordinary project either"
 fi
 cmp -s "${own_wt}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "the lockfile is restored before node_modules is removed"
 pass "a rollback removes the project's own node_modules and runs no npm"
+
+# A project that keeps another manager's lockfile. After the restore it has a
+# package.json and no npm lockfile, and the rollback says exactly that: "no
+# lockfile" would be false next to a yarn.lock.
+yarn_wt="${tmp_root}/yarn-wt"
+mkdir -p "${yarn_wt}/node_modules/installed-package"
+printf '{"dependencies":{}}\n' > "${yarn_wt}/package.json"
+: > "${yarn_wt}/yarn.lock"
+scripts/safedeps-pre-guard.sh > /dev/null <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${yarn_wt}"}
+EOF
+printf '%s\n' "${tampered_lock}" > "${yarn_wt}/package-lock.json"
+yarn_post=$(
+  PATH="${emptying_bin}:${PATH}" scripts/safedeps-post-verify.sh <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${yarn_wt}"}
+EOF
+)
+grep -q 'suspicious dependency change detected' <<< "${yarn_post}" || fail "reorg fires in a project that keeps a yarn.lock"
+[[ -f "${yarn_wt}/yarn.lock" ]] || fail "the rollback leaves the yarn.lock it found"
+grep -qF "/yarn-wt has a package.json and neither package-lock.json nor npm-shrinkwrap.json" <<< "${yarn_post}" \
+  || fail "the rollback names the npm lockfiles it looked for"
+if grep -q 'no lockfile' <<< "${yarn_post}"; then
+  fail "the rollback does not call a yarn project lockless"
+fi
+assert_gives_no_command "${yarn_post}" "the rollback in a yarn project gives no command"
+pass "a rollback next to another manager's lockfile says which lockfiles are missing"
+
+# node_modules that cannot be removed: the rollback says it is still there and
+# gives no command. A read-only directory stops rm for an ordinary user; root
+# removes it anyway (the CI image runs as root), so the row is for the others.
+if [[ "$(id -u)" != 0 ]]; then
+  stuck_wt="${tmp_root}/stuck-wt"
+  mkdir -p "${stuck_wt}/node_modules/locked-package"
+  : > "${stuck_wt}/node_modules/locked-package/index.js"
+  printf '{"dependencies":{"fixture-parent":"1.0.0"}}\n' > "${stuck_wt}/package.json"
+  cp "${tmp_root}/revert-safe-lock.json" "${stuck_wt}/package-lock.json"
+  scripts/safedeps-pre-guard.sh > /dev/null <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${stuck_wt}"}
+EOF
+  printf '%s\n' "${tampered_lock}" > "${stuck_wt}/package-lock.json"
+  chmod 555 "${stuck_wt}/node_modules/locked-package"
+  stuck_post=$(
+    PATH="${emptying_bin}:${PATH}" scripts/safedeps-post-verify.sh <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${stuck_wt}"}
+EOF
+  )
+  chmod 755 "${stuck_wt}/node_modules/locked-package"
+  grep -q 'suspicious dependency change detected' <<< "${stuck_post}" || fail "reorg fires where node_modules cannot be removed"
+  grep -q "node_modules could not be removed: .*/stuck-wt/node_modules is still there" <<< "${stuck_post}" \
+    || fail "the rollback says the node_modules it could not remove is still there"
+  assert_gives_no_command "${stuck_post}" "the rollback that could not remove node_modules gives no command"
+  cmp -s "${stuck_wt}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "the lockfile is still restored where node_modules cannot be removed"
+  pass "a rollback that cannot remove node_modules says so and gives no command"
+fi
 
 # `npm install --no-save <pkg>` in a directory without package.json writes
 # node_modules (with npm's hidden lockfile) and nothing else. That is still an

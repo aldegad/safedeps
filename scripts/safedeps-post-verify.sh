@@ -586,12 +586,12 @@ rollback_node_modules() {
   if [[ -L "${node_modules}" ]]; then
     local target
     target=$(safedeps_link_target "${node_modules}")
-    record_rollback_refusal "node_modules removal" "${node_modules} is a symbolic link to ${target}; the packages this install wrote through the link are still in ${target}"
+    record_rollback_refusal "node_modules removal" "${node_modules} is a symbolic link to ${target}; safedeps removed nothing there, so whatever this install wrote through the link is still there"
     return 0
   fi
   [[ -d "${node_modules}" ]] || return 0
   if ! rm -rf "${node_modules}"; then
-    ROLLBACK_WARNINGS+=("node_modules could not be removed; remove ${node_modules} by hand before using the project")
+    ROLLBACK_WARNINGS+=("node_modules could not be removed: ${node_modules} is still there, with whatever this install wrote in it")
     return 0
   fi
   ROLLED_BACK+=("node_modules (removed)")
@@ -599,7 +599,7 @@ rollback_node_modules() {
   # command: where a reinstall would write is npm's to decide (a bare npm ci in
   # a workspace member empties the workspace root's node_modules), and a
   # judgment that is silent when it does not block reads as "go ahead".
-  ROLLBACK_WARNINGS+=("node_modules was removed. Nothing is installed in ${PROJECT_DIR} until the next install. safedeps does not reinstall packages, and it does not judge where a reinstall would write; the gate checks the next install's packages like any other install")
+  ROLLBACK_WARNINGS+=("${node_modules} was removed. safedeps does not reinstall packages, and it does not judge where a reinstall would write; the gate checks the next install like any other install")
   if [[ ! -f "${PROJECT_DIR}/package.json" ]]; then
     ROLLBACK_WARNINGS+=("after the restore, ${PROJECT_DIR} has no package.json")
   elif [[ ! -f "${PROJECT_DIR}/package-lock.json" && ! -f "${PROJECT_DIR}/npm-shrinkwrap.json" ]]; then
@@ -1118,7 +1118,7 @@ run_verified_npm_rebuild_if_injected() {
   local outside
   outside=$(project_npm_blocker)
   if [[ -n "${outside}" ]]; then
-    ROLLBACK_WARNINGS+=("npm rebuild skipped after verified inert install: ${outside}. The verified packages' install scripts have not run. safedeps runs npm only where it cannot reach past the project, and it does not judge where a rebuild would write")
+    ROLLBACK_WARNINGS+=("npm rebuild skipped after verified inert install: ${outside}. safedeps rebuilds only where package.json, the lockfiles and node_modules at the project root are not links. The verified packages' install scripts have not run")
     log_advisory "post-verify rebuild skipped: ${outside} -- project ${PROJECT_DIR}"
     return 0
   fi

@@ -37,7 +37,11 @@ safedeps_link_target() {
 }
 
 # safedeps_npm_reach_blocker <dir>: prints which root npm file of <dir> is a
-# link out of it (or that <dir> cannot be resolved), or nothing.
+# link out of it (or that <dir> cannot be resolved), or nothing. The answer
+# goes into a message as the reason, so it states only what was read from
+# disk. What npm would do with that fact is the reasoning in this header,
+# never part of the answer: an answer that carried a prediction ("npm would
+# work in an enclosing project", where a real npm stayed put) was wrong.
 safedeps_npm_reach_blocker() {
   local dir="$1" name
 

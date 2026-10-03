@@ -161,7 +161,7 @@ After the install command completes, the verify hook analyzes what changed. For 
 
   The baseline used to be the snapshot taken *before* the verified install, which put it one install behind. Measured with a real npm against a local registry: an approved `npm install a`, then an unapproved `npm install b`, rolled the project back to one without `a` in `package.json`, the lockfile or `node_modules`. Now `a` stays and only `b` goes, on Claude Code and Codex alike (`scripts/test/lockless-forms.sh`).
 
-  The baseline is the files, not `node_modules`. The rollback rebuilds `node_modules` from the restored lockfile, so a verified install that saved nothing (`--no-save`) is not part of the baseline and does not survive a later rollback. If the verified state cannot be recorded, the baseline stays where it was and you are told that a later rollback would undo this install too.
+  The baseline is the files, not `node_modules`. The rollback removes `node_modules`, and the next install builds it again from the restored files. So a verified install that saved nothing (`--no-save`) is not part of the baseline, and its packages leave with `node_modules` at a later rollback. If the verified state cannot be recorded, the baseline stays where it was and you are told that a later rollback would undo this install too.
 
   The files are copied before the checks read them, and the copy becomes the baseline only if the project still holds the same bytes when the checks finish. If another install changed them in the meantime, what is there now was not checked, so the baseline does not move and you are told why.
 - **Any check fails** -- A **reorg** is triggered:
