@@ -49,7 +49,12 @@ post_hook() {
   payload=$(cat)
   call=$(mktemp -d "${ORACLE_DIR}/call.XXXXXX")
   oracle_before "${call}"
-  out=$(printf '%s' "${payload}" | ORACLE_NPM_LOG="${call}/npm.log" PATH="${ORACLE_DIR}/bin:${PATH}" \
+  # The npm shim goes on PATH only where the row has an npm: on a PATH with
+  # none, the shim would be the npm the hook finds, and the row would test a
+  # hook that has one.
+  local path="${PATH}"
+  command -v npm >/dev/null 2>&1 && path="${ORACLE_DIR}/bin:${PATH}"
+  out=$(printf '%s' "${payload}" | ORACLE_NPM_LOG="${call}/npm.log" PATH="${path}" \
     "${ROOT_DIR}/scripts/safedeps-post-verify.sh")
   printf '%s' "${out}"
   oracle_message "${call}" "${payload}" "${out}" || exit 1
