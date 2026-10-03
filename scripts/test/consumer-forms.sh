@@ -1243,6 +1243,27 @@ do
 done
 pass "a command word or a runner package assembled from quotes stays unrecognized (documented boundary)"
 
+# A word between the manager and its verb that the shell removes when it runs
+# the command is the same boundary: the recognizers read the word where it
+# stands, and an unset variable, an empty substitution or a zsh glob that
+# matches nothing with `(N)` leaves `pip install ...` behind. main behaved the
+# same. Pinned as the gate answers now, so that the plan that reads which word
+# is the command and which the verb has rows to turn
+# (safedeps/command-words-read-as-the-shell-dequotes). Each row: whether each
+# shell ran the install with the variable unset, in the columns of word_rows
+# above (measured 2026-10-03 with a stub in the manager's place), then the form.
+for vanishing_row in \
+  '1111111|pip $x install evil==1.0.0' \
+  '1111111|pip ${x} install evil==1.0.0' \
+  '1111111|pip $(true) install evil==1.0.0' \
+  '1111111|npm $x install evil' \
+  '0100010|pip nope*(N) install evil==1.0.0'
+do
+  expect_pass "a word the shell removes between the manager and its verb (ran ${vanishing_row%%|*}): ${vanishing_row#*|}" "${vanishing_row#*|}"
+done
+[[ -z "$(gate_rewrite 'npm $x install evil')" ]] || fail "an npm install behind a word the shell removes gets no rewrite, as pinned (got: $(gate_rewrite 'npm $x install evil'))"
+pass "a word the shell removes between the manager and its verb stays unrecognized (documented boundary)"
+
 # A case arm is a statement. A grammar pattern cannot tell a pattern's `)` from
 # any other `)` (`echo $(date) pip install x` would read as an install), so case
 # arms were pinned outside the gate. The lexer knows where a pattern ends: it
