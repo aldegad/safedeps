@@ -1080,6 +1080,16 @@ word_rows=(
   'WK12|0100110|nocorrect noglob - pip install evil==1.0.0'
   'WK13|0100110|exec - pip install evil==1.0.0'
   'WK14|0100110|builtin noglob pip install evil==1.0.0'
+  # zsh reads `<N-M>` as a glob for a range of numbers: bytes of a word,
+  # where bash and dash read two redirections and take `install` or the
+  # manager for a target.
+  'WN1|0100110|pip >/dev/fd/<1-1> install evil==1.0.0'
+  'WN2|0100110|>/dev/fd/<1-1> pip install evil==1.0.0'
+  'WN3|0100110|X=/dev/fd/<1-1> pip install evil==1.0.0'
+  # A comment inside a substitution is nested with it and ends neither the
+  # value nor the target the substitution is part of.
+  $'WM1|1111111|x=$(echo f # c\n) pip install evil==1.0.0'
+  $'WM2|1111111|pip >$(echo f # )\n) install evil==1.0.0'
   # A value with an escaped blank, an ANSI-C string, quoted and escaped
   # parentheses is one word, as it was.
   'WV1|1111111|a=b\ c pip install evil==1.0.0'

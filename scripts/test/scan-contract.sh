@@ -887,6 +887,17 @@ for form in '>!f pip i' 'pip >/dev/null i' '{fd}>&2 pip i' '< <(true) pip i'; do
 done
 pass "redirections: a process substitution target is one word whose body is a payload, a {varname} or number glued in front is part of the operator, a heredoc's too, and the recognizers read them blanked wherever they stand"
 
+# Whether the bash reading of a text says the shells read it differently
+# (used here and for rule 5 of the stmts view below).
+stmts_diverges() { # text -> 0 when the bash stmts reading says DIVERGE
+  local f rc=1
+  f=$(mktemp "${TMPDIR:-/tmp}/safedeps-diverge.XXXXXX")
+  SAFEDEPS_READING=bash SAFEDEPS_LEX_DIVERGE="${f}" stmts_view "$1" > /dev/null
+  [[ -s "${f}" ]] && rc=0
+  rm -f "${f}"
+  return "${rc}"
+}
+
 # Where a word ends is one answer: the depth of the lexer walk. The shell's
 # grammar puts parentheses inside words, and each is a context on the walk's
 # stack, so every byte up to its close is nested and no reader keeps a byte
@@ -906,7 +917,10 @@ pass "redirections: a process substitution target is one word whose body is a pa
 # A case pattern close ends a word only at the top level: inside a
 # substitution it is nested with the rest of the body. An assignment word is
 # a name, a subscript and `=` or `+=`. The zsh precommand modifiers are
-# prefixes and starts in the zsh reading alone.
+# prefixes and starts in the zsh reading alone. zsh reads `<N-M>` as a glob
+# for a range of numbers, bytes of a word, where bash and dash read two
+# redirections; the scan view prints its `<` and `>` as it prints an escaped
+# operator.
 #
 # Each of these was read short by a reader with its own byte set, and the
 # word after it was a command no recognizer read: `a=(x) pip install x` ran
@@ -982,12 +996,18 @@ check_unprefixed "zsh" "the zsh precommand modifiers go, in any order, after exe
   'noglob pip i; - nocorrect pip i; builtin pip i; exec - pip i' 'pip i; pip i; pip i; pip i'
 check_unprefixed "bash dash" "and are commands outside zsh" \
   'noglob pip i; - nocorrect pip i; builtin pip i' 'noglob pip i; - nocorrect pip i; builtin pip i'
+check_unprefixed "zsh" "a zsh numeric range glob is part of a target, of a value and of an argument" \
+  '>f<1-2> pip i; X=<-> pip i; pip >f<1-> i' "pip i; pip i; pip$(sp 8)i"
+check_unprefixed "bash dash" "and two redirections to bash and dash, the second with the next word as its target" \
+  '>f<1-2> pip i' 'i'
+check_view scan_view "zsh" "the scan view prints the range glob's < and > as characters" \
+  'echo a<1-2>b <1-2 >c' 'echo a_1-2_b <1-2 >c'
 check_stmts "zsh" "a zsh precommand modifier is followed by a start" \
   'noglob pip i; echo noglob pip i' 'noglob;pip i; echo noglob pip i'
-for form in 'a[1 + 1]=x pip i' '>/dev/null(N) pip i' 'pip >f!(x) i' 'noglob pip i' '- pip i' "ls 'x'(N)"; do
+for form in 'a[1 + 1]=x pip i' '>/dev/null(N) pip i' 'pip >f!(x) i' 'noglob pip i' '- pip i' "ls 'x'(N)" 'pip >f<1-2> i'; do
   stmts_diverges "${form}" || fail "word depth: the bash reading of [${form}] says no DIVERGE, and the shells do not read that word the same way"
 done
-for form in 'a=(x y) pip i' 'a[1]=x pip i' 'a+=x pip i' 'x=$(case a in a) echo f;; esac) pip i' '< =(true) pip i' 'cat <(a; b)' 'ls file[0-9].txt'; do
+for form in 'a=(x y) pip i' 'a[1]=x pip i' 'a+=x pip i' 'x=$(case a in a) echo f;; esac) pip i' '< =(true) pip i' 'cat <(a; b)' 'ls file[0-9].txt' 'cat <1-2 >out'; do
   stmts_diverges "${form}" && fail "word depth: the bash reading of [${form}] says DIVERGE, and every reading reads that word the same way"
 done
 
@@ -1052,14 +1072,6 @@ pass "statement split: &> ends a statement in the dash reading alone"
 # not. Without the first, the zsh reading that finds `repeat 1 { pip i; }` is
 # never asked. zsh `case x {` is not here: the lexer reads a case that never
 # closes in every reading, which writes no starts and is UNDECIDED.
-stmts_diverges() { # text -> 0 when the bash stmts reading says DIVERGE
-  local f rc=1
-  f=$(mktemp "${TMPDIR:-/tmp}/safedeps-diverge.XXXXXX")
-  SAFEDEPS_READING=bash SAFEDEPS_LEX_DIVERGE="${f}" stmts_view "$1" > /dev/null
-  [[ -s "${f}" ]] && rc=0
-  rm -f "${f}"
-  return "${rc}"
-}
 for form in 'repeat 1 { pip i; }' 'for i (1) pip i' 'foreach i (1) pip i; end' 'if [[ 1 ]] pip i' \
     'while ((i++<1)) { pip i; }' '{ true; } always { pip i; }' 'coproc foo { pip i; }' \
     'case x in x) true;| x) pip i;; esac' 'case x in x) true;;& x) pip i;; esac' 'coproc foo if pip i; then :; fi' \
