@@ -818,6 +818,53 @@ grep -q 'neither lockfile records (../lib/node_modules/sd-victim (sd-victim@1.0.
   || fail "the skipped rebuild names the package in the linked library (post: ${CASE_POST:-<quiet>})"
 pass "a package in a file: dependency's node_modules that no lockfile records is not rebuilt, and the warning names it"
 
+# --- 11. The inert flag is the value npm reads -------------------------------------------
+# npm keeps the last value an option is given. The pre-guard skipped the
+# rewrite whenever the text `--ignore-scripts` stood anywhere in the command,
+# so `--ignore-scripts=false` and `&& echo --ignore-scripts` ran the install
+# with its scripts, and the meta said nothing was injected. Each form here is
+# an approved install that asks npm, one way or another, to run its scripts. It
+# must run none during the install, and the rebuild after the closure verifies
+# runs them. The last two rows already carry a true flag: the command runs as
+# written and runs no script at all.
+count_install_marks() { INSTALL_MARKS=$(grep -c '^sd-approved' "${MARKS}" || true); }
+for row in \
+  "npm install sd-approved@1.0.0 --ignore-scripts=false|asked" \
+  "npm install sd-approved@1.0.0 --no-ignore-scripts|asked" \
+  "npm install sd-approved@1.0.0 --ignore-scripts false|asked" \
+  "npm install sd-approved@1.0.0 --no-ignore|asked" \
+  "npm install sd-approved@1.0.0 --ignore-scripts --ign=false|asked" \
+  "npm install sd-approved@1.0.0 && echo --ignore-scripts|rebuilt" \
+  "X=--ignore-scripts npm install sd-approved@1.0.0|rebuilt" \
+  "npm install sd-approved@1.0.0 --cache --ignore-scripts|rebuilt" \
+  "npm install sd-approved@1.0.0 --prefix . --ignore-scripts=false > install.log 2>&1|asked" \
+  "sh -c 'npm install sd-approved@1.0.0 --ignore-scripts=false'|asked" \
+  "npm install sd-approved@1.0.0 --ignore-scripts|as written" \
+  "npm install --ignore-scripts=true sd-approved@1.0.0 --save|as written"
+do
+  IFS='|' read -r form want <<< "${row}"
+  new_project
+  : > "${MARKS}"
+  INSTALL_MARKS=""
+  run_install "${form}" claude count_install_marks
+  [[ "${INSTALL_MARKS}" == 0 ]] \
+    || fail "an approved install runs no script during the install: ${form} (ran: $(cut -f1,2 "${MARKS}" | paste -sd, -); command: ${CASE_EXEC})"
+  [[ -e "${CASE_PROJECT}/node_modules/sd-approved" ]] || fail "the approved install installs: ${form}"
+  if [[ "${want}" != "as written" ]]; then
+    [[ "${CASE_EXEC}" != "${form}" ]] || fail "the install is rewritten: ${form}"
+    grep -q '^sd-approved@[^	]*	install' <<< "${CASE_RAN}" \
+      || fail "the verified install is rebuilt, so its scripts run after the check: ${form} (post: ${CASE_POST:-<quiet>})"
+    if [[ "${want}" == asked ]]; then
+      grep -q 'sets ignore-scripts false; safedeps put --ignore-scripts after it' "${CASE_HOME}/advisory.log" \
+        || fail "an install that asked for its scripts is recorded in advisory.log: ${form}"
+    fi
+  else
+    [[ "${CASE_EXEC}" == "${form}" ]] || fail "an install that already carries the flag runs as written: ${form} (got: ${CASE_EXEC})"
+    [[ -z "${CASE_RAN}" ]] || fail "an install the command made inert itself runs no script: ${form} (${CASE_RAN})"
+  fi
+done
+pass "an approved install that asks npm for its scripts runs none during the install, wherever the request stands, and one that carries the flag runs as written"
+
 # --- the fixture never left the machine ---------------------------------------------------
 npm_sandbox_registry_was_local
 
