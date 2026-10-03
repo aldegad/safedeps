@@ -579,6 +579,7 @@ EOF
 )
 grep -q 'suspicious dependency change detected' <<< "${revert_post}" || fail "reorg fires on a tampered lockfile"
 cmp -s "${revert_project}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "reorg restores the exact safe lockfile content on disk"
+grep -qE '^ci --global=false --location=project --prefix .*/revert-project$' "${tmp_root}/npm-calls.log" || fail "the rollback's npm ci is pinned to the project"
 pass "reorg reverts a tampered lockfile to safe content on disk"
 
 # A rollback never acts outside the project it read. Some worktree layouts link
@@ -748,8 +749,11 @@ EOF
 )
 grep -q 'suspicious dependency change detected' <<< "${walk_post}" || fail "reorg fires in a project nested inside another"
 [[ -f "${walk_main}/node_modules/kept-package/package.json" ]] || fail "a rollback's npm ci never walks up to empty the enclosing project's node_modules"
-grep -qE '^ci --global=false --location=project --prefix .*/walk-main/nested/worktree$' "${tmp_root}/walkup-npm-calls.log" || fail "the rollback's npm ci is pinned to the project"
-pass "a rollback's npm ci stays in a project nested inside another"
+if grep -q '^ci' "${tmp_root}/walkup-npm-calls.log" 2>/dev/null; then
+  fail "a rollback runs no npm in a project with no package.json"
+fi
+grep -q 'REFUSED node_modules reinstall: .*has no package.json' <<< "${walk_post}" || fail "the refused reinstall says the project has no package.json"
+pass "a rollback runs no npm where npm would walk up to an enclosing project"
 
 # The install path: the install created package.json and the lockfile, the
 # rollback removes both, and the reinstall falls back to npm install in a
@@ -771,8 +775,90 @@ EOF
 )
 grep -q 'suspicious dependency change detected' <<< "${walk2_post}" || fail "reorg fires in a fresh project nested inside another"
 [[ -f "${walk2_main}/node_modules/kept-package/package.json" ]] || fail "a rollback's npm install never walks up to prune the enclosing project's node_modules"
-grep -qE '^install --global=false --location=project --prefix .*/walk2-main/nested/worktree$' "${tmp_root}/walkup-npm-calls.log" || fail "the rollback's npm install is pinned to the project"
-pass "a rollback's npm install stays in a project nested inside another"
+if grep -q '^install' "${tmp_root}/walkup-npm-calls.log" 2>/dev/null; then
+  fail "a rollback runs no npm install once it has removed the package.json the install created"
+fi
+pass "a rollback runs no npm install where npm would walk up to an enclosing project"
+
+# A lockfile that links to another checkout's: the restore of it is refused,
+# and the reinstall is refused too, because a fallback npm install saves the
+# lockfile through the link. This stub fails ci, as npm does when the linked
+# lockfile no longer matches package.json, and writes the lockfile on install.
+lockwrite_bin="${tmp_root}/lockwrite-npm-bin"
+mkdir -p "${lockwrite_bin}"
+cat > "${lockwrite_bin}/npm" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "${tmp_root}/lockwrite-npm-calls.log"
+case "\$1" in
+  ci) exit 1 ;;
+  install) printf 'REWRITTEN\n' > package-lock.json ;;
+esac
+exit 0
+EOF
+chmod +x "${lockwrite_bin}/npm"
+linklock_wt="${tmp_root}/linklock-wt"
+linklock_outside="${tmp_root}/linklock-outside"
+mkdir -p "${linklock_wt}" "${linklock_outside}"
+printf '{"dependencies":{"fixture-parent":"1.0.0"}}\n' > "${linklock_wt}/package.json"
+cp "${tmp_root}/revert-safe-lock.json" "${linklock_outside}/package-lock.json"
+ln -s "${linklock_outside}/package-lock.json" "${linklock_wt}/package-lock.json"
+scripts/safedeps-pre-guard.sh > /dev/null <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${linklock_wt}"}
+EOF
+printf '%s\n' "${tampered_lock}" > "${linklock_outside}/package-lock.json"
+cp "${linklock_outside}/package-lock.json" "${tmp_root}/linklock-expected.json"
+linklock_post=$(
+  PATH="${lockwrite_bin}:${PATH}" scripts/safedeps-post-verify.sh <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${linklock_wt}"}
+EOF
+)
+grep -q 'suspicious dependency change detected' <<< "${linklock_post}" || fail "reorg fires in a project whose lockfile is a link"
+cmp -s "${linklock_outside}/package-lock.json" "${tmp_root}/linklock-expected.json" || fail "a rollback never writes the lockfile a link points to, by restore or by reinstall"
+if grep -qE '^(ci|install)' "${tmp_root}/lockwrite-npm-calls.log" 2>/dev/null; then
+  fail "a rollback runs no npm in a project whose lockfile is a link"
+fi
+grep -q 'REFUSED node_modules reinstall: .*package-lock.json is a symbolic link' <<< "${linklock_post}" || fail "the refused reinstall names the linked lockfile"
+pass "a rollback refuses the reinstall when the lockfile links outside the project"
+
+# A workspace may lie outside the project, and npm ci empties every
+# workspace's node_modules. npm cannot list the workspaces before the tree is
+# installed, so a project that declares workspaces is not reinstalled by the
+# rollback at all. This stub empties the declared workspace on ci.
+ws_bin="${tmp_root}/ws-npm-bin"
+mkdir -p "${ws_bin}"
+cat > "${ws_bin}/npm" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "${tmp_root}/ws-npm-calls.log"
+case "\$1" in
+  ci) rm -rf ../ws-outside/node_modules/* ;;
+esac
+exit 0
+EOF
+chmod +x "${ws_bin}/npm"
+ws_wt="${tmp_root}/ws-wt"
+ws_outside="${tmp_root}/ws-outside"
+mkdir -p "${ws_wt}" "${ws_outside}/node_modules/kept-package"
+printf '{"name":"shared","version":"1.0.0"}\n' > "${ws_outside}/package.json"
+printf '{"name":"kept-package","version":"1.0.0"}\n' > "${ws_outside}/node_modules/kept-package/package.json"
+printf '{"name":"ws","workspaces":["../ws-outside"],"dependencies":{"fixture-parent":"1.0.0"}}\n' > "${ws_wt}/package.json"
+cp "${tmp_root}/revert-safe-lock.json" "${ws_wt}/package-lock.json"
+scripts/safedeps-pre-guard.sh > /dev/null <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${ws_wt}"}
+EOF
+printf '%s\n' "${tampered_lock}" > "${ws_wt}/package-lock.json"
+ws_post=$(
+  PATH="${ws_bin}:${PATH}" scripts/safedeps-post-verify.sh <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${ws_wt}"}
+EOF
+)
+grep -q 'suspicious dependency change detected' <<< "${ws_post}" || fail "reorg fires in a project that declares workspaces"
+[[ -f "${ws_outside}/node_modules/kept-package/package.json" ]] || fail "a rollback never empties a workspace outside the project"
+if grep -q '^ci' "${tmp_root}/ws-npm-calls.log" 2>/dev/null; then
+  fail "a rollback runs no npm ci in a project that declares workspaces"
+fi
+grep -q 'REFUSED node_modules reinstall: .*declares workspaces' <<< "${ws_post}" || fail "the refused reinstall says the project declares workspaces"
+cmp -s "${ws_wt}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "the lockfile of a workspace project is still restored"
+pass "a rollback refuses the reinstall in a project that declares workspaces"
 
 export SAFEDEPS_HOME="${tmp_root}/safe-missing-transitive"
 export SAFEDEPS_OSV_API_URL="http://127.0.0.1:${port}/osv/v1/query"

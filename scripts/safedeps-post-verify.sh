@@ -205,9 +205,9 @@ monitored_files() {
 # rollback_target_outside <path>: prints why <path> must not be touched, or
 # nothing when it may be. Every target is a name directly inside PROJECT_DIR,
 # so a target can lead outside only by being a link. npm can lead outside on
-# its own: in a directory with no package.json and no node_modules it walks up
-# to the enclosing project and works there. Every npm the rollback runs is
-# therefore pinned to the project (SAFEDEPS_NPM_PROJECT_FLAGS below).
+# its own, which rollback_npm_blocker below answers for every npm the rollback
+# runs, and each of those is also pinned to the project
+# (SAFEDEPS_NPM_PROJECT_FLAGS).
 rollback_target_outside() {
   local target="$1"
 
@@ -228,6 +228,43 @@ ROLLBACK_REFUSED=$'\n'
 # --location=project stop a project .npmrc from sending the command to the
 # global tree.
 SAFEDEPS_NPM_PROJECT_FLAGS=(--global=false --location=project)
+
+# rollback_npm_blocker: prints why the rollback must not run npm in the
+# project, or nothing when it may. npm reaches past the files it is pointed at
+# in three ways, and each one is refused here rather than predicted:
+# - it reads and writes package.json, the lockfiles and node_modules at the
+#   root, and follows a link among them (a fallback `npm install` rewrote a
+#   linked lockfile after the restore of that lockfile had been refused);
+# - without a package.json it walks up and works in an enclosing project;
+# - `npm ci` empties the node_modules of every workspace, and a workspace may
+#   lie outside the project (`"workspaces": ["../shared"]`). Which directories
+#   those are is npm's to say, and npm cannot say before the tree is installed,
+#   so a project that declares workspaces is not reinstalled automatically.
+rollback_npm_blocker() {
+  local name
+
+  if ! (cd -P "${PROJECT_DIR}" 2>/dev/null); then
+    printf 'the project directory %s cannot be resolved' "${PROJECT_DIR}"
+    return 0
+  fi
+  for name in package.json package-lock.json npm-shrinkwrap.json node_modules; do
+    if [[ -L "${PROJECT_DIR}/${name}" ]]; then
+      printf '%s/%s is a symbolic link to %s' "${PROJECT_DIR}" "${name}" "$(readlink "${PROJECT_DIR}/${name}" 2>/dev/null || printf 'an unreadable target')"
+      return 0
+    fi
+  done
+  if [[ ! -f "${PROJECT_DIR}/package.json" ]]; then
+    printf '%s has no package.json, so npm would work in an enclosing project' "${PROJECT_DIR}"
+    return 0
+  fi
+  if ! jq -e 'type == "object"' "${PROJECT_DIR}/package.json" >/dev/null 2>&1; then
+    printf '%s/package.json cannot be read as an object' "${PROJECT_DIR}"
+    return 0
+  fi
+  if jq -e 'has("workspaces")' "${PROJECT_DIR}/package.json" >/dev/null 2>&1; then
+    printf '%s/package.json declares workspaces; npm ci empties every workspace'"'"'s node_modules, and a workspace may lie outside the project' "${PROJECT_DIR}"
+  fi
+}
 record_rollback_refusal() {
   local step="$1" why="$2"
 
@@ -394,15 +431,13 @@ cleanup_old_snapshots() {
 restore_node_modules() {
   local outside
 
-  # `npm ci` empties the directory node_modules resolves to, and the fallback
-  # removes it, so neither runs on a node_modules that is a link or lives
-  # outside the project.
-  if [[ -e "${PROJECT_DIR}/node_modules" || -L "${PROJECT_DIR}/node_modules" ]]; then
-    outside=$(rollback_target_outside "${PROJECT_DIR}/node_modules")
-    if [[ -n "${outside}" ]]; then
-      record_rollback_refusal "node_modules reinstall" "${outside}; npm ci empties the directory node_modules resolves to, so following it would delete another checkout's packages. Reinstall in the directory that owns it, or replace the link with a real directory and run npm ci there"
-      return
-    fi
+  # The reinstall runs only in a project npm cannot reach past
+  # (rollback_npm_blocker). A refusal leaves node_modules as it is and says how
+  # to finish by hand.
+  outside=$(rollback_npm_blocker)
+  if [[ -n "${outside}" ]]; then
+    record_rollback_refusal "node_modules reinstall" "${outside}. Reinstall by hand, in the directory that owns the files"
+    return
   fi
 
   if ! command -v npm >/dev/null 2>&1; then
@@ -430,16 +465,14 @@ run_verified_npm_rebuild_if_injected() {
   injected=$(jq -r '.ignore_scripts_injected == true' "${META_FILE}" 2>/dev/null || printf 'false')
   [[ "${injected}" == "true" ]] || return 0
 
-  # A rebuild through a linked node_modules runs another checkout's install
-  # scripts, which this install neither wrote nor verified.
+  # A rebuild where npm can reach past the project runs install scripts in
+  # another checkout's tree, which this install neither wrote nor verified.
   local outside
-  if [[ -e "${PROJECT_DIR}/node_modules" || -L "${PROJECT_DIR}/node_modules" ]]; then
-    outside=$(rollback_target_outside "${PROJECT_DIR}/node_modules")
-    if [[ -n "${outside}" ]]; then
-      ROLLBACK_WARNINGS+=("npm rebuild skipped after verified inert install: ${outside}; a rebuild there would run another checkout's install scripts")
-      log_advisory "post-verify rebuild skipped: ${outside} -- project ${PROJECT_DIR}"
-      return 0
-    fi
+  outside=$(rollback_npm_blocker)
+  if [[ -n "${outside}" ]]; then
+    ROLLBACK_WARNINGS+=("npm rebuild skipped after verified inert install: ${outside}; run npm rebuild by hand where the files belong")
+    log_advisory "post-verify rebuild skipped: ${outside} -- project ${PROJECT_DIR}"
+    return 0
   fi
 
   if ! command -v npm >/dev/null 2>&1; then
