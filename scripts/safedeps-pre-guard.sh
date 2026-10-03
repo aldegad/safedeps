@@ -256,10 +256,13 @@ compute_dir_hash() {
 # the inert-install rewrite normalized out, so PreToolUse (original command) and
 # PostToolUse (possibly `--ignore-scripts`-appended) of the SAME install resolve to
 # the same key. This keeps concurrent installs in one project on separate pending
-# files instead of clobbering a single global one.
+# files instead of clobbering a single global one. The strip loops: the flag
+# can now follow one the command already carried (`--cache --ignore-scripts`
+# then ours), and a /g pass took the blank between them with the first, so the
+# second stayed and the PostToolUse hook found no pending state.
 compute_pending_key() {
   local dir_hash="$1" command="$2" norm cmd_hash
-  norm=$(printf '%s' "${command}" | sed -E 's/[[:space:]]+--ignore-scripts([;&|)}`"'"'"'])/\1/g; s/[[:space:]]+--ignore-scripts([[:space:]]|$)/ /g; s/[[:space:]]+/ /g; s/^ //; s/ $//')
+  norm=$(printf '%s' "${command}" | sed -E -e ':a' -e 's/[[:space:]]+--ignore-scripts([;&|)}`"'"'"'])/\1/' -e 'ta' -e ':b' -e 's/[[:space:]]+--ignore-scripts([[:space:]]|$)/ /' -e 'tb' -e 's/[[:space:]]+/ /g; s/^ //; s/ $//')
   if command -v md5sum >/dev/null 2>&1; then
     cmd_hash=$(printf '%s' "${norm}" | md5sum | cut -d' ' -f1)
   elif command -v md5 >/dev/null 2>&1; then

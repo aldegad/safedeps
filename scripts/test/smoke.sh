@@ -636,6 +636,29 @@ asked_before=$(grep -c 'sets ignore-scripts false; safedeps put --ignore-scripts
 run_hook_command "${tmp_root}/home-compound" "${tmp_root}/safe-compound" "npm install left-pad@1.3.0 --ignore-scripts=false" >/dev/null
 asked_after=$(grep -c 'sets ignore-scripts false; safedeps put --ignore-scripts after it' "${tmp_root}/safe-compound/advisory.log" 2>/dev/null || true)
 (( ${asked_after:-0} > ${asked_before:-0} )) || fail "an install that asked for its scripts is recorded when the flag overrides it"
+# The PostToolUse hook finds the pending state by a key with the flag stripped
+# from the command it receives, which is the rewritten one. The flag can now
+# follow one the command already carried, and a strip that took the blank
+# between them with the first left the second, so the keys differed: the post
+# hook found no pending state and the verified install was never rebuilt.
+key_safe=$(mktemp -d "${tmp_root}/safe-key.XXXXXX")
+SAFEDEPS_HOME="${key_safe}" lib/ledger/ledger.sh approve npm left-pad 1.3.0 1.3.0 smoke >/dev/null
+for key_in in \
+  "npm install left-pad@1.3.0 --cache --ignore-scripts" \
+  "npm install left-pad@1.3.0 --ignore-scripts=false" \
+  "sh -c 'npm install left-pad@1.3.0'"
+do
+  rm -rf "${key_safe}/pending"
+  key_out=$(run_hook_command "${tmp_root}/home-key" "${key_safe}" "${key_in}")
+  key_cmd=$(jq -r '.hookSpecificOutput.updatedInput.command // empty' <<< "${key_out}")
+  [[ -n "${key_cmd}" ]] || fail "the key case is rewritten: ${key_in}"
+  key_pre=$(find "${key_safe}/pending" -name '*.json' | sed -E 's#.*/##; s/__.*//')
+  key_post=$(bash -c 'eval "$(sed -n "/^compute_pending_key() {/,/^}/p" scripts/safedeps-post-verify.sh)"; compute_pending_key "$1" "$2"' _ "${key_pre%%_*}" "${key_cmd}")
+  [[ -n "${key_pre}" && "${key_pre}" == "${key_post}" ]] \
+    || fail "the post hook derives the pre hook's pending key from the rewritten command: ${key_in} (pre ${key_pre}, post ${key_post})"
+done
+pass "the pending key is the same for the command and its inert rewrite, wherever the flag lands"
+
 # A `--` before the verb leaves no place where npm reads the flag as an option:
 # the command is not rewritten, and the downgrade is recorded.
 downgrades_before=$(grep -c 'could not make every npm install in this command inert' "${tmp_root}/safe-compound/advisory.log" 2>/dev/null || true)
