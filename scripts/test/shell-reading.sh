@@ -16,8 +16,9 @@
 # A form marked `gate: pass` is data the shell never runs, and must stay data.
 #
 # The shells are bash, zsh and dash, as the agent wrapper and both platforms
-# run them (measured.{bash,zsh,sh,agent,dash} on macOS, measured.linux.{bash,
-# dash} on Linux). The lexer reads a command once per shell -- the bash, zsh
+# run them (measured.{bash,zsh,sh,agent,agent-noset,dash} on macOS,
+# measured.linux.{bash,dash} on Linux; the two agent columns are the wrapper
+# with and without its `setopt NO_EXTENDED_GLOB NO_BARE_GLOB_QUAL`). The lexer reads a command once per shell -- the bash, zsh
 # and dash readings -- and the gate judges the union. Before the gate is asked
 # anything, each reading is held to its own shell here: wherever a shell ran
 # the tail, that shell's reading must show it. The union would hide a reading
@@ -42,7 +43,7 @@ pass() { printf 'ok - %s\n' "$1"; }
 fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
 
 # shell column -> the reading that stands for it
-SHELL_READINGS="bash:bash sh:bash bash5:bash linux.bash:bash zsh:zsh agent:zsh dash:dash linux.dash:dash"
+SHELL_READINGS="bash:bash sh:bash bash5:bash linux.bash:bash zsh:zsh agent:zsh agent-noset:zsh dash:dash linux.dash:dash"
 
 tmp_root=$(mktemp -d "${TMPDIR:-/tmp}/safedeps-shell-reading.XXXXXX")
 trap 'rm -rf "${tmp_root}"' EXIT
@@ -101,7 +102,7 @@ for ((i = 0; i < n; i++)); do
 p install evil==6.6.6/'; printf 'X'); text="${text%X}"
   for pair in ${SHELL_READINGS}; do
     column="${pair%%:*}"
-    [[ "$(jq -r ".[${i}].measured.${column} // \"\"" "${FORMS}")" == R* ]] || continue
+    [[ "$(jq -r --arg c "${column}" ".[${i}] | getpath([\"measured\"] + (\$c | split(\".\"))) // \"\"" "${FORMS}")" == R* ]] || continue
     cells=$((cells + 1))
     reading_shows_tail "${pair#*:}" "${text}" || unfaithful+=("${id}:${column}")
   done
@@ -124,7 +125,7 @@ for ((i = 0; i < n; i++)); do
   jq -j ".[${i}].text" "${FORMS}" \
     | sed -e 's/@@TAIL@@/pip install evil==6.6.6/' -e 's/@@HEAD@@/pip/g' -e 's/@@TAIL_SPLIT@@/pi\\\
 p install evil==6.6.6/' > "${tmp_root}/${id}.cmd"
-  shells=$(jq -r ".[${i}].measured | \"\(.bash) \(.zsh) \(.agent) \(.dash) \(.bash5 // \"\") \(.linux.bash) \(.linux.dash)\"" "${FORMS}")
+  shells=$(jq -r ".[${i}].measured | \"\(.bash) \(.zsh) \(.agent) \(.[\"agent-noset\"] // \"\") \(.dash) \(.bash5 // \"\") \(.linux.bash) \(.linux.dash)\"" "${FORMS}")
   want=$(jq -r ".[${i}].gate // empty" "${FORMS}")
   got=$(decision_of "${tmp_root}/${id}.cmd")
   if [[ "${shells}" == *R* ]]; then

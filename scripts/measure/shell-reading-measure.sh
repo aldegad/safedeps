@@ -33,12 +33,23 @@
 #   scripts/measure/shell-reading-measure.sh --record   print the corpus with
 #                                                       freshly measured values
 #
-# The agent column is the Claude Code Bash tool's own wrapper (zsh -c with the
-# session's shell snapshot, then eval), measured only where a snapshot exists.
+# The agent columns are the Claude Code Bash tool's own wrapper (zsh -c with
+# the session's shell snapshot, then eval), measured only where a snapshot
+# exists. There are two, because the wrapper has been both and they run
+# different forms:
+#
+#   agent        the wrapper as it is now (read from `ps -o command= -p $$`
+#                inside the tool, 2026-10-03): after the snapshot it runs
+#                `setopt NO_EXTENDED_GLOB NO_BARE_GLOB_QUAL`, so a bare glob
+#                qualifier is no qualifier and `>/dev/(null) cmd` runs cmd
+#   agent-noset  the wrapper without that line, which is also how any other
+#                zsh -c caller reads: `>/dev/null(N) cmd` runs cmd
+#
+# One column for both would have missed the forms only the other runs.
 #
 # The shells are the ones the platform has. On macOS: bash 3.2, zsh, /bin/sh
-# (bash in POSIX mode), the agent wrapper and /bin/dash, recorded as
-# measured.{bash,zsh,sh,agent,dash}. On Linux: bash and dash (which is /bin/sh
+# (bash in POSIX mode), the two agent wrappers and /bin/dash, recorded as
+# measured.{bash,zsh,sh,agent,agent-noset,dash}. On Linux: bash and dash (which is /bin/sh
 # there, and what reads a `sh -c` script), recorded as measured.linux.{bash,dash}.
 # --record replaces only this platform's fields, so the record carries both
 # after one run on each. On macOS, SAFEDEPS_MEASURE_BASH5=<path to a bash 5>
@@ -72,10 +83,11 @@ run_in() { # shell file -> R (ran the tail), - (did not), with ! when the shell 
       out=$(cd "${dir}" && "${dash_bin}" -c "$(cat "${file}")" 2>"${dir}/.err" </dev/null) ;;
     linux-bash) out=$(cd "${dir}" && bash -c "$(cat "${file}")" 2>"${dir}/.err" </dev/null) ;;
     bash5) out=$(cd "${dir}" && "${SAFEDEPS_MEASURE_BASH5}" -c "$(cat "${file}")" 2>"${dir}/.err" </dev/null) ;;
-    agent)
+    agent|agent-noset)
       [[ -n "${snapshot}" ]] || { printf 'n/a'; return; }
-      local q; q=$(sed "s/'/'\\\\''/g" "${file}")
-      out=$(cd "${dir}" && /bin/zsh -c "source ${snapshot} 2>/dev/null || true && eval '${q}' < /dev/null" 2>"${dir}/.err") ;;
+      local q setopts=""; q=$(sed "s/'/'\\\\''/g" "${file}")
+      [[ "${shell}" == agent-noset ]] || setopts="setopt NO_EXTENDED_GLOB NO_BARE_GLOB_QUAL 2>/dev/null || true && "
+      out=$(cd "${dir}" && /bin/zsh -c "source ${snapshot} 2>/dev/null || true && ${setopts}eval '${q}' < /dev/null" 2>"${dir}/.err") ;;
   esac
   printf '%s\n' "${out}" | grep -qx REACHED && r="R"
   [[ -e "${dir}/.reached" ]] && r="R"
@@ -119,12 +131,13 @@ ho REACHED/' > "${work}/${id}.sh"
     zsh_v=$(run_in zsh "${work}/${id}.sh")
     sh_v=$(run_in sh "${work}/${id}.sh")
     agent_v=$(run_in agent "${work}/${id}.sh")
+    noset_v=$(run_in agent-noset "${work}/${id}.sh")
     dash_v=$(run_in dash "${work}/${id}.sh")
     bash5_v=""
     [[ -z "${SAFEDEPS_MEASURE_BASH5:-}" ]] || bash5_v=$(run_in bash5 "${work}/${id}.sh")
     if [[ "${RECORD}" == "true" ]]; then
-      records+=("$(jq -c --argjson i "${i}" --arg b "${bash_v}" --arg z "${zsh_v}" --arg s "${sh_v}" --arg a "${agent_v}" --arg d "${dash_v}" --arg b5 "${bash5_v}" \
-        '.[$i] | .measured = ((.measured // {}) + {bash: $b, zsh: $z, sh: $s, agent: $a, dash: $d} + (if $b5 == "" then {} else {bash5: $b5} end))' "${FORMS}")")
+      records+=("$(jq -c --argjson i "${i}" --arg b "${bash_v}" --arg z "${zsh_v}" --arg s "${sh_v}" --arg a "${agent_v}" --arg an "${noset_v}" --arg d "${dash_v}" --arg b5 "${bash5_v}" \
+        '.[$i] | .measured = ((.measured // {}) + {bash: $b, zsh: $z, sh: $s, agent: $a, "agent-noset": $an, dash: $d} + (if $b5 == "" then {} else {bash5: $b5} end))' "${FORMS}")")
       continue
     fi
     recorded=$(jq -r ".[${i}].measured | \"\(.bash) \(.zsh) \(.sh) \(.dash)\"" "${FORMS}")
