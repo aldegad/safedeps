@@ -64,7 +64,13 @@ fi
 runs() { # shell-binary file -> R or -
   local d out
   d=$(mktemp -d "${work}/cwd.XXXXXX")
-  out=$(cd "${d}" && "$1" -c "$(cat "$2")" 2>/dev/null </dev/null)
+  # zsh with no startup files (-f): a ~/.zshenv runs in every `zsh -c` and can
+  # change what a form runs.
+  if [[ "$1" == */zsh ]]; then
+    out=$(cd "${d}" && "$1" -f -c "$(cat "$2")" 2>/dev/null </dev/null)
+  else
+    out=$(cd "${d}" && "$1" -c "$(cat "$2")" 2>/dev/null </dev/null)
+  fi
   printf '%s\n' "${out}" | grep -qx REACHED && printf 'R' || printf '%s' '-'
 }
 shows() { # reading text -> 0 when that reading shows the tail

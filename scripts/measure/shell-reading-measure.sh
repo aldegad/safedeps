@@ -75,7 +75,11 @@ run_in() { # shell file -> R (ran the tail), - (did not), with ! when the shell 
   chmod +x "${dir}/ran"
   case "${shell}" in
     bash) out=$(cd "${dir}" && /bin/bash -c "$(cat "${file}")" 2>"${dir}/.err" </dev/null) ;;
-    zsh)  out=$(cd "${dir}" && /bin/zsh -c "$(cat "${file}")" 2>"${dir}/.err" </dev/null) ;;
+    # -f: no startup files. A ~/.zshenv runs in every `zsh -c`, and one that
+    # defines a function (a kuma hook defined `command`) changed what forms ran
+    # (a false regression in review). The agent columns keep the wrapper,
+    # startup files and all, because that is what the agent runs.
+    zsh)  out=$(cd "${dir}" && /bin/zsh -f -c "$(cat "${file}")" 2>"${dir}/.err" </dev/null) ;;
     sh)   out=$(cd "${dir}" && /bin/sh -c "$(cat "${file}")" 2>"${dir}/.err" </dev/null) ;;
     dash)
       local dash_bin; dash_bin=$(command -v dash 2>/dev/null || true)
