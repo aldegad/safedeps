@@ -2418,7 +2418,7 @@ report_rollback_tail() {
     report_say "${TRACE_LINE}"
     TRACE_LINE_SAID=true
   fi
-  [[ "${BACKSTOP_INSTALL:-false}" == true ]] || report_say "$(fact_inert "${META_FILE}" "${INPUT}")"
+  [[ "${BACKSTOP_INSTALL:-false}" == true ]] || report_inert "${META_FILE}" "${INPUT}"
 }
 
 # The reorg.log entry and the message of a rollback, from the same lines.
@@ -2442,7 +2442,7 @@ LOG_EOF
   # Only the rollback that consumed this command's record reaches this: the
   # backstop restores a confirmed snapshot and has no record to speak from.
   if [[ "${snapshot_line}" != *', a confirmed snapshot' && "${BACKSTOP_INSTALL:-false}" != true ]]; then
-    log_advisory "post-verify REORG with no confirmed snapshot in ${PROJECT_DIR}: ${snapshot_line}; $(fact_inert "${META_FILE}" "${INPUT}"). Reasons: $4"
+    log_advisory "post-verify REORG with no confirmed snapshot in ${PROJECT_DIR}: ${snapshot_line}${REPORT_INERT:+; ${REPORT_INERT}}. Reasons: $4"
   fi
   details=$(fact_file "Details log" "${GUARD_DIR}/reorg.log")
 
