@@ -154,7 +154,7 @@ ledger 게이트나 사전 비행 체크에 실패하면 해당 명령은 실행
   1. lock file을 마지막 confirmed 스냅샷에서 복원
   2. 변경된 경우 `package.json` 복원
   3. `npm ci`(실패 시 `npm install` 대체)로 `node_modules` 재구성해 악성 아티팩트 제거
-     롤백은 심볼릭 링크를 따라 프로젝트 밖으로 나가지 않습니다. `node_modules`·`package.json`·lockfile 이 다른 디렉터리를 가리키는 링크면 그 단계는 거부되고, 메시지와 `reorg.log`(`REORG REFUSED`)에 이름이 남습니다. `npm ci` 는 `node_modules` 가 가리키는 곳을 비우기 때문입니다. 그 디렉터리의 주인 쪽에서 다시 설치하세요.
+     롤백은 심볼릭 링크를 따라 프로젝트 밖으로 나가지 않습니다. `node_modules`·`package.json`·lockfile 이 다른 디렉터리를 가리키는 링크면 그 단계는 거부되고, 메시지와 `reorg.log`(`REORG REFUSED`)에 이름이 남습니다. `npm ci` 는 `node_modules` 가 가리키는 곳을 비우기 때문입니다. 그 디렉터리의 주인 쪽에서 다시 설치하세요. 롤백이 부르는 npm 은 모두 `--prefix` 로 프로젝트에 고정되어, 상위 프로젝트로 올라가 작업하지도 않습니다.
   4. 이벤트를 `~/.safedeps/reorg.log`에 기록
   5. Claude Code에 탐지 위협과 롤백 동작을 상세히 담은 시스템 메시지 전달
 
