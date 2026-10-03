@@ -722,7 +722,12 @@ shell_lex() {
           }
           # Inside case: after `in`, and after each `;;` `;&` `;;&`, a pattern
           # runs to its `)`, which ends the pattern -- class p, read by the
-          # stmts view as a statement boundary, so the arm is judged.
+          # stmts view as a statement boundary, so the arm is judged. Only at
+          # the top level: inside a substitution the close is a `)` of the
+          # body like any other, nested with it, so a reader of class p never
+          # has to ask how deep it is. Classed p there, it ended the value of
+          # `x=$(case a in a) echo f;; esac)` and the target of `>$(case ...)`
+          # at the pattern (form WC3).
           if (top == "C") {
             if (cpat[d] == 0 && c == "i" && X[i+1] == "n" && wordstart(i) && (i + 2 > N || X[i+2] ~ /[ \t\n;&|()<>]/)) { C[i+1] = cls; i++; cpat[d] = 1; cpw[d] = 0; continue }
             if (cpat[d] == 1 && c == "(" && !cpw[d]) { CPO[i] = 1; continue }
@@ -993,7 +998,7 @@ shell_lex() {
       function emit_pieces(   k, a, ln, pln) {
         buf = ""; held = 0; ln = 1; a = 1; pln = 1
         for (k = 1; k <= N; k++) {
-          if (!(k in DROP) && (C[k] == "p" && DEP[k] == 1 || C[k] == "c" && DEP[k] == 1 && X[k] ~ /[;&|\n]/)) {
+          if (!(k in DROP) && (C[k] == "p" || C[k] == "c" && DEP[k] == 1 && X[k] ~ /[;&|\n]/)) {
             piece(a, k - 1, pln)
             a = k + 1
             if (X[k] == "\n") ln++
@@ -1064,15 +1069,15 @@ shell_lex() {
       # nested is the depth of the walk (DEP) and nothing else: every
       # parenthesis the shell reads as part of a word is a context there (an
       # array value, a glob group, a process substitution, the subscript of
-      # an assignment in bash), and a case pattern close ends a word only at
+      # an assignment in bash), and a case pattern close is class p only at
       # the top level. This function used to answer from the byte alone, and
       # each word it cut where the walk did not was a statement no
       # recognizer read: `a=(x) pip install x` ran with `x)` as the command,
       # and the `)` of a case pattern inside `>$(case a in a) echo f;; esac)`
       # ended the target there (forms WA1, WC3).
       function word_sep(k) {
-        if (C[k] == "h" || C[k] == "b" || C[k] == "B") return 1
-        if (C[k] == "m" || C[k] == "p") return DEP[k] == 1
+        if (C[k] == "h" || C[k] == "b" || C[k] == "B" || C[k] == "p") return 1
+        if (C[k] == "m") return DEP[k] == 1
         return C[k] == "c" && DEP[k] == 1 && X[k] ~ /[ \t\n;&|()<>]/
       }
       function mark(a, z,   k) { for (k = a; k <= z; k++) A[k] = 1 }
@@ -1197,7 +1202,7 @@ shell_lex() {
             # An `&` is part of a redirection after `>` or `<` (`2>&1`) and,
             # outside dash, before `>` (`&>`); in dash that one ends a command.
             if (op == "&" && (X[k+1] == ">" && rs != "dash" || k > 1 && (X[k-1] == ">" || X[k-1] == "<") && C[k-1] == "c")) op = ">"
-            if (C[k] == "p" && DEP[k] == 1 || op ~ /[\n;&|]/) {
+            if (C[k] == "p" || op ~ /[\n;&|]/) {
               st = 1; pre = 0; rd = 0; fn = 0; fr = 0; inp = 0; rp = 0; dbr = 0; cop = 0; tm = 0; fh = 0
             }
             else if (op == "<" || op == ">") {
