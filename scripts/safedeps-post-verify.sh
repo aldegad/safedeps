@@ -424,41 +424,67 @@ rollback_note_npm_project() {
 }
 
 # Whether this command is seen to have written the project's node tree: a
-# manifest or lockfile of a node package manager that the restore put back (or
-# refused to, through a link), or a node_modules that differs from what the
-# pre-guard listed just before the command ran. Removing node_modules purges
-# what a rejected install wrote; when the command wrote nothing there is
-# nothing of its to purge. This gate judges the whole closure even when the
-# command changed nothing, so a command misread as an install, in a project
-# whose closure was never approved, reached the rollback with nothing to roll
-# back -- and the removal then took the project's dependencies with it. The
+# manifest or lockfile of a node package manager that differs from the snapshot
+# the pre-guard took just before the command, or a node_modules that differs
+# from what the pre-guard listed then. Removing node_modules purges what a
+# rejected install wrote; when the command wrote nothing there is nothing of
+# its to purge. This gate judges the whole closure even when the command
+# changed nothing, so a command misread as an install, in a project whose
+# closure was never approved, reached the rollback with nothing to roll back
+# -- and the removal then took the project's dependencies with it. The
 # reinstall the rollback used to run had been hiding that.
 #
-# ROLLBACK_PRE_SNAPSHOT_ID names the snapshot taken before this command. It is
-# empty in the backstop, which has none; with nothing to compare against, the
-# command counts as having written.
+# The files are compared before the restore and against the snapshot from
+# before this command, not by what the restore put back: the restore goes to
+# the confirmed snapshot, which can be older, and a file it puts back is then
+# one the command never touched.
+#
+# The times are compared with find, not with the shell's -nt. bash 3.2 compares
+# whole seconds, and a real `npm ci` that replaced a package in place finished
+# inside the second the snapshot was taken in (measured in review: seven runs
+# of eight left the rejected version on disk).
+#
+# With no snapshot from before the command (the backstop has none) there is
+# nothing to compare against, and the command counts as having written.
 ROLLBACK_NODE_FILES="package.json package-lock.json npm-shrinkwrap.json pnpm-lock.yaml yarn.lock bun.lock bun.lockb"
 ROLLBACK_PRE_SNAPSHOT_ID=""
-rollback_command_wrote_node_tree() {
-  local name restored node_modules="${PROJECT_DIR}/node_modules"
+ROLLBACK_COMMAND_WROTE_NODE_FILE=unknown
+rollback_note_command_writes() {
+  local pre="$1" name copy
+  ROLLBACK_PRE_SNAPSHOT_ID="${pre}"
+  ROLLBACK_COMMAND_WROTE_NODE_FILE=unknown
+  [[ -n "${pre}" && -f "${SNAPSHOT_DIR}/${pre}_meta.json" ]] || return 0
 
+  ROLLBACK_COMMAND_WROTE_NODE_FILE=false
   for name in ${ROLLBACK_NODE_FILES}; do
-    for restored in "${ROLLED_BACK[@]+"${ROLLED_BACK[@]}"}"; do
-      [[ "${restored}" != "${name}" ]] || return 0
-    done
-    [[ "${ROLLBACK_REFUSED}" != *$'\n'"restore of ${name}"$'\n'* ]] || return 0
+    copy="${SNAPSHOT_DIR}/${pre}_${name}"
+    if [[ -f "${copy}" ]]; then
+      if files_differ "${copy}" "${PROJECT_DIR}/${name}"; then
+        ROLLBACK_COMMAND_WROTE_NODE_FILE=true
+        return 0
+      fi
+    elif [[ -f "${copy}.missing" ]] && [[ -e "${PROJECT_DIR}/${name}" || -L "${PROJECT_DIR}/${name}" ]]; then
+      ROLLBACK_COMMAND_WROTE_NODE_FILE=true
+      return 0
+    fi
   done
+}
+
+rollback_command_wrote_node_tree() {
+  local node_modules="${PROJECT_DIR}/node_modules"
+
+  [[ "${ROLLBACK_COMMAND_WROTE_NODE_FILE}" == false ]] || return 0
 
   local pre="${ROLLBACK_PRE_SNAPSHOT_ID}"
   local meta="${SNAPSHOT_DIR}/${pre}_meta.json"
   local packages="${SNAPSHOT_DIR}/${pre}_packages.list"
   local bins="${SNAPSHOT_DIR}/${pre}_bins.list"
-  [[ -n "${pre}" && -f "${meta}" && -f "${packages}" && -f "${bins}" ]] || return 0
+  [[ -f "${meta}" && -f "${packages}" && -f "${bins}" ]] || return 0
 
   [[ -z "$(find "${node_modules}" -maxdepth 3 -name "package.json" 2>/dev/null | sort | comm -13 "${packages}" - | head -1)" ]] || return 0
   [[ -z "$({ ls "${node_modules}/.bin/" 2>/dev/null || true; } | sort | comm -13 "${bins}" - | head -1)" ]] || return 0
-  [[ ! "${node_modules}/.package-lock.json" -nt "${meta}" ]] || return 0
-  [[ ! "${node_modules}" -nt "${meta}" ]] || return 0
+  [[ -z "$(find -H "${node_modules}/.package-lock.json" -prune -newer "${meta}" 2>/dev/null)" ]] || return 0
+  [[ -z "$(find -H "${node_modules}" -prune -newer "${meta}" 2>/dev/null)" ]] || return 0
   return 1
 }
 
@@ -469,7 +495,7 @@ rollback_node_modules() {
   [[ "${ROLLBACK_NPM_PROJECT}" == true ]] || return 0
   if ! rollback_command_wrote_node_tree; then
     [[ -e "${node_modules}" || -L "${node_modules}" ]] || return 0
-    ROLLBACK_WARNINGS+=("${node_modules} was not removed: none of the project's node manifest or lock files differed from the snapshot taken before this command, node_modules lists no package or binary that snapshot did not list, and neither node_modules nor its .package-lock.json was modified after the snapshot")
+    ROLLBACK_WARNINGS+=("${node_modules} was not removed: when this rollback began, none of the project's node manifest or lock files differed from the snapshot taken before this command; node_modules lists no package or binary that snapshot did not list; and neither node_modules nor its .package-lock.json is newer than that snapshot")
     return 0
   fi
   if [[ -L "${node_modules}" ]]; then
@@ -1012,7 +1038,7 @@ There is no confirmed-safe snapshot for ${PROJECT_DIR} yet, so safedeps could NO
     "${reason_str%%; }" "restoring-files"
   rollback_note_npm_project
   # The backstop has no snapshot from before this command.
-  ROLLBACK_PRE_SNAPSHOT_ID=""
+  rollback_note_command_writes ""
 
   SNAPSHOT_ID="${rollback_id}"   # so monitored_files() reads the baseline's list
   ROLLED_BACK=()
@@ -1096,7 +1122,7 @@ if [[ "${SUSPICIOUS}" == "true" ]]; then
   safedeps_journal_open "${JOURNAL_ID}" "${PROJECT_DIR}" "${ROLLBACK_SNAPSHOT_ID}" \
     "${REASON_STR_FOR_JOURNAL%%; }" "restoring-files"
   rollback_note_npm_project
-  ROLLBACK_PRE_SNAPSHOT_ID="${SNAPSHOT_ID}"
+  rollback_note_command_writes "${SNAPSHOT_ID}"
 
   while IFS= read -r monitored_file; do
     [[ -z "${monitored_file}" ]] && continue
