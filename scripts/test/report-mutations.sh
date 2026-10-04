@@ -3,7 +3,7 @@
 #
 # The oracle's green is a claim that no line the post hook printed is false or
 # outside the grammar. A check that cannot fail says nothing, so this script
-# makes it fail thirty-one ways: each mutation below puts into the hook the kind
+# makes it fail thirty-two ways: each mutation below puts into the hook the kind
 # of line review found by reading -- a clause behind a true fact, a claim with
 # no check, a line built outside the fact functions, a guessed cause, prose in
 # a rollback, a line only reorg.log carries, a line left out, a reorg.log entry
@@ -21,7 +21,8 @@
 # snapshot doing the same (Empty), a record that is not one JSON object
 # set aside with nothing said (NotObject), and a record with no project_dir
 # judged in the hook's own working directory with the record's hash
-# (NoDir, the code before the fix) -- and
+# (NoDir, the code before the fix), and a record's dir_hash picking the
+# confirmed snapshot again (RecordHash, bamdori J) -- and
 # e2e must turn red on it, at the
 # oracle, with the reason named here. Two of them (P2, R3) passed
 # the whole suite while the check was a list of forbidden words; seven more
@@ -49,7 +50,7 @@
 # second, and a node_modules that keeps whole seconds is walked from a baseline
 # that is not set back (lumi r2 P3).
 #
-# This is thirty-nine e2e runs, so it is not part of `npm test`. Run it when a
+# This is forty e2e runs, so it is not part of `npm test`. Run it when a
 # line the hook prints, a fact function, the oracle or the trace check changes.
 #
 #   scripts/test/report-mutations.sh            every mutation
@@ -63,7 +64,7 @@ trap 'rm -rf "${WORK}"' EXIT
 # mutation <name> sets the file, what the mutation is, the reason the oracle
 # must give, and the text to find and to put in its place. The text to find
 # occurs exactly once in the file, or the mutation is reported as not applying.
-MUTATIONS=(P2 R3 K Lie Bypass Head NoCheck Snap Cause Prose LogOnly Reasons Kept Silent JOmit RefuseSilent F1 F2 LogSilent F4 MarkOrig MarkSkip Unread Same Default Version XStr2 Gone Empty NotObject NoDir
+MUTATIONS=(P2 R3 K Lie Bypass Head NoCheck Snap Cause Prose LogOnly Reasons Kept Silent JOmit RefuseSilent F1 F2 LogSilent F4 MarkOrig MarkSkip Unread Same Default Version XStr2 Gone Empty NotObject NoDir RecordHash
   TraceNever TraceAlways WalkOff PullAlways Oldest LinkLstat AnySubsecond)
 
 # A mutation can change a second file too (M_FILE2, M_OLD2, M_NEW2). M_AT is
@@ -421,10 +422,24 @@ $4; node_modules was restored from the confirmed snapshot
       M_WHY='a record with no project_dir is judged and rolled back in the hook'"'"'s own working directory'
       M_RED='a step line names a path outside'
       M_OLD='  PROJECT_DIR="${POST_CWD}"
-  DIR_HASH=$(compute_dir_hash "${PROJECT_DIR}")
-fi'
+fi
+DIR_HASH=$(compute_dir_hash "${PROJECT_DIR}")
+'
       M_NEW='  PROJECT_DIR=$(pwd)
-fi'
+fi
+[[ -n "${DIR_HASH:-}" ]] || DIR_HASH=$(compute_dir_hash "${PROJECT_DIR}")
+'
+      ;;
+    RecordHash)
+      M_FILE=scripts/safedeps-post-verify.sh
+      M_WHY='the record'"'"'s dir_hash picks the confirmed snapshot again'
+      M_RED='the confirmed record of the project does not name this snapshot'
+      M_OLD='fi
+DIR_HASH=$(compute_dir_hash "${PROJECT_DIR}")
+'
+      M_NEW='fi
+[[ -n "${DIR_HASH:-}" ]] || DIR_HASH=$(compute_dir_hash "${PROJECT_DIR}")
+'
       ;;
     *) return 1 ;;
   esac

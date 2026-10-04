@@ -1572,18 +1572,19 @@ if [[ "${BACKSTOP_INSTALL:-false}" != "true" && -z "${SNAPSHOT_ID}" ]]; then
   BACKSTOP_RECORD_EMPTY=true
 fi
 # A record with no project_dir is judged in the directory the command ran in,
-# which the payload names, and its hash is that directory's too: the project
-# and the hash that picks its confirmed snapshot always name one directory.
-# The hook's own working directory, used before with the record's hash, sent
-# the judgment there and could restore another project's confirmed snapshot
-# into it and remove its node_modules.
+# which the payload names. The hook's own working directory, used before, sent
+# the judgment to another project.
+#
+# The hash that picks the confirmed snapshot is always computed here from the
+# project, never taken from the record, so the two always name one directory.
+# The pre-guard writes both from one directory, so a sound record gets the
+# value it holds. A damaged one did not: project_dir X with the dir_hash of Z
+# restored Z's confirmed snapshot into X (bamdori J, measured: X/package.json
+# became Z's). The record's dir_hash is read only to match a legacy record.
 if [[ -z "${PROJECT_DIR}" ]]; then
   PROJECT_DIR="${POST_CWD}"
-  DIR_HASH=$(compute_dir_hash "${PROJECT_DIR}")
 fi
-if [[ -z "${DIR_HASH:-}" ]]; then
-  DIR_HASH=$(compute_dir_hash "${PROJECT_DIR}")
-fi
+DIR_HASH=$(compute_dir_hash "${PROJECT_DIR}")
 release_state_lock; STATE_LOCK_HELD=false
 
 # The snapshot the record names. The backstop has none: it diffs the live
@@ -2476,15 +2477,15 @@ check_npm_effect_closure() {
 
 # Why the backstop rolled nothing back, from the two tests it ran.
 # What the backstop's head says about the record of this command: none was
-# found, or one was and the snapshot it names has no meta file, or one was and
-# it names no snapshot, or a record was found and is not one JSON object. The
-# last three are what sent it here. The last does not say "of this command":
-# an unreadable legacy current_state cannot say whose it is.
+# found, or a pre-guard record was and the snapshot it names has no meta file,
+# or it names no snapshot, or it is not one JSON object. The last three are
+# what sent it here. They do not say "of this command": a legacy record is
+# matched to the call by its directory only, and an unreadable one by nothing.
 backstop_record_clause() {
   if [[ "${BACKSTOP_RECORD_GONE:-false}" == true ]]; then
-    printf 'this hook found a record of this command from before it ran, and the snapshot it names has no meta file'
+    printf 'this hook found a pre-guard record, and the snapshot it names has no meta file'
   elif [[ "${BACKSTOP_RECORD_EMPTY:-false}" == true ]]; then
-    printf 'this hook found a record of this command from before it ran, and the record names no snapshot'
+    printf 'this hook found a pre-guard record, and the record names no snapshot'
   elif [[ "${BACKSTOP_RECORD_UNREAD:-false}" == true ]]; then
     printf 'this hook found a pre-guard record, and the record is not one JSON object'
   else
