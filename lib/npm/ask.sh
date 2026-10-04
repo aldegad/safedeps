@@ -49,6 +49,11 @@ SAFEDEPS_NPM_ASK_POST_SECONDS=10
 
 # Flags every ask carries. They change nothing npm decides about where or what;
 # they keep the ask from writing a log file or checking for an npm update.
+# Each ask also names a cache of its own, in its scratch directory
+# (safedeps_npm_ask_start): npm creates its cache directory when it starts, so
+# an install's `--cache dir` made the ask create dir in the project while the
+# gate was still judging the command (measured, npm 11.19.0). The cache
+# decides nothing npm is asked here.
 SAFEDEPS_NPM_ASK_QUIET=(--logs-max=0 --update-notifier=false)
 
 SAFEDEPS_NPM_ASK_PIDS=()
@@ -315,9 +320,39 @@ safedeps_npm_ask_start() {
   [[ $# -gt 0 ]] && shift
   [[ -z "${PATH+x}" ]] || env_words+=("PATH=${PATH}")
   ( cd "${dir}" 2>/dev/null || { printf 'cannot enter %s\n' "${dir}" >&2; exit 126; }
-    exec env "${env_words[@]+"${env_words[@]}"}" npm "$@" "${SAFEDEPS_NPM_ASK_QUIET[@]}"
+    exec env "${env_words[@]+"${env_words[@]}"}" npm "$@" "${SAFEDEPS_NPM_ASK_QUIET[@]}" --cache "${out%/*}/cache"
   ) > "${out}" 2> "${out}.err" &
   SAFEDEPS_NPM_ASK_PIDS+=("$!")
+}
+
+# Whether the words "$@" leave a word after them standing as an option, the
+# way npm reads them (safedeps_npm_read_args, both npm versions where they
+# differ). Every ask puts its own flags after the install's words, because npm
+# keeps the last value it is given and `--global=false` has to outlast a `-g`.
+# An install whose last word is an option that takes the next word as its
+# value (`--cache`, `-C`, `--fetch-retries`) took the first of them instead:
+# npm created a directory named `--json` or `--global=false` in the project
+# while the gate was asking it where the install lands (measured, npm 11.19.0).
+# Words after a `--` make every flag an operand. Either way npm is not asked.
+# Without the reader there is no reading, and npm is not asked either.
+safedeps_npm_ask_words_end() {
+  local probe=--safedeps-ask-probe v k
+  declare -F safedeps_npm_read_args >/dev/null || return 1
+  for k in plain other; do
+    if [[ "${k}" == other ]]; then
+      safedeps_npm_other_applies "$@" || break
+      safedeps_npm_as_other safedeps_npm_read_args "$@" "${probe}" || return 1
+    else
+      safedeps_npm_read_args "$@" "${probe}" || return 1
+    fi
+    for v in "${SAFEDEPS_G_NPM_WORDS[@]+"${SAFEDEPS_G_NPM_WORDS[@]}"}"; do
+      [[ "${v}" != "${probe}" ]] || return 1
+    done
+    for v in "${SAFEDEPS_G_NPM_VALUES[@]+"${SAFEDEPS_G_NPM_VALUES[@]}"}"; do
+      [[ "${v##*$'\037'}" != "${probe}" ]] || return 1
+    done
+  done
+  return 0
 }
 
 # Waits for every started ask until $SECONDS reaches <until>. Returns 0 when
@@ -484,6 +519,12 @@ safedeps_npm_install_target() {
     esac
     args+=("${word}")
   done
+
+  if ! safedeps_npm_ask_words_end "${args[@]+"${args[@]}"}"; then
+    printf '?\tthe install'"'"'s last option takes the next word as its value, or its words end npm'"'"'s options, so npm cannot be asked with them without reading the ask'"'"'s own flags as the install'"'"'s\n'
+    jq -nc '{unknown: "the install'"'"'s last option takes the next word as its value, or its words end npm'"'"'s options, so npm cannot be asked which registry it fetches from with them"}'
+    return 0
+  fi
 
   if ! command -v npm >/dev/null 2>&1; then
     printf '?\tnpm is not on the PATH this hook runs with, so safedeps cannot ask npm where this install lands\n'

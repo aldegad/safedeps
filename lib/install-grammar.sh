@@ -228,6 +228,11 @@ SAFEDEPS_G_NPM_INSTALL_RE="${SAFEDEPS_G_START}(${SAFEDEPS_G_NPM_INSTALL_BODY})${
 # deny on a machine without jq, so these stay loose on purpose. The substring
 # alternatives are the pre-grammar forms, kept so this can only widen.
 SAFEDEPS_G_RAW_INSTALL_RE="(^|[^A-Za-z0-9_./-])(${SAFEDEPS_G_INSTALL_BODY})([^A-Za-z0-9_-]|$)|(npm|pnpm|yarn|bun)([^\"]*)(install|add|dlx)|pip[0-9]*[[:space:]]+install|cargo[[:space:]]+(add|install)|go[[:space:]]+(get|install)|gem[[:space:]]+install|bundle[[:space:]]+add|poetry[[:space:]]+add|uv[[:space:]]+(add|pip)|pipenv[[:space:]]+install|mvn([^\"]*)dependency:get|dotnet[[:space:]]+add[[:space:]]+package"
+# The PostToolUse backstop's pattern, read case-insensitively with grep -E. The
+# pre-guard reads the same one to decide which commands it did not read as an
+# install still get a trace baseline, so the two cannot disagree on which
+# commands the backstop judges.
+SAFEDEPS_G_BACKSTOP_RE="${SAFEDEPS_G_RAW_INSTALL_RE}|(^|[^a-zA-Z0-9_-])npx[[:space:]]+(@?[A-Za-z0-9._-])"
 
 
 # How npm-package-arg (npa) reads an argument, as far as npm link needs it:
@@ -562,7 +567,9 @@ safedeps_js_is_number() {
 
 # npm's reading of the words after `npm`, as nopt reads them (nopt-lib.js
 # parse, nopt 9 in npm 11.19.0). Sets SAFEDEPS_G_NPM_AT and SAFEDEPS_G_NPM_WORDS
-# (and SAFEDEPS_G_NPM_VALUES, each option value it took),
+# (and SAFEDEPS_G_NPM_VALUES, each option value it took, and
+# SAFEDEPS_G_NPM_SWITCHES, each switch it set, as `<option>=true|false` in the
+# order npm reads them, so the last one for an option is the value npm keeps),
 # the positional words in order with the index of the word each came from. The
 # first is npm's command; the rest are its arguments. A positional can be the
 # value half of a `--name=value` word whose option took no value
@@ -571,8 +578,8 @@ safedeps_js_is_number() {
 # when the reading depends on something a table cannot hold (`@host`).
 safedeps_npm_read_args() {
   local -a w=("$@") at=() exp=()
-  local i j n arg v s cls la la_set hadeq no key consumed flags lits steps=0
-  SAFEDEPS_G_NPM_AT=() SAFEDEPS_G_NPM_WORDS=() SAFEDEPS_G_NPM_VALUES=()
+  local i j n arg v s cls la la_set hadeq no neg key consumed flags lits steps=0
+  SAFEDEPS_G_NPM_AT=() SAFEDEPS_G_NPM_WORDS=() SAFEDEPS_G_NPM_VALUES=() SAFEDEPS_G_NPM_SWITCHES=()
   for (( i = 0; i < ${#w[@]}; i++ )); do at[i]=${i}; done
   i=0
   while (( i < ${#w[@]} )); do
@@ -615,8 +622,11 @@ safedeps_npm_read_args() {
     fi
     s="${arg}"
     while [[ "${s}" == -* ]]; do s="${s#-}"; done
-    no=""
-    while [[ "${s:0:3}" == [Nn][Oo]- ]]; do no="set"; s="${s:3}"; done
+    no="" neg=false
+    while [[ "${s:0:3}" == [Nn][Oo]- ]]; do
+      no="set" s="${s:3}"
+      [[ "${neg}" == true ]] && neg=false || neg=true
+    done
     key="${s}" cls=""
     if ! safedeps_npm_lookup "${key}" "${SAFEDEPS_G_NPM_OPTIONS}"; then
       safedeps_npm_unique_prefix "${key}" "${SAFEDEPS_G_NPM_OPTIONS}"
@@ -653,6 +663,17 @@ safedeps_npm_read_args() {
     # `--package` names the package it runs.
     if (( consumed )); then
       SAFEDEPS_G_NPM_VALUES+=("${at[i+1]}"$'\037'"${key}"$'\037'"${w[i+1]}")
+    fi
+    # A switch is true unless a `no-` (an odd number of them) or a `true` or
+    # `false` after it says otherwise; nopt reads `--x false` as `--x=false`.
+    if [[ -n "${no}" || "${cls}" == b* ]]; then
+      v=true
+      (( consumed )) && [[ "${w[i+1]}" == false ]] && v=false
+      if [[ "${neg}" == true ]]; then
+        [[ "${v}" == true ]] && v=false || v=true
+      fi
+      (( consumed )) && [[ "${w[i+1]}" != true && "${w[i+1]}" != false ]] && v=""
+      [[ -z "${v}" ]] || SAFEDEPS_G_NPM_SWITCHES+=("${key}=${v}")
     fi
     i=$(( i + 1 + consumed ))
   done
@@ -1138,6 +1159,39 @@ safedeps_npx_first_pass() {
   SAFEDEPS_G_NPX_WORDS=("${w[@]+"${w[@]}"}") SAFEDEPS_G_NPX_AT=("${at[@]+"${at[@]}"}")
 }
 
+# Whether <word>, or the last part of it when it is a path, is <name>, matched
+# whole and ignoring case, as the recognizers match it: macOS volumes ignore
+# case, so `PIP`, `NPM` and `ENV` run pip, npm and env there. With no <name>,
+# the manager the word names goes to SAFEDEPS_G_VALUE (the family, lowercase,
+# from SAFEDEPS_G_EXECUTABLES; empty for none), and the answer is whether it
+# names one. The readers that compare a word with a manager's name ask here, so
+# none keeps a spelling of its own: a reader that matched case left `PIP install
+# evil==6.6.6` with no spec to check while the recognizers called it an install.
+safedeps_manager_name() {
+  local base="${1##*/}" rest entry nocase=false rc=1
+  shopt -q nocasematch && nocase=true
+  shopt -s nocasematch
+  if [[ $# -gt 1 ]]; then
+    [[ "${base}" == "$2" ]] && rc=0
+  else
+    SAFEDEPS_G_VALUE=""
+    if [[ "${base}" =~ ^(${SAFEDEPS_G_EXECUTABLES})$ ]]; then
+      rest="${SAFEDEPS_G_EXECUTABLES}|"
+      while [[ -n "${rest}" ]]; do
+        entry="${rest%%|*}" rest="${rest#*|}"
+        if [[ "${base}" =~ ^(${entry})$ ]]; then
+          entry="${entry%%\[*}"
+          [[ "${entry}" != py ]] || entry=python
+          SAFEDEPS_G_VALUE="${entry}" rc=0
+          break
+        fi
+      done
+    fi
+  fi
+  [[ "${nocase}" == true ]] || shopt -u nocasematch
+  return "${rc}"
+}
+
 # One statement's words as its package manager reads them. The arguments are
 # the statement's words, one shell word each (the lexer's pieces view, quotes
 # removed). Sets:
@@ -1206,7 +1260,7 @@ safedeps_manager_read_union() {
 
 safedeps_manager_read_once() {
   local -a w=("$@")
-  local n=$# i=0 t family="" base kind="" path="" traits="" endopts=false named=false
+  local n=$# i=0 t family="" kind="" path="" traits="" endopts=false named=false
   local opt val cls j k unknown=false
   SAFEDEPS_G_M_FAMILY=none SAFEDEPS_G_M_KIND=none SAFEDEPS_G_M_LOCALBIN=false
   SAFEDEPS_G_M_ROLE=() SAFEDEPS_G_M_TEXT=()
@@ -1226,8 +1280,14 @@ safedeps_manager_read_once() {
     case "${t}" in
       ''|then|do|else|elif|if|while|until|time|coproc|command|exec) i=$(( i + 1 )); continue ;;
     esac
+    # macOS ships /usr/bin/command, which runs the builtin whatever case it
+    # was called by, and /usr/bin/time.
+    if safedeps_manager_name "${t}" command || safedeps_manager_name "${t}" time; then
+      i=$(( i + 1 ))
+      continue
+    fi
     if [[ "${t}" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then i=$(( i + 1 )); continue; fi
-    if [[ "${t}" == env || "${t}" == */env ]]; then
+    if safedeps_manager_name "${t}" env; then
       i=$(( i + 1 ))
       while (( i < n )) && [[ "${w[i]}" == -?* ]]; do
         if [[ "${w[i]}" != *=* ]] && safedeps_manager_option_class env "" "${w[i]}"; then
@@ -1243,13 +1303,8 @@ safedeps_manager_read_once() {
   done
   (( i < n )) || return 0
   w[i]="${t}"
-  base="${t##*/}"
-  case "${base}" in
-    npm|npx|pnpm|pnpx|yarn|bun|bunx|uv|uvx|pipx|poetry|pipenv|cargo|go|gem|bundle|mvn|dotnet) family="${base}" ;;
-    pip|pip[0-9]*) family=pip ;;
-    python|python[0-9]*|py) family=python ;;
-    *) return 0 ;;
-  esac
+  safedeps_manager_name "${t}" || return 0
+  family="${SAFEDEPS_G_VALUE}"
   SAFEDEPS_G_M_ROLE[i]=m
   i=$(( i + 1 ))
 
@@ -1282,7 +1337,7 @@ safedeps_manager_read_once() {
               i=$(( i + 1 ))
               val="${w[i]:-}"
             fi
-            [[ "${val}" == pip ]] || return 0
+            safedeps_manager_name "${val}" pip || return 0
             SAFEDEPS_G_M_ROLE[i]=m i=$(( i + 1 )) family=pip
             break 2
             ;;

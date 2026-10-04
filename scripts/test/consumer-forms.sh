@@ -1751,7 +1751,8 @@ for carrier in \
   "split|npm install evil; echo global=true > .npmrc; npm install other" \
   "split|npm install evil; npm config set global true; npm install other" \
   "split|(cd sub; npm install evil); npm install other" \
-  "split|npm install evil; echo \$(rm package.json); npm install other"
+  "split|npm install evil; echo \$(rm package.json); npm install other" \
+  "split|NPM install evil; command cd sub; Npm install other"
 do
   expect="${carrier%%|*}"
   form="${carrier#*|}"
@@ -1764,6 +1765,16 @@ do
   fi
 done
 pass "lockfile writers share a trace only with inert statements between them and no relocation of their own"
+
+# npm's name in another case runs npm on a macOS volume. The ask reads it as
+# npm, so npm is asked with the statement's own arguments rather than the gate
+# falling back to the cwd.
+for carrier in "npm --prefix sub install evil" "NPM --prefix sub install evil" "X=1 Npm --prefix sub install evil"; do
+  state=$(pending_of "${carrier}")
+  [[ "$(jq -r '.project_dir' <<< "${state}")" == "$(cd "${project_dir}/sub" && pwd -P)" ]] \
+    || fail "npm in any case is asked where it installs: ${carrier} ($(jq -c . <<< "${state}"))"
+done
+pass "npm in any case is asked where it installs"
 
 # Where the shells read a command differently the gate judges each reading on
 # its own (resolve_install_targets, A1). A statement both readings share is one
