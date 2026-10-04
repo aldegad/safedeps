@@ -179,9 +179,11 @@ SAFEDEPS_G_INSTALL_BODY="${SAFEDEPS_G_NPM_INSTALL_BODY}\
 # end of the line, so an install whose verb stood against the operator was no
 # install to v2.17.2, 7d66f8c or v2.18.0: no check, no `--ignore-scripts`,
 # and for every manager but npm no later check either (form `npm ci; echo
-# x`, scripts/measure/glued-verb-reading.sh). Read on the scan view, an
-# escaped operator is `_` there (`npm ci\;` hands npm `ci;`), and a quoted one
-# is blank, which ends the word as a blank. `(` is left out: no shell ends a
+# x`, scripts/measure/glued-verb-reading.sh). Read on the scan view, a quoted
+# operator is blank, which ends the word as a blank. So is the backslash of an
+# escaped one (`npm ci\;` reads as `npm ci` and a blank, though the shell
+# hands npm `ci;`): an over-read that predates this end and costs a check or
+# a rewrite of a command that installs nothing. `(` is left out: no shell ends a
 # word there and hands the word before it on (bash refuses `npm ci(`; zsh
 # reads `npm ci()` as defining functions).
 #

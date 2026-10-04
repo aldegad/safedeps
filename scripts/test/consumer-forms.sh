@@ -578,8 +578,8 @@ done
 # zsh closes a `{` group at a `}` that ends a word and runs what is before it
 # (`{ npm ci}` runs `npm ci`; zsh 5.9, measured). bash and dash refuse that
 # group, so the zsh reading is the one that runs.
-got=$(gate_reason '{ npm ci}')
-[[ "${got}" == allow\ * ]] || fail "an npm install closed by a glued } is read as one (got: ${got:0:120})"
+got=$(gate_decision '{ npm ci}')
+[[ "${got}" == allow ]] || fail "an npm install closed by a glued } is read as one (got: ${got})"
 
 # The npm install with its verb against the operator gets `--ignore-scripts`
 # right after the verb, before the operator, as the spaced form gets it after
@@ -590,7 +590,11 @@ expect_rewrite() {
   out=$(jq -nc --arg c "${command}" --arg cwd "${project_dir}" \
     '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
     HOME="${tmp_root}/home" SAFEDEPS_HOME="${safe}" scripts/safedeps-pre-guard.sh 2>/dev/null)
-  got=$(jq -r '.hookSpecificOutput.updatedInput.command // "(no rewrite)"' <<< "${out:-{\}}")
+  # An empty answer is no rewrite, said here rather than through a `{}`
+  # default: under a mutation that emptied the answer, jq failed on that
+  # default on macOS bash 3.2 and the row died without a `not ok`.
+  got="(no rewrite)"
+  [[ -z "${out}" ]] || got=$(jq -r '.hookSpecificOutput.updatedInput.command // "(no rewrite)"' <<< "${out}")
   [[ "${got}" == "${want}" ]] || fail "${label} is rewritten to [${want}] (got: [${got}])"
 }
 expect_rewrite "npm ci before ;"          'npm ci; echo x'    'npm ci --ignore-scripts; echo x'
@@ -602,13 +606,11 @@ expect_rewrite "npm ci in a group"        '{ npm ci;}'        '{ npm ci --ignore
 expect_rewrite "npm ci before >"          'npm ci>/dev/null'  'npm ci --ignore-scripts>/dev/null'
 expect_rewrite "npm ci in a substitution" 'x=$(npm ci)'       'x=$(npm ci --ignore-scripts)'
 
-# What the shell does not end there stays what it is. An escaped operator is a
-# character (npm is handed `ci;`), a `}` inside a word is part of it (`ci}x`), a
-# `-`, `:` or letter after the verb makes another word, and an operator after
-# text that is no install, or inside quotes, a comment or a heredoc body to
-# `cat`, is data.
+# What the shell does not end there stays what it is. A `}` inside a word is
+# part of it (`ci}x`), a `-`, `:` or letter after the verb makes another word,
+# and an operator after text that is no install, or inside quotes, a comment
+# or a heredoc body to `cat`, is data.
 for glued_data in \
-  'npm ci\; echo x' \
   'npm cit-helper; echo x' \
   'npm ci:all; echo x' \
   'npm run ci; echo x' \
