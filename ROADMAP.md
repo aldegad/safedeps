@@ -1016,6 +1016,31 @@ Review found more than one release could close, and these were stated rather tha
 
 On the release tree 1d43743, `npm test` ran all 14 batteries with 395 ok and 0 not ok on macOS and on Linux. macOS was an M1 MacBook (macOS 15.6.1, bash 3.2.57, npm 11.19.0): 3876s with two batteries at a time, load 1.5 to 19.3. Linux was the project's Debian 13 VM (bash 5.2.37, node v20.20.2, npm 10.8.2): 2628s, load 0.2 to 15.7, run in a root without the VM's root-owned `/node_modules`, which otherwise changes where npm says a manifest-less directory installs. The commits after 1d43743 change only documentation and one comment. Each change was cross-validated by another member before it merged, and the merged tree was re-read for agreement between README, ARCHITECTURE, SKILL and AGENTS before it shipped. That re-reading found the floor named as v2.17.2 when it is 7d66f8c, and the three downgraded shapes above are what it turned up.
 
+## v2.18.1 — in progress
+
+### An install in text the rewrite cannot read gets the flag where v2.17.2 put it
+
+v2.18.0 gave no `--ignore-scripts` to a command that ran an npm install it could not read: one in a `ksh -c` script, one in a double-quoted `sh -c`, `bash -c`, `zsh -c`, `dash -c` or `eval` script with a backslash, a backquote or `$(` in it, and one beside a heredoc body piped to another command. The flags of the command's readable installs went with it. v2.17.2 had flagged most of those commands. v2.18.0 recorded each as a downgrade and listed it under "Moved to v2.18.1".
+
+The rewrite now reads the rest of the command as before, and puts the flag into that text where v2.17.2 put it: right after each npm install verb that a blank follows or that ends its line, in the text as written. Where that text starts and ends comes from a new lexer view, `classes`, so an escaped quote, a substitution with quotes of its own and glued quoting stay inside it. Code nested in its quotes, such as `$(...)` inside double quotes, is left to the reading of the command, which already places its flags. A script handed to a shell other than sh, bash, zsh and dash gets the same treatment whatever its quoting, because no reading here follows that shell's grammar. The piped heredoc body is flagged too, as v2.17.2 flagged it, because the gate cannot tell a consumer that runs the body from one that only reads it. That changes the text a command like `wc -l` reads.
+
+Such a command is recorded in `advisory.log` as one whose flag nobody read, and its snapshot meta carries `ignore_scripts_unread: true`, so the post hook says the install's scripts may have run. A verb in that text that no blank follows, as in `sh -c "cd \"d\" && npm ci"`, gets no flag, in v2.17.2 either. The command is still recorded, and where nothing else in it is an install it is a recorded downgrade, as before.
+
+**Measured.** `scripts/measure/inert-downgrade-grid.sh` judges 292 forms through two trees' pre-guards and runs each rewrite under bash and zsh with a stub npm that records its argv. No package manager runs. Both runs were on an M1 MacBook (macOS, bash 3.2.57), against bb0787d (v2.17.2):
+
+| head tree | LOSS | GAIN | same | load (start, end) |
+|---|---|---|---|---|
+| 2d96377 (v2.18.0) | 85 | 68 | 139 | 4.63, 8.54 |
+| this change | 0 | 94 | 198 | 5.67, 7.27 |
+
+LOSS is a form where every npm call of v2.17.2's rewrite read the flag as true and the head's rewrite does not, and the head does not deny it. On the grid's own 260 forms (sets g and x) v2.18.0 was LOSS 77 and GAIN 60, and this change is LOSS 0 and GAIN 85. Joined by form, every form v2.18.0 flagged is still flagged, and every GAIN of v2.18.0 is still a GAIN. Of the forms that still get no flag npm reads, v2.17.2 gave none a flag either, except `false || sh -c "npm ci \"x\""`, which is denied as an install piped into a shell (a separate item below). `scripts/measure/inert-downgrade-rule.py` states v2.18.0's rule as a predicate on the command text: against the 2d96377 table it has 0 mismatches on 292 forms, and each of its 13 mutations in `scripts/measure/inert-downgrade-rule-mutations.py` leaves 1 to 30.
+
+**Real npm.** `lockless-forms` section 11e installs an approved synthetic package through six such forms with a real npm, in the sandbox of `scripts/test/lib/npm-sandbox.sh`: a double-quoted `sh -c` with escaped quotes, `eval`, `bash -c` with `$(...)`, `dash -c` with a backquote, `ksh -c`, and a piped heredoc beside a visible install. The package's preinstall, install and postinstall each write a mark, and no mark was written while any of the six installed (M1 MacBook, all six run, none skipped).
+
+**Verified.** On the M1 MacBook, on e53130d: `smoke` 61 ok, 0 not ok, release floor checked on every rewrite (507s, load 5.3 to 9.0), and `lockless-forms` 31 ok, 0 not ok (759s, load 9.4 to 9.9). The same batteries with 2d96377's pre-guard put in a copy fail: `smoke` on the piped heredoc row, `lockless-forms` on the first 11e row, which 2d96377 sends with no flag. Four mutations of the change, each in a copy, each fail `smoke`: no piped heredoc body (the heredoc row), no script handed to another shell (the `ksh` row), no record for a script whose verb could not be flagged (its record row), and no unread flag in the meta (the meta check). `scan-contract` passed on Linux (aarch64, bash 5.2.21; 43 ok).
+
+---
+
 ## v3 (future)
 
 ### Ledger tamper resistance
