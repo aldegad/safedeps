@@ -787,6 +787,21 @@ bypass_cases=(
   "gem install rails -v 7.1.0"
   "cargo add serde --vers 1.0.0"
   "dotnet add package X --version 1.0.0"
+  # A manager's name in another case runs the manager on a macOS volume, and
+  # the recognizers read it ignoring case. The word reader matched case, so
+  # these were installs with no spec to check (safedeps_manager_name).
+  "PIP install requests==2.31.0"
+  "Pip3 install requests==2.31.0"
+  "python3 -m PIP install requests==2.31.0"
+  "PYTHON -m pip install requests==2.31.0"
+  "/usr/local/bin/PIP install requests==2.31.0"
+  "TIME pip install requests==2.31.0"
+  "Cargo add serde --vers 1.0.0"
+  "NPM install evil@1.2.3"
+  "X=1 Npm install evil@1.2.3"
+  "Npx evil@1.2.3"
+  "Gem install rails -v 7.1.0"
+  "GO install example.com/evil@v1.2.3"
 )
 for bypass_cmd in "${bypass_cases[@]}"; do
   bypass_output=$(run_hook_command "${tmp_root}/home-bypass" "${tmp_root}/safe-bypass" "${bypass_cmd}")

@@ -1093,6 +1093,39 @@ safedeps_npx_first_pass() {
   SAFEDEPS_G_NPX_WORDS=("${w[@]+"${w[@]}"}") SAFEDEPS_G_NPX_AT=("${at[@]+"${at[@]}"}")
 }
 
+# Whether <word>, or the last part of it when it is a path, is <name>, matched
+# whole and ignoring case, as the recognizers match it: macOS volumes ignore
+# case, so `PIP`, `NPM` and `ENV` run pip, npm and env there. With no <name>,
+# the manager the word names goes to SAFEDEPS_G_VALUE (the family, lowercase,
+# from SAFEDEPS_G_EXECUTABLES; empty for none), and the answer is whether it
+# names one. The readers that compare a word with a manager's name ask here, so
+# none keeps a spelling of its own: a reader that matched case left `PIP install
+# evil==6.6.6` with no spec to check while the recognizers called it an install.
+safedeps_manager_name() {
+  local base="${1##*/}" rest entry nocase=false rc=1
+  shopt -q nocasematch && nocase=true
+  shopt -s nocasematch
+  if [[ $# -gt 1 ]]; then
+    [[ "${base}" == "$2" ]] && rc=0
+  else
+    SAFEDEPS_G_VALUE=""
+    if [[ "${base}" =~ ^(${SAFEDEPS_G_EXECUTABLES})$ ]]; then
+      rest="${SAFEDEPS_G_EXECUTABLES}|"
+      while [[ -n "${rest}" ]]; do
+        entry="${rest%%|*}" rest="${rest#*|}"
+        if [[ "${base}" =~ ^(${entry})$ ]]; then
+          entry="${entry%%\[*}"
+          [[ "${entry}" != py ]] || entry=python
+          SAFEDEPS_G_VALUE="${entry}" rc=0
+          break
+        fi
+      done
+    fi
+  fi
+  [[ "${nocase}" == true ]] || shopt -u nocasematch
+  return "${rc}"
+}
+
 # One statement's words as its package manager reads them. The arguments are
 # the statement's words, one shell word each (the lexer's pieces view, quotes
 # removed). Sets:
@@ -1161,7 +1194,7 @@ safedeps_manager_read_union() {
 
 safedeps_manager_read_once() {
   local -a w=("$@")
-  local n=$# i=0 t family="" base kind="" path="" traits="" endopts=false named=false
+  local n=$# i=0 t family="" kind="" path="" traits="" endopts=false named=false
   local opt val cls j k unknown=false
   SAFEDEPS_G_M_FAMILY=none SAFEDEPS_G_M_KIND=none SAFEDEPS_G_M_LOCALBIN=false
   SAFEDEPS_G_M_ROLE=() SAFEDEPS_G_M_TEXT=()
@@ -1181,8 +1214,14 @@ safedeps_manager_read_once() {
     case "${t}" in
       ''|then|do|else|elif|if|while|until|time|coproc|command|exec) i=$(( i + 1 )); continue ;;
     esac
+    # macOS ships /usr/bin/command, which runs the builtin whatever case it
+    # was called by, and /usr/bin/time.
+    if safedeps_manager_name "${t}" command || safedeps_manager_name "${t}" time; then
+      i=$(( i + 1 ))
+      continue
+    fi
     if [[ "${t}" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then i=$(( i + 1 )); continue; fi
-    if [[ "${t}" == env || "${t}" == */env ]]; then
+    if safedeps_manager_name "${t}" env; then
       i=$(( i + 1 ))
       while (( i < n )) && [[ "${w[i]}" == -?* ]]; do
         if [[ "${w[i]}" != *=* ]] && safedeps_manager_option_class env "" "${w[i]}"; then
@@ -1198,13 +1237,8 @@ safedeps_manager_read_once() {
   done
   (( i < n )) || return 0
   w[i]="${t}"
-  base="${t##*/}"
-  case "${base}" in
-    npm|npx|pnpm|pnpx|yarn|bun|bunx|uv|uvx|pipx|poetry|pipenv|cargo|go|gem|bundle|mvn|dotnet) family="${base}" ;;
-    pip|pip[0-9]*) family=pip ;;
-    python|python[0-9]*|py) family=python ;;
-    *) return 0 ;;
-  esac
+  safedeps_manager_name "${t}" || return 0
+  family="${SAFEDEPS_G_VALUE}"
   SAFEDEPS_G_M_ROLE[i]=m
   i=$(( i + 1 ))
 
@@ -1237,7 +1271,7 @@ safedeps_manager_read_once() {
               i=$(( i + 1 ))
               val="${w[i]:-}"
             fi
-            [[ "${val}" == pip ]] || return 0
+            safedeps_manager_name "${val}" pip || return 0
             SAFEDEPS_G_M_ROLE[i]=m i=$(( i + 1 )) family=pip
             break 2
             ;;

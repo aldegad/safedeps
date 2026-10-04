@@ -857,7 +857,7 @@ reader_bodies=$(
   done
   for fn in safedeps_manager_read safedeps_manager_read_union safedeps_manager_read_once safedeps_manager_read_npm safedeps_manager_read_npm_once safedeps_manager_read_mvn \
       safedeps_npx_first_pass safedeps_npm_read_args safedeps_manager_option_class safedeps_manager_command \
-      safedeps_manager_npm_at safedeps_manager_long_option; do
+      safedeps_manager_npm_at safedeps_manager_long_option safedeps_manager_name; do
     sed -n "/^${fn}() {/,/^}/p" "${grammar_src}"
   done
 )
