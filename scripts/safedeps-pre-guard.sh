@@ -4902,8 +4902,9 @@ fi
 # The entry belongs to this tool call (safedeps_call_base in
 # lib/gates/call-id.sh), and only this call's post hook reads it. A call whose
 # post hook never runs (a call the user denied after this hook let it through,
-# or a failed one on Claude Code where PostToolUseFailure is not registered)
-# leaves its entry to the age sweep, and no other call reads it.
+# one cancelled while it runs, or a failed one on Claude Code where
+# PostToolUseFailure is not registered) leaves its entry to the age sweep, and
+# no other call reads it.
 #
 # This decides no verdict and runs after the gate. Anything that fails here
 # leaves no entry, and the backstop counts a command with no entry as traced,
