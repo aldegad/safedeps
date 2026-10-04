@@ -76,7 +76,10 @@ gate_reason() {
   out=$(jq -nc --arg c "$1" --arg cwd "${project_dir}" \
     '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
     HOME="${tmp_root}/home" SAFEDEPS_HOME="${safe}" scripts/safedeps-pre-guard.sh 2>/dev/null)
-  jq -r '(.hookSpecificOutput.permissionDecision // "pass") + " " + (.hookSpecificOutput.permissionDecisionReason // "")' <<< "${out:-{\}}"
+  # No answer is an empty object, set apart from the expansion: bash 3.2 keeps
+  # the backslash of "${out:-{\}}" and hands jq `{\}`, which it cannot parse.
+  [[ -n "${out}" ]] || out='{}'
+  jq -r '(.hookSpecificOutput.permissionDecision // "pass") + " " + (.hookSpecificOutput.permissionDecisionReason // "")' <<< "${out}"
 }
 
 # An UNDECIDED deny: the gate could not finish reading the command, and says so
