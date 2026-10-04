@@ -1018,6 +1018,32 @@ On the release tree 1d43743, `npm test` ran all 14 batteries with 395 ok and 0 n
 
 ## v2.18.1 (in progress)
 
+### An install record belongs to one call
+
+v2.18.0 listed this as a boundary: the post hook found the pre-guard's record of an install by the directory the command ran in and the command. A call could therefore speak from another call's record. Two overlapping calls of one command each took the other's record. A call whose post hook never ran left a record that the next call of the same command consumed, and a rollback with no confirmed snapshot restored that older call's snapshot, so an edit made between the two calls was lost. A record left by a pre-guard older than v2.4.1 was read too, and a call it did not match ended the hook with no judgment.
+
+Both engines send the same `tool_use_id` to both hooks of a call, as the backstop's trace entry already used (measured on Claude Code 2.1.288 and 2.1.289 and Codex CLI 0.160.0). The record is now `pending/id-<tool_use_id>.json`, and the post hook of a call that names an id reads that record and no other. A call with a backstop entry reads no record at all. A hook input that names no id keeps the old lookup, and both hooks say so in `advisory.log`. The pre-v2.4.1 records are not read. `lib/gates/call-id.sh` is the one reading of the id for both hooks, and the report oracle reads the id from the hook input in Python, separately.
+
+During an upgrade, a record written by the other version's pre-guard is not read. The call goes to the backstop, which, in a project with no confirmed snapshot, warns and keeps the install. The record waits for the 24-hour sweep.
+
+New e2e rows run two overlapping calls of one command on each engine, a call whose post hook never ran followed by the same command, an entry taken in another directory, and an input with no id. `report-mutations.sh` gained four mutations, each red: every record kept and found by directory and command again; a call whose own record is missing given the one found that way; a pre-v2.4.1 record read again; and an input with no id given the old lookup with nothing said in `advisory.log`.
+
+### A failed call is judged
+
+Claude Code runs `PostToolUse` only after a tool call succeeds. After a Bash call that ran and failed it runs `PostToolUseFailure`, with the same tool name, input and `tool_use_id`, and safedeps did not register it. A failed npm install can still have written the project's tree, and it was never judged; its record stayed behind for the next call of the command. The installer now registers the post hook for both events on Claude Code. Codex runs `PostToolUse` after a failed Bash call too and documents no `PostToolUseFailure`, so its config is unchanged. `--uninstall` and the legacy cleanup reach both events on either engine. The post hook reads neither `tool_response` nor `error`, so a failure is judged like a success. Rerun the installer to pick up the new event.
+
+A call cancelled while it runs still gets neither hook, per Claude Code's hook reference: it is not judged, its record waits for the sweep, and no other call reads it.
+
+### The Codex clause is said of Codex calls only
+
+The registry warning added "(on Codex it cannot)" after "safedeps did not add --ignore-scripts to this install" on either engine. On Claude Code that line follows a command whose own words already keep `ignore-scripts` true, or a rewrite that was downgraded, and the clause then named the wrong engine. The post hook now reads the engine the way the pre-guard does: Codex sends `turn_id`, and Claude Code does not. An e2e row shows the warning on each engine, and a mutation that puts the old wording back is red at the oracle.
+
+### npm releases are published from a tag, by trusted publishing
+
+Publishing v2.18.0 needed the owner's passkey twice, once to log in and once to publish. A pushed `v*` tag now runs `.github/workflows/publish.yml`. Its first job requires the CI run on `main` for the tagged commit, and both of its test jobs, to have succeeded. The second job checks that npm is at least 11.5.1 and that the tag, `package.json` and `bin/safedeps` name the same version. It then runs `npm publish --provenance` with the job's OIDC token and no npm token. Last, it reads the release back from the registry: published by GitHub, with a provenance attestation, and with the same file list as `npm pack --dry-run` of the tag. The job runs in the `npm-publish` environment, which allows deployments only from `v*` tags, because npm's trusted publisher checks only the workflow file and the environment.
+
+The requirements come from npm's trusted publishing documentation: npm 11.5.1 or later, Node 22.14.0 or later, `id-token: write`, and GitHub-hosted runners. Node 22 ships npm 10, so the job uses Node 24. AGENTS.md Release procedure steps 5 and 10 now describe the Linux check and the publish as they are run. Before the first tag, the workflow was checked without publishing anything: actionlint is clean; the CI check passes 2d96377 and stops at bb0787d (red CI) and at a commit with only a pull-request run; and the read-back fails on 2.18.0, which a token published, and passes on packages published by OIDC. The first real run is this release's.
+
 ### The gate's cost on macOS grows with the command, not its square
 
 v2.18.0 made the scan linear on both systems, and its "Faster" notes said the rest of the guard was not linear on macOS yet: with the deadline off, an install-bearing command cost 37.5s at 64KB there and 3.6s on Linux, so on macOS such a command was answered `UNDECIDED`. A line profile on an M1 found one awk program behind most of it. The lexer's `cscripts` view, which reads the scripts a command hands to `sh -c` or `eval`, took each word's basename with `sub(/.*\//, ...)`. The macOS awk (BWK) tries that match from every byte and runs to the end of the word from each one. The view cost 0.25s at 8KB, 3.2s at 32KB and 12.9s at 64KB, while the scan view, the only one `scan-cost.sh` timed, stayed at 0.2s. The word itself now answers the test: its basename ends in `sh` exactly when the word does. Five awk programs also built strings a byte at a time with `s = s c`, which BWK does by copying the whole string, so they go through a chunked builder instead. No verdict depends on how the strings are built.
