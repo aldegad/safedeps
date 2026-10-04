@@ -1687,8 +1687,9 @@ command_is_injectable_npm_install() {
 # npm. Three readers of the inert rewrite each kept a spelling of this pattern
 # that matched case, so the recognizer called `NPM ci` an install and the
 # rewrite found no verb in it: a downgrade, where main (a6fd57a) had
-# appended the flag. Every reader here that looks for an npm verb asks this
-# one.
+# appended the flag. Every reader here that looks for a verb to rewrite asks
+# this one. The check for an npm verb in a heredoc body does not: its match
+# withholds every rewrite, so it keeps the release's case (inert_rewrite_in_place).
 inert_npm_verb_grep() {
   LC_ALL=C judge_grep "$@" -Ei "npm${SAFEDEPS_G_OPTS}[[:space:]]+(${SAFEDEPS_G_NPM_VERBS}|${SAFEDEPS_G_NPM_LINK_VERBS})([[:space:]]|\$)"
 }
@@ -2120,7 +2121,9 @@ inert_rewrite_in_place() {
   local command="$1" lines offsets="" e note settled=false asked=false unverified=false floor=false rc=0 append=0 release_rewrote=false
   lines=$(inert_offsets_of "${command}") || rc=$?
   (( rc == 0 )) || return "${rc}"
-  if strip_heredoc_bodies "${command}" shell-bodies | inert_npm_verb_grep -q; then
+  # Matches case, as the release did: with -i, return 3 drops the compound floor, as with the awk in inert_payload_spans (v2.18.1).
+  if strip_heredoc_bodies "${command}" shell-bodies \
+      | LC_ALL=C judge_grep -qE "npm${SAFEDEPS_G_OPTS}[[:space:]]+(${SAFEDEPS_G_NPM_VERBS}|${SAFEDEPS_G_NPM_LINK_VERBS})([[:space:]]|\$)"; then
     return 3
   fi
   inert_release_skips "${command}" || release_rewrote=true

@@ -608,6 +608,30 @@ do
 done
 pass "inert flag lands on an install whose npm is spelled in another case"
 
+# A heredoc body piped to a command is data, and `Npm install` in it is not an
+# npm verb to the heredoc check, which matches case as the release did: read in
+# any case, it withheld every rewrite, so the visible install got none of the
+# flags the release gave it and ran its scripts.
+# The commands hold a pipe, so each row is a pair of array entries rather than
+# one `in|want` string.
+heredoc_case_in=(
+  $'npm install left-pad@1.3.0 && cat <<E | wc -l\nNpm install left-pad@1.3.0\nE'
+  $'npm install evil && cat <<E | wc -l\nNPM install evil\nE'
+)
+heredoc_case_want=(
+  $'npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts && cat <<E | wc -l\nNpm install left-pad@1.3.0\nE'
+  $'npm install --ignore-scripts evil --ignore-scripts && cat <<E | wc -l\nNPM install evil\nE'
+)
+for heredoc_i in "${!heredoc_case_in[@]}"; do
+  inert_in="${heredoc_case_in[${heredoc_i}]}"
+  inert_want="${heredoc_case_want[${heredoc_i}]}"
+  inert_out=$(run_hook_command "${tmp_root}/home-compound" "${tmp_root}/safe-compound" "${inert_in}")
+  inert_got=$(jq -r '.hookSpecificOutput.updatedInput.command' <<< "${inert_out}")
+  [[ "${inert_got}" == "${inert_want}" ]] \
+    || fail "inert flag lands on the install beside a heredoc body that spells npm in another case: $(printf '%q' "${inert_in}") (got: $(printf '%q' "${inert_got}"))"
+done
+pass "inert flag lands on the install beside a heredoc body that spells npm in another case"
+
 # Whether an install already carries the flag is read from that install's own
 # arguments, the way npm reads them, and the flag goes after its last argument,
 # because npm keeps the last value an option is given. The bare text
