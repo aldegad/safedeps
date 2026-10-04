@@ -923,8 +923,10 @@ check_view unprefixed_view "${all}" "a redirection between the manager and its v
   'pip 2>/dev/null i' "pip$(sp 13)i"
 check_view unprefixed_view "${all}" "a process substitution target before the command goes" \
   '< <(true) pip i' 'pip i'
-check_view unprefixed_view "${all}" "a {varname} redirection before the command goes, after an assignment, exec and !" \
+check_view unprefixed_view "bash dash" "a {varname} redirection before the command goes, after an assignment, exec and !" \
   'FOO=1 {fd}>/dev/null pip i; exec {fd}>&2 pip i; ! {fd}<&0 pip i' 'pip i; pip i; ! ;pip i'
+check_view unprefixed_view "zsh" "zsh reads a { glued to the first word as a group opener, so there {fd} is no descriptor" \
+  'FOO=1 {fd}>/dev/null pip i; exec {fd}>&2 pip i; ! {fd}<&0 pip i' 'pip i; pip i; ! {;fd}    pip i'
 check_view unprefixed_view "${all}" "after echo the words stay arguments" \
   'echo {fd}>/dev/null pip i' "echo$(sp 16)pip i"
 check_view live_view "${all}" "the live view blanks a redirection, so the inert rewrite finds the verb" \

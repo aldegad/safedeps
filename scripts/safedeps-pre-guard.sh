@@ -786,11 +786,12 @@ shell_lex() {
             # at both.
             if (cpat[d] == 2 && c == ";" && (X[i+1] == "|" || X[i+1] == ";" && X[i+2] == "&")) div = 1
             # The bytes after the first `;` are the rest of one operator:
-            # ARM marks them, so no word reader takes them for a word (the
-            # walk read the second `;` of `;;` as a command word).
+            # at the top level ARM marks them, so no word reader takes them
+            # for a word (the walk read the second `;` of `;;` as a command
+            # word). Inside a substitution they are bytes of its word.
             if (cpat[d] == 2 && c == ";" && (X[i+1] == ";" || X[i+1] == "&" || X[i+1] == "|" && shz)) {
-              C[i+1] = cls; i++; ARM[i] = 1
-              if (X[i] == ";" && X[i+1] == "&" && shb) { C[i+1] = cls; i++; ARM[i] = 1 }
+              C[i+1] = cls; i++; if (dc == 1) ARM[i] = 1
+              if (X[i] == ";" && X[i+1] == "&" && shb) { C[i+1] = cls; i++; if (dc == 1) ARM[i] = 1 }
               cpat[d] = 1; cpw[d] = 0; continue
             }
           }
@@ -1579,7 +1580,7 @@ shell_lex() {
       function bare(k,   j) {
         j = k - 1
         while (j >= 1 && (X[j] == " " || X[j] == "\t") && C[j] == "c") j--
-        if (j < 1) return 0
+        if (j < 1 || (j in ARM)) return 0
         return !(C[j] == "c" && DEP[j] == 1 && !(j in DROP) && X[j] ~ /[\n;&|(]/)
       }
       # The walk checks its own answers. The lexing decides which `(` is part
