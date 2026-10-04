@@ -4456,9 +4456,14 @@ fi
 # second. Set back two seconds, it counted a pull made 0.3 seconds before a
 # grep as the grep's trace, and the grep removed node_modules (lumi r1 R1); two
 # Bash calls in one message are 0.16 seconds apart. Where the baseline file or
-# the project's node tree keeps whole seconds, a write in the second the
-# baseline was touched in would not be newer than it, so there the baseline is
-# set two seconds back as before. Which one applied is in the entry.
+# any part of the project's node tree keeps whole seconds, a write in the
+# second the baseline was touched in would not be newer than it, so there the
+# baseline is set two seconds back as before. Every part has to show a time
+# below the second, the target of a linked one included: a tree whose lockfile
+# kept nanoseconds and whose node_modules was on a whole-second mount was read
+# as subsecond when one part was enough, and the walk missed a write in the
+# baseline's second (lumi r2 P3, 2 of 5 on a real mount). Which one applied is
+# in the entry.
 #
 # The entry belongs to this tool call (safedeps_backstop_entry_base), and only
 # this call's post hook reads it. A call whose post hook never runs (Claude
@@ -4470,7 +4475,7 @@ fi
 # which is what it did before there were entries. So the grep is not a judgment
 # reading (judge_grep), and there is nothing for the gate to settle.
 guard_backstop_trace_baseline() {
-  local dir dir_hash entry_dir base id at stamp entry rel clock resolution=seconds lock hidden tree
+  local dir dir_hash entry_dir base id at stamp entry rel resolution=seconds lock hidden tree present=0 subsecond=0
   [[ -n "${SAFEDEPS_G_BACKSTOP_RE:-}" ]] || return 0
   printf '%s' "${COMMAND}" | grep -qiE "${SAFEDEPS_G_BACKSTOP_RE}" 2>/dev/null || return 0
   local lib="${BASH_SOURCE[0]%/*}/../lib/gates/backstop-trace.sh"
@@ -4490,19 +4495,18 @@ guard_backstop_trace_baseline() {
   base=$(safedeps_backstop_entry_base "${entry_dir}" "${id}") || return 0
   mkdir -p "${entry_dir}" 2>/dev/null || return 0
   find "${entry_dir}" -type f -mmin +1440 -delete 2>/dev/null || true
-  lock=$(guard_file_inode "${dir}/package-lock.json")
-  hidden=$(guard_file_inode "${dir}/node_modules/.package-lock.json")
-  tree=$(guard_file_inode "${dir}/node_modules")
+  lock=$(safedeps_tree_inode "${dir}/package-lock.json")
+  hidden=$(safedeps_tree_inode "${dir}/node_modules/.package-lock.json")
+  tree=$(safedeps_tree_inode "${dir}/node_modules")
   # Whether the project's node tree keeps time below one second, read from what
   # is there: a whole-second filesystem prints zeros below the second.
-  local project_subsecond=false
   for rel in package-lock.json node_modules/.package-lock.json node_modules; do
-    [[ -e "${dir}/${rel}" ]] || continue
-    clock=$(safedeps_file_clock "${dir}/${rel}" c)
-    safedeps_clock_has_subsecond "${clock}" && project_subsecond=true
+    [[ -e "${dir}/${rel}" || -L "${dir}/${rel}" ]] || continue
+    present=$((present + 1))
+    safedeps_clock_has_subsecond "$(safedeps_tree_clock "${dir}/${rel}")" && subsecond=$((subsecond + 1))
   done
   touch "${base}.trace" 2>/dev/null || return 0
-  if [[ "${project_subsecond}" == true ]] \
+  if (( present > 0 && subsecond == present )) \
     && safedeps_clock_has_subsecond "$(safedeps_file_clock "${base}.trace" m)"; then
     resolution=subsecond
   else
@@ -4514,8 +4518,8 @@ guard_backstop_trace_baseline() {
   entry=$(jq -nc --arg key "$(compute_pending_key "${dir_hash}" "${COMMAND}")" \
     --arg baseline "${base}.trace" --arg resolution "${resolution}" \
     --arg lock "${lock}" --arg hidden "${hidden}" --arg tree "${tree}" \
-    --arg lock_clock "$(safedeps_file_clock "${dir}/package-lock.json" c)" \
-    --arg hidden_clock "$(safedeps_file_clock "${dir}/node_modules/.package-lock.json" c)" \
+    --arg lock_clock "$(safedeps_tree_clock "${dir}/package-lock.json")" \
+    --arg hidden_clock "$(safedeps_tree_clock "${dir}/node_modules/.package-lock.json")" \
     '{key: $key, baseline: $baseline, resolution: $resolution,
       inodes: {"package-lock.json": $lock, "node_modules/.package-lock.json": $hidden, node_modules: $tree},
       clocks: {"package-lock.json": $lock_clock, "node_modules/.package-lock.json": $hidden_clock}}' 2>/dev/null) \

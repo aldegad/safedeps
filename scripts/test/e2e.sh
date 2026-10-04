@@ -1519,6 +1519,15 @@ grep -q 'A rollback ran\.' <<< "$(post_message "${twoobj_post}")" \
 rm -f "$(grammar_pending "${twoobj_wt}")"
 pass "a record that is not one JSON object gets no --ignore-scripts line, and advisory.log says it could not be read"
 
+# A record that sends a command to the backstop belongs to a command the
+# pre-guard read as an install, and the pre-guard takes a trace entry only
+# where it writes no record. So the backstop reads none and counts the command
+# as traced, and advisory.log says why.
+record_traced_count() {
+  { grep -cF "post-verify BACKSTOP traced: the command reached the backstop through a pre-guard record, and the pre-guard takes a trace entry only where it writes no record." "${SAFEDEPS_HOME}/advisory.log" || true; }
+}
+bs_entry() { printf '%s/pending/backstop/id-%s.json' "${2:-${SAFEDEPS_HOME}}" "$1"; }
+
 # A pending state whose snapshot has no meta file. The post hook used to exit
 # there with nothing said, so the install was never judged (bamdori r23, as
 # old as e315244): an unapproved lockfile passed with exit 0, no output and no
@@ -1582,16 +1591,19 @@ grammar_pre "${gone_c_wt}" "npm install fixture-parent@1.0.0" > /dev/null
 touch "${gone_c_wt}/package-lock.json"
 gone_c_first=$(PATH="${stub_bin}:${PATH}" grammar_post "${gone_c_wt}" "npm install fixture-parent@1.0.0 --ignore-scripts")
 [[ -z "${gone_c_first}" ]] || fail "C: the project has a confirmed snapshot (${gone_c_first})"
-grammar_pre "${gone_c_wt}" "npm install fixture-parent@1.0.0" > /dev/null
+grammar_pre "${gone_c_wt}" "npm install fixture-parent@1.0.0" toolu_gone_c > /dev/null
 gone_c_pending=$(grammar_pending "${gone_c_wt}")
 rm -f "$(gone_meta_of "${gone_c_pending}")"
 printf '%s\n' "${tampered_lock}" > "${gone_c_wt}/package-lock.json"
-gone_c_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${gone_c_wt}" "npm install fixture-parent@1.0.0 --ignore-scripts")
+record_traced_before=$(record_traced_count)
+gone_c_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${gone_c_wt}" "npm install fixture-parent@1.0.0 --ignore-scripts" toolu_gone_c)
 grep -qx 'safedeps: suspicious dependency change detected; this hook found a record of this command from before it ran, and the snapshot it names has no meta file. A rollback ran.' <<< "$(post_message "${gone_c_post}")" \
   || fail "C: the backstop rolls back, and says the record was found and its snapshot has no meta file (${gone_c_post})"
 ! grep -q -- '--ignore-scripts' <<< "$(post_message "${gone_c_post}")" \
   || fail "C: the backstop says nothing about --ignore-scripts (${gone_c_post})"
 cmp -s "${gone_c_wt}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "C: the backstop restores the confirmed lockfile"
+[[ "$(record_traced_count)" == "$(( record_traced_before + 1 ))" && ! -e "$(bs_entry toolu_gone_c)" ]] \
+  || fail "C: the pre-guard read the install and took no trace entry, and the backstop counts the command as traced for the record"
 pass "a record whose snapshot has no meta file goes to the backstop, which rolls back to a confirmed snapshot"
 
 # A record that names no snapshot. The pre-guard always writes one, so an empty
@@ -1613,18 +1625,21 @@ grammar_pre "${empty_wt}" "npm install fixture-parent@1.0.0" > /dev/null
 touch "${empty_wt}/package-lock.json"
 empty_first=$(PATH="${stub_bin}:${PATH}" grammar_post "${empty_wt}" "npm install fixture-parent@1.0.0 --ignore-scripts")
 [[ -z "${empty_first}" ]] || fail "D: the project has a confirmed snapshot (${empty_first})"
-grammar_pre "${empty_wt}" "npm install fixture-parent@1.0.0" > /dev/null
+grammar_pre "${empty_wt}" "npm install fixture-parent@1.0.0" toolu_empty_d > /dev/null
 empty_pending=$(grammar_pending "${empty_wt}")
 jq '.snapshot_id = ""' "${empty_pending}" > "${empty_pending}.edit" && mv "${empty_pending}.edit" "${empty_pending}"
 empty_line=$(empty_line_of "${empty_pending}")
 printf '%s\n' "${tampered_lock}" > "${empty_wt}/package-lock.json"
-empty_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${empty_wt}" "npm install fixture-parent@1.0.0 --ignore-scripts")
+record_traced_before=$(record_traced_count)
+empty_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${empty_wt}" "npm install fixture-parent@1.0.0 --ignore-scripts" toolu_empty_d)
 grep -qx 'safedeps: suspicious dependency change detected; this hook found a record of this command from before it ran, and the record names no snapshot. A rollback ran.' <<< "$(post_message "${empty_post}")" \
   || fail "D: the backstop rolls back, and says the record was found and names no snapshot (${empty_post})"
 [[ "$(grep -cF "${empty_line}" "${SAFEDEPS_HOME}/advisory.log")" == 1 ]] \
   || fail "D: advisory.log names the record that names no snapshot once"
 [[ ! -e "${empty_pending}" ]] || fail "D: the record is set aside"
 cmp -s "${empty_wt}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "D: the backstop restores the confirmed lockfile"
+[[ "$(record_traced_count)" == "$(( record_traced_before + 1 ))" ]] \
+  || fail "D: the backstop counts the command as traced for the record"
 pass "a pending state that names no snapshot goes to the backstop, which rolls back to a confirmed snapshot"
 
 # E: the legacy record a pre-#5 pre-guard left, which the post hook still
@@ -1740,7 +1755,10 @@ unread_row() {
 
 # U1: garbage, an unapproved lockfile and a confirmed snapshot. The backstop
 # rolls back to it.
+record_traced_before=$(record_traced_count)
 unread_row U1 'not json {' yes tampered
+[[ "$(record_traced_count)" == "$(( record_traced_before + 1 ))" ]] \
+  || fail "U1: the backstop counts the command as traced for the record"
 grep -qx 'safedeps: suspicious dependency change detected; this hook found a pre-guard record, and the record is not one JSON object. A rollback ran.' <<< "$(post_message "${UNREAD_POST}")" \
   || fail "U1: the backstop rolls back, and says the record was found and is not one JSON object (${UNREAD_POST})"
 cmp -s "${UNREAD_WT}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "U1: the backstop restores the confirmed lockfile"
@@ -1887,7 +1905,6 @@ bs_assert_rollback() {
 }
 bs_grep='grep -n \"npm install\" README.md'
 bs_entries() { { find "$1/pending/backstop" -type f 2>/dev/null || true; } | wc -l | tr -d ' '; }
-bs_entry() { printf '%s/pending/backstop/id-%s.json' "${2:-${SAFEDEPS_HOME}}" "$1"; }
 bs_untraced_count() {
   { grep -cF "post-verify BACKSTOP UNTRACED: no trace in $(cd -P "$1" && pwd -P): " "${SAFEDEPS_HOME}/advisory.log" || true; }
 }
@@ -1929,6 +1946,36 @@ bs_t4_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${bs_t4_wt}" "npm run deps
 bs_assert_rollback "${bs_t4_wt}" "${bs_t4_post}" "an install the pre-guard did not read" \
   "$(cd -P "${bs_t4_wt}" && pwd -P)/package-lock.json has another status change time than the one recorded before this command"
 pass "an install the pre-guard did not read is rolled back"
+
+# A lockfile that is a symbolic link (lumi r2 S1). A write through the link
+# changes the target's status change time and not the link's, so the entry
+# holds both, and a write through the link is a trace. The row writes only the
+# lockfile, as `npm install --package-lock-only` does, so the walk of
+# node_modules finds nothing and the lockfile's time is the only trace. A link
+# pointed at another file is a trace too: the link is a new one.
+bs_s1_wt="${tmp_root}/bs-s1-wt"
+bs_project "${bs_s1_wt}"
+mv "${bs_s1_wt}/package-lock.json" "${bs_s1_wt}/real-lock.json"
+ln -s real-lock.json "${bs_s1_wt}/package-lock.json"
+grammar_pre "${bs_s1_wt}" "npm run deps:install" toolu_bs_s1 > /dev/null
+printf '%s\n' "${tampered_lock}" > "${bs_s1_wt}/package-lock.json"
+bs_s1_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${bs_s1_wt}" "npm run deps:install" toolu_bs_s1)
+grep -q 'A rollback ran\.' <<< "${bs_s1_post}" || fail "a write through a linked lockfile is a trace (${bs_s1_post})"
+grep -qF "post-verify BACKSTOP traced: $(cd -P "${bs_s1_wt}" && pwd -P)/package-lock.json has another status change time than the one recorded before this command" "${SAFEDEPS_HOME}/advisory.log" \
+  || fail "a write through a linked lockfile: advisory.log names the lockfile's status change time"
+[[ -L "${bs_s1_wt}/package-lock.json" ]] || fail "a write through a linked lockfile: the rollback leaves the link a link"
+bs_s1b_wt="${tmp_root}/bs-s1b-wt"
+bs_project "${bs_s1b_wt}"
+mv "${bs_s1b_wt}/package-lock.json" "${bs_s1b_wt}/real-lock.json"
+ln -s real-lock.json "${bs_s1b_wt}/package-lock.json"
+printf '%s\n' "${tampered_lock}" > "${bs_s1b_wt}/other-lock.json"
+grammar_pre "${bs_s1b_wt}" "npm run deps:install" toolu_bs_s1b > /dev/null
+ln -sfn other-lock.json "${bs_s1b_wt}/package-lock.json"
+bs_s1b_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${bs_s1b_wt}" "npm run deps:install" toolu_bs_s1b)
+grep -q 'A rollback ran\.' <<< "${bs_s1b_post}" || fail "a lockfile link pointed at another file is a trace (${bs_s1b_post})"
+grep -qF "post-verify BACKSTOP traced: $(cd -P "${bs_s1b_wt}" && pwd -P)/package-lock.json has another inode than before this command" "${SAFEDEPS_HOME}/advisory.log" \
+  || fail "a lockfile link pointed at another file: advisory.log names the inode"
+pass "a write through a linked lockfile, and a lockfile link pointed elsewhere, are traces"
 
 # The ledger entries that approved the closure expired. The ledger is this
 # suite's, so the row reads a copy of it.
@@ -2027,6 +2074,57 @@ bs_sec_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${bs_sec_wt}" "${bs_grep}
 bs_assert_rollback "${bs_sec_wt}" "${bs_sec_post}" "a grep on a whole-second filesystem" \
   "$(cd -P "${bs_sec_wt}" && pwd -P)/package-lock.json changed after the baseline taken before this command"
 pass "on a filesystem that keeps whole seconds the baseline is set two seconds back"
+
+# A node tree on two filesystems (lumi r2 P3): the lockfile keeps nanoseconds
+# and node_modules is on a mount that keeps whole seconds, simulated by a stat
+# that prints no part below the second for node_modules and a walk that reads
+# each time there as the start of its second. A write into node_modules in the
+# second the baseline was touched in is then not newer than a baseline that is
+# not set back. Where one part with a time below the second was enough, the
+# tree was read as subsecond and the walk missed such a write (2 of 5 on a real
+# HFS+ mount). Every part has to show one now, so the baseline is set back.
+bs_mix_wt="${tmp_root}/bs-mix-wt"
+bs_project "${bs_mix_wt}"
+bs_mix_bin="${tmp_root}/bs-mix-bin"
+mkdir -p "${bs_mix_bin}"
+cat > "${bs_mix_bin}/stat" <<EOF
+#!/usr/bin/env bash
+out=\$("$(command -v stat)" "\$@") || exit
+case "\${!#}" in
+  */node_modules) printf '%s\n' "\${out}" | sed -E 's/\.[0-9]+/.000000000/' ;;
+  *) printf '%s\n' "\${out}" ;;
+esac
+EOF
+cat > "${bs_mix_bin}/whole-second-walk.py" <<'EOF'
+import os, sys
+root, base = sys.argv[1], os.stat(sys.argv[2]).st_ctime_ns
+def newer(path, follow):
+    st = os.stat(path) if follow else os.lstat(path)
+    return st.st_ctime_ns // 10**9 * 10**9 > base
+if newer(root, True):
+    print(root); sys.exit(0)
+for parent, dirs, files in os.walk(root):
+    for name in dirs + files:
+        if newer(os.path.join(parent, name), False):
+            print(os.path.join(parent, name)); sys.exit(0)
+EOF
+cat > "${bs_mix_bin}/find" <<EOF
+#!/usr/bin/env bash
+if [[ "\$1" == -H && "\$2" == */node_modules && "\$3" == -cnewer ]]; then
+  exec python3 "${bs_mix_bin}/whole-second-walk.py" "\$2" "\$4"
+fi
+exec "$(command -v find)" "\$@"
+EOF
+chmod +x "${bs_mix_bin}/stat" "${bs_mix_bin}/find"
+PATH="${bs_mix_bin}:${PATH}" grammar_pre "${bs_mix_wt}" "npm run deps:add" toolu_bs_mix > /dev/null
+bs_mix_entry=$(cat "$(bs_entry toolu_bs_mix)" 2>/dev/null || true)
+printf 'x\n' > "${bs_mix_wt}/node_modules/installed-package/added.js"
+bs_mix_post=$(PATH="${bs_mix_bin}:${stub_bin}:${PATH}" grammar_post "${bs_mix_wt}" "npm run deps:add" toolu_bs_mix)
+[[ "$(jq -r .resolution <<< "${bs_mix_entry:-null}")" == seconds ]] \
+  || fail "a write into node_modules on a whole-second mount beside a subsecond lockfile: the baseline is set back (${bs_mix_entry})"
+grep -qF "post-verify BACKSTOP traced: $(cd -P "${bs_mix_wt}" && pwd -P)/node_modules" "${SAFEDEPS_HOME}/advisory.log" \
+  || fail "a write into node_modules on a whole-second mount beside a subsecond lockfile: the walk finds it (${bs_mix_post})"
+pass "a tree with one part on a whole-second filesystem sets the baseline back"
 
 # A walk that does not finish within its deadline: a find that never answers.
 bs_slow_wt="${tmp_root}/bs-slow-wt"

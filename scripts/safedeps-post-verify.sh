@@ -1605,6 +1605,14 @@ if [[ "${BACKSTOP_INSTALL:-false}" != "true" && ! -f "${META_FILE}" ]]; then
   SNAPSHOT_ID=""
   META_FILE="${SNAPSHOT_DIR}/_meta.json"
 fi
+# A command that reached the backstop through one of these records was read as
+# an install by the pre-guard, and the pre-guard takes a trace entry only for a
+# command it did not read as one, where it writes no record. So none is read
+# here, and the command counts as traced, as one with no entry does.
+if [[ "${BACKSTOP_RECORD_GONE:-false}" == true || "${BACKSTOP_RECORD_EMPTY:-false}" == true \
+  || "${BACKSTOP_RECORD_UNREAD:-false}" == true ]]; then
+  BACKSTOP_TRACE_NONE="the command reached the backstop through a pre-guard record, and the pre-guard takes a trace entry only where it writes no record"
+fi
 
 # --- Begin Reorg Verification ---
 
@@ -2668,14 +2676,13 @@ backstop_trace() {
       printf '%s did not exist before this command and exists now' "${file}"
       return 0
     fi
-    inode=""
-    read -r inode _ < <(ls -di -- "${file}" 2>/dev/null) || true
+    inode=$(safedeps_tree_inode "${file}")
     if [[ "${inode}" != "${recorded}" ]]; then
       printf '%s has another inode than before this command' "${file}"
       return 0
     fi
     [[ "${rel}" == node_modules ]] && continue
-    if [[ -z "${recorded_clock}" || "$(safedeps_file_clock "${file}" c)" != "${recorded_clock}" ]]; then
+    if [[ -z "${recorded_clock}" || "$(safedeps_tree_clock "${file}")" != "${recorded_clock}" ]]; then
       printf '%s has another status change time than the one recorded before this command' "${file}"
       return 0
     fi

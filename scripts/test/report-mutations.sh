@@ -302,8 +302,8 @@ $4; node_modules was restored from the confirmed snapshot
       M_WHY='a baseline set two seconds back on every filesystem, the rule before it was measured'
       M_AT=""
       M_RED='a grep right after a pull outside the gate: the backstop says nothing'
-      M_OLD='  if [[ "${project_subsecond}" == true ]] \'
-      M_NEW='  if false && [[ "${project_subsecond}" == true ]] \'
+      M_OLD='  if (( present > 0 && subsecond == present )) \'
+      M_NEW='  if false && (( present > 0 && subsecond == present )) \'
       ;;
     Oldest)
       M_FILE=scripts/safedeps-pre-guard.sh
@@ -315,6 +315,25 @@ $4; node_modules was restored from the confirmed snapshot
       M_FILE2=scripts/safedeps-post-verify.sh
       M_OLD2='  if ! base=$(safedeps_backstop_entry_base "${GUARD_DIR}/pending/backstop" "${id}"); then'
       M_NEW2='  if ! base=$(ls -tr "${GUARD_DIR}/pending/backstop/id-$(compute_pending_key "${POST_DIR_HASH}" "${COMMAND}")_"*.json 2>/dev/null | head -n 1 | sed '"'"'s/\.json$//'"'"' | grep .); then'
+      ;;
+    LinkLstat)
+      M_FILE=lib/gates/backstop-trace.sh
+      M_WHY='a linked lockfile read by its own status change time and not its target'"'"'s, the rule before lumi r2 S1'
+      M_AT=""
+      M_RED='a write through a linked lockfile is a trace'
+      M_OLD='      stat -L -c "${field}" -- "$1" 2>/dev/null'
+      M_NEW='      stat -c "${field}" -- "$1" 2>/dev/null'
+      M_FILE2=lib/gates/backstop-trace.sh
+      M_OLD2='      stat -L -f "${field}" -- "$1" 2>/dev/null'
+      M_NEW2='      stat -f "${field}" -- "$1" 2>/dev/null'
+      ;;
+    AnySubsecond)
+      M_FILE=scripts/safedeps-pre-guard.sh
+      M_WHY='a node tree read as subsecond where any part, rather than every one, keeps time below one second, the rule before lumi r2 P3'
+      M_AT=""
+      M_RED='a write into node_modules on a whole-second mount beside a subsecond lockfile'
+      M_OLD='  if (( present > 0 && subsecond == present )) \'
+      M_NEW='  if (( subsecond > 0 )) \'
       ;;
     WalkOff)
       M_FILE=scripts/safedeps-post-verify.sh
