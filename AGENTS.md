@@ -151,13 +151,25 @@ any step is open.
    stated proposition moved. Credit issue reporters.
 4. **Run the consistency audit** (next section) and read its ceiling. Then have
    someone other than the author re-read the changed propositions.
-5. **Test on both platforms before anything leaves the machine.** `npm test` on
-   macOS, and the CI steps on Linux: ubuntu:24.04 with jq, procps, git, node,
-   npm, shellcheck and CI's pinned gitleaks, running CI's exact shellcheck list,
-   `npm test`, `./bin/safedeps scan secrets --repo`, and `npm pack --dry-run`.
-   Record `uptime` beside each run. Linux-only failures (GNU `stat -f`, the
-   128KB `E2BIG` limit, ext4 directory order) were invisible on macOS and kept
-   CI red for a month.
+5. **Test on both platforms before anything leaves the machine.** Run the
+   release tree, not a plan branch, on two machines, and record `uptime` beside
+   each run:
+   - **macOS:** `npm test`.
+   - **Linux:** a Debian or Ubuntu machine -- a VM, or an `ubuntu:24.04`
+     container -- with bash, jq, procps, git, node, npm, shellcheck, and the
+     gitleaks version `ci.yml` pins (`GITLEAKS_VERSION`, checked against its
+     sha256). Run CI's four Linux steps there, each as `ci.yml` writes it: the
+     ShellCheck step's exact file list, `npm test`,
+     `./bin/safedeps scan secrets --repo`, and the package-contents step
+     (zero runtime dependencies, `npm pack --dry-run`).
+
+   A step the Linux machine cannot run is named in the ROADMAP section with the
+   reason, and step 8's CI run carries it. v2.18.0 ran `npm test` on a Debian VM
+   and left the other three to CI after the push; that is the form to record,
+   not to leave unsaid. CI is the authority either way: it runs on GitHub's
+   runners from a clean checkout. This step exists to keep a red tree off `main`:
+   Linux-only failures (GNU `stat -f`, the 128KB `E2BIG` limit, ext4 directory
+   order) were invisible on macOS and kept CI red for a month.
 6. **Run the release gates.** The package has zero runtime dependencies
    (`jq '(.dependencies // {}) + (.optionalDependencies // {}) | length'
    package.json` prints 0), `./bin/safedeps scan secrets --repo` passes, and
@@ -176,7 +188,8 @@ any step is open.
    commit. Both `test (ubuntu-latest)` and `test (macos-latest)` must be green.
    Red stops the release: fix forward, and do not tag a red commit.
 9. **Tag and publish the GitHub release.** An annotated tag `vX.Y.Z` on the
-   green commit, pushed, and `gh release create vX.Y.Z --notes-file <notes>`.
+   green commit, pushed (the push starts step 10's publish), and
+   `gh release create vX.Y.Z --notes-file <notes>`.
    The notes cover every user-visible change since the previous tag (derive them
    from `git log <previous-tag>..vX.Y.Z` and the ROADMAP section): security
    fixes first, each with what could get past before and how it is verified
@@ -185,10 +198,48 @@ any step is open.
    `false`, `false` and the tag, and `gh release view --json tagName` (the
    latest release) must name it. A draft is not a release: users and
    `releases/latest` never see it.
-10. **Publish to npm.** From a clean checkout of the tag, `npm whoami` (the
-    owner logs in; publishing needs their 2FA), `npm publish --access public`,
-    then confirm `npm view @aldegad/safedeps version` is X.Y.Z and that the
-    published tarball's file list matches `npm pack --dry-run` of the tag.
+10. **Publish to npm.** Pushing the tag in step 9 starts
+    `.github/workflows/publish.yml`, which publishes by trusted publishing:
+    npm accepts the job's GitHub OIDC token, so there is no npm token, no
+    login and no 2FA prompt, and npm attaches provenance. Watch it:
+    `gh run list --workflow publish.yml -L 1`, then `gh run watch <id>`. The
+    run must be green. Its jobs, in order:
+    - `ci-green` reads the CI run on a push to `main` for the tagged commit and
+      stops unless the run and both `test (ubuntu-latest)` and
+      `test (macos-latest)` concluded `success`. It does not run the suite again
+      (about two hours on macOS). A tag pushed before CI finished fails here;
+      rerun it with `gh run rerun <id>` once CI is green.
+    - `publish` checks that npm is at least 11.5.1, that the tag, `package.json`
+      and `bin/safedeps` name the same version, runs `npm publish --provenance`,
+      then reads the release back from the registry: the version's
+      `_npmUser.trustedPublisher.id` must be `github`, its
+      `dist.attestations.provenance` must exist, and the published tarball's
+      file list must equal `npm pack --dry-run` of the tag.
+
+    Then confirm it yourself: `npm view @aldegad/safedeps version` is X.Y.Z, and
+    `npm view @aldegad/safedeps@X.Y.Z dist.attestations.provenance.predicateType`
+    prints an SLSA provenance URL. A failure at `npm publish` (ENEEDAUTH, 403)
+    means the trusted publisher on npmjs.com does not match this workflow; check
+    it against the setup below, then rerun. A failure in the read-back comes
+    after the publish: the version is already published and cannot be published
+    again, so fix forward in the next patch. Do not fall back to publishing
+    from a laptop. That needs the owner's login and 2FA and ships without
+    provenance, so it is the owner's decision, and the ROADMAP section says so
+    if it happens.
+
+    **One-time setup on npmjs.com (owner, logged in).** Package
+    `@aldegad/safedeps` → Settings → Trusted publishing → GitHub Actions, with
+    the fields exactly as below (npm does not check them when they are saved,
+    and a mismatch first shows as a failed publish):
+    Organization or user `aldegad`, Repository `safedeps`, Workflow filename
+    `publish.yml`, Environment name `npm-publish`, and under Allowed actions
+    select `npm publish` (a connection created after 2026-09-03 allows only
+    `npm stage publish` until it is selected). A connection cannot be edited,
+    only deleted and created again, so renaming the workflow file or its
+    `environment` means doing this again. After the
+    first green publish, Settings → Publishing access → "Require two-factor
+    authentication and disallow tokens" closes the token path; that and staged
+    publishing (`npm stage publish`, approved with 2FA) are the owner's choices.
 11. **Close the loop.** Reply on every GitHub issue the release fixes with the
     fix commit and the release link, and close it.
 
