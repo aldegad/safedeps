@@ -511,30 +511,24 @@ pass "control: mutated spec diverges on ${control_hit}/${fuzz_cases} inputs, so 
 # them: where the bash reading says no DIVERGE, the zsh and dash views are the
 # bash views, byte for byte. That is what lets the guard skip the other two
 # readings, so a place where the shells differ that the lexer does not report
-# shows here as a reading that moved without a DIVERGE. The stmts view is in
-# that check too: a statement start only zsh reads (`repeat 1 {`) has to make
-# the bash reading say DIVERGE, or the zsh reading that finds it never runs.
+# shows here as a reading that moved without a DIVERGE. The statement starts
+# are in that check too, as the events they are (the events view, and the
+# recognize view the recognizers read): a start only zsh reads (`repeat 1 {`,
+# `true&!pip i`) has to make the bash reading say DIVERGE, or the zsh reading
+# that finds it never runs. Those two views are not offsets into the command
+# (a start is a place between two bytes, and the recognize view puts a `;`
+# in there), so they are held to the cross-reading check alone.
 scan_view() { shell_lex "$1" scan "safedeps:scan-contract"; }
 code_view() { shell_lex "$1" code "safedeps:scan-contract"; }
 noredir_view() { shell_lex "$1" noredir "safedeps:scan-contract"; }
 stmts_view() { shell_lex "$1" stmts "safedeps:scan-contract"; }
 unprefixed_view() { shell_lex "$1" unprefixed "safedeps:scan-contract"; }
+events_view() { shell_lex "$1" events "safedeps:scan-contract"; }
+recognize_view() { shell_lex "$1" recognize "safedeps:scan-contract"; }
+stmtcuts_view() { shell_lex "$1" stmtcuts "safedeps:scan-contract"; }
 property_failures=0
 stmts_unterm=0
-stmts_added=0
 diverge_file=$(mktemp "${TMPDIR:-/tmp}/safedeps-diverge.XXXXXX")
-# <twice> is <once> with starts added and nothing else changed: a byte that
-# differs is a `;` written over a blank, or over the `(` of a subshell glued
-# to the word before it, the two bytes a start is written over.
-stmts_adds_starts_only() {
-  local LC_ALL=C k a b
-  [[ ${#1} -eq ${#2} ]] || return 1
-  for ((k = 0; k < ${#1}; k++)); do
-    a="${1:k:1}" b="${2:k:1}"
-    [[ "${a}" == "${b}" ]] && continue
-    [[ "${b}" == ";" && ( "${a}" == " " || "${a}" == $'\t' || "${a}" == "(" || "${a}" == "{" ) ]] || return 1
-  done
-}
 # Whether the lexer finishes reading <text> in the current reading: an open
 # quote, body or context makes it UNTERM, which the guard settles as a failed
 # reading.
@@ -560,38 +554,35 @@ check_view_properties() { # input label
         property_failures=$((property_failures + 1))
         continue
       fi
-      # The stmts view writes starts only for a reading that closes (as the
-      # prefix and redirection views strip only then). An unclosed reading
-      # writes none, and its view, whose open quote is blank, may close when
-      # it is read again and get starts then. Such a command is UNDECIDED, so
+      # The stmts view blanks a separator inside a redirection only for a
+      # reading that closes (as the prefix and redirection views strip only
+      # then). An unclosed reading, whose open quote the view prints blank,
+      # may close when it is read again. Such a command is UNDECIDED, so
       # nothing reads its statements; the view is held to idempotence on
       # every reading that closes, and the ones skipped are counted below.
+      # It carries no statement start, so there is nothing a second reading
+      # may add: it used to write each start over the byte before it, and a
+      # word holding an escape or a quote, read again, could find one more.
       if [[ "${v}" == stmts_view ]] && ! SAFEDEPS_READING="${reading}" reading_closes "${x}"; then
         stmts_unterm=$((stmts_unterm + 1))
         continue
       fi
       twice=$(SAFEDEPS_READING="${reading}" "${v}" "${once}"; printf 'X'); twice="${twice%X}"
-      # The view prints an escape or a quote as a blank, so read again a word
-      # that holds one is two words, or none (`}\x` is `} x`). There a reading
-      # again may find a start the first did not; it must keep every start
-      # and change no other byte (a start is written over a blank, or over
-      # the `(` of a subshell glued to a word). Without an escape or a quote
-      # it is idempotent.
-      if [[ "${v}" == stmts_view && "${twice}" != "${once}" && "${x}" == *[\\\'\"]* ]]; then
-        if stmts_adds_starts_only "${once}" "${twice}"; then
-          stmts_added=$((stmts_added + 1))
-          continue
-        fi
-      fi
       if [[ "${twice}" != "${once}" ]]; then
         printf 'idempotence: %s (%s) read twice differs on [%q] (%s)\n  once  [%q]\n  twice [%q]\n' "${v}" "${reading}" "${x}" "$2" "${once}" "${twice}" >&2
         property_failures=$((property_failures + 1))
       fi
     done
+    # The starts, as events and as the recognizers read them: the
+    # cross-reading check only.
+    for v in events_view recognize_view; do
+      once=$(SAFEDEPS_READING="${reading}" "${v}" "${x}"; printf 'X'); once="${once%X}"
+      views+="${once}"$'\036'
+    done
     if [[ "${reading}" == bash ]]; then
       bash_views="${views}"
       : > "${diverge_file}"
-      for v in scan_view code_view noredir_view stmts_view; do
+      for v in scan_view code_view noredir_view stmts_view events_view recognize_view; do
         SAFEDEPS_READING=bash SAFEDEPS_LEX_DIVERGE="${diverge_file}" "${v}" "${x}" > /dev/null
       done
     elif [[ ! -s "${diverge_file}" && "${views}" != "${bash_views}" ]]; then
@@ -619,27 +610,31 @@ for ((c = 0; c < fuzz_cases; c++)); do
 done
 [[ ${property_failures} -eq 0 ]] || fail "view properties: ${property_failures} violation(s) (seed ${fuzz_seed})"
 rm -f "${diverge_file}"
-pass "view properties: scan, code, noredir and stmts keep length and are idempotent in the bash, zsh and dash readings, and read as bash wherever bash says no DIVERGE, on ${form_count} shell forms and ${fuzz_cases} random inputs (stmts: ${stmts_unterm} unclosed readings not asked, ${stmts_added} with an escape or a quote read again with starts added and none lost)"
+pass "view properties: scan, code, noredir and stmts keep length and are idempotent in the bash, zsh and dash readings, and they and the starts (events, recognize) read as bash wherever bash says no DIVERGE, on ${form_count} shell forms and ${fuzz_cases} random inputs (stmts: ${stmts_unterm} unclosed readings not asked)"
 
-# --- the statement starts (the stmts view) ---------------------------------------
-# The install recognizers and command_statements read the stmts view, where
-# every place a command starts is a `;`: a case pattern close, and the blank
-# before a word that stands where the shell reads a command. The lexer decides
-# those from the shell grammar (starts() in shell_lex), so SAFEDEPS_G_START
-# knows only separators. The scan view is not touched: a prototype that wrote
-# the starts into it broke its idempotence, because a redirection target read
-# again stood at a command start. The rules, each as a literal:
+# --- the statement starts (events) ----------------------------------------------
+# Where a command starts is a place between two bytes, and the lexer's walk
+# over the words (starts() in shell_lex) says where, from the shell grammar:
+# after a separator, a case pattern close, a reserved word, a function head,
+# `time`, `coproc`, the zsh short forms. SAFEDEPS_G_START knows only
+# separators. The walk hands each start on as an event, never as a byte: the
+# events view lists them, the recognize view the recognizers read puts a `;`
+# in at each one no separator stands before (a bare start), and
+# command_statements cuts there (the stmtcuts view). The stmts view used to
+# write each start over the byte before it, and a start with no byte of its
+# own -- after a reserved word, `!`, a head's `)` or zsh's glued `{`, with a
+# redirection first -- borrowed a byte of the token before it or was lost:
+# `if true; then>/dev/null pip install x; fi` was no install to any
+# recognizer (verdict bamdori-20261004-224625). The rows below print the stmts
+# view with a `;` put in at each bare start, which is what a recognizer reads
+# but for the prefixes the recognize view removes. The rules, each as a
+# literal:
 #
-#   1. Length is kept, and the view is idempotent in each reading on every
-#      reading that closes and holds no escape or quote (the property check
-#      above). A reading that does not close writes no starts and is
-#      UNDECIDED; read again with its open quote blank, it may close and get
-#      them. And the view prints an escape or a quote as a blank, so a word
-#      holding one reads as two words, or none, the second time (`}\x` as
-#      `} x`, the scan view has the same property for `a\;b`). There a second
-#      reading may add a start, never drop one, and changes no other byte; the
-#      check counts those.
-#   2. Only a top-level blank becomes a start. None falls inside quotes, a
+#   1. The stmts view keeps the length and is idempotent in each reading on
+#      every reading that closes (the property check above); it carries no
+#      start. The starts read as bash wherever the bash reading says no
+#      DIVERGE (the same check, on the events and recognize views).
+#   2. A start is an event at top-level code. None falls inside quotes, a
 #      substitution, an arithmetic context or a heredoc body.
 #   3. A `;` `&` `|` that is not at the top level ends no statement and is
 #      `_`: inside an arithmetic context (`for ((i=0;i<1;i++)) {` was cut at
@@ -651,139 +646,182 @@ pass "view properties: scan, code, noredir and stmts keep length and are idempot
 #      start falls between them and the command, and the word after a
 #      redirection operator is its target, never a command. Splitting
 #      `npm_config_global=true npm install x` there dropped its UNGATED record.
-#      A redirection that comes first takes the start.
+#      A redirection that comes first takes the start, glued to the token
+#      before it or not.
 #   5. A rule is the reading's whose shell has it. A rule every reading shares
 #      only adds starts, at a form the shells without it fail to parse, such
-#      as a compound command right after `function NAME` (bash 5 alone). zsh
-#      alone: `}` wherever it stands, `always`, `for NAME (WORDS)`, `foreach`,
-#      `repeat`, `[[ ... ]]` or an arithmetic `((...))` before a body, `case
-#      WORD {`, and `;|` ending an arm. bash alone: `coproc NAME` before a
+#      as a compound command right after `function NAME` (bash 5 alone), or a
+#      subshell glued to the close of another (no shell parses `(a)(b)`).
+#      zsh alone: `}` wherever it stands, `always`, `for NAME (WORDS)`,
+#      `foreach`, `repeat`, `[[ ... ]]` or an arithmetic `((...))` before a
+#      body, `case WORD {`, `;|` ending an arm, a `{` glued to the first word
+#      of a command, and `&!` ending one. bash alone: `coproc NAME` before a
 #      compound command, and `;;&`. dash alone: the `&` of `&>` ends a
 #      command, and the next starts at the `>` (bash and zsh read one
-#      redirection there).
-#      The bash reading says DIVERGE at each, so the reading that reads it
-#      runs.
-#   6. Everything else is the scan view, byte for byte.
+#      redirection there). The bash reading says DIVERGE at each, so the
+#      reading that reads it runs.
+#   6. A descriptor word is read as each shell reads it: zsh and dash read one
+#      digit glued to a redirection operator, bash any number, and a `{name}`
+#      in bash and zsh. A word starts where the walk starts a command too
+#      (zsh `{2>/dev/null pip i; }`), not only after a byte that ends a token.
 #
 # Each row names the readings it holds in. The forms the rules rest on were
 # run in the real shells (macOS bash 3.2, zsh 5.9 and dash; Linux bash 5.2 and
 # dash), and stmts_shell_rows below keeps what each ran.
-check_stmts() { # readings label input expected
+starts_view() { # text -> the stmts view with a `;` put in at each bare start
+  local out cuts body k LC_ALL=C
+  out=$(stmtcuts_view "$1"; printf 'X'); out="${out%X}"
+  cuts="${out%%$'\n'*}"; body="${out#*$'\n'}"
+  for k in $(tr ' ' '\n' <<< "${cuts}" | sort -rn); do
+    body="${body:0:k-1};${body:k-1}"
+  done
+  printf '%s' "${body}"
+}
+check_starts() { # readings label input expected
   local got reading
   for reading in $1; do
-    got=$(SAFEDEPS_READING="${reading}" capture stmts_view "$3")
-    [[ "${got}" == "$4" ]] || fail "stmts view (${reading}): $2: [${got}] != expected [$4]"
+    got=$(SAFEDEPS_READING="${reading}" capture starts_view "$3")
+    [[ "${got}" == "$4" ]] || fail "starts (${reading}): $2: [${got}] != expected [$4]"
   done
 }
 all="bash zsh dash"
-check_stmts "${all}" "a reserved word opens a statement" \
-  'if true; then pip i; fi' 'if;true; then;pip i; fi'
-check_stmts "${all}" "a function head opens its body" \
-  'f() { pip i; }; f' 'f();{;pip i; }; f'
-check_stmts "${all}" "a subshell function body starts after its head, or on its \`(\` when glued" \
+check_starts "${all}" "a reserved word opens a statement" \
+  'if true; then pip i; fi' 'if ;true; then ;pip i; fi'
+check_starts "${all}" "a function head opens its body" \
+  'f() { pip i; }; f' 'f() ;{ ;pip i; }; f'
+check_starts "${all}" "a subshell function body starts at its \`(\`, glued to the head or not" \
   'f() ( pip i ); f; f()(pip i); function f ( pip i ); function f () ( pip i )' \
-  'f();( pip i ); f; f();pip i); function f;( pip i ); function f ();( pip i )'
-check_stmts "bash" "a subshell after coproc NAME is its body in bash" \
-  'coproc foo ( pip i )' 'coproc;foo;( pip i )'
-check_stmts "zsh dash" "and nothing outside bash" \
-  'coproc foo ( pip i )' 'coproc;foo ( pip i )'
-check_stmts "${all}" "a function with more than one name" \
-  'function f g { pip i; }' 'function f g {;pip i; }'
-check_stmts "bash" "coproc NAME opens its body in bash" \
-  'coproc foo { pip i; }' 'coproc;foo {;pip i; }'
-check_stmts "zsh dash" "coproc NAME opens nothing outside bash" \
-  'coproc foo { pip i; }' 'coproc;foo { pip i; }'
-check_stmts "${all}" "a compound command right after function NAME is its body" \
-  'function f if pip i; then :; fi' 'function f;if;pip i; then;:; fi'
-check_stmts "${all}" "a loop right after function NAME is its body" \
-  'function f while pip i; do :; done' 'function f;while;pip i; do;:; done'
-check_stmts "${all}" "a case right after function NAME opens its arms" \
-  'function f case x in x) pip i;; esac' 'function f;case x in x);pip i;_ esac'
-check_stmts "${all}" "after a second name only a brace opens a body" \
-  'function f g if pip i; then :; fi' 'function f g if pip i; then;:; fi'
-check_stmts "bash" "coproc NAME before a compound command opens it in bash" \
-  'coproc foo if pip i; then :; fi' 'coproc;foo;if;pip i; then;:; fi'
-check_stmts "zsh dash" "coproc NAME before a compound command opens nothing outside bash" \
-  'coproc foo if pip i; then :; fi' 'coproc;foo if pip i; then;:; fi'
-check_stmts "bash" "a case after coproc NAME opens its arms in bash" \
-  'coproc foo case x in x) pip i;; esac' 'coproc;foo;case x in x);pip i;_ esac'
-check_stmts "${all}" "a case pattern close is a start, written after the close" \
-  'case x in x) { pip i; };; esac' 'case x in x);{;pip i; };_ esac'
-check_stmts "${all}" "an arm glued to its pattern close starts at the close" \
-  'case x in x)pip i;; esac' 'case x in x;pip i;_ esac'
-check_stmts "${all}" "a subshell in an arm starts on the blank after the pattern close, and is not that close read again" \
-  'case x in x) (echo hi);; esac' 'case x in x);(echo hi);_ esac'
-check_stmts "${all}" "time and its options" \
-  'time -p pip i' 'time -p;pip i'
-check_stmts "zsh" "the zsh short forms" \
-  'for i (1) pip i; repeat 1 pip i; if [[ 1 ]] pip i' 'for i (1);pip i; repeat 1;pip i; if;[[ 1 ]];pip i'
-check_stmts "bash dash" "the zsh short forms are no forms outside zsh" \
-  'for i (1) pip i; repeat 1 pip i; if [[ 1 ]] pip i' 'for i (1) pip i; repeat 1 pip i; if;[[ 1 ]] pip i'
-check_stmts "zsh" "an arithmetic context before a body in zsh" \
-  'while ((i++<1)) { pip i; }' 'while ((i++<1));{;pip i; }'
-check_stmts "bash" "an arithmetic context is a command of its own in bash" \
+  'f() ;( pip i ); f; f();(pip i); function f ;( pip i ); function f () ;( pip i )'
+check_starts "bash" "a subshell after coproc NAME is its body in bash" \
+  'coproc foo ( pip i )' 'coproc ;foo ;( pip i )'
+check_starts "zsh dash" "and nothing outside bash" \
+  'coproc foo ( pip i )' 'coproc ;foo ( pip i )'
+check_starts "${all}" "a function with more than one name" \
+  'function f g { pip i; }' 'function f g { ;pip i; }'
+check_starts "bash" "coproc NAME opens its body in bash" \
+  'coproc foo { pip i; }' 'coproc ;foo { ;pip i; }'
+check_starts "zsh dash" "coproc NAME opens nothing outside bash" \
+  'coproc foo { pip i; }' 'coproc ;foo { pip i; }'
+check_starts "${all}" "a compound command right after function NAME is its body" \
+  'function f if pip i; then :; fi' 'function f ;if ;pip i; then ;:; fi'
+check_starts "${all}" "a loop right after function NAME is its body" \
+  'function f while pip i; do :; done' 'function f ;while ;pip i; do ;:; done'
+check_starts "${all}" "a case right after function NAME opens its arms" \
+  'function f case x in x) pip i;; esac' 'function f ;case x in x) ;pip i;_ esac'
+check_starts "${all}" "after a second name only a brace opens a body" \
+  'function f g if pip i; then :; fi' 'function f g if pip i; then ;:; fi'
+check_starts "bash" "coproc NAME before a compound command opens it in bash" \
+  'coproc foo if pip i; then :; fi' 'coproc ;foo ;if ;pip i; then ;:; fi'
+check_starts "zsh dash" "coproc NAME before a compound command opens nothing outside bash" \
+  'coproc foo if pip i; then :; fi' 'coproc ;foo if pip i; then ;:; fi'
+check_starts "bash" "a case after coproc NAME opens its arms in bash" \
+  'coproc foo case x in x) pip i;; esac' 'coproc ;foo ;case x in x) ;pip i;_ esac'
+check_starts "${all}" "a case pattern close is a start, after the close" \
+  'case x in x) { pip i; };; esac' 'case x in x) ;{ ;pip i; };_ esac'
+check_starts "${all}" "an arm glued to its pattern close starts after the close" \
+  'case x in x)pip i;; esac' 'case x in x);pip i;_ esac'
+check_starts "${all}" "a subshell in an arm starts at its \`(\`, and the pattern close stays a close" \
+  'case x in x) (echo hi);; esac' 'case x in x) ;(echo hi);_ esac'
+check_starts "${all}" "time and its options" \
+  'time -p pip i' 'time -p ;pip i'
+check_starts "zsh" "the zsh short forms" \
+  'for i (1) pip i; repeat 1 pip i; if [[ 1 ]] pip i' 'for i (1) ;pip i; repeat 1 ;pip i; if ;[[ 1 ]] ;pip i'
+check_starts "bash dash" "the zsh short forms are no forms outside zsh" \
+  'for i (1) pip i; repeat 1 pip i; if [[ 1 ]] pip i' 'for i (1) pip i; repeat 1 pip i; if ;[[ 1 ]] pip i'
+check_starts "zsh" "an arithmetic context before a body in zsh" \
+  'while ((i++<1)) { pip i; }' 'while ((i++<1)) ;{ ;pip i; }'
+check_starts "bash" "an arithmetic context is a command of its own in bash" \
   'while ((i++<1)) { pip i; }' 'while ((i++<1)) { pip i; }'
-check_stmts "zsh" "a group closes wherever its brace stands in zsh, and always opens a block" \
-  '{ true } always { pip i }' '{;true };always;{;pip i }'
-check_stmts "bash dash" "always is a word outside zsh" \
-  '{ true } always { pip i }' '{;true } always { pip i }'
-check_stmts "zsh" "an arm ends at ;| in zsh" \
-  'case x in x) true;| x) pip i;; esac' 'case x in x);true;_ x);pip i;_ esac'
-check_stmts "bash" "an arm goes on past ;| in bash" \
-  'case x in x) true;| x) pip i;; esac' 'case x in x);true;| x) pip i;_ esac'
-check_stmts "${all}" "an argument that spells a reserved word opens nothing" \
+check_starts "zsh" "a group closes wherever its brace stands in zsh, and always opens a block" \
+  '{ true } always { pip i }' '{ ;true } ;always ;{ ;pip i }'
+check_starts "bash dash" "always is a word outside zsh" \
+  '{ true } always { pip i }' '{ ;true } always { pip i }'
+check_starts "zsh" "an arm ends at ;| in zsh" \
+  'case x in x) true;| x) pip i;; esac' 'case x in x) ;true;_ x) ;pip i;_ esac'
+check_starts "bash" "an arm goes on past ;| in bash" \
+  'case x in x) true;| x) pip i;; esac' 'case x in x) ;true;| x) pip i;_ esac'
+check_starts "${all}" "an argument that spells a reserved word opens nothing" \
   'echo { pip i }; echo then pip i; echo ! pip i' 'echo { pip i }; echo then pip i; echo ! pip i'
-check_stmts "${all}" "no start inside quotes" \
+check_starts "${all}" "no start inside quotes" \
   'echo "then pip i" '"'"'{ pip i'"'" "echo$(sp 23)"
-check_stmts "${all}" "no start inside a substitution, and its separators end no top-level statement" \
+check_starts "${all}" "no start inside a substitution, and its separators end no top-level statement" \
   'echo $(if x; then pip i; fi)' 'echo $(if x_ then pip i_ fi)'
-check_stmts "${all}" "no start inside a heredoc body" \
+check_starts "${all}" "no start inside a heredoc body" \
   $'cat <<E\nthen pip i\nE' $'cat    \n'"$(sp 12)"
-check_stmts "bash zsh" "an arithmetic separator ends nothing" \
-  'for ((i=0;i<1;i++)) { pip i; }' 'for ((i=0_i<1_i++)) {;pip i; }'
-check_stmts "dash" "dash reads (( as a subshell, whose separators end statements" \
+check_starts "bash zsh" "an arithmetic separator ends nothing" \
+  'for ((i=0;i<1;i++)) { pip i; }' 'for ((i=0_i<1_i++)) { ;pip i; }'
+check_starts "dash" "dash reads (( as a subshell, whose separators end statements" \
   'for ((i=0;i<1;i++)) { pip i; }' 'for ((i=0;i<1;i++)) { pip i; }'
-check_stmts "${all}" "a substitution inside arithmetic is nested, and ends nothing at the top" \
+check_starts "${all}" "a substitution inside arithmetic is nested, and ends nothing at the top" \
   'echo $(( $(true; pip i) ))' 'echo $(( $(true_ pip i) ))'
-check_stmts "${all}" "an assignment stays with its command" \
-  'if FOO=1 BAR=2 pip i; fi' 'if;FOO=1 BAR=2 pip i; fi'
-check_stmts "${all}" "a redirection stays with its command, and its target is no command" \
-  '! > then 2>&1 pip i' '!;> then 2>_1 pip i'
-check_stmts "${all}" "a redirection that comes first takes its command's start" \
-  '{ 2>/dev/null pip i; }; if >f pip i; then :; fi' '{;2>/dev/null pip i; }; if;>f pip i; then;:; fi'
-check_stmts "bash zsh" "&> is one redirection operator outside dash" \
+check_starts "${all}" "an assignment stays with its command" \
+  'if FOO=1 BAR=2 pip i; fi' 'if ;FOO=1 BAR=2 pip i; fi'
+check_starts "${all}" "a redirection stays with its command, and its target is no command" \
+  '! > then 2>&1 pip i' '! ;> then 2>_1 pip i'
+check_starts "${all}" "a redirection that comes first takes its command's start" \
+  '{ 2>/dev/null pip i; }; if >f pip i; then :; fi' '{ ;2>/dev/null pip i; }; if ;>f pip i; then ;:; fi'
+check_starts "bash zsh" "&> is one redirection operator outside dash" \
   'echo a &>/dev/null pip i; pip i &>f' 'echo a  >/dev/null pip i; pip i  >f'
-check_stmts "dash" "dash ends a command at the & of &>, and the next starts at the >" \
+check_starts "dash" "dash ends a command at the & of &>, and the next starts at the >" \
   'echo a &>/dev/null pip i; pip i &>f' 'echo a &>/dev/null pip i; pip i &>f'
-check_stmts "dash" "the command dash starts at the > reads its words as at any start" \
-  'echo a &>/dev/null time pip i' 'echo a &>/dev/null time;pip i'
-check_stmts "bash zsh" "after &> the same words are arguments" \
+check_starts "dash" "the command dash starts at the > reads its words as at any start" \
+  'echo a &>/dev/null time pip i' 'echo a &>/dev/null time ;pip i'
+check_starts "bash zsh" "after &> the same words are arguments" \
   'echo a &>/dev/null time pip i' 'echo a  >/dev/null time pip i'
-check_stmts "${all}" "after > the & of a duplication is the operator in every shell" \
+check_starts "${all}" "after > the & of a duplication is the operator in every shell" \
   'echo a >&/dev/null pip i; echo a 2>&1 pip i' 'echo a >_/dev/null pip i; echo a 2>_1 pip i'
-check_stmts "${all}" "a command glued to a function head starts at the blank the view prints" \
-  'f()\pip i' 'f();pip i'
-check_stmts "${all}" "a subshell where a command stands, with words of its statement before it, is a start" \
-  'function f { (pip i); }; f' 'function f {;(pip i); }; f'
-check_stmts "${all}" "after do, glued to it or not" \
-  'for i do (pip i); done; for i do(pip i); done' 'for i do;(pip i); done; for i do;pip i); done'
-check_stmts "${all}" "the close of a subshell ends a command, so a reserved word may follow it" \
-  'if (true) then (pip i) fi' 'if;(true);then;(pip i);fi'
-check_stmts "${all}" "the same glued: the start is written over the (" \
-  'if(true)then(pip i)fi' 'if;true)then;pip i)fi'
-check_stmts "${all}" "an empty () with a blank inside is a function head" \
-  'f( ) { pip i; }; f( )( pip i )' 'f( );{;pip i; }; f( ); pip i )'
-check_stmts "${all}" "a subshell after a separator needs no start" \
+check_starts "${all}" "a command glued to a function head starts at its escape, which the view prints blank" \
+  'f()\pip i' 'f(); pip i'
+check_starts "${all}" "a subshell where a command stands, with words of its statement before it, is a start" \
+  'function f { (pip i); }; f' 'function f { ;(pip i); }; f'
+check_starts "${all}" "after do, glued to it or not" \
+  'for i do (pip i); done; for i do(pip i); done' 'for i do ;(pip i); done; for i do;(pip i); done'
+check_starts "${all}" "the close of a subshell ends a command, so a reserved word may follow it" \
+  'if (true) then (pip i) fi' 'if ;(true) ;then ;(pip i) ;fi'
+check_starts "${all}" "the same glued: each start is put in between the two bytes" \
+  'if(true)then(pip i)fi' 'if;(true);then;(pip i);fi'
+check_starts "${all}" "an empty () with a blank inside is a function head" \
+  'f( ) { pip i; }; f( )( pip i )' 'f( ) ;{ ;pip i; }; f( );( pip i )'
+check_starts "${all}" "a subshell after a separator needs no start" \
   'a && (pip i); (pip i) | (pip i)' 'a && (pip i); (pip i) | (pip i)'
-check_stmts "${all}" "a ( among the arguments opens no subshell, and its close ends no command" \
+check_starts "${all}" "a ( among the arguments opens no subshell, and its close ends no command" \
   'echo a (b) pip i' 'echo a (b) pip i'
-check_stmts "${all}" "inside [[ ... ]] a ( groups a test and starts nothing" \
+check_starts "${all}" "inside [[ ... ]] a ( groups a test and starts nothing" \
   '[[ ( -n x ) ]] && pip i' '[[ ( -n x ) ]] && pip i'
-check_stmts "${all}" "a subshell right after another one closes is no start written over its (" \
-  '(a)(pip i); (a) (pip i)' '(a)(pip i); (a);(pip i)'
-check_stmts "${all}" "a process substitution opens a command, an argument after it does not" \
+check_starts "${all}" "a subshell glued to the close of another is a start no shell parses, delivered all the same" \
+  '(a)(pip i); (a) (pip i)' '(a);(pip i); (a) ;(pip i)'
+check_starts "${all}" "a process substitution opens a command, an argument after it does not" \
   'cat <(echo hi) pip i' 'cat <(echo hi) pip i'
-pass "stmts view: statement starts follow each shell grammar, and nothing nested opens one"
+# Starts with no byte of their own before them (the verdict's class): a
+# redirection glued to a reserved word, `!`, a head's close or zsh's glued
+# `{`. Each is a start the walk always found; only its delivery lost it.
+check_starts "${all}" "a redirection glued to a reserved word or ! starts its command" \
+  'if true; then>/dev/null pip i; fi; !>/dev/null pip i; if>f pip i; then :; fi' \
+  'if ;true; then;>/dev/null pip i; fi; !;>/dev/null pip i; if;>f pip i; then ;:; fi'
+check_starts "bash zsh" "a redirection glued to an arithmetic for head" \
+  'for ((i=0;i<1;i++)) {>/dev/null pip i; }' 'for ((i=0_i<1_i++)) {;>/dev/null pip i; }'
+check_starts "zsh" "after a short-form head's close" \
+  'for i (1)>/dev/null pip i; if ((1))2>/dev/null pip i; if (true)2>&1 pip i' \
+  'for i (1);>/dev/null pip i; if ((1));2>/dev/null pip i; if ;(true);2>_1 pip i'
+check_starts "zsh" "after a { glued to the first word, with a prefix first" \
+  '{X=1 pip i; }; {2>/dev/null pip i; }; {command pip i; }; () {2>&1 pip i; }; repeat 1 {X=1 pip i; }' \
+  '{;X=1 pip i; }; {;2>/dev/null pip i; }; {;command pip i; }; () {;2>_1 pip i; }; repeat 1 {;X=1 pip i; }'
+check_starts "bash dash" "where the { is the first byte of the command word" \
+  '{X=1 pip i; }; {2>/dev/null pip i; }; () {2>&1 pip i; }' \
+  '{X=1 pip i; }; {2>/dev/null pip i; }; () ;{2>_1 pip i; }'
+check_starts "zsh" "a subscript assignment after a glued { is a prefix" \
+  '{a[1]=x pip i; }' '{;a[1]=x pip i; }'
+check_starts "zsh" "zsh ends a command at &!, glued to the next or not" \
+  'true&!pip i; { true&!pip i; }; true &! pip i' 'true&!;pip i; { ;true&!;pip i; }; true &! ;pip i'
+check_starts "bash dash" "bash and dash read the ! glued to & as part of the next word" \
+  'true&!pip i; true &! pip i' 'true&!pip i; true &! ;pip i'
+check_starts "zsh" "zsh reads one digit as a descriptor, so repeat counts the rest" \
+  'repeat 12>&1 pip i' 'repeat 12;>&1 pip i'
+check_starts "bash dash" "repeat is a command outside zsh" \
+  'repeat 12>&1 pip i' 'repeat 12>&1 pip i'
+check_starts "zsh" "a zsh precommand modifier is followed by a start" \
+  'noglob pip i; echo noglob pip i' 'noglob ;pip i; echo noglob pip i'
+pass "starts: each start the walk finds is an event, put in between two bytes, and nothing nested opens one"
 
 # The unprefixed view drops what a command starts with before its name --
 # assignments, env, command, exec, and redirections -- at every start the
@@ -816,6 +854,8 @@ check_unprefixed "dash" "after the & of &> a command starts, and its redirection
   'echo a &>/dev/null pip i' 'echo a &pip i'
 check_unprefixed "dash" "the same with &>> and a blank before the target" \
   'echo a &>> /dev/null FOO=1 pip i' 'echo a &pip i'
+check_unprefixed "${all}" "env, command and time are programs as well, named in any case or by a path" \
+  'TIME pip i; /usr/bin/time -p pip i; ENV pip i; Command pip i; /usr/bin/env pip i' 'pip i; pip i; pip i; pip i; pip i'
 pass "unprefixed view: the prefixes a command starts with go, redirections among them, and only at a start; a redirection elsewhere is blanked"
 
 # A redirection is read where the shell reads one, and every view that drops
@@ -849,6 +889,10 @@ check_view() { # view readings label input expected
 }
 live_view() { shell_lex "$1" live "safedeps:scan-contract"; }
 substs_view() { shell_lex "$1" substs "safedeps:scan-contract"; }
+check_view noredir_view "zsh dash" "a descriptor word: zsh and dash read one digit glued to an operator as its descriptor" \
+  'echo 12>/dev/null pip i; echo 1>/dev/null' "echo 12$(sp 10) pip i; echo$(sp 12)"
+check_view noredir_view "bash" "bash reads any number" \
+  'echo 12>/dev/null pip i; echo 1>/dev/null' "echo$(sp 13) pip i; echo$(sp 12)"
 check_view noredir_view "${all}" "a process substitution target is one word" \
   '< <(true) pip i' "$(sp 10)pip i"
 check_view noredir_view "${all}" "a process substitution target with a blank and a redirection inside" \
@@ -914,11 +958,14 @@ done
 pass "redirections: a process substitution target is one word whose body is a payload, a {varname} or number glued in front is part of the operator, a heredoc's too, and the recognizers read them blanked wherever they stand"
 
 # Whether the bash reading of a text says the shells read it differently
-# (used here and for rule 5 of the stmts view below).
-stmts_diverges() { # text -> 0 when the bash stmts reading says DIVERGE
+# (used here and for rule 5 of the starts below). The events view runs the
+# lexing and the walk, and the recognize view the prefixes too, so between
+# them they say DIVERGE where any of the three differs.
+bash_diverges() { # text -> 0 when the bash reading says DIVERGE
   local f rc=1
   f=$(mktemp "${TMPDIR:-/tmp}/safedeps-diverge.XXXXXX")
-  SAFEDEPS_READING=bash SAFEDEPS_LEX_DIVERGE="${f}" stmts_view "$1" > /dev/null
+  SAFEDEPS_READING=bash SAFEDEPS_LEX_DIVERGE="${f}" events_view "$1" > /dev/null
+  SAFEDEPS_READING=bash SAFEDEPS_LEX_DIVERGE="${f}" recognize_view "$1" > /dev/null
   [[ -s "${f}" ]] && rc=0
   rm -f "${f}"
   return "${rc}"
@@ -974,22 +1021,22 @@ check_word_nested "bash zsh" "a glob group after an escaped byte" 'ls \)(' ')'
 check_word_nested "bash zsh" "a glob group after a substitution" 'ls $(x)(' ')'
 check_word_nested "bash" "a subscript in bash" 'a[' ']=x pip i'
 # What is not a word parenthesis keeps its separators at the top level.
-check_stmts "${all}" "a subshell is no word" \
+check_starts "${all}" "a subshell is no word" \
   '(b;c) | (d&e)' '(b;c) | (d&e)'
-check_stmts "dash" "dash has no glob group: the ( is an operator" \
+check_starts "dash" "dash has no glob group: the ( is an operator" \
   'ls x(b;c)' 'ls x(b;c)'
-check_stmts "zsh dash" "a blank inside a subscript ends the word outside bash" \
+check_starts "zsh dash" "a blank inside a subscript ends the word outside bash" \
   'a[b;c]=x' 'a[b;c]=x'
-check_stmts "${all}" "a # among array elements opens a comment, and the value closes after it" \
+check_starts "${all}" "a # among array elements opens a comment, and the value closes after it" \
   $'a=(x # c)\ny) pip i' "a=(x$(sp 6)y) pip i"
-check_stmts "bash zsh" "a # inside a glob group glued to a word is none" \
+check_starts "bash zsh" "a # inside a glob group glued to a word is none" \
   'ls x(a #b) # c' "ls x(a #b)$(sp 4)"
-check_stmts "bash" "a # inside a bash subscript is none" \
+check_starts "bash" "a # inside a bash subscript is none" \
   'a[1 #2]=x pip i' 'a[1 #2]=x pip i'
-check_stmts "${all}" "a case pattern close inside a substitution starts nothing" \
+check_starts "${all}" "a case pattern close inside a substitution starts nothing" \
   'x=$(case a in a) b;; esac) pip i' 'x=$(case a in a) b__ esac) pip i'
-check_stmts "${all}" "and at the top level it still does" \
-  'case a in a) pip i;; esac' 'case a in a);pip i;_ esac'
+check_starts "${all}" "and at the top level it still does" \
+  'case a in a) pip i;; esac' 'case a in a) ;pip i;_ esac'
 check_unprefixed "${all}" "an array value is a prefix, blanks and all" \
   'a=( x y ) b+=(z) pip i' 'pip i'
 check_unprefixed "${all}" "an array value with a comment and a newline inside" \
@@ -1028,13 +1075,11 @@ check_unprefixed "bash dash" "and two redirections to bash and dash, the second 
   '>f<1-2> pip i' 'i'
 check_view scan_view "zsh" "the scan view prints the range glob's < and > as characters" \
   'echo a<1-2>b <1-2 >c' 'echo a_1-2_b <1-2 >c'
-check_stmts "zsh" "a zsh precommand modifier is followed by a start" \
-  'noglob pip i; echo noglob pip i' 'noglob;pip i; echo noglob pip i'
 for form in 'a[1 + 1]=x pip i' '>/dev/null(N) pip i' 'pip >f!(x) i' 'noglob pip i' '- pip i' "ls 'x'(N)" 'pip >f<1-2> i'; do
-  stmts_diverges "${form}" || fail "word depth: the bash reading of [${form}] says no DIVERGE, and the shells do not read that word the same way"
+  bash_diverges "${form}" || fail "word depth: the bash reading of [${form}] says no DIVERGE, and the shells do not read that word the same way"
 done
 for form in 'a=(x y) pip i' 'a[1]=x pip i' 'a+=x pip i' 'x=$(case a in a) echo f;; esac) pip i' '< =(true) pip i' 'cat <(a; b)' 'ls file[0-9].txt' 'cat <1-2 >out'; do
-  stmts_diverges "${form}" && fail "word depth: the bash reading of [${form}] says DIVERGE, and every reading reads that word the same way"
+  bash_diverges "${form}" && fail "word depth: the bash reading of [${form}] says DIVERGE, and every reading reads that word the same way"
 done
 
 # The walk checks its own answers (walks_fail in the lexer): a `(` the lexing
@@ -1054,7 +1099,7 @@ walk_fails() { # text -> 0 when the bash reading of the view marks the scan fail
   return "${rc}"
 }
 for form in 'pip ((x) y) i' 'echo a ((b) c)' 'X=1 ((a) b)' 'pip(N) i' 'x(a) pip i'; do
-  for v in stmts_view unprefixed_view; do
+  for v in events_view unprefixed_view; do
     walk_fails "${v}" "${form}" || fail "walk check (${v}): the bash reading of [${form}] is not failed, and its walks have no command where that ( stands"
   done
 done
@@ -1066,7 +1111,7 @@ for form in '(pip i)' 'a && (pip i)' '! (pip i)' 'time (pip i)' '{ (pip i) }' 'i
     'cat <(a) >(b)' 'cat =(a)' 'f () { pip i; }' 'pip >f!(x) i' 'echo fix(scope): x' \
     'f( ) { pip i; }' 'f( )( pip i )' 'if(true)then(pip i)fi' 'if (true) then (pip i) fi' 'coproc(pip i)' \
     'function f { (pip i); }' 'for i do(pip i); done' 'rm !(keep) x' 'echo {(a)} b' '(a) (pip i)'; do
-  for v in stmts_view unprefixed_view; do
+  for v in events_view unprefixed_view; do
     walk_fails "${v}" "${form}" && fail "walk check (${v}): the bash reading of [${form}] is failed, and a shell reads that ( where it stands"
   done
 done
@@ -1103,16 +1148,19 @@ pass "statement split: &> ends a statement in the dash reading alone"
 for form in 'repeat 1 { pip i; }' 'for i (1) pip i' 'foreach i (1) pip i; end' 'if [[ 1 ]] pip i' \
     'while ((i++<1)) { pip i; }' '{ true; } always { pip i; }' 'coproc foo { pip i; }' \
     'case x in x) true;| x) pip i;; esac' 'case x in x) true;;& x) pip i;; esac' 'coproc foo if pip i; then :; fi' \
-    'echo a &>/dev/null pip i' 'pip i &>/dev/null' 'echo $(echo a &>f pip i)'; do
-  stmts_diverges "${form}" || fail "stmts view: the bash reading of [${form}] says no DIVERGE, and the starts there are not the same in every shell"
+    'echo a &>/dev/null pip i' 'pip i &>/dev/null' 'echo $(echo a &>f pip i)' \
+    'true&!pip i' '{2>/dev/null pip i; }' '{X=1 pip i; }' '{a[1]=x pip i; }' 'repeat 12>&1 pip i' \
+    'if ((1))2>/dev/null pip i' 'echo 12>/dev/null pip i' 'exec -- noglob pip i' 'command - pip i'; do
+  bash_diverges "${form}" || fail "starts: the bash reading of [${form}] says no DIVERGE, and the starts there are not the same in every shell"
 done
 for form in 'if true; then pip i; fi' 'f() { pip i; }; f' 'time -p pip i' 'function f g { pip i; }' \
     'case x in x) { pip i; };; esac' 'echo { pip i }; echo then pip i' 'FOO=1 pip i > out' \
     'function f if pip i; then :; fi' '{ 2>/dev/null pip i; }' \
-    'echo a 2>&1 pip i' 'echo a >&/dev/null pip i' 'echo a \&>/dev/null pip i' 'echo "a &>f" pip i'; do
-  stmts_diverges "${form}" && fail "stmts view: the bash reading of [${form}] says DIVERGE, and every shell reads its starts the same way"
+    'echo a 2>&1 pip i' 'echo a >&/dev/null pip i' 'echo a \&>/dev/null pip i' 'echo "a &>f" pip i' \
+    'if true; then>/dev/null pip i; fi' '!>/dev/null pip i' 'echo 1>/dev/null pip i' 'true & pip i'; do
+  bash_diverges "${form}" && fail "starts: the bash reading of [${form}] says DIVERGE, and every shell reads its starts the same way"
 done
-pass "stmts view: the bash reading says DIVERGE where the shells start commands differently, and only there"
+pass "starts: the bash reading says DIVERGE where the shells start commands differently, and only there"
 
 # What each shell ran, the rows rule 5 rests on: R when the shell printed RAN,
 # - when it did not (a parse error, or the form is no form to it). Columns:
@@ -1200,16 +1248,13 @@ if [[ "${SAFEDEPS_STMTS_MEASURE:-}" == 1 ]]; then
   pass "stmts shell rows: ${#stmts_shell_rows[@]} forms ran here as recorded"
 fi
 
-# Rule 6 on random input, in each reading: where the stmts view differs from
-# the scan view, the byte is a start written over a byte the scan prints blank
-# or a case close, or a nested separator written as `_` (a nested newline as a
-# blank). A start is written over a backslash or a quote only where a word is
-# glued to what is before it (`}\pip`): the view prints that byte blank, and
-# read again it is the blank before the word. A start is written over a `(`
-# only where a subshell is glued to what is before it (`f()(pip i)`,
-# `do(pip i)`), which has no blank to carry it, like an arm glued to its case
-# close. In the zsh reading a start is written over a `{` glued to the first
-# word of a command, which zsh reads as the group opener (`{pip i; }`).
+# Rule 1's other half on random input, in each reading: where the stmts view
+# differs from the scan view, the byte is a nested separator written as `_`
+# (a nested newline as a blank), or the `&` of `&>` written as a blank. The
+# view carries no start: it used to write each one over the byte before it (a
+# blank, a case close, the `(` of a glued subshell, zsh's glued `{`, the
+# escape or quote a glued word starts with), and each byte it could not write
+# over was a start lost.
 stmts_diffs=0
 for reading in bash zsh dash; do
   RANDOM="${fuzz_seed}"
@@ -1222,10 +1267,10 @@ for reading in bash zsh dash; do
     sv=$(SAFEDEPS_READING="${reading}" capture scan_view "${input}"); tv=$(SAFEDEPS_READING="${reading}" capture stmts_view "${input}")
     LC_ALL=C
     for ((k = 0; k < ${#sv}; k++)); do
-      a="${sv:k:1}" b="${tv:k:1}" r="${input:k:1}"
+      a="${sv:k:1}" b="${tv:k:1}"
       [[ "${a}" == "${b}" ]] && continue
-      if [[ "${b}" == ";" && ( "${a}" == " " || "${a}" == $'\t' || "${r}" == ")" || "${r}" == "(" && k -gt 0 && "${input:k-1:1}" != [$' \t\n;&|(<>'] || "${r}" == "{" && "${reading}" == zsh ) ]] || [[ "${b}" == "_" && "${a}" =~ [\;\&\|] ]] \
-          || [[ "${b}" == " " && "${a}" == $'\n' ]] || [[ "${b}" == " " && "${a}" == "&" && "${sv:k+1:1}" == ">" ]]; then continue; fi
+      if [[ "${b}" == "_" && "${a}" =~ [\;\&\|] ]] || [[ "${b}" == " " && "${a}" == $'\n' ]] \
+          || [[ "${b}" == " " && "${a}" == "&" && "${sv:k+1:1}" == ">" ]]; then continue; fi
       printf 'stmts (%s) differs from scan at %d of [%q]: scan [%q] stmts [%q]\n' "${reading}" "${k}" "${input}" "${a}" "${b}" >&2
       stmts_diffs=$((stmts_diffs + 1))
     done
@@ -1233,7 +1278,7 @@ for reading in bash zsh dash; do
   done
 done
 [[ ${stmts_diffs} -eq 0 ]] || fail "stmts view: ${stmts_diffs} byte(s) differ from the scan view outside the stated rules (seed ${fuzz_seed})"
-pass "stmts view: on ${fuzz_cases} random inputs in each reading it differs from the scan view only by starts and nested separators"
+pass "stmts view: on ${fuzz_cases} random inputs in each reading it differs from the scan view only by nested separators"
 
 # The random inputs above are mostly readings that do not close, and those are
 # not asked for idempotence. These are drawn from the words the start walk
@@ -1267,6 +1312,134 @@ done
 [[ ${grammar_failures} -eq 0 ]] || fail "stmts view: ${grammar_failures} of ${grammar_closed} closed readings of grammar words not idempotent (seed ${fuzz_seed})"
 [[ ${grammar_closed} -gt $((fuzz_cases * 3 / 4)) ]] || fail "stmts view: only ${grammar_closed} of $((fuzz_cases * 3)) grammar-word readings closed, too few to say anything"
 pass "stmts view: idempotent and length-preserving on ${grammar_closed} closed readings of $((fuzz_cases * 3)) random grammar-word inputs (bash, zsh, dash)"
+
+# --- the event contract -----------------------------------------------------------
+# What each reader of a start may rely on, checked on every event of a reading
+# that closes, in each reading, on the recorded shell forms, the first places
+# of the grid and random input (scripts/measure/first-place-grid.sh generates
+# the places from the simple-command grammar):
+#
+#   E1. A start or a command word is an event at top-level code: depth 1, and
+#       a byte of code, an escape or the quote a word opens with -- never a
+#       byte inside quotes, a substitution, arithmetic or a heredoc.
+#   E2. No start falls between a command's prefixes and its command word: the
+#       prefixes of each start (the cwords view) run to a command word the
+#       walk read, and no other start stands among them. Splitting
+#       `npm_config_global=true npm install x` there dropped its UNGATED
+#       record.
+#   E3. The recognizers read the command word right after a separator: in
+#       the recognize view the statement of each start, from its command word
+#       on, follows one of `;` `&` `|` `(` or a newline, blanks between, or
+#       begins the text. That is what SAFEDEPS_G_START anchors on.
+#   E4. command_statements cuts there: a statement of its output begins with
+#       the start's prefixes and command word.
+event_failures=0
+event_checked=0
+event_inputs=0
+event_flags=$(mktemp "${TMPDIR:-/tmp}/safedeps-event-flags.XXXXXX")
+event_blanks=$' \t'
+# Whether the offset <n> is in the space-separated list <list>.
+in_list() { [[ " $1 " == *" $2 "* ]]; }
+event_contract() { # input label
+  local x="$1" reading ev cw rv stm line k w pre st first ok p head off rec slist="" wlist="" f1 f2 f3 f4 f6
+  local LC_ALL=C
+  event_inputs=$((event_inputs + 1))
+  for reading in bash zsh dash; do
+    : > "${event_flags}"
+    ev=$(SAFEDEPS_READING="${reading}" SAFEDEPS_LEX_FLAGS="${event_flags}" events_view "${x}")
+    ! grep -q '^UNTERM$' "${event_flags}" || continue
+    cw=$(SAFEDEPS_READING="${reading}" shell_lex "${x}" cwords "safedeps:scan-contract")
+    rv=$(SAFEDEPS_READING="${reading}" recognize_view "${x}"; printf 'X'); rv="${rv%X}"
+    stm=$(SAFEDEPS_READING="${reading}" command_statements "${x}" | cut -d $'\035' -f2)
+    slist=""; wlist=""
+    while read -r f1 f2 f3 f4 _ f6; do
+      [[ -n "${f1}" ]] || continue
+      event_checked=$((event_checked + 1))
+      if [[ "${f1}" == S ]]; then slist+=" ${f2}"; else wlist+=" ${f2}"; fi
+      ok=1
+      [[ "${f4}" == 1 ]] || ok=0
+      case "${f3}" in
+        c|x|l) ;;
+        q) [[ "${x:f2-1:1}" == [\'\"\$] && ( "${f1}" == W || "${f6}" != q ) ]] || ok=0 ;;
+        *) ok=0 ;;
+      esac
+      [[ ${ok} == 1 ]] || { printf 'E1 (%s): event [%s %s %s %s] of [%q] (%s) is not at top-level code\n' "${reading}" "${f1}" "${f2}" "${f3}" "${f4}" "${x}" "$2" >&2; event_failures=$((event_failures + 1)); }
+    done <<< "${ev}"
+    while IFS=$'\037' read -r k w pre st; do
+      [[ -n "${k}" ]] || continue
+      # A subshell that starts a command has no command word of its own: the
+      # command inside it is the next start.
+      if [[ "${x:k-1:1}" != "(" ]]; then
+        ok=0
+        for ((p = k; p <= w; p++)); do in_list "${wlist}" "${p}" && { ok=1; break; }; done
+        for ((p = k + 1; p < w; p++)); do ! in_list "${slist}" "${p}" || ok=0; done
+        [[ ${ok} == 1 ]] || { printf 'E2 (%s): the prefixes of the start at %s of [%q] (%s) reach no command word alone\n' "${reading}" "${k}" "${x}" "$2" >&2; event_failures=$((event_failures + 1)); }
+      fi
+      # After `;;`, `;&`, `;;&` or `;|` the walk reads the next word where an
+      # arm or `esac` stands: no command, and the stmts view prints the
+      # terminator's second byte as `_`. E3 and E4 are about commands.
+      head="${x:0:k-1}"; head="${head%"${head##*[!${event_blanks}]}"}"
+      [[ "${head}" != *";;" && "${head}" != *";&" && "${head}" != *";|" ]] || continue
+      # Each place the statement stands in the recognize view, until one
+      # follows a separator or begins the text.
+      ok=0; off=0
+      while [[ "${rv:off}" == *"${st}"* ]]; do
+        head="${rv:off}"; head="${head%%"${st}"*}"
+        p=$((off + ${#head}))
+        head="${rv:0:p}"; head="${head%"${head##*[!${event_blanks}]}"}"
+        if [[ -z "${head}" || "${head: -1}" == [\;\&\|\(] || "${head: -1}" == $'\n' ]]; then ok=1; break; fi
+        off=$((p + 1))
+      done
+      [[ ${ok} == 1 ]] || { printf 'E3 (%s): the statement [%q] of the start at %s of [%q] (%s) follows no separator in the recognize view [%q]\n' "${reading}" "${st}" "${k}" "${x}" "$2" "${rv}" >&2; event_failures=$((event_failures + 1)); }
+      first="${st%%[${event_blanks}]*}"
+      ok=0
+      while IFS= read -r rec; do
+        # A statement may begin with a `(` the split does not cut at: the
+        # start after it is the command in that subshell.
+        rec="${rec#"${rec%%[!${event_blanks}]*}"}"
+        [[ "${rec}" == "${pre}${first}"* ]] && { ok=1; break; }
+        rec="${rec#"${rec%%[!(${event_blanks}]*}"}"
+        [[ "${rec}" == "${pre}${first}"* ]] && { ok=1; break; }
+      done <<< "${stm}"
+      [[ ${ok} == 1 ]] || { printf 'E4 (%s): no statement of [%q] (%s) begins with [%q]\n' "${reading}" "${x}" "$2" "${pre}${first}" >&2; event_failures=$((event_failures + 1)); }
+    done <<< "${cw}"
+  done
+}
+for ((i = 0; i < form_count; i++)); do
+  form=$(jq -j ".[${i}].text" "${forms_file}" | sed -e 's/@@TAIL@@/pip install evil==6.6.6/' -e 's/@@HEAD@@/pip/g' -e 's/@@TAIL_SPLIT@@/pi\\\
+p install evil==6.6.6/'; printf 'X')
+  event_contract "${form%X}" "$(jq -r ".[${i}].id" "${forms_file}")"
+done
+# Every twentieth first-place form of the grid's generator (pip), so each first
+# place stands in a spread of productions.
+first_place_forms=$(bash "${ROOT_DIR}/scripts/measure/first-place-grid.sh" generate pip | awk 'NR % 20 == 1')
+first_place_count=0
+while IFS= read -r line; do
+  form=$(jq -j .text <<< "${line}" | sed 's/@@HEAD@@/pip/g'; printf 'X')
+  event_contract "${form%X}" "$(jq -r .id <<< "${line}")"
+  first_place_count=$((first_place_count + 1))
+done <<< "${first_place_forms}"
+RANDOM="${fuzz_seed}"
+event_cases=$((fuzz_cases / 4))
+for ((c = 0; c < event_cases; c++)); do
+  len=$((RANDOM % 40))
+  input=""
+  for ((k = 0; k < len; k++)); do
+    input+="${heredoc_alphabet[RANDOM % ${#heredoc_alphabet[@]}]}"
+  done
+  event_contract "${input}" "random ${c}"
+  len=$((RANDOM % 12 + 1))
+  input=""
+  for ((k = 0; k < len; k++)); do
+    input+="${grammar_words[RANDOM % ${#grammar_words[@]}]}"
+    (( RANDOM % 4 )) && input+=" "
+  done
+  event_contract "${input}" "grammar ${c}"
+done
+rm -f "${event_flags}"
+[[ ${event_failures} -eq 0 ]] || fail "event contract: ${event_failures} violation(s) (seed ${fuzz_seed})"
+[[ ${event_checked} -gt 1000 ]] || fail "event contract: only ${event_checked} events checked, too few to say anything"
+pass "event contract: ${event_checked} events of ${event_inputs} inputs (${form_count} shell forms, ${first_place_count} first-place forms, $((event_cases * 2)) random), in bash, zsh and dash: each at top-level code, none between a command's prefixes and its word, each command word after a separator to the recognizers and at a cut of command_statements"
 
 # --- where a word ends (SAFEDEPS_G_END) ------------------------------------------
 # The recognizers end a manager and a verb with SAFEDEPS_G_END, read on the
@@ -1466,7 +1639,7 @@ pass "the lexer memo returns a view only for the exact text, and only from the g
 real_awk=$(command -v awk)
 fail_tmp=$(mktemp -d "${TMPDIR:-/tmp}/safedeps-scanfail.XXXXXX")
 trap 'rm -rf "${fail_tmp}"' EXIT
-mkdir -p "${fail_tmp}/scanner-only" "${fail_tmp}/all-awk" "${fail_tmp}/scanner-later" "${fail_tmp}/blanking-only" "${fail_tmp}/spans-only" "${fail_tmp}/project"
+mkdir -p "${fail_tmp}/scanner-only" "${fail_tmp}/all-awk" "${fail_tmp}/scanner-later" "${fail_tmp}/blanking-only" "${fail_tmp}/project"
 printf '{"dependencies":{}}\n' > "${fail_tmp}/project/package.json"
 cat > "${fail_tmp}/scanner-only/awk" <<SHIM
 #!/usr/bin/env bash
@@ -1503,21 +1676,7 @@ case "\$*" in
 esac
 exec '${real_awk}' "\$@"
 SHIM
-# The awk that turns the install matches into byte spans for that blanking
-# pass (install_match_spans). It ran under no marker and its failure was
-# swallowed with grep's "no match", so the visible install was not set aside
-# and was read as install text piped into a shell (caught in review).
-cat > "${fail_tmp}/spans-only/awk" <<SHIM
-#!/usr/bin/env bash
-case "\$*" in
-  *"safedeps:install_match_spans"*)
-    printf 'x' >> '${fail_tmp}/spans-only/count'
-    exit 2
-    ;;
-esac
-exec '${real_awk}' "\$@"
-SHIM
-chmod +x "${fail_tmp}/scanner-only/awk" "${fail_tmp}/all-awk/awk" "${fail_tmp}/scanner-later/awk" "${fail_tmp}/blanking-only/awk" "${fail_tmp}/spans-only/awk"
+chmod +x "${fail_tmp}/scanner-only/awk" "${fail_tmp}/all-awk/awk" "${fail_tmp}/scanner-later/awk" "${fail_tmp}/blanking-only/awk"
 
 # Runs the guard through the entry shim, the way the engines do. An optional
 # third argument, `<ecosystem> <name> <version>`, is approved first.
@@ -1623,17 +1782,19 @@ done
 pass "a failed grep or sed on the judgment path denies install-looking commands as UNDECIDED"
 
 # Nothing is piped here but the word `ok`, so a finding about piped install text
-# could only come from the failed span reading.
+# could only come from the failed blanking. It used to have an awk of its own
+# that turned pattern matches into byte spans (install_match_spans); the
+# lexer's cwords view gives the spans now, and this holds the one awk left.
 spans_beside="pip install requests==2.0.0 && echo ok | sh"
 scanfail_guard "" "${spans_beside}" "pypi requests 2.0.0"
 [[ "${SCANFAIL_DECISION}" == "pass" ]] || fail "control: an approved install beside a pipe that carries no install passes (got: ${SCANFAIL_DECISION})"
-rm -f "${fail_tmp}/spans-only/count"
-scanfail_guard "${fail_tmp}/spans-only" "${spans_beside}" "pypi requests 2.0.0"
-[[ -s "${fail_tmp}/spans-only/count" ]] || fail "the span shim was reached (otherwise this case tests nothing)"
-[[ "${SCANFAIL_DECISION}" == "deny" ]] || fail "a failed span awk is not a pass for a command that names a package manager (got: ${SCANFAIL_DECISION})"
-grep -q 'UNDECIDED' <<< "${SCANFAIL_REASON}" || fail "a failed span awk is reported as undecided, not as a piped-install finding"
-grep -q 'scanner failed' <<< "${SCANFAIL_LOG}" || fail "a failed span awk is recorded in advisory.log"
-pass "a failed span awk beside a visible install answers UNDECIDED, not a finding"
+rm -f "${fail_tmp}/blanking-only/count"
+scanfail_guard "${fail_tmp}/blanking-only" "${spans_beside}" "pypi requests 2.0.0"
+[[ -s "${fail_tmp}/blanking-only/count" ]] || fail "the blanking shim was reached (otherwise this case tests nothing)"
+[[ "${SCANFAIL_DECISION}" == "deny" ]] || fail "a failed blanking awk is not a pass for a command that names a package manager (got: ${SCANFAIL_DECISION})"
+grep -q 'UNDECIDED' <<< "${SCANFAIL_REASON}" || fail "a failed blanking awk is reported as undecided, not as a piped-install finding"
+grep -q 'scanner failed' <<< "${SCANFAIL_LOG}" || fail "a failed blanking awk is recorded in advisory.log"
+pass "a failed blanking awk beside a pipe that carries no install answers UNDECIDED, not a finding"
 
 scanfail_guard "${fail_tmp}/all-awk" "pip install requests==2.0.0"
 [[ "${SCANFAIL_DECISION}" == "deny" ]] || fail "with awk failing everywhere an install is still denied (got: ${SCANFAIL_DECISION})"
