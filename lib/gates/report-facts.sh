@@ -177,6 +177,22 @@ fact_inert() {
   esac
 }
 
+# The one line said when the pre-guard's record says it rewrote this command
+# and an install in it holds a word the shell decides at run time
+# (ignore_scripts_unread): nobody read where npm keeps the flag, and the words
+# around it can undo it. It is a warning added to the inert line, never a
+# claim that scripts did not run: no line says that. The record states the
+# warning or it does not; a record that lacks the field loses the warning and
+# makes no other line true or false. Where npm keeps the flag is not in the
+# command text at all (a function or alias from the agent's shell snapshot,
+# .zshenv or BASH_ENV can change the words npm receives), so the line is about
+# what safedeps could not read, and its absence says nothing either way.
+INERT_UNREAD_LINE="safedeps could not read where npm keeps the --ignore-scripts in the command safedeps wrote, so the install's own scripts may have run"
+fact_inert_unread() {
+  [[ "$(jq -r '.record == 2 and .ignore_scripts_injected == true and .ignore_scripts_unread == true' "$1" 2>/dev/null)" == true ]] \
+    && printf '%s' "${INERT_UNREAD_LINE}"
+}
+
 # What is said instead when fact_inert says no line: nothing in the message,
 # and one line in advisory.log with which of the two it was, as the backstop
 # says nothing for want of a record.
@@ -188,6 +204,16 @@ report_inert_unsaid() {
   fi
 }
 
+# report_inert_unread <meta file> <inert line>: says INERT_UNREAD_LINE after an
+# "added" or "asked" line whose record states the warning. Returns 1 when it
+# says nothing.
+report_inert_unread() {
+  local unread
+  [[ "$2" != 'safedeps did not add --ignore-scripts to this install' ]] || return 1
+  unread=$(fact_inert_unread "$1") || return 1
+  report_say "${unread}"
+}
+
 # report_inert <meta file> <hook input>: says the line and keeps it in
 # REPORT_INERT for the advisory.log entry of the same rollback, which repeats
 # it rather than reading the record again.
@@ -197,6 +223,7 @@ report_inert() {
   REPORT_INERT=$(fact_inert "$1" "$2") || rc=$?
   if [[ ${rc} -eq 0 ]]; then
     report_say "${REPORT_INERT}"
+    ! report_inert_unread "$1" "${REPORT_INERT}" || REPORT_INERT+="; ${INERT_UNREAD_LINE}"
   else
     REPORT_INERT=""
     report_inert_unsaid "$1" "${rc}"
@@ -215,8 +242,10 @@ report_rebuild() {
     report_say "safedeps $3"
   elif [[ "${inert}" == 'safedeps added --ignore-scripts to this install' ]]; then
     report_say "${inert} and $3"
+    report_inert_unread "$1" "${inert}" || true
   else
     report_say "${inert}"
+    report_inert_unread "$1" "${inert}" || true
     report_say "safedeps $3"
   fi
 }

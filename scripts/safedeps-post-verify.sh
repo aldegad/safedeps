@@ -146,7 +146,7 @@ compute_dir_hash() {
 # dir hash + a hash of the command with the inert-install rewrite normalized out.
 compute_pending_key() {
   local dir_hash="$1" command="$2" norm cmd_hash
-  norm=$(printf '%s' "${command}" | sed -E 's/[[:space:]]+--ignore-scripts([[:space:]]|$)/ /g; s/[[:space:]]+/ /g; s/^ //; s/ $//')
+  norm=$(printf '%s' "${command}" | sed -E -e ':a' -e 's/[[:space:]]+--ignore-scripts([^=[:alnum:]_-]|$)/\1/' -e 'ta' -e 's/[[:space:]]+/ /g; s/^ //; s/ $//')
   if command -v md5sum >/dev/null 2>&1; then
     cmd_hash=$(printf '%s' "${norm}" | md5sum | cut -d' ' -f1)
   elif command -v md5 >/dev/null 2>&1; then
@@ -1183,6 +1183,19 @@ describe_rebuild_blockers() {
   printf '%s' "${clauses}"
 }
 
+# What a warning adds about the install's own scripts: nothing, or the
+# pre-guard's unread warning (fact_inert_unread, the same line the rollback and
+# rebuild lines say). A warning says what safedeps did, never that no script
+# ran: where npm keeps the flag is decided by shell state the command text does
+# not hold (a function or alias from the agent's shell snapshot, .zshenv,
+# BASH_ENV), so that is not safedeps' to claim. A record that lacks the field
+# loses the warning and claims nothing more.
+inert_unread_note() {
+  local unread
+  unread=$(fact_inert_unread "${META_FILE}") || return 0
+  printf '. %s' "${unread}"
+}
+
 # The warning for the `fetched` packages npm_rebuild_unrecorded found: which
 # registry npm fetched them from, or why npm could not say, and that a person
 # decides whether to trust it before anyone rebuilds.
@@ -1199,7 +1212,7 @@ describe_fetched_elsewhere() {
     where="safedeps could not tell which registry this install fetched ${names} from (${unknown:-npm did not say}), so it cannot tell they came from the public npm registry"
     trust="where they came from"
   fi
-  printf '%s' "install scripts were not run in ${PROJECT_DIR} because ${where}. The install is kept"
+  printf '%s' "safedeps did not run npm rebuild in ${PROJECT_DIR} because ${where}$(inert_unread_note). The install is kept"
   [[ -n "${registries}" ]] || ! npm_fetch_sourced \
     || printf '. %s' "safedeps did not run them this time because the command runs code safedeps does not read or run (a file it sources, an eval, or npm under a PATH or NODE_OPTIONS of its own), and that code can change npm's environment where safedeps cannot see it. It has not recorded these bytes as withheld: whoever controls that code already runs code in this shell, so a record would protect nothing against them. The next install npm says fetches from the public npm registry rebuilds them as usual"
   printf '. %s' "If you trust ${trust}, confirm with the user before running \`npm rebuild ${names}\` yourself; do not rebuild without asking"
@@ -1227,7 +1240,7 @@ describe_withheld() {
     where="from a registry safedeps could not name (${unknown:-the record does not say})"
     trust="where they came from"
   fi
-  printf '%s' "install scripts were not run in ${PROJECT_DIR} because the bytes of ${names} here are the ones an install in ${projects} first fetched ${where}. They are kept. $(npm_withheld_scope). If you trust ${trust}, confirm with the user before running \`npm rebuild ${names}\` yourself; do not rebuild without asking"
+  printf '%s' "safedeps did not run npm rebuild in ${PROJECT_DIR} because the bytes of ${names} here are the ones an install in ${projects} first fetched ${where}$(inert_unread_note). They are kept. $(npm_withheld_scope). If you trust ${trust}, confirm with the user before running \`npm rebuild ${names}\` yourself; do not rebuild without asking"
 }
 
 # Runs `npm rebuild` in PROJECT_DIR when npm_rebuild_unrecorded finds nothing in
@@ -2203,7 +2216,7 @@ npm_withheld_judge() {
   if npm_fetch_sourced; then
     facts=$(jq -c '[.[] | select((type == "object" and .cause == "sourced") | not)]' <<< "${facts}" 2>/dev/null) \
       || facts="${NPM_FETCH_FACTS}"
-    log_advisory "post-verify: not recording the bytes this install brought into ${PROJECT_DIR} as withheld for want of npm's answer: the command runs code safedeps does not read or run (source, . or eval before the install, or npm under a PATH or NODE_OPTIONS of its own), and whoever controls that code already runs code in this shell. Their install scripts were not run this time."
+    log_advisory "post-verify: not recording the bytes this install brought into ${PROJECT_DIR} as withheld for want of npm's answer: the command runs code safedeps does not read or run (source, . or eval before the install, or npm under a PATH or NODE_OPTIONS of its own), and whoever controls that code already runs code in this shell. safedeps did not run npm rebuild for them this time$(inert_unread_note)."
   fi
   inert=$(jq -r '.ignore_scripts_injected == true' "${META_FILE}" 2>/dev/null || printf 'false')
   # shellcheck disable=SC2016 # a jq program: jq expands its $names
@@ -2294,7 +2307,7 @@ npm_tree_record_observed() {
 
 # Function: check the sources this install brought in, from either npm record
 check_npm_new_sources() {
-  local nonstandard insecure
+  local nonstandard insecure inert_said
   [[ ${#NPM_NEW_SOURCES[@]} -gt 0 ]] || return 0
 
   # Check for resolved URLs pointing to non-standard registries. Each entry is
@@ -2315,11 +2328,11 @@ check_npm_new_sources() {
   # proxy are configured exactly so, and safedeps has no path yet to approve
   # one, so a rollback would undo every install those users make. The bytes
   # stay; their install scripts are what is withheld. On Claude Code the
-  # rebuild check does that and says which registry (npm_rebuild_vouched). On
-  # Codex the install is not inert and its own scripts ran before this hook,
-  # so the record says that instead. Where npm could not be asked, the
-  # rebuild check withholds the scripts as well, and advisory.log already says
-  # why.
+  # rebuild check does that and says which registry (npm_rebuild_vouched).
+  # Where safedeps did not add --ignore-scripts to the command this hook
+  # received (on Codex it cannot), the warning says so instead. Where npm
+  # could not be asked, the rebuild check withholds the scripts as well, and
+  # advisory.log already says why.
   if [[ -n "${fetched}" ]]; then
     npm_fetch_facts_load
     if ! fetched=$(jq -nrR --arg public "${SAFEDEPS_NPM_PUBLIC_REGISTRY_RE}" --argjson facts "${NPM_FETCH_FACTS}" \
@@ -2332,7 +2345,8 @@ check_npm_new_sources() {
     fi
     if [[ -n "${fetched}" ]]; then
       log_advisory "post-verify: kept in ${PROJECT_DIR}, fetched from a registry that is not the public npm registry ($(name_sources "${fetched}")); not rolled back, and safedeps runs none of their install scripts."
-      if [[ "$(fact_inert "${META_FILE}" "${INPUT}" 2>/dev/null)" != 'safedeps added --ignore-scripts to this install' ]]; then
+      inert_said=$(fact_inert "${META_FILE}" "${INPUT}" 2>/dev/null) || inert_said=""
+      if [[ "${inert_said}" != 'safedeps added --ignore-scripts to this install' ]]; then
         # Left out only where the rollback line would say "added": the
         # record says safedeps wrote a command and this hook received exactly
         # it. That the record says safedeps rewrote a command is not enough:
@@ -2344,8 +2358,15 @@ check_npm_new_sources() {
         # Said only if the install is kept: a check after this one can still
         # roll it back, and "The install is kept" in a rollback message was
         # false (the report oracle allows this sentence in the kept message
-        # only).
-        CONFIRM_ONLY_WARNINGS+=("this install fetched packages from a registry that is not the public npm registry ($(name_sources "${fetched}")). safedeps did not make the install inert (on Codex it cannot), so unless the command said --ignore-scripts, their install scripts already ran during the install. The install is kept; confirm with the user that they trust that registry${NPM_WITHHELD_RECORDED[0]:+. $(npm_withheld_scope)}")
+        # only). It says what safedeps did, the inert line's own words, and
+        # never what npm did: "unless the command said --ignore-scripts, their
+        # install scripts already ran" was false under a function that turns
+        # the flag off and under an .npmrc that turns it on.
+        case "${inert_said}" in
+          'safedeps did not add --ignore-scripts to this install') inert_said+=" (on Codex it cannot)" ;;
+          '') inert_said="safedeps has no record it can read of adding --ignore-scripts to this install" ;;
+        esac
+        CONFIRM_ONLY_WARNINGS+=("this install fetched packages from a registry that is not the public npm registry ($(name_sources "${fetched}")). ${inert_said}, so their install scripts may already have run. The install is kept; confirm with the user that they trust that registry${NPM_WITHHELD_RECORDED[0]:+. $(npm_withheld_scope)}")
       fi
     fi
   fi

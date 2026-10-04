@@ -116,7 +116,6 @@ log-rollback log-backstop log-confirm log-refused log-journal log-inert-unread l
 # reorg decision and may precede a rollback.
 ORACLE_PROSE=(
   "prose-rebuild-not-run|confirm|0|npm rebuild was not run: "
-  "prose-scripts-not-run|confirm|0|install scripts were not run in "
   "prose-baseline-not-moved|confirm|0|safedeps verified this install but could not record the result as the new rollback baseline ("
   "prose-bytes-unread|rollback confirm|0|safedeps could not read which bytes this install brought into "
   "prose-fetch-unknown|rollback confirm|0|safedeps could not tell where npm fetched the bytes this install brought into "
@@ -1118,6 +1117,16 @@ oracle_line() {
     oracle_inert_line inert-asked asked
   elif [[ "${line}" == 'safedeps did not add --ignore-scripts to this install' ]]; then
     oracle_inert_line inert-none none
+  elif [[ "${line}" == "safedeps could not read where npm keeps the --ignore-scripts in the command safedeps wrote, so the install's own scripts may have run" ]]; then
+    # Said only right after an "added" or "asked" line, from a record that
+    # states the warning.
+    oracle_count inert-unread
+    case "${O_PREV}" in
+      'safedeps added --ignore-scripts to this install'*|'safedeps asked for --ignore-scripts on this install; the command this hook received is not the one safedeps wrote') ;;
+      *) oracle_red "the unread warning follows no line that says safedeps added or asked for --ignore-scripts" ;;
+    esac
+    [[ "$(python3 "${ORACLE_READ}" unread "${O_META:-${O_CALL}/no-record}" 2>/dev/null)" == 1 ]] \
+      || oracle_red "the unread warning, and the pre-guard's record does not state ignore_scripts_unread true: ${O_META:-no record}"
   elif [[ "${line}" =~ ${re_file_absent} ]]; then
     oracle_count file-line-absent; O_SAW_DETAILS=1
     [[ "${BASH_REMATCH[1]}" == "Details log" && "${O_BLOCK}" != confirm ]] || oracle_red "this file line does not belong in this message"

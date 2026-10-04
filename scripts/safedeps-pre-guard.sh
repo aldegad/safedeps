@@ -256,10 +256,18 @@ compute_dir_hash() {
 # the inert-install rewrite normalized out, so PreToolUse (original command) and
 # PostToolUse (possibly `--ignore-scripts`-appended) of the SAME install resolve to
 # the same key. This keeps concurrent installs in one project on separate pending
-# files instead of clobbering a single global one.
+# files instead of clobbering a single global one. Every ` --ignore-scripts`
+# that is a whole word goes, whatever byte follows it. The flag is placed after
+# a word, so the byte after it never continues it. A list of the bytes allowed
+# to follow it missed `>` and `<` (`x>log` became `x --ignore-scripts>log`),
+# the keys differed, and the PostToolUse hook found no pending state: no
+# rebuild, and no rollback of an unapproved lockfile. The
+# strip loops, because the flag can follow one the command already carried
+# (`--cache --ignore-scripts` then ours) and a /g pass took the blank between
+# them with the first.
 compute_pending_key() {
   local dir_hash="$1" command="$2" norm cmd_hash
-  norm=$(printf '%s' "${command}" | sed -E 's/[[:space:]]+--ignore-scripts([[:space:]]|$)/ /g; s/[[:space:]]+/ /g; s/^ //; s/ $//')
+  norm=$(printf '%s' "${command}" | sed -E -e ':a' -e 's/[[:space:]]+--ignore-scripts([^=[:alnum:]_-]|$)/\1/' -e 'ta' -e 's/[[:space:]]+/ /g; s/^ //; s/ $//')
   if command -v md5sum >/dev/null 2>&1; then
     cmd_hash=$(printf '%s' "${norm}" | md5sum | cut -d' ' -f1)
   elif command -v md5 >/dev/null 2>&1; then
@@ -1672,51 +1680,11 @@ command_is_injectable_npm_install() {
   return 1
 }
 
-command_has_ignore_scripts_flag() {
-  local command="$1"
-  local scan_command
-
-  while IFS= read -r scan_command; do
-    scan_command=$(command_scan_text "${scan_command}")
-    echo "${scan_command}" | judge_grep -qEi -- '(^|[[:space:]])--ignore-scripts([=[:space:]]|$)' && return 0
-  done < <(command_candidate_texts "${command}")
-  return 1
-}
-
-# True when appending `--ignore-scripts` to the end of the command would not put
-# it on the npm install: the command chains more than one statement at the shell
-# level (a `;`, `&&`, `||`, or `|` OUTSIDE quotes), runs over more than one line,
-# or holds a `#` outside quotes. Quoted text is blanked by command_scan_text first
-# so `echo "a && b"` is NOT a reason. Appending to a compound command lands the
-# flag on the trailing statement (finding #7); appending after a comment lands it
-# inside the comment, where the shell never passes it to npm and the lifecycle
-# scripts run while the meta says they were suppressed (`npm ci # rebuild`,
-# caught in the linearize design judgment). Appending after a heredoc lands it
-# after the terminator. A `#` inside a word is not a comment, but the in-place
-# rewrite is correct there too, so no attempt is made to tell them apart.
-command_needs_inplace_inert() {
-  local scanned code
-  scanned=$(command_scan_text "$1")
-  [[ "${scanned}" == *$'\n'* ]] && return 0
-  # A group, a substitution or an expansion: the flag appended to the end lands
-  # outside it, or becomes an argument of what it expands to.
-  printf '%s' "${scanned}" | judge_grep -qE '[;&|()`$]' && return 0
-  # An install that is not the command's own code -- a script handed to
-  # `sh -c` or `eval` -- is not where an appended flag lands: it would become
-  # that script's $0.
-  printf '%s' "${scanned}" \
-    | judge_grep -qE "npm${SAFEDEPS_G_OPTS}[[:space:]]+(${SAFEDEPS_G_NPM_VERBS}|${SAFEDEPS_G_NPM_LINK_VERBS})([[:space:]]|\$)" || return 0
-  # A comment or a heredoc: the code view blanks both, so it differs from the
-  # command wherever one is. The scan view blanks them too, which is why this
-  # cannot be read off the scan view the way `;&|` are.
-  code=$(strip_heredoc_bodies "$1")
-  [[ "${code}" != "$1" ]]
-}
-
-# Offsets just past each npm install verb in <text>, one per line, read on the
-# live view, so a verb in a comment, a quoted string or a heredoc body is not
-# one, and a verb in a substitution inside quotes is. The live view keeps every
-# byte in place, so an offset there is the offset in <text>.
+# Each npm install verb in <text>, one per line, as `<start> <end>`: the offset
+# of its `npm` and the offset just past the verb, read on the live view, so a
+# verb in a comment, a quoted string or a heredoc body is not one, and a verb
+# in a substitution inside quotes is. The live view keeps every byte in place,
+# so an offset there is the offset in <text>.
 inert_verb_ends() {
   local live matches
   live=$(shell_lex "$1" live "safedeps:inert_offsets") || return 1
@@ -1728,10 +1696,312 @@ inert_verb_ends() {
   [[ -n "${matches}" ]] || return 0
   if ! printf '%s\n' "${matches}" | LC_ALL=C awk '
     # safedeps:inert_offsets (scripts/measure/scan-failure-census.sh keys on this line)
-    { c = index($0, ":"); m = substr($0, c + 1); e = substr($0, 1, c - 1) + length(m); if (m ~ /[[:space:]]$/) e--; print e }'; then
+    { c = index($0, ":"); m = substr($0, c + 1); s = substr($0, 1, c - 1); e = s + length(m); if (m ~ /[[:space:]]$/) e--; print s, e }'; then
     [[ -z "${SAFEDEPS_SCAN_MARK:-}" ]] || printf 'failed\n' >> "${SAFEDEPS_SCAN_MARK}"
     return 1
   fi
+}
+
+# Bytes that no shell expansion acts on, in bash, zsh or dash under their
+# default options. A word is one the shell leaves as written only when every
+# byte of it outside quotes is one of these and it does not start with `~` or
+# `=` (shell_expands).
+SAFEDEPS_SHELL_INERT_BYTES='abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._/@:+,=%-'
+
+# Whether the shell can change the words of a statement when it runs it. The
+# answer is an allow-list, not a list of what expands: a word is left as
+# written only when every byte of it outside quotes is in
+# SAFEDEPS_SHELL_INERT_BYTES and it does not start with `~` or `=`; any other
+# byte, wherever it stands, makes the word one the shell decides at run time.
+# Two deny-lists stood here and each missed a kind of expansion one at a time:
+# `$`, backquotes and globs without the tilde (`HOME=--cache; npm install x ~`
+# handed npm `--cache` before the trailing flag, and the install ran its
+# scripts with nothing recorded), then a list of the expansions that still
+# missed zsh's named directories (`~c` after `hash -d`), its alternation glob
+# `(--cache|zz)` and bash's extglob `@(--cache)` once a command turns it on.
+#
+# The set is what is left after the expansions bash's manual lists, in its
+# order, with what zsh and dash add, each step naming the bytes it needs:
+#
+#   brace          `{` (bash, zsh: `{a,b}`, `{1..3}`)
+#   tilde          `~` (a word's start: `~`, `~user`, `~+`, `~-`, zsh's `~1`
+#                  and named directories `~name`; after `=` or `:` in a word
+#                  shaped like an assignment, `a=x:~`, measured in bash)
+#   parameter, command, arithmetic
+#                  `$` and a backquote
+#   process substitution
+#                  `<(`, `>(`, zsh's `=(`
+#   word splitting splits only what the steps above produced
+#   pathname       `*`, `?`, `[`; bash's extglob `?(`, `*(`, `+(`, `@(`, `!(`;
+#                  zsh's alternation `(a|b)`, qualifiers `x(.)`, numeric ranges
+#                  `<1-3>`, and with extendedglob `^`, `#` and `~` in a word
+#   zsh's `=cmd`   `=` at a word's start
+#   history        `!` and `^` (only in an interactive shell)
+#
+# None of those bytes is in the set, and `=` only past a word's start, so a
+# kind of expansion the table forgot still makes its word dynamic. A byte the
+# set leaves out that expands nothing (`~` inside a version range like
+# `foo@~1.2.3`, `^` in `foo@^1.2.3`, a `}` the shell hands npm as a word) costs
+# a record, never a pass.
+#
+# Each byte is read in the quoting the shell reads it in. <live> is the
+# statement with redirections, comments and quoted text blanked (the lexer's
+# noredir view, then its live view), so a quoted byte is never judged by the
+# set; a blank stands where a quote was, which only splits a word and can only
+# add a word start. <words> is its words after quote removal (the pieces view),
+# for `$` and backquotes, which act inside double quotes too; a `$` in single
+# quotes counts there as well, which costs a record. A view that marks the
+# quoted bytes of each word can replace both arguments with no change to the
+# rule.
+#
+# An npm install still gets the flag right after its verb as well
+# (inert_flag_offsets), so a word read as written that the shell changes
+# anyway leaves the install where the flag after the verb alone left it.
+shell_expands() {
+  local live="$1" words="$2" w
+  local -a live_words=()
+  [[ "${words}" != *[\$\`]* ]] || return 0
+  IFS=$' \t\n' read -r -d '' -a live_words <<< "${live}" || true
+  for w in "${live_words[@]+"${live_words[@]}"}"; do
+    [[ "${w}" != [~=]* && "${w}" != *[!"${SAFEDEPS_SHELL_INERT_BYTES}"]* ]] || return 0
+  done
+  return 1
+}
+
+# How npm reads the npm statement <text> (from its `npm` to where it ends),
+# read the way npm reads its arguments (safedeps_npm_read_args, both npm
+# versions where they differ). Sets INERT_READ_KIND to `read`, or to `dynamic`
+# when the shell can change a word in it at run time (shell_expands: the word
+# could be any option, or a `--`) or the reading depends on something no table
+# holds;
+# INERT_READ_ENDS to true when a word in it is only dashes, which ends npm's
+# options; INERT_READ_LAST to the last value ignore-scripts takes in each
+# reading (`unset` when none sets it); and INERT_READ_REST to everything else
+# the reading found: the positional words, the option values and the other
+# switches. Two statements with the same INERT_READ_REST differ at most in
+# ignore-scripts, which is how a placement of the flag is checked: it must
+# leave ignore-scripts true and change nothing else npm reads.
+inert_statement_reads() {
+  local joined pieces live line words w k last rest dynamic=false
+  local -a argv=() line_words=()
+  INERT_READ_KIND="" INERT_READ_ENDS=false INERT_READ_LAST="" INERT_READ_REST=""
+  # The pieces view reads one statement per line, so the statement goes in as
+  # the joined view: a newline inside quotes, a continuation and a comment
+  # read as the shell reads them. Fed as written, `--message "a<newline>
+  # --ignore-scripts"` put the quoted line on a line of its own, where it read
+  # as the flag, and the install ran its scripts unrewritten.
+  joined=$(shell_lex "$1" joined "safedeps:inert_offsets") || return 1
+  pieces=$(shell_lex "${joined}" pieces "safedeps:inert_offsets") || return 1
+  while IFS= read -r line; do
+    [[ -n "${line}" ]] || continue
+    if [[ "${line}" == "!" ]]; then dynamic=true; continue; fi
+    words="${line#*$'\037'}"
+    words="${words#*$'\037'}"
+    IFS=$' \t' read -ra line_words <<< "${words}"
+    for w in "${line_words[@]+"${line_words[@]}"}"; do
+      [[ "${w}" == $'\002' ]] && w="" || w="${w//$'\002'/ }"
+      [[ ! "${w}" =~ ^--+$ ]] || INERT_READ_ENDS=true
+      argv+=("${w}")
+    done
+  done <<< "${pieces}"
+  INERT_READ_KIND=dynamic
+  [[ "${dynamic}" == false ]] || return 0
+  live=$(shell_lex "${joined}" noredir "safedeps:inert_offsets") || return 1
+  live=$(shell_lex "${live}" live "safedeps:inert_offsets") || return 1
+  ! shell_expands "${live}" "${argv[*]+"${argv[*]}"}" || return 0
+  for k in plain other; do
+    if [[ "${k}" == other ]]; then
+      safedeps_npm_other_applies "${argv[@]:1}" || break
+      safedeps_npm_as_other safedeps_npm_read_args "${argv[@]:1}" || return 0
+    else
+      safedeps_npm_read_args "${argv[@]:1}" || return 0
+    fi
+    last=unset rest="${k}"
+    for w in "${SAFEDEPS_G_NPM_SWITCHES[@]+"${SAFEDEPS_G_NPM_SWITCHES[@]}"}"; do
+      if [[ "${w}" == ignore-scripts=* ]]; then last="${w#*=}"; else rest+=$'\036'"s:${w}"; fi
+    done
+    for w in "${SAFEDEPS_G_NPM_WORDS[@]+"${SAFEDEPS_G_NPM_WORDS[@]}"}"; do rest+=$'\036'"w:${w}"; done
+    for w in "${SAFEDEPS_G_NPM_VALUES[@]+"${SAFEDEPS_G_NPM_VALUES[@]}"}"; do rest+=$'\036'"v:${w#*$'\037'}"; done
+    INERT_READ_LAST+="${last} " INERT_READ_REST+="${rest}"$'\035'
+  done
+  INERT_READ_KIND=read
+}
+
+# Where `--ignore-scripts` goes for each npm install verb in <text>: one line
+# or two per verb, the offset of the byte a flag goes after. npm keeps the last
+# value an option is given (measured on npm 11.19.0: `--ignore-scripts=false`,
+# `--no-ignore-scripts`, `--no-ignore` and `--ign=false` after the flag each
+# ran the install scripts), so the first place tried is just past the last
+# word of the statement's own arguments, before a `--` that ends its options,
+# a redirection, a comment, a heredoc operator or the separator that ends it.
+# Placed right after the verb, it lost to all of them. A place stands only
+# when the statement read with the flag there leaves ignore-scripts true and
+# reads the same otherwise (inert_statement_reads), so an option that takes the
+# next word as its value cannot take the flag. A statement whose arguments
+# already leave the option true prints `-`. Every other statement also gets
+# the flag right after its verb (the floor, where the release put it), so it
+# prints the place read and the verb's end, each with ` asked` when it asked
+# for its scripts; one holding a word the shell decides at run time prints the
+# last argument's end and the verb's, each with ` unverified`; and one with no
+# place read (its end not found, a `--` before the flag, or no place reading
+# true) prints the verb's end with ` floor`, which the caller sends and
+# records as a downgrade.
+inert_flag_offsets() {
+  local text="$1" pairs dir ends start bound at stmt cands p note want placed verb
+  pairs=$(inert_verb_ends "${text}") || return 1
+  [[ -n "${pairs}" ]] || return 0
+  dir=$(mktemp -d "${TMPDIR:-/tmp}/safedeps-inert.XXXXXX") || {
+    [[ -z "${SAFEDEPS_SCAN_MARK:-}" ]] || printf 'failed\n' >> "${SAFEDEPS_SCAN_MARK}"
+    return 1
+  }
+  printf '%s' "${text}" > "${dir}/raw"
+  if ! shell_lex "${text}" live "safedeps:inert_offsets" > "${dir}/live" \
+     || ! shell_lex "${text}" code "safedeps:inert_offsets" > "${dir}/code" \
+     || ! shell_lex "${text}" noredir "safedeps:inert_offsets" > "${dir}/noredir"; then
+    rm -rf "${dir}"
+    return 1
+  fi
+  # live finds where the statement ends: it keeps the code the shell runs at
+  # this level, nested code inside quotes included, and blanks quoted text. code
+  # and noredir say which trailing bytes are not arguments: a comment or a
+  # heredoc operator (code) and a redirection (noredir). The three keep every
+  # byte in place, so one index reads all of them and the command.
+  if ! ends=$(printf '%s\n' "${pairs}" | LC_ALL=C awk -v dir="${dir}" '
+    # safedeps:inert_offsets (scripts/measure/scan-failure-census.sh keys on this line)
+    function slurp(f,   out, line, count) {
+      out = ""; count = 0
+      while ((getline line < f) > 0) out = out (count++ ? "\n" : "") line
+      close(f)
+      return out
+    }
+    function blank(c) { return c == " " || c == "\t" || c == "\n" || c == "" }
+    function sep(k) { return L[k] == ";" || L[k] == "&" || L[k] == "|" || L[k] == "(" || L[k] == ")" || L[k] == "<" || L[k] == ">" || L[k] == "`" || L[k] == "\n" }
+    BEGIN {
+      n = split(slurp(dir "/raw"), T, ""); split(slurp(dir "/live"), L, "")
+      split(slurp(dir "/code"), C, ""); split(slurp(dir "/noredir"), R, "")
+    }
+    {
+      s = $1; e = $2; inside = 0
+      for (k = 1; k <= e; k++) if (L[k] == "`") inside = !inside
+      depth = 0; brace = 0; b = 0; dd = 0; unsure = 0
+      for (k = e + 1; k <= n; k++) {
+        c = L[k]
+        if (c == "`") {
+          if (depth || brace) { unsure = 1; break }
+          if (inside) { b = k; break }
+          for (j = k + 1; j <= n && L[j] != "`"; j++) ;
+          if (j > n) { unsure = 1; break }
+          k = j; continue
+        }
+        # A `}` is not an end: to bash it is an argument (`npm i x } --no-ignore`
+        # hands both words to npm), and zsh, which closes a group with it, will
+        # not parse a word after it, so a flag there runs nothing.
+        if (c == "(") { depth++; continue }
+        if (c == ")") { if (!depth) { b = k; break }; depth--; continue }
+        if (c == "$" && L[k + 1] == "{") { brace++; k++; continue }
+        if (c == "}" && brace) { brace--; continue }
+        if (depth || brace) continue
+        if (c == "\n" || c == ";") { b = k; break }
+        if (c == "&") { if (L[k - 1] == ">" || L[k - 1] == "<" || L[k + 1] == ">") continue; b = k; break }
+        if (c == "|") { if (L[k - 1] == ">") continue; b = k; break }
+        # A word that is only dashes, quoted or escaped or not, ends npm options:
+        # the flag after it is an operand (`npm ci -- --ignore-scripts` ran the
+        # scripts).
+        if (!blank(C[k]) && blank(C[k - 1])) {
+          w = ""
+          for (j = k; j <= n && !blank(C[j]) && !sep(j); j++) w = w C[j]
+          gsub(/["\047\\]/, "", w)
+          if (w ~ /^--+$/) { dd = k; b = k; break }
+        }
+      }
+      if (unsure) { print "?", s, e; next }
+      if (!b) b = n + 1
+      at = b - 1
+      while (at > e && (blank(C[at]) || blank(R[at]) || (T[at] == "\\" && T[at + 1] == "\n"))) at--
+      # Every other place the flag could go, from the last argument back to the
+      # verb: the end of each word. A blank inside quotes reads as a word end
+      # here too; the reading of the placed flag rejects it, since it changes
+      # a value npm reads.
+      cands = at
+      for (k = at - 1; k > e; k--)
+        if (!blank(T[k]) && !blank(C[k]) && !blank(R[k]) && blank(T[k + 1])) cands = cands "," k
+      if (e < at) cands = cands "," e
+      print s, b, at, (dd ? "dd" : "-"), cands
+    }') || [[ -z "${ends}" ]]; then
+    [[ -z "${SAFEDEPS_SCAN_MARK:-}" ]] || printf 'failed\n' >> "${SAFEDEPS_SCAN_MARK}"
+    rm -rf "${dir}"
+    return 1
+  fi
+  rm -rf "${dir}"
+  while read -r start bound at _ cands; do
+    # Where no place is read, the statement keeps the floor alone: the flag
+    # right after its verb, where the release put it, recorded as a downgrade
+    # (` floor`). Its end could not be found (the awk printed `? <start> <verb
+    # end>`), or its words show a `--` the flag would land after (one the end
+    # finder could not read, or one before the verb: `npm -- ci -- x`), or no
+    # place reads as true below. These used to drop the rewrite of the whole
+    # command, which left such an install with less than the release gave it.
+    if [[ "${start}" == "?" ]]; then
+      printf '%s floor\n' "${at}"
+      continue
+    fi
+    verb="${cands##*,}"
+    stmt="${text:start:bound-1-start}"
+    inert_statement_reads "${stmt}" || return 1
+    if [[ "${INERT_READ_ENDS}" == true ]]; then
+      printf '%s floor\n' "${verb}"
+      continue
+    fi
+    if [[ "${INERT_READ_KIND}" != read ]]; then
+      # A word the shell decides at run time can be an option that sets
+      # ignore-scripts, one that takes the next word as its value, or a `--`.
+      # The flag goes both after the verb, where only a later word can undo
+      # it, and after the last argument, where only a word before it can, and
+      # the install is recorded as one whose flag nobody read.
+      printf '%s unverified\n' "${at}"
+      (( ${cands##*,} == at )) || printf '%s unverified\n' "${cands##*,}"
+      continue
+    fi
+    if [[ " ${INERT_READ_LAST}" != *" "[!t]* ]]; then
+      # Its own arguments leave the option true. The caller still writes the
+      # floor here where the release rewrote the command, which it did unless
+      # the text `--ignore-scripts` stood unquoted in it (inert_release_skips):
+      # a quoted `"--ignore-scripts"` and `--no-no-ignore-scripts` it rewrote.
+      printf '%s settled\n' "${verb}"
+      continue
+    fi
+    note=""
+    [[ " ${INERT_READ_LAST}" != *" false "* ]] || note=" asked"
+    want="${INERT_READ_REST}" placed=""
+    # The flag goes at the first place, from the last argument back, where npm
+    # reads the placed statement with ignore-scripts true and everything else
+    # as before. After the last argument it outlasts every word that sets the
+    # option; it fails there when the last word is an option that takes the
+    # next word as its value (`--cache`, `-C`, `--reg`), which then takes the
+    # flag instead (measured on npm 11.19.0: the install ran its scripts).
+    #
+    #
+    # The flag also goes right after the verb, always: that is the floor
+    # (inert_rewrite_in_place adds the release's own end flag to it). The
+    # place is read without it, since it only adds a true flag or takes a
+    # `true` or `false` after the verb as its value, as the release's flag
+    # did there.
+    for p in ${cands//,/ }; do
+      inert_statement_reads "${stmt:0:p-start}"" --ignore-scripts""${stmt:p-start}" || return 1
+      [[ "${INERT_READ_KIND}" == read && "${INERT_READ_ENDS}" != true ]] || continue
+      [[ " ${INERT_READ_LAST}" != *" "[!t]* && "${INERT_READ_REST}" == "${want}" ]] || continue
+      placed="${p}"
+      break
+    done
+    # No place in the statement leaves the option true without changing what
+    # npm reads (`--no-ignore-scripts x --cache`): the floor alone, recorded.
+    if [[ -z "${placed}" ]]; then
+      printf '%s floor\n' "${verb}"
+      continue
+    fi
+    printf '%s%s\n' "${placed}" "${note}"
+    (( placed == verb )) || printf '%s%s\n' "${verb}" "${note}"
+  done <<< "${ends}"
 }
 
 # The scripts handed to `sh -c` (or bash, zsh, dash) and `eval` in <command>, as
@@ -1780,12 +2050,13 @@ inert_payload_spans() {
   fi
 }
 
-# Offsets just past every npm install verb the shell runs in <text>: its own
-# code (the live view) and, recursively, the scripts it hands to a shell.
-# Returns 3 when an install sits where no offset can reach it.
+# Where `--ignore-scripts` goes for every npm install the shell runs in <text>
+# (inert_flag_offsets): its own code (the live view) and, recursively, the
+# scripts it hands to a shell. Returns 3 when an install sits where no offset
+# can reach it.
 inert_offsets_of() {
-  local text="$1" depth="${2:-0}" spans start len body inner e
-  inert_verb_ends "${text}" || return 1
+  local text="$1" depth="${2:-0}" spans start len body inner e note
+  inert_flag_offsets "${text}" || return $?
   (( depth < 4 )) || return 0
   spans=$(inert_payload_spans "${text}") || return 1
   [[ "${spans}" != *"?"* ]] || return 3
@@ -1798,19 +2069,35 @@ inert_offsets_of() {
       return 1
     }
     inner=$(inert_offsets_of "${body}" $(( depth + 1 ))) || return $?
-    for e in ${inner}; do
-      printf '%s\n' "$(( start + e ))"
-    done
+    while read -r e note; do
+      [[ -n "${e}" ]] || continue
+      if [[ "${e}" == - ]]; then printf -- '-\n'; continue; fi
+      printf '%s%s\n' "$(( start + e ))" "${note:+ ${note}}"
+    done <<< "${inner}"
   done <<< "${spans}"
 }
 
-# The command with `--ignore-scripts` inserted right after every npm install
-# verb the shell runs: in the command's own code, in a substitution, and in a
-# script it hands to `sh -c` or `eval`. Prints nothing when no verb was found.
-# Returns 3, printing nothing, when an npm install sits where the rewrite cannot
-# reach it -- a double-quoted script with an escape or a substitution in it, a
-# heredoc piped into a shell -- so the caller records the downgrade instead of
-# reporting the command inert.
+# The command with `--ignore-scripts` placed after the last argument of every
+# npm install the shell runs: in the command's own code, in a substitution, and
+# in a script it hands to `sh -c` or `eval`. Prints nothing when no verb was
+# found. Returns 4, printing nothing, when every install already leaves
+# ignore-scripts true. With the rewrite printed, it returns 4 plus the sum of
+# 1 when an install asked for its scripts and the flag now overrides it, 2 when
+# an install holds a word the shell decides at run time, so nobody read
+# whether the flag holds, and 4 when an install keeps only the floor because
+# no place in it reads as true (a downgrade the caller records); 0 when none
+# applies. Returns 3, printing nothing, when an npm install sits where the
+# rewrite cannot reach it -- a double-quoted script with an escape or a
+# substitution in it, a heredoc piped into a shell -- so the caller records the
+# downgrade instead of reporting the command inert; the release did not
+# rewrite these either.
+#
+# The rewrite always holds the release's own (7d66f8c): the flag right after
+# every verb, which inert_flag_offsets prints, and, for a command the release
+# appended to (inert_release_appends), the flag at the end of the command. So
+# deleting the flags the release did not write gives the release's rewrite:
+# whatever the shell does to the words, npm receives at least what the release
+# gave it, and the flags placed by reading only add to that.
 #
 # A raw-text rewrite used to land on an `npm i` inside a trailing comment and
 # count that as done, and could not see past a quoted option value (caught in
@@ -1818,16 +2105,32 @@ inert_offsets_of() {
 # in `sh -c '...'` beside a visible one ran its lifecycle scripts with nothing
 # recorded (caught in the release integration).
 inert_rewrite_in_place() {
-  local command="$1" offsets rc=0
-  offsets=$(inert_offsets_of "${command}") || rc=$?
+  local command="$1" lines offsets="" e note settled=false asked=false unverified=false floor=false rc=0 append=0 release_rewrote=false
+  lines=$(inert_offsets_of "${command}") || rc=$?
   (( rc == 0 )) || return "${rc}"
   if strip_heredoc_bodies "${command}" shell-bodies \
       | LC_ALL=C judge_grep -qE "npm${SAFEDEPS_G_OPTS}[[:space:]]+(${SAFEDEPS_G_NPM_VERBS}|${SAFEDEPS_G_NPM_LINK_VERBS})([[:space:]]|\$)"; then
     return 3
   fi
-  offsets=$(printf '%s\n' "${offsets}" | LC_ALL=C sort -nu | tr '\n' ' ')
-  [[ -n "${offsets// /}" ]] || return 0
-  if ! { printf '%s\n' "${offsets}"; printf '%s' "${command}"; } | LC_ALL=C awk '
+  inert_release_skips "${command}" || release_rewrote=true
+  while read -r e note; do
+    [[ -n "${e}" ]] || continue
+    if [[ "${e}" == - || "${note}" == settled ]]; then
+      settled=true
+      [[ "${note}" == settled && "${release_rewrote}" == true ]] || continue
+    fi
+    [[ "${note}" != asked ]] || asked=true
+    [[ "${note}" != unverified ]] || unverified=true
+    [[ "${note}" != floor ]] || floor=true
+    offsets+="${e}"$'\n'
+  done <<< "${lines}"
+  [[ -z "${offsets}" ]] || ! inert_release_appends "${command}" || append=1
+  if [[ -z "${offsets}" ]]; then
+    [[ "${settled}" == true ]] && return 4
+    return 0
+  fi
+  offsets=$(printf '%s' "${offsets}" | LC_ALL=C sort -nu | tr '\n' ' ')
+  if ! { printf '%s\n' "${offsets}"; printf '%s' "${command}"; } | LC_ALL=C awk -v append="${append}" '
     # safedeps:inert_rewrite_in_place (scripts/measure/scan-failure-census.sh keys on this line)
     NR == 1 { k = split($0, at, " "); for (j = 1; j <= k; j++) want[at[j]] = 1; next }
     { if (NR > 2) X[++n] = "\n"; m = split($0, c, ""); for (j = 1; j <= m; j++) X[++n] = c[j] }
@@ -1838,12 +2141,53 @@ inert_rewrite_in_place() {
         if (i in want) buf = buf " --ignore-scripts"
         if (++held >= 4096) { printf "%s", buf; buf = ""; held = 0 }
       }
+      # The release appended its flag to the command; one placed there already
+      # is that flag.
+      if (append && !(n in want)) buf = buf " --ignore-scripts"
       printf "%s", buf
     }
   '; then
     [[ -z "${SAFEDEPS_SCAN_MARK:-}" ]] || printf 'failed\n' >> "${SAFEDEPS_SCAN_MARK}"
     return 1
   fi
+  rc=0
+  [[ "${asked}" != true ]] || rc=$(( rc + 1 ))
+  [[ "${unverified}" != true ]] || rc=$(( rc + 2 ))
+  [[ "${floor}" != true ]] || rc=$(( rc + 4 ))
+  (( rc == 0 )) || return $(( rc + 4 ))
+}
+
+# Whether the release (7d66f8c) left <command> as written: it did whenever the
+# text `--ignore-scripts` stood in the scan view of the command or of a script
+# it hands to a shell (its command_has_ignore_scripts_flag), whatever npm made
+# of it.
+inert_release_skips() {
+  local text
+  while IFS= read -r text; do
+    command_scan_text "${text}" | judge_grep -qE -- '(^|[[:space:]])--ignore-scripts([=[:space:]]|$)' && return 0
+  done < <(command_candidate_texts "$1")
+  return 1
+}
+
+# Whether the release (7d66f8c) appended `--ignore-scripts` to the end of
+# <command> rather than inserting it after each verb: it did for a command of
+# one line whose scan view holds none of `;&|()`$`, shows the verb, and has no
+# comment or heredoc, when the text `--ignore-scripts` was nowhere in it (it
+# rewrote nothing then). This is the release's decision kept as it was, with
+# this tree's grammar, so the floor is the release's rewrite and not a guess at
+# it: a flag right after the verb alone is not, and against a word the shell
+# expands into `--no-ignore-scripts` after the place a reading chose, the
+# release's end flag is the one that stands.
+inert_release_appends() {
+  local scanned code
+  scanned=$(command_scan_text "$1") || return 1
+  [[ "${scanned}" != *$'\n'* ]] || return 1
+  ! printf '%s' "${scanned}" | judge_grep -qE '[;&|()`$]' || return 1
+  ! inert_release_skips "$1" || return 1
+  printf '%s' "${scanned}" \
+    | judge_grep -qE "npm${SAFEDEPS_G_OPTS}[[:space:]]+(${SAFEDEPS_G_NPM_VERBS}|${SAFEDEPS_G_NPM_LINK_VERBS})([[:space:]]|\$)" || return 1
+  code=$(strip_heredoc_bodies "$1")
+  [[ "${code}" == "$1" ]]
 }
 
 # The statements of a command, one per line, as
@@ -4229,38 +4573,57 @@ guard_extract_specs() {
 }
 
 # How the current reading would make the command's npm installs inert, as one
-# value the readings can be compared on: none, append, downgrade, or `rewrite`
-# and the rewritten command on the next line.
+# value the readings can be compared on: none, downgrade, or `rewrite` (with
+# ` asked`, ` unverified` and ` floor` when they apply, or ` release` alone
+# when only the release's rewrite was written) and the rewritten command on the
+# next line.
 guard_reading_inert() {
   local outcome=none updated="" rc=0
-  if command_is_injectable_npm_install "${COMMAND}" && \
-     ! command_has_ignore_scripts_flag "${COMMAND}"; then
-    if command_needs_inplace_inert "${COMMAND}"; then
-      # Insert `--ignore-scripts` immediately AFTER each npm-install verb so the
-      # flag stays inside its own statement. Appending to the end of the
-      # whole string would land it on the trailing statement (e.g.
-      # `npm install evil && npm run build --ignore-scripts`), leaving the install
-      # itself running lifecycle scripts (finding #7). `npm install --ignore-scripts <pkg>`
-      # is valid npm syntax (flags may precede operands).
-      # scripts/test/smoke.sh pins the landing spot. A failed rewrite marks the
-      # reading, so the gate settles it instead of reading it as nothing to do.
-      updated=$(inert_rewrite_in_place "${COMMAND}") || rc=$?
-      case "${rc}" in
-        0) ;;
-        3) updated="" ;;
-        *) guard_mark_reading_failed; updated="" ;;
-      esac
-      if [[ -z "${updated}" || "${updated}" == "${COMMAND}" ]]; then
-        # The rewrite did not land -- never blind-append to a compound command.
-        # Downgrade to detect-and-rollback (the effect gate still verifies the
-        # closure), recorded once the command is known to run: the inert
-        # guarantee is observably relaxed, never silently.
-        outcome=downgrade
-      else
-        outcome="rewrite"$'\n'"${updated}"
+  if command_is_injectable_npm_install "${COMMAND}"; then
+    # Place `--ignore-scripts` after the last argument of each npm install, in
+    # its own statement. Appending to the end of the whole string would land
+    # it on the trailing statement (e.g. `npm install evil && npm run build
+    # --ignore-scripts`), leaving the install itself running lifecycle scripts
+    # (finding #7). Right after the verb alone, it lost to any later word that
+    # sets the option, since npm keeps the last value; it now goes there too,
+    # as a floor under the reading (inert_flag_offsets). Whether a statement already
+    # carries the flag is read from that statement's own arguments: the bare
+    # text anywhere in the command used to skip the rewrite for
+    # `--ignore-scripts=false` and for `&& echo --ignore-scripts`, with no
+    # record. scripts/test/smoke.sh pins the landing spot. A failed rewrite
+    # marks the reading, so the gate settles it instead of reading it as
+    # nothing to do.
+    updated=$(inert_rewrite_in_place "${COMMAND}") || rc=$?
+    case "${rc}" in
+      0|5|6|7|8|9|10|11) ;;
+      3|4) updated="" ;;
+      *) guard_mark_reading_failed; updated="" ;;
+    esac
+    if (( rc == 4 )); then
+      outcome=none
+    elif [[ -z "${updated}" || "${updated}" == "${COMMAND}" ]]; then
+      # The rewrite did not land -- never blind-append to a compound command.
+      # Downgrade to detect-and-rollback (the effect gate still verifies the
+      # closure), recorded once the command is known to run: the inert
+      # guarantee is observably relaxed, never silently.
+      outcome=downgrade
+      # The floor holds on this path too, whatever stopped the rewrite (an
+      # install in a script handed to a shell that no offset reaches, a heredoc
+      # fed to a shell, no verb found, a failed reading): where the release
+      # appended its flag to the command, the command gets that rewrite. It
+      # used to get none, and `npm ci eval "\npm"` ran its scripts where the
+      # release's `npm ci eval "\npm" --ignore-scripts` ran none.
+      if inert_release_appends "${COMMAND}"; then
+        outcome="rewrite release"$'\n'"${COMMAND} --ignore-scripts"
       fi
     else
-      outcome=append
+      outcome=rewrite
+      if (( rc > 4 )); then
+        (( ((rc - 4) & 1) == 0 )) || outcome+=" asked"
+        (( ((rc - 4) & 2) == 0 )) || outcome+=" unverified"
+        (( ((rc - 4) & 4) == 0 )) || outcome+=" floor"
+      fi
+      outcome+=$'\n'"${updated}"
     fi
   fi
   printf -v "GUARD_INERT_$1" '%s' "${outcome}"
@@ -4755,6 +5118,7 @@ cat > "${SNAPSHOT_DIR}/${SNAPSHOT_ID}_meta.json" << META_EOF
   "project_dir": $(printf '%s' "${PROJECT_DIR}" | jq -Rs .),
   "command": $(printf '%s' "${COMMAND}" | jq -Rs .),
   "ignore_scripts_injected": false,
+  "ignore_scripts_unread": false,
   "lock_files_found": ${SNAPSHOTTED}
 }
 META_EOF
@@ -4763,13 +5127,21 @@ META_EOF
 # hook says "added" only where the command it receives is these bytes. Returns
 # non-zero when the record was not written, and the caller then writes no
 # rewrite: a rewrite with no record made the post hook's "did not add" false.
+# ignore_scripts_unread says an install in it holds a word the shell decides
+# at run time (INERT_UNVERIFIED), or the rewrite is only the release's because
+# no place was read (INERT_RELEASE_ONLY), so nobody read where npm keeps the
+# flag: a reason for the post hook to add a warning, never a permission to say
+# the scripts did not run. A record that lacks it loses that warning and claims
+# nothing more.
 mark_ignore_scripts_injected() {
   local meta_file="${SNAPSHOT_DIR}/${SNAPSHOT_ID}_meta.json"
-  local temp_file
+  local temp_file unread=false
 
   [[ -f "${meta_file}" ]] || return 1
+  [[ "${INERT_UNVERIFIED}" != true && "${INERT_RELEASE_ONLY}" != true ]] || unread=true
   temp_file=$(mktemp "${SNAPSHOT_DIR}/.${SNAPSHOT_ID}_meta.XXXXXX") || return 1
-  if jq --arg command "$1" '.ignore_scripts_injected = true | .updated_command = $command' "${meta_file}" > "${temp_file}" \
+  if jq --arg command "$1" --argjson unread "${unread}" \
+      '.ignore_scripts_injected = true | .updated_command = $command | .ignore_scripts_unread = $unread' "${meta_file}" > "${temp_file}" \
     && mv -f "${temp_file}" "${meta_file}"; then
     return 0
   fi
@@ -5054,6 +5426,10 @@ if [[ "${GUARD_READING_SET}" == bash ]] && guard_readings_diverge; then
 fi
 UPDATED_COMMAND=""
 INERT_DOWNGRADED=false
+INERT_FLOOR_ONLY=false
+INERT_RELEASE_ONLY=false
+INERT_ASKED=false
+INERT_UNVERIFIED=false
 if [[ "${GUARD_IS_CODEX}" != true ]]; then
   inert_first="" inert_seen=false
   for guard_reading in ${GUARD_READING_SET}; do
@@ -5066,9 +5442,19 @@ if [[ "${GUARD_IS_CODEX}" != true ]]; then
     fi
   done
   case "${inert_first}" in
-    append) UPDATED_COMMAND="${COMMAND} --ignore-scripts" ;;
     downgrade) INERT_DOWNGRADED=true ;;
-    rewrite$'\n'*) UPDATED_COMMAND="${inert_first#rewrite$'\n'}" ;;
+    rewrite*$'\n'*)
+      UPDATED_COMMAND="${inert_first#*$'\n'}"
+      inert_first="${inert_first%%$'\n'*}"
+      [[ "${inert_first}" != *" asked"* ]] || INERT_ASKED=true
+      [[ "${inert_first}" != *" unverified"* ]] || INERT_UNVERIFIED=true
+      # A statement kept only the floor: the release's rewrite, with no place
+      # read as true. It is sent and recorded as a downgrade.
+      [[ "${inert_first}" != *" floor"* ]] || INERT_FLOOR_ONLY=true
+      # No rewrite landed, and the command gets the release's own: the flag
+      # at the end of a one-statement command. Also a recorded downgrade.
+      [[ "${inert_first}" != *" release"* ]] || INERT_RELEASE_ONLY=true
+      ;;
   esac
 fi
 
@@ -5084,7 +5470,19 @@ fi
 guard_settle_scan_failure
 
 if [[ "${INERT_DOWNGRADED}" == "true" ]]; then
-  log_advisory "pre-guard: could not make every npm install in this command inert in place (one is in a compound command the rewrite did not land in, or in a script handed to a shell that it cannot reach); lifecycle scripts may run before the effect gate verifies (downgraded to detect-and-rollback). Command: ${COMMAND}"
+  log_advisory "pre-guard: could not make every npm install in this command inert in place (one is in a compound command the rewrite did not land in, in a statement whose end it could not find, or in a script handed to a shell that it cannot reach); lifecycle scripts may run before the effect gate verifies (downgraded to detect-and-rollback). Command: ${COMMAND}"
+fi
+if [[ "${INERT_FLOOR_ONLY}" == "true" ]]; then
+  log_advisory "pre-guard: an npm install in this command has no place where safedeps could read npm keeping --ignore-scripts true (its end could not be found, a -- ends npm's options before it, or every place changes what npm reads); safedeps put the flag right after each verb, where the release put it in a compound command, and at the end of a one-statement command, where the release put it there; lifecycle scripts may run before the effect gate verifies (downgraded to detect-and-rollback). Command: ${COMMAND}"
+fi
+if [[ "${INERT_RELEASE_ONLY}" == "true" ]]; then
+  log_advisory "pre-guard: could not place --ignore-scripts by reading an npm install in this command (one is in a script handed to a shell that the rewrite cannot reach, in a heredoc fed to a shell, or in text it could not read); safedeps added the flag only at the end of the command, where the release added it, and could not read where npm keeps it, so lifecycle scripts may run before the effect gate verifies (downgraded to detect-and-rollback). Command: ${COMMAND}"
+fi
+if [[ "${INERT_ASKED}" == "true" ]]; then
+  log_advisory "pre-guard: an npm install in this command sets ignore-scripts false; safedeps put --ignore-scripts after it, where npm reads the last value an option is given, and safedeps itself runs the install's scripts only through the rebuild after the closure verifies. Command: ${COMMAND}"
+fi
+if [[ "${INERT_UNVERIFIED}" == "true" ]]; then
+  log_advisory "pre-guard: an npm install in this command holds a word the shell decides at run time (a tilde, a brace, \$x, \$(...), a glob or another expansion), which can set ignore-scripts, take the next word as its value, or end npm's options; safedeps put --ignore-scripts both right after the verb and after the last argument, and could not read whether npm keeps it true, so the install's scripts may run before the effect gate verifies. Command: ${COMMAND}"
 fi
 
 # Write per-install pending state for PostToolUse, keyed by (dir_hash, normalized

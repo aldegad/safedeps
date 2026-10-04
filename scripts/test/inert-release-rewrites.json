@@ -1,0 +1,850 @@
+[
+ {
+  "command": "(npm install left-pad@1.3.0 --ignore-scripts=false) && echo ok",
+  "release": null
+ },
+ {
+  "command": "HOME=--cache; npm install left-pad@1.3.0 ~",
+  "release": "HOME=--cache; npm install --ignore-scripts left-pad@1.3.0 ~"
+ },
+ {
+  "command": "HOME=--cache; npm install sd-approved@1.0.0 ~",
+  "release": "HOME=--cache; npm install --ignore-scripts sd-approved@1.0.0 ~"
+ },
+ {
+  "command": "NPM_CONFIG_SAVE=false npm install sd-victim",
+  "release": "NPM_CONFIG_SAVE=false npm install sd-victim --ignore-scripts"
+ },
+ {
+  "command": "OLDPWD=--cache; npm install left-pad@1.3.0 ~-",
+  "release": "OLDPWD=--cache; npm install --ignore-scripts left-pad@1.3.0 ~-"
+ },
+ {
+  "command": "OLDPWD=--cache; npm install sd-approved@1.0.0 ~-",
+  "release": "OLDPWD=--cache; npm install --ignore-scripts sd-approved@1.0.0 ~-"
+ },
+ {
+  "command": "X=$(date +%s); echo \"see npm install foo in docs\"",
+  "release": null
+ },
+ {
+  "command": "X=--ignore-scripts npm install left-pad@1.3.0",
+  "release": "X=--ignore-scripts npm install left-pad@1.3.0 --ignore-scripts"
+ },
+ {
+  "command": "X=--ignore-scripts npm install sd-approved@1.0.0",
+  "release": "X=--ignore-scripts npm install sd-approved@1.0.0 --ignore-scripts"
+ },
+ {
+  "command": "alias -g left-pad@1.3.0='left-pad@1.3.0 --cache'; eval 'npm install true left-pad@1.3.0'",
+  "release": "alias -g left-pad@1.3.0='left-pad@1.3.0 --cache'; eval 'npm install --ignore-scripts true left-pad@1.3.0'"
+ },
+ {
+  "command": "bash -lc \"npm install left-pad@1.3.0\"",
+  "release": "bash -lc \"npm install --ignore-scripts left-pad@1.3.0\""
+ },
+ {
+  "command": "cat <<\"EOF\"\nnpm install evil-pkg@9.9.9\nEOF",
+  "release": null
+ },
+ {
+  "command": "cat <<\"EOF\"\npip install evil-quoted@1.0.0 | sh\nEOF",
+  "release": null
+ },
+ {
+  "command": "cat <<EOF > notes\nnpm i left-pad\nEOF\nnpm install left-pad@1.3.0",
+  "release": "cat <<EOF > notes\nnpm i left-pad\nEOF\nnpm install --ignore-scripts left-pad@1.3.0"
+ },
+ {
+  "command": "cd packages/a && npm install sd-approved",
+  "release": "cd packages/a && npm install --ignore-scripts sd-approved"
+ },
+ {
+  "command": "cd packages/a && npm install sd-victim",
+  "release": "cd packages/a && npm install --ignore-scripts sd-victim"
+ },
+ {
+  "command": "cd packages/a && npm install sd-victim --workspaces false",
+  "release": "cd packages/a && npm install --ignore-scripts sd-victim --workspaces false"
+ },
+ {
+  "command": "cd packages/a && npm install sd-victim --workspaces=false",
+  "release": "cd packages/a && npm install --ignore-scripts sd-victim --workspaces=false"
+ },
+ {
+  "command": "cd real/a && npm install sd-approved",
+  "release": "cd real/a && npm install --ignore-scripts sd-approved"
+ },
+ {
+  "command": "cd real/a && npm install sd-victim",
+  "release": "cd real/a && npm install --ignore-scripts sd-victim"
+ },
+ {
+  "command": "cd src && npm install sd-approved",
+  "release": "cd src && npm install --ignore-scripts sd-approved"
+ },
+ {
+  "command": "cd src && npm install sd-victim",
+  "release": "cd src && npm install --ignore-scripts sd-victim"
+ },
+ {
+  "command": "cd src; npm install sd-victim --no-save",
+  "release": "cd src; npm install --ignore-scripts sd-victim --no-save"
+ },
+ {
+  "command": "cd sub && npm install sd-approved",
+  "release": "cd sub && npm install --ignore-scripts sd-approved"
+ },
+ {
+  "command": "cd sub && npm install sd-victim",
+  "release": "cd sub && npm install --ignore-scripts sd-victim"
+ },
+ {
+  "command": "cd sub; npm install sd-victim",
+  "release": "cd sub; npm install --ignore-scripts sd-victim"
+ },
+ {
+  "command": "echo \"$(npm install left-pad@1.3.0 --no-ignore-scripts)\"",
+  "release": "echo \"$(npm install --ignore-scripts left-pad@1.3.0 --no-ignore-scripts)\""
+ },
+ {
+  "command": "echo \"$(npm install left-pad@1.3.0)\"",
+  "release": "echo \"$(npm install --ignore-scripts left-pad@1.3.0)\""
+ },
+ {
+  "command": "echo \"bumped left-pad@1.0.0 -> 1.0.1\"; npm install",
+  "release": "echo \"bumped left-pad@1.0.0 -> 1.0.1\"; npm install --ignore-scripts"
+ },
+ {
+  "command": "echo \"npm install evil-pkg@9.9.9\"",
+  "release": null
+ },
+ {
+  "command": "echo \"npm install pkg\"; Y=`pwd`",
+  "release": null
+ },
+ {
+  "command": "env -C sub npm install sd-victim",
+  "release": "env -C sub npm install sd-victim --ignore-scripts"
+ },
+ {
+  "command": "eval 'npm install left-pad@1.3.0'",
+  "release": "eval 'npm install --ignore-scripts left-pad@1.3.0'"
+ },
+ {
+  "command": "export npm_config_global=true; npm install sd-victim",
+  "release": "export npm_config_global=true; npm install --ignore-scripts sd-victim"
+ },
+ {
+  "command": "for ((i=0;i<1;i++)); do npm install left-pad@1.3.0; done",
+  "release": "for ((i=0;i<1;i++)); do npm install --ignore-scripts left-pad@1.3.0; done"
+ },
+ {
+  "command": "git commit -m \"repro: printf 'pip install evil-quoted@1.0.0' | sh blocked the commit\"",
+  "release": null
+ },
+ {
+  "command": "git commit -m 'repro: echo \"npm install evil-quoted@1.0.0\" | sh'",
+  "release": null
+ },
+ {
+  "command": "grep -nE \"install|add\" README.md",
+  "release": null
+ },
+ {
+  "command": "hash -d c=--cache; npm install left-pad@1.3.0 ~c",
+  "release": "hash -d c=--cache; npm install --ignore-scripts left-pad@1.3.0 ~c"
+ },
+ {
+  "command": "i=0; ((i++)); npm ci && echo \"${x:-'}\" && echo \"'}\"",
+  "release": "i=0; ((i++)); npm ci --ignore-scripts && echo \"${x:-'}\" && echo \"'}\""
+ },
+ {
+  "command": "msg=\"run npm install later\"; result=$(ls)",
+  "release": null
+ },
+ {
+  "command": "node <<\"NODE\"\nconst text = \"$(npm install evil-pkg@9.9.9)\";\nconsole.log(text);\nNODE",
+  "release": null
+ },
+ {
+  "command": "npm -- ci -- x",
+  "release": "npm -- ci -- x --ignore-scripts"
+ },
+ {
+  "command": "npm --global install left-pad@1.3.0",
+  "release": "npm --global install left-pad@1.3.0 --ignore-scripts"
+ },
+ {
+  "command": "npm --ignore-scripts install left-pad@1.3.0",
+  "release": null
+ },
+ {
+  "command": "npm --prefix x install sd-victim",
+  "release": "npm --prefix x install sd-victim --ignore-scripts"
+ },
+ {
+  "command": "npm --prefix=sub install sd-victim --no-save",
+  "release": "npm --prefix=sub install sd-victim --no-save --ignore-scripts"
+ },
+ {
+  "command": "npm --prefix=x install sd-victim",
+  "release": "npm --prefix=x install sd-victim --ignore-scripts"
+ },
+ {
+  "command": "npm --userconfig \"/tmp/a b/.npmrc\" install left-pad@1.3.0 # then npm i later",
+  "release": "npm --userconfig \"/tmp/a b/.npmrc\" install --ignore-scripts left-pad@1.3.0 # then npm i later"
+ },
+ {
+  "command": "npm --version",
+  "release": null
+ },
+ {
+  "command": "npm -C sub install sd-approved",
+  "release": "npm -C sub install sd-approved --ignore-scripts"
+ },
+ {
+  "command": "npm -C sub install sd-victim",
+  "release": "npm -C sub install sd-victim --ignore-scripts"
+ },
+ {
+  "command": "npm -g install left-pad@1.3.0",
+  "release": "npm -g install left-pad@1.3.0 --ignore-scripts"
+ },
+ {
+  "command": "npm ci\necho \"${x:-hi}\"",
+  "release": "npm ci --ignore-scripts\necho \"${x:-hi}\""
+ },
+ {
+  "command": "npm ci # then npm i later",
+  "release": "npm ci --ignore-scripts # then npm i later"
+ },
+ {
+  "command": "npm ci $(printf -- \"--no-ignore-scripts --cache\")",
+  "release": "npm ci --ignore-scripts $(printf -- \"--no-ignore-scripts --cache\")"
+ },
+ {
+  "command": "npm ci $(printf -- --)",
+  "release": "npm ci --ignore-scripts $(printf -- --)"
+ },
+ {
+  "command": "npm ci -- x",
+  "release": "npm ci -- x --ignore-scripts"
+ },
+ {
+  "command": "npm ci --ignore-scripts && npm install left-pad@1.3.0",
+  "release": null
+ },
+ {
+  "command": "npm ci --no-ignore-scripts '--' x",
+  "release": "npm ci --no-ignore-scripts '--' x --ignore-scripts"
+ },
+ {
+  "command": "npm ci eval \"\\npm\"",
+  "release": "npm ci eval \"\\npm\" --ignore-scripts"
+ },
+ {
+  "command": "npm ci left-pad@1.3.0 sh -c \"x\\y npm\" false \"$HOME\"",
+  "release": "npm ci left-pad@1.3.0 sh -c \"x\\y npm\" false \"$HOME\" --ignore-scripts"
+ },
+ {
+  "command": "npm i --locat=global left-pad@1.3.0",
+  "release": "npm i --locat=global left-pad@1.3.0 --ignore-scripts"
+ },
+ {
+  "command": "npm i --no-global=false left-pad@1.3.0",
+  "release": "npm i --no-global=false left-pad@1.3.0 --ignore-scripts"
+ },
+ {
+  "command": "npm i --save=false sd-victim",
+  "release": "npm i --save=false sd-victim --ignore-scripts"
+ },
+ {
+  "command": "npm i -fg left-pad@1.3.0",
+  "release": "npm i -fg left-pad@1.3.0 --ignore-scripts"
+ },
+ {
+  "command": "npm i -g=true left-pad@1.3.0",
+  "release": "npm i -g=true left-pad@1.3.0 --ignore-scripts"
+ },
+ {
+  "command": "npm install --global left-pad@1.3.0",
+  "release": "npm install --global left-pad@1.3.0 --ignore-scripts"
+ },
+ {
+  "command": "npm install --global=false sd-victim",
+  "release": "npm install --global=false sd-victim --ignore-scripts"
+ },
+ {
+  "command": "npm install --ignore-scripts left-pad@1.3.0 --ign=false",
+  "release": null
+ },
+ {
+  "command": "npm install --ignore-scripts left-pad@1.3.0 --save",
+  "release": null
+ },
+ {
+  "command": "npm install --ignore-scripts sd-approved@1.0.0 --cache --ignore-scripts",
+  "release": null
+ },
+ {
+  "command": "npm install --ignore-scripts sd-approved@1.0.0 --ignore-scripts",
+  "release": null
+ },
+ {
+  "command": "npm install --ignore-scripts sd-approved@1.0.0 --no-ignore-scripts --ignore-scripts",
+  "release": null
+ },
+ {
+  "command": "npm install --ignore-scripts=true sd-approved@1.0.0 --save",
+  "release": null
+ },
+ {
+  "command": "npm install --location=project sd-swapped",
+  "release": "npm install --location=project sd-swapped --ignore-scripts"
+ },
+ {
+  "command": "npm install --location=project sd-victim",
+  "release": "npm install --location=project sd-victim --ignore-scripts"
+ },
+ {
+  "command": "npm install --no-global sd-victim",
+  "release": "npm install --no-global sd-victim --ignore-scripts"
+ },
+ {
+  "command": "npm install --no-ignore-scripts left-pad@1.3.0 --reg",
+  "release": "npm install --no-ignore-scripts left-pad@1.3.0 --reg --ignore-scripts"
+ },
+ {
+  "command": "npm install --no-package-lock sd-victim",
+  "release": "npm install --no-package-lock sd-victim --ignore-scripts"
+ },
+ {
+  "command": "npm install --no-save sd-victim",
+  "release": "npm install --no-save sd-victim --ignore-scripts"
+ },
+ {
+  "command": "npm install -g left-pad@1.3.0",
+  "release": "npm install -g left-pad@1.3.0 --ignore-scripts"
+ },
+ {
+  "command": "npm install -g sd-victim",
+  "release": "npm install -g sd-victim --ignore-scripts"
+ },
+ {
+  "command": "npm install -gf left-pad@1.3.0",
+  "release": "npm install -gf left-pad@1.3.0 --ignore-scripts"
+ },
+ {
+  "command": "npm install conc-a@1.0.0",
+  "release": "npm install conc-a@1.0.0 --ignore-scripts"
+ },
+ {
+  "command": "npm install ledger-tamper@1.0.0",
+  "release": "npm install ledger-tamper@1.0.0 --ignore-scripts"
+ },
+ {
+  "command": "npm install left-pad@1.3.0",
+  "release": "npm install left-pad@1.3.0 --ignore-scripts"
+ },
+ {
+  "command": "npm install left-pad@1.3.0\necho done",
+  "release": "npm install --ignore-scripts left-pad@1.3.0\necho done"
+ },
+ {
+  "command": "npm install left-pad@1.3.0 \"$FLAGS\"",
+  "release": "npm install left-pad@1.3.0 \"$FLAGS\" --ignore-scripts"
+ },
+ {
+  "command": "npm install left-pad@1.3.0 \"--ignore-scripts\"",
+  "release": "npm install left-pad@1.3.0 \"--ignore-scripts\" --ignore-scripts"
+ },
+ {
+  "command": "npm install left-pad@1.3.0 # rebuild the lockfile",
+  "release": "npm install --ignore-scripts left-pad@1.3.0 # rebuild the lockfile"
+ },
+ {
+  "command": "npm install left-pad@1.3.0 # ~ {a,b} *",
+  "release": "npm install --ignore-scripts left-pad@1.3.0 # ~ {a,b} *"
+ },
+ {
+  "command": "npm install left-pad@1.3.0 $FLAGS",
+  "release": "npm install --ignore-scripts left-pad@1.3.0 $FLAGS"
+ },
+ {
+  "command": "npm install left-pad@1.3.0 && echo 'npm install left-pad@1.3.0'",
+  "release": "npm install --ignore-scripts left-pad@1.3.0 && echo 'npm install left-pad@1.3.0'"
+ },
+ {
+  "command": "npm install left-pad@1.3.0 && echo --ignore-scripts",
+  "release": null
+ },
+ {
+  "command": "npm install left-pad@1.3.0 && npm run build",
+  "release": "npm install --ignore-scripts left-pad@1.3.0 && npm run build"
+ },
+ {
+  "command": "npm install left-pad@1.3.0 (--cache|zz)",
+  "release": "npm install --ignore-scripts left-pad@1.3.0 (--cache|zz)"
+ },
+ {
+  "command": "npm install left-pad@1.3.0 --[c]ache",
+  "release": "npm install left-pad@1.3.0 --[c]ache --ignore-scripts"
+ },
+ {
+  "command": "npm install left-pad@1.3.0 --c?che",
+  "release": "npm install left-pad@1.3.0 --c?che --ignore-scripts"
+ },
+ {
+  "command": "npm install left-pad@1.3.0 --cache",
+  "release": "npm install left-pad@1.3.0 --cache --ignore-scripts"
+ },
+ {
+  "command": "npm install left-pad@1.3.0 --cache && echo ok",
+  "release": "npm install --ignore-scripts left-pad@1.3.0 --cache && echo ok"
+ },
+ {
+  "command": "npm install left-pad@1.3.0 --cache --ignore-scripts",
+  "release": null
+ },
+ {
+  "command": "npm install left-pad@1.3.0 --ignore-scripts",
+  "release": null
+ },
+ {
+  "command": "npm install left-pad@1.3.0 --ignore-scripts && npm run build",
+  "release": null
+ },
+ {
+  "command": "npm install left-pad@1.3.0 --ignore-scripts --message \"a\nb\"",
+  "release": null
+ },
+ {
+  "command": "npm install left-pad@1.3.0 --ignore-scripts false",
+  "release": null
+ },
+ {
+  "command": "npm install left-pad@1.3.0 --ignore-scripts true",
+  "release": null
+ },
+ {
+  "command": "npm install left-pad@1.3.0 --ignore-scripts } --no-ignore-scripts",
+  "release": null
+ },
+ {
+  "command": "npm install left-pad@1.3.0 --ignore-scripts=false",
+  "release": null
+ },
+ {
+  "command": "npm install left-pad@1.3.0 --ignore-scripts=false > log 2>&1",
+  "release": null
+ },
+ {
+  "command": "npm install left-pad@1.3.0 --ignore-scripts=true",
+  "release": null
+ },
+ {
+  "command": "npm install left-pad@1.3.0 --message \"a\n--ignore-scripts\"",
+  "release": "npm install left-pad@1.3.0 --message \"a\n--ignore-scripts\" --ignore-scripts"
+ },
+ {
+  "command": "npm install left-pad@1.3.0 --message \"~ {a,b} (c) * ? [d] =e\"",
+  "release": "npm install left-pad@1.3.0 --message \"~ {a,b} (c) * ? [d] =e\" --ignore-scripts"
+ },
+ {
+  "command": "npm install left-pad@1.3.0 --message $((1))",
+  "release": "npm install --ignore-scripts left-pad@1.3.0 --message $((1))"
+ },
+ {
+  "command": "npm install left-pad@1.3.0 --message 'a # b'",
+  "release": "npm install left-pad@1.3.0 --message 'a # b' --ignore-scripts"
+ },
+ {
+  "command": "npm install left-pad@1.3.0 --message 'a b' --fetch-retries",
+  "release": "npm install left-pad@1.3.0 --message 'a b' --fetch-retries --ignore-scripts"
+ },
+ {
+  "command": "npm install left-pad@1.3.0 --message '~ {a,b} (c) * ? [d] =e'",
+  "release": "npm install left-pad@1.3.0 --message '~ {a,b} (c) * ? [d] =e' --ignore-scripts"
+ },
+ {
+  "command": "npm install left-pad@1.3.0 --message --ignore-scripts",
+  "release": null
+ },
+ {
+  "command": "npm install left-pad@1.3.0 --message <(true)",
+  "release": "npm install --ignore-scripts left-pad@1.3.0 --message <(true)"
+ },
+ {
+  "command": "npm install left-pad@1.3.0 --message =npm",
+  "release": "npm install left-pad@1.3.0 --message =npm --ignore-scripts"
+ },
+ {
+  "command": "npm install left-pad@1.3.0 --message a#b",
+  "release": "npm install left-pad@1.3.0 --message a#b --ignore-scripts"
+ },
+ {
+  "command": "npm install left-pad@1.3.0 --message a%b+c,d:e/f@g=h_i.j-k",
+  "release": "npm install left-pad@1.3.0 --message a%b+c,d:e/f@g=h_i.j-k --ignore-scripts"
+ },
+ {
+  "command": "npm install left-pad@1.3.0 --message a='x':~",
+  "release": "npm install left-pad@1.3.0 --message a='x':~ --ignore-scripts"
+ },
+ {
+  "command": "npm install left-pad@1.3.0 --message a=x:~",
+  "release": "npm install left-pad@1.3.0 --message a=x:~ --ignore-scripts"
+ },
+ {
+  "command": "npm install left-pad@1.3.0 --message a=~",
+  "release": "npm install left-pad@1.3.0 --message a=~ --ignore-scripts"
+ },
+ {
+  "command": "npm install left-pad@1.3.0 --message a^b",
+  "release": "npm install left-pad@1.3.0 --message a^b --ignore-scripts"
+ },
+ {
+  "command": "npm install left-pad@1.3.0 --message x(.)",
+  "release": "npm install --ignore-scripts left-pad@1.3.0 --message x(.)"
+ },
+ {
+  "command": "npm install left-pad@1.3.0 --message x~y",
+  "release": "npm install left-pad@1.3.0 --message x~y --ignore-scripts"
+ },
+ {
+  "command": "npm install left-pad@1.3.0 --message {1..2}",
+  "release": "npm install left-pad@1.3.0 --message {1..2} --ignore-scripts"
+ },
+ {
+  "command": "npm install left-pad@1.3.0 --no-ignore",
+  "release": "npm install left-pad@1.3.0 --no-ignore --ignore-scripts"
+ },
+ {
+  "command": "npm install left-pad@1.3.0 --no-ignore-scripts",
+  "release": "npm install left-pad@1.3.0 --no-ignore-scripts --ignore-scripts"
+ },
+ {
+  "command": "npm install left-pad@1.3.0 --no-no-ignore-scripts",
+  "release": "npm install left-pad@1.3.0 --no-no-ignore-scripts --ignore-scripts"
+ },
+ {
+  "command": "npm install left-pad@1.3.0 --userconfig=eval \"x\\y npm\"",
+  "release": "npm install left-pad@1.3.0 --userconfig=eval \"x\\y npm\" --ignore-scripts"
+ },
+ {
+  "command": "npm install left-pad@1.3.0 -C",
+  "release": "npm install left-pad@1.3.0 -C --ignore-scripts"
+ },
+ {
+  "command": "npm install left-pad@1.3.0 -no-ignore-scripts",
+  "release": "npm install left-pad@1.3.0 -no-ignore-scripts --ignore-scripts"
+ },
+ {
+  "command": "npm install left-pad@1.3.0 <<EOF\nyes\nEOF",
+  "release": "npm install --ignore-scripts left-pad@1.3.0 <<EOF\nyes\nEOF"
+ },
+ {
+  "command": "npm install left-pad@1.3.0 > install.log 2>&1",
+  "release": "npm install --ignore-scripts left-pad@1.3.0 > install.log 2>&1"
+ },
+ {
+  "command": "npm install left-pad@1.3.0 \\~",
+  "release": "npm install left-pad@1.3.0 \\~ --ignore-scripts"
+ },
+ {
+  "command": "npm install left-pad@1.3.0 `printf -- --cache`",
+  "release": "npm install --ignore-scripts left-pad@1.3.0 `printf -- --cache`"
+ },
+ {
+  "command": "npm install left-pad@1.3.0 eval \"$(echo) npm\"",
+  "release": "npm install left-pad@1.3.0 eval \"$(echo) npm\" --ignore-scripts"
+ },
+ {
+  "command": "npm install left-pad@1.3.0 eval \"a\\b npm\"",
+  "release": "npm install left-pad@1.3.0 eval \"a\\b npm\" --ignore-scripts"
+ },
+ {
+  "command": "npm install left-pad@1.3.0 eval \"npm\\ x\"",
+  "release": "npm install left-pad@1.3.0 eval \"npm\\ x\" --ignore-scripts"
+ },
+ {
+  "command": "npm install left-pad@1.3.0 sh -c \"\\npm\"",
+  "release": "npm install left-pad@1.3.0 sh -c \"\\npm\" --ignore-scripts"
+ },
+ {
+  "command": "npm install left-pad@1.3.0 {--cache,}",
+  "release": "npm install left-pad@1.3.0 {--cache,} --ignore-scripts"
+ },
+ {
+  "command": "npm install left-pad@1.3.0 {x,--cache}",
+  "release": "npm install left-pad@1.3.0 {x,--cache} --ignore-scripts"
+ },
+ {
+  "command": "npm install left-pad@1.3.0 ~+",
+  "release": "npm install left-pad@1.3.0 ~+ --ignore-scripts"
+ },
+ {
+  "command": "npm install left-pad@1.3.0 ~root",
+  "release": "npm install left-pad@1.3.0 ~root --ignore-scripts"
+ },
+ {
+  "command": "npm install left-pad@1.3.0; ((count++)); echo \"$((count+1))\"",
+  "release": "npm install --ignore-scripts left-pad@1.3.0; ((count++)); echo \"$((count+1))\""
+ },
+ {
+  "command": "npm install left-pad@1.3.0; sh -c \"echo $(date); npm install left-pad@1.3.0\"",
+  "release": null
+ },
+ {
+  "command": "npm install left-pad@1.3.0; sh -c \"echo \\\"hi\\\"; npm install left-pad@1.3.0\"",
+  "release": null
+ },
+ {
+  "command": "npm install left-pad@1.3.0; sh -c 'cd sub && npm install left-pad@1.3.0'",
+  "release": "npm install --ignore-scripts left-pad@1.3.0; sh -c 'cd sub && npm install --ignore-scripts left-pad@1.3.0'"
+ },
+ {
+  "command": "npm install left-pad@1.3.0<input",
+  "release": "npm install left-pad@1.3.0<input --ignore-scripts"
+ },
+ {
+  "command": "npm install left-pad@1.3.0>install.log",
+  "release": "npm install left-pad@1.3.0>install.log --ignore-scripts"
+ },
+ {
+  "command": "npm install sd-approved",
+  "release": "npm install sd-approved --ignore-scripts"
+ },
+ {
+  "command": "npm install sd-approved && printf '%s\\n' 'global=true' > .npmrc",
+  "release": "npm install --ignore-scripts sd-approved && printf '%s\\n' 'global=true' > .npmrc"
+ },
+ {
+  "command": "npm install sd-approved && printf '%s\\n' 'location=global' > .npmrc",
+  "release": "npm install --ignore-scripts sd-approved && printf '%s\\n' 'location=global' > .npmrc"
+ },
+ {
+  "command": "npm install sd-approved --no-save",
+  "release": "npm install sd-approved --no-save --ignore-scripts"
+ },
+ {
+  "command": "npm install sd-approved --no-workspaces",
+  "release": "npm install sd-approved --no-workspaces --ignore-scripts"
+ },
+ {
+  "command": "npm install sd-approved -w packages/a",
+  "release": "npm install sd-approved -w packages/a --ignore-scripts"
+ },
+ {
+  "command": "npm install sd-approved-too",
+  "release": "npm install sd-approved-too --ignore-scripts"
+ },
+ {
+  "command": "npm install sd-approved@1.0.0",
+  "release": "npm install sd-approved@1.0.0 --ignore-scripts"
+ },
+ {
+  "command": "npm install sd-approved@1.0.0 $FLAGS",
+  "release": "npm install --ignore-scripts sd-approved@1.0.0 $FLAGS"
+ },
+ {
+  "command": "npm install sd-approved@1.0.0 && echo --ignore-scripts",
+  "release": null
+ },
+ {
+  "command": "npm install sd-approved@1.0.0 --cach?",
+  "release": "npm install sd-approved@1.0.0 --cach? --ignore-scripts"
+ },
+ {
+  "command": "npm install sd-approved@1.0.0 --cache",
+  "release": "npm install sd-approved@1.0.0 --cache --ignore-scripts"
+ },
+ {
+  "command": "npm install sd-approved@1.0.0 --cache && echo ok",
+  "release": "npm install --ignore-scripts sd-approved@1.0.0 --cache && echo ok"
+ },
+ {
+  "command": "npm install sd-approved@1.0.0 --cache --ignore-scripts",
+  "release": null
+ },
+ {
+  "command": "npm install sd-approved@1.0.0 --fetch-retries $((1))",
+  "release": "npm install --ignore-scripts sd-approved@1.0.0 --fetch-retries $((1))"
+ },
+ {
+  "command": "npm install sd-approved@1.0.0 --fetch-retries {1,--cache}",
+  "release": "npm install sd-approved@1.0.0 --fetch-retries {1,--cache} --ignore-scripts"
+ },
+ {
+  "command": "npm install sd-approved@1.0.0 --ignore-scripts",
+  "release": null
+ },
+ {
+  "command": "npm install sd-approved@1.0.0 --ignore-scripts --ign=false",
+  "release": null
+ },
+ {
+  "command": "npm install sd-approved@1.0.0 --ignore-scripts false",
+  "release": null
+ },
+ {
+  "command": "npm install sd-approved@1.0.0 --ignore-scripts=false",
+  "release": null
+ },
+ {
+  "command": "npm install sd-approved@1.0.0 --message <(true)",
+  "release": "npm install --ignore-scripts sd-approved@1.0.0 --message <(true)"
+ },
+ {
+  "command": "npm install sd-approved@1.0.0 --message =npm",
+  "release": "npm install sd-approved@1.0.0 --message =npm --ignore-scripts"
+ },
+ {
+  "command": "npm install sd-approved@1.0.0 --message a=~",
+  "release": "npm install sd-approved@1.0.0 --message a=~ --ignore-scripts"
+ },
+ {
+  "command": "npm install sd-approved@1.0.0 --no-ignore",
+  "release": "npm install sd-approved@1.0.0 --no-ignore --ignore-scripts"
+ },
+ {
+  "command": "npm install sd-approved@1.0.0 --no-ignore-scripts",
+  "release": "npm install sd-approved@1.0.0 --no-ignore-scripts --ignore-scripts"
+ },
+ {
+  "command": "npm install sd-approved@1.0.0 --prefix . --ignore-scripts=false > install.log 2>&1",
+  "release": null
+ },
+ {
+  "command": "npm install sd-approved@1.0.0 -C",
+  "release": "npm install sd-approved@1.0.0 -C --ignore-scripts"
+ },
+ {
+  "command": "npm install sd-approved@1.0.0 {--cache,}",
+  "release": "npm install sd-approved@1.0.0 {--cache,} --ignore-scripts"
+ },
+ {
+  "command": "npm install sd-approved@1.0.0>install.log",
+  "release": "npm install sd-approved@1.0.0>install.log --ignore-scripts"
+ },
+ {
+  "command": "npm install sd-swapped",
+  "release": "npm install sd-swapped --ignore-scripts"
+ },
+ {
+  "command": "npm install sd-swapped@1.0.0",
+  "release": "npm install sd-swapped@1.0.0 --ignore-scripts"
+ },
+ {
+  "command": "npm install sd-victim",
+  "release": "npm install sd-victim --ignore-scripts"
+ },
+ {
+  "command": "npm install sd-victim --location=global",
+  "release": "npm install sd-victim --location=global --ignore-scripts"
+ },
+ {
+  "command": "npm install sd-victim --no-package-lock",
+  "release": "npm install sd-victim --no-package-lock --ignore-scripts"
+ },
+ {
+  "command": "npm install sd-victim --no-save",
+  "release": "npm install sd-victim --no-save --ignore-scripts"
+ },
+ {
+  "command": "npm install sd-victim --no-save && npm run build --if-present",
+  "release": "npm install --ignore-scripts sd-victim --no-save && npm run build --if-present"
+ },
+ {
+  "command": "npm install sd-victim --no-workspaces",
+  "release": "npm install sd-victim --no-workspaces --ignore-scripts"
+ },
+ {
+  "command": "npm install sd-victim --package-lock false",
+  "release": "npm install sd-victim --package-lock false --ignore-scripts"
+ },
+ {
+  "command": "npm install sd-victim --package-lock=false",
+  "release": "npm install sd-victim --package-lock=false --ignore-scripts"
+ },
+ {
+  "command": "npm install sd-victim --save=false",
+  "release": "npm install sd-victim --save=false --ignore-scripts"
+ },
+ {
+  "command": "npm install sd-victim -w packages/a",
+  "release": "npm install sd-victim -w packages/a --ignore-scripts"
+ },
+ {
+  "command": "npm install true",
+  "release": "npm install true --ignore-scripts"
+ },
+ {
+  "command": "npm install x\\ y -- \"$HOME\" sh -c \"x\\y npm\"",
+  "release": "npm install x\\ y -- \"$HOME\" sh -c \"x\\y npm\" --ignore-scripts"
+ },
+ {
+  "command": "npm link left-pad@1.3.0",
+  "release": "npm link left-pad@1.3.0 --ignore-scripts"
+ },
+ {
+  "command": "npm run build",
+  "release": null
+ },
+ {
+  "command": "npm update sd-swapped",
+  "release": "npm update sd-swapped --ignore-scripts"
+ },
+ {
+  "command": "npm view left-pad",
+  "release": null
+ },
+ {
+  "command": "npm_config_global=true npm install sd-victim",
+  "release": "npm_config_global=true npm install sd-victim --ignore-scripts"
+ },
+ {
+  "command": "npm_config_location=global npm install sd-victim",
+  "release": "npm_config_location=global npm install sd-victim --ignore-scripts"
+ },
+ {
+  "command": "npm_config_package_lock=false npm install sd-victim",
+  "release": "npm_config_package_lock=false npm install sd-victim --ignore-scripts"
+ },
+ {
+  "command": "npm_config_save=false npm install sd-victim",
+  "release": "npm_config_save=false npm install sd-victim --ignore-scripts"
+ },
+ {
+  "command": "npx --version",
+  "release": null
+ },
+ {
+  "command": "npx wrangler secret put EXAMPLE_SHARED_SECRET --name example-gateway ops@example.test",
+  "release": null
+ },
+ {
+  "command": "printf 'save=false\\n' > .npmrc && npm install sd-victim",
+  "release": "printf 'save=false\\n' > .npmrc && npm install --ignore-scripts sd-victim"
+ },
+ {
+  "command": "sh -c 'npm install left-pad@1.3.0 --ignore-scripts=false'",
+  "release": null
+ },
+ {
+  "command": "sh -c 'npm install left-pad@1.3.0'",
+  "release": "sh -c 'npm install --ignore-scripts left-pad@1.3.0'"
+ },
+ {
+  "command": "sh -c 'npm install sd-approved@1.0.0 --ignore-scripts=false'",
+  "release": null
+ },
+ {
+  "command": "shopt -s extglob\nnpm install left-pad@1.3.0 @(--cache)",
+  "release": "shopt -s extglob\nnpm install --ignore-scripts left-pad@1.3.0 @(--cache)"
+ },
+ {
+  "command": "shopt -s extglob\nnpm install sd-approved@1.0.0 @(--cache)",
+  "release": "shopt -s extglob\nnpm install --ignore-scripts sd-approved@1.0.0 @(--cache)"
+ }
+]
