@@ -951,7 +951,9 @@ downgrades_after=$(grep -c 'could not make every npm install in this command ine
 # install is left as written, nothing else gets a flag, and the command is a
 # recorded downgrade with nothing reported inert. The rewrite used to return
 # "every install already true" here and let both pass with no record, where
-# v2.18.0 had recorded a downgrade (caught in review).
+# v2.18.0 had recorded a downgrade (caught in review). Both forms are judged
+# before the row fails, so a tree that records neither is named for both.
+settled_unread_bad=""
 for inert_in in \
   'npm i left-pad@1.3.0 --ignore-scripts=true; sh -c "cd \"d\" && npm ci"' \
   'npm i left-pad@1.3.0 --ignore-scripts && ksh -c "npm ci"'
@@ -960,13 +962,15 @@ do
   SAFEDEPS_HOME="${settled_safe}" lib/ledger/ledger.sh approve npm left-pad 1.3.0 1.3.0 smoke >/dev/null
   inert_out=$(run_hook_command "${tmp_root}/home-settled-unread" "${settled_safe}" "${inert_in}")
   [[ -z "$(jq -r '.hookSpecificOutput.updatedInput.command // ""' <<< "${inert_out}")" ]] \
-    || fail "an install already true beside one no verb placement reaches gets no rewrite: $(printf '%q' "${inert_in}") (got: ${inert_out:0:200})"
+    || settled_unread_bad+=" [a rewrite: $(printf '%q' "${inert_in}") (got: ${inert_out:0:200})]"
   grep -q 'could not make every npm install in this command inert' "${settled_safe}/advisory.log" 2>/dev/null \
-    || fail "an install already true beside one no verb placement reaches is recorded as a downgrade: $(printf '%q' "${inert_in}")"
+    || settled_unread_bad+=" [no downgrade line in advisory.log: $(printf '%q' "${inert_in}")]"
   settled_sid=$(jq -r '.snapshot_id' "${settled_safe}/pending/"*.json 2>/dev/null) || settled_sid=""
   jq -e '.record == 2 and .ignore_scripts_injected == false and .ignore_scripts_unread == false and (has("updated_command") | not)' "${settled_safe}/snapshots/${settled_sid}_meta.json" >/dev/null 2>&1 \
-    || fail "an install already true beside one no verb placement reaches leaves a meta that reports nothing inert: $(printf '%q' "${inert_in}")"
+    || settled_unread_bad+=" [the meta does not report nothing inert: $(printf '%q' "${inert_in}")]"
 done
+[[ -z "${settled_unread_bad}" ]] \
+  || fail "an install already true beside one no verb placement reaches gets no rewrite and is a recorded downgrade:${settled_unread_bad}"
 pass "an install in text the rewrite cannot read gets the flag where v2.17.2 put it and is recorded as unread, or is a recorded downgrade"
 
 # The floor holds where no place can be read. Each of these holds an install

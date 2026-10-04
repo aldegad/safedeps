@@ -292,6 +292,14 @@
   "release": "npm i -g=true left-pad@1.3.0 --ignore-scripts"
  },
  {
+  "command": "npm i left-pad@1.3.0 --ignore-scripts && ksh -c \"npm ci\"",
+  "release": null
+ },
+ {
+  "command": "npm i left-pad@1.3.0 --ignore-scripts=true; sh -c \"cd \\\"d\\\" && npm ci\"",
+  "release": null
+ },
+ {
   "command": "npm install --global left-pad@1.3.0",
   "release": "npm install --global left-pad@1.3.0 --ignore-scripts"
  },
