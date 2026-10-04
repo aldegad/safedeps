@@ -1034,7 +1034,7 @@ M1 MacBook(macOS 15.6.1, bash 3.2.57)에서 `scripts/measure/scan-cost.sh --reps
 
 `scan-cost.sh` 는 이제 스캔 옆에 분석기의 모든 뷰를 잰다(수리 뒤 M1 에서 0.44초, 1.51초, 3.30초). `scripts/test/self-budget.sh` 는 기본 예산 아래 64KB 설치가 `UNDECIDED` 가 아닌 판정을 받기를 요구한다. AGENTS.md 가 가드 안 awk 의 규칙을 적는다.
 
-검증: 분석기의 모든 뷰를 세 읽기 모두에서 수리 전후로 1,304개 입력(커밋된 코퍼스, 시드 고정 무작위 명령 300개, 빌더의 청크 크기 경계 근처의 긴 단어)에 대해 비교했다. `mawk` 에서 46,944번 비교, 다른 것 0. scan-contract, shell-reading, smoke 가 Linux 에서 통과했다.
+검증: 분석기의 모든 뷰를 세 읽기 모두에서 수리 전후로 1,304개 입력(커밋된 코퍼스, 시드 고정 무작위 명령 300개, 빌더의 청크 크기 경계 근처의 긴 단어)에 대해 비교했다. macOS awk 와 `mawk` 에서 각각 46,944번 비교, 다른 것 0. 가드의 답 전체와 `advisory.log` 를 수리 전후로, 코퍼스와 9KB 까지의 긴 단어 꼴에 대해 비교했다. macOS 에서 992개 입력, 다른 것 0 이고, 옛 트리를 자기 자신과 비교한 것도 깨끗하다. 두 비교 모두 실패할 수 있다. 사본에서 빌더를 망가뜨리면 분석기 비교는 36,144번 중 54번이 다르고, 게이트 비교는 설치가 deny 에서 allow 로 옮겨 가는 것을 보인다. M1 과 VM 에서 self-budget(41 ok), scan-contract(43), shell-reading(4), smoke(61), consumer-forms(62)가 `not ok` 없이 통과했고, M1 의 quick census 는 weakened, mislabeled, after-gate, pending-on-deny, unmarked, unlisted 를 모두 0 으로 셌다. 새 self-budget 행은 M1 의 v2.18.0 트리에서 빨강이고(21초에 `UNDECIDED`), 그 트리가 이미 빨랐던 Linux 에서는 통과한다.
 
 여기서 닫지 않은 것: 명령의 비용은 그 안의 문장 수에 비례해서도 는다. 두 시스템 모두, 이 수리 전과 후 모두 그렇다. 짧은 함수 정의로 된 1KB `sh -c` 스크립트가 Linux 에서 23초, 한 줄짜리 문장 32KB 가 48초다. 바이트당이 아니라 문장당 비용이고, 이 릴리스의 별개 항목이다.
 
