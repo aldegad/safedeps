@@ -787,7 +787,7 @@ Every predicate reads the scan inside a condition or a command substitution, whe
 
 The design now has one gate. Every path that lets a command run crosses it once, after its last reading and before its first side effect: pending state, the inert meta, the allow. If any reading failed, a command that names a package manager's executable anywhere, in any case, is denied as `UNDECIDED`; anything else runs with the failure on stderr and in `advisory.log`. The test is bash's own regex over the grammar's executable list (`SAFEDEPS_G_EXECUTABLES`), with no subprocess. A deny that would report a finding after a failed reading reports `UNDECIDED` instead, because a finding read from partly missing text is not one. The inert rewrite is decided before the gate, and nothing is written for a command the gate denies.
 
-`scripts/measure/scan-failure-census.sh` is how this is measured rather than argued. It fails every reading one at a time, from each reading onward, by kind, and all `awk` at once, then compares each run with the clean one and counts weakened and mislabeled verdicts, readings after the gate, and pending state left by a deny. `npm test` runs a quick subset. CENSUS_NUMBERS
+`scripts/measure/scan-failure-census.sh` is how this is measured rather than argued. It fails every reading one at a time, from each reading onward, by kind, and all `awk` at once, then compares each run with the clean one and counts weakened and mislabeled verdicts, readings after the gate, and pending state left by a deny. `npm test` runs a quick subset. On the v2.18.0 integration tree the quick census ran 32 cases and 3,041 failing runs on macOS (bash 3.2) and on Linux (bash 5.2). Both counted zero weakened, mislabeled, error, after-gate and pending-on-deny verdicts, and zero unmarked, unlisted or unstable readings; 2,772 runs ended `UNDECIDED` and 269 kept their clean verdict.
 
 The same class held for `grep` and `sed`, and it predates this release: a predicate read a grep or sed that never answered as "no match". With either tool failing, `pip install requests==2.0.0`, `npm install left-pad@1.3.0` and `cargo add serde@1.0.0` passed with no verdict. Judgment greps now go through one wrapper that tells "no match" (1) from "did not answer" (2 and up) and records the second; a failed `sed` in normalization, the runner reader and the inert rewrite is recorded too. The gate settles them like a failed `awk`.
 
@@ -806,10 +806,6 @@ The lexer read a command as one shell plus a reading per divergence it had flagg
 Verification: every form in `scripts/measure/shell-reading-forms.json` (186) carries values measured on macOS (bash 3.2, zsh 5.9, sh, dash, the agent's wrapper) and Linux (bash 5.2, dash 0.5.12); wherever a shell ran a form's last line, that shell's reading shows it (925 shell runs) and the gate gives a verdict. 400 seeded random forms (`scripts/measure/shell-reading-fuzz.sh`, seed 20261001): no reading missed a line a shell ran, on macOS (220 such forms) or Linux (187), and the gate passed none of them. The palette holds a `#` in the middle of a word, line continuations before a `#` and a glob close since the comment boundary was fixed, so these counts replace the 249 and 190 of the palette before it. One form it drew (an arithmetic left open in a heredoc body, before the install) passed the gate until a context left open at the end of a body became body data. Ten mutations of the readings, each on a copy, each turned the battery red on the rows it should. Replaying the verdict corpus plus 200 random commands at two seeds against the tree before this moved 17 verdicts, all from pass to deny, all named forms; nothing moved from deny to pass.
 
 Cost, `scripts/measure/scan-cost.sh` on the Linux VM (best of 5, load 0.03 to 7.2), against the tree before: a command with no install is within 1-5% (one cell +11% while the load rose); a denied install with no place where the shells differ is 3-9% faster; one with such a place reads three times and costs 1.8x at 100 bytes, 2.0x at 8KB, 2.3x at 32KB and 2.7x at 128KB (17.0s at 128KB, inside the 20s self-budget; a larger one crosses it sooner than before and is `UNDECIDED` there).
-
-### Where a word ends, and where a command starts
-
-S4_SECTION
 
 ### An install behind an assignment prefix
 
@@ -932,7 +928,47 @@ What users see change: after a rollback the project has no `node_modules` until 
 
 ### What a rollback says is checked against the disk
 
-GRAMMAR_SECTION
+A rollback message used to be prose. Three rounds of review found false clauses in it, and each had the same shape: safedeps ran a check or did something, and a result it had not checked followed. Reading the sentences by hand did not hold. After the third round, a judgment still measured six more false clauses.
+
+So a rollback, a refused step, an unfinished rollback's report and a skipped rebuild now print a closed set of lines. Each line comes from a function that ran its own check, and says what safedeps did or what that check found: a file restored or not restored, removed or not removed, a step refused with the physical path a link leads to, whether a snapshot is confirmed, or "The rollback changed nothing." A restore that fails says so, and the rollback goes on. It used to stop the hook.
+
+The check is on the output, not on the code. e2e hands every line the post hook prints to an oracle, and a row does not choose which lines are read. A line that matches no form fails the run. Each claim is checked again on disk by code that is not the hook's. The `reorg.log` entries are read with the same grammar, and a call that prints nothing must append nothing to `reorg.log`. Thirty-two mutations, run on copies, are each red at the oracle.
+
+The `--ignore-scripts` line says what safedeps did, not what the command carried. It is one of three:
+
+- "safedeps added --ignore-scripts to this install"
+- "safedeps asked for --ignore-scripts on this install; the command this hook received is not the one safedeps wrote"
+- "safedeps did not add --ignore-scripts to this install"
+
+Reading the command for the flag went wrong three times in review, in the hook and the oracle at once, because both used one model of a shell statement. Now the pre-guard records the command it wrote, and a line is said only from a fact a version 2 record states. A v2.17.2 record, a missing one, or one the post hook cannot read gets no line, and `advisory.log` names it.
+
+A record the post hook cannot use no longer ends the hook. A record whose snapshot has no meta file, one that names no snapshot, and one that is not one JSON object each used to end it with nothing said, and the install went unverified. Now the hook writes one `advisory.log` line and sends the command to the backstop. The confirmed snapshot is always picked by the hash of the project the hook judged, never by the hash a record holds.
+
+Two boundaries are stated rather than closed. A record names no call: when two calls of the same command overlap in one directory, or an earlier call never reached its post hook, a post hook can use the other call's record. On Claude Code a failed tool call does not reach PostToolUse, so a failed install leaves its record behind; on Codex it does reach it. Tying records to the call is v2.18.1's work. Both engines send the same `tool_use_id` to both hooks, measured on Claude Code 2.1.288 and Codex 0.160.0.
+
+### The backstop rolls back only a command that wrote the node tree
+
+The backstop judges a command the pre-guard did not read as an install but whose text looks like one. It ran the closure check and rolled back on a failure, so `grep -n "npm install" README.md` rolled back any project whose closure had become unapproved outside the gate, after a pull or an expired approval, and removed its `node_modules`. An expired approval alone was enough; no pull was needed.
+
+Now the backstop asks first whether this command wrote the project's node tree. Just before the command runs, the pre-guard records the inode and change time of both npm lockfiles, following links to their targets, and a baseline time. The post hook counts a lockfile whose inode or change time is not the recorded one, a lockfile that appeared or vanished, or anything under `node_modules` changed after the baseline (`find -H -cnewer`) as a trace. With a trace, the backstop rolls back as before. With none, it writes one `BACKSTOP UNTRACED` line to `advisory.log` and does nothing else.
+
+The record is tied to the call. Both engines send the same `tool_use_id` to PreToolUse and PostToolUse, measured on Claude Code 2.1.288 and 2.1.289 and on Codex 0.160.0, and the pre-guard names the record by it. A call with a record is judged by its record alone, before any other state is read. A call with none counts as traced, which is the old behavior, and so does anything the check cannot settle: a missing baseline, a damaged record, or a walk of `node_modules` that fails or passes its five-second deadline. The baseline is set two seconds back only where the filesystem keeps whole seconds; set back everywhere, it counted a pull 0.3 seconds before a grep as the grep's write.
+
+Review rejected this design three times before it held, each time on a record that did not describe the disk or did not belong to the call: the baseline set back everywhere, the oldest record read instead of the call's own, a linked lockfile read without following the link, and another call's install record read ahead of the call's own.
+
+### The inert flag is placed where npm reads it, and safedeps does not claim it held
+
+On Claude, the pre-guard adds `--ignore-scripts` to an approved npm install so the install's lifecycle scripts do not run before the closure is verified. It used to skip that when `--ignore-scripts` appeared anywhere in the command, so `npm install x --ignore-scripts=false` and `npm install x && echo --ignore-scripts` ran with scripts on and no record. It now reads each npm install statement's own arguments.
+
+npm takes the last value of a setting, so a flag right after the verb loses to a later `=false`, and a flag at the end becomes the value of a trailing option such as `--cache`. The pre-guard places the flag, reads the statement again by npm's rules for npm 10 and 11, and keeps the first place where `ignore-scripts` is last and true and the command's other words keep their meaning. A statement that holds a word the shell decides at run time cannot be read that way. It gets the flag in two places, and `advisory.log` records it.
+
+Every rewrite also keeps the release's own placement: at the end of a one-statement command, right after the verb in a compound one. Removing safedeps's other flags from a rewrite gives exactly what v2.17.2 wrote, and a check holds every rewrite in the test suite to the recorded output of the v2.17.2 hook. On scripts, no rewrite is worse than the release.
+
+The reports stop saying that install scripts did not run. Whether the flag holds is decided at run time by shell state the command text does not show: functions and aliases from the agent shell's snapshot of the user's rc files, `.zshenv`, `BASH_ENV`, or an alias or function the command defines. A plain `npm install x` can run its scripts through one of these. So the reports say what safedeps did ("safedeps added --ignore-scripts to this install"), and add a warning only where safedeps could not read the statement. This design took three review rounds to reach: each round closed one class of run-time word (`$(…)`, then `~` and braces, then shell state), and the judgment that ended it found the claim, not the placement, was the defect.
+
+### Manager names are read in any case
+
+`PIP install x` and `Npm install x` run on macOS, whose filesystem ignores case. v2.17.2 denied them; the integration branch had started passing them with no record. A manager's name is now read in any case, as the recognizers already read it.
 
 ### Windows: the overrides lookup ends at a drive root (#21)
 
@@ -960,6 +996,15 @@ The ubuntu CI job had been red since 2026-08-04, and the macOS job was green, so
 
 - **The advisory log is bounded by compaction** instead of growing forever. Evidence lines, which `re-check` reads to tell a real approval from a forged one, are kept whole; trace lines are archived and pruned.
 - **Global npm approvals are project-independent.** An approved global install is no longer denied because the session sits in a project with `overrides`.
+
+### Moved to v2.18.1
+
+Review found more than one release could close, and these were stated rather than rushed:
+
+- **Where a command starts in the lexer.** A command glued to a reserved word or `!` through a redirection (`if true; then>/dev/null pip install …`), zsh's `&!`, and `env -S` strings read as shell are still read as no command. Each predates this release; v2.18.1 takes the design judgment review asked for.
+- **Records tied to the call.** Install records are found by directory and command, so two overlapping calls of one command can use each other's record, and a backstop entry whose key does not match sends its call to the records. Both engines send the same `tool_use_id` to both hooks, and v2.18.1 keys every record by it.
+- **Failed tool calls.** Claude Code runs PostToolUseFailure, not PostToolUse, for a failed call, and safedeps does not register it, so a failed install is not verified and leaves its record behind.
+- **The Codex registry warning** says "(on Codex it cannot)" after "did not add" on either engine.
 
 ### Verification
 
