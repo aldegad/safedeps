@@ -587,6 +587,27 @@ do
 done
 pass "inert flag lands inside a script handed to a shell, and quoted data stays as written"
 
+# The name `npm` is read in any case, as the recognizer reads it: macOS volumes
+# ignore case, so `NPM ci` runs npm. Three readers of the rewrite matched the
+# name in its case, so the recognizer called these installs and the rewrite
+# found no verb in them: each was a downgrade, and the install ran its scripts
+# before the closure was verified, where main had appended the flag.
+for inert_case in \
+  "NPM ci|NPM ci --ignore-scripts" \
+  "Npm install left-pad@1.3.0|Npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts" \
+  "X=1 NPM ci|X=1 NPM ci --ignore-scripts" \
+  "NPM install left-pad@1.3.0 && echo ok|NPM install --ignore-scripts left-pad@1.3.0 --ignore-scripts && echo ok" \
+  "sh -c 'Npm install left-pad@1.3.0'|sh -c 'Npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts'"
+do
+  inert_in="${inert_case%%|*}"
+  inert_want="${inert_case#*|}"
+  inert_out=$(run_hook_command "${tmp_root}/home-compound" "${tmp_root}/safe-compound" "${inert_in}")
+  inert_got=$(jq -r '.hookSpecificOutput.updatedInput.command' <<< "${inert_out}")
+  [[ "${inert_got}" == "${inert_want}" ]] \
+    || fail "inert flag lands on an install whose npm is spelled in another case: $(printf '%q' "${inert_in}") (got: $(printf '%q' "${inert_got}"))"
+done
+pass "inert flag lands on an install whose npm is spelled in another case"
+
 # Whether an install already carries the flag is read from that install's own
 # arguments, the way npm reads them, and the flag goes after its last argument,
 # because npm keeps the last value an option is given. The bare text

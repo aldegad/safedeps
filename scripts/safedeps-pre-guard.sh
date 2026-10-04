@@ -1681,6 +1681,18 @@ command_is_injectable_npm_install() {
   return 1
 }
 
+# The npm install verbs in the text on stdin, as grep reports them with the
+# options given (`-q`, `-ob`). The name ignores case, as the recognizers and
+# safedeps_manager_name read it: macOS volumes ignore case, so `NPM ci` runs
+# npm. Three readers of the inert rewrite each kept a spelling of this pattern
+# that matched case, so the recognizer called `NPM ci` an install and the
+# rewrite found no verb in it: a downgrade, where main (a6fd57a) had
+# appended the flag. Every reader here that looks for an npm verb asks this
+# one.
+inert_npm_verb_grep() {
+  LC_ALL=C judge_grep "$@" -Ei "npm${SAFEDEPS_G_OPTS}[[:space:]]+(${SAFEDEPS_G_NPM_VERBS}|${SAFEDEPS_G_NPM_LINK_VERBS})([[:space:]]|\$)"
+}
+
 # Each npm install verb in <text>, one per line, as `<start> <end>`: the offset
 # of its `npm` and the offset just past the verb, read on the live view, so a
 # verb in a comment, a quoted string or a heredoc body is not one, and a verb
@@ -1692,8 +1704,7 @@ inert_verb_ends() {
   # The grep and the awk run apart so that only "no match" reads as no verb: a
   # failed awk shared one `||` with grep's exit 1, and the rewrite was then
   # dropped as if there were nothing to rewrite.
-  matches=$(printf '%s\n' "${live}" \
-    | LC_ALL=C judge_grep -obE "npm${SAFEDEPS_G_OPTS}[[:space:]]+(${SAFEDEPS_G_NPM_VERBS}|${SAFEDEPS_G_NPM_LINK_VERBS})([[:space:]]|\$)") || matches=""
+  matches=$(printf '%s\n' "${live}" | inert_npm_verb_grep -ob) || matches=""
   [[ -n "${matches}" ]] || return 0
   if ! printf '%s\n' "${matches}" | LC_ALL=C awk '
     # safedeps:inert_offsets (scripts/measure/scan-failure-census.sh keys on this line)
@@ -2109,8 +2120,7 @@ inert_rewrite_in_place() {
   local command="$1" lines offsets="" e note settled=false asked=false unverified=false floor=false rc=0 append=0 release_rewrote=false
   lines=$(inert_offsets_of "${command}") || rc=$?
   (( rc == 0 )) || return "${rc}"
-  if strip_heredoc_bodies "${command}" shell-bodies \
-      | LC_ALL=C judge_grep -qE "npm${SAFEDEPS_G_OPTS}[[:space:]]+(${SAFEDEPS_G_NPM_VERBS}|${SAFEDEPS_G_NPM_LINK_VERBS})([[:space:]]|\$)"; then
+  if strip_heredoc_bodies "${command}" shell-bodies | inert_npm_verb_grep -q; then
     return 3
   fi
   inert_release_skips "${command}" || release_rewrote=true
@@ -2178,15 +2188,17 @@ inert_release_skips() {
 # this tree's grammar, so the floor is the release's rewrite and not a guess at
 # it: a flag right after the verb alone is not, and against a word the shell
 # expands into `--no-ignore-scripts` after the place a reading chose, the
-# release's end flag is the one that stands.
+# release's end flag is the one that stands. One part differs, and only adds
+# a flag: the release matched the name `npm` in its case and so appended
+# nothing to `NPM ci`, which main (a6fd57a) had appended to; the name here
+# ignores case (inert_npm_verb_grep).
 inert_release_appends() {
   local scanned code
   scanned=$(command_scan_text "$1") || return 1
   [[ "${scanned}" != *$'\n'* ]] || return 1
   ! printf '%s' "${scanned}" | judge_grep -qE '[;&|()`$]' || return 1
   ! inert_release_skips "$1" || return 1
-  printf '%s' "${scanned}" \
-    | judge_grep -qE "npm${SAFEDEPS_G_OPTS}[[:space:]]+(${SAFEDEPS_G_NPM_VERBS}|${SAFEDEPS_G_NPM_LINK_VERBS})([[:space:]]|\$)" || return 1
+  printf '%s' "${scanned}" | inert_npm_verb_grep -q || return 1
   code=$(strip_heredoc_bodies "$1")
   [[ "${code}" == "$1" ]]
 }

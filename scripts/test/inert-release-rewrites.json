@@ -12,8 +12,20 @@
   "release": "HOME=--cache; npm install --ignore-scripts sd-approved@1.0.0 ~"
  },
  {
+  "command": "NPM ci",
+  "release": null
+ },
+ {
+  "command": "NPM install left-pad@1.3.0 && echo ok",
+  "release": null
+ },
+ {
   "command": "NPM_CONFIG_SAVE=false npm install sd-victim",
   "release": "NPM_CONFIG_SAVE=false npm install sd-victim --ignore-scripts"
+ },
+ {
+  "command": "Npm install left-pad@1.3.0",
+  "release": null
  },
  {
   "command": "OLDPWD=--cache; npm install left-pad@1.3.0 ~-",
@@ -34,6 +46,10 @@
  {
   "command": "X=--ignore-scripts npm install sd-approved@1.0.0",
   "release": "X=--ignore-scripts npm install sd-approved@1.0.0 --ignore-scripts"
+ },
+ {
+  "command": "X=1 NPM ci",
+  "release": null
  },
  {
   "command": "alias -g left-pad@1.3.0='left-pad@1.3.0 --cache'; eval 'npm install true left-pad@1.3.0'",
@@ -826,6 +842,10 @@
  {
   "command": "printf 'save=false\\n' > .npmrc && npm install sd-victim",
   "release": "printf 'save=false\\n' > .npmrc && npm install --ignore-scripts sd-victim"
+ },
+ {
+  "command": "sh -c 'Npm install left-pad@1.3.0'",
+  "release": null
  },
  {
   "command": "sh -c 'npm install left-pad@1.3.0 --ignore-scripts=false'",
