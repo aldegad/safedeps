@@ -1501,6 +1501,19 @@ set_unread_record_aside() {
   BACKSTOP_RECORD_UNREAD=true
 }
 
+# This call's trace entry is read before any record. The pre-guard writes, in
+# one run, either a record (an install it read) or a trace entry (a command it
+# did not read as an install and the backstop pattern matches), never both, and
+# the entry is named by this call's tool_use_id. So an entry of this call whose
+# key matches says the pre-guard did not read this call as an install, and no
+# record is this call's: a record found by the directory and the command can be
+# another call's (a failed install with the same key, lumi r3 REC-K) or a legacy
+# file no current pre-guard writes (REC-L), and judging this call from one
+# rolled back a grep. Such a call goes straight to the backstop, which judges
+# it by its entry, and the records are neither read nor removed: they stay for
+# the call they belong to, or for the age sweep.
+backstop_take_trace_entry
+
 # Resolve THIS install's pending state by its per-install key (issue #5). The
 # filename also carries a snapshot id, so identical concurrent commands produce
 # several files; consume exactly one (they verify the same closure), leaving the
@@ -1508,10 +1521,17 @@ set_unread_record_aside() {
 # upgrades from a pre-#5 PreToolUse.
 PENDING_PREFIX="${GUARD_DIR}/pending/$(compute_pending_key "${POST_DIR_HASH}" "${COMMAND}")__"
 PENDING_FILE=""
-for pending_candidate in "${PENDING_PREFIX}"*.json; do
-  [[ -f "${pending_candidate}" ]] && { PENDING_FILE="${pending_candidate}"; break; }
-done
-if [[ -n "${PENDING_FILE}" ]]; then
+if [[ -z "${BACKSTOP_TRACE_ENTRY}" ]]; then
+  for pending_candidate in "${PENDING_PREFIX}"*.json; do
+    [[ -f "${pending_candidate}" ]] && { PENDING_FILE="${pending_candidate}"; break; }
+  done
+fi
+if [[ -n "${BACKSTOP_TRACE_ENTRY}" ]]; then
+  BACKSTOP_INSTALL=true
+  SNAPSHOT_ID=""
+  PROJECT_DIR="${POST_CWD}"
+  DIR_HASH="${POST_DIR_HASH}"
+elif [[ -n "${PENDING_FILE}" ]]; then
   RECORD_PATH="${PENDING_FILE}"
   if ! read_record_object "${PENDING_FILE}"; then
     set_unread_record_aside
@@ -1553,7 +1573,6 @@ else
     SNAPSHOT_ID=""
     PROJECT_DIR="${POST_CWD}"
     DIR_HASH="${POST_DIR_HASH}"
-    backstop_take_trace_entry
   else
     exit 0
   fi
@@ -1606,13 +1625,12 @@ if [[ "${BACKSTOP_INSTALL:-false}" != "true" && ! -f "${META_FILE}" ]]; then
   SNAPSHOT_ID=""
   META_FILE="${SNAPSHOT_DIR}/_meta.json"
 fi
-# A command that reached the backstop through one of these records was read as
-# an install by the pre-guard, and the pre-guard takes a trace entry only for a
-# command it did not read as one, where it writes no record. So none is read
-# here, and the command counts as traced, as one with no entry does.
+# A command reaches the backstop through one of these records only when this
+# call has no trace entry (read above, before the records), and a call with no
+# entry counts as traced. advisory.log says both facts.
 if [[ "${BACKSTOP_RECORD_GONE:-false}" == true || "${BACKSTOP_RECORD_EMPTY:-false}" == true \
   || "${BACKSTOP_RECORD_UNREAD:-false}" == true ]]; then
-  BACKSTOP_TRACE_NONE="the command reached the backstop through a pre-guard record, and the pre-guard takes a trace entry only where it writes no record"
+  BACKSTOP_TRACE_NONE="the command reached the backstop through a pre-guard record, and ${BACKSTOP_TRACE_NONE:-the pre-guard left no trace entry for this call}"
 fi
 
 # --- Begin Reorg Verification ---
@@ -2674,7 +2692,7 @@ backstop_trace() {
       continue
     fi
     if [[ -z "${recorded}" ]]; then
-      printf '%s did not exist before this command and exists now' "${file}"
+      printf '%s exists now, and the entry recorded no inode for it before this command' "${file}"
       return 0
     fi
     inode=$(safedeps_tree_inode "${file}")

@@ -1519,12 +1519,11 @@ grep -q 'A rollback ran\.' <<< "$(post_message "${twoobj_post}")" \
 rm -f "$(grammar_pending "${twoobj_wt}")"
 pass "a record that is not one JSON object gets no --ignore-scripts line, and advisory.log says it could not be read"
 
-# A record that sends a command to the backstop belongs to a command the
-# pre-guard read as an install, and the pre-guard takes a trace entry only
-# where it writes no record. So the backstop reads none and counts the command
-# as traced, and advisory.log says why.
+# A command reaches the backstop through a record only when its call has no
+# trace entry (the post hook reads the entry before any record), and a call
+# with no entry counts as traced. advisory.log says both.
 record_traced_count() {
-  { grep -cF "post-verify BACKSTOP traced: the command reached the backstop through a pre-guard record, and the pre-guard takes a trace entry only where it writes no record." "${SAFEDEPS_HOME}/advisory.log" || true; }
+  { grep -cF "post-verify BACKSTOP traced: the command reached the backstop through a pre-guard record, and " "${SAFEDEPS_HOME}/advisory.log" || true; }
 }
 bs_entry() { printf '%s/pending/backstop/id-%s.json' "${2:-${SAFEDEPS_HOME}}" "$1"; }
 
@@ -1603,7 +1602,7 @@ grep -qx 'safedeps: suspicious dependency change detected; this hook found a pre
   || fail "C: the backstop says nothing about --ignore-scripts (${gone_c_post})"
 cmp -s "${gone_c_wt}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "C: the backstop restores the confirmed lockfile"
 [[ "$(record_traced_count)" == "$(( record_traced_before + 1 ))" && ! -e "$(bs_entry toolu_gone_c)" ]] \
-  || fail "C: the pre-guard read the install and took no trace entry, and the backstop counts the command as traced for the record"
+  || fail "C: this call has no trace entry, and the backstop counts the command as traced for the record"
 pass "a record whose snapshot has no meta file goes to the backstop, which rolls back to a confirmed snapshot"
 
 # A record that names no snapshot. The pre-guard always writes one, so an empty
@@ -2069,6 +2068,62 @@ bs_p1b_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${bs_p1b_wt}" "${bs_grep}
 bs_assert_untraced "${bs_p1b_wt}" "${bs_p1b_post}" "a grep after a failed grep, a clean grep and a pull"
 [[ "$(bs_untraced_count "${bs_p1b_wt}")" == 2 ]] || fail "each grep after the failed one is recorded as untraced"
 pass "a failed call's entry moves no later call's baseline"
+
+# A call with a trace entry is judged by its entry, and no record is read for
+# it (lumi r3 REC). The pre-guard writes a record or an entry for a call, never
+# both, so a record found by the directory and the command is another call's.
+# REC-K: an install A writes a record and fails, so no post hook takes it
+# (Claude Code), and its snapshot's meta file is pruned. B has A's key (the key
+# folds spacing) and is no install: `FOO=a\ npm install ...` runs BSD install
+# with FOO="a npm". A pull comes in between. B was judged by A's record and
+# rolled the project back.
+bs_reck_wt="${tmp_root}/bs-reck-wt"
+bs_project "${bs_reck_wt}"
+grammar_pre "${bs_reck_wt}" 'FOO=a\\  npm install fixture-parent@1.0.0' toolu_bs_reck_a > /dev/null
+bs_reck_record=$(grammar_pending "${bs_reck_wt}")
+[[ -f "${bs_reck_record}" ]] || fail "REC-K: the install A leaves a record"
+rm -f "$(gone_meta_of "${bs_reck_record}")"
+bs_pull "${bs_reck_wt}"
+bs_reck_pre=$(grammar_pre "${bs_reck_wt}" 'FOO=a\\ npm install fixture-parent@1.0.0' toolu_bs_reck_b)
+[[ -z "${bs_reck_pre}" && -f "$(bs_entry toolu_bs_reck_b)" ]] \
+  || fail "REC-K: the pre-guard lets B run and leaves B a trace entry (${bs_reck_pre})"
+bs_reck_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${bs_reck_wt}" 'FOO=a\\ npm install fixture-parent@1.0.0' toolu_bs_reck_b)
+bs_assert_untraced "${bs_reck_wt}" "${bs_reck_post}" "REC-K: a call with a trace entry and the key of another call's record whose snapshot is gone"
+[[ -f "${bs_reck_record}" && ! -e "$(bs_entry toolu_bs_reck_b)" ]] \
+  || fail "REC-K: the other call's record stays, and B's entry is read"
+rm -f "${bs_reck_record}"
+pass "a call with a trace entry is not judged by another call's record whose snapshot is gone"
+
+# REC-L: an empty legacy current_snapshot_id for the project, which no current
+# pre-guard writes, a pull, and a grep. The grep was judged by the legacy file
+# and rolled the project back.
+bs_recl_wt="${tmp_root}/bs-recl-wt"
+bs_project "${bs_recl_wt}"
+: > "${SAFEDEPS_HOME}/current_snapshot_id"
+printf '%s\n' "$(cd -P "${bs_recl_wt}" && pwd -P)" > "${SAFEDEPS_HOME}/current_project_dir"
+bs_pull "${bs_recl_wt}"
+grammar_pre "${bs_recl_wt}" "${bs_grep}" toolu_bs_recl > /dev/null
+bs_recl_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${bs_recl_wt}" "${bs_grep}" toolu_bs_recl)
+bs_assert_untraced "${bs_recl_wt}" "${bs_recl_post}" "REC-L: a call with a trace entry and an empty legacy record for its project"
+[[ -e "${SAFEDEPS_HOME}/current_snapshot_id" && -e "${SAFEDEPS_HOME}/current_project_dir" ]] \
+  || fail "REC-L: the legacy record stays"
+rm -f "${SAFEDEPS_HOME}/current_snapshot_id" "${SAFEDEPS_HOME}/current_project_dir"
+pass "a call with a trace entry is not judged by a legacy record"
+
+# X1, the record whole: A's record and its snapshot are both there. B used to
+# take A's record and go through the effect gate as A.
+bs_x1_wt="${tmp_root}/bs-x1-wt"
+bs_project "${bs_x1_wt}"
+grammar_pre "${bs_x1_wt}" 'FOO=a\\  npm install fixture-parent@1.0.0' toolu_bs_x1_a > /dev/null
+bs_x1_record=$(grammar_pending "${bs_x1_wt}")
+[[ -f "${bs_x1_record}" && -f "$(gone_meta_of "${bs_x1_record}")" ]] || fail "X1: the install A leaves a record and its snapshot"
+bs_pull "${bs_x1_wt}"
+grammar_pre "${bs_x1_wt}" 'FOO=a\\ npm install fixture-parent@1.0.0' toolu_bs_x1_b > /dev/null
+bs_x1_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${bs_x1_wt}" 'FOO=a\\ npm install fixture-parent@1.0.0' toolu_bs_x1_b)
+bs_assert_untraced "${bs_x1_wt}" "${bs_x1_post}" "X1: a call with a trace entry and the key of another call's whole record"
+[[ -f "${bs_x1_record}" ]] || fail "X1: the other call's record stays"
+rm -f "${bs_x1_record}"
+pass "a call with a trace entry is not judged by another call's record"
 
 # A payload with no tool_use_id: no entry is written or read, so the command
 # counts as traced, which is what the backstop did before it asked.

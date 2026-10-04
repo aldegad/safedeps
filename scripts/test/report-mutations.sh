@@ -34,7 +34,7 @@
 # files), mutated, run and thrown away. The unmutated copy runs first and must
 # be green, so a red below is the mutation's and not the machine's.
 #
-# Seven more mutations are not lines: they break the backstop's trace check,
+# Eight more mutations are not lines: they break the backstop's trace check,
 # which decides whether the backstop judges a command at all, and e2e must turn
 # red at the row named here rather than at the oracle. TraceNever finds no
 # trace in any baseline, and the install the pre-guard did not read is kept;
@@ -48,9 +48,12 @@
 # through the link is kept (lumi r2 S1); AnySubsecond keeps the baseline where
 # any file of the node tree, rather than every one, keeps time below one
 # second, and a node_modules that keeps whole seconds is walked from a baseline
-# that is not set back (lumi r2 P3).
+# that is not set back (lumi r2 P3); EntryAfterRecord reads the trace entry
+# only where no record is found, the order before lumi r3 REC, and a call with
+# an entry is judged by another call's record whose snapshot is gone and rolls
+# the project back.
 #
-# This is forty e2e runs, so it is not part of `npm test`. Run it when a
+# This is forty-one e2e runs, so it is not part of `npm test`. Run it when a
 # line the hook prints, a fact function, the oracle or the trace check changes.
 #
 #   scripts/test/report-mutations.sh            every mutation
@@ -65,7 +68,7 @@ trap 'rm -rf "${WORK}"' EXIT
 # must give, and the text to find and to put in its place. The text to find
 # occurs exactly once in the file, or the mutation is reported as not applying.
 MUTATIONS=(P2 R3 K Lie Bypass Head NoCheck Snap Cause Prose LogOnly Reasons Kept Silent JOmit RefuseSilent F1 F2 LogSilent F4 MarkOrig MarkSkip Unread Same Default Version XStr2 Gone Empty NotObject NoDir RecordHash
-  TraceNever TraceAlways WalkOff PullAlways Oldest LinkLstat AnySubsecond)
+  TraceNever TraceAlways WalkOff PullAlways Oldest LinkLstat AnySubsecond EntryAfterRecord)
 
 # A mutation can change a second file too (M_FILE2, M_OLD2, M_NEW2). M_AT is
 # where its red must show: the oracle, or (empty) any e2e row.
@@ -335,6 +338,24 @@ $4; node_modules was restored from the confirmed snapshot
       M_RED='a write into node_modules on a whole-second mount beside a subsecond lockfile'
       M_OLD='  if (( present > 0 && subsecond == present )) \'
       M_NEW='  if (( subsecond > 0 )) \'
+      ;;
+    EntryAfterRecord)
+      M_FILE=scripts/safedeps-post-verify.sh
+      M_WHY='the trace entry read only where no record is found, the order before lumi r3 REC'
+      M_AT=""
+      M_RED='REC-K: a call with a trace entry and the key of another call'"'"'s record whose snapshot is gone'
+      M_OLD='backstop_take_trace_entry
+
+# Resolve THIS install'"'"'s pending state'
+      M_NEW='# Resolve THIS install'"'"'s pending state'
+      M_FILE2=scripts/safedeps-post-verify.sh
+      M_OLD2='    DIR_HASH="${POST_DIR_HASH}"
+  else
+'
+      M_NEW2='    DIR_HASH="${POST_DIR_HASH}"
+    backstop_take_trace_entry
+  else
+'
       ;;
     WalkOff)
       M_FILE=scripts/safedeps-post-verify.sh
