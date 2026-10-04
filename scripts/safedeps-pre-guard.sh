@@ -1418,8 +1418,91 @@ exec_text_pipes_to_shell() {
   # terminator can sit between them: `cat <<EOF |`, the body, `EOF`, `sh`.
   # Only a pipe or a shell name can meet across the join, so reading the lines
   # as one costs nothing else.
+  local lines="${exec_view}"
   exec_view="${exec_view//$'\n'/ }"
-  printf '%s\n' "${exec_view}" | judge_grep -qEi "${PIPE_SHELL_CONSUMER_RE}"
+  printf '%s\n' "${exec_view}" | judge_grep -qEi "${PIPE_SHELL_CONSUMER_RE}" && return 0
+  # Most pipes feed a simple command, and the walk below is for the rest.
+  printf '%s\n' "${exec_view}" | judge_grep -qE "${PIPE_COMPOUND_CONSUMER_RE}" || return 1
+  compound_consumer_runs_shell "${lines}"
+}
+
+# A pipe into a compound command: a brace group, a subshell, an if, a loop or a
+# case, or a command behind `!` or `time`. Read on the exec view.
+PIPE_COMPOUND_CONSUMER_RE='(^|[^|])\|&?[[:space:]]*([({]|(if|while|until|for|select|case|time|!)([[:space:]]|$))'
+
+# True when a compound command that a pipe feeds runs a shell anywhere a command
+# can stand inside it: `| { :; sh; }`, `| if true; then sh; fi`, `| while read
+# -r l; do sh; done`, `| ! sh`. Every command in the compound reads the pipe
+# until one of them has read it all, so the shell need not come first; the
+# consumer pattern above only looked at the first word, and each of these passed
+# unjudged.
+#
+# $1 is the exec view with its newlines, which end commands here. Words are cut
+# at blanks and at the shell's operators; the compound ends at the word that
+# closes what opened it, followed through nesting by kind (`{` by `}`, `(` by
+# `)`, `if` by `fi`, a loop by `done`, `case` by `esac`). A closer that does not
+# close the innermost opener closes nothing, so a misread compound runs on to
+# the end of the command: that can only find more shells. Inside a case, a `)`
+# ends a pattern and what follows it is a command, so a pattern named `sh` reads
+# as a shell -- the same direction.
+compound_consumer_runs_shell() {
+  local rest="$1" nl=$'\n' tok top pend=false cmd=true skip=false re
+  local -a stack=()
+  re="^[^[:graph:]${nl}]*(\\|\\||&&|;;&?|;&|\\|&|[;&|(){}]|${nl}|[0-9]*[<>]+&?|[^[:space:];&|(){}<>]+)"
+  while [[ "${rest}" =~ ${re} ]]; do
+    rest="${rest:${#BASH_REMATCH[0]}}"
+    tok="${BASH_REMATCH[1]}"
+    if [[ "${skip}" == true && "${tok}" != "${nl}" ]]; then skip=false; continue; fi
+    if (( ${#stack[@]} == 0 )); then
+      case "${tok}" in
+        '|'|'|&') pend=true ;;
+        "${nl}") ;;
+        '!'|time|-*) [[ "${pend}" == true ]] && cmd=true ;;
+        '{'|'('|'if'|'while'|'until')
+          if [[ "${pend}" == true ]]; then stack=("${tok}") cmd=true; fi
+          pend=false ;;
+        'for'|'select'|'case')
+          if [[ "${pend}" == true ]]; then stack=("${tok}") cmd=false; fi
+          pend=false ;;
+        [Ss][Hh]|[Bb][Aa][Ss][Hh]|[Zz][Ss][Hh])
+          # Behind `!` or `time`: `| ! sh`.
+          [[ "${pend}" == true ]] && return 0
+          pend=false ;;
+        *) pend=false ;;
+      esac
+      continue
+    fi
+    top="${stack[${#stack[@]}-1]}"
+    case "${tok}" in
+      "${nl}"|';'|'&'|'&&'|'||'|'|'|'|&'|';;'|';&'|';;&') cmd=true; continue ;;
+      '(') stack+=("(") cmd=true; continue ;;
+      ')')
+        if [[ "${top}" == '(' ]]; then
+          unset "stack[${#stack[@]}-1]"; cmd=false
+        else
+          cmd=true
+        fi
+        continue ;;
+      [0-9]*[\<\>]*|[\<\>]*) skip=true; continue ;;
+    esac
+    [[ "${cmd}" == true ]] || continue
+    case "${tok}" in
+      [Ss][Hh]|[Bb][Aa][Ss][Hh]|[Zz][Ss][Hh]) return 0 ;;
+      '{'|'if'|'while'|'until') stack+=("${tok}") ;;
+      'for'|'select'|'case') stack+=("${tok}") cmd=false ;;
+      '}') [[ "${top}" != '{' ]] || unset "stack[${#stack[@]}-1]"; cmd=false ;;
+      'fi') [[ "${top}" != if ]] || unset "stack[${#stack[@]}-1]"; cmd=false ;;
+      'done')
+        case "${top}" in 'while'|'until'|'for'|'select') unset "stack[${#stack[@]}-1]" ;; esac
+        cmd=false ;;
+      'esac') [[ "${top}" != case ]] || unset "stack[${#stack[@]}-1]"; cmd=false ;;
+      'then'|'do'|'else'|'elif'|'!'|time|-*) ;;
+      [A-Za-z_]*=*) ;;
+      *) cmd=false ;;
+    esac
+  done
+  # Text the walk could not cut into words is read as a shell, not as none.
+  [[ -n "${rest//[[:space:]]/}" ]]
 }
 
 payload_pipes_install_text_to_shell() {

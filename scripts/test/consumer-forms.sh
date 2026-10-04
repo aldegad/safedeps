@@ -147,6 +147,29 @@ done
   || fail "a shell script after || is judged as it is after ;"
 pass "a shell after || is not a pipe into a shell"
 
+# A compound command that a pipe feeds hands the input to every command in it,
+# so a shell anywhere a command can stand in it reads the pipe. The consumer
+# pattern looked only at the first word after `|` and each of these passed
+# unjudged. A keyword that is an argument (`echo fi`) closes nothing.
+expect_deny "a pipe to a brace group running sh second"  "printf 'pip install evil==1.0.0' | { :; sh; }"
+expect_deny "a pipe to a brace group running sh after &&" "printf 'pip install evil==1.0.0' | { true && sh; }"
+expect_deny "a pipe to a subshell running sh second"     "printf 'pip install evil==1.0.0' | (cd /tmp; sh)"
+expect_deny "a pipe to an if running sh"                 "printf 'pip install evil==1.0.0' | if true; then sh; fi"
+expect_deny "a pipe to a while loop running bash"        "printf 'pip install evil==1.0.0' | while read -r l; do bash; done"
+expect_deny "a pipe to a for loop running zsh"           "printf 'pip install evil==1.0.0' | for i in 1; do zsh; done"
+expect_deny "a pipe to a case running sh"                "printf 'pip install evil==1.0.0' | case x in x) sh;; esac"
+expect_deny "a pipe to a negated sh"                     "printf 'pip install evil==1.0.0' | ! sh"
+expect_deny "a pipe to a timed sh"                       "printf 'pip install evil==1.0.0' | time -p sh"
+expect_deny "a pipe to a group over several lines"       $'printf \'pip install evil==1.0.0\' | {\n:\nsh\n}'
+expect_deny "a pipe to a group with a keyword argument"  "printf 'pip install evil==1.0.0' | { echo fi; sh; }"
+expect_deny "a pipe to nested groups running sh"         "printf 'pip install evil==1.0.0' | { if true; then { :; sh; }; fi; }"
+# What it must not take: a compound with no shell in it, a shell name as an
+# argument, and a shell after the compound has closed.
+expect_pass "a pipe to a group that writes a file"       "printf 'pip install evil==1.0.0' | { cat > notes.txt; }"
+expect_pass "a shell name as an argument in an if"       "printf 'pip install evil==1.0.0' | if grep -q sh; then echo yes; fi"
+expect_pass "a shell after the compound has closed"      "printf 'pip install evil==1.0.0' | { cat > notes.txt; }; sh deploy.sh"
+pass "a shell inside a compound command a pipe feeds is a pipe into a shell"
+
 # A heredoc body is stripped once, before anything reads the payloads. A reader
 # that stripped again saw the `<<EOF` line with no body after it and dropped
 # every following line, so an install written after a heredoc passed with no
@@ -1955,7 +1978,9 @@ for piped in \
   "pip install requests==2.0.0; echo -e '\\npip install evil==6.6.6' | bash" \
   "npm install mongoose@8.0.0 && printf '\\npip install evil==6.6.6' | sh" \
   "npm install \"mongoose@8.0.0\" && printf '\\npip install evil==6.6.6' | sh" \
-  "npx -y echo-cli@1.0.0 'pip' install evil==6.6.6 | sh"
+  "npx -y echo-cli@1.0.0 'pip' install evil==6.6.6 | sh" \
+  "pip install requests==2.0.0 && printf 'pip install evil==6.6.6' | { :; sh; }" \
+  "npm install left-pad@1.3.0 && printf 'cargo install evil@6.6.6' | if true; then sh; fi"
 do
   grep -q 'reads like an install into a shell' <<< "$(beside_reason "${piped}")" \
     || fail "a piped install beside a visible one is denied by the pipe rule: $(printf '%q' "${piped}")"
