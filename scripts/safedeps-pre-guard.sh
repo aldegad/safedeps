@@ -4574,7 +4574,8 @@ guard_extract_specs() {
 
 # How the current reading would make the command's npm installs inert, as one
 # value the readings can be compared on: none, downgrade, or `rewrite` (with
-# ` asked` and ` unverified` when they apply) and the rewritten command on the
+# ` asked`, ` unverified` and ` floor` when they apply, or ` release` alone
+# when only the release's rewrite was written) and the rewritten command on the
 # next line.
 guard_reading_inert() {
   local outcome=none updated="" rc=0
@@ -4606,6 +4607,15 @@ guard_reading_inert() {
       # closure), recorded once the command is known to run: the inert
       # guarantee is observably relaxed, never silently.
       outcome=downgrade
+      # The floor holds on this path too, whatever stopped the rewrite (an
+      # install in a script handed to a shell that no offset reaches, a heredoc
+      # fed to a shell, no verb found, a failed reading): where the release
+      # appended its flag to the command, the command gets that rewrite. It
+      # used to get none, and `npm ci eval "\npm"` ran its scripts where the
+      # release's `npm ci eval "\npm" --ignore-scripts` ran none.
+      if inert_release_appends "${COMMAND}"; then
+        outcome="rewrite release"$'\n'"${COMMAND} --ignore-scripts"
+      fi
     else
       outcome=rewrite
       if (( rc > 4 )); then
@@ -5034,16 +5044,17 @@ META_EOF
 # non-zero when the record was not written, and the caller then writes no
 # rewrite: a rewrite with no record made the post hook's "did not add" false.
 # ignore_scripts_unread says an install in it holds a word the shell decides
-# at run time (INERT_UNVERIFIED), so nobody read where npm keeps the flag: a
-# reason for the post hook to add a warning, never a permission to say the
-# scripts did not run. A record that lacks it loses that warning and claims
+# at run time (INERT_UNVERIFIED), or the rewrite is only the release's because
+# no place was read (INERT_RELEASE_ONLY), so nobody read where npm keeps the
+# flag: a reason for the post hook to add a warning, never a permission to say
+# the scripts did not run. A record that lacks it loses that warning and claims
 # nothing more.
 mark_ignore_scripts_injected() {
   local meta_file="${SNAPSHOT_DIR}/${SNAPSHOT_ID}_meta.json"
   local temp_file unread=false
 
   [[ -f "${meta_file}" ]] || return 1
-  [[ "${INERT_UNVERIFIED}" != true ]] || unread=true
+  [[ "${INERT_UNVERIFIED}" != true && "${INERT_RELEASE_ONLY}" != true ]] || unread=true
   temp_file=$(mktemp "${SNAPSHOT_DIR}/.${SNAPSHOT_ID}_meta.XXXXXX") || return 1
   if jq --arg command "$1" --argjson unread "${unread}" \
       '.ignore_scripts_injected = true | .updated_command = $command | .ignore_scripts_unread = $unread' "${meta_file}" > "${temp_file}" \
@@ -5332,6 +5343,7 @@ fi
 UPDATED_COMMAND=""
 INERT_DOWNGRADED=false
 INERT_FLOOR_ONLY=false
+INERT_RELEASE_ONLY=false
 INERT_ASKED=false
 INERT_UNVERIFIED=false
 if [[ "${GUARD_IS_CODEX}" != true ]]; then
@@ -5355,6 +5367,9 @@ if [[ "${GUARD_IS_CODEX}" != true ]]; then
       # A statement kept only the floor: the release's rewrite, with no place
       # read as true. It is sent and recorded as a downgrade.
       [[ "${inert_first}" != *" floor"* ]] || INERT_FLOOR_ONLY=true
+      # No rewrite landed, and the command gets the release's own: the flag
+      # at the end of a one-statement command. Also a recorded downgrade.
+      [[ "${inert_first}" != *" release"* ]] || INERT_RELEASE_ONLY=true
       ;;
   esac
 fi
@@ -5374,7 +5389,10 @@ if [[ "${INERT_DOWNGRADED}" == "true" ]]; then
   log_advisory "pre-guard: could not make every npm install in this command inert in place (one is in a compound command the rewrite did not land in, in a statement whose end it could not find, or in a script handed to a shell that it cannot reach); lifecycle scripts may run before the effect gate verifies (downgraded to detect-and-rollback). Command: ${COMMAND}"
 fi
 if [[ "${INERT_FLOOR_ONLY}" == "true" ]]; then
-  log_advisory "pre-guard: an npm install in this command has no place where safedeps could read npm keeping --ignore-scripts true (its end could not be found, a -- ends npm's options before it, or every place changes what npm reads); safedeps put the flag only where the release put it, right after the verb (and at the end of a one-statement command), and lifecycle scripts may run before the effect gate verifies (downgraded to detect-and-rollback). Command: ${COMMAND}"
+  log_advisory "pre-guard: an npm install in this command has no place where safedeps could read npm keeping --ignore-scripts true (its end could not be found, a -- ends npm's options before it, or every place changes what npm reads); safedeps put the flag right after each verb, where the release put it in a compound command, and at the end of a one-statement command, where the release put it there; lifecycle scripts may run before the effect gate verifies (downgraded to detect-and-rollback). Command: ${COMMAND}"
+fi
+if [[ "${INERT_RELEASE_ONLY}" == "true" ]]; then
+  log_advisory "pre-guard: could not place --ignore-scripts by reading an npm install in this command (one is in a script handed to a shell that the rewrite cannot reach, in a heredoc fed to a shell, or in text it could not read); safedeps added the flag only at the end of the command, where the release added it, and could not read where npm keeps it, so lifecycle scripts may run before the effect gate verifies (downgraded to detect-and-rollback). Command: ${COMMAND}"
 fi
 if [[ "${INERT_ASKED}" == "true" ]]; then
   log_advisory "pre-guard: an npm install in this command sets ignore-scripts false; safedeps put --ignore-scripts after it, where npm reads the last value an option is given, and safedeps itself runs the install's scripts only through the rebuild after the closure verifies. Command: ${COMMAND}"
