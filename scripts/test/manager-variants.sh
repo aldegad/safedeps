@@ -241,10 +241,13 @@ fi
 # dependency:get;` were no install at all (v2.17.2, 7d66f8c and v2.18.0). For
 # each manager the install is written with its last word against each
 # operator and with a blank before it, and the two must get the same answers,
-# none of them a pass. scripts/measure/glued-verb-reading.sh prints the whole
-# table, with the words each shell hands the manager.
+# none of them a pass. An install that names no package and is no npm install
+# (`go get`, `pnpm install`) gets no answer read or not, so none stands here;
+# scripts/measure/glued-verb-reading.sh prints the whole table, those rows
+# marked silent, with the words each shell hands the manager.
 glued_bases=(
   'npm ci'
+  'npm --prefix=. i'
   'npm install evil@1.0.0'
   'npx evil@1.0.0'
   'pnpm add evil@1.0.0'
@@ -254,12 +257,10 @@ glued_bases=(
   'uv add evil==1.0.0'
   'poetry add evil==1.0.0'
   'cargo add evil@1.0.0'
-  'go get'
   'go get example.com/m@v1.0.0'
   'gem install rake -v 13.0.0'
   'bundle add rails --version 7.1.0'
   'mvn -Dartifact=g:evil:1.0.0 dependency:get'
-  'dotnet package update'
   'dotnet add package Serilog --version 3.1.1'
 )
 # <glued template>|<spaced template>, %C% standing for the install.
