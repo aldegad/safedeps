@@ -785,9 +785,12 @@ shell_lex() {
             # each is its own reading rule and the bash reading says DIVERGE
             # at both.
             if (cpat[d] == 2 && c == ";" && (X[i+1] == "|" || X[i+1] == ";" && X[i+2] == "&")) div = 1
+            # The bytes after the first `;` are the rest of one operator:
+            # ARM marks them, so no word reader takes them for a word (the
+            # walk read the second `;` of `;;` as a command word).
             if (cpat[d] == 2 && c == ";" && (X[i+1] == ";" || X[i+1] == "&" || X[i+1] == "|" && shz)) {
-              C[i+1] = cls; i++
-              if (X[i] == ";" && X[i+1] == "&" && shb) { C[i+1] = cls; i++ }
+              C[i+1] = cls; i++; ARM[i] = 1
+              if (X[i] == ";" && X[i+1] == "&" && shb) { C[i+1] = cls; i++; ARM[i] = 1 }
               cpat[d] = 1; cpw[d] = 0; continue
             }
           }
@@ -1052,6 +1055,11 @@ shell_lex() {
           if (X[s] != "{" || C[s] != C[j] || X[s+1] !~ /[A-Za-z_]/) return j
         }
         if (s == j || !wordstart(s) && !(s in EV)) return j
+        # zsh reads a `{` glued to the first word as the group opener, and
+        # its walk starts the command after it (EV): the word `{fd}` is then
+        # no descriptor, and `fd}` is the command (zsh does not run `{fd}>f
+        # pip install x`, measured).
+        if (X[s] == "{" && ((s + 1) in EV) && !(s in EV)) return j
         return fdat(s, j, policy) ? s : j
       }
       # Whether bytes s..j-1, a word, are the descriptor word of the
@@ -1177,7 +1185,11 @@ shell_lex() {
       # of `npm >$(cat <<E ... E) install x` at the `<<`, and the verb was
       # never beside npm for the rewrite (no --ignore-scripts, no record).
       function word_sep(k) {
-        if (C[k] == "h" || C[k] == "b" || C[k] == "B") return !(k in WD) || WD[k] <= 1
+        if (k in ARM) return 1
+        # Every byte of a body at the top level is no word of the command,
+        # an escape or a comment in a substitution there too: read as word
+        # bytes, they gave the walk a command inside the body.
+        if (C[k] == "h" || C[k] == "b" || C[k] == "B" || (k in BF)) return !(k in WD) || WD[k] <= 1
         if (C[k] == "p") return 1
         if (C[k] == "m") return DEP[k] == 1
         return C[k] == "c" && DEP[k] == 1 && X[k] ~ /[ \t\n;&|()<>]/
@@ -1435,6 +1447,9 @@ shell_lex() {
               if (!(X[k+1] == "(" && (k + 2) in AR)) { PST[++pn] = body; PCOND[pn] = cw; cw = 0 }
               if (X[k+1] == "(" && (k + 2) in AR) { }
               else if (zr && fr == 2 && !fra) { inp = 1; fr = 0 }
+              # The `(` that opens a case pattern opens no command: the word
+              # after it is the pattern (`case x in (x) ...`).
+              else if (k in CPO) { }
               else { st = 1; pre = 0; rd = 0; fn = 0; fr = 0; rp = 0; cop = 0; tm = 0 }
               fh = 0
             }
@@ -2092,8 +2107,8 @@ shell_lex() {
         buf = ""; held = 0
         for (k = 1; k <= N; k++) {
           if (!(k in EV)) continue
-          for (w = k; w <= N && ((w in A) || (X[w] == " " || X[w] == "\t") && C[w] == "c" && DEP[w] == 1); w++) ;
-          if (w > N || (w > k && (w in EV)) || topsep(w)) continue
+          for (w = k; w <= N && !(w > k && (w in EV)) && ((w in A) || (X[w] == " " || X[w] == "\t") && C[w] == "c" && DEP[w] == 1); w++) ;
+          if (w > N || (w > k && (w in EV)) || topsep(w) || word_sep(w)) continue
           put(k "\037" w "\037")
           for (j = k; j < w; j++) put(fbyte(sbyte(j)))
           put("\037")
