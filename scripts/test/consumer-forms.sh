@@ -1915,11 +1915,12 @@ mkdir -p "${beside_home}"
   safedeps_ledger_write_approved_spec pypi requests 2.0.0 >/dev/null
   safedeps_ledger_write_approved_spec npm left-pad 1.3.0 >/dev/null
   safedeps_ledger_write_approved_spec npm echo-cli 1.0.0 >/dev/null
+  safedeps_ledger_write_approved_spec pypi pip 24.0 >/dev/null
   # `pip install'evil==1'` is one word to the shell, `installevil==1`, and the
   # extractor reads it the same way. Approving that identity lets the row reach
-  # the pipe rule; the row is there for what it does to the blanking pass (a
-  # quote glued to the verb must not be blanked, or everything after it
-  # re-quotes), not for what pip would make of it.
+  # the pipe rule. The row was written for a pass that set the visible install's
+  # words aside (a quote glued to the verb must not be set aside, or everything
+  # after it re-quotes), not for what pip would make of it.
   safedeps_ledger_write_approved_spec pypi installevil 1 >/dev/null
   safedeps_ledger_write_approved_spec npm mongoose 8.0.0 >/dev/null ) \
   || fail "the beside-visible fixture approvals could be written"
@@ -1951,88 +1952,167 @@ beside_reason() {
 [[ "$(beside_decision 'npx -y echo-cli@1.0.0 hello')" != "deny" ]] \
   || fail "beside-visible fixture: the approved runner itself is not denied"
 
+# Every form beside a visible install is written with @V@ just before the
+# visible install's first word. beside_expect drops the marker and checks the
+# row; the S1 loop at the end of this part puts `true ` there instead, which
+# makes the visible install an argument and leaves every other byte as it was.
+# The pipe question is the standalone one, asked of the same text, so the two
+# must be denied or not denied together. Three rounds set the visible install's
+# words aside first, and each left a row where they were not: a whole-word
+# search (`\npip`), a word-start search (`%spip`, `cut -c2-`), and the install's
+# own words, which the shell hands a producer through `$_` (W06-W08 below).
+beside_rows=()
+beside_expect() { # want label marked-form; want is pipe, deny, allow or pass
+  local want="$1" label="$2" form="${3//@V@/}" got
+  [[ "$3" == *@V@* ]] || fail "beside-visible row has no @V@ marker: ${label}"
+  beside_rows+=("$3")
+  if [[ "${want}" == pipe ]]; then
+    grep -q 'reads like an install into a shell' <<< "$(beside_reason "${form}")" \
+      || fail "${label}: denied by the pipe rule: $(printf '%q' "${form}")"
+  else
+    got=$(beside_decision "${form}")
+    [[ "${got}" == "${want}" ]] || fail "${label} (want ${want}, got ${got}): $(printf '%q' "${form}")"
+  fi
+}
+
 for piped in \
-  "pip install requests==2.0.0 && printf 'pip install evil==6.6.6' | sh" \
-  "pip install -r requirements.txt; printf 'pip install evil==6.6.6' | sh" \
-  "npm ci && printf 'cargo install evil@6.6.6' | sh" \
-  "npm install left-pad@1.3.0 && printf 'npm install -g evil@6.6.6' | sh" \
-  "pip install requests==2.0.0; echo pip install evil==6.6.6 | sh" \
-  "pip install requests==2.0.0 && sh -c \"printf 'pip install evil==6.6.6' | sh\"" \
-  "pip install requests==2.0.0 && x=\$(printf 'pip install evil==6.6.6' | sh)" \
-  "pip install requests==2.0.0 && printf 'pip install evil==6.6.6' | cat | /bin/sh" \
-  "pip install requests==2.0.0 && printf 'pip install evil==6.6.6' | env FOO=1 sh -s" \
-  $'pip install requests==2.0.0\ncat <<EOF | sh\npip install evil==6.6.6\nEOF' \
-  "pip install requests==2.0.0; c='pip install evil==6.6.6'; echo \"\$c\" | sh" \
-  "pip install requests==2.0.0; (printf 'pip install evil==6.6.6'; :) | sh" \
-  "npx -y echo-cli@1.0.0 pip install evil==6.6.6 | sh" \
-  "pip install'evil==1' ; printf 'pip install evil==6.6.6' | sh" \
-  "pip install requests==2.0.0 && printf 'pip\\tinstall evil==6.6.6' | sh" \
-  "pip install requests==2.0.0 && echo pip\\ install evil==6.6.6 | sh" \
-  "pip install requests==2.0.0 && printf pip' install evil==6.6.6' | sh" \
-  "pip install requests==2.0.0 && echo 'pipXinstall evil==6.6.6' | tr X ' ' | sh" \
-  "npm install left-pad@1.3.0 && printf 'pip%sinstall evil==6.6.6' ' ' | sh" \
-  "PIP_INDEX_URL=x pip install requests==2.0.0 && printf 'pip install evil==6.6.6' | sh" \
-  "pip install requests==2.0.0 && printf '\\npip install evil==6.6.6' | sh" \
-  "pip install requests==2.0.0 && printf '\\tpip install evil==6.6.6' | sh" \
-  "pip install requests==2.0.0 && printf '%spip install evil==6.6.6' '' | sh" \
-  "pip install requests==2.0.0 && printf 'xpip install evil==6.6.6' | cut -c2- | sh" \
-  "npm install left-pad@1.3.0 && printf '\\ncargo install evil@6.6.6' | sh" \
-  "pip install requests==2.0.0 && printf 'set -e\\npip install evil==6.6.6\\n' | sh" \
-  "pip install requests==2.0.0; echo -e '\\npip install evil==6.6.6' | bash" \
-  "npm install mongoose@8.0.0 && printf '\\npip install evil==6.6.6' | sh" \
-  "npm install \"mongoose@8.0.0\" && printf '\\npip install evil==6.6.6' | sh" \
-  "npx -y echo-cli@1.0.0 'pip' install evil==6.6.6 | sh" \
-  "pip install requests==2.0.0 && printf 'pip install evil==6.6.6' | { :; sh; }" \
-  "npm install left-pad@1.3.0 && printf 'cargo install evil@6.6.6' | if true; then sh; fi"
+  "@V@pip install requests==2.0.0 && printf 'pip install evil==6.6.6' | sh" \
+  "@V@pip install -r requirements.txt; printf 'pip install evil==6.6.6' | sh" \
+  "@V@npm ci && printf 'cargo install evil@6.6.6' | sh" \
+  "@V@npm install left-pad@1.3.0 && printf 'npm install -g evil@6.6.6' | sh" \
+  "@V@pip install requests==2.0.0; echo pip install evil==6.6.6 | sh" \
+  "@V@pip install requests==2.0.0 && sh -c \"printf 'pip install evil==6.6.6' | sh\"" \
+  "@V@pip install requests==2.0.0 && x=\$(printf 'pip install evil==6.6.6' | sh)" \
+  "@V@pip install requests==2.0.0 && printf 'pip install evil==6.6.6' | cat | /bin/sh" \
+  "@V@pip install requests==2.0.0 && printf 'pip install evil==6.6.6' | env FOO=1 sh -s" \
+  $'@V@pip install requests==2.0.0\ncat <<EOF | sh\npip install evil==6.6.6\nEOF' \
+  "@V@pip install requests==2.0.0; c='pip install evil==6.6.6'; echo \"\$c\" | sh" \
+  "@V@pip install requests==2.0.0; (printf 'pip install evil==6.6.6'; :) | sh" \
+  "@V@npx -y echo-cli@1.0.0 pip install evil==6.6.6 | sh" \
+  "@V@pip install'evil==1' ; printf 'pip install evil==6.6.6' | sh" \
+  "@V@pip install requests==2.0.0 && printf 'pip\\tinstall evil==6.6.6' | sh" \
+  "@V@pip install requests==2.0.0 && echo pip\\ install evil==6.6.6 | sh" \
+  "@V@pip install requests==2.0.0 && printf pip' install evil==6.6.6' | sh" \
+  "@V@pip install requests==2.0.0 && echo 'pipXinstall evil==6.6.6' | tr X ' ' | sh" \
+  "@V@npm install left-pad@1.3.0 && printf 'pip%sinstall evil==6.6.6' ' ' | sh" \
+  "PIP_INDEX_URL=x @V@pip install requests==2.0.0 && printf 'pip install evil==6.6.6' | sh" \
+  "@V@pip install requests==2.0.0 && printf '\\npip install evil==6.6.6' | sh" \
+  "@V@pip install requests==2.0.0 && printf '\\tpip install evil==6.6.6' | sh" \
+  "@V@pip install requests==2.0.0 && printf '%spip install evil==6.6.6' '' | sh" \
+  "@V@pip install requests==2.0.0 && printf 'xpip install evil==6.6.6' | cut -c2- | sh" \
+  "@V@npm install left-pad@1.3.0 && printf '\\ncargo install evil@6.6.6' | sh" \
+  "@V@pip install requests==2.0.0 && printf 'set -e\\npip install evil==6.6.6\\n' | sh" \
+  "@V@pip install requests==2.0.0; echo -e '\\npip install evil==6.6.6' | bash" \
+  "@V@npm install mongoose@8.0.0 && printf '\\npip install evil==6.6.6' | sh" \
+  "@V@npm install \"mongoose@8.0.0\" && printf '\\npip install evil==6.6.6' | sh" \
+  "@V@npx -y echo-cli@1.0.0 'pip' install evil==6.6.6 | sh" \
+  "@V@pip install requests==2.0.0 && printf 'pip install evil==6.6.6' | { :; sh; }" \
+  "@V@npm install left-pad@1.3.0 && printf 'cargo install evil@6.6.6' | if true; then sh; fi"
 do
-  grep -q 'reads like an install into a shell' <<< "$(beside_reason "${piped}")" \
-    || fail "a piped install beside a visible one is denied by the pipe rule: $(printf '%q' "${piped}")"
+  beside_expect pipe "a piped install beside a visible one" "${piped}"
 done
 pass "an install piped into a shell is denied beside a visible install, even an approved one"
 
-# What the fix must not take with it: a visible install next to a pipe into a
-# shell that carries no other install text keeps its verdict.
-[[ "$(beside_decision 'npm install left-pad@1.3.0 && cat setup.sh | sh')" == "allow" ]] \
-  || fail "a visible npm install beside a script piped into sh keeps its verdict"
-[[ "$(beside_decision "pip install requests==2.0.0 && printf 'echo hi' | sh")" == "pass" ]] \
-  || fail "a visible pip install beside a harmless pipe into sh keeps its verdict"
-[[ "$(beside_decision $'npm install left-pad@1.3.0\ncat <<EOF | sh\necho hi\nEOF')" == "allow" ]] \
-  || fail "a visible install beside a heredoc with no install piped into sh keeps its verdict"
-[[ "$(beside_decision 'npm install left-pad@1.3.0 2>&1 | tee log')" == "allow" ]] \
-  || fail "a visible install piped into a non-shell keeps its verdict"
-# The manager word is blanked as a whole word. `pip` inside an assignment
-# prefix's name came first, so the prefix lost three letters, the real install
-# stayed, and the pipe check read it as install text piped into a shell.
-[[ "$(beside_decision "PIP_INDEX_URL=x pip install requests==2.0.0 && printf 'hi' | zsh -s")" == "pass" ]] \
-  || fail "an assignment prefix naming a manager does not make a harmless pipe a piped install"
-[[ "$(beside_decision 'npm_config_loglevel=warn npm install left-pad@1.3.0 && cat setup.sh | sh')" == "allow" ]] \
-  || fail "an npm_config_ prefix beside a script piped into sh keeps its verdict"
-[[ "$(beside_decision 'pip install requests==2.0.0 && git commit -m "document the pip install x | sh idiom"')" == "pass" ]] \
-  || fail "a quoted pipe idiom beside a visible install stays data"
-# The visible install's own words -- its operands and options, as its manager
-# reads them -- are set aside with it, and what is left is searched as loosely
-# as a pipe with nothing beside it: `go` inside `mongoose` is not install text
-# because `mongoose@8.0.0` is gone, not because the search asks for a word
-# start. A search that asked for one let `\npip` through (the rows above with an
-# escape, a format or a `cut` before the manager). And only a heredoc handed to
-# a shell counts; one written to a file is data.
-[[ "$(beside_decision 'npm install mongoose@8.0.0 && cat setup.sh | sh')" == "allow" ]] \
-  || fail "a package name that contains a manager's name is not install text"
-[[ "$(beside_decision 'npm install "mongoose@8.0.0" && cat setup.sh | sh')" == "allow" ]] \
-  || fail "a quoted package name that contains a manager's name is not install text"
-[[ "$(beside_decision 'npm install --save-bundle left-pad@1.3.0 && cat setup.sh | sh')" == "allow" ]] \
-  || fail "an option of the visible install that contains a manager's name is not install text"
-[[ "$(beside_decision "npm install mongoose@8.0.0 && printf 'set -e\\necho built\\n' | sh")" == "allow" ]] \
-  || fail "an escape in a producer with no install in it keeps the visible install's verdict"
-[[ "$(beside_decision "pip install requests==2.0.0 && printf '\\npip install evil==6.6.6' | cat")" == "pass" ]] \
-  || fail "the same producer piped into a non-shell keeps the visible install's verdict"
-[[ "$(beside_decision $'npm install left-pad@1.3.0 && cat <<EOF > notes.md\npip install x\nEOF\ncat s.sh | sh')" == "allow" ]] \
-  || fail "a heredoc written to a file is not piped into a shell"
-[[ "$(beside_decision $'npm install left-pad@1.3.0 && cat <<EOF | sh\npip install evil==6.6.6\nEOF')" == "deny" ]] \
-  || fail "a heredoc piped into a shell beside a visible install is still read"
-[[ "$(beside_decision $'cat <<EOF > notes.md\nhello\nEOF\npip install requests==2.0.0 && eval "pip install evil==6.6.6"')" == "deny" ]] \
-  || fail "an eval install after a heredoc beside a visible install is still read"
-pass "a visible install beside a pipe into a shell with nothing else to install keeps its verdict"
+# The cost of asking the standalone question: a command that mixes an install
+# with a pipe into a shell is denied, even when the pipe carries nothing to
+# install, and the two have to run as separate commands. These ten kept the
+# visible install's verdict while its words were set aside (68cc2f8 and
+# before). Each line says why the text cannot clear its row.
+beside_expect pipe "a file piped into sh: the gate cannot read the file, and H01 below writes it in the same command" \
+  '@V@npm install left-pad@1.3.0 && cat setup.sh | sh'
+beside_expect pipe "a harmless printf piped into sh: \$_ and the exec string read as plainly (W01, W06-W08)" \
+  "@V@pip install requests==2.0.0 && printf 'echo hi' | sh"
+beside_expect pipe "a heredoc with no install piped into sh: its body is a producer like printf, read beside install text" \
+  $'@V@npm install left-pad@1.3.0\ncat <<EOF | sh\necho hi\nEOF'
+beside_expect pipe "an assignment prefix and a harmless pipe into zsh: the prefix is the install's word, and the install's words are install text" \
+  "PIP_INDEX_URL=x @V@pip install requests==2.0.0 && printf 'hi' | zsh -s"
+beside_expect pipe "an npm_config_ prefix and a file piped into sh: the prefix does not change what the producer reads" \
+  'npm_config_loglevel=warn @V@npm install left-pad@1.3.0 && cat setup.sh | sh'
+beside_expect pipe "a package named mongoose and a file piped into sh: its words are no longer set aside, and \$_ hands them on" \
+  '@V@npm install mongoose@8.0.0 && cat setup.sh | sh'
+beside_expect pipe "a quoted package named mongoose and a file piped into sh: quoting does not keep \$_ from it" \
+  '@V@npm install "mongoose@8.0.0" && cat setup.sh | sh'
+beside_expect pipe "an option naming a manager and a file piped into sh: an option value reaches \$_ (W07, W08)" \
+  '@V@npm install --save-bundle left-pad@1.3.0 && cat setup.sh | sh'
+beside_expect pipe "an escape in a producer with no install: harmless only by its producer, which the text cannot vouch for" \
+  "@V@npm install mongoose@8.0.0 && printf 'set -e\\necho built\\n' | sh"
+beside_expect pipe "a heredoc written to a file, then a file piped into sh: the shape of H01, and the text cannot tell them apart" \
+  $'@V@npm install left-pad@1.3.0 && cat <<EOF > notes.md\npip install x\nEOF\ncat s.sh | sh'
+pass "an install and an unrelated pipe into a shell in one command are denied by the pipe rule"
+
+# What does not go: no pipe into a shell, or a pipe that is data.
+beside_expect allow "a visible install piped into a non-shell keeps its verdict" \
+  '@V@npm install left-pad@1.3.0 2>&1 | tee log'
+beside_expect pass "a quoted pipe idiom beside a visible install stays data" \
+  '@V@pip install requests==2.0.0 && git commit -m "document the pip install x | sh idiom"'
+beside_expect pass "the same producer piped into a non-shell keeps the visible install's verdict" \
+  "@V@pip install requests==2.0.0 && printf '\\npip install evil==6.6.6' | cat"
+beside_expect allow "a heredoc written to a file and not run keeps the visible install's verdict" \
+  $'@V@npm install left-pad@1.3.0 && cat <<EOF > notes.md\npip install x\nEOF'
+beside_expect deny "a heredoc piped into a shell beside a visible install is still read" \
+  $'@V@npm install left-pad@1.3.0 && cat <<EOF | sh\npip install evil==6.6.6\nEOF'
+beside_expect deny "an eval install after a heredoc beside a visible install is still read" \
+  $'cat <<EOF > notes.md\nhello\nEOF\n@V@pip install requests==2.0.0 && eval "pip install evil==6.6.6"'
+pass "a visible install with no pipe into a shell keeps its verdict"
+
+# The verdict grid's cells (jetbi-20261005-062855) where the path beside a
+# visible install passed what the standalone path denies. G1 carries the
+# install in a heredoc that reaches the shell another way than a piped body:
+# through a file, a descriptor, a group, a subshell, a variable or tee. G2
+# carries it in a comment the producer reads back. G3 carries the visible
+# install's own words: through the exec string, a function's text, or `$_`,
+# which holds the last word of the visible install (W06-W08 passed with no
+# record while those words were set aside).
+for h in \
+  $'@V@pip install requests==2.0.0\ncat <<EOF > s.sh\npip install evil==6.6.6\nEOF\ncat s.sh | sh' \
+  $'@V@npm install left-pad@1.3.0 && cat <<\'EOF\' > s.sh\npip install evil==6.6.6\nEOF\ncat s.sh | sh' \
+  $'exec 3<<EOF\npip install evil==6.6.6\nEOF\ncat <&3 | sh\n@V@pip install requests==2.0.0' \
+  $'@V@pip install requests==2.0.0\n{ cat <<EOF\npip install evil==6.6.6\nEOF\n} | sh' \
+  $'@V@npm install left-pad@1.3.0 && (cat <<EOF\npip install evil==6.6.6\nEOF\n) | sh' \
+  $'x=$(cat <<EOF\npip install evil==6.6.6\nEOF\n); echo "$x" | sh\n@V@pip install requests==2.0.0' \
+  $'@V@pip install requests==2.0.0\ntee s.sh >/dev/null <<EOF\npip install evil==6.6.6\nEOF\ncat s.sh | sh' \
+  $'@V@npm install left-pad@1.3.0 && cat <<EOF > s.sh\nprintf \'\\npip install evil==6.6.6\'\nEOF\nsh s.sh | sh' \
+  $'cat <<EOF > s.sh\ncargo install evil@6.6.6\nEOF\ncat s.sh | sh\n@V@pip install requests==2.0.0'
+do
+  beside_expect pipe "an install a heredoc carries to a shell (G1 H01-H07 H10 H14)" "${h}"
+done
+for c in \
+  "@V@pip install requests==2.0.0 && echo \"\$BASH_EXECUTION_STRING\" | sed -n 's/.*#://p' | sh #:pip install evil==6.6.6" \
+  "@V@npm install left-pad@1.3.0; echo \"\$ZSH_EXECUTION_STRING\" | sed -n 's/.*#://p' | sh #:pip install evil==6.6.6" \
+  "@V@pip install requests==2.0.0 && ps -o args= -p \$\$ | sed -n 's/.*#://p' | sh #:pip install evil==6.6.6" \
+  $'@V@npm install left-pad@1.3.0; echo "$BASH_EXECUTION_STRING" | sed -n \'s/^#://p\' | sh\n#:pip install evil==6.6.6'
+do
+  beside_expect pipe "an install a comment carries to a shell (G2 C02-C05)" "${c}"
+done
+for w in \
+  "@V@pip install requests==2.0.0 && echo \"\$BASH_EXECUTION_STRING\" | sed -n 's/ &&.*//; s/requests==2.0.0/evil==6.6.6/p' | sh" \
+  "@V@pip install requests==2.0.0 && echo \"\$ZSH_EXECUTION_STRING\" | sed -n 's/ &&.*//; s/requests==2.0.0/evil==6.6.6/p' | sh" \
+  "@V@pip install pip==24.0 && echo \"\${_%%=*} install evil==6.6.6\" | sh" \
+  "@V@npm install left-pad@1.3.0 --cache pip && echo \"\$_ install evil==6.6.6\" | sh" \
+  "@V@pip install requests==2.0.0 --src pip && echo \"\$_ install evil==6.6.6\" | sh"
+do
+  beside_expect pipe "the visible install's own words carried to a shell (G3 W01 W02 W06-W08)" "${w}"
+done
+# A function's text is not read as a visible install, so these are denied as
+# a hidden install either way; they are here for the loop below.
+for w in \
+  "f() { @V@pip install requests==2.0.0; }; declare -f f | sed -n 's/requests==2.0.0/evil==6.6.6/p' | sh" \
+  "f() { @V@pip install requests==2.0.0; }; functions f | sed -n 's/requests==2.0.0/evil==6.6.6/p' | sh" \
+  "f() { @V@pip install requests==2.0.0; }; type f | sed -n 's/requests==2.0.0/evil==6.6.6/p' | sh"
+do
+  beside_expect deny "a function's text carried to a shell (G3 W03-W05)" "${w}"
+done
+pass "installs a heredoc, a comment or the visible install's own words carry to a shell are denied beside a visible install"
+
+# S1: every row above, with the visible install switched off by `true `, is
+# denied exactly when the row is.
+for row in "${beside_rows[@]}"; do
+  b=$(beside_decision "${row//@V@/}")
+  s=$(beside_decision "${row//@V@/true }")
+  [[ "${b}" == deny && "${s}" == deny || "${b}" != deny && "${s}" != deny ]] \
+    || fail "beside a visible install the verdict is the standalone verdict (S1): ${b} beside, ${s} with it switched off: $(printf '%q' "${row//@V@/}")"
+done
+pass "beside a visible install every row gets the verdict it gets with the install switched off (${#beside_rows[@]} rows)"
 
 # --- Ordinary commands that pass where the shells differ --------------------
 # The gate reads a command as bash, as zsh and as dash, and the zsh and dash

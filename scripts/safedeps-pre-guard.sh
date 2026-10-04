@@ -348,19 +348,33 @@ command_hides_dependency_install() {
 }
 
 # The pipe half of command_hides_dependency_install, asked beside a visible
-# install (see payload_pipes_unread_install_text_to_shell). The payload loops
-# are the same; the install question on eval and substitution payloads is not
-# asked, because beside a visible install those payloads are candidate texts
-# already and their specs reach the ledger.
-command_pipes_unread_install_to_shell() {
+# install. The question and the texts it is asked of are the standalone ones:
+# the command, and its `sh -c`, eval and substitution payloads, each searched
+# whole by payload_pipes_install_text_to_shell. The install question on eval and
+# substitution payloads is not asked, because beside a visible install those
+# payloads are candidate texts already and their specs reach the ledger.
+#
+# The visible install's own words are not set aside first. That was tried for
+# three rounds, and each time the path beside a visible install searched less
+# text than the standalone path and passed a pipe the standalone path denies: a
+# whole-word search missed `\npip` and `pip\tinstall`, a word-start search missed
+# `%spip` and `xpip ... | cut -c2-`, and setting aside the install's own words
+# missed `echo "$_ install evil==6.6.6" | sh`, where the shell hands the last of
+# those words to the producer. Setting a word aside rests on the claim that it
+# prints nothing into the shell, and a producer can read the command's own text
+# through `$_`, `$BASH_EXECUTION_STRING`, `ps` or a file, which the gate cannot
+# list. So beside a visible install the same pipe gets the same verdict, and a
+# command that mixes an install with an unrelated `| sh` is denied: the two run
+# as separate commands.
+command_pipes_install_to_shell() {
   local command="$1"
   local payload stripped
 
-  payload_pipes_unread_install_text_to_shell "${command}" && return 0
+  payload_pipes_install_text_to_shell "${command}" && return 0
   stripped=$(strip_heredoc_bodies "${command}")
   while IFS= read -r payload; do
     [[ -z "${payload}" ]] && continue
-    payload_pipes_unread_install_text_to_shell "${payload}" && return 0
+    payload_pipes_install_text_to_shell "${payload}" && return 0
   done < <(extract_shell_c_payloads "${stripped}"; extract_eval_payloads "${stripped}"; extract_command_substitution_payloads "${stripped}")
   return 1
 }
@@ -1378,13 +1392,6 @@ extract_command_substitution_payloads() {
 # Install text as the pipe checks search for it: a manager, then a verb
 # anywhere after it on the same line. Loose on purpose -- it reads text that is
 # data at its own quoting level, where no statement grammar applies.
-# The visible installs the blanking pass sets aside, found the way detection
-# finds them: detection strips assignment and env/command prefixes before it
-# matches, so the blanking pass has to step over them too. Read on the scan
-# view, where a quoted value is already blank. Without the prefix, an install
-# behind `PIP_INDEX_URL=x` was not set aside, and the pipe check read it as
-# install text piped into a shell (caught in review).
-BLANK_INSTALL_RE="${SAFEDEPS_G_START}((env|command)([[:space:]]+-[^[:space:]]*)*[[:space:]]+|[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*(${SAFEDEPS_G_INSTALL_BODY})([[:space:]]|\$)"
 PIPE_MANAGER_RE='(npm|npx|pnpm|pnpx|yarn|bun|bunx|pip[0-9.]*|(python[0-9.]*|py)[[:space:]]+-[A-Za-z0-9]*m[[:space:]]*pip|poetry|uv|uvx|pipx|pipenv|cargo|go|gem|bundle|mvn|dotnet)'
 PIPE_INSTALL_TEXT_RE="${PIPE_MANAGER_RE}.*(${SAFEDEPS_G_ALL_VERBS})"
 
@@ -1518,246 +1525,12 @@ payload_pipes_install_text_to_shell() {
   # Check the raw install text FIRST: the grep is O(n) while building the exec
   # view is not free, and both checks are pure predicates, so conjunction order
   # cannot change the verdict — only the cost. Most commands carry no install
-  # text at all and must not pay for the exec view.
+  # text at all and must not pay for the exec view. A payload with no `|` has
+  # no pipe in any view of it, and most visible installs, which carry install
+  # text by definition, pipe nothing.
+  [[ "${payload}" == *'|'* ]] || return 1
   text_has_install_words "${payload}" || return 1
   exec_text_pipes_to_shell "$(strip_heredoc_bodies "${payload}")"
-}
-
-# The same question asked beside a visible install.
-#
-# payload_pipes_install_text_to_shell searches the whole payload for install
-# text. That is right when nothing in the command is an install the gate can
-# read: any install text there is something else. Beside a visible install it
-# says nothing, because the visible install is install text too, so the
-# recognition block never asked it -- and a hidden install piped into a shell
-# passed with the visible one (`pip install requests==2.0.0 && printf 'pip
-# install evil==6.6.6' | sh` checked requests and ran evil unchecked).
-#
-# So the visible installs are set aside first, and what is left is asked the
-# whole-payload question, as loosely as it is asked with nothing beside it.
-# Wherever the install pattern matches the scan text -- exactly what
-# command_is_dependency_install reads as an install -- the manager word that
-# starts the match is blanked out of the raw text, and so is every other word
-# of that statement the manager's grammar reads as the install's own: its
-# command, options and their values, and the operands it installs or runs
-# (install_own_word_spans). Those reach the ledger as specs, or are options of
-# the install that print nothing into a shell. A runner's program arguments are
-# not the install's own and stay.
-#
-# The search over what is left is the standalone search. Three rounds tightened
-# it instead and each left a hole: a manager inside a word matched there
-# (`go` inside `mongoose`), so the search asked for whole words, which missed
-# `pip\tinstall` and a `tr`; then it asked for a word start, which missed
-# `\npip`, `%spip`, `xpip ... | cut -c2-` and `echo -e '\npip ...'` (caught in
-# review). What is piped is data the shell has not read yet, and the ways a
-# producer turns it into `pip install` cannot be listed. So the
-# false positive is fixed where it comes from -- the visible install's own
-# operands are no longer in the text -- and the search stays as loose as the
-# one that denies the same producer with nothing beside it.
-#
-# Only the words the grammar gives a role go, never the whole match. A match can
-# run into the arguments: the pattern cannot know which options take a value, so
-# in `npx -y echo-cli@1.0.0 pip install x | sh` it reads `pip` as the package
-# npx runs, and blanking the whole match hid the `pip install` that is echoed
-# into the shell (caught before review, by this function's own attack battery).
-# The grammar reads `pip` there as the program's argument.
-#
-# Where the grammar cannot be read positionally -- a statement with a partly
-# quoted word, an escape, an expansion or a glob in it, or one it reads two
-# ways -- only the manager word goes. That keeps more text, so it can only turn an allow into a
-# deny, and only beside a pipe into a shell. So does an install the recognizer
-# only reads after normalize_install_text (`env pip install`, `/usr/bin/pip
-# install`), which is not matched here and stays in the text.
-payload_pipes_unread_install_text_to_shell() {
-  local payload="$1"
-  local commands remainder
-
-  [[ "${payload}" == *'|'* ]] || return 1
-  commands=$(strip_heredoc_bodies "${payload}")
-  # Most visible installs pipe into no shell, and that answer is cheap.
-  exec_text_pipes_to_shell "${commands}" || return 1
-
-  remainder=$(install_managers_blanked "${commands}") || return 1
-  text_has_install_words "${remainder}" && return 0
-  [[ "${payload}" == *'<<'* ]] || return 1
-  text_has_install_words "$(strip_heredoc_bodies "${payload}" shell-bodies)"
-}
-
-# The byte spans of the words each install-pattern match's statement owns, as
-# the manager's grammar reads that statement: `<offset>:<length> ` per word,
-# 0-based offsets into $1. $2 is the scan text of $1 and $3 the matches, one
-# `<offset>:<match>` per line.
-#
-# A statement is read only where each of its blank-separated words is a word
-# the shell hands the manager as written: bytes the scan text keeps unchanged
-# (no comment, no escaped operator), or one whole single- or double-quoted
-# word, and in either case none of the bytes the shell expands or splits on
-# (`$`, a backquote, a glob, a brace, a backslash, a blank inside quotes). There
-# a word is exactly the argument, so a role is a byte span, and a quoted word's
-# span covers both of its quotes. Anywhere else the statement owns no words
-# here, and only its manager word is blanked. A reading that is the union of
-# two (SAFEDEPS_G_M_UNION) owns none either: a word one reading takes for a
-# runner's argument may carry the other's package role.
-install_own_word_spans() {
-  local text="$1" scan="$2" matches="$3"
-  local LC_ALL=C nl=$'\n' line off rest stmt raw pos tok word k out=""
-  local -a owned_words owned_offs owned_lens
-
-  while IFS= read -r line; do
-    [[ -n "${line}" ]] || continue
-    off="${line%%:*}"
-    # The pattern may start at the separator before the statement.
-    rest="${scan:off}"
-    while [[ "${rest}" == [\;\&\|\(]* || "${rest}" == [[:blank:]]* ]]; do
-      rest="${rest:1}" off=$(( off + 1 ))
-    done
-    stmt="${rest%%"${nl}"*}"
-    stmt="${stmt%%[;&|()<>\`]*}"
-    raw="${text:off:${#stmt}}"
-    [[ -n "${stmt}" && ${#raw} -eq ${#stmt} ]] || continue
-    owned_words=() owned_offs=() owned_lens=() pos=0
-    while (( pos < ${#raw} )); do
-      if [[ "${raw:pos:1}" == [[:blank:]] ]]; then pos=$(( pos + 1 )); continue; fi
-      tok="${raw:pos}"
-      tok="${tok%%[[:blank:]]*}"
-      if [[ "${stmt:pos:${#tok}}" == "${tok}" ]]; then
-        word="${tok}"
-      elif [[ "${tok}" == \'?*\' || "${tok}" == \"?*\" ]] && [[ "${stmt:pos:${#tok}}" != *[![:blank:]]* ]]; then
-        word="${tok:1:${#tok}-2}"
-      else
-        continue 2
-      fi
-      [[ "${word}" != *[!A-Za-z0-9@._/:=~^+,%-]* ]] || continue 2
-      owned_words+=("${word}") owned_offs+=("$(( off + pos ))") owned_lens+=("${#tok}")
-      pos=$(( pos + ${#tok} ))
-    done
-    (( ${#owned_words[@]} > 0 )) || continue
-    safedeps_manager_read "${owned_words[@]}" || continue
-    [[ "${SAFEDEPS_G_M_KIND}" != none && "${SAFEDEPS_G_M_UNION}" == false ]] || continue
-    for (( k = 0; k < ${#owned_words[@]}; k++ )); do
-      case "${SAFEDEPS_G_M_ROLE[k]}" in -|a) continue ;; esac
-      out+="${owned_offs[k]}:${owned_lens[k]} "
-    done
-  done <<< "${matches}"
-  printf '%s' "${out}"
-}
-
-# $1 with the manager word of every install-pattern match blanked, and the
-# other words its statement owns (install_own_word_spans).
-#
-# The pattern is matched on the scan text, where quoted regions are blank, so a
-# match is never install text inside quotes. The scanner blanks bytes and never
-# moves one, so a byte offset into the scan text is the same offset into $1;
-# the awk reads the two side by side and refuses a pair where that does not
-# hold (the scan may only blank a byte, or write `_` for an escaped operator).
-# Only bytes the scan text keeps are blanked. A quote character is blank
-# there, so it is never touched and the quote structure of what is left is the
-# quote structure of $1 -- blanking a quote would re-quote everything after it.
-#
-# A failure is recorded like a scanner failure (see command_scan_text), and the
-# caller reads it as "no answer", which guard_settle_scan_failure turns into an
-# UNDECIDED deny for a command that looks like an install -- and this command
-# has a visible one.
-install_managers_blanked() {
-  local text="$1"
-  local scan matches spans="" owned=""
-
-  if ! scan=$(command_scan_text "${text}"); then
-    return 1
-  fi
-  # `offset:match` per match, 0-based byte offsets. No match is not an error:
-  # the text is then returned whole, which only keeps more install text in it.
-  # The grep and the awk run apart so that only "no match" reads as no spans: a
-  # failed awk used to be swallowed by the same `||`, and the visible install it
-  # should have blanked was then read as install text piped into a shell -- a
-  # finding drawn from a failed reading (caught in review).
-  matches=$(printf '%s\n' "${scan}" | LC_ALL=C judge_grep -obEi "${BLANK_INSTALL_RE}") || matches=""
-  if [[ -n "${matches}" ]] && ! spans=$(printf '%s\n' "${matches}" | LC_ALL=C awk '
-    # safedeps:install_match_spans (scripts/measure/scan-failure-census.sh keys on this line)
-    { c = index($0, ":"); printf "%d:%d ", substr($0, 1, c - 1), length($0) - c }'); then
-    [[ -z "${SAFEDEPS_SCAN_MARK:-}" ]] || printf 'failed\n' >> "${SAFEDEPS_SCAN_MARK}"
-    return 1
-  fi
-  [[ -z "${matches}" ]] || owned=$(install_own_word_spans "${text}" "${scan}" "${matches}")
-
-  if ! { printf '%s\n' "${spans}"; printf '%s\n' "${owned}"; printf '%s\n' "${text}"; printf '%s' "${scan}"; } |
-    SAFEDEPS_PIPE_MANAGER_RE="${PIPE_MANAGER_RE}" LC_ALL=C awk '
-    # safedeps:install_managers_blanked (scripts/test/scan-contract.sh keys on this line)
-    NR == 1 { nspan = split($0, span, " "); next }
-    NR == 2 { nown = split($0, own, " "); next }
-    {
-      if (NR > 3) X[++n] = "\n"
-      m = split($0, c, "")
-      for (j = 1; j <= m; j++) X[++n] = c[j]
-    }
-    END {
-      # The raw text, a newline, then its scan text: 2L + 1 bytes in all.
-      if (n % 2 == 0) exit 2
-      L = (n - 1) / 2
-      if (X[L + 1] != "\n") exit 2
-      # The scan only blanks a byte or, for an escaped operator, writes `_`.
-      for (i = 1; i <= L; i++) {
-        s = X[L + 1 + i]
-        if (s != X[i] && s != " " && s != "_") exit 2
-      }
-      # The first manager word inside each match, read on the scan text.
-      mre = ENVIRON["SAFEDEPS_PIPE_MANAGER_RE"]
-      for (k = 1; k <= nspan; k++) {
-        split(span[k], p, ":")
-        str = ""
-        for (i = p[1] + 1; i <= p[1] + p[2] && i <= L; i++) str = str X[L + 1 + i]
-        # The manager word as a whole word: `pip` inside `PIP_INDEX_URL=x pip
-        # install` is no manager, and blanking it left the real install to be
-        # read as install text piped into a shell (caught in review).
-        s = tolower(str); slen = length(s); from = 1; at = 0
-        while (from <= slen && match(substr(s, from), mre)) {
-          a = from + RSTART - 1; z = a + RLENGTH
-          pre = (p[1] + a - 1 >= 1) ? tolower(X[L + 1 + p[1] + a - 1]) : ""
-          post = (z <= slen) ? substr(s, z, 1) : ""
-          if (pre !~ /[a-z0-9_]/ && post !~ /[a-z0-9_]/) { at = a; alen = RLENGTH; break }
-          from = a + 1
-        }
-        if (!at) continue
-        for (i = p[1] + at; i < p[1] + at + alen; i++)
-          if (X[L + 1 + i] != " " && X[i] != "\n") X[i] = " "
-        # The assignment prefixes of the install are its arguments, not install
-        # text: `PIP_INDEX_URL=x` left `pip` at a word start for the loose
-        # search of the pipe check. A name is blanked always; it runs no code.
-        # A value is blanked only when it holds no `$`, backtick or
-        # parenthesis, so a substitution in it is still read.
-        j = 1
-        while (j < at) {
-          while (j < at && substr(s, j, 1) ~ /[ \t]/) j++
-          w0 = j
-          while (j < at && substr(s, j, 1) !~ /[ \t]/) j++
-          word = substr(s, w0, j - w0)
-          if (!match(word, /^[a-z_][a-z0-9_]*=/)) continue
-          e = (word ~ /[$`()]/) ? w0 + RLENGTH - 2 : j - 1
-          for (q = w0; q <= e; q++) {
-            i = p[1] + q
-            if (X[L + 1 + i] != " " && X[i] != "\n") X[i] = " "
-          }
-        }
-      }
-      # The other words each install owns, as install_own_word_spans read them.
-      # A quoted word goes with both of its quotes, so the quote structure of
-      # what is left is still that of the text.
-      for (k = 1; k <= nown; k++) {
-        split(own[k], p, ":")
-        for (i = p[1] + 1; i <= p[1] + p[2] && i <= L; i++)
-          if (X[i] != "\n") X[i] = " "
-      }
-      buf = ""; held = 0
-      for (i = 1; i <= L; i++) {
-        buf = buf X[i]
-        if (++held >= 4096) { printf "%s", buf; buf = ""; held = 0 }
-      }
-      printf "%s", buf
-    }
-  '; then
-    [[ -z "${SAFEDEPS_SCAN_MARK:-}" ]] || printf 'failed\n' >> "${SAFEDEPS_SCAN_MARK}"
-    return 1
-  fi
 }
 
 # The command as lines the shell reads as statements (the joined view): line
@@ -4873,7 +4646,7 @@ guard_reading_detect() {
     # A visible install used to switch the hidden-install check off. It is a
     # hidden install like any other, and it is denied where the others are,
     # after the snapshot: every path between here and there is a deny.
-    if command_pipes_unread_install_to_shell "${COMMAND}"; then
+    if command_pipes_install_to_shell "${COMMAND}"; then
       PIPED_BESIDE_VISIBLE=true
       printf -v "GUARD_HIDDEN_$1" '%s' true
     fi
@@ -5564,11 +5337,14 @@ fi
 # one, so nothing can reduce a piped install to a spec. Beside a visible install
 # the specs that were extracted are the visible one's, so the count below would
 # read as "reduced" -- this case is settled on its own, fail-closed like the same
-# pipe with nothing beside it.
+# pipe with nothing beside it. The visible install's own text counts as install
+# text here (command_pipes_install_to_shell), so an install and an unrelated
+# pipe into a shell in one command land here too, and the reason says to split
+# them.
 if [[ "${PIPED_BESIDE_VISIBLE}" == "true" ]]; then
   guard_undecided_if_scan_failed
   log_advisory "pre-guard DENY: install text piped into a shell beside a visible install could not be reduced to an approved spec — fail-closed. Command: ${COMMAND}"
-  jq -nc '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:"safedeps: this command pipes text that reads like an install into a shell (`... | sh`) beside the install it runs. The gate checks the visible install, but it cannot extract a package spec from what is piped, so the command is blocked fail-closed. Run the piped install as its own command, written out rather than piped, so it can be checked."}}'
+  jq -nc '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:"safedeps: this command pipes text that reads like an install into a shell (`... | sh`) beside the install it runs. The gate checks the visible install, but it cannot extract a package spec from what is piped, and it cannot tell whether the piped text reads the install'"'"'s own words, so the command is blocked fail-closed. Run the install and the pipe into the shell as separate commands. If the piped text is itself an install, write it out rather than piping it, so it can be checked."}}'
   exit 0
 fi
 
