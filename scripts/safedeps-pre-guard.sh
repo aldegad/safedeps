@@ -287,6 +287,17 @@ guard_mark_reading_failed() {
   [[ -z "${SAFEDEPS_SCAN_MARK:-}" ]] || printf 'failed\n' >> "${SAFEDEPS_SCAN_MARK}"
 }
 
+# Whether the lexer wrote <flag> into its flags file <file>. A grep that cannot
+# answer (2 and up) is recorded and counts as the flag being set: the flag read
+# here says a command does not close, and a grep that failed used to read as
+# "it closes", which let everything the open quote swallowed go unread.
+guard_lex_flag_set() {
+  local rc=0
+  grep -q "^$1\$" "$2" 2>/dev/null || rc=$?
+  (( rc <= 1 )) || guard_mark_reading_failed
+  (( rc != 1 ))
+}
+
 # grep for a judgment: 0 is a match and 1 is no match. Anything else -- a grep
 # that errored, was killed or could not be started -- is not "no match"; it is
 # recorded and returns 1, and the gate decides.
@@ -1624,9 +1635,9 @@ join_line_continuations_checked() {
     return
   fi
   joined=$(SAFEDEPS_LEX_FLAGS="${f1}" shell_lex "$1" joined "safedeps:join_line_continuations")
-  if ! grep -q '^UNTERM$' "${f1}" 2>/dev/null; then
+  if ! guard_lex_flag_set UNTERM "${f1}"; then
     SAFEDEPS_LEX_FLAGS="${f2}" shell_lex "${joined}" scan "safedeps:command_scan_text" > /dev/null
-    grep -q '^UNTERM$' "${f2}" 2>/dev/null && guard_mark_reading_failed
+    ! guard_lex_flag_set UNTERM "${f2}" || guard_mark_reading_failed
   fi
   rm -f "${f1}" "${f2}"
   printf '%s' "${joined}"
@@ -3374,12 +3385,17 @@ guard_reading_writers_unattributable() {
 # PostToolUse hook has to find a trace of.
 #
 # A grep that cannot answer counts as a match: the cost is a trace check on a
-# command that needed none, where the other direction skips the check.
+# command that needed none, where the other direction skips the check. It is
+# recorded as a failed reading too, so the gate settles it. Counted as a match
+# alone, it wrote an npm trace baseline into the pending state of a `pip
+# install` with nothing said (the census, once it failed one grep at a time and
+# compared that part of the record).
 guard_command_has_npm_install() {
   local seg rc
   while IFS= read -r seg; do
     rc=0
     command_scan_text "${seg}" | grep -qEi "${SAFEDEPS_G_NPM_INSTALL_RE}" || rc=$?
+    (( rc <= 1 )) || guard_mark_reading_failed
     (( rc == 1 )) || return 0
   done < <(command_candidate_texts "$1")
   return 1
@@ -4017,7 +4033,7 @@ guard_check_command_reads() {
     return 0
   fi
   SAFEDEPS_LEX_FLAGS="${flags}" shell_lex "${COMMAND}" scan "safedeps:command_reads" > /dev/null || true
-  grep -q '^UNTERM$' "${flags}" 2>/dev/null && rc=1
+  ! guard_lex_flag_set UNTERM "${flags}" || rc=1
   rm -f "${flags}"
   return ${rc}
 }
