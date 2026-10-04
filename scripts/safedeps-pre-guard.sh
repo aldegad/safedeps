@@ -898,8 +898,9 @@ shell_lex() {
             if (X[k] ~ /[\n;&|(]/ || C[k] == "p") { atstart = 1; envmode = 0; takes = 0; execmode = 0; cmdmode = 0; timemode = 0 }
             k++; continue
           }
-          s = k; w = ""
-          while (k <= N && !word_sep(k)) { w = w X[k]; k++ }
+          s = k; sb_reset("w", "")
+          while (k <= N && !word_sep(k)) { sb_add("w", X[k]); k++ }
+          w = sb_get("w")
           if (!atstart) continue
           hit = 0
           if (takes) { takes = 0; hit = 1 }
@@ -1042,15 +1043,16 @@ shell_lex() {
         k = j + 2; strip = 0
         if (X[k] == "-") { strip = 1; k++ }
         while (X[k] == " " || X[k] == "\t") k++
-        w = ""; q = 0
+        sb_reset("w", ""); q = 0
         while (k <= N) {
           cc = X[k]
           if (cc ~ /[ \t\n;&|()<>]/) break
-          if (cc == "\\") { q = 1; w = w X[k+1]; k += 2; continue }
-          if (cc == "\047") { q = 1; k++; while (k <= N && X[k] != "\047") { w = w X[k]; k++ } k++; continue }
-          if (cc == "\042") { q = 1; k++; while (k <= N && X[k] != "\042") { if (X[k] == "\\") k++; w = w X[k]; k++ } k++; continue }
-          w = w cc; k++
+          if (cc == "\\") { q = 1; sb_add("w", X[k+1]); k += 2; continue }
+          if (cc == "\047") { q = 1; k++; while (k <= N && X[k] != "\047") { sb_add("w", X[k]); k++ } k++; continue }
+          if (cc == "\042") { q = 1; k++; while (k <= N && X[k] != "\042") { if (X[k] == "\\") k++; sb_add("w", X[k]); k++ } k++; continue }
+          sb_add("w", cc); k++
         }
+        w = sb_get("w")
         if (w == "") { C[j] = cls; return j }
         np++; pd[np] = w; ps[np] = strip; pq[np] = q; pstart[np] = j; pdq[np] = (dq > 0); pb[np] = (ctx[d] == "B")
         pS[np] = 0
@@ -1084,10 +1086,11 @@ shell_lex() {
           pfed[p] = fed
           done = 0; bs = s
           while (s <= N) {
-            e = s; line = ""
+            e = s; sb_reset("w", "")
             while (1) {
-              while (e <= N && X[e] != "\n") { line = line X[e]; e++ }
-              if (!pq[p] && e <= N && line ~ /(^|[^\\])(\\\\)*\\$/) { line = substr(line, 1, length(line) - 1); e++; continue }
+              while (e <= N && X[e] != "\n") { sb_add("w", X[e]); e++ }
+              line = sb_get("w")
+              if (!pq[p] && e <= N && line ~ /(^|[^\\])(\\\\)*\\$/) { sb_reset("w", substr(line, 1, length(line) - 1)); e++; continue }
               break
             }
             t = line; if (ps[p]) sub(/^\t+/, "", t)
@@ -1138,18 +1141,18 @@ shell_lex() {
       # `S` and the word after `sh|bash|zsh|dash -...c`, or `E` and the words
       # after `eval` joined by blanks. A $\047...\047 escape this cannot name
       # adds a record `!`.
-      function emit_cscripts(   k, w, inw, n, W) {
-        buf = ""; held = 0; n = 0; w = ""; inw = 0
+      function emit_cscripts(   k, inw, n, W) {
+        buf = ""; held = 0; n = 0; sb_reset("w", ""); inw = 0
         for (k = 1; k <= N + 1; k++) {
           if (k > N || word_sep(k)) {
-            if (inw) { W[++n] = w; w = ""; inw = 0 }
+            if (inw) { W[++n] = sb_get("w"); sb_reset("w", ""); inw = 0 }
             if (k > N || C[k] == "p" || C[k] == "c" && DEP[k] == 1 && X[k] ~ /[\n;&|()]/) { cscripts_of(W, n); n = 0 }
             continue
           }
           inw = 1
           if (k in DROP) continue
-          if (k in VAL) w = w VAL[k]
-          else if (!RM[k]) w = w X[k]
+          if (k in VAL) sb_add("w", VAL[k])
+          else if (!RM[k]) sb_add("w", X[k])
         }
         if (aqbad) put("!\035")
         printf "%s", buf
@@ -1159,10 +1162,16 @@ shell_lex() {
       # by a regex open on the left, and narrowing it to four names passed
       # `ksh -c "pip install ..."` with no verdict (caught in review). Options
       # may stand before -c: -o and +o take a name, -- ends the options.
-      function cscripts_of(W, n,   j, m, s, base, args) {
+      #
+      # The name is the word itself, not its basename: the bytes after the last
+      # slash end in sh exactly when the word does, since a word that ends in
+      # sh has no slash in its last two bytes. The basename was taken with
+      # sub(/.*\//, ...), which the macOS awk (BWK) tries from every byte and
+      # runs to the end of the word from each, so one 64KB word cost 13s
+      # (scripts/measure/scan-cost.sh). A `~` test is one pass.
+      function cscripts_of(W, n,   j, m, s) {
         for (j = 1; j <= n; j++) {
-          base = W[j]; sub(/.*\//, "", base)
-          if (base ~ /sh$/ && j < n) {
+          if (W[j] ~ /sh$/ && j < n) {
             for (m = j + 1; m <= n; m++) {
               # -o, or a cluster ending in o (-euo), takes the next word as an option name
               if (W[m] ~ /^[-+][A-Za-z]*o$/) { m++; continue }
@@ -1177,10 +1186,12 @@ shell_lex() {
             }
             continue
           }
+          # The arguments go out one at a time: joined into one string first,
+          # each word copied the whole string again (BWK concatenates by copy).
           if (W[j] == "eval" && j < n) {
-            args = ""
-            for (m = j + 1; m <= n; m++) args = args (m > j + 1 ? " " : "") W[m]
-            put("E" args "\035"); break
+            put("E")
+            for (m = j + 1; m <= n; m++) put((m > j + 1 ? " " : "") W[m])
+            put("\035"); break
           }
         }
       }
@@ -1202,6 +1213,21 @@ shell_lex() {
         buf = buf s
         if (++held >= 4096) { printf "%s", buf; buf = ""; held = 0 }
       }
+      # The string builder (sb_*), the same in every awk program here that
+      # builds a string a byte at a time. The macOS awk (BWK) copies
+      # both strings on every concatenation, so `w = w c` costs the square of
+      # the length: 0.17s for one 64KB word on an M1, paid again by each view
+      # that builds one. Bytes go to a piece of 64, pieces to a chunk of 64
+      # pieces, chunks to the string: a byte is copied a bounded number of
+      # times until the string passes 4KB, and past that the string is copied
+      # once per 4KB added. Strings are kept apart by name.
+      function sb_reset(id, s) { SBS[id] = s; SBC[id] = ""; SBP[id] = ""; SBPN[id] = 0; SBCN[id] = 0 }
+      function sb_add(id, s) {
+        SBP[id] = SBP[id] s; if (++SBPN[id] < 64) return
+        SBC[id] = SBC[id] SBP[id]; SBP[id] = ""; SBPN[id] = 0; if (++SBCN[id] < 64) return
+        SBS[id] = SBS[id] SBC[id]; SBC[id] = ""; SBCN[id] = 0
+      }
+      function sb_get(id) { return SBS[id] SBC[id] SBP[id] }
       function emit(   k, cc, cl, p, first) {
         buf = ""; held = 0
         if (view == "shell-bodies") {
@@ -1531,6 +1557,14 @@ install_managers_blanked() {
   if ! { printf '%s\n' "${spans}"; printf '%s\n' "${text}"; printf '%s' "${scan}"; } |
     SAFEDEPS_PIPE_MANAGER_RE="${PIPE_MANAGER_RE}" LC_ALL=C awk '
     # safedeps:install_managers_blanked (scripts/test/scan-contract.sh keys on this line)
+    # The string builder (sb_*): see shell_lex.
+    function sb_reset(id, s) { SBS[id] = s; SBC[id] = ""; SBP[id] = ""; SBPN[id] = 0; SBCN[id] = 0 }
+    function sb_add(id, s) {
+      SBP[id] = SBP[id] s; if (++SBPN[id] < 64) return
+      SBC[id] = SBC[id] SBP[id]; SBP[id] = ""; SBPN[id] = 0; if (++SBCN[id] < 64) return
+      SBS[id] = SBS[id] SBC[id]; SBC[id] = ""; SBCN[id] = 0
+    }
+    function sb_get(id) { return SBS[id] SBC[id] SBP[id] }
     NR == 1 { nspan = split($0, span, " "); next }
     {
       if (NR > 2) X[++n] = "\n"
@@ -1551,8 +1585,9 @@ install_managers_blanked() {
       mre = ENVIRON["SAFEDEPS_PIPE_MANAGER_RE"]
       for (k = 1; k <= nspan; k++) {
         split(span[k], p, ":")
-        str = ""
-        for (i = p[1] + 1; i <= p[1] + p[2] && i <= L; i++) str = str X[L + 1 + i]
+        sb_reset("str", "")
+        for (i = p[1] + 1; i <= p[1] + p[2] && i <= L; i++) sb_add("str", X[L + 1 + i])
+        str = sb_get("str")
         # The manager word as a whole word: `pip` inside `PIP_INDEX_URL=x pip
         # install` is no manager, and blanking it left the real install to be
         # read as install text piped into a shell (caught in review).
@@ -1881,11 +1916,19 @@ inert_flag_offsets() {
   # byte in place, so one index reads all of them and the command.
   if ! ends=$(printf '%s\n' "${pairs}" | LC_ALL=C awk -v dir="${dir}" '
     # safedeps:inert_offsets (scripts/measure/scan-failure-census.sh keys on this line)
-    function slurp(f,   out, line, count) {
-      out = ""; count = 0
-      while ((getline line < f) > 0) out = out (count++ ? "\n" : "") line
+    # The string builder (sb_*): see shell_lex.
+    function sb_reset(id, s) { SBS[id] = s; SBC[id] = ""; SBP[id] = ""; SBPN[id] = 0; SBCN[id] = 0 }
+    function sb_add(id, s) {
+      SBP[id] = SBP[id] s; if (++SBPN[id] < 64) return
+      SBC[id] = SBC[id] SBP[id]; SBP[id] = ""; SBPN[id] = 0; if (++SBCN[id] < 64) return
+      SBS[id] = SBS[id] SBC[id]; SBC[id] = ""; SBCN[id] = 0
+    }
+    function sb_get(id) { return SBS[id] SBC[id] SBP[id] }
+    function slurp(f,   line, count) {
+      sb_reset("slurp", ""); count = 0
+      while ((getline line < f) > 0) sb_add("slurp", (count++ ? "\n" : "") line)
       close(f)
-      return out
+      return sb_get("slurp")
     }
     function blank(c) { return c == " " || c == "\t" || c == "\n" || c == "" }
     function sep(k) { return L[k] == ";" || L[k] == "&" || L[k] == "|" || L[k] == "(" || L[k] == ")" || L[k] == "<" || L[k] == ">" || L[k] == "`" || L[k] == "\n" }
@@ -1921,8 +1964,9 @@ inert_flag_offsets() {
         # the flag after it is an operand (`npm ci -- --ignore-scripts` ran the
         # scripts).
         if (!blank(C[k]) && blank(C[k - 1])) {
-          w = ""
-          for (j = k; j <= n && !blank(C[j]) && !sep(j); j++) w = w C[j]
+          sb_reset("w", "")
+          for (j = k; j <= n && !blank(C[j]) && !sep(j); j++) sb_add("w", C[j])
+          w = sb_get("w")
           gsub(/["\047\\]/, "", w)
           if (w ~ /^--+$/) { dd = k; b = k; break }
         }
@@ -1935,11 +1979,11 @@ inert_flag_offsets() {
       # verb: the end of each word. A blank inside quotes reads as a word end
       # here too; the reading of the placed flag rejects it, since it changes
       # a value npm reads.
-      cands = at
+      sb_reset("cands", at)
       for (k = at - 1; k > e; k--)
-        if (!blank(T[k]) && !blank(C[k]) && !blank(R[k]) && blank(T[k + 1])) cands = cands "," k
-      if (e < at) cands = cands "," e
-      print s, b, at, (dd ? "dd" : "-"), cands
+        if (!blank(T[k]) && !blank(C[k]) && !blank(R[k]) && blank(T[k + 1])) sb_add("cands", "," k)
+      if (e < at) sb_add("cands", "," e)
+      print s, b, at, (dd ? "dd" : "-"), sb_get("cands")
     }') || [[ -z "${ends}" ]]; then
     [[ -z "${SAFEDEPS_SCAN_MARK:-}" ]] || printf 'failed\n' >> "${SAFEDEPS_SCAN_MARK}"
     rm -rf "${dir}"
@@ -2254,66 +2298,80 @@ command_statements() {
   shell_lex "$1" stmts "safedeps:command_scan_text" > "${scan_file}"
   if ! LC_ALL=C awk -v scan_file="${scan_file}" -v raw_file="${raw_file}" '
     # safedeps:command_statements (scripts/measure/scan-failure-census.sh and scripts/test/scan-contract.sh key on this line)
-    function slurp(f,   out, line, count) {
-      out = ""; count = 0
-      while ((getline line < f) > 0) out = out (count++ ? "\n" : "") line
-      close(f)
-      return out
+    # The string builder (sb_*): see shell_lex.
+    function sb_reset(id, s) { SBS[id] = s; SBC[id] = ""; SBP[id] = ""; SBPN[id] = 0; SBCN[id] = 0 }
+    function sb_add(id, s) {
+      SBP[id] = SBP[id] s; if (++SBPN[id] < 64) return
+      SBC[id] = SBC[id] SBP[id]; SBP[id] = ""; SBPN[id] = 0; if (++SBCN[id] < 64) return
+      SBS[id] = SBS[id] SBC[id]; SBC[id] = ""; SBCN[id] = 0
     }
-    function word_end() {
-      if (has) words = words (words == "" ? "" : "\037") word (dyn ? "\001" : "")
-      word = ""; has = 0; dyn = 0
+    function sb_get(id) { return SBS[id] SBC[id] SBP[id] }
+    function slurp(f,   line, count) {
+      sb_reset("slurp", ""); count = 0
+      while ((getline line < f) > 0) sb_add("slurp", (count++ ? "\n" : "") line)
+      close(f)
+      return sb_get("slurp")
+    }
+    # wne: whether the words so far are not empty, which decides the
+    # separator as `words == ""` did when the words were one string.
+    function word_end(   piece) {
+      if (has) {
+        piece = (wne ? "\037" : "") sb_get("word") (dyn ? "\001" : "")
+        sb_add("words", piece)
+        if (piece != "") wne = 1
+      }
+      sb_reset("word", ""); has = 0; dyn = 0
     }
     function words_of(from, to,   i, ch, q) {
-      words = ""; word = ""; has = 0; dyn = 0; q = ""
+      sb_reset("words", ""); wne = 0; sb_reset("word", ""); has = 0; dyn = 0; q = ""
       for (i = from; i <= to; i++) {
         ch = r[i]
         if (q == "") {
           if (ch == " " || ch == "\t" || ch == "\n") { word_end(); continue }
-          if (ch == "\\") { if (i < to) { i++; word = word r[i]; has = 1 }; continue }
+          if (ch == "\\") { if (i < to) { i++; sb_add("word", r[i]); has = 1 }; continue }
           if (ch == "\047") { q = "s"; has = 1; continue }
           if (ch == "\"") { q = "d"; has = 1; continue }
           if (ch == "$" || ch == "`" || ch == "*" || ch == "?" || ch == "[") dyn = 1
           if (ch == "~" && !has) dyn = 1
-          word = word ch; has = 1
+          sb_add("word", ch); has = 1
           continue
         }
-        if (q == "s") { if (ch == "\047") q = ""; else word = word ch; continue }
+        if (q == "s") { if (ch == "\047") q = ""; else sb_add("word", ch); continue }
         if (ch == "\\" && i < to && (r[i + 1] == "$" || r[i + 1] == "`" || r[i + 1] == "\"" || r[i + 1] == "\\")) {
-          i++; word = word r[i]; continue
+          i++; sb_add("word", r[i]); continue
         }
         if (ch == "\"") { q = ""; continue }
         if (ch == "$" || ch == "`") dyn = 1
         if (ch == "\n" || ch == "\t") ch = " "
-        word = word ch
+        sb_add("word", ch)
       }
       word_end()
-      return words
+      return sb_get("words")
     }
-    function raw_of(from, to,   i, ch, out) {
-      out = ""
+    function raw_of(from, to,   i, ch) {
+      sb_reset("raw", "")
       for (i = from; i <= to; i++) {
         ch = r[i]
         if (ch == "\t" || ch == "\035" || ch == "\037") ch = " "
         else if (ch == "\n") ch = "\036"
-        out = out ch
+        sb_add("raw", ch)
       }
-      return out
+      return sb_get("raw")
     }
     function emit(nx, to) {
-      text = cur; gsub(/[\t\035]/, " ", text)
+      text = sb_get("cur"); gsub(/[\t\035]/, " ", text)
       printf "%s\035%s\035%s\035%s\035%s\n", prev, text, nx, words_of(from, to), raw_of(from, to)
-      prev = nx; cur = ""
+      prev = nx; sb_reset("cur", "")
     }
     BEGIN {
       n = split(slurp(scan_file), c, "")
       split(slurp(raw_file), r, "")
-      prev = "start"; cur = ""; from = 1
+      prev = "start"; sb_reset("cur", ""); from = 1
       for (i = 1; i <= n; i++) {
         ch = c[i]
         if (ch == ";" || ch == "\n") { emit(";", i - 1); from = i + 1; continue }
         if (ch == "&") {
-          if (c[i - 1] == ">" || c[i + 1] == ">") { cur = cur ch; continue }
+          if (c[i - 1] == ">" || c[i + 1] == ">") { sb_add("cur", ch); continue }
           if (c[i + 1] == "&") { emit("&&", i - 1); i++; from = i + 1; continue }
           emit("&", i - 1); from = i + 1; continue
         }
@@ -2323,7 +2381,7 @@ command_statements() {
           if (c[i + 1] == "&") i++
           emit("|", to); from = i + 1; continue
         }
-        cur = cur ch
+        sb_add("cur", ch)
       }
       emit("end", n)
     }'; then
