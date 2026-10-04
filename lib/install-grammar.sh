@@ -1242,6 +1242,21 @@ safedeps_manager_read_once() {
   SAFEDEPS_G_M_FAMILY=none SAFEDEPS_G_M_KIND=none SAFEDEPS_G_M_LOCALBIN=false
   SAFEDEPS_G_M_ROLE=() SAFEDEPS_G_M_TEXT=()
   for (( j = 0; j < n; j++ )); do SAFEDEPS_G_M_ROLE[j]=-; SAFEDEPS_G_M_TEXT[j]=""; done
+  # A grouping character against the end of a word is \002 in the pieces view,
+  # as one against its start is: the `}` zsh closes a group with (`{ mvn
+  # -Dartifact=g:a:1 dependency:get}` runs the goal, SAFEDEPS_G_END). It is no
+  # part of the word the manager reads, so a command word that ends in one is
+  # still that command. Kept, it hid maven's goal and the artifact went
+  # unchecked. A quoted blank at a word's end is \002 as well, and for a
+  # command word reading it the same way can only add a command and so a
+  # check. An option keeps it: npm reads `"--cache "` as a switch of its own,
+  # so the word after it is the package, and reading it as `--cache` would
+  # take the package for the cache's value. Roles are read from this copy;
+  # the caller's words keep their text.
+  for (( j = 0; j < n; j++ )); do
+    [[ "${w[j]}" != -* ]] || continue
+    while [[ "${w[j]}" == ?*$'\002' ]]; do w[j]="${w[j]%$'\002'}"; done
+  done
 
   # The command word: past grouping, reserved words, assignments, and the
   # prefixes the shell runs the command through (`command`, `exec`, and env
