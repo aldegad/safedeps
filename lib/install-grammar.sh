@@ -103,22 +103,26 @@ SAFEDEPS_G_SHELLS='sh|bash|rbash|dash|ash|hush|ksh|ksh93|rksh|mksh|lksh|pdksh|ok
 # --- building blocks ------------------------------------------------------------
 # Where a command starts: the beginning of a line (indented or not), or after a
 # separator or an opening parenthesis. Nothing else, because the text these
-# patterns read is the lexer's stmts view (command_start_text), where every
-# other place a command starts is already written as `;`: after a reserved
-# word, a case pattern, a function head, `time` and its options, `coproc`, and
-# the zsh short forms. The shell decides those from its grammar state, and the
-# lexer follows that state (starts() in shell_lex); so `echo do pip install`
-# and `echo { pip install x }` stay echoes. This used to carry a chain of the
-# reserved words before a command, a second copy of that knowledge that could
-# not see the state: `f() { pip install x; }; f` passed, and so did every zsh
-# short form, `for ((...)) {`, and a function with more than one name.
+# patterns read is the lexer's recognize view (command_start_text), where a
+# `;` is put in at every other place a command starts: after a reserved word,
+# a case pattern, a function head, `time` and its options, `coproc`, and the
+# zsh short forms, with the prefixes of the command removed. The shell
+# decides those from its grammar state, and the lexer follows that state
+# (starts() in shell_lex) and hands each start on as an event between two
+# bytes, never written over one; so `echo do pip install` and `echo { pip
+# install x }` stay echoes, and `then>/dev/null pip install x` is a start.
+# This used to carry a chain of the reserved words before a command, a second
+# copy of that knowledge that could not see the state: `f() { pip install x;
+# }; f` passed, and so did every zsh short form, `for ((...)) {`, and a
+# function with more than one name.
 SAFEDEPS_G_START='(^[[:space:]]*|[;&|(][[:space:]]*)'
 
 # Where a word ends, on the same view: before a byte the view prints where the
 # lexer ends a word at the top level, or at the end of the text. The lexer
 # decides it (word_sep in shell_lex, from the depth of its walk), and the view
-# prints every such byte as one of these: a blank or a newline, `;` `&` `|`
-# (which it prints nowhere else, see SAFEDEPS_G_START), or `(` `)` `<` `>`.
+# (the stmts bytes it is made of) prints every such byte as one of these: a
+# blank or a newline, `;` `&` `|` (which it prints nowhere else, see
+# SAFEDEPS_G_START), or `(` `)` `<` `>`.
 # scripts/test/scan-contract.sh checks that on the recorded forms and on random
 # input, against the lexer's own answer (the wordends view). The converse does
 # not hold, and is not needed: a blank the view prints for quoted or escaped
@@ -219,7 +223,8 @@ SAFEDEPS_G_INSTALL_BODY="${SAFEDEPS_G_NPM_INSTALL_BODY}\
 
 # --- the patterns the gates read --------------------------------------------------
 # Anchored at a statement start. Run these on command_start_text output, where
-# quoted text is already blanked and every statement start is a separator.
+# quoted text is already blanked and every statement start is a separator; the
+# text is lexed once there, and a reader does not lex that output again.
 SAFEDEPS_G_INSTALL_RE="${SAFEDEPS_G_START}(${SAFEDEPS_G_INSTALL_BODY})${SAFEDEPS_G_END}"
 SAFEDEPS_G_NPM_INSTALL_RE="${SAFEDEPS_G_START}(${SAFEDEPS_G_NPM_INSTALL_BODY})${SAFEDEPS_G_END}"
 

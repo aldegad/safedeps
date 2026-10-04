@@ -497,10 +497,10 @@ shell_lex() {
       #              line, space-separated, then the stmts view: where
       #              command_statements cuts
       #   view=events  one line per event of this reading, in byte order:
-      #              `S <offset> <class> <depth> <bare>` where a command
-      #              starts (its first byte, a prefix included) and `W
-      #              <offset>` at the word the walk reads as its command or
-      #              reserved word. For scan-contract.
+      #              `S <offset> <class> <depth> <bare> <class before>` where
+      #              a command starts (its first byte, a prefix included) and
+      #              `W <offset> <class> <depth>` at the word the walk reads as
+      #              its command or reserved word. For scan-contract.
       #   view=cwords  one line per start event: its offset, the offset of
       #              the first byte the prefixes leave, the stmts bytes of the
       #              prefixes, and the recognize bytes of the statement from
@@ -1249,16 +1249,32 @@ shell_lex() {
           else if (timemode && w == "--") { timemode = 0; hit = 1 }
           else if (timemode && w ~ /^-/) { if (w ~ /^-[a-z]*[of]$/) takes = 1; hit = 1 }
           else if (assignat(s, k, 1)) hit = 1
-          else if (bw == "env") { envmode = 1; hit = 1 }
+          # env, command and time are programs too (macOS ships /usr/bin/env,
+          # /usr/bin/command and /usr/bin/time), and a macOS volume ignores
+          # case, so `TIME pip install x` runs the install there. Their names
+          # are read as the grammar reads the name of a manager
+          # (safedeps_manager_name): the last part of a path, in any case. The
+          # start pattern of the recognizers read `time` in any case until the
+          # walk took the reserved words over, and a merge with that pattern
+          # gone left `TIME` the command name.
+          else if (tolower(bw) == "env") { envmode = 1; hit = 1 }
           else if (w == "exec") { envmode = 0; execmode = 1; cmdmode = 0; hit = 1 }
-          else if (w == "command") { envmode = 0; cmdmode = 1; execmode = 0; hit = 1 }
+          else if (tolower(bw) == "command") { envmode = 0; cmdmode = 1; execmode = 0; hit = 1 }
           # The reserved word `time` goes like the other prefixes, so a reader
           # of this view finds the command after it (`| time sh`, the pipe
           # check).
-          else if (w == "time") { envmode = 0; timemode = 1; hit = 1 }
+          else if (tolower(bw) == "time") { envmode = 0; timemode = 1; hit = 1 }
           else if (shz && zprecmd(w)) { envmode = 0; hit = 1 }
           else if (opener(w) || shz && zopener(w) || w == "coproc") { envmode = 0; continue }
           else {
+            # A word zsh reads as a precommand modifier, where the other
+            # readings read the command: zsh goes on to the command after it
+            # (`exec -- noglob pip install x` runs the install in zsh alone).
+            # The walk reads no command after `exec` or `command`, so its
+            # starts agree there; this is where the readings part, and the
+            # bash reading says so. A second lexing of this view used to find
+            # the modifier at a start and say it by accident.
+            if (!shz && zprecmd(w)) div = 1
             # The command word. A path before an executable the grammar
             # names reads as that executable, wherever the path points:
             # `/usr/bin/pip`, `.venv/bin/pip` and `$VENV/bin/pip` run a pip
@@ -2051,8 +2067,8 @@ shell_lex() {
       }
       function emit_events(   k) {
         for (k = 1; k <= N; k++) {
-          if (k in EV) printf "S %d %s %d %d\n", k, C[k], DEP[k], bare(k)
-          if (k in EW) printf "W %d\n", k
+          if (k in EV) printf "S %d %s %d %d %s\n", k, C[k], DEP[k], bare(k), (k > 1 ? C[k-1] : "-")
+          if (k in EW) printf "W %d %s %d\n", k, C[k], DEP[k]
         }
       }
       # The bare starts first, on one line, then the stmts view: the
