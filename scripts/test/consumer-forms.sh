@@ -168,6 +168,31 @@ expect_pass "a top-level command substitution"        '$(echo pip install evil==
 expect_pass "a pipe to a quoted shell name"           "printf 'pip install evil==1.0.0' | \"sh\""
 pass "command gate leaves the unenumerated carriers unjudged (documented boundary)"
 
+# Two payloads read by a grammar that is not the shell's, which this release
+# does not read that way (sibling plan after statement-starts-from-the-lexer):
+# `env -S STRING` splits STRING by env(1)'s own rules -- its options, `--`,
+# `\_` as a blank, `#` ending it -- where the payload reader reads STRING as
+# a script, and zsh runs the code in a glob qualifier `e:...:` or `e{...}`,
+# which no reader reads. Every shell runs the env forms and zsh the qualifier
+# forms (verdict howl-20261004-084050, W33 of the v2.18.1 plan); each passes
+# here with no record, as on main. Pinned so that the change that closes them
+# is loud. `env -S 'pip install x'` itself is read (consumer rows above).
+for boundary in \
+  "env -S '-u X pip install evil==1.0.0'" \
+  "env -S '-- pip install evil==1.0.0'" \
+  "env -S '-v pip install evil==1.0.0'" \
+  "env -S'-u X pip install evil==1.0.0'" \
+  "env -S 'pip\\_install\\_evil==1.0.0'" \
+  "env -S 'pip install #c' evil==1.0.0" \
+  "ls *(e:'pip install evil==1.0.0':)" \
+  "echo *(e:'pip install evil==1.0.0':)" \
+  'print -l *(e{pip install evil==1.0.0})' \
+  "ls -d /*(e:'npm ci':)"
+do
+  expect_pass "${boundary}" "${boundary}"
+done
+pass "env -S read by env(1)'s splitting and zsh's glob qualifier code are not read yet (documented boundary)"
+
 
 # For npm the miss is DELAYED detection, not a miss: the effect gate's recognizer
 # is a raw grep with no carrier enumeration, so it fires on the same text the
@@ -573,6 +598,29 @@ gate_rewrite() {
     HOME="${tmp_root}/home" SAFEDEPS_HOME="${safe}" scripts/safedeps-pre-guard.sh 2>/dev/null |
     jq -r '.hookSpecificOutput.updatedInput.command // ""'
 }
+# Where `--ignore-scripts` stands in a rewritten command, as offsets into the
+# command as written, one per flag.
+flag_places() {
+  local rest="$1" head out="" at=0
+  while [[ "${rest}" == *" --ignore-scripts"* ]]; do
+    head="${rest%%" --ignore-scripts"*}"
+    at=$(( at + ${#head} )); out+=" ${at}"
+    rest="${rest#*" --ignore-scripts"}"
+  done
+  printf '%s ' "${out}"
+}
+# Whether the gate rewrites <form> with a flag at least where <expected> has
+# one, and adds nothing but flags. Since v2.18.0 a statement gets the flag
+# right after its verb (the floor) and at the place its own arguments read
+# true, often after the last one (inert_flag_offsets), so a row states the
+# flags it is about and the rest may stand beside them.
+rewrite_holds() { # form expected
+  local got p places
+  got=$(gate_rewrite "$1")
+  [[ -n "${got}" && "${got// --ignore-scripts/}" == "$1" && "${2// --ignore-scripts/}" == "$1" ]] || return 1
+  places=$(flag_places "${got}")
+  for p in $(flag_places "$2"); do [[ " ${places}" == *" ${p} "* ]] || return 1; done
+}
 # Each row: the form's id in the judgment grid, then whether each shell ran
 # its install (1) or not (0), in the order macOS bash 3.2, zsh 5.9, macOS sh,
 # dash, zsh through the agent's eval wrapper, Linux bash 5.2. Measured by
@@ -746,6 +794,39 @@ start_rows=(
   'SB7|101101|f( ) { pip install evil==1.0.0; }; f'
   'SB8|101101|f( )( pip install evil==1.0.0 ); f'
   'SB9|000001|coproc(pip install evil==1.0.0); wait'
+  # A start with no byte of its own before it: a redirection, an assignment
+  # or a precommand glued to a reserved word, `!`, the close of a head, or
+  # zsh's glued `{`. The walk always found these starts; the stmts view wrote
+  # each start over the byte before it and had none here, and the unprefixed
+  # view removed the redirection and left nothing between the reserved word
+  # and the command (`then>/dev/null pip` read as `thenpip`). Each passed with
+  # no record on main, v2.18.0 and every round before this one (verdict
+  # howl-20261004-084050, its forms as written there; bamdori-20261004-224625
+  # measured the macOS columns with a stub that marks only the exact install
+  # arguments, and the agent column is the zsh one). zsh alone reads `&!` as
+  # one list terminator, so a command glued after it starts there.
+  'HA1|111111|if true; then>/dev/null pip install evil==1.0.0; fi'
+  'HA2|111111|for i in 1; do>/dev/null pip install evil==1.0.0; done'
+  'HA3|111111|while true; do</dev/null pip install evil==1.0.0; break; done'
+  'HA4|111111|if false; then :; else>/dev/null X=1 pip install evil==1.0.0; fi'
+  'HA5|111111|if>/dev/null pip install evil==1.0.0; then :; fi'
+  'HA6|111111|!>/dev/null pip install evil==1.0.0'
+  'HA7|111011|for ((i=0;i<1;i++)) {>/dev/null pip install evil==1.0.0; }'
+  'HA8|010010|for i (1)>/dev/null pip install evil==1.0.0'
+  'HA9|010010|if ((1))2>/dev/null pip install evil==1.0.0'
+  'HA10|010010|if (true)2>&1 pip install evil==1.0.0'
+  $'HA11|010010|foreach i (1)</dev/null pip install evil==1.0.0\nend'
+  'HA12|010010|{X=1 pip install evil==1.0.0; }'
+  'HA13|010010|{2>/dev/null pip install evil==1.0.0; }'
+  'HA14|010010|{command pip install evil==1.0.0; }'
+  'HA15|010010|() {2>&1 pip install evil==1.0.0; }'
+  'HA16|010010|repeat 1 {X=1 pip install evil==1.0.0; }'
+  'HA17|010010|{a[1]=x pip install evil==1.0.0; }'
+  'HA18|010010|repeat 12>&1 pip install evil==1.0.0'
+  'HB1|010010|true&!pip install evil==1.0.0'
+  'HB2|010010|{ true&!pip install evil==1.0.0; }'
+  'HB3|010010|if true; then true&!pip install evil==1.0.0; fi'
+  'HB5|111111|true &! pip install evil==1.0.0'
 )
 for start_row in "${start_rows[@]}"; do
   start_ran="${start_row#*|}" start_ran="${start_ran%%|*}" start_form="${start_row#*|*|}"
@@ -859,7 +940,7 @@ do
   expect_not_approved "${precmd_row#*|} before an install (${precmd_row%%|*})" "${precmd_row#*|} pip install evil==1.0.0"
 done
 for inert_form in 'command -- npm ci' 'exec -- npm ci' 'exec -aa npm ci' 'command -pp npm ci'; do
-  [[ "$(gate_rewrite "${inert_form}")" == "${inert_form} --ignore-scripts" ]] \
+  rewrite_holds "${inert_form}" "${inert_form} --ignore-scripts" \
     || fail "an npm install behind ${inert_form% npm ci} gets --ignore-scripts (got: $(gate_rewrite "${inert_form}"))"
 done
 # `command -v` and `-V` only say what the word is (0000 measured).
@@ -889,7 +970,7 @@ do
   expect_not_approved "${close_row#*|} (${close_row%%|*})" "${close_row#*|}"
 done
 for inert_form in 'for ((i=0;i<1;i++)){(npm ci);}' 'for i (1)(npm ci)' 'cat <((npm ci))'; do
-  [[ "$(gate_rewrite "${inert_form}")" == "${inert_form/npm ci/npm ci --ignore-scripts}" ]] \
+  rewrite_holds "${inert_form}" "${inert_form/npm ci/npm ci --ignore-scripts}" \
     || fail "an npm install after a closed head gets --ignore-scripts: ${inert_form} (got: $(gate_rewrite "${inert_form}"))"
 done
 # dash reads `((` as two subshells, so it puts these installs elsewhere, and no
@@ -917,7 +998,7 @@ for inert_form in \
   'function f while npm install evil; do break; done; f' \
   'npm install evil &>/dev/null'
 do
-  [[ "$(gate_rewrite "${inert_form}")" == "${inert_form/npm install/npm install --ignore-scripts}" ]] \
+  rewrite_holds "${inert_form}" "${inert_form/npm install/npm install --ignore-scripts}" \
     || fail "an npm install at a statement start gets --ignore-scripts: ${inert_form} (got: $(gate_rewrite "${inert_form}"))"
 done
 # A verb ends where the shell ends its word, which is the lexer's to say
@@ -933,7 +1014,7 @@ for inert_form in \
   'npm ci>/dev/null' 'npm ci</dev/null' 'npm ci&>/dev/null' 'npm ci>&2' 'case x in x) npm ci;; esac' \
   'x=$(npm ci)' 'echo $(npm ci)'
 do
-  [[ "$(gate_rewrite "${inert_form}")" == "${inert_form/npm ci/npm ci --ignore-scripts}" ]] \
+  rewrite_holds "${inert_form}" "${inert_form/npm ci/npm ci --ignore-scripts}" \
     || fail "an npm verb ended by what follows it gets --ignore-scripts: ${inert_form} (got: $(gate_rewrite "${inert_form}"))"
 done
 expect_not_approved "an npm install ended by ; is checked" 'npm install evil@1.0.0;'
@@ -944,7 +1025,7 @@ for decoy in 'echo npm ci;' 'echo "npm ci;"' 'npm cix;' 'npm ci_x' "echo 'npm ci
 done
 # dash ends the install at the `&` of `&>`, and the rewrite lands after the
 # verb in every reading, so the edit is the same one it was.
-[[ "$(gate_rewrite 'npm ci &>/dev/null && npm run build')" == 'npm ci --ignore-scripts &>/dev/null && npm run build' ]] \
+rewrite_holds 'npm ci &>/dev/null && npm run build' 'npm ci --ignore-scripts &>/dev/null && npm run build' \
   || fail "an npm ci with &> after it gets --ignore-scripts (got: $(gate_rewrite 'npm ci &>/dev/null && npm run build'))"
 # Only some shells parse these, so a reading finds no install where another
 # does, and no single text is inert for every shell: UNDECIDED, with the
@@ -960,6 +1041,19 @@ do
   got=$(gate_reason "${inert_form}")
   [[ "${got}" == "deny "*UNDECIDED*"read the npm installs in this command in different places"* ]] \
     || fail "an npm install at a start only some shells read is UNDECIDED, not rewritten for one: ${inert_form} (got: ${got:0:120})"
+done
+# The npm forms of the starts with no byte of their own (verdict
+# howl-20261004-084050): every shell runs the first two, which got no
+# --ignore-scripts and no record before, and zsh alone the last two, where no
+# one text is inert for every shell.
+for inert_form in 'if true; then>/dev/null npm ci; fi' 'for d in a b; do>/dev/null npm ci; done'; do
+  rewrite_holds "${inert_form}" "${inert_form/npm ci/npm ci --ignore-scripts}" \
+    || fail "an npm install glued behind a reserved word and a redirection gets --ignore-scripts: ${inert_form} (got: $(gate_rewrite "${inert_form}"))"
+done
+for inert_form in '{2>/dev/null npm ci; }' 'true&!npm ci'; do
+  got=$(gate_reason "${inert_form}")
+  [[ "${got}" == "deny "*UNDECIDED*"read the npm installs in this command in different places"* ]] \
+    || fail "an npm install at a start only zsh reads is UNDECIDED, not rewritten for one shell: ${inert_form} (got: ${got:0:120})"
 done
 pass "the inert rewrite reaches an npm install at every statement start the readings agree on, and is UNDECIDED where they do not"
 
@@ -979,15 +1073,14 @@ for rewrite_row in \
   'cat <(npm install evil)|cat <(npm install --ignore-scripts evil)' \
   'npm install evil > >(npm install other)|npm install --ignore-scripts evil > >(npm install --ignore-scripts other)'
 do
-  got=$(gate_rewrite "${rewrite_row%%|*}")
-  [[ "${got}" == "${rewrite_row#*|}" ]] || fail "the rewrite lands after the verb: ${rewrite_row%%|*} (got: ${got})"
+  rewrite_holds "${rewrite_row%%|*}" "${rewrite_row#*|}" || fail "the rewrite lands after the verb: ${rewrite_row%%|*} (got: $(gate_rewrite "${rewrite_row%%|*}"))"
 done
 # A redirection target is no flag. `--ignore-scripts` as the file stdout goes
 # to read as an install that already had the flag, so it got no rewrite and
-# npm ran the lifecycle scripts (v2.18.0 and before). The flag is appended,
-# after the target, where npm reads it.
+# npm ran the lifecycle scripts (v2.18.0 and before). The flag goes in after
+# the verb, and the target stays the target.
 got=$(gate_rewrite 'npm install evil > --ignore-scripts')
-[[ "${got}" == 'npm install evil > --ignore-scripts --ignore-scripts' ]] \
+[[ "${got}" == 'npm install --ignore-scripts evil'* && "${got}" == *' > --ignore-scripts'* ]] \
   || fail "a redirection target named --ignore-scripts is not the flag (got: ${got})"
 pass "the inert rewrite finds an npm verb behind a redirection, and a redirection target is not the flag"
 
@@ -1011,8 +1104,7 @@ for rewrite_row in \
   'npm >$(npm install y) install x|npm >$(npm install --ignore-scripts y) install --ignore-scripts x' \
   'npm install x >$(npm install y)|npm install --ignore-scripts x >$(npm install --ignore-scripts y)'
 do
-  got=$(gate_rewrite "${rewrite_row%%|*}")
-  [[ "${got}" == "${rewrite_row#*|}" ]] || fail "the rewrite finds the verb behind a redirection whose target is a substitution: ${rewrite_row%%|*} (got: ${got})"
+  rewrite_holds "${rewrite_row%%|*}" "${rewrite_row#*|}" || fail "the rewrite finds the verb behind a redirection whose target is a substitution: ${rewrite_row%%|*} (got: $(gate_rewrite "${rewrite_row%%|*}"))"
 done
 expect_not_approved "a pip install behind a redirection whose target is a substitution" 'pip >$(echo f) install evil==1.0.0'
 expect_not_approved "an install inside the target's substitution is still a payload" 'npm >$(pip install evil==1.0.0) install x'
@@ -1033,8 +1125,7 @@ for rewrite_row in \
   $'npm >"$(cat <<E\nx\nE\n)" install evil|npm >"$(cat <<E\nx\nE\n)" install --ignore-scripts evil' \
   $'npm ci >$(cat <<E\nx\nE\n)|npm ci --ignore-scripts >$(cat <<E\nx\nE\n)'
 do
-  got=$(gate_rewrite "${rewrite_row%%|*}")
-  [[ "${got}" == "${rewrite_row#*|}" ]] || fail "the rewrite finds the verb behind a target whose substitution holds a heredoc: ${rewrite_row%%|*} (got: ${got})"
+  rewrite_holds "${rewrite_row%%|*}" "${rewrite_row#*|}" || fail "the rewrite finds the verb behind a target whose substitution holds a heredoc: ${rewrite_row%%|*} (got: $(gate_rewrite "${rewrite_row%%|*}"))"
 done
 expect_not_approved "a pip install behind a target whose substitution holds a heredoc" $'pip >$(cat <<E\nx\nE\n) install evil==1.0.0'
 expect_not_approved "an install after an assignment whose value holds a heredoc" $'x=$(cat <<E\nx\nE\n) pip install evil==1.0.0'
@@ -1058,7 +1149,7 @@ for path_form in \
 do
   expect_not_approved "a manager named by a path: ${path_form}" "${path_form}"
 done
-[[ "$(gate_rewrite 'node_modules/.bin/npm ci')" == 'node_modules/.bin/npm ci --ignore-scripts' ]] \
+rewrite_holds 'node_modules/.bin/npm ci' 'node_modules/.bin/npm ci --ignore-scripts' \
   || fail "an npm named by a relative path gets --ignore-scripts (got: $(gate_rewrite 'node_modules/.bin/npm ci'))"
 for decoy in 'echo .venv/bin/pip install evil==1.0.0' 'ls /usr/bin/pip' '/opt/pip/bin/tool install x' '.venv/bin/pipx-foo install x'; do
   expect_pass "${decoy}" "${decoy}"
@@ -1423,25 +1514,24 @@ for rewrite_row in \
   'x=$(case a in a) echo f;; esac) npm install evil|x=$(case a in a) echo f;; esac) npm install --ignore-scripts evil' \
   '>$(case a in a) echo f;; esac) npm install evil|>$(case a in a) echo f;; esac) npm install --ignore-scripts evil' \
   '< =(true) npm install evil|< =(true) npm install --ignore-scripts evil' \
-  '>/dev/null(N) npm install evil|>/dev/null(N) npm install --ignore-scripts evil' \
-  '>/dev/(null) npm install evil|>/dev/(null) npm install --ignore-scripts evil' \
   'cat =(npm install evil)|cat =(npm install --ignore-scripts evil)'
 do
-  got=$(gate_rewrite "${rewrite_row%%|*}")
-  [[ "${got}" == "${rewrite_row#*|}" ]] || fail "an npm install after a word the shell reads whole gets --ignore-scripts: ${rewrite_row%%|*} (got: ${got})"
+  rewrite_holds "${rewrite_row%%|*}" "${rewrite_row#*|}" || fail "an npm install after a word the shell reads whole gets --ignore-scripts: ${rewrite_row%%|*} (got: $(gate_rewrite "${rewrite_row%%|*}"))"
 done
 # Where only some shells read the word that way the readings put the install
 # in different places: UNDECIDED, never a rewrite for one shell.
 # (`>/dev/null(N) npm install x` runs in zsh alone, `>/dev/(null) npm
 # install x` in the agent's zsh wrapper alone; bash and dash fail to parse
-# either. Their readings once found no install there and the answer was
-# UNDECIDED. Now that the close of a subshell is a place a command starts,
-# dash reads the group left after the redirection as one, and the install
-# after it where zsh does: every reading agrees, and the rewrite above is
-# the one zsh runs.)
+# either, and their readings find no install there. A second lexing of the
+# text with the redirection removed once read the `(N)` left at the front as
+# a subshell at a command start, so dash appeared to agree with zsh and the
+# command was rewritten; dash parses no such command. The text is lexed once
+# now, and the answer is UNDECIDED again.)
 for inert_form in \
   'a[1 + 1]=x npm install evil' \
-  'noglob npm install evil'
+  'noglob npm install evil' \
+  '>/dev/null(N) npm install evil' \
+  '>/dev/(null) npm install evil'
 do
   got=$(gate_reason "${inert_form}")
   [[ "${got}" == "deny "*UNDECIDED*"read the npm installs in this command in different places"* ]] \
