@@ -1069,12 +1069,20 @@ for rewrite_row in \
   'npm {fd}>/dev/null install evil|npm {fd}>/dev/null install --ignore-scripts evil' \
   '< <(true) npm install evil|< <(true) npm install --ignore-scripts evil' \
   '> >(cat) npm install evil|> >(cat) npm install --ignore-scripts evil' \
-  '{fd}>/dev/null npm install evil|{fd}>/dev/null npm install evil --ignore-scripts' \
   'cat <(npm install evil)|cat <(npm install --ignore-scripts evil)' \
   'npm install evil > >(npm install other)|npm install --ignore-scripts evil > >(npm install --ignore-scripts other)'
 do
   rewrite_holds "${rewrite_row%%|*}" "${rewrite_row#*|}" || fail "the rewrite lands after the verb: ${rewrite_row%%|*} (got: $(gate_rewrite "${rewrite_row%%|*}"))"
 done
+# bash 5 runs `{fd}>/dev/null npm install x` with a descriptor in fd; zsh
+# reads the `{` glued to the first word as a group opener, so the command is
+# `fd}` and the install does not run (measured: zsh runs no V-row). The
+# readings put the install in different places: UNDECIDED, never a rewrite
+# for one shell. zsh's reading of the descriptor word used to disagree with
+# its own walk and find the install anyway.
+got=$(gate_reason '{fd}>/dev/null npm install evil')
+[[ "${got}" == "deny "*UNDECIDED*"read the npm installs in this command in different places"* ]] \
+  || fail "an npm install behind {fd} that only bash 5 runs is UNDECIDED, not rewritten for one shell (got: ${got:0:120})"
 # A redirection target is no flag. `--ignore-scripts` as the file stdout goes
 # to read as an install that already had the flag, so it got no rewrite and
 # npm ran the lifecycle scripts (v2.18.0 and before). The flag goes in after

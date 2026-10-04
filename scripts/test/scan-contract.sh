@@ -823,7 +823,11 @@ check_starts "zsh" "a zsh precommand modifier is followed by a start" \
   'noglob pip i; echo noglob pip i' 'noglob ;pip i; echo noglob pip i'
 pass "starts: each start the walk finds is an event, put in between two bytes, and nothing nested opens one"
 
-# The unprefixed view drops what a command starts with before its name --
+# The unprefixed view puts a `;` in at each start no separator stands before,
+# as the recognize view does, so a start whose prefix it removes keeps a
+# separator before its command (`then>/dev/null pip` is `then;pip`, never
+# `thenpip`); a start that was itself a removed prefix leaves its `;` too.
+# It drops what a command starts with before its name --
 # assignments, env, command, exec, and redirections -- at every start the
 # stmts walk finds, so the install recognizers see the command name at a
 # separator. A redirection left in place put a word between the start and the
@@ -843,9 +847,9 @@ check_unprefixed "${all}" "a redirection before the command name goes, with its 
 check_unprefixed "${all}" "a redirection with a blank before its target, after a separator" \
   'echo a; 2> /dev/null pip i' 'echo a; pip i'
 check_unprefixed "${all}" "redirections and assignments mixed, inside a group" \
-  '{ FOO=1 </dev/null 2>&1 BAR=2 pip i; }' '{ pip i; }'
+  '{ FOO=1 </dev/null 2>&1 BAR=2 pip i; }' '{ ;pip i; }'
 check_unprefixed "${all}" "a start after function NAME drops its prefixes" \
-  'function f { 2>&1 FOO=1 pip i; }' 'function f { pip i; }'
+  'function f { 2>&1 FOO=1 pip i; }' 'function f { ;pip i; }'
 check_unprefixed "${all}" "a redirection after the command name is blanked, and the words after it stay arguments" \
   'echo 2>/dev/null pip i' "echo$(sp 13)pip i"
 check_unprefixed "bash zsh" "a redirection after an argument is blanked" \
@@ -920,7 +924,7 @@ check_view unprefixed_view "${all}" "a redirection between the manager and its v
 check_view unprefixed_view "${all}" "a process substitution target before the command goes" \
   '< <(true) pip i' 'pip i'
 check_view unprefixed_view "${all}" "a {varname} redirection before the command goes, after an assignment, exec and !" \
-  'FOO=1 {fd}>/dev/null pip i; exec {fd}>&2 pip i; ! {fd}<&0 pip i' 'pip i; pip i; ! pip i'
+  'FOO=1 {fd}>/dev/null pip i; exec {fd}>&2 pip i; ! {fd}<&0 pip i' 'pip i; pip i; ! ;pip i'
 check_view unprefixed_view "${all}" "after echo the words stay arguments" \
   'echo {fd}>/dev/null pip i' "echo$(sp 16)pip i"
 check_view live_view "${all}" "the live view blanks a redirection, so the inert rewrite finds the verb" \
@@ -1066,7 +1070,7 @@ check_unprefixed "dash" "to dash the ( after the target is an operator" \
 check_unprefixed "bash zsh" "a group glued behind a ! or a reserved word's letters is part of the word" \
   'pip >f!(x) i; pip >f-do(.) i' "pip$(sp 8)i; pip$(sp 10)i"
 check_unprefixed "zsh" "the zsh precommand modifiers go, in any order, after exec too" \
-  'noglob pip i; - nocorrect pip i; builtin pip i; exec - pip i' 'pip i; pip i; pip i; pip i'
+  'noglob pip i; - nocorrect pip i; builtin pip i; exec - pip i' ';pip i; ;;pip i; ;pip i; pip i'
 check_unprefixed "bash dash" "and are commands outside zsh" \
   'noglob pip i; - nocorrect pip i; builtin pip i' 'noglob pip i; - nocorrect pip i; builtin pip i'
 check_unprefixed "zsh" "a zsh numeric range glob is part of a target, of a value and of an argument" \
@@ -1357,7 +1361,13 @@ event_contract() { # input label
       event_checked=$((event_checked + 1))
       if [[ "${f1}" == S ]]; then slist+=" ${f2}"; else wlist+=" ${f2}"; fi
       ok=1
-      [[ "${f4}" == 1 ]] || ok=0
+      # An arithmetic command `((...))` is one word to the walk, which starts
+      # at its second `(`; the lexing classes that byte with the first and
+      # gives it no depth of its own.
+      # A process substitution that stands as a word (`<(a)`) takes its `<`
+      # or `>` into the nested depth of its body, as the lexing reads it.
+      [[ "${f4}" == 1 || "${f4}" == 0 && "${x:f2-1:1}" == "(" && "${x:f2-2:1}" == "(" \
+        || "${f4}" == 2 && "${x:f2-1:1}" == [\<\>] && "${x:f2:1}" == "(" ]] || ok=0
       case "${f3}" in
         c|x|l) ;;
         q) [[ "${x:f2-1:1}" == [\'\"\$] && ( "${f1}" == W || "${f6}" != q ) ]] || ok=0 ;;
@@ -1380,6 +1390,11 @@ event_contract() { # input label
       # terminator's second byte as `_`. E3 and E4 are about commands.
       head="${x:0:k-1}"; head="${head%"${head##*[!${event_blanks}]}"}"
       [[ "${head}" != *";;" && "${head}" != *";&" && "${head}" != *";|" ]] || continue
+      # A start right after a `(` is no cut of the statement split, which
+      # does not cut at a `(` (the spec extractor blanks grouping bytes):
+      # the command in a subshell, and the word of an arithmetic command,
+      # which starts at the second `(` of its `((`.
+      [[ "${head: -1}" != "(" ]] || continue
       # Each place the statement stands in the recognize view, until one
       # follows a separator or begins the text.
       ok=0; off=0
@@ -1394,11 +1409,7 @@ event_contract() { # input label
       first="${st%%[${event_blanks}]*}"
       ok=0
       while IFS= read -r rec; do
-        # A statement may begin with a `(` the split does not cut at: the
-        # start after it is the command in that subshell.
         rec="${rec#"${rec%%[!${event_blanks}]*}"}"
-        [[ "${rec}" == "${pre}${first}"* ]] && { ok=1; break; }
-        rec="${rec#"${rec%%[!(${event_blanks}]*}"}"
         [[ "${rec}" == "${pre}${first}"* ]] && { ok=1; break; }
       done <<< "${stm}"
       [[ ${ok} == 1 ]] || { printf 'E4 (%s): no statement of [%q] (%s) begins with [%q]\n' "${reading}" "${x}" "$2" "${pre}${first}" >&2; event_failures=$((event_failures + 1)); }
