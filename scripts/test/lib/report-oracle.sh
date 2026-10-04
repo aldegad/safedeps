@@ -816,16 +816,16 @@ oracle_line() {
     'safedeps: suspicious dependency change detected; this hook found no record of this command from before it ran. No rollback ran.')
       oracle_block_end; O_BLOCK=backstop-none; O_HEAD="${line}"; oracle_count head-backstop-none
       oracle_record_none; return 0 ;;
-    'safedeps: suspicious dependency change detected; this hook found a record of this command from before it ran, and the snapshot it names has no meta file. A rollback ran.')
+    'safedeps: suspicious dependency change detected; this hook found a pre-guard record, and the snapshot it names has no meta file. A rollback ran.')
       oracle_block_end; O_BLOCK=backstop-rollback; O_HEAD="${line}"; oracle_count head-gone-rollback
       oracle_record_gone_head; return 0 ;;
-    'safedeps: suspicious dependency change detected; this hook found a record of this command from before it ran, and the snapshot it names has no meta file. No rollback ran.')
+    'safedeps: suspicious dependency change detected; this hook found a pre-guard record, and the snapshot it names has no meta file. No rollback ran.')
       oracle_block_end; O_BLOCK=backstop-none; O_HEAD="${line}"; oracle_count head-gone-none
       oracle_record_gone_head; return 0 ;;
-    'safedeps: suspicious dependency change detected; this hook found a record of this command from before it ran, and the record names no snapshot. A rollback ran.')
+    'safedeps: suspicious dependency change detected; this hook found a pre-guard record, and the record names no snapshot. A rollback ran.')
       oracle_block_end; O_BLOCK=backstop-rollback; O_HEAD="${line}"; oracle_count head-empty-rollback
       oracle_record_empty_head; return 0 ;;
-    'safedeps: suspicious dependency change detected; this hook found a record of this command from before it ran, and the record names no snapshot. No rollback ran.')
+    'safedeps: suspicious dependency change detected; this hook found a pre-guard record, and the record names no snapshot. No rollback ran.')
       oracle_block_end; O_BLOCK=backstop-none; O_HEAD="${line}"; oracle_count head-empty-none
       oracle_record_empty_head; return 0 ;;
     'safedeps: suspicious dependency change detected; this hook found a pre-guard record, and the record is not one JSON object. A rollback ran.')
@@ -1292,15 +1292,16 @@ oracle_message() {
     O_TRACE=$(cat "${consumed}.trace")
     O_NODE_FILES=$(cat "${consumed}.nodefiles")
     O_TREE=$(cat "${consumed}.tree")
-    if [[ -n "${project}" ]]; then
-      O_PROJECT="${project}"
-      O_DIR_HASH=$(python3 "${ORACLE_READ}" string "${consumed}" dir_hash 2>/dev/null) || O_DIR_HASH=""
-    fi
+    [[ -z "${project}" ]] || O_PROJECT="${project}"
     # A snapshot with no meta file is not one the backstop restores from or
     # compares with, so the call has no snapshot from before the command.
     [[ "${O_GONE}" != 1 ]] || O_PRE=""
   fi
-  [[ -n "${O_DIR_HASH}" ]] || O_DIR_HASH=$(oracle_dir_hash "${O_PROJECT}")
+  # The hash that picks the project's confirmed snapshot is the project's own,
+  # never the record's dir_hash (bamdori J: a record naming X with Z's hash
+  # restored Z's snapshot into X, and this file, reading the record's hash
+  # too, agreed). Computed in Python, not with the hook's md5 tools.
+  O_DIR_HASH=$(python3 -c 'import hashlib, sys; print(hashlib.md5(sys.argv[1].encode("utf-8", "surrogateescape")).hexdigest())' "${O_PROJECT}")
   oracle_reset
   oracle_verdict
   # SAFEDEPS_ORACLE_DUMP=<file> keeps every message the suite read, for a
