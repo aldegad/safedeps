@@ -1,22 +1,23 @@
 #!/usr/bin/env bash
 # The floor under the inert rewrite, checked on every rewrite a battery sees:
 # deleting from this tree's rewrite some of the `--ignore-scripts` flags it
-# inserted gives the release's rewrite of the same command (7d66f8c, the last
-# release before the rewrite read the install's words). So npm receives at
-# least the words the release gave it, whatever the shell does to the command,
+# inserted gives 7d66f8c's rewrite of the same command (the tree, during the
+# v2.18.0 cycle, before the rewrite read the install's words; it is not the
+# published v2.17.2, bb0787d). So npm receives at least the words 7d66f8c
+# gave it, whatever the shell does to the command,
 # and the flags placed by reading only add to them. Whether npm keeps the flag
 # is decided by shell state the command does not hold (a function or alias in
 # the agent's shell snapshot, .zshenv, BASH_ENV), so no reading can promise
 # it; this property is what can be promised, and it holds by construction
 # (inert_rewrite_in_place), not form by form.
 #
-# The release's rewrites are measured, not derived: scripts/test/inert-release-
-# rewrites.json holds, for each command a battery rewrites, what the release's
+# 7d66f8c's rewrites are measured, not derived: scripts/test/inert-release-
+# rewrites.json holds, for each command a battery rewrites, what 7d66f8c's
 # own pre-guard printed for it (null: it printed no rewrite), with the
 # battery's temporary root written as <tmp>. A command missing from it fails,
 # so a new row is recorded before it is checked. To record, run the battery
 # with SAFEDEPS_RELEASE_HOOK=<a 7d66f8c checkout>/scripts/safedeps-pre-guard.sh
-# and SAFEDEPS_RELEASE_RECORD=<file>: each rewrite then runs the release's hook
+# and SAFEDEPS_RELEASE_RECORD=<file>: each rewrite then runs that hook
 # on the same payload, in a copy of the project and the safedeps home, and
 # appends the pair; merge the file into the JSON (scripts/test/lib/
 # release-floor-merge.py).
