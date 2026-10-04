@@ -172,11 +172,33 @@ SAFEDEPS_G_INSTALL_BODY="${SAFEDEPS_G_NPM_INSTALL_BODY}\
 |dotnet${SAFEDEPS_G_O}[[:space:]]+package${SAFEDEPS_G_O}[[:space:]]+(add|update)\
 |dotnet${SAFEDEPS_G_O}[[:space:]]+tool${SAFEDEPS_G_O}[[:space:]]+(install|update)"
 
+# Where the shell ends a word: a blank, the end of the line, or an operator
+# (`;`, `&`, `|`, `)`, `<`, `>`). `npm ci; echo x` hands npm the word `ci`, as
+# `npm ci ; echo x` does, and so do `(npm ci)`, `npm ci&&x` and `npm
+# ci>log`. The recognizers used to end the last word only at a blank or the
+# end of the line, so an install whose verb stood against the operator was no
+# install to v2.17.2, 7d66f8c or v2.18.0: no check, no `--ignore-scripts`,
+# and for every manager but npm no later check either (form `npm ci; echo
+# x`, scripts/measure/glued-verb-reading.sh). Read on the scan view, an
+# escaped operator is `_` there (`npm ci\;` hands npm `ci;`), and a quoted one
+# is blank, which ends the word as a blank. `(` is left out: no shell ends a
+# word there and hands the word before it on (bash refuses `npm ci(`; zsh
+# reads `npm ci()` as defining functions).
+#
+# A `}` against one of those ends a word too, for zsh: it closes a `{` group
+# there and hands the word before it on (`{ npm ci}` runs `npm ci`, and `{
+# npm ci}&& x` as well; measured on zsh 5.9). bash and dash refuse that group,
+# and outside a group zsh refuses the `}` and bash hands npm `ci}`, which
+# installs nothing, so reading it as an end costs at most a check. A `}`
+# inside a word is the word's (`{ p a}b }` hands `a}b`), and the extractor
+# already blanks a grouping character in a word (guard_word_as_read).
+SAFEDEPS_G_END='[}]?([[:space:];&|)<>]|$)'
+
 # --- the patterns the gates read --------------------------------------------------
 # Anchored at a statement start. Run these on command_scan_text output, where
 # quoted text is already blanked.
-SAFEDEPS_G_INSTALL_RE="${SAFEDEPS_G_START}(${SAFEDEPS_G_INSTALL_BODY})([[:space:]]|$)"
-SAFEDEPS_G_NPM_INSTALL_RE="${SAFEDEPS_G_START}(${SAFEDEPS_G_NPM_INSTALL_BODY})([[:space:]]|$)"
+SAFEDEPS_G_INSTALL_RE="${SAFEDEPS_G_START}(${SAFEDEPS_G_INSTALL_BODY})${SAFEDEPS_G_END}"
+SAFEDEPS_G_NPM_INSTALL_RE="${SAFEDEPS_G_START}(${SAFEDEPS_G_NPM_INSTALL_BODY})${SAFEDEPS_G_END}"
 
 # Unanchored, for raw text nobody has parsed: the jq-missing fail-closed check
 # and the PostToolUse backstop. A false positive there costs a closure diff or a

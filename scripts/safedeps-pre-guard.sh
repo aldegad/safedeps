@@ -1384,7 +1384,7 @@ extract_command_substitution_payloads() {
 # view, where a quoted value is already blank. Without the prefix, an install
 # behind `PIP_INDEX_URL=x` was not set aside, and the pipe check read it as
 # install text piped into a shell (caught in review).
-BLANK_INSTALL_RE="${SAFEDEPS_G_START}((env|command)([[:space:]]+-[^[:space:]]*)*[[:space:]]+|[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*(${SAFEDEPS_G_INSTALL_BODY})([[:space:]]|\$)"
+BLANK_INSTALL_RE="${SAFEDEPS_G_START}((env|command)([[:space:]]+-[^[:space:]]*)*[[:space:]]+|[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*(${SAFEDEPS_G_INSTALL_BODY})${SAFEDEPS_G_END}"
 PIPE_MANAGER_RE='(npm|npx|pnpm|pnpx|yarn|bun|bunx|pip[0-9.]*|(python[0-9.]*|py)[[:space:]]+-[A-Za-z0-9]*m[[:space:]]*pip|poetry|uv|uvx|pipx|pipenv|cargo|go|gem|bundle|mvn|dotnet)'
 PIPE_INSTALL_TEXT_RE="${PIPE_MANAGER_RE}.*(${SAFEDEPS_G_ALL_VERBS})"
 
@@ -1691,7 +1691,7 @@ command_is_injectable_npm_install() {
 # this one. The check for an npm verb in a heredoc body does not: its match
 # withholds every rewrite, so it keeps the release's case (inert_rewrite_in_place).
 inert_npm_verb_grep() {
-  LC_ALL=C judge_grep "$@" -Ei "npm${SAFEDEPS_G_OPTS}[[:space:]]+(${SAFEDEPS_G_NPM_VERBS}|${SAFEDEPS_G_NPM_LINK_VERBS})([[:space:]]|\$)"
+  LC_ALL=C judge_grep "$@" -Ei "npm${SAFEDEPS_G_OPTS}[[:space:]]+(${SAFEDEPS_G_NPM_VERBS}|${SAFEDEPS_G_NPM_LINK_VERBS})${SAFEDEPS_G_END}"
 }
 
 # Each npm install verb in <text>, one per line, as `<start> <end>`: the offset
@@ -1709,7 +1709,8 @@ inert_verb_ends() {
   [[ -n "${matches}" ]] || return 0
   if ! printf '%s\n' "${matches}" | LC_ALL=C awk '
     # safedeps:inert_offsets (scripts/measure/scan-failure-census.sh keys on this line)
-    { c = index($0, ":"); m = substr($0, c + 1); s = substr($0, 1, c - 1); e = s + length(m); if (m ~ /[[:space:]]$/) e--; print s, e }'; then
+    # The match ends with SAFEDEPS_G_END: an operator or a blank, and a `}` before it, are not the verb.
+    { c = index($0, ":"); m = substr($0, c + 1); s = substr($0, 1, c - 1); if (m ~ /[[:space:];&|)<>]$/) m = substr(m, 1, length(m) - 1); if (m ~ /[}]$/) m = substr(m, 1, length(m) - 1); print s, s + length(m) }'; then
     [[ -z "${SAFEDEPS_SCAN_MARK:-}" ]] || printf 'failed\n' >> "${SAFEDEPS_SCAN_MARK}"
     return 1
   fi
@@ -2121,7 +2122,7 @@ inert_rewrite_in_place() {
   local command="$1" lines offsets="" e note settled=false asked=false unverified=false floor=false rc=0 append=0 release_rewrote=false
   lines=$(inert_offsets_of "${command}") || rc=$?
   (( rc == 0 )) || return "${rc}"
-  # Matches case, as the release did: with -i, return 3 drops the compound floor, as with the awk in inert_payload_spans (v2.18.1).
+  # Matches case and ends the verb at a blank, as the release did: with -i or SAFEDEPS_G_END, return 3 drops the compound floor, as with the awk in inert_payload_spans (v2.18.1).
   if strip_heredoc_bodies "${command}" shell-bodies \
       | LC_ALL=C judge_grep -qE "npm${SAFEDEPS_G_OPTS}[[:space:]]+(${SAFEDEPS_G_NPM_VERBS}|${SAFEDEPS_G_NPM_LINK_VERBS})([[:space:]]|\$)"; then
     return 3
@@ -2194,14 +2195,18 @@ inert_release_skips() {
 # release's end flag is the one that stands. One part differs, and only adds
 # a flag: the release matched the name `npm` in its case and so appended
 # nothing to `NPM ci`, which main (a6fd57a) had appended to; the name here
-# ignores case (inert_npm_verb_grep).
+# ignores case. The verb still ends where the release ended it, at a blank or
+# the end of the line: `npm ci>log` was no install to the release, so it
+# appended nothing there, and the in-place flag after the verb is this tree's
+# own (SAFEDEPS_G_END).
 inert_release_appends() {
   local scanned code
   scanned=$(command_scan_text "$1") || return 1
   [[ "${scanned}" != *$'\n'* ]] || return 1
   ! printf '%s' "${scanned}" | judge_grep -qE '[;&|()`$]' || return 1
   ! inert_release_skips "$1" || return 1
-  printf '%s' "${scanned}" | inert_npm_verb_grep -q || return 1
+  printf '%s' "${scanned}" \
+    | LC_ALL=C judge_grep -qEi "npm${SAFEDEPS_G_OPTS}[[:space:]]+(${SAFEDEPS_G_NPM_VERBS}|${SAFEDEPS_G_NPM_LINK_VERBS})([[:space:]]|\$)" || return 1
   code=$(strip_heredoc_bodies "$1")
   [[ "${code}" == "$1" ]]
 }

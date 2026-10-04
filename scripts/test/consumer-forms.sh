@@ -543,6 +543,93 @@ expect_pass "an install named only in an assignment value" 'FOO="pip install evi
 expect_deny "an install inside a substitution in an assignment value" 'FOO=$(pip install evil==1.0.0) ls'
 pass "an install behind an assignment prefix is gated however the value is quoted or nested"
 
+# A word ends at an operator, as the shell ends it. `npm ci; echo x` hands npm
+# the word `ci` exactly as `npm ci ; echo x` does, and so do `(npm ci)`, `npm
+# ci&&x` and `npm ci>log`. The recognizers ended the last word only at a blank
+# or the end of the line, so an install whose verb stood against the operator
+# was no install to v2.17.2, 7d66f8c or v2.18.0: no check, no record, no
+# `--ignore-scripts`. For maven, as for pip, cargo, go, gem and nuget, this gate
+# is the only one, so that was a complete miss. The package stands before the
+# verb here, so the verb is the word against the operator; the table for every
+# manager and operator is scripts/measure/glued-verb-reading.sh.
+for glued_form in \
+  'mvn -Dartifact=g:evil:1.0.0 dependency:get;' \
+  'mvn -Dartifact=g:evil:1.0.0 dependency:get; echo x' \
+  'mvn -Dartifact=g:evil:1.0.0 dependency:get&& echo x' \
+  'mvn -Dartifact=g:evil:1.0.0 dependency:get|| echo x' \
+  'mvn -Dartifact=g:evil:1.0.0 dependency:get| cat' \
+  'mvn -Dartifact=g:evil:1.0.0 dependency:get& wait' \
+  '(mvn -Dartifact=g:evil:1.0.0 dependency:get)' \
+  '{ mvn -Dartifact=g:evil:1.0.0 dependency:get;}' \
+  'mvn -Dartifact=g:evil:1.0.0 dependency:get>/dev/null' \
+  'mvn -Dartifact=g:evil:1.0.0 dependency:get</dev/null' \
+  'echo $(mvn -Dartifact=g:evil:1.0.0 dependency:get)' \
+  'x="$(mvn -Dartifact=g:evil:1.0.0 dependency:get)"' \
+  'pip install evil==1.0.0;' \
+  'cargo add evil@1.0.0&& echo x' \
+  'gem install rake -v 13.0.0|| echo x' \
+  'dotnet add package Serilog --version 3.1.1;' \
+  'go get example.com/m@v1.0.0;' \
+  '{ mvn -Dartifact=g:evil:1.0.0 dependency:get}' \
+  '{ mvn -Dartifact=g:evil:1.0.0 dependency:get}&& echo x'
+do
+  expect_deny "an install whose last word stands against an operator: ${glued_form}" "${glued_form}"
+done
+# zsh closes a `{` group at a `}` that ends a word and runs what is before it
+# (`{ npm ci}` runs `npm ci`; zsh 5.9, measured). bash and dash refuse that
+# group, so the zsh reading is the one that runs.
+got=$(gate_reason '{ npm ci}')
+[[ "${got}" == allow\ * ]] || fail "an npm install closed by a glued } is read as one (got: ${got:0:120})"
+
+# The npm install with its verb against the operator gets `--ignore-scripts`
+# right after the verb, before the operator, as the spaced form gets it after
+# the verb.
+expect_rewrite() {
+  local label="$1" command="$2" want="$3" safe out got
+  safe=$(mktemp -d "${tmp_root}/safe.XXXXXX")
+  out=$(jq -nc --arg c "${command}" --arg cwd "${project_dir}" \
+    '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
+    HOME="${tmp_root}/home" SAFEDEPS_HOME="${safe}" scripts/safedeps-pre-guard.sh 2>/dev/null)
+  got=$(jq -r '.hookSpecificOutput.updatedInput.command // "(no rewrite)"' <<< "${out:-{\}}")
+  [[ "${got}" == "${want}" ]] || fail "${label} is rewritten to [${want}] (got: [${got}])"
+}
+expect_rewrite "npm ci before ;"          'npm ci; echo x'    'npm ci --ignore-scripts; echo x'
+expect_rewrite "npm ci at the end with ;" 'npm ci;'           'npm ci --ignore-scripts;'
+expect_rewrite "npm ci before &&"         'npm ci&& echo x'   'npm ci --ignore-scripts&& echo x'
+expect_rewrite "npm i before |"           'npm i| cat'        'npm i --ignore-scripts| cat'
+expect_rewrite "npm ci in a subshell"     '(npm ci)'          '(npm ci --ignore-scripts)'
+expect_rewrite "npm ci in a group"        '{ npm ci;}'        '{ npm ci --ignore-scripts;}'
+expect_rewrite "npm ci before >"          'npm ci>/dev/null'  'npm ci --ignore-scripts>/dev/null'
+expect_rewrite "npm ci in a substitution" 'x=$(npm ci)'       'x=$(npm ci --ignore-scripts)'
+
+# What the shell does not end there stays what it is. An escaped operator is a
+# character (npm is handed `ci;`), a `}` inside a word is part of it (`ci}x`), a
+# `-`, `:` or letter after the verb makes another word, and an operator after
+# text that is no install, or inside quotes, a comment or a heredoc body to
+# `cat`, is data.
+for glued_data in \
+  'npm ci\; echo x' \
+  'npm cit-helper; echo x' \
+  'npm ci:all; echo x' \
+  'npm run ci; echo x' \
+  'npm view evil@1.0.0| cat' \
+  'pip installer; echo x' \
+  'go getter&& echo x' \
+  'mvn dependency:getx; echo x' \
+  'echo npm ci; echo x' \
+  'echo pip install evil==1.0.0;' \
+  'grep -n "npm ci;" README.md' \
+  "printf '%s\\n' 'mvn -Dartifact=g:evil:1.0.0 dependency:get;'" \
+  'git commit -m "run npm ci; then go get;"' \
+  'ls # npm ci; pip install evil==1.0.0;' \
+  $'cat <<E\nnpm ci; pip install evil==1.0.0;\nE' \
+  'echo $(npm ls)| cat' \
+  '{ npm ci}x; }'
+do
+  expect_pass "data with an operator after a manager's word: ${glued_data}" "${glued_data}"
+done
+pass "a word ends at an operator as the shell ends it, and what the shell does not end there stays data"
+
 # npm takes any unique abbreviation of a command or alias, and the camelCase
 # form of a dashed one (lib/utils/cmd-list.js deref). The grammar holds what
 # deref accepts, measured from npm; where an npm is on PATH, that measurement is

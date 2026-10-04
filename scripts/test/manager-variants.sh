@@ -233,6 +233,75 @@ else
   pass "verdict, prescription and record do not depend on how a value is spelled (${#templates[@]} templates, ${#spellings[@]} spellings, ${n} commands)"
 fi
 
+# --- Where the last word ends ----------------------------------------------------
+# The shell ends a word at a blank and at an operator, so the install's last
+# word against `;`, `&`, `|`, `&&`, `)`, `<` or `>` is the same word as with a
+# blank before the operator. The recognizers ended it only at a blank or the
+# end of the line, and `npm ci; echo x`, `go get;` and `mvn -Dartifact=g:a:1
+# dependency:get;` were no install at all (v2.17.2, 7d66f8c and v2.18.0). For
+# each manager the install is written with its last word against each
+# operator and with a blank before it, and the two must get the same answers,
+# none of them a pass. scripts/measure/glued-verb-reading.sh prints the whole
+# table, with the words each shell hands the manager.
+glued_bases=(
+  'npm ci'
+  'npm install evil@1.0.0'
+  'npx evil@1.0.0'
+  'pnpm add evil@1.0.0'
+  'yarn add evil@1.0.0'
+  'bun add evil@1.0.0'
+  'pip install evil==1.0.0'
+  'uv add evil==1.0.0'
+  'poetry add evil==1.0.0'
+  'cargo add evil@1.0.0'
+  'go get'
+  'go get example.com/m@v1.0.0'
+  'gem install rake -v 13.0.0'
+  'bundle add rails --version 7.1.0'
+  'mvn -Dartifact=g:evil:1.0.0 dependency:get'
+  'dotnet package update'
+  'dotnet add package Serilog --version 3.1.1'
+)
+# <glued template>|<spaced template>, %C% standing for the install.
+glued_ends=(
+  '%C%; echo x|%C% ; echo x'
+  '%C%;|%C% ;'
+  '%C%& wait|%C% & wait'
+  '%C%| cat|%C% | cat'
+  '%C%&& echo x|%C% && echo x'
+  '(%C%)|(%C% )'
+  '%C%>/dev/null|%C% >/dev/null'
+  # A visible install is set aside before a pipe into a shell is searched for
+  # install text; one left in place read as install text piped into the shell.
+  '%C%; cat notes.txt | sh|%C% ; cat notes.txt | sh'
+)
+jobs_dir="${tmp_root}/glued"
+mkdir -p "${jobs_dir}"
+n=0
+for base in "${glued_bases[@]}"; do
+  for end in "${glued_ends[@]}"; do
+    glued="${end%%|*}" spaced="${end#*|}"
+    printf '%s\n' "${glued//%C%/${base}}" > "${jobs_dir}/${n}.cmd"
+    ( tuple "${glued//%C%/${base}}" > "${jobs_dir}/${n}.glued"
+      tuple "${spaced//%C%/${base}}" > "${jobs_dir}/${n}.spaced" ) &
+    n=$((n + 1))
+    (( n % 4 == 0 )) && wait
+  done
+done
+wait
+red=0
+for (( k = 0; k < n; k++ )); do
+  got=$(cat "${jobs_dir}/${k}.glued") want=$(cat "${jobs_dir}/${k}.spaced")
+  [[ "${got}" == "${want}" && "${want}" != pass\ * ]] && continue
+  red=$((red + 1))
+  printf '# RED [%s] (spaced: [%s]) %s\n' "${got}" "${want}" "$(cat "${jobs_dir}/${k}.cmd")" >&2
+done
+if (( red > 0 )); then
+  not_ok "an install whose last word stands against an operator reads differently from the spaced one (${red} of ${n} commands)"
+else
+  pass "an install's last word ends at an operator as at a blank (${#glued_bases[@]} installs, ${#glued_ends[@]} operators, ${n} commands)"
+fi
+
 # --- A manager's runtime option where it installs --------------------------------
 # bun's `--help` lists options that take a value when bun runs a file: --print,
 # --eval, --preload, --port and the rest. In an install command bun reads each
