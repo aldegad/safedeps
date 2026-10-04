@@ -83,9 +83,13 @@
 #
 # --quick also skips the K-onward runs (the full census keeps them), so npm
 # test pays for one failing run per reading rather than two. It keeps the K-th
-# grep and sed runs: sed-all fails the first judgment sed a command reaches and
-# that mark covers every later one, so only a sed failing alone shows whether a
-# later site marks its own failure.
+# sed runs: sed-all fails the first judgment sed a command reaches and that
+# mark covers every later one, so only a sed failing alone shows whether a
+# later site marks its own failure. It skips the K-th grep runs, which the
+# full census keeps: they were 1,126 of the quick corpus's 5,083 failing runs,
+# and npm test is already long.
+# The two grep sites they found (0240b78) are held by rows in
+# scripts/test/scan-contract.sh that fail each of those calls alone.
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
@@ -400,9 +404,11 @@ for n in $(seq 1 "${case_count}"); do
     printf '%s k %s\n' "${n}" "${k}" >> "${WORK}/jobs"
     [[ "${QUICK}" == "true" ]] || printf '%s from-k %s\n' "${n}" "${k}" >> "${WORK}/jobs"
   done
-  for k in $(seq 1 "$(cut -f14 "${WORK}/results/${n}.count.0")"); do
-    printf '%s grep-k %s\n' "${n}" "${k}" >> "${WORK}/jobs"
-  done
+  if [[ "${QUICK}" != "true" ]]; then
+    for k in $(seq 1 "$(cut -f14 "${WORK}/results/${n}.count.0")"); do
+      printf '%s grep-k %s\n' "${n}" "${k}" >> "${WORK}/jobs"
+    done
+  fi
   for k in $(seq 1 "$(cut -f15 "${WORK}/results/${n}.count.0")"); do
     printf '%s sed-k %s\n' "${n}" "${k}" >> "${WORK}/jobs"
   done

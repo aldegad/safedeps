@@ -735,6 +735,7 @@ scanfail_guard() {
     '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
     PATH="${bin:+${bin}:}${PATH}" HOME="${home}" SAFEDEPS_HOME="${home}/safe" \
     scripts/safedeps-hook-entry.sh pre 2>"${home}/stderr") || fail "the hook exited non-zero for: ${command}"
+  SCANFAIL_HOME="${home}"
   SCANFAIL_ERR=$(cat "${home}/stderr")
   SCANFAIL_LOG=$(cat "${home}/safe/advisory.log" 2>/dev/null || printf '')
   SCANFAIL_DECISION=$(jq -r '.hookSpecificOutput.permissionDecision // "pass"' <<< "${SCANFAIL_OUT:-{\}}" 2>/dev/null || printf 'pass')
@@ -821,6 +822,88 @@ for tool in grep sed; do
   [[ "${SCANFAIL_DECISION}" == "pass" ]] || fail "a failed ${tool} does not block a command that names no package manager (got: ${SCANFAIL_DECISION})"
 done
 pass "a failed grep or sed on the judgment path denies install-looking commands as UNDECIDED"
+
+# One judgment grep failing alone. grep-all cannot show these: the first grep a
+# command reaches marks its failure, and that mark covers every later grep. The
+# census fails each grep call alone (grep-k), but only in its full run, which
+# npm test does not pay for, so the two sites the census found that way are
+# held here. The shim fails the J-th call whose first two arguments are the
+# site's, and only that call; a counting run first finds how many such calls a
+# command makes, so every one of them fails alone and none is left out.
+mkdir -p "${fail_tmp}/grep-one"
+real_grep=$(command -v grep)
+cat > "${fail_tmp}/grep-one/grep" <<SHIM
+#!/usr/bin/env bash
+if [[ "\$1" == "\${GREP_ONE_A1}" && "\$2" == "\${GREP_ONE_A2}" ]]; then
+  printf 'x\n' >> "\${GREP_ONE_TALLY}"
+  n=0
+  while IFS= read -r _; do n=\$(( n + 1 )); done < "\${GREP_ONE_TALLY}"
+  [[ "\${n}" != "\${GREP_ONE_AT}" ]] || exit 2
+fi
+exec '${real_grep}' "\$@"
+SHIM
+chmod +x "${fail_tmp}/grep-one/grep"
+
+# Fails the J-th call of the site <a1> <a2> alone, for every J the command
+# reaches, and hands each run to <check>. A site the command never reaches is a
+# failure of this battery, not a pass.
+grep_one_each() {
+  local a1="$1" a2="$2" command="$3" approve="$4" check="$5" calls at
+  export GREP_ONE_A1="${a1}" GREP_ONE_A2="${a2}" GREP_ONE_TALLY="${fail_tmp}/grep-one/tally"
+  rm -f "${GREP_ONE_TALLY}"
+  GREP_ONE_AT=0 scanfail_guard "${fail_tmp}/grep-one" "${command}" "${approve}"
+  calls=0
+  [[ ! -f "${GREP_ONE_TALLY}" ]] || calls=$(wc -l < "${GREP_ONE_TALLY}" | tr -d ' ')
+  (( calls > 0 )) || fail "the command reaches the grep site ${a1} ${a2:0:40} (otherwise this case tests nothing): ${command}"
+  for (( at = 1; at <= calls; at++ )); do
+    rm -f "${GREP_ONE_TALLY}"
+    GREP_ONE_AT="${at}" scanfail_guard "${fail_tmp}/grep-one" "${command}" "${approve}"
+    "${check}" "${at}/${calls}"
+  done
+  unset GREP_ONE_A1 GREP_ONE_A2 GREP_ONE_TALLY
+}
+
+# (a) The grep that reads the lexer's UNTERM flag. A failure there read as "the
+# command closes", and the line the open quote swallowed went unread: this
+# command went from an UNDECIDED deny to a pass (0240b78).
+open_quote=$'echo "a\npip install evil==6.6.6'
+check_open_quote() {
+  [[ "${SCANFAIL_DECISION}" == "deny" ]] \
+    || fail "the UNTERM grep failing alone (call $1) does not let an open quote through (got: ${SCANFAIL_DECISION})"
+  grep -q 'UNDECIDED' <<< "${SCANFAIL_REASON}" || fail "the UNTERM grep failing alone (call $1) answers UNDECIDED"
+  grep -q 'scanner failed' <<< "${SCANFAIL_LOG}" || fail "the UNTERM grep failing alone (call $1) is recorded in advisory.log"
+}
+grep_one_each -q '^UNTERM$' "${open_quote}" "" check_open_quote
+pass "the UNTERM flag grep failing alone, at each of its calls, leaves an open quote over an install UNDECIDED"
+
+# (b) The grep in guard_command_has_npm_install. A failure there counted as a
+# match, which is the safe answer, but nothing recorded it, so an approved `pip
+# install` was allowed with an npm trace baseline in its pending state and
+# nothing said (0240b78). The other calls of the same pattern go through
+# judge_grep and are failed here too.
+npm_install_re=$(bash -c '. lib/install-grammar.sh && printf "%s" "${SAFEDEPS_G_NPM_INSTALL_RE}"')
+[[ -n "${npm_install_re}" ]] || fail "SAFEDEPS_G_NPM_INSTALL_RE could be read from lib/install-grammar.sh"
+pending_npm_traces() {
+  local f found=0
+  for f in "$1"/pending/*.json; do
+    [[ -f "${f}" ]] || continue
+    [[ "$(jq -r '.npm_trace | type' "${f}")" == "null" ]] || found=$(( found + 1 ))
+  done
+  printf '%s' "${found}"
+}
+scanfail_guard "" "pip install requests==2.0.0" "pypi requests 2.0.0"
+[[ "${SCANFAIL_DECISION}" != "deny" ]] || fail "control: an approved pip install is not denied (got: ${SCANFAIL_DECISION})"
+ls "${SCANFAIL_HOME}"/safe/pending/*.json > /dev/null 2>&1 || fail "control: an allowed pip install writes pending state"
+[[ "$(pending_npm_traces "${SCANFAIL_HOME}/safe")" == "0" ]] || fail "control: an allowed pip install has no npm trace baseline"
+check_pip_trace() {
+  [[ "$(pending_npm_traces "${SCANFAIL_HOME}/safe")" == "0" ]] \
+    || fail "the npm-install grep failing alone (call $1) writes no npm trace baseline into a pip install's pending state"
+  [[ "${SCANFAIL_DECISION}" == "deny" ]] && grep -q 'UNDECIDED' <<< "${SCANFAIL_REASON}" \
+    || fail "the npm-install grep failing alone (call $1) answers UNDECIDED (got: ${SCANFAIL_DECISION})"
+  grep -q 'scanner failed' <<< "${SCANFAIL_LOG}" || fail "the npm-install grep failing alone (call $1) is recorded in advisory.log"
+}
+grep_one_each -qEi "${npm_install_re}" "pip install requests==2.0.0" "pypi requests 2.0.0" check_pip_trace
+pass "the npm-install grep failing alone, at each of its calls, is recorded and leaves no npm trace in a pip install's pending state"
 
 # Nothing is piped here but the word `ok`, so a finding about piped install text
 # could only come from the failed span reading.
