@@ -1016,6 +1016,28 @@ Review found more than one release could close, and these were stated rather tha
 
 On the release tree 1d43743, `npm test` ran all 14 batteries with 395 ok and 0 not ok on macOS and on Linux. macOS was an M1 MacBook (macOS 15.6.1, bash 3.2.57, npm 11.19.0): 3876s with two batteries at a time, load 1.5 to 19.3. Linux was the project's Debian 13 VM (bash 5.2.37, node v20.20.2, npm 10.8.2): 2628s, load 0.2 to 15.7, run in a root without the VM's root-owned `/node_modules`, which otherwise changes where npm says a manifest-less directory installs. The commits after 1d43743 change only documentation and one comment. Each change was cross-validated by another member before it merged, and the merged tree was re-read for agreement between README, ARCHITECTURE, SKILL and AGENTS before it shipped. That re-reading found the floor named as v2.17.2 when it is 7d66f8c, and the three downgraded shapes above are what it turned up.
 
+## v2.18.1 (in progress)
+
+### The gate's cost on macOS grows with the command, not its square
+
+v2.18.0 made the scan linear on both systems, and its "Faster" notes said the rest of the guard was not linear on macOS yet: with the deadline off, an install-bearing command cost 37.5s at 64KB there and 3.6s on Linux, so on macOS such a command was answered `UNDECIDED`. A line profile on an M1 found one awk program behind most of it. The lexer's `cscripts` view, which reads the scripts a command hands to `sh -c` or `eval`, took each word's basename with `sub(/.*\//, ...)`. The macOS awk (BWK) tries that match from every byte and runs to the end of the word from each one. The view cost 0.25s at 8KB, 3.2s at 32KB and 12.9s at 64KB, while the scan view, the only one `scan-cost.sh` timed, stayed at 0.2s. The word itself now answers the test: its basename ends in `sh` exactly when the word does. Five awk programs also built strings a byte at a time with `s = s c`, which BWK does by copying the whole string, so they go through a chunked builder instead. No verdict depends on how the strings are built.
+
+`scripts/measure/scan-cost.sh --reps 3` on an M1 MacBook (macOS 15.6.1, bash 3.2.57), best of three, deadline off, load 2.9 to 3.7, 2026-10-05, v2.18.0 (2d96377) against the fix (4808f69):
+
+| command | 8KB | 32KB | 64KB |
+|---|---|---|---|
+| no install | 0.60s → 0.40s | 4.23s → 1.01s | 15.76s → 1.95s |
+| an install | 2.32s → 1.88s | 10.93s → 4.13s | 38.07s → 8.95s |
+| an install, three readings | 7.29s → 5.39s | 46.0s → 12.9s | 160.8s → 22.5s |
+
+On the project's Debian VM (bash 5.2.37, `mawk`, load 1.0 to 2.1) the same rows were 0.89s → 0.79s and 3.72s → 3.35s at 64KB: Linux was linear before and is unchanged. A 64KB install on macOS is now judged inside the 20s self-budget. A command that reads three times, one where the shells differ, still crosses it near 64KB.
+
+`scan-cost.sh` now times every view of the lexer beside the scan (0.44s, 1.51s and 3.30s on the M1 after the fix), and `scripts/test/self-budget.sh` requires a 64KB install to get its verdict, not `UNDECIDED`, under the default budget. AGENTS.md states the rule for awk in the guard.
+
+Verification: every lexer view in all three readings, before against after, on 1,304 inputs (the committed corpora, 300 seeded random commands and long words around the builder's chunk sizes): 46,944 comparisons, none different, under `mawk`. scan-contract, shell-reading and smoke passed on Linux.
+
+Not closed here: a command's cost also grows with how many statements it holds, on both systems and before and after this fix. A 1KB `sh -c` script of short function definitions takes 23s on Linux, and 32KB of one-line statements takes 48s. That cost is per statement, not per byte, and is a separate item of this release.
+
 ## v3 (future)
 
 ### Ledger tamper resistance
