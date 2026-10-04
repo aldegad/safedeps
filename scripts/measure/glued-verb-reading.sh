@@ -36,8 +36,9 @@
 #   --jobs <n>    guards at once (default 2)
 #   --out <file>  also write the table there, tab-separated
 # Verdicts: same (read as the spaced form is), same-zsh (a glued `}`, answered
-# as `{ <install> ;}`), DIFF (read differently), unread (neither form is read:
-# the tree does not know that install at all).
+# as `{ <install> ;}`), silent (the same answers, which for that install say
+# nothing), DIFF (read differently), unread (the spaced form is not read
+# either: the tree does not know that install at all).
 # Exit: 0 every glued form reads as its spaced form and is read, 1 otherwise.
 set -euo pipefail
 
@@ -60,44 +61,50 @@ mkdir -p "${project_dir}"
 printf '{"dependencies":{}}\n' > "${project_dir}/package.json"
 printf 'evil==1.0.0\n' > "${project_dir}/requirements.txt"
 
-# <manager word>|<words before it>|<words after it>. The manager word is the
-# one the shell probe replaces; the operator goes right after the last word.
+# <manager word>|<words before it>|<words after it>|<what the spaced form
+# shows>. The manager word is the one the shell probe replaces; the operator
+# goes right after the last word. What the spaced form shows says how a
+# reading can be seen at all: `deny` (a pinned package, unapproved), `rewrite`
+# (an npm install, which gets `--ignore-scripts`), or `silent`: an install that
+# names no package and is no npm CLI install gets no check, record or rewrite
+# whether it is read or not, so equal answers say nothing there and the row
+# says so.
 bases=(
-  'npm||ci'
-  'npm||i'
-  'npm||install evil@1.0.0'
-  'npm||--prefix=. ci'
-  'npx||evil@1.0.0'
-  'npm||init vite@5.0.0'
-  'pnpm||install'
-  'pnpm||add evil@1.0.0'
-  'pnpm||dlx evil@1.0.0'
-  'yarn||install'
-  'yarn||add evil@1.0.0'
-  'bun||install'
-  'bun||add evil@1.0.0'
-  'bunx||evil@1.0.0'
-  'pip|PIP_REQUIREMENT=requirements.txt|install'
-  'pip||install evil==1.0.0'
-  'python3||-m pip install evil==1.0.0'
-  'uv||add evil==1.0.0'
-  'uv||pip install evil==1.0.0'
-  'uvx||ruff==0.1.0'
-  'poetry||add evil==1.0.0'
-  'pipx||install black==24.1.0'
-  'pipenv||install evil==1.0.0'
-  'cargo||add evil@1.0.0'
-  'cargo||install ripgrep --version 13.0.0'
-  'go||get'
-  'go||install'
-  'go||get example.com/m@v1.0.0'
-  'gem||install rake -v 13.0.0'
-  'bundle||add rails --version 7.1.0'
-  'mvn||-Dartifact=g:evil:1.0.0 dependency:get'
-  'mvn||dependency:get -Dartifact=g:evil:1.0.0'
-  'dotnet||package update'
-  'dotnet||add package Serilog --version 3.1.1'
-  'dotnet||tool install dotnet-ef --version 8.0.0'
+  'npm||ci|rewrite'
+  'npm||i|rewrite'
+  'npm||install evil@1.0.0|deny'
+  'npm||--prefix=. ci|rewrite'
+  'npx||evil@1.0.0|deny'
+  'npm||init vite@5.0.0|deny'
+  'pnpm||install|silent'
+  'pnpm||add evil@1.0.0|deny'
+  'pnpm||dlx evil@1.0.0|deny'
+  'yarn||install|silent'
+  'yarn||add evil@1.0.0|deny'
+  'bun||install|silent'
+  'bun||add evil@1.0.0|deny'
+  'bunx||evil@1.0.0|deny'
+  'pip|PIP_REQUIREMENT=requirements.txt|install|silent'
+  'pip||install evil==1.0.0|deny'
+  'python3||-m pip install evil==1.0.0|deny'
+  'uv||add evil==1.0.0|deny'
+  'uv||pip install evil==1.0.0|deny'
+  'uvx||ruff==0.1.0|deny'
+  'poetry||add evil==1.0.0|deny'
+  'pipx||install black==24.1.0|deny'
+  'pipenv||install evil==1.0.0|deny'
+  'cargo||add evil@1.0.0|deny'
+  'cargo||install ripgrep --version 13.0.0|deny'
+  'go||get|silent'
+  'go||install|silent'
+  'go||get example.com/m@v1.0.0|deny'
+  'gem||install rake -v 13.0.0|deny'
+  'bundle||add rails --version 7.1.0|deny'
+  'mvn||-Dartifact=g:evil:1.0.0 dependency:get|deny'
+  'mvn||dependency:get -Dartifact=g:evil:1.0.0|deny'
+  'dotnet||package update|silent'
+  'dotnet||add package Serilog --version 3.1.1|deny'
+  'dotnet||tool install dotnet-ef --version 8.0.0|deny'
 )
 
 # <name>^<glued template>^<spaced template>; %C% is the install.
@@ -174,14 +181,14 @@ jobs_dir="${tmp_root}/jobs"
 mkdir -p "${jobs_dir}"
 n=0
 for b in "${bases[@]}"; do
-  IFS='|' read -r manager pre post <<< "${b}"
+  IFS='|' read -r manager pre post shows <<< "${b}"
   install="${pre:+${pre} }${manager} ${post}"
   probe="${pre:+${pre} }_sd_argv ${post}"
   for o in "${operators[@]}"; do
     IFS='^' read -r name glued spaced <<< "${o}"
     g="${glued//%C%/${install}}" s="${spaced//%C%/${install}}"
     pg="${glued//%C%/${probe}}"
-    printf '%s\t%s\t%s\t%s\t%s\n' "${manager}" "${name}" "${g}" "${s}" "${pg}" > "${jobs_dir}/${n}.row"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "${manager}" "${name}" "${g}" "${s}" "${pg}" "${shows}" > "${jobs_dir}/${n}.row"
     ( tuple "${g}" > "${jobs_dir}/${n}.g"
       if [[ -n "${spaced}" ]]; then tuple "${s}" > "${jobs_dir}/${n}.s"; else : > "${jobs_dir}/${n}.s"; fi
       for sh in bash zsh dash; do printf '%s=%s ' "${sh}" "$(shell_words "${sh}" "${pg}")"; done > "${jobs_dir}/${n}.w"
@@ -197,30 +204,33 @@ here_form=$'bash <<E\nnpm ci\nE'
 here_got=$(tuple "${here_form}")
 
 table=$(
-  printf 'id\tmanager\top\tglued\tshells\tglued_tuple\tglued_rewrite\tspaced_tuple\tspaced_rewrite\tverdict\n'
+  printf 'id\tmanager\top\tglued\tshells\tglued_tuple\tglued_rewrite\tspaced_tuple\tspaced_rewrite\tshows\tverdict\n'
   for (( k = 0; k < n; k++ )); do
-    IFS=$'\t' read -r manager name g s _ < "${jobs_dir}/${k}.row"
+    IFS=$'\t' read -r manager name g s _ shows < "${jobs_dir}/${k}.row"
     IFS=$'\t' read -r gt gr < "${jobs_dir}/${k}.g" || true
     st="" sr=""
     [[ ! -s "${jobs_dir}/${k}.s" ]] || IFS=$'\t' read -r st sr < "${jobs_dir}/${k}.s" || true
     gn="${gr// /}" sn="${sr// /}"
     [[ "${g}" == *--ignore-scripts ]] || gn="${gn%--ignore-scripts}"
     [[ "${s}" == *--ignore-scripts ]] || sn="${sn%--ignore-scripts}"
-    if [[ "${name}" == '}' ]]; then
-      [[ "${gt}" == "${st}" ]] && v='same-zsh' || v=DIFF
-      [[ "${v}" != same-zsh || "${gt}" != "pass |  |  | pass" ]] || v=unread
-    elif [[ "${gt}" != "${st}" || "${gn}" != "${sn}" ]]; then
+    if [[ "${name}" == '}' && "${gt}" != "${st}" ]] \
+       || [[ "${name}" != '}' && ( "${gt}" != "${st}" || "${gn}" != "${sn}" ) ]]; then
       v=DIFF
-    elif [[ "${gt}" == "pass |  |  | pass" && -z "${gr}" ]]; then
-      # Neither is read: the tree does not know the install however it ends.
+    elif [[ "${shows}" == deny && "${st}" != deny* ]] || [[ "${shows}" == rewrite && -z "${sr}" ]]; then
+      # The spaced form is not read either: the tree does not know the install
+      # however it ends.
       v=unread
+    elif [[ "${shows}" == silent ]]; then
+      v=silent
+    elif [[ "${name}" == '}' ]]; then
+      v='same-zsh'
     else
       v=same
     fi
-    printf '%03d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$((k + 1))" "${manager}" "${name}" \
-      "${g}" "$(cat "${jobs_dir}/${k}.w")" "${gt}" "${gr}" "${st}" "${sr}" "${v}"
+    printf '%03d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$((k + 1))" "${manager}" "${name}" \
+      "${g}" "$(cat "${jobs_dir}/${k}.w")" "${gt}" "${gr}" "${st}" "${sr}" "${shows}" "${v}"
   done
-  printf 'here\tnpm\theredoc\t%s\t-\t%s\t-\t-\tout-of-enumeration\n' "${here_form//$'\n'/\\n}" "${here_got}"
+  printf 'here\tnpm\theredoc\t%s\t-\t%s\t-\t-\t-\tout-of-enumeration\n' "${here_form//$'\n'/\\n}" "${here_got}"
 )
 [[ -z "${OUT}" ]] || printf '%s\n' "${table}" > "${OUT}"
 printf '%s\n' "${table}"
