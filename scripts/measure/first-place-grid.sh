@@ -1,22 +1,12 @@
 #!/usr/bin/env bash
 # safedeps: the first place of a command list, generated from the grammar.
 #
-# redirection-grid.sh crosses the manual's compound-command productions with
-# four first places picked by hand (a command, a subshell, a group, `!`), and
-# the starts that table missed were all in what the simple-command grammar puts
-# before a command word. This axis is that grammar:
-#
-#   POSIX Shell Command Language 2.10.2 (Shell Grammar):
-#     pipeline       : pipe_sequence | Bang pipe_sequence
-#     cmd_prefix     : io_redirect | cmd_prefix io_redirect
-#                    | ASSIGNMENT_WORD | cmd_prefix ASSIGNMENT_WORD
-#     io_redirect    : io_file | IO_NUMBER io_file | io_here | IO_NUMBER io_here
-#     io_file        : '<' | LESSAND | '>' | GREATAND | DGREAT | LESSGREAT | CLOBBER
-#     io_here        : DLESS here_end | DLESSDASH here_end
-#   bash 3.6 Redirections (&>, &>>, <<<, {varname}), 3.4 Parameters (+=,
-#   NAME[i]=, NAME=(...)), 3.2.3 Pipelines (time, time -p), 4.1 (command, exec);
-#   zsh 6.2 Precommand Modifiers (-, nocorrect, noglob), 7 Redirection (>!);
-#   env(1).
+# The first places are what the simple-command grammar puts before a command
+# word (POSIX cmd_prefix and Bang, the bash and zsh additions, the
+# precommands), listed once as FIRSTS in redirection-grid.sh with the grammar
+# they come from. The grid crosses them with its productions; this script
+# prints that cross alone, for pip or for npm (eight of them), and measures
+# it against source trees.
 #
 # Each item stands first in the list slot of every production in
 # redirection-grid.sh (read from that file, so the places are the committed
@@ -41,47 +31,10 @@ set -euo pipefail
 REPO_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 GRID="${REPO_DIR}/scripts/measure/redirection-grid.sh"
 
-# id <TAB> prefix text (the install follows it after one blank)
-ITEMS='lt	</dev/null
-lessand	<&0
-gt	>/dev/null
-greatand	>&2
-dgreat	>>/dev/null
-lessgreat	<>/dev/null
-clobber	>|/dev/null
-ionum-gt	2>/dev/null
-ionum-dup	2>&1
-dless	<<E
-dlessdash	<<-E
-and-gt	&>/dev/null
-and-dgreat	&>>/dev/null
-tless	<<<x
-varfd	{fd}>/dev/null
-z-bang-gt	>!/dev/null
-assign	X=1
-assign-plus	X+=1
-assign-sub	a[1]=x
-assign-arr	a=(x)
-bang	!
-time	time
-time-p	time -p
-command	command
-command-p	command -p
-exec	exec
-noglob	noglob
-nocorrect	nocorrect
-z-dash	-
-env	env
-env-assign	env X=1
-env-u	env -u X
-gt+assign	>/dev/null X=1
-assign+gt	X=1 >/dev/null
-ionum+command	2>/dev/null command
-assign+command	X=1 command
-gt+dup	>/dev/null 2>&1
-bang+gt	! >/dev/null
-time+gt	time >/dev/null
-noglob+gt	noglob >/dev/null'
+# The items are the grid's own first places (FIRSTS in redirection-grid.sh,
+# the one list of them), read from that file like the productions.
+ITEMS=$(awk '/^FIRSTS=\x27/{p=1; sub(/^FIRSTS=\x27/, "")} p{print; if (/\x27$/) exit}' "${GRID}" \
+  | sed -e '$ s/'"'"'$//' -e "s/'\"'\"'/'/g")
 
 generate() {
   local table="$1" install items productions pid tpl data iid item list t

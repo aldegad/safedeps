@@ -424,6 +424,68 @@ iS	env -iS '"'"'%H'"'"'
 S-rest	env -S '"'"'%C install'"'"' evil==6.6.6
 split-string	env --split-string='"'"'%H'"'"'
 path-S	/usr/bin/env -S '"'"'%H'"'"''
+# What stands first in a command list, before the command word: generated
+# from the simple-command grammar, not picked. The four first places picked by
+# hand before (a command, a subshell, a group, `!`) missed every start a
+# prefix glued to a reserved word, `!`, a head's close or zsh's `{` puts there
+# (verdict howl-20261004-084050), and those are what this grammar puts before
+# a command word:
+#
+#   POSIX Shell Command Language 2.10.2 (Shell Grammar):
+#     pipeline       : pipe_sequence | Bang pipe_sequence
+#     cmd_prefix     : io_redirect | cmd_prefix io_redirect
+#                    | ASSIGNMENT_WORD | cmd_prefix ASSIGNMENT_WORD
+#     io_redirect    : io_file | IO_NUMBER io_file | io_here | IO_NUMBER io_here
+#     io_file        : '<' | LESSAND | '>' | GREATAND | DGREAT | LESSGREAT | CLOBBER
+#     io_here        : DLESS here_end | DLESSDASH here_end
+#   bash 3.6 Redirections (&>, &>>, <<<, {varname}), 3.4 Parameters (+=,
+#   NAME[i]=, NAME=(...)), 3.2.3 Pipelines (time, time -p), 4.1 (command, exec);
+#   zsh 6.2 Precommand Modifiers (-, nocorrect, noglob), 7 Redirection (>!);
+#   env(1).
+#
+# id <TAB> prefix text (the install follows it after one blank). This is the
+# one list: scripts/measure/first-place-grid.sh reads it from here.
+FIRSTS='lt	</dev/null
+lessand	<&0
+gt	>/dev/null
+greatand	>&2
+dgreat	>>/dev/null
+lessgreat	<>/dev/null
+clobber	>|/dev/null
+ionum-gt	2>/dev/null
+ionum-dup	2>&1
+dless	<<E
+dlessdash	<<-E
+and-gt	&>/dev/null
+and-dgreat	&>>/dev/null
+tless	<<<x
+varfd	{fd}>/dev/null
+z-bang-gt	>!/dev/null
+assign	X=1
+assign-plus	X+=1
+assign-sub	a[1]=x
+assign-arr	a=(x)
+bang	!
+time	time
+time-p	time -p
+command	command
+command-p	command -p
+exec	exec
+noglob	noglob
+nocorrect	nocorrect
+z-dash	-
+env	env
+env-assign	env X=1
+env-u	env -u X
+gt+assign	>/dev/null X=1
+assign+gt	X=1 >/dev/null
+ionum+command	2>/dev/null command
+assign+command	X=1 command
+gt+dup	>/dev/null 2>&1
+bang+gt	! >/dev/null
+time+gt	time >/dev/null
+noglob+gt	noglob >/dev/null'
+
 # The words two prefixes in a row are drawn from (the first, then the second).
 PRECOMMAND_FIRSTS='command|command -p|command --|exec|exec -c|exec --|noglob|-|nocorrect|time -p'
 PRECOMMAND_SECONDS='command|command -p|command --|exec|exec -a x|exec --|noglob|-|env|time'
@@ -508,11 +570,11 @@ ps-assign	bash: Process Substitution	x=<(%_%L) true
 z-eq	zsh: Process Substitution	cat =(%_%L)
 data-sq	bash: Single Quotes	echo '"'"'if true; then%_%L; fi'"'"'
 data-dq	bash: Double Quotes	echo "{%_%L; }"'
-# id <TAB> what stands first in the list, %H the install
+# id <TAB> what stands first in the list, %H the install: a command, a
+# subshell and a group, and each first place in FIRSTS before the command.
 FILLERS='cmd	%H
 sub	(%H)
-group	{ %H; }
-bang	! %H'
+group	{ %H; }'
 
 # The heredoc bodies a form needs: one per delimiter B, in order.
 bodies() { # count
@@ -560,13 +622,16 @@ subshell_form() {
 }
 
 # One form of the later tables: <id> <label> <template> <glue> <data?>, where
-# %S is a subshell running the install, %H the install and %_ the glue.
+# %S is a subshell running the install, %H the install and %_ the glue. A
+# first place that opens a heredoc gets its body after the form.
 place_form() {
-  local id="$1" label="$2" text="$3" glue="$4" data="$5"
+  local id="$1" label="$2" text="$3" glue="$4" data="$5" n
   text="${text//%S/(%H)}"
   text="${text//%H/@@HEAD@@ ${ARGS}}"
   text="${text//%_/${glue}}"
-  text="${text//@NL@/$'\n'}"$'\n'
+  text="${text//@NL@/$'\n'}"
+  n=$(grep -o '<<-\{0,1\}E' <<< "${text}" | grep -c . || true)
+  text="${text}$(bodies "${n}")"$'\n'
   jq -nc --arg id "${id}" --arg label "${label}" --arg text "${text}" --argjson data "${data}" \
     '{id: $id, cls: "P", label: $label, text: $text} + (if $data then {data: true} else {} end)'
 }
@@ -635,7 +700,7 @@ generate() {
         else
           place_form "RL-${pid}-${xid}" "${xid} in ${pid} (${manual})" "${tpl//%L/${xtext}}" " " "${data}"
         fi
-      done <<< "${FILLERS}"
+      done < <(printf '%s\n' "${FILLERS}"; while IFS=$'\t' read -r xid xtext; do printf '%s\t%s %%H\n' "${xid}" "${xtext}"; done <<< "${FIRSTS}")
     done <<< "${PRODUCTIONS}"
   } | jq -s '.'
 }
