@@ -2200,23 +2200,25 @@ inert_offsets_of() {
 }
 
 # The command with `--ignore-scripts` placed after the last argument of every
-# npm install the shell runs: in the command's own code, in a substitution, and
-# in a script it hands to `sh -c` or `eval`. Prints nothing when no verb was
-# found. Returns 4, printing nothing, when every install already leaves
-# ignore-scripts true. With the rewrite printed, it returns 4 plus the sum of
-# 1 when an install asked for its scripts and the flag now overrides it, 2 when
-# an install holds a word the shell decides at run time, so nobody read
-# whether the flag holds, 4 when an install keeps only the floor because no
-# place in it reads as true (a downgrade the caller records), and 8 when an
-# install is in text the rewrite cannot read -- a double-quoted script with an
-# escape or a substitution in it, a script handed to `ksh -c`, a heredoc body
-# piped into another command -- where the flag went where v2.17.2 put it
-# (inert_unread_offsets), so nobody read whether npm keeps it; 0 when none
-# applies. Such an install used to return 3 and drop the rewrite of the whole
-# command: 7d66f8c dropped it too, and v2.17.2 had flagged these
+# npm install the shell runs: in the command's own code, in a substitution,
+# and in a script it hands to `sh -c` or `eval`. Prints nothing when no verb
+# was found. Returns 4, printing nothing, when every install already leaves
+# ignore-scripts true and none is in text the rewrite cannot read. With the
+# rewrite printed, it returns 4 plus the sum of 1 when an install asked for
+# its scripts and the flag now overrides it, 2 when an install holds a word
+# the shell decides at run time, so nobody read whether the flag holds, 4 when
+# an install keeps only the floor because no place in it reads as true (a
+# downgrade the caller records), and 8 when an install is in text the rewrite
+# cannot read -- a double-quoted script with an escape or a substitution in
+# it, a script handed to `ksh -c`, a heredoc body piped into another command
+# -- where the flag went where v2.17.2 put it (inert_unread_offsets), so
+# nobody read whether npm keeps it; 0 when none applies. Such an install used
+# to return 3 and drop the rewrite of the whole command: 7d66f8c dropped it
+# too, and v2.17.2 had flagged these
 # (scripts/measure/inert-downgrade-grid.sh). Where that text holds `npm` and
-# no verb could be flagged, nothing is printed for it and the caller records a
-# downgrade, as before.
+# no verb could be flagged, nothing is printed for it, and where no other flag
+# was placed either (no other install, or every other one already true) the
+# caller records a downgrade, as before.
 #
 # The rewrite always holds the release's own (7d66f8c): the flag right after
 # every verb, which inert_flag_offsets prints, and, for a command the release
@@ -2252,8 +2254,12 @@ inert_rewrite_in_place() {
     offsets+="${e}"$'\n'
   done <<< "${lines}"
   [[ -z "${offsets}" ]] || ! inert_release_appends "${command}" || append=1
+  # An install already true settles nothing for one in text the rewrite cannot
+  # read: with no flag placed there, the command is a recorded downgrade. It
+  # returned 4 here, and `npm i y --ignore-scripts; ksh -c "npm ci"` passed
+  # with no record, where v2.18.0 had recorded a downgrade (caught in review).
   if [[ -z "${offsets}" ]]; then
-    [[ "${settled}" == true ]] && return 4
+    [[ "${settled}" == true && "${unread}" != true ]] && return 4
     return 0
   fi
   offsets=$(printf '%s' "${offsets}" | LC_ALL=C sort -nu | tr '\n' ' ')
