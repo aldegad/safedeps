@@ -263,25 +263,26 @@ glued_bases=(
   'mvn -Dartifact=g:evil:1.0.0 dependency:get'
   'dotnet add package Serilog --version 3.1.1'
 )
-# <glued template>|<spaced template>, %C% standing for the install.
+# <glued template>^<spaced template>, %C% standing for the install. `^`, since
+# an end can hold a `|`.
 glued_ends=(
-  '%C%; echo x|%C% ; echo x'
-  '%C%;|%C% ;'
-  '%C%& wait|%C% & wait'
-  '%C%| cat|%C% | cat'
-  '%C%&& echo x|%C% && echo x'
-  '(%C%)|(%C% )'
-  '%C%>/dev/null|%C% >/dev/null'
+  '%C%; echo x^%C% ; echo x'
+  '%C%;^%C% ;'
+  '%C%& wait^%C% & wait'
+  '%C%| cat^%C% | cat'
+  '%C%&& echo x^%C% && echo x'
+  '(%C%)^(%C% )'
+  '%C%>/dev/null^%C% >/dev/null'
   # A visible install is set aside before a pipe into a shell is searched for
   # install text; one left in place read as install text piped into the shell.
-  '%C%; cat notes.txt | sh|%C% ; cat notes.txt | sh'
+  '%C%; cat notes.txt | sh^%C% ; cat notes.txt | sh'
 )
 jobs_dir="${tmp_root}/glued"
 mkdir -p "${jobs_dir}"
 n=0
 for base in "${glued_bases[@]}"; do
   for end in "${glued_ends[@]}"; do
-    glued="${end%%|*}" spaced="${end#*|}"
+    glued="${end%%^*}" spaced="${end#*^}"
     printf '%s\n' "${glued//%C%/${base}}" > "${jobs_dir}/${n}.cmd"
     ( tuple "${glued//%C%/${base}}" > "${jobs_dir}/${n}.glued"
       tuple "${spaced//%C%/${base}}" > "${jobs_dir}/${n}.spaced" ) &
