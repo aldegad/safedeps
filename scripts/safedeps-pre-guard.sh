@@ -1290,10 +1290,11 @@ normalize_install_text() {
   # `lines`: <text> holds one statement per line, each read on its own.
   [[ "${2:-}" != lines ]] || view="unprefixed-lines"
 
-  # An absolute path before an executable reads as the executable.
+  # An absolute path before an executable reads as the executable, in any case
+  # (macOS volumes ignore it, as the recognizers do).
   if ! normalized=$(printf '%s' "${text}" | sed -E \
     -e 's/^[[:space:]]+//' \
-    -e "s#(^|[[:space:];|&({!])(/[^[:space:];|&]+/)(${SAFEDEPS_G_EXECUTABLES}|sh|bash|zsh)([[:space:];|&]|\$)#\\1\\3\\4#g"); then
+    -e "s#(^|[[:space:];|&({!])(/[^[:space:];|&]+/)(${SAFEDEPS_G_EXECUTABLES}|sh|bash|zsh)([[:space:];|&]|\$)#\\1\\3\\4#gI"); then
     # Empty text would read as "no install". Keep what there is and let the
     # gate settle the failure.
     guard_mark_reading_failed
@@ -2953,16 +2954,15 @@ resolve_reading_targets() {
           continue
         fi
         [[ "${tok}" != *$'\001' ]] || { npm_unknown="${tok%$'\001'}"; continue; }
-        case "${tok}" in
-          npm) npm_word="${tok}"; continue ;;
-          */npm)
-            npm_word="${tok}"
-            guard_npm_word_is_hooks "${tok}" "${here}" || stmt_code="${tok}"
-            continue
-            ;;
-          env) in_env=true; continue ;;
-          command|exec) continue ;;
-        esac
+        # Names ignore case, as the recognizers read them (safedeps_manager_name).
+        if safedeps_manager_name "${tok}" npm; then
+          npm_word="${tok}"
+          [[ "${tok}" != */* ]] || guard_npm_word_is_hooks "${tok}" "${here}" || stmt_code="${tok}"
+          continue
+        fi
+        if [[ "${tok}" != */* ]] && safedeps_manager_name "${tok}" env; then in_env=true; continue; fi
+        [[ "${tok}" != exec ]] || continue
+        if [[ "${tok}" != */* ]] && safedeps_manager_name "${tok}" command; then continue; fi
         if [[ "${in_env}" == true ]]; then
           case "${tok}" in
             -C|--chdir) skip=true; continue ;;
@@ -3274,9 +3274,7 @@ guard_reading_writers_unattributable() {
 
     npm_at=-1
     for (( i = 0; i < ${#toks[@]}; i++ )); do
-      case "${toks[i]}" in
-        npm|*/npm) npm_at=${i}; break ;;
-      esac
+      if safedeps_manager_name "${toks[i]}" npm; then npm_at=${i}; break; fi
     done
     sub=""
     if (( npm_at >= 0 )); then
