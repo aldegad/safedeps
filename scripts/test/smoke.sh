@@ -837,7 +837,8 @@ run_hook_command "${tmp_root}/home-compound" "${tmp_root}/safe-compound" "npm in
   || fail "asking npm about an install with a trailing value option makes nothing in the project ($(find "${project_dir}" -maxdepth 1 -name '-*' | paste -sd, -))"
 grep -q "the install's last option takes the next word as its value" "${tmp_root}/safe-compound/advisory.log" \
   || fail "an install npm is not asked about records why"
-# The PostToolUse hook finds the pending state by a key with the flag stripped
+# For a call that names no tool_use_id (these payloads name none), the
+# PostToolUse hook finds the pending state by a key with the flag stripped
 # from the command it receives, which is the rewritten one. The flag can now
 # follow one the command already carried, and a strip that took the blank
 # between them with the first left the second, so the keys differed: the post

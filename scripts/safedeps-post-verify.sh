@@ -75,6 +75,8 @@ source "${SAFEDEPS_REPO_DIR}/lib/gates/rollback-journal.sh"
 source "${SAFEDEPS_REPO_DIR}/lib/npm/workspaces.sh"
 # shellcheck source=../lib/npm/ask.sh
 source "${SAFEDEPS_REPO_DIR}/lib/npm/ask.sh"
+# shellcheck source=../lib/gates/call-id.sh
+source "${SAFEDEPS_REPO_DIR}/lib/gates/call-id.sh"
 # shellcheck source=../lib/gates/backstop-trace.sh
 source "${SAFEDEPS_REPO_DIR}/lib/gates/backstop-trace.sh"
 
@@ -1377,13 +1379,15 @@ post_command_looks_like_install() {
 # entry is read: it is named by the call's tool_use_id, which no other call
 # carries. An entry left by a call whose post hook never ran is not this one,
 # and the age sweep removes it. Empty when there is none, and
-# BACKSTOP_TRACE_NONE says why.
+# BACKSTOP_TRACE_NONE says why. BACKSTOP_TRACE_FOUND says the entry was there,
+# whatever it held: the pre-guard wrote an entry and not a record for this
+# call, so no record is this call's.
 BACKSTOP_TRACE_ENTRY=""
 BACKSTOP_TRACE_NONE=""
+BACKSTOP_TRACE_FOUND=false
 backstop_take_trace_entry() {
-  local id base
-  id=$(jq -r 'if (.tool_use_id | type) == "string" then .tool_use_id else empty end' <<< "${INPUT}" 2>/dev/null) || id=""
-  if ! base=$(safedeps_backstop_entry_base "${GUARD_DIR}/pending/backstop" "${id}"); then
+  local base
+  if [[ -z "${CALL_ID}" ]] || ! base=$(safedeps_call_base "${GUARD_DIR}/pending/backstop" "${CALL_ID}"); then
     BACKSTOP_TRACE_NONE="this hook's input names no tool_use_id, so no trace entry belongs to this call"
     return 0
   fi
@@ -1391,6 +1395,7 @@ backstop_take_trace_entry() {
     BACKSTOP_TRACE_NONE="the pre-guard left no trace entry for this call"
     return 0
   fi
+  BACKSTOP_TRACE_FOUND=true
   BACKSTOP_TRACE_ENTRY=$(cat "${base}.json" 2>/dev/null) || BACKSTOP_TRACE_ENTRY=""
   rm -f "${base}.json"
   if [[ -z "${BACKSTOP_TRACE_ENTRY}" ]]; then
@@ -1398,31 +1403,15 @@ backstop_take_trace_entry() {
     rm -f "${base}.trace"
     return 0
   fi
-  # The entry must be this command's in this directory; the call that wrote it
-  # read the same input, so anything else is an entry this hook cannot vouch for.
+  # The entry must be this command's in this directory. It is this call's, but
+  # its inodes and times are of the directory the pre-guard ran in, and a post
+  # hook whose payload names another directory cannot read them against that
+  # one. Such a call counts as traced, and still reads no record.
   if [[ "$(jq -r '.key // empty' <<< "${BACKSTOP_TRACE_ENTRY}" 2>/dev/null)" != "$(compute_pending_key "${POST_DIR_HASH}" "${COMMAND}")" ]]; then
     BACKSTOP_TRACE_NONE="the trace entry for this call was taken for another directory or command"
     rm -f "${base}.trace"
     BACKSTOP_TRACE_ENTRY=""
   fi
-}
-
-legacy_pending_matches_post_context() {
-  local pending_project_dir="${1:-}"
-  local pending_dir_hash="${2:-}"
-
-  [[ -n "${pending_project_dir}" ]] || return 1
-  if command -v realpath >/dev/null 2>&1; then
-    pending_project_dir=$(realpath "${pending_project_dir}" 2>/dev/null || echo "${pending_project_dir}")
-  elif command -v readlink >/dev/null 2>&1; then
-    pending_project_dir=$(readlink -f "${pending_project_dir}" 2>/dev/null || echo "${pending_project_dir}")
-  fi
-
-  [[ "${pending_project_dir}" == "${POST_CWD}" ]] || return 1
-  if [[ -n "${pending_dir_hash}" && "${pending_dir_hash}" != "${POST_DIR_HASH}" ]]; then
-    return 1
-  fi
-  post_command_looks_like_install "${COMMAND}"
 }
 
 # An unfinished rollback from an earlier run is the loudest thing this hook can
@@ -1474,6 +1463,9 @@ elif command -v readlink >/dev/null 2>&1; then
   POST_CWD=$(readlink -f "${POST_CWD}" 2>/dev/null || echo "${POST_CWD}")
 fi
 POST_DIR_HASH=$(compute_dir_hash "${POST_CWD}")
+# This call's tool_use_id (lib/gates/call-id.sh), or empty when the input names
+# none. Claude Code sends the same one to PostToolUseFailure as to PostToolUse.
+CALL_ID=$(safedeps_call_id "${INPUT}") || CALL_ID=""
 
 STATE_LOCK_HELD=true
 acquire_state_lock
@@ -1517,29 +1509,37 @@ set_unread_record_aside() {
 # This call's trace entry is read before any record. The pre-guard writes, in
 # one run, either a record (an install it read) or a trace entry (a command it
 # did not read as an install and the backstop pattern matches), never both, and
-# the entry is named by this call's tool_use_id. So an entry of this call whose
-# key matches says the pre-guard did not read this call as an install, and no
-# record is this call's: a record found by the directory and the command can be
-# another call's (a failed install with the same key, lumi r3 REC-K) or a legacy
-# file no current pre-guard writes (REC-L), and judging this call from one
-# rolled back a grep. Such a call goes straight to the backstop, which judges
-# it by its entry, and the records are neither read nor removed: they stay for
-# the call they belong to, or for the age sweep.
+# the entry is named by this call's tool_use_id. So a call with an entry has no
+# record, whatever the entry holds, and goes straight to the backstop, which
+# judges it by its entry. An entry taken in another directory than the one this
+# hook was given (MM) used to send the call on to the records, where another
+# call's record of the same command judged it.
 backstop_take_trace_entry
 
-# Resolve THIS install's pending state by its per-install key (issue #5). The
-# filename also carries a snapshot id, so identical concurrent commands produce
-# several files; consume exactly one (they verify the same closure), leaving the
-# rest for their own post hooks. Fall back to the legacy global files for in-flight
-# upgrades from a pre-#5 PreToolUse.
-PENDING_PREFIX="${GUARD_DIR}/pending/$(compute_pending_key "${POST_DIR_HASH}" "${COMMAND}")__"
+# This call's record. A call that names a tool_use_id has its record under it
+# (lib/gates/call-id.sh), and no other record is read for it: a record found by
+# the directory and the command can be another call's. Two overlapping calls
+# of one command each took the other's (bamdori r19 X1), and a call whose post
+# hook never ran left one that the next call of the command consumed, rolling
+# back what was edited in between (O2). A call that names none is found by the
+# key from before (issue #5), and advisory.log says so. The records a pre-#5
+# pre-guard left (current_state, current_snapshot_id) are not read: no current
+# pre-guard writes them, and a call they did not match ended this hook with no
+# judgment.
 PENDING_FILE=""
-if [[ -z "${BACKSTOP_TRACE_ENTRY}" ]]; then
-  for pending_candidate in "${PENDING_PREFIX}"*.json; do
-    [[ -f "${pending_candidate}" ]] && { PENDING_FILE="${pending_candidate}"; break; }
-  done
+if [[ "${BACKSTOP_TRACE_FOUND}" != true ]]; then
+  if [[ -n "${CALL_ID}" ]]; then
+    PENDING_FILE="$(safedeps_call_base "${GUARD_DIR}/pending" "${CALL_ID}").json"
+    [[ -f "${PENDING_FILE}" ]] || PENDING_FILE=""
+  else
+    for pending_candidate in "${GUARD_DIR}/pending/$(compute_pending_key "${POST_DIR_HASH}" "${COMMAND}")__"*.json; do
+      [[ -f "${pending_candidate}" ]] && { PENDING_FILE="${pending_candidate}"; break; }
+    done
+    [[ -z "${PENDING_FILE}" ]] \
+      || log_advisory "post-verify: this hook's input names no tool_use_id, so it took the record ${PENDING_FILE} by the directory and the command, and another call of the same command in the same directory can have written it"
+  fi
 fi
-if [[ -n "${BACKSTOP_TRACE_ENTRY}" ]]; then
+if [[ "${BACKSTOP_TRACE_FOUND}" == true ]]; then
   BACKSTOP_INSTALL=true
   SNAPSHOT_ID=""
   PROJECT_DIR="${POST_CWD}"
@@ -1550,33 +1550,9 @@ elif [[ -n "${PENDING_FILE}" ]]; then
     set_unread_record_aside
   fi
   rm -f "${PENDING_FILE}"
-elif [[ -f "${GUARD_DIR}/current_state" ]]; then
-  RECORD_PATH="${GUARD_DIR}/current_state"
-  if ! read_record_object "${RECORD_PATH}"; then
-    # A legacy record that cannot be read cannot say whose it is either, so
-    # it goes to the backstop only for a command that looks like an install.
-    set_unread_record_aside
-    rm -f "${RECORD_PATH}"
-    post_command_looks_like_install "${COMMAND}" || exit 0
-  elif ! legacy_pending_matches_post_context "${PROJECT_DIR}" "${DIR_HASH}"; then
-    log_advisory "post-verify SKIP: legacy current_state did not match this Bash command/cwd (post_cwd=${POST_CWD}, pending_project=${PROJECT_DIR:-unknown}) — bounded no-op."
-    exit 0
-  else
-    rm -f "${RECORD_PATH}"
-  fi
-elif [[ -f "${GUARD_DIR}/current_snapshot_id" ]]; then
-  SNAPSHOT_ID=$(cat "${GUARD_DIR}/current_snapshot_id")
-  PROJECT_DIR=$(cat "${GUARD_DIR}/current_project_dir" 2>/dev/null || pwd)
-  DIR_HASH=$(compute_dir_hash "${PROJECT_DIR}")
-  if ! legacy_pending_matches_post_context "${PROJECT_DIR}" "${DIR_HASH}"; then
-    log_advisory "post-verify SKIP: legacy current_snapshot_id did not match this Bash command/cwd (post_cwd=${POST_CWD}, pending_project=${PROJECT_DIR:-unknown}) — bounded no-op."
-    exit 0
-  fi
-  RECORD_PATH="${GUARD_DIR}/current_snapshot_id"
-  rm -f "${GUARD_DIR}/current_snapshot_id" "${GUARD_DIR}/current_project_dir"
 else
-  # No pending state for this command (PreToolUse never recognized it — a parser
-  # blind spot, a payload with no `cwd`, or a genuinely novel install form). If it
+  # No record for this call (PreToolUse never recognized it — a parser blind
+  # spot, a payload with no `cwd`, or a genuinely novel install form). If it
   # nonetheless looks like an install, the documented effect gate must NOT inherit
   # the parser's blind spot: run a command-independent closure backstop instead of
   # only logging UNVERIFIED (finding #5). The backstop machinery lives past the
@@ -1592,8 +1568,8 @@ else
 fi
 
 # A record that names no snapshot. The pre-guard always writes one
-# (claim_snapshot_id), so an empty id comes from a damaged pending state or an
-# empty legacy current_snapshot_id: a record exists and cannot be used. That
+# (claim_snapshot_id), so an empty id comes from a damaged pending state: a
+# record exists and cannot be used. That
 # used to end the hook here with nothing said, as the missing meta below did,
 # so it goes the same way: advisory.log names the record, which is already
 # removed, and the backstop judges the command, with a head that says the
@@ -1612,7 +1588,7 @@ fi
 # The pre-guard writes both from one directory, so a sound record gets the
 # value it holds. A damaged one did not: project_dir X with the dir_hash of Z
 # restored Z's confirmed snapshot into X (bamdori J, measured: X/package.json
-# became Z's). The record's dir_hash is read only to match a legacy record.
+# became Z's). The record's dir_hash, read with the record, is replaced here.
 if [[ -z "${PROJECT_DIR}" ]]; then
   PROJECT_DIR="${POST_CWD}"
 fi
@@ -2518,8 +2494,9 @@ check_npm_effect_closure() {
 # What the backstop's head says about the record of this command: none was
 # found, or a pre-guard record was and the snapshot it names has no meta file,
 # or it names no snapshot, or it is not one JSON object. The last three are
-# what sent it here. They do not say "of this command": a legacy record is
-# matched to the call by its directory only, and an unreadable one by nothing.
+# what sent it here. They do not say "of this command": a record found for a
+# call that names no tool_use_id is matched to it by its directory and command
+# only, and an unreadable one by nothing.
 backstop_record_clause() {
   if [[ "${BACKSTOP_RECORD_GONE:-false}" == true ]]; then
     printf 'this hook found a pre-guard record, and the snapshot it names has no meta file'

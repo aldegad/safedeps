@@ -1047,8 +1047,9 @@ new_un1() { new_project; quiet_first "unset npm_config_userconfig; HOME=${XH_HOM
 #   quiet:<package>     confirmed quietly, and <package> rebuilt (`-`: nothing to check)
 #   denied:<reason>     the pre-guard denies it, saying <reason>; nothing is installed
 # A `fallback` may carry `:<text>` that the message must also say.
-# RH3c is RH3x with a record of the rewrite that the command did not carry
-# (engine `crossed`, npm-sandbox.sh): the Codex warning used to be left out
+# RH3c is RH3 on a Claude Code call that ran the command as given, not as
+# safedeps rewrote it, so the call's record of the rewrite is one the command
+# did not carry (engine `crossed`, npm-sandbox.sh): the warning used to be left out
 # whenever the record said safedeps rewrote a command, and is now left out only
 # where the command received is the one it wrote.
 # The warning a later command gets for the impostor an earlier one fetched.

@@ -4841,8 +4841,8 @@ fi
 # baseline's second (lumi r2 P3, 2 of 5 on a real mount). Which one applied is
 # in the entry.
 #
-# The entry belongs to this tool call (safedeps_backstop_entry_base), and only
-# this call's post hook reads it. A call whose post hook never runs (Claude
+# The entry belongs to this tool call (safedeps_call_base in
+# lib/gates/call-id.sh), and only this call's post hook reads it. A call whose post hook never runs (Claude
 # Code runs none for a Bash call that ended in an error) leaves its entry to
 # the age sweep, and no other call reads it.
 #
@@ -4858,7 +4858,7 @@ guard_backstop_trace_baseline() {
   [[ -r "${lib}" ]] || return 0
   # shellcheck source=../lib/gates/backstop-trace.sh
   source "${lib}" || return 0
-  id=$(jq -r 'if (.tool_use_id | type) == "string" then .tool_use_id else empty end' <<< "${INPUT}" 2>/dev/null) || return 0
+  id=$(safedeps_call_id "${INPUT}") || return 0
   # The cwd as the PostToolUse hook resolves it, so the key is the one it builds.
   dir="${CWD_DIR}"
   if command -v realpath >/dev/null 2>&1; then
@@ -4868,7 +4868,7 @@ guard_backstop_trace_baseline() {
   fi
   dir_hash=$(compute_dir_hash "${dir}")
   entry_dir="${GUARD_DIR}/pending/backstop"
-  base=$(safedeps_backstop_entry_base "${entry_dir}" "${id}") || return 0
+  base=$(safedeps_call_base "${entry_dir}" "${id}") || return 0
   mkdir -p "${entry_dir}" 2>/dev/null || return 0
   find "${entry_dir}" -type f -mmin +1440 -delete 2>/dev/null || true
   lock=$(safedeps_tree_inode "${dir}/package-lock.json")
@@ -5498,21 +5498,43 @@ if [[ "${INERT_UNVERIFIED}" == "true" ]]; then
   log_advisory "pre-guard: an npm install in this command holds a word the shell decides at run time (a tilde, a brace, \$x, \$(...), a glob or another expansion), which can set ignore-scripts, take the next word as its value, or end npm's options; safedeps put --ignore-scripts both right after the verb and after the last argument, and could not read whether npm keeps it true, so the install's scripts may run before the effect gate verifies. Command: ${COMMAND}"
 fi
 
-# Write per-install pending state for PostToolUse, keyed by (dir_hash, normalized
-# command) so concurrent installs in the same project keep separate state instead
-# of clobbering one global file (issue #5). The single-file write is still atomic
-# (write_state_file) to prevent TOCTOU within one install.
+# Write the record of this install for the post hook of the same call. It is
+# named by the call's tool_use_id (lib/gates/call-id.sh), which both hooks of
+# one call receive and no other call does, so the post hook reads this call's
+# record and no other. Records used to be found by the directory and the
+# command, and a call could speak from another's: two overlapping calls of one
+# command each took the other's record (bamdori r19 X1), and a call whose post
+# hook never ran (a tool call the user rejected, or a failed one on Claude
+# Code before PostToolUseFailure was registered) left a record the next call
+# of the command consumed, rolling back what was edited in between (O2). The
+# single-file write is still atomic (write_state_file).
 PENDING_DIR="${GUARD_DIR}/pending"
 mkdir -p "${PENDING_DIR}"
 # GC pending entries whose PostToolUse never fired (crash/no-op). 24h is well past
 # any real install, so this never deletes an in-flight one (a 60-min window could
 # have reaped a slow native build that was still running).
 find "${PENDING_DIR}" \( -name '*.json' -o -name '*.trace' \) -type f -mmin +1440 -delete 2>/dev/null || true
-# Key = (dir, normalized command); the snapshot id suffix makes the filename unique
-# per install, so even two identical concurrent commands keep separate state.
-PENDING_KEY=$(compute_pending_key "${KEY_DIR_HASH}" "${COMMAND}")
-# The snapshot id is unique per call (claim_snapshot_id), so the filename is too.
-PENDING_BASE="${PENDING_DIR}/${PENDING_KEY}__${SNAPSHOT_ID}"
+CALL_ID=""
+CALL_ID_LIB="${BASH_SOURCE[0]%/*}/../lib/gates/call-id.sh"
+# shellcheck source=../lib/gates/call-id.sh
+if [[ -r "${CALL_ID_LIB}" ]] && source "${CALL_ID_LIB}" 2>/dev/null; then
+  CALL_ID=$(safedeps_call_id "${INPUT}") || CALL_ID=""
+  CALL_ID_WHY="this hook's input names no tool_use_id"
+else
+  CALL_ID_WHY="the pre-guard could not read ${CALL_ID_LIB}"
+fi
+if [[ -n "${CALL_ID}" ]]; then
+  PENDING_BASE=$(safedeps_call_base "${PENDING_DIR}" "${CALL_ID}")
+else
+  # A call that names no tool_use_id keeps the key from before: the directory
+  # and the command with the inert rewrite normalized out (issue #5), and the
+  # snapshot id, which is unique per call (claim_snapshot_id). The post hook
+  # finds the record by that key only for such a call, and two overlapping
+  # calls of the command can then use each other's record, so it is recorded.
+  PENDING_KEY=$(compute_pending_key "${KEY_DIR_HASH}" "${COMMAND}")
+  PENDING_BASE="${PENDING_DIR}/${PENDING_KEY}__${SNAPSHOT_ID}"
+  log_advisory "pre-guard: ${CALL_ID_WHY}, so the record of this install is kept under its directory and command, and another call of the same command in the same directory can use it. Command: ${COMMAND}"
+fi
 
 # The trace baseline: a file touched now, and the inode of each npm lockfile in
 # the directory the gate reads. npm rewrote node_modules/.package-lock.json on
@@ -5545,9 +5567,10 @@ if [[ "${NPM_TRACE_WANTED}" == true ]]; then
 fi
 CURRENT_STATE=$(jq -n --arg sid "${SNAPSHOT_ID}" --arg pdir "${PROJECT_DIR}" --arg dhash "${DIR_HASH}" \
   --arg from "${PROJECT_DIR_FROM}" --argjson trace "${TRACE_JSON}" --arg attribution "${ATTRIBUTION}" \
-  --argjson fetch "${FETCH_JSON}" \
+  --argjson fetch "${FETCH_JSON}" --arg call "${CALL_ID}" \
   '{snapshot_id: $sid, project_dir: $pdir, dir_hash: $dhash, project_dir_from: $from,
-    npm_trace: $trace, npm_unattributable: $attribution, npm_fetch: $fetch}')
+    npm_trace: $trace, npm_unattributable: $attribution, npm_fetch: $fetch,
+    tool_use_id: (if $call == "" then null else $call end)}')
 write_state_file "${PENDING_BASE}.json" "${CURRENT_STATE}"
 
 if [[ -n "${UPDATED_COMMAND}" ]]; then

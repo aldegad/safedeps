@@ -42,13 +42,15 @@
 # a reader of the command here and one in the hook shared a model of shell
 # statements and were wrong on the same commands.
 #
-# Which record is this command's, and what it says, the oracle does not learn
-# the hook's way either. The hook finds the record by the pending key and reads
-# it with jq; when the key missed (bamdori r18: `sh -c 'npm ci'`, rewritten),
-# the oracle found the same nothing and agreed with a false "did not add". So
-# the record is read here in Python (report-oracle-read.py), "did not add" is
-# red when a record no call has used yet, found by what it holds, says
-# safedeps wrote exactly the command this hook received, an --ignore-scripts
+# Which record is this call's, and what it says, the oracle does not learn
+# the hook's way either. The hook finds the record by the file named after the
+# call's tool_use_id (or, for a call that names none, by the pending key) and
+# reads it with jq; when the key missed (bamdori r18: `sh -c 'npm ci'`,
+# rewritten), the oracle found the same nothing and agreed with a false "did
+# not add". So the record is read here in Python (report-oracle-read.py), a
+# record the hook consumed must hold this call's tool_use_id, "did not add" is
+# red when a record of this call no hook has used yet, found by what it holds,
+# says safedeps wrote exactly the command this hook received, an --ignore-scripts
 # line is red in a message from a hook that
 # found no record, and each record is checked when it is written: the rewrite
 # the pre-guard printed is read from its stdout (oracle_pre) and must be, byte
@@ -278,7 +280,7 @@ oracle_before() {
     oracle_tree_state "${file}" "${cwd}" > "${call}/pending/${file##*/}.tree"
     oracle_note_listing "${call}" "$(jq -r '.project_dir // empty' "${file}" 2>/dev/null)"
   done
-  # The records a pre-#5 pre-guard left, which the hook still reads.
+  # The records a pre-#5 pre-guard left, which the hook must not read.
   for file in current_state current_snapshot_id; do
     [[ -f "${home}/${file}" ]] || continue
     mkdir -p "${call}/legacy"
@@ -339,19 +341,22 @@ oracle_inert_holds() {
     added:true:true|asked:true:false|none:false:*) ;;
     *) oracle_red "the pre-guard's record says it rewrote the command: ${asked}; the command this hook received is the one it wrote: ${same}" ;;
   esac
-  # "did not add" is a claim about every record no call has used yet, not
-  # only the one the hook found: an outstanding record that says safedeps
-  # wrote exactly this command makes it false, however the hook missed it. The
-  # records are those of the pending states noted before the hook ran, found
-  # by what they hold, not by the hook's key. Records already used are left
-  # out because e2e runs calls one at a time and each reaches its post hook:
-  # its Codex row that carries the flag itself sends the bytes an earlier
-  # Claude rewrite wrote, and its "did not add" is true (measured: scanning
-  # every record turned that row red). Overlapping calls are a stated
-  # boundary, and e2e has no row for them.
+  # "did not add" is a claim about every record of this call no hook has used
+  # yet, not only the one the hook found: an outstanding record of this call
+  # that says safedeps wrote exactly this command makes it false, however the
+  # hook missed it. The records are those of the pending states noted before
+  # the hook ran, found by what they hold, not by the hook's key, and a record
+  # is this call's when it holds this call's tool_use_id, or holds none for a
+  # call that names none. Records already used are left out because e2e runs
+  # each call to its post hook: its Codex row that carries the flag itself
+  # sends the bytes an earlier Claude rewrite wrote, and its "did not add" is
+  # true (measured: scanning every record turned that row red). Another call's
+  # outstanding record is left out for the same reason: an overlapping Claude
+  # call of the same command can hold exactly those bytes (OV1).
   [[ "$1" == none && "${O_DIRECT}" != 1 ]] || return 0
   for pending in "${O_CALL}/pending"/*.json; do
     [[ -f "${pending}" ]] || continue
+    [[ "$(python3 "${ORACLE_READ}" string "${pending}" tool_use_id 2>/dev/null)" == "${O_CALL_ID}" ]] || continue
     meta="${O_HOME}/snapshots/$(python3 "${ORACLE_READ}" string "${pending}" snapshot_id 2>/dev/null)_meta.json"
     [[ -f "${meta}" ]] || continue
     python3 "${ORACLE_READ}" wrote "${meta}" > "${O_CALL}/inert.any" 2>/dev/null || continue
@@ -1263,13 +1268,34 @@ oracle_message() {
   done
   if [[ -n "${consumed}" ]]; then
     oracle_record_gone "${consumed}" "${O_HOME}/pending/${consumed##*/}" json
-  elif [[ -f "${call}/legacy/current_state" && ! -e "${O_HOME}/current_state" ]]; then
-    oracle_record_gone "${call}/legacy/current_state" "${O_HOME}/current_state" json
-  elif [[ -f "${call}/legacy/current_snapshot_id" && ! -e "${O_HOME}/current_snapshot_id" ]]; then
-    oracle_record_gone "${call}/legacy/current_snapshot_id" "${O_HOME}/current_snapshot_id" text
   else
     oracle_record_gone ""
   fi
+  # Which call this is, read from the hook input in Python, and whose record
+  # the hook consumed, read from what the record holds. A record is the
+  # pre-guard's for one call, so a call that names a tool_use_id consumes only
+  # a record that holds it, and a call that names none only a record that
+  # holds none. Two overlapping calls of one command each took the other's
+  # record, and the oracle, reading the record each took, agreed with both
+  # (bamdori r19 X1). A record that is not one JSON object holds nothing to
+  # compare.
+  printf '%s' "${payload}" > "${call}/payload.json"
+  O_CALL_ID=$(python3 "${ORACLE_READ}" call "${call}/payload.json" 2>/dev/null) || O_CALL_ID=""
+  if [[ -n "${consumed}" && "${O_UNREAD}" != 1 ]]; then
+    local held
+    held=$(python3 "${ORACLE_READ}" string "${consumed}" tool_use_id 2>/dev/null) || held=""
+    if [[ "${held}" != "${O_CALL_ID}" ]]; then
+      O_LINE="record ${consumed##*/}"
+      oracle_red "the hook consumed the record of the call '${held}', and this call is '${O_CALL_ID}'"
+    fi
+  fi
+  # The records a pre-#5 pre-guard left are no call's, and none is read.
+  for file in current_state current_snapshot_id; do
+    if [[ -f "${call}/legacy/${file}" && ! -e "${O_HOME}/${file}" ]]; then
+      O_LINE="${O_HOME}/${file}"
+      oracle_red "the hook consumed a record a pre-#5 pre-guard left, which belongs to no call"
+    fi
+  done
   # A call that printed nothing appended nothing to reorg.log. The post hook
   # writes an entry in four places (a rollback, a refused step, the confirm
   # warnings, an unfinished rollback's report), and each of them prints a
@@ -1330,7 +1356,7 @@ oracle_message() {
 # reaches. They are read as the lines of a confirm block, with no reorg.log.
 oracle_direct() {
   local line
-  O_CALL="${ORACLE_DIR}" O_DIRECT=1 O_RECORD_UNREAD=0 O_CONSUMED="" O_GONE=0 O_EMPTY=0 O_UNREAD=0 O_HOME="${SAFEDEPS_HOME:-${HOME}/.safedeps}" O_NPM_LOG=/dev/null
+  O_CALL="${ORACLE_DIR}" O_DIRECT=1 O_RECORD_UNREAD=0 O_CALL_ID="" O_CONSUMED="" O_GONE=0 O_EMPTY=0 O_UNREAD=0 O_HOME="${SAFEDEPS_HOME:-${HOME}/.safedeps}" O_NPM_LOG=/dev/null
   O_META="$1" O_PAYLOAD="$2" O_CMD=$(jq -r '.tool_input.command // empty' <<< "$2") O_PROJECT="" O_PRE="" O_TRACE="unread" O_NODE_FILES="" O_TREE="" O_DIR_HASH=""
   oracle_reset
   oracle_verdict

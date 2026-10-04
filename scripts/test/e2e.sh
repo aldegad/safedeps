@@ -1286,8 +1286,17 @@ grammar_pre() {
 EOF
 }
 grammar_pre_codex() {
+  local id_field=""
+  [[ -z "${3:-}" ]] || id_field=",\"tool_use_id\":\"$3\""
   pre_hook <<EOF
-{"tool_name":"Bash","tool_input":{"command":"$2"},"cwd":"$1","turn_id":"turn-e2e","model":"codex-test"}
+{"tool_name":"Bash","tool_input":{"command":"$2"},"cwd":"$1","turn_id":"turn-e2e","model":"codex-test"${id_field}}
+EOF
+}
+grammar_post_codex() {
+  local id_field=""
+  [[ -z "${3:-}" ]] || id_field=",\"tool_use_id\":\"$3\""
+  post_hook <<EOF
+{"tool_name":"Bash","tool_input":{"command":"$2"},"cwd":"$1","turn_id":"turn-e2e","model":"codex-test"${id_field}}
 EOF
 }
 grammar_post() {
@@ -1613,8 +1622,7 @@ cmp -s "${gone_c_wt}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || f
 pass "a record whose snapshot has no meta file goes to the backstop, which rolls back to a confirmed snapshot"
 
 # A record that names no snapshot. The pre-guard always writes one, so an empty
-# id is a damaged pending state or an empty legacy current_snapshot_id. The
-# post hook used to exit there with nothing said, as it did for a missing meta.
+# id is a damaged pending state. The post hook used to exit there with nothing said, as it did for a missing meta.
 # Now advisory.log names the record, the record is set aside, and the backstop
 # judges the command, with a head that says the record was found and names no
 # snapshot. The oracle holds the advisory line once per such call and each
@@ -1648,22 +1656,23 @@ cmp -s "${empty_wt}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fa
   || fail "D: the backstop counts the command as traced for the record"
 pass "a pending state that names no snapshot goes to the backstop, which rolls back to a confirmed snapshot"
 
-# E: the legacy record a pre-#5 pre-guard left, which the post hook still
-# reads: an empty current_snapshot_id for this project, an unapproved
-# lockfile, and no confirmed snapshot. The backstop flags the install.
+# E: a record a pre-#5 pre-guard left, an empty current_snapshot_id for this
+# project, with an unapproved lockfile and no confirmed snapshot. No current
+# pre-guard writes it, and it names no call. It was read as this command's
+# record, and a call it did not match ended the hook with no judgment ("SKIP
+# ... bounded no-op"). It is not read now: the backstop judges the install as
+# one with no record, and the file stays.
 legacy_wt=$(mktemp -d "${tmp_root}/legacy-wt.XXXXXX")
 grammar_project "${legacy_wt}"
 : > "${SAFEDEPS_HOME}/current_snapshot_id"
 printf '%s\n' "$(cd -P "${legacy_wt}" && pwd -P)" > "${SAFEDEPS_HOME}/current_project_dir"
-legacy_line=$(empty_line_of "${SAFEDEPS_HOME}/current_snapshot_id")
 printf '%s\n' "${tampered_lock}" > "${legacy_wt}/package-lock.json"
 legacy_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${legacy_wt}" "npm install fixture-parent@1.0.0")
-grep -qx 'safedeps: suspicious dependency change detected; this hook found a pre-guard record, and the record names no snapshot. No rollback ran.' <<< "$(post_message "${legacy_post}")" \
-  || fail "E: the backstop flags the unapproved lockfile, and says the record was found and names no snapshot (${legacy_post})"
-[[ "$(grep -cF "${legacy_line}" "${SAFEDEPS_HOME}/advisory.log")" == 1 ]] \
-  || fail "E: advisory.log names the legacy record that names no snapshot once"
-[[ ! -e "${SAFEDEPS_HOME}/current_snapshot_id" && ! -e "${SAFEDEPS_HOME}/current_project_dir" ]] || fail "E: the legacy record is set aside"
-pass "an empty legacy current_snapshot_id goes to the backstop, which flags an unapproved lockfile"
+grep -qx 'safedeps: suspicious dependency change detected; this hook found no record of this command from before it ran. No rollback ran.' <<< "$(post_message "${legacy_post}")" \
+  || fail "E: the backstop flags the unapproved lockfile, and says it found no record (${legacy_post})"
+[[ -e "${SAFEDEPS_HOME}/current_snapshot_id" && -e "${SAFEDEPS_HOME}/current_project_dir" ]] || fail "E: the legacy record stays"
+rm -f "${SAFEDEPS_HOME}/current_snapshot_id" "${SAFEDEPS_HOME}/current_project_dir"
+pass "a record a pre-#5 pre-guard left is not read, and the backstop judges the install"
 
 # F: a record with no project_dir, and a hook whose own working directory is
 # another project with an unapproved lockfile. The hook judged and rolled back
@@ -2144,6 +2153,125 @@ bs_noid_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${bs_noid_wt}" "${bs_gre
 bs_assert_rollback "${bs_noid_wt}" "${bs_noid_post}" "a grep with no tool_use_id" \
   "this hook's input names no tool_use_id, so no trace entry belongs to this call"
 pass "a call with no tool_use_id is judged as before: a trace"
+
+# --- Records bound to the call ---------------------------------------------
+#
+# The pre-guard keeps the record of an install under the call's tool_use_id,
+# which both hooks of one call receive and no other call does, and the post
+# hook of a call that names one reads that record and no other. Records used to
+# be found by the directory and the command (issue #5), so a call could speak
+# from another call's record. A search by that key takes the first record in
+# name order, and a record's name starts with its second, so where a row needs
+# the other call's record to be the one a search by key finds first, that call
+# runs a second earlier.
+call_rewrite() { jq -r '.hookSpecificOutput.updatedInput.command // empty' <<< "${1:-{\}}"; }
+call_record() { printf '%s/pending/id-%s.json' "${2:-${SAFEDEPS_HOME}}" "$1"; }
+call_records_of() { { grep -lF "\"$(cd -P "$1" && pwd -P)\"" "${SAFEDEPS_HOME}/pending"/*.json 2>/dev/null || true; } | wc -l | tr -d ' '; }
+
+# OV1 (bamdori r19 X1): two overlapping calls of one install in one project.
+# A is a Claude Code call that safedeps rewrote; B is a Codex call that sends
+# the command A was rewritten to, so both have one key. B's post hook runs
+# first. Found by the key, B took A's record and said "added" of a Codex
+# install, and A then took B's and said "did not add" of the command safedeps
+# wrote.
+ov1_wt="${tmp_root}/ov1-wt"
+grammar_project "${ov1_wt}"
+ov1_pre=$(grammar_pre "${ov1_wt}" "npm install fixture-parent@1.0.0" toolu_ov1_a)
+ov1_cmd=$(call_rewrite "${ov1_pre}")
+[[ "${ov1_cmd}" == *--ignore-scripts* ]] || fail "OV1: the pre-guard rewrites A (${ov1_pre})"
+sleep 1
+grammar_pre_codex "${ov1_wt}" "${ov1_cmd}" exec-ov1-b > /dev/null
+[[ "$(call_records_of "${ov1_wt}")" == 2 ]] || fail "OV1: the two calls leave a record each"
+printf '%s\n' "${tampered_lock}" > "${ov1_wt}/package-lock.json"
+ov1_b_post=$(PATH="${stub_bin}:${PATH}" grammar_post_codex "${ov1_wt}" "${ov1_cmd}" exec-ov1-b)
+grep -qx 'safedeps did not add --ignore-scripts to this install' <<< "$(post_message "${ov1_b_post}")" \
+  || fail "OV1: the Codex call B speaks from its own record: safedeps did not add the flag (${ov1_b_post})"
+[[ ! -e "$(call_record exec-ov1-b)" && -f "$(call_record toolu_ov1_a)" ]] \
+  || fail "OV1: B's post hook takes B's record and leaves A's"
+printf '%s\n' "${tampered_lock}" > "${ov1_wt}/package-lock.json"
+ov1_a_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${ov1_wt}" "${ov1_cmd}" toolu_ov1_a)
+grep -qx 'safedeps added --ignore-scripts to this install' <<< "$(post_message "${ov1_a_post}")" \
+  || fail "OV1: the Claude Code call A speaks from its own record: safedeps added the flag (${ov1_a_post})"
+[[ ! -e "$(call_record toolu_ov1_a)" ]] || fail "OV1: A's post hook takes A's record"
+pass "two overlapping calls of one install each speak from their own record"
+
+# OV2: a call that names a tool_use_id and has no record of its own (its
+# pre-guard did not run, as when the hooks were registered mid-call) does not
+# take the record of a call that named none. It goes to the backstop, as a
+# command with no record does.
+ov2_wt="${tmp_root}/ov2-wt"
+grammar_project "${ov2_wt}"
+grammar_pre "${ov2_wt}" "npm install fixture-parent@1.0.0" > /dev/null
+ov2_record=$(grammar_pending "${ov2_wt}")
+printf '%s\n' "${tampered_lock}" > "${ov2_wt}/package-lock.json"
+ov2_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${ov2_wt}" "npm install fixture-parent@1.0.0" toolu_ov2_b)
+grep -q 'this hook found no record of this command from before it ran\.' <<< "$(post_message "${ov2_post}")" \
+  || fail "OV2: a call with no record of its own goes to the backstop (${ov2_post})"
+[[ -n "${ov2_record}" && -f "${ov2_record}" ]] || fail "OV2: the other call's record stays"
+rm -f "${ov2_record}" "${ov2_record%.json}.trace"
+pass "a call that names a tool_use_id does not take the record of a call that named none"
+
+# O2 (bamdori r18): a call whose post hook never ran (a tool call the user
+# rejected after its pre-guard ran) leaves its record. The user edits
+# package.json, and the next call of the same command is rolled back. Found by
+# the key, that call took the old record and restored the snapshot from before
+# the edit, so the edit was lost.
+o2_wt="${tmp_root}/o2-wt"
+grammar_project "${o2_wt}"
+grammar_pre "${o2_wt}" "npm install fixture-parent@1.0.0" toolu_o2_rejected > /dev/null
+sleep 1
+jq '.description = "edited by the user"' "${o2_wt}/package.json" > "${o2_wt}/package.json.edit" \
+  && mv "${o2_wt}/package.json.edit" "${o2_wt}/package.json"
+o2_cmd=$(call_rewrite "$(grammar_pre "${o2_wt}" "npm install fixture-parent@1.0.0" toolu_o2)")
+printf '%s\n' "${tampered_lock}" > "${o2_wt}/package-lock.json"
+o2_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${o2_wt}" "${o2_cmd}" toolu_o2)
+grep -q 'A rollback ran\.' <<< "${o2_post}" || fail "O2: the unapproved lockfile is rolled back (${o2_post})"
+[[ "$(jq -r '.description // empty' "${o2_wt}/package.json")" == 'edited by the user' ]] \
+  || fail "O2: the rollback keeps the edit made after the rejected call ($(cat "${o2_wt}/package.json"))"
+[[ -f "$(call_record toolu_o2_rejected)" ]] || fail "O2: the rejected call's record stays for the age sweep"
+rm -f "$(call_record toolu_o2_rejected)" "${SAFEDEPS_HOME}/pending/id-toolu_o2_rejected.trace"
+pass "a call is not judged by the record of a call whose post hook never ran"
+
+# MM (lumi r4): this call's own trace entry, taken in another directory than
+# the one its post hook is given, and in that directory the record of an
+# install with the same key (from a call that named no tool_use_id) whose
+# snapshot is gone. The entry was set aside and the call went on to the
+# records, where that record judged it. A call with an entry reads no record:
+# it counts as traced, and the backstop judges it with no record.
+mm_parent="${tmp_root}/mm-wt"
+mm_wt="${mm_parent}/sub"
+bs_project "${mm_parent}"
+grammar_project "${mm_wt}"
+grammar_pre "${mm_wt}" 'FOO=a\\  npm install fixture-parent@1.0.0' > /dev/null
+mm_record=$(grammar_pending "${mm_wt}")
+rm -f "$(gone_meta_of "${mm_record}")"
+grammar_pre "${mm_parent}" 'FOO=a\\ npm install fixture-parent@1.0.0' toolu_mm > /dev/null
+[[ -f "$(bs_entry toolu_mm)" ]] || fail "MM: the pre-guard leaves the call a trace entry"
+mm_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${mm_wt}" 'FOO=a\\ npm install fixture-parent@1.0.0' toolu_mm)
+! grep -q 'this hook found a pre-guard record' <<< "${mm_post}" \
+  || fail "MM: a call with a trace entry is not judged by another call's record (${mm_post})"
+[[ -f "${mm_record}" ]] || fail "MM: the other call's record stays"
+grep -qF "the trace entry for this call was taken for another directory or command" "${SAFEDEPS_HOME}/advisory.log" \
+  || fail "MM: advisory.log says the entry was taken for another directory"
+rm -f "${mm_record}" "${mm_record%.json}.trace"
+pass "a call whose trace entry was taken in another directory reads no record"
+
+# A call that names no tool_use_id keeps the key from before, and both hooks
+# say so in advisory.log: two overlapping calls of its command can still use
+# each other's record.
+noid_wt="${tmp_root}/noid-wt"
+grammar_project "${noid_wt}"
+noid_cmd=$(call_rewrite "$(grammar_pre "${noid_wt}" "npm install fixture-parent@1.0.0")")
+noid_record=$(grammar_pending "${noid_wt}")
+[[ "${noid_record##*/}" == *__*.json ]] || fail "a call with no tool_use_id keeps its record under the directory and the command (${noid_record})"
+grep -qF "pre-guard: this hook's input names no tool_use_id, so the record of this install is kept under its directory and command" "${SAFEDEPS_HOME}/advisory.log" \
+  || fail "the pre-guard records that a call names no tool_use_id"
+touch "${noid_wt}/package-lock.json"
+noid_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${noid_wt}" "${noid_cmd}")
+[[ -z "${noid_post}" && ! -e "${noid_record}" ]] || fail "a call with no tool_use_id is judged from the record found by the key (${noid_post})"
+grep -qF "post-verify: this hook's input names no tool_use_id, so it took the record ${noid_record} by the directory and the command" "${SAFEDEPS_HOME}/advisory.log" \
+  || fail "the post hook records that it took a record by the key"
+pass "a call with no tool_use_id is judged as before, and both hooks record it"
 
 # A filesystem that keeps whole seconds, simulated: a touch that drops the part
 # below the second. A write in the second the baseline is touched in would not
@@ -2818,10 +2946,10 @@ legacy_skip_out=$(
 {"tool_name":"Bash","tool_input":{"command":"echo done"},"cwd":"${legacy_post_project}"}
 EOF
 )
-[[ -z "${legacy_skip_out}" ]] || fail "post hook keeps unrelated legacy-pending Bash quiet"
-grep -q 'post-verify SKIP: legacy current_state' "${legacy_skip_safe}/advisory.log" || fail "post hook logs legacy pending bounded skip"
-[[ -f "${legacy_skip_safe}/current_state" ]] || fail "post hook does not consume mismatched legacy pending"
-pass "post hook bounds unrelated Bash with stale legacy pending"
+[[ -z "${legacy_skip_out}" ]] || fail "post hook keeps unrelated Bash quiet beside a pre-#5 record"
+! grep -q 'post-verify SKIP: legacy' "${legacy_skip_safe}/advisory.log" 2>/dev/null || fail "post hook reads no pre-#5 record, so it skips nothing for one"
+[[ -f "${legacy_skip_safe}/current_state" ]] || fail "post hook does not consume a pre-#5 record"
+pass "post hook leaves a pre-#5 record alone"
 
 # --- Secret-leak lane: pre-commit gate must DENY a secret, PASS clean/example -
 # The real bypass harness for the secret lane. Needs a scanner (gitleaks or

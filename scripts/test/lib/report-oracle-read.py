@@ -36,6 +36,12 @@ command for the flag, so neither does this file.
       hook did, and both said "did not add" of a command safedeps had
       written).
 
+  call <hook input file>
+      The call the input names: its top-level tool_use_id when that is a
+      string of 1 to 128 letters, digits, `_` or `-`, which is what a file can
+      be named after. Exit 1 when it names none (the hooks then fall back to
+      the directory and the command).
+
   said <snapshot meta file> <file holding the command the hook received>
       The --ignore-scripts line the record allows: added, asked, none,
       unstated (no line, the record does not state the fact), or unreadable
@@ -51,6 +57,7 @@ rule is read here from the parsed record, not with the hook's jq program.
 import hashlib
 import json
 import os
+import re
 import sys
 
 
@@ -171,6 +178,15 @@ def said(path, received_path):
     return 0
 
 
+def call(path):
+    data = load(path)
+    value = data.get("tool_use_id") if isinstance(data, dict) else None
+    if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", value):
+        emit(value)
+        return 0
+    return 1
+
+
 def is_object(path):
     """0 when the file is one JSON object, 1 when it is anything else."""
     return 0 if isinstance(load(path), dict) else 1
@@ -195,6 +211,8 @@ def main():
         return string(sys.argv[2], sys.argv[3:])
     if sys.argv[1] == "wrote":
         return wrote(sys.argv[2])
+    if sys.argv[1] == "call":
+        return call(sys.argv[2])
     if sys.argv[1] == "said":
         return said(sys.argv[2], sys.argv[3])
     if sys.argv[1] == "packages":
