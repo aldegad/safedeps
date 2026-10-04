@@ -3,7 +3,7 @@
 #
 # The oracle's green is a claim that no line the post hook printed is false or
 # outside the grammar. A check that cannot fail says nothing, so this script
-# makes it fail thirty-five ways: each mutation below puts into the hook the kind
+# makes it fail thirty-six ways: each mutation below puts into the hook the kind
 # of line review found by reading -- a clause behind a true fact, a claim with
 # no check, a line built outside the fact functions, a guessed cause, prose in
 # a rollback, a line only reorg.log carries, a line left out, a reorg.log entry
@@ -26,8 +26,9 @@
 # directory and the command again for every call, so that one of two
 # overlapping calls takes the other's (KeyRecords, bamdori r19 X1), a call
 # whose own record is missing given another call's by that key
-# (IdFallsBackToKey), and a record a pre-#5 pre-guard left read again (Legacy)
-# -- and e2e must turn red on it, at the
+# (IdFallsBackToKey), a record a pre-#5 pre-guard left read again (Legacy),
+# and the registry warning saying "(on Codex it cannot)" of a Claude Code call
+# again (CodexEverywhere) -- and e2e must turn red on it, at the
 # oracle, with the reason named here. Two of them (P2, R3) passed
 # the whole suite while the check was a list of forbidden words; seven more
 # (Prose to RefuseSilent, bamdori r16) passed the oracle before it read
@@ -60,7 +61,7 @@
 # call, a call has its entry or its record and never both, so no row can tell
 # the two orders apart. KeyRecords is the defect it stood for.
 #
-# This is forty-four e2e runs, so it is not part of `npm test`. Run it when a
+# This is forty-five e2e runs, so it is not part of `npm test`. Run it when a
 # line the hook prints, a fact function, the oracle or the trace check changes.
 #
 #   scripts/test/report-mutations.sh            every mutation
@@ -75,7 +76,7 @@ trap 'rm -rf "${WORK}"' EXIT
 # must give, and the text to find and to put in its place. The text to find
 # occurs exactly once in the file, or the mutation is reported as not applying.
 MUTATIONS=(P2 R3 K Lie Bypass Head NoCheck Snap Cause Prose LogOnly Reasons Kept Silent JOmit RefuseSilent F1 F2 LogSilent F4 MarkOrig MarkSkip Unread Same Default Version XStr2 Gone Empty NotObject NoDir RecordHash
-  KeyRecords IdFallsBackToKey Legacy
+  KeyRecords IdFallsBackToKey Legacy CodexEverywhere
   TraceNever TraceAlways WalkOff PullAlways Oldest LinkLstat AnySubsecond NoIdSilent)
 
 # A mutation can change a second file too (M_FILE2, M_OLD2, M_NEW2). M_AT is
@@ -486,6 +487,13 @@ DIR_HASH=$(compute_dir_hash "${PROJECT_DIR}")
   rm -f "${GUARD_DIR}/current_snapshot_id" "${GUARD_DIR}/current_project_dir"
 else
   # No record for this call (PreToolUse never recognized it'
+      ;;
+    CodexEverywhere)
+      M_FILE=scripts/safedeps-post-verify.sh
+      M_WHY='the registry warning says safedeps cannot add --ignore-scripts on Codex of a call from either engine, as it did in v2.18.0'
+      M_RED='the warning says safedeps cannot add --ignore-scripts on Codex, of a claude call'
+      M_OLD='            [[ "${POST_IS_CODEX}" != true ]] || inert_said+=" (on Codex it cannot)" ;;'
+      M_NEW='            inert_said+=" (on Codex it cannot)" ;;'
       ;;
     NoIdSilent)
       M_FILE=scripts/safedeps-pre-guard.sh

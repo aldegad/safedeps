@@ -122,7 +122,7 @@ ORACLE_PROSE=(
   "prose-bytes-unread|rollback confirm|0|safedeps could not read which bytes this install brought into "
   "prose-fetch-unknown|rollback confirm|0|safedeps could not tell where npm fetched the bytes this install brought into "
   "prose-record-failed|rollback confirm|0|safedeps could not record the bytes this install fetched from a registry that is not the public npm registry ("
-  "prose-fetched-elsewhere|confirm|0|this install fetched packages from a registry that is not the public npm registry ("
+  "prose-fetched-elsewhere|confirm|2|this install fetched packages from a registry that is not the public npm registry ("
 )
 oracle_prose_field() {
   local entry="$1" n="$2"
@@ -365,6 +365,21 @@ oracle_inert_holds() {
       return
     fi
   done
+}
+
+# The registry warning says safedeps cannot add --ignore-scripts on Codex only
+# for a Codex call, and of a Codex call that safedeps did not add it it says so.
+# It was said on either engine. The engine is read from the hook input in
+# Python.
+oracle_fetched_engine() {
+  local engine
+  engine=$(python3 "${ORACLE_READ}" engine "${O_CALL}/payload.json" 2>/dev/null) || engine=""
+  case "$1" in
+    *'. safedeps did not add --ignore-scripts to this install (on Codex it cannot), '*)
+      [[ "${engine}" == codex ]] || oracle_red "the warning says safedeps cannot add --ignore-scripts on Codex, of a ${engine:-unread} call" ;;
+    *'. safedeps did not add --ignore-scripts to this install, '*)
+      [[ "${engine}" == claude ]] || oracle_red "the warning leaves out that safedeps cannot add --ignore-scripts on Codex, of a ${engine:-unread} call" ;;
+  esac
 }
 
 # An --ignore-scripts line speaks from the pre-guard's record of this command,
@@ -869,6 +884,7 @@ oracle_line() {
     if [[ "${line:0:${#prose}}" == "${prose}" ]]; then
       [[ " $(oracle_prose_field "${entry}" 2) " == *" ${O_BLOCK} "* ]] || oracle_red "effect-gate prose in a block it is not said in (${O_BLOCK})"
       oracle_count "${entry%%|*}"
+      [[ "${entry%%|*}" != prose-fetched-elsewhere ]] || oracle_fetched_engine "${line}"
       return 0
     fi
   done

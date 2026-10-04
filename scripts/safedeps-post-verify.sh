@@ -1474,6 +1474,11 @@ POST_DIR_HASH=$(compute_dir_hash "${POST_CWD}")
 # This call's tool_use_id (lib/gates/call-id.sh), or empty when the input names
 # none. Claude Code sends the same one to PostToolUseFailure as to PostToolUse.
 CALL_ID=$(safedeps_call_id "${INPUT}") || CALL_ID=""
+# Which engine sent this call: Codex sends turn_id in the hook input and Claude
+# Code does not (the pre-guard reads it the same way). Only what this hook says
+# about an engine depends on it.
+POST_IS_CODEX=false
+jq -e 'has("turn_id")' <<< "${INPUT}" >/dev/null 2>&1 && POST_IS_CODEX=true
 
 STATE_LOCK_HELD=true
 acquire_state_lock
@@ -2314,7 +2319,8 @@ check_npm_new_sources() {
   # stay; their install scripts are what is withheld. On Claude Code the
   # rebuild check does that and says which registry (npm_rebuild_vouched).
   # Where safedeps did not add --ignore-scripts to the command this hook
-  # received (on Codex it cannot), the warning says so instead. Where npm
+  # received, the warning says so instead, and on Codex, where safedeps cannot
+  # rewrite a command, it says that too. Where npm
   # could not be asked, the rebuild check withholds the scripts as well, and
   # advisory.log already says why.
   if [[ -n "${fetched}" ]]; then
@@ -2334,20 +2340,23 @@ check_npm_new_sources() {
         # Left out only where the rollback line would say "added": the
         # record says safedeps wrote a command and this hook received exactly
         # it. That the record says safedeps rewrote a command is not enough:
-        # a record no call names can be another call's (an overlapping one,
-        # or one that never reached its post hook), and a Codex install of the
-        # same command without the flag then lost this warning while its
-        # scripts had run. The rebuild above still reads the record's own
-        # field; one reading of the record for all three is a later plan's.
+        # the command can have run as given, not as safedeps wrote it. The
+        # rebuild above still reads the record's own field; one reading of the
+        # record for all three is a later plan's.
         # Said only if the install is kept: a check after this one can still
         # roll it back, and "The install is kept" in a rollback message was
         # false (the report oracle allows this sentence in the kept message
         # only). It says what safedeps did, the inert line's own words, and
         # never what npm did: "unless the command said --ignore-scripts, their
         # install scripts already ran" was false under a function that turns
-        # the flag off and under an .npmrc that turns it on.
+        # the flag off and under an .npmrc that turns it on. "(on Codex it
+        # cannot)" is said of a Codex call only. On Claude Code the record
+        # says safedeps did not rewrite the command where the command's own
+        # words keep ignore-scripts true or the rewrite was downgraded, and
+        # the clause was said there too, of an engine that can rewrite.
         case "${inert_said}" in
-          'safedeps did not add --ignore-scripts to this install') inert_said+=" (on Codex it cannot)" ;;
+          'safedeps did not add --ignore-scripts to this install')
+            [[ "${POST_IS_CODEX}" != true ]] || inert_said+=" (on Codex it cannot)" ;;
           '') inert_said="safedeps has no record it can read of adding --ignore-scripts to this install" ;;
         esac
         CONFIRM_ONLY_WARNINGS+=("this install fetched packages from a registry that is not the public npm registry ($(name_sources "${fetched}")). ${inert_said}, so their install scripts may already have run. The install is kept; confirm with the user that they trust that registry${NPM_WITHHELD_RECORDED[0]:+. $(npm_withheld_scope)}")

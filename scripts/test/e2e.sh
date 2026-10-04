@@ -2460,6 +2460,64 @@ for inert_case in \
 done
 pass "the --ignore-scripts line is the pre-guard's record and a comparison of bytes, and reads no command"
 
+# The warning for packages npm fetched from a registry that is not the public
+# one says why safedeps did not add --ignore-scripts. "(on Codex it cannot)"
+# was said on either engine; it is said of a Codex call only. Each row's install
+# brings in the approved closure with a public `resolved` URL, and npm (the
+# stub) says it fetches from another registry, so the install is kept and the
+# warning is said. On Claude Code the command keeps ignore-scripts true itself,
+# so safedeps did not add the flag. The integrity values are this row's own: a
+# recorded integrity withholds a rebuild of those bytes in every later row.
+fetched_bin="${tmp_root}/fetched-bin"
+mkdir -p "${fetched_bin}"
+cat > "${fetched_bin}/npm" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$1" == query ]]; then
+  printf '%s\n' '[{"location":"","name":"fetched-project"},{"location":"node_modules/fixture-parent","name":"fixture-parent","version":"1.0.0"},{"location":"node_modules/fixture-child","name":"fixture-child","version":"1.0.0"}]'
+elif [[ "$1" == config ]]; then
+  printf '%s\n' '{"registry":"http://127.0.0.1:9/elsewhere/","replace-registry-host":"npmjs"}'
+fi
+exit 0
+EOF
+chmod +x "${fetched_bin}/npm"
+for fetched_engine in claude codex; do
+  fetched_wt="${tmp_root}/fetched-${fetched_engine}-wt"
+  grammar_project "${fetched_wt}"
+  printf '%s\n' '{"name":"fetched-project","lockfileVersion":3,"packages":{"":{"dependencies":{"fixture-parent":"1.0.0"}}}}' > "${fetched_wt}/package-lock.json"
+  if [[ "${fetched_engine}" == codex ]]; then
+    fetched_cmd="npm install fixture-parent@1.0.0"
+    grammar_pre_codex "${fetched_wt}" "${fetched_cmd}" "exec-fetched-${fetched_engine}" > /dev/null
+  else
+    fetched_cmd="npm install --ignore-scripts fixture-parent@1.0.0"
+    [[ -z "$(call_rewrite "$(grammar_pre "${fetched_wt}" "${fetched_cmd}" "toolu_fetched_${fetched_engine}")")" ]] \
+      || fail "fetched (${fetched_engine}): safedeps leaves a command that keeps ignore-scripts true as written"
+  fi
+  cat > "${fetched_wt}/package-lock.json" <<EOF
+{
+  "name": "fetched-project",
+  "lockfileVersion": 3,
+  "packages": {
+    "": {"dependencies": {"fixture-parent": "1.0.0"}},
+    "node_modules/fixture-parent": {"version": "1.0.0", "resolved": "https://registry.npmjs.org/fixture-parent/-/fixture-parent-1.0.0.tgz", "integrity": "sha512-fetched${fetched_engine}parent", "dependencies": {"fixture-child": "1.0.0"}},
+    "node_modules/fixture-child": {"version": "1.0.0", "resolved": "https://registry.npmjs.org/fixture-child/-/fixture-child-1.0.0.tgz", "integrity": "sha512-fetched${fetched_engine}child"}
+  }
+}
+EOF
+  if [[ "${fetched_engine}" == codex ]]; then
+    fetched_post=$(PATH="${fetched_bin}:${PATH}" grammar_post_codex "${fetched_wt}" "${fetched_cmd}" "exec-fetched-${fetched_engine}")
+    fetched_said='. safedeps did not add --ignore-scripts to this install (on Codex it cannot), so their install scripts may already have run. '
+  else
+    fetched_post=$(PATH="${fetched_bin}:${PATH}" grammar_post "${fetched_wt}" "${fetched_cmd}" "toolu_fetched_${fetched_engine}")
+    fetched_said='. safedeps did not add --ignore-scripts to this install, so their install scripts may already have run. '
+  fi
+  ! grep -q 'A rollback ran\.' <<< "${fetched_post}" || fail "fetched (${fetched_engine}): the install is kept (${fetched_post})"
+  grep -q '^this install fetched packages from a registry that is not the public npm registry (' <<< "$(post_message "${fetched_post}")" \
+    || fail "fetched (${fetched_engine}): the warning names the registry (${fetched_post})"
+  grep -qF "${fetched_said}" <<< "$(post_message "${fetched_post}")" \
+    || fail "fetched (${fetched_engine}): the warning says why safedeps did not add --ignore-scripts for this engine (${fetched_post})"
+done
+pass "the registry warning says safedeps cannot add --ignore-scripts on Codex only of a Codex call"
+
 # A node_modules that is a link is listed through the link, before the command
 # and in the rollback (F1, bamdori r16 LK1). The command writes a package into
 # the directory the link leads to and leaves both lockfiles alone: the listing
