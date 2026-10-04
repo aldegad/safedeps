@@ -811,7 +811,7 @@ Cost, `scripts/measure/scan-cost.sh` on the Linux VM (best of 5, load 0.03 to 7.
 
 `FOO="a b" pip install evil==6.6.6` passed with no verdict and no record, on v2.17.2 and on every branch of this release until it was found. So did the same install behind `FOO='a b'`, `FOO=$(printf x)`, a backtick, `FOO=a\ b`, `FOO=${BAR:-a b}` or `env FOO="a b"`. For the ecosystems the command gate is the authority for, that was a complete bypass. The prefix stripper read an assignment value as the bytes up to the first blank or quote, so any value with a blank in it kept its prefix in front of the install, and the install was never recognized. Assignment, `env`, `command` and `exec` prefixes are now read off the lexer, where a value is one word however it is quoted or nested. An install inside a substitution in a value is still read; an install named only in a quoted value is data.
 
-Beside a pipe, the same prefix produced the opposite error: `PIP_INDEX_URL=x pip install requests==2.0.0 && printf 'hi' | zsh -s`, with `requests` approved, was denied as an install piped into a shell. The blanking pass now steps over prefixes, takes the manager word only as a whole word, and blanks the install's own assignment names and plain values.
+Beside a pipe, the same prefix produced the opposite error on the integration branch, once the pipe check ran beside a visible install: `PIP_INDEX_URL=x pip install requests==2.0.0 && printf 'hi' | zsh -s`, with `requests` approved, was denied as an install piped into a shell. The blanking pass now steps over prefixes, takes the manager word only as a whole word, and blanks the install's own assignment names and plain values.
 
 ### The inert flag landed inside a comment
 
