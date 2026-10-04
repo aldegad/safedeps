@@ -3,7 +3,7 @@
 #
 # The oracle's green is a claim that no line the post hook printed is false or
 # outside the grammar. A check that cannot fail says nothing, so this script
-# makes it fail thirty-two ways: each mutation below puts into the hook the kind
+# makes it fail thirty-six ways: each mutation below puts into the hook the kind
 # of line review found by reading -- a clause behind a true fact, a claim with
 # no check, a line built outside the fact functions, a guessed cause, prose in
 # a rollback, a line only reorg.log carries, a line left out, a reorg.log entry
@@ -22,8 +22,13 @@
 # set aside with nothing said (NotObject), and a record with no project_dir
 # judged in the hook's own working directory with the record's hash
 # (NoDir, the code before the fix), and a record's dir_hash picking the
-# confirmed snapshot again (RecordHash, bamdori J) -- and
-# e2e must turn red on it, at the
+# confirmed snapshot again (RecordHash, bamdori J), a record found by the
+# directory and the command again for every call, so that one of two
+# overlapping calls takes the other's (KeyRecords, bamdori r19 X1), a call
+# whose own record is missing given another call's by that key
+# (IdFallsBackToKey), a record a pre-#5 pre-guard left read again (Legacy),
+# and the registry warning saying "(on Codex it cannot)" of a Claude Code call
+# again (CodexEverywhere) -- and e2e must turn red on it, at the
 # oracle, with the reason named here. Two of them (P2, R3) passed
 # the whole suite while the check was a list of forbidden words; seven more
 # (Prose to RefuseSilent, bamdori r16) passed the oracle before it read
@@ -34,9 +39,10 @@
 # files), mutated, run and thrown away. The unmutated copy runs first and must
 # be green, so a red below is the mutation's and not the machine's.
 #
-# Eight more mutations are not lines: they break the backstop's trace check,
-# which decides whether the backstop judges a command at all, and e2e must turn
-# red at the row named here rather than at the oracle. TraceNever finds no
+# Eight more mutations are not lines: seven break the backstop's trace check,
+# which decides whether the backstop judges a command at all, and one drops the
+# advisory.log line that says a call named no tool_use_id (NoIdSilent), and e2e
+# must turn red at the row named here rather than at the oracle. TraceNever finds no
 # trace in any baseline, and the install the pre-guard did not read is kept;
 # TraceAlways finds one in every baseline, and a grep rolls the project back;
 # WalkOff drops the walk of node_modules, and a write only there (bun, pnpm, a
@@ -48,12 +54,14 @@
 # through the link is kept (lumi r2 S1); AnySubsecond keeps the baseline where
 # any file of the node tree, rather than every one, keeps time below one
 # second, and a node_modules that keeps whole seconds is walked from a baseline
-# that is not set back (lumi r2 P3); EntryAfterRecord reads the trace entry
-# only where no record is found, the order before lumi r3 REC, and a call with
-# an entry is judged by another call's record whose snapshot is gone and rolls
-# the project back.
+# that is not set back (lumi r2 P3).
 #
-# This is forty-one e2e runs, so it is not part of `npm test`. Run it when a
+# EntryAfterRecord, which read the trace entry only where no record was found
+# (the order before lumi r3 REC), is retired: since records are bound to the
+# call, a call has its entry or its record and never both, so no row can tell
+# the two orders apart. KeyRecords is the defect it stood for.
+#
+# This is forty-five e2e runs, so it is not part of `npm test`. Run it when a
 # line the hook prints, a fact function, the oracle or the trace check changes.
 #
 #   scripts/test/report-mutations.sh            every mutation
@@ -68,7 +76,8 @@ trap 'rm -rf "${WORK}"' EXIT
 # must give, and the text to find and to put in its place. The text to find
 # occurs exactly once in the file, or the mutation is reported as not applying.
 MUTATIONS=(P2 R3 K Lie Bypass Head NoCheck Snap Cause Prose LogOnly Reasons Kept Silent JOmit RefuseSilent F1 F2 LogSilent F4 MarkOrig MarkSkip Unread Same Default Version XStr2 Gone Empty NotObject NoDir RecordHash
-  TraceNever TraceAlways WalkOff PullAlways Oldest LinkLstat AnySubsecond EntryAfterRecord)
+  KeyRecords IdFallsBackToKey Legacy CodexEverywhere
+  TraceNever TraceAlways WalkOff PullAlways Oldest LinkLstat AnySubsecond NoIdSilent)
 
 # A mutation can change a second file too (M_FILE2, M_OLD2, M_NEW2). M_AT is
 # where its red must show: the oracle, or (empty) any e2e row.
@@ -314,10 +323,10 @@ $4; node_modules was restored from the confirmed snapshot
       M_WHY='entries kept by project and command and the oldest one read, the rule before entries belonged to a call'
       M_AT=""
       M_RED='a grep after a failed grep and a pull: the backstop says nothing'
-      M_OLD='  base=$(safedeps_backstop_entry_base "${entry_dir}" "${id}") || return 0'
-      M_NEW='  base=$(safedeps_backstop_entry_base "${entry_dir}" "$(compute_pending_key "${dir_hash}" "${COMMAND}")_$$") || return 0'
+      M_OLD='  base=$(safedeps_call_base "${entry_dir}" "${id}") || return 0'
+      M_NEW='  base=$(safedeps_call_base "${entry_dir}" "$(compute_pending_key "${dir_hash}" "${COMMAND}")_$$") || return 0'
       M_FILE2=scripts/safedeps-post-verify.sh
-      M_OLD2='  if ! base=$(safedeps_backstop_entry_base "${GUARD_DIR}/pending/backstop" "${id}"); then'
+      M_OLD2='  if [[ -z "${CALL_ID}" ]] || ! base=$(safedeps_call_base "${GUARD_DIR}/pending/backstop" "${CALL_ID}"); then'
       M_NEW2='  if ! base=$(ls -tr "${GUARD_DIR}/pending/backstop/id-$(compute_pending_key "${POST_DIR_HASH}" "${COMMAND}")_"*.json 2>/dev/null | head -n 1 | sed '"'"'s/\.json$//'"'"' | grep .); then'
       ;;
     LinkLstat)
@@ -338,24 +347,6 @@ $4; node_modules was restored from the confirmed snapshot
       M_RED='a write into node_modules on a whole-second mount beside a subsecond lockfile'
       M_OLD='  if (( present > 0 && subsecond == present )) \'
       M_NEW='  if (( subsecond > 0 )) \'
-      ;;
-    EntryAfterRecord)
-      M_FILE=scripts/safedeps-post-verify.sh
-      M_WHY='the trace entry read only where no record is found, the order before lumi r3 REC'
-      M_AT=""
-      M_RED='REC-K: a call with a trace entry and the key of another call'"'"'s record whose snapshot is gone'
-      M_OLD='backstop_take_trace_entry
-
-# Resolve THIS install'"'"'s pending state'
-      M_NEW='# Resolve THIS install'"'"'s pending state'
-      M_FILE2=scripts/safedeps-post-verify.sh
-      M_OLD2='    DIR_HASH="${POST_DIR_HASH}"
-  else
-'
-      M_NEW2='    DIR_HASH="${POST_DIR_HASH}"
-    backstop_take_trace_entry
-  else
-'
       ;;
     WalkOff)
       M_FILE=scripts/safedeps-post-verify.sh
@@ -461,6 +452,56 @@ DIR_HASH=$(compute_dir_hash "${PROJECT_DIR}")
       M_NEW='fi
 [[ -n "${DIR_HASH:-}" ]] || DIR_HASH=$(compute_dir_hash "${PROJECT_DIR}")
 '
+      ;;
+    KeyRecords)
+      M_FILE=scripts/safedeps-pre-guard.sh
+      M_WHY='records kept and found by the directory and the command for every call, the rule before they were bound to the call'
+      M_RED="the hook consumed the record of the call 'toolu_ov1_a', and this call is 'exec-ov1-b'"
+      M_OLD='if [[ -n "${CALL_ID}" ]]; then
+  PENDING_BASE=$(safedeps_call_base'
+      M_NEW='if false; then
+  PENDING_BASE=$(safedeps_call_base'
+      M_FILE2=scripts/safedeps-post-verify.sh
+      M_OLD2='  if [[ -n "${CALL_ID}" ]]; then
+    PENDING_FILE='
+      M_NEW2='  if false; then
+    PENDING_FILE='
+      ;;
+    IdFallsBackToKey)
+      M_FILE=scripts/safedeps-post-verify.sh
+      M_WHY='a call whose own record is missing given the record found by the directory and the command'
+      M_RED="the hook consumed the record of the call '', and this call is 'toolu_ov2_b'"
+      M_OLD='    [[ -f "${PENDING_FILE}" ]] || PENDING_FILE=""'
+      M_NEW='    [[ -f "${PENDING_FILE}" ]] || PENDING_FILE=$(ls "${GUARD_DIR}/pending/$(compute_pending_key "${POST_DIR_HASH}" "${COMMAND}")__"*.json 2>/dev/null | head -n 1)'
+      ;;
+    Legacy)
+      M_FILE=scripts/safedeps-post-verify.sh
+      M_WHY='a record a pre-#5 pre-guard left read as this command'"'"'s again'
+      M_RED='the hook consumed a record a pre-#5 pre-guard left, which belongs to no call'
+      M_OLD='else
+  # No record for this call (PreToolUse never recognized it'
+      M_NEW='elif [[ -f "${GUARD_DIR}/current_snapshot_id" ]]; then
+  SNAPSHOT_ID=$(cat "${GUARD_DIR}/current_snapshot_id")
+  PROJECT_DIR=$(cat "${GUARD_DIR}/current_project_dir" 2>/dev/null || pwd)
+  RECORD_PATH="${GUARD_DIR}/current_snapshot_id"
+  rm -f "${GUARD_DIR}/current_snapshot_id" "${GUARD_DIR}/current_project_dir"
+else
+  # No record for this call (PreToolUse never recognized it'
+      ;;
+    CodexEverywhere)
+      M_FILE=scripts/safedeps-post-verify.sh
+      M_WHY='the registry warning says safedeps cannot add --ignore-scripts on Codex of a call from either engine, as it did in v2.18.0'
+      M_RED='the warning says safedeps cannot add --ignore-scripts on Codex, of a claude call'
+      M_OLD='            [[ "${POST_IS_CODEX}" != true ]] || inert_said+=" (on Codex it cannot)" ;;'
+      M_NEW='            inert_said+=" (on Codex it cannot)" ;;'
+      ;;
+    NoIdSilent)
+      M_FILE=scripts/safedeps-pre-guard.sh
+      M_WHY='a call that names no tool_use_id given the record kept by the directory and the command, with nothing said'
+      M_AT=""
+      M_RED='the pre-guard records that a call names no tool_use_id'
+      M_OLD='  log_advisory "pre-guard: ${CALL_ID_WHY}, so the record'
+      M_NEW='  : "pre-guard: ${CALL_ID_WHY}, so the record'
       ;;
     *) return 1 ;;
   esac

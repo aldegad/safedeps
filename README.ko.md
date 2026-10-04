@@ -189,19 +189,19 @@ ledger 게이트나 사전 비행 체크에 실패하면 해당 명령은 실행
 | `<path> exists` / `<path> does not exist` / `<path>/package.json has the key workspaces` | 롤백 뒤 프로젝트 루트에 있는 것입니다. safedeps 는 패키지를 재설치하지 않고, 재설치가 어디에 쓸지 판단하지 않습니다. 프로젝트 자신의 `node_modules` 만 지우고, 워크스페이스 멤버의 것은 지우지 않습니다. |
 | `The rollback changed nothing.` | 어떤 단계도 `cp` 나 `rm` 을 돌리지 않았습니다. 돌다가 실패한 단계는 바꾼 것이 없다고 하지 않습니다. `rm -rf` 는 지울 수 있는 것을 지운 뒤에 실패합니다. |
 | `no install trace in <dir>: ...` | 그 디렉터리의 npm lockfile 둘 다 명령 동안 바뀌지 않았습니다. 거기에는 이 설치의 흔적이 없습니다. |
-| `safedeps added --ignore-scripts to this install` | 이 훅이 쓴 pre-guard 기록이 safedeps 가 설치를 플래그를 달아 고쳐 썼다고 말하고, post 훅이 받은 명령이 바이트 하나 다르지 않게 그 기록에 담긴 명령입니다. 같은 명령의 두 호출이 같은 디렉터리에서 겹치거나 앞선 호출이 post 훅에 닿지 못한 경우가 아니라면 그 기록은 이 호출의 것입니다(아래). safedeps 가 쓴 명령에는 플래그가 실려 있었습니다. 명령이 스스로 `npm rebuild` 를 돌리면 설치 스크립트는 그래도 돕니다. rebuild 건너뜀 줄과 같습니다. |
-| `safedeps asked for --ignore-scripts on this install; the command this hook received is not the one safedeps wrote` | 이 훅이 쓴 pre-guard 기록이 safedeps 가 명령을 고쳐 썼다고 말하는데, post 훅은 다른 명령을 받았습니다. 같은 명령의 두 호출이 같은 디렉터리에서 겹치거나 앞선 호출이 post 훅에 닿지 못한 경우가 아니라면 그 기록은 이 호출의 것이고(아래), 그렇다면 런타임이 safedeps 가 쓴 그대로 돌리지 않았습니다. 설치의 스크립트가 돌았다고 보십시오. |
+| `safedeps added --ignore-scripts to this install` | 이 훅이 쓴 pre-guard 기록이 safedeps 가 설치를 플래그를 달아 고쳐 썼다고 말하고, post 훅이 받은 명령이 바이트 하나 다르지 않게 그 기록에 담긴 명령입니다. 그 기록은 이 호출 자신의 것입니다(아래). safedeps 가 쓴 명령에는 플래그가 실려 있었습니다. 명령이 스스로 `npm rebuild` 를 돌리면 설치 스크립트는 그래도 돕니다. rebuild 건너뜀 줄과 같습니다. |
+| `safedeps asked for --ignore-scripts on this install; the command this hook received is not the one safedeps wrote` | 이 훅이 쓴 pre-guard 기록이 safedeps 가 명령을 고쳐 썼다고 말하는데, post 훅은 다른 명령을 받았습니다. 런타임이 safedeps 가 쓴 그대로 돌리지 않은 것입니다. 설치의 스크립트가 돌았다고 보십시오. |
 | `safedeps did not add --ignore-scripts to this install` | 이 훅이 쓴 pre-guard 기록이 safedeps 가 명령을 고쳐 쓰지 않았다고 말합니다. Codex 에서는 할 수 없습니다. 기록을 쓰지 못한 pre-guard 는 명령을 고쳐 쓰지 않고, 그 사실을 `advisory.log` 에 남깁니다. 기록 파일이 없으면 줄을 내지 않습니다(아래). |
 | `... did not run npm rebuild: <fact>` | safedeps 는 프로젝트 루트의 `package.json`·lockfile·`node_modules` 가 링크가 아니고 이 설치의 흔적이 있는 디렉터리에서만 rebuild 합니다. 이 줄은 safedeps 가 한 일을 말합니다. 설치 스크립트가 돌았는지는 말하지 않습니다. 명령이 스스로 rebuild 했다면 스크립트는 이미 돌았습니다. |
 | `... ran npm rebuild: exit <n>` | safedeps 가 돌린 rebuild 가 그 종료 코드로 실패했습니다. |
 
 이 세 줄은 명령이 무엇을 다는지가 아니라 safedeps 가 한 일을 말합니다. safedeps 는 명령에서 플래그를 읽지 않습니다. "did not add" 는 설치 스크립트가 돌았는지 말하지 않습니다. 명령이 단어나 환경이나 `.npmrc` 로 스스로 플래그를 걸 수 있습니다. Codex 에서는 safedeps 가 플래그를 넣을 수 없습니다.
 
-세 줄은 모두 post 훅이 이 명령에 대한 pre-guard 의 기록을 찾았을 때만 나옵니다. backstop 의 롤백에는 셋 다 없습니다. backstop 은 post 훅이 그 기록을 찾지 못했거나, 찾은 기록이 가리키는 스냅샷에 meta 파일이 없거나, 찾은 기록이 스냅샷을 가리키지 않거나, 찾은 기록이 JSON 객체 하나가 아닐 때 돌고, 머리말이 어느 쪽인지 말합니다("this hook found no record of this command from before it ran", "this hook found a pre-guard record, and the snapshot it names has no meta file", "this hook found a pre-guard record, and the record names no snapshot", 또는 "this hook found a pre-guard record, and the record is not one JSON object"). 기록이 post 훅이 계산하지 않은 키 아래에 있을 수 있고, meta 파일이 없는 스냅샷이나 없는 스냅샷에는 고쳐 쓰기의 기록이 없으므로, backstop 은 safedeps 가 한 일을 말하지 않습니다.
+세 줄은 모두 post 훅이 이 명령에 대한 pre-guard 의 기록을 찾았을 때만 나옵니다. backstop 의 롤백에는 셋 다 없습니다. backstop 은 post 훅이 그 기록을 찾지 못했거나, 찾은 기록이 가리키는 스냅샷에 meta 파일이 없거나, 찾은 기록이 스냅샷을 가리키지 않거나, 찾은 기록이 JSON 객체 하나가 아닐 때 돌고, 머리말이 어느 쪽인지 말합니다("this hook found no record of this command from before it ran", "this hook found a pre-guard record, and the snapshot it names has no meta file", "this hook found a pre-guard record, and the record names no snapshot", 또는 "this hook found a pre-guard record, and the record is not one JSON object"). `tool_use_id` 를 적지 않은 호출이라면 기록이 post 훅이 계산하지 않은 키 아래에 있을 수 있고, meta 파일이 없는 스냅샷이나 없는 스냅샷에는 고쳐 쓰기의 기록이 없으므로, backstop 은 safedeps 가 한 일을 말하지 않습니다.
 
 줄은 기록이 밝힌 사실로만 냅니다. 기록에는 버전이 있고, 이 사실을 밝히는 것은 v2.18.0 부터 쓰는 버전 2 기록뿐입니다. 버전 2 기록에서 "safedeps 가 명령을 고쳐 쓰지 않았다" 는 값 false 이고, "고쳐 썼다" 는 값 true 와 safedeps 가 쓴 명령입니다. v2.17.2 기록에는 버전이 없고 둘 다 밝히지 않습니다. 그 false 는 고쳐 쓰지 않았다는 뜻이 아니었습니다. 기록 쓰기가 실패해도 고쳐 쓴 명령은 나갔기 때문입니다. 그 true 에는 비교할 명령이 없습니다. 그런 기록, 없는 기록, 두 사실 중 어느 것도 밝히지 않는 기록에는 세 줄 중 어느 것도 내지 않고, `advisory.log` 에 그 기록을 적습니다. post 훅이 읽지 못한 기록(JSON 객체 하나가 아닌 파일 등)에도 줄이 없고, `advisory.log` 에 읽지 못했다고 남깁니다. 예전에는 이 모양마다 기록에 없는 값으로 "did not add" 나 "asked" 를 냈고, 그 줄은 거짓일 수 있었습니다.
 
-**post 훅이 쓰는 기록은 호출이 아니라 명령이 돈 디렉터리와 명령으로 찾습니다.** 명령은 `--ignore-scripts` 와 공백을 빼고 비교합니다. 호출을 하나씩 차례로 돌리면 호출마다 자기 기록을 씁니다. 두 세션이 같은 디렉터리에서 같은 명령을 동시에 돌리거나, 그 명령의 앞선 호출이 post 훅에 닿지 못했으면, post 훅은 다른 호출의 기록을 쓸 수 있습니다. 앞선 호출은 pre-guard 가 통과시킨 뒤 거부되면, 그리고 Claude Code 에서는 실패하면 post 훅에 닿지 못합니다. Claude Code 는 도구 호출이 성공한 뒤에만 post 훅을 부르고, 실패한 호출은 safedeps 가 등록하지 않는 별도 이벤트로 갑니다. 그래서 Claude Code 에서 실패한 설치는 기록을 남기고, 같은 디렉터리의 같은 명령이 24시간 안에 그 기록을 씁니다. Codex 에서는 실패한 Bash 호출도 PostToolUse 에 닿습니다. 그러면 그 기록에서 나온 줄은 모두 다른 호출에 관한 것일 수 있습니다. 위의 세 줄, 스냅샷 줄의 `taken before this command`, `kept` 줄과 사유 줄의 명령 전 스냅샷, 설치 흔적 줄의 기준선이 그렇습니다. 확정 스냅샷이 없는 롤백은 그때 다른 호출의 스냅샷으로 되돌립니다. 기록이 스냅샷보다 오래 남을 수도 있습니다. 기록은 24시간 남고, 스냅샷 정리는 그보다 먼저 스냅샷을 지울 수 있습니다. 기록이 가리키는 스냅샷에 meta 파일이 없는 호출은 backstop 으로 가고, `advisory.log` 가 그 기록을 적습니다. 기록이 스냅샷을 가리키지 않는 호출도 그렇습니다. 손상된 기록만 그렇게 됩니다. 기록이 JSON 객체 하나가 아닌 호출도 그렇습니다. v2.18.0 전에는 post 훅이 앞의 두 곳에서 아무 말 없이 멈췄고 설치를 검사하지 않았습니다. 세 번째는 그 명령을 부를 때마다 24시간 동안 훅을 오류로 끝냈습니다. 프로젝트 디렉터리를 적지 않은 기록은 훅 자신의 작업 디렉터리가 아니라 명령이 돈 디렉터리에서 판정합니다. 확정 스냅샷으로의 롤백은 손상된 기록이 무엇을 적었든 늘 판정하는 디렉터리의 확정 스냅샷을 씁니다. 테스트는 호출을 하나씩 돌리므로 겹치는 경우를 검사하지 않습니다. 기록을 각자의 호출에 묶는 일은 다음 릴리스에서 할 예정입니다.
+**post 훅이 쓰는 기록은 자기 호출의 기록입니다.** pre-guard 는 설치의 기록을 호출의 `tool_use_id` 아래에 둡니다. 한 호출의 두 훅이 모두 받고 다른 호출은 받지 않는 값입니다. post 훅은 그 기록만 읽습니다. 두 세션이 같은 디렉터리에서 같은 명령을 동시에 돌려도 post 훅마다 자기 호출의 기록을 씁니다. pre-guard 가 통과시킨 뒤 거부된 호출은 post 훅이 돌지 않고, 그 기록은 24시간 정리를 기다립니다. 뒤의 어느 호출도 그 기록을 읽지 않습니다. v2.18.1 전에는 기록을 명령이 돈 디렉터리와 명령으로 찾았고, 두 경우 모두 post 훅이 다른 호출의 기록을 쓸 수 있었습니다. 그 기록에서 나온 줄은 모두 다른 호출에 관한 것일 수 있었고, 확정 스냅샷이 없는 롤백은 다른 호출의 스냅샷으로 되돌려 두 호출 사이에 고친 내용이 사라졌습니다. `tool_use_id` 를 적지 않은 훅 입력은 지금도 그렇게 맞추고, `advisory.log` 가 그 사실을 적습니다. Claude Code 와 Codex 는 둘 다 그 값을 보냅니다. 실패한 호출도 판정합니다. Claude Code 는 실행된 뒤 실패한 Bash 호출에 `PostToolUse` 가 아니라 `PostToolUseFailure` 를 부르고, 설치기는 post 훅을 둘 다에 등록합니다. 그래서 실패한 설치도 다른 설치처럼 검사하고, 기록을 남기지 않습니다. Codex 는 실패한 Bash 호출에도 `PostToolUse` 를 부릅니다. 설치마다 기록을 두기 전의 pre-guard 가 기기에 하나 남기던 기록(`current_state`, `current_snapshot_id`)은 어느 호출도 가리키지 않으므로 읽지 않습니다. 기록이 스냅샷보다 오래 남을 수도 있습니다. 기록은 24시간 남고, 스냅샷 정리는 그보다 먼저 스냅샷을 지울 수 있습니다. 기록이 가리키는 스냅샷에 meta 파일이 없는 호출은 backstop 으로 가고, `advisory.log` 가 그 기록을 적습니다. 기록이 스냅샷을 가리키지 않는 호출도 그렇습니다. 손상된 기록만 그렇게 됩니다. 기록이 JSON 객체 하나가 아닌 호출도 그렇습니다. v2.18.0 전에는 post 훅이 앞의 두 곳에서 아무 말 없이 멈췄고 설치를 검사하지 않았습니다. 세 번째는 그 명령을 부를 때마다 24시간 동안 훅을 오류로 끝냈습니다. 프로젝트 디렉터리를 적지 않은 기록은 훅 자신의 작업 디렉터리가 아니라 명령이 돈 디렉터리에서 판정합니다. 확정 스냅샷으로의 롤백은 손상된 기록이 무엇을 적었든 늘 판정하는 디렉터리의 확정 스냅샷을 씁니다. 테스트는 같은 명령의 겹치는 두 호출을 엔진마다 하나씩 돌려, 각자 자기 기록으로 말하는지 검사합니다.
 
 끝나지 않은 롤백의 보고도 같은 모양입니다. 그 `Rollback snapshot:` 줄은 보고를 쓰는 시점에 프로젝트의 confirmed 기록이 그 스냅샷을 가리키는지를 롤백 메시지처럼 말합니다. `Owner:` 는 그 프로세스가 일하고 있지 않다는 것을 보인 검사입니다. 돌고 있지 않거나, 좀비이거나, 그 pid 가 나중에 시작한 다른 프로세스의 것이거나, 멈춰 있습니다. 멈춘 프로세스는 죽지 않았습니다. 프로세스를 다시 이어 주면 롤백도 이어지므로, 프로젝트를 고치기 전에 그 프로세스를 어떻게 할지 먼저 정하십시오. `Checked at the time of this report` 아래에는 `node_modules` 가 무엇인지와, 감시 대상 파일 가운데 스냅샷과 다른 것만 적힙니다. 그 파일들을 확인한 뒤에 재설치하십시오.
 
@@ -359,10 +359,24 @@ node scripts/install/install-safedeps-hooks.mjs
           }
         ]
       }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/skills/safedeps/scripts/safedeps-hook-entry.sh post",
+            "timeout": 30
+          }
+        ]
+      }
     ]
   }
 }
 ```
+
+Claude Code 는 실행된 뒤 실패한 Bash 호출에 `PostToolUse` 가 아니라 `PostToolUseFailure` 를 부르므로, post 훅은 둘 다에 등록합니다. 실패한 설치도 프로젝트의 트리에 썼을 수 있기 때문입니다. Codex 는 실패한 호출에도 `PostToolUse` 를 부르고 `PostToolUseFailure` 는 문서에 없으므로, Codex 설정에는 `PreToolUse` 와 `PostToolUse` 만 들어갑니다.
 
 **4. 실행 권한 확인:**
 

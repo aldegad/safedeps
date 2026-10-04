@@ -1286,8 +1286,17 @@ grammar_pre() {
 EOF
 }
 grammar_pre_codex() {
+  local id_field=""
+  [[ -z "${3:-}" ]] || id_field=",\"tool_use_id\":\"$3\""
   pre_hook <<EOF
-{"tool_name":"Bash","tool_input":{"command":"$2"},"cwd":"$1","turn_id":"turn-e2e","model":"codex-test"}
+{"tool_name":"Bash","tool_input":{"command":"$2"},"cwd":"$1","turn_id":"turn-e2e","model":"codex-test"${id_field}}
+EOF
+}
+grammar_post_codex() {
+  local id_field=""
+  [[ -z "${3:-}" ]] || id_field=",\"tool_use_id\":\"$3\""
+  post_hook <<EOF
+{"tool_name":"Bash","tool_input":{"command":"$2"},"cwd":"$1","turn_id":"turn-e2e","model":"codex-test"${id_field}}
 EOF
 }
 grammar_post() {
@@ -1613,8 +1622,7 @@ cmp -s "${gone_c_wt}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || f
 pass "a record whose snapshot has no meta file goes to the backstop, which rolls back to a confirmed snapshot"
 
 # A record that names no snapshot. The pre-guard always writes one, so an empty
-# id is a damaged pending state or an empty legacy current_snapshot_id. The
-# post hook used to exit there with nothing said, as it did for a missing meta.
+# id is a damaged pending state. The post hook used to exit there with nothing said, as it did for a missing meta.
 # Now advisory.log names the record, the record is set aside, and the backstop
 # judges the command, with a head that says the record was found and names no
 # snapshot. The oracle holds the advisory line once per such call and each
@@ -1648,22 +1656,23 @@ cmp -s "${empty_wt}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fa
   || fail "D: the backstop counts the command as traced for the record"
 pass "a pending state that names no snapshot goes to the backstop, which rolls back to a confirmed snapshot"
 
-# E: the legacy record a pre-#5 pre-guard left, which the post hook still
-# reads: an empty current_snapshot_id for this project, an unapproved
-# lockfile, and no confirmed snapshot. The backstop flags the install.
+# E: a record a pre-#5 pre-guard left, an empty current_snapshot_id for this
+# project, with an unapproved lockfile and no confirmed snapshot. No current
+# pre-guard writes it, and it names no call. It was read as this command's
+# record, and a call it did not match ended the hook with no judgment ("SKIP
+# ... bounded no-op"). It is not read now: the backstop judges the install as
+# one with no record, and the file stays.
 legacy_wt=$(mktemp -d "${tmp_root}/legacy-wt.XXXXXX")
 grammar_project "${legacy_wt}"
 : > "${SAFEDEPS_HOME}/current_snapshot_id"
 printf '%s\n' "$(cd -P "${legacy_wt}" && pwd -P)" > "${SAFEDEPS_HOME}/current_project_dir"
-legacy_line=$(empty_line_of "${SAFEDEPS_HOME}/current_snapshot_id")
 printf '%s\n' "${tampered_lock}" > "${legacy_wt}/package-lock.json"
 legacy_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${legacy_wt}" "npm install fixture-parent@1.0.0")
-grep -qx 'safedeps: suspicious dependency change detected; this hook found a pre-guard record, and the record names no snapshot. No rollback ran.' <<< "$(post_message "${legacy_post}")" \
-  || fail "E: the backstop flags the unapproved lockfile, and says the record was found and names no snapshot (${legacy_post})"
-[[ "$(grep -cF "${legacy_line}" "${SAFEDEPS_HOME}/advisory.log")" == 1 ]] \
-  || fail "E: advisory.log names the legacy record that names no snapshot once"
-[[ ! -e "${SAFEDEPS_HOME}/current_snapshot_id" && ! -e "${SAFEDEPS_HOME}/current_project_dir" ]] || fail "E: the legacy record is set aside"
-pass "an empty legacy current_snapshot_id goes to the backstop, which flags an unapproved lockfile"
+grep -qx 'safedeps: suspicious dependency change detected; this hook found no record of this command from before it ran. No rollback ran.' <<< "$(post_message "${legacy_post}")" \
+  || fail "E: the backstop flags the unapproved lockfile, and says it found no record (${legacy_post})"
+[[ -e "${SAFEDEPS_HOME}/current_snapshot_id" && -e "${SAFEDEPS_HOME}/current_project_dir" ]] || fail "E: the legacy record stays"
+rm -f "${SAFEDEPS_HOME}/current_snapshot_id" "${SAFEDEPS_HOME}/current_project_dir"
+pass "a record a pre-#5 pre-guard left is not read, and the backstop judges the install"
 
 # F: a record with no project_dir, and a hook whose own working directory is
 # another project with an unapproved lockfile. The hook judged and rolled back
@@ -2045,7 +2054,9 @@ grep -qF "post-verify BACKSTOP traced: $(cd -P "${bs_ttl_wt}" && pwd -P)/node_mo
 pass "after the ledger expired, a git log rolls nothing back and a write into node_modules rolls back"
 
 # A call whose post hook never ran: Claude Code runs no PostToolUse for a Bash
-# call that ended in an error, so its entry stays (lumi r1 P1). It is that
+# call that ended in an error, and runs nothing at all where PostToolUseFailure
+# is not registered or for a call the user denied, so its entry stays (lumi r1
+# P1). It is that
 # call's, and the next call reads only its own: a pull and a grep after it is
 # untraced, and the failed call's entry is still there for the age sweep.
 bs_p1_wt="${tmp_root}/bs-p1-wt"
@@ -2144,6 +2155,165 @@ bs_noid_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${bs_noid_wt}" "${bs_gre
 bs_assert_rollback "${bs_noid_wt}" "${bs_noid_post}" "a grep with no tool_use_id" \
   "this hook's input names no tool_use_id, so no trace entry belongs to this call"
 pass "a call with no tool_use_id is judged as before: a trace"
+
+# --- Records bound to the call ---------------------------------------------
+#
+# The pre-guard keeps the record of an install under the call's tool_use_id,
+# which both hooks of one call receive and no other call does, and the post
+# hook of a call that names one reads that record and no other. Records used to
+# be found by the directory and the command (issue #5), so a call could speak
+# from another call's record. A search by that key takes the first record in
+# name order, and a record's name starts with its second, so where a row needs
+# the other call's record to be the one a search by key finds first, that call
+# runs a second earlier.
+call_rewrite() { jq -r '.hookSpecificOutput.updatedInput.command // empty' <<< "${1:-{\}}"; }
+call_record() { printf '%s/pending/id-%s.json' "${2:-${SAFEDEPS_HOME}}" "$1"; }
+call_records_of() { { grep -lF "\"$(cd -P "$1" && pwd -P)\"" "${SAFEDEPS_HOME}/pending"/*.json 2>/dev/null || true; } | wc -l | tr -d ' '; }
+
+# OV1 (bamdori r19 X1): two overlapping calls of one install in one project.
+# A is a Claude Code call that safedeps rewrote; B is a Codex call that sends
+# the command A was rewritten to, so both have one key. B's post hook runs
+# first. Found by the key, B took A's record and said "added" of a Codex
+# install, and A then took B's and said "did not add" of the command safedeps
+# wrote.
+ov1_wt="${tmp_root}/ov1-wt"
+grammar_project "${ov1_wt}"
+ov1_pre=$(grammar_pre "${ov1_wt}" "npm install fixture-parent@1.0.0" toolu_ov1_a)
+ov1_cmd=$(call_rewrite "${ov1_pre}")
+[[ "${ov1_cmd}" == *--ignore-scripts* ]] || fail "OV1: the pre-guard rewrites A (${ov1_pre})"
+sleep 1
+grammar_pre_codex "${ov1_wt}" "${ov1_cmd}" exec-ov1-b > /dev/null
+[[ "$(call_records_of "${ov1_wt}")" == 2 ]] || fail "OV1: the two calls leave a record each"
+printf '%s\n' "${tampered_lock}" > "${ov1_wt}/package-lock.json"
+ov1_b_post=$(PATH="${stub_bin}:${PATH}" grammar_post_codex "${ov1_wt}" "${ov1_cmd}" exec-ov1-b)
+grep -qx 'safedeps did not add --ignore-scripts to this install' <<< "$(post_message "${ov1_b_post}")" \
+  || fail "OV1: the Codex call B speaks from its own record: safedeps did not add the flag (${ov1_b_post})"
+[[ ! -e "$(call_record exec-ov1-b)" && -f "$(call_record toolu_ov1_a)" ]] \
+  || fail "OV1: B's post hook takes B's record and leaves A's"
+printf '%s\n' "${tampered_lock}" > "${ov1_wt}/package-lock.json"
+ov1_a_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${ov1_wt}" "${ov1_cmd}" toolu_ov1_a)
+grep -qx 'safedeps added --ignore-scripts to this install' <<< "$(post_message "${ov1_a_post}")" \
+  || fail "OV1: the Claude Code call A speaks from its own record: safedeps added the flag (${ov1_a_post})"
+[[ ! -e "$(call_record toolu_ov1_a)" ]] || fail "OV1: A's post hook takes A's record"
+pass "two overlapping calls of one install each speak from their own record"
+
+# OV2: a call that names a tool_use_id and has no record of its own (its
+# pre-guard did not run, as when the hooks were registered mid-call) does not
+# take the record of a call that named none. It goes to the backstop, as a
+# command with no record does.
+ov2_wt="${tmp_root}/ov2-wt"
+grammar_project "${ov2_wt}"
+grammar_pre "${ov2_wt}" "npm install fixture-parent@1.0.0" > /dev/null
+ov2_record=$(grammar_pending "${ov2_wt}")
+printf '%s\n' "${tampered_lock}" > "${ov2_wt}/package-lock.json"
+ov2_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${ov2_wt}" "npm install fixture-parent@1.0.0" toolu_ov2_b)
+grep -q 'this hook found no record of this command from before it ran\.' <<< "$(post_message "${ov2_post}")" \
+  || fail "OV2: a call with no record of its own goes to the backstop (${ov2_post})"
+[[ -n "${ov2_record}" && -f "${ov2_record}" ]] || fail "OV2: the other call's record stays"
+rm -f "${ov2_record}" "${ov2_record%.json}.trace"
+pass "a call that names a tool_use_id does not take the record of a call that named none"
+
+# O2 (bamdori r18): a call whose post hook never ran (a tool call the user
+# rejected after its pre-guard ran) leaves its record. The user edits
+# package.json, and the next call of the same command is rolled back. Found by
+# the key, that call took the old record and restored the snapshot from before
+# the edit, so the edit was lost.
+o2_wt="${tmp_root}/o2-wt"
+grammar_project "${o2_wt}"
+grammar_pre "${o2_wt}" "npm install fixture-parent@1.0.0" toolu_o2_rejected > /dev/null
+sleep 1
+jq '.description = "edited by the user"' "${o2_wt}/package.json" > "${o2_wt}/package.json.edit" \
+  && mv "${o2_wt}/package.json.edit" "${o2_wt}/package.json"
+o2_cmd=$(call_rewrite "$(grammar_pre "${o2_wt}" "npm install fixture-parent@1.0.0" toolu_o2)")
+printf '%s\n' "${tampered_lock}" > "${o2_wt}/package-lock.json"
+o2_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${o2_wt}" "${o2_cmd}" toolu_o2)
+grep -q 'A rollback ran\.' <<< "${o2_post}" || fail "O2: the unapproved lockfile is rolled back (${o2_post})"
+[[ "$(jq -r '.description // empty' "${o2_wt}/package.json")" == 'edited by the user' ]] \
+  || fail "O2: the rollback keeps the edit made after the rejected call ($(cat "${o2_wt}/package.json"))"
+[[ -f "$(call_record toolu_o2_rejected)" ]] || fail "O2: the rejected call's record stays for the age sweep"
+rm -f "$(call_record toolu_o2_rejected)" "${SAFEDEPS_HOME}/pending/id-toolu_o2_rejected.trace"
+pass "a call is not judged by the record of a call whose post hook never ran"
+
+# MM (lumi r4): this call's own trace entry, taken in another directory than
+# the one its post hook is given, and in that directory the record of an
+# install with the same key (from a call that named no tool_use_id) whose
+# snapshot is gone. The entry was set aside and the call went on to the
+# records, where that record judged it. A call with an entry reads no record:
+# it counts as traced, and the backstop judges it with no record.
+mm_parent="${tmp_root}/mm-wt"
+mm_wt="${mm_parent}/sub"
+bs_project "${mm_parent}"
+grammar_project "${mm_wt}"
+grammar_pre "${mm_wt}" 'FOO=a\\  npm install fixture-parent@1.0.0' > /dev/null
+mm_record=$(grammar_pending "${mm_wt}")
+rm -f "$(gone_meta_of "${mm_record}")"
+grammar_pre "${mm_parent}" 'FOO=a\\ npm install fixture-parent@1.0.0' toolu_mm > /dev/null
+[[ -f "$(bs_entry toolu_mm)" ]] || fail "MM: the pre-guard leaves the call a trace entry"
+mm_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${mm_wt}" 'FOO=a\\ npm install fixture-parent@1.0.0' toolu_mm)
+! grep -q 'this hook found a pre-guard record' <<< "${mm_post}" \
+  || fail "MM: a call with a trace entry is not judged by another call's record (${mm_post})"
+[[ -f "${mm_record}" ]] || fail "MM: the other call's record stays"
+grep -qF "the trace entry for this call was taken for another directory or command" "${SAFEDEPS_HOME}/advisory.log" \
+  || fail "MM: advisory.log says the entry was taken for another directory"
+rm -f "${mm_record}" "${mm_record%.json}.trace"
+pass "a call whose trace entry was taken in another directory reads no record"
+
+# A call that names no tool_use_id keeps the key from before, and both hooks
+# say so in advisory.log: two overlapping calls of its command can still use
+# each other's record.
+noid_wt="${tmp_root}/noid-wt"
+grammar_project "${noid_wt}"
+noid_cmd=$(call_rewrite "$(grammar_pre "${noid_wt}" "npm install fixture-parent@1.0.0")")
+noid_record=$(grammar_pending "${noid_wt}")
+[[ "${noid_record##*/}" == *__*.json ]] || fail "a call with no tool_use_id keeps its record under the directory and the command (${noid_record})"
+grep -qF "pre-guard: this hook's input names no tool_use_id, so the record of this install is kept under its directory and command" "${SAFEDEPS_HOME}/advisory.log" \
+  || fail "the pre-guard records that a call names no tool_use_id"
+touch "${noid_wt}/package-lock.json"
+noid_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${noid_wt}" "${noid_cmd}")
+[[ -z "${noid_post}" && ! -e "${noid_record}" ]] || fail "a call with no tool_use_id is judged from the record found by the key (${noid_post})"
+grep -qF "post-verify: this hook's input names no tool_use_id, so it took the record ${noid_record} by the directory and the command" "${SAFEDEPS_HOME}/advisory.log" \
+  || fail "the post hook records that it took a record by the key"
+pass "a call with no tool_use_id is judged as before, and both hooks record it"
+
+# A failed install. Claude Code runs PostToolUseFailure for a Bash call that ran
+# and failed, with the call's tool_use_id and an `error` where a success has
+# `tool_response`; Codex runs PostToolUse, with its turn_id. An install that
+# fails can still have written the project's tree, and before
+# PostToolUseFailure was registered Claude Code ran no post hook for it: the
+# install was not judged, and its record stayed for the next call of the
+# command. Here each failed install wrote an unapproved lockfile, is judged
+# and rolled back, and leaves no record.
+fail_post_claude() {
+  post_hook <<EOF
+{"session_id":"e2e","hook_event_name":"PostToolUseFailure","tool_name":"Bash","tool_input":{"command":"$2"},"cwd":"$1","tool_use_id":"$3","error":"Exit code 1\\nnpm error code E404","is_interrupt":false}
+EOF
+}
+fail_post_codex() {
+  post_hook <<EOF
+{"hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":{"command":"$2"},"cwd":"$1","tool_use_id":"$3","turn_id":"turn-e2e","model":"codex-test","tool_response":"npm error code E404\\nExit code: 1"}
+EOF
+}
+fa_claude_wt="${tmp_root}/fa-claude-wt"
+grammar_project "${fa_claude_wt}"
+fa_claude_cmd=$(call_rewrite "$(grammar_pre "${fa_claude_wt}" "npm install fixture-parent@1.0.0" toolu_fa_claude)")
+[[ -f "$(call_record toolu_fa_claude)" ]] || fail "a failed install on Claude Code: the pre-guard leaves its record"
+printf '%s\n' "${tampered_lock}" > "${fa_claude_wt}/package-lock.json"
+fa_claude_post=$(PATH="${stub_bin}:${PATH}" fail_post_claude "${fa_claude_wt}" "${fa_claude_cmd}" toolu_fa_claude)
+grep -q 'A rollback ran\.' <<< "${fa_claude_post}" || fail "a failed install on Claude Code is judged and rolled back (${fa_claude_post})"
+grep -qx 'safedeps added --ignore-scripts to this install' <<< "$(post_message "${fa_claude_post}")" \
+  || fail "a failed install on Claude Code speaks from its own record"
+[[ ! -e "$(call_record toolu_fa_claude)" && "$(call_records_of "${fa_claude_wt}")" == 0 ]] \
+  || fail "a failed install on Claude Code leaves no record"
+fa_codex_wt="${tmp_root}/fa-codex-wt"
+grammar_project "${fa_codex_wt}"
+grammar_pre_codex "${fa_codex_wt}" "npm install fixture-parent@1.0.0" exec-fa-codex > /dev/null
+printf '%s\n' "${tampered_lock}" > "${fa_codex_wt}/package-lock.json"
+fa_codex_post=$(PATH="${stub_bin}:${PATH}" fail_post_codex "${fa_codex_wt}" "npm install fixture-parent@1.0.0" exec-fa-codex)
+grep -q 'A rollback ran\.' <<< "${fa_codex_post}" || fail "a failed install on Codex is judged and rolled back (${fa_codex_post})"
+grep -qx 'safedeps did not add --ignore-scripts to this install' <<< "$(post_message "${fa_codex_post}")" \
+  || fail "a failed install on Codex speaks from its own record"
+[[ "$(call_records_of "${fa_codex_wt}")" == 0 ]] || fail "a failed install on Codex leaves no record"
+pass "a failed install is judged and leaves no record, on both engines"
 
 # A filesystem that keeps whole seconds, simulated: a touch that drops the part
 # below the second. A write in the second the baseline is touched in would not
@@ -2284,11 +2454,73 @@ for inert_case in \
        [[ "${inert_received}" == *--ignore-scripts* ]] || fail "${inert_name}: the pre-guard rewrites the command on Claude (${inert_pre})" ;;
   esac
   printf '%s\n' "${tampered_lock}" > "${inert_wt}/package-lock.json"
-  inert_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${inert_wt}" "${inert_received}")
+  if [[ "${inert_engine}" == codex ]]; then
+    inert_post=$(PATH="${stub_bin}:${PATH}" grammar_post_codex "${inert_wt}" "${inert_received}")
+  else
+    inert_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${inert_wt}" "${inert_received}")
+  fi
   grep -qxF "${inert_said}" <<< "$(post_message "${inert_post}")" \
     || fail "${inert_engine} ${inert_name}: the --ignore-scripts line says '${inert_said}' (${inert_post})"
 done
 pass "the --ignore-scripts line is the pre-guard's record and a comparison of bytes, and reads no command"
+
+# The warning for packages npm fetched from a registry that is not the public
+# one says why safedeps did not add --ignore-scripts. "(on Codex it cannot)"
+# was said on either engine; it is said of a Codex call only. Each row's install
+# brings in the approved closure with a public `resolved` URL, and npm (the
+# stub) says it fetches from another registry, so the install is kept and the
+# warning is said. On Claude Code the command keeps ignore-scripts true itself,
+# so safedeps did not add the flag. The integrity values are this row's own: a
+# recorded integrity withholds a rebuild of those bytes in every later row.
+fetched_bin="${tmp_root}/fetched-bin"
+mkdir -p "${fetched_bin}"
+cat > "${fetched_bin}/npm" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$1" == query ]]; then
+  printf '%s\n' '[{"location":"","name":"fetched-project"},{"location":"node_modules/fixture-parent","name":"fixture-parent","version":"1.0.0"},{"location":"node_modules/fixture-child","name":"fixture-child","version":"1.0.0"}]'
+elif [[ "$1" == config ]]; then
+  printf '%s\n' '{"registry":"http://127.0.0.1:9/elsewhere/","replace-registry-host":"npmjs"}'
+fi
+exit 0
+EOF
+chmod +x "${fetched_bin}/npm"
+for fetched_engine in claude codex; do
+  fetched_wt="${tmp_root}/fetched-${fetched_engine}-wt"
+  grammar_project "${fetched_wt}"
+  printf '%s\n' '{"name":"fetched-project","lockfileVersion":3,"packages":{"":{"dependencies":{"fixture-parent":"1.0.0"}}}}' > "${fetched_wt}/package-lock.json"
+  if [[ "${fetched_engine}" == codex ]]; then
+    fetched_cmd="npm install fixture-parent@1.0.0"
+    grammar_pre_codex "${fetched_wt}" "${fetched_cmd}" "exec-fetched-${fetched_engine}" > /dev/null
+  else
+    fetched_cmd="npm install --ignore-scripts fixture-parent@1.0.0"
+    [[ -z "$(call_rewrite "$(grammar_pre "${fetched_wt}" "${fetched_cmd}" "toolu_fetched_${fetched_engine}")")" ]] \
+      || fail "fetched (${fetched_engine}): safedeps leaves a command that keeps ignore-scripts true as written"
+  fi
+  cat > "${fetched_wt}/package-lock.json" <<EOF
+{
+  "name": "fetched-project",
+  "lockfileVersion": 3,
+  "packages": {
+    "": {"dependencies": {"fixture-parent": "1.0.0"}},
+    "node_modules/fixture-parent": {"version": "1.0.0", "resolved": "https://registry.npmjs.org/fixture-parent/-/fixture-parent-1.0.0.tgz", "integrity": "sha512-fetched${fetched_engine}parent", "dependencies": {"fixture-child": "1.0.0"}},
+    "node_modules/fixture-child": {"version": "1.0.0", "resolved": "https://registry.npmjs.org/fixture-child/-/fixture-child-1.0.0.tgz", "integrity": "sha512-fetched${fetched_engine}child"}
+  }
+}
+EOF
+  if [[ "${fetched_engine}" == codex ]]; then
+    fetched_post=$(PATH="${fetched_bin}:${PATH}" grammar_post_codex "${fetched_wt}" "${fetched_cmd}" "exec-fetched-${fetched_engine}")
+    fetched_said='. safedeps did not add --ignore-scripts to this install (on Codex it cannot), so their install scripts may already have run. '
+  else
+    fetched_post=$(PATH="${fetched_bin}:${PATH}" grammar_post "${fetched_wt}" "${fetched_cmd}" "toolu_fetched_${fetched_engine}")
+    fetched_said='. safedeps did not add --ignore-scripts to this install, so their install scripts may already have run. '
+  fi
+  ! grep -q 'A rollback ran\.' <<< "${fetched_post}" || fail "fetched (${fetched_engine}): the install is kept (${fetched_post})"
+  grep -q '^this install fetched packages from a registry that is not the public npm registry (' <<< "$(post_message "${fetched_post}")" \
+    || fail "fetched (${fetched_engine}): the warning names the registry (${fetched_post})"
+  grep -qF "${fetched_said}" <<< "$(post_message "${fetched_post}")" \
+    || fail "fetched (${fetched_engine}): the warning says why safedeps did not add --ignore-scripts for this engine (${fetched_post})"
+done
+pass "the registry warning says safedeps cannot add --ignore-scripts on Codex only of a Codex call"
 
 # A node_modules that is a link is listed through the link, before the command
 # and in the rollback (F1, bamdori r16 LK1). The command writes a package into
@@ -2781,6 +3013,14 @@ jq -e --arg pre "~/.codex/skills/safedeps/scripts/safedeps-hook-entry.sh pre" '
 jq -e --arg post "~/.codex/skills/safedeps/scripts/safedeps-hook-entry.sh post" '
   [.hooks.PostToolUse[]?.hooks[]?.command] | index($post)
 ' "${installer_home}/.codex/hooks.json" >/dev/null || fail "installer writes codex post hook"
+# Claude Code runs PostToolUseFailure, not PostToolUse, after a Bash call that
+# ran and failed, so the post hook is registered there too; Codex runs
+# PostToolUse after a failed Bash call and documents no PostToolUseFailure.
+jq -e --arg post "~/.claude/skills/safedeps/scripts/safedeps-hook-entry.sh post" '
+  [.hooks.PostToolUseFailure[]? | select(.matcher == "Bash") | .hooks[]? | select(.command == $post and .timeout == 30)] | length == 1
+' "${installer_home}/.claude/settings.json" >/dev/null || fail "installer writes the claude post hook for PostToolUseFailure"
+jq -e '.hooks | has("PostToolUseFailure") | not' "${installer_home}/.codex/hooks.json" >/dev/null \
+  || fail "installer writes no PostToolUseFailure hook for codex"
 jq -e '
   [.hooks.PreToolUse[]?, .hooks.PostToolUse[]? | select(.matcher == "Bash") | .hooks[]? | select(.command | contains("/safedeps/")) | .timeout] | all(. == 30)
 ' "${installer_home}/.claude/settings.json" >/dev/null || fail "installer writes claude safedeps hook timeouts"
@@ -2801,6 +3041,28 @@ jq -e '
 ' "${installer_backfill_home}/.codex/hooks.json" >/dev/null || fail "installer backfills existing codex safedeps hook timeouts"
 pass "installer legacy cleanup and hook timeout backfill"
 
+# The installer twice registers each hook once, and --uninstall removes the
+# post hook from every event it was registered for, PostToolUseFailure too.
+# A safedeps PostToolUseFailure hook in Codex's config is one nothing
+# documents, and the installer removes it.
+installer_twice_home="${tmp_root}/installer-twice-home"
+mkdir -p "${installer_twice_home}/.claude" "${installer_twice_home}/.codex"
+cat > "${installer_twice_home}/.codex/hooks.json" <<'EOF'
+{"hooks":{"PostToolUseFailure":[{"matcher":"Bash","hooks":[{"type":"command","command":"~/.codex/skills/safedeps/scripts/safedeps-hook-entry.sh post","timeout":30}]}]}}
+EOF
+HOME="${installer_twice_home}" node scripts/install/install-safedeps-hooks.mjs >/dev/null
+HOME="${installer_twice_home}" node scripts/install/install-safedeps-hooks.mjs >/dev/null
+jq -e '[.hooks[]?[]? | .hooks[]? | select(.command | contains("/safedeps/"))] | length == 3' "${installer_twice_home}/.claude/settings.json" >/dev/null \
+  || fail "the installer run twice registers the claude pre hook and the post hook for two events, once each"
+jq -e '[.hooks[]?[]? | .hooks[]? | select(.command | contains("/safedeps/"))] | length == 2' "${installer_twice_home}/.codex/hooks.json" >/dev/null \
+  || fail "the installer leaves codex with one pre and one post hook, and no PostToolUseFailure hook"
+HOME="${installer_twice_home}" node scripts/install/install-safedeps-hooks.mjs --uninstall >/dev/null
+for installer_cfg in "${installer_twice_home}/.claude/settings.json" "${installer_twice_home}/.codex/hooks.json"; do
+  jq -e '[.hooks[]?[]? | .hooks[]? | select(.command | contains("/safedeps/"))] | length == 0' "${installer_cfg}" >/dev/null \
+    || fail "--uninstall removes every safedeps hook from ${installer_cfg##*/}"
+done
+pass "the installer registers the claude post hook for PostToolUseFailure once, and uninstalls it"
+
 legacy_skip_safe="${tmp_root}/safe-legacy-skip"
 legacy_pending_project="${tmp_root}/legacy-pending-project"
 legacy_post_project="${tmp_root}/legacy-post-project"
@@ -2818,10 +3080,10 @@ legacy_skip_out=$(
 {"tool_name":"Bash","tool_input":{"command":"echo done"},"cwd":"${legacy_post_project}"}
 EOF
 )
-[[ -z "${legacy_skip_out}" ]] || fail "post hook keeps unrelated legacy-pending Bash quiet"
-grep -q 'post-verify SKIP: legacy current_state' "${legacy_skip_safe}/advisory.log" || fail "post hook logs legacy pending bounded skip"
-[[ -f "${legacy_skip_safe}/current_state" ]] || fail "post hook does not consume mismatched legacy pending"
-pass "post hook bounds unrelated Bash with stale legacy pending"
+[[ -z "${legacy_skip_out}" ]] || fail "post hook keeps unrelated Bash quiet beside a pre-#5 record"
+! grep -q 'post-verify SKIP: legacy' "${legacy_skip_safe}/advisory.log" 2>/dev/null || fail "post hook reads no pre-#5 record, so it skips nothing for one"
+[[ -f "${legacy_skip_safe}/current_state" ]] || fail "post hook does not consume a pre-#5 record"
+pass "post hook leaves a pre-#5 record alone"
 
 # --- Secret-leak lane: pre-commit gate must DENY a secret, PASS clean/example -
 # The real bypass harness for the secret lane. Needs a scanner (gitleaks or
