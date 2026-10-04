@@ -1498,7 +1498,8 @@ for spec in "${CASE_HOME}/approved-specs"/*.json; do
   jq '.expires_at = "2020-01-01T00:00:00Z"' "${spec}" > "${spec}.new" && mv "${spec}.new" "${spec}"
 done
 cp "${CASE_PROJECT}/package-lock.json" "${tmp_root}/bt1-lock.json"
-# The pre-guard's baseline is set two seconds back.
+# On a filesystem that keeps whole seconds the pre-guard's baseline is set two
+# seconds back, and the ledger edit above is then inside it.
 sleep 3
 run_install 'npm run deps:install'
 printf 'BT1  claude  npm run deps:install (installs nothing, ledger expired) | rollback=%s post=[%s]\n' \
