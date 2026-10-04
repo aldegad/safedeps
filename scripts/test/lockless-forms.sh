@@ -1066,6 +1066,44 @@ do
 done
 pass "npm reads the flag after the verb and the flag after the last argument as one, and the one after the verb stands when a later word takes the other"
 
+# --- 11e. An install in text the rewrite cannot read ----------------------------------
+# v2.18.0 gave no --ignore-scripts to a command that ran an npm install it
+# could not read -- one in a double-quoted script with an escape or a
+# substitution in it, one in a script handed to ksh, one beside a heredoc body
+# piped to another command -- and dropped the flags of the command's other
+# installs with it, where v2.17.2 had put the flag right after each verb
+# (scripts/measure/inert-downgrade-grid.sh measures both trees). The rewrite
+# puts it there again and records that nobody read it. Each approved install
+# here runs no script while it installs, and no post hook line says its
+# scripts did not run. A row whose shell is not installed is skipped and says
+# so.
+for row in \
+  'true; sh -c "npm install sd-approved@1.0.0 \"--loglevel=warn\""|sh' \
+  'eval "npm install sd-approved@1.0.0 \"--loglevel=warn\""|sh' \
+  'true; bash -c "npm install sd-approved@1.0.0 $(printf -- --loglevel=warn)"|bash' \
+  'true; dash -c "npm install sd-approved@1.0.0 `printf -- --loglevel=warn`"|dash' \
+  "true; ksh -c 'npm install sd-approved@1.0.0'|ksh" \
+  $'npm install sd-approved@1.0.0 && cat <<E | wc -l\nnpm install sd-approved@1.0.0\nE|sh'
+do
+  form="${row%|*}" needs="${row##*|}"
+  if ! command -v "${needs}" > /dev/null 2>&1; then
+    printf '# skipped, %s is not installed: %s\n' "${needs}" "${form}"
+    continue
+  fi
+  new_project
+  : > "${MARKS}"
+  INSTALL_MARKS=""
+  run_install "${form}" claude count_install_marks
+  [[ "${INSTALL_MARKS}" == 0 ]] \
+    || fail "an approved install in text the rewrite cannot read runs no script during the install: ${form} (ran: $(cut -f1,2 "${MARKS}" | paste -sd, -); command: ${CASE_EXEC})"
+  [[ -e "${CASE_PROJECT}/node_modules/sd-approved" ]] || fail "the approved install installs: ${form}"
+  grep -q 'is in text safedeps could not read as the shell will' "${CASE_HOME}/advisory.log" \
+    || fail "an install in text the rewrite cannot read is recorded in advisory.log: ${form}"
+  ! grep -qE 'install scripts were not run|no install script was run' <<< "${CASE_POST}" \
+    || fail "the post hook does not say the scripts of an install whose flag nobody read did not run: ${form} (post: ${CASE_POST})"
+done
+pass "an approved install in text the rewrite cannot read runs no script while it installs, and is recorded as one whose flag nobody read"
+
 # --- every rewrite holds the release's -------------------------------------------------
 release_floor_settle
 pass "deleting flags the hook inserted gives the release's rewrite, for every install this battery rewrites"
