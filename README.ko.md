@@ -359,10 +359,24 @@ node scripts/install/install-safedeps-hooks.mjs
           }
         ]
       }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/skills/safedeps/scripts/safedeps-hook-entry.sh post",
+            "timeout": 30
+          }
+        ]
+      }
     ]
   }
 }
 ```
+
+Claude Code 는 실행된 뒤 실패한 Bash 호출에 `PostToolUse` 가 아니라 `PostToolUseFailure` 를 부르므로, post 훅은 둘 다에 등록합니다. 실패한 설치도 프로젝트의 트리에 썼을 수 있기 때문입니다. Codex 는 실패한 호출에도 `PostToolUse` 를 부르고 `PostToolUseFailure` 는 문서에 없으므로, Codex 설정에는 `PreToolUse` 와 `PostToolUse` 만 들어갑니다.
 
 **4. 실행 권한 확인:**
 

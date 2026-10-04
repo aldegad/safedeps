@@ -1443,7 +1443,15 @@ emit_unfinished_report_if_unsent() {
 }
 trap 'emit_unfinished_report_if_unsent' EXIT
 
-# Read tool input from stdin
+# Read tool input from stdin. This hook is registered for PostToolUse on both
+# engines and, on Claude Code, for PostToolUseFailure, which Claude Code runs
+# instead of PostToolUse after a Bash call that ran and failed (the installer,
+# POST_EVENTS_BY_ENGINE). A failed install can have written the project's
+# tree, so it is judged like any other, and its record is used and removed
+# here rather than left for the age sweep. A failure payload carries `error`
+# where a success carries `tool_response`; this hook reads neither, so the
+# two are judged the same way. Codex runs PostToolUse after a failed Bash call
+# too.
 INPUT=$(cat)
 
 # Only process Bash tool results

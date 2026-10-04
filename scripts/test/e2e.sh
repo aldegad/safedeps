@@ -2054,7 +2054,9 @@ grep -qF "post-verify BACKSTOP traced: $(cd -P "${bs_ttl_wt}" && pwd -P)/node_mo
 pass "after the ledger expired, a git log rolls nothing back and a write into node_modules rolls back"
 
 # A call whose post hook never ran: Claude Code runs no PostToolUse for a Bash
-# call that ended in an error, so its entry stays (lumi r1 P1). It is that
+# call that ended in an error, and runs nothing at all where PostToolUseFailure
+# is not registered or for a call the user denied, so its entry stays (lumi r1
+# P1). It is that
 # call's, and the next call reads only its own: a pull and a grep after it is
 # untraced, and the failed call's entry is still there for the age sweep.
 bs_p1_wt="${tmp_root}/bs-p1-wt"
@@ -2272,6 +2274,46 @@ noid_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${noid_wt}" "${noid_cmd}")
 grep -qF "post-verify: this hook's input names no tool_use_id, so it took the record ${noid_record} by the directory and the command" "${SAFEDEPS_HOME}/advisory.log" \
   || fail "the post hook records that it took a record by the key"
 pass "a call with no tool_use_id is judged as before, and both hooks record it"
+
+# A failed install. Claude Code runs PostToolUseFailure for a Bash call that ran
+# and failed, with the call's tool_use_id and an `error` where a success has
+# `tool_response`; Codex runs PostToolUse, with its turn_id. An install that
+# fails can still have written the project's tree, and before
+# PostToolUseFailure was registered Claude Code ran no post hook for it: the
+# install was not judged, and its record stayed for the next call of the
+# command. Here each failed install wrote an unapproved lockfile, is judged
+# and rolled back, and leaves no record.
+fail_post_claude() {
+  post_hook <<EOF
+{"session_id":"e2e","hook_event_name":"PostToolUseFailure","tool_name":"Bash","tool_input":{"command":"$2"},"cwd":"$1","tool_use_id":"$3","error":"Exit code 1\\nnpm error code E404","is_interrupt":false}
+EOF
+}
+fail_post_codex() {
+  post_hook <<EOF
+{"hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":{"command":"$2"},"cwd":"$1","tool_use_id":"$3","turn_id":"turn-e2e","model":"codex-test","tool_response":"npm error code E404\\nExit code: 1"}
+EOF
+}
+fa_claude_wt="${tmp_root}/fa-claude-wt"
+grammar_project "${fa_claude_wt}"
+fa_claude_cmd=$(call_rewrite "$(grammar_pre "${fa_claude_wt}" "npm install fixture-parent@1.0.0" toolu_fa_claude)")
+[[ -f "$(call_record toolu_fa_claude)" ]] || fail "a failed install on Claude Code: the pre-guard leaves its record"
+printf '%s\n' "${tampered_lock}" > "${fa_claude_wt}/package-lock.json"
+fa_claude_post=$(PATH="${stub_bin}:${PATH}" fail_post_claude "${fa_claude_wt}" "${fa_claude_cmd}" toolu_fa_claude)
+grep -q 'A rollback ran\.' <<< "${fa_claude_post}" || fail "a failed install on Claude Code is judged and rolled back (${fa_claude_post})"
+grep -qx 'safedeps added --ignore-scripts to this install' <<< "$(post_message "${fa_claude_post}")" \
+  || fail "a failed install on Claude Code speaks from its own record"
+[[ ! -e "$(call_record toolu_fa_claude)" && "$(call_records_of "${fa_claude_wt}")" == 0 ]] \
+  || fail "a failed install on Claude Code leaves no record"
+fa_codex_wt="${tmp_root}/fa-codex-wt"
+grammar_project "${fa_codex_wt}"
+grammar_pre_codex "${fa_codex_wt}" "npm install fixture-parent@1.0.0" exec-fa-codex > /dev/null
+printf '%s\n' "${tampered_lock}" > "${fa_codex_wt}/package-lock.json"
+fa_codex_post=$(PATH="${stub_bin}:${PATH}" fail_post_codex "${fa_codex_wt}" "npm install fixture-parent@1.0.0" exec-fa-codex)
+grep -q 'A rollback ran\.' <<< "${fa_codex_post}" || fail "a failed install on Codex is judged and rolled back (${fa_codex_post})"
+grep -qx 'safedeps did not add --ignore-scripts to this install' <<< "$(post_message "${fa_codex_post}")" \
+  || fail "a failed install on Codex speaks from its own record"
+[[ "$(call_records_of "${fa_codex_wt}")" == 0 ]] || fail "a failed install on Codex leaves no record"
+pass "a failed install is judged and leaves no record, on both engines"
 
 # A filesystem that keeps whole seconds, simulated: a touch that drops the part
 # below the second. A write in the second the baseline is touched in would not
@@ -2909,6 +2951,14 @@ jq -e --arg pre "~/.codex/skills/safedeps/scripts/safedeps-hook-entry.sh pre" '
 jq -e --arg post "~/.codex/skills/safedeps/scripts/safedeps-hook-entry.sh post" '
   [.hooks.PostToolUse[]?.hooks[]?.command] | index($post)
 ' "${installer_home}/.codex/hooks.json" >/dev/null || fail "installer writes codex post hook"
+# Claude Code runs PostToolUseFailure, not PostToolUse, after a Bash call that
+# ran and failed, so the post hook is registered there too; Codex runs
+# PostToolUse after a failed Bash call and documents no PostToolUseFailure.
+jq -e --arg post "~/.claude/skills/safedeps/scripts/safedeps-hook-entry.sh post" '
+  [.hooks.PostToolUseFailure[]? | select(.matcher == "Bash") | .hooks[]? | select(.command == $post and .timeout == 30)] | length == 1
+' "${installer_home}/.claude/settings.json" >/dev/null || fail "installer writes the claude post hook for PostToolUseFailure"
+jq -e '.hooks | has("PostToolUseFailure") | not' "${installer_home}/.codex/hooks.json" >/dev/null \
+  || fail "installer writes no PostToolUseFailure hook for codex"
 jq -e '
   [.hooks.PreToolUse[]?, .hooks.PostToolUse[]? | select(.matcher == "Bash") | .hooks[]? | select(.command | contains("/safedeps/")) | .timeout] | all(. == 30)
 ' "${installer_home}/.claude/settings.json" >/dev/null || fail "installer writes claude safedeps hook timeouts"
@@ -2928,6 +2978,28 @@ jq -e '
   [.hooks.PreToolUse[]?, .hooks.PostToolUse[]? | select(.matcher == "Bash") | .hooks[]? | select(.command | contains("/safedeps/")) | .timeout] | length == 2 and all(. == 30)
 ' "${installer_backfill_home}/.codex/hooks.json" >/dev/null || fail "installer backfills existing codex safedeps hook timeouts"
 pass "installer legacy cleanup and hook timeout backfill"
+
+# The installer twice registers each hook once, and --uninstall removes the
+# post hook from every event it was registered for, PostToolUseFailure too.
+# A safedeps PostToolUseFailure hook in Codex's config is one nothing
+# documents, and the installer removes it.
+installer_twice_home="${tmp_root}/installer-twice-home"
+mkdir -p "${installer_twice_home}/.claude" "${installer_twice_home}/.codex"
+cat > "${installer_twice_home}/.codex/hooks.json" <<'EOF'
+{"hooks":{"PostToolUseFailure":[{"matcher":"Bash","hooks":[{"type":"command","command":"~/.codex/skills/safedeps/scripts/safedeps-hook-entry.sh post","timeout":30}]}]}}
+EOF
+HOME="${installer_twice_home}" node scripts/install/install-safedeps-hooks.mjs >/dev/null
+HOME="${installer_twice_home}" node scripts/install/install-safedeps-hooks.mjs >/dev/null
+jq -e '[.hooks[]?[]? | .hooks[]? | select(.command | contains("/safedeps/"))] | length == 3' "${installer_twice_home}/.claude/settings.json" >/dev/null \
+  || fail "the installer run twice registers the claude pre hook and the post hook for two events, once each"
+jq -e '[.hooks[]?[]? | .hooks[]? | select(.command | contains("/safedeps/"))] | length == 2' "${installer_twice_home}/.codex/hooks.json" >/dev/null \
+  || fail "the installer leaves codex with one pre and one post hook, and no PostToolUseFailure hook"
+HOME="${installer_twice_home}" node scripts/install/install-safedeps-hooks.mjs --uninstall >/dev/null
+for installer_cfg in "${installer_twice_home}/.claude/settings.json" "${installer_twice_home}/.codex/hooks.json"; do
+  jq -e '[.hooks[]?[]? | .hooks[]? | select(.command | contains("/safedeps/"))] | length == 0' "${installer_cfg}" >/dev/null \
+    || fail "--uninstall removes every safedeps hook from ${installer_cfg##*/}"
+done
+pass "the installer registers the claude post hook for PostToolUseFailure once, and uninstalls it"
 
 legacy_skip_safe="${tmp_root}/safe-legacy-skip"
 legacy_pending_project="${tmp_root}/legacy-pending-project"

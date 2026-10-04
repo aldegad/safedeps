@@ -120,6 +120,14 @@ done
 # block something that works rather than remove something dead. If safedeps ever
 # wants that form, that is a decision about having two registration channels,
 # and AGENTS.md is where it gets made.
+# The post hook is registered for PostToolUseFailure on Claude Code too, and
+# the manual block says so where the installer does.
+grep -q '^  claude: \["PostToolUse", "PostToolUseFailure"\],$' scripts/install/install-safedeps-hooks.mjs \
+  || fail "the installer registers the claude post hook for PostToolUse and PostToolUseFailure"
+for doc in README.md README.ko.md; do
+  grep -A6 '"PostToolUseFailure": \[' "${doc}" | grep -q "${installer_entry} post" \
+    || fail "${doc} registers the entry shim with 'post' for PostToolUseFailure"
+done
 if grep -qE '^\s*script:\s*scripts/safedeps-' SKILL.md; then
   fail "SKILL.md leaves registration to the installer rather than declaring its own"
 fi

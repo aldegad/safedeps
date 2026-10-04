@@ -359,10 +359,24 @@ Edit `.claude/settings.json` (project-level) or `~/.claude/settings.json` (globa
           }
         ]
       }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/skills/safedeps/scripts/safedeps-hook-entry.sh post",
+            "timeout": 30
+          }
+        ]
+      }
     ]
   }
 }
 ```
+
+Claude Code runs `PostToolUseFailure`, not `PostToolUse`, after a Bash call that ran and failed, so the post hook is registered for both: an install that fails can still have written the project's tree. Codex runs `PostToolUse` after a failed call too and documents no `PostToolUseFailure`, so its config gets `PreToolUse` and `PostToolUse` only.
 
 **4. Verify permissions:**
 
