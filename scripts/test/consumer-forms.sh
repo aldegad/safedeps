@@ -127,7 +127,25 @@ expect_deny "a pipe to sh inside a brace group"       "{ printf 'pip install evi
 expect_deny "a pipe to a subshell running sh"         "printf 'pip install evil==1.0.0' | (sh)"
 expect_deny "a pipe to a brace group running sh"      "printf 'pip install evil==1.0.0' | { sh; }"
 expect_deny "a |& pipe to sh"                         "printf 'pip install evil==1.0.0' |& sh"
+expect_deny "a pipe to sh after a ||"                 "false || printf 'pip install evil==1.0.0' | sh"
 pass "a pipe into a shell is read through the shell's operators and groups"
+
+# `||` is not a pipe. The shell after it runs only when the command before it
+# fails, and it reads the caller's input, not that command's output. Read as a
+# pipe, a shell script after `||` was denied as an install piped into a shell,
+# while the same script after `;` was judged as the install it is.
+for or_form in \
+  'false || sh -c "npm ci \"x\""' \
+  "false || sh -c 'npm ci'" \
+  "printf 'pip install evil==1.0.0' || sh"
+do
+  got=$(gate_reason "${or_form}")
+  [[ "${got}" != *'reads like an install into a shell'* ]] \
+    || fail "a shell after || is not a pipe into a shell: ${or_form} (got: ${got:0:120})"
+done
+[[ "$(gate_decision 'false || sh -c "npm ci \"x\""')" == "$(gate_decision 'false; sh -c "npm ci \"x\""')" ]] \
+  || fail "a shell script after || is judged as it is after ;"
+pass "a shell after || is not a pipe into a shell"
 
 # A heredoc body is stripped once, before anything reads the payloads. A reader
 # that stripped again saw the `<<EOF` line with no body after it and dropped

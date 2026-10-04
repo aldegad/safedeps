@@ -1393,8 +1393,11 @@ PIPE_INSTALL_TEXT_RE="${PIPE_MANAGER_RE}.*(${SAFEDEPS_G_ALL_VERBS})"
 # group closer, so `| sh; echo`, `| sh&&x` and `(... | sh)` are the same
 # consumer as `| sh `. `|&` pipes stderr as well, and a group opener before the
 # shell (`| (sh)`, `| { sh; }`) still hands it the input. Each of these used to
-# pass unjudged.
-PIPE_SHELL_CONSUMER_RE='\|&?[[:space:]]*([({][[:space:]]*)*(bash|sh|zsh)([[:space:];&|)}<>`]|$)'
+# pass unjudged. A `|` that is half of `||` is no pipe: the shell after it runs
+# only when the command before it fails, and reads the caller's input, not that
+# command's output. Read as a pipe, `false || sh -c "npm ci \"x\""` was denied
+# as an install piped into a shell.
+PIPE_SHELL_CONSUMER_RE='(^|[^|])\|&?[[:space:]]*([({][[:space:]]*)*(bash|sh|zsh)([[:space:];&|)}<>`]|$)'
 
 text_has_install_words() {
   printf '%s\n' "$1" | judge_grep -qEi "${PIPE_INSTALL_TEXT_RE}"
