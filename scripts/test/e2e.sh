@@ -2097,7 +2097,8 @@ esac
 EOF
 cat > "${bs_mix_bin}/whole-second-walk.py" <<'EOF'
 import os, sys
-root, base = sys.argv[1], os.stat(sys.argv[2]).st_ctime_ns
+# find -cnewer compares a status change time with the reference's modification time.
+root, base = sys.argv[1], os.stat(sys.argv[2]).st_mtime_ns
 def newer(path, follow):
     st = os.stat(path) if follow else os.lstat(path)
     return st.st_ctime_ns // 10**9 * 10**9 > base
