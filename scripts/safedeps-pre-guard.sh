@@ -1388,16 +1388,6 @@ BLANK_INSTALL_RE="${SAFEDEPS_G_START}((env|command)([[:space:]]+-[^[:space:]]*)*
 PIPE_MANAGER_RE='(npm|npx|pnpm|pnpx|yarn|bun|bunx|pip[0-9.]*|(python[0-9.]*|py)[[:space:]]+-[A-Za-z0-9]*m[[:space:]]*pip|poetry|uv|uvx|pipx|pipenv|cargo|go|gem|bundle|mvn|dotnet)'
 PIPE_INSTALL_TEXT_RE="${PIPE_MANAGER_RE}.*(${SAFEDEPS_G_ALL_VERBS})"
 
-# The same, with the manager starting a word. Beside a visible install the text
-# left after setting the install aside is mostly that install's own arguments,
-# and a manager name inside a word matched there -- `go` inside `mongoose` --
-# so `npm install mongoose@8.0.0 && cat setup.sh | sh` was denied (caught in
-# review). The rest stays loose on purpose: what is piped is data the shell has
-# not read yet, and printf escapes, glued quotes, an escaped blank or a `tr`
-# turn `pip<something>install` into `pip install` on the way. Requiring whole
-# blank-separated words let exactly those through (caught in review).
-PIPE_INSTALL_WORD_START_RE="(^|[^[:alnum:]_.-])${PIPE_MANAGER_RE}.*(${SAFEDEPS_G_ALL_VERBS})"
-
 # A pipe into a shell, read on normalized exec text. The consumer ends where the
 # shell ends a word: at a blank, and also at an operator, a redirection or a
 # group closer, so `| sh; echo`, `| sh&&x` and `(... | sh)` are the same
@@ -1408,10 +1398,6 @@ PIPE_SHELL_CONSUMER_RE='\|&?[[:space:]]*([({][[:space:]]*)*(bash|sh|zsh)([[:spac
 
 text_has_install_words() {
   printf '%s\n' "$1" | judge_grep -qEi "${PIPE_INSTALL_TEXT_RE}"
-}
-
-text_has_install_words_from_a_word_start() {
-  printf '%s\n' "$1" | judge_grep -qEi "${PIPE_INSTALL_WORD_START_RE}"
 }
 
 # $1 has its heredoc bodies stripped already. Stripping twice is not a no-op:
@@ -1461,22 +1447,41 @@ payload_pipes_install_text_to_shell() {
 # passed with the visible one (`pip install requests==2.0.0 && printf 'pip
 # install evil==6.6.6' | sh` checked requests and ran evil unchecked).
 #
-# So the visible installs are set aside first. Wherever the install pattern
-# matches the scan text -- exactly what command_is_dependency_install reads as
-# an install -- the manager word that starts the match is blanked out of the
-# raw text, and the whole-payload question is asked of what is left, plus any
-# heredoc bodies. A verb with no manager before it no longer reads as install
-# text, so that is enough to set the install aside.
+# So the visible installs are set aside first, and what is left is asked the
+# whole-payload question, as loosely as it is asked with nothing beside it.
+# Wherever the install pattern matches the scan text -- exactly what
+# command_is_dependency_install reads as an install -- the manager word that
+# starts the match is blanked out of the raw text, and so is every other word
+# of that statement the manager's grammar reads as the install's own: its
+# command, options and their values, and the operands it installs or runs
+# (install_own_word_spans). Those reach the ledger as specs, or are options of
+# the install that print nothing into a shell. A runner's program arguments are
+# not the install's own and stay.
 #
-# Only the manager word goes, not the whole match. A match can run into the
-# arguments: the grammar cannot know which options take a value, so in `npx -y
-# echo-cli@1.0.0 pip install x | sh` it reads `pip` as the package npx runs,
-# and blanking the whole match hid the `pip install` that is echoed into the
-# shell (caught before review, by this function's own attack battery).
+# The search over what is left is the standalone search. Three rounds tightened
+# it instead and each left a hole: a manager inside a word matched there
+# (`go` inside `mongoose`), so the search asked for whole words, which missed
+# `pip\tinstall` and a `tr`; then it asked for a word start, which missed
+# `\npip`, `%spip`, `xpip ... | cut -c2-` and `echo -e '\npip ...'` (caught in
+# review). What is piped is data the shell has not read yet, and the ways a
+# producer turns it into `pip install` cannot be listed. So the
+# false positive is fixed where it comes from -- the visible install's own
+# operands are no longer in the text -- and the search stays as loose as the
+# one that denies the same producer with nothing beside it.
 #
-# An install the recognizer only reads after normalize_install_text (`env pip
-# install`, `/usr/bin/pip install`) is not matched here and stays in the text.
-# That can only turn an allow into a deny, and only beside a pipe into a shell.
+# Only the words the grammar gives a role go, never the whole match. A match can
+# run into the arguments: the pattern cannot know which options take a value, so
+# in `npx -y echo-cli@1.0.0 pip install x | sh` it reads `pip` as the package
+# npx runs, and blanking the whole match hid the `pip install` that is echoed
+# into the shell (caught before review, by this function's own attack battery).
+# The grammar reads `pip` there as the program's argument.
+#
+# Where the grammar cannot be read positionally -- a statement with a partly
+# quoted word, an escape, an expansion or a glob in it, or one it reads two
+# ways -- only the manager word goes. That keeps more text, so it can only turn an allow into a
+# deny, and only beside a pipe into a shell. So does an install the recognizer
+# only reads after normalize_install_text (`env pip install`, `/usr/bin/pip
+# install`), which is not matched here and stays in the text.
 payload_pipes_unread_install_text_to_shell() {
   local payload="$1"
   local commands remainder
@@ -1487,12 +1492,72 @@ payload_pipes_unread_install_text_to_shell() {
   exec_text_pipes_to_shell "${commands}" || return 1
 
   remainder=$(install_managers_blanked "${commands}") || return 1
-  text_has_install_words_from_a_word_start "${remainder}" && return 0
+  text_has_install_words "${remainder}" && return 0
   [[ "${payload}" == *'<<'* ]] || return 1
-  text_has_install_words_from_a_word_start "$(strip_heredoc_bodies "${payload}" shell-bodies)"
+  text_has_install_words "$(strip_heredoc_bodies "${payload}" shell-bodies)"
 }
 
-# $1 with the manager word of every install-pattern match blanked.
+# The byte spans of the words each install-pattern match's statement owns, as
+# the manager's grammar reads that statement: `<offset>:<length> ` per word,
+# 0-based offsets into $1. $2 is the scan text of $1 and $3 the matches, one
+# `<offset>:<match>` per line.
+#
+# A statement is read only where each of its blank-separated words is a word
+# the shell hands the manager as written: bytes the scan text keeps unchanged
+# (no comment, no escaped operator), or one whole single- or double-quoted
+# word, and in either case none of the bytes the shell expands or splits on
+# (`$`, a backquote, a glob, a brace, a backslash, a blank inside quotes). There
+# a word is exactly the argument, so a role is a byte span, and a quoted word's
+# span covers both of its quotes. Anywhere else the statement owns no words
+# here, and only its manager word is blanked. A reading that is the union of
+# two (SAFEDEPS_G_M_UNION) owns none either: a word one reading takes for a
+# runner's argument may carry the other's package role.
+install_own_word_spans() {
+  local text="$1" scan="$2" matches="$3"
+  local LC_ALL=C nl=$'\n' line off rest stmt raw pos tok word k out=""
+  local -a owned_words owned_offs owned_lens
+
+  while IFS= read -r line; do
+    [[ -n "${line}" ]] || continue
+    off="${line%%:*}"
+    # The pattern may start at the separator before the statement.
+    rest="${scan:off}"
+    while [[ "${rest}" == [\;\&\|\(]* || "${rest}" == [[:blank:]]* ]]; do
+      rest="${rest:1}" off=$(( off + 1 ))
+    done
+    stmt="${rest%%"${nl}"*}"
+    stmt="${stmt%%[;&|()<>\`]*}"
+    raw="${text:off:${#stmt}}"
+    [[ -n "${stmt}" && ${#raw} -eq ${#stmt} ]] || continue
+    owned_words=() owned_offs=() owned_lens=() pos=0
+    while (( pos < ${#raw} )); do
+      if [[ "${raw:pos:1}" == [[:blank:]] ]]; then pos=$(( pos + 1 )); continue; fi
+      tok="${raw:pos}"
+      tok="${tok%%[[:blank:]]*}"
+      if [[ "${stmt:pos:${#tok}}" == "${tok}" ]]; then
+        word="${tok}"
+      elif [[ "${tok}" == \'?*\' || "${tok}" == \"?*\" ]] && [[ "${stmt:pos:${#tok}}" != *[![:blank:]]* ]]; then
+        word="${tok:1:${#tok}-2}"
+      else
+        continue 2
+      fi
+      [[ "${word}" != *[!A-Za-z0-9@._/:=~^+,%-]* ]] || continue 2
+      owned_words+=("${word}") owned_offs+=("$(( off + pos ))") owned_lens+=("${#tok}")
+      pos=$(( pos + ${#tok} ))
+    done
+    (( ${#owned_words[@]} > 0 )) || continue
+    safedeps_manager_read "${owned_words[@]}" || continue
+    [[ "${SAFEDEPS_G_M_KIND}" != none && "${SAFEDEPS_G_M_UNION}" == false ]] || continue
+    for (( k = 0; k < ${#owned_words[@]}; k++ )); do
+      case "${SAFEDEPS_G_M_ROLE[k]}" in -|a) continue ;; esac
+      out+="${owned_offs[k]}:${owned_lens[k]} "
+    done
+  done <<< "${matches}"
+  printf '%s' "${out}"
+}
+
+# $1 with the manager word of every install-pattern match blanked, and the
+# other words its statement owns (install_own_word_spans).
 #
 # The pattern is matched on the scan text, where quoted regions are blank, so a
 # match is never install text inside quotes. The scanner blanks bytes and never
@@ -1509,7 +1574,7 @@ payload_pipes_unread_install_text_to_shell() {
 # has a visible one.
 install_managers_blanked() {
   local text="$1"
-  local scan matches spans=""
+  local scan matches spans="" owned=""
 
   if ! scan=$(command_scan_text "${text}"); then
     return 1
@@ -1527,13 +1592,15 @@ install_managers_blanked() {
     [[ -z "${SAFEDEPS_SCAN_MARK:-}" ]] || printf 'failed\n' >> "${SAFEDEPS_SCAN_MARK}"
     return 1
   fi
+  [[ -z "${matches}" ]] || owned=$(install_own_word_spans "${text}" "${scan}" "${matches}")
 
-  if ! { printf '%s\n' "${spans}"; printf '%s\n' "${text}"; printf '%s' "${scan}"; } |
+  if ! { printf '%s\n' "${spans}"; printf '%s\n' "${owned}"; printf '%s\n' "${text}"; printf '%s' "${scan}"; } |
     SAFEDEPS_PIPE_MANAGER_RE="${PIPE_MANAGER_RE}" LC_ALL=C awk '
     # safedeps:install_managers_blanked (scripts/test/scan-contract.sh keys on this line)
     NR == 1 { nspan = split($0, span, " "); next }
+    NR == 2 { nown = split($0, own, " "); next }
     {
-      if (NR > 2) X[++n] = "\n"
+      if (NR > 3) X[++n] = "\n"
       m = split($0, c, "")
       for (j = 1; j <= m; j++) X[++n] = c[j]
     }
@@ -1585,6 +1652,14 @@ install_managers_blanked() {
             if (X[L + 1 + i] != " " && X[i] != "\n") X[i] = " "
           }
         }
+      }
+      # The other words each install owns, as install_own_word_spans read them.
+      # A quoted word goes with both of its quotes, so the quote structure of
+      # what is left is still that of the text.
+      for (k = 1; k <= nown; k++) {
+        split(own[k], p, ":")
+        for (i = p[1] + 1; i <= p[1] + p[2] && i <= L; i++)
+          if (X[i] != "\n") X[i] = " "
       }
       buf = ""; held = 0
       for (i = 1; i <= L; i++) {

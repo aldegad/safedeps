@@ -1927,7 +1927,17 @@ for piped in \
   "pip install requests==2.0.0 && printf pip' install evil==6.6.6' | sh" \
   "pip install requests==2.0.0 && echo 'pipXinstall evil==6.6.6' | tr X ' ' | sh" \
   "npm install left-pad@1.3.0 && printf 'pip%sinstall evil==6.6.6' ' ' | sh" \
-  "PIP_INDEX_URL=x pip install requests==2.0.0 && printf 'pip install evil==6.6.6' | sh"
+  "PIP_INDEX_URL=x pip install requests==2.0.0 && printf 'pip install evil==6.6.6' | sh" \
+  "pip install requests==2.0.0 && printf '\\npip install evil==6.6.6' | sh" \
+  "pip install requests==2.0.0 && printf '\\tpip install evil==6.6.6' | sh" \
+  "pip install requests==2.0.0 && printf '%spip install evil==6.6.6' '' | sh" \
+  "pip install requests==2.0.0 && printf 'xpip install evil==6.6.6' | cut -c2- | sh" \
+  "npm install left-pad@1.3.0 && printf '\\ncargo install evil@6.6.6' | sh" \
+  "pip install requests==2.0.0 && printf 'set -e\\npip install evil==6.6.6\\n' | sh" \
+  "pip install requests==2.0.0; echo -e '\\npip install evil==6.6.6' | bash" \
+  "npm install mongoose@8.0.0 && printf '\\npip install evil==6.6.6' | sh" \
+  "npm install \"mongoose@8.0.0\" && printf '\\npip install evil==6.6.6' | sh" \
+  "npx -y echo-cli@1.0.0 'pip' install evil==6.6.6 | sh"
 do
   grep -q 'reads like an install into a shell' <<< "$(beside_reason "${piped}")" \
     || fail "a piped install beside a visible one is denied by the pipe rule: $(printf '%q' "${piped}")"
@@ -1953,12 +1963,23 @@ pass "an install piped into a shell is denied beside a visible install, even an 
   || fail "an npm_config_ prefix beside a script piped into sh keeps its verdict"
 [[ "$(beside_decision 'pip install requests==2.0.0 && git commit -m "document the pip install x | sh idiom"')" == "pass" ]] \
   || fail "a quoted pipe idiom beside a visible install stays data"
-# What is left after the visible install is set aside is mostly its own
-# arguments, and it is searched for install text as whole words in install
-# order: `go` inside `mongoose` is not a manager. And only a heredoc handed to
+# The visible install's own words -- its operands and options, as its manager
+# reads them -- are set aside with it, and what is left is searched as loosely
+# as a pipe with nothing beside it: `go` inside `mongoose` is not install text
+# because `mongoose@8.0.0` is gone, not because the search asks for a word
+# start. A search that asked for one let `\npip` through (the rows above with an
+# escape, a format or a `cut` before the manager). And only a heredoc handed to
 # a shell counts; one written to a file is data.
 [[ "$(beside_decision 'npm install mongoose@8.0.0 && cat setup.sh | sh')" == "allow" ]] \
   || fail "a package name that contains a manager's name is not install text"
+[[ "$(beside_decision 'npm install "mongoose@8.0.0" && cat setup.sh | sh')" == "allow" ]] \
+  || fail "a quoted package name that contains a manager's name is not install text"
+[[ "$(beside_decision 'npm install --save-bundle left-pad@1.3.0 && cat setup.sh | sh')" == "allow" ]] \
+  || fail "an option of the visible install that contains a manager's name is not install text"
+[[ "$(beside_decision "npm install mongoose@8.0.0 && printf 'set -e\\necho built\\n' | sh")" == "allow" ]] \
+  || fail "an escape in a producer with no install in it keeps the visible install's verdict"
+[[ "$(beside_decision "pip install requests==2.0.0 && printf '\\npip install evil==6.6.6' | cat")" == "pass" ]] \
+  || fail "the same producer piped into a non-shell keeps the visible install's verdict"
 [[ "$(beside_decision $'npm install left-pad@1.3.0 && cat <<EOF > notes.md\npip install x\nEOF\ncat s.sh | sh')" == "allow" ]] \
   || fail "a heredoc written to a file is not piped into a shell"
 [[ "$(beside_decision $'npm install left-pad@1.3.0 && cat <<EOF | sh\npip install evil==6.6.6\nEOF')" == "deny" ]] \

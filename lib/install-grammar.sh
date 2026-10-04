@@ -1164,10 +1164,14 @@ safedeps_manager_name() {
 #                        value of `--name=value`, `-xvalue`, `--name:value`
 #   SAFEDEPS_G_M_LOCALBIN  true for a runner that runs a binary the project
 #                        already has without fetching (npx, npm exec, bunx)
+#   SAFEDEPS_G_M_UNION   true when the roles are the union of more than one
+#                        reading (below), so a word's role may be another
+#                        reading's: a word one reading takes for a runner's
+#                        argument can carry another's package role
 # No process is started: this runs once per statement.
 safedeps_manager_read() {
   local ambiguous
-  SAFEDEPS_G_M_AMBIGUOUS=-1 SAFEDEPS_G_M_FORCE_VALUE=-1
+  SAFEDEPS_G_M_AMBIGUOUS=-1 SAFEDEPS_G_M_FORCE_VALUE=-1 SAFEDEPS_G_M_UNION=false
   SAFEDEPS_G_M_OTHER=false SAFEDEPS_G_M_OTHER_SEEN=false
   safedeps_manager_read_once "$@"
   # An option one version of the manager reads as a switch and another as an
@@ -1202,6 +1206,7 @@ safedeps_manager_read() {
 safedeps_manager_read_union() {
   local -a role=("${SAFEDEPS_G_M_ROLE[@]}") text=("${SAFEDEPS_G_M_TEXT[@]}")
   local kind="${SAFEDEPS_G_M_KIND}" localbin="${SAFEDEPS_G_M_LOCALBIN}" k
+  SAFEDEPS_G_M_UNION=true
   safedeps_manager_read_once "$@"
   for (( k = 0; k < ${#role[@]}; k++ )); do
     case "${role[k]}:${SAFEDEPS_G_M_ROLE[k]}" in
