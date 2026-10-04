@@ -816,9 +816,9 @@ check_starts "zsh" "zsh ends a command at &!, glued to the next or not" \
 check_starts "bash dash" "bash and dash read the ! glued to & as part of the next word" \
   'true&!pip i; true &! pip i' 'true&!pip i; true &! ;pip i'
 check_starts "zsh" "zsh reads one digit as a descriptor, so repeat counts the rest" \
-  'repeat 12>&1 pip i' 'repeat 12;>&1 pip i'
+  'repeat 12>&1 pip i' 'repeat 12;>_1 pip i'
 check_starts "bash dash" "repeat is a command outside zsh" \
-  'repeat 12>&1 pip i' 'repeat 12>&1 pip i'
+  'repeat 12>&1 pip i' 'repeat 12>_1 pip i'
 check_starts "zsh" "a zsh precommand modifier is followed by a start" \
   'noglob pip i; echo noglob pip i' 'noglob ;pip i; echo noglob pip i'
 pass "starts: each start the walk finds is an event, put in between two bytes, and nothing nested opens one"
