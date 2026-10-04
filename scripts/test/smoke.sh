@@ -859,6 +859,40 @@ downgrades_after=$(grep -c 'could not make every npm install in this command ine
 (( ${downgrades_after:-0} > ${downgrades_before:-0} )) || fail "a script with an escaped quote is recorded as an inert downgrade"
 pass "a script the inert rewrite cannot reach is a recorded downgrade, or UNDECIDED when it cannot be read"
 
+# The floor holds where no place can be read. An install in a double-quoted
+# script handed to a shell, with an escape or a substitution in it, gets no
+# offset; a one-statement command still gets the release's rewrite, its flag
+# at the end, recorded as a downgrade whose flag nobody read. These got no
+# rewrite at all, and `npm ci eval "\npm"` ran its postinstall where the
+# release's rewrite ran none (validator round 4: six forms, and two from its
+# seeded fuzz). The release floor check in run_hook_command judges each
+# against the release's own rewrite.
+release_only_safe=$(mktemp -d "${tmp_root}/safe-release-only.XXXXXX")
+SAFEDEPS_HOME="${release_only_safe}" lib/ledger/ledger.sh approve npm left-pad 1.3.0 1.3.0 smoke >/dev/null
+for inert_in in \
+  'npm ci eval "\npm"' \
+  'npm install left-pad@1.3.0 eval "a\b npm"' \
+  'npm install left-pad@1.3.0 eval "npm\ x"' \
+  'npm install left-pad@1.3.0 eval "$(echo) npm"' \
+  'npm install left-pad@1.3.0 sh -c "\npm"' \
+  'npm install left-pad@1.3.0 --userconfig=eval "x\y npm"' \
+  'npm ci left-pad@1.3.0 sh -c "x\y npm" false "$HOME"' \
+  'npm install x\ y -- "$HOME" sh -c "x\y npm"'
+do
+  rm -rf "${release_only_safe}/pending"
+  release_only_before=$(grep -c 'could not place --ignore-scripts by reading' "${release_only_safe}/advisory.log" 2>/dev/null || true)
+  inert_out=$(run_hook_command "${tmp_root}/home-release-only" "${release_only_safe}" "${inert_in}")
+  [[ "$(jq -r '.hookSpecificOutput.updatedInput.command // ""' <<< "${inert_out}")" == "${inert_in} --ignore-scripts" ]] \
+    || fail "an install no place can be read in keeps the release's rewrite: $(printf '%q' "${inert_in}") (got: ${inert_out:0:240})"
+  release_only_after=$(grep -c 'could not place --ignore-scripts by reading' "${release_only_safe}/advisory.log" 2>/dev/null || true)
+  (( ${release_only_after:-0} > ${release_only_before:-0} )) \
+    || fail "an install no place can be read in is recorded as a downgrade: $(printf '%q' "${inert_in}")"
+  release_only_sid=$(jq -r '.snapshot_id' "${release_only_safe}/pending/"*.json 2>/dev/null) || release_only_sid=""
+  jq -e '.ignore_scripts_injected == true and .ignore_scripts_unread == true' "${release_only_safe}/snapshots/${release_only_sid}_meta.json" >/dev/null 2>&1 \
+    || fail "an install no place can be read in is recorded with the unread warning: $(printf '%q' "${inert_in}")"
+done
+pass "an install no place can be read in keeps the release's rewrite, recorded as an unread downgrade"
+
 # The rewrite changes the text every shell reads, so it is made only where
 # bash, zsh and dash agree where the npm installs are. In I2 and I3 the
 # apostrophe in "${x:-'}" opens a quote for bash and is a character for zsh and
