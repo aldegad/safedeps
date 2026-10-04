@@ -2120,11 +2120,19 @@ chmod +x "${bs_mix_bin}/stat" "${bs_mix_bin}/find"
 PATH="${bs_mix_bin}:${PATH}" grammar_pre "${bs_mix_wt}" "npm run deps:add" toolu_bs_mix > /dev/null
 bs_mix_entry=$(cat "$(bs_entry toolu_bs_mix)" 2>/dev/null || true)
 printf 'x\n' > "${bs_mix_wt}/node_modules/installed-package/added.js"
+# The walk from this entry's baseline, on a copy of it with the same times. The
+# post hook checks the lockfile first, and in this row the lockfile changed
+# just before the baseline too, so its trace line can name either.
+bs_mix_base="${tmp_root}/bs-mix-baseline"
+touch -r "$(jq -r .baseline <<< "${bs_mix_entry:-null}")" "${bs_mix_base}" 2>/dev/null || : > "${bs_mix_base}"
+bs_mix_walk=$(PATH="${bs_mix_bin}:${PATH}" find -H "${bs_mix_wt}/node_modules" -cnewer "${bs_mix_base}" -print -quit)
 bs_mix_post=$(PATH="${bs_mix_bin}:${stub_bin}:${PATH}" grammar_post "${bs_mix_wt}" "npm run deps:add" toolu_bs_mix)
 [[ "$(jq -r .resolution <<< "${bs_mix_entry:-null}")" == seconds ]] \
   || fail "a write into node_modules on a whole-second mount beside a subsecond lockfile: the baseline is set back (${bs_mix_entry})"
-grep -qF "post-verify BACKSTOP traced: $(cd -P "${bs_mix_wt}" && pwd -P)/node_modules" "${SAFEDEPS_HOME}/advisory.log" \
-  || fail "a write into node_modules on a whole-second mount beside a subsecond lockfile: the walk finds it (${bs_mix_post})"
+[[ "${bs_mix_walk}" == "${bs_mix_wt}/node_modules"* ]] \
+  || fail "a write into node_modules on a whole-second mount beside a subsecond lockfile: the walk from the entry's baseline finds it (${bs_mix_walk})"
+grep -qF "post-verify BACKSTOP traced: $(cd -P "${bs_mix_wt}" && pwd -P)/" "${SAFEDEPS_HOME}/advisory.log" \
+  || fail "a write into node_modules on a whole-second mount beside a subsecond lockfile: the backstop counts it as traced (${bs_mix_post})"
 pass "a tree with one part on a whole-second filesystem sets the baseline back"
 
 # A walk that does not finish within its deadline: a find that never answers.
