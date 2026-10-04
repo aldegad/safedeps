@@ -330,7 +330,14 @@ run_install() {
   [[ -z "${between}" ]] || "${between}" "${CASE_PROJECT}"
 
   marks_before=$(wc -l < "${MARKS}" | tr -d ' ')
-  payload=$(jq -nc --arg c "${exec_command}" --arg d "${CASE_CWD}" --arg id "${post_id}" '{tool_name:"Bash",tool_input:{command:$c},cwd:$d,tool_use_id:$id}')
+  # Codex sends turn_id and model to PostToolUse as it does to PreToolUse, and
+  # the post hook reads the engine from it.
+  if [[ "${engine}" == codex ]]; then
+    payload=$(jq -nc --arg c "${exec_command}" --arg d "${CASE_CWD}" --arg id "${post_id}" \
+      '{tool_name:"Bash",tool_input:{command:$c},cwd:$d,tool_use_id:$id,turn_id:"turn-lockless",model:"codex-test"}')
+  else
+    payload=$(jq -nc --arg c "${exec_command}" --arg d "${CASE_CWD}" --arg id "${post_id}" '{tool_name:"Bash",tool_input:{command:$c},cwd:$d,tool_use_id:$id}')
+  fi
   CASE_POST=$(printf '%s' "${payload}" | PATH="${CASE_POST_PATH:-${PATH}}" SAFEDEPS_HOME="${CASE_HOME}" scripts/safedeps-hook-entry.sh post 2>/dev/null)
   CASE_RAN=$(tail -n +"$((marks_before + 1))" "${MARKS}")
 }

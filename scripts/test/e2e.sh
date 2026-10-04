@@ -2454,7 +2454,11 @@ for inert_case in \
        [[ "${inert_received}" == *--ignore-scripts* ]] || fail "${inert_name}: the pre-guard rewrites the command on Claude (${inert_pre})" ;;
   esac
   printf '%s\n' "${tampered_lock}" > "${inert_wt}/package-lock.json"
-  inert_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${inert_wt}" "${inert_received}")
+  if [[ "${inert_engine}" == codex ]]; then
+    inert_post=$(PATH="${stub_bin}:${PATH}" grammar_post_codex "${inert_wt}" "${inert_received}")
+  else
+    inert_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${inert_wt}" "${inert_received}")
+  fi
   grep -qxF "${inert_said}" <<< "$(post_message "${inert_post}")" \
     || fail "${inert_engine} ${inert_name}: the --ignore-scripts line says '${inert_said}' (${inert_post})"
 done
