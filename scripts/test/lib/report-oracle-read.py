@@ -171,7 +171,14 @@ def said(path, received_path):
     return 0
 
 
+def is_object(path):
+    """0 when the file is one JSON object, 1 when it is anything else."""
+    return 0 if isinstance(load(path), dict) else 1
+
+
 def main():
+    if sys.argv[1] == "object":
+        return is_object(sys.argv[2])
     if sys.argv[1] == "string":
         return string(sys.argv[2], sys.argv[3:])
     if sys.argv[1] == "wrote":
