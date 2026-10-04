@@ -897,6 +897,10 @@ check_view noredir_view "zsh dash" "a descriptor word: zsh and dash read one dig
   'echo 12>/dev/null pip i; echo 1>/dev/null' "echo 12$(sp 10) pip i; echo$(sp 12)"
 check_view noredir_view "bash" "bash reads any number" \
   'echo 12>/dev/null pip i; echo 1>/dev/null' "echo$(sp 13) pip i; echo$(sp 12)"
+check_view recognize_view "zsh" "a descriptor word starts where the walk starts the command: after a { zsh reads as glued" \
+  '{2>/dev/null pip i; }; ! 2>&1 pip i' '{;pip i; }; ! ;pip i'
+check_view recognize_view "bash dash" "where the { is a byte of the first word, the word is the command" \
+  '{2>/dev/null pip i; }; ! 2>&1 pip i' "{2$(sp 11)pip i; }; ! ;pip i"
 check_view noredir_view "${all}" "a process substitution target is one word" \
   '< <(true) pip i' "$(sp 10)pip i"
 check_view noredir_view "${all}" "a process substitution target with a blank and a redirection inside" \
