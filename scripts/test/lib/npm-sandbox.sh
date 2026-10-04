@@ -277,15 +277,26 @@ stub_npm_path() {
 # the deny reason, CASE_NOT_INERT is true, CASE_INSTALL_RC the exit status.
 # CASE_CMD_ENV is an array of NAME=value the command runs with and the hooks do
 # not see, as an agent's shell can carry state its hooks were not given.
+#
+# Each call carries one top-level tool_use_id in both payloads, as both engines
+# send it (measured: Claude Code toolu_..., Codex CLI exec-<uuid>). The
+# backstop's trace entry is named by it, and a payload with none counts as
+# traced, so a row about a command that left no trace needs it. Engine
+# `crossed` is two calls, so its post payload carries another id.
+NPM_SANDBOX_CALLS=0
 run_install() {
-  local command="$1" engine="${2:-claude}" between="${3:-}" payload pre exec_command marks_before
+  local command="$1" engine="${2:-claude}" between="${3:-}" payload pre exec_command marks_before id post_id
   CASE_PRE_DENY="" CASE_NOT_INERT=false CASE_INSTALL_RC=0 CASE_POST="" CASE_RAN="" CASE_EXEC=""
   rm -rf "${tmp_root}/global"
+  NPM_SANDBOX_CALLS=$((NPM_SANDBOX_CALLS + 1))
+  id="toolu_sandbox_$$_${NPM_SANDBOX_CALLS}"
+  post_id="${id}"
+  [[ "${engine}" != crossed ]] || post_id="${id}_codex"
   if [[ "${engine}" == codex ]]; then
-    payload=$(jq -nc --arg c "${command}" --arg d "${CASE_CWD}" \
-      '{tool_name:"Bash",tool_input:{command:$c},cwd:$d,turn_id:"turn-lockless",model:"codex-test"}')
+    payload=$(jq -nc --arg c "${command}" --arg d "${CASE_CWD}" --arg id "${id}" \
+      '{tool_name:"Bash",tool_input:{command:$c},cwd:$d,tool_use_id:$id,turn_id:"turn-lockless",model:"codex-test"}')
   else
-    payload=$(jq -nc --arg c "${command}" --arg d "${CASE_CWD}" '{tool_name:"Bash",tool_input:{command:$c},cwd:$d}')
+    payload=$(jq -nc --arg c "${command}" --arg d "${CASE_CWD}" --arg id "${id}" '{tool_name:"Bash",tool_input:{command:$c},cwd:$d,tool_use_id:$id}')
   fi
   pre=$(printf '%s' "${payload}" | PATH="${CASE_PRE_PATH:-${PATH}}" SAFEDEPS_HOME="${CASE_HOME}" scripts/safedeps-hook-entry.sh pre 2>/dev/null)
   if [[ -n "${pre}" && "$(jq -r '.hookSpecificOutput.permissionDecision // empty' <<< "${pre}")" == deny ]]; then
@@ -317,7 +328,7 @@ run_install() {
   [[ -z "${between}" ]] || "${between}" "${CASE_PROJECT}"
 
   marks_before=$(wc -l < "${MARKS}" | tr -d ' ')
-  payload=$(jq -nc --arg c "${exec_command}" --arg d "${CASE_CWD}" '{tool_name:"Bash",tool_input:{command:$c},cwd:$d}')
+  payload=$(jq -nc --arg c "${exec_command}" --arg d "${CASE_CWD}" --arg id "${post_id}" '{tool_name:"Bash",tool_input:{command:$c},cwd:$d,tool_use_id:$id}')
   CASE_POST=$(printf '%s' "${payload}" | PATH="${CASE_POST_PATH:-${PATH}}" SAFEDEPS_HOME="${CASE_HOME}" scripts/safedeps-hook-entry.sh post 2>/dev/null)
   CASE_RAN=$(tail -n +"$((marks_before + 1))" "${MARKS}")
 }
