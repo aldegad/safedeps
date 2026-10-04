@@ -130,7 +130,7 @@ Recorded reasons:'
 '
       M_NEW='report_rollback_tail() {
   report_changed_nothing
-  report_say "install scripts were not run in ${PROJECT_DIR}"
+  report_say "npm rebuild was not run: ${PROJECT_DIR}"
 '
       ;;
     LogOnly)

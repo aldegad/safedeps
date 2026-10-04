@@ -948,7 +948,7 @@ do
     unverified)
       # Nobody read whether npm kept the flag, so the post hook does not say
       # the install's scripts did not run.
-      [[ -z "${CASE_RAN}" ]] && grep -q 'could not read where npm keeps the --ignore-scripts it added' <<< "${CASE_POST}" \
+      [[ -z "${CASE_RAN}" ]] && grep -q 'could not read where npm keeps the --ignore-scripts in the command safedeps wrote' <<< "${CASE_POST}" \
         && ! grep -q 'install scripts were not run' <<< "${CASE_POST}" \
         || fail "an install whose flag nobody read is not rebuilt, and the user is told its scripts may have run: ${form} (post: ${CASE_POST:-<quiet>})"
       ;;
@@ -1036,10 +1036,10 @@ do
   ! grep -qE 'install scripts were not run|no install script was run' <<< "${CASE_POST}" \
     || fail "the post hook does not say no install script ran: ${form} (${setup}) (post: ${CASE_POST})"
   if [[ "${setup}" == lock_victim ]]; then
-    rolled_back && grep -q "could not read where npm keeps the --ignore-scripts it added" <<< "${CASE_POST}" \
+    rolled_back && grep -q "could not read where npm keeps the --ignore-scripts in the command safedeps wrote" <<< "${CASE_POST}" \
       || fail "the rollback says the install's own scripts may have run: ${form} (post: ${CASE_POST})"
   else
-    grep -q 'could not read where npm keeps the --ignore-scripts it added' <<< "${CASE_POST}" \
+    grep -q 'could not read where npm keeps the --ignore-scripts in the command safedeps wrote' <<< "${CASE_POST}" \
       || fail "the post hook says the install's scripts may have run: ${form} (post: ${CASE_POST:-<quiet>})"
   fi
 done

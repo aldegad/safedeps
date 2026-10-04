@@ -187,7 +187,7 @@ fact_inert() {
 # command text at all (a function or alias from the agent's shell snapshot,
 # .zshenv or BASH_ENV can change the words npm receives), so the line is about
 # what safedeps could not read, and its absence says nothing either way.
-INERT_UNREAD_LINE="safedeps could not read where npm keeps the --ignore-scripts it added, so the install's own scripts may have run"
+INERT_UNREAD_LINE="safedeps could not read where npm keeps the --ignore-scripts in the command safedeps wrote, so the install's own scripts may have run"
 fact_inert_unread() {
   [[ "$(jq -r '.record == 2 and .ignore_scripts_injected == true and .ignore_scripts_unread == true' "$1" 2>/dev/null)" == true ]] \
     && printf '%s' "${INERT_UNREAD_LINE}"

@@ -113,7 +113,6 @@ log-rollback log-backstop log-confirm log-refused log-journal log-inert-unread l
 # reorg decision and may precede a rollback.
 ORACLE_PROSE=(
   "prose-rebuild-not-run|confirm|0|npm rebuild was not run: "
-  "prose-scripts-not-run|confirm|0|install scripts were not run in "
   "prose-baseline-not-moved|confirm|0|safedeps verified this install but could not record the result as the new rollback baseline ("
   "prose-bytes-unread|rollback confirm|0|safedeps could not read which bytes this install brought into "
   "prose-fetch-unknown|rollback confirm|0|safedeps could not tell where npm fetched the bytes this install brought into "
@@ -1076,7 +1075,7 @@ oracle_line() {
     oracle_inert_line inert-asked asked
   elif [[ "${line}" == 'safedeps did not add --ignore-scripts to this install' ]]; then
     oracle_inert_line inert-none none
-  elif [[ "${line}" == "safedeps could not read where npm keeps the --ignore-scripts it added, so the install's own scripts may have run" ]]; then
+  elif [[ "${line}" == "safedeps could not read where npm keeps the --ignore-scripts in the command safedeps wrote, so the install's own scripts may have run" ]]; then
     # Said only right after an "added" or "asked" line, from a record that
     # states the warning.
     oracle_count inert-unread
