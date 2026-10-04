@@ -1377,7 +1377,7 @@ shell_lex() {
       # place between two bytes, and the readers take it from here: the
       # recognize view puts a separator in, command_statements cuts there,
       # prefixes() starts there.
-      function starts(rs, CS, CW,   k, s, w, op, st, pre, rd, fn, fr, fra, inp, rp, dbr, cop, tm, cs, zr, br, fh, j, pn, PST, body, HC, cw, PCOND, pcw, acond) {
+      function starts(rs, CS, CW,   k, s, w, op, st, pre, rd, fn, fr, fra, inp, rp, dbr, cop, tm, cs, zr, br, fh, j, pn, PST, body, HC, cw, PCOND, pcw, acond, hd) {
         zr = (rs == "zsh"); br = (rs == "bash")
         st = 1; pre = 0; rd = 0; fn = 0; fr = 0; fra = 0; inp = 0; rp = 0; dbr = 0; cop = 0; tm = 0; cs = 0; fh = 0; k = 1; pn = 0
         while (k <= N) {
@@ -1405,8 +1405,14 @@ shell_lex() {
               # (The `<` or `>` that opens a process substitution is no
               # operator: it is nested, with the word it starts.)
               rd = 1
-              if (st && !pre) CS[k] = 1
-              if (st) pre = 1
+              # Not while the walk reads a head: the names after `function`,
+              # the list of a `for`, the count of `repeat`, the words of `[[`,
+              # the word of a `case`. No shell starts a command there, and a
+              # start with no command word after it broke the event contract
+              # (random input on bash 5: `function f g>x y`).
+              hd = (fn || fr || rp || dbr || cs || inp)
+              if (st && !pre && !hd) CS[k] = 1
+              if (st && !hd) pre = 1
               if (op == ">" && X[k+1] == "|") k++
             }
             else if (op == "(") {
