@@ -49,10 +49,13 @@ jobs:
         with:
           node-version: "20"
 
-      # The static checks run once per OS, in group a, before its batteries.
+      # Every group installs gitleaks: group a's secret scan needs it, and so do
+      # e2e's pre-commit gate rows in group b, which print `ok ... SKIPPED`
+      # without it. Installed in group a alone, both OSes skipped those rows
+      # (run 37297541785); the verdict job now fails on such a line.
       # Linux: download the pinned gitleaks release and verify its checksum before use.
       - name: Install gitleaks (Linux, checksum-verified)
-        if: matrix.group == 'a' && runner.os == 'Linux'
+        if: runner.os == 'Linux'
         run: |
           curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" -o /tmp/gitleaks.tar.gz
           echo "${GITLEAKS_LINUX_X64_SHA256}  /tmp/gitleaks.tar.gz" | sha256sum -c -
@@ -63,7 +66,7 @@ jobs:
       # macOS keeps the same pin + checksum posture as Linux (no mutable brew formula).
       # macos-latest is arm64; a non-arm64 runner would fail the checksum loudly.
       - name: Install gitleaks (macOS, checksum-verified)
-        if: matrix.group == 'a' && runner.os == 'macOS'
+        if: runner.os == 'macOS'
         run: |
           curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_darwin_arm64.tar.gz" -o /tmp/gitleaks.tar.gz
           echo "${GITLEAKS_DARWIN_ARM64_SHA256}  /tmp/gitleaks.tar.gz" | shasum -a 256 -c -
@@ -71,6 +74,7 @@ jobs:
           sudo install /tmp/gitleaks /usr/local/bin/gitleaks
           gitleaks version
 
+      # The static checks run once per OS, in group a, before its batteries.
       # The gate is bash-heavy; lint it for real bugs. The tree is error-clean;
       # the remaining shellcheck noise is unused-var and intentional-literal-tilde.
       - name: ShellCheck
@@ -173,8 +177,9 @@ jobs:
           pattern: census-${{ matrix.os }}-*
           path: ${{ runner.temp }}/verdict
 
-      # Every battery with a CI group ran once, every census run was made once,
-      # and no census failure mode was idle over all shards.
+      # Every battery with a CI group ran once and printed no skipped row the
+      # verdict does not name, every census run was made once, and no census
+      # failure mode was idle over all shards.
       - name: The jobs of ${{ matrix.os }} ran everything
         env:
           DIR: ${{ runner.temp }}/verdict

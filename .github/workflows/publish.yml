@@ -131,7 +131,10 @@ jobs:
 
       # Everything below runs after npm accepted the version, and a version is
       # published once: a failure here says so, and is fixed forward in the
-      # next patch, never by publishing again.
+      # next patch, never by publishing again. So each read below that can fail
+      # on what the registry or the runner answers ends in `|| unconfirmed`:
+      # under set -e alone it would end the step without saying the version
+      # was published. (The jq reads of $meta read JSON jq has already parsed.)
       #
       # The registry can answer 404 for a while after a publish: in v2.18.1
       # (run 37265447356) the version document answered 404 on this runner for
@@ -181,7 +184,8 @@ jobs:
           if [ "$publisher" != github ] || [ "$predicate" = none ]; then
             unconfirmed "the registry does not mark it as published by GitHub with provenance"
           fi
-          npm pack --dry-run --json | jq -r '.[0].files[].path' | sort > "$RUNNER_TEMP/local.txt"
+          npm pack --dry-run --json | jq -r '.[0].files[].path' | sort > "$RUNNER_TEMP/local.txt" \
+            || unconfirmed "npm pack --dry-run of the tag did not list its files"
           # The tarball named by the document read above, not
           # `npm pack <name>@<version>`: that reads the package document,
           # which the registry can update later than the version's.
@@ -190,7 +194,8 @@ jobs:
           tarball="$RUNNER_TEMP/published.tgz"
           curl -sSfL --retry 10 --retry-delay 15 --retry-all-errors -o "$tarball" "$tarball_url" \
             || unconfirmed "$tarball_url did not download"
-          tar -tzf "$tarball" | sed 's#^package/##' | sort > "$RUNNER_TEMP/published.txt"
+          tar -tzf "$tarball" | sed 's#^package/##' | sort > "$RUNNER_TEMP/published.txt" \
+            || unconfirmed "the tarball from $tarball_url did not list as a gzip tar"
           if ! diff -u "$RUNNER_TEMP/local.txt" "$RUNNER_TEMP/published.txt"; then
             unconfirmed "the published file list differs from npm pack --dry-run of the tag"
           fi
