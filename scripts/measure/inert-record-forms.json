@@ -1,5 +1,5 @@
 {
- "about": "Forms outside scripts/measure/inert-downgrade-grid.sh for scripts/measure/inert-record-invariant.sh: j, s and x are the validator's probes of rounds 1 and 2 (jetbi-20261005-042625, jetbi-20261005-073337), y its unmeasured follow-up, v an npm install the rewrite cannot read beside one it flags or one already settled, one kind per form.",
+ "about": "Forms outside scripts/measure/inert-downgrade-grid.sh for scripts/measure/inert-record-invariant.sh: j, s and x are the validator's probes of rounds 1 and 2 (jetbi-20261005-042625, jetbi-20261005-073337), y its unmeasured follow-up, v an npm install the rewrite cannot read beside one it flags or one already settled, one kind per form. probes: r3q01-r3q21 are the validator's third-round forms and r3k01-r3k04 controls; e001-e016 are text the shell decodes (scope lit: an ANSI-C string, a quoted alias, function, trap or variable) or that another program computes at run time (scope cmp: printf octal, base64, rev, tr, parameter pieces), from the design judgment that made the record an allow-list.",
  "forms": [
   {
    "id": "j001",
@@ -500,6 +500,229 @@
    "id": "v022",
    "tag": "v|commit message mentions npm",
    "cmd": "npm i y && git commit -q --allow-empty -m 'npm: add y' 2>/dev/null; true"
+  }
+ ],
+ "probes": [
+  {
+   "id": "r3q01",
+   "tag": "A|bash --norc -c dq",
+   "cmd": "npm i y && bash --norc -c \"npm ci x\""
+  },
+  {
+   "id": "r3q02",
+   "tag": "A|bash --norc -c sq",
+   "cmd": "npm i y && bash --norc -c 'npm ci'"
+  },
+  {
+   "id": "r3q03",
+   "tag": "A|bash --login -c",
+   "cmd": "npm i y && bash --login -c 'npm ci x'"
+  },
+  {
+   "id": "r3q04",
+   "tag": "A|bash -O extglob -c",
+   "cmd": "npm i y && bash -O extglob -c 'npm ci x'"
+  },
+  {
+   "id": "r3q05",
+   "tag": "A|bash -c -e (option after -c)",
+   "cmd": "npm i y && bash -c -e 'npm ci x'"
+  },
+  {
+   "id": "r3q06",
+   "tag": "A|eval -- dq",
+   "cmd": "npm i y && eval -- \"npm ci x\""
+  },
+  {
+   "id": "r3q07",
+   "tag": "A|settled + bash --norc -c",
+   "cmd": "npm i y --ignore-scripts && bash --norc -c 'npm ci x'"
+  },
+  {
+   "id": "r3q08",
+   "tag": "A|uppercase BASH -c",
+   "cmd": "npm i y && BASH -c 'npm ci x'"
+  },
+  {
+   "id": "r3q09",
+   "tag": "A|quoted shell name",
+   "cmd": "npm i y && \"bash\" -c 'npm ci x'"
+  },
+  {
+   "id": "r3q10",
+   "tag": "B|here-string sq to bash",
+   "cmd": "npm i y && bash <<< 'npm ci x'"
+  },
+  {
+   "id": "r3q11",
+   "tag": "B|here-string dq to sh",
+   "cmd": "npm i y && sh <<< \"npm ci x\""
+  },
+  {
+   "id": "r3q12",
+   "tag": "B|process substitution to bash",
+   "cmd": "npm i y && bash <(echo 'npm ci x')"
+  },
+  {
+   "id": "r3q13",
+   "tag": "B|source process substitution",
+   "cmd": "npm i y && source <(echo 'npm ci x')"
+  },
+  {
+   "id": "r3q14",
+   "tag": "C|python3 -c",
+   "cmd": "npm i y && python3 -c \"import os; os.system('npm ci x')\""
+  },
+  {
+   "id": "r3q15",
+   "tag": "C|perl -e",
+   "cmd": "npm i y && perl -e 'system(\"npm ci x\")'"
+  },
+  {
+   "id": "r3q16",
+   "tag": "D|quoted command word",
+   "cmd": "npm i y && \"npm\" ci x"
+  },
+  {
+   "id": "r3q17",
+   "tag": "D|escaped command word",
+   "cmd": "npm i y && n\\pm ci x"
+  },
+  {
+   "id": "r3q18",
+   "tag": "D|alone quoted command word",
+   "cmd": "\"npm\" ci x"
+  },
+  {
+   "id": "r3q19",
+   "tag": "E|substituted command word",
+   "cmd": "npm i y && $(echo npm) ci x"
+  },
+  {
+   "id": "r3q20",
+   "tag": "E|script from a variable",
+   "cmd": "npm i y && S='npm ci x' && sh -c \"$S\""
+  },
+  {
+   "id": "r3q21",
+   "tag": "E|heredoc to a file then run",
+   "cmd": "npm i y && cat > s.sh <<'E'\nnpm ci x\nE\nsh s.sh"
+  },
+  {
+   "id": "r3k01",
+   "tag": "control|x005 recorded",
+   "cmd": "npm i y && sh <<E | tee log\nnpm ci&&true\nE"
+  },
+  {
+   "id": "r3k02",
+   "tag": "control|v011 recorded",
+   "cmd": "npm i y && sh <<E\nnpm ci\nE"
+  },
+  {
+   "id": "r3k03",
+   "tag": "control|bash -c sq read",
+   "cmd": "npm i y && bash -c 'npm ci x'"
+  },
+  {
+   "id": "r3k04",
+   "tag": "control|echo data",
+   "cmd": "npm i y && echo \"npm ci done\""
+  },
+  {
+   "id": "e001",
+   "tag": "E|lit|ansi-c hex",
+   "scope": "lit",
+   "cmd": "npm i y && sh -c $'\\x6epm ci x'"
+  },
+  {
+   "id": "e002",
+   "tag": "E|lit|ansi-c octal",
+   "scope": "lit",
+   "cmd": "npm i y && eval $'\\156pm ci x'"
+  },
+  {
+   "id": "e003",
+   "tag": "E|lit|ansi-c cmd word",
+   "scope": "lit",
+   "cmd": "npm i y && $'\\x6epm' ci x"
+  },
+  {
+   "id": "e004",
+   "tag": "E|lit|U sets false after",
+   "scope": "lit",
+   "cmd": "npm i y && sh -c \"npm ci \\\"x\\\" --ignore-scripts=false\""
+  },
+  {
+   "id": "e005",
+   "tag": "E|lit|ksh sets false",
+   "scope": "lit",
+   "cmd": "npm i y && ksh -c 'npm ci x --ignore-scripts=false'"
+  },
+  {
+   "id": "e006",
+   "tag": "E|lit|piped heredoc sets false",
+   "scope": "lit",
+   "cmd": "npm i y && cat <<E | sh\nnpm ci x --ignore-scripts=false\nE"
+  },
+  {
+   "id": "e007",
+   "tag": "E|lit|alias then",
+   "scope": "lit",
+   "cmd": "npm i y && alias n='npm ci x'; eval n"
+  },
+  {
+   "id": "e008",
+   "tag": "E|lit|function from sq",
+   "scope": "lit",
+   "cmd": "npm i y && eval 'f() { npm ci x; }'; f"
+  },
+  {
+   "id": "e009",
+   "tag": "E|lit|trap",
+   "scope": "lit",
+   "cmd": "npm i y && trap 'npm ci x' EXIT"
+  },
+  {
+   "id": "e010",
+   "tag": "E|lit|PROMPT_COMMAND-like var",
+   "scope": "lit",
+   "cmd": "npm i y && X='npm ci x'; $X"
+  },
+  {
+   "id": "e011",
+   "tag": "E|cmp|param pieces",
+   "scope": "cmp",
+   "cmd": "npm i y && e=; sh -c \"n${e}pm ci x\""
+  },
+  {
+   "id": "e012",
+   "tag": "E|cmp|var prefix",
+   "scope": "cmp",
+   "cmd": "npm i y && a=np; sh -c \"${a}m ci x\""
+  },
+  {
+   "id": "e013",
+   "tag": "E|cmp|printf octal|sh",
+   "scope": "cmp",
+   "cmd": "npm i y && printf '\\156pm ci x\\n' | sh"
+  },
+  {
+   "id": "e014",
+   "tag": "E|cmp|base64|sh",
+   "scope": "cmp",
+   "cmd": "npm i y && echo bnBtIGNpIHgK | base64 -d | sh"
+  },
+  {
+   "id": "e015",
+   "tag": "E|cmp|rev|sh",
+   "scope": "cmp",
+   "cmd": "npm i y && echo 'x ic mpn' | rev | sh"
+  },
+  {
+   "id": "e016",
+   "tag": "E|cmp|tr|sh",
+   "scope": "cmp",
+   "cmd": "npm i y && echo 'opn ci x' | tr o n | sh"
   }
  ]
 }

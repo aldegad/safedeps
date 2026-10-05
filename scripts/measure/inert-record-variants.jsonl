@@ -1,0 +1,632 @@
+{"id":"g0003F2","tag":"G1|sh O -c (-B) [F2]","cmd":"npm i y && sh -B -c 'npm ci'"}
+{"id":"g0003S1","tag":"G1|sh O -c (-B) [S1]","cmd":"npm i y --ignore-scripts && sh -B -c 'npm ci x'"}
+{"id":"g0004F2","tag":"G1|sh -c O (-B) [F2]","cmd":"npm i y && sh -c -B 'npm ci'"}
+{"id":"g0004S1","tag":"G1|sh -c O (-B) [S1]","cmd":"npm i y --ignore-scripts && sh -c -B 'npm ci x'"}
+{"id":"g0006F2","tag":"G1|sh -cL (-B) [F2]","cmd":"npm i y && sh -cB 'npm ci'"}
+{"id":"g0006S1","tag":"G1|sh -cL (-B) [S1]","cmd":"npm i y --ignore-scripts && sh -cB 'npm ci x'"}
+{"id":"g0007F2","tag":"G1|sh O -c (+B) [F2]","cmd":"npm i y && sh +B -c 'npm ci'"}
+{"id":"g0007S1","tag":"G1|sh O -c (+B) [S1]","cmd":"npm i y --ignore-scripts && sh +B -c 'npm ci x'"}
+{"id":"g0008F2","tag":"G1|sh -c O (+B) [F2]","cmd":"npm i y && sh -c +B 'npm ci'"}
+{"id":"g0008S1","tag":"G1|sh -c O (+B) [S1]","cmd":"npm i y --ignore-scripts && sh -c +B 'npm ci x'"}
+{"id":"g0153F2","tag":"G1|sh O -c (--debug) [F2]","cmd":"npm i y && sh --debug -c 'npm ci'"}
+{"id":"g0153S1","tag":"G1|sh O -c (--debug) [S1]","cmd":"npm i y --ignore-scripts && sh --debug -c 'npm ci x'"}
+{"id":"g0161F2","tag":"G1|sh O -c (--init-file /dev/null) [F2]","cmd":"npm i y && sh --init-file /dev/null -c 'npm ci'"}
+{"id":"g0161S1","tag":"G1|sh O -c (--init-file /dev/null) [S1]","cmd":"npm i y --ignore-scripts && sh --init-file /dev/null -c 'npm ci x'"}
+{"id":"g0183F2","tag":"G1|sh O -c (-o allexport) [F2]","cmd":"npm i y && sh -o allexport -c 'npm ci'"}
+{"id":"g0183S1","tag":"G1|sh O -c (-o allexport) [S1]","cmd":"npm i y --ignore-scripts && sh -o allexport -c 'npm ci x'"}
+{"id":"g0184F2","tag":"G1|sh -c O (-o allexport) [F2]","cmd":"npm i y && sh -c -o allexport 'npm ci'"}
+{"id":"g0184S1","tag":"G1|sh -c O (-o allexport) [S1]","cmd":"npm i y --ignore-scripts && sh -c -o allexport 'npm ci x'"}
+{"id":"g0185F2","tag":"G1|sh O -c (+o allexport) [F2]","cmd":"npm i y && sh +o allexport -c 'npm ci'"}
+{"id":"g0185S1","tag":"G1|sh O -c (+o allexport) [S1]","cmd":"npm i y --ignore-scripts && sh +o allexport -c 'npm ci x'"}
+{"id":"g0186F2","tag":"G1|sh -c O (+o allexport) [F2]","cmd":"npm i y && sh -c +o allexport 'npm ci'"}
+{"id":"g0186S1","tag":"G1|sh -c O (+o allexport) [S1]","cmd":"npm i y --ignore-scripts && sh -c +o allexport 'npm ci x'"}
+{"id":"g0188F2","tag":"G1|name Sh [F2]","cmd":"npm i y && Sh -c 'npm ci'"}
+{"id":"g0188S1","tag":"G1|name Sh [S1]","cmd":"npm i y --ignore-scripts && Sh -c 'npm ci x'"}
+{"id":"g0189F2","tag":"G1|name SH [F2]","cmd":"npm i y && SH -c 'npm ci'"}
+{"id":"g0189S1","tag":"G1|name SH [S1]","cmd":"npm i y --ignore-scripts && SH -c 'npm ci x'"}
+{"id":"g0192F2","tag":"G1|bash O -c (-B) [F2]","cmd":"npm i y && bash -B -c 'npm ci'"}
+{"id":"g0192S1","tag":"G1|bash O -c (-B) [S1]","cmd":"npm i y --ignore-scripts && bash -B -c 'npm ci x'"}
+{"id":"g0193F2","tag":"G1|bash -c O (-B) [F2]","cmd":"npm i y && bash -c -B 'npm ci'"}
+{"id":"g0193S1","tag":"G1|bash -c O (-B) [S1]","cmd":"npm i y --ignore-scripts && bash -c -B 'npm ci x'"}
+{"id":"g0195F2","tag":"G1|bash -cL (-B) [F2]","cmd":"npm i y && bash -cB 'npm ci'"}
+{"id":"g0195S1","tag":"G1|bash -cL (-B) [S1]","cmd":"npm i y --ignore-scripts && bash -cB 'npm ci x'"}
+{"id":"g0196F2","tag":"G1|bash O -c (+B) [F2]","cmd":"npm i y && bash +B -c 'npm ci'"}
+{"id":"g0196S1","tag":"G1|bash O -c (+B) [S1]","cmd":"npm i y --ignore-scripts && bash +B -c 'npm ci x'"}
+{"id":"g0197F2","tag":"G1|bash -c O (+B) [F2]","cmd":"npm i y && bash -c +B 'npm ci'"}
+{"id":"g0197S1","tag":"G1|bash -c O (+B) [S1]","cmd":"npm i y --ignore-scripts && bash -c +B 'npm ci x'"}
+{"id":"g0342F2","tag":"G1|bash O -c (--debug) [F2]","cmd":"npm i y && bash --debug -c 'npm ci'"}
+{"id":"g0342S1","tag":"G1|bash O -c (--debug) [S1]","cmd":"npm i y --ignore-scripts && bash --debug -c 'npm ci x'"}
+{"id":"g0350F2","tag":"G1|bash O -c (--init-file /dev/null) [F2]","cmd":"npm i y && bash --init-file /dev/null -c 'npm ci'"}
+{"id":"g0350S1","tag":"G1|bash O -c (--init-file /dev/null) [S1]","cmd":"npm i y --ignore-scripts && bash --init-file /dev/null -c 'npm ci x'"}
+{"id":"g0372F2","tag":"G1|bash O -c (-o allexport) [F2]","cmd":"npm i y && bash -o allexport -c 'npm ci'"}
+{"id":"g0372S1","tag":"G1|bash O -c (-o allexport) [S1]","cmd":"npm i y --ignore-scripts && bash -o allexport -c 'npm ci x'"}
+{"id":"g0373F2","tag":"G1|bash -c O (-o allexport) [F2]","cmd":"npm i y && bash -c -o allexport 'npm ci'"}
+{"id":"g0373S1","tag":"G1|bash -c O (-o allexport) [S1]","cmd":"npm i y --ignore-scripts && bash -c -o allexport 'npm ci x'"}
+{"id":"g0374F2","tag":"G1|bash O -c (+o allexport) [F2]","cmd":"npm i y && bash +o allexport -c 'npm ci'"}
+{"id":"g0374S1","tag":"G1|bash O -c (+o allexport) [S1]","cmd":"npm i y --ignore-scripts && bash +o allexport -c 'npm ci x'"}
+{"id":"g0375F2","tag":"G1|bash -c O (+o allexport) [F2]","cmd":"npm i y && bash -c +o allexport 'npm ci'"}
+{"id":"g0375S1","tag":"G1|bash -c O (+o allexport) [S1]","cmd":"npm i y --ignore-scripts && bash -c +o allexport 'npm ci x'"}
+{"id":"g0376F2","tag":"G1|bash O -c (-O cdable_vars) [F2]","cmd":"npm i y && bash -O cdable_vars -c 'npm ci'"}
+{"id":"g0376S1","tag":"G1|bash O -c (-O cdable_vars) [S1]","cmd":"npm i y --ignore-scripts && bash -O cdable_vars -c 'npm ci x'"}
+{"id":"g0377F2","tag":"G1|bash -c O (-O cdable_vars) [F2]","cmd":"npm i y && bash -c -O cdable_vars 'npm ci'"}
+{"id":"g0377S1","tag":"G1|bash -c O (-O cdable_vars) [S1]","cmd":"npm i y --ignore-scripts && bash -c -O cdable_vars 'npm ci x'"}
+{"id":"g0378F2","tag":"G1|bash O -c (+O cdable_vars) [F2]","cmd":"npm i y && bash +O cdable_vars -c 'npm ci'"}
+{"id":"g0378S1","tag":"G1|bash O -c (+O cdable_vars) [S1]","cmd":"npm i y --ignore-scripts && bash +O cdable_vars -c 'npm ci x'"}
+{"id":"g0379F2","tag":"G1|bash -c O (+O cdable_vars) [F2]","cmd":"npm i y && bash -c +O cdable_vars 'npm ci'"}
+{"id":"g0379S1","tag":"G1|bash -c O (+O cdable_vars) [S1]","cmd":"npm i y --ignore-scripts && bash -c +O cdable_vars 'npm ci x'"}
+{"id":"g0382F2","tag":"G1|name BASH [F2]","cmd":"npm i y && BASH -c 'npm ci'"}
+{"id":"g0382S1","tag":"G1|name BASH [S1]","cmd":"npm i y --ignore-scripts && BASH -c 'npm ci x'"}
+{"id":"g0385F2","tag":"G1|zsh O -c (-B) [F2]","cmd":"npm i y && zsh -B -c 'npm ci'"}
+{"id":"g0385S1","tag":"G1|zsh O -c (-B) [S1]","cmd":"npm i y --ignore-scripts && zsh -B -c 'npm ci x'"}
+{"id":"g0386F2","tag":"G1|zsh -c O (-B) [F2]","cmd":"npm i y && zsh -c -B 'npm ci'"}
+{"id":"g0386S1","tag":"G1|zsh -c O (-B) [S1]","cmd":"npm i y --ignore-scripts && zsh -c -B 'npm ci x'"}
+{"id":"g0388F2","tag":"G1|zsh -cL (-B) [F2]","cmd":"npm i y && zsh -cB 'npm ci'"}
+{"id":"g0388S1","tag":"G1|zsh -cL (-B) [S1]","cmd":"npm i y --ignore-scripts && zsh -cB 'npm ci x'"}
+{"id":"g0389F2","tag":"G1|zsh O -c (+B) [F2]","cmd":"npm i y && zsh +B -c 'npm ci'"}
+{"id":"g0389S1","tag":"G1|zsh O -c (+B) [S1]","cmd":"npm i y --ignore-scripts && zsh +B -c 'npm ci x'"}
+{"id":"g0390F2","tag":"G1|zsh -c O (+B) [F2]","cmd":"npm i y && zsh -c +B 'npm ci'"}
+{"id":"g0390S1","tag":"G1|zsh -c O (+B) [S1]","cmd":"npm i y --ignore-scripts && zsh -c +B 'npm ci x'"}
+{"id":"g0657F2","tag":"G1|zsh O -c (--aliases) [F2]","cmd":"npm i y && zsh --aliases -c 'npm ci'"}
+{"id":"g0657S1","tag":"G1|zsh O -c (--aliases) [S1]","cmd":"npm i y --ignore-scripts && zsh --aliases -c 'npm ci x'"}
+{"id":"g0658F2","tag":"G1|zsh -c O (--aliases) [F2]","cmd":"npm i y && zsh -c --aliases 'npm ci'"}
+{"id":"g0658S1","tag":"G1|zsh -c O (--aliases) [S1]","cmd":"npm i y --ignore-scripts && zsh -c --aliases 'npm ci x'"}
+{"id":"g1077F2","tag":"G1|zsh O -c (-o noaliases) [F2]","cmd":"npm i y && zsh -o noaliases -c 'npm ci'"}
+{"id":"g1077S1","tag":"G1|zsh O -c (-o noaliases) [S1]","cmd":"npm i y --ignore-scripts && zsh -o noaliases -c 'npm ci x'"}
+{"id":"g1078F2","tag":"G1|zsh -c O (-o noaliases) [F2]","cmd":"npm i y && zsh -c -o noaliases 'npm ci'"}
+{"id":"g1078S1","tag":"G1|zsh -c O (-o noaliases) [S1]","cmd":"npm i y --ignore-scripts && zsh -c -o noaliases 'npm ci x'"}
+{"id":"g1079F2","tag":"G1|zsh O -c (+o noaliases) [F2]","cmd":"npm i y && zsh +o noaliases -c 'npm ci'"}
+{"id":"g1079S1","tag":"G1|zsh O -c (+o noaliases) [S1]","cmd":"npm i y --ignore-scripts && zsh +o noaliases -c 'npm ci x'"}
+{"id":"g1080F2","tag":"G1|zsh -c O (+o noaliases) [F2]","cmd":"npm i y && zsh -c +o noaliases 'npm ci'"}
+{"id":"g1080S1","tag":"G1|zsh -c O (+o noaliases) [S1]","cmd":"npm i y --ignore-scripts && zsh -c +o noaliases 'npm ci x'"}
+{"id":"g1083F2","tag":"G1|name ZSH [F2]","cmd":"npm i y && ZSH -c 'npm ci'"}
+{"id":"g1083S1","tag":"G1|name ZSH [S1]","cmd":"npm i y --ignore-scripts && ZSH -c 'npm ci x'"}
+{"id":"g1086F2","tag":"G1|dash O -c (-C) [F2]","cmd":"npm i y && dash -C -c 'npm ci'"}
+{"id":"g1086S1","tag":"G1|dash O -c (-C) [S1]","cmd":"npm i y --ignore-scripts && dash -C -c 'npm ci x'"}
+{"id":"g1087F2","tag":"G1|dash -c O (-C) [F2]","cmd":"npm i y && dash -c -C 'npm ci'"}
+{"id":"g1087S1","tag":"G1|dash -c O (-C) [S1]","cmd":"npm i y --ignore-scripts && dash -c -C 'npm ci x'"}
+{"id":"g1089F2","tag":"G1|dash -cL (-C) [F2]","cmd":"npm i y && dash -cC 'npm ci'"}
+{"id":"g1089S1","tag":"G1|dash -cL (-C) [S1]","cmd":"npm i y --ignore-scripts && dash -cC 'npm ci x'"}
+{"id":"g1090F2","tag":"G1|dash O -c (+C) [F2]","cmd":"npm i y && dash +C -c 'npm ci'"}
+{"id":"g1090S1","tag":"G1|dash O -c (+C) [S1]","cmd":"npm i y --ignore-scripts && dash +C -c 'npm ci x'"}
+{"id":"g1091F2","tag":"G1|dash -c O (+C) [F2]","cmd":"npm i y && dash -c +C 'npm ci'"}
+{"id":"g1091S1","tag":"G1|dash -c O (+C) [S1]","cmd":"npm i y --ignore-scripts && dash -c +C 'npm ci x'"}
+{"id":"g1182F2","tag":"G1|dash O -c (-o errexit) [F2]","cmd":"npm i y && dash -o errexit -c 'npm ci'"}
+{"id":"g1182S1","tag":"G1|dash O -c (-o errexit) [S1]","cmd":"npm i y --ignore-scripts && dash -o errexit -c 'npm ci x'"}
+{"id":"g1183F2","tag":"G1|dash -c O (-o errexit) [F2]","cmd":"npm i y && dash -c -o errexit 'npm ci'"}
+{"id":"g1183S1","tag":"G1|dash -c O (-o errexit) [S1]","cmd":"npm i y --ignore-scripts && dash -c -o errexit 'npm ci x'"}
+{"id":"g1184F2","tag":"G1|dash O -c (+o errexit) [F2]","cmd":"npm i y && dash +o errexit -c 'npm ci'"}
+{"id":"g1184S1","tag":"G1|dash O -c (+o errexit) [S1]","cmd":"npm i y --ignore-scripts && dash +o errexit -c 'npm ci x'"}
+{"id":"g1185F2","tag":"G1|dash -c O (+o errexit) [F2]","cmd":"npm i y && dash -c +o errexit 'npm ci'"}
+{"id":"g1185S1","tag":"G1|dash -c O (+o errexit) [S1]","cmd":"npm i y --ignore-scripts && dash -c +o errexit 'npm ci x'"}
+{"id":"g1188F2","tag":"G1|name DASH [F2]","cmd":"npm i y && DASH -c 'npm ci'"}
+{"id":"g1188S1","tag":"G1|name DASH [S1]","cmd":"npm i y --ignore-scripts && DASH -c 'npm ci x'"}
+{"id":"g1189F2","tag":"G2|sh <<< [F2]","cmd":"npm i y && sh <<< 'npm ci'"}
+{"id":"g1189S1","tag":"G2|sh <<< [S1]","cmd":"npm i y --ignore-scripts && sh <<< 'npm ci x'"}
+{"id":"g1190F2","tag":"G2|sh <<E [F2]","cmd":"npm i y && sh <<E\nnpm ci\nE"}
+{"id":"g1190S1","tag":"G2|sh <<E [S1]","cmd":"npm i y --ignore-scripts && sh <<E\nnpm ci x\nE"}
+{"id":"g1191F2","tag":"G2|sh <<-E [F2]","cmd":"npm i y && sh <<-E\n\tnpm ci\n\tE"}
+{"id":"g1191S1","tag":"G2|sh <<-E [S1]","cmd":"npm i y --ignore-scripts && sh <<-E\n\tnpm ci x\n\tE"}
+{"id":"g1192F2","tag":"G2|sh <<'E' [F2]","cmd":"npm i y && sh <<'E'\nnpm ci\nE"}
+{"id":"g1192S1","tag":"G2|sh <<'E' [S1]","cmd":"npm i y --ignore-scripts && sh <<'E'\nnpm ci x\nE"}
+{"id":"g1193F2","tag":"G2|sh < <() [F2]","cmd":"npm i y && sh < <(echo 'npm ci')"}
+{"id":"g1193S1","tag":"G2|sh < <() [S1]","cmd":"npm i y --ignore-scripts && sh < <(echo 'npm ci x')"}
+{"id":"g1194F2","tag":"G2|sh -s <<< [F2]","cmd":"npm i y && sh -s <<< 'npm ci'"}
+{"id":"g1194S1","tag":"G2|sh -s <<< [S1]","cmd":"npm i y --ignore-scripts && sh -s <<< 'npm ci x'"}
+{"id":"g1195F2","tag":"G2|sh -s <<E [F2]","cmd":"npm i y && sh -s <<E\nnpm ci\nE"}
+{"id":"g1195S1","tag":"G2|sh -s <<E [S1]","cmd":"npm i y --ignore-scripts && sh -s <<E\nnpm ci x\nE"}
+{"id":"g1196F2","tag":"G2|sh -s <<-E [F2]","cmd":"npm i y && sh -s <<-E\n\tnpm ci\n\tE"}
+{"id":"g1196S1","tag":"G2|sh -s <<-E [S1]","cmd":"npm i y --ignore-scripts && sh -s <<-E\n\tnpm ci x\n\tE"}
+{"id":"g1197F2","tag":"G2|sh -s <<'E' [F2]","cmd":"npm i y && sh -s <<'E'\nnpm ci\nE"}
+{"id":"g1197S1","tag":"G2|sh -s <<'E' [S1]","cmd":"npm i y --ignore-scripts && sh -s <<'E'\nnpm ci x\nE"}
+{"id":"g1198F2","tag":"G2|sh -s < <() [F2]","cmd":"npm i y && sh -s < <(echo 'npm ci')"}
+{"id":"g1198S1","tag":"G2|sh -s < <() [S1]","cmd":"npm i y --ignore-scripts && sh -s < <(echo 'npm ci x')"}
+{"id":"g1199F2","tag":"G2|sh - <<< [F2]","cmd":"npm i y && sh - <<< 'npm ci'"}
+{"id":"g1199S1","tag":"G2|sh - <<< [S1]","cmd":"npm i y --ignore-scripts && sh - <<< 'npm ci x'"}
+{"id":"g1200F2","tag":"G2|sh - <<E [F2]","cmd":"npm i y && sh - <<E\nnpm ci\nE"}
+{"id":"g1200S1","tag":"G2|sh - <<E [S1]","cmd":"npm i y --ignore-scripts && sh - <<E\nnpm ci x\nE"}
+{"id":"g1201F2","tag":"G2|sh - <<-E [F2]","cmd":"npm i y && sh - <<-E\n\tnpm ci\n\tE"}
+{"id":"g1201S1","tag":"G2|sh - <<-E [S1]","cmd":"npm i y --ignore-scripts && sh - <<-E\n\tnpm ci x\n\tE"}
+{"id":"g1202F2","tag":"G2|sh - <<'E' [F2]","cmd":"npm i y && sh - <<'E'\nnpm ci\nE"}
+{"id":"g1202S1","tag":"G2|sh - <<'E' [S1]","cmd":"npm i y --ignore-scripts && sh - <<'E'\nnpm ci x\nE"}
+{"id":"g1203F2","tag":"G2|sh - < <() [F2]","cmd":"npm i y && sh - < <(echo 'npm ci')"}
+{"id":"g1203S1","tag":"G2|sh - < <() [S1]","cmd":"npm i y --ignore-scripts && sh - < <(echo 'npm ci x')"}
+{"id":"g1204F2","tag":"G2|sh /dev/stdin <<< [F2]","cmd":"npm i y && sh /dev/stdin <<< 'npm ci'"}
+{"id":"g1204S1","tag":"G2|sh /dev/stdin <<< [S1]","cmd":"npm i y --ignore-scripts && sh /dev/stdin <<< 'npm ci x'"}
+{"id":"g1205F2","tag":"G2|sh /dev/stdin <<E [F2]","cmd":"npm i y && sh /dev/stdin <<E\nnpm ci\nE"}
+{"id":"g1205S1","tag":"G2|sh /dev/stdin <<E [S1]","cmd":"npm i y --ignore-scripts && sh /dev/stdin <<E\nnpm ci x\nE"}
+{"id":"g1206F2","tag":"G2|sh /dev/stdin <<-E [F2]","cmd":"npm i y && sh /dev/stdin <<-E\n\tnpm ci\n\tE"}
+{"id":"g1206S1","tag":"G2|sh /dev/stdin <<-E [S1]","cmd":"npm i y --ignore-scripts && sh /dev/stdin <<-E\n\tnpm ci x\n\tE"}
+{"id":"g1207F2","tag":"G2|sh /dev/stdin <<'E' [F2]","cmd":"npm i y && sh /dev/stdin <<'E'\nnpm ci\nE"}
+{"id":"g1207S1","tag":"G2|sh /dev/stdin <<'E' [S1]","cmd":"npm i y --ignore-scripts && sh /dev/stdin <<'E'\nnpm ci x\nE"}
+{"id":"g1208F2","tag":"G2|sh /dev/stdin < <() [F2]","cmd":"npm i y && sh /dev/stdin < <(echo 'npm ci')"}
+{"id":"g1208S1","tag":"G2|sh /dev/stdin < <() [S1]","cmd":"npm i y --ignore-scripts && sh /dev/stdin < <(echo 'npm ci x')"}
+{"id":"g1209F2","tag":"G2|sh /dev/fd/0 <<< [F2]","cmd":"npm i y && sh /dev/fd/0 <<< 'npm ci'"}
+{"id":"g1209S1","tag":"G2|sh /dev/fd/0 <<< [S1]","cmd":"npm i y --ignore-scripts && sh /dev/fd/0 <<< 'npm ci x'"}
+{"id":"g1210F2","tag":"G2|sh /dev/fd/0 <<E [F2]","cmd":"npm i y && sh /dev/fd/0 <<E\nnpm ci\nE"}
+{"id":"g1210S1","tag":"G2|sh /dev/fd/0 <<E [S1]","cmd":"npm i y --ignore-scripts && sh /dev/fd/0 <<E\nnpm ci x\nE"}
+{"id":"g1211F2","tag":"G2|sh /dev/fd/0 <<-E [F2]","cmd":"npm i y && sh /dev/fd/0 <<-E\n\tnpm ci\n\tE"}
+{"id":"g1211S1","tag":"G2|sh /dev/fd/0 <<-E [S1]","cmd":"npm i y --ignore-scripts && sh /dev/fd/0 <<-E\n\tnpm ci x\n\tE"}
+{"id":"g1212F2","tag":"G2|sh /dev/fd/0 <<'E' [F2]","cmd":"npm i y && sh /dev/fd/0 <<'E'\nnpm ci\nE"}
+{"id":"g1212S1","tag":"G2|sh /dev/fd/0 <<'E' [S1]","cmd":"npm i y --ignore-scripts && sh /dev/fd/0 <<'E'\nnpm ci x\nE"}
+{"id":"g1213F2","tag":"G2|sh /dev/fd/0 < <() [F2]","cmd":"npm i y && sh /dev/fd/0 < <(echo 'npm ci')"}
+{"id":"g1213S1","tag":"G2|sh /dev/fd/0 < <() [S1]","cmd":"npm i y --ignore-scripts && sh /dev/fd/0 < <(echo 'npm ci x')"}
+{"id":"g1214F2","tag":"G2|sh 0<<< [F2]","cmd":"npm i y && sh 0<<< 'npm ci'"}
+{"id":"g1214S1","tag":"G2|sh 0<<< [S1]","cmd":"npm i y --ignore-scripts && sh 0<<< 'npm ci x'"}
+{"id":"g1215F2","tag":"G2|sh 0<<E [F2]","cmd":"npm i y && sh 0<<E\nnpm ci\nE"}
+{"id":"g1215S1","tag":"G2|sh 0<<E [S1]","cmd":"npm i y --ignore-scripts && sh 0<<E\nnpm ci x\nE"}
+{"id":"g1216F2","tag":"G2|sh 0<<-E [F2]","cmd":"npm i y && sh 0<<-E\n\tnpm ci\n\tE"}
+{"id":"g1216S1","tag":"G2|sh 0<<-E [S1]","cmd":"npm i y --ignore-scripts && sh 0<<-E\n\tnpm ci x\n\tE"}
+{"id":"g1217F2","tag":"G2|sh 0<<'E' [F2]","cmd":"npm i y && sh 0<<'E'\nnpm ci\nE"}
+{"id":"g1217S1","tag":"G2|sh 0<<'E' [S1]","cmd":"npm i y --ignore-scripts && sh 0<<'E'\nnpm ci x\nE"}
+{"id":"g1218F2","tag":"G2|sh 0< <() [F2]","cmd":"npm i y && sh 0< <(echo 'npm ci')"}
+{"id":"g1218S1","tag":"G2|sh 0< <() [S1]","cmd":"npm i y --ignore-scripts && sh 0< <(echo 'npm ci x')"}
+{"id":"g1219F2","tag":"G2|sh -s 0<<< [F2]","cmd":"npm i y && sh -s 0<<< 'npm ci'"}
+{"id":"g1219S1","tag":"G2|sh -s 0<<< [S1]","cmd":"npm i y --ignore-scripts && sh -s 0<<< 'npm ci x'"}
+{"id":"g1220F2","tag":"G2|sh -s 0<<E [F2]","cmd":"npm i y && sh -s 0<<E\nnpm ci\nE"}
+{"id":"g1220S1","tag":"G2|sh -s 0<<E [S1]","cmd":"npm i y --ignore-scripts && sh -s 0<<E\nnpm ci x\nE"}
+{"id":"g1221F2","tag":"G2|sh -s 0<<-E [F2]","cmd":"npm i y && sh -s 0<<-E\n\tnpm ci\n\tE"}
+{"id":"g1221S1","tag":"G2|sh -s 0<<-E [S1]","cmd":"npm i y --ignore-scripts && sh -s 0<<-E\n\tnpm ci x\n\tE"}
+{"id":"g1222F2","tag":"G2|sh -s 0<<'E' [F2]","cmd":"npm i y && sh -s 0<<'E'\nnpm ci\nE"}
+{"id":"g1222S1","tag":"G2|sh -s 0<<'E' [S1]","cmd":"npm i y --ignore-scripts && sh -s 0<<'E'\nnpm ci x\nE"}
+{"id":"g1223F2","tag":"G2|sh -s 0< <() [F2]","cmd":"npm i y && sh -s 0< <(echo 'npm ci')"}
+{"id":"g1223S1","tag":"G2|sh -s 0< <() [S1]","cmd":"npm i y --ignore-scripts && sh -s 0< <(echo 'npm ci x')"}
+{"id":"g1224F2","tag":"G2|sh - 0<<< [F2]","cmd":"npm i y && sh - 0<<< 'npm ci'"}
+{"id":"g1224S1","tag":"G2|sh - 0<<< [S1]","cmd":"npm i y --ignore-scripts && sh - 0<<< 'npm ci x'"}
+{"id":"g1225F2","tag":"G2|sh - 0<<E [F2]","cmd":"npm i y && sh - 0<<E\nnpm ci\nE"}
+{"id":"g1225S1","tag":"G2|sh - 0<<E [S1]","cmd":"npm i y --ignore-scripts && sh - 0<<E\nnpm ci x\nE"}
+{"id":"g1226F2","tag":"G2|sh - 0<<-E [F2]","cmd":"npm i y && sh - 0<<-E\n\tnpm ci\n\tE"}
+{"id":"g1226S1","tag":"G2|sh - 0<<-E [S1]","cmd":"npm i y --ignore-scripts && sh - 0<<-E\n\tnpm ci x\n\tE"}
+{"id":"g1227F2","tag":"G2|sh - 0<<'E' [F2]","cmd":"npm i y && sh - 0<<'E'\nnpm ci\nE"}
+{"id":"g1227S1","tag":"G2|sh - 0<<'E' [S1]","cmd":"npm i y --ignore-scripts && sh - 0<<'E'\nnpm ci x\nE"}
+{"id":"g1228F2","tag":"G2|sh - 0< <() [F2]","cmd":"npm i y && sh - 0< <(echo 'npm ci')"}
+{"id":"g1228S1","tag":"G2|sh - 0< <() [S1]","cmd":"npm i y --ignore-scripts && sh - 0< <(echo 'npm ci x')"}
+{"id":"g1229F2","tag":"G2|sh /dev/stdin 0<<< [F2]","cmd":"npm i y && sh /dev/stdin 0<<< 'npm ci'"}
+{"id":"g1229S1","tag":"G2|sh /dev/stdin 0<<< [S1]","cmd":"npm i y --ignore-scripts && sh /dev/stdin 0<<< 'npm ci x'"}
+{"id":"g1230F2","tag":"G2|sh /dev/stdin 0<<E [F2]","cmd":"npm i y && sh /dev/stdin 0<<E\nnpm ci\nE"}
+{"id":"g1230S1","tag":"G2|sh /dev/stdin 0<<E [S1]","cmd":"npm i y --ignore-scripts && sh /dev/stdin 0<<E\nnpm ci x\nE"}
+{"id":"g1231F2","tag":"G2|sh /dev/stdin 0<<-E [F2]","cmd":"npm i y && sh /dev/stdin 0<<-E\n\tnpm ci\n\tE"}
+{"id":"g1231S1","tag":"G2|sh /dev/stdin 0<<-E [S1]","cmd":"npm i y --ignore-scripts && sh /dev/stdin 0<<-E\n\tnpm ci x\n\tE"}
+{"id":"g1232F2","tag":"G2|sh /dev/stdin 0<<'E' [F2]","cmd":"npm i y && sh /dev/stdin 0<<'E'\nnpm ci\nE"}
+{"id":"g1232S1","tag":"G2|sh /dev/stdin 0<<'E' [S1]","cmd":"npm i y --ignore-scripts && sh /dev/stdin 0<<'E'\nnpm ci x\nE"}
+{"id":"g1233F2","tag":"G2|sh /dev/stdin 0< <() [F2]","cmd":"npm i y && sh /dev/stdin 0< <(echo 'npm ci')"}
+{"id":"g1233S1","tag":"G2|sh /dev/stdin 0< <() [S1]","cmd":"npm i y --ignore-scripts && sh /dev/stdin 0< <(echo 'npm ci x')"}
+{"id":"g1234F2","tag":"G2|sh /dev/fd/0 0<<< [F2]","cmd":"npm i y && sh /dev/fd/0 0<<< 'npm ci'"}
+{"id":"g1234S1","tag":"G2|sh /dev/fd/0 0<<< [S1]","cmd":"npm i y --ignore-scripts && sh /dev/fd/0 0<<< 'npm ci x'"}
+{"id":"g1235F2","tag":"G2|sh /dev/fd/0 0<<E [F2]","cmd":"npm i y && sh /dev/fd/0 0<<E\nnpm ci\nE"}
+{"id":"g1235S1","tag":"G2|sh /dev/fd/0 0<<E [S1]","cmd":"npm i y --ignore-scripts && sh /dev/fd/0 0<<E\nnpm ci x\nE"}
+{"id":"g1236F2","tag":"G2|sh /dev/fd/0 0<<-E [F2]","cmd":"npm i y && sh /dev/fd/0 0<<-E\n\tnpm ci\n\tE"}
+{"id":"g1236S1","tag":"G2|sh /dev/fd/0 0<<-E [S1]","cmd":"npm i y --ignore-scripts && sh /dev/fd/0 0<<-E\n\tnpm ci x\n\tE"}
+{"id":"g1237F2","tag":"G2|sh /dev/fd/0 0<<'E' [F2]","cmd":"npm i y && sh /dev/fd/0 0<<'E'\nnpm ci\nE"}
+{"id":"g1237S1","tag":"G2|sh /dev/fd/0 0<<'E' [S1]","cmd":"npm i y --ignore-scripts && sh /dev/fd/0 0<<'E'\nnpm ci x\nE"}
+{"id":"g1238F2","tag":"G2|sh /dev/fd/0 0< <() [F2]","cmd":"npm i y && sh /dev/fd/0 0< <(echo 'npm ci')"}
+{"id":"g1238S1","tag":"G2|sh /dev/fd/0 0< <() [S1]","cmd":"npm i y --ignore-scripts && sh /dev/fd/0 0< <(echo 'npm ci x')"}
+{"id":"g1239F2","tag":"G2|sh <& here-string [F2]","cmd":"npm i y && exec 3<<< 'npm ci'; sh <&3"}
+{"id":"g1239S1","tag":"G2|sh <& here-string [S1]","cmd":"npm i y --ignore-scripts && exec 3<<< 'npm ci x'; sh <&3"}
+{"id":"g1240F2","tag":"G2|sh <> file [F2]","cmd":"npm i y && printf '%s\\n' 'npm ci' > f; sh <> f"}
+{"id":"g1240S1","tag":"G2|sh <> file [S1]","cmd":"npm i y --ignore-scripts && printf '%s\\n' 'npm ci x' > f; sh <> f"}
+{"id":"g1241F2","tag":"G2|sh <(..) path [F2]","cmd":"npm i y && sh <(echo 'npm ci')"}
+{"id":"g1241S1","tag":"G2|sh <(..) path [S1]","cmd":"npm i y --ignore-scripts && sh <(echo 'npm ci x')"}
+{"id":"g1244F2","tag":"G2|file then sh [F2]","cmd":"npm i y && printf '%s\\n' 'npm ci' > f; sh f"}
+{"id":"g1244S1","tag":"G2|file then sh [S1]","cmd":"npm i y --ignore-scripts && printf '%s\\n' 'npm ci x' > f; sh f"}
+{"id":"g1245F2","tag":"G2|heredoc file then sh [F2]","cmd":"npm i y && cat > f <<'E'\nnpm ci\nE\nsh f"}
+{"id":"g1245S1","tag":"G2|heredoc file then sh [S1]","cmd":"npm i y --ignore-scripts && cat > f <<'E'\nnpm ci x\nE\nsh f"}
+{"id":"g1247F2","tag":"G2|bash <<< [F2]","cmd":"npm i y && bash <<< 'npm ci'"}
+{"id":"g1247S1","tag":"G2|bash <<< [S1]","cmd":"npm i y --ignore-scripts && bash <<< 'npm ci x'"}
+{"id":"g1248F2","tag":"G2|bash <<E [F2]","cmd":"npm i y && bash <<E\nnpm ci\nE"}
+{"id":"g1248S1","tag":"G2|bash <<E [S1]","cmd":"npm i y --ignore-scripts && bash <<E\nnpm ci x\nE"}
+{"id":"g1249F2","tag":"G2|bash <<-E [F2]","cmd":"npm i y && bash <<-E\n\tnpm ci\n\tE"}
+{"id":"g1249S1","tag":"G2|bash <<-E [S1]","cmd":"npm i y --ignore-scripts && bash <<-E\n\tnpm ci x\n\tE"}
+{"id":"g1250F2","tag":"G2|bash <<'E' [F2]","cmd":"npm i y && bash <<'E'\nnpm ci\nE"}
+{"id":"g1250S1","tag":"G2|bash <<'E' [S1]","cmd":"npm i y --ignore-scripts && bash <<'E'\nnpm ci x\nE"}
+{"id":"g1251F2","tag":"G2|bash < <() [F2]","cmd":"npm i y && bash < <(echo 'npm ci')"}
+{"id":"g1251S1","tag":"G2|bash < <() [S1]","cmd":"npm i y --ignore-scripts && bash < <(echo 'npm ci x')"}
+{"id":"g1252F2","tag":"G2|bash -s <<< [F2]","cmd":"npm i y && bash -s <<< 'npm ci'"}
+{"id":"g1252S1","tag":"G2|bash -s <<< [S1]","cmd":"npm i y --ignore-scripts && bash -s <<< 'npm ci x'"}
+{"id":"g1253F2","tag":"G2|bash -s <<E [F2]","cmd":"npm i y && bash -s <<E\nnpm ci\nE"}
+{"id":"g1253S1","tag":"G2|bash -s <<E [S1]","cmd":"npm i y --ignore-scripts && bash -s <<E\nnpm ci x\nE"}
+{"id":"g1254F2","tag":"G2|bash -s <<-E [F2]","cmd":"npm i y && bash -s <<-E\n\tnpm ci\n\tE"}
+{"id":"g1254S1","tag":"G2|bash -s <<-E [S1]","cmd":"npm i y --ignore-scripts && bash -s <<-E\n\tnpm ci x\n\tE"}
+{"id":"g1255F2","tag":"G2|bash -s <<'E' [F2]","cmd":"npm i y && bash -s <<'E'\nnpm ci\nE"}
+{"id":"g1255S1","tag":"G2|bash -s <<'E' [S1]","cmd":"npm i y --ignore-scripts && bash -s <<'E'\nnpm ci x\nE"}
+{"id":"g1256F2","tag":"G2|bash -s < <() [F2]","cmd":"npm i y && bash -s < <(echo 'npm ci')"}
+{"id":"g1256S1","tag":"G2|bash -s < <() [S1]","cmd":"npm i y --ignore-scripts && bash -s < <(echo 'npm ci x')"}
+{"id":"g1257F2","tag":"G2|bash - <<< [F2]","cmd":"npm i y && bash - <<< 'npm ci'"}
+{"id":"g1257S1","tag":"G2|bash - <<< [S1]","cmd":"npm i y --ignore-scripts && bash - <<< 'npm ci x'"}
+{"id":"g1258F2","tag":"G2|bash - <<E [F2]","cmd":"npm i y && bash - <<E\nnpm ci\nE"}
+{"id":"g1258S1","tag":"G2|bash - <<E [S1]","cmd":"npm i y --ignore-scripts && bash - <<E\nnpm ci x\nE"}
+{"id":"g1259F2","tag":"G2|bash - <<-E [F2]","cmd":"npm i y && bash - <<-E\n\tnpm ci\n\tE"}
+{"id":"g1259S1","tag":"G2|bash - <<-E [S1]","cmd":"npm i y --ignore-scripts && bash - <<-E\n\tnpm ci x\n\tE"}
+{"id":"g1260F2","tag":"G2|bash - <<'E' [F2]","cmd":"npm i y && bash - <<'E'\nnpm ci\nE"}
+{"id":"g1260S1","tag":"G2|bash - <<'E' [S1]","cmd":"npm i y --ignore-scripts && bash - <<'E'\nnpm ci x\nE"}
+{"id":"g1261F2","tag":"G2|bash - < <() [F2]","cmd":"npm i y && bash - < <(echo 'npm ci')"}
+{"id":"g1261S1","tag":"G2|bash - < <() [S1]","cmd":"npm i y --ignore-scripts && bash - < <(echo 'npm ci x')"}
+{"id":"g1262F2","tag":"G2|bash /dev/stdin <<< [F2]","cmd":"npm i y && bash /dev/stdin <<< 'npm ci'"}
+{"id":"g1262S1","tag":"G2|bash /dev/stdin <<< [S1]","cmd":"npm i y --ignore-scripts && bash /dev/stdin <<< 'npm ci x'"}
+{"id":"g1263F2","tag":"G2|bash /dev/stdin <<E [F2]","cmd":"npm i y && bash /dev/stdin <<E\nnpm ci\nE"}
+{"id":"g1263S1","tag":"G2|bash /dev/stdin <<E [S1]","cmd":"npm i y --ignore-scripts && bash /dev/stdin <<E\nnpm ci x\nE"}
+{"id":"g1264F2","tag":"G2|bash /dev/stdin <<-E [F2]","cmd":"npm i y && bash /dev/stdin <<-E\n\tnpm ci\n\tE"}
+{"id":"g1264S1","tag":"G2|bash /dev/stdin <<-E [S1]","cmd":"npm i y --ignore-scripts && bash /dev/stdin <<-E\n\tnpm ci x\n\tE"}
+{"id":"g1265F2","tag":"G2|bash /dev/stdin <<'E' [F2]","cmd":"npm i y && bash /dev/stdin <<'E'\nnpm ci\nE"}
+{"id":"g1265S1","tag":"G2|bash /dev/stdin <<'E' [S1]","cmd":"npm i y --ignore-scripts && bash /dev/stdin <<'E'\nnpm ci x\nE"}
+{"id":"g1266F2","tag":"G2|bash /dev/stdin < <() [F2]","cmd":"npm i y && bash /dev/stdin < <(echo 'npm ci')"}
+{"id":"g1266S1","tag":"G2|bash /dev/stdin < <() [S1]","cmd":"npm i y --ignore-scripts && bash /dev/stdin < <(echo 'npm ci x')"}
+{"id":"g1267F2","tag":"G2|bash /dev/fd/0 <<< [F2]","cmd":"npm i y && bash /dev/fd/0 <<< 'npm ci'"}
+{"id":"g1267S1","tag":"G2|bash /dev/fd/0 <<< [S1]","cmd":"npm i y --ignore-scripts && bash /dev/fd/0 <<< 'npm ci x'"}
+{"id":"g1268F2","tag":"G2|bash /dev/fd/0 <<E [F2]","cmd":"npm i y && bash /dev/fd/0 <<E\nnpm ci\nE"}
+{"id":"g1268S1","tag":"G2|bash /dev/fd/0 <<E [S1]","cmd":"npm i y --ignore-scripts && bash /dev/fd/0 <<E\nnpm ci x\nE"}
+{"id":"g1269F2","tag":"G2|bash /dev/fd/0 <<-E [F2]","cmd":"npm i y && bash /dev/fd/0 <<-E\n\tnpm ci\n\tE"}
+{"id":"g1269S1","tag":"G2|bash /dev/fd/0 <<-E [S1]","cmd":"npm i y --ignore-scripts && bash /dev/fd/0 <<-E\n\tnpm ci x\n\tE"}
+{"id":"g1270F2","tag":"G2|bash /dev/fd/0 <<'E' [F2]","cmd":"npm i y && bash /dev/fd/0 <<'E'\nnpm ci\nE"}
+{"id":"g1270S1","tag":"G2|bash /dev/fd/0 <<'E' [S1]","cmd":"npm i y --ignore-scripts && bash /dev/fd/0 <<'E'\nnpm ci x\nE"}
+{"id":"g1271F2","tag":"G2|bash /dev/fd/0 < <() [F2]","cmd":"npm i y && bash /dev/fd/0 < <(echo 'npm ci')"}
+{"id":"g1271S1","tag":"G2|bash /dev/fd/0 < <() [S1]","cmd":"npm i y --ignore-scripts && bash /dev/fd/0 < <(echo 'npm ci x')"}
+{"id":"g1272F2","tag":"G2|bash 0<<< [F2]","cmd":"npm i y && bash 0<<< 'npm ci'"}
+{"id":"g1272S1","tag":"G2|bash 0<<< [S1]","cmd":"npm i y --ignore-scripts && bash 0<<< 'npm ci x'"}
+{"id":"g1273F2","tag":"G2|bash 0<<E [F2]","cmd":"npm i y && bash 0<<E\nnpm ci\nE"}
+{"id":"g1273S1","tag":"G2|bash 0<<E [S1]","cmd":"npm i y --ignore-scripts && bash 0<<E\nnpm ci x\nE"}
+{"id":"g1274F2","tag":"G2|bash 0<<-E [F2]","cmd":"npm i y && bash 0<<-E\n\tnpm ci\n\tE"}
+{"id":"g1274S1","tag":"G2|bash 0<<-E [S1]","cmd":"npm i y --ignore-scripts && bash 0<<-E\n\tnpm ci x\n\tE"}
+{"id":"g1275F2","tag":"G2|bash 0<<'E' [F2]","cmd":"npm i y && bash 0<<'E'\nnpm ci\nE"}
+{"id":"g1275S1","tag":"G2|bash 0<<'E' [S1]","cmd":"npm i y --ignore-scripts && bash 0<<'E'\nnpm ci x\nE"}
+{"id":"g1276F2","tag":"G2|bash 0< <() [F2]","cmd":"npm i y && bash 0< <(echo 'npm ci')"}
+{"id":"g1276S1","tag":"G2|bash 0< <() [S1]","cmd":"npm i y --ignore-scripts && bash 0< <(echo 'npm ci x')"}
+{"id":"g1277F2","tag":"G2|bash -s 0<<< [F2]","cmd":"npm i y && bash -s 0<<< 'npm ci'"}
+{"id":"g1277S1","tag":"G2|bash -s 0<<< [S1]","cmd":"npm i y --ignore-scripts && bash -s 0<<< 'npm ci x'"}
+{"id":"g1278F2","tag":"G2|bash -s 0<<E [F2]","cmd":"npm i y && bash -s 0<<E\nnpm ci\nE"}
+{"id":"g1278S1","tag":"G2|bash -s 0<<E [S1]","cmd":"npm i y --ignore-scripts && bash -s 0<<E\nnpm ci x\nE"}
+{"id":"g1279F2","tag":"G2|bash -s 0<<-E [F2]","cmd":"npm i y && bash -s 0<<-E\n\tnpm ci\n\tE"}
+{"id":"g1279S1","tag":"G2|bash -s 0<<-E [S1]","cmd":"npm i y --ignore-scripts && bash -s 0<<-E\n\tnpm ci x\n\tE"}
+{"id":"g1280F2","tag":"G2|bash -s 0<<'E' [F2]","cmd":"npm i y && bash -s 0<<'E'\nnpm ci\nE"}
+{"id":"g1280S1","tag":"G2|bash -s 0<<'E' [S1]","cmd":"npm i y --ignore-scripts && bash -s 0<<'E'\nnpm ci x\nE"}
+{"id":"g1281F2","tag":"G2|bash -s 0< <() [F2]","cmd":"npm i y && bash -s 0< <(echo 'npm ci')"}
+{"id":"g1281S1","tag":"G2|bash -s 0< <() [S1]","cmd":"npm i y --ignore-scripts && bash -s 0< <(echo 'npm ci x')"}
+{"id":"g1282F2","tag":"G2|bash - 0<<< [F2]","cmd":"npm i y && bash - 0<<< 'npm ci'"}
+{"id":"g1282S1","tag":"G2|bash - 0<<< [S1]","cmd":"npm i y --ignore-scripts && bash - 0<<< 'npm ci x'"}
+{"id":"g1283F2","tag":"G2|bash - 0<<E [F2]","cmd":"npm i y && bash - 0<<E\nnpm ci\nE"}
+{"id":"g1283S1","tag":"G2|bash - 0<<E [S1]","cmd":"npm i y --ignore-scripts && bash - 0<<E\nnpm ci x\nE"}
+{"id":"g1284F2","tag":"G2|bash - 0<<-E [F2]","cmd":"npm i y && bash - 0<<-E\n\tnpm ci\n\tE"}
+{"id":"g1284S1","tag":"G2|bash - 0<<-E [S1]","cmd":"npm i y --ignore-scripts && bash - 0<<-E\n\tnpm ci x\n\tE"}
+{"id":"g1285F2","tag":"G2|bash - 0<<'E' [F2]","cmd":"npm i y && bash - 0<<'E'\nnpm ci\nE"}
+{"id":"g1285S1","tag":"G2|bash - 0<<'E' [S1]","cmd":"npm i y --ignore-scripts && bash - 0<<'E'\nnpm ci x\nE"}
+{"id":"g1286F2","tag":"G2|bash - 0< <() [F2]","cmd":"npm i y && bash - 0< <(echo 'npm ci')"}
+{"id":"g1286S1","tag":"G2|bash - 0< <() [S1]","cmd":"npm i y --ignore-scripts && bash - 0< <(echo 'npm ci x')"}
+{"id":"g1287F2","tag":"G2|bash /dev/stdin 0<<< [F2]","cmd":"npm i y && bash /dev/stdin 0<<< 'npm ci'"}
+{"id":"g1287S1","tag":"G2|bash /dev/stdin 0<<< [S1]","cmd":"npm i y --ignore-scripts && bash /dev/stdin 0<<< 'npm ci x'"}
+{"id":"g1288F2","tag":"G2|bash /dev/stdin 0<<E [F2]","cmd":"npm i y && bash /dev/stdin 0<<E\nnpm ci\nE"}
+{"id":"g1288S1","tag":"G2|bash /dev/stdin 0<<E [S1]","cmd":"npm i y --ignore-scripts && bash /dev/stdin 0<<E\nnpm ci x\nE"}
+{"id":"g1289F2","tag":"G2|bash /dev/stdin 0<<-E [F2]","cmd":"npm i y && bash /dev/stdin 0<<-E\n\tnpm ci\n\tE"}
+{"id":"g1289S1","tag":"G2|bash /dev/stdin 0<<-E [S1]","cmd":"npm i y --ignore-scripts && bash /dev/stdin 0<<-E\n\tnpm ci x\n\tE"}
+{"id":"g1290F2","tag":"G2|bash /dev/stdin 0<<'E' [F2]","cmd":"npm i y && bash /dev/stdin 0<<'E'\nnpm ci\nE"}
+{"id":"g1290S1","tag":"G2|bash /dev/stdin 0<<'E' [S1]","cmd":"npm i y --ignore-scripts && bash /dev/stdin 0<<'E'\nnpm ci x\nE"}
+{"id":"g1291F2","tag":"G2|bash /dev/stdin 0< <() [F2]","cmd":"npm i y && bash /dev/stdin 0< <(echo 'npm ci')"}
+{"id":"g1291S1","tag":"G2|bash /dev/stdin 0< <() [S1]","cmd":"npm i y --ignore-scripts && bash /dev/stdin 0< <(echo 'npm ci x')"}
+{"id":"g1292F2","tag":"G2|bash /dev/fd/0 0<<< [F2]","cmd":"npm i y && bash /dev/fd/0 0<<< 'npm ci'"}
+{"id":"g1292S1","tag":"G2|bash /dev/fd/0 0<<< [S1]","cmd":"npm i y --ignore-scripts && bash /dev/fd/0 0<<< 'npm ci x'"}
+{"id":"g1293F2","tag":"G2|bash /dev/fd/0 0<<E [F2]","cmd":"npm i y && bash /dev/fd/0 0<<E\nnpm ci\nE"}
+{"id":"g1293S1","tag":"G2|bash /dev/fd/0 0<<E [S1]","cmd":"npm i y --ignore-scripts && bash /dev/fd/0 0<<E\nnpm ci x\nE"}
+{"id":"g1294F2","tag":"G2|bash /dev/fd/0 0<<-E [F2]","cmd":"npm i y && bash /dev/fd/0 0<<-E\n\tnpm ci\n\tE"}
+{"id":"g1294S1","tag":"G2|bash /dev/fd/0 0<<-E [S1]","cmd":"npm i y --ignore-scripts && bash /dev/fd/0 0<<-E\n\tnpm ci x\n\tE"}
+{"id":"g1295F2","tag":"G2|bash /dev/fd/0 0<<'E' [F2]","cmd":"npm i y && bash /dev/fd/0 0<<'E'\nnpm ci\nE"}
+{"id":"g1295S1","tag":"G2|bash /dev/fd/0 0<<'E' [S1]","cmd":"npm i y --ignore-scripts && bash /dev/fd/0 0<<'E'\nnpm ci x\nE"}
+{"id":"g1296F2","tag":"G2|bash /dev/fd/0 0< <() [F2]","cmd":"npm i y && bash /dev/fd/0 0< <(echo 'npm ci')"}
+{"id":"g1296S1","tag":"G2|bash /dev/fd/0 0< <() [S1]","cmd":"npm i y --ignore-scripts && bash /dev/fd/0 0< <(echo 'npm ci x')"}
+{"id":"g1297F2","tag":"G2|bash <& here-string [F2]","cmd":"npm i y && exec 3<<< 'npm ci'; bash <&3"}
+{"id":"g1297S1","tag":"G2|bash <& here-string [S1]","cmd":"npm i y --ignore-scripts && exec 3<<< 'npm ci x'; bash <&3"}
+{"id":"g1298F2","tag":"G2|bash <> file [F2]","cmd":"npm i y && printf '%s\\n' 'npm ci' > f; bash <> f"}
+{"id":"g1298S1","tag":"G2|bash <> file [S1]","cmd":"npm i y --ignore-scripts && printf '%s\\n' 'npm ci x' > f; bash <> f"}
+{"id":"g1299F2","tag":"G2|bash <(..) path [F2]","cmd":"npm i y && bash <(echo 'npm ci')"}
+{"id":"g1299S1","tag":"G2|bash <(..) path [S1]","cmd":"npm i y --ignore-scripts && bash <(echo 'npm ci x')"}
+{"id":"g1302F2","tag":"G2|file then bash [F2]","cmd":"npm i y && printf '%s\\n' 'npm ci' > f; bash f"}
+{"id":"g1302S1","tag":"G2|file then bash [S1]","cmd":"npm i y --ignore-scripts && printf '%s\\n' 'npm ci x' > f; bash f"}
+{"id":"g1303F2","tag":"G2|heredoc file then bash [F2]","cmd":"npm i y && cat > f <<'E'\nnpm ci\nE\nbash f"}
+{"id":"g1303S1","tag":"G2|heredoc file then bash [S1]","cmd":"npm i y --ignore-scripts && cat > f <<'E'\nnpm ci x\nE\nbash f"}
+{"id":"g1305F2","tag":"G2|zsh <<< [F2]","cmd":"npm i y && zsh <<< 'npm ci'"}
+{"id":"g1305S1","tag":"G2|zsh <<< [S1]","cmd":"npm i y --ignore-scripts && zsh <<< 'npm ci x'"}
+{"id":"g1306F2","tag":"G2|zsh <<E [F2]","cmd":"npm i y && zsh <<E\nnpm ci\nE"}
+{"id":"g1306S1","tag":"G2|zsh <<E [S1]","cmd":"npm i y --ignore-scripts && zsh <<E\nnpm ci x\nE"}
+{"id":"g1307F2","tag":"G2|zsh <<-E [F2]","cmd":"npm i y && zsh <<-E\n\tnpm ci\n\tE"}
+{"id":"g1307S1","tag":"G2|zsh <<-E [S1]","cmd":"npm i y --ignore-scripts && zsh <<-E\n\tnpm ci x\n\tE"}
+{"id":"g1308F2","tag":"G2|zsh <<'E' [F2]","cmd":"npm i y && zsh <<'E'\nnpm ci\nE"}
+{"id":"g1308S1","tag":"G2|zsh <<'E' [S1]","cmd":"npm i y --ignore-scripts && zsh <<'E'\nnpm ci x\nE"}
+{"id":"g1309F2","tag":"G2|zsh < <() [F2]","cmd":"npm i y && zsh < <(echo 'npm ci')"}
+{"id":"g1309S1","tag":"G2|zsh < <() [S1]","cmd":"npm i y --ignore-scripts && zsh < <(echo 'npm ci x')"}
+{"id":"g1310F2","tag":"G2|zsh -s <<< [F2]","cmd":"npm i y && zsh -s <<< 'npm ci'"}
+{"id":"g1310S1","tag":"G2|zsh -s <<< [S1]","cmd":"npm i y --ignore-scripts && zsh -s <<< 'npm ci x'"}
+{"id":"g1311F2","tag":"G2|zsh -s <<E [F2]","cmd":"npm i y && zsh -s <<E\nnpm ci\nE"}
+{"id":"g1311S1","tag":"G2|zsh -s <<E [S1]","cmd":"npm i y --ignore-scripts && zsh -s <<E\nnpm ci x\nE"}
+{"id":"g1312F2","tag":"G2|zsh -s <<-E [F2]","cmd":"npm i y && zsh -s <<-E\n\tnpm ci\n\tE"}
+{"id":"g1312S1","tag":"G2|zsh -s <<-E [S1]","cmd":"npm i y --ignore-scripts && zsh -s <<-E\n\tnpm ci x\n\tE"}
+{"id":"g1313F2","tag":"G2|zsh -s <<'E' [F2]","cmd":"npm i y && zsh -s <<'E'\nnpm ci\nE"}
+{"id":"g1313S1","tag":"G2|zsh -s <<'E' [S1]","cmd":"npm i y --ignore-scripts && zsh -s <<'E'\nnpm ci x\nE"}
+{"id":"g1314F2","tag":"G2|zsh -s < <() [F2]","cmd":"npm i y && zsh -s < <(echo 'npm ci')"}
+{"id":"g1314S1","tag":"G2|zsh -s < <() [S1]","cmd":"npm i y --ignore-scripts && zsh -s < <(echo 'npm ci x')"}
+{"id":"g1315F2","tag":"G2|zsh - <<< [F2]","cmd":"npm i y && zsh - <<< 'npm ci'"}
+{"id":"g1315S1","tag":"G2|zsh - <<< [S1]","cmd":"npm i y --ignore-scripts && zsh - <<< 'npm ci x'"}
+{"id":"g1316F2","tag":"G2|zsh - <<E [F2]","cmd":"npm i y && zsh - <<E\nnpm ci\nE"}
+{"id":"g1316S1","tag":"G2|zsh - <<E [S1]","cmd":"npm i y --ignore-scripts && zsh - <<E\nnpm ci x\nE"}
+{"id":"g1317F2","tag":"G2|zsh - <<-E [F2]","cmd":"npm i y && zsh - <<-E\n\tnpm ci\n\tE"}
+{"id":"g1317S1","tag":"G2|zsh - <<-E [S1]","cmd":"npm i y --ignore-scripts && zsh - <<-E\n\tnpm ci x\n\tE"}
+{"id":"g1318F2","tag":"G2|zsh - <<'E' [F2]","cmd":"npm i y && zsh - <<'E'\nnpm ci\nE"}
+{"id":"g1318S1","tag":"G2|zsh - <<'E' [S1]","cmd":"npm i y --ignore-scripts && zsh - <<'E'\nnpm ci x\nE"}
+{"id":"g1319F2","tag":"G2|zsh - < <() [F2]","cmd":"npm i y && zsh - < <(echo 'npm ci')"}
+{"id":"g1319S1","tag":"G2|zsh - < <() [S1]","cmd":"npm i y --ignore-scripts && zsh - < <(echo 'npm ci x')"}
+{"id":"g1320F2","tag":"G2|zsh /dev/stdin <<< [F2]","cmd":"npm i y && zsh /dev/stdin <<< 'npm ci'"}
+{"id":"g1320S1","tag":"G2|zsh /dev/stdin <<< [S1]","cmd":"npm i y --ignore-scripts && zsh /dev/stdin <<< 'npm ci x'"}
+{"id":"g1321F2","tag":"G2|zsh /dev/stdin <<E [F2]","cmd":"npm i y && zsh /dev/stdin <<E\nnpm ci\nE"}
+{"id":"g1321S1","tag":"G2|zsh /dev/stdin <<E [S1]","cmd":"npm i y --ignore-scripts && zsh /dev/stdin <<E\nnpm ci x\nE"}
+{"id":"g1322F2","tag":"G2|zsh /dev/stdin <<-E [F2]","cmd":"npm i y && zsh /dev/stdin <<-E\n\tnpm ci\n\tE"}
+{"id":"g1322S1","tag":"G2|zsh /dev/stdin <<-E [S1]","cmd":"npm i y --ignore-scripts && zsh /dev/stdin <<-E\n\tnpm ci x\n\tE"}
+{"id":"g1323F2","tag":"G2|zsh /dev/stdin <<'E' [F2]","cmd":"npm i y && zsh /dev/stdin <<'E'\nnpm ci\nE"}
+{"id":"g1323S1","tag":"G2|zsh /dev/stdin <<'E' [S1]","cmd":"npm i y --ignore-scripts && zsh /dev/stdin <<'E'\nnpm ci x\nE"}
+{"id":"g1324F2","tag":"G2|zsh /dev/stdin < <() [F2]","cmd":"npm i y && zsh /dev/stdin < <(echo 'npm ci')"}
+{"id":"g1324S1","tag":"G2|zsh /dev/stdin < <() [S1]","cmd":"npm i y --ignore-scripts && zsh /dev/stdin < <(echo 'npm ci x')"}
+{"id":"g1325F2","tag":"G2|zsh /dev/fd/0 <<< [F2]","cmd":"npm i y && zsh /dev/fd/0 <<< 'npm ci'"}
+{"id":"g1325S1","tag":"G2|zsh /dev/fd/0 <<< [S1]","cmd":"npm i y --ignore-scripts && zsh /dev/fd/0 <<< 'npm ci x'"}
+{"id":"g1326F2","tag":"G2|zsh /dev/fd/0 <<E [F2]","cmd":"npm i y && zsh /dev/fd/0 <<E\nnpm ci\nE"}
+{"id":"g1326S1","tag":"G2|zsh /dev/fd/0 <<E [S1]","cmd":"npm i y --ignore-scripts && zsh /dev/fd/0 <<E\nnpm ci x\nE"}
+{"id":"g1327F2","tag":"G2|zsh /dev/fd/0 <<-E [F2]","cmd":"npm i y && zsh /dev/fd/0 <<-E\n\tnpm ci\n\tE"}
+{"id":"g1327S1","tag":"G2|zsh /dev/fd/0 <<-E [S1]","cmd":"npm i y --ignore-scripts && zsh /dev/fd/0 <<-E\n\tnpm ci x\n\tE"}
+{"id":"g1328F2","tag":"G2|zsh /dev/fd/0 <<'E' [F2]","cmd":"npm i y && zsh /dev/fd/0 <<'E'\nnpm ci\nE"}
+{"id":"g1328S1","tag":"G2|zsh /dev/fd/0 <<'E' [S1]","cmd":"npm i y --ignore-scripts && zsh /dev/fd/0 <<'E'\nnpm ci x\nE"}
+{"id":"g1329F2","tag":"G2|zsh /dev/fd/0 < <() [F2]","cmd":"npm i y && zsh /dev/fd/0 < <(echo 'npm ci')"}
+{"id":"g1329S1","tag":"G2|zsh /dev/fd/0 < <() [S1]","cmd":"npm i y --ignore-scripts && zsh /dev/fd/0 < <(echo 'npm ci x')"}
+{"id":"g1330F2","tag":"G2|zsh 0<<< [F2]","cmd":"npm i y && zsh 0<<< 'npm ci'"}
+{"id":"g1330S1","tag":"G2|zsh 0<<< [S1]","cmd":"npm i y --ignore-scripts && zsh 0<<< 'npm ci x'"}
+{"id":"g1331F2","tag":"G2|zsh 0<<E [F2]","cmd":"npm i y && zsh 0<<E\nnpm ci\nE"}
+{"id":"g1331S1","tag":"G2|zsh 0<<E [S1]","cmd":"npm i y --ignore-scripts && zsh 0<<E\nnpm ci x\nE"}
+{"id":"g1332F2","tag":"G2|zsh 0<<-E [F2]","cmd":"npm i y && zsh 0<<-E\n\tnpm ci\n\tE"}
+{"id":"g1332S1","tag":"G2|zsh 0<<-E [S1]","cmd":"npm i y --ignore-scripts && zsh 0<<-E\n\tnpm ci x\n\tE"}
+{"id":"g1333F2","tag":"G2|zsh 0<<'E' [F2]","cmd":"npm i y && zsh 0<<'E'\nnpm ci\nE"}
+{"id":"g1333S1","tag":"G2|zsh 0<<'E' [S1]","cmd":"npm i y --ignore-scripts && zsh 0<<'E'\nnpm ci x\nE"}
+{"id":"g1334F2","tag":"G2|zsh 0< <() [F2]","cmd":"npm i y && zsh 0< <(echo 'npm ci')"}
+{"id":"g1334S1","tag":"G2|zsh 0< <() [S1]","cmd":"npm i y --ignore-scripts && zsh 0< <(echo 'npm ci x')"}
+{"id":"g1335F2","tag":"G2|zsh -s 0<<< [F2]","cmd":"npm i y && zsh -s 0<<< 'npm ci'"}
+{"id":"g1335S1","tag":"G2|zsh -s 0<<< [S1]","cmd":"npm i y --ignore-scripts && zsh -s 0<<< 'npm ci x'"}
+{"id":"g1336F2","tag":"G2|zsh -s 0<<E [F2]","cmd":"npm i y && zsh -s 0<<E\nnpm ci\nE"}
+{"id":"g1336S1","tag":"G2|zsh -s 0<<E [S1]","cmd":"npm i y --ignore-scripts && zsh -s 0<<E\nnpm ci x\nE"}
+{"id":"g1337F2","tag":"G2|zsh -s 0<<-E [F2]","cmd":"npm i y && zsh -s 0<<-E\n\tnpm ci\n\tE"}
+{"id":"g1337S1","tag":"G2|zsh -s 0<<-E [S1]","cmd":"npm i y --ignore-scripts && zsh -s 0<<-E\n\tnpm ci x\n\tE"}
+{"id":"g1338F2","tag":"G2|zsh -s 0<<'E' [F2]","cmd":"npm i y && zsh -s 0<<'E'\nnpm ci\nE"}
+{"id":"g1338S1","tag":"G2|zsh -s 0<<'E' [S1]","cmd":"npm i y --ignore-scripts && zsh -s 0<<'E'\nnpm ci x\nE"}
+{"id":"g1339F2","tag":"G2|zsh -s 0< <() [F2]","cmd":"npm i y && zsh -s 0< <(echo 'npm ci')"}
+{"id":"g1339S1","tag":"G2|zsh -s 0< <() [S1]","cmd":"npm i y --ignore-scripts && zsh -s 0< <(echo 'npm ci x')"}
+{"id":"g1340F2","tag":"G2|zsh - 0<<< [F2]","cmd":"npm i y && zsh - 0<<< 'npm ci'"}
+{"id":"g1340S1","tag":"G2|zsh - 0<<< [S1]","cmd":"npm i y --ignore-scripts && zsh - 0<<< 'npm ci x'"}
+{"id":"g1341F2","tag":"G2|zsh - 0<<E [F2]","cmd":"npm i y && zsh - 0<<E\nnpm ci\nE"}
+{"id":"g1341S1","tag":"G2|zsh - 0<<E [S1]","cmd":"npm i y --ignore-scripts && zsh - 0<<E\nnpm ci x\nE"}
+{"id":"g1342F2","tag":"G2|zsh - 0<<-E [F2]","cmd":"npm i y && zsh - 0<<-E\n\tnpm ci\n\tE"}
+{"id":"g1342S1","tag":"G2|zsh - 0<<-E [S1]","cmd":"npm i y --ignore-scripts && zsh - 0<<-E\n\tnpm ci x\n\tE"}
+{"id":"g1343F2","tag":"G2|zsh - 0<<'E' [F2]","cmd":"npm i y && zsh - 0<<'E'\nnpm ci\nE"}
+{"id":"g1343S1","tag":"G2|zsh - 0<<'E' [S1]","cmd":"npm i y --ignore-scripts && zsh - 0<<'E'\nnpm ci x\nE"}
+{"id":"g1344F2","tag":"G2|zsh - 0< <() [F2]","cmd":"npm i y && zsh - 0< <(echo 'npm ci')"}
+{"id":"g1344S1","tag":"G2|zsh - 0< <() [S1]","cmd":"npm i y --ignore-scripts && zsh - 0< <(echo 'npm ci x')"}
+{"id":"g1345F2","tag":"G2|zsh /dev/stdin 0<<< [F2]","cmd":"npm i y && zsh /dev/stdin 0<<< 'npm ci'"}
+{"id":"g1345S1","tag":"G2|zsh /dev/stdin 0<<< [S1]","cmd":"npm i y --ignore-scripts && zsh /dev/stdin 0<<< 'npm ci x'"}
+{"id":"g1346F2","tag":"G2|zsh /dev/stdin 0<<E [F2]","cmd":"npm i y && zsh /dev/stdin 0<<E\nnpm ci\nE"}
+{"id":"g1346S1","tag":"G2|zsh /dev/stdin 0<<E [S1]","cmd":"npm i y --ignore-scripts && zsh /dev/stdin 0<<E\nnpm ci x\nE"}
+{"id":"g1347F2","tag":"G2|zsh /dev/stdin 0<<-E [F2]","cmd":"npm i y && zsh /dev/stdin 0<<-E\n\tnpm ci\n\tE"}
+{"id":"g1347S1","tag":"G2|zsh /dev/stdin 0<<-E [S1]","cmd":"npm i y --ignore-scripts && zsh /dev/stdin 0<<-E\n\tnpm ci x\n\tE"}
+{"id":"g1348F2","tag":"G2|zsh /dev/stdin 0<<'E' [F2]","cmd":"npm i y && zsh /dev/stdin 0<<'E'\nnpm ci\nE"}
+{"id":"g1348S1","tag":"G2|zsh /dev/stdin 0<<'E' [S1]","cmd":"npm i y --ignore-scripts && zsh /dev/stdin 0<<'E'\nnpm ci x\nE"}
+{"id":"g1349F2","tag":"G2|zsh /dev/stdin 0< <() [F2]","cmd":"npm i y && zsh /dev/stdin 0< <(echo 'npm ci')"}
+{"id":"g1349S1","tag":"G2|zsh /dev/stdin 0< <() [S1]","cmd":"npm i y --ignore-scripts && zsh /dev/stdin 0< <(echo 'npm ci x')"}
+{"id":"g1350F2","tag":"G2|zsh /dev/fd/0 0<<< [F2]","cmd":"npm i y && zsh /dev/fd/0 0<<< 'npm ci'"}
+{"id":"g1350S1","tag":"G2|zsh /dev/fd/0 0<<< [S1]","cmd":"npm i y --ignore-scripts && zsh /dev/fd/0 0<<< 'npm ci x'"}
+{"id":"g1351F2","tag":"G2|zsh /dev/fd/0 0<<E [F2]","cmd":"npm i y && zsh /dev/fd/0 0<<E\nnpm ci\nE"}
+{"id":"g1351S1","tag":"G2|zsh /dev/fd/0 0<<E [S1]","cmd":"npm i y --ignore-scripts && zsh /dev/fd/0 0<<E\nnpm ci x\nE"}
+{"id":"g1352F2","tag":"G2|zsh /dev/fd/0 0<<-E [F2]","cmd":"npm i y && zsh /dev/fd/0 0<<-E\n\tnpm ci\n\tE"}
+{"id":"g1352S1","tag":"G2|zsh /dev/fd/0 0<<-E [S1]","cmd":"npm i y --ignore-scripts && zsh /dev/fd/0 0<<-E\n\tnpm ci x\n\tE"}
+{"id":"g1353F2","tag":"G2|zsh /dev/fd/0 0<<'E' [F2]","cmd":"npm i y && zsh /dev/fd/0 0<<'E'\nnpm ci\nE"}
+{"id":"g1353S1","tag":"G2|zsh /dev/fd/0 0<<'E' [S1]","cmd":"npm i y --ignore-scripts && zsh /dev/fd/0 0<<'E'\nnpm ci x\nE"}
+{"id":"g1354F2","tag":"G2|zsh /dev/fd/0 0< <() [F2]","cmd":"npm i y && zsh /dev/fd/0 0< <(echo 'npm ci')"}
+{"id":"g1354S1","tag":"G2|zsh /dev/fd/0 0< <() [S1]","cmd":"npm i y --ignore-scripts && zsh /dev/fd/0 0< <(echo 'npm ci x')"}
+{"id":"g1355F2","tag":"G2|zsh <& here-string [F2]","cmd":"npm i y && exec 3<<< 'npm ci'; zsh <&3"}
+{"id":"g1355S1","tag":"G2|zsh <& here-string [S1]","cmd":"npm i y --ignore-scripts && exec 3<<< 'npm ci x'; zsh <&3"}
+{"id":"g1356F2","tag":"G2|zsh <> file [F2]","cmd":"npm i y && printf '%s\\n' 'npm ci' > f; zsh <> f"}
+{"id":"g1356S1","tag":"G2|zsh <> file [S1]","cmd":"npm i y --ignore-scripts && printf '%s\\n' 'npm ci x' > f; zsh <> f"}
+{"id":"g1357F2","tag":"G2|zsh <(..) path [F2]","cmd":"npm i y && zsh <(echo 'npm ci')"}
+{"id":"g1357S1","tag":"G2|zsh <(..) path [S1]","cmd":"npm i y --ignore-scripts && zsh <(echo 'npm ci x')"}
+{"id":"g1360F2","tag":"G2|file then zsh [F2]","cmd":"npm i y && printf '%s\\n' 'npm ci' > f; zsh f"}
+{"id":"g1360S1","tag":"G2|file then zsh [S1]","cmd":"npm i y --ignore-scripts && printf '%s\\n' 'npm ci x' > f; zsh f"}
+{"id":"g1361F2","tag":"G2|heredoc file then zsh [F2]","cmd":"npm i y && cat > f <<'E'\nnpm ci\nE\nzsh f"}
+{"id":"g1361S1","tag":"G2|heredoc file then zsh [S1]","cmd":"npm i y --ignore-scripts && cat > f <<'E'\nnpm ci x\nE\nzsh f"}
+{"id":"g1363F2","tag":"G2|dash <<< [F2]","cmd":"npm i y && dash <<< 'npm ci'"}
+{"id":"g1363S1","tag":"G2|dash <<< [S1]","cmd":"npm i y --ignore-scripts && dash <<< 'npm ci x'"}
+{"id":"g1364F2","tag":"G2|dash <<E [F2]","cmd":"npm i y && dash <<E\nnpm ci\nE"}
+{"id":"g1364S1","tag":"G2|dash <<E [S1]","cmd":"npm i y --ignore-scripts && dash <<E\nnpm ci x\nE"}
+{"id":"g1365F2","tag":"G2|dash <<-E [F2]","cmd":"npm i y && dash <<-E\n\tnpm ci\n\tE"}
+{"id":"g1365S1","tag":"G2|dash <<-E [S1]","cmd":"npm i y --ignore-scripts && dash <<-E\n\tnpm ci x\n\tE"}
+{"id":"g1366F2","tag":"G2|dash <<'E' [F2]","cmd":"npm i y && dash <<'E'\nnpm ci\nE"}
+{"id":"g1366S1","tag":"G2|dash <<'E' [S1]","cmd":"npm i y --ignore-scripts && dash <<'E'\nnpm ci x\nE"}
+{"id":"g1367F2","tag":"G2|dash < <() [F2]","cmd":"npm i y && dash < <(echo 'npm ci')"}
+{"id":"g1367S1","tag":"G2|dash < <() [S1]","cmd":"npm i y --ignore-scripts && dash < <(echo 'npm ci x')"}
+{"id":"g1368F2","tag":"G2|dash -s <<< [F2]","cmd":"npm i y && dash -s <<< 'npm ci'"}
+{"id":"g1368S1","tag":"G2|dash -s <<< [S1]","cmd":"npm i y --ignore-scripts && dash -s <<< 'npm ci x'"}
+{"id":"g1369F2","tag":"G2|dash -s <<E [F2]","cmd":"npm i y && dash -s <<E\nnpm ci\nE"}
+{"id":"g1369S1","tag":"G2|dash -s <<E [S1]","cmd":"npm i y --ignore-scripts && dash -s <<E\nnpm ci x\nE"}
+{"id":"g1370F2","tag":"G2|dash -s <<-E [F2]","cmd":"npm i y && dash -s <<-E\n\tnpm ci\n\tE"}
+{"id":"g1370S1","tag":"G2|dash -s <<-E [S1]","cmd":"npm i y --ignore-scripts && dash -s <<-E\n\tnpm ci x\n\tE"}
+{"id":"g1371F2","tag":"G2|dash -s <<'E' [F2]","cmd":"npm i y && dash -s <<'E'\nnpm ci\nE"}
+{"id":"g1371S1","tag":"G2|dash -s <<'E' [S1]","cmd":"npm i y --ignore-scripts && dash -s <<'E'\nnpm ci x\nE"}
+{"id":"g1372F2","tag":"G2|dash -s < <() [F2]","cmd":"npm i y && dash -s < <(echo 'npm ci')"}
+{"id":"g1372S1","tag":"G2|dash -s < <() [S1]","cmd":"npm i y --ignore-scripts && dash -s < <(echo 'npm ci x')"}
+{"id":"g1373F2","tag":"G2|dash - <<< [F2]","cmd":"npm i y && dash - <<< 'npm ci'"}
+{"id":"g1373S1","tag":"G2|dash - <<< [S1]","cmd":"npm i y --ignore-scripts && dash - <<< 'npm ci x'"}
+{"id":"g1374F2","tag":"G2|dash - <<E [F2]","cmd":"npm i y && dash - <<E\nnpm ci\nE"}
+{"id":"g1374S1","tag":"G2|dash - <<E [S1]","cmd":"npm i y --ignore-scripts && dash - <<E\nnpm ci x\nE"}
+{"id":"g1375F2","tag":"G2|dash - <<-E [F2]","cmd":"npm i y && dash - <<-E\n\tnpm ci\n\tE"}
+{"id":"g1375S1","tag":"G2|dash - <<-E [S1]","cmd":"npm i y --ignore-scripts && dash - <<-E\n\tnpm ci x\n\tE"}
+{"id":"g1376F2","tag":"G2|dash - <<'E' [F2]","cmd":"npm i y && dash - <<'E'\nnpm ci\nE"}
+{"id":"g1376S1","tag":"G2|dash - <<'E' [S1]","cmd":"npm i y --ignore-scripts && dash - <<'E'\nnpm ci x\nE"}
+{"id":"g1377F2","tag":"G2|dash - < <() [F2]","cmd":"npm i y && dash - < <(echo 'npm ci')"}
+{"id":"g1377S1","tag":"G2|dash - < <() [S1]","cmd":"npm i y --ignore-scripts && dash - < <(echo 'npm ci x')"}
+{"id":"g1378F2","tag":"G2|dash /dev/stdin <<< [F2]","cmd":"npm i y && dash /dev/stdin <<< 'npm ci'"}
+{"id":"g1378S1","tag":"G2|dash /dev/stdin <<< [S1]","cmd":"npm i y --ignore-scripts && dash /dev/stdin <<< 'npm ci x'"}
+{"id":"g1379F2","tag":"G2|dash /dev/stdin <<E [F2]","cmd":"npm i y && dash /dev/stdin <<E\nnpm ci\nE"}
+{"id":"g1379S1","tag":"G2|dash /dev/stdin <<E [S1]","cmd":"npm i y --ignore-scripts && dash /dev/stdin <<E\nnpm ci x\nE"}
+{"id":"g1380F2","tag":"G2|dash /dev/stdin <<-E [F2]","cmd":"npm i y && dash /dev/stdin <<-E\n\tnpm ci\n\tE"}
+{"id":"g1380S1","tag":"G2|dash /dev/stdin <<-E [S1]","cmd":"npm i y --ignore-scripts && dash /dev/stdin <<-E\n\tnpm ci x\n\tE"}
+{"id":"g1381F2","tag":"G2|dash /dev/stdin <<'E' [F2]","cmd":"npm i y && dash /dev/stdin <<'E'\nnpm ci\nE"}
+{"id":"g1381S1","tag":"G2|dash /dev/stdin <<'E' [S1]","cmd":"npm i y --ignore-scripts && dash /dev/stdin <<'E'\nnpm ci x\nE"}
+{"id":"g1382F2","tag":"G2|dash /dev/stdin < <() [F2]","cmd":"npm i y && dash /dev/stdin < <(echo 'npm ci')"}
+{"id":"g1382S1","tag":"G2|dash /dev/stdin < <() [S1]","cmd":"npm i y --ignore-scripts && dash /dev/stdin < <(echo 'npm ci x')"}
+{"id":"g1383F2","tag":"G2|dash /dev/fd/0 <<< [F2]","cmd":"npm i y && dash /dev/fd/0 <<< 'npm ci'"}
+{"id":"g1383S1","tag":"G2|dash /dev/fd/0 <<< [S1]","cmd":"npm i y --ignore-scripts && dash /dev/fd/0 <<< 'npm ci x'"}
+{"id":"g1384F2","tag":"G2|dash /dev/fd/0 <<E [F2]","cmd":"npm i y && dash /dev/fd/0 <<E\nnpm ci\nE"}
+{"id":"g1384S1","tag":"G2|dash /dev/fd/0 <<E [S1]","cmd":"npm i y --ignore-scripts && dash /dev/fd/0 <<E\nnpm ci x\nE"}
+{"id":"g1385F2","tag":"G2|dash /dev/fd/0 <<-E [F2]","cmd":"npm i y && dash /dev/fd/0 <<-E\n\tnpm ci\n\tE"}
+{"id":"g1385S1","tag":"G2|dash /dev/fd/0 <<-E [S1]","cmd":"npm i y --ignore-scripts && dash /dev/fd/0 <<-E\n\tnpm ci x\n\tE"}
+{"id":"g1386F2","tag":"G2|dash /dev/fd/0 <<'E' [F2]","cmd":"npm i y && dash /dev/fd/0 <<'E'\nnpm ci\nE"}
+{"id":"g1386S1","tag":"G2|dash /dev/fd/0 <<'E' [S1]","cmd":"npm i y --ignore-scripts && dash /dev/fd/0 <<'E'\nnpm ci x\nE"}
+{"id":"g1387F2","tag":"G2|dash /dev/fd/0 < <() [F2]","cmd":"npm i y && dash /dev/fd/0 < <(echo 'npm ci')"}
+{"id":"g1387S1","tag":"G2|dash /dev/fd/0 < <() [S1]","cmd":"npm i y --ignore-scripts && dash /dev/fd/0 < <(echo 'npm ci x')"}
+{"id":"g1388F2","tag":"G2|dash 0<<< [F2]","cmd":"npm i y && dash 0<<< 'npm ci'"}
+{"id":"g1388S1","tag":"G2|dash 0<<< [S1]","cmd":"npm i y --ignore-scripts && dash 0<<< 'npm ci x'"}
+{"id":"g1389F2","tag":"G2|dash 0<<E [F2]","cmd":"npm i y && dash 0<<E\nnpm ci\nE"}
+{"id":"g1389S1","tag":"G2|dash 0<<E [S1]","cmd":"npm i y --ignore-scripts && dash 0<<E\nnpm ci x\nE"}
+{"id":"g1390F2","tag":"G2|dash 0<<-E [F2]","cmd":"npm i y && dash 0<<-E\n\tnpm ci\n\tE"}
+{"id":"g1390S1","tag":"G2|dash 0<<-E [S1]","cmd":"npm i y --ignore-scripts && dash 0<<-E\n\tnpm ci x\n\tE"}
+{"id":"g1391F2","tag":"G2|dash 0<<'E' [F2]","cmd":"npm i y && dash 0<<'E'\nnpm ci\nE"}
+{"id":"g1391S1","tag":"G2|dash 0<<'E' [S1]","cmd":"npm i y --ignore-scripts && dash 0<<'E'\nnpm ci x\nE"}
+{"id":"g1392F2","tag":"G2|dash 0< <() [F2]","cmd":"npm i y && dash 0< <(echo 'npm ci')"}
+{"id":"g1392S1","tag":"G2|dash 0< <() [S1]","cmd":"npm i y --ignore-scripts && dash 0< <(echo 'npm ci x')"}
+{"id":"g1393F2","tag":"G2|dash -s 0<<< [F2]","cmd":"npm i y && dash -s 0<<< 'npm ci'"}
+{"id":"g1393S1","tag":"G2|dash -s 0<<< [S1]","cmd":"npm i y --ignore-scripts && dash -s 0<<< 'npm ci x'"}
+{"id":"g1394F2","tag":"G2|dash -s 0<<E [F2]","cmd":"npm i y && dash -s 0<<E\nnpm ci\nE"}
+{"id":"g1394S1","tag":"G2|dash -s 0<<E [S1]","cmd":"npm i y --ignore-scripts && dash -s 0<<E\nnpm ci x\nE"}
+{"id":"g1395F2","tag":"G2|dash -s 0<<-E [F2]","cmd":"npm i y && dash -s 0<<-E\n\tnpm ci\n\tE"}
+{"id":"g1395S1","tag":"G2|dash -s 0<<-E [S1]","cmd":"npm i y --ignore-scripts && dash -s 0<<-E\n\tnpm ci x\n\tE"}
+{"id":"g1396F2","tag":"G2|dash -s 0<<'E' [F2]","cmd":"npm i y && dash -s 0<<'E'\nnpm ci\nE"}
+{"id":"g1396S1","tag":"G2|dash -s 0<<'E' [S1]","cmd":"npm i y --ignore-scripts && dash -s 0<<'E'\nnpm ci x\nE"}
+{"id":"g1397F2","tag":"G2|dash -s 0< <() [F2]","cmd":"npm i y && dash -s 0< <(echo 'npm ci')"}
+{"id":"g1397S1","tag":"G2|dash -s 0< <() [S1]","cmd":"npm i y --ignore-scripts && dash -s 0< <(echo 'npm ci x')"}
+{"id":"g1398F2","tag":"G2|dash - 0<<< [F2]","cmd":"npm i y && dash - 0<<< 'npm ci'"}
+{"id":"g1398S1","tag":"G2|dash - 0<<< [S1]","cmd":"npm i y --ignore-scripts && dash - 0<<< 'npm ci x'"}
+{"id":"g1399F2","tag":"G2|dash - 0<<E [F2]","cmd":"npm i y && dash - 0<<E\nnpm ci\nE"}
+{"id":"g1399S1","tag":"G2|dash - 0<<E [S1]","cmd":"npm i y --ignore-scripts && dash - 0<<E\nnpm ci x\nE"}
+{"id":"g1400F2","tag":"G2|dash - 0<<-E [F2]","cmd":"npm i y && dash - 0<<-E\n\tnpm ci\n\tE"}
+{"id":"g1400S1","tag":"G2|dash - 0<<-E [S1]","cmd":"npm i y --ignore-scripts && dash - 0<<-E\n\tnpm ci x\n\tE"}
+{"id":"g1401F2","tag":"G2|dash - 0<<'E' [F2]","cmd":"npm i y && dash - 0<<'E'\nnpm ci\nE"}
+{"id":"g1401S1","tag":"G2|dash - 0<<'E' [S1]","cmd":"npm i y --ignore-scripts && dash - 0<<'E'\nnpm ci x\nE"}
+{"id":"g1402F2","tag":"G2|dash - 0< <() [F2]","cmd":"npm i y && dash - 0< <(echo 'npm ci')"}
+{"id":"g1402S1","tag":"G2|dash - 0< <() [S1]","cmd":"npm i y --ignore-scripts && dash - 0< <(echo 'npm ci x')"}
+{"id":"g1403F2","tag":"G2|dash /dev/stdin 0<<< [F2]","cmd":"npm i y && dash /dev/stdin 0<<< 'npm ci'"}
+{"id":"g1403S1","tag":"G2|dash /dev/stdin 0<<< [S1]","cmd":"npm i y --ignore-scripts && dash /dev/stdin 0<<< 'npm ci x'"}
+{"id":"g1404F2","tag":"G2|dash /dev/stdin 0<<E [F2]","cmd":"npm i y && dash /dev/stdin 0<<E\nnpm ci\nE"}
+{"id":"g1404S1","tag":"G2|dash /dev/stdin 0<<E [S1]","cmd":"npm i y --ignore-scripts && dash /dev/stdin 0<<E\nnpm ci x\nE"}
+{"id":"g1405F2","tag":"G2|dash /dev/stdin 0<<-E [F2]","cmd":"npm i y && dash /dev/stdin 0<<-E\n\tnpm ci\n\tE"}
+{"id":"g1405S1","tag":"G2|dash /dev/stdin 0<<-E [S1]","cmd":"npm i y --ignore-scripts && dash /dev/stdin 0<<-E\n\tnpm ci x\n\tE"}
+{"id":"g1406F2","tag":"G2|dash /dev/stdin 0<<'E' [F2]","cmd":"npm i y && dash /dev/stdin 0<<'E'\nnpm ci\nE"}
+{"id":"g1406S1","tag":"G2|dash /dev/stdin 0<<'E' [S1]","cmd":"npm i y --ignore-scripts && dash /dev/stdin 0<<'E'\nnpm ci x\nE"}
+{"id":"g1407F2","tag":"G2|dash /dev/stdin 0< <() [F2]","cmd":"npm i y && dash /dev/stdin 0< <(echo 'npm ci')"}
+{"id":"g1407S1","tag":"G2|dash /dev/stdin 0< <() [S1]","cmd":"npm i y --ignore-scripts && dash /dev/stdin 0< <(echo 'npm ci x')"}
+{"id":"g1408F2","tag":"G2|dash /dev/fd/0 0<<< [F2]","cmd":"npm i y && dash /dev/fd/0 0<<< 'npm ci'"}
+{"id":"g1408S1","tag":"G2|dash /dev/fd/0 0<<< [S1]","cmd":"npm i y --ignore-scripts && dash /dev/fd/0 0<<< 'npm ci x'"}
+{"id":"g1409F2","tag":"G2|dash /dev/fd/0 0<<E [F2]","cmd":"npm i y && dash /dev/fd/0 0<<E\nnpm ci\nE"}
+{"id":"g1409S1","tag":"G2|dash /dev/fd/0 0<<E [S1]","cmd":"npm i y --ignore-scripts && dash /dev/fd/0 0<<E\nnpm ci x\nE"}
+{"id":"g1410F2","tag":"G2|dash /dev/fd/0 0<<-E [F2]","cmd":"npm i y && dash /dev/fd/0 0<<-E\n\tnpm ci\n\tE"}
+{"id":"g1410S1","tag":"G2|dash /dev/fd/0 0<<-E [S1]","cmd":"npm i y --ignore-scripts && dash /dev/fd/0 0<<-E\n\tnpm ci x\n\tE"}
+{"id":"g1411F2","tag":"G2|dash /dev/fd/0 0<<'E' [F2]","cmd":"npm i y && dash /dev/fd/0 0<<'E'\nnpm ci\nE"}
+{"id":"g1411S1","tag":"G2|dash /dev/fd/0 0<<'E' [S1]","cmd":"npm i y --ignore-scripts && dash /dev/fd/0 0<<'E'\nnpm ci x\nE"}
+{"id":"g1412F2","tag":"G2|dash /dev/fd/0 0< <() [F2]","cmd":"npm i y && dash /dev/fd/0 0< <(echo 'npm ci')"}
+{"id":"g1412S1","tag":"G2|dash /dev/fd/0 0< <() [S1]","cmd":"npm i y --ignore-scripts && dash /dev/fd/0 0< <(echo 'npm ci x')"}
+{"id":"g1413F2","tag":"G2|dash <& here-string [F2]","cmd":"npm i y && exec 3<<< 'npm ci'; dash <&3"}
+{"id":"g1413S1","tag":"G2|dash <& here-string [S1]","cmd":"npm i y --ignore-scripts && exec 3<<< 'npm ci x'; dash <&3"}
+{"id":"g1414F2","tag":"G2|dash <> file [F2]","cmd":"npm i y && printf '%s\\n' 'npm ci' > f; dash <> f"}
+{"id":"g1414S1","tag":"G2|dash <> file [S1]","cmd":"npm i y --ignore-scripts && printf '%s\\n' 'npm ci x' > f; dash <> f"}
+{"id":"g1415F2","tag":"G2|dash <(..) path [F2]","cmd":"npm i y && dash <(echo 'npm ci')"}
+{"id":"g1415S1","tag":"G2|dash <(..) path [S1]","cmd":"npm i y --ignore-scripts && dash <(echo 'npm ci x')"}
+{"id":"g1416F2","tag":"G2|echo | dash [F2]","cmd":"npm i y && echo 'npm ci' | dash"}
+{"id":"g1416S1","tag":"G2|echo | dash [S1]","cmd":"npm i y --ignore-scripts && echo 'npm ci x' | dash"}
+{"id":"g1417F2","tag":"G2|printf | dash [F2]","cmd":"npm i y && printf '%s\\n' 'npm ci' | dash"}
+{"id":"g1417S1","tag":"G2|printf | dash [S1]","cmd":"npm i y --ignore-scripts && printf '%s\\n' 'npm ci x' | dash"}
+{"id":"g1418F2","tag":"G2|file then dash [F2]","cmd":"npm i y && printf '%s\\n' 'npm ci' > f; dash f"}
+{"id":"g1418S1","tag":"G2|file then dash [S1]","cmd":"npm i y --ignore-scripts && printf '%s\\n' 'npm ci x' > f; dash f"}
+{"id":"g1419F2","tag":"G2|heredoc file then dash [F2]","cmd":"npm i y && cat > f <<'E'\nnpm ci\nE\ndash f"}
+{"id":"g1419S1","tag":"G2|heredoc file then dash [S1]","cmd":"npm i y --ignore-scripts && cat > f <<'E'\nnpm ci x\nE\ndash f"}
+{"id":"g1429F2","tag":"G3|builtin . <() [F2]","cmd":"npm i y && . <(echo 'npm ci')"}
+{"id":"g1429S1","tag":"G3|builtin . <() [S1]","cmd":"npm i y --ignore-scripts && . <(echo 'npm ci x')"}
+{"id":"g1687F2","tag":"G3|builtin source <() [F2]","cmd":"npm i y && source <(echo 'npm ci')"}
+{"id":"g1687S1","tag":"G3|builtin source <() [S1]","cmd":"npm i y --ignore-scripts && source <(echo 'npm ci x')"}
+{"id":"g1775F2","tag":"G4|cmd $(echo sq) [F2]","cmd":"npm i y && v=1 S='npm ci' r=S; a=(npm ci); printf '%s\\n' 'npm ci' > f; $(echo 'npm ci')"}
+{"id":"g1775S1","tag":"G4|cmd $(echo sq) [S1]","cmd":"npm i y --ignore-scripts && v=1 S='npm ci x' r=S; a=(npm ci x); printf '%s\\n' 'npm ci x' > f; $(echo 'npm ci x')"}
+{"id":"g1778F2","tag":"G4|bash -c $(echo sq) [F2]","cmd":"npm i y && v=1 S='npm ci' r=S; a=(npm ci); printf '%s\\n' 'npm ci' > f; bash -c $(echo 'npm ci')"}
+{"id":"g1778S1","tag":"G4|bash -c $(echo sq) [S1]","cmd":"npm i y --ignore-scripts && v=1 S='npm ci x' r=S; a=(npm ci x); printf '%s\\n' 'npm ci x' > f; bash -c $(echo 'npm ci x')"}
+{"id":"g1779F2","tag":"G4|eval $(echo sq) [F2]","cmd":"npm i y && v=1 S='npm ci' r=S; a=(npm ci); printf '%s\\n' 'npm ci' > f; eval $(echo 'npm ci')"}
+{"id":"g1779S1","tag":"G4|eval $(echo sq) [S1]","cmd":"npm i y --ignore-scripts && v=1 S='npm ci x' r=S; a=(npm ci x); printf '%s\\n' 'npm ci x' > f; eval $(echo 'npm ci x')"}
+{"id":"g1780F2","tag":"G4|cmd `echo sq` [F2]","cmd":"npm i y && v=1 S='npm ci' r=S; a=(npm ci); printf '%s\\n' 'npm ci' > f; `echo 'npm ci'`"}
+{"id":"g1780S1","tag":"G4|cmd `echo sq` [S1]","cmd":"npm i y --ignore-scripts && v=1 S='npm ci x' r=S; a=(npm ci x); printf '%s\\n' 'npm ci x' > f; `echo 'npm ci x'`"}
+{"id":"g1783F2","tag":"G4|bash -c `echo sq` [F2]","cmd":"npm i y && v=1 S='npm ci' r=S; a=(npm ci); printf '%s\\n' 'npm ci' > f; bash -c `echo 'npm ci'`"}
+{"id":"g1783S1","tag":"G4|bash -c `echo sq` [S1]","cmd":"npm i y --ignore-scripts && v=1 S='npm ci x' r=S; a=(npm ci x); printf '%s\\n' 'npm ci x' > f; bash -c `echo 'npm ci x'`"}
+{"id":"g1784F2","tag":"G4|eval `echo sq` [F2]","cmd":"npm i y && v=1 S='npm ci' r=S; a=(npm ci); printf '%s\\n' 'npm ci' > f; eval `echo 'npm ci'`"}
+{"id":"g1784S1","tag":"G4|eval `echo sq` [S1]","cmd":"npm i y --ignore-scripts && v=1 S='npm ci x' r=S; a=(npm ci x); printf '%s\\n' 'npm ci x' > f; eval `echo 'npm ci x'`"}
+{"id":"g1788F2","tag":"G4|bash -c ${u:-P} [F2]","cmd":"npm i y && v=1 S='npm ci' r=S; a=(npm ci); printf '%s\\n' 'npm ci' > f; bash -c ${u:-npm ci}"}
+{"id":"g1788S1","tag":"G4|bash -c ${u:-P} [S1]","cmd":"npm i y --ignore-scripts && v=1 S='npm ci x' r=S; a=(npm ci x); printf '%s\\n' 'npm ci x' > f; bash -c ${u:-npm ci x}"}
+{"id":"g1793F2","tag":"G4|bash -c ${u-P} [F2]","cmd":"npm i y && v=1 S='npm ci' r=S; a=(npm ci); printf '%s\\n' 'npm ci' > f; bash -c ${u-npm ci}"}
+{"id":"g1793S1","tag":"G4|bash -c ${u-P} [S1]","cmd":"npm i y --ignore-scripts && v=1 S='npm ci x' r=S; a=(npm ci x); printf '%s\\n' 'npm ci x' > f; bash -c ${u-npm ci x}"}
+{"id":"g1798F2","tag":"G4|bash -c ${u:=P} [F2]","cmd":"npm i y && v=1 S='npm ci' r=S; a=(npm ci); printf '%s\\n' 'npm ci' > f; bash -c ${u:=npm ci}"}
+{"id":"g1798S1","tag":"G4|bash -c ${u:=P} [S1]","cmd":"npm i y --ignore-scripts && v=1 S='npm ci x' r=S; a=(npm ci x); printf '%s\\n' 'npm ci x' > f; bash -c ${u:=npm ci x}"}
+{"id":"g1803F2","tag":"G4|bash -c ${u=P} [F2]","cmd":"npm i y && v=1 S='npm ci' r=S; a=(npm ci); printf '%s\\n' 'npm ci' > f; bash -c ${u=npm ci}"}
+{"id":"g1803S1","tag":"G4|bash -c ${u=P} [S1]","cmd":"npm i y --ignore-scripts && v=1 S='npm ci x' r=S; a=(npm ci x); printf '%s\\n' 'npm ci x' > f; bash -c ${u=npm ci x}"}
+{"id":"g1808F2","tag":"G4|bash -c ${v:+P} [F2]","cmd":"npm i y && v=1 S='npm ci' r=S; a=(npm ci); printf '%s\\n' 'npm ci' > f; bash -c ${v:+npm ci}"}
+{"id":"g1808S1","tag":"G4|bash -c ${v:+P} [S1]","cmd":"npm i y --ignore-scripts && v=1 S='npm ci x' r=S; a=(npm ci x); printf '%s\\n' 'npm ci x' > f; bash -c ${v:+npm ci x}"}
+{"id":"g1813F2","tag":"G4|bash -c ${v+P} [F2]","cmd":"npm i y && v=1 S='npm ci' r=S; a=(npm ci); printf '%s\\n' 'npm ci' > f; bash -c ${v+npm ci}"}
+{"id":"g1813S1","tag":"G4|bash -c ${v+P} [S1]","cmd":"npm i y --ignore-scripts && v=1 S='npm ci x' r=S; a=(npm ci x); printf '%s\\n' 'npm ci x' > f; bash -c ${v+npm ci x}"}
+{"id":"g1815F2","tag":"G4|cmd $S [F2]","cmd":"npm i y && v=1 S='npm ci' r=S; a=(npm ci); printf '%s\\n' 'npm ci' > f; $S"}
+{"id":"g1815S1","tag":"G4|cmd $S [S1]","cmd":"npm i y --ignore-scripts && v=1 S='npm ci x' r=S; a=(npm ci x); printf '%s\\n' 'npm ci x' > f; $S"}
+{"id":"g1817F2","tag":"G4|sh -c \"$S\" [F2]","cmd":"npm i y && v=1 S='npm ci' r=S; a=(npm ci); printf '%s\\n' 'npm ci' > f; sh -c \"$S\""}
+{"id":"g1817S1","tag":"G4|sh -c \"$S\" [S1]","cmd":"npm i y --ignore-scripts && v=1 S='npm ci x' r=S; a=(npm ci x); printf '%s\\n' 'npm ci x' > f; sh -c \"$S\""}
+{"id":"g1818F2","tag":"G4|bash -c $S [F2]","cmd":"npm i y && v=1 S='npm ci' r=S; a=(npm ci); printf '%s\\n' 'npm ci' > f; bash -c $S"}
+{"id":"g1818S1","tag":"G4|bash -c $S [S1]","cmd":"npm i y --ignore-scripts && v=1 S='npm ci x' r=S; a=(npm ci x); printf '%s\\n' 'npm ci x' > f; bash -c $S"}
+{"id":"g1819F2","tag":"G4|eval $S [F2]","cmd":"npm i y && v=1 S='npm ci' r=S; a=(npm ci); printf '%s\\n' 'npm ci' > f; eval $S"}
+{"id":"g1819S1","tag":"G4|eval $S [S1]","cmd":"npm i y --ignore-scripts && v=1 S='npm ci x' r=S; a=(npm ci x); printf '%s\\n' 'npm ci x' > f; eval $S"}
+{"id":"g1820F2","tag":"G4|cmd ${!r} [F2]","cmd":"npm i y && v=1 S='npm ci' r=S; a=(npm ci); printf '%s\\n' 'npm ci' > f; ${!r}"}
+{"id":"g1820S1","tag":"G4|cmd ${!r} [S1]","cmd":"npm i y --ignore-scripts && v=1 S='npm ci x' r=S; a=(npm ci x); printf '%s\\n' 'npm ci x' > f; ${!r}"}
+{"id":"g1822F2","tag":"G4|sh -c \"${!r}\" [F2]","cmd":"npm i y && v=1 S='npm ci' r=S; a=(npm ci); printf '%s\\n' 'npm ci' > f; sh -c \"${!r}\""}
+{"id":"g1822S1","tag":"G4|sh -c \"${!r}\" [S1]","cmd":"npm i y --ignore-scripts && v=1 S='npm ci x' r=S; a=(npm ci x); printf '%s\\n' 'npm ci x' > f; sh -c \"${!r}\""}
+{"id":"g1823F2","tag":"G4|bash -c ${!r} [F2]","cmd":"npm i y && v=1 S='npm ci' r=S; a=(npm ci); printf '%s\\n' 'npm ci' > f; bash -c ${!r}"}
+{"id":"g1823S1","tag":"G4|bash -c ${!r} [S1]","cmd":"npm i y --ignore-scripts && v=1 S='npm ci x' r=S; a=(npm ci x); printf '%s\\n' 'npm ci x' > f; bash -c ${!r}"}
+{"id":"g1824F2","tag":"G4|eval ${!r} [F2]","cmd":"npm i y && v=1 S='npm ci' r=S; a=(npm ci); printf '%s\\n' 'npm ci' > f; eval ${!r}"}
+{"id":"g1824S1","tag":"G4|eval ${!r} [S1]","cmd":"npm i y --ignore-scripts && v=1 S='npm ci x' r=S; a=(npm ci x); printf '%s\\n' 'npm ci x' > f; eval ${!r}"}
+{"id":"g1827F2","tag":"G4|sh -c \"${a[@]}\" [F2]","cmd":"npm i y && v=1 S='npm ci' r=S; a=(npm ci); printf '%s\\n' 'npm ci' > f; sh -c \"${a[@]}\""}
+{"id":"g1827S1","tag":"G4|sh -c \"${a[@]}\" [S1]","cmd":"npm i y --ignore-scripts && v=1 S='npm ci x' r=S; a=(npm ci x); printf '%s\\n' 'npm ci x' > f; sh -c \"${a[@]}\""}
+{"id":"g1828F2","tag":"G4|bash -c ${a[@]} [F2]","cmd":"npm i y && v=1 S='npm ci' r=S; a=(npm ci); printf '%s\\n' 'npm ci' > f; bash -c ${a[@]}"}
+{"id":"g1828S1","tag":"G4|bash -c ${a[@]} [S1]","cmd":"npm i y --ignore-scripts && v=1 S='npm ci x' r=S; a=(npm ci x); printf '%s\\n' 'npm ci x' > f; bash -c ${a[@]}"}
+{"id":"g1832F2","tag":"G4|bash -c $'P' [F2]","cmd":"npm i y && v=1 S='npm ci' r=S; a=(npm ci); printf '%s\\n' 'npm ci' > f; bash -c $'npm ci'"}
+{"id":"g1832S1","tag":"G4|bash -c $'P' [S1]","cmd":"npm i y --ignore-scripts && v=1 S='npm ci x' r=S; a=(npm ci x); printf '%s\\n' 'npm ci x' > f; bash -c $'npm ci x'"}
+{"id":"g1833F2","tag":"G4|eval $'P' [F2]","cmd":"npm i y && v=1 S='npm ci' r=S; a=(npm ci); printf '%s\\n' 'npm ci' > f; eval $'npm ci'"}
+{"id":"g1833S1","tag":"G4|eval $'P' [S1]","cmd":"npm i y --ignore-scripts && v=1 S='npm ci x' r=S; a=(npm ci x); printf '%s\\n' 'npm ci x' > f; eval $'npm ci x'"}
+{"id":"g1837F2","tag":"G4|bash -c $\"P\" [F2]","cmd":"npm i y && v=1 S='npm ci' r=S; a=(npm ci); printf '%s\\n' 'npm ci' > f; bash -c $\"npm ci\""}
+{"id":"g1837S1","tag":"G4|bash -c $\"P\" [S1]","cmd":"npm i y --ignore-scripts && v=1 S='npm ci x' r=S; a=(npm ci x); printf '%s\\n' 'npm ci x' > f; bash -c $\"npm ci x\""}
+{"id":"g1838F2","tag":"G4|eval $\"P\" [F2]","cmd":"npm i y && v=1 S='npm ci' r=S; a=(npm ci); printf '%s\\n' 'npm ci' > f; eval $\"npm ci\""}
+{"id":"g1838S1","tag":"G4|eval $\"P\" [S1]","cmd":"npm i y --ignore-scripts && v=1 S='npm ci x' r=S; a=(npm ci x); printf '%s\\n' 'npm ci x' > f; eval $\"npm ci x\""}
+{"id":"g1839F2","tag":"G4|cmd $(<f) [F2]","cmd":"npm i y && v=1 S='npm ci' r=S; a=(npm ci); printf '%s\\n' 'npm ci' > f; $(<f)"}
+{"id":"g1839S1","tag":"G4|cmd $(<f) [S1]","cmd":"npm i y --ignore-scripts && v=1 S='npm ci x' r=S; a=(npm ci x); printf '%s\\n' 'npm ci x' > f; $(<f)"}
+{"id":"g1841F2","tag":"G4|sh -c \"$(<f)\" [F2]","cmd":"npm i y && v=1 S='npm ci' r=S; a=(npm ci); printf '%s\\n' 'npm ci' > f; sh -c \"$(<f)\""}
+{"id":"g1841S1","tag":"G4|sh -c \"$(<f)\" [S1]","cmd":"npm i y --ignore-scripts && v=1 S='npm ci x' r=S; a=(npm ci x); printf '%s\\n' 'npm ci x' > f; sh -c \"$(<f)\""}
+{"id":"g1842F2","tag":"G4|bash -c $(<f) [F2]","cmd":"npm i y && v=1 S='npm ci' r=S; a=(npm ci); printf '%s\\n' 'npm ci' > f; bash -c $(<f)"}
+{"id":"g1842S1","tag":"G4|bash -c $(<f) [S1]","cmd":"npm i y --ignore-scripts && v=1 S='npm ci x' r=S; a=(npm ci x); printf '%s\\n' 'npm ci x' > f; bash -c $(<f)"}
+{"id":"g1843F2","tag":"G4|eval $(<f) [F2]","cmd":"npm i y && v=1 S='npm ci' r=S; a=(npm ci); printf '%s\\n' 'npm ci' > f; eval $(<f)"}
+{"id":"g1843S1","tag":"G4|eval $(<f) [S1]","cmd":"npm i y --ignore-scripts && v=1 S='npm ci x' r=S; a=(npm ci x); printf '%s\\n' 'npm ci x' > f; eval $(<f)"}
+{"id":"g1844F2","tag":"G4|cmd =(echo) [F2]","cmd":"npm i y && v=1 S='npm ci' r=S; a=(npm ci); printf '%s\\n' 'npm ci' > f; $(cat =(echo 'npm ci'))"}
+{"id":"g1844S1","tag":"G4|cmd =(echo) [S1]","cmd":"npm i y --ignore-scripts && v=1 S='npm ci x' r=S; a=(npm ci x); printf '%s\\n' 'npm ci x' > f; $(cat =(echo 'npm ci x'))"}
+{"id":"g1847F2","tag":"G4|bash -c =(echo) [F2]","cmd":"npm i y && v=1 S='npm ci' r=S; a=(npm ci); printf '%s\\n' 'npm ci' > f; bash -c $(cat =(echo 'npm ci'))"}
+{"id":"g1847S1","tag":"G4|bash -c =(echo) [S1]","cmd":"npm i y --ignore-scripts && v=1 S='npm ci x' r=S; a=(npm ci x); printf '%s\\n' 'npm ci x' > f; bash -c $(cat =(echo 'npm ci x'))"}
+{"id":"g1848F2","tag":"G4|eval =(echo) [F2]","cmd":"npm i y && v=1 S='npm ci' r=S; a=(npm ci); printf '%s\\n' 'npm ci' > f; eval $(cat =(echo 'npm ci'))"}
+{"id":"g1848S1","tag":"G4|eval =(echo) [S1]","cmd":"npm i y --ignore-scripts && v=1 S='npm ci x' r=S; a=(npm ci x); printf '%s\\n' 'npm ci x' > f; eval $(cat =(echo 'npm ci x'))"}
+{"id":"g1849F2","tag":"G4|command word \"npm\" [F2]","cmd":"npm i y && \"npm\" ci x"}
+{"id":"g1849S1","tag":"G4|command word \"npm\" [S1]","cmd":"npm i y --ignore-scripts && \"npm\" ci x"}
+{"id":"g1850F2","tag":"G4|command word 'n'pm [F2]","cmd":"npm i y && 'n'pm ci x"}
+{"id":"g1850S1","tag":"G4|command word 'n'pm [S1]","cmd":"npm i y --ignore-scripts && 'n'pm ci x"}
+{"id":"g1851F2","tag":"G4|command word n\\pm [F2]","cmd":"npm i y && n\\pm ci x"}
+{"id":"g1851S1","tag":"G4|command word n\\pm [S1]","cmd":"npm i y --ignore-scripts && n\\pm ci x"}
+{"id":"g1852F2","tag":"G4|command word $(echo npm) [F2]","cmd":"npm i y && $(echo npm) ci x"}
+{"id":"g1852S1","tag":"G4|command word $(echo npm) [S1]","cmd":"npm i y --ignore-scripts && $(echo npm) ci x"}
+{"id":"g1853F2","tag":"G4|command word `echo npm` [F2]","cmd":"npm i y && `echo npm` ci x"}
+{"id":"g1853S1","tag":"G4|command word `echo npm` [S1]","cmd":"npm i y --ignore-scripts && `echo npm` ci x"}
+{"id":"g1854F2","tag":"G4|command word ${u:-npm} [F2]","cmd":"npm i y && ${u:-npm} ci x"}
+{"id":"g1854S1","tag":"G4|command word ${u:-npm} [S1]","cmd":"npm i y --ignore-scripts && ${u:-npm} ci x"}
+{"id":"g1855F2","tag":"G4|command word $'npm' [F2]","cmd":"npm i y && $'npm' ci x"}
+{"id":"g1855S1","tag":"G4|command word $'npm' [S1]","cmd":"npm i y --ignore-scripts && $'npm' ci x"}
+{"id":"g1856F2","tag":"G4|command word N\"P\"M [F2]","cmd":"npm i y && N\"P\"M ci x"}
+{"id":"g1856S1","tag":"G4|command word N\"P\"M [S1]","cmd":"npm i y --ignore-scripts && N\"P\"M ci x"}

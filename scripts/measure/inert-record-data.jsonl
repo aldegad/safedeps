@@ -1,0 +1,25 @@
+{"id": "d001", "tag": "D|echo sq", "cmd": "npm i y && echo 'npm ci x'"}
+{"id": "d002", "tag": "D|echo dq", "cmd": "npm i y && echo \"npm ci x\""}
+{"id": "d003", "tag": "D|echo bare", "cmd": "npm i y && echo npm ci x"}
+{"id": "d004", "tag": "D|printf", "cmd": "npm i y && printf '%s\\n' 'npm ci x'"}
+{"id": "d005", "tag": "D|git commit -m sq", "cmd": "npm i y && git commit -q -m 'npm ci x' 2>/dev/null; true"}
+{"id": "d006", "tag": "D|git commit -m dq prose", "cmd": "npm i y && git commit -q -m \"chore: run npm ci x in CI\" 2>/dev/null; true"}
+{"id": "d007", "tag": "D|git commit heredoc msg", "cmd": "npm i y && git commit -q -F - <<'EOF' 2>/dev/null; true\nfix: npm ci x in docs\nEOF"}
+{"id": "d008", "tag": "D|cat > file <<'E'", "cmd": "npm i y && cat > notes.txt <<'E'\nthen npm ci x\nE"}
+{"id": "d009", "tag": "D|cat > file <<E", "cmd": "npm i y && cat > notes.txt <<E\nnpm ci x\nE"}
+{"id": "d010", "tag": "D|cat >> file <<-E", "cmd": "npm i y && cat >> notes.txt <<-E\n\tnpm ci x\n\tE"}
+{"id": "d011", "tag": "D|tee file <<<", "cmd": "npm i y && tee notes.txt <<< 'npm ci x' > /dev/null"}
+{"id": "d012", "tag": "D|grep pattern", "cmd": "npm i y && grep -c 'npm ci x' /dev/null; true"}
+{"id": "d013", "tag": "D|comment", "cmd": "npm i y && true # npm ci x"}
+{"id": "d014", "tag": "D|colon arg", "cmd": "npm i y && : 'npm ci x'"}
+{"id": "d015", "tag": "D|assignment", "cmd": "npm i y && msg='npm ci x'; echo \"$msg\" > /dev/null"}
+{"id": "d016", "tag": "D|jq --arg", "cmd": "npm i y && jq -n --arg m 'npm ci x' '$m' > /dev/null"}
+{"id": "d017", "tag": "D|printf >> file", "cmd": "npm i y && printf '%s\\n' 'npm ci x' >> notes.txt"}
+{"id": "d018", "tag": "D|data heredoc | grep", "cmd": "npm i y && cat <<E | grep -c npm\nnpm ci x\nE"}
+{"id": "d019", "tag": "D|echo | grep", "cmd": "npm i y && echo 'npm ci x' | grep -c npm"}
+{"id": "d020", "tag": "D|sed script", "cmd": "npm i y && sed -n 's/npm ci x/x/p' /dev/null"}
+{"id": "d021", "tag": "D|awk print", "cmd": "npm i y && awk 'BEGIN { print \"npm ci x\" }' > /dev/null"}
+{"id": "d022", "tag": "D|readme heredoc md", "cmd": "npm i y && cat > R.md <<'E'\n## Install\n\n```\nnpm ci x\n```\nE"}
+{"id": "d023", "tag": "D|json with script", "cmd": "npm i y && printf '%s\\n' '{\"scripts\":{\"ci\":\"npm ci x\"}}' > s.json"}
+{"id": "d024", "tag": "D|echo mention only", "cmd": "npm i y && echo 'npm is slow'"}
+{"id": "d025", "tag": "D|echo npm run", "cmd": "npm i y && echo 'npm run build'"}
