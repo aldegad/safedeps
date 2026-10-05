@@ -68,8 +68,10 @@
 #
 # Usage:
 #   scripts/measure/scan-failure-census.sh [--quick] [--jobs N] [--variants "claude codex padded"]
+#       [--shard I/M --out DIR] [--list]
 #
-#   --quick      the subset npm test runs (the corpus's "quick" block)
+#   --quick      the subset `npm run test:release` runs (the corpus's "quick"
+#                block)
 #   --jobs N     parallel runs (default: SAFEDEPS_TEST_JOBS when it is set,
 #                otherwise half the CPUs rounded up, at most 16)
 #   --variants   payload shapes: claude (no turn_id), codex (turn_id, so no
@@ -80,6 +82,24 @@
 #                claude and approved on the rest; with --quick, all four on
 #                the rows the corpus lists under quick.variants, claude on the
 #                rest.
+#   --shard I/M  run the I-th of M shards, so M machines can share one census.
+#                Every shard runs the clean and counting runs of every case,
+#                because each failing run is compared with its case's clean
+#                run. The failing runs are split by their line in the list of
+#                all failing runs: line L goes to shard ((L-1) mod M) + 1. The
+#                list holds a case's runs on consecutive lines, and one case
+#                can own a third of them, so a split by case would leave one
+#                shard with most of the work. A shard judges every check but
+#                idle-mode, which asks whether a mode failed a call in any run
+#                and so can only be answered over all shards. It needs --out.
+#   --out DIR    write what the shards are combined from (see
+#                scripts/measure/census-shards.sh): `shard` (I and M), `cases`
+#                (one id per case), `jobs` (every failing run of the whole
+#                census, not only this shard's), `ran` (the runs this one made)
+#                and `hits` (calls failed per mode).
+#   --list       run the clean and counting runs, print every run this census
+#                would make as `<case id> <mode> <K>`, and stop. A case id is
+#                its number and the cksum of its variant and command.
 #
 # --quick also skips the K-onward runs (the full census keeps them), so npm
 # test pays for one failing run per reading rather than two. It keeps the K-th
@@ -197,14 +217,36 @@ if [[ -n "${SAFEDEPS_TEST_JOBS:-}" ]]; then
   JOBS="${SAFEDEPS_TEST_JOBS}"
 fi
 VARIANTS=""
+SHARD_I=1 SHARD_M=1 OUT="" LIST=false
+usage() {
+  printf 'usage: %s [--quick] [--jobs N] [--variants "claude codex padded"] [--shard I/M --out DIR] [--list]\n' "$0" >&2
+  exit 2
+}
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --quick) QUICK=true; shift ;;
     --jobs) JOBS="$2"; shift 2 ;;
     --variants) VARIANTS="$2"; shift 2 ;;
-    *) printf 'usage: %s [--quick] [--jobs N] [--variants "claude codex padded"]\n' "$0" >&2; exit 2 ;;
+    --shard)
+      [[ "${2:-}" =~ ^([1-9][0-9]*)/([1-9][0-9]*)$ ]] || usage
+      SHARD_I="${BASH_REMATCH[1]}" SHARD_M="${BASH_REMATCH[2]}"
+      (( SHARD_I <= SHARD_M )) || usage
+      shift 2 ;;
+    --out) OUT="${2:-}"; [[ -n "${OUT}" ]] || usage; shift 2 ;;
+    --list) LIST=true; shift ;;
+    *) usage ;;
   esac
 done
+# A shard without --out would pass with idle-mode unjudged and nothing to judge
+# it from.
+if (( SHARD_M > 1 )) && [[ "${OUT}" == "" && "${LIST}" == false ]]; then
+  printf 'census: --shard needs --out, where the shards are combined from\n' >&2
+  exit 2
+fi
+if [[ -n "${OUT}" ]]; then
+  mkdir -p "${OUT}" || { printf 'census: cannot create %s\n' "${OUT}" >&2; exit 2; }
+  OUT=$(cd "${OUT}" && pwd)
+fi
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/safedeps-census.XXXXXX")
 trap 'rm -rf "${WORK}"' EXIT
@@ -382,8 +424,22 @@ done < <(jq -j --arg quick "${QUICK}" '
   | ($b.forms[] as $f | $b.wrappers[] | sub("\\{\\}"; $f) + "\u0000"),
     ($b.extras[], $b.controls[] | . + "\u0000")' "${CORPUS}")
 
+# A case's id is its number and the cksum of its variant and command, so lists
+# from two runs of the census compare by what each case is, not only by its
+# place in the corpus.
+for n in $(seq 1 "${case_count}"); do
+  printf '%s\t%s:%s\n' "${n}" "${n}" \
+    "$( { cat "${WORK}/cases/${n}.variant"; printf '\t'; cat "${WORK}/cases/${n}.cmd"; } | cksum | tr ' ' '-')"
+done > "${WORK}/case-ids"
+# Prints "<n> <mode> <k>" lines from stdin as "<case id> <mode> <k>".
+with_case_ids() {
+  awk -v ids="${WORK}/case-ids" 'BEGIN { while ((getline l < ids) > 0) { split(l, f, "\t"); id[f[1]] = f[2] } }
+    { print id[$1] " " $2 " " $3 }'
+}
+
 printf 'safedeps scan-failure census\n'
-printf '  cases %d (%s), jobs %d, %s\n' "${case_count}" "$([[ "${QUICK}" == "true" ]] && printf quick || printf full)" "${JOBS}" "$(uptime | sed 's/.*load/load/')"
+printf '  cases %d (%s), jobs %d, shard %d/%d, %s\n' "${case_count}" "$([[ "${QUICK}" == "true" ]] && printf quick || printf full)" "${JOBS}" \
+  "${SHARD_I}" "${SHARD_M}" "$(uptime | sed 's/.*load/load/')"
 
 # --- clean runs -----------------------------------------------------------------
 seq 1 "${case_count}" | xargs -P "${JOBS}" -I{} bash "${SELF}" --run "${WORK}" {} none 0
@@ -395,32 +451,59 @@ seq 1 "${case_count}" | xargs -P "${JOBS}" -I{} bash "${SELF}" --run "${WORK}" {
 seq 1 "${case_count}" | xargs -P "${JOBS}" -I{} bash "${SELF}" --run "${WORK}" {} count 0
 
 # --- failing runs ---------------------------------------------------------------
-: > "${WORK}/jobs"
+# Every failing run of the whole census goes to jobs-all; this shard's share of
+# it goes to jobs.
+: > "${WORK}/jobs-all"
 for n in $(seq 1 "${case_count}"); do
   reads=$(cut -f9 "${WORK}/results/${n}.none.0")
   for k in $(seq 1 "${reads}"); do
-    printf '%s k %s\n' "${n}" "${k}" >> "${WORK}/jobs"
-    [[ "${QUICK}" == "true" ]] || printf '%s from-k %s\n' "${n}" "${k}" >> "${WORK}/jobs"
+    printf '%s k %s\n' "${n}" "${k}" >> "${WORK}/jobs-all"
+    [[ "${QUICK}" == "true" ]] || printf '%s from-k %s\n' "${n}" "${k}" >> "${WORK}/jobs-all"
   done
   if [[ "${QUICK}" != "true" ]]; then
     for k in $(seq 1 "$(cut -f14 "${WORK}/results/${n}.count.0")"); do
-      printf '%s grep-k %s\n' "${n}" "${k}" >> "${WORK}/jobs"
+      printf '%s grep-k %s\n' "${n}" "${k}" >> "${WORK}/jobs-all"
     done
   fi
   for k in $(seq 1 "$(cut -f15 "${WORK}/results/${n}.count.0")"); do
-    printf '%s sed-k %s\n' "${n}" "${k}" >> "${WORK}/jobs"
+    printf '%s sed-k %s\n' "${n}" "${k}" >> "${WORK}/jobs-all"
   done
   for mode in scan-all join-all strip-all reads-all inert-all offsets-all norm-all subst-all stmts-all npmrc-all pieces-all payload-all paywords-all payspans-all awk-all grep-all sed-all; do
-    printf '%s %s 0\n' "${n}" "${mode}" >> "${WORK}/jobs"
+    printf '%s %s 0\n' "${n}" "${mode}" >> "${WORK}/jobs-all"
   done
 done
+awk -v i="${SHARD_I}" -v m="${SHARD_M}" '(NR - 1) % m == i - 1' "${WORK}/jobs-all" > "${WORK}/jobs"
+
+if [[ "${LIST}" == true ]]; then
+  for n in $(seq 1 "${case_count}"); do printf '%s none 0\n%s count 0\n' "${n}" "${n}"; done | with_case_ids
+  with_case_ids < "${WORK}/jobs"
+  exit 0
+fi
+
 # The K-th runs by tool, so the price of each mode can be read off a log.
-printf '  failing runs %d (K-th awk %d, grep %d, sed %d)\n' "$(wc -l < "${WORK}/jobs" | tr -d ' ')" \
+printf '  failing runs %d of %d (K-th awk %d, grep %d, sed %d)\n' "$(wc -l < "${WORK}/jobs" | tr -d ' ')" \
+  "$(wc -l < "${WORK}/jobs-all" | tr -d ' ')" \
   "$(grep -c ' k ' "${WORK}/jobs" || true)" "$(grep -c ' grep-k ' "${WORK}/jobs" || true)" "$(grep -c ' sed-k ' "${WORK}/jobs" || true)"
 xargs -P "${JOBS}" -L 1 bash "${SELF}" --run "${WORK}" < "${WORK}/jobs"
 
+if [[ -n "${OUT}" ]]; then
+  : > "${OUT}/hits"
+  printf '%s %s\n' "${SHARD_I}" "${SHARD_M}" > "${OUT}/shard"
+  cut -f2 "${WORK}/case-ids" > "${OUT}/cases"
+  with_case_ids < "${WORK}/jobs-all" > "${OUT}/jobs"
+  # The runs this census made, read from the results it holds rather than from
+  # the list it was given: a run that wrote no result was not made.
+  for f in "${WORK}/results"/*; do
+    f="${f##*/}"
+    printf '%s %s %s\n' "${f%%.*}" "$(f="${f#*.}"; printf '%s' "${f%.*}")" "${f##*.}"
+  done | with_case_ids > "${OUT}/ran"
+fi
+
 # --- verdict --------------------------------------------------------------------
-cat "${WORK}/results"/* | awk -F'\t' -v cases="${WORK}/cases" -v strays="${WORK}/strays" '
+# A shard leaves idle-mode to census-shards.sh, which sums the hits of every
+# shard; it writes its own hits for that.
+cat "${WORK}/results"/* | awk -F'\t' -v cases="${WORK}/cases" -v strays="${WORK}/strays" \
+  -v sharded="$(( SHARD_M > 1 ? 1 : 0 ))" -v hits_out="${OUT:+${OUT}/hits}" '
   $2 == "none" { base[$1] = $5 "\t" $6 "\t" $7 "\t" $8 }
   { row[NR] = $0 }
   END {
@@ -459,9 +542,15 @@ cat "${WORK}/results"/* | awk -F'\t' -v cases="${WORK}/cases" -v strays="${WORK}
     # A failure mode that failed nothing, in any run, contributed only "same"
     # rows: its zero says nothing. That is how a mode keyed on a marker the
     # guard did not carry went unnoticed (caught in review).
-    for (m in hits) if (hits[m] == 0) { count["idle-mode"]++; bad[++nb] = "idle-mode\t" m " failed no call in any run" }
+    if (hits_out != "") { for (m in hits) printf "%s %d\n", m, hits[m] > hits_out; close(hits_out) }
+    if (!sharded) {
+      for (m in hits) if (hits[m] == 0) { count["idle-mode"]++; bad[++nb] = "idle-mode\t" m " failed no call in any run" }
+    }
     split("clean same undecided weakened mislabeled error after-gate pending-on-deny idle-mode unmarked unlisted unstable", order, " ")
-    for (j = 1; j <= 12; j++) printf "  %-16s %d\n", order[j], count[order[j]] + 0
+    for (j = 1; j <= 12; j++) {
+      if (sharded && order[j] == "idle-mode") { printf "  %-16s %s\n", order[j], "left to census-shards.sh combine"; continue }
+      printf "  %-16s %d\n", order[j], count[order[j]] + 0
+    }
     for (j = 1; j <= nb; j++) print "  " bad[j]
     fail = count["weakened"] + count["mislabeled"] + count["error"] + count["after-gate"] + count["pending-on-deny"] + count["idle-mode"] + count["unmarked"] + count["unlisted"] + count["unstable"]
     exit (fail > 0 ? 1 : 0)
