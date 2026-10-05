@@ -1854,3 +1854,456 @@
 {"id":"g1854","tag":"G4|command word ${u:-npm}","cmd":"npm i y && ${u:-npm} ci x"}
 {"id":"g1855","tag":"G4|command word $'npm'","cmd":"npm i y && $'npm' ci x"}
 {"id":"g1856","tag":"G4|command word N\"P\"M","cmd":"npm i y && N\"P\"M ci x"}
+{"id":"g1857","tag":"G5|bare --k=","cmd":"npm i y && npm --heading= ci x"}
+{"id":"g1858","tag":"G5|sh -c sq --k=","cmd":"npm i y && sh -c 'npm --heading= ci x'"}
+{"id":"g1859","tag":"G5|bash -c dq --k=","cmd":"npm i y && bash -c \"npm --heading= ci x\""}
+{"id":"g1860","tag":"G5|eval sq --k=","cmd":"npm i y && eval 'npm --heading= ci x'"}
+{"id":"g1861","tag":"G5|bash <<< sq --k=","cmd":"npm i y && bash <<< 'npm --heading= ci x'"}
+{"id":"g1862","tag":"G5|sh <<'E' --k=","cmd":"npm i y && sh <<'E'\nnpm --heading= ci x\nE"}
+{"id":"g1863","tag":"G5|echo sq | sh --k=","cmd":"npm i y && echo 'npm --heading= ci x' | sh"}
+{"id":"g1864","tag":"G5|settled bare --k=","cmd":"npm i y --ignore-scripts && npm --heading= ci x"}
+{"id":"g1865","tag":"G5|bare --k=v","cmd":"npm i y && npm --heading=v ci x"}
+{"id":"g1866","tag":"G5|sh -c sq --k=v","cmd":"npm i y && sh -c 'npm --heading=v ci x'"}
+{"id":"g1867","tag":"G5|bash -c dq --k=v","cmd":"npm i y && bash -c \"npm --heading=v ci x\""}
+{"id":"g1868","tag":"G5|eval sq --k=v","cmd":"npm i y && eval 'npm --heading=v ci x'"}
+{"id":"g1869","tag":"G5|bash <<< sq --k=v","cmd":"npm i y && bash <<< 'npm --heading=v ci x'"}
+{"id":"g1870","tag":"G5|sh <<'E' --k=v","cmd":"npm i y && sh <<'E'\nnpm --heading=v ci x\nE"}
+{"id":"g1871","tag":"G5|echo sq | sh --k=v","cmd":"npm i y && echo 'npm --heading=v ci x' | sh"}
+{"id":"g1872","tag":"G5|settled bare --k=v","cmd":"npm i y --ignore-scripts && npm --heading=v ci x"}
+{"id":"g1873","tag":"G5|bare --k v","cmd":"npm i y && npm --heading v ci x"}
+{"id":"g1874","tag":"G5|sh -c sq --k v","cmd":"npm i y && sh -c 'npm --heading v ci x'"}
+{"id":"g1875","tag":"G5|bash -c dq --k v","cmd":"npm i y && bash -c \"npm --heading v ci x\""}
+{"id":"g1876","tag":"G5|eval sq --k v","cmd":"npm i y && eval 'npm --heading v ci x'"}
+{"id":"g1877","tag":"G5|bash <<< sq --k v","cmd":"npm i y && bash <<< 'npm --heading v ci x'"}
+{"id":"g1878","tag":"G5|sh <<'E' --k v","cmd":"npm i y && sh <<'E'\nnpm --heading v ci x\nE"}
+{"id":"g1879","tag":"G5|echo sq | sh --k v","cmd":"npm i y && echo 'npm --heading v ci x' | sh"}
+{"id":"g1880","tag":"G5|settled bare --k v","cmd":"npm i y --ignore-scripts && npm --heading v ci x"}
+{"id":"g1881","tag":"G5|bare --k a b","cmd":"npm i y && npm --heading a b ci x"}
+{"id":"g1882","tag":"G5|sh -c sq --k a b","cmd":"npm i y && sh -c 'npm --heading a b ci x'"}
+{"id":"g1883","tag":"G5|bash -c dq --k a b","cmd":"npm i y && bash -c \"npm --heading a b ci x\""}
+{"id":"g1884","tag":"G5|eval sq --k a b","cmd":"npm i y && eval 'npm --heading a b ci x'"}
+{"id":"g1885","tag":"G5|bash <<< sq --k a b","cmd":"npm i y && bash <<< 'npm --heading a b ci x'"}
+{"id":"g1886","tag":"G5|sh <<'E' --k a b","cmd":"npm i y && sh <<'E'\nnpm --heading a b ci x\nE"}
+{"id":"g1887","tag":"G5|echo sq | sh --k a b","cmd":"npm i y && echo 'npm --heading a b ci x' | sh"}
+{"id":"g1888","tag":"G5|settled bare --k a b","cmd":"npm i y --ignore-scripts && npm --heading a b ci x"}
+{"id":"g1889","tag":"G5|bare --k 'a b'","cmd":"npm i y && npm --heading 'a b' ci x"}
+{"id":"g1890","tag":"G5|sh -c sq --k 'a b'","cmd":"npm i y && sh -c 'npm --heading '\\''a b'\\'' ci x'"}
+{"id":"g1891","tag":"G5|bash -c dq --k 'a b'","cmd":"npm i y && bash -c \"npm --heading 'a b' ci x\""}
+{"id":"g1892","tag":"G5|eval sq --k 'a b'","cmd":"npm i y && eval 'npm --heading '\\''a b'\\'' ci x'"}
+{"id":"g1893","tag":"G5|bash <<< sq --k 'a b'","cmd":"npm i y && bash <<< 'npm --heading '\\''a b'\\'' ci x'"}
+{"id":"g1894","tag":"G5|sh <<'E' --k 'a b'","cmd":"npm i y && sh <<'E'\nnpm --heading 'a b' ci x\nE"}
+{"id":"g1895","tag":"G5|echo sq | sh --k 'a b'","cmd":"npm i y && echo 'npm --heading '\\''a b'\\'' ci x' | sh"}
+{"id":"g1896","tag":"G5|settled bare --k 'a b'","cmd":"npm i y --ignore-scripts && npm --heading 'a b' ci x"}
+{"id":"g1897","tag":"G5|bare --k \"a b\"","cmd":"npm i y && npm --heading \"a b\" ci x"}
+{"id":"g1898","tag":"G5|sh -c sq --k \"a b\"","cmd":"npm i y && sh -c 'npm --heading \"a b\" ci x'"}
+{"id":"g1899","tag":"G5|bash -c dq --k \"a b\"","cmd":"npm i y && bash -c \"npm --heading \\\"a b\\\" ci x\""}
+{"id":"g1900","tag":"G5|eval sq --k \"a b\"","cmd":"npm i y && eval 'npm --heading \"a b\" ci x'"}
+{"id":"g1901","tag":"G5|bash <<< sq --k \"a b\"","cmd":"npm i y && bash <<< 'npm --heading \"a b\" ci x'"}
+{"id":"g1902","tag":"G5|sh <<'E' --k \"a b\"","cmd":"npm i y && sh <<'E'\nnpm --heading \"a b\" ci x\nE"}
+{"id":"g1903","tag":"G5|echo sq | sh --k \"a b\"","cmd":"npm i y && echo 'npm --heading \"a b\" ci x' | sh"}
+{"id":"g1904","tag":"G5|settled bare --k \"a b\"","cmd":"npm i y --ignore-scripts && npm --heading \"a b\" ci x"}
+{"id":"g1905","tag":"G5|bare -d","cmd":"npm i y && npm -d ci x"}
+{"id":"g1906","tag":"G5|sh -c sq -d","cmd":"npm i y && sh -c 'npm -d ci x'"}
+{"id":"g1907","tag":"G5|bash -c dq -d","cmd":"npm i y && bash -c \"npm -d ci x\""}
+{"id":"g1908","tag":"G5|eval sq -d","cmd":"npm i y && eval 'npm -d ci x'"}
+{"id":"g1909","tag":"G5|bash <<< sq -d","cmd":"npm i y && bash <<< 'npm -d ci x'"}
+{"id":"g1910","tag":"G5|sh <<'E' -d","cmd":"npm i y && sh <<'E'\nnpm -d ci x\nE"}
+{"id":"g1911","tag":"G5|echo sq | sh -d","cmd":"npm i y && echo 'npm -d ci x' | sh"}
+{"id":"g1912","tag":"G5|settled bare -d","cmd":"npm i y --ignore-scripts && npm -d ci x"}
+{"id":"g1913","tag":"G5|bare -dd","cmd":"npm i y && npm -dd ci x"}
+{"id":"g1914","tag":"G5|sh -c sq -dd","cmd":"npm i y && sh -c 'npm -dd ci x'"}
+{"id":"g1915","tag":"G5|bash -c dq -dd","cmd":"npm i y && bash -c \"npm -dd ci x\""}
+{"id":"g1916","tag":"G5|eval sq -dd","cmd":"npm i y && eval 'npm -dd ci x'"}
+{"id":"g1917","tag":"G5|bash <<< sq -dd","cmd":"npm i y && bash <<< 'npm -dd ci x'"}
+{"id":"g1918","tag":"G5|sh <<'E' -dd","cmd":"npm i y && sh <<'E'\nnpm -dd ci x\nE"}
+{"id":"g1919","tag":"G5|echo sq | sh -dd","cmd":"npm i y && echo 'npm -dd ci x' | sh"}
+{"id":"g1920","tag":"G5|settled bare -dd","cmd":"npm i y --ignore-scripts && npm -dd ci x"}
+{"id":"g1921","tag":"G5|bare -ddd","cmd":"npm i y && npm -ddd ci x"}
+{"id":"g1922","tag":"G5|sh -c sq -ddd","cmd":"npm i y && sh -c 'npm -ddd ci x'"}
+{"id":"g1923","tag":"G5|bash -c dq -ddd","cmd":"npm i y && bash -c \"npm -ddd ci x\""}
+{"id":"g1924","tag":"G5|eval sq -ddd","cmd":"npm i y && eval 'npm -ddd ci x'"}
+{"id":"g1925","tag":"G5|bash <<< sq -ddd","cmd":"npm i y && bash <<< 'npm -ddd ci x'"}
+{"id":"g1926","tag":"G5|sh <<'E' -ddd","cmd":"npm i y && sh <<'E'\nnpm -ddd ci x\nE"}
+{"id":"g1927","tag":"G5|echo sq | sh -ddd","cmd":"npm i y && echo 'npm -ddd ci x' | sh"}
+{"id":"g1928","tag":"G5|settled bare -ddd","cmd":"npm i y --ignore-scripts && npm -ddd ci x"}
+{"id":"g1929","tag":"G5|bare -dq","cmd":"npm i y && npm -dq ci x"}
+{"id":"g1930","tag":"G5|sh -c sq -dq","cmd":"npm i y && sh -c 'npm -dq ci x'"}
+{"id":"g1931","tag":"G5|bash -c dq -dq","cmd":"npm i y && bash -c \"npm -dq ci x\""}
+{"id":"g1932","tag":"G5|eval sq -dq","cmd":"npm i y && eval 'npm -dq ci x'"}
+{"id":"g1933","tag":"G5|bash <<< sq -dq","cmd":"npm i y && bash <<< 'npm -dq ci x'"}
+{"id":"g1934","tag":"G5|sh <<'E' -dq","cmd":"npm i y && sh <<'E'\nnpm -dq ci x\nE"}
+{"id":"g1935","tag":"G5|echo sq | sh -dq","cmd":"npm i y && echo 'npm -dq ci x' | sh"}
+{"id":"g1936","tag":"G5|settled bare -dq","cmd":"npm i y --ignore-scripts && npm -dq ci x"}
+{"id":"g1937","tag":"G5|bare -C d","cmd":"npm i y && npm -C d ci x"}
+{"id":"g1938","tag":"G5|sh -c sq -C d","cmd":"npm i y && sh -c 'npm -C d ci x'"}
+{"id":"g1939","tag":"G5|bash -c dq -C d","cmd":"npm i y && bash -c \"npm -C d ci x\""}
+{"id":"g1940","tag":"G5|eval sq -C d","cmd":"npm i y && eval 'npm -C d ci x'"}
+{"id":"g1941","tag":"G5|bash <<< sq -C d","cmd":"npm i y && bash <<< 'npm -C d ci x'"}
+{"id":"g1942","tag":"G5|sh <<'E' -C d","cmd":"npm i y && sh <<'E'\nnpm -C d ci x\nE"}
+{"id":"g1943","tag":"G5|echo sq | sh -C d","cmd":"npm i y && echo 'npm -C d ci x' | sh"}
+{"id":"g1944","tag":"G5|settled bare -C d","cmd":"npm i y --ignore-scripts && npm -C d ci x"}
+{"id":"g1945","tag":"G5|bare --prefix=d","cmd":"npm i y && npm --prefix=d ci x"}
+{"id":"g1946","tag":"G5|sh -c sq --prefix=d","cmd":"npm i y && sh -c 'npm --prefix=d ci x'"}
+{"id":"g1947","tag":"G5|bash -c dq --prefix=d","cmd":"npm i y && bash -c \"npm --prefix=d ci x\""}
+{"id":"g1948","tag":"G5|eval sq --prefix=d","cmd":"npm i y && eval 'npm --prefix=d ci x'"}
+{"id":"g1949","tag":"G5|bash <<< sq --prefix=d","cmd":"npm i y && bash <<< 'npm --prefix=d ci x'"}
+{"id":"g1950","tag":"G5|sh <<'E' --prefix=d","cmd":"npm i y && sh <<'E'\nnpm --prefix=d ci x\nE"}
+{"id":"g1951","tag":"G5|echo sq | sh --prefix=d","cmd":"npm i y && echo 'npm --prefix=d ci x' | sh"}
+{"id":"g1952","tag":"G5|settled bare --prefix=d","cmd":"npm i y --ignore-scripts && npm --prefix=d ci x"}
+{"id":"g1953","tag":"G5|bare --prefix d","cmd":"npm i y && npm --prefix d ci x"}
+{"id":"g1954","tag":"G5|sh -c sq --prefix d","cmd":"npm i y && sh -c 'npm --prefix d ci x'"}
+{"id":"g1955","tag":"G5|bash -c dq --prefix d","cmd":"npm i y && bash -c \"npm --prefix d ci x\""}
+{"id":"g1956","tag":"G5|eval sq --prefix d","cmd":"npm i y && eval 'npm --prefix d ci x'"}
+{"id":"g1957","tag":"G5|bash <<< sq --prefix d","cmd":"npm i y && bash <<< 'npm --prefix d ci x'"}
+{"id":"g1958","tag":"G5|sh <<'E' --prefix d","cmd":"npm i y && sh <<'E'\nnpm --prefix d ci x\nE"}
+{"id":"g1959","tag":"G5|echo sq | sh --prefix d","cmd":"npm i y && echo 'npm --prefix d ci x' | sh"}
+{"id":"g1960","tag":"G5|settled bare --prefix d","cmd":"npm i y --ignore-scripts && npm --prefix d ci x"}
+{"id":"g1961","tag":"G5|bare --","cmd":"npm i y && npm -- ci x"}
+{"id":"g1962","tag":"G5|sh -c sq --","cmd":"npm i y && sh -c 'npm -- ci x'"}
+{"id":"g1963","tag":"G5|bash -c dq --","cmd":"npm i y && bash -c \"npm -- ci x\""}
+{"id":"g1964","tag":"G5|eval sq --","cmd":"npm i y && eval 'npm -- ci x'"}
+{"id":"g1965","tag":"G5|bash <<< sq --","cmd":"npm i y && bash <<< 'npm -- ci x'"}
+{"id":"g1966","tag":"G5|sh <<'E' --","cmd":"npm i y && sh <<'E'\nnpm -- ci x\nE"}
+{"id":"g1967","tag":"G5|echo sq | sh --","cmd":"npm i y && echo 'npm -- ci x' | sh"}
+{"id":"g1968","tag":"G5|settled bare --","cmd":"npm i y --ignore-scripts && npm -- ci x"}
+{"id":"g1969","tag":"G5|bare --k= --l=w","cmd":"npm i y && npm --heading= --loglevel=warn ci x"}
+{"id":"g1970","tag":"G5|sh -c sq --k= --l=w","cmd":"npm i y && sh -c 'npm --heading= --loglevel=warn ci x'"}
+{"id":"g1971","tag":"G5|bash -c dq --k= --l=w","cmd":"npm i y && bash -c \"npm --heading= --loglevel=warn ci x\""}
+{"id":"g1972","tag":"G5|eval sq --k= --l=w","cmd":"npm i y && eval 'npm --heading= --loglevel=warn ci x'"}
+{"id":"g1973","tag":"G5|bash <<< sq --k= --l=w","cmd":"npm i y && bash <<< 'npm --heading= --loglevel=warn ci x'"}
+{"id":"g1974","tag":"G5|sh <<'E' --k= --l=w","cmd":"npm i y && sh <<'E'\nnpm --heading= --loglevel=warn ci x\nE"}
+{"id":"g1975","tag":"G5|echo sq | sh --k= --l=w","cmd":"npm i y && echo 'npm --heading= --loglevel=warn ci x' | sh"}
+{"id":"g1976","tag":"G5|settled bare --k= --l=w","cmd":"npm i y --ignore-scripts && npm --heading= --loglevel=warn ci x"}
+{"id":"g1977","tag":"G5|bare --l w -d","cmd":"npm i y && npm --loglevel warn -d ci x"}
+{"id":"g1978","tag":"G5|sh -c sq --l w -d","cmd":"npm i y && sh -c 'npm --loglevel warn -d ci x'"}
+{"id":"g1979","tag":"G5|bash -c dq --l w -d","cmd":"npm i y && bash -c \"npm --loglevel warn -d ci x\""}
+{"id":"g1980","tag":"G5|eval sq --l w -d","cmd":"npm i y && eval 'npm --loglevel warn -d ci x'"}
+{"id":"g1981","tag":"G5|bash <<< sq --l w -d","cmd":"npm i y && bash <<< 'npm --loglevel warn -d ci x'"}
+{"id":"g1982","tag":"G5|sh <<'E' --l w -d","cmd":"npm i y && sh <<'E'\nnpm --loglevel warn -d ci x\nE"}
+{"id":"g1983","tag":"G5|echo sq | sh --l w -d","cmd":"npm i y && echo 'npm --loglevel warn -d ci x' | sh"}
+{"id":"g1984","tag":"G5|settled bare --l w -d","cmd":"npm i y --ignore-scripts && npm --loglevel warn -d ci x"}
+{"id":"g1985","tag":"G5|bare $V","cmd":"npm i y && V=ci; npm $V x"}
+{"id":"g1986","tag":"G5|sh -c sq $V","cmd":"npm i y && sh -c 'V=ci; npm $V x'"}
+{"id":"g1987","tag":"G5|bash -c dq $V","cmd":"npm i y && bash -c \"V=ci; npm \\$V x\""}
+{"id":"g1988","tag":"G5|eval sq $V","cmd":"npm i y && eval 'V=ci; npm $V x'"}
+{"id":"g1989","tag":"G5|bash <<< sq $V","cmd":"npm i y && bash <<< 'V=ci; npm $V x'"}
+{"id":"g1990","tag":"G5|sh <<'E' $V","cmd":"npm i y && sh <<'E'\nV=ci; npm $V x\nE"}
+{"id":"g1991","tag":"G5|echo sq | sh $V","cmd":"npm i y && echo 'V=ci; npm $V x' | sh"}
+{"id":"g1992","tag":"G5|settled bare $V","cmd":"npm i y --ignore-scripts && V=ci; npm $V x"}
+{"id":"g1993","tag":"G5|bare \"$V\"","cmd":"npm i y && V=ci; npm \"$V\" x"}
+{"id":"g1994","tag":"G5|sh -c sq \"$V\"","cmd":"npm i y && sh -c 'V=ci; npm \"$V\" x'"}
+{"id":"g1995","tag":"G5|bash -c dq \"$V\"","cmd":"npm i y && bash -c \"V=ci; npm \\\"\\$V\\\" x\""}
+{"id":"g1996","tag":"G5|eval sq \"$V\"","cmd":"npm i y && eval 'V=ci; npm \"$V\" x'"}
+{"id":"g1997","tag":"G5|bash <<< sq \"$V\"","cmd":"npm i y && bash <<< 'V=ci; npm \"$V\" x'"}
+{"id":"g1998","tag":"G5|sh <<'E' \"$V\"","cmd":"npm i y && sh <<'E'\nV=ci; npm \"$V\" x\nE"}
+{"id":"g1999","tag":"G5|echo sq | sh \"$V\"","cmd":"npm i y && echo 'V=ci; npm \"$V\" x' | sh"}
+{"id":"g2000","tag":"G5|settled bare \"$V\"","cmd":"npm i y --ignore-scripts && V=ci; npm \"$V\" x"}
+{"id":"g2001","tag":"G5|bare ${u:-ci}","cmd":"npm i y && npm ${u:-ci} x"}
+{"id":"g2002","tag":"G5|sh -c sq ${u:-ci}","cmd":"npm i y && sh -c 'npm ${u:-ci} x'"}
+{"id":"g2003","tag":"G5|bash -c dq ${u:-ci}","cmd":"npm i y && bash -c \"npm \\${u:-ci} x\""}
+{"id":"g2004","tag":"G5|eval sq ${u:-ci}","cmd":"npm i y && eval 'npm ${u:-ci} x'"}
+{"id":"g2005","tag":"G5|bash <<< sq ${u:-ci}","cmd":"npm i y && bash <<< 'npm ${u:-ci} x'"}
+{"id":"g2006","tag":"G5|sh <<'E' ${u:-ci}","cmd":"npm i y && sh <<'E'\nnpm ${u:-ci} x\nE"}
+{"id":"g2007","tag":"G5|echo sq | sh ${u:-ci}","cmd":"npm i y && echo 'npm ${u:-ci} x' | sh"}
+{"id":"g2008","tag":"G5|settled bare ${u:-ci}","cmd":"npm i y --ignore-scripts && npm ${u:-ci} x"}
+{"id":"g2009","tag":"G5|bare $(echo ci)","cmd":"npm i y && npm $(echo ci) x"}
+{"id":"g2010","tag":"G5|sh -c sq $(echo ci)","cmd":"npm i y && sh -c 'npm $(echo ci) x'"}
+{"id":"g2011","tag":"G5|bash -c dq $(echo ci)","cmd":"npm i y && bash -c \"npm \\$(echo ci) x\""}
+{"id":"g2012","tag":"G5|eval sq $(echo ci)","cmd":"npm i y && eval 'npm $(echo ci) x'"}
+{"id":"g2013","tag":"G5|bash <<< sq $(echo ci)","cmd":"npm i y && bash <<< 'npm $(echo ci) x'"}
+{"id":"g2014","tag":"G5|sh <<'E' $(echo ci)","cmd":"npm i y && sh <<'E'\nnpm $(echo ci) x\nE"}
+{"id":"g2015","tag":"G5|echo sq | sh $(echo ci)","cmd":"npm i y && echo 'npm $(echo ci) x' | sh"}
+{"id":"g2016","tag":"G5|settled bare $(echo ci)","cmd":"npm i y --ignore-scripts && npm $(echo ci) x"}
+{"id":"g2017","tag":"G5|bare `echo ci`","cmd":"npm i y && npm `echo ci` x"}
+{"id":"g2018","tag":"G5|sh -c sq `echo ci`","cmd":"npm i y && sh -c 'npm `echo ci` x'"}
+{"id":"g2019","tag":"G5|bash -c dq `echo ci`","cmd":"npm i y && bash -c \"npm \\`echo ci\\` x\""}
+{"id":"g2020","tag":"G5|eval sq `echo ci`","cmd":"npm i y && eval 'npm `echo ci` x'"}
+{"id":"g2021","tag":"G5|bash <<< sq `echo ci`","cmd":"npm i y && bash <<< 'npm `echo ci` x'"}
+{"id":"g2022","tag":"G5|sh <<'E' `echo ci`","cmd":"npm i y && sh <<'E'\nnpm `echo ci` x\nE"}
+{"id":"g2023","tag":"G5|echo sq | sh `echo ci`","cmd":"npm i y && echo 'npm `echo ci` x' | sh"}
+{"id":"g2024","tag":"G5|settled bare `echo ci`","cmd":"npm i y --ignore-scripts && npm `echo ci` x"}
+{"id":"g2025","tag":"G5|bare $'ci'","cmd":"npm i y && npm $'ci' x"}
+{"id":"g2026","tag":"G5|sh -c sq $'ci'","cmd":"npm i y && sh -c 'npm $'\\''ci'\\'' x'"}
+{"id":"g2027","tag":"G5|bash -c dq $'ci'","cmd":"npm i y && bash -c \"npm \\$'ci' x\""}
+{"id":"g2028","tag":"G5|eval sq $'ci'","cmd":"npm i y && eval 'npm $'\\''ci'\\'' x'"}
+{"id":"g2029","tag":"G5|bash <<< sq $'ci'","cmd":"npm i y && bash <<< 'npm $'\\''ci'\\'' x'"}
+{"id":"g2030","tag":"G5|sh <<'E' $'ci'","cmd":"npm i y && sh <<'E'\nnpm $'ci' x\nE"}
+{"id":"g2031","tag":"G5|echo sq | sh $'ci'","cmd":"npm i y && echo 'npm $'\\''ci'\\'' x' | sh"}
+{"id":"g2032","tag":"G5|settled bare $'ci'","cmd":"npm i y --ignore-scripts && npm $'ci' x"}
+{"id":"g2033","tag":"G5|bare $'\\x63i'","cmd":"npm i y && npm $'\\x63i' x"}
+{"id":"g2034","tag":"G5|sh -c sq $'\\x63i'","cmd":"npm i y && sh -c 'npm $'\\''\\x63i'\\'' x'"}
+{"id":"g2035","tag":"G5|bash -c dq $'\\x63i'","cmd":"npm i y && bash -c \"npm \\$'\\\\x63i' x\""}
+{"id":"g2036","tag":"G5|eval sq $'\\x63i'","cmd":"npm i y && eval 'npm $'\\''\\x63i'\\'' x'"}
+{"id":"g2037","tag":"G5|bash <<< sq $'\\x63i'","cmd":"npm i y && bash <<< 'npm $'\\''\\x63i'\\'' x'"}
+{"id":"g2038","tag":"G5|sh <<'E' $'\\x63i'","cmd":"npm i y && sh <<'E'\nnpm $'\\x63i' x\nE"}
+{"id":"g2039","tag":"G5|echo sq | sh $'\\x63i'","cmd":"npm i y && echo 'npm $'\\''\\x63i'\\'' x' | sh"}
+{"id":"g2040","tag":"G5|settled bare $'\\x63i'","cmd":"npm i y --ignore-scripts && npm $'\\x63i' x"}
+{"id":"g2041","tag":"G5|bare c$'\\x69'","cmd":"npm i y && npm c$'\\x69' x"}
+{"id":"g2042","tag":"G5|sh -c sq c$'\\x69'","cmd":"npm i y && sh -c 'npm c$'\\''\\x69'\\'' x'"}
+{"id":"g2043","tag":"G5|bash -c dq c$'\\x69'","cmd":"npm i y && bash -c \"npm c\\$'\\\\x69' x\""}
+{"id":"g2044","tag":"G5|eval sq c$'\\x69'","cmd":"npm i y && eval 'npm c$'\\''\\x69'\\'' x'"}
+{"id":"g2045","tag":"G5|bash <<< sq c$'\\x69'","cmd":"npm i y && bash <<< 'npm c$'\\''\\x69'\\'' x'"}
+{"id":"g2046","tag":"G5|sh <<'E' c$'\\x69'","cmd":"npm i y && sh <<'E'\nnpm c$'\\x69' x\nE"}
+{"id":"g2047","tag":"G5|echo sq | sh c$'\\x69'","cmd":"npm i y && echo 'npm c$'\\''\\x69'\\'' x' | sh"}
+{"id":"g2048","tag":"G5|settled bare c$'\\x69'","cmd":"npm i y --ignore-scripts && npm c$'\\x69' x"}
+{"id":"g2049","tag":"G5|bare {ci,x}","cmd":"npm i y && npm {ci,x}"}
+{"id":"g2050","tag":"G5|sh -c sq {ci,x}","cmd":"npm i y && sh -c 'npm {ci,x}'"}
+{"id":"g2051","tag":"G5|bash -c dq {ci,x}","cmd":"npm i y && bash -c \"npm {ci,x}\""}
+{"id":"g2052","tag":"G5|eval sq {ci,x}","cmd":"npm i y && eval 'npm {ci,x}'"}
+{"id":"g2053","tag":"G5|bash <<< sq {ci,x}","cmd":"npm i y && bash <<< 'npm {ci,x}'"}
+{"id":"g2054","tag":"G5|sh <<'E' {ci,x}","cmd":"npm i y && sh <<'E'\nnpm {ci,x}\nE"}
+{"id":"g2055","tag":"G5|echo sq | sh {ci,x}","cmd":"npm i y && echo 'npm {ci,x}' | sh"}
+{"id":"g2056","tag":"G5|settled bare {ci,x}","cmd":"npm i y --ignore-scripts && npm {ci,x}"}
+{"id":"g2057","tag":"G5|bare c?","cmd":"npm i y && touch ci; npm c? x"}
+{"id":"g2058","tag":"G5|sh -c sq c?","cmd":"npm i y && sh -c 'touch ci; npm c? x'"}
+{"id":"g2059","tag":"G5|bash -c dq c?","cmd":"npm i y && bash -c \"touch ci; npm c? x\""}
+{"id":"g2060","tag":"G5|eval sq c?","cmd":"npm i y && eval 'touch ci; npm c? x'"}
+{"id":"g2061","tag":"G5|bash <<< sq c?","cmd":"npm i y && bash <<< 'touch ci; npm c? x'"}
+{"id":"g2062","tag":"G5|sh <<'E' c?","cmd":"npm i y && sh <<'E'\ntouch ci; npm c? x\nE"}
+{"id":"g2063","tag":"G5|echo sq | sh c?","cmd":"npm i y && echo 'touch ci; npm c? x' | sh"}
+{"id":"g2064","tag":"G5|settled bare c?","cmd":"npm i y --ignore-scripts && touch ci; npm c? x"}
+{"id":"g2065","tag":"G5|bare c[i]","cmd":"npm i y && touch ci; npm c[i] x"}
+{"id":"g2066","tag":"G5|sh -c sq c[i]","cmd":"npm i y && sh -c 'touch ci; npm c[i] x'"}
+{"id":"g2067","tag":"G5|bash -c dq c[i]","cmd":"npm i y && bash -c \"touch ci; npm c[i] x\""}
+{"id":"g2068","tag":"G5|eval sq c[i]","cmd":"npm i y && eval 'touch ci; npm c[i] x'"}
+{"id":"g2069","tag":"G5|bash <<< sq c[i]","cmd":"npm i y && bash <<< 'touch ci; npm c[i] x'"}
+{"id":"g2070","tag":"G5|sh <<'E' c[i]","cmd":"npm i y && sh <<'E'\ntouch ci; npm c[i] x\nE"}
+{"id":"g2071","tag":"G5|echo sq | sh c[i]","cmd":"npm i y && echo 'touch ci; npm c[i] x' | sh"}
+{"id":"g2072","tag":"G5|settled bare c[i]","cmd":"npm i y --ignore-scripts && touch ci; npm c[i] x"}
+{"id":"g2073","tag":"G5|bare c*","cmd":"npm i y && touch ci; npm c* x"}
+{"id":"g2074","tag":"G5|sh -c sq c*","cmd":"npm i y && sh -c 'touch ci; npm c* x'"}
+{"id":"g2075","tag":"G5|bash -c dq c*","cmd":"npm i y && bash -c \"touch ci; npm c* x\""}
+{"id":"g2076","tag":"G5|eval sq c*","cmd":"npm i y && eval 'touch ci; npm c* x'"}
+{"id":"g2077","tag":"G5|bash <<< sq c*","cmd":"npm i y && bash <<< 'touch ci; npm c* x'"}
+{"id":"g2078","tag":"G5|sh <<'E' c*","cmd":"npm i y && sh <<'E'\ntouch ci; npm c* x\nE"}
+{"id":"g2079","tag":"G5|echo sq | sh c*","cmd":"npm i y && echo 'touch ci; npm c* x' | sh"}
+{"id":"g2080","tag":"G5|settled bare c*","cmd":"npm i y --ignore-scripts && touch ci; npm c* x"}
+{"id":"g2081","tag":"G5|bare \"$@\"","cmd":"npm i y && set -- ci x; npm \"$@\""}
+{"id":"g2082","tag":"G5|sh -c sq \"$@\"","cmd":"npm i y && sh -c 'set -- ci x; npm \"$@\"'"}
+{"id":"g2083","tag":"G5|bash -c dq \"$@\"","cmd":"npm i y && bash -c \"set -- ci x; npm \\\"\\$@\\\"\""}
+{"id":"g2084","tag":"G5|eval sq \"$@\"","cmd":"npm i y && eval 'set -- ci x; npm \"$@\"'"}
+{"id":"g2085","tag":"G5|bash <<< sq \"$@\"","cmd":"npm i y && bash <<< 'set -- ci x; npm \"$@\"'"}
+{"id":"g2086","tag":"G5|sh <<'E' \"$@\"","cmd":"npm i y && sh <<'E'\nset -- ci x; npm \"$@\"\nE"}
+{"id":"g2087","tag":"G5|echo sq | sh \"$@\"","cmd":"npm i y && echo 'set -- ci x; npm \"$@\"' | sh"}
+{"id":"g2088","tag":"G5|settled bare \"$@\"","cmd":"npm i y --ignore-scripts && set -- ci x; npm \"$@\""}
+{"id":"g2089","tag":"G5|bare ${A[@]}","cmd":"npm i y && A=(ci x); npm \"${A[@]}\""}
+{"id":"g2090","tag":"G5|sh -c sq ${A[@]}","cmd":"npm i y && sh -c 'A=(ci x); npm \"${A[@]}\"'"}
+{"id":"g2091","tag":"G5|bash -c dq ${A[@]}","cmd":"npm i y && bash -c \"A=(ci x); npm \\\"\\${A[@]}\\\"\""}
+{"id":"g2092","tag":"G5|eval sq ${A[@]}","cmd":"npm i y && eval 'A=(ci x); npm \"${A[@]}\"'"}
+{"id":"g2093","tag":"G5|bash <<< sq ${A[@]}","cmd":"npm i y && bash <<< 'A=(ci x); npm \"${A[@]}\"'"}
+{"id":"g2094","tag":"G5|sh <<'E' ${A[@]}","cmd":"npm i y && sh <<'E'\nA=(ci x); npm \"${A[@]}\"\nE"}
+{"id":"g2095","tag":"G5|echo sq | sh ${A[@]}","cmd":"npm i y && echo 'A=(ci x); npm \"${A[@]}\"' | sh"}
+{"id":"g2096","tag":"G5|settled bare ${A[@]}","cmd":"npm i y --ignore-scripts && A=(ci x); npm \"${A[@]}\""}
+{"id":"g2097","tag":"G5|bare 'ci'","cmd":"npm i y && npm 'ci' x"}
+{"id":"g2098","tag":"G5|sh -c sq 'ci'","cmd":"npm i y && sh -c 'npm '\\''ci'\\'' x'"}
+{"id":"g2099","tag":"G5|bash -c dq 'ci'","cmd":"npm i y && bash -c \"npm 'ci' x\""}
+{"id":"g2100","tag":"G5|eval sq 'ci'","cmd":"npm i y && eval 'npm '\\''ci'\\'' x'"}
+{"id":"g2101","tag":"G5|bash <<< sq 'ci'","cmd":"npm i y && bash <<< 'npm '\\''ci'\\'' x'"}
+{"id":"g2102","tag":"G5|sh <<'E' 'ci'","cmd":"npm i y && sh <<'E'\nnpm 'ci' x\nE"}
+{"id":"g2103","tag":"G5|echo sq | sh 'ci'","cmd":"npm i y && echo 'npm '\\''ci'\\'' x' | sh"}
+{"id":"g2104","tag":"G5|settled bare 'ci'","cmd":"npm i y --ignore-scripts && npm 'ci' x"}
+{"id":"g2105","tag":"G5|bare c\"\"i","cmd":"npm i y && npm c\"\"i x"}
+{"id":"g2106","tag":"G5|sh -c sq c\"\"i","cmd":"npm i y && sh -c 'npm c\"\"i x'"}
+{"id":"g2107","tag":"G5|bash -c dq c\"\"i","cmd":"npm i y && bash -c \"npm c\\\"\\\"i x\""}
+{"id":"g2108","tag":"G5|eval sq c\"\"i","cmd":"npm i y && eval 'npm c\"\"i x'"}
+{"id":"g2109","tag":"G5|bash <<< sq c\"\"i","cmd":"npm i y && bash <<< 'npm c\"\"i x'"}
+{"id":"g2110","tag":"G5|sh <<'E' c\"\"i","cmd":"npm i y && sh <<'E'\nnpm c\"\"i x\nE"}
+{"id":"g2111","tag":"G5|echo sq | sh c\"\"i","cmd":"npm i y && echo 'npm c\"\"i x' | sh"}
+{"id":"g2112","tag":"G5|settled bare c\"\"i","cmd":"npm i y --ignore-scripts && npm c\"\"i x"}
+{"id":"g2113","tag":"G5|bare \"c\"i","cmd":"npm i y && npm \"c\"i x"}
+{"id":"g2114","tag":"G5|sh -c sq \"c\"i","cmd":"npm i y && sh -c 'npm \"c\"i x'"}
+{"id":"g2115","tag":"G5|bash -c dq \"c\"i","cmd":"npm i y && bash -c \"npm \\\"c\\\"i x\""}
+{"id":"g2116","tag":"G5|eval sq \"c\"i","cmd":"npm i y && eval 'npm \"c\"i x'"}
+{"id":"g2117","tag":"G5|bash <<< sq \"c\"i","cmd":"npm i y && bash <<< 'npm \"c\"i x'"}
+{"id":"g2118","tag":"G5|sh <<'E' \"c\"i","cmd":"npm i y && sh <<'E'\nnpm \"c\"i x\nE"}
+{"id":"g2119","tag":"G5|echo sq | sh \"c\"i","cmd":"npm i y && echo 'npm \"c\"i x' | sh"}
+{"id":"g2120","tag":"G5|settled bare \"c\"i","cmd":"npm i y --ignore-scripts && npm \"c\"i x"}
+{"id":"g2121","tag":"G5|bare \\ci","cmd":"npm i y && npm \\ci x"}
+{"id":"g2122","tag":"G5|sh -c sq \\ci","cmd":"npm i y && sh -c 'npm \\ci x'"}
+{"id":"g2123","tag":"G5|bash -c dq \\ci","cmd":"npm i y && bash -c \"npm \\\\ci x\""}
+{"id":"g2124","tag":"G5|eval sq \\ci","cmd":"npm i y && eval 'npm \\ci x'"}
+{"id":"g2125","tag":"G5|bash <<< sq \\ci","cmd":"npm i y && bash <<< 'npm \\ci x'"}
+{"id":"g2126","tag":"G5|sh <<'E' \\ci","cmd":"npm i y && sh <<'E'\nnpm \\ci x\nE"}
+{"id":"g2127","tag":"G5|echo sq | sh \\ci","cmd":"npm i y && echo 'npm \\ci x' | sh"}
+{"id":"g2128","tag":"G5|settled bare \\ci","cmd":"npm i y --ignore-scripts && npm \\ci x"}
+{"id":"g2129","tag":"G5|bare f \"$@\"","cmd":"npm i y && f() { npm \"$@\"; }; f ci x"}
+{"id":"g2130","tag":"G5|sh -c sq f \"$@\"","cmd":"npm i y && sh -c 'f() { npm \"$@\"; }; f ci x'"}
+{"id":"g2131","tag":"G5|bash -c dq f \"$@\"","cmd":"npm i y && bash -c \"f() { npm \\\"\\$@\\\"; }; f ci x\""}
+{"id":"g2132","tag":"G5|eval sq f \"$@\"","cmd":"npm i y && eval 'f() { npm \"$@\"; }; f ci x'"}
+{"id":"g2133","tag":"G5|bash <<< sq f \"$@\"","cmd":"npm i y && bash <<< 'f() { npm \"$@\"; }; f ci x'"}
+{"id":"g2134","tag":"G5|sh <<'E' f \"$@\"","cmd":"npm i y && sh <<'E'\nf() { npm \"$@\"; }; f ci x\nE"}
+{"id":"g2135","tag":"G5|echo sq | sh f \"$@\"","cmd":"npm i y && echo 'f() { npm \"$@\"; }; f ci x' | sh"}
+{"id":"g2136","tag":"G5|settled bare f \"$@\"","cmd":"npm i y --ignore-scripts && f() { npm \"$@\"; }; f ci x"}
+{"id":"g2137","tag":"G5|sh -c sq \"npm\"","cmd":"npm i y && sh -c '\"npm\" ci x'"}
+{"id":"g2138","tag":"G5|bash -c dq \"npm\"","cmd":"npm i y && bash -c \"\\\"npm\\\" ci x\""}
+{"id":"g2139","tag":"G5|eval sq \"npm\"","cmd":"npm i y && eval '\"npm\" ci x'"}
+{"id":"g2140","tag":"G5|bash <<< sq \"npm\"","cmd":"npm i y && bash <<< '\"npm\" ci x'"}
+{"id":"g2141","tag":"G5|sh <<'E' \"npm\"","cmd":"npm i y && sh <<'E'\n\"npm\" ci x\nE"}
+{"id":"g2142","tag":"G5|echo sq | sh \"npm\"","cmd":"npm i y && echo '\"npm\" ci x' | sh"}
+{"id":"g2143","tag":"G5|settled bare \"npm\"","cmd":"npm i y --ignore-scripts && \"npm\" ci x"}
+{"id":"g2144","tag":"G5|sh -c sq 'n'pm","cmd":"npm i y && sh -c ''\\''n'\\''pm ci x'"}
+{"id":"g2145","tag":"G5|bash -c dq 'n'pm","cmd":"npm i y && bash -c \"'n'pm ci x\""}
+{"id":"g2146","tag":"G5|eval sq 'n'pm","cmd":"npm i y && eval ''\\''n'\\''pm ci x'"}
+{"id":"g2147","tag":"G5|bash <<< sq 'n'pm","cmd":"npm i y && bash <<< ''\\''n'\\''pm ci x'"}
+{"id":"g2148","tag":"G5|sh <<'E' 'n'pm","cmd":"npm i y && sh <<'E'\n'n'pm ci x\nE"}
+{"id":"g2149","tag":"G5|echo sq | sh 'n'pm","cmd":"npm i y && echo ''\\''n'\\''pm ci x' | sh"}
+{"id":"g2150","tag":"G5|settled bare 'n'pm","cmd":"npm i y --ignore-scripts && 'n'pm ci x"}
+{"id":"g2151","tag":"G5|sh -c sq n\\pm","cmd":"npm i y && sh -c 'n\\pm ci x'"}
+{"id":"g2152","tag":"G5|bash -c dq n\\pm","cmd":"npm i y && bash -c \"n\\\\pm ci x\""}
+{"id":"g2153","tag":"G5|eval sq n\\pm","cmd":"npm i y && eval 'n\\pm ci x'"}
+{"id":"g2154","tag":"G5|bash <<< sq n\\pm","cmd":"npm i y && bash <<< 'n\\pm ci x'"}
+{"id":"g2155","tag":"G5|sh <<'E' n\\pm","cmd":"npm i y && sh <<'E'\nn\\pm ci x\nE"}
+{"id":"g2156","tag":"G5|echo sq | sh n\\pm","cmd":"npm i y && echo 'n\\pm ci x' | sh"}
+{"id":"g2157","tag":"G5|settled bare n\\pm","cmd":"npm i y --ignore-scripts && n\\pm ci x"}
+{"id":"g2158","tag":"G5|bare \\npm","cmd":"npm i y && \\npm ci x"}
+{"id":"g2159","tag":"G5|sh -c sq \\npm","cmd":"npm i y && sh -c '\\npm ci x'"}
+{"id":"g2160","tag":"G5|bash -c dq \\npm","cmd":"npm i y && bash -c \"\\\\npm ci x\""}
+{"id":"g2161","tag":"G5|eval sq \\npm","cmd":"npm i y && eval '\\npm ci x'"}
+{"id":"g2162","tag":"G5|bash <<< sq \\npm","cmd":"npm i y && bash <<< '\\npm ci x'"}
+{"id":"g2163","tag":"G5|sh <<'E' \\npm","cmd":"npm i y && sh <<'E'\n\\npm ci x\nE"}
+{"id":"g2164","tag":"G5|echo sq | sh \\npm","cmd":"npm i y && echo '\\npm ci x' | sh"}
+{"id":"g2165","tag":"G5|settled bare \\npm","cmd":"npm i y --ignore-scripts && \\npm ci x"}
+{"id":"g2166","tag":"G5|bare \"\"npm","cmd":"npm i y && \"\"npm ci x"}
+{"id":"g2167","tag":"G5|sh -c sq \"\"npm","cmd":"npm i y && sh -c '\"\"npm ci x'"}
+{"id":"g2168","tag":"G5|bash -c dq \"\"npm","cmd":"npm i y && bash -c \"\\\"\\\"npm ci x\""}
+{"id":"g2169","tag":"G5|eval sq \"\"npm","cmd":"npm i y && eval '\"\"npm ci x'"}
+{"id":"g2170","tag":"G5|bash <<< sq \"\"npm","cmd":"npm i y && bash <<< '\"\"npm ci x'"}
+{"id":"g2171","tag":"G5|sh <<'E' \"\"npm","cmd":"npm i y && sh <<'E'\n\"\"npm ci x\nE"}
+{"id":"g2172","tag":"G5|echo sq | sh \"\"npm","cmd":"npm i y && echo '\"\"npm ci x' | sh"}
+{"id":"g2173","tag":"G5|settled bare \"\"npm","cmd":"npm i y --ignore-scripts && \"\"npm ci x"}
+{"id":"g2174","tag":"G5|bare ''npm","cmd":"npm i y && ''npm ci x"}
+{"id":"g2175","tag":"G5|sh -c sq ''npm","cmd":"npm i y && sh -c ''\\'''\\''npm ci x'"}
+{"id":"g2176","tag":"G5|bash -c dq ''npm","cmd":"npm i y && bash -c \"''npm ci x\""}
+{"id":"g2177","tag":"G5|eval sq ''npm","cmd":"npm i y && eval ''\\'''\\''npm ci x'"}
+{"id":"g2178","tag":"G5|bash <<< sq ''npm","cmd":"npm i y && bash <<< ''\\'''\\''npm ci x'"}
+{"id":"g2179","tag":"G5|sh <<'E' ''npm","cmd":"npm i y && sh <<'E'\n''npm ci x\nE"}
+{"id":"g2180","tag":"G5|echo sq | sh ''npm","cmd":"npm i y && echo ''\\'''\\''npm ci x' | sh"}
+{"id":"g2181","tag":"G5|settled bare ''npm","cmd":"npm i y --ignore-scripts && ''npm ci x"}
+{"id":"g2182","tag":"G5|bare $'n'pm","cmd":"npm i y && $'n'pm ci x"}
+{"id":"g2183","tag":"G5|sh -c sq $'n'pm","cmd":"npm i y && sh -c '$'\\''n'\\''pm ci x'"}
+{"id":"g2184","tag":"G5|bash -c dq $'n'pm","cmd":"npm i y && bash -c \"\\$'n'pm ci x\""}
+{"id":"g2185","tag":"G5|eval sq $'n'pm","cmd":"npm i y && eval '$'\\''n'\\''pm ci x'"}
+{"id":"g2186","tag":"G5|bash <<< sq $'n'pm","cmd":"npm i y && bash <<< '$'\\''n'\\''pm ci x'"}
+{"id":"g2187","tag":"G5|sh <<'E' $'n'pm","cmd":"npm i y && sh <<'E'\n$'n'pm ci x\nE"}
+{"id":"g2188","tag":"G5|echo sq | sh $'n'pm","cmd":"npm i y && echo '$'\\''n'\\''pm ci x' | sh"}
+{"id":"g2189","tag":"G5|settled bare $'n'pm","cmd":"npm i y --ignore-scripts && $'n'pm ci x"}
+{"id":"g2190","tag":"G5|bare n$'\\x70'm","cmd":"npm i y && n$'\\x70'm ci x"}
+{"id":"g2191","tag":"G5|sh -c sq n$'\\x70'm","cmd":"npm i y && sh -c 'n$'\\''\\x70'\\''m ci x'"}
+{"id":"g2192","tag":"G5|bash -c dq n$'\\x70'm","cmd":"npm i y && bash -c \"n\\$'\\\\x70'm ci x\""}
+{"id":"g2193","tag":"G5|eval sq n$'\\x70'm","cmd":"npm i y && eval 'n$'\\''\\x70'\\''m ci x'"}
+{"id":"g2194","tag":"G5|bash <<< sq n$'\\x70'm","cmd":"npm i y && bash <<< 'n$'\\''\\x70'\\''m ci x'"}
+{"id":"g2195","tag":"G5|sh <<'E' n$'\\x70'm","cmd":"npm i y && sh <<'E'\nn$'\\x70'm ci x\nE"}
+{"id":"g2196","tag":"G5|echo sq | sh n$'\\x70'm","cmd":"npm i y && echo 'n$'\\''\\x70'\\''m ci x' | sh"}
+{"id":"g2197","tag":"G5|settled bare n$'\\x70'm","cmd":"npm i y --ignore-scripts && n$'\\x70'm ci x"}
+{"id":"g2198","tag":"G5|bare $'\\x6e'pm","cmd":"npm i y && $'\\x6e'pm ci x"}
+{"id":"g2199","tag":"G5|sh -c sq $'\\x6e'pm","cmd":"npm i y && sh -c '$'\\''\\x6e'\\''pm ci x'"}
+{"id":"g2200","tag":"G5|bash -c dq $'\\x6e'pm","cmd":"npm i y && bash -c \"\\$'\\\\x6e'pm ci x\""}
+{"id":"g2201","tag":"G5|eval sq $'\\x6e'pm","cmd":"npm i y && eval '$'\\''\\x6e'\\''pm ci x'"}
+{"id":"g2202","tag":"G5|bash <<< sq $'\\x6e'pm","cmd":"npm i y && bash <<< '$'\\''\\x6e'\\''pm ci x'"}
+{"id":"g2203","tag":"G5|sh <<'E' $'\\x6e'pm","cmd":"npm i y && sh <<'E'\n$'\\x6e'pm ci x\nE"}
+{"id":"g2204","tag":"G5|echo sq | sh $'\\x6e'pm","cmd":"npm i y && echo '$'\\''\\x6e'\\''pm ci x' | sh"}
+{"id":"g2205","tag":"G5|settled bare $'\\x6e'pm","cmd":"npm i y --ignore-scripts && $'\\x6e'pm ci x"}
+{"id":"g2206","tag":"G5|bare {npm,ci,x}","cmd":"npm i y && {npm,ci,x}"}
+{"id":"g2207","tag":"G5|sh -c sq {npm,ci,x}","cmd":"npm i y && sh -c '{npm,ci,x}'"}
+{"id":"g2208","tag":"G5|bash -c dq {npm,ci,x}","cmd":"npm i y && bash -c \"{npm,ci,x}\""}
+{"id":"g2209","tag":"G5|eval sq {npm,ci,x}","cmd":"npm i y && eval '{npm,ci,x}'"}
+{"id":"g2210","tag":"G5|bash <<< sq {npm,ci,x}","cmd":"npm i y && bash <<< '{npm,ci,x}'"}
+{"id":"g2211","tag":"G5|sh <<'E' {npm,ci,x}","cmd":"npm i y && sh <<'E'\n{npm,ci,x}\nE"}
+{"id":"g2212","tag":"G5|echo sq | sh {npm,ci,x}","cmd":"npm i y && echo '{npm,ci,x}' | sh"}
+{"id":"g2213","tag":"G5|settled bare {npm,ci,x}","cmd":"npm i y --ignore-scripts && {npm,ci,x}"}
+{"id":"g2214","tag":"G5|bare {npm,ci} x","cmd":"npm i y && {npm,ci} x"}
+{"id":"g2215","tag":"G5|sh -c sq {npm,ci} x","cmd":"npm i y && sh -c '{npm,ci} x'"}
+{"id":"g2216","tag":"G5|bash -c dq {npm,ci} x","cmd":"npm i y && bash -c \"{npm,ci} x\""}
+{"id":"g2217","tag":"G5|eval sq {npm,ci} x","cmd":"npm i y && eval '{npm,ci} x'"}
+{"id":"g2218","tag":"G5|bash <<< sq {npm,ci} x","cmd":"npm i y && bash <<< '{npm,ci} x'"}
+{"id":"g2219","tag":"G5|sh <<'E' {npm,ci} x","cmd":"npm i y && sh <<'E'\n{npm,ci} x\nE"}
+{"id":"g2220","tag":"G5|echo sq | sh {npm,ci} x","cmd":"npm i y && echo '{npm,ci} x' | sh"}
+{"id":"g2221","tag":"G5|settled bare {npm,ci} x","cmd":"npm i y --ignore-scripts && {npm,ci} x"}
+{"id":"g2222","tag":"G5|bare n?m","cmd":"npm i y && touch npm; n?m ci x"}
+{"id":"g2223","tag":"G5|sh -c sq n?m","cmd":"npm i y && sh -c 'touch npm; n?m ci x'"}
+{"id":"g2224","tag":"G5|bash -c dq n?m","cmd":"npm i y && bash -c \"touch npm; n?m ci x\""}
+{"id":"g2225","tag":"G5|eval sq n?m","cmd":"npm i y && eval 'touch npm; n?m ci x'"}
+{"id":"g2226","tag":"G5|bash <<< sq n?m","cmd":"npm i y && bash <<< 'touch npm; n?m ci x'"}
+{"id":"g2227","tag":"G5|sh <<'E' n?m","cmd":"npm i y && sh <<'E'\ntouch npm; n?m ci x\nE"}
+{"id":"g2228","tag":"G5|echo sq | sh n?m","cmd":"npm i y && echo 'touch npm; n?m ci x' | sh"}
+{"id":"g2229","tag":"G5|settled bare n?m","cmd":"npm i y --ignore-scripts && touch npm; n?m ci x"}
+{"id":"g2230","tag":"G5|bare [n]pm","cmd":"npm i y && touch npm; [n]pm ci x"}
+{"id":"g2231","tag":"G5|sh -c sq [n]pm","cmd":"npm i y && sh -c 'touch npm; [n]pm ci x'"}
+{"id":"g2232","tag":"G5|bash -c dq [n]pm","cmd":"npm i y && bash -c \"touch npm; [n]pm ci x\""}
+{"id":"g2233","tag":"G5|eval sq [n]pm","cmd":"npm i y && eval 'touch npm; [n]pm ci x'"}
+{"id":"g2234","tag":"G5|bash <<< sq [n]pm","cmd":"npm i y && bash <<< 'touch npm; [n]pm ci x'"}
+{"id":"g2235","tag":"G5|sh <<'E' [n]pm","cmd":"npm i y && sh <<'E'\ntouch npm; [n]pm ci x\nE"}
+{"id":"g2236","tag":"G5|echo sq | sh [n]pm","cmd":"npm i y && echo 'touch npm; [n]pm ci x' | sh"}
+{"id":"g2237","tag":"G5|settled bare [n]pm","cmd":"npm i y --ignore-scripts && touch npm; [n]pm ci x"}
+{"id":"g2238","tag":"G5|bare =npm","cmd":"npm i y && =npm ci x"}
+{"id":"g2239","tag":"G5|sh -c sq =npm","cmd":"npm i y && sh -c '=npm ci x'"}
+{"id":"g2240","tag":"G5|bash -c dq =npm","cmd":"npm i y && bash -c \"=npm ci x\""}
+{"id":"g2241","tag":"G5|eval sq =npm","cmd":"npm i y && eval '=npm ci x'"}
+{"id":"g2242","tag":"G5|bash <<< sq =npm","cmd":"npm i y && bash <<< '=npm ci x'"}
+{"id":"g2243","tag":"G5|sh <<'E' =npm","cmd":"npm i y && sh <<'E'\n=npm ci x\nE"}
+{"id":"g2244","tag":"G5|echo sq | sh =npm","cmd":"npm i y && echo '=npm ci x' | sh"}
+{"id":"g2245","tag":"G5|settled bare =npm","cmd":"npm i y --ignore-scripts && =npm ci x"}
+{"id":"g2246","tag":"G5|bare true;npm","cmd":"npm i y && true;npm ci x"}
+{"id":"g2247","tag":"G5|sh -c sq true;npm","cmd":"npm i y && sh -c 'true;npm ci x'"}
+{"id":"g2248","tag":"G5|bash -c dq true;npm","cmd":"npm i y && bash -c \"true;npm ci x\""}
+{"id":"g2249","tag":"G5|eval sq true;npm","cmd":"npm i y && eval 'true;npm ci x'"}
+{"id":"g2250","tag":"G5|bash <<< sq true;npm","cmd":"npm i y && bash <<< 'true;npm ci x'"}
+{"id":"g2251","tag":"G5|sh <<'E' true;npm","cmd":"npm i y && sh <<'E'\ntrue;npm ci x\nE"}
+{"id":"g2252","tag":"G5|echo sq | sh true;npm","cmd":"npm i y && echo 'true;npm ci x' | sh"}
+{"id":"g2253","tag":"G5|settled bare true;npm","cmd":"npm i y --ignore-scripts && true;npm ci x"}
+{"id":"g2254","tag":"G5|bare true&&npm","cmd":"npm i y && true&&npm ci x"}
+{"id":"g2255","tag":"G5|sh -c sq true&&npm","cmd":"npm i y && sh -c 'true&&npm ci x'"}
+{"id":"g2256","tag":"G5|bash -c dq true&&npm","cmd":"npm i y && bash -c \"true&&npm ci x\""}
+{"id":"g2257","tag":"G5|eval sq true&&npm","cmd":"npm i y && eval 'true&&npm ci x'"}
+{"id":"g2258","tag":"G5|bash <<< sq true&&npm","cmd":"npm i y && bash <<< 'true&&npm ci x'"}
+{"id":"g2259","tag":"G5|sh <<'E' true&&npm","cmd":"npm i y && sh <<'E'\ntrue&&npm ci x\nE"}
+{"id":"g2260","tag":"G5|echo sq | sh true&&npm","cmd":"npm i y && echo 'true&&npm ci x' | sh"}
+{"id":"g2261","tag":"G5|settled bare true&&npm","cmd":"npm i y --ignore-scripts && true&&npm ci x"}
+{"id":"g2262","tag":"G5|bare true$'\\n'npm","cmd":"npm i y && true$'\\n'npm ci x"}
+{"id":"g2263","tag":"G5|sh -c sq true$'\\n'npm","cmd":"npm i y && sh -c 'true$'\\''\\n'\\''npm ci x'"}
+{"id":"g2264","tag":"G5|bash -c dq true$'\\n'npm","cmd":"npm i y && bash -c \"true\\$'\\\\n'npm ci x\""}
+{"id":"g2265","tag":"G5|eval sq true$'\\n'npm","cmd":"npm i y && eval 'true$'\\''\\n'\\''npm ci x'"}
+{"id":"g2266","tag":"G5|bash <<< sq true$'\\n'npm","cmd":"npm i y && bash <<< 'true$'\\''\\n'\\''npm ci x'"}
+{"id":"g2267","tag":"G5|sh <<'E' true$'\\n'npm","cmd":"npm i y && sh <<'E'\ntrue$'\\n'npm ci x\nE"}
+{"id":"g2268","tag":"G5|echo sq | sh true$'\\n'npm","cmd":"npm i y && echo 'true$'\\''\\n'\\''npm ci x' | sh"}
+{"id":"g2269","tag":"G5|settled bare true$'\\n'npm","cmd":"npm i y --ignore-scripts && true$'\\n'npm ci x"}
+{"id":"g2270","tag":"G5|bare true$'\\073'npm","cmd":"npm i y && true$'\\073'npm ci x"}
+{"id":"g2271","tag":"G5|sh -c sq true$'\\073'npm","cmd":"npm i y && sh -c 'true$'\\''\\073'\\''npm ci x'"}
+{"id":"g2272","tag":"G5|bash -c dq true$'\\073'npm","cmd":"npm i y && bash -c \"true\\$'\\\\073'npm ci x\""}
+{"id":"g2273","tag":"G5|eval sq true$'\\073'npm","cmd":"npm i y && eval 'true$'\\''\\073'\\''npm ci x'"}
+{"id":"g2274","tag":"G5|bash <<< sq true$'\\073'npm","cmd":"npm i y && bash <<< 'true$'\\''\\073'\\''npm ci x'"}
+{"id":"g2275","tag":"G5|sh <<'E' true$'\\073'npm","cmd":"npm i y && sh <<'E'\ntrue$'\\073'npm ci x\nE"}
+{"id":"g2276","tag":"G5|echo sq | sh true$'\\073'npm","cmd":"npm i y && echo 'true$'\\''\\073'\\''npm ci x' | sh"}
+{"id":"g2277","tag":"G5|settled bare true$'\\073'npm","cmd":"npm i y --ignore-scripts && true$'\\073'npm ci x"}
+{"id":"g2278","tag":"G5|bare env -S'..'","cmd":"npm i y && env -S'npm ci x'"}
+{"id":"g2279","tag":"G5|sh -c sq env -S'..'","cmd":"npm i y && sh -c 'env -S'\\''npm ci x'\\'''"}
+{"id":"g2280","tag":"G5|bash -c dq env -S'..'","cmd":"npm i y && bash -c \"env -S'npm ci x'\""}
+{"id":"g2281","tag":"G5|eval sq env -S'..'","cmd":"npm i y && eval 'env -S'\\''npm ci x'\\'''"}
+{"id":"g2282","tag":"G5|bash <<< sq env -S'..'","cmd":"npm i y && bash <<< 'env -S'\\''npm ci x'\\'''"}
+{"id":"g2283","tag":"G5|sh <<'E' env -S'..'","cmd":"npm i y && sh <<'E'\nenv -S'npm ci x'\nE"}
+{"id":"g2284","tag":"G5|echo sq | sh env -S'..'","cmd":"npm i y && echo 'env -S'\\''npm ci x'\\''' | sh"}
+{"id":"g2285","tag":"G5|settled bare env -S'..'","cmd":"npm i y --ignore-scripts && env -S'npm ci x'"}
+{"id":"g2286","tag":"G5|bare env -S\"..\"","cmd":"npm i y && env -S\"npm ci x\""}
+{"id":"g2287","tag":"G5|sh -c sq env -S\"..\"","cmd":"npm i y && sh -c 'env -S\"npm ci x\"'"}
+{"id":"g2288","tag":"G5|bash -c dq env -S\"..\"","cmd":"npm i y && bash -c \"env -S\\\"npm ci x\\\"\""}
+{"id":"g2289","tag":"G5|eval sq env -S\"..\"","cmd":"npm i y && eval 'env -S\"npm ci x\"'"}
+{"id":"g2290","tag":"G5|bash <<< sq env -S\"..\"","cmd":"npm i y && bash <<< 'env -S\"npm ci x\"'"}
+{"id":"g2291","tag":"G5|sh <<'E' env -S\"..\"","cmd":"npm i y && sh <<'E'\nenv -S\"npm ci x\"\nE"}
+{"id":"g2292","tag":"G5|echo sq | sh env -S\"..\"","cmd":"npm i y && echo 'env -S\"npm ci x\"' | sh"}
+{"id":"g2293","tag":"G5|settled bare env -S\"..\"","cmd":"npm i y --ignore-scripts && env -S\"npm ci x\""}
+{"id":"g2294","tag":"G5|bare env -Snpm\\ ..","cmd":"npm i y && env -Snpm\\ ci\\ x"}
+{"id":"g2295","tag":"G5|sh -c sq env -Snpm\\ ..","cmd":"npm i y && sh -c 'env -Snpm\\ ci\\ x'"}
+{"id":"g2296","tag":"G5|bash -c dq env -Snpm\\ ..","cmd":"npm i y && bash -c \"env -Snpm\\\\ ci\\\\ x\""}
+{"id":"g2297","tag":"G5|eval sq env -Snpm\\ ..","cmd":"npm i y && eval 'env -Snpm\\ ci\\ x'"}
+{"id":"g2298","tag":"G5|bash <<< sq env -Snpm\\ ..","cmd":"npm i y && bash <<< 'env -Snpm\\ ci\\ x'"}
+{"id":"g2299","tag":"G5|sh <<'E' env -Snpm\\ ..","cmd":"npm i y && sh <<'E'\nenv -Snpm\\ ci\\ x\nE"}
+{"id":"g2300","tag":"G5|echo sq | sh env -Snpm\\ ..","cmd":"npm i y && echo 'env -Snpm\\ ci\\ x' | sh"}
+{"id":"g2301","tag":"G5|settled bare env -Snpm\\ ..","cmd":"npm i y --ignore-scripts && env -Snpm\\ ci\\ x"}
+{"id":"g2302","tag":"G5|bare env -S'n'pm\\ ..","cmd":"npm i y && env -S'n'pm\\ ci\\ x"}
+{"id":"g2303","tag":"G5|sh -c sq env -S'n'pm\\ ..","cmd":"npm i y && sh -c 'env -S'\\''n'\\''pm\\ ci\\ x'"}
+{"id":"g2304","tag":"G5|bash -c dq env -S'n'pm\\ ..","cmd":"npm i y && bash -c \"env -S'n'pm\\\\ ci\\\\ x\""}
+{"id":"g2305","tag":"G5|eval sq env -S'n'pm\\ ..","cmd":"npm i y && eval 'env -S'\\''n'\\''pm\\ ci\\ x'"}
+{"id":"g2306","tag":"G5|bash <<< sq env -S'n'pm\\ ..","cmd":"npm i y && bash <<< 'env -S'\\''n'\\''pm\\ ci\\ x'"}
+{"id":"g2307","tag":"G5|sh <<'E' env -S'n'pm\\ ..","cmd":"npm i y && sh <<'E'\nenv -S'n'pm\\ ci\\ x\nE"}
+{"id":"g2308","tag":"G5|echo sq | sh env -S'n'pm\\ ..","cmd":"npm i y && echo 'env -S'\\''n'\\''pm\\ ci\\ x' | sh"}
+{"id":"g2309","tag":"G5|settled bare env -S'n'pm\\ ..","cmd":"npm i y --ignore-scripts && env -S'n'pm\\ ci\\ x"}

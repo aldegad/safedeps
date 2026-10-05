@@ -8,13 +8,16 @@ Run on the host whose shells are measured; it runs each shell with harmless
 scripts (`-L -c true`, `--help`, `set -o`, `shopt`, `compgen`, `command -V`)
 and nothing else. The committed inert-record-gen.jsonl was written on an M1
 MacBook (macOS 15.6.1: /bin/bash 3.2.57, /bin/zsh 5.9, /bin/sh, /bin/dash) on
-2026-10-05; another host's shells can give another list. Every list below is read from the
-shells, not written by hand, except the redirection operators and expansion
+2026-10-05, and again on the same host on 2026-10-06 when G5 was added (its
+first 1,856 rows came out byte for byte the same); another host's shells can
+give another list. Every list below is read from the shells, not written by
+hand, except G5 and the redirection operators and expansion
 forms, which are transcribed whole from bash(1) REDIRECTION and EXPANSION and
 zsh(1)/zshexpn(1) (process substitution =(...)), so the rule is "every operator
 and every expansion form in those sections", not "the ones the author knew".
 
-Rules (each form gets the prefix `npm i y && ` in pass 1):
+Rules (each form gets the prefix `npm i y && ` in pass 1, and the settled G5
+forms `npm i y --ignore-scripts && `):
   G1 invocation options. For S in sh, bash, zsh, dash:
      - letters: every ASCII letter L such that `S -L -c true </dev/null` exits 0
        within 3s, and every `+L` likewise (the shell's own option table, probed);
@@ -48,6 +51,27 @@ Rules (each form gets the prefix `npm i y && ` in pass 1):
      `$".."`, `$(<file)`, zsh `=( )`), each used as (a) the whole command,
      (b) the command word, (c) the script of `sh -c`, `bash -c`, (d) the words
      of `eval`; plus quoting the command word itself ("npm", 'n'pm, n\\pm).
+  G5 the npm statement's own words (validator jetbi-20261005-234803: G1-G4
+     hold the payload at `npm ci x` and vary only how it reaches a shell, so a
+     reading of npm's own words that is narrower than npm's was never tried).
+     Three kinds of variant V, each one npm call whose command is `ci`:
+     - option shapes between `npm` and the verb, as npm's parser takes them:
+       an empty value (`--heading=`), a value glued or apart, a value of two
+       words, a short option alone and in clusters, `-C`/`--prefix` with a
+       directory, `--`, and two options in a row;
+     - the verb as a word the shell computes or unquotes: a variable, `"$@"`,
+       an array, a parameter default, a command substitution, backquotes,
+       ANSI-C strings whole and in part, braces, globs over a file named
+       `ci`, quotes inside the word, an escaped letter, a function;
+     - bytes in front of `npm`: quotes and escapes in and before the word, an
+       ANSI-C string (a decoded letter, newline or `;`), braces, globs over a
+       file named `npm`, zsh's `=npm`, an operator with no blank, and `env -S`
+       with its string glued, quoted or escaped.
+     Each V is carried bare, as `sh -c` and `bash -c` scripts (single and
+     double quotes), as `eval` words, as a here-string and a quoted heredoc
+     to a shell, and piped from `echo`; bare V also stands beside an install
+     that already has the flag. Every carrier quotes V for the shell that
+     reads it, so the shell that runs V sees V's own bytes.
 Pass 2 is scripts/measure/inert-record-variants.py.
 """
 import json, re, subprocess, sys
@@ -70,8 +94,8 @@ def run(argv, inp=None, t=3):
 forms = []
 
 
-def add(fam, tag, cmd):
-    forms.append({"fam": fam, "tag": tag, "cmd": cmd})
+def add(fam, tag, cmd, pre="npm i y && "):
+    forms.append({"fam": fam, "tag": tag, "cmd": cmd, "pre": pre})
 
 
 letters = [chr(c) for c in range(65, 91)] + [chr(c) for c in range(97, 123)]
@@ -171,13 +195,58 @@ for k, w in {"\"npm\"": '"npm" ci x', "'n'pm": "'n'pm ci x", "n\\pm": "n\\pm ci 
              "${u:-npm}": "${u:-npm} ci x", "$'npm'": "$'npm' ci x", "N\"P\"M": 'N"P"M ci x'}.items():
     add("G4", f"command word {k}", w)
 
+# G5
+def sq(t):
+    return "'" + t.replace("'", "'\\''") + "'"
+
+
+def dq(t):
+    return '"' + "".join("\\" + ch if ch in '\\"$`' else ch for ch in t) + '"'
+
+
+V = {
+    # option shapes
+    "--k=": "npm --heading= ci x", "--k=v": "npm --heading=v ci x", "--k v": "npm --heading v ci x",
+    "--k a b": "npm --heading a b ci x", "--k 'a b'": "npm --heading 'a b' ci x",
+    "--k \"a b\"": 'npm --heading "a b" ci x', "-d": "npm -d ci x", "-dd": "npm -dd ci x",
+    "-ddd": "npm -ddd ci x", "-dq": "npm -dq ci x", "-C d": "npm -C d ci x",
+    "--prefix=d": "npm --prefix=d ci x", "--prefix d": "npm --prefix d ci x", "--": "npm -- ci x",
+    "--k= --l=w": "npm --heading= --loglevel=warn ci x", "--l w -d": "npm --loglevel warn -d ci x",
+    # the verb computed or unquoted
+    "$V": "V=ci; npm $V x", "\"$V\"": 'V=ci; npm "$V" x', "${u:-ci}": "npm ${u:-ci} x",
+    "$(echo ci)": "npm $(echo ci) x", "`echo ci`": "npm `echo ci` x", "$'ci'": "npm $'ci' x",
+    "$'\\x63i'": "npm $'\\x63i' x", "c$'\\x69'": "npm c$'\\x69' x", "{ci,x}": "npm {ci,x}",
+    "c?": "touch ci; npm c? x", "c[i]": "touch ci; npm c[i] x", "c*": "touch ci; npm c* x",
+    "\"$@\"": 'set -- ci x; npm "$@"', "${A[@]}": 'A=(ci x); npm "${A[@]}"',
+    "'ci'": "npm 'ci' x", "c\"\"i": 'npm c""i x', "\"c\"i": 'npm "c"i x', "\\ci": "npm \\ci x",
+    "f \"$@\"": 'f() { npm "$@"; }; f ci x',
+    # bytes in front of npm
+    "\"npm\"": '"npm" ci x', "'n'pm": "'n'pm ci x", "n\\pm": "n\\pm ci x", "\\npm": "\\npm ci x",
+    "\"\"npm": '""npm ci x', "''npm": "''npm ci x", "$'n'pm": "$'n'pm ci x",
+    "n$'\\x70'm": "n$'\\x70'm ci x", "$'\\x6e'pm": "$'\\x6e'pm ci x", "{npm,ci,x}": "{npm,ci,x}",
+    "{npm,ci} x": "{npm,ci} x", "n?m": "touch npm; n?m ci x", "[n]pm": "touch npm; [n]pm ci x",
+    "=npm": "=npm ci x", "true;npm": "true;npm ci x", "true&&npm": "true&&npm ci x",
+    "true$'\\n'npm": "true$'\\n'npm ci x", "true$'\\073'npm": "true$'\\073'npm ci x",
+    "env -S'..'": "env -S'npm ci x'", "env -S\"..\"": 'env -S"npm ci x"',
+    "env -Snpm\\ ..": "env -Snpm\\ ci\\ x", "env -S'n'pm\\ ..": "env -S'n'pm\\ ci\\ x",
+}
+for k, v in V.items():
+    add("G5", f"bare {k}", v)
+    add("G5", f"sh -c sq {k}", f"sh -c {sq(v)}")
+    add("G5", f"bash -c dq {k}", f"bash -c {dq(v)}")
+    add("G5", f"eval sq {k}", f"eval {sq(v)}")
+    add("G5", f"bash <<< sq {k}", f"bash <<< {sq(v)}")
+    add("G5", f"sh <<'E' {k}", f"sh <<'E'\n{v}\nE")
+    add("G5", f"echo sq | sh {k}", f"echo {sq(v)} | sh")
+    add("G5", f"settled bare {k}", v, pre="npm i y --ignore-scripts && ")
+
 seen = set()
 out = []
 for f in forms:
-    if f["cmd"] in seen:
+    if f["pre"] + f["cmd"] in seen:
         continue
-    seen.add(f["cmd"])
+    seen.add(f["pre"] + f["cmd"])
     out.append(f)
 for i, f in enumerate(out, 1):
-    print(json.dumps({"id": f"g{i:04d}", "tag": f["fam"] + "|" + f["tag"], "cmd": "npm i y && " + f["cmd"]}, ensure_ascii=False))
+    print(json.dumps({"id": f"g{i:04d}", "tag": f["fam"] + "|" + f["tag"], "cmd": f["pre"] + f["cmd"]}, ensure_ascii=False, separators=(",", ":")))
 print(f"generated {len(out)} forms", file=sys.stderr)

@@ -39,8 +39,11 @@
 #          the command spells the install, so it is the effect gate's, and it
 #          is listed by name, never counted as a violation
 #   gen    inert-record-gen.jsonl, written by inert-record-gen.py from the
-#          shells' own option, builtin and reserved-word tables and the
-#          redirection and expansion sections of bash(1) and zsh(1)
+#          shells' own option, builtin and reserved-word tables, the
+#          redirection and expansion sections of bash(1) and zsh(1), and the
+#          npm statement's own words (G5: option shapes, a computed verb,
+#          bytes in front of `npm`). A gen form that makes fewer than two npm
+#          calls in both shells never reached its own npm and is marked `vac`
 #   var    inert-record-variants.jsonl, written by inert-record-variants.py:
 #          one form per shape of the gen forms that made an unflagged npm
 #          call on 5b5a775, with the script `npm ci` (F2) and beside an
@@ -147,6 +150,29 @@ cat > "${W}/stub/npm" <<'EOF'
 #!/bin/sh
 { printf 'CALL'; for a in "$@"; do printf '\t%s' "$a"; done; printf '\n'; } >> "$NPMLOG"
 EOF
+# npx runs npm as a package: this one skips npx's own options (and the value
+# of -p/--package), drops the package it would fetch and hands the rest to the
+# stub npm, so a form that reaches npm through npx (`npx npm@10 ci x`) makes
+# its npm call instead of failing quietly before it.
+cat > "${W}/stub/npx" <<'EOF'
+#!/bin/sh
+pkg=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -p|--package) pkg=1; shift 2 ;;
+    --) shift; break ;;
+    -*) shift ;;
+    *) break ;;
+  esac
+done
+if [ -n "$pkg" ]; then
+  cmd="$1"; shift
+  [ "$cmd" = npm ] || exit 0
+else
+  shift
+fi
+exec "$(dirname "$0")/npm" "$@"
+EOF
 # A shell the host lacks runs the script with /bin/sh, so the row reaches its
 # npm; one the forms name and the host has is left alone.
 for s in mksh fish pdksh yash posh ksh; do
@@ -211,6 +237,10 @@ judge() { # <form id>
     else verdict=unjudged
     fi
     if grep -qiE 'not found|No such file' "${r}/err.bash" "${r}/err.zsh" 2> /dev/null; then vac=vac; fi
+    # Every gen form is `npm i y && ` and one npm call: a form that made fewer
+    # than two calls in both shells never reached the npm it is about, so it
+    # cannot fail. It is listed, never counted as passing.
+    if [[ "${id%%-*}" == gen ]] && (( (cb > cz ? cb : cz) < 2 )); then vac=vac; fi
     reach=$(awk -F'\t' -v id="${id}" '$1 == id { print $2 }' "${W}/reach.tsv")
     if [[ -n "${reach}" ]] && (( (cb > cz ? cb : cz) < reach )); then short=SHORT; fi
   fi

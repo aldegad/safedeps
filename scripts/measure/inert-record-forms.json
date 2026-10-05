@@ -1,5 +1,5 @@
 {
- "about": "Forms outside scripts/measure/inert-downgrade-grid.sh for scripts/measure/inert-record-invariant.sh: j, s and x are the validator's probes of rounds 1 and 2 (jetbi-20261005-042625, jetbi-20261005-073337), y its unmeasured follow-up, v an npm install the rewrite cannot read beside one it flags or one already settled, one kind per form. probes: r3q01-r3q21 are the validator's third-round forms and r3k01-r3k04 controls; e001-e016 are text the shell decodes (scope lit: an ANSI-C string, a quoted alias, function, trap or variable) or that another program computes at run time (scope cmp: printf octal, base64, rev, tr, parameter pieces), from the design judgment that made the record an allow-list.",
+ "about": "Forms outside scripts/measure/inert-downgrade-grid.sh for scripts/measure/inert-record-invariant.sh: j, s and x are the validator's probes of rounds 1 and 2 (jetbi-20261005-042625, jetbi-20261005-073337), y its unmeasured follow-up, z the validator's fourth-round probes of the allow-list record (jetbi-20261005-234803: option values, computed words, bytes glued before npm, npx; the ids after z are the validator's), v an npm install the rewrite cannot read beside one it flags or one already settled, one kind per form. probes: r3q01-r3q21 are the validator's third-round forms and r3k01-r3k04 controls; e001-e016 are text the shell decodes (scope lit: an ANSI-C string, a quoted alias, function, trap or variable) or that another program computes at run time (scope cmp: printf octal, base64, rev, tr, parameter pieces), from the design judgment that made the record an allow-list.",
  "forms": [
   {
    "id": "j001",
@@ -500,6 +500,206 @@
    "id": "v022",
    "tag": "v|commit message mentions npm",
    "cmd": "npm i y && git commit -q --allow-empty -m 'npm: add y' 2>/dev/null; true"
+  },
+  {
+   "id": "za01",
+   "tag": "r4|A option value empty, beside install",
+   "cmd": "npm i y && npm --heading= ci x"
+  },
+  {
+   "id": "za02",
+   "tag": "r4|A option value with a blank, beside install",
+   "cmd": "npm i y && npm --heading \"a b\" ci x"
+  },
+  {
+   "id": "za03",
+   "tag": "r4|A empty value in sh -c script",
+   "cmd": "npm i y && sh -c 'npm --heading= ci x'"
+  },
+  {
+   "id": "za04",
+   "tag": "r4|A empty value in here-string",
+   "cmd": "npm i y && bash <<< 'npm --heading= ci x'"
+  },
+  {
+   "id": "za05",
+   "tag": "r4|A empty value beside settled install",
+   "cmd": "npm i y --ignore-scripts && npm --heading= ci x"
+  },
+  {
+   "id": "za06",
+   "tag": "r4|A empty value alone",
+   "cmd": "npm --heading= ci x"
+  },
+  {
+   "id": "za07",
+   "tag": "r4|A value with a blank in here-string",
+   "cmd": "npm i y && bash <<< \"npm --heading 'a b' ci x\""
+  },
+  {
+   "id": "za08",
+   "tag": "r4|A empty value in heredoc to sh",
+   "cmd": "npm i y && sh <<'E'\nnpm --heading= ci x\nE"
+  },
+  {
+   "id": "zb01",
+   "tag": "r4|B verb from a variable",
+   "cmd": "npm i y && V=ci && npm $V x"
+  },
+  {
+   "id": "zb02",
+   "tag": "r4|B verb from positional params",
+   "cmd": "npm i y && set -- ci x && npm \"$@\""
+  },
+  {
+   "id": "zb03",
+   "tag": "r4|B verb from default expansion",
+   "cmd": "npm i y && npm ${V:-ci} x"
+  },
+  {
+   "id": "zb04",
+   "tag": "r4|B verb from command substitution",
+   "cmd": "npm i y && npm $(echo ci) x"
+  },
+  {
+   "id": "zb05",
+   "tag": "r4|B verb from brace expansion",
+   "cmd": "npm i y && npm {ci,x}"
+  },
+  {
+   "id": "zb06",
+   "tag": "r4|B verb in ANSI-C quotes",
+   "cmd": "npm i y && npm $'ci' x"
+  },
+  {
+   "id": "zb07",
+   "tag": "r4|B verb from a glob",
+   "cmd": "npm i y && touch ci && npm c? x"
+  },
+  {
+   "id": "zb08",
+   "tag": "r4|B control: verb single-quoted",
+   "cmd": "npm i y && npm 'ci' x"
+  },
+  {
+   "id": "zb09",
+   "tag": "r4|B control: verb split by empty quotes",
+   "cmd": "npm i y && npm c\"\"i x"
+  },
+  {
+   "id": "zb10",
+   "tag": "r4|B verb from an array",
+   "cmd": "npm i y && A=(ci x) && npm \"${A[@]}\""
+  },
+  {
+   "id": "zc01",
+   "tag": "r4|C command word from brace expansion",
+   "cmd": "npm i y && {npm,ci,x}"
+  },
+  {
+   "id": "zc02",
+   "tag": "r4|C command word from brace expansion, args after",
+   "cmd": "npm i y && {npm,ci} x"
+  },
+  {
+   "id": "zc03",
+   "tag": "r4|C command word bound by hash -p",
+   "cmd": "npm i y && hash -p \"$(command -v npm)\" n && n ci x"
+  },
+  {
+   "id": "zc04",
+   "tag": "r4|C command word from an alias on the line before",
+   "cmd": "npm i y && alias n=npm\nn ci x"
+  },
+  {
+   "id": "zc05",
+   "tag": "r4|C command word is a function the command defines",
+   "cmd": "npm i y && n() { npm \"$@\"; } && n ci x"
+  },
+  {
+   "id": "zd01",
+   "tag": "r4|D env -S glued single quotes",
+   "cmd": "npm i y && env -S'npm ci x'"
+  },
+  {
+   "id": "zd02",
+   "tag": "r4|D env -S glued double quotes",
+   "cmd": "npm i y && env -S\"npm ci x\""
+  },
+  {
+   "id": "zd03",
+   "tag": "r4|D sh -c script glued with an ANSI-C newline",
+   "cmd": "npm i y && sh -c 'true'$'\\n''npm ci x'"
+  },
+  {
+   "id": "zd04",
+   "tag": "r4|D eval glued with an ANSI-C newline",
+   "cmd": "npm i y && eval 'true'$'\\n''npm ci x'"
+  },
+  {
+   "id": "zd05",
+   "tag": "r4|D eval words glued with an ANSI-C semicolon",
+   "cmd": "npm i y && eval true$'\\073'npm ci x"
+  },
+  {
+   "id": "zd06",
+   "tag": "r4|D control: escaped semicolon in sh -c word",
+   "cmd": "npm i y && sh -c x\\;npm\\ ci\\ x"
+  },
+  {
+   "id": "zd07",
+   "tag": "r4|D control: env -S with a blank",
+   "cmd": "npm i y && env -S 'npm ci x'"
+  },
+  {
+   "id": "ze01",
+   "tag": "r4|E npx runs npm@10",
+   "cmd": "npm i y && npx npm@10 ci x"
+  },
+  {
+   "id": "ze02",
+   "tag": "r4|E npx --yes runs npm@latest",
+   "cmd": "npm i y && npx --yes npm@latest ci x"
+  },
+  {
+   "id": "ze03",
+   "tag": "r4|E control: npx -p npm@10 npm",
+   "cmd": "npm i y && npx -p npm@10 npm ci x"
+  },
+  {
+   "id": "zf01",
+   "tag": "r4|F control: brace group",
+   "cmd": "npm i y && { npm ci x; }"
+  },
+  {
+   "id": "zf02",
+   "tag": "r4|F control: case arm with open paren",
+   "cmd": "npm i y && case a in (a) npm ci x;; esac"
+  },
+  {
+   "id": "zg01",
+   "tag": "r4|G sh -c ANSI-C script",
+   "cmd": "npm i y && sh -c $'npm ci x'"
+  },
+  {
+   "id": "zg02",
+   "tag": "r4|G sh -c ANSI-C script with escape before npm",
+   "cmd": "npm i y && sh -c $'\\x20npm ci x'"
+  },
+  {
+   "id": "zg03",
+   "tag": "r4|G eval ANSI-C script",
+   "cmd": "npm i y && eval $'npm ci x'"
+  },
+  {
+   "id": "zg04",
+   "tag": "r4|G sh -c ANSI-C escape between npm and verb",
+   "cmd": "npm i y && sh -c $'npm\\x20ci x'"
+  },
+  {
+   "id": "zg05",
+   "tag": "r4|G sh -c ANSI-C newline before npm",
+   "cmd": "npm i y && sh -c $'\\nnpm ci x'"
   }
  ],
  "probes": [
