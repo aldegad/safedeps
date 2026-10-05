@@ -1075,6 +1075,41 @@ Every run went through a test host's queue, never on the author's machine. macOS
 
 The lexer alone (scan) is unchanged: 0.028–0.033s at 8KB and 0.057–0.066s at 32KB in both trees.
 
+### The gate's cost no longer grows with the number of statements
+
+v2.18.1 left one cost open: a command's cost grew with how many statements it held, on both systems. On the project's Debian VM, with the deadline off, 400 one-line statements with an install on its own line took 70s, and an `sh -c` script of 40 short function definitions took 45s. A profile counted one judgment of 321 one-line statements at 3,883 lexer calls and 8,147 processes. Almost all came from `command_is_dependency_install`, which the landing and the spec extractor asked of every statement, about a dozen processes each.
+
+"Every reader lexes the command once", above, removed those lexings. The landing and the extractor now take each statement's recognize bytes from the one lexing of the command and ask `recognized_dependency_install` of them. That left one grep per statement, in the landing, the extractor and the ecosystem detection, in each of the three readings. On the statement-starts head (151ecef) the same 321 statements cost 972 greps of 1,061 processes on the VM, and 32KB of one-line statements with an install (2,415 statements) was still answered `UNDECIDED` at the default 20s budget.
+
+v2.18.1 also said 32KB of one-line statements took 48s. That shape cut its last line short, so the command held no install (`echo lnpm install ...`). The shapes measured here keep the install on its own line.
+
+- **The recognizers' question is asked of every statement at once.** `recognized_dependency_install_each` asks it of many texts with one grep and maps grep's line numbers back: line k answers for text k-1, because grep matches each line on its own, as it matches a one-line text on a here-string. The landing, the extractor and the ecosystem detection ask it before their loops and read the answers in order.
+- **A text one line cannot stand for is asked alone.** That is a text with a newline in it, a text with a byte past ASCII, and every text when grep fails or prints anything but numbered lines. The reader asks `recognized_dependency_install` of it when it gets there. Bytes past ASCII are left out because GNU grep reads its input as binary from the first byte that is not valid in the locale and stops printing numbered lines there, so the texts after it would read as no. The texts are classified in the C locale, where a pattern compares bytes: in a UTF-8 locale bash's `read` took the newline after an invalid byte as part of it, so two such texts in a row read as one and the second reached grep (the battery below caught it on Linux).
+- **The batch marks nothing.** A text asked alone marks a failed grep as it always did, so a grep that fails costs what it cost before, and a statement the reader never reaches is never asked.
+
+`scripts/measure/scan-cost.sh --statements` times the whole gate against the number of statements, with the deadline off and a 120s cap per cell. Before is 151ecef, after is the final code (e4773ad), in seconds:
+
+| statements | one-line statements, Linux | `sh -c` functions, Linux | one-line statements, macOS | `sh -c` functions, macOS |
+|---|---|---|---|---|
+| 40 | 1.7 → 0.9 | 4.9 → 1.9 | 1.5 → 1.0 | 4.6 → 2.4 |
+| 100 | 2.8 → 0.9 | 9.8 → 2.4 | 2.7 → 1.2 | 8.8 → 3.4 |
+| 400 | 8.8 → 1.1 | 35.1 → 3.5 | 7.0 → 1.7 | 26.6 → 6.4 |
+| 1600 | 33.6 → 2.2 | >120 → 10.5 | 24.9 → 4.1 | 103.8 → 25.2 |
+| 3200 | 65.7 → 3.4 | – → 24.2 | 46.3 → 7.6 | >120 → 60.1 |
+
+Linux is the project's Debian 13 VM (bash 5.2.37, mawk 1.3.4, C.UTF-8), load 1.1 to 2.1 before and 3.1 to 3.4 after. macOS is an M1 Max MacBook shared with other runs (macOS 15.6.1, bash 3.2.57, the macOS awk 20200816, C.UTF-8), load 14.8 to 17.0 before and 10.2 to 14.8 after. A cell over the cap is `>120`, and the cells after it in its column were not run.
+
+Under the default 20s budget, 32KB of one-line statements with an install is judged in 3s on Linux and 5s on macOS, where 151ecef answered it `UNDECIDED` at 20s on both. A 1KB `sh -c` script of 33 functions is judged in 2s and 3s. `scripts/test/self-budget.sh` holds both, with the same lines and no install.
+
+Not closed here: one long `sh -c` script still costs more than its length in a straight line, 3.5s, 10.5s and 24.2s at 400, 1,600 and 3,200 functions on Linux, and 6.4s, 25.2s and 60.1s on macOS. That cost is the reading of one payload of up to 100KB, not a cost per statement of the command around it, and it is not located yet.
+
+Verification, on e4773ad against 151ecef. Every run went through a test host's queue.
+
+- **The batch against one grep per text.** `scripts/test/statement-batch.sh` section 1 asks 6,770 texts both ways: every input of the committed corpora and 129 seeded random commands, each of their lines, the statements' recognize bytes as the readers hand them over, and texts with valid and invalid bytes past ASCII. They go in batches of 400 in order and in reverse, once whole and once empty. On Linux all 20,310 answers and the mark agree, and on macOS too. With grep failing, the answers and the mark agree too. Section 2 compares the ecosystem detection with the loop it replaced on 522 commands, multi-line forms included: none differ.
+- **Mutations, each on a copy.** Mapping grep's line k to text k turns both sections red (on Linux 314 of 522 ecosystems, and at the gate 159 of 278 corpus commands and 9 of 10 commands with bytes past ASCII, where pinned installs that 151ecef denies are let through). Handing texts past ASCII to grep turns section 1 red on Linux (6 answers). On macOS it stays green, and cannot turn red: the macOS grep (2.6.0-FreeBSD) decides each line on its own and never reads the rest of its input as binary. A line where an invalid byte comes before the install word does not match there, asked alone or in a batch alike (measured in C.UTF-8 and en_US.UTF-8). That is also why macOS counts 5,571 yes answers where Linux counts 5,580.
+- **The whole guard, before against after.** The guard's answer and `advisory.log`, 151ecef against e4773ad: on Linux, deadline off, the committed corpora, seeded random commands and statement shapes up to 9KB (1,265 inputs) and the 10 commands with bytes past ASCII and statements over several lines that the mutation above changes: none different.
+- **Batteries** on e4773ad. Linux, load 2.5 to 9.4: statement-batch 4 ok and 0 not ok, self-budget 44/0, scan-contract 56/0, smoke 61/0, consumer-forms 88/0, shell-reading 4/0, install-dir-differential 1/0, and census --quick with 0 weakened, mislabeled, error, after-gate, pending-on-deny, idle-mode, unmarked, unlisted and unstable. macOS, the M1 Max above, load 6.0 to 56: statement-batch 4/0, self-budget 44/0, scan-contract 56/0, smoke 61/0, consumer-forms 88/0, shell-reading 4/0, install-dir-differential 1/0. The census ran on Linux only.
+
 ## v2.18.1 — records belong to one call, and npm publishes from a tag (shipped)
 
 This release closes the v2.18.0 boundaries that were ready, and moves npm publishing to GitHub Actions. The rest of what v2.18.0 moved here is listed at the end of this section and ships in v2.18.2.
