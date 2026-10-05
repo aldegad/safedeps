@@ -62,6 +62,17 @@ See the `skill-hook-authoring` skill for the full payload/decision schema. Essen
 - A security change needs **both** a bypass harness (the threat must DENY/REORG) and a regression check (normal installs still pass; no false positives on `echo`/heredoc/`npm run`/`npx`).
 - **Cite counts a reader can reproduce from the repo.** "159 forms" measured in a scratch corpus is decoration — nobody can check it, and a number nobody can check reads as verification without being any. Quote the battery's own form count or `npm test`'s ok lines, or commit the corpus you counted.
 
+### What to run, and where
+
+Measurement time is the release's bottleneck. A judgment costs seconds on macOS, a battery row about ten, and a fix that reran everything on both platforms took three and a half hours of host time before a validator ran the same again. So each measurement runs once, at the level where it can fail.
+
+- **Per change** (one plan's branch): the batteries the change reaches, once on macOS and once on Linux; one mutation control per fix, on a copy, where reverting the fix turns its new row red; and any measurement the plan's Done Criteria names. Nothing else.
+- **Per release** (the integration tree, before main moves): `npm test` on both platforms, the quick scan-failure census, and the judgment grids, corpora and replays of the areas the release changed. These do not run per branch unless the plan's Done Criteria names one.
+- **A validator** reads the worker's own logs on the hosts and checks them against the claim. Its own runs are counterexample probes the author did not write, and one control showing a probe can fail. It does not rerun the worker's batteries.
+- **A second rejection of the same class stops the patching.** When review rejects one class of defect twice, the next round starts with a design judgment, not a third shape fix. The pipe check took three rejections before its design changed, and each one cost a full round of measurement.
+
+The bypass-harness and regression rule above still holds for every security change; this section only says where each run happens.
+
 ## Verification hygiene
 
 The verification procedure has its own shared state, and three defects came out
