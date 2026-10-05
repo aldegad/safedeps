@@ -31,8 +31,9 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
         # run-all.sh --group: a and b split the single-process batteries;
-        # timing holds self-budget and effect-trace-grid, which a busy machine
-        # turns red without a defect, so nothing else runs beside them.
+        # timing holds self-budget, effect-trace-grid and
+        # install-dir-differential, which a busy machine turns red without a
+        # defect, so nothing that loads the runner runs beside them.
         group: [a, b, timing]
     env:
       GITLEAKS_VERSION: "8.30.1"

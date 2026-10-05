@@ -71,9 +71,14 @@ cd "${ROOT_DIR}" || exit 2
 #
 # The CI groups balance the macOS times of v2.18.1 (run 37256605251, seconds
 # under the whole suite's load): a holds manager-variants 1584, shell-reading
-# 545, install-dir-differential 450, smoke 416, scan-contract 204 and the small
-# ones; b holds consumer-forms 1541, lockless-forms 1054 and e2e 752. timing
-# holds the two load-sensitive batteries, on a runner of their own.
+# 545, smoke 416, scan-contract 204 and the small ones; b holds consumer-forms
+# 1541, lockless-forms 1054 and e2e 752. timing holds the batteries a loaded
+# runner turns red without a defect, on a runner of their own: the two of the
+# second phase, and install-dir-differential, which needs npm to answer 237
+# layouts inside the gate's deadline. In group a it ran beside
+# manager-variants, which took a 3-CPU macOS runner from load 5 to 43, and
+# seven of its layouts went UNDECIDED (CI run 37267052867); the timing runner
+# stayed under 16.
 ALL_BATTERIES=(
   "smoke|1|dev|a|scripts/test/smoke.sh"
   "scan-contract|1|dev|a|scripts/test/scan-contract.sh"
@@ -81,7 +86,7 @@ ALL_BATTERIES=(
   "census|1|release|-|scripts/measure/scan-failure-census.sh --quick"
   "consumer-forms|1|dev|b|scripts/test/consumer-forms.sh"
   "manager-variants|1|dev|a|scripts/test/manager-variants.sh"
-  "install-dir-differential|1|dev|a|scripts/test/install-dir-differential.sh"
+  "install-dir-differential|1|dev|timing|scripts/test/install-dir-differential.sh"
   "workspace-snapshot-count|1|dev|a|scripts/test/workspace-snapshot-count.sh"
   "self-budget|2|dev|timing|scripts/test/self-budget.sh"
   "advisory-log-retention|1|dev|a|scripts/test/advisory-log-retention.sh"
