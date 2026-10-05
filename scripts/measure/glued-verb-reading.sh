@@ -18,8 +18,20 @@
 #
 # A `}` glued to the last word is zsh's: it closes a `{` group there and hands
 # the word before it on (`{ npm ci}` runs `npm ci`), where bash and dash refuse
-# the group. Those rows are held to `{ <install> ;}`, by their answers only:
-# where the flag goes after a `}` is the rewrite's own business.
+# the group. Those rows are held to `{ <install> ;}`, the rewrite with the `;`
+# set aside. With no group open (`nogroup}`), zsh refuses the `}` and bash and
+# dash hand the manager the word with its `}`, so that row has no spaced form:
+# it is held only to what the shells make of its rewrite (below). A closing
+# backtick ends the word as an operator does (`` echo `npm ci` ``).
+#
+# The rewrite is read by the shells as well. Each rewritten command, glued and
+# spaced, runs with the manager's name replaced by the stand-in, and every
+# shell must hand the stand-in the words it handed for the command as written,
+# with `--ignore-scripts` added and nothing else changed, and refuse it exactly
+# where it refused the command as written (column `rw`). A rewrite that turned
+# `npm ci}` (bash hands `ci}`, which npm refuses) into a command bash runs as
+# `npm ci`, or `{ npm ci}` into a parse error in zsh, fails it; the first
+# version of the glued `}` end did both (caught in review).
 #
 # The rewrite of the spaced form can carry one flag more, at its very end: the
 # flag 7d66f8c appended to a one-statement install (inert_release_appends),
@@ -37,7 +49,10 @@
 #   --out <file>  also write the table there, tab-separated
 # Verdicts: same (read as the spaced form is), same-zsh (a glued `}`, answered
 # as `{ <install> ;}`), silent (the same answers, which for that install say
-# nothing), DIFF (read differently), unread (the spaced form is not read
+# nothing), nogroup (a `}` outside a group, whose rewrite the shells read as
+# the command as written), floor-zsh (read as the spaced form, and zsh refuses
+# only the floor's end flag after the closing `}`, below), DIFF (read differently, or a rewrite the shells do
+# not read as the command as written), unread (the spaced form is not read
 # either: the tree does not know that install at all).
 # Exit: 0 every glued form reads as its spaced form and is read, 1 otherwise.
 set -euo pipefail
@@ -120,6 +135,8 @@ operators=(
   '}^{ %C%}^{ %C% ;}'
   '>^%C%>/dev/null^%C% >/dev/null'
   '<^%C%</dev/null^%C% </dev/null'
+  '`^echo `%C%`^echo `%C% `'
+  'nogroup}^%C%}^'
 )
 
 # The guard's answers for one command, after approving what it prescribes,
@@ -177,6 +194,39 @@ wait' >/dev/null 2>&1 </dev/null ) || true
   printf '%s' "${out%,}"
 }
 
+# The words each shell hands the stand-in for <rewrite>, <manager>'s name
+# replaced by it, as `bash=<words> zsh=<words> dash=<words> `; `-` with no
+# rewrite.
+rewrite_words() {
+  local rewrite="$1" manager="$2" sh
+  [[ -n "${rewrite}" ]] || { printf -- '-'; return; }
+  for sh in bash zsh dash; do
+    printf '%s=%s ' "${sh}" "$(shell_words "${sh}" "${rewrite/"${manager} "/_sd_argv }")"
+  done
+}
+
+# Whether the shells read <rewrite words> as <words>: per shell, refused
+# exactly where the command as written was refused, and otherwise the same
+# words with `--ignore-scripts` added and nothing else. `ok`, `-` (no
+# rewrite) or what failed.
+rewrite_reads() {
+  local words="$1" rwords="$2" sh o r stripped out="" w
+  [[ "${rwords}" != - ]] || { printf -- '-'; return; }
+  for sh in bash zsh dash; do
+    o=$(printf '%s\n' ${words} | sed -n "s/^${sh}=//p")
+    r=$(printf '%s\n' ${rwords} | sed -n "s/^${sh}=//p")
+    [[ "${o}" != absent ]] || continue
+    if [[ "${o}" == syntax || "${r}" == syntax ]]; then
+      [[ "${o}" == "${r}" ]] || out+="${sh}:${o}->${r};"
+      continue
+    fi
+    stripped=""
+    for w in ${r//,/ }; do [[ "${w}" == --ignore-scripts ]] || stripped+="${w},"; done
+    [[ "${stripped%,}" == "${o}" && ",${r}," == *,--ignore-scripts,* ]] || out+="${sh}:${o}->${r};"
+  done
+  printf '%s' "${out:-ok}"
+}
+
 jobs_dir="${tmp_root}/jobs"
 mkdir -p "${jobs_dir}"
 n=0
@@ -188,10 +238,21 @@ for b in "${bases[@]}"; do
     IFS='^' read -r name glued spaced <<< "${o}"
     g="${glued//%C%/${install}}" s="${spaced//%C%/${install}}"
     pg="${glued//%C%/${probe}}"
+    ps="${spaced//%C%/${probe}}"
     printf '%s\t%s\t%s\t%s\t%s\t%s\n' "${manager}" "${name}" "${g}" "${s}" "${pg}" "${shows}" > "${jobs_dir}/${n}.row"
     ( tuple "${g}" > "${jobs_dir}/${n}.g"
       if [[ -n "${spaced}" ]]; then tuple "${s}" > "${jobs_dir}/${n}.s"; else : > "${jobs_dir}/${n}.s"; fi
       for sh in bash zsh dash; do printf '%s=%s ' "${sh}" "$(shell_words "${sh}" "${pg}")"; done > "${jobs_dir}/${n}.w"
+      IFS=$'\t' read -r _ grw < "${jobs_dir}/${n}.g" || grw=""
+      rewrite_words "${grw}" "${manager}" > "${jobs_dir}/${n}.gr"
+      if [[ -n "${spaced}" ]]; then
+        for sh in bash zsh dash; do printf '%s=%s ' "${sh}" "$(shell_words "${sh}" "${ps}")"; done > "${jobs_dir}/${n}.sw"
+        srw=""
+        [[ ! -s "${jobs_dir}/${n}.s" ]] || IFS=$'\t' read -r _ srw < "${jobs_dir}/${n}.s" || srw=""
+        rewrite_words "${srw}" "${manager}" > "${jobs_dir}/${n}.sr"
+      else
+        printf -- '-' > "${jobs_dir}/${n}.sw"; printf -- '-' > "${jobs_dir}/${n}.sr"
+      fi
     ) &
     n=$((n + 1))
     (( n % JOBS == 0 )) && wait
@@ -203,8 +264,9 @@ wait
 here_form=$'bash <<E\nnpm ci\nE'
 here_got=$(tuple "${here_form}")
 
+floor_re='^zsh:[^;]*->syntax;$'
 table=$(
-  printf 'id\tmanager\top\tglued\tshells\tglued_tuple\tglued_rewrite\tspaced_tuple\tspaced_rewrite\tshows\tverdict\n'
+  printf 'id\tmanager\top\tglued\tshells\tglued_tuple\tglued_rewrite\trewrite_shells\tspaced_tuple\tspaced_rewrite\trw\tshows\tverdict\n'
   for (( k = 0; k < n; k++ )); do
     IFS=$'\t' read -r manager name g s _ shows < "${jobs_dir}/${k}.row"
     IFS=$'\t' read -r gt gr < "${jobs_dir}/${k}.g" || true
@@ -213,9 +275,27 @@ table=$(
     gn="${gr// /}" sn="${sr// /}"
     [[ "${g}" == *--ignore-scripts ]] || gn="${gn%--ignore-scripts}"
     [[ "${s}" == *--ignore-scripts ]] || sn="${sn%--ignore-scripts}"
-    if [[ "${name}" == '}' && "${gt}" != "${st}" ]] \
-       || [[ "${name}" != '}' && ( "${gt}" != "${st}" || "${gn}" != "${sn}" ) ]]; then
+    # `{ <install> ;}` against `{ <install>}`: the `;` is the spaced form's own.
+    [[ "${name}" != '}' ]] || sn="${sn//';}'/'}'}"
+    rwg=$(rewrite_reads "$(cat "${jobs_dir}/${k}.w")" "$(cat "${jobs_dir}/${k}.gr")")
+    rws=-
+    [[ -z "${s}" ]] || rws=$(rewrite_reads "$(cat "${jobs_dir}/${k}.sw")" "$(cat "${jobs_dir}/${k}.sr")")
+    rw="glued:${rwg} spaced:${rws}"
+    # The one way a rewrite may fail the shells here: 7d66f8c appended its flag
+    # to a one-statement install, after the closing `}` (inert_release_appends),
+    # and zsh refuses a word after that `}`. Every rewrite keeps 7d66f8c's
+    # (AGENTS.md, the floor), so zsh refuses `{ npm install x}` rewritten, as it
+    # refused 7d66f8c's own rewrite of it.
+    floor=0
+    [[ "${rwg}" =~ ${floor_re} && "${gr}" == *'} --ignore-scripts' && ( "${rws}" == ok || "${rws}" == - ) ]] && floor=1
+    if [[ "${floor}" == 0 ]] && { [[ "${rwg}" != ok && "${rwg}" != - ]] || [[ "${rws}" != ok && "${rws}" != - ]]; }; then
       v=DIFF
+    elif [[ "${name}" == nogroup'}' ]]; then
+      v=nogroup
+    elif [[ "${gt}" != "${st}" || "${gn}" != "${sn}" ]]; then
+      v=DIFF
+    elif [[ "${floor}" == 1 ]]; then
+      v='floor-zsh'
     elif [[ "${shows}" == deny && "${st}" != deny* ]] || [[ "${shows}" == rewrite && -z "${sr}" ]]; then
       # The spaced form is not read either: the tree does not know the install
       # however it ends.
@@ -227,16 +307,17 @@ table=$(
     else
       v=same
     fi
-    printf '%03d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$((k + 1))" "${manager}" "${name}" \
-      "${g}" "$(cat "${jobs_dir}/${k}.w")" "${gt}" "${gr}" "${st}" "${sr}" "${shows}" "${v}"
+    printf '%03d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$((k + 1))" "${manager}" "${name}" \
+      "${g}" "$(cat "${jobs_dir}/${k}.w")" "${gt}" "${gr}" "$(cat "${jobs_dir}/${k}.gr")" "${st}" "${sr}" "${rw}" "${shows}" "${v}"
   done
-  printf 'here\tnpm\theredoc\t%s\t-\t%s\t-\t-\t-\tout-of-enumeration\n' "${here_form//$'\n'/\\n}" "${here_got}"
+  printf 'here\tnpm\theredoc\t%s\t-\t%s\t-\t-\t-\t-\t-\t-\tout-of-enumeration\n' "${here_form//$'\n'/\\n}" "${here_got}"
 )
 [[ -z "${OUT}" ]] || printf '%s\n' "${table}" > "${OUT}"
 printf '%s\n' "${table}"
 diff_count=$(printf '%s\n' "${table}" | awk -F'\t' '$NF == "DIFF"' | wc -l | tr -d ' ')
 unread_count=$(printf '%s\n' "${table}" | awk -F'\t' '$NF == "unread"' | wc -l | tr -d ' ')
-printf '# tree %s (%s): %s forms, %s read differently from their spaced form, %s not read either way\n' \
+floor_count=$(printf '%s\n' "${table}" | awk -F'\t' '$NF == "floor-zsh"' | wc -l | tr -d ' ')
+printf '# tree %s (%s): %s forms, %s read differently from their spaced form, %s not read either way, %s refused by zsh only for the floor flag after `}`\n' \
   "${TREE}" "$(sed -nE 's/^SAFEDEPS_VERSION="?([^"]*)"?$/\1/p' "${TREE}/bin/safedeps" | head -1)" \
-  "${n}" "${diff_count}" "${unread_count}"
+  "${n}" "${diff_count}" "${unread_count}" "${floor_count}"
 (( diff_count == 0 && unread_count == 0 ))
