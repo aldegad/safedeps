@@ -493,6 +493,10 @@ safedeps/
   LICENSE         # Apache-2.0
 ```
 
+### 테스트 실행
+
+`npm test` 는 개발용 실행입니다. 릴리스에만 필요한 두 배터리, 축약 scan-failure census 와 `scripts/test/effect-trace-grid.sh` 를 뺀 모든 테스트 배터리를 돌립니다. `npm run test:release` 는 그 둘을 포함해 모든 배터리를 돌립니다. CI 는 릴리스 세트를 Linux 와 macOS 에서 병렬 잡으로 나눠 돌립니다. `scripts/test/run-all.sh --list` 는 실행이 시작할 배터리 목록을 출력합니다.
+
 ## What's Different
 
 `safedeps`는 AI 코딩 에이전트가 install 명령을 작성하는 **순간**에 패키지 설치를 가로챕니다. CI 스캔 시점, PR 리뷰 시점, 런타임 샌드박스 시점이 아닙니다. 이 타이밍이 핵심 차별점입니다.

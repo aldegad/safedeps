@@ -493,6 +493,10 @@ safedeps/
   LICENSE         # Apache-2.0
 ```
 
+### Running the tests
+
+`npm test` is the development run: every test battery except the two that only a release needs, the quick scan-failure census and `scripts/test/effect-trace-grid.sh`. `npm run test:release` runs every battery, those two included. CI runs the release set on Linux and macOS, split into parallel jobs. `scripts/test/run-all.sh --list` prints which batteries a run would start.
+
 ## What's Different
 
 `safedeps` intercepts package installs at **the moment an AI coding agent writes the install command** — not at CI scan time, PR review time, or runtime sandbox time. That timing is the core differentiator.
