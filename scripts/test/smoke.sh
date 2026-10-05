@@ -1047,7 +1047,6 @@ pass "an npm install the rewrite did not read is recorded as unread, whatever ki
 release_only_safe=$(mktemp -d "${tmp_root}/safe-release-only.XXXXXX")
 SAFEDEPS_HOME="${release_only_safe}" lib/ledger/ledger.sh approve npm left-pad 1.3.0 1.3.0 smoke >/dev/null
 for inert_in in \
-  'npm ci eval "\npm"' \
   'npm install left-pad@1.3.0 eval "a\b npm"' \
   'npm install left-pad@1.3.0 eval "npm\ x"' \
   'npm install left-pad@1.3.0 eval "$(echo) npm"' \
@@ -1070,6 +1069,20 @@ do
     || fail "an install no place can be read in is recorded with the unread warning: $(printf '%q' "${inert_in}")"
 done
 pass "an install no place can be read in keeps the release's rewrite, recorded as one whose flag nobody read"
+# `npm ci eval "\npm"` is one npm install whose operands are `eval` and
+# `\npm`: the shell runs no eval there. It keeps the flags the rewrite reads
+# for it and the release's end flag, and, with no npm install verb left in the
+# text the rewrite did not read as a command, it is not recorded. It was
+# recorded while the record listed text that names npm; that record was noise.
+release_only_safe=$(mktemp -d "${tmp_root}/safe-release-operand.XXXXXX")
+inert_in='npm ci eval "\npm"'
+inert_out=$(run_hook_command "${tmp_root}/home-release-operand" "${release_only_safe}" "${inert_in}")
+release_only_got=$(jq -r '.hookSpecificOutput.updatedInput.command // ""' <<< "${inert_out}")
+[[ "${release_only_got}" == 'npm ci --ignore-scripts eval "\npm" --ignore-scripts' ]] \
+  || fail "an npm install whose operands spell eval keeps its rewrite: $(printf '%q' "${inert_in}") (got: ${inert_out:0:240})"
+! grep -qE 'could not place --ignore-scripts by reading|safedeps did not read as a command holds an npm install verb' "${release_only_safe}/advisory.log" 2>/dev/null \
+  || fail "an npm install whose operands spell eval and npm is not recorded as unread: $(printf '%q' "${inert_in}")"
+pass "an npm install whose operands spell eval and npm keeps its rewrite and is not recorded"
 
 # The rewrite changes the text every shell reads, so it is made only where
 # bash, zsh and dash agree where the npm installs are. In I2 and I3 the
