@@ -826,7 +826,7 @@ shell_lex() {
       function emit_pieces(   k, a, ln, pln) {
         buf = ""; held = 0; ln = 1; a = 1; pln = 1
         for (k = 1; k <= N; k++) {
-          if (!(k in DROP) && (C[k] == "p" || C[k] == "c" && DEP[k] == 1 && (X[k] ~ /[;&|\n]/ || (k in GC)))) {
+          if (!(k in DROP) && (C[k] == "p" || C[k] == "c" && DEP[k] == 1 && X[k] ~ /[;&|\n]/)) {
             piece(a, k - 1, pln)
             a = k + 1
             if (X[k] == "\n") ln++
@@ -969,11 +969,12 @@ shell_lex() {
       #     `p ci`. Read as an end there, it
       #     made `npm ci}`, which installs nothing, into `npm ci` through the
       #     `--ignore-scripts` rewrite (caught in review);
-      #   - one zsh closes a group with (GC) stays `}` in those views, ends
-      #     the statement in the stmts, pieces and cscripts views, is a blank
-      #     in the joined and unprefixed views (their readers take one line
-      #     at a time, and a line read on its own has lost the `{`), and the
-      #     install grammar reads it as an end (SAFEDEPS_G_END). The zsh
+      #   - one zsh closes a group with (GC) stays `}` in those views, where
+      #     the install grammar reads it as an end (SAFEDEPS_G_END), and is a
+      #     blank in the joined view, whose readers take one line at a time:
+      #     a line read on its own has lost the `{`. The statement readers
+      #     (the stmts and pieces views) take joined text, so the blank ends
+      #     the statement for them as well. The zsh
       #     reading marks it at once. bash and dash mark it too when the group
       #     level holding it ends with a group bash has not closed, since bash
       #     then refuses that text and runs none of it, so reading it as zsh
@@ -1243,12 +1244,6 @@ shell_lex() {
             if (k > N || C[k] == "p" || C[k] == "c" && DEP[k] == 1 && X[k] ~ /[\n;&|()]/) { cscripts_of(W, n); n = 0 }
             continue
           }
-          # A `}` zsh closes a group with ends the word and the statement.
-          if ((k in GC) && C[k] == "c" && DEP[k] == 1) {
-            if (inw) { W[++n] = w; w = ""; inw = 0 }
-            cscripts_of(W, n); n = 0
-            continue
-          }
           inw = 1
           if (k in DROP) continue
           if (k in VAL) w = w VAL[k]
@@ -1329,9 +1324,7 @@ shell_lex() {
             # this view prints as a blank, it would follow a blank, which is
             # where a comment starts (form WB7).
             if (cl == "p" && view == "stmts") put(";")
-            # A glued `}` zsh closes a group with ends the statement; one no
-            # shell closes a group with is a character (group_close).
-            else if (view == "stmts" && (k in GC) && cl == "c" && DEP[k] == 1 && !(k in DROP)) put(";")
+            # A glued `}` that closes no group is a character (group_close).
             else if ((k in NC) && (cl == "c" || view == "live" && (cl == "Q" || cl == "B"))) put("_")
             # A statement ends only at a top-level separator: not inside a
             # substitution, an expansion or arithmetic, and not in a
@@ -1346,7 +1339,7 @@ shell_lex() {
             continue
           }
           if (view == "unprefixed" || view == "unprefixed-lines") {
-            if (!(k in A)) put(cl == "p" ? ";" : (k in GC) ? " " : cc)
+            if (!(k in A)) put(cl == "p" ? ";" : cc)
             continue
           }
           if (view == "code") {

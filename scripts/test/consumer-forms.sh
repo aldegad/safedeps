@@ -619,6 +619,8 @@ expect_rewrite "npm ci closed by a glued }"        '{ npm ci}'          '{ npm c
 expect_rewrite "npm ci closed by a glued } and &&" '{ npm ci}&& echo x' '{ npm ci --ignore-scripts}&& echo x'
 expect_rewrite "npm ci in backticks closed by a glued }" 'echo `{ npm ci}`' 'echo `{ npm ci --ignore-scripts}`'
 expect_rewrite "npm ci after another statement in the group" '{ echo a; npm ci}' '{ echo a; npm ci --ignore-scripts}'
+# A line read on its own has lost the `{` of the line before it.
+expect_rewrite "npm ci on the line after the {" $'{\nnpm ci}' $'{\nnpm ci --ignore-scripts}'
 # With no group open, zsh refuses the `}` and bash hands npm `ci}`, which npm
 # refuses as a command: no install, and no rewrite that would make it one.
 expect_rewrite "npm ci} outside a group" 'npm ci}'            '(no rewrite)'
