@@ -6004,9 +6004,11 @@ guard_extract_specs() {
 
   # Whether each piece is an install, asked for all of them at once and
   # replayed below where the loop asks (command_is_dependency_install_each).
-  # The pieces end in a newline, so reading them from a variable reads the
-  # lines the process substitution did.
-  pieces=$(guard_extract_pieces "${cmd}" "${targets}") || true
+  # The pieces are read whole from the process substitution the loop read
+  # them from (a spec reader starts no command substitution, which could fail
+  # and read as no spec), so both loops below read the same lines.
+  pieces=""
+  IFS= read -r -d '' pieces < <(guard_extract_pieces "${cmd}" "${targets}") || true
   SAFEDEPS_ID_IN=()
   while IFS=$'\t\037' read -r gate_reads seg words; do
     [[ "${seg}" =~ [^[:space:]] ]] || continue

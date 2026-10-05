@@ -394,20 +394,22 @@ ecosystem_alone() {
   printf ''
 }
 eco_both() {
-  # <fn> <text>: the answer, the flag file, and whether the DIVERGE and mark
-  # files were written, as one string. The loop read its segments from a
-  # process substitution and returned at the first ecosystem, and the writer
-  # still lexing payloads then died of SIGPIPE when it next wrote, so how
-  # many DIVERGE and mark lines it left depended on that timing. The gate
-  # reads both files only for being empty or not (guard_readings_diverge,
-  # guard_scan_failed), so that is what is compared. ECO_FULL keeps all.
+  # <fn> <text>: the answer, and whether the DIVERGE, flag and mark files
+  # were written, as one string. The loop read its segments from a process
+  # substitution and returned at the first ecosystem, and the writer still
+  # lexing payloads then died of SIGPIPE when it next wrote, so how many
+  # lines it left in each file depended on that timing. The gate reads the
+  # DIVERGE and mark files only for being empty or not
+  # (guard_readings_diverge, guard_scan_failed), and sets no flag file while
+  # it asks for the ecosystem, so that is what is compared. ECO_FULL keeps
+  # all.
   local dir="${TMP_ROOT}/eco.$1" out
   mkdir -p "${dir}"
   : > "${dir}/d"; : > "${dir}/u"; : > "${dir}/m"
   out=$(SAFEDEPS_LEX_DIVERGE="${dir}/d" SAFEDEPS_LEX_FLAGS="${dir}/u" SAFEDEPS_SCAN_MARK="${dir}/m" "$1" "$2"; printf 'X')
   # Each test ends in true: an assignment returns the status of its last
   # command substitution, and an empty file would end the battery here.
-  ECO="${out%X}|$([[ ! -s "${dir}/d" ]] || printf D)|$(cat "${dir}/u")|$([[ ! -s "${dir}/m" ]] || printf M)"
+  ECO="${out%X}|$([[ ! -s "${dir}/d" ]] || printf D)|$([[ ! -s "${dir}/u" ]] || printf U)|$([[ ! -s "${dir}/m" ]] || printf M)"
   ECO_FULL="${out%X}|$(cat "${dir}/d")|$(cat "${dir}/u")|$(cat "${dir}/m")"
 }
 ECO_FORMS=(
@@ -451,7 +453,7 @@ SAFEDEPS_READING=bash differ=0
 for text in "${ECO_FORMS[@]}"; do
   PATH="${TMP_ROOT}/failgrep:${PATH}" eco_both ecosystem_alone "${text}"; a="${ECO}"
   PATH="${TMP_ROOT}/failgrep:${PATH}" eco_both guard_detect_ecosystem "${text}"; b="${ECO}"
-  if [[ "${a%%|*}" != "${b%%|*}" || "${a##*|}" != *failed* || "${b##*|}" != *failed* ]]; then
+  if [[ "${a%%|*}" != "${b%%|*}" || "${a##*|}" != M || "${b##*|}" != M ]]; then
     differ=$(( differ + 1 ))
     printf '# with grep failing: %q: alone %q, batched %q\n' "${text:0:60}" "${a:0:60}" "${b:0:60}"
   fi
