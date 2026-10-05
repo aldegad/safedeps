@@ -1037,12 +1037,12 @@ v2.18.0 의 인식기는 문장 시작을 정규식으로 찾았다. 구분자 �
 
 모든 실행은 테스트 호스트의 대기열을 거쳤고, 작성자의 맥에서는 돌리지 않았다. macOS: M1 맥북 두 대(macOS 15, bash 3.2.57), 부하 4~17. 리눅스: 프로젝트의 데비안 13 VM(bash 5.2.37, mawk 1.3.4), 부하 1.7~8, VM 의 두 번째 슬롯에서 다른 실행이 함께 돌았다.
 
-- **최종 코드(0d05321)의 배터리.** macOS: scan-contract 54 ok·0 not ok, consumer-forms 82/0, shell-reading 4/0, smoke 61/0, manager-variants 3/0, hook-entry 11/0, census --quick 은 weakened·mislabeled·error·after-gate·pending-on-deny·idle-mode·unmarked·unlisted·unstable 모두 0. 리눅스: scan-contract 54/0, shell-reading 4/0, smoke 61/0, manager-variants 3/0, hook-entry 11/0, census --quick 같은 0, CI 의 shellcheck 목록. 리눅스 consumer-forms 는 58e8466 에서 82/0 이다. 그 뒤 두 커밋은 어느 셸도 파싱하지 못하는 머리 안의 리다이렉트가 명령을 시작하지 않게 하고, scan-contract 행 둘을 더한다.
+- **최종 코드(0d05321)의 배터리.** macOS: scan-contract 54 ok·0 not ok, consumer-forms 82/0, shell-reading 4/0, smoke 61/0, manager-variants 3/0, hook-entry 11/0, census --quick 은 weakened·mislabeled·error·after-gate·pending-on-deny·idle-mode·unmarked·unlisted·unstable 모두 0. 리눅스: scan-contract 54/0, consumer-forms 82/0, shell-reading 4/0, smoke 61/0, manager-variants 3/0, hook-entry 11/0, census --quick 같은 0, CI 의 shellcheck 목록.
 - **사건 계약**은 세 읽기 모두에서 입력 707개(셸 꼴 217, 첫 자리 꼴 290, 무작위 200)의 사건 10715개를 본다. 첫 전체 실행이 리더가 걸음과 어긋난 자리 다섯을 찾았고 모두 고쳤다(f4d9d56). 리눅스의 무작위 순서가 여섯 번째를 찾았다(4e91f25).
 - **변이(각각 사본에서):** 구분자 없는 시작에 `;` 를 끼우지 않기, 거기서 문장을 자르지 않기, `DIVERGE` 에 사건 집합을 비교하지 않기, 디스크립터 읽기가 걸음의 시작을 무시하기, zsh 의 `&!` 빼기. 다섯 모두 scan-contract 를 빨강으로 만든다. 새 행을 단 75b8130 코드는 첫 시작 행에서 빨강이다.
-- **npm 첫 자리 표**(모든 생산에 첫 자리 8종을 앞세운 `npm ci`, 1160 꼴): macOS 셸 하나라도 실행하는 841 꼴 중 601 은 재작성, 226 은 `UNDECIDED`, 14 는 통과다. 14 는 백틱 안의 npm 이고, 하나하나 `advisory.log` 에 강등으로 기록된다. 데이터 32 꼴은 통과다. f4d9d56 이전 트리에서 쟀고, f4d9d56 은 zsh `{fd}` 꼴을 재작성에서 `UNDECIDED` 로 바꾼다.
+- **npm 첫 자리 표**(모든 생산에 첫 자리 8종을 앞세운 `npm ci`, 1160 꼴): macOS 셸 하나라도 실행하는 841 꼴 중 601 은 재작성, 226 은 `UNDECIDED`, 14 는 통과다. 14 는 백틱 안의 npm 이고, 하나하나 `advisory.log` 에 강등으로 기록된다. 데이터 32 꼴은 통과다. 최종 코드에서 쟀다. f4d9d56 이전 트리도 같은 수였다. 그 커밋이 옮기는 `{fd}` 꼴은 macOS 셸 어느 것도 실행하지 않는다.
 - **격자**: 8438 꼴, 셸 열 하나라도 실행하는 꼴 7047, 데이터 꼴 450. 최종 코드로 커밋한 기록의 조각을 지금까지 판정했다. macOS 4219 꼴(넷 중 두 조각): 셸이 실행하는 3290 꼴은 하나하나 패키지를 짚는 설치로 거부됐고, 데이터 241 꼴은 통과했고, 셸 실행 18482번에서 읽기마다 자기 셸이 실행한 줄을 보였다. 리눅스 3166 꼴은 같은 방식으로 2657 과 156 이다. 셸이 실행하는데 게이트가 통과시킨 꼴은 어느 조각에도 없다. 나머지 격자는 테스트 호스트를 릴리스에 내주느라 멈췄고, 그 뒤에 돈다.
-- **75b8130 대비 재생**(scan-corpus 310 꼴에 무작위 명령 200·300개, 시드 9191·4242): 판정 510/510, 610/610 동일, 58e8466 에서. 대조군(아무것도 지우지 않는 scan)은 510 중 1을 움직이므로 재생은 실패할 수 있다.
+- **75b8130 대비 재생**(scan-corpus 310 꼴에 무작위 명령 200·300개, 시드 9191·4242): 판정 510/510, 610/610 동일, 최종 코드(92da88d)와 그 앞 58e8466 모두에서. 대조군(아무것도 지우지 않는 scan)은 510 중 1을 움직이므로 재생은 실패할 수 있다.
 - **비용**(`scripts/measure/scan-cost.sh`, 리눅스 VM, 마감 끔, 3회 중 최선, 두 바퀴씩; 75b8130 → 0d05321, 초). 인식기는 이제 자기 텍스트를 두 번이 아니라 한 번 렉싱한다:
 
 | 크기 | gate quiet | gate loud | gate split |
