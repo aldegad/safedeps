@@ -152,7 +152,9 @@ time_views() {
 time_gate() {
   local input="$1" s e best="" i t safe payload
   payload="${WORK}/payload.json"
-  jq -nc --arg c "${input}" --arg cwd "${PROJECT}" \
+  # From a file: one argument over 128KB is E2BIG on Linux.
+  printf '%s' "${input}" > "${WORK}/command"
+  jq -nc --rawfile c "${WORK}/command" --arg cwd "${PROJECT}" \
     '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' > "${payload}"
   for ((i = 0; i < REPS; i++)); do
     safe=$(mktemp -d "${WORK}/safe.XXXXXX")
@@ -196,7 +198,9 @@ descendants() { local c; for c in $(pgrep -P "$1" 2>/dev/null); do descendants "
 time_gate_capped() {
   local input="$1" s e best="" i t safe payload pid kids over
   payload="${WORK}/payload.json"
-  jq -nc --arg c "${input}" --arg cwd "${PROJECT}" \
+  # From a file: one argument over 128KB is E2BIG on Linux.
+  printf '%s' "${input}" > "${WORK}/command"
+  jq -nc --rawfile c "${WORK}/command" --arg cwd "${PROJECT}" \
     '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' > "${payload}"
   for ((i = 0; i < REPS; i++)); do
     safe=$(mktemp -d "${WORK}/safe.XXXXXX")
