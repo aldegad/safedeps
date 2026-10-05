@@ -1882,20 +1882,29 @@ shell_lex() {
       # only at a command position: counted that way, bg can only be too low,
       # and too low makes bash run the word, which is the reading that can
       # only withhold a rewrite (the readings then differ, UNDECIDED).
-      function group_close(   k, zg, bg, end, pn, q, P) {
+      #
+      # The bash reading also counts the groups the dash walk opens (bd), and
+      # says DIVERGE where dash would settle a glued `}` otherwise: a reading
+      # that says nothing at a place must print the views the other readings
+      # print there, and the walks do not open the same groups everywhere
+      # (each reading keeps rules of its own, see starts()).
+      function group_close(   k, zg, bg, bd, end, pn, q, P) {
         if (!unterm) {
           if (!wantst) starts(policy, GXV, GXW, GOR)
           if (!shz && !(wantst && shb)) starts("zsh", GZV, GZW, GOZ)
+          if (shb && !wantst) starts("dash", GDV, GDW, GOD)
         }
-        zg = 0; bg = 0; pn = 0
+        zg = 0; bg = 0; bd = 0; pn = 0
         for (k = 1; k <= N; k++) {
           if (shz ? (k in GOR) : (k in GOZ)) zg++
           if (k in GOR) bg++
+          if (k in GOD) bd++
           if (!(k in RB)) continue
           end = (k == N || X[k+1] ~ /[ \t\n;&|)<>`]/)
           if (wordstart(k)) {
             if (RBT[k] && end && zg > 0) zg--
             if (RBT[k] && end && bg > 0) bg--
+            if (RBT[k] && end && bd > 0) bd--
             continue
           }
           # Glued to the word before it and closing no group, a `}` is a
@@ -1913,6 +1922,7 @@ shell_lex() {
           if (bg > 0) GC[P[q]] = 1
           else { NC[P[q]] = 1; if (shb) div = 1 }
         }
+        if (shb && pn > 0 && (bg > 0) != (bd > 0)) div = 1
       }
       # Whether a word starts at byte j: the byte before it ends a token. That
       # is a question about the token, not the character: a blank or a newline
