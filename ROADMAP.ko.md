@@ -56,7 +56,7 @@ Safedeps 는 **개발 의존성 install** (npm / pip / cargo / go / gem / maven 
 
 ### 릴리즈 메모
 
-- npm 패키지 version 은 `package.json` 이 SSoT. `bin/safedeps` `SAFEDEPS_VERSION` 이 이를 따라가고, smoke 테스트는 `package.json` 을 읽어 대조한다 (현재 v2.18.0).
+- npm 패키지 version 은 `package.json` 이 SSoT. `bin/safedeps` `SAFEDEPS_VERSION` 이 이를 따라가고, smoke 테스트는 `package.json` 을 읽어 대조한다 (현재 v2.18.1).
 - `npm test` 는 release smoke suite 를 실행한다. full fixture E2E 는 `v2.1-tests` 에 있다.
 - daily re-check 는 LLM 토큰을 쓰지 않는다. opt-in 이며, macOS `launchd` user agent 가 매일 `safedeps re-check --json` 을 실행한다 (`install-safedeps-recheck-agent.mjs` 로 atomic install). `~/.safedeps/recheck.log` 와 `~/.safedeps/recheck-alerts.jsonl` 를 쓰고, 새 CVE/KEV/revoke/provider-skip/위조-의심 시 macOS notification 을 띄운다. 네트워크는 OSV / CISA / GHSA query 에만 쓴다.
 
@@ -1016,7 +1016,9 @@ ubuntu CI 작업은 2026-08-04 부터 빨간색이었고 macOS 작업은 초록�
 
 릴리스 트리 1d43743 에서 `npm test` 는 macOS 와 Linux 모두 배터리 14개를 ok 395, not ok 0 으로 마쳤다. macOS 는 M1 MacBook(macOS 15.6.1, bash 3.2.57, npm 11.19.0)이고, 배터리 두 개씩 3876초, 부하 1.5–19.3 이었다. Linux 는 프로젝트의 Debian 13 VM(bash 5.2.37, node v20.20.2, npm 10.8.2)이고, 2628초, 부하 0.2–15.7 이었다. VM 의 root 소유 `/node_modules` 가 없는 루트에서 돌렸다. 그것이 있으면 manifest 없는 디렉터리에서 npm 이 말하는 설치 위치가 바뀐다. 1d43743 뒤의 커밋은 문서와 주석 하나만 바꾼다. 모든 변경은 합치기 전에 다른 멤버가 크로스 검증했고, 합친 트리는 출하 전에 README·ARCHITECTURE·SKILL·AGENTS 가 서로 맞는지 다시 읽었다. 그 재독이 바닥을 v2.17.2 라고 부른 것(실제로는 7d66f8c)을 찾았고, 위의 강등된 꼴 셋도 그때 드러났다.
 
-## v2.18.1 (진행 중)
+## v2.18.1 — 기록은 한 호출의 것이고, npm 은 태그에서 게시한다 (출하)
+
+이 릴리스는 v2.18.0 이 넘긴 경계 중 준비된 것을 닫고, npm 게시를 GitHub Actions 로 옮긴다. v2.18.0 이 여기로 넘긴 나머지는 이 절 끝에 적었고 v2.18.2 로 나간다.
 
 ### 설치 기록은 한 호출의 것이다
 
@@ -1062,7 +1064,19 @@ M1 MacBook(macOS 15.6.1, bash 3.2.57)에서 `scripts/measure/scan-cost.sh --reps
 
 검증: 분석기의 모든 뷰를 세 읽기 모두에서 수리 전후로 1,304개 입력(커밋된 코퍼스, 시드 고정 무작위 명령 300개, 빌더의 청크 크기 경계 근처의 긴 단어)에 대해 비교했다. macOS awk 와 `mawk` 에서 각각 46,944번 비교, 다른 것 0. 가드의 답 전체와 `advisory.log` 를 수리 전후로, 코퍼스와 9KB 까지의 긴 단어 꼴에 대해 비교했다. macOS 에서 992개 입력, 다른 것 0 이고, 옛 트리를 자기 자신과 비교한 것도 깨끗하다. 두 비교 모두 실패할 수 있다. 사본에서 빌더를 망가뜨리면 분석기 비교는 36,144번 중 54번이 다르고, 게이트 비교는 설치가 deny 에서 allow 로 옮겨 가는 것을 보인다. M1 과 VM 에서 self-budget(41 ok), scan-contract(43), shell-reading(4), smoke(61), consumer-forms(62)가 `not ok` 없이 통과했고, M1 의 quick census 는 weakened, mislabeled, after-gate, pending-on-deny, unmarked, unlisted 를 모두 0 으로 셌다. 새 self-budget 행은 M1 의 v2.18.0 트리에서 빨강이고(21초에 `UNDECIDED`), 그 트리가 이미 빨랐던 Linux 에서는 통과한다.
 
-여기서 닫지 않은 것: 명령의 비용은 그 안의 문장 수에 비례해서도 는다. 두 시스템 모두, 이 수리 전과 후 모두 그렇다. 짧은 함수 정의로 된 1KB `sh -c` 스크립트가 Linux 에서 23초, 한 줄짜리 문장 32KB 가 48초다. 바이트당이 아니라 문장당 비용이고, 이 릴리스의 별개 항목이다.
+여기서 닫지 않은 것: 명령의 비용은 그 안의 문장 수에 비례해서도 는다. 두 시스템 모두, 이 수리 전과 후 모두 그렇다. 짧은 함수 정의로 된 1KB `sh -c` 스크립트가 Linux 에서 23초, 한 줄짜리 문장 32KB 가 48초다. 바이트당이 아니라 문장당 비용이고, v2.18.2 로 넘긴다.
+
+### v2.18.2 로 넘긴 것
+
+모두 자기 플랜이 있고 작업은 계속된다. 이 릴리스를 내려고 범위에서 뺐다.
+
+- **재작성이 못 읽는 텍스트의 inert 플래그.** v2.17.2 는 `--ignore-scripts` 를 주고 v2.18.0 은 주지 않는 명령(`ksh -c` 스크립트, 이스케이프나 치환이 든 큰따옴표 셸 스크립트나 `eval`, 다른 명령으로 파이프되는 heredoc 본문)은 아직 플래그를 받지 않는다. 검토에서 그런 텍스트가 플래그도 기록도 없이 npm 동사를 숨길 수 있다는 것이 나왔고, 수리는 못 읽는 텍스트의 모든 종류가 한 기록 경로를 지나게 하고 392꼴에서 스크립트로 검사한다.
+- **`;` 에 붙은 동사.** `npm ci;` 와 다른 매니저의 같은 꼴을 설치로 읽지 않는다.
+- **렉서에서 명령이 시작하는 자리.** 예약어나 `!` 에 리다이렉트로 붙은 명령, zsh 의 `&!`, 함수 본문 안의 설치.
+- **문장당 비용.** 문장별 질문을 일괄로 바꾸면 400문장 명령이 Linux 에서 67.7초에서 5.2초가 된다. 위 렉서 변경 위에 짓는다.
+- **셸이 코드로 읽는 payload.** `env -S` 문자열과 코드를 돌리는 zsh 글롭 한정자.
+- **큰따옴표 안 `$(...)` 가 든 인자.** 그런 인자 뒤의 inert 플래그가 치환 안으로 들어갈 수 있다.
+- **목록 밖의 파이프 소비자.** 파이프 검사가 이름으로 모르는 소비자(함수, `source`, `dash`, `coproc` 등)에 넘어가는 설치 텍스트는 단독이든 보이는 설치 옆이든 기록 없이 통과한다. 목록 대신 닫힌 규칙으로 바꾼다.
 
 ## v3 (미래)
 

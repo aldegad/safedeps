@@ -56,7 +56,7 @@ The internal engine keeps the v1 `reorg-guard` assets.
 
 ### Release notes
 
-- The npm package version in `package.json` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION` tracks it and the smoke test reads `package.json` to compare (current: v2.18.0).
+- The npm package version in `package.json` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION` tracks it and the smoke test reads `package.json` to compare (current: v2.18.1).
 - `npm test` runs the release smoke suite; the full fixture E2E lives under `v2.1-tests`.
 - The daily re-check uses no LLM tokens. It is opt-in: a macOS `launchd` user agent runs `safedeps re-check --json` daily, installed atomically by `install-safedeps-recheck-agent.mjs`. It writes `~/.safedeps/recheck.log` and `~/.safedeps/recheck-alerts.jsonl` and raises a macOS notification on a new CVE/KEV/revoke/provider-skip/suspected-forgery. Network is used only for OSV / CISA / GHSA queries.
 
@@ -1016,7 +1016,9 @@ Review found more than one release could close, and these were stated rather tha
 
 On the release tree 1d43743, `npm test` ran all 14 batteries with 395 ok and 0 not ok on macOS and on Linux. macOS was an M1 MacBook (macOS 15.6.1, bash 3.2.57, npm 11.19.0): 3876s with two batteries at a time, load 1.5 to 19.3. Linux was the project's Debian 13 VM (bash 5.2.37, node v20.20.2, npm 10.8.2): 2628s, load 0.2 to 15.7, run in a root without the VM's root-owned `/node_modules`, which otherwise changes where npm says a manifest-less directory installs. The commits after 1d43743 change only documentation and one comment. Each change was cross-validated by another member before it merged, and the merged tree was re-read for agreement between README, ARCHITECTURE, SKILL and AGENTS before it shipped. That re-reading found the floor named as v2.17.2 when it is 7d66f8c, and the three downgraded shapes above are what it turned up.
 
-## v2.18.1 (in progress)
+## v2.18.1 — records belong to one call, and npm publishes from a tag (shipped)
+
+This release closes the v2.18.0 boundaries that were ready, and moves npm publishing to GitHub Actions. The rest of what v2.18.0 moved here is listed at the end of this section and ships in v2.18.2.
 
 ### An install record belongs to one call
 
@@ -1062,7 +1064,19 @@ On the project's Debian VM (bash 5.2.37, `mawk`, load 1.0 to 2.1) the same rows 
 
 Verification: every lexer view in all three readings, before against after, on 1,304 inputs (the committed corpora, 300 seeded random commands and long words around the builder's chunk sizes): 46,944 comparisons, none different, under the macOS awk and under `mawk`. The guard's whole answer and its `advisory.log`, before against after, on the corpora and the long-word shapes up to 9KB: 992 inputs, none different, on macOS; the same comparison of the old tree with itself is also clean. Both comparisons can fail: with the builder broken on a copy, the lexer comparison differs on 54 of 36,144 and the gate comparison shows installs moving from deny to allow. On the M1 and on the VM, self-budget (41 ok), scan-contract (43), shell-reading (4), smoke (61) and consumer-forms (62) passed with no `not ok`, and the quick census on the M1 counted zero weakened, mislabeled, after-gate, pending-on-deny, unmarked and unlisted. The new self-budget row is red on the v2.18.0 tree on the M1 (`UNDECIDED` at 21s) and passes there on Linux, where that tree was already fast.
 
-Not closed here: a command's cost also grows with how many statements it holds, on both systems and before and after this fix. A 1KB `sh -c` script of short function definitions takes 23s on Linux, and 32KB of one-line statements takes 48s. That cost is per statement, not per byte, and is a separate item of this release.
+Not closed here: a command's cost also grows with how many statements it holds, on both systems and before and after this fix. A 1KB `sh -c` script of short function definitions takes 23s on Linux, and 32KB of one-line statements takes 48s. That cost is per statement, not per byte, and moves to v2.18.2.
+
+### Moved to v2.18.2
+
+Each of these has its own plan, and the work goes on. They were cut from this release so that it could ship.
+
+- **The inert flag in text the rewrite cannot read.** The commands v2.17.2 gave `--ignore-scripts` and v2.18.0 does not (a `ksh -c` script, a double-quoted shell script or `eval` with an escape or a substitution in it, a heredoc body piped to another command) still get none. Review found that such a text can also hide an npm verb with neither a flag nor a record, and the repair makes one record path for every kind of unread text, checked by a script over 392 shapes.
+- **A verb glued to `;`.** `npm ci;` and the same spelling in other managers are not read as an install.
+- **Where a command starts in the lexer.** A command glued to a reserved word or `!` through a redirection, zsh's `&!`, and installs inside a function body.
+- **The per-statement cost.** Batching the per-statement questions takes a 400-statement command from 67.7s to 5.2s on Linux; it builds on the lexer change above.
+- **Payloads the shells read as code.** `env -S` strings and zsh glob qualifiers that run code.
+- **An argument with `$(...)` inside double quotes.** The inert flag after such an argument can land inside the substitution.
+- **Pipe consumers outside the list.** Install text piped to a consumer the pipe check does not name (a function, `source`, `dash`, `coproc` and others) passes with no record, alone and beside a visible install alike. A closed rule replaces the list.
 
 ## v3 (future)
 
