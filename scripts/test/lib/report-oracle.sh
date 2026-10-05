@@ -1138,7 +1138,7 @@ oracle_line() {
     oracle_inert_line inert-asked asked
   elif [[ "${line}" == 'safedeps did not add --ignore-scripts to this install' ]]; then
     oracle_inert_line inert-none none
-  elif [[ "${line}" == "safedeps could not read where npm keeps the --ignore-scripts in the command safedeps wrote, so the install's own scripts may have run" ]]; then
+  elif [[ "${line}" == "safedeps did not read all of the command it wrote as the shell will" ]]; then
     # Said only right after an "added" or "asked" line, from a record that
     # states the warning.
     oracle_count inert-unread

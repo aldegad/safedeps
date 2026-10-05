@@ -511,6 +511,10 @@ pass "control: mutated spec diverges on ${control_hit}/${fuzz_cases} inputs, so 
 scan_view() { shell_lex "$1" scan "safedeps:scan-contract"; }
 code_view() { shell_lex "$1" code "safedeps:scan-contract"; }
 noredir_view() { shell_lex "$1" noredir "safedeps:scan-contract"; }
+# The cmdword view is read as offsets too (inert_flag_offsets reads the bytes
+# before a verb's offset in it), so it keeps the byte length; it is never read
+# again, so idempotence is not asked of it.
+cmdword_view() { shell_lex "$1" cmdword "safedeps:scan-contract"; }
 property_failures=0
 diverge_file=$(mktemp "${TMPDIR:-/tmp}/safedeps-diverge.XXXXXX")
 check_view_properties() { # input label
@@ -533,6 +537,11 @@ check_view_properties() { # input label
         property_failures=$((property_failures + 1))
       fi
     done
+    once=$(SAFEDEPS_READING="${reading}" cmdword_view "${x}"; printf 'X'); once="${once%X}"
+    if [[ "$(byte_len "${once}")" != "$(byte_len "${x}")" ]]; then
+      printf 'length: cmdword_view (%s) changed the length of [%q] (%s)\n' "${reading}" "${x}" "$2" >&2
+      property_failures=$((property_failures + 1))
+    fi
     if [[ "${reading}" == bash ]]; then
       bash_views="${views}"
       : > "${diverge_file}"
@@ -564,7 +573,7 @@ for ((c = 0; c < fuzz_cases; c++)); do
 done
 [[ ${property_failures} -eq 0 ]] || fail "view properties: ${property_failures} violation(s) (seed ${fuzz_seed})"
 rm -f "${diverge_file}"
-pass "view properties: scan, code and noredir keep length and are idempotent in the bash, zsh and dash readings, and read as bash wherever bash says no DIVERGE, on ${form_count} shell forms and ${fuzz_cases} random inputs"
+pass "view properties: scan, code and noredir keep length and are idempotent, cmdword keeps length, in the bash, zsh and dash readings, and read as bash wherever bash says no DIVERGE, on ${form_count} shell forms and ${fuzz_cases} random inputs"
 
 # --- the words the spec extractor reads -----------------------------------------
 # The pieces view hands the extractor each statement's words: redirections out,

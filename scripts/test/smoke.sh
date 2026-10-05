@@ -831,7 +831,7 @@ do
     || fail "bash hands npm a word the text does not show: $(printf '%q' "${echo_form}") (argv: $(paste -sd' ' - <<< "${echo_argv}"))"
 done
 # An install whose flag nobody read says so in the meta, so the post hook adds
-# the warning that its scripts may have run.
+# the warning that safedeps did not read all of the command it wrote.
 dyn_safe=$(mktemp -d "${tmp_root}/safe-dyn.XXXXXX")
 SAFEDEPS_HOME="${dyn_safe}" lib/ledger/ledger.sh approve npm left-pad 1.3.0 1.3.0 smoke >/dev/null
 run_hook_command "${tmp_root}/home-dyn" "${dyn_safe}" 'HOME=--cache; npm install left-pad@1.3.0 ~' >/dev/null
@@ -945,7 +945,7 @@ for unread_i in "${!unread_case_in[@]}"; do
   inert_got=$(jq -r '.hookSpecificOutput.updatedInput.command // ""' <<< "${inert_out}")
   [[ "${inert_got}" == "${inert_want}" ]] \
     || fail "an install in text the rewrite cannot read gets the flag where v2.17.2 put it: $(printf '%q' "${inert_in}") (got: $(printf '%q' "${inert_got}"); ${inert_out:0:200})"
-  grep -q 'is in text safedeps could not read as the shell will' "${unread_safe}/advisory.log" 2>/dev/null \
+  grep -q 'safedeps did not read as a command holds an npm install verb' "${unread_safe}/advisory.log" 2>/dev/null \
     || fail "an install in text the rewrite cannot read is recorded as one whose flag nobody read: $(printf '%q' "${inert_in}")"
   unread_sid=$(jq -r '.snapshot_id' "${unread_safe}/pending/"*.json 2>/dev/null) || unread_sid=""
   jq -e '.ignore_scripts_injected == true and .ignore_scripts_unread == true' "${unread_safe}/snapshots/${unread_sid}_meta.json" >/dev/null 2>&1 \
@@ -1025,7 +1025,7 @@ for left_i in "${!left_case_in[@]}"; do
   inert_got=$(jq -r '.hookSpecificOutput.updatedInput.command // ""' <<< "${inert_out}")
   [[ "${inert_got}" == "npm i --ignore-scripts left-pad@1.3.0 --ignore-scripts${left_case_tail[${left_i}]}" ]] \
     || left_bad+=" [the rewrite changed: $(printf '%q' "${inert_in}") (got: $(printf '%q' "${inert_got}"); ${inert_out:0:160})]"
-  grep -q 'is in text safedeps could not read as the shell will' "${left_safe}/advisory.log" 2>/dev/null \
+  grep -q 'safedeps did not read as a command holds an npm install verb' "${left_safe}/advisory.log" 2>/dev/null \
     || left_bad+=" [no unread line in advisory.log: $(printf '%q' "${inert_in}")]"
   left_sid=$(jq -r '.snapshot_id' "${left_safe}/pending/"*.json 2>/dev/null) || left_sid=""
   jq -e '.ignore_scripts_injected == true and .ignore_scripts_unread == true' "${left_safe}/snapshots/${left_sid}_meta.json" >/dev/null 2>&1 \
@@ -1057,12 +1057,12 @@ for inert_in in \
   'npm install x\ y -- "$HOME" sh -c "x\y npm"'
 do
   rm -rf "${release_only_safe}/pending"
-  release_only_before=$(grep -cE 'could not place --ignore-scripts by reading|is in text safedeps could not read as the shell will' "${release_only_safe}/advisory.log" 2>/dev/null || true)
+  release_only_before=$(grep -cE 'could not place --ignore-scripts by reading|safedeps did not read as a command holds an npm install verb' "${release_only_safe}/advisory.log" 2>/dev/null || true)
   inert_out=$(run_hook_command "${tmp_root}/home-release-only" "${release_only_safe}" "${inert_in}")
   release_only_got=$(jq -r '.hookSpecificOutput.updatedInput.command // ""' <<< "${inert_out}")
   [[ "${release_only_got}" == *" --ignore-scripts" && "${release_only_got}" != "${inert_in}" ]] \
     || fail "an install no place can be read in keeps the release's rewrite: $(printf '%q' "${inert_in}") (got: ${inert_out:0:240})"
-  release_only_after=$(grep -cE 'could not place --ignore-scripts by reading|is in text safedeps could not read as the shell will' "${release_only_safe}/advisory.log" 2>/dev/null || true)
+  release_only_after=$(grep -cE 'could not place --ignore-scripts by reading|safedeps did not read as a command holds an npm install verb' "${release_only_safe}/advisory.log" 2>/dev/null || true)
   (( ${release_only_after:-0} > ${release_only_before:-0} )) \
     || fail "an install no place can be read in is recorded as one whose flag nobody read: $(printf '%q' "${inert_in}")"
   release_only_sid=$(jq -r '.snapshot_id' "${release_only_safe}/pending/"*.json 2>/dev/null) || release_only_sid=""

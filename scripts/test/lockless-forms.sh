@@ -948,9 +948,9 @@ do
     unverified)
       # Nobody read whether npm kept the flag, so the post hook does not say
       # the install's scripts did not run.
-      [[ -z "${CASE_RAN}" ]] && grep -q 'could not read where npm keeps the --ignore-scripts in the command safedeps wrote' <<< "${CASE_POST}" \
+      [[ -z "${CASE_RAN}" ]] && grep -q 'safedeps did not read all of the command it wrote as the shell will' <<< "${CASE_POST}" \
         && ! grep -q 'install scripts were not run' <<< "${CASE_POST}" \
-        || fail "an install whose flag nobody read is not rebuilt, and the user is told its scripts may have run: ${form} (post: ${CASE_POST:-<quiet>})"
+        || fail "an install whose flag nobody read is not rebuilt, and the user is told safedeps did not read all of the command: ${form} (post: ${CASE_POST:-<quiet>})"
       ;;
     rebuilt)
       grep -q '^sd-approved@[^	]*	install' <<< "${CASE_RAN}" \
@@ -1018,7 +1018,7 @@ pass "an install holding a word any shell expansion decides runs no script while
 # and a rollback with no confirmed snapshot said "no install script was run".
 # No line says that any more: a line says what safedeps did. The meta records
 # that the flag went in unread (ignore_scripts_unread), and that adds the one
-# warning that the install's own scripts may have run.
+# warning that safedeps did not read all of the command it wrote.
 # The meta is read between the install and the post hook, which consumes it.
 capture_meta() { CASE_META=$(cat "${CASE_HOME}"/snapshots/*_meta.json 2>/dev/null) || CASE_META=""; }
 for row in \
@@ -1036,14 +1036,14 @@ do
   ! grep -qE 'install scripts were not run|no install script was run' <<< "${CASE_POST}" \
     || fail "the post hook does not say no install script ran: ${form} (${setup}) (post: ${CASE_POST})"
   if [[ "${setup}" == lock_victim ]]; then
-    rolled_back && grep -q "could not read where npm keeps the --ignore-scripts in the command safedeps wrote" <<< "${CASE_POST}" \
-      || fail "the rollback says the install's own scripts may have run: ${form} (post: ${CASE_POST})"
+    rolled_back && grep -q "safedeps did not read all of the command it wrote as the shell will" <<< "${CASE_POST}" \
+      || fail "the rollback says safedeps did not read all of the command it wrote: ${form} (post: ${CASE_POST})"
   else
-    grep -q 'could not read where npm keeps the --ignore-scripts in the command safedeps wrote' <<< "${CASE_POST}" \
-      || fail "the post hook says the install's scripts may have run: ${form} (post: ${CASE_POST:-<quiet>})"
+    grep -q 'safedeps did not read all of the command it wrote as the shell will' <<< "${CASE_POST}" \
+      || fail "the post hook says safedeps did not read all of the command it wrote: ${form} (post: ${CASE_POST:-<quiet>})"
   fi
 done
-pass "no post hook line says no install script ran, and one whose flag went in unread says its scripts may have run"
+pass "no post hook line says no install script ran, and one whose flag went in unread says safedeps did not read all of the command"
 
 # --- 11d. The flag after the verb is a floor under the reading --------------------------
 # Every rewritten install also gets the flag right after its verb, where the
@@ -1097,7 +1097,7 @@ do
   [[ "${INSTALL_MARKS}" == 0 ]] \
     || fail "an approved install in text the rewrite cannot read runs no script during the install: ${form} (ran: $(cut -f1,2 "${MARKS}" | paste -sd, -); command: ${CASE_EXEC})"
   [[ -e "${CASE_PROJECT}/node_modules/sd-approved" ]] || fail "the approved install installs: ${form}"
-  grep -q 'is in text safedeps could not read as the shell will' "${CASE_HOME}/advisory.log" \
+  grep -q 'safedeps did not read as a command holds an npm install verb' "${CASE_HOME}/advisory.log" \
     || fail "an install in text the rewrite cannot read is recorded in advisory.log: ${form}"
   ! grep -qE 'install scripts were not run|no install script was run' <<< "${CASE_POST}" \
     || fail "the post hook does not say the scripts of an install whose flag nobody read did not run: ${form} (post: ${CASE_POST})"
