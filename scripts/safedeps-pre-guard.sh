@@ -2491,8 +2491,9 @@ inert_dynamic_command_word() {
 # the shell decides at run time, so nobody read whether the flag holds, 4 when
 # an install keeps only the floor because no place in it reads as true (a
 # downgrade the caller records), and 8 when the command holds an npm install
-# verb in text the rewrite did not read as a command, or a command word the
-# shell computes (inert_bytes_left_unread, inert_dynamic_command_word); 0 when
+# verb in text the rewrite did not read as a command, an unread `npm` in a
+# word the shell computes, or a command word or npm's command that the shell
+# computes (inert_bytes_left_unread, inert_dynamic_command_word); 0 when
 # none applies. In a script word it cannot read (a double-quoted script with an
 # escape or a substitution in it, a script handed to `ksh -c`) and in a heredoc
 # body piped into another command, the flag goes where v2.17.2 put it
@@ -5584,8 +5585,9 @@ META_EOF
 # rewrite: a rewrite with no record made the post hook's "did not add" false.
 # ignore_scripts_unread says an install in it holds a word the shell decides
 # at run time (INERT_UNVERIFIED), an npm install verb is in text the rewrite
-# did not read as a command or the shell computes a command word
-# (INERT_UNREAD), or the rewrite is only the release's because no place was
+# did not read as a command, an `npm` it did not read is in a word the shell
+# computes, or the shell computes a command word or the word npm reads as its
+# command (INERT_UNREAD), or the rewrite is only the release's because no place was
 # read (INERT_RELEASE_ONLY): safedeps did not read all of the command as the
 # shell will. It is a reason for the post hook to add a warning, never
 # a permission to say the scripts did not run. A record that lacks it loses
@@ -5915,8 +5917,9 @@ if [[ "${GUARD_IS_CODEX}" != true ]]; then
       # No rewrite landed, and the command gets the release's own: the flag
       # at the end of a one-statement command. Also a recorded downgrade.
       [[ "${inert_first}" != *" release"* ]] || INERT_RELEASE_ONLY=true
-      # An npm install verb in text the rewrite did not read as a command, or
-      # a command word the shell computes (inert_bytes_left_unread,
+      # An npm install verb in text the rewrite did not read as a command, an
+      # unread `npm` in a word the shell computes, or a command word or npm's
+      # command that the shell computes (inert_bytes_left_unread,
       # inert_dynamic_command_word). Sent, and recorded.
       [[ "${inert_first}" != *" unread"* ]] || INERT_UNREAD=true
       ;;
@@ -5950,7 +5953,7 @@ if [[ "${INERT_UNVERIFIED}" == "true" ]]; then
   log_advisory "pre-guard: an npm install in this command holds a word the shell decides at run time (a tilde, a brace, \$x, \$(...), a glob or another expansion), which can set ignore-scripts, take the next word as its value, or end npm's options; safedeps put --ignore-scripts both right after the verb and after the last argument, and could not read whether npm keeps it true, so the install's scripts may run before the effect gate verifies. Command: ${COMMAND}"
 fi
 if [[ "${INERT_UNREAD}" == "true" ]]; then
-  log_advisory "pre-guard: text of this command that safedeps did not read as a command holds an npm install verb, or a command word in it is one the shell computes; safedeps put --ignore-scripts right after each npm install verb in a script word or a piped heredoc body that a blank follows or that ends its line, where v2.17.2 put it, and none elsewhere in that text. Command: ${COMMAND}"
+  log_advisory "pre-guard: text of this command that safedeps did not read as a command holds an npm install verb, or an npm inside a word the shell computes, or a command word or npm's command in it is one the shell computes; safedeps put --ignore-scripts right after each npm install verb in a script word or a piped heredoc body that a blank follows or that ends its line, where v2.17.2 put it, and none elsewhere in that text. Command: ${COMMAND}"
 fi
 
 # Write the record of this install for the post hook of the same call. It is
