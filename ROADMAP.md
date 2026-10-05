@@ -1016,6 +1016,27 @@ Review found more than one release could close, and these were stated rather tha
 
 On the release tree 1d43743, `npm test` ran all 14 batteries with 395 ok and 0 not ok on macOS and on Linux. macOS was an M1 MacBook (macOS 15.6.1, bash 3.2.57, npm 11.19.0): 3876s with two batteries at a time, load 1.5 to 19.3. Linux was the project's Debian 13 VM (bash 5.2.37, node v20.20.2, npm 10.8.2): 2628s, load 0.2 to 15.7, run in a root without the VM's root-owned `/node_modules`, which otherwise changes where npm says a manifest-less directory installs. The commits after 1d43743 change only documentation and one comment. Each change was cross-validated by another member before it merged, and the merged tree was re-read for agreement between README, ARCHITECTURE, SKILL and AGENTS before it shipped. That re-reading found the floor named as v2.17.2 when it is 7d66f8c, and the three downgraded shapes above are what it turned up.
 
+## v2.18.1 (in progress)
+
+### A pipe into a shell gets the same verdict beside an install as alone
+
+v2.18.0 said that beside a visible install a piped install "is refused fail-closed, as it always was with nothing beside it". That was false for several shapes. The check set the visible install aside first, then searched what was left more narrowly than it searches with nothing beside an install. With the visible spec approved, these passed on v2.18.0 with the piped install unchecked, while the same producer alone was denied:
+
+- a manager behind an escape, a format or a `cut`: `pip install requests==2.0.0 && printf '\npip install evil==6.6.6' | sh`, and the `\t`, `%s`, `xpip ... | cut -c2-`, `set -e\n...` and `echo -e` forms;
+- an install that a heredoc carries to the shell by a route other than a piped body: written to a file and then `cat s.sh | sh`, a file descriptor, a group, a subshell, a variable, or `tee`;
+- an install in a comment that the producer reads back through `$BASH_EXECUTION_STRING`, `$ZSH_EXECUTION_STRING` or `ps`;
+- the visible install's own spec, rewritten by `sed` from the exec string.
+
+Repairs in this cycle kept the setting aside and changed the search, and each one left a form through. The last set aside every word the manager's grammar reads as the install's own. It missed `pip install pip==24.0 && echo "${_%%=*} install evil==6.6.6" | sh`, because the shell hands the producer the install's last word as `$_`. A producer can read the command's own text through `$_`, the exec string, `ps` or a file, and the gate cannot list those routes. So nothing is set aside now. Beside a visible install the gate asks the pipe question it asks with nothing beside one, of the same text: the whole command, and each `sh -c`, `eval` and substitution script in it.
+
+The cost falls on commands that mix an install with an unrelated pipe into a shell, such as `npm install x && cat setup.sh | sh`. Such a command is now denied, and the reason says to run the two as separate commands.
+
+**Verified.** `scripts/test/consumer-forms.sh` holds the change. It writes each form beside a visible install with a marker before that install. Every row is checked for its verdict, and then an S1 loop checks it against the same bytes with the visible install switched off by `true `. The rows are the 32 piped installs from before, the ten forms that kept the visible install's verdict and are now denied, each with the reason the text cannot clear it, and 21 cells that passed beside an install and were denied alone: heredoc carriers, comment carriers, and the visible install's own words. Six rows have no pipe into a shell and keep their verdict. In all, the loop covers 69 rows. On 1bf5748, consumer-forms passed with 67 ok and 0 not ok on macOS (carenine, an M1 Max MacBook, bash 3.2, 846s, load 4.5 at the start and 5.3 at the end) and on Linux (the project's Debian VM, bash 5.2.37, 806s, load 3.2 at the start and 3.8 at the end). On Linux, smoke (61 ok), scan-contract (41) and shell-reading (4) passed too. Two mutations, each run on a copy, turn the battery red. With 68cc2f8's setting aside put back, 56 checks fail: every heredoc and comment row, the five own-word rows the pipe rule denies, the ten flipped rows, and the S1 loop on 28 rows. With the pipe question off beside a visible install, 122 checks fail, the S1 loop on 61 of its 69 rows.
+
+On macOS, smoke (61 ok), scan-contract (41) and shell-reading (4) passed as well. The quick scan-failure census ran 2,971 failing runs there and counted zero weakened, mislabeled, error, after-gate, pending-on-deny, unmarked, unlisted and unstable (load 4.5 at the start and 4.8 at the end). `scripts/measure/scan-verdict-replay.sh aa77fac --random 200 --seed 1001` moved none of 438 verdicts, the false-positive category included. Its control, a scan that blanks nothing, moved 1, so the replay can fail (an M1 MacBook, load 4.7 at the start and 5.2 at the end).
+
+---
+
 ## v3 (future)
 
 ### Ledger tamper resistance
