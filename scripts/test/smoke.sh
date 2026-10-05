@@ -1041,48 +1041,46 @@ pass "an npm install the rewrite did not read is recorded as unread, whatever ki
 # got no rewrite at all, and `npm ci eval "\npm"` ran its postinstall where the
 # release's rewrite ran none (validator round 4: six forms, and two from its
 # seeded fuzz). Each now keeps the release's rewrite, the flag at the end,
-# with the flags read for the visible install, and is recorded as one whose
-# flag nobody read. The release floor check in run_hook_command judges each
-# against the release's own rewrite.
+# with the flags read for the visible install. The release floor check in
+# run_hook_command judges each against the release's own rewrite.
+#
+# Each is one npm install whose operands spell `eval` or `sh -c`: the shell
+# runs no eval and no sh there. Each keeps its rewrite, the flags read for it
+# and the release's end flag. It is recorded where a rule input applies: a
+# command word the shell computes in a script the command hands on (`$(echo)
+# npm`), or a word the shell decides at run time (`"$HOME"`). The others were
+# recorded while the record listed text that names npm after an `eval` or a
+# `sh -c`; with no npm install verb left in text the rewrite did not read as a
+# command, they are not, and npm reads the flag in every one.
 release_only_safe=$(mktemp -d "${tmp_root}/safe-release-only.XXXXXX")
 SAFEDEPS_HOME="${release_only_safe}" lib/ledger/ledger.sh approve npm left-pad 1.3.0 1.3.0 smoke >/dev/null
-for inert_in in \
-  'npm install left-pad@1.3.0 eval "a\b npm"' \
-  'npm install left-pad@1.3.0 eval "npm\ x"' \
-  'npm install left-pad@1.3.0 eval "$(echo) npm"' \
-  'npm install left-pad@1.3.0 sh -c "\npm"' \
-  'npm install left-pad@1.3.0 --userconfig=eval "x\y npm"' \
-  'npm ci left-pad@1.3.0 sh -c "x\y npm" false "$HOME"' \
-  'npm install x\ y -- "$HOME" sh -c "x\y npm"'
+for row in \
+  '0|npm ci eval "\npm"' \
+  '0|npm install left-pad@1.3.0 eval "a\b npm"' \
+  '0|npm install left-pad@1.3.0 eval "npm\ x"' \
+  '1|npm install left-pad@1.3.0 eval "$(echo) npm"' \
+  '0|npm install left-pad@1.3.0 sh -c "\npm"' \
+  '0|npm install left-pad@1.3.0 --userconfig=eval "x\y npm"' \
+  '1|npm ci left-pad@1.3.0 sh -c "x\y npm" false "$HOME"' \
+  '0|npm install x\ y -- "$HOME" sh -c "x\y npm"'
 do
+  release_only_want="${row%%|*}" inert_in="${row#*|}"
   rm -rf "${release_only_safe}/pending"
-  release_only_before=$(grep -cE 'could not place --ignore-scripts by reading|safedeps did not read as a command holds an npm install verb' "${release_only_safe}/advisory.log" 2>/dev/null || true)
   inert_out=$(run_hook_command "${tmp_root}/home-release-only" "${release_only_safe}" "${inert_in}")
   release_only_got=$(jq -r '.hookSpecificOutput.updatedInput.command // ""' <<< "${inert_out}")
   [[ "${release_only_got}" == *" --ignore-scripts" && "${release_only_got}" != "${inert_in}" ]] \
-    || fail "an install no place can be read in keeps the release's rewrite: $(printf '%q' "${inert_in}") (got: ${inert_out:0:240})"
-  release_only_after=$(grep -cE 'could not place --ignore-scripts by reading|safedeps did not read as a command holds an npm install verb' "${release_only_safe}/advisory.log" 2>/dev/null || true)
-  (( ${release_only_after:-0} > ${release_only_before:-0} )) \
-    || fail "an install no place can be read in is recorded as one whose flag nobody read: $(printf '%q' "${inert_in}")"
+    || fail "an npm install whose operands spell eval or sh -c keeps its rewrite: $(printf '%q' "${inert_in}") (got: ${inert_out:0:240})"
   release_only_sid=$(jq -r '.snapshot_id' "${release_only_safe}/pending/"*.json 2>/dev/null) || release_only_sid=""
-  jq -e '.ignore_scripts_injected == true and .ignore_scripts_unread == true' "${release_only_safe}/snapshots/${release_only_sid}_meta.json" >/dev/null 2>&1 \
-    || fail "an install no place can be read in is recorded with the unread warning: $(printf '%q' "${inert_in}")"
+  release_only_unread=$(jq -r '.ignore_scripts_unread' "${release_only_safe}/snapshots/${release_only_sid}_meta.json" 2>/dev/null) || release_only_unread=""
+  if [[ "${release_only_want}" == 1 ]]; then
+    [[ "${release_only_unread}" == true ]] \
+      || fail "an npm install with a computed or run-time word is recorded with the unread warning: $(printf '%q' "${inert_in}") (meta: ${release_only_unread:-none})"
+  else
+    [[ "${release_only_unread}" == false ]] \
+      || fail "an npm install whose operands spell eval or sh -c and npm, with nothing the shell decides, is not recorded as unread: $(printf '%q' "${inert_in}") (meta: ${release_only_unread:-none})"
+  fi
 done
-pass "an install no place can be read in keeps the release's rewrite, recorded as one whose flag nobody read"
-# `npm ci eval "\npm"` is one npm install whose operands are `eval` and
-# `\npm`: the shell runs no eval there. It keeps the flags the rewrite reads
-# for it and the release's end flag, and, with no npm install verb left in the
-# text the rewrite did not read as a command, it is not recorded. It was
-# recorded while the record listed text that names npm; that record was noise.
-release_only_safe=$(mktemp -d "${tmp_root}/safe-release-operand.XXXXXX")
-inert_in='npm ci eval "\npm"'
-inert_out=$(run_hook_command "${tmp_root}/home-release-operand" "${release_only_safe}" "${inert_in}")
-release_only_got=$(jq -r '.hookSpecificOutput.updatedInput.command // ""' <<< "${inert_out}")
-[[ "${release_only_got}" == 'npm ci --ignore-scripts eval "\npm" --ignore-scripts' ]] \
-  || fail "an npm install whose operands spell eval keeps its rewrite: $(printf '%q' "${inert_in}") (got: ${inert_out:0:240})"
-! grep -qE 'could not place --ignore-scripts by reading|safedeps did not read as a command holds an npm install verb' "${release_only_safe}/advisory.log" 2>/dev/null \
-  || fail "an npm install whose operands spell eval and npm is not recorded as unread: $(printf '%q' "${inert_in}")"
-pass "an npm install whose operands spell eval and npm keeps its rewrite and is not recorded"
+pass "an npm install whose operands spell eval or sh -c keeps its rewrite, and is recorded only where a word is computed or decided at run time"
 
 # The rewrite changes the text every shell reads, so it is made only where
 # bash, zsh and dash agree where the npm installs are. In I2 and I3 the
