@@ -338,11 +338,11 @@ recognized_dependency_install() {
 # matches each line of its input on its own, as it matches a text of one
 # line on a here-string, so line k of the input answers for text k-1. A text
 # that holds a newline is not a line: 2. A text with a byte past ASCII is 2
-# too, so the input grep reads is ASCII: where a byte is not valid in the
-# locale, GNU grep reads the input as binary from that point on and prints
-# "binary file matches" in place of the numbered lines, and the texts after
-# it would read as no. A grep that does not answer, or prints anything but
-# numbered lines, makes every text 2.
+# too, so the input grep reads, and the lines it prints, are ASCII: where a
+# byte is not valid in the locale, GNU grep reads the input as binary from
+# that point on and prints "binary file matches" in place of the numbered
+# lines, and the texts after it would read as no. A grep that does not
+# answer, or prints anything but numbered lines, makes every text 2.
 #
 # Nothing here marks the reading. A text the reader reaches with a 2 is asked
 # alone, and that call marks the reading as it always did, so a grep that
@@ -350,38 +350,28 @@ recognized_dependency_install() {
 # never reaches is never asked. scripts/test/statement-batch.sh compares
 # this, asked alone where it says 2, with recognized_dependency_install.
 recognized_dependency_install_each() {
-  local i n=${#SAFEDEPS_RDI_IN[@]} all="" hits="" hit rc=0
+  local i n=${#SAFEDEPS_RDI_IN[@]} all="" flags="" hits="" hit rc=0
   SAFEDEPS_RDI_ANS=()
   (( n > 0 )) || return 0
-  for (( i = 0; i < n; i++ )); do
-    SAFEDEPS_RDI_ANS[i]=1
-    if [[ "${SAFEDEPS_RDI_IN[i]}" == *$'\n'* ]]; then
-      SAFEDEPS_RDI_ANS[i]=2
-      all+=$'\n'
-    else
-      all+="${SAFEDEPS_RDI_IN[i]}"$'\n'
-    fi
-  done
-  all="${all%$'\n'}"
-  hits=$(LC_ALL=C grep -n $'[\x80-\xff]' <<< "${all}") || rc=$?
-  if (( rc > 1 )); then
+  # Which texts one line can stand for, one character each, read in the C
+  # locale, where a pattern compares bytes. In a UTF-8 locale bash reads an
+  # invalid byte together with the bytes after it: `read` took a newline
+  # after one as part of the line, so two texts read as one and the second
+  # reached grep unflagged.
+  flags=$(LC_ALL=C
+    hb=$'[\x80-\xff]'
+    for t in "${SAFEDEPS_RDI_IN[@]}"; do
+      if [[ "${t}" == *$'\n'* || "${t}" == *${hb}* ]]; then printf 2; else printf 1; fi
+    done) || flags=""
+  if (( ${#flags} != n )); then
     for (( i = 0; i < n; i++ )); do SAFEDEPS_RDI_ANS[i]=2; done
     return 0
   fi
-  if [[ -n "${hits}" ]]; then
-    all=""
-    while IFS= read -r hit; do
-      hit="${hit%%:*}"
-      [[ "${hit}" =~ ^[0-9]+$ ]] && (( hit >= 1 && hit <= n )) || { for (( i = 0; i < n; i++ )); do SAFEDEPS_RDI_ANS[i]=2; done; return 0; }
-      SAFEDEPS_RDI_ANS[hit - 1]=2
-    done <<< "${hits}"
-    for (( i = 0; i < n; i++ )); do
-      if (( SAFEDEPS_RDI_ANS[i] == 2 )); then all+=$'\n'; else all+="${SAFEDEPS_RDI_IN[i]}"$'\n'; fi
-    done
-    all="${all%$'\n'}"
-  fi
-  rc=0
-  hits=$(grep -nEi "${SAFEDEPS_INSTALL_PATTERN}" <<< "${all}") || rc=$?
+  for (( i = 0; i < n; i++ )); do
+    SAFEDEPS_RDI_ANS[i]="${flags:i:1}"
+    if [[ "${SAFEDEPS_RDI_ANS[i]}" == 1 ]]; then all+="${SAFEDEPS_RDI_IN[i]}"$'\n'; else all+=$'\n'; fi
+  done
+  hits=$(grep -nEi "${SAFEDEPS_INSTALL_PATTERN}" <<< "${all%$'\n'}") || rc=$?
   if (( rc > 1 )) || { (( rc == 0 )) && [[ -z "${hits}" || $'\n'"${hits}" =~ $'\n'[^0-9] ]]; }; then
     for (( i = 0; i < n; i++ )); do SAFEDEPS_RDI_ANS[i]=2; done
     return 0
