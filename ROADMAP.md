@@ -1016,6 +1016,42 @@ Review found more than one release could close, and these were stated rather tha
 
 On the release tree 1d43743, `npm test` ran all 14 batteries with 395 ok and 0 not ok on macOS and on Linux. macOS was an M1 MacBook (macOS 15.6.1, bash 3.2.57, npm 11.19.0): 3876s with two batteries at a time, load 1.5 to 19.3. Linux was the project's Debian 13 VM (bash 5.2.37, node v20.20.2, npm 10.8.2): 2628s, load 0.2 to 15.7, run in a root without the VM's root-owned `/node_modules`, which otherwise changes where npm says a manifest-less directory installs. The commits after 1d43743 change only documentation and one comment. Each change was cross-validated by another member before it merged, and the merged tree was re-read for agreement between README, ARCHITECTURE, SKILL and AGENTS before it shipped. That re-reading found the floor named as v2.17.2 when it is 7d66f8c, and the three downgraded shapes above are what it turned up.
 
+## v2.18.2 — in progress
+
+### Where a command starts is an event, not a byte
+
+In v2.18.0 the recognizers found a statement start with a regex: a separator, then a chain of the reserved words that may stand before a command. A chain cannot see the shell state that puts a command there, so a function body (`f() { pip install evil==1.0.0; }; f`), a function with more than one name, `time -p {`, `coproc NAME {`, zsh's short forms (`for i (1) {`, `repeat 1 {`, `} always {`), `for ((i=0;i<1;i++)) {` and a redirection before the command (`2>/dev/null pip install ...`) each passed with no verdict. This release reads where a command starts in the lexer, which walks the words with each shell's grammar state (ARCHITECTURE.md has the rules), and holds the forms in `scripts/test/consumer-forms.sh` with what each shell ran.
+
+The walk's first design handed its answer to the recognizers as bytes: the stmts view wrote a `;` over the byte before each start. A start glued to the token before it had no byte of its own. Three review rounds found three such places, and each repair borrowed one more byte of a neighbouring token (a case pattern's `)`, a head's `)`, zsh's glued `{`). The fourth could not be borrowed: a redirection, an assignment or a precommand glued to a reserved word, `!`, a head's close or zsh's `{`, as in `if true; then>/dev/null pip install evil==1.0.0; fi`. The prefixes were removed by a second lexing of the changed text, which found `thenpip`. A table generated from the simple-command grammar found 403 forms of this kind that some shell runs and the gate passed with no record, 108 of them in all four macOS shells. main, asked about 111 of them, passed each.
+
+- **The walk hands each start on as an event between two bytes.** The recognizers read one lexing of the text (the recognize view), the statement split cuts at the events, the pass that sets a visible install aside before the pipe check reads each start's statement, and the bash reading compares the event sets of its three walks for `DIVERGE`. Every rule that borrowed a byte is gone.
+- **Where a word starts is the walk's answer.** A descriptor word or a subscript assignment after zsh's glued `{` starts where the walk starts the command. zsh and dash read one digit before a redirection operator as its descriptor and bash any number, so zsh runs `repeat 12>&1 pip install x` twelve times.
+- **zsh's `&!` ends a command,** so `true&!pip install x` is read in the zsh reading.
+- **A zsh precommand modifier where the other shells read the command** (`exec -- noglob pip install x`) makes the bash reading say `DIVERGE`. A second lexing used to say it by accident.
+- **The redirection grid's first places are generated** from the same grammar (`FIRSTS` in `scripts/measure/redirection-grid.sh`, which `scripts/measure/first-place-grid.sh` reads), not four picked by hand.
+- **Two payload grammars stay a stated boundary,** pinned as passes in `scripts/test/consumer-forms.sh`: an `env -S` string split by env(1)'s own rules, and code in a zsh glob qualifier (`*(e:...:)`). A later plan reads them.
+- **Three npm forms that only one shell runs are `UNDECIDED` instead of rewritten:** `>/dev/null(N) npm install x` and `>/dev/(null) npm install x` (zsh alone) and `{fd}>/dev/null npm install x` (bash 5 alone). The other shells fail to parse them or run no install, so the readings put the install in different places. The rewrite they used to get came from a second lexing that read the leftover `(N)` as a subshell at a command start, and from a zsh reading of `{fd}` that disagreed with its own walk. Fail-closed.
+- **`TIME pip install x`** runs /usr/bin/time on a macOS volume, which ignores case. The start pattern used to read `time` in any case; the walk read it only in lower case, so the merge with main left `TIME` a command name. env, command and time are now read as the grammar reads a manager's name, the last part of a path in any case.
+
+### Verification
+
+Every run went through a test host's queue, never on the author's machine. macOS: two M1 MacBooks (macOS 15, bash 3.2.57), load 4 to 17. Linux: the project's Debian 13 VM (bash 5.2.37, mawk 1.3.4), load 1.7 to 8, with another run beside it on the VM's second slot.
+
+- **Batteries on the final code (0d05321).** macOS: scan-contract 54 ok and 0 not ok, consumer-forms 82/0, shell-reading 4/0, smoke 61/0, manager-variants 3/0, hook-entry 11/0, and census --quick with 0 weakened, mislabeled, error, after-gate, pending-on-deny, idle-mode, unmarked, unlisted and unstable. Linux: scan-contract 54/0, shell-reading 4/0, smoke 61/0, manager-variants 3/0, hook-entry 11/0, census --quick with the same zeros, and CI's shellcheck list. consumer-forms on Linux ran at 58e8466, 82/0; the two commits after it stop a redirection inside a head no shell parses from starting a command, and add two scan-contract rows.
+- **The event contract** checks 10715 events of 707 inputs (217 shell forms, 290 first-place forms, 200 random) in all three readings. Its first full run found five places where a reader disagreed with the walk, each fixed (f4d9d56), and the Linux random sequence found a sixth (4e91f25).
+- **Mutations, each on a copy:** putting no `;` in at a bare start, cutting no statement there, comparing no event sets for `DIVERGE`, letting the descriptor reading ignore the walk's starts, and dropping zsh's `&!` each turn scan-contract red. The 75b8130 code with the new rows is red at the first start row.
+- **The first-place table for npm** (`npm ci` behind 8 first places in every production, 1160 forms): of the 841 forms some macOS shell runs, 601 are rewritten, 226 are `UNDECIDED`, and 14 pass. The 14 are an npm inside backticks, and each is recorded in `advisory.log` as a downgrade. The 32 data forms pass. This was measured on a tree before f4d9d56, which turns the zsh `{fd}` forms from rewritten to `UNDECIDED`.
+- **The grid**: 8438 forms, 7047 run by some shell column, 450 data forms. Judged so far on the final code, in parts of the committed record: on macOS 4219 forms (two of four quarters), each of the 3290 a shell runs denied as an install that names the package and each of the 241 data forms passed, and in 18482 shell runs each reading showed the line its own shell ran; on Linux 3166 forms, 2657 and 156 the same way. No part found a form a shell runs and the gate let through. The rest of the grid was stopped to free the test hosts for the v2.18.1 release and runs after it.
+- **Replay against 75b8130** (the 310 forms of scan-corpus, with 200 and 300 random commands, seeds 9191 and 4242): 510 of 510 and 610 of 610 verdicts identical, at 58e8466. The control, a scan that blanks nothing, moves 1 of 510, so the replay can fail.
+- **Cost** (`scripts/measure/scan-cost.sh`, Linux VM, deadline off, best of 3, two rounds each; 75b8130 then 0d05321, in seconds). The recognizers lex their text once now, where they lexed it twice:
+
+| size | gate quiet | gate loud | gate split |
+|---|---|---|---|
+| 8KB | 0.338–0.350 → 0.313–0.321 | 1.873 → 1.591–1.597 | 5.534–5.640 → 4.547–4.565 |
+| 32KB | 0.741–0.770 → 0.642–0.656 | 3.239–3.292 → 2.828–2.866 | 9.473–9.642 → 8.496–8.539 |
+
+The lexer alone (scan) is unchanged: 0.028–0.033s at 8KB and 0.057–0.066s at 32KB in both trees.
+
 ## v3 (future)
 
 ### Ledger tamper resistance
