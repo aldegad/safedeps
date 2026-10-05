@@ -5461,16 +5461,46 @@ guard_segment_ecosystem() {
 # names the command for the npm project context and for messages.
 guard_detect_ecosystem() {
   local cmd="$1"
-  local seg eco
+  local seg eco all="" hits hit at
+  local -a segs=()
 
   # The statements are cut on the recognize view, where every statement start
-  # is a separator, so a cut at `;` `|` `&` is a cut between statements.
+  # is a separator, so a cut at `;` `|` `&` is a cut between statements. A
+  # segment is a line of that cut (read reads one line), so a statement over
+  # several lines is several segments.
   while IFS= read -r seg; do
     [[ "${seg}" =~ [^[:space:]] ]] || continue
-    judge_grep -qEi "${SAFEDEPS_INSTALL_PATTERN}" <<< "${seg}" || continue
-    eco=$(guard_segment_ecosystem "${seg}")
-    [[ -n "${eco}" ]] && { printf '%s' "${eco}"; return 0; }
+    segs+=("${seg}")
   done < <(command_candidate_start_texts "${cmd}" | tr ';|&' '\n')
+  (( ${#segs[@]} > 0 )) || { printf ''; return 0; }
+  # One grep for every segment instead of one each: a segment is a line with
+  # no newline in it, so grep line k is segs[k-1], and grep matches each line
+  # on its own, as it matched each segment on a here-string. The matches are
+  # asked in their order, as the loop asked them. A grep that does not
+  # answer marks the reading (judge_grep) and matches nothing, as each grep
+  # in the loop did. Its output is read whole before the first answer: left
+  # in a pipe, a grep still writing when the loop returned died of SIGPIPE
+  # and judge_grep marked that as a failed reading. Where grep calls the
+  # input binary it prints no numbered lines, and may match differently
+  # than on one segment, so then every segment is asked on its own, as
+  # before.
+  for seg in "${segs[@]}"; do all+="${seg}"$'\n'; done
+  hits=$(judge_grep -nEi "${SAFEDEPS_INSTALL_PATTERN}" <<< "${all%$'\n'}") || hits=""
+  if [[ -n "${hits}" && $'\n'"${hits}" =~ $'\n'[^0-9] ]]; then
+    for seg in "${segs[@]}"; do
+      judge_grep -qEi "${SAFEDEPS_INSTALL_PATTERN}" <<< "${seg}" || continue
+      eco=$(guard_segment_ecosystem "${seg}")
+      [[ -n "${eco}" ]] && { printf '%s' "${eco}"; return 0; }
+    done
+    printf ''
+    return 0
+  fi
+  while IFS= read -r hit; do
+    at="${hit%%:*}"
+    [[ "${at}" =~ ^[0-9]+$ ]] || continue
+    eco=$(guard_segment_ecosystem "${segs[at - 1]}")
+    [[ -n "${eco}" ]] && { printf '%s' "${eco}"; return 0; }
+  done <<< "${hits}"
   printf ''
 }
 

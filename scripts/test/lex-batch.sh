@@ -24,6 +24,10 @@
 # inputs, in every reading, and compares each answer, and what replaying it
 # appends to the DIVERGE, mark and flag files, with asking it alone.
 #
+# guard_detect_ecosystem asks one grep about every segment of a command.
+# Section 5 compares it with the grep per segment it replaced, on forms that
+# hold newlines inside statements, with grep working and with it failing.
+#
 # A batch that falls back to reading one text at a time gives the same answers
 # by construction, so it would pass the comparison while losing the reason the
 # batch exists: the battery also requires every batch to have run as one.
@@ -352,6 +356,81 @@ done
 printf '# %d questions asked both ways (%d installs), %d differ\n' "${asked}" "${installs}" "${differ}"
 (( differ == 0 )) && pass "the batched install question answers, and writes, as the question asked alone" \
   || fail "the batched install question answers, and writes, as the question asked alone"
+
+# --- 5. the ecosystem of the first install, one grep for every segment ------
+
+# guard_detect_ecosystem asks one grep about every segment and maps grep's
+# line numbers back to segments. The loop it replaced asked one grep per
+# segment; it is kept here, as it was, to compare with. A segment is a line,
+# so a statement over several lines is several segments: the forms below put
+# newlines inside segments on purpose (a heredoc, quotes, a continuation, a
+# script), where a mapping by statement would go wrong.
+ecosystem_alone() {
+  local cmd="$1"
+  local seg eco
+  while IFS= read -r seg; do
+    [[ "${seg}" =~ [^[:space:]] ]] || continue
+    judge_grep -qEi "${SAFEDEPS_INSTALL_PATTERN}" <<< "${seg}" || continue
+    eco=$(guard_segment_ecosystem "${seg}")
+    [[ -n "${eco}" ]] && { printf '%s' "${eco}"; return 0; }
+  done < <(command_candidate_start_texts "${cmd}" | tr ';|&' '\n')
+  printf ''
+}
+eco_both() {
+  # <fn> <text>: the answer and the three files, as one string.
+  local dir="${TMP_ROOT}/eco.$1" out
+  mkdir -p "${dir}"
+  : > "${dir}/d"; : > "${dir}/u"; : > "${dir}/m"
+  out=$(SAFEDEPS_LEX_DIVERGE="${dir}/d" SAFEDEPS_LEX_FLAGS="${dir}/u" SAFEDEPS_SCAN_MARK="${dir}/m" "$1" "$2"; printf 'X')
+  ECO="${out%X}|$(cat "${dir}/d")|$(cat "${dir}/u")|$(cat "${dir}/m")"
+}
+ECO_FORMS=(
+  $'echo a\nnpm install left-pad@1.0.0'
+  $'echo one\necho two\npip install evil==1.0\nnpm ci'
+  $'cat <<EOF\nnpm install y@1\nEOF\npip install z==1'
+  $'echo "a\nb" ; yarn add c@1 | tee log'
+  $'npm run x && \\\n  pip install q==2'
+  $'sh -c \'echo a\npip install q==1\'; echo done'
+  $'x=1\n\ny=2; gem install rake -v 13.0.0'
+  $'echo "npm install no"\ncargo install c@1\nnpm i d@1'
+  $'f() {\n  echo hi\n}\ngo install a@v1'
+  $'true\n\n\n\nmvn -Dartifact=g:a:1 dependency:get'
+)
+eco_inputs=("${ECO_FORMS[@]}")
+for (( k = 0; k < n; k += 7 )); do eco_inputs+=("${INPUTS[k]}"); done
+asked=0 differ=0 named=0
+for reading in bash zsh dash; do
+  SAFEDEPS_READING="${reading}"
+  for text in "${eco_inputs[@]}"; do
+    eco_both ecosystem_alone "${text}"; a="${ECO}"
+    eco_both guard_detect_ecosystem "${text}"; b="${ECO}"
+    asked=$(( asked + 1 ))
+    [[ "${a}" == "|"* ]] || named=$(( named + 1 ))
+    if [[ "${a}" != "${b}" ]]; then
+      differ=$(( differ + 1 ))
+      (( differ > 5 )) || printf '# differs: %s %q: alone %q, batched %q\n' "${reading}" "${text:0:60}" "${a:0:60}" "${b:0:60}"
+    fi
+  done
+done
+printf '# %d commands asked both ways (%d named an ecosystem), %d differ\n' "${asked}" "${named}" "${differ}"
+(( differ == 0 )) && pass "one grep for every segment names the ecosystem, and writes, as a grep per segment" \
+  || fail "one grep for every segment names the ecosystem, and writes, as a grep per segment"
+
+# With every grep failing, both mark the reading and name nothing.
+mkdir -p "${TMP_ROOT}/failgrep"
+printf '#!/bin/sh\nexit 2\n' > "${TMP_ROOT}/failgrep/grep"
+chmod +x "${TMP_ROOT}/failgrep/grep"
+SAFEDEPS_READING=bash differ=0
+for text in "${ECO_FORMS[@]}"; do
+  PATH="${TMP_ROOT}/failgrep:${PATH}" eco_both ecosystem_alone "${text}"; a="${ECO}"
+  PATH="${TMP_ROOT}/failgrep:${PATH}" eco_both guard_detect_ecosystem "${text}"; b="${ECO}"
+  if [[ "${a%%|*}" != "${b%%|*}" || "${a##*|}" != *failed* || "${b##*|}" != *failed* ]]; then
+    differ=$(( differ + 1 ))
+    printf '# with grep failing: %q: alone %q, batched %q\n' "${text:0:60}" "${a:0:60}" "${b:0:60}"
+  fi
+done
+(( differ == 0 )) && pass "with grep failing, both name no ecosystem and both mark the reading" \
+  || fail "with grep failing, both name no ecosystem and both mark the reading"
 
 (( FAILED == 0 )) || exit 1
 printf 'lex-batch battery: all checks passed\n'
