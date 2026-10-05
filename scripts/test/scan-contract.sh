@@ -92,7 +92,8 @@ eval "${shipped_src}"
 declare -F command_scan_text > /dev/null || fail "extracted command_scan_text did not define the function"
 # The payload readers: the lexer prints where each payload lies, and these cut
 # the text (the payload records below).
-payload_src=$(grep '^SAFEDEPS_PAYLOAD_BAD_CODE=' "${GUARD}")
+payload_src=$(grep '^SAFEDEPS_PAYLOAD_BAD_CODE=' "${GUARD}") \
+  || fail "SAFEDEPS_PAYLOAD_BAD_CODE not found in ${GUARD} (renamed? then update this battery)"
 for fn in guard_mark_reading_failed command_start_text lex_payload_build lex_payloads read_payload_scripts \
     extract_shell_c_payloads extract_eval_payloads extract_command_substitution_payloads \
     command_payload_raw_texts command_payload_start_texts command_candidate_start_texts; do
@@ -783,24 +784,34 @@ pass "builder: a unit outside the text, a code outside 1-127 or a unit of no kin
 # and bash 3.2 runs a command substitution under the caller's `set -e`: one
 # that ended non-zero there ended the subshell, and every text after it read
 # as no install (a prototype of the change that made these records numbers).
-# Scripts five deep reach every reader's depth limit.
+# Scripts five deep reach every reader's depth limit. The calls run in a bash
+# of their own: a subshell here would run inside this battery's `|| true`,
+# where bash ignores `set -e` for everything in it, and the check could not
+# fail (a mutated reader that ended non-zero passed it).
 deep="eval eval eval eval eval 'x=\$(pip i)'"
-setE_out=$(
-  set -euo pipefail
-  PAYLOADS=()
-  read_payload_scripts "${deep}" E
-  extract_shell_c_payloads "sh -c 'sh -c \"sh -c ls\"'"
-  extract_eval_payloads "${deep}"
-  extract_command_substitution_payloads "${deep}"
-  command_payload_raw_texts "${deep}"
-  command_payload_start_texts "${deep}" > /dev/null
-  command_candidate_start_texts "${deep}" > /dev/null
-  lex_payloads "${deep}" cscripts
-  lex_payloads "${deep}" view-of-no-kind
-  lex_payload_build x zz
-  printf 'finished'
-) || true
+setE_script="set -euo pipefail
+${shipped_src}
+${payload_src}
+source '${ROOT_DIR}/lib/install-grammar.sh'
+SAFEDEPS_READING=bash
+deep=$(printf '%q' "${deep}")
+PAYLOADS=()
+read_payload_scripts \"\${deep}\" E
+extract_shell_c_payloads \"sh -c 'sh -c \\\"sh -c ls\\\"'\"
+extract_eval_payloads \"\${deep}\"
+extract_command_substitution_payloads \"\${deep}\"
+command_payload_raw_texts \"\${deep}\"
+command_payload_start_texts \"\${deep}\" > /dev/null
+command_candidate_start_texts \"\${deep}\" > /dev/null
+lex_payloads \"\${deep}\" cscripts
+lex_payloads \"\${deep}\" view-of-no-kind
+lex_payload_build x zz
+"
+setE_out=$(bash -c "${setE_script}printf finished" 2>/dev/null) || true
 [[ "${setE_out}" == finished ]] || fail "a payload reader ended non-zero under set -e"
+# The control: a reader that ends non-zero stops the same script there.
+setE_out=$(bash -c "${setE_script}ends_nonzero() { (( 0 )) && :; }; ends_nonzero; printf finished" 2>/dev/null) || true
+[[ "${setE_out}" != finished ]] || fail "control: a reader that ends non-zero under set -e stops the script, so the check above can fail"
 PAYLOADS=()
 command_payload_raw_texts "sh -c 'x=\$(pip i)'"
 [[ " $(printf '%q ' ${PAYLOADS[@]+"${PAYLOADS[@]}"})" == *" pip\ i "* ]] \
