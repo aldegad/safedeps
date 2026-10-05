@@ -2,13 +2,19 @@
 # safedeps: a reader that asks about every statement at once answers as the
 # reader that asked about each.
 #
-# guard_detect_ecosystem asks one grep about every segment of a command and
-# maps grep's line numbers back to the segments. It replaced a grep per
-# segment, which made the gate's cost grow with the number of statements.
-# This battery keeps that loop, as it was, and compares the two on the
-# committed corpora, seeded random commands, and forms that hold newlines
-# inside statements, in every reading, with grep working and with it
-# failing. Mutations of the mapping (line k read as segment k+1) turn it red.
+# recognized_dependency_install_each asks the recognizers' question of many
+# texts with one grep and maps grep's line numbers back to the texts; the
+# landing, the spec extractor and the ecosystem detection ask it of every
+# statement at once, where each asked one grep per statement, which made the
+# gate's cost grow with the number of statements. Section 1 compares it,
+# with the texts it leaves to the reader asked alone, against
+# recognized_dependency_install asked of each text: the statements of the
+# committed corpora and seeded random commands as the readers hand them over,
+# whole commands with newlines in them, and texts with bytes past ASCII, in
+# two batch orders, with grep working and with it failing. Section 2 keeps
+# the ecosystem loop as it was and compares guard_detect_ecosystem with it on
+# forms that hold newlines inside statements. A copy whose mapping is off by
+# one line turns both red.
 #
 # Usage: scripts/test/statement-batch.sh
 set -euo pipefail
@@ -65,13 +71,107 @@ while IFS= read -r -d '' c; do INPUTS+=("${c}"); done < <(
 printf '# %d inputs\n' "${#INPUTS[@]}"
 n=${#INPUTS[@]}
 
-
 # Every function of the guard (definitions only) and the grammar it reads.
 # shellcheck source=../../lib/install-grammar.sh
 source lib/install-grammar.sh
 eval "$(sed -n -e '/^[a-z_][a-z_0-9]*() {$/,/^}$/p' -e '/^SAFEDEPS_INSTALL_PATTERN=/p' "${GUARD}")"
 
-# --- the ecosystem of the first install, one grep for every segment ------
+# --- 1. one grep for many texts answers as one grep per text ------------------
+
+# The texts: every input whole, every line of every input, and each
+# statement's recognize bytes as the landing and the extractor read them
+# (the pieces view's fifth field), then texts with bytes past ASCII, which
+# GNU grep reads as binary in a UTF-8 locale where they are not valid.
+TEXTS=()
+for c in "${INPUTS[@]}"; do
+  TEXTS+=("${c}")
+  while IFS= read -r line; do TEXTS+=("${line}"); done <<< "${c}"
+done
+SAFEDEPS_READING=bash
+for (( k = 0; k < n; k += 3 )); do
+  pieces=$(shell_lex "${INPUTS[k]}" pieces "safedeps:extract_pieces" 2> /dev/null) || pieces=""
+  while IFS=$'\037' read -r _ _ _ _ prec; do TEXTS+=("${prec}"); done <<< "${pieces}"
+done
+TEXTS+=($'npm install x\xe9' $'echo \xe9; npm install x' $'npm \xc4\xb1nstall x' $'npm in\xc5\xbftall x' \
+  $'pip install \xe2\x84\xaaafka==1' $'\xff\xfe' "" " " $'npm install x\nnpm ci' $'echo a\n' "npm install x")
+printf '# %d texts\n' "${#TEXTS[@]}"
+
+# rdi_alone <text>: recognized_dependency_install and the mark it leaves.
+# rdi_batch: the batch over SAFEDEPS_RDI_IN, each 2 asked alone in order, as
+# the readers do; RDI_OUT[i] the answer and RDI_MARKED whether the reading
+# was marked.
+mark_file="${TMP_ROOT}/rdi.mark"
+rdi_batch() {
+  local i
+  : > "${mark_file}"
+  RDI_OUT=()
+  SAFEDEPS_SCAN_MARK="${mark_file}" recognized_dependency_install_each
+  for (( i = 0; i < ${#SAFEDEPS_RDI_IN[@]}; i++ )); do
+    case "${SAFEDEPS_RDI_ANS[i]:-x}" in
+      0|1) RDI_OUT[i]="${SAFEDEPS_RDI_ANS[i]}" ;;
+      2) RDI_OUT[i]=0; SAFEDEPS_SCAN_MARK="${mark_file}" recognized_dependency_install "${SAFEDEPS_RDI_IN[i]}" || RDI_OUT[i]=1 ;;
+      *) RDI_OUT[i]="missing" ;;
+    esac
+  done
+  RDI_MARKED=$([[ ! -s "${mark_file}" ]] || printf M)
+}
+rdi_alone_all() {
+  local i
+  : > "${mark_file}"
+  ALONE_OUT=()
+  for (( i = 0; i < ${#SAFEDEPS_RDI_IN[@]}; i++ )); do
+    ALONE_OUT[i]=0
+    SAFEDEPS_SCAN_MARK="${mark_file}" recognized_dependency_install "${SAFEDEPS_RDI_IN[i]}" || ALONE_OUT[i]=1
+  done
+  ALONE_MARKED=$([[ ! -s "${mark_file}" ]] || printf M)
+}
+rdi_compare() {
+  # <label>: compare the two over SAFEDEPS_RDI_IN; counts into differ, asked, yes.
+  local i
+  rdi_batch; rdi_alone_all
+  for (( i = 0; i < ${#SAFEDEPS_RDI_IN[@]}; i++ )); do
+    asked=$(( asked + 1 ))
+    [[ "${ALONE_OUT[i]}" != 0 ]] || yes=$(( yes + 1 ))
+    if [[ "${RDI_OUT[i]}" != "${ALONE_OUT[i]}" ]]; then
+      differ=$(( differ + 1 ))
+      (( differ > 5 )) || printf '# differs (%s) text %d %q: alone %s, batched %s\n' "$1" "${i}" "${SAFEDEPS_RDI_IN[i]:0:60}" "${ALONE_OUT[i]}" "${RDI_OUT[i]}"
+    fi
+  done
+  if [[ "${RDI_MARKED}" != "${ALONE_MARKED}" ]]; then
+    differ=$(( differ + 1 ))
+    printf '# differs (%s): the reading marked alone %q, batched %q\n' "$1" "${ALONE_MARKED}" "${RDI_MARKED}"
+  fi
+}
+asked=0 differ=0 yes=0 batches=0
+# Batches of 400 in order and in reverse, so each text stands after
+# different ones and at a different line.
+for (( k = 0; k < ${#TEXTS[@]}; k += 400 )); do
+  SAFEDEPS_RDI_IN=("${TEXTS[@]:k:400}")
+  rdi_compare forward; batches=$(( batches + 1 ))
+  rev=()
+  for (( i = ${#SAFEDEPS_RDI_IN[@]} - 1; i >= 0; i-- )); do rev+=("${SAFEDEPS_RDI_IN[i]}"); done
+  SAFEDEPS_RDI_IN=("${rev[@]}")
+  rdi_compare reverse; batches=$(( batches + 1 ))
+done
+# The whole set in one batch, and none.
+SAFEDEPS_RDI_IN=("${TEXTS[@]}"); rdi_compare whole
+SAFEDEPS_RDI_IN=(); rdi_compare empty
+printf '# %d answers compared in %d batches (%d yes), %d differ\n' "${asked}" "$(( batches + 2 ))" "${yes}" "${differ}"
+(( differ == 0 && yes > 0 )) && pass "one grep for many texts answers as one grep per text" \
+  || fail "one grep for many texts answers as one grep per text"
+
+# With every grep failing, the batch leaves every text to the reader, and
+# the answers and the mark are those of asking each alone.
+mkdir -p "${TMP_ROOT}/failgrep"
+printf '#!/bin/sh\nexit 2\n' > "${TMP_ROOT}/failgrep/grep"
+chmod +x "${TMP_ROOT}/failgrep/grep"
+asked=0 differ=0 yes=0
+SAFEDEPS_RDI_IN=("${TEXTS[@]:0:200}")
+PATH="${TMP_ROOT}/failgrep:${PATH}" rdi_compare failing
+(( differ == 0 )) && pass "with grep failing, the batch answers and marks as one grep per text" \
+  || fail "with grep failing, the batch answers and marks as one grep per text"
+
+# --- 2. the ecosystem of the first install, one grep for every segment ------
 
 # guard_detect_ecosystem asks one grep about every segment and maps grep's
 # line numbers back to segments. The loop it replaced asked one grep per
@@ -84,7 +184,7 @@ ecosystem_alone() {
   local seg eco
   while IFS= read -r seg; do
     [[ "${seg}" =~ [^[:space:]] ]] || continue
-    judge_grep -qEi "${SAFEDEPS_INSTALL_PATTERN}" <<< "${seg}" || continue
+    recognized_dependency_install "${seg}" || continue
     eco=$(guard_segment_ecosystem "${seg}")
     [[ -n "${eco}" ]] && { printf '%s' "${eco}"; return 0; }
   done < <(command_candidate_start_texts "${cmd}" | tr ';|&' '\n')
@@ -143,9 +243,6 @@ printf '# %d commands asked both ways (%d named an ecosystem), %d differ; %d lef
   || fail "one grep for every segment names the ecosystem, and writes, as a grep per segment"
 
 # With every grep failing, both mark the reading and name nothing.
-mkdir -p "${TMP_ROOT}/failgrep"
-printf '#!/bin/sh\nexit 2\n' > "${TMP_ROOT}/failgrep/grep"
-chmod +x "${TMP_ROOT}/failgrep/grep"
 SAFEDEPS_READING=bash differ=0
 for text in "${ECO_FORMS[@]}"; do
   PATH="${TMP_ROOT}/failgrep:${PATH}" eco_both ecosystem_alone "${text}"; a="${ECO}"

@@ -326,6 +326,74 @@ recognized_dependency_install() {
   judge_grep -qEi "${SAFEDEPS_INSTALL_PATTERN}" <<< "$1"
 }
 
+# recognized_dependency_install for every text in SAFEDEPS_RDI_IN, from one
+# grep, for a reader that asks it statement by statement (the landing, the
+# spec extractor, the ecosystem detection). One grep per statement, in each
+# reading, was the gate's cost per statement: 3,200 one-line statements with
+# an install took 45s on the project's Linux VM (scan-cost's statements
+# table, deadline off), and 32KB of them was answered UNDECIDED.
+#
+# SAFEDEPS_RDI_ANS[i] is 0 where the answer for text i is yes, 1 where it is
+# no, and 2 where the reader asks recognized_dependency_install itself. grep
+# matches each line of its input on its own, as it matches a text of one
+# line on a here-string, so line k of the input answers for text k-1. A text
+# that holds a newline is not a line: 2. A text with a byte past ASCII is 2
+# too, so the input grep reads is ASCII: where a byte is not valid in the
+# locale, GNU grep reads the input as binary from that point on and prints
+# "binary file matches" in place of the numbered lines, and the texts after
+# it would read as no. A grep that does not answer, or prints anything but
+# numbered lines, makes every text 2.
+#
+# Nothing here marks the reading. A text the reader reaches with a 2 is asked
+# alone, and that call marks the reading as it always did, so a grep that
+# fails here costs what the greps cost before, and a statement the reader
+# never reaches is never asked. scripts/test/statement-batch.sh compares
+# this, asked alone where it says 2, with recognized_dependency_install.
+recognized_dependency_install_each() {
+  local i n=${#SAFEDEPS_RDI_IN[@]} all="" hits="" hit rc=0
+  SAFEDEPS_RDI_ANS=()
+  (( n > 0 )) || return 0
+  for (( i = 0; i < n; i++ )); do
+    SAFEDEPS_RDI_ANS[i]=1
+    if [[ "${SAFEDEPS_RDI_IN[i]}" == *$'\n'* ]]; then
+      SAFEDEPS_RDI_ANS[i]=2
+      all+=$'\n'
+    else
+      all+="${SAFEDEPS_RDI_IN[i]}"$'\n'
+    fi
+  done
+  all="${all%$'\n'}"
+  hits=$(LC_ALL=C grep -n $'[\x80-\xff]' <<< "${all}") || rc=$?
+  if (( rc > 1 )); then
+    for (( i = 0; i < n; i++ )); do SAFEDEPS_RDI_ANS[i]=2; done
+    return 0
+  fi
+  if [[ -n "${hits}" ]]; then
+    all=""
+    while IFS= read -r hit; do
+      hit="${hit%%:*}"
+      [[ "${hit}" =~ ^[0-9]+$ ]] && (( hit >= 1 && hit <= n )) || { for (( i = 0; i < n; i++ )); do SAFEDEPS_RDI_ANS[i]=2; done; return 0; }
+      SAFEDEPS_RDI_ANS[hit - 1]=2
+    done <<< "${hits}"
+    for (( i = 0; i < n; i++ )); do
+      if (( SAFEDEPS_RDI_ANS[i] == 2 )); then all+=$'\n'; else all+="${SAFEDEPS_RDI_IN[i]}"$'\n'; fi
+    done
+    all="${all%$'\n'}"
+  fi
+  rc=0
+  hits=$(grep -nEi "${SAFEDEPS_INSTALL_PATTERN}" <<< "${all}") || rc=$?
+  if (( rc > 1 )) || { (( rc == 0 )) && [[ -z "${hits}" || $'\n'"${hits}" =~ $'\n'[^0-9] ]]; }; then
+    for (( i = 0; i < n; i++ )); do SAFEDEPS_RDI_ANS[i]=2; done
+    return 0
+  fi
+  while IFS= read -r hit; do
+    hit="${hit%%:*}"
+    [[ "${hit}" =~ ^[0-9]+$ ]] || continue
+    (( SAFEDEPS_RDI_ANS[hit - 1] != 1 )) || SAFEDEPS_RDI_ANS[hit - 1]=0
+  done <<< "${hits}"
+  return 0
+}
+
 command_hides_dependency_install() {
   local command="$1"
   local payload
@@ -3710,7 +3778,7 @@ resolve_reading_targets() {
   local npm_until="" here cond_dir="" depth=0 conditional env_changer="" env_setting="" statements pieces piece_at pw puw prec n=0 m k role
   local opts exporting literal ignore_env unset_names rc_home
   local code_changer="" stmt_code changer npm_unsets=" "
-  local -a toks=() npm_env=() npm_args=() npm_exports=() stmt_words=() stmt_uwords=() stmt_recs=() mw=() assigned_words=()
+  local -a toks=() npm_env=() npm_args=() npm_exports=() stmt_words=() stmt_uwords=() stmt_recs=() stmt_ans=() mw=() assigned_words=()
   local -a env_opts=() env_inherit=() env_after=()
 
   command_scan_text "${text}" | judge_grep -q '[(){}`]' && grouped=true
@@ -3732,6 +3800,15 @@ resolve_reading_targets() {
     stmt_uwords[piece_at]="${puw}"
     stmt_recs[piece_at]="${prec}"
   done <<< "${pieces}"
+  # Whether each statement is an install, asked of every statement at once
+  # and read where the loop asks (recognized_dependency_install_each):
+  # statement N is text N-1.
+  SAFEDEPS_RDI_IN=()
+  for k in ${stmt_recs[@]+"${!stmt_recs[@]}"}; do
+    while (( ${#SAFEDEPS_RDI_IN[@]} < k )); do SAFEDEPS_RDI_IN+=("${stmt_recs[${#SAFEDEPS_RDI_IN[@]} + 1]:-}"); done
+  done
+  recognized_dependency_install_each
+  stmt_ans=("${SAFEDEPS_RDI_ANS[@]+"${SAFEDEPS_RDI_ANS[@]}"}")
 
   while IFS=$'\035' read -r before stmt after words raw; do
     n=$(( n + 1 ))
@@ -3942,7 +4019,11 @@ resolve_reading_targets() {
 
       # The statement as the recognizers read it, its prefixes removed:
       # `npm_config_save=false npm install x` is an npm install.
-      recognized_dependency_install "${stmt_recs[n]:-}" || break
+      case "${stmt_ans[n - 1]:-2}" in
+        0) ;;
+        1) break ;;
+        *) recognized_dependency_install "${stmt_recs[n]:-}" || break ;;
+      esac
 
       # The npm word and its arguments. The words before npm go to env(1) in
       # front of npm when npm is asked below, and the words after it are npm's
@@ -5074,8 +5155,8 @@ guard_segment_ecosystem() {
 # names the command for the npm project context and for messages.
 guard_detect_ecosystem() {
   local cmd="$1"
-  local seg eco all="" hits hit at
-  local -a segs=()
+  local seg eco i
+  local -a segs=() ans=()
 
   # The statements are cut on the recognize view, where every statement start
   # is a separator, so a cut at `;` `|` `&` is a cut between statements. A
@@ -5085,35 +5166,20 @@ guard_detect_ecosystem() {
     [[ "${seg}" =~ [^[:space:]] ]] || continue
     segs+=("${seg}")
   done < <(command_candidate_start_texts "${cmd}" | tr ';|&' '\n')
-  (( ${#segs[@]} > 0 )) || { printf ''; return 0; }
-  # One grep for every segment instead of one each: a segment is a line with
-  # no newline in it, so grep line k is segs[k-1], and grep matches each line
-  # on its own, as it matched each segment on a here-string. The matches are
-  # asked in their order, as the loop asked them. A grep that does not
-  # answer marks the reading (judge_grep) and matches nothing, as each grep
-  # in the loop did. Its output is read whole before the first answer: left
-  # in a pipe, a grep still writing when the loop returned died of SIGPIPE
-  # and judge_grep marked that as a failed reading. Where grep calls the
-  # input binary it prints no numbered lines, and may match differently
-  # than on one segment, so then every segment is asked on its own, as
-  # before.
-  for seg in "${segs[@]}"; do all+="${seg}"$'\n'; done
-  hits=$(judge_grep -nEi "${SAFEDEPS_INSTALL_PATTERN}" <<< "${all%$'\n'}") || hits=""
-  if [[ -n "${hits}" && $'\n'"${hits}" =~ $'\n'[^0-9] ]]; then
-    for seg in "${segs[@]}"; do
-      recognized_dependency_install "${seg}" || continue
-      eco=$(guard_segment_ecosystem "${seg}")
-      [[ -n "${eco}" ]] && { printf '%s' "${eco}"; return 0; }
-    done
-    printf ''
-    return 0
-  fi
-  while IFS= read -r hit; do
-    at="${hit%%:*}"
-    [[ "${at}" =~ ^[0-9]+$ ]] || continue
-    eco=$(guard_segment_ecosystem "${segs[at - 1]}")
+  # Every segment is asked at once and its answer read in order, as the loop
+  # asked them one by one (recognized_dependency_install_each).
+  SAFEDEPS_RDI_IN=("${segs[@]+"${segs[@]}"}")
+  recognized_dependency_install_each
+  ans=("${SAFEDEPS_RDI_ANS[@]+"${SAFEDEPS_RDI_ANS[@]}"}")
+  for (( i = 0; i < ${#segs[@]}; i++ )); do
+    case "${ans[i]:-2}" in
+      0) ;;
+      1) continue ;;
+      *) recognized_dependency_install "${segs[i]}" || continue ;;
+    esac
+    eco=$(guard_segment_ecosystem "${segs[i]}")
     [[ -n "${eco}" ]] && { printf '%s' "${eco}"; return 0; }
-  done <<< "${hits}"
+  done
   printf ''
 }
 
@@ -5524,15 +5590,29 @@ guard_extract_specs() {
   # install. The spec lines are the same in both modes; the gate reads only
   # those, so the other lines cannot move a verdict.
   local cmd="$1" targets="$2" mode="${3:-}"
-  local seg words gate_reads eco family k role text out line versions spec_line created
-  local -a w=() roles=() texts=()
+  local seg words gate_reads eco family k role text out line versions spec_line created p
+  local -a w=() roles=() texts=() p_reads=() p_segs=() p_words=() p_ans=()
 
   # The pieces carry no tab, so the tab and \037 cut the three fields. <seg>
   # is the statement as the recognizers read it, from the same lexing as its
-  # words.
+  # words. They are read whole first, so whether each is an install is asked
+  # of all of them at once (recognized_dependency_install_each) and read
+  # below in order, where it was asked one piece at a time.
   while IFS=$'\t\037' read -r gate_reads seg words; do
     [[ "${seg}" =~ [^[:space:]] ]] || continue
-    recognized_dependency_install "${seg}" || continue
+    p_reads+=("${gate_reads}") p_segs+=("${seg}") p_words+=("${words}")
+  done < <(guard_extract_pieces "${cmd}" "${targets}")
+  SAFEDEPS_RDI_IN=("${p_segs[@]+"${p_segs[@]}"}")
+  recognized_dependency_install_each
+  p_ans=("${SAFEDEPS_RDI_ANS[@]+"${SAFEDEPS_RDI_ANS[@]}"}")
+
+  for (( p = 0; p < ${#p_segs[@]}; p++ )); do
+    gate_reads="${p_reads[p]}" seg="${p_segs[p]}" words="${p_words[p]}"
+    case "${p_ans[p]:-2}" in
+      0) ;;
+      1) continue ;;
+      *) recognized_dependency_install "${seg}" || continue ;;
+    esac
     # Grouping characters are the shell's (`(npm i x)`, `{ pip install y; }`).
     words="${words//[(){\}]/ }"
     set -f
@@ -5621,7 +5701,7 @@ guard_extract_specs() {
       [[ "${mode}" != readings ]] || out+="O"$'\t'"${k}"$'\t'"${role}"$'\t'"${text}"$'\n'
     done
     printf '%s' "${out}"
-  done < <(guard_extract_pieces "${cmd}" "${targets}")
+  done
 }
 
 # How the current reading would make the command's npm installs inert, as one
