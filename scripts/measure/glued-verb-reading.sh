@@ -278,7 +278,8 @@ table=$(
     [[ "${g}" == *--ignore-scripts ]] || gn="${gn%--ignore-scripts}"
     [[ "${s}" == *--ignore-scripts ]] || sn="${sn%--ignore-scripts}"
     # `{ <install> ;}` against `{ <install>}`: the `;` is the spaced form's own.
-    [[ "${name}" != '}' ]] || sn="${sn//"${semi_close}"/"${close_brace}"}"
+    # Unquoted: bash 3.2 keeps double quotes inside the replacement literally.
+    [[ "${name}" != '}' ]] || sn="${sn//${semi_close}/${close_brace}}"
     rwg=$(rewrite_reads "$(cat "${jobs_dir}/${k}.w")" "$(cat "${jobs_dir}/${k}.gr")")
     rws=-
     [[ -z "${s}" ]] || rws=$(rewrite_reads "$(cat "${jobs_dir}/${k}.sw")" "$(cat "${jobs_dir}/${k}.sr")")
