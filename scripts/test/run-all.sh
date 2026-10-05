@@ -77,8 +77,17 @@ cd "${ROOT_DIR}" || exit 2
 # second phase, and install-dir-differential, which needs npm to answer 237
 # layouts inside the gate's deadline. In group a it ran beside
 # manager-variants, which took a 3-CPU macOS runner from load 5 to 43, and
-# seven of its layouts went UNDECIDED (CI run 37267052867); the timing runner
-# stayed under 16.
+# seven of its layouts went UNDECIDED (CI run 37267052867).
+#
+# The timing group runs one battery at a time (SERIAL_GROUPS). Its batteries
+# are sensitive to load and also make it: install-dir-differential judges six
+# layouts at once, and in CI run 37269688992 it left a 3-CPU macOS runner at
+# load 38 for self-budget, whose 64KB install then took 20s to judge and failed.
+# Two reds of one class -- a load-sensitive battery beside load -- so no
+# battery shares that runner with another. Serial, it costs the sum of the
+# three (macOS, measured alone: about 400 + 160 + 1170 seconds), still less
+# than a census shard.
+SERIAL_GROUPS=(timing)
 ALL_BATTERIES=(
   "smoke|1|dev|a|scripts/test/smoke.sh"
   "scan-contract|1|dev|a|scripts/test/scan-contract.sh"
@@ -169,6 +178,11 @@ done
 
 serial=false
 [[ "${SAFEDEPS_TEST_SERIAL:-}" == 1 ]] && serial=true
+if [[ "${selection}" == group ]]; then
+  for serial_group in "${SERIAL_GROUPS[@]}"; do
+    [[ "${group}" != "${serial_group}" ]] || serial=true
+  done
+fi
 
 cpus=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || printf '2')
 [[ "${cpus}" =~ ^[1-9][0-9]*$ ]] || cpus=2
