@@ -388,12 +388,19 @@ ecosystem_alone() {
   printf ''
 }
 eco_both() {
-  # <fn> <text>: the answer and the three files, as one string.
+  # <fn> <text>: the answer, the flag file, and whether the DIVERGE and mark
+  # files were written, as one string. The loop read its segments from a
+  # process substitution and returned at the first ecosystem, and the writer
+  # still lexing payloads then died of SIGPIPE when it next wrote, so how
+  # many DIVERGE and mark lines it left depended on that timing. The gate
+  # reads both files only for being empty or not (guard_readings_diverge,
+  # guard_scan_failed), so that is what is compared. ECO_FULL keeps all.
   local dir="${TMP_ROOT}/eco.$1" out
   mkdir -p "${dir}"
   : > "${dir}/d"; : > "${dir}/u"; : > "${dir}/m"
   out=$(SAFEDEPS_LEX_DIVERGE="${dir}/d" SAFEDEPS_LEX_FLAGS="${dir}/u" SAFEDEPS_SCAN_MARK="${dir}/m" "$1" "$2"; printf 'X')
-  ECO="${out%X}|$(cat "${dir}/d")|$(cat "${dir}/u")|$(cat "${dir}/m")"
+  ECO="${out%X}|$([[ -s "${dir}/d" ]] && printf D)|$(cat "${dir}/u")|$([[ -s "${dir}/m" ]] && printf M)"
+  ECO_FULL="${out%X}|$(cat "${dir}/d")|$(cat "${dir}/u")|$(cat "${dir}/m")"
 }
 ECO_FORMS=(
   $'echo a\nnpm install left-pad@1.0.0'
@@ -409,21 +416,22 @@ ECO_FORMS=(
 )
 eco_inputs=("${ECO_FORMS[@]}")
 for (( k = 0; k < n; k += 7 )); do eco_inputs+=("${INPUTS[k]}"); done
-asked=0 differ=0 named=0
+asked=0 differ=0 named=0 counts=0
 for reading in bash zsh dash; do
   SAFEDEPS_READING="${reading}"
   for text in "${eco_inputs[@]}"; do
-    eco_both ecosystem_alone "${text}"; a="${ECO}"
-    eco_both guard_detect_ecosystem "${text}"; b="${ECO}"
+    eco_both ecosystem_alone "${text}"; a="${ECO}"; af="${ECO_FULL}"
+    eco_both guard_detect_ecosystem "${text}"; b="${ECO}"; bf="${ECO_FULL}"
     asked=$(( asked + 1 ))
+    [[ "${af}" == "${bf}" ]] || counts=$(( counts + 1 ))
     [[ "${a}" == "|"* ]] || named=$(( named + 1 ))
     if [[ "${a}" != "${b}" ]]; then
       differ=$(( differ + 1 ))
-      (( differ > 5 )) || printf '# differs: %s %q: alone %q, batched %q\n' "${reading}" "${text:0:60}" "${a:0:60}" "${b:0:60}"
+      (( differ > 5 )) || printf '# differs: %s %q: alone %q, batched %q\n' "${reading}" "${text:0:60}" "${af}" "${bf}"
     fi
   done
 done
-printf '# %d commands asked both ways (%d named an ecosystem), %d differ\n' "${asked}" "${named}" "${differ}"
+printf '# %d commands asked both ways (%d named an ecosystem), %d differ; %d left a different number of DIVERGE or mark lines\n' "${asked}" "${named}" "${differ}" "${counts}"
 (( differ == 0 )) && pass "one grep for every segment names the ecosystem, and writes, as a grep per segment" \
   || fail "one grep for every segment names the ecosystem, and writes, as a grep per segment"
 
