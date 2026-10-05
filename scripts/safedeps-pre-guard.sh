@@ -2287,11 +2287,13 @@ inert_offsets_of() {
 # where each one's `npm` starts; inert_flag_offsets counts a verb as read only
 # where its `npm` is a command word of the text it was read in). Each read
 # `npm` is set aside, the command's own comments are blanked (class m: the
-# shell runs nothing there), and the quotes and backslashes are taken out. That
-# text is read twice: as it is, and with every `$'...'` decoded where it stands,
-# as bash and zsh decode it, so a decoded byte joins the text on either side of
-# it (`n$'\x70'm`) and a decoded newline starts a line (`true$'\n'npm ci`). If
-# an npm install verb is left anywhere in either, the command is recorded.
+# shell runs nothing there), and the text is read with every quote and
+# backslash taken out, and again through the shell's own quote removal, one
+# level at a time for up to three levels, with each `$'...'` decoded where it
+# stands. A decoded byte then joins the text on either side of it
+# (`n$'\x70'm`), a decoded newline starts a line (`true$'\n'npm ci`), and a
+# `$'...'` inside a quoted script is decoded at the level that runs it. If an
+# npm install verb is left anywhere in any of these, the command is recorded.
 #
 # So is an `npm` the rewrite did not read inside a word the shell computes
 # (`$(...)`, `${...}`, `<(...)`, `>(...)`, backquotes), install verb or not:
@@ -2328,20 +2330,42 @@ inert_bytes_left_unread() {
     { if (NR > 3) X[++n] = "\n"; m = split($0, c, ""); for (j = 1; j <= m; j++) X[++n] = c[j] }
     function oct(c) { return index("01234567", c) }
     function hex(c) { return index("0123456789abcdef", tolower(c)) }
-    # The $\047...\047 whose text starts at <i>, decoded; returns the index of
-    # its closing quote.
-    function decode(i,    e, v, d) {
-      for (; i <= n && X[i] != "\047"; i++) {
-        if (X[i] != "\\" || i == n) { printf "%s", X[i]; continue }
-        e = X[++i]
-        if (oct(e)) { v = 0; for (d = 0; d < 3 && oct(X[i]); d++) v = v * 8 + oct(X[i++]) - 1; i--; if (v > 0 && v < 128) printf "%c", v; continue }
-        if (e == "x" && hex(X[i + 1])) { v = 0; for (d = 0; d < 2 && hex(X[i + 1]); d++) v = v * 16 + hex(X[++i]) - 1; if (v > 0 && v < 128) printf "%c", v; continue }
-        if ((e == "u" || e == "U") && hex(X[i + 1])) { v = 0; for (d = 0; d < (e == "u" ? 4 : 8) && hex(X[i + 1]); d++) v = v * 16 + hex(X[++i]) - 1; if (v > 0 && v < 128) printf "%c", v; continue }
-        if (e == "c") { i++; continue }
-        if (e == "n") printf "\n"; else if (e == "t") printf "\t"; else if (index("abefrvE", e)) printf " "
-        else printf "%s", e
+    # One level of quote removal as the shell does it, from S[1..ns] into D,
+    # returning the length. Single quotes keep their text, double quotes drop the
+    # backslash before $ ` " \ and a newline, a backslash outside quotes
+    # keeps the byte after it, and each $\047...\047 is decoded where it
+    # stands, as bash and zsh decode it.
+    function unq(S, ns, D,    i, j, q, c, e, v, d) {
+      j = 0; q = 0
+      for (i = 1; i <= ns; i++) {
+        c = S[i]
+        if (q == 1) { if (c == "\047") q = 0; else D[++j] = c; continue }
+        if (q == 2) {
+          if (c == "\"") q = 0
+          else if (c == "\\" && i < ns && (S[i + 1] == "$" || S[i + 1] == "`" || S[i + 1] == "\"" || S[i + 1] == "\\" || S[i + 1] == "\n")) { i++; if (S[i] != "\n") D[++j] = S[i] }
+          else D[++j] = c
+          continue
+        }
+        if (c == "\\") { if (i < ns) { i++; if (S[i] != "\n") D[++j] = S[i] }; continue }
+        if (c == "\047") { q = 1; continue }
+        if (c == "\"") { q = 2; continue }
+        if (c == "$" && S[i + 1] == "\"") { q = 2; i++; continue }
+        if (c == "$" && S[i + 1] == "\047") {
+          for (i += 2; i <= ns && S[i] != "\047"; i++) {
+            if (S[i] != "\\" || i == ns) { D[++j] = S[i]; continue }
+            e = S[++i]
+            if (oct(e)) { v = 0; for (d = 0; d < 3 && oct(S[i]); d++) v = v * 8 + oct(S[i++]) - 1; i--; if (v > 0 && v < 128) D[++j] = sprintf("%c", v); continue }
+            if (e == "x" && hex(S[i + 1])) { v = 0; for (d = 0; d < 2 && hex(S[i + 1]); d++) v = v * 16 + hex(S[++i]) - 1; if (v > 0 && v < 128) D[++j] = sprintf("%c", v); continue }
+            if ((e == "u" || e == "U") && hex(S[i + 1])) { v = 0; for (d = 0; d < (e == "u" ? 4 : 8) && hex(S[i + 1]); d++) v = v * 16 + hex(S[++i]) - 1; if (v > 0 && v < 128) D[++j] = sprintf("%c", v); continue }
+            if (e == "c") { i++; continue }
+            if (e == "n") D[++j] = "\n"; else if (e == "t") D[++j] = "\t"; else if (index("abefrvE", e)) D[++j] = " "
+            else D[++j] = e
+          }
+          continue
+        }
+        D[++j] = c
       }
-      return i
+      return j
     }
     END {
       for (i = 1; i <= n; i++) { if (i in hide) X[i] = "_"; else if (K[i] == "m") X[i] = " " }
@@ -2359,19 +2383,26 @@ inert_bytes_left_unread() {
         else if (ns > 0 && X[i] == st[ns]) ns--
       }
       printf "%s", computed ? "C" : "-"
-      # The text with quotes and backslashes out, and a backslash-newline
-      # pair joined, as the shell joins a continuation; the second time with
-      # each $\047...\047 decoded in place. Both, because which `$\047` opens
-      # one is a question of quoting this does not ask: decoding from a `$\047`
-      # inside single quotes would read the escapes after it as an ANSI-C
-      # string, which the shell does not.
-      for (pass = 0; pass < 2; pass++) {
-        if (pass) printf "\n"
-        for (i = 1; i <= n; i++) {
-          if (X[i] == "\\" && X[i + 1] == "\n") { i++; continue }
-          if (pass && X[i] == "$" && X[i + 1] == "\047") { i = decode(i + 2); continue }
-          if (X[i] != "\"" && X[i] != "\047" && X[i] != "\\") printf "%s", X[i]
-        }
+      # The text with every quote, backslash and the `$` of a `$\047` or `$"`
+      # out, and a backslash-newline pair joined, as the shell joins a
+      # continuation: every level of quoting at once.
+      for (i = 1; i <= n; i++) {
+        if (X[i] == "\\" && X[i + 1] == "\n") { i++; continue }
+        if (X[i] == "$" && (X[i + 1] == "\047" || X[i + 1] == "\"")) continue
+        if (X[i] != "\"" && X[i] != "\047" && X[i] != "\\") printf "%s", X[i]
+      }
+      # Then quote removal as the shell does it, one level at a time, as a
+      # script handed on reads the text the level above it left, up to three
+      # levels: an ANSI-C string inside a single-quoted here-string is text to
+      # the outer shell and is decoded only by the shell it is handed to.
+      # Quote removal drops no byte of text, only quoting, so each level can
+      # only add a verb to what the first reading found.
+      m = n; for (i = 1; i <= n; i++) A[i] = X[i]
+      for (lv = 1; lv <= 3; lv++) {
+        m = unq(A, m, B)
+        printf "\n"; more = 0
+        for (i = 1; i <= m; i++) { printf "%s", B[i]; A[i] = B[i]; if (B[i] == "\047" || B[i] == "\"" || B[i] == "\\") more = 1 }
+        if (!more) break
       }
       printf "X"
     }'); then
