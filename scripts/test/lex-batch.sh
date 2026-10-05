@@ -405,7 +405,9 @@ eco_both() {
   mkdir -p "${dir}"
   : > "${dir}/d"; : > "${dir}/u"; : > "${dir}/m"
   out=$(SAFEDEPS_LEX_DIVERGE="${dir}/d" SAFEDEPS_LEX_FLAGS="${dir}/u" SAFEDEPS_SCAN_MARK="${dir}/m" "$1" "$2"; printf 'X')
-  ECO="${out%X}|$([[ -s "${dir}/d" ]] && printf D)|$(cat "${dir}/u")|$([[ -s "${dir}/m" ]] && printf M)"
+  # Each test ends in true: an assignment returns the status of its last
+  # command substitution, and an empty file would end the battery here.
+  ECO="${out%X}|$([[ ! -s "${dir}/d" ]] || printf D)|$(cat "${dir}/u")|$([[ ! -s "${dir}/m" ]] || printf M)"
   ECO_FULL="${out%X}|$(cat "${dir}/d")|$(cat "${dir}/u")|$(cat "${dir}/m")"
 }
 ECO_FORMS=(
