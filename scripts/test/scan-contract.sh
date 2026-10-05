@@ -1365,7 +1365,9 @@ pass "stmts view: idempotent and length-preserving on ${grammar_closed} closed r
 #       on, follows one of `;` `&` `|` `(` or a newline, blanks between, or
 #       begins the text. That is what SAFEDEPS_G_START anchors on.
 #   E4. command_statements cuts there: a statement of its output begins with
-#       the start's prefixes and command word.
+#       the start's prefixes and command word, as the stmts view has them.
+#       The statement split cuts the stmts view and keeps a line
+#       continuation's bytes, which the recognize view of E3 drops.
 event_failures=0
 event_checked=0
 event_inputs=0
@@ -1374,7 +1376,7 @@ event_blanks=$' \t'
 # Whether the offset <n> is in the space-separated list <list>.
 in_list() { [[ " $1 " == *" $2 "* ]]; }
 event_contract() { # input label
-  local x="$1" reading ev cw rv stm line k w pre st first ok p head off rec slist="" wlist="" f1 f2 f3 f4 f6
+  local x="$1" reading ev cw rv stm line k w pre st sst first ok p head off rec slist="" wlist="" f1 f2 f3 f4 f6
   local LC_ALL=C
   event_inputs=$((event_inputs + 1))
   for reading in bash zsh dash; do
@@ -1404,7 +1406,7 @@ event_contract() { # input label
       esac
       [[ ${ok} == 1 ]] || { printf 'E1 (%s): event [%s %s %s %s] of [%q] (%s) is not at top-level code\n' "${reading}" "${f1}" "${f2}" "${f3}" "${f4}" "${x}" "$2" >&2; event_failures=$((event_failures + 1)); }
     done <<< "${ev}"
-    while IFS=$'\037' read -r k w pre st; do
+    while IFS=$'\037' read -r k w pre st sst; do
       [[ -n "${k}" ]] || continue
       # A subshell that starts a command has no command word of its own: the
       # command inside it is the next start.
@@ -1435,7 +1437,7 @@ event_contract() { # input label
         off=$((p + 1))
       done
       [[ ${ok} == 1 ]] || { printf 'E3 (%s): the statement [%q] of the start at %s of [%q] (%s) follows no separator in the recognize view [%q]\n' "${reading}" "${st}" "${k}" "${x}" "$2" "${rv}" >&2; event_failures=$((event_failures + 1)); }
-      first="${st%%[${event_blanks}]*}"
+      first="${sst%%[${event_blanks}]*}"
       ok=0
       while IFS= read -r rec; do
         rec="${rec#"${rec%%[!${event_blanks}]*}"}"

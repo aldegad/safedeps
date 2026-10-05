@@ -547,9 +547,10 @@ shell_lex() {
       #              its command or reserved word. For scan-contract.
       #   view=cwords  one line per start event: its offset, the offset of
       #              the first byte the prefixes leave, the stmts bytes of the
-      #              prefixes, and the recognize bytes of the statement from
-      #              there to its end, \037 between them. For
-      #              the event contract in scan-contract.
+      #              prefixes, the recognize bytes of the statement from
+      #              there to its end, and the stmts bytes of the same
+      #              statement, \037 between them. For the event contract in
+      #              scan-contract.
       #   view=wordends  the stmts view as a mask: 1 at each byte where the
       #              lexer ends a word that a word byte stands before, 0
       #              elsewhere; length-preserving. For scan-contract.
@@ -2205,9 +2206,11 @@ shell_lex() {
       # newline read as a blank, so the command cannot forge a field.
       function fbyte(b) { return (b == "\037" || b == "\036" || b == "\n") ? " " : b }
       # Each start, the first byte its prefixes leave, the prefixes as the
-      # stmts view has them, and the statement from there on as the
-      # recognize view has it, up to its end: the next start or a top-level
-      # separator. A start whose prefixes leave nothing before the next has
+      # stmts view has them, and the statement from there on up to its end
+      # (the next start or a top-level separator) twice: as the recognize
+      # view has it, which drops a line continuation, and as the stmts view
+      # has it, which the statement split cuts, the bytes of a continuation
+      # kept. A start whose prefixes leave nothing before the next has
       # no line.
       function emit_cwords(   k, w, j) {
         buf = ""; held = 0
@@ -2219,6 +2222,8 @@ shell_lex() {
           for (j = k; j < w; j++) put(fbyte(sbyte(j)))
           put("\037")
           for (j = w; j <= N && !(j > w && (j in EV)) && !topsep(j); j++) if (C[j] != "l") put(fbyte((j in DROP) ? " " : sbyte(j)))
+          put("\037")
+          for (j = w; j <= N && !(j > w && (j in EV)) && !topsep(j); j++) put(fbyte((j in DROP) ? " " : sbyte(j)))
           put("\n")
         }
         printf "%s", buf
