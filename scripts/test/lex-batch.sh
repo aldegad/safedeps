@@ -260,15 +260,21 @@ for reading in bash zsh dash; do
     SAFEDEPS_LB_IN=("${CUR[@]}")
     shell_lex_batch "${view}" "safedeps:lex-batch"
     [[ "${SAFEDEPS_LB_MODE}" == batch ]] || fellback=$(( fellback + 1 ))
-    fw_out=("${SAFEDEPS_LB_OUT[@]}") fw_d=("${SAFEDEPS_LB_D[@]}") fw_u=("${SAFEDEPS_LB_U[@]}") fw_m=("${SAFEDEPS_LB_M[@]}") fw_f=("${SAFEDEPS_LB_F[@]}")
+    # Copied by index: a part a text did not write is unset, and an array
+    # copied whole closes up around it.
+    fw_out=() fw_d=() fw_u=() fw_m=() fw_f=()
+    for (( k = 0; k < m; k++ )); do
+      fw_out[k]="${SAFEDEPS_LB_OUT[k]}" fw_d[k]="${SAFEDEPS_LB_D[k]:-}" fw_u[k]="${SAFEDEPS_LB_U[k]:-}"
+      fw_m[k]="${SAFEDEPS_LB_M[k]:-}" fw_f[k]="${SAFEDEPS_LB_F[k]}"
+    done
     SAFEDEPS_LB_IN=()
     for (( k = m - 1; k >= 0; k-- )); do SAFEDEPS_LB_IN+=("${CUR[k]}"); done
     shell_lex_batch "${view}" "safedeps:lex-batch"
     [[ "${SAFEDEPS_LB_MODE}" == batch ]] || fellback=$(( fellback + 1 ))
     for (( k = 0; k < m; k++ )); do
       r=$(( m - 1 - k ))
-      if [[ "${fw_out[k]}" != "${SAFEDEPS_LB_OUT[r]}" || "${fw_d[k]}" != "${SAFEDEPS_LB_D[r]}" || "${fw_u[k]}" != "${SAFEDEPS_LB_U[r]}" \
-            || "${fw_m[k]}" != "${SAFEDEPS_LB_M[r]}" || "${fw_f[k]}" != "${SAFEDEPS_LB_F[r]}" ]]; then
+      if [[ "${fw_out[k]}" != "${SAFEDEPS_LB_OUT[r]}" || "${fw_d[k]}" != "${SAFEDEPS_LB_D[r]:-}" || "${fw_u[k]}" != "${SAFEDEPS_LB_U[r]:-}" \
+            || "${fw_m[k]}" != "${SAFEDEPS_LB_M[r]:-}" || "${fw_f[k]}" != "${SAFEDEPS_LB_F[r]}" ]]; then
         orders=$(( orders + 1 ))
         (( orders > 5 )) || printf '# order differs: %s %s %s input %d\n' "${set}" "${reading}" "${view}" "${k}"
       fi

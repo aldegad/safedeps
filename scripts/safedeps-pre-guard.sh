@@ -336,12 +336,12 @@ command_is_dependency_install_each() {
   SAFEDEPS_LB_IN=("${SAFEDEPS_ID_IN[@]}")
   shell_lex_batch joined "safedeps:join_line_continuations"
   for (( i = 0; i < n; i++ )); do
-    SAFEDEPS_ID_D[i]+="${SAFEDEPS_LB_D[i]}" SAFEDEPS_ID_M[i]+="${SAFEDEPS_LB_M[i]}"
+    SAFEDEPS_ID_D[i]+="${SAFEDEPS_LB_D[i]:-}" SAFEDEPS_ID_M[i]+="${SAFEDEPS_LB_M[i]:-}"
     t="${SAFEDEPS_LB_OUT[i]}"
     while [[ "${t}" == *$'\n' ]]; do t="${t%$'\n'}"; done
     J[i]="${t}"
     u1[i]=0
-    [[ $'\n'"${SAFEDEPS_LB_U[i]}" != *$'\n'UNTERM$'\n'* ]] || u1[i]=1
+    [[ $'\n'"${SAFEDEPS_LB_U[i]:-}" != *$'\n'UNTERM$'\n'* ]] || u1[i]=1
   done
   SAFEDEPS_LB_IN=() idx=()
   for (( i = 0; i < n; i++ )); do
@@ -351,8 +351,8 @@ command_is_dependency_install_each() {
     shell_lex_batch scan "safedeps:command_scan_text"
     for (( k = 0; k < ${#idx[@]}; k++ )); do
       i="${idx[k]}"
-      SAFEDEPS_ID_D[i]+="${SAFEDEPS_LB_D[k]}" SAFEDEPS_ID_M[i]+="${SAFEDEPS_LB_M[k]}"
-      [[ $'\n'"${SAFEDEPS_LB_U[k]}" != *$'\n'UNTERM$'\n'* ]] || SAFEDEPS_ID_M[i]+=$'failed\n'
+      SAFEDEPS_ID_D[i]+="${SAFEDEPS_LB_D[k]:-}" SAFEDEPS_ID_M[i]+="${SAFEDEPS_LB_M[k]:-}"
+      [[ $'\n'"${SAFEDEPS_LB_U[k]:-}" != *$'\n'UNTERM$'\n'* ]] || SAFEDEPS_ID_M[i]+=$'failed\n'
     done
   fi
 
@@ -360,7 +360,7 @@ command_is_dependency_install_each() {
   SAFEDEPS_LB_IN=("${J[@]}")
   shell_lex_batch recognize "safedeps:command_scan_text"
   for (( i = 0; i < n; i++ )); do
-    SAFEDEPS_ID_D[i]+="${SAFEDEPS_LB_D[i]}" SAFEDEPS_ID_M[i]+="${SAFEDEPS_LB_M[i]}" SAFEDEPS_ID_U[i]+="${SAFEDEPS_LB_U[i]}"
+    SAFEDEPS_ID_D[i]+="${SAFEDEPS_LB_D[i]:-}" SAFEDEPS_ID_M[i]+="${SAFEDEPS_LB_M[i]:-}" SAFEDEPS_ID_U[i]+="${SAFEDEPS_LB_U[i]:-}"
     R0[i]="${SAFEDEPS_LB_OUT[i]}"
   done
 
@@ -381,11 +381,14 @@ command_is_dependency_install_each() {
       nfail[j]="${SAFEDEPS_LB_F[k]}" nbang[j]=0 kids[j]=""
       r="${j}"
       while (( r >= n )); do r="${pidx[r]}"; done
-      SAFEDEPS_ID_D[r]+="${SAFEDEPS_LB_D[k]}${SAFEDEPS_LB_D[k]}"
-      SAFEDEPS_ID_M[r]+="${SAFEDEPS_LB_M[k]}${SAFEDEPS_LB_M[k]}"
-      SAFEDEPS_ID_U[r]+="${SAFEDEPS_LB_U[k]}${SAFEDEPS_LB_U[k]}"
+      SAFEDEPS_ID_D[r]+="${SAFEDEPS_LB_D[k]:-}${SAFEDEPS_LB_D[k]:-}"
+      SAFEDEPS_ID_M[r]+="${SAFEDEPS_LB_M[k]:-}${SAFEDEPS_LB_M[k]:-}"
+      SAFEDEPS_ID_U[r]+="${SAFEDEPS_LB_U[k]:-}${SAFEDEPS_LB_U[k]:-}"
       (( nfail[j] == 0 )) || continue
       o="${SAFEDEPS_LB_OUT[k]}"
+      # No records: the loop below would read nothing (and a here-string is
+      # a temporary file under bash 3.2).
+      [[ -n "${o}" ]] || continue
       while [[ "${o}" == *$'\n' ]]; do o="${o%$'\n'}"; done
       while IFS= read -r -d $'\035' rec; do
         if [[ "${rec}" == "!" ]]; then
@@ -405,7 +408,7 @@ command_is_dependency_install_each() {
   SAFEDEPS_LB_IN=("${J[@]}")
   shell_lex_batch substs "safedeps:extract_command_substitution_payloads"
   for (( i = 0; i < n; i++ )); do
-    SAFEDEPS_ID_D[i]+="${SAFEDEPS_LB_D[i]}" SAFEDEPS_ID_M[i]+="${SAFEDEPS_LB_M[i]}" SAFEDEPS_ID_U[i]+="${SAFEDEPS_LB_U[i]}"
+    SAFEDEPS_ID_D[i]+="${SAFEDEPS_LB_D[i]:-}" SAFEDEPS_ID_M[i]+="${SAFEDEPS_LB_M[i]:-}" SAFEDEPS_ID_U[i]+="${SAFEDEPS_LB_U[i]:-}"
     acc=""
     command_is_dependency_install_each_kind "${i}" S
     command_is_dependency_install_each_kind "${i}" E
@@ -414,6 +417,7 @@ command_is_dependency_install_each() {
   # command_start_text of every payload line that is not empty.
   SAFEDEPS_LB_IN=() idx=()
   for (( i = 0; i < n; i++ )); do
+    [[ -n "${P[i]}" ]] || continue
     while IFS= read -r line; do
       [[ -z "${line}" ]] && continue
       SAFEDEPS_LB_IN+=("${line}") idx+=("${i}")
@@ -424,7 +428,7 @@ command_is_dependency_install_each() {
     shell_lex_batch recognize "safedeps:command_scan_text"
     for (( k = 0; k < ${#idx[@]}; k++ )); do
       i="${idx[k]}"
-      SAFEDEPS_ID_D[i]+="${SAFEDEPS_LB_D[k]}" SAFEDEPS_ID_M[i]+="${SAFEDEPS_LB_M[k]}" SAFEDEPS_ID_U[i]+="${SAFEDEPS_LB_U[k]}"
+      SAFEDEPS_ID_D[i]+="${SAFEDEPS_LB_D[k]:-}" SAFEDEPS_ID_M[i]+="${SAFEDEPS_LB_M[k]:-}" SAFEDEPS_ID_U[i]+="${SAFEDEPS_LB_U[k]:-}"
       stream[i]+="${SAFEDEPS_LB_OUT[k]}"$'\n'
     done
   fi
@@ -2914,9 +2918,9 @@ shell_lex_batch() {
         IFS= read -r -d '' extra && extra="${extra}x" || true
       } < "${dir}/out"
       if (( i == n )) && [[ -z "${extra}" ]] \
-          && shell_lex_batch_side "${dir}/d" "${n}" && SAFEDEPS_LB_D=("${SAFEDEPS_LB_PART[@]}") \
-          && shell_lex_batch_side "${dir}/u" "${n}" && SAFEDEPS_LB_U=("${SAFEDEPS_LB_PART[@]}") \
-          && shell_lex_batch_side "${dir}/m" "${n}" && SAFEDEPS_LB_M=("${SAFEDEPS_LB_PART[@]}"); then
+          && shell_lex_batch_side "${dir}/d" "${n}" SAFEDEPS_LB_D \
+          && shell_lex_batch_side "${dir}/u" "${n}" SAFEDEPS_LB_U \
+          && shell_lex_batch_side "${dir}/m" "${n}" SAFEDEPS_LB_M; then
         rm -rf "${dir}"
         # shellcheck disable=SC2034  # read by scripts/test/lex-batch.sh
         SAFEDEPS_LB_MODE="batch"
@@ -2945,25 +2949,26 @@ shell_lex_batch() {
   return 0
 }
 
-# The parts of a batch's side file <file>, one per text, into
-# SAFEDEPS_LB_PART: the lines before each end mark \001<index>. Fails unless
+# The parts of a batch's side file <file>, one per text, into the array
+# named <name>: the lines before each end mark \001<index>, set only where a
+# text wrote something (readers take an unset part as empty). Fails unless
 # there are <n> marks, in order, and nothing after the last. A file exactly
 # as long as its <n> marks holds nothing else, and is not read line by line:
 # most texts write no side output, and the lines were most of a batch's cost.
 shell_lex_batch_side() {
-  local f="$1" n="$2" k=0 line="" acc="" size marks p=10
-  SAFEDEPS_LB_PART=()
+  local f="$1" n="$2" name="$3" k=0 line="" acc="" size marks p=10
+  eval "${name}=()"
   # The marks \001<k>\n for k = 0 .. n-1: two bytes and a digit each, and
   # one digit more for each k at or past each power of ten.
   marks=$(( 3 * n ))
   while (( p < n )); do marks=$(( marks + n - p )); p=$(( p * 10 )); done
   if size=$(wc -c < "${f}" 2>/dev/null) && (( size + 0 == marks )); then
-    for (( k = 0; k < n; k++ )); do SAFEDEPS_LB_PART[k]=""; done
     return 0
   fi
   while IFS= read -r line; do
     if [[ "${line}" == $'\001'"${k}" ]]; then
-      SAFEDEPS_LB_PART[k]="${acc}" acc="" k=$(( k + 1 ))
+      [[ -z "${acc}" ]] || eval "${name}[k]=\${acc}"
+      acc="" k=$(( k + 1 ))
       continue
     fi
     acc+="${line}"$'\n'
@@ -2981,9 +2986,9 @@ shell_lex_batch_replay() {
     guard_mark_reading_failed
     return 1
   fi
-  [[ -z "${SAFEDEPS_LB_D[i]}" || -z "${SAFEDEPS_LEX_DIVERGE:-}" ]] || printf '%s' "${SAFEDEPS_LB_D[i]}" >> "${SAFEDEPS_LEX_DIVERGE}"
-  [[ -z "${SAFEDEPS_LB_U[i]}" || -z "${SAFEDEPS_LEX_FLAGS:-}" ]] || printf '%s' "${SAFEDEPS_LB_U[i]}" >> "${SAFEDEPS_LEX_FLAGS}"
-  [[ -z "${SAFEDEPS_LB_M[i]}" || -z "${SAFEDEPS_SCAN_MARK:-}" ]] || printf '%s' "${SAFEDEPS_LB_M[i]}" >> "${SAFEDEPS_SCAN_MARK}"
+  [[ -z "${SAFEDEPS_LB_D[i]:-}" || -z "${SAFEDEPS_LEX_DIVERGE:-}" ]] || printf '%s' "${SAFEDEPS_LB_D[i]:-}" >> "${SAFEDEPS_LEX_DIVERGE}"
+  [[ -z "${SAFEDEPS_LB_U[i]:-}" || -z "${SAFEDEPS_LEX_FLAGS:-}" ]] || printf '%s' "${SAFEDEPS_LB_U[i]:-}" >> "${SAFEDEPS_LEX_FLAGS}"
+  [[ -z "${SAFEDEPS_LB_M[i]:-}" || -z "${SAFEDEPS_SCAN_MARK:-}" ]] || printf '%s' "${SAFEDEPS_LB_M[i]:-}" >> "${SAFEDEPS_SCAN_MARK}"
   (( SAFEDEPS_LB_F[i] == 0 )) || return 1
   printf '%s' "${SAFEDEPS_LB_OUT[i]}"
 }
