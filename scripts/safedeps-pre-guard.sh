@@ -1018,12 +1018,13 @@ shell_lex() {
         # which reads its events: a descriptor word starts a word where the
         # walk starts a command (fdword).
         if (wantst && !unterm) starts_all()
-        # Which glued `}` closes a group reads the groups the walk opened.
-        if (wantgrp) group_close()
         # The same holds for redirections: in a reading that never closes, a
         # stripped target changes how the rest reads, and the view stops
         # being idempotent (random inputs in scan-contract).
         if (((view == "noredir" || view == "live" || view == "flat" || wantst) && !unterm) || view == "pieces" || view == "cscripts" || view == "stmts" || view == "recognize" || view == "stmtcuts" || view == "cwords") redirs()
+        # Which glued `}` closes a group reads the groups the walk opened, and
+        # the redirections (DROP) the views blank.
+        if (wantgrp) group_close()
         if ((view == "unprefixed" || view == "recognize" || view == "cwords" || view == "pieces") && !unterm) prefixes()
         # After redirs(), which says DIVERGE at a `!` only zsh reads as part
         # of its operator.
@@ -1900,11 +1901,19 @@ shell_lex() {
           if (k in GOR) bg++
           if (k in GOD) bd++
           if (!(k in RB)) continue
+          # Nested, a `}` is decided where its body is read (above), and is a
+          # character here whether it stands as a word or not: the views print
+          # a nested `;` `&` `|` as `_`, so one read as standing after such a
+          # byte was glued when the view was read again, and the view was not
+          # idempotent (random input in scan-contract). For the same reason a
+          # `}` after an operator byte of a redirection, which the stmts view
+          # blanks, is read as glued.
+          if (!RBT[k]) { NC[k] = 1; continue }
           end = (k == N || X[k+1] ~ /[ \t\n;&|)<>`]/)
-          if (wordstart(k)) {
-            if (RBT[k] && end && zg > 0) zg--
-            if (RBT[k] && end && bg > 0) bg--
-            if (RBT[k] && end && bd > 0) bd--
+          if (wordstart(k) && !((k - 1) in DROP && X[k-1] ~ /[;&|]/)) {
+            if (end && zg > 0) zg--
+            if (end && bg > 0) bg--
+            if (end && bd > 0) bd--
             continue
           }
           # Glued to the word before it and closing no group, a `}` is a
@@ -1913,7 +1922,7 @@ shell_lex() {
           # Kept as `}` inside a word, it read as a word end once the quote
           # after it was blanked, and the scan view read again was not the
           # scan view.
-          if (!RBT[k] || !end || zg == 0) { NC[k] = 1; continue }
+          if (!end || zg == 0) { NC[k] = 1; continue }
           zg--
           if (shz) GC[k] = 1
           else P[++pn] = k
