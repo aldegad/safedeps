@@ -116,25 +116,9 @@ pass "the lexer program holds no apostrophe"
 # reading had produced under a fixed name hid a line zsh runs (form SL1).
 lex_calls=$(grep -nE '(^|[^_[:alnum:]])shell_lex[[:space:]]' "${GUARD}" | grep -vE '^[0-9]+:[[:space:]]*#' | grep -v 'shell_lex() {')
 [[ -n "${lex_calls}" ]] || fail "no shell_lex call sites found in ${GUARD} (renamed? then update this check)"
-bad_calls=$(printf '%s\n' "${lex_calls}" | grep -vE 'shell_lex "[^"]+" ("\$\{view\}"|[a-z-]+) "safedeps:[a-z_]+"' \
-  | grep -vE 'shell_lex "[^"]*" "\$\{view\}" "\$\{marker\}"' || true)
+bad_calls=$(printf '%s\n' "${lex_calls}" | grep -vE 'shell_lex "[^"]+" ("\$\{view\}"|[a-z-]+) "safedeps:[a-z_]+"' || true)
 [[ -z "${bad_calls}" ]] || fail "shell_lex call sites that do not read <text> <view> <marker>:
 ${bad_calls}"
-# shell_lex_batch reads many texts as shell_lex reads each, and forwards its
-# caller's view and marker to shell_lex. Only it may forward a marker, and
-# every call of it names one, so each reading still carries a literal marker.
-forwards=$(awk '
-  /^[a-z_]+\(\) \{/ { fn = $1; sub(/\(\).*/, "", fn) }
-  /^\}/ { fn = "" }
-  /^[[:space:]]*#/ { next }
-  /shell_lex "[^"]*" "\$\{view\}" "\$\{marker\}"/ && fn != "shell_lex_batch" { print NR ": " fn }
-' "${GUARD}")
-[[ -z "${forwards}" ]] || fail "shell_lex calls that forward a marker outside shell_lex_batch:
-${forwards}"
-batch_calls=$(grep -nE '(^|[^_[:alnum:]])shell_lex_batch[[:space:]]' "${GUARD}" | grep -vE '^[0-9]+:[[:space:]]*#' \
-  | grep -v 'shell_lex_batch() {' | grep -vE 'shell_lex_batch ("\$\{view\}"|[a-z-]+) "safedeps:[a-z_]+"' || true)
-[[ -z "${batch_calls}" ]] || fail "shell_lex_batch call sites that do not read <view> <marker>:
-${batch_calls}"
 reading_sets=$(awk '
   /^[a-z_]+\(\) \{/ { fn = $1; sub(/\(\).*/, "", fn) }
   /^\}/ { fn = "" }
