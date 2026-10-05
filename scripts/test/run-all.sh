@@ -49,6 +49,7 @@ cd "${ROOT_DIR}" || exit 2
 BATTERIES=(
   "smoke|1|scripts/test/smoke.sh"
   "scan-contract|1|scripts/test/scan-contract.sh"
+  "lex-batch|1|scripts/test/lex-batch.sh"
   "shell-reading|1|scripts/test/shell-reading.sh"
   "census|1|scripts/measure/scan-failure-census.sh --quick"
   "consumer-forms|1|scripts/test/consumer-forms.sh"

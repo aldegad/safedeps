@@ -1634,6 +1634,190 @@ install_managers_blanked() {
   fi
 }
 
+# The global state of the lexer's awk program (shell_lex): every array and
+# every scalar it keeps between statements, as a batch has to clear them
+# before each text. awk starts a process with all of them unset, and a batch
+# that left one set read one text in the state another left behind. The lists
+# are the union over the lexer of this tree and of the statement-starts
+# branch, so a name either one uses is cleared; clearing a name a program
+# never reads changes nothing. scripts/test/lex-batch.sh lists the globals of
+# the program shell_lex runs and fails on any name missing here, so a new
+# global cannot be added to the lexer without being added to these.
+SAFEDEPS_LEX_ARRAYS="A ACL AQV AR ARM BF BSF C CPO CS CW DEP DQS DROP ED EDW ESC EV EW EZ EZW GL GLO HC HEND HSTART JMP KEEP PCOND PS PSB PSN PST RM SBC SBCN SBP SBPN SBS SPC SUBC VAL W WC WD WPO X adol besc ch cpat cpw cst ctx glc pS par pb pd pdq pfed pnp pq ps pstart sbeg sbr send sid skind sl wkind"
+SAFEDEPS_LEX_SCALARS="N a ab acond any aqbad args atstart az b base be body br bs buf bw c cc cl closer cls cmdmode cop cs cw d dbr dc depth div divfile divmemo dollar done dq e envmode execmode exre fed fh first flagfile fn fr fra h hb1 hd held hit hn hstop i id inp inw j k kk lead line lit ln m mm mode n nh np nsub op p pc pcw perline pln pn policy pre q qtop rd rest rp rs s shb shd shre shz sk smark smdone st started strip sv t takes timemode tm top unterm v view w w4 walked wantar wantdep wantst wends wk z zr"
+
+# shell_lex for many texts at once: the view of each text in SAFEDEPS_LB_IN,
+# read in the current reading exactly as shell_lex reads it alone, in one awk
+# process. A statement-by-statement reader called shell_lex once per statement,
+# and each call cost a few processes, so a command's cost grew with the number
+# of its statements: a 1KB `sh -c` script of short functions took 23s on Linux
+# and 50s on an M1, and 321 one-line statements with an install took 117s on
+# the M1 (scripts/measure/scan-cost.sh, the statements table).
+#
+# Each text is read from a fresh state. The program is shell_lex's own, as the
+# running shell holds it, taken with the awk arguments shell_lex would pass
+# (awk is a function for the length of one call that records them), so the
+# program and the arguments are never a second copy. Its BEGIN and END become
+# functions, and before each text every global in SAFEDEPS_LEX_ARRAYS and
+# SAFEDEPS_LEX_SCALARS is cleared, except the -v arguments, then BEGIN runs
+# again. Each text is a file of its own and reaches the program as shell_lex's
+# stdin does: the text and a newline.
+#
+# The side outputs a call writes -- DIVERGE, UNTERM, a failure mark -- go to
+# files of the text's own and come back as text, not to the run's files: a
+# reader replays them when it reads that text (shell_lex_batch_replay). A text
+# read ahead that the single reader would never have reached leaves no trace,
+# so reading ahead cannot bring in a reading or a failure the single reader
+# would not have.
+#
+# Results: SAFEDEPS_LB_OUT[i] the view, SAFEDEPS_LB_D/U/M[i] what the call
+# wrote to the DIVERGE, flag and mark files, SAFEDEPS_LB_F[i] 1 when the call
+# failed (shell_lex returned 1), and SAFEDEPS_LB_MODE how they were read:
+# batch, or single when anything about the batch was not exactly one record
+# per text (awk failing, a record missing, bytes after the last). Then every
+# text is read again with shell_lex alone, its side outputs redirected the
+# same way: slower, never different. scripts/test/lex-batch.sh requires batch.
+shell_lex_batch() {
+  local view="$1" marker="$2" dir argf a name prog="" i n r rc=0 o d u m extra reset="" skip=" " policy="${SAFEDEPS_READING:-}"
+  local -a argv=() vopts=()
+  SAFEDEPS_LB_OUT=() SAFEDEPS_LB_D=() SAFEDEPS_LB_U=() SAFEDEPS_LB_M=() SAFEDEPS_LB_F=()
+  SAFEDEPS_LB_READING="${policy}"
+  # shellcheck disable=SC2153  # the caller's input
+  n=${#SAFEDEPS_LB_IN[@]}
+  (( n > 0 )) || return 0
+  if ! dir=$(mktemp -d "${TMPDIR:-/tmp}/safedeps-lb.XXXXXX" 2>/dev/null); then
+    # Nowhere to put the texts or catch a side output: every text reads as a
+    # failed reading, which the gate settles.
+    for (( i = 0; i < n; i++ )); do
+      SAFEDEPS_LB_OUT[i]="" SAFEDEPS_LB_D[i]="" SAFEDEPS_LB_U[i]="" SAFEDEPS_LB_M[i]=$'failed\n' SAFEDEPS_LB_F[i]=1
+    done
+    return 0
+  fi
+  # The awk arguments shell_lex passes for this view in this reading.
+  argf="${dir}/argv"
+  : > "${argf}"
+  awk() { printf '%s\0' "$@" > "${argf}"; }
+  shell_lex "" "${view}" "${marker}" > /dev/null 2>&1 || true
+  unset -f awk
+  while IFS= read -r -d '' a; do argv+=("${a}"); done < "${argf}"
+  for (( i = 0; i < ${#argv[@]}; i++ )); do
+    if [[ "${argv[i]}" == -v ]] && (( i + 1 < ${#argv[@]} )); then
+      vopts+=(-v "${argv[i+1]}")
+      name="${argv[i+1]%%=*}"
+      skip+="${name} "
+      # A side output the batch does not redirect would be written for texts
+      # no reader reaches: such a program is read one text at a time.
+      case "${name}" in
+        divfile|divmemo|smark) ;;
+        *)
+          a="${argv[i+1]#*=}"
+          if [[ -n "${a}" && ( "${a}" == "${SAFEDEPS_LEX_DIVERGE:-}" || "${a}" == "${SAFEDEPS_SCAN_MARK:-}" || "${a}" == "${SAFEDEPS_LEX_FLAGS:-}" ) ]]; then
+            rc=1
+          fi
+          ;;
+      esac
+      i=$(( i + 1 ))
+    elif (( i == ${#argv[@]} - 1 )); then
+      prog="${argv[i]}"
+    fi
+  done
+  # awk reads an argument holding `=` as an assignment, not a file.
+  [[ -n "${prog}" && "${dir}" != *=* ]] || rc=1
+  if (( rc == 0 )); then
+    for name in ${SAFEDEPS_LEX_ARRAYS}; do [[ "${skip}" == *" ${name} "* ]] || reset+="delete ${name}; "; done
+    for name in ${SAFEDEPS_LEX_SCALARS}; do [[ "${skip}" == *" ${name} "* ]] || reset+="${name} = __lb_nil; "; done
+    printf '%s\n' "${prog}" > "${dir}/prog.in"
+    # The lexer's BEGIN and END become functions the batch calls once per
+    # text. A program whose blocks did not convert does not run, and its texts
+    # are read one at a time.
+    sed -e 's/^      BEGIN {/      function __lb_begin() {/' -e 's/^      END {/      function __lb_end() {/' \
+      "${dir}/prog.in" > "${dir}/prog.awk" 2>/dev/null || rc=1
+    printf '%s\n' 'FNR == 1 { if (__lb_on) __lb_fin(); __lb_go() }' > "${dir}/pre.awk"
+    printf '%s\n' \
+      'BEGIN {' \
+      '  while ((getline __lb_l < __lb_list) > 0) ARGV[++__lb_n] = __lb_l' \
+      '  close(__lb_list); ARGC = __lb_n + 1' \
+      '}' \
+      'END { if (__lb_on) __lb_fin() }' \
+      'function __lb_trunc(f) { printf "" > f; close(f) }' \
+      'function __lb_body(f,   l, s) { s = ""; while ((getline l < f) > 0) s = s l "\n"; close(f); return s }' \
+      'function __lb_go() {' \
+      '  __lb_reset(); __lb_on = 1' \
+      '  __lb_trunc(__lb_d); __lb_trunc(__lb_u); __lb_trunc(__lb_m)' \
+      '  divfile = __lb_d; divmemo = ""; smark = __lb_m' \
+      '  ENVIRON["SAFEDEPS_LEX_FLAGS"] = __lb_u; ENVIRON["SAFEDEPS_LEX_DIVERGE"] = __lb_d; ENVIRON["SAFEDEPS_SCAN_MARK"] = __lb_m' \
+      '  __lb_begin()' \
+      '}' \
+      'function __lb_fin() {' \
+      '  __lb_end()' \
+      '  close(__lb_d); close(__lb_u); close(__lb_m)' \
+      '  printf "%c%s%c%s%c%s%c", 0, __lb_body(__lb_d), 0, __lb_body(__lb_u), 0, __lb_body(__lb_m), 0' \
+      '}' \
+      "function __lb_reset() { ${reset}}" > "${dir}/drv.awk"
+    : > "${dir}/list"
+    for (( i = 0; i < n; i++ )); do
+      printf '%s\n' "${SAFEDEPS_LB_IN[i]}" > "${dir}/t.${i}"
+      printf '%s\n' "${dir}/t.${i}" >> "${dir}/list"
+    done
+  fi
+  if (( rc == 0 )) && LC_ALL=C command awk "${vopts[@]}" -v __lb_list="${dir}/list" \
+      -v __lb_d="${dir}/d" -v __lb_u="${dir}/u" -v __lb_m="${dir}/m" \
+      -f "${dir}/pre.awk" -f "${dir}/prog.awk" -f "${dir}/drv.awk" > "${dir}/out" 2>/dev/null; then
+    # Four records per text, and nothing after the last: anything else means
+    # the frames did not line up.
+    i=0 extra=""
+    {
+      while (( i < n )) && IFS= read -r -d '' o && IFS= read -r -d '' d && IFS= read -r -d '' u && IFS= read -r -d '' m; do
+        SAFEDEPS_LB_OUT[i]="${o}" SAFEDEPS_LB_D[i]="${d}" SAFEDEPS_LB_U[i]="${u}" SAFEDEPS_LB_M[i]="${m}" SAFEDEPS_LB_F[i]=0
+        i=$(( i + 1 ))
+      done
+      IFS= read -r -d '' extra && extra="${extra}x" || true
+    } < "${dir}/out"
+    if (( i == n )) && [[ -z "${extra}" ]]; then
+      rm -rf "${dir}"
+      # shellcheck disable=SC2034  # read by scripts/test/lex-batch.sh
+      SAFEDEPS_LB_MODE="batch"
+      return 0
+    fi
+  fi
+  # One text at a time, each call's side outputs caught in files of its own.
+  # shellcheck disable=SC2034  # read by scripts/test/lex-batch.sh
+  SAFEDEPS_LB_MODE="single"
+  for (( i = 0; i < n; i++ )); do
+    : > "${dir}/d"; : > "${dir}/u"; : > "${dir}/m"
+    r=0
+    o=$(SAFEDEPS_LEX_DIVERGE="${dir}/d" SAFEDEPS_LEX_FLAGS="${dir}/u" SAFEDEPS_SCAN_MARK="${dir}/m" SAFEDEPS_LEX_CACHE="" \
+      shell_lex "${SAFEDEPS_LB_IN[i]}" "${view}" "${marker}" && printf 'X') || r=1
+    SAFEDEPS_LB_OUT[i]="${o%X}"
+    (( r == 0 )) || SAFEDEPS_LB_OUT[i]=""
+    SAFEDEPS_LB_F[i]="${r}"
+    d="" u="" m=""
+    IFS= read -r -d '' d < "${dir}/d" || true
+    IFS= read -r -d '' u < "${dir}/u" || true
+    IFS= read -r -d '' m < "${dir}/m" || true
+    SAFEDEPS_LB_D[i]="${d}" SAFEDEPS_LB_U[i]="${u}" SAFEDEPS_LB_M[i]="${m}"
+  done
+  rm -rf "${dir}"
+  return 0
+}
+
+# What shell_lex would print and write for text <i> of the last batch, done
+# now: its side outputs appended to the files in force at this call, as
+# shell_lex appends to them, its view printed. Returns 1 where shell_lex would
+# have, and where the batch was read in another reading.
+shell_lex_batch_replay() {
+  local i="$1"
+  if [[ "${SAFEDEPS_LB_READING:-}" != "${SAFEDEPS_READING:-}" || -z "${SAFEDEPS_LB_F[i]:-}" ]]; then
+    guard_mark_reading_failed
+    return 1
+  fi
+  [[ -z "${SAFEDEPS_LB_D[i]}" || -z "${SAFEDEPS_LEX_DIVERGE:-}" ]] || printf '%s' "${SAFEDEPS_LB_D[i]}" >> "${SAFEDEPS_LEX_DIVERGE}"
+  [[ -z "${SAFEDEPS_LB_U[i]}" || -z "${SAFEDEPS_LEX_FLAGS:-}" ]] || printf '%s' "${SAFEDEPS_LB_U[i]}" >> "${SAFEDEPS_LEX_FLAGS}"
+  [[ -z "${SAFEDEPS_LB_M[i]}" || -z "${SAFEDEPS_SCAN_MARK:-}" ]] || printf '%s' "${SAFEDEPS_LB_M[i]}" >> "${SAFEDEPS_SCAN_MARK}"
+  (( SAFEDEPS_LB_F[i] == 0 )) || return 1
+  printf '%s' "${SAFEDEPS_LB_OUT[i]}"
+}
+
 # The command as lines the shell reads as statements (the joined view): line
 # continuations removed, newlines inside quotes, heredoc bodies and comments
 # blanked.
