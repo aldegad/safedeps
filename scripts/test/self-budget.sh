@@ -799,4 +799,33 @@ if grep -q 'UNDECIDED' <<< "${GUARD_REASON}"; then fail "a 64KB install is judge
 printf '# note - 64KB install judged in %ss\n' "${GUARD_ELAPSED}"
 pass "a 64KB install is judged inside the default budget, not answered UNDECIDED"
 
+# The gate's cost grew with the number of statements, not the bytes: a reader
+# that asked about each statement paid a dozen processes for each. A 1KB
+# `sh -c` script of short functions took 64s on an M1 and 41s on Linux, and
+# 321 one-line statements with an install 117s on the M1 (scan-cost's
+# statements table, deadline off), so the deadline answered UNDECIDED in
+# their place. Each of these shapes gets its verdict, not UNDECIDED, under the
+# default budget, on both systems.
+unit="f() { echo 'a b' \\\"\$x\\\" (1); }; "
+script=""
+for (( i = 0; i < 33; i++ )); do script+="${unit}"; done
+guard "sh -c \"${script}\" ; npm install left-pad@1.3.0" 20
+[[ "${GUARD_DECISION}" == "deny" ]] || fail "a 1KB sh -c script of 33 functions is judged inside the default budget (got: ${GUARD_DECISION})"
+if grep -q 'UNDECIDED' <<< "${GUARD_REASON}"; then fail "a 1KB sh -c script of 33 functions is judged, not timed out (took ${GUARD_ELAPSED}s)"; fi
+printf '# note - 1KB sh -c script of 33 functions judged in %ss\n' "${GUARD_ELAPSED}"
+pass "a 1KB sh -c script of short functions is judged inside the default budget, not answered UNDECIDED"
+
+lines=""
+for (( i = 0; ${#lines} < 32700; i++ )); do lines+="echo line${i}"$'\n'; done
+guard "${lines}npm install left-pad@1.3.0" 20
+[[ "${GUARD_DECISION}" == "deny" ]] || fail "32KB of one-line statements with an install is judged inside the default budget (got: ${GUARD_DECISION})"
+if grep -q 'UNDECIDED' <<< "${GUARD_REASON}"; then fail "32KB of one-line statements with an install is judged, not timed out (took ${GUARD_ELAPSED}s)"; fi
+printf '# note - 32KB of one-line statements (%s) with an install judged in %ss\n' "${i}" "${GUARD_ELAPSED}"
+pass "32KB of one-line statements with an install is judged inside the default budget, not answered UNDECIDED"
+
+guard "${lines}echo done" 20
+if grep -q 'UNDECIDED' <<< "${GUARD_REASON}"; then fail "32KB of one-line statements is judged, not timed out (took ${GUARD_ELAPSED}s)"; fi
+printf '# note - 32KB of one-line statements with no install judged in %ss\n' "${GUARD_ELAPSED}"
+pass "32KB of one-line statements with no install is judged inside the default budget, not answered UNDECIDED"
+
 printf 'self-budget battery: all checks passed\n'

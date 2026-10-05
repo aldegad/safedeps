@@ -50,7 +50,7 @@
 # Usage:
 #   scripts/measure/scan-cost.sh [SIZE_BYTES...]        # default sweep
 #   scripts/measure/scan-cost.sh --reps 5 32000 65536
-#   scripts/measure/scan-cost.sh --statements 100 400 3200 --cap 60 8192
+#   scripts/measure/scan-cost.sh --statements 100,400,3200 --cap 60 8192
 #
 # Sizes are approximate command lengths in bytes.
 #
@@ -67,13 +67,12 @@ REPS=3
 CAP=120
 SIZES=()
 COUNTS=()
-counts_next=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --reps) REPS="${2:-3}"; shift 2 ;;
     --cap) CAP="${2:-120}"; shift 2 ;;
-    --statements) counts_next=true; shift ;;
-    *) if [[ "${counts_next}" == true ]]; then COUNTS+=("$1"); else SIZES+=("$1"); fi; shift ;;
+    --statements) IFS=, read -ra COUNTS <<< "${2:-}"; shift 2 ;;
+    *) SIZES+=("$1"); shift ;;
   esac
 done
 [[ ${#SIZES[@]} -eq 0 ]] && SIZES=(1000 4000 8000 16000 32000 65536)
