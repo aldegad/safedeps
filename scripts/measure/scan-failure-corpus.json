@@ -82,7 +82,9 @@
     "npm ci;",
     "(cd sub && npm install)",
     "env -S 'pip install requests==2.0.0'",
-    "printf 'pip install evil==6.6.6' | dash"
+    "printf 'pip install evil==6.6.6' | dash",
+    "npm install left-pad@1.3.0 && echo done && npm install cowsay@1.5.0",
+    "echo \"a\npip install evil==6.6.6"
   ],
   "controls": [
     "ls -la",
@@ -94,7 +96,7 @@
     "git commit -m 'bump npm i x'"
   ],
   "quick": {
-    "comment": "The subset npm test runs: one form per ecosystem bare, the wrappers that reach a different reader on one form, the extras that exercise join, blanking, inert, --prefix and a spec-less npm install, and two controls. Claude payloads only, except the rows under variants, which also run as codex, padded and approved; K-onward runs are left to the full census.",
+    "comment": "The subset npm test runs: one form per ecosystem bare, the wrappers that reach a different reader on one form, the extras that exercise join, blanking, inert, --prefix, a spec-less npm install and two npm installs with an inert statement between them (the sed that reads an inert head in the npm attribution) and a command that does not close (the grep that reads the lexer's flag), and two controls. Claude payloads only, except the rows under variants, which also run as codex, padded and approved; K-onward runs are left to the full census.",
     "forms": [
       "npm install left-pad@1.3.0",
       "pnpm add left-pad@1.3.0",
@@ -121,7 +123,9 @@
       "sh -c \"echo \\\"a\\\"; pip install requests==2.0.0\"",
       ".venv/bin/pip install requests==2.0.0",
       "/usr/bin/env pip install requests==2.0.0",
-      "npm ci;"
+      "npm ci;",
+      "npm install left-pad@1.3.0 && echo done && npm install cowsay@1.5.0",
+      "echo \"a\npip install evil==6.6.6"
     ],
     "controls": [
       "ls -la",
@@ -131,7 +135,8 @@
       "npm install left-pad@1.3.0 && npm run build",
       "pip install requests==2.0.0",
       "npm install left-pad@1.3.0",
-      "eval \"npm install left-pad@1.3.0\""
+      "eval \"npm install left-pad@1.3.0\"",
+      "npm install left-pad@1.3.0 && echo done && npm install cowsay@1.5.0"
     ]
   },
   "approvals": [

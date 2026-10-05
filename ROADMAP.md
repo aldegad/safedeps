@@ -56,7 +56,7 @@ The internal engine keeps the v1 `reorg-guard` assets.
 
 ### Release notes
 
-- The npm package version in `package.json` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION` tracks it and the smoke test reads `package.json` to compare (current: v2.18.0).
+- The npm package version in `package.json` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION` tracks it and the smoke test reads `package.json` to compare (current: v2.18.1).
 - `npm test` runs the release smoke suite; the full fixture E2E lives under `v2.1-tests`.
 - The daily re-check uses no LLM tokens. It is opt-in: a macOS `launchd` user agent runs `safedeps re-check --json` daily, installed atomically by `install-safedeps-recheck-agent.mjs`. It writes `~/.safedeps/recheck.log` and `~/.safedeps/recheck-alerts.jsonl` and raises a macOS notification on a new CVE/KEV/revoke/provider-skip/suspected-forgery. Network is used only for OSV / CISA / GHSA queries.
 
@@ -1016,7 +1016,76 @@ Review found more than one release could close, and these were stated rather tha
 
 On the release tree 1d43743, `npm test` ran all 14 batteries with 395 ok and 0 not ok on macOS and on Linux. macOS was an M1 MacBook (macOS 15.6.1, bash 3.2.57, npm 11.19.0): 3876s with two batteries at a time, load 1.5 to 19.3. Linux was the project's Debian 13 VM (bash 5.2.37, node v20.20.2, npm 10.8.2): 2628s, load 0.2 to 15.7, run in a root without the VM's root-owned `/node_modules`, which otherwise changes where npm says a manifest-less directory installs. The commits after 1d43743 change only documentation and one comment. Each change was cross-validated by another member before it merged, and the merged tree was re-read for agreement between README, ARCHITECTURE, SKILL and AGENTS before it shipped. That re-reading found the floor named as v2.17.2 when it is 7d66f8c, and the three downgraded shapes above are what it turned up.
 
-## v2.18.1 (in progress)
+## v2.18.2 — in progress
+
+### Where a command starts is an event, not a byte
+
+In v2.18.0 the recognizers found a statement start with a regex: a separator, then a chain of the reserved words that may stand before a command. A chain cannot see the shell state that puts a command there, so a function body (`f() { pip install evil==1.0.0; }; f`), a function with more than one name, `time -p {`, `coproc NAME {`, zsh's short forms (`for i (1) {`, `repeat 1 {`, `} always {`), `for ((i=0;i<1;i++)) {` and a redirection before the command (`2>/dev/null pip install ...`) each passed with no verdict. This release reads where a command starts in the lexer, which walks the words with each shell's grammar state (ARCHITECTURE.md has the rules), and holds the forms in `scripts/test/consumer-forms.sh` with what each shell ran.
+
+The walk's first design handed its answer to the recognizers as bytes: the stmts view wrote a `;` over the byte before each start. A start glued to the token before it had no byte of its own. Three review rounds found three such places, and each repair borrowed one more byte of a neighbouring token (a case pattern's `)`, a head's `)`, zsh's glued `{`). The fourth could not be borrowed: a redirection, an assignment or a precommand glued to a reserved word, `!`, a head's close or zsh's `{`, as in `if true; then>/dev/null pip install evil==1.0.0; fi`. The prefixes were removed by a second lexing of the changed text, which found `thenpip`. A table generated from the simple-command grammar found 403 forms of this kind that some shell runs and the gate passed with no record, 108 of them in all four macOS shells. main, asked about 111 of them, passed each.
+
+- **The walk hands each start on as an event between two bytes.** The recognizers read the recognize view, the statement split cuts at the events, and the bash reading compares the event sets of its three walks for `DIVERGE`. Every rule that borrowed a byte is gone.
+- **Where a word starts is the walk's answer.** A descriptor word or a subscript assignment after zsh's glued `{` starts where the walk starts the command. zsh and dash read one digit before a redirection operator as its descriptor and bash any number, so zsh runs `repeat 12>&1 pip install x` twelve times.
+- **zsh's `&!` ends a command,** so `true&!pip install x` is read in the zsh reading.
+- **A zsh precommand modifier where the other shells read the command** (`exec -- noglob pip install x`) makes the bash reading say `DIVERGE`. A second lexing used to say it by accident.
+- **The redirection grid's first places are generated** from the same grammar (`FIRSTS` in `scripts/measure/redirection-grid.sh`, which `scripts/measure/first-place-grid.sh` reads), not four picked by hand.
+- **Two payload grammars stay a stated boundary,** pinned as passes in `scripts/test/consumer-forms.sh`: an `env -S` string split by env(1)'s own rules, and code in a zsh glob qualifier (`*(e:...:)`). A later plan reads them.
+- **Three npm forms that only one shell runs are `UNDECIDED` instead of rewritten:** `>/dev/null(N) npm install x` and `>/dev/(null) npm install x` (zsh alone) and `{fd}>/dev/null npm install x` (bash 5 alone). The other shells fail to parse them or run no install, so the readings put the install in different places. The rewrite they used to get came from a second lexing that read the leftover `(N)` as a subshell at a command start, and from a zsh reading of `{fd}` that disagreed with its own walk. Fail-closed.
+- **An npm install behind a descriptor of two or more digits is `UNDECIDED` too** (`12>/dev/null npm ci`, `10>&2 npm install`). bash reads the number as the descriptor and runs the install. zsh and dash read one digit there, so they take `12` for the command and run no install. The readings put the install in different places. 75b8130 rewrote these forms, because all its readings took the number for a descriptor. A one-digit descriptor (`2>/dev/null npm ci`) is rewritten as before. The first-place table for npm holds only one-digit descriptors, so its counts do not show this move. Fail-closed.
+- **`TIME pip install x`** runs /usr/bin/time on a macOS volume, which ignores case. The start pattern used to read `time` in any case; the walk read it only in lower case, so the merge with main left `TIME` a command name. env, command and time are now read as the grammar reads a manager's name, the last part of a path in any case.
+
+### Every reader lexes the command once
+
+The section above said the recognizers read one lexing of the text. They did not. They lexed the joined view of the command, which another lexing had already made, and so did the landing, the spec extractor, the writer attribution and the inert reading, each through the joined view or the code view; the extractor lexed the unprefixed view of that once more. The joined view blanked a heredoc body and its terminator line but kept the live code of an unquoted body, which the shell runs. Lexed again, `cat <<E`, `$(date)`, `E`, `pip install evil==6.6.6` read as one command, `$(date)`, with the install as its arguments. Every shell measured runs that install, and the gate passed it with no verdict and no record; an npm install there ran without `--ignore-scripts`. `git commit -F - <<EOF` with a `$(date)` in the message, then `npm ci`, is an ordinary agent command. v2.18.1 and v2.18.0 passed it too (verdict buri-20261005-145152, which found it on the checkpoint head).
+
+- **Each reader lexes the command as written, once per reading, and takes its views from that lexing.** The recognizers read its recognize view, which now drops a line continuation itself. The landing and the extractor read its pieces view, cut where the statement split cuts, with each statement's words (with and without its prefixes) and its recognize bytes; the extractor takes them through the landing's list, so the two still read the same statements. The statement split reads words from the stmtraw view, where a body, its live code and a comment are blank and a continuation is stepped over. The inert reading lexes the statement it places the flag in, whole, and reads the flat view of it for the shell's expansions.
+- **A payload is the one other text a reader lexes:** a script handed to `sh -c` or `eval`, and the body of a substitution, read from the command as written and passed on whole (each ends in `\035`, so one holding a newline stays one text).
+- **The joined view, the per-line pieces reading and `normalize_install_text` are gone,** so no reader can lex them again. A view no branch names fails the reading instead of printing the code view.
+- **The structure is checked, not described.** `scripts/test/scan-contract.sh` runs the guard under an awk shim that records every lexing, and each text lexed must be the command, a payload, or a piece of one cut at offsets (a statement, or one with the inert flag put in). The comment that said "each text is lexed once" was what a checkpoint review read.
+- **The pipe check beside a compound consumer** (main's walker, merged here) steps over the `;` the recognize view puts in after `!` or `time`, so `| ! sh` is still a pipe into a shell.
+- **The scan-failure discriminator joins a continuation** before it looks for a manager's name, as the recognizers do: `pi\<newline>p install` names pip nowhere in its bytes.
+
+### Verification
+
+Every run went through a test host's queue, never on the author's machine. macOS: two M1 MacBooks (macOS 15, bash 3.2.57), load 4 to 17. Linux: the project's Debian 13 VM (bash 5.2.37, mawk 1.3.4), load 1.7 to 8, with another run beside it on the VM's second slot.
+
+- **Batteries on the final code (0d05321).** macOS: scan-contract 54 ok and 0 not ok, consumer-forms 82/0, shell-reading 4/0, smoke 61/0, manager-variants 3/0, hook-entry 11/0, and census --quick with 0 weakened, mislabeled, error, after-gate, pending-on-deny, idle-mode, unmarked, unlisted and unstable. Linux: scan-contract 54/0, consumer-forms 82/0, shell-reading 4/0, smoke 61/0, manager-variants 3/0, hook-entry 11/0, census --quick with the same zeros, and CI's shellcheck list.
+- **The event contract** checks 10715 events of 707 inputs (217 shell forms, 290 first-place forms, 200 random) in all three readings. Its first full run found five places where a reader disagreed with the walk, each fixed (f4d9d56), and the Linux random sequence found a sixth (4e91f25).
+- **Mutations, each on a copy:** putting no `;` in at a bare start, cutting no statement there, comparing no event sets for `DIVERGE`, letting the descriptor reading ignore the walk's starts, and dropping zsh's `&!` each turn scan-contract red. The 75b8130 code with the new rows is red at the first start row.
+- **The first-place table for npm** (`npm ci` behind 8 first places in every production, 1160 forms): of the 841 forms some macOS shell runs, 601 are rewritten, 226 are `UNDECIDED`, and 14 pass. The 14 are an npm inside backticks, and each is recorded in `advisory.log` as a downgrade. The 32 data forms pass. Measured on the final code; a tree before f4d9d56 gave the same counts, since no macOS shell runs the `{fd}` forms that commit moves.
+- **The grid**: 8438 forms, 7047 run by some shell column, 450 data forms. Judged so far on the final code, in parts of the committed record: on macOS 4219 forms (two of four quarters), each of the 3290 a shell runs denied as an install that names the package and each of the 241 data forms passed, and in 18482 shell runs each reading showed the line its own shell ran; on Linux 3166 forms, 2657 and 156 the same way. No part found a form a shell runs and the gate let through. The rest of the grid was stopped to free the test hosts for the v2.18.1 release and runs after it.
+- **Replay against 75b8130** (the 310 forms of scan-corpus, with 200 and 300 random commands, seeds 9191 and 4242): 510 of 510 and 610 of 610 verdicts identical, on the final code (92da88d) and on 58e8466 before it. The control, a scan that blanks nothing, moves 1 of 510, so the replay can fail.
+- **Cost** (`scripts/measure/scan-cost.sh`, Linux VM, deadline off, best of 3, two rounds each; 75b8130 then 0d05321, in seconds). The recognizers lexed their text twice on 0d05321 (the joined view, then the recognize view of it), where 75b8130 lexed it three times; since the repair below they lex it once, and the cost is measured again in the integration tree:
+
+| size | gate quiet | gate loud | gate split |
+|---|---|---|---|
+| 8KB | 0.338–0.350 → 0.313–0.321 | 1.873 → 1.591–1.597 | 5.534–5.640 → 4.547–4.565 |
+| 32KB | 0.741–0.770 → 0.642–0.656 | 3.239–3.292 → 2.828–2.866 | 9.473–9.642 → 8.496–8.539 |
+
+The lexer alone (scan) is unchanged: 0.028–0.033s at 8KB and 0.057–0.066s at 32KB in both trees.
+
+## v2.18.1 — records belong to one call, and npm publishes from a tag (shipped)
+
+This release closes the v2.18.0 boundaries that were ready, and moves npm publishing to GitHub Actions. The rest of what v2.18.0 moved here is listed at the end of this section and ships in v2.18.2.
+
+### Beside an install, a pipe into a shell is asked the same question as alone
+
+v2.18.0 said that beside a visible install a piped install "is refused fail-closed, as it always was with nothing beside it". That was false for several shapes. The check set the visible install aside first, then searched what was left more narrowly than it searches with nothing beside an install. With the visible spec approved, these passed on v2.18.0 with the piped install unchecked, while the same producer alone was denied:
+
+- a manager behind an escape, a format or a `cut`: `pip install requests==2.0.0 && printf '\npip install evil==6.6.6' | sh`, and the `\t`, `%s`, `xpip ... | cut -c2-`, `set -e\n...` and `echo -e` forms;
+- an install that a heredoc carries to the shell by a route other than a piped body: written to a file and then `cat s.sh | sh`, a file descriptor, a group, a subshell, a variable, or `tee`;
+- an install in a comment that the producer reads back through `$BASH_EXECUTION_STRING`, `$ZSH_EXECUTION_STRING` or `ps`;
+- the visible install's own spec, rewritten by `sed` from the exec string.
+
+Repairs in this cycle kept the setting aside and changed the search, and each one left a form through. The last set aside every word the manager's grammar reads as the install's own. It missed `pip install pip==24.0 && echo "${_%%=*} install evil==6.6.6" | sh`, because the shell hands the producer the install's last word as `$_`. A producer can read the command's own text through `$_`, the exec string, `ps` or a file, and the gate cannot list those routes. So nothing is set aside now. Beside a visible install the gate asks the pipe question it asks with nothing beside one, of the same text: the whole command, and each `sh -c`, `eval` and substitution script in it.
+
+The cost falls on commands that mix an install with an unrelated pipe into a shell, such as `npm install x && cat setup.sh | sh`. Such a command is now denied, and the reason says to run the two as separate commands.
+
+**Verified.** `scripts/test/consumer-forms.sh` holds the change. It writes each form beside a visible install with a marker before that install. Every row is checked for its verdict, and then an S1 loop checks it against the same bytes with the visible install switched off by `true `. The rows are the 32 piped installs from before, the ten forms that kept the visible install's verdict and are now denied, each with the reason the text cannot clear it, and 21 rows from the grid's carriers (heredoc carriers, comment carriers, and the visible install's own words): 18 of them passed beside an install and were denied alone, and three were denied on both paths. Six rows keep their verdict: four carry nothing into a shell, and two were denied already. In all, the loop covers 69 rows. On 1bf5748, consumer-forms passed with 67 ok and 0 not ok on macOS (carenine, an M1 Max MacBook, bash 3.2, 846s, load 4.5 at the start and 5.3 at the end) and on Linux (the project's Debian VM, bash 5.2.37, 806s, load 3.2 at the start and 3.8 at the end). On Linux, smoke (61 ok), scan-contract (41) and shell-reading (4) passed too. Two mutations, each run on a copy, turn the battery red. With 68cc2f8's setting aside put back, 56 checks fail: every heredoc and comment row, the five own-word rows the pipe rule denies, the ten flipped rows, and the S1 loop on 28 rows. With the pipe question off beside a visible install, 122 checks fail, the S1 loop on 61 of its 69 rows.
+
+On macOS, smoke (61 ok), scan-contract (41) and shell-reading (4) passed as well. The quick scan-failure census ran 2,971 failing runs there and counted zero weakened, mislabeled, error, after-gate, pending-on-deny, unmarked, unlisted and unstable (load 4.5 at the start and 4.8 at the end). `scripts/measure/scan-verdict-replay.sh aa77fac --random 200 --seed 1001` moved none of 438 verdicts, the false-positive category included. Its control, a scan that blanks nothing, moved 1, so the replay can fail (an M1 MacBook, load 4.7 at the start and 5.2 at the end).
+
+Not closed here: the same producer one level in. When the install's words reach the shell through `$_` or the exec string inside a command substitution, a backquote, a double-quoted `sh -c` or `eval` (`pip install pip==24.0 && x=$(echo "${_%%=*} install evil==6.6.6" | sh)`), the pipe is asked of that payload's own text, which does not hold the visible install's words, and the command passes with no record, beside an install and alone alike. v2.18.0 and v2.17.2 pass it too. So this release does not say that a piped install beside a visible install is always denied. It moves to v2.18.2.
 
 ### An install record belongs to one call
 
@@ -1062,7 +1131,22 @@ On the project's Debian VM (bash 5.2.37, `mawk`, load 1.0 to 2.1) the same rows 
 
 Verification: every lexer view in all three readings, before against after, on 1,304 inputs (the committed corpora, 300 seeded random commands and long words around the builder's chunk sizes): 46,944 comparisons, none different, under the macOS awk and under `mawk`. The guard's whole answer and its `advisory.log`, before against after, on the corpora and the long-word shapes up to 9KB: 992 inputs, none different, on macOS; the same comparison of the old tree with itself is also clean. Both comparisons can fail: with the builder broken on a copy, the lexer comparison differs on 54 of 36,144 and the gate comparison shows installs moving from deny to allow. On the M1 and on the VM, self-budget (41 ok), scan-contract (43), shell-reading (4), smoke (61) and consumer-forms (62) passed with no `not ok`, and the quick census on the M1 counted zero weakened, mislabeled, after-gate, pending-on-deny, unmarked and unlisted. The new self-budget row is red on the v2.18.0 tree on the M1 (`UNDECIDED` at 21s) and passes there on Linux, where that tree was already fast.
 
-Not closed here: a command's cost also grows with how many statements it holds, on both systems and before and after this fix. A 1KB `sh -c` script of short function definitions takes 23s on Linux, and 32KB of one-line statements takes 48s. That cost is per statement, not per byte, and is a separate item of this release.
+Not closed here: a command's cost also grows with how many statements it holds, on both systems and before and after this fix. A 1KB `sh -c` script of short function definitions takes 23s on Linux, and 32KB of one-line statements takes 48s. That cost is per statement, not per byte, and moves to v2.18.2.
+
+### Moved to v2.18.2
+
+Each of these has its own plan, and the work goes on. They were cut from this release so that it could ship.
+
+- **The inert flag in text the rewrite cannot read.** The commands v2.17.2 gave `--ignore-scripts` and v2.18.0 does not (a `ksh -c` script, a double-quoted shell script or `eval` with an escape or a substitution in it, a heredoc body piped to another command) still get none. Review found that such a text can also hide an npm verb with neither a flag nor a record, and the repair makes one record path for every kind of unread text, checked by a script over 392 shapes.
+- **A verb glued to `;`.** `npm ci;` and the same spelling in other managers are not read as an install.
+- **Where a command starts in the lexer.** A command glued to a reserved word or `!` through a redirection, zsh's `&!`, and installs inside a function body.
+- **The per-statement cost.** Batching the per-statement questions takes a 400-statement command from 67.7s to 5.2s on Linux; it builds on the lexer change above.
+- **Payloads the shells read as code.** `env -S` strings and zsh glob qualifiers that run code.
+- **An argument with `$(...)` inside double quotes.** The inert flag after such an argument can land inside the substitution.
+- **Pipe consumers outside the list.** Install text piped to a consumer the pipe check does not name (a function, `source`, `dash`, `coproc` and others) passes with no record, alone and beside a visible install alike. A closed rule replaces the list.
+- **The same piped producer one level in.** A pipe into a shell inside a command substitution, a backquote, a double-quoted `sh -c` or `eval` that reads the visible install's words through `$_` or the exec string passes with no record. The proposed rule denies any pipe into a shell in any payload of a command that holds install text.
+
+---
 
 ## v3 (future)
 
