@@ -2,8 +2,8 @@
 # safedeps: scan-failure census -- fail every reading of a command, one at a
 # time and all at once, and check that no verdict gets weaker.
 #
-# The pre-guard reads a command through awk (the scanner, the line joiner, the
-# payload readers). A failed awk returns empty text, and
+# The pre-guard reads a command through awk (the lexer's views, the statement
+# split, the payload readers). A failed awk returns empty text, and
 # empty text reads as "no install", so every reading is a place where a failure
 # could turn a deny into a pass. The guard's answer to that is one gate that
 # every non-deny path crosses after its last reading: if any reading failed, a
@@ -236,13 +236,11 @@ tally() { printf '%s\n' "\$2" >> "\${state}/\$1"; }
 kind=""
 case "\$*" in
   *"safedeps:command_scan_text"*) kind=scan ;;
-  *"safedeps:join_line_continuations"*) kind=join ;;
   *"safedeps:strip_heredoc_bodies"*) kind=strip ;;
   *"safedeps:command_reads"*) kind=reads ;;
   *"safedeps:inert_rewrite_in_place"*) kind=inert ;;
   *"safedeps:inert_offsets"*) kind=offsets ;;
   *"safedeps:inert_payload_spans"*) kind=payspans ;;
-  *"safedeps:normalize_install_text"*) kind=norm ;;
   *"safedeps:extract_command_substitution_payloads"*) kind=subst ;;
   *"safedeps:command_statements"*) kind=stmts ;;
   *"safedeps:guard_npmrc_value"*) kind=npmrc ;;
@@ -286,8 +284,8 @@ chmod +x "${WORK}/bin/awk"
 # are numbered by awk calls alone.
 #
 # sed-all was the only sed mode for a release, and it could not see one site:
-# the first judgment sed a command reaches (normalize_install_text) marks its
-# failure, and that mark covers every later sed, so a later site whose own mark
+# the first judgment sed a command reached (then normalize_install_text) marked
+# its failure, and that mark covers every later sed, so a later site whose own mark
 # was deleted still read as UNDECIDED (raised in review of v2.18.0). Failing
 # one call at a time lets each site answer for itself. Measured on the sed that
 # reads an inert head between two npm installs: with its mark deleted, the K-th
@@ -410,7 +408,7 @@ for n in $(seq 1 "${case_count}"); do
   for k in $(seq 1 "$(cut -f15 "${WORK}/results/${n}.count.0")"); do
     printf '%s sed-k %s\n' "${n}" "${k}" >> "${WORK}/jobs"
   done
-  for mode in scan-all join-all strip-all reads-all inert-all offsets-all norm-all subst-all stmts-all npmrc-all pieces-all payload-all paywords-all payspans-all awk-all grep-all sed-all; do
+  for mode in scan-all strip-all reads-all inert-all offsets-all subst-all stmts-all npmrc-all pieces-all payload-all paywords-all payspans-all awk-all grep-all sed-all; do
     printf '%s %s 0\n' "${n}" "${mode}" >> "${WORK}/jobs"
   done
 done

@@ -101,7 +101,7 @@ time_scan() {
   printf '%s' "${best}"
 }
 
-LEX_VIEWS="scan code live noredir pieces cscripts stmts substs unprefixed unprefixed-lines joined shell-bodies"
+LEX_VIEWS="scan code live flat noredir pieces cscripts stmts recognize stmtcuts stmtraw substs unprefixed shell-bodies"
 time_views() {
   local input="$1" s e best="" i t v
   for ((i = 0; i < REPS; i++)); do

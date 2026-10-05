@@ -107,8 +107,8 @@ expect_deny "sh -c nested in a single-quoted sh -c"   "sh -c 'sh -c \"pip instal
 pass "command gate catches the enumerated shell carriers"
 
 # The two sides of one pipe must agree on what counts as the same invocation.
-# normalize_install_text already declares that a path-qualified or env-prefixed
-# invocation is the bare one; it was applied to the install text and skipped on
+# The lexer reads a path-qualified or env-prefixed invocation as the bare one
+# (prefixes() in shell_lex); that was applied to the install text and skipped on
 # the consumer, so `| /bin/sh` and `| env sh` read as a different consumer than
 # `| sh`. These four are that inconsistency, not four separate carriers.
 expect_deny "a pipe to an absolute-path shell"        "printf 'pip install evil==1.0.0' | /bin/sh"
@@ -2085,6 +2085,7 @@ for escaped_form in \
   'echo \" ; pip install evil==1.0.0' \
   "echo \\' ; pip install evil==1.0.0" \
   $'pip \\\ninstall evil==1.0.0' \
+  $'pi\\\np install evil==1.0.0' \
   $'echo a\\\\\npip install evil==1.0.0'
 do
   expect_deny "an install after $(printf '%q' "${escaped_form}")" "${escaped_form}"
@@ -3211,19 +3212,63 @@ do
 done
 pass "ordinary commands where bash, zsh and dash read differently keep their verdicts (25)"
 
-# A reader that lexes the joined lines again reads them out of the context of
+# A reader that lexed the joined lines again read them out of the context of
 # the first lexing. Here an arithmetic expansion left open in an unquoted
 # heredoc body (the `$((` on the second line, inside the body that `<<2`
 # opens) used to land on one joined line with the install after the body, and
 # lexed again at the top level its apostrophe opened a quote that never closed.
 # bash and zsh run the install (fuzz form F19, seed 20261001, on macOS and
 # Linux); the gate passed it. A context left open at the end of a body is body
-# data now, so the install is read and checked. Should a joined text still not
-# close where its text did, that reading has failed, and the gate says
-# UNDECIDED: either way, never a pass.
+# data now, so the install is read and checked, and no reader lexes a joined
+# text any more (the rows below).
 joined_reread=$'((echo $(echo ")") <<2) )\nx=$((cat <<EOF\nit\'s\nEOF\n) )\n2\npip install evil==6.6.6\n'
 got=$(gate_reason "${joined_reread}")
 [[ "${got}" == "deny "*"install not approved"* ]] || fail "an install after a heredoc body that leaves an arithmetic open is read and checked (got: ${got:0:120})"
 pass "an install after a heredoc body that leaves a context open is read, not hidden by a reading of the body out of it"
+
+# Live code in an unquoted heredoc body (`$(date)`, `${HOME}`, a backquote,
+# `$((1+1))`) and the install on the line after the terminator. The
+# recognizers, the landing, the extractor and the inert reading each lexed
+# the joined view of the command again: that view blanked the body and its
+# terminator line but kept the live code, so lexed again, `$(date)` stood where
+# the next command did and took `pip install` for its arguments. The install
+# passed with no verdict and no record, and an npm install ran unrewritten, in
+# every shell measured (macOS bash 3.2, GNU bash 5.2, zsh -f, sh and dash;
+# Linux bash 5.2 and dash; verdict buri-20261005-145152, which found it on
+# v2.18.1 too). Each reader now lexes the command as written, once, and a
+# payload on its own; scan-contract traces every lexing of a guard run and
+# holds each to that. A plain body, `$HOME`, a quoted delimiter and a
+# separator before the install were denied before: they are rows here too, as
+# the controls the same bytes give.
+heredoc_body_rows=(
+  $'Q01|pip|cat <<E\n$(date)\nE\npip install evil==6.6.6\n'
+  $'Q02|pip|cat > notes.txt <<EOF\nbuilt at $(date)\nEOF\npip install evil==6.6.6\n'
+  $'Q03|npm|cat > notes.txt <<EOF\nbuilt at $(date)\nEOF\nnpm install evil\n'
+  $'Q04|pip|cat <<E\n${HOME}\nE\npip install evil==6.6.6\n'
+  $'Q05|pip|cat <<E\n`date`\nE\npip install evil==6.6.6\n'
+  $'Q06|pip|cat <<E\n$((1+1))\nE\npip install evil==6.6.6\n'
+  $'Q07|pip|cat <<-E\n\t$(date)\n\tE\npip install evil==6.6.6\n'
+  $'Q08|pip|cat <<E\n$(date)\nE\necho ok && pip install evil==6.6.6\n'
+  $'Q09|pip|cat <<E\n$(echo a\nb)\nE\npip install evil==6.6.6\n'
+  $'Q10|pip|cat <<\'E\'\n$(date)\nE\npip install evil==6.6.6\n'
+  $'Q11|pip|cat <<E\n$HOME\nE\npip install evil==6.6.6\n'
+  $'Q12|pip|x=$(cat <<E\n$(date)\nE\n)\npip install evil==6.6.6\n'
+  $'Q13|pip|cat <<E | wc -l\n$(date)\nE\npip install evil==6.6.6\n'
+  $'Q14|npm|git commit -F - <<EOF\nfix $(date)\nEOF\nnpm ci\n'
+  $'Q15|data|cat <<E\n$(date)\npip install evil==6.6.6\nE\n'
+)
+for row in "${heredoc_body_rows[@]}"; do
+  id="${row%%|*}"; rest="${row#*|}"; kind="${rest%%|*}"; form="${rest#*|}"
+  case "${kind}" in
+    pip) expect_not_approved "${id}, an install after a heredoc body with live code in it," "${form}" ;;
+    npm)
+      got=$(gate_rewrite "${form}")
+      [[ -n "${got}" && "${got}" == *" --ignore-scripts"* && "${got// --ignore-scripts/}" == "${form}" ]] \
+        || fail "${id}: an npm install after a heredoc body with live code in it is rewritten with --ignore-scripts (got: ${got:-no rewrite})"
+      ;;
+    data) expect_pass "${id}, an install that is a line of a heredoc body," "${form}" ;;
+  esac
+done
+pass "an install on the line after a heredoc body with live code in it is read: pip denied, npm rewritten, and the body itself data (Q01-Q15)"
 
 printf 'consumer-forms passed\n'

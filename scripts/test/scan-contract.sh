@@ -495,16 +495,19 @@ pass "control: mutated spec diverges on ${control_hit}/${fuzz_cases} inputs, so 
 
 # --- view properties ------------------------------------------------------------
 # Every reader takes a view of the one lexing, and three views are read as
-# offsets into the command or may be read again: scan (what the predicates
-# read), code (what the payload readers read, quotes kept) and noredir (the
-# command with its redirections blanked, what the spec extractor's pieces are
-# cut from). Each keeps the byte length of the command, so an offset found in a
-# view is the offset in the command, and each is idempotent, so a view read
-# again is the view read once. Stripping a heredoc twice is how its body once
-# swallowed the line after it (caught in review). The joined view is neither:
-# it drops continuations on purpose. Checked on every recorded shell form and on
-# random input drawn from the characters quotes, comments, heredocs,
-# substitutions and redirections are made of.
+# offsets into the command: scan (what the predicates read), code (quotes
+# kept, which the inert rewrite reads beside the live view) and noredir (the
+# command with its redirections blanked). Each keeps the byte length of the
+# command, so an offset found in a view is the offset in the command, and each
+# is idempotent, so a view read again is the view read once. No reader of the
+# guard lexes a view's output any more (the lexing trace below holds that), so
+# idempotence is a property of the lexer here, not a license: stripping a
+# heredoc twice is how its body once swallowed the line after it (caught in
+# review), and lexing the joined view again is how the live code of a body
+# took the next command for its argument (verdict buri-20261005-145152).
+# Checked on every recorded shell form and on random input drawn from the
+# characters quotes, comments, heredocs, substitutions and redirections are
+# made of.
 #
 # Each property holds within each reading (bash, zsh, dash): a view is read
 # again only under the reading that made it. And one property holds across
@@ -885,8 +888,8 @@ pass "unprefixed view: the prefixes a command starts with go, redirections among
 check_view() { # view readings label input expected
   local got reading
   for reading in $2; do
-    # The sentinel again: the substs view ends in a newline, which a bare
-    # $(...) here would strip.
+    # The sentinel again: a view can end in a newline, which a bare $(...)
+    # here would strip. The substs view ends each body in \035.
     got=$(SAFEDEPS_READING="${reading}" capture "$1" "$4"; printf 'X'); got="${got%X}"
     [[ "${got}" == "$5" ]] || fail "$1 (${reading}): $3: [${got}] != expected [$5]"
   done
@@ -950,9 +953,9 @@ check_view flat_view "${all}" "and a process substitution in a target, body and 
 check_view flat_view "${all}" "a substitution that is no target stays, as in the live view" \
   'npm i "$(echo x)" >f' "npm i$(sp 4)echo x)$(sp 4)"
 check_view substs_view "${all}" "a process substitution body is a payload, an argument or a target" \
-  'cat <(pip i) > >(npm i)' $'pip i\nnpm i\n'
+  'cat <(pip i) > >(npm i)' $'pip i\035npm i\035'
 check_view substs_view "${all}" "nested in a substitution, both bodies" \
-  'cat <(echo $(pip i))' $'echo $(pip i)\npip i\n'
+  'cat <(echo $(pip i))' $'echo $(pip i)\035pip i\035'
 for form in '>! f pip i' 'pip >! f i' 'echo a >>! f'; do
   f=$(mktemp "${TMPDIR:-/tmp}/safedeps-diverge.XXXXXX")
   SAFEDEPS_READING=bash SAFEDEPS_LEX_DIVERGE="${f}" noredir_view "${form}" > /dev/null
@@ -1068,7 +1071,7 @@ check_unprefixed "${all}" "a target between a command and its arguments" \
 check_unprefixed "${all}" "zsh =(...) is one word, here a target" \
   '< =(true; true) pip i' 'pip i'
 check_view substs_view "${all}" "and its body is a payload" \
-  'cat =(pip i) > =(npm i)' $'pip i\nnpm i\n'
+  'cat =(pip i) > =(npm i)' $'pip i\035npm i\035'
 check_unprefixed "bash zsh" "a glob qualifier glued to a target is part of it" \
   '>/dev/null(N) pip i' 'pip i'
 check_unprefixed "dash" "to dash the ( after the target is an operator" \
@@ -1149,6 +1152,26 @@ check_statements "dash" "dash splits at the & of &>" \
 check_statements "${all}" "a duplication splits no statement in any shell" \
   'echo a 2>&1 pip i; echo a >&2 pip i' 2
 pass "statement split: &> ends a statement in the dash reading alone"
+
+# The statement split reads the command as written, so it reads each
+# statement's words from the stmtraw view of that one lexing: a heredoc body
+# (the live code in one too), a comment and a heredoc operator are no words of
+# any statement, and a line continuation joins the bytes around it. It read
+# the joined view of the code view before, which kept the live code of a body:
+# the statement after `cat <<E`, `$(date)`, `E` began with `$(date)`, and the
+# landing read that as its command (verdict buri-20261005-145152).
+check_statement_words() { # readings label input expected-words-of-each-statement-that-has-some
+  local got reading
+  for reading in $1; do
+    got=$(SAFEDEPS_READING="${reading}" command_statements "$3" | cut -d $'\035' -f4 | { grep -v '^$' || true; } | tr '\037\n' ' |')
+    [[ "${got}" == "$4" ]] || fail "statement words (${reading}): $2: [${got}] != expected [$4]"
+  done
+}
+check_statement_words "${all}" "a heredoc body, its live code and a comment are no words" \
+  $'cat <<E\n$(date) `date`\nE\nnpm install left-pad@1.3.0 # $(x) y\n' 'cat|npm install left-pad@1.3.0|'
+check_statement_words "${all}" "a line continuation joins the bytes around it" \
+  $'np\\\nm install left-pad@1.3.0 \\\n  --save-exact' 'npm install left-pad@1.3.0 --save-exact|'
+pass "statement split: each statement's words leave out a heredoc body, its live code and a comment, and join a continuation"
 
 # Rule 5's other half: a form whose starts differ between the readings makes
 # the bash reading say DIVERGE, and a form every shell reads the same way does
@@ -1630,7 +1653,7 @@ SAFEDEPS_LEX_CACHE="${memo_dir}" SAFEDEPS_LEX_DIVERGE="${memo_diverge}" shell_le
 rm -f "${memo_diverge}"
 # The guard ignores a memo directory from the environment. Plant a blank view
 # for every view of the command; the install must still be judged.
-for v in scan code joined unprefixed; do
+for v in scan code recognize pieces stmtcuts stmtraw cscripts substs; do
   for pol in bash zsh dash; do
     k="${memo_dir}/${v}.${pol}.$(printf '%s' "${big_install}" | cksum | tr ' ' '.')"
     printf '%*s' "${#big_install}" '' > "${k}.out"; printf '%s' "${big_install}" > "${k}.in"
@@ -1855,6 +1878,130 @@ pass "the npm-install grep failing alone, at each of its calls, is recorded and 
 scanfail_guard "${fail_tmp}/all-awk" "pip install requests==2.0.0"
 [[ "${SCANFAIL_DECISION}" == "deny" ]] || fail "with awk failing everywhere an install is still denied (got: ${SCANFAIL_DECISION})"
 pass "with awk failing everywhere an install is still denied"
+
+# --- every lexing reads the command or a payload ----------------------------------
+# A reader lexes the command as written, or a payload (a script it hands to
+# `sh -c` or `eval`, the body of a substitution), or a piece of one cut at
+# offsets (a statement, the inert reading's statement with the flag put in);
+# never the output of a view. A view changes bytes, and a text a view changed
+# reads out of the context the first lexing had. The recognizers, the landing,
+# the extractor and the inert reading each lexed the joined view again, which
+# blanked a heredoc body and its terminator line but kept the live code in an
+# unquoted one: `$(date)` then stood where the command after the body did, and
+# the install there passed with no verdict (verdict buri-20261005-145152). The
+# comment over that reader said "Each text is lexed once", and a review that
+# read the comment instead of the call chain passed it.
+#
+# So the call chain is measured. An awk shim records every lexing a guard run
+# makes (shell_lex is the one awk called with a view and a policy): the view,
+# the text, and for the payload views (cscripts, substs) the payloads they
+# hand back. Each text lexed must then be a substring of the command or of a
+# payload, after taking out at most one ` --ignore-scripts` the inert reading
+# put in. A view's output is such a substring only where the view changed no
+# byte, and then lexing it is lexing the command. The forms reach every reader
+# that lexes (the views must all show up in the trace, or this checks nothing),
+# with the bytes a view used to change: a heredoc with live code, a line
+# continuation, a comment, a newline inside quotes, prefixes, payloads that
+# hold newlines, and installs the landing and the inert rewrite read. The
+# inert rewrite runs only for an install the gate lets through, so its forms
+# are `npm ci`, which names no package, with quotes and a comment in it.
+mkdir -p "${fail_tmp}/lex-trace-bin"
+cat > "${fail_tmp}/lex-trace-bin/awk" <<SHIM
+#!/usr/bin/env bash
+view=""; marker=""; prev=""
+for a in "\$@"; do
+  [[ "\${prev}" == -v && "\${a}" == view=* ]] && view="\${a#view=}"
+  [[ "\${prev}" == -v && "\${a}" == marker=* ]] && marker="\${a#marker=}"
+  prev="\${a}"
+done
+case " \$* " in *" policy="*) ;; *) view="" ;; esac
+[[ -n "\${view}" && -n "\${LEX_TRACE:-}" ]] || exec '${real_awk}' "\$@"
+f=\$(mktemp "\${LEX_TRACE}/lex.XXXXXX") || exit 2
+printf '%s' "\${view}" > "\${f}.view"
+printf '%s' "\${marker}" > "\${f}.marker"
+cat > "\${f}.in"
+case "\${view}" in
+  cscripts|substs)
+    '${real_awk}' "\$@" < "\${f}.in" > "\${f}.out"; rc=\$?
+    cat "\${f}.out"
+    exit "\${rc}"
+    ;;
+esac
+exec '${real_awk}' "\$@" < "\${f}.in"
+SHIM
+chmod +x "${fail_tmp}/lex-trace-bin/awk"
+
+# Whether <text> is a substring of one of the allowed texts (LEX_ALLOWED), as
+# it is or with one ` --ignore-scripts` taken out.
+lex_text_allowed() {
+  local text="$1" a rest head pre="" cand
+  for a in "${LEX_ALLOWED[@]}"; do [[ "${a}" == *"${text}"* ]] && return 0; done
+  rest="${text}"
+  while [[ "${rest}" == *" --ignore-scripts"* ]]; do
+    head="${rest%%" --ignore-scripts"*}"
+    rest="${rest#*" --ignore-scripts"}"
+    cand="${pre}${head}${rest}"
+    for a in "${LEX_ALLOWED[@]}"; do [[ "${a}" == *"${cand}"* ]] && return 0; done
+    pre="${pre}${head} --ignore-scripts"
+  done
+  return 1
+}
+
+# Runs the guard on <command> under the trace and checks every lexing it made.
+# Adds the views and the readers (their markers) it saw to LEX_VIEWS_SEEN; each
+# lexing of a text that is not
+# the command, a payload or a piece of one is a line in LEX_BAD.
+lex_trace_check() {
+  local command="$1" trace f view out rec text
+  trace=$(mktemp -d "${fail_tmp}/lex-trace.XXXXXX")
+  LEX_TRACE="${trace}" scanfail_guard "${fail_tmp}/lex-trace-bin" "${command}"
+  LEX_ALLOWED=("${command}")
+  for f in "${trace}"/lex.*.out; do
+    [[ -f "${f}" ]] || continue
+    view=$(cat "${f%.out}.view")
+    out=$(cat "${f}"; printf 'X'); out="${out%X}"
+    while IFS= read -r -d $'\035' rec; do
+      [[ "${view}" != cscripts ]] || rec="${rec:1}"
+      [[ -z "${rec}" ]] || LEX_ALLOWED+=("${rec}")
+    done <<< "${out}"
+  done
+  for f in "${trace}"/lex.*.in; do
+    [[ -f "${f}" ]] || continue
+    view=$(cat "${f%.in}.view")
+    LEX_VIEWS_SEEN+=" ${view} $(cat "${f%.in}.marker") "
+    # shell_lex hands the awk the text and a newline.
+    text=$(cat "${f}"; printf 'X'); text="${text%X}"; text="${text%$'\n'}"
+    lex_text_allowed "${text}" || LEX_BAD+="${view} of [${text}] in [${command}]"$'\n'
+  done
+  rm -rf "${trace}"
+}
+LEX_VIEWS_SEEN="" LEX_BAD=""
+lex_forms=(
+  $'cat <<E\n$(date)\nE\npip install evil==6.6.6\n'
+  $'git commit -F - <<EOF\nfix $(date)\nEOF\nnpm ci\n'
+  $'cat <<-E\n\t${HOME} `date`\n\tE\nnpm install left-pad@1.3.0 # a comment\n'
+  $'pi\\\np install evil==6.6.6'
+  $'npm install left-pad@1.3.0 --message "a\nb" \\\n  --save-exact'
+  $'npm ci --message "a\nb" \\\n  --loglevel warn 2>/dev/null'
+  "npm ci --tag 'a b' # a comment"
+  $'cat <<E\n$(date)\nE\nnpm ci --tag "$(echo x)"\n'
+  'FOO="a b" PIP_INDEX_URL=x pip install evil==6.6.6 2>/dev/null'
+  $'sh -c "echo a\npip install evil==6.6.6"; eval \'npm ci\''
+  $'x=$(echo a\nnpm install left-pad@1.3.0); echo "$x"'
+  'cd sub && npm install left-pad@1.3.0 && npm install cowsay@1.5.0'
+  $'case x in x) npm ci;; esac; if true; then pip install evil==6.6.6; fi'
+  $'cat <<EOF | sh\npip install evil==6.6.6\nEOF'
+  'npm install -g left-pad@1.3.0'
+)
+for form in "${lex_forms[@]}"; do lex_trace_check "${form}"; done
+for v in recognize pieces stmtcuts stmtraw cscripts substs scan flat live \
+    safedeps:inert_offsets safedeps:extract_pieces safedeps:payload_pieces safedeps:read_payload_words \
+    safedeps:extract_command_substitution_payloads safedeps:command_reads; do
+  [[ "${LEX_VIEWS_SEEN}" == *" ${v} "* ]] || fail "the lexing trace saw ${v} (otherwise this checks less than it says)"
+done
+[[ -z "${LEX_BAD}" ]] || fail "every lexing reads the command, a payload or a piece of one; these read a view's output:
+${LEX_BAD}"
+pass "every lexing of a guard run reads the command, a payload or a piece of one, never a view's output (${#lex_forms[@]} forms)"
 
 # --- the spec readers start no process ------------------------------------------
 # The spec readers used to rewrite a statement with sed and tr before reading it
