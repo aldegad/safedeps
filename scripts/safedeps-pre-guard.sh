@@ -2466,8 +2466,13 @@ inert_dynamic_command_word() {
 inert_dynamic_in() {
   local text="$1" classes noredir eqstart='(^|[[:space:];&|()])='
   [[ "${text}" == *[!$' \t\n;&|<>()'"${SAFEDEPS_SHELL_INERT_BYTES}"]* || "${text}" =~ ${eqstart} ]] || return 1
-  classes=$(shell_lex "${text}" classes "safedeps:inert_rewrite_in_place") || return 2
-  noredir=$(shell_lex "${text}" noredir "safedeps:inert_rewrite_in_place") || return 2
+  # A level text is one the byte rule built, not the command: a place where the
+  # shells lex it differently (`A=(ci x)` out of its quotes) is not a place in
+  # the command, so it does not report DIVERGE, which would fail the reading.
+  local div="${SAFEDEPS_LEX_DIVERGE:-}"
+  [[ "$2" != 1 ]] || div=""
+  classes=$(SAFEDEPS_LEX_DIVERGE="${div}" shell_lex "${text}" classes "safedeps:inert_rewrite_in_place") || return 2
+  noredir=$(SAFEDEPS_LEX_DIVERGE="${div}" shell_lex "${text}" noredir "safedeps:inert_rewrite_in_place") || return 2
   if printf '%s\n%s' "${classes}" "${noredir}" | LC_ALL=C awk -v inert="${SAFEDEPS_SHELL_INERT_BYTES}" -v levels="$2" '
     # safedeps:inert_rewrite_in_place (scripts/measure/scan-failure-census.sh keys on this line)
     NR == 1 { K = $0; next }
