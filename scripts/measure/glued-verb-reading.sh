@@ -243,12 +243,13 @@ for b in "${bases[@]}"; do
     ( tuple "${g}" > "${jobs_dir}/${n}.g"
       if [[ -n "${spaced}" ]]; then tuple "${s}" > "${jobs_dir}/${n}.s"; else : > "${jobs_dir}/${n}.s"; fi
       for sh in bash zsh dash; do printf '%s=%s ' "${sh}" "$(shell_words "${sh}" "${pg}")"; done > "${jobs_dir}/${n}.w"
-      IFS=$'\t' read -r _ grw < "${jobs_dir}/${n}.g" || grw=""
+      # The tuple ends with no newline, so read returns 1 having read it.
+      grw=""; IFS=$'\t' read -r _ grw < "${jobs_dir}/${n}.g" || true
       rewrite_words "${grw}" "${manager}" > "${jobs_dir}/${n}.gr"
       if [[ -n "${spaced}" ]]; then
         for sh in bash zsh dash; do printf '%s=%s ' "${sh}" "$(shell_words "${sh}" "${ps}")"; done > "${jobs_dir}/${n}.sw"
         srw=""
-        [[ ! -s "${jobs_dir}/${n}.s" ]] || IFS=$'\t' read -r _ srw < "${jobs_dir}/${n}.s" || srw=""
+        [[ ! -s "${jobs_dir}/${n}.s" ]] || IFS=$'\t' read -r _ srw < "${jobs_dir}/${n}.s" || true
         rewrite_words "${srw}" "${manager}" > "${jobs_dir}/${n}.sr"
       else
         printf -- '-' > "${jobs_dir}/${n}.sw"; printf -- '-' > "${jobs_dir}/${n}.sr"
@@ -265,6 +266,7 @@ here_form=$'bash <<E\nnpm ci\nE'
 here_got=$(tuple "${here_form}")
 
 floor_re='^zsh:[^;]*->syntax;$'
+semi_close=';}' close_brace='}'
 table=$(
   printf 'id\tmanager\top\tglued\tshells\tglued_tuple\tglued_rewrite\trewrite_shells\tspaced_tuple\tspaced_rewrite\trw\tshows\tverdict\n'
   for (( k = 0; k < n; k++ )); do
@@ -276,7 +278,7 @@ table=$(
     [[ "${g}" == *--ignore-scripts ]] || gn="${gn%--ignore-scripts}"
     [[ "${s}" == *--ignore-scripts ]] || sn="${sn%--ignore-scripts}"
     # `{ <install> ;}` against `{ <install>}`: the `;` is the spaced form's own.
-    [[ "${name}" != '}' ]] || sn="${sn//';}'/'}'}"
+    [[ "${name}" != '}' ]] || sn="${sn//"${semi_close}"/"${close_brace}"}"
     rwg=$(rewrite_reads "$(cat "${jobs_dir}/${k}.w")" "$(cat "${jobs_dir}/${k}.gr")")
     rws=-
     [[ -z "${s}" ]] || rws=$(rewrite_reads "$(cat "${jobs_dir}/${k}.sw")" "$(cat "${jobs_dir}/${k}.sr")")
