@@ -279,10 +279,10 @@ stub_npm_path() {
 # not see, as an agent's shell can carry state its hooks were not given.
 #
 # Each call carries one top-level tool_use_id in both payloads, as both engines
-# send it (measured: Claude Code toolu_..., Codex CLI exec-<uuid>). The
-# backstop's trace entry is named by it, and a payload with none counts as
-# traced, so a row about a command that left no trace needs it. Engine
-# `crossed` is two calls, so its post payload carries another id.
+# send it (measured: Claude Code toolu_..., Codex CLI exec-<uuid>). The record
+# of an install and the backstop's trace entry are named by it, and a payload
+# with none counts as traced, so a row about a command that left no trace
+# needs it.
 NPM_SANDBOX_CALLS=0
 run_install() {
   local command="$1" engine="${2:-claude}" between="${3:-}" payload pre exec_command marks_before id post_id
@@ -291,7 +291,6 @@ run_install() {
   NPM_SANDBOX_CALLS=$((NPM_SANDBOX_CALLS + 1))
   id="toolu_sandbox_$$_${NPM_SANDBOX_CALLS}"
   post_id="${id}"
-  [[ "${engine}" != crossed ]] || post_id="${id}_codex"
   if [[ "${engine}" == codex ]]; then
     payload=$(jq -nc --arg c "${command}" --arg d "${CASE_CWD}" --arg id "${id}" \
       '{tool_name:"Bash",tool_input:{command:$c},cwd:$d,tool_use_id:$id,turn_id:"turn-lockless",model:"codex-test"}')
@@ -305,8 +304,11 @@ run_install() {
     return 0
   fi
   # Engine `crossed`: the pre-guard is Claude Code's and records the rewrite it
-  # prints, and the command runs as given, as a Codex call of the same command
-  # in the same directory would run it and consume that record (bamdori r19 X1).
+  # prints, and the call runs the command as given, not as safedeps rewrote it,
+  # so the command its post hook receives is not the one safedeps wrote. Before
+  # records were bound to the call this was a Codex call of the same command in
+  # the same directory consuming that record (bamdori r19 X1); a Codex call now
+  # reads only its own.
   exec_command=""
   [[ -z "${pre}" || "${engine}" == crossed ]] || exec_command=$(jq -r '.hookSpecificOutput.updatedInput.command // empty' <<< "${pre}")
   # The release floor (lib/release-floor.sh), for a battery that asks for it.
@@ -328,7 +330,14 @@ run_install() {
   [[ -z "${between}" ]] || "${between}" "${CASE_PROJECT}"
 
   marks_before=$(wc -l < "${MARKS}" | tr -d ' ')
-  payload=$(jq -nc --arg c "${exec_command}" --arg d "${CASE_CWD}" --arg id "${post_id}" '{tool_name:"Bash",tool_input:{command:$c},cwd:$d,tool_use_id:$id}')
+  # Codex sends turn_id and model to PostToolUse as it does to PreToolUse, and
+  # the post hook reads the engine from it.
+  if [[ "${engine}" == codex ]]; then
+    payload=$(jq -nc --arg c "${exec_command}" --arg d "${CASE_CWD}" --arg id "${post_id}" \
+      '{tool_name:"Bash",tool_input:{command:$c},cwd:$d,tool_use_id:$id,turn_id:"turn-lockless",model:"codex-test"}')
+  else
+    payload=$(jq -nc --arg c "${exec_command}" --arg d "${CASE_CWD}" --arg id "${post_id}" '{tool_name:"Bash",tool_input:{command:$c},cwd:$d,tool_use_id:$id}')
+  fi
   CASE_POST=$(printf '%s' "${payload}" | PATH="${CASE_POST_PATH:-${PATH}}" SAFEDEPS_HOME="${CASE_HOME}" scripts/safedeps-hook-entry.sh post 2>/dev/null)
   CASE_RAN=$(tail -n +"$((marks_before + 1))" "${MARKS}")
 }

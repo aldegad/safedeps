@@ -70,7 +70,9 @@
     "cat <<EOF | sh\npip install evil==6.6.6\nEOF",
     "printf 'pip install evil==1.0.0' | sh; echo done",
     "npx -y echo-cli@1.0.0 pip install evil==6.6.6 | sh",
-    "sh -c \"echo \\\"a\\\"; pip install requests==2.0.0\""
+    "sh -c \"echo \\\"a\\\"; pip install requests==2.0.0\"",
+    "npm install left-pad@1.3.0 && echo done && npm install cowsay@1.5.0",
+    "echo \"a\npip install evil==6.6.6"
   ],
   "controls": [
     "ls -la",
@@ -82,7 +84,7 @@
     "git commit -m 'bump npm i x'"
   ],
   "quick": {
-    "comment": "The subset npm test runs: one form per ecosystem bare, the wrappers that reach a different reader on one form, the extras that exercise join, blanking, inert, --prefix and a spec-less npm install, and two controls. Claude payloads only, except the rows under variants, which also run as codex, padded and approved; K-onward runs are left to the full census.",
+    "comment": "The subset npm test runs: one form per ecosystem bare, the wrappers that reach a different reader on one form, the extras that exercise join, blanking, inert, --prefix, a spec-less npm install and two npm installs with an inert statement between them (the sed that reads an inert head in the npm attribution) and a command that does not close (the grep that reads the lexer's flag), and two controls. Claude payloads only, except the rows under variants, which also run as codex, padded and approved; K-onward runs are left to the full census.",
     "forms": [
       "npm install left-pad@1.3.0",
       "pnpm add left-pad@1.3.0",
@@ -106,7 +108,9 @@
       "npm install --prefix ../other left-pad@1.3.0",
       "npm ci",
       "npm ci # rebuild the lockfile",
-      "sh -c \"echo \\\"a\\\"; pip install requests==2.0.0\""
+      "sh -c \"echo \\\"a\\\"; pip install requests==2.0.0\"",
+      "npm install left-pad@1.3.0 && echo done && npm install cowsay@1.5.0",
+      "echo \"a\npip install evil==6.6.6"
     ],
     "controls": [
       "ls -la",
@@ -115,7 +119,8 @@
     "variants": [
       "npm install left-pad@1.3.0 && npm run build",
       "pip install requests==2.0.0",
-      "npm install left-pad@1.3.0", "eval \"npm install left-pad@1.3.0\""]
+      "npm install left-pad@1.3.0", "eval \"npm install left-pad@1.3.0\"",
+      "npm install left-pad@1.3.0 && echo done && npm install cowsay@1.5.0"]
   },
   "approvals": [
     [
