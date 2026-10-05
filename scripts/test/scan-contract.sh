@@ -666,7 +666,7 @@ pass "the lexer memo returns a view only for the exact text, and only from the g
 real_awk=$(command -v awk)
 fail_tmp=$(mktemp -d "${TMPDIR:-/tmp}/safedeps-scanfail.XXXXXX")
 trap 'rm -rf "${fail_tmp}"' EXIT
-mkdir -p "${fail_tmp}/scanner-only" "${fail_tmp}/all-awk" "${fail_tmp}/scanner-later" "${fail_tmp}/blanking-only" "${fail_tmp}/spans-only" "${fail_tmp}/project"
+mkdir -p "${fail_tmp}/scanner-only" "${fail_tmp}/all-awk" "${fail_tmp}/scanner-later" "${fail_tmp}/project"
 printf '{"dependencies":{}}\n' > "${fail_tmp}/project/package.json"
 cat > "${fail_tmp}/scanner-only/awk" <<SHIM
 #!/usr/bin/env bash
@@ -690,34 +690,7 @@ case "\$*" in
 esac
 exec '${real_awk}' "\$@"
 SHIM
-# The awk that sets a visible install aside before the pipe check reads the
-# rest (install_managers_blanked). It fails alone, and counts its calls so the
-# case below can show it was reached.
-cat > "${fail_tmp}/blanking-only/awk" <<SHIM
-#!/usr/bin/env bash
-case "\$*" in
-  *"safedeps:install_managers_blanked"*)
-    printf 'x' >> '${fail_tmp}/blanking-only/count'
-    exit 2
-    ;;
-esac
-exec '${real_awk}' "\$@"
-SHIM
-# The awk that turns the install matches into byte spans for that blanking
-# pass (install_match_spans). It ran under no marker and its failure was
-# swallowed with grep's "no match", so the visible install was not set aside
-# and was read as install text piped into a shell (caught in review).
-cat > "${fail_tmp}/spans-only/awk" <<SHIM
-#!/usr/bin/env bash
-case "\$*" in
-  *"safedeps:install_match_spans"*)
-    printf 'x' >> '${fail_tmp}/spans-only/count'
-    exit 2
-    ;;
-esac
-exec '${real_awk}' "\$@"
-SHIM
-chmod +x "${fail_tmp}/scanner-only/awk" "${fail_tmp}/all-awk/awk" "${fail_tmp}/scanner-later/awk" "${fail_tmp}/blanking-only/awk" "${fail_tmp}/spans-only/awk"
+chmod +x "${fail_tmp}/scanner-only/awk" "${fail_tmp}/all-awk/awk" "${fail_tmp}/scanner-later/awk"
 
 # Runs the guard through the entry shim, the way the engines do. An optional
 # third argument, `<ecosystem> <name> <version>`, is approved first.
@@ -785,22 +758,6 @@ scanfail_guard "${fail_tmp}/scanner-later" "pip install requests==2.0.0"
 grep -q 'UNDECIDED' <<< "${SCANFAIL_REASON}" || fail "a scanner that fails after recognizing the install answers UNDECIDED"
 grep -q 'scanner failed' <<< "${SCANFAIL_LOG}" || fail "a scanner that fails after recognizing the install is recorded"
 pass "a scanner that fails after the install was recognized is settled before pending state is written"
-
-# Beside a visible install, the pipe check sets the install aside with its own
-# awk before reading the rest. When that awk fails the check has no answer, and
-# no answer must not read as "nothing piped": the settle turns it into
-# UNDECIDED. The visible spec is approved so that nothing else denies first.
-piped_beside="pip install requests==2.0.0 && printf 'pip install evil==6.6.6' | sh"
-scanfail_guard "" "${piped_beside}" "pypi requests 2.0.0"
-[[ "${SCANFAIL_DECISION}" == "deny" ]] || fail "control: a working pipe check denies an install piped beside an approved one (got: ${SCANFAIL_DECISION})"
-if grep -q 'UNDECIDED' <<< "${SCANFAIL_REASON}"; then fail "control: a working pipe check answers with a finding, not UNDECIDED"; fi
-rm -f "${fail_tmp}/blanking-only/count"
-scanfail_guard "${fail_tmp}/blanking-only" "${piped_beside}" "pypi requests 2.0.0"
-[[ -s "${fail_tmp}/blanking-only/count" ]] || fail "the blanking shim was reached (otherwise this case tests nothing)"
-[[ "${SCANFAIL_DECISION}" == "deny" ]] || fail "a failed blanking awk does not turn a piped install into a pass (got: ${SCANFAIL_DECISION})"
-grep -q 'UNDECIDED' <<< "${SCANFAIL_REASON}" || fail "a failed blanking awk is reported as undecided, not as a finding"
-grep -q 'scanner failed' <<< "${SCANFAIL_LOG}" || fail "a failed blanking awk is recorded in advisory.log"
-pass "a failed blanking awk beside a visible install answers UNDECIDED, not pass"
 
 # grep and sed sit on the judgment path too. A predicate that reads a grep or
 # sed that never answered as "no match" passed every one of these on the tree
@@ -904,19 +861,6 @@ check_pip_trace() {
 }
 grep_one_each -qEi "${npm_install_re}" "pip install requests==2.0.0" "pypi requests 2.0.0" check_pip_trace
 pass "the npm-install grep failing alone, at each of its calls, is recorded and leaves no npm trace in a pip install's pending state"
-
-# Nothing is piped here but the word `ok`, so a finding about piped install text
-# could only come from the failed span reading.
-spans_beside="pip install requests==2.0.0 && echo ok | sh"
-scanfail_guard "" "${spans_beside}" "pypi requests 2.0.0"
-[[ "${SCANFAIL_DECISION}" == "pass" ]] || fail "control: an approved install beside a pipe that carries no install passes (got: ${SCANFAIL_DECISION})"
-rm -f "${fail_tmp}/spans-only/count"
-scanfail_guard "${fail_tmp}/spans-only" "${spans_beside}" "pypi requests 2.0.0"
-[[ -s "${fail_tmp}/spans-only/count" ]] || fail "the span shim was reached (otherwise this case tests nothing)"
-[[ "${SCANFAIL_DECISION}" == "deny" ]] || fail "a failed span awk is not a pass for a command that names a package manager (got: ${SCANFAIL_DECISION})"
-grep -q 'UNDECIDED' <<< "${SCANFAIL_REASON}" || fail "a failed span awk is reported as undecided, not as a piped-install finding"
-grep -q 'scanner failed' <<< "${SCANFAIL_LOG}" || fail "a failed span awk is recorded in advisory.log"
-pass "a failed span awk beside a visible install answers UNDECIDED, not a finding"
 
 scanfail_guard "${fail_tmp}/all-awk" "pip install requests==2.0.0"
 [[ "${SCANFAIL_DECISION}" == "deny" ]] || fail "with awk failing everywhere an install is still denied (got: ${SCANFAIL_DECISION})"

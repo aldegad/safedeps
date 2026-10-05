@@ -1020,6 +1020,25 @@ On the release tree 1d43743, `npm test` ran all 14 batteries with 395 ok and 0 n
 
 This release closes the v2.18.0 boundaries that were ready, and moves npm publishing to GitHub Actions. The rest of what v2.18.0 moved here is listed at the end of this section and ships in v2.18.2.
 
+### Beside an install, a pipe into a shell is asked the same question as alone
+
+v2.18.0 said that beside a visible install a piped install "is refused fail-closed, as it always was with nothing beside it". That was false for several shapes. The check set the visible install aside first, then searched what was left more narrowly than it searches with nothing beside an install. With the visible spec approved, these passed on v2.18.0 with the piped install unchecked, while the same producer alone was denied:
+
+- a manager behind an escape, a format or a `cut`: `pip install requests==2.0.0 && printf '\npip install evil==6.6.6' | sh`, and the `\t`, `%s`, `xpip ... | cut -c2-`, `set -e\n...` and `echo -e` forms;
+- an install that a heredoc carries to the shell by a route other than a piped body: written to a file and then `cat s.sh | sh`, a file descriptor, a group, a subshell, a variable, or `tee`;
+- an install in a comment that the producer reads back through `$BASH_EXECUTION_STRING`, `$ZSH_EXECUTION_STRING` or `ps`;
+- the visible install's own spec, rewritten by `sed` from the exec string.
+
+Repairs in this cycle kept the setting aside and changed the search, and each one left a form through. The last set aside every word the manager's grammar reads as the install's own. It missed `pip install pip==24.0 && echo "${_%%=*} install evil==6.6.6" | sh`, because the shell hands the producer the install's last word as `$_`. A producer can read the command's own text through `$_`, the exec string, `ps` or a file, and the gate cannot list those routes. So nothing is set aside now. Beside a visible install the gate asks the pipe question it asks with nothing beside one, of the same text: the whole command, and each `sh -c`, `eval` and substitution script in it.
+
+The cost falls on commands that mix an install with an unrelated pipe into a shell, such as `npm install x && cat setup.sh | sh`. Such a command is now denied, and the reason says to run the two as separate commands.
+
+**Verified.** `scripts/test/consumer-forms.sh` holds the change. It writes each form beside a visible install with a marker before that install. Every row is checked for its verdict, and then an S1 loop checks it against the same bytes with the visible install switched off by `true `. The rows are the 32 piped installs from before, the ten forms that kept the visible install's verdict and are now denied, each with the reason the text cannot clear it, and 21 rows from the grid's carriers (heredoc carriers, comment carriers, and the visible install's own words): 18 of them passed beside an install and were denied alone, and three were denied on both paths. Six rows keep their verdict: four carry nothing into a shell, and two were denied already. In all, the loop covers 69 rows. On 1bf5748, consumer-forms passed with 67 ok and 0 not ok on macOS (carenine, an M1 Max MacBook, bash 3.2, 846s, load 4.5 at the start and 5.3 at the end) and on Linux (the project's Debian VM, bash 5.2.37, 806s, load 3.2 at the start and 3.8 at the end). On Linux, smoke (61 ok), scan-contract (41) and shell-reading (4) passed too. Two mutations, each run on a copy, turn the battery red. With 68cc2f8's setting aside put back, 56 checks fail: every heredoc and comment row, the five own-word rows the pipe rule denies, the ten flipped rows, and the S1 loop on 28 rows. With the pipe question off beside a visible install, 122 checks fail, the S1 loop on 61 of its 69 rows.
+
+On macOS, smoke (61 ok), scan-contract (41) and shell-reading (4) passed as well. The quick scan-failure census ran 2,971 failing runs there and counted zero weakened, mislabeled, error, after-gate, pending-on-deny, unmarked, unlisted and unstable (load 4.5 at the start and 4.8 at the end). `scripts/measure/scan-verdict-replay.sh aa77fac --random 200 --seed 1001` moved none of 438 verdicts, the false-positive category included. Its control, a scan that blanks nothing, moved 1, so the replay can fail (an M1 MacBook, load 4.7 at the start and 5.2 at the end).
+
+Not closed here: the same producer one level in. When the install's words reach the shell through `$_` or the exec string inside a command substitution, a backquote, a double-quoted `sh -c` or `eval` (`pip install pip==24.0 && x=$(echo "${_%%=*} install evil==6.6.6" | sh)`), the pipe is asked of that payload's own text, which does not hold the visible install's words, and the command passes with no record, beside an install and alone alike. v2.18.0 and v2.17.2 pass it too. So this release does not say that a piped install beside a visible install is always denied. It moves to v2.18.2.
+
 ### An install record belongs to one call
 
 v2.18.0 listed this as a boundary: the post hook found the pre-guard's record of an install by the directory the command ran in and the command. A call could therefore speak from another call's record. Two overlapping calls of one command each took the other's record. A call whose post hook never ran left a record that the next call of the same command consumed, and a rollback with no confirmed snapshot restored that older call's snapshot, so an edit made between the two calls was lost. A record left by a pre-guard older than v2.4.1 was read too, and a call it did not match ended the hook with no judgment.
@@ -1077,6 +1096,9 @@ Each of these has its own plan, and the work goes on. They were cut from this re
 - **Payloads the shells read as code.** `env -S` strings and zsh glob qualifiers that run code.
 - **An argument with `$(...)` inside double quotes.** The inert flag after such an argument can land inside the substitution.
 - **Pipe consumers outside the list.** Install text piped to a consumer the pipe check does not name (a function, `source`, `dash`, `coproc` and others) passes with no record, alone and beside a visible install alike. A closed rule replaces the list.
+- **The same piped producer one level in.** A pipe into a shell inside a command substitution, a backquote, a double-quoted `sh -c` or `eval` that reads the visible install's words through `$_` or the exec string passes with no record. The proposed rule denies any pipe into a shell in any payload of a command that holds install text.
+
+---
 
 ## v3 (future)
 

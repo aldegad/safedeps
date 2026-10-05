@@ -3,7 +3,7 @@
 # time and all at once, and check that no verdict gets weaker.
 #
 # The pre-guard reads a command through awk (the scanner, the line joiner, the
-# blanking pass beside a visible install). A failed awk returns empty text, and
+# payload readers). A failed awk returns empty text, and
 # empty text reads as "no install", so every reading is a place where a failure
 # could turn a deny into a pass. The guard's answer to that is one gate that
 # every non-deny path crosses after its last reading: if any reading failed, a
@@ -237,8 +237,6 @@ kind=""
 case "\$*" in
   *"safedeps:command_scan_text"*) kind=scan ;;
   *"safedeps:join_line_continuations"*) kind=join ;;
-  *"safedeps:install_managers_blanked"*) kind=blank ;;
-  *"safedeps:install_match_spans"*) kind=spans ;;
   *"safedeps:strip_heredoc_bodies"*) kind=strip ;;
   *"safedeps:command_reads"*) kind=reads ;;
   *"safedeps:inert_rewrite_in_place"*) kind=inert ;;
@@ -412,7 +410,7 @@ for n in $(seq 1 "${case_count}"); do
   for k in $(seq 1 "$(cut -f15 "${WORK}/results/${n}.count.0")"); do
     printf '%s sed-k %s\n' "${n}" "${k}" >> "${WORK}/jobs"
   done
-  for mode in scan-all join-all strip-all reads-all inert-all offsets-all norm-all subst-all blank-all spans-all stmts-all npmrc-all pieces-all payload-all paywords-all payspans-all awk-all grep-all sed-all; do
+  for mode in scan-all join-all strip-all reads-all inert-all offsets-all norm-all subst-all stmts-all npmrc-all pieces-all payload-all paywords-all payspans-all awk-all grep-all sed-all; do
     printf '%s %s 0\n' "${n}" "${mode}" >> "${WORK}/jobs"
   done
 done
