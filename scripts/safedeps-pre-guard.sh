@@ -1227,14 +1227,20 @@ shell_lex() {
       # evil (uv 0.10.11 reads the empty value as no preference), and
       # --python took evil==1.0.0 as its value. With `pre` 0, the prefixes of
       # the statement (A) are left out: the words the extractor reads.
+      #
+      # A `}` that closes a zsh group (GC, group_close) ends the word before
+      # it, as zsh ends it there, and is no word of the statement. Read as a
+      # grouping character inside the word, it made `{ mvn ...
+      # dependency:get}` a goal of `dependency:get` and a marker, which no
+      # goal reading names, and the install zsh runs passed.
       function pwords(a, z, pre,   k, w) {
         w = 0
         for (k = a; k <= z; k++) {
           if (!pre && (k in A)) continue
-          if ((k in DROP) || !(k in VAL) && !RM[k] && word_sep(k)) {
+          if ((k in DROP) || (k in GC) || !(k in VAL) && !RM[k] && word_sep(k)) {
             if (w == 1) put("\002")
             w = 0
-            put((k in DROP) ? " " : pbyte(k))
+            put(((k in DROP) || (k in GC)) ? " " : pbyte(k))
             continue
           }
           if (w == 0) w = 1
