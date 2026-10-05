@@ -2287,9 +2287,28 @@ inert_offsets_of() {
 # where each one's `npm` starts; inert_flag_offsets counts a verb as read only
 # where its `npm` is a command word of the text it was read in). Each read
 # `npm` is set aside, the command's own comments are blanked (class m: the
-# shell runs nothing there), the quotes and backslashes are taken out, and
-# every `$'...'` is decoded as well, as bash and zsh decode it. If an npm
-# install verb is left anywhere in that text, the command is recorded.
+# shell runs nothing there), and the quotes and backslashes are taken out. That
+# text is read twice: as it is, and with every `$'...'` decoded where it stands,
+# as bash and zsh decode it, so a decoded byte joins the text on either side of
+# it (`n$'\x70'm`) and a decoded newline starts a line (`true$'\n'npm ci`). If
+# an npm install verb is left anywhere in either, the command is recorded.
+#
+# So is an `npm` the rewrite did not read inside a word the shell computes
+# (`$(...)`, `${...}`, `<(...)`, `>(...)`, backquotes), install verb or not:
+# the shell can make that word npm's path and hand it to something that binds
+# a name to it, as `hash -p "$(command -v npm)" n && n ci x` does in bash
+# (validator jetbi-20261005-234803, zc03), with no byte of the statement that
+# runs it naming npm. Its cost is `$(npm root -g)` and the like beside an
+# install.
+#
+# "An npm install verb" is the recognizers' own: `npm`, then their option
+# grammar (SAFEDEPS_G_O: an option's value may be empty or run over several
+# words, as npm reads `--heading=` and `--heading 'a b'`), then a verb. Nothing
+# stands in front of the `npm`: a program that takes its command glued to an
+# option reads it there (`env -S'npm ci'`, `env -Snpm\ ci`), so a left boundary
+# was a guess about who reads the text, and it missed those (validator
+# jetbi-20261005-234803, class L). The cost is a record beside an install for
+# `pnpm i` and the like (scripts/measure/inert-record-data.py).
 #
 # Nothing here asks where the text goes. Three rounds of review each found a
 # way into a shell the record did not list (a script word, a piped heredoc
@@ -2309,27 +2328,49 @@ inert_bytes_left_unread() {
     { if (NR > 3) X[++n] = "\n"; m = split($0, c, ""); for (j = 1; j <= m; j++) X[++n] = c[j] }
     function oct(c) { return index("01234567", c) }
     function hex(c) { return index("0123456789abcdef", tolower(c)) }
+    # The $\047...\047 whose text starts at <i>, decoded; returns the index of
+    # its closing quote.
+    function decode(i,    e, v, d) {
+      for (; i <= n && X[i] != "\047"; i++) {
+        if (X[i] != "\\" || i == n) { printf "%s", X[i]; continue }
+        e = X[++i]
+        if (oct(e)) { v = 0; for (d = 0; d < 3 && oct(X[i]); d++) v = v * 8 + oct(X[i++]) - 1; i--; if (v > 0 && v < 128) printf "%c", v; continue }
+        if (e == "x" && hex(X[i + 1])) { v = 0; for (d = 0; d < 2 && hex(X[i + 1]); d++) v = v * 16 + hex(X[++i]) - 1; if (v > 0 && v < 128) printf "%c", v; continue }
+        if ((e == "u" || e == "U") && hex(X[i + 1])) { v = 0; for (d = 0; d < (e == "u" ? 4 : 8) && hex(X[i + 1]); d++) v = v * 16 + hex(X[++i]) - 1; if (v > 0 && v < 128) printf "%c", v; continue }
+        if (e == "c") { i++; continue }
+        if (e == "n") printf "\n"; else if (e == "t") printf "\t"; else if (index("abefrvE", e)) printf " "
+        else printf "%s", e
+      }
+      return i
+    }
     END {
       for (i = 1; i <= n; i++) { if (i in hide) X[i] = "_"; else if (K[i] == "m") X[i] = " " }
-      # The text with quotes and backslashes out, and a backslash-newline
-      # pair joined, as the shell joins a continuation.
-      for (i = 1; i <= n; i++) {
-        if (X[i] == "\\" && X[i + 1] == "\n") { i++; continue }
-        if (X[i] != "\"" && X[i] != "\047" && X[i] != "\\") printf "%s", X[i]
+      # An `npm` the rewrite did not read, inside a word the shell computes: a
+      # substitution in quotes or a live heredoc body (classes Q, B), or one
+      # at the top level, followed by the openers $( ${ <( >( and the
+      # backquote of class c to the byte that closes each.
+      ns = 0; computed = 0
+      for (i = 1; i <= n && !computed; i++) {
+        if ((K[i] == "Q" || K[i] == "B" || ns > 0) && tolower(X[i] X[i + 1] X[i + 2]) == "npm") computed = 1
+        if (K[i] != "c") continue
+        if ((X[i] == "$" || X[i] == "<" || X[i] == ">") && X[i + 1] == "(" || X[i] == "$" && X[i + 1] == "{") { st[++ns] = (X[i + 1] == "(") ? ")" : "}"; i++ }
+        else if (X[i] == "`") { if (ns > 0 && st[ns] == "`") ns--; else st[++ns] = "`" }
+        else if (ns > 0 && X[i] == "(") st[++ns] = ")"
+        else if (ns > 0 && X[i] == st[ns]) ns--
       }
-      # Then each $\047...\047 decoded, on lines of its own.
-      for (i = 1; i < n; i++) {
-        if (X[i] != "$" || X[i + 1] != "\047") continue
-        printf "\n"
-        for (i += 2; i <= n && X[i] != "\047"; i++) {
-          if (X[i] != "\\" || i == n) { printf "%s", X[i]; continue }
-          e = X[++i]
-          if (oct(e)) { v = 0; for (d = 0; d < 3 && oct(X[i]); d++) v = v * 8 + oct(X[i++]) - 1; i--; if (v > 0 && v < 128) printf "%c", v; continue }
-          if (e == "x" && hex(X[i + 1])) { v = 0; for (d = 0; d < 2 && hex(X[i + 1]); d++) v = v * 16 + hex(X[++i]) - 1; if (v > 0 && v < 128) printf "%c", v; continue }
-          if ((e == "u" || e == "U") && hex(X[i + 1])) { v = 0; for (d = 0; d < (e == "u" ? 4 : 8) && hex(X[i + 1]); d++) v = v * 16 + hex(X[++i]) - 1; if (v > 0 && v < 128) printf "%c", v; continue }
-          if (e == "c") { i++; continue }
-          if (e == "n") printf "\n"; else if (e == "t") printf "\t"; else if (index("abefrvE", e)) printf " "
-          else printf "%s", e
+      printf "%s", computed ? "C" : "-"
+      # The text with quotes and backslashes out, and a backslash-newline
+      # pair joined, as the shell joins a continuation; the second time with
+      # each $\047...\047 decoded in place. Both, because which `$\047` opens
+      # one is a question of quoting this does not ask: decoding from a `$\047`
+      # inside single quotes would read the escapes after it as an ANSI-C
+      # string, which the shell does not.
+      for (pass = 0; pass < 2; pass++) {
+        if (pass) printf "\n"
+        for (i = 1; i <= n; i++) {
+          if (X[i] == "\\" && X[i + 1] == "\n") { i++; continue }
+          if (pass && X[i] == "$" && X[i + 1] == "\047") { i = decode(i + 2); continue }
+          if (X[i] != "\"" && X[i] != "\047" && X[i] != "\\") printf "%s", X[i]
         }
       }
       printf "X"
@@ -2338,55 +2379,97 @@ inert_bytes_left_unread() {
     return 2
   fi
   left="${left%X}"
+  [[ "${left:0:1}" != C ]] || return 0
+  left="${left:1}"
   [[ "${left}" == *[Nn][Pp][Mm]* ]] || return 1
   printf '%s\n' "${left}" \
-    | LC_ALL=C judge_grep -qEi "(^|[^[:alnum:]_.-])npm${SAFEDEPS_G_OPTS}[[:space:]]+(${SAFEDEPS_G_NPM_VERBS}|${SAFEDEPS_G_NPM_LINK_VERBS})([^[:alnum:]_-]|\$)"
+    | LC_ALL=C judge_grep -qEi "npm${SAFEDEPS_G_O}[[:space:]]+(${SAFEDEPS_G_NPM_VERBS}|${SAFEDEPS_G_NPM_LINK_VERBS})([^[:alnum:]_-]|\$)"
 }
 
 # Whether a statement of <command>, or of a script it hands to a shell or to
 # `eval` or a substitution in it (command_candidate_texts, with the prefixes
-# the recognizers strip already gone), has a command word the shell computes:
-# a `$` or a backquote anywhere in it, quoted or not (`$(echo npm) ci`,
-# `"$X" ci`). Returns 0 when one does, 1 when none does, 2 on a failed
-# reading. Such a word can be npm with no byte of the command spelling it, so
-# the byte rule cannot see it; the command is recorded instead.
+# the recognizers strip already gone), has a word the shell computes where npm
+# or its command can stand: the command word of any statement (`$(echo npm)
+# ci`, `{npm,ci,x}`), and in a statement whose command word is npm, the word
+# npm reads as its command (`npm $V x`, `npm "$@"`, `npm c? x`). Returns 0
+# when one does, 1 when none does, 2 on a failed reading. Such a word can be
+# npm or an install verb with no byte of the command spelling it, so the byte
+# rule cannot see it; the command is recorded instead.
+#
+# "Computed" is shell_expands' allow-list, read per word: a byte outside
+# quotes that is not in SAFEDEPS_SHELL_INERT_BYTES, a word that starts with `~`
+# or `=` there, or a `$` or a backquote anywhere in it, quoted or not. The
+# clause this replaced listed `$` and the backquote, a list of what expands,
+# and braces, globs and the tilde passed it (validator jetbi-20261005-234803,
+# class D). Reserved words (`{`, `}`, `!`, `[[`) are read before any expansion,
+# and a lone `[` has no closing bracket for a glob to use, so none of them is
+# computed. The word npm reads as its command is the first word after `npm`
+# unless an option comes first; after an option it is any later word, because
+# the recognizers' option grammar (SAFEDEPS_G_O) lets any option take the
+# words after it as its value. A case pattern is not a command word.
 inert_dynamic_command_word() {
-  local text classes noredir
+  local text classes noredir eqstart='(^|[[:space:];&|()])='
   while IFS= read -r text; do
-    [[ "${text}" == *[\$\`]* ]] || continue
+    [[ "${text}" == *[!$' \t\n;&|<>()'"${SAFEDEPS_SHELL_INERT_BYTES}"]* || "${text}" =~ ${eqstart} ]] || continue
     classes=$(shell_lex "${text}" classes "safedeps:inert_rewrite_in_place") || return 2
     noredir=$(shell_lex "${text}" noredir "safedeps:inert_rewrite_in_place") || return 2
-    if printf '%s\n%s' "${classes}" "${noredir}" | LC_ALL=C awk '
+    if printf '%s\n%s' "${classes}" "${noredir}" | LC_ALL=C awk -v inert="${SAFEDEPS_SHELL_INERT_BYTES}" '
       # safedeps:inert_rewrite_in_place (scripts/measure/scan-failure-census.sh keys on this line)
       NR == 1 { K = $0; next }
       { X = X (NR > 2 ? "\n" : "") $0 }
       END {
         N = split(X, XC, ""); if (split(K, KC, "") != N) exit 3
-        split("! { if then else elif while until do time coproc", kw, " ")
+        split("! { } if then else elif while until do time coproc", kw, " ")
         for (j in kw) KW[kw[j]] = 1
+        m = split(inert, ib, ""); for (j = 1; j <= m; j++) IB[ib[j]] = 1
+        # A case pattern runs back from the `)` that closes it (class p) to
+        # the `in`, the `;;` or the line before it; `|` is its alternation.
+        pat = 0
+        for (k = N; k >= 1; k--) {
+          if (KC[k] == "p") pat = 1
+          else if (pat && KC[k] == "c" && index(";&(\n", XC[k])) pat = 0
+          else if (pat && KC[k] == "c" && index(" \t", XC[k]) && k > 2 && XC[k-1] == "n" && XC[k-2] == "i" && (k == 3 || index(" \t", XC[k-3]))) pat = 0
+          PAT[k] = pat
+        }
         # A word runs to a blank or an operator at its own level; a `(` inside
-        # it (`$(`, `$((`, `<(`) opens a level the word keeps to its `)`. Only
-        # the first eight bytes are kept, which every reserved word fits in:
-        # a string built a byte at a time costs the square of its length
-        # under the macOS awk.
-        start = 1
+        # it (`$(`, `$((`, `<(`) opens a level the word keeps to its `)`. Of
+        # its text with the quotes out, only the first eight bytes and the last
+        # four are kept, which every reserved word and `/npm` fit in: a string
+        # built a byte at a time costs the square of its length under the
+        # macOS awk.
+        start = 1; innpm = 0
         for (k = 1; k <= N; k++) {
           c = XC[k]; top = (KC[k] == "c" || KC[k] == "p")
           if (KC[k] == "m" || KC[k] == "h" || KC[k] == "b" || KC[k] == "F" || KC[k] == "l") continue
           if (top && (c == " " || c == "\t" || c == "<" || c == ">")) continue
-          if (top && index(";&|()\n", c)) { start = 1; continue }
-          w = ""; wl = 0; dyn = 0; depth = 0
+          if (top && index(";&|()\n", c)) { start = 1; innpm = 0; continue }
+          s = k; w = ""; t = ""; wl = 0; rl = 0; dyn = 0; depth = 0
           for (; k <= N; k++) {
-            c = XC[k]; top = (KC[k] == "c" || KC[k] == "p")
-            if (depth == 0 && ((top && index(" \t;&|()<>\n", c) && !(c == "(" && wl > 0)) || KC[k] == "m" || KC[k] == "h" || KC[k] == "b" || KC[k] == "F")) { k--; break }
+            c = XC[k]; cl = KC[k]; top = (cl == "c" || cl == "p")
+            if (depth == 0 && ((top && index(" \t;&|()<>\n", c) && !(c == "(" && rl > 0)) || cl == "m" || cl == "h" || cl == "b" || cl == "F")) { k--; break }
+            rl++
             if (top && c == "(") depth++
             else if (top && c == ")") depth--
             if (c == "$" || c == "`") dyn = 1
-            if (wl++ < 8) w = w c
+            else if (cl == "c" && (!(c in IB) || k == s && c == "=")) dyn = 1
+            if (cl == "x" || cl == "l" || cl == "q" && (c == "\047" || c == "\042")) continue
+            if (wl < 8) w = w c
+            t = (wl < 4 ? t : substr(t, 2)) c
+            wl++
           }
-          if (!start) continue
+          if (PAT[s]) continue
+          if (start) {
+            if (wl <= 8 && (w in KW || w == "[[" || w == "[")) { start = (w in KW); continue }
+            if (dyn) exit 0
+            start = 0; opt = 0
+            t = tolower(t)
+            innpm = (wl == 3 && t == "npm" || wl > 3 && t == "/npm")
+            continue
+          }
+          if (!innpm) continue
           if (dyn) exit 0
-          if (!(w in KW)) start = 0
+          if (substr(w, 1, 1) == "-") opt = 1
+          else if (!opt) innpm = 0
         }
         exit 1
       }'; then
