@@ -2797,13 +2797,19 @@ shell_lex_batch() {
     done
     return 0
   fi
-  # The awk arguments shell_lex passes for this view in this reading.
+  # The awk arguments shell_lex passes for this view in this reading: the
+  # options to one file, the program, its last argument, to another, so bash
+  # reads back only the options (read -d reads a byte per system call).
   argf="${dir}/argv"
-  : > "${argf}"
-  awk() { printf '%s\0' "$@" > "${argf}"; }
+  : > "${argf}"; : > "${dir}/prog.in"
+  awk() {
+    while (( $# > 1 )); do printf '%s\0' "$1" >> "${argf}"; shift; done
+    printf '%s\n' "$1" > "${dir}/prog.in"
+  }
   shell_lex "" "${view}" "${marker}" > /dev/null 2>&1 || true
   unset -f awk
   while IFS= read -r -d '' a; do argv+=("${a}"); done < "${argf}"
+  [[ ! -s "${dir}/prog.in" ]] || prog=1
   for (( i = 0; i < ${#argv[@]}; i++ )); do
     if [[ "${argv[i]}" == -v ]] && (( i + 1 < ${#argv[@]} )); then
       vopts+=(-v "${argv[i+1]}")
@@ -2827,8 +2833,10 @@ shell_lex_batch() {
           ;;
       esac
       i=$(( i + 1 ))
-    elif (( i == ${#argv[@]} - 1 )); then
-      prog="${argv[i]}"
+    else
+      # Anything but -v pairs before the program is an argument the batch
+      # does not pass on.
+      rc=1
     fi
   done
   # awk reads an argument holding `=` as an assignment, not a file.
@@ -2836,7 +2844,6 @@ shell_lex_batch() {
   if (( rc == 0 )); then
     for name in ${SAFEDEPS_LEX_ARRAYS}; do [[ "${skip}" == *" ${name} "* ]] || reset+="delete ${name}; "; done
     for name in ${SAFEDEPS_LEX_SCALARS}; do [[ "${skip}" == *" ${name} "* ]] || reset+="${name} = __lb_nil; "; done
-    printf '%s\n' "${prog}" > "${dir}/prog.in"
     # The lexer's BEGIN and END become functions the batch calls once per
     # text. A program whose blocks did not convert does not run, and its texts
     # are read one at a time.
@@ -2846,14 +2853,13 @@ shell_lex_batch() {
     # as each reaches shell_lex: the text and a newline. A text with a
     # newline is several records, so then each text is a file of its own and
     # a new file starts a text.
-    lines=1
+    lines=1 a=""
     for (( i = 0; i < n; i++ )); do
       [[ "${SAFEDEPS_LB_IN[i]}" != *$'\n'* ]] || { lines=0; break; }
+      a+="${SAFEDEPS_LB_IN[i]}"$'\n'
     done
     if (( lines == 1 )); then
       printf '%s\n' '{ if (__lb_on) __lb_fin(); __lb_go() }' > "${dir}/pre.awk"
-      a=""
-      for (( i = 0; i < n; i++ )); do a+="${SAFEDEPS_LB_IN[i]}"$'\n'; done
       printf '%s' "${a}" > "${dir}/in"
       : > "${dir}/list"
     else
@@ -2941,10 +2947,20 @@ shell_lex_batch() {
 
 # The parts of a batch's side file <file>, one per text, into
 # SAFEDEPS_LB_PART: the lines before each end mark \001<index>. Fails unless
-# there are <n> marks, in order, and nothing after the last.
+# there are <n> marks, in order, and nothing after the last. A file exactly
+# as long as its <n> marks holds nothing else, and is not read line by line:
+# most texts write no side output, and the lines were most of a batch's cost.
 shell_lex_batch_side() {
-  local f="$1" n="$2" k=0 line="" acc=""
+  local f="$1" n="$2" k=0 line="" acc="" size marks p=10
   SAFEDEPS_LB_PART=()
+  # The marks \001<k>\n for k = 0 .. n-1: two bytes and a digit each, and
+  # one digit more for each k at or past each power of ten.
+  marks=$(( 3 * n ))
+  while (( p < n )); do marks=$(( marks + n - p )); p=$(( p * 10 )); done
+  if size=$(wc -c < "${f}" 2>/dev/null) && (( size + 0 == marks )); then
+    for (( k = 0; k < n; k++ )); do SAFEDEPS_LB_PART[k]=""; done
+    return 0
+  fi
   while IFS= read -r line; do
     if [[ "${line}" == $'\001'"${k}" ]]; then
       SAFEDEPS_LB_PART[k]="${acc}" acc="" k=$(( k + 1 ))
