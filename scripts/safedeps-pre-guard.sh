@@ -2322,6 +2322,9 @@ inert_offsets_of() {
 # install, is recorded too (scripts/measure/inert-record-data.py).
 inert_bytes_left_unread() {
   local command="$1" at="$2" classes left
+  # The texts the second reading made, one per level, for
+  # inert_dynamic_command_word.
+  INERT_LEVELS=""
   classes=$(shell_lex "${command}" classes "safedeps:inert_rewrite_in_place") || return 2
   if ! left=$(printf '%s\n%s\n%s' "${at}" "${classes}" "${command}" | LC_ALL=C awk '
     # safedeps:inert_rewrite_in_place (scripts/measure/scan-failure-census.sh keys on this line)
@@ -2400,7 +2403,7 @@ inert_bytes_left_unread() {
       m = n; for (i = 1; i <= n; i++) A[i] = X[i]
       for (lv = 1; lv <= 3; lv++) {
         m = unq(A, m, B)
-        printf "\n"; more = 0
+        printf "\036"; more = 0
         for (i = 1; i <= m; i++) { printf "%s", B[i]; A[i] = B[i]; if (B[i] == "\047" || B[i] == "\"" || B[i] == "\\") more = 1 }
         if (!more) break
       }
@@ -2410,10 +2413,12 @@ inert_bytes_left_unread() {
     return 2
   fi
   left="${left%X}"
+  INERT_LEVELS="${left#*$'\036'}"
+  [[ "${left}" == *$'\036'* ]] || INERT_LEVELS=""
   [[ "${left:0:1}" != C ]] || return 0
   left="${left:1}"
   [[ "${left}" == *[Nn][Pp][Mm]* ]] || return 1
-  printf '%s\n' "${left}" \
+  printf '%s\n' "${left//$'\036'/$'\n'}" \
     | LC_ALL=C judge_grep -qEi "npm${SAFEDEPS_G_O}[[:space:]]+(${SAFEDEPS_G_NPM_VERBS}|${SAFEDEPS_G_NPM_LINK_VERBS})([^[:alnum:]_-]|\$)"
 }
 
@@ -2439,77 +2444,106 @@ inert_bytes_left_unread() {
 # the recognizers' option grammar (SAFEDEPS_G_O) lets any option take the
 # words after it as its value. A case pattern is not a command word.
 inert_dynamic_command_word() {
-  local text classes noredir eqstart='(^|[[:space:];&|()])='
+  local text rc
   while IFS= read -r text; do
-    [[ "${text}" == *[!$' \t\n;&|<>()'"${SAFEDEPS_SHELL_INERT_BYTES}"]* || "${text}" =~ ${eqstart} ]] || continue
-    classes=$(shell_lex "${text}" classes "safedeps:inert_rewrite_in_place") || return 2
-    noredir=$(shell_lex "${text}" noredir "safedeps:inert_rewrite_in_place") || return 2
-    if printf '%s\n%s' "${classes}" "${noredir}" | LC_ALL=C awk -v inert="${SAFEDEPS_SHELL_INERT_BYTES}" '
-      # safedeps:inert_rewrite_in_place (scripts/measure/scan-failure-census.sh keys on this line)
-      NR == 1 { K = $0; next }
-      { X = X (NR > 2 ? "\n" : "") $0 }
-      END {
-        N = split(X, XC, ""); if (split(K, KC, "") != N) exit 3
-        split("! { } if then else elif while until do time coproc", kw, " ")
-        for (j in kw) KW[kw[j]] = 1
-        m = split(inert, ib, ""); for (j = 1; j <= m; j++) IB[ib[j]] = 1
-        # A case pattern runs back from the `)` that closes it (class p) to
-        # the `in`, the `;;` or the line before it; `|` is its alternation.
-        pat = 0
-        for (k = N; k >= 1; k--) {
-          if (KC[k] == "p") pat = 1
-          else if (pat && KC[k] == "c" && index(";&(\n", XC[k])) pat = 0
-          else if (pat && KC[k] == "c" && index(" \t", XC[k]) && k > 2 && XC[k-1] == "n" && XC[k-2] == "i" && (k == 3 || index(" \t", XC[k-3]))) pat = 0
-          PAT[k] = pat
-        }
-        # A word runs to a blank or an operator at its own level; a `(` inside
-        # it (`$(`, `$((`, `<(`) opens a level the word keeps to its `)`. Of
-        # its text with the quotes out, only the first eight bytes and the last
-        # four are kept, which every reserved word and `/npm` fit in: a string
-        # built a byte at a time costs the square of its length under the
-        # macOS awk.
-        start = 1; innpm = 0
-        for (k = 1; k <= N; k++) {
-          c = XC[k]; top = (KC[k] == "c" || KC[k] == "p")
-          if (KC[k] == "m" || KC[k] == "h" || KC[k] == "b" || KC[k] == "F" || KC[k] == "l") continue
-          if (top && (c == " " || c == "\t" || c == "<" || c == ">")) continue
-          if (top && index(";&|()\n", c)) { start = 1; innpm = 0; continue }
-          s = k; w = ""; t = ""; wl = 0; rl = 0; dyn = 0; depth = 0
-          for (; k <= N; k++) {
-            c = XC[k]; cl = KC[k]; top = (cl == "c" || cl == "p")
-            if (depth == 0 && ((top && index(" \t;&|()<>\n", c) && !(c == "(" && rl > 0)) || cl == "m" || cl == "h" || cl == "b" || cl == "F")) { k--; break }
-            rl++
-            if (top && c == "(") depth++
-            else if (top && c == ")") depth--
-            if (c == "$" || c == "`") dyn = 1
-            else if (cl == "c" && (!(c in IB) || k == s && c == "=")) dyn = 1
-            if (cl == "x" || cl == "l" || cl == "q" && (c == "\047" || c == "\042")) continue
-            if (wl < 8) w = w c
-            t = (wl < 4 ? t : substr(t, 2)) c
-            wl++
-          }
-          if (PAT[s]) continue
-          if (start) {
-            if (wl <= 8 && (w in KW || w == "[[" || w == "[")) { start = (w in KW); continue }
-            if (dyn) exit 0
-            start = 0; opt = 0
-            t = tolower(t)
-            innpm = (wl == 3 && t == "npm" || wl > 3 && t == "/npm")
-            continue
-          }
-          if (!innpm) continue
-          if (dyn) exit 0
-          if (substr(w, 1, 1) == "-") opt = 1
-          else if (!opt) innpm = 0
-        }
-        exit 1
-      }'; then
-      return 0
-    else
-      case $? in 1) ;; *) [[ -z "${SAFEDEPS_SCAN_MARK:-}" ]] || printf 'failed\n' >> "${SAFEDEPS_SCAN_MARK}"; return 2 ;; esac
-    fi
+    rc=0; inert_dynamic_in "${text}" 0 || rc=$?
+    (( rc == 1 )) || return "${rc}"
   done < <(command_candidate_texts "$1")
+  # The texts the byte rule read through quote removal, one per level, with
+  # every `<` a newline, so a here-string or a heredoc body handed to a shell
+  # starts statements of its own, as it does to that shell (`bash <<< 'npm
+  # ${u:-ci} x'`). The cost is a redirection source read as a command word.
+  while IFS= read -r -d $'\036' text; do
+    rc=0; inert_dynamic_in "${text//</$'\n'}" 1 || rc=$?
+    (( rc == 1 )) || return "${rc}"
+  done <<< "${INERT_LEVELS:+${INERT_LEVELS}$'\036'}"
   return 1
+}
+
+# inert_dynamic_command_word for one <text>; <levels> is 1 for a text the byte
+# rule unquoted. Returns 0 when a computed word stands where npm or its
+# command can, 1 when none does, 2 on a failed reading.
+inert_dynamic_in() {
+  local text="$1" classes noredir eqstart='(^|[[:space:];&|()])='
+  [[ "${text}" == *[!$' \t\n;&|<>()'"${SAFEDEPS_SHELL_INERT_BYTES}"]* || "${text}" =~ ${eqstart} ]] || return 1
+  classes=$(shell_lex "${text}" classes "safedeps:inert_rewrite_in_place") || return 2
+  noredir=$(shell_lex "${text}" noredir "safedeps:inert_rewrite_in_place") || return 2
+  if printf '%s\n%s' "${classes}" "${noredir}" | LC_ALL=C awk -v inert="${SAFEDEPS_SHELL_INERT_BYTES}" -v levels="$2" '
+    # safedeps:inert_rewrite_in_place (scripts/measure/scan-failure-census.sh keys on this line)
+    NR == 1 { K = $0; next }
+    { X = X (NR > 2 ? "\n" : "") $0 }
+    END {
+      N = split(X, XC, ""); if (split(K, KC, "") != N) exit 3
+      split("! { } if then else elif while until do time coproc", kw, " ")
+      for (j in kw) KW[kw[j]] = 1
+      m = split(inert, ib, ""); for (j = 1; j <= m; j++) IB[ib[j]] = 1
+      # A case pattern runs back from the `)` that closes it (class p) to
+      # the `in`, the `;;` or the line before it; `|` is its alternation.
+      pat = 0
+      for (k = N; k >= 1; k--) {
+        if (KC[k] == "p") pat = 1
+        else if (pat && KC[k] == "c" && index(";&(\n", XC[k])) pat = 0
+        else if (pat && KC[k] == "c" && index(" \t", XC[k]) && k > 2 && XC[k-1] == "n" && XC[k-2] == "i" && (k == 3 || index(" \t", XC[k-3]))) pat = 0
+        PAT[k] = pat
+      }
+      # In a text the byte rule unquoted (levels), where the npm the rewrite
+      # read is already set aside, an `npm` inside a substitution is one it
+      # did not read, as inert_bytes_left_unread reads the command itself.
+      ns = 0
+      for (k = 1; levels && k <= N; k++) {
+        if ((KC[k] == "Q" || KC[k] == "B" || ns > 0) && tolower(XC[k] XC[k + 1] XC[k + 2]) == "npm") exit 0
+        if (KC[k] != "c") continue
+        if ((XC[k] == "$" || XC[k] == "<" || XC[k] == ">") && XC[k + 1] == "(" || XC[k] == "$" && XC[k + 1] == "{") { st[++ns] = (XC[k + 1] == "(") ? ")" : "}"; k++ }
+        else if (XC[k] == "`") { if (ns > 0 && st[ns] == "`") ns--; else st[++ns] = "`" }
+        else if (ns > 0 && XC[k] == "(") st[++ns] = ")"
+        else if (ns > 0 && XC[k] == st[ns]) ns--
+      }
+      # A word runs to a blank or an operator at its own level; a `(` inside
+      # it (`$(`, `$((`, `<(`) opens a level the word keeps to its `)`. Of
+      # its text with the quotes out, only the first eight bytes and the last
+      # four are kept, which every reserved word and `/npm` fit in: a string
+      # built a byte at a time costs the square of its length under the
+      # macOS awk.
+      start = 1; innpm = 0
+      for (k = 1; k <= N; k++) {
+        c = XC[k]; top = (KC[k] == "c" || KC[k] == "p")
+        if (KC[k] == "m" || KC[k] == "h" || KC[k] == "b" || KC[k] == "F" || KC[k] == "l") continue
+        if (top && (c == " " || c == "\t" || c == "<" || c == ">")) continue
+        if (top && index(";&|()\n", c)) { start = 1; innpm = 0; continue }
+        s = k; w = ""; t = ""; wl = 0; rl = 0; dyn = 0; depth = 0
+        for (; k <= N; k++) {
+          c = XC[k]; cl = KC[k]; top = (cl == "c" || cl == "p")
+          if (depth == 0 && ((top && index(" \t;&|()<>\n", c) && !(c == "(" && rl > 0)) || cl == "m" || cl == "h" || cl == "b" || cl == "F")) { k--; break }
+          rl++
+          if (top && c == "(") depth++
+          else if (top && c == ")") depth--
+          if (c == "$" || c == "`") dyn = 1
+          else if (cl == "c" && (!(c in IB) || k == s && c == "=")) dyn = 1
+          if (cl == "x" || cl == "l" || cl == "q" && (c == "\047" || c == "\042")) continue
+          if (wl < 8) w = w c
+          t = (wl < 4 ? t : substr(t, 2)) c
+          wl++
+        }
+        if (PAT[s]) continue
+        if (start) {
+          if (wl <= 8 && (w in KW || w == "[[" || w == "[")) { start = (w in KW); continue }
+          if (dyn) exit 0
+          start = 0; opt = 0
+          t = tolower(t)
+          innpm = (wl == 3 && t == "npm" || wl > 3 && t == "/npm")
+          continue
+        }
+        if (!innpm) continue
+        if (dyn) exit 0
+        if (substr(w, 1, 1) == "-") opt = 1
+        else if (!opt) innpm = 0
+      }
+      exit 1
+    }'; then
+    return 0
+  else
+    case $? in 1) return 1 ;; *) [[ -z "${SAFEDEPS_SCAN_MARK:-}" ]] || printf 'failed\n' >> "${SAFEDEPS_SCAN_MARK}"; return 2 ;; esac
+  fi
 }
 
 # The command with `--ignore-scripts` placed after the last argument of every
