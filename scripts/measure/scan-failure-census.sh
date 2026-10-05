@@ -209,7 +209,6 @@ case "\$*" in
   *"safedeps:command_scan_text"*) kind=scan ;;
   *"safedeps:join_line_continuations"*) kind=join ;;
   *"safedeps:install_managers_blanked"*) kind=blank ;;
-  *"safedeps:install_match_spans"*) kind=spans ;;
   *"safedeps:strip_heredoc_bodies"*) kind=strip ;;
   *"safedeps:command_reads"*) kind=reads ;;
   *"safedeps:inert_rewrite_in_place"*) kind=inert ;;
@@ -339,7 +338,7 @@ for n in $(seq 1 "${case_count}"); do
     printf '%s k %s\n' "${n}" "${k}" >> "${WORK}/jobs"
     [[ "${QUICK}" == "true" ]] || printf '%s from-k %s\n' "${n}" "${k}" >> "${WORK}/jobs"
   done
-  for mode in scan-all join-all strip-all reads-all inert-all offsets-all norm-all subst-all blank-all spans-all stmts-all npmrc-all pieces-all payload-all paywords-all payspans-all awk-all grep-all sed-all; do
+  for mode in scan-all join-all strip-all reads-all inert-all offsets-all norm-all subst-all blank-all stmts-all npmrc-all pieces-all payload-all paywords-all payspans-all awk-all grep-all sed-all; do
     printf '%s %s 0\n' "${n}" "${mode}" >> "${WORK}/jobs"
   done
 done

@@ -16,8 +16,9 @@
 # A form marked `gate: pass` is data the shell never runs, and must stay data.
 #
 # The shells are bash, zsh and dash, as the agent wrapper and both platforms
-# run them (measured.{bash,zsh,sh,agent,dash} on macOS, measured.linux.{bash,
-# dash} on Linux). The lexer reads a command once per shell -- the bash, zsh
+# run them (measured.{bash,zsh,sh,agent,agent-noset,dash} on macOS,
+# measured.linux.{bash,dash} on Linux; the two agent columns are the wrapper
+# with and without its `setopt NO_EXTENDED_GLOB NO_BARE_GLOB_QUAL`). The lexer reads a command once per shell -- the bash, zsh
 # and dash readings -- and the gate judges the union. Before the gate is asked
 # anything, each reading is held to its own shell here: wherever a shell ran
 # the tail, that shell's reading must show it. The union would hide a reading
@@ -34,13 +35,15 @@ COUNT=false
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "${ROOT_DIR}"
-FORMS="scripts/measure/shell-reading-forms.json"
+# SAFEDEPS_SHELL_FORMS names another corpus in the same format: the
+# redirection grid (scripts/measure/redirection-grid.sh) is judged that way.
+FORMS="${SAFEDEPS_SHELL_FORMS:-scripts/measure/shell-reading-forms.json}"
 
 pass() { printf 'ok - %s\n' "$1"; }
 fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
 
 # shell column -> the reading that stands for it
-SHELL_READINGS="bash:bash sh:bash linux.bash:bash zsh:zsh agent:zsh dash:dash linux.dash:dash"
+SHELL_READINGS="bash:bash sh:bash bash5:bash linux.bash:bash zsh:zsh agent:zsh agent-noset:zsh dash:dash linux.dash:dash"
 
 tmp_root=$(mktemp -d "${TMPDIR:-/tmp}/safedeps-shell-reading.XXXXXX")
 trap 'rm -rf "${tmp_root}"' EXIT
@@ -74,13 +77,21 @@ pass "control: the harness separates a judged install from data"
 
 # Each reading against its own shell. A reading shows the tail when its live
 # view (every byte the shell runs at the top level), the scripts it hands to
-# `sh -c` or `eval`, or the heredoc bodies it pipes to a shell hold it.
+# `sh -c` or `eval`, the heredoc bodies it pipes to a shell, or the statement
+# the recognizers read (the unprefixed view, every redirection blank) hold it.
+# The last is the one for a redirection between a command and its arguments
+# whose target holds a substitution: the live view keeps that body, which
+# runs, so there the command and its arguments are not side by side.
 lex_src=$(sed -n '/^shell_lex() {/,/^}/p' scripts/safedeps-pre-guard.sh)
 [[ "${lex_src}" == *"shell_lex() {"* ]] || fail "shell_lex not found in the guard (renamed? then update this battery)"
 eval "${lex_src}"
+# The lexer reads the lists of the grammar (the shells, the executables), as
+# it does in the guard.
+# shellcheck source=lib/install-grammar.sh
+source lib/install-grammar.sh
 reading_shows_tail() { # reading text
   local v
-  for v in live cscripts shell-bodies; do
+  for v in live cscripts shell-bodies unprefixed; do
     SAFEDEPS_READING="$1" shell_lex "$2" "${v}" "safedeps:shell-reading" | tr -d ' \t\n' \
       | grep -q 'pipinstallevil==6\.6\.6' && return 0
   done
@@ -91,11 +102,11 @@ cells=0
 declare -a unfaithful=()
 for ((i = 0; i < n; i++)); do
   id=$(jq -r ".[${i}].id" "${FORMS}")
-  text=$(jq -j ".[${i}].text" "${FORMS}" | sed -e 's/@@TAIL@@/pip install evil==6.6.6/' -e 's/@@TAIL_SPLIT@@/pi\\\
+  text=$(jq -j ".[${i}].text" "${FORMS}" | sed -e 's/@@TAIL@@/pip install evil==6.6.6/' -e 's/@@HEAD@@/pip/g' -e 's/@@TAIL_SPLIT@@/pi\\\
 p install evil==6.6.6/'; printf 'X'); text="${text%X}"
   for pair in ${SHELL_READINGS}; do
     column="${pair%%:*}"
-    [[ "$(jq -r ".[${i}].measured.${column} // \"\"" "${FORMS}")" == R* ]] || continue
+    [[ "$(jq -r --arg c "${column}" ".[${i}] | getpath([\"measured\"] + (\$c | split(\".\"))) // \"\"" "${FORMS}")" == R* ]] || continue
     cells=$((cells + 1))
     reading_shows_tail "${pair#*:}" "${text}" || unfaithful+=("${id}:${column}")
   done
@@ -116,9 +127,9 @@ for ((i = 0; i < n; i++)); do
   id=$(jq -r ".[${i}].id" "${FORMS}")
   label=$(jq -r ".[${i}].label" "${FORMS}")
   jq -j ".[${i}].text" "${FORMS}" \
-    | sed -e 's/@@TAIL@@/pip install evil==6.6.6/' -e 's/@@TAIL_SPLIT@@/pi\\\
+    | sed -e 's/@@TAIL@@/pip install evil==6.6.6/' -e 's/@@HEAD@@/pip/g' -e 's/@@TAIL_SPLIT@@/pi\\\
 p install evil==6.6.6/' > "${tmp_root}/${id}.cmd"
-  shells=$(jq -r ".[${i}].measured | \"\(.bash) \(.zsh) \(.agent) \(.dash) \(.linux.bash) \(.linux.dash)\"" "${FORMS}")
+  shells=$(jq -r ".[${i}].measured | \"\(.bash) \(.zsh) \(.agent) \(.[\"agent-noset\"] // \"\") \(.dash) \(.bash5 // \"\") \(.linux.bash) \(.linux.dash)\"" "${FORMS}")
   want=$(jq -r ".[${i}].gate // empty" "${FORMS}")
   got=$(decision_of "${tmp_root}/${id}.cmd")
   if [[ "${shells}" == *R* ]]; then

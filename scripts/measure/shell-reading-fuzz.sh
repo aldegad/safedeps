@@ -44,6 +44,10 @@ GUARD="scripts/safedeps-pre-guard.sh"
 src=$(sed -n '/^shell_lex() {/,/^}/p' "${GUARD}")
 [[ "${src}" == *"shell_lex() {"* ]] || { printf 'shell_lex not found in %s\n' "${GUARD}" >&2; exit 2; }
 eval "${src}"
+# The lexer reads the lists of the grammar (the shells, the executables), as
+# it does in the guard.
+# shellcheck source=lib/install-grammar.sh
+source lib/install-grammar.sh
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/safedeps-fuzz.XXXXXX")
 trap 'rm -rf "${work}"' EXIT
@@ -60,7 +64,13 @@ fi
 runs() { # shell-binary file -> R or -
   local d out
   d=$(mktemp -d "${work}/cwd.XXXXXX")
-  out=$(cd "${d}" && "$1" -c "$(cat "$2")" 2>/dev/null </dev/null)
+  # zsh with no startup files (-f): a ~/.zshenv runs in every `zsh -c` and can
+  # change what a form runs.
+  if [[ "$1" == */zsh ]]; then
+    out=$(cd "${d}" && "$1" -f -c "$(cat "$2")" 2>/dev/null </dev/null)
+  else
+    out=$(cd "${d}" && "$1" -c "$(cat "$2")" 2>/dev/null </dev/null)
+  fi
   printf '%s\n' "${out}" | grep -qx REACHED && printf 'R' || printf '%s' '-'
 }
 shows() { # reading text -> 0 when that reading shows the tail
