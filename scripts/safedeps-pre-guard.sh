@@ -314,7 +314,16 @@ judge_grep() {
 command_is_dependency_install() {
   local texts
   texts=$(command_candidate_start_texts "$1")
-  judge_grep -qEi "${SAFEDEPS_INSTALL_PATTERN}" <<< "${texts}"
+  recognized_dependency_install "${texts}"
+}
+
+# Whether <texts>, read the way the recognizers read a command (its recognize
+# view, or a statement's recognize bytes from the same lexing), hold a
+# dependency install. The landing, the ecosystem detection and the spec
+# extractor ask this of each statement's recognize bytes: asking
+# command_is_dependency_install would lex those bytes again.
+recognized_dependency_install() {
+  judge_grep -qEi "${SAFEDEPS_INSTALL_PATTERN}" <<< "$1"
 }
 
 command_hides_dependency_install() {
@@ -3933,7 +3942,7 @@ resolve_reading_targets() {
 
       # The statement as the recognizers read it, its prefixes removed:
       # `npm_config_save=false npm install x` is an npm install.
-      judge_grep -qEi "${SAFEDEPS_INSTALL_PATTERN}" <<< "${stmt_recs[n]:-}" || break
+      recognized_dependency_install "${stmt_recs[n]:-}" || break
 
       # The npm word and its arguments. The words before npm go to env(1) in
       # front of npm when npm is asked below, and the words after it are npm's
@@ -5071,7 +5080,7 @@ guard_detect_ecosystem() {
   # is a separator, so a cut at `;` `|` `&` is a cut between statements.
   while IFS= read -r seg; do
     [[ "${seg}" =~ [^[:space:]] ]] || continue
-    judge_grep -qEi "${SAFEDEPS_INSTALL_PATTERN}" <<< "${seg}" || continue
+    recognized_dependency_install "${seg}" || continue
     eco=$(guard_segment_ecosystem "${seg}")
     [[ -n "${eco}" ]] && { printf '%s' "${eco}"; return 0; }
   done < <(command_candidate_start_texts "${cmd}" | tr ';|&' '\n')
@@ -5493,7 +5502,7 @@ guard_extract_specs() {
   # words.
   while IFS=$'\t\037' read -r gate_reads seg words; do
     [[ "${seg}" =~ [^[:space:]] ]] || continue
-    judge_grep -qEi "${SAFEDEPS_INSTALL_PATTERN}" <<< "${seg}" || continue
+    recognized_dependency_install "${seg}" || continue
     # Grouping characters are the shell's (`(npm i x)`, `{ pip install y; }`).
     words="${words//[(){\}]/ }"
     set -f
