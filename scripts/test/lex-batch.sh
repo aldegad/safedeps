@@ -113,12 +113,12 @@ while i < n:
     m = re.match(r'(\+\+|--|\+=|-=|\*=|/=|%=|\^=|==|!=|<=|>=|&&|\|\||>>|[-+*/%^!<>=?:,;(){}\[\]|$~&])', src[i:i+4])
     if not m: sys.exit('cannot read the program at byte %d: %r' % (i, src[i:i+30]))
     toks.append(('op', m.group(0))); prev = ('op', m.group(0)); i += len(m.group(0))
-funcs = {}; scopes = []; k = 0
+funcs = {}; scopes = []; header = set(); k = 0
 while k < len(toks):
     if toks[k] == ('kw', 'function') or toks[k] == ('kw', 'func'):
         name = toks[k+1][1]; j = k + 3; params = []
         while toks[j][1] != ')':
-            if toks[j][0] == 'id': params.append(toks[j][1])
+            if toks[j][0] == 'id': params.append(toks[j][1]); header.add(j)
             j += 1
         while toks[j][1] != '{': j += 1
         depth = 0; s0 = j
@@ -154,7 +154,7 @@ for t, (kind, w) in enumerate(toks):
         depth -= 1; continue
     if (kind, w) == ('op', ',') and calls and calls[-1][2] == depth:
         calls[-1][1] += 1; continue
-    if kind != 'id' or w in BI or w in funcs or w in SPECIAL or w in scope_of(t): continue
+    if kind != 'id' or t in header or w in BI or w in funcs or w in SPECIAL or w in scope_of(t): continue
     nxt = toks[t+1][1] if t + 1 < len(toks) else ''
     if nxt == '(': continue
     isarr = nxt == '[' or toks[t-1][1] in ('in', 'delete')

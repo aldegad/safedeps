@@ -2565,8 +2565,8 @@ install_managers_blanked() {
 # never reads changes nothing. scripts/test/lex-batch.sh lists the globals of
 # the program shell_lex runs and fails on any name missing here, so a new
 # global cannot be added to the lexer without being added to these.
-SAFEDEPS_LEX_ARRAYS="A ACL AQV AR ARM BF BSF C CPO CS CW DEP DQS DROP ED EDW ESC EV EW EZ EZW GL GLO HC HEND HSTART JMP KEEP PCOND PS PSB PSN PST RM SBC SBCN SBP SBPN SBS SPC SUBC VAL W WC WD WPO X adol besc ch cpat cpw cst ctx glc pS par pb pd pdq pfed pnp pq ps pstart sbeg sbr send sid skind sl wkind"
-SAFEDEPS_LEX_SCALARS="N a ab acond any aqbad args atstart az b base be body br bs buf bw c cc cl closer cls cmdmode cop cs cw d dbr dc depth div divfile divmemo dollar done dq e envmode execmode exre fed fh first flagfile fn fr fra h hb1 hd held hit hn hstop i id inp inw j k kk lead line lit ln m mm mode n nh np nsub op p pc pcw perline pln pn policy pre q qtop rd rest rp rs s shb shd shre shz sk smark smdone st started strip sv t takes timemode tm top unterm v view w w4 walked wantar wantdep wantst wends wk z zr"
+SAFEDEPS_LEX_ARRAYS="A ACL AQV AR ARM BF BSF C CPO DEP DQS DROP ED EDW ESC EV EW EZ EZW GL GLO HEND HSTART JMP KEEP PS PSB PSN RM SBC SBCN SBP SBPN SBS SPC SUBC VAL WC WD WPO X adol besc ch cpat cpw cst ctx glc pS par pb pd pdq pfed pnp pq ps pstart sbeg sbr send sid skind sl wkind"
+SAFEDEPS_LEX_SCALARS="N aqbad buf c cls d dc div divfile divmemo dq exre flagfile hb1 held hn hstop i j kk lead m mm mode n nh np nsub perline policy qtop shb shd shre shz smark smdone started top unterm view w4 wantar wantdep wantst wends wk"
 
 # shell_lex for many texts at once: the view of each text in SAFEDEPS_LB_IN,
 # read in the current reading exactly as shell_lex reads it alone, in one awk
@@ -2581,9 +2581,9 @@ SAFEDEPS_LEX_SCALARS="N a ab acond any aqbad args atstart az b base be body br b
 # (awk is a function for the length of one call that records them), so the
 # program and the arguments are never a second copy. Its BEGIN and END become
 # functions, and before each text every global in SAFEDEPS_LEX_ARRAYS and
-# SAFEDEPS_LEX_SCALARS is cleared, except the -v arguments, then BEGIN runs
-# again. Each text is a file of its own and reaches the program as shell_lex's
-# stdin does: the text and a newline.
+# SAFEDEPS_LEX_SCALARS is cleared, each -v argument is set back to the value
+# awk gave it, and BEGIN runs again. Each text is a file of its own and
+# reaches the program as shell_lex's stdin does: the text and a newline.
 #
 # The side outputs a call writes -- DIVERGE, UNTERM, a failure mark -- go to
 # files of the text's own and come back as text, not to the run's files: a
@@ -2600,7 +2600,7 @@ SAFEDEPS_LEX_SCALARS="N a ab acond any aqbad args atstart az b base be body br b
 # text is read again with shell_lex alone, its side outputs redirected the
 # same way: slower, never different. scripts/test/lex-batch.sh requires batch.
 shell_lex_batch() {
-  local view="$1" marker="$2" dir argf a name prog="" i n r rc=0 o d u m extra reset="" skip=" " policy="${SAFEDEPS_READING:-}"
+  local view="$1" marker="$2" dir argf a name prog="" i n r rc=0 o d u m extra reset="" skip=" " save="" restore="" policy="${SAFEDEPS_READING:-}"
   local -a argv=() vopts=()
   SAFEDEPS_LB_OUT=() SAFEDEPS_LB_D=() SAFEDEPS_LB_U=() SAFEDEPS_LB_M=() SAFEDEPS_LB_F=()
   SAFEDEPS_LB_READING="${policy}"
@@ -2627,6 +2627,12 @@ shell_lex_batch() {
       vopts+=(-v "${argv[i+1]}")
       name="${argv[i+1]%%=*}"
       skip+="${name} "
+      # The program may assign a -v variable (the wordends view sets view to
+      # stmts), so each one is put back before each text, to the value awk
+      # gave it from the argument.
+      [[ "${name}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || rc=1
+      save+="__lb_v_${name} = ${name}; "
+      restore+="${name} = __lb_v_${name}; "
       # A side output the batch does not redirect would be written for texts
       # no reader reaches: such a program is read one text at a time.
       case "${name}" in
@@ -2656,6 +2662,7 @@ shell_lex_batch() {
       "${dir}/prog.in" > "${dir}/prog.awk" 2>/dev/null || rc=1
     printf '%s\n' 'FNR == 1 { if (__lb_on) __lb_fin(); __lb_go() }' > "${dir}/pre.awk"
     printf '%s\n' \
+      "BEGIN { ${save}}" \
       'BEGIN {' \
       '  while ((getline __lb_l < __lb_list) > 0) ARGV[++__lb_n] = __lb_l' \
       '  close(__lb_list); ARGC = __lb_n + 1' \
@@ -2675,7 +2682,7 @@ shell_lex_batch() {
       '  close(__lb_d); close(__lb_u); close(__lb_m)' \
       '  printf "%c%s%c%s%c%s%c", 0, __lb_body(__lb_d), 0, __lb_body(__lb_u), 0, __lb_body(__lb_m), 0' \
       '}' \
-      "function __lb_reset() { ${reset}}" > "${dir}/drv.awk"
+      "function __lb_reset() { ${reset}${restore}}" > "${dir}/drv.awk"
     : > "${dir}/list"
     for (( i = 0; i < n; i++ )); do
       printf '%s\n' "${SAFEDEPS_LB_IN[i]}" > "${dir}/t.${i}"
