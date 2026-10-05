@@ -62,9 +62,10 @@ src=$(sed -n \
   -e '/^shell_lex() {/,/^}/p' \
   -e '/^SAFEDEPS_LEX_ARRAYS=/p' -e '/^SAFEDEPS_LEX_SCALARS=/p' \
   -e '/^shell_lex_batch() {/,/^}/p' \
+  -e '/^shell_lex_batch_side() {/,/^}/p' \
   -e '/^shell_lex_batch_replay() {/,/^}/p' "${GUARD}")
 eval "${src}"
-for f in shell_lex shell_lex_batch shell_lex_batch_replay guard_mark_reading_failed; do
+for f in shell_lex shell_lex_batch shell_lex_batch_side shell_lex_batch_replay guard_mark_reading_failed; do
   declare -F "${f}" > /dev/null || { printf 'lex-batch: %s not found in the guard\n' "${f}" >&2; exit 2; }
 done
 SAFEDEPS_SCAN_MARK=""
