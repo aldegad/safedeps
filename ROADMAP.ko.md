@@ -1031,6 +1031,7 @@ v2.18.0 의 인식기는 문장 시작을 정규식으로 찾았다. 구분자 �
 - **리다이렉트 격자의 첫 자리를 생성한다.** 같은 문법에서 만들고(`scripts/measure/redirection-grid.sh` 의 `FIRSTS`, `scripts/measure/first-place-grid.sh` 가 읽는다), 손으로 고른 넷이 아니다.
 - **페이로드 문법 둘은 밝혀 둔 경계로 남는다.** env(1) 이 자기 규칙으로 나누는 `env -S` 문자열과, zsh glob 한정자 안의 코드(`*(e:...:)`)다. `scripts/test/consumer-forms.sh` 에 통과로 고정했고, 다음 플랜이 읽는다.
 - **한 셸만 실행하는 npm 꼴 셋은 재작성 대신 `UNDECIDED` 다.** `>/dev/null(N) npm install x` 와 `>/dev/(null) npm install x`(zsh 만), `{fd}>/dev/null npm install x`(bash 5 만)다. 다른 셸은 파싱하지 못하거나 설치를 돌리지 않으므로, 읽기마다 설치 자리가 다르다. 예전의 재작성은 남은 `(N)` 을 명령 시작의 서브셸로 읽은 두 번째 렉싱과, 자기 걸음과 어긋난 zsh 의 `{fd}` 읽기에서 나왔다. fail-closed 다.
+- **두 자리 이상의 디스크립터 뒤 npm 설치도 `UNDECIDED` 다**(`12>/dev/null npm ci`, `10>&2 npm install`). bash 는 그 수를 디스크립터로 읽고 설치를 돌린다. zsh 와 dash 는 그 자리에서 한 자리만 읽으므로 `12` 를 명령으로 보고 설치를 돌리지 않는다. 읽기마다 설치 자리가 다르다. 75b8130 은 모든 읽기가 그 수를 디스크립터로 보았기 때문에 이 꼴을 재작성했다. 한 자리 디스크립터(`2>/dev/null npm ci`)는 전처럼 재작성한다. npm 첫 자리 표에는 한 자리 디스크립터만 있어서 그 수에는 이 이동이 드러나지 않는다. fail-closed 다.
 - **`TIME pip install x`** 는 대소문자를 가리지 않는 macOS 볼륨에서 /usr/bin/time 을 실행한다. 시작 패턴은 `time` 을 대소문자 없이 읽었고 걸음은 소문자만 읽어서, main 과의 merge 가 `TIME` 을 명령 이름으로 남겼다. 이제 env, command, time 을 문법이 매니저 이름을 읽듯 읽는다. 경로의 마지막 조각을, 대소문자 없이.
 
 ### 검증
