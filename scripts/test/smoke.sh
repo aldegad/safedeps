@@ -894,9 +894,11 @@ pass "the inert flag is read from each install's own arguments and goes where np
 # approved install in a script with an escaped quote is read to its end and
 # allowed. The heredoc body is text a shell could be handed, so it is flagged
 # as v2.17.2 flagged it; the npm in it is read in any case, as everywhere the
-# rewrite looks for a verb. The last row's hidden install has no verb a blank
-# follows, so it gets no flag, as in v2.17.2; the visible one keeps its flags,
-# and the command is still recorded as one whose flag nobody read.
+# rewrite looks for a verb. The last two rows' hidden installs have no verb a
+# blank follows, so they get no flag, as in v2.17.2; the visible one keeps its
+# flags, and the command is still recorded as one whose flag nobody read. The
+# heredoc body fed to `sh` and piped to `tee` was recorded for no kind but a
+# script word, and passed with no flag and no record (validator round 2, x005).
 unread_case_in=(
   'npm install left-pad@1.3.0; sh -c "echo $(date); npm install left-pad@1.3.0"'
   'npm install left-pad@1.3.0; sh -c "echo \"hi\"; npm install left-pad@1.3.0"'
@@ -909,6 +911,7 @@ unread_case_in=(
   $'npm install left-pad@1.3.0 && cat <<E | wc -l\nnpm install left-pad@1.3.0\nE'
   $'npm install left-pad@1.3.0 && cat <<E | wc -l\nNpm install left-pad@1.3.0\nE'
   'npm install left-pad@1.3.0; sh -c "npm install\"\" left-pad@1.3.0"'
+  $'npm i left-pad@1.3.0 && sh <<E | tee log\nnpm ci&&true\nE'
 )
 unread_case_want=(
   'npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts; sh -c "echo $(date); npm install --ignore-scripts left-pad@1.3.0"'
@@ -922,6 +925,7 @@ unread_case_want=(
   $'npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts && cat <<E | wc -l\nnpm install --ignore-scripts left-pad@1.3.0\nE'
   $'npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts && cat <<E | wc -l\nNpm install --ignore-scripts left-pad@1.3.0\nE'
   'npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts; sh -c "npm install\"\" left-pad@1.3.0"'
+  $'npm i --ignore-scripts left-pad@1.3.0 --ignore-scripts && sh <<E | tee log\nnpm ci&&true\nE'
 )
 for unread_i in "${!unread_case_in[@]}"; do
   inert_in="${unread_case_in[${unread_i}]}"
@@ -951,12 +955,14 @@ downgrades_after=$(grep -c 'could not make every npm install in this command ine
 # install is left as written, nothing else gets a flag, and the command is a
 # recorded downgrade with nothing reported inert. The rewrite used to return
 # "every install already true" here and let both pass with no record, where
-# v2.18.0 had recorded a downgrade (caught in review). Both forms are judged
-# before the row fails, so a tree that records neither is named for both.
+# v2.18.0 had recorded a downgrade (caught in review), and the heredoc form
+# passed the same way a round later (x006). Every form is judged before the
+# row fails, so a tree that records none is named for each.
 settled_unread_bad=""
 for inert_in in \
   'npm i left-pad@1.3.0 --ignore-scripts=true; sh -c "cd \"d\" && npm ci"' \
-  'npm i left-pad@1.3.0 --ignore-scripts && ksh -c "npm ci"'
+  'npm i left-pad@1.3.0 --ignore-scripts && ksh -c "npm ci"' \
+  $'npm i left-pad@1.3.0 --ignore-scripts && sh <<E | tee log\nnpm ci&&true\nE'
 do
   settled_safe=$(mktemp -d "${tmp_root}/safe-settled-unread.XXXXXX")
   SAFEDEPS_HOME="${settled_safe}" lib/ledger/ledger.sh approve npm left-pad 1.3.0 1.3.0 smoke >/dev/null
@@ -972,6 +978,53 @@ done
 [[ -z "${settled_unread_bad}" ]] \
   || fail "an install already true beside one no verb placement reaches gets no rewrite and is a recorded downgrade:${settled_unread_bad}"
 pass "an install in text the rewrite cannot read gets the flag where v2.17.2 put it and is recorded as unread, or is a recorded downgrade"
+
+# The record does not depend on the kind of text. An npm install the rewrite
+# did not read, beside one it flagged, is recorded as one whose flag nobody
+# read and changes nothing in the rewrite, whatever kept the reading from it:
+# a shell option cluster its head does not take, a script word glued to more
+# quoting, a glued word whose rest turns the flag off, an unquoted script
+# word, a heredoc body handed to a shell with no pipe, and a verb an operator
+# follows at once. Each of these ran its `npm ci`
+# with no flag and no record. The last two script words keep the flags the
+# rewrite placed before (one inside the quoted segment, one on the outer
+# statement), and neither reaches npm as true.
+# scripts/measure/inert-record-invariant.sh holds every form of its corpus to
+# the same rule.
+left_case_in=(
+  'npm i left-pad@1.3.0 && sh -ce "npm ci \"x\""'
+  "npm i left-pad@1.3.0 && sh -c 'npm 'ci"
+  'npm i left-pad@1.3.0 && sh -c "npm ci "--ignore-scripts=false'
+  'npm i left-pad@1.3.0 && sh -c npm\ ci'
+  $'npm i left-pad@1.3.0 && sh <<E\nnpm ci\nE'
+  'npm i left-pad@1.3.0 && npm ci;true'
+)
+left_case_tail=(
+  ' && sh -ce "npm ci \"x\""'
+  " && sh -c 'npm 'ci"
+  ' && sh -c "npm ci --ignore-scripts "--ignore-scripts=false'
+  ' && sh -c npm\ ci --ignore-scripts'
+  $' && sh <<E\nnpm ci\nE'
+  ' && npm ci;true'
+)
+left_bad=""
+for left_i in "${!left_case_in[@]}"; do
+  inert_in="${left_case_in[${left_i}]}"
+  left_safe=$(mktemp -d "${tmp_root}/safe-left-unread.XXXXXX")
+  SAFEDEPS_HOME="${left_safe}" lib/ledger/ledger.sh approve npm left-pad 1.3.0 1.3.0 smoke >/dev/null
+  inert_out=$(run_hook_command "${tmp_root}/home-left-unread" "${left_safe}" "${inert_in}")
+  inert_got=$(jq -r '.hookSpecificOutput.updatedInput.command // ""' <<< "${inert_out}")
+  [[ "${inert_got}" == "npm i --ignore-scripts left-pad@1.3.0 --ignore-scripts${left_case_tail[${left_i}]}" ]] \
+    || left_bad+=" [the rewrite changed: $(printf '%q' "${inert_in}") (got: $(printf '%q' "${inert_got}"); ${inert_out:0:160})]"
+  grep -q 'is in text safedeps could not read as the shell will' "${left_safe}/advisory.log" 2>/dev/null \
+    || left_bad+=" [no unread line in advisory.log: $(printf '%q' "${inert_in}")]"
+  left_sid=$(jq -r '.snapshot_id' "${left_safe}/pending/"*.json 2>/dev/null) || left_sid=""
+  jq -e '.ignore_scripts_injected == true and .ignore_scripts_unread == true' "${left_safe}/snapshots/${left_sid}_meta.json" >/dev/null 2>&1 \
+    || left_bad+=" [the meta has no unread warning: $(printf '%q' "${inert_in}")]"
+done
+[[ -z "${left_bad}" ]] \
+  || fail "an npm install the rewrite did not read beside one it flagged is recorded as unread, and the rewrite is unchanged:${left_bad}"
+pass "an npm install the rewrite did not read is recorded as unread, whatever kind of text kept the reading from it (${#left_case_in[@]} kinds)"
 
 # The floor holds where no place can be read. Each of these holds an install
 # in front of a double-quoted word with an escape or a substitution in it after

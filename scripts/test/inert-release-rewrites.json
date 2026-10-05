@@ -292,7 +292,39 @@
   "release": "npm i -g=true left-pad@1.3.0 --ignore-scripts"
  },
  {
+  "command": "npm i left-pad@1.3.0 && npm ci;true",
+  "release": "npm i --ignore-scripts left-pad@1.3.0 && npm ci;true"
+ },
+ {
+  "command": "npm i left-pad@1.3.0 && sh -c \"npm ci \"--ignore-scripts=false",
+  "release": null
+ },
+ {
+  "command": "npm i left-pad@1.3.0 && sh -c 'npm 'ci",
+  "release": "npm i --ignore-scripts left-pad@1.3.0 && sh -c 'npm 'ci"
+ },
+ {
+  "command": "npm i left-pad@1.3.0 && sh -c npm\\ ci",
+  "release": "npm i --ignore-scripts left-pad@1.3.0 && sh -c npm\\ ci --ignore-scripts"
+ },
+ {
+  "command": "npm i left-pad@1.3.0 && sh -ce \"npm ci \\\"x\\\"\"",
+  "release": "npm i --ignore-scripts left-pad@1.3.0 && sh -ce \"npm ci \\\"x\\\"\""
+ },
+ {
+  "command": "npm i left-pad@1.3.0 && sh <<E\nnpm ci\nE",
+  "release": "npm i --ignore-scripts left-pad@1.3.0 && sh <<E\nnpm ci\nE"
+ },
+ {
+  "command": "npm i left-pad@1.3.0 && sh <<E | tee log\nnpm ci&&true\nE",
+  "release": "npm i --ignore-scripts left-pad@1.3.0 && sh <<E | tee log\nnpm ci&&true\nE"
+ },
+ {
   "command": "npm i left-pad@1.3.0 --ignore-scripts && ksh -c \"npm ci\"",
+  "release": null
+ },
+ {
+  "command": "npm i left-pad@1.3.0 --ignore-scripts && sh <<E | tee log\nnpm ci&&true\nE",
   "release": null
  },
  {
