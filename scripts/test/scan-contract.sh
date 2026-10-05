@@ -1365,7 +1365,9 @@ pass "stmts view: idempotent and length-preserving on ${grammar_closed} closed r
 #       on, follows one of `;` `&` `|` `(` or a newline, blanks between, or
 #       begins the text. That is what SAFEDEPS_G_START anchors on.
 #   E4. command_statements cuts there: a statement of its output begins with
-#       the start's prefixes and command word.
+#       the start's prefixes and command word, as the stmts view has them.
+#       The statement split cuts the stmts view and keeps a line
+#       continuation's bytes, which the recognize view of E3 drops.
 event_failures=0
 event_checked=0
 event_inputs=0
@@ -1374,7 +1376,7 @@ event_blanks=$' \t'
 # Whether the offset <n> is in the space-separated list <list>.
 in_list() { [[ " $1 " == *" $2 "* ]]; }
 event_contract() { # input label
-  local x="$1" reading ev cw rv stm line k w pre st first ok p head off rec slist="" wlist="" f1 f2 f3 f4 f6
+  local x="$1" reading ev cw rv stm line k w pre st sst first ok p head off rec slist="" wlist="" f1 f2 f3 f4 f6
   local LC_ALL=C
   event_inputs=$((event_inputs + 1))
   for reading in bash zsh dash; do
@@ -1404,7 +1406,7 @@ event_contract() { # input label
       esac
       [[ ${ok} == 1 ]] || { printf 'E1 (%s): event [%s %s %s %s] of [%q] (%s) is not at top-level code\n' "${reading}" "${f1}" "${f2}" "${f3}" "${f4}" "${x}" "$2" >&2; event_failures=$((event_failures + 1)); }
     done <<< "${ev}"
-    while IFS=$'\037' read -r k w pre st; do
+    while IFS=$'\037' read -r k w pre st sst; do
       [[ -n "${k}" ]] || continue
       # A subshell that starts a command has no command word of its own: the
       # command inside it is the next start.
@@ -1435,7 +1437,7 @@ event_contract() { # input label
         off=$((p + 1))
       done
       [[ ${ok} == 1 ]] || { printf 'E3 (%s): the statement [%q] of the start at %s of [%q] (%s) follows no separator in the recognize view [%q]\n' "${reading}" "${st}" "${k}" "${x}" "$2" "${rv}" >&2; event_failures=$((event_failures + 1)); }
-      first="${st%%[${event_blanks}]*}"
+      first="${sst%%[${event_blanks}]*}"
       ok=0
       while IFS= read -r rec; do
         rec="${rec#"${rec%%[!${event_blanks}]*}"}"
@@ -1600,7 +1602,9 @@ pass "one list of executables, matched whole and ignoring case, and one closed l
 words_view_of() { # text -> the words field of its first piece, one per line
   local line
   line=$(shell_lex "$1" pieces "safedeps:scan-contract" | head -n1)
-  line="${line#*$'\037'}"; line="${line#*$'\037'}"
+  # The words are the third field; the prefix-free words and the recognize
+  # bytes follow it.
+  line="${line#*$'\037'}"; line="${line#*$'\037'}"; line="${line%%$'\037'*}"
   set -f
   # shellcheck disable=SC2086
   printf '%s\n' ${line}
@@ -1776,22 +1780,44 @@ pass "a scanner that fails after the install was recognized is settled before pe
 # sed that never answered as "no match" passed every one of these on the tree
 # before this check existed. They are recorded like a failed awk reading and
 # settled at the same gate.
+#
+# No sed is read on the way to these three unapproved installs' verdicts any
+# more: normalize_install_text ran one, and it read the joined view, which is
+# gone with it.
+# So the sed shim counts its calls. A command that reached no sed keeps its
+# finding, and an approved npm install, whose writer attribution reads each
+# statement with sed, must reach one and answer UNDECIDED, or the sed rows
+# check nothing.
 mkdir -p "${fail_tmp}/grep-all" "${fail_tmp}/sed-all"
+sed_tally="${fail_tmp}/sed-all/tally"
 printf '#!/usr/bin/env bash\nexit 2\n' > "${fail_tmp}/grep-all/grep"
-printf '#!/usr/bin/env bash\nexit 2\n' > "${fail_tmp}/sed-all/sed"
+printf '#!/usr/bin/env bash\nprintf "x\\n" >> "%s"\nexit 2\n' "${sed_tally}" > "${fail_tmp}/sed-all/sed"
 chmod +x "${fail_tmp}/grep-all/grep" "${fail_tmp}/sed-all/sed"
 for tool in grep sed; do
   for failing_command in "pip install requests==2.0.0" "npm install left-pad@1.3.0" "cargo add serde@1.0.0"; do
+    rm -f "${sed_tally}"
     scanfail_guard "${fail_tmp}/${tool}-all" "${failing_command}"
     [[ "${SCANFAIL_DECISION}" == "deny" ]] \
       || fail "a failed ${tool} does not turn an install into a pass: ${failing_command} (got: ${SCANFAIL_DECISION})"
-    grep -q 'UNDECIDED' <<< "${SCANFAIL_REASON}" \
-      || fail "a failed ${tool} is reported as undecided: ${failing_command}"
+    if [[ "${tool}" == grep || -s "${sed_tally}" ]]; then
+      grep -q 'UNDECIDED' <<< "${SCANFAIL_REASON}" \
+        || fail "a failed ${tool} is reported as undecided: ${failing_command}"
+    else
+      grep -q 'install not approved' <<< "${SCANFAIL_REASON}" \
+        || fail "an install whose verdict reads no sed keeps its finding with sed failing: ${failing_command} (got: ${SCANFAIL_REASON:0:120})"
+    fi
   done
+  if [[ "${tool}" == sed ]]; then
+    rm -f "${sed_tally}"
+    scanfail_guard "${fail_tmp}/sed-all" "npm install left-pad@1.3.0" "npm left-pad 1.3.0"
+    [[ -s "${sed_tally}" ]] || fail "an approved npm install reaches a sed (otherwise the sed rows check nothing)"
+    [[ "${SCANFAIL_DECISION}" == "deny" ]] && grep -q 'UNDECIDED' <<< "${SCANFAIL_REASON}" \
+      || fail "a failed sed on an approved npm install is reported as undecided (got: ${SCANFAIL_DECISION}: ${SCANFAIL_REASON:0:120})"
+  fi
   scanfail_guard "${fail_tmp}/${tool}-all" "ls -la"
   [[ "${SCANFAIL_DECISION}" == "pass" ]] || fail "a failed ${tool} does not block a command that names no package manager (got: ${SCANFAIL_DECISION})"
 done
-pass "a failed grep or sed on the judgment path denies install-looking commands as UNDECIDED"
+pass "a failed grep or sed on the judgment path denies install-looking commands as UNDECIDED, and an install whose verdict reads no sed keeps its finding"
 
 # One judgment grep failing alone. grep-all cannot show these: the first grep a
 # command reaches marks its failure, and that mark covers every later grep. The

@@ -3262,8 +3262,11 @@ for row in "${heredoc_body_rows[@]}"; do
   case "${kind}" in
     pip) expect_not_approved "${id}, an install after a heredoc body with live code in it," "${form}" ;;
     npm)
+      # Each form ends in a newline, and every rewrite drops a command's
+      # trailing newlines (main 9017f9c does too, measured), so the rewrite
+      # is compared with the form without its last newline.
       got=$(gate_rewrite "${form}")
-      [[ -n "${got}" && "${got}" == *" --ignore-scripts"* && "${got// --ignore-scripts/}" == "${form}" ]] \
+      [[ -n "${got}" && "${got}" == *" --ignore-scripts"* && "${got// --ignore-scripts/}" == "${form%$'\n'}" ]] \
         || fail "${id}: an npm install after a heredoc body with live code in it is rewritten with --ignore-scripts (got: ${got:-no rewrite})"
       ;;
     data) expect_pass "${id}, an install that is a line of a heredoc body," "${form}" ;;
