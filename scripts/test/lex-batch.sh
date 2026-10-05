@@ -19,6 +19,11 @@
 #      shell_lex called alone. The two orders put every text after different
 #      ones, so state left over shows as a difference between them as well.
 #
+# command_is_dependency_install_each asks command_is_dependency_install about
+# many statements at once, on these batches. Section 4 asks it about the same
+# inputs, in every reading, and compares each answer, and what replaying it
+# appends to the DIVERGE, mark and flag files, with asking it alone.
+#
 # A batch that falls back to reading one text at a time gives the same answers
 # by construction, so it would pass the comparison while losing the reason the
 # batch exists: the battery also requires every batch to have run as one.
@@ -303,6 +308,50 @@ if shell_lex_batch_replay 0 > /dev/null 2>&1; then
 else
   pass "a batch read in one reading is not replayed in another"
 fi
+
+# --- 4. the batched install question answers as the question asked alone ----
+
+# Every function of the guard (definitions only) and the grammar it reads.
+# shellcheck source=../../lib/install-grammar.sh
+source lib/install-grammar.sh
+eval "$(sed -n -e '/^[a-z_][a-z_0-9]*() {$/,/^}$/p' -e '/^SAFEDEPS_INSTALL_PATTERN=/p' "${GUARD}")"
+alone() {
+  # command_is_dependency_install alone, its side outputs in files of its own.
+  local dir="${TMP_ROOT}/alone" r=0
+  mkdir -p "${dir}"
+  : > "${dir}/d"; : > "${dir}/u"; : > "${dir}/m"
+  SAFEDEPS_LEX_DIVERGE="${dir}/d" SAFEDEPS_LEX_FLAGS="${dir}/u" SAFEDEPS_SCAN_MARK="${dir}/m" \
+    command_is_dependency_install "$1" || r=1
+  ALONE="${r}|$(cat "${dir}/d")|$(cat "${dir}/u")|$(cat "${dir}/m")"
+}
+replayed() {
+  local dir="${TMP_ROOT}/replayed" r=0
+  mkdir -p "${dir}"
+  : > "${dir}/d"; : > "${dir}/u"; : > "${dir}/m"
+  SAFEDEPS_LEX_DIVERGE="${dir}/d" SAFEDEPS_LEX_FLAGS="${dir}/u" SAFEDEPS_SCAN_MARK="${dir}/m" \
+    command_is_dependency_install_replay "$1" || r=1
+  REPLAYED="${r}|$(cat "${dir}/d")|$(cat "${dir}/u")|$(cat "${dir}/m")"
+}
+asked=0 differ=0 installs=0
+for reading in bash zsh dash; do
+  SAFEDEPS_READING="${reading}"
+  SAFEDEPS_ID_IN=("${INPUTS[@]}")
+  command_is_dependency_install_each
+  for (( k = 0; k < n; k++ )); do
+    [[ "${FULL}" == true ]] || (( (k + ${#reading}) % 4 == 0 )) || continue
+    alone "${INPUTS[k]}"
+    replayed "${k}"
+    asked=$(( asked + 1 ))
+    [[ "${ALONE}" != 0* ]] || installs=$(( installs + 1 ))
+    if [[ "${ALONE}" != "${REPLAYED}" ]]; then
+      differ=$(( differ + 1 ))
+      (( differ > 5 )) || printf '# differs: %s input %d: alone %q, batched %q\n' "${reading}" "${k}" "${ALONE:0:80}" "${REPLAYED:0:80}"
+    fi
+  done
+done
+printf '# %d questions asked both ways (%d installs), %d differ\n' "${asked}" "${installs}" "${differ}"
+(( differ == 0 )) && pass "the batched install question answers, and writes, as the question asked alone" \
+  || fail "the batched install question answers, and writes, as the question asked alone"
 
 (( FAILED == 0 )) || exit 1
 printf 'lex-batch battery: all checks passed\n'

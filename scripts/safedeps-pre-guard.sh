@@ -306,6 +306,184 @@ command_is_dependency_install() {
   judge_grep -qEi "${SAFEDEPS_INSTALL_PATTERN}" <<< "${texts}"
 }
 
+# command_is_dependency_install for every text in SAFEDEPS_ID_IN at once, for
+# a reader that asks it statement by statement (resolve_reading_targets,
+# guard_extract_specs). Asked one statement at a time it cost about a dozen
+# processes per statement, so 321 one-line statements with an install took
+# 117s on an M1 and a 1KB `sh -c` script of short functions 64s. Here every
+# step of command_candidate_start_texts runs once for all the texts: the
+# lexer reads each step's texts in one batch (shell_lex_batch), and one grep
+# reads the candidate texts of every statement, each from a file of its own.
+#
+# Nothing is written to the run's files here. SAFEDEPS_ID_ANS[i] is the answer
+# for text i, and SAFEDEPS_ID_D/M/U[i] hold what asking about it alone would
+# have appended to the DIVERGE, mark and flag files: the reader replays them
+# when it asks (command_is_dependency_install_replay), so a statement it never
+# asks about leaves no trace. scripts/test/lex-batch.sh compares this, answer
+# and files byte for byte, with command_is_dependency_install asked alone.
+command_is_dependency_install_each() {
+  local n i k j t r o rec dir pat="${SAFEDEPS_INSTALL_PATTERN}" level nodes=0 first last rc=0 line acc
+  local -a J=() u1=() R0=() P=() idx=() pidx=() kids=() ntext=() nkind=() nbang=() nfail=() stream=()
+  n=${#SAFEDEPS_ID_IN[@]}
+  SAFEDEPS_ID_ANS=() SAFEDEPS_ID_D=() SAFEDEPS_ID_M=() SAFEDEPS_ID_U=()
+  SAFEDEPS_ID_READING="${SAFEDEPS_READING:-}"
+  for (( i = 0; i < n; i++ )); do SAFEDEPS_ID_D[i]="" SAFEDEPS_ID_M[i]="" SAFEDEPS_ID_U[i]="" SAFEDEPS_ID_ANS[i]=1; done
+  (( n > 0 )) || return 0
+
+  # join_line_continuations_checked: the joined view, its flags in a file of
+  # the function's own (not the caller's), and where it closes, the scan of
+  # the joined text read for UNTERM.
+  SAFEDEPS_LB_IN=("${SAFEDEPS_ID_IN[@]}")
+  shell_lex_batch joined "safedeps:join_line_continuations"
+  for (( i = 0; i < n; i++ )); do
+    SAFEDEPS_ID_D[i]+="${SAFEDEPS_LB_D[i]}" SAFEDEPS_ID_M[i]+="${SAFEDEPS_LB_M[i]}"
+    t="${SAFEDEPS_LB_OUT[i]}"
+    while [[ "${t}" == *$'\n' ]]; do t="${t%$'\n'}"; done
+    J[i]="${t}"
+    u1[i]=0
+    [[ $'\n'"${SAFEDEPS_LB_U[i]}" != *$'\n'UNTERM$'\n'* ]] || u1[i]=1
+  done
+  SAFEDEPS_LB_IN=() idx=()
+  for (( i = 0; i < n; i++ )); do
+    (( u1[i] == 1 )) || { SAFEDEPS_LB_IN+=("${J[i]}"); idx+=("${i}"); }
+  done
+  if (( ${#idx[@]} > 0 )); then
+    shell_lex_batch scan "safedeps:command_scan_text"
+    for (( k = 0; k < ${#idx[@]}; k++ )); do
+      i="${idx[k]}"
+      SAFEDEPS_ID_D[i]+="${SAFEDEPS_LB_D[k]}" SAFEDEPS_ID_M[i]+="${SAFEDEPS_LB_M[k]}"
+      [[ $'\n'"${SAFEDEPS_LB_U[k]}" != *$'\n'UNTERM$'\n'* ]] || SAFEDEPS_ID_M[i]+=$'failed\n'
+    done
+  fi
+
+  # command_start_text of the joined text.
+  SAFEDEPS_LB_IN=("${J[@]}")
+  shell_lex_batch recognize "safedeps:command_scan_text"
+  for (( i = 0; i < n; i++ )); do
+    SAFEDEPS_ID_D[i]+="${SAFEDEPS_LB_D[i]}" SAFEDEPS_ID_M[i]+="${SAFEDEPS_LB_M[i]}" SAFEDEPS_ID_U[i]+="${SAFEDEPS_LB_U[i]}"
+    R0[i]="${SAFEDEPS_LB_OUT[i]}"
+  done
+
+  # read_payload_scripts, for kind S and for kind E: the cscripts view of the
+  # joined text, then of every record it holds, three levels down; the records
+  # of the last level are printed and not read. Both kinds read the same
+  # texts, so each is read once here and counted twice: asked alone, each kind
+  # lexes it, and marks each `!` record.
+  for (( i = 0; i < n; i++ )); do ntext[i]="${J[i]}"; nkind[i]=""; kids[i]=""; done
+  nodes=${n} first=0 last=${n}
+  for (( level = 0; level <= 3; level++ )); do
+    SAFEDEPS_LB_IN=()
+    for (( j = first; j < last; j++ )); do SAFEDEPS_LB_IN+=("${ntext[j]}"); done
+    (( ${#SAFEDEPS_LB_IN[@]} > 0 )) || break
+    shell_lex_batch cscripts "safedeps:read_payload_words"
+    for (( j = first; j < last; j++ )); do
+      k=$(( j - first ))
+      nfail[j]="${SAFEDEPS_LB_F[k]}" nbang[j]=0 kids[j]=""
+      r="${j}"
+      while (( r >= n )); do r="${pidx[r]}"; done
+      SAFEDEPS_ID_D[r]+="${SAFEDEPS_LB_D[k]}${SAFEDEPS_LB_D[k]}"
+      SAFEDEPS_ID_M[r]+="${SAFEDEPS_LB_M[k]}${SAFEDEPS_LB_M[k]}"
+      SAFEDEPS_ID_U[r]+="${SAFEDEPS_LB_U[k]}${SAFEDEPS_LB_U[k]}"
+      (( nfail[j] == 0 )) || continue
+      o="${SAFEDEPS_LB_OUT[k]}"
+      while [[ "${o}" == *$'\n' ]]; do o="${o%$'\n'}"; done
+      while IFS= read -r -d $'\035' rec; do
+        if [[ "${rec}" == "!" ]]; then
+          nbang[j]=$(( nbang[j] + 1 ))
+          SAFEDEPS_ID_M[r]+=$'failed\n'$'failed\n'
+          continue
+        fi
+        ntext[nodes]="${rec:1}" nkind[nodes]="${rec:0:1}" pidx[nodes]="${j}" kids[nodes]=""
+        kids[j]+="${nodes} "
+        nodes=$(( nodes + 1 ))
+      done <<< "${o}"
+    done
+    first=${last} last=${nodes}
+  done
+  # The payloads, as command_payload_raw_texts prints them: kind S in the
+  # order read_payload_scripts prints, then kind E, then the substitutions.
+  SAFEDEPS_LB_IN=("${J[@]}")
+  shell_lex_batch substs "safedeps:extract_command_substitution_payloads"
+  for (( i = 0; i < n; i++ )); do
+    SAFEDEPS_ID_D[i]+="${SAFEDEPS_LB_D[i]}" SAFEDEPS_ID_M[i]+="${SAFEDEPS_LB_M[i]}" SAFEDEPS_ID_U[i]+="${SAFEDEPS_LB_U[i]}"
+    acc=""
+    command_is_dependency_install_each_kind "${i}" S
+    command_is_dependency_install_each_kind "${i}" E
+    P[i]="${acc}${SAFEDEPS_LB_OUT[i]}"
+  done
+  # command_start_text of every payload line that is not empty.
+  SAFEDEPS_LB_IN=() idx=()
+  for (( i = 0; i < n; i++ )); do
+    while IFS= read -r line; do
+      [[ -z "${line}" ]] && continue
+      SAFEDEPS_LB_IN+=("${line}") idx+=("${i}")
+    done <<< "${P[i]}"
+  done
+  for (( i = 0; i < n; i++ )); do stream[i]="${R0[i]}"$'\n'; done
+  if (( ${#idx[@]} > 0 )); then
+    shell_lex_batch recognize "safedeps:command_scan_text"
+    for (( k = 0; k < ${#idx[@]}; k++ )); do
+      i="${idx[k]}"
+      SAFEDEPS_ID_D[i]+="${SAFEDEPS_LB_D[k]}" SAFEDEPS_ID_M[i]+="${SAFEDEPS_LB_M[k]}" SAFEDEPS_ID_U[i]+="${SAFEDEPS_LB_U[k]}"
+      stream[i]+="${SAFEDEPS_LB_OUT[k]}"$'\n'
+    done
+  fi
+
+  # The grep, as judge_grep reads the candidate texts on a here-string: each
+  # statement's texts in a file of their own, trailing newlines dropped as
+  # the command substitution drops them, then one. -l names the files with a
+  # match. A grep that does not answer marks each statement it was asked for,
+  # as judge_grep does.
+  if ! dir=$(mktemp -d "${TMPDIR:-/tmp}/safedeps-id.XXXXXX" 2>/dev/null); then
+    for (( i = 0; i < n; i++ )); do SAFEDEPS_ID_M[i]+=$'failed\n'; done
+    return 0
+  fi
+  for (( i = 0; i < n; i++ )); do
+    t="${stream[i]}"
+    while [[ "${t}" == *$'\n' ]]; do t="${t%$'\n'}"; done
+    printf '%s\n' "${t}" > "${dir}/s.${i}"
+  done
+  o=$(cd "${dir}" && grep -lEi "${pat}" s.*) || rc=$?
+  rm -rf "${dir}"
+  if (( rc > 1 )); then
+    for (( i = 0; i < n; i++ )); do SAFEDEPS_ID_M[i]+=$'failed\n'; done
+    return 0
+  fi
+  while IFS= read -r line; do
+    [[ "${line}" == s.* ]] || continue
+    SAFEDEPS_ID_ANS[${line#s.}]=0
+  done <<< "${o}"
+  return 0
+}
+
+# The payloads of kind <kind> under text <i>, in the order read_payload_scripts
+# prints them (each record of the kind, then the records under it), appended
+# to the caller's acc.
+command_is_dependency_install_each_kind() {
+  local node="$1" want="$2" c
+  for c in ${kids[node]}; do
+    [[ "${nkind[c]}" != "${want}" ]] || acc+="${ntext[c]}"$'\n'
+    command_is_dependency_install_each_kind "${c}" "${want}"
+  done
+}
+
+# command_is_dependency_install for text <i> of the last
+# command_is_dependency_install_each, asked now: what asking it alone appends
+# to the DIVERGE, mark and flag files in force at this call is appended, and
+# its answer returned. A text the batch did not read in this reading is asked
+# alone.
+command_is_dependency_install_replay() {
+  local i="$1"
+  if [[ "${SAFEDEPS_ID_READING:-}" != "${SAFEDEPS_READING:-}" || -z "${SAFEDEPS_ID_ANS[i]:-}" ]]; then
+    command_is_dependency_install "${SAFEDEPS_ID_IN[i]}"
+    return
+  fi
+  [[ -z "${SAFEDEPS_ID_D[i]}" || -z "${SAFEDEPS_LEX_DIVERGE:-}" ]] || printf '%s' "${SAFEDEPS_ID_D[i]}" >> "${SAFEDEPS_LEX_DIVERGE}"
+  [[ -z "${SAFEDEPS_ID_M[i]}" || -z "${SAFEDEPS_SCAN_MARK:-}" ]] || printf '%s' "${SAFEDEPS_ID_M[i]}" >> "${SAFEDEPS_SCAN_MARK}"
+  [[ -z "${SAFEDEPS_ID_U[i]}" || -z "${SAFEDEPS_LEX_FLAGS:-}" ]] || printf '%s' "${SAFEDEPS_ID_U[i]}" >> "${SAFEDEPS_LEX_FLAGS}"
+  return "${SAFEDEPS_ID_ANS[i]}"
+}
+
 command_hides_dependency_install() {
   local command="$1"
   local payload stripped
@@ -3940,6 +4118,12 @@ resolve_reading_targets() {
     stmt_words[piece_at]="${stmt_words[piece_at]:+${stmt_words[piece_at]} }${pw}"
   done <<< "${pieces}"
 
+  # Whether each statement is an install, asked for all of them at once and
+  # replayed below where the loop asks (command_is_dependency_install_each).
+  SAFEDEPS_ID_IN=()
+  while IFS=$'\035' read -r _ stmt _ _ _; do SAFEDEPS_ID_IN+=("${stmt}"); done <<< "${statements}"
+  command_is_dependency_install_each
+
   while IFS=$'\035' read -r before stmt after words raw; do
     n=$(( n + 1 ))
     if [[ "${before}" == "?" ]]; then
@@ -4147,7 +4331,7 @@ resolve_reading_targets() {
         fi
       fi
 
-      command_is_dependency_install "${stmt}" || break
+      command_is_dependency_install_replay "$(( n - 1 ))" || break
 
       # Kind is read from the statement as the other recognizers read it, with
       # `VAR=value` prefixes and `env` wrappers stripped: `npm_config_save=false
@@ -5717,13 +5901,26 @@ guard_extract_specs() {
   # install. The spec lines are the same in both modes; the gate reads only
   # those, so the other lines cannot move a verdict.
   local cmd="$1" targets="$2" mode="${3:-}"
-  local seg words gate_reads eco family k role text out line versions spec_line created
+  local seg words gate_reads eco family k role text out line versions spec_line created pieces asked=0
   local -a w=() roles=() texts=()
+
+  # Whether each piece is an install, asked for all of them at once and
+  # replayed below where the loop asks (command_is_dependency_install_each).
+  # The pieces end in a newline, so reading them from a variable reads the
+  # lines the process substitution did.
+  pieces=$(guard_extract_pieces "${cmd}" "${targets}") || true
+  SAFEDEPS_ID_IN=()
+  while IFS=$'\t\037' read -r gate_reads seg words; do
+    [[ "${seg}" =~ [^[:space:]] ]] || continue
+    SAFEDEPS_ID_IN+=("${seg}")
+  done <<< "${pieces}"
+  command_is_dependency_install_each
 
   # The pieces carry no tab, so the tab and \037 cut the three fields.
   while IFS=$'\t\037' read -r gate_reads seg words; do
     [[ "${seg}" =~ [^[:space:]] ]] || continue
-    command_is_dependency_install "${seg}" || continue
+    asked=$(( asked + 1 ))
+    command_is_dependency_install_replay "$(( asked - 1 ))" || continue
     # Grouping characters are the shell's (`(npm i x)`, `{ pip install y; }`).
     words="${words//[(){\}]/ }"
     set -f
@@ -5812,7 +6009,7 @@ guard_extract_specs() {
       [[ "${mode}" != readings ]] || out+="O"$'\t'"${k}"$'\t'"${role}"$'\t'"${text}"$'\n'
     done
     printf '%s' "${out}"
-  done < <(guard_extract_pieces "${cmd}" "${targets}")
+  done <<< "${pieces}"
 }
 
 # How the current reading would make the command's npm installs inert, as one
