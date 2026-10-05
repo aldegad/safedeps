@@ -242,36 +242,46 @@ single() {
 }
 
 n=${#INPUTS[@]}
+# A batch whose texts hold no newline reads them as the lines of one input;
+# one with a newline gives each text a file. The inputs as they are hold
+# newlines, so the texts without one are read again as a batch of their own.
+LINE_INPUTS=()
+for c in "${INPUTS[@]}"; do [[ "${c}" == *$'\n'* ]] || LINE_INPUTS+=("${c}"); done
+printf '# %d inputs hold no newline\n' "${#LINE_INPUTS[@]}"
 compared=0 differ=0 orders=0 fellback=0 vi=0
+for set in all lines; do
+  if [[ "${set}" == all ]]; then CUR=("${INPUTS[@]}"); else CUR=("${LINE_INPUTS[@]}"); fi
+  m=${#CUR[@]}
 for reading in bash zsh dash; do
   SAFEDEPS_READING="${reading}"
   for view in ${VIEWS}; do
     vi=$(( vi + 1 ))
-    SAFEDEPS_LB_IN=("${INPUTS[@]}")
+    SAFEDEPS_LB_IN=("${CUR[@]}")
     shell_lex_batch "${view}" "safedeps:lex-batch"
     [[ "${SAFEDEPS_LB_MODE}" == batch ]] || fellback=$(( fellback + 1 ))
     fw_out=("${SAFEDEPS_LB_OUT[@]}") fw_d=("${SAFEDEPS_LB_D[@]}") fw_u=("${SAFEDEPS_LB_U[@]}") fw_m=("${SAFEDEPS_LB_M[@]}") fw_f=("${SAFEDEPS_LB_F[@]}")
     SAFEDEPS_LB_IN=()
-    for (( k = n - 1; k >= 0; k-- )); do SAFEDEPS_LB_IN+=("${INPUTS[k]}"); done
+    for (( k = m - 1; k >= 0; k-- )); do SAFEDEPS_LB_IN+=("${CUR[k]}"); done
     shell_lex_batch "${view}" "safedeps:lex-batch"
     [[ "${SAFEDEPS_LB_MODE}" == batch ]] || fellback=$(( fellback + 1 ))
-    for (( k = 0; k < n; k++ )); do
-      r=$(( n - 1 - k ))
+    for (( k = 0; k < m; k++ )); do
+      r=$(( m - 1 - k ))
       if [[ "${fw_out[k]}" != "${SAFEDEPS_LB_OUT[r]}" || "${fw_d[k]}" != "${SAFEDEPS_LB_D[r]}" || "${fw_u[k]}" != "${SAFEDEPS_LB_U[r]}" \
             || "${fw_m[k]}" != "${SAFEDEPS_LB_M[r]}" || "${fw_f[k]}" != "${SAFEDEPS_LB_F[r]}" ]]; then
         orders=$(( orders + 1 ))
-        (( orders > 5 )) || printf '# order differs: %s %s input %d\n' "${reading}" "${view}" "${k}"
+        (( orders > 5 )) || printf '# order differs: %s %s %s input %d\n' "${set}" "${reading}" "${view}" "${k}"
       fi
       [[ "${FULL}" == true ]] || (( (k + vi) % 8 == 0 )) || continue
-      single "${INPUTS[k]}" "${view}"
+      single "${CUR[k]}" "${view}"
       compared=$(( compared + 1 ))
       if [[ "${fw_out[k]}" != "${SINGLE_OUT}" || "${fw_d[k]}" != "${SINGLE_D}" || "${fw_u[k]}" != "${SINGLE_U}" \
             || "${fw_m[k]}" != "${SINGLE_M}" || "${fw_f[k]}" != "${SINGLE_F}" ]]; then
         differ=$(( differ + 1 ))
-        (( differ > 5 )) || printf '# differs from shell_lex alone: %s %s input %d\n' "${reading}" "${view}" "${k}"
+        (( differ > 5 )) || printf '# differs from shell_lex alone: %s %s %s input %d\n' "${set}" "${reading}" "${view}" "${k}"
       fi
     done
   done
+done
 done
 printf '# %d texts compared with shell_lex alone, %d differ; %d differ between the two batch orders\n' "${compared}" "${differ}" "${orders}"
 (( differ == 0 )) && pass "a batch reads each text as shell_lex alone reads it (view and side outputs)" \

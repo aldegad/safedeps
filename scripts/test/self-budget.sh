@@ -800,12 +800,12 @@ printf '# note - 64KB install judged in %ss\n' "${GUARD_ELAPSED}"
 pass "a 64KB install is judged inside the default budget, not answered UNDECIDED"
 
 # The gate's cost grew with the number of statements, not the bytes: a reader
-# that asked about each statement paid a dozen processes for each. A 1KB
-# `sh -c` script of short functions took 64s on an M1 and 41s on Linux, and
-# 321 one-line statements with an install 117s on the M1 (scan-cost's
-# statements table, deadline off), so the deadline answered UNDECIDED in
-# their place. Each of these shapes gets its verdict, not UNDECIDED, under the
-# default budget, on both systems.
+# that asked about each statement paid a dozen processes for each. On the
+# project's Linux VM an `sh -c` script of 40 short functions took 49s and 400
+# one-line statements with an install 68s (scan-cost's statements table,
+# deadline off), so the deadline answered UNDECIDED in their place. Each of
+# these shapes gets its verdict, not UNDECIDED, under the default budget, on
+# both systems.
 unit="f() { echo 'a b' \\\"\$x\\\" (1); }; "
 script=""
 for (( i = 0; i < 33; i++ )); do script+="${unit}"; done
