@@ -1,9 +1,25 @@
 #!/usr/bin/env bash
 # safedeps: the npm test runner.
 #
-# Runs every battery and reports on each one. The batteries used to run as one
-# `&&` chain, so a full run cost the sum of thirteen batteries and stopped at
-# the first red. They do not share state: each makes its own mktemp root and
+#   run-all.sh               the development set: every battery but the two
+#                            that only a release needs (`npm test`)
+#   run-all.sh --release     every battery (`npm run test:release`)
+#   run-all.sh --group NAME  the batteries of one CI job (see below)
+#   run-all.sh --list [--release | --group NAME | --ci]
+#                            print the names of the batteries a run would
+#                            start, one per line, and start nothing; --ci
+#                            lists every battery that has a CI group
+#
+# The development set leaves out the census and effect-trace-grid. The census
+# took 72 minutes of a 2-hour macOS CI run (v2.18.0, run 37191343467), and
+# effect-trace-grid waits for it and then runs another 19 to 47. Both measure
+# what a release ships, and AGENTS.md ("What to run, and where") runs them per
+# release, not per change; a change that reaches the scan readings or the
+# effect gate runs them by name.
+#
+# Runs the batteries it selects and reports on each one. The batteries used to
+# run as one `&&` chain, so a full run cost the sum of thirteen batteries and
+# stopped at the first red. They do not share state: each makes its own mktemp root and
 # points HOME or SAFEDEPS_HOME into it, and every fixture server listens on a
 # port the kernel picks (or the closed port 9). So the batteries of a phase run
 # at the same time. The second phase waits for the census, not for the whole
@@ -27,7 +43,13 @@ set -uo pipefail
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "${ROOT_DIR}" || exit 2
 
-# <name>|<phase>|<command>, in the old chain's order.
+# <name>|<phase>|<scope>|<CI job>|<command>, in the old chain's order.
+#
+# scope is `dev` for a battery `npm test` runs and `release` for one only a
+# release runs. CI job names the group a CI job runs with --group; CI runs the
+# census in shards of its own (scan-failure-census.sh --shard), so its group is
+# `-`. .github/workflows/ci.yml runs one job per group and OS, and its verdict
+# job fails unless those jobs ran every battery with a group here, each once.
 #
 # The second phase holds the batteries that a busy machine turns red without a
 # defect:
@@ -46,43 +68,121 @@ cd "${ROOT_DIR}" || exit 2
 # per CPU and is the load these two cannot stand, while every other battery is
 # one process at a time. On the Mac the single-process batteries outlasted the
 # census by six minutes.
-BATTERIES=(
-  "smoke|1|scripts/test/smoke.sh"
-  "scan-contract|1|scripts/test/scan-contract.sh"
-  "shell-reading|1|scripts/test/shell-reading.sh"
-  "census|1|scripts/measure/scan-failure-census.sh --quick"
-  "consumer-forms|1|scripts/test/consumer-forms.sh"
-  "manager-variants|1|scripts/test/manager-variants.sh"
-  "install-dir-differential|1|scripts/test/install-dir-differential.sh"
-  "workspace-snapshot-count|1|scripts/test/workspace-snapshot-count.sh"
-  "self-budget|2|scripts/test/self-budget.sh"
-  "advisory-log-retention|1|scripts/test/advisory-log-retention.sh"
-  "hook-entry|1|scripts/test/hook-entry.sh"
-  "lockless-forms|1|scripts/test/lockless-forms.sh"
-  "effect-trace-grid|2|scripts/test/effect-trace-grid.sh"
-  "e2e|1|scripts/test/e2e.sh"
+#
+# The CI groups balance the macOS times of v2.18.1 (run 37256605251, seconds
+# under the whole suite's load): a holds manager-variants 1584, shell-reading
+# 545, smoke 416, scan-contract 204 and the small ones; b holds consumer-forms
+# 1541, lockless-forms 1054 and e2e 752. timing holds the batteries a loaded
+# runner turns red without a defect, on a runner of their own: the two of the
+# second phase, and install-dir-differential, which needs npm to answer 237
+# layouts inside the gate's deadline. In group a it ran beside
+# manager-variants, which took a 3-CPU macOS runner from load 5 to 43, and
+# seven of its layouts went UNDECIDED (CI run 37267052867).
+#
+# The timing group runs one battery at a time (SERIAL_GROUPS). Its batteries
+# are sensitive to load and also make it: install-dir-differential judges six
+# layouts at once, and in CI run 37269688992 it left a 3-CPU macOS runner at
+# load 38 for self-budget, whose 64KB install then took 20s to judge and failed.
+# Two reds of one class -- a load-sensitive battery beside load -- so no
+# battery shares that runner with another. Serial, it costs the sum of the
+# three (macOS, measured alone: about 400 + 160 + 1170 seconds), still less
+# than a census shard.
+SERIAL_GROUPS=(timing)
+ALL_BATTERIES=(
+  "smoke|1|dev|a|scripts/test/smoke.sh"
+  "scan-contract|1|dev|a|scripts/test/scan-contract.sh"
+  "shell-reading|1|dev|a|scripts/test/shell-reading.sh"
+  "census|1|release|-|scripts/measure/scan-failure-census.sh --quick"
+  "consumer-forms|1|dev|b|scripts/test/consumer-forms.sh"
+  "manager-variants|1|dev|a|scripts/test/manager-variants.sh"
+  "install-dir-differential|1|dev|timing|scripts/test/install-dir-differential.sh"
+  "workspace-snapshot-count|1|dev|a|scripts/test/workspace-snapshot-count.sh"
+  "self-budget|2|dev|timing|scripts/test/self-budget.sh"
+  "advisory-log-retention|1|dev|a|scripts/test/advisory-log-retention.sh"
+  "hook-entry|1|dev|a|scripts/test/hook-entry.sh"
+  "lockless-forms|1|dev|b|scripts/test/lockless-forms.sh"
+  "effect-trace-grid|2|release|timing|scripts/test/effect-trace-grid.sh"
+  "e2e|1|dev|b|scripts/test/e2e.sh"
 )
+#
+# A run without the census (the development set, a CI group) has no second
+# phase to wait for: the load these two cannot stand is the census's, and every
+# other battery is one process at a time. So there they start in the order
+# below like any other battery.
 PHASE_TWO_AFTER=census
 # The batteries that start first when slots are short, longest first (alone on
 # the 8-CPU Linux VM: census 431s, consumer-forms 373s, lockless-forms 313s,
 # effect-trace-grid 214s). The rest follow in the order above.
-START_FIRST=(census consumer-forms lockless-forms effect-trace-grid)
-# Checked before anything starts: a second phase with nothing to wait for would
-# start at once, under the very load it exists to avoid.
-printf '%s\n' "${BATTERIES[@]}" | grep -qx "${PHASE_TWO_AFTER}|1|.*" || {
+START_FIRST_ALL=(census consumer-forms lockless-forms effect-trace-grid)
+# Checked before anything starts, on the whole table: a second phase with
+# nothing to wait for would start at once, under the very load it exists to
+# avoid.
+printf '%s\n' "${ALL_BATTERIES[@]}" | grep -qx "${PHASE_TWO_AFTER}|1|.*" || {
   printf 'run-all: the second phase waits for %s, and no first-phase battery has that name\n' "${PHASE_TWO_AFTER}" >&2
   exit 2
 }
 
-for first in "${START_FIRST[@]}"; do
-  printf '%s\n' "${BATTERIES[@]}" | grep -q "^${first}|" || {
-    printf 'run-all: START_FIRST names %s, which is not a battery\n' "${first}" >&2
+for first in "${START_FIRST_ALL[@]}"; do
+  printf '%s\n' "${ALL_BATTERIES[@]}" | grep -q "^${first}|" || {
+    printf 'run-all: START_FIRST_ALL names %s, which is not a battery\n' "${first}" >&2
     exit 2
   }
 done
 
+usage() {
+  printf 'usage: %s [--list] [--release | --group NAME | --ci]\n' "$0" >&2
+  exit 2
+}
+selection=dev group="" list_only=false
+while (( $# > 0 )); do
+  case "$1" in
+    --release) [[ "${selection}" == dev ]] || usage; selection=release; shift ;;
+    # A group is a name; `-` marks the census, which CI runs in shards.
+    --group) [[ "${selection}" == dev && "${2:-}" =~ ^[a-z][a-z0-9-]*$ ]] || usage; selection=group group="$2"; shift 2 ;;
+    --ci) [[ "${selection}" == dev ]] || usage; selection=ci; shift ;;
+    --list) list_only=true; shift ;;
+    *) usage ;;
+  esac
+done
+[[ "${selection}" != ci || "${list_only}" == true ]] || usage
+
+# The batteries of this run, as <name>|<phase>|<command>, in the table's order.
+BATTERIES=()
+for entry in "${ALL_BATTERIES[@]}"; do
+  IFS='|' read -r name phase scope ci_group command <<< "${entry}"
+  case "${selection}" in
+    dev) [[ "${scope}" == dev ]] || continue ;;
+    group) [[ "${ci_group}" == "${group}" ]] || continue ;;
+    ci) [[ "${ci_group}" != - ]] || continue ;;
+  esac
+  BATTERIES+=("${name}|${phase}|${command}")
+done
+(( ${#BATTERIES[@]} > 0 )) || {
+  printf 'run-all: no battery is in CI group %s\n' "${group:0:40}" >&2
+  exit 2
+}
+if [[ "${list_only}" == true ]]; then
+  for entry in "${BATTERIES[@]}"; do printf '%s\n' "${entry%%|*}"; done
+  exit 0
+fi
+case "${selection}" in
+  dev) run_label="development set" ;;
+  release) run_label="release set" ;;
+  group) run_label="CI group ${group}" ;;
+esac
+selected() { printf '%s\n' "${BATTERIES[@]}" | grep -q "^$1|"; }
+START_FIRST=()
+for first in "${START_FIRST_ALL[@]}"; do
+  ! selected "${first}" || START_FIRST+=("${first}")
+done
+
 serial=false
 [[ "${SAFEDEPS_TEST_SERIAL:-}" == 1 ]] && serial=true
+if [[ "${selection}" == group ]]; then
+  for serial_group in "${SERIAL_GROUPS[@]}"; do
+    [[ "${group}" != "${serial_group}" ]] || serial=true
+  done
+fi
 
 cpus=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || printf '2')
 [[ "${cpus}" =~ ^[1-9][0-9]*$ ]] || cpus=2
@@ -150,7 +250,8 @@ stop_batteries() {
 trap stop_batteries INT TERM
 
 suite_start=$(date +%s)
-printf '# safedeps npm test: %s, logs in %s, load %s, %s CPUs, %s jobs\n' \
+printf '# safedeps tests, %s (%d batteries): %s, logs in %s, load %s, %s CPUs, %s jobs\n' \
+  "${run_label}" "${#BATTERIES[@]}" \
   "$([[ "${serial}" == true ]] && printf serial || printf parallel)" "${log_dir}" "$(load_now)" \
   "${cpus}" "${jobs}"
 
@@ -163,15 +264,16 @@ if [[ "${serial}" == true ]]; then
   done
 else
   # Start order: START_FIRST, then the rest in the order of BATTERIES.
-  pending=("${START_FIRST[@]}")
+  pending=(${START_FIRST[@]+"${START_FIRST[@]}"})
   for entry in "${BATTERIES[@]}"; do
     IFS='|' read -r name _ _ <<< "${entry}"
-    case " ${START_FIRST[*]} " in *" ${name} "*) ;; *) pending+=("${name}") ;; esac
+    case " ${START_FIRST[*]-} " in *" ${name} "*) ;; *) pending+=("${name}") ;; esac
   done
   # A battery is done when its .rc file exists: run_one writes it last. bash
   # 3.2 (macOS) has no `wait -n`, so the slots are polled once a second.
   running=()
   gate_open=false
+  selected "${PHASE_TWO_AFTER}" || gate_open=true
   while (( ${#pending[@]} > 0 || ${#running[@]} > 0 )); do
     still=()
     for name in ${running[@]+"${running[@]}"}; do

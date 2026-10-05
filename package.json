@@ -20,7 +20,8 @@
     "LICENSE"
   ],
   "scripts": {
-    "test": "bash scripts/test/run-all.sh"
+    "test": "bash scripts/test/run-all.sh",
+    "test:release": "bash scripts/test/run-all.sh --release"
   },
   "keywords": [
     "safedeps",
