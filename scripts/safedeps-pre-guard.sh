@@ -545,8 +545,8 @@ shell_lex() {
       #   b  heredoc body (data)         B  live code in an unquoted heredoc body
       #
       # view=scan    quoted text, comments, heredoc operators and bodies blanked;
-      #              an escaped operator is `_`, and so is a `}` glued to a
-      #              word that closes no group (group_close); length-preserving
+      #              an escaped operator is `_`, and a `}` glued to a word
+      #              that closes no group is `%` (group_close); length-preserving
       #   view=stmts   scan, with a nested `;` `&` `|` as `_`; length-preserving
       #   view=recognize  stmts with the prefixes of each command removed (the
       #              A of the unprefixed view), every other top-level redirection
@@ -1847,10 +1847,13 @@ shell_lex() {
       #
       #   - a glued `}` with no zsh group open, or with a word byte after it,
       #     is a character to every shell that runs it (NC): the views the
-      #     recognizers and the rewrite read print it as `_` (cbyte), so no
+      #     recognizers and the rewrite read print it as `%` (cbyte), so no
       #     reader takes `p ci}` for `p ci`. Read as an end there, it made
       #     `npm ci}`, which installs nothing, into `npm ci` through the
-      #     `--ignore-scripts` rewrite (caught in review);
+      #     `--ignore-scripts` rewrite (caught in review). It is `%`, a byte
+      #     with no role in the lexer that ends no word: `_` is a byte of a
+      #     name, so `}=(` read again was the array assignment `_=(`, and the
+      #     view read twice was not the view (random input in scan-contract);
       #   - one zsh closes a group with (GC) stays `}` in those views, where
       #     the install grammar reads it as an end (SAFEDEPS_G_END). The zsh
       #     reading marks it at once. bash and dash mark it too when the text
@@ -2354,7 +2357,7 @@ shell_lex() {
       function cbyte(k,   cc, cl) {
         cc = X[k]; cl = C[k]
         # A glued `}` that closes no group is a character (group_close).
-        if (k in NC) return (cl == "c" || cl == "Q" || cl == "B") ? "_" : " "
+        if (k in NC) return (cl == "c" || cl == "Q" || cl == "B") ? "%" : " "
         if (cl == "c" || cl == "p") return (cc == "#" && (k == 1 || C[k-1] != "c" && C[k-1] != "e" || C[k-1] == "e" && X[k-1] ~ /[ \t]/)) ? "_" : cc
         if (cl == "e") return index(";&|()<>!{}#`\042\047\\$", cc) ? "_" : (cc == "\n" ? " " : cc)
         return " "
@@ -2499,7 +2502,7 @@ shell_lex() {
             # The flat view blanks the whole redirection: a body in its
             # target is read in the live view, where it stands.
             else if (view == "flat" && (k in DROP)) put(" ")
-            else if ((view == "live" || view == "flat") && (cl == "Q" || cl == "B")) put((k in NC) ? "_" : cc)
+            else if ((view == "live" || view == "flat") && (cl == "Q" || cl == "B")) put((k in NC) ? "%" : cc)
             else put(cbyte(k))
             continue
           }
@@ -3034,7 +3037,7 @@ SAFEDEPS_SHELL_INERT_BYTES='abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ
 # kind of expansion the table forgot still makes its word dynamic. A byte the
 # set leaves out that expands nothing (`~` inside a version range like
 # `foo@~1.2.3`, `^` in `foo@^1.2.3`) costs a record, never a pass. A `}` glued
-# to a word that closes no group is `_` in the live view, a character to every
+# to a word that closes no group is `%` in the live view, a character to every
 # shell that runs it, which no shell expands (group_close in shell_lex).
 #
 # Each byte is read in the quoting the shell reads it in. <live> is the
@@ -3205,7 +3208,7 @@ inert_flag_offsets() {
         # closes a group with it, will not parse a word after it, so a flag
         # there runs nothing. A `}` glued to the end of a word is in the live
         # view only where zsh closes a group with it (the lexer prints any
-        # other as `_`, group_close), and it ends the statement: the flag goes
+        # other as `%`, group_close), and it ends the statement: the flag goes
         # before it, where zsh reads it as the last word (`{ npm ci
         # --ignore-scripts}`). After it, `{ npm ci} --ignore-scripts` is a
         # parse error in zsh and in bash.

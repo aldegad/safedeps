@@ -157,7 +157,7 @@ SAFEDEPS_G_START='(^[[:space:]]*|[;&|(][[:space:]]*)'
 # which bash runs as `npm ci` (caught in review). So the lexer decides which
 # `}` closes a group (group_close in the guard's shell_lex), from the groups
 # its walk opened: the views keep that one as `}`, and print a glued `}` that
-# closes nothing as `_`, which ends no word here. A `}` inside a word is the
+# closes nothing as `%`, which ends no word here. A `}` inside a word is the
 # word's (`{ p a}b }` hands `a}b`), and the extractor already blanks a
 # grouping character in a word (guard_word_as_read).
 SAFEDEPS_G_WORD_END_CLASS='[[:space:];&|()<>`]'

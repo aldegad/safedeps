@@ -39,14 +39,14 @@
 #      quote, backslash or dollar: as itself it would open a quote, an escape
 #      or a `$'` region when the scan is read again, and the scan view has to
 #      read the same the second time (caught by the view-property check).
-#      And a `}` glued to the word before it passes as `_` unless it closes a
+#      And a `}` glued to the word before it passes as `%` unless it closes a
 #      `{` group. zsh closes one at a glued `}` before a blank, an operator, a
 #      backtick or the end, and hands the word before it on; bash and dash
 #      hand the `}` with the word. Inside a word, or with no group open, it is
 #      a character to every shell that runs it. With one open, the bash
 #      reading keeps it as `}` when bash leaves a group open at that level,
 #      since bash then refuses the text and runs none of it; otherwise it is
-#      `_` there and the zsh reading keeps `}` (DIVERGE). As itself, `npm ci}`
+#      `%` there and the zsh reading keeps `}` (DIVERGE). As itself, `npm ci}`
 #      read as `npm ci`, and so did `npm ci}'x'` once its quote was blanked.
 #   3. A quote character that opens or closes a region is itself blanked.
 #   4. Every byte inside a quoted region is blanked, newlines included.
@@ -255,7 +255,7 @@ reference_spec_scan_text() {
           (( ${bg[d]:-0} > 0 )) && bg[d]=$(( bg[d] - 1 ))
         fi
       elif [[ -n "${next}" && "${next}" != [$' \t\n;&|)<>`'] ]] || (( ${zg[d]:-0} == 0 )); then
-        output="${output%?}_"
+        output="${output%?}%"
       else
         zg[d]=$(( zg[d] - 1 )); pend[d]+=" $(( ${#output} - 1 ))"
       fi
@@ -272,12 +272,12 @@ reference_spec_scan_text() {
 }
 
 # The glued `}` the bash reading left pending at level d, decided when the level
-# ends: `}` where bash leaves a group open there, `_` otherwise. Reads and
+# ends: `}` where bash leaves a group open there, `%` otherwise. Reads and
 # writes the caller's locals.
 reference_group_settle() {
   local q
   for q in ${pend[d]:-}; do
-    (( ${bg[d]:-0} > 0 )) || output="${output:0:q}_${output:q+1}"
+    (( ${bg[d]:-0} > 0 )) || output="${output:0:q}%${output:q+1}"
   done
   pend[d]=""
 }
@@ -479,7 +479,7 @@ check "a line continuation joins the two lines" \
 # rule 2: a `}` glued to the end of a word closes a group only in zsh
 check "a glued } with no group open is a character, so npm ci} is no npm ci" \
   'npm ci}; echo x' \
-  'npm ci_; echo x'
+  'npm ci%; echo x'
 
 check "a glued } in a group bash leaves open stays }, as zsh closes the group there" \
   '{ npm ci}&& echo x' \
@@ -487,19 +487,19 @@ check "a glued } in a group bash leaves open stays }, as zsh closes the group th
 
 check "a glued } in a group bash closes later is the word's to bash" \
   '{ npm ci}; }' \
-  '{ npm ci_; }'
+  '{ npm ci%; }'
 
 check "a } inside a word is a character too; one standing as a word is unchanged" \
   '{ p a}b }' \
-  '{ p a_b }'
+  '{ p a%b }'
 
 check "a } before a quote is inside the word, so blanking the quote ends nothing" \
   "npm ci}'x'" \
-  'npm ci_   '
+  'npm ci%   '
 
 check "a glued } that ends a brace expansion is a character" \
   'echo {a,b}' \
-  'echo {a,b_'
+  'echo {a,b%'
 
 # rule 7
 check "unterminated single quote blanks the rest" \
