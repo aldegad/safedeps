@@ -90,6 +90,17 @@ shipped_src=$(sed -n '/^shell_lex() {/,/^}/p; /^command_scan_text() {/,/^}/p' "$
   || fail "shell_lex and command_scan_text not found in ${GUARD} (renamed? then update this battery)"
 eval "${shipped_src}"
 declare -F command_scan_text > /dev/null || fail "extracted command_scan_text did not define the function"
+# The payload readers: the lexer prints where each payload lies, and these cut
+# the text (the payload records below).
+payload_src=$(grep '^SAFEDEPS_PAYLOAD_BAD_CODE=' "${GUARD}")
+for fn in guard_mark_reading_failed command_start_text lex_payload_build lex_payloads read_payload_scripts \
+    extract_shell_c_payloads extract_eval_payloads extract_command_substitution_payloads \
+    command_payload_raw_texts command_payload_start_texts command_candidate_start_texts; do
+  fn_src=$(sed -n "/^${fn}() {/,/^}/p" "${GUARD}")
+  [[ "${fn_src}" == *"${fn}() {"* ]] || fail "${fn} not found in ${GUARD} (renamed? then update this battery)"
+  payload_src+=$'\n'"${fn_src}"
+done
+eval "${payload_src}"
 # The lexer reads the lists of the grammar (the shells, the executables), as
 # it does in the guard.
 # shellcheck source=lib/install-grammar.sh
@@ -615,6 +626,187 @@ done
 rm -f "${diverge_file}"
 pass "view properties: scan, code, noredir and stmts keep length and are idempotent in the bash, zsh and dash readings, and they and the starts (events, recognize) read as bash wherever bash says no DIVERGE, on ${form_count} shell forms and ${fuzz_cases} random inputs (stmts: ${stmts_unterm} unclosed readings not asked)"
 
+# --- payload records ------------------------------------------------------------
+# The payload views (cscripts, substs) print where each payload lies in the
+# text, as numbers, and the reader cuts the text it holds (lex_payload_build).
+# They used to print the payload bytes, each ending in \035, and a \035 the
+# command wrote in a body or a script split one payload into two: the halves
+# were lexed alone, and the install after the byte passed with nothing recorded
+# (verdict buri-20261005-181919; a newline separator had done the same a round
+# before). The contract that closes the class is the alphabet: every line is
+# `!`, or a kind (S, E, B) and units ` a:n` (n bytes from byte a) and ` #c#c...`
+# (bytes by code), so no byte of the command can stand in a record, and the
+# builder places every unit the lexer prints. Checked on the recorded shell
+# forms, on every control byte in each place a payload is drawn, and on random
+# input mixing the payload grammar with every byte 0x01-0x7f.
+payload_record_re='^(!|[BSE]( [0-9]+:[0-9]+| #[0-9]+(#[0-9]+)*)*)$'
+cscripts_view() { shell_lex "$1" cscripts "safedeps:scan-contract"; }
+substs_view() { shell_lex "$1" substs "safedeps:scan-contract"; }
+record_failures=0 record_count=0
+check_records() { # reading input label
+  local reading="$1" x="$2" v out line mark
+  for v in cscripts_view substs_view; do
+    out=$(SAFEDEPS_READING="${reading}" "${v}" "${x}"; printf 'X'); out="${out%X}"
+    while IFS= read -r line; do
+      [[ -n "${line}" ]] || continue
+      record_count=$((record_count + 1))
+      if ! [[ "${line}" =~ ${payload_record_re} ]]; then
+        printf 'record: %s (%s) of [%q] (%s) is not numbers: [%q]\n' "${v}" "${reading}" "${x}" "$3" "${line}" >&2
+        record_failures=$((record_failures + 1))
+        continue
+      fi
+      [[ "${line}" != "!" ]] || continue
+      mark=$(mktemp "${TMPDIR:-/tmp}/safedeps-record-mark.XXXXXX")
+      # shellcheck disable=SC2086 # the units, split on blanks
+      SAFEDEPS_SCAN_MARK="${mark}" lex_payload_build "${x}" ${line:1}
+      if [[ -s "${mark}" ]]; then
+        printf 'record: %s (%s) of [%q] (%s) names a unit the text does not hold: [%q]\n' "${v}" "${reading}" "${x}" "$3" "${line}" >&2
+        record_failures=$((record_failures + 1))
+      fi
+      rm -f "${mark}"
+    done <<< "${out}"
+  done
+}
+for ((i = 0; i < form_count; i++)); do
+  form=$(jq -j ".[${i}].text" "${forms_file}" | sed -e 's/@@TAIL@@/pip install evil==6.6.6/' -e 's/@@HEAD@@/pip/g' -e 's/@@TAIL_SPLIT@@/pi\\\
+p install evil==6.6.6/'; printf 'X')
+  check_records bash "${form%X}" "$(jq -r ".[${i}].id" "${forms_file}")"
+done
+# Every control byte where a payload is drawn: a substitution body, a script
+# after `sh -c` and after `eval`, and one an escape decodes (the generator of
+# the full corpus is scripts/measure/payload-boundary-forms.py).
+for code in $(seq 1 31) 127; do
+  # shellcheck disable=SC2059 # an octal escape
+  printf -v b "\\$(printf '%03o' "${code}")"
+  hex=$(printf '%02x' "${code}")
+  for form in "x=\$(echo \"${b}\"; pip install evil==6.6.6)" \
+      "sh -c 'echo \"${b}\"; pip install evil==6.6.6'" \
+      "eval 'echo \"${b}\"; pip install evil==6.6.6'" \
+      "eval \$'echo \\x${hex}; pip install evil==6.6.6'"; do
+    check_records bash "${form}" "control byte ${hex}"
+  done
+done
+record_alphabet=('sh -c ' 'eval ' 'env -S ' 'bash -c ' '$(' ')' '`' "'" '"' '\' "\$'" '\x1d' '\n' ' ' ';' '<(' '#' 'pip install x' '--split-string=')
+for code in $(seq 1 127); do
+  # shellcheck disable=SC2059 # an octal escape
+  printf -v b "\\$(printf '%03o' "${code}")"
+  record_alphabet+=("${b}")
+done
+RANDOM="${fuzz_seed}"
+record_cases="${SAFEDEPS_SCAN_RECORD_CASES:-200}"
+for ((c = 0; c < record_cases; c++)); do
+  len=$((RANDOM % 24))
+  input=""
+  for ((k = 0; k < len; k++)); do
+    # Half the draws from the payload grammar, half from every byte.
+    if (( RANDOM % 2 )); then input+="${record_alphabet[RANDOM % 19]}"
+    else input+="${record_alphabet[RANDOM % ${#record_alphabet[@]}]}"; fi
+  done
+  record_readings=(bash zsh dash)
+  check_records "${record_readings[c % 3]}" "${input}" "random ${c}"
+done
+[[ ${record_failures} -eq 0 ]] || fail "payload records: ${record_failures} record(s) break the alphabet or name units the text does not hold (seed ${fuzz_seed})"
+pass "payload records: ${record_count} cscripts and substs records are numbers only and every unit lies in the text, on ${form_count} shell forms, 32 control bytes in 4 places and ${record_cases} random inputs"
+
+# The payloads the reader builds, against the payloads the shell runs.
+check_payloads() { # readings label input expected (kind:payload, one per argument)
+  local readings="$1" label="$2" x="$3" reading i
+  local -a pgot=() pwant=()
+  shift 3
+  for reading in ${readings}; do
+    pgot=() pwant=("$@")
+    SAFEDEPS_READING="${reading}" lex_payloads "${x}" cscripts
+    for ((i = 0; i < ${#LEX_PAYLOADS[@]}; i++)); do pgot+=("${LEX_PAYLOAD_KINDS[i]}:${LEX_PAYLOADS[i]}"); done
+    SAFEDEPS_READING="${reading}" lex_payloads "${x}" substs
+    for ((i = 0; i < ${#LEX_PAYLOADS[@]}; i++)); do pgot+=("${LEX_PAYLOAD_KINDS[i]}:${LEX_PAYLOADS[i]}"); done
+    [[ "$(printf '%q ' ${pgot[@]+"${pgot[@]}"})" == "$(printf '%q ' ${pwant[@]+"${pwant[@]}"})" ]] \
+      || fail "payloads (${reading}): ${label}: [$(printf '%q ' ${pgot[@]+"${pgot[@]}"})] != expected [$(printf '%q ' ${pwant[@]+"${pwant[@]}"})]"
+  done
+}
+gs=$'\035'
+check_payloads "bash zsh dash" "a \\035 in a substitution body is a byte of the one payload" \
+  "x=\$(echo \"${gs}\"; pip i)" "B:echo \"${gs}\"; pip i"
+check_payloads "bash zsh dash" "and in a script" \
+  "sh -c 'echo \"${gs}\"; pip i'" "S:echo \"${gs}\"; pip i"
+check_payloads "bash zsh dash" "a newline in a script" \
+  $'sh -c "echo a\npip i"' $'S:echo a\npip i'
+check_payloads "bash zsh" "an escape the shell decodes in a script, as in every view" \
+  $'sh -c $\'echo a\\npip i\'' $'S:echo a\npip i'
+check_payloads "bash zsh" "an escape on every second byte, one unit of codes" \
+  $'sh -c $\'\\na\\nb\\n\'' $'S:\na\nb\n'
+check_payloads "bash zsh" "a \\035 an escape decodes" \
+  $'eval $\'echo \\x1d; pip i\'' "E:echo ${gs}; pip i"
+check_payloads "bash zsh dash" "eval joins its words with blanks" \
+  "eval 'a  b' c" "E:a  b c"
+check_payloads "bash zsh dash" "env -S and the words after it" \
+  "env -S 'pip i' x" "E:pip i x"
+check_payloads "bash zsh dash" "env --split-string=, from its value on" \
+  'env --split-string=pip\ i x' "E:pip i x"
+check_payloads "bash zsh dash" "a backtick body unescaped as the shell does" \
+  'x=`echo \$y`' 'B:echo $y'
+check_payloads "bash zsh dash" "nested substitutions, both bodies" \
+  'x=$(a $(pip i))' 'B:a $(pip i)' 'B:pip i'
+check_payloads "bash zsh dash" "an empty body" \
+  'x=$()' 'B:'
+pass "payloads: the reader builds each payload the shell runs from the records"
+
+# The builder places only what it can: a unit outside the text, a code that is
+# not 1-127, or a unit of no kind is a failed reading.
+builder_case() { # expect-mark expect-payload text units...
+  local want_mark="$1" want="$2" mark
+  shift 2
+  mark=$(mktemp "${TMPDIR:-/tmp}/safedeps-builder-mark.XXXXXX")
+  SAFEDEPS_SCAN_MARK="${mark}" lex_payload_build "$@"
+  if [[ "${want_mark}" == yes ]]; then
+    [[ -s "${mark}" ]] || fail "builder: [${*:2}] over [$1] is a failed reading"
+  else
+    [[ ! -s "${mark}" ]] || fail "builder: [${*:2}] over [$1] is no failed reading"
+  fi
+  [[ "${PAYLOAD}" == "${want}" ]] || fail "builder: [${*:2}] over [$1] builds [${PAYLOAD}], expected [${want}]"
+  rm -f "${mark}"
+}
+builder_case no abc abc 1:3
+builder_case no 'bA%\' abc 2:1 '#65#37#92'
+builder_case yes '' abc 2:3
+builder_case yes '' abc 0:1
+builder_case yes '' abc 1:0
+builder_case yes a abc 1:1 zz
+builder_case yes '' abc '#0'
+builder_case yes '' abc '#128'
+builder_case yes '' abc '#65##66'
+builder_case yes '' abc '#65#'
+builder_case yes '' abc '#'
+builder_case yes '' abc '#065'
+pass "builder: a unit outside the text, a code outside 1-127 or a unit of no kind is a failed reading"
+
+# Every payload reader ends with status 0. They are called as plain commands,
+# and bash 3.2 runs a command substitution under the caller's `set -e`: one
+# that ended non-zero there ended the subshell, and every text after it read
+# as no install (a prototype of the change that made these records numbers).
+# Scripts five deep reach every reader's depth limit.
+deep="eval eval eval eval eval 'x=\$(pip i)'"
+setE_out=$(
+  set -euo pipefail
+  PAYLOADS=()
+  read_payload_scripts "${deep}" E
+  extract_shell_c_payloads "sh -c 'sh -c \"sh -c ls\"'"
+  extract_eval_payloads "${deep}"
+  extract_command_substitution_payloads "${deep}"
+  command_payload_raw_texts "${deep}"
+  command_payload_start_texts "${deep}" > /dev/null
+  command_candidate_start_texts "${deep}" > /dev/null
+  lex_payloads "${deep}" cscripts
+  lex_payloads "${deep}" view-of-no-kind
+  lex_payload_build x zz
+  printf 'finished'
+) || true
+[[ "${setE_out}" == finished ]] || fail "a payload reader ended non-zero under set -e"
+PAYLOADS=()
+command_payload_raw_texts "sh -c 'x=\$(pip i)'"
+[[ " $(printf '%q ' ${PAYLOADS[@]+"${PAYLOADS[@]}"})" == *" pip\ i "* ]] \
+  || fail "the payloads of a script are read to its substitutions"
+pass "every payload reader ends with status 0 under set -e, and the payloads of a script are read to its substitutions"
+
 # --- the statement starts (events) ----------------------------------------------
 # Where a command starts is a place between two bytes, and the lexer's walk
 # over the words (starts() in shell_lex) says where, from the shell grammar:
@@ -889,13 +1081,19 @@ check_view() { # view readings label input expected
   local got reading
   for reading in $2; do
     # The sentinel again: a view can end in a newline, which a bare $(...)
-    # here would strip. The substs view ends each body in \035.
+    # here would strip. substs_payloads ends each body in \035.
     got=$(SAFEDEPS_READING="${reading}" capture "$1" "$4"; printf 'X'); got="${got%X}"
     [[ "${got}" == "$5" ]] || fail "$1 (${reading}): $3: [${got}] != expected [$5]"
   done
 }
 live_view() { shell_lex "$1" live "safedeps:scan-contract"; }
-substs_view() { shell_lex "$1" substs "safedeps:scan-contract"; }
+# The bodies the reader builds from the substs records, each ending in \035
+# here, where the expected text holds none.
+substs_payloads() {
+  local p
+  lex_payloads "$1" substs
+  for p in ${LEX_PAYLOADS[@]+"${LEX_PAYLOADS[@]}"}; do printf '%s\035' "${p}"; done
+}
 check_view noredir_view "zsh dash" "a descriptor word: zsh and dash read one digit glued to an operator as its descriptor" \
   'echo 12>/dev/null pip i; echo 1>/dev/null' "echo 12$(sp 10) pip i; echo$(sp 12)"
 check_view noredir_view "bash" "bash reads any number" \
@@ -952,9 +1150,9 @@ check_view flat_view "${all}" "and a process substitution in a target, body and 
   'npm i > >(npm i x)' "npm i$(sp 13)"
 check_view flat_view "${all}" "a substitution that is no target stays, as in the live view" \
   'npm i "$(echo x)" >f' "npm i$(sp 4)echo x)$(sp 4)"
-check_view substs_view "${all}" "a process substitution body is a payload, an argument or a target" \
+check_view substs_payloads "${all}" "a process substitution body is a payload, an argument or a target" \
   'cat <(pip i) > >(npm i)' $'pip i\035npm i\035'
-check_view substs_view "${all}" "nested in a substitution, both bodies" \
+check_view substs_payloads "${all}" "nested in a substitution, both bodies" \
   'cat <(echo $(pip i))' $'echo $(pip i)\035pip i\035'
 for form in '>! f pip i' 'pip >! f i' 'echo a >>! f'; do
   f=$(mktemp "${TMPDIR:-/tmp}/safedeps-diverge.XXXXXX")
@@ -1070,7 +1268,7 @@ check_unprefixed "${all}" "a target between a command and its arguments" \
   'pip >$(case a in a) echo f;; esac) i' "pip$(sp 32)i"
 check_unprefixed "${all}" "zsh =(...) is one word, here a target" \
   '< =(true; true) pip i' 'pip i'
-check_view substs_view "${all}" "and its body is a payload" \
+check_view substs_payloads "${all}" "and its body is a payload" \
   'cat =(pip i) > =(npm i)' $'pip i\035npm i\035'
 check_unprefixed "bash zsh" "a glob qualifier glued to a target is part of it" \
   '>/dev/null(N) pip i' 'pip i'
@@ -1920,17 +2118,24 @@ pass "with awk failing everywhere an install is still denied"
 #
 # So the call chain is measured. An awk shim records every lexing a guard run
 # makes (shell_lex is the one awk called with a view and a policy): the view,
-# the text, and for the payload views (cscripts, substs) the payloads they
-# hand back. Each text lexed must then be a substring of the command or of a
-# payload, after taking out at most one ` --ignore-scripts` the inert reading
-# put in. A view's output is such a substring only where the view changed no
-# byte, and then lexing it is lexing the command. The forms reach every reader
-# that lexes (the views must all show up in the trace, or this checks nothing),
-# with the bytes a view used to change: a heredoc with live code, a line
-# continuation, a comment, a newline inside quotes, prefixes, payloads that
-# hold newlines, and installs the landing and the inert rewrite read. The
-# inert rewrite runs only for an install the gate lets through, so its forms
-# are `npm ci`, which names no package, with quotes and a comment in it.
+# the reader's marker and the text. The texts allowed are the command and the
+# payloads the shell runs, written out by hand beside each form, never taken
+# from the code: this check used to build them from the payload records,
+# cut where the readers cut them, and accepted any substring of those, so a
+# payload the code split at a forged separator was allowed half by half and the
+# check could not turn red on the class it was there for (verdict
+# buri-20261005-181919). A lexed text passes when it is one of them, as written
+# or with one ` --ignore-scripts` the inert reading put in, or a whole statement
+# of one: it starts at the start of that text or after a separator, ends at its
+# end or before one, and leaves no quote open by this battery's own count
+# (the method of scripts/measure/lex-trace-oracle.py). The forms reach every
+# reader that lexes (the views must all show up in the trace, or this checks
+# nothing), with the bytes a view used to change: a heredoc with live code, a
+# line continuation, a comment, a newline inside quotes, prefixes, payloads
+# that hold newlines, a \035 where a payload is drawn, and installs the landing
+# and the inert rewrite read. The inert rewrite runs only for an install the
+# gate lets through, so its forms are `npm ci`, which names no package, with
+# quotes and a comment in it.
 mkdir -p "${fail_tmp}/lex-trace-bin"
 cat > "${fail_tmp}/lex-trace-bin/awk" <<SHIM
 #!/usr/bin/env bash
@@ -1946,88 +2151,138 @@ f=\$(mktemp "\${LEX_TRACE}/lex.XXXXXX") || exit 2
 printf '%s' "\${view}" > "\${f}.view"
 printf '%s' "\${marker}" > "\${f}.marker"
 cat > "\${f}.in"
-case "\${view}" in
-  cscripts|substs)
-    '${real_awk}' "\$@" < "\${f}.in" > "\${f}.out"; rc=\$?
-    cat "\${f}.out"
-    exit "\${rc}"
-    ;;
-esac
 exec '${real_awk}' "\$@" < "\${f}.in"
 SHIM
 chmod +x "${fail_tmp}/lex-trace-bin/awk"
 
-# Whether <text> is a substring of one of the allowed texts (LEX_ALLOWED), as
-# it is or with one ` --ignore-scripts` taken out.
+# Whether <text> leaves no quote open, counted here: outside single quotes a
+# backslash escapes the next byte, and ' " ` open and close.
+lex_quotes_closed() {
+  local t="$1" q="" c i=0 n=${#1}
+  while (( i < n )); do
+    c="${t:i:1}"
+    if [[ -z "${q}" ]]; then
+      if [[ "${c}" == '\' ]]; then i=$((i + 2)); continue; fi
+      [[ "${c}" != "'" && "${c}" != '"' && "${c}" != '`' ]] || q="${c}"
+    elif [[ "${q}" == "'" ]]; then
+      [[ "${c}" != "'" ]] || q=""
+    else
+      if [[ "${c}" == '\' ]]; then i=$((i + 2)); continue; fi
+      [[ "${c}" != "${q}" ]] || q=""
+    fi
+    i=$((i + 1))
+  done
+  [[ -z "${q}" ]]
+}
+# Whether <piece> is a whole statement of <text> at one of its places.
+lex_whole_statement() {
+  local piece="$1" rest="$2" pre="" head before after
+  [[ -n "${piece}" ]] && lex_quotes_closed "${piece}" || return 1
+  while [[ "${rest}" == *"${piece}"* ]]; do
+    head="${rest%%"${piece}"*}"
+    before="${pre}${head}"
+    after="${rest#"${head}"}"; after="${after#"${piece}"}"
+    while [[ "${before}" == *[' '$'\t'] ]]; do before="${before%?}"; done
+    while [[ "${after}" == [' '$'\t']* ]]; do after="${after#?}"; done
+    if [[ ( -z "${before}" || "${before}" == *[';&|({)'$'\n'] ) && ( -z "${after}" || "${after}" == [';&|)}'$'\n']* ) ]]; then
+      return 0
+    fi
+    # The next place starts one byte after this one.
+    pre="${pre}${head}${piece:0:1}"
+    rest="${rest#"${head}"}"; rest="${rest:1}"
+  done
+  return 1
+}
+# Whether <text> is allowed (LEX_ALLOWED): one of the texts, or a whole
+# statement of one, as it is or with one ` --ignore-scripts` taken out.
 lex_text_allowed() {
   local text="$1" a rest head pre="" cand
-  for a in "${LEX_ALLOWED[@]}"; do [[ "${a}" == *"${text}"* ]] && return 0; done
+  local -a cands=("${text}")
   rest="${text}"
   while [[ "${rest}" == *" --ignore-scripts"* ]]; do
     head="${rest%%" --ignore-scripts"*}"
     rest="${rest#*" --ignore-scripts"}"
-    cand="${pre}${head}${rest}"
-    for a in "${LEX_ALLOWED[@]}"; do [[ "${a}" == *"${cand}"* ]] && return 0; done
+    cands+=("${pre}${head}${rest}")
     pre="${pre}${head} --ignore-scripts"
+  done
+  for cand in "${cands[@]}"; do
+    for a in "${LEX_ALLOWED[@]}"; do
+      [[ "${cand}" == "${a}" ]] && return 0
+      lex_whole_statement "${cand}" "${a}" && return 0
+    done
   done
   return 1
 }
 
-# Runs the guard on <command> under the trace and checks every lexing it made.
-# Adds the views and the readers (their markers) it saw to LEX_VIEWS_SEEN; each
-# lexing of a text that is not
-# the command, a payload or a piece of one is a line in LEX_BAD.
+# Runs the guard on <command> under the trace and checks every lexing it made
+# against the command and the payloads after it. Adds the views and the
+# readers (their markers) it saw to LEX_VIEWS_SEEN; each lexing of a text that
+# is none of these is a line in LEX_BAD. A text in LEX_KNOWN is a stated
+# exception, counted in LEX_KNOWN_SEEN.
 lex_trace_check() {
-  local command="$1" trace f view out rec text
+  local command="$1" trace f view text
   trace=$(mktemp -d "${fail_tmp}/lex-trace.XXXXXX")
   LEX_TRACE="${trace}" scanfail_guard "${fail_tmp}/lex-trace-bin" "${command}"
-  LEX_ALLOWED=("${command}")
-  for f in "${trace}"/lex.*.out; do
-    [[ -f "${f}" ]] || continue
-    view=$(cat "${f%.out}.view")
-    out=$(cat "${f}"; printf 'X'); out="${out%X}"
-    while IFS= read -r -d $'\035' rec; do
-      [[ "${view}" != cscripts ]] || rec="${rec:1}"
-      [[ -z "${rec}" ]] || LEX_ALLOWED+=("${rec}")
-    done <<< "${out}"
-  done
+  LEX_ALLOWED=("$@")
   for f in "${trace}"/lex.*.in; do
     [[ -f "${f}" ]] || continue
     view=$(cat "${f%.in}.view")
     LEX_VIEWS_SEEN+=" ${view} $(cat "${f%.in}.marker") "
     # shell_lex hands the awk the text and a newline.
     text=$(cat "${f}"; printf 'X'); text="${text%X}"; text="${text%$'\n'}"
-    lex_text_allowed "${text}" || LEX_BAD+="${view} of [${text}] in [${command}]"$'\n'
+    lex_text_allowed "${text}" && continue
+    if [[ -n "${LEX_KNOWN:-}" && "${text}" == "${LEX_KNOWN}" ]]; then LEX_KNOWN_SEEN=$((LEX_KNOWN_SEEN + 1)); continue; fi
+    LEX_BAD+="${view} of [${text}] in [${command}]"$'\n'
   done
   rm -rf "${trace}"
 }
-LEX_VIEWS_SEEN="" LEX_BAD=""
-lex_forms=(
-  $'cat <<E\n$(date)\nE\npip install evil==6.6.6\n'
-  $'git commit -F - <<EOF\nfix $(date)\nEOF\nnpm ci\n'
-  $'cat <<-E\n\t${HOME} `date`\n\tE\nnpm install left-pad@1.3.0 # a comment\n'
-  $'pi\\\np install evil==6.6.6'
-  $'npm install left-pad@1.3.0 --message "a\nb" \\\n  --save-exact'
-  $'npm ci --message "a\nb" \\\n  --loglevel warn 2>/dev/null'
-  "npm ci --tag 'a b' # a comment"
-  $'cat <<E\n$(date)\nE\nnpm ci --tag "$(echo x)"\n'
-  'FOO="a b" PIP_INDEX_URL=x pip install evil==6.6.6 2>/dev/null'
-  $'sh -c "echo a\npip install evil==6.6.6"; eval \'npm ci\''
-  $'x=$(echo a\nnpm install left-pad@1.3.0); echo "$x"'
-  'cd sub && npm install left-pad@1.3.0 && npm install cowsay@1.5.0'
-  $'case x in x) npm ci;; esac; if true; then pip install evil==6.6.6; fi'
-  $'cat <<EOF | sh\npip install evil==6.6.6\nEOF'
-  'npm install -g left-pad@1.3.0'
-)
-for form in "${lex_forms[@]}"; do lex_trace_check "${form}"; done
+LEX_VIEWS_SEEN="" LEX_BAD="" LEX_KNOWN="" LEX_KNOWN_SEEN=0
+gs=$'\035'
+lex_form_count=0
+lex_form() { lex_form_count=$((lex_form_count + 1)); lex_trace_check "$@"; }
+lex_form $'cat <<E\n$(date)\nE\npip install evil==6.6.6\n' 'date'
+lex_form $'git commit -F - <<EOF\nfix $(date)\nEOF\nnpm ci\n' 'date'
+lex_form $'cat <<-E\n\t${HOME} `date`\n\tE\nnpm install left-pad@1.3.0 # a comment\n' 'date'
+lex_form $'pi\\\np install evil==6.6.6'
+lex_form $'npm install left-pad@1.3.0 --message "a\nb" \\\n  --save-exact'
+lex_form $'npm ci --message "a\nb" \\\n  --loglevel warn 2>/dev/null'
+lex_form "npm ci --tag 'a b' # a comment"
+# The inert reading looks for the end of the statement on the live view, with
+# depths of its own, and lexes the statement up to where it stopped: here
+# inside the quoted substitution, so the text it lexes (`npm ci --tag
+# "$(echo x`, in its flat and pieces views) is no statement. Known,
+# recorded as a downgrade, and the inert placement's to close
+# (safedeps/quoted-substitution-inert-placement); stated so that any other
+# text this form lexes is still red.
+LEX_KNOWN='npm ci --tag "$(echo x'
+lex_form $'cat <<E\n$(date)\nE\nnpm ci --tag "$(echo x)"\n' 'date' 'echo x'
+LEX_KNOWN=""
+lex_form 'FOO="a b" PIP_INDEX_URL=x pip install evil==6.6.6 2>/dev/null'
+lex_form $'sh -c "echo a\npip install evil==6.6.6"; eval \'npm ci\'' $'echo a\npip install evil==6.6.6' 'npm ci'
+lex_form $'x=$(echo a\nnpm install left-pad@1.3.0); echo "$x"' $'echo a\nnpm install left-pad@1.3.0'
+lex_form 'cd sub && npm install left-pad@1.3.0 && npm install cowsay@1.5.0'
+lex_form $'case x in x) npm ci;; esac; if true; then pip install evil==6.6.6; fi'
+lex_form $'cat <<EOF | sh\npip install evil==6.6.6\nEOF'
+lex_form 'npm install -g left-pad@1.3.0'
+# A \035 where a payload is drawn: in a substitution body, in a script, and
+# decoded from an escape. Cut at that byte, each was two texts lexed alone.
+lex_form "x=\$(echo \"${gs}\"; pip install evil==6.6.6)" "echo \"${gs}\"; pip install evil==6.6.6"
+lex_form "sh -c 'echo \"${gs}\"; npm ci'" "echo \"${gs}\"; npm ci"
+lex_form $'sh -c $\'echo "\\x1d"; pip install evil==6.6.6\'' "echo \"${gs}\"; pip install evil==6.6.6"
+lex_form "sh -c \"sh -c 'echo ${gs}; pip install evil==6.6.6'\"" "sh -c 'echo ${gs}; pip install evil==6.6.6'" "echo ${gs}; pip install evil==6.6.6"
+# A substitution inside a script, and an escape the script reader decodes.
+lex_form "sh -c 'x=\$(echo \"${gs}\"; pip install evil==6.6.6)'" "x=\$(echo \"${gs}\"; pip install evil==6.6.6)" "echo \"${gs}\"; pip install evil==6.6.6"
+lex_form $'sh -c $\'echo a\\npip install evil==6.6.6\'' $'echo a\npip install evil==6.6.6'
+lex_form "sh -c 'x=\$(npm ci)'" 'x=$(npm ci)' 'npm ci'
+[[ "${LEX_KNOWN_SEEN}" -gt 0 ]] || fail "the stated exception of the lexing trace is still lexed (seen ${LEX_KNOWN_SEEN}); if it is gone, drop it"
 for v in recognize pieces stmtcuts stmtraw cscripts substs scan flat live \
     safedeps:inert_offsets safedeps:extract_pieces safedeps:payload_pieces safedeps:read_payload_words \
     safedeps:extract_command_substitution_payloads safedeps:command_reads; do
   [[ "${LEX_VIEWS_SEEN}" == *" ${v} "* ]] || fail "the lexing trace saw ${v} (otherwise this checks less than it says)"
 done
-[[ -z "${LEX_BAD}" ]] || fail "every lexing reads the command, a payload or a piece of one; these read a view's output:
+[[ -z "${LEX_BAD}" ]] || fail "every lexing reads the command, a payload or a whole statement of one; these read something else:
 ${LEX_BAD}"
-pass "every lexing of a guard run reads the command, a payload or a piece of one, never a view's output (${#lex_forms[@]} forms)"
+pass "every lexing of a guard run reads the command, a payload the shell runs or a whole statement of one, never a view's output or a cut payload (${lex_form_count} forms, one stated exception)"
 
 # --- the spec readers start no process ------------------------------------------
 # The spec readers used to rewrite a statement with sed and tr before reading it

@@ -329,6 +329,7 @@ recognized_dependency_install() {
 command_hides_dependency_install() {
   local command="$1"
   local payload
+  local -a pls=()
 
   # Top-level pipe-to-shell: `<producer> | sh` whose producer text literally
   # contains a package manager + install verb (e.g. `printf 'pip install x' | sh`).
@@ -341,23 +342,29 @@ command_hides_dependency_install() {
   payload_pipes_install_text_to_shell "${command}" && return 0
 
   # The payload readers take the command as written (see
-  # extract_shell_c_payloads).
-  while IFS= read -r -d $'\035' payload; do
+  # extract_shell_c_payloads) and hand the payloads back in PAYLOADS.
+  extract_shell_c_payloads "${command}"
+  pls=(${PAYLOADS[@]+"${PAYLOADS[@]}"})
+  for payload in ${pls[@]+"${pls[@]}"}; do
     [[ -z "${payload}" ]] && continue
     payload_pipes_install_text_to_shell "${payload}" && return 0
-  done < <(extract_shell_c_payloads "${command}")
+  done
 
-  while IFS= read -r -d $'\035' payload; do
+  extract_eval_payloads "${command}"
+  pls=(${PAYLOADS[@]+"${PAYLOADS[@]}"})
+  for payload in ${pls[@]+"${pls[@]}"}; do
     [[ -z "${payload}" ]] && continue
     command_is_dependency_install "${payload}" && return 0
     payload_pipes_install_text_to_shell "${payload}" && return 0
-  done < <(extract_eval_payloads "${command}")
+  done
 
-  while IFS= read -r -d $'\035' payload; do
+  extract_command_substitution_payloads "${command}"
+  pls=(${PAYLOADS[@]+"${PAYLOADS[@]}"})
+  for payload in ${pls[@]+"${pls[@]}"}; do
     [[ -z "${payload}" ]] && continue
     command_is_dependency_install "${payload}" && return 0
     payload_pipes_install_text_to_shell "${payload}" && return 0
-  done < <(extract_command_substitution_payloads "${command}")
+  done
 
   return 1
 }
@@ -384,12 +391,15 @@ command_hides_dependency_install() {
 command_pipes_install_to_shell() {
   local command="$1"
   local payload
+  local -a pls=()
 
   payload_pipes_install_text_to_shell "${command}" && return 0
-  while IFS= read -r -d $'\035' payload; do
+  command_payload_raw_texts "${command}"
+  pls=(${PAYLOADS[@]+"${PAYLOADS[@]}"})
+  for payload in ${pls[@]+"${pls[@]}"}; do
     [[ -z "${payload}" ]] && continue
     payload_pipes_install_text_to_shell "${payload}" && return 0
-  done < <(command_payload_raw_texts "${command}")
+  done
   return 1
 }
 
@@ -673,12 +683,18 @@ shell_lex() {
         wantst = (view == "recognize" || view == "stmtcuts" || view == "events" || view == "cwords" || view == "unprefixed" || view == "pieces")
         wantdep = (wantst || view == "noredir" || view == "pieces" || view == "cscripts" || view == "stmts" || view == "live" || view == "flat")
         wantar = wantst
-        if (view == "pieces") {
-          # The value of each one-letter escape in $\047...\047.
-          AQV["a"] = "\007"; AQV["b"] = "\010"; AQV["e"] = "\033"; AQV["E"] = "\033"
-          AQV["f"] = "\014"; AQV["n"] = "\n"; AQV["r"] = "\r"; AQV["t"] = "\t"; AQV["v"] = "\013"
-          AQV["\\"] = "\\"; AQV["\047"] = "\047"; AQV["\042"] = "\042"; AQV["?"] = "?"
-        }
+        # The value of each one-letter escape in $\047...\047, in every view.
+        # A lexing fact is the same whichever view asks for it: this table
+        # was loaded for the pieces view alone, so the cscripts view read
+        # `sh -c $\047echo a\\npip install x\047` as a backslash and an n,
+        # one statement after echo, and the install passed with nothing
+        # recorded (v2.18.1 on).
+        AQV["a"] = "\007"; AQV["b"] = "\010"; AQV["e"] = "\033"; AQV["E"] = "\033"
+        AQV["f"] = "\014"; AQV["n"] = "\n"; AQV["r"] = "\r"; AQV["t"] = "\t"; AQV["v"] = "\013"
+        AQV["\\"] = "\\"; AQV["\047"] = "\047"; AQV["\042"] = "\042"; AQV["?"] = "?"
+        # The code of each byte an escape can decode to, for the payload
+        # records (emit_cscripts).
+        if (view == "cscripts") for (j = 1; j < 128; j++) ORD[sprintf("%c", j)] = j
         mode = ""; np = 0; unterm = 0; hn = 0; hstop = 0; div = 0
         shb = (policy == "bash"); shz = (policy == "zsh"); shd = (policy == "dash")
         for (i = 1; i <= N; i++) {
@@ -2035,29 +2051,87 @@ shell_lex() {
         }
         nh++; HSTART[bs] = nh; HEND[nh] = be
       }
-      # The scripts the command hands to a shell. Words are cut where the shell
-      # cuts them (word_sep) and read after its quote removal, so a script word
-      # holding escaped quotes, blanks in quotes, glued quoting, an ANSI-C word or
-      # escaped blanks is the string the shell passes. Each record ends in \035:
-      # `S` and the word after `sh|bash|zsh|dash -...c`, or `E` and the words
-      # after `eval` joined by blanks. A $\047...\047 escape this cannot name
-      # adds a record `!`.
+      # The scripts the command hands to a shell, and the bodies of its
+      # substitutions, go out as records of numbers, never of bytes. One
+      # record per line: `S` (the word after `sh|bash|zsh|dash -...c`), `E`
+      # (the words after `eval`, or an env -S string and the words after it,
+      # joined by blanks) or `B` (a substitution body), then the payload as
+      # units, ` a:n` for n bytes of the lexed text from byte a, and ` #c`
+      # for a byte of code c that the text does not hold where the payload
+      # needs it (an escape the shell decodes, the blank that joins two
+      # words); consecutive codes fold into one unit (` #10#112#105`). A
+      # `!` record says a payload here cannot be named. The reader holds the
+      # text and cuts it (lex_payload_build).
+      #
+      # So a record holds `BSE!`, digits, `:`, `#` and blanks, and no byte
+      # of the command can stand in one. These records carried the payload
+      # bytes, each ending in \035, and the readers cut at that byte: a \035
+      # the command wrote in a body or a script split one payload into two,
+      # each lexed alone, and an install after it passed with nothing
+      # recorded (verdict buri-20261005-181919). A newline separator had
+      # done the same a round before. Structure leaves the lexer as a
+      # rendering or as numbers (ARCHITECTURE.md, "What the lexer hands its
+      # readers").
+      #
+      # Words are cut where the shell cuts them (word_sep) and read after
+      # its quote removal, so a script word holding escaped quotes, blanks
+      # in quotes, glued quoting, an ANSI-C word or escaped blanks is the
+      # string the shell passes. W holds the value of each word, for the tests
+      # below; WS its units.
       function emit_cscripts(   k, inw, n, W) {
-        buf = ""; held = 0; n = 0; sb_reset("w", ""); inw = 0
+        buf = ""; held = 0; n = 0; sb_reset("w", ""); sb_reset("ws", ""); inw = 0
         for (k = 1; k <= N + 1; k++) {
           if (k > N || word_sep(k)) {
-            if (inw) { W[++n] = sb_get("w"); sb_reset("w", ""); inw = 0 }
+            if (inw) { W[++n] = sb_get("w"); WS[n] = sb_get("ws"); sb_reset("w", ""); sb_reset("ws", ""); inw = 0 }
             if (k > N || C[k] == "p" || C[k] == "c" && DEP[k] == 1 && X[k] ~ /[\n;&|()]/) { cscripts_of(W, n); n = 0 }
             continue
           }
           inw = 1
           if (k in DROP) continue
-          if (k in VAL) sb_add("w", VAL[k])
-          else if (!RM[k]) sb_add("w", X[k])
+          if (k in VAL) { sb_add("w", VAL[k]); sb_add("ws", " #" ORD[VAL[k]]) }
+          else if (!RM[k]) { sb_add("w", X[k]); sb_add("ws", " " k) }
         }
-        if (aqbad) put("!\035")
+        if (aqbad) put("!\n")
         printf "%s", buf
       }
+      # A unit list with its first <cnt> units left out: the units of
+      # `--split-string=VALUE` from its value on.
+      function units_drop(s, cnt,   T, nt, i) {
+        nt = split(s, T, " "); sb_reset("ud", "")
+        for (i = cnt + 1; i <= nt; i++) sb_add("ud", " " T[i])
+        return sb_get("ud")
+      }
+      # A unit list (` k` for byte k, ` #c` for code c) as the units of a record:
+      # bytes of the text in a row become one ` a:n`, codes in a row one
+      # ` #c#c...`. A run of fewer than four bytes between codes, each
+      # below 128, goes out as codes, so an escape on every second byte
+      # (`$\047\\na\\nb...\047`) is one unit, not one per byte: the reader
+      # pays per unit. Pending codes always come before a pending run.
+      function runs(s,   T, nt, i, u, v) {
+        nt = split(s, T, " "); sb_reset("rn", ""); sb_reset("rc", ""); RCN = 0; RA = 0; RL = 0
+        for (i = 1; i <= nt; i++) {
+          u = T[i]
+          if (substr(u, 1, 1) == "#") {
+            if (RL && RL < 4 && ascii_run(RA, RL)) { for (v = RA; v < RA + RL; v++) rc_add(ORD[X[v]]); RL = 0 }
+            else if (RL) { rc_flush(); rl_flush() }
+            rc_add(substr(u, 2))
+            continue
+          }
+          v = u + 0
+          if (RL && v == RA + RL) { RL++; continue }
+          if (RL) { rc_flush(); rl_flush() }
+          RA = v; RL = 1
+        }
+        rc_flush(); rl_flush()
+        return sb_get("rn")
+      }
+      function ascii_run(a, l,   v) {
+        for (v = a; v < a + l; v++) if (!(X[v] in ORD)) return 0
+        return 1
+      }
+      function rc_add(c) { sb_add("rc", (RCN++ ? "#" : "") c) }
+      function rc_flush() { if (RCN) sb_add("rn", " #" sb_get("rc")); sb_reset("rc", ""); RCN = 0 }
+      function rl_flush() { if (RL) sb_add("rn", " " RA ":" RL); RL = 0 }
       # A shell is a command word in the closed list of the grammar
       # (SAFEDEPS_G_SHELLS, passed in as shre): the reader it replaced matched
       # four names and passed `ksh -c "pip install ..."` (caught in review),
@@ -2075,32 +2149,32 @@ shell_lex() {
       # split, which is one pass. It was taken with sub(/.*\//, ...), which the
       # macOS awk (BWK) tries from every byte and runs to the end of the word
       # from each, so one 64KB word cost 13s (scripts/measure/scan-cost.sh).
-      function cscripts_of(W, n,   j, m, s, base, args, c, q, sv, rest, np, P) {
+      function cscripts_of(W, n,   j, m, s, base, args, c, q, sv, svs, rest, np, P) {
         for (j = 1; j <= n; j++) {
           np = split(W[j], P, "/"); base = P[np]
           if (base == "env" && j < n) {
-            sv = ""; rest = 0
+            sv = ""; svs = ""; rest = 0
             for (m = j + 1; m <= n && !rest; m++) {
               if (W[m] == "--" || W[m] !~ /^-/ && W[m] !~ /^[A-Za-z_][A-Za-z0-9_]*=/) break
-              if (W[m] ~ /^--split-string=/) { sv = substr(W[m], 16); rest = m + 1; break }
-              if (W[m] == "--split-string") { if (m < n) { sv = W[m+1]; rest = m + 2 }; break }
+              if (W[m] ~ /^--split-string=/) { sv = substr(W[m], 16); svs = units_drop(WS[m], 15); rest = m + 1; break }
+              if (W[m] == "--split-string") { if (m < n) { sv = W[m+1]; svs = WS[m+1]; rest = m + 2 }; break }
               if (W[m] ~ /^--/ || W[m] !~ /^-/) continue
               for (q = 2; q <= length(W[m]); q++) {
                 c = substr(W[m], q, 1)
                 if (c ~ /[uCP]/) { if (q == length(W[m])) m++; break }
                 if (c == "S") {
-                  if (q < length(W[m])) { sv = substr(W[m], q + 1); rest = m + 1 }
-                  else if (m < n) { sv = W[m+1]; rest = m + 2 }
+                  if (q < length(W[m])) { sv = substr(W[m], q + 1); svs = units_drop(WS[m], q); rest = m + 1 }
+                  else if (m < n) { sv = W[m+1]; svs = WS[m+1]; rest = m + 2 }
                   break
                 }
               }
               if (rest) break
             }
             if (rest) {
-              if (sv ~ /[$`]/) { put("!\035"); break }
-              put("E" sv)
-              for (m = rest; m <= n; m++) put(" " W[m])
-              put("\035"); break
+              if (sv ~ /[$`]/) { put("!\n"); break }
+              sb_reset("ev", svs)
+              for (m = rest; m <= n; m++) sb_add("ev", " #32" WS[m])
+              put("E" runs(sb_get("ev")) "\n"); break
             }
             continue
           }
@@ -2111,7 +2185,7 @@ shell_lex() {
               if (W[m] ~ /^-[A-Za-z]*c[A-Za-z]*$/) {
                 s = m + 1
                 if (s <= n && W[s] == "--") s++
-                if (s <= n) { put("S" W[s] "\035"); j = s }
+                if (s <= n) { put("S" runs(WS[s]) "\n"); j = s }
                 break
               }
               if (W[m] ~ /^[-+][A-Za-z]+$/ || W[m] == "--") continue
@@ -2119,26 +2193,28 @@ shell_lex() {
             }
             continue
           }
-          # The arguments go out one at a time: joined into one string first,
-          # each word copied the whole string again (BWK concatenates by copy).
+          # The words go to the builder one at a time: joined into one string
+          # first, each word copied the whole string again (BWK concatenates
+          # by copy).
           if (W[j] == "eval" && j < n) {
-            put("E")
-            for (m = j + 1; m <= n; m++) put((m > j + 1 ? " " : "") W[m])
-            put("\035"); break
+            sb_reset("ev", "")
+            for (m = j + 1; m <= n; m++) sb_add("ev", (m > j + 1 ? " #32" : "") WS[m])
+            put("E" runs(sb_get("ev")) "\n"); break
           }
         }
       }
-      function emit_substs(   k, a, z, t, b) {
+      # Each substitution body as a `B` record. A backtick body is unescaped
+      # the way the shell unescapes it before it reads it (`\`` nests), so
+      # its escaping backslashes are not units.
+      function emit_substs(   k, a, z, t) {
         buf = ""; held = 0
         for (k = 1; k <= nsub; k++) {
-          a = sbeg[k]; z = send[k]
+          a = sbeg[k]; z = send[k]; sb_reset("su", "")
           for (t = a; t <= z; t++) {
-            b = X[t]
-            # The shell unescapes a backtick body before it reads it.
-            if (skind[k] == "B" && b == "\\" && t < z && (X[t+1] == "`" || X[t+1] == "\\" || X[t+1] == "$")) { t++; b = X[t] }
-            put(b)
+            if (skind[k] == "B" && X[t] == "\\" && t < z && (X[t+1] == "`" || X[t+1] == "\\" || X[t+1] == "$")) t++
+            sb_add("su", " " t)
           }
-          put("\035")
+          put("B" runs(sb_get("su")) "\n")
         }
         printf "%s", buf
       }
@@ -2196,7 +2272,9 @@ shell_lex() {
       # one per byte of the command: a comment, a heredoc operator and a
       # heredoc body, the live code in one too, are no words of a statement
       # and read as blanks, a newline inside quotes as a blank, and each byte
-      # of a line continuation as \001, which the reader steps over. It read
+      # of a line continuation as \001, which the reader steps over; a \001
+      # the command wrote is \002, so the reader does not step over it as
+      # one (it read `c<\001>d` as `cd`). It read
       # the joined view before, which kept the live code of a body (`$(date)`)
       # and blanked the terminator line, so that code stood as the first word
       # of the statement after the body.
@@ -2207,6 +2285,7 @@ shell_lex() {
           if (cl == "l") put("\001")
           else if (cl == "m" || cl == "h" || cl == "b" || cl == "B") put(X[k] == "\n" ? "\n" : " ")
           else if (X[k] == "\n" && cl != "c") put(" ")
+          else if (X[k] == "\001") put("\002")
           else put(X[k])
         }
         printf "%s", buf
@@ -2371,25 +2450,115 @@ strip_heredoc_bodies() {
   fi
 }
 
-# The three payload readers below take the command as written, or a payload,
-# and print each payload they find ending in \035, so a payload that holds a
-# newline stays one text. The lexer knows a heredoc body is data and steps
-# over it, so a `sh -c` a body quotes is no payload. They used to take the
-# command with its bodies stripped and its lines joined, two views lexed
-# again: the joined view kept the live code of a body where the command after
-# it stood (verdict buri-20261005-145152), and a reader that stripped once
-# more dropped every line after a heredoc (caught in review).
+# The payload readers below take the command as written, or a payload, and
+# put each payload they find into the array PAYLOADS. A payload never travels
+# as bytes between the lexer and its reader: the lexer prints where it lies in
+# the text (the cscripts and substs records, numbers only), and the reader cuts
+# the text it holds (lex_payload_build). The records used to carry the bytes,
+# each payload ending in \035, and a \035 the command wrote split one payload
+# into two (verdict buri-20261005-181919); a newline had done the same before.
+#
+# The lexer knows a heredoc body is data and steps over it, so a `sh -c` a body
+# quotes is no payload. The readers used to take the command with its bodies
+# stripped and its lines joined, two views lexed again: the joined view kept
+# the live code of a body where the command after it stood (verdict
+# buri-20261005-145152), and a reader that stripped once more dropped every
+# line after a heredoc (caught in review).
+#
+# Every one of them ends with status 0. They are called as plain commands,
+# often inside a command substitution, and bash 3.2 runs that subshell under
+# the caller's `set -e`: a reader that ended non-zero ended the subshell there,
+# the texts after it were never printed, and the install in them read as none
+# (a prototype of this change, 32 forms measured).
+
+# One payload built from <text> and the units of a lexer record, into PAYLOAD.
+# `a:n` is n bytes of <text> from byte a (1-based); `#c#c...` the bytes of
+# those codes, which an escape decoded or a join put in. Anything else, a code
+# outside 1-127 or a range past the end of <text>, is a failed reading: the
+# lexer printed something this cannot place, and a payload built without it
+# would be a text the shell never runs, read as if it were. The pieces are
+# joined once at the end, since a string grown a piece at a time is copied
+# whole each time. A run of codes is checked with tests that read it once (a
+# glob for its shape, one search for a code that is not 1-127): a regex that
+# repeats a group over it asks the regex library for the place of every
+# repetition, and a run can be the whole 64KB command.
+SAFEDEPS_PAYLOAD_BAD_CODE='(^|#)(0[0-9]*|[0-9]{4,}|[2-9][0-9][0-9]|1[3-9][0-9]|12[89])(#|$)'
+lex_payload_build() {
+  local LC_ALL=C text="$1" tok fmt ch IFS=$' \t\n'
+  local -a parts=() codes=()
+  PAYLOAD=""
+  shift
+  for tok in "$@"; do
+    if [[ "${tok}" =~ ^([1-9][0-9]{0,8}):([1-9][0-9]{0,8})$ ]]; then
+      if (( BASH_REMATCH[1] + BASH_REMATCH[2] - 1 > ${#text} )); then
+        guard_mark_reading_failed
+        continue
+      fi
+      parts+=("${text:BASH_REMATCH[1]-1:BASH_REMATCH[2]}")
+    elif [[ "${tok}" == '#'[0-9]* && "${tok}" != *[!0-9#]* && "${tok}" != *'##'* && "${tok}" != *'#' ]] \
+        && ! [[ "${tok:1}" =~ ${SAFEDEPS_PAYLOAD_BAD_CODE} ]]; then
+      IFS='#'
+      # shellcheck disable=SC2206 # split on `#`; the test above leaves digits only
+      codes=(${tok:1})
+      IFS=$' \t\n'
+      printf -v fmt '\\%03o' "${codes[@]}"
+      # shellcheck disable=SC2059 # the format is octal escapes only
+      printf -v ch "${fmt}"
+      parts+=("${ch}")
+    else
+      guard_mark_reading_failed
+    fi
+  done
+  printf -v PAYLOAD '%s' ${parts[@]+"${parts[@]}"}
+  return 0
+}
+
+# The payloads one lexing of <text> in <view> names, into LEX_PAYLOADS, with
+# the kind of each (S, E or B) in LEX_PAYLOAD_KINDS: the scripts it hands to a
+# shell (cscripts) or the bodies of its substitutions (substs). A `!` record, a
+# record with any byte but the record's own, and a kind no reader knows are
+# failed readings.
+lex_payloads() {
+  local text="$1" out rec IFS=$' \t\n'
+  LEX_PAYLOADS=(); LEX_PAYLOAD_KINDS=()
+  case "$2" in
+    cscripts) out=$(shell_lex "${text}" cscripts "safedeps:read_payload_words") || return 0 ;;
+    substs) out=$(shell_lex "${text}" substs "safedeps:extract_command_substitution_payloads") || return 0 ;;
+    *) guard_mark_reading_failed; return 0 ;;
+  esac
+  while IFS= read -r rec; do
+    [[ -n "${rec}" ]] || continue
+    if [[ "${rec}" == "!" ]]; then
+      guard_mark_reading_failed
+      continue
+    fi
+    if [[ "${rec}" =~ [^BSE0-9:#\ ] || "${rec}" != [BSE]* ]]; then
+      guard_mark_reading_failed
+      continue
+    fi
+    # shellcheck disable=SC2086 # the units, split on blanks; the test above leaves no glob byte
+    lex_payload_build "${text}" ${rec:1}
+    LEX_PAYLOADS+=("${PAYLOAD}")
+    LEX_PAYLOAD_KINDS+=("${rec:0:1}")
+  done <<< "${out}"
+  return 0
+}
+
 extract_shell_c_payloads() {
+  PAYLOADS=()
   read_payload_scripts "$1" S
+  return 0
 }
 
 extract_eval_payloads() {
+  PAYLOADS=()
   read_payload_scripts "$1" E
+  return 0
 }
 
-# The scripts <text> hands to `sh -c` (kind S) or to `eval` (kind E), one per
-# line, read off the lexer's cscripts view: the word the shell passes, quotes
-# removed and escapes applied, and recursively the scripts inside those.
+# The scripts <text> hands to `sh -c` (kind S) or to `eval` (kind E), added to
+# PAYLOADS, read off the lexer's cscripts view: the word the shell passes,
+# quotes removed and escapes applied, and recursively the scripts inside those.
 #
 # The reader this replaced took the word after `-c` up to its first matching
 # quote. `sh -c "echo \"hi\"; pip install evil==1.0.0"` read that way is
@@ -2401,25 +2570,27 @@ extract_eval_payloads() {
 # cannot name is a failed reading. A head inside quoted text is data: the
 # shell does not split that text into words, and neither does this.
 read_payload_scripts() {
-  local text="$1" kind="$2" depth="${3:-0}" out rec
-  out=$(shell_lex "${text}" cscripts "safedeps:read_payload_words") || return 0
-  while IFS= read -r -d $'\035' rec; do
-    if [[ "${rec}" == "!" ]]; then
-      guard_mark_reading_failed
-      continue
-    fi
-    [[ "${rec}" == "${kind}"* ]] && printf '%s\035' "${rec:1}"
+  local text="$1" kind="$2" depth="${3:-0}" i
+  local -a texts=() kinds=()
+  lex_payloads "${text}" cscripts
+  texts=(${LEX_PAYLOADS[@]+"${LEX_PAYLOADS[@]}"})
+  kinds=(${LEX_PAYLOAD_KINDS[@]+"${LEX_PAYLOAD_KINDS[@]}"})
+  for (( i = 0; i < ${#texts[@]}; i++ )); do
+    [[ "${kinds[i]}" != "${kind}" ]] || PAYLOADS+=("${texts[i]}")
     # A script holding another: `sh -c 'sh -c "pip install ..."'`.
-    (( depth < 3 )) && read_payload_scripts "${rec:1}" "${kind}" $(( depth + 1 ))
-  done <<< "${out}"
+    if (( depth < 3 )); then read_payload_scripts "${texts[i]}" "${kind}" $(( depth + 1 )); fi
+  done
+  return 0
 }
 
+# The bodies of <text>'s substitutions as the lexer delimits them, into
+# PAYLOADS. The string scan this replaced cut a body at its first `)` (so a
+# case pattern ended it) and did not unescape or nest backticks, and it was a
+# second parser of the command.
 extract_command_substitution_payloads() {
-  # The bodies as the lexer delimits them, each ending in \035. The string
-  # scan this replaced cut a body at its first `)` (so a case pattern ended
-  # it) and did not unescape or nest backticks, and it was a second parser of
-  # the command.
-  shell_lex "$1" substs "safedeps:extract_command_substitution_payloads"
+  lex_payloads "$1" substs
+  PAYLOADS=(${LEX_PAYLOADS[@]+"${LEX_PAYLOADS[@]}"})
+  return 0
 }
 
 # Install text as the pipe checks search for it: a manager, then a verb
@@ -2593,33 +2764,49 @@ payload_pipes_install_text_to_shell() {
 # shell (verdict buri-20261005-145152). The recognize view drops a line
 # continuation itself.
 command_candidate_start_texts() {
-  local payload
   command_start_text "$1"
   printf '\n'
-  while IFS= read -r -d $'\035' payload; do
-    [[ "${payload}" =~ [^[:space:]] ]] || continue
-    command_start_text "${payload}"
-    printf '\n'
-  done < <(command_payload_raw_texts "$1")
+  command_payload_start_texts "$1"
+  return 0
 }
 
-# The payloads of a command as written: the text a `sh -c`, an `eval` or a
-# command substitution hands to a shell, each ending in \035.
+# The payloads of a command as written, into PAYLOADS: the text a `sh -c`, an
+# `eval` or a command substitution hands to a shell, and the payloads of each
+# payload, of every kind, to three levels. The readers used to follow a script
+# only into the scripts inside it, so the substitution in `sh -c 'x=$(pip
+# install ...)'` was read by no reader and the install passed with nothing
+# recorded, whatever byte the script held (every tree to v2.18.1). Each text is
+# lexed twice: once for its scripts, once for its substitutions.
 command_payload_raw_texts() {
-  extract_shell_c_payloads "$1"
-  extract_eval_payloads "$1"
-  extract_command_substitution_payloads "$1"
+  local -a queue=("$1") level=(0) found=()
+  local i=0 k t d p
+  while (( i < ${#queue[@]} )); do
+    t="${queue[i]}"; d="${level[i]}"; i=$(( i + 1 ))
+    for k in cscripts substs; do
+      lex_payloads "${t}" "${k}"
+      for p in ${LEX_PAYLOADS[@]+"${LEX_PAYLOADS[@]}"}; do
+        found+=("${p}")
+        if (( d < 3 )); then queue+=("${p}"); level+=("$(( d + 1 ))"); fi
+      done
+    done
+  done
+  PAYLOADS=(${found[@]+"${found[@]}"})
+  return 0
 }
 
 # The recognize view of each payload of <command> (command_payload_raw_texts),
 # one per line: the text an install recognizer reads for each.
 command_payload_start_texts() {
   local payload
-  while IFS= read -r -d $'\035' payload; do
+  local -a pls=()
+  command_payload_raw_texts "$1"
+  pls=(${PAYLOADS[@]+"${PAYLOADS[@]}"})
+  for payload in ${pls[@]+"${pls[@]}"}; do
     [[ "${payload}" =~ [^[:space:]] ]] || continue
     command_start_text "${payload}"
     printf '\n'
-  done < <(command_payload_raw_texts "$1")
+  done
+  return 0
 }
 
 command_is_injectable_npm_install() {
@@ -3270,14 +3457,19 @@ command_statements() {
       }
       sb_reset("word", ""); has = 0; dyn = 0
     }
+    # A byte of a word that is a separator of this record (\037 joins the
+    # words, \035 the fields) is \002 here, as in the pieces view: left as
+    # it was, a \037 the command wrote split one word into two for every
+    # reader of the words, and a \035 moved the fields after it.
+    function wb(ch) { return (ch == "\037" || ch == "\035") ? "\002" : ch }
     function words_of(from, to,   i, ch, q) {
       sb_reset("words", ""); wne = 0; sb_reset("word", ""); has = 0; dyn = 0; q = ""
       for (i = from; i <= to; i++) {
-        ch = r[i]
+        ch = wb(r[i])
         if (ch == "\001") continue
         if (q == "") {
           if (ch == " " || ch == "\t" || ch == "\n") { word_end(); continue }
-          if (ch == "\\") { if (i < to) { i++; if (r[i] != "\001") sb_add("word", r[i]); has = 1 }; continue }
+          if (ch == "\\") { if (i < to) { i++; if (r[i] != "\001") sb_add("word", wb(r[i])); has = 1 }; continue }
           if (ch == "\047") { q = "s"; has = 1; continue }
           if (ch == "\"") { q = "d"; has = 1; continue }
           if (ch == "$" || ch == "`" || ch == "*" || ch == "?" || ch == "[") dyn = 1
@@ -3287,7 +3479,7 @@ command_statements() {
         }
         if (q == "s") { if (ch == "\047") q = ""; else sb_add("word", ch); continue }
         if (ch == "\\" && i < to && (r[i + 1] == "$" || r[i + 1] == "`" || r[i + 1] == "\"" || r[i + 1] == "\\")) {
-          i++; sb_add("word", r[i]); continue
+          i++; sb_add("word", wb(r[i])); continue
         }
         if (ch == "\"") { q = ""; continue }
         if (ch == "$" || ch == "`") dyn = 1
@@ -4223,6 +4415,18 @@ resolve_reading_targets() {
       fi
       break
     done
+    # The record is cut at \035 and at newlines, and two of its fields carry
+    # values the command chose: npm's answer for where the install lands
+    # (`--prefix` names it) and the prose, which quotes command words. A
+    # directory holding a separator cannot be carried, so it reads as
+    # unknown, which the gate records; the prose carries a blank there.
+    # <fetch> is one line of JSON, which escapes both.
+    if [[ "${target}" == *$'\035'* || "${target}" == *$'\n'* ]]; then
+      target="?"
+      why="${why:+${why}; }npm named a directory whose name holds a byte this record cannot carry"
+    fi
+    why="${why//$'\035'/ }"
+    why="${why//$'\n'/ }"
     printf '%s\035%s\035%s\035%s\035%s\037%s\n' "${kind}" "${target}" "${why}" "${fetch}" "${stmt_recs[n]:-}" "${stmt_uwords[n]:-}"
   done <<< "${statements}"
   return 0
@@ -5361,6 +5565,7 @@ guard_effect_gate_reads() {
 guard_extract_pieces() {
   local cmd="$1" targets="$2"
   local kind fields payload pieces
+  local -a pls=()
 
   while IFS=$'\035' read -r kind _ _ _ fields; do
     [[ -n "${kind}" ]] || continue
@@ -5371,7 +5576,9 @@ guard_extract_pieces() {
     fi
   done <<< "${targets}"
 
-  while IFS= read -r -d $'\035' payload; do
+  command_payload_raw_texts "${cmd}"
+  pls=(${PAYLOADS[@]+"${PAYLOADS[@]}"})
+  for payload in ${pls[@]+"${pls[@]}"}; do
     [[ "${payload}" =~ [^[:space:]] ]] || continue
     pieces=$(shell_lex "${payload}" pieces "safedeps:payload_pieces") || pieces=""
     printf '%s\n' "${pieces}" | LC_ALL=C awk -F'\037' '
@@ -5379,7 +5586,8 @@ guard_extract_pieces() {
       $0 == "!" { bad = 1; next }
       NF >= 5 { printf "false\t%s\037%s\n", $5, $4 }
       END { exit bad ? 3 : 0 }' || guard_mark_reading_failed
-  done < <(command_payload_raw_texts "${cmd}")
+  done
+  return 0
 }
 
 # The ecosystem a manager installs from, in GUARD_ECO (empty for none).

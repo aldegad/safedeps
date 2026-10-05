@@ -123,8 +123,10 @@ PATHS = [
     ("Y06", "npm", "sh -c \"npm ci \\\"x\\\"\"", ["npm ci \"x\""]),
     ("Y07", "npm", "sh -c 'npm ci'\"\"", ["npm ci"]),
     ("Y08", "npm", "sh -c 'x=$(npm ci)'", ["x=$(npm ci)", "npm ci"]),
-    ("Y09", "pip", "sh -c 'sh -c \"x=\\$(pip install evil==6.6.6)\"'", []),
-    ("Y10", "pip", "eval 'echo \"$(pip install evil==6.6.6)\"'", []),
+    ("Y09", "pip", "sh -c 'sh -c \"x=\\$(pip install evil==6.6.6)\"'",
+     ["sh -c \"x=\\$(pip install evil==6.6.6)\"", "x=$(pip install evil==6.6.6)", "pip install evil==6.6.6"]),
+    ("Y10", "pip", "eval 'echo \"$(pip install evil==6.6.6)\"'",
+     ["echo \"$(pip install evil==6.6.6)\"", "pip install evil==6.6.6"]),
 ]
 
 

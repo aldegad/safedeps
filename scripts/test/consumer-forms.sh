@@ -3274,4 +3274,72 @@ for row in "${heredoc_body_rows[@]}"; do
 done
 pass "an install on the line after a heredoc body with live code in it is read: pip denied, npm rewritten, and the body itself data (Q01-Q15)"
 
+# --- A payload is read whole, whatever bytes it holds -------------------------
+# The lexer hands the readers the scripts a command passes to `sh -c` and
+# `eval` and the bodies of its substitutions. It used to print their bytes,
+# each payload ending in \035, and the readers cut at that byte: a \035 the
+# command wrote in a body or a script split one payload into two, each lexed
+# alone, and the install after it passed with nothing recorded (verdict
+# buri-20261005-181919, GS01-GS12; GS02, GS04-GS07 and GS12 were denied by
+# v2.18.1). The records are numbers now, and the reader cuts the text it holds.
+# The same rows hold two other payload paths that passed with nothing
+# recorded on every tree to v2.18.1: a substitution inside a script, which no
+# reader followed (C06, X03, X05, X15, Y08, Y09), and a $'...' escape the
+# script reader did not decode, since its table was loaded for one view
+# (X09-X12, Y03). Forms from scripts/measure/payload-boundary-forms.py and
+# Buri's verdict.
+gs=$'\035'
+payload_rows=(
+  "GS01|pip|sh -c 'echo \"${gs}\"; pip install evil==6.6.6'"
+  "GS02|pip|x=\$(echo \"${gs}\"; pip install evil==6.6.6)"
+  "GS03|pip|eval 'echo \"${gs}\"; pip install evil==6.6.6'"
+  "GS04|pip|x=\`echo \"${gs}\"; pip install evil==6.6.6\`"
+  "GS05|pip|cat <(echo \"${gs}\"; pip install evil==6.6.6)"
+  "GS06|pip|echo \"\$(echo '${gs}'; pip install evil==6.6.6)\""
+  "GS07|npm|x=\$(echo \"${gs}\"; npm install evil@6.6.6)"
+  "GS08|npm|sh -c 'echo \"${gs}\"; npm install evil@6.6.6'"
+  "GS09|pip|x=\$(echo \"a\"; pip install evil==6.6.6)"
+  "GS10|pip|echo \"${gs}\"; pip install evil==6.6.6"
+  "GS11|pip|bash -c 'printf \"%s\" \"${gs}\" && pip install evil==6.6.6'"
+  "GS12|pip|git log --format=\"\$(echo '${gs}'; pip install evil==6.6.6)\""
+  "C04|pip|sh -c \$'echo \"\\x1d\"; pip install evil==6.6.6'"
+  "C05|npm|eval \$'echo \\x1d; npm install evil@6.6.6'"
+  "C09|pip|sh -c \"sh -c 'echo ${gs}; pip install evil==6.6.6'\""
+  "S11|npm|x=\$(echo \"a${gs}b\" && npm install evil@6.6.6)"
+  "S13|pip|echo \`echo '${gs}'\` \$(pip install evil==6.6.6)"
+  "C06|pip|sh -c 'x=\$(echo \"${gs}\"; pip install evil==6.6.6)'"
+  "C06a|pip|sh -c 'x=\$(echo \"a\"; pip install evil==6.6.6)'"
+  "X03|pip|sh -c 'x=\$(pip install evil==6.6.6)'"
+  "X05|pip|sh -c 'echo \$(pip install evil==6.6.6)'"
+  "X09|pip|sh -c \$'echo a\\npip install evil==6.6.6'"
+  "X10|pip|eval \$'echo a\\npip install evil==6.6.6'"
+  "X11|pip|sh -c \$'pip\\tinstall evil==6.6.6'"
+  "X12|npm|sh -c \$'echo a\\nnpm install evil@6.6.6'"
+  "X15|npm|sh -c 'x=\$(npm install evil@6.6.6)'"
+  "Y09|pip|sh -c 'sh -c \"x=\\\$(pip install evil==6.6.6)\"'"
+)
+for row in "${payload_rows[@]}"; do
+  id="${row%%|*}"; rest="${row#*|}"; form="${rest#*|}"
+  expect_not_approved "${id}, an install in a payload the shell runs," "${form}"
+done
+# npm ci names no package, so the gate lets it through and the inert rewrite
+# reads the payload: the flag goes inside it, where npm reads it.
+rewrite_holds "x=\$(echo \"${gs}\"; npm ci)" "x=\$(echo \"${gs}\"; npm ci --ignore-scripts)" \
+  || fail "Y04: an npm ci beside a \\035 in a substitution body is rewritten inside it (got: $(gate_rewrite "x=\$(echo \"${gs}\"; npm ci)"))"
+rewrite_holds "sh -c 'echo \"${gs}\"; npm ci'" "sh -c 'echo \"${gs}\"; npm ci --ignore-scripts'" \
+  || fail "Y05: an npm ci beside a \\035 in a script is rewritten inside it (got: $(gate_rewrite "sh -c 'echo \"${gs}\"; npm ci'"))"
+rewrite_holds "sh -c 'x=\$(npm ci)'" "sh -c 'x=\$(npm ci --ignore-scripts)'" \
+  || fail "Y08: an npm ci in a substitution inside a script is rewritten inside it (got: $(gate_rewrite "sh -c 'x=\$(npm ci)'"))"
+# The rewrite cannot place a flag inside a $'...' script, so it says so: a
+# recorded downgrade, never a command reported inert (inert_payload_spans).
+y03_safe=$(mktemp -d "${tmp_root}/safe.XXXXXX")
+y03_out=$(jq -nc --arg c $'bash -c $\'echo a\\nnpm ci\'' --arg cwd "${project_dir}" \
+  '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
+  HOME="${tmp_root}/home" SAFEDEPS_HOME="${y03_safe}" scripts/safedeps-pre-guard.sh 2>/dev/null)
+if [[ -n "${y03_out}" ]] || ! grep -qiE 'downgrade|unread|could not read|could not make' "${y03_safe}/advisory.log" 2>/dev/null; then
+  fail "Y03: an npm ci in a \$'...' script is a recorded downgrade (got: ${y03_out:-pass}, advisory: $(head -3 "${y03_safe}/advisory.log" 2>/dev/null))"
+fi
+expect_pass "DT04, install text inside quotes beside a \\035, is data" "echo \"${gs} pip install evil==6.6.6\""
+pass "a payload is read whole, whatever bytes it holds: ${#payload_rows[@]} forms denied as installs, three npm ci rewritten inside their payload, one recorded downgrade"
+
 printf 'consumer-forms passed\n'
