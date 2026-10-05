@@ -30,7 +30,10 @@
 # The counts are counts of forms, not of how often anyone writes them.
 #
 # usage: scripts/measure/inert-downgrade-grid.sh [--jobs N] [--out DIR] [<base ref> [<head ref>]]
+#        scripts/measure/inert-downgrade-grid.sh --forms-only DIR
 #
+# --forms-only writes the forms, as <id>.cmd and <id>.tag, into DIR and judges
+# nothing: scripts/measure/inert-record-invariant.sh reads them from there.
 # The defaults are bb0787d (v2.17.2, published) and HEAD. A ref is archived
 # with `git archive`; `.` is the working tree as it is, uncommitted changes
 # included. scripts/measure/inert-downgrade-rule.py reads the table this
@@ -39,11 +42,12 @@
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
-jobs=2 out=""
+jobs=2 out="" forms_only=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --jobs) jobs="$2"; shift 2 ;;
     --out) out="$2"; shift 2 ;;
+    --forms-only) forms_only="$2"; shift 2 ;;
     -h|--help) awk 'NR > 3 && /^#/ { sub(/^# ?/, ""); print; next } NR > 3 { exit }' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) break ;;
   esac
@@ -51,33 +55,9 @@ done
 base_ref="${1:-bb0787d}" head_ref="${2:-HEAD}"
 case "${jobs}" in 1|2) ;; *) printf 'inert-downgrade-grid: --jobs is 1 or 2\n' >&2; exit 2 ;; esac
 
-W="${out:-$(mktemp -d "${TMPDIR:-/tmp}/inert-downgrade-grid.XXXXXX")}"
-mkdir -p "${W}/stub" "${W}/forms" "${W}/home" "${W}/run" "${W}/tree/base" "${W}/tree/head" "${W}/project"
+W="${forms_only:-${out:-$(mktemp -d "${TMPDIR:-/tmp}/inert-downgrade-grid.XXXXXX")}}"
+mkdir -p "${W}/forms"
 W=$(cd "${W}" && pwd)
-
-archive() { # <ref> <dir>
-  if [[ "$1" == . ]]; then
-    (cd "${ROOT_DIR}" && git ls-files -z --cached --others --exclude-standard | xargs -0 tar -cf -) | tar -xf - -C "$2"
-  else
-    (cd "${ROOT_DIR}" && git archive "$1") | tar -xf - -C "$2"
-  fi
-}
-archive "${base_ref}" "${W}/tree/base"
-archive "${head_ref}" "${W}/tree/head"
-{
-  printf 'base\t%s\t%s\n' "${base_ref}" "$(cd "${ROOT_DIR}" && git rev-parse --short "${base_ref/#./HEAD}")"
-  printf 'head\t%s\t%s%s\n' "${head_ref}" "$(cd "${ROOT_DIR}" && git rev-parse --short "${head_ref/#./HEAD}")" \
-    "$([[ "${head_ref}" == . && -n "$(cd "${ROOT_DIR}" && git status --porcelain)" ]] && printf '+changes')"
-  for s in bash zsh sh dash ksh; do printf 'shell\t%s\t%s\n' "${s}" "$(command -v "${s}" || printf missing)"; done
-} > "${W}/refs.tsv"
-
-printf '{"name":"p","version":"1.0.0","dependencies":{}}\n' > "${W}/project/package.json"
-printf '{"name":"p","version":"1.0.0","lockfileVersion":3,"requires":true,"packages":{"":{"name":"p","version":"1.0.0"}}}\n' > "${W}/project/package-lock.json"
-cat > "${W}/stub/npm" <<'EOF'
-#!/bin/sh
-{ printf 'CALL'; for a in "$@"; do printf '\t%s' "$a"; done; printf '\n'; } >> "$NPMLOG"
-EOF
-chmod +x "${W}/stub/npm"
 
 # ---- forms --------------------------------------------------------------
 n=0 fset=""
@@ -193,6 +173,37 @@ add "npmcase|subst-dq"           'npm install x; sh -c "cd $(pwd) && NPM ci"'
 add "npmcase|sq"                 "npm install x; sh -c 'true && NPM ci'"
 add "npmcase|esc-dq-alone"       'true; sh -c "cd \"d\" && NPM ci"'
 add "ksh|sq-arg"                 "true; ksh -c 'npm ci x'"
+
+if [[ -n "${forms_only}" ]]; then
+  # The forms alone, for a reader that judges them its own way.
+  mv "${W}"/forms/* "${W}/" && rmdir "${W}/forms"
+  exit 0
+fi
+mkdir -p "${W}/stub" "${W}/home" "${W}/run" "${W}/tree/base" "${W}/tree/head" "${W}/project"
+
+archive() { # <ref> <dir>
+  if [[ "$1" == . ]]; then
+    (cd "${ROOT_DIR}" && git ls-files -z --cached --others --exclude-standard | xargs -0 tar -cf -) | tar -xf - -C "$2"
+  else
+    (cd "${ROOT_DIR}" && git archive "$1") | tar -xf - -C "$2"
+  fi
+}
+archive "${base_ref}" "${W}/tree/base"
+archive "${head_ref}" "${W}/tree/head"
+{
+  printf 'base\t%s\t%s\n' "${base_ref}" "$(cd "${ROOT_DIR}" && git rev-parse --short "${base_ref/#./HEAD}")"
+  printf 'head\t%s\t%s%s\n' "${head_ref}" "$(cd "${ROOT_DIR}" && git rev-parse --short "${head_ref/#./HEAD}")" \
+    "$([[ "${head_ref}" == . && -n "$(cd "${ROOT_DIR}" && git status --porcelain)" ]] && printf '+changes')"
+  for s in bash zsh sh dash ksh; do printf 'shell\t%s\t%s\n' "${s}" "$(command -v "${s}" || printf missing)"; done
+} > "${W}/refs.tsv"
+
+printf '{"name":"p","version":"1.0.0","dependencies":{}}\n' > "${W}/project/package.json"
+printf '{"name":"p","version":"1.0.0","lockfileVersion":3,"requires":true,"packages":{"":{"name":"p","version":"1.0.0"}}}\n' > "${W}/project/package-lock.json"
+cat > "${W}/stub/npm" <<'EOF'
+#!/bin/sh
+{ printf 'CALL'; for a in "$@"; do printf '\t%s' "$a"; done; printf '\n'; } >> "$NPMLOG"
+EOF
+chmod +x "${W}/stub/npm"
 
 # ---- judge one form under one tree --------------------------------------
 reads_flag() { # stdin: CALL lines; Y if every call reads ignore-scripts true, N if one does not, - if none ran
