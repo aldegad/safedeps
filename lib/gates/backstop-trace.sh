@@ -9,17 +9,12 @@
 # which the post hook counts as a trace: the backstop then judges the command
 # as it did before entries existed.
 
-# The entry of one tool call: <dir>/id-<tool_use_id>, without an extension.
-# The tool_use_id is the one field both hooks of a call receive and no other
-# call does (Claude Code and Codex both send it top-level in PreToolUse and
-# PostToolUse). A call whose input names none, or names one that is not a plain
-# word, gets no entry: nothing else ties the pre-guard's entry to this call's
-# post hook rather than another's.
-safedeps_backstop_entry_base() {
-  local dir="$1" id="$2"
-  [[ "${id}" =~ ^[A-Za-z0-9_-]{1,128}$ ]] || return 1
-  printf '%s/id-%s' "${dir}" "${id}"
-}
+# The entry of one tool call is <dir>/id-<tool_use_id> (safedeps_call_base),
+# without an extension. A call whose input names no tool_use_id, or names one
+# that is not a plain word, gets no entry: nothing else ties the pre-guard's
+# entry to this call's post hook rather than another's.
+# shellcheck source=./call-id.sh
+source "${BASH_SOURCE[0]%/*}/call-id.sh"
 
 # stat prints a time at the resolution the filesystem keeps only with its own
 # flags: GNU `-c %y`/`%z`, BSD `-f %Fm`/`%Fc`. GNU goes first, because on Linux

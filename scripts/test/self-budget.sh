@@ -787,4 +787,16 @@ guard "npm install left-pad@1.3.0" 20 16
 if grep -q 'UNDECIDED' <<< "${GUARD_REASON}"; then fail "engaged in-budget install is judged, not timed out"; fi
 pass "engaged but in-budget install is judged normally, not timed out"
 
+# A 64KB command with an install, under the default budget, gets the verdict
+# it gets at 100 bytes. On macOS (bash 3.2 and the BWK awk) the judgment used
+# to cost the square of a long word: 37.5s for this shape with the deadline
+# off on an M1 (v2.18.0), so the deadline answered UNDECIDED in its place.
+# It is linear now; the row turns red if a quadratic step comes back on
+# macOS, where the CI job runs it. On Linux it was fast either way.
+guard "echo $(pad 65490) ; npm install left-pad@1.3.0" 20
+[[ "${GUARD_DECISION}" == "deny" ]] || fail "a 64KB install is judged inside the default budget (got: ${GUARD_DECISION})"
+if grep -q 'UNDECIDED' <<< "${GUARD_REASON}"; then fail "a 64KB install is judged, not timed out (took ${GUARD_ELAPSED}s)"; fi
+printf '# note - 64KB install judged in %ss\n' "${GUARD_ELAPSED}"
+pass "a 64KB install is judged inside the default budget, not answered UNDECIDED"
+
 printf 'self-budget battery: all checks passed\n'

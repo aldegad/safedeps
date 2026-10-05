@@ -12,6 +12,11 @@
 #
 #   scan   command_scan_text alone, extracted from the guard. This is the
 #          function the size curve was about.
+#   views  every view of the lexer (shell_lex) once, in the bash reading, on
+#          the loud input. The scan view is one of twelve, and the readers of
+#          the others build words and lines out of the bytes: the cscripts view
+#          cost 12.9s at 64KB on an M1 while the scan stayed at 0.2s, so a
+#          scan column alone said "linear" over a gate that was not.
 #   gate   the whole hook, end to end, through the real entry path. This is
 #          what the runtime's timeout actually applies to, and it includes the
 #          per-call cost of everything else the guard does.
@@ -96,6 +101,19 @@ time_scan() {
   printf '%s' "${best}"
 }
 
+LEX_VIEWS="scan code live noredir pieces cscripts stmts substs unprefixed unprefixed-lines joined shell-bodies"
+time_views() {
+  local input="$1" s e best="" i t v
+  for ((i = 0; i < REPS; i++)); do
+    s=$(now)
+    for v in ${LEX_VIEWS}; do shell_lex "${input}" "${v}" "safedeps:scan-cost" > /dev/null; done
+    e=$(now)
+    t=$(elapsed "${s}" "${e}")
+    if [[ -z "${best}" ]] || python3 -c "import sys; sys.exit(0 if ${t} < ${best} else 1)"; then best="${t}"; fi
+  done
+  printf '%s' "${best}"
+}
+
 time_gate() {
   local input="$1" s e best="" i t safe payload
   payload="${WORK}/payload.json"
@@ -120,16 +138,17 @@ printf 'sees. With the deadline on, an over-budget command is denied UNDECIDED i
 printf 'about the budget. Quoting a gate number as "how long the hook takes" is\n'
 printf 'wrong, and it was misread that way within an hour of this file existing.\n'
 printf 'bash %s, awk %s\n\n' "${BASH_VERSION}" "$(awk --version 2>/dev/null | head -1 || echo 'BWK awk (no --version)')"
-printf '%-10s %-12s %-12s %-12s %-12s %-12s\n' 'size' 'scan quiet' 'scan loud' 'gate quiet' 'gate loud' 'gate split'
+printf '%-10s %-12s %-12s %-12s %-12s %-12s %-12s\n' 'size' 'scan quiet' 'scan loud' 'views loud' 'gate quiet' 'gate loud' 'gate split'
 
 for size in "${SIZES[@]}"; do
   quiet=$(make_input "${size}" quiet)
   loud=$(make_input "${size}" loud)
   split=$(make_input "${size}" split)
-  printf '%-10s %-12s %-12s %-12s %-12s %-12s\n' \
+  printf '%-10s %-12s %-12s %-12s %-12s %-12s %-12s\n' \
     "${size}B" \
     "$(time_scan "${quiet}")s" \
     "$(time_scan "${loud}")s" \
+    "$(time_views "${loud}")s" \
     "$(time_gate "${quiet}")s" \
     "$(time_gate "${loud}")s" \
     "$(time_gate "${split}")s"

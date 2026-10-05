@@ -3,7 +3,7 @@
 # time and all at once, and check that no verdict gets weaker.
 #
 # The pre-guard reads a command through awk (the scanner, the line joiner, the
-# blanking pass beside a visible install). A failed awk returns empty text, and
+# payload readers). A failed awk returns empty text, and
 # empty text reads as "no install", so every reading is a place where a failure
 # could turn a deny into a pass. The guard's answer to that is one gate that
 # every non-deny path crosses after its last reading: if any reading failed, a
@@ -15,13 +15,20 @@
 # For each command it first runs the guard with nothing failing and counts the
 # readings (N). Then it runs it again with the K-th reading failing, for every
 # K in 1..N, and with readings K..N failing, and with every reading of one kind
-# failing, and with every awk, every grep or every sed failing. Each run is compared with the clean one
-# on (decision, finding-or-UNDECIDED, updatedInput, pending project_dir).
+# failing, and with every awk, every grep or every sed failing. grep and sed get
+# a K-th mode of their own: a counting run finds how many times the guard calls
+# each (G and S), and then each call fails alone, K in 1..G and 1..S. Each run
+# is compared with the clean one on (decision, finding-or-UNDECIDED,
+# updatedInput, pending record: project_dir, whether an npm trace was wanted,
+# npm_unattributable).
 #
 #   same        identical to the clean run
 #   undecided   denied as UNDECIDED -- the gate did its job
-#   weakened    anything that lets more through: a deny became allow/pass, the
-#               inert rewrite was lost or moved, pending state points elsewhere
+#   weakened    any other difference read from a failed call: a deny became
+#               allow/pass, the inert rewrite was lost or moved, the pending
+#               record changed. A changed record counts in either direction,
+#               because the census cannot tell which one the PostToolUse hook
+#               is better off with; only the gate's UNDECIDED settles a failure.
 #   mislabeled  a deny that claims a finding, read from a failed reading
 #   error       the hook exited non-zero
 #
@@ -55,7 +62,9 @@
 #
 # Every payload is judged, never executed. Runs happen with PATH led by an awk
 # shim that fails on cue; the guard keys each reading with a marker line in its
-# awk program (`safedeps:<function>`), and the shim reads that marker.
+# awk program (`safedeps:<function>`), and the shim reads that marker. grep and
+# sed carry no marker, so their shims count calls instead: the K-th call is the
+# K-th grep (or sed) the run makes, whatever site makes it.
 #
 # Usage:
 #   scripts/measure/scan-failure-census.sh [--quick] [--jobs N] [--variants "claude codex padded"]
@@ -73,7 +82,14 @@
 #                rest.
 #
 # --quick also skips the K-onward runs (the full census keeps them), so npm
-# test pays for one failing run per reading rather than two.
+# test pays for one failing run per reading rather than two. It keeps the K-th
+# sed runs: sed-all fails the first judgment sed a command reaches and that
+# mark covers every later one, so only a sed failing alone shows whether a
+# later site marks its own failure. It skips the K-th grep runs, which the
+# full census keeps: they were 1,126 of the quick corpus's 5,083 failing runs,
+# and npm test is already long.
+# The two grep sites they found (0240b78) are held by rows in
+# scripts/test/scan-contract.sh that fail each of those calls alone.
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
@@ -94,10 +110,14 @@ if [[ "${1:-}" == "--run" ]]; then
   [[ "${variant}" != "approved" ]] || cp -R "${WORK}/approved-home" "${T}/h/safe"
   codex=""
   [[ "${variant}" == "codex" ]] && codex=1
-  # The grep and sed shims are on PATH only in the mode that fails them; in
-  # every other mode they would only exec the real tool (see setup).
+  # The grep and sed shims are on PATH only in the modes that count or fail
+  # them; in every other mode they would only exec the real tool (see setup).
   bin="${WORK}/bin"
-  [[ ! -d "${WORK}/bin-${mode}" ]] || bin="${WORK}/bin-${mode}"
+  case "${mode}" in
+    grep-all|grep-k) bin="${WORK}/bin-grep" ;;
+    sed-all|sed-k) bin="${WORK}/bin-sed" ;;
+    count) bin="${WORK}/bin-count" ;;
+  esac
   rc=0
   out=$(jq -nc --rawfile c "${WORK}/cases/${n}.cmd" --arg cwd "${T}/p" --arg codex "${codex}" \
       '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd} + (if $codex != "" then {turn_id:"t1",model:"m"} else {} end)' |
@@ -113,10 +133,17 @@ if [[ "${1:-}" == "--run" ]]; then
       if [[ "${reason}" == *UNDECIDED* ]]; then class="undecided"; else class="finding"; fi
     fi
   fi
+  # The pending record is compared on what the guard read from the command:
+  # the directory, whether a trace was wanted, and why the trace cannot answer
+  # for every npm install. The last one was left out until a failed sed could
+  # change it unseen: a sed that cannot read an inert head between two npm
+  # installs turns the shared trace into an UNGATED one, and a run that changed
+  # only that compared as the same.
   pending="-"
   for f in "${T}/h/safe/pending"/*.json; do
     [[ -f "${f}" ]] || continue
-    pending=$(jq -r '.project_dir' "${f}" 2>/dev/null || printf 'unreadable')
+    pending=$(jq -r '[.project_dir, (.npm_trace | type), (.npm_unattributable // "")] | join(" ; ")' "${f}" 2>/dev/null \
+      || printf 'unreadable')
   done
   # Every counter is a tally file with one line per event (see the shim).
   tally_count() {
@@ -130,6 +157,8 @@ if [[ "${1:-}" == "--run" ]]; then
   failed=$(tally_count "${T}/st/failed")
   unmarked=$(tally_count "${T}/st/unmarked")
   unlisted=$(tally_count "${T}/st/unlisted")
+  grep_calls=$(tally_count "${T}/st/grep-calls")
+  sed_calls=$(tally_count "${T}/st/sed-calls")
   [[ ! -s "${T}/st/strays" ]] || cp "${T}/st/strays" "${WORK}/strays/${n}.${mode}.${k}"
   # Paths under the run's own temp root differ every run; compare them as T.
   # The guard resolves the project directory, so the root appears in its
@@ -140,9 +169,9 @@ if [[ "${1:-}" == "--run" ]]; then
   pending="${pending//${T_physical}/T}"
   pending="${pending//${T}/T}"
   updated="${updated//$'\n'/\\n}"
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "${n}" "${mode}" "${k}" "${rc}" "${decision}" "${class}" "${updated}" "${pending}" "${reads}" "${after}" "${failed}" \
-    "${unmarked}" "${unlisted}" \
+    "${unmarked}" "${unlisted}" "${grep_calls}" "${sed_calls}" \
     > "${WORK}/results/${n}.${mode}.${k}"
   rm -rf "${T}"
   exit 0
@@ -208,7 +237,6 @@ kind=""
 case "\$*" in
   *"safedeps:command_scan_text"*) kind=scan ;;
   *"safedeps:join_line_continuations"*) kind=join ;;
-  *"safedeps:install_managers_blanked"*) kind=blank ;;
   *"safedeps:strip_heredoc_bodies"*) kind=strip ;;
   *"safedeps:command_reads"*) kind=reads ;;
   *"safedeps:inert_rewrite_in_place"*) kind=inert ;;
@@ -250,26 +278,56 @@ exec "\${real}" "\$@"
 SHIM
 chmod +x "${WORK}/bin/awk"
 
-# grep and sed sit on the judgment path too. These fail every call in their
-# mode; a reading is not counted by them, because the K-th-reading runs are
-# about awk. Each lives in a directory of its own beside the awk shim, and a
-# run puts that directory on PATH only in the shim's mode. In any other mode
-# the shim would only exec the real tool, at the price of a bash start on
-# every grep and sed the guard runs.
+# grep and sed sit on the judgment path too, and carry no marker, so their shim
+# counts calls rather than readings: the count mode tallies every call, the
+# K-th mode fails the K-th call alone, and the all mode fails every call. The
+# ordinal is taken the way the awk shim takes it, from a tally file of tokens.
+# A call is counted only in the count and K-th modes; the awk-reading K runs
+# are numbered by awk calls alone.
+#
+# sed-all was the only sed mode for a release, and it could not see one site:
+# the first judgment sed a command reaches (normalize_install_text) marks its
+# failure, and that mark covers every later sed, so a later site whose own mark
+# was deleted still read as UNDECIDED (raised in review of v2.18.0). Failing
+# one call at a time lets each site answer for itself. Measured on the sed that
+# reads an inert head between two npm installs: with its mark deleted, the K-th
+# sed run of the two-installs row is weakened (the pending attribution changes
+# and nothing is said), where the sed-all run of the same row is UNDECIDED.
+#
+# Each shim lives in a directory of its own beside the awk shim, and a run puts
+# that directory on PATH only in a mode that needs it; the count mode gets both.
+# In any other mode the shim would only exec the real tool, at the price of a
+# bash start on every grep and sed the guard runs.
+mkdir -p "${WORK}/bin-count"
+ln -s "${WORK}/bin/awk" "${WORK}/bin-count/awk"
 for tool in grep sed; do
   real_tool=$(command -v "${tool}")
-  mkdir -p "${WORK}/bin-${tool}-all"
-  ln -s "${WORK}/bin/awk" "${WORK}/bin-${tool}-all/awk"
-  cat > "${WORK}/bin-${tool}-all/${tool}" <<SHIM
+  mkdir -p "${WORK}/bin-${tool}"
+  ln -s "${WORK}/bin/awk" "${WORK}/bin-${tool}/awk"
+  cat > "${WORK}/bin-${tool}/${tool}" <<SHIM
 #!${shim_bash}
-if [[ -n "\${CENSUS_STATE:-}" && "\${CENSUS_MODE:-none}" == "${tool}-all" ]]; then
-  # Counted like the awk shim's failures, so the idle-mode check sees them.
-  printf 'x\n' >> "\${CENSUS_STATE}/failed"
-  exit 2
-fi
+state="\${CENSUS_STATE:-}"
+[[ -n "\${state}" ]] || exec '${real_tool}' "\$@"
+# Failures are counted like the awk shim's, so the idle-mode check sees them.
+case "\${CENSUS_MODE:-none}" in
+  ${tool}-all) printf 'x\n' >> "\${state}/failed"; exit 2 ;;
+  ${tool}-k|count)
+    token="\$\$.\${RANDOM}\${RANDOM}"
+    printf '%s\n' "\${token}" >> "\${state}/${tool}-calls"
+    if [[ "\${CENSUS_MODE}" == "${tool}-k" ]]; then
+      n=0
+      while IFS= read -r line; do
+        n=\$(( n + 1 ))
+        [[ "\${line}" != "\${token}" ]] || break
+      done < "\${state}/${tool}-calls"
+      [[ "\${n}" != "\${CENSUS_K}" ]] || { printf 'x\n' >> "\${state}/failed"; exit 2; }
+    fi
+    ;;
+esac
 exec '${real_tool}' "\$@"
 SHIM
-  chmod +x "${WORK}/bin-${tool}-all/${tool}"
+  chmod +x "${WORK}/bin-${tool}/${tool}"
+  ln -s "${WORK}/bin-${tool}/${tool}" "${WORK}/bin-count/${tool}"
 done
 
 # --- the approved ledger -------------------------------------------------------
@@ -330,6 +388,12 @@ printf '  cases %d (%s), jobs %d, %s\n' "${case_count}" "$([[ "${QUICK}" == "tru
 # --- clean runs -----------------------------------------------------------------
 seq 1 "${case_count}" | xargs -P "${JOBS}" -I{} bash "${SELF}" --run "${WORK}" {} none 0
 
+# --- counting runs --------------------------------------------------------------
+# A second clean run with the grep and sed shims counting. It is kept apart
+# from the clean run so the baseline every failing run is compared with pays
+# for no shim but awk's.
+seq 1 "${case_count}" | xargs -P "${JOBS}" -I{} bash "${SELF}" --run "${WORK}" {} count 0
+
 # --- failing runs ---------------------------------------------------------------
 : > "${WORK}/jobs"
 for n in $(seq 1 "${case_count}"); do
@@ -338,11 +402,21 @@ for n in $(seq 1 "${case_count}"); do
     printf '%s k %s\n' "${n}" "${k}" >> "${WORK}/jobs"
     [[ "${QUICK}" == "true" ]] || printf '%s from-k %s\n' "${n}" "${k}" >> "${WORK}/jobs"
   done
-  for mode in scan-all join-all strip-all reads-all inert-all offsets-all norm-all subst-all blank-all stmts-all npmrc-all pieces-all payload-all paywords-all payspans-all awk-all grep-all sed-all; do
+  if [[ "${QUICK}" != "true" ]]; then
+    for k in $(seq 1 "$(cut -f14 "${WORK}/results/${n}.count.0")"); do
+      printf '%s grep-k %s\n' "${n}" "${k}" >> "${WORK}/jobs"
+    done
+  fi
+  for k in $(seq 1 "$(cut -f15 "${WORK}/results/${n}.count.0")"); do
+    printf '%s sed-k %s\n' "${n}" "${k}" >> "${WORK}/jobs"
+  done
+  for mode in scan-all join-all strip-all reads-all inert-all offsets-all norm-all subst-all stmts-all npmrc-all pieces-all payload-all paywords-all payspans-all awk-all grep-all sed-all; do
     printf '%s %s 0\n' "${n}" "${mode}" >> "${WORK}/jobs"
   done
 done
-printf '  failing runs %d\n' "$(wc -l < "${WORK}/jobs" | tr -d ' ')"
+# The K-th runs by tool, so the price of each mode can be read off a log.
+printf '  failing runs %d (K-th awk %d, grep %d, sed %d)\n' "$(wc -l < "${WORK}/jobs" | tr -d ' ')" \
+  "$(grep -c ' k ' "${WORK}/jobs" || true)" "$(grep -c ' grep-k ' "${WORK}/jobs" || true)" "$(grep -c ' sed-k ' "${WORK}/jobs" || true)"
 xargs -P "${JOBS}" -L 1 bash "${SELF}" --run "${WORK}" < "${WORK}/jobs"
 
 # --- verdict --------------------------------------------------------------------
@@ -366,6 +440,8 @@ cat "${WORK}/results"/* | awk -F'\t' -v cases="${WORK}/cases" -v strays="${WORK}
         }
         continue
       }
+      # The counting run only numbers the grep and sed calls.
+      if (mode == "count") continue
       hits[mode] += f[11]
       split(base[n], b, "\t")
       if (rc != 0) verdict = "error"

@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // safedeps cross-engine installer.
 // Registers the safedeps skill + PreToolUse/PostToolUse hooks for both
-// Claude Code (~/.claude) and Codex CLI (~/.codex).
+// Claude Code (~/.claude) and Codex CLI (~/.codex), and on Claude Code the
+// post hook for PostToolUseFailure too.
 //
 // Idempotent: running twice leaves state unchanged.
 // Backup-before-write: every JSON config file is copied to .bak before edit.
@@ -33,6 +34,23 @@ const REPO_ENTRY_HOOK = join(REPO_ROOT, "scripts", ENTRY_HOOK_NAME);
 const CLI_BIN = join(REPO_ROOT, "bin", "safedeps");
 const PRE_HOOK_TIMEOUT_SECONDS = 30;
 const POST_HOOK_TIMEOUT_SECONDS = 30;
+// The events the post hook is registered for, by engine. Claude Code runs
+// PostToolUse only after a tool call succeeds, and PostToolUseFailure after a
+// Bash call that ran and failed, with the same tool_name, tool_input and
+// tool_use_id (source: https://code.claude.com/docs/en/hooks, "PostToolUse:
+// Runs immediately after a tool completes successfully", "PostToolUseFailure:
+// Runs when a tool that started executing fails", verified 2026-10-04).
+// Without it a failed npm install was never judged, and its record stayed for
+// the next call of the command. Codex runs PostToolUse after a Bash command
+// that exits non-zero too, and documents no PostToolUseFailure (source:
+// https://learn.chatgpt.com/docs/hooks, verified 2026-10-04).
+const POST_EVENTS_BY_ENGINE = {
+  claude: ["PostToolUse", "PostToolUseFailure"],
+  codex: ["PostToolUse"],
+};
+// Every event a post hook was ever registered for, so --uninstall and the
+// legacy cleanup reach all of them on either engine.
+const ALL_POST_EVENTS = ["PostToolUse", "PostToolUseFailure"];
 
 const args = new Set(process.argv.slice(2));
 const UNINSTALL = args.has("--uninstall");
@@ -174,7 +192,7 @@ function pruneAllSafedepsHooks(config, eventName, hookName) {
   return changed;
 }
 
-function installInEngine({ engineRoot, configPath, label }) {
+function installInEngine({ engineRoot, configPath, label, engine }) {
   if (!existsSync(engineRoot)) {
     warn(`skip ${label} (${engineRoot} not present)`);
     return;
@@ -189,7 +207,10 @@ function installInEngine({ engineRoot, configPath, label }) {
     if (existsSync(configPath)) {
       const cfg = readJson(configPath);
       const pre = removeHook(cfg, "PreToolUse", preCommand) || pruneAllSafedepsHooks(cfg, "PreToolUse", PRE_HOOK_NAME);
-      const post = removeHook(cfg, "PostToolUse", postCommand) || pruneAllSafedepsHooks(cfg, "PostToolUse", POST_HOOK_NAME);
+      let post = false;
+      for (const event of ALL_POST_EVENTS) {
+        post = (removeHook(cfg, event, postCommand) || pruneAllSafedepsHooks(cfg, event, POST_HOOK_NAME)) || post;
+      }
       if (pre || post) {
         writeJsonWithBackup(configPath, cfg);
         log(`patched ${configPath} (removed safedeps hooks)`);
@@ -203,10 +224,22 @@ function installInEngine({ engineRoot, configPath, label }) {
   ensureSymlink(REPO_ROOT, skillLink);
 
   const cfg = readJson(configPath);
+  const postEvents = POST_EVENTS_BY_ENGINE[engine];
   const legacyPreRemoved = pruneNonCanonicalSafedepsHooks(cfg, "PreToolUse", preCommand, PRE_HOOK_NAME);
-  const legacyPostRemoved = pruneNonCanonicalSafedepsHooks(cfg, "PostToolUse", postCommand, POST_HOOK_NAME);
+  let legacyPostRemoved = false;
+  for (const event of ALL_POST_EVENTS) {
+    // An event this engine does not get is pruned whole, canonical command
+    // included: a post hook there would be a registration nothing documents.
+    const removed = postEvents.includes(event)
+      ? pruneNonCanonicalSafedepsHooks(cfg, event, postCommand, POST_HOOK_NAME)
+      : pruneAllSafedepsHooks(cfg, event, POST_HOOK_NAME);
+    legacyPostRemoved = removed || legacyPostRemoved;
+  }
   const preAdded = ensureHook(cfg, "PreToolUse", preCommand, PRE_HOOK_TIMEOUT_SECONDS);
-  const postAdded = ensureHook(cfg, "PostToolUse", postCommand, POST_HOOK_TIMEOUT_SECONDS);
+  let postAdded = false;
+  for (const event of postEvents) {
+    postAdded = ensureHook(cfg, event, postCommand, POST_HOOK_TIMEOUT_SECONDS) || postAdded;
+  }
   if (legacyPreRemoved || legacyPostRemoved || preAdded || postAdded) {
     writeJsonWithBackup(configPath, cfg);
     log(`patched ${configPath} (pre=${preAdded ? "added" : "ok"}, post=${postAdded ? "added" : "ok"}, legacy=${legacyPreRemoved || legacyPostRemoved ? "removed" : "ok"})`);
@@ -290,11 +323,13 @@ function main() {
     engineRoot: join(HOME, ".claude"),
     configPath: join(HOME, ".claude", "settings.json"),
     label: "Claude Code",
+    engine: "claude",
   });
   installInEngine({
     engineRoot: join(HOME, ".codex"),
     configPath: join(HOME, ".codex", "hooks.json"),
     label: "Codex CLI",
+    engine: "codex",
   });
 
   maybeLinkBin();

@@ -1,0 +1,152 @@
+name: Publish
+
+# Publishes to npm by trusted publishing (OIDC): no npm token exists anywhere,
+# and npm attaches provenance. The npmjs.com side names this workflow by its
+# filename, publish.yml, and the environment below; renaming either breaks
+# publishing until the trusted publisher on npmjs.com is recreated to match.
+# Release procedure: AGENTS.md, steps 8-10.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions: {}
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+jobs:
+  # Publish only a commit whose CI run on main is green on both platforms.
+  # The suite takes about two hours on macOS, so this reads the CI run that
+  # step 8 already waited for instead of running it again. No run, a run still
+  # going, or any other conclusion stops the release; rerun this workflow once
+  # CI is green.
+  ci-green:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+    steps:
+      - name: Require a green CI run on main for this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          runs=$(gh api "repos/$REPO/actions/workflows/ci.yml/runs?head_sha=$SHA&event=push&branch=main&per_page=100")
+          run_id=$(jq -r '[.workflow_runs[] | select(.head_sha == env.SHA)] | sort_by(.created_at) | last | .id // empty' <<<"$runs")
+          if [ -z "$run_id" ]; then
+            echo "::error::no CI run on a push to main for $SHA; push main and wait for CI before tagging"
+            exit 1
+          fi
+          run=$(gh api "repos/$REPO/actions/runs/$run_id")
+          status=$(jq -r .status <<<"$run")
+          conclusion=$(jq -r .conclusion <<<"$run")
+          echo "CI run $run_id: status=$status conclusion=$conclusion"
+          if [ "$status" != completed ] || [ "$conclusion" != success ]; then
+            echo "::error::CI run $run_id for $SHA is $status/$conclusion, not completed/success"
+            exit 1
+          fi
+          jobs=$(gh api "repos/$REPO/actions/runs/$run_id/jobs?filter=latest&per_page=100")
+          for name in "test (ubuntu-latest)" "test (macos-latest)"; do
+            c=$(NAME="$name" jq -r '[.jobs[] | select(.name == env.NAME) | .conclusion] | if length == 1 then .[0] else "missing" end' <<<"$jobs")
+            echo "$name: $c"
+            if [ "$c" != success ]; then
+              echo "::error::CI job '$name' for $SHA is $c"
+              exit 1
+            fi
+          done
+
+  publish:
+    needs: ci-green
+    runs-on: ubuntu-latest
+    # Named in the trusted publisher on npmjs.com; the OIDC token carries it.
+    environment: npm-publish
+    permissions:
+      contents: read
+      id-token: write # OIDC token for npm trusted publishing
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      # Trusted publishing needs npm >= 11.5.1 and Node >= 22.14.0. Node 22
+      # bundles npm 10, so this is Node 24 (its npm is 11.5.1 from 24.5.0).
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+          package-manager-cache: false
+
+      - name: Check npm and the version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          npm_version=$(npm --version)
+          echo "node $(node --version), npm $npm_version"
+          node -e '
+            const [a, b, c] = process.argv[1].split(".").map(Number);
+            if (a < 11 || (a === 11 && (b < 5 || (b === 5 && c < 1)))) {
+              console.error("::error::trusted publishing needs npm >= 11.5.1, found " + process.argv[1]);
+              process.exit(1);
+            }' "$npm_version"
+          pkg_version=$(jq -r .version package.json)
+          bin_version=$(./bin/safedeps --json version | jq -r .version)
+          echo "tag $TAG, package.json $pkg_version, bin/safedeps $bin_version"
+          if [ "$TAG" != "v$pkg_version" ] || [ "$bin_version" != "$pkg_version" ]; then
+            echo "::error::tag, package.json and bin/safedeps disagree on the version"
+            exit 1
+          fi
+
+      # No token: npm exchanges the job's OIDC token for a short-lived publish
+      # credential. Provenance is automatic under trusted publishing; the flag
+      # asks for it by name as well. The package has no dependencies and no
+      # lockfile, so there is nothing to install.
+      - name: Publish
+        run: npm publish --provenance
+
+      - name: Read the release back from the registry
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version=${TAG#v}
+          name=$(jq -r .name package.json)
+          url="https://registry.npmjs.org/${name/\//%2f}/$version"
+          meta=""
+          for _ in $(seq 1 20); do
+            if meta=$(curl -sSf "$url"); then break; fi
+            meta=""
+            sleep 15
+          done
+          if [ -z "$meta" ]; then
+            echo "::error::$url did not answer after publish"
+            exit 1
+          fi
+          publisher=$(jq -r '._npmUser.trustedPublisher.id // "none"' <<<"$meta")
+          predicate=$(jq -r '.dist.attestations.provenance.predicateType // "none"' <<<"$meta")
+          echo "trusted publisher: $publisher"
+          echo "provenance: $predicate"
+          if [ "$publisher" != github ] || [ "$predicate" = none ]; then
+            echo "::error::$name@$version is not marked as published by GitHub with provenance"
+            exit 1
+          fi
+          npm pack --dry-run --json | jq -r '.[0].files[].path' | sort > "$RUNNER_TEMP/local.txt"
+          # The tarball named by the version document read above, not
+          # `npm pack <name>@<version>`: that reads the package document,
+          # which the registry can update later than the version's.
+          tarball_url=$(jq -r '.dist.tarball // empty' <<<"$meta")
+          if [ -z "$tarball_url" ]; then
+            echo "::error::$url names no dist.tarball"
+            exit 1
+          fi
+          tarball="$RUNNER_TEMP/published.tgz"
+          curl -sSfL --retry 10 --retry-delay 15 --retry-all-errors -o "$tarball" "$tarball_url"
+          tar -tzf "$tarball" | sed 's#^package/##' | sort > "$RUNNER_TEMP/published.txt"
+          if ! diff -u "$RUNNER_TEMP/local.txt" "$RUNNER_TEMP/published.txt"; then
+            echo "::error::the published file list differs from npm pack --dry-run of the tag"
+            exit 1
+          fi
+          echo "published file list matches the tag ($(wc -l < "$RUNNER_TEMP/published.txt") files)"

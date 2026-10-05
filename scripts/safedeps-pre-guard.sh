@@ -287,6 +287,17 @@ guard_mark_reading_failed() {
   [[ -z "${SAFEDEPS_SCAN_MARK:-}" ]] || printf 'failed\n' >> "${SAFEDEPS_SCAN_MARK}"
 }
 
+# Whether the lexer wrote <flag> into its flags file <file>. A grep that cannot
+# answer (2 and up) is recorded and counts as the flag being set: the flag read
+# here says a command does not close, and a grep that failed used to read as
+# "it closes", which let everything the open quote swallowed go unread.
+guard_lex_flag_set() {
+  local rc=0
+  grep -q "^$1\$" "$2" 2>/dev/null || rc=$?
+  (( rc <= 1 )) || guard_mark_reading_failed
+  (( rc != 1 ))
+}
+
 # grep for a judgment: 0 is a match and 1 is no match. Anything else -- a grep
 # that errored, was killed or could not be started -- is not "no match"; it is
 # recorded and returns 1, and the gate decides.
@@ -343,19 +354,33 @@ command_hides_dependency_install() {
 }
 
 # The pipe half of command_hides_dependency_install, asked beside a visible
-# install (see payload_pipes_unread_install_text_to_shell). The payload loops
-# are the same; the install question on eval and substitution payloads is not
-# asked, because beside a visible install those payloads are candidate texts
-# already and their specs reach the ledger.
-command_pipes_unread_install_to_shell() {
+# install. The question and the texts it is asked of are the standalone ones:
+# the command, and its `sh -c`, eval and substitution payloads, each searched
+# whole by payload_pipes_install_text_to_shell. The install question on eval and
+# substitution payloads is not asked, because beside a visible install those
+# payloads are candidate texts already and their specs reach the ledger.
+#
+# The visible install's own words are not set aside first. That was tried for
+# three rounds, and each time the path beside a visible install searched less
+# text than the standalone path and passed a pipe the standalone path denies: a
+# whole-word search missed `\npip` and `pip\tinstall`, a word-start search missed
+# `%spip` and `xpip ... | cut -c2-`, and setting aside the install's own words
+# missed `echo "$_ install evil==6.6.6" | sh`, where the shell hands the last of
+# those words to the producer. Setting a word aside rests on the claim that it
+# prints nothing into the shell, and a producer can read the command's own text
+# through `$_`, `$BASH_EXECUTION_STRING`, `ps` or a file, which the gate cannot
+# list. So beside a visible install the same pipe gets the same verdict, and a
+# command that mixes an install with an unrelated `| sh` is denied: the two run
+# as separate commands.
+command_pipes_install_to_shell() {
   local command="$1"
   local payload stripped
 
-  payload_pipes_unread_install_text_to_shell "${command}" && return 0
+  payload_pipes_install_text_to_shell "${command}" && return 0
   stripped=$(strip_heredoc_bodies "${command}")
   while IFS= read -r payload; do
     [[ -z "${payload}" ]] && continue
-    payload_pipes_unread_install_text_to_shell "${payload}" && return 0
+    payload_pipes_install_text_to_shell "${payload}" && return 0
   done < <(extract_shell_c_payloads "${stripped}"; extract_eval_payloads "${stripped}"; extract_command_substitution_payloads "${stripped}")
   return 1
 }
@@ -505,7 +530,7 @@ shell_lex() {
       #              the first byte the prefixes leave, the stmts bytes of the
       #              prefixes, and the recognize bytes of the statement from
       #              there to its end, \037 between them. For
-      #              install_managers_blanked.
+      #              the event contract in scan-contract.
       #   view=wordends  the stmts view as a mask: 1 at each byte where the
       #              lexer ends a word that a word byte stands before, 0
       #              elsewhere; length-preserving. For scan-contract.
@@ -1224,8 +1249,9 @@ shell_lex() {
             }
             k++; continue
           }
-          s = k; w = ""
-          while (k <= N && !word_sep(k) && !(k > s && (k in EV))) { w = w X[k]; k++ }
+          s = k; sb_reset("w", "")
+          while (k <= N && !word_sep(k) && !(k > s && (k in EV))) { sb_add("w", X[k]); k++ }
+          w = sb_get("w")
           if (!atstart) continue
           # A word that is a path, with its last part plain: bw is that part.
           # `/usr/bin/env` is env as `/usr/bin/pip` is pip.
@@ -1481,8 +1507,9 @@ shell_lex() {
             }
             k++; continue
           }
-          s = k; w = ""
-          while (k <= N && !word_sep(k)) { w = w X[k]; k++ }
+          s = k; sb_reset("w", "")
+          while (k <= N && !word_sep(k)) { sb_add("w", X[k]); k++ }
+          w = sb_get("w")
           fh = 0
           if (inp) continue
           if (rd) { rd = 0; continue }
@@ -1863,15 +1890,16 @@ shell_lex() {
         k = j + 2; strip = 0
         if (X[k] == "-") { strip = 1; k++ }
         while (X[k] == " " || X[k] == "\t") k++
-        w = ""; q = 0
+        sb_reset("w", ""); q = 0
         while (k <= N) {
           cc = X[k]
           if (cc ~ /[ \t\n;&|()<>]/) break
-          if (cc == "\\") { q = 1; w = w X[k+1]; k += 2; continue }
-          if (cc == "\047") { q = 1; k++; while (k <= N && X[k] != "\047") { w = w X[k]; k++ } k++; continue }
-          if (cc == "\042") { q = 1; k++; while (k <= N && X[k] != "\042") { if (X[k] == "\\") k++; w = w X[k]; k++ } k++; continue }
-          w = w cc; k++
+          if (cc == "\\") { q = 1; sb_add("w", X[k+1]); k += 2; continue }
+          if (cc == "\047") { q = 1; k++; while (k <= N && X[k] != "\047") { sb_add("w", X[k]); k++ } k++; continue }
+          if (cc == "\042") { q = 1; k++; while (k <= N && X[k] != "\042") { if (X[k] == "\\") k++; sb_add("w", X[k]); k++ } k++; continue }
+          sb_add("w", cc); k++
         }
+        w = sb_get("w")
         if (w == "") { C[j] = cls; return j }
         np++; pd[np] = w; ps[np] = strip; pq[np] = q; pstart[np] = j; pdq[np] = (dq > 0); pb[np] = (ctx[d] == "B")
         pS[np] = 0
@@ -1905,10 +1933,11 @@ shell_lex() {
           pfed[p] = fed
           done = 0; bs = s
           while (s <= N) {
-            e = s; line = ""
+            e = s; sb_reset("w", "")
             while (1) {
-              while (e <= N && X[e] != "\n") { line = line X[e]; e++ }
-              if (!pq[p] && e <= N && line ~ /(^|[^\\])(\\\\)*\\$/) { line = substr(line, 1, length(line) - 1); e++; continue }
+              while (e <= N && X[e] != "\n") { sb_add("w", X[e]); e++ }
+              line = sb_get("w")
+              if (!pq[p] && e <= N && line ~ /(^|[^\\])(\\\\)*\\$/) { sb_reset("w", substr(line, 1, length(line) - 1)); e++; continue }
               break
             }
             t = line; if (ps[p]) sub(/^\t+/, "", t)
@@ -1959,18 +1988,18 @@ shell_lex() {
       # `S` and the word after `sh|bash|zsh|dash -...c`, or `E` and the words
       # after `eval` joined by blanks. A $\047...\047 escape this cannot name
       # adds a record `!`.
-      function emit_cscripts(   k, w, inw, n, W) {
-        buf = ""; held = 0; n = 0; w = ""; inw = 0
+      function emit_cscripts(   k, inw, n, W) {
+        buf = ""; held = 0; n = 0; sb_reset("w", ""); inw = 0
         for (k = 1; k <= N + 1; k++) {
           if (k > N || word_sep(k)) {
-            if (inw) { W[++n] = w; w = ""; inw = 0 }
+            if (inw) { W[++n] = sb_get("w"); sb_reset("w", ""); inw = 0 }
             if (k > N || C[k] == "p" || C[k] == "c" && DEP[k] == 1 && X[k] ~ /[\n;&|()]/) { cscripts_of(W, n); n = 0 }
             continue
           }
           inw = 1
           if (k in DROP) continue
-          if (k in VAL) w = w VAL[k]
-          else if (!RM[k]) w = w X[k]
+          if (k in VAL) sb_add("w", VAL[k])
+          else if (!RM[k]) sb_add("w", X[k])
         }
         if (aqbad) put("!\035")
         printf "%s", buf
@@ -1987,9 +2016,14 @@ shell_lex() {
       # shell (no operators), so reading it as a script can only find more.
       # A STRING whose value is decided at run time cannot be read: a `!`
       # record, which the reader records as a failed reading.
-      function cscripts_of(W, n,   j, m, s, base, args, c, q, sv, rest) {
+      #
+      # The name is the last part of the word after its last slash, taken by
+      # split, which is one pass. It was taken with sub(/.*\//, ...), which the
+      # macOS awk (BWK) tries from every byte and runs to the end of the word
+      # from each, so one 64KB word cost 13s (scripts/measure/scan-cost.sh).
+      function cscripts_of(W, n,   j, m, s, base, args, c, q, sv, rest, np, P) {
         for (j = 1; j <= n; j++) {
-          base = W[j]; sub(/.*\//, "", base)
+          np = split(W[j], P, "/"); base = P[np]
           if (base == "env" && j < n) {
             sv = ""; rest = 0
             for (m = j + 1; m <= n && !rest; m++) {
@@ -2010,9 +2044,9 @@ shell_lex() {
             }
             if (rest) {
               if (sv ~ /[$`]/) { put("!\035"); break }
-              args = sv
-              for (m = rest; m <= n; m++) args = args " " W[m]
-              put("E" args "\035"); break
+              put("E" sv)
+              for (m = rest; m <= n; m++) put(" " W[m])
+              put("\035"); break
             }
             continue
           }
@@ -2031,10 +2065,12 @@ shell_lex() {
             }
             continue
           }
+          # The arguments go out one at a time: joined into one string first,
+          # each word copied the whole string again (BWK concatenates by copy).
           if (W[j] == "eval" && j < n) {
-            args = ""
-            for (m = j + 1; m <= n; m++) args = args (m > j + 1 ? " " : "") W[m]
-            put("E" args "\035"); break
+            put("E")
+            for (m = j + 1; m <= n; m++) put((m > j + 1 ? " " : "") W[m])
+            put("\035"); break
           }
         }
       }
@@ -2124,6 +2160,21 @@ shell_lex() {
         }
         printf "%s", buf
       }
+      # The string builder (sb_*), the same in every awk program here that
+      # builds a string a byte at a time. The macOS awk (BWK) copies
+      # both strings on every concatenation, so `w = w c` costs the square of
+      # the length: 0.17s for one 64KB word on an M1, paid again by each view
+      # that builds one. Bytes go to a piece of 64, pieces to a chunk of 64
+      # pieces, chunks to the string: a byte is copied a bounded number of
+      # times until the string passes 4KB, and past that the string is copied
+      # once per 4KB added. Strings are kept apart by name.
+      function sb_reset(id, s) { SBS[id] = s; SBC[id] = ""; SBP[id] = ""; SBPN[id] = 0; SBCN[id] = 0 }
+      function sb_add(id, s) {
+        SBP[id] = SBP[id] s; if (++SBPN[id] < 64) return
+        SBC[id] = SBC[id] SBP[id]; SBP[id] = ""; SBPN[id] = 0; if (++SBCN[id] < 64) return
+        SBS[id] = SBS[id] SBC[id]; SBC[id] = ""; SBCN[id] = 0
+      }
+      function sb_get(id) { return SBS[id] SBC[id] SBP[id] }
       function emit(   k, cc, cl, p, first) {
         buf = ""; held = 0
         if (view == "shell-bodies") {
@@ -2331,25 +2382,8 @@ extract_command_substitution_payloads() {
 # Install text as the pipe checks search for it: a manager, then a verb
 # anywhere after it on the same line. Loose on purpose -- it reads text that is
 # data at its own quoting level, where no statement grammar applies.
-# The visible installs the blanking pass sets aside, found the way detection
-# finds them: a line of the cwords view whose statement, read from where its
-# prefixes end, is an install. The lexer has removed the prefixes, so this
-# reads no assignment, env or command of its own: without them, an install
-# behind `PIP_INDEX_URL=x` was not set aside, and the pipe check read it as
-# install text piped into a shell (caught in review).
-BLANK_INSTALL_RE="^[0-9]+"$'\037'"[0-9]+"$'\037'"[^"$'\037'"]*"$'\037'"(${SAFEDEPS_G_INSTALL_BODY})${SAFEDEPS_G_END}"
 PIPE_MANAGER_RE='(npm|npx|pnpm|pnpx|yarn|bun|bunx|pip[0-9.]*|(python[0-9.]*|py)[[:space:]]+-[A-Za-z0-9]*m[[:space:]]*pip|poetry|uv|uvx|pipx|pipenv|cargo|go|gem|bundle|mvn|dotnet)'
 PIPE_INSTALL_TEXT_RE="${PIPE_MANAGER_RE}.*(${SAFEDEPS_G_ALL_VERBS})"
-
-# The same, with the manager starting a word. Beside a visible install the text
-# left after setting the install aside is mostly that install's own arguments,
-# and a manager name inside a word matched there -- `go` inside `mongoose` --
-# so `npm install mongoose@8.0.0 && cat setup.sh | sh` was denied (caught in
-# review). The rest stays loose on purpose: what is piped is data the shell has
-# not read yet, and printf escapes, glued quotes, an escaped blank or a `tr`
-# turn `pip<something>install` into `pip install` on the way. Requiring whole
-# blank-separated words let exactly those through (caught in review).
-PIPE_INSTALL_WORD_START_RE="(^|[^[:alnum:]_.-])${PIPE_MANAGER_RE}.*(${SAFEDEPS_G_ALL_VERBS})"
 
 # A pipe into a shell, read on the recognize view. The consumer ends where the
 # shell ends a word: at a blank, and also at an operator, a redirection or a
@@ -2357,15 +2391,15 @@ PIPE_INSTALL_WORD_START_RE="(^|[^[:alnum:]_.-])${PIPE_MANAGER_RE}.*(${SAFEDEPS_G
 # consumer as `| sh `. `|&` pipes stderr as well, and a group opener before the
 # shell (`| (sh)`, `| { sh; }`) still hands it the input. Each of these used to
 # pass unjudged. The view puts a `;` in where the command after `{` starts, so
-# a `;` is stepped over with the openers: `| { ;sh; }`.
-PIPE_SHELL_CONSUMER_RE="\\|&?[[:space:]]*([({;][[:space:]]*)*(${SAFEDEPS_G_SHELLS})([[:space:];&|)}<>\`]|\$)"
+# a `;` is stepped over with the openers: `| { ;sh; }`. A `|` that is half of
+# `||` is no pipe: the shell after it runs only when the command before it
+# fails, and reads the caller's input, not that command's output. Read as a
+# pipe, `false || sh -c "npm ci \"x\""` was denied as an install piped into a
+# shell.
+PIPE_SHELL_CONSUMER_RE="(^|[^|])\\|&?[[:space:]]*([({;][[:space:]]*)*(${SAFEDEPS_G_SHELLS})([[:space:];&|)}<>\`]|\$)"
 
 text_has_install_words() {
   printf '%s\n' "$1" | judge_grep -qEi "${PIPE_INSTALL_TEXT_RE}"
-}
-
-text_has_install_words_from_a_word_start() {
-  printf '%s\n' "$1" | judge_grep -qEi "${PIPE_INSTALL_WORD_START_RE}"
 }
 
 # $1 has its heredoc bodies stripped already. Stripping twice is not a no-op:
@@ -2383,8 +2417,91 @@ exec_text_pipes_to_shell() {
   # terminator can sit between them: `cat <<EOF |`, the body, `EOF`, `sh`.
   # Only a pipe or a shell name can meet across the join, so reading the lines
   # as one costs nothing else.
+  local lines="${exec_view}"
   exec_view="${exec_view//$'\n'/ }"
-  printf '%s\n' "${exec_view}" | judge_grep -qEi "${PIPE_SHELL_CONSUMER_RE}"
+  printf '%s\n' "${exec_view}" | judge_grep -qEi "${PIPE_SHELL_CONSUMER_RE}" && return 0
+  # Most pipes feed a simple command, and the walk below is for the rest.
+  printf '%s\n' "${exec_view}" | judge_grep -qE "${PIPE_COMPOUND_CONSUMER_RE}" || return 1
+  compound_consumer_runs_shell "${lines}"
+}
+
+# A pipe into a compound command: a brace group, a subshell, an if, a loop or a
+# case, or a command behind `!` or `time`. Read on the exec view.
+PIPE_COMPOUND_CONSUMER_RE='(^|[^|])\|&?[[:space:]]*([({]|(if|while|until|for|select|case|time|!)([[:space:]]|$))'
+
+# True when a compound command that a pipe feeds runs a shell anywhere a command
+# can stand inside it: `| { :; sh; }`, `| if true; then sh; fi`, `| while read
+# -r l; do sh; done`, `| ! sh`. Every command in the compound reads the pipe
+# until one of them has read it all, so the shell need not come first; the
+# consumer pattern above only looked at the first word, and each of these passed
+# unjudged.
+#
+# $1 is the exec view with its newlines, which end commands here. Words are cut
+# at blanks and at the shell's operators; the compound ends at the word that
+# closes what opened it, followed through nesting by kind (`{` by `}`, `(` by
+# `)`, `if` by `fi`, a loop by `done`, `case` by `esac`). A closer that does not
+# close the innermost opener closes nothing, so a misread compound runs on to
+# the end of the command: that can only find more shells. Inside a case, a `)`
+# ends a pattern and what follows it is a command, so a pattern named `sh` reads
+# as a shell -- the same direction.
+compound_consumer_runs_shell() {
+  local rest="$1" nl=$'\n' tok top pend=false cmd=true skip=false re
+  local -a stack=()
+  re="^[^[:graph:]${nl}]*(\\|\\||&&|;;&?|;&|\\|&|[;&|(){}]|${nl}|[0-9]*[<>]+&?|[^[:space:];&|(){}<>]+)"
+  while [[ "${rest}" =~ ${re} ]]; do
+    rest="${rest:${#BASH_REMATCH[0]}}"
+    tok="${BASH_REMATCH[1]}"
+    if [[ "${skip}" == true && "${tok}" != "${nl}" ]]; then skip=false; continue; fi
+    if (( ${#stack[@]} == 0 )); then
+      case "${tok}" in
+        '|'|'|&') pend=true ;;
+        "${nl}") ;;
+        '!'|time|-*) [[ "${pend}" == true ]] && cmd=true ;;
+        '{'|'('|'if'|'while'|'until')
+          if [[ "${pend}" == true ]]; then stack=("${tok}") cmd=true; fi
+          pend=false ;;
+        'for'|'select'|'case')
+          if [[ "${pend}" == true ]]; then stack=("${tok}") cmd=false; fi
+          pend=false ;;
+        [Ss][Hh]|[Bb][Aa][Ss][Hh]|[Zz][Ss][Hh])
+          # Behind `!` or `time`: `| ! sh`.
+          [[ "${pend}" == true ]] && return 0
+          pend=false ;;
+        *) pend=false ;;
+      esac
+      continue
+    fi
+    top="${stack[${#stack[@]}-1]}"
+    case "${tok}" in
+      "${nl}"|';'|'&'|'&&'|'||'|'|'|'|&'|';;'|';&'|';;&') cmd=true; continue ;;
+      '(') stack+=("(") cmd=true; continue ;;
+      ')')
+        if [[ "${top}" == '(' ]]; then
+          unset "stack[${#stack[@]}-1]"; cmd=false
+        else
+          cmd=true
+        fi
+        continue ;;
+      [0-9]*[\<\>]*|[\<\>]*) skip=true; continue ;;
+    esac
+    [[ "${cmd}" == true ]] || continue
+    case "${tok}" in
+      [Ss][Hh]|[Bb][Aa][Ss][Hh]|[Zz][Ss][Hh]) return 0 ;;
+      '{'|'if'|'while'|'until') stack+=("${tok}") ;;
+      'for'|'select'|'case') stack+=("${tok}") cmd=false ;;
+      '}') [[ "${top}" != '{' ]] || unset "stack[${#stack[@]}-1]"; cmd=false ;;
+      'fi') [[ "${top}" != if ]] || unset "stack[${#stack[@]}-1]"; cmd=false ;;
+      'done')
+        case "${top}" in 'while'|'until'|'for'|'select') unset "stack[${#stack[@]}-1]" ;; esac
+        cmd=false ;;
+      'esac') [[ "${top}" != case ]] || unset "stack[${#stack[@]}-1]"; cmd=false ;;
+      'then'|'do'|'else'|'elif'|'!'|time|-*) ;;
+      [A-Za-z_]*=*) ;;
+      *) cmd=false ;;
+    esac
+  done
+  # Text the walk could not cut into words is read as a shell, not as none.
+  [[ -n "${rest//[[:space:]]/}" ]]
 }
 
 payload_pipes_install_text_to_shell() {
@@ -2400,138 +2517,12 @@ payload_pipes_install_text_to_shell() {
   # Check the raw install text FIRST: the grep is O(n) while building the exec
   # view is not free, and both checks are pure predicates, so conjunction order
   # cannot change the verdict — only the cost. Most commands carry no install
-  # text at all and must not pay for the exec view.
+  # text at all and must not pay for the exec view. A payload with no `|` has
+  # no pipe in any view of it, and most visible installs, which carry install
+  # text by definition, pipe nothing.
+  [[ "${payload}" == *'|'* ]] || return 1
   text_has_install_words "${payload}" || return 1
   exec_text_pipes_to_shell "$(strip_heredoc_bodies "${payload}")"
-}
-
-# The same question asked beside a visible install.
-#
-# payload_pipes_install_text_to_shell searches the whole payload for install
-# text. That is right when nothing in the command is an install the gate can
-# read: any install text there is something else. Beside a visible install it
-# says nothing, because the visible install is install text too, so the
-# recognition block never asked it -- and a hidden install piped into a shell
-# passed with the visible one (`pip install requests==2.0.0 && printf 'pip
-# install evil==6.6.6' | sh` checked requests and ran evil unchecked).
-#
-# So the visible installs are set aside first. Wherever the install pattern
-# matches the scan text -- exactly what command_is_dependency_install reads as
-# an install -- the manager word that starts the match is blanked out of the
-# raw text, and the whole-payload question is asked of what is left, plus any
-# heredoc bodies. A verb with no manager before it no longer reads as install
-# text, so that is enough to set the install aside.
-#
-# Only the manager word goes, not the whole match. A match can run into the
-# arguments: the grammar cannot know which options take a value, so in `npx -y
-# echo-cli@1.0.0 pip install x | sh` it reads `pip` as the package npx runs,
-# and blanking the whole match hid the `pip install` that is echoed into the
-# shell (caught before review, by this function's own attack battery).
-#
-# An install the recognizer only reads after normalize_install_text (`env pip
-# install`, `/usr/bin/pip install`) is not matched here and stays in the text.
-# That can only turn an allow into a deny, and only beside a pipe into a shell.
-payload_pipes_unread_install_text_to_shell() {
-  local payload="$1"
-  local commands remainder
-
-  [[ "${payload}" == *'|'* ]] || return 1
-  commands=$(strip_heredoc_bodies "${payload}")
-  # Most visible installs pipe into no shell, and that answer is cheap.
-  exec_text_pipes_to_shell "${commands}" || return 1
-
-  remainder=$(install_managers_blanked "${commands}") || return 1
-  text_has_install_words_from_a_word_start "${remainder}" && return 0
-  [[ "${payload}" == *'<<'* ]] || return 1
-  text_has_install_words_from_a_word_start "$(strip_heredoc_bodies "${payload}" shell-bodies)"
-}
-
-# $1 with the manager word of every visible install blanked.
-#
-# The installs are the starts of the lexer's walk whose statement is one (the
-# cwords view, BLANK_INSTALL_RE): each line gives the offset of the start, the
-# offset where its prefixes end, the prefixes as the stmts view prints them and
-# the statement from there as the recognize view prints it. Both views print a
-# quoted byte blank and keep every byte where it is, so an offset in a line is
-# the offset in $1. Only bytes a view keeps are blanked. A quote character is
-# blank there, so it is never touched and the quote structure of what is left
-# is the quote structure of $1 -- blanking a quote would re-quote everything
-# after it. This used to find the installs again with a pattern anchored on
-# the stmts view, where a start was a byte written over the one before it, and
-# a start with no byte of its own left its install where the pipe check read
-# it.
-#
-# A failure is recorded like a scanner failure (see command_scan_text), and the
-# caller reads it as "no answer", which guard_settle_scan_failure turns into an
-# UNDECIDED deny for a command that looks like an install -- and this command
-# has a visible one.
-install_managers_blanked() {
-  local text="$1"
-  local lines matches nl nrec=0
-
-  if ! lines=$(shell_lex "${text}" cwords "safedeps:command_scan_text"); then
-    return 1
-  fi
-  # No match is not an error: the text is then returned whole, which only
-  # keeps more install text in it. The grep and the awk run apart so that only
-  # "no match" reads as no install: a failed awk used to be swallowed by the
-  # same `||`, and the visible install it should have blanked was then read as
-  # install text piped into a shell -- a finding drawn from a failed reading
-  # (caught in review).
-  matches=$(printf '%s\n' "${lines}" | LC_ALL=C judge_grep -Ei "${BLANK_INSTALL_RE}") || matches=""
-  # The awk reads the number of lines first, then the lines, then $1.
-  if [[ -n "${matches}" ]]; then
-    nl="${matches//[!$'\n']/}"
-    nrec=$(( ${#nl} + 1 ))
-  fi
-  if ! { printf '%s\n' "${nrec}"; [[ -z "${matches}" ]] || printf '%s\n' "${matches}"; printf '%s' "${text}"; } |
-    SAFEDEPS_PIPE_MANAGER_RE="${PIPE_MANAGER_RE}" LC_ALL=C awk '
-    # safedeps:install_managers_blanked (scripts/test/scan-contract.sh keys on this line)
-    NR == 1 { nrec = $0 + 0; next }
-    NR <= nrec + 1 { rec[NR - 1] = $0; next }
-    {
-      if (NR > nrec + 2) X[++n] = "\n"
-      m = split($0, c, "")
-      for (j = 1; j <= m; j++) X[++n] = c[j]
-    }
-    END {
-      mre = "^" ENVIRON["SAFEDEPS_PIPE_MANAGER_RE"]
-      for (r = 1; r <= nrec; r++) {
-        if (split(rec[r], f, "\037") != 4) exit 2
-        k = f[1] + 0; w = f[2] + 0; pre = f[3]; st = f[4]
-        if (k < 1 || w < k || w - k != length(pre) || w + length(st) - 1 > n) exit 2
-        # The manager word, at the start of the statement.
-        if (!match(tolower(st), mre)) continue
-        for (q = 0; q < RLENGTH; q++)
-          if (substr(st, q + 1, 1) != " " && X[w + q] != "\n") X[w + q] = " "
-        # The assignment prefixes of the install are its arguments, not
-        # install text: `PIP_INDEX_URL=x` left `pip` at a word start for the
-        # loose search of the pipe check. A name is blanked always; it runs no
-        # code. A value is blanked only when it holds no `$`, backtick or
-        # parenthesis, so a substitution in it is still read.
-        s = tolower(pre); slen = length(s); j = 1
-        while (j <= slen) {
-          while (j <= slen && substr(s, j, 1) ~ /[ \t]/) j++
-          w0 = j
-          while (j <= slen && substr(s, j, 1) !~ /[ \t]/) j++
-          word = substr(s, w0, j - w0)
-          if (!match(word, /^[a-z_][a-z0-9_]*=/)) continue
-          e = (word ~ /[$`()]/) ? w0 + RLENGTH - 2 : j - 1
-          for (q = w0; q <= e; q++)
-            if (substr(pre, q, 1) != " " && X[k + q - 1] != "\n") X[k + q - 1] = " "
-        }
-      }
-      buf = ""; held = 0
-      for (i = 1; i <= n; i++) {
-        buf = buf X[i]
-        if (++held >= 4096) { printf "%s", buf; buf = ""; held = 0 }
-      }
-      printf "%s", buf
-    }
-  '; then
-    [[ -z "${SAFEDEPS_SCAN_MARK:-}" ]] || printf 'failed\n' >> "${SAFEDEPS_SCAN_MARK}"
-    return 1
-  fi
 }
 
 # The command as lines the shell reads as statements (the joined view): line
@@ -2559,9 +2550,9 @@ join_line_continuations_checked() {
     return
   fi
   joined=$(SAFEDEPS_LEX_FLAGS="${f1}" shell_lex "$1" joined "safedeps:join_line_continuations")
-  if ! grep -q '^UNTERM$' "${f1}" 2>/dev/null; then
+  if ! guard_lex_flag_set UNTERM "${f1}"; then
     SAFEDEPS_LEX_FLAGS="${f2}" shell_lex "${joined}" scan "safedeps:command_scan_text" > /dev/null
-    grep -q '^UNTERM$' "${f2}" 2>/dev/null && guard_mark_reading_failed
+    ! guard_lex_flag_set UNTERM "${f2}" || guard_mark_reading_failed
   fi
   rm -f "${f1}" "${f2}"
   printf '%s' "${joined}"
@@ -2853,11 +2844,19 @@ inert_flag_offsets() {
   # byte in place, so one index reads all of them and the command.
   if ! ends=$(printf '%s\n' "${pairs}" | LC_ALL=C awk -v dir="${dir}" '
     # safedeps:inert_offsets (scripts/measure/scan-failure-census.sh keys on this line)
-    function slurp(f,   out, line, count) {
-      out = ""; count = 0
-      while ((getline line < f) > 0) out = out (count++ ? "\n" : "") line
+    # The string builder (sb_*): see shell_lex.
+    function sb_reset(id, s) { SBS[id] = s; SBC[id] = ""; SBP[id] = ""; SBPN[id] = 0; SBCN[id] = 0 }
+    function sb_add(id, s) {
+      SBP[id] = SBP[id] s; if (++SBPN[id] < 64) return
+      SBC[id] = SBC[id] SBP[id]; SBP[id] = ""; SBPN[id] = 0; if (++SBCN[id] < 64) return
+      SBS[id] = SBS[id] SBC[id]; SBC[id] = ""; SBCN[id] = 0
+    }
+    function sb_get(id) { return SBS[id] SBC[id] SBP[id] }
+    function slurp(f,   line, count) {
+      sb_reset("slurp", ""); count = 0
+      while ((getline line < f) > 0) sb_add("slurp", (count++ ? "\n" : "") line)
       close(f)
-      return out
+      return sb_get("slurp")
     }
     function blank(c) { return c == " " || c == "\t" || c == "\n" || c == "" }
     function sep(k) { return L[k] == ";" || L[k] == "&" || L[k] == "|" || L[k] == "(" || L[k] == ")" || L[k] == "<" || L[k] == ">" || L[k] == "`" || L[k] == "\n" }
@@ -2893,8 +2892,9 @@ inert_flag_offsets() {
         # the flag after it is an operand (`npm ci -- --ignore-scripts` ran the
         # scripts).
         if (!blank(C[k]) && blank(C[k - 1])) {
-          w = ""
-          for (j = k; j <= n && !blank(C[j]) && !sep(j); j++) w = w C[j]
+          sb_reset("w", "")
+          for (j = k; j <= n && !blank(C[j]) && !sep(j); j++) sb_add("w", C[j])
+          w = sb_get("w")
           gsub(/["\047\\]/, "", w)
           if (w ~ /^--+$/) { dd = k; b = k; break }
         }
@@ -2907,11 +2907,11 @@ inert_flag_offsets() {
       # verb: the end of each word. A blank inside quotes reads as a word end
       # here too; the reading of the placed flag rejects it, since it changes
       # a value npm reads.
-      cands = at
+      sb_reset("cands", at)
       for (k = at - 1; k > e; k--)
-        if (!blank(T[k]) && !blank(C[k]) && !blank(R[k]) && blank(T[k + 1])) cands = cands "," k
-      if (e < at) cands = cands "," e
-      print s, b, at, (dd ? "dd" : "-"), cands
+        if (!blank(T[k]) && !blank(C[k]) && !blank(R[k]) && blank(T[k + 1])) sb_add("cands", "," k)
+      if (e < at) sb_add("cands", "," e)
+      print s, b, at, (dd ? "dd" : "-"), sb_get("cands")
     }') || [[ -z "${ends}" ]]; then
     [[ -z "${SAFEDEPS_SCAN_MARK:-}" ]] || printf 'failed\n' >> "${SAFEDEPS_SCAN_MARK}"
     rm -rf "${dir}"
@@ -3238,56 +3238,70 @@ command_statements() {
   shell_lex "$1" stmtcuts "safedeps:command_scan_text" > "${scan_file}"
   if ! LC_ALL=C awk -v scan_file="${scan_file}" -v raw_file="${raw_file}" '
     # safedeps:command_statements (scripts/measure/scan-failure-census.sh and scripts/test/scan-contract.sh key on this line)
-    function slurp(f,   out, line, count) {
-      out = ""; count = 0
-      while ((getline line < f) > 0) out = out (count++ ? "\n" : "") line
-      close(f)
-      return out
+    # The string builder (sb_*): see shell_lex.
+    function sb_reset(id, s) { SBS[id] = s; SBC[id] = ""; SBP[id] = ""; SBPN[id] = 0; SBCN[id] = 0 }
+    function sb_add(id, s) {
+      SBP[id] = SBP[id] s; if (++SBPN[id] < 64) return
+      SBC[id] = SBC[id] SBP[id]; SBP[id] = ""; SBPN[id] = 0; if (++SBCN[id] < 64) return
+      SBS[id] = SBS[id] SBC[id]; SBC[id] = ""; SBCN[id] = 0
     }
-    function word_end() {
-      if (has) words = words (words == "" ? "" : "\037") word (dyn ? "\001" : "")
-      word = ""; has = 0; dyn = 0
+    function sb_get(id) { return SBS[id] SBC[id] SBP[id] }
+    function slurp(f,   line, count) {
+      sb_reset("slurp", ""); count = 0
+      while ((getline line < f) > 0) sb_add("slurp", (count++ ? "\n" : "") line)
+      close(f)
+      return sb_get("slurp")
+    }
+    # wne: whether the words so far are not empty, which decides the
+    # separator as `words == ""` did when the words were one string.
+    function word_end(   piece) {
+      if (has) {
+        piece = (wne ? "\037" : "") sb_get("word") (dyn ? "\001" : "")
+        sb_add("words", piece)
+        if (piece != "") wne = 1
+      }
+      sb_reset("word", ""); has = 0; dyn = 0
     }
     function words_of(from, to,   i, ch, q) {
-      words = ""; word = ""; has = 0; dyn = 0; q = ""
+      sb_reset("words", ""); wne = 0; sb_reset("word", ""); has = 0; dyn = 0; q = ""
       for (i = from; i <= to; i++) {
         ch = r[i]
         if (q == "") {
           if (ch == " " || ch == "\t" || ch == "\n") { word_end(); continue }
-          if (ch == "\\") { if (i < to) { i++; word = word r[i]; has = 1 }; continue }
+          if (ch == "\\") { if (i < to) { i++; sb_add("word", r[i]); has = 1 }; continue }
           if (ch == "\047") { q = "s"; has = 1; continue }
           if (ch == "\"") { q = "d"; has = 1; continue }
           if (ch == "$" || ch == "`" || ch == "*" || ch == "?" || ch == "[") dyn = 1
           if (ch == "~" && !has) dyn = 1
-          word = word ch; has = 1
+          sb_add("word", ch); has = 1
           continue
         }
-        if (q == "s") { if (ch == "\047") q = ""; else word = word ch; continue }
+        if (q == "s") { if (ch == "\047") q = ""; else sb_add("word", ch); continue }
         if (ch == "\\" && i < to && (r[i + 1] == "$" || r[i + 1] == "`" || r[i + 1] == "\"" || r[i + 1] == "\\")) {
-          i++; word = word r[i]; continue
+          i++; sb_add("word", r[i]); continue
         }
         if (ch == "\"") { q = ""; continue }
         if (ch == "$" || ch == "`") dyn = 1
         if (ch == "\n" || ch == "\t") ch = " "
-        word = word ch
+        sb_add("word", ch)
       }
       word_end()
-      return words
+      return sb_get("words")
     }
-    function raw_of(from, to,   i, ch, out) {
-      out = ""
+    function raw_of(from, to,   i, ch) {
+      sb_reset("raw", "")
       for (i = from; i <= to; i++) {
         ch = r[i]
         if (ch == "\t" || ch == "\035" || ch == "\037") ch = " "
         else if (ch == "\n") ch = "\036"
-        out = out ch
+        sb_add("raw", ch)
       }
-      return out
+      return sb_get("raw")
     }
     function emit(nx, to) {
-      text = cur; gsub(/[\t\035]/, " ", text)
+      text = sb_get("cur"); gsub(/[\t\035]/, " ", text)
       printf "%s\035%s\035%s\035%s\035%s\n", prev, text, nx, words_of(from, to), raw_of(from, to)
-      prev = nx; cur = ""
+      prev = nx; sb_reset("cur", "")
     }
     BEGIN {
       # The first line holds the starts with no separator before them, the
@@ -3297,7 +3311,7 @@ command_statements() {
       for (k = 1; k <= ncut; k++) CUT[cuts[k] + 0] = 1
       n = split(slurp(scan_file), c, "")
       split(slurp(raw_file), r, "")
-      prev = "start"; cur = ""; from = 1
+      prev = "start"; sb_reset("cur", ""); from = 1
       for (i = 1; i <= n; i++) {
         ch = c[i]
         if (i in CUT) { emit(";", i - 1); from = i }
@@ -3312,7 +3326,7 @@ command_statements() {
           if (c[i + 1] == "&") i++
           emit("|", to); from = i + 1; continue
         }
-        cur = cur ch
+        sb_add("cur", ch)
       }
       emit("end", n)
     }'; then
@@ -4365,11 +4379,16 @@ guard_reading_writers_unattributable() {
 # PostToolUse hook has to find a trace of.
 #
 # A grep that cannot answer counts as a match: the cost is a trace check on a
-# command that needed none, where the other direction skips the check.
+# command that needed none, where the other direction skips the check. It is
+# recorded as a failed reading too, so the gate settles it. Counted as a match
+# alone, it wrote an npm trace baseline into the pending state of a `pip
+# install` with nothing said (the census, once it failed one grep at a time and
+# compared that part of the record).
 guard_command_has_npm_install() {
   local texts rc=0
   texts=$(command_candidate_start_texts "$1")
   grep -qEi "${SAFEDEPS_G_NPM_INSTALL_RE}" <<< "${texts}" || rc=$?
+  (( rc <= 1 )) || guard_mark_reading_failed
   (( rc == 1 )) || return 0
   return 1
 }
@@ -5006,7 +5025,7 @@ guard_check_command_reads() {
     return 0
   fi
   SAFEDEPS_LEX_FLAGS="${flags}" shell_lex "${COMMAND}" scan "safedeps:command_reads" > /dev/null || true
-  grep -q '^UNTERM$' "${flags}" 2>/dev/null && rc=1
+  ! guard_lex_flag_set UNTERM "${flags}" || rc=1
   rm -f "${flags}"
   return ${rc}
 }
@@ -5706,7 +5725,7 @@ guard_reading_detect() {
     # A visible install used to switch the hidden-install check off. It is a
     # hidden install like any other, and it is denied where the others are,
     # after the snapshot: every path between here and there is a deny.
-    if command_pipes_unread_install_to_shell "${COMMAND}"; then
+    if command_pipes_install_to_shell "${COMMAND}"; then
       PIPED_BESIDE_VISIBLE=true
       printf -v "GUARD_HIDDEN_$1" '%s' true
     fi
@@ -5835,10 +5854,12 @@ fi
 # baseline's second (lumi r2 P3, 2 of 5 on a real mount). Which one applied is
 # in the entry.
 #
-# The entry belongs to this tool call (safedeps_backstop_entry_base), and only
-# this call's post hook reads it. A call whose post hook never runs (Claude
-# Code runs none for a Bash call that ended in an error) leaves its entry to
-# the age sweep, and no other call reads it.
+# The entry belongs to this tool call (safedeps_call_base in
+# lib/gates/call-id.sh), and only this call's post hook reads it. A call whose
+# post hook never runs (a call the user denied after this hook let it through,
+# one cancelled while it runs, or a failed one on Claude Code where
+# PostToolUseFailure is not registered) leaves its entry to the age sweep, and
+# no other call reads it.
 #
 # This decides no verdict and runs after the gate. Anything that fails here
 # leaves no entry, and the backstop counts a command with no entry as traced,
@@ -5852,7 +5873,7 @@ guard_backstop_trace_baseline() {
   [[ -r "${lib}" ]] || return 0
   # shellcheck source=../lib/gates/backstop-trace.sh
   source "${lib}" || return 0
-  id=$(jq -r 'if (.tool_use_id | type) == "string" then .tool_use_id else empty end' <<< "${INPUT}" 2>/dev/null) || return 0
+  id=$(safedeps_call_id "${INPUT}") || return 0
   # The cwd as the PostToolUse hook resolves it, so the key is the one it builds.
   dir="${CWD_DIR}"
   if command -v realpath >/dev/null 2>&1; then
@@ -5862,7 +5883,7 @@ guard_backstop_trace_baseline() {
   fi
   dir_hash=$(compute_dir_hash "${dir}")
   entry_dir="${GUARD_DIR}/pending/backstop"
-  base=$(safedeps_backstop_entry_base "${entry_dir}" "${id}") || return 0
+  base=$(safedeps_call_base "${entry_dir}" "${id}") || return 0
   mkdir -p "${entry_dir}" 2>/dev/null || return 0
   find "${entry_dir}" -type f -mmin +1440 -delete 2>/dev/null || true
   lock=$(safedeps_tree_inode "${dir}/package-lock.json")
@@ -6397,11 +6418,14 @@ fi
 # one, so nothing can reduce a piped install to a spec. Beside a visible install
 # the specs that were extracted are the visible one's, so the count below would
 # read as "reduced" -- this case is settled on its own, fail-closed like the same
-# pipe with nothing beside it.
+# pipe with nothing beside it. The visible install's own text counts as install
+# text here (command_pipes_install_to_shell), so an install and an unrelated
+# pipe into a shell in one command land here too, and the reason says to split
+# them.
 if [[ "${PIPED_BESIDE_VISIBLE}" == "true" ]]; then
   guard_undecided_if_scan_failed
   log_advisory "pre-guard DENY: install text piped into a shell beside a visible install could not be reduced to an approved spec — fail-closed. Command: ${COMMAND}"
-  jq -nc '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:"safedeps: this command pipes text that reads like an install into a shell (`... | sh`) beside the install it runs. The gate checks the visible install, but it cannot extract a package spec from what is piped, so the command is blocked fail-closed. Run the piped install as its own command, written out rather than piped, so it can be checked."}}'
+  jq -nc '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:"safedeps: this command pipes text that reads like an install into a shell (`... | sh`) beside the install it runs. The gate checks the visible install, but it cannot extract a package spec from what is piped, and it cannot tell whether the piped text reads the install'"'"'s own words, so the command is blocked fail-closed. Run the install and the pipe into the shell as separate commands. If the piped text is itself an install, write it out rather than piping it, so it can be checked."}}'
   exit 0
 fi
 
@@ -6492,21 +6516,43 @@ if [[ "${INERT_UNVERIFIED}" == "true" ]]; then
   log_advisory "pre-guard: an npm install in this command holds a word the shell decides at run time (a tilde, a brace, \$x, \$(...), a glob or another expansion), which can set ignore-scripts, take the next word as its value, or end npm's options; safedeps put --ignore-scripts both right after the verb and after the last argument, and could not read whether npm keeps it true, so the install's scripts may run before the effect gate verifies. Command: ${COMMAND}"
 fi
 
-# Write per-install pending state for PostToolUse, keyed by (dir_hash, normalized
-# command) so concurrent installs in the same project keep separate state instead
-# of clobbering one global file (issue #5). The single-file write is still atomic
-# (write_state_file) to prevent TOCTOU within one install.
+# Write the record of this install for the post hook of the same call. It is
+# named by the call's tool_use_id (lib/gates/call-id.sh), which both hooks of
+# one call receive and no other call does, so the post hook reads this call's
+# record and no other. Records used to be found by the directory and the
+# command, and a call could speak from another's: two overlapping calls of one
+# command each took the other's record (bamdori r19 X1), and a call whose post
+# hook never ran (a tool call the user rejected, or a failed one on Claude
+# Code before PostToolUseFailure was registered) left a record the next call
+# of the command consumed, rolling back what was edited in between (O2). The
+# single-file write is still atomic (write_state_file).
 PENDING_DIR="${GUARD_DIR}/pending"
 mkdir -p "${PENDING_DIR}"
 # GC pending entries whose PostToolUse never fired (crash/no-op). 24h is well past
 # any real install, so this never deletes an in-flight one (a 60-min window could
 # have reaped a slow native build that was still running).
 find "${PENDING_DIR}" \( -name '*.json' -o -name '*.trace' \) -type f -mmin +1440 -delete 2>/dev/null || true
-# Key = (dir, normalized command); the snapshot id suffix makes the filename unique
-# per install, so even two identical concurrent commands keep separate state.
-PENDING_KEY=$(compute_pending_key "${KEY_DIR_HASH}" "${COMMAND}")
-# The snapshot id is unique per call (claim_snapshot_id), so the filename is too.
-PENDING_BASE="${PENDING_DIR}/${PENDING_KEY}__${SNAPSHOT_ID}"
+CALL_ID=""
+CALL_ID_LIB="${BASH_SOURCE[0]%/*}/../lib/gates/call-id.sh"
+# shellcheck source=../lib/gates/call-id.sh
+if [[ -r "${CALL_ID_LIB}" ]] && source "${CALL_ID_LIB}" 2>/dev/null; then
+  CALL_ID=$(safedeps_call_id "${INPUT}") || CALL_ID=""
+  CALL_ID_WHY="this hook's input names no tool_use_id"
+else
+  CALL_ID_WHY="the pre-guard could not read ${CALL_ID_LIB}"
+fi
+if [[ -n "${CALL_ID}" ]]; then
+  PENDING_BASE=$(safedeps_call_base "${PENDING_DIR}" "${CALL_ID}")
+else
+  # A call that names no tool_use_id keeps the key from before: the directory
+  # and the command with the inert rewrite normalized out (issue #5), and the
+  # snapshot id, which is unique per call (claim_snapshot_id). The post hook
+  # finds the record by that key only for such a call, and two overlapping
+  # calls of the command can then use each other's record, so it is recorded.
+  PENDING_KEY=$(compute_pending_key "${KEY_DIR_HASH}" "${COMMAND}")
+  PENDING_BASE="${PENDING_DIR}/${PENDING_KEY}__${SNAPSHOT_ID}"
+  log_advisory "pre-guard: ${CALL_ID_WHY}, so the record of this install is kept under its directory and command, and another call of the same command in the same directory can use it. Command: ${COMMAND}"
+fi
 
 # The trace baseline: a file touched now, and the inode of each npm lockfile in
 # the directory the gate reads. npm rewrote node_modules/.package-lock.json on
@@ -6539,9 +6585,10 @@ if [[ "${NPM_TRACE_WANTED}" == true ]]; then
 fi
 CURRENT_STATE=$(jq -n --arg sid "${SNAPSHOT_ID}" --arg pdir "${PROJECT_DIR}" --arg dhash "${DIR_HASH}" \
   --arg from "${PROJECT_DIR_FROM}" --argjson trace "${TRACE_JSON}" --arg attribution "${ATTRIBUTION}" \
-  --argjson fetch "${FETCH_JSON}" \
+  --argjson fetch "${FETCH_JSON}" --arg call "${CALL_ID}" \
   '{snapshot_id: $sid, project_dir: $pdir, dir_hash: $dhash, project_dir_from: $from,
-    npm_trace: $trace, npm_unattributable: $attribution, npm_fetch: $fetch}')
+    npm_trace: $trace, npm_unattributable: $attribution, npm_fetch: $fetch,
+    tool_use_id: (if $call == "" then null else $call end)}')
 write_state_file "${PENDING_BASE}.json" "${CURRENT_STATE}"
 
 if [[ -n "${UPDATED_COMMAND}" ]]; then

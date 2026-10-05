@@ -120,6 +120,14 @@ done
 # block something that works rather than remove something dead. If safedeps ever
 # wants that form, that is a decision about having two registration channels,
 # and AGENTS.md is where it gets made.
+# The post hook is registered for PostToolUseFailure on Claude Code too, and
+# the manual block says so where the installer does.
+grep -q '^  claude: \["PostToolUse", "PostToolUseFailure"\],$' scripts/install/install-safedeps-hooks.mjs \
+  || fail "the installer registers the claude post hook for PostToolUse and PostToolUseFailure"
+for doc in README.md README.ko.md; do
+  grep -A6 '"PostToolUseFailure": \[' "${doc}" | grep -q "${installer_entry} post" \
+    || fail "${doc} registers the entry shim with 'post' for PostToolUseFailure"
+done
 if grep -qE '^\s*script:\s*scripts/safedeps-' SKILL.md; then
   fail "SKILL.md leaves registration to the installer rather than declaring its own"
 fi
@@ -837,7 +845,8 @@ run_hook_command "${tmp_root}/home-compound" "${tmp_root}/safe-compound" "npm in
   || fail "asking npm about an install with a trailing value option makes nothing in the project ($(find "${project_dir}" -maxdepth 1 -name '-*' | paste -sd, -))"
 grep -q "the install's last option takes the next word as its value" "${tmp_root}/safe-compound/advisory.log" \
   || fail "an install npm is not asked about records why"
-# The PostToolUse hook finds the pending state by a key with the flag stripped
+# For a call that names no tool_use_id (these payloads name none), the
+# PostToolUse hook finds the pending state by a key with the flag stripped
 # from the command it receives, which is the rewritten one. The flag can now
 # follow one the command already carried, and a strip that took the blank
 # between them with the first left the second, so the keys differed: the post
