@@ -571,16 +571,12 @@ for glued_form in \
   'dotnet add package Serilog --version 3.1.1;' \
   'go get example.com/m@v1.0.0;' \
   '{ mvn -Dartifact=g:evil:1.0.0 dependency:get}' \
-  '{ mvn -Dartifact=g:evil:1.0.0 dependency:get}&& echo x'
+  '{ mvn -Dartifact=g:evil:1.0.0 dependency:get}&& echo x' \
+  '{ echo a; mvn -Dartifact=g:evil:1.0.0 dependency:get}' \
+  'echo `mvn -Dartifact=g:evil:1.0.0 dependency:get`'
 do
   expect_deny "an install whose last word stands against an operator: ${glued_form}" "${glued_form}"
 done
-# zsh closes a `{` group at a `}` that ends a word and runs what is before it
-# (`{ npm ci}` runs `npm ci`; zsh 5.9, measured). bash and dash refuse that
-# group, so the zsh reading is the one that runs.
-got=$(gate_decision '{ npm ci}')
-[[ "${got}" == allow ]] || fail "an npm install closed by a glued } is read as one (got: ${got})"
-
 # The npm install with its verb against the operator gets `--ignore-scripts`
 # right after the verb, before the operator, as the spaced form gets it after
 # the verb.
@@ -605,6 +601,39 @@ expect_rewrite "npm ci in a subshell"     '(npm ci)'          '(npm ci --ignore-
 expect_rewrite "npm ci in a group"        '{ npm ci;}'        '{ npm ci --ignore-scripts;}'
 expect_rewrite "npm ci before >"          'npm ci>/dev/null'  'npm ci --ignore-scripts>/dev/null'
 expect_rewrite "npm ci in a substitution" 'x=$(npm ci)'       'x=$(npm ci --ignore-scripts)'
+
+# A closing backtick ends the word too: `` echo `npm ci` `` hands npm `ci`. An
+# opening one continues it: `` npm ci`echo x` `` hands npm `cix`, which
+# installs nothing, and a flag after `ci` would make it `npm ci`.
+expect_rewrite "npm ci before a closing backtick" 'echo `npm ci`' 'echo `npm ci --ignore-scripts`'
+expect_rewrite "npm i before a closing backtick"  'x=`npm i`'     'x=`npm i --ignore-scripts`'
+expect_rewrite "npm ci before an opening backtick" 'npm ci`echo x`' '(no rewrite)'
+
+# zsh closes a `{` group at a `}` that ends a word and hands the word before it
+# on (`{ npm ci}` runs `npm ci`; zsh 5.9, measured). bash and dash refuse that
+# group. The flag goes before the `}`, where zsh reads it as the last word:
+# after it, `{ npm ci} --ignore-scripts` is a parse error in zsh and in bash.
+# The rewrites below are read by the shells themselves in
+# scripts/measure/glued-verb-reading.sh (its rewrite columns).
+expect_rewrite "npm ci closed by a glued }"        '{ npm ci}'          '{ npm ci --ignore-scripts}'
+expect_rewrite "npm ci closed by a glued } and &&" '{ npm ci}&& echo x' '{ npm ci --ignore-scripts}&& echo x'
+expect_rewrite "npm ci in backticks closed by a glued }" 'echo `{ npm ci}`' 'echo `{ npm ci --ignore-scripts}`'
+expect_rewrite "npm ci after another statement in the group" '{ echo a; npm ci}' '{ echo a; npm ci --ignore-scripts}'
+# With no group open, zsh refuses the `}` and bash hands npm `ci}`, which npm
+# refuses as a command: no install, and no rewrite that would make it one.
+expect_rewrite "npm ci} outside a group" 'npm ci}'            '(no rewrite)'
+expect_rewrite "npm i} outside a group"  'npm i} ; echo x'    '(no rewrite)'
+# A `}` with a quote or an escape after it is inside the word (`ci}x`), even
+# where the scan view blanks the quote.
+expect_rewrite "npm ci} before a quote"     "npm ci}'x'"       '(no rewrite)'
+expect_rewrite "npm ci} before an escape"   'npm ci}\x'        '(no rewrite)'
+expect_rewrite "npm ci} before a quote in a group" "{ npm ci}'x' ;}" '(no rewrite)'
+expect_pass "npm ci} outside a group, which installs nothing" 'npm ci}'
+expect_pass "a maven goal with a } outside a group, which maven does not know" 'mvn -Dartifact=g:evil:1.0.0 dependency:get}'
+# bash closes this group at the last `}` and runs `npm ci}`; zsh closes it at
+# the glued one and refuses the last. No single rewrite is right for both, so
+# it is undecided, as any command the readings rewrite differently is.
+expect_undecided "a glued } that bash reads as part of the word and zsh as a closer" '{ npm ci}; }'
 
 # What the shell does not end there stays what it is. A `}` inside a word is
 # part of it (`ci}x`), a `-`, `:` or letter after the verb makes another word,

@@ -235,8 +235,9 @@ fi
 
 # --- Where the last word ends ----------------------------------------------------
 # The shell ends a word at a blank and at an operator, so the install's last
-# word against `;`, `&`, `|`, `&&`, `)`, `<` or `>` is the same word as with a
-# blank before the operator. The recognizers ended it only at a blank or the
+# word against `;`, `&`, `|`, `&&`, `)`, `<`, `>` or a closing backtick is the
+# same word as with a blank before the operator, and so it is against a `}`
+# that closes a zsh group. The recognizers ended it only at a blank or the
 # end of the line, and `npm ci; echo x`, `go get;` and `mvn -Dartifact=g:a:1
 # dependency:get;` were no install at all (v2.17.2, 7d66f8c and v2.18.0). For
 # each manager the install is written with its last word against each
@@ -276,6 +277,11 @@ glued_ends=(
   # A visible install is set aside before a pipe into a shell is searched for
   # install text; one left in place read as install text piped into the shell.
   '%C%; cat notes.txt | sh^%C% ; cat notes.txt | sh'
+  # A closing backtick ends the word as an operator does.
+  'echo `%C%`^echo `%C% `'
+  # zsh closes the group at the glued `}` and hands the word before it on;
+  # bash and dash refuse the group.
+  '{ %C%}^{ %C% ;}'
 )
 jobs_dir="${tmp_root}/glued"
 mkdir -p "${jobs_dir}"

@@ -172,29 +172,41 @@ SAFEDEPS_G_INSTALL_BODY="${SAFEDEPS_G_NPM_INSTALL_BODY}\
 |dotnet${SAFEDEPS_G_O}[[:space:]]+package${SAFEDEPS_G_O}[[:space:]]+(add|update)\
 |dotnet${SAFEDEPS_G_O}[[:space:]]+tool${SAFEDEPS_G_O}[[:space:]]+(install|update)"
 
-# Where the shell ends a word: a blank, the end of the line, or an operator
-# (`;`, `&`, `|`, `)`, `<`, `>`). `npm ci; echo x` hands npm the word `ci`, as
-# `npm ci ; echo x` does, and so do `(npm ci)`, `npm ci&&x` and `npm
-# ci>log`. The recognizers used to end the last word only at a blank or the
-# end of the line, so an install whose verb stood against the operator was no
-# install to v2.17.2, 7d66f8c or v2.18.0: no check, no `--ignore-scripts`,
-# and for every manager but npm no later check either (form `npm ci; echo
-# x`, scripts/measure/glued-verb-reading.sh). Read on the scan view, a quoted
-# operator is blank, which ends the word as a blank. So is the backslash of an
-# escaped one (`npm ci\;` reads as `npm ci` and a blank, though the shell
-# hands npm `ci;`): an over-read that predates this end and costs a check or
-# a rewrite of a command that installs nothing. `(` is left out: no shell ends a
-# word there and hands the word before it on (bash refuses `npm ci(`; zsh
-# reads `npm ci()` as defining functions).
+# Where the shell ends a word: a blank, the end of the line, an operator
+# (`;`, `&`, `|`, `)`, `<`, `>`) or a closing backtick. `npm ci; echo x` hands
+# npm the word `ci`, as `npm ci ; echo x` does, and so do `(npm ci)`, `npm
+# ci&&x`, `npm ci>log` and `` echo `npm ci` ``. The recognizers used to end
+# the last word only at a blank or the end of the line, so an install whose
+# verb stood against the operator was no install to v2.17.2, 7d66f8c or
+# v2.18.0: no check, no `--ignore-scripts`, and for every manager but npm no
+# later check either (form `npm ci; echo x`, scripts/measure/glued-verb-reading.sh).
+# Read on the scan view, a quoted operator is blank, which ends the word as a
+# blank. So is the backslash of an escaped one (`npm ci\;` reads as `npm ci`
+# and a blank, though the shell hands npm `ci;`): an over-read that predates
+# this end and costs a check or a rewrite of a command that installs nothing.
+# `(` is left out: no shell ends a word there and hands the word before it on
+# (bash refuses `npm ci(`; zsh reads `npm ci()` as defining functions).
 #
-# A `}` against one of those ends a word too, for zsh: it closes a `{` group
-# there and hands the word before it on (`{ npm ci}` runs `npm ci`, and `{
-# npm ci}&& x` as well; measured on zsh 5.9). bash and dash refuse that group,
-# and outside a group zsh refuses the `}` and bash hands npm `ci}`, which
-# installs nothing, so reading it as an end costs at most a check. A `}`
-# inside a word is the word's (`{ p a}b }` hands `a}b`), and the extractor
-# already blanks a grouping character in a word (guard_word_as_read).
-SAFEDEPS_G_END='[}]?([[:space:];&|)<>]|$)'
+# A pattern cannot tell a closing backtick from an opening one, and an opening
+# one glued to a word continues it: `` npm ci`echo x` `` hands npm `cix`. The
+# recognizers read that as `npm ci`, an over-read that costs a check or a
+# record. The rewrite, which would turn it into a command that runs `npm ci`,
+# reads the backticks before the verb and places no flag there
+# (inert_flag_offsets). An install inside backticks was read before this end
+# too, from the substitution's body; what the end adds is its rewrite.
+#
+# A `}` against one of those ends a word only where zsh closes a `{` group
+# with it: `{ npm ci}` runs `npm ci`, and `{ npm ci}&& x` as well (zsh 5.9,
+# measured). bash and dash refuse that group. Outside a group zsh refuses the
+# `}` and bash hands npm `ci}`, which installs nothing; read as an end there,
+# the rewrite made `npm ci}` into `npm ci --ignore-scripts} --ignore-scripts`,
+# which bash runs as `npm ci` (caught in review). So the lexer
+# decides which `}` closes a group (group_close in the guard's shell_lex): the
+# scan view keeps that one as `}`, and prints a glued `}` that closes nothing
+# as `_`, which ends no word here. A `}` inside a word is the word's (`{ p a}b
+# }` hands `a}b`), and the extractor already blanks a grouping character in a
+# word (guard_word_as_read).
+SAFEDEPS_G_END='[}]?([[:space:];&|)<>`]|$)'
 
 # --- the patterns the gates read --------------------------------------------------
 # Anchored at a statement start. Run these on command_scan_text output, where
@@ -1244,21 +1256,6 @@ safedeps_manager_read_once() {
   SAFEDEPS_G_M_FAMILY=none SAFEDEPS_G_M_KIND=none SAFEDEPS_G_M_LOCALBIN=false
   SAFEDEPS_G_M_ROLE=() SAFEDEPS_G_M_TEXT=()
   for (( j = 0; j < n; j++ )); do SAFEDEPS_G_M_ROLE[j]=-; SAFEDEPS_G_M_TEXT[j]=""; done
-  # A grouping character against the end of a word is \002 in the pieces view,
-  # as one against its start is: the `}` zsh closes a group with (`{ mvn
-  # -Dartifact=g:a:1 dependency:get}` runs the goal, SAFEDEPS_G_END). It is no
-  # part of the word the manager reads, so a command word that ends in one is
-  # still that command. Kept, it hid maven's goal and the artifact went
-  # unchecked. A quoted blank at a word's end is \002 as well, and for a
-  # command word reading it the same way can only add a command and so a
-  # check. An option keeps it: npm reads `"--cache "` as a switch of its own,
-  # so the word after it is the package, and reading it as `--cache` would
-  # take the package for the cache's value. Roles are read from this copy;
-  # the caller's words keep their text.
-  for (( j = 0; j < n; j++ )); do
-    [[ "${w[j]}" != -* ]] || continue
-    while [[ "${w[j]}" == ?*$'\002' ]]; do w[j]="${w[j]%$'\002'}"; done
-  done
 
   # The command word: past grouping, reserved words, assignments, and the
   # prefixes the shell runs the command through (`command`, `exec`, and env

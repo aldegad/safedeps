@@ -460,12 +460,14 @@ shell_lex() {
       #   b  heredoc body (data)         B  live code in an unquoted heredoc body
       #
       # view=scan    quoted text, comments, heredoc operators and bodies blanked;
-      #              an escaped operator is `_`; length-preserving
+      #              an escaped operator is `_`, and so is a glued `}` that closes
+      #              no group (group_close); length-preserving
       #   view=code    comments, heredoc operators and bodies blanked, quotes kept;
       #              length-preserving
       #   view=joined  code view with line continuations removed and every newline
       #              that does not end a statement blanked (a newline in code nested
-      #              in quotes becomes `;`); for text read one line at a time
+      #              in quotes becomes `;`, and a glued `}` that closes a zsh group
+      #              a blank, group_close); for text read one line at a time
       #   view=shell-bodies  the raw lines of heredoc bodies whose command pipes
       #              into something
       #   view=substs  the body of every command substitution, one after another,
@@ -517,6 +519,11 @@ shell_lex() {
       #   `\047` inside "${...}": a quote to bash, a character to zsh and dash.
       #   `$\047...\047`  bash and zsh: an ANSI-C string, where \\047 does not
       #                close it; dash: `$` and a single-quoted string.
+      #   `}` glued to the end of a word, before a blank, an operator, a
+      #                closing backtick or the end: zsh closes an open `{`
+      #                group there and hands the word before it on (`{ p ci}`
+      #                hands `ci`); bash and dash read a character. See
+      #                group_close below.
       #
       # Each site is decided per shell where it stands: zsh read one `((` as a
       # subshell and the next as arithmetic in one command (form M1), which no
@@ -537,7 +544,7 @@ shell_lex() {
         # The bytes any rule below acts on. Every other byte keeps the class of
         # its context and changes nothing, so it is classified without running
         # the rules -- most of a long command is such bytes.
-        split("\\ $ \047 \042 # ( ) < ] } ` c e i ;", sl, " ")
+        split("\\ $ \047 \042 # ( ) < ] { } ` c e i ;", sl, " ")
         for (j in sl) SPC[sl[j]] = 1
         SPC["\n"] = 1
         DQS["\\"] = 1; DQS["\042"] = 1; DQS["$"] = 1; DQS["`"] = 1
@@ -559,6 +566,8 @@ shell_lex() {
           # swallowed the install the zsh reading had split out (caught by the
           # verdict replay).
           if (perline && X[i] == "\n") {
+            for (gl = d; gl >= 1; gl--) group_settle(gl)
+            zg[1] = 0; bg[1] = 0
             mode = ""; d = 1; dq = 0; dc = 1; hn = 0; np = 0; hstop = 0; par[1] = 0
             C[i] = "c"; DEP[i] = 1; continue
           }
@@ -618,7 +627,7 @@ shell_lex() {
             else if (c == "$" && X[i+1] == "(" && X[i+2] == "(") { C[i+1] = "q"; C[i+2] = "q"; arith_or_sub(i, 1) }
             else if (c == "$" && X[i+1] == "(") { C[i+1] = "q"; i++; push("S") }
             else if (c == "$" && X[i+1] == "{") { C[i+1] = "q"; i++; push("V") }
-            else if (c == "`") push("B")
+            else if (c == "`") { push("B"); BQO[i] = 1 }
             continue
           }
           if (top == "H") {
@@ -635,7 +644,7 @@ shell_lex() {
             if (c == "$" && X[i+1] == "(" && X[i+2] == "(") { C[i] = "B"; C[i+1] = "B"; C[i+2] = "B"; arith_or_sub(i, 1); continue }
             if (c == "$" && X[i+1] == "(") { C[i] = "B"; C[i+1] = "B"; i++; push("S"); continue }
             if (c == "$" && X[i+1] == "{") { C[i] = "B"; C[i+1] = "B"; i++; push("V"); continue }
-            if (c == "`") { C[i] = "B"; push("B"); continue }
+            if (c == "`") { C[i] = "B"; push("B"); BQO[i] = 1; continue }
             continue
           }
           cls = (dq > 0) ? "Q" : (hn > 0 ? "B" : "c")
@@ -718,8 +727,10 @@ shell_lex() {
           # read as anywhere else (forms K1, K2).
           if (c == "$" && X[i+1] == "[") { div = 1; if (shd) continue; C[i+1] = cls; i++; push("K"); continue }
           if (c == "$" && X[i+1] == "{") { C[i+1] = cls; i++; push("V"); continue }
-          if (c == "`") { if (top == "B") pop(); else push("B"); continue }
+          if (c == "`") { if (top == "B") pop(); else { push("B"); BQO[i] = 1 }; continue }
           if (top == "V") { if (c == "}") pop(); continue }
+          if (c == "{") { if (group_opens(i)) { zg[d]++; bg[d]++; GO[i] = 1 }; continue }
+          if (c == "}") { group_close(i); continue }
           # A process substitution is a word like `$(...)`: its `)` ends no
           # token (PS marks the parenthesis level it opened, WC its close).
           # So is a glob word: zsh reads a `(` where an argument stands as the
@@ -746,6 +757,7 @@ shell_lex() {
           if (c == "<" && X[i+1] == "<" && X[i+2] != "<" && X[i-1] != "<") { i = heredoc_op(i); continue }
           if (c == "\n") { i = at_newline(i); continue }
         }
+        for (gl = d; gl >= 1; gl--) group_settle(gl)
         if (mode == "SQ" || mode == "AQ" || d > 1 || np > 0) unterm = 1
         flagfile = ENVIRON["SAFEDEPS_LEX_FLAGS"]
         if (flagfile != "" && unterm) print "UNTERM" >> flagfile
@@ -814,7 +826,7 @@ shell_lex() {
       function emit_pieces(   k, a, ln, pln) {
         buf = ""; held = 0; ln = 1; a = 1; pln = 1
         for (k = 1; k <= N; k++) {
-          if (!(k in DROP) && (C[k] == "p" || C[k] == "c" && DEP[k] == 1 && X[k] ~ /[;&|\n]/)) {
+          if (!(k in DROP) && (C[k] == "p" || C[k] == "c" && DEP[k] == 1 && (X[k] ~ /[;&|\n]/ || (k in GC)))) {
             piece(a, k - 1, pln)
             a = k + 1
             if (X[k] == "\n") ln++
@@ -921,6 +933,7 @@ shell_lex() {
 
       function push(k) {
         d++; ctx[d] = k; par[d] = 0; pnp[d] = np; besc[d] = 0; cpat[d] = 0; cpw[d] = 0; adol[d] = 0; glc[d] = 0; cst[d] = i
+        zg[d] = 0; bg[d] = 0; gpn[d] = 0
         if (k == "D") dq++
         if (k == "H") hn++
         if (k != "C") dc++
@@ -931,6 +944,7 @@ shell_lex() {
       # next line as a command (form P7).
       function pop() {
         if (d > 1) {
+          group_settle(d)
           if (ctx[d] == "S" || ctx[d] == "B") send[sid[d]] = besc[d] ? i - 2 : i - 1
           if ((ctx[d] == "S" || ctx[d] == "B") && np > pnp[d]) np = pnp[d]
           if (ctx[d] == "D") dq--
@@ -938,6 +952,89 @@ shell_lex() {
           if (ctx[d] != "C") dc--
           d--
         }
+      }
+      # A `{` group, and the `}` glued to a word that closes one in zsh.
+      #
+      # zsh closes an open `{` group at a `}` that ends a word, when a blank,
+      # an operator, a closing backtick or the end of the text follows it, and
+      # hands the word before it on: `{ p ci}` hands `ci`, `{ p ci}&& q` runs
+      # both, and `{ p ci}}` hands `ci}` (zsh 5.9, measured). With no group
+      # open zsh refuses that `}`. bash and dash never close a group there:
+      # they hand `ci}`, which npm refuses as a command, and a group holding
+      # one is closed only by a later `}` that stands as a word. So
+      #
+      #   - a glued `}` with no zsh group open, or with a word byte after it,
+      #     is a character to every shell that runs it (NC): the scan, live
+      #     and stmts views print it as `_`, so no reader takes `p ci}` for
+      #     `p ci`. Read as an end there, it
+      #     made `npm ci}`, which installs nothing, into `npm ci` through the
+      #     `--ignore-scripts` rewrite (caught in review);
+      #   - one zsh closes a group with (GC) stays `}` in those views, ends
+      #     the statement in the stmts, pieces and cscripts views, is a blank
+      #     in the joined and unprefixed views (their readers take one line
+      #     at a time, and a line read on its own has lost the `{`), and the
+      #     install grammar reads it as an end (SAFEDEPS_G_END). The zsh
+      #     reading marks it at once. bash and dash mark it too when the group
+      #     level holding it ends with a group bash has not closed, since bash
+      #     then refuses that text and runs none of it, so reading it as zsh
+      #     does changes nothing bash runs; otherwise bash runs the word with
+      #     its `}`, marks it NC, and says DIVERGE.
+      #
+      # zg counts the groups zsh has open at this level and bg those bash may
+      # have open. A `}` that stands as a word closes one in zsh wherever it
+      # stands, and is counted as closing one for bash too, though bash closes
+      # only at a command position: counted that way, bg can only be too low,
+      # and too low makes bash run the word, which is the reading that can
+      # only withhold a rewrite (the readings then differ, UNDECIDED). An
+      # opener is a `{` standing as a word where a command starts
+      # (group_opens), read as narrowly as it can be, for the same reason.
+      function group_opens(j,   k, w) {
+        # Right after an opening backtick a word starts too: the shell reads
+        # the backtick body as a command of its own.
+        if (!(wordstart(j) || (j - 1) in BQO) || (j < N && X[j+1] !~ /[ \t\n]/)) return 0
+        k = j - 1
+        while (k >= 1 && (X[k] == " " || X[k] == "\t" || C[k] == "l")) k--
+        if (k < 1) return 1
+        # A substitution opened inside double quotes has its opener classed as
+        # quoted text; a newline that ends a heredoc terminator is body.
+        if (X[k] == "`") return (k in BQO)
+        if (X[k] == "(" && X[k-1] == "$") return 1
+        if (X[k] == "\n") return 1
+        if (C[k] != "c" && C[k] != "Q" && C[k] != "B" && C[k] != "p") return 0
+        if (X[k] == "{") return (k in GO)
+        if (X[k] == ")") return !(k in WC)
+        if (X[k] == "!") return cmdpos(k)
+        if (X[k] == "&" || X[k] == "|") return X[k-1] != ">" && X[k-1] != "<"
+        if (X[k] ~ /[\n;(]/) return 1
+        w = ""
+        while (k >= 1 && X[k] ~ /[a-z]/) { w = X[k] w; k-- }
+        return w ~ /^(if|then|else|elif|while|until|do|time)$/ && cmdpos(k + 1)
+      }
+      function group_close(j,   end) {
+        end = (j == N || X[j+1] ~ /[ \t\n;&|)<>`]/)
+        if (wordstart(j)) {
+          if (end && zg[d] > 0) zg[d]--
+          if (end && bg[d] > 0) bg[d]--
+          return
+        }
+        # Glued to the word before it and closing no group, a `}` is a
+        # character of the word, at its end or inside it (`{ p a}b }` hands `a}b`,
+        # `p ci}\047x\047` hands `ci}x`): NC, whatever follows it. Kept as `}`
+        # inside a word, it read as a word end once the quote after it was
+        # blanked, and the scan view read again was not the scan view.
+        if (!end || zg[d] == 0) { NC[j] = 1; return }
+        zg[d]--
+        if (shz) GC[j] = 1
+        else gpend[d, ++gpn[d]] = j
+      }
+      # The glued `}` bash and dash have left open at level l, decided when
+      # the level ends (see above).
+      function group_settle(l,   q) {
+        for (q = 1; q <= gpn[l]; q++) {
+          if (bg[l] > 0) GC[gpend[l, q]] = 1
+          else { NC[gpend[l, q]] = 1; if (shb) div = 1 }
+        }
+        gpn[l] = 0
       }
       # Whether a word starts at byte j: the byte before it ends a token. That
       # is a question about the token, not the character: a blank or a newline
@@ -1146,6 +1243,12 @@ shell_lex() {
             if (k > N || C[k] == "p" || C[k] == "c" && DEP[k] == 1 && X[k] ~ /[\n;&|()]/) { cscripts_of(W, n); n = 0 }
             continue
           }
+          # A `}` zsh closes a group with ends the word and the statement.
+          if ((k in GC) && C[k] == "c" && DEP[k] == 1) {
+            if (inw) { W[++n] = w; w = ""; inw = 0 }
+            cscripts_of(W, n); n = 0
+            continue
+          }
           inw = 1
           if (k in DROP) continue
           if (k in VAL) w = w VAL[k]
@@ -1226,6 +1329,10 @@ shell_lex() {
             # this view prints as a blank, it would follow a blank, which is
             # where a comment starts (form WB7).
             if (cl == "p" && view == "stmts") put(";")
+            # A glued `}` zsh closes a group with ends the statement; one no
+            # shell closes a group with is a character (group_close).
+            else if (view == "stmts" && (k in GC) && cl == "c" && DEP[k] == 1 && !(k in DROP)) put(";")
+            else if ((k in NC) && (cl == "c" || view == "live" && (cl == "Q" || cl == "B"))) put("_")
             # A statement ends only at a top-level separator: not inside a
             # substitution, an expansion or arithmetic, and not in a
             # redirection operator (`>|`, `<&-`, `2>&1`). command_statements
@@ -1239,7 +1346,7 @@ shell_lex() {
             continue
           }
           if (view == "unprefixed" || view == "unprefixed-lines") {
-            if (!(k in A)) put(cl == "p" ? ";" : cc)
+            if (!(k in A)) put(cl == "p" ? ";" : (k in GC) ? " " : cc)
             continue
           }
           if (view == "code") {
@@ -1248,6 +1355,11 @@ shell_lex() {
             continue
           }
           # joined
+          # A line read on its own no longer holds the `{` a glued `}` closes,
+          # so the `}` is a blank there: the word before it ends, as zsh ends
+          # it (group_close). A `;` would have run into the `;;` that ends a
+          # case arm.
+          if (k in GC) { put(" "); continue }
           if (cl == "l") continue
           if (cl == "m" || cl == "h") { put(" "); continue }
           if (cl == "b") { put(" "); continue }
@@ -1709,8 +1821,8 @@ inert_verb_ends() {
   [[ -n "${matches}" ]] || return 0
   if ! printf '%s\n' "${matches}" | LC_ALL=C awk '
     # safedeps:inert_offsets (scripts/measure/scan-failure-census.sh keys on this line)
-    # The match ends with SAFEDEPS_G_END: an operator or a blank, and a `}` before it, are not the verb.
-    { c = index($0, ":"); m = substr($0, c + 1); s = substr($0, 1, c - 1); if (m ~ /[[:space:];&|)<>]$/) m = substr(m, 1, length(m) - 1); if (m ~ /[}]$/) m = substr(m, 1, length(m) - 1); print s, s + length(m) }'; then
+    # The match ends with SAFEDEPS_G_END: an operator, a backtick or a blank, and a `}` before it, are not the verb.
+    { c = index($0, ":"); m = substr($0, c + 1); s = substr($0, 1, c - 1); if (m ~ /[[:space:];&|)<>`]$/) m = substr(m, 1, length(m) - 1); if (m ~ /[}]$/) m = substr(m, 1, length(m) - 1); print s, s + length(m) }'; then
     [[ -z "${SAFEDEPS_SCAN_MARK:-}" ]] || printf 'failed\n' >> "${SAFEDEPS_SCAN_MARK}"
     return 1
   fi
@@ -1755,8 +1867,9 @@ SAFEDEPS_SHELL_INERT_BYTES='abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ
 # None of those bytes is in the set, and `=` only past a word's start, so a
 # kind of expansion the table forgot still makes its word dynamic. A byte the
 # set leaves out that expands nothing (`~` inside a version range like
-# `foo@~1.2.3`, `^` in `foo@^1.2.3`, a `}` the shell hands npm as a word) costs
-# a record, never a pass.
+# `foo@~1.2.3`, `^` in `foo@^1.2.3`) costs a record, never a pass. A `}` glued
+# to a word that closes no group is `_` in the live view, a character to every
+# shell that runs it, which no shell expands (group_close in shell_lex).
 #
 # Each byte is read in the quoting the shell reads it in. <live> is the
 # statement with redirections, comments and quoted text blanked (the lexer's
@@ -1897,6 +2010,11 @@ inert_flag_offsets() {
     {
       s = $1; e = $2; inside = 0
       for (k = 1; k <= e; k++) if (L[k] == "`") inside = !inside
+      # A backtick against the verb ends it only when it closes a substitution
+      # the verb is in. One that opens a substitution continues the word: `npm
+      # ci`echo x`` hands npm `cix`, which installs nothing, and a flag after
+      # `ci` would make it `npm ci`. Such a match is no verb.
+      if (L[e + 1] == "`" && !inside) { print "x", s, e; next }
       depth = 0; brace = 0; b = 0; dd = 0; unsure = 0
       for (k = e + 1; k <= n; k++) {
         c = L[k]
@@ -1907,9 +2025,16 @@ inert_flag_offsets() {
           if (j > n) { unsure = 1; break }
           k = j; continue
         }
-        # A `}` is not an end: to bash it is an argument (`npm i x } --no-ignore`
-        # hands both words to npm), and zsh, which closes a group with it, will
-        # not parse a word after it, so a flag there runs nothing.
+        # A `}` that stands as a word is not an end: to bash it is an argument
+        # (`npm i x } --no-ignore` hands both words to npm), and zsh, which
+        # closes a group with it, will not parse a word after it, so a flag
+        # there runs nothing. A `}` glued to the end of a word is in the live
+        # view only where zsh closes a group with it (the lexer prints any
+        # other as `_`, group_close), and it ends the statement: the flag goes
+        # before it, where zsh reads it as the last word (`{ npm ci
+        # --ignore-scripts}`). After it, `{ npm ci} --ignore-scripts` is a
+        # parse error in zsh and in bash.
+        if (c == "}" && !depth && !brace && !blank(C[k - 1]) && (k == n || blank(L[k + 1]) || index(";&|)<>`", L[k + 1]))) { b = k; break }
         if (c == "(") { depth++; continue }
         if (c == ")") { if (!depth) { b = k; break }; depth--; continue }
         if (c == "$" && L[k + 1] == "{") { brace++; k++; continue }
@@ -1948,6 +2073,8 @@ inert_flag_offsets() {
   fi
   rm -rf "${dir}"
   while read -r start bound at _ cands; do
+    # A match the end finder read as no verb (an opening backtick against it).
+    [[ "${start}" != x ]] || continue
     # Where no place is read, the statement keeps the floor alone: the flag
     # right after its verb, where the release put it, recorded as a downgrade
     # (` floor`). Its end could not be found (the awk printed `? <start> <verb
