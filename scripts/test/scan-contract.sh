@@ -39,6 +39,15 @@
 #      quote, backslash or dollar: as itself it would open a quote, an escape
 #      or a `$'` region when the scan is read again, and the scan view has to
 #      read the same the second time (caught by the view-property check).
+#      And a `}` glued to the word before it passes as `_` unless it closes a
+#      `{` group. zsh closes one at a glued `}` before a blank, an operator, a
+#      backtick or the end, and hands the word before it on; bash and dash
+#      hand the `}` with the word. Inside a word, or with no group open, it is
+#      a character to every shell that runs it. With one open, the bash
+#      reading keeps it as `}` when bash leaves a group open at that level,
+#      since bash then refuses the text and runs none of it; otherwise it is
+#      `_` there and the zsh reading keeps `}` (DIVERGE). As itself, `npm ci}`
+#      read as `npm ci`, and so did `npm ci}'x'` once its quote was blanked.
 #   3. A quote character that opens or closes a region is itself blanked.
 #   4. Every byte inside a quoted region is blanked, newlines included.
 #   5. A single-quoted region ends at the next single quote, unconditionally.
@@ -154,8 +163,8 @@ reference_spec_scan_text() {
   local mode="" sq_closes="${REF_SQ_CLOSES:-1}"
   # The context stack: T top, D double quotes, S $( or subshell, A arithmetic,
   # K $[, V ${. dq counts the D entries; par counts parentheses per level.
-  local -a ctx=(T) par=(0)
-  local d=0 dq=0
+  local -a ctx=(T) par=(0) zg=(0) bg=(0) pend=("")
+  local d=0 dq=0 q prev next
   for ((i = 0; i < n; i++)); do
     c="${input:i:1}"
     if [[ "${mode}" == "SQ" ]]; then
@@ -174,10 +183,10 @@ reference_spec_scan_text() {
       if [[ "${c}" == "\\" ]]; then ((i++)); [[ ${i} -lt ${n} ]] && output+=" "
       elif [[ "${c}" == '"' ]]; then ((d--)); ((dq--))
       elif [[ "${c}" == '$' && "${input:i+1:2}" == "((" ]]; then
-        if reference_la "${input}" $((i + 3)); then output+="  "; ((i += 2)); ((d++)); ctx[d]=A; par[d]=0
-        else output+=" "; ((i++)); ((d++)); ctx[d]=S; par[d]=0; fi
-      elif [[ "${c}" == '$' && "${input:i+1:1}" == "(" ]]; then output+=" "; ((i++)); ((d++)); ctx[d]=S; par[d]=0
-      elif [[ "${c}" == '$' && "${input:i+1:1}" == "{" ]]; then output+=" "; ((i++)); ((d++)); ctx[d]=V; par[d]=0
+        if reference_la "${input}" $((i + 3)); then output+="  "; ((i += 2)); ((d++)); ctx[d]=A; par[d]=0; zg[d]=0; bg[d]=0; pend[d]=""
+        else output+=" "; ((i++)); ((d++)); ctx[d]=S; par[d]=0; zg[d]=0; bg[d]=0; pend[d]=""; fi
+      elif [[ "${c}" == '$' && "${input:i+1:1}" == "(" ]]; then output+=" "; ((i++)); ((d++)); ctx[d]=S; par[d]=0; zg[d]=0; bg[d]=0; pend[d]=""
+      elif [[ "${c}" == '$' && "${input:i+1:1}" == "{" ]]; then output+=" "; ((i++)); ((d++)); ctx[d]=V; par[d]=0; zg[d]=0; bg[d]=0; pend[d]=""
       fi
       continue
     fi
@@ -200,7 +209,7 @@ reference_spec_scan_text() {
     fi
     if [[ "${c}" == '$' && "${input:i+1:1}" == "'" ]]; then output+="  "; ((i++)); mode=AQ; continue; fi
     if [[ "${c}" == "'" ]]; then output+=" "; mode=SQ; continue; fi
-    if [[ "${c}" == '"' ]]; then output+=" "; ((d++)); ctx[d]=D; par[d]=0; ((dq++)); continue; fi
+    if [[ "${c}" == '"' ]]; then output+=" "; ((d++)); ctx[d]=D; par[d]=0; zg[d]=0; bg[d]=0; pend[d]=""; ((dq++)); continue; fi
     if [[ "${ctx[d]}" == "A" || "${ctx[d]}" == "K" ]]; then
       output+="${keep}"
       if [[ "${ctx[d]}" == "K" ]]; then [[ "${c}" == "]" ]] && ((d--)); continue; fi
@@ -214,28 +223,63 @@ reference_spec_scan_text() {
     # `((` and `$((` are decided where they stand, by the look-ahead bash
     # makes (reference_la): arithmetic, or a subshell -- `$(` and a `(`.
     if [[ "${c}" == '$' && "${input:i+1:2}" == "((" ]]; then
-      if reference_la "${input}" $((i + 3)); then output+="${three}"; ((i += 2)); ((d++)); ctx[d]=A; par[d]=0
-      else output+="${two}"; ((i++)); ((d++)); ctx[d]=S; par[d]=0; fi
+      if reference_la "${input}" $((i + 3)); then output+="${three}"; ((i += 2)); ((d++)); ctx[d]=A; par[d]=0; zg[d]=0; bg[d]=0; pend[d]=""
+      else output+="${two}"; ((i++)); ((d++)); ctx[d]=S; par[d]=0; zg[d]=0; bg[d]=0; pend[d]=""; fi
       continue
     fi
     if [[ "${c}" == "(" && "${input:i+1:1}" == "(" ]]; then
       output+="${two}"; ((i++))
-      if reference_la "${input}" $((i + 1)); then ((d++)); ctx[d]=A; par[d]=0
+      if reference_la "${input}" $((i + 1)); then ((d++)); ctx[d]=A; par[d]=0; zg[d]=0; bg[d]=0; pend[d]=""
       else par[d]=$((par[d] + 2)); fi
       continue
     fi
-    if [[ "${c}" == '$' && "${input:i+1:1}" == "(" ]]; then output+="${two}"; ((i++)); ((d++)); ctx[d]=S; par[d]=0; continue; fi
-    if [[ "${c}" == '$' && "${input:i+1:1}" == "[" ]]; then output+="${two}"; ((i++)); ((d++)); ctx[d]=K; par[d]=0; continue; fi
-    if [[ "${c}" == '$' && "${input:i+1:1}" == "{" ]]; then output+="${two}"; ((i++)); ((d++)); ctx[d]=V; par[d]=0; continue; fi
+    if [[ "${c}" == '$' && "${input:i+1:1}" == "(" ]]; then output+="${two}"; ((i++)); ((d++)); ctx[d]=S; par[d]=0; zg[d]=0; bg[d]=0; pend[d]=""; continue; fi
+    if [[ "${c}" == '$' && "${input:i+1:1}" == "[" ]]; then output+="${two}"; ((i++)); ((d++)); ctx[d]=K; par[d]=0; zg[d]=0; bg[d]=0; pend[d]=""; continue; fi
+    if [[ "${c}" == '$' && "${input:i+1:1}" == "{" ]]; then output+="${two}"; ((i++)); ((d++)); ctx[d]=V; par[d]=0; zg[d]=0; bg[d]=0; pend[d]=""; continue; fi
     output+="${keep}"
     if [[ "${ctx[d]}" == "V" ]]; then [[ "${c}" == "}" ]] && ((d--)); continue; fi
+    # A `{` group: an opener is a `{` word of its own where a command starts.
+    if [[ ${dq} -eq 0 && "${c}" == "{" && "${input:i+1:1}" == [$' \t\n'] ]]; then
+      prev="${input:i-1:1}"
+      if (( i == 0 )) || [[ "${prev}" == [$' \t\n;&|('] ]] && reference_cmdpos "${input}" "${i}"; then
+        zg[d]=$(( ${zg[d]:-0} + 1 )); bg[d]=$(( ${bg[d]:-0} + 1 ))
+      fi
+      continue
+    fi
+    if [[ ${dq} -eq 0 && "${c}" == "}" ]]; then
+      next="${input:i+1:1}"
+      prev="${input:i-1:1}"
+      if (( i == 0 )) || [[ "${prev}" == [$' \t\n;&|()<>'] ]]; then
+        if [[ -z "${next}" || "${next}" == [$' \t\n;&|)<>`'] ]]; then
+          (( ${zg[d]:-0} > 0 )) && zg[d]=$(( zg[d] - 1 ))
+          (( ${bg[d]:-0} > 0 )) && bg[d]=$(( bg[d] - 1 ))
+        fi
+      elif [[ -n "${next}" && "${next}" != [$' \t\n;&|)<>`'] ]] || (( ${zg[d]:-0} == 0 )); then
+        output="${output%?}_"
+      else
+        zg[d]=$(( zg[d] - 1 )); pend[d]+=" $(( ${#output} - 1 ))"
+      fi
+      continue
+    fi
     if [[ "${c}" == "(" ]]; then ((par[d]++))
     elif [[ "${c}" == ")" ]]; then
       if [[ ${par[d]} -gt 0 ]]; then ((par[d]--))
-      elif [[ "${ctx[d]}" == "S" ]]; then ((d--)); fi
+      elif [[ "${ctx[d]}" == "S" ]]; then reference_group_settle; ((d--)); fi
     fi
   done
+  while (( d >= 0 )); do reference_group_settle; d=$((d - 1)); done
   printf '%s' "${output}"
+}
+
+# The glued `}` the bash reading left pending at level d, decided when the level
+# ends: `}` where bash leaves a group open there, `_` otherwise. Reads and
+# writes the caller's locals.
+reference_group_settle() {
+  local q
+  for q in ${pend[d]:-}; do
+    (( ${bg[d]:-0} > 0 )) || output="${output:0:q}_${output:q+1}"
+  done
+  pend[d]=""
 }
 
 reference_scan_text() { reference_spec_scan_text "$@"; }
@@ -432,6 +476,31 @@ check "a line continuation joins the two lines" \
   $'pip \\\ninstall evil' \
   'pip   install evil'
 
+# rule 2: a `}` glued to the end of a word closes a group only in zsh
+check "a glued } with no group open is a character, so npm ci} is no npm ci" \
+  'npm ci}; echo x' \
+  'npm ci_; echo x'
+
+check "a glued } in a group bash leaves open stays }, as zsh closes the group there" \
+  '{ npm ci}&& echo x' \
+  '{ npm ci}&& echo x'
+
+check "a glued } in a group bash closes later is the word's to bash" \
+  '{ npm ci}; }' \
+  '{ npm ci_; }'
+
+check "a } inside a word is a character too; one standing as a word is unchanged" \
+  '{ p a}b }' \
+  '{ p a_b }'
+
+check "a } before a quote is inside the word, so blanking the quote ends nothing" \
+  "npm ci}'x'" \
+  'npm ci_   '
+
+check "a glued } that ends a brace expansion is a character" \
+  'echo {a,b}' \
+  'echo {a,b_'
+
 # rule 7
 check "unterminated single quote blanks the rest" \
   "echo 'npm install evil" \
@@ -463,7 +532,11 @@ pass "case table: ${checks} cases"
 # --- randomized differential --------------------------------------------------
 # The table states the rules; this states that nothing outside the table diverges.
 # The alphabet is weighted toward the characters the rules are about, because
-# uniform ASCII almost never produces a nested or escaped quote.
+# uniform ASCII almost never produces a nested or escaped quote. It holds no
+# brace: the reference states the group rule for the table above, and not the
+# lexer's narrower reading of where a group opens (a `{` after an escape or
+# after the `)` of a substitution opens none); the view properties below run
+# braces through all three readings.
 fuzz_seed="${SAFEDEPS_SCAN_FUZZ_SEED:-20260805}"
 fuzz_cases="${SAFEDEPS_SCAN_FUZZ_CASES:-400}"
 RANDOM="${fuzz_seed}"

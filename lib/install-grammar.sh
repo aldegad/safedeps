@@ -131,9 +131,37 @@ SAFEDEPS_G_START='(^[[:space:]]*|[;&|(][[:space:]]*)'
 # with this, never with a set of its own: the tails used to be
 # `([[:space:]]|$)`, which is not where the shell ends a word, so `npm ci;`,
 # `(npm install)` and `then npm ci; fi` were no install to any recognizer --
-# no check, no `--ignore-scripts`, no pending state.
-SAFEDEPS_G_WORD_END_CLASS='[[:space:];&|()<>]'
-SAFEDEPS_G_END="(${SAFEDEPS_G_WORD_END_CLASS}|\$)"
+# no check, no `--ignore-scripts`, no pending state. For every manager but npm
+# the pre-guard is the only gate, so that was a complete miss (form `npm ci;
+# echo x`, scripts/measure/glued-verb-reading.sh).
+#
+# Read this way, a quoted operator is blank, which ends the word as a blank.
+# So is the backslash of an escaped one (`npm ci\;` reads as `npm ci` and a
+# blank, though the shell hands npm `ci;`): an over-read that predates this
+# end and costs a check or a rewrite of a command that installs nothing.
+#
+# The rewrite reads the same end on the live view, where the code inside a
+# substitution stands too, so a closing backtick ends a word there as well
+# (`` echo `npm ci` `` hands npm `ci`). A pattern cannot tell a closing
+# backtick from an opening one, and an opening one glued to a word continues
+# it: `` npm ci`echo x` `` hands npm `cix`. The recognizers read that as `npm
+# ci`, an over-read that costs a check or a record. The rewrite, which would
+# turn it into a command that runs `npm ci`, reads the backticks before the
+# verb and places no flag there (inert_flag_offsets).
+#
+# A `}` against one of those ends a word only where zsh closes a `{` group
+# with it: `{ npm ci}` runs `npm ci`, and `{ npm ci}&& x` as well (zsh 5.9,
+# measured). bash and dash refuse that group. Outside a group zsh refuses the
+# `}` and bash hands npm `ci}`, which installs nothing; read as an end there,
+# the rewrite made `npm ci}` into `npm ci --ignore-scripts} --ignore-scripts`,
+# which bash runs as `npm ci` (caught in review). So the lexer decides which
+# `}` closes a group (group_close in the guard's shell_lex), from the groups
+# its walk opened: the views keep that one as `}`, and print a glued `}` that
+# closes nothing as `_`, which ends no word here. A `}` inside a word is the
+# word's (`{ p a}b }` hands `a}b`), and the extractor already blanks a
+# grouping character in a word (guard_word_as_read).
+SAFEDEPS_G_WORD_END_CLASS='[[:space:];&|()<>`]'
+SAFEDEPS_G_END="[}]?(${SAFEDEPS_G_WORD_END_CLASS}|\$)"
 
 # Options between a manager and its verb: any number, each with an optional
 # value, plus the bare `--` that ends them. A value can only be told from the verb by trying both readings, which
