@@ -17,6 +17,8 @@ p=argparse.ArgumentParser(description=__doc__)
 p.add_argument('--core',required=True)
 p.add_argument('--report',required=True)
 p.add_argument('--only')
+p.add_argument('--implementation',choices=['bash','rust'],default='rust')
+p.add_argument('--no-reorg',action='store_true',help='Leave reorg.log absent before the existing fixture')
 p.add_argument('--expect-difference',action='store_true')
 p.add_argument('--expect-oracle-text',help='Required diagnostic substring for a source-mutation run')
 a=p.parse_args()
@@ -31,10 +33,14 @@ oracle_init "$BOX/oracle"
 payload=$(cat "$BOX/payload.json")
 call="$BOX/oracle/call"
 mkdir -p "$call"
-: > "$call/native-owner-source"
+[[ "$IMPLEMENTATION" != rust ]] || : > "$call/native-owner-source"
 oracle_before "$call" "$payload"
-request=$(jq -cn --arg input "$payload" '{op:"hook",input:$input}')
-out=$(printf '%s' "$request" | "$CORE" post-probe)
+if [[ "$IMPLEMENTATION" == bash ]]; then
+  out=$(printf '%s' "$payload" | "$ROOT/scripts/safedeps-post-verify.sh")
+else
+  request=$(jq -cn --arg input "$payload" '{op:"hook",input:$input}')
+  out=$(printf '%s' "$request" | "$CORE" post-probe)
+fi
 rc=$?
 printf '%s\\n' "$out" > "$BOX/hook.out"
 printf '%s\\n' "$rc" > "$BOX/hook.rc"
@@ -51,7 +57,8 @@ with tempfile.TemporaryDirectory(prefix='core-post-oracle.') as tmp:
         d=box/'case';shutil.rmtree(d,ignore_errors=True)
         home=d/'state';project=d/'project'
         (home/'rollback-journal').mkdir(parents=True);(home/'snapshots').mkdir();project.mkdir()
-        (home/'advisory.log').touch();(home/'reorg.log').touch()
+        (home/'advisory.log').touch()
+        if not a.no_reorg:(home/'reorg.log').touch()
         if shape!='empty':
             entry=dict(journal_id='j',project_dir=str(project),rollback_snapshot='seed-snapshot',reasons='fixture',stage='removing-node-modules',opened_at='2001-02-03T04:05:06Z',stage_at='2001-02-03T04:05:17Z')
             if shape!='no-pid': entry['pid']='2147483647'
@@ -72,9 +79,9 @@ with tempfile.TemporaryDirectory(prefix='core-post-oracle.') as tmp:
                 if shape=='snapshot-link':
                     (project/'target.json').write_text('{}');target.symlink_to('target.json')
         (d/'payload.json').write_text(json.dumps(dict(tool_name='Bash',tool_input=dict(command='true'),cwd=str(project),tool_use_id='oracle-call')))
-        env=dict(os.environ,ROOT=str(root),CORE=core,BOX=str(d),SAFEDEPS_HOME=str(home),LC_ALL='C')
+        env=dict(os.environ,ROOT=str(root),CORE=core,BOX=str(d),SAFEDEPS_HOME=str(home),LC_ALL='C',IMPLEMENTATION=a.implementation)
         result=subprocess.run(['bash',str(script)],env=env,capture_output=True,text=True,timeout=30)
-        rows.append(dict(name=shape,rc=result.returncode,oracle_stdout=result.stdout,oracle_stderr=result.stderr,
+        rows.append(dict(name=shape,implementation=a.implementation,reorg_exists_after=(home/'reorg.log').exists(),rc=result.returncode,oracle_stdout=result.stdout,oracle_stderr=result.stderr,
                          hook_rc=int((d/'hook.rc').read_text()) if (d/'hook.rc').exists() else None,
                          hook_stdout=(d/'hook.out').read_text() if (d/'hook.out').exists() else None))
         print(('ok' if result.returncode==0 else 'FAIL'),shape,flush=True)
