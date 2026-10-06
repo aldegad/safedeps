@@ -33,7 +33,7 @@ shift
 hash) shift; safedeps_ledger_hash "$@" ;;
 check) shift; safedeps_ledger_check "$@" ;;
 index) safedeps_ledger_effect_index "${3:-}" ;;
-misses) safedeps_ledger_effect_check_batch "$2" "$4" "${3:-}" ;;
+misses) if safedeps_ledger_effect_check_batch "$2" "$4" "${3:-}"; then exit 0; else exit $?; fi ;;
 esac
 ''')
     def key(eco, pkg, version, context=''):

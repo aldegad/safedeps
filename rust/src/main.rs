@@ -411,6 +411,10 @@ fn main() {
             Some(input) => ledger::main(&args[2..], &input),
             None => 1,
         },
+        Some("ask-probe") => match read_stdin() {
+            Some(input) => ask::probe(&input),
+            None => 2,
+        },
         Some("json-stream") => match read_stdin() {
             Some(input) => {
                 let stream = json::read(&input);

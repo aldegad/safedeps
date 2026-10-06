@@ -5,6 +5,8 @@ use crate::{ere::Regex, jq, json::{self, Value}, manager, os};
 use std::{ffi::{OsStr}, fs::{self, File}, io, os::unix::{ffi::{OsStrExt, OsStringExt}, fs::PermissionsExt, process::ExitStatusExt}, path::{Path, PathBuf}, process::{Child, Command, Stdio}, time::{Duration, Instant}};
 
 type W = Vec<u8>;
+mod fetch;
+pub use fetch::{fetch_known_problems, fetch_origin, fetch_origins, fetch_problems, host, registry_public, Origin};
 pub const PRE_SECONDS: u64 = 8;
 pub const POST_SECONDS: u64 = 10;
 
@@ -218,4 +220,47 @@ pub fn install_target(dir: &Path, until: Instant, env: &[W], args: &[W]) -> Targ
     if a[2].status != 0 && a[2].stderr.windows(13).any(|w| w == b"ENOWORKSPACES") { fetch = fetch_facts(&os::path(&prefix), until, env, &words); }
     let location = fs::canonicalize(os::path(&prefix)).map(|p| p.into_os_string().into_vec()).unwrap_or(prefix);
     Target { location, fetch }
+}
+
+/// Measurement-only entry. Hook callers use the typed functions above; this
+/// entry accepts data, never a shell program, and calls the same implementation.
+pub fn probe(input: &[u8]) -> i32 {
+    let Ok(v) = json::parse_one(input) else { return 5; };
+    let get = |k| v.get(k).and_then(Value::as_str).unwrap_or("");
+    let words = |k| -> Option<Vec<W>> {
+        match v.get(k) {
+            None => Some(Vec::new()),
+            Some(Value::Arr(a)) => a.iter().map(Value::as_bytes).collect(),
+            _ => None,
+        }
+    };
+    let Some(env) = words("env") else { return 2; };
+    let Some(args) = words("args") else { return 2; };
+    let millis = v.get("milliseconds").and_then(|v| match v { Value::Num(n) => n.parse::<u64>().ok(), _ => None }).unwrap_or(8000).min(10_000);
+    let until = Instant::now() + Duration::from_millis(millis);
+    let dir = Path::new(get("dir"));
+    let result = match get("op") {
+        "target" => {
+            let answer = install_target(dir, until, &env, &args);
+            println!("{}\n{}", jq::text(&answer.location), jq::compact(&jq::from_value(&answer.fetch)));
+            return 0;
+        }
+        "fetch" => fetch_facts(dir, until, &env, &args),
+        "query" => match query(dir, until) {
+            Ok(answer) => { use std::io::Write; let _ = std::io::stdout().write_all(&answer.stdout); return 0; }
+            Err(why) => { println!("{}", why); return 1; }
+        },
+        "host" => Value::Str(host(get("url")).into_bytes()),
+        "public" => Value::Bool(registry_public(v.get("registry"), v.get("facts").unwrap_or(&Value::Null))),
+        "origins" => match fetch_origins(v.get("facts").unwrap_or(&Value::Null), get("url")) {
+            Ok(origins) => Value::Arr(origins.iter().map(Origin::value).collect()), Err(()) => return 5,
+        },
+        "problems" | "known-problems" => {
+            let facts = v.get("facts").unwrap_or(&Value::Null);
+            let answer = if get("op") == "problems" { fetch_problems(facts,get("url")) } else { fetch_known_problems(facts,get("url")) };
+            match answer { Ok(problems) => Value::Arr(problems.into_iter().map(|s| Value::Str(s.into_bytes())).collect()), Err(()) => return 5 }
+        }
+        _ => return 2,
+    };
+    println!("{}", jq::compact(&jq::from_value(&result))); 0
 }
