@@ -138,10 +138,12 @@ mkdir -p "${tree}" || die "cannot create ${tree}"
 tar -xf "${archive}" -C "${tree}" || die "cannot unpack the archive"
 
 # --- units ------------------------------------------------------------------------
-# <unit> <weight> <seconds>, longest first.
+# <unit> <weight> <seconds>, the most CPU-seconds (weight times seconds) first.
+# Ordered by seconds alone, the units that fill a whole host waited behind the
+# single-CPU ones and ran last, alone, after the hosts had emptied.
 bash "${tree}/scripts/test/run-all.sh" --plan ${set_flag} > "${work}/plan" 2>"${work}/plan.err" \
   || die "run-all.sh --plan failed: $(head -c 200 "${work}/plan.err")"
-sort -k3,3nr -k1,1 "${work}/plan" > "${work}/plan.sorted"
+awk '{ print $1, $2, $3, $2 * $3 }' "${work}/plan" | sort -k4,4nr -k1,1 > "${work}/plan.sorted"
 U_NAME=() U_WEIGHT=() U_STATE=() U_HOST=() U_START=()
 while read -r unit weight _; do
   if [[ -n "${only}" ]]; then
