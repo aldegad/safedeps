@@ -160,42 +160,6 @@ fn env_bytes(name: &str) -> W {
     std::env::var_os(name).map(|v| v.into_vec()).unwrap_or_default()
 }
 
-/// `safedeps_truth_sources_moved_list`, joined with blanks. Empty when the run
-/// uses the canonical sources.
-fn truth_sources_moved() -> W {
-    fn put(moved: &mut Vec<W>, label: &str, value: &[u8]) {
-        let mut m = format!("{}=", label).into_bytes();
-        m.extend_from_slice(value);
-        moved.push(m);
-    }
-    fn url(moved: &mut Vec<W>, name: &str, default: &str, label: &str) {
-        let v = env_bytes(name);
-        if !v.is_empty() && v != default.as_bytes() {
-            put(moved, label, &v);
-        }
-    }
-    fn named(moved: &mut Vec<W>, name: &str, label: &str) {
-        let v = env_bytes(name);
-        if !v.is_empty() {
-            put(moved, label, &v);
-        }
-    }
-    let mut moved: Vec<W> = Vec::new();
-    url(&mut moved, "SAFEDEPS_OSV_API_URL", "https://api.osv.dev/v1/query", "osv");
-    url(&mut moved, "SAFEDEPS_OSV_BATCH_API_URL", "https://api.osv.dev/v1/querybatch", "osv-batch");
-    url(&mut moved, "SAFEDEPS_KEV_CATALOG_URL", "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json", "kev");
-    url(&mut moved, "SAFEDEPS_GHSA_API_URL", "https://api.github.com/advisories", "ghsa");
-    named(&mut moved, "SAFEDEPS_NPM_CLOSURE_FIXTURE_JSON", "npm-closure-fixture");
-    named(&mut moved, "SAFEDEPS_YARN_INFO_FIXTURE_NDJSON", "yarn-info-fixture");
-    if !env_bytes("SAFEDEPS_NPM_OVERRIDES_JSON").is_empty() {
-        put(&mut moved, "npm-overrides", b"set");
-    }
-    named(&mut moved, "SAFEDEPS_RECHECK_FIXTURE_JSON", "recheck-fixture");
-    url(&mut moved, "SAFEDEPS_LEDGER_DEFAULT_TTL_DAYS", "30", "ledger-ttl-days");
-    named(&mut moved, "SAFEDEPS_NPM_TEST_REGISTRY", "npm-test-registry");
-    moved.join(&b' ')
-}
-
 // ---- the judgment ------------------------------------------------------------------
 
 struct Call {
@@ -473,7 +437,7 @@ pub fn main(input: &[u8]) -> i32 {
     }
 
     // `safedeps_guard_announce_truth_sources`
-    let moved = truth_sources_moved();
+    let moved = state::truth_sources_moved();
     if !moved.is_empty() {
         state::log_advisory(
             &guard_dir,
