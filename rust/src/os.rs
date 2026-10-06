@@ -26,10 +26,24 @@ struct Tm {
 }
 
 extern "C" {
+    fn access(path: *const std::ffi::c_char, mode: i32) -> i32;
     fn mkdtemp(template: *mut std::ffi::c_char) -> *mut std::ffi::c_char;
     fn umask(mask: u32) -> u32;
     fn kill(pid: i32, sig: i32) -> i32;
     fn localtime_r(t: *const i64, tm: *mut Tm) -> *mut Tm;
+}
+
+/// The hook shell's -r test, including ACLs and symlink targets.
+pub fn readable(path: &Path) -> bool {
+    accessible(path,4)
+}
+pub fn executable(path: &Path) -> bool {
+    accessible(path,1)
+}
+fn accessible(path: &Path,mode:i32) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(path)=std::ffi::CString::new(path.as_os_str().as_bytes()) else { return false };
+    unsafe { access(path.as_ptr(),mode)==0 }
 }
 
 /// Exclusively claim a scratch directory using libc's mkdtemp, as the shell
