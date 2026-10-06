@@ -19,7 +19,7 @@ import time
 p=argparse.ArgumentParser(description=__doc__)
 p.add_argument('--core',required=True)
 p.add_argument('--report')
-p.add_argument('--only')
+p.add_argument('--only', help='Comma-separated row names')
 p.add_argument('--control-journal-opened', action='store_true', help='Change the reported opening date to the seeded stage date')
 p.add_argument('--expect-difference', action='store_true')
 a=p.parse_args()
@@ -79,7 +79,7 @@ rows=[]
 clock_slots={}
 SEEDED_OPENED='2001-02-03T04:05:06Z'
 SEEDED_STAGE='2001-02-03T04:05:17Z'
-def wanted(name): return not a.only or name==a.only
+def wanted(name): return not a.only or name in a.only.split(',')
 def epoch(text):
     try: return int(datetime.datetime.strptime(text,'%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=datetime.timezone.utc).timestamp())
     except ValueError: return None

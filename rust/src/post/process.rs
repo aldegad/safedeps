@@ -13,7 +13,9 @@ fn info(pid:i32)->Option<(Vec<u8>,i64)>{
         comm:[u8;16],name:[u8;32],nfiles:u32,pgid:u32,jobc:u32,tdev:u32,tpgid:u32,nice:i32,start_sec:u64,start_usec:u64}
     extern "C" {fn proc_pidinfo(pid:i32,flavor:i32,arg:u64,buffer:*mut std::ffi::c_void,size:i32)->i32;}
     let mut b: Bsd=unsafe{std::mem::zeroed()};let size=std::mem::size_of::<Bsd>() as i32;
-    if unsafe{proc_pidinfo(pid,3,0,&mut b as *mut _ as *mut _,size)}!=size{return None}
+    // PROC_PIDTBSDINFO needs nonzero arg to include zombies. xnu's
+    // bsd/kern/proc_info.c sets findzomb only when this arg is nonzero.
+    if unsafe{proc_pidinfo(pid,3,1,&mut b as *mut _ as *mut _,size)}!=size{return None}
     let mut status=vec![match b.status{4=>b'T',5=>b'Z',_=>b'R'}];
     // ps/print.c state(), with PROC_FLAG_* from sys/proc_info.h.
     // https://github.com/apple-oss-distributions/adv_cmds/blob/main/ps/print.c
