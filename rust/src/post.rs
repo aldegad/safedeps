@@ -4,6 +4,7 @@
 
 mod jv;
 mod sh;
+pub use sh::fnmatch as shell_pattern_matches;
 mod closure;
 mod report;
 mod workspaces;
