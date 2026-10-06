@@ -4,7 +4,7 @@
 # One build, two callers. A checkout builds its own binary with this script
 # (the installer runs it, and so does release step 7 after main moves), and
 # the publish job builds the three binaries the package ships with it. No
-# binary is committed: bin/native/ is ignored by git.
+# binary is committed: the root .gitignore names bin/native/.
 #
 #   scripts/build-core.sh                    this machine's binary, from this
 #                                            checkout's source
@@ -25,9 +25,19 @@
 #     the checkout's source when a hook starts, and does not judge from a
 #     source it was not built from. --locked matters for that too: a cargo
 #     that rewrote Cargo.lock would change the hash under the binary.
-#   - The binary replaces the old one by rename, never by writing over it: a
-#     hook may be running the old file, and macOS kills a process whose
-#     executable was written under it.
+#   - The binary is the file cargo names in its own report of the build
+#     (--message-format=json), never a path this script assumes: with
+#     CARGO_TARGET_DIR or build.target-dir set, cargo writes elsewhere, and a
+#     file left at the assumed path is an older build.
+#   - The new binary is checked before it takes the old one's place, as a
+#     file beside it: its header names the target, and where this machine can
+#     run it, it prints its version, a stamp of this build's kind, and
+#     `stamp --check` says ok. Only then does it replace the old one, by
+#     rename, never by writing over it: a hook may be running the old file,
+#     and macOS kills a process whose executable was written under it. A
+#     check that fails leaves the old binary as it was. A binary for another
+#     machine is checked as far as its header and is said to be built and not
+#     run.
 #
 # --publish marks the stamp `publish`. Such a binary ships in a package that
 # has no rust/ directory, so it has no source to check itself against and does
@@ -100,7 +110,7 @@ while [[ $# -gt 0 ]]; do
       [[ $# -ge 2 ]] || stop "--sums needs a file"
       sums="$2"
       shift ;;
-    -h|--help) sed -n '2,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) awk 'NR > 1 && !/^#/ { exit } NR > 1 { sub(/^# ?/, ""); print }' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) stop "unknown argument $1 (see --help)" ;;
   esac
   shift
@@ -110,6 +120,8 @@ done
   || stop "${CRATE_DIR}/Cargo.toml is not there. An installed package has no source to build from; it ships its binaries. Reinstall the package instead."
 command -v cargo >/dev/null 2>&1 \
   || stop "cargo is not on PATH, so the core cannot be built from this checkout. Install Rust (https://rustup.rs), or install the published package, which ships built binaries."
+command -v jq >/dev/null 2>&1 \
+  || stop "jq is not on PATH. The build reads which file cargo built from cargo's own JSON report, and safedeps' hooks need jq as well."
 
 if [[ ${#targets[@]} -eq 0 ]]; then
   host=$(host_target) || stop "bash reports ${BASH_VERSINFO[5]:-no machine}, and safedeps builds no binary for it (darwin-arm64, darwin-x64, linux-x64)"
@@ -126,42 +138,60 @@ packages=$(grep -c '^\[\[package\]\]' "${CRATE_DIR}/Cargo.lock" || true)
 printf 'build-core: %s, %s\n' "$(cargo --version)" "$(rustc --version 2>/dev/null || printf 'rustc did not answer')"
 printf 'build-core: a %s build for %s\n' "${kind}" "${targets[*]}"
 
+# The first bytes of a binary name its format and its machine: Mach-O 64
+# (cf fa ed fe) with the CPU type that follows, or 64-bit ELF (7f 45 4c 46 02)
+# with x86-64 (3e 00) as e_machine at byte 18.
+header_names() { # <file> <target>
+  local head
+  head=$(od -An -tx1 -N20 "$1" 2>/dev/null | tr -d ' \n') || return 1
+  case "$2" in
+    aarch64-apple-darwin) [[ "${head:0:16}" == cffaedfe0c000001 ]] ;;
+    x86_64-apple-darwin) [[ "${head:0:16}" == cffaedfe07000001 ]] ;;
+    x86_64-unknown-linux-musl) [[ "${head:0:10}" == 7f454c4602 && "${head:36:4}" == 3e00 ]] ;;
+    *) return 1 ;;
+  esac
+}
+
+host=$(host_target) || host=""
 [[ -z "${sums}" ]] || : > "${sums}"
 for target in "${targets[@]}"; do
   platform=$(platform_of "${target}")
   # The stamp's kind is read by rust/build.rs from this one variable, and only
   # here is it set. The musl target links with the linker the toolchain
-  # ships, so the build needs no C toolchain for Linux on a Mac.
-  ( cd "${CRATE_DIR}" \
+  # ships, so the build needs no C toolchain for Linux on a Mac. cargo's
+  # report goes to a file; its diagnostics still reach the terminal.
+  report=$(mktemp "${TMPDIR:-/tmp}/safedeps-build-core.XXXXXX") || stop "could not make a file for cargo's report"
+  if ! ( cd "${CRATE_DIR}" \
       && SAFEDEPS_CORE_BUILD_KIND="${kind}" CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=rust-lld \
-         cargo build --release --locked --offline --target "${target}" ) \
-    || stop "cargo build failed for ${target}. --offline: a crate that had to be fetched fails here. A cross target also needs its standard library (rustup target add ${target})."
-  built="${CRATE_DIR}/target/${target}/release/safedeps-core"
-  [[ -f "${built}" ]] || stop "cargo left no binary at ${built}"
-  mkdir -p "${NATIVE_DIR}/${platform}"
-  staged=$(mktemp "${NATIVE_DIR}/${platform}/.safedeps-core.XXXXXX")
-  if ! { cp "${built}" "${staged}" && chmod 755 "${staged}" && mv -f "${staged}" "${NATIVE_DIR}/${platform}/safedeps-core"; }; then
-    rm -f "${staged}"
-    stop "could not place the binary in ${NATIVE_DIR}/${platform}"
+         cargo build --release --locked --offline --target "${target}" --message-format=json-render-diagnostics ) > "${report}"; then
+    rm -f "${report}"
+    stop "cargo build failed for ${target}. --offline: a crate that had to be fetched fails here. A cross target also needs its standard library (rustup target add ${target})."
   fi
+  built=$(jq -r 'select(.reason == "compiler-artifact" and .target.name == "safedeps-core" and (.target.kind | any(. == "bin"))) | .executable // empty' "${report}") \
+    || { rm -f "${report}"; stop "cargo's report of the ${target} build could not be read"; }
+  rm -f "${report}"
+  [[ -n "${built}" && "${built}" != *$'\n'* ]] \
+    || stop "cargo's report of the ${target} build does not name one safedeps-core binary (it named: ${built:-none})"
+  [[ -f "${built}" ]] || stop "cargo named ${built} as the binary it built for ${target}, and no file is there"
+
+  mkdir -p "${NATIVE_DIR}/${platform}"
+  staged=$(mktemp "${NATIVE_DIR}/${platform}/.safedeps-core.XXXXXX") || stop "could not make a file in ${NATIVE_DIR}/${platform}"
+  discard() { rm -f "${staged}"; stop "$1 The binary that was at bin/native/${platform}/safedeps-core is as it was."; }
+  { cp "${built}" "${staged}" && chmod 755 "${staged}"; } || discard "could not copy ${built} beside the binary."
+  header_names "${staged}" "${target}" || discard "${built} does not start with the header of a ${target} binary."
+  if [[ "${target}" == "${host}" ]]; then
+    version=$("${staged}" version) || discard "the binary built for ${target} does not run."
+    stamp=$("${staged}" stamp) || discard "the binary built for ${target} does not print its stamp."
+    [[ "${stamp%% *}" == "${kind}" ]] || discard "the binary's stamp says ${stamp%% *}, and this was a ${kind} build."
+    check=$("${staged}" stamp --check 2>&1) || discard "the binary's stamp check failed: ${check}"
+    [[ "${check}" == ok ]] || discard "the binary's stamp check said: ${check}"
+    ran="ran: ${version}, stamp ${stamp}, stamp --check ok"
+  else
+    ran="built and not run: this machine runs ${host:-a platform safedeps builds nothing for}; its header names ${target}"
+  fi
+  mv -f "${staged}" "${NATIVE_DIR}/${platform}/safedeps-core" || discard "could not move the checked binary into place."
   digest=$(sha256_of "${NATIVE_DIR}/${platform}/safedeps-core")
   printf 'build-core: bin/native/%s/safedeps-core %s\n' "${platform}" "${digest}"
+  printf 'build-core: %s\n' "${ran}"
   [[ -z "${sums}" ]] || printf '%s  %s/safedeps-core\n' "${digest}" "${platform}" >> "${sums}"
 done
-
-# Read back the binary this machine can run: its version, its stamp, and for
-# a checkout build that the stamp is the source it was just built from.
-if host=$(host_target) && host_platform=$(platform_of "${host}") && [[ " ${targets[*]} " == *" ${host} "* ]]; then
-  core="${NATIVE_DIR}/${host_platform}/safedeps-core"
-  version=$("${core}" version) || stop "the built binary does not run: ${core}"
-  stamp=$("${core}" stamp) || stop "the built binary does not print its stamp: ${core}"
-  printf 'build-core: %s, stamp %s\n' "${version}" "${stamp}"
-  [[ "${stamp%% *}" == "${kind}" ]] || stop "the binary's stamp says ${stamp%% *}, and this was a ${kind} build"
-  if [[ "${kind}" == checkout ]]; then
-    check=$("${core}" stamp --check 2>&1) || stop "the built binary does not match the source it was built from: ${check}"
-    [[ "${check}" == ok ]] || stop "the built binary's stamp check said: ${check}"
-    printf 'build-core: the stamp matches rust/ as it is now\n'
-  fi
-else
-  printf 'build-core: no binary for this machine was built, so none was run\n'
-fi
