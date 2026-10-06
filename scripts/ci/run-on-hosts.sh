@@ -48,13 +48,16 @@
 #
 # The host file has one host per line, fields separated by `|`, `#` comments:
 #
-#   name|ssh destination|ssh options|cpus|queue|PATH prefix|runs directory
+#   name|ssh destination|ssh options|cpus|queue|PATH prefix|runs directory[|holds]
 #
 # cpus is how many CPUs of the host the run may keep busy; queue is the
 # command that takes the host's slot, given an owner name and a command, or
 # `-` for none; the PATH prefix may use $HOME and is put before the host's PATH
-# for every unit; the runs directory is relative to the remote home. See
-# scripts/ci/test-hosts.example. The file stays outside the repository: host
+# for every unit; the runs directory is relative to the remote home; holds is
+# how many slots of the queue the run takes, 1 when it is left out. A queue
+# with two slots lets one other suite share the host with a run that holds
+# one; a run that holds both has the host to itself, and starts its units
+# there only once it holds both. See scripts/ci/test-hosts.example. The file stays outside the repository: host
 # addresses are not for a public tree.
 set -uo pipefail
 
@@ -87,10 +90,13 @@ done
 
 # --- hosts ------------------------------------------------------------------------
 [[ -r "${hosts_file}" ]] || die "no host file at ${hosts_file} (see scripts/ci/test-hosts.example)"
-H_NAME=() H_DEST=() H_OPTS=() H_CPUS=() H_QUEUE=() H_PATH=() H_DIR=()
-while IFS='|' read -r name dest opts cpus queue path dir extra; do
+H_NAME=() H_DEST=() H_OPTS=() H_CPUS=() H_QUEUE=() H_PATH=() H_DIR=() H_HOLDS=()
+while IFS='|' read -r name dest opts cpus queue path dir holds extra; do
   [[ -n "${name}" && "${name}" != \#* ]] || continue
-  [[ -z "${extra}" && -n "${dir}" ]] || die "host ${name}: a line has seven fields"
+  [[ -z "${extra}" && -n "${dir}" ]] || die "host ${name}: a line has seven fields, or eight with holds"
+  holds="${holds:-1}"
+  [[ "${holds}" =~ ^[1-9]$ ]] || die "host ${name}: holds is a number of queue slots, 1 to 9"
+  [[ "${queue}" != - || "${holds}" == 1 ]] || die "host ${name}: a host with no queue has no slots to hold"
   [[ "${name}" =~ ^[a-z][a-z0-9-]*$ ]] || die "host name ${name}: lower-case letters, digits and dashes"
   [[ "${cpus}" =~ ^[1-9][0-9]*$ ]] || die "host ${name}: cpus must be a whole number"
   [[ "${dir}" =~ ^[A-Za-z0-9._/-]+$ && "${dir}" != /* && "${dir}" != *..* ]] \
@@ -99,7 +105,7 @@ while IFS='|' read -r name dest opts cpus queue path dir extra; do
     case ",${pick}," in *",${name},"*) ;; *) continue ;; esac
   fi
   H_NAME+=("${name}") H_DEST+=("${dest}") H_OPTS+=("${opts}") H_CPUS+=("${cpus}")
-  H_QUEUE+=("${queue}") H_PATH+=("${path}") H_DIR+=("${dir}")
+  H_QUEUE+=("${queue}") H_PATH+=("${path}") H_DIR+=("${dir}") H_HOLDS+=("${holds}")
 done < "${hosts_file}"
 (( ${#H_NAME[@]} > 0 )) || die "no host named in ${hosts_file}${pick:+ matches ${pick}}"
 if [[ -n "${pick}" ]]; then
@@ -214,13 +220,16 @@ for (( h = 0; h < ${#H_NAME[@]}; h++ )); do
     run="${H_RUN[h]}"
     ssh_host "${h}" "mkdir -p ${run}/tree ${run}/out && tar -x -C ${run}/tree" < "${archive}" || exit 1
     printf '%s\n' "${H_PATH[h]}" | ssh_host "${h}" "cat > ${run}/path" || exit 1
-    if [[ "${H_QUEUE[h]}" == - ]]; then
-      holder="bash ${run}/tree/scripts/ci/remote.sh hold ${run}"
-    else
-      holder="${H_QUEUE[h]} safedeps-ci-${run_id} bash ${run}/tree/scripts/ci/remote.sh hold ${run}"
-    fi
-    ssh_host "${h}" "nohup ${holder} > ${run}/hold.log 2>&1 < /dev/null & echo \$! > ${run}/queue.pid; uptime" \
-      > "${work}/ship-${H_NAME[h]}.out" 2>&1 || exit 1
+    holders=""
+    for (( k = 1; k <= H_HOLDS[h]; k++ )); do
+      if [[ "${H_QUEUE[h]}" == - ]]; then
+        holder="bash ${run}/tree/scripts/ci/remote.sh hold ${run} ${k}"
+      else
+        holder="${H_QUEUE[h]} safedeps-ci-${run_id}-${k} bash ${run}/tree/scripts/ci/remote.sh hold ${run} ${k}"
+      fi
+      holders+="nohup ${holder} > ${run}/hold-${k}.log 2>&1 < /dev/null & echo \$! > ${run}/queue-${k}.pid; "
+    done
+    ssh_host "${h}" "${holders}uptime" > "${work}/ship-${H_NAME[h]}.out" 2>&1 || exit 1
   ) &
   ship_pid[h]=$!
 done
@@ -228,7 +237,7 @@ for (( h = 0; h < ${#H_NAME[@]}; h++ )); do
   if wait "${ship_pid[h]}"; then
     H_STATE[h]=queued H_SEEN[h]=$(now)
     H_LOAD0[h]=$(sed -E -n 's/.*load averages?: *//p' "${work}/ship-${H_NAME[h]}.out" | tr -d ',' | tail -n 1)
-    event "${H_NAME[h]}: shipped, waiting for its queue slot (load ${H_LOAD0[h]})"
+    event "${H_NAME[h]}: shipped, waiting for ${H_HOLDS[h]} queue slot(s) (load ${H_LOAD0[h]})"
   else
     host_dead "${h}" "could not ship the tree or take the queue: $(tail -n 2 "${work}/ship-${H_NAME[h]}.out" 2>/dev/null | tr '\n' ' ' | head -c 200)"
   fi
@@ -265,11 +274,12 @@ while (( $(pending_count) > 0 || $(running_count) > 0 )); do
     fi
     H_SEEN[h]=$(now)
     H_LOAD1[h]=$(sed -n 's/^load //p' "${poll}")
-    if [[ "${H_STATE[h]}" == queued ]] && grep -qx 'held yes' "${poll}"; then
+    held_now=$(sed -n 's/^held //p' "${poll}")
+    if [[ "${H_STATE[h]}" == queued ]] && (( ${held_now:-0} >= H_HOLDS[h] )); then
       H_STATE[h]=held
       [[ -n "${first_held}" ]] || first_held=$(now)
-      event "${H_NAME[h]}: has its queue slot (load ${H_LOAD1[h]})"
-    elif [[ "${H_STATE[h]}" == held ]] && grep -qx 'held no' "${poll}"; then
+      event "${H_NAME[h]}: holds ${H_HOLDS[h]} queue slot(s) (load ${H_LOAD1[h]})"
+    elif [[ "${H_STATE[h]}" == held ]] && (( ${held_now:-0} < H_HOLDS[h] )); then
       host_dead "${h}" "it gave up its queue slot while the run still had work"
       continue
     fi
@@ -321,7 +331,7 @@ for (( h = 0; h < ${#H_NAME[@]}; h++ )); do
   [[ "${H_STATE[h]}" != dead ]] || continue
   run="${H_RUN[h]}"
   ssh_host "${h}" "bash ${run}/tree/scripts/ci/remote.sh stop ${run}" >/dev/null 2>&1 || true
-  [[ "${H_STATE[h]}" == held ]] || event "${H_NAME[h]}: never got its queue slot, so it ran nothing"
+  [[ "${H_STATE[h]}" == held ]] || event "${H_NAME[h]}: never got its ${H_HOLDS[h]} queue slot(s), so it ran nothing"
   mkdir -p "${logs}/hosts/${H_NAME[h]}"
   if ssh_host "${h}" "uptime; tar -C ${run}/out -cf - . > ${run}/out.tar" > "${work}/end-${H_NAME[h]}.out" 2>&1 \
     && ssh_host "${h}" "cat ${run}/out.tar" | tar -xf - -C "${logs}/hosts/${H_NAME[h]}"; then
@@ -341,7 +351,7 @@ waited=$(( first_held - suite_start ))
   printf 'end %s\n' "$(date '+%Y-%m-%d %H:%M:%S %z')"
   printf 'wall %ss from the first queue slot (budget %ss), after %ss waiting for the queues\n' "${secs}" "${budget}" "${waited}"
   for (( h = 0; h < ${#H_NAME[@]}; h++ )); do
-    printf 'host %s %s cpus %s load at start %s, at end %s\n' "${H_NAME[h]}" "${H_STATE[h]}" "${H_CPUS[h]}" \
+    printf 'host %s %s cpus %s holds %s load at start %s, at end %s\n' "${H_NAME[h]}" "${H_STATE[h]}" "${H_CPUS[h]}" "${H_HOLDS[h]}" \
       "${H_LOAD0[h]:-?}" "${H_LOAD1[h]:-?}"
   done
 } >> "${work}/run.txt"

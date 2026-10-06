@@ -2,9 +2,9 @@
 # ~/.config/safedeps/test-hosts (or pass --hosts-file) and fill in your own
 # hosts there; host addresses do not belong in a public repository.
 #
-# One host per line, seven fields separated by `|`:
+# One host per line, seven fields separated by `|`, and an eighth if needed:
 #
-#   name|ssh destination|ssh options|cpus|queue|PATH prefix|runs directory
+#   name|ssh destination|ssh options|cpus|queue|PATH prefix|runs directory|holds
 #
 #   name             lower-case letters, digits and dashes; --hosts picks by it
 #   ssh destination  user@address, or a Host alias from ~/.ssh/config
@@ -15,6 +15,8 @@
 #   PATH prefix      put before the host's PATH for every unit; may use $HOME
 #   runs directory   under the remote home; each run makes a directory there
 #                    and removes it once its logs are collected
+#   holds            how many slots of the queue a run takes (default 1); with
+#                    every slot held the run has the host to itself
 #
 # A Linux host and a macOS host each run every unit they are given; to test
 # both platforms, run once with --hosts naming the macOS hosts and once with

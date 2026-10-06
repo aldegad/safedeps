@@ -8,29 +8,32 @@
 # unit starts detached and writes its result to files, and the coordinator
 # reads the files.
 #
-#   remote.sh hold RUN        Runs inside the host's queue (slot.sh,
+#   remote.sh hold RUN [K]    Runs inside the host's queue (slot.sh,
 #                             vm-locked.sh), so the run takes a slot like any
-#                             other suite. Writes RUN/held, then waits. It ends,
-#                             and frees the slot, when RUN/release appears or
-#                             when the coordinator has not polled for
-#                             HEARTBEAT_MINUTES (it touches RUN/heartbeat on
-#                             every status call), so a coordinator that died
-#                             does not keep the slot.
+#                             other suite; K numbers the slot when the run
+#                             takes more than one. Writes RUN/held-K, then
+#                             waits. It ends, and frees the slot, when
+#                             RUN/release appears or when the coordinator has
+#                             not polled for HEARTBEAT_MINUTES (it touches
+#                             RUN/heartbeat on every status call), so a
+#                             coordinator that died does not keep the slot.
 #   remote.sh start RUN UNIT  Starts one unit detached and returns.
 #   remote.sh status RUN      Touches the heartbeat and prints one line per unit
 #                             started: `unit <name> done <rc>`, `unit <name>
 #                             running`, or `unit <name> lost` (its process is
 #                             gone and it wrote no exit status). Then `held
-#                             yes|no` and `load <1m 5m 15m>`.
+#                             <how many slots are held>` and `load <1m 5m 15m>`.
 #   remote.sh stop RUN [UNIT] Signals each running unit's process and its
 #                             children, one pid at a time, never a process
-#                             group, and releases the hold. With UNIT, stops
-#                             that unit alone and keeps the hold.
+#                             group, and releases the hold: each queue waiter
+#                             (RUN/queue-K.pid) is signalled the same way, so a
+#                             slot still waited for is given up at once. With
+#                             UNIT, stops that unit alone and keeps the hold.
 #
 # RUN holds tree/ (the shipped tree), path (a PATH prefix the coordinator
 # writes from the host file), out/ (each unit's .log, .rc, .secs, .load-start,
-# .load-end and .pid, written by run-all.sh --unit), held, heartbeat and
-# release.
+# .load-end and .pid, written by run-all.sh --unit), held-K, queue-K.pid,
+# heartbeat and release.
 set -uo pipefail
 
 HEARTBEAT_MINUTES=10
@@ -68,9 +71,11 @@ signal_tree() {
 
 case "${action}" in
   hold)
+    k="${3:-1}"
+    [[ "${k}" =~ ^[1-9]$ ]] || die "a hold is numbered 1 to 9 (got ${k:0:20})"
     : > "${RUN}/heartbeat"
-    printf '%s %s\n' "$$" "$(date +%s)" > "${RUN}/held"
-    while [[ ! -e "${RUN}/release" && -e "${RUN}/held" ]]; do
+    printf '%s %s\n' "$$" "$(date +%s)" > "${RUN}/held-${k}"
+    while [[ ! -e "${RUN}/release" && -e "${RUN}/held-${k}" ]]; do
       if [[ -z "$(find "${RUN}/heartbeat" -mmin "-${HEARTBEAT_MINUTES}" 2>/dev/null)" ]]; then
         printf 'remote: no status call for %s minutes; the coordinator is gone, so the slot is freed\n' \
           "${HEARTBEAT_MINUTES}" >> "${RUN}/hold.log"
@@ -78,7 +83,7 @@ case "${action}" in
       fi
       sleep "${HOLD_POLL_SECONDS}"
     done
-    rm -f "${RUN}/held"
+    rm -f "${RUN}/held-${k}"
     ;;
   start)
     unit="${3:-}"
@@ -112,7 +117,9 @@ case "${action}" in
         printf 'unit %s lost\n' "${unit}"
       fi
     done
-    if [[ -e "${RUN}/held" ]]; then printf 'held yes\n'; else printf 'held no\n'; fi
+    held=0
+    for f in "${RUN}"/held-*; do [[ -e "${f}" ]] && held=$((held + 1)); done
+    printf 'held %s\n' "${held}"
     printf 'load %s\n' "$(load_now)"
     ;;
   stop)
@@ -127,7 +134,15 @@ case "${action}" in
       signal_tree TERM "${pid}"
       printf 'stopped %s (pid %s)\n' "${unit}" "${pid}"
     done
-    [[ -n "${only}" ]] || : > "${RUN}/release"
+    if [[ -z "${only}" ]]; then
+      : > "${RUN}/release"
+      for pid_file in "${RUN}"/queue-*.pid; do
+        [[ -e "${pid_file}" ]] || continue
+        pid=$(cat "${pid_file}")
+        [[ "${pid}" =~ ^[0-9]+$ ]] && ps -o args= -p "${pid}" 2>/dev/null | grep -qF -- "${RUN}/tree/scripts/ci/remote.sh hold" \
+          && signal_tree TERM "${pid}"
+      done
+    fi
     ;;
   *) die "unknown action ${action:0:40}" ;;
 esac
