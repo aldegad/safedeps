@@ -444,6 +444,18 @@ fn main() {
             Some(input) => ask::probe(&input),
             None => 2,
         },
+        Some("state-rotate") => {
+            os::set_umask(0o077);
+            let path = state::guard_dir().join("advisory.log");
+            state::advisory_rotate_once(&path);
+            if let Some(input) = read_stdin().filter(|v| !v.is_empty()) {
+                if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&path) {
+                    let _ = f.write_all(&input);
+                }
+                state::advisory_rotate_once(&path);
+            }
+            0
+        },
         Some("json-stream") => match read_stdin() {
             Some(input) => {
                 let stream = json::read(&input);

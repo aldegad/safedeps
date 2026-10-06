@@ -11,6 +11,9 @@ type W = Vec<u8>;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
+mod log;
+pub use log::advisory_rotate_once;
+
 /// `GUARD_DIR="${SAFEDEPS_HOME:-${HOME}/.safedeps}"`. An empty
 /// `SAFEDEPS_HOME` counts as unset, and an unset `HOME` leaves the path
 /// starting at `/.safedeps`, as the shell's expansion does.
