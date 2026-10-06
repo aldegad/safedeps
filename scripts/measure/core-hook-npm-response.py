@@ -172,11 +172,11 @@ class Rows:
         row.update(more, status='fail' if errors else 'pass', reason=reason, errors=errors)
 
     def leave(self, layer, case, side, reason, **more):
-        """Not observed: the row stays not-run, with the reason and what was seen."""
+        """The row stays not-run, with the reason and what was seen."""
         row = self.rows[(layer, case, side)]
         if row['status'] != 'not-run':
             raise ValueError('row judged twice: %s/%s/%s' % (layer, case, side))
-        row.update(more, reason='unobserved: ' + reason)
+        row.update(more, reason=reason)
 
     def status(self, layer, case, side=None):
         return self.rows[(layer, case, side)]['status']
@@ -214,8 +214,8 @@ def launch_rows(rows, rec, scenario, impl, view, facts):
                 initial_scratch=facts['initial_scratch'], observer_errors=view['observer'].get('errors', []),
                 claim='which child held which response file and bytes when it was let go; not which bytes the hook read')
     if facts['verdict'] == 'unresolved' and expect['verdict'] != 'unresolved':
-        rows.leave('linkage', name, impl, 'only what was not observed stands between this launch and its expectation: %s'
-                   % ', '.join(facts['codes']), **seen)
+        rows.leave('linkage', name, impl, 'unobserved: only what was not observed stands between this launch and its '
+                   'expectation: %s' % ', '.join(facts['codes']), **seen)
     else:
         rows.judge('linkage', name, impl, errors, **seen)
     if scenario.get('claim_order'):
@@ -231,7 +231,7 @@ def launch_rows(rows, rec, scenario, impl, view, facts):
                     claim='observed: record numbers as claimed, exits as ps saw them after each release')
         if missed:
             # The observer could not produce the order; that is not observed, not a failure of the hooks.
-            rows.leave('orders', name, impl, '; '.join(missed), **seen)
+            rows.leave('orders', name, impl, 'unobserved: ' + '; '.join(missed), **seen)
         else:
             rows.judge('orders', name, impl, errors, **seen)
     result = expect['result']
@@ -337,7 +337,12 @@ def judge(a):
                 if base is None:
                     continue
                 s = next(x for x in scenarios if x['name'] == c['from'])
-                mutated, effects = nr.mutate(rec, s, base, c)
+                try:
+                    mutated, effects = nr.mutate(rec, s, base, c)
+                except (KeyError, IndexError, nr.HarnessError) as e:
+                    rows.leave('declared', c['name'], impl, 'the edit could not be built from %s: %s: %s'
+                               % (c['from'], type(e).__name__, e), synthetic=True)
+                    continue
                 facts = nr.judge_launch(rec, s, mutated, effects)
                 errors = []
                 if facts['verdict'] != c['expect']['verdict']:
@@ -360,7 +365,7 @@ def judge(a):
 def finish(rows, out, inputs, rec, observed, stopped, why=''):
     table = list(rows.rows.values())
     for row in table:
-        if row['status'] == 'not-run' and not row['reason'].startswith('unobserved: '):
+        if row['status'] == 'not-run' and row['reason'] == 'not reached':
             row['reason'] = why or 'not reached'
     failed = ['/'.join(str(p) for p in (r['layer'], r['case'], r['side']) if p) for r in table if r['status'] == 'fail']
     not_run = ['/'.join(str(p) for p in (r['layer'], r['case'], r['side']) if p) for r in table if r['status'] == 'not-run']
