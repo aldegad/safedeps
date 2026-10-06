@@ -12,7 +12,7 @@
 //   node scripts/install/install-safedeps-hooks.mjs --uninstall
 //   node scripts/install/install-safedeps-hooks.mjs --link-bin   (optional ~/.local/bin/safedeps)
 
-import { existsSync, lstatSync, readFileSync, writeFileSync, copyFileSync, mkdirSync, symlinkSync, unlinkSync, readlinkSync, renameSync, accessSync, constants as fsConstants } from "node:fs";
+import { existsSync, lstatSync, readFileSync, writeFileSync, copyFileSync, mkdirSync, symlinkSync, unlinkSync, readlinkSync, renameSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
@@ -322,51 +322,61 @@ function printRecommendedSetup() {
   console.log(out.join("\n"));
 }
 
-// The platform directory the entry looks in, by the same table it reads
-// (scripts/safedeps-hook-entry-native.sh, scripts/build-core.sh).
-function nativePlatform() {
-  const os = { darwin: "darwin", linux: "linux" }[process.platform];
-  const arch = { arm64: "arm64", x64: "x64" }[process.arch];
-  return os && arch ? `${os}-${arch}` : null;
+function entryRunsCore() {
+  return readFileSync(REPO_ENTRY_HOOK, "utf8").split("\n").includes(ENTRY_RUNS_CORE_LINE);
+}
+
+// The entry, run the way an engine runs it, on a call it does not judge (a
+// Read): it finds the binary for this platform by its own reading of the
+// platform, runs it, and has to end with nothing to say. So the installer
+// keeps no platform table of its own: the one that decides is the entry's.
+function probeEntry() {
+  const payload = JSON.stringify({ session_id: "safedeps-install", hook_event_name: "PreToolUse",
+    tool_name: "Read", tool_input: { file_path: "/dev/null" } });
+  const run = spawnSync(REPO_ENTRY_HOOK, ["pre"], { input: payload, encoding: "utf8" });
+  if (run.error || run.status !== 0 || run.stdout.trim() !== "") {
+    const said = [run.error ? run.error.message : "", run.stderr, run.stdout].map((x) => (x || "").trim()).filter(Boolean).join("\n");
+    return `the entry ${REPO_ENTRY_HOOK} did not answer a call it does not judge (${run.error ? "it did not start" : `exit ${run.status}`}): ${said || "it said nothing"}`;
+  }
+  return null;
 }
 
 // When the entry runs the core, the core has to be there before the hooks
 // are registered: a checkout builds it (scripts/build-core.sh, which needs
-// cargo), and an installed package must already carry it. Either way a
-// missing binary stops the install with the reason, before any engine config
-// is written. The entry would deny every Bash call without it.
+// cargo), and an installed package must already carry it. Either way the
+// entry then has to run it, and a failure stops the install with the reason,
+// before any engine config is written. The entry would deny every Bash call
+// without it.
 function prepareCore() {
-  const entry = readFileSync(REPO_ENTRY_HOOK, "utf8").split("\n");
-  if (!entry.includes(ENTRY_RUNS_CORE_LINE)) {
-    log("the entry runs the bash hooks; no core binary is needed");
-    return;
-  }
-  const platform = nativePlatform();
   if (existsSync(join(REPO_ROOT, "rust", "Cargo.toml"))) {
     log(`building the core from this checkout: ${BUILD_CORE}`);
     const run = spawnSync("bash", [BUILD_CORE], { stdio: "inherit" });
     if (run.error || run.status !== 0) {
       throw new Error(`scripts/build-core.sh did not build the core (${run.error ? run.error.message : `exit ${run.status}`}); its reason is above. Nothing was registered.`);
     }
+    const failed = probeEntry();
+    if (failed) throw new Error(`${failed}. Nothing was registered.`);
+    log("the entry runs the core it built");
     return;
   }
-  if (!platform) {
-    throw new Error(`this package carries no safedeps-core binary for ${process.platform}-${process.arch}. Nothing was registered.`);
-  }
-  const core = join(REPO_ROOT, "bin", "native", platform, "safedeps-core");
-  try {
-    accessSync(core, fsConstants.X_OK);
-  } catch {
-    throw new Error(`this package has no runnable safedeps-core binary at ${core}. Reinstall the package. Nothing was registered.`);
-  }
-  log(`core binary ok ${core}`);
+  const failed = probeEntry();
+  if (failed) throw new Error(`${failed}. Reinstall the package. Nothing was registered.`);
+  log("the entry runs this package's core");
 }
 
 function main() {
-  if (!existsSync(REPO_PRE_HOOK) || !existsSync(REPO_POST_HOOK) || !existsSync(REPO_ENTRY_HOOK)) {
-    throw new Error(`hook scripts not found at ${REPO_PRE_HOOK} / ${REPO_POST_HOOK} / ${REPO_ENTRY_HOOK}`);
+  if (!existsSync(REPO_ENTRY_HOOK)) {
+    throw new Error(`the hook entry is not at ${REPO_ENTRY_HOOK}`);
   }
-  if (!UNINSTALL) prepareCore();
+  // The bash hooks are needed by an entry that runs them, and only by it.
+  const runsCore = entryRunsCore();
+  if (!runsCore && (!existsSync(REPO_PRE_HOOK) || !existsSync(REPO_POST_HOOK))) {
+    throw new Error(`hook scripts not found at ${REPO_PRE_HOOK} / ${REPO_POST_HOOK}`);
+  }
+  if (!UNINSTALL) {
+    if (runsCore) prepareCore();
+    else log("the entry runs the bash hooks; no core binary is needed");
+  }
 
   installInEngine({
     engineRoot: join(HOME, ".claude"),
