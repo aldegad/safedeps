@@ -2832,7 +2832,7 @@
   },
   {
    "id": "post-journal-unfinished",
-   "note": "A rollback journal entry whose owner is gone is reported once.",
+   "note": "A rollback journal entry whose owner is gone is reported once. Its times, pid and ids are seeded and compared as written; `at` is there for the seed-epoch control: the incident record is the entry, moved.",
    "tags": [
     "post",
     "journal"
@@ -2848,7 +2848,8 @@
       "stage": "restoring-files",
       "opened_at": "2026-01-01T00:00:00Z",
       "stage_at": "2026-01-01T00:00:01Z",
-      "pid": "999999"
+      "pid": "999999",
+      "at": 1767225600
      }
     }
    },

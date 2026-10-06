@@ -18,21 +18,34 @@ stand-in's call records, each entry's name, kind, mode and bytes. The two
 records must be equal after the masks below, and nothing else is set aside.
 
 The masks are a closed list (MASKS). Each has a name, each is counted, and the
-summary prints the counts:
+summary prints the counts. A mask sets a value aside only where the value came
+from this side's run, and that origin is checked, never read off the value's
+shape. A value the seed holds (any name or byte of the sandbox as restored,
+and the case's own steps and environment) is compared as it is written, so a
+candidate that states a seeded time, pid or id wrongly is red however much its
+wrong value looks like the right one. A value of no proven origin is compared
+as it is written too, and the summary counts them:
 
-  iso-utc             a UTC time `2026-10-06T13:14:53Z`
-  epoch               epoch seconds in a JSON field named in EPOCH_KEYS, and
-                      the seconds that start an npm-withheld record's name
+  iso-utc             a UTC time `2026-10-06T13:14:53Z` that the seed does not
+                      hold and that falls inside this side's run window (from
+                      just before the seed was restored to just after the
+                      last step, in whole seconds)
+  epoch               the same, for epoch seconds in a JSON field named in
+                      EPOCH_KEYS and the seconds that start an npm-withheld
+                      record's name
   snapshot-id         the id of a snapshot that appeared on disk during the
                       case, as `<snap#N>`: N counts ids in the order they
                       appeared, so two snapshots are never read as one
-  snapshot-id-unlisted an id of the same shape that never was on disk
+  snapshot-id-run     an id of the same shape that never was on disk and the
+                      seed does not hold, whose seconds fall in the run window
+                      and whose pid is a hook this harness started (step K):
+                      `<snap+:stepK>`
   pid                 a number in a pid position (after a snapshot id in a
                       journal id, a JSON `pid`, `pid N` in prose, an
-                      npm-withheld record's name): `<pid:stepK>` when it is
-                      the pid of the hook this harness started for step K,
-                      `<pid:other>` otherwise
-  mktemp              the six characters mktemp chose in a name the hooks make
+                      npm-withheld record's name) that is the pid of the hook
+                      this harness started for step K: `<pid:stepK>`
+  mktemp              the six characters mktemp chose in a name the hooks
+                      make, where the seed holds no such name
   inode               in a pending record's `inodes`, each number replaced by
                       the path that had that inode when the record was written
   clock               in a backstop entry's `clocks`, each time stat printed
@@ -91,6 +104,7 @@ Usage:
 Exit status: 0 green, 1 red, 2 the harness could not run.
 """
 import argparse
+import calendar
 import difflib
 import fnmatch
 import hashlib
@@ -111,13 +125,29 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 MEASURE = os.path.join(ROOT, "scripts", "measure")
 DEFAULT_CASES = os.path.join(MEASURE, "core-hook-cases.json")
 BOX_DIRS = ("home", "state", "project", "tmp")
-# The size at which the pre-guard's self budget engages by default
-# (SAFEDEPS_BUDGET_ENGAGE_DEFAULT_BYTES).
-ENGAGE_BYTES = 1024
 CLOSED_PORT = "http://127.0.0.1:9"
 
-MASKS = ("iso-utc", "epoch", "snapshot-id", "snapshot-id-unlisted", "pid", "mktemp", "inode", "clock",
+
+def engage_bytes():
+    """The size at which the pre-guard's self budget engages by default, read
+    from the reference's own assignment (SAFEDEPS_BUDGET_ENGAGE_DEFAULT_BYTES)
+    rather than copied here, where it would drift from the hook it describes."""
+    path = os.path.join(ROOT, "scripts", "safedeps-pre-guard.sh")
+    try:
+        text = open(path, encoding="utf-8", errors="surrogateescape").read()
+    except OSError as e:
+        die("cannot read %s: %s" % (path, e.strerror))
+    found = re.findall(r"^SAFEDEPS_BUDGET_ENGAGE_DEFAULT_BYTES=([0-9]+)$", text, re.M)
+    if len(found) != 1:
+        die("%s assigns SAFEDEPS_BUDGET_ENGAGE_DEFAULT_BYTES %d times, not once" % (path, len(found)))
+    return int(found[0])
+
+
+MASKS = ("iso-utc", "epoch", "snapshot-id", "snapshot-id-run", "pid", "mktemp", "inode", "clock",
          "bash-diagnostic", "stub-call-name", "tree-root", "deadline-tmp")
+# Values in a masked position that no mask took: the seed holds them, or their
+# origin in this run is not proven. They are compared as written.
+KEPT = ("iso-utc", "epoch", "snapshot-id", "pid", "mktemp")
 
 # JSON fields that hold epoch seconds. A field that is not here is compared.
 EPOCH_KEYS = ("timestamp", "at", "verified_at", "confirmed_at")
@@ -131,6 +161,9 @@ STUB_ENV_NOISE = ("_", "SHLVL")
 def die(msg):
     sys.stderr.write("core-hook-differential: %s\n" % msg)
     sys.exit(2)
+
+
+ENGAGE_BYTES = engage_bytes()
 
 
 # --- the corpus ----------------------------------------------------------------
@@ -529,6 +562,12 @@ def build_seed(ctx, case, box, seed):
         if r.returncode not in allowed:
             return "the seed command safedeps %s ended with %d: %s" % (" ".join(argv), r.returncode, r.stderr.decode("latin-1")[-400:])
     shutil.copytree(box, seed, symlinks=True)
+    if case.get("seed_cli"):
+        # The CLI wrote times of its own into the seed. A run that started in
+        # the same second could write a value the seed holds, which is then
+        # compared as written while the other side wrote the next second's.
+        # So the runs start in a later second than the seed was made in.
+        time.sleep(1.0 - time.time() % 1.0 + 0.01)
     return None
 
 
@@ -572,6 +611,7 @@ def updated_command(out):
 
 
 def run_side(ctx, case, box, seed, impl):
+    t_start = time.time()
     restore(case, box, seed)
     trees = [harvest(box)]
     steps = []
@@ -608,7 +648,8 @@ def run_side(ctx, case, box, seed, impl):
             apply_effect(box, s["effect"])
         steps.append(rec)
         trees.append(harvest(box))
-    return {"steps": steps, "trees": trees}
+    # The seconds this side's run could have written a time in.
+    return {"steps": steps, "trees": trees, "window": (int(t_start), int(time.time()) + 1)}
 
 
 # --- the masks -----------------------------------------------------------------------
@@ -616,8 +657,9 @@ def run_side(ctx, case, box, seed, impl):
 SNAP_NAME = re.compile(r"^\.?([0-9]+_[0-9a-f]+-[0-9]+(?:-[0-9]+)*)_")
 SNAP_SHAPE = re.compile(r"(?<![0-9A-Za-z])[0-9]{9,11}_[0-9a-f]{32}-[0-9]+(?![0-9])")
 ISO = re.compile(r"(?<![0-9])20[0-9]{2}-[01][0-9]-[0-3][0-9]T[0-2][0-9]:[0-5][0-9]:[0-6][0-9]Z")
+NUM = re.compile(r"(?<![0-9])[0-9]{9,11}(?![0-9])")
 EPOCH_FIELD = re.compile(r'("(?:%s)"\s*:\s*"?)([0-9]{9,11})(?![0-9])' % "|".join(EPOCH_KEYS))
-PID_AFTER_SNAP = re.compile(r"(<snap#[0-9]+>-)([0-9]+)(?![0-9])")
+PID_AFTER_SNAP = re.compile(r"(<snap(?:#[0-9]+|\+:step[0-9]+)>-)([0-9]+)(?![0-9])")
 PID_FIELD = re.compile(r'("pid"\s*:\s*"?)([0-9]+)(?![0-9])')
 PID_PROSE = re.compile(r"(\bpid )([0-9]+)(?![0-9])")
 WITHHELD_NAME = re.compile(r"(^|/)([0-9]{9,11})-([0-9]+)-([A-Za-z0-9]{6})\.json$")
@@ -629,17 +671,40 @@ CLOCK = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9:]{8}(?:\.[0-9]+)? [+-][0-9]
 BASH_DIAG = re.compile(r"^(?:\S*/)?[A-Za-z0-9_.-]+\.sh: line [0-9]+: .*$|^bash: .*$")
 
 
+def iso_seconds(v):
+    try:
+        return calendar.timegm(time.strptime(v, "%Y-%m-%dT%H:%M:%SZ"))
+    except ValueError:
+        return None
+
+
 class Canon:
     """One side's record of a case, in the form the two sides are compared in."""
 
     def __init__(self, case, box, run, roots):
         self.case, self.box, self.run, self.roots = case, box, run, roots
         self.counts = dict.fromkeys(MASKS, 0)
+        self.kept = dict.fromkeys(KEPT, 0)
         self.diag = []
         self.noted = []
         trees = run["trees"]
+        self.window = run["window"]
+        # What the seed holds: every name and byte of the sandbox as restored,
+        # and what the case itself hands the hooks. These values are compared
+        # as they are written.
+        seed = trees[0][0]
+        self.seed_names = set(seed)
+        parts = list(seed) + [data.decode("latin-1") for _kind, _mode, data in seed.values()]
+        parts.append(json.dumps(fill(case.get("steps", []), box)))
+        parts.append(json.dumps(fill(case.get("env", {}), box)))
+        seed_text = "\n".join(parts)
+        self.seed_isos = set(ISO.findall(seed_text))
+        self.seed_nums = set(NUM.findall(seed_text))
+        self.seed_snaps = set(SNAP_SHAPE.findall(seed_text))
+        self.seed_tmps = set(m.group(0) for m in MKTEMP.finditer(seed_text))
+        self.seed_tmps |= set(m.group(0) for rel in seed for m in HIDDEN_TMP_NAME.finditer(rel))
         self.snaps = {}
-        seeded = self.snapshot_ids(trees[0][0])
+        seeded = self.snapshot_ids(seed)
         for b in range(1, len(trees)):
             for sid in sorted(self.snapshot_ids(trees[b][0]) - seeded - set(self.snaps)):
                 self.snaps[sid] = len(self.snaps) + 1
@@ -664,9 +729,46 @@ class Canon:
     def bump(self, name, n=1):
         self.counts[name] += n
 
-    def pid_token(self, value):
-        self.bump("pid")
-        return "<pid:step%d>" % self.pids[value] if value in self.pids else "<pid:other>"
+    def keep(self, name, value):
+        self.kept[name] += 1
+        return value
+
+    def in_window(self, seconds):
+        return seconds is not None and self.window[0] <= seconds <= self.window[1]
+
+    # Each of these returns the token for a value whose origin in this run is
+    # proven, and the value itself otherwise.
+    def pid_value(self, v):
+        if v in self.pids:
+            self.bump("pid")
+            return "<pid:step%d>" % self.pids[v]
+        return self.keep("pid", v)
+
+    def epoch_value(self, v):
+        if v not in self.seed_nums and self.in_window(int(v)):
+            self.bump("epoch")
+            return "<epoch>"
+        return self.keep("epoch", v)
+
+    def iso_value(self, v):
+        if v not in self.seed_isos and self.in_window(iso_seconds(v)):
+            self.bump("iso-utc")
+            return "<iso>"
+        return self.keep("iso-utc", v)
+
+    def snap_value(self, v):
+        if v not in self.seed_snaps:
+            seconds, pid = v.split("_", 1)[0], v.rsplit("-", 1)[1]
+            if self.in_window(int(seconds)) and pid in self.pids:
+                self.bump("snapshot-id-run")
+                return "<snap+:step%d>" % self.pids[pid]
+        return self.keep("snapshot-id", v)
+
+    def tmp_value(self, whole, head):
+        if whole not in self.seed_tmps:
+            self.bump("mktemp")
+            return head + "<tmp>"
+        return self.keep("mktemp", whole)
 
     def text(self, t):
         if self.snap_re:
@@ -674,28 +776,12 @@ class Canon:
                 self.bump("snapshot-id")
                 return "<snap#%d>" % self.snaps[m.group(0)]
             t = self.snap_re.sub(snap, t)
-
-        def unlisted(m):
-            self.bump("snapshot-id-unlisted")
-            return "<snap?>"
-        t = SNAP_SHAPE.sub(unlisted, t)
+        t = SNAP_SHAPE.sub(lambda m: self.snap_value(m.group(0)), t)
         for rx in (PID_AFTER_SNAP, PID_FIELD, PID_PROSE):
-            t = rx.sub(lambda m: m.group(1) + self.pid_token(m.group(2)), t)
-
-        def epoch(m):
-            self.bump("epoch")
-            return m.group(1) + "<epoch>"
-        t = EPOCH_FIELD.sub(epoch, t)
-
-        def iso(_m):
-            self.bump("iso-utc")
-            return "<iso>"
-        t = ISO.sub(iso, t)
-
-        def tmp(m):
-            self.bump("mktemp")
-            return m.group(1) + "<tmp>"
-        t = MKTEMP.sub(tmp, t)
+            t = rx.sub(lambda m: m.group(1) + self.pid_value(m.group(2)), t)
+        t = EPOCH_FIELD.sub(lambda m: m.group(1) + self.epoch_value(m.group(2)), t)
+        t = ISO.sub(lambda m: self.iso_value(m.group(0)), t)
+        t = MKTEMP.sub(lambda m: self.tmp_value(m.group(0), m.group(1)), t)
         t = t.replace(self.box, "@BOX@")
         for root in self.roots:
             if root in t:
@@ -705,17 +791,13 @@ class Canon:
 
     def name(self, rel):
         def withheld(m):
-            self.bump("epoch")
-            self.bump("mktemp")
-            return "%s<epoch>-%s-<tmp>.json" % (m.group(1), self.pid_token(m.group(3)))
-        def hidden(m):
-            self.bump("mktemp")
-            return m.group(1) + "<tmp>"
-        if rel.startswith("state/npm-withheld/"):
+            return "%s%s-%s-%s.json" % (m.group(1), self.epoch_value(m.group(2)), self.pid_value(m.group(3)),
+                                        self.tmp_value(m.group(0), ""))
+        if rel.startswith("state/npm-withheld/") and rel not in self.seed_names:
             rel = WITHHELD_NAME.sub(withheld, rel)
         rel = self.text(rel)
         if rel.startswith("state/"):
-            rel = HIDDEN_TMP_NAME.sub(hidden, rel)
+            rel = HIDDEN_TMP_NAME.sub(lambda m: self.tmp_value(m.group(0), m.group(1)), rel)
         return rel
 
     def written_at(self, rel, b):
@@ -940,6 +1022,23 @@ MUTATIONS = [
     {"name": "post-log-entry", "cases": ["npm-install-no-trace"], "file": "scripts/safedeps-post-verify.sh", "channel": "tree:state/advisory.log",
      "old": """  printf '%s\\t%s\\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" >> "${GUARD_DIR}/advisory.log" 2>/dev/null || true\n""",
      "new": """  printf '%s\\t%s\\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1 " >> "${GUARD_DIR}/advisory.log" 2>/dev/null || true\n"""},
+    # A seeded value stated wrongly, in the shape of the right one: each is a
+    # value a mask would take by its shape alone. They have to be red, so the
+    # masks are shown to take only what this run wrote.
+    {"name": "seed-iso", "cases": ["post-journal-unfinished"], "file": "lib/gates/rollback-journal.sh", "channel": "stdout",
+     "old": """    journal_line="Journal: ${journal_id}, opened ${opened_at}; last recorded stage ${stage}${stage_detail}"\n""",
+     "new": """    journal_line="Journal: ${journal_id}, opened ${stage_at:-${opened_at}}; last recorded stage ${stage}${stage_detail}"\n"""},
+    {"name": "seed-pid", "cases": ["post-journal-unfinished"], "file": "lib/gates/rollback-journal.sh", "channel": "stdout",
+     "old": """  SAFEDEPS_JOURNAL_OWNER_FACT="pid ${pid} is not running"\n""",
+     "new": """  SAFEDEPS_JOURNAL_OWNER_FACT="pid ${pid%?}8 is not running"\n"""},
+    {"name": "seed-snapshot-id", "cases": ["post-journal-unfinished"], "file": "lib/gates/rollback-journal.sh", "channel": "stdout",
+     "old": """    printf 'Rollback snapshot: %s; no confirmed snapshot names it' "${snap}"\n""",
+     "new": """    printf 'Rollback snapshot: %s; no confirmed snapshot names it' "${snap%?}3"\n"""},
+    # The incident record is the journal entry, moved. The copy changes the
+    # seeded epoch's last digit and keeps the entry's inode, mode and other bytes.
+    {"name": "seed-epoch", "cases": ["post-journal-unfinished"], "file": "lib/gates/rollback-journal.sh", "channel": "tree:state/rollback-incidents/*",
+     "old": """    mv -f "${entry}" "${SAFEDEPS_INCIDENT_DIR}/${journal_id}.json" 2>/dev/null || rm -f "${entry}"\n""",
+     "new": """    { sed 's/"at": 1767225600/"at": 1767225601/' "${entry}" > "${entry}.m" && cat "${entry}.m" > "${entry}"; rm -f "${entry}.m"; }; mv -f "${entry}" "${SAFEDEPS_INCIDENT_DIR}/${journal_id}.json" 2>/dev/null || rm -f "${entry}"\n"""},
 ]
 
 
@@ -1119,6 +1218,7 @@ def main():
     report = {"mode": mode, "cases": [], "controls": []}
     red = []
     totals = dict.fromkeys(MASKS, 0)
+    kept = dict.fromkeys(KEPT, 0)
     reached = {}
     hook_steps = [0]
     diag_cases = [0]
@@ -1178,6 +1278,8 @@ def main():
                 hook_steps[0] += len([s for s in cr.ref["steps"] if s])
                 for k, v in cr.ref_canon.counts.items():
                     totals[k] += v
+                for k, v in cr.ref_canon.kept.items():
+                    kept[k] += v
                 for r in cr.reach:
                     reached[r] = reached.get(r, 0) + 1
                 if cr.ref_canon.diag:
@@ -1203,6 +1305,8 @@ def main():
     status = 0
     print("cases %d, hook calls per side %d, red %d%s" % (len(cases), hook_steps[0], len(red), (": " + ", ".join(sorted(red))) if red else ""))
     print("masks applied on the reference side: %s" % ", ".join("%s %d" % (k, totals[k]) for k in MASKS))
+    print("compared as written on the reference side (seeded, or no proven origin in this run): %s"
+          % ", ".join("%s %d" % (k, kept[k]) for k in KEPT))
     print("bash diagnostics set aside in %d cases" % diag_cases[0])
     print("reached by the reference: %s" % ", ".join("%s %d" % (k, reached[k]) for k in sorted(reached)))
     if red:
@@ -1228,6 +1332,7 @@ def main():
     print("end: %s" % uptime(), flush=True)
     if a.report:
         report["masks"] = totals
+        report["kept"] = kept
         report["reached"] = reached
         report["skipped"] = skipped
         with open(a.report, "w", encoding="utf-8") as f:
