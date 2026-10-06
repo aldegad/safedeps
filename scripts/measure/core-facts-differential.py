@@ -29,6 +29,11 @@ guard and the core as a JSON payload on standard input.
 Usage:
   core-facts-differential.py --core <safedeps-core> [--jobs N] [--sets a,b]
       [--limit N] [--random N] [--seed S] [--report FILE] [--control]
+      [--sample set:N,...] [--commands FILE]
+
+--commands adds a set named `harvest`: one JSON string per line, the commands
+scripts/measure/core-harvest.sh collected from the batteries that keep theirs
+in shell code.
 """
 import argparse
 import json
@@ -187,6 +192,7 @@ def main():
     ap.add_argument("--report", default="")
     ap.add_argument("--control", action="store_true")
     ap.add_argument("--sample", default="", help="set:N,... a seeded sample of N texts from each named set")
+    ap.add_argument("--commands", default="", help="a file of JSON strings, one command per line: the set `harvest`")
     a = ap.parse_args()
     a.core = os.path.abspath(a.core)
     jobs = max(1, min(a.jobs, 2))
@@ -200,6 +206,8 @@ def main():
     open(oracle, "w", encoding="latin-1").write(patched_guard(a.control))
 
     sets = corpora(a.random, a.seed)
+    if a.commands:
+        sets["harvest"] = [json.loads(l) for l in open(a.commands, encoding="utf-8") if l.strip()]
     if a.sets:
         sets = {k: v for k, v in sets.items() if k in a.sets.split(",")}
     for spec in filter(None, a.sample.split(",")):
