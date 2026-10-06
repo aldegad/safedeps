@@ -1737,11 +1737,12 @@ expect_rewrite_recorded "npm ci in a function body closed by a glued } in a subs
   'npm ci; x=$(function f { npm ci}; f)' 'npm ci --ignore-scripts; x=$(function f { npm ci}; f)'
 expect_rewrite_recorded "npm ci in a repeat group closed by a glued } in backticks, after a visible npm ci" \
   'npm ci && echo `repeat 1 { npm ci}`' 'npm ci --ignore-scripts && echo `repeat 1 { npm ci}`'
-# Beside an install whose own arguments already leave ignore-scripts true, the
-# rewrite has nothing left to place: the command is a recorded downgrade, never
-# one whose installs all read as inert.
+# Beside an install whose own arguments already leave ignore-scripts true, and
+# that the release left as written, the rewrite has nothing left to place: the
+# command is a recorded downgrade, never one whose installs all read as inert.
+# (`--ignore-scripts;` the release rewrote, so that form is a rewrite above.)
 expect_recorded_downgrade "npm ci in backticks closed by a glued }, after an npm ci that carries the flag" \
-  'npm ci --ignore-scripts; echo `{ npm ci}`'
+  'npm ci --ignore-scripts && echo `{ npm ci}`'
 pass "an npm install glued to a } nested in a substitution is a recorded downgrade, alone or beside an install the rewrite reaches"
 expect_rewrite "npm ci after another statement in the group" '{ echo a; npm ci}' '{ echo a; npm ci --ignore-scripts}'
 # A line read on its own has lost the `{` of the line before it.
