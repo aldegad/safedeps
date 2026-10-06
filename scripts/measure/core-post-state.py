@@ -5,6 +5,7 @@ Neither npm nor a network request runs. Complete-hook checks remain separate.
 """
 import argparse
 import datetime
+import hashlib
 import json
 import math
 import os
@@ -22,6 +23,7 @@ p.add_argument('--report')
 p.add_argument('--only', help='Comma-separated row names')
 p.add_argument('--control-journal-opened', action='store_true', help='Change the reported opening date to the seeded stage date')
 p.add_argument('--expect-difference', action='store_true')
+p.add_argument('--accept-class',choices=['verified-snapshot-last-present'])
 a=p.parse_args()
 root=Path(__file__).resolve().parents[2]
 core=str(Path(a.core).resolve())
@@ -223,7 +225,7 @@ done
         req=dict(op='trace',path=str(project),entry=raw,none='fixture names no call')
         # A trace probe reads metadata only, so both readers see this one disk.
         record('trace-'+shape,run('bash',req,d)[:2],run('rust',req,d)[:2])
-    for action in ['unchanged','changed','added','missing-staged','last-present','two-present','normal-pre','last-absent','empty-list']:
+    for action in ['unchanged','changed','added','missing-staged','last-present','two-present','two-content-change','two-list-change','normal-pre','last-absent','empty-list']:
         if not wanted('snapshot-'+action): continue
         normal_list=None;pre_evidence=None
         if action=='normal-pre':
@@ -252,23 +254,57 @@ done
             clock_slots.pop(d,None)
             (d/'project/package.json').write_text('{"name":"kept"}\n')
             (d/'home/snapshots/pre_monitored_files.list').write_text('package.json\npackage-lock.json\npackages/a/package.json\n')
-            if action in ['last-present','two-present','normal-pre','last-absent','empty-list']:
+            if action in ['last-present','two-present','two-content-change','two-list-change','normal-pre','last-absent','empty-list']:
                 names={'last-present':'package.json\n','two-present':'package.json\npackage-lock.json\n',
+                       'two-content-change':'package.json\npackage-lock.json\n','two-list-change':'package.json\npackage-lock.json\n',
                        'normal-pre':normal_list,'last-absent':'package.json\nyarn.lock\n','empty-list':''}[action]
                 (d/'home/snapshots/pre_monitored_files.list').write_text(names)
-                if action in ['two-present','normal-pre']:(d/'project/package-lock.json').write_text('{"lockfileVersion":3,"packages":{}}\n')
+                if action.startswith('two-') or action=='normal-pre':(d/'project/package-lock.json').write_text('{"lockfileVersion":3,"packages":{}}\n')
             before=project_bytes(d/'project')
             list_before=(d/'home/snapshots/pre_monitored_files.list').read_bytes().hex()
             req=dict(op='snapshot',path=str(d/'project'),id='pre',action='stage')
             stages=[run(side,req,d)[:2]]
-            if action=='changed':(d/'project/package.json').write_text('{"name":"changed"}\n')
+            if action in ['changed','two-content-change']:(d/'project/package.json').write_text('{"name":"changed"}\n')
+            if action=='two-list-change':(d/'home/snapshots/pre_monitored_files.list').write_text('package.json\npackage-lock.json\nyarn.lock\n')
             if action=='added':(d/'project/package-lock.json').write_text('{}')
             if action=='missing-staged':(d/'home/snapshots/verified-pre_monitored_files.list').unlink()
             req['action']='confirm';stages.append(run(side,req,d)[:2]);results.append([stages,disk(d),
                 dict(project_before=before,project_after=project_bytes(d/'project'),list_before=list_before,
                      list_after=(d/'home/snapshots/pre_monitored_files.list').read_bytes().hex())])
+            if action.startswith('two-'):
+                results[-1].append({name:(d/'home/snapshots'/('verified-pre_'+name)).read_bytes().hex()
+                                    for name in before if (d/'home/snapshots'/('verified-pre_'+name)).is_file()})
         record('snapshot-'+action,*results)
         if pre_evidence is not None:rows[-1]['pre_generated_fixture']=pre_evidence
+        if action.startswith('two-'):
+            # The named difference is bounded by this exact synthetic list,
+            # unchanged live bytes, and the candidate's real sealed files.
+            # No output or disk channel is removed from the row comparison.
+            reference,candidate=results
+            pointer='home/confirmed_'+hashlib.md5(str(d/'project').encode()).hexdigest()
+            state=candidate[1];evidence=candidate[2]
+            unchanged=(evidence['project_before']==evidence['project_after'] and evidence['list_before']==evidence['list_after']
+                       and reference[2]==evidence)
+            copied=all(candidate[3].get(name)==value[1]
+                       for name,value in evidence['project_after'].items())
+            meta=state.get('home/snapshots/verified-pre_meta.json',['file','null'])[1]
+            sealed=json.loads(meta) if meta else None
+            sealed_ok=(isinstance(sealed,dict) and sealed.get('project_dir')=='@ROOT@/project'
+                       and sealed.get('snapshot_id')=='verified-pre' and sealed.get('verified_from')=='pre'
+                       and sealed.get('parent_snapshot_id') is None and sealed.get('timestamp')=='TIME')
+            proof=dict(unchanged=unchanged,copies_match_live=copied,sealed_for_this_project=sealed_ok,
+                       verified_list_matches=state.get('home/snapshots/verified-pre_monitored_files.list')==['file','package-lock.json\npackage.json\n'],
+                       pointer_names_verified=state.get(pointer)==['file','verified-pre\n'],
+                       reference_no_pointer=pointer not in reference[1],
+                       reference_no_staged_files=not any(k.startswith('home/snapshots/verified-pre_') for k in reference[1]),
+                       reference_changed_warning='the dependency files changed while they were being verified' in reference[0][-1][1])
+            rows[-1]['independent_confirmation']=proof
+            if action=='two-present' and all(proof.values()) and candidate[0][-1]==(0,''):
+                rows[-1]['classified_difference']='verified-snapshot-last-present'
+            if action!='two-present':
+                no_confirmation=all(not any(k.startswith('home/confirmed_') or k=='home/snapshots/verified-pre_meta.json' for k in result[1]) for result in results)
+                rows[-1]['changed_input_was_not_confirmed']=no_confirmation
+                if not no_confirmation:raise SystemExit('changed bytes or list was confirmed')
     for shape in ['empty','no-pid','gone','live','unreadable','gone-staged']:
         if not wanted('journal-'+shape): continue
         results=[]
@@ -287,6 +323,7 @@ done
         record('journal-'+shape,*results)
 if a.report:Path(a.report).write_text(json.dumps(rows,ensure_ascii=False,indent=2)+'\n')
 bad=sum(not r['same'] for r in rows)
+unclassified=sum(not r['same'] and r.get('classified_difference')!=a.accept_class for r in rows)
 print('end:',subprocess.check_output(['uptime'],text=True).strip())
 print(f'core-post-state: {len(rows)} cases, {bad} differ')
-raise SystemExit(0 if rows and bool(bad)==a.expect_difference else 1)
+raise SystemExit(0 if rows and (unclassified==0 if a.accept_class else bool(bad)==a.expect_difference) else 1)
