@@ -150,12 +150,40 @@ with tempfile.TemporaryDirectory(prefix='core-post-state.') as tmp:
         child=subprocess.Popen(['sleep','60'])
         try:
             os.kill(child.pid,signal.SIGSTOP)
+            os.waitpid(child.pid,os.WUNTRACED)
             for label,opened in [('stopped',iso(time.time())),('stopped-reused','2000-01-01T00:00:00Z')]:
                 if not wanted(label): continue
                 req=dict(op='owner',pid=str(child.pid),opened=opened)
                 record(label,run('bash',req,box)[:2],run('rust',req,box)[:2])
         finally:
             os.kill(child.pid,signal.SIGCONT);child.terminate();child.wait()
+    if wanted('stopped-session'):
+        child=subprocess.Popen(['sleep','60'],start_new_session=True)
+        try:
+            os.kill(child.pid,signal.SIGSTOP)
+            os.waitpid(child.pid,os.WUNTRACED)
+            req=dict(op='owner',pid=str(child.pid),opened=iso(time.time()))
+            record('stopped-session',run('bash',req,box)[:2],run('rust',req,box)[:2])
+        finally:
+            os.kill(child.pid,signal.SIGCONT);child.terminate();child.wait()
+    if wanted('zombie-session'):
+        pid=os.fork()
+        if pid==0:
+            os.setsid()
+            os._exit(0)
+        try:
+            # Do not reap until both readers have observed this fixture's
+            # zombie, including inherited nice and session-leader modifiers.
+            until=time.monotonic()+5
+            while True:
+                status=subprocess.check_output(['ps','-o','state=','-p',str(pid)]).strip()
+                if status.startswith(b'Z'):break
+                if time.monotonic()>=until:raise RuntimeError('fixture did not become a zombie')
+                time.sleep(.01)
+            req=dict(op='owner',pid=str(pid),opened=iso(time.time()))
+            record('zombie-session',run('bash',req,box)[:2],run('rust',req,box)[:2])
+        finally:
+            os.waitpid(pid,0)
     facts=box/'trace-facts.sh'
     facts.write_text('''#!/bin/bash
 set -eu
@@ -196,7 +224,9 @@ done
         if not wanted('snapshot-'+action): continue
         results=[]
         for side in ['bash','rust']:
-            d=box/side;shutil.rmtree(d,ignore_errors=True);(d/'home/snapshots').mkdir(parents=True);(d/'project').mkdir()
+            # Restore the seed at one absolute path. The confirmed filename
+            # hashes this path, which must remain comparable without a mask.
+            d=box/'paired';shutil.rmtree(d,ignore_errors=True);(d/'home/snapshots').mkdir(parents=True);(d/'project').mkdir()
             clock_slots.pop(d,None)
             (d/'project/package.json').write_text('{"name":"kept"}\n')
             (d/'home/snapshots/pre_monitored_files.list').write_text('package.json\npackage-lock.json\npackages/a/package.json\n')
@@ -212,7 +242,7 @@ done
         results=[]
         opened=iso(time.time()) if shape=='live' else SEEDED_OPENED
         for side in ['bash','rust']:
-            d=box/side;shutil.rmtree(d,ignore_errors=True);(d/'home/rollback-journal').mkdir(parents=True);(d/'project').mkdir()
+            d=box/'paired';shutil.rmtree(d,ignore_errors=True);(d/'home/rollback-journal').mkdir(parents=True);(d/'project').mkdir()
             clock_slots.pop(d,None)
             if shape!='empty':
                 v=dict(journal_id='j',project_dir=str(d/'project'),rollback_snapshot='s',reasons='fixture',stage='restoring-files',opened_at=opened)
