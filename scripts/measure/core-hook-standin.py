@@ -30,7 +30,8 @@ builder. No install command is executed. Call records keep their claim order,
 which is not launch order.
 
 Exit 0: every acceptance row passed. Exit 1: a row failed. Exit 3: nothing
-failed and a row was not run. Exit 2: this runner could not do its work.
+failed and a row was not run. Exit 2: this runner could not do its work; the
+rows it had judged are saved, and the rest say what stopped it.
 """
 import argparse
 import importlib.util
@@ -198,6 +199,7 @@ def asks_check(errors, record):
 def answers_check(errors, record, npm, argvs):
     """The record's answers are the fixture's, and each full argv selects its own."""
     answers, indexes = npm['answers'], []
+    same(errors, 'asks with an answer to check', bool(record['asks']), True)
     for ask in record['asks']:
         name, want = ask['name'], ask['answer']
         label = 'ask %s answer ' % name
@@ -259,6 +261,10 @@ def launch_env_check(errors, record, argvs, cases, ctx, box, obs):
         same(errors, 'hook launch has no ' + name, name in launch, False)
     same(errors, 'the ask runs where the command runs', [call['cwd'], call['env']['PWD']], [fx['payload']['cwd']] * 2)
     same(errors, 'hook status', record['hook']['status'], 'exit 0')
+    scratch = record['scratch']
+    same(errors, 'scratch rule (parent is the call TMPDIR, leaf prefix, kind)',
+         [scratch['parent'], isinstance(scratch['leaf_prefix'], str) and bool(scratch['leaf_prefix']), scratch['kind']],
+         [call['env'].get('TMPDIR'), True, 'dir'])
     return case, expect
 
 
@@ -266,6 +272,11 @@ def direct_check(errors, record):
     spec = record['direct']
     same(errors, 'direct cases', [case['name'] for case in spec['cases']], list(DIRECT))
     same(errors, 'direct head', [spec['argv'][:len(spec['selector'])], bool(spec['selector'])], [spec['selector'], True])
+    same(errors, 'direct argv, environment and default answer are strings',
+         [isinstance(spec['argv'], list) and all(isinstance(word, str) for word in spec['argv']),
+          isinstance(spec['env'], dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in spec['env'].items()),
+          isinstance(spec['default'].get('stdout', ''), str) and isinstance(spec['default'].get('stderr', ''), str),
+          type(spec['default'].get('exit', 0)) is int], [True, True, True, True])
     kinds = {}
     for case in spec['cases']:
         answer = case['answer']
@@ -539,8 +550,9 @@ def calls_check(rows, label, expect, side, drains, raw_dir, shas):
         errors.append({'field': 'original records', 'actual': 0, 'expected': 'at least one to compare'})
     same(errors, 'take_calls records', unstamped(step['npm_calls']), raw)
     same(errors, 'take_calls order', [call['seq'] for call in step['npm_calls']], sorted(raw))
-    same(errors, 'take_calls unfinished', step['incomplete_calls'], [])
-    rows.judge('calls', 'take-calls', label, errors, pointer, date_calls=len(step['date_calls']))
+    same(errors, 'take_calls unfinished npm records', [call for call in step['incomplete_calls'] if 'npm' in call], [])
+    rows.judge('calls', 'take-calls', label, errors, pointer, date_calls=len(step['date_calls']),
+               unfinished_date_calls=len([call for call in step['incomplete_calls'] if 'npm' not in call]))
     return {'raw': raw, 'picked': picked, 'bound': bound}
 
 
@@ -563,22 +575,23 @@ def scratch_source(result, side_name, expect, found):
 
 # --- admission and replay --------------------------------------------------------------
 
-def replay(doc, path, manifest, pin, out):
-    """The canonical comparison here and through the CLI, from the same selected manifest."""
-    result = compare.compare_case(doc['case'], doc)
+def replay(doc, result, path, manifest, pin, out):
+    """The canonical CLI over the same bundle and selected manifest, against this process's result."""
     row = compare.report_row(doc['case']['id'], result)
-    save(out / (path.stem + '.in-process.json'), row)
     report = out / (path.stem + '.replay.json')
     argv = [sys.executable, '-I', str(HERE / 'core-hook-differential.py'), '--replay', str(path),
             '--evidence-manifest', str(manifest), '--evidence-sha256', pin, '--report', str(report)]
     save(out / (path.stem + '.argv.json'), argv)
-    run = subprocess.run(argv, capture_output=True, timeout=60)
+    try:
+        run = subprocess.run(argv, capture_output=True, timeout=60)
+    except subprocess.TimeoutExpired:
+        return {'rc': None, 'report_exit': None, 'same_verdict': False}
     evidence.publish(out / (path.stem + '.stdout'), run.stdout)
     evidence.publish(out / (path.stem + '.stderr'), run.stderr)
     evidence.publish(out / (path.stem + '.rc'), ('%d\n' % run.returncode).encode())
     replayed = json.loads(report.read_bytes()) if report.is_file() else {}
-    return result, {'rc': run.returncode, 'report_exit': replayed.get('exit'),
-                    'same_verdict': replayed.get('verdict_sha256') == compare.verdict_digest([row])}
+    return {'rc': run.returncode, 'report_exit': replayed.get('exit'),
+            'same_verdict': replayed.get('verdict_sha256') == compare.verdict_digest([row])}
 
 
 def main():
@@ -610,7 +623,7 @@ def main():
     rows.owe('calls', CALLS, sides)
     for layer in ('admission', 'replay', 'equivalence'):
         rows.owe(layer, bundles)
-    launches = {'executable': 0, 'hook': 0}
+    launches, stopped = {'executable': 0, 'hook': 0}, []
     inputs = {'contract': {'path': str(Path(a.contract).resolve()), 'selected': a.contract_sha256,
                            'read': evidence.sha(Path(a.contract).read_bytes())},
               'cases': {'path': str(Path(a.cases).resolve()), 'read': evidence.sha(Path(a.cases).read_bytes())},
@@ -631,7 +644,7 @@ def main():
         save(out / 'results.json', {
             'format': RESULTS, 'mode': 'planned-negative:' + a.planned_negative if a.planned_negative else 'baseline',
             'stop_after': a.stop_after, 'skip_bash': a.skip_bash, 'inputs': inputs, 'inputs_sha256': stamp,
-            'launches': launches, 'rows': table,
+            'launches': launches, 'rows': table, 'stopped': stopped[0] if stopped else None,
             'acceptance': {'status': status, 'rows': len(owed), 'failed': failed, 'not_run': not_run},
             'semantic': [{key: row.get(key) for key in ('case', 'status', 'verdict', 'rc', 'red_channels', 'unresolved')}
                          for row in table if row['layer'] == 'equivalence'],
@@ -648,6 +661,16 @@ def main():
     def stops(layer):
         return None if a.planned_negative else rows.failed(layer)
 
+    try:
+        return layers(a, out, dirs, ctx, sandbox, box, seed, obs, bundles, rows, launches, inputs, finish, stops)
+    except Exception as e:  # The rows already judged are kept; the rest say what stopped the runner.
+        traceback.print_exc()
+        stopped.append('%s: %s' % (type(e).__name__, e))
+        finish('this runner stopped before the row was judged: ' + stopped[0])
+        return 2
+
+
+def layers(a, out, dirs, ctx, sandbox, box, seed, obs, bundles, rows, launches, inputs, finish, stops):
     accepted = contract(rows, a, ctx, box, obs)
     hit = rows.failed('contract')
     if hit or accepted is None:
@@ -720,11 +743,20 @@ def main():
     if hit:
         return finish('a baseline row failed, so what depends on it was not run', hit)
 
+    results = {}
     for name in bundles:
-        result, cli = replay(docs[name], paths[name], manifest, pin, out)
+        results[name] = compare.compare_case(docs[name]['case'], docs[name])
+        seen = out / (paths[name].stem + '.in-process.json')
+        save(seen, compare.report_row(docs[name]['case']['id'], results[name]))
         for label, side_name in BUNDLES[name].items():
-            rows.judge('calls', 'scratch-source', label, scratch_source(result, side_name, expect, found[label]),
-                       [out / (paths[name].stem + '.in-process.json')])
+            rows.judge('calls', 'scratch-source', label, scratch_source(results[name], side_name, expect, found[label]), [seen])
+    hit = stops('calls')
+    if hit:
+        return finish('a baseline row failed, so what depends on it was not run', hit)
+
+    for name in bundles:
+        result = results[name]
+        cli = replay(docs[name], result, paths[name], manifest, pin, out)
         verdict = result['verdict']
         errors = []
         same(errors, 'CLI verdict is this process verdict', cli['same_verdict'], True)

@@ -100,6 +100,12 @@ def change(name, doc, fixture_id):
 
 def control(a):
     name = a.name
+    needs = ['tree'] if name == 'h1' else ['contract', 'out'] + (['cases'] if REFUSED[name][1] == 'cases' else [])
+    missing = [arg for arg in needs if not getattr(a, arg)]
+    if missing:
+        raise ValueError('%s needs --%s' % (name, ', --'.join(missing)))
+    if os.path.lexists(a.note):
+        raise ValueError('the note is already there, so nothing was changed: ' + a.note)
     if name == 'h1':
         target = Path(a.tree) / OBSERVE
         source = target.read_bytes()
@@ -236,6 +242,10 @@ def read_of(run, which):
     return (((run['results'] or {}).get('inputs') or {}).get(which) or {}).get('read')
 
 
+def runner_of(run):
+    return (((run['results'] or {}).get('inputs') or {}).get('runner') or {}).get('sha256')
+
+
 def refused(run, name, stage):
     """A planned negative of the contract: refused at its row, with nothing launched."""
     if run['results'] is None:
@@ -281,14 +291,17 @@ def h1(run, baseline):
     check(problems, 'collector sources that differ from the baseline', sorted(k for k in set(mine) | set(base) if mine.get(k) != base.get(k)),
           ['core_hook/observe.py'])
     check(problems, 'the stand-in source the run used', mine.get('core_hook/observe.py'), H1_SHA256)
-    if status_of(run, 'admission/native-pair') == 'pass':
-        said = run['table'].get('equivalence/native-pair', {}).get('expectations') or {}
-        check(problems, 'the canonical expectations name the missing calls on both sides',
-              [any('has no calls/npm/' in line for line in said.get(side) or []) for side in ('reference', 'candidate')], [True, True])
+    check(problems, 'the runner is read and is the one the baseline ran',
+          [runner_of(run) is not None, runner_of(run) == runner_of(baseline)], [True, True])
+    # The failure is seen in a collection that was itself admitted, not in a refused one.
+    said = run['table'].get('equivalence/native-pair', {}).get('expectations') or {}
+    check(problems, 'admission of the new collection', status_of(run, 'admission/native-pair'), 'pass')
+    check(problems, 'the canonical expectations name the missing calls on both sides',
+          [any('has no calls/npm/' in line for line in said.get(side) or []) for side in ('reference', 'candidate')], [True, True])
     if problems:
         return 'fail', '; '.join(problems)
     return 'pass', ('detected: three direct runs gave no answer and a syntax failure and wrote no record; both native sides '
-                    'left no call record; admission was %s' % status_of(run, 'admission/native-pair'))
+                    'left no call record in an admitted collection, and the canonical expectations name the missing calls')
 
 
 def fresh_positive(run, baseline):
@@ -297,16 +310,22 @@ def fresh_positive(run, baseline):
     stop = run['results'].get('stop_after')
     problems = consistent(run, 'baseline', stop_after=stop)
     check(problems, 'stop_after is none or executable', stop in (None, 'executable'), True)
-    check(problems, "its record is not the author's", read_of(run, 'contract') not in (None, read_of(baseline, 'contract')), True)
+    check(problems, "its record is read, the author's is read, and they differ",
+          [read_of(run, 'contract') is not None, read_of(baseline, 'contract') is not None,
+           read_of(run, 'contract') != read_of(baseline, 'contract')], [True, True, True])
     return grade(run, ['contract/' + case for case in CONTRACT] +
                  ['executable/%s/%s' % (case, name) for case in ('response', 'record') for name in DIRECT], problems)
 
 
-def fresh_record_loss(run):
+def fresh_record_loss(run, baseline):
     if run['results'] is None:
         return 'not-run', '%s; no results were read from %s' % (FRESH, run['dir'])
     res = run['results']
     problems = consistent(run, 'planned-negative:record-loss', stop_after=res.get('stop_after'), skip_bash=res.get('skip_bash'))
+    check(problems, 'stop_after is none or executable', res.get('stop_after') in (None, 'executable'), True)
+    mine, base = sources_of(run), sources_of(baseline)
+    check(problems, 'both collector sources are read and the stand-in source differs from the baseline',
+          [bool(mine), bool(base), mine.get('core_hook/observe.py') != base.get('core_hook/observe.py')], [True, True, True])
     for name in DIRECT:
         check(problems, name + ' (answer, record)',
               [status_of(run, 'executable/response/' + name), status_of(run, 'executable/record/' + name)], ['pass', 'fail'])
@@ -358,7 +377,7 @@ def assess(data, stage):
     else:
         add('A4/h1', data['h1'], h1(data['h1'], base))
     add('A5/fresh-positive', data['fresh-positive'], fresh_positive(data['fresh-positive'], base))
-    add('A5/fresh-record-loss', data['fresh-record-loss'], fresh_record_loss(data['fresh-record-loss']))
+    add('A5/fresh-record-loss', data['fresh-record-loss'], fresh_record_loss(data['fresh-record-loss'], base))
     return rows
 
 
