@@ -12,6 +12,7 @@ import argparse
 import importlib.util
 import json
 from pathlib import Path
+import re
 import subprocess
 import sys
 import time
@@ -26,8 +27,12 @@ p.add_argument('--walk-core')
 p.add_argument('--owner-core')
 p.add_argument('--coarse-core')
 p.add_argument('--suite', choices=['e2e', 'effect-trace-grid'], required=True)
+p.add_argument('--grid-rows', help='Only these comma-separated table IDs, preserving original row assertions')
 p.add_argument('--run-dir', required=True, help='A new evidence directory; existing paths are refused')
 a = p.parse_args()
+selected=a.grid_rows.split(',') if a.grid_rows else []
+if selected and (a.suite!='effect-trace-grid' or any(not re.fullmatch(r'[A-Za-z0-9]+',s) for s in selected) or len(set(selected))!=len(selected)):
+    p.error('--grid-rows requires unique alphanumeric effect-grid table IDs')
 if a.native_faults and (a.probe or a.suite!='e2e' or not all([a.walk_core,a.owner_core,a.coarse_core])):
     p.error('--native-faults requires public e2e entry and all three injection cores')
 archive = Path(a.archive).resolve(strict=True)
@@ -38,6 +43,16 @@ run.mkdir(parents=True, exist_ok=False)
 tree = run/'tree'
 tree.mkdir()
 subprocess.run(['tar', 'xf', str(archive), '-C', str(tree)], check=True)
+if selected:
+    # Selection belongs to this measurement archive. The source battery and
+    # every selected row's assertions remain intact. Never claim full-grid
+    # coverage from the battery's final summary when this selector is used.
+    shard=tree/'scripts/test/lib/shard.sh'
+    text=shard.read_text();anchor='shard_row() {\n'
+    if text.count(anchor)!=1: raise SystemExit('shard selection anchor is not unique')
+    cases='|'.join("*': "+name+"|'*" for name in selected)
+    selector='  case "$1" in '+cases+") printf '# focused-grid-row %s\\n' \"$1\" ;; *) return 1 ;; esac\n"
+    shard.write_text(text.replace(anchor,anchor+selector))
 spec=importlib.util.spec_from_file_location('native_adapter',Path(__file__).with_name('core-post-suite-adapt.py'))
 adapter=importlib.util.module_from_spec(spec);spec.loader.exec_module(adapter)
 
@@ -71,6 +86,10 @@ report = dict(suite=a.suite, archive=str(archive), core=str(core),
               pre_core=str(pre) if pre else None, post_entry='probe' if a.probe else 'post',
               native_faults=a.native_faults,
               started=started, elapsed_seconds=time.time()-started, rc=result.returncode)
+if selected:
+    reached=re.findall(r'^# focused-grid-row [^\n]*: ([A-Za-z0-9]+)\|', (run/'suite.log').read_text(), re.M)
+    report.update(selected_grid_rows=selected,reached_grid_rows=reached,full_grid=False)
+    if sorted(reached)!=sorted(selected): report['rc']=1
 (run/'result.json').write_text(json.dumps(report, indent=2)+'\n')
 print(json.dumps(report), flush=True)
-raise SystemExit(result.returncode if result.returncode >= 0 else 128-result.returncode)
+raise SystemExit(report['rc'] if report['rc'] >= 0 else 128-report['rc'])
