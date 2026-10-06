@@ -74,6 +74,18 @@ MUTATIONS = [
      '            elif worse is True:\n                put(res, "decrease")',
      '            elif False:\n                put(res, "decrease")',
      "the bash side reads true where the core only records: a decrease"),
+    ("a record hides a second call that lost its option",
+     '            if fx and not fy:\n                out["true_to_false"] += 1',
+     '            if fx and not fy and not res["sides"][side].get("record"):\n                out["true_to_false"] += 1',
+     "a second call that goes from true to false is counted, record or no record"),
+    ("npm calls that hold cover a difference in what the command printed",
+     '    v["effects"] = "differ:" + ",".join(sorted(differ)) if differ else UNKNOWN if eff_unknown else "same"',
+     '    v["effects"] = "same" if v["npm"] == "ok" else ("differ:" + ",".join(sorted(differ)) if differ else UNKNOWN if eff_unknown else "same")',
+     "npm calls that hold do not cover a stdout that differs"),
+    ("a row with nothing run is counted with the rows that ran",
+     '            if why is not None:\n                p["not_paired"][why] = p["not_paired"].get(why, 0) + 1\n                continue',
+     '            if False:\n                p["not_paired"][why] = p["not_paired"].get(why, 0) + 1\n                continue',
+     "a row the core blocks, one it leaves undecided and one with no run are in no count of what ran"),
 ]
 
 

@@ -26,6 +26,15 @@
 # are not the command's as written with flags added is red all the same.
 # This table names no class the plan owner has not seen; a pattern here is not
 # widened and a class is not added without that.
+#
+# A row the core blocks is not here and is no class. Where a reading of the
+# core holds `collision <kind>` (the release's bytes, the command's own
+# arguments and data, and a flag npm reads as the option cannot be had
+# together), the core sends no rewrite and the command is UNDECIDED: the
+# comparison gives such a row the status `blocked:<kind>`, counts it apart
+# from `same` and from every named difference, and puts it in no count of what
+# holds. readings-place-apart keeps its meaning: the three values are in fact
+# different.
 script-payload-read	+flag,+rec	no	(^|[^A-Za-z0-9_.-])([A-Za-z0-9_.-]*sh\s+(-[A-Za-z]+\s+)*-[A-Za-z]*c[A-Za-z]*|eval)\b	A script handed to sh -c, bash -c, zsh -c, dash -c, another shell or eval is a payload the core reads at its own top level (Run::payloads, kind S or E), through the quoting the lexer removed. The bash rewrite read only a single-quoted script, or a double-quoted one with no escape and no substitution (its R spans), and put v2.17.2's flag in the rest (U) or none (G). So the core places the flag after the last argument there too, and records unverified or floor where the script's words or its place say so.
 nested-brace	+flag,+rec	no	(\$\(|<\(|`)[^\n]*\}	A `}` in a substitution body is read where the body is read, at its own top level (R1, R2: tookdaki-20261006-112251, -135807). The bash rewrite read the body with the outer level's bytes, where a nested `}` is a character, and left that install with no flag.
 dq-subst-escaped-operator	+flag,+rec	no	"[^"]*(\$\(|`)[^"]*\\[;|&)]	An escaped operator in a substitution inside double quotes is a word of the body (R3-1, Pq forms: tookdaki-20261006-211048). The bash rewrite's end finder read the escape as the outer level shows it and ended the statement there.

@@ -147,6 +147,10 @@ def main():
         o = d.consensus(recs, cb) if recs else None
         if o == "deny":
             side["decision"] = "deny (the readings disagree)"
+        elif o == "blocked":
+            # No rewrite is sent and nothing runs: the duties of the rewrite
+            # collide. Kept apart from a disagreement of the readings.
+            side["decision"] = "deny (blocked: %s)" % ", ".join(d.blocked_kinds(recs))
         elif o is not None:
             side["value"] = [o[0], sorted(o[1])]
             side["rewrite"] = o[2].decode("utf-8", "surrogateescape") if o[0] == "rewrite" else None

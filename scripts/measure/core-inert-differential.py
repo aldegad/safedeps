@@ -16,11 +16,22 @@ What a row is
 
 Every row has one status, and the counts add up: total = core-error +
 bash-not-reached + compared, and compared = reading-set + incomplete +
-both-failed + both-undecided + same + differ.
+both-failed + blocked + blocked+failed + both-undecided + same + differ.
 
   reading-set      the two sides read the command in different sets of readings
   incomplete       a reading of the set has no value on one side
   both-failed      the reading failed on both sides (UNDECIDED on both)
+  blocked:<kind>   a reading of the core holds `collision <kind>`: the duties of
+                   the rewrite (the release's bytes, the arguments and data of
+                   the command as written, a flag npm reads as the option)
+                   cannot be met together, so the core sends no rewrite and the
+                   command is UNDECIDED. This is the core's own reason, whether
+                   its readings agree or not and whatever the bash side does.
+                   A blocked row is no agreement and no success: it is in no
+                   count of `same`, of a floor kept, or of a call that kept its
+                   flag, and it is listed with what the bash side's command did.
+  blocked+failed   the same where a reading of the core failed too: a failed
+                   reading is another reason, so the row is red
   both-undecided   the readings hold different values on both sides: no rewrite
                    is sent on either. It is neither `same` nor an agreement.
   same             every reading holds the same bytes on both sides, and neither
@@ -93,7 +104,42 @@ and proves nothing about what a shell runs.
 
 With --floor, every command of scripts/test/inert-release-rewrites.json that
 the core rewrites is checked against 7d66f8c's recorded rewrite: deleting some
-of the core's flags gives the release's (release-floor.sh's property).
+of the core's flags gives the release's (release-floor.sh's property). With
+--floor-tree, an extracted 7d66f8c's whole pre-guard is asked of every row and
+the rewrite it sends is that row's floor, where the recorded file has none;
+what its command does under the shells is kept like any side's. A rewrite the
+core sends with no floor to hold it to is `unmeasured`, never `ok`.
+
+The accounting
+--------------
+
+After the statuses the run prints what it observed, axis by axis, each number
+with the rows it is over:
+
+  the core, row by row     sent, as-written, blocked, undecided, unobserved
+  the rows that ran        by their npm calls and by their effects beside the
+                           command as written; a rewrite the core sends whose
+                           calls or effects do not hold is red, whatever its
+                           status and whatever the bash side does
+  beside the bash side, v2.18.1 and 7d66f8c
+                           rows and shell runs paired, install calls paired by
+                           their order, calls that go from a true
+                           ignore-scripts to a false one (red beside the bash
+                           side and v2.18.1, recorded or not), calls lost,
+                           added or changed, what was unknown, and the rows
+                           that were not paired with why
+  new SILENT               the rows and shell runs where the core's state is
+                           SILENT and the other side's is not, over the pairs
+                           whose states are both known; `LOSS against v2.18.1`
+                           is this number and nothing wider. No state is
+                           compared beside 7d66f8c: its record lines are not
+                           the ones this file reads
+
+A row of an --extra file may carry "expect" (`sent`, `as-written`, `blocked`,
+`blocked:<kind>`, `undecided`): a row that is not what its line says is red.
+It may carry "stand_ins": "sudo-print", which runs every side of that row
+with a sudo that writes its arguments down, prints them and runs nothing,
+where the default one runs them.
 
 Commands are data: each reaches the guards and the core as a JSON payload on
 standard input, and the shells as an argument. No package manager runs.
@@ -106,9 +152,11 @@ the first schema is read with every axis it did not record as `unknown`.
 observation and the statuses against cases each of which an earlier version
 of this file got wrong.
 
-Exit: 0 only when every row is `same`, or a named difference the shells show
-to hold (or one where nothing runs on the core's side); 1 otherwise. A row
-undecided on both sides, any `decrease:` row and any row not observed are red.
+Exit: 0 only when every row is `same`, a named difference the shells show
+to hold (or one where nothing runs on the core's side), or `blocked`, and
+nothing in the accounting is red; 1 otherwise. A row undecided on both sides,
+any `decrease:` row and any row not observed are red. A blocked row is not
+red and not green: it is counted apart.
 A named row whose npm calls are lost on both sides alike is listed as
 `shared-loss` and is not the core's red.
 --control and --selftest have their own.
@@ -116,6 +164,7 @@ A named row whose npm calls are lost on both sides alike is listed as
 Usage:
   core-inert-differential.py --core <safedeps-core> [--jobs 1] [--sets a,b]
       [--extra name=FILE.jsonl ...] [--shells | --evidence] [--floor]
+      [--floor-tree DIR]
       [--release-tree DIR --approve eco:name:version ...] [--path-prefix DIRS]
       [--limit N] [--report FILE] [--table FILE] [--manifest FILE]
       [--list FILE] [--control]
@@ -145,6 +194,7 @@ FLAG = b" --ignore-scripts"
 FLAGWORD = "--ignore-scripts"
 NOTES = ("asked", "unverified", "floor", "unread", "release")
 SHELLS = ("bash", "zsh", "dash", "zsh-agent")
+COLLISION = b"collision "
 
 DUMP = r'''
 # --- core-inert-differential: the inert value of every reading, as records ---
@@ -199,6 +249,12 @@ exec "$(dirname "$0")/npm" "$@"
 OTHERS = ["pnpm", "pnpx", "yarn", "bun", "bunx", "pip", "pip3", "pipx", "poetry", "uv", "uvx", "pipenv", "cargo", "go",
           "gem", "bundle", "mvn", "dotnet", "python", "python3", "curl", "wget", "brew", "git", "ssh", "scp", "nc"]
 STUB_SUDO = '#!/bin/sh\nwhile [ $# -gt 0 ]; do case "$1" in -*) shift ;; *) break ;; esac; done\nexec "$@"\n'
+# Another sudo, for a row that names it ("stand_ins": "sudo-print"): it writes
+# its call down, prints its arguments and runs nothing. Which of the two a
+# real sudo is like is not the comparison's to say; a rewrite that holds under
+# one and changes what the other prints has put a flag into data.
+STUB_SUDO_PRINT = '#!/bin/sh\nprintf \'%s\\0\' sudo "$#" "$@" >> "$NPMLOG"\nprintf \'%s\\n\' "$@"\n'
+STAND_INS = ("", "sudo-print")
 
 # The gate's own reading of npm's arguments, one argv a call, every field
 # ended by a NUL: `unread`, or `read`, the last value ignore-scripts takes,
@@ -364,12 +420,22 @@ def readings(recs):
     return rs, [recs.get("inert." + r) for r in rs]
 
 
+def blocked_kinds(recs):
+    """The collision kinds the readings hold (`collision <kind>`): the duties
+    of the rewrite cannot be met together there, so no rewrite is sent and the
+    command is UNDECIDED, whether the readings agree or not."""
+    _, vals = readings(recs)
+    return sorted(set(v[len(COLLISION):].decode("latin-1") for v in vals if v is not None and v.startswith(COLLISION)))
+
+
 def consensus(recs, cmd):
-    """The value every reading agrees on, 'deny' where they differ, None where
-    a reading has none."""
+    """The value every reading agrees on, 'blocked' where a reading holds a
+    collision, 'deny' where they differ, None where a reading has none."""
     rs, vals = readings(recs)
     if not vals or any(v is None for v in vals):
         return None
+    if blocked_kinds(recs):
+        return "blocked"
     if any(v != vals[0] for v in vals):
         return "deny"
     return outcome(vals[0], cmd)
@@ -473,10 +539,18 @@ class Shells:
         for n, t in texts.items():
             open(os.path.join(self.stub, n), "w").write(t)
             os.chmod(os.path.join(self.stub, n), 0o755)
+        # The same stand-ins with the other sudo, for the rows that name it.
+        self.variants = {"": self.stub, "sudo-print": os.path.join(work, "stub-sudo-print")}
+        os.makedirs(self.variants["sudo-print"], exist_ok=True)
+        for n, t in texts.items():
+            p = os.path.join(self.variants["sudo-print"], n)
+            open(p, "w").write(STUB_SUDO_PRINT if n == "sudo" else t)
+            os.chmod(p, 0o755)
         self.shells = [s for s in ("/bin/bash", "/bin/zsh", "/bin/dash", "/usr/bin/zsh", "/usr/bin/dash") if os.access(s, os.X_OK)]
         seen = set()
         self.shells = [s for s in self.shells if not (os.path.basename(s) in seen or seen.add(os.path.basename(s)))]
         self.info = {"stubs": {n: sha256(t.encode()) for n, t in sorted(texts.items())}, "shells": {},
+                     "stand_ins": {"sudo-print": {"sudo": sha256(STUB_SUDO_PRINT.encode())}},
                      "env": {"HOME": "<the run's directory>", "ZDOTDIR": "<the run's directory>", "PATH": "<stubs>:/usr/bin:/bin",
                              "NPMLOG": "<a file beside the run's directory>", "SD_INERT_CMD": "<the command>"},
                      "initial_files": ["d/"], "deadline_seconds": 10}
@@ -497,9 +571,10 @@ class Shells:
             out.append(("zsh-agent", [zsh, "-c", 'setopt NO_EXTENDED_GLOB NO_BARE_GLOB_QUAL 2>/dev/null || true && eval "$SD_INERT_CMD"']))
         return out
 
-    def observe(self, cmd, box, files=()):
+    def observe(self, cmd, box, files=(), stand_ins=""):
         """One run of `cmd` per shell, each in a fresh directory that holds an
-        empty `d/` and the files named. Per shell: the exit status, whether the
+        empty `d/` and the files named, with the stand-ins named (the default
+        ones, or a variant). Per shell: the exit status, whether the
         run was killed at its deadline, stdout and stderr, every stand-in call
         in order (`calls`: program and argv), the npm calls among them
         (`npm`), the others (`other`), and the files left."""
@@ -511,7 +586,7 @@ class Shells:
                 open(os.path.join(c, f), "w").close()
             log = c + ".log"
             open(log, "w").close()
-            env = {"HOME": c, "ZDOTDIR": c, "PATH": self.stub + ":/usr/bin:/bin", "NPMLOG": log, "SD_INERT_CMD": cmd}
+            env = {"HOME": c, "ZDOTDIR": c, "PATH": self.variants[stand_ins] + ":/usr/bin:/bin", "NPMLOG": log, "SD_INERT_CMD": cmd}
             obs = {"rc": UNKNOWN, "timeout": False}
             try:
                 sr = subprocess.run(["nice", "-n", "10", "perl", "-e", "alarm 10; exec @ARGV"] + argv, cwd=c, env=env,
@@ -832,7 +907,9 @@ def relate(w, s, R):
 def side_verdict(res, side, R):
     """What the shells show of a side beside the command as written:
 
-      npm      `deny` (the side sends no command), `unknown`, `loss` (a call
+      npm      `deny` or `blocked` (the side sends no command: its readings
+               disagree or one failed, or its duties collide), `unknown`,
+               `loss` (a call
                gone or added, an argument changed, a flag that is no option
                to npm, or a SILENT state), `nocall` (no shell made an install
                call), or `ok`
@@ -843,8 +920,8 @@ def side_verdict(res, side, R):
     sides = res.get("sides", {})
     w, s = sides.get("written", {}), sides.get(side, {})
     v = {"npm": UNKNOWN, "effects": UNKNOWN, "shells": {}}
-    if s.get("decision") == "deny":
-        v["npm"] = v["effects"] = "deny"
+    if s.get("decision") in ("deny", "blocked"):
+        v["npm"] = v["effects"] = s["decision"]
         return v
     ws, ss = w.get("shells"), s.get("shells")
     if not isinstance(ws, dict) or not isinstance(ss, dict):
@@ -896,7 +973,7 @@ def worse_than_bash(res):
     has one): True, False, or None where a state is not known."""
     obs = res.get("obs", {})
     c, b = obs.get("core"), obs.get("bash")
-    if not c or not b or b["npm"] == "deny" or c["npm"] == "deny":
+    if not c or not b or b["npm"] in ("deny", "blocked") or c["npm"] in ("deny", "blocked"):
         return None
     rank = {"NOCALL": 0, "FLAG": 0, "REC": 1, "SILENT": 2}
     worse = False
@@ -907,6 +984,167 @@ def worse_than_bash(res):
         if rank[cs] > rank[bs]:
             worse = True
     return worse
+
+
+PAIR_KEYS = ("shells", "calls", "true_to_false", "false_to_true", "lost", "added", "changed", "unknown_shells", "unknown_calls")
+
+
+def call_changes(res, base, side, R):
+    """The install calls of `side` beside those of `base`, shell by shell and
+    call by call: the calls pair by their order, in a shell where both runs
+    made the same number of npm calls. Counted: calls that go from a true
+    ignore-scripts to a false one and the other way, calls lost and added,
+    calls that are an install on one side only, and what cannot be compared.
+    A record on `side` takes nothing away: a call that lost the option is
+    counted, recorded or not, and a first call that kept it does not stand
+    for a second that did not. None where a side has no runs."""
+    sb = res.get("sides", {}).get(base, {}).get("shells")
+    ss = res.get("sides", {}).get(side, {}).get("shells")
+    if not isinstance(sb, dict) or not isinstance(ss, dict):
+        return None
+    out = dict({k: 0 for k in PAIR_KEYS}, where=[])
+    for sh in SHELLS:
+        b, s = sb.get(sh), ss.get(sh)
+        if not calls_known(b) or not calls_known(s):
+            out["unknown_shells"] += 1
+            continue
+        out["shells"] += 1
+        bn, sn = b["npm"], s["npm"]
+        if len(sn) != len(bn):
+            out["lost" if len(sn) < len(bn) else "added"] += abs(len(bn) - len(sn))
+            continue
+        for k, (x, y) in enumerate(zip(bn, sn)):
+            ix, iy = R.install(x), R.install(y)
+            if ix is None or iy is None:
+                out["unknown_calls"] += 1
+                continue
+            if ix != iy:
+                out["changed"] += 1
+                continue
+            if not ix:
+                continue
+            fx, fy = R.flagged(x), R.flagged(y)
+            if fx is None or fy is None:
+                out["unknown_calls"] += 1
+                continue
+            out["calls"] += 1
+            if fx and not fy:
+                out["true_to_false"] += 1
+                out["where"].append([sh, k])
+            elif fy and not fx:
+                out["false_to_true"] += 1
+    return out
+
+
+def core_decision(res):
+    """What the core does with a row: `sent` (a rewrite every reading agrees
+    on), `as-written` (none: the command runs as given), `blocked` (a reading
+    holds a collision), `undecided` (its readings disagree or one failed),
+    `no-install` (it reads no install) or `unobserved` (it ended non-zero, or
+    a reading has no value)."""
+    if res.get("core_rc") != 0 or not res.get("core"):
+        return "unobserved"
+    got = {k: v.encode("latin-1") for k, v in res["core"].items()}
+    if got.get("any_install") != b"true":
+        return "no-install"
+    cb = cmd_bytes(res["command"])
+    o = consensus(got, cb)
+    if o is None:
+        return "unobserved"
+    if o == "blocked":
+        return "blocked"
+    if o == "deny" or got.get("failed") == b"true":
+        return "undecided"
+    return "sent" if o[0] == "rewrite" and o[2] != cb else "as-written"
+
+
+def meets(expect, res):
+    """Whether a row is what its line of the selection said it would be:
+    `sent`, `as-written`, `blocked`, `blocked:<kind>` or `undecided`."""
+    d = core_decision(res)
+    if expect.startswith("blocked:"):
+        return d == "blocked" and res.get("status") == expect
+    return d == expect
+
+
+def accounting(results, R):
+    """What the run shows, axis by axis, each number with the rows it is over.
+    A row is in a number only where the thing counted was observed. A row the
+    core blocks or leaves UNDECIDED runs nothing on the core's side: it is in
+    no count of what ran, of a floor kept or of a call that kept its flag, and
+    a row with no run observed is `not observed`, never held."""
+    acc = {"rows": len(results), "core": {}, "ran_observed": 0, "ran_unobserved": 0, "npm_rows": {}, "effects_rows": {},
+           "relations": {}, "effects_shells": {}, "floor_of_sent": {}, "sent_not_held": [], "pairs": {}}
+    bases = [b for b in ("bash", "v2.18.1", "7d66f8c") if any(b in res.get("sides", {}) for res in results)]
+    for k, res in enumerate(results):
+        res.pop("true_to_false", None)
+        d = core_decision(res)
+        acc["core"][d] = acc["core"].get(d, 0) + 1
+        sides = res.get("sides", {})
+        c = sides.get("core")
+        if d == "sent":
+            f = str(res.get("floor", "unmeasured")).split(":")[0]
+            acc["floor_of_sent"][f] = acc["floor_of_sent"].get(f, 0) + 1
+        if d in ("sent", "as-written"):
+            cv = res.get("obs", {}).get("core")
+            if cv is None or not isinstance((c or {}).get("shells"), dict):
+                acc["ran_unobserved"] += 1
+            else:
+                acc["ran_observed"] += 1
+                acc["npm_rows"][cv["npm"]] = acc["npm_rows"].get(cv["npm"], 0) + 1
+                e = cv["effects"].split(":")[0]
+                acc["effects_rows"][e] = acc["effects_rows"].get(e, 0) + 1
+                for sh, r in cv["shells"].items():
+                    acc["relations"][r.get("npm")] = acc["relations"].get(r.get("npm"), 0) + 1
+                    for axis in ("rc", "stdout", "stderr", "other", "files"):
+                        if r.get(axis) in ("differ", UNKNOWN):
+                            key = "%s %s" % (axis, r[axis])
+                            acc["effects_shells"][key] = acc["effects_shells"].get(key, 0) + 1
+                # A rewrite the core sends is held to the command as written,
+                # whatever the bash side does with the same bytes.
+                if d == "sent" and (cv["npm"] in ("loss", UNKNOWN) or e != "same"):
+                    acc["sent_not_held"].append(k)
+        for base in bases:
+            p = acc["pairs"].setdefault(base, dict({x: 0 for x in PAIR_KEYS}, rows=0, true_to_false_rows=0, state_pairs=0,
+                                                   state_unknown=0, new_silent_rows=0, new_silent_shells=0, not_paired={}))
+            b = sides.get(base)
+            cs_, bs_ = (c or {}).get("shells"), (b or {}).get("shells")
+            why = None
+            if d in ("blocked", "undecided"):
+                why = "the core is " + d
+            elif b is not None and b.get("decision") != "run":
+                why = "%s sends nothing (%s)" % (base, b.get("decision"))
+            elif not isinstance(cs_, dict) or not isinstance(bs_, dict):
+                why = "not observed"
+            if why is not None:
+                p["not_paired"][why] = p["not_paired"].get(why, 0) + 1
+                continue
+            p["rows"] += 1
+            ch = call_changes(res, base, "core", R) or {}
+            for x in PAIR_KEYS:
+                p[x] += ch.get(x, 0)
+            if ch.get("true_to_false"):
+                p["true_to_false_rows"] += 1
+                res.setdefault("true_to_false", {})[base] = ch["where"]
+            # A state needs the side's record. The 7d66f8c tree's record
+            # lines are not the ones this file knows (INERT_RECORD_RE is this
+            # release's), so no state is compared beside it: its calls are.
+            if base == "7d66f8c":
+                p["states"] = "not compared: the record lines of that tree are not read"
+                continue
+            rec, brec = bool((c or {}).get("record")), bool((b or {}).get("record"))
+            new = 0
+            for sh in SHELLS:
+                x, y = state((cs_ or {}).get(sh), rec, R), state((bs_ or {}).get(sh), brec, R)
+                if x == "UNKNOWN" or y == "UNKNOWN":
+                    p["state_unknown"] += 1
+                    continue
+                p["state_pairs"] += 1
+                if x == "SILENT" and y != "SILENT":
+                    new += 1
+            p["new_silent_shells"] += new
+            p["new_silent_rows"] += 1 if new else 0
+    return acc
 
 
 def subseq(head, release, command):
@@ -1031,10 +1269,10 @@ def fill_records(res):
     cb = cmd_bytes(res["command"])
     for side, key in (("bash", "ref"), ("core", "core")):
         v = res.get("sides", {}).get(side)
-        if not isinstance(v, dict) or v.get("decision") == "deny" or "record" in v:
+        if not isinstance(v, dict) or v.get("decision") in ("deny", "blocked") or "record" in v:
             continue
         o = consensus({k: x.encode("latin-1") for k, x in res[key].items()}, cb)
-        if o not in (None, "deny"):
+        if o not in (None, "deny", "blocked"):
             v["record"] = bool(records_of(o))
 
 
@@ -1087,7 +1325,8 @@ def load_classes():
 def classify(results, classes, R):
     """Gives every row its one status. Returns the counts."""
     counts = {"total": len(results), "core_error": 0, "not_reached": 0, "compared": 0, "reading_set": 0, "incomplete": 0,
-              "both_failed": 0, "both_undecided": 0, "same": 0, "differ": 0, "payload_free_differ": 0}
+              "both_failed": 0, "blocked": 0, "blocked_failed": 0, "both_undecided": 0, "same": 0, "differ": 0,
+              "payload_free_differ": 0}
     per = {}
 
     def put(res, status):
@@ -1099,7 +1338,7 @@ def classify(results, classes, R):
         cb = cmd_bytes(cmd)
         ref = {k: v.encode("latin-1") for k, v in res["ref"].items()}
         got = {k: v.encode("latin-1") for k, v in res["core"].items()}
-        for k in ("status", "tokens", "payload_free", "class_refused", "obs", "label", "readings_differ"):
+        for k in ("status", "tokens", "payload_free", "class_refused", "obs", "label", "readings_differ", "blocked", "expect_failed"):
             res.pop(k, None)
         if res["core_rc"] != 0:
             counts["core_error"] += 1
@@ -1125,6 +1364,20 @@ def classify(results, classes, R):
         bfail, cfail = ref.get("failed") == b"true", got.get("failed") == b"true"
         bden, cden = len(set(bvals)) > 1, len(set(cvals)) > 1
         res["readings_differ"] = {"bash": bden, "core": cden, "values_equal": bvals == cvals}
+        cblk = blocked_kinds(got)
+        if cblk and not (bfail and cfail):
+            # The core's own reason to send nothing: its duties collide. It
+            # is no agreement and no disagreement of the readings, whatever
+            # the bash side does, and it is in no count of what holds.
+            bv = res["obs"].get("bash")
+            res["blocked"] = {"kinds": cblk, "core_failed": cfail,
+                              "readings": {r: (v[len(COLLISION):].decode("latin-1") if v.startswith(COLLISION) else None)
+                                           for r, v in zip(rs, cvals)},
+                              "bash": "failed" if bfail else "readings-disagree" if bden else "sends",
+                              "bash_observed": {"npm": bv["npm"], "effects": bv["effects"]} if bv else None}
+            counts["blocked_failed" if cfail else "blocked"] += 1
+            put(res, ("blocked+failed:" if cfail else "blocked:") + "+".join(cblk))
+            continue
         toks = set()
         if cfail and not bfail:
             toks.add("+undecided")
@@ -1291,6 +1544,20 @@ def summarize(results, counts, R, a, extra):
     for res in results:
         if "floor" in res:
             floor[res["floor"]] = floor.get(res["floor"], 0) + 1
+    acc = accounting(results, R)
+    unmet = []
+    for res in results:
+        if res.get("expect") and not meets(res["expect"], res):
+            res["expect_failed"] = "expected %s, the core: %s (%s)" % (res["expect"], core_decision(res), res.get("status"))
+            unmet.append(res)
+    expected = sum(1 for res in results if res.get("expect"))
+    blocked = [res for res in results if str(res.get("status", "")).startswith("blocked")]
+    blocked_by = {}
+    for res in blocked:
+        bo = res["blocked"].get("bash_observed")
+        k = "%s | the bash side %s%s" % (res["status"], res["blocked"]["bash"],
+                                         (": npm %s, effects %s" % (bo["npm"], bo["effects"].split(":")[0])) if bo else "")
+        blocked_by[k] = blocked_by.get(k, 0) + 1
     # A named difference holds only where the shells show the core's npm calls
     # to be the command's as written with flags added, or where nothing runs
     # on the core's side (its readings disagree).
@@ -1312,20 +1579,30 @@ def summarize(results, counts, R, a, extra):
         if res.get("label"):
             k = "%s (%s)" % (res["label"], res.get("status"))
             labels[k] = labels.get(k, 0) + 1
-    out.update({"reach_judged": judged, "reach_short": len(short), "floor": floor, "class_observation": class_obs, "labels": labels})
+    out.update({"reach_judged": judged, "reach_short": len(short), "floor": floor, "class_observation": class_obs, "labels": labels,
+                "accounting": acc, "blocked": blocked_by, "expected": expected, "expect_unmet": len(unmet)})
     per = counts["status"]
     red = (counts["core_error"] + counts["reading_set"] + counts["incomplete"] + counts["both_failed"] + counts["both_undecided"]
+           + counts["blocked_failed"]
            + sum(v for k, v in per.items() if k == "unclassified" or k.startswith("decrease"))
            + len(silent_run) + len(silent_words_run) + len(loss) + len(loss_words) + len(short)
            + sum(v for k, v in floor.items() if k.startswith("NOT")))
     for s, ks in class_obs.items():
-        red += sum(v for k, v in ks.items() if k == "not-observed" or k.split("/")[0] in ("loss", UNKNOWN))
+        # A named row holds where the shells show its calls and its effects to
+        # be the command's own, or where nothing runs on the core's side.
+        red += sum(v for k, v in ks.items() if k == "not-observed" or k.split("/")[0] in ("loss", UNKNOWN)
+                   or k.split("/")[1] in ("differ", UNKNOWN))
+    # A call that went from a true option to a false one beside the bash side
+    # or v2.18.1, a rewrite sent whose calls or effects do not hold, and a row
+    # that is not what its line said are red. A blocked row is neither.
+    red += sum(p["true_to_false"] for b, p in acc["pairs"].items() if b in ("bash", "v2.18.1"))
+    red += len(acc["sent_not_held"]) + len(unmet)
     out["red"] = red
 
     print("load start: %s" % extra.get("up0", ""))
     print("load end:   %s" % extra.get("up1", ""))
-    for k in ("total", "core_error", "not_reached", "compared", "reading_set", "incomplete", "both_failed", "both_undecided", "same", "differ",
-              "payload_free_differ"):
+    for k in ("total", "core_error", "not_reached", "compared", "reading_set", "incomplete", "both_failed", "blocked", "blocked_failed",
+              "both_undecided", "same", "differ", "payload_free_differ"):
         print("%-22s %d" % (k, counts[k]))
     for k in sorted(per):
         print("  status %-34s %d" % (k, per[k]))
@@ -1333,13 +1610,54 @@ def summarize(results, counts, R, a, extra):
         print("  observed %-40s %s" % (s, ", ".join("%s %d" % kv for kv in sorted(class_obs[s].items()))))
     for k in sorted(labels):
         print("  label %-50s %d" % (k, labels[k]))
-    if a.floor:
+    if floor:
         print("release floor: %s" % ", ".join("%s %d" % (k, v) for k, v in sorted(floor.items())))
+
+    def kv(d):
+        return ", ".join("%s %d" % (k, v) for k, v in sorted(d.items(), key=lambda x: str(x[0]))) or "none"
+
+    print("blocked (the core sends nothing, its duties collide; in no count of what holds): %d rows" % len(blocked))
+    for k in sorted(blocked_by):
+        print("  %s: %d" % (k, blocked_by[k]))
+    print("the core, row by row: %s" % kv(acc["core"]))
+    print("  rows whose command runs on the core's side (sent or as written): observed %d, not observed %d"
+          % (acc["ran_observed"], acc["ran_unobserved"]))
+    print("  observed rows by their npm calls: %s; by their effects beside the command as written: %s"
+          % (kv(acc["npm_rows"]), kv(acc["effects_rows"])))
+    print("  shell runs by how the npm calls relate: %s" % kv(acc["relations"]))
+    print("  effect axes that differ or are unknown, in shell runs: %s" % kv(acc["effects_shells"]))
+    print("  floor of the rewrites the core sends: %s" % kv(acc["floor_of_sent"]))
+    print("  rewrites sent whose calls or effects are not shown to hold: %d" % len(acc["sent_not_held"]))
+    for base in sorted(acc["pairs"]):
+        p = acc["pairs"][base]
+        print("  beside %s: %d rows and %d shell runs paired, %d install calls paired by order; true to false %d calls in %d rows, "
+              "false to true %d; calls lost %d, added %d, an install on one side only %d; unknown: %d shell runs, %d calls"
+              % (base, p["rows"], p["shells"], p["calls"], p["true_to_false"], p["true_to_false_rows"], p["false_to_true"],
+                 p["lost"], p["added"], p["changed"], p["unknown_shells"], p["unknown_calls"]))
+        if p.get("states"):
+            print("    states beside %s: %s; not paired: %s" % (base, p["states"], kv(p["not_paired"])))
+        else:
+            print("    new SILENT beside %s: %d rows, %d of %d shell-run states (states unknown: %d); not paired: %s"
+                  % (base, p["new_silent_rows"], p["new_silent_shells"], p["state_pairs"], p["state_unknown"], kv(p["not_paired"])))
+    if expected:
+        print("expectations: %d rows carry one, %d not met" % (expected, len(unmet)))
+    for res in unmet[:40]:
+        print("UNMET %s %r %s" % (res["set"], res["command"], res["expect_failed"]))
+    for res in blocked[:80]:
+        print("BLOCKED %s %r %s%s" % (res["set"], res["command"], res["status"],
+                                      (" stand-ins=" + res["stand_ins"]) if res.get("stand_ins") else ""))
+    for k in acc["sent_not_held"][:40]:
+        res = results[k]
+        cv = res.get("obs", {}).get("core") or {}
+        print("SENT-NOT-HELD %s %r status=%s npm %s, effects %s" % (res["set"], res["command"], res.get("status"), cv.get("npm"), cv.get("effects")))
+    for res in results:
+        for base, where in sorted((res.get("true_to_false") or {}).items()):
+            print("TRUE-TO-FALSE beside %s %s %r status=%s calls=%s" % (base, res["set"], res["command"], res.get("status"), json.dumps(where)))
     print("npm's own parser: %s" % ("asked (npm %s)" % R.npm_version if R.npm_asked else "not asked: %s" % R.npm_error))
     print("core SILENT (both readers): %d, of which the head's whole pre-guard denies %d and lets through or was not asked %d; "
           "by the flag words: %d; core-only SILENT: %d; core states UNKNOWN: %d rows"
           % (len(silent), len(denied), len(silent_run), len(silent_words), len(only_silent), state_unknown))
-    print("LOSS against v2.18.1 (both readers): %d; by the flag words: %d; not decidable (a state UNKNOWN): %d rows"
+    print("LOSS against v2.18.1 (new SILENT rows, both readers): %d; by the flag words: %d; not decidable (a state UNKNOWN): %d rows"
           % (len(loss), len(loss_words), len(loss_unknown)))
     if reach:
         print("reach: %d forms with a reach number judged, SHORT %d" % (judged, len(short)))
@@ -1379,7 +1697,9 @@ def manifest(path, results, run):
                    "status": res.get("status"), "label": res.get("label"), "tokens": res.get("tokens"),
                    "reading_set": res.get("ref", {}).get("reading_set"), "readings_differ": res.get("readings_differ"),
                    "payloads3": res.get("payloads3"), "payload_free": res.get("payload_free"), "floor": res.get("floor"),
-                   "sides": {}}
+                   "floor_basis": res.get("floor_basis"), "core": core_decision(res), "blocked": res.get("blocked"),
+                   "stand_ins": res.get("stand_ins"), "expect": res.get("expect"), "expect_failed": res.get("expect_failed"),
+                   "true_to_false": res.get("true_to_false"), "sides": {}}
             for side, v in res.get("sides", {}).items():
                 s = {"decision": v.get("decision"), "record": v.get("record"), "state": v.get("state"), "state_words": v.get("state_words")}
                 if isinstance(v.get("shells"), dict):
@@ -1507,6 +1827,55 @@ def selftest(a):
     if R.npm_asked:
         check("a `-` row whose calls hold and whose effects are the command's own: its label", minus["status"], "decrease:argv-equal")
         check("the bash side reads true where the core only records: a decrease", worse["status"], "decrease")
+    # 8. The duty collision. A row the core blocks is no agreement and no
+    # success; a call that lost its option is counted whatever is recorded and
+    # whatever the call before it kept; npm calls that hold do not cover data
+    # that changed; and a row with nothing run is in no count of what ran.
+    lost_arg = ["ci", "--ignore-scripts", "x", "--ignore-scripts=false"]
+    kept_arg = lost_arg + ["--ignore-scripts"]
+    first = ["i", "--ignore-scripts", "y", "--ignore-scripts"]
+    R.ask([["i", "y"], ["ci", "x", "--ignore-scripts=false"], first, lost_arg, kept_arg])
+    w2 = obs([["i", "y"], ["ci", "x", "--ignore-scripts=false"]])
+    b2 = obs([first, kept_arg])
+    c2 = obs([first, lost_arg])
+
+    def crow(value, core_side):
+        res = {"set": "selftest", "command": "selftest", "core_rc": 0, "payloads3": {"bash": 0, "zsh": 0, "dash": 0},
+               "ref": {"reading_set": "bash", "any_install": "true", "inert.bash": "rewrite unread\nselftest --ignore-scripts", "failed": "false"},
+               "core": {"reading_set": "bash", "any_install": "true", "inert.bash": value, "failed": "false"},
+               "sides": {"written": {"decision": "run", "shells": four(w2)}, "bash": {"decision": "run", "record": True, "shells": four(b2)}}}
+        if core_side is not None:
+            res["sides"]["core"] = core_side
+        return res
+
+    sent = crow("rewrite unread\nselftest --ignore-scripts", {"decision": "run", "record": True, "shells": four(c2)})
+    blk = crow("collision floor-outside-command", {"decision": "blocked", "why": "selftest"})
+    und = crow("none", {"decision": "deny", "why": "its reading failed"})
+    und["core"]["failed"] = "true"
+    gone = crow("rewrite unread\nselftest --ignore-scripts", None)
+    eight = [sent, blk, und, gone]
+    cnt = classify(eight, load_classes(), R)
+    acc = accounting(eight, R)
+    check("a row the core blocks has its own status", blk["status"], "blocked:floor-outside-command")
+    check("...and is counted apart, not as `same`", [cnt["blocked"], blk["status"] == "same"], [1, False])
+    check("a row expected to be blocked that the core sends does not meet its line", meets("blocked", sent), False)
+    check("a blocked row meets the kind its line names, and no other", [meets("blocked:floor-outside-command", blk), meets("blocked:end-flag-not-an-option", blk)],
+          [True, False])
+    check("a row the core blocks, one it leaves undecided and one with no run are in no count of what ran",
+          [acc["pairs"]["bash"]["rows"], acc["core"].get("blocked"), acc["core"].get("undecided"), acc["ran_unobserved"]], [1, 1, 1, 1])
+    if R.npm_asked:
+        ch = call_changes(sent, "bash", "core", R)
+        check("a second call that goes from true to false is counted, record or no record", [ch["true_to_false"], ch["calls"]], [4, 8])
+        check("...and the run's accounting holds it beside the bash side", acc["pairs"]["bash"]["true_to_false_rows"], 1)
+        wa, ca = obs([["ci"]], stdout_sha256="a"), obs([["ci", "--ignore-scripts"]], stdout_sha256="b")
+        check("npm calls that hold do not cover a stdout that differs", side_verdict(row(four(wa), four(ca)), "core", R)["effects"], "differ:stdout")
+    # 9. The other sudo runs nothing and prints what it was handed.
+    box9 = tempfile.mkdtemp(prefix="b.", dir=work)
+    oe = shells.observe("sudo npm ci x", box9)
+    op = shells.observe("sudo npm ci x", box9, stand_ins="sudo-print")
+    check("the default sudo runs its arguments", oe["bash"]["npm"], [["ci", "x"]])
+    check("the other sudo runs nothing, writes its call down and prints its arguments",
+          [op["bash"]["npm"], op["bash"]["other"], op["bash"]["stdout"]], [[], [["sudo", "npm", "ci", "x"]], "npm\nci\nx\n"])
     shutil.rmtree(work, ignore_errors=True)
     print("selftest: %d not ok" % bad)
     return 1 if bad else 0
@@ -1522,6 +1891,8 @@ def main():
     ap.add_argument("--evidence", action="store_true", help="run the shells on the rows that differ")
     ap.add_argument("--release-tree", default="")
     ap.add_argument("--floor", action="store_true")
+    ap.add_argument("--floor-tree", default="", help="an extracted 7d66f8c: its whole pre-guard is asked of every row, and the rewrite "
+                                                     "it sends is that row's floor where the recorded file has none")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--random", type=int, default=0)
     ap.add_argument("--seed", type=int, default=20261006)
@@ -1563,6 +1934,7 @@ def main():
     open(oracle, "w", encoding="latin-1").write(src)
 
     sets = {}
+    row_opts = {}
     names = [s for s in a.sets.split(",") if s]
     if a.reclassify:
         names = ["-"]
@@ -1590,6 +1962,12 @@ def main():
                 c = r.get("cmd", r.get("text", r.get("command"))) if isinstance(r, dict) else r
                 if isinstance(c, str):
                     rows.append(c)
+                    if isinstance(r, dict) and (r.get("expect") or r.get("stand_ins")):
+                        if r.get("stand_ins", "") not in STAND_INS:
+                            sys.exit("core-inert-differential: %s names stand-ins this file does not have: %r" % (path_, r.get("stand_ins")))
+                        if (name, c) in row_opts:
+                            sys.exit("core-inert-differential: %s holds a command twice: %r" % (path_, c))
+                        row_opts[(name, c)] = {"expect": r.get("expect"), "stand_ins": r.get("stand_ins", "")}
         sets[name] = rows
     rows = []
     for name, texts in sets.items():
@@ -1621,9 +1999,13 @@ def main():
     rpath = path
     if a.path_prefix:
         rpath = ":".join(os.path.expanduser(x) for x in a.path_prefix.split(":") if x) + ":" + path
-    observing = bool(a.shells or a.release_tree or a.evidence)
+    observing = bool(a.shells or a.release_tree or a.floor_tree or a.evidence)
     shells = Shells(work) if observing else None
     rel_guard = os.path.join(os.path.abspath(os.path.expanduser(a.release_tree)), "scripts", "safedeps-pre-guard.sh") if a.release_tree else ""
+    floor_guard = os.path.join(os.path.abspath(os.path.expanduser(a.floor_tree)), "scripts", "safedeps-pre-guard.sh") if a.floor_tree else ""
+    for g in (rel_guard, floor_guard):
+        if g and not os.path.isfile(g) and not a.reclassify:
+            sys.exit("core-inert-differential: no pre-guard at %s" % g)
     floor_rows = {}
     if a.floor:
         for r in json.load(open(os.path.join(TEST, "inert-release-rewrites.json"), encoding="utf-8")):
@@ -1636,9 +2018,10 @@ def main():
             env.update(extra)
         return env
 
-    def release_side(cmd, idx, box):
-        """The --release-tree pre-guard's answer, and what its command does
-        under the shells."""
+    def release_side(cmd, idx, box, guard=None, var=""):
+        """A tree's whole pre-guard's answer (the --release-tree's, or the
+        one named), and what its command does under the shells."""
+        tree_guard = guard or rel_guard
         rbox = tempfile.mkdtemp(prefix="r.", dir=box)
         rproj = os.path.join(rbox, "project")
         os.makedirs(rproj)
@@ -1646,9 +2029,9 @@ def main():
         env = box_env(rbox, release=True)
         for ap_ in a.approve:
             eco, name_, ver = ap_.split(":")
-            subprocess.run(["bash", os.path.join(os.path.dirname(os.path.dirname(rel_guard)), "lib", "ledger", "ledger.sh"),
+            subprocess.run(["bash", os.path.join(os.path.dirname(os.path.dirname(tree_guard)), "lib", "ledger", "ledger.sh"),
                             "approve", eco, name_, ver, ver, "inert-differential"], env=env, capture_output=True, timeout=60)
-        r = subprocess.run(["nice", "-n", "10", "bash", rel_guard], input=payload(cmd, rproj, "toolu_inert%d" % idx),
+        r = subprocess.run(["nice", "-n", "10", "bash", tree_guard], input=payload(cmd, rproj, "toolu_inert%d" % idx),
                            capture_output=True, env=env, cwd=rproj, timeout=180)
         try:
             hso = json.loads(r.stdout or b"{}").get("hookSpecificOutput", {})
@@ -1659,7 +2042,7 @@ def main():
         if hso.get("permissionDecision") == "deny":
             return {"decision": "deny", "reason": (hso.get("permissionDecisionReason") or "")[:200], "guard_rc": r.returncode}
         run = hso.get("updatedInput", {}).get("command") or cmd
-        return {"decision": "run", "run": run, "shells": shells.observe(run, box), "record": rec, "guard_rc": r.returncode,
+        return {"decision": "run", "run": run, "shells": shells.observe(run, box, stand_ins=var), "record": rec, "guard_rc": r.returncode,
                 "flags": flag_positions(cmd_bytes(cmd), cmd_bytes(run))}
 
     def whole_guard(guard, cmd, tid, box):
@@ -1693,6 +2076,12 @@ def main():
             open(os.path.join(d, "package.json"), "w").write('{"dependencies":{}}\n')
         dump = os.path.join(box, "dump")
         res = {"set": name, "command": cmd}
+        opts = row_opts.get((name, cmd), {})
+        var = opts.get("stand_ins", "")
+        if var:
+            res["stand_ins"] = var
+        if opts.get("expect"):
+            res["expect"] = opts["expect"]
         try:
             br = subprocess.run(["nice", "-n", "10", "bash", oracle], input=payload(cmd, proj), capture_output=True,
                                 env=box_env(box, {"SAFEDEPS_CORE_DUMP": dump}), cwd=proj, timeout=180)
@@ -1722,33 +2111,55 @@ def main():
         res["core"] = {k: v.decode("latin-1") for k, v in got.items()}
         cb = cmd_bytes(cmd)
         differs = ref and got and any(ref.get(k) != got.get(k) for k in set(ref) | set(got) if k.startswith("inert.") or k == "failed")
-        if a.shells or rel_guard or (a.evidence and differs):
-            sides = {"written": {"decision": "run", "run": cmd, "shells": shells.observe(cmd, box)}}
+        if a.shells or rel_guard or floor_guard or (a.evidence and differs):
+            sides = {"written": {"decision": "run", "run": cmd, "shells": shells.observe(cmd, box, stand_ins=var)}}
             for side, recs in (("bash", ref), ("core", got)):
                 if not recs or recs.get("any_install") != b"true":
                     continue
                 o = consensus(recs, cb)
                 if o is None:
                     continue
+                if o == "blocked":
+                    sides[side] = {"decision": "blocked", "why": "its duties collide: " + ", ".join(blocked_kinds(recs))}
+                    continue
                 if o == "deny" or recs.get("failed") == b"true":
                     sides[side] = {"decision": "deny", "why": "its readings disagree" if o == "deny" else "its reading failed"}
                     continue
                 run = o[2].decode("utf-8", "surrogateescape")
-                sides[side] = {"decision": "run", "run": run, "record": bool(records_of(o)), "shells": shells.observe(run, box)}
+                sides[side] = {"decision": "run", "run": run, "record": bool(records_of(o)), "shells": shells.observe(run, box, stand_ins=var)}
             if rel_guard:
-                sides["v2.18.1"] = release_side(cmd, idx, box)
+                sides["v2.18.1"] = release_side(cmd, idx, box, rel_guard, var)
+            if floor_guard:
+                sides["7d66f8c"] = release_side(cmd, idx, box, floor_guard, var)
             res["sides"] = sides
         if a.floor and cmd in floor_rows:
             o = consensus(got, cb) if got else None
             rel = floor_rows[cmd]
             if rel is None:
                 res["floor"] = "release-none"
-            elif o is None or o == "deny":
-                res["floor"] = "core-deny" if o == "deny" else "core-none"
+            elif o is None or o in ("deny", "blocked"):
+                res["floor"] = {"deny": "core-deny", "blocked": "core-blocked"}.get(o, "core-none")
             elif o[0] != "rewrite":
                 res["floor"] = "NOT: the core writes no rewrite"
             else:
                 res["floor"] = "ok" if subseq(o[2], cmd_bytes(rel), cb) else "NOT"
+            res["floor_basis"] = "scripts/test/inert-release-rewrites.json"
+        f7 = res.get("sides", {}).get("7d66f8c")
+        if f7 is not None and "floor" not in res:
+            # The floor of a row the recorded file does not hold: what the
+            # 7d66f8c tree's own pre-guard sends for it.
+            o = consensus(got, cb) if got else None
+            if f7.get("decision") != "run":
+                res["floor"] = "release-deny"
+            elif f7.get("run") == cmd:
+                res["floor"] = "release-none"
+            elif o is None or o in ("deny", "blocked"):
+                res["floor"] = {"deny": "core-deny", "blocked": "core-blocked"}.get(o, "core-none")
+            elif o[0] != "rewrite":
+                res["floor"] = "NOT: the core writes no rewrite"
+            else:
+                res["floor"] = "ok" if subseq(o[2], cmd_bytes(f7["run"]), cb) else "NOT"
+            res["floor_basis"] = "the --floor-tree pre-guard's own answer"
         shutil.rmtree(box, ignore_errors=True)
         return idx, res
 
@@ -1757,6 +2168,7 @@ def main():
                 "guard_sha256": sha256(open(GUARD, "rb").read()), "core": a.core or None,
                 "core_sha256": sha256(open(a.core, "rb").read()) if a.core and os.path.isfile(a.core) else None,
                 "release_guard_sha256": sha256(open(rel_guard, "rb").read()) if rel_guard and os.path.isfile(rel_guard) else None,
+                "floor_guard_sha256": sha256(open(floor_guard, "rb").read()) if floor_guard and os.path.isfile(floor_guard) else None,
                 "shells": shells.info if shells else None, "jobs": jobs}
     commit = os.path.join(os.path.dirname(ROOT), "commit")
     if os.path.isfile(commit):
