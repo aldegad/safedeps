@@ -62,6 +62,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 
 
@@ -212,7 +213,38 @@ def unread(path):
     return 0
 
 
+def process_stat(pid):
+    """Independent observation for native hooks: ps, not libproc or /proc."""
+    if not re.fullmatch(r'[0-9]+', pid):
+        return 1
+    result = subprocess.run(['ps', '-o', 'stat=', '-p', pid], capture_output=True)
+    if result.returncode:
+        return 1
+    emit(result.stdout.strip().decode('ascii', 'strict'))
+    return 0
+
+
+def native_query_failure(path, pid):
+    """The fixture owns this evidence, as it owns record-unread.
+
+    A source-copy injection records its selected response before the hook;
+    the hook never writes this marker. A successful/full response cannot
+    justify a failure report. Do not infer an injection from hook output.
+    """
+    evidence = load(path)
+    if not isinstance(evidence, dict) or evidence.get('pid') != pid:
+        return 1
+    size, returned = evidence.get('expected_bytes'), evidence.get('returned_bytes')
+    if type(size) is not int or size <= 0 or type(returned) is not int:
+        return 1
+    return 0 if returned != size or evidence.get('returned_pid', pid) != pid else 1
+
+
 def main():
+    if sys.argv[1] == "process-stat":
+        return process_stat(sys.argv[2])
+    if sys.argv[1] == "native-query-failure":
+        return native_query_failure(sys.argv[2], sys.argv[3])
     if sys.argv[1] == "object":
         return is_object(sys.argv[2])
     if sys.argv[1] == "unread":

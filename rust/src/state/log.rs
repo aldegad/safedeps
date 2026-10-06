@@ -16,7 +16,7 @@ fn suffixed(file: &Path, suffix: &[u8]) -> PathBuf {
 }
 fn append(file: &Path, level: &str, message: &[u8]) {
     if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).mode(0o600).open(file) {
-        let _ = write!(f, "[{}] {} ", os::utc_stamp(os::now().0), level);
+        let _ = write!(f, "[{}] {} ", os::utc_stamp(os::wall(os::WallRole::AdvisoryRotationHeader).seconds()), level);
         let _ = f.write_all(message); let _ = f.write_all(b"\n");
     }
 }
@@ -29,13 +29,13 @@ fn rotate(file: &Path) {
     let lock = suffixed(file, b".rotate.lock");
     if fs::create_dir(&lock).is_err() {
         let stale = fs::metadata(&lock).ok().is_some_and(|m| m.mtime() >= 0 &&
-            os::now().0.saturating_sub(m.mtime()) > knob("SAFEDEPS_ADVISORY_LOG_LOCK_STALE_SECONDS", 300) as i64);
+            os::wall(os::WallRole::AdvisoryRotationLockAge).seconds().saturating_sub(m.mtime()) > knob("SAFEDEPS_ADVISORY_LOG_LOCK_STALE_SECONDS", 300) as i64);
         if !stale { return }
         let _ = fs::remove_dir(&lock);
         if fs::create_dir(&lock).is_err() { return }
     }
     let _lock = Lock(lock);
-    let stamp = os::utc_stamp(os::now().0).replace(['-', ':'], "");
+    let stamp = os::utc_stamp(os::wall(os::WallRole::AdvisoryRotationName).seconds()).replace(['-', ':'], "");
     let archive = suffixed(file, format!(".{}.gz", stamp).as_bytes());
     // gzip is the archive format's existing tool. No shell or command payload
     // is involved; stderr belongs to the refusal line below.

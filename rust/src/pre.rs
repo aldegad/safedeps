@@ -1,11 +1,10 @@
 //! `safedeps-core pre`: the PreToolUse hook.
 //!
-//! What is here is the path of a command that is not an install: reading the
-//! payload, the truth-source notice, the self budget and its deadline, the
-//! detection in each reading, the settlement of a failed reading, and the
-//! backstop's trace baseline. A command the detection reads as an install is
-//! not judged yet: this says so on stderr and exits 2, and
-//! `scripts/safedeps-pre-guard.sh` stays the hook until it is.
+//! The common entry owns payload reading, truth-source notices, the deadline
+//! and scan settlement. Codex installs use the shared target, snapshot,
+//! ledger and pending-state path. The Claude install path still awaits B's
+//! verified rewrite implementation and exits 2. The installed hook remains
+//! `scripts/safedeps-pre-guard.sh` until integration is complete.
 //!
 //! Each step stands for the step of the bash guard named in its comment, and
 //! prints what that step prints. The differences are the ones a process
@@ -16,7 +15,6 @@ use crate::ere::Regex;
 use crate::grammar;
 use crate::jq;
 use crate::json::{self, Value};
-use crate::lex::Reading;
 use crate::{callid, md5, os, state};
 use std::io::Write;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
@@ -26,7 +24,20 @@ use std::time::{Duration, Instant, SystemTime};
 type W = Vec<u8>;
 mod budget;
 mod snapshot;
-pub use snapshot::probe;
+mod targets;
+mod pending;
+mod readings;
+mod effects;
+mod install;
+pub fn probe(input:&[u8])->i32 {
+    match json::parse_one(input).ok().and_then(|v|v.get("op").and_then(Value::as_str).map(str::to_string)).as_deref() {
+        Some("targets"|"target-statements")=>targets::probe(input),
+        Some("readings")=>readings::probe(input),
+        Some("install-codex")=>install::probe(input),
+        Some("invoke-quote")=>install::quote_probe(input),
+        _=>snapshot::probe(input),
+    }
+}
 
 const RUNTIME_BUDGET_SECONDS: u64 = 30;
 const SELF_BUDGET_MAX_SECONDS: u64 = 25;
@@ -79,16 +90,6 @@ fn jq_r(v: Option<&Value>) -> W {
         None | Some(Value::Null) | Some(Value::Bool(false)) => W::new(),
         Some(Value::Str(s)) => captured(s.clone()),
         Some(other) => captured(jq::pretty(&jq::from_value(other)).into_bytes()),
-    }
-}
-
-/// `.name` as jq indexes it: the value, null for an object without it or for
-/// null, and an error (exit 5) for anything else.
-fn index<'a>(v: Option<&'a Value>, name: &str) -> Result<Option<&'a Value>, ()> {
-    match v {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::Obj(_)) => Ok(v.and_then(|o| o.get(name))),
-        Some(_) => Err(()),
     }
 }
 
@@ -166,7 +167,7 @@ fn env_bytes(name: &str) -> W {
 // ---- the judgment ------------------------------------------------------------------
 
 struct Call {
-    input: Value,
+    input: json::Stream,
     command: W,
     /// `GUARD_DIR` as the text the guard builds its paths from.
     guard: W,
@@ -233,7 +234,7 @@ fn backstop_trace_baseline(call: &Call, cwd: &[u8]) {
     if !call.command.split(|&b| b == b'\n').any(|line| re.is_match(line)) {
         return;
     }
-    let Some(id) = callid::call_id(&call.input) else { return };
+    let Some(id) = callid::from_stream(&call.input) else { return };
     let dir = os::realpath(cwd);
     let dir_hash = md5::hex(&dir);
     let entry_text = cat(&[&call.guard, b"/pending/backstop"]);
@@ -266,7 +267,7 @@ fn backstop_trace_baseline(call: &Call, cwd: &[u8]) {
     let trace = os::path(&trace_text);
     // `touch`: made when it is not there, and its times set to now either way.
     let touched = std::fs::OpenOptions::new().create(true).append(true).mode(0o600).open(&trace).and_then(|f| {
-        let now = SystemTime::now();
+        let now = os::wall(os::WallRole::BackstopTouch).system_time();
         f.set_times(std::fs::FileTimes::new().set_accessed(now).set_modified(now))
     });
     if touched.is_err() {
@@ -276,7 +277,7 @@ fn backstop_trace_baseline(call: &Call, cwd: &[u8]) {
     if present > 0 && subsecond == present && os::clock_has_subsecond(&os::file_clock(&trace, b'm', false)) {
         resolution = "subsecond";
     } else {
-        let (now, _) = os::now();
+        let now = os::wall(os::WallRole::BackstopFallback).seconds();
         let at = SystemTime::UNIX_EPOCH + Duration::from_secs((now - 2).max(0) as u64);
         let set = std::fs::OpenOptions::new().append(true).open(&trace).and_then(|f| f.set_times(std::fs::FileTimes::new().set_accessed(at).set_modified(at)));
         if set.is_err() {
@@ -323,41 +324,24 @@ fn shell_pwd() -> W {
     std::env::current_dir().map(|p| p.into_os_string().into_vec()).unwrap_or_default()
 }
 
-/// The judgment of one command, from the detection on. `Err(())` is an
-/// install: the part of the hook that judges one is not written.
+/// The shared reading driver detects once and obtains facts only for an
+/// install. Err marks the still-unintegrated Claude rewrite path.
 fn judge(call: &Call) -> Result<Out, ()> {
     let mut out = Out::default();
     let core = Core::new();
     let mut run = Run::new(&core);
-    let mut cwd = jq_r(index(Some(&call.input), "cwd").ok().flatten());
+    let mut cwd = match jq::capture_field(&call.input, &["cwd"]) {
+        Ok(cwd) => cwd,
+        Err(code) => return Ok(Out { code, ..Out::default() }),
+    };
     if cwd.is_empty() {
         cwd = shell_pwd();
     }
-    let mut closed = false;
-    let mut any_install = false;
-    let mut detect = |run: &mut Run, r: Reading| {
-        run.reading = Some(r);
-        if run.command_reads(&call.command) {
-            closed = true;
-        }
-        if run.is_install(&call.command) {
-            any_install = true;
-            let _ = run.pipes_install_to_shell(&call.command);
-        } else if run.hides_install(&call.command) {
-            any_install = true;
-        }
-        run.reading = None;
-    };
-    detect(&mut run, Reading::Bash);
-    if run.diverge {
-        detect(&mut run, Reading::Zsh);
-        detect(&mut run, Reading::Dash);
-    }
-    if !closed {
-        run.failed = true;
-    }
-    if any_install {
-        return Err(());
+    let read = readings::Readings::collect(&mut run, &call.command, &cwd);
+    if read.yes("any_install") {
+        if !jq::stream_has(&call.input, "turn_id") { return Err(()) }
+        return Ok(install::judge(call, &mut run, &cwd, &read,
+            |_,_| unreachable!("Codex must not ask for a rewrite")));
     }
     if settle_scan_failure(call, run.failed, &mut out) {
         return Ok(out);
@@ -374,7 +358,7 @@ fn emit(out: &Out) -> i32 {
     out.code
 }
 
-const NOT_WRITTEN: &str = "safedeps-core pre: this command reads as a dependency install, and the part of the hook that judges one is not written yet. scripts/safedeps-pre-guard.sh is the PreToolUse hook.";
+const NOT_WRITTEN: &str = "safedeps-core pre: this Claude install needs the inert rewrite implementation, which is not integrated yet. scripts/safedeps-pre-guard.sh is the PreToolUse hook.";
 
 /// A stale checkout can settle only the existing unscanned-manager question.
 /// It never calls the old judgment or creates a snapshot, pending record or
@@ -421,20 +405,16 @@ pub fn main(input: &[u8], budget_child: bool) -> i32 {
         return 1;
     }
 
-    // `INPUT=$(cat)`, then jq twice. jq ends with 5 on text that is not JSON
-    // and on a value it cannot index, and the guard ends with it (measured,
-    // jq 1.7 and 1.7.1). jq reads every JSON text of its input; the engines
-    // send one, and more than one is refused here the same way.
+    // `INPUT=$(cat)`, then jq twice. Both invocations read the complete
+    // stream before the tool/command branch, even for a non-Bash tool.
     let input = captured(input.to_vec());
-    if input.iter().all(|&b| is_space(b)) {
-        return 0;
-    }
-    let Ok(payload) = json::parse_one(&input) else { return 5 };
-    let Ok(tool) = index(Some(&payload), "tool_name") else { return 5 };
-    let tool = jq_r(tool);
-    let Ok(tool_input) = index(Some(&payload), "tool_input") else { return 5 };
-    let Ok(command) = index(tool_input, "command") else { return 5 };
-    let command = jq_r(command);
+    let payload = json::read(&input);
+    let tool = match jq::capture_field(&payload, &["tool_name"]) {
+        Ok(v) => v, Err(code) => return code,
+    };
+    let command = match jq::capture_field(&payload, &["tool_input", "command"]) {
+        Ok(v) => v, Err(code) => return code,
+    };
     if tool != b"Bash" || command.is_empty() {
         return 0;
     }

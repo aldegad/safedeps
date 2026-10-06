@@ -24,6 +24,48 @@ pub enum J {
     Obj(Vec<(String, J)>),
 }
 
+pub static NULL: crate::json::Value = crate::json::Value::Null;
+
+/// jq's string-key lookup. An absent object key and null produce null;
+/// indexing a scalar or array with a string is an error, including before //.
+pub fn field<'a>(v: &'a crate::json::Value, key: &str) -> Result<&'a crate::json::Value, ()> {
+    use crate::json::Value;
+    match v {
+        Value::Null => Ok(&NULL),
+        Value::Obj(_) => Ok(v.get(key).unwrap_or(&NULL)),
+        _ => Err(()),
+    }
+}
+
+pub fn path<'a>(mut v: &'a crate::json::Value, keys: &[&str]) -> Result<&'a crate::json::Value, ()> {
+    for key in keys { v = field(v, key)?; }
+    Ok(v)
+}
+
+/// $(jq -r '.path // empty'): evaluate the whole JSON stream, preserve the
+/// last filter result's status, then capture stdout once. Newlines inside an
+/// earlier value must not be trimmed before joining the following values.
+pub fn capture_field(stream: &crate::json::Stream, keys: &[&str]) -> Result<Vec<u8>, i32> {
+    use crate::json::{self, Value};
+    let (lines, rc) = json::each(stream, |v| Ok(match path(v, keys)? {
+        Value::Null | Value::Bool(false) => Vec::new(),
+        Value::Str(s) => vec![s.clone()],
+        value => vec![pretty(&from_value(value)).into_bytes()],
+    }));
+    if rc == 0 { Ok(json::captured(&lines)) } else { Err(rc) }
+}
+
+/// jq -e 'has("key")' with stdout/stderr discarded. The final value's
+/// result controls success; a parse failure always fails the invocation.
+pub fn stream_has(stream: &crate::json::Stream, key: &str) -> bool {
+    use crate::json::{self, Value};
+    let (lines, rc) = json::each(stream, |v| match v {
+        Value::Obj(_) | Value::Null => Ok(vec![if v.get(key).is_some() { b"true".to_vec() } else { b"false".to_vec() }]),
+        _ => Err(()),
+    });
+    rc == 0 && lines.last().is_some_and(|s| s == b"true")
+}
+
 /// jq's UTF-8 decoder: the next codepoint (or None for an invalid sequence)
 /// and how many bytes it took.
 fn utf8_next(b: &[u8]) -> (Option<u32>, usize) {

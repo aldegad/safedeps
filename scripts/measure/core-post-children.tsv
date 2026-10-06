@@ -1,0 +1,8 @@
+program	operation	condition	calls_per_judgment	owner	measurement_scope
+npm	config ls --json	post reads fetch facts for new bytes or rebuild	at most one shared facts read	ask::fetch_facts via post::npm::Npm::facts	install and rebuild paths; not the closure-only cost fixture
+npm	query *	rebuild reaches whole-tree judgment	at most one	ask::query via post::npm::Npm::query_tree	verified inert install path
+npm	rebuild --global=false --location=project --prefix	inert install has trace, no root links, hidden record, readable withheld state, and approved whole tree	at most one; none during rollback	post::npm::Npm::rebuild	verified inert install path; count child separately from its own descendants
+curl	OSV querybatch	at least one closure spec lacks a fresh cache	one	post::providers::Providers::batch	warm and cold-loopback whole-post cost fixture
+curl	KEV catalog	catalog is stale or missing when a closure item is judged	one after successful refresh; up to closure item count if every refresh fails	post::providers::Providers::kev	warm and cold-loopback whole-post cost fixture; failure condition is separate
+file	classify new node_modules/.bin entry	install record reaches binary check; selected entry is a regular file or resolves to one	first20 new names, then Bash IFS splitting; one call for each resulting existing file	post::heuristics::binaries	classifier comparison, cap20 fixture and magic-only source control
+gzip	archive advisory.log	provider init, configured byte threshold met, rotation lock acquired, archive opened	at most one per process	state::advisory_rotate_once	whole-post cost with explicit --rotate-bytes fixture

@@ -26,11 +26,57 @@ struct Tm {
 }
 
 extern "C" {
+    fn access(path: *const std::ffi::c_char, mode: i32) -> i32;
     fn mkdtemp(template: *mut std::ffi::c_char) -> *mut std::ffi::c_char;
     fn umask(mask: u32) -> u32;
     fn kill(pid: i32, sig: i32) -> i32;
     fn waitid(kind: i32, id: u32, info: *mut WaitInfo, options: i32) -> i32;
     fn localtime_r(t: *const i64, tm: *mut Tm) -> *mut Tm;
+    fn newlocale(mask: i32, name: *const std::ffi::c_char, base: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
+    fn freelocale(locale: *mut std::ffi::c_void);
+    fn isprint_l(c: i32, locale: *mut std::ffi::c_void) -> i32;
+    #[cfg(not(target_os = "macos"))]
+    fn iswprint_l(c: u32, locale: *mut std::ffi::c_void) -> i32;
+}
+
+/// Printable units for the hook shell's printf %q. Darwin's system bash
+/// uses byte ctype, including in UTF-8 locales; the GNU bash on the Linux
+/// test host uses wide characters. A private locale avoids changing the
+/// process locale while other system helpers are active.
+pub fn bash_quote_units(s: &[u8]) -> Vec<(usize, bool)> {
+    #[cfg(target_os = "macos")]
+    let (mask, widths) = (2, vec![1; s.len()]);
+    #[cfg(not(target_os = "macos"))]
+    let (mask, widths) = (1, bash_chars(s));
+    let locale = unsafe { newlocale(mask, b"\0".as_ptr().cast(), std::ptr::null_mut()) };
+    let mut at = 0;
+    let mut out = Vec::with_capacity(widths.len());
+    for n in widths {
+        let printable = if locale.is_null() { (32..127).contains(&s[at]) }
+            else {
+                #[cfg(target_os = "macos")]
+                { unsafe { isprint_l(s[at] as i32, locale) != 0 } }
+                #[cfg(not(target_os = "macos"))]
+                { if n == 1 { unsafe { isprint_l(s[at] as i32, locale) != 0 } }
+                  else { let c = std::str::from_utf8(&s[at..at+n]).unwrap().chars().next().unwrap(); unsafe { iswprint_l(c as u32, locale) != 0 } } }
+            };
+        out.push((n, printable)); at += n;
+    }
+    if !locale.is_null() { unsafe { freelocale(locale) } }
+    out
+}
+
+/// The hook shell's -r test, including ACLs and symlink targets.
+pub fn readable(path: &Path) -> bool {
+    accessible(path,4)
+}
+pub fn executable(path: &Path) -> bool {
+    accessible(path,1)
+}
+fn accessible(path: &Path,mode:i32) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(path)=std::ffi::CString::new(path.as_os_str().as_bytes()) else { return false };
+    unsafe { access(path.as_ptr(),mode)==0 }
 }
 
 /// Exclusively claim a scratch directory using libc's mkdtemp, as the shell
@@ -85,10 +131,86 @@ pub fn child_exited_unreaped(pid: u32) -> std::io::Result<bool> {
     }
 }
 
-pub fn now() -> (i64, u32) {
-    match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
-        Ok(d) => (d.as_secs() as i64, d.subsec_nanos()),
-        Err(_) => (0, 0),
+/// A closed source role identifies the consumer of one wall-clock read.
+/// Roles never choose a clock or alter its value. Artifact roles cannot stand
+/// in for internal expiry, retention, baseline or temporary-name readings.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WallRole {
+    PreSnapshot,
+    AdvisoryHeader,
+    AdvisoryRotationHeader,
+    AdvisoryRotationName,
+    ProviderHeader,
+    ReorgRefusedHeader,
+    ReorgRollbackHeader,
+    ConfirmWarningsHeader,
+    JournalOpened,
+    JournalStage,
+    JournalRecoveryHeader,
+    VerifiedMeta,
+    NpmObserved,
+    NpmWithheldEntry,
+    NpmWithheldName,
+    PreLedgerExpiry,
+    PostLedgerExpiry,
+    LedgerCliExpiry,
+    ProviderCacheExpiry,
+    StateLockAge,
+    AdvisoryRotationLockAge,
+    StateRetention,
+    StateTempName,
+    PostTempName,
+    BackstopTouch,
+    BackstopFallback,
+}
+
+/// One raw reading. Every accessor is pure; retaining this value retains the
+/// original event, including its subsecond precision and pre-epoch status.
+#[derive(Clone, Copy, Debug)]
+pub struct WallTime(std::time::SystemTime);
+
+impl WallTime {
+    fn epoch_parts(self) -> (i64, u32) {
+        match self.0.duration_since(std::time::UNIX_EPOCH) {
+            Ok(d) => (d.as_secs() as i64, d.subsec_nanos()),
+            Err(_) => (0, 0),
+        }
+    }
+    pub fn seconds(self) -> i64 { self.epoch_parts().0 }
+    pub fn nanos(self) -> u32 { self.epoch_parts().1 }
+    pub fn system_time(self) -> std::time::SystemTime { self.0 }
+}
+
+/// The only wall-clock generator. An independently reviewed measurement
+/// archive can observe `raw` here, before epoch conversion or consumer math.
+/// Production builds have no observer, counter, I/O or selection switch.
+pub fn wall(_role: WallRole) -> WallTime {
+    let raw = std::time::SystemTime::now();
+    WallTime(raw)
+}
+
+#[cfg(test)]
+mod wall_tests {
+    use super::WallTime;
+    use std::time::{Duration, UNIX_EPOCH};
+
+    #[test]
+    fn wall_time_accessors_preserve_raw() {
+        for (secs, nanos) in [(0, 0), (0, 1), (1_791_291_940, 999_999_999)] {
+            let raw = UNIX_EPOCH + Duration::new(secs, nanos);
+            let read = WallTime(raw);
+            assert_eq!(read.system_time(), raw);
+            assert_eq!(read.seconds(), secs as i64);
+            assert_eq!(read.nanos(), nanos);
+            assert_eq!(read.system_time(), raw);
+        }
+        // The old seconds/nanos API returned zero before the epoch. The raw
+        // accessor must still preserve the error, not replace it with epoch.
+        let raw = UNIX_EPOCH - Duration::from_nanos(1);
+        let read = WallTime(raw);
+        assert_eq!((read.seconds(), read.nanos()), (0, 0));
+        assert_eq!(read.system_time(), raw);
+        assert!(read.system_time().duration_since(UNIX_EPOCH).is_err());
     }
 }
 

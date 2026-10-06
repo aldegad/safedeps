@@ -29,6 +29,10 @@ def reference(root):
     start = src.index('PARENT_SNAPSHOT_ID=""\n', src.index('\nacquire_state_lock\n'))
     end = src.index('\n# --- Pre-flight security checks', start)
     body = src[start:end]
+    pending_start=src.index('PENDING_DIR="${GUARD_DIR}/pending"',src.index('# Write the record of this install'))
+    pending_end=src.index('\nif [[ -n "${UPDATED_COMMAND}" ]]',pending_start)
+    pending=src[pending_start:pending_end]
+    pending=pending.replace('${BASH_SOURCE[0]%/*}/..','${ROOT}')
     arrays = src[src.index('SAFEDEPS_LOCK_FILES=('):src.index('\numask 077')]
     return '''#!/bin/bash
 set -euo pipefail
@@ -46,10 +50,19 @@ mkdir -p "$SNAPSHOT_DIR"
 source "$ROOT/lib/npm/workspaces.sh"
 ''' + arrays + ''.join(function(name) for name in (
         'log_advisory', 'acquire_state_lock', 'release_state_lock',
-        'snapshot_project_file', 'snapshot_workspace_manifests')) + '''
+        'snapshot_project_file', 'snapshot_workspace_manifests', 'compute_pending_key', 'guard_file_inode', 'write_state_file')) + '''
 acquire_state_lock
 trap release_state_lock EXIT
 ''' + body + '''
+if jq -e 'has("pending")' <<< "$INPUT" >/dev/null; then
+  KEY_DIR_HASH=$(jq -r '.pending.cwd_hash' <<< "$INPUT")
+  PROJECT_DIR_FROM=$(jq -r '.pending.project_from' <<< "$INPUT")
+  NPM_TRACE_WANTED=$(jq -r '.pending.trace' <<< "$INPUT")
+  ATTRIBUTION=$(jq -r '.pending.attribution' <<< "$INPUT")
+  PROJECT_FETCH=$(jq -c '.pending.fetch' <<< "$INPUT")
+  PROJECT_FETCH_WHY=$(jq -r '.pending.fetch_why' <<< "$INPUT")
+''' + pending + '''
+fi
 if jq -e 'has("rewrite")' <<< "$INPUT" >/dev/null; then
   UPDATED_COMMAND=$(jq -r .rewrite <<< "$INPUT")
   INERT_UNVERIFIED=false

@@ -1,0 +1,16 @@
+{"id":"extra-close","command":"{ npm ci --ignore-scripts=false} }","npm_start":2,"npm_end":31,"zsh_rc":1,"argv":[]}
+{"id":"preceding-install","command":"npm ci; { npm ci --ignore-scripts=false} }","npm_start":10,"npm_end":39,"zsh_rc":1,"argv":[]}
+{"id":"glued-close","command":"{ npm ci --ignore-scripts=false}","npm_start":2,"npm_end":31,"zsh_rc":0,"argv":[["ci","--ignore-scripts=false"]]}
+{"id":"next-statement","command":"{ npm ci --ignore-scripts=false}; echo tail","npm_start":2,"npm_end":31,"zsh_rc":0,"argv":[["ci","--ignore-scripts=false"]]}
+{"id":"group-redirection","command":"{ npm ci --ignore-scripts=false}>f","npm_start":2,"npm_end":31,"zsh_rc":0,"argv":[["ci","--ignore-scripts=false"]]}
+{"id":"nested-group","command":"{ { npm ci --ignore-scripts=false} }","npm_start":4,"npm_end":33,"zsh_rc":0,"argv":[["ci","--ignore-scripts=false"]]}
+{"id":"ordinary-close","command":"{ npm ci --ignore-scripts=false; }","unchanged":true,"zsh_rc":0,"argv":[["ci","--ignore-scripts=false"]]}
+{"id":"quoted-brace","command":"npm ci --ignore-scripts=false \"}\"","unchanged":true,"zsh_rc":0,"argv":[["ci","--ignore-scripts=false","}"]]}
+{"id":"escaped-brace","command":"npm ci --ignore-scripts=false \\}","unchanged":true,"zsh_rc":0,"argv":[["ci","--ignore-scripts=false","}"]]}
+{"id":"no-group","command":"npm ci x}","unchanged":true,"zsh_rc":1,"argv":[]}
+{"id":"parameter-close","command":"npm ci \"${UNSET_VAR:-x}\"","unchanged":true,"zsh_rc":0,"argv":[["ci","x"]]}
+{"id":"data","command":"npm ci; echo \"npm\" ci x","unchanged":true,"zsh_rc":0,"argv":[["ci"]]}
+{"id":"quoted-command","command":"\"npm\" \"ci\"","unchanged":true,"zsh_rc":0,"argv":[["ci"]]}
+{"id":"redirect-payload","command":"x=$(npm ci --ignore-scripts=false &>f)","unchanged":true,"zsh_rc":0,"argv":[["ci","--ignore-scripts=false"]]}
+{"id":"arithmetic-word","command":"echo $[ $(if true; then npm ci --ignore-scripts=false; fi) ]","unchanged":true,"zsh_rc":0,"argv":[["ci","--ignore-scripts=false"]]}
+{"id":"arithmetic-command","command":"(( $(if true; then npm ci --ignore-scripts=false; fi) ))","unchanged":true,"zsh_rc":1,"argv":[["ci","--ignore-scripts=false"]]}

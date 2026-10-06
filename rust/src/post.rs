@@ -1,11 +1,10 @@
 //! `safedeps-core post`: the PostToolUse hook (and Claude Code's
-//! PostToolUseFailure). Not written yet.
-//!
-//! Until it is, `scripts/safedeps-post-verify.sh` is the hook, and this exits
-//! 2 so that a shim pointed here early says so instead of staying silent.
+//! PostToolUseFailure). The public entry checks its source stamp before
+//! consuming any pending record or rollback journal.
 
 mod jv;
 mod sh;
+pub use sh::fnmatch as shell_pattern_matches;
 mod closure;
 mod report;
 mod workspaces;
@@ -19,6 +18,11 @@ mod process;
 mod journal;
 mod rollback;
 mod npm;
+mod providers;
+mod effect;
+mod call;
+mod heuristics;
+mod run;
 
 /// A measurement entry, fed one JSON request. It calls the same operations
 /// the hook uses; the reference side calls their bash functions.
@@ -30,6 +34,22 @@ pub fn probe(input: &[u8]) -> i32 {
     let bytes = |key| jv::text(get(key)).unwrap_or(b"");
     let path = sh::p(bytes("path"));
     let result: Result<Vec<u8>, i32> = match bytes("op") {
+        b"hook" => return run::main(bytes("input")),
+        b"heuristics" => {
+            let store = snapshot::Store::new(crate::state::guard_dir(), path, bytes("id").to_vec());
+            let mut reasons = Vec::new();
+            match bytes("action") {
+                b"binaries" => heuristics::binaries(&store, &mut reasons),
+                b"lockfile" => heuristics::lockfile(&store, &mut reasons),
+                b"scripts" => {
+                    let nodes: Vec<Vec<u8>> = match get("nodes") { Value::Arr(xs) => xs.iter().filter_map(jv::text).map(Vec::from).collect(), _ => Vec::new() };
+                    if let Err(rc) = heuristics::scripts(&store, &nodes, &mut reasons) { return rc }
+                },
+                _ => return 2,
+            }
+            Ok(reasons.join(&b'\n'))
+        },
+        b"resolved-diff" => Ok(heuristics::added_resolved(bytes("before"), bytes("after")).to_string().into_bytes()),
         b"closure" => closure::lock_closure(&path).map(|cs| {
             let mut out = Vec::new();
             for c in cs { out.extend(jv::dump(&Value::Arr(c.iter().map(closure::Spec::to_value).collect()))); out.push(b'\n'); }
@@ -89,6 +109,11 @@ pub fn probe(input: &[u8]) -> i32 {
                 b"remove" => r.remove(&path),
                 b"inert" => r.inert(&crate::state::guard_dir(), &path, bytes("input")),
                 b"rebuild" => r.rebuild(&crate::state::guard_dir(), &path, bytes("input"), bytes("fact")),
+                b"refuse-outside" => {
+                    if let Some(why)=report::outside(&sh::p(bytes("project")), &path) {
+                        r.say(report::refused(bytes("kind"), &path, &why));
+                    }
+                },
                 b"workspaces" => r.workspaces_key(&path),
                 _ => return 2,
             }
@@ -100,7 +125,16 @@ pub fn probe(input: &[u8]) -> i32 {
     match result { Ok(out) => { let _ = std::io::stdout().write_all(&out); 0 }, Err(rc) => rc }
 }
 
-pub fn main(_input: &[u8]) -> i32 {
-    eprintln!("safedeps-core post: not written yet. scripts/safedeps-post-verify.sh is the PostToolUse hook.");
-    2
+pub fn main(input: &[u8]) -> i32 {
+    crate::os::set_umask(0o077);
+    if let Some(why) = crate::stamp::refusal() {
+        use std::os::unix::fs::DirBuilderExt;
+        let home = crate::state::guard_dir();
+        let _ = std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&home);
+        let message = format!("post-verify UNVERIFIED: {}; no dependency judgment was made.", why);
+        crate::state::log_advisory(&home, message.as_bytes());
+        eprintln!("{}", message);
+        return 0;
+    }
+    run::main(input)
 }

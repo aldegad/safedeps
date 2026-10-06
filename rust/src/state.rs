@@ -47,7 +47,7 @@ pub fn ensure_dirs(dir: &Path) -> std::io::Result<()> {
 /// `advisory.log`. A line that cannot be written is dropped, as the shell's
 /// `|| true` drops it.
 pub fn log_advisory(dir: &Path, text: &[u8]) {
-    let (secs, _) = crate::os::now();
+    let secs = os::wall(os::WallRole::AdvisoryHeader).seconds();
     let mut line = crate::os::utc_stamp(secs).into_bytes();
     line.push(b'\t');
     line.extend_from_slice(text);
@@ -118,7 +118,7 @@ impl StateLock {
                 Ok(()) => return Ok(Self { path: path.to_path_buf() }),
                 Err(e) => {
                     if let Ok(m) = std::fs::metadata(path) {
-                        let age = os::now().0 - m.mtime();
+                        let age = os::wall(os::WallRole::StateLockAge).seconds() - m.mtime();
                         if m.is_dir() && age > 60 {
                             warnings.extend_from_slice(format!("safedeps: removing stale lock ({}s old).\n", age).as_bytes());
                             if std::fs::remove_dir(path).is_ok() { continue; }
@@ -206,7 +206,8 @@ fn renamed_file(target: &Path, write: impl FnOnce(&mut std::fs::File) -> std::io
     let dir = target.parent().unwrap_or(Path::new("."));
     std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
     let base = target.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let (secs, nanos) = os::now();
+    let stamp = os::wall(os::WallRole::StateTempName);
+    let (secs, nanos) = (stamp.seconds(), stamp.nanos());
     let seed = (nanos ^ (secs as u32).rotate_left(11)).wrapping_add(std::process::id().wrapping_mul(2_654_435_761));
     for n in 0..64u32 {
         let temp = dir.join(format!(".{}.{:06x}", base, seed.wrapping_add(n) & 0xff_ffff));
@@ -232,7 +233,20 @@ fn renamed_file(target: &Path, write: impl FnOnce(&mut std::fs::File) -> std::io
 /// from whole seconds; GNU find compares the times as they are (measured on
 /// macOS and in WSL1: a file 86,400 seconds old goes on GNU and stays on BSD).
 pub fn sweep_day_old(dir: &Path) {
-    let now = SystemTime::now();
+    sweep_old(dir, |_| true)
+}
+
+/// Install pending records share their directory with other bookkeeping.
+/// Match the hook's find expression: only regular *.json and *.trace files.
+pub fn sweep_pending(dir: &Path) {
+    sweep_old(dir, |p| {
+        use std::os::unix::ffi::OsStrExt;
+        p.file_name().is_some_and(|n| { let n=n.as_bytes(); n.ends_with(b".json")||n.ends_with(b".trace") })
+    })
+}
+
+fn sweep_old(dir: &Path, selected: impl Fn(&Path)->bool) {
+    let now = os::wall(os::WallRole::StateRetention).system_time();
     let mut dirs = vec![dir.to_path_buf()];
     while let Some(d) = dirs.pop() {
         let Ok(entries) = std::fs::read_dir(&d) else { continue };
@@ -245,6 +259,7 @@ pub fn sweep_day_old(dir: &Path) {
             if !kind.is_file() {
                 continue;
             }
+            if !selected(&entry.path()) { continue; }
             let Ok(modified) = entry.metadata().and_then(|m| m.modified()) else { continue };
             let old = if cfg!(target_os = "macos") {
                 let secs = |t: SystemTime| t.duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);

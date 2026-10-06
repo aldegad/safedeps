@@ -87,7 +87,7 @@ impl Store{
     }
     fn seal(&self,parent:&[u8])->bool{
         let value=jv::obj(vec![("snapshot_id",jv::s(&self.verified)),("parent_snapshot_id",if parent.is_empty(){Value::Null}else{jv::s(parent)}),
-            ("verified_from",jv::s(&self.id)),("timestamp",jv::num(os::now().0)),("project_dir",jv::s(sh::bytes(&self.project)))]);
+            ("verified_from",jv::s(&self.id)),("timestamp",jv::num(os::wall(os::WallRole::VerifiedMeta).seconds())),("project_dir",jv::s(sh::bytes(&self.project)))]);
         // jq -n is pretty here; the shared writer owns the spelling.
         let body=cat(&[jq::pretty(&jv::to_j(&value)).as_bytes(),b"\n"]);
         sh::write_renamed(&cat(&[sh::bytes(&self.home),b"/snapshots/.",&self.verified,b"_meta."]),&self.path(&self.verified,b"meta.json"),&body)

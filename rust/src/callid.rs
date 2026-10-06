@@ -2,7 +2,7 @@
 //! read it with this, so the pre-guard and the post hook of one call name its
 //! files the same way.
 
-use crate::json::Value;
+use crate::{jq, json::{self, Value}};
 
 fn plain(id: &[u8]) -> bool {
     !id.is_empty() && id.len() <= 128 && id.iter().all(|b| b.is_ascii_alphanumeric() || *b == b'_' || *b == b'-')
@@ -16,10 +16,21 @@ fn plain(id: &[u8]) -> bool {
 /// newlines that end the output before the test, so they are dropped here.
 pub fn call_id(input: &Value) -> Option<String> {
     let Value::Str(raw) = input.get("tool_use_id")? else { return None };
-    let mut id: Vec<u8> = raw.iter().copied().filter(|&b| b != 0).collect();
-    while id.last() == Some(&b'\n') {
-        id.pop();
-    }
+    validated(json::captured(&[raw.clone()]))
+}
+
+/// The same filter over a hook's JSON stream. Multiple values can emit one
+/// id, no id, or multiple lines; only the captured result is validated.
+pub fn from_stream(input: &json::Stream) -> Option<String> {
+    let (lines, rc) = json::each(input, |v| Ok(match jq::field(v, "tool_use_id")? {
+        Value::Str(raw) => vec![raw.clone()],
+        _ => Vec::new(),
+    }));
+    if rc != 0 { return None }
+    validated(json::captured(&lines))
+}
+
+fn validated(id: Vec<u8>) -> Option<String> {
     if !plain(&id) {
         return None;
     }
