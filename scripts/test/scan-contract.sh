@@ -90,10 +90,11 @@ pass() { printf 'ok - %s\n' "$1"; }
 fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
 
 # Rows for --shard I/M (scripts/test/lib/shard.sh): each input of the sections
-# that judge many inputs one at a time (the view properties above all, which
-# took 346 of the battery's first 392 seconds). The other checks run whole in
-# every shard. A random input is drawn before its row is decided, so every
-# shard draws the same inputs from the same seed.
+# that judge many inputs one at a time: the view properties, the event
+# contract and the word ends (346, 165 and over 100 seconds of a run on
+# carenine at load 7 to 17). The other
+# checks run whole in every shard. A random input is drawn before its row is
+# decided, so every shard draws the same inputs from the same seed.
 # shellcheck source=lib/shard.sh
 source "${ROOT_DIR}/scripts/test/lib/shard.sh"
 shard_args "$@"
@@ -1669,6 +1670,7 @@ event_blanks=$' \t'
 # Whether the offset <n> is in the space-separated list <list>.
 in_list() { [[ " $1 " == *" $2 "* ]]; }
 event_contract() { # input label
+  shard_row "event contract: $2" || return 0
   local x="$1" reading ev cw rv stm line k w pre st sst first ok p head off rec slist="" wlist="" f1 f2 f3 f4 f6
   local LC_ALL=C
   event_inputs=$((event_inputs + 1))
@@ -1773,7 +1775,10 @@ for ((c = 0; c < event_cases; c++)); do
 done
 rm -f "${event_flags}"
 [[ ${event_failures} -eq 0 ]] || fail "event contract: ${event_failures} violation(s) (seed ${fuzz_seed})"
-[[ ${event_checked} -gt 1000 ]] || fail "event contract: only ${event_checked} events checked, too few to say anything"
+# A shard checks its share of the inputs, so the floor is its share too: the
+# shards together check more than 1000, and a run of one shard all of them.
+[[ $(( event_checked * SHARD_M )) -gt 1000 ]] \
+  || fail "event contract: only ${event_checked} events checked (shard ${SHARD_I}/${SHARD_M}), too few to say anything"
 pass "event contract: ${event_checked} events of ${event_inputs} inputs (${form_count} shell forms, ${first_place_count} first-place forms, $((event_cases * 2)) random), in bash, zsh and dash: each at top-level code, none between a command's prefixes and its word, each command word after a separator to the recognizers and at a cut of command_statements"
 
 # --- where a word ends (SAFEDEPS_G_END) ------------------------------------------
@@ -1789,6 +1794,7 @@ wordends_view() { shell_lex "$1" wordends "safedeps:scan-contract"; }
 word_end_failures=0
 word_end_checked=0
 check_word_ends() { # input label
+  shard_row "word ends: $2: $1" || return 0
   local x="$1" reading mask tv k b v LC_ALL=C
   for reading in bash zsh dash; do
     mask=$(SAFEDEPS_READING="${reading}" wordends_view "${x}"; printf 'X'); mask="${mask%X}"
@@ -1840,7 +1846,9 @@ for ((c = 0; c < fuzz_cases; c++)); do
   check_word_ends "${input}" "grammar ${c}"
 done
 [[ ${word_end_failures} -eq 0 ]] || fail "word ends: ${word_end_failures} byte(s) where the lexer ends a word print as a byte SAFEDEPS_G_END does not read as one (seed ${fuzz_seed})"
-[[ ${word_end_checked} -gt 1000 ]] || fail "word ends: only ${word_end_checked} word ends checked, too few to say anything"
+# As for the event contract: a shard's floor is its share of the inputs.
+[[ $(( word_end_checked * SHARD_M )) -gt 1000 ]] \
+  || fail "word ends: only ${word_end_checked} word ends checked (shard ${SHARD_I}/${SHARD_M}), too few to say anything"
 for got in "npm ci;" "(npm install)" "npm ci&>log"; do
   SAFEDEPS_READING=bash stmts_view "${got}" | grep -qE "${SAFEDEPS_G_NPM_INSTALL_RE}" \
     || fail "word ends: the npm recognizer reads [${got}] as an install"

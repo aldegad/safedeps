@@ -11,7 +11,9 @@
 #   --rev          the commit to test; default HEAD. Uncommitted changes are
 #                  not tested, and the run says so.
 #   --logs         where the logs land; default a new directory under TMPDIR
-#   --budget       the wall clock a run has, default 600 (AGENTS.md, Testing)
+#   --budget       the wall clock a run has, default 600 (AGENTS.md, Testing),
+#                  counted from the first queue slot the run gets: the wait
+#                  for the suites ahead in the queues is printed beside it
 #   --only         run these units alone (a comma-separated list), to try the
 #                  runner itself. Such a run is red by construction: the verdict
 #                  judges the whole set, and names the units that did not run.
@@ -196,6 +198,7 @@ trap cleanup EXIT
 trap 'event "interrupted: stopping every unit"; stop_all; exit 130' INT TERM
 
 suite_start=$(now)
+first_held=""
 {
   printf 'commit %s%s\n' "${sha}" "${dirty}"
   printf 'set %s\n' "$([[ -n "${set_flag}" ]] && printf release || printf development)"
@@ -264,6 +267,7 @@ while (( $(pending_count) > 0 || $(running_count) > 0 )); do
     H_LOAD1[h]=$(sed -n 's/^load //p' "${poll}")
     if [[ "${H_STATE[h]}" == queued ]] && grep -qx 'held yes' "${poll}"; then
       H_STATE[h]=held
+      [[ -n "${first_held}" ]] || first_held=$(now)
       event "${H_NAME[h]}: has its queue slot (load ${H_LOAD1[h]})"
     elif [[ "${H_STATE[h]}" == held ]] && grep -qx 'held no' "${poll}"; then
       host_dead "${h}" "it gave up its queue slot while the run still had work"
@@ -328,10 +332,14 @@ for (( h = 0; h < ${#H_NAME[@]}; h++ )); do
   fi
 done
 
-secs=$(( suite_end - suite_start ))
+# The run's own time starts at the first queue slot; before it the run waited
+# for other suites. A run that never got a slot ran nothing and is red anyway.
+[[ -n "${first_held}" ]] || first_held="${suite_end}"
+secs=$(( suite_end - first_held ))
+waited=$(( first_held - suite_start ))
 {
   printf 'end %s\n' "$(date '+%Y-%m-%d %H:%M:%S %z')"
-  printf 'wall %ss (budget %ss)\n' "${secs}" "${budget}"
+  printf 'wall %ss from the first queue slot (budget %ss), after %ss waiting for the queues\n' "${secs}" "${budget}" "${waited}"
   for (( h = 0; h < ${#H_NAME[@]}; h++ )); do
     printf 'host %s %s cpus %s load at start %s, at end %s\n' "${H_NAME[h]}" "${H_STATE[h]}" "${H_CPUS[h]}" \
       "${H_LOAD0[h]:-?}" "${H_LOAD1[h]:-?}"
@@ -340,8 +348,10 @@ secs=$(( suite_end - suite_start ))
 
 # --- verdict ------------------------------------------------------------------------
 cat "${work}/run.txt"
-verdict_rc=0
-bash "${tree}/scripts/test/ci-verdict.sh" ${set_flag} "${logs}" || verdict_rc=$?
+bash "${tree}/scripts/test/ci-verdict.sh" ${set_flag} "${logs}" 2>&1 | tee "${work}/verdict.txt"
+verdict_rc=${PIPESTATUS[0]}
+# The tree and its archive are what the run shipped; the logs are what it made.
+rm -rf "${tree}" "${archive}"
 if (( verdict_rc != 0 )); then
   printf '# RED: see %s\n' "${logs}"
   exit 1
