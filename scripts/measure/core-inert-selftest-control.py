@@ -77,7 +77,7 @@ MUTATIONS = [
      "the bash side reads true where the core only records: a decrease"),
     ("a record hides a second call that lost its option",
      '            if fx and not fy:\n                out["true_to_false"] += 1',
-     '            if fx and not fy and not res["sides"][side].get("record"):\n                out["true_to_false"] += 1',
+     '            if fx and not fy and not side_record(res["sides"][side]):\n                out["true_to_false"] += 1',
      "a second call that goes from true to false is counted, record or no record"),
     ("npm calls that hold cover a difference in what the command printed",
      '    v["effects"] = "differ:" + ",".join(sorted(differ)) if differ else "invalid" if eff_invalid else UNKNOWN if eff_unknown else "same"',

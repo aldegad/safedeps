@@ -3237,7 +3237,8 @@ def selftest(a):
     check("core records with no any_install make the row invalid", evaluate(source([no_inst]), [])["rows"][0]["status"], "invalid")
     ev_null = evaluate(source([erow(four(c10)), None]), [])
     check("a null row is a slot of its own, invalid, beside the rows that read",
-          [len(ev_null["rows"]), ev_null["counts"]["invalid"], ev_null["rows"][1]["status"]], [2, 1, "invalid"])
+          [len(ev_null["rows"]), ev_null["counts"]["invalid"], ev_null["rows"][1]["status"] if len(ev_null["rows"]) > 1 else None],
+          [2, 1, "invalid"])
     ls_ = erow(four(c10))
     ls_["sides"] = []
     ev_ls = evaluate(source([ls_]), [])
