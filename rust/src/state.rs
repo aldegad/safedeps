@@ -12,12 +12,20 @@ use std::path::{Path, PathBuf};
 /// `SAFEDEPS_HOME` counts as unset, and an unset `HOME` leaves the path
 /// starting at `/.safedeps`, as the shell's expansion does.
 pub fn guard_dir() -> PathBuf {
+    crate::os::path(&guard_text())
+}
+
+/// The same directory as the text the hooks build their paths from. A record
+/// that names a path holds that text, so `x/` and `/pending` make `x//pending`
+/// there, as the shell's expansion does.
+pub fn guard_text() -> Vec<u8> {
+    use std::os::unix::ffi::OsStringExt;
     match std::env::var_os("SAFEDEPS_HOME") {
-        Some(h) if !h.is_empty() => PathBuf::from(h),
+        Some(h) if !h.is_empty() => h.into_vec(),
         _ => {
-            let mut p = std::env::var_os("HOME").unwrap_or_default();
-            p.push("/.safedeps");
-            PathBuf::from(p)
+            let mut p = std::env::var_os("HOME").unwrap_or_default().into_vec();
+            p.extend_from_slice(b"/.safedeps");
+            p
         }
     }
 }

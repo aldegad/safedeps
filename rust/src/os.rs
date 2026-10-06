@@ -212,15 +212,17 @@ pub fn clock_has_subsecond(line: &str) -> bool {
 /// unchanged where realpath fails. BSD realpath fails on a path that is not
 /// there. GNU realpath needs every part but the last to be there: it follows
 /// a link in the last part, and what the link names may be missing.
-pub fn realpath(dir: &str) -> String {
-    if let Ok(p) = std::fs::canonicalize(dir) {
-        return p.to_string_lossy().into_owned();
+pub fn realpath(dir: &[u8]) -> Vec<u8> {
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+    let given = Path::new(std::ffi::OsStr::from_bytes(dir));
+    if let Ok(p) = std::fs::canonicalize(given) {
+        return p.into_os_string().into_vec();
     }
     if cfg!(target_os = "linux") {
-        let mut path = std::path::PathBuf::from(dir);
+        let mut path = given.to_path_buf();
         for _ in 0..40 {
             if let Ok(p) = std::fs::canonicalize(&path) {
-                return p.to_string_lossy().into_owned();
+                return p.into_os_string().into_vec();
             }
             let parent = match path.parent() {
                 Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
@@ -231,43 +233,65 @@ pub fn realpath(dir: &str) -> String {
                 Ok(target) => path = if target.is_absolute() { target } else { parent.join(target) },
                 Err(_) => {
                     if let (Ok(pp), Some(name)) = (std::fs::canonicalize(&parent), path.file_name()) {
-                        return pp.join(name).to_string_lossy().into_owned();
+                        return pp.join(name).into_os_string().into_vec();
                     }
                     break;
                 }
             }
         }
     }
-    dir.to_string()
+    dir.to_vec()
 }
 
-/// `${#s}` as bash counts it in the locale the hook runs with: characters
-/// where the locale's codeset is UTF-8 (a byte that starts no valid sequence
-/// counts as one), bytes otherwise.
-pub fn bash_len(s: &[u8]) -> usize {
+/// A path from the bytes a shell string holds.
+pub fn path(bytes: &[u8]) -> std::path::PathBuf {
+    use std::os::unix::ffi::OsStrExt;
+    std::path::PathBuf::from(std::ffi::OsStr::from_bytes(bytes))
+}
+
+/// Whether the hook's locale reads text as UTF-8: the first of `LC_ALL`,
+/// `LC_CTYPE` and `LANG` that is set names the codeset.
+fn locale_is_utf8() -> bool {
     let loc = ["LC_ALL", "LC_CTYPE", "LANG"]
         .iter()
         .filter_map(|k| std::env::var(k).ok())
         .find(|v| !v.is_empty())
         .unwrap_or_default()
         .to_ascii_lowercase();
-    if !(loc.contains("utf-8") || loc.contains("utf8")) {
-        return s.len();
+    loc.contains("utf-8") || loc.contains("utf8")
+}
+
+/// The length in bytes of each character of `s` as bash counts characters in
+/// the hook's locale: under a UTF-8 locale a well-formed sequence is one
+/// character and a byte that starts none is one; otherwise every byte is one.
+pub fn bash_chars(s: &[u8]) -> Vec<usize> {
+    if !locale_is_utf8() {
+        return vec![1; s.len()];
     }
-    let mut n = 0;
+    let mut out = Vec::with_capacity(s.len());
     let mut i = 0;
     while i < s.len() {
-        let w = match std::str::from_utf8(&s[i..(i + 4).min(s.len())]) {
+        let end = (i + 4).min(s.len());
+        let w = match std::str::from_utf8(&s[i..end]) {
             Ok(t) => t.chars().next().map(|c| c.len_utf8()).unwrap_or(1),
-            Err(e) if e.valid_up_to() > 0 => std::str::from_utf8(&s[i..i + e.valid_up_to()])
-                .ok()
-                .and_then(|t| t.chars().next())
-                .map(|c| c.len_utf8())
-                .unwrap_or(1),
+            Err(e) if e.valid_up_to() > 0 => {
+                std::str::from_utf8(&s[i..i + e.valid_up_to()]).ok().and_then(|t| t.chars().next()).map(|c| c.len_utf8()).unwrap_or(1)
+            }
             Err(_) => 1,
         };
+        out.push(w);
         i += w;
-        n += 1;
     }
-    n
+    out
+}
+
+/// `${#s}`.
+pub fn bash_len(s: &[u8]) -> usize {
+    bash_chars(s).len()
+}
+
+/// `${s:0:n}`.
+pub fn bash_prefix(s: &[u8], n: usize) -> Vec<u8> {
+    let bytes: usize = bash_chars(s).iter().take(n).sum();
+    s[..bytes].to_vec()
 }

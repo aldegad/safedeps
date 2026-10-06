@@ -44,7 +44,6 @@
 // `post`, `inert`): they are in the tree before their callers so that the
 // people writing those callers share one copy. The mark goes when the caller
 // lands.
-#[allow(dead_code)]
 mod callid;
 mod core;
 mod ere;
@@ -57,7 +56,6 @@ mod jq;
 mod json;
 mod lex;
 mod manager;
-#[allow(dead_code)]
 mod md5;
 #[allow(dead_code)]
 mod os;
@@ -296,7 +294,7 @@ fn cmd_kat(args: &[String]) -> i32 {
         line("clock-m", os::file_clock(path, b'm', false).as_bytes());
         line("clock-m-follow", os::file_clock(path, b'm', true).as_bytes());
         line("inode", os::tree_inode(path).as_bytes());
-        line("realpath", os::realpath(p).as_bytes());
+        line("realpath", &os::realpath(p.as_bytes()));
         line("bash-len", os::bash_len(p.as_bytes()).to_string().as_bytes());
     }
     let mut so = std::io::stdout().lock();
@@ -375,7 +373,8 @@ fn cmd_words() -> i32 {
 }
 
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
+    // An argument that is not text must not end the process before it answers.
+    let args: Vec<String> = std::env::args_os().map(|a| a.to_string_lossy().into_owned()).collect();
     let code = match args.get(1).map(|s| s.as_str()) {
         Some("lex") => cmd_lex(&args[2..]),
         Some("lex-batch") => cmd_lex_batch(),
@@ -390,6 +389,12 @@ fn main() {
             Some(input) => inert::cli(&input),
             None => 1,
         },
+        // The hooks take the subcommand and nothing else: no argument and no
+        // environment variable chooses how one judges.
+        Some("pre") if args.len() > 2 => {
+            println!("{}", jq::deny("safedeps: the PreToolUse hook was started with an argument, and it takes none. Bash is blocked fail-closed until the hook is registered as safedeps installs it: node scripts/install/install-safedeps-hooks.mjs"));
+            0
+        }
         Some("pre") => match read_stdin() {
             Some(input) => pre::main(&input),
             None => 2,

@@ -189,3 +189,14 @@ pub fn parse(s: &[u8]) -> Result<Value, String> {
     let v = p.value()?;
     Ok(v)
 }
+
+/// One JSON text, with nothing after it but blanks.
+pub fn parse_one(s: &[u8]) -> Result<Value, String> {
+    let mut p = P { s, i: 0 };
+    let v = p.value()?;
+    p.ws();
+    if p.i != s.len() {
+        return Err("text after the value".into());
+    }
+    Ok(v)
+}
