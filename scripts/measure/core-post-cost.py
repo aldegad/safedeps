@@ -6,7 +6,8 @@ program invocations through PATH; this is not a count of forks or Bash
 subshells. Rust's direct child list is npm, curl, file, gzip. The default
 fixture exercises the closure backstop. --bin-count adds a recorded empty
 install that classifies new text bin files; --rotate-bytes exercises archive
-creation. None of these fixtures exercises the npm rebuild path.
+creation. --rebuild uses one approved synthetic package whose harmless
+lifecycle script leaves a receipt inside its own fixture directory.
 Warm-cache and cold-loopback results are CPU/local-provider measurements,
 not a claim about the canonical providers' network latency.
 """
@@ -35,6 +36,7 @@ p.add_argument('--cache',choices=['warm','cold-loopback'],default='warm')
 p.add_argument('--count',action='store_true',help='Run a separate PATH-instrumented sample')
 p.add_argument('--bin-count',type=int,default=0,help='Use a recorded empty install with this many new text bin files')
 p.add_argument('--rotate-bytes',type=int,default=0,help='Seed an INFO log and set the rotation threshold to this size')
+p.add_argument('--rebuild',action='store_true',help='Measure config/query/rebuild over one approved local fixture package')
 p.add_argument('--report',required=True)
 a=p.parse_args()
 sizes=[int(x) for x in a.sizes.split(',')]
@@ -42,6 +44,8 @@ ledgers=[int(x) for x in a.ledger_sizes.split(',')]
 if any(x<0 for x in sizes+ledgers):p.error('sizes must be nonnegative')
 if a.bin_count<0 or a.rotate_bytes<0:p.error('bin count and rotation bytes must be nonnegative')
 if a.bin_count and (sizes!=[0] or ledgers!=[0]):p.error('--bin-count requires --sizes 0 --ledger-sizes 0')
+if a.rebuild and (sizes!=[1] or ledgers!=[1] or a.bin_count or a.cache!='warm' or not a.count):
+    p.error('--rebuild requires --sizes 1 --ledger-sizes 1 --cache warm --count and no bin fixture')
 root=Path(__file__).resolve().parents[2]
 core=str(Path(a.core).resolve(strict=True))
 programs='npm curl file gzip jq date mkdir cat sed grep awk sort find stat sha256sum shasum md5 md5sum mktemp rm mv cp tr head tail cut paste wc ls sleep uname ps diff cmp readlink basename dirname realpath'.split()
@@ -90,13 +94,16 @@ def seed(d,n,l):
         line=b'[2001-02-03T04:05:06Z] INFO synthetic rotation fixture\n'
         (home/'advisory.log').write_bytes(line*(a.rotate_bytes//len(line)+1))
     payload=dict(tool_name='Bash',tool_input=dict(command='npm install fixture'),cwd=str(project),tool_use_id='cost-call')
-    if a.bin_count:
+    if a.bin_count or a.rebuild:
         bins=project/'node_modules/.bin';bins.mkdir(parents=True)
         for i in range(a.bin_count):(bins/('probe-%04d'%i)).write_text('plain text\n')
         shutil.copyfile(project/'package-lock.json',project/'node_modules/.package-lock.json')
         snapshots=home/'snapshots';snapshots.mkdir();pending=home/'pending';pending.mkdir()
+        if a.rebuild:payload['tool_input']['command']='npm install --ignore-scripts '+spec(0)
         record=dict(record=2,snapshot_id='pre',tool_use_id='cost-call',project_dir=str(project),
-                    command=payload['tool_input']['command'],ignore_scripts_injected=False)
+                    command=payload['tool_input']['command'],ignore_scripts_injected=a.rebuild)
+        if a.rebuild:
+            record.update(updated_command=payload['tool_input']['command'],npm_fetch=dict(registry='https://registry.npmjs.org/',replace='npmjs',scopes={}))
         write_json(snapshots/'pre_meta.json',record);write_json(pending/'id-cost-call.json',record)
         (snapshots/'pre_monitored_files.list').write_text(pre_evidence['list'])
         for name in pre_evidence['list'].splitlines():
@@ -105,6 +112,15 @@ def seed(d,n,l):
             else:(snapshots/('pre_'+name+'.missing')).touch()
         for name in ['bins.list','packages.list']:(snapshots/('pre_'+name)).touch()
         shutil.copyfile(project/'package-lock.json',snapshots/'pre_npm-tree-record.json')
+        if a.rebuild:
+            package=project/'node_modules'/spec(0);package.mkdir()
+            write_json(package/'package.json',dict(name=spec(0),version='1.0.0',scripts=dict(install='node ./fixture-install.cjs')))
+            (package/'fixture-install.cjs').write_text("require('fs').writeFileSync('rebuild-receipt', 'fixture lifecycle ran\\n');\n")
+            packages['node_modules/'+spec(0)].update(resolved='https://registry.npmjs.org/'+spec(0)+'/-/'+spec(0)+'-1.0.0.tgz',integrity='sha512-Zml4dHVyZQ==')
+            write_json(project/'package-lock.json',dict(lockfileVersion=3,packages=packages))
+            shutil.copyfile(project/'package-lock.json',project/'node_modules/.package-lock.json')
+            write_json(project/'package.json',dict(name='cost-fixture',version='1.0.0',dependencies={spec(0):'1.0.0'}))
+            (project/'.npmrc').write_text('registry=https://registry.npmjs.org/\nignore-scripts=false\n')
     return home,json.dumps(payload).encode()
 
 rows=[]
@@ -112,7 +128,7 @@ print('start:',subprocess.check_output(['uptime'],text=True).strip(),flush=True)
 try:
     with tempfile.TemporaryDirectory(prefix='core-post-cost.') as tmp:
         box=Path(tmp).resolve();count_log=box/'invocations.jsonl';bin_dir=box/'count-bin';bin_dir.mkdir()
-        if a.bin_count:
+        if a.bin_count or a.rebuild:
             fixture_spec=importlib.util.spec_from_file_location('pre_fixture',Path(__file__).with_name('core-post-pre-fixture.py'))
             fixture=importlib.util.module_from_spec(fixture_spec);fixture_spec.loader.exec_module(fixture)
             pre_evidence=fixture.pre_list(root,box/'normal-pre')
@@ -122,7 +138,7 @@ try:
             # not add a child. Interpreter overhead is excluded from timings.
             wrapper=bin_dir/name
             wrapper.write_text('#!'+sys.executable+'\nimport json,os,sys\n'
-                +'with open('+repr(str(count_log))+',"a") as f:f.write(json.dumps('+repr(name)+')+"\\n")\n'
+                +'with open('+repr(str(count_log))+',"a") as f:f.write(json.dumps(dict(program='+repr(name)+',verb=sys.argv[1] if '+repr(name)+'=="npm" and len(sys.argv)>1 else None))+"\\n")\n'
                 +'os.execv('+repr(path)+','+repr([path])+'+sys.argv[1:])\n')
             wrapper.chmod(0o755)
         for n in sizes:
@@ -136,6 +152,9 @@ try:
                         env={k:v for k,v in os.environ.items() if not k.startswith('SAFEDEPS_')}
                         env.update(SAFEDEPS_HOME=str(home),SAFEDEPS_OSV_BATCH_API_URL=endpoint+'/osv',
                                    SAFEDEPS_KEV_CATALOG_URL=endpoint+'/kev',LC_ALL='C')
+                        if a.rebuild:
+                            user=home.parent/'user-home';user.mkdir(exist_ok=True)
+                            env.update(HOME=str(user),NPM_CONFIG_USERCONFIG='/dev/null',NPM_CONFIG_IGNORE_SCRIPTS='false')
                         if a.rotate_bytes:env['SAFEDEPS_ADVISORY_LOG_MAX_BYTES']=str(a.rotate_bytes)
                         if counted:env['PATH']=str(bin_dir)+os.pathsep+env['PATH']
                         if side=='bash':argv=['bash',str(root/'scripts/safedeps-post-verify.sh')]
@@ -153,7 +172,13 @@ try:
                             expected=(not out and not (home/'pending/id-cost-call.json').exists()
                                       and len(list(home.parent.glob('project/node_modules/.bin/*')))==a.bin_count
                                       and bool(list(home.glob('confirmed_*'))))
-                        calls=Counter(json.loads(line) for line in count_log.read_text().splitlines())
+                        if a.rebuild:
+                            receipt=home.parent/'project/node_modules'/spec(0)/'rebuild-receipt'
+                            expected=(not out and receipt.is_file() and receipt.read_text()=='fixture lifecycle ran\n'
+                                      and not (home/'pending/id-cost-call.json').exists() and bool(list(home.glob('confirmed_*'))))
+                        invocations=[json.loads(line) for line in count_log.read_text().splitlines()]
+                        calls=Counter(call['program'] for call in invocations)
+                        npm_commands=Counter(call['verb'] for call in invocations if call['program']=='npm')
                         expected_requests=[] if a.cache=='warm' or n==0 else [dict(path='/osv',queries=n),dict(path='/kev')]
                         provider_line='OSV batch cache hit' if a.cache=='warm' else 'OSV batch live query ok'
                         passed=(result.returncode==0 and expected and requests==expected_requests
@@ -162,8 +187,9 @@ try:
                         if a.rotate_bytes:passed=passed and bool(list(home.glob('advisory.log.*.gz')))
                         if counted and side=='rust':
                             passed=passed and calls.get('file',0)==min(a.bin_count,20) and calls.get('gzip',0)==bool(a.rotate_bytes)
+                            if a.rebuild:passed=passed and npm_commands==dict(config=1,query=1,rebuild=1)
                         sample=dict(rc=result.returncode,passed=passed,stdout=out,stderr=err,requests=list(requests))
-                        if counted:sample['external_program_invocations']=dict(calls)
+                        if counted:sample.update(external_program_invocations=dict(calls),npm_commands=dict(npm_commands))
                         else:sample.update(seconds=elapsed,over_30s=elapsed>30)
                         samples['counted' if counted else 'timed']=sample
                         print(side,n,l,'counted' if counted else 'timed',result.returncode,
@@ -172,7 +198,7 @@ try:
 finally:
     server.shutdown();server.server_close();thread.join()
 report=dict(host=dict(system=platform.system(),release=platform.release(),machine=platform.machine()),
-            scope='recorded empty install with new text bins' if a.bin_count else 'whole post command-independent backstop; no rebuild',
+            scope='verified rebuild of one approved fixture package' if a.rebuild else 'recorded empty install with new text bins' if a.bin_count else 'whole post command-independent backstop; no rebuild',
             bin_count=a.bin_count,rotation_seed_bytes=a.rotate_bytes,
             pre_generated_fixture=pre_evidence,
             count_unit='selected external program invocations, not forks or subshells',
