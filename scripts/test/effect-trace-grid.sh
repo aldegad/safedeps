@@ -1564,7 +1564,8 @@ if shard_row "the backstop rolls back an npm run that installed (BT2) and nothin
   pass "the backstop rolls back an npm run that installed (BT2) and nothing after one that did not (BT1)"
 fi
 
-npm_sandbox_registry_was_local
+# A list run (--shard-list) installs nothing, so nothing reached the registry.
+shard_listing || npm_sandbox_registry_was_local
 # The evil registry is asked for the impostor only, and was asked at all: every
 # RH row but RH4 and RH5 fetches through it.
 # A shard that ran no RH row sent nothing there; what was sent is checked in

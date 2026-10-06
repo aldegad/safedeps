@@ -1132,7 +1132,8 @@ release_floor_settle
 pass "deleting flags the hook inserted gives the release's rewrite, for every install this battery rewrites"
 
 # --- the fixture never left the machine ---------------------------------------------------
-npm_sandbox_registry_was_local
+# A list run (--shard-list) installs nothing, so nothing reached the registry.
+shard_listing || npm_sandbox_registry_was_local
 
 shard_end
 printf 'lockless-forms passed\n'

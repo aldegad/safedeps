@@ -86,6 +86,11 @@ shard_row() {
   printf '# shard-row %s\n' "${SHARD_N}"
 }
 
+# shard_listing: true in a list run. A list run runs no row, so a check of what
+# the rows did (a request log, a floor on how many inputs were checked) has
+# nothing to read there; such a check runs unless this is true.
+shard_listing() { [[ "${SHARD_LIST}" == true ]]; }
+
 # shard_end: the last line of a sharded run. Call it after the battery's last
 # row, on the path a passing run takes.
 shard_end() {

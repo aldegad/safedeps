@@ -1639,8 +1639,9 @@ for reading in bash zsh dash; do
   done
 done
 [[ ${grammar_failures} -eq 0 ]] || fail "stmts view: ${grammar_failures} of ${grammar_closed} closed readings of grammar words not idempotent (seed ${fuzz_seed})"
-# A shard's floor is its share of the inputs, as for the event contract.
-[[ $(( grammar_closed * SHARD_M )) -gt $((fuzz_cases * 3 / 4)) ]] || fail "stmts view: only ${grammar_closed} of $((fuzz_cases * 3)) grammar-word readings closed, too few to say anything"
+# A shard's floor is its share of the inputs, as for the event contract; a
+# list run checks no input, and has no floor.
+shard_listing || [[ $(( grammar_closed * SHARD_M )) -gt $((fuzz_cases * 3 / 4)) ]] || fail "stmts view: only ${grammar_closed} of $((fuzz_cases * 3)) grammar-word readings closed, too few to say anything"
 pass "stmts view: idempotent and length-preserving on ${grammar_closed} closed readings of $((fuzz_cases * 3)) random grammar-word inputs (bash, zsh, dash)"
 
 # --- the event contract -----------------------------------------------------------
@@ -1779,8 +1780,9 @@ done
 rm -f "${event_flags}"
 [[ ${event_failures} -eq 0 ]] || fail "event contract: ${event_failures} violation(s) (seed ${fuzz_seed})"
 # A shard checks its share of the inputs, so the floor is its share too: the
-# shards together check more than 1000, and a run of one shard all of them.
-[[ $(( event_checked * SHARD_M )) -gt 1000 ]] \
+# shards together check more than 1000, and a run of one shard all of them. A
+# list run checks no input, and has no floor.
+shard_listing || [[ $(( event_checked * SHARD_M )) -gt 1000 ]] \
   || fail "event contract: only ${event_checked} events checked (shard ${SHARD_I}/${SHARD_M}), too few to say anything"
 pass "event contract: ${event_checked} events of ${event_inputs} inputs (${form_count} shell forms, ${first_place_count} first-place forms, $((event_cases * 2)) random), in bash, zsh and dash: each at top-level code, none between a command's prefixes and its word, each command word after a separator to the recognizers and at a cut of command_statements"
 
@@ -1850,7 +1852,7 @@ for ((c = 0; c < fuzz_cases; c++)); do
 done
 [[ ${word_end_failures} -eq 0 ]] || fail "word ends: ${word_end_failures} byte(s) where the lexer ends a word print as a byte SAFEDEPS_G_END does not read as one (seed ${fuzz_seed})"
 # As for the event contract: a shard's floor is its share of the inputs.
-[[ $(( word_end_checked * SHARD_M )) -gt 1000 ]] \
+shard_listing || [[ $(( word_end_checked * SHARD_M )) -gt 1000 ]] \
   || fail "word ends: only ${word_end_checked} word ends checked (shard ${SHARD_I}/${SHARD_M}), too few to say anything"
 for got in "npm ci;" "(npm install)" "npm ci&>log"; do
   SAFEDEPS_READING=bash stmts_view "${got}" | grep -qE "${SAFEDEPS_G_NPM_INSTALL_RE}" \
