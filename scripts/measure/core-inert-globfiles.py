@@ -6,13 +6,14 @@ generation has files to match.
 For each record, the command as written and each side's saved command (the
 rewrite it sent, or the command as written where it sent none) run under
 bash, zsh, dash and the agent's zsh wrapper, with their default options, with
-a stub npm, in a fresh directory that holds the files of one set (`--set
-zz`, `--set --cache`, `--set zz,--cache`). Each npm call is kept with the
-exit status and stderr of its shell, and with what the guard's own reading of
-npm's arguments (safedeps_npm_read_args in lib/install-grammar.sh, the last
-value ignore-scripts takes) makes of it. Nothing is judged again: the guards
-are not run, so the rewrites are the ones the bundle saved. No package
-manager runs.
+stand-ins for npm and the other tools, in a fresh directory that holds the
+files of one set (`--set zz`, `--set --cache`, `--set zz,--cache`). Each run
+is kept whole, as core-inert-differential.py observes one, and each npm call
+with what the guard's own reading of npm's arguments
+(safedeps_npm_read_args in lib/install-grammar.sh, the last value
+ignore-scripts takes) makes of it. Nothing is judged again: the guards are
+not run, so the rewrites are the ones the bundle saved. No package manager
+runs.
 
 Usage:
   core-inert-globfiles.py --witness FILE.jsonl --set NAMES [--set NAMES ...] --out FILE.jsonl
@@ -56,8 +57,8 @@ def main():
     open(reader, "w").write(READER)
 
     def reading(argv):
-        r = subprocess.run(["bash", reader, ROOT] + argv, capture_output=True, text=True, timeout=30)
-        return r.stdout.strip() if r.returncode == 0 else "failed: rc %d" % r.returncode
+        r = subprocess.run(["bash", reader, ROOT] + [x.encode("latin-1") for x in argv], capture_output=True, timeout=30)
+        return r.stdout.decode("latin-1").strip() if r.returncode == 0 else "failed: rc %d" % r.returncode
 
     up0 = subprocess.run(["uptime"], capture_output=True, text=True).stdout.strip()
     out = open(a.out, "w", encoding="utf-8")
@@ -78,11 +79,10 @@ def main():
             row = {"cmd": cmd, "files": files, "runs": {}, "denied": denied}
             for name, text in runs:
                 box = tempfile.mkdtemp(prefix="g.", dir=work)
-                calls = shells.run(text, box, files)
-                row["runs"][name] = {"command": text, "shells": {
-                    s: {"rc": shells.meta[s]["rc"], "stderr": shells.meta[s]["stderr"],
-                        "calls": [{"argv": c, "ignore_scripts": reading(c)} for c in calls[s]]}
-                    for s in calls}}
+                obs = shells.observe(text, box, files)
+                for o in obs.values():
+                    o["readings"] = [reading(c) for c in o["npm"]] if isinstance(o.get("npm"), list) else d.UNKNOWN
+                row["runs"][name] = {"command": text, "shells": obs}
                 shutil.rmtree(box, ignore_errors=True)
             out.write(json.dumps(row, ensure_ascii=False) + "\n")
     out.close()

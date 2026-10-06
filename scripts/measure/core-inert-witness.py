@@ -7,15 +7,17 @@ own whole pre-guard, as a PreToolUse payload: the decision, the command it
 sends, its exit status, and the advisory.log lines it wrote. The Rust core
 (`safedeps-core inert`) gives its value per reading and the command its
 readings agree on. Then the command as written, and the command each side
-would run, run under bash, zsh, dash and the agent's zsh wrapper with a stub
-npm, each with its exit status, its stderr's first bytes and the npm calls it
-made. The flags are split by where they come from: the ones 7d66f8c placed
-(the floor, from its recorded rewrite in scripts/test/inert-release-rewrites.json
-and from its own run), and the ones each later side added. Each npm call is
-set beside the call the command as written makes, with every
-`--ignore-scripts` word taken out, so an argument whose value a rewrite
-changed shows as a change. --saved adds what a saved comparison report held
-for the same command.
+would run, run under bash, zsh, dash and the agent's zsh wrapper with
+stand-ins for npm and the other tools: each run is kept whole, as
+core-inert-differential.py observes one (exit status, stdout, stderr, every
+stand-in call with its argv, the files left). The flags are split by where
+they come from: the ones 7d66f8c placed (the floor, from its recorded rewrite
+in scripts/test/inert-release-rewrites.json and from its own run), and the
+ones each later side added. Each npm call is set beside the call the command
+as written makes: where it is that call with `--ignore-scripts` words
+inserted, the inserted places are listed, and where it is not, both argvs are
+listed whole. No argument is taken out to make two calls compare. --saved
+adds what a saved comparison report held for the same command.
 
 Commands are data: they reach the guards as payloads and the shells as an
 argument; no package manager runs.
@@ -45,32 +47,24 @@ def load_diff():
     return mod
 
 
-def strip_flags(argv):
-    return [a for a in argv if a != "--ignore-scripts"]
-
-
-def compare_calls(orig, now):
-    """Each npm call of `now` beside the same call of the command as written,
-    flags taken out: the arguments whose value is not the one written."""
+def compare_calls(d, orig, now):
+    """Each npm call of a run beside the same call of the command as written
+    (two observations of one shell): the indices of the `--ignore-scripts`
+    words inserted, or both argvs where the call is no such edit."""
+    if not d.calls_known(orig) or not d.calls_known(now):
+        return [{"note": "a run's npm calls are not known"}]
     out = []
-    for i, call in enumerate(now):
-        base = orig[i] if i < len(orig) else None
-        s = strip_flags(call)
-        if base is None:
+    for i, call in enumerate(now["npm"]):
+        if i >= len(orig["npm"]):
             out.append({"call": i, "note": "no such call in the command as written", "argv": call})
             continue
-        b = strip_flags(base)
-        if s == b:
-            continue
-        changes = []
-        for k in range(max(len(s), len(b))):
-            x = b[k] if k < len(b) else None
-            y = s[k] if k < len(s) else None
-            if x != y:
-                changes.append({"arg": k, "written": x, "now": y})
-        out.append({"call": i, "changes": changes})
-    if len(orig) > len(now):
-        out.append({"note": "the command as written makes %d npm calls, this one %d" % (len(orig), len(now))})
+        ins = d.flag_edit(orig["npm"][i], call)
+        if ins is None:
+            out.append({"call": i, "note": "not the written call with flags inserted", "written": orig["npm"][i], "now": call})
+        elif ins:
+            out.append({"call": i, "inserted": ins})
+    if len(orig["npm"]) > len(now["npm"]):
+        out.append({"note": "the command as written makes %d npm calls, this one %d" % (len(orig["npm"]), len(now["npm"]))})
     return out
 
 
@@ -109,8 +103,8 @@ def main():
         cb = cmd.encode("utf-8", "surrogateescape")
         rec = {"cmd": cmd, "sides": {}}
         box = tempfile.mkdtemp(prefix="w.", dir=work)
-        written = shells.run(cmd, box)
-        rec["written"] = {"calls": written, "shells": dict(shells.meta)}
+        written = shells.observe(cmd, box)
+        rec["written"] = {"shells": written}
         if cmd in release:
             r = release[cmd]
             rec["release_recorded"] = {"rewrite": r, "flags": d.flag_positions(cb, r.encode("utf-8", "surrogateescape")) if r else []}
@@ -143,10 +137,9 @@ def main():
             side["rewrite"] = run
             side["flags"] = d.flag_positions(cb, run.encode("utf-8", "surrogateescape")) if run else []
             if side["decision"] != "deny":
-                calls = shells.run(run or cmd, box)
-                side["calls"] = calls
-                side["shells"] = dict(shells.meta)
-                side["argv_changes"] = {s: compare_calls(written.get(s, []), v) for s, v in calls.items()}
+                obs = shells.observe(run or cmd, box)
+                side["shells"] = obs
+                side["argv_changes"] = {s: compare_calls(d, written.get(s), v) for s, v in obs.items()}
             rec["sides"][name] = side
         c = subprocess.run(["nice", "-n", "10", a.core, "inert"], input=d.payload(cmd, "/tmp"), capture_output=True, timeout=120)
         recs = d.parse_records(c.stdout) if c.returncode == 0 else {}
@@ -159,10 +152,9 @@ def main():
             side["rewrite"] = o[2].decode("utf-8", "surrogateescape") if o[0] == "rewrite" else None
             side["flags"] = o[3]
             side["inert_record"] = bool(d.records_of(o))
-            calls = shells.run(o[2].decode("utf-8", "surrogateescape"), box)
-            side["calls"] = calls
-            side["shells"] = dict(shells.meta)
-            side["argv_changes"] = {s: compare_calls(written.get(s, []), v) for s, v in calls.items()}
+            obs = shells.observe(o[2].decode("utf-8", "surrogateescape"), box)
+            side["shells"] = obs
+            side["argv_changes"] = {s: compare_calls(d, written.get(s), v) for s, v in obs.items()}
         rec["sides"]["core"] = side
         floor = set(rec.get("release_recorded", {}).get("flags") or [])
         if "7d66f8c" in rec["sides"]:
