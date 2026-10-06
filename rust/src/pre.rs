@@ -160,42 +160,6 @@ fn env_bytes(name: &str) -> W {
     std::env::var_os(name).map(|v| v.into_vec()).unwrap_or_default()
 }
 
-/// `safedeps_truth_sources_moved_list`, joined with blanks. Empty when the run
-/// uses the canonical sources.
-fn truth_sources_moved() -> W {
-    fn put(moved: &mut Vec<W>, label: &str, value: &[u8]) {
-        let mut m = format!("{}=", label).into_bytes();
-        m.extend_from_slice(value);
-        moved.push(m);
-    }
-    fn url(moved: &mut Vec<W>, name: &str, default: &str, label: &str) {
-        let v = env_bytes(name);
-        if !v.is_empty() && v != default.as_bytes() {
-            put(moved, label, &v);
-        }
-    }
-    fn named(moved: &mut Vec<W>, name: &str, label: &str) {
-        let v = env_bytes(name);
-        if !v.is_empty() {
-            put(moved, label, &v);
-        }
-    }
-    let mut moved: Vec<W> = Vec::new();
-    url(&mut moved, "SAFEDEPS_OSV_API_URL", "https://api.osv.dev/v1/query", "osv");
-    url(&mut moved, "SAFEDEPS_OSV_BATCH_API_URL", "https://api.osv.dev/v1/querybatch", "osv-batch");
-    url(&mut moved, "SAFEDEPS_KEV_CATALOG_URL", "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json", "kev");
-    url(&mut moved, "SAFEDEPS_GHSA_API_URL", "https://api.github.com/advisories", "ghsa");
-    named(&mut moved, "SAFEDEPS_NPM_CLOSURE_FIXTURE_JSON", "npm-closure-fixture");
-    named(&mut moved, "SAFEDEPS_YARN_INFO_FIXTURE_NDJSON", "yarn-info-fixture");
-    if !env_bytes("SAFEDEPS_NPM_OVERRIDES_JSON").is_empty() {
-        put(&mut moved, "npm-overrides", b"set");
-    }
-    named(&mut moved, "SAFEDEPS_RECHECK_FIXTURE_JSON", "recheck-fixture");
-    url(&mut moved, "SAFEDEPS_LEDGER_DEFAULT_TTL_DAYS", "30", "ledger-ttl-days");
-    named(&mut moved, "SAFEDEPS_NPM_TEST_REGISTRY", "npm-test-registry");
-    moved.join(&b' ')
-}
-
 // ---- the judgment ------------------------------------------------------------------
 
 struct Call {
@@ -409,18 +373,49 @@ fn emit(out: &Out) -> i32 {
 
 const NOT_WRITTEN: &str = "safedeps-core pre: this command reads as a dependency install, and the part of the hook that judges one is not written yet. scripts/safedeps-pre-guard.sh is the PreToolUse hook.";
 
+/// A stale checkout can settle only the existing unscanned-manager question.
+/// It never calls the old judgment or creates a snapshot, pending record or
+/// trace baseline. An unreadable payload is not evidence of an absent name.
+fn stale(input: &[u8], why: &str, guard: &Path) -> i32 {
+    let _ = std::fs::DirBuilder::new().recursive(true).mode(0o700).create(guard);
+    let payload = json::parse_one(input).ok();
+    let tool = payload.as_ref().and_then(|p| p.get("tool_name")).and_then(Value::as_str);
+    let command = payload.as_ref().and_then(|p| p.get("tool_input")).and_then(|p| p.get("command"));
+    let disposition = match (tool, command) {
+        (Some("Bash"), Some(Value::Str(command))) => {
+            if looks_like_install_unscanned(command) { "the command names a package manager" }
+            else {
+                let message = format!("{} The command names no package manager and was allowed without a judgment.", why);
+                state::log_advisory(guard, format!("pre-guard: {}", message).as_bytes());
+                eprintln!("{}", message);
+                return 0;
+            }
+        }
+        (Some(tool), _) if tool != "Bash" => {
+            let message = format!("{} This is not a Bash tool call.", why);
+            state::log_advisory(guard, format!("pre-guard: {}", message).as_bytes());
+            eprintln!("{}", message);
+            return 0;
+        }
+        _ => "the Bash command could not be read from the payload",
+    };
+    let reason = format!("safedeps: UNDECIDED — {} {}; no dependency judgment was made.", why, disposition);
+    state::log_advisory(guard, format!("pre-guard DENY: {}", reason).as_bytes());
+    eprintln!("{}", reason);
+    println!("{}", jq::deny(&reason));
+    0
+}
+
 pub fn main(input: &[u8]) -> i32 {
     let started = Instant::now();
     // `umask 077; mkdir -p "$GUARD_DIR" "$SNAPSHOT_DIR"`, before anything is read.
     os::set_umask(0o077);
     let guard_dir = state::guard_dir();
+    if let Some(why) = crate::stamp::refusal() {
+        return stale(input, &why, &guard_dir);
+    }
     if state::ensure_dirs(&guard_dir).is_err() {
         return 1;
-    }
-    if let Some(why) = crate::stamp::refusal() {
-        state::log_advisory(&guard_dir, format!("pre-guard DENY: {}", why).as_bytes());
-        println!("{}", jq::deny(&why));
-        return 0;
     }
 
     // `INPUT=$(cat)`, then jq twice. jq ends with 5 on text that is not JSON
@@ -442,7 +437,7 @@ pub fn main(input: &[u8]) -> i32 {
     }
 
     // `safedeps_guard_announce_truth_sources`
-    let moved = truth_sources_moved();
+    let moved = state::truth_sources_moved();
     if !moved.is_empty() {
         state::log_advisory(
             &guard_dir,

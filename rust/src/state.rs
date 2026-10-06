@@ -54,6 +54,46 @@ pub fn log_advisory(dir: &Path, text: &[u8]) {
     }
 }
 
+/// `safedeps_truth_sources_moved_list`, joined with blanks. Empty when the run
+/// uses the canonical sources.
+pub fn truth_sources_moved() -> W {
+    fn env_bytes(name: &str) -> W {
+        use std::os::unix::ffi::OsStringExt;
+        std::env::var_os(name).map(|v| v.into_vec()).unwrap_or_default()
+    }
+    fn put(moved: &mut Vec<W>, label: &str, value: &[u8]) {
+        let mut m = format!("{}=", label).into_bytes();
+        m.extend_from_slice(value);
+        moved.push(m);
+    }
+    fn url(moved: &mut Vec<W>, name: &str, default: &str, label: &str) {
+        let v = env_bytes(name);
+        if !v.is_empty() && v != default.as_bytes() {
+            put(moved, label, &v);
+        }
+    }
+    fn named(moved: &mut Vec<W>, name: &str, label: &str) {
+        let v = env_bytes(name);
+        if !v.is_empty() {
+            put(moved, label, &v);
+        }
+    }
+    let mut moved: Vec<W> = Vec::new();
+    url(&mut moved, "SAFEDEPS_OSV_API_URL", "https://api.osv.dev/v1/query", "osv");
+    url(&mut moved, "SAFEDEPS_OSV_BATCH_API_URL", "https://api.osv.dev/v1/querybatch", "osv-batch");
+    url(&mut moved, "SAFEDEPS_KEV_CATALOG_URL", "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json", "kev");
+    url(&mut moved, "SAFEDEPS_GHSA_API_URL", "https://api.github.com/advisories", "ghsa");
+    named(&mut moved, "SAFEDEPS_NPM_CLOSURE_FIXTURE_JSON", "npm-closure-fixture");
+    named(&mut moved, "SAFEDEPS_YARN_INFO_FIXTURE_NDJSON", "yarn-info-fixture");
+    if !env_bytes("SAFEDEPS_NPM_OVERRIDES_JSON").is_empty() {
+        put(&mut moved, "npm-overrides", b"set");
+    }
+    named(&mut moved, "SAFEDEPS_RECHECK_FIXTURE_JSON", "recheck-fixture");
+    url(&mut moved, "SAFEDEPS_LEDGER_DEFAULT_TTL_DAYS", "30", "ledger-ttl-days");
+    named(&mut moved, "SAFEDEPS_NPM_TEST_REGISTRY", "npm-test-registry");
+    moved.join(&b' ')
+}
+
 /// The two hooks use the same mkdir lock, but answer failure differently.
 /// Keep the verdict in the caller. Dropping an acquired lock releases it;
 /// a failed acquisition never owns (and must never remove) the directory.
