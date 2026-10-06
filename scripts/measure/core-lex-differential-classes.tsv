@@ -1,0 +1,2 @@
+# class<TAB>view<TAB>field<TAB>exact command pattern<TAB>reason
+arithmetic-substitution-quotes	*	*	\A\(\( x = \$\(echo "\)" \| wc -c\) <<2 \)\)\npip install evil==6\.6\.6\n2\n\Z	The substitution is its own shell context: its quoted close parenthesis does not close arithmetic. core-payload-probe.py checks this exact input with private pip argv under bash, zsh and dash. Bash and zsh call pip; dash does not. The payload now appears in substs; zsh no longer treats its quote as an outer-arithmetic divergence.
