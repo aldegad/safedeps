@@ -48,6 +48,10 @@ pub fn file(label: &[u8], p: &Path) -> Vec<u8> {
     cat(&[label, b": ", sh::bytes(p), if sh::is_file(p) { b"" } else { b" is not a file" }])
 }
 
+pub fn refused(kind: &[u8], path: &Path, why: &[u8]) -> Vec<u8> {
+    cat(&[b"refused ", kind, b" of ", sh::bytes(path), b": ", why])
+}
+
 /// Err(1): unreadable/not one object; Err(2): absent or the v2 fact is unstated.
 pub fn inert(meta: &Path, input: &[u8]) -> Result<Vec<u8>, i32> {
     if !sh::present(meta) { return Err(2) }

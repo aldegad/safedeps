@@ -9,10 +9,6 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-extern "C" {
-    fn access(path: *const std::os::raw::c_char, mode: i32) -> i32;
-}
-
 pub fn p(b: &[u8]) -> PathBuf {
     PathBuf::from(std::ffi::OsStr::from_bytes(b))
 }
@@ -47,16 +43,12 @@ pub fn is_dir(path: &Path) -> bool {
 }
 
 /// `[[ -r p ]]`
-pub fn readable(path: &Path) -> bool {
-    let Ok(c) = std::ffi::CString::new(bytes(path)) else { return false };
-    unsafe { access(c.as_ptr(), 4) == 0 }
-}
+pub use crate::os::readable;
 
 pub fn command_exists(name: &str) -> bool {
     std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).any(|dir| {
         let path=dir.join(name);
-        let Ok(c)=std::ffi::CString::new(bytes(&path)) else{return false};
-        is_file(&path) && unsafe{access(c.as_ptr(),1)==0}
+        is_file(&path) && crate::os::executable(&path)
     })
 }
 
@@ -291,7 +283,8 @@ fn random_tail() -> [u8; 6] {
     let mut raw = [0u8; 6];
     let read = std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut raw));
     if read.is_err() {
-        let (s, n) = crate::os::now();
+        let time = crate::os::wall(crate::os::WallRole::PostTempName);
+        let (s, n) = (time.seconds(), time.nanos());
         let mut x = (s as u64) ^ ((n as u64) << 20) ^ ((std::process::id() as u64) << 40);
         for b in raw.iter_mut() {
             x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);

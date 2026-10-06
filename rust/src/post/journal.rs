@@ -11,7 +11,7 @@ impl Journal{
     pub fn open(&self,id:&[u8],project:&Path,snap:&[u8],reasons:&[u8],stage:&[u8])->Result<(),()> {
         if !sh::mkdir_p(&self.dir){return Err(())}
         let v=jv::obj(vec![("journal_id",jv::s(id)),("project_dir",jv::s(sh::bytes(project))),("rollback_snapshot",jv::s(snap)),("reasons",jv::s(reasons)),
-            ("stage",jv::s(stage)),("opened_at",jv::s(os::utc_stamp(os::now().0).as_bytes())),("pid",jv::s(std::process::id().to_string().as_bytes()))]);
+            ("stage",jv::s(stage)),("opened_at",jv::s(os::utc_stamp(os::wall(os::WallRole::JournalOpened).seconds()).as_bytes())),("pid",jv::s(std::process::id().to_string().as_bytes()))]);
         state::write_state_file(&self.path(id),&jv::dump(&v)).map_err(|_|())
     }
     pub fn stage(&self,id:&[u8],stage:&[u8])->Result<(),()> {
@@ -20,7 +20,7 @@ impl Journal{
         let mut lines=Vec::new();
         for v in st.values{
             let mut o=match v{Value::Obj(o)=>o,Value::Null=>Vec::new(),_=>return Ok(())};
-            jv::set(&mut o,b"stage".to_vec(),jv::s(stage));jv::set(&mut o,b"stage_at".to_vec(),jv::s(os::utc_stamp(os::now().0).as_bytes()));lines.push(jv::dump(&Value::Obj(o)));
+            jv::set(&mut o,b"stage".to_vec(),jv::s(stage));jv::set(&mut o,b"stage_at".to_vec(),jv::s(os::utc_stamp(os::wall(os::WallRole::JournalStage).seconds()).as_bytes()));lines.push(jv::dump(&Value::Obj(o)));
         }
         state::write_state_file(&file,&lines.join(&b'\n')).map_err(|_|())
     }
@@ -70,7 +70,7 @@ impl Journal{
             let journal_line=cat(&[b"Journal: ",&id,b", opened ",&opened,b"; last recorded stage ",&stage,&detail]);
             let snapshot_line=self.snapshot_line(&project,&snap);let incident_line=report::file(b"Incident record",&incident);
             let log_head=if owner==2{b"REORG STOPPED".as_slice()}else{b"REORG INTERRUPTED"};
-            let log=cat(&[b"[",os::utc_stamp(os::now().0).as_bytes(),b"] ",log_head,b"\n  ",&journal_line,b"\n  Owner: ",&fact,b"\n  Project: ",sh::bytes(&project),b"\n  ",&snapshot_line,b"\n  Reasons: ",&reasons,b"\n  ",&incident_line,b"\n"]);
+            let log=cat(&[b"[",os::utc_stamp(os::wall(os::WallRole::JournalRecoveryHeader).seconds()).as_bytes(),b"] ",log_head,b"\n  ",&journal_line,b"\n  Owner: ",&fact,b"\n  Project: ",sh::bytes(&project),b"\n  ",&snapshot_line,b"\n  Reasons: ",&reasons,b"\n  ",&incident_line,b"\n"]);
             sh::append(&reorg,&log);
             reports.push(cat(&[b"safedeps: a rollback of ",sh::bytes(&project),if owner==2{b" has not finished."}else{b" did not finish."},b"\n\n",
                 &journal_line,b"\nOwner: ",&fact,b"\n",&snapshot_line,b"\nRecorded reasons:\n",&reasons,b"\n\nChecked at the time of this report:\n",
