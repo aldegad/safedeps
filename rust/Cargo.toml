@@ -1,0 +1,26 @@
+[package]
+name = "safedeps-core"
+version = "0.1.0"
+edition = "2021"
+description = "The judgment core of the safedeps PreToolUse guard: the shell lexer, the install recognizers and the spec extractor"
+license = "Apache-2.0"
+publish = false
+
+# No dependencies, on purpose: safedeps has zero runtime dependencies and the
+# binary keeps that property (AGENTS.md, "No SaaS dependency"). The regex
+# engine and every parser here are this crate's own.
+[dependencies]
+
+[[bin]]
+name = "safedeps-core"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+# A panic ends the process with a signal, which the caller reads as a failed
+# reading (the guard marks it and settles it as UNDECIDED), never as an answer.
+panic = "abort"
+debug = false
+strip = true
