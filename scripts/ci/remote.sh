@@ -63,13 +63,18 @@ mkdir -p "${OUT}" || die "cannot create ${OUT}"
 
 load_now() { uptime | sed -E 's/.*load averages?: *//; s/,//g'; }
 
-# A unit's pid is alive and still this run's unit: a pid the system handed to
-# another process since does not count.
-unit_alive() {
-  local pid="$1"
-  [[ "${pid}" =~ ^[0-9]+$ ]] || return 1
-  ps -o args= -p "${pid}" 2>/dev/null | grep -qF -- "${RUN}/tree/scripts/ci/remote.sh run"
+# A pid is alive and still this run's `remote.sh ACTION`: a pid the system
+# handed to another process since does not count. The run directory is named
+# by its last component, which mktemp made unique on this host, because the
+# coordinator starts the queue waiters with a path relative to the home
+# directory and the units are started here with an absolute one. Matched on
+# the absolute path, a waiter that never got its slot was never signalled, and
+# it took its turn in the queue after the run had ended (measured).
+run_process() { # pid action
+  [[ "$1" =~ ^[0-9]+$ ]] || return 1
+  ps -o args= -p "$1" 2>/dev/null | grep -qF -- "/${RUN##*/}/tree/scripts/ci/remote.sh $2"
 }
+unit_alive() { run_process "$1" run; }
 
 # Signals a process and every process below it, children first, by pid.
 signal_tree() {
@@ -205,8 +210,7 @@ case "${action}" in
       for pid_file in "${RUN}"/queue-*.pid; do
         [[ -e "${pid_file}" ]] || continue
         pid=$(cat "${pid_file}")
-        [[ "${pid}" =~ ^[0-9]+$ ]] && ps -o args= -p "${pid}" 2>/dev/null | grep -qF -- "${RUN}/tree/scripts/ci/remote.sh hold" \
-          && signal_tree TERM "${pid}"
+        run_process "${pid}" hold && signal_tree TERM "${pid}"
       done
     fi
     ;;
