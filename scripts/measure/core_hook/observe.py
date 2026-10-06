@@ -263,9 +263,6 @@ with os.fdopen(fd, "w") as f:
 os.rename(name + ".part", name)
 if answer.get("sleep"):
     import time
-import uuid
-
-from . import evidence
     time.sleep(answer["sleep"])
 sys.stdout.write(answer.get("stdout", ""))
 sys.stderr.write(answer.get("stderr", ""))
