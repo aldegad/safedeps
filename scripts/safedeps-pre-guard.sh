@@ -3114,9 +3114,9 @@ inert_verb_ends_in() {
 # line, outermost first: `<first> <last> <units>`, the bytes of <text> (from 1)
 # the body starts and ends at, and the units of its substs record. Such a body
 # holds `npm`, in any case, and a `}` the lexer leaves to the payload's
-# reading: one glued to a word inside the body, which the live view prints as
-# `%` (group_close in shell_lex). Only the outermost is printed; the reading of
-# that body finds the ones inside it.
+# reading: one nested in the body, glued to a word or standing as one, which
+# the live view prints as `%` (group_close in shell_lex). Only the outermost
+# is printed; the reading of that body finds the ones inside it.
 #
 # The recognizers read such a body as a payload, at its own top level, where
 # zsh closes a group at the `}` and runs the install. The rewrite read it as

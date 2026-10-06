@@ -46,7 +46,7 @@
 #
 # A third table measures the substitution bodies the inert rewrite reads as
 # payloads (inert_subst_bodies in the guard): a body that holds npm and a `}`
-# glued to a word inside it gets a reading of its own, at its own top level.
+# nested in it gets a reading of its own, at its own top level.
 # Each shape ends in an install the gate rewrites:
 #
 #   bodies  N statements `x<k>=$( { npm view a<k>} )`, then `npm ci`: N bodies
