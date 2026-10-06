@@ -266,8 +266,11 @@ impl<'c> Run<'c> {
     }
 
     /// The texts `text` hands on at its own top level, each with where its
-    /// bytes stand in `text`: the scripts it gives `sh -c` and `eval` (the
-    /// cscripts view) and the bodies of its substitutions (the substs view).
+    /// bytes stand in `text`: the scripts its command words give `sh -c`,
+    /// `eval` and `env -S`, and the bodies of its substitutions. Interpreter
+    /// names in arguments are not calls. The structural script path uses
+    /// the existing statement/prefix walk; the textual cscripts view is a
+    /// broader compatibility search and is not semantic payload authority.
     /// One level: a substitution nested in another substitution is returned
     /// only when this is called on the enclosing payload. Order is cscripts
     /// first, then substitutions, in input-start order within each group.
