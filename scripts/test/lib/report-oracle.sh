@@ -111,6 +111,13 @@ file-line file-line-absent
 log-rollback log-backstop log-confirm log-refused log-journal log-inert-unread log-inert-unstated log-record-gone log-record-empty log-record-unread
 "
 
+# The native owner API supplies integer start times, so the ps empty/date
+# parser forms are absent. Keep one grammar and require its native failure
+# form when a native-hook suite explicitly selects this coverage contract.
+oracle_native_owner_forms() {
+  ORACLE_FORMS="${ORACLE_FORMS/ owner-no-start owner-bad-start / owner-native-query-failed }"
+}
+
 # The effect gate's prose: id | the blocks it may appear in | the most lines
 # of it this suite may show | the exact prefix the sentence starts with. The
 # rebuild warnings and "the install is kept" are said only of an install that

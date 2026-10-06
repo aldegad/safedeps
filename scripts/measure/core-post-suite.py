@@ -20,9 +20,15 @@ p.add_argument('--archive', required=True)
 p.add_argument('--core', required=True)
 p.add_argument('--pre-core')
 p.add_argument('--probe', action='store_true')
+p.add_argument('--native-faults',action='store_true',help='Adapt removed subprocess failure fixtures on the archive')
+p.add_argument('--walk-core')
+p.add_argument('--owner-core')
+p.add_argument('--coarse-core')
 p.add_argument('--suite', choices=['e2e', 'effect-trace-grid'], required=True)
 p.add_argument('--run-dir', required=True, help='A new evidence directory; existing paths are refused')
 a = p.parse_args()
+if a.native_faults and (a.probe or a.suite!='e2e' or not all([a.walk_core,a.owner_core,a.coarse_core])):
+    p.error('--native-faults requires public e2e entry and all three injection cores')
 archive = Path(a.archive).resolve(strict=True)
 core = Path(a.core).resolve(strict=True)
 pre = Path(a.pre_core).resolve(strict=True) if a.pre_core else None
@@ -51,6 +57,11 @@ def entry(path, binary, command, probe=False):
 entry(tree/'scripts/safedeps-post-verify.sh', core, 'post', a.probe)
 if pre:
     entry(tree/'scripts/safedeps-pre-guard.sh', pre, 'pre')
+if a.native_faults:
+    import importlib.util
+    spec=importlib.util.spec_from_file_location('native_adapter',Path(__file__).with_name('core-post-suite-adapt.py'))
+    adapter=importlib.util.module_from_spec(spec);spec.loader.exec_module(adapter)
+    adapter.adapt(tree,core,Path(a.walk_core).resolve(strict=True),Path(a.owner_core).resolve(strict=True),Path(a.coarse_core).resolve(strict=True),run)
 started = time.time()
 with (run/'suite.log').open('wb') as log:
     subprocess.run(['uptime'], stdout=log, stderr=log)
@@ -59,6 +70,7 @@ with (run/'suite.log').open('wb') as log:
 (run/'suite.rc').write_text(str(result.returncode)+'\n')
 report = dict(suite=a.suite, archive=str(archive), core=str(core),
               pre_core=str(pre) if pre else None, post_entry='probe' if a.probe else 'post',
+              native_faults=a.native_faults,
               started=started, elapsed_seconds=time.time()-started, rc=result.returncode)
 (run/'result.json').write_text(json.dumps(report, indent=2)+'\n')
 print(json.dumps(report), flush=True)

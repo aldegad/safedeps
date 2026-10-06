@@ -1,8 +1,6 @@
 //! `safedeps-core post`: the PostToolUse hook (and Claude Code's
-//! PostToolUseFailure). Not written yet.
-//!
-//! Until it is, `scripts/safedeps-post-verify.sh` is the hook, and this exits
-//! 2 so that a shim pointed here early says so instead of staying silent.
+//! PostToolUseFailure). The public entry checks its source stamp before
+//! consuming any pending record or rollback journal.
 
 mod jv;
 mod sh;
@@ -121,7 +119,16 @@ pub fn probe(input: &[u8]) -> i32 {
     match result { Ok(out) => { let _ = std::io::stdout().write_all(&out); 0 }, Err(rc) => rc }
 }
 
-pub fn main(_input: &[u8]) -> i32 {
-    eprintln!("safedeps-core post: not written yet. scripts/safedeps-post-verify.sh is the PostToolUse hook.");
-    2
+pub fn main(input: &[u8]) -> i32 {
+    crate::os::set_umask(0o077);
+    if let Some(why) = crate::stamp::refusal() {
+        use std::os::unix::fs::DirBuilderExt;
+        let home = crate::state::guard_dir();
+        let _ = std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&home);
+        let message = format!("post-verify UNVERIFIED: {}; no dependency judgment was made.", why);
+        crate::state::log_advisory(&home, message.as_bytes());
+        eprintln!("{}", message);
+        return 0;
+    }
+    run::main(input)
 }
