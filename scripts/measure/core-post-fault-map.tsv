@@ -1,0 +1,10 @@
+fixture	original_condition	native_injection	observation	scope
+markread	jq refuses the v2 meta read	core-post-faults.py unread-meta chmod000	original report oracle and unread advisory; no inert line	post
+cpfail	cp fails to overwrite root lockfile	core-post-faults.py restore-readonly chmod444	original report oracle; cp exit1; lockfile still differs	post
+cpgone	cp fails to create absent root lockfile	core-post-faults.py restore-absent parent chmod555	original report oracle; cp exit1; lockfile still absent	post
+rmfail	rm cannot finish removing node_modules	core-post-faults.py remove-readonly child directory chmod555	original report oracle; rm exit1; node_modules still exists	post
+bs_slow	find remains alive beyond the walk deadline	archive-only delay at native walk entry; not yet supplied	original deadline assertion and rollback oracle must run	post
+bs_mix	one part of the tree exposes whole-second ctime	actual coarse clock or archive-only clock adapter; not yet supplied	entry resolution and actual write detection; PATH shim alone is insufficient	pre+post
+owner-empty	ps gives no start time for live owner	archive-only native info lookup failure; not yet supplied	original unresolved-owner assertion and journal oracle must run	post
+owner-garbage	ps gives a nonempty unparseable date	native start time is an integer; no corresponding ps text parser	interpretation difference; original PATH injection does not reach Rust	post
+markfail	jq fails to write the rewrite into its record	A pre writer disk/source failure; pending A implementation	original no-rewrite assertion and pre oracle must run	pre
