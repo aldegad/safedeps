@@ -272,7 +272,7 @@ impl Npm{
         let origins=|url:&Value|ask::fetch_origins(facts,&String::from_utf8_lossy(jv::text(url).ok_or(())?)).map(|os|os.iter().map(|o|o.value()).collect());
         tree::judge(&store.project,&store.home,&jv::read(&answer.stdout),withheld,&problems,&origins).map_err(|_|b"npm query answered with something safedeps could not compare with the lockfiles".to_vec())
     }
-    pub fn rebuild(&self,store:&Store,current:&Value,trace:&mut Install,input:&[u8],report:&mut Report){
+    pub fn rebuild(&mut self,store:&Store,current:&Value,trace:&mut Install,input:&[u8],report:&mut Report){
         if !meta_true(&store.meta(),"ignore_scripts_injected"){return}
         let meta=store.meta();let home=&store.home;let project=sh::bytes(&store.project);
         if trace.absent{report.rebuild(home,&meta,input,&cat(&[b"did not run npm rebuild: ",&trace.line]));trace.said=true;return}
@@ -285,6 +285,9 @@ impl Npm{
             state::log_advisory(home,&cat(&[b"post-verify: npm rebuild skipped in ",project," — node_modules has no .package-lock.json, so the tree it would rebuild is not the tree the effect gate read.".as_bytes()]));
             report.say(cat(&[b"npm rebuild was not run: ",project,b"/node_modules has no .package-lock.json, so safedeps could not read the tree it would rebuild. safedeps did not run npm rebuild; review node_modules, then run `npm rebuild` yourself if it is what you expect"]));return;
         }
+        // This tree still needs npm's registry answers when the install
+        // brought in no new integrity and record()/sources() needed none.
+        self.facts(store,current);
         let withheld=match withheld_read(home){Ok(v)=>v,Err(_)=>{
             let why=cat(&[b"safedeps could not read its record of the bytes it withheld in ",sh::bytes(&home.join("npm-withheld"))]);
             state::log_advisory(home,&cat(&[b"post-verify: npm rebuild after the install skipped in ",project," — ".as_bytes(),&why,b", so it cannot tell that tree holds none of them."]));
