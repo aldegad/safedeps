@@ -9,6 +9,7 @@ The default pre hook is Bash. Supply --pre-core when the shared pre is ready.
 That adapter adds a Python process and is not a process-cost measurement.
 """
 import argparse
+import importlib.util
 import json
 from pathlib import Path
 import subprocess
@@ -37,6 +38,8 @@ run.mkdir(parents=True, exist_ok=False)
 tree = run/'tree'
 tree.mkdir()
 subprocess.run(['tar', 'xf', str(archive), '-C', str(tree)], check=True)
+spec=importlib.util.spec_from_file_location('native_adapter',Path(__file__).with_name('core-post-suite-adapt.py'))
+adapter=importlib.util.module_from_spec(spec);spec.loader.exec_module(adapter)
 
 def entry(path, binary, command, probe=False):
     # Python source literals, not shell interpolation. Fixed argv only.
@@ -51,16 +54,12 @@ def entry(path, binary, command, probe=False):
         source += 'raise SystemExit(rc if rc >= 0 else 128-rc)\n'
     else:
         source += 'os.execv(' + repr(str(binary)) + ', ' + repr([str(binary), command]) + ')\n'
-    path.write_text(source)
-    path.chmod(0o755)
+    adapter.python_entry(path,source)
 
 entry(tree/'scripts/safedeps-post-verify.sh', core, 'post', a.probe)
 if pre:
     entry(tree/'scripts/safedeps-pre-guard.sh', pre, 'pre')
 if a.native_faults:
-    import importlib.util
-    spec=importlib.util.spec_from_file_location('native_adapter',Path(__file__).with_name('core-post-suite-adapt.py'))
-    adapter=importlib.util.module_from_spec(spec);spec.loader.exec_module(adapter)
     adapter.adapt(tree,core,Path(a.walk_core).resolve(strict=True),Path(a.owner_core).resolve(strict=True),Path(a.coarse_core).resolve(strict=True),run)
 started = time.time()
 with (run/'suite.log').open('wb') as log:

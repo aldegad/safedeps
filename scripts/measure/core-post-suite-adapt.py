@@ -2,13 +2,18 @@
 
 All assertions stay except the explicitly named owner diagnostic spelling.
 The removed ps garbage-date parser row is reported as an absent code path,
-not a passing native failure injection. Direct Bash fact rows are still
-listed separately until their probe adapter is supplied.
+not a passing native failure injection. Direct fact rows call native probes.
 """
 import json
 from pathlib import Path
 import shlex
 import sys
+
+def python_entry(path,source):
+    # The original entry shim explicitly runs `bash hook.sh`. Keep the
+    # measurement adapter callable through that path as well as its shebang.
+    path.write_text('#!/usr/bin/env bash\nexec '+shlex.quote(sys.executable)+' -c '+shlex.quote(source)+'\n')
+    path.chmod(0o755)
 
 def direct_calls(text,core):
     for variable,kind,project,extra in [
@@ -45,8 +50,7 @@ def adapt(tree,core,walk_core,owner_core,coarse_core,run):
           '--walk-core',str(walk_core),'--owner-core',str(owner_core),'--coarse-core',str(coarse_core),
           '--receipts',str(run/'native-injections.jsonl')]
     wrapper=tree/'scripts/safedeps-post-verify.sh'
-    wrapper.write_text('#!'+sys.executable+'\nimport os\nos.execv('+repr(sys.executable)+','+repr(argv)+')\n')
-    wrapper.chmod(0o755)
+    python_entry(wrapper,'import os\nos.execv('+repr(sys.executable)+','+repr(argv)+')\n')
     (run/'fixture-adapters.json').write_text(json.dumps(dict(edits=edits,
         absent_native_path=['ps garbage lstart parsing'],
         still_bash=['pre hook']),indent=2)+'\n')
