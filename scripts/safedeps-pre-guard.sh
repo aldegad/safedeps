@@ -1875,10 +1875,12 @@ shell_lex() {
       # Only at the top level, where the walk reads the words. A `}` nested in
       # a substitution, in quotes or in a heredoc body is decided where that
       # body is read as a payload, at its own top level; here a glued one is
-      # NC. So the rewrite finds no verb before the glued `}` of a group in
+      # NC. So the rewrite places no flag before the glued `}` of a group in
       # backticks or in `$(...)`: the body, read as a payload, is an install
-      # to the recognizers, the rewrite misses it, and the install is a
-      # recorded downgrade.
+      # to the recognizers, and the rewrite reads the verb against the `%` it
+      # sees there (inert_nested_verb_ends) and records the install as a
+      # downgrade, alone or beside an install it rewrites. Beside one, the
+      # command used to read as rewritten, with nothing recorded.
       #
       # zg counts the groups zsh has open and bg those this reading may have
       # open. A `}` that stands as a word closes one in zsh wherever it
