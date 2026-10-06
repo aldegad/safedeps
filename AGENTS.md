@@ -32,7 +32,7 @@ Claude Code + Codex CLI only — not Grok/Hermes yet. When a hook capability dif
 
 ## CI
 
-GitHub CI is not used: no test workflow is created or run on GitHub. CI runs separately, on the infrastructure Alex set up (the remote runners and test machines named under Testing). The reason is that GitHub's CI is too slow. This section mirrors the owner's global rule (2026-10-06), and a new project copies it into its own `AGENTS.md`. `.github/workflows/ci.yml` stays only as a by-hand reference for the Linux release steps until a script on our hosts replaces it; `publish.yml` is not CI, it is the trusted-publishing job that puts a tagged release on npm.
+GitHub CI is not used: no test workflow is created or run on GitHub. CI runs separately, on the infrastructure Alex set up (the remote runners and test machines named under Testing). The reason is that GitHub's CI is too slow. This section mirrors the owner's global rule (2026-10-06), and a new project copies it into its own `AGENTS.md`. `.github/workflows/ci.yml` stays only as a by-hand reference until a script on our hosts replaces it; `publish.yml` is not CI, it is the trusted-publishing job that puts a tagged release on npm.
 
 ## Version SSoT
 
@@ -58,7 +58,7 @@ See the `skill-hook-authoring` skill for the full payload/decision schema. Essen
 
 ## Testing
 
-- **Our CI is our own infrastructure, and a test run finishes within ten minutes** (owner, 2026-10-06). GitHub Actions does not run the suite: `ci.yml` runs only by hand, and no release step waits for it. The suite runs on our hosts: alex-macbook-m1 and carenine for macOS, the Grok VM for Linux (their runners are `~/safedeps-runs/slot.sh` and `~/sd-runs/vm-locked.sh`). The budget is ten minutes of wall clock for a run, development or release. It is not met yet: on one host `npm test` took 21 minutes and `npm run test:release` 46 to 62 (carenine, 2026-10-05), and GitHub's macOS runners took 37 minutes split five ways. Two changes are meant to bring it inside: running the groups and census shards on several hosts at once, and a harness that asks the guard's judgment directly instead of starting the whole hook for every row. Both are items of the v2.18.2 release plan. Until a run fits, the budget is what a change to the suite is measured against, never a reason to leave a battery out.
+- **Our CI is our own infrastructure, and a test run finishes within ten minutes** (owner, 2026-10-06). GitHub Actions does not run the suite: `ci.yml` runs only by hand, and no release step waits for it. The suite runs on our hosts: alex-macbook-m1 and carenine for macOS (runner `~/safedeps-runs/slot.sh`), and WSL1 on the home Windows PC for Windows, the environment Kuma Studio's Windows build runs in. Linux is not tested (owner, 2026-10-06): Kuma Studio ships for Windows and macOS only. The budget is ten minutes of wall clock for a run, development or release. It is not met yet: on one host `npm test` took 21 minutes and `npm run test:release` 46 to 62 (carenine, 2026-10-05), and GitHub's macOS runners took 37 minutes split five ways. Running the groups and census shards on several hosts at once is meant to bring the development run inside. The release run needs a judgment that costs less: one guard call is 0.6 to 0.9 CPU seconds, nearly all of it spent starting about 93 external processes, and the hook's own start is 2 to 7% of it (measured 2026-10-06), so a harness that skips the hook would not help. The owner's direction for that cost is Rust. Until a run fits, the budget is what a change to the suite is measured against, never a reason to leave a battery out.
 - Two commands, one runner (`scripts/test/run-all.sh`). `npm test` is the development run: every battery except the quick scan-failure census and `effect-trace-grid.sh`. `npm run test:release` runs every battery, those two included. The two left out took most of a release's CI time (v2.18.0 on macOS: the census 4,324 of 7,166 seconds, and `effect-trace-grid.sh`, which waits for it, 2,840), and both measure what a release ships. A change that reaches the scan readings or the effect gate runs them by name: `scripts/measure/scan-failure-census.sh --quick`, `scripts/test/effect-trace-grid.sh`. Keep both commands green.
 - `run-all.sh --list` prints the batteries a run would start, with `--release` or `--group NAME` as for a run.
 - The batteries run in parallel. They keep their state apart: each makes its own mktemp root, points `HOME` or `SAFEDEPS_HOME` into it, and starts its fixture servers on a port the kernel picks. Measured with a fresh `HOME` and `TMPDIR`, a full run left only npm's own cache and logs in the inherited `HOME`. A new battery keeps the same isolation, or it cannot run beside the others.
@@ -74,7 +74,7 @@ See the `skill-hook-authoring` skill for the full payload/decision schema. Essen
 
 Measurement time is the release's bottleneck. A judgment costs seconds on macOS, a battery row about ten, and a fix that reran everything on both platforms took three and a half hours of host time before a validator ran the same again. So each measurement runs once, at the level where it can fail.
 
-- **Per change** (one plan's branch): the batteries the change reaches, once on macOS and once on Linux; one mutation control per fix, on a copy, where reverting the fix turns its new row red; and any measurement the plan's Done Criteria names. Nothing else.
+- **Per change** (one plan's branch): the batteries the change reaches, once on macOS; one mutation control per fix, on a copy, where reverting the fix turns its new row red; and any measurement the plan's Done Criteria names. Nothing else.
 - **Per release** (the integration tree, before main moves): `npm run test:release` on both platforms (the quick scan-failure census and `effect-trace-grid.sh` included), and the judgment grids, corpora and replays of the areas the release changed. These do not run per branch unless the plan's Done Criteria names one.
 - **A validator** reads the worker's own logs on the hosts and checks them against the claim. Its own runs are counterexample probes the author did not write, and one control showing a probe can fail. It does not rerun the worker's batteries.
 - **A second rejection of the same class stops the patching.** When review rejects one class of defect twice, the next round starts with a design judgment, not a third shape fix. The pipe check took three rejections before its design changed, and each one cost a full round of measurement.
@@ -172,27 +172,22 @@ any step is open.
    stated proposition moved. Credit issue reporters.
 4. **Run the consistency audit** (next section) and read its ceiling. Then have
    someone other than the author re-read the changed propositions.
-5. **Test on both platforms before anything leaves the machine.** Run the
-   release tree, not a plan branch, on two machines, and record `uptime` beside
-   each run:
-   - **macOS:** `npm run test:release`.
-   - **Linux:** a Debian or Ubuntu machine -- a VM, or an `ubuntu:24.04`
-     container -- with bash, jq, procps, git, node, npm, shellcheck, and the
-     gitleaks version `ci.yml` pins (`GITLEAKS_VERSION`, checked against its
-     sha256). Run CI's four Linux steps there, each as `ci.yml` writes it: the
-     ShellCheck step's exact file list, `npm run test:release` (CI runs the
-     same batteries split into jobs; see Testing),
-     `./bin/safedeps scan secrets --repo`, and the package-contents step
+5. **Test before anything leaves the machine.** Run the release tree, not a
+   plan branch, and record `uptime` beside each run:
+   - **macOS:** `npm run test:release`, and the release checks: the ShellCheck
+     file list, `./bin/safedeps scan secrets --repo`, and the package contents
      (zero runtime dependencies, `npm pack --dry-run`).
+   - **Windows:** `npm run test:release` in WSL1 on the home Windows PC, the
+     environment Kuma Studio's Windows build runs in. Until plan
+     `safedeps/wsl1-environment-measure` has measured that environment, a WSL1
+     run is recorded with what it showed and does not hold the release; a
+     failure that comes from WSL1 itself is named in the ROADMAP section.
 
-   These two runs are the test of the release; no CI on GitHub stands behind
-   them (owner, 2026-10-06). A step the Linux machine cannot run is named in
-   the ROADMAP section with the reason, and the release does not go out until
-   it has run on a Linux host. v2.18.1 pushed before its own suites finished and
-   leaned on GitHub's CI for Linux; that is no longer a way out. This step exists
-   to keep a red tree off `main`:
-   Linux-only failures (GNU `stat -f`, the 128KB `E2BIG` limit, ext4 directory
-   order) were invisible on macOS and kept CI red for a month.
+   These runs are the test of the release; no CI on GitHub stands behind them
+   (owner, 2026-10-06). Linux is not tested: Kuma Studio ships for Windows and
+   macOS only, and the owner dropped the Linux runs on 2026-10-06. v2.18.1
+   pushed before its own suites finished and leaned on GitHub's CI; that is no
+   longer a way out. This step exists to keep a red tree off `main`.
 6. **Run the release gates.** The package has zero runtime dependencies
    (`jq '(.dependencies // {}) + (.optionalDependencies // {}) | length'
    package.json` prints 0), `./bin/safedeps scan secrets --repo` passes, and
