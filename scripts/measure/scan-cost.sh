@@ -44,6 +44,19 @@
 #           reader, and the `(1)` in it is a place where the shells read
 #           differently, so the guard reads the command three times.
 #
+# A third table measures the substitution bodies the inert rewrite reads as
+# payloads (inert_subst_bodies in the guard): a body that holds npm and a `}`
+# glued to a word inside it gets a reading of its own, at its own top level.
+# Each shape ends in an install the gate rewrites:
+#
+#   bodies  N statements `x<k>=$( { npm view a<k>} )`, then `npm ci`: N bodies
+#           read as payloads.
+#   plain   N statements `x<k>=$(npm view a<k>)`, then `npm ci`: the same
+#           bodies with no `}`, read as part of the command.
+#   depth   one such body nested D deep (`x=$(echo $(echo ... { npm ci
+#           --ignore-scripts=false}))`), then `npm ci`. The rewrite reads it at
+#           every depth, with no bound.
+#
 # A cell that passes the cap (--cap, default 120s) reads `>CAP`, and the larger
 # counts of that shape are skipped.
 #
@@ -51,6 +64,7 @@
 #   scripts/measure/scan-cost.sh [SIZE_BYTES...]        # default sweep
 #   scripts/measure/scan-cost.sh --reps 5 32000 65536
 #   scripts/measure/scan-cost.sh --statements 100,400,3200 --cap 60 8192
+#   scripts/measure/scan-cost.sh --bodies 10,40,100 --depths 4,8 8192
 #
 # Sizes are approximate command lengths in bytes.
 #
@@ -67,16 +81,22 @@ REPS=3
 CAP=120
 SIZES=()
 COUNTS=()
+BODIES=()
+DEPTHS=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --reps) REPS="${2:-3}"; shift 2 ;;
     --cap) CAP="${2:-120}"; shift 2 ;;
     --statements) IFS=, read -ra COUNTS <<< "${2:-}"; shift 2 ;;
+    --bodies) IFS=, read -ra BODIES <<< "${2:-}"; shift 2 ;;
+    --depths) IFS=, read -ra DEPTHS <<< "${2:-}"; shift 2 ;;
     *) SIZES+=("$1"); shift ;;
   esac
 done
 [[ ${#SIZES[@]} -eq 0 ]] && SIZES=(1000 4000 8000 16000 32000 65536)
 [[ ${#COUNTS[@]} -eq 0 ]] && COUNTS=(40 100 400 1600 3200)
+[[ ${#BODIES[@]} -eq 0 ]] && BODIES=(10 40 100)
+[[ ${#DEPTHS[@]} -eq 0 ]] && DEPTHS=(4 8 16)
 
 command -v python3 > /dev/null || { printf 'scan-cost: python3 is required for timing and input generation\n' >&2; exit 2; }
 
@@ -123,6 +143,23 @@ if shape == "lines":
 else:
     unit = "f() { echo \x27a b\x27 \\\"$x\\\" (1); }; "
     sys.stdout.write("sh -c \"" + unit * count + "\" ; npm install left-pad@1.0.0")
+' "$1" "$2"
+}
+
+# The substitution-body shapes (see the header): N bodies, or one D deep.
+make_bodies() {
+  python3 -c '
+import sys
+count, shape = int(sys.argv[1]), sys.argv[2]
+if shape == "bodies":
+    sys.stdout.write("".join("x%d=$( { npm view a%d} ); " % (k, k) for k in range(count)) + "npm ci")
+elif shape == "plain":
+    sys.stdout.write("".join("x%d=$(npm view a%d); " % (k, k) for k in range(count)) + "npm ci")
+else:
+    body = "{ npm ci --ignore-scripts=false}"
+    for k in range(count):
+        body = "$(echo %s)" % body
+    sys.stdout.write("x=" + body + "; npm ci")
 ' "$1" "$2"
 }
 
@@ -242,6 +279,31 @@ for count in "${COUNTS[@]}"; do
     [[ "${cell_script}" != ">"* ]] || capped+="script "
   fi
   printf '%-10s %-12s %-12s %-12s %-12s\n' "${count}" "${#lines}B" "${cell_lines}" "${#script}B" "${cell_script}"
+done
+
+printf '\n%-10s %-12s %-12s %-12s %-12s\n' 'bodies' 'bodies bytes' 'gate bodies' 'plain bytes' 'gate plain'
+capped=" "
+for count in "${BODIES[@]}"; do
+  bodies=$(make_bodies "${count}" bodies)
+  plain=$(make_bodies "${count}" plain)
+  cell_bodies="-" cell_plain="-"
+  if [[ "${capped}" != *" bodies "* ]]; then
+    cell_bodies="$(time_gate_capped "${bodies}")s"
+    [[ "${cell_bodies}" != ">"* ]] || capped+="bodies "
+  fi
+  if [[ "${capped}" != *" plain "* ]]; then
+    cell_plain="$(time_gate_capped "${plain}")s"
+    [[ "${cell_plain}" != ">"* ]] || capped+="plain "
+  fi
+  printf '%-10s %-12s %-12s %-12s %-12s\n' "${count}" "${#bodies}B" "${cell_bodies}" "${#plain}B" "${cell_plain}"
+done
+
+printf '\n%-10s %-12s %-12s\n' 'depth' 'depth bytes' 'gate depth'
+for count in "${DEPTHS[@]}"; do
+  depth=$(make_bodies "${count}" depth)
+  cell="$(time_gate_capped "${depth}")s"
+  printf '%-10s %-12s %-12s\n' "${count}" "${#depth}B" "${cell}"
+  [[ "${cell}" != ">"* ]] || break
 done
 
 printf '\nload average %s at finish\n' "$(load_now)"
