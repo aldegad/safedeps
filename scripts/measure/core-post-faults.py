@@ -7,6 +7,9 @@ same synthetic pending record and snapshot at the same absolute path. The
 existing independent oracle is unchanged, and the expected failure line is
 required separately, so an injection that never reached the operation fails.
 This is a focused supplement, not a complete e2e or form-coverage result.
+The absent-lockfile fixture makes its project directory read-only: this
+prevents creating the lockfile AND removing node_modules itself. The
+overwrite fixture keeps a writable parent and checks that removal continues.
 """
 import argparse
 import json
@@ -118,12 +121,20 @@ with tempfile.TemporaryDirectory(prefix='core-post-faults.') as tmp:
                     reached=f'not restored {project}/package-lock.json: cp exit 1; {project}/package-lock.json {suffix}' in message
                 else:
                     reached=f'not removed {project}/node_modules: rm exit 1; {project}/node_modules exists' in message
+                journal_closed=not list((home/'rollback-journal').glob('*.json'))
+                tree_exists=(project/'node_modules').exists()
+                continued=True
+                if kind=='restore-readonly':
+                    continued=not tree_exists and f'removed {project}/node_modules' in message
+                elif kind=='restore-absent':
+                    continued=(tree_exists and f'not removed {project}/node_modules: rm exit 1; {project}/node_modules exists' in message)
                 # The closed oracle checks the bytes/logs/disk, while this
                 # assertion verifies this fixture reached its failure path.
-                passed=hook_rc==0 and result.returncode==0 and reached
+                passed=hook_rc==0 and result.returncode==0 and reached and continued and journal_closed
                 if a.expect_oracle_text:
-                    passed=hook_rc==0 and result.returncode!=0 and a.expect_oracle_text in result.stderr
+                    passed=hook_rc==0 and result.returncode!=0 and a.expect_oracle_text in result.stderr and journal_closed
                 rows.append(dict(name=kind,side=side,passed=passed,injection_reached=reached,
+                                 rollback_continued=continued,journal_closed=journal_closed,node_modules_exists=tree_exists,
                                  rc=result.returncode,hook_rc=hook_rc,hook_stdout=raw,
                                  oracle_stdout=result.stdout,oracle_stderr=result.stderr))
                 print(('ok' if passed else 'FAIL'),side,kind,flush=True)
