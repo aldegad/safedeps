@@ -44,6 +44,9 @@ never green:
                             placed flag is no option to npm, a call without
                             the flag has no record, or the core's state is
                             worse than the bash side's
+  decrease:shared-loss      the same, and the bash side's npm calls are the
+                            core's in every shell: what is lost is lost on
+                            both sides (a floor flag that breaks a word)
   decrease:unknown          the npm calls were not observed whole (see below)
   decrease:nocall           no shell made an install call: nothing was observed
   decrease:effects-unknown  the npm calls hold, the rest was not recorded
@@ -195,7 +198,9 @@ STUB_SUDO = '#!/bin/sh\nwhile [ $# -gt 0 ]; do case "$1" in -*) shift ;; *) brea
 # The gate's own reading of npm's arguments, one argv a call, every field
 # ended by a NUL: `unread`, or `read`, the last value ignore-scripts takes,
 # then the positional words, the other switches and the option values, each
-# list behind its length.
+# list behind its length. An option value is kept without the place it stood
+# at, as the gate's own inert reading keeps it (INERT_READ_REST): an inserted
+# flag moves every place after it, and nothing npm reads with it.
 GATE_READER = r'''
 set -u
 source "$1/lib/install-grammar.sh" || exit 3
@@ -210,7 +215,9 @@ done
 printf 'read\0%s\0' "${last}"
 emit "${SAFEDEPS_G_NPM_WORDS[@]+"${SAFEDEPS_G_NPM_WORDS[@]}"}"
 emit "${sw[@]+"${sw[@]}"}"
-emit "${SAFEDEPS_G_NPM_VALUES[@]+"${SAFEDEPS_G_NPM_VALUES[@]}"}"
+vals=()
+for w in "${SAFEDEPS_G_NPM_VALUES[@]+"${SAFEDEPS_G_NPM_VALUES[@]}"}"; do vals+=("${w#*$'\037'}"); done
+emit "${vals[@]+"${vals[@]}"}"
 '''
 
 # npm's own reading of the same argvs: nopt with npm's option definitions,
@@ -654,6 +661,11 @@ class Readers:
             return None
         return (tuple(g["words"]), tuple(g["switches"]), tuple(g["values"]), tuple(n["remain"]))
 
+    def answers(self):
+        """Every argv asked, with what each reader said, for the report."""
+        return [{"argv": list(a), "gate": self.gate.get(a), "npm": self.npm.get(a),
+                 "install": self.install(list(a)), "flagged": self.flagged(list(a))} for a in sorted(self.gate)]
+
 
 class NoReaders:
     """Stands where no reader was asked: every answer is unknown."""
@@ -672,6 +684,9 @@ class NoReaders:
 
     def rest(self, argv):
         return None
+
+    def answers(self):
+        return []
 
 
 def whole(obs):
@@ -1165,8 +1180,10 @@ def classify(results, classes, R):
                 put(res, "decrease:minus-deny")
             elif cv is None or cv["npm"] == UNKNOWN:
                 put(res, "decrease:unknown")
-            elif cv["npm"] == "loss" or worse is True:
+            elif worse is True:
                 put(res, "decrease")
+            elif cv["npm"] == "loss":
+                put(res, "decrease:shared-loss" if npm_calls_identical(res, "bash", "core") else "decrease")
             elif cv["npm"] == "nocall":
                 put(res, "decrease:nocall")
             elif worse is None:
@@ -1239,6 +1256,13 @@ def summarize(results, counts, R, a, extra):
                         break
             if any(x == "UNKNOWN" or rel["state"].get(sh, "UNKNOWN") == "UNKNOWN" for sh, x in c["state"].items()):
                 loss_unknown.append(res)
+    # A SILENT row the head's whole pre-guard denies runs nothing: it is
+    # listed, and it is not the invariant's failure. One it lets through, or
+    # one it was not asked about, is.
+    denied = [res for res in silent if res.get("sides", {}).get("head", {}).get("decision") == "deny"]
+    silent_run = [res for res in silent if res not in denied]
+    silent_words_run = [res for res in silent_words if res.get("sides", {}).get("head", {}).get("decision") != "deny"]
+    out.update({"core_silent_denied_by_head": len(denied), "core_silent_let_through": len(silent_run)})
     out.update({"core_silent": len(silent), "core_silent_words": len(silent_words), "core_only_silent": len(only_silent),
                 "loss": len(loss), "loss_words": len(loss_words), "loss_unknown": len(loss_unknown), "core_state_unknown": state_unknown})
     # The record invariant's reach (inert-record-invariant.sh): a form that
@@ -1282,7 +1306,7 @@ def summarize(results, counts, R, a, extra):
     per = counts["status"]
     red = (counts["core_error"] + counts["reading_set"] + counts["incomplete"] + counts["both_failed"] + counts["both_undecided"]
            + sum(v for k, v in per.items() if k == "unclassified" or k.startswith("decrease"))
-           + len(silent) + len(silent_words) + len(loss) + len(loss_words) + len(short)
+           + len(silent_run) + len(silent_words_run) + len(loss) + len(loss_words) + len(short)
            + sum(v for k, v in floor.items() if k.startswith("NOT")))
     for s, ks in class_obs.items():
         red += sum(v for k, v in ks.items() if k == "not-observed" or k.split("/")[0] in ("loss", UNKNOWN))
@@ -1302,8 +1326,9 @@ def summarize(results, counts, R, a, extra):
     if a.floor:
         print("release floor: %s" % ", ".join("%s %d" % (k, v) for k, v in sorted(floor.items())))
     print("npm's own parser: %s" % ("asked (npm %s)" % R.npm_version if R.npm_asked else "not asked: %s" % R.npm_error))
-    print("core SILENT (both readers): %d; by the flag words: %d; core-only SILENT: %d; core states UNKNOWN: %d rows"
-          % (len(silent), len(silent_words), len(only_silent), state_unknown))
+    print("core SILENT (both readers): %d, of which the head's whole pre-guard denies %d and lets through or was not asked %d; "
+          "by the flag words: %d; core-only SILENT: %d; core states UNKNOWN: %d rows"
+          % (len(silent), len(denied), len(silent_run), len(silent_words), len(only_silent), state_unknown))
     print("LOSS against v2.18.1 (both readers): %d; by the flag words: %d; not decidable (a state UNKNOWN): %d rows"
           % (len(loss), len(loss_words), len(loss_unknown)))
     if reach:
@@ -1313,7 +1338,9 @@ def summarize(results, counts, R, a, extra):
     for res, sh, rv in loss[:20]:
         print("LOSS %s %r shell=%s v2.18.1=%s" % (res["set"], res["command"], sh, rv))
     for res in silent[:20]:
-        print("SILENT %s %r %s" % (res["set"], res["command"], res["sides"]["core"].get("state")))
+        h = res["sides"].get("head", {})
+        print("SILENT %s %r %s head: %s %s" % (res["set"], res["command"], res["sides"]["core"].get("state"), h.get("decision", "not asked"),
+                                              h.get("reason", "")[:120]))
     shown = 0
     for res in results:
         s = res.get("status", "")
@@ -1623,6 +1650,27 @@ def main():
         return {"decision": "run", "run": run, "shells": shells.observe(run, box), "record": rec, "guard_rc": r.returncode,
                 "flags": flag_positions(cmd_bytes(cmd), cmd_bytes(run))}
 
+    def whole_guard(guard, cmd, tid, box):
+        """A tree's whole pre-guard, asked as the hook is: its decision and
+        its reason. The sandbox ledger holds the --approve specs."""
+        gbox = tempfile.mkdtemp(prefix="g.", dir=box)
+        proj = os.path.join(gbox, "project")
+        os.makedirs(proj)
+        open(os.path.join(proj, "package.json"), "w").write('{"name":"p","version":"1.0.0","dependencies":{}}\n')
+        env = box_env(gbox, release=True)
+        for ap_ in a.approve:
+            eco, name_, ver = ap_.split(":")
+            subprocess.run(["bash", os.path.join(os.path.dirname(os.path.dirname(guard)), "lib", "ledger", "ledger.sh"),
+                            "approve", eco, name_, ver, ver, "inert-differential"], env=env, capture_output=True, timeout=60)
+        r = subprocess.run(["nice", "-n", "10", "bash", guard], input=payload(cmd, proj, tid), capture_output=True, env=env, cwd=proj, timeout=180)
+        try:
+            hso = json.loads(r.stdout or b"{}").get("hookSpecificOutput", {})
+        except ValueError:
+            hso = {}
+        return {"decision": "deny" if hso.get("permissionDecision") == "deny" else "allow",
+                "reason": (hso.get("permissionDecisionReason") or "")[:300], "guard_rc": r.returncode,
+                "rewrite": hso.get("updatedInput", {}).get("command")}
+
     def one(idx_row):
         idx, (name, cmd) = idx_row
         box = tempfile.mkdtemp(prefix="c.", dir=work)
@@ -1755,6 +1803,17 @@ def main():
                 reach[ids[fid]] = (fid, int(n))
 
     counts = classify(results, load_classes(), R)
+    # A row where the core's side makes a call without the flag and writes no
+    # record: what the head's whole pre-guard answers for that command. The
+    # inert rewrite is one step of the guard, and a command the guard denies
+    # runs nothing.
+    if observing and not a.reclassify:
+        for k, res in enumerate(results):
+            c = res.get("sides", {}).get("core", {})
+            if isinstance(c.get("shells"), dict) and any(state(o, bool(c.get("record")), R) == "SILENT" for o in c["shells"].values()):
+                box = tempfile.mkdtemp(prefix="h.", dir=work)
+                res["sides"]["head"] = whole_guard(GUARD, res["command"], "toolu_head%d" % k, box)
+                shutil.rmtree(box, ignore_errors=True)
     summary, red = summarize(results, counts, R, a, {"up0": up0, "up1": up1, "reach": reach})
     if a.table:
         with open(a.table, "w", encoding="utf-8") as f:
@@ -1766,7 +1825,7 @@ def main():
     if a.manifest:
         manifest(a.manifest, results, run_info)
     if a.report:
-        json.dump({"schema": SCHEMA, "run": run_info, "summary": summary, "load": [up0, up1], "rows": results},
+        json.dump({"schema": SCHEMA, "run": run_info, "summary": summary, "load": [up0, up1], "readings": R.answers(), "rows": results},
                   open(a.report, "w"), ensure_ascii=False, indent=1)
     shutil.rmtree(work, ignore_errors=True)
     if a.control:

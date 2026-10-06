@@ -71,8 +71,8 @@ MUTATIONS = [
      '    out["rc"] = "same"\n    for axis in ("stdout_sha256", "stderr_sha256", "other", "files"):\n        a = w.get(axis, UNKNOWN)',
      "a flag handed to another command changes the exit status"),
     ("a state worse than the bash side's is not a decrease",
-     '            elif cv["npm"] == "loss" or worse is True:',
-     '            elif cv["npm"] == "loss":',
+     '            elif worse is True:\n                put(res, "decrease")',
+     '            elif False:\n                put(res, "decrease")',
      "the bash side reads true where the core only records: a decrease"),
 ]
 
