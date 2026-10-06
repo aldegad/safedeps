@@ -54,6 +54,8 @@ NPM_SANDBOX_NAME=lockless
 NPM_SANDBOX_SCRIPT_RE='lockless-forms\.sh'
 # shellcheck source=lib/npm-sandbox.sh
 source "${ROOT_DIR}/scripts/test/lib/npm-sandbox.sh"
+# Forms hold paths under the sandbox, so a row's label says <tmp> there.
+shard_mask tmp "${tmp_root}"
 # shellcheck source=lib/release-floor.sh
 source "${ROOT_DIR}/scripts/test/lib/release-floor.sh"
 NPM_SANDBOX_RELEASE_FLOOR=true

@@ -54,6 +54,8 @@ NPM_SANDBOX_SCRIPT_RE='effect-trace-grid\.sh'
 NPM_SANDBOX_TOLERANT=true
 # shellcheck source=lib/npm-sandbox.sh
 source "${ROOT_DIR}/scripts/test/lib/npm-sandbox.sh"
+# Forms hold paths under the sandbox, so a row's label says <tmp> there.
+shard_mask tmp "${tmp_root}"
 
 # An alternate tree for CDPATH: <alt>/sub is a project of its own, so a `cd sub`
 # that CDPATH sends there installs there.

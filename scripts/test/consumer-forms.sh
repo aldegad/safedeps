@@ -37,6 +37,8 @@ cleanup() {
   rm -rf "${tmp_root}"
 }
 trap cleanup EXIT
+# Forms hold paths under it, so a row's label says <tmp> there.
+shard_mask tmp "${tmp_root}"
 
 project_dir="${tmp_root}/project"
 mkdir -p "${project_dir}"

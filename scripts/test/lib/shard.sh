@@ -43,6 +43,7 @@ SHARD_N=0
 SHARD_REST=()
 SHARD_ROWS_FILE=""
 SHARD_DEPTH=""
+SHARD_MASKS=()
 
 # shard_args "$@": takes --shard and --shard-list out of the arguments and
 # leaves the rest in SHARD_REST.
@@ -62,7 +63,28 @@ shard_args() {
   done
   SHARD_DEPTH="${BASH_SUBSHELL}"
   [[ "${SHARD_ON}" == true ]] || return 0
+  shard_mask root "${ROOT_DIR:-}"
   SHARD_ROWS_FILE=$(mktemp "${TMPDIR:-/tmp}/safedeps-shard-rows.XXXXXX") || fail "cannot create the shard row list"
+}
+
+# shard_mask NAME PATH...: a row's label says <NAME> where it holds PATH. The
+# shards of one battery run on different hosts, each in its own temporary
+# directory, and they agree on the list of rows only when no label holds a
+# path or a port that one run made: a temporary root, the tree's own path, a
+# fixture registry's port (127.0.0.1:<port>, masked always). A path is masked
+# in each spelling it takes here: its physical form, as given, and as `cd` and
+# `pwd` print it, each with and without /private, longest first.
+shard_mask() {
+  local name="$1" p q
+  shift
+  for p in "$@"; do
+    [[ -n "${p}" ]] || continue
+    for q in "$(cd "${p}" 2>/dev/null && pwd -P)" "${p}" "$(cd "${p}" 2>/dev/null && pwd)"; do
+      [[ -n "${q}" ]] || continue
+      SHARD_MASKS+=("${q}" "<${name}>")
+      [[ "${q}" != /private/* ]] || SHARD_MASKS+=("${q#/private}" "<${name}>")
+    done
+  done
 }
 
 # shard_row LABEL: counts a row and says whether this run runs it. Call it first
@@ -77,7 +99,13 @@ shard_row() {
   [[ "${BASH_SUBSHELL}" == "${SHARD_DEPTH}" ]] \
     || fail "shard_row ran in a subshell (depth ${BASH_SUBSHELL}, the battery's is ${SHARD_DEPTH:-unset}): ${1:0:80}"
   SHARD_N=$(( SHARD_N + 1 ))
-  local label="${1//$'\n'/\\n}"
+  local label="${1//$'\n'/\\n}" i
+  for (( i = 0; i < ${#SHARD_MASKS[@]}; i += 2 )); do
+    label=${label//"${SHARD_MASKS[i]}"/${SHARD_MASKS[i + 1]}}
+  done
+  while [[ "${label}" =~ 127\.0\.0\.1:[0-9]+ ]]; do
+    label=${label//"${BASH_REMATCH[0]}"/127.0.0.1:<port>}
+  done
   printf '%s\t%s\n' "${SHARD_N}" "${label}" >> "${SHARD_ROWS_FILE}" || fail "cannot record row ${SHARD_N}"
   (( (SHARD_N - 1) % SHARD_M + 1 == SHARD_I )) || return 1
   if [[ "${SHARD_LIST}" == true ]]; then
