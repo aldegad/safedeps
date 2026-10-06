@@ -220,7 +220,7 @@ done
         req=dict(op='trace',path=str(project),entry=raw,none='fixture names no call')
         # A trace probe reads metadata only, so both readers see this one disk.
         record('trace-'+shape,run('bash',req,d)[:2],run('rust',req,d)[:2])
-    for action in ['unchanged','changed','added','missing-staged']:
+    for action in ['unchanged','changed','added','missing-staged','last-present','last-absent','empty-list']:
         if not wanted('snapshot-'+action): continue
         results=[]
         for side in ['bash','rust']:
@@ -230,6 +230,9 @@ done
             clock_slots.pop(d,None)
             (d/'project/package.json').write_text('{"name":"kept"}\n')
             (d/'home/snapshots/pre_monitored_files.list').write_text('package.json\npackage-lock.json\npackages/a/package.json\n')
+            if action in ['last-present','last-absent','empty-list']:
+                names={'last-present':'package.json\n','last-absent':'package.json\nyarn.lock\n','empty-list':''}[action]
+                (d/'home/snapshots/pre_monitored_files.list').write_text(names)
             req=dict(op='snapshot',path=str(d/'project'),id='pre',action='stage')
             stages=[run(side,req,d)[:2]]
             if action=='changed':(d/'project/package.json').write_text('{"name":"changed"}\n')
