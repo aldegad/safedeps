@@ -72,7 +72,61 @@ cases={
    'if jv::eq(jv::path(v, &["tool_input", "command"])?, jv::field(&m, "updated_command")?) { b"added" }',
    'if true { b"added" }',
    "the pre-guard's record says it rewrote the command: true; the command this hook received is the one it wrote: false"),
+ 'P2':('fault','confirm-link','report.rs',
+   '        match inert(meta, input) {\n            Err(rc) => { inert_unsaid',
+   '        let extended=cat(&[fact,b". Rebuild there yourself once the link is gone"]);let fact=extended.as_slice();\n        match inert(meta, input) {\n            Err(rc) => { inert_unsaid',
+   'the reason is not a fact form that holds on disk'),
+ 'R3':('fault','confirm-link','report.rs',
+   'b" is a symbolic link to ", &link_target(path)])',
+   'b" is a symbolic link to ", &link_target(path), b", and npm follows it"])',
+   'the reason is not a fact form that holds on disk'),
+ 'Bypass':('fault','confirm-link','npm.rs',
+   'report.rebuild(home,&meta,input,&cat(&[b"did not run npm rebuild: ",&why]));',
+   'report.rebuild(home,&meta,input,&cat(&[b"did not run npm rebuild: ",&why]));report.say(b"The verified packages\' install scripts have not run");',
+   'a line outside the grammar'),
+ 'RefuseSilent':('fault','restore-link','rollback.rs',
+   'b": ",why]);self.report.say(&line);', 'b": ",why]);',
+   'the reorg.log entries this hook appended are not the ones its message calls for'),
+ 'LogSilent':('fault','confirm-clean','run.rs',
+   'if report.lines.is_empty() { return Ok(None) }',
+   'if report.lines.is_empty() { sh::append(&call.store.home.join("reorg.log"),b"[2001-02-03T04:05:06Z] CONFIRM warnings\\n  restored phantom\\n");return Ok(None) }',
+   'reorg.log grew by '),
+ 'F4':('fault','backstop-rollback','rollback.rs',
+   'if !self.backstop{self.report.inert(&self.store.home,&self.store.meta(),input);}',
+   'self.report.inert(&self.store.home,&self.store.meta(),input);',
+   'a hook whose record states no --ignore-scripts line said so in advisory.log 1 times, not 0'),
+ 'NoDir':('fault','pending-nodir','call.rs',
+   'if !dir.is_empty() { project = sh::p(&dir); }',
+   'if !dir.is_empty() { project = sh::p(&dir); } else { project = std::env::current_dir().unwrap(); }',
+   'a step line names a path outside'),
+ 'RecordHash':('fault','pending-hash','call.rs',
+   'let mut store = Store::new(home.into(), project, snapshot_id);',
+   'let mut store = Store::new(home.into(), project, snapshot_id);let recorded=string(&current,"dir_hash");if !recorded.is_empty(){store.hash=String::from_utf8_lossy(&recorded).into_owned();}',
+   'the confirmed record of the project does not name this snapshot'),
+ 'IdFallsBackToKey':('fault','pending-fallback','call.rs',
+   'sh::is_file(&p).then_some(p)',
+   'sh::is_file(&p).then_some(p).or_else(|| fs::read_dir(home.join("pending")).ok()?.filter_map(Result::ok).map(|e|e.path()).find(|p|sh::basename(sh::bytes(p)).starts_with(format!("{}__",key).as_bytes())))',
+   "the hook consumed the record of the call '', and this call is 'fault-call'"),
 }
+# Keep these whole branch replacements tied to the checked-in source. Each
+# anchor must select exactly one branch before any archive mutation is made.
+call_source=(root/'rust/src/post/call.rs').read_text()
+for name,shape,start,end,diagnostic in [
+ ('Gone','pending-gone','        if record == Record::Install && !sh::is_file(&store.meta()) {',
+  '        if matches!(record, Record::Unread',
+  'a pending state whose snapshot has no meta file was consumed, and advisory.log names it 0 times, not once'),
+ ('Empty','pending-empty','            if record == Record::Install && snapshot_id.is_empty() {',
+  '        } else if !found',
+  'a record that names no snapshot was consumed, and advisory.log names it 0 times, not once'),
+]:
+    if call_source.count(start)!=1 or call_source.count(end)!=1:raise SystemExit(name+': branch anchor is not unique')
+    old=call_source[call_source.index(start):call_source.index(end)]
+    cases[name]=('fault',shape,'call.rs',old,start+' return Ok(None); }\n',diagnostic)
+not_object='''                record = Record::Unread;
+                state::log_advisory(home, &cat(&[b"post-verify: the pre-guard's record ", sh::bytes(p), b" is not one JSON object; this hook set the record aside"]));'''
+cases['NotObject']=('fault','pending-object','call.rs',not_object,
+    '                sh::rm_f(p);return Ok(None);',
+    'a record that is not one JSON object was consumed, and advisory.log names it 0 times, not once')
 names=a.names.split(',')
 if not names or any(n not in cases for n in names):p.error('unknown control name')
 
