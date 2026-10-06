@@ -100,7 +100,12 @@ pub fn from_value(v: &crate::json::Value) -> J {
     match v {
         Value::Null => J::Null,
         Value::Bool(b) => J::Bool(*b),
-        Value::Num(n) => J::Num(n.clone()),
+        Value::Num(n) => match n.as_str() {
+            "NaN" => J::Null,
+            "Infinity" => J::Num("1.7976931348623157e+308".into()),
+            "-Infinity" => J::Num("-1.7976931348623157e+308".into()),
+            _ => J::Num(n.clone()),
+        },
         Value::Str(s) => arg(s),
         Value::Arr(a) => J::Arr(a.iter().map(from_value).collect()),
         Value::Obj(o) => J::Obj(o.iter().map(|(k, v)| (text(k), from_value(v))).collect()),
