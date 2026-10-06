@@ -179,18 +179,7 @@ pub struct Facts {
     pub records: Vec<(String, W)>,
 }
 
-/// A text the command hands on, as the shell that runs it reads it: a script
-/// for `sh -c` (kind `S`) or `eval` (`E`), or the body of a substitution
-/// (`B`).
-#[derive(Debug, Clone)]
-pub struct Payload {
-    pub kind: u8,
-    pub text: W,
-    /// For each byte of `text`, the offset (from 0) in the text it was read
-    /// from of the byte it is; None for a byte the lexer decoded, which has
-    /// no one byte to stand for it.
-    pub src: Vec<Option<usize>>,
-}
+pub use crate::lex::{Payload, PayloadOrigin};
 
 impl<'c> Run<'c> {
     pub fn new(c: &'c Core) -> Run<'c> {
@@ -257,40 +246,16 @@ impl<'c> Run<'c> {
     /// payload. The records are the ones `lex_payloads` reads, so a payload
     /// here is byte for byte a payload there.
     pub fn payloads(&mut self, text: &[u8]) -> Vec<Payload> {
+        let Some(rd) = self.reading else { self.failed = true; return Vec::new(); };
         let mut res = Vec::new();
         for view in ["cscripts", "substs"] {
-            let Some(out) = self.lex(text, view) else { continue };
-            let out = subst(out);
-            for rec in herestring_lines(&out) {
-                if rec.is_empty() {
-                    continue;
+            match Lex::new(&self.c.g, text, view, rd).run_payloads() {
+                Ok((mut payloads, side)) => {
+                    self.failed |= side.smfail;
+                    self.diverge |= side.diverge;
+                    res.append(&mut payloads);
                 }
-                if rec == b"!" {
-                    self.failed = true;
-                    continue;
-                }
-                if rec.iter().any(|&b| !(b"BSE:# ".contains(&b) || b.is_ascii_digit())) || !matches!(rec[0], b'B' | b'S' | b'E') {
-                    self.failed = true;
-                    continue;
-                }
-                let mut p = Payload { kind: rec[0], text: W::new(), src: Vec::new() };
-                for tok in ifs_words(&rec[1..]) {
-                    if let Some((a, n)) = parse_range(&tok) {
-                        if a + n - 1 > text.len() as u64 {
-                            self.failed = true;
-                            continue;
-                        }
-                        let from = (a - 1) as usize;
-                        p.text.extend_from_slice(&text[from..from + n as usize]);
-                        p.src.extend((from..from + n as usize).map(Some));
-                    } else if let Some(bytes) = parse_codes(&tok) {
-                        p.src.extend(bytes.iter().map(|_| None));
-                        p.text.extend_from_slice(&bytes);
-                    } else {
-                        self.failed = true;
-                    }
-                }
-                res.push(p);
+                Err((_, side)) => { self.failed = true; self.diverge |= side.diverge; }
             }
         }
         res

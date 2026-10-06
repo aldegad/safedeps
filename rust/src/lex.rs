@@ -74,6 +74,29 @@ pub struct Side {
 #[derive(Debug)]
 pub struct UnknownView;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PayloadOrigin {
+    ShellC,
+    Eval,
+    EnvSplit,
+    CommandSubstitution,
+    Backquote,
+    ProcessSubstitution,
+}
+
+/// A payload owns its original byte map before the textual views compress
+/// ranges into character codes. Decoded and synthetic bytes alone have no
+/// source position. An S payload also names the shell word that runs it;
+/// callers must not infer ksh/bash/etc from the surrounding text again.
+#[derive(Debug, Clone)]
+pub struct Payload {
+    pub kind: u8,
+    pub text: Vec<u8>,
+    pub src: Vec<Option<usize>>,
+    pub origin: PayloadOrigin,
+    pub shell: Option<Vec<u8>>,
+}
+
 /// One word of a statement, as the walk of the pieces view reads it: the
 /// bytes of the text it is written with, quotes included, and its value with
 /// the quoting removed. `start..end` is a range of the lexed text, from 0.
@@ -301,6 +324,7 @@ pub struct Lex<'g> {
     wantar: bool,
     out: Vec<u8>,
     spans: Option<Vec<PieceSpan>>,
+    payloads: Option<Vec<Payload>>,
 }
 
 fn aqv(e: u8) -> Option<u8> {
@@ -450,6 +474,7 @@ impl<'g> Lex<'g> {
             wantar,
             out: Vec::new(),
             spans: None,
+            payloads: None,
         }
     }
 
@@ -561,6 +586,40 @@ impl<'g> Lex<'g> {
             Ok(()) => Ok((Pieces { pieces: self.spans.take().unwrap_or_default(), unreadable: self.aqbad, view: self.out }, side)),
             Err(e) => Err((e, side)),
         }
+    }
+
+    pub fn run_payloads(mut self) -> Result<(Vec<Payload>, Side), (UnknownView, Side)> {
+        if !matches!(self.view.as_str(), "cscripts" | "substs") {
+            return Err((UnknownView, Side::default()));
+        }
+        self.payloads = Some(Vec::new());
+        let r = self.run_passes();
+        let side = Side { unterm: self.unterm, diverge: self.div, smfail: self.smfail || self.aqbad };
+        match r {
+            Ok(()) => Ok((self.payloads.take().unwrap_or_default(), side)),
+            Err(e) => Err((e, side)),
+        }
+    }
+
+    fn capture_payload(&mut self, kind: u8, units: &str, origin: PayloadOrigin, shell: Option<&[u8]>) {
+        if self.payloads.is_none() { return; }
+        let mut p = Payload { kind, text: Vec::new(), src: Vec::new(), origin, shell: shell.map(<[u8]>::to_vec) };
+        for unit in awk_split(units) {
+            if let Some(code) = unit.strip_prefix('#') {
+                match code.parse::<u8>() {
+                    Ok(b) => { p.text.push(b); p.src.push(None); }
+                    Err(_) => self.smfail = true,
+                }
+            } else {
+                match unit.parse::<usize>() {
+                    Ok(n) if n > 0 && n <= self.n as usize => {
+                        p.text.push(self.xb(n as I)); p.src.push(Some(n - 1));
+                    }
+                    _ => self.smfail = true,
+                }
+            }
+        }
+        self.payloads.as_mut().unwrap().push(p);
     }
 
     fn run_passes(&mut self) -> Result<(), UnknownView> {
@@ -971,6 +1030,20 @@ impl<'g> Lex<'g> {
             }
         }
         if top == b'A' || top == b'K' {
+            // Arithmetic expands command substitutions too. Using the same
+            // context stack keeps their shell bodies out of the arithmetic
+            // parenthesis count and exposes them to every payload reader.
+            if c == b'$' && self.xb(i + 1) == b'(' && self.xb(i + 2) != b'(' {
+                self.setc(i + 1, cls);
+                self.i = i + 1;
+                self.push(b'S');
+                return i + 1;
+            }
+            if c == b'`' {
+                self.i = i;
+                self.push(b'B');
+                return i;
+            }
             if top == b'K' {
                 if c == b']' {
                     self.i = i;
@@ -2988,6 +3061,7 @@ impl<'g> Lex<'g> {
                         ev.push_str(" #32");
                         ev.push_str(wsv(m));
                     }
+                    self.capture_payload(b'E', &ev, PayloadOrigin::EnvSplit, None);
                     let r = self.runs(&ev);
                     self.put(b"E");
                     self.put(r.as_bytes());
@@ -3015,6 +3089,7 @@ impl<'g> Lex<'g> {
                             s += 1;
                         }
                         if s <= n {
+                            self.capture_payload(b'S', wsv(s), PayloadOrigin::ShellC, Some(word));
                             let r = self.runs(wsv(s));
                             self.put(b"S");
                             self.put(r.as_bytes());
@@ -3040,6 +3115,7 @@ impl<'g> Lex<'g> {
                     }
                     ev.push_str(wsv(m));
                 }
+                self.capture_payload(b'E', &ev, PayloadOrigin::Eval, None);
                 let r = self.runs(&ev);
                 self.put(b"E");
                 self.put(r.as_bytes());
@@ -3064,6 +3140,12 @@ impl<'g> Lex<'g> {
                 su.push_str(&format!(" {}", t));
                 t += 1;
             }
+            let origin = match self.skind[k] {
+                b'B' => PayloadOrigin::Backquote,
+                b'P' => PayloadOrigin::ProcessSubstitution,
+                _ => PayloadOrigin::CommandSubstitution,
+            };
+            self.capture_payload(b'B', &su, origin, None);
             out.push(b'B');
             out.extend_from_slice(self.runs(&su).as_bytes());
             out.push(b'\n');
