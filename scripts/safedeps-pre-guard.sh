@@ -2953,8 +2953,12 @@ command_is_injectable_npm_install() {
 # appended the flag. Every reader here that looks for a verb to rewrite asks
 # this one. The check for an npm verb in a heredoc body does not: its match
 # withholds every rewrite, so it keeps the release's case (inert_rewrite_in_place).
+# With --nested first, the verb ends in the `%` the live view prints for a glued
+# `}` that closes no group there (inert_nested_verb_ends).
 inert_npm_verb_grep() {
-  LC_ALL=C judge_grep "$@" -Ei "npm${SAFEDEPS_G_OPTS}[[:space:]]+(${SAFEDEPS_G_NPM_VERBS}|${SAFEDEPS_G_NPM_LINK_VERBS})${SAFEDEPS_G_END}"
+  local end="${SAFEDEPS_G_END}"
+  if [[ "${1:-}" == --nested ]]; then end="%"; shift; fi
+  LC_ALL=C judge_grep "$@" -Ei "npm${SAFEDEPS_G_OPTS}[[:space:]]+(${SAFEDEPS_G_NPM_VERBS}|${SAFEDEPS_G_NPM_LINK_VERBS})${end}"
 }
 
 # Each npm install verb in <text>, one per line, as `<start> <end>`: the offset
@@ -2995,6 +2999,55 @@ inert_verb_ends() {
     [[ -z "${SAFEDEPS_SCAN_MARK:-}" ]] || printf 'failed\n' >> "${SAFEDEPS_SCAN_MARK}"
     return 1
   fi
+}
+
+# Each npm install verb in <text> that the rewrite cannot reach, one per line,
+# the offset just past the verb: one glued to a `}` that stands inside the body
+# of a substitution. The recognizers read that body as a payload, at its own
+# top level, where zsh closes a group at the `}` and runs the install (``echo
+# `{ npm ci}` ``). The rewrite reads <text>, where a nested `}` is a character
+# (`%` in the live view, group_close in shell_lex), so inert_verb_ends finds no
+# verb there. Alone, such an install left the rewrite nothing to do, and the
+# command was a recorded downgrade. Beside an install the rewrite did reach,
+# the command read as rewritten, and zsh ran the nested install's scripts with
+# nothing recorded (verdict tookdaki-20261006-112251, R1). The caller keeps
+# the rewrite as it is and records the floor (inert_rewrite_in_place).
+#
+# Whether the `}` is nested is the lexer's answer: it stands in a range the
+# substs view names. Whether the payload's reading closes a group there is not
+# asked, so a nested `npm ci}` that closes none is counted too. That can only
+# add a record, never drop one.
+inert_nested_verb_ends() {
+  local LC_ALL=C text="$1" live matches subs m s pos rec tok inside IFS=$' \t\n'
+  live=$(shell_lex "${text}" live "safedeps:inert_offsets") || return 1
+  [[ "${live}" == *%* ]] || return 0
+  matches=$(printf '%s\n' "${live}" | inert_npm_verb_grep --nested -ob) || matches=""
+  [[ -n "${matches}" ]] || return 0
+  subs=$(shell_lex "${text}" substs "safedeps:inert_offsets") || return 1
+  while IFS= read -r m; do
+    [[ -n "${m}" ]] || continue
+    # grep's offset counts from 0, and its match ends in the `%`, so the
+    # offset plus the length of the match is that byte, counted from 1.
+    s="${m%%:*}" m="${m#*:}"
+    pos=$(( s + ${#m} ))
+    # A `%` the command holds as written is no `}`.
+    [[ "${text:pos-1:1}" == "}" ]] || continue
+    inside=false
+    while IFS= read -r rec; do
+      [[ -n "${rec}" ]] || continue
+      if [[ "${rec}" =~ [^BSE0-9:#\ ] || "${rec}" != [BSE]* ]]; then
+        guard_mark_reading_failed
+        continue
+      fi
+      # shellcheck disable=SC2086 # the units, split on blanks; the test above leaves no glob byte
+      for tok in ${rec:1}; do
+        [[ "${tok}" =~ ^([1-9][0-9]{0,8}):([1-9][0-9]{0,8})$ ]] || continue
+        (( pos < BASH_REMATCH[1] || pos >= BASH_REMATCH[1] + BASH_REMATCH[2] )) || inside=true
+      done
+    done <<< "${subs}"
+    [[ "${inside}" != true ]] || printf '%s\n' "$(( pos - 1 ))"
+  done <<< "${matches}"
+  return 0
 }
 
 # Bytes that no shell expansion acts on, in bash, zsh or dash under their
@@ -3142,9 +3195,15 @@ inert_statement_reads() {
 # last argument's end and the verb's, each with ` unverified`; and one with no
 # place read (its end not found, a `--` before the flag, or no place reading
 # true) prints the verb's end with ` floor`, which the caller sends and
-# records as a downgrade.
+# records as a downgrade. A verb the rewrite cannot reach, glued to a `}`
+# nested in a substitution (inert_nested_verb_ends), prints its end with
+# ` nested`: the caller places no flag there and records the floor.
 inert_flag_offsets() {
-  local text="$1" pairs dir ends start bound at stmt cands p note want placed verb
+  local text="$1" pairs nested dir ends start bound at stmt cands p note want placed verb
+  nested=$(inert_nested_verb_ends "${text}") || return 1
+  while read -r p; do
+    [[ -z "${p}" ]] || printf '%s nested\n' "${p}"
+  done <<< "${nested}"
   pairs=$(inert_verb_ends "${text}") || return 1
   [[ -n "${pairs}" ]] || return 0
   dir=$(mktemp -d "${TMPDIR:-/tmp}/safedeps-inert.XXXXXX") || {
@@ -3405,8 +3464,12 @@ inert_offsets_of() {
 # 1 when an install asked for its scripts and the flag now overrides it, 2 when
 # an install holds a word the shell decides at run time, so nobody read
 # whether the flag holds, and 4 when an install keeps only the floor because
-# no place in it reads as true (a downgrade the caller records); 0 when none
-# applies. Returns 3, printing nothing, when an npm install sits where the
+# no place in it reads as true, or gets no flag because its verb is glued to a
+# `}` nested in a substitution (` nested`, inert_nested_verb_ends) -- a
+# downgrade the caller records; 0 when none applies. Prints nothing and
+# returns 0, the caller's downgrade, when such a nested install is the only
+# one left to rewrite, even where every other install already leaves
+# ignore-scripts true. Returns 3, printing nothing, when an npm install sits where the
 # rewrite cannot reach it -- a double-quoted script with an escape or a
 # substitution in it, a heredoc piped into a shell -- so the caller records the
 # downgrade instead of reporting the command inert; the release did not
@@ -3436,6 +3499,13 @@ inert_rewrite_in_place() {
   inert_release_skips "${command}" || release_rewrote=true
   while read -r e note; do
     [[ -n "${e}" ]] || continue
+    # An install the rewrite cannot reach gets no flag, and the command keeps
+    # the rewrite of the others. Read as nothing, it left that rewrite to
+    # report the command inert, with nothing recorded.
+    if [[ "${note}" == nested ]]; then
+      floor=true
+      continue
+    fi
     if [[ "${e}" == - || "${note}" == settled ]]; then
       settled=true
       [[ "${note}" == settled && "${release_rewrote}" == true ]] || continue
@@ -3447,7 +3517,7 @@ inert_rewrite_in_place() {
   done <<< "${lines}"
   [[ -z "${offsets}" ]] || ! inert_release_appends "${command}" || append=1
   if [[ -z "${offsets}" ]]; then
-    [[ "${settled}" == true ]] && return 4
+    [[ "${settled}" == true && "${floor}" != true ]] && return 4
     return 0
   fi
   offsets=$(printf '%s' "${offsets}" | LC_ALL=C sort -nu | tr '\n' ' ')
@@ -6835,7 +6905,9 @@ if [[ "${GUARD_IS_CODEX}" != true ]]; then
       [[ "${inert_first}" != *" asked"* ]] || INERT_ASKED=true
       [[ "${inert_first}" != *" unverified"* ]] || INERT_UNVERIFIED=true
       # A statement kept only the floor: the release's rewrite, with no place
-      # read as true. It is sent and recorded as a downgrade.
+      # read as true, or an install the rewrite cannot reach beside one it
+      # rewrote (inert_nested_verb_ends). It is sent and recorded as a
+      # downgrade.
       [[ "${inert_first}" != *" floor"* ]] || INERT_FLOOR_ONLY=true
       # No rewrite landed, and the command gets the release's own: the flag
       # at the end of a one-statement command. Also a recorded downgrade.
@@ -6859,7 +6931,7 @@ if [[ "${INERT_DOWNGRADED}" == "true" ]]; then
   log_advisory "pre-guard: could not make every npm install in this command inert in place (one is in a compound command the rewrite did not land in, in a statement whose end it could not find, or in a script handed to a shell that it cannot reach); lifecycle scripts may run before the effect gate verifies (downgraded to detect-and-rollback). Command: ${COMMAND}"
 fi
 if [[ "${INERT_FLOOR_ONLY}" == "true" ]]; then
-  log_advisory "pre-guard: an npm install in this command has no place where safedeps could read npm keeping --ignore-scripts true (its end could not be found, a -- ends npm's options before it, or every place changes what npm reads); safedeps put the flag right after each verb, where the release put it in a compound command, and at the end of a one-statement command, where the release put it there; lifecycle scripts may run before the effect gate verifies (downgraded to detect-and-rollback). Command: ${COMMAND}"
+  log_advisory "pre-guard: an npm install in this command has no place where safedeps could read npm keeping --ignore-scripts true (its end could not be found, a -- ends npm's options before it, every place changes what npm reads, or its verb is glued to a } inside a substitution, which the rewrite reads as a character and gives no flag); safedeps put the flag right after each verb it read, where the release put it in a compound command, and at the end of a one-statement command, where the release put it there; lifecycle scripts may run before the effect gate verifies (downgraded to detect-and-rollback). Command: ${COMMAND}"
 fi
 if [[ "${INERT_RELEASE_ONLY}" == "true" ]]; then
   log_advisory "pre-guard: could not place --ignore-scripts by reading an npm install in this command (one is in a script handed to a shell that the rewrite cannot reach, in a heredoc fed to a shell, or in text it could not read); safedeps added the flag only at the end of the command, where the release added it, and could not read where npm keeps it, so lifecycle scripts may run before the effect gate verifies (downgraded to detect-and-rollback). Command: ${COMMAND}"
