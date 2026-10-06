@@ -1390,7 +1390,9 @@ def admit(res, k, source, schema, floor_rows, measured_argv):
     if saved_floor is not None or basis is not None:
         v, b = floor_of(res, floor_rows, basis)
         if v is None:
-            note("floor", UNKNOWN if basis == FLOOR_FILE else "invalid",
+            # The first schema kept a floor and not what it was held to: that
+            # is not recorded, not a contradiction.
+            note("floor", UNKNOWN if basis == FLOOR_FILE or (basis is None and schema == 1) else "invalid",
                  "the floor %r has nothing in the row, or in this tree's recorded rewrites, to hold it to" % (saved_floor,))
         else:
             if saved_floor is not None and saved_floor != v:
@@ -2879,11 +2881,11 @@ def selftest(a):
     except Unsupported:
         refused = True
     check("a report of a schema this file does not read is not read", refused, True)
-    sch, rows1 = decode_report({"rows": [{"set": "s", "command": "npm ci", "core_rc": 0, "ref": {}, "core": {},
+    sch, rows1 = decode_report({"rows": [{"set": "s", "command": "npm ci", "core_rc": 0, "ref": {}, "core": {}, "floor": "ok",
                                           "sides": {"written": {"calls": {sh: [["ci"]] for sh in SHELLS}}}}]})
     admit(rows1[0], 0, {"report": "selftest"}, sch, {}, [])
     w1 = rows1[0]["sides"]["written"]["shells"]["bash"]
-    check("the first schema's npm calls are read, and what it did not keep is unknown",
+    check("the first schema's npm calls are read, and what it did not keep (its floor's basis among it) is unknown",
           [sch, axis(w1, "npm"), axis(w1, "rc"), rows1[0]["evidence"]["invalid"]], [1, "ok", UNKNOWN, []])
     shutil.rmtree(work, ignore_errors=True)
     print("selftest: %d not ok" % bad)
