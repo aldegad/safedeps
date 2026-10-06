@@ -107,6 +107,30 @@ cases={
    'sh::is_file(&p).then_some(p)',
    'sh::is_file(&p).then_some(p).or_else(|| fs::read_dir(home.join("pending")).ok()?.filter_map(Result::ok).map(|e|e.path()).find(|p|sh::basename(sh::bytes(p)).starts_with(format!("{}__",key).as_bytes())))',
    "the hook consumed the record of the call '', and this call is 'fault-call'"),
+ 'Legacy':('fault','pending-legacy','call.rs',
+   '        let mut project = cwd;\n',
+   '        let mut project = cwd;\n        if pending.is_none() && sh::is_file(&home.join("current_snapshot_id")){snapshot_id=sh::cat_captured(&home.join("current_snapshot_id")).unwrap_or_default();if let Some(p)=sh::cat_captured(&home.join("current_project_dir")){project=sh::p(&p);}record=Record::Install;sh::rm_f(&home.join("current_snapshot_id"));sh::rm_f(&home.join("current_project_dir"));}\n',
+   'the hook consumed a record a pre-#5 pre-guard left, which belongs to no call'),
+ 'CodexEverywhere':('fault','registry-claude','npm.rs',
+   'if inert==report::NONE&&codex{', 'if inert==report::NONE{',
+   'the warning says safedeps cannot add --ignore-scripts on Codex, of a claude call'),
+ 'TraceNever':('assertion','trace-lock','trace.rs',
+   '    for (i,rel) in [RECORDS[0],RECORDS[1],"node_modules"].iter().enumerate() {',
+   '    return(false,b"the mutant checked nothing".to_vec());\n    for (i,rel) in [RECORDS[0],RECORDS[1],"node_modules"].iter().enumerate() {',
+   'an install the pre-guard did not read: the backstop rolls back'),
+ 'TraceAlways':('assertion','trace-untraced','trace.rs',
+   'if entry.is_empty() {return (true,', 'if true {return (true,',
+   'a grep right after a pull outside the gate: the backstop says nothing'),
+ 'WalkOff':('assertion','trace-tree','trace.rs',
+   '''    let rc=walk(&tree,usize::MAX,true,Some(until),|p,m|{
+        if (m.ctime(),m.ctime_nsec())>(b.mtime(),b.mtime_nsec()){found=sh::bytes(p).to_vec();true}else{false}
+    });''',
+   '    let rc:Result<(),i32>=Ok(());',
+   'a write only into node_modules is a trace'),
+ 'LinkLstat':('assertion','trace-link','trace.rs',
+   'os::tree_clock(&file).as_bytes()!=lines[5+i]',
+   'os::file_clock(&file,b\'c\',false).as_bytes()!=lines[5+i].split(|b|*b==b\'|\').next().unwrap_or(b"")',
+   'a write through a linked lockfile is a trace'),
 }
 # Keep these whole branch replacements tied to the checked-in source. Each
 # anchor must select exactly one branch before any archive mutation is made.
@@ -141,7 +165,7 @@ def fixture(kind,shape,binary,name,diagnostic=None):
     if kind!='journal':argv+=['--side','rust']
     if kind.startswith('record-'):argv+=['--meta-shape',kind[len('record-'):]]
     if diagnostic:
-        argv+=['--expect-oracle-text',diagnostic]
+        argv+=['--expect-assertion' if kind=='assertion' else '--expect-oracle-text',diagnostic]
         if kind=='journal':argv+=['--expect-difference']
     return execute(argv,name)
 
