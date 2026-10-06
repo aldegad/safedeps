@@ -18,18 +18,38 @@
 # Every step runs, whatever an earlier one answered, and the script exits 1
 # when any failed and names them.
 #
-# The secret scan runs gitleaks, so the gitleaks on PATH must be the pinned
-# version. --install-gitleaks DIR downloads the pinned release for this
-# platform into DIR, checks its sha256 against the pin, and puts DIR first on
-# PATH. Only linux x64 and darwin arm64 are pinned.
+# The secret scan runs the gitleaks on PATH, so that binary must be the pinned
+# release: its sha256 is checked against the pin for this platform, the
+# binary's own, not only the version it prints. A version string is what any
+# program can print. --install-gitleaks DIR downloads the pinned release for
+# this platform into DIR, checks the tarball's sha256 against the pin, and puts
+# DIR first on PATH. Only linux x64 (also WSL1) and darwin arm64 are pinned.
 set -uo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "${ROOT_DIR}" || exit 2
 
+# The tarball pins are the release's checksums.txt. The binary pins are the
+# sha256 of the gitleaks binary inside each tarball, measured on 2026-10-06
+# from tarballs that matched those pins.
 GITLEAKS_VERSION="8.30.1"
 GITLEAKS_LINUX_X64_SHA256="551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+GITLEAKS_LINUX_X64_BIN_SHA256="88f91962aa2f93ac6ab281d553b9e125f5197bbbce38f9f2437f7299c32e5509"
 GITLEAKS_DARWIN_ARM64_SHA256="b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5"
+GITLEAKS_DARWIN_ARM64_BIN_SHA256="ba52fb1bfabbcde42f032afad3d6e0b19dff8ed105229a16e7caa338bbc0e84f"
+asset="" sum="" bin_sum=""
+case "$(uname -s)/$(uname -m)" in
+  Linux/x86_64) asset="linux_x64" sum="${GITLEAKS_LINUX_X64_SHA256}" bin_sum="${GITLEAKS_LINUX_X64_BIN_SHA256}" ;;
+  Darwin/arm64) asset="darwin_arm64" sum="${GITLEAKS_DARWIN_ARM64_SHA256}" bin_sum="${GITLEAKS_DARWIN_ARM64_BIN_SHA256}" ;;
+esac
+
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | cut -d' ' -f1
+  else
+    shasum -a 256 "$1" | cut -d' ' -f1
+  fi
+}
 
 # The files ShellCheck reads: the gate, its libraries and hooks, and the scripts
 # that decide whether a run is green. The rest of the tree is error-clean too;
@@ -50,20 +70,12 @@ die() { printf 'release-checks: %s\n' "$1" >&2; exit 2; }
 if [[ "${1:-}" == --install-gitleaks ]]; then
   dest="${2:-}"
   [[ -n "${dest}" ]] || die "--install-gitleaks needs a directory"
-  case "$(uname -s)/$(uname -m)" in
-    Linux/x86_64) asset="linux_x64" sum="${GITLEAKS_LINUX_X64_SHA256}" ;;
-    Darwin/arm64) asset="darwin_arm64" sum="${GITLEAKS_DARWIN_ARM64_SHA256}" ;;
-    *) die "no gitleaks pin for $(uname -s)/$(uname -m)" ;;
-  esac
+  [[ -n "${asset}" ]] || die "no gitleaks pin for $(uname -s)/$(uname -m)"
   mkdir -p "${dest}" || die "cannot create ${dest}"
   tarball=$(mktemp "${TMPDIR:-/tmp}/gitleaks.XXXXXX") || die "cannot create a temporary file"
   curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_${asset}.tar.gz" \
     -o "${tarball}" || die "cannot download gitleaks ${GITLEAKS_VERSION}"
-  if command -v sha256sum >/dev/null 2>&1; then
-    got=$(sha256sum "${tarball}" | cut -d' ' -f1)
-  else
-    got=$(shasum -a 256 "${tarball}" | cut -d' ' -f1)
-  fi
+  got=$(sha256_of "${tarball}")
   [[ "${got}" == "${sum}" ]] || { rm -f "${tarball}"; die "gitleaks ${asset} has sha256 ${got}, the pin is ${sum}"; }
   tar -xzf "${tarball}" -C "${dest}" gitleaks || die "cannot unpack gitleaks"
   rm -f "${tarball}"
@@ -96,6 +108,14 @@ if [[ "$(git rev-parse --is-shallow-repository 2>/dev/null)" != false ]]; then
 elif [[ "$(gitleaks version 2>/dev/null | sed 's/^v//')" != "${GITLEAKS_VERSION}" ]]; then
   printf 'not ok - gitleaks on PATH is %s, the pin is %s (--install-gitleaks DIR installs it)\n' \
     "$(gitleaks version 2>/dev/null || printf 'missing')" "${GITLEAKS_VERSION}"
+  failed+=(secret-scan)
+elif [[ -z "${bin_sum}" ]]; then
+  printf 'not ok - no gitleaks pin for %s, so the gitleaks on PATH cannot be checked\n' "$(uname -s)/$(uname -m)"
+  failed+=(secret-scan)
+elif gitleaks_bin=$(command -v gitleaks); gitleaks_sum=$(sha256_of "${gitleaks_bin:-/nonexistent}" 2>/dev/null); \
+     [[ "${gitleaks_sum}" != "${bin_sum}" ]]; then
+  printf 'not ok - gitleaks at %s has sha256 %s; the pinned %s release binary has %s (--install-gitleaks DIR installs it)\n' \
+    "${gitleaks_bin:-(not found)}" "${gitleaks_sum:-(unreadable)}" "${asset}" "${bin_sum}"
   failed+=(secret-scan)
 elif ./bin/safedeps scan secrets --repo; then
   printf 'ok - no secret in any commit (gitleaks %s)\n' "${GITLEAKS_VERSION}"
