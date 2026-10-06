@@ -9,53 +9,71 @@
 //! when the digest is the one it was built with.
 //!
 //! A package holds no `rust/`, and a missing source must not read as "the
-//! same": the publish job's build is marked `publish` when it is built, and
-//! only that mark skips the check. A checkout's binary that finds no source
-//! does not answer.
+//! same": the publish job's build is marked `publish` when it is built. Only
+//! a marked binary in the package layout with no own `rust/` skips the check.
+//! A publish binary beside source checks it too. A checkout's binary that
+//! finds no source does not answer.
 
-use std::path::PathBuf;
+use std::{io, path::{Path, PathBuf}};
 
 pub const KIND: &str = env!("SAFEDEPS_CORE_STAMP_KIND");
 pub const SHA256: &str = env!("SAFEDEPS_CORE_STAMP_SHA256");
 
 pub enum Check {
-    /// The publish job's build: there is no source to hold it to.
+    /// A publish build in a package whose own source directory is absent.
     Published,
-    /// A checkout's build, and `rust/` there hashes to its stamp.
+    /// The binary's own `rust/` hashes to its stamp.
     Same,
-    /// A checkout's build, and `rust/` there hashes to something else.
+    /// The binary's own `rust/` hashes to something else.
     Differs { dir: PathBuf, now: String },
-    /// A checkout's build that cannot read a source to hold itself to.
+    /// The required source or the binary's placement cannot be read.
     NoSource { why: String },
 }
 
-/// The `rust/` this binary answers for: in the nearest directory above the
-/// binary, at most five up, that holds `rust/Cargo.toml`. An installed binary
-/// is `<root>/bin/native/<os>-<arch>/safedeps-core`, a built one
-/// `<root>/rust/target/[<target>/]release/safedeps-core`.
-fn source_dir() -> Result<PathBuf, String> {
+/// Resolve placement, not source existence. Looking upwards for Cargo.toml
+/// would mistake an enclosing project's source for an installed package's.
+/// The bool identifies the package layout, where publish may omit source.
+fn source_at(exe: &Path) -> Result<(PathBuf, bool), String> {
+    let dir = exe.parent().ok_or_else(|| format!("{} has no parent directory", exe.display()))?;
+    if let Some(native) = dir.parent().filter(|p| p.file_name().is_some_and(|n| n == "native")) {
+        if let Some(bin) = native.parent().filter(|p| p.file_name().is_some_and(|n| n == "bin")) {
+            if let Some(root) = bin.parent() { return Ok((root.join("rust"), true)); }
+        }
+    }
+    // A normal cargo build has either target/<profile> or
+    // target/<triple>/<profile>. These are exact shapes, never a search.
+    if dir.file_name().is_some_and(|n| n == "release" || n == "debug") {
+        if let Some(parent) = dir.parent() {
+            let target = if parent.file_name().is_some_and(|n| n == "target") { Some(parent) }
+                else { parent.parent().filter(|p| p.file_name().is_some_and(|n| n == "target")) };
+            if let Some(rust) = target.and_then(Path::parent).filter(|p| p.file_name().is_some_and(|n| n == "rust")) {
+                return Ok((rust.to_path_buf(), false));
+            }
+        }
+    }
+    // A directly placed probe/development binary can read source beside it,
+    // but an unfamiliar layout never earns the source-free package exemption.
+    Ok((dir.join("rust"), false))
+}
+
+fn source_dir() -> Result<(PathBuf, bool), String> {
     let exe = std::env::current_exe().map_err(|e| format!("the binary's own path cannot be read ({})", e))?;
     let exe = exe.canonicalize().map_err(|e| format!("{} cannot be resolved ({})", exe.display(), e))?;
-    let mut dir = exe.parent();
-    for _ in 0..6 {
-        let Some(d) = dir else { break };
-        let rust = d.join("rust");
-        if rust.join("Cargo.toml").is_file() {
-            return Ok(rust);
-        }
-        dir = d.parent();
-    }
-    Err(format!("no rust/Cargo.toml in the five directories above {}", exe.display()))
+    source_at(&exe)
 }
 
 pub fn check() -> Check {
-    if KIND == "publish" {
-        return Check::Published;
-    }
-    let dir = match source_dir() {
+    let (dir, packaged) = match source_dir() {
         Ok(d) => d,
         Err(why) => return Check::NoSource { why },
     };
+    // lstat distinguishes absence from an unreadable or dangling source
+    // link. is_dir/is_file would turn those failures into a publish pass.
+    match std::fs::symlink_metadata(&dir) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound && packaged && KIND == "publish" => return Check::Published,
+        Err(e) => return Check::NoSource { why: format!("{} cannot be read ({})", dir.display(), e) },
+        Ok(_) => {}
+    }
     match crate::srchash::digest(&dir) {
         Ok(now) if now == SHA256 => Check::Same,
         Ok(now) => Check::Differs { dir, now },
@@ -75,7 +93,7 @@ pub fn refusal() -> Option<String> {
             now
         )),
         Check::NoSource { why } => Some(format!(
-            "safedeps: the safedeps-core binary is a checkout's build and cannot read the source it was built from: {}. Rebuild it in its checkout: scripts/build-core.sh",
+            "safedeps: the safedeps-core binary cannot read the source beside it: {}. Rebuild it in its checkout: scripts/build-core.sh",
             why
         )),
     }

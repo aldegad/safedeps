@@ -376,6 +376,30 @@ fn cmd_words() -> i32 {
     0
 }
 
+/// JSON structure probe: source offsets are data, not the compressed view.
+fn cmd_payloads() -> i32 {
+    let Some(input) = read_stdin() else { return 2; };
+    let Some(reading) = std::env::var("SAFEDEPS_READING").ok().and_then(|r| lex::Reading::parse(&r)) else { return 1; };
+    let core = core::Core::new();
+    let mut run = core::Run::new(&core);
+    run.reading = Some(reading);
+    let payloads = run.payloads(&input).into_iter().map(|p| {
+        let origin = match p.origin {
+            core::PayloadOrigin::ShellC => "shell-c",
+            core::PayloadOrigin::Eval => "eval",
+            core::PayloadOrigin::EnvSplit => "env-split",
+            core::PayloadOrigin::CommandSubstitution => "command-substitution",
+            core::PayloadOrigin::Backquote => "backquote",
+            core::PayloadOrigin::ProcessSubstitution => "process-substitution",
+        };
+        jq::obj(vec![("kind", jq::s(&(p.kind as char).to_string())), ("text", jq::arg(&p.text)),
+            ("src", jq::J::Arr(p.src.into_iter().map(|n| n.map(|n| jq::J::Num(n.to_string())).unwrap_or(jq::J::Null)).collect())),
+            ("origin", jq::s(origin)), ("shell", p.shell.map(|s| jq::arg(&s)).unwrap_or(jq::J::Null))])
+    }).collect();
+    println!("{}", jq::compact(&jq::obj(vec![("payloads", jq::J::Arr(payloads)), ("failed", jq::J::Bool(run.failed)), ("diverge", jq::J::Bool(run.diverge))])));
+    0
+}
+
 fn main() {
     // An argument that is not text must not end the process before it answers.
     let args: Vec<String> = std::env::args_os().map(|a| a.to_string_lossy().into_owned()).collect();
@@ -389,36 +413,63 @@ fn main() {
         Some("grep") => cmd_grep(&args[2..]),
         Some("facts") => cmd_facts(),
         Some("words") => cmd_words(),
+        Some("payloads") => cmd_payloads(),
         Some("inert") => match read_stdin() {
             Some(input) => inert::cli(&input),
             None => 1,
         },
         // The hooks take the subcommand and nothing else: no argument and no
         // environment variable chooses how one judges.
+        Some("pre") if args.len() == 3 && args[2] == "--budget-child" => match read_stdin() {
+            Some(input) => pre::main(&input, true),
+            None => 2,
+        },
         Some("pre") if args.len() > 2 => {
             println!("{}", jq::deny("safedeps: the PreToolUse hook was started with an argument, and it takes none. Bash is blocked fail-closed until the hook is registered as safedeps installs it: node scripts/install/install-safedeps-hooks.mjs"));
             0
         }
         Some("pre") => match read_stdin() {
-            Some(input) => pre::main(&input),
+            Some(input) => pre::main(&input, false),
             None => 2,
         },
         Some("post") => match read_stdin() {
             Some(input) => post::main(&input),
             None => 2,
         },
+        Some("post-probe") => match read_stdin() {
+            Some(input) => post::probe(&input),
+            None => 2,
+        },
+        Some("pre-probe") => match read_stdin() {
+            Some(input) => pre::probe(&input),
+            None => 2,
+        },
         Some("ledger") => match read_stdin() {
             Some(input) => ledger::main(&args[2..], &input),
             None => 1,
         },
-        Some("json-stream") => match read_stdin() {
-            Some(input) => match json::parse_stream(&input) {
-                Ok(values) => {
-                    for value in values { println!("{}", jq::compact(&jq::from_value(&value))); }
-                    0
+        Some("ask-probe") => match read_stdin() {
+            Some(input) => ask::probe(&input),
+            None => 2,
+        },
+        Some("state-rotate") => {
+            os::set_umask(0o077);
+            let path = state::guard_dir().join("advisory.log");
+            state::advisory_rotate_once(&path);
+            if let Some(input) = read_stdin().filter(|v| !v.is_empty()) {
+                if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&path) {
+                    let _ = f.write_all(&input);
                 }
-                Err(_) => 5,
-            },
+                state::advisory_rotate_once(&path);
+            }
+            0
+        },
+        Some("json-stream") => match read_stdin() {
+            Some(input) => {
+                let stream = json::read(&input);
+                for value in stream.values { println!("{}", jq::compact(&jq::from_value(&value))); }
+                if stream.failed { 5 } else { 0 }
+            }
             None => 2,
         },
         Some("kat") => cmd_kat(&args[2..]),

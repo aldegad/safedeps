@@ -11,6 +11,9 @@ type W = Vec<u8>;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
+mod log;
+pub use log::advisory_rotate_once;
+
 /// `GUARD_DIR="${SAFEDEPS_HOME:-${HOME}/.safedeps}"`. An empty
 /// `SAFEDEPS_HOME` counts as unset, and an unset `HOME` leaves the path
 /// starting at `/.safedeps`, as the shell's expansion does.
@@ -52,6 +55,46 @@ pub fn log_advisory(dir: &Path, text: &[u8]) {
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).mode(0o600).open(dir.join("advisory.log")) {
         let _ = f.write_all(&line);
     }
+}
+
+/// `safedeps_truth_sources_moved_list`, joined with blanks. Empty when the run
+/// uses the canonical sources.
+pub fn truth_sources_moved() -> W {
+    fn env_bytes(name: &str) -> W {
+        use std::os::unix::ffi::OsStringExt;
+        std::env::var_os(name).map(|v| v.into_vec()).unwrap_or_default()
+    }
+    fn put(moved: &mut Vec<W>, label: &str, value: &[u8]) {
+        let mut m = format!("{}=", label).into_bytes();
+        m.extend_from_slice(value);
+        moved.push(m);
+    }
+    fn url(moved: &mut Vec<W>, name: &str, default: &str, label: &str) {
+        let v = env_bytes(name);
+        if !v.is_empty() && v != default.as_bytes() {
+            put(moved, label, &v);
+        }
+    }
+    fn named(moved: &mut Vec<W>, name: &str, label: &str) {
+        let v = env_bytes(name);
+        if !v.is_empty() {
+            put(moved, label, &v);
+        }
+    }
+    let mut moved: Vec<W> = Vec::new();
+    url(&mut moved, "SAFEDEPS_OSV_API_URL", "https://api.osv.dev/v1/query", "osv");
+    url(&mut moved, "SAFEDEPS_OSV_BATCH_API_URL", "https://api.osv.dev/v1/querybatch", "osv-batch");
+    url(&mut moved, "SAFEDEPS_KEV_CATALOG_URL", "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json", "kev");
+    url(&mut moved, "SAFEDEPS_GHSA_API_URL", "https://api.github.com/advisories", "ghsa");
+    named(&mut moved, "SAFEDEPS_NPM_CLOSURE_FIXTURE_JSON", "npm-closure-fixture");
+    named(&mut moved, "SAFEDEPS_YARN_INFO_FIXTURE_NDJSON", "yarn-info-fixture");
+    if !env_bytes("SAFEDEPS_NPM_OVERRIDES_JSON").is_empty() {
+        put(&mut moved, "npm-overrides", b"set");
+    }
+    named(&mut moved, "SAFEDEPS_RECHECK_FIXTURE_JSON", "recheck-fixture");
+    url(&mut moved, "SAFEDEPS_LEDGER_DEFAULT_TTL_DAYS", "30", "ledger-ttl-days");
+    named(&mut moved, "SAFEDEPS_NPM_TEST_REGISTRY", "npm-test-registry");
+    moved.join(&b' ')
 }
 
 /// The two hooks use the same mkdir lock, but answer failure differently.
@@ -149,6 +192,17 @@ pub fn pending_key(dir_hash: &str, command: &[u8]) -> String {
 /// `write_state_file`: the value and a newline, through a temporary name in
 /// the same directory.
 pub fn write_state_file(target: &Path, value: &[u8]) -> std::io::Result<()> {
+    renamed_file(target, |f| f.write_all(value).and_then(|_| f.write_all(b"\n")))
+}
+
+/// Keep the source's bytes, through the same private temporary file and
+/// rename as a state record. Unlike write_state_file, this adds no newline.
+pub fn copy_state_file(source: &Path, target: &Path) -> std::io::Result<()> {
+    let mut from = std::fs::File::open(source)?;
+    renamed_file(target, |to| std::io::copy(&mut from, to).map(|_| ()))
+}
+
+fn renamed_file(target: &Path, write: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>) -> std::io::Result<()> {
     let dir = target.parent().unwrap_or(Path::new("."));
     std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
     let base = target.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -158,7 +212,7 @@ pub fn write_state_file(target: &Path, value: &[u8]) -> std::io::Result<()> {
         let temp = dir.join(format!(".{}.{:06x}", base, seed.wrapping_add(n) & 0xff_ffff));
         match std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&temp) {
             Ok(mut f) => {
-                let wrote = f.write_all(value).and_then(|_| f.write_all(b"\n"));
+                let wrote = write(&mut f);
                 drop(f);
                 if let Err(e) = wrote.and_then(|_| std::fs::rename(&temp, target)) {
                     let _ = std::fs::remove_file(&temp);

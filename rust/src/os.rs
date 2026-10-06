@@ -29,6 +29,7 @@ extern "C" {
     fn mkdtemp(template: *mut std::ffi::c_char) -> *mut std::ffi::c_char;
     fn umask(mask: u32) -> u32;
     fn kill(pid: i32, sig: i32) -> i32;
+    fn waitid(kind: i32, id: u32, info: *mut WaitInfo, options: i32) -> i32;
     fn localtime_r(t: *const i64, tm: *mut Tm) -> *mut Tm;
 }
 
@@ -58,6 +59,29 @@ pub fn set_umask(mask: u32) {
 pub fn kill_group(pgid: u32, sig: i32) {
     unsafe {
         kill(-(pgid as i32), sig);
+    }
+}
+
+// siginfo_t is 104 bytes on the supported Darwin ABIs and 128 on Linux;
+// both start with int si_signo and have alignment 8. Only that first field
+// is read. Zeroed storage also handles older WNOHANG implementations.
+#[repr(C, align(8))]
+struct WaitInfo { signo: i32, rest: [u8; 124] }
+
+/// Observe one owned child's exit without consuming its status or freeing
+/// its pid. POSIX waitid(WNOWAIT) lets the caller clean its process group
+/// before wait() reaps the leader. No signal is sent by this function.
+pub fn child_exited_unreaped(pid: u32) -> std::io::Result<bool> {
+    #[cfg(target_os = "macos")]
+    const WNOWAIT: i32 = 0x20;
+    #[cfg(not(target_os = "macos"))]
+    const WNOWAIT: i32 = 0x01000000;
+    let mut info = WaitInfo { signo: 0, rest: [0; 124] };
+    loop {
+        // P_PID = 1, WEXITED = 4, WNOHANG = 1 in sys/wait.h on both targets.
+        if unsafe { waitid(1, pid, &mut info, 4 | 1 | WNOWAIT) } == 0 { return Ok(info.signo != 0) }
+        let err = std::io::Error::last_os_error();
+        if err.kind() != std::io::ErrorKind::Interrupted { return Err(err) }
     }
 }
 
