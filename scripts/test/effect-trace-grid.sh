@@ -1344,6 +1344,8 @@ npm_masks=no
 # an npm that does not mask, the gate reads where npm said and rolls it back.
 new_uuidproject
 leaf="${CASE_PROJECT##*/}"
+# The carriers below name this mktemp leaf, so a row's label says <leaf> there.
+shard_mask leaf "${leaf}"
 mkdir -p "${UUID_OTHER}/${leaf}" "${UUID_OTHER}/elsewhere"
 printf '{"name":"other","version":"1.0.0"}\n' > "${UUID_OTHER}/${leaf}/package.json"
 printf '{"name":"elsewhere","version":"1.0.0"}\n' > "${UUID_OTHER}/elsewhere/package.json"
