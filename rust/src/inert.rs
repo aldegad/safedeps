@@ -51,8 +51,9 @@
 //! its own), the flag at the end of a command the release appended to, and
 //! v2.17.2's flag in the
 //! two texts the bash rewrite did not read: a heredoc body piped into another
-//! command, and a script word that is not one plain quoted segment or goes to
-//! another shell, there in the word's bytes as written. Those positions say
+//! command, and a script word its own search names as unread (a double-quoted
+//! one with an escape or a substitution, one handed to another shell), there
+//! in the word's bytes as written. Those positions say
 //! where a flag goes and nothing else: not whether a statement is an install,
 //! where it ends, whether its `npm` was read, or what npm makes of its
 //! options. A floor position belongs to an install only where the two name
@@ -474,13 +475,13 @@ fn rewrite_with(run: &mut Run, rx: &Rx, command: &[u8], cands: &[u8], detail: &m
         }
     }
     // v2.17.2's flags in a script the bash rewrite did not read, placed in
-    // the word as written, in the bytes of the text that holds it. Two
-    // sources name such a word, and a flag either names is placed: the bash
-    // rewrite's own search for a script's head, in the texts it read (the
-    // command, and the scripts it read as texts of their own), and a script
-    // payload it did not read as a text of its own (a `sh -c` or `eval`
-    // script word that is not one plain quoted segment, another shell's
-    // script).
+    // the word as written. Which words those are is the bash rewrite's own
+    // search for a script's head, in the texts it read (the command, and the
+    // scripts it read as texts of their own), and nothing else: a script
+    // word it gave no flag (one glued to more text, an unquoted one) gets
+    // none here. Every script payload the lexer names used to get them, and
+    // a script nested in another by glued quotes then got one after the `--`
+    // of its `npm -- ci x`.
     for node in &nodes {
         if node.kind != b'R' && !(matches!(node.kind, b'S' | b'E') && node.read_like) {
             continue;
@@ -488,19 +489,6 @@ fn rewrite_with(run: &mut Run, rx: &Rx, command: &[u8], cands: &[u8], detail: &m
         let spans = floor::unread_spans(run, &node.text)?;
         for e in floor::unread_script_ends(run, &rx.floor, &node.text, &spans)? {
             if let Some(er) = node.after(e) {
-                fed.insert(er);
-            }
-        }
-    }
-    for node in &nodes {
-        if !matches!(node.kind, b'S' | b'E') || node.read_like {
-            continue;
-        }
-        let Some(lo) = node.src.iter().flatten().min().copied() else { continue };
-        let Some(hi) = node.src.iter().flatten().max().map(|m| m + 1) else { continue };
-        let parent = &nodes[node.parent];
-        for e in floor::unread_script_ends(run, &rx.floor, &parent.text, &[(lo, hi)])? {
-            if let Some(er) = parent.after(e) {
                 fed.insert(er);
             }
         }
