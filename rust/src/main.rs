@@ -219,6 +219,10 @@ fn main() {
         }
         Some("grep") => cmd_grep(&args[2..]),
         Some("facts") => cmd_facts(),
+        Some("version") => {
+            println!("safedeps-core {}", env!("CARGO_PKG_VERSION"));
+            0
+        }
         _ => {
             eprintln!("usage: safedeps-core lex <view> | lex-batch | grammar | grep [-i] [-n] <pattern>");
             2

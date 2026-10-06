@@ -144,6 +144,13 @@ pub fn dump() -> String {
         ("SAFEDEPS_G_NPM_INSTALL_RE", p.npm_install_re.clone()),
         ("SAFEDEPS_G_RAW_INSTALL_RE", p.raw_install_re.clone()),
         ("SAFEDEPS_G_BACKSTOP_RE", p.backstop_re.clone()),
+        ("SAFEDEPS_G_NPM_OPTIONS", crate::tables::NPM_OPTIONS.into()),
+        ("SAFEDEPS_G_NPM_SHORTHANDS", crate::tables::NPM_SHORTHANDS.into()),
+        ("SAFEDEPS_G_NPM_OTHER", crate::tables::NPM_OTHER.into()),
+        ("SAFEDEPS_G_COMMANDS", crate::tables::COMMANDS.into()),
+        ("SAFEDEPS_G_VALUE_OPTIONS", crate::tables::VALUE_OPTIONS.into()),
+        ("SAFEDEPS_G_LONG_OPTIONS", crate::tables::LONG_OPTIONS.into()),
+        ("SAFEDEPS_G_PARSERS", crate::tables::PARSERS.into()),
     ];
     let mut s = String::new();
     for (k, v) in rows {
