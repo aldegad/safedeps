@@ -38,6 +38,7 @@ source "$ROOT/lib/gates/npm-reach.sh"
 source "$ROOT/lib/gates/report-facts.sh"
 source "$ROOT/lib/npm/ask.sh"
 set +e
+ROLLBACK_WARNINGS=()
 input=$(cat)
 op=$(jq -r .op <<< "$input")
 path=$(jq -r '.path // ""' <<< "$input")
