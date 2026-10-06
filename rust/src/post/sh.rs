@@ -58,6 +58,7 @@ pub fn command_exists(name: &str) -> bool {
         let Ok(c)=std::ffi::CString::new(bytes(&path)) else{return false};
         is_file(&path) && unsafe{access(c.as_ptr(),1)==0}
     })
+}
 
 /// Whether the hook's locale reads text as UTF-8, as bash decides it for `?`
 /// in a pattern: LC_ALL, then LC_CTYPE, then LANG.
