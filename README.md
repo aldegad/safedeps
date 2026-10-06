@@ -495,7 +495,7 @@ safedeps/
 
 ### Running the tests
 
-`npm test` is the development run: every test battery except the two that only a release needs, the quick scan-failure census and `scripts/test/effect-trace-grid.sh`. `npm run test:release` runs every battery, those two included. Releases run the release set on our own macOS machines, and in WSL1 for Windows. Linux is not tested. GitHub Actions does not run the tests. `scripts/test/run-all.sh --list` prints which batteries a run would start.
+`npm test` is the development run: every test battery except the two that only a release needs, the quick scan-failure census and `scripts/test/effect-trace-grid.sh`. `npm run test:release` runs every battery, those two included. Releases run the release set on our own macOS machines, and in WSL1 for Windows. Linux is not tested. GitHub Actions does not run the tests. `scripts/ci/run-on-hosts.sh` runs either set on several of our macOS machines at once. It splits the longest batteries into row shards, and a run is green only when the shards add up to the whole set and no machine was lost on the way. `scripts/ci/release-checks.sh` runs the release checks that are not tests: ShellCheck, the secret scan over every commit, and the package contents. `scripts/test/run-all.sh --list` prints which batteries a run would start.
 
 ## What's Different
 
