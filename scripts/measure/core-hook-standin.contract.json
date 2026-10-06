@@ -1,0 +1,100 @@
+{
+ "format": "core-hook-standin-acceptance/1",
+ "about": "What core-hook-standin.py expects of one fixture, written before any run and from no run's output. The fixture owns its command and the bytes the stand-in npm answers with; this record owns what the calls must be. Its sources are the fixture named below and the ask contract in AGENTS.md (npm is asked with the statement's own arguments and environment, the ask's own flags go after the command's words, a name that chooses code is never carried, the ask runs the hook's own npm on the hook's PATH). The runner checks the record against the fixture before it starts anything. @W@ is the statement's words, @Q@ the quiet flags, @S@ the scratch directory of one hook run, bound from the call records and then checked by the relations under scratch. @BOX@, @PROJECT@, @HOME@, @STATE@ and @TMP@ are the sandbox's directories, @OBS@ the collector's observation directory and @SYSTEM@ the system directories the collector puts on PATH.",
+ "fixture": {
+  "cases": "core-hook-cases.json",
+  "id": "pre-npm-asked-env",
+  "case_sha256": "ccfc73725c01dcece0e90e5c16cbaef46d3308b42e06d28ec47dd4ba23a64c4a",
+  "npm": "ok",
+  "npm_sha256": "0d74de0e99bd273bb966f5e4a5846806dcb4a460fcfe6b6ea231afc184b245da",
+  "defaults_sha256": "4da28fc529062f994fa83e852b438873d0ab537c0d3a712c0f25b6313e012134",
+  "steps": 1,
+  "step": 0,
+  "hook": "pre",
+  "engine": "codex",
+  "command": "FOO=1 npm_config_registry=https://registry.npmjs.org/ NODE_OPTIONS=--require=/nonexistent npm install",
+  "payload": {
+   "session_id": "core-hook-differential",
+   "hook_event_name": "PreToolUse",
+   "tool_name": "Bash",
+   "tool_input": {
+    "command": "FOO=1 npm_config_registry=https://registry.npmjs.org/ NODE_OPTIONS=--require=/nonexistent npm install"
+   },
+   "cwd": "@PROJECT@",
+   "tool_use_id": "toolu_01",
+   "turn_id": "turn-1",
+   "model": "codex-test"
+  }
+ },
+ "statement": {
+  "assignments": [
+   ["FOO", "1"],
+   ["npm_config_registry", "https://registry.npmjs.org/"],
+   ["NODE_OPTIONS", "--require=/nonexistent"]
+  ],
+  "manager": "npm",
+  "words": ["install"],
+  "carried": ["FOO", "npm_config_registry"],
+  "code_names": ["NODE_OPTIONS"]
+ },
+ "quiet": ["--logs-max=0", "--update-notifier=false"],
+ "asks": [
+  {
+   "name": "prefix",
+   "count": 1,
+   "argv": ["prefix", "@W@", "--global=false", "--location=project", "@Q@", "--cache", "@S@/cache"],
+   "answer": {"index": 0, "selector": ["prefix"], "stdout": "@PROJECT@\n", "stderr": "", "exit": 0}
+  },
+  {
+   "name": "root",
+   "count": 1,
+   "argv": ["root", "@W@", "@Q@", "--cache", "@S@/cache"],
+   "answer": {"index": 1, "selector": ["root"], "stdout": "@PROJECT@/node_modules\n", "stderr": "", "exit": 0}
+  },
+  {
+   "name": "config",
+   "count": 1,
+   "argv": ["config", "ls", "@W@", "--json", "@Q@", "--cache", "@S@/cache"],
+   "answer": {
+    "index": 2,
+    "selector": ["config", "ls"],
+    "stdout": "{\"registry\": \"https://registry.npmjs.org/\", \"replace-registry-host\": \"npmjs\", \"global\": false, \"location\": \"user\"}\n",
+    "stderr": "",
+    "exit": 0
+   }
+  }
+ ],
+ "call": {
+  "cwd": "@PROJECT@",
+  "env": {
+   "FOO": "1",
+   "npm_config_registry": "https://registry.npmjs.org/",
+   "PATH": "@BOX@/stub:@OBS@/bin:@SYSTEM@",
+   "HOME": "@HOME@",
+   "SAFEDEPS_HOME": "@STATE@",
+   "TMPDIR": "@TMP@",
+   "PWD": "@PROJECT@"
+  },
+  "inherited": ["PATH", "HOME", "SAFEDEPS_HOME", "TMPDIR"],
+  "absent": ["NODE_OPTIONS"]
+ },
+ "hook": {
+  "status": "exit 0"
+ },
+ "scratch": {
+  "parent": "@TMP@",
+  "leaf_prefix": "safedeps-npm-ask.",
+  "kind": "dir"
+ },
+ "direct": {
+  "argv": ["prefix", "--json"],
+  "selector": ["prefix"],
+  "default": {"stdout": "WRONG ANSWER\n", "exit": 99},
+  "env": {"LANG": "en_US.UTF-8"},
+  "cases": [
+   {"name": "ordinary", "answer": {"stdout": "ordinary-answer\n", "stderr": "ordinary-diagnostic\n"}},
+   {"name": "sleep", "answer": {"stdout": "sleep-answer\n", "stderr": "sleep-diagnostic\n", "sleep": 0.05}},
+   {"name": "nonzero", "answer": {"stdout": "nonzero-answer\n", "stderr": "fixture refusal\n", "exit": 23}}
+  ]
+ }
+}
