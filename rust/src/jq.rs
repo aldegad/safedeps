@@ -94,6 +94,19 @@ pub fn obj(pairs: Vec<(&str, J)>) -> J {
     J::Obj(pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
 }
 
+/// Keep the reader's values in jq's spelling, including object key order.
+pub fn from_value(v: &crate::json::Value) -> J {
+    use crate::json::Value;
+    match v {
+        Value::Null => J::Null,
+        Value::Bool(b) => J::Bool(*b),
+        Value::Num(n) => J::Num(n.clone()),
+        Value::Str(s) => arg(s),
+        Value::Arr(a) => J::Arr(a.iter().map(from_value).collect()),
+        Value::Obj(o) => J::Obj(o.iter().map(|(k, v)| (text(k), from_value(v))).collect()),
+    }
+}
+
 fn put_str(out: &mut String, v: &str) {
     out.push('"');
     for c in v.chars() {

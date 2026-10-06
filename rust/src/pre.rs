@@ -68,17 +68,6 @@ fn captured(mut v: W) -> W {
     v
 }
 
-fn to_jq(v: &Value) -> jq::J {
-    match v {
-        Value::Null => jq::J::Null,
-        Value::Bool(b) => jq::J::Bool(*b),
-        Value::Num(n) => jq::J::Num(n.clone()),
-        Value::Str(s) => jq::arg(s),
-        Value::Arr(a) => jq::J::Arr(a.iter().map(to_jq).collect()),
-        Value::Obj(o) => jq::J::Obj(o.iter().map(|(k, v)| (jq::text(k), to_jq(v))).collect()),
-    }
-}
-
 /// `jq -r '<path> // empty'` captured by `$(...)`: a string as its bytes,
 /// null and false as nothing, anything else as jq prints it. A number is
 /// printed as it was written; jq 1.7 respells one written with an exponent.
@@ -86,7 +75,7 @@ fn jq_r(v: Option<&Value>) -> W {
     match v {
         None | Some(Value::Null) | Some(Value::Bool(false)) => W::new(),
         Some(Value::Str(s)) => captured(s.clone()),
-        Some(other) => captured(jq::pretty(&to_jq(other)).into_bytes()),
+        Some(other) => captured(jq::pretty(&jq::from_value(other)).into_bytes()),
     }
 }
 

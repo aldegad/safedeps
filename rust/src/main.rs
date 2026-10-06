@@ -54,6 +54,8 @@ mod inert;
 #[allow(dead_code)]
 mod jq;
 mod json;
+#[allow(dead_code)]
+mod ledger;
 mod lex;
 mod manager;
 mod md5;
@@ -402,6 +404,10 @@ fn main() {
         Some("post") => match read_stdin() {
             Some(input) => post::main(&input),
             None => 2,
+        },
+        Some("ledger") => match read_stdin() {
+            Some(input) => ledger::main(&args[2..], &input),
+            None => 1,
         },
         Some("kat") => cmd_kat(&args[2..]),
         Some("stamp") => cmd_stamp(&args[2..]),
