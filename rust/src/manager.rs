@@ -582,6 +582,23 @@ impl<'r> Reader<'r> {
         Some(out)
     }
 
+    /// safedeps_npm_ask_words_end: a flag appended to these words must stay
+    /// an option in both npm readings, never an operand or option value.
+    pub fn npm_ask_words_end(&mut self, args: &[W]) -> bool {
+        let probe = b"--safedeps-ask-probe".to_vec();
+        let mut words = args.to_vec();
+        words.push(probe.clone());
+        for other in [false, true] {
+            if other && !self.npm_other_applies(args) { break; }
+            let saved = self.npm_options.clone();
+            if other { self.npm_options = self.options_as_other(); }
+            let ok = self.npm_read_args(&words);
+            self.npm_options = saved;
+            if !ok || self.npm_words.contains(&probe) || self.npm_values.iter().any(|(_, _, v)| v == &probe) { return false; }
+        }
+        true
+    }
+
     fn npm_other_applies(&self, words: &[W]) -> bool {
         let t = tables::NPM_OTHER.as_bytes();
         for word in words {
