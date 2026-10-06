@@ -10,6 +10,11 @@ mod closure;
 mod report;
 mod workspaces;
 mod tree;
+mod trace;
+mod snapshot;
+mod process;
+mod journal;
+mod rollback;
 
 /// A measurement entry, fed one JSON request. It calls the same operations
 /// the hook uses; the reference side calls their bash functions.
