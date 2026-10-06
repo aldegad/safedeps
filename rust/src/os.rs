@@ -162,8 +162,6 @@ pub enum WallRole {
     PostTempName,
     BackstopTouch,
     BackstopFallback,
-    // Removed with the remaining post callers when their owner migrates them.
-    PostMigration,
 }
 
 /// One raw reading. Every accessor is pure; retaining this value retains the
@@ -189,12 +187,6 @@ impl WallTime {
 pub fn wall(_role: WallRole) -> WallTime {
     let raw = std::time::SystemTime::now();
     WallTime(raw)
-}
-
-/// Transitional post API. Its callers move to explicit roles in the post
-/// owner's next change; this already delegates to the sole read boundary.
-pub fn now() -> (i64, u32) {
-    wall(WallRole::PostMigration).epoch_parts()
 }
 
 #[cfg(test)]
