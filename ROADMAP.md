@@ -1016,7 +1016,115 @@ Review found more than one release could close, and these were stated rather tha
 
 On the release tree 1d43743, `npm test` ran all 14 batteries with 395 ok and 0 not ok on macOS and on Linux. macOS was an M1 MacBook (macOS 15.6.1, bash 3.2.57, npm 11.19.0): 3876s with two batteries at a time, load 1.5 to 19.3. Linux was the project's Debian 13 VM (bash 5.2.37, node v20.20.2, npm 10.8.2): 2628s, load 0.2 to 15.7, run in a root without the VM's root-owned `/node_modules`, which otherwise changes where npm says a manifest-less directory installs. The commits after 1d43743 change only documentation and one comment. Each change was cross-validated by another member before it merged, and the merged tree was re-read for agreement between README, ARCHITECTURE, SKILL and AGENTS before it shipped. That re-reading found the floor named as v2.17.2 when it is 7d66f8c, and the three downgraded shapes above are what it turned up.
 
-## v2.18.2 — in progress
+## v2.18.1 — records belong to one call, and npm publishes from a tag (shipped)
+
+This release closes four of the eight boundaries v2.18.0 moved here: records tied to the call, failed tool calls, a `||` read as a pipe, and the Codex registry warning. It also moves npm publishing to GitHub Actions. The other four go on to v2.18.2: where a command starts in the lexer, the commands v2.17.2 gave `--ignore-scripts` and v2.18.0 downgrades, an npm spelled in another case inside such a script, and a verb glued to `;`. They are listed at the end of this section, with what else moved.
+
+### Beside an install, a pipe into a shell is asked the same question as alone
+
+v2.18.0 said that beside a visible install a piped install "is refused fail-closed, as it always was with nothing beside it". That was false for several shapes. The check set the visible install aside first, then searched what was left more narrowly than it searches with nothing beside an install. With the visible spec approved, these passed on v2.18.0 with the piped install unchecked, while the same producer alone was denied:
+
+- a manager behind an escape, a format or a `cut`: `pip install requests==2.0.0 && printf '\npip install evil==6.6.6' | sh`, and the `\t`, `%s`, `xpip ... | cut -c2-`, `set -e\n...` and `echo -e` forms;
+- an install that a heredoc carries to the shell by a route other than a piped body: written to a file and then `cat s.sh | sh`, a file descriptor, a group, a subshell, a variable, or `tee`;
+- an install in a comment that the producer reads back through `$BASH_EXECUTION_STRING`, `$ZSH_EXECUTION_STRING` or `ps`;
+- the visible install's own spec, rewritten by `sed` from the exec string.
+
+Repairs in this cycle kept the setting aside and changed the search, and each one left a form through. The last set aside every word the manager's grammar reads as the install's own. It missed `pip install pip==24.0 && echo "${_%%=*} install evil==6.6.6" | sh`, because the shell hands the producer the install's last word as `$_`. A producer can read the command's own text through `$_`, the exec string, `ps` or a file, and the gate cannot list those routes. So nothing is set aside now. Beside a visible install the gate asks the pipe question it asks with nothing beside one, of the same text: the whole command, and each `sh -c`, `eval` and substitution script in it.
+
+The cost falls on commands that mix an install with an unrelated pipe into a shell, such as `npm install x && cat setup.sh | sh`. Such a command is now denied, and the reason says to run the two as separate commands.
+
+**Verified.** `scripts/test/consumer-forms.sh` holds the change. It writes each form beside a visible install with a marker before that install. Every row is checked for its verdict, and then an S1 loop checks it against the same bytes with the visible install switched off by `true `. The rows are the 32 piped installs from before, the ten forms that kept the visible install's verdict and are now denied, each with the reason the text cannot clear it, and 21 rows from the grid's carriers (heredoc carriers, comment carriers, and the visible install's own words): 18 of them passed beside an install and were denied alone, and three were denied on both paths. Six rows keep their verdict: four carry nothing into a shell, and two were denied already. In all, the loop covers 69 rows. On 1bf5748, consumer-forms passed with 67 ok and 0 not ok on macOS (carenine, an M1 Max MacBook, bash 3.2, 846s, load 4.5 at the start and 5.3 at the end) and on Linux (the project's Debian VM, bash 5.2.37, 806s, load 3.2 at the start and 3.8 at the end). On Linux, smoke (61 ok), scan-contract (41) and shell-reading (4) passed too. Two mutations, each run on a copy, turn the battery red. With 68cc2f8's setting aside put back, 56 checks fail: every heredoc and comment row, the five own-word rows the pipe rule denies, the ten flipped rows, and the S1 loop on 28 rows. With the pipe question off beside a visible install, 122 checks fail, the S1 loop on 61 of its 69 rows.
+
+On macOS, smoke (61 ok), scan-contract (41) and shell-reading (4) passed as well. The quick scan-failure census ran 2,971 failing runs there and counted zero weakened, mislabeled, error, after-gate, pending-on-deny, unmarked, unlisted and unstable (load 4.5 at the start and 4.8 at the end). `scripts/measure/scan-verdict-replay.sh aa77fac --random 200 --seed 1001` moved none of 438 verdicts, the false-positive category included. Its control, a scan that blanks nothing, moved 1, so the replay can fail (an M1 MacBook, load 4.7 at the start and 5.2 at the end).
+
+Not closed here: the same producer one level in. When the install's words reach the shell through `$_` or the exec string inside a command substitution, a backquote, a double-quoted `sh -c` or `eval` (`pip install pip==24.0 && x=$(echo "${_%%=*} install evil==6.6.6" | sh)`), the pipe is asked of that payload's own text, which does not hold the visible install's words, and the command passes with no record, beside an install and alone alike. v2.18.0 and v2.17.2 pass it too. So this release does not say that a piped install beside a visible install is always denied. It moves to v2.18.2.
+
+### An install record belongs to one call
+
+v2.18.0 listed this as a boundary: the post hook found the pre-guard's record of an install by the directory the command ran in and the command. A call could therefore speak from another call's record. Two overlapping calls of one command each took the other's record. A call whose post hook never ran left a record that the next call of the same command consumed, and a rollback with no confirmed snapshot restored that older call's snapshot, so an edit made between the two calls was lost. A record left by a pre-guard older than v2.4.1 was read too, and a call it did not match ended the hook with no judgment.
+
+Both engines send the same `tool_use_id` to both hooks of a call, as the backstop's trace entry already used (measured on Claude Code 2.1.288 and 2.1.289 and Codex CLI 0.160.0). The record is now `pending/id-<tool_use_id>.json`, and the post hook of a call that names an id reads that record and no other. A call with a backstop entry reads no record at all. A hook input that names no id keeps the old lookup, and both hooks say so in `advisory.log`. The pre-v2.4.1 records are not read. `lib/gates/call-id.sh` is the one reading of the id for both hooks, and the report oracle reads the id from the hook input in Python, separately.
+
+During an upgrade, a record written by the other version's pre-guard is not read. The call goes to the backstop, which, in a project with no confirmed snapshot, warns and keeps the install. The record waits for the 24-hour sweep.
+
+New e2e rows run two overlapping calls of one command on each engine, a call whose post hook never ran followed by the same command, an entry taken in another directory, and an input with no id. `report-mutations.sh` gained four mutations, each red: every record kept and found by directory and command again; a call whose own record is missing given the one found that way; a pre-v2.4.1 record read again; and an input with no id given the old lookup with nothing said in `advisory.log`.
+
+### A failed call is judged
+
+Claude Code runs `PostToolUse` only after a tool call succeeds. After a Bash call that ran and failed it runs `PostToolUseFailure`, with the same tool name, input and `tool_use_id`, and safedeps did not register it. A failed npm install can still have written the project's tree, and it was never judged; its record stayed behind for the next call of the command. The installer now registers the post hook for both events on Claude Code. Codex runs `PostToolUse` after a failed Bash call too and documents no `PostToolUseFailure`, so its config is unchanged. `--uninstall` and the legacy cleanup reach both events on either engine. The post hook reads neither `tool_response` nor `error`, so a failure is judged like a success. Rerun the installer to pick up the new event.
+
+A call cancelled while it runs still gets neither hook, per Claude Code's hook reference: it is not judged, its record waits for the sweep, and no other call reads it.
+
+### The Codex clause is said of Codex calls only
+
+The registry warning added "(on Codex it cannot)" after "safedeps did not add --ignore-scripts to this install" on either engine. On Claude Code that line follows a command whose own words already keep `ignore-scripts` true, or a rewrite that was downgraded, and the clause then named the wrong engine. The post hook now reads the engine the way the pre-guard does: Codex sends `turn_id`, and Claude Code does not. An e2e row shows the warning on each engine, and a mutation that puts the old wording back is red at the oracle.
+
+### npm releases are published from a tag, by trusted publishing
+
+Publishing v2.18.0 needed the owner's passkey twice, once to log in and once to publish. A pushed `v*` tag now runs `.github/workflows/publish.yml`. Its first job requires the CI run on `main` for the tagged commit, and both of its test jobs, to have succeeded. The second job checks that npm is at least 11.5.1 and that the tag, `package.json` and `bin/safedeps` name the same version. It then runs `npm publish --provenance` with the job's OIDC token and no npm token. Last, it reads the release back from the registry: published by GitHub, with a provenance attestation, and with the same file list as `npm pack --dry-run` of the tag. The job runs in the `npm-publish` environment, which allows deployments only from `v*` tags, because npm's trusted publisher checks only the workflow file and the environment.
+
+The requirements come from npm's trusted publishing documentation: npm 11.5.1 or later, Node 22.14.0 or later, `id-token: write`, and GitHub-hosted runners. Node 22 ships npm 10, so the job uses Node 24. AGENTS.md Release procedure steps 5 and 10 now describe the Linux check and the publish as they are run. Before the first tag, the workflow was checked without publishing anything: actionlint is clean; the CI check passes 2d96377 and stops at bb0787d (red CI) and at a commit with only a pull-request run; and the read-back fails on 2.18.0, which a token published, and passes on packages published by OIDC. The first real run is this release's.
+
+### The gate's cost on macOS grows with the command, not its square
+
+v2.18.0 made the scan linear on both systems, and its "Faster" notes said the rest of the guard was not linear on macOS yet: with the deadline off, an install-bearing command cost 37.5s at 64KB there and 3.6s on Linux, so on macOS such a command was answered `UNDECIDED`. A line profile on an M1 found one awk program behind most of it. The lexer's `cscripts` view, which reads the scripts a command hands to `sh -c` or `eval`, took each word's basename with `sub(/.*\//, ...)`. The macOS awk (BWK) tries that match from every byte and runs to the end of the word from each one. The view cost 0.25s at 8KB, 3.2s at 32KB and 12.9s at 64KB, while the scan view, the only one `scan-cost.sh` timed, stayed at 0.2s. The word itself now answers the test: its basename ends in `sh` exactly when the word does. Five awk programs also built strings a byte at a time with `s = s c`, which BWK does by copying the whole string, so they go through a chunked builder instead. No verdict depends on how the strings are built.
+
+`scripts/measure/scan-cost.sh --reps 3` on an M1 MacBook (macOS 15.6.1, bash 3.2.57), best of three, deadline off, load 2.9 to 3.7, 2026-10-05, v2.18.0 (2d96377) against the fix (4808f69):
+
+| command | 8KB | 32KB | 64KB |
+|---|---|---|---|
+| no install | 0.60s → 0.40s | 4.23s → 1.01s | 15.76s → 1.95s |
+| an install | 2.32s → 1.88s | 10.93s → 4.13s | 38.07s → 8.95s |
+| an install, three readings | 7.29s → 5.39s | 46.0s → 12.9s | 160.8s → 22.5s |
+
+On the project's Debian VM (bash 5.2.37, `mawk`, load 1.0 to 2.1) the same rows were 0.89s → 0.79s and 3.72s → 3.35s at 64KB: Linux was linear before and is unchanged. A 64KB install on macOS is now judged inside the 20s self-budget. A command that reads three times, one where the shells differ, still crosses it near 64KB.
+
+`scan-cost.sh` now times every view of the lexer beside the scan (0.44s, 1.51s and 3.30s on the M1 after the fix), and `scripts/test/self-budget.sh` requires a 64KB install to get its verdict, not `UNDECIDED`, under the default budget. AGENTS.md states the rule for awk in the guard.
+
+Verification: every lexer view in all three readings, before against after, on 1,304 inputs (the committed corpora, 300 seeded random commands and long words around the builder's chunk sizes): 46,944 comparisons, none different, under the macOS awk and under `mawk`. The guard's whole answer and its `advisory.log`, before against after, on the corpora and the long-word shapes up to 9KB: 992 inputs, none different, on macOS; the same comparison of the old tree with itself is also clean. Both comparisons can fail: with the builder broken on a copy, the lexer comparison differs on 54 of 36,144 and the gate comparison shows installs moving from deny to allow. On the M1 and on the VM, self-budget (41 ok), scan-contract (43), shell-reading (4), smoke (61) and consumer-forms (62) passed with no `not ok`, and the quick census on the M1 counted zero weakened, mislabeled, after-gate, pending-on-deny, unmarked and unlisted. The new self-budget row is red on the v2.18.0 tree on the M1 (`UNDECIDED` at 21s) and passes there on Linux, where that tree was already fast.
+
+Not closed here: a command's cost also grows with how many statements it holds, on both systems and before and after this fix. A 1KB `sh -c` script of short function definitions takes 23s on Linux, and 32KB of one-line statements takes 48s. That cost is per statement, not per byte, and moves to v2.18.2.
+
+### A shell inside a compound command fed by a pipe
+
+The pipe check read only the first word after `|`. So a compound command that ran a shell later in its body passed unjudged: `printf 'pip install evil==1.0.0' | { :; sh; }`, `| (cd /tmp; sh)`, `| if true; then sh; fi`, `| while read -r l; do bash; done`, a case arm, `| ! sh` and `| time -p sh`. The check now follows the compound command through its nesting and reads a shell wherever a command can stand as the consumer. Text it cannot cut into words counts as a shell. Twelve compound consumers are held by rows in `scripts/test/consumer-forms.sh`. A shell name used as an argument, or a shell after the compound has closed, is not read as the consumer (48716ae).
+
+### A `||` is not a pipe
+
+v2.18.0 listed this as a boundary. `false || sh -c "npm ci \"x\""` was denied as install text piped into a shell, while the same script after `;` was judged as the install it is. The pipe rule read the second `|` of `||` as a pipe. It now skips both halves, so the command gets the `;` decision, and a real pipe after `||` is still denied (07e14d7).
+
+### The census fails each grep and sed call alone
+
+The scan-failure census failed each awk reading alone, but the greps and seds only all at once, so a site whose failure another site's mark covered still read as handled. It now numbers the grep and sed calls and fails each one alone (`grep-k`, `sed-k`), and it compares the pending record's trace and attribution as well as its directory (e238f13). The full census found two judgment sites. A failed read of the lexer's unterminated-quote flag counted as "the command closes", so an open quote over an install passed where it should have been answered `UNDECIDED`. A failed grep in the npm-install check was not recorded. Both go through `guard_lex_flag_set` and `judge_grep` now, and rows in `scripts/test/scan-contract.sh` fail each of their calls alone (0240b78). The quick census keeps `sed-k` and leaves `grep-k` to the full run.
+
+### Verification
+
+On the release tree 0a49059, `npm test` ran all 14 batteries with 409 ok and 0 not ok on macOS and on Linux. macOS was an M1 Max MacBook (macOS 15.6.1, bash 3.2.57, npm 11.19.0): 3710s. Linux was the project's Debian VM (bash 5.2.37, npm 10.8.2): 3470s. Release step 5 was not run in full on Linux. ShellCheck ran over the step's file list on macOS, not on the Linux machine, and the secret scan there read a one-commit snapshot. CI run 37256605251 ran both over the full history on Ubuntu and macOS, and passed.
+
+The publish workflow published 2.18.1 by trusted publishing. Read back by hand, the version is published by GitHub with an SLSA provenance attestation, and its tarball holds the same 88 files as `npm pack --dry-run` of the tag. The workflow's own read-back step failed after the publish had succeeded: the registry answered 404 for the five minutes it waited (run 37265447356). v2.18.2 fixes the wait. The tag went out before this section had the four parts above; they were added in v2.18.2.
+
+### Moved to v2.18.2
+
+Each of these has its own plan, and the work goes on. They were cut from this release so that it could ship.
+
+- **The inert flag in text the rewrite cannot read.** The commands v2.17.2 gave `--ignore-scripts` and v2.18.0 does not (a `ksh -c` script, a double-quoted shell script or `eval` with an escape or a substitution in it, a heredoc body piped to another command) still get none. Review found that such a text can also hide an npm verb with neither a flag nor a record, and the repair makes one record path for every kind of unread text, checked by a script over 392 shapes. An npm spelled in another case inside such a script goes with them.
+- **A verb glued to `;`.** `npm ci;` and the same spelling in other managers are not read as an install.
+- **Where a command starts in the lexer.** A command glued to a reserved word or `!` through a redirection, zsh's `&!`, and installs inside a function body.
+- **The per-statement cost.** Batching the per-statement questions takes a 400-statement command from 67.7s to 5.2s on Linux; it builds on the lexer change above.
+- **Payloads the shells read as code.** `env -S` strings and zsh glob qualifiers that run code.
+- **An argument with `$(...)` inside double quotes.** The inert flag after such an argument can land inside the substitution.
+- **Pipe consumers outside the list.** Install text piped to a consumer the pipe check does not name (a function, `source`, `dash`, `coproc` and others) passes with no record, alone and beside a visible install alike. A closed rule replaces the list.
+- **The same piped producer one level in.** A pipe into a shell inside a command substitution, a backquote, a double-quoted `sh -c` or `eval` that reads the visible install's words through `$_` or the exec string passes with no record. The proposed rule denies any pipe into a shell in any payload of a command that holds install text.
+
+## v2.18.2 — a command starts and a word ends where the shell says, and the tests run on our machines (shipped)
+
+This release closes what v2.18.1 moved here and was ready: where a command starts in the lexer, a verb glued to an operator, the commands v2.17.2 gave `--ignore-scripts` and v2.18.0 downgraded, the cost that grew with the number of statements, and the publish job's read-back. It also takes the tests off GitHub. They run on our own machines now, Linux is no longer tested, and Windows is measured in WSL1. What is still open moves to v2.18.3 and is listed at the end of this section.
+
+### A verb ends where the shell ends the word
+
+v2.18.0 listed this as a boundary: `npm ci; echo x` was not read as an install, in v2.17.2 either. The recognizers ended a manager or a verb only at a blank or the end of the line. The shell ends a word at `;`, `&`, `|`, `(`, `)`, `<`, `>` and a closing backtick as well, and zsh at a `}` that closes a group. So `npm ci;`, `go get;`, `(npm install)` and zsh's `{ npm ci}` ran with no ledger check and no inert flag. Every install pattern now ends its last word where the lexer ends a word (`SAFEDEPS_G_END`), and which `}` closes a group is the lexer's answer, not the pattern's.
+
+`scripts/measure/glued-verb-reading.sh` writes each manager's installs against each operator and beside a blank, 385 forms (35 installs of 13 managers by 11 operators), and compares the two verdicts. v2.17.2 differs on 62 of them and v2.18.0 on 44 (npm 33, mvn 11). This release differs on none, on macOS and on Linux. `consumer-forms.sh` holds 19 glued denies, 8 npm rewrites and 16 data rows, and `manager-variants.sh` holds 128 commands to their spaced spelling. Five mutations are each red, and a replay of 466 verdicts moved 7, all of them glued installs.
 
 ### Where a command starts is an event, not a byte
 
@@ -1160,7 +1268,7 @@ Such a command is recorded in `advisory.log` as one whose flag nobody read, and 
 
 **Verified.** `smoke` on f9fbeb2, with the release floor recorded for its eight new rows: macOS 62 ok, 0 not ok (278s, load 9.1 to 5.5), Linux 62 ok, 0 not ok (grok VM, bash 5.2.37, 333s, load 3.3 to 4.6). With all three fixes off in a copy, `smoke` fails at the first row that records a script word with no verb it can flag, before the new rows run; the one-control-per-fix invariant runs above show each fix's own forms going red. `lockless-forms` 31 ok, 0 not ok on macOS (537s, load 13.0 to 9.1, on a copy whose pre-guard differs from f9fbeb2's only in a comment) and on Linux (589s, load 1.9 to 2.2). The grid against bb0787d: LOSS 0, GAIN 94, same 198 on 292 forms (M1 MacBook, 794s, load 7.1 to 26.7), and every cell is the one 6625e4d had, so no rewrite moved.
 
-**Boundary.** A command the recognizers do not call an npm install is neither rewritten nor recorded by this path: `npm ci; echo x` (a verb an operator follows at once, with no other install beside it), `bash <<E` with `npm ci` in the body, `bash --norc -c`, `eval --`, `npm --_x ci`, and a newline inside a double-quoted script. v2.17.2 flagged none of them either. They belong to the install grammar and are listed for it.
+**Boundary.** A command the recognizers do not call an npm install is neither rewritten nor recorded by this path: `bash <<E` with `npm ci` in the body, `bash --norc -c`, `eval --` and `npm --_x ci`. v2.17.2 flagged none of them either. They belong to the install grammar and are listed for v2.18.3. Two forms that stood on this list are read in this release, by the changes above: `npm ci; echo x`, a verb an operator follows at once, and a newline inside a double-quoted script. Both are rewritten on the release tree and were not on v2.18.1 (verdict-only probes, an M1 Max MacBook, 2026-10-06).
 
 **Measured.** `scripts/measure/inert-downgrade-grid.sh` judges 292 forms through two trees' pre-guards and runs each rewrite under bash and zsh with a stub npm that records its argv. No package manager runs. Both runs were on an M1 MacBook (macOS, bash 3.2.57), against bb0787d (v2.17.2):
 
@@ -1239,107 +1347,30 @@ The integration tree ends a verb where the lexer ends a word (`SAFEDEPS_G_END`),
 
 **Measured** on M1 MacBooks, macOS 15.6.1, bash 3.2.57 and zsh 5.9. `inert-record-invariant.sh`, every set as committed on 258e348 (3,439 forms): on 258e348, 0 violations, 0 SHORT, 103 denied, and 22 of the 25 data forms recorded as noise (carenine, 17:49 to 18:26, load 12.4 to 12.5). The same sets on 5b5a775: 1,352 violations (carenine, 14:57 to 15:43, load 19.0 to 9.7). The rows `m01` to `m06` came after that run, in a96a62f, whose pre-guard is 258e348's. On a96a62f, `--sets ext` (146 forms) found 0 violations and 0 SHORT, with all six rows recorded (carenine, 19:06 to 19:10, load 18.6 to 30.0). On a copy whose computed-word clause reads noredir (two lines changed), the same set found 4 violations, `m01`, `m02`, `m04` and `m05`, and exited 1; `m03` and `m06` were recorded on both trees (carenine, 19:10 to 19:13, load 30.0 to 19.3). The 22 forms denied on the merge head alone are the integration tree's: 18 pipe text into `sh` or `dash`, and 4 are `UNDECIDED` where the shells read a zsh precommand modifier differently. The 42 forms of the stdin hand-off class (N3 1,418 and N3x 228, buri-20261006-123050) are 21 and 21 on the merge head, as before it (M1, 14:41 to 15:34). Batteries: `scan-contract` 67 ok (df9cefc, M1 14:16 to 14:31, load 26.1 to 5.9), `consumer-forms` 92 ok (258e348, M1 17:51 to 18:30, load 5.0 to 6.9), `smoke` 62 ok (c9b6fc6, M1 18:09 to 18:19, load 8.6 to 18.9), none not ok. The fix in 258e348 changes only the inert record's readers, and scan-contract was not run again after it. Linux was not measured: the owner decided Kuma Studio ships for Windows and macOS only, and a run already started on oracle-brain-vm was stopped when that host was cleaned up.
 
----
+### The tests run on our own machines
 
-## v2.18.1 — records belong to one call, and npm publishes from a tag (shipped)
+GitHub Actions no longer runs the tests (the owner's decision, 2026-10-06). Its macOS runners took two hours for a release before the split and 37 minutes after it, and `ci.yml` is removed. `scripts/ci/run-on-hosts.sh` sends a tree to our macOS hosts, takes a slot in each host's queue, and runs the batteries and the row shards of the large ones there. It then judges the collected logs with `scripts/test/ci-verdict.sh`: every unit once, every shard's rows once, no skipped row outside the allow list, no unit that printed no `ok` line, and no log from another run. `scripts/ci/release-checks.sh` runs what CI's other steps ran: ShellCheck over the same file list, the secret scan, the package contents, and the gitleaks binary against a pinned sha256.
 
-This release closes four of the eight boundaries v2.18.0 moved here: records tied to the call, failed tool calls, a `||` read as a pipe, and the Codex registry warning. It also moves npm publishing to GitHub Actions. The other four go on to v2.18.2: where a command starts in the lexer, the commands v2.17.2 gave `--ignore-scripts` and v2.18.0 downgrades, an npm spelled in another case inside such a script, and a verb glued to `;`. They are listed at the end of this section, with what else moved.
+Measured on 2026-10-06, both green: the development set in 901s on two M1 MacBooks, and the release set in 3010s on one. Nine mutations of the collected logs are each red. So are the five paths review found, each on a copy with the fix reverted: a lowercase TAP skip, an empty log with exit 0, a run directory whose name collides, a unit that outlives its run, and a gitleaks binary nobody hashed.
 
-### Beside an install, a pipe into a shell is asked the same question as alone
+Linux is no longer tested, also by the owner's decision: Kuma Studio, which this gate serves, ships for macOS and Windows.
 
-v2.18.0 said that beside a visible install a piped install "is refused fail-closed, as it always was with nothing beside it". That was false for several shapes. The check set the visible install aside first, then searched what was left more narrowly than it searches with nothing beside an install. With the visible spec approved, these passed on v2.18.0 with the piped install unchecked, while the same producer alone was denied:
+The publish job no longer waits for a CI run, because there is none; the tag is pushed after the release's own runs. Its read-back now asks the version document and the package document with a fresh query string and no-cache, for up to 20 minutes, and a failed read-back says that the version was published. v2.18.1's read-back timed out after a publish that had succeeded.
 
-- a manager behind an escape, a format or a `cut`: `pip install requests==2.0.0 && printf '\npip install evil==6.6.6' | sh`, and the `\t`, `%s`, `xpip ... | cut -c2-`, `set -e\n...` and `echo -e` forms;
-- an install that a heredoc carries to the shell by a route other than a piped body: written to a file and then `cat s.sh | sh`, a file descriptor, a group, a subshell, a variable, or `tee`;
-- an install in a comment that the producer reads back through `$BASH_EXECUTION_STRING`, `$ZSH_EXECUTION_STRING` or `ps`;
-- the visible install's own spec, rewritten by `sed` from the exec string.
+### Moved to v2.18.3
 
-Repairs in this cycle kept the setting aside and changed the search, and each one left a form through. The last set aside every word the manager's grammar reads as the install's own. It missed `pip install pip==24.0 && echo "${_%%=*} install evil==6.6.6" | sh`, because the shell hands the producer the install's last word as `$_`. A producer can read the command's own text through `$_`, the exec string, `ps` or a file, and the gate cannot list those routes. So nothing is set aside now. Beside a visible install the gate asks the pipe question it asks with nothing beside one, of the same text: the whole command, and each `sh -c`, `eval` and substitution script in it.
-
-The cost falls on commands that mix an install with an unrelated pipe into a shell, such as `npm install x && cat setup.sh | sh`. Such a command is now denied, and the reason says to run the two as separate commands.
-
-**Verified.** `scripts/test/consumer-forms.sh` holds the change. It writes each form beside a visible install with a marker before that install. Every row is checked for its verdict, and then an S1 loop checks it against the same bytes with the visible install switched off by `true `. The rows are the 32 piped installs from before, the ten forms that kept the visible install's verdict and are now denied, each with the reason the text cannot clear it, and 21 rows from the grid's carriers (heredoc carriers, comment carriers, and the visible install's own words): 18 of them passed beside an install and were denied alone, and three were denied on both paths. Six rows keep their verdict: four carry nothing into a shell, and two were denied already. In all, the loop covers 69 rows. On 1bf5748, consumer-forms passed with 67 ok and 0 not ok on macOS (carenine, an M1 Max MacBook, bash 3.2, 846s, load 4.5 at the start and 5.3 at the end) and on Linux (the project's Debian VM, bash 5.2.37, 806s, load 3.2 at the start and 3.8 at the end). On Linux, smoke (61 ok), scan-contract (41) and shell-reading (4) passed too. Two mutations, each run on a copy, turn the battery red. With 68cc2f8's setting aside put back, 56 checks fail: every heredoc and comment row, the five own-word rows the pipe rule denies, the ten flipped rows, and the S1 loop on 28 rows. With the pipe question off beside a visible install, 122 checks fail, the S1 loop on 61 of its 69 rows.
-
-On macOS, smoke (61 ok), scan-contract (41) and shell-reading (4) passed as well. The quick scan-failure census ran 2,971 failing runs there and counted zero weakened, mislabeled, error, after-gate, pending-on-deny, unmarked, unlisted and unstable (load 4.5 at the start and 4.8 at the end). `scripts/measure/scan-verdict-replay.sh aa77fac --random 200 --seed 1001` moved none of 438 verdicts, the false-positive category included. Its control, a scan that blanks nothing, moved 1, so the replay can fail (an M1 MacBook, load 4.7 at the start and 5.2 at the end).
-
-Not closed here: the same producer one level in. When the install's words reach the shell through `$_` or the exec string inside a command substitution, a backquote, a double-quoted `sh -c` or `eval` (`pip install pip==24.0 && x=$(echo "${_%%=*} install evil==6.6.6" | sh)`), the pipe is asked of that payload's own text, which does not hold the visible install's words, and the command passes with no record, beside an install and alone alike. v2.18.0 and v2.17.2 pass it too. So this release does not say that a piped install beside a visible install is always denied. It moves to v2.18.2.
-
-### An install record belongs to one call
-
-v2.18.0 listed this as a boundary: the post hook found the pre-guard's record of an install by the directory the command ran in and the command. A call could therefore speak from another call's record. Two overlapping calls of one command each took the other's record. A call whose post hook never ran left a record that the next call of the same command consumed, and a rollback with no confirmed snapshot restored that older call's snapshot, so an edit made between the two calls was lost. A record left by a pre-guard older than v2.4.1 was read too, and a call it did not match ended the hook with no judgment.
-
-Both engines send the same `tool_use_id` to both hooks of a call, as the backstop's trace entry already used (measured on Claude Code 2.1.288 and 2.1.289 and Codex CLI 0.160.0). The record is now `pending/id-<tool_use_id>.json`, and the post hook of a call that names an id reads that record and no other. A call with a backstop entry reads no record at all. A hook input that names no id keeps the old lookup, and both hooks say so in `advisory.log`. The pre-v2.4.1 records are not read. `lib/gates/call-id.sh` is the one reading of the id for both hooks, and the report oracle reads the id from the hook input in Python, separately.
-
-During an upgrade, a record written by the other version's pre-guard is not read. The call goes to the backstop, which, in a project with no confirmed snapshot, warns and keeps the install. The record waits for the 24-hour sweep.
-
-New e2e rows run two overlapping calls of one command on each engine, a call whose post hook never ran followed by the same command, an entry taken in another directory, and an input with no id. `report-mutations.sh` gained four mutations, each red: every record kept and found by directory and command again; a call whose own record is missing given the one found that way; a pre-v2.4.1 record read again; and an input with no id given the old lookup with nothing said in `advisory.log`.
-
-### A failed call is judged
-
-Claude Code runs `PostToolUse` only after a tool call succeeds. After a Bash call that ran and failed it runs `PostToolUseFailure`, with the same tool name, input and `tool_use_id`, and safedeps did not register it. A failed npm install can still have written the project's tree, and it was never judged; its record stayed behind for the next call of the command. The installer now registers the post hook for both events on Claude Code. Codex runs `PostToolUse` after a failed Bash call too and documents no `PostToolUseFailure`, so its config is unchanged. `--uninstall` and the legacy cleanup reach both events on either engine. The post hook reads neither `tool_response` nor `error`, so a failure is judged like a success. Rerun the installer to pick up the new event.
-
-A call cancelled while it runs still gets neither hook, per Claude Code's hook reference: it is not judged, its record waits for the sweep, and no other call reads it.
-
-### The Codex clause is said of Codex calls only
-
-The registry warning added "(on Codex it cannot)" after "safedeps did not add --ignore-scripts to this install" on either engine. On Claude Code that line follows a command whose own words already keep `ignore-scripts` true, or a rewrite that was downgraded, and the clause then named the wrong engine. The post hook now reads the engine the way the pre-guard does: Codex sends `turn_id`, and Claude Code does not. An e2e row shows the warning on each engine, and a mutation that puts the old wording back is red at the oracle.
-
-### npm releases are published from a tag, by trusted publishing
-
-Publishing v2.18.0 needed the owner's passkey twice, once to log in and once to publish. A pushed `v*` tag now runs `.github/workflows/publish.yml`. Its first job requires the CI run on `main` for the tagged commit, and both of its test jobs, to have succeeded. The second job checks that npm is at least 11.5.1 and that the tag, `package.json` and `bin/safedeps` name the same version. It then runs `npm publish --provenance` with the job's OIDC token and no npm token. Last, it reads the release back from the registry: published by GitHub, with a provenance attestation, and with the same file list as `npm pack --dry-run` of the tag. The job runs in the `npm-publish` environment, which allows deployments only from `v*` tags, because npm's trusted publisher checks only the workflow file and the environment.
-
-The requirements come from npm's trusted publishing documentation: npm 11.5.1 or later, Node 22.14.0 or later, `id-token: write`, and GitHub-hosted runners. Node 22 ships npm 10, so the job uses Node 24. AGENTS.md Release procedure steps 5 and 10 now describe the Linux check and the publish as they are run. Before the first tag, the workflow was checked without publishing anything: actionlint is clean; the CI check passes 2d96377 and stops at bb0787d (red CI) and at a commit with only a pull-request run; and the read-back fails on 2.18.0, which a token published, and passes on packages published by OIDC. The first real run is this release's.
-
-### The gate's cost on macOS grows with the command, not its square
-
-v2.18.0 made the scan linear on both systems, and its "Faster" notes said the rest of the guard was not linear on macOS yet: with the deadline off, an install-bearing command cost 37.5s at 64KB there and 3.6s on Linux, so on macOS such a command was answered `UNDECIDED`. A line profile on an M1 found one awk program behind most of it. The lexer's `cscripts` view, which reads the scripts a command hands to `sh -c` or `eval`, took each word's basename with `sub(/.*\//, ...)`. The macOS awk (BWK) tries that match from every byte and runs to the end of the word from each one. The view cost 0.25s at 8KB, 3.2s at 32KB and 12.9s at 64KB, while the scan view, the only one `scan-cost.sh` timed, stayed at 0.2s. The word itself now answers the test: its basename ends in `sh` exactly when the word does. Five awk programs also built strings a byte at a time with `s = s c`, which BWK does by copying the whole string, so they go through a chunked builder instead. No verdict depends on how the strings are built.
-
-`scripts/measure/scan-cost.sh --reps 3` on an M1 MacBook (macOS 15.6.1, bash 3.2.57), best of three, deadline off, load 2.9 to 3.7, 2026-10-05, v2.18.0 (2d96377) against the fix (4808f69):
-
-| command | 8KB | 32KB | 64KB |
-|---|---|---|---|
-| no install | 0.60s → 0.40s | 4.23s → 1.01s | 15.76s → 1.95s |
-| an install | 2.32s → 1.88s | 10.93s → 4.13s | 38.07s → 8.95s |
-| an install, three readings | 7.29s → 5.39s | 46.0s → 12.9s | 160.8s → 22.5s |
-
-On the project's Debian VM (bash 5.2.37, `mawk`, load 1.0 to 2.1) the same rows were 0.89s → 0.79s and 3.72s → 3.35s at 64KB: Linux was linear before and is unchanged. A 64KB install on macOS is now judged inside the 20s self-budget. A command that reads three times, one where the shells differ, still crosses it near 64KB.
-
-`scan-cost.sh` now times every view of the lexer beside the scan (0.44s, 1.51s and 3.30s on the M1 after the fix), and `scripts/test/self-budget.sh` requires a 64KB install to get its verdict, not `UNDECIDED`, under the default budget. AGENTS.md states the rule for awk in the guard.
-
-Verification: every lexer view in all three readings, before against after, on 1,304 inputs (the committed corpora, 300 seeded random commands and long words around the builder's chunk sizes): 46,944 comparisons, none different, under the macOS awk and under `mawk`. The guard's whole answer and its `advisory.log`, before against after, on the corpora and the long-word shapes up to 9KB: 992 inputs, none different, on macOS; the same comparison of the old tree with itself is also clean. Both comparisons can fail: with the builder broken on a copy, the lexer comparison differs on 54 of 36,144 and the gate comparison shows installs moving from deny to allow. On the M1 and on the VM, self-budget (41 ok), scan-contract (43), shell-reading (4), smoke (61) and consumer-forms (62) passed with no `not ok`, and the quick census on the M1 counted zero weakened, mislabeled, after-gate, pending-on-deny, unmarked and unlisted. The new self-budget row is red on the v2.18.0 tree on the M1 (`UNDECIDED` at 21s) and passes there on Linux, where that tree was already fast.
-
-Not closed here: a command's cost also grows with how many statements it holds, on both systems and before and after this fix. A 1KB `sh -c` script of short function definitions takes 23s on Linux, and 32KB of one-line statements takes 48s. That cost is per statement, not per byte, and moves to v2.18.2.
-
-### A shell inside a compound command fed by a pipe
-
-The pipe check read only the first word after `|`. So a compound command that ran a shell later in its body passed unjudged: `printf 'pip install evil==1.0.0' | { :; sh; }`, `| (cd /tmp; sh)`, `| if true; then sh; fi`, `| while read -r l; do bash; done`, a case arm, `| ! sh` and `| time -p sh`. The check now follows the compound command through its nesting and reads a shell wherever a command can stand as the consumer. Text it cannot cut into words counts as a shell. Twelve compound consumers are held by rows in `scripts/test/consumer-forms.sh`. A shell name used as an argument, or a shell after the compound has closed, is not read as the consumer (48716ae).
-
-### A `||` is not a pipe
-
-v2.18.0 listed this as a boundary. `false || sh -c "npm ci \"x\""` was denied as install text piped into a shell, while the same script after `;` was judged as the install it is. The pipe rule read the second `|` of `||` as a pipe. It now skips both halves, so the command gets the `;` decision, and a real pipe after `||` is still denied (07e14d7).
-
-### The census fails each grep and sed call alone
-
-The scan-failure census failed each awk reading alone, but the greps and seds only all at once, so a site whose failure another site's mark covered still read as handled. It now numbers the grep and sed calls and fails each one alone (`grep-k`, `sed-k`), and it compares the pending record's trace and attribution as well as its directory (e238f13). The full census found two judgment sites. A failed read of the lexer's unterminated-quote flag counted as "the command closes", so an open quote over an install passed where it should have been answered `UNDECIDED`. A failed grep in the npm-install check was not recorded. Both go through `guard_lex_flag_set` and `judge_grep` now, and rows in `scripts/test/scan-contract.sh` fail each of their calls alone (0240b78). The quick census keeps `sed-k` and leaves `grep-k` to the full run.
-
-### Verification
-
-On the release tree 0a49059, `npm test` ran all 14 batteries with 409 ok and 0 not ok on macOS and on Linux. macOS was an M1 Max MacBook (macOS 15.6.1, bash 3.2.57, npm 11.19.0): 3710s. Linux was the project's Debian VM (bash 5.2.37, npm 10.8.2): 3470s. Release step 5 was not run in full on Linux. ShellCheck ran over the step's file list on macOS, not on the Linux machine, and the secret scan there read a one-commit snapshot. CI run 37256605251 ran both over the full history on Ubuntu and macOS, and passed.
-
-The publish workflow published 2.18.1 by trusted publishing. Read back by hand, the version is published by GitHub with an SLSA provenance attestation, and its tarball holds the same 88 files as `npm pack --dry-run` of the tag. The workflow's own read-back step failed after the publish had succeeded: the registry answered 404 for the five minutes it waited (run 37265447356). v2.18.2 fixes the wait. The tag went out before this section had the four parts above; they were added in v2.18.2.
-
-### Moved to v2.18.2
-
-Each of these has its own plan, and the work goes on. They were cut from this release so that it could ship.
-
-- **The inert flag in text the rewrite cannot read.** The commands v2.17.2 gave `--ignore-scripts` and v2.18.0 does not (a `ksh -c` script, a double-quoted shell script or `eval` with an escape or a substitution in it, a heredoc body piped to another command) still get none. Review found that such a text can also hide an npm verb with neither a flag nor a record, and the repair makes one record path for every kind of unread text, checked by a script over 392 shapes. An npm spelled in another case inside such a script goes with them.
-- **A verb glued to `;`.** `npm ci;` and the same spelling in other managers are not read as an install.
-- **Where a command starts in the lexer.** A command glued to a reserved word or `!` through a redirection, zsh's `&!`, and installs inside a function body.
-- **The per-statement cost.** Batching the per-statement questions takes a 400-statement command from 67.7s to 5.2s on Linux; it builds on the lexer change above.
-- **Payloads the shells read as code.** `env -S` strings and zsh glob qualifiers that run code.
+- **The judgment's cost.** One guard call starts about 93 external processes, and that is nearly all of its 0.6 to 0.9 CPU seconds. v2.18.3 moves the judgment's core to Rust, with this release's bash as the reference it is compared against.
+- **A script handed on through a shell's standard input.** A here-string or heredoc body that hands a script on to `sh -c`, `bash -c` or `eval`, where the npm statement inside builds its verb or its command word at run time (a `bash <<<` script that runs `sh -c` with `npm ${u:-ci} x` inside), runs with no flag and no record: 42 generated forms, on v2.17.2 and v2.18.1 as well. It starts with a design judgment, not another shape fix.
+- **A `}` glued behind a quoted script word.** `{ sh -c 'npm ci'}` runs `npm ci` in zsh and passes with nothing recorded, on v2.18.1 as well.
+- **Installs the recognizers do not read.** A heredoc fed to a shell's standard input (`bash <<E`), `bash --norc -c`, `eval --`, `npm --_x ci`, and a command word written with quotes or a backslash (`"npm" ci x`).
+- **Pipe consumers outside the list, and the same producer one level in.** Unchanged from v2.18.1's list.
+- **Payloads the shells read as code.** `env -S` strings and zsh glob qualifiers.
 - **An argument with `$(...)` inside double quotes.** The inert flag after such an argument can land inside the substitution.
-- **Pipe consumers outside the list.** Install text piped to a consumer the pipe check does not name (a function, `source`, `dash`, `coproc` and others) passes with no record, alone and beside a visible install alike. A closed rule replaces the list.
-- **The same piped producer one level in.** A pipe into a shell inside a command substitution, a backquote, a double-quoted `sh -c` or `eval` that reads the visible install's words through `$_` or the exec string passes with no record. The proposed rule denies any pipe into a shell in any payload of a command that holds install text.
+- **Noise in the inert record.** A word after a parenthesis inside quotes is read as a command word, so harmless commands such as `git commit -m "fix: handle (null) values!"` beside an install are recorded.
+- **A small command that outlasts the hook.** The guard's own deadline runs only for commands of 4KB and more. One measurement put a 2.6KB command of a hundred substitutions past 30s, and another put a similar one at 9s; the two are not reconciled yet.
+- **`run-all.sh` does not judge skipped rows.** The host runner's verdict does. A run judged by `run-all.sh` alone is green on a skipped row, so its log is read for them.
+
+---
 
 ## v3 (future)
 
