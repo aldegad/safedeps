@@ -6,6 +6,7 @@ I/O faults use permissions; this builds copies for native delay, clock
 precision, and process query failure. It does not claim a Rust pre result.
 """
 import argparse
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -28,13 +29,9 @@ def execute(argv,name,env=None):
     (run/(name+'.rc')).write_text(str(r.returncode)+'\n')
     return r.returncode
 
-edits={
-    'walk':('rust/src/post/trace.rs','    let mut todo=vec![(root.to_path_buf(),0)];',
-            '    if until.is_some(){std::thread::sleep(Duration::from_millis(1100));}\n    let mut todo=vec![(root.to_path_buf(),0)];'),
-    'coarse':('rust/src/post/trace.rs','if (m.ctime(),m.ctime_nsec())>(b.mtime(),b.mtime_nsec())',
-              'if (m.ctime(),0)>(b.mtime(),b.mtime_nsec())'),
-    'owner':('rust/src/post/process.rs','unsafe{proc_pidinfo(pid,3,1,&mut b as *mut _ as *mut _,size)}','0'),
-}
+spec=importlib.util.spec_from_file_location('fault_edits',Path(__file__).with_name('core-post-native-injections.py'))
+fault_edits=importlib.util.module_from_spec(spec);spec.loader.exec_module(fault_edits)
+edits=fault_edits.EDITS
 cores={}
 for name,(relative,old,new) in edits.items():
     target=run/name;target.mkdir();subprocess.run(['tar','xf',str(archive),'-C',str(target)],check=True)

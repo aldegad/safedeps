@@ -89,7 +89,7 @@ def seed(d,kind):
     (snapshot/'pre_package-lock.json').write_text(json.dumps(lock)+'\n')
     (snapshot/'pre_monitored_files.list').write_text('package-lock.json\npackage.json\n')
     (snapshot/'pre_packages.list').touch();(snapshot/'pre_bins.list').touch()
-    command='grep -n "npm install" README.md' if kind=='trace-untraced' else 'npm install fixture-item'
+    command='grep -n "npm install" README.md' if kind in ['trace-untraced','trace-deadline'] else 'npm install fixture-item'
     record=dict(record=2,snapshot_id='pre',tool_use_id='fault-call',project_dir=str(project),
                 ignore_scripts_injected=False,command=command,updated_command=command)
     (snapshot/'pre_meta.json').write_text(json.dumps(record)+'\n')
@@ -209,13 +209,14 @@ with tempfile.TemporaryDirectory(prefix='core-post-faults.') as tmp:
     allowed=kinds if not a.only else ['unread-meta','restore-readonly','restore-absent','remove-readonly',
         'restore-link','confirm-link','confirm-clean','pending-gone','pending-empty','pending-object',
         'pending-nodir','pending-hash','pending-fallback','pending-legacy','backstop-rollback',
-        'trace-untraced','trace-lock','trace-link','trace-tree','registry-claude']
+        'trace-untraced','trace-lock','trace-link','trace-tree','trace-deadline','registry-claude']
     if any(kind not in allowed for kind in kinds):p.error('unknown fixture')
     for kind in kinds:
         if a.only and kind not in a.only.split(','):continue
         for side in (['bash','rust'] if a.side=='both' else [a.side]):
             home,project=seed(d,kind)
             env=dict(os.environ,ROOT=str(root),CORE=core,BOX=str(d),SAFEDEPS_HOME=str(home),LC_ALL='C',FAULT=kind,SIDE=side)
+            if kind=='trace-deadline':env['SAFEDEPS_BACKSTOP_WALK_SECONDS']='1'
             if (d/'bin').is_dir():env['PATH']=str(d/'bin')+os.pathsep+env['PATH']
             try:
                 result=subprocess.run(['bash',str(script)],cwd=d/'hook-cwd',env=env,capture_output=True,text=True,timeout=30)
@@ -235,6 +236,9 @@ with tempfile.TemporaryDirectory(prefix='core-post-faults.') as tmp:
                 elif kind=='registry-claude':
                     reached='this install fetched packages from a registry that is not the public npm registry (' in message and '(on Codex it cannot)' not in message
                 elif kind=='trace-untraced':reached=not message and 'BACKSTOP UNTRACED:' in log
+                elif kind=='trace-deadline':
+                    reached=('A rollback ran.' in message and not (project/'node_modules').exists()
+                             and f'the walk of {project}/node_modules did not finish within 1s' in log)
                 elif kind.startswith('trace-'):reached='A rollback ran.' in message and 'BACKSTOP traced:' in log
                 elif kind in ['pending-gone','pending-empty','pending-object']:
                     clause={'pending-gone':'is not a file; this hook set the record aside',
@@ -267,6 +271,7 @@ with tempfile.TemporaryDirectory(prefix='core-post-faults.') as tmp:
                 assertion={'trace-untraced':'a grep right after a pull outside the gate: the backstop says nothing',
                            'trace-lock':'an install the pre-guard did not read: the backstop rolls back',
                            'trace-tree':'a write only into node_modules is a trace',
+                           'trace-deadline':'a walk past its deadline: the backstop rolls back',
                            'trace-link':'a write through a linked lockfile is a trace'}.get(kind)
                 if a.expect_assertion:
                     passed=hook_rc==0 and result.returncode==0 and not reached and a.expect_assertion==assertion and journal_closed
