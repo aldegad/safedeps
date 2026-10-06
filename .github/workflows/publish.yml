@@ -40,8 +40,10 @@ jobs:
           persist-credentials: false
 
       # The toolchain is pinned here and nowhere else. rustup is on the
-      # runner image; this fetches the compiler and the three targets'
-      # standard libraries, and nothing after this step fetches anything.
+      # runner image (actions/runner-images, macos-15-arm64-Readme.md lists
+      # Rustup 1.29.0 in image 20260907); this fetches the compiler and the
+      # three targets' standard libraries, and nothing after this step
+      # fetches anything.
       - name: Toolchain
         run: |
           set -euo pipefail
@@ -64,9 +66,10 @@ jobs:
           [ "$(wc -l < native.sha256 | tr -d ' ')" = 3 ]
 
       # build-core.sh ran the arm64 binary. The x64 one runs under Rosetta
-      # where the runner has it; where it does not, that is said, and the
-      # binary ships built and not run. The linux binary is run by the
-      # publish job, which is on Linux.
+      # where the runner has it; the image's readme does not list Rosetta,
+      # and where it is missing that is said, and the binary ships built and
+      # not run. The linux binary is run by the publish job, which is on
+      # Linux.
       - name: Run the darwin-x64 binary
         run: |
           set -euo pipefail
