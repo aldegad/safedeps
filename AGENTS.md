@@ -182,7 +182,9 @@ any step is open.
      the release checks, `scripts/ci/release-checks.sh` in a clone with its
      full history: the ShellCheck file list, `./bin/safedeps scan secrets
      --repo`, and the package contents (zero runtime dependencies, `npm pack
-     --dry-run`).
+     --dry-run`). The secret scan runs the gitleaks on PATH only when that
+     binary's sha256 is the pinned release binary's; `--install-gitleaks DIR`
+     installs the pinned release where it is not.
    - **Windows:** `npm run test:release` in WSL1 on the home Windows PC, the
      environment Kuma Studio's Windows build runs in. Until plan
      `safedeps/wsl1-environment-measure` has measured that environment, a WSL1
