@@ -2844,6 +2844,9 @@ expect_prescription 'nuget dotnet-ef@8.0.0;' 'dotnet tool install dotnet-ef --ve
 expect_prescription 'maven g:a@1.0;' 'mvn -D artifact=g:a:1.0 dependency:get'
 expect_prescription 'pypi evil@1.0.0;' 'pip install --ta dir evil==1.0.0'
 expect_prescription 'pypi evil@1.0.0;' 'pip --cache-dir x install evil==1.0.0'
+# A long option written as its one abbreviation, before the command: the guard
+# ended on an unset BASH_REMATCH[2] here and the shim reported a crash.
+expect_prescription 'pypi evil@1.0.0;' 'pip --cache x install evil==1.0.0'
 expect_prescription 'pypi evil@1.0.0;' 'uv --directory x add evil==1.0.0'
 expect_prescription 'go example.com/m@v1.0.0;' 'go run --C x example.com/m@v1.0.0'
 # npm 10.8.2 does not define --min-release-age, so to it the word after the

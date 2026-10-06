@@ -1101,7 +1101,11 @@ safedeps_manager_long_option() {
   [[ "${SAFEDEPS_G_LONG_OPTIONS}" =~ ${re} ]] && return 0
   re=" ${family}/${scopes}:(${SAFEDEPS_G_ERE}[^ ]*)"
   [[ "${SAFEDEPS_G_LONG_OPTIONS}" =~ ${re} ]] || return 0
-  first="${BASH_REMATCH[2]}"
+  # With no command path the pattern has one group, and bash leaves
+  # BASH_REMATCH[2] unset: read bare under `set -u`, it ended the guard, and
+  # the entry shim denied `pip --cache x install evil==1.0.0` as a crashed
+  # checkout (v2.18.0 through v2.18.1; found by the Rust core's comparison).
+  first="${BASH_REMATCH[2]:-}"
   [[ -n "${first}" ]] || first="${BASH_REMATCH[1]}"
   re=" ${family}/${scopes}:${SAFEDEPS_G_ERE}[^ ]* (.* )?${family}/${scopes}:${SAFEDEPS_G_ERE}[^ ]*"
   [[ "${SAFEDEPS_G_LONG_OPTIONS}" =~ ${re} ]] && return 0
