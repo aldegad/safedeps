@@ -8,7 +8,7 @@
 //! or an end, and nothing here reads text nested in this one: a payload is a
 //! text of its own, read by asking this of it (`inert.rs`).
 
-use crate::core::Run;
+use crate::core::{Core, Run};
 use crate::ere::Regex;
 use crate::grammar;
 use crate::manager::{self, Reader};
@@ -55,6 +55,85 @@ pub struct Install {
     /// The offset the read flag goes after.
     pub place: Option<usize>,
     pub note: Note,
+    /// Which statement of the text this is (its place in `Run::pieces`).
+    pub piece: usize,
+    /// Where each word of the statement ends in the text, the command word
+    /// first.
+    pub ends: Vec<usize>,
+    /// The words as npm is asked about them, `npm` first.
+    words: Vec<W>,
+    /// A word of the statement is one the shell decides at run time.
+    dynamic: bool,
+}
+
+/// What npm makes of the statement with a flag inserted after one of its
+/// words, beside the statement as written.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Check {
+    /// npm reads the flag as the option, and everything else as before.
+    Holds,
+    /// It does not: the flag stands after a `--` and is an operand, an option
+    /// before it takes it as its value, or it takes the word after it (`true`,
+    /// `false`) as its own value.
+    Changes,
+    /// The statement holds a word the shell decides at run time, or a reading
+    /// does not close: nobody can say.
+    Unread,
+}
+
+impl Install {
+    /// `Check` for a flag inserted after word `k` of the statement (0 is the
+    /// command word), asked of npm's tables for the whole statement, the
+    /// words after a `--` included.
+    pub fn flag_after(&self, core: &Core, k: usize) -> Check {
+        if self.dynamic || k >= self.words.len() {
+            return Check::Unread;
+        }
+        let mut rd = Reader::new(&core.mrx);
+        let Some(orig) = rd.npm_inert_reading(&self.words[1..]) else { return Check::Unread };
+        let mut a2: Vec<W> = self.words[1..=k].to_vec();
+        a2.push(FLAG_WORD.to_vec());
+        a2.extend_from_slice(&self.words[k + 1..]);
+        match rd.npm_inert_reading(&a2) {
+            None => Check::Unread,
+            Some(r2) => {
+                if r2.len() == orig.len() && r2.iter().zip(orig.iter()).all(|(a, b)| a.1 == b.1) {
+                    Check::Holds
+                } else {
+                    Check::Changes
+                }
+            }
+        }
+    }
+}
+
+const FLAG_WORD: &[u8] = b"--ignore-scripts";
+
+/// Whether the flag appended to `text` is read as one more word, the last,
+/// of statement `piece` of `text`, with every other statement and every other
+/// word as they were. None on a failed reading.
+pub fn appended_is_last_word(run: &mut Run, text: &[u8], piece: usize) -> Option<bool> {
+    let (before, _) = run.pieces(text)?;
+    let mut t2 = text.to_vec();
+    t2.push(b' ');
+    t2.extend_from_slice(FLAG_WORD);
+    let (after, _) = run.pieces(&t2)?;
+    if before.unreadable || after.unreadable || before.pieces.len() != after.pieces.len() {
+        return Some(false);
+    }
+    for (k, (a, b)) in before.pieces.iter().zip(after.pieces.iter()).enumerate() {
+        if k != piece {
+            if a.words != b.words {
+                return Some(false);
+            }
+            continue;
+        }
+        let Some((last, head)) = b.words.split_last() else { return Some(false) };
+        if head != a.words.as_slice() || last.value != FLAG_WORD || last.end != t2.len() || last.start != text.len() + 1 {
+            return Some(false);
+        }
+    }
+    Some(piece < before.pieces.len())
 }
 
 /// The command word names npm: no blank in its value, and its last part is
@@ -93,7 +172,7 @@ pub fn installs(run: &mut Run, rx: &Rx, text: &[u8]) -> Option<Vec<Install>> {
     let unreadable = pieces.unreadable;
     let mut flat: Option<W> = None;
     let mut out = Vec::new();
-    for piece in &pieces.pieces {
+    for (pi, piece) in pieces.pieces.iter().enumerate() {
         let words = &piece.words;
         // The statement's command word, and nothing further on.
         let Some(head) = words.first() else { continue };
@@ -121,17 +200,27 @@ pub fn installs(run: &mut Run, rx: &Rx, text: &[u8]) -> Option<Vec<Install>> {
                 None
             };
             let verb_end = words[v].end;
-            let mut install = Install { npm, verb_end, place: None, note: Note::Floor };
-            if ends {
-                out.push(install);
-                continue;
-            }
             if flat.is_none() {
                 flat = Some(run.lex(text, "flat")?);
             }
             let fl = flat.as_ref().unwrap();
             let span = &fl[head.start.min(fl.len())..last.end.min(fl.len())];
-            if unreadable || shell_expands(&ws[..cut], span) {
+            let dynamic = unreadable || shell_expands(&ws[..cut], span);
+            let mut install = Install {
+                npm,
+                verb_end,
+                place: None,
+                note: Note::Floor,
+                piece: pi,
+                ends: words.iter().map(|w| w.end).collect(),
+                words: ws.clone(),
+                dynamic,
+            };
+            if ends {
+                out.push(install);
+                continue;
+            }
+            if dynamic {
                 install.note = Note::Unverified;
                 install.place = Some(last.end);
                 out.push(install);

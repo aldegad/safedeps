@@ -67,6 +67,44 @@
 //! offset of a payload's own text becomes an offset of the command without
 //! being read back.
 //!
+//! # Duties that collide
+//!
+//! Three things are owed at once: the release's bytes (the floor), the
+//! arguments and the data of the command as written, and a flag npm reads as
+//! the option. They cannot always be had together. `echo npm ci x` beside an
+//! install is the plain case: the release wrote its flag into what `echo`
+//! prints, and no rewrite both keeps that flag and prints what the command
+//! printed. Where they cannot, the command is not rewritten at all: the
+//! reading's value is `collision <kind>`, and the guard answers `UNDECIDED`
+//! with that as a reason of its own. The floor is not dropped to let the
+//! command run, and a record does not stand in for a flag.
+//!
+//! A flag the release owes is one the reader can answer for where it stands
+//! right after a word of an install the reader read (in the command, or read
+//! back through every text above it), and npm's tables read the statement
+//! with the flag there as they read it without, the flag an option.
+//!
+//! - `floor-outside-command`: the release owes a flag where no such word
+//!   ends: in an argument of another command (`echo npm ci x`, `sudo npm ci
+//!   x`), in an array value, in a word a parameter expansion holds, in a
+//!   script no shell is handed (`echo sh -c 'npm ci x'`), in a heredoc body
+//!   another command reads, in a script word whose flag does not read back.
+//!   Whether such text reaches npm is the structure's to say, and it has not
+//!   said so; nothing here guesses what a wrapper runs or follows a value to
+//!   where it is used.
+//! - `floor-not-an-option`: the word is an install's, and npm does not read
+//!   the flag there as the option with everything else as before (`npm -- ci
+//!   x`: an operand; `npm install true`: the flag takes the word as its
+//!   value).
+//! - `end-flag-outside-command`, `end-flag-not-an-option`: the same for the
+//!   flag the release appended to a one-statement command, read back as one
+//!   more word of the install (`npm install x --cache`: `--cache` takes it as
+//!   its value).
+//!
+//! A statement holding a word the shell decides at run time is not a
+//! collision: npm cannot be asked about it, its flags are placed, and it is
+//! recorded as unverified, as before. The command is never run to find out.
+//!
 //! # The record (record.rs)
 //!
 //! `inert_bytes_left_unread` and `inert_dynamic_command_word`, ported as they
@@ -149,6 +187,10 @@ pub struct Rewrite {
     pub floor: bool,
     /// The command holds an npm install the rewrite did not read.
     pub unread: bool,
+    /// The release owes a flag where the duties of this rewrite cannot be
+    /// met together (see "Duties that collide"): no rewrite is sent, and the
+    /// guard answers `UNDECIDED` with this as its reason.
+    pub collision: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -499,7 +541,8 @@ fn rewrite_with(run: &mut Run, rx: &Rx, command: &[u8], cands: &[u8], detail: &m
     struct Found {
         node: usize,
         npm: Option<usize>,
-        verb: Option<usize>,
+        /// The install as the reader read it, in its own text.
+        inst: read::Install,
         place: Option<usize>,
         wanted: bool,
         note: read::Note,
@@ -521,7 +564,6 @@ fn rewrite_with(run: &mut Run, rx: &Rx, command: &[u8], cands: &[u8], detail: &m
         for inst in ins {
             let node = &nodes[ni];
             let npm = inst.npm.and_then(|a| node.three(a));
-            let verb = node.after(inst.verb_end);
             let place = match inst.place {
                 None => None,
                 Some(q) if ni == 0 => Some(q),
@@ -546,7 +588,7 @@ fn rewrite_with(run: &mut Run, rx: &Rx, command: &[u8], cands: &[u8], detail: &m
                 left_unread = !bash_command_word(&cmdwords[&ni], inst.npm.unwrap_or(0));
             }
             let at = if left_unread { None } else { npm };
-            found.push(Found { node: ni, npm, verb, place, wanted: inst.place.is_some(), note: inst.note, at });
+            found.push(Found { node: ni, npm, place, wanted: inst.place.is_some(), note: inst.note, at, inst });
         }
     }
     // The flags.
@@ -554,10 +596,14 @@ fn rewrite_with(run: &mut Run, rx: &Rx, command: &[u8], cands: &[u8], detail: &m
     let mut offsets: BTreeSet<usize> = BTreeSet::new();
     let (mut settled, mut asked, mut unverified, mut floor_rec) = (false, false, false, false);
     let mut read_at: Vec<usize> = Vec::new();
+    // Every offset the release owes a flag at: the kept verb flags, and
+    // v2.17.2's.
+    let mut owed: Vec<usize> = Vec::new();
     for &(s, e) in &pairs {
         let kept = release_rewrote || !s.is_some_and(|s| settled_npm.contains(&s));
         if kept {
             offsets.insert(e);
+            owed.push(e);
         }
         if let Some(d) = detail.as_mut() {
             d.extend_from_slice(format!("pair {} {} {}\n", num(s), e, kept as u8).as_bytes());
@@ -565,6 +611,7 @@ fn rewrite_with(run: &mut Run, rx: &Rx, command: &[u8], cands: &[u8], detail: &m
     }
     for &e in &fed {
         offsets.insert(e);
+        owed.push(e);
         if let Some(d) = detail.as_mut() {
             d.extend_from_slice(format!("fed {}\n", e).as_bytes());
         }
@@ -608,7 +655,7 @@ fn rewrite_with(run: &mut Run, rx: &Rx, command: &[u8], cands: &[u8], detail: &m
                     f.node,
                     num(f.npm),
                     note_name(f.note),
-                    num(f.verb),
+                    num(nodes[f.node].after(f.inst.verb_end)),
                     num(f.place),
                     f.wanted as u8,
                     num(f.at)
@@ -619,6 +666,67 @@ fn rewrite_with(run: &mut Run, rx: &Rx, command: &[u8], cands: &[u8], detail: &m
     }
     read_at.sort_unstable();
     read_at.dedup();
+    // Duties that collide. A flag the release owes must be one the reader
+    // can answer for: it stands right after a word of an install the reader
+    // read (in the command, or read back through every text above it), and
+    // npm reads the statement with the flag there as it reads it without,
+    // the flag an option. A flag owed anywhere else stands in what the
+    // structure calls data, or in the arguments of a command nobody here
+    // knows to run npm; one npm does not read as the option changes an
+    // argument. Neither can be sent and neither may be left out, so the
+    // command is not rewritten at all.
+    let n = command.len();
+    let append = floor::release_appends(run, &rx.floor, command, cands);
+    let mut collision: Option<(&'static str, usize)> = None;
+    for &e in &owed {
+        if collision.is_some() {
+            break;
+        }
+        let mut check: Option<read::Check> = None;
+        'owner: for f in &found {
+            for (k, &q) in f.inst.ends.iter().enumerate() {
+                if nodes[f.node].after(q) != Some(e) {
+                    continue;
+                }
+                if f.node != 0 && carry(run, &nodes, f.node, q) != Some(e) {
+                    continue;
+                }
+                check = Some(f.inst.flag_after(run.c, k));
+                break 'owner;
+            }
+        }
+        match check {
+            None => collision = Some(("floor-outside-command", e)),
+            Some(read::Check::Changes) => collision = Some(("floor-not-an-option", e)),
+            Some(_) => {}
+        }
+    }
+    if collision.is_none() && append && !offsets.contains(&n) {
+        // The release's end flag: appended, it must be one more word of an
+        // install the reader read in the command, and an option there.
+        let mut check: Option<read::Check> = None;
+        for f in found.iter().filter(|f| f.node == 0) {
+            let (failed, diverge) = (run.failed, run.diverge);
+            let last = read::appended_is_last_word(run, command, f.inst.piece);
+            run.failed = failed;
+            run.diverge = diverge;
+            if last == Some(true) {
+                check = Some(f.inst.flag_after(run.c, f.inst.ends.len().saturating_sub(1)));
+                break;
+            }
+        }
+        match check {
+            None => collision = Some(("end-flag-outside-command", n)),
+            Some(read::Check::Changes) => collision = Some(("end-flag-not-an-option", n)),
+            Some(_) => {}
+        }
+    }
+    if let Some((kind, at)) = collision {
+        if let Some(d) = detail.as_mut() {
+            d.extend_from_slice(format!("collision {} {}\n", kind, at).as_bytes());
+        }
+        return Some(Rewrite { collision: Some(kind), ..Rewrite::default() });
+    }
     // The record.
     let left = record::bytes_left_unread(run, &rx.record, command, &read_at).ok()?;
     let mut unread = left.unread;
@@ -628,7 +736,6 @@ fn rewrite_with(run: &mut Run, rx: &Rx, command: &[u8], cands: &[u8], detail: &m
     if let Some(d) = detail.as_mut() {
         d.extend_from_slice(format!("texts {} release {} unread {}\n", nodes.len(), release_rewrote as u8, unread as u8).as_bytes());
     }
-    let n = command.len();
     offsets.retain(|&o| o >= 1 && o <= n);
     if offsets.is_empty() {
         if settled && !unread && !floor_rec {
@@ -636,7 +743,6 @@ fn rewrite_with(run: &mut Run, rx: &Rx, command: &[u8], cands: &[u8], detail: &m
         }
         return Some(Rewrite::default());
     }
-    let append = floor::release_appends(run, &rx.floor, command, cands);
     let mut out = Vec::with_capacity(n + FLAG.len() * (offsets.len() + 1));
     for (k, &b) in command.iter().enumerate() {
         out.push(b);
@@ -647,8 +753,19 @@ fn rewrite_with(run: &mut Run, rx: &Rx, command: &[u8], cands: &[u8], detail: &m
     if append && !offsets.contains(&n) {
         out.extend_from_slice(FLAG);
     }
-    Some(Rewrite { command: Some(out), settled, asked, unverified, floor: floor_rec, unread })
+    Some(Rewrite { command: Some(out), settled, asked, unverified, floor: floor_rec, unread, collision: None })
 }
+
+/// The kind of a `collision` value of `reading_inert`, or None for any other
+/// value. Whoever settles the readings asks this of each reading's value
+/// before anything else: one reading that holds a collision makes the command
+/// `UNDECIDED`, with no rewrite and no record of one, whether the readings
+/// agree or not.
+pub fn collision_kind(value: &[u8]) -> Option<&[u8]> {
+    value.strip_prefix(COLLISION)
+}
+
+const COLLISION: &[u8] = b"collision ";
 
 /// Runs `f` with a fresh failure flag: a reading that fails inside is the
 /// rewrite's failure, and the flag the run had stays set.
@@ -675,8 +792,16 @@ pub fn rewrite_in_place(run: &mut Run, command: &[u8]) -> Result<Rewrite, Failed
 
 /// `guard_reading_inert`: how this reading makes the command's npm installs
 /// inert, as the value the readings are compared on (`GUARD_INERT_<reading>`):
-/// `none`, `downgrade`, or `rewrite` with its notes and the command on the
-/// next line. A failed reading marks the run.
+/// `none`, `downgrade`, `rewrite` with its notes and the command on the next
+/// line, or `collision <kind>` where the duties of the rewrite cannot be met
+/// together. A failed reading marks the run.
+///
+/// `collision` is not a value of the bash guard's. Whoever settles the
+/// readings answers `UNDECIDED` for the command when any reading holds it
+/// (`collision_kind`), the same in all three or not, with a reason of its
+/// own, sends no rewrite and writes no record of one. A caller that does not
+/// ask reads the value as no rewrite and lets the command run as written,
+/// which is the one thing a collision must not become.
 pub fn reading_inert(run: &mut Run, command: &[u8]) -> W {
     reading_inert_detail(run, command, &mut None)
 }
@@ -688,6 +813,11 @@ fn reading_inert_detail(run: &mut Run, command: &[u8], detail: &mut Option<W>) -
             return b"none".to_vec();
         }
         let r = guarded(run, |run| rewrite_with(run, rx, command, &cands, detail));
+        if let Ok(Rewrite { collision: Some(kind), .. }) = &r {
+            let mut o = COLLISION.to_vec();
+            o.extend_from_slice(kind.as_bytes());
+            return o;
+        }
         let updated = match &r {
             Ok(rw) if rw.command.is_none() && rw.settled => return b"none".to_vec(),
             Ok(rw) => rw.command.clone().filter(|c| c.as_slice() != command),
@@ -732,9 +862,10 @@ fn reading_inert_detail(run: &mut Run, command: &[u8], detail: &mut Option<W>) -
 /// A detail is this reading's own account, for the comparison to sort rows
 /// by, never evidence of what a shell runs: `pair <npm> <verb end> <kept>`
 /// for each verb the reference search found, `fed <offset>` for each flag of
-/// v2.17.2's in text the bash rewrite did not read, and `install <text>
+/// v2.17.2's in text the bash rewrite did not read, `install <text>
 /// <npm> <note> <verb end> <place> <wanted> <read at>` for each install the
-/// reader found, each a statement whose command word is npm.
+/// reader found, each a statement whose command word is npm, and `collision
+/// <kind> <offset>` for the first owed flag nobody can answer for.
 pub fn cli(input: &[u8]) -> i32 {
     let Some((tool, cmd)) = core::command_of_payload(input) else { return 0 };
     let mut cmd: W = cmd.into_iter().filter(|&b| b != 0).collect();
