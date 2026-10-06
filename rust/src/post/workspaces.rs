@@ -81,7 +81,14 @@ pub fn glob_members(root: &Path, pattern: &[u8]) -> Vec<Vec<u8>> {
         } else { Vec::new() };
     }
     let mut out = Vec::new();
-    expand(root, &pattern.split(|b| *b == b'/').collect::<Vec<_>>(), true, &mut out);
+    // A quoted slash is still a pathname separator. Preserve quotation of
+    // characters inside each component, removing only that separator's quote.
+    let mut parts: Vec<Vec<u8>> = pattern.split(|b| *b == b'/').map(Vec::from).collect();
+    let last = parts.len().saturating_sub(1);
+    for part in parts.iter_mut().take(last) {
+        if part.iter().rev().take_while(|b| **b == b'\\').count() % 2 == 1 { part.pop(); }
+    }
+    expand(root, &parts.iter().map(Vec::as_slice).collect::<Vec<_>>(), true, &mut out);
     out
 }
 
