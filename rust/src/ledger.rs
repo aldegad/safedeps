@@ -1,5 +1,7 @@
 //! The hooks' approval reader. One predicate and one effect index per run.
 //! lib/ledger/ledger.sh remains the writer; this does not approve anything.
+pub mod context;
+
 use crate::{jq, json::{self, Value}, os, sha256, state};
 use std::{collections::HashSet, io, os::unix::fs::DirBuilderExt, path::{Path, PathBuf}};
 
@@ -191,6 +193,7 @@ pub fn main(args: &[String], input: &[u8]) -> i32 {
     let dir = directory();
     let now = os::now().0;
     match args.first().map(String::as_str) {
+        Some("context-probe") => return context::probe(input),
         Some("hash") if (4..=5).contains(&args.len()) => { print!("{}", hash(&args[1], &args[2], &args[3], args.get(4).map(String::as_str).unwrap_or(""))); 0 }
         Some("check") if (4..=5).contains(&args.len()) => {
             match check(&dir, &args[1], &args[2], &args[3], args.get(4).map(String::as_str).unwrap_or(""), now) {
