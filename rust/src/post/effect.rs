@@ -19,7 +19,7 @@ pub fn check(store: &Store, reasons: &mut Vec<Vec<u8>>) {
     let all = closure::unique_sorted(all);
     let value = Value::Arr(all.iter().map(closure::Spec::to_value).collect());
     let mut warnings = Vec::new();
-    let index = ledger::effect_index(&ledger::directory(), "", os::now().0, &mut warnings);
+    let index = ledger::effect_index(&ledger::directory(), "", os::wall(os::WallRole::PostLedgerExpiry).seconds(), &mut warnings);
     let _ = std::io::stderr().write_all(&warnings);
     let misses = index.map_err(|_| ()).and_then(|index| index.misses("npm", &value));
     let Ok(misses) = misses else {

@@ -283,7 +283,8 @@ fn random_tail() -> [u8; 6] {
     let mut raw = [0u8; 6];
     let read = std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut raw));
     if read.is_err() {
-        let (s, n) = crate::os::now();
+        let time = crate::os::wall(crate::os::WallRole::PostTempName);
+        let (s, n) = (time.seconds(), time.nanos());
         let mut x = (s as u64) ^ ((n as u64) << 20) ^ ((std::process::id() as u64) << 40);
         for b in raw.iter_mut() {
             x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);

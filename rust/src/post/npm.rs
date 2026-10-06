@@ -58,7 +58,7 @@ impl Npm{
     fn observe(store:&Store,copy:&Path){
         let dir=store.home.join("npm-observed");
         let ok=digest(copy).is_some_and(|hash|{
-            let v=jv::obj(vec![("project",jv::s(sh::bytes(&store.project))),("tree",jv::s(hash.as_bytes())),("at",jv::num(os::now().0))]);
+            let v=jv::obj(vec![("project",jv::s(sh::bytes(&store.project))),("tree",jv::s(hash.as_bytes())),("at",jv::num(os::wall(os::WallRole::NpmObserved).seconds()))]);
             state::write_state_file(&dir.join(format!("{}.json",store.hash)),&jv::dump(&v)).is_ok()
         });
         if !ok{state::log_advisory(&store.home,&cat(&[b"post-verify: could not keep the hash of the tree record judged in ",sh::bytes(&store.project),b" (",sh::bytes(&dir),b"), so the next install there counts every integrity in it as new."]));}
@@ -113,7 +113,7 @@ impl Npm{
             };
             if from.is_empty(){continue}
             let entry=jv::obj(vec![("package",jv::s(&cat(&[&strval(field(&r,"name")?),b"@",&strval(field(&r,"version")?)]))),
-                ("origins",Value::Arr(jv::unique(from))),("project",jv::s(sh::bytes(&store.project))),("at",jv::num(os::now().0)),("inert",Value::Bool(inert))]);
+                ("origins",Value::Arr(jv::unique(from))),("project",jv::s(sh::bytes(&store.project))),("at",jv::num(os::wall(os::WallRole::NpmWithheldEntry).seconds())),("inert",Value::Bool(inert))]);
             let Value::Arr(tokens)=field(&r,"tokens")?else{return Err(())};
             for token in tokens{let Value::Str(t)=token else{return Err(())};jv::set(&mut out,t.clone(),entry.clone());}
         }Ok(Value::Obj(out))
@@ -156,7 +156,7 @@ impl Npm{
         let dir=store.home.join("npm-withheld");let tmp=if sh::mkdir_p(&dir){sh::mktemp(&cat(&[sh::bytes(&dir),b"/.record."]))}else{None};
         let wrote=tmp.as_ref().is_some_and(|tmp|{
             let tail=sh::basename(sh::bytes(tmp));let tail=tail.rsplit(|b|*b==b'.').next().unwrap_or(b"");
-            let target=dir.join(sh::p(&cat(&[os::now().0.to_string().as_bytes(),b"-",std::process::id().to_string().as_bytes(),b"-",tail,b".json"])));
+            let target=dir.join(sh::p(&cat(&[os::wall(os::WallRole::NpmWithheldName).seconds().to_string().as_bytes(),b"-",std::process::id().to_string().as_bytes(),b"-",tail,b".json"])));
             fs::write(tmp,cat(&[&jv::dump(&recorded),b"\n"])).is_ok()&&fs::rename(tmp,target).is_ok()
         });
         if !wrote{

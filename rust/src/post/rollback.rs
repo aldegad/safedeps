@@ -28,7 +28,7 @@ impl<'a> Rollback<'a>{
         if !self.refused.insert(cat(&[kind,b" of ",sh::bytes(path)])){return}
         let line=report::refused(kind,path,why);self.report.say(&line);
         state::log_advisory(&self.store.home,&cat(&[b"post-verify REORG REFUSED: ",&line,b" -- project ",sh::bytes(&self.store.project)]));
-        sh::append(&self.store.home.join("reorg.log"),&cat(&[b"[",os::utc_stamp(os::now().0).as_bytes(),b"] REORG REFUSED\n  Project: ",sh::bytes(&self.store.project),b"\n  ",&line,b"\n"]));
+        sh::append(&self.store.home.join("reorg.log"),&cat(&[b"[",os::utc_stamp(os::wall(os::WallRole::ReorgRefusedHeader).seconds()).as_bytes(),b"] REORG REFUSED\n  Project: ",sh::bytes(&self.store.project),b"\n  ",&line,b"\n"]));
     }
     pub fn restore(&mut self,name:&[u8]){
         let saved=self.store.copy(&self.target,name);let live=self.store.project.join(sh::p(name));
@@ -98,7 +98,7 @@ impl<'a> Rollback<'a>{
         let pre=if self.pre.is_empty(){Vec::new()}else{cat(&[b"\n  Snapshot: ",&self.pre])};
         let mut details=Vec::new();for l in &self.report.lines{details.extend(cat(&[b"  ",l,b"\n"]));}
         let log=self.store.home.join("reorg.log");
-        sh::append(&log,&cat(&[b"[",os::utc_stamp(os::now().0).as_bytes(),b"] ",log_head,&pre,b"\n  Project: ",sh::bytes(&self.store.project),b"\n  Reasons: ",reasons,b"\n  ",&snapshot_line,b"\n",&details]));
+        sh::append(&log,&cat(&[b"[",os::utc_stamp(os::wall(os::WallRole::ReorgRollbackHeader).seconds()).as_bytes(),b"] ",log_head,&pre,b"\n  Project: ",sh::bytes(&self.store.project),b"\n  Reasons: ",reasons,b"\n  ",&snapshot_line,b"\n",&details]));
         if !snapshot_line.ends_with(b", a confirmed snapshot")&&!self.backstop{
             let inert=if self.report.inert.is_empty(){Vec::new()}else{cat(&[b"; ",&self.report.inert])};
             state::log_advisory(&self.store.home,&cat(&[b"post-verify REORG with no confirmed snapshot in ",sh::bytes(&self.store.project),b": ",&snapshot_line,&inert,b". Reasons: ",reasons]));

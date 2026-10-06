@@ -99,7 +99,7 @@ fn judge(call: &mut Call, journal: &Journal, input: &[u8]) -> Result<Option<W>, 
     if report.lines.is_empty() { return Ok(None) }
     let mut lines = Vec::new();
     for line in &report.lines { lines.extend(cat(&[b"  ", line, b"\n"])); }
-    sh::append(&call.store.home.join("reorg.log"), &cat(&[b"[", os::utc_stamp(os::now().0).as_bytes(), b"] CONFIRM warnings\n  Snapshot: ", &call.store.id, b"\n  Project: ", sh::bytes(&call.store.project), b"\n", &lines]));
+    sh::append(&call.store.home.join("reorg.log"), &cat(&[b"[", os::utc_stamp(os::wall(os::WallRole::ConfirmWarningsHeader).seconds()).as_bytes(), b"] CONFIRM warnings\n  Snapshot: ", &call.store.id, b"\n  Project: ", sh::bytes(&call.store.project), b"\n", &lines]));
     Ok(Some(cat(&[b"safedeps: this install was not rolled back.\n", &report.lines.join(&b'\n')])))
 }
 
