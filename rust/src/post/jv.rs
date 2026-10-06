@@ -3,7 +3,7 @@
 use crate::json::Value;
 use std::cmp::Ordering;
 pub use crate::json::{Stream, read, read_file, read_one_object, captured, each, set};
-pub static NULL: Value = Value::Null;
+pub use crate::jq::{NULL, field, path};
 
 pub fn type_name(v: &Value) -> &'static str {
     match v {
@@ -16,16 +16,6 @@ pub fn type_name(v: &Value) -> &'static str {
     }
 }
 
-/// `.key`: null of null, the value or null of an object, and an error of
-/// anything else. jq's `//` does not catch that error (measured).
-pub fn field<'a>(v: &'a Value, k: &str) -> Result<&'a Value, ()> {
-    match v {
-        Value::Null => Ok(&NULL),
-        Value::Obj(o) => Ok(o.iter().find(|(kk, _)| kk.as_slice() == k.as_bytes()).map(|(_, x)| x).unwrap_or(&NULL)),
-        _ => Err(()),
-    }
-}
-
 /// `.[key]` with a key that is bytes.
 pub fn field_bytes<'a>(v: &'a Value, k: &[u8]) -> Result<&'a Value, ()> {
     match v {
@@ -33,15 +23,6 @@ pub fn field_bytes<'a>(v: &'a Value, k: &[u8]) -> Result<&'a Value, ()> {
         Value::Obj(o) => Ok(o.iter().find(|(kk, _)| kk.as_slice() == k).map(|(_, x)| x).unwrap_or(&NULL)),
         _ => Err(()),
     }
-}
-
-/// A path of keys, each read with `field`.
-pub fn path<'a>(v: &'a Value, keys: &[&str]) -> Result<&'a Value, ()> {
-    let mut cur = v;
-    for k in keys {
-        cur = field(cur, k)?;
-    }
-    Ok(cur)
 }
 
 /// Neither null nor false: what `//`, `select` and `if` take as true.

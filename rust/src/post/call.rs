@@ -2,6 +2,7 @@
 //! is held. A trace entry owns the call even when its content is unreadable.
 use super::{jv, sh, report::cat, snapshot::{self, Store}, trace};
 use crate::{callid, ere::Regex, grammar, json::Value, md5, os, state};
+use crate::jq::{capture_field as field, stream_has};
 use std::{fs, path::{Path, PathBuf}};
 type W = Vec<u8>;
 
@@ -29,13 +30,6 @@ pub struct Call {
     pub store: Store, pub current: Value, pub command: W, pub codex: bool,
     pub record: Record, pub entry: W, pub trace_none: W,
 }
-fn field(st: &jv::Stream, path: &[&str]) -> Result<W, i32> {
-    let (lines, rc) = jv::each(st, |v| {
-        let f = jv::path(v, path)?;
-        Ok(if jv::truthy(f) { vec![jv::tostring(f)] } else { Vec::new() })
-    });
-    if rc == 0 { Ok(jv::captured(&lines)) } else { Err(rc) }
-}
 fn string(v: &Value, key: &str) -> W {
     jv::field(v, key).ok().and_then(jv::text).map(|s| jv::captured(&[s.to_vec()])).unwrap_or_default()
 }
@@ -51,8 +45,8 @@ impl Call {
         let cwd = sh::p(&os::realpath(&cwd));
         let hash = md5::hex(sh::bytes(&cwd));
         let key = state::pending_key(&hash, &command);
-        let id = if st.values.len() == 1 { callid::call_id(&st.values[0]) } else { None };
-        let codex = st.values.last().is_some_and(|v| v.get("turn_id").is_some());
+        let id = callid::from_stream(&st);
+        let codex = stream_has(&st, "turn_id");
         // acquire() already reports the lock failure. The hook then exits 0.
         let Ok(lock) = snapshot::acquire(home) else { return Ok(None) };
         let mut entry = Vec::new();
