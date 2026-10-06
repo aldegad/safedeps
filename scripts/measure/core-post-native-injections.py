@@ -7,3 +7,16 @@ EDITS = {
                'if (m.ctime(),0)>(b.mtime(),b.mtime_nsec())'),
     'owner': ('rust/src/post/process.rs', 'unsafe{proc_pidinfo(pid,3,1,&mut b as *mut _ as *mut _,size)}', '0'),
 }
+
+# Pre observes the node root through the same native clock reader as ordinary
+# files. Quantize only that returned observation, retaining its real seconds.
+# Used on archive copies together with EDITS['coarse'] for the post walk.
+PRE_EDITS = {
+    'coarse': ('rust/src/pre.rs',
+        '        if os::clock_has_subsecond(&os::tree_clock(&path)) {',
+        '''        let observed=os::tree_clock(&path);
+        let observed=if path.file_name().is_some_and(|n|n=="node_modules") {
+            observed.split('|').map(|v|v.split('.').next().unwrap_or(v)).collect::<Vec<_>>().join("|")
+        }else{observed};
+        if os::clock_has_subsecond(&observed) {'''),
+}

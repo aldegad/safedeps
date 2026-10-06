@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Two remaining report controls through public Codex pre and native post.
+"""Remaining report controls reachable through public Codex pre and post.
 
 The hook wrappers, pre/post oracle, and the named assertions are taken from
 the existing e2e source. Synthetic projects use empty initial closures; the
@@ -9,6 +9,7 @@ oracle error is not an assertion control. This is not the full e2e suite.
 """
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -20,8 +21,11 @@ p.add_argument('--archive',required=True)
 p.add_argument('--core',required=True)
 p.add_argument('--cargo',required=True)
 p.add_argument('--run-dir',required=True)
+p.add_argument('--names',default='NoIdSilent,PullAlways')
 a=p.parse_args()
 root=Path(__file__).resolve().parents[2]
+spec=importlib.util.spec_from_file_location('native_edits',Path(__file__).with_name('core-post-native-injections.py'))
+native_edits=importlib.util.module_from_spec(spec);spec.loader.exec_module(native_edits)
 archive=Path(a.archive).resolve(strict=True);core=Path(a.core).resolve(strict=True)
 cargo=Path(a.cargo).resolve(strict=True)
 run=Path(a.run_dir).resolve();run.mkdir(parents=True,exist_ok=False)
@@ -52,14 +56,45 @@ cases={
         old='if present > 0 && subsecond == present && os::clock_has_subsecond',
         new='if false && present > 0 && subsecond == present && os::clock_has_subsecond',
         diagnostic='a grep right after a pull outside the gate: the backstop says nothing'),
+    'Oldest':dict(file='rust/src/pre.rs',
+        old='    let base = cat(&[&entry_text, b"/id-", id.as_bytes()]);',
+        new='    let base = cat(&[&entry_text, b"/id-", state::pending_key(&dir_hash, &call.command).as_bytes(), b"_", std::process::id().to_string().as_bytes()]);',
+        also=dict(file='rust/src/post/call.rs',
+            old='            let base = call_base(&home.join("pending/backstop"), id);',
+            new='''            let dir=home.join("pending/backstop");
+            let prefix=format!("id-{}_",key);
+            let mut entries:Vec<_>=fs::read_dir(&dir).into_iter().flatten().filter_map(Result::ok)
+                .map(|e|e.path()).filter(|p|sh::basename(sh::bytes(p)).starts_with(prefix.as_bytes()) && p.extension().is_some_and(|e|e=="json")).collect();
+            entries.sort_by_key(|p|fs::metadata(p).and_then(|m|m.modified()).ok());
+            let base=entries.into_iter().next().unwrap_or_else(||call_base(&dir,id)).with_extension("");'''),
+        diagnostic='a grep after a failed grep and a pull: the backstop says nothing'),
+    'AnySubsecond':dict(file='rust/src/pre.rs',
+        old='if present > 0 && subsecond == present && os::clock_has_subsecond',
+        new='if subsecond > 0 && os::clock_has_subsecond',
+        faults=[native_edits.PRE_EDITS['coarse'],native_edits.EDITS['coarse']],
+        diagnostic='a write into node_modules on a whole-second mount beside a subsecond lockfile: the baseline is set back'),
 }
+names=a.names.split(',')
+if not names or any(name not in cases for name in names):p.error('unknown control name')
 
 def execute(argv,stem,env=None):
     with (run/(stem+'.log')).open('wb') as f:r=subprocess.run(argv,stdout=f,stderr=f,env=env)
     (run/(stem+'.rc')).write_text(str(r.returncode)+'\n')
     return r.returncode
 
-def fixture(name,pre,stem):
+def build_copy(stem,edits):
+    tree=run/(stem+'-source');tree.mkdir()
+    subprocess.run(['tar','xf',str(archive),'-C',str(tree)],check=True)
+    for edit in edits:
+        path=tree/edit['file'];text=path.read_text()
+        if text.count(edit['old'])!=1:raise SystemExit('mutation anchor not unique: '+stem)
+        path.write_text(text.replace(edit['old'],edit['new']))
+    (run/(stem+'.mutation.json')).write_text(json.dumps(edits,indent=2)+'\n')
+    rc=execute([str(cargo),'build','--manifest-path',str(tree/'rust/Cargo.toml'),
+                '--release','--locked','--offline','-j1'],stem+'-build',dict(os.environ,SAFEDEPS_CORE_BUILD_KIND='checkout'))
+    return rc,tree/'rust/target/release/safedeps-core'
+
+def fixture(name,pre,stem,post=None):
     box=run/stem;project=box/'project';project.mkdir(parents=True)
     home=box/'state';home.mkdir();(box/'home').mkdir()
     for log in ['advisory.log','reorg.log']:(home/log).touch()
@@ -97,25 +132,80 @@ grep -qF "post-verify: this hook's input names no tool_use_id, so it took the re
         (home/'cache/kev/known_exploited_vulnerabilities.json').write_text('{"vulnerabilities":[]}\n')
         call['tool_input']['command']='grep -n "npm install" README.md';call['tool_use_id']='pull-call'
         (box/'grep.json').write_text(json.dumps(call))
+        if name=='Oldest':
+            failed=dict(call,tool_use_id='failed-call')
+            (box/'failed.json').write_text(json.dumps(failed))
         script+='''mkdir -p "$BOX/project/node_modules/installed-package"
 printf '%s\\n' '{"name":"installed-package","version":"1.0.0"}' > "$BOX/project/node_modules/installed-package/package.json"
 tampered_lock=$(cat "$BOX/tampered.json")
+'''
+        if name=='Oldest':
+            script+='''pre=$(pre_hook < "$BOX/failed.json")
+[[ -z "$pre" ]] || fail "the first grep is allowed"
+find "$SAFEDEPS_HOME/pending/backstop" -name '*.json' -type f > "$BOX/failed-entry-paths.txt"
+'''
+        if name!='AnySubsecond':
+            script+='''
 cp "$BOX/tampered.json" "$BOX/project/.pull"
 mv "$BOX/project/.pull" "$BOX/project/package-lock.json"
+'''
+        script+='''
 pre=$(pre_hook < "$BOX/grep.json")
 printf '%s\\n' "$pre" > "$BOX/grep-pre.out"
 [[ -z "$pre" ]] || fail "the pre-guard lets a grep run"
-cp "$SAFEDEPS_HOME/pending/backstop/id-pull-call.json" "$BOX/entry.json"
+'''
+        if name=='Oldest':
+            # Preserve both entries even in the faulty copy, whose filenames
+            # deliberately no longer contain the current call's id.
+            script+='''mkdir "$BOX/entries-before-post"
+cp "$SAFEDEPS_HOME/pending/backstop/"*.json "$BOX/entries-before-post/"
+'''
+        else:
+            script+='cp "$SAFEDEPS_HOME/pending/backstop/id-pull-call.json" "$BOX/entry.json"\n'
+        if name=='AnySubsecond':
+            script+='''printf 'x\\n' > "$BOX/project/node_modules/installed-package/added.js"
+python3 - "$BOX" <<'PY'
+import json,os,sys
+from pathlib import Path
+box=Path(sys.argv[1]);project=box/'project';tree=project/'node_modules'
+entry=json.loads((box/'entry.json').read_text());base=Path(entry['baseline']).stat().st_mtime_ns
+paths=[tree]
+for parent,dirs,files in os.walk(tree):paths.extend(Path(parent)/name for name in dirs+files)
+observed=[dict(path=str(p),ctime_ns=p.lstat().st_ctime_ns) for p in paths]
+newer=[r['path'] for r in observed if r['ctime_ns']//10**9*10**9>base]
+receipt=dict(baseline_ns=base,lock_ctime_ns=(project/'package-lock.json').stat().st_ctime_ns,
+             observed=observed,integer_time_newer_paths=newer,entry=entry)
+(box/'precision.json').write_text(json.dumps(receipt,indent=2)+'\\n')
+if receipt['lock_ctime_ns']%10**9==0:raise SystemExit('fixture lock has no subsecond precision')
+PY
+'''
+        script+='''
 post=$(post_hook < "$BOX/grep.json")
 printf '%s\\n' "$post" > "$BOX/grep-post.out"
 printf '%s\n' 'grep-post rc0 and original post oracle passed'
-bs_assert_untraced "$BOX/project" "$(post_message "$post")" "a grep right after a pull outside the gate"
+'''
+        if name=='AnySubsecond':
+            script+='''bs_mix_entry=$(cat "$BOX/entry.json")
+'''+section('[[ "$(jq -r .resolution <<< "${bs_mix_entry:-null}")" == seconds ]]', '[[ "${bs_mix_walk}"')
+            script+='''python3 - "$BOX/precision.json" <<'PY'
+import json,sys
+d=json.load(open(sys.argv[1]))
+if not d['integer_time_newer_paths']:raise SystemExit('shifted baseline missed the independent integer-time walk')
+PY
+grep -qF "post-verify BACKSTOP traced: $BOX/project/" "$SAFEDEPS_HOME/advisory.log" || fail "the mixed precision tree is traced"
+'''
+        elif name=='Oldest':
+            script+='''bs_assert_untraced "$BOX/project" "$(post_message "$post")" "a grep after a failed grep and a pull"
+[[ -f "$SAFEDEPS_HOME/pending/backstop/id-failed-call.json" && ! -e "$SAFEDEPS_HOME/pending/backstop/id-pull-call.json" ]] || fail "the failed call's entry stays and the read one is gone"
+'''
+        else:
+            script+='''bs_assert_untraced "$BOX/project" "$(post_message "$post")" "a grep right after a pull outside the gate"
 [[ "$(jq -r .resolution "$BOX/entry.json")" == subsecond ]] || fail "on a filesystem that keeps time below one second the baseline is not set back"
 '''
     script+='printf "%s\\n" "fixture assertion reached and passed"\n'
     path=box/'run.sh';path.write_text(script)
     env={k:v for k,v in os.environ.items() if not k.startswith('SAFEDEPS_')}
-    env.update(ROOT_DIR=str(root),BOX=str(box),PRE_CORE=str(pre),POST_CORE=str(core),
+    env.update(ROOT_DIR=str(root),BOX=str(box),PRE_CORE=str(pre),POST_CORE=str(post or core),
                SAFEDEPS_HOME=str(home),HOME=str(box/'home'),NPM_CONFIG_USERCONFIG='/dev/null',LC_ALL='C')
     rc=execute(['bash',str(path)],stem,env)
     log=(run/(stem+'.log')).read_text()
@@ -130,20 +220,19 @@ bs_assert_untraced "$BOX/project" "$(post_message "$post")" "a grep right after 
                 reached='fixture assertion reached and passed' in log)
 
 rows=[]
-for name,change in cases.items():
-    baseline=fixture(name,core,name+'-baseline')
+for name in names:
+    change=cases[name]
+    faults=[dict(zip(['file','old','new'],edit)) for edit in change.get('faults',[])]
+    baseline_core=core
+    if faults:
+        fault_rc,baseline_core=build_copy(name+'-observations',faults)
+        if fault_rc:raise SystemExit(fault_rc)
+    baseline=fixture(name,baseline_core,name+'-baseline',post=baseline_core if faults else None)
     if baseline['rc'] or not baseline['reached']:
         (run/'result.json').write_text(json.dumps(dict(rows=rows,failed_baseline=dict(name=name,**baseline)),indent=2)+'\n')
         raise SystemExit('baseline failed: '+name)
-    tree=run/(name+'-source');tree.mkdir()
-    subprocess.run(['tar','xf',str(archive),'-C',str(tree)],check=True)
-    path=tree/change['file'];text=path.read_text()
-    if text.count(change['old'])!=1:raise SystemExit('mutation anchor not unique: '+name)
-    path.write_text(text.replace(change['old'],change['new']))
-    (run/(name+'.mutation.json')).write_text(json.dumps(change,indent=2)+'\n')
-    build=execute([str(cargo),'build','--manifest-path',str(tree/'rust/Cargo.toml'),
-                   '--release','--locked','--offline','-j1'],name+'-build',dict(os.environ,SAFEDEPS_CORE_BUILD_KIND='checkout'))
-    control=fixture(name,tree/'rust/target/release/safedeps-core',name+'-control') if build==0 else None
+    build,mutant=build_copy(name,faults+[change]+([change['also']] if 'also' in change else []))
+    control=fixture(name,mutant,name+'-control',post=mutant if faults or 'also' in change else None) if build==0 else None
     passed=build==0 and control['rc']==1 and control['diagnostic_found'] and control['hook_and_oracle_passed'] and not control['oracle_failed']
     rows.append(dict(name=name,baseline=baseline,build_rc=build,control=control,passed=passed))
     print(name,'caught' if passed else 'FAIL',flush=True)
