@@ -19,6 +19,8 @@ p = argparse.ArgumentParser(description=__doc__)
 p.add_argument('--core', required=True)
 p.add_argument('--report')
 p.add_argument('--control', action='store_true')
+p.add_argument('--only', help='Run one named case, e.g. restore-broken')
+p.add_argument('--expect-difference', action='store_true', help='A source mutant must differ')
 a = p.parse_args()
 root = Path(__file__).resolve().parents[2]
 core = str(Path(a.core).resolve())
@@ -38,6 +40,7 @@ source "$ROOT/lib/gates/npm-reach.sh"
 source "$ROOT/lib/gates/report-facts.sh"
 source "$ROOT/lib/npm/ask.sh"
 set +e
+ROLLBACK_WARNINGS=()
 input=$(cat)
 op=$(jq -r .op <<< "$input")
 path=$(jq -r '.path // ""' <<< "$input")
@@ -144,6 +147,7 @@ with tempfile.TemporaryDirectory(prefix='core-post-pure.') as tmp:
     box = Path(tmp)
     script = box / 'reference.sh'; script.write_text(wrapper)
     for label, request, files, dirs, links in cases:
+        if a.only and label != a.only: continue
         results = []
         for side in ['bash', 'rust']:
             d = box / side
@@ -172,4 +176,4 @@ if a.report: Path(a.report).write_text(json.dumps(rows, ensure_ascii=False, inde
 bad = sum(not r['same'] for r in rows)
 print('end:', subprocess.check_output(['uptime'], text=True).strip())
 print(f'core-post-pure: {len(rows)} cases, {bad} differ')
-raise SystemExit(0 if (bad > 0 if a.control else bad == 0) else 1)
+raise SystemExit(0 if rows and (bad > 0 if a.control or a.expect_difference else bad == 0) else 1)

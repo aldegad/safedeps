@@ -9,7 +9,14 @@ mod sh;
 mod closure;
 mod report;
 mod workspaces;
+pub use workspaces::members as workspace_members;
 mod tree;
+mod trace;
+mod snapshot;
+mod process;
+mod journal;
+mod rollback;
+mod npm;
 
 /// A measurement entry, fed one JSON request. It calls the same operations
 /// the hook uses; the reference side calls their bash functions.
@@ -45,6 +52,30 @@ pub fn probe(input: &[u8]) -> i32 {
                 .map(|ls| { let mut b = ls.join(&b'\n'); if !b.is_empty() { b.push(b'\n'); } b }).map_err(|_| 1)
         }
         b"path" => Ok(report::path(&path)),
+        b"owner" => { let (rc,line)=process::owner(bytes("pid"),bytes("opened")); let _=std::io::stdout().write_all(&line); return rc; }
+        b"journal" => {
+            let j=journal::Journal::new(&crate::state::guard_dir());
+            match bytes("action") {
+                b"open" => j.open(bytes("id"),&path,bytes("snapshot"),bytes("reasons"),bytes("stage")).map(|_|Vec::new()).map_err(|_|1),
+                b"stage" => j.stage(bytes("id"),bytes("stage")).map(|_|Vec::new()).map_err(|_|1),
+                b"report" => Ok(j.unfinished()),
+                _=>return 2,
+            }
+        }
+        b"trace" => {
+            let (traced,line)=trace::backstop(&path,bytes("entry"),bytes("none"));
+            let _=std::io::stdout().write_all(&line);return if traced{0}else{1};
+        }
+        b"snapshot" => {
+            let mut store=snapshot::Store::new(crate::state::guard_dir(),path,bytes("id").to_vec());
+            match bytes("action") {
+                b"stage"=>{store.stage();if store.staged{Ok(Vec::new())}else{Err(1)}},
+                b"confirm"=>{store.staged=true;let mut r=report::Report::default();store.confirm(&mut r).map_err(|_|1).map(|_|jv::captured(&r.lines))},
+                b"cleanup"=>store.cleanup().map(|_|Vec::new()).map_err(|_|1),
+                _=>return 2,
+            }
+        }
+        b"withheld"=>npm::withheld_read(&crate::state::guard_dir()).map(|v|report::cat(&[&jv::dump(&v),b"\n"])).map_err(|_|1),
         b"outside" => Ok(report::outside(&sh::p(bytes("project")), &path).unwrap_or_default()),
         b"reach" => Ok(report::reach_blocker(&path).unwrap_or_default()),
         b"inert" => report::inert(&path, bytes("input")),

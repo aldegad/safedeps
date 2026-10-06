@@ -365,6 +365,9 @@ fn read_full(f: &mut std::fs::File, buf: &mut [u8]) -> std::io::Result<usize> {
 /// it, so a copy that fails part way leaves what cp would leave; a target
 /// that is not there is made with the source's mode under the umask.
 pub fn cp(src: &Path, dst: &Path) -> i32 {
+    // cp will follow a link to a file, but refuses a dangling destination
+    // link rather than creating a file at its missing target.
+    if is_link(dst) && !exists(dst) { return 1; }
     let Ok(mut from) = std::fs::File::open(src) else { return 1 };
     let Ok(meta) = from.metadata() else { return 1 };
     if meta.is_dir() {
