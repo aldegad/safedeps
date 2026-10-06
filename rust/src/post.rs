@@ -10,6 +10,7 @@ mod closure;
 mod report;
 mod workspaces;
 pub use workspaces::members as workspace_members;
+pub use workspaces::glob_members as workspace_glob_members;
 mod tree;
 mod trace;
 mod snapshot;
@@ -39,6 +40,7 @@ pub fn probe(input: &[u8]) -> i32 {
             closure::new_records(&path, &earlier).map(|mut b| { if !b.is_empty() { b.push(b'\n'); } b }).map_err(|_| 1)
         }
         b"workspaces" => Ok([workspaces::members(&path), b"\n".to_vec()].concat()),
+        b"workspace-glob" => Ok(jv::dump(&Value::Arr(workspace_glob_members(&path, bytes("pattern")).iter().map(|p| jv::s(p)).collect()))),
         b"workspace-dirs" => {
             let mut b = workspaces::physical_members(&path, &crate::state::guard_dir()).join(&b'\n');
             if !b.is_empty() { b.push(b'\n'); } Ok(b)

@@ -29,40 +29,50 @@ fn patterns(root: &Path) -> Vec<u8> {
     if out == b"bad" { cat(&[b"?\t", sh::bytes(&file), b" declares workspaces npm would reject"]) } else { out }
 }
 
-fn children(base: &Path, dots: bool) -> Vec<PathBuf> {
+fn children(base: &Path, dots: bool, include_modules: bool) -> Vec<PathBuf> {
     let Ok(entries) = fs::read_dir(base) else { return Vec::new() };
     let mut paths: Vec<_> = entries.filter_map(Result::ok).map(|e| e.path()).filter(|p| {
         let name = sh::basename(sh::bytes(p));
-        (dots || !name.starts_with(b".")) && name != b"node_modules" && sh::is_dir(p)
+        (dots || !name.starts_with(b".")) && (include_modules || name != b"node_modules") && sh::is_dir(p)
     }).collect();
     paths.sort_by(|a,b| sh::bytes(a).cmp(sh::bytes(b)));
     paths
 }
 
-fn expand(base: &Path, segments: &[&[u8]], out: &mut Vec<Vec<u8>>) {
+fn expand(base: &Path, segments: &[&[u8]], include_modules: bool, out: &mut Vec<Vec<u8>>) {
     let Some((&seg, rest)) = segments.split_first() else {
         if sh::is_file(&base.join("package.json")) { out.push(sh::bytes(base).to_vec()); }
         return;
     };
     match seg {
-        b"" | b"." => expand(base, rest, out),
+        b"" | b"." => expand(base, rest, include_modules, out),
         b"**" => {
-            expand(base, rest, out);
-            for p in children(base, false) { if !sh::is_link(&p) { expand(&p, segments, out); } }
+            expand(base, rest, include_modules, out);
+            for p in children(base, false, include_modules) { if !sh::is_link(&p) { expand(&p, segments, include_modules, out); } }
         }
-        b"node_modules" => {}
+        b"node_modules" if !include_modules => {}
         _ if seg.iter().any(|b| b"*?[".contains(b)) => {
-            for p in children(base, true) {
+            for p in children(base, true, include_modules) {
                 let name = sh::basename(sh::bytes(&p));
                 if name.starts_with(b".") && !seg.starts_with(b".") { continue }
-                if sh::fnmatch(seg, &name) { expand(&p, rest, out); }
+                if sh::fnmatch(seg, &name) { expand(&p, rest, include_modules, out); }
             }
         }
         _ => {
             let p = sh::p(&cat(&[sh::bytes(base), b"/", seg]));
-            if sh::is_dir(&p) { expand(&p, rest, out); }
+            if sh::is_dir(&p) { expand(&p, rest, include_modules, out); }
         }
     }
+}
+
+/// One pattern from the Yarn materialization-input reader. The caller owns
+/// pattern validation (including rejecting **), physical containment, and
+/// manifest hashing. Unlike ordinary workspace membership, this listing
+/// includes node_modules when the pattern names it.
+pub fn glob_members(root: &Path, pattern: &[u8]) -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    expand(root, &pattern.split(|b| *b == b'/').collect::<Vec<_>>(), true, &mut out);
+    out
 }
 
 pub fn members(root: &Path) -> Vec<u8> {
@@ -84,7 +94,7 @@ pub fn members(root: &Path) -> Vec<u8> {
         }
         let mut segs: Vec<_> = pat.split(|b| *b == b'/').collect();
         if pat.is_empty() { segs.clear(); } else if segs.last() == Some(&b"".as_slice()) { segs.pop(); }
-        expand(root, &segs, &mut out);
+        expand(root, &segs, false, &mut out);
     }
     // The shell pipeline sorts lines, so a path containing a newline produces
     // two records just as it does there.
