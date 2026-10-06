@@ -35,6 +35,9 @@ subprocess.run(['tar', 'xf', str(archive), '-C', str(tree)], check=True)
 def entry(path, binary, command, probe=False):
     # Python source literals, not shell interpolation. Fixed argv only.
     source = '#!' + sys.executable + '\nimport json, os, subprocess, sys\n'
+    if command == 'post':
+        source += 'call = os.environ.get("ORACLE_CALL")\n'
+        source += 'if call: open(os.path.join(call, "native-owner-source"), "w").close()\n'
     if probe:
         source += 'raw = sys.stdin.buffer.read().decode("utf-8", "surrogateescape")\n'
         source += 'request = json.dumps(dict(op="hook", input=raw), ensure_ascii=True).encode()\n'

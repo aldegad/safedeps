@@ -31,6 +31,7 @@ oracle_init "$BOX/oracle"
 payload=$(cat "$BOX/payload.json")
 call="$BOX/oracle/call"
 mkdir -p "$call"
+: > "$call/native-owner-source"
 oracle_before "$call" "$payload"
 request=$(jq -cn --arg input "$payload" '{op:"hook",input:$input}')
 out=$(printf '%s' "$request" | "$CORE" post-probe)

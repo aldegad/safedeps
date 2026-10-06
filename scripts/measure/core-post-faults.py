@@ -39,6 +39,7 @@ oracle_init "$BOX/oracle"
 payload=$(cat "$BOX/payload.json")
 call="$BOX/oracle/call"
 mkdir -p "$call"
+[[ "$SIDE" != rust ]] || : > "$call/native-owner-source"
 oracle_before "$call" "$payload"
 if [[ "$FAULT" == unread-meta ]]; then
   : > "$call/record-unread"

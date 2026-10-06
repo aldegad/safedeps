@@ -292,6 +292,8 @@ oracle_before() {
     cp "${file}" "${call}/journal/${id}.json"
     oracle_owner_state "$(jq -r '.pid // empty' "${file}" 2>/dev/null)" "$(jq -r '.opened_at // empty' "${file}" 2>/dev/null)" \
       > "${call}/journal/${id}.owner"
+    python3 "${ORACLE_READ}" process-stat "$(jq -r '.pid // empty' "${file}" 2>/dev/null)" \
+      > "${call}/journal/${id}.process-stat" || :
   done
 }
 
@@ -906,10 +908,20 @@ oracle_line() {
       O_SAW_OWNER=1
       state=$(cat "${O_CALL}/journal/${O_JOURNAL_ID}.owner" 2>/dev/null)
       local pid; pid=$(jq -r '.pid // empty' "${O_CALL}/journal/${O_JOURNAL_ID}.json" 2>/dev/null)
+      if [[ -f "${O_CALL}/native-owner-source" && "${fact}" == *ps* ]]; then
+        oracle_red "a native owner report claims a ps observation"; return 0
+      fi
       case "${fact}" in
         "pid ${pid} is not running") expected=not-running ;;
         "pid ${pid} is a zombie (ps state "*")") expected=zombie ;;
         "pid ${pid} is stopped (ps state "*")") expected=stopped ;;
+        "pid ${pid} is a zombie (process state "*")") expected=zombie ;;
+        "pid ${pid} is stopped (process state "*")") expected=stopped ;;
+        "native process query supplied no usable owner data for pid ${pid}")
+          expected=native-query-failed
+          python3 "${ORACLE_READ}" native-query-failure "${O_CALL}/native-query-failure.json" "${pid}" \
+            || oracle_red "the fixture records no failed native query for this owner"
+          ;;
         "pid ${pid} started after the journal was opened") expected=later ;;
         "the journal records no pid") expected=no-pid ;;
         "ps gives no start time for pid ${pid}") expected=no-start ;;
@@ -918,7 +930,15 @@ oracle_line() {
         *) oracle_red "a line outside the grammar"; return 0 ;;
       esac
       oracle_count "owner-${expected}"
-      [[ "${state}" == "${expected}" ]] || oracle_red "the owner this file read before the hook is '${state}'"
+      if [[ "${fact}" == *' (process state '* ]]; then
+        local observed_stat; observed_stat=$(cat "${O_CALL}/journal/${O_JOURNAL_ID}.process-stat" 2>/dev/null)
+        local owner_word=stopped; [[ "${expected}" != zombie ]] || owner_word='a zombie'
+        [[ "${fact}" == "pid ${pid} is ${owner_word} (process state ${observed_stat})" ]] \
+          || oracle_red "the native owner status differs from the independent process observation"
+      fi
+      if [[ "${expected}" != native-query-failed ]]; then
+        [[ "${state}" == "${expected}" ]] || oracle_red "the owner this file read before the hook is '${state}'"
+      fi
       if [[ "${expected}" == stopped ]]; then
         [[ "${O_JOURNAL_HEAD}" == stopped ]] || oracle_red "a stopped owner under a headline that says the rollback did not finish"
       else
@@ -953,6 +973,10 @@ oracle_line() {
       oracle_count file-line
       [[ "${BASH_REMATCH[1]}" != "Details log" ]] || oracle_red "a Details log line in an unfinished-rollback report"
       [[ -f "${BASH_REMATCH[2]}" ]] || oracle_red "no such file"
+      if [[ "${BASH_REMATCH[1]}" == 'Incident record' && -f "${O_CALL}/native-owner-source" ]]; then
+        cmp -s "${BASH_REMATCH[2]}" "${O_CALL}/journal/${O_JOURNAL_ID}.json" \
+          || oracle_red "the native owner incident differs from the recorded journal"
+      fi
       else
       oracle_path_fact "${line}" || rc=$?
       if [[ ${rc} -eq 2 || "${O_SECTION}" != checked ]]; then

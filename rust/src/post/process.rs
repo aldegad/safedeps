@@ -16,6 +16,7 @@ fn info(pid:i32)->Option<(Vec<u8>,i64)>{
     // PROC_PIDTBSDINFO needs nonzero arg to include zombies. xnu's
     // bsd/kern/proc_info.c sets findzomb only when this arg is nonzero.
     if unsafe{proc_pidinfo(pid,3,1,&mut b as *mut _ as *mut _,size)}!=size{return None}
+    if b.pid!=pid as u32 || b.start_usec>=1_000_000 || b.start_sec>i64::MAX as u64{return None}
     let mut status=vec![match b.status{4=>b'T',5=>b'Z',_=>b'R'}];
     // ps/print.c state(), with PROC_FLAG_* from sys/proc_info.h.
     // https://github.com/apple-oss-distributions/adv_cmds/blob/main/ps/print.c
@@ -60,10 +61,10 @@ pub fn owner(pid:&[u8],opened:&[u8])->(i32,Vec<u8>){
     if pid.is_empty() || !pid.iter().all(u8::is_ascii_digit){return(1,b"the journal records no pid".to_vec())}
     let n=std::str::from_utf8(pid).ok().and_then(|p|p.parse::<i32>().ok());
     if n.is_none_or(|n|unsafe{kill(n,0)}!=0){return(1,cat(&[b"pid ",pid,b" is not running"]))}
-    let Some((st,start))=info(n.unwrap())else{return(1,cat(&[b"ps gives no start time for pid ",pid]))};
-    if st.first()==Some(&b'Z'){return(1,cat(&[b"pid ",pid,b" is a zombie (ps state ",&st,b")"]))}
+    let Some((st,start))=info(n.unwrap())else{return(1,cat(&[b"native process query supplied no usable owner data for pid ",pid]))};
+    if st.first()==Some(&b'Z'){return(1,cat(&[b"pid ",pid,b" is a zombie (process state ",&st,b")"]))}
     let Some(at)=std::str::from_utf8(opened).ok().and_then(ledger::epoch)else{return(1,b"the opening time of the journal cannot be parsed".to_vec())};
     if start>at{return(1,cat(&[b"pid ",pid,b" started after the journal was opened"]))}
-    if matches!(st.first(),Some(&b'T')|Some(&b't')){return(2,cat(&[b"pid ",pid,b" is stopped (ps state ",&st,b")"]))}
+    if matches!(st.first(),Some(&b'T')|Some(&b't')){return(2,cat(&[b"pid ",pid,b" is stopped (process state ",&st,b")"]))}
     (0,cat(&[b"pid ",pid,b" is running"]))
 }
