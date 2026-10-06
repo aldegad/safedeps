@@ -19,7 +19,10 @@
 # An unclassified move exits 1: a move nobody can name is the thing to look at.
 #
 # Usage:
-#   scripts/measure/tuple-replay.sh <baseline-ref|baseline-dir> [--random N] [--seed S]
+#   scripts/measure/tuple-replay.sh <baseline-ref|baseline-dir> [--random N] [--seed S] [--jobs N]
+#
+# --jobs is how many commands are replayed at once (default 8); a shared test
+# host takes 2 or fewer.
 #
 # The baseline is extracted with `git archive`, never checked out as a
 # worktree (see scan-verdict-replay.sh for why).
@@ -33,10 +36,12 @@ BASELINE="${1:-}"
 shift
 RANDOM_COUNT=200
 SEED=20261002
+JOBS=8
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --random) RANDOM_COUNT="${2:-200}"; shift 2 ;;
     --seed) SEED="${2:-20261002}"; shift 2 ;;
+    --jobs) JOBS="${2:-8}"; shift 2 ;;
     *) printf 'tuple-replay: unknown argument %s\n' "$1" >&2; exit 2 ;;
   esac
 done
@@ -142,7 +147,7 @@ TOTAL=$(jq 'length' "${WORK}/all.json")
 printf 'safedeps tuple replay\n  baseline %s -> current %s\n  corpus %s committed + %s generated (seed %s) = %s commands\n\n' \
   "${BASELINE_SHA}" "${CURRENT_SHA}" "$(jq 'length' scripts/measure/tuple-corpus.json)" "${RANDOM_COUNT}" "${SEED}" "${TOTAL}"
 
-# Eight at a time; each command gets its own homes.
+# JOBS at a time; each command gets its own homes.
 mkdir -p "${WORK}/out"
 for ((idx = 0; idx < TOTAL; idx++)); do
   (
@@ -150,7 +155,7 @@ for ((idx = 0; idx < TOTAL; idx++)); do
     printf '%s\n%s\n' "$(tuple "${BASE_TREE}" "${command_text}")" "$(tuple "${REPO_DIR}" "${command_text}")" \
       > "${WORK}/out/${idx}"
   ) &
-  (( (idx + 1) % 8 == 0 )) && wait
+  (( (idx + 1) % JOBS == 0 )) && wait
 done
 wait
 

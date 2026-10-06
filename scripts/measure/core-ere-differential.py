@@ -98,14 +98,14 @@ def main():
         g = subprocess.run(["grep"] + flags + [p, path], capture_output=True, env=dict(os.environ, LC_ALL="C"))
         if g.returncode > 1:
             sys.exit("core-ere-differential: grep failed on pattern %d: %r" % (k, g.stderr[:300]))
-        want = set(int(x.split(b":", 1)[0]) for x in g.stdout.splitlines() if x)
+        want = set(int(x.split(b":", 1)[0]) for x in g.stdout.split(b"\n") if x)
         cp = p
         if a.control and k == 0:
             cp = p.replace("|poetry", "", 1)
         c = subprocess.run([core, "grep", "-n"] + (["-i"] if icase else []) + [cp], stdin=open(path, "rb"), capture_output=True)
         if c.returncode > 1:
             sys.exit("core-ere-differential: core grep failed on pattern %d: %r" % (k, c.stderr[:300]))
-        got = set(int(x.split(b":", 1)[0]) for x in c.stdout.splitlines() if x)
+        got = set(int(x.split(b":", 1)[0]) for x in c.stdout.split(b"\n") if x)
         diff = sorted(want ^ got)
         print("  pattern %d (%s, %d chars): grep %d lines, core %d, differ %d" % (k, "icase" if icase else "case", len(p), len(want), len(got), len(diff)))
         for n in diff[:8]:
