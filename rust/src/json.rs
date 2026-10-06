@@ -184,8 +184,31 @@ impl<'a> P<'a> {
     }
 }
 
+/// All values of a JSON stream, as jq reads ledger files. An unreadable
+/// stream is an error, never an empty list of approvals.
+pub fn parse_stream(s: &[u8]) -> Result<Vec<Value>, String> {
+    let mut p = P { s, i: 0 };
+    let mut out = Vec::new();
+    loop {
+        p.ws();
+        if p.i == s.len() { return Ok(out); }
+        out.push(p.value()?);
+    }
+}
+
 pub fn parse(s: &[u8]) -> Result<Value, String> {
     let mut p = P { s, i: 0 };
     let v = p.value()?;
+    Ok(v)
+}
+
+/// One JSON text, with nothing after it but blanks.
+pub fn parse_one(s: &[u8]) -> Result<Value, String> {
+    let mut p = P { s, i: 0 };
+    let v = p.value()?;
+    p.ws();
+    if p.i != s.len() {
+        return Err("text after the value".into());
+    }
     Ok(v)
 }

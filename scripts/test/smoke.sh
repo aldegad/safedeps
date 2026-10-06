@@ -54,6 +54,15 @@ pkg_version=$(jq -r '.version' package.json)
 [[ "$(jq -r '.version' <<< "${version_json}")" == "${pkg_version}" ]] || fail "cli version matches package.json (${pkg_version})"
 pass "cli version"
 
+# The core's crate is the third place the version is written: `safedeps-core
+# version` prints it, so a release that bumped the other two would ship a
+# binary that names the old one.
+crate_version=$(awk -F'"' '/^version = "/ { print $2; exit }' rust/Cargo.toml)
+[[ "${crate_version}" == "${pkg_version}" ]] || fail "rust/Cargo.toml version (${crate_version}) matches package.json (${pkg_version})"
+lock_version=$(awk -F'"' '/^name = "safedeps-core"$/ { hit = 1; next } hit && /^version = "/ { print $2; exit }' rust/Cargo.lock)
+[[ "${lock_version}" == "${pkg_version}" ]] || fail "rust/Cargo.lock names safedeps-core ${lock_version}, package.json ${pkg_version}"
+pass "crate version"
+
 # The guard clamps its self budget below the runtime hook budget, and it cannot
 # read that budget at runtime — the payload does not carry it and any of several
 # settings files may have registered the hook. So it names the number safedeps

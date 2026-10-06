@@ -527,6 +527,78 @@ impl<'r> Reader<'r> {
         true
     }
 
+    /// What `inert_statement_reads` asks of npm's tables about the words
+    /// after `npm`: one entry per npm whose reading differs (the plain one,
+    /// then the other npm's when an option it defines differently is named),
+    /// each the last value ignore-scripts takes (`unset` when nothing sets
+    /// it) and everything else the reading found, spelled as the shell
+    /// function spells `INERT_READ_REST`. None where a reading does not
+    /// close, which the caller reads as a statement nobody read.
+    pub fn npm_inert_reading(&mut self, args: &[W]) -> Option<Vec<(String, W)>> {
+        let mut out = Vec::new();
+        for k in ["plain", "other"] {
+            if k == "other" {
+                if !self.npm_other_applies(args) {
+                    break;
+                }
+                let saved = self.npm_options.clone();
+                self.npm_options = self.options_as_other();
+                let ok = self.npm_read_args(args);
+                self.npm_options = saved;
+                if !ok {
+                    return None;
+                }
+            } else if !self.npm_read_args(args) {
+                return None;
+            }
+            let mut last = "unset".to_string();
+            let mut rest: W = k.as_bytes().to_vec();
+            for (key, v) in &self.npm_switches {
+                let v = if *v { "true" } else { "false" };
+                if key.as_slice() == b"ignore-scripts" {
+                    last = v.to_string();
+                } else {
+                    rest.push(0x1e);
+                    rest.extend_from_slice(b"s:");
+                    rest.extend_from_slice(key);
+                    rest.push(b'=');
+                    rest.extend_from_slice(v.as_bytes());
+                }
+            }
+            for w in &self.npm_words {
+                rest.push(0x1e);
+                rest.extend_from_slice(b"w:");
+                rest.extend_from_slice(w);
+            }
+            for (_, key, val) in &self.npm_values {
+                rest.push(0x1e);
+                rest.extend_from_slice(b"v:");
+                rest.extend_from_slice(key);
+                rest.push(0x1f);
+                rest.extend_from_slice(val);
+            }
+            out.push((last, rest));
+        }
+        Some(out)
+    }
+
+    /// safedeps_npm_ask_words_end: a flag appended to these words must stay
+    /// an option in both npm readings, never an operand or option value.
+    pub fn npm_ask_words_end(&mut self, args: &[W]) -> bool {
+        let probe = b"--safedeps-ask-probe".to_vec();
+        let mut words = args.to_vec();
+        words.push(probe.clone());
+        for other in [false, true] {
+            if other && !self.npm_other_applies(args) { break; }
+            let saved = self.npm_options.clone();
+            if other { self.npm_options = self.options_as_other(); }
+            let ok = self.npm_read_args(&words);
+            self.npm_options = saved;
+            if !ok || self.npm_words.contains(&probe) || self.npm_values.iter().any(|(_, _, v)| v == &probe) { return false; }
+        }
+        true
+    }
+
     fn npm_other_applies(&self, words: &[W]) -> bool {
         let t = tables::NPM_OTHER.as_bytes();
         for word in words {

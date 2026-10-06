@@ -905,14 +905,19 @@ alex-macbook-m1 과 carenine 은 macOS 15.6, bash 3.2.57 이다. M1 은 실행�
 
 ### 배포 방식 (안)
 
-- **패키지 안에 플랫폼마다 바이너리 하나**, `bin/native/<os>-<arch>/safedeps-core` 에 둔다. 패키지는 이미 `bin/` 을 싣기 때문에 `files` 가 바뀌지 않고, 의존성도 늘지 않는다. 플랫폼별 optional 패키지는 의존성이고 release gate 가 그것을 센다.
+- **패키지 안에 플랫폼마다 바이너리 하나**, `bin/native/<os>-<arch>/safedeps-core` 에 둔다: darwin-arm64, darwin-x64, linux-x64. 패키지는 이미 `bin/` 을 싣기 때문에 `files` 가 바뀌지 않고, 의존성도 늘지 않는다. 플랫폼별 optional 패키지는 의존성이고 release gate 가 그것을 센다.
 - **Linux 는 정적 링크.** linux-x64 바이너리는 musl 대상으로 빌드해 정적으로 링크하므로 호스트의 libc 에 기대지 않는다. WSL1 이 돌리는 바이너리가 이것이다. 두 바이너리 모두 맥 한 대에서 빌드했다: darwin-arm64 는 `cargo build --release`, linux-x64 는 `--target x86_64-unknown-linux-musl` 에 linker 로 `rust-lld`.
 - **entry shim 의 계약은 그대로다.** shim 은 지금 `bash <hook>` 을 돌리는 자리에서 바이너리를 돌리게 된다. 바이너리는 설계된 모든 경로에서 0 으로 끝나고 결정은 JSON 으로 나간다. panic 에는 abort 하므로, 다른 종료 코드는 여전히 hook 이 온전치 않다는 뜻이고 shim 은 그것을 설명 붙은 deny 로 바꾼다. 바이너리가 없거나, 실행할 수 없거나, 그 플랫폼용이 없으면 그렇다고 말하는 deny 가 된다. bash guard 로 떨어지는 일은 없다. 권위가 둘이면 서로 어긋나고, 조용한 두 번째 권위는 no-silent-fallback 규칙이 금하는 바로 그것이다. shim 은 플랫폼을 bash 자체의 `OSTYPE`, `HOSTTYPE` 에서 읽게 되므로 바이너리를 찾느라 프로세스를 띄우지 않는다.
-- **바이너리를 어디서 빌드할지는 owner 의 결정이다.** tag 된 소스에서 publish job 이 빌드하고 우리 호스트의 빌드와 대조하거나, 우리 호스트에서 빌드해 커밋할 수 있다. 앞의 방식은 바이너리를 git 밖에 두고 provenance 아래에 두며, 그 job 에 macOS runner 가 필요하다.
+- **publish job 이 tag 된 소스에서 빌드한다** (owner, 2026-10-06). 바이너리는 저장소에 커밋하지 않는다. tag 를 게시하는 run 이 바이너리를 먼저 빌드하므로, npm 이 붙이는 provenance 가 그 바이너리를 빌드한 run 을 가리킨다. `publish.yml` 은 아직 이렇게 하지 않는다. 계획은 이렇다:
+  - macOS runner 의 build job 이 세 대상을 모두 빌드한다. darwin 바이너리의 링크에는 Apple 의 SDK 가 필요해서 Linux runner 는 그 둘을 빌드하지 못한다. build job 은 게시 자격을 갖지 않는다.
+  - 빌드는 `cargo build --release --locked --offline` 이다. 받을 crate 가 없으니 offline 으로 성공하고, 나중에 의존성이 추가되면 거기서 실패한다.
+  - publish job 은 build job 의 바이너리를 받아, 그 job 이 쓴 목록과 digest 를 대조하고, 실행 비트를 되살리고, linux-x64 바이너리를 실행해 본다. `publish.yml` 은 파일 이름과 `npm-publish` environment 를 그대로 둔다. npmjs.com 의 trusted publisher 가 그 둘을 이름으로 가리키기 때문이다.
+  - 다시 읽기는 게시된 파일 목록을, 바이너리를 놓은 뒤 job 의 트리에서 낸 `npm pack --dry-run` 과 비교한다. tag 의 트리에는 바이너리가 없기 때문이다. 게시된 tarball 에 바이너리가 각각 들어 있고, 실행 비트가 있고, digest 가 빌드한 것과 같은지도 확인한다.
+- **checkout 에는 거기서 빌드하기 전까지 바이너리가 없다.** 설치된 hook 은 checkout 을 가리키는 symlink 다. 그 checkout 에서 누가 바이너리를 빌드할지, 소스보다 오래된 바이너리를 어떻게 잡을지는 아직 정하지 않았다.
 
 `scripts/measure/core-pack-probe.sh` 가 앞의 두 항목을 npm 으로 직접 확인한다. 바이너리를 넣은 트리 사본을 pack 하고, tarball 을 sandbox 프로젝트에 offline 으로 install 한 뒤, 설치된 바이너리를 실행한다. macOS(darwin-arm64, npm 11.19.0)와 WSL1(linux-x64, npm 10.9.8)에서: 패키지는 의존성을 하나도 이름 붙이지 않고, `npm pack` 은 바이너리를 싣되 `rust/` 는 싣지 않으며, 실행 비트는 install 뒤에도 남고, 설치된 바이너리는 pack 한 것과 바이트 단위로 같다.
 
-재지 않은 것: Intel Mac 바이너리와 arm64 Linux 바이너리.
+재지 않은 것: Intel Mac 바이너리와 arm64 Linux 바이너리. darwin-x64 바이너리는 위 빌드 목록에 있고, 아직 빌드하지도 실행하지도 않았다.
 
 ### 옮기는 순서, 그리고 bash guard 가 은퇴하는 때
 
