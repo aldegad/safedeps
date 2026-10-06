@@ -90,9 +90,9 @@ pass() { printf 'ok - %s\n' "$1"; }
 fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
 
 # Rows for --shard I/M (scripts/test/lib/shard.sh): each input of the sections
-# that judge many inputs one at a time: the view properties, the event
-# contract and the word ends (346, 165 and over 100 seconds of a run on
-# carenine at load 7 to 17). The other
+# that judge many inputs one at a time: the view properties, the random
+# statement views, the event contract and the word ends (346, 92, 165 and over
+# 200 seconds of a run on carenine at load 7 to 17). The other
 # checks run whole in every shard. A random input is drawn before its row is
 # decided, so every shard draws the same inputs from the same seed.
 # shellcheck source=lib/shard.sh
@@ -1591,6 +1591,7 @@ for reading in bash zsh dash; do
     for ((k = 0; k < len; k++)); do
       input+="${heredoc_alphabet[RANDOM % ${#heredoc_alphabet[@]}]}"
     done
+    shard_row "stmts view: ${reading} random ${c}" || continue
     sv=$(SAFEDEPS_READING="${reading}" capture scan_view "${input}"); tv=$(SAFEDEPS_READING="${reading}" capture stmts_view "${input}")
     LC_ALL=C
     for ((k = 0; k < ${#sv}; k++)); do
@@ -1626,6 +1627,7 @@ for reading in bash zsh dash; do
       input+="${grammar_words[RANDOM % ${#grammar_words[@]}]}"
       (( RANDOM % 4 )) && input+=" "
     done
+    shard_row "stmts view: ${reading} grammar ${c}" || continue
     SAFEDEPS_READING="${reading}" reading_closes "${input}" || continue
     grammar_closed=$((grammar_closed + 1))
     once=$(SAFEDEPS_READING="${reading}" stmts_view "${input}"; printf 'X'); once="${once%X}"
@@ -1637,7 +1639,8 @@ for reading in bash zsh dash; do
   done
 done
 [[ ${grammar_failures} -eq 0 ]] || fail "stmts view: ${grammar_failures} of ${grammar_closed} closed readings of grammar words not idempotent (seed ${fuzz_seed})"
-[[ ${grammar_closed} -gt $((fuzz_cases * 3 / 4)) ]] || fail "stmts view: only ${grammar_closed} of $((fuzz_cases * 3)) grammar-word readings closed, too few to say anything"
+# A shard's floor is its share of the inputs, as for the event contract.
+[[ $(( grammar_closed * SHARD_M )) -gt $((fuzz_cases * 3 / 4)) ]] || fail "stmts view: only ${grammar_closed} of $((fuzz_cases * 3)) grammar-word readings closed, too few to say anything"
 pass "stmts view: idempotent and length-preserving on ${grammar_closed} closed readings of $((fuzz_cases * 3)) random grammar-word inputs (bash, zsh, dash)"
 
 # --- the event contract -----------------------------------------------------------
