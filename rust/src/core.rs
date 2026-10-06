@@ -242,9 +242,11 @@ impl<'c> Run<'c> {
     /// The texts `text` hands on at its own top level, each with where its
     /// bytes stand in `text`: the scripts it gives `sh -c` and `eval` (the
     /// cscripts view) and the bodies of its substitutions (the substs view).
-    /// One level: a payload's own payloads are read by asking this of the
-    /// payload. The records are the ones `lex_payloads` reads, so a payload
-    /// here is byte for byte a payload there.
+    /// One level: a substitution nested in another substitution is returned
+    /// only when this is called on the enclosing payload. Order is cscripts
+    /// first, then substitutions, in input-start order within each group.
+    /// Bodies use the same units as the text views, but preserve the source
+    /// map before compression. Arithmetic itself is not a payload.
     pub fn payloads(&mut self, text: &[u8]) -> Vec<Payload> {
         let Some(rd) = self.reading else { self.failed = true; return Vec::new(); };
         let mut res = Vec::new();

@@ -315,6 +315,7 @@ pub struct Lex<'g> {
     sbeg: Vec<I>,
     send: Vec<I>,
     skind: Vec<u8>,
+    sparent: Vec<I>,
     i: I,
     cls: u8,
     hasbrace: bool,
@@ -465,6 +466,7 @@ impl<'g> Lex<'g> {
             sbeg: vec![0; 2],
             send: vec![0; 2],
             skind: vec![0; 2],
+            sparent: vec![0; 2],
             i: 0,
             cls: UNSET,
             hasbrace,
@@ -2248,10 +2250,13 @@ impl<'g> Lex<'g> {
                 self.sbeg.resize(ns + 1, 0);
                 self.send.resize(ns + 1, 0);
                 self.skind.resize(ns + 1, 0);
+                self.sparent.resize(ns + 1, 0);
             }
             self.sbeg[ns] = i + 1;
             self.send[ns] = self.n;
             self.skind[ns] = k;
+            self.sparent[ns] = (1..d).rev().find(|&at| matches!(self.ctx[at as usize].kind, b'S' | b'B'))
+                .map(|at| self.ctx[at as usize].sid).unwrap_or(0);
             self.ctxd(d).sid = ns as I;
         }
     }
@@ -3053,6 +3058,7 @@ impl<'g> Lex<'g> {
                 }
                 if rest != 0 {
                     if sv.iter().any(|&b| b == b'$' || b == b'`') {
+                        if self.payloads.is_some() { self.smfail = true; }
                         self.put(b"!\n");
                         break;
                     }
@@ -3145,7 +3151,9 @@ impl<'g> Lex<'g> {
                 b'P' => PayloadOrigin::ProcessSubstitution,
                 _ => PayloadOrigin::CommandSubstitution,
             };
-            self.capture_payload(b'B', &su, origin, None);
+            // The structural API is one level. The legacy textual substs
+            // view still lists all bodies, as the bash reference does.
+            if self.sparent[k] == 0 { self.capture_payload(b'B', &su, origin, None); }
             out.push(b'B');
             out.extend_from_slice(self.runs(&su).as_bytes());
             out.push(b'\n');
