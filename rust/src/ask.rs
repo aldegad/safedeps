@@ -146,6 +146,7 @@ pub fn query(dir: &Path, until: Instant) -> Result<Answer, String> {
     Ok(a)
 }
 
+#[derive(Clone)]
 pub struct Target { pub location: W, pub fetch: Value }
 fn no_target(why: &str, fetch: Value) -> Target { Target { location: format!("?\t{}", why).into_bytes(), fetch } }
 fn last_line(b: &[u8]) -> W {
