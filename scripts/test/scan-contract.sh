@@ -2400,6 +2400,11 @@ lex_form "sh -c \"sh -c 'echo ${gs}; pip install evil==6.6.6'\"" "sh -c 'echo ${
 lex_form "sh -c 'x=\$(echo \"${gs}\"; pip install evil==6.6.6)'" "x=\$(echo \"${gs}\"; pip install evil==6.6.6)" "echo \"${gs}\"; pip install evil==6.6.6"
 lex_form $'sh -c $\'echo a\\npip install evil==6.6.6\'' $'echo a\npip install evil==6.6.6'
 lex_form "sh -c 'x=\$(npm ci)'" 'x=$(npm ci)' 'npm ci'
+# A substitution body holding npm and a glued `}`: the inert rewrite reads it
+# as a payload, at its own top level (inert_subst_bodies), the one in a
+# backtick body with its escaping backslashes taken out, as the shell reads it.
+lex_form 'npm ci; x=$( { npm ci --ignore-scripts=false} )' ' { npm ci --ignore-scripts=false} '
+lex_form 'echo `echo \`{ npm ci}\``' 'echo `{ npm ci}`' '{ npm ci}'
 # A quoted byte the shell reads as an operator once a handed-on script removes
 # the quotes: the inert record reads the byte rule's levels (the stated
 # exception above).

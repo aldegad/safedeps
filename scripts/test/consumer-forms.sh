@@ -1735,29 +1735,20 @@ expect_rewrite "npm ci before an opening backtick" 'npm ci`echo x`' '(no rewrite
 expect_rewrite "npm ci closed by a glued }"        '{ npm ci}'          '{ npm ci --ignore-scripts}'
 expect_rewrite "npm ci closed by a glued } and &&" '{ npm ci}&& echo x' '{ npm ci --ignore-scripts}&& echo x'
 # In backticks or in `$(...)` the group is decided where the body is read as
-# a payload, at its own top level: an install to the recognizers there. The
-# rewrite reads the command, where a glued `}` nested in a body is a character
-# (group_close in shell_lex), so it places no flag there, and the install is a
-# recorded downgrade rather than a rewrite or a silent pass. That holds beside
-# an install the rewrite reaches too: the command keeps that rewrite, and the
-# nested install is recorded as kept to the floor (inert_nested_verb_ends).
-# There the rewrite used to read as done, and zsh ran the nested install's
-# scripts with nothing recorded (verdict tookdaki-20261006-112251, R1).
-expect_recorded_downgrade() {
-  shard_row "expect_recorded_downgrade|$1|$2" || return 0
-  local label="$1" command="$2" safe out
-  safe=$(mktemp -d "${tmp_root}/safe.XXXXXX")
-  out=$(jq -nc --arg c "${command}" --arg cwd "${project_dir}" \
-    '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
-    HOME="${tmp_root}/home" SAFEDEPS_HOME="${safe}" scripts/safedeps-pre-guard.sh 2>/dev/null)
-  if [[ -n "${out}" ]] || ! grep -q 'could not make every npm install in this command inert' "${safe}/advisory.log" 2>/dev/null; then
-    fail "${label} is a recorded downgrade (got: ${out:-pass}, advisory: $(head -3 "${safe}/advisory.log" 2>/dev/null))"
-  fi
-}
-expect_recorded_downgrade "npm ci in backticks closed by a glued }" 'echo `{ npm ci}`'
-expect_recorded_downgrade "npm ci in a substitution closed by a glued }" 'x=$( { npm ci} )'
-expect_rewrite_recorded() {
-  shard_row "expect_rewrite_recorded|$1|$2|$3" || return 0
+# a payload, at its own top level, and the rewrite reads the body there too
+# (inert_subst_bodies): the flag goes before the glued `}`, as at the top
+# level, and zsh runs the install with it. The rewrite used to read such a
+# body as part of the command, where the `}` is a character. With the `}` on
+# the verb, the install got no flag and only a record (verdict
+# tookdaki-20261006-112251, R1). With the `}` on the last word, the statement
+# read as already true, since npm reads `false}` as true, and passed with no
+# flag and no record, and zsh ran its scripts (verdict
+# tookdaki-20261006-135807, R2). Each row names the whole rewrite, and none of
+# them may leave an install to the floor or drop the rewrite: every row but
+# the settled ones was a pass, a floor or a downgrade on the tree before this
+# reading.
+expect_rewrite_read() {
+  shard_row "expect_rewrite_read|$1|$2|$3" || return 0
   local label="$1" command="$2" want="$3" safe out got
   safe=$(mktemp -d "${tmp_root}/safe.XXXXXX")
   out=$(jq -nc --arg c "${command}" --arg cwd "${project_dir}" \
@@ -1765,25 +1756,128 @@ expect_rewrite_recorded() {
     HOME="${tmp_root}/home" SAFEDEPS_HOME="${safe}" scripts/safedeps-pre-guard.sh 2>/dev/null)
   got="(no rewrite)"
   [[ -z "${out}" ]] || got=$(jq -r '.hookSpecificOutput.updatedInput.command // "(no rewrite)"' <<< "${out}")
-  [[ "${got}" == "${want}" ]] || fail "${label} keeps the rewrite of the visible install [${want}] (got: [${got}])"
-  grep -q 'has no place where safedeps could read npm keeping --ignore-scripts true' "${safe}/advisory.log" 2>/dev/null \
-    || fail "${label} records the nested install as a downgrade (advisory: $(head -3 "${safe}/advisory.log" 2>/dev/null))"
+  [[ "${got}" == "${want}" ]] || fail "${label} is rewritten to [${want}] (got: [${got}])"
+  ! grep -qE 'has no place where safedeps could read npm keeping|could not make every npm install in this command inert' "${safe}/advisory.log" 2>/dev/null \
+    || fail "${label} reads the nested install, with no floor or downgrade (advisory: $(head -3 "${safe}/advisory.log" 2>/dev/null))"
 }
-expect_rewrite_recorded "npm ci in backticks closed by a glued }, before a visible npm ci" \
-  'echo `{ npm ci}`; npm ci' 'echo `{ npm ci}`; npm ci --ignore-scripts'
-expect_rewrite_recorded "npm ci in a substitution closed by a glued }, after a visible npm ci" \
-  'npm ci; x=$( { npm ci} )' 'npm ci --ignore-scripts; x=$( { npm ci} )'
-expect_rewrite_recorded "npm ci in a function body closed by a glued } in a substitution, after a visible npm ci" \
-  'npm ci; x=$(function f { npm ci}; f)' 'npm ci --ignore-scripts; x=$(function f { npm ci}; f)'
-expect_rewrite_recorded "npm ci in a repeat group closed by a glued } in backticks, after a visible npm ci" \
-  'npm ci && echo `repeat 1 { npm ci}`' 'npm ci --ignore-scripts && echo `repeat 1 { npm ci}`'
-# Beside an install whose own arguments already leave ignore-scripts true, and
-# that the release left as written, the rewrite has nothing left to place: the
-# command is a recorded downgrade, never one whose installs all read as inert.
-# (`--ignore-scripts;` the release rewrote, so that form is a rewrite above.)
-expect_recorded_downgrade "npm ci in backticks closed by a glued }, after an npm ci that carries the flag" \
-  'npm ci --ignore-scripts && echo `{ npm ci}`'
-pass "an npm install glued to a } nested in a substitution is a recorded downgrade, alone or beside an install the rewrite reaches"
+# The reported forms: the `}` on the verb (R1), alone, beside a visible install
+# and beside one that already carries the flag.
+expect_rewrite_read "npm ci in backticks closed by a glued }" \
+  'echo `{ npm ci}`' 'echo `{ npm ci --ignore-scripts}`'
+expect_rewrite_read "npm ci in a substitution closed by a glued }" \
+  'x=$( { npm ci} )' 'x=$( { npm ci --ignore-scripts} )'
+expect_rewrite_read "npm ci in backticks closed by a glued }, before a visible npm ci" \
+  'echo `{ npm ci}`; npm ci' 'echo `{ npm ci --ignore-scripts}`; npm ci --ignore-scripts'
+expect_rewrite_read "npm ci in a substitution closed by a glued }, after a visible npm ci" \
+  'npm ci; x=$( { npm ci} )' 'npm ci --ignore-scripts; x=$( { npm ci --ignore-scripts} )'
+expect_rewrite_read "npm ci in a function body closed by a glued } in a substitution, after a visible npm ci" \
+  'npm ci; x=$(function f { npm ci}; f)' 'npm ci --ignore-scripts; x=$(function f { npm ci --ignore-scripts}; f)'
+expect_rewrite_read "npm ci in backticks closed by a glued }, after an npm ci that carries the flag" \
+  'npm ci --ignore-scripts && echo `{ npm ci}`' 'npm ci --ignore-scripts && echo `{ npm ci --ignore-scripts}`'
+# zsh alone reads `repeat 1 {`, so the readings put the install in different
+# places, as they do at the top level (`repeat 1 { npm ci}` is UNDECIDED). It
+# used to keep the visible install's rewrite and record the nested one.
+expect_undecided "npm ci in a repeat group closed by a glued } in backticks, after a visible npm ci" \
+  'npm ci && echo `repeat 1 { npm ci}`'
+# The `}` on the last word (R2), one row per substitution kind: npm read
+# `--ignore-scripts=false}` as true, and none of these had a flag where zsh
+# runs the install.
+r2='npm ci --ignore-scripts=false'
+r2w='npm ci --ignore-scripts --ignore-scripts=false --ignore-scripts'
+r2_cases=(
+  "\$( )|x=\$( { ${r2}} )|x=\$( { ${r2w}} )"
+  "backticks|echo \`{ ${r2}}\`|echo \`{ ${r2w}}\`"
+  "<( )|cat <( { ${r2}} )|cat <( { ${r2w}} )"
+  ">( )|echo x >( { ${r2}} )|echo x >( { ${r2w}} )"
+  "\"\$( )\"|echo \"\$( { ${r2}} )\"|echo \"\$( { ${r2w}} )\""
+  "\"\` \`\"|echo \"\`{ ${r2}}\`\"|echo \"\`{ ${r2w}}\`\""
+  "a function body|x=\$(function f { ${r2}}; f)|x=\$(function f { ${r2w}}; f)"
+  "a function body after f()|x=\$(f() { ${r2}}; f)|x=\$(f() { ${r2w}}; f)"
+  "an if body|x=\$(if true; then { ${r2}}; fi)|x=\$(if true; then { ${r2w}}; fi)"
+  "\$( ) in \$( )|x=\$(echo \$( { ${r2}} ))|x=\$(echo \$( { ${r2w}} ))"
+  "backticks in \$( )|x=\$(echo \`{ ${r2}}\`)|x=\$(echo \`{ ${r2w}}\`)"
+  "backticks in backticks|echo \`echo \\\`{ ${r2}}\\\`\`|echo \`echo \\\`{ ${r2w}}\\\`\`"
+  "a parameter default|echo \${x:-\$( { ${r2}} )}|echo \${x:-\$( { ${r2w}} )}"
+  "an eval script|eval 'x=\$( { ${r2}} )'|eval 'x=\$( { ${r2w}} )'"
+  "a word with more after it|echo \$( { ${r2}} ) done|echo \$( { ${r2w}} ) done"
+  "six substitutions deep|x=\$(echo \$(echo \$(echo \$(echo \$(echo \$( { ${r2}} ))))))|x=\$(echo \$(echo \$(echo \$(echo \$(echo \$( { ${r2w}} ))))))"
+)
+for r2_case in "${r2_cases[@]}"; do
+  IFS='|' read -r r2_label r2_in r2_want <<< "${r2_case}"
+  expect_rewrite_read "an npm install whose last word is glued to a } in ${r2_label}" "${r2_in}" "${r2_want}"
+done
+expect_rewrite_read "an npm install whose last word is glued to a } in a substitution in a heredoc body" \
+  $'cat <<E\n$( { npm ci --ignore-scripts=false} )\nE' $'cat <<E\n$( { npm ci --ignore-scripts --ignore-scripts=false --ignore-scripts} )\nE'
+# The other places a `}` stands in the statement. The flag goes before a
+# redirection, which is a word of the body's own top level, and before an
+# option that takes the next word as its value (`-C`).
+p_cases=(
+  "NPM spelled in capitals|x=\$( { NPM ci} )|x=\$( { NPM ci --ignore-scripts} )"
+  "an option|x=\$( { npm ci --ignore-scripts=false --silent} )|x=\$( { npm ci --ignore-scripts --ignore-scripts=false --silent --ignore-scripts} )"
+  "--no-ignore-scripts|x=\$( { npm ci --no-ignore-scripts} )|x=\$( { npm ci --ignore-scripts --no-ignore-scripts --ignore-scripts} )"
+  "an option that takes a value|x=\$( { npm ci --ignore-scripts=false -C} )|x=\$( { npm ci --ignore-scripts --ignore-scripts=false --ignore-scripts -C} )"
+  "a value|x=\$( { npm ci --ignore-scripts false} )|x=\$( { npm ci --ignore-scripts --ignore-scripts false --ignore-scripts} )"
+  "an option's value|x=\$( { npm ci --ignore-scripts=false --loglevel warn} )|x=\$( { npm ci --ignore-scripts --ignore-scripts=false --loglevel warn --ignore-scripts} )"
+  "a package|x=\$( { npm i --ignore-scripts=false x} )|x=\$( { npm i --ignore-scripts --ignore-scripts=false x --ignore-scripts} )"
+  "a redirection target|x=\$( { npm ci --ignore-scripts=false >f} )|x=\$( { npm ci --ignore-scripts --ignore-scripts=false --ignore-scripts >f} )"
+  "a descriptor's redirection target|x=\$( { npm ci --ignore-scripts=false 2>/dev/null} )|x=\$( { npm ci --ignore-scripts --ignore-scripts=false --ignore-scripts 2>/dev/null} )"
+)
+for p_case in "${p_cases[@]}"; do
+  IFS='|' read -r p_label p_in p_want <<< "${p_case}"
+  expect_rewrite_read "an npm install in a substitution with a } glued to ${p_label}" "${p_in}" "${p_want}"
+done
+# Beside a visible install: before it, before one that carries the flag, and
+# after it.
+expect_rewrite_read "the last word glued to a } in a substitution, after a visible npm ci" \
+  "npm ci; x=\$( { ${r2}} )" "npm ci --ignore-scripts; x=\$( { ${r2w}} )"
+expect_rewrite_read "the last word glued to a } in a substitution, after an npm ci that carries the flag" \
+  "npm ci --ignore-scripts; x=\$( { ${r2}} )" "npm ci --ignore-scripts; x=\$( { ${r2w}} )"
+expect_rewrite_read "the last word glued to a } in a substitution, before a visible npm ci" \
+  "x=\$( { ${r2}} ); npm ci" "x=\$( { ${r2w}} ); npm ci --ignore-scripts"
+# The validator's forms for the `}` on the last word, as written.
+g_cases=(
+  "G1|x=\$( { npm ci --ignore-scripts=false} )|x=\$( { ${r2w}} )"
+  "G2|npm ci; x=\$( { npm ci --ignore-scripts=false} )|npm ci --ignore-scripts; x=\$( { ${r2w}} )"
+  "G3|npm ci --ignore-scripts; x=\$( { npm ci --ignore-scripts=false} )|npm ci --ignore-scripts; x=\$( { ${r2w}} )"
+  "G4|npm ci; x=\$( { npm ci --ignore-scripts false} )|npm ci --ignore-scripts; x=\$( { npm ci --ignore-scripts --ignore-scripts false --ignore-scripts} )"
+  "G5|npm ci; x=\$( { npm ci --no-ignore-scripts} )|npm ci --ignore-scripts; x=\$( { npm ci --ignore-scripts --no-ignore-scripts --ignore-scripts} )"
+  "G7|echo \`{ npm ci --ignore-scripts=false}\`|echo \`{ ${r2w}}\`"
+  "G8|npm ci; echo \`{ npm ci --ignore-scripts=false}\`|npm ci --ignore-scripts; echo \`{ ${r2w}}\`"
+  "G9|npm ci; x=\$( { npm ci --ignore-scripts=false; } )|npm ci --ignore-scripts; x=\$( { ${r2w}; } )"
+  "G11|npm ci; zsh -c 'x=\$( { npm ci --ignore-scripts=false} )'|npm ci --ignore-scripts; zsh -c 'x=\$( { ${r2w}} )'"
+  "G12|npm ci; x=\$( { npm i --ignore-scripts=false} )|npm ci --ignore-scripts; x=\$( { npm i --ignore-scripts --ignore-scripts=false --ignore-scripts} )"
+  "G15|x=\$( { npm ci --ignore-scripts false} )|x=\$( { npm ci --ignore-scripts --ignore-scripts false --ignore-scripts} )"
+  "G16|npm ci --ignore-scripts; x=\$( { npm ci --no-ignore-scripts} )|npm ci --ignore-scripts --ignore-scripts; x=\$( { npm ci --ignore-scripts --no-ignore-scripts --ignore-scripts} )"
+  "G17|zsh -c '{ npm ci --ignore-scripts=false}'|zsh -c '{ ${r2w}}'"
+  "G18|npm ci; x=\$(function f { npm ci --ignore-scripts=false}; f)|npm ci --ignore-scripts; x=\$(function f { ${r2w}}; f)"
+  "G19|npm ci; cat <( { npm ci --ignore-scripts=false} )|npm ci --ignore-scripts; cat <( { ${r2w}} )"
+  "F12|npm ci --ignore-scripts; x=\$( { npm ci --ignore-scripts=false} )|npm ci --ignore-scripts; x=\$( { ${r2w}} )"
+)
+for g_case in "${g_cases[@]}"; do
+  IFS='|' read -r g_label g_in g_want <<< "${g_case}"
+  expect_rewrite_read "the validator's ${g_label}" "${g_in}" "${g_want}"
+done
+# G10 is the top-level form. G6, G13 and G14 leave the option true by their
+# own arguments: npm reads `--ignore-scripts=0` and `=null` as the switch with
+# its value as an operand, as nopt reads a boolean with a value other than
+# `true` or `false`. Each rewrite is its top-level twin's (`npm ci; { npm ci
+# --ignore-scripts=0}` and the like).
+expect_rewrite "the validator's G10" '{ npm ci --ignore-scripts=false}' "{ ${r2w}}"
+expect_rewrite "the validator's G6" 'npm ci; x=$( { npm ci --ignore-scripts=0} )' 'npm ci --ignore-scripts; x=$( { npm ci --ignore-scripts=0} )'
+expect_rewrite "the validator's G13" 'npm ci; x=$( { npm ci --ignore-scripts=null} )' 'npm ci --ignore-scripts; x=$( { npm ci --ignore-scripts=null} )'
+expect_rewrite "the validator's G14" 'npm ci; x=$( { npm ci --ignore-scripts} )' 'npm ci --ignore-scripts; x=$( { npm ci --ignore-scripts --ignore-scripts} )'
+# G20's `}` stands as a word. Its rewrite is the one before this reading and
+# its top-level twin's (`{ npm ci --ignore-scripts=false }`): a `}` that stands
+# as a word is no end, and the shell decides it at run time, so the flags go
+# after the verb and after the last word, and the install is recorded as one
+# whose flag nobody read. zsh parses no word after that `}` and runs none of
+# the command; bash refuses the substitution as written.
+expect_rewrite "the validator's G20" 'npm ci; x=$( { npm ci --ignore-scripts=false } )' "npm ci --ignore-scripts; x=\$( { ${r2w%" --ignore-scripts"} } --ignore-scripts )"
+# Its own arguments leave the option true, so there is nothing to place, as
+# at the top level.
+expect_rewrite "an npm install that sets the flag last, glued to a } in a substitution" \
+  'x=$( { npm ci --ignore-scripts=false --ignore-scripts} )' '(no rewrite)'
+pass "an npm install in a substitution body with a nested } is read where the body is read as a payload, and gets the flag before the }"
 expect_rewrite "npm ci after another statement in the group" '{ echo a; npm ci}' '{ echo a; npm ci --ignore-scripts}'
 # A line read on its own has lost the `{` of the line before it.
 expect_rewrite "npm ci on the line after the {" $'{\nnpm ci}' $'{\nnpm ci --ignore-scripts}'
