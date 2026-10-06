@@ -188,3 +188,122 @@ pub fn withheld_read(home:&Path)->Result<Value,()>{
         }
     }Ok(Value::Obj(out))
 }
+
+fn name_sources(lines:&[W])->W{
+    let mut out=lines.iter().take(3).cloned().collect::<Vec<_>>().join(b";".as_slice());
+    let count=lines.iter().filter(|l|!l.is_empty()).count();if count>3{out.extend(cat(&[b"; and ",(count-3).to_string().as_bytes(),b" more"]));}out
+}
+fn fields(lines:&[W],kind:&[u8],column:usize,rest:bool)->Vec<W>{
+    let prefix=cat(&[kind,b"\t"]);let mut out:Vec<W>=lines.iter().filter(|l|l.starts_with(&prefix)).map(|l|if rest{sh::cut_from(l,column)}else{sh::cut_field(l,column)}.to_vec()).collect();out.sort();out.dedup();out
+}
+fn clauses(lines:&[W])->W{
+    let mut out=Vec::new();
+    for (kind,label) in [
+        (b"unrecorded".as_slice(),b"a package, or a version of one, that neither lockfile records".as_slice()),
+        (b"source",b"a package not recorded as coming from the public registry"),
+        (b"fetched",b"a package recorded on the public registry that safedeps cannot tell npm fetched from there"),
+        (b"withheld",b"a package whose bytes safedeps withheld when an earlier install fetched them"),
+        (b"nointegrity",b"a package recorded on the public registry with no integrity, so safedeps cannot tell its bytes from ones it withheld"),
+        (b"directory",b"a directory that is not a declared workspace member")]{
+        // grep/paste keeps query order and duplicates; sed expands every ';'.
+        let prefix=cat(&[kind,b"\t"]);
+        let values:Vec<_>=lines.iter().filter(|l|l.starts_with(&prefix)).map(|l|sh::cut_from(l,2).to_vec()).collect();
+        if values.is_empty(){continue}
+        let list=values.join(b";".as_slice()).split(|b|*b==b';').map(Vec::from).collect::<Vec<_>>().join(b"; ".as_slice());
+        out.push(cat(&[label,b" (",&list,b")"]));
+    }out.join(b", and ".as_slice())
+}
+impl Npm{
+    pub fn sources(&mut self,store:&Store,current:&Value,input:&[u8],codex:bool,reasons:&mut Vec<W>,confirm:&mut Vec<W>){
+        if self.sources.is_empty(){return}
+        let mut nonstandard=Vec::new();let mut public=Vec::new();
+        for line in &self.sources{
+            let url=line.windows(2).position(|x|x==b": ").map(|p|&line[p+2..]).unwrap_or(line);
+            if closure::public_registry_url(url){public.push(line.clone());}else{nonstandard.push(line.clone());}
+        }
+        if !public.is_empty(){
+            let facts=self.facts(store,current).clone();let mut fetched=Vec::new();let mut failed=false;
+            for entry in public{
+                let url=entry.windows(2).position(|x|x==b": ").map(|p|&entry[p+2..]).unwrap_or(&entry);
+                match ask::fetch_known_problems(&facts,&String::from_utf8_lossy(url)){
+                    Ok(p) if !p.is_empty()=>fetched.push(cat(&[&entry,b", but ",p.join("; ").as_bytes()])),Ok(_)=>{},Err(_)=>{failed=true;break}
+                }
+            }
+            if failed{
+                state::log_advisory(&store.home,&cat(&[b"post-verify: the sources on the public registry in ",sh::bytes(&store.project),b" could not be judged against npm's answer about where it fetched them; the rebuild check judges them again and withholds what it cannot vouch for."]));
+            }else if !fetched.is_empty(){
+                let sources=name_sources(&fetched);
+                state::log_advisory(&store.home,&cat(&[b"post-verify: kept in ",sh::bytes(&store.project),b", fetched from a registry that is not the public npm registry (",&sources,b"); not rolled back, and safedeps runs none of their install scripts."]));
+                let mut inert=report::inert(&store.meta(),input).unwrap_or_default();
+                if inert!=report::ADDED{
+                    if inert==report::NONE&&codex{inert.extend(b" (on Codex it cannot)");}
+                    if inert.is_empty(){inert=b"safedeps has no record it can read of adding --ignore-scripts to this install".to_vec();}
+                    confirm.push(cat(&[b"this install fetched packages from a registry that is not the public npm registry (",&sources,b"). ",&inert,b", so their install scripts may already have run. The install is kept; confirm with the user that they trust that registry",&if self.recorded.is_empty(){Vec::new()}else{cat(&[b". ",WITHHELD_SCOPE])}]));
+                }
+            }
+        }
+        if !nonstandard.is_empty(){reasons.push(cat(&[b"Lock file contains resolved URLs from non-standard registries (",&name_sources(&nonstandard),b")"]));}
+        let insecure:Vec<_>=self.sources.iter().filter(|s|{let s=s.to_ascii_lowercase();s.windows(7).any(|w|w==b"http://")||s.windows(6).any(|w|w==b"git://")}).cloned().collect();
+        if !insecure.is_empty(){reasons.push(cat(&[b"Lock file contains insecure (non-HTTPS) resolved URLs (",&name_sources(&insecure),b")"]));}
+    }
+    fn describe_origins(&self,store:&Store,current:&Value,lines:&[W],held:bool)->W{
+        let kind=if held{b"held".as_slice()}else{b"origin"};
+        let names=fields(lines,kind,2,false).join(b" ".as_slice());
+        let origins=fields(lines,kind,3,!held);let known=origins.iter().filter(|s|!s.starts_with(b"?")).cloned().collect::<Vec<_>>().join(b", ".as_slice());
+        let unknown=origins.iter().filter_map(|s|s.strip_prefix(b"?").map(Vec::from)).collect::<Vec<_>>().join(b"; ".as_slice());
+        let mut where_from=Vec::new();let trust=if known.is_empty(){b"where they came from".as_slice()}else{b"that registry"};
+        if held{
+            if known.is_empty(){where_from=cat(&[b"from a registry safedeps could not name (",if unknown.is_empty(){b"the record does not say"}else{&unknown},b")"]);}
+            else{where_from.extend(cat(&[b"from ",&known,b", which is not the public npm registry"]));if !unknown.is_empty(){where_from.extend(cat(&[b", or from a registry safedeps could not name (",&unknown,b")"]));}}
+            let projects=fields(lines,kind,4,false).join(b", ".as_slice());
+            return cat(&[b"safedeps did not run npm rebuild in ",sh::bytes(&store.project),b" because the bytes of ",&names,b" here are the ones an install in ",&projects,b" first fetched ",&where_from,&unread_note(&store.meta()),b". They are kept. ",WITHHELD_SCOPE,b". If you trust ",trust,b", confirm with the user before running `npm rebuild ",&names,b"` yourself; do not rebuild without asking"]);
+        }
+        if known.is_empty(){where_from=cat(&[b"safedeps could not tell which registry this install fetched ",&names,b" from (",if unknown.is_empty(){b"npm did not say"}else{&unknown},b"), so it cannot tell they came from the public npm registry"]);}
+        else{where_from.extend(cat(&[b"this install fetched ",&names,b" from ",&known,b", which is not the public npm registry"]));if !unknown.is_empty(){where_from.extend(cat(&[b" (one of npm's answers is missing as well: ",&unknown,b")"]));}}
+        let mut out=cat(&[b"safedeps did not run npm rebuild in ",sh::bytes(&store.project),b" because ",&where_from,&unread_note(&store.meta()),b". The install is kept"]);
+        if known.is_empty()&&sourced(current){out.extend(b". safedeps did not run them this time because the command runs code safedeps does not read or run (a file it sources, an eval, or npm under a PATH or NODE_OPTIONS of its own), and that code can change npm's environment where safedeps cannot see it. It has not recorded these bytes as withheld: whoever controls that code already runs code in this shell, so a record would protect nothing against them. The next install npm says fetches from the public npm registry rebuilds them as usual");}
+        out.extend(cat(&[b". If you trust ",trust,b", confirm with the user before running `npm rebuild ",&names,b"` yourself; do not rebuild without asking"]));
+        if !self.recorded.is_empty(){out.extend(cat(&[b". ",WITHHELD_SCOPE]));}out
+    }
+    fn query_tree(&self,store:&Store,withheld:&Value)->Result<Vec<W>,W>{
+        let Some(facts)=&self.facts else{return Err(b"safedeps did not ask npm which registry this tree came from".to_vec())};
+        let answer=ask::query(&store.project,Instant::now()+Duration::from_secs(ask::POST_SECONDS)).map_err(|s|s.into_bytes())?;
+        let problems=|url:&Value|ask::fetch_problems(facts,&String::from_utf8_lossy(jv::text(url).ok_or(())?)).map(|ps|ps.iter().map(|p|jv::s(p.as_bytes())).collect());
+        let origins=|url:&Value|ask::fetch_origins(facts,&String::from_utf8_lossy(jv::text(url).ok_or(())?)).map(|os|os.iter().map(|o|o.value()).collect());
+        tree::judge(&store.project,&store.home,&jv::read(&answer.stdout),withheld,&problems,&origins).map_err(|_|b"npm query answered with something safedeps could not compare with the lockfiles".to_vec())
+    }
+    pub fn rebuild(&self,store:&Store,current:&Value,trace:&mut Install,input:&[u8],report:&mut Report){
+        if !meta_true(&store.meta(),"ignore_scripts_injected"){return}
+        let meta=store.meta();let home=&store.home;let project=sh::bytes(&store.project);
+        if trace.absent{report.rebuild(home,&meta,input,&cat(&[b"did not run npm rebuild: ",&trace.line]));trace.said=true;return}
+        if !sh::is_dir(&store.project.join("node_modules")){return}
+        if let Some(why)=report::reach_blocker(&store.project){
+            report.rebuild(home,&meta,input,&cat(&[b"did not run npm rebuild: ",&why]));
+            state::log_advisory(home,&cat(&[b"post-verify rebuild skipped: ",&why,b" -- project ",project]));return;
+        }
+        if !sh::is_file(&store.project.join("node_modules/.package-lock.json")){
+            state::log_advisory(home,&cat(&[b"post-verify: npm rebuild skipped in ",project," — node_modules has no .package-lock.json, so the tree it would rebuild is not the tree the effect gate read.".as_bytes()]));
+            report.say(cat(&[b"npm rebuild was not run: ",project,b"/node_modules has no .package-lock.json, so safedeps could not read the tree it would rebuild. safedeps did not run npm rebuild; review node_modules, then run `npm rebuild` yourself if it is what you expect"]));return;
+        }
+        let withheld=match withheld_read(home){Ok(v)=>v,Err(_)=>{
+            let why=cat(&[b"safedeps could not read its record of the bytes it withheld in ",sh::bytes(&home.join("npm-withheld"))]);
+            state::log_advisory(home,&cat(&[b"post-verify: npm rebuild after the install skipped in ",project," — ".as_bytes(),&why,b", so it cannot tell that tree holds none of them."]));
+            report.say(cat(&[b"npm rebuild was not run: ",&why,b", so it could not tell that the tree holds none of them. safedeps did not run npm rebuild; review node_modules, then run `npm rebuild` yourself if it is what you expect"]));return;
+        }};
+        let blockers=match self.query_tree(store,&withheld){Ok(b)=>b,Err(why)=>{
+            state::log_advisory(home,&cat(&[b"post-verify: npm rebuild after the install skipped in ",project," — safedeps asked npm which packages a rebuild would run over and got no answer (".as_bytes(),&why,b"), so it cannot tell that tree is one it can vouch for."]));
+            report.say(cat(&[b"npm rebuild was not run: safedeps asked npm which packages it would rebuild and got no answer (",&why,b"), so it could not tell they are the ones it read. safedeps did not run npm rebuild; review node_modules, then run `npm rebuild` yourself if it is what you expect"]));return;
+        }};
+        if !blockers.is_empty(){
+            state::log_advisory(home,&cat(&[b"post-verify: npm rebuild after the install skipped in ",project," — the tree npm would rebuild holds ".as_bytes(),&clauses(&blockers),b"."]));
+            if blockers.iter().any(|l|l.starts_with(b"fetched")){report.say(self.describe_origins(store,current,&blockers,false));}
+            if blockers.iter().any(|l|l.starts_with(b"withheld")){report.say(self.describe_origins(store,current,&blockers,true));}
+            let rest:Vec<_>=blockers.into_iter().filter(|l|![b"fetched\t".as_slice(),b"origin\t",b"withheld\t",b"held\t"].iter().any(|p|l.starts_with(p))).collect();
+            if !rest.is_empty(){report.say(cat(&[b"npm rebuild was not run: the tree npm would rebuild in ",project,b" holds ",&clauses(&rest),b". safedeps runs install scripts only over a tree whose every package is on record and comes from the public registry or a declared workspace member. safedeps did not run npm rebuild; review it, then run `npm rebuild` yourself if it is what you expect"]));}return;
+        }
+        use std::process::{Command,Stdio};use std::os::unix::process::ExitStatusExt;
+        let rc=Command::new("npm").current_dir(&store.project).args(["rebuild","--global=false","--location=project","--prefix"]).arg(&store.project)
+            .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status().map(|s|s.code().unwrap_or(128+s.signal().unwrap_or(0))).unwrap_or(127);
+        if rc!=0{report.rebuild(home,&meta,input,&cat(&[b"ran npm rebuild: exit ",rc.to_string().as_bytes()]));}
+    }
+}

@@ -18,6 +18,11 @@ mod process;
 mod journal;
 mod rollback;
 mod npm;
+mod providers;
+mod effect;
+mod call;
+mod heuristics;
+mod run;
 
 /// A measurement entry, fed one JSON request. It calls the same operations
 /// the hook uses; the reference side calls their bash functions.
@@ -29,6 +34,22 @@ pub fn probe(input: &[u8]) -> i32 {
     let bytes = |key| jv::text(get(key)).unwrap_or(b"");
     let path = sh::p(bytes("path"));
     let result: Result<Vec<u8>, i32> = match bytes("op") {
+        b"hook" => return run::main(bytes("input")),
+        b"heuristics" => {
+            let store = snapshot::Store::new(crate::state::guard_dir(), path, bytes("id").to_vec());
+            let mut reasons = Vec::new();
+            match bytes("action") {
+                b"binaries" => heuristics::binaries(&store, &mut reasons),
+                b"lockfile" => heuristics::lockfile(&store, &mut reasons),
+                b"scripts" => {
+                    let nodes: Vec<Vec<u8>> = match get("nodes") { Value::Arr(xs) => xs.iter().filter_map(jv::text).map(Vec::from).collect(), _ => Vec::new() };
+                    if let Err(rc) = heuristics::scripts(&store, &nodes, &mut reasons) { return rc }
+                },
+                _ => return 2,
+            }
+            Ok(reasons.join(&b'\n'))
+        },
+        b"resolved-diff" => Ok(heuristics::added_resolved(bytes("before"), bytes("after")).to_string().into_bytes()),
         b"closure" => closure::lock_closure(&path).map(|cs| {
             let mut out = Vec::new();
             for c in cs { out.extend(jv::dump(&Value::Arr(c.iter().map(closure::Spec::to_value).collect()))); out.push(b'\n'); }
