@@ -3605,7 +3605,9 @@ inert_payload_spans() {
     }
   fi
   classes=$(shell_lex "${command}" classes "safedeps:inert_payload_spans") || return 1
-  if ! { printf '%s\n' "${classes}"; printf '%s' "${command}"; } | LC_ALL=C awk -v heads="${heads}" '
+  # The text ends in `X`, which END takes off: awk drops a newline that ends
+  # its input, and a text that ends in one read one byte short of its view.
+  if ! { printf '%s\n' "${classes}"; printf '%sX' "${command}"; } | LC_ALL=C awk -v heads="${heads}" '
     # safedeps:inert_payload_spans (scripts/measure/scan-failure-census.sh keys on this line)
     NR == 1 { K = $0; next }
     { X = X (NR > 2 ? "\n" : "") $0 }
@@ -3616,6 +3618,7 @@ inert_payload_spans() {
       return KC[z] != "p" && KC[z] != "F" && KC[z] != "."
     }
     END {
+      X = substr(X, 1, length(X) - 1)
       N = split(X, XC, "")
       # The view keeps every byte in place; one that does not is a failed reading.
       if (split(K, KC, "") != N) exit 3
@@ -3680,12 +3683,13 @@ inert_unread_offsets() {
   done <<< "${spans}"
   [[ -n "${regions}" ]] || return 0
   classes=$(shell_lex "${text}" classes "safedeps:inert_payload_spans") || return 1
-  if ! view=$(printf '%s\n%s\n%s' "${regions}" "${classes}" "${text}" | LC_ALL=C awk '
+  if ! view=$(printf '%s\n%s\n%sX' "${regions}" "${classes}" "${text}" | LC_ALL=C awk '
     # safedeps:inert_payload_spans (scripts/measure/scan-failure-census.sh keys on this line)
     NR == 1 { R = $0; next }
     NR == 2 { K = $0; next }
     { X = X (NR > 3 ? "\n" : "") $0 }
     END {
+      X = substr(X, 1, length(X) - 1)
       N = split(X, XC, ""); if (split(K, KC, "") != N) exit 3
       for (k = 1; k <= N; k++) V[k] = (XC[k] == "\n") ? "\n" : " "
       n = split(R, F, " ")
@@ -3958,16 +3962,21 @@ inert_dynamic_in() {
   if [[ "$2" == 1 ]]; then
     div=""
     classes=$(SAFEDEPS_LEX_DIVERGE="${div}" shell_lex "${text}" classes "safedeps:inert_rewrite_in_place_levels") || return 2
-    noredir=$(SAFEDEPS_LEX_DIVERGE="${div}" shell_lex "${text}" noprefix "safedeps:inert_rewrite_in_place_levels") || return 2
+    noredir=$(SAFEDEPS_LEX_DIVERGE="${div}" shell_lex "${text}" noprefix "safedeps:inert_rewrite_in_place_levels" && printf X) || return 2
   else
     classes=$(SAFEDEPS_LEX_DIVERGE="${div}" shell_lex "${text}" classes "safedeps:inert_rewrite_in_place") || return 2
-    noredir=$(SAFEDEPS_LEX_DIVERGE="${div}" shell_lex "${text}" noprefix "safedeps:inert_rewrite_in_place") || return 2
+    noredir=$(SAFEDEPS_LEX_DIVERGE="${div}" shell_lex "${text}" noprefix "safedeps:inert_rewrite_in_place" && printf X) || return 2
   fi
+  # The view keeps a newline that ends the text, and a capture drops it, so
+  # it is captured with an `X` after it, which stays on the awk's input and
+  # END takes off. Lost, a payload that ends in one (a heredoc in a
+  # substitution) read one byte short of its classes and failed the reading.
   if printf '%s\n%s' "${classes}" "${noredir}" | LC_ALL=C awk -v inert="${SAFEDEPS_SHELL_INERT_BYTES}" -v levels="$2" '
     # safedeps:inert_rewrite_in_place (scripts/measure/scan-failure-census.sh keys on this line)
     NR == 1 { K = $0; next }
     { X = X (NR > 2 ? "\n" : "") $0 }
     END {
+      X = substr(X, 1, length(X) - 1)
       N = split(X, XC, ""); if (split(K, KC, "") != N) exit 3
       split("! { } if then else elif while until do time coproc", kw, " ")
       for (j in kw) KW[kw[j]] = 1

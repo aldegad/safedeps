@@ -994,8 +994,11 @@ pass "an install in text the rewrite cannot read gets the flag where v2.17.2 put
 # a shell option cluster its head does not take, a script word glued to more
 # quoting, a glued word whose rest turns the flag off, an unquoted script
 # word, a heredoc body handed to a shell with no pipe, and a verb an operator
-# follows at once. Each of these ran its `npm ci`
-# with no flag and no record. The last two script words keep the flags the
+# follows at once in a script word the rewrite cannot read, where a flag goes
+# only after a blank, as v2.17.2 put it. Each of these ran its `npm ci`
+# with no flag and no record. At the top level the rewrite now reads a verb an
+# operator follows (`npm ci;true` gets its flag, SAFEDEPS_G_END), so that row
+# carries it inside such a script. The third and fourth script words keep the flags the
 # rewrite placed before (one inside the quoted segment, one on the outer
 # statement), and neither reaches npm as true.
 # scripts/measure/inert-record-invariant.sh holds every form of its corpus to
@@ -1006,7 +1009,7 @@ left_case_in=(
   'npm i left-pad@1.3.0 && sh -c "npm ci "--ignore-scripts=false'
   'npm i left-pad@1.3.0 && sh -c npm\ ci'
   $'npm i left-pad@1.3.0 && sh <<E\nnpm ci\nE'
-  'npm i left-pad@1.3.0 && npm ci;true'
+  'npm i left-pad@1.3.0 && sh -c "cd \"d\" && npm ci;true"'
 )
 left_case_tail=(
   ' && sh -ce "npm ci \"x\""'
@@ -1014,7 +1017,7 @@ left_case_tail=(
   ' && sh -c "npm ci --ignore-scripts "--ignore-scripts=false'
   ' && sh -c npm\ ci --ignore-scripts'
   $' && sh <<E\nnpm ci\nE'
-  ' && npm ci;true'
+  ' && sh -c "cd \"d\" && npm ci;true"'
 )
 left_bad=""
 for left_i in "${!left_case_in[@]}"; do
