@@ -44,7 +44,13 @@ writes none; `~rec+x`, `~rec-x`, `~asked`, `~kind:a>b` say which record or
 value changed), +undecided / -undecided, +deny:readings-disagree / -deny.
 
 A difference with only `+` directions is named by a line of
-scripts/measure/core-intended-inert.tsv, or it is `unclassified`. A
+scripts/measure/core-intended-inert.tsv, or it is `unclassified`. One exact
+input, `npm i y && env -S'npm ci x'`, is named script-payload-read by its
+conditions (env_split_string_read: the flag's one place, the core's own
+account of where it read the string, the floor, the record, and in every shell
+the two calls, what npm reads of them and everything else the run left), never
+by that class's pattern, which is not widened; `class_basis` says so on the
+row. A
 difference with a `-` direction has no name. What the harness says of one is
 an observation for the plan owner to judge row by row, never a class and
 never green:
@@ -1179,6 +1185,19 @@ ARGUMENT_SUBSTITUTION_INPUT = 'npm install left-pad@1.3.0 eval "$(echo) npm"'
 # Matched by their conditions here, never by their line's tokens and pattern.
 CODE_CHECKED = ("argument-substitution-preserved",)
 
+# One exact input adopted as a positive of the payload contract
+# script-payload-read already names (plan safedeps/guard-core-inert,
+# 2026-10-07 05:40), by the conditions of env_split_string_read and by nothing
+# else: no pattern for `env -S` is added and that class's pattern is as it was.
+# The string in quotes is the payload the structure names (its `npm` at byte
+# 18 of the command, its last byte at 25), and the core's one added flag goes
+# after the string's last word, at byte 26, inside the closing quote.
+ENV_SPLIT_INPUT = "npm i y && env -S'npm ci x'"
+ENV_SPLIT_NPM = 18
+ENV_SPLIT_PLACE = 26
+ENV_SPLIT_CLASS = "script-payload-read"
+ENV_SPLIT_CALLS = [["i", "y"], ["ci", "x"]]
+
 
 def substitution_bodies(cmd):
     """The (start, end) offsets of each `$(...)` body of a command, by
@@ -1235,6 +1254,78 @@ def argument_substitution_preserved(res):
     if v.get("record") and not any(records_of(outcome(res["core"].get("inert." + r, "").encode("latin-1"), cb))
                                    for r in res["ref"]["reading_set"].split()):
         return "v2.18.1 records and the core does not"
+    return None
+
+
+def env_split_string_read(res, R):
+    """The one input adopted under script-payload-read by its conditions:
+    every condition holds, or the first that does not. What is asked: the
+    exact bytes; in every reading of the set, a rewrite on both sides, the
+    core's flags being the bash rewrite's and one more at the end of the
+    split string, the core's own detail naming an install read in a payload
+    with its `npm` and its place there, and the unread record kept; the
+    release floor shown kept; and in every shell the command as written making
+    its two calls, the core's command making the same two with flags added
+    that npm reads as a true option and as nothing else, the second being
+    `ci x --ignore-scripts`, with the exit status, stdout, stderr, the other
+    stand-ins' calls and the files as the command as written left them; and
+    beside v2.18.1 no call lost and none gone from true to false. A shell
+    with no run, or a run not observed whole, refuses it."""
+    cmd = res["command"]
+    if cmd != ENV_SPLIT_INPUT:
+        return "not the input"
+    cb = cmd.encode()
+    rs = res["ref"].get("reading_set", "").split()
+    if not rs or res["core"].get("reading_set", "").split() != rs:
+        return "the two sides do not read the command in the same readings"
+    for r in rs:
+        bv, cv_ = res["ref"].get("inert." + r), res["core"].get("inert." + r)
+        if bv is None or cv_ is None:
+            return "%s: a reading has no value" % r
+        bo, co = outcome(bv.encode("latin-1"), cb), outcome(cv_.encode("latin-1"), cb)
+        if bo[0] != "rewrite" or co[0] != "rewrite" or bo[3] is None or co[3] is None:
+            return "%s: a side has no rewrite that is the command with flags inserted" % r
+        if set(co[3]) - set(bo[3]) != {ENV_SPLIT_PLACE} or set(bo[3]) - set(co[3]):
+            return "%s: the core's flags are not the bash rewrite's and one more at byte %d" % (r, ENV_SPLIT_PLACE)
+        if "unread" not in records_of(co) or not records_of(co) >= records_of(bo):
+            return "%s: the unread record, or a record of the bash rewrite, is missing" % r
+        lines = [l.split() for l in (res["core"].get("detail." + r) or "").split("\n") if l.strip()]
+        if not any(f[0] == "install" and len(f) >= 6 and f[1] != "0" and f[2] == str(ENV_SPLIT_NPM) and f[5] == str(ENV_SPLIT_PLACE)
+                   for f in lines):
+            return "%s: the core's detail names no install read in a payload with its npm at %d and its place at %d" % (
+                r, ENV_SPLIT_NPM, ENV_SPLIT_PLACE)
+    if res.get("floor") != "ok":
+        return "the release floor is not shown kept"
+    sides = res.get("sides", {})
+    ws, c = sides.get("written", {}).get("shells"), sides.get("core", {})
+    cs = c.get("shells")
+    if c.get("decision") != "run" or not isinstance(ws, dict) or not isinstance(cs, dict):
+        return "the shells did not run the command as written and the core's"
+    for sh in SHELLS:
+        a, b = ws.get(sh), cs.get(sh)
+        if not whole(a) or not whole(b):
+            return "%s: a run is missing or was not observed whole" % sh
+        if a["npm"] != ENV_SPLIT_CALLS:
+            return "%s: the command as written does not make its two calls" % sh
+        if len(b["npm"]) != len(a["npm"]):
+            return "%s: the core's command does not make two calls" % sh
+        for x, y in zip(a["npm"], b["npm"]):
+            if not flag_edit(x, y):
+                return "%s: a call is not the call as written with a flag added" % sh
+            if R.rest(x) is None or R.rest(x) != R.rest(y) or R.flagged(y) is not True:
+                return "%s: npm does not read a call as before with ignore-scripts true" % sh
+        if b["npm"][1] != ENV_SPLIT_CALLS[1] + [FLAGWORD]:
+            return "%s: the second call is not `ci x --ignore-scripts`" % sh
+        rel = relate(a, b, R)
+        for axis in ("rc", "stdout", "stderr", "other", "files"):
+            if rel[axis] != "same":
+                return "%s: %s is not the command's as written (%s)" % (sh, axis, rel[axis])
+    v = sides.get("v2.18.1", {})
+    if v.get("decision") != "run" or not isinstance(v.get("shells"), dict):
+        return "no v2.18.1 side that runs (run with --release-tree, --path-prefix and --approve)"
+    ch = call_changes(res, "v2.18.1", "core", R)
+    if ch is None or ch["true_to_false"] or ch["lost"] or ch["changed"] or ch["unknown_shells"] or ch["unknown_calls"]:
+        return "beside v2.18.1 a call is lost, changed, gone from true to false, or not known"
     return None
 
 
@@ -1344,7 +1435,7 @@ def classify(results, classes, R):
         cb = cmd_bytes(cmd)
         ref = {k: v.encode("latin-1") for k, v in res["ref"].items()}
         got = {k: v.encode("latin-1") for k, v in res["core"].items()}
-        for k in ("status", "tokens", "payload_free", "class_refused", "obs", "label", "readings_differ", "blocked", "expect_failed"):
+        for k in ("status", "tokens", "payload_free", "class_refused", "obs", "label", "readings_differ", "blocked", "expect_failed", "class_basis"):
             res.pop(k, None)
         if res["core_rc"] != 0:
             counts["core_error"] += 1
@@ -1429,6 +1520,13 @@ def classify(results, classes, R):
             why = argument_substitution_preserved(res)
             if why is None:
                 put(res, "class:argument-substitution-preserved")
+                continue
+            res["class_refused"] = why
+        if cmd == ENV_SPLIT_INPUT:
+            why = env_split_string_read(res, R)
+            if why is None:
+                res["class_basis"] = "this exact input, by its conditions (env_split_string_read), not by the class's pattern"
+                put(res, "class:" + ENV_SPLIT_CLASS)
                 continue
             res["class_refused"] = why
         if any(t.startswith("-") or t.startswith("?") for t in toks):
@@ -1619,6 +1717,9 @@ def summarize(results, counts, R, a, extra):
         print("  observed %-40s %s" % (s, ", ".join("%s %d" % kv for kv in sorted(class_obs[s].items()))))
     for k in sorted(labels):
         print("  label %-50s %d" % (k, labels[k]))
+    for res in results:
+        if res.get("class_basis"):
+            print("  named %s for %r: %s" % (res.get("status"), res["command"], res["class_basis"]))
     if floor:
         print("release floor: %s" % ", ".join("%s %d" % (k, v) for k, v in sorted(floor.items())))
 
@@ -1711,7 +1812,8 @@ def manifest(path, results, run):
                    "payloads3": res.get("payloads3"), "payload_free": res.get("payload_free"), "floor": res.get("floor"),
                    "floor_basis": res.get("floor_basis"), "core": core_decision(res), "blocked": res.get("blocked"),
                    "stand_ins": res.get("stand_ins"), "expect": res.get("expect"), "expect_failed": res.get("expect_failed"),
-                   "true_to_false": res.get("true_to_false"), "sides": {}}
+                   "true_to_false": res.get("true_to_false"), "class_basis": res.get("class_basis"),
+                   "class_refused": res.get("class_refused"), "sides": {}}
             for side, v in res.get("sides", {}).items():
                 s = {"decision": v.get("decision"), "record": v.get("record"), "state": v.get("state"), "state_words": v.get("state_words")}
                 if isinstance(v.get("shells"), dict):
@@ -1888,6 +1990,35 @@ def selftest(a):
     check("the default sudo runs its arguments", oe["bash"]["npm"], [["ci", "x"]])
     check("the other sudo runs nothing, writes its call down and prints its arguments",
           [op["bash"]["npm"], op["bash"]["other"], op["bash"]["stdout"]], [[], [["sudo", "npm", "ci", "x"]], "npm\nci\nx\n"])
+    # 10. The one exact env -S input is named by its conditions, never by its
+    # bytes alone: an argument gone from a call, a stdout that differs or a
+    # shell with no run leaves it unclassified.
+    if R.npm_asked:
+        brw = "npm i --ignore-scripts y --ignore-scripts && env -S'npm ci x'"
+        crw = "npm i --ignore-scripts y --ignore-scripts && env -S'npm ci x --ignore-scripts'"
+        R.ask([["ci", "x"], ["ci", "x", FLAGWORD], ["ci", FLAGWORD]])
+        w10, b10, c10 = obs(ENV_SPLIT_CALLS), obs([first, ["ci", "x"]]), obs([first, ["ci", "x", FLAGWORD]])
+
+        def erow(core_shells):
+            return {"set": "selftest", "command": ENV_SPLIT_INPUT, "core_rc": 0, "floor": "ok", "payloads3": {"bash": 1, "zsh": 1, "dash": 1},
+                    "ref": {"reading_set": "bash", "any_install": "true", "failed": "false", "inert.bash": "rewrite unread\n" + brw},
+                    "core": {"reading_set": "bash", "any_install": "true", "failed": "false", "inert.bash": "rewrite unread\n" + crw,
+                             "detail.bash": "pair 0 5 1\ninstall 0 0 plain 5 7 1 0\ninstall 1 18 plain 24 26 1 -\ntexts 2 release 1 unread 1\n"},
+                    "sides": {"written": {"decision": "run", "shells": four(w10)},
+                              "bash": {"decision": "run", "record": True, "shells": four(b10)},
+                              "core": {"decision": "run", "record": True, "shells": core_shells},
+                              "v2.18.1": {"decision": "run", "record": False, "shells": four(b10)}}}
+
+        pos = erow(four(c10))
+        gone_arg = erow(four(obs([first, ["ci", FLAGWORD]])))
+        other_out = erow(four(dict(c10, stdout_sha256="z")))
+        no_run = erow({sh: dict(c10) for sh in SHELLS[:3]})
+        classify([pos, gone_arg, other_out, no_run], load_classes(), R)
+        check("the exact env -S row whose calls and effects hold is named by its conditions", [pos["status"], bool(pos.get("class_basis"))],
+              ["class:script-payload-read", True])
+        check("an argument gone from a call refuses the exact env -S row", gone_arg["status"], "unclassified")
+        check("a stdout that differs refuses the exact env -S row", other_out["status"], "unclassified")
+        check("a shell with no run refuses the exact env -S row", no_run["status"], "unclassified")
     shutil.rmtree(work, ignore_errors=True)
     print("selftest: %d not ok" % bad)
     return 1 if bad else 0

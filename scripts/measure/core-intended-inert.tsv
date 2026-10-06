@@ -35,6 +35,19 @@
 # from `same` and from every named difference, and puts it in no count of what
 # holds. readings-place-apart keeps its meaning: the three values are in fact
 # different.
+#
+# One exact input is named script-payload-read without matching that line's
+# pattern, which is as it was: `npm i y && env -S'npm ci x'` (plan owner,
+# 2026-10-07 05:40). The string in quotes is a payload the structure already
+# names, read at its own top level like a script handed to a shell, and the
+# core's one added flag stands after the string's last word, inside the quote.
+# It is matched only by the conditions of env_split_string_read in
+# core-inert-differential.py: these bytes, the flag's one place, the core's
+# account of the payload it read, the floor, the unread record, and in every
+# shell the two calls, what npm reads of them, and the exit status, streams,
+# other calls and files of the command as written. No other `env -S` text is
+# named by this: the two inputs where the flag cuts the string in two
+# (`env -Snpm\ ci\ x`) are blocked, not named.
 script-payload-read	+flag,+rec	no	(^|[^A-Za-z0-9_.-])([A-Za-z0-9_.-]*sh\s+(-[A-Za-z]+\s+)*-[A-Za-z]*c[A-Za-z]*|eval)\b	A script handed to sh -c, bash -c, zsh -c, dash -c, another shell or eval is a payload the core reads at its own top level (Run::payloads, kind S or E), through the quoting the lexer removed. The bash rewrite read only a single-quoted script, or a double-quoted one with no escape and no substitution (its R spans), and put v2.17.2's flag in the rest (U) or none (G). So the core places the flag after the last argument there too, and records unverified or floor where the script's words or its place say so.
 nested-brace	+flag,+rec	no	(\$\(|<\(|`)[^\n]*\}	A `}` in a substitution body is read where the body is read, at its own top level (R1, R2: tookdaki-20261006-112251, -135807). The bash rewrite read the body with the outer level's bytes, where a nested `}` is a character, and left that install with no flag.
 dq-subst-escaped-operator	+flag,+rec	no	"[^"]*(\$\(|`)[^"]*\\[;|&)]	An escaped operator in a substitution inside double quotes is a word of the body (R3-1, Pq forms: tookdaki-20261006-211048). The bash rewrite's end finder read the escape as the outer level shows it and ended the statement there.
