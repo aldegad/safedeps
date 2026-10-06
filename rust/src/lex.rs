@@ -1244,6 +1244,20 @@ impl<'g> Lex<'g> {
                 && !self.cmdpos(i)
                 && !self.forlist(i)
             {
+                if self.shz {
+                    // A bare parenthesized pattern is one zsh word even
+                    // after whitespace. Use the same word context as an
+                    // attached pattern so its | cannot become a pipeline.
+                    self.ctxd(d).par -= 1;
+                    self.div = true;
+                    self.i = i;
+                    self.push(b'W');
+                    let dd = self.d;
+                    self.ctxd(dd).wkind = b'g';
+                    self.wpo.set(i);
+                    if self.wantdep { self.setdep(i, self.dc); }
+                    return i;
+                }
                 self.gl.insert((d, par));
                 self.glo.set(i);
                 self.ctxd(d).glc += 1;
