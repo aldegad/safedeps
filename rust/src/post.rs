@@ -13,6 +13,7 @@ pub use workspaces::members as workspace_members;
 mod tree;
 mod trace;
 mod snapshot;
+pub use snapshot::{LOCKS, MANIFESTS};
 mod process;
 mod journal;
 mod rollback;
