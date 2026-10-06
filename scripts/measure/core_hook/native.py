@@ -155,7 +155,7 @@ def events(side, k):
         # needs separate independently collected lifecycle evidence; no PID guess.
         if pid != s['pid'] or ppid != s.get('collector_pid'):
             return [], 'native child/start identity was not independently observed'
-        event_id = '%s/%s/%s/%d/%s' % (side.doc.get('run_id'), side.doc.get('execution_id'), s['native_raw'], seq, role)
+        event_id = '%s/%s/step%d/%s/%d/%s' % (side.doc.get('run_id'), side.doc.get('execution_id'), k, s['native_raw'], seq, role)
         out.append({'id': event_id, 'role': role, 'ordinal': seq, 'seconds': secs if sign == 'after' else 0,
                     'nanos': nanos, 'sign': sign})
     return out, None

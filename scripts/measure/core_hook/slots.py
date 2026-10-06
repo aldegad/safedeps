@@ -487,7 +487,15 @@ class Finder:
     def add(self, place, start, end, value, slot, role, result=None, claim=None):
         occurrence = RawOccurrence(self, place, start, end, slot, role, result, claim)
         m = re.match(r'(step|boundary) ([0-9]+) (.*)', place)
-        step = claim.step if claim else (int(m.group(2)) - (m.group(1) == 'boundary') if m else None)
+        role_step = re.search(r'(?:^|:)step([0-9]+)(?:$|:)', role)
+        if claim:
+            step = claim.step
+        elif role_step:
+            step = int(role_step.group(1))
+        elif m and m.group(1) == 'boundary' and m.group(3).startswith('file '):
+            step = self.side.written_step(m.group(3)[5:], int(m.group(2)))
+        else:
+            step = int(m.group(2)) - (m.group(1) == 'boundary') if m else None
         call = None
         hook = self.side.hook(step) if step is not None else None
         if hook:
