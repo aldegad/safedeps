@@ -1554,12 +1554,14 @@ def flag_edit(w, s):
 
 
 def effect_value(o, name):
-    """An admitted run's value on one of EFFECTS."""
+    """An admitted run's value on one of EFFECTS. It is read only where the
+    intake held the axis as evidence, and reads nothing it does not find."""
     if name in ("stdout", "stderr"):
-        return (o[name + "_len"], o[name + "_sha256"])
+        return (o.get(name + "_len"), o.get(name + "_sha256"))
     if name == "order":
-        return [x[0] for x in o["calls"]]
-    return o[name]
+        calls = o.get("calls")
+        return [x[0] if isinstance(x, list) and x else None for x in calls] if isinstance(calls, list) else calls
+    return o.get(name)
 
 
 def relate(w, s, R):
@@ -2651,6 +2653,8 @@ def selftest(a):
     adm(o3["bash"])
     adm(o4["bash"])
     check("a flag handed to another command changes the exit status", relate(o3["bash"], o4["bash"], saved())["rc"], "differ")
+    n1, n2 = adm(obs([["ci"]], rc=None)), adm(obs([["ci"]], rc=None))
+    check("a null exit status on both sides is no evidence", relate(n1, n2, saved())["rc"], "invalid")
     # 3. Two runs at once each get their own result.
     with ThreadPoolExecutor(max_workers=2) as ex:
         fa = ex.submit(shells.observe, "npm ci a; exit 5", tempfile.mkdtemp(prefix="b.", dir=work))
@@ -2845,8 +2849,6 @@ def selftest(a):
     # 11. The intake: what is not evidence is never equal to anything, and is
     # in no count of what held; a reader's answer is read as it was kept and
     # never asked for again; a schema this file does not read is not guessed.
-    n1, n2 = adm(obs([["ci"]], rc=None)), adm(obs([["ci"]], rc=None))
-    check("a null exit status on both sides is no evidence", relate(n1, n2, saved())["rc"], "invalid")
     nr = row(four(obs([["ci"]], rc=None)), four(obs([["ci"]], rc=None)))
     check("an exit status that is no evidence is no effect that held", side_verdict(nr, "core", saved())["effects"], "invalid")
     z1, z2 = adm(obs([["ci", ""]], rc=3)), adm(obs([["ci", ""]], rc=3))
