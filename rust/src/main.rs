@@ -407,6 +407,10 @@ fn main() {
             Some(input) => post::main(&input),
             None => 2,
         },
+        Some("post-probe") => match read_stdin() {
+            Some(input) => post::probe(&input),
+            None => 2,
+        },
         Some("ledger") => match read_stdin() {
             Some(input) => ledger::main(&args[2..], &input),
             None => 1,
