@@ -9,10 +9,6 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-extern "C" {
-    fn access(path: *const std::os::raw::c_char, mode: i32) -> i32;
-}
-
 pub fn p(b: &[u8]) -> PathBuf {
     PathBuf::from(std::ffi::OsStr::from_bytes(b))
 }
@@ -47,16 +43,12 @@ pub fn is_dir(path: &Path) -> bool {
 }
 
 /// `[[ -r p ]]`
-pub fn readable(path: &Path) -> bool {
-    let Ok(c) = std::ffi::CString::new(bytes(path)) else { return false };
-    unsafe { access(c.as_ptr(), 4) == 0 }
-}
+pub use crate::os::readable;
 
 pub fn command_exists(name: &str) -> bool {
     std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).any(|dir| {
         let path=dir.join(name);
-        let Ok(c)=std::ffi::CString::new(bytes(&path)) else{return false};
-        is_file(&path) && unsafe{access(c.as_ptr(),1)==0}
+        is_file(&path) && crate::os::executable(&path)
     })
 }
 
