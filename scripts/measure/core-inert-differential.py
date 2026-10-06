@@ -170,11 +170,26 @@ not be read, an axis the first schema did not keep) and `invalid` (recorded,
 and not what this file writes, or at odds with another record of the same
 row).
 
+- The admission makes one slot per row of the source, in its order, bound to
+  the source's sha256, the row's ordinal and its place in the source (a JSON
+  pointer). A slot is `admitted` or `rejected`, and nothing after the
+  admission reads anything but slots: the statuses, the accounting, the
+  summary, the table, the manifest and the report are projections of them.
 - A row whose own records are invalid is `invalid` and nothing else: a slot
   that is not an object, a reading set with a name twice or a name this file
   does not know, a value for a reading outside the set, no `any_install`, no
-  payload counts or a `sides` that is not an object in this schema. The slot
-  keeps its ordinal.
+  payload counts or a `sides` that is not an object in this schema. Its slot
+  is `rejected`: it keeps its ordinal, the row's JSON type, its set and its
+  command where they are strings, and where and why it was rejected, and no
+  other field of the row. The values are in the source, at the pointer named.
+- Inside an admitted row, what is not what this file writes is rejected the
+  same way, with its pointer and why, and the rest of the row keeps its
+  evidence: a side (it stands in its place as `decision` invalid), a side's
+  runs, a shell's run that is not an object (it stands in its place as a
+  rejected run, invalid on every axis and never read as a shell that did not
+  run, and the other shells keep theirs), A's words that do not read,
+  `stand_ins` and `expect`. A side this file does not write and a shell it
+  does not run are left out, and so is any field it does not read.
 - `any_install` is decoded once per side and every consumer reads that
   decoding. The core's payload count of a reading, A's words of the same text,
   reading and core, and the row's stored count are records of one fact, each
@@ -1115,6 +1130,36 @@ def axis(o, name):
     return ax.get(name, UNKNOWN)
 
 
+def jtype(x):
+    """The JSON type of a value, as a rejection names it."""
+    if x is MISSING:
+        return "missing"
+    if x is None:
+        return "null"
+    if isinstance(x, bool):
+        return "boolean"
+    if isinstance(x, (int, float)):
+        return "number"
+    return {str: "string", list: "array", dict: "object"}.get(type(x), type(x).__name__)
+
+
+def pointer(*parts):
+    """A JSON pointer (RFC 6901) into the source."""
+    return "".join("/" + str(p).replace("~", "~0").replace("/", "~1") for p in parts)
+
+
+def rejected_run(at):
+    """A shell's run that is not an object, in its place: invalid on every
+    axis, so that it is never read as a shell that did not run. Its value is
+    in the source at `at`."""
+    return {"rejected": at, "_axes": {x: "invalid" for x in AXES}, "_why": {x: "the run is not an object" for x in AXES}}
+
+
+def admitted(results):
+    """The slots the intake admitted: the only ones whose facts are read."""
+    return [res for res in results if res.get("slot") == "admitted"]
+
+
 def records_problem(recs, who, schema=SCHEMA):
     """What is wrong with one side's inert records, or None. A reading with
     no value is not this: it is the status `incomplete`."""
@@ -1157,47 +1202,60 @@ def records_problem(recs, who, schema=SCHEMA):
 
 SIDE_DECISIONS = {"written": ("run",), "bash": ("run", "deny", "blocked"), "core": ("run", "deny", "blocked"),
                   "v2.18.1": ("run", "deny"), "7d66f8c": ("run", "deny"), "head": ("allow", "deny")}
-DERIVED_ROW = ("status", "tokens", "label", "obs", "payload_free", "payload_free_basis", "class_refused", "class_basis",
-               "readings_differ", "blocked", "expect_failed", "true_to_false", "evidence", "reach", "core_readings")
+# The fields of a row the intake reads. Any other field (a value an older
+# classification derived, or one this file does not write) is not carried.
+ROW_FIELDS = ("set", "command", "core_rc", "bash_rc", "bash_exit", "bash_timeout", "ref", "core", "payloads3", "sides",
+              "stand_ins", "expect", "words", "words_rewrite", "floor", "floor_basis")
 DERIVED_SIDE = ("state", "state_words", "state_npm")
 
 
-def admit_side(res, name, v, schema, cb):
-    """The problems of one side of a row: (where, kind, why)."""
-    out = []
+def admit_side(res, name, v, schema, cb, at=()):
+    """The intake of one side of the row whose place in the source is `at`:
+    (its problems as (where, kind, why), what it rejected as {pointer, type,
+    why}, and the side the slot keeps: the side admitted, a rejected side
+    (`decision` invalid) in its place, or None for a side this file does not
+    write)."""
+    out, rej = [], []
     where = "side %s" % name
+    here = at + ("sides", name)
 
     def bad(why, kind="invalid"):
         out.append((where, kind, why))
 
+    def reject(why, path=(), value=v):
+        rej.append({"pointer": pointer(*(here + path)), "type": jtype(value), "why": why})
+
+    def instead(why):
+        bad(why)
+        reject(why)
+        return out, rej, {"decision": "invalid", "rejected": pointer(*here)}
+
     if name not in SIDE_DECISIONS:
         bad("a side this file does not write")
-        return out
+        reject("a side this file does not write")
+        return out, rej, None
     if not isinstance(v, dict):
-        bad("not an object")
-        return out
+        return instead("not an object")
     for k in DERIVED_SIDE:
         v.pop(k, None)
     d = v.get("decision")
     if d not in SIDE_DECISIONS[name]:
-        bad("decision %r" % (d,))
-        return out
+        return instead("decision %r" % (d,))
     if name == "head":
         if not isinstance(v.get("reason", ""), str) or not _is_int(v.get("guard_rc", 0)):
-            bad("the pre-guard's answer is not one this file writes")
-        return out
+            return instead("the pre-guard's answer is not one this file writes")
+        return out, rej, v
     o = None
     if name in ("bash", "core"):
         recs = res.get("ref" if name == "bash" else "core") or {}
         o = consensus(enc(recs), cb) if recs else None
         want = None if o is None else "blocked" if o == "blocked" else "deny" if (o == "deny" or recs.get("failed") == "true") else "run"
         if d != want:
-            bad("decision %s where its readings say %s" % (d, want))
-            return out
+            return instead("decision %s where its readings say %s" % (d, want))
     if d != "run":
         if "shells" in v:
-            bad("a side that sends nothing has runs")
-        return out
+            return instead("a side that sends nothing has runs")
+        return out, rej, v
     run = v.get("run", MISSING)
     if not isinstance(run, str):
         if run is MISSING and schema == 1:
@@ -1230,14 +1288,22 @@ def admit_side(res, name, v, schema, cb):
             bad("the first schema kept no runs for it", UNKNOWN)
         else:
             bad("a side that ran has no runs")
-        return out
-    for s_, ob in sh.items():
+            if sh is not MISSING:
+                reject("a side that ran has no runs", ("shells",), sh)
+                del v["shells"]
+        return out, rej, v
+    for s_, ob in list(sh.items()):
         if s_ not in SHELLS:
             bad("a shell this file does not run (%s)" % s_)
+            reject("a shell this file does not run", ("shells", s_), ob)
+            del sh[s_]
             continue
         for x, kind, why in admit_obs(ob, schema):
             out.append(("%s shell %s %s" % (where, s_, x), kind, why))
-    return out
+        if not isinstance(ob, dict):
+            reject("the run is not an object", ("shells", s_), ob)
+            sh[s_] = rejected_run(pointer(*(here + ("shells", s_))))
+    return out, rej, v
 
 
 def words_records(b, p=0):
@@ -1386,7 +1452,7 @@ def floor_of(res, floor_rows, basis):
         target = cmd_bytes(floor_rows[cmd])
     elif basis == FLOOR_TREE:
         f7 = (res.get("sides") or {}).get("7d66f8c")
-        if not isinstance(f7, dict):
+        if not isinstance(f7, dict) or "rejected" in f7:
             return None, None
         if f7.get("decision") != "run":
             return "release-deny", basis
@@ -1404,50 +1470,64 @@ def floor_of(res, floor_rows, basis):
     return ("ok" if subseq(o[2], target, cb) else "NOT"), basis
 
 
-def admit(res, k, ctx):
-    """The intake of one row slot (see The intake). `ctx` holds what the
-    source says of all its rows: its schema and sha256, the provenance of the
-    run that measured it, A's words records bound to it, and the recorded
-    release rewrites attached. Sets `evidence`; a slot that is no object, or
-    a row whose own records cannot be read, gets `_invalid_row`. Keeps what
-    it decodes once for every consumer in `_facts` (whether each side reads
-    an install) and A's words that are evidence for this row (its own, or
-    attached) in `_words`."""
-    for key in DERIVED_ROW:
-        res.pop(key, None)
-    for key in [x for x in res if x.startswith("_") and x != "_raw_type"]:
+def admit(res, k, ctx, raw_type="object"):
+    """The intake of the source's row `k` (see The intake) on its slot `res`,
+    in place: a copy of the row, or an empty slot for a row that is not an
+    object, whose JSON type is `raw_type`. The slot becomes `admitted` or
+    `rejected` and gets `evidence`. `ctx` holds what the source says of all
+    its rows: its schema and sha256, the provenance of the run that measured
+    it, A's words records bound to it, and the recorded release rewrites
+    attached. An admitted slot keeps what it decodes once for every consumer
+    in `_facts` (whether each side reads an install) and A's words that are
+    evidence for this row (its own, or attached) in `_words`."""
+    for key in [x for x in res if x not in ROW_FIELDS]:
         del res[key]
+    at = ("rows", k)
     schema = ctx["schema"]
     prov, prov_why = ctx["provenance"]
-    ev = {"schema": schema, "from": {"source_sha256": ctx["source_sha256"], "row": k + 1}, "provenance": prov,
-          "invalid": [], "unknown": []}
+    ev = {"schema": schema, "from": {"source_sha256": ctx["source_sha256"], "row": k + 1, "pointer": pointer(*at)},
+          "provenance": prov, "invalid": [], "unknown": [], "rejected": []}
     res["evidence"] = ev
 
     def note(where, kind, why):
         ev["invalid" if kind == "invalid" else "unknown"].append("%s: %s" % (where, why))
 
-    def row_invalid(why):
+    def reject(path, why, type_):
+        ev["rejected"].append({"pointer": pointer(*(at + path)), "type": type_, "why": why})
+
+    def row_invalid(why, path, type_):
         note("row", "invalid", why)
-        res["_invalid_row"] = why
+        reject(path, why, type_)
+        shown = {f: res.get(f) if isinstance(res.get(f), str) else None for f in ("set", "command")}
+        if shown["command"] is not None:
+            ev["from"]["command_sha256"] = sha256(cmd_bytes(shown["command"]))
+        res.clear()
+        res.update(slot="rejected", raw_type=raw_type, set=shown["set"], command=shown["command"], evidence=ev)
+
+    def drop(key, why):
+        note(key, "invalid", why)
+        reject((key,), why, jtype(res[key]))
+        del res[key]
 
     if prov != "ok":
         note("source", prov, prov_why)
-    if "_raw_type" in res:
-        return row_invalid("row %d is not an object (%s)" % (k + 1, res["_raw_type"]))
-    cmd = res.get("command")
-    if not isinstance(cmd, str) or not isinstance(res.get("set"), str):
-        return row_invalid("no command or no set")
+    if raw_type != "object":
+        return row_invalid("row %d is not an object (%s)" % (k + 1, raw_type), (), raw_type)
+    for key in ("command", "set"):
+        if not isinstance(res.get(key), str):
+            return row_invalid("no command or no set", (key,), jtype(res.get(key, MISSING)))
+    cmd = res["command"]
     cb = cmd_bytes(cmd)
     ev["from"]["command_sha256"] = sha256(cb)
     if not _is_int(res.get("core_rc")):
-        return row_invalid("the core's exit status is not one")
+        return row_invalid("the core's exit status is not one", ("core_rc",), jtype(res.get("core_rc", MISSING)))
     for key, who in (("ref", "the bash guard"), ("core", "the core")):
         why = records_problem(res[key], who, schema) if key in res else "%s: no records" % who
         if why:
-            return row_invalid(why)
+            return row_invalid(why, (key,), jtype(res.get(key, MISSING)))
     sides = res.get("sides", MISSING)
     if sides is not MISSING and not isinstance(sides, dict):
-        return row_invalid("sides is not an object (%s)" % type(sides).__name__)
+        return row_invalid("sides is not an object (%s)" % type(sides).__name__, ("sides",), jtype(sides))
     facts = {}
     for key, name in (("ref", "bash_install"), ("core", "core_install")):
         v = res[key].get("any_install") if res[key] else None
@@ -1458,18 +1538,28 @@ def admit(res, k, ctx):
     p3 = res.get("payloads3", MISSING)
     if p3 is MISSING:
         if schema != 1:
-            return row_invalid("no payload counts")
+            return row_invalid("no payload counts", ("payloads3",), "missing")
         note("payloads3", UNKNOWN, "the first schema did not keep them")
         p3 = None
     elif not (isinstance(p3, dict) and set(p3) == set(READING_NAMES)
               and all(p3[r] is None or (_is_int(p3[r]) and p3[r] >= 0) for r in READING_NAMES)):
-        return row_invalid("the payload counts are not three counts")
-    if res.get("stand_ins", "") not in STAND_INS:
-        note("stand_ins", "invalid", "stand-ins this file does not have")
-    if not isinstance(res.get("expect", ""), str):
-        note("expect", "invalid", "not a word")
+        return row_invalid("the payload counts are not three counts", ("payloads3",), jtype(p3))
+    if "stand_ins" in res and res["stand_ins"] not in STAND_INS:
+        drop("stand_ins", "stand-ins this file does not have")
+    if "expect" in res and not isinstance(res["expect"], str):
+        drop("expect", "not a word")
+
+    def words_of(key, text):
+        """A's words the row kept for `text`; ones that are not evidence are
+        rejected and not kept."""
+        got = admit_words(res, key, text, p3, note)
+        if got is None and key in res:
+            reject((key,), ev["invalid"][-1].split(": ", 1)[1], jtype(res[key]))
+            del res[key]
+        return got
+
     # A's words: the row's own, else attached from the source's own core.
-    own = admit_words(res, "words", cmd, p3, note)
+    own = words_of("words", cmd)
     wc = own if own is not None else ctx["words"].get(cmd)
     if own is None and wc is not None and isinstance(p3, dict):
         for rd, x in sorted(wc.items()):
@@ -1478,11 +1568,11 @@ def admit(res, k, ctx):
     run = core_run(res)
     wr = None
     if run is not None:
-        wr = admit_words(res, "words_rewrite", run, p3, note)
+        wr = words_of("words_rewrite", run)
         if wr is None:
             wr = ctx["words"].get(run)
     elif "words_rewrite" in res:
-        note("words_rewrite", "invalid", "words of a rewrite the core does not send")
+        drop("words_rewrite", "words of a rewrite the core does not send")
     res["_words"] = {"words": wc, "words_rewrite": wr}
     # The core's own payload counts, beside A's and the row's.
     if facts["core_install"]:
@@ -1505,6 +1595,17 @@ def admit(res, k, ctx):
                     note("core.payloads." + r, "invalid", "the core counts %d payloads, A's words of the same text %d" % (n, len(x["payloads"])))
             elif isinstance(p3, dict) and _is_int(p3.get(r)) and p3[r] != n:
                 note("core.payloads." + r, "invalid", "the core counts %d payloads, the row's payload count %d" % (n, p3[r]))
+    # The sides, each in its place, before anything compares them.
+    if sides is not MISSING:
+        for name, v in list(sides.items()):
+            problems, rej, keep = admit_side(res, name, v, schema, cb, at)
+            for where, kind, why in problems:
+                note(where, kind, why)
+            ev["rejected"].extend(rej)
+            if keep is None:
+                del sides[name]
+            else:
+                sides[name] = keep
     # The floor, computed again from the basis the row declares.
     saved_floor, basis = res.pop("floor", None), res.pop("floor_basis", None)
     if saved_floor is not None or basis is not None:
@@ -1525,13 +1626,7 @@ def admit(res, k, ctx):
             if saved_floor is not None and saved_floor != v:
                 note("floor", "invalid", "saved %r, computed again from the row %r" % (saved_floor, v))
             res["floor"], res["floor_basis"] = v, b
-    if sides is MISSING:
-        return
-    for name, v in list(sides.items()):
-        for where, kind, why in admit_side(res, name, v, schema, cb):
-            note(where, kind, why)
-        if not isinstance(v, dict):
-            sides[name] = {"decision": "invalid"}
+    res["slot"] = "admitted"
 
 
 def _hex(x):
@@ -1568,7 +1663,7 @@ def provenance_of(saved, schema):
 def ineligible(res):
     """Why a row can be in no count of what held, or None: it is invalid, its
     evidence is, or what measured it is not recorded."""
-    if res.get("_invalid_row") or res.get("status") == "invalid":
+    if res.get("slot") != "admitted" or res.get("status") == "invalid":
         return "the row is invalid"
     ev = res.get("evidence") or {}
     if ev.get("invalid"):
@@ -1685,8 +1780,8 @@ def evaluate(src_bytes, atts, readers=None):
     ctx = {"schema": schema, "source_sha256": sha256(src_bytes), "provenance": prov, "words": words, "floor_rows": floor_rows}
     slots = []
     for k, raw in enumerate(rows):
-        slot = raw if isinstance(raw, dict) else {"_raw_type": type(raw).__name__}
-        admit(slot, k, ctx)
+        slot = raw if isinstance(raw, dict) else {}
+        admit(slot, k, ctx, jtype(raw))
         slots.append(slot)
     R = readers or SavedReaders(saved.get("readings"), {"source": "the source's saved answers",
                                                         "npm_version": (run.get("npm_parser") or {}).get("version") or ""})
@@ -2058,7 +2153,7 @@ def core_decision(res):
     holds a collision), `undecided` (its readings disagree or one failed),
     `no-install` (it reads no install), `unobserved` (it ended non-zero, or
     a reading has no value) or `invalid` (the row's records do not read)."""
-    if res.get("_invalid_row") or res.get("status") == "invalid":
+    if res.get("slot") != "admitted" or res.get("status") == "invalid":
         return "invalid"
     if res.get("core_rc") != 0 or not res.get("core"):
         return "unobserved"
@@ -2099,7 +2194,7 @@ def accounting(results, R):
     acc = {"rows": len(results), "core": {}, "ran_observed": 0, "ran_unobserved": 0, "npm_rows": {}, "effects_rows": {},
            "relations": {}, "effects_shells": {}, "floor_of_sent": {}, "sent_notes": {}, "sent_not_held": [], "pairs": {},
            "evidence_invalid": [], "provenance_unknown": []}
-    bases = [b for b in ("bash", "v2.18.1", "7d66f8c") if any(b in (res.get("sides") or {}) for res in results)]
+    bases = [b for b in ("bash", "v2.18.1", "7d66f8c") if any(b in res.get("sides", {}) for res in admitted(results))]
 
     def pair(base):
         return acc["pairs"].setdefault(base, dict({x: 0 for x in PAIR_KEYS}, rows=0, true_to_false_rows=0, state_pairs=0,
@@ -2451,9 +2546,8 @@ def classify(results, classes, R):
     for res in results:
         for k in ("status", "tokens", "payload_free", "class_refused", "obs", "label", "readings_differ", "blocked", "expect_failed", "class_basis"):
             res.pop(k, None)
-        if "evidence" not in res:
-            res["_invalid_row"] = "the intake did not see it"
-        if res.get("_invalid_row"):
+        # A slot the intake rejected, or one it did not see, holds no facts.
+        if res.get("slot") != "admitted":
             counts["invalid"] += 1
             put(res, "invalid")
             continue
@@ -2616,7 +2710,7 @@ def summarize(results, counts, R, a, extra):
     summary and whether the run is red."""
     out = {"counts": counts}
     silent, silent_words, only_silent, loss, loss_words, loss_unknown, state_unknown = [], [], [], [], [], [], 0
-    for res in results:
+    for res in admitted(results):
         st = {}
         for side, v in res.get("sides", {}).items():
             if side == "written" or not isinstance(v.get("shells"), dict):
@@ -2658,7 +2752,7 @@ def summarize(results, counts, R, a, extra):
     # inert-record-reach.tsv names never reached its npm and cannot fail.
     short, judged = [], 0
     reach = extra.get("reach") or {}
-    for res in results:
+    for res in admitted(results):
         if res.get("command") not in reach:
             continue
         sh = res.get("sides", {}).get("core", {}).get("shells")
@@ -2671,17 +2765,17 @@ def summarize(results, counts, R, a, extra):
         if made < need:
             short.append(res)
     floor = {}
-    for res in results:
+    for res in admitted(results):
         if "floor" in res:
             floor[res["floor"]] = floor.get(res["floor"], 0) + 1
     acc = accounting(results, R)
     unmet = []
-    for res in results:
+    for res in admitted(results):
         if res.get("expect") and not meets(res["expect"], res):
             res["expect_failed"] = "expected %s, the core: %s (%s)" % (res["expect"], core_decision(res), res.get("status"))
             unmet.append(res)
-    expected = sum(1 for res in results if res.get("expect"))
-    blocked = [res for res in results if str(res.get("status", "")).startswith("blocked")]
+    expected = sum(1 for res in admitted(results) if res.get("expect"))
+    blocked = [res for res in admitted(results) if str(res.get("status", "")).startswith("blocked")]
     blocked_by = {}
     for res in blocked:
         bo = res["blocked"].get("bash_observed")
@@ -2692,7 +2786,7 @@ def summarize(results, counts, R, a, extra):
     # to be the command's as written with flags added, or where nothing runs
     # on the core's side (its readings disagree).
     class_obs = {}
-    for res in results:
+    for res in admitted(results):
         s = res.get("status", "")
         if s.startswith("class:"):
             cv = res.get("obs", {}).get("core")
@@ -2708,7 +2802,7 @@ def summarize(results, counts, R, a, extra):
             class_obs.setdefault(s, {})
             class_obs[s][k] = class_obs[s].get(k, 0) + 1
     labels = {}
-    for res in results:
+    for res in admitted(results):
         if res.get("label"):
             k = "%s (%s)" % (res["label"], res.get("status"))
             labels[k] = labels.get(k, 0) + 1
@@ -2741,8 +2835,8 @@ def summarize(results, counts, R, a, extra):
     for k in ("total", "invalid", "core_error", "not_reached", "compared", "reading_set", "incomplete", "both_failed", "blocked",
               "blocked_failed", "both_undecided", "same", "differ", "payload_free_differ"):
         print("%-22s %d" % (k, counts[k]))
-    ev_rows = [res for res in results if res.get("status") != "invalid" and (res.get("evidence") or {}).get("invalid")]
-    unk_rows = [res for res in results if (res.get("evidence") or {}).get("unknown")]
+    ev_rows = [res for res in admitted(results) if res["evidence"]["invalid"]]
+    unk_rows = [res for res in results if res["evidence"]["unknown"]]
     prov = extra.get("provenance") or ("?", None)
     print("source: provenance %s%s; rows not counted for it %d" % (prov[0], (" (%s)" % prov[1]) if prov[1] else "", len(acc["provenance_unknown"])))
     print("intake: %d rows; invalid rows %d; rows with invalid evidence %d; rows with an axis not recorded or not observable %d"
@@ -2760,7 +2854,7 @@ def summarize(results, counts, R, a, extra):
         print("  observed %-40s %s" % (s, ", ".join("%s %d" % kv for kv in sorted(class_obs[s].items()))))
     for k in sorted(labels):
         print("  label %-50s %d" % (k, labels[k]))
-    for res in results:
+    for res in admitted(results):
         if res.get("class_basis"):
             print("  named %s for %r: %s" % (res.get("status"), res["command"], res["class_basis"]))
     if floor:
@@ -2806,7 +2900,7 @@ def summarize(results, counts, R, a, extra):
         res = results[k]
         cv = res.get("obs", {}).get("core") or {}
         print("SENT-NOT-HELD %s %r status=%s npm %s, effects %s" % (res["set"], res["command"], res.get("status"), cv.get("npm"), cv.get("effects")))
-    for res in results:
+    for res in admitted(results):
         for base, where in sorted((res.get("true_to_false") or {}).items()):
             print("TRUE-TO-FALSE beside %s %s %r status=%s calls=%s" % (base, res["set"], res["command"], res.get("status"), json.dumps(where)))
     print("npm's own parser: %s" % ("asked (npm %s)" % R.npm_version if R.npm_asked else "not asked: %s" % R.npm_error))
@@ -2826,7 +2920,7 @@ def summarize(results, counts, R, a, extra):
         print("SILENT %s %r %s head: %s %s" % (res["set"], res["command"], res["sides"]["core"].get("state"), h.get("decision", "not asked"),
                                               h.get("reason", "")[:120]))
     shown = 0
-    for res in results:
+    for res in admitted(results):
         s = res.get("status", "")
         if s in ("unclassified", "decrease", "decrease:unknown", "reading-set", "incomplete", "core-error") or str(res.get("floor", "")).startswith("NOT"):
             shown += 1
@@ -2847,28 +2941,40 @@ def summarize(results, counts, R, a, extra):
 
 def manifest(path, results, head):
     """One JSON line for the report (`head`: the source, its provenance and
-    the classifier) and one per row slot: a projection of the evaluation."""
+    the classifier) and one per slot, in the source's order: a projection of
+    the slot. A rejected slot shows what it keeps (its display, where and why
+    it was rejected) and nothing of the row's fields; a rejected side or run
+    shows where it is in the source."""
     with open(path, "w", encoding="utf-8") as f:
         f.write(json.dumps(head, ensure_ascii=False) + "\n")
-        for k, res in enumerate(results):
-            cmd_ = res.get("command") if isinstance(res.get("command"), str) else None
-            row = {"row": k + 1, "set": res.get("set"), "command_sha256": sha256(cmd_bytes(cmd_)) if cmd_ is not None else None, "command": cmd_,
-                   "status": res.get("status"), "label": res.get("label"), "tokens": res.get("tokens"),
-                   "reading_set": res.get("ref", {}).get("reading_set"), "readings_differ": res.get("readings_differ"),
-                   "payloads3": res.get("payloads3"), "payload_free": res.get("payload_free"), "floor": res.get("floor"),
-                   "floor_basis": res.get("floor_basis"), "core": core_decision(res), "blocked": res.get("blocked"),
-                   "stand_ins": res.get("stand_ins"), "expect": res.get("expect"), "expect_failed": res.get("expect_failed"),
-                   "true_to_false": res.get("true_to_false"), "class_basis": res.get("class_basis"),
-                   "class_refused": res.get("class_refused"), "evidence": res.get("evidence"), "sides": {}}
+        for res in results:
+            ev = res["evidence"]
+            row = {"row": ev["from"]["row"], "slot": res.get("slot"), "set": res.get("set"),
+                   "command_sha256": ev["from"].get("command_sha256"), "command": res.get("command"), "status": res.get("status"),
+                   "core": core_decision(res), "evidence": ev}
+            if res.get("slot") != "admitted":
+                row["raw_type"] = res.get("raw_type")
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+                continue
+            row.update({"label": res.get("label"), "tokens": res.get("tokens"), "reading_set": res["ref"].get("reading_set"),
+                        "readings_differ": res.get("readings_differ"), "payloads3": res.get("payloads3"),
+                        "payload_free": res.get("payload_free"), "floor": res.get("floor"), "floor_basis": res.get("floor_basis"),
+                        "blocked": res.get("blocked"), "stand_ins": res.get("stand_ins"), "expect": res.get("expect"),
+                        "expect_failed": res.get("expect_failed"), "true_to_false": res.get("true_to_false"),
+                        "class_basis": res.get("class_basis"), "class_refused": res.get("class_refused"), "sides": {}})
             for side, v in res.get("sides", {}).items():
+                if "rejected" in v:
+                    row["sides"][side] = {"decision": v["decision"], "rejected": v["rejected"]}
+                    continue
                 s = {"decision": v.get("decision"), "record": v.get("record"), "record_computed": v.get("_record"), "state": v.get("state"),
                      "state_words": v.get("state_words")}
                 if isinstance(v.get("shells"), dict):
-                    s["shells"] = {sh: {"rc": o.get("rc"), "timeout": o.get("timeout"), "log": o.get("log"),
-                                        "npm_calls": len(o["npm"]) if isinstance(o.get("npm"), list) else UNKNOWN,
-                                        "other_calls": len(o["other"]) if isinstance(o.get("other"), list) else UNKNOWN,
-                                        "files": len(o["files"]) if isinstance(o.get("files"), dict) else UNKNOWN,
-                                        "axes": o.get("_axes")}
+                    s["shells"] = {sh: {"rejected": o["rejected"], "axes": o["_axes"]} if "rejected" in o else
+                                   {"rc": o.get("rc"), "timeout": o.get("timeout"), "log": o.get("log"),
+                                    "npm_calls": len(o["npm"]) if isinstance(o.get("npm"), list) else UNKNOWN,
+                                    "other_calls": len(o["other"]) if isinstance(o.get("other"), list) else UNKNOWN,
+                                    "files": len(o["files"]) if isinstance(o.get("files"), dict) else UNKNOWN,
+                                    "axes": o.get("_axes")}
                                    for sh, o in v["shells"].items()}
                 row["sides"][side] = s
             if res.get("obs"):
@@ -3243,6 +3349,20 @@ def selftest(a):
     ls_["sides"] = []
     ev_ls = evaluate(source([ls_]), [])
     check("a list of sides makes its row invalid, and the row stays", [len(ev_ls["rows"]), ev_ls["rows"][0]["status"]], [1, "invalid"])
+    rj = erow(four(c10))
+    rj["ref"] = []
+    s1_ = evaluate(source([erow(four(c10)), rj]), [])["rows"][1]
+    check("a rejected slot keeps its ordinal, its display and where it was rejected, and none of the row's fields",
+          [s1_["slot"], s1_["set"], s1_["command"], [(x["pointer"], x["type"]) for x in s1_["evidence"]["rejected"]],
+           s1_["evidence"]["from"]["row"], "ref" in s1_, "sides" in s1_],
+          ["rejected", "selftest", ENV_SPLIT_INPUT, [("/rows/1/ref", "array")], 2, False, False])
+    ro = erow(four(c10))
+    ro["sides"]["core"]["shells"]["bash"] = []
+    r0_ = evaluate(source([ro]), [])["rows"][0]
+    sh_ = r0_["sides"]["core"]["shells"]
+    check("a shell's run that is no object is rejected in its place, invalid and not missing, and the other shells keep theirs",
+          [r0_["slot"], sh_["bash"].get("rejected"), axis(sh_["bash"], "npm"), axis(sh_["zsh"], "npm")],
+          ["admitted", "/rows/0/sides/core/shells/bash", "invalid", "ok"])
     pc = erow(four(c10))
     pc["core"]["payloads.bash"] = "99"
     prep(pc)
@@ -3636,11 +3756,13 @@ def main():
             except Unsupported as e:
                 stop("this run's own observations do not read: %s" % e)
             for k, res in enumerate(pre["rows"]):
-                cs_ = (res.get("sides") or {}).get("core") or {}
+                if res.get("slot") != "admitted":
+                    continue
+                cs_ = res.get("sides", {}).get("core", {})
                 if isinstance(cs_.get("shells"), dict) and any(state(o, side_record(cs_), pre["readers"]) == "SILENT"
                                                                for o in cs_["shells"].values()):
                     box = tempfile.mkdtemp(prefix="h.", dir=work)
-                    raw_rows[k].setdefault("sides", {})["head"] = whole_guard(GUARD, raw_rows[k]["command"], "toolu_head%d" % k, box)
+                    raw_rows[k].setdefault("sides", {})["head"] = whole_guard(GUARD, res["command"], "toolu_head%d" % k, box)
                     shutil.rmtree(box, ignore_errors=True)
         src_bytes = json.dumps(snapshot).encode("ascii")
         src_info = {"kind": "live", "path": None}
@@ -3650,8 +3772,8 @@ def main():
         if a.reclassify and a.reread:
             # A new observation: the readers on this PATH asked again of every
             # npm argv that is evidence. The saved answers stay in the source.
-            argvs = [x for res in ev["rows"] for v in (res.get("sides") or {}).values() if isinstance(v, dict)
-                     and isinstance(v.get("shells"), dict) for o in v["shells"].values() if calls_known(o) for x in o["npm"]]
+            argvs = [x for res in admitted(ev["rows"]) for v in res.get("sides", {}).values()
+                     if isinstance(v.get("shells"), dict) for o in v["shells"].values() if calls_known(o) for x in o["npm"]]
             live = Readers(work, rpath)
             live.ask(argvs)
             ev = evaluate(src_bytes, atts, SavedReaders(live.answers(), {"source": "asked again on this PATH (--reread): a new observation",
