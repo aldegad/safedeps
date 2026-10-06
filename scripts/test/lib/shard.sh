@@ -67,15 +67,16 @@ shard_args() {
 
 # shard_row LABEL: counts a row and says whether this run runs it. Call it first
 # in a row, as `shard_row "<label>" || return 0` in a function or
-# `shard_row "<label>" || continue` in a loop. It must run in the battery's own
-# shell: a count made in a subshell (a command substitution, a pipeline, a
-# background job) is lost when the subshell ends, and every later row would
-# take a number already used. So that is a failure, not a row.
+# `shard_row "<label>" || continue` in a loop. Unsharded, it runs every row and
+# counts nothing. Sharded, it must run in the battery's own shell: a count made
+# in a subshell (a command substitution, a pipeline, a background job) is lost
+# when the subshell ends, and every later row would take a number already used.
+# So that is a failure, not a row.
 shard_row() {
+  [[ "${SHARD_ON}" == true ]] || return 0
   [[ "${BASH_SUBSHELL}" == "${SHARD_DEPTH}" ]] \
     || fail "shard_row ran in a subshell (depth ${BASH_SUBSHELL}, the battery's is ${SHARD_DEPTH:-unset}): ${1:0:80}"
   SHARD_N=$(( SHARD_N + 1 ))
-  [[ "${SHARD_ON}" == true ]] || return 0
   local label="${1//$'\n'/\\n}"
   printf '%s\t%s\n' "${SHARD_N}" "${label}" >> "${SHARD_ROWS_FILE}" || fail "cannot record row ${SHARD_N}"
   (( (SHARD_N - 1) % SHARD_M + 1 == SHARD_I )) || return 1
