@@ -266,108 +266,6 @@ fn settle_scan_failure(call: &Call, failed: bool, out: &mut Out) -> bool {
     false
 }
 
-/// `compute_pending_key`'s normal form of a command, as its sed writes it: on
-/// each line, every ` --ignore-scripts` that is a whole word is taken out,
-/// each run of blanks becomes one blank, and a blank at either end goes.
-fn pending_norm(command: &[u8]) -> W {
-    let flag = Regex::new("[[:space:]]+--ignore-scripts([^=[:alnum:]_-]|$)", false).expect("the flag pattern");
-    let mut lines: Vec<W> = Vec::new();
-    for line in command.split(|&b| b == b'\n') {
-        let mut line = line.to_vec();
-        while let Some((s, e)) = flag.find(&line) {
-            // `\1` is the byte after the flag; there is none where the flag
-            // ends the line.
-            let cut = if line[..e].ends_with(b"--ignore-scripts") { e } else { e - 1 };
-            line.drain(s..cut);
-        }
-        let mut norm = W::with_capacity(line.len());
-        let mut blank = false;
-        for &b in &line {
-            if is_space(b) {
-                if !blank {
-                    norm.push(b' ');
-                }
-                blank = true;
-            } else {
-                norm.push(b);
-                blank = false;
-            }
-        }
-        if norm.first() == Some(&b' ') {
-            norm.remove(0);
-        }
-        if norm.last() == Some(&b' ') {
-            norm.pop();
-        }
-        lines.push(norm);
-    }
-    captured(lines.join(&b'\n'))
-}
-
-/// `compute_pending_key <dir hash> <command>`.
-fn pending_key(dir_hash: &str, command: &[u8]) -> String {
-    format!("{}_{}", dir_hash, md5::hex(&pending_norm(command)))
-}
-
-/// `write_state_file`: the value and a newline, through a temporary name in
-/// the same directory.
-fn write_state_file(target: &Path, value: &[u8]) -> std::io::Result<()> {
-    let dir = target.parent().unwrap_or(Path::new("."));
-    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
-    let base = target.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let (secs, nanos) = os::now();
-    let seed = (nanos ^ (secs as u32).rotate_left(11)).wrapping_add(std::process::id().wrapping_mul(2_654_435_761));
-    for n in 0..64u32 {
-        let temp = dir.join(format!(".{}.{:06x}", base, seed.wrapping_add(n) & 0xff_ffff));
-        match std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&temp) {
-            Ok(mut f) => {
-                let wrote = f.write_all(value).and_then(|_| f.write_all(b"\n"));
-                drop(f);
-                if let Err(e) = wrote.and_then(|_| std::fs::rename(&temp, target)) {
-                    let _ = std::fs::remove_file(&temp);
-                    return Err(e);
-                }
-                return Ok(());
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(e),
-        }
-    }
-    Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "no temporary name was free"))
-}
-
-/// `find <dir> -type f -mmin +1440 -delete`: the files under `dir` last
-/// modified more than a day ago. BSD find counts whole minutes, rounded up,
-/// from whole seconds; GNU find compares the times as they are (measured on
-/// macOS and in WSL1: a file 86,400 seconds old goes on GNU and stays on BSD).
-fn sweep_day_old(dir: &Path) {
-    let now = SystemTime::now();
-    let mut dirs = vec![dir.to_path_buf()];
-    while let Some(d) = dirs.pop() {
-        let Ok(entries) = std::fs::read_dir(&d) else { continue };
-        for entry in entries.flatten() {
-            let Ok(kind) = entry.file_type() else { continue };
-            if kind.is_dir() {
-                dirs.push(entry.path());
-                continue;
-            }
-            if !kind.is_file() {
-                continue;
-            }
-            let Ok(modified) = entry.metadata().and_then(|m| m.modified()) else { continue };
-            let old = if cfg!(target_os = "macos") {
-                let secs = |t: SystemTime| t.duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
-                (secs(now) - secs(modified) + 59) / 60 > 1440
-            } else {
-                now.duration_since(modified).map(|d| d > Duration::from_secs(86_400)).unwrap_or(false)
-            };
-            if old {
-                let _ = std::fs::remove_file(entry.path());
-            }
-        }
-    }
-}
-
 /// `guard_backstop_trace_baseline`: the record the PostToolUse backstop reads
 /// to tell whether this command left a trace in the cwd's node tree. It
 /// decides no verdict; anything that fails leaves no entry, which the
@@ -391,7 +289,7 @@ fn backstop_trace_baseline(call: &Call, cwd: &[u8]) {
     if std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&entry_dir).is_err() {
         return;
     }
-    sweep_day_old(&entry_dir);
+    state::sweep_day_old(&entry_dir);
     let d = os::path(&dir);
     let lock = os::tree_inode(&d.join("package-lock.json"));
     let hidden = os::tree_inode(&d.join("node_modules/.package-lock.json"));
@@ -431,7 +329,7 @@ fn backstop_trace_baseline(call: &Call, cwd: &[u8]) {
         }
     }
     let entry = jq::obj(vec![
-        ("key", jq::s(&pending_key(&dir_hash, &call.command))),
+        ("key", jq::s(&state::pending_key(&dir_hash, &call.command))),
         ("baseline", jq::arg(&trace_text)),
         ("resolution", jq::s(resolution)),
         (
@@ -446,7 +344,7 @@ fn backstop_trace_baseline(call: &Call, cwd: &[u8]) {
             ]),
         ),
     ]);
-    if write_state_file(&os::path(&cat(&[&base, b".json"])), jq::compact(&entry).as_bytes()).is_err() {
+    if state::write_state_file(&os::path(&cat(&[&base, b".json"])), jq::compact(&entry).as_bytes()).is_err() {
         let _ = std::fs::remove_file(&trace);
     }
 }
