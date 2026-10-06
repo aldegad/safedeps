@@ -1,0 +1,27 @@
+{"id": "echo-shell", "command": "npm i y && echo ksh -c 'npm ci x'", "expected": [], "shell": {"argv": [["i", "y"]], "rc": 0, "stdout": "ksh -c npm ci x\n"}}
+{"id": "echo-eval", "command": "echo eval npm ci", "expected": [], "shell": {"argv": [], "rc": 0, "stdout": "eval npm ci\n"}}
+{"id": "echo-env", "command": "echo env -S'npm ci'", "expected": [], "shell": {"argv": [], "rc": 0, "stdout": "env -Snpm ci\n"}}
+{"id": "manager-operand", "command": "npm i x sh -c 'npm ci'", "expected": [], "shell": {"argv": [["i", "x", "sh", "-c", "npm ci"]], "rc": 0, "stdout": ""}}
+{"id": "exec-option-value", "command": "exec -a sh echo ksh -c 'npm ci'", "expected": [], "shell": {"argv": [], "rc": 0, "stdout": "ksh -c npm ci\n"}}
+{"id": "env-option-value", "command": "env -u sh echo ksh -c 'npm ci'", "expected": [], "shell": {"argv": [], "rc": 0, "stdout": "ksh -c npm ci\n"}}
+{"id": "shell", "command": "sh -c 'npm ci'", "expected": [{"kind": "S", "text": "npm ci", "origin": "shell-c", "shell": "sh"}], "shell": {"argv": [["ci"]], "rc": 0, "stdout": ""}}
+{"id": "quoted-shell", "command": "'sh' -c 'npm ci'", "expected": [{"kind": "S", "text": "npm ci", "origin": "shell-c", "shell": "sh"}], "shell": {"argv": [["ci"]], "rc": 0, "stdout": ""}}
+{"id": "shell-path", "command": "/bin/sh -c 'npm ci'", "expected": [{"kind": "S", "text": "npm ci", "origin": "shell-c", "shell": "/bin/sh"}], "shell": {"argv": [["ci"]], "rc": 0, "stdout": ""}}
+{"id": "assignment", "command": "X=yes sh -c 'npm ci'", "expected": [{"kind": "S", "text": "npm ci", "origin": "shell-c", "shell": "sh"}], "shell": {"argv": [["ci"]], "rc": 0, "stdout": ""}}
+{"id": "command-prefix", "command": "command sh -c 'npm ci'", "expected": [{"kind": "S", "text": "npm ci", "origin": "shell-c", "shell": "sh"}], "shell": {"argv": [["ci"]], "rc": 0, "stdout": ""}}
+{"id": "env-shell", "command": "env -u DUMMY sh -c 'npm ci'", "expected": [{"kind": "S", "text": "npm ci", "origin": "shell-c", "shell": "sh"}], "shell": {"argv": [["ci"]], "rc": 0, "stdout": ""}}
+{"id": "env-split", "command": "env -S'npm ci' x", "expected": [{"kind": "E", "text": "npm ci x", "origin": "env-split", "shell": null}], "shell": {"argv": [["ci", "x"]], "rc": 0, "stdout": ""}}
+{"id": "command-env-split", "command": "command env -S'npm ci' x", "expected": [{"kind": "E", "text": "npm ci x", "origin": "env-split", "shell": null}], "shell": {"argv": [["ci", "x"]], "rc": 0, "stdout": ""}}
+{"id": "eval", "command": "eval npm ci x", "expected": [{"kind": "E", "text": "npm ci x", "origin": "eval", "shell": null}], "shell": {"argv": [["ci", "x"]], "rc": 0, "stdout": ""}}
+{"id": "command-eval", "command": "command eval npm ci", "expected": [{"kind": "E", "text": "npm ci", "origin": "eval", "shell": null}], "shell": {"argv": [["ci"]], "rc": 0, "stdout": ""}}
+{"id": "if-body", "command": "if true; then sh -c 'npm ci'; fi", "expected": [{"kind": "S", "text": "npm ci", "origin": "shell-c", "shell": "sh"}], "shell": {"argv": [["ci"]], "rc": 0, "stdout": ""}}
+{"id": "case-body", "command": "case x in x) sh -c 'npm ci';; esac", "expected": [{"kind": "S", "text": "npm ci", "origin": "shell-c", "shell": "sh"}], "shell": {"argv": [["ci"]], "rc": 0, "stdout": ""}}
+{"id": "group", "command": "{ sh -c 'npm ci'; }", "expected": [{"kind": "S", "text": "npm ci", "origin": "shell-c", "shell": "sh"}], "shell": {"argv": [["ci"]], "rc": 0, "stdout": ""}}
+{"id": "redirection", "command": ">f sh -c 'npm ci'", "expected": [{"kind": "S", "text": "npm ci", "origin": "shell-c", "shell": "sh"}], "shell": {"argv": [["ci"]], "rc": 0, "stdout": ""}}
+{"id": "real-substitution", "command": "echo ksh -c \"$(npm ci)\"", "expected": [{"kind": "B", "text": "npm ci", "origin": "command-substitution", "shell": null}], "shell": {"argv": [["ci"]], "rc": 0, "stdout": "ksh -c \n"}}
+{"id": "nested-data", "command": "sh -c \"echo ksh -c 'npm ci x'\"", "expected": [{"kind": "S", "text": "echo ksh -c 'npm ci x'", "origin": "shell-c", "shell": "sh"}], "child_expected": [[]], "shell": {"argv": [], "rc": 0, "stdout": "ksh -c npm ci x\n"}}
+{"id": "nested-call", "command": "sh -c \"sh -c 'npm ci'\"", "expected": [{"kind": "S", "text": "sh -c 'npm ci'", "origin": "shell-c", "shell": "sh"}], "child_expected": [[{"kind": "S", "text": "npm ci", "origin": "shell-c", "shell": "sh"}]], "shell": {"argv": [["ci"]], "rc": 0, "stdout": ""}}
+{"id": "array-data", "command": "a=(sh -c 'npm ci')", "expected": [], "readings": ["bash", "zsh"], "shell": {"argv": [], "rc": 0, "stdout": ""}}
+{"id": "data-env-dynamic", "command": "echo env -S'npm $V'", "expected": [], "shell": {"argv": [], "rc": 0, "stdout": "env -Snpm $V\n"}}
+{"id": "unread-env", "command": "env -S'npm $V'", "expected": [], "failed": true}
+{"id": "unterminated", "command": "sh -c 'npm ci", "expected": [], "failed": true}

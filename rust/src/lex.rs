@@ -595,6 +595,15 @@ impl<'g> Lex<'g> {
             return Err((UnknownView, Side::default()));
         }
         self.payloads = Some(Vec::new());
+        if self.view == "cscripts" {
+            // Semantic payloads share the statement and prefix walk with
+            // pieces. The textual cscripts view remains a compatibility
+            // search; an interpreter name in an argument is not a call.
+            self.wantst = true;
+            self.wantdep = true;
+            self.wantar = true;
+            self.wantgrp = self.x.contains(&b'}');
+        }
         let r = self.run_passes();
         let side = Side { unterm: self.unterm, diverge: self.div, smfail: self.smfail || self.aqbad };
         match r {
@@ -679,7 +688,8 @@ impl<'g> Lex<'g> {
         if self.wantgrp {
             self.group_close();
         }
-        if matches!(v, "unprefixed" | "recognize" | "cwords" | "pieces" | "cmdword" | "noprefix") && !self.unterm {
+        if (matches!(v, "unprefixed" | "recognize" | "cwords" | "pieces" | "cmdword" | "noprefix")
+            || v == "cscripts" && self.payloads.is_some()) && !self.unterm {
             self.prefixes();
         }
         let r = match v {
@@ -692,7 +702,15 @@ impl<'g> Lex<'g> {
                 Ok(())
             }
             "cscripts" => {
-                self.emit_cscripts();
+                if self.payloads.is_some() {
+                    if self.unterm {
+                        self.smfail = true;
+                    } else {
+                        self.emit_pieces();
+                    }
+                } else {
+                    self.emit_cscripts();
+                }
                 Ok(())
             }
             "events" => {
@@ -1644,6 +1662,7 @@ impl<'g> Lex<'g> {
             } else if self.assignat(s, k, true) != 0 {
                 hit = true;
             } else if lbw == b"env" {
+                if self.payloads.is_some() { self.ew.set(s); }
                 envmode = true;
                 hit = true;
             } else if w == b"exec" {
@@ -1667,6 +1686,11 @@ impl<'g> Lex<'g> {
                 envmode = false;
                 continue;
             } else {
+                // The prefix walk has reached the command, after consuming
+                // option operands and assignments. Preserve that original
+                // start for the structural script reader, including quotes
+                // and executable paths, before prefix bytes are blanked.
+                if self.payloads.is_some() { self.ew.set(s); }
                 if !self.shz && zprecmd(&w) {
                     self.div = true;
                 }
@@ -2873,13 +2897,20 @@ impl<'g> Lex<'g> {
     }
 
     fn emit_cscripts(&mut self) {
-        let n = self.n;
+        self.cscripts_range(1, self.n);
+        if self.aqbad {
+            self.put(b"!\n");
+        }
+    }
+
+    fn cscripts_range(&mut self, a: I, n: I) {
         let mut words: Vec<Vec<u8>> = Vec::new();
         let mut units: Vec<String> = Vec::new();
+        let mut starts: Vec<I> = Vec::new();
         let mut w: Vec<u8> = Vec::new();
         let mut ws = String::new();
         let mut inw = false;
-        let mut k: I = 1;
+        let mut k: I = a;
         while k <= n + 1 {
             if k > n || self.word_sep(k) {
                 if inw {
@@ -2891,13 +2922,15 @@ impl<'g> Lex<'g> {
                     || self.cb(k) == b'p'
                     || self.cb(k) == b'c' && self.dep1(k) && matches!(self.xb(k), b'\n' | b';' | b'&' | b'|' | b'(' | b')')
                 {
-                    self.cscripts_of(&words, &units);
+                    self.cscripts_of(&words, &units, &starts);
                     words.clear();
                     units.clear();
+                    starts.clear();
                 }
                 k += 1;
                 continue;
             }
+            if !inw { starts.push(k); }
             inw = true;
             if self.drop.has(k) {
                 k += 1;
@@ -2911,9 +2944,6 @@ impl<'g> Lex<'g> {
                 ws.push_str(&format!(" {}", k));
             }
             k += 1;
-        }
-        if self.aqbad {
-            self.put(b"!\n");
         }
     }
 
@@ -3001,13 +3031,17 @@ impl<'g> Lex<'g> {
         true
     }
 
-    fn cscripts_of(&mut self, w: &[Vec<u8>], ws: &[String]) {
+    fn cscripts_of(&mut self, w: &[Vec<u8>], ws: &[String], starts: &[I]) {
         let n = w.len();
         // 1-based views of the word arrays, as the awk reads them.
         let wv = |m: usize| -> &[u8] { if m >= 1 && m <= n { &w[m - 1] } else { b"" } };
         let wsv = |m: usize| -> &str { if m >= 1 && m <= n { &ws[m - 1] } else { "" } };
         let mut j = 1usize;
         while j <= n {
+            if self.payloads.is_some() && !self.ew.has(starts[j - 1]) {
+                j += 1;
+                continue;
+            }
             let word = wv(j);
             let base: &[u8] = match word.iter().rposition(|&b| b == b'/') {
                 Some(p) => &word[p + 1..],
@@ -3492,6 +3526,10 @@ impl<'g> Lex<'g> {
     }
 
     fn piece(&mut self, a: I, z: I, nn: I) {
+        if self.view == "cscripts" && self.payloads.is_some() {
+            self.cscripts_range(a, z);
+            return;
+        }
         let mut any = false;
         let mut k = a;
         while k <= z {
