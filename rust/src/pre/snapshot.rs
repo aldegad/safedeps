@@ -148,7 +148,7 @@ pub fn probe(input:&[u8])->i32 {
     let mut warnings=Vec::new();
     let Ok(_lock)=state::StateLock::acquire(&guard_dir.join("state.lock"),&mut warnings,None)else{return 1};
     let _=std::io::stderr().write_all(&warnings);
-    let call=Call{input:value.clone(),command:command.clone(),guard:state::guard_text(),guard_dir};
+    let call=Call{input:json::Stream{values:vec![value.clone()],failed:false},command:command.clone(),guard:state::guard_text(),guard_dir};
     let snap=match Snapshot::create(&call,project){
         Ok(snap)=>snap,
         Err(Error::Io(e))=>{eprintln!("{}",e);return 1},

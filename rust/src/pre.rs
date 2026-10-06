@@ -93,16 +93,6 @@ fn jq_r(v: Option<&Value>) -> W {
     }
 }
 
-/// `.name` as jq indexes it: the value, null for an object without it or for
-/// null, and an error (exit 5) for anything else.
-fn index<'a>(v: Option<&'a Value>, name: &str) -> Result<Option<&'a Value>, ()> {
-    match v {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::Obj(_)) => Ok(v.and_then(|o| o.get(name))),
-        Some(_) => Err(()),
-    }
-}
-
 // ---- the knobs -----------------------------------------------------------------
 
 /// `safedeps_normalize_knob`: the digits of a knob's value, or None when it is
@@ -177,7 +167,7 @@ fn env_bytes(name: &str) -> W {
 // ---- the judgment ------------------------------------------------------------------
 
 struct Call {
-    input: Value,
+    input: json::Stream,
     command: W,
     /// `GUARD_DIR` as the text the guard builds its paths from.
     guard: W,
@@ -244,7 +234,7 @@ fn backstop_trace_baseline(call: &Call, cwd: &[u8]) {
     if !call.command.split(|&b| b == b'\n').any(|line| re.is_match(line)) {
         return;
     }
-    let Some(id) = callid::call_id(&call.input) else { return };
+    let Some(id) = callid::from_stream(&call.input) else { return };
     let dir = os::realpath(cwd);
     let dir_hash = md5::hex(&dir);
     let entry_text = cat(&[&call.guard, b"/pending/backstop"]);
@@ -340,13 +330,16 @@ fn judge(call: &Call) -> Result<Out, ()> {
     let mut out = Out::default();
     let core = Core::new();
     let mut run = Run::new(&core);
-    let mut cwd = jq_r(index(Some(&call.input), "cwd").ok().flatten());
+    let mut cwd = match jq::capture_field(&call.input, &["cwd"]) {
+        Ok(cwd) => cwd,
+        Err(code) => return Ok(Out { code, ..Out::default() }),
+    };
     if cwd.is_empty() {
         cwd = shell_pwd();
     }
     let read = readings::Readings::collect(&mut run, &call.command, &cwd);
     if read.yes("any_install") {
-        if call.input.get("turn_id").is_none() { return Err(()) }
+        if !jq::stream_has(&call.input, "turn_id") { return Err(()) }
         return Ok(install::judge(call, &mut run, &cwd, &read,
             |_,_| unreachable!("Codex must not ask for a rewrite")));
     }
@@ -412,20 +405,16 @@ pub fn main(input: &[u8], budget_child: bool) -> i32 {
         return 1;
     }
 
-    // `INPUT=$(cat)`, then jq twice. jq ends with 5 on text that is not JSON
-    // and on a value it cannot index, and the guard ends with it (measured,
-    // jq 1.7 and 1.7.1). jq reads every JSON text of its input; the engines
-    // send one, and more than one is refused here the same way.
+    // `INPUT=$(cat)`, then jq twice. Both invocations read the complete
+    // stream before the tool/command branch, even for a non-Bash tool.
     let input = captured(input.to_vec());
-    if input.iter().all(|&b| is_space(b)) {
-        return 0;
-    }
-    let Ok(payload) = json::parse_one(&input) else { return 5 };
-    let Ok(tool) = index(Some(&payload), "tool_name") else { return 5 };
-    let tool = jq_r(tool);
-    let Ok(tool_input) = index(Some(&payload), "tool_input") else { return 5 };
-    let Ok(command) = index(tool_input, "command") else { return 5 };
-    let command = jq_r(command);
+    let payload = json::read(&input);
+    let tool = match jq::capture_field(&payload, &["tool_name"]) {
+        Ok(v) => v, Err(code) => return code,
+    };
+    let command = match jq::capture_field(&payload, &["tool_input", "command"]) {
+        Ok(v) => v, Err(code) => return code,
+    };
     if tool != b"Bash" || command.is_empty() {
         return 0;
     }
