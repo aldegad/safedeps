@@ -21,10 +21,12 @@
 #     adds fails here rather than being fetched.
 #   - The binary carries a stamp (rust/build.rs): the kind of build and the
 #     sha256 of the source it was built from (rust/Cargo.toml, Cargo.lock,
-#     build.rs and src/**/*.rs). A checkout's binary checks that stamp against
-#     the checkout's source when a hook starts, and does not judge from a
-#     source it was not built from. --locked matters for that too: a cargo
-#     that rewrote Cargo.lock would change the hash under the binary.
+#     build.rs and src/**/*.rs). A binary checks that stamp when a hook
+#     starts, against the source of its own tree (the rust/ of the root that
+#     holds bin/native/<platform>, never a directory found by looking
+#     upwards), and does not judge from a source it was not built from.
+#     --locked matters for that too: a cargo that rewrote Cargo.lock would
+#     change the hash under the binary.
 #   - The binary is the file cargo names in its own report of the build
 #     (--message-format=json), never a path this script assumes: with
 #     CARGO_TARGET_DIR or build.target-dir set, cargo writes elsewhere, and a
@@ -39,11 +41,14 @@
 #     machine is checked as far as its header and is said to be built and not
 #     run.
 #
-# --publish marks the stamp `publish`. Such a binary ships in a package that
-# has no rust/ directory, so it has no source to check itself against and does
-# not look for one. The mark is fixed when the binary is built, here, by the
-# publish job; nothing at run time can set it. A checkout never builds with
-# --publish: its binary would stop noticing that the source moved.
+# --publish marks the stamp `publish`. The mark is fixed when the binary is
+# built, here, by the publish job; nothing at run time can set it. It changes
+# one thing: a publish binary whose own tree has no rust/ at all, which is the
+# package npm installs, skips the check, because there is no source to hold
+# it to. Where its own rust/ is there, unreadable or a dangling link, it is
+# checked or refused like any other binary. So the publish job's build is
+# checked against the tagged source here, and a checkout's --publish build
+# still notices that the source moved.
 #
 # The toolchain is whatever `cargo` is on PATH. The publish job pins it; a
 # checkout's is the developer's.

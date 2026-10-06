@@ -55,8 +55,9 @@ jobs:
       # runs. It refuses a Cargo.lock that lists anything but the crate, and
       # builds --locked --offline, so a crate that would have to be fetched
       # fails the release here. --publish marks the binaries' stamp: they ship
-      # without rust/, and do not look for a source to check themselves
-      # against.
+      # without rust/, and a publish binary skips its source check only where
+      # its own tree has no rust/ at all. Here, beside the tagged source,
+      # build-core.sh checks the arm64 binary against it before placing it.
       - name: Build the binaries
         run: |
           set -euo pipefail
@@ -116,7 +117,9 @@ jobs:
       # The binaries land where the build job had them: bin/native/ and
       # native.sha256, at the root. An artifact does not keep the exec bit, so
       # it is set again here, after the bytes are checked against the build
-      # job's digests. The linux binary is run on this runner. Then the
+      # job's digests. The linux binary is run on this runner, beside the
+      # tag's rust/: it prints a publish stamp, and its check against that
+      # source says ok, so it was built from this tag. Then the
       # package is listed the way it will be packed: each binary has to be in
       # it with mode 755, nothing of rust/ may be, and it names no dependency.
       # The mode is checked here, before the publish, which cannot be taken
@@ -135,6 +138,9 @@ jobs:
           stamp=$(./bin/native/linux-x64/safedeps-core stamp)
           echo "stamp: $stamp"
           [ "${stamp%% *}" = publish ] || { echo "::error::the linux-x64 binary's stamp is not a publish build's"; exit 1; }
+          check=$(./bin/native/linux-x64/safedeps-core stamp --check 2>&1) \
+            || { echo "::error::the linux-x64 binary was not built from this tag's rust/: $check"; exit 1; }
+          [ "$check" = ok ] || { echo "::error::the linux-x64 binary's stamp check said: $check"; exit 1; }
           npm pack --dry-run --json > "$RUNNER_TEMP/pack.json"
           for p in darwin-arm64 darwin-x64 linux-x64; do
             mode=$(jq -r --arg f "bin/native/$p/safedeps-core" '[.[0].files[] | select(.path == $f) | .mode] | if length == 1 then .[0] else "none" end' "$RUNNER_TEMP/pack.json")
