@@ -1148,7 +1148,7 @@ Verification, on e4773ad against 151ecef. Every run went through a test host's q
 
 ## v2.18.1 — records belong to one call, and npm publishes from a tag (shipped)
 
-This release closes the v2.18.0 boundaries that were ready, and moves npm publishing to GitHub Actions. The rest of what v2.18.0 moved here is listed at the end of this section and ships in v2.18.2.
+This release closes four of the eight boundaries v2.18.0 moved here: records tied to the call, failed tool calls, a `||` read as a pipe, and the Codex registry warning. It also moves npm publishing to GitHub Actions. The other four go on to v2.18.2: where a command starts in the lexer, the commands v2.17.2 gave `--ignore-scripts` and v2.18.0 downgrades, an npm spelled in another case inside such a script, and a verb glued to `;`. They are listed at the end of this section, with what else moved.
 
 ### Beside an install, a pipe into a shell is asked the same question as alone
 
@@ -1215,11 +1215,29 @@ Verification: every lexer view in all three readings, before against after, on 1
 
 Not closed here: a command's cost also grows with how many statements it holds, on both systems and before and after this fix. A 1KB `sh -c` script of short function definitions takes 23s on Linux, and 32KB of one-line statements takes 48s. That cost is per statement, not per byte, and moves to v2.18.2.
 
+### A shell inside a compound command fed by a pipe
+
+The pipe check read only the first word after `|`. So a compound command that ran a shell later in its body passed unjudged: `printf 'pip install evil==1.0.0' | { :; sh; }`, `| (cd /tmp; sh)`, `| if true; then sh; fi`, `| while read -r l; do bash; done`, a case arm, `| ! sh` and `| time -p sh`. The check now follows the compound command through its nesting and reads a shell wherever a command can stand as the consumer. Text it cannot cut into words counts as a shell. Twelve compound consumers are held by rows in `scripts/test/consumer-forms.sh`. A shell name used as an argument, or a shell after the compound has closed, is not read as the consumer (48716ae).
+
+### A `||` is not a pipe
+
+v2.18.0 listed this as a boundary. `false || sh -c "npm ci \"x\""` was denied as install text piped into a shell, while the same script after `;` was judged as the install it is. The pipe rule read the second `|` of `||` as a pipe. It now skips both halves, so the command gets the `;` decision, and a real pipe after `||` is still denied (07e14d7).
+
+### The census fails each grep and sed call alone
+
+The scan-failure census failed each awk reading alone, but the greps and seds only all at once, so a site whose failure another site's mark covered still read as handled. It now numbers the grep and sed calls and fails each one alone (`grep-k`, `sed-k`), and it compares the pending record's trace and attribution as well as its directory (e238f13). The full census found two judgment sites. A failed read of the lexer's unterminated-quote flag counted as "the command closes", so an open quote over an install passed where it should have been answered `UNDECIDED`. A failed grep in the npm-install check was not recorded. Both go through `guard_lex_flag_set` and `judge_grep` now, and rows in `scripts/test/scan-contract.sh` fail each of their calls alone (0240b78). The quick census keeps `sed-k` and leaves `grep-k` to the full run.
+
+### Verification
+
+On the release tree 0a49059, `npm test` ran all 14 batteries with 409 ok and 0 not ok on macOS and on Linux. macOS was an M1 Max MacBook (macOS 15.6.1, bash 3.2.57, npm 11.19.0): 3710s. Linux was the project's Debian VM (bash 5.2.37, npm 10.8.2): 3470s. Release step 5 was not run in full on Linux. ShellCheck ran over the step's file list on macOS, not on the Linux machine, and the secret scan there read a one-commit snapshot. CI run 37256605251 ran both over the full history on Ubuntu and macOS, and passed.
+
+The publish workflow published 2.18.1 by trusted publishing. Read back by hand, the version is published by GitHub with an SLSA provenance attestation, and its tarball holds the same 88 files as `npm pack --dry-run` of the tag. The workflow's own read-back step failed after the publish had succeeded: the registry answered 404 for the five minutes it waited (run 37265447356). v2.18.2 fixes the wait. The tag went out before this section had the four parts above; they were added in v2.18.2.
+
 ### Moved to v2.18.2
 
 Each of these has its own plan, and the work goes on. They were cut from this release so that it could ship.
 
-- **The inert flag in text the rewrite cannot read.** The commands v2.17.2 gave `--ignore-scripts` and v2.18.0 does not (a `ksh -c` script, a double-quoted shell script or `eval` with an escape or a substitution in it, a heredoc body piped to another command) still get none. Review found that such a text can also hide an npm verb with neither a flag nor a record, and the repair makes one record path for every kind of unread text, checked by a script over 392 shapes.
+- **The inert flag in text the rewrite cannot read.** The commands v2.17.2 gave `--ignore-scripts` and v2.18.0 does not (a `ksh -c` script, a double-quoted shell script or `eval` with an escape or a substitution in it, a heredoc body piped to another command) still get none. Review found that such a text can also hide an npm verb with neither a flag nor a record, and the repair makes one record path for every kind of unread text, checked by a script over 392 shapes. An npm spelled in another case inside such a script goes with them.
 - **A verb glued to `;`.** `npm ci;` and the same spelling in other managers are not read as an install.
 - **Where a command starts in the lexer.** A command glued to a reserved word or `!` through a redirection, zsh's `&!`, and installs inside a function body.
 - **The per-statement cost.** Batching the per-statement questions takes a 400-statement command from 67.7s to 5.2s on Linux; it builds on the lexer change above.
