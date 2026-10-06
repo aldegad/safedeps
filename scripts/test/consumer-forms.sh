@@ -1757,6 +1757,7 @@ expect_recorded_downgrade() {
 expect_recorded_downgrade "npm ci in backticks closed by a glued }" 'echo `{ npm ci}`'
 expect_recorded_downgrade "npm ci in a substitution closed by a glued }" 'x=$( { npm ci} )'
 expect_rewrite_recorded() {
+  shard_row "expect_rewrite_recorded|$1|$2|$3" || return 0
   local label="$1" command="$2" want="$3" safe out got
   safe=$(mktemp -d "${tmp_root}/safe.XXXXXX")
   out=$(jq -nc --arg c "${command}" --arg cwd "${project_dir}" \
