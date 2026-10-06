@@ -36,7 +36,8 @@
 # Every battery runs, whatever another one answered. Each writes one log. At the
 # end the runner prints every log in the order below, then one summary line per
 # battery, then the tail of each failed battery's log. It exits non-zero when
-# any battery exited non-zero or printed a `not ok` line, and names them.
+# any battery exited non-zero, printed a `not ok` line, or (the census aside)
+# printed no `ok` line, and names them.
 #
 # The runner never takes the whole machine by default. At most SAFEDEPS_TEST_JOBS
 # batteries run at once, and the census runs that many guards; the default is
@@ -182,11 +183,13 @@ for entry in "${ALL_BATTERIES[@]}"; do
           exit 2
         }
         command="${command} --shard ${shard%%of*}/${shard#*of}"
-        [[ "${name}" != census ]] || command="${command} --out ${SAFEDEPS_TEST_LOG_DIR:-}/${unit}.out"
       elif (( shards != 1 )); then
         printf 'run-all: the table splits %s into %s, so its units are %s@1of%s and on\n' "${name}" "${shards}" "${name}" "${shards}" >&2
         exit 2
       fi
+      # The census prints no `ok` lines; ci-verdict.sh judges a census unit,
+      # a shard or the whole census, from this directory.
+      [[ "${name}" != census ]] || command="${command} --out ${SAFEDEPS_TEST_LOG_DIR:-}/${unit}.out"
       name="${unit}" phase=1 unit_weight="${weight}"
       ;;
   esac
@@ -373,7 +376,11 @@ for entry in "${BATTERIES[@]}"; do
     "$(cat "${log_dir}/${name}.load-end" 2>/dev/null || printf '?')"
   # A battery fails on a non-zero exit, and also on a `not ok` line it printed
   # and then exited 0 over: either one is a red the old chain would have shown.
-  if [[ "${rc}" != 0 || "${not_ok:-0}" != 0 ]]; then
+  # It also fails when it printed no `ok` line: an empty log with exit status 0
+  # passed both. Every battery prints `ok` lines but the census, which judges
+  # itself in its exit status (ci-verdict.sh holds the host runner's units to
+  # the same floor).
+  if [[ "${rc}" != 0 || "${not_ok:-0}" != 0 ]] || [[ "${name%%@*}" != census && ! "${ok:-0}" =~ ^[1-9] ]]; then
     failed+=("${name}")
   fi
 done
