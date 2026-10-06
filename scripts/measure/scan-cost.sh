@@ -31,9 +31,26 @@
 #          differently, so the guard reads the command three times instead of
 #          once (gate column only).
 #
+# A second table measures the gate against the number of statements, not the
+# bytes: statement readers ask about each statement, so a short command of many
+# statements cost more than a long command of one (a 1KB `sh -c` script of
+# short functions took 23s on Linux, where a 64KB install took 3s). Two shapes,
+# each with an install the gate has to judge:
+#
+#   lines   N one-line statements (`echo line<k>`), then `npm install` on its
+#           own line.
+#   script  `sh -c` with a script of N short function definitions, then an
+#           install. Each definition is three statements to a statement
+#           reader, and the `(1)` in it is a place where the shells read
+#           differently, so the guard reads the command three times.
+#
+# A cell that passes the cap (--cap, default 120s) reads `>CAP`, and the larger
+# counts of that shape are skipped.
+#
 # Usage:
 #   scripts/measure/scan-cost.sh [SIZE_BYTES...]        # default sweep
 #   scripts/measure/scan-cost.sh --reps 5 32000 65536
+#   scripts/measure/scan-cost.sh --statements 100,400,3200 --cap 60 8192
 #
 # Sizes are approximate command lengths in bytes.
 #
@@ -47,14 +64,19 @@ REPO_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "${REPO_DIR}"
 
 REPS=3
+CAP=120
 SIZES=()
+COUNTS=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --reps) REPS="${2:-3}"; shift 2 ;;
+    --cap) CAP="${2:-120}"; shift 2 ;;
+    --statements) IFS=, read -ra COUNTS <<< "${2:-}"; shift 2 ;;
     *) SIZES+=("$1"); shift ;;
   esac
 done
 [[ ${#SIZES[@]} -eq 0 ]] && SIZES=(1000 4000 8000 16000 32000 65536)
+[[ ${#COUNTS[@]} -eq 0 ]] && COUNTS=(40 100 400 1600 3200)
 
 command -v python3 > /dev/null || { printf 'scan-cost: python3 is required for timing and input generation\n' >&2; exit 2; }
 
@@ -91,6 +113,19 @@ make_input() {
   esac
 }
 
+# The statements shapes, N statements each (see the header).
+make_statements() {
+  python3 -c '
+import sys
+count, shape = int(sys.argv[1]), sys.argv[2]
+if shape == "lines":
+    sys.stdout.write("".join("echo line%d\n" % k for k in range(count)) + "npm install left-pad@1.0.0")
+else:
+    unit = "f() { echo \x27a b\x27 \\\"$x\\\" (1); }; "
+    sys.stdout.write("sh -c \"" + unit * count + "\" ; npm install left-pad@1.0.0")
+' "$1" "$2"
+}
+
 time_scan() {
   local input="$1" s e best="" i t
   for ((i = 0; i < REPS; i++)); do
@@ -101,7 +136,7 @@ time_scan() {
   printf '%s' "${best}"
 }
 
-LEX_VIEWS="scan code live noredir pieces cscripts stmts substs unprefixed unprefixed-lines joined shell-bodies"
+LEX_VIEWS="scan code live flat noredir pieces cscripts stmts recognize stmtcuts stmtraw substs unprefixed shell-bodies"
 time_views() {
   local input="$1" s e best="" i t v
   for ((i = 0; i < REPS; i++)); do
@@ -117,7 +152,9 @@ time_views() {
 time_gate() {
   local input="$1" s e best="" i t safe payload
   payload="${WORK}/payload.json"
-  jq -nc --arg c "${input}" --arg cwd "${PROJECT}" \
+  # From a file: one argument over 128KB is E2BIG on Linux.
+  printf '%s' "${input}" > "${WORK}/command"
+  jq -nc --rawfile c "${WORK}/command" --arg cwd "${PROJECT}" \
     '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' > "${payload}"
   for ((i = 0; i < REPS; i++)); do
     safe=$(mktemp -d "${WORK}/safe.XXXXXX")
@@ -152,6 +189,59 @@ for size in "${SIZES[@]}"; do
     "$(time_gate "${quiet}")s" \
     "$(time_gate "${loud}")s" \
     "$(time_gate "${split}")s"
+done
+
+# The whole gate on one input, with the deadline off and the cap above: the
+# run and every process under it are stopped one by one past the cap, never
+# by process group (on the project's VM every process shares one).
+descendants() { local c; for c in $(pgrep -P "$1" 2>/dev/null); do descendants "${c}"; printf '%s\n' "${c}"; done; }
+time_gate_capped() {
+  local input="$1" s e best="" i t safe payload pid kids over
+  payload="${WORK}/payload.json"
+  # From a file: one argument over 128KB is E2BIG on Linux.
+  printf '%s' "${input}" > "${WORK}/command"
+  jq -nc --rawfile c "${WORK}/command" --arg cwd "${PROJECT}" \
+    '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' > "${payload}"
+  for ((i = 0; i < REPS; i++)); do
+    safe=$(mktemp -d "${WORK}/safe.XXXXXX")
+    s=$(now)
+    HOME="${WORK}/home" SAFEDEPS_HOME="${safe}" SAFEDEPS_BUDGET_DISABLED=1 \
+      bash scripts/safedeps-pre-guard.sh < "${payload}" > /dev/null 2>&1 &
+    pid=$! over=""
+    while kill -0 "${pid}" 2>/dev/null; do
+      sleep 0.2
+      if python3 -c "import time, sys; sys.exit(0 if time.time() - ${s} > ${CAP} else 1)"; then
+        kids=$(descendants "${pid}")
+        kill "${pid}" 2>/dev/null || true
+        for t in ${kids}; do kill "${t}" 2>/dev/null || true; done
+        over=1
+        break
+      fi
+    done
+    wait "${pid}" 2>/dev/null || true
+    e=$(now)
+    if [[ -n "${over}" ]]; then printf '>%s' "${CAP}"; return; fi
+    t=$(elapsed "${s}" "${e}")
+    if [[ -z "${best}" ]] || python3 -c "import sys; sys.exit(0 if ${t} < ${best} else 1)"; then best="${t}"; fi
+  done
+  printf '%s' "${best}"
+}
+
+printf '\n%-10s %-12s %-12s %-12s %-12s\n' 'statements' 'lines bytes' 'gate lines' 'script bytes' 'gate script'
+capped=" "
+for count in "${COUNTS[@]}"; do
+  lines=$(make_statements "${count}" lines)
+  script=$(make_statements "${count}" script)
+  cell_lines="-" cell_script="-"
+  if [[ "${capped}" != *" lines "* ]]; then
+    cell_lines="$(time_gate_capped "${lines}")s"
+    [[ "${cell_lines}" != ">"* ]] || capped+="lines "
+  fi
+  if [[ "${capped}" != *" script "* ]]; then
+    cell_script="$(time_gate_capped "${script}")s"
+    [[ "${cell_script}" != ">"* ]] || capped+="script "
+  fi
+  printf '%-10s %-12s %-12s %-12s %-12s\n' "${count}" "${#lines}B" "${cell_lines}" "${#script}B" "${cell_script}"
 done
 
 printf '\nload average %s at finish\n' "$(load_now)"

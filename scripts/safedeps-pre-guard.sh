@@ -308,23 +308,86 @@ judge_grep() {
   return $(( rc == 0 ? 0 : 1 ))
 }
 
+# The texts are read in full before the grep: in a pipe, `grep -q` leaves at
+# its first match, the writer then dies of SIGPIPE, and under pipefail a found
+# install read as none (measured on form X3 while this was written).
 command_is_dependency_install() {
-  local command="$1"
-  local scan_command
-  local install_pattern
+  local texts
+  texts=$(command_candidate_start_texts "$1")
+  recognized_dependency_install "${texts}"
+}
 
-  install_pattern="${SAFEDEPS_INSTALL_PATTERN}"
+# Whether <texts>, read the way the recognizers read a command (its recognize
+# view, or a statement's recognize bytes from the same lexing), hold a
+# dependency install. The landing, the ecosystem detection and the spec
+# extractor ask this of each statement's recognize bytes: asking
+# command_is_dependency_install would lex those bytes again.
+recognized_dependency_install() {
+  judge_grep -qEi "${SAFEDEPS_INSTALL_PATTERN}" <<< "$1"
+}
 
-  while IFS= read -r scan_command; do
-    scan_command=$(command_scan_text "${scan_command}")
-    echo "${scan_command}" | judge_grep -qEi "${install_pattern}" && return 0
-  done < <(command_candidate_texts "${command}")
-  return 1
+# recognized_dependency_install for every text in SAFEDEPS_RDI_IN, from one
+# grep, for a reader that asks it statement by statement (the landing, the
+# spec extractor, the ecosystem detection). One grep per statement, in each
+# reading, was the gate's cost per statement: 3,200 one-line statements with
+# an install took 45s on the project's Linux VM (scan-cost's statements
+# table, deadline off), and 32KB of them was answered UNDECIDED.
+#
+# SAFEDEPS_RDI_ANS[i] is 0 where the answer for text i is yes, 1 where it is
+# no, and 2 where the reader asks recognized_dependency_install itself. grep
+# matches each line of its input on its own, as it matches a text of one
+# line on a here-string, so line k of the input answers for text k-1. A text
+# that holds a newline is not a line: 2. A text with a byte past ASCII is 2
+# too, so the input grep reads, and the lines it prints, are ASCII: where a
+# byte is not valid in the locale, GNU grep reads the input as binary from
+# that point on and prints "binary file matches" in place of the numbered
+# lines, and the texts after it would read as no. A grep that does not
+# answer, or prints anything but numbered lines, makes every text 2.
+#
+# Nothing here marks the reading. A text the reader reaches with a 2 is asked
+# alone, and that call marks the reading as it always did, so a grep that
+# fails here costs what the greps cost before, and a statement the reader
+# never reaches is never asked. scripts/test/statement-batch.sh compares
+# this, asked alone where it says 2, with recognized_dependency_install.
+recognized_dependency_install_each() {
+  local i n=${#SAFEDEPS_RDI_IN[@]} all="" flags="" hits="" hit rc=0
+  SAFEDEPS_RDI_ANS=()
+  (( n > 0 )) || return 0
+  # Which texts one line can stand for, one character each, read in the C
+  # locale, where a pattern compares bytes. In a UTF-8 locale bash reads an
+  # invalid byte together with the bytes after it: `read` took a newline
+  # after one as part of the line, so two texts read as one and the second
+  # reached grep unflagged.
+  flags=$(LC_ALL=C
+    hb=$'[\x80-\xff]'
+    for t in "${SAFEDEPS_RDI_IN[@]}"; do
+      if [[ "${t}" == *$'\n'* || "${t}" == *${hb}* ]]; then printf 2; else printf 1; fi
+    done) || flags=""
+  if (( ${#flags} != n )); then
+    for (( i = 0; i < n; i++ )); do SAFEDEPS_RDI_ANS[i]=2; done
+    return 0
+  fi
+  for (( i = 0; i < n; i++ )); do
+    SAFEDEPS_RDI_ANS[i]="${flags:i:1}"
+    if [[ "${SAFEDEPS_RDI_ANS[i]}" == 1 ]]; then all+="${SAFEDEPS_RDI_IN[i]}"$'\n'; else all+=$'\n'; fi
+  done
+  hits=$(grep -nEi "${SAFEDEPS_INSTALL_PATTERN}" <<< "${all%$'\n'}") || rc=$?
+  if (( rc > 1 )) || { (( rc == 0 )) && [[ -z "${hits}" || $'\n'"${hits}" =~ $'\n'[^0-9] ]]; }; then
+    for (( i = 0; i < n; i++ )); do SAFEDEPS_RDI_ANS[i]=2; done
+    return 0
+  fi
+  while IFS= read -r hit; do
+    hit="${hit%%:*}"
+    [[ "${hit}" =~ ^[0-9]+$ ]] || continue
+    (( SAFEDEPS_RDI_ANS[hit - 1] != 1 )) || SAFEDEPS_RDI_ANS[hit - 1]=0
+  done <<< "${hits}"
+  return 0
 }
 
 command_hides_dependency_install() {
   local command="$1"
-  local payload stripped
+  local payload
+  local -a pls=()
 
   # Top-level pipe-to-shell: `<producer> | sh` whose producer text literally
   # contains a package manager + install verb (e.g. `printf 'pip install x' | sh`).
@@ -336,24 +399,30 @@ command_hides_dependency_install() {
   # on its own quoting level below.
   payload_pipes_install_text_to_shell "${command}" && return 0
 
-  # The payload readers take text with its heredoc bodies stripped, once.
-  stripped=$(strip_heredoc_bodies "${command}")
-  while IFS= read -r payload; do
+  # The payload readers take the command as written (see
+  # extract_shell_c_payloads) and hand the payloads back in PAYLOADS.
+  extract_shell_c_payloads "${command}"
+  pls=(${PAYLOADS[@]+"${PAYLOADS[@]}"})
+  for payload in ${pls[@]+"${pls[@]}"}; do
     [[ -z "${payload}" ]] && continue
     payload_pipes_install_text_to_shell "${payload}" && return 0
-  done < <(extract_shell_c_payloads "${stripped}")
+  done
 
-  while IFS= read -r payload; do
+  extract_eval_payloads "${command}"
+  pls=(${PAYLOADS[@]+"${PAYLOADS[@]}"})
+  for payload in ${pls[@]+"${pls[@]}"}; do
     [[ -z "${payload}" ]] && continue
     command_is_dependency_install "${payload}" && return 0
     payload_pipes_install_text_to_shell "${payload}" && return 0
-  done < <(extract_eval_payloads "${stripped}")
+  done
 
-  while IFS= read -r payload; do
+  extract_command_substitution_payloads "${command}"
+  pls=(${PAYLOADS[@]+"${PAYLOADS[@]}"})
+  for payload in ${pls[@]+"${pls[@]}"}; do
     [[ -z "${payload}" ]] && continue
     command_is_dependency_install "${payload}" && return 0
     payload_pipes_install_text_to_shell "${payload}" && return 0
-  done < <(extract_command_substitution_payloads "${stripped}")
+  done
 
   return 1
 }
@@ -379,14 +448,16 @@ command_hides_dependency_install() {
 # as separate commands.
 command_pipes_install_to_shell() {
   local command="$1"
-  local payload stripped
+  local payload
+  local -a pls=()
 
   payload_pipes_install_text_to_shell "${command}" && return 0
-  stripped=$(strip_heredoc_bodies "${command}")
-  while IFS= read -r payload; do
+  command_payload_raw_texts "${command}"
+  pls=(${PAYLOADS[@]+"${PAYLOADS[@]}"})
+  for payload in ${pls[@]+"${pls[@]}"}; do
     [[ -z "${payload}" ]] && continue
     payload_pipes_install_text_to_shell "${payload}" && return 0
-  done < <(extract_shell_c_payloads "${stripped}"; extract_eval_payloads "${stripped}"; extract_command_substitution_payloads "${stripped}")
+  done
   return 1
 }
 
@@ -399,16 +470,56 @@ command_pipes_install_to_shell() {
 #
 #   scan    quoted text, comments, heredoc operators and bodies blanked; an
 #           escaped operator is `_`. What the detection predicates read.
-#   code    comments, heredoc operators and bodies blanked; quotes kept. What
-#           the payload readers read.
-#   joined  code, with line continuations removed and every newline that does
-#           not end a statement blanked. What is read one line at a time.
+#   code    comments, heredoc operators and bodies blanked; quotes kept.
+#   cscripts, substs  the scripts the command hands to a shell (`sh -c`,
+#           `eval`) and the bodies of its substitutions, one record each: the
+#           payloads, which are scripts of their own and the one text a
+#           reader lexes besides the command.
+#   pieces  the statements, cut where command_statements cuts them, each with
+#           its words after quote removal, with and without its prefixes,
+#           and its recognize bytes. What the spec extractor, the landing and
+#           the inert reading read.
 #   shell-bodies  the bodies of heredocs whose command pipes into something.
 #   live    scan, with code nested in quotes ("$(...)") and live code in an
-#           unquoted heredoc body kept: every byte the shell runs at this
-#           level. What the inert rewrite reads.
-#   stmts   scan, with the `)` that closes a case pattern read as `;`: where a
-#           statement ends. What command_statements splits on.
+#           unquoted heredoc body kept, and every top-level redirection
+#           blanked but the body of a process substitution in its target:
+#           every byte the shell runs at this level, with nothing between a
+#           command and its arguments. What the inert rewrite reads.
+#   flat    live, with every top-level redirection blanked whole, the body of
+#           a substitution in its target too. The inert rewrite reads it
+#           beside the live view: there a command and its arguments are side
+#           by side when a redirection whose target holds a substitution
+#           stands between them (`npm >$(echo f) install x`).
+#   stmts   scan, with every `;`, `&` or `|` that is not at the top level (in
+#           arithmetic, a substitution, a redirection operator) written `_`,
+#           since it ends nothing: a separator here is one the shell reads.
+#           Length-preserving and idempotent. It carries no statement start.
+#   recognize  what the install recognizers read (command_start_text): the
+#           stmts view with the prefixes of each command removed, as
+#           unprefixed removes them, every other top-level redirection
+#           blanked, a line continuation dropped, and a `;` put in at each
+#           statement start that no separator already stands before. Not
+#           length-preserving.
+#
+# A reader lexes the command, or a payload, and nothing else: never the output
+# of a view. A view changes bytes, and a text a view changed reads out of the
+# context the first lexing had. Each reader that did so lost the line after a
+# heredoc: the joined view kept the live code of an unquoted body (`$(date)`)
+# and blanked the terminator line, so lexed again, that code stood where the
+# next command did and took it for an argument (verdict buri-20261005-145152).
+# scripts/test/scan-contract.sh traces every lexing of a guard run and holds
+# each input to the command, a payload, or a piece of one.
+#
+# Where a command starts is not a byte. The walk over the words (starts() in
+# the awk) follows the shell grammar and says where each command starts: an
+# event between two bytes, which a view delivers by putting a separator in
+# (recognize), by cutting there (stmtcuts, read by command_statements), or by
+# listing it (events, cwords). The stmts view used to write each start over
+# the byte before it, and a start with no byte of its own before it -- after a
+# reserved word, `!`, a head's `)` or zsh's glued `{`, with a redirection
+# first -- borrowed a byte of the token before or was lost: `then>/dev/null
+# pip install x` was no install to any recognizer, and each repair borrowed
+# one more byte (verdict bamdori-20261004-224625).
 #
 # It replaced three state machines that ran one after another -- a line-based
 # heredoc regex, a line joiner and the quote scanner -- and had to agree. They
@@ -423,7 +534,7 @@ command_pipes_install_to_shell() {
 # A reading is a shell: bash, zsh or dash, named by SAFEDEPS_READING. The three
 # lex the same text differently in a few places (ARCHITECTURE.md has the table:
 # `((`, `$((`, quotes inside arithmetic, `$[`, an apostrophe inside "${...}",
-# `$'...'`), and a command is judged under every reading a shell could give it.
+# `$'...'`, `&>`), and a command is judged under every reading a shell could give it.
 # Nothing here picks a reading: the guard's driver sets the variable, once per
 # reading, and every reader of the command lexes under it, including a reader
 # that lexes text another reader handed it. A reading picked per call was how
@@ -474,7 +585,14 @@ shell_lex() {
     fi
     div="${memo}.div"
   fi
-  if ! out=$(printf '%s\n' "${text}" | LC_ALL=C awk -v view="${view}" -v policy="${policy}" -v marker="${marker}" -v divfile="${SAFEDEPS_LEX_DIVERGE:-}" -v divmemo="${div}" '
+  # The executables and the shells the grammar names: a command word that is
+  # a path to one of them reads as the bare name (prefixes() in the awk), and
+  # a shell word hands the script after -c to the payload reader (cscripts).
+  # Empty where the grammar is not loaded; every reader of the views loads it.
+  local exre="" shre=""
+  [[ -z "${SAFEDEPS_G_EXECUTABLES:-}" ]] || exre="^(${SAFEDEPS_G_EXECUTABLES}|${SAFEDEPS_G_SHELLS})\$"
+  [[ -z "${SAFEDEPS_G_SHELLS:-}" ]] || shre="^(${SAFEDEPS_G_SHELLS})\$"
+  if ! out=$(printf '%s\n' "${text}" | LC_ALL=C awk -v view="${view}" -v policy="${policy}" -v marker="${marker}" -v divfile="${SAFEDEPS_LEX_DIVERGE:-}" -v divmemo="${div}" -v smark="${SAFEDEPS_SCAN_MARK:-}" -v exre="${exre}" -v shre="${shre}" '
       # One pass over the command as the shell lexes it. Every byte gets a class,
       # and each view is printed from the classes:
       #
@@ -485,38 +603,73 @@ shell_lex() {
       #   b  heredoc body (data)         B  live code in an unquoted heredoc body
       #
       # view=scan    quoted text, comments, heredoc operators and bodies blanked;
-      #              an escaped operator is `_`; length-preserving
+      #              an escaped operator is `_`, and a `}` glued to a word
+      #              that closes no group is `%` (group_close); length-preserving
+      #   view=stmts   scan, with a nested `;` `&` `|` as `_`; length-preserving
+      #   view=recognize  stmts with the prefixes of each command removed (the
+      #              A of the unprefixed view), every other top-level redirection
+      #              blanked, a line continuation dropped, and a `;` put in
+      #              before each start event no separator stands before (bare);
+      #              not length-preserving
+      #   view=stmtcuts  the offsets of the bare start events on the first
+      #              line, space-separated, then the stmts view: where
+      #              command_statements cuts
+      #   view=stmtraw  the bytes command_statements reads words from: a
+      #              comment, a heredoc operator, a heredoc body and the live
+      #              code in one blank, a newline inside quotes blank, and each
+      #              byte of a line continuation \001; length-preserving
+      #   view=events  one line per event of this reading, in byte order:
+      #              `S <offset> <class> <depth> <bare> <class before>` where
+      #              a command starts (its first byte, a prefix included) and
+      #              `W <offset> <class> <depth>` at the word the walk reads as
+      #              its command or reserved word. For scan-contract.
+      #   view=cwords  one line per start event: its offset, the offset of
+      #              the first byte the prefixes leave, the stmts bytes of the
+      #              prefixes, the recognize bytes of the statement from
+      #              there to its end, and the stmts bytes of the same
+      #              statement, \037 between them. For the event contract in
+      #              scan-contract.
+      #   view=wordends  the stmts view as a mask: 1 at each byte where the
+      #              lexer ends a word that a word byte stands before, 0
+      #              elsewhere; length-preserving. For scan-contract.
       #   view=code    comments, heredoc operators and bodies blanked, quotes kept;
       #              length-preserving
-      #   view=joined  code view with line continuations removed and every newline
-      #              that does not end a statement blanked (a newline in code nested
-      #              in quotes becomes `;`); for text read one line at a time
       #   view=shell-bodies  the raw lines of heredoc bodies whose command pipes
       #              into something
       #   view=substs  the body of every command substitution, one after another,
       #              as the shell delimits it: `$(...)` (case patterns inside close
       #              nothing) and backticks, a backtick body unescaped the way the
-      #              shell unescapes it (`\`` nests). For the payload extractor.
+      #              shell unescapes it (`\`` nests), and the body of every
+      #              process substitution, each ending in \035. For the payload
+      #              extractor.
       #   view=unprefixed  the text with the prefixes a statement may start with
       #              removed: assignments (NAME=value, the value one word however
-      #              it is quoted or nested), env with its options and
-      #              assignments, command and exec. Not length-preserving.
-      #   view=noredir  every top-level redirection blanked: the operator, a file
-      #              descriptor number that is the whole word in front of it, and
-      #              the target word. An operator inside quotes, a substitution or
-      #              after a backslash is a character, and one in the middle of a
-      #              word still is an operator (`x==1>/dev/null`), as the shell
-      #              reads it. `<(` and `>(` are process substitutions and stay.
+      #              it is quoted or nested), redirections with their targets,
+      #              env with its options and assignments, command and exec, at
+      #              every start event of the walk; and every other top-level
+      #              redirection blanked, as noredir blanks it. Raw bytes
+      #              otherwise. No reader of the guard takes it: scan-contract
+      #              holds the prefix rules (A) on it, which recognize and
+      #              pieces read. Not length-preserving.
+      #   view=noredir  every top-level redirection blanked: the operator, the
+      #              file descriptor word in front of it (a number or a {name}
+      #              that is the whole word), and the target word, a process
+      #              substitution whole. An operator inside quotes, a
+      #              substitution or after a backslash is a character, and one in
+      #              the middle of a word still is an operator
+      #              (`x==1>/dev/null`), as the shell reads it. A process
+      #              substitution that is an argument (`cat <(x)`) stays.
       #              length-preserving
-      #   view=unprefixed-lines  unprefixed, for text holding one statement per
-      #              line, each line read from a fresh state like pieces: a case
-      #              left open by one statement no longer swallows the prefixes of
-      #              the next (caught in the release integration).
-      #   view=pieces  for text holding one statement per line, each line read
-      #              from a fresh state. One output line per piece, cut at
-      #              top-level `;` `&` `|`, newlines and case-pattern closes:
-      #              `<line>\037<raw>\037<words>`. <raw> is the piece as the noredir
-      #              view has it. <words> is the same bytes after the shell quote
+      #   view=pieces  one output line per statement that holds a word, cut
+      #              where command_statements cuts (a top-level separator, as
+      #              the stmts view has it, or a bare start event), and
+      #              numbered as it numbers them:
+      #              `<n>\037<raw>\037<words>\037<uwords>\037<rec>`. <raw> is the
+      #              statement as the noredir view has it. <uwords> is <words>
+      #              without the prefixes of the statement (the A of the
+      #              unprefixed view), and <rec> is the statement as the
+      #              recognize view has it, one line. <words> is the same bytes
+      #              after the shell quote
       #              removal: the quote characters go, and so does an escaping
       #              backslash outside quotes or inside double quotes before
       #              $ ` " \; a $\047...\047 escape is decoded; code nested in a
@@ -542,6 +695,24 @@ shell_lex() {
       #   `\047` inside "${...}": a quote to bash, a character to zsh and dash.
       #   `$\047...\047`  bash and zsh: an ANSI-C string, where \\047 does not
       #                close it; dash: `$` and a single-quoted string.
+      #   `&>`         bash and zsh: a redirection of both outputs; dash: `&`,
+      #                which ends a command, then `>` before the next one.
+      #   `(` glued to a word, or where an argument stands: bash and zsh read
+      #                a glob group or qualifier, part of the word (zsh runs
+      #                it; bash 5 fails to parse it without extglob); dash:
+      #                an operator.
+      #   `NAME[...]=` bash pairs the brackets, so a blank inside is part of
+      #                the assignment word; zsh and dash end the word there.
+      #   `<N-M>`      zsh: a glob for a range of numbers, bytes of a word;
+      #                bash and dash: two redirections.
+      #   `noglob` `nocorrect` `-` `builtin` before a command: zsh reads a
+      #                precommand modifier and the command after it; bash
+      #                and dash read a command and its arguments.
+      #   `}` glued to the end of a word, before a blank, an operator, a
+      #                closing backtick or the end: zsh closes an open `{`
+      #                group there and hands the word before it on (`{ p ci}`
+      #                hands `ci`); bash and dash read a character. See
+      #                group_close below.
       #
       # Each site is decided per shell where it stands: zsh read one `((` as a
       # subshell and the next as arithmetic in one command (form M1), which no
@@ -555,38 +726,46 @@ shell_lex() {
         started = 1
         m = split($0, ch, "")
         for (j = 1; j <= m; j++) X[++n] = ch[j]
+        if (index($0, "}")) hasbrace = 1
       }
       END {
         N = n
+        # The wordends view is the stmts view read as a mask: `1` where the
+        # lexer ends a word at the byte (word_sep, with a word byte before
+        # it), `0` elsewhere. scan-contract holds the stmts view to printing
+        # each such byte as one SAFEDEPS_G_END reads as a word end.
+        wends = (view == "wordends")
+        if (wends) view = "stmts"
         d = 1; ctx[1] = "T"; par[1] = 0; dq = 0; dc = 1
         # The bytes any rule below acts on. Every other byte keeps the class of
         # its context and changes nothing, so it is classified without running
         # the rules -- most of a long command is such bytes.
-        split("\\ $ \047 \042 # ( ) < ] } ` c e i ;", sl, " ")
+        split("\\ $ \047 \042 # ( ) < [ ] } ` c e i ; &", sl, " ")
         for (j in sl) SPC[sl[j]] = 1
         SPC["\n"] = 1
         DQS["\\"] = 1; DQS["\042"] = 1; DQS["$"] = 1; DQS["`"] = 1
-        wantdep = (view == "unprefixed" || view == "unprefixed-lines" || view == "noredir" || view == "pieces" || view == "cscripts" || view == "stmts")
-        if (view == "pieces") {
-          # The value of each one-letter escape in $\047...\047.
-          AQV["a"] = "\007"; AQV["b"] = "\010"; AQV["e"] = "\033"; AQV["E"] = "\033"
-          AQV["f"] = "\014"; AQV["n"] = "\n"; AQV["r"] = "\r"; AQV["t"] = "\t"; AQV["v"] = "\013"
-          AQV["\\"] = "\\"; AQV["\047"] = "\047"; AQV["\042"] = "\042"; AQV["?"] = "?"
-        }
+        # The views that walk the words for where each command starts.
+        wantst = (view == "recognize" || view == "stmtcuts" || view == "events" || view == "cwords" || view == "unprefixed" || view == "pieces")
+        # The views that print a `}` as the close of a group or as a
+        # character (group_close), which needs the group openers of the walk.
+        wantgrp = hasbrace && (wantst || view == "scan" || view == "stmts" || view == "live" || view == "flat")
+        wantdep = (wantst || wantgrp || view == "noredir" || view == "pieces" || view == "cscripts" || view == "stmts" || view == "live" || view == "flat")
+        wantar = wantst || wantgrp
+        # The value of each one-letter escape in $\047...\047, in every view.
+        # A lexing fact is the same whichever view asks for it: this table
+        # was loaded for the pieces view alone, so the cscripts view read
+        # `sh -c $\047echo a\\npip install x\047` as a backslash and an n,
+        # one statement after echo, and the install passed with nothing
+        # recorded (v2.18.1 on).
+        AQV["a"] = "\007"; AQV["b"] = "\010"; AQV["e"] = "\033"; AQV["E"] = "\033"
+        AQV["f"] = "\014"; AQV["n"] = "\n"; AQV["r"] = "\r"; AQV["t"] = "\t"; AQV["v"] = "\013"
+        AQV["\\"] = "\\"; AQV["\047"] = "\047"; AQV["\042"] = "\042"; AQV["?"] = "?"
+        # The code of each byte an escape can decode to, for the payload
+        # records (emit_cscripts).
+        if (view == "cscripts") for (j = 1; j < 128; j++) ORD[sprintf("%c", j)] = j
         mode = ""; np = 0; unterm = 0; hn = 0; hstop = 0; div = 0
         shb = (policy == "bash"); shz = (policy == "zsh"); shd = (policy == "dash")
-        perline = (view == "pieces" || view == "unprefixed-lines")
         for (i = 1; i <= N; i++) {
-          # The pieces view reads one statement per line. A line starts from
-          # nothing, so a quote one statement left open on its line cannot run
-          # into the next: when the statements of two readings were joined
-          # into one text, a bash reading of an apostrophe in "${...}"
-          # swallowed the install the zsh reading had split out (caught by the
-          # verdict replay).
-          if (perline && X[i] == "\n") {
-            mode = ""; d = 1; dq = 0; dc = 1; hn = 0; np = 0; hstop = 0; par[1] = 0
-            C[i] = "c"; DEP[i] = 1; continue
-          }
           # An unquoted heredoc body ends where at_newline found its terminator
           # line: close what is open in it (a substitution left open there never
           # closes, as in the shell) and step over the terminator.
@@ -595,10 +774,10 @@ shell_lex() {
             # shell; the lines after it still run (form H29), so it is dropped,
             # not counted as a command that never closes. Its bytes become body
             # data, from the opener on: they run nowhere, and left as live code
-            # a reader that lexes the joined lines again read them out of the
-            # body, where the open context ran on into the lines after it (an
-            # open arithmetic with a quote in it took the install after the
-            # body along, fuzz form F19).
+            # a reader that lexed the joined lines again (none does now) read
+            # them out of the body, where the open context ran on into the
+            # lines after it (an open arithmetic with a quote in it took the
+            # install after the body along, fuzz form F19).
             if (d > 1 && ctx[d] != "H") {
               for (kk = d; kk > 1 && ctx[kk-1] != "H"; kk--) ;
               for (j = cst[kk]; j > 1 && (X[j-1] == "$" || X[j-1] == "(") && C[j-1] != "b"; j--) ;
@@ -610,7 +789,10 @@ shell_lex() {
           if (i in JMP) { i = JMP[i]; continue }
           if (i in HSTART) { push("H"); hstop = HEND[HSTART[i]] }
           c = X[i]
-          if (wantdep) DEP[i] = (mode == "") ? dc : 99
+          # A comment has the depth of the context it stands in: one among the
+          # elements of an array value, or inside a substitution, is nested
+          # with them and ends no word at the top level.
+          if (wantdep) DEP[i] = (mode == "" || mode == "CM") ? dc : 99
           # RM marks what the shell quote removal takes out of a top-level word
           # (qtop: the quote was opened at the top level, not in a substitution
           # or an expansion). Only the pieces view reads it.
@@ -665,6 +847,13 @@ shell_lex() {
           }
           cls = (dq > 0) ? "Q" : (hn > 0 ? "B" : "c")
           C[i] = cls
+          # The top of an arithmetic context, where `;` `&` `|` are operators
+          # and end no statement. Not inside its parentheses: there `$(...)`
+          # is still a command substitution the shell runs.
+          if (wantar && (top == "K" || top == "A" && par[d] == 0)) AR[i] = 1
+          # A blank or an operator inside the subscript of an assignment word is
+          # part of the word to bash alone (see the `[` rule below).
+          if (top == "W" && wkind[d] == "s" && c ~ /[ \t\n;&|()<>]/) div = 1
           if (!(c in SPC) && !(top == "C" && cpat[d] == 1)) continue
           if (c == "\\") {
             if (X[i+1] == "\n") { C[i] = "l"; C[i+1] = "l"; if (dc == 1) { RM[i] = 1; RM[i+1] = 1 }; i++; continue }
@@ -700,36 +889,57 @@ shell_lex() {
           # case ... esac: a pattern close `)` closes no substitution (form P8).
           if ((c == "c" || c == "e") && wordstart(i) && (i + 4 > N || X[i+4] ~ /[ \t\n;&|()<>]/)) {
             w4 = X[i] X[i+1] X[i+2] X[i+3]
-            if (w4 == "case" && cmdpos(i)) { C[i+1] = cls; C[i+2] = cls; C[i+3] = cls; i += 3; push("C"); continue }
+            if (w4 == "case" && (cmdpos(i) || namehead(i))) { C[i+1] = cls; C[i+2] = cls; C[i+3] = cls; i += 3; push("C"); continue }
             # `esac` ends the case where a pattern list could start, not as a
             # pattern word after `|` (`*|esac)`, form X7).
             if (w4 == "esac" && top == "C" && !(cpat[d] == 1 && cpw[d])) { C[i+1] = cls; C[i+2] = cls; C[i+3] = cls; i += 3; pop(); continue }
           }
           # Inside case: after `in`, and after each `;;` `;&` `;;&`, a pattern
           # runs to its `)`, which ends the pattern -- class p, read by the
-          # unprefixed view as a statement boundary, so the arm is judged.
+          # stmts view as a statement boundary, so the arm is judged. Only at
+          # the top level: inside a substitution the close is a `)` of the
+          # body like any other, nested with it, so a reader of class p never
+          # has to ask how deep it is. Classed p there, it ended the value of
+          # `x=$(case a in a) echo f;; esac)` and the target of `>$(case ...)`
+          # at the pattern (form WC3).
           if (top == "C") {
             if (cpat[d] == 0 && c == "i" && X[i+1] == "n" && wordstart(i) && (i + 2 > N || X[i+2] ~ /[ \t\n;&|()<>]/)) { C[i+1] = cls; i++; cpat[d] = 1; cpw[d] = 0; continue }
-            if (cpat[d] == 1 && c == "(" && !cpw[d]) continue
-            if (cpat[d] == 1 && c == ")") { C[i] = "p"; cpat[d] = 2; continue }
+            if (cpat[d] == 1 && c == "(" && !cpw[d]) { CPO[i] = 1; continue }
+            if (cpat[d] == 1 && c == ")") { if (dc == 1) C[i] = "p"; cpat[d] = 2; continue }
             if (cpat[d] == 1 && c !~ /[ \t\n]/) cpw[d] = 1
-            # An arm ends at `;;`, `;&`, `;;&`, or zsh `;|` (forms X8, X9).
-            if (cpat[d] == 2 && c == ";" && (X[i+1] == ";" || X[i+1] == "&" || X[i+1] == "|")) {
-              C[i+1] = cls; i++
-              if (X[i] == ";" && X[i+1] == "&") { C[i+1] = cls; i++ }
+            # An arm ends at `;;` or `;&` (forms X8, X9), at `;;&` in bash and
+            # at `;|` in zsh. The other shells fail to parse those two, so
+            # each is its own reading rule and the bash reading says DIVERGE
+            # at both.
+            if (cpat[d] == 2 && c == ";" && (X[i+1] == "|" || X[i+1] == ";" && X[i+2] == "&")) div = 1
+            # The bytes after the first `;` are the rest of one operator:
+            # at the top level ARM marks them, so no word reader takes them
+            # for a word (the walk read the second `;` of `;;` as a command
+            # word). Inside a substitution they are bytes of its word.
+            if (cpat[d] == 2 && c == ";" && (X[i+1] == ";" || X[i+1] == "&" || X[i+1] == "|" && shz)) {
+              C[i+1] = cls; i++; if (dc == 1) ARM[i] = 1
+              if (X[i] == ";" && X[i+1] == "&" && shb) { C[i+1] = cls; i++; if (dc == 1) ARM[i] = 1 }
               cpat[d] = 1; cpw[d] = 0; continue
             }
           }
           if (top == "A" || top == "K") {
             if (top == "K") { if (c == "]") pop(); continue }
             if (c == "(") par[d]++
-            else if (c == ")") { if (par[d] > 0) par[d]--; else if (X[i+1] == ")") { i++; C[i] = cls; if (adol[d]) WC[i] = 1; pop() } }
+            # The `))` that closes an arithmetic command ends its word, as the
+            # `((` that opens it starts one: bash and zsh read `((...))` as a
+            # token of its own, so a reserved word or a group glued after it
+            # is a word of its own (`for ((i=0;i<1;i++)){ pip install x; }`,
+            # `for ((...))do`). ACL marks it for the walk. The close of `$((`
+            # is a byte of the word it stands in.
+            else if (c == ")") { if (par[d] > 0) par[d]--; else if (X[i+1] == ")") { i++; C[i] = cls; if (adol[d]) WC[i] = 1; else ACL[i] = 1; pop(); if ((i in ACL) && wantdep) DEP[i] = dc } }
             else if (c == "\n") i = at_newline(i)
             continue
           }
-          if (c == "#" && (wordstart(i) || top == "B" && X[i-1] == "`") && top != "V") {
+          if (c == "#" && (wordstart(i) || top == "B" && X[i-1] == "`") && top != "V" && !(top == "W" && wkind[d] != "a")) {
             # Inside a glob word (see GL below) a `#` is a glob operator, never
-            # a comment (form G5).
+            # a comment (form G5); inside a subscript it is a character. Among
+            # the elements of an array value it opens a comment as anywhere
+            # (form WA10).
             if (glc[d] > 0) { div = 1; continue }
             C[i] = "m"; mode = "CM"; continue
           }
@@ -737,7 +947,11 @@ shell_lex() {
           # `((` is decided wherever it stands, not only where a command starts:
           # a hand list of command positions missed backticks, case patterns,
           # coproc and time -p (forms P1, P2, P15, Q2).
-          if (c == "(" && X[i+1] == "(") { C[i+1] = cls; arith_or_sub(i, 0); continue }
+          # Not where the first `(` opens a process substitution (`<((pip
+          # install x))`, a subshell inside one, which bash and zsh run, form
+          # PS1) or zsh `=(`: the shell reads that opener before it looks for
+          # arithmetic, and the `(` rule below reads it.
+          if (c == "(" && X[i+1] == "(" && !(i > 1 && (X[i-1] == "<" || X[i-1] == ">") && C[i-1] == cls) && wparen(i) != "z") { C[i+1] = cls; arith_or_sub(i, 0); continue }
           if (c == "$" && X[i+1] == "(") { C[i+1] = cls; i++; push("S"); continue }
           # dash has no `$[`: the bytes are a word, quotes and comments in it
           # read as anywhere else (forms K1, K2).
@@ -745,28 +959,106 @@ shell_lex() {
           if (c == "$" && X[i+1] == "{") { C[i+1] = cls; i++; push("V"); continue }
           if (c == "`") { if (top == "B") pop(); else push("B"); continue }
           if (top == "V") { if (c == "}") pop(); continue }
-          # A process substitution is a word like `$(...)`: its `)` ends no
-          # token (PS marks the parenthesis level it opened, WC its close).
-          # So is a glob word: zsh reads a `(` where an argument stands as the
-          # start of one, and inside a substitution bash 3.2 reads it the same
-          # way, so a `#` in it or after its `)` is no comment (forms G5,
-          # ZG1); bash 5.2 and dash fail to parse it. GL marks the level for
-          # the bash and zsh readings, glc counts the open ones, and the bash
-          # reading says DIVERGE. An empty `()` is a function head, not a glob.
+          # Every other `}` here is one the shell may read as the close of a
+          # `{` group: one standing as a word, or one glued to the end of the
+          # word before it, which zsh reads as a close there. Which of them
+          # closes one is decided after the walk, from the groups the walk
+          # opened (group_close); RBT marks the ones at the top level, where
+          # the walk reads the words.
+          if (c == "}") { RB[i] = 1; if (dc == 1) RBT[i] = 1; continue }
+          # `&>` is one redirection operator to bash and zsh. dash has none:
+          # the `&` ends the command before it, and the `>` is a redirection
+          # that the next command starts with (forms AR1-AR13), so
+          # `echo a &>/dev/null pip install x` runs the install in dash
+          # alone. redirs() and starts() read it per reading, and the bash
+          # reading says DIVERGE here. After `>` or `<` the `&` belongs to a
+          # duplication (`2>&1`) in every shell.
+          if (c == "&") { if (X[i+1] == ">" && !(i > 1 && X[i-1] ~ /[<>]/ && C[i-1] == cls)) div = 1; continue }
+          # A subscript glued to a name at the start of a word, with `=` or
+          # `+=` after its `]`, is part of an assignment word (SUBC holds its
+          # close). bash reads the brackets as a pair wherever a command may
+          # start, whatever they hold, so a blank inside ends no word there
+          # (`a[1 + 1]=x pip install x` runs the install in bash alone, form
+          # WA18): a context in the bash reading, which says DIVERGE at a blank
+          # or an operator inside. zsh and dash cut the word at the blank.
+          if (c == "[") {
+            if (top == "W" && wkind[d] == "s") { sbr[d]++; continue }
+            if (subname(i) && (wk = la_sub(i + 1)) && (X[wk] == "=" || X[wk] == "+" && X[wk+1] == "=")) {
+              SUBC[i] = wk - 1
+              if (shb) { push("W"); wkind[d] = "s"; sbr[d] = 0; if (wantdep) DEP[i] = dc }
+            }
+            continue
+          }
+          if (c == "]") {
+            if (top == "W" && wkind[d] == "s") { if (sbr[d] > 0) sbr[d]--; else { SUBC[cst[d]] = i; pop() } }
+            continue
+          }
+          # A parenthesis the shell reads as part of a word opens a context,
+          # like `$(...)`, so every byte up to its `)` is nested: no blank or
+          # operator in it ends the word, and no reader has to know why
+          # (word_sep reads the depth). wparen() says which one this is:
+          #
+          #   a  the value of an array assignment, `NAME=(`, `NAME+=(` (bash,
+          #      zsh). Its elements are words, so comments, quotes and
+          #      substitutions read as anywhere (W, kind a).
+          #   z  zsh `=(...)` at the start of a word: a process substitution
+          #      through a temporary file. Its body runs, so it is a payload
+          #      like `$(...)` (S, in substs).
+          #   g  a glob group or qualifier glued to a word (zsh, and bash 3.2
+          #      inside a substitution): a `#` in it is no comment (form G5).
+          #      bash 5.2 and dash fail to parse it, so the bash reading says
+          #      DIVERGE (W, kind g).
+          #
+          # `<(` and `>(` open a process substitution, in a word or as one:
+          # its body runs and is a payload too (kind P), and the `<` or `>`
+          # that opens it is a byte of that word, not an operator, so it
+          # takes the depth of the body. Read at the top level, the opener
+          # ended the word before it and three readers each needed a rule of
+          # their own for the word after it (form W1).
+          #
+          # Any other `(` is an operator: a subshell, a function head, or in
+          # zsh a glob word that starts where an argument stands (`ls
+          # (a|b)*`). GL marks that level for the bash and zsh readings, glc
+          # counts the open ones so that a `#` in it or after its `)` is no
+          # comment (form ZG1), and the bash reading says DIVERGE. GLO marks
+          # one the walk reads as that glob, for the consistency check in
+          # starts().
           if (c == "(") {
+            wk = wparen(i)
+            if (wk == "z") { push("S"); if (wantdep) DEP[i] = dc; continue }
+            if (wk == "a" || wk == "g") { if (wk == "g") div = 1; push("W"); wkind[d] = wk; WPO[i] = 1; if (wantdep) DEP[i] = dc; continue }
+            if (i > 1 && (X[i-1] == "<" || X[i-1] == ">") && C[i-1] == cls) {
+              push("S"); skind[nsub] = "P"; PSN[i] = nsub
+              if (wantdep) { DEP[i] = dc; DEP[i-1] = dc }
+              continue
+            }
             par[d]++
-            if (i > 1 && (X[i-1] == "<" || X[i-1] == ">") && C[i-1] == cls) PS[d, par[d]] = 1; else delete PS[d, par[d]]
-            if (!shd && X[i+1] != ")" && (i == 1 || X[i-1] !~ /[$<>]/) && !cmdpos(i)) { GL[d, par[d]] = 1; glc[d]++; div = 1 } else delete GL[d, par[d]]
+            if (!shd && !emptyahead(i) && (i == 1 || X[i-1] !~ /[$<>]/) && !cmdpos(i) && !forlist(i)) { GL[d, par[d]] = 1; GLO[i] = 1; glc[d]++; div = 1 } else delete GL[d, par[d]]
             continue
           }
           if (c == ")") {
             if (par[d] > 0) {
-              if ((d, par[d]) in PS) { WC[i] = 1; delete PS[d, par[d]] }
               if ((d, par[d]) in GL) { WC[i] = 1; delete GL[d, par[d]]; glc[d]-- }
               par[d]--
             }
-            else if (top == "S") { WC[i] = 1; pop() }
+            else if (top == "S" || top == "W" && wkind[d] != "s") { WC[i] = 1; pop() }
             continue
+          }
+          if (top == "W" && wkind[d] == "s") continue
+          # zsh reads `<N-M>`, with either number left out, as a glob for a
+          # range of numbers: bytes of a word, where bash and dash read two
+          # redirections (`pip >f<1-2> install x` runs the install in zsh
+          # alone when a file matches; to bash `install` is a target). In the
+          # zsh reading the `<` and `>` are characters, as escaped ones are,
+          # and the bash reading says DIVERGE.
+          if (c == "<" && cls == "c" && (wk = numglob(i))) {
+            div = 1
+            if (shz) {
+              C[i] = "e"
+              for (i++; i < wk; i++) { C[i] = cls; if (wantdep) DEP[i] = dc }
+              C[i] = "e"; if (wantdep) DEP[i] = dc
+              continue
+            }
           }
           if (c == "<" && X[i+1] == "<" && X[i+2] != "<" && X[i-1] != "<") { i = heredoc_op(i); continue }
           if (c == "\n") { i = at_newline(i); continue }
@@ -774,22 +1066,37 @@ shell_lex() {
         if (mode == "SQ" || mode == "AQ" || d > 1 || np > 0) unterm = 1
         flagfile = ENVIRON["SAFEDEPS_LEX_FLAGS"]
         if (flagfile != "" && unterm) print "UNTERM" >> flagfile
-        if (div) {
-          if (divfile != "") print "DIVERGE" >> divfile
-          if (divmemo != "") print "DIVERGE" > divmemo
-        }
         # A reading that never closes strips nothing: a prefix word would run to
         # the end of the input and take every line after it along (form A7, a
         # heredoc inside `$((` that bash reads as arithmetic). Such a command is
         # settled as UNDECIDED by guard_check_command_reads anyway.
-        if ((view == "unprefixed" || view == "unprefixed-lines") && !unterm) prefixes()
+        # Statement starts are read only from a reading that closes, for the
+        # same reason: a word walk through a quote or a body that never ends
+        # marks starts the shell never reads. The walk comes before redirs(),
+        # which reads its events: a descriptor word starts a word where the
+        # walk starts a command (fdword).
+        if (wantst && !unterm) starts_all()
         # The same holds for redirections: in a reading that never closes, a
         # stripped target changes how the rest reads, and the view stops
         # being idempotent (random inputs in scan-contract).
-        if ((view == "noredir" && !unterm) || view == "pieces" || view == "cscripts" || view == "stmts") redirs()
+        if (((view == "noredir" || view == "live" || view == "flat" || wantst) && !unterm) || view == "pieces" || view == "cscripts" || view == "stmts" || view == "recognize" || view == "stmtcuts" || view == "cwords") redirs()
+        # Which glued `}` closes a group reads the groups the walk opened, and
+        # the redirections (DROP) the views blank.
+        if (wantgrp) group_close()
+        if ((view == "unprefixed" || view == "recognize" || view == "cwords" || view == "pieces") && !unterm) prefixes()
+        # After redirs(), which says DIVERGE at a `!` only zsh reads as part
+        # of its operator.
+        if (div) {
+          if (divfile != "") print "DIVERGE" >> divfile
+          if (divmemo != "") print "DIVERGE" > divmemo
+        }
         if (view == "substs") emit_substs()
         else if (view == "pieces") emit_pieces()
         else if (view == "cscripts") emit_cscripts()
+        else if (view == "events") emit_events()
+        else if (view == "stmtcuts") emit_stmtcuts()
+        else if (view == "stmtraw") emit_stmtraw()
+        else if (view == "cwords") emit_cwords()
         else emit()
       }
 
@@ -814,50 +1121,159 @@ shell_lex() {
         VAL[j+1] = sprintf("%c", v)
       }
 
-      # The top-level redirections: DROP marks the operator, a file descriptor
-      # number that is the whole word in front of it, the blanks after it and
-      # its target word.
-      function redirs(   k, j, s) {
+      # The top-level redirections: DROP marks the operator, the file
+      # descriptor word in front of it (fdword), the blanks after it and its
+      # target word (wordend). In the dash reading `&>` is no operator: the
+      # `&` ends a command, and the `>` after it is read on its own. zsh reads
+      # a `!` after `>`, `>>`, `>&` or `&>` as part of the operator (`>!`
+      # clobbers); bash and dash read it as the start of the target word. The
+      # two agree on the bytes unless a blank follows the `!`, where the word
+      # after it is the target to zsh alone, so the bash reading says DIVERGE
+      # there.
+      #
+      # KEEP marks what the live view keeps of a redirection: the body of a
+      # process substitution in its target, which is code the shell runs.
+      # PSB marks the bytes that open and close it, which the live view
+      # blanks with the rest of the redirection though they are nested. A
+      # substitution in a target needs no mark, since its body is not
+      # top-level code.
+      function redirs(   k, j, s, m, e, z) {
         for (k = 1; k <= N; k++) {
           if (C[k] != "c" || DEP[k] != 1) continue
-          if (X[k] == "&" && X[k+1] == ">" && C[k+1] == "c") j = k + 1
+          if (X[k] == "&" && X[k+1] == ">" && C[k+1] == "c") { if (shd) continue; j = k + 1 }
           else if (X[k] == "<" || X[k] == ">") j = k
           else continue
           if (X[j+1] == "(") { k = j + 1; continue }
-          s = k
-          while (s > 1 && C[s-1] == "c" && DEP[s-1] == 1 && X[s-1] ~ /[0-9]/) s--
-          if (s == k || s > 1 && !word_sep(s - 1)) s = k
+          s = fdword(k)
           j++
-          while (j <= N && C[j] == "c" && X[j] ~ /[<>]/) j++
-          if (j <= N && C[j] == "c" && (X[j] == "&" || X[j] == "|")) j++
+          # A `<` or `>` whose `(` opens a process substitution starts the
+          # target, not more operator: `><(x)`, `>>(x)` and `<<(x)` are an
+          # operator and a process substitution to zsh (and `><(x)` to bash),
+          # and read as one operator they left `(x)` where the command
+          # stands (the redirection grid, forms RT-ps*-mid).
+          while (j <= N && C[j] == "c" && X[j] ~ /[<>]/ && !((j + 1) in PSN)) j++
+          if (j <= N && C[j] == "c" && X[j] == "&") j++
+          if (j <= N && C[j] == "c" && X[j] == "|") j++
+          else if (j <= N && C[j] == "c" && X[j] == "!" && X[j-1] != "<") {
+            if (j + 1 > N || word_sep(j + 1)) div = 1
+            if (shz) j++
+          }
           while (j <= N && C[j] == "c" && DEP[j] == 1 && (X[j] == " " || X[j] == "\t")) j++
-          while (j <= N && !word_sep(j)) j++
-          for (; s < j; s++) DROP[s] = 1
+          z = wordend(j)
+          for (m = j; m < z; m++) {
+            if (!((X[m] == "<" || X[m] == ">") && C[m] == "c" && (m + 1) in PSN)) continue
+            for (e = m + 2; e <= send[PSN[m+1]]; e++) KEEP[e] = 1
+            PSB[m] = 1; PSB[m+1] = 1; PSB[e] = 1
+            m = e
+          }
+          for (j = z; s < j; s++) DROP[s] = 1
           k = j - 1
         }
       }
-      function emit_pieces(   k, a, ln, pln) {
-        buf = ""; held = 0; ln = 1; a = 1; pln = 1
-        for (k = 1; k <= N; k++) {
-          if (!(k in DROP) && (C[k] == "p" || C[k] == "c" && DEP[k] == 1 && X[k] ~ /[;&|\n]/)) {
-            piece(a, k - 1, pln)
-            a = k + 1
-            if (X[k] == "\n") ln++
-            pln = ln
-            continue
-          }
-          if (X[k] == "\n") ln++
+      # The first byte of the file descriptor word glued in front of the
+      # redirection operator at byte j, or j when there is none: a number, or
+      # a name in braces, which bash 4.1 and later and zsh read as a variable
+      # the shell opens a descriptor into (`{fd}>/dev/null pip install x`
+      # runs the install in bash 5). Older bash and dash read `{fd}` as a
+      # word, the command name where it comes first; reading it as part of
+      # the redirection there can only show a command that does not run.
+      #
+      # The word starts where the byte before it ends a token (wordstart) or
+      # where the walk starts a command (EV, the start events of this
+      # reading): zsh reads a `{` glued to the first word as the group
+      # opener, so in `{2>/dev/null pip install x; }` the `2` starts a word
+      # though the `{` before it ends none. Read from the byte alone, the `2`
+      # was the command and the install its argument (zsh runs it).
+      function fdword(j,   s) {
+        s = j
+        if (s > 1 && X[s-1] ~ /[0-9]/) {
+          while (s > 1 && X[s-1] ~ /[0-9]/ && C[s-1] == C[j]) s--
+        } else if (s > 3 && X[s-1] == "}" && C[s-1] == C[j]) {
+          s = j - 2
+          while (s > 1 && X[s] ~ /[A-Za-z0-9_]/ && C[s] == C[j]) s--
+          if (X[s] != "{" || C[s] != C[j] || X[s+1] !~ /[A-Za-z_]/) return j
         }
-        piece(a, N, pln)
+        if (s == j || !wordstart(s) && !(s in EV)) return j
+        # zsh reads a `{` glued to the first word as the group opener, and
+        # its walk starts the command after it (EV): the word `{fd}` is then
+        # no descriptor, and `fd}` is the command (zsh does not run `{fd}>f
+        # pip install x`, measured).
+        if (X[s] == "{" && ((s + 1) in EV) && !(s in EV)) return j
+        return fdat(s, j, policy) ? s : j
+      }
+      # Whether bytes s..j-1, a word, are the descriptor word of the
+      # redirection operator at byte j in reading rs: a `{name}`, or a
+      # number. zsh and dash read one digit there and bash any number
+      # (measured: `echo 12>/dev/null` prints 12 into /dev/null in zsh and
+      # dash, an empty line in bash; the zsh manual says "preceded by a
+      # digit"). So in zsh `repeat 12>&1 pip install x` repeats the install
+      # twelve times with its output on the descriptor 1, where a reading of
+      # `12` as the descriptor left `repeat` no count and took the install
+      # for one. The bash reading says DIVERGE where the readings differ.
+      function fdat(s, j, rs) {
+        if (X[s] == "{") return 1
+        if (j - s == 1) return 1
+        if (rs == policy && shb) div = 1
+        return rs == "bash"
+      }
+      # Whether the word the walk reads at bytes s..j-1 has the shape of a
+      # descriptor word glued to the operator at j: digits, or `{name}`,
+      # all of the class of the operator. The walk asks this with the word start
+      # it found itself.
+      function fdshape(s, j,   k) {
+        if (s >= j) return 0
+        if (X[s] == "{") {
+          if (j - s < 3 || X[j-1] != "}" || X[s+1] !~ /[A-Za-z_]/) return 0
+          for (k = s; k < j; k++) if (C[k] != C[j] || k > s && k < j - 1 && X[k] !~ /[A-Za-z0-9_]/) return 0
+          return 1
+        }
+        for (k = s; k < j; k++) if (X[k] !~ /[0-9]/ || C[k] != C[j]) return 0
+        return 1
+      }
+      # The byte after the word that starts at byte j, cut where the shell
+      # cuts it (word_sep).
+      function wordend(j) {
+        while (j <= N && !word_sep(j)) j++
+        return j
+      }
+      # The statements, cut where command_statements cuts them: at a top-level
+      # separator as the stmts view has it (`;`, a newline, `&`, `&&`, `|`,
+      # `||`, `|&`) and at a start no separator stands before. Each is numbered
+      # as command_statements numbers it, an empty one included, so line n of
+      # the landing (resolve_reading_targets) and piece n are one statement.
+      # The pieces used to be cut from the text lines another reader handed
+      # this view -- the statements of the joined view, one per line -- and
+      # every line was lexed again from nothing: a heredoc body there left the
+      # live code in it (`$(date)`) where the next command stood, which took
+      # that command for its argument (verdict buri-20261005-145152).
+      function emit_pieces(   k, a, n, ch) {
+        buf = ""; held = 0; n = 1; a = 1
+        for (k = 1; k <= N; k++) {
+          if ((k in EV) && bare(k)) { piece(a, k - 1, n); n++; a = k }
+          ch = sbyte(k)
+          if (ch == ";" || ch == "\n") { piece(a, k - 1, n); n++; a = k + 1; continue }
+          if (ch == "&") {
+            piece(a, k - 1, n); n++
+            if (k < N && sbyte(k + 1) == "&") k++
+            a = k + 1; continue
+          }
+          if (ch == "|") {
+            piece(a, k - 1, n); n++
+            if (k < N && (sbyte(k + 1) == "|" || sbyte(k + 1) == "&")) k++
+            a = k + 1; continue
+          }
+        }
+        piece(a, N, n)
         if (aqbad) put("!\n")
         printf "%s", buf
       }
       # A byte of a piece as one line can carry it: a newline inside the piece
       # (code nested in a substitution) ends a command there, and the field
-      # separators and a tab read as a blank, as do a comment and a heredoc
-      # operator or body, which are not words.
+      # separators and a tab read as a blank, as do a comment, a heredoc
+      # operator or body, a line continuation and a case pattern close, which
+      # are not words.
       function pbyte(k,   cc) {
-        if (k in DROP || C[k] == "m" || C[k] == "h" || C[k] == "b") return " "
+        if (k in DROP || C[k] == "m" || C[k] == "h" || C[k] == "b" || C[k] == "l" || C[k] == "p") return " "
         cc = X[k]
         if (cc == "\n") return (C[k] == "c" || C[k] == "Q" || C[k] == "B") ? ";" : " "
         if (cc == "\037" || cc == "\036" || cc == "\t") return " "
@@ -868,20 +1284,22 @@ shell_lex() {
       # empty word, which the shell passes, so it is \002 too. Dropped, it
       # moved each later word up one place: `uvx --python "" evil==1.0.0` runs
       # evil (uv 0.10.11 reads the empty value as no preference), and
-      # --python took evil==1.0.0 as its value.
-      function piece(a, z, n,   k, any, w) {
-        any = 0
-        for (k = a; k <= z; k++) if (!(k in DROP) && X[k] !~ /[ \t\n]/) { any = 1; break }
-        if (!any) return
-        put(n "\037")
-        for (k = a; k <= z; k++) put(pbyte(k))
-        put("\037")
+      # --python took evil==1.0.0 as its value. With `pre` 0, the prefixes of
+      # the statement (A) are left out: the words the extractor reads.
+      #
+      # A `}` that closes a zsh group (GC, group_close) ends the word before
+      # it, as zsh ends it there, and is no word of the statement. Read as a
+      # grouping character inside the word, it made `{ mvn ...
+      # dependency:get}` a goal of `dependency:get` and a marker, which no
+      # goal reading names, and the install zsh runs passed.
+      function pwords(a, z, pre,   k, w) {
         w = 0
         for (k = a; k <= z; k++) {
-          if ((k in DROP) || !(k in VAL) && !RM[k] && word_sep(k)) {
+          if (!pre && (k in A)) continue
+          if ((k in DROP) || (k in GC) || !(k in VAL) && !RM[k] && word_sep(k)) {
             if (w == 1) put("\002")
             w = 0
-            put((k in DROP) ? " " : pbyte(k))
+            put(((k in DROP) || (k in GC)) ? " " : pbyte(k))
             continue
           }
           if (w == 0) w = 1
@@ -890,6 +1308,29 @@ shell_lex() {
           } else if (!RM[k]) { put(wbyte(k)); w = 2 }
         }
         if (w == 1) put("\002")
+      }
+      # The statement as the recognize view has it, on one line: what the
+      # recognizers read of this statement alone.
+      function precog(a, z,   k, cc) {
+        for (k = a; k <= z; k++) {
+          if ((k in EV) && bare(k)) put(";")
+          if ((k in A) || C[k] == "l") continue
+          cc = ((k in DROP) && !unterm) ? " " : sbyte(k)
+          put((cc == "\n" || cc == "\t" || cc == "\037" || cc == "\036") ? " " : cc)
+        }
+      }
+      function piece(a, z, n,   k, any) {
+        any = 0
+        for (k = a; k <= z; k++) if (!(k in DROP) && X[k] !~ /[ \t\n]/ && C[k] != "m" && C[k] != "h" && C[k] != "b" && C[k] != "B" && C[k] != "l") { any = 1; break }
+        if (!any) return
+        put(n "\037")
+        for (k = a; k <= z; k++) put(pbyte(k))
+        put("\037")
+        pwords(a, z, 1)
+        put("\037")
+        pwords(a, z, 0)
+        put("\037")
+        precog(a, z)
         put("\n")
       }
       # A byte inside a word, for the words field: one the extractor would cut
@@ -906,9 +1347,31 @@ shell_lex() {
 
       # A byte that ends a word at the top level: unquoted blank or operator
       # in code that is not nested, or anything the shell does not read as a
-      # word (a comment, a heredoc operator or body).
+      # word (a comment, a heredoc operator or body). Whether a byte is
+      # nested is the depth of the walk (DEP) and nothing else: every
+      # parenthesis the shell reads as part of a word is a context there (an
+      # array value, a glob group, a process substitution, the subscript of
+      # an assignment in bash), and a case pattern close is class p only at
+      # the top level. This function used to answer from the byte alone, and
+      # each word it cut where the walk did not was a statement no
+      # recognizer read: `a=(x) pip install x` ran with `x)` as the command,
+      # and the `)` of a case pattern inside `>$(case a in a) echo f;; esac)`
+      # ended the target there (forms WA1, WC3).
+      #
+      # A heredoc operator, body or terminator ends a word where the heredoc
+      # stands at the top level. One opened inside a substitution is part of
+      # that word, as the rest of the substitution is (WD, the depth the
+      # outermost heredoc stands at): read as a word end, it cut the target
+      # of `npm >$(cat <<E ... E) install x` at the `<<`, and the verb was
+      # never beside npm for the rewrite (no --ignore-scripts, no record).
       function word_sep(k) {
-        if (C[k] == "m" || C[k] == "h" || C[k] == "b" || C[k] == "B" || C[k] == "p") return 1
+        if (k in ARM) return 1
+        # Every byte of a body at the top level is no word of the command,
+        # an escape or a comment in a substitution there too: read as word
+        # bytes, they gave the walk a command inside the body.
+        if (C[k] == "h" || C[k] == "b" || C[k] == "B" || (k in BF)) return !(k in WD) || WD[k] <= 1
+        if (C[k] == "p") return 1
+        if (C[k] == "m") return DEP[k] == 1
         return C[k] == "c" && DEP[k] == 1 && X[k] ~ /[ \t\n;&|()<>]/
       }
       function mark(a, z,   k) { for (k = a; k <= z; k++) A[k] = 1 }
@@ -916,39 +1379,504 @@ shell_lex() {
       # after each. A word is cut only by word_sep, so a quoted or nested value
       # (FOO="a b", FOO=$(cmd arg), FOO=a\ b) stays one word -- the sed this
       # replaced read a value as the bytes up to the first blank or quote.
-      function prefixes(   k, s, w, atstart, envmode, takes, hit, execmode, cmdmode, timemode) {
-        atstart = 1; envmode = 0; takes = 0; execmode = 0; cmdmode = 0; timemode = 0; k = 1
+      # A statement starts where starts() found a command (EV), and only
+      # there: this reads the events and no separator of its own. A
+      # redirection there is a prefix like an assignment: redirs() has marked
+      # its operator, file descriptor and target in DROP. Left in place,
+      # `2>/dev/null pip install ...` put a word between the start and the
+      # install, and no recognizer read it (every shell runs it). Read from
+      # separators, the starts after `function NAME {` kept their
+      # assignments the same way. A word is cut at an event inside it too:
+      # zsh reads `{X=1 pip install x; }` as a group whose command starts
+      # after the `{`, where word_sep alone saw one word `{X=1`.
+      function prefixes(   k, s, w, atstart, envmode, takes, hit, execmode, cmdmode, timemode, sl, j, bw) {
+        atstart = 0; envmode = 0; takes = 0; execmode = 0; cmdmode = 0; timemode = 0; k = 1
         while (k <= N) {
+          if (k in EV) { atstart = 1; envmode = 0; takes = 0; execmode = 0; cmdmode = 0; timemode = 0 }
           if (word_sep(k)) {
-            if (X[k] ~ /[\n;&|(]/ || C[k] == "p") { atstart = 1; envmode = 0; takes = 0; execmode = 0; cmdmode = 0; timemode = 0 }
+            # A redirection that ends in an operator byte (the `)` of a
+            # process substitution target) takes the blanks after it along,
+            # as one that ends in a word does below.
+            if (k in DROP) {
+              if (atstart) { A[k] = 1; if (!((k + 1) in DROP)) while (k + 1 <= N && C[k+1] == "c" && DEP[k+1] == 1 && (X[k+1] == " " || X[k+1] == "\t")) { k++; A[k] = 1 } }
+              k++; continue
+            }
             k++; continue
           }
           s = k; sb_reset("w", "")
-          while (k <= N && !word_sep(k)) { sb_add("w", X[k]); k++ }
+          while (k <= N && !word_sep(k) && !(k > s && (k in EV))) { sb_add("w", X[k]); k++ }
           w = sb_get("w")
           if (!atstart) continue
+          # A word that is a path, with its last part plain: bw is that part.
+          # `/usr/bin/env` is env as `/usr/bin/pip` is pip.
+          sl = 0; bw = w
+          for (j = s; j < k; j++) if (X[j] == "/" && C[j] == "c" && DEP[j] == 1) sl = j
+          if (sl > 0) {
+            for (j = sl + 1; j < k && C[j] == "c" && DEP[j] == 1; j++) ;
+            if (j == k && sl < k - 1) bw = substr(w, sl - s + 2); else sl = 0
+          }
           hit = 0
-          if (takes) { takes = 0; hit = 1 }
-          else if (envmode && w ~ /^-/) { if (w ~ /^(-u|--unset|-C|--chdir)$/) takes = 1; hit = 1 }
-          else if (execmode && w ~ /^-[a-z]+$/) { if (w ~ /a$/) takes = 1; hit = 1 }
-          else if (cmdmode && w == "-p") hit = 1
-          else if (timemode && w == "-p") hit = 1
-          else if (w ~ /^[A-Za-z_][A-Za-z0-9_]*=/) hit = 1
-          else if (w == "env") { envmode = 1; hit = 1 }
+          if (s in DROP) hit = 1
+          else if (takes) { takes = 0; hit = 1 }
+          # `--` ends the options of `command` and `exec`: the word after it
+          # is read afresh, as the command or another prefix (`exec --
+          # noglob pip install x` runs the install in zsh). Read as the
+          # command, it hid the install after it in every shell that runs
+          # `command --` or `exec --`.
+          else if ((execmode || cmdmode) && w == "--") { execmode = 0; cmdmode = 0; hit = 1 }
+          # env takes a value after -u, -C and -P (macOS and GNU env; -S is
+          # read by the payload reader, see cscripts_of).
+          else if (envmode && w ~ /^-/) { if (w ~ /^(-[0iv]*[uCP]|--unset|--chdir)$/) takes = 1; hit = 1 }
+          # exec takes `-c`, `-l` and `-a NAME` (bash and zsh), clustered as
+          # getopt reads them: the first `a` takes the rest of its word as
+          # the name, or the next word when it ends the word. `-aa` is the
+          # name `a`; read as `-a` before a name, it took the command.
+          else if (execmode && w ~ /^-[a-z]+$/) { if (index(w, "a") == length(w)) takes = 1; hit = 1 }
+          # `command -p` runs the command from the default path; getopt
+          # takes the switch any number of times (`-pp`). `-v` and `-V` only
+          # say what the word is, so the install after them does not run.
+          else if (cmdmode && w ~ /^-p+$/) hit = 1
+          # time takes `-p` as the reserved word (bash, zsh), and in dash it is
+          # /usr/bin/time, whose options end at `--` and where -o and -f take
+          # a value; the walk skips every `-` word after time, and so does this.
+          else if (timemode && w == "--") { timemode = 0; hit = 1 }
+          else if (timemode && w ~ /^-/) { if (w ~ /^-[a-z]*[of]$/) takes = 1; hit = 1 }
+          else if (assignat(s, k, 1)) hit = 1
+          # env, command and time are programs too (macOS ships /usr/bin/env,
+          # /usr/bin/command and /usr/bin/time), and a macOS volume ignores
+          # case, so `TIME pip install x` runs the install there. Their names
+          # are read as the grammar reads the name of a manager
+          # (safedeps_manager_name): the last part of a path, in any case. The
+          # start pattern of the recognizers read `time` in any case until the
+          # walk took the reserved words over, and a merge with that pattern
+          # gone left `TIME` the command name.
+          else if (tolower(bw) == "env") { envmode = 1; hit = 1 }
           else if (w == "exec") { envmode = 0; execmode = 1; cmdmode = 0; hit = 1 }
-          else if (w == "command") { envmode = 0; cmdmode = 1; execmode = 0; hit = 1 }
-          else if (w == "time") { envmode = 0; timemode = 1; continue }
-          else if (w ~ /^(!|[{]|if|then|else|elif|while|until|do|coproc)$/) { envmode = 0; continue }
-          else { atstart = 0; envmode = 0; continue }
+          else if (tolower(bw) == "command") { envmode = 0; cmdmode = 1; execmode = 0; hit = 1 }
+          # The reserved word `time` goes like the other prefixes, so a reader
+          # of this view finds the command after it (`| time sh`, the pipe
+          # check).
+          else if (tolower(bw) == "time") { envmode = 0; timemode = 1; hit = 1 }
+          else if (shz && zprecmd(w)) { envmode = 0; hit = 1 }
+          else if (opener(w) || shz && zopener(w) || w == "coproc") { envmode = 0; continue }
+          else {
+            # A word zsh reads as a precommand modifier, where the other
+            # readings read the command: zsh goes on to the command after it
+            # (`exec -- noglob pip install x` runs the install in zsh alone).
+            # The walk reads no command after `exec` or `command`, so its
+            # starts agree there; this is where the readings part, and the
+            # bash reading says so. A second lexing of this view used to find
+            # the modifier at a start and say it by accident.
+            if (!shz && zprecmd(w)) div = 1
+            # The command word. A path before an executable the grammar
+            # names reads as that executable, wherever the path points:
+            # `/usr/bin/pip`, `.venv/bin/pip` and `$VENV/bin/pip` run a pip
+            # (exre, the list in the grammar). The sed this replaced read only an
+            # absolute path, after a byte of its own start set and before a
+            # byte of its own end set, so `x)/usr/bin/pip install x` (a case
+            # arm) and `/usr/bin/pip>/dev/null install x` passed unjudged.
+            if (sl > 0 && exre != "" && tolower(bw) ~ exre) mark(s, sl)
+            atstart = 0; envmode = 0; continue
+          }
           mark(s, k - 1)
           while (k <= N && C[k] == "c" && DEP[k] == 1 && (X[k] == " " || X[k] == "\t")) { A[k] = 1; k++ }
         }
       }
 
+      # The reserved words after which a command stands, the one list of them:
+      # prefixes() and starts() read it. SAFEDEPS_G_START used to carry a
+      # second copy as a regex chain, and a chain names only the words before
+      # a command, never the shell state that puts one there (the function
+      # heads, `for ((...))`, the zsh short forms). zopener() holds the two
+      # only zsh reads so: `}` closes a group wherever it stands, and
+      # `always` opens the block after one.
+      function opener(w) { return w ~ /^(!|[{]|if|then|else|elif|while|until|do)$/ }
+      # The words that open a compound command other than a group or a
+      # subshell: what may follow `function NAME` and `coproc NAME` as a body.
+      function cbody(w) { return w ~ /^(if|while|until|for|select|case|[[][[])$/ }
+      function zopener(w) { return w == "}" || w == "always" }
+      # The precommand modifiers only zsh reads: a word before a command that
+      # changes how it is run and is no command itself (`noglob pip install
+      # x` runs the install). The manual lists six; `command` and `exec` are
+      # read in every reading, with their options, in prefixes().
+      function zprecmd(w) { return w == "-" || w == "builtin" || w == "nocorrect" || w == "noglob" }
+      # Whether the word at bytes s..k-1 assigns: the byte after its `=`, or
+      # 0. A name, a subscript whose close the lexing found (SUBC), `=` or
+      # `+=`. An assignment stays with the command it prefixes. A regex over
+      # the word read `a[b[1]]=x` and `a["]"]=x` as commands, and `a+=x` and
+      # `a[1]=x` were not listed at all, so the install after each was an
+      # argument (forms WA7, WA15-WA17).
+      #
+      # The walk asks with a word start of its own (walked = 1), which the
+      # lexing may not have seen: zsh reads `{a[1]=x pip install x; }` as a
+      # group whose command assigns before the install, but the lexing,
+      # which asks whether a byte ends a token, found no word start at the
+      # `a` and no subscript there. The subscript is then read here, the way
+      # the lexing reads one.
+      function assignat(s, k, walked,   p, wk) {
+        p = s
+        if (X[p] !~ /[A-Za-z_]/) return 0
+        while (p < k && X[p] ~ /[A-Za-z0-9_]/) p++
+        if (p < k && X[p] == "[" && walked && !(p in SUBC) && (wk = la_sub(p + 1)) && (X[wk] == "=" || X[wk] == "+" && X[wk+1] == "=")) SUBC[p] = wk - 1
+        if (p < k && X[p] == "[") { if (!(p in SUBC) || SUBC[p] >= k) return 0; p = SUBC[p] + 1 }
+        if (p < k && X[p] == "+") p++
+        return (p < k && X[p] == "=") ? p + 1 : 0
+      }
+      # Where each command starts, in the reading rs. The walk follows the
+      # shell grammar word by word and keeps st set while the next word
+      # stands where the shell reads a command name. Assignments and
+      # redirections before a command are part of it, so no start falls
+      # between them and the command, and a redirection that comes first is
+      # where it starts; the word after a redirection operator is its
+      # target, never a command.
+      #
+      # Every reading: after a separator or a case pattern, a reserved word, a
+      # function head (an empty `()`, `function NAME... {`, or `function NAME`
+      # before any other compound command: bash 5 reads `function WORD
+      # function_body`, so `function f if pip install x; then :; fi` defines a
+      # function that runs it), `time` and its options, `coproc`, `for
+      # NAME... {` and `for ((...)) {`. A rule may be shared only when it adds
+      # starts: a shell that has no such form fails to parse the command, and
+      # runs none of it (measured per shell in scan-contract). zsh alone: `}` wherever it stands, `always`, the short
+      # forms `for NAME (WORDS)`, `foreach`, `repeat WORD`, `[[ ... ]]` and an
+      # arithmetic `((...))` before a body, and `case WORD {`. bash alone:
+      # `coproc NAME` before a compound command (`coproc WORD shell_command`:
+      # `{`, `if`, `while` and the rest of cbody). These take starts away from
+      # what the shared walk reads (the words in `for i (1)`) or only one shell
+      # runs them, so the reading that is not that shell does not read them;
+      # the bash reading walks all three and says DIVERGE where they differ
+      # (see starts_all).
+      #
+      # The arithmetic word is read as such: its first `(` is a separator to
+      # the word walk, so the word starts at the second one, with AR after it.
+      #
+      # The walk writes events, never bytes. CS gets the first byte of each
+      # command, its prefixes included: the first word, or the redirection
+      # operator or file descriptor before it. CW gets the word it reads as
+      # the command, or as the reserved word that opens one. A start is a
+      # place between two bytes, and the readers take it from here: the
+      # recognize view puts a separator in, command_statements cuts there,
+      # prefixes() starts there.
+      function starts(rs, CS, CW, GO,   k, s, w, op, st, pre, rd, fn, fr, fra, inp, rp, dbr, cop, tm, cs, zr, br, fh, j, pn, PST, body, HC, cw, PCOND, pcw, acond, hd) {
+        zr = (rs == "zsh"); br = (rs == "bash")
+        st = 1; pre = 0; rd = 0; fn = 0; fr = 0; fra = 0; inp = 0; rp = 0; dbr = 0; cop = 0; tm = 0; cs = 0; fh = 0; k = 1; pn = 0
+        while (k <= N) {
+          if (word_sep(k)) {
+            op = (C[k] == "c" && DEP[k] == 1) ? X[k] : ""
+            # An `&` is part of a redirection after `>` or `<` (`2>&1`) and,
+            # outside dash, before `>` (`&>`); in dash that one ends a command.
+            if (op == "&" && (X[k+1] == ">" && rs != "dash" || k > 1 && (X[k-1] == ">" || X[k-1] == "<") && C[k-1] == "c")) op = ">"
+            # zsh reads `&!` as one list terminator, as `&` that disowns the
+            # job (zsh manual, Simple Commands & Pipelines), so a command
+            # glued after it starts there: `true&!pip install x` runs the
+            # install in zsh alone, where bash and dash read `!pip` as a
+            # command name. With a blank after it every shell starts one (in
+            # bash and dash at the `!` they read as reserved).
+            if (zr && op == "&" && X[k+1] == "!" && C[k+1] == "c" && DEP[k+1] == 1) {
+              st = 1; pre = 0; rd = 0; fn = 0; fr = 0; inp = 0; rp = 0; dbr = 0; cop = 0; tm = 0; fh = 0
+              k += 2; continue
+            }
+            if (C[k] == "p" || op ~ /[\n;&|]/) {
+              st = 1; pre = 0; rd = 0; fn = 0; fr = 0; inp = 0; rp = 0; dbr = 0; cop = 0; tm = 0; fh = 0
+            }
+            else if (op == "<" || op == ">") {
+              fh = 0
+              # A redirection that comes first is the start of its command.
+              # (The `<` or `>` that opens a process substitution is no
+              # operator: it is nested, with the word it starts.)
+              rd = 1
+              # Not while the walk reads a head: the names after `function`,
+              # the list of a `for`, the count of `repeat`, the words of `[[`,
+              # the word of a `case`. No shell starts a command there, and a
+              # start with no command word after it broke the event contract
+              # (random input on bash 5: `function f g>x y`).
+              hd = (fn || fr || rp || dbr || cs || inp)
+              if (st && !pre && !hd) CS[k] = 1
+              if (st && !hd) pre = 1
+              if (op == ">" && X[k+1] == "|") k++
+            }
+            else if (op == "(") {
+              for (j = k + 1; j <= N && (X[j] == " " || X[j] == "\t"); j++) ;
+              if (!(st && !pre) && !fh && fn != 2 && cop != 2 && !(zr && fr == 2) && X[j] != ")" && !(X[k+1] == "(" && (k + 2) in AR) && !(k in CPO) && !(k in GLO)) BSF[rs]++
+              # A subshell that is a function body (`f() ( ... )`, `function
+              # f ( ... )`, and in bash `coproc NAME ( ... )`) starts a
+              # command after a word, so the start is marked before it, as
+              # before a `{`. Unmarked, the statement began at the function
+              # name, and the extractor read the install in the body as
+              # arguments of `f` (caught when the release met the lexer).
+              # The `(` of an empty `()` is the head itself, not a body. A
+              # body glued to the head (`f()(pip install x)`) has no blank to
+              # mark, so the `(` itself is the start, as a case close glued
+              # to its arm is.
+              #
+              # The same holds for any subshell where a command stands with
+              # words of its statement before it: `function f { (pip install
+              # x); }`, `for i do (pip install x); done`, and glued to a
+              # reserved word, `if(true)then(pip install x)fi`. The start is
+              # the `(`, so the statement no longer begins at `function` or
+              # `for`, where the extractor read no manager in it (every shell
+              # that has the form runs it, and each passed). Where the walk
+              # is still reading a head -- the names after `for`, `function`
+              # or `repeat`, the words of `[[ ... ]]` -- no command stands yet
+              # (zsh `for NAME (WORDS)` opens its list there), and in a case
+              # pattern the `(` belongs to the pattern.
+              #
+              # PST remembers, for each open `(`, whether it opened such a
+              # subshell, so that its `)` can say a command ended there.
+              #
+              # After the header of an arithmetic `for ((...))` the `(` is
+              # the body (zsh runs `for ((...)) (pip install x)`), and so it
+              # is after the word list of zsh `for NAME (WORDS)`: HC marks
+              # the `)` that closed such a head. A subshell glued to a case
+              # pattern close (`*)(pip install x);;`) starts at its `(` too.
+              body = ((fh || fn == 2 || br && cop == 2 || fr == 2 && fra || st && !pre && !fn && !fr && !rp && !dbr && !(k in CPO)) && !(X[k+1] == "(" && (k + 2) in AR) && !emptyahead(k))
+              if (body) CS[k] = 1
+              if (!(X[k+1] == "(" && (k + 2) in AR)) { PST[++pn] = body; PCOND[pn] = cw; cw = 0 }
+              if (X[k+1] == "(" && (k + 2) in AR) { }
+              else if (zr && fr == 2 && !fra) { inp = 1; fr = 0 }
+              # The `(` that opens a case pattern opens no command: the word
+              # after it is the pattern (`case x in (x) ...`).
+              else if (k in CPO) { }
+              else { st = 1; pre = 0; rd = 0; fn = 0; fr = 0; rp = 0; cop = 0; tm = 0 }
+              fh = 0
+            }
+            else if (op == ")") {
+              # The `))` of an arithmetic command or header ends its word and
+              # nothing else: the `((` opened no subshell.
+              # In zsh the condition of `if`, `elif`, `while` and `until` may
+              # be an arithmetic command or a subshell with the body right
+              # after it (the short forms), so its close is a head close too.
+              # Only there: an arithmetic command elsewhere closes no head
+              # (`((echo "a))b") )`, where zsh closes it early, runs nothing).
+              if (k in ACL) { if (fr == 2 && fra || zr && acond) HC[k] = 1; acond = 0 }
+              else if (inp) { inp = 0; st = 1; HC[k] = 1 }
+              else if (emptyparen(k)) { st = 1; fn = 0; fh = 1 }
+              else if (cs == 3) st = 1
+              # The close of a subshell ends a command, so a reserved word
+              # may follow it at once (`if (true) then ...`, which every
+              # shell measured runs). A `(` that opened none -- a glob
+              # word, a stray one among the arguments -- closes nothing.
+              else if (pn > 0 && PST[pn]) { st = 1; pre = 0; if (zr && PCOND[pn]) HC[k] = 1 }
+              if (pn > 0 && !(k in ACL)) pn--
+            }
+            k++; continue
+          }
+          s = k; sb_reset("w", "")
+          while (k <= N && !word_sep(k)) { sb_add("w", X[k]); k++ }
+          w = sb_get("w")
+          fh = 0
+          if (inp) continue
+          if (rd) { rd = 0; continue }
+          if (dbr) { if (w == "]]") { dbr = 0; st = zr }; continue }
+          # fn counts the words after `function`: 2 right after the name,
+          # where bash reads a body; 3 after more names, where only `{` opens
+          # one (zsh).
+          if (fn) {
+            if (w == "{") { GO[s] = 1; fn = 0; st = 1; continue }
+            if (fn != 2 || !cbody(w)) { fn = (fn == 1) ? 2 : 3; continue }
+            fn = 0; st = 1
+          }
+          # fra is set when the head is arithmetic, `for ((...))`: then the
+          # word after it is the body, a `do`, a `{` or, in zsh, a command
+          # (the short form `for ((...)) sublist`; bash fails to parse it, so
+          # the start is shared).
+          if (fr == 1) { fr = 2; fra = (substr(w, 1, 1) == "(" && (s + 1) in AR); continue }
+          if (fr == 2) {
+            if (w == "in") { fr = 0; st = 0 }
+            else if (w == "do" || w == "{") { if (w == "{") GO[s] = 1; fr = 0; st = 1 }
+            else if (fra) { fr = 0; st = 1; fra = 0 }
+            if (fr == 2 || w == "in" || w == "do" || w == "{") continue
+          }
+          if (rp) { rp = 0; st = 1; continue }
+          if (cs == 1) { cs = 2; continue }
+          if (cs == 2) { cs = (zr && w == "{") ? 3 : 0; continue }
+          if (!st && br && cop == 2 && cbody(w)) { st = 1; cop = 0 }
+          if (!st) {
+            if (br && cop == 2 && w == "{") { GO[s] = 1; st = 1 }
+            else if (zr && w == "}") st = 1
+            cop = 0
+            continue
+          }
+          # The options of time: `-p`, and in dash those of /usr/bin/time,
+          # where -o and -f take the next word (prefixes() reads the same).
+          if (tm == 2) { tm = 1; continue }
+          if (tm && w ~ /^-/) { if (w ~ /^-[a-z]*[of]$/) tm = 2; continue }
+          tm = 0
+          # zsh reads a `{` glued to the first word of a command as the
+          # group opener (`{pip install x; }` runs the install in zsh alone).
+          # The rest of the word is read again, as the first word of the
+          # command in the group: its start is the byte after the `{`.
+          if (zr && !pre && length(w) > 1 && substr(w, 1, 1) == "{" && C[s] == "c" && DEP[s] == 1) { GO[s] = 1; k = s + 1; continue }
+          # A file descriptor word glued to a redirection belongs to it. The
+          # word starts where the walk says (s), which is not always where a
+          # byte ends a token: after a `{` zsh reads as glued (`{2>/dev/null pip`).
+          if ((X[k] == "<" || X[k] == ">") && C[k] == "c" && fdshape(s, k) && fdat(s, k, rs)) {
+            if (!pre) CS[s] = 1
+            pre = 1
+            continue
+          }
+          # A command glued to the `)` that closes a head (zsh `for i
+          # (1)pip install x`, `for ((...))pip install x`, `if ((1))pip ...`)
+          # starts there like any other: the start is the place between the
+          # `)` and the word.
+          if (!pre) CS[s] = 1
+          pre = 0
+          if (!assignat(s, k, 1)) CW[s] = 1
+          # The word after `coproc` is a command to zsh and to bash, unless
+          # bash reads it as the NAME of a `coproc NAME {`. It is a start,
+          # and read on as at any other.
+          if (cop == 1) cop = (w == "{") ? 0 : 2
+          pcw = cw; cw = 0
+          if (opener(w) || zr && zopener(w)) { if (w == "{") GO[s] = 1; cop = 0; cw = (w ~ /^(if|elif|while|until)$/); continue }
+          if (assignat(s, k, 1)) { pre = 1; continue }
+          if (w == "time") { tm = 1; continue }
+          if (zr && zprecmd(w)) continue
+          if (w == "function") { fn = 1; continue }
+          if (w == "for" || w == "select" || zr && w == "foreach") { fr = 1; continue }
+          if (zr && w == "repeat") { rp = 1; continue }
+          if (w == "[[") { dbr = 1; continue }
+          if (w == "coproc") { cop = 1; continue }
+          if (w == "case") { cs = 1; st = 0; continue }
+          if (zr && substr(w, 1, 1) == "(" && (s + 1) in AR) { acond = pcw; continue }
+          for (j = s; j < k; j++) if (j in WPO) { BSF[rs]++; break }
+          st = 0
+        }
+      }
+      # The starts of this reading in EV, its command words in EW. The bash
+      # reading also walks as zsh and as dash, and says DIVERGE where a start
+      # differs, so that a form only zsh runs brings the zsh reading in. On
+      # the same classes the walks differ only by the rules above; where the
+      # classes themselves differ, the lexing has said DIVERGE already. The
+      # starts compared are the events: one with no byte before it to carry
+      # it is a start all the same, and one that only zsh reads (`true&!pip
+      # install x`) has to bring the zsh reading in.
+      function starts_all(   j) {
+        starts(policy, EV, EW, GOR)
+        if (!shb) return
+        starts("zsh", EZ, EZW, GOZ); starts("dash", ED, EDW, GOD)
+        walks_fail()
+        if (div) return
+        for (j in EZ) if (!(j in EV)) { div = 1; return }
+        for (j in ED) if (!(j in EV)) { div = 1; return }
+        for (j in EV) if (!(j in EZ) || !(j in ED)) { div = 1; return }
+      }
+      # Whether the start at byte k is bare: no separator the shell reads
+      # stands before it (blanks between), so a reader that knows only
+      # separators would not find it. A start after `;`, `&`, `|`, `(` or a
+      # newline, or at the beginning, is delivered by that byte already.
+      function bare(k,   j) {
+        j = k - 1
+        while (j >= 1 && (X[j] == " " || X[j] == "\t") && C[j] == "c") j--
+        if (j < 1 || (j in ARM)) return 0
+        return !(C[j] == "c" && DEP[j] == 1 && !(j in DROP) && X[j] ~ /[\n;&|(]/)
+      }
+      # The walk checks its own answers. The lexing decides which `(` is part
+      # of a word, and partly by the bytes before it (cmdpos, namehead,
+      # wordstart); the walk decides where a command may start from the
+      # grammar. Where the two disagree, one of them misread the command, and
+      # which one cannot be told from here. BSF counts, per walk, the two
+      # ways they can: a `(` the lexing left an operator where the walk has
+      # no command position, no function head and no short-form list, and a
+      # word parenthesis inside the word the walk reads as a command name.
+      # (An arithmetic `((`, a case pattern `(` and a zsh glob word the
+      # lexing marked are operators the walk expects, CPO and GLO.) Only the
+      # bash reading asks, and only when its three walks all count one: a
+      # `(` that zsh alone reads where a command stands (`foreach i (1)`) is
+      # a form of that shell, not a misreading. Then the reading is failed --
+      # the mark the guard settles as UNDECIDED for a command that names a
+      # package manager -- never guessed. This closes nothing by itself: each
+      # form found this way got its own rule (the `!` in cmdpos), and the
+      # check stays for the next one.
+      function walks_fail() { if (BSF["bash"] && BSF["zsh"] && BSF["dash"]) smfail() }
+      function smfail() { if (smark != "" && !smdone) { print "failed" >> smark; smdone = 1 } }
+      # Which word the `(` at byte j is part of: "a" an array value, "z" a
+      # zsh `=(...)`, "g" a glob group or qualifier, "" none -- an operator
+      # (see the `(` rule in the main loop). A `(` is part of a word only
+      # glued to one: after a byte that ends no token. A line continuation is
+      # no byte. An escaped byte, a closing quote and the close of a
+      # substitution are bytes of a word whatever they are, so the `(` after
+      # one is a glob (zsh; no other shell parses it): read by the byte
+      # alone, `\)(` was an operator after a separator, and the view read
+      # again, where the escape is `_`, was a word (random input in
+      # scan-contract). An empty `()` is a function head, never a glob, with
+      # blanks inside it too: bash, sh and dash run `f( ) { pip install x; }`.
+      function wparen(j,   k, p, pc, s) {
+        k = j
+        while (k > 2 && C[k-1] == "l") k -= 2
+        if (k < 2) return ""
+        p = X[k-1]; pc = C[k-1]
+        if (p == "=" && pc == C[j] && !((k - 1) in WC)) {
+          if (wordstart(k - 1)) return "z"
+          for (s = k - 1; s > 1 && C[s-1] == C[j] && X[s-1] !~ /[ \t\n;&|()<>]/; s--) ;
+          if (assignat(s, k) == k) return "a"
+        }
+        # An empty `()` is a function head, never a glob; an array value may
+        # be empty (`a=()`), which is decided above.
+        if (emptyahead(j)) return ""
+        if (pc == "e" || pc == "q" || (k - 1) in WC) return shd ? "" : "g"
+        # The `&` of a duplication (`<&(`, `>&(`) is an operator byte the stmts
+        # view prints as `_`, a word byte when the view is read again. No
+        # shell parses a `(` there, so it is read the way the second reading
+        # will read it.
+        if (pc == C[j] && p == "&" && k > 2 && X[k-2] ~ /[<>]/ && C[k-2] == C[j]) return shd ? "" : "g"
+        if (pc != C[j] || p ~ /[ \t\n;&|()<>]/) return ""
+        if (!shd && p != "$" && !cmdpos(j)) return "g"
+        return ""
+      }
+      # Whether the `(` at byte j is the `(` of an empty `()`, with or without
+      # blanks inside.
+      function emptyahead(j) {
+        j++
+        while (j <= N && (X[j] == " " || X[j] == "\t")) j++
+        return X[j] == ")"
+      }
+      # The `>` that closes a zsh numeric range glob opened by the `<` at byte
+      # j, the way zsh looks ahead for one: digits, `-`, digits, `>`. 0 when
+      # the bytes are not one.
+      function numglob(j,   k) {
+        k = j + 1
+        while (k <= N && X[k] ~ /[0-9]/) k++
+        if (X[k] != "-") return 0
+        k++
+        while (k <= N && X[k] ~ /[0-9]/) k++
+        return (k <= N && X[k] == ">") ? k : 0
+      }
+      # Whether the `[` at byte j follows a name that starts a word: `NAME[`.
+      function subname(j,   k) {
+        k = j - 1
+        while (k >= 1 && X[k] ~ /[A-Za-z0-9_]/ && C[k] == C[j]) k--
+        return k < j - 1 && X[k+1] ~ /[A-Za-z_]/ && wordstart(k + 1)
+      }
+      # The byte after the `]` that closes the subscript opened just before
+      # k, the way bash pairs them: nested brackets count, and an escape, a
+      # quote, `$(...)`, `${...}` and backticks are stepped over whole. 0
+      # when there is none.
+      function la_sub(k,   depth, cc) {
+        depth = 0
+        while (k <= N) {
+          cc = X[k]
+          if (cc == "\\") { k += 2; continue }
+          if (cc == "\047") { k = la_sq(k + 1); continue }
+          if (cc == "\042") { k = la_dq(k + 1); continue }
+          if (cc == "`") { k = la_bq(k + 1); continue }
+          if (cc == "$" && (X[k+1] == "(" || X[k+1] == "{")) { k = la_close(k + 2, X[k+1] == "(" ? ")" : "}"); continue }
+          if (cc == "[") depth++
+          else if (cc == "]") { if (depth > 0) depth--; else return k + 1 }
+          k++
+        }
+        return 0
+      }
+      # The `)` at k closes an empty `()`: a function head.
+      function emptyparen(k,   j) {
+        j = k - 1
+        while (j >= 1 && (X[j] == " " || X[j] == "\t") && C[j] == "c") j--
+        return j >= 1 && X[j] == "(" && C[j] == "c" && DEP[j] == 1
+      }
+
       function push(k) {
         d++; ctx[d] = k; par[d] = 0; pnp[d] = np; besc[d] = 0; cpat[d] = 0; cpw[d] = 0; adol[d] = 0; glc[d] = 0; cst[d] = i
         if (k == "D") dq++
-        if (k == "H") hn++
+        if (k == "H") { hn++; if (hn == 1) hb1 = dc }
         if (k != "C") dc++
         if (k == "S" || k == "B") { nsub++; sbeg[nsub] = i + 1; send[nsub] = N; skind[nsub] = k; sid[d] = nsub }
       }
@@ -964,6 +1892,107 @@ shell_lex() {
           if (ctx[d] != "C") dc--
           d--
         }
+      }
+      # A `{` group, and the `}` glued to a word that closes one in zsh.
+      #
+      # zsh closes an open `{` group at a `}` that ends a word, when a blank,
+      # an operator, a closing backtick or the end of the text follows it, and
+      # hands the word before it on: `{ p ci}` hands `ci`, `{ p ci}&& q` runs
+      # both, and `{ p ci}}` hands `ci}` (zsh 5.9, measured). With no group
+      # open zsh refuses that `}`. bash and dash never close a group there:
+      # they hand `ci}`, which npm refuses as a command, and a group holding
+      # one is closed only by a later `}` that stands as a word. So
+      #
+      #   - a glued `}` with no zsh group open, or with a word byte after it,
+      #     is a character to every shell that runs it (NC): the views the
+      #     recognizers and the rewrite read print it as `%` (cbyte), so no
+      #     reader takes `p ci}` for `p ci`. Read as an end there, it made
+      #     `npm ci}`, which installs nothing, into `npm ci` through the
+      #     `--ignore-scripts` rewrite (caught in review). It is `%`, a byte
+      #     with no role in the lexer that ends no word: `_` is a byte of a
+      #     name, so `}=(` read again was the array assignment `_=(`, and the
+      #     view read twice was not the view (random input in scan-contract);
+      #   - one zsh closes a group with (GC) stays `}` in those views, where
+      #     the install grammar reads it as an end (SAFEDEPS_G_END). The zsh
+      #     reading marks it at once. bash and dash mark it too when the text
+      #     ends with a group bash has not closed, since bash then refuses
+      #     that text and runs none of it, so reading it as zsh does changes
+      #     nothing bash runs; otherwise bash runs the word with its `}`,
+      #     marks it NC, and says DIVERGE.
+      #
+      # Which `{` opens a group is the answer of the walk, never a second reading
+      # of the bytes: starts() marks GO wherever it reads a `{` as a group
+      # opener, in each shell (after `function NAME`, an empty `()`, `repeat
+      # WORD`, the list of `for NAME (WORDS)`, a reserved word, a separator).
+      # A reading of its own here, by the bytes before the `{`, knew the
+      # separators and the reserved words and none of the heads, so `function
+      # f { npm ci}; f` closed no group in it, the `}` was a character, and
+      # the install zsh runs passed with nothing recorded, where `function f {
+      # npm ci; }; f` was read.
+      #
+      # Only at the top level, where the walk reads the words. A `}` nested in
+      # a substitution, in quotes or in a heredoc body is decided where that
+      # body is read as a payload, at its own top level; here a glued one is
+      # NC. So the rewrite finds no verb before the glued `}` of a group in
+      # backticks or in `$(...)`: the body, read as a payload, is an install
+      # to the recognizers, the rewrite misses it, and the install is a
+      # recorded downgrade.
+      #
+      # zg counts the groups zsh has open and bg those this reading may have
+      # open. A `}` that stands as a word closes one in zsh wherever it
+      # stands, and is counted as closing one for bash too, though bash closes
+      # only at a command position: counted that way, bg can only be too low,
+      # and too low makes bash run the word, which is the reading that can
+      # only withhold a rewrite (the readings then differ, UNDECIDED).
+      #
+      # The bash reading also counts the groups the dash walk opens (bd), and
+      # says DIVERGE where dash would settle a glued `}` otherwise: a reading
+      # that says nothing at a place must print the views the other readings
+      # print there, and the walks do not open the same groups everywhere
+      # (each reading keeps rules of its own, see starts()).
+      function group_close(   k, zg, bg, bd, end, pn, q, P) {
+        if (!unterm) {
+          if (!wantst) starts(policy, GXV, GXW, GOR)
+          if (!shz && !(wantst && shb)) starts("zsh", GZV, GZW, GOZ)
+          if (shb && !wantst) starts("dash", GDV, GDW, GOD)
+        }
+        zg = 0; bg = 0; bd = 0; pn = 0
+        for (k = 1; k <= N; k++) {
+          if (shz ? (k in GOR) : (k in GOZ)) zg++
+          if (k in GOR) bg++
+          if (k in GOD) bd++
+          if (!(k in RB)) continue
+          # Nested, a `}` is decided where its body is read (above), and is a
+          # character here whether it stands as a word or not: the views print
+          # a nested `;` `&` `|` as `_`, so one read as standing after such a
+          # byte was glued when the view was read again, and the view was not
+          # idempotent (random input in scan-contract). For the same reason a
+          # `}` after an operator byte of a redirection, which the stmts view
+          # blanks, is read as glued.
+          if (!RBT[k]) { NC[k] = 1; continue }
+          end = (k == N || X[k+1] ~ /[ \t\n;&|)<>`]/)
+          if (wordstart(k) && !((k - 1) in DROP && X[k-1] ~ /[;&|]/)) {
+            if (end && zg > 0) zg--
+            if (end && bg > 0) bg--
+            if (end && bd > 0) bd--
+            continue
+          }
+          # Glued to the word before it and closing no group, a `}` is a
+          # character of the word, at its end or inside it (`{ p a}b }` hands
+          # `a}b`, `p ci}\047x\047` hands `ci}x`): NC, whatever follows it.
+          # Kept as `}` inside a word, it read as a word end once the quote
+          # after it was blanked, and the scan view read again was not the
+          # scan view.
+          if (!end || zg == 0) { NC[k] = 1; continue }
+          zg--
+          if (shz) GC[k] = 1
+          else P[++pn] = k
+        }
+        for (q = 1; q <= pn; q++) {
+          if (bg > 0) GC[P[q]] = 1
+          else { NC[P[q]] = 1; if (shb) div = 1 }
+        }
+        if (shb && pn > 0 && (bg > 0) != (bd > 0)) div = 1
       }
       # Whether a word starts at byte j: the byte before it ends a token. That
       # is a question about the token, not the character: a blank or a newline
@@ -985,13 +2014,57 @@ shell_lex() {
       }
       # Whether byte j stands where a command starts, by the words before it.
       # A line continuation is skipped like a blank: the shell removes it.
+      # A reserved word is one only as a word of its own: read by the byte,
+      # the `!` of `f!(x)` put a command after it, and the extglob target
+      # `>f!(x)` between `pip` and `install` was an operator `(` that took
+      # the verb away (form WE2); the `do` of `>f-do(.)` did the same. And
+      # `!` and `{` are reserved only where a command may start themselves:
+      # the `!` of the extglob argument in `rm !(keep)` is a byte of that
+      # word. bash 5 runs a subshell glued to `coproc`.
       function cmdpos(j,   k, w) {
         k = j - 1
         while (k >= 1 && (X[k] == " " || X[k] == "\t" || C[k] == "l")) k--
-        if (k < 1 || X[k] ~ /[\n;&|(!{)`]/) return 1
+        if (k < 1 || X[k] ~ /[\n;&|()`]/) return 1
+        if (X[k] == "!") return wordstart(k) && cmdpos(k)
+        if (X[k] == "{") return wordstart(k) && (cmdpos(k) || namehead(k))
         w = ""
         while (k >= 1 && X[k] ~ /[a-z]/) { w = X[k] w; k-- }
-        return w ~ /^(if|then|else|elif|while|until|do|time)$/
+        return w ~ /^(if|then|else|elif|while|until|do|time|coproc)$/ && wordstart(k + 1)
+      }
+      # The depth a heredoc stands at: the depth of the line its operator is on, or
+      # inside a body, the depth the outermost heredoc stands at -- every byte
+      # of a body at the top level is no word of the command.
+      function hdepth() { return hn > 0 ? hb1 : dc }
+      # Whether the `(` at byte j opens the word list of zsh `for NAME... (`
+      # or `foreach NAME... (`: an operator of that head, never a glob word.
+      # Read as a glob, its `)` made a subshell glued after it a glob
+      # qualifier, and `for i (1)(pip install x)`, which zsh runs, had no
+      # command in it.
+      function forlist(j,   k, w, n) {
+        k = j - 1; n = 0
+        while (1) {
+          while (k >= 1 && (X[k] == " " || X[k] == "\t") && C[k] == C[j]) k--
+          w = ""
+          while (k >= 1 && X[k] ~ /[A-Za-z0-9_]/ && C[k] == C[j]) { w = X[k] w; k-- }
+          if (w == "") return 0
+          if ((w == "for" || w == "foreach") && n > 0) return wordstart(k + 1) && cmdpos(k + 1)
+          n++
+          if (k >= 1 && X[k] !~ /[ \t]/) return 0
+        }
+      }
+      # Whether byte j follows the NAME of `function NAME` or `coproc NAME`,
+      # where bash 5 reads a compound command (see cbody). Asked where a
+      # `case` opens, so that `function f case x in x) ...` has its arms: the
+      # walk reads the body, and the pattern close is a start like any other.
+      function namehead(j,   k, w) {
+        k = j - 1
+        while (k >= 1 && (X[k] == " " || X[k] == "\t" || C[k] == "l")) k--
+        if (k < 1 || X[k] ~ /[ \t\n;&|()<>]/) return 0
+        while (k >= 1 && X[k] !~ /[ \t\n;&|()<>]/) k--
+        while (k >= 1 && (X[k] == " " || X[k] == "\t" || C[k] == "l")) k--
+        w = ""
+        while (k >= 1 && X[k] ~ /[a-z]/) { w = X[k] w; k-- }
+        return (w == "function" || w == "coproc") && (k < 1 || X[k] ~ /[ \t\n;&|(!{)`]/)
       }
       # `((` (dollar=0) or `$((` (dollar=1) at byte j, decided the way this
       # reading decides it (see the table above). The bash reading also asks
@@ -1007,7 +2080,7 @@ shell_lex() {
         }
         if (a) { i = j + dollar + 1; push("A"); adol[d] = dollar; return }
         if (dollar) { i = j + 1; push("S") }
-        else { i = j + 1; delete PS[d, par[d] + 1]; delete PS[d, par[d] + 2]; delete GL[d, par[d] + 1]; delete GL[d, par[d] + 2]; par[d] += 2 }
+        else { i = j + 1; delete GL[d, par[d] + 1]; delete GL[d, par[d] + 2]; par[d] += 2 }
       }
       # The look-ahead bash and zsh make at `((`: from byte k to the first `)`
       # not nested in a parenthesis. 1 when another `)` follows it
@@ -1063,7 +2136,11 @@ shell_lex() {
         return N + 1
       }
       # `<<`, an optional `-`, blanks, then the delimiter word with its quoting
-      # removed. A quoted delimiter makes the body literal.
+      # removed. A quoted delimiter makes the body literal. A file descriptor
+      # word glued in front (`0<<E`, `{fd}<<E`) is part of the operator, so
+      # every view that blanks the operator blanks it too: left as code, it
+      # stood where the command name stands, and the install after it was
+      # an argument to no recognizer.
       function heredoc_op(j,   k, strip, w, q, cc, sk) {
         k = j + 2; strip = 0
         if (X[k] == "-") { strip = 1; k++ }
@@ -1082,7 +2159,7 @@ shell_lex() {
         np++; pd[np] = w; ps[np] = strip; pq[np] = q; pstart[np] = j; pdq[np] = (dq > 0); pb[np] = (ctx[d] == "B")
         pS[np] = 0
         for (sk = d; sk > 1; sk--) if (ctx[sk] == "S") { pS[np] = 1; break }
-        for (mm = j; mm < k && mm <= N; mm++) C[mm] = "h"
+        for (mm = fdword(j); mm < k && mm <= N; mm++) { C[mm] = "h"; WD[mm] = hdepth() }
         return k - 1
       }
       # A newline that ends a line of code. Pending heredoc bodies start after it.
@@ -1128,15 +2205,15 @@ shell_lex() {
             if (pb[p] && index(t, pd[p] "`") == 1 || shb && pS[p] && index(t, pd[p] ")") == 1) {
               lead = length(line) - length(t)
               body_region(bs, s - 1, p)
-              for (kk = s; kk < s + lead + length(pd[p]); kk++) C[kk] = "b"
+              for (kk = s; kk < s + lead + length(pd[p]); kk++) { C[kk] = "b"; WD[kk] = hdepth() }
               if (s + lead + length(pd[p]) - 1 >= s) JMP[s] = s + lead + length(pd[p]) - 1
               np = 0
               return j
             }
             if (t == pd[p]) {
               body_region(bs, s - 1, p)
-              for (kk = s; kk < e; kk++) C[kk] = "b"
-              if (e <= N) C[e] = "b"
+              for (kk = s; kk < e; kk++) { C[kk] = "b"; WD[kk] = hdepth() }
+              if (e <= N) { C[e] = "b"; WD[e] = hdepth() }
               JMP[s] = (e <= N) ? e : N
               s = e + 1; done = 1; break
             }
@@ -1151,7 +2228,7 @@ shell_lex() {
       # unquoted one is walked by the main loop as context H.
       function body_region(bs, be, p,   kk) {
         if (be < bs) return
-        for (kk = bs; kk <= be; kk++) BF[kk] = p
+        for (kk = bs; kk <= be; kk++) { BF[kk] = p; WD[kk] = hdepth() }
         if (pq[p]) {
           for (kk = bs; kk <= be; kk++) C[kk] = "b"
           JMP[bs] = be
@@ -1159,51 +2236,141 @@ shell_lex() {
         }
         nh++; HSTART[bs] = nh; HEND[nh] = be
       }
-      # The scripts the command hands to a shell. Words are cut where the shell
-      # cuts them (word_sep) and read after its quote removal, so a script word
-      # holding escaped quotes, blanks in quotes, glued quoting, an ANSI-C word or
-      # escaped blanks is the string the shell passes. Each record ends in \035:
-      # `S` and the word after `sh|bash|zsh|dash -...c`, or `E` and the words
-      # after `eval` joined by blanks. A $\047...\047 escape this cannot name
-      # adds a record `!`.
+      # The scripts the command hands to a shell, and the bodies of its
+      # substitutions, go out as records of numbers, never of bytes. One
+      # record per line: `S` (the word after `sh|bash|zsh|dash -...c`), `E`
+      # (the words after `eval`, or an env -S string and the words after it,
+      # joined by blanks) or `B` (a substitution body), then the payload as
+      # units, ` a:n` for n bytes of the lexed text from byte a, and ` #c`
+      # for a byte of code c that the text does not hold where the payload
+      # needs it (an escape the shell decodes, the blank that joins two
+      # words); consecutive codes fold into one unit (` #10#112#105`). A
+      # `!` record says a payload here cannot be named. The reader holds the
+      # text and cuts it (lex_payload_build).
+      #
+      # So a record holds `BSE!`, digits, `:`, `#` and blanks, and no byte
+      # of the command can stand in one. These records carried the payload
+      # bytes, each ending in \035, and the readers cut at that byte: a \035
+      # the command wrote in a body or a script split one payload into two,
+      # each lexed alone, and an install after it passed with nothing
+      # recorded (verdict buri-20261005-181919). A newline separator had
+      # done the same a round before. Structure leaves the lexer as a
+      # rendering or as numbers (ARCHITECTURE.md, "What the lexer hands its
+      # readers").
+      #
+      # Words are cut where the shell cuts them (word_sep) and read after
+      # its quote removal, so a script word holding escaped quotes, blanks
+      # in quotes, glued quoting, an ANSI-C word or escaped blanks is the
+      # string the shell passes. W holds the value of each word, for the tests
+      # below; WS its units.
       function emit_cscripts(   k, inw, n, W) {
-        buf = ""; held = 0; n = 0; sb_reset("w", ""); inw = 0
+        buf = ""; held = 0; n = 0; sb_reset("w", ""); sb_reset("ws", ""); inw = 0
         for (k = 1; k <= N + 1; k++) {
           if (k > N || word_sep(k)) {
-            if (inw) { W[++n] = sb_get("w"); sb_reset("w", ""); inw = 0 }
+            if (inw) { W[++n] = sb_get("w"); WS[n] = sb_get("ws"); sb_reset("w", ""); sb_reset("ws", ""); inw = 0 }
             if (k > N || C[k] == "p" || C[k] == "c" && DEP[k] == 1 && X[k] ~ /[\n;&|()]/) { cscripts_of(W, n); n = 0 }
             continue
           }
           inw = 1
           if (k in DROP) continue
-          if (k in VAL) sb_add("w", VAL[k])
-          else if (!RM[k]) sb_add("w", X[k])
+          if (k in VAL) { sb_add("w", VAL[k]); sb_add("ws", " #" ORD[VAL[k]]) }
+          else if (!RM[k]) { sb_add("w", X[k]); sb_add("ws", " " k) }
         }
-        if (aqbad) put("!\035")
+        if (aqbad) put("!\n")
         printf "%s", buf
       }
-      # A shell is any command word whose name ends in sh (ksh, csh, tcsh, fish
-      # as well as sh, bash, zsh, dash): the reader it replaced matched those
-      # by a regex open on the left, and narrowing it to four names passed
-      # `ksh -c "pip install ..."` with no verdict (caught in review). Options
-      # may stand before -c: -o and +o take a name, -- ends the options.
+      # A unit list with its first <cnt> units left out: the units of
+      # `--split-string=VALUE` from its value on.
+      function units_drop(s, cnt,   T, nt, i) {
+        nt = split(s, T, " "); sb_reset("ud", "")
+        for (i = cnt + 1; i <= nt; i++) sb_add("ud", " " T[i])
+        return sb_get("ud")
+      }
+      # A unit list (` k` for byte k, ` #c` for code c) as the units of a record:
+      # bytes of the text in a row become one ` a:n`, codes in a row one
+      # ` #c#c...`. A run of fewer than four bytes between codes, each
+      # below 128, goes out as codes, so an escape on every second byte
+      # (`$\047\\na\\nb...\047`) is one unit, not one per byte: the reader
+      # pays per unit. Pending codes always come before a pending run.
+      function runs(s,   T, nt, i, u, v) {
+        nt = split(s, T, " "); sb_reset("rn", ""); sb_reset("rc", ""); RCN = 0; RA = 0; RL = 0
+        for (i = 1; i <= nt; i++) {
+          u = T[i]
+          if (substr(u, 1, 1) == "#") {
+            if (RL && RL < 4 && ascii_run(RA, RL)) { for (v = RA; v < RA + RL; v++) rc_add(ORD[X[v]]); RL = 0 }
+            else if (RL) { rc_flush(); rl_flush() }
+            rc_add(substr(u, 2))
+            continue
+          }
+          v = u + 0
+          if (RL && v == RA + RL) { RL++; continue }
+          if (RL) { rc_flush(); rl_flush() }
+          RA = v; RL = 1
+        }
+        rc_flush(); rl_flush()
+        return sb_get("rn")
+      }
+      function ascii_run(a, l,   v) {
+        for (v = a; v < a + l; v++) if (!(X[v] in ORD)) return 0
+        return 1
+      }
+      function rc_add(c) { sb_add("rc", (RCN++ ? "#" : "") c) }
+      function rc_flush() { if (RCN) sb_add("rn", " #" sb_get("rc")); sb_reset("rc", ""); RCN = 0 }
+      function rl_flush() { if (RL) sb_add("rn", " " RA ":" RL); RL = 0 }
+      # A shell is a command word in the closed list of the grammar
+      # (SAFEDEPS_G_SHELLS, passed in as shre): the reader it replaced matched
+      # four names and passed `ksh -c "pip install ..."` (caught in review),
+      # and the suffix rule after it read ssh as a shell. Options may stand
+      # before -c: -o and +o take a name, -- ends the options.
       #
-      # The name is the word itself, not its basename: the bytes after the last
-      # slash end in sh exactly when the word does, since a word that ends in
-      # sh has no slash in its last two bytes. The basename was taken with
-      # sub(/.*\//, ...), which the macOS awk (BWK) tries from every byte and
-      # runs to the end of the word from each, so one 64KB word cost 13s
-      # (scripts/measure/scan-cost.sh). A `~` test is one pass.
-      function cscripts_of(W, n,   j, m, s) {
+      # env -S STRING (and --split-string) splits STRING into words and runs
+      # them with the words after it, so STRING and those words are a script
+      # like the words after eval: an E record. Its splitting is not the
+      # shell (no operators), so reading it as a script can only find more.
+      # A STRING whose value is decided at run time cannot be read: a `!`
+      # record, which the reader records as a failed reading.
+      #
+      # The name is the last part of the word after its last slash, taken by
+      # split, which is one pass. It was taken with sub(/.*\//, ...), which the
+      # macOS awk (BWK) tries from every byte and runs to the end of the word
+      # from each, so one 64KB word cost 13s (scripts/measure/scan-cost.sh).
+      function cscripts_of(W, n,   j, m, s, base, args, c, q, sv, svs, rest, np, P) {
         for (j = 1; j <= n; j++) {
-          if (W[j] ~ /sh$/ && j < n) {
+          np = split(W[j], P, "/"); base = P[np]
+          if (base == "env" && j < n) {
+            sv = ""; svs = ""; rest = 0
+            for (m = j + 1; m <= n && !rest; m++) {
+              if (W[m] == "--" || W[m] !~ /^-/ && W[m] !~ /^[A-Za-z_][A-Za-z0-9_]*=/) break
+              if (W[m] ~ /^--split-string=/) { sv = substr(W[m], 16); svs = units_drop(WS[m], 15); rest = m + 1; break }
+              if (W[m] == "--split-string") { if (m < n) { sv = W[m+1]; svs = WS[m+1]; rest = m + 2 }; break }
+              if (W[m] ~ /^--/ || W[m] !~ /^-/) continue
+              for (q = 2; q <= length(W[m]); q++) {
+                c = substr(W[m], q, 1)
+                if (c ~ /[uCP]/) { if (q == length(W[m])) m++; break }
+                if (c == "S") {
+                  if (q < length(W[m])) { sv = substr(W[m], q + 1); svs = units_drop(WS[m], q); rest = m + 1 }
+                  else if (m < n) { sv = W[m+1]; svs = WS[m+1]; rest = m + 2 }
+                  break
+                }
+              }
+              if (rest) break
+            }
+            if (rest) {
+              if (sv ~ /[$`]/) { put("!\n"); break }
+              sb_reset("ev", svs)
+              for (m = rest; m <= n; m++) sb_add("ev", " #32" WS[m])
+              put("E" runs(sb_get("ev")) "\n"); break
+            }
+            continue
+          }
+          if (shre != "" && base ~ shre && j < n) {
             for (m = j + 1; m <= n; m++) {
               # -o, or a cluster ending in o (-euo), takes the next word as an option name
               if (W[m] ~ /^[-+][A-Za-z]*o$/) { m++; continue }
               if (W[m] ~ /^-[A-Za-z]*c[A-Za-z]*$/) {
                 s = m + 1
                 if (s <= n && W[s] == "--") s++
-                if (s <= n) { put("S" W[s] "\035"); j = s }
+                if (s <= n) { put("S" runs(WS[s]) "\n"); j = s }
                 break
               }
               if (W[m] ~ /^[-+][A-Za-z]+$/ || W[m] == "--") continue
@@ -1211,32 +2378,130 @@ shell_lex() {
             }
             continue
           }
-          # The arguments go out one at a time: joined into one string first,
-          # each word copied the whole string again (BWK concatenates by copy).
+          # The words go to the builder one at a time: joined into one string
+          # first, each word copied the whole string again (BWK concatenates
+          # by copy).
           if (W[j] == "eval" && j < n) {
-            put("E")
-            for (m = j + 1; m <= n; m++) put((m > j + 1 ? " " : "") W[m])
-            put("\035"); break
+            sb_reset("ev", "")
+            for (m = j + 1; m <= n; m++) sb_add("ev", (m > j + 1 ? " #32" : "") WS[m])
+            put("E" runs(sb_get("ev")) "\n"); break
           }
         }
       }
-      function emit_substs(   k, a, z, t, b) {
+      # Each substitution body as a `B` record. A backtick body is unescaped
+      # the way the shell unescapes it before it reads it (`\`` nests), so
+      # its escaping backslashes are not units.
+      function emit_substs(   k, a, z, t) {
         buf = ""; held = 0
         for (k = 1; k <= nsub; k++) {
-          a = sbeg[k]; z = send[k]
+          a = sbeg[k]; z = send[k]; sb_reset("su", "")
           for (t = a; t <= z; t++) {
-            b = X[t]
-            # The shell unescapes a backtick body before it reads it.
-            if (skind[k] == "B" && b == "\\" && t < z && (X[t+1] == "`" || X[t+1] == "\\" || X[t+1] == "$")) { t++; b = X[t] }
-            put(b)
+            if (skind[k] == "B" && X[t] == "\\" && t < z && (X[t+1] == "`" || X[t+1] == "\\" || X[t+1] == "$")) t++
+            sb_add("su", " " t)
           }
-          put("\n")
+          put("B" runs(sb_get("su")) "\n")
         }
         printf "%s", buf
       }
       function put(s) {
         buf = buf s
         if (++held >= 4096) { printf "%s", buf; buf = ""; held = 0 }
+      }
+      # Byte k as the scan view prints it. A code `#` is never a comment
+      # start here, and must not become one when the scan is read again:
+      # after a blanked region (a quoted word with a `#` glued to its closing
+      # quote) or an escaped blank, which this view prints as a blank, it
+      # would follow a blank, which is where a comment starts (form WB7).
+      function cbyte(k,   cc, cl) {
+        cc = X[k]; cl = C[k]
+        # A glued `}` that closes no group is a character (group_close).
+        if (k in NC) return (cl == "c" || cl == "Q" || cl == "B") ? "%" : " "
+        if (cl == "c" || cl == "p") return (cc == "#" && (k == 1 || C[k-1] != "c" && C[k-1] != "e" || C[k-1] == "e" && X[k-1] ~ /[ \t]/)) ? "_" : cc
+        if (cl == "e") return index(";&|()<>!{}#`\042\047\\$", cc) ? "_" : (cc == "\n" ? " " : cc)
+        return " "
+      }
+      # Byte k as the stmts view prints it. A statement ends only at a
+      # top-level separator: not inside a substitution, an expansion or
+      # arithmetic, and not in a redirection operator (`>|`, `<&-`, `2>&1`).
+      # command_statements cut wherever these bytes were, so the words after
+      # `$(pwd | sed x)` or `>| f` left the install (caught in review). The
+      # `&` that opens `&>` ends the word before it, as the `>` of any other
+      # redirection does, so it is a blank: written `_`, it was a byte of
+      # that word to the recognizers, and `npm ci&>log` was no install
+      # (SAFEDEPS_G_END in lib/install-grammar.sh).
+      function sbyte(k,   cc) {
+        cc = X[k]
+        if (C[k] == "c" && (k in DROP) && cc == "&" && X[k+1] == ">") return " "
+        if (C[k] == "c" && (DEP[k] != 1 || (k in DROP)) && cc ~ /[;&|\n]/) return (cc == "\n") ? " " : "_"
+        return cbyte(k)
+      }
+      # Whether byte k is a separator the shell reads at the top level, or
+      # a case pattern close: where a statement ends.
+      function topsep(k) {
+        return C[k] == "p" || C[k] == "c" && DEP[k] == 1 && !(k in DROP) && X[k] ~ /[;&|\n]/
+      }
+      function emit_events(   k) {
+        for (k = 1; k <= N; k++) {
+          if (k in EV) printf "S %d %s %d %d %s\n", k, C[k], DEP[k], bare(k), (k > 1 ? C[k-1] : "-")
+          if (k in EW) printf "W %d %s %d\n", k, C[k], DEP[k]
+        }
+      }
+      # The bare starts first, on one line, then the stmts view: the
+      # statements are cut at its separators and at those starts.
+      function emit_stmtcuts(   k, first) {
+        buf = ""; held = 0; first = 1
+        for (k = 1; k <= N; k++) if ((k in EV) && bare(k)) { put((first ? "" : " ") k); first = 0 }
+        put("\n")
+        for (k = 1; k <= N; k++) put(sbyte(k))
+        printf "%s", buf
+      }
+      # The bytes command_statements reads the words of each statement from,
+      # one per byte of the command: a comment, a heredoc operator and a
+      # heredoc body, the live code in one too, are no words of a statement
+      # and read as blanks, a newline inside quotes as a blank, and each byte
+      # of a line continuation as \001, which the reader steps over; a \001
+      # the command wrote is \002, so the reader does not step over it as
+      # one (it read `c<\001>d` as `cd`). It read
+      # the joined view before, which kept the live code of a body (`$(date)`)
+      # and blanked the terminator line, so that code stood as the first word
+      # of the statement after the body.
+      function emit_stmtraw(   k, cl) {
+        buf = ""; held = 0
+        for (k = 1; k <= N; k++) {
+          cl = C[k]
+          if (cl == "l") put("\001")
+          else if (cl == "m" || cl == "h" || cl == "b" || cl == "B") put(X[k] == "\n" ? "\n" : " ")
+          else if (X[k] == "\n" && cl != "c") put(" ")
+          else if (X[k] == "\001") put("\002")
+          else put(X[k])
+        }
+        printf "%s", buf
+      }
+      # A byte of a cwords field: the record and field separators and a
+      # newline read as a blank, so the command cannot forge a field.
+      function fbyte(b) { return (b == "\037" || b == "\036" || b == "\n") ? " " : b }
+      # Each start, the first byte its prefixes leave, the prefixes as the
+      # stmts view has them, and the statement from there on up to its end
+      # (the next start or a top-level separator) twice: as the recognize
+      # view has it, which drops a line continuation, and as the stmts view
+      # has it, which the statement split cuts, the bytes of a continuation
+      # kept. A start whose prefixes leave nothing before the next has
+      # no line.
+      function emit_cwords(   k, w, j) {
+        buf = ""; held = 0
+        for (k = 1; k <= N; k++) {
+          if (!(k in EV)) continue
+          for (w = k; w <= N && !(w > k && (w in EV)) && ((w in A) || (X[w] == " " || X[w] == "\t") && C[w] == "c" && DEP[w] == 1); w++) ;
+          if (w > N || (w > k && (w in EV)) || topsep(w) || word_sep(w)) continue
+          put(k "\037" w "\037")
+          for (j = k; j < w; j++) put(fbyte(sbyte(j)))
+          put("\037")
+          for (j = w; j <= N && !(j > w && (j in EV)) && !topsep(j); j++) if (C[j] != "l") put(fbyte((j in DROP) ? " " : sbyte(j)))
+          put("\037")
+          for (j = w; j <= N && !(j > w && (j in EV)) && !topsep(j); j++) put(fbyte((j in DROP) ? " " : sbyte(j)))
+          put("\n")
+        }
+        printf "%s", buf
       }
       # The string builder (sb_*), the same in every awk program here that
       # builds a string a byte at a time. The macOS awk (BWK) copies
@@ -1269,46 +2534,58 @@ shell_lex() {
         }
         for (k = 1; k <= N; k++) {
           cc = X[k]; cl = C[k]
+          if (wends) { put((k > 1 && word_sep(k) && !word_sep(k - 1)) ? "1" : "0"); continue }
           if (view == "noredir") { put((k in DROP) ? " " : cc); continue }
-          if (view == "scan" || view == "live" || view == "stmts") {
-            # A code `#` is never a comment start here, and must not become one
-            # when the scan is read again: after a blanked region (a quoted word
-            # with a `#` glued to its closing quote) or an escaped blank, which
-            # this view prints as a blank, it would follow a blank, which is
-            # where a comment starts (form WB7).
-            if (cl == "p" && view == "stmts") put(";")
-            # A statement ends only at a top-level separator: not inside a
-            # substitution, an expansion or arithmetic, and not in a
-            # redirection operator (`>|`, `<&-`, `2>&1`). command_statements
-            # cut wherever these bytes were, so the words after
-            # `$(pwd | sed x)` or `>| f` left the install (caught in review).
-            else if (view == "stmts" && cl == "c" && (DEP[k] != 1 || (k in DROP)) && cc ~ /[;&|\n]/) put(cc == "\n" ? " " : "_")
-            else if (cl == "c" || cl == "p") put(cc == "#" && (k == 1 || C[k-1] != "c" && C[k-1] != "e" || C[k-1] == "e" && X[k-1] ~ /[ \t]/) ? "_" : cc)
-            else if (cl == "e") put(index(";&|()<>!{}#`\042\047\\$", cc) ? "_" : (cc == "\n" ? " " : cc))
-            else if (view == "live" && (cl == "Q" || cl == "B")) put(cc)
-            else put(" ")
+          if (view == "stmts") { put(sbyte(k)); continue }
+          # The recognizers read the starts as separators: a `;` goes in at
+          # each start no separator stands before, between two bytes, never
+          # over one. The prefixes of each command are gone (A), so the `;`
+          # stands right before the command word, and every other top-level
+          # redirection is blank, as the extractor reads it (noredir).
+          # A line continuation is dropped: the shell joins the bytes around
+          # it, so `pi\<newline>p install` runs pip. Blanked, as the stmts
+          # view keeps its length, it split that word in two.
+          if (view == "recognize") {
+            if ((k in EV) && bare(k)) put(";")
+            if ((k in A) || cl == "l") continue
+            put(((k in DROP) && !unterm) ? " " : sbyte(k))
             continue
           }
-          if (view == "unprefixed" || view == "unprefixed-lines") {
-            if (!(k in A)) put(cl == "p" ? ";" : cc)
+          if (view == "scan" || view == "live" || view == "flat") {
+            # The live view blanks a redirection where it is top-level code,
+            # so the inert rewrite finds the verb of `npm 2>/dev/null
+            # install`; the body of a substitution in its target stays,
+            # since the shell runs it.
+            if (view == "live" && (k in DROP) && !(k in KEEP) && (cl == "c" && (DEP[k] == 1 || (k in PSB)) || cl == "e")) put(" ")
+            # The flat view blanks the whole redirection: a body in its
+            # target is read in the live view, where it stands.
+            else if (view == "flat" && (k in DROP)) put(" ")
+            else if ((view == "live" || view == "flat") && (cl == "Q" || cl == "B")) put((k in NC) ? "%" : cc)
+            else put(cbyte(k))
             continue
           }
-          if (view == "code") {
-            if (cl == "m" || cl == "h" || cl == "b") put(cc == "\n" && cl != "h" ? "\n" : " ")
-            else put(cc)
+          if (view == "unprefixed") {
+            # A start no separator stands before gets one put in, as in the
+            # recognize view: removing the prefixes between a reserved word
+            # and its command left nothing between them (`then>/dev/null pip`
+            # as `thenpip`), and the pieces of a payload read from this view
+            # had no install in them. A case pattern close stays `)`: written
+            # as `;`, the text read again was a case that never closes.
+            # A redirection anywhere else is blanked, as in noredir, so the
+            # recognizers read the statement the spec extractor reads: left
+            # in place, one between the manager and its verb (`pip
+            # 2>/dev/null install`) hid the install from every recognizer
+            # while the extractor read it.
+            if ((k in EV) && bare(k)) put(";")
+            if (!(k in A)) put((k in DROP) ? " " : cc)
             continue
           }
-          # joined
-          if (cl == "l") continue
-          if (cl == "m" || cl == "h") { put(" "); continue }
-          if (cl == "b") { put(" "); continue }
-          if (cc == "\n") {
-            if (cl == "c") put("\n")
-            else if (cl == "Q" || cl == "B") put(";")
-            else put(" ")
-            continue
-          }
-          put(cc)
+          # A view no branch names is a failed reading, never the code view:
+          # a caller that asks for a view that is gone gets no text that
+          # passes for one.
+          if (view != "code") exit 2
+          if (cl == "m" || cl == "h" || cl == "b") put(cc == "\n" && cl != "h" ? "\n" : " ")
+          else put(cc)
         }
         printf "%s", buf
       }
@@ -1335,34 +2612,18 @@ command_scan_text() {
   shell_lex "$1" scan "safedeps:command_scan_text"
 }
 
-normalize_install_text() {
-  local text="$1" view="unprefixed"
-  local normalized unprefixed
-  # `lines`: <text> holds one statement per line, each read on its own.
-  [[ "${2:-}" != lines ]] || view="unprefixed-lines"
-
-  # An absolute path before an executable reads as the executable, in any case
-  # (macOS volumes ignore it, as the recognizers do).
-  if ! normalized=$(printf '%s' "${text}" | sed -E \
-    -e 's/^[[:space:]]+//' \
-    -e "s#(^|[[:space:];|&({!])(/[^[:space:];|&]+/)(${SAFEDEPS_G_EXECUTABLES}|sh|bash|zsh)([[:space:];|&]|\$)#\\1\\3\\4#gI"); then
-    # Empty text would read as "no install". Keep what there is and let the
-    # gate settle the failure.
-    guard_mark_reading_failed
-    printf '%s' "${text}"
-    return
-  fi
-  # The prefixes a statement may start with -- assignments, env with its
-  # options and assignments, command, exec -- are removed by the lexer, which
-  # knows where a value ends however it is quoted or nested. The sed this
-  # replaced read a value as the bytes up to the first blank or quote, so
-  # `FOO="a b" pip install evil==6.6.6` and `FOO=$(cmd arg) pip install ...`
-  # kept their prefix and the install after it was never recognized (caught in
-  # review). A failed reading keeps the text it had and is recorded.
-  if unprefixed=$(shell_lex "${normalized}" "${view}" "safedeps:normalize_install_text"); then
-    normalized="${unprefixed}"
-  fi
-  printf '%s' "${normalized}"
+# What the install recognizers read: the recognize view, where every place a
+# command starts is a separator and the prefixes of each command are gone.
+# SAFEDEPS_G_START knows only separators, so a pattern anchored with it has to
+# read this view, never the scan view. The reserved words, function heads and
+# zsh short forms that put a command at a word are the lexer's to know
+# (starts() in shell_lex); a regex chain of the words before a command was a
+# second copy of that, and could not see the state that puts a command there
+# (`for ((...)) {`, `f g() {`, `repeat 1 {`). The marker is the scan's, so a
+# failed reading here fails the recognition the same way (scan-contract's
+# scanner shims).
+command_start_text() {
+  shell_lex "$1" recognize "safedeps:command_scan_text"
 }
 
 # The command with heredoc operators, bodies and comments blanked and quotes
@@ -1376,25 +2637,115 @@ strip_heredoc_bodies() {
   fi
 }
 
-# The three payload readers below take text whose heredoc bodies are already
-# stripped, and never strip it again. A body is data, so reading `sh -c` out of
-# one made a heredoc that quotes an attack form read as that attack; but
-# stripping twice is not a no-op either (see exec_text_pipes_to_shell), and the
-# candidate texts are stripped before they get here -- a reader that stripped
-# again dropped every line after a heredoc, so `sh -c` and `eval` installs
-# written after one passed with no verdict (caught in review). Callers strip,
-# once.
+# The payload readers below take the command as written, or a payload, and
+# put each payload they find into the array PAYLOADS. A payload never travels
+# as bytes between the lexer and its reader: the lexer prints where it lies in
+# the text (the cscripts and substs records, numbers only), and the reader cuts
+# the text it holds (lex_payload_build). The records used to carry the bytes,
+# each payload ending in \035, and a \035 the command wrote split one payload
+# into two (verdict buri-20261005-181919); a newline had done the same before.
+#
+# The lexer knows a heredoc body is data and steps over it, so a `sh -c` a body
+# quotes is no payload. The readers used to take the command with its bodies
+# stripped and its lines joined, two views lexed again: the joined view kept
+# the live code of a body where the command after it stood (verdict
+# buri-20261005-145152), and a reader that stripped once more dropped every
+# line after a heredoc (caught in review).
+#
+# Every one of them ends with status 0. They are called as plain commands,
+# often inside a command substitution, and bash 3.2 runs that subshell under
+# the caller's `set -e`: a reader that ended non-zero ended the subshell there,
+# the texts after it were never printed, and the install in them read as none
+# (a prototype of this change, 32 forms measured).
+
+# One payload built from <text> and the units of a lexer record, into PAYLOAD.
+# `a:n` is n bytes of <text> from byte a (1-based); `#c#c...` the bytes of
+# those codes, which an escape decoded or a join put in. Anything else, a code
+# outside 1-127 or a range past the end of <text>, is a failed reading: the
+# lexer printed something this cannot place, and a payload built without it
+# would be a text the shell never runs, read as if it were. The pieces are
+# joined once at the end, since a string grown a piece at a time is copied
+# whole each time. A run of codes is checked with tests that read it once (a
+# glob for its shape, one search for a code that is not 1-127): a regex that
+# repeats a group over it asks the regex library for the place of every
+# repetition, and a run can be the whole 64KB command.
+SAFEDEPS_PAYLOAD_BAD_CODE='(^|#)(0[0-9]*|[0-9]{4,}|[2-9][0-9][0-9]|1[3-9][0-9]|12[89])(#|$)'
+lex_payload_build() {
+  local LC_ALL=C text="$1" tok fmt ch IFS=$' \t\n'
+  local -a parts=() codes=()
+  PAYLOAD=""
+  shift
+  for tok in "$@"; do
+    if [[ "${tok}" =~ ^([1-9][0-9]{0,8}):([1-9][0-9]{0,8})$ ]]; then
+      if (( BASH_REMATCH[1] + BASH_REMATCH[2] - 1 > ${#text} )); then
+        guard_mark_reading_failed
+        continue
+      fi
+      parts+=("${text:BASH_REMATCH[1]-1:BASH_REMATCH[2]}")
+    elif [[ "${tok}" == '#'[0-9]* && "${tok}" != *[!0-9#]* && "${tok}" != *'##'* && "${tok}" != *'#' ]] \
+        && ! [[ "${tok:1}" =~ ${SAFEDEPS_PAYLOAD_BAD_CODE} ]]; then
+      IFS='#'
+      # shellcheck disable=SC2206 # split on `#`; the test above leaves digits only
+      codes=(${tok:1})
+      IFS=$' \t\n'
+      printf -v fmt '\\%03o' "${codes[@]}"
+      # shellcheck disable=SC2059 # the format is octal escapes only
+      printf -v ch "${fmt}"
+      parts+=("${ch}")
+    else
+      guard_mark_reading_failed
+    fi
+  done
+  printf -v PAYLOAD '%s' ${parts[@]+"${parts[@]}"}
+  return 0
+}
+
+# The payloads one lexing of <text> in <view> names, into LEX_PAYLOADS, with
+# the kind of each (S, E or B) in LEX_PAYLOAD_KINDS: the scripts it hands to a
+# shell (cscripts) or the bodies of its substitutions (substs). A `!` record, a
+# record with any byte but the record's own, and a kind no reader knows are
+# failed readings.
+lex_payloads() {
+  local text="$1" out rec IFS=$' \t\n'
+  LEX_PAYLOADS=(); LEX_PAYLOAD_KINDS=()
+  case "$2" in
+    cscripts) out=$(shell_lex "${text}" cscripts "safedeps:read_payload_words") || return 0 ;;
+    substs) out=$(shell_lex "${text}" substs "safedeps:extract_command_substitution_payloads") || return 0 ;;
+    *) guard_mark_reading_failed; return 0 ;;
+  esac
+  while IFS= read -r rec; do
+    [[ -n "${rec}" ]] || continue
+    if [[ "${rec}" == "!" ]]; then
+      guard_mark_reading_failed
+      continue
+    fi
+    if [[ "${rec}" =~ [^BSE0-9:#\ ] || "${rec}" != [BSE]* ]]; then
+      guard_mark_reading_failed
+      continue
+    fi
+    # shellcheck disable=SC2086 # the units, split on blanks; the test above leaves no glob byte
+    lex_payload_build "${text}" ${rec:1}
+    LEX_PAYLOADS+=("${PAYLOAD}")
+    LEX_PAYLOAD_KINDS+=("${rec:0:1}")
+  done <<< "${out}"
+  return 0
+}
+
 extract_shell_c_payloads() {
+  PAYLOADS=()
   read_payload_scripts "$1" S
+  return 0
 }
 
 extract_eval_payloads() {
+  PAYLOADS=()
   read_payload_scripts "$1" E
+  return 0
 }
 
-# The scripts <text> hands to `sh -c` (kind S) or to `eval` (kind E), one per
-# line, read off the lexer's cscripts view: the word the shell passes, quotes
-# removed and escapes applied, and recursively the scripts inside those.
+# The scripts <text> hands to `sh -c` (kind S) or to `eval` (kind E), added to
+# PAYLOADS, read off the lexer's cscripts view: the word the shell passes,
+# quotes removed and escapes applied, and recursively the scripts inside those.
 #
 # The reader this replaced took the word after `-c` up to its first matching
 # quote. `sh -c "echo \"hi\"; pip install evil==1.0.0"` read that way is
@@ -1406,24 +2757,27 @@ extract_eval_payloads() {
 # cannot name is a failed reading. A head inside quoted text is data: the
 # shell does not split that text into words, and neither does this.
 read_payload_scripts() {
-  local text="$1" kind="$2" depth="${3:-0}" out rec
-  out=$(shell_lex "${text}" cscripts "safedeps:read_payload_words") || return 0
-  while IFS= read -r -d $'\035' rec; do
-    if [[ "${rec}" == "!" ]]; then
-      guard_mark_reading_failed
-      continue
-    fi
-    [[ "${rec}" == "${kind}"* ]] && printf '%s\n' "${rec:1}"
+  local text="$1" kind="$2" depth="${3:-0}" i
+  local -a texts=() kinds=()
+  lex_payloads "${text}" cscripts
+  texts=(${LEX_PAYLOADS[@]+"${LEX_PAYLOADS[@]}"})
+  kinds=(${LEX_PAYLOAD_KINDS[@]+"${LEX_PAYLOAD_KINDS[@]}"})
+  for (( i = 0; i < ${#texts[@]}; i++ )); do
+    [[ "${kinds[i]}" != "${kind}" ]] || PAYLOADS+=("${texts[i]}")
     # A script holding another: `sh -c 'sh -c "pip install ..."'`.
-    (( depth < 3 )) && read_payload_scripts "${rec:1}" "${kind}" $(( depth + 1 ))
-  done <<< "${out}"
+    if (( depth < 3 )); then read_payload_scripts "${texts[i]}" "${kind}" $(( depth + 1 )); fi
+  done
+  return 0
 }
 
+# The bodies of <text>'s substitutions as the lexer delimits them, into
+# PAYLOADS. The string scan this replaced cut a body at its first `)` (so a
+# case pattern ended it) and did not unescape or nest backticks, and it was a
+# second parser of the command.
 extract_command_substitution_payloads() {
-  # The bodies as the lexer delimits them. The string scan this replaced cut a
-  # body at its first `)` (so a case pattern ended it) and did not unescape or
-  # nest backticks, and it was a second parser of the command.
-  shell_lex "$1" substs "safedeps:extract_command_substitution_payloads"
+  lex_payloads "$1" substs
+  PAYLOADS=(${LEX_PAYLOADS[@]+"${LEX_PAYLOADS[@]}"})
+  return 0
 }
 
 # Install text as the pipe checks search for it: a manager, then a verb
@@ -1432,16 +2786,18 @@ extract_command_substitution_payloads() {
 PIPE_MANAGER_RE='(npm|npx|pnpm|pnpx|yarn|bun|bunx|pip[0-9.]*|(python[0-9.]*|py)[[:space:]]+-[A-Za-z0-9]*m[[:space:]]*pip|poetry|uv|uvx|pipx|pipenv|cargo|go|gem|bundle|mvn|dotnet)'
 PIPE_INSTALL_TEXT_RE="${PIPE_MANAGER_RE}.*(${SAFEDEPS_G_ALL_VERBS})"
 
-# A pipe into a shell, read on normalized exec text. The consumer ends where the
+# A pipe into a shell, read on the recognize view. The consumer ends where the
 # shell ends a word: at a blank, and also at an operator, a redirection or a
 # group closer, so `| sh; echo`, `| sh&&x` and `(... | sh)` are the same
 # consumer as `| sh `. `|&` pipes stderr as well, and a group opener before the
 # shell (`| (sh)`, `| { sh; }`) still hands it the input. Each of these used to
-# pass unjudged. A `|` that is half of `||` is no pipe: the shell after it runs
-# only when the command before it fails, and reads the caller's input, not that
-# command's output. Read as a pipe, `false || sh -c "npm ci \"x\""` was denied
-# as an install piped into a shell.
-PIPE_SHELL_CONSUMER_RE='(^|[^|])\|&?[[:space:]]*([({][[:space:]]*)*(bash|sh|zsh)([[:space:];&|)}<>`]|$)'
+# pass unjudged. The view puts a `;` in where the command after `{` starts, so
+# a `;` is stepped over with the openers: `| { ;sh; }`. A `|` that is half of
+# `||` is no pipe: the shell after it runs only when the command before it
+# fails, and reads the caller's input, not that command's output. Read as a
+# pipe, `false || sh -c "npm ci \"x\""` was denied as an install piped into a
+# shell.
+PIPE_SHELL_CONSUMER_RE="(^|[^|])\\|&?[[:space:]]*([({;][[:space:]]*)*(${SAFEDEPS_G_SHELLS})([[:space:];&|)}<>\`]|\$)"
 
 text_has_install_words() {
   printf '%s\n' "$1" | judge_grep -qEi "${PIPE_INSTALL_TEXT_RE}"
@@ -1452,12 +2808,12 @@ text_has_install_words() {
 # after it, and drops every line that follows.
 exec_text_pipes_to_shell() {
   local exec_view
-  # The consumer side is normalized the same way the producer side already is:
-  # `| /bin/sh`, `| env sh`, and `| command sh` are the same consumer as `| sh`.
-  # normalize_install_text is the file's existing statement of that equivalence —
-  # it was applied to the install text and skipped here, so the two sides of one
-  # pipe disagreed about what counts as the same invocation.
-  exec_view=$(normalize_install_text "$(command_scan_text "$1")")
+  # The consumer side is read the way the producer side is: `| /bin/sh`, `| env
+  # sh`, and `| command sh` are the same consumer as `| sh`. The recognize view
+  # removes the prefixes at each start, so the two sides of one pipe agree about
+  # what counts as the same invocation. It used to be the unprefixed view of the
+  # scan view, a lexing of a text another lexing had already changed.
+  exec_view=$(command_start_text "$1")
   # A line that ends in a pipe continues on the next one, and a heredoc's
   # terminator can sit between them: `cat <<EOF |`, the body, `EOF`, `sh`.
   # Only a pipe or a shell name can meet across the join, so reading the lines
@@ -1501,6 +2857,11 @@ compound_consumer_runs_shell() {
       case "${tok}" in
         '|'|'|&') pend=true ;;
         "${nl}") ;;
+        # The recognize view puts a `;` in where a command starts with no
+        # separator before it, as after `!` or `time`: `| ! sh` reads `| ! ;sh`
+        # there. Right after a pipe no `;` the shell reads can stand, so this
+        # one is a start, and the command after it still reads the pipe.
+        ';') ;;
         '!'|time|-*) [[ "${pend}" == true ]] && cmd=true ;;
         '{'|'('|'if'|'while'|'until')
           if [[ "${pend}" == true ]]; then stack=("${tok}") cmd=true; fi
@@ -1557,7 +2918,9 @@ payload_pipes_install_text_to_shell() {
   # message) and outside heredoc bodies (a body is data; `cat <<EOF | sh` keeps
   # its pipe on the redirect line, which survives the strip). The install text
   # is still searched raw, because in a real hidden install it lives inside the
-  # producer's quotes or heredoc body by construction.
+  # producer's quotes or heredoc body by construction. The exec view is the
+  # recognize view of the payload as written, which blanks a body, the live
+  # code in one too.
   #
   # Check the raw install text FIRST: the grep is O(n) while building the exec
   # view is not free, and both checks are pure predicates, so conjunction order
@@ -1567,89 +2930,76 @@ payload_pipes_install_text_to_shell() {
   # text by definition, pipe nothing.
   [[ "${payload}" == *'|'* ]] || return 1
   text_has_install_words "${payload}" || return 1
-  exec_text_pipes_to_shell "$(strip_heredoc_bodies "${payload}")"
+  exec_text_pipes_to_shell "${payload}"
 }
 
-# The command as lines the shell reads as statements (the joined view): line
-# continuations removed, newlines inside quotes, heredoc bodies and comments
-# blanked.
-join_line_continuations() {
-  shell_lex "$1" joined "safedeps:join_line_continuations"
-}
-
-# The joined view of <text> in the current reading, read again. A reader that
-# lexes the joined lines again reads them out of the context the first lexing
-# had: live code in an unquoted heredoc body lands on one line with the code
-# after the body, and lexed again at the top level, a quote in that body code
-# (`$((cat <<EOF` then `it's` in a body) opened a quote that never closed and
-# took the install after the body along (fuzz form F19, seed 20261001). Where
-# <text> closes in this reading and its joined view does not, that second
-# reading failed, and the gate settles it as one (UNDECIDED), never as "no
-# install". Where <text> itself does not close, the reading already says so.
-join_line_continuations_checked() {
-  local f1 f2 joined
-  if ! f1=$(mktemp "${TMPDIR:-/tmp}/safedeps-lex.XXXXXX" 2>/dev/null) || ! f2=$(mktemp "${TMPDIR:-/tmp}/safedeps-lex.XXXXXX" 2>/dev/null); then
-    [[ -z "${f1:-}" ]] || rm -f "${f1}"
-    guard_mark_reading_failed
-    join_line_continuations "$1"
-    return
-  fi
-  joined=$(SAFEDEPS_LEX_FLAGS="${f1}" shell_lex "$1" joined "safedeps:join_line_continuations")
-  if ! guard_lex_flag_set UNTERM "${f1}"; then
-    SAFEDEPS_LEX_FLAGS="${f2}" shell_lex "${joined}" scan "safedeps:command_scan_text" > /dev/null
-    ! guard_lex_flag_set UNTERM "${f2}" || guard_mark_reading_failed
-  fi
-  rm -f "${f1}" "${f2}"
-  printf '%s' "${joined}"
-}
-
-command_candidate_texts() {
-  local command="$1"
-
-  command=$(join_line_continuations_checked "${command}")
-
-  normalize_install_text "${command}"
+# The candidate texts as the install recognizers read them, in the current
+# reading: the recognize view of the command, then of each of its payloads
+# (command_payload_raw_texts), each followed by a newline. Each text is lexed
+# once, as written: the command whole, since a statement start depends on
+# what came before it (the second line of a case, `x) { pip install ...; };;`,
+# is a case pattern with no case before it when read alone, form X22 of the
+# statement-start judgment), and each payload on its own, since the inner
+# shell reads a payload from its start.
+#
+# The command used to go through the joined view first, and the recognize
+# view was the lexing of that view: a second lexing of a text the first had
+# changed. The joined view blanked a heredoc body and its terminator line but
+# kept the live code in an unquoted one, so `cat <<E`, `$(date)`, `E`, `pip
+# install evil==6.6.6` read as `$(date)   pip install ...`, a command with
+# arguments, and the install after the body passed with no verdict in every
+# shell (verdict buri-20261005-145152). The recognize view drops a line
+# continuation itself.
+command_candidate_start_texts() {
+  command_start_text "$1"
   printf '\n'
-  command_payload_texts "${command}"
+  command_payload_start_texts "$1"
+  return 0
 }
 
-# The payloads of a command whose heredoc bodies are stripped and whose line
-# continuations are joined: the text a `sh -c`, an `eval` or a command
-# substitution hands to a shell, normalized, one per line. command_candidate_texts
-# is the command itself followed by these.
-command_payload_texts() {
-  local command="$1"
-  local payload
+# The payloads of a command as written, into PAYLOADS: the text a `sh -c`, an
+# `eval` or a command substitution hands to a shell, and the payloads of each
+# payload, of every kind, to three levels. The readers used to follow a script
+# only into the scripts inside it, so the substitution in `sh -c 'x=$(pip
+# install ...)'` was read by no reader and the install passed with nothing
+# recorded, whatever byte the script held (every tree to v2.18.1). Each text is
+# lexed twice: once for its scripts, once for its substitutions.
+command_payload_raw_texts() {
+  local -a queue=("$1") level=(0) found=()
+  local i=0 k t d p
+  while (( i < ${#queue[@]} )); do
+    t="${queue[i]}"; d="${level[i]}"; i=$(( i + 1 ))
+    for k in cscripts substs; do
+      lex_payloads "${t}" "${k}"
+      for p in ${LEX_PAYLOADS[@]+"${LEX_PAYLOADS[@]}"}; do
+        found+=("${p}")
+        if (( d < 3 )); then queue+=("${p}"); level+=("$(( d + 1 ))"); fi
+      done
+    done
+  done
+  PAYLOADS=(${found[@]+"${found[@]}"})
+  return 0
+}
 
-  while IFS= read -r payload; do
-    [[ -z "${payload}" ]] && continue
-    normalize_install_text "${payload}"
+# The recognize view of each payload of <command> (command_payload_raw_texts),
+# one per line: the text an install recognizer reads for each.
+command_payload_start_texts() {
+  local payload
+  local -a pls=()
+  command_payload_raw_texts "$1"
+  pls=(${PAYLOADS[@]+"${PAYLOADS[@]}"})
+  for payload in ${pls[@]+"${pls[@]}"}; do
+    [[ "${payload}" =~ [^[:space:]] ]] || continue
+    command_start_text "${payload}"
     printf '\n'
-  done < <(extract_shell_c_payloads "${command}")
-  while IFS= read -r payload; do
-    [[ -z "${payload}" ]] && continue
-    normalize_install_text "${payload}"
-    printf '\n'
-  done < <(extract_eval_payloads "${command}")
-  while IFS= read -r payload; do
-    [[ -z "${payload}" ]] && continue
-    normalize_install_text "${payload}"
-    printf '\n'
-  done < <(extract_command_substitution_payloads "${command}")
+  done
+  return 0
 }
 
 command_is_injectable_npm_install() {
-  local command="$1"
-  local scan_command
-  local npm_install_pattern
-
-  npm_install_pattern="${SAFEDEPS_G_NPM_INSTALL_RE}"
-
-  while IFS= read -r scan_command; do
-    scan_command=$(command_scan_text "${scan_command}")
-    echo "${scan_command}" | judge_grep -qEi "${npm_install_pattern}" && return 0
-  done < <(command_candidate_texts "${command}")
-  return 1
+  local texts
+  texts=$(command_candidate_start_texts "$1")
+  judge_grep -qEi "${SAFEDEPS_G_NPM_INSTALL_RE}" <<< "${texts}"
 }
 
 # The npm install verbs in the text on stdin, as grep reports them with the
@@ -1662,7 +3012,7 @@ command_is_injectable_npm_install() {
 # this one. The check for an npm verb in a heredoc body does not: its match
 # withholds every rewrite, so it keeps the release's case (inert_rewrite_in_place).
 inert_npm_verb_grep() {
-  LC_ALL=C judge_grep "$@" -Ei "npm${SAFEDEPS_G_OPTS}[[:space:]]+(${SAFEDEPS_G_NPM_VERBS}|${SAFEDEPS_G_NPM_LINK_VERBS})([[:space:]]|\$)"
+  LC_ALL=C judge_grep "$@" -Ei "npm${SAFEDEPS_G_OPTS}[[:space:]]+(${SAFEDEPS_G_NPM_VERBS}|${SAFEDEPS_G_NPM_LINK_VERBS})${SAFEDEPS_G_END}"
 }
 
 # Each npm install verb in <text>, one per line, as `<start> <end>`: the offset
@@ -1670,17 +3020,36 @@ inert_npm_verb_grep() {
 # verb in a comment, a quoted string or a heredoc body is not one, and a verb
 # in a substitution inside quotes is. The live view keeps every byte in place,
 # so an offset there is the offset in <text>.
+#
+# The live view keeps the body of a substitution in a redirection target,
+# because the shell runs it and an npm install in it needs the flag where it
+# stands. So a redirection with such a target between npm and its verb left
+# the body between them, no verb was found, and the rewrite ended as if there
+# were nothing to rewrite: `npm >$(echo f) install x` ran its lifecycle
+# scripts with no flag and no record (every shell runs it). The flat view
+# blanks the redirection whole, so the verb is found there; the two views
+# keep the same offsets, and a verb both find is one pair.
 inert_verb_ends() {
-  local live matches
+  local live flat matches more
   live=$(shell_lex "$1" live "safedeps:inert_offsets") || return 1
+  flat=$(shell_lex "$1" flat "safedeps:inert_offsets") || return 1
   # The grep and the awk run apart so that only "no match" reads as no verb: a
   # failed awk shared one `||` with grep's exit 1, and the rewrite was then
   # dropped as if there were nothing to rewrite.
   matches=$(printf '%s\n' "${live}" | inert_npm_verb_grep -ob) || matches=""
+  if [[ "${flat}" != "${live}" ]]; then
+    more=$(printf '%s\n' "${flat}" | inert_npm_verb_grep -ob) || more=""
+    if [[ -n "${more}" && -n "${matches}" ]]; then matches+=$'\n'"${more}"; elif [[ -n "${more}" ]]; then matches="${more}"; fi
+  fi
   [[ -n "${matches}" ]] || return 0
-  if ! printf '%s\n' "${matches}" | LC_ALL=C awk '
+  # The match ends in the byte that ended the verb, unless the verb ended the
+  # line; no verb ends in one of those bytes.
+  if ! printf '%s\n' "${matches}" | LC_ALL=C awk -v endre="${SAFEDEPS_G_WORD_END_CLASS}\$" '
     # safedeps:inert_offsets (scripts/measure/scan-failure-census.sh keys on this line)
-    { c = index($0, ":"); m = substr($0, c + 1); s = substr($0, 1, c - 1); e = s + length(m); if (m ~ /[[:space:]]$/) e--; print s, e }'; then
+    # The match ends with SAFEDEPS_G_END: the byte that ended the verb, unless
+    # the verb ended the line, and before it a `}` that closes a zsh group.
+    # Neither is the verb.
+    { c = index($0, ":"); m = substr($0, c + 1); s = substr($0, 1, c - 1); if (m ~ endre) m = substr(m, 1, length(m) - 1); if (m ~ /[}]$/) m = substr(m, 1, length(m) - 1); e = s + length(m); if (!seen[s, e]++) print s, e }'; then
     [[ -z "${SAFEDEPS_SCAN_MARK:-}" ]] || printf 'failed\n' >> "${SAFEDEPS_SCAN_MARK}"
     return 1
   fi
@@ -1725,14 +3094,15 @@ SAFEDEPS_SHELL_INERT_BYTES='abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ
 # None of those bytes is in the set, and `=` only past a word's start, so a
 # kind of expansion the table forgot still makes its word dynamic. A byte the
 # set leaves out that expands nothing (`~` inside a version range like
-# `foo@~1.2.3`, `^` in `foo@^1.2.3`, a `}` the shell hands npm as a word) costs
-# a record, never a pass.
+# `foo@~1.2.3`, `^` in `foo@^1.2.3`) costs a record, never a pass. A `}` glued
+# to a word that closes no group is `%` in the live view, a character to every
+# shell that runs it, which no shell expands (group_close in shell_lex).
 #
 # Each byte is read in the quoting the shell reads it in. <live> is the
 # statement with redirections, comments and quoted text blanked (the lexer's
-# noredir view, then its live view), so a quoted byte is never judged by the
-# set; a blank stands where a quote was, which only splits a word and can only
-# add a word start. <words> is its words after quote removal (the pieces view),
+# flat view), so a quoted byte is never judged by the set; a blank stands
+# where a quote or a line continuation was, which only splits a word and can
+# only add a word start. <words> is its words after quote removal (the pieces view),
 # for `$` and backquotes, which act inside double quotes too; a `$` in single
 # quotes counts there as well, which costs a record. A view that marks the
 # quoted bytes of each word can replace both arguments with no change to the
@@ -1766,21 +3136,23 @@ shell_expands() {
 # ignore-scripts, which is how a placement of the flag is checked: it must
 # leave ignore-scripts true and change nothing else npm reads.
 inert_statement_reads() {
-  local joined pieces live line words w k last rest dynamic=false
+  local pieces live line words w k last rest dynamic=false
   local -a argv=() line_words=()
   INERT_READ_KIND="" INERT_READ_ENDS=false INERT_READ_LAST="" INERT_READ_REST=""
-  # The pieces view reads one statement per line, so the statement goes in as
-  # the joined view: a newline inside quotes, a continuation and a comment
-  # read as the shell reads them. Fed as written, `--message "a<newline>
-  # --ignore-scripts"` put the quoted line on a line of its own, where it read
-  # as the flag, and the install ran its scripts unrewritten.
-  joined=$(shell_lex "$1" joined "safedeps:inert_offsets") || return 1
-  pieces=$(shell_lex "${joined}" pieces "safedeps:inert_offsets") || return 1
+  # The statement as written, lexed once: the pieces view reads a newline
+  # inside quotes, a continuation and a comment as the shell reads them, the
+  # whole text at a time. It used to read one line at a time, so the
+  # statement went in as the joined view, which was a second lexing of a text
+  # the first had changed. Fed as written to that reading, `--message
+  # "a<newline>--ignore-scripts"` put the quoted line on a line of its own,
+  # where it read as the flag, and the install ran its scripts unrewritten.
+  pieces=$(shell_lex "$1" pieces "safedeps:inert_offsets") || return 1
   while IFS= read -r line; do
     [[ -n "${line}" ]] || continue
     if [[ "${line}" == "!" ]]; then dynamic=true; continue; fi
     words="${line#*$'\037'}"
     words="${words#*$'\037'}"
+    words="${words%%$'\037'*}"
     IFS=$' \t' read -ra line_words <<< "${words}"
     for w in "${line_words[@]+"${line_words[@]}"}"; do
       [[ "${w}" == $'\002' ]] && w="" || w="${w//$'\002'/ }"
@@ -1790,8 +3162,7 @@ inert_statement_reads() {
   done <<< "${pieces}"
   INERT_READ_KIND=dynamic
   [[ "${dynamic}" == false ]] || return 0
-  live=$(shell_lex "${joined}" noredir "safedeps:inert_offsets") || return 1
-  live=$(shell_lex "${live}" live "safedeps:inert_offsets") || return 1
+  live=$(shell_lex "$1" flat "safedeps:inert_offsets") || return 1
   ! shell_expands "${live}" "${argv[*]+"${argv[*]}"}" || return 0
   for k in plain other; do
     if [[ "${k}" == other ]]; then
@@ -1875,6 +3246,11 @@ inert_flag_offsets() {
     {
       s = $1; e = $2; inside = 0
       for (k = 1; k <= e; k++) if (L[k] == "`") inside = !inside
+      # A backtick against the verb ends it only when it closes a substitution
+      # the verb is in. One that opens a substitution continues the word: `npm
+      # ci`echo x`` hands npm `cix`, which installs nothing, and a flag after
+      # `ci` would make it `npm ci`. Such a match is no verb.
+      if (L[e + 1] == "`" && !inside) { print "x", s, e; next }
       depth = 0; brace = 0; b = 0; dd = 0; unsure = 0
       for (k = e + 1; k <= n; k++) {
         c = L[k]
@@ -1885,9 +3261,16 @@ inert_flag_offsets() {
           if (j > n) { unsure = 1; break }
           k = j; continue
         }
-        # A `}` is not an end: to bash it is an argument (`npm i x } --no-ignore`
-        # hands both words to npm), and zsh, which closes a group with it, will
-        # not parse a word after it, so a flag there runs nothing.
+        # A `}` that stands as a word is not an end: to bash it is an argument
+        # (`npm i x } --no-ignore` hands both words to npm), and zsh, which
+        # closes a group with it, will not parse a word after it, so a flag
+        # there runs nothing. A `}` glued to the end of a word is in the live
+        # view only where zsh closes a group with it (the lexer prints any
+        # other as `%`, group_close), and it ends the statement: the flag goes
+        # before it, where zsh reads it as the last word (`{ npm ci
+        # --ignore-scripts}`). After it, `{ npm ci} --ignore-scripts` is a
+        # parse error in zsh and in bash.
+        if (c == "}" && !depth && !brace && !blank(C[k - 1]) && (k == n || blank(L[k + 1]) || index(";&|)<>`", L[k + 1]))) { b = k; break }
         if (c == "(") { depth++; continue }
         if (c == ")") { if (!depth) { b = k; break }; depth--; continue }
         if (c == "$" && L[k + 1] == "{") { brace++; k++; continue }
@@ -1927,6 +3310,8 @@ inert_flag_offsets() {
   fi
   rm -rf "${dir}"
   while read -r start bound at _ cands; do
+    # A match the end finder read as no verb (an opening backtick against it).
+    [[ "${start}" != x ]] || continue
     # Where no place is read, the statement keeps the floor alone: the flag
     # right after its verb, where the release put it, recorded as a downgrade
     # (` floor`). Its end could not be found (the awk printed `? <start> <verb
@@ -2101,7 +3486,7 @@ inert_rewrite_in_place() {
   local command="$1" lines offsets="" e note settled=false asked=false unverified=false floor=false rc=0 append=0 release_rewrote=false
   lines=$(inert_offsets_of "${command}") || rc=$?
   (( rc == 0 )) || return "${rc}"
-  # Matches case, as the release did: with -i, return 3 drops the compound floor, as with the awk in inert_payload_spans (v2.18.1).
+  # Matches case and ends the verb at a blank, as the release did: with -i or SAFEDEPS_G_END, return 3 drops the compound floor, as with the awk in inert_payload_spans (v2.18.1).
   if strip_heredoc_bodies "${command}" shell-bodies \
       | LC_ALL=C judge_grep -qE "npm${SAFEDEPS_G_OPTS}[[:space:]]+(${SAFEDEPS_G_NPM_VERBS}|${SAFEDEPS_G_NPM_LINK_VERBS})([[:space:]]|\$)"; then
     return 3
@@ -2153,14 +3538,15 @@ inert_rewrite_in_place() {
 
 # Whether the release (7d66f8c) left <command> as written: it did whenever the
 # text `--ignore-scripts` stood in the scan view of the command or of a script
-# it hands to a shell (its command_has_ignore_scripts_flag), whatever npm made
-# of it.
+# it hands to a shell, its prefixes removed (its command_has_ignore_scripts_flag),
+# whatever npm made of it. That is the recognize view of each, read once: the
+# scan view of the unprefixed view of the joined view, three lexings, is what
+# the release read, and each lexing after the first read a text the one before
+# had changed.
 inert_release_skips() {
-  local text
-  while IFS= read -r text; do
-    command_scan_text "${text}" | judge_grep -qE -- '(^|[[:space:]])--ignore-scripts([=[:space:]]|$)' && return 0
-  done < <(command_candidate_texts "$1")
-  return 1
+  local texts
+  texts=$(command_candidate_start_texts "$1")
+  judge_grep -qE -- '(^|[[:space:]])--ignore-scripts([=[:space:]]|$)' <<< "${texts}"
 }
 
 # Whether the release (7d66f8c) appended `--ignore-scripts` to the end of
@@ -2174,14 +3560,18 @@ inert_release_skips() {
 # release's end flag is the one that stands. One part differs, and only adds
 # a flag: the release matched the name `npm` in its case and so appended
 # nothing to `NPM ci`, which main (a6fd57a) had appended to; the name here
-# ignores case (inert_npm_verb_grep).
+# ignores case. The verb still ends where the release ended it, at a blank or
+# the end of the line: `npm ci>log` was no install to the release, so it
+# appended nothing there, and the in-place flag after the verb is this tree's
+# own (SAFEDEPS_G_END).
 inert_release_appends() {
   local scanned code
   scanned=$(command_scan_text "$1") || return 1
   [[ "${scanned}" != *$'\n'* ]] || return 1
   ! printf '%s' "${scanned}" | judge_grep -qE '[;&|()`$]' || return 1
   ! inert_release_skips "$1" || return 1
-  printf '%s' "${scanned}" | inert_npm_verb_grep -q || return 1
+  printf '%s' "${scanned}" \
+    | LC_ALL=C judge_grep -qEi "npm${SAFEDEPS_G_OPTS}[[:space:]]+(${SAFEDEPS_G_NPM_VERBS}|${SAFEDEPS_G_NPM_LINK_VERBS})([[:space:]]|\$)" || return 1
   code=$(strip_heredoc_bodies "$1")
   [[ "${code}" == "$1" ]]
 }
@@ -2192,8 +3582,20 @@ inert_release_appends() {
 # its quote-blanked text, so a separator inside quotes is not one. Fields are
 # split on \035 rather than a tab because `read` merges adjacent tabs, and an
 # empty field (a statement with no words) then shifted the next one into it. A newline
-# separates like `;`, and a redirection (`2>&1`, `&>`, `|&`) does not split a
-# statement.
+# separates like `;`. A redirection (`2>&1`, `&>`) does not split a statement:
+# the stmts view writes its `&` as `_` in a reading whose shell reads one
+# there. This used to decide `&>` by itself, by the byte after the `&`, and
+# kept the statement whole in the dash reading too, where the `&` ends the
+# command and the next one starts at the `>`.
+#
+# A statement also ends where the next one starts with no separator before it
+# (after a reserved word, a case pattern close, `!`, a head, zsh's `{` or
+# `&!`): the lexer lists those starts (the stmtcuts view), and the cut is made
+# there, between two bytes, with `;` as the separator. The starts used to be
+# written into the stmts view over the byte before them, and a start with no
+# blank before it had no byte of its own: `if true; then>/dev/null pip
+# install x; fi` kept `then` and the install in one statement, which named no
+# manager.
 #
 # <words> is the statement split into words the way the shell splits it, read
 # from the raw text: quotes delimit and are removed, a backslash escapes, and
@@ -2206,9 +3608,15 @@ inert_release_appends() {
 #
 # A fifth field, <raw>, is the statement's own text as written, quotes and all,
 # with a tab read as a space and a newline (one inside quotes; any other ends
-# the statement) carried as \036. It is what the spec extractor reads, so the
-# extractor and resolve_install_targets read the same statements and a
-# statement's landing travels with its text instead of being joined to it.
+# the statement) carried as \036.
+#
+# <text> is a command as written, never a view of one. The words and <raw> are
+# read from the stmtraw view of it, where a comment, a heredoc operator and a
+# heredoc body (with the live code in one) are blank and a line continuation
+# is stepped over: the statement after a body begins with the body's bytes,
+# which are no words of it. This used to read the joined view of the code view
+# as if it were the command, and that view kept the live code of a body: the
+# statement after `cat <<E`, `$(date)`, `E` began with the word `$(date)`.
 #
 # When the statements cannot be read (awk failed, or no temp file), this says
 # so in SAFEDEPS_SCAN_MARK and adds a line whose <before> is `?`. The lines
@@ -2225,13 +3633,13 @@ command_statements() {
       printf '?\035\035\035\035\n'
       return 0
     }
-  printf '%s' "$1" > "${raw_file}"
-  # The stmts view ends a statement at a case pattern's `)` as well. On the
-  # scan view an arm after the first was split out as `*) pip install ...`,
-  # where the `)` no longer closes a pattern, so the install was not at a
-  # statement start: no spec and no record (caught when the lexer and the
-  # extractor met in the release tree).
-  shell_lex "$1" stmts "safedeps:command_scan_text" > "${scan_file}"
+  # A case pattern's `)` ends a statement as well: the arm after it starts
+  # one. On the scan view an arm after the first was split out as `*) pip
+  # install ...`, where the `)` no longer closes a pattern, so the install was
+  # not at a statement start: no spec and no record (caught when the lexer and
+  # the extractor met in the release tree).
+  shell_lex "$1" stmtcuts "safedeps:command_scan_text" > "${scan_file}"
+  shell_lex "$1" stmtraw "safedeps:command_scan_text" > "${raw_file}"
   if ! LC_ALL=C awk -v scan_file="${scan_file}" -v raw_file="${raw_file}" '
     # safedeps:command_statements (scripts/measure/scan-failure-census.sh and scripts/test/scan-contract.sh key on this line)
     # The string builder (sb_*): see shell_lex.
@@ -2258,13 +3666,19 @@ command_statements() {
       }
       sb_reset("word", ""); has = 0; dyn = 0
     }
+    # A byte of a word that is a separator of this record (\037 joins the
+    # words, \035 the fields) is \002 here, as in the pieces view: left as
+    # it was, a \037 the command wrote split one word into two for every
+    # reader of the words, and a \035 moved the fields after it.
+    function wb(ch) { return (ch == "\037" || ch == "\035") ? "\002" : ch }
     function words_of(from, to,   i, ch, q) {
       sb_reset("words", ""); wne = 0; sb_reset("word", ""); has = 0; dyn = 0; q = ""
       for (i = from; i <= to; i++) {
-        ch = r[i]
+        ch = wb(r[i])
+        if (ch == "\001") continue
         if (q == "") {
           if (ch == " " || ch == "\t" || ch == "\n") { word_end(); continue }
-          if (ch == "\\") { if (i < to) { i++; sb_add("word", r[i]); has = 1 }; continue }
+          if (ch == "\\") { if (i < to) { i++; if (r[i] != "\001") sb_add("word", wb(r[i])); has = 1 }; continue }
           if (ch == "\047") { q = "s"; has = 1; continue }
           if (ch == "\"") { q = "d"; has = 1; continue }
           if (ch == "$" || ch == "`" || ch == "*" || ch == "?" || ch == "[") dyn = 1
@@ -2274,7 +3688,7 @@ command_statements() {
         }
         if (q == "s") { if (ch == "\047") q = ""; else sb_add("word", ch); continue }
         if (ch == "\\" && i < to && (r[i + 1] == "$" || r[i + 1] == "`" || r[i + 1] == "\"" || r[i + 1] == "\\")) {
-          i++; sb_add("word", r[i]); continue
+          i++; sb_add("word", wb(r[i])); continue
         }
         if (ch == "\"") { q = ""; continue }
         if (ch == "$" || ch == "`") dyn = 1
@@ -2288,6 +3702,7 @@ command_statements() {
       sb_reset("raw", "")
       for (i = from; i <= to; i++) {
         ch = r[i]
+        if (ch == "\001") continue
         if (ch == "\t" || ch == "\035" || ch == "\037") ch = " "
         else if (ch == "\n") ch = "\036"
         sb_add("raw", ch)
@@ -2300,14 +3715,19 @@ command_statements() {
       prev = nx; sb_reset("cur", "")
     }
     BEGIN {
+      # The first line holds the starts with no separator before them, the
+      # rest is the stmts view.
+      if ((getline line < scan_file) <= 0) exit 2
+      ncut = split(line, cuts, " ")
+      for (k = 1; k <= ncut; k++) CUT[cuts[k] + 0] = 1
       n = split(slurp(scan_file), c, "")
       split(slurp(raw_file), r, "")
       prev = "start"; sb_reset("cur", ""); from = 1
       for (i = 1; i <= n; i++) {
         ch = c[i]
+        if (i in CUT) { emit(";", i - 1); from = i }
         if (ch == ";" || ch == "\n") { emit(";", i - 1); from = i + 1; continue }
         if (ch == "&") {
-          if (c[i - 1] == ">" || c[i + 1] == ">") { sb_add("cur", ch); continue }
           if (c[i + 1] == "&") { emit("&&", i - 1); i++; from = i + 1; continue }
           emit("&", i - 1); from = i + 1; continue
         }
@@ -2452,7 +3872,7 @@ guard_npmrc_unrecorded() {
 
 # Where each install statement in the command lands, one line per statement of
 # the command (command_statements), as
-# `<kind>\035<dir>\035<why>\035<fetch>\035<raw>`.
+# `<kind>\035<dir>\035<why>\035<fetch>\035<rec>\037<words>`.
 # <kind> is `npm` for an npm CLI install that is not a runner,
 # `npm-unrecorded` for one no lockfile of the project records whatever lands
 # there (an .npmrc keeps it out of both lockfiles, or `npm link <pkg>` puts the
@@ -2466,7 +3886,9 @@ guard_npmrc_unrecorded() {
 # <fetch> is an npm install's fetch facts, one line of JSON asked of npm with
 # the same words as <dir> (lib/npm/ask.sh): which registry it fetches from. It
 # is empty where npm was not asked, and the reason is then <why>.
-# <raw> is the statement as command_statements gives it.
+# <rec> is the statement as the recognizers read it and <words> its words
+# after quote removal with its prefixes left out, both from the lexer's pieces
+# view of the command (its <rec> and <uwords>): what the spec extractor reads.
 #
 # Every statement is listed, installs or not, because this is also the list of
 # statements the spec extractor reads (guard_extract_specs). The extractor
@@ -2527,9 +3949,7 @@ guard_npmrc_unrecorded() {
 # and no record (caught when the lexer and the extractor met in the release
 # tree).
 resolve_install_targets() {
-  local cmd="$1" cwd="$2" stripped
-  stripped=$(strip_heredoc_bodies "${cmd}")
-  resolve_reading_targets "$(join_line_continuations "${stripped}")" "${cwd}"
+  resolve_reading_targets "$1" "$2"
   return 0
 }
 
@@ -2682,32 +4102,46 @@ guard_shell_assignment() {
 }
 
 # The statements and where each lands (see resolve_install_targets). <text> is
-# the joined view of the command.
+# the command as written: every view this reads is a view of it, lexed once.
 resolve_reading_targets() {
   local text="$1" cwd="$2"
-  local before stmt after words raw head target want kind manager tok value normalized in_env skip
+  local before stmt after words raw head target want kind manager tok value in_env skip
   local user_rc cli_global_off why run_dir answer local_prefix npm_word npm_unknown i fetch cause
   local dir="${cwd}" grouped=false env_userconfig=false exports_unknown="" exported_names=" "
-  local npm_until="" here cond_dir="" depth=0 conditional env_changer="" env_setting="" statements pieces piece_at pw n=0 m k role
+  local npm_until="" here cond_dir="" depth=0 conditional env_changer="" env_setting="" statements pieces piece_at pw puw prec n=0 m k role
   local opts exporting literal ignore_env unset_names rc_home
   local code_changer="" stmt_code changer npm_unsets=" "
-  local -a toks=() npm_env=() npm_args=() npm_exports=() stmt_words=() mw=() assigned_words=()
+  local -a toks=() npm_env=() npm_args=() npm_exports=() stmt_words=() stmt_uwords=() stmt_recs=() stmt_ans=() mw=() assigned_words=()
   local -a env_opts=() env_inherit=() env_after=()
 
   command_scan_text "${text}" | judge_grep -q '[(){}`]' && grouped=true
   command_scan_text "${text}" | judge_grep -qEi 'npm_config_userconfig=' && env_userconfig=true
 
   # Each statement's words as the shell splits them (the lexer's pieces view),
-  # for the manager's grammar below: line N of the pieces is statement N.
+  # for the manager's grammar below, and its text as the recognizers read it:
+  # piece N is statement N. Both views are lexings of the command itself. The
+  # pieces used to be the statements' own texts, one per line, lexed again
+  # from nothing, and the statements those of the joined view: the statement
+  # after a heredoc body began with the live code of the body (`$(date)`),
+  # which read as its command (verdict buri-20261005-145152).
   statements=$(command_statements "${text}")
-  raw=""
-  while IFS=$'\035' read -r _ _ _ _ value; do raw+="${value}"$'\n'; done <<< "${statements}"
-  pieces=$(shell_lex "${raw}" pieces "safedeps:extract_pieces") || pieces=""
-  while IFS=$'\037' read -r piece_at _ pw; do
+  pieces=$(shell_lex "${text}" pieces "safedeps:extract_pieces") || pieces=""
+  while IFS=$'\037' read -r piece_at _ pw puw prec; do
     if [[ "${piece_at}" == "!" ]]; then guard_mark_reading_failed; continue; fi
     [[ "${piece_at}" =~ ^[0-9]+$ ]] || continue
-    stmt_words[piece_at]="${stmt_words[piece_at]:+${stmt_words[piece_at]} }${pw}"
+    stmt_words[piece_at]="${pw}"
+    stmt_uwords[piece_at]="${puw}"
+    stmt_recs[piece_at]="${prec}"
   done <<< "${pieces}"
+  # Whether each statement is an install, asked of every statement at once
+  # and read where the loop asks (recognized_dependency_install_each):
+  # statement N is text N-1.
+  SAFEDEPS_RDI_IN=()
+  for k in ${stmt_recs[@]+"${!stmt_recs[@]}"}; do
+    while (( ${#SAFEDEPS_RDI_IN[@]} < k )); do SAFEDEPS_RDI_IN+=("${stmt_recs[${#SAFEDEPS_RDI_IN[@]} + 1]:-}"); done
+  done
+  recognized_dependency_install_each
+  stmt_ans=("${SAFEDEPS_RDI_ANS[@]+"${SAFEDEPS_RDI_ANS[@]}"}")
 
   while IFS=$'\035' read -r before stmt after words raw; do
     n=$(( n + 1 ))
@@ -2732,9 +4166,11 @@ resolve_reading_targets() {
       IFS=$'\037' read -ra toks <<< "${words}"
       [[ ${#toks[@]} -gt 0 ]] || break
 
-      # A statement may open with a group or a reserved word; the command is
-      # what follows. A word that opens a compound command counts toward the
-      # depth a `cd` is conditional at.
+      # A statement may open with a group character glued to its command
+      # (`(cd x`). A reserved word before a command is mostly a statement of
+      # its own here, since the stmts view this splits on starts a statement
+      # at the command; either way, a word that opens a compound command
+      # counts toward the depth a `cd` is conditional at.
       while [[ ${#toks[@]} -gt 0 ]]; do
         head="${toks[0]}"
         head="${head#"${head%%[!({!]*}"}"
@@ -2914,12 +4350,14 @@ resolve_reading_targets() {
         fi
       fi
 
-      command_is_dependency_install "${stmt}" || break
+      # The statement as the recognizers read it, its prefixes removed:
+      # `npm_config_save=false npm install x` is an npm install.
+      case "${stmt_ans[n - 1]:-2}" in
+        0) ;;
+        1) break ;;
+        *) recognized_dependency_install "${stmt_recs[n]:-}" || break ;;
+      esac
 
-      # Kind is read from the statement as the other recognizers read it, with
-      # `VAR=value` prefixes and `env` wrappers stripped: `npm_config_save=false
-      # npm install x` is an npm install.
-      normalized=$(normalize_install_text "${stmt}")
       # The npm word and its arguments. The words before npm go to env(1) in
       # front of npm when npm is asked below, and the words after it are npm's
       # arguments, unchanged. env(1) reads its options before any assignment,
@@ -3199,7 +4637,19 @@ resolve_reading_targets() {
       fi
       break
     done
-    printf '%s\035%s\035%s\035%s\035%s\n' "${kind}" "${target}" "${why}" "${fetch}" "${raw}"
+    # The record is cut at \035 and at newlines, and two of its fields carry
+    # values the command chose: npm's answer for where the install lands
+    # (`--prefix` names it) and the prose, which quotes command words. A
+    # directory holding a separator cannot be carried, so it reads as
+    # unknown, which the gate records; the prose carries a blank there.
+    # <fetch> is one line of JSON, which escapes both.
+    if [[ "${target}" == *$'\035'* || "${target}" == *$'\n'* ]]; then
+      target="?"
+      why="${why:+${why}; }npm named a directory whose name holds a byte this record cannot carry"
+    fi
+    why="${why//$'\035'/ }"
+    why="${why//$'\n'/ }"
+    printf '%s\035%s\035%s\035%s\035%s\037%s\n' "${kind}" "${target}" "${why}" "${fetch}" "${stmt_recs[n]:-}" "${stmt_uwords[n]:-}"
   done <<< "${statements}"
   return 0
 }
@@ -3238,20 +4688,19 @@ resolve_reading_targets() {
 # both readings share twice.
 guard_npm_writers_unattributable() {
   local cmd="$1"
-  local stripped payload payloads=0
-  stripped=$(strip_heredoc_bodies "${cmd}")
+  local payload payloads=0
 
   while IFS= read -r payload; do
     [[ -n "${payload}" ]] || continue
-    if command_scan_text "${payload}" | judge_grep -qEi "${SAFEDEPS_G_NPM_INSTALL_RE}"; then
+    if judge_grep -qEi "${SAFEDEPS_G_NPM_INSTALL_RE}" <<< "${payload}"; then
       payloads=$(( payloads + 1 ))
     fi
-  done < <(command_payload_texts "$(join_line_continuations "${stripped}")")
+  done < <(command_payload_start_texts "${cmd}")
 
-  guard_reading_writers_unattributable "$(join_line_continuations "${stripped}")" "${payloads}"
+  guard_reading_writers_unattributable "${cmd}" "${payloads}"
 }
 
-# guard_npm_writers_unattributable over the joined view <text>, with
+# guard_npm_writers_unattributable over the command <text> as written, with
 # <payloads> npm installs found in the command's payloads.
 guard_reading_writers_unattributable() {
   local text="$1" payloads="$2"
@@ -3374,13 +4823,11 @@ guard_reading_writers_unattributable() {
 # install` with nothing said (the census, once it failed one grep at a time and
 # compared that part of the record).
 guard_command_has_npm_install() {
-  local seg rc
-  while IFS= read -r seg; do
-    rc=0
-    command_scan_text "${seg}" | grep -qEi "${SAFEDEPS_G_NPM_INSTALL_RE}" || rc=$?
-    (( rc <= 1 )) || guard_mark_reading_failed
-    (( rc == 1 )) || return 0
-  done < <(command_candidate_texts "$1")
+  local texts rc=0
+  texts=$(command_candidate_start_texts "$1")
+  grep -qEi "${SAFEDEPS_G_NPM_INSTALL_RE}" <<< "${texts}" || rc=$?
+  (( rc <= 1 )) || guard_mark_reading_failed
+  (( rc == 1 )) || return 0
   return 1
 }
 
@@ -3960,11 +5407,13 @@ guard_scan_failed() {
 # the scanned recognizers match anyway (three review rounds, then a design
 # judgment). It is loose on purpose: `go` and `py` appear in ordinary words, and
 # a false "yes" here costs one UNDECIDED deny on a run where awk had already
-# failed.
+# failed. A line continuation is taken out first, as the recognizers drop it:
+# `pi\<newline>p install` runs pip and spells it nowhere. Taken out of quotes
+# too, where it is no continuation, it can only add a "yes".
 guard_looks_like_install_unscanned() {
-  local re="(${SAFEDEPS_G_EXECUTABLES})" rc=0
+  local re="(${SAFEDEPS_G_EXECUTABLES})" rc=0 joined="${COMMAND//\\$'\n'/}"
   shopt -s nocasematch
-  [[ "${COMMAND}" =~ ${re} ]] || rc=1
+  [[ "${joined}" =~ ${re} ]] || rc=1
   shopt -u nocasematch
   return ${rc}
 }
@@ -4021,23 +5470,25 @@ guard_check_command_reads() {
   return ${rc}
 }
 
-# The ecosystem of ONE statement, read from the manager that starts it.
+# The ecosystem of ONE statement, read from the manager that starts it. The
+# statement is recognize text already (command_candidate_start_texts), so it is
+# read as it is: lexed again, a statement cut out of that view is a text no
+# shell reads.
 guard_segment_ecosystem() {
-  local scan
-  scan=$(command_scan_text "$1")
-  if echo "${scan}" | judge_grep -qEi "${SAFEDEPS_G_START}(npm|pnpm|pnpx|yarn|npx|bun|bunx)([[:space:]]|\$)"; then
+  local scan="$1"
+  if echo "${scan}" | judge_grep -qEi "${SAFEDEPS_G_START}(npm|pnpm|pnpx|yarn|npx|bun|bunx)${SAFEDEPS_G_END}"; then
     printf 'npm'
-  elif echo "${scan}" | judge_grep -qEi "${SAFEDEPS_G_START}(pip[0-9.]*|poetry|uv|uvx|pipx|pipenv|(python[0-9.]*|py)${SAFEDEPS_G_OPTS}[[:space:]]+-[A-Za-z0-9]*m[[:space:]]*pip)([[:space:]]|\$)"; then
+  elif echo "${scan}" | judge_grep -qEi "${SAFEDEPS_G_START}(pip[0-9.]*|poetry|uv|uvx|pipx|pipenv|(python[0-9.]*|py)${SAFEDEPS_G_OPTS}[[:space:]]+-[A-Za-z0-9]*m[[:space:]]*pip)${SAFEDEPS_G_END}"; then
     printf 'pypi'
-  elif echo "${scan}" | judge_grep -qEi "${SAFEDEPS_G_START}cargo([[:space:]]|\$)"; then
+  elif echo "${scan}" | judge_grep -qEi "${SAFEDEPS_G_START}cargo${SAFEDEPS_G_END}"; then
     printf 'crates.io'
-  elif echo "${scan}" | judge_grep -qEi "${SAFEDEPS_G_START}go([[:space:]]|\$)"; then
+  elif echo "${scan}" | judge_grep -qEi "${SAFEDEPS_G_START}go${SAFEDEPS_G_END}"; then
     printf 'go'
-  elif echo "${scan}" | judge_grep -qEi "${SAFEDEPS_G_START}(gem|bundle)([[:space:]]|\$)"; then
+  elif echo "${scan}" | judge_grep -qEi "${SAFEDEPS_G_START}(gem|bundle)${SAFEDEPS_G_END}"; then
     printf 'rubygems'
-  elif echo "${scan}" | judge_grep -qEi "${SAFEDEPS_G_START}mvn([[:space:]]|\$)"; then
+  elif echo "${scan}" | judge_grep -qEi "${SAFEDEPS_G_START}mvn${SAFEDEPS_G_END}"; then
     printf 'maven'
-  elif echo "${scan}" | judge_grep -qEi "${SAFEDEPS_G_START}dotnet([[:space:]]|\$)"; then
+  elif echo "${scan}" | judge_grep -qEi "${SAFEDEPS_G_START}dotnet${SAFEDEPS_G_END}"; then
     printf 'nuget'
   fi
 }
@@ -4049,14 +5500,31 @@ guard_segment_ecosystem() {
 # names the command for the npm project context and for messages.
 guard_detect_ecosystem() {
   local cmd="$1"
-  local seg eco
+  local seg eco i
+  local -a segs=() ans=()
 
+  # The statements are cut on the recognize view, where every statement start
+  # is a separator, so a cut at `;` `|` `&` is a cut between statements. A
+  # segment is a line of that cut (read reads one line), so a statement over
+  # several lines is several segments.
   while IFS= read -r seg; do
     [[ "${seg}" =~ [^[:space:]] ]] || continue
-    command_is_dependency_install "${seg}" || continue
-    eco=$(guard_segment_ecosystem "${seg}")
+    segs+=("${seg}")
+  done < <(command_candidate_start_texts "${cmd}" | tr ';|&' '\n')
+  # Every segment is asked at once and its answer read in order, as the loop
+  # asked them one by one (recognized_dependency_install_each).
+  SAFEDEPS_RDI_IN=("${segs[@]+"${segs[@]}"}")
+  recognized_dependency_install_each
+  ans=("${SAFEDEPS_RDI_ANS[@]+"${SAFEDEPS_RDI_ANS[@]}"}")
+  for (( i = 0; i < ${#segs[@]}; i++ )); do
+    case "${ans[i]:-2}" in
+      0) ;;
+      1) continue ;;
+      *) recognized_dependency_install "${segs[i]}" || continue ;;
+    esac
+    eco=$(guard_segment_ecosystem "${segs[i]}")
     [[ -n "${eco}" ]] && { printf '%s' "${eco}"; return 0; }
-  done < <(command_candidate_texts "${cmd}" | tr ';|&' '\n')
+  done
   printf ''
 }
 
@@ -4098,8 +5566,9 @@ guard_all_npm_installs_are_global() {
   done <<< "${targets}"
   [[ "${found}" == true ]] || return 1
   while IFS= read -r payload; do
-    command_scan_text "${payload}" | judge_grep -qEi "${SAFEDEPS_G_NPM_INSTALL_RE}" && return 1
-  done < <(command_payload_texts "$(join_line_continuations "$(strip_heredoc_bodies "${cmd}")")")
+    [[ -n "${payload}" ]] || continue
+    judge_grep -qEi "${SAFEDEPS_G_NPM_INSTALL_RE}" <<< "${payload}" && return 1
+  done < <(command_payload_start_texts "${cmd}")
   return 0
 }
 
@@ -4299,21 +5768,19 @@ guard_effect_gate_reads() {
   [[ "$1" == npm ]]
 }
 
-# The statements the spec extractor reads, one piece per line as
-# `<read>\t<piece>\037<words>`. <read> is `true` when the effect gate reads the
-# install the piece belongs to (guard_effect_gate_reads), and `false`
-# otherwise. <piece> is the statement as written, its redirections blanked, and
-# <words> the same after the shell's quote removal; both come from one reading
-# of the lexer (the pieces view of shell_lex).
+# The statements the spec extractor reads, one per line as
+# `<read>\t<rec>\037<words>`. <read> is `true` when the effect gate reads the
+# install the statement belongs to (guard_effect_gate_reads), and `false`
+# otherwise. <rec> is the statement as the recognizers read it, and <words> its
+# words after the shell's quote removal, its prefixes left out; both come from
+# one lexing of the command (the pieces view of shell_lex).
 #
 # The command's own statements come from <targets>, resolve_install_targets'
 # list, so the extractor and the landing read the same statements and each one
 # carries its landing with it. Joining two separate readings of a command was
 # the defect behind three rounds of the UNGATED record (a pin found by name,
 # then by ecosystem and name), and a statement found by position in a second
-# split would be the same join. The statements are normalized together, one per
-# line, and the lexer cuts each at its own `;`, `|`, `&` and newlines, so line N
-# is statement N.
+# split would be the same join.
 #
 # The lexer reads the quotes, the redirections and the cuts. Each used to have a
 # reader of its own, and each reader had its own model of the shell's quoting:
@@ -4324,54 +5791,40 @@ guard_effect_gate_reads() {
 # `"x >'" ... 2>"'"`; and the cut at `;` `|` `&` read no quotes at all, so
 # `pip install --log "a;b" evil==1.0.0` was two pieces and the second was not an
 # install. The shell reads all three with one set of rules, and so does this.
+# The statements were then normalized together, one per line, and lexed again;
+# the lexing that cuts them now is the one lexing of the command.
 #
 # Payloads (`sh -c`, `eval`, a command substitution) follow, with <read> false:
 # where a payload's install lands is decided inside the payload, and the
-# landing does not read inside it. Each payload is read on its own, since one
-# that its reader could not finish must not run into the next.
+# landing does not read inside it. Each payload is lexed on its own, as the
+# inner shell reads it, so one that its reader could not finish does not run
+# into the next.
 guard_extract_pieces() {
   local cmd="$1" targets="$2"
-  local kind read_flags="" normalized pieces payload
+  local kind fields payload pieces
+  local -a pls=()
 
-  while IFS=$'\035' read -r kind _ _ _; do
+  while IFS=$'\035' read -r kind _ _ _ fields; do
     [[ -n "${kind}" ]] || continue
     if guard_effect_gate_reads "${kind}"; then
-      read_flags+="1"
+      printf 'true\t%s\n' "${fields}"
     else
-      read_flags+="0"
+      printf 'false\t%s\n' "${fields}"
     fi
   done <<< "${targets}"
 
-  # One normalization for every statement, as one line each, so line N is
-  # statement N. A command substitution drops only trailing empty lines, and
-  # an empty statement has nothing to read.
-  normalized=$(normalize_install_text "$(
-    while IFS=$'\035' read -r kind _ _ _ raw; do
-      [[ -n "${kind}" ]] || continue
-      printf '%s\n' "${raw}"
-    done <<< "${targets}"
-  )" lines)
-  # A failed lexer marks the failure itself; an escape it could not read is a
-  # `!` line, marked here.
-  pieces=$(shell_lex "${normalized}" pieces "safedeps:extract_pieces") || pieces=""
-  if ! printf '%s\n' "${pieces}" | LC_ALL=C awk -F'\037' -v flags="${read_flags}" '
-    # safedeps:extract_pieces (scripts/test/scan-contract.sh keys on this line)
-    $0 == "!" { bad = 1; next }
-    NF < 3 || $1 > length(flags) { next }
-    { printf "%s\t%s\037%s\n", (substr(flags, $1, 1) == "1" ? "true" : "false"), $2, $3 }
-    END { exit bad ? 3 : 0 }'; then
-    guard_mark_reading_failed
-  fi
-
-  while IFS= read -r payload; do
+  command_payload_raw_texts "${cmd}"
+  pls=(${PAYLOADS[@]+"${PAYLOADS[@]}"})
+  for payload in ${pls[@]+"${pls[@]}"}; do
     [[ "${payload}" =~ [^[:space:]] ]] || continue
     pieces=$(shell_lex "${payload}" pieces "safedeps:payload_pieces") || pieces=""
     printf '%s\n' "${pieces}" | LC_ALL=C awk -F'\037' '
       # safedeps:payload_pieces (scripts/measure/scan-failure-census.sh keys on this line)
       $0 == "!" { bad = 1; next }
-      NF >= 3 { printf "false\t%s\037%s\n", $2, $3 }
+      NF >= 5 { printf "false\t%s\037%s\n", $5, $4 }
       END { exit bad ? 3 : 0 }' || guard_mark_reading_failed
-  done < <(command_payload_texts "$(join_line_continuations "$(strip_heredoc_bodies "${cmd}")")")
+  done
+  return 0
 }
 
 # The ecosystem a manager installs from, in GUARD_ECO (empty for none).
@@ -4486,13 +5939,29 @@ guard_extract_specs() {
   # install. The spec lines are the same in both modes; the gate reads only
   # those, so the other lines cannot move a verdict.
   local cmd="$1" targets="$2" mode="${3:-}"
-  local seg words gate_reads eco family k role text out line versions spec_line created
-  local -a w=() roles=() texts=()
+  local seg words gate_reads eco family k role text out line versions spec_line created p
+  local -a w=() roles=() texts=() p_reads=() p_segs=() p_words=() p_ans=()
 
-  # The pieces carry no tab, so the tab and \037 cut the three fields.
+  # The pieces carry no tab, so the tab and \037 cut the three fields. <seg>
+  # is the statement as the recognizers read it, from the same lexing as its
+  # words. They are read whole first, so whether each is an install is asked
+  # of all of them at once (recognized_dependency_install_each) and read
+  # below in order, where it was asked one piece at a time.
   while IFS=$'\t\037' read -r gate_reads seg words; do
     [[ "${seg}" =~ [^[:space:]] ]] || continue
-    command_is_dependency_install "${seg}" || continue
+    p_reads+=("${gate_reads}") p_segs+=("${seg}") p_words+=("${words}")
+  done < <(guard_extract_pieces "${cmd}" "${targets}")
+  SAFEDEPS_RDI_IN=("${p_segs[@]+"${p_segs[@]}"}")
+  recognized_dependency_install_each
+  p_ans=("${SAFEDEPS_RDI_ANS[@]+"${SAFEDEPS_RDI_ANS[@]}"}")
+
+  for (( p = 0; p < ${#p_segs[@]}; p++ )); do
+    gate_reads="${p_reads[p]}" seg="${p_segs[p]}" words="${p_words[p]}"
+    case "${p_ans[p]:-2}" in
+      0) ;;
+      1) continue ;;
+      *) recognized_dependency_install "${seg}" || continue ;;
+    esac
     # Grouping characters are the shell's (`(npm i x)`, `{ pip install y; }`).
     words="${words//[(){\}]/ }"
     set -f
@@ -4581,7 +6050,7 @@ guard_extract_specs() {
       [[ "${mode}" != readings ]] || out+="O"$'\t'"${k}"$'\t'"${role}"$'\t'"${text}"$'\n'
     done
     printf '%s' "${out}"
-  done < <(guard_extract_pieces "${cmd}" "${targets}")
+  done
 }
 
 # How the current reading would make the command's npm installs inert, as one

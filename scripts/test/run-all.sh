@@ -91,6 +91,7 @@ SERIAL_GROUPS=(timing)
 ALL_BATTERIES=(
   "smoke|1|dev|a|scripts/test/smoke.sh"
   "scan-contract|1|dev|a|scripts/test/scan-contract.sh"
+  "statement-batch|1|dev|a|scripts/test/statement-batch.sh"
   "shell-reading|1|dev|a|scripts/test/shell-reading.sh"
   "census|1|release|-|scripts/measure/scan-failure-census.sh --quick"
   "consumer-forms|1|dev|b|scripts/test/consumer-forms.sh"

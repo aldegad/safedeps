@@ -13,7 +13,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -30,7 +32,9 @@
       "linux": {
         "bash": "-",
         "dash": "-"
-      }
+      },
+      "bash5": "-",
+      "agent-noset": "-"
     }
   },
   {
@@ -47,7 +51,9 @@
       "linux": {
         "bash": "-",
         "dash": "-"
-      }
+      },
+      "bash5": "-",
+      "agent-noset": "-"
     }
   },
   {
@@ -64,7 +70,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -81,7 +89,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -98,7 +108,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -115,7 +127,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -132,7 +146,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -149,7 +165,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -166,7 +184,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -183,7 +203,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -200,7 +222,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -217,7 +241,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -234,7 +260,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -251,7 +279,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -268,7 +298,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -285,7 +317,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -302,7 +336,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -319,7 +355,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -336,7 +374,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -353,7 +393,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -370,7 +412,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -387,7 +431,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -404,7 +450,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -421,7 +469,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -438,7 +488,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -455,7 +507,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -472,7 +526,9 @@
       "linux": {
         "bash": "R",
         "dash": "-!"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -489,7 +545,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -506,7 +564,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -523,7 +583,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -540,7 +602,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -557,7 +621,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -574,7 +640,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -591,7 +659,9 @@
       "linux": {
         "bash": "R",
         "dash": "-"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -608,7 +678,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -625,7 +697,9 @@
       "linux": {
         "bash": "R",
         "dash": "-"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -642,7 +716,9 @@
       "linux": {
         "bash": "R",
         "dash": "-"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -659,7 +735,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -676,7 +754,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -693,7 +773,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -710,7 +792,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -727,7 +811,9 @@
       "linux": {
         "bash": "R",
         "dash": "-!"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -744,7 +830,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -761,7 +849,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -778,7 +868,9 @@
       "linux": {
         "bash": "-!",
         "dash": "R"
-      }
+      },
+      "bash5": "-!",
+      "agent-noset": "R"
     }
   },
   {
@@ -795,7 +887,9 @@
       "linux": {
         "bash": "R",
         "dash": "-!"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "-!"
     }
   },
   {
@@ -812,7 +906,9 @@
       "linux": {
         "bash": "R",
         "dash": "-!"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -829,7 +925,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -846,7 +944,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -863,7 +963,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -880,7 +982,9 @@
       "linux": {
         "bash": "-!",
         "dash": "-!"
-      }
+      },
+      "bash5": "-!",
+      "agent-noset": "R"
     }
   },
   {
@@ -897,7 +1001,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -914,7 +1020,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -931,7 +1039,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -948,7 +1058,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -965,7 +1077,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -982,7 +1096,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -999,7 +1115,9 @@
       "linux": {
         "bash": "R!",
         "dash": "-!"
-      }
+      },
+      "bash5": "R!",
+      "agent-noset": "-!"
     }
   },
   {
@@ -1016,7 +1134,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -1033,7 +1153,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -1050,7 +1172,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -1067,7 +1191,9 @@
       "linux": {
         "bash": "-",
         "dash": "-"
-      }
+      },
+      "bash5": "-",
+      "agent-noset": "-"
     },
     "gate": "pass"
   },
@@ -1085,7 +1211,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -1102,7 +1230,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -1119,7 +1249,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -1136,7 +1268,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -1153,7 +1287,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -1170,7 +1306,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -1187,7 +1325,9 @@
       "linux": {
         "bash": "R",
         "dash": "-!"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -1204,7 +1344,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -1221,7 +1363,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -1237,7 +1381,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -1253,7 +1399,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -1269,7 +1417,9 @@
       "linux": {
         "bash": "R",
         "dash": "-"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -1285,7 +1435,9 @@
       "linux": {
         "bash": "R",
         "dash": "-"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -1301,7 +1453,9 @@
       "linux": {
         "bash": "R",
         "dash": "-"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -1317,7 +1471,9 @@
       "linux": {
         "bash": "R",
         "dash": "-!"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -1333,7 +1489,9 @@
       "linux": {
         "bash": "R",
         "dash": "-!"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -1349,7 +1507,9 @@
       "linux": {
         "bash": "R",
         "dash": "-!"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "-!"
     }
   },
   {
@@ -1365,7 +1525,9 @@
       "linux": {
         "bash": "-",
         "dash": "R"
-      }
+      },
+      "bash5": "-",
+      "agent-noset": "R"
     }
   },
   {
@@ -1381,7 +1543,9 @@
       "linux": {
         "bash": "-",
         "dash": "-"
-      }
+      },
+      "bash5": "-",
+      "agent-noset": "R"
     }
   },
   {
@@ -1397,7 +1561,9 @@
       "linux": {
         "bash": "-",
         "dash": "-"
-      }
+      },
+      "bash5": "-",
+      "agent-noset": "R"
     }
   },
   {
@@ -1413,7 +1579,9 @@
       "linux": {
         "bash": "-",
         "dash": "R"
-      }
+      },
+      "bash5": "-",
+      "agent-noset": "R"
     }
   },
   {
@@ -1429,7 +1597,9 @@
       "linux": {
         "bash": "-",
         "dash": "-"
-      }
+      },
+      "bash5": "-",
+      "agent-noset": "R"
     }
   },
   {
@@ -1445,7 +1615,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -1461,7 +1633,9 @@
       "linux": {
         "bash": "-",
         "dash": "R"
-      }
+      },
+      "bash5": "-",
+      "agent-noset": "R"
     }
   },
   {
@@ -1477,7 +1651,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -1493,7 +1669,9 @@
       "linux": {
         "bash": "R",
         "dash": "-"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -1509,7 +1687,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -1525,7 +1705,9 @@
       "linux": {
         "bash": "R",
         "dash": "-"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "-"
     }
   },
   {
@@ -1541,7 +1723,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -1557,7 +1741,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -1573,7 +1759,9 @@
       "linux": {
         "bash": "R",
         "dash": "-!"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -1589,7 +1777,9 @@
       "linux": {
         "bash": "R",
         "dash": "-"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -1605,7 +1795,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -1621,7 +1813,9 @@
       "linux": {
         "bash": "R",
         "dash": "-!"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -1637,7 +1831,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -1653,7 +1849,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -1669,7 +1867,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -1685,7 +1885,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -1701,7 +1903,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -1717,7 +1921,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -1733,7 +1939,9 @@
       "linux": {
         "bash": "-",
         "dash": "-"
-      }
+      },
+      "bash5": "-",
+      "agent-noset": "R"
     }
   },
   {
@@ -1749,7 +1957,9 @@
       "linux": {
         "bash": "-",
         "dash": "-"
-      }
+      },
+      "bash5": "-",
+      "agent-noset": "R"
     }
   },
   {
@@ -1765,7 +1975,9 @@
       "linux": {
         "bash": "-",
         "dash": "-"
-      }
+      },
+      "bash5": "-",
+      "agent-noset": "R"
     }
   },
   {
@@ -1781,7 +1993,9 @@
       "linux": {
         "bash": "-",
         "dash": "-"
-      }
+      },
+      "bash5": "-",
+      "agent-noset": "R"
     }
   },
   {
@@ -1797,7 +2011,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -1813,7 +2029,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -1829,7 +2047,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -1845,7 +2065,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -1861,7 +2083,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -1877,7 +2101,9 @@
       "linux": {
         "bash": "-!",
         "dash": "-!"
-      }
+      },
+      "bash5": "-!",
+      "agent-noset": "R"
     }
   },
   {
@@ -1893,7 +2119,9 @@
       "linux": {
         "bash": "-!",
         "dash": "-!"
-      }
+      },
+      "bash5": "-!",
+      "agent-noset": "R"
     }
   },
   {
@@ -1909,7 +2137,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -1926,7 +2156,9 @@
       "linux": {
         "bash": "-!",
         "dash": "R"
-      }
+      },
+      "bash5": "-!",
+      "agent-noset": "R"
     }
   },
   {
@@ -1943,7 +2175,9 @@
       "linux": {
         "bash": "-!",
         "dash": "-!"
-      }
+      },
+      "bash5": "-!",
+      "agent-noset": "R"
     }
   },
   {
@@ -1960,7 +2194,9 @@
       "linux": {
         "bash": "-!",
         "dash": "-"
-      }
+      },
+      "bash5": "-!",
+      "agent-noset": "R"
     }
   },
   {
@@ -1977,7 +2213,9 @@
       "linux": {
         "bash": "-!",
         "dash": "-"
-      }
+      },
+      "bash5": "-!",
+      "agent-noset": "R"
     }
   },
   {
@@ -1994,7 +2232,9 @@
       "linux": {
         "bash": "-!",
         "dash": "-"
-      }
+      },
+      "bash5": "-!",
+      "agent-noset": "R"
     }
   },
   {
@@ -2011,7 +2251,9 @@
       "linux": {
         "bash": "R",
         "dash": "-"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "-"
     }
   },
   {
@@ -2028,7 +2270,9 @@
       "linux": {
         "bash": "-",
         "dash": "R"
-      }
+      },
+      "bash5": "-",
+      "agent-noset": "R"
     }
   },
   {
@@ -2045,7 +2289,9 @@
       "linux": {
         "bash": "-!",
         "dash": "-"
-      }
+      },
+      "bash5": "-!",
+      "agent-noset": "R"
     }
   },
   {
@@ -2062,7 +2308,9 @@
       "linux": {
         "bash": "-",
         "dash": "R"
-      }
+      },
+      "bash5": "-",
+      "agent-noset": "R"
     }
   },
   {
@@ -2079,7 +2327,9 @@
       "linux": {
         "bash": "-!",
         "dash": "R"
-      }
+      },
+      "bash5": "-!",
+      "agent-noset": "R"
     }
   },
   {
@@ -2096,7 +2346,9 @@
       "linux": {
         "bash": "-!",
         "dash": "-"
-      }
+      },
+      "bash5": "-!",
+      "agent-noset": "R"
     }
   },
   {
@@ -2113,7 +2365,9 @@
       "linux": {
         "bash": "-!",
         "dash": "-!"
-      }
+      },
+      "bash5": "-!",
+      "agent-noset": "R"
     }
   },
   {
@@ -2130,7 +2384,9 @@
       "linux": {
         "bash": "-!",
         "dash": "-!"
-      }
+      },
+      "bash5": "-!",
+      "agent-noset": "R"
     }
   },
   {
@@ -2147,7 +2403,9 @@
       "linux": {
         "bash": "R",
         "dash": "-"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -2164,7 +2422,9 @@
       "linux": {
         "bash": "-!",
         "dash": "-!"
-      }
+      },
+      "bash5": "-!",
+      "agent-noset": "R"
     }
   },
   {
@@ -2181,7 +2441,9 @@
       "linux": {
         "bash": "-!",
         "dash": "R"
-      }
+      },
+      "bash5": "-!",
+      "agent-noset": "-"
     }
   },
   {
@@ -2198,7 +2460,9 @@
       "linux": {
         "bash": "-!",
         "dash": "R"
-      }
+      },
+      "bash5": "-!",
+      "agent-noset": "-"
     }
   },
   {
@@ -2215,7 +2479,9 @@
       "linux": {
         "bash": "-",
         "dash": "R!"
-      }
+      },
+      "bash5": "-",
+      "agent-noset": "-"
     }
   },
   {
@@ -2232,7 +2498,9 @@
       "linux": {
         "bash": "R!",
         "dash": "-"
-      }
+      },
+      "bash5": "R!",
+      "agent-noset": "-"
     }
   },
   {
@@ -2249,7 +2517,9 @@
       "linux": {
         "bash": "-!",
         "dash": "R"
-      }
+      },
+      "bash5": "-!",
+      "agent-noset": "-"
     }
   },
   {
@@ -2266,7 +2536,9 @@
       "linux": {
         "bash": "R!",
         "dash": "R"
-      }
+      },
+      "bash5": "R!",
+      "agent-noset": "-"
     }
   },
   {
@@ -2283,7 +2555,9 @@
       "linux": {
         "bash": "R",
         "dash": "-"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -2300,7 +2574,9 @@
       "linux": {
         "bash": "R",
         "dash": "-"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -2317,7 +2593,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -2334,7 +2612,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -2351,7 +2631,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -2368,7 +2650,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -2385,7 +2669,9 @@
       "linux": {
         "bash": "R",
         "dash": "-!"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "-!"
     }
   },
   {
@@ -2402,7 +2688,9 @@
       "linux": {
         "bash": "R",
         "dash": "-!"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "-"
     }
   },
   {
@@ -2419,7 +2707,9 @@
       "linux": {
         "bash": "R",
         "dash": "-!"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "-!"
     }
   },
   {
@@ -2436,7 +2726,9 @@
       "linux": {
         "bash": "-",
         "dash": "R"
-      }
+      },
+      "bash5": "-",
+      "agent-noset": "R"
     }
   },
   {
@@ -2453,7 +2745,9 @@
       "linux": {
         "bash": "-",
         "dash": "R"
-      }
+      },
+      "bash5": "-",
+      "agent-noset": "R"
     }
   },
   {
@@ -2470,7 +2764,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -2487,7 +2783,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -2504,7 +2802,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -2521,7 +2821,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -2538,7 +2840,9 @@
       "linux": {
         "bash": "-!",
         "dash": "-!"
-      }
+      },
+      "bash5": "-!",
+      "agent-noset": "R"
     }
   },
   {
@@ -2555,7 +2859,9 @@
       "linux": {
         "bash": "R",
         "dash": "-!"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -2572,7 +2878,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -2589,7 +2897,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -2606,7 +2916,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -2623,7 +2935,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -2640,7 +2954,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -2657,7 +2973,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -2674,7 +2992,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -2691,7 +3011,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -2708,7 +3030,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -2725,7 +3049,9 @@
       "linux": {
         "bash": "-!",
         "dash": "-!"
-      }
+      },
+      "bash5": "-!",
+      "agent-noset": "-!"
     }
   },
   {
@@ -2742,7 +3068,9 @@
       "linux": {
         "bash": "-!",
         "dash": "-!"
-      }
+      },
+      "bash5": "-!",
+      "agent-noset": "R"
     }
   },
   {
@@ -2759,7 +3087,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -2776,7 +3106,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -2793,7 +3125,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -2810,7 +3144,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -2827,7 +3163,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -2844,7 +3182,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -2861,7 +3201,9 @@
       "linux": {
         "bash": "-",
         "dash": "-"
-      }
+      },
+      "bash5": "-",
+      "agent-noset": "-"
     }
   },
   {
@@ -2878,7 +3220,9 @@
       "linux": {
         "bash": "-",
         "dash": "-"
-      }
+      },
+      "bash5": "-",
+      "agent-noset": "-"
     }
   },
   {
@@ -2895,7 +3239,9 @@
       "linux": {
         "bash": "-",
         "dash": "-"
-      }
+      },
+      "bash5": "-",
+      "agent-noset": "-"
     }
   },
   {
@@ -2912,7 +3258,9 @@
       "linux": {
         "bash": "-",
         "dash": "-"
-      }
+      },
+      "bash5": "-",
+      "agent-noset": "-"
     }
   },
   {
@@ -2929,7 +3277,9 @@
       "linux": {
         "bash": "-",
         "dash": "-"
-      }
+      },
+      "bash5": "-",
+      "agent-noset": "-"
     }
   },
   {
@@ -2946,7 +3296,9 @@
       "linux": {
         "bash": "-",
         "dash": "-"
-      }
+      },
+      "bash5": "-",
+      "agent-noset": "-"
     }
   },
   {
@@ -2963,7 +3315,9 @@
       "linux": {
         "bash": "-",
         "dash": "-"
-      }
+      },
+      "bash5": "-",
+      "agent-noset": "-"
     }
   },
   {
@@ -2980,7 +3334,9 @@
       "linux": {
         "bash": "-",
         "dash": "-"
-      }
+      },
+      "bash5": "-",
+      "agent-noset": "-"
     }
   },
   {
@@ -2997,7 +3353,9 @@
       "linux": {
         "bash": "-",
         "dash": "-"
-      }
+      },
+      "bash5": "-",
+      "agent-noset": "-"
     }
   },
   {
@@ -3014,7 +3372,9 @@
       "linux": {
         "bash": "-",
         "dash": "-!"
-      }
+      },
+      "bash5": "-",
+      "agent-noset": "-"
     }
   },
   {
@@ -3031,7 +3391,9 @@
       "linux": {
         "bash": "-",
         "dash": "-"
-      }
+      },
+      "bash5": "-",
+      "agent-noset": "-"
     }
   },
   {
@@ -3048,7 +3410,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -3065,7 +3429,9 @@
       "linux": {
         "bash": "-",
         "dash": "-"
-      }
+      },
+      "bash5": "-",
+      "agent-noset": "-"
     }
   },
   {
@@ -3082,7 +3448,9 @@
       "linux": {
         "bash": "-",
         "dash": "-"
-      }
+      },
+      "bash5": "-",
+      "agent-noset": "-"
     }
   },
   {
@@ -3099,7 +3467,9 @@
       "linux": {
         "bash": "R",
         "dash": "R"
-      }
+      },
+      "bash5": "R",
+      "agent-noset": "R"
     }
   },
   {
@@ -3116,7 +3486,598 @@
       "linux": {
         "bash": "-!",
         "dash": "-!"
-      }
+      },
+      "bash5": "-!",
+      "agent-noset": "-"
+    }
+  },
+  {
+    "id": "AM1",
+    "cls": "V",
+    "label": "dash has no &>: the & ends the command, and the next one starts at the >",
+    "text": "echo a &>/dev/stdout @@TAIL@@\n",
+    "measured": {
+      "bash": "-",
+      "zsh": "-",
+      "sh": "-",
+      "agent": "-",
+      "dash": "R",
+      "linux": {
+        "bash": "-",
+        "dash": "R"
+      },
+      "bash5": "-",
+      "agent-noset": "-"
+    }
+  },
+  {
+    "id": "AM2",
+    "cls": "V",
+    "label": "the same with &>>, which bash 3.2 does not parse",
+    "text": "echo a &>>/dev/stdout @@TAIL@@\n",
+    "measured": {
+      "bash": "-!",
+      "zsh": "-",
+      "sh": "-!",
+      "agent": "-",
+      "dash": "R",
+      "linux": {
+        "bash": "-",
+        "dash": "R"
+      },
+      "bash5": "-",
+      "agent-noset": "-"
+    }
+  },
+  {
+    "id": "W1",
+    "cls": "R",
+    "label": "a redirection whose target is a process substitution, before the command: the target is one word, `<(true)`, and the command starts after it",
+    "text": "< <(true) @@TAIL@@\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "-!",
+      "agent": "R",
+      "dash": "-!",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "-!"
+      },
+      "agent-noset": "R"
+    }
+  },
+  {
+    "id": "W6",
+    "cls": "R",
+    "label": "the same with an output process substitution",
+    "text": "> >(cat) @@TAIL@@\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "-!",
+      "agent": "R",
+      "dash": "-!",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "-!"
+      },
+      "agent-noset": "R"
+    }
+  },
+  {
+    "id": "V1",
+    "cls": "R",
+    "label": "bash 4.1+ reads {fd}> as a redirection that opens a descriptor into fd, so the install after it is the command (bash 3.2, zsh and dash run {fd} as a command)",
+    "text": "{fd}>/dev/null @@TAIL@@\n",
+    "measured": {
+      "bash": "-",
+      "zsh": "-!",
+      "sh": "-",
+      "agent": "-!",
+      "dash": "-",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "-"
+      },
+      "agent-noset": "-!"
+    }
+  },
+  {
+    "id": "V2",
+    "cls": "R",
+    "label": "{varname} with a duplication",
+    "text": "{fd}>&2 @@TAIL@@\n",
+    "measured": {
+      "bash": "-",
+      "zsh": "-!",
+      "sh": "-",
+      "agent": "-!",
+      "dash": "-",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "-"
+      },
+      "agent-noset": "-!"
+    }
+  },
+  {
+    "id": "V3",
+    "cls": "R",
+    "label": "two {varname} redirections",
+    "text": "{a}>/dev/null {b}>/dev/null @@TAIL@@\n",
+    "measured": {
+      "bash": "-",
+      "zsh": "-!",
+      "sh": "-",
+      "agent": "-!",
+      "dash": "-",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "-"
+      },
+      "agent-noset": "-!"
+    }
+  },
+  {
+    "id": "V4",
+    "cls": "R",
+    "label": "{varname} duplicating stdin",
+    "text": "{fd}<&0 @@TAIL@@\n",
+    "measured": {
+      "bash": "-",
+      "zsh": "-!",
+      "sh": "-",
+      "agent": "-!",
+      "dash": "-",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "-"
+      },
+      "agent-noset": "-!"
+    }
+  },
+  {
+    "id": "V5",
+    "cls": "R",
+    "label": "{varname} appending",
+    "text": "{fd}>>/dev/null @@TAIL@@\n",
+    "measured": {
+      "bash": "-",
+      "zsh": "-!",
+      "sh": "-",
+      "agent": "-!",
+      "dash": "-",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "-"
+      },
+      "agent-noset": "-!"
+    }
+  },
+  {
+    "id": "W2",
+    "cls": "R",
+    "label": "{varname} with a here-string",
+    "text": "{fd}<<<x @@TAIL@@\n",
+    "measured": {
+      "bash": "-",
+      "zsh": "-!",
+      "sh": "-",
+      "agent": "-!",
+      "dash": "-!",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "-!"
+      },
+      "agent-noset": "-!"
+    }
+  },
+  {
+    "id": "V6",
+    "cls": "R",
+    "label": "{varname} after a separator",
+    "text": "echo a; {fd}>/dev/null @@TAIL@@\n",
+    "measured": {
+      "bash": "-",
+      "zsh": "-!",
+      "sh": "-",
+      "agent": "-!",
+      "dash": "-",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "-"
+      },
+      "agent-noset": "-!"
+    }
+  },
+  {
+    "id": "V7",
+    "cls": "R",
+    "label": "{varname} in a function body",
+    "text": "f() { {fd}>/dev/null @@TAIL@@; }; f\n",
+    "measured": {
+      "bash": "-",
+      "zsh": "-!",
+      "sh": "-",
+      "agent": "-!",
+      "dash": "-",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "-"
+      },
+      "agent-noset": "-!"
+    }
+  },
+  {
+    "id": "V31",
+    "cls": "R",
+    "label": "{varname} after an assignment",
+    "text": "FOO=1 {fd}>/dev/null @@TAIL@@\n",
+    "measured": {
+      "bash": "-",
+      "zsh": "-!",
+      "sh": "-",
+      "agent": "-!",
+      "dash": "-",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "-"
+      },
+      "agent-noset": "-!"
+    }
+  },
+  {
+    "id": "V32",
+    "cls": "R",
+    "label": "{varname} after !",
+    "text": "! {fd}>/dev/null @@TAIL@@\n",
+    "measured": {
+      "bash": "-",
+      "zsh": "-!",
+      "sh": "-",
+      "agent": "-!",
+      "dash": "-",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "-"
+      },
+      "agent-noset": "-!"
+    }
+  },
+  {
+    "id": "V33",
+    "cls": "R",
+    "label": "{varname} before an assignment",
+    "text": "{fd}>/dev/null npm_config_global=true @@TAIL@@\n",
+    "measured": {
+      "bash": "-",
+      "zsh": "-!",
+      "sh": "-",
+      "agent": "-!",
+      "dash": "-",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "-"
+      },
+      "agent-noset": "-!"
+    }
+  },
+  {
+    "id": "W12",
+    "cls": "R",
+    "label": "{varname} before env",
+    "text": "{fd}>/dev/null env @@TAIL@@\n",
+    "measured": {
+      "bash": "-",
+      "zsh": "-!",
+      "sh": "-",
+      "agent": "-!",
+      "dash": "-",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "-"
+      },
+      "agent-noset": "-!"
+    }
+  },
+  {
+    "id": "W9",
+    "cls": "R",
+    "label": "{varname} after exec, which zsh reads as well",
+    "text": "exec {fd}>/dev/null @@TAIL@@\n",
+    "measured": {
+      "bash": "-",
+      "zsh": "R",
+      "sh": "-",
+      "agent": "R",
+      "dash": "-",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "-"
+      },
+      "agent-noset": "R"
+    }
+  },
+  {
+    "id": "W10",
+    "cls": "R",
+    "label": "{varname} after command, which zsh reads as well",
+    "text": "command {fd}>/dev/null @@TAIL@@\n",
+    "measured": {
+      "bash": "-",
+      "zsh": "R",
+      "sh": "-",
+      "agent": "R",
+      "dash": "-",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "-"
+      },
+      "agent-noset": "R"
+    }
+  },
+  {
+    "id": "HD1",
+    "cls": "R",
+    "label": "a descriptor number glued to a heredoc operator is part of it",
+    "text": "0<<E @@TAIL@@\nx\nE\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "dash": "R",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      },
+      "agent-noset": "R"
+    }
+  },
+  {
+    "id": "HD2",
+    "cls": "R",
+    "label": "a {varname} glued to a heredoc operator",
+    "text": "{fd}<<E @@TAIL@@\nx\nE\n",
+    "measured": {
+      "bash": "-",
+      "zsh": "-!",
+      "sh": "-",
+      "agent": "-!",
+      "dash": "-",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "-"
+      },
+      "agent-noset": "-!"
+    }
+  },
+  {
+    "id": "ZB1",
+    "cls": "R",
+    "label": "zsh reads >! as one operator, so the word after the blank is its target; bash and dash write to a file named ! and run /dev/null",
+    "text": "@@HEAD@@ >! /dev/null install evil==6.6.6\n",
+    "measured": {
+      "bash": "-",
+      "zsh": "R",
+      "sh": "-",
+      "agent": "R",
+      "dash": "-",
+      "bash5": "-",
+      "linux": {
+        "bash": "-",
+        "dash": "-"
+      },
+      "agent-noset": "R"
+    }
+  },
+  {
+    "id": "RM1",
+    "cls": "R",
+    "label": "a redirection between the command word and its arguments: every shell passes the arguments unchanged",
+    "text": "@@HEAD@@ 2>/dev/null install evil==6.6.6\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "dash": "R",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      },
+      "agent-noset": "R"
+    }
+  },
+  {
+    "id": "RM2",
+    "cls": "R",
+    "label": "the same with {varname} (bash 5 and zsh read the redirection, the others an argument)",
+    "text": "@@HEAD@@ {fd}>/dev/null install evil==6.6.6\n",
+    "measured": {
+      "bash": "-",
+      "zsh": "R",
+      "sh": "-",
+      "agent": "R",
+      "dash": "-",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "-"
+      },
+      "agent-noset": "R"
+    }
+  },
+  {
+    "id": "RM3",
+    "cls": "R",
+    "label": "the same with an input redirection",
+    "text": "@@HEAD@@ </dev/null install evil==6.6.6\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "dash": "R",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      },
+      "agent-noset": "R"
+    }
+  },
+  {
+    "id": "RM4",
+    "cls": "R",
+    "label": "the same with an output redirection",
+    "text": "@@HEAD@@ >/dev/null install evil==6.6.6\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "dash": "R",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      },
+      "agent-noset": "R"
+    }
+  },
+  {
+    "id": "RM5",
+    "cls": "R",
+    "label": "the same with a duplication",
+    "text": "@@HEAD@@ 2>&1 install evil==6.6.6\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "R",
+      "agent": "R",
+      "dash": "R",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "R"
+      },
+      "agent-noset": "R"
+    }
+  },
+  {
+    "id": "PA1",
+    "cls": "R",
+    "label": "a process substitution as an argument runs its body: the body is a payload like a command substitution",
+    "text": "cat <(@@TAIL@@)\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "-!",
+      "agent": "R",
+      "dash": "-!",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "-!"
+      },
+      "agent-noset": "R"
+    }
+  },
+  {
+    "id": "PA2",
+    "cls": "R",
+    "label": "an output process substitution as an argument",
+    "text": "tee >(@@TAIL@@) </dev/null\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "-!",
+      "agent": "R",
+      "dash": "-!",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "-!"
+      },
+      "agent-noset": "R"
+    }
+  },
+  {
+    "id": "PA3",
+    "cls": "R",
+    "label": "a process substitution as an argument, before another (the stub marks a file: diff reformats what the body prints)",
+    "text": "diff <(@@HEAD@@ install evil==6.6.6) /dev/null\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "-!",
+      "agent": "R",
+      "dash": "-!",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "-!"
+      },
+      "agent-noset": "R"
+    }
+  },
+  {
+    "id": "PA4",
+    "cls": "R",
+    "label": "a process substitution whose body has two statements",
+    "text": "cat <(true; @@TAIL@@)\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "-!",
+      "agent": "R",
+      "dash": "-!",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "-!"
+      },
+      "agent-noset": "R"
+    }
+  },
+  {
+    "id": "PA6",
+    "cls": "R",
+    "label": "a process substitution target whose body is the install: the body runs, and it is a payload (cat reads to the end, so the body has run when the shell exits)",
+    "text": "cat < <(@@HEAD@@ install evil==6.6.6)\n",
+    "measured": {
+      "bash": "R",
+      "zsh": "R",
+      "sh": "-!",
+      "agent": "R",
+      "dash": "-!",
+      "bash5": "R",
+      "linux": {
+        "bash": "R",
+        "dash": "-!"
+      },
+      "agent-noset": "R"
     }
   }
 ]
