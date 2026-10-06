@@ -52,6 +52,14 @@ pub fn readable(path: &Path) -> bool {
     unsafe { access(c.as_ptr(), 4) == 0 }
 }
 
+pub fn command_exists(name: &str) -> bool {
+    std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).any(|dir| {
+        let path=dir.join(name);
+        let Ok(c)=std::ffi::CString::new(bytes(&path)) else{return false};
+        is_file(&path) && unsafe{access(c.as_ptr(),1)==0}
+    })
+}
+
 /// Whether the hook's locale reads text as UTF-8, as bash decides it for `?`
 /// in a pattern: LC_ALL, then LC_CTYPE, then LANG.
 pub fn utf8_locale() -> bool {
