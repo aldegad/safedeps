@@ -347,4 +347,86 @@ else
   pass "native entry: out of processes is an explained deny, not a non-blocking 128"
 fi
 
+# --- the installer prepares the core for an entry that runs it ---------------
+#
+# The entry that runs the core carries a line saying so, and the installer
+# reads it from the file it registers: a checkout builds the core with
+# scripts/build-core.sh, an installed package must carry the binary, and a
+# missing core stops the install before any engine config is written. The
+# entry registered today runs the bash hooks, and the installer builds nothing
+# for it.
+marker='# safedeps-entry: runs bin/native/<os>-<arch>/safedeps-core'
+grep -qxF "${marker}" scripts/safedeps-hook-entry-native.sh || fail "the native entry carries the line the installer reads"
+if grep -qxF "${marker}" scripts/safedeps-hook-entry.sh; then
+  fail "the bash entry does not carry the core's line"
+fi
+pass "installer: the native entry says it runs the core, and the bash entry does not"
+
+installer_repo() { # <dir> <entry file> <build stub body or "">
+  local dir="$1"
+  mkdir -p "${dir}/scripts/install" "${dir}/bin"
+  cp scripts/install/install-safedeps-hooks.mjs "${dir}/scripts/install/"
+  cp "$2" "${dir}/scripts/safedeps-hook-entry.sh"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "${dir}/scripts/safedeps-pre-guard.sh"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "${dir}/scripts/safedeps-post-verify.sh"
+  printf '#!/usr/bin/env bash\n' > "${dir}/bin/safedeps"
+  if [[ -n "$3" ]]; then
+    mkdir -p "${dir}/rust"
+    printf '[package]\nname = "safedeps-core"\n' > "${dir}/rust/Cargo.toml"
+    printf '#!/usr/bin/env bash\n: > %q\n%s\n' "${dir}/build-ran" "$3" > "${dir}/scripts/build-core.sh"
+    chmod +x "${dir}/scripts/build-core.sh"
+  fi
+}
+run_installer() { # <repo> <home>
+  local rc=0
+  mkdir -p "$2/.claude"
+  HOME="$2" node "$1/scripts/install/install-safedeps-hooks.mjs" > "${tmp_root}/inst.out" 2>&1 || rc=$?
+  installer_rc=${rc}
+  installer_out=$(cat "${tmp_root}/inst.out")
+}
+
+inst="${tmp_root}/inst-checkout"
+installer_repo "${inst}" scripts/safedeps-hook-entry-native.sh \
+  "mkdir -p $(printf '%q' "${inst}/bin/native/${native_os}-${native_arch}") && printf '#!/bin/sh\nexit 0\n' > $(printf '%q' "${inst}/bin/native/${native_os}-${native_arch}/safedeps-core") && chmod 755 $(printf '%q' "${inst}/bin/native/${native_os}-${native_arch}/safedeps-core")"
+run_installer "${inst}" "${tmp_root}/inst-home-1"
+[[ ${installer_rc} -eq 0 ]] || fail "installer, checkout, native entry: exits 0 (${installer_rc}: ${installer_out})"
+[[ -e "${inst}/build-ran" ]] || fail "installer, checkout, native entry: scripts/build-core.sh ran"
+jq -e '[.hooks.PreToolUse[]?.hooks[]?.command] | any(endswith("safedeps-hook-entry.sh pre"))' "${tmp_root}/inst-home-1/.claude/settings.json" >/dev/null \
+  || fail "installer, checkout, native entry: the hooks are registered after the build"
+pass "installer: in a checkout, an entry that runs the core builds it, then registers"
+
+inst="${tmp_root}/inst-nocargo"
+installer_repo "${inst}" scripts/safedeps-hook-entry-native.sh "echo 'build-core: cargo is not on PATH, so the core cannot be built from this checkout.' >&2; exit 1"
+run_installer "${inst}" "${tmp_root}/inst-home-2"
+[[ ${installer_rc} -ne 0 ]] || fail "installer, checkout, build fails: the installer does not exit 0"
+grep -q "cargo is not on PATH" <<< "${installer_out}" || fail "installer, build fails: the build's reason reaches the user (${installer_out})"
+grep -q "Nothing was registered" <<< "${installer_out}" || fail "installer, build fails: it says nothing was registered"
+[[ ! -e "${tmp_root}/inst-home-2/.claude/settings.json" ]] || fail "installer, build fails: no engine config is written"
+[[ ! -e "${tmp_root}/inst-home-2/.claude/skills/safedeps" ]] || fail "installer, build fails: the skill is not linked"
+pass "installer: a checkout that cannot build the core stops with the reason and registers nothing"
+
+inst="${tmp_root}/inst-package"
+installer_repo "${inst}" scripts/safedeps-hook-entry-native.sh ""
+run_installer "${inst}" "${tmp_root}/inst-home-3"
+[[ ${installer_rc} -ne 0 ]] || fail "installer, package with no binary: the installer does not exit 0"
+grep -q "no runnable safedeps-core binary" <<< "${installer_out}" || fail "installer, package with no binary: the cause is named (${installer_out})"
+[[ ! -e "${tmp_root}/inst-home-3/.claude/settings.json" ]] || fail "installer, package with no binary: no engine config is written"
+mkdir -p "${inst}/bin/native/${native_os}-${native_arch}"
+printf '#!/bin/sh\nexit 0\n' > "${inst}/bin/native/${native_os}-${native_arch}/safedeps-core"
+chmod 644 "${inst}/bin/native/${native_os}-${native_arch}/safedeps-core"
+run_installer "${inst}" "${tmp_root}/inst-home-3"
+[[ ${installer_rc} -ne 0 ]] || fail "installer, package with a binary that is not executable: the installer does not exit 0"
+chmod 755 "${inst}/bin/native/${native_os}-${native_arch}/safedeps-core"
+run_installer "${inst}" "${tmp_root}/inst-home-3"
+[[ ${installer_rc} -eq 0 ]] || fail "installer, package with its binary: exits 0 (${installer_out})"
+[[ ! -e "${inst}/build-ran" ]] || fail "installer, package: nothing is built"
+pass "installer: a package must carry a runnable binary for this platform, and builds nothing"
+
+inst="${tmp_root}/inst-bash"
+installer_repo "${inst}" scripts/safedeps-hook-entry.sh "exit 1"
+run_installer "${inst}" "${tmp_root}/inst-home-4"
+[[ ${installer_rc} -eq 0 ]] || fail "installer, bash entry: exits 0 (${installer_out})"
+[[ ! -e "${inst}/build-ran" ]] || fail "installer, bash entry: scripts/build-core.sh did not run"
+pass "installer: the entry registered today runs the bash hooks, and nothing is built for it"
+
 printf 'entry battery: all checks passed\n'

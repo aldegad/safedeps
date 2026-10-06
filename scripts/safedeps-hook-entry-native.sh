@@ -39,6 +39,10 @@
 # (3.2) or 254 (5) when it cannot start a process, both engines read either as
 # a non-blocking hook failure, and the EXIT trap turns any exit the shim did
 # not choose into an explained exit 2, written with builtins.
+#
+# The installer reads the next line: it builds or checks the core before it
+# registers an entry that carries it.
+# safedeps-entry: runs bin/native/<os>-<arch>/safedeps-core
 set -u
 
 target="${1:-}"

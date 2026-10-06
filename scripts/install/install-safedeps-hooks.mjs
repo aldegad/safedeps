@@ -12,7 +12,8 @@
 //   node scripts/install/install-safedeps-hooks.mjs --uninstall
 //   node scripts/install/install-safedeps-hooks.mjs --link-bin   (optional ~/.local/bin/safedeps)
 
-import { existsSync, lstatSync, readFileSync, writeFileSync, copyFileSync, mkdirSync, symlinkSync, unlinkSync, readlinkSync, renameSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, writeFileSync, copyFileSync, mkdirSync, symlinkSync, unlinkSync, readlinkSync, renameSync, accessSync, constants as fsConstants } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -32,6 +33,13 @@ const REPO_PRE_HOOK = join(REPO_ROOT, "scripts", PRE_HOOK_NAME);
 const REPO_POST_HOOK = join(REPO_ROOT, "scripts", POST_HOOK_NAME);
 const REPO_ENTRY_HOOK = join(REPO_ROOT, "scripts", ENTRY_HOOK_NAME);
 const CLI_BIN = join(REPO_ROOT, "bin", "safedeps");
+// An entry that runs the Rust core says so on a line of its own
+// (scripts/safedeps-hook-entry-native.sh, which takes the entry's name when
+// the hooks move to the core). Read from the file being registered, so what
+// the installer prepares is decided by the entry it installs, and nothing
+// else chooses.
+const ENTRY_RUNS_CORE_LINE = "# safedeps-entry: runs bin/native/<os>-<arch>/safedeps-core";
+const BUILD_CORE = join(REPO_ROOT, "scripts", "build-core.sh");
 const PRE_HOOK_TIMEOUT_SECONDS = 30;
 const POST_HOOK_TIMEOUT_SECONDS = 30;
 // The events the post hook is registered for, by engine. Claude Code runs
@@ -314,10 +322,51 @@ function printRecommendedSetup() {
   console.log(out.join("\n"));
 }
 
+// The platform directory the entry looks in, by the same table it reads
+// (scripts/safedeps-hook-entry-native.sh, scripts/build-core.sh).
+function nativePlatform() {
+  const os = { darwin: "darwin", linux: "linux" }[process.platform];
+  const arch = { arm64: "arm64", x64: "x64" }[process.arch];
+  return os && arch ? `${os}-${arch}` : null;
+}
+
+// When the entry runs the core, the core has to be there before the hooks
+// are registered: a checkout builds it (scripts/build-core.sh, which needs
+// cargo), and an installed package must already carry it. Either way a
+// missing binary stops the install with the reason, before any engine config
+// is written. The entry would deny every Bash call without it.
+function prepareCore() {
+  const entry = readFileSync(REPO_ENTRY_HOOK, "utf8").split("\n");
+  if (!entry.includes(ENTRY_RUNS_CORE_LINE)) {
+    log("the entry runs the bash hooks; no core binary is needed");
+    return;
+  }
+  const platform = nativePlatform();
+  if (existsSync(join(REPO_ROOT, "rust", "Cargo.toml"))) {
+    log(`building the core from this checkout: ${BUILD_CORE}`);
+    const run = spawnSync("bash", [BUILD_CORE], { stdio: "inherit" });
+    if (run.error || run.status !== 0) {
+      throw new Error(`scripts/build-core.sh did not build the core (${run.error ? run.error.message : `exit ${run.status}`}); its reason is above. Nothing was registered.`);
+    }
+    return;
+  }
+  if (!platform) {
+    throw new Error(`this package carries no safedeps-core binary for ${process.platform}-${process.arch}. Nothing was registered.`);
+  }
+  const core = join(REPO_ROOT, "bin", "native", platform, "safedeps-core");
+  try {
+    accessSync(core, fsConstants.X_OK);
+  } catch {
+    throw new Error(`this package has no runnable safedeps-core binary at ${core}. Reinstall the package. Nothing was registered.`);
+  }
+  log(`core binary ok ${core}`);
+}
+
 function main() {
   if (!existsSync(REPO_PRE_HOOK) || !existsSync(REPO_POST_HOOK) || !existsSync(REPO_ENTRY_HOOK)) {
     throw new Error(`hook scripts not found at ${REPO_PRE_HOOK} / ${REPO_POST_HOOK} / ${REPO_ENTRY_HOOK}`);
   }
+  if (!UNINSTALL) prepareCore();
 
   installInEngine({
     engineRoot: join(HOME, ".claude"),
