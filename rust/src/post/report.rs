@@ -54,7 +54,7 @@ pub fn inert(meta: &Path, input: &[u8]) -> Result<Vec<u8>, i32> {
     let m = jv::read_one_object(meta).ok_or(1)?;
     let st = jv::read(input);
     let (lines, rc) = jv::each(&st, |v| {
-        let said = if !jv::eq(jv::field(&m, "record")?, &jv::num(2)) { b"unstated".as_slice() }
+        let said: &[u8] = if !jv::eq(jv::field(&m, "record")?, &jv::num(2)) { b"unstated" }
         else if matches!(jv::field(&m, "ignore_scripts_injected")?, Value::Bool(false)) { b"none" }
         else if matches!(jv::field(&m, "ignore_scripts_injected")?, Value::Bool(true)) && matches!(jv::field(&m, "updated_command")?, Value::Str(_)) {
             if jv::eq(jv::path(v, &["tool_input", "command"])?, jv::field(&m, "updated_command")?) { b"added" } else { b"asked" }
