@@ -79,19 +79,6 @@ fn accessible(path: &Path,mode:i32) -> bool {
     unsafe { access(path.as_ptr(),mode)==0 }
 }
 
-/// The hook shell's -r test, including ACLs and symlink targets.
-pub fn readable(path: &Path) -> bool {
-    accessible(path,4)
-}
-pub fn executable(path: &Path) -> bool {
-    accessible(path,1)
-}
-fn accessible(path: &Path,mode:i32) -> bool {
-    use std::os::unix::ffi::OsStrExt;
-    let Ok(path)=std::ffi::CString::new(path.as_os_str().as_bytes()) else { return false };
-    unsafe { access(path.as_ptr(),mode)==0 }
-}
-
 /// Exclusively claim a scratch directory using libc's mkdtemp, as the shell
 /// helper does. The caller owns removal. No pid/RANDOM naming convention.
 pub fn scratch_dir(prefix: &str) -> std::io::Result<std::path::PathBuf> {
