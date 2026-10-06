@@ -116,7 +116,10 @@ Usage:
       [--extra name=FILE.jsonl ...] [--shells | --evidence] [--floor]
       [--release-tree DIR --approve eco:name:version ...] [--path-prefix DIRS]
       [--limit N] [--report FILE] [--table FILE] [--manifest FILE]
-      [--list FILE] [--reclassify REPORT] [--control] [--selftest]
+      [--list FILE] [--control]
+  core-inert-differential.py --reclassify REPORT [--path-prefix DIRS]
+      [--report FILE] [--table FILE] [--manifest FILE]
+  core-inert-differential.py --selftest [--path-prefix DIRS]
 """
 import argparse
 import hashlib
@@ -1528,9 +1531,11 @@ def main():
     a = ap.parse_args()
     if a.selftest:
         sys.exit(selftest(a))
-    if not a.core:
+    if not a.core and not a.reclassify:
         sys.exit("core-inert-differential: --core is required")
-    a.core = os.path.abspath(a.core)
+    # A saved report is classified again without a core: none runs, and the
+    # run's record must not name one that did not measure these rows.
+    a.core = os.path.abspath(a.core) if a.core else ""
     jobs = max(1, min(a.jobs, 2))
 
     work = tempfile.mkdtemp(prefix="safedeps-core-inert.")
@@ -1742,8 +1747,8 @@ def main():
 
     run_info = {"schema": SCHEMA, "argv": sys.argv[1:], "harness_sha256": sha256(open(os.path.abspath(__file__), "rb").read()),
                 "classes_sha256": sha256(open(os.path.join(MEASURE, "core-intended-inert.tsv"), "rb").read()),
-                "guard_sha256": sha256(open(GUARD, "rb").read()), "core": a.core,
-                "core_sha256": sha256(open(a.core, "rb").read()) if os.path.isfile(a.core) else UNKNOWN,
+                "guard_sha256": sha256(open(GUARD, "rb").read()), "core": a.core or None,
+                "core_sha256": sha256(open(a.core, "rb").read()) if a.core and os.path.isfile(a.core) else None,
                 "release_guard_sha256": sha256(open(rel_guard, "rb").read()) if rel_guard and os.path.isfile(rel_guard) else None,
                 "shells": shells.info if shells else None, "jobs": jobs}
     commit = os.path.join(os.path.dirname(ROOT), "commit")
