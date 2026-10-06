@@ -218,8 +218,9 @@ event "safedeps tests on our hosts: $(sed -n 2p "${work}/run.txt" | cut -d' ' -f
 for (( h = 0; h < ${#H_NAME[@]}; h++ )); do
   (
     run="${H_RUN[h]}"
-    ssh_host "${h}" "mkdir -p ${run}/tree ${run}/out && tar -x -C ${run}/tree" < "${archive}" || exit 1
-    printf '%s\n' "${H_PATH[h]}" | ssh_host "${h}" "cat > ${run}/path" || exit 1
+    ssh_host "${h}" "mkdir -p ${run}/tree ${run}/out && tar -x -C ${run}/tree" < "${archive}" \
+      > "${work}/ship-${H_NAME[h]}.out" 2>&1 || exit 1
+    printf '%s\n' "${H_PATH[h]}" | ssh_host "${h}" "cat > ${run}/path" >> "${work}/ship-${H_NAME[h]}.out" 2>&1 || exit 1
     holders=""
     for (( k = 1; k <= H_HOLDS[h]; k++ )); do
       if [[ "${H_QUEUE[h]}" == - ]]; then
@@ -229,7 +230,7 @@ for (( h = 0; h < ${#H_NAME[@]}; h++ )); do
       fi
       holders+="nohup ${holder} > ${run}/hold-${k}.log 2>&1 < /dev/null & echo \$! > ${run}/queue-${k}.pid; "
     done
-    ssh_host "${h}" "${holders}uptime" > "${work}/ship-${H_NAME[h]}.out" 2>&1 || exit 1
+    ssh_host "${h}" "${holders}uptime" >> "${work}/ship-${H_NAME[h]}.out" 2>&1 || exit 1
   ) &
   ship_pid[h]=$!
 done
