@@ -409,18 +409,49 @@ fn emit(out: &Out) -> i32 {
 
 const NOT_WRITTEN: &str = "safedeps-core pre: this command reads as a dependency install, and the part of the hook that judges one is not written yet. scripts/safedeps-pre-guard.sh is the PreToolUse hook.";
 
+/// A stale checkout can settle only the existing unscanned-manager question.
+/// It never calls the old judgment or creates a snapshot, pending record or
+/// trace baseline. An unreadable payload is not evidence of an absent name.
+fn stale(input: &[u8], why: &str, guard: &Path) -> i32 {
+    let _ = std::fs::DirBuilder::new().recursive(true).mode(0o700).create(guard);
+    let payload = json::parse_one(input).ok();
+    let tool = payload.as_ref().and_then(|p| p.get("tool_name")).and_then(Value::as_str);
+    let command = payload.as_ref().and_then(|p| p.get("tool_input")).and_then(|p| p.get("command"));
+    let disposition = match (tool, command) {
+        (Some("Bash"), Some(Value::Str(command))) => {
+            if looks_like_install_unscanned(command) { "the command names a package manager" }
+            else {
+                let message = format!("{} The command names no package manager and was allowed without a judgment.", why);
+                state::log_advisory(guard, format!("pre-guard: {}", message).as_bytes());
+                eprintln!("{}", message);
+                return 0;
+            }
+        }
+        (Some(tool), _) if tool != "Bash" => {
+            let message = format!("{} This is not a Bash tool call.", why);
+            state::log_advisory(guard, format!("pre-guard: {}", message).as_bytes());
+            eprintln!("{}", message);
+            return 0;
+        }
+        _ => "the Bash command could not be read from the payload",
+    };
+    let reason = format!("safedeps: UNDECIDED — {} {}; no dependency judgment was made.", why, disposition);
+    state::log_advisory(guard, format!("pre-guard DENY: {}", reason).as_bytes());
+    eprintln!("{}", reason);
+    println!("{}", jq::deny(&reason));
+    0
+}
+
 pub fn main(input: &[u8]) -> i32 {
     let started = Instant::now();
     // `umask 077; mkdir -p "$GUARD_DIR" "$SNAPSHOT_DIR"`, before anything is read.
     os::set_umask(0o077);
     let guard_dir = state::guard_dir();
+    if let Some(why) = crate::stamp::refusal() {
+        return stale(input, &why, &guard_dir);
+    }
     if state::ensure_dirs(&guard_dir).is_err() {
         return 1;
-    }
-    if let Some(why) = crate::stamp::refusal() {
-        state::log_advisory(&guard_dir, format!("pre-guard DENY: {}", why).as_bytes());
-        println!("{}", jq::deny(&why));
-        return 0;
     }
 
     // `INPUT=$(cat)`, then jq twice. jq ends with 5 on text that is not JSON
