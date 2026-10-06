@@ -1,10 +1,14 @@
 fixture	original_condition	native_injection	observation	scope
-markread	jq refuses the v2 meta read	core-post-faults.py unread-meta chmod000	original report oracle and unread advisory; no inert line	post
-cpfail	cp fails to overwrite root lockfile	core-post-faults.py restore-readonly chmod444	original report oracle; cp exit1; lockfile still differs	post
-cpgone	cp fails to create absent root lockfile	core-post-faults.py restore-absent parent chmod555	original report oracle; cp exit1; lockfile still absent	post
-rmfail	rm cannot finish removing node_modules	core-post-faults.py remove-readonly child directory chmod555	original report oracle; rm exit1; node_modules still exists	post
-bs_slow	find remains alive beyond the walk deadline	archive-only delay at native walk entry; not yet supplied	original deadline assertion and rollback oracle must run	post
-bs_mix	one part of the tree exposes whole-second ctime	actual coarse clock or archive-only clock adapter; not yet supplied	entry resolution and actual write detection; PATH shim alone is insufficient	pre+post
-owner-empty	ps gives no start time for live owner	archive-only native info lookup failure; not yet supplied	original unresolved-owner assertion and journal oracle must run	post
-owner-garbage	ps gives a nonempty unparseable date	native start time is an integer; no corresponding ps text parser	interpretation difference; original PATH injection does not reach Rust	post
-markfail	jq fails to write the rewrite into its record	A pre writer disk/source failure; pending A implementation	original no-rewrite assertion and pre oracle must run	pre
+markread	jq refuses the v2 meta read	core-post-faults.py unread-meta chmod000; native e2e entry does the same after oracle_before	original report oracle, unread advisory and no inert line; injection receipt	post
+cpfail	cp fails to overwrite root lockfile	core-post-faults.py restore-readonly chmod444; native e2e entry chmod444	cp exit1 and differing bytes; node_modules removal continues; journal closes	post
+cpgone	cp fails to create absent root lockfile	core-post-faults.py restore-absent parent chmod555; native e2e entry chmod555	both file creation and top-level deletion fail; original oracle checks actual disk and lines	post
+rmfail	rm cannot finish removing node_modules	core-post-faults.py remove-readonly; native e2e adds held data then chmod555 child directory	rm exit1; node_modules remains; original oracle and journal closure	post
+twoobj	jq marks an actual two-object meta record as unread	fixture keeps its two objects; native entry supplies fixture-owned record-unread marker	original no-inert-line and one unread-advisory assertion	post
+bs_slow	find remains alive beyond the walk deadline	core-post-native-suite.py walk copy delays the native bounded walk	original deadline assertion and rollback oracle; source-copy receipt	post
+bs_mix	one part of the tree exposes whole-second ctime	core-post-native-suite.py coarse copy rounds observed node ctimes; Bash pre's existing stat fixture	original resolution, integer-time walk and traced assertions; native pre remains a separate required check	Bash-pre+Rust-post
+bs_sec	baseline touch keeps only whole seconds	original Bash pre touch fixture	original baseline-backdating assertion; native pre requires A's corresponding injection	Bash-pre
+owner-empty	ps gives no start time for live owner	core-post-owner-controls.py zero native response; same source copy in native e2e	original oracle requires fixture-owned response evidence, incident bytes and journal closure	post
+owner-short	native response shorter than proc_bsdinfo	core-post-owner-controls.py size-8 response	same unresolved-owner diagnostic and independent oracle	post
+owner-wrong-pid	native response identifies another owner	core-post-owner-controls.py returned pid changed before decoder validation	same unresolved-owner diagnostic and independent oracle	post
+owner-garbage	ps gives a nonempty unparseable date	native start time is an integer; no corresponding ps text parser	absent implementation path recorded in fixture-adapters.json; never counted as a passed native injection	post
+markfail	jq fails to write the rewrite into its record	Bash pre original fixture; A native pre writer disk/source failure still required	original no-rewrite assertion and pre oracle	pre

@@ -3,8 +3,10 @@
 
 Timing runs have no counting wrappers. A separate run counts selected external
 program invocations through PATH; this is not a count of forks or Bash
-subshells. Rust's direct child list is npm, curl, file, gzip. This fixture
-exercises the closure backstop, so it does not measure rebuild or file/gzip.
+subshells. Rust's direct child list is npm, curl, file, gzip. The default
+fixture exercises the closure backstop. --bin-count adds a recorded empty
+install that classifies new text bin files; --rotate-bytes exercises archive
+creation. None of these fixtures exercises the npm rebuild path.
 Warm-cache and cold-loopback results are CPU/local-provider measurements,
 not a claim about the canonical providers' network latency.
 """
@@ -30,11 +32,15 @@ p.add_argument('--sizes',default='1,4,16,64,128')
 p.add_argument('--ledger-sizes',default='0')
 p.add_argument('--cache',choices=['warm','cold-loopback'],default='warm')
 p.add_argument('--count',action='store_true',help='Run a separate PATH-instrumented sample')
+p.add_argument('--bin-count',type=int,default=0,help='Use a recorded empty install with this many new text bin files')
+p.add_argument('--rotate-bytes',type=int,default=0,help='Seed an INFO log and set the rotation threshold to this size')
 p.add_argument('--report',required=True)
 a=p.parse_args()
 sizes=[int(x) for x in a.sizes.split(',')]
 ledgers=[int(x) for x in a.ledger_sizes.split(',')]
 if any(x<0 for x in sizes+ledgers):p.error('sizes must be nonnegative')
+if a.bin_count<0 or a.rotate_bytes<0:p.error('bin count and rotation bytes must be nonnegative')
+if a.bin_count and (sizes!=[0] or ledgers!=[0]):p.error('--bin-count requires --sizes 0 --ledger-sizes 0')
 root=Path(__file__).resolve().parents[2]
 core=str(Path(a.core).resolve(strict=True))
 programs='npm curl file gzip jq date mkdir cat sed grep awk sort find stat sha256sum shasum md5 md5sum mktemp rm mv cp tr head tail cut paste wc ls sleep uname ps diff cmp readlink basename dirname realpath'.split()
@@ -78,7 +84,22 @@ def seed(d,n,l):
             key=hashlib.sha256(('osv\nnpm\n%s\n1.0.0'%spec(i)).encode()).hexdigest()
             write_json(cache/'osv'/(key+'.json'),dict(vulns=[]))
         write_json(cache/'kev/known_exploited_vulnerabilities.json',dict(vulnerabilities=[]))
+    if a.rotate_bytes:
+        line=b'[2001-02-03T04:05:06Z] INFO synthetic rotation fixture\n'
+        (home/'advisory.log').write_bytes(line*(a.rotate_bytes//len(line)+1))
     payload=dict(tool_name='Bash',tool_input=dict(command='npm install fixture'),cwd=str(project),tool_use_id='cost-call')
+    if a.bin_count:
+        bins=project/'node_modules/.bin';bins.mkdir(parents=True)
+        for i in range(a.bin_count):(bins/('probe-%04d'%i)).write_text('plain text\n')
+        shutil.copyfile(project/'package-lock.json',project/'node_modules/.package-lock.json')
+        snapshots=home/'snapshots';snapshots.mkdir();pending=home/'pending';pending.mkdir()
+        record=dict(record=2,snapshot_id='pre',tool_use_id='cost-call',project_dir=str(project),
+                    command=payload['tool_input']['command'],ignore_scripts_injected=False)
+        write_json(snapshots/'pre_meta.json',record);write_json(pending/'id-cost-call.json',record)
+        (snapshots/'pre_monitored_files.list').write_text('package.json\npackage-lock.json\n')
+        for name in ['package.json','package-lock.json']:shutil.copyfile(project/name,snapshots/('pre_'+name))
+        for name in ['bins.list','packages.list']:(snapshots/('pre_'+name)).touch()
+        shutil.copyfile(project/'package-lock.json',snapshots/'pre_npm-tree-record.json')
     return home,json.dumps(payload).encode()
 
 rows=[]
@@ -106,6 +127,7 @@ try:
                         env={k:v for k,v in os.environ.items() if not k.startswith('SAFEDEPS_')}
                         env.update(SAFEDEPS_HOME=str(home),SAFEDEPS_OSV_BATCH_API_URL=endpoint+'/osv',
                                    SAFEDEPS_KEV_CATALOG_URL=endpoint+'/kev',LC_ALL='C')
+                        if a.rotate_bytes:env['SAFEDEPS_ADVISORY_LOG_MAX_BYTES']=str(a.rotate_bytes)
                         if counted:env['PATH']=str(bin_dir)+os.pathsep+env['PATH']
                         if side=='bash':argv=['bash',str(root/'scripts/safedeps-post-verify.sh')]
                         else:
@@ -118,12 +140,19 @@ try:
                         log=(home/'advisory.log').read_text() if (home/'advisory.log').exists() else ''
                         expected=(not out and 'BACKSTOP clean:' in log) if l>=n else (
                             'No rollback ran.' in out and 'unapproved package(s)' in out and 'BACKSTOP FLAGGED (no baseline)' in log)
+                        if a.bin_count:
+                            expected=(not out and not (home/'pending/id-cost-call.json').exists()
+                                      and len(list(home.parent.glob('project/node_modules/.bin/*')))==a.bin_count
+                                      and bool(list(home.glob('confirmed_*'))))
                         calls=Counter(json.loads(line) for line in count_log.read_text().splitlines())
                         expected_requests=[] if a.cache=='warm' or n==0 else [dict(path='/osv',queries=n),dict(path='/kev')]
                         provider_line='OSV batch cache hit' if a.cache=='warm' else 'OSV batch live query ok'
                         passed=(result.returncode==0 and expected and requests==expected_requests
                                 and log.count(provider_line)==n and 'verification failed' not in out
                                 and 'ledger closure check could not run' not in out)
+                        if a.rotate_bytes:passed=passed and bool(list(home.glob('advisory.log.*.gz')))
+                        if counted and side=='rust':
+                            passed=passed and calls.get('file',0)==min(a.bin_count,20) and calls.get('gzip',0)==bool(a.rotate_bytes)
                         sample=dict(rc=result.returncode,passed=passed,stdout=out,stderr=err,requests=list(requests))
                         if counted:sample['external_program_invocations']=dict(calls)
                         else:sample.update(seconds=elapsed,over_30s=elapsed>30)
@@ -134,7 +163,8 @@ try:
 finally:
     server.shutdown();server.server_close();thread.join()
 report=dict(host=dict(system=platform.system(),release=platform.release(),machine=platform.machine()),
-            scope='whole post command-independent backstop; no rebuild, bin classifier or rotation',
+            scope='recorded empty install with new text bins' if a.bin_count else 'whole post command-independent backstop; no rebuild',
+            bin_count=a.bin_count,rotation_seed_bytes=a.rotate_bytes,
             count_unit='selected external program invocations, not forks or subshells',
             programs=real,core=core,entry='post-probe' if a.probe else 'post',rows=rows)
 Path(a.report).write_text(json.dumps(report,indent=2)+'\n')
