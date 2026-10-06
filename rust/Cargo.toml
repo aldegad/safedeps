@@ -1,8 +1,11 @@
 [package]
 name = "safedeps-core"
-version = "0.1.0"
+# The package's version: package.json is the source of truth, and the smoke
+# test holds this line and bin/safedeps to it.
+version = "2.18.1"
 edition = "2021"
-description = "The judgment core of the safedeps PreToolUse guard: the shell lexer, the install recognizers and the spec extractor"
+description = "The safedeps hooks' core: the shell lexer, the install recognizers, the spec extractor and what is being moved from the bash hooks"
+build = "build.rs"
 license = "Apache-2.0"
 publish = false
 

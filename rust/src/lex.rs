@@ -74,6 +74,55 @@ pub struct Side {
 #[derive(Debug)]
 pub struct UnknownView;
 
+/// One word of a statement, as the walk of the pieces view reads it: the
+/// bytes of the text it is written with, quotes included, and its value with
+/// the quoting removed. `start..end` is a range of the lexed text, from 0.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WordSpan {
+    pub start: usize,
+    pub end: usize,
+    pub value: Vec<u8>,
+}
+
+impl WordSpan {
+    /// The word as the shell readers of the pieces view read it back. The
+    /// view writes \002 for a blank, a parenthesis, a brace and the two record
+    /// separators inside a word, and \002 alone for an empty word; its
+    /// readers take \002 alone for an empty word and any other \002 for a
+    /// space. So a word that is one such byte (`{`, `' '`) reads back empty.
+    pub fn folded(&self) -> Vec<u8> {
+        let fold = |b: u8| matches!(b, b' ' | b'\t' | b'\n' | b'(' | b')' | b'{' | b'}' | 0x1e | 0x1f);
+        if self.value.len() == 1 && fold(self.value[0]) {
+            return Vec::new();
+        }
+        self.value.iter().map(|&b| if fold(b) { b' ' } else { b }).collect()
+    }
+}
+
+/// One statement of the text's own top level (a piece of the pieces view):
+/// `start..end` in the lexed text, and its words with the prefixes the
+/// recognizers strip and its redirections set aside, the command word first.
+/// An operator that stands in the statement (a parenthesis, a `<`) is no
+/// word.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PieceSpan {
+    pub nn: usize,
+    pub start: usize,
+    pub end: usize,
+    pub words: Vec<WordSpan>,
+}
+
+/// The statements of a text with where their words stand. It is the pieces
+/// view's own walk, so a word here is a word there. `unreadable` is that
+/// view's `!` line: a `$'...'` escape whose value the lexer cannot name.
+#[derive(Debug, Clone, Default)]
+pub struct Pieces {
+    pub pieces: Vec<PieceSpan>,
+    pub unreadable: bool,
+    /// The pieces view of the same lexing.
+    pub view: Vec<u8>,
+}
+
 pub struct Grammar {
     /// `^(executables|shells)$`, matched against a lowercased word.
     pub exre: Option<Regex>,
@@ -251,6 +300,7 @@ pub struct Lex<'g> {
     wantdep: bool,
     wantar: bool,
     out: Vec<u8>,
+    spans: Option<Vec<PieceSpan>>,
 }
 
 fn aqv(e: u8) -> Option<u8> {
@@ -399,6 +449,7 @@ impl<'g> Lex<'g> {
             wantdep,
             wantar,
             out: Vec::new(),
+            spans: None,
         }
     }
 
@@ -489,6 +540,30 @@ impl<'g> Lex<'g> {
 
     // ---- the lexing ---------------------------------------------------------
     pub fn run(mut self) -> Result<(Vec<u8>, Side), (UnknownView, Side)> {
+        let r = self.run_passes();
+        let side = Side { unterm: self.unterm, diverge: self.div, smfail: self.smfail };
+        match r {
+            Ok(()) => Ok((self.out, side)),
+            Err(e) => Err((e, side)),
+        }
+    }
+
+    /// The pieces view's lexing, with where each statement and each of its
+    /// words stands. The lexer must have been made for the `pieces` view.
+    pub fn run_pieces(mut self) -> Result<(Pieces, Side), (UnknownView, Side)> {
+        if self.view != "pieces" {
+            return Err((UnknownView, Side::default()));
+        }
+        self.spans = Some(Vec::new());
+        let r = self.run_passes();
+        let side = Side { unterm: self.unterm, diverge: self.div, smfail: self.smfail };
+        match r {
+            Ok(()) => Ok((Pieces { pieces: self.spans.take().unwrap_or_default(), unreadable: self.aqbad, view: self.out }, side)),
+            Err(e) => Err((e, side)),
+        }
+    }
+
+    fn run_passes(&mut self) -> Result<(), UnknownView> {
         let n = self.n;
         let mut i: I = 1;
         while i <= n {
@@ -577,11 +652,7 @@ impl<'g> Lex<'g> {
             }
             _ => self.emit(),
         };
-        let side = Side { unterm: self.unterm, diverge: self.div, smfail: self.smfail };
-        match r {
-            Ok(()) => Ok((self.out, side)),
-            Err(e) => Err((e, side)),
-        }
+        r
     }
 
     /// One byte of the main loop at `i`; returns the `i` the loop's own `i++`
@@ -3252,6 +3323,49 @@ impl<'g> Lex<'g> {
         }
     }
 
+    /// The words `pwords(a, z, false)` prints, with where each stands: the
+    /// same tests in the same order, so the two cannot read a word apart.
+    fn word_spans(&self, a: I, z: I) -> Vec<WordSpan> {
+        let mut out: Vec<WordSpan> = Vec::new();
+        let mut w = 0;
+        let mut ws: I = 0;
+        let mut we: I = 0;
+        let mut value: Vec<u8> = Vec::new();
+        let mut k = a;
+        while k <= z {
+            if self.a.has(k) {
+                k += 1;
+                continue;
+            }
+            let v = self.valb(k);
+            if self.drop.has(k) || self.gc.has(k) || v.is_none() && !self.rmb(k) && self.word_sep(k) {
+                if w != 0 {
+                    out.push(WordSpan { start: (ws - 1) as usize, end: we as usize, value: std::mem::take(&mut value) });
+                }
+                w = 0;
+                k += 1;
+                continue;
+            }
+            if w == 0 {
+                w = 1;
+                ws = k;
+            }
+            we = k;
+            if let Some(vb) = v {
+                value.push(vb);
+                w = 2;
+            } else if !self.rmb(k) {
+                value.push(self.xb(k));
+                w = 2;
+            }
+            k += 1;
+        }
+        if w != 0 {
+            out.push(WordSpan { start: (ws - 1) as usize, end: we as usize, value });
+        }
+        out
+    }
+
     fn precog(&mut self, a: I, z: I) {
         let mut k = a;
         while k <= z {
@@ -3281,6 +3395,12 @@ impl<'g> Lex<'g> {
         }
         if !any {
             return;
+        }
+        if self.spans.is_some() {
+            let words = self.word_spans(a, z);
+            if let Some(v) = self.spans.as_mut() {
+                v.push(PieceSpan { nn: nn as usize, start: (a - 1).max(0) as usize, end: z.max(a - 1).max(0) as usize, words });
+            }
         }
         self.put(nn.to_string().as_bytes());
         self.put1(0x1f);

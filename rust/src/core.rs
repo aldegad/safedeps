@@ -179,6 +179,19 @@ pub struct Facts {
     pub records: Vec<(String, W)>,
 }
 
+/// A text the command hands on, as the shell that runs it reads it: a script
+/// for `sh -c` (kind `S`) or `eval` (`E`), or the body of a substitution
+/// (`B`).
+#[derive(Debug, Clone)]
+pub struct Payload {
+    pub kind: u8,
+    pub text: W,
+    /// For each byte of `text`, the offset (from 0) in the text it was read
+    /// from of the byte it is; None for a byte the lexer decoded, which has
+    /// no one byte to stand for it.
+    pub src: Vec<Option<usize>>,
+}
+
 impl<'c> Run<'c> {
     pub fn new(c: &'c Core) -> Run<'c> {
         Run { c, reading: None, diverge: false, failed: false }
@@ -235,6 +248,81 @@ impl<'c> Run<'c> {
             }
         }
         out
+    }
+
+    /// The texts `text` hands on at its own top level, each with where its
+    /// bytes stand in `text`: the scripts it gives `sh -c` and `eval` (the
+    /// cscripts view) and the bodies of its substitutions (the substs view).
+    /// One level: a payload's own payloads are read by asking this of the
+    /// payload. The records are the ones `lex_payloads` reads, so a payload
+    /// here is byte for byte a payload there.
+    pub fn payloads(&mut self, text: &[u8]) -> Vec<Payload> {
+        let mut res = Vec::new();
+        for view in ["cscripts", "substs"] {
+            let Some(out) = self.lex(text, view) else { continue };
+            let out = subst(out);
+            for rec in herestring_lines(&out) {
+                if rec.is_empty() {
+                    continue;
+                }
+                if rec == b"!" {
+                    self.failed = true;
+                    continue;
+                }
+                if rec.iter().any(|&b| !(b"BSE:# ".contains(&b) || b.is_ascii_digit())) || !matches!(rec[0], b'B' | b'S' | b'E') {
+                    self.failed = true;
+                    continue;
+                }
+                let mut p = Payload { kind: rec[0], text: W::new(), src: Vec::new() };
+                for tok in ifs_words(&rec[1..]) {
+                    if let Some((a, n)) = parse_range(&tok) {
+                        if a + n - 1 > text.len() as u64 {
+                            self.failed = true;
+                            continue;
+                        }
+                        let from = (a - 1) as usize;
+                        p.text.extend_from_slice(&text[from..from + n as usize]);
+                        p.src.extend((from..from + n as usize).map(Some));
+                    } else if let Some(bytes) = parse_codes(&tok) {
+                        p.src.extend(bytes.iter().map(|_| None));
+                        p.text.extend_from_slice(&bytes);
+                    } else {
+                        self.failed = true;
+                    }
+                }
+                res.push(p);
+            }
+        }
+        res
+    }
+
+    /// The statements of `text`'s own top level and where their words stand
+    /// (`lex::Pieces`), and whether the text ends inside a quote or a
+    /// construct (the lexer's UNTERM). None where the lexing fails, which is
+    /// a failed reading.
+    pub fn pieces(&mut self, text: &[u8]) -> Option<(lex::Pieces, bool)> {
+        let Some(rd) = self.reading else {
+            self.failed = true;
+            return None;
+        };
+        match Lex::new(&self.c.g, text, "pieces", rd).run_pieces() {
+            Ok((p, side)) => {
+                if side.smfail {
+                    self.failed = true;
+                }
+                if side.diverge {
+                    self.diverge = true;
+                }
+                Some((p, side.unterm))
+            }
+            Err((_, side)) => {
+                if side.diverge {
+                    self.diverge = true;
+                }
+                self.failed = true;
+                None
+            }
+        }
     }
 
     /// `lex_payloads`: (kind, payload) for each record.
