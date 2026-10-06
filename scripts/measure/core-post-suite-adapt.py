@@ -7,7 +7,21 @@ listed separately until their probe adapter is supplied.
 """
 import json
 from pathlib import Path
+import shlex
 import sys
+
+def direct_calls(text,core):
+    for variable,kind,project,extra in [
+        ('nofile','missing','${tmp_root}/no-such-project',' --log-body "${nofile_log}"'),
+        ('unresolved','unresolved','${unresolved_dir}',''),
+    ]:
+        start=text.index(variable+'_lines=$(\n')
+        end=text.index('\n)\noracle_direct',start)+2
+        replacement=(variable+'_lines=$('+shlex.quote(sys.executable)+' "${ROOT_DIR}/scripts/measure/core-post-direct-call.py" --core '
+                     +shlex.quote(str(core))+' --meta "${'+variable+'_meta}" --input "${'+variable+'_input}"'
+                     +' --project "'+project+'" --kind '+kind+extra+')')
+        text=text[:start]+replacement+text[end:]
+    return text
 
 def adapt(tree,core,walk_core,owner_core,coarse_core,run):
     path=tree/'scripts/test/e2e.sh';text=path.read_text();edits=[]
@@ -24,6 +38,8 @@ def adapt(tree,core,walk_core,owner_core,coarse_core,run):
             'native integer API has no garbage lstart parser; zero response injected in a source copy')
     replace('rmfail_post=$(PATH=', 'printf "held fixture bytes\\n" > "${rmfail_wt}/node_modules/installed-package/held"\nrmfail_post=$(PATH=',
             'a nonempty readonly child makes removal fail under native I/O')
+    text=direct_calls(text,core)
+    edits.append(dict(reason='the two direct fact rows call the native fact probes; original oracle and assertions retained'))
     path.write_text(text)
     argv=[sys.executable,str(tree/'scripts/measure/core-post-native-hook.py'),'--core',str(core),
           '--walk-core',str(walk_core),'--owner-core',str(owner_core),'--coarse-core',str(coarse_core),
@@ -33,4 +49,4 @@ def adapt(tree,core,walk_core,owner_core,coarse_core,run):
     wrapper.chmod(0o755)
     (run/'fixture-adapters.json').write_text(json.dumps(dict(edits=edits,
         absent_native_path=['ps garbage lstart parsing'],
-        still_bash=['pre hook','oracle_direct missing-meta fact','oracle_direct unresolved path fact']),indent=2)+'\n')
+        still_bash=['pre hook']),indent=2)+'\n')

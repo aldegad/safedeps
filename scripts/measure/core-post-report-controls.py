@@ -85,7 +85,7 @@ cases={
    'report.rebuild(home,&meta,input,&cat(&[b"did not run npm rebuild: ",&why]));report.say(b"The verified packages\' install scripts have not run");',
    'a line outside the grammar'),
  'RefuseSilent':('fault','restore-link','rollback.rs',
-   'b": ",why]);self.report.say(&line);', 'b": ",why]);',
+   'let line=report::refused(kind,path,why);self.report.say(&line);', 'let line=report::refused(kind,path,why);',
    'the reorg.log entries this hook appended are not the ones its message calls for'),
  'LogSilent':('fault','confirm-clean','run.rs',
    'if report.lines.is_empty() { return Ok(None) }',

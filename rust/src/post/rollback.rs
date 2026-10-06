@@ -26,7 +26,7 @@ impl<'a> Rollback<'a>{
     }
     fn refuse(&mut self,kind:&[u8],path:&std::path::Path,why:&[u8]){
         if !self.refused.insert(cat(&[kind,b" of ",sh::bytes(path)])){return}
-        let line=cat(&[b"refused ",kind,b" of ",sh::bytes(path),b": ",why]);self.report.say(&line);
+        let line=report::refused(kind,path,why);self.report.say(&line);
         state::log_advisory(&self.store.home,&cat(&[b"post-verify REORG REFUSED: ",&line,b" -- project ",sh::bytes(&self.store.project)]));
         sh::append(&self.store.home.join("reorg.log"),&cat(&[b"[",os::utc_stamp(os::now().0).as_bytes(),b"] REORG REFUSED\n  Project: ",sh::bytes(&self.store.project),b"\n  ",&line,b"\n"]));
     }

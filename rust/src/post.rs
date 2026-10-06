@@ -108,6 +108,11 @@ pub fn probe(input: &[u8]) -> i32 {
                 b"remove" => r.remove(&path),
                 b"inert" => r.inert(&crate::state::guard_dir(), &path, bytes("input")),
                 b"rebuild" => r.rebuild(&crate::state::guard_dir(), &path, bytes("input"), bytes("fact")),
+                b"refuse-outside" => {
+                    if let Some(why)=report::outside(&sh::p(bytes("project")), &path) {
+                        r.say(report::refused(bytes("kind"), &path, &why));
+                    }
+                },
                 b"workspaces" => r.workspaces_key(&path),
                 _ => return 2,
             }
