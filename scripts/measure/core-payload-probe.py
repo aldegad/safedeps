@@ -55,7 +55,7 @@ for reading in ['bash','zsh','dash']:
         inner=json.loads(subprocess.run([core,'payloads'],input=first[0]['text'].encode(),env=env,capture_output=True).stdout)['payloads']
         ok=len(inner)==1 and inner[0]['text']=='npm ci'
         if ok:
-            composed=[first[0]['src'][pos] for pos in inner[0]['src']]
+            composed=[first[0]['src'][pos] if pos is not None else None for pos in inner[0]['src']]
             ok=composed==list(range(nested.index('npm'),nested.index('npm')+6))
     count+=1; bad+=not ok
     print(('ok ' if ok else 'DIFF ')+reading+'/one-level',flush=True)
@@ -71,8 +71,19 @@ for reading in ['bash','zsh','dash']:
         for command in ['echo $(( $(npm ci) + 1 ))','echo $(( `npm ci` + 1 ))']:
             if trace.exists(): trace.unlink()
             actual=subprocess.run([shell_path],input=command.encode(),env=shell_env,capture_output=True)
-            count+=1; ok=actual.returncode==0 and actual.stdout==b'3\n' and trace.read_bytes()==b'ci\n'; bad+=not ok
+            count+=1; ok=actual.returncode==0 and actual.stdout==b'3\n' and trace.exists() and trace.read_bytes()==b'ci\n'; bad+=not ok
             print(('ok ' if ok else 'DIFF ')+reading+'/arithmetic-shell-argv',flush=True)
+        # The exact shell-reading corpus row whose old lexer gave a quote
+        # inside arithmetic the outer reading's treatment. The private pip
+        # records whether that reading exposes the following install.
+        pip=Path(tmp,'pip'); pip.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$PAYLOAD_ARGV"\n'); pip.chmod(0o700)
+        quoted='(( x = $(echo ")" | wc -c) <<2 ))\npip install evil==6.6.6\n2\n'
+        if trace.exists(): trace.unlink()
+        actual=subprocess.run([shell_path],input=quoted.encode(),env=shell_env,capture_output=True)
+        got=trace.read_bytes() if trace.exists() else None
+        expected=None if reading=='dash' else b'install\nevil==6.6.6\n'
+        count+=1; ok=got==expected; bad+=not ok
+        print(('ok ' if ok else 'DIFF ')+reading+'/quoted-arithmetic-shell-argv',flush=True)
     actual=subprocess.run([shell_path],input=b"printf '%s\\n' $'n\\x70m ci'",capture_output=True)
     expected=b'$n\\x70m ci\n' if reading=='dash' else b'npm ci\n'
     count+=1; ok=actual.returncode==0 and actual.stdout==expected; bad+=not ok

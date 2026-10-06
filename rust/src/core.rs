@@ -139,6 +139,19 @@ pub fn read_fields(line: &[u8], ifs: &[u8], n: usize) -> Vec<W> {
         while e > p && ws(line[e - 1]) {
             e -= 1;
         }
+        // When exactly one field remains, read assigns that word, without
+        // its separator. With more fields than names it keeps the complete
+        // remainder instead: IFS=: read a on a: -> a, on a:: -> a::.
+        let word_end=(p..line.len()).find(|&i|ifs.contains(&line[i])).unwrap_or(line.len());
+        let mut next=word_end;
+        if next<line.len() {
+            if ws(line[next]) {
+                while next<line.len()&&ws(line[next]){next+=1}
+                if next<line.len()&&nws(line[next]){next+=1}
+            }else{next+=1}
+            while next<line.len()&&ws(line[next]){next+=1}
+        }
+        if next==line.len(){e=word_end;}
         out.push(if p <= e { line[p..e].to_vec() } else { W::new() });
     }
     while out.len() < n {
@@ -149,7 +162,7 @@ pub fn read_fields(line: &[u8], ifs: &[u8], n: usize) -> Vec<W> {
 
 /// bash `IFS=<c> read -ra a <<< "$s"` for a non-blank separator: the first
 /// line cut at every separator, a trailing one giving no empty field.
-fn read_array(s: &[u8], sep: u8) -> Vec<W> {
+pub(crate) fn read_array(s: &[u8], sep: u8) -> Vec<W> {
     let line = s.split(|&b| b == b'\n').next().unwrap_or(b"");
     if line.is_empty() {
         return vec![];
@@ -162,7 +175,7 @@ fn read_array(s: &[u8], sep: u8) -> Vec<W> {
 }
 
 /// Words as `( ${x} )` splits them with the default IFS.
-fn ifs_words(s: &[u8]) -> Vec<W> {
+pub(crate) fn ifs_words(s: &[u8]) -> Vec<W> {
     s.split(|&b| b == b' ' || b == b'\t' || b == b'\n').filter(|w| !w.is_empty()).map(|w| w.to_vec()).collect()
 }
 
@@ -175,8 +188,21 @@ pub struct Run<'c> {
     pub failed: bool,
 }
 
+pub struct TargetStatement {
+    pub before: W, pub text: W, pub after: W, pub tokens: Vec<W>,
+    pub words: W, pub uwords: W, pub rec: W,
+}
+impl TargetStatement {
+    pub fn fields(&self)->W { [self.rec.as_slice(), &[0x1f], &self.uwords].concat() }
+    pub fn manager_words(&self)->Vec<W> {
+        ifs_words(&self.words.iter().map(|&b|if b"(){}".contains(&b){b' '}else{b}).collect::<W>())
+    }
+}
+
 pub struct Facts {
     pub records: Vec<(String, W)>,
+    pub hidden: [bool; 3],
+    pub piped: bool,
 }
 
 pub use crate::lex::{Payload, PayloadOrigin};
@@ -470,12 +496,10 @@ impl<'c> Run<'c> {
         statements_of(&cuts, &raw)
     }
 
-    /// The statements' kinds and fields, `resolve_reading_targets` as far as
-    /// the extractor reads it: the kind that says whether the effect gate
-    /// reads a statement (npm), and the statement's recognize bytes and
-    /// unprefixed words. Where npm's answer could move an install out of both
-    /// lockfiles (an .npmrc), stage 1 does not ask.
-    pub fn targets(&mut self, cmd: &[u8]) -> Vec<(String, W)> {
+    /// Statement and piece fields from the same original command, joined by
+    /// their lexer ordinal. Both the pure facts and pre's disk questions use
+    /// this structure; neither lexes a reconstructed statement.
+    pub fn target_statements(&mut self, cmd: &[u8]) -> Vec<TargetStatement> {
         let statements = subst(self.statements(cmd));
         let pieces = subst(self.lex(cmd, "pieces").unwrap_or_default());
         let mut words: std::collections::HashMap<usize, W> = Default::default();
@@ -495,19 +519,24 @@ impl<'c> Run<'c> {
             uwords.insert(n, f[3].clone());
             recs.insert(n, f[4].clone());
         }
+        herestring_lines(&statements).into_iter().enumerate().map(|(i,line)| {
+            let f=read_fields(line, &[0x1d], 5);
+            let n=i+1;
+            TargetStatement { before:f[0].clone(), text:f[1].clone(), after:f[2].clone(),
+                tokens:read_array(&f[3],0x1f), words:words.remove(&n).unwrap_or_default(),
+                uwords:uwords.remove(&n).unwrap_or_default(), rec:recs.remove(&n).unwrap_or_default() }
+        }).collect()
+    }
+
+    /// Pure target kinds used by the command facts; disk answers belong to pre.
+    pub fn targets(&mut self, cmd: &[u8]) -> Vec<(String, W)> {
+        let statements=self.target_statements(cmd);
         let mut out = Vec::new();
-        let mut n = 0usize;
         let mut rd = Reader::new(&self.c.mrx);
-        for line in herestring_lines(&statements) {
-            n += 1;
-            let f = read_fields(line, &[0x1d], 5);
-            let wordsf = &f[3];
+        for statement in statements {
             let mut kind = "-".to_string();
             'one: loop {
-                if wordsf.is_empty() {
-                    break;
-                }
-                let mut toks = read_array(wordsf, 0x1f);
+                let mut toks = statement.tokens.clone();
                 if toks.is_empty() {
                     break;
                 }
@@ -536,11 +565,11 @@ impl<'c> Run<'c> {
                 if assign_word(&toks[0]) && toks.iter().all(|t| assign_word(t)) {
                     break;
                 }
-                let rec = recs.get(&n).cloned().unwrap_or_default();
+                let rec = &statement.rec;
                 if !self.recognized(&rec) {
                     break;
                 }
-                let pw = words.get(&n).cloned().unwrap_or_default();
+                let pw = &statement.words;
                 let pw: W = pw.iter().map(|&b| if matches!(b, b'(' | b')' | b'{' | b'}') { b' ' } else { b }).collect();
                 let mw = ifs_words(&pw);
                 kind = "other".into();
@@ -558,9 +587,11 @@ impl<'c> Run<'c> {
                 }
                 break;
             }
-            let mut fields = recs.get(&n).cloned().unwrap_or_default();
-            fields.push(0x1f);
-            fields.extend_from_slice(&uwords.get(&n).cloned().unwrap_or_default());
+            // The caller reads these from the resolver's five-field record.
+            // In particular, a sole final record separator is consumed by
+            // read, even when it came from a quoted byte in the command.
+            let record=[b"\x1d\x1d\x1d\x1d".as_slice(),&statement.fields()].concat();
+            let fields=read_fields(&record,&[0x1d],5).pop().unwrap_or_default();
             out.push((kind, fields));
         }
         out
@@ -640,6 +671,13 @@ impl<'c> Run<'c> {
 
     // ---- the driver -------------------------------------------------------------------
     pub fn facts(&mut self, cmd: &[u8]) -> Facts {
+        self.facts_with(cmd, |run| run.targets(cmd))
+    }
+
+    /// One reading driver for the pure comparison and the pre hook. The
+    /// caller supplies the target records; detection, spec extraction and
+    /// bringing in diverging readings remain the same operation.
+    pub fn facts_with(&mut self, cmd: &[u8], mut resolve: impl FnMut(&mut Self) -> Vec<(String, W)>) -> Facts {
         let mut rec: Vec<(String, W)> = Vec::new();
         let mut set: Vec<Reading> = Vec::new();
         let mut closed = false;
@@ -691,7 +729,7 @@ impl<'c> Run<'c> {
         rec.push(("piped".into(), tf(piped)));
         rec.push(("failed.detect".into(), tf(self.failed)));
         if !any {
-            return Facts { records: rec };
+            return Facts { records: rec, hidden, piped };
         }
         struct Per {
             eco: String,
@@ -702,9 +740,9 @@ impl<'c> Run<'c> {
         let mut ledger_eco = String::new();
         let mut ledger_specs: Vec<W> = Vec::new();
         let mut unreduced = false;
-        let mut facts_of = |run: &mut Run, r: Reading, per: &mut Vec<(Reading, Per)>, hidden: &[bool; 3]| {
+        let mut facts_of = |run: &mut Self, r: Reading, per: &mut Vec<(Reading, Per)>, hidden: &[bool; 3]| {
             run.reading = Some(r);
-            let targets = run.targets(cmd);
+            let targets = resolve(run);
             let eco = run.detect_ecosystem(cmd);
             if ledger_eco.is_empty() {
                 ledger_eco = eco.clone();
@@ -764,7 +802,7 @@ impl<'c> Run<'c> {
         }
         rec.push(("ledger_specs".into(), ls));
         rec.push(("failed.facts".into(), tf(self.failed)));
-        Facts { records: rec }
+        Facts { records: rec, hidden, piped }
     }
 }
 
@@ -1263,3 +1301,25 @@ pub fn command_of_payload(input: &[u8]) -> Option<(String, W)> {
 
 #[allow(dead_code)]
 fn unused(_: &manager::Regexes) {}
+
+#[cfg(test)]
+mod field_tests {
+    use super::read_fields;
+    #[test]
+    fn final_field_keeps_only_extra_separators() {
+        // Bash 3.2 read -r, with a nonblank IFS and one/two destinations.
+        for (input,one,two) in [
+            ("a","a",["a",""]), ("a:","a",["a",""]),
+            ("a::","a::",["a",""]), ("a:b:","a:b:",["a","b"]),
+            ("a:b::","a:b::",["a","b::"]), ("a:b:c:","a:b:c:",["a","b:c:"]),
+            (":","",["",""]), ("::","::",["",""]), ("a::b:","a::b:",["a",":b:"]),
+        ] {
+            assert_eq!(read_fields(input.as_bytes(),b":",1),vec![one.as_bytes().to_vec()],"one {input:?}");
+            assert_eq!(read_fields(input.as_bytes(),b":",2),two.iter().map(|s|s.as_bytes().to_vec()).collect::<Vec<_>>(),"two {input:?}");
+        }
+        for (tail,expected) in [("\x1d",""),("\x1d\x1d","\x1d\x1d"),("a\x1d","a"),("a\x1db\x1d","a\x1db\x1d")] {
+            let raw=format!("-\x1d\x1d\x1d\x1decho \x1fecho {tail}");
+            assert_eq!(read_fields(raw.as_bytes(),&[0x1d],5)[4],format!("echo \x1fecho {expected}").as_bytes());
+        }
+    }
+}

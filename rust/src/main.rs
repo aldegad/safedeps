@@ -420,12 +420,16 @@ fn main() {
         },
         // The hooks take the subcommand and nothing else: no argument and no
         // environment variable chooses how one judges.
+        Some("pre") if args.len() == 3 && args[2] == "--budget-child" => match read_stdin() {
+            Some(input) => pre::main(&input, true),
+            None => 2,
+        },
         Some("pre") if args.len() > 2 => {
             println!("{}", jq::deny("safedeps: the PreToolUse hook was started with an argument, and it takes none. Bash is blocked fail-closed until the hook is registered as safedeps installs it: node scripts/install/install-safedeps-hooks.mjs"));
             0
         }
         Some("pre") => match read_stdin() {
-            Some(input) => pre::main(&input),
+            Some(input) => pre::main(&input, false),
             None => 2,
         },
         Some("post") => match read_stdin() {
@@ -434,6 +438,10 @@ fn main() {
         },
         Some("post-probe") => match read_stdin() {
             Some(input) => post::probe(&input),
+            None => 2,
+        },
+        Some("pre-probe") => match read_stdin() {
+            Some(input) => pre::probe(&input),
             None => 2,
         },
         Some("ledger") => match read_stdin() {

@@ -1,11 +1,10 @@
 //! `safedeps-core pre`: the PreToolUse hook.
 //!
-//! What is here is the path of a command that is not an install: reading the
-//! payload, the truth-source notice, the self budget and its deadline, the
-//! detection in each reading, the settlement of a failed reading, and the
-//! backstop's trace baseline. A command the detection reads as an install is
-//! not judged yet: this says so on stderr and exits 2, and
-//! `scripts/safedeps-pre-guard.sh` stays the hook until it is.
+//! The common entry owns payload reading, truth-source notices, the deadline
+//! and scan settlement. Codex installs use the shared target, snapshot,
+//! ledger and pending-state path. The Claude install path still awaits B's
+//! verified rewrite implementation and exits 2. The installed hook remains
+//! `scripts/safedeps-pre-guard.sh` until integration is complete.
 //!
 //! Each step stands for the step of the bash guard named in its comment, and
 //! prints what that step prints. The differences are the ones a process
@@ -16,7 +15,6 @@ use crate::ere::Regex;
 use crate::grammar;
 use crate::jq;
 use crate::json::{self, Value};
-use crate::lex::Reading;
 use crate::{callid, md5, os, state};
 use std::io::Write;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
@@ -24,6 +22,22 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 type W = Vec<u8>;
+mod budget;
+mod snapshot;
+mod targets;
+mod pending;
+mod readings;
+mod effects;
+mod install;
+pub fn probe(input:&[u8])->i32 {
+    match json::parse_one(input).ok().and_then(|v|v.get("op").and_then(Value::as_str).map(str::to_string)).as_deref() {
+        Some("targets"|"target-statements")=>targets::probe(input),
+        Some("readings")=>readings::probe(input),
+        Some("install-codex")=>install::probe(input),
+        Some("invoke-quote")=>install::quote_probe(input),
+        _=>snapshot::probe(input),
+    }
+}
 
 const RUNTIME_BUDGET_SECONDS: u64 = 30;
 const SELF_BUDGET_MAX_SECONDS: u64 = 25;
@@ -263,7 +277,7 @@ fn backstop_trace_baseline(call: &Call, cwd: &[u8]) {
     let trace = os::path(&trace_text);
     // `touch`: made when it is not there, and its times set to now either way.
     let touched = std::fs::OpenOptions::new().create(true).append(true).mode(0o600).open(&trace).and_then(|f| {
-        let now = SystemTime::now();
+        let now = os::wall(os::WallRole::BackstopTouch).system_time();
         f.set_times(std::fs::FileTimes::new().set_accessed(now).set_modified(now))
     });
     if touched.is_err() {
@@ -273,7 +287,7 @@ fn backstop_trace_baseline(call: &Call, cwd: &[u8]) {
     if present > 0 && subsecond == present && os::clock_has_subsecond(&os::file_clock(&trace, b'm', false)) {
         resolution = "subsecond";
     } else {
-        let (now, _) = os::now();
+        let now = os::wall(os::WallRole::BackstopFallback).seconds();
         let at = SystemTime::UNIX_EPOCH + Duration::from_secs((now - 2).max(0) as u64);
         let set = std::fs::OpenOptions::new().append(true).open(&trace).and_then(|f| f.set_times(std::fs::FileTimes::new().set_accessed(at).set_modified(at)));
         if set.is_err() {
@@ -320,8 +334,8 @@ fn shell_pwd() -> W {
     std::env::current_dir().map(|p| p.into_os_string().into_vec()).unwrap_or_default()
 }
 
-/// The judgment of one command, from the detection on. `Err(())` is an
-/// install: the part of the hook that judges one is not written.
+/// The shared reading driver detects once and obtains facts only for an
+/// install. Err marks the still-unintegrated Claude rewrite path.
 fn judge(call: &Call) -> Result<Out, ()> {
     let mut out = Out::default();
     let core = Core::new();
@@ -330,31 +344,11 @@ fn judge(call: &Call) -> Result<Out, ()> {
     if cwd.is_empty() {
         cwd = shell_pwd();
     }
-    let mut closed = false;
-    let mut any_install = false;
-    let mut detect = |run: &mut Run, r: Reading| {
-        run.reading = Some(r);
-        if run.command_reads(&call.command) {
-            closed = true;
-        }
-        if run.is_install(&call.command) {
-            any_install = true;
-            let _ = run.pipes_install_to_shell(&call.command);
-        } else if run.hides_install(&call.command) {
-            any_install = true;
-        }
-        run.reading = None;
-    };
-    detect(&mut run, Reading::Bash);
-    if run.diverge {
-        detect(&mut run, Reading::Zsh);
-        detect(&mut run, Reading::Dash);
-    }
-    if !closed {
-        run.failed = true;
-    }
-    if any_install {
-        return Err(());
+    let read = readings::Readings::collect(&mut run, &call.command, &cwd);
+    if read.yes("any_install") {
+        if call.input.get("turn_id").is_none() { return Err(()) }
+        return Ok(install::judge(call, &mut run, &cwd, &read,
+            |_,_| unreachable!("Codex must not ask for a rewrite")));
     }
     if settle_scan_failure(call, run.failed, &mut out) {
         return Ok(out);
@@ -371,7 +365,7 @@ fn emit(out: &Out) -> i32 {
     out.code
 }
 
-const NOT_WRITTEN: &str = "safedeps-core pre: this command reads as a dependency install, and the part of the hook that judges one is not written yet. scripts/safedeps-pre-guard.sh is the PreToolUse hook.";
+const NOT_WRITTEN: &str = "safedeps-core pre: this Claude install needs the inert rewrite implementation, which is not integrated yet. scripts/safedeps-pre-guard.sh is the PreToolUse hook.";
 
 /// A stale checkout can settle only the existing unscanned-manager question.
 /// It never calls the old judgment or creates a snapshot, pending record or
@@ -406,7 +400,7 @@ fn stale(input: &[u8], why: &str, guard: &Path) -> i32 {
     0
 }
 
-pub fn main(input: &[u8]) -> i32 {
+pub fn main(input: &[u8], budget_child: bool) -> i32 {
     let started = Instant::now();
     // `umask 077; mkdir -p "$GUARD_DIR" "$SNAPSHOT_DIR"`, before anything is read.
     os::set_umask(0o077);
@@ -438,7 +432,7 @@ pub fn main(input: &[u8]) -> i32 {
 
     // `safedeps_guard_announce_truth_sources`
     let moved = state::truth_sources_moved();
-    if !moved.is_empty() {
+    if !budget_child && !moved.is_empty() {
         state::log_advisory(
             &guard_dir,
             &cat(&[b"pre-guard: advisory truth source moved: ", &moved, " — this run did not judge against the canonical sources.".as_bytes()]),
@@ -453,8 +447,8 @@ pub fn main(input: &[u8]) -> i32 {
     let call = Call { input: payload, command, guard: state::guard_text(), guard_dir: guard_dir.clone() };
     let mut err = std::io::stderr().lock();
 
-    if size < engage.value || disabled {
-        if disabled && size >= engage.value {
+    if size < engage.value || disabled || budget_child {
+        if disabled && size >= engage.value && !budget_child {
             state::log_advisory(&guard_dir, format!("pre-guard: SAFEDEPS_BUDGET_DISABLED is set — the self-budget deadline is OFF for this command ({} bytes). Past the {}s runtime hook budget this gate is killed and the install proceeds unjudged.", size, RUNTIME_BUDGET_SECONDS).as_bytes());
             let _ = writeln!(err, "safedeps: SAFEDEPS_BUDGET_DISABLED is set, so the self-budget deadline is OFF for this command. The judgment now runs with no deadline of its own, and past the {}s runtime hook budget the runtime kills this gate and the install proceeds unjudged. Unset it to restore the gate.", RUNTIME_BUDGET_SECONDS);
         }
@@ -518,40 +512,12 @@ pub fn main(input: &[u8]) -> i32 {
     }
     drop(err);
 
-    // The judgment runs beside the deadline, and the deadline is read from
-    // the clock, from when this process started. The bash guard spawns itself
-    // as a child for this and kills the child's tree; here the judgment is a
-    // thread, and the process ending is what stops it. Nothing the judgment
-    // has to say is written until it has finished.
-    let (tx, rx) = std::sync::mpsc::channel::<Result<Out, ()>>();
-    let deadline = Duration::from_secs(budget.value);
-    let left = deadline.saturating_sub(started.elapsed());
-    // With no time left there is no judgment to start: the guard's first
-    // look at the clock ends its child.
-    let worker = if left.is_zero() {
-        drop(tx);
-        None
-    } else {
-        Some(std::thread::spawn(move || {
-            let r = judge(&call);
-            let _ = tx.send(r);
-        }))
-    };
-    match rx.recv_timeout(left) {
-        Ok(Ok(out)) => {
-            if let Some(w) = worker {
-                let _ = w.join();
-            }
-            emit(&out)
-        }
-        Ok(Err(())) => {
-            eprintln!("{}", NOT_WRITTEN);
-            2
-        }
-        Err(_) => {
-            // 143 is what the guard records for a judgment it stopped: the
-            // status of a child ended by its TERM.
-            state::log_advisory(&guard_dir, format!("pre-guard DENY: judgment unfinished within the {}s self-budget (command {} bytes, child rc=143) — fail-closed, not a detection.", budget.value, size).as_bytes());
+    // The parent owns the deadline and the child's process group. A thread
+    // cannot clean up npm's children when this process exits at the deadline.
+    match budget::run(&input, started + Duration::from_secs(budget.value)) {
+        Ok(out) => emit(&out),
+        Err(code) => {
+            state::log_advisory(&guard_dir, format!("pre-guard DENY: judgment unfinished within the {}s self-budget (command {} bytes, child rc={}) — fail-closed, not a detection.", budget.value, size, code).as_bytes());
             let mut clamp = W::new();
             if !budget.clamped_from.is_empty() {
                 clamp = format!(" Your SAFEDEPS_SELF_BUDGET_SECONDS={} was clamped to the {}s ceiling: above it the {}s runtime hook budget kills this gate mid-judgment and the install runs unjudged, so raising it removes the check rather than extending it.", b(&budget.clamped_from), SELF_BUDGET_MAX_SECONDS, RUNTIME_BUDGET_SECONDS).into_bytes();
@@ -567,9 +533,7 @@ pub fn main(input: &[u8]) -> i32 {
                 jq::obj(vec![("hookEventName", jq::s("PreToolUse")), ("permissionDecision", jq::s("deny")), ("permissionDecisionReason", jq::arg(&reason))]),
             )]));
             println!("{}", answer);
-            // The judgment is still running; leaving ends it.
-            let _ = std::io::stdout().flush();
-            std::process::exit(0);
+            0
         }
     }
 }
