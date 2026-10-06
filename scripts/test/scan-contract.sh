@@ -609,6 +609,12 @@ pass "control: mutated spec diverges on ${control_hit}/${fuzz_cases} inputs, so 
 scan_view() { shell_lex "$1" scan "safedeps:scan-contract"; }
 code_view() { shell_lex "$1" code "safedeps:scan-contract"; }
 noredir_view() { shell_lex "$1" noredir "safedeps:scan-contract"; }
+# The cmdword and noprefix views are read as offsets too (inert_flag_offsets
+# reads the bytes before a verb's offset in cmdword, inert_dynamic_in reads
+# noprefix beside the classes view), so they keep the byte length; neither is
+# read again, so idempotence is not asked of them.
+cmdword_view() { shell_lex "$1" cmdword "safedeps:scan-contract"; }
+noprefix_view() { shell_lex "$1" noprefix "safedeps:scan-contract"; }
 stmts_view() { shell_lex "$1" stmts "safedeps:scan-contract"; }
 unprefixed_view() { shell_lex "$1" unprefixed "safedeps:scan-contract"; }
 events_view() { shell_lex "$1" events "safedeps:scan-contract"; }
@@ -661,6 +667,13 @@ check_view_properties() { # input label
         property_failures=$((property_failures + 1))
       fi
     done
+    for v in cmdword_view noprefix_view; do
+      once=$(SAFEDEPS_READING="${reading}" "${v}" "${x}"; printf 'X'); once="${once%X}"
+      if [[ "$(byte_len "${once}")" != "$(byte_len "${x}")" ]]; then
+        printf 'length: %s (%s) changed the length of [%q] (%s)\n' "${v}" "${reading}" "${x}" "$2" >&2
+        property_failures=$((property_failures + 1))
+      fi
+    done
     # The starts, as events and as the recognizers read them: the
     # cross-reading check only.
     for v in events_view recognize_view; do
@@ -698,7 +711,7 @@ for ((c = 0; c < fuzz_cases; c++)); do
 done
 [[ ${property_failures} -eq 0 ]] || fail "view properties: ${property_failures} violation(s) (seed ${fuzz_seed})"
 rm -f "${diverge_file}"
-pass "view properties: scan, code, noredir and stmts keep length and are idempotent in the bash, zsh and dash readings, and they and the starts (events, recognize) read as bash wherever bash says no DIVERGE, on ${form_count} shell forms and ${fuzz_cases} random inputs (stmts: ${stmts_unterm} unclosed readings not asked)"
+pass "view properties: scan, code, noredir and stmts keep length and are idempotent, cmdword and noprefix keep length, in the bash, zsh and dash readings, and they and the starts (events, recognize) read as bash wherever bash says no DIVERGE, on ${form_count} shell forms and ${fuzz_cases} random inputs (stmts: ${stmts_unterm} unclosed readings not asked)"
 
 # --- payload records ------------------------------------------------------------
 # The payload views (cscripts, substs) print where each payload lies in the
@@ -2314,13 +2327,18 @@ lex_trace_check() {
     LEX_VIEWS_SEEN+=" ${view} $(cat "${f%.in}.marker") "
     # shell_lex hands the awk the text and a newline.
     text=$(cat "${f}"; printf 'X'); text="${text%X}"; text="${text%$'\n'}"
+    # The one reader that lexes a text it built (inert_dynamic_command_word:
+    # the byte rule's quote-removed levels), after the command and every
+    # payload were read, where a finding can only add a record. Counted, so
+    # the exception stays one that is still made.
+    if [[ "$(cat "${f%.in}.marker")" == "safedeps:inert_rewrite_in_place_levels" ]]; then LEX_LEVELS_SEEN=$((LEX_LEVELS_SEEN + 1)); continue; fi
     lex_text_allowed "${text}" && continue
     if [[ -n "${LEX_KNOWN:-}" && "${text}" == "${LEX_KNOWN}" ]]; then LEX_KNOWN_SEEN=$((LEX_KNOWN_SEEN + 1)); continue; fi
     LEX_BAD+="${view} of [${text}] in [${command}]"$'\n'
   done
   rm -rf "${trace}"
 }
-LEX_VIEWS_SEEN="" LEX_BAD="" LEX_KNOWN="" LEX_KNOWN_SEEN=0
+LEX_VIEWS_SEEN="" LEX_BAD="" LEX_KNOWN="" LEX_KNOWN_SEEN=0 LEX_LEVELS_SEEN=0
 gs=$'\035'
 lex_form_count=0
 lex_form() { lex_form_count=$((lex_form_count + 1)); lex_trace_check "$@"; }
@@ -2358,7 +2376,12 @@ lex_form "sh -c \"sh -c 'echo ${gs}; pip install evil==6.6.6'\"" "sh -c 'echo ${
 lex_form "sh -c 'x=\$(echo \"${gs}\"; pip install evil==6.6.6)'" "x=\$(echo \"${gs}\"; pip install evil==6.6.6)" "echo \"${gs}\"; pip install evil==6.6.6"
 lex_form $'sh -c $\'echo a\\npip install evil==6.6.6\'' $'echo a\npip install evil==6.6.6'
 lex_form "sh -c 'x=\$(npm ci)'" 'x=$(npm ci)' 'npm ci'
+# A quoted byte the shell reads as an operator once a handed-on script removes
+# the quotes: the inert record reads the byte rule's levels (the stated
+# exception above).
+lex_form 'npm ci --tag "a|b"'
 [[ "${LEX_KNOWN_SEEN}" -gt 0 ]] || fail "the stated exception of the lexing trace is still lexed (seen ${LEX_KNOWN_SEEN}); if it is gone, drop it"
+[[ "${LEX_LEVELS_SEEN}" -gt 0 ]] || fail "the inert record still lexes the byte rule's levels (seen ${LEX_LEVELS_SEEN}); if it no longer does, drop its exception"
 for v in recognize pieces stmtcuts stmtraw cscripts substs scan flat live \
     safedeps:inert_offsets safedeps:extract_pieces safedeps:payload_pieces safedeps:read_payload_words \
     safedeps:extract_command_substitution_payloads safedeps:command_reads; do
@@ -2366,7 +2389,7 @@ for v in recognize pieces stmtcuts stmtraw cscripts substs scan flat live \
 done
 [[ -z "${LEX_BAD}" ]] || fail "every lexing reads the command, a payload or a whole statement of one; these read something else:
 ${LEX_BAD}"
-pass "every lexing of a guard run reads the command, a payload the shell runs or a whole statement of one, never a view's output or a cut payload (${lex_form_count} forms, one stated exception)"
+pass "every lexing of a guard run reads the command, a payload the shell runs or a whole statement of one, never a view's output or a cut payload (${lex_form_count} forms, one stated exception, and the inert record's levels lexed ${LEX_LEVELS_SEEN} times)"
 
 # --- the spec readers start no process ------------------------------------------
 # The spec readers used to rewrite a statement with sed and tr before reading it

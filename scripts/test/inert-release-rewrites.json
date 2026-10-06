@@ -144,6 +144,14 @@
   "release": "env -C sub npm install sd-victim --ignore-scripts"
  },
  {
+  "command": "eval \"npm install left-pad@1.3.0 \\\"--loglevel=warn\\\"\"",
+  "release": null
+ },
+ {
+  "command": "eval \"npm install sd-approved@1.0.0 \\\"--loglevel=warn\\\"\"",
+  "release": null
+ },
+ {
   "command": "eval 'npm install left-pad@1.3.0'",
   "release": "eval 'npm install --ignore-scripts left-pad@1.3.0'"
  },
@@ -284,6 +292,50 @@
   "release": "npm i -g=true left-pad@1.3.0 --ignore-scripts"
  },
  {
+  "command": "npm i left-pad@1.3.0 && npm ci;true",
+  "release": "npm i --ignore-scripts left-pad@1.3.0 && npm ci;true"
+ },
+ {
+  "command": "npm i left-pad@1.3.0 && sh -c \"cd \\\"d\\\" && npm ci;true\"",
+  "release": null
+ },
+ {
+  "command": "npm i left-pad@1.3.0 && sh -c \"npm ci \"--ignore-scripts=false",
+  "release": null
+ },
+ {
+  "command": "npm i left-pad@1.3.0 && sh -c 'npm 'ci",
+  "release": "npm i --ignore-scripts left-pad@1.3.0 && sh -c 'npm 'ci"
+ },
+ {
+  "command": "npm i left-pad@1.3.0 && sh -c npm\\ ci",
+  "release": "npm i --ignore-scripts left-pad@1.3.0 && sh -c npm\\ ci --ignore-scripts"
+ },
+ {
+  "command": "npm i left-pad@1.3.0 && sh -ce \"npm ci \\\"x\\\"\"",
+  "release": "npm i --ignore-scripts left-pad@1.3.0 && sh -ce \"npm ci \\\"x\\\"\""
+ },
+ {
+  "command": "npm i left-pad@1.3.0 && sh <<E\nnpm ci\nE",
+  "release": "npm i --ignore-scripts left-pad@1.3.0 && sh <<E\nnpm ci\nE"
+ },
+ {
+  "command": "npm i left-pad@1.3.0 && sh <<E | tee log\nnpm ci&&true\nE",
+  "release": "npm i --ignore-scripts left-pad@1.3.0 && sh <<E | tee log\nnpm ci&&true\nE"
+ },
+ {
+  "command": "npm i left-pad@1.3.0 --ignore-scripts && ksh -c \"npm ci\"",
+  "release": null
+ },
+ {
+  "command": "npm i left-pad@1.3.0 --ignore-scripts && sh <<E | tee log\nnpm ci&&true\nE",
+  "release": null
+ },
+ {
+  "command": "npm i left-pad@1.3.0 --ignore-scripts=true; sh -c \"cd \\\"d\\\" && npm ci\"",
+  "release": null
+ },
+ {
   "command": "npm install --global left-pad@1.3.0",
   "release": "npm install --global left-pad@1.3.0 --ignore-scripts"
  },
@@ -394,6 +446,10 @@
  {
   "command": "npm install left-pad@1.3.0 && cat <<E | wc -l\nNpm install left-pad@1.3.0\nE",
   "release": "npm install --ignore-scripts left-pad@1.3.0 && cat <<E | wc -l\nNpm install left-pad@1.3.0\nE"
+ },
+ {
+  "command": "npm install left-pad@1.3.0 && cat <<E | wc -l\nnpm install left-pad@1.3.0\nE",
+  "release": null
  },
  {
   "command": "npm install left-pad@1.3.0 && echo 'npm install left-pad@1.3.0'",
@@ -624,6 +680,10 @@
   "release": null
  },
  {
+  "command": "npm install left-pad@1.3.0; sh -c \"npm install\\\"\\\" left-pad@1.3.0\"",
+  "release": null
+ },
+ {
   "command": "npm install left-pad@1.3.0; sh -c 'cd sub && npm install left-pad@1.3.0'",
   "release": "npm install --ignore-scripts left-pad@1.3.0; sh -c 'cd sub && npm install --ignore-scripts left-pad@1.3.0'"
  },
@@ -670,6 +730,10 @@
  {
   "command": "npm install sd-approved@1.0.0 $FLAGS",
   "release": "npm install --ignore-scripts sd-approved@1.0.0 $FLAGS"
+ },
+ {
+  "command": "npm install sd-approved@1.0.0 && cat <<E | wc -l\nnpm install sd-approved@1.0.0\nE",
+  "release": null
  },
  {
   "command": "npm install sd-approved@1.0.0 && echo --ignore-scripts",
@@ -852,6 +916,10 @@
   "release": "printf 'save=false\\n' > .npmrc && npm install --ignore-scripts sd-victim"
  },
  {
+  "command": "sh -c \"npm install left-pad@1.3.0 \\\"--loglevel=warn\\\"\"",
+  "release": null
+ },
+ {
   "command": "sh -c 'Npm install left-pad@1.3.0'",
   "release": null
  },
@@ -874,5 +942,41 @@
  {
   "command": "shopt -s extglob\nnpm install sd-approved@1.0.0 @(--cache)",
   "release": "shopt -s extglob\nnpm install --ignore-scripts sd-approved@1.0.0 @(--cache)"
+ },
+ {
+  "command": "true; bash -c \"npm install sd-approved@1.0.0 $(printf -- --loglevel=warn)\"",
+  "release": null
+ },
+ {
+  "command": "true; bash -lc \"npm install left-pad@1.3.0 `printf -- --loglevel=warn`\"",
+  "release": null
+ },
+ {
+  "command": "true; dash -c \"npm install sd-approved@1.0.0 `printf -- --loglevel=warn`\"",
+  "release": null
+ },
+ {
+  "command": "true; ksh -c 'npm install left-pad@1.3.0'",
+  "release": null
+ },
+ {
+  "command": "true; ksh -c 'npm install sd-approved@1.0.0'",
+  "release": null
+ },
+ {
+  "command": "true; sh -c \"npm install left-pad@1.3.0 \\\"--loglevel=warn\\\"\"",
+  "release": null
+ },
+ {
+  "command": "true; sh -c \"npm install sd-approved@1.0.0 \\\"--loglevel=warn\\\"\"",
+  "release": null
+ },
+ {
+  "command": "true; sh -c \"npm install\\\"\\\" left-pad@1.3.0\"",
+  "release": null
+ },
+ {
+  "command": "true; zsh -c \"npm install left-pad@1.3.0 --fetch-retries $((1))\"",
+  "release": null
  }
 ]

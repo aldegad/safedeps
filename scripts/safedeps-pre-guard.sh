@@ -494,6 +494,11 @@ command_pipes_install_to_shell() {
 #           arithmetic, a substitution, a redirection operator) written `_`,
 #           since it ends nothing: a separator here is one the shell reads.
 #           Length-preserving and idempotent. It carries no statement start.
+#   classes the class of every byte, one letter each (the table in the awk
+#           below), and `F` for a byte of a heredoc body whose command pipes
+#           into something: where a quoted script word or such a body starts
+#           and ends. What the inert rewrite reads to find text it cannot
+#           read (inert_payload_spans).
 #   recognize  what the install recognizers read (command_start_text): the
 #           stmts view with the prefixes of each command removed, as
 #           unprefixed removes them, every other top-level redirection
@@ -636,6 +641,9 @@ shell_lex() {
       #              length-preserving
       #   view=shell-bodies  the raw lines of heredoc bodies whose command pipes
       #              into something
+      #   view=classes  the class of each byte as one letter, `F` for a byte of
+      #              a heredoc body whose command pipes into something, `.` for
+      #              a byte no rule classed; length-preserving, with no newline
       #   view=substs  the body of every command substitution, one after another,
       #              as the shell delimits it: `$(...)` (case patterns inside close
       #              nothing) and backticks, a backtick body unescaped the way the
@@ -651,6 +659,13 @@ shell_lex() {
       #              otherwise. No reader of the guard takes it: scan-contract
       #              holds the prefix rules (A) on it, which recognize and
       #              pieces read. Not length-preserving.
+      #   view=cmdword  where a command word can stand, for an offset found in
+      #              the live view: the code view with the prefixes the
+      #              unprefixed view removes blanked in place, escaping
+      #              backslashes and continuations blanked, and an escaped
+      #              operator or blank made `_` and the `)` closing a case pattern
+      #              made `;`, so the bytes before a word say whether it starts a
+      #              statement. length-preserving
       #   view=noredir  every top-level redirection blanked: the operator, the
       #              file descriptor word in front of it (a number or a {name}
       #              that is the whole word), and the target word, a process
@@ -659,6 +674,9 @@ shell_lex() {
       #              the middle of a word still is an operator
       #              (`x==1>/dev/null`), as the shell reads it. A process
       #              substitution that is an argument (`cat <(x)`) stays.
+      #   view=noprefix  noredir with the prefixes the unprefixed view removes
+      #              blanked in place too, so the command word of each
+      #              statement is its first word. length-preserving
       #              length-preserving
       #   view=pieces  one output line per statement that holds a word, cut
       #              where command_statements cuts (a top-level separator, as
@@ -745,7 +763,7 @@ shell_lex() {
         SPC["\n"] = 1
         DQS["\\"] = 1; DQS["\042"] = 1; DQS["$"] = 1; DQS["`"] = 1
         # The views that walk the words for where each command starts.
-        wantst = (view == "recognize" || view == "stmtcuts" || view == "events" || view == "cwords" || view == "unprefixed" || view == "pieces")
+        wantst = (view == "recognize" || view == "stmtcuts" || view == "events" || view == "cwords" || view == "unprefixed" || view == "pieces" || view == "cmdword" || view == "noprefix")
         # The views that print a `}` as the close of a group or as a
         # character (group_close), which needs the group openers of the walk.
         wantgrp = hasbrace && (wantst || view == "scan" || view == "stmts" || view == "live" || view == "flat")
@@ -1083,7 +1101,7 @@ shell_lex() {
         # Which glued `}` closes a group reads the groups the walk opened, and
         # the redirections (DROP) the views blank.
         if (wantgrp) group_close()
-        if ((view == "unprefixed" || view == "recognize" || view == "cwords" || view == "pieces") && !unterm) prefixes()
+        if ((view == "unprefixed" || view == "recognize" || view == "cwords" || view == "pieces" || view == "cmdword" || view == "noprefix") && !unterm) prefixes()
         # After redirs(), which says DIVERGE at a `!` only zsh reads as part
         # of its operator.
         if (div) {
@@ -2537,6 +2555,7 @@ shell_lex() {
         for (k = 1; k <= N; k++) {
           cc = X[k]; cl = C[k]
           if (wends) { put((k > 1 && word_sep(k) && !word_sep(k - 1)) ? "1" : "0"); continue }
+          if (view == "classes") { put(((k in BF) && pfed[BF[k]]) ? "F" : (cl == "" ? "." : cl)); continue }
           if (view == "noredir") { put((k in DROP) ? " " : cc); continue }
           if (view == "stmts") { put(sbyte(k)); continue }
           # The recognizers read the starts as separators: a `;` goes in at
@@ -2553,6 +2572,17 @@ shell_lex() {
             put(((k in DROP) && !unterm) ? " " : sbyte(k))
             continue
           }
+          # Where a command word can stand (inert_flag_offsets): the prefixes
+          # the walk set aside at each start (A) are blank, so the bytes before a
+          # word say whether it is the command word. Length-preserving, as
+          # the live view the offsets come from.
+          if (view == "cmdword") {
+            if (cl == "p") put(";")
+            else if ((k in A) || cl == "m" || cl == "h" || cl == "b" || cl == "x" || cl == "l") put(cc == "\n" && cl != "h" && cl != "l" ? "\n" : " ")
+            else if (cl == "e") put(index(";&|()<>!{}#`\042\047\\$ \t\n", cc) ? "_" : cc)
+            else put(cc)
+            continue
+          }
           if (view == "scan" || view == "live" || view == "flat") {
             # The live view blanks a redirection where it is top-level code,
             # so the inert rewrite finds the verb of `npm 2>/dev/null
@@ -2566,6 +2596,11 @@ shell_lex() {
             else put(cbyte(k))
             continue
           }
+          # The noredir view with the prefixes the walk set aside at each
+          # start (A) blanked too, in place: where a command word stands is
+          # read from the bytes before it (inert_dynamic_in). A newline in a
+          # quoted prefix value is blanked with the rest of it.
+          if (view == "noprefix") { put(((k in DROP) || (k in A) && !(cc == "\n" && cl == "c")) ? " " : cc); continue }
           if (view == "unprefixed") {
             # A start no separator stands before gets one put in, as in the
             # recognize view: removing the prefixes between a reserved word
@@ -3011,13 +3046,15 @@ command_is_injectable_npm_install() {
 # that matched case, so the recognizer called `NPM ci` an install and the
 # rewrite found no verb in it: a downgrade, where main (a6fd57a) had
 # appended the flag. Every reader here that looks for a verb to rewrite asks
-# this one. The check for an npm verb in a heredoc body does not: its match
-# withholds every rewrite, so it keeps the release's case (inert_rewrite_in_place).
-# With --nested first, the verb ends in the `%` the live view prints for a glued
-# `}` that closes no group there (inert_nested_verb_ends).
+# this one, the flags placed in a piped heredoc body included
+# (inert_unread_offsets). With --nested first, the verb ends in the `%` the live view prints for a glued
+# `}` that closes no group there (inert_nested_verb_ends). With --blank first,
+# it ends at a blank or the end of its line, as v2.17.2's sed read it: the
+# place inert_unread_offsets keeps in text the rewrite cannot read.
 inert_npm_verb_grep() {
   local end="${SAFEDEPS_G_END}"
   if [[ "${1:-}" == --nested ]]; then end="%"; shift; fi
+  if [[ "${1:-}" == --blank ]]; then end="([[:space:]]|\$)"; shift; fi
   LC_ALL=C judge_grep "$@" -Ei "npm${SAFEDEPS_G_OPTS}[[:space:]]+(${SAFEDEPS_G_NPM_VERBS}|${SAFEDEPS_G_NPM_LINK_VERBS})${end}"
 }
 
@@ -3036,15 +3073,29 @@ inert_npm_verb_grep() {
 # blanks the redirection whole, so the verb is found there; the two views
 # keep the same offsets, and a verb both find is one pair.
 inert_verb_ends() {
-  local live flat matches more
+  local live flat
   live=$(shell_lex "$1" live "safedeps:inert_offsets") || return 1
   flat=$(shell_lex "$1" flat "safedeps:inert_offsets") || return 1
+  if [[ "${flat}" != "${live}" ]]; then
+    inert_verb_ends_in "${live}" "${flat}"
+  else
+    inert_verb_ends_in "${live}"
+  fi
+}
+
+# The same, in each <view> given: a text that keeps every byte of the command
+# in place, with what is not to be read blanked. A verb two views find is one
+# pair. With --blank first, a verb ends only at a blank or the end of its line
+# (inert_npm_verb_grep).
+inert_verb_ends_in() {
+  local matches more end=()
+  if [[ "${1:-}" == --blank ]]; then end=(--blank); shift; fi
   # The grep and the awk run apart so that only "no match" reads as no verb: a
   # failed awk shared one `||` with grep's exit 1, and the rewrite was then
   # dropped as if there were nothing to rewrite.
-  matches=$(printf '%s\n' "${live}" | inert_npm_verb_grep -ob) || matches=""
-  if [[ "${flat}" != "${live}" ]]; then
-    more=$(printf '%s\n' "${flat}" | inert_npm_verb_grep -ob) || more=""
+  matches=$(printf '%s\n' "$1" | inert_npm_verb_grep "${end[@]+"${end[@]}"}" -ob) || matches=""
+  if (( $# > 1 )); then
+    more=$(printf '%s\n' "$2" | inert_npm_verb_grep "${end[@]+"${end[@]}"}" -ob) || more=""
     if [[ -n "${more}" && -n "${matches}" ]]; then matches+=$'\n'"${more}"; elif [[ -n "${more}" ]]; then matches="${more}"; fi
   fi
   [[ -n "${matches}" ]] || return 0
@@ -3258,6 +3309,18 @@ inert_statement_reads() {
 # records as a downgrade. A verb the rewrite cannot reach, glued to a `}`
 # nested in a substitution (inert_nested_verb_ends), prints its end with
 # ` nested`: the caller places no flag there and records the floor.
+#
+# A verb is read, and prints `@<offset>` where its `npm` starts, only where
+# that `npm` stands as the command word of <text>: at its start or after a
+# separator, a `(`, a backquote or a reserved word that a command follows, once
+# the prefixes the recognizers strip (assignments, redirections, env and its
+# options, command, exec) are set aside (the lexer's cmdword view), or as the
+# last part of a path there (`./node_modules/.bin/npm`). Every other verb the
+# flags went to is one the shell may not run as npm at all, and the record does
+# not count it as read (inert_bytes_left_unread). A nested verb prints no
+# `@`, so the record sees it too. Counted as read wherever the live view
+# showed it, `echo npm ci; sh -c npm\ ci` and `ksh -c npm\ ci` hid the install
+# the shell ran (the design judgment's P2r).
 inert_flag_offsets() {
   local text="$1" pairs nested dir ends start bound at stmt cands p note want placed verb
   nested=$(inert_nested_verb_ends "${text}") || return 1
@@ -3273,7 +3336,48 @@ inert_flag_offsets() {
   printf '%s' "${text}" > "${dir}/raw"
   if ! shell_lex "${text}" live "safedeps:inert_offsets" > "${dir}/live" \
      || ! shell_lex "${text}" code "safedeps:inert_offsets" > "${dir}/code" \
-     || ! shell_lex "${text}" noredir "safedeps:inert_offsets" > "${dir}/noredir"; then
+     || ! shell_lex "${text}" noredir "safedeps:inert_offsets" > "${dir}/noredir" \
+     || ! shell_lex "${text}" cmdword "safedeps:inert_offsets" > "${dir}/cmdword"; then
+    rm -rf "${dir}"
+    return 1
+  fi
+  if ! printf '%s\n' "${pairs}" | LC_ALL=C awk -v dir="${dir}" '
+    # safedeps:inert_offsets (scripts/measure/scan-failure-census.sh keys on this line)
+    function sb_reset(id, s) { SBS[id] = s; SBC[id] = ""; SBP[id] = ""; SBPN[id] = 0; SBCN[id] = 0 }
+    function sb_add(id, s) {
+      SBP[id] = SBP[id] s; if (++SBPN[id] < 64) return
+      SBC[id] = SBC[id] SBP[id]; SBP[id] = ""; SBPN[id] = 0; if (++SBCN[id] < 64) return
+      SBS[id] = SBS[id] SBC[id]; SBC[id] = ""; SBCN[id] = 0
+    }
+    function sb_get(id) { return SBS[id] SBC[id] SBP[id] }
+    function slurp(f,   line, count) {
+      sb_reset("slurp", ""); count = 0
+      while ((getline line < f) > 0) sb_add("slurp", (count++ ? "\n" : "") line)
+      close(f)
+      return sb_get("slurp")
+    }
+    BEGIN {
+      split(slurp(dir "/cmdword"), V, "")
+      split("! { if then else elif while until do time coproc", kw, " ")
+      for (j in kw) KW[kw[j]] = 1
+      SEP = ";&|(`\n"
+      PATHB = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._/@:+,=%-"
+    }
+    {
+      j = $1
+      if (j >= 1 && V[j] == "/") while (j >= 1 && index(PATHB, V[j])) j--
+      for (;;) {
+        while (j >= 1 && (V[j] == " " || V[j] == "\t")) j--
+        if (j < 1 || index(SEP, V[j])) { print "@" $1; next }
+        e = j
+        while (j >= 1 && V[j] ~ /[a-z!{]/) j--
+        w = ""
+        for (k = j + 1; k <= e; k++) w = w V[k]
+        if (!(w in KW)) next
+        if (j >= 1 && V[j] != " " && V[j] != "\t" && !index(SEP, V[j])) next
+      }
+    }'; then
+    [[ -z "${SAFEDEPS_SCAN_MARK:-}" ]] || printf 'failed\n' >> "${SAFEDEPS_SCAN_MARK}"
     rm -rf "${dir}"
     return 1
   fi
@@ -3443,45 +3547,114 @@ inert_flag_offsets() {
   done <<< "${ends}"
 }
 
-# The scripts handed to `sh -c` (or bash, zsh, dash) and `eval` in <command>, as
-# `<start> <length>` in bytes, for each script whose bytes are the bytes the
-# inner shell reads: a single-quoted one, or a double-quoted one with no
-# escape and no substitution in it. Prints `?` instead when a double-quoted
-# script it cannot map has `npm` anywhere after its head, so the caller records
-# a downgrade rather than reporting the command inert.
+# The scripts <command> hands to a shell or to `eval`, and the heredoc bodies
+# it pipes into another command, one per line:
+#
+#   R <start> <length>  a script whose bytes are the bytes the inner shell
+#                       reads, handed to `sh -c` (or bash, zsh, dash) or
+#                       `eval`: a single-quoted one, or a double-quoted one
+#                       with no escape and no substitution in it.
+#                       inert_offsets_of reads it as a command of its own.
+#   U <start> <length>  a script word whose bytes the rewrite cannot read as
+#                       the inner shell reads them: a double-quoted one with
+#                       an escape or a substitution in it, and any script
+#                       handed to another shell (`ksh -c`, whose grammar no
+#                       reading here follows).
+#   F <start> <length>  a heredoc body whose command pipes into something.
+#   G <start> <length>  a script word handed to sh, bash, zsh, dash or `eval`
+#                       that is not one quoted segment: unquoted (`sh -c
+#                       npm\ ci`) or glued to more text (`sh -c "npm ci
+#                       "--x`). The shell hands the inner shell the whole
+#                       word; a glued word's first segment is still read (R),
+#                       and its verbs are not counted as read.
+#
+# <start> is the offset of the first byte, in bytes. A U word runs from its
+# first byte to the first byte the shell reads outside it, as the lexer's
+# classes view says, so an escaped quote, a substitution with quotes of its
+# own and glued quoting stay inside it. inert_unread_offsets puts the flag
+# into U and F text where v2.17.2 put it. G text gets no flag; v2.18.0 placed
+# none there either, so the rewrite of every command stays what it was.
+#
+# These spans say where flags go, never whether the command is recorded: that
+# is the byte rule (inert_bytes_left_unread), which needs no list of the ways
+# text reaches a shell.
+#
+# These used to print `?`, and the caller then dropped the rewrite of the
+# whole command and recorded a downgrade: an install the rewrite could read
+# beside one it could not lost its flag too, where v2.17.2 had flagged both
+# (scripts/measure/inert-downgrade-grid.sh).
 inert_payload_spans() {
-  local command="$1" scan heads
+  local command="$1" scan heads="" classes=""
   scan=$(command_scan_text "${command}") || return 1
   # The grep and the awk run apart, as in inert_verb_ends: under pipefail a grep
   # that found no head failed the pipeline, and "no script handed to a shell"
-  # read as a failed reading.
+  # read as a failed reading. A shell is any command name ending in `sh`, as
+  # the lexer's cscripts view reads one; bash, sh, zsh and dash are the ones
+  # read here (R).
   heads=$(printf '%s\n' "${scan}" \
-    | LC_ALL=C judge_grep -obE "(^|[^[:alnum:]_.-])((bash|sh|zsh|dash)[[:space:]]+-[A-Za-z]*c|eval)([[:space:]]|\$)") || heads=""
-  [[ -n "${heads}" ]] || return 0
-  heads=$(printf '%s\n' "${heads}" | LC_ALL=C awk '
-      # safedeps:inert_payload_spans (scripts/measure/scan-failure-census.sh keys on this line)
-      { c = index($0, ":"); printf "%d ", substr($0, 1, c - 1) + length(substr($0, c + 1)) }') || {
-    [[ -z "${SAFEDEPS_SCAN_MARK:-}" ]] || printf 'failed\n' >> "${SAFEDEPS_SCAN_MARK}"
-    return 1
-  }
-  if ! printf '%s' "${command}" | LC_ALL=C awk -v heads="${heads}" '
+    | LC_ALL=C judge_grep -obE "(^|[^[:alnum:]_.-])([[:alnum:]_.-]*sh[[:space:]]+-[A-Za-z]*c|eval)([[:space:]]|\$)") || heads=""
+  [[ -n "${heads}" || "${command}" == *"<<"* ]] || return 0
+  if [[ -n "${heads}" ]]; then
+    heads=$(printf '%s\n' "${heads}" | LC_ALL=C awk '
+        # safedeps:inert_payload_spans (scripts/measure/scan-failure-census.sh keys on this line)
+        { c = index($0, ":"); m = substr($0, c + 1); w = m
+          sub(/^[^[:alnum:]_.-]/, "", w); sub(/[[:space:]].*/, "", w)
+          printf "%d:%s ", substr($0, 1, c - 1) + length(m), (w ~ /^(bash|sh|zsh|dash|eval)$/ ? "R" : "U") }') || {
+      [[ -z "${SAFEDEPS_SCAN_MARK:-}" ]] || printf 'failed\n' >> "${SAFEDEPS_SCAN_MARK}"
+      return 1
+    }
+  fi
+  classes=$(shell_lex "${command}" classes "safedeps:inert_payload_spans") || return 1
+  # The text ends in `X`, which END takes off: awk drops a newline that ends
+  # its input, and a text that ends in one read one byte short of its view.
+  if ! { printf '%s\n' "${classes}"; printf '%sX' "${command}"; } | LC_ALL=C awk -v heads="${heads}" '
     # safedeps:inert_payload_spans (scripts/measure/scan-failure-census.sh keys on this line)
-    { X = X (NR > 1 ? "\n" : "") $0 }
+    NR == 1 { K = $0; next }
+    { X = X (NR > 2 ? "\n" : "") $0 }
+    # A byte of the word: quoted, nested in quotes, escaped, or code that is
+    # not a blank or an operator.
+    function inword(z) {
+      if (KC[z] == "c") return XC[z] !~ /[ \t\n;&|()<>]/
+      return KC[z] != "p" && KC[z] != "F" && KC[z] != "."
+    }
     END {
+      X = substr(X, 1, length(X) - 1)
+      N = split(X, XC, "")
+      # The view keeps every byte in place; one that does not is a failed reading.
+      if (split(K, KC, "") != N) exit 3
       n = split(heads, H, " ")
       for (j = 1; j <= n; j++) {
-        p = H[j] + 1
-        while (substr(X, p, 1) == " " || substr(X, p, 1) == "\t") p++
-        q = substr(X, p, 1)
-        if (q != "\047" && q != "\042") continue
-        e = index(substr(X, p + 1), q)
-        body = e ? substr(X, p + 1, e - 1) : ""
-        if (q == "\042" && (!e || index(body, "\\") || index(body, "$(") || index(body, "`"))) {
-          if (index(substr(X, p), "npm")) print "?"
-          continue
+        c = index(H[j], ":"); kind = substr(H[j], c + 1); p = substr(H[j], 1, c - 1) + 1
+        while (XC[p] == " " || XC[p] == "\t") p++
+        q = XC[p]
+        for (z = p; z <= N && inword(z); z++) ;
+        if (kind == "R") {
+          # A script word that is not one quoted segment, unquoted or glued to
+          # more text, is read no further than its first segment, and the
+          # shell hands the inner shell the whole word: G, text the rewrite
+          # does not read. An unquoted word used to be skipped, and a glued
+          # one read up to its first closing quote, and each ran `npm ci`
+          # beside a flagged install with no record (`sh -c npm\ ci`, `sh -c
+          # "npm ci "--ignore-scripts=false`).
+          if (q != "\047" && q != "\042") {
+            if (z > p) printf "G %d %d\n", p - 1, z - p
+            continue
+          }
+          e = index(substr(X, p + 1), q)
+          body = e ? substr(X, p + 1, e - 1) : ""
+          if (!(q == "\042" && (!e || index(body, "\\") || index(body, "$(") || index(body, "`")))) {
+            if (e >= 2) printf "R %d %d\n", p, e - 1
+            if (p + e + 1 != z) printf "G %d %d\n", p - 1, z - p
+            continue
+          }
         }
-        if (e < 2) continue
-        printf "%d %d\n", p, e - 1
+        if (z > p) printf "U %d %d\n", p - 1, z - p
+      }
+      for (k = 1; k <= N; k++) {
+        if (KC[k] != "F") continue
+        for (z = k; z <= N && KC[z] == "F"; z++) ;
+        printf "F %d %d\n", k - 1, z - k
+        k = z
       }
     }'; then
     [[ -z "${SAFEDEPS_SCAN_MARK:-}" ]] || printf 'failed\n' >> "${SAFEDEPS_SCAN_MARK}"
@@ -3489,18 +3662,76 @@ inert_payload_spans() {
   fi
 }
 
+# Where `--ignore-scripts` goes in the text the rewrite cannot read (the U and
+# F lines of inert_payload_spans, in <spans>): right after each npm install
+# verb that is followed by a blank or ends its line, where v2.17.2 put it (its
+# sed, `s/(npm<options> <verb>)([[:space:]]|$)/\1 --ignore-scripts\2/`), one
+# offset per line. In a U word, code nested in its quotes (`$(...)` inside
+# double quotes) is left out: the outer shell runs it, and the reading of the
+# command already placed its flags (inert_flag_offsets). G and H text get no
+# flag.
+#
+# Nothing here reads the inner script, and nothing here decides the record: a
+# verb placed this way is not one the rewrite read, so the record sees it in
+# the bytes it did not read (inert_bytes_left_unread). The flag is placed in
+# the text as written, as v2.17.2 placed it, so npm receives at least the
+# words v2.17.2 gave it in these places, and no more is claimed.
+inert_unread_offsets() {
+  local text="$1" spans="$2" classes view regions="" kind start len
+  while read -r kind start len; do
+    [[ "${kind}" != U && "${kind}" != F ]] || regions+="${kind} ${start} ${len} "
+  done <<< "${spans}"
+  [[ -n "${regions}" ]] || return 0
+  classes=$(shell_lex "${text}" classes "safedeps:inert_payload_spans") || return 1
+  if ! view=$(printf '%s\n%s\n%sX' "${regions}" "${classes}" "${text}" | LC_ALL=C awk '
+    # safedeps:inert_payload_spans (scripts/measure/scan-failure-census.sh keys on this line)
+    NR == 1 { R = $0; next }
+    NR == 2 { K = $0; next }
+    { X = X (NR > 3 ? "\n" : "") $0 }
+    END {
+      X = substr(X, 1, length(X) - 1)
+      N = split(X, XC, ""); if (split(K, KC, "") != N) exit 3
+      for (k = 1; k <= N; k++) V[k] = (XC[k] == "\n") ? "\n" : " "
+      n = split(R, F, " ")
+      for (j = 1; j + 2 <= n; j += 3) {
+        a = F[j + 1] + 1; z = F[j + 1] + F[j + 2]
+        for (k = a; k <= z; k++) {
+          # Into U text, quoted, escaped or code, and into F text.
+          if (F[j] == "U" && KC[k] != "q" && KC[k] != "l" && KC[k] != "x" && KC[k] != "e" && KC[k] != "c") continue
+          V[k] = XC[k]
+        }
+      }
+      for (k = 1; k <= N; k++) printf "%s", V[k]
+      printf "X"
+    }'); then
+    [[ -z "${SAFEDEPS_SCAN_MARK:-}" ]] || printf 'failed\n' >> "${SAFEDEPS_SCAN_MARK}"
+    return 1
+  fi
+  inert_verb_ends_in --blank "${view%X}" | while read -r _ e; do printf '%s\n' "${e}"; done
+  return "${PIPESTATUS[0]}"
+}
+
 # Where `--ignore-scripts` goes for every npm install the shell runs in <text>
-# (inert_flag_offsets): its own code (the live view) and, recursively, the
-# scripts it hands to a shell. Returns 3 when an install sits where no offset
-# can reach it.
+# (inert_flag_offsets): its own code (the live view), recursively the scripts
+# it hands to a shell that it can read, and the text it cannot read
+# (inert_unread_offsets).
 inert_offsets_of() {
-  local text="$1" depth="${2:-0}" spans start len body inner e note
+  local text="$1" depth="${2:-0}" spans kind start len body inner e note glued
   inert_flag_offsets "${text}" || return $?
   (( depth < 4 )) || return 0
   spans=$(inert_payload_spans "${text}") || return 1
-  [[ "${spans}" != *"?"* ]] || return 3
-  while read -r start len; do
-    [[ -n "${start}" ]] || continue
+  inert_unread_offsets "${text}" "${spans}" || return 1
+  # A script read from the first quoted segment of a glued word (an R span a G
+  # span starts one byte before) is not the whole script the shell hands on:
+  # its flags are placed, and its verbs are not counted as read. Counted,
+  # `sh -c "npm ci "--ignore-scripts=false` beside a flagged install ran its
+  # install with no flag and no record.
+  glued=" "
+  while read -r kind start _; do
+    [[ "${kind}" != G ]] || glued+="$(( start + 1 )) "
+  done <<< "${spans}"
+  while read -r kind start len; do
+    [[ "${kind}" == R ]] || continue
     body=$(printf '%s' "${text}" | LC_ALL=C awk -v s="${start}" -v l="${len}" '
       # safedeps:inert_payload_spans (scripts/measure/scan-failure-census.sh keys on this line)
       { X = X (NR > 1 ? "\n" : "") $0 } END { printf "%s", substr(X, s + 1, l) }') || {
@@ -3510,30 +3741,347 @@ inert_offsets_of() {
     inner=$(inert_offsets_of "${body}" $(( depth + 1 ))) || return $?
     while read -r e note; do
       [[ -n "${e}" ]] || continue
-      if [[ "${e}" == - ]]; then printf -- '-\n'; continue; fi
+      if [[ "${e}" == - ]]; then printf -- '%s%s\n' "${e}" "${note:+ ${note}}"; continue; fi
+      if [[ "${e}" == @* ]]; then
+        [[ "${glued}" == *" ${start} "* ]] || printf '@%s\n' "$(( start + ${e#@} ))"
+        continue
+      fi
       printf '%s%s\n' "$(( start + e ))" "${note:+ ${note}}"
     done <<< "${inner}"
   done <<< "${spans}"
 }
 
+# Whether <command> holds an npm install verb the rewrite did not read: the
+# record, as an allow-list over the bytes of the command. Returns 0 when it
+# does, 1 when it does not, 2 on a failed reading.
+#
+# Its inputs are the command's bytes and the verbs the rewrite read (<at>,
+# where each one's `npm` starts; inert_flag_offsets counts a verb as read only
+# where its `npm` is a command word of the text it was read in). Each read
+# `npm` is set aside, the command's own comments are blanked (class m: the
+# shell runs nothing there), and the text is read with every quote and
+# backslash taken out, and again through the shell's own quote removal, one
+# level at a time for up to three levels, with each `$'...'` decoded where it
+# stands. A decoded byte then joins the text on either side of it
+# (`n$'\x70'm`), a decoded newline starts a line (`true$'\n'npm ci`), and a
+# `$'...'` inside a quoted script is decoded at the level that runs it. If an
+# npm install verb is left anywhere in any of these, the command is recorded.
+#
+# So is an `npm` the rewrite did not read inside a word the shell computes
+# (`$(...)`, `${...}`, `<(...)`, `>(...)`, backquotes), install verb or not:
+# the shell can make that word npm's path and hand it to something that binds
+# a name to it, as `hash -p "$(command -v npm)" n && n ci x` does in bash
+# (validator jetbi-20261005-234803, zc03), with no byte of the statement that
+# runs it naming npm. Its cost is `$(npm root -g)` and the like beside an
+# install.
+#
+# "An npm install verb" is the recognizers' own: `npm`, then their option
+# grammar (SAFEDEPS_G_O: an option's value may be empty or run over several
+# words, as npm reads `--heading=` and `--heading 'a b'`), then a verb. Nothing
+# stands in front of the `npm`: a program that takes its command glued to an
+# option reads it there (`env -S'npm ci'`, `env -Snpm\ ci`), so a left boundary
+# was a guess about who reads the text, and it missed those (validator
+# jetbi-20261005-234803, class L). The cost is a record beside an install for
+# `pnpm i` and the like (scripts/measure/inert-record-data.py).
+#
+# Nothing here asks where the text goes. Three rounds of review each found a
+# way into a shell the record did not list (a script word, a piped heredoc
+# body, then the options, builtins, redirections and expansions of
+# scripts/measure/inert-record-gen.py), because a list of the ways text
+# reaches a shell is a deny-list. This passes only what the rewrite read, as
+# shell_expands passes only bytes it knows. The cost is data: an install verb
+# in an echo, a commit message or a heredoc written to a file, beside an
+# install, is recorded too (scripts/measure/inert-record-data.py).
+inert_bytes_left_unread() {
+  local command="$1" at="$2" classes left
+  # The texts the second reading made, one per level, for
+  # inert_dynamic_command_word.
+  INERT_LEVELS=""
+  classes=$(shell_lex "${command}" classes "safedeps:inert_rewrite_in_place") || return 2
+  if ! left=$(printf '%s\n%s\n%s' "${at}" "${classes}" "${command}" | LC_ALL=C awk '
+    # safedeps:inert_rewrite_in_place (scripts/measure/scan-failure-census.sh keys on this line)
+    NR == 1 { k = split($0, a, " "); for (j = 1; j <= k; j++) { s = a[j] + 1; hide[s] = 1; hide[s + 1] = 1; hide[s + 2] = 1 }; next }
+    NR == 2 { split($0, K, ""); next }
+    { if (NR > 3) X[++n] = "\n"; m = split($0, c, ""); for (j = 1; j <= m; j++) X[++n] = c[j] }
+    function oct(c) { return index("01234567", c) }
+    function hex(c) { return index("0123456789abcdef", tolower(c)) }
+    # One level of quote removal as the shell does it, from S[1..ns] into D,
+    # returning the length. Single quotes keep their text, double quotes drop the
+    # backslash before $ ` " \ and a newline, a backslash outside quotes
+    # keeps the byte after it, and each $\047...\047 is decoded where it
+    # stands, as bash and zsh decode it.
+    function unq(S, ns, D,    i, j, q, c, e, v, d) {
+      j = 0; q = 0
+      for (i = 1; i <= ns; i++) {
+        c = S[i]
+        if (q == 1) { if (c == "\047") q = 0; else D[++j] = c; continue }
+        if (q == 2) {
+          if (c == "\"") q = 0
+          else if (c == "\\" && i < ns && (S[i + 1] == "$" || S[i + 1] == "`" || S[i + 1] == "\"" || S[i + 1] == "\\" || S[i + 1] == "\n")) { i++; if (S[i] != "\n") D[++j] = S[i] }
+          else D[++j] = c
+          continue
+        }
+        if (c == "\\") { if (i < ns) { i++; if (S[i] != "\n") D[++j] = S[i] }; continue }
+        if (c == "\047") { q = 1; continue }
+        if (c == "\"") { q = 2; continue }
+        if (c == "$" && S[i + 1] == "\"") { q = 2; i++; continue }
+        if (c == "$" && S[i + 1] == "\047") {
+          for (i += 2; i <= ns && S[i] != "\047"; i++) {
+            if (S[i] != "\\" || i == ns) { D[++j] = S[i]; continue }
+            e = S[++i]
+            if (oct(e)) { v = 0; for (d = 0; d < 3 && oct(S[i]); d++) v = v * 8 + oct(S[i++]) - 1; i--; if (v > 0 && v < 128) D[++j] = sprintf("%c", v); continue }
+            if (e == "x" && hex(S[i + 1])) { v = 0; for (d = 0; d < 2 && hex(S[i + 1]); d++) v = v * 16 + hex(S[++i]) - 1; if (v > 0 && v < 128) D[++j] = sprintf("%c", v); continue }
+            if ((e == "u" || e == "U") && hex(S[i + 1])) { v = 0; for (d = 0; d < (e == "u" ? 4 : 8) && hex(S[i + 1]); d++) v = v * 16 + hex(S[++i]) - 1; if (v > 0 && v < 128) D[++j] = sprintf("%c", v); continue }
+            if (e == "c") { i++; continue }
+            if (e == "n") D[++j] = "\n"; else if (e == "t") D[++j] = "\t"; else if (index("abefrvE", e)) D[++j] = " "
+            else D[++j] = e
+          }
+          continue
+        }
+        D[++j] = c
+      }
+      return j
+    }
+    END {
+      for (i = 1; i <= n; i++) { if (i in hide) X[i] = "_"; else if (K[i] == "m") X[i] = " " }
+      # An `npm` the rewrite did not read, inside a word the shell computes: a
+      # substitution in quotes or a live heredoc body (classes Q, B), or one
+      # at the top level, followed by the openers $( ${ <( >( and the
+      # backquote of class c to the byte that closes each.
+      ns = 0; computed = 0
+      for (i = 1; i <= n && !computed; i++) {
+        if ((K[i] == "Q" || K[i] == "B" || ns > 0) && tolower(X[i] X[i + 1] X[i + 2]) == "npm") computed = 1
+        if (K[i] != "c") continue
+        if ((X[i] == "$" || X[i] == "<" || X[i] == ">") && X[i + 1] == "(" || X[i] == "$" && X[i + 1] == "{") { st[++ns] = (X[i + 1] == "(") ? ")" : "}"; i++ }
+        else if (X[i] == "`") { if (ns > 0 && st[ns] == "`") ns--; else st[++ns] = "`" }
+        else if (ns > 0 && X[i] == "(") st[++ns] = ")"
+        else if (ns > 0 && X[i] == st[ns]) ns--
+      }
+      printf "%s", computed ? "C" : "-"
+      # The text with every quote, backslash and the `$` of a `$\047` or `$"`
+      # out, and a backslash-newline pair joined, as the shell joins a
+      # continuation: every level of quoting at once.
+      for (i = 1; i <= n; i++) {
+        if (X[i] == "\\" && X[i + 1] == "\n") { i++; continue }
+        if (X[i] == "$" && (X[i + 1] == "\047" || X[i + 1] == "\"")) continue
+        if (X[i] != "\"" && X[i] != "\047" && X[i] != "\\") printf "%s", X[i]
+      }
+      # Then quote removal as the shell does it, one level at a time, as a
+      # script handed on reads the text the level above it left, up to three
+      # levels: an ANSI-C string inside a single-quoted here-string is text to
+      # the outer shell and is decoded only by the shell it is handed to.
+      # Quote removal drops no byte of text, only quoting, so each level can
+      # only add a verb to what the first reading found.
+      m = n; for (i = 1; i <= n; i++) A[i] = X[i]
+      for (lv = 1; lv <= 3; lv++) {
+        m = unq(A, m, B)
+        printf "\036"; more = 0
+        for (i = 1; i <= m; i++) { printf "%s", B[i]; A[i] = B[i]; if (B[i] == "\047" || B[i] == "\"" || B[i] == "\\") more = 1 }
+        if (!more) break
+      }
+      printf "X"
+    }'); then
+    [[ -z "${SAFEDEPS_SCAN_MARK:-}" ]] || printf 'failed\n' >> "${SAFEDEPS_SCAN_MARK}"
+    return 2
+  fi
+  left="${left%X}"
+  INERT_LEVELS="${left#*$'\036'}"
+  [[ "${left}" == *$'\036'* ]] || INERT_LEVELS=""
+  [[ "${left:0:1}" != C ]] || return 0
+  left="${left:1}"
+  [[ "${left}" == *[Nn][Pp][Mm]* ]] || return 1
+  printf '%s\n' "${left//$'\036'/$'\n'}" \
+    | LC_ALL=C judge_grep -qEi "npm${SAFEDEPS_G_O}[[:space:]]+(${SAFEDEPS_G_NPM_VERBS}|${SAFEDEPS_G_NPM_LINK_VERBS})([^[:alnum:]_-]|\$)"
+}
+
+# Whether a statement of <command>, or of a script it hands to a shell or to
+# `eval` or a substitution in it (command_payload_raw_texts), each lexed as
+# written with the prefixes the recognizers strip blanked in place (the
+# lexer's noprefix view), has a word the shell computes where npm
+# or its command can stand: the command word of any statement (`$(echo npm)
+# ci`, `{npm,ci,x}`), and in a statement whose command word is npm, the word
+# npm reads as its command (`npm $V x`, `npm "$@"`, `npm c? x`). Returns 0
+# when one does, 1 when none does, 2 on a failed reading. Such a word can be
+# npm or an install verb with no byte of the command spelling it, so the byte
+# rule cannot see it; the command is recorded instead.
+#
+# "Computed" is shell_expands' allow-list, read per word: a byte outside
+# quotes that is not in SAFEDEPS_SHELL_INERT_BYTES, a word that starts with `~`
+# or `=` there, or a `$` or a backquote anywhere in it, quoted or not. The
+# clause this replaced listed `$` and the backquote, a list of what expands,
+# and braces, globs and the tilde passed it (validator jetbi-20261005-234803,
+# class D). Reserved words (`{`, `}`, `!`, `[[`) are read before any expansion,
+# and a lone `[` has no closing bracket for a glob to use, so none of them is
+# computed. The word npm reads as its command is the first word after `npm`
+# unless an option comes first; after an option it is any later word, because
+# the recognizers' option grammar (SAFEDEPS_G_O) lets any option take the
+# words after it as its value. A case pattern is not a command word.
+inert_dynamic_command_word() {
+  local text rc
+  local -a texts=()
+  # The command and its payloads, each lexed as written, as every other reader
+  # lexes them. This read the recognizers' normalized texts before, a view's
+  # output lexed again, which the lexer's own rule forbids (shell_lex).
+  command_payload_raw_texts "$1"
+  texts=("$1" ${PAYLOADS[@]+"${PAYLOADS[@]}"})
+  for text in "${texts[@]}"; do
+    [[ "${text}" =~ [^[:space:]] ]] || continue
+    rc=0; inert_dynamic_in "${text}" 0 || rc=$?
+    (( rc == 1 )) || return "${rc}"
+  done
+  # The texts the byte rule read through quote removal, one per level, with
+  # every `<` a newline, so a here-string or a heredoc body handed to a shell
+  # starts statements of its own, as it does to that shell (`bash <<< 'npm
+  # ${u:-ci} x'`). The cost is a redirection source read as a command word.
+  #
+  # These are the one text a reader lexes that is neither the command nor a
+  # payload: the byte rule built them. They are read only after the command
+  # and every payload found no computed word, and a word found in them can
+  # only add a record, so a line their lexing hides is still read where the
+  # command's own lexing reads it. The lexing trace in scan-contract names this
+  # reader's marker as its one stated exception.
+  while IFS= read -r -d $'\036' text; do
+    rc=0; inert_dynamic_in "${text//</$'\n'}" 1 || rc=$?
+    (( rc == 1 )) || return "${rc}"
+  done <<< "${INERT_LEVELS:+${INERT_LEVELS}$'\036'}"
+  return 1
+}
+
+# inert_dynamic_command_word for one <text>; <levels> is 1 for a text the byte
+# rule unquoted. Returns 0 when a computed word stands where npm or its
+# command can, 1 when none does, 2 on a failed reading.
+inert_dynamic_in() {
+  local text="$1" classes noredir eqstart='(^|[[:space:];&|()])='
+  [[ "${text}" == *[!$' \t\n;&|<>()'"${SAFEDEPS_SHELL_INERT_BYTES}"]* || "${text}" =~ ${eqstart} ]] || return 1
+  # A level text is one the byte rule built, not the command: a place where the
+  # shells lex it differently (`A=(ci x)` out of its quotes) is not a place in
+  # the command, so it does not report DIVERGE, which would fail the reading.
+  local div="${SAFEDEPS_LEX_DIVERGE:-}"
+  # A level text carries a marker of its own, the inert kind to the census, so
+  # the lexing trace in scan-contract can name it.
+  if [[ "$2" == 1 ]]; then
+    div=""
+    classes=$(SAFEDEPS_LEX_DIVERGE="${div}" shell_lex "${text}" classes "safedeps:inert_rewrite_in_place_levels") || return 2
+    noredir=$(SAFEDEPS_LEX_DIVERGE="${div}" shell_lex "${text}" noprefix "safedeps:inert_rewrite_in_place_levels" && printf X) || return 2
+  else
+    classes=$(SAFEDEPS_LEX_DIVERGE="${div}" shell_lex "${text}" classes "safedeps:inert_rewrite_in_place") || return 2
+    noredir=$(SAFEDEPS_LEX_DIVERGE="${div}" shell_lex "${text}" noprefix "safedeps:inert_rewrite_in_place" && printf X) || return 2
+  fi
+  # The view keeps a newline that ends the text, and a capture drops it, so
+  # it is captured with an `X` after it, which stays on the awk's input and
+  # END takes off. Lost, a payload that ends in one (a heredoc in a
+  # substitution) read one byte short of its classes and failed the reading.
+  if printf '%s\n%s' "${classes}" "${noredir}" | LC_ALL=C awk -v inert="${SAFEDEPS_SHELL_INERT_BYTES}" -v levels="$2" '
+    # safedeps:inert_rewrite_in_place (scripts/measure/scan-failure-census.sh keys on this line)
+    NR == 1 { K = $0; next }
+    { X = X (NR > 2 ? "\n" : "") $0 }
+    END {
+      X = substr(X, 1, length(X) - 1)
+      N = split(X, XC, ""); if (split(K, KC, "") != N) exit 3
+      split("! { } if then else elif while until do time coproc", kw, " ")
+      for (j in kw) KW[kw[j]] = 1
+      m = split(inert, ib, ""); for (j = 1; j <= m; j++) IB[ib[j]] = 1
+      # A case pattern runs back from the `)` that closes it (class p) to
+      # the `in`, the `;;` or the line before it; `|` is its alternation.
+      pat = 0
+      for (k = N; k >= 1; k--) {
+        if (KC[k] == "p") pat = 1
+        else if (pat && KC[k] == "c" && index(";&(\n", XC[k])) pat = 0
+        else if (pat && KC[k] == "c" && index(" \t", XC[k]) && k > 2 && XC[k-1] == "n" && XC[k-2] == "i" && (k == 3 || index(" \t", XC[k-3]))) pat = 0
+        PAT[k] = pat
+      }
+      # In a text the byte rule unquoted (levels), where the npm the rewrite
+      # read is already set aside, an `npm` inside a substitution is one it
+      # did not read, as inert_bytes_left_unread reads the command itself.
+      ns = 0
+      for (k = 1; levels && k <= N; k++) {
+        if ((KC[k] == "Q" || KC[k] == "B" || ns > 0) && tolower(XC[k] XC[k + 1] XC[k + 2]) == "npm") exit 0
+        if (KC[k] != "c") continue
+        if ((XC[k] == "$" || XC[k] == "<" || XC[k] == ">") && XC[k + 1] == "(" || XC[k] == "$" && XC[k + 1] == "{") { st[++ns] = (XC[k + 1] == "(") ? ")" : "}"; k++ }
+        else if (XC[k] == "`") { if (ns > 0 && st[ns] == "`") ns--; else st[++ns] = "`" }
+        else if (ns > 0 && XC[k] == "(") st[++ns] = ")"
+        else if (ns > 0 && XC[k] == st[ns]) ns--
+      }
+      # A word runs to a blank or an operator at its own level; a `(` inside
+      # it (`$(`, `$((`, `<(`) opens a level the word keeps to its `)`. Of
+      # its text with the quotes out, only the first eight bytes and the last
+      # four are kept, which every reserved word and `/npm` fit in: a string
+      # built a byte at a time costs the square of its length under the
+      # macOS awk.
+      start = 1; innpm = 0
+      for (k = 1; k <= N; k++) {
+        c = XC[k]; top = (KC[k] == "c" || KC[k] == "p")
+        if (KC[k] == "m" || KC[k] == "h" || KC[k] == "b" || KC[k] == "F" || KC[k] == "l") continue
+        if (top && (c == " " || c == "\t" || c == "<" || c == ">")) continue
+        if (top && index(";&|()\n", c)) { start = 1; innpm = 0; continue }
+        s = k; w = ""; t = ""; wl = 0; rl = 0; dyn = 0; depth = 0
+        for (; k <= N; k++) {
+          c = XC[k]; cl = KC[k]; top = (cl == "c" || cl == "p")
+          if (depth == 0 && ((top && index(" \t;&|()<>\n", c) && !(c == "(" && rl > 0)) || cl == "m" || cl == "h" || cl == "b" || cl == "F")) { k--; break }
+          rl++
+          if (top && c == "(") depth++
+          else if (top && c == ")") depth--
+          if (c == "$" || c == "`") dyn = 1
+          else if (cl == "c" && (!(c in IB) || k == s && c == "=")) dyn = 1
+          if (cl == "x" || cl == "l" || cl == "q" && (c == "\047" || c == "\042")) continue
+          if (wl < 8) w = w c
+          t = (wl < 4 ? t : substr(t, 2)) c
+          wl++
+        }
+        if (PAT[s]) continue
+        if (start) {
+          if (wl <= 8 && (w in KW || w == "[[" || w == "[")) { start = (w in KW); continue }
+          if (dyn) exit 0
+          start = 0; opt = 0
+          t = tolower(t)
+          innpm = (wl == 3 && t == "npm" || wl > 3 && t == "/npm")
+          continue
+        }
+        if (!innpm) continue
+        if (dyn) exit 0
+        if (substr(w, 1, 1) == "-") opt = 1
+        else if (!opt) innpm = 0
+      }
+      exit 1
+    }'; then
+    return 0
+  else
+    case $? in 1) return 1 ;; *) [[ -z "${SAFEDEPS_SCAN_MARK:-}" ]] || printf 'failed\n' >> "${SAFEDEPS_SCAN_MARK}"; return 2 ;; esac
+  fi
+}
+
 # The command with `--ignore-scripts` placed after the last argument of every
-# npm install the shell runs: in the command's own code, in a substitution, and
-# in a script it hands to `sh -c` or `eval`. Prints nothing when no verb was
-# found. Returns 4, printing nothing, when every install already leaves
-# ignore-scripts true. With the rewrite printed, it returns 4 plus the sum of
-# 1 when an install asked for its scripts and the flag now overrides it, 2 when
-# an install holds a word the shell decides at run time, so nobody read
-# whether the flag holds, and 4 when an install keeps only the floor because
-# no place in it reads as true, or gets no flag because its verb is glued to a
-# `}` nested in a substitution (` nested`, inert_nested_verb_ends) -- a
-# downgrade the caller records; 0 when none applies. Prints nothing and
-# returns 0, the caller's downgrade, when such a nested install is the only
-# one left to rewrite, even where every other install already leaves
-# ignore-scripts true. Returns 3, printing nothing, when an npm install sits where the
-# rewrite cannot reach it -- a double-quoted script with an escape or a
-# substitution in it, a heredoc piped into a shell -- so the caller records the
-# downgrade instead of reporting the command inert; the release did not
-# rewrite these either.
+# npm install the shell runs: in the command's own code, in a substitution,
+# and in a script it hands to `sh -c` or `eval`. Prints nothing when no verb
+# was found. Returns 4, printing nothing, when every install already leaves
+# ignore-scripts true and none is in text the rewrite cannot read or cannot
+# reach. With the rewrite printed, it returns 4 plus the sum of 1 when an
+# install asked for its scripts and the flag now overrides it, 2 when an
+# install holds a word the shell decides at run time, so nobody read whether
+# the flag holds, 4 when an install keeps only the floor because no place in
+# it reads as true, or gets no flag because its verb is glued to a `}` nested
+# in a substitution (` nested`, inert_nested_verb_ends) -- a downgrade the
+# caller records -- and 8 when the command holds an npm install verb in text
+# the rewrite did not read as a command, an unread `npm` in a word the shell
+# computes, or a command word or npm's command that the shell computes
+# (inert_bytes_left_unread, inert_dynamic_command_word); 0 when none applies.
+# A nested verb prints no `@` (inert_flag_offsets), so the byte rule sees it
+# too, and such a command carries both 4 and 8. In a script word it cannot
+# read (a double-quoted script with an escape or a substitution in it, a
+# script handed to `ksh -c`) and in a heredoc body piped into another command,
+# the flag goes where v2.17.2 put it (inert_unread_offsets). Such an install
+# used to return 3 and drop the rewrite of the whole command: 7d66f8c dropped
+# it too, and v2.17.2 had flagged these
+# (scripts/measure/inert-downgrade-grid.sh). Where no flag was placed for it,
+# nothing is printed for it, and where no other flag was placed either (no
+# other install, or every other one already true) it prints nothing and
+# returns 0, and the caller records a downgrade, as before. A nested install
+# that is the only one left to rewrite goes the same way.
+#
+# The 8 is the one record of an install the rewrite did not read, and its
+# inputs are the command's bytes and the verbs the rewrite read, nothing about
+# the kind of text: scripts/measure/inert-record-invariant.sh holds every form
+# that makes an npm call without the flag to a record.
 #
 # The rewrite always holds the release's own (7d66f8c): the flag right after
 # every verb, which inert_flag_offsets prints, and, for a command the release
@@ -3548,17 +4096,16 @@ inert_offsets_of() {
 # in `sh -c '...'` beside a visible one ran its lifecycle scripts with nothing
 # recorded (caught in the release integration).
 inert_rewrite_in_place() {
-  local command="$1" lines offsets="" e note settled=false asked=false unverified=false floor=false rc=0 append=0 release_rewrote=false
+  local command="$1" lines offsets="" e note settled=false asked=false unverified=false floor=false unread=false rc=0 append=0 release_rewrote=false read_at=""
   lines=$(inert_offsets_of "${command}") || rc=$?
   (( rc == 0 )) || return "${rc}"
-  # Matches case and ends the verb at a blank, as the release did: with -i or SAFEDEPS_G_END, return 3 drops the compound floor, as with the awk in inert_payload_spans (v2.18.1).
-  if strip_heredoc_bodies "${command}" shell-bodies \
-      | LC_ALL=C judge_grep -qE "npm${SAFEDEPS_G_OPTS}[[:space:]]+(${SAFEDEPS_G_NPM_VERBS}|${SAFEDEPS_G_NPM_LINK_VERBS})([[:space:]]|\$)"; then
-    return 3
-  fi
   inert_release_skips "${command}" || release_rewrote=true
   while read -r e note; do
     [[ -n "${e}" ]] || continue
+    if [[ "${e}" == @* ]]; then
+      read_at+="${e#@} "
+      continue
+    fi
     # An install the rewrite cannot reach gets no flag, and the command keeps
     # the rewrite of the others. Read as nothing, it left that rewrite to
     # report the command inert, with nothing recorded.
@@ -3576,8 +4123,25 @@ inert_rewrite_in_place() {
     offsets+="${e}"$'\n'
   done <<< "${lines}"
   [[ -z "${offsets}" ]] || ! inert_release_appends "${command}" || append=1
+  # The record has two inputs: the bytes of the command against the verbs the
+  # rewrite read, and a command word the shell computes.
+  rc=0
+  inert_bytes_left_unread "${command}" "${read_at}" || rc=$?
+  if (( rc == 1 )); then
+    rc=0
+    inert_dynamic_command_word "${command}" || rc=$?
+  fi
+  case "${rc}" in
+    0) unread=true ;;
+    1) ;;
+    *) return 1 ;;
+  esac
+  # An install already true settles nothing for one in text the rewrite cannot
+  # read: with no flag placed there, the command is a recorded downgrade. It
+  # returned 4 here, and `npm i y --ignore-scripts; ksh -c "npm ci"` passed
+  # with no record, where v2.18.0 had recorded a downgrade (caught in review).
   if [[ -z "${offsets}" ]]; then
-    [[ "${settled}" == true && "${floor}" != true ]] && return 4
+    [[ "${settled}" == true && "${unread}" != true && "${floor}" != true ]] && return 4
     return 0
   fi
   offsets=$(printf '%s' "${offsets}" | LC_ALL=C sort -nu | tr '\n' ' ')
@@ -3605,6 +4169,7 @@ inert_rewrite_in_place() {
   [[ "${asked}" != true ]] || rc=$(( rc + 1 ))
   [[ "${unverified}" != true ]] || rc=$(( rc + 2 ))
   [[ "${floor}" != true ]] || rc=$(( rc + 4 ))
+  [[ "${unread}" != true ]] || rc=$(( rc + 8 ))
   (( rc == 0 )) || return $(( rc + 4 ))
 }
 
@@ -6127,9 +6692,9 @@ guard_extract_specs() {
 
 # How the current reading would make the command's npm installs inert, as one
 # value the readings can be compared on: none, downgrade, or `rewrite` (with
-# ` asked`, ` unverified` and ` floor` when they apply, or ` release` alone
-# when only the release's rewrite was written) and the rewritten command on the
-# next line.
+# ` asked`, ` unverified`, ` floor` and ` unread` when they apply, or
+# ` release` alone when only the release's rewrite was written) and the
+# rewritten command on the next line.
 guard_reading_inert() {
   local outcome=none updated="" rc=0
   if command_is_injectable_npm_install "${COMMAND}"; then
@@ -6148,8 +6713,8 @@ guard_reading_inert() {
     # nothing to do.
     updated=$(inert_rewrite_in_place "${COMMAND}") || rc=$?
     case "${rc}" in
-      0|5|6|7|8|9|10|11) ;;
-      3|4) updated="" ;;
+      0|5|6|7|8|9|10|11|12|13|14|15|16|17|18|19) ;;
+      4) updated="" ;;
       *) guard_mark_reading_failed; updated="" ;;
     esac
     if (( rc == 4 )); then
@@ -6161,8 +6726,8 @@ guard_reading_inert() {
       # guarantee is observably relaxed, never silently.
       outcome=downgrade
       # The floor holds on this path too, whatever stopped the rewrite (an
-      # install in a script handed to a shell that no offset reaches, a heredoc
-      # fed to a shell, no verb found, a failed reading): where the release
+      # install in text it cannot read where no verb could be flagged, no verb
+      # found, a failed reading): where the release
       # appended its flag to the command, the command gets that rewrite. It
       # used to get none, and `npm ci eval "\npm"` ran its scripts where the
       # release's `npm ci eval "\npm" --ignore-scripts` ran none.
@@ -6175,6 +6740,7 @@ guard_reading_inert() {
         (( ((rc - 4) & 1) == 0 )) || outcome+=" asked"
         (( ((rc - 4) & 2) == 0 )) || outcome+=" unverified"
         (( ((rc - 4) & 4) == 0 )) || outcome+=" floor"
+        (( ((rc - 4) & 8) == 0 )) || outcome+=" unread"
       fi
       outcome+=$'\n'"${updated}"
     fi
@@ -6683,17 +7249,20 @@ META_EOF
 # non-zero when the record was not written, and the caller then writes no
 # rewrite: a rewrite with no record made the post hook's "did not add" false.
 # ignore_scripts_unread says an install in it holds a word the shell decides
-# at run time (INERT_UNVERIFIED), or the rewrite is only the release's because
-# no place was read (INERT_RELEASE_ONLY), so nobody read where npm keeps the
-# flag: a reason for the post hook to add a warning, never a permission to say
-# the scripts did not run. A record that lacks it loses that warning and claims
-# nothing more.
+# at run time (INERT_UNVERIFIED), an npm install verb is in text the rewrite
+# did not read as a command, an `npm` it did not read is in a word the shell
+# computes, or the shell computes a command word or the word npm reads as its
+# command (INERT_UNREAD), or the rewrite is only the release's because no place was
+# read (INERT_RELEASE_ONLY): safedeps did not read all of the command as the
+# shell will. It is a reason for the post hook to add a warning, never
+# a permission to say the scripts did not run. A record that lacks it loses
+# that warning and claims nothing more.
 mark_ignore_scripts_injected() {
   local meta_file="${SNAPSHOT_DIR}/${SNAPSHOT_ID}_meta.json"
   local temp_file unread=false
 
   [[ -f "${meta_file}" ]] || return 1
-  [[ "${INERT_UNVERIFIED}" != true && "${INERT_RELEASE_ONLY}" != true ]] || unread=true
+  [[ "${INERT_UNVERIFIED}" != true && "${INERT_UNREAD}" != true && "${INERT_RELEASE_ONLY}" != true ]] || unread=true
   temp_file=$(mktemp "${SNAPSHOT_DIR}/.${SNAPSHOT_ID}_meta.XXXXXX") || return 1
   if jq --arg command "$1" --argjson unread "${unread}" \
       '.ignore_scripts_injected = true | .updated_command = $command | .ignore_scripts_unread = $unread' "${meta_file}" > "${temp_file}" \
@@ -6988,6 +7557,7 @@ INERT_FLOOR_ONLY=false
 INERT_RELEASE_ONLY=false
 INERT_ASKED=false
 INERT_UNVERIFIED=false
+INERT_UNREAD=false
 if [[ "${GUARD_IS_CODEX}" != true ]]; then
   inert_first="" inert_seen=false
   for guard_reading in ${GUARD_READING_SET}; do
@@ -7014,6 +7584,11 @@ if [[ "${GUARD_IS_CODEX}" != true ]]; then
       # No rewrite landed, and the command gets the release's own: the flag
       # at the end of a one-statement command. Also a recorded downgrade.
       [[ "${inert_first}" != *" release"* ]] || INERT_RELEASE_ONLY=true
+      # An npm install verb in text the rewrite did not read as a command, an
+      # unread `npm` in a word the shell computes, or a command word or npm's
+      # command that the shell computes (inert_bytes_left_unread,
+      # inert_dynamic_command_word). Sent, and recorded.
+      [[ "${inert_first}" != *" unread"* ]] || INERT_UNREAD=true
       ;;
   esac
 fi
@@ -7030,7 +7605,7 @@ fi
 guard_settle_scan_failure
 
 if [[ "${INERT_DOWNGRADED}" == "true" ]]; then
-  log_advisory "pre-guard: could not make every npm install in this command inert in place (one is in a compound command the rewrite did not land in, in a statement whose end it could not find, or in a script handed to a shell that it cannot reach); lifecycle scripts may run before the effect gate verifies (downgraded to detect-and-rollback). Command: ${COMMAND}"
+  log_advisory "pre-guard: could not make every npm install in this command inert in place (one is in a compound command the rewrite did not land in, in a statement whose end it could not find, in a script handed to a shell that it cannot reach, in a heredoc body handed to a shell or piped on, or the text it did not read names npm); lifecycle scripts may run before the effect gate verifies (downgraded to detect-and-rollback). Command: ${COMMAND}"
 fi
 if [[ "${INERT_FLOOR_ONLY}" == "true" ]]; then
   log_advisory "pre-guard: an npm install in this command has no place where safedeps could read npm keeping --ignore-scripts true (its end could not be found, a -- ends npm's options before it, every place changes what npm reads, or its verb is glued to a } inside a substitution, which the rewrite reads as a character and gives no flag); safedeps put the flag right after each verb it read, where the release put it in a compound command, and at the end of a one-statement command, where the release put it there; lifecycle scripts may run before the effect gate verifies (downgraded to detect-and-rollback). Command: ${COMMAND}"
@@ -7043,6 +7618,9 @@ if [[ "${INERT_ASKED}" == "true" ]]; then
 fi
 if [[ "${INERT_UNVERIFIED}" == "true" ]]; then
   log_advisory "pre-guard: an npm install in this command holds a word the shell decides at run time (a tilde, a brace, \$x, \$(...), a glob or another expansion), which can set ignore-scripts, take the next word as its value, or end npm's options; safedeps put --ignore-scripts both right after the verb and after the last argument, and could not read whether npm keeps it true, so the install's scripts may run before the effect gate verifies. Command: ${COMMAND}"
+fi
+if [[ "${INERT_UNREAD}" == "true" ]]; then
+  log_advisory "pre-guard: text of this command that safedeps did not read as a command holds an npm install verb, or an npm inside a word the shell computes, or a command word or npm's command in it is one the shell computes; safedeps put --ignore-scripts right after each npm install verb in a script word or a piped heredoc body that a blank follows or that ends its line, where v2.17.2 put it, and none elsewhere in that text. Command: ${COMMAND}"
 fi
 
 # Write the record of this install for the post hook of the same call. It is

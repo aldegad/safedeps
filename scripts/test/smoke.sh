@@ -616,10 +616,12 @@ do
 done
 pass "inert flag lands on an install whose npm is spelled in another case"
 
-# A heredoc body piped to a command is data, and `Npm install` in it is not an
-# npm verb to the heredoc check, which matches case as the release did: read in
-# any case, it withheld every rewrite, so the visible install got none of the
-# flags the release gave it and ran its scripts.
+# A heredoc body piped to a command, with `Npm install` in it, withheld every
+# rewrite once the check for an npm verb there was read in any case, so the
+# visible install got none of the flags the release gave it and ran its
+# scripts. Nothing withholds the rewrite now: the visible install keeps its
+# flags, and the body, text the rewrite cannot read, gets the flag after its
+# verb as v2.17.2 put it, in any case.
 # The commands hold a pipe, so each row is a pair of array entries rather than
 # one `in|want` string.
 heredoc_case_in=(
@@ -627,8 +629,8 @@ heredoc_case_in=(
   $'npm install evil && cat <<E | wc -l\nNPM install evil\nE'
 )
 heredoc_case_want=(
-  $'npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts && cat <<E | wc -l\nNpm install left-pad@1.3.0\nE'
-  $'npm install --ignore-scripts evil --ignore-scripts && cat <<E | wc -l\nNPM install evil\nE'
+  $'npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts && cat <<E | wc -l\nNpm install --ignore-scripts left-pad@1.3.0\nE'
+  $'npm install --ignore-scripts evil --ignore-scripts && cat <<E | wc -l\nNPM install --ignore-scripts evil\nE'
 )
 for heredoc_i in "${!heredoc_case_in[@]}"; do
   inert_in="${heredoc_case_in[${heredoc_i}]}"
@@ -829,7 +831,7 @@ do
     || fail "bash hands npm a word the text does not show: $(printf '%q' "${echo_form}") (argv: $(paste -sd' ' - <<< "${echo_argv}"))"
 done
 # An install whose flag nobody read says so in the meta, so the post hook adds
-# the warning that its scripts may have run.
+# the warning that safedeps did not read all of the command it wrote.
 dyn_safe=$(mktemp -d "${tmp_root}/safe-dyn.XXXXXX")
 SAFEDEPS_HOME="${dyn_safe}" lib/ledger/ledger.sh approve npm left-pad 1.3.0 1.3.0 smoke >/dev/null
 run_hook_command "${tmp_root}/home-dyn" "${dyn_safe}" 'HOME=--cache; npm install left-pad@1.3.0 ~' >/dev/null
@@ -890,62 +892,198 @@ downgrades_after=$(grep -c 'has no place where safedeps could read npm keeping -
 (( ${downgrades_after:-0} > ${downgrades_before:-0} )) || fail "an install with a -- before its verb is recorded as an inert downgrade"
 pass "the inert flag is read from each install's own arguments and goes where npm reads it last; one already true is left as written"
 
-# A script the rewrite cannot map -- double-quoted with a substitution in it --
-# is a recorded downgrade, never a command reported inert while an install in
-# it runs its scripts.
+# Text the rewrite cannot read as the shell will -- a double-quoted script
+# with an escape or a substitution in it, a script handed to ksh, a heredoc
+# body piped into another command -- gets the flag where v2.17.2 put it: right
+# after each npm install verb there that is followed by a blank or ends its
+# line. The command is recorded as one whose flag nobody read, and the meta
+# says so. The rewrite used to drop every flag in such a command, the visible
+# install's too, and record a downgrade, where v2.17.2 had flagged them
+# (scripts/measure/inert-downgrade-grid.sh). An
+# approved install in a script with an escaped quote is read to its end and
+# allowed. The heredoc body is text a shell could be handed, so it is flagged
+# as v2.17.2 flagged it; the npm in it is read in any case, as everywhere the
+# rewrite looks for a verb. The last two rows' hidden installs have no verb a
+# blank follows, so they get no flag, as in v2.17.2; the visible one keeps its
+# flags, and the command is still recorded as one whose flag nobody read. The
+# heredoc body fed to `sh` and piped to `tee` was recorded for no kind but a
+# script word, and passed with no flag and no record (validator round 2, x005).
+unread_case_in=(
+  'npm install left-pad@1.3.0; sh -c "echo $(date); npm install left-pad@1.3.0"'
+  'npm install left-pad@1.3.0; sh -c "echo \"hi\"; npm install left-pad@1.3.0"'
+  'true; sh -c "npm install left-pad@1.3.0 \"--loglevel=warn\""'
+  'sh -c "npm install left-pad@1.3.0 \"--loglevel=warn\""'
+  'eval "npm install left-pad@1.3.0 \"--loglevel=warn\""'
+  'true; bash -lc "npm install left-pad@1.3.0 `printf -- --loglevel=warn`"'
+  'true; zsh -c "npm install left-pad@1.3.0 --fetch-retries $((1))"'
+  "true; ksh -c 'npm install left-pad@1.3.0'"
+  $'npm install left-pad@1.3.0 && cat <<E | wc -l\nnpm install left-pad@1.3.0\nE'
+  $'npm install left-pad@1.3.0 && cat <<E | wc -l\nNpm install left-pad@1.3.0\nE'
+  'npm install left-pad@1.3.0; sh -c "npm install\"\" left-pad@1.3.0"'
+  $'npm i left-pad@1.3.0 && sh <<E | tee log\nnpm ci&&true\nE'
+)
+unread_case_want=(
+  'npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts; sh -c "echo $(date); npm install --ignore-scripts left-pad@1.3.0"'
+  'npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts; sh -c "echo \"hi\"; npm install --ignore-scripts left-pad@1.3.0"'
+  'true; sh -c "npm install --ignore-scripts left-pad@1.3.0 \"--loglevel=warn\""'
+  'sh -c "npm install --ignore-scripts left-pad@1.3.0 \"--loglevel=warn\""'
+  'eval "npm install --ignore-scripts left-pad@1.3.0 \"--loglevel=warn\""'
+  'true; bash -lc "npm install --ignore-scripts left-pad@1.3.0 `printf -- --loglevel=warn`"'
+  'true; zsh -c "npm install --ignore-scripts left-pad@1.3.0 --fetch-retries $((1))"'
+  "true; ksh -c 'npm install --ignore-scripts left-pad@1.3.0'"
+  $'npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts && cat <<E | wc -l\nnpm install --ignore-scripts left-pad@1.3.0\nE'
+  $'npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts && cat <<E | wc -l\nNpm install --ignore-scripts left-pad@1.3.0\nE'
+  'npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts; sh -c "npm install\"\" left-pad@1.3.0"'
+  $'npm i --ignore-scripts left-pad@1.3.0 --ignore-scripts && sh <<E | tee log\nnpm ci&&true\nE'
+)
+for unread_i in "${!unread_case_in[@]}"; do
+  inert_in="${unread_case_in[${unread_i}]}"
+  inert_want="${unread_case_want[${unread_i}]}"
+  unread_safe=$(mktemp -d "${tmp_root}/safe-unread.XXXXXX")
+  SAFEDEPS_HOME="${unread_safe}" lib/ledger/ledger.sh approve npm left-pad 1.3.0 1.3.0 smoke >/dev/null
+  inert_out=$(run_hook_command "${tmp_root}/home-unread" "${unread_safe}" "${inert_in}")
+  inert_got=$(jq -r '.hookSpecificOutput.updatedInput.command // ""' <<< "${inert_out}")
+  [[ "${inert_got}" == "${inert_want}" ]] \
+    || fail "an install in text the rewrite cannot read gets the flag where v2.17.2 put it: $(printf '%q' "${inert_in}") (got: $(printf '%q' "${inert_got}"); ${inert_out:0:200})"
+  grep -q 'safedeps did not read as a command holds an npm install verb' "${unread_safe}/advisory.log" 2>/dev/null \
+    || fail "an install in text the rewrite cannot read is recorded as one whose flag nobody read: $(printf '%q' "${inert_in}")"
+  unread_sid=$(jq -r '.snapshot_id' "${unread_safe}/pending/"*.json 2>/dev/null) || unread_sid=""
+  jq -e '.ignore_scripts_injected == true and .ignore_scripts_unread == true' "${unread_safe}/snapshots/${unread_sid}_meta.json" >/dev/null 2>&1 \
+    || fail "an install in text the rewrite cannot read is recorded with the unread warning: $(printf '%q' "${inert_in}")"
+done
+# Where that text holds `npm` and no verb in it can be flagged, and nothing
+# else in the command is an install, the command is a recorded downgrade, as
+# before: nothing is reported inert.
 downgrades_before=$(grep -c 'could not make every npm install in this command inert' "${tmp_root}/safe-compound/advisory.log" 2>/dev/null || true)
-inert_out=$(run_hook_command "${tmp_root}/home-compound" "${tmp_root}/safe-compound" 'npm install left-pad@1.3.0; sh -c "echo $(date); npm install left-pad@1.3.0"')
+inert_out=$(run_hook_command "${tmp_root}/home-compound" "${tmp_root}/safe-compound" 'true; sh -c "npm install\"\" left-pad@1.3.0"')
 [[ -z "$(jq -r '.hookSpecificOutput.updatedInput.command // ""' <<< "${inert_out}")" ]] \
-  || fail "a script the inert rewrite cannot map gets no partial rewrite"
+  || fail "a script whose install no verb placement reaches gets no rewrite (got: ${inert_out:0:200})"
 downgrades_after=$(grep -c 'could not make every npm install in this command inert' "${tmp_root}/safe-compound/advisory.log" 2>/dev/null || true)
-(( ${downgrades_after:-0} > ${downgrades_before:-0} )) || fail "a script the inert rewrite cannot map is recorded as a downgrade"
-# One with an escaped quote in it is read to its end now (the payload reader
-# takes the word the shell passes), so the approved install inside it is judged
-# and allowed; the inert rewrite cannot map an escaped double-quoted script, so
-# it is a recorded downgrade, as above.
-downgrades_before=$(grep -c 'could not make every npm install in this command inert' "${tmp_root}/safe-compound/advisory.log" 2>/dev/null || true)
-inert_out=$(run_hook_command "${tmp_root}/home-compound" "${tmp_root}/safe-compound" 'npm install left-pad@1.3.0; sh -c "echo \"hi\"; npm install left-pad@1.3.0"')
-[[ "$(jq -r '.hookSpecificOutput.permissionDecision // "allow"' <<< "${inert_out}")" != deny ]] \
-  || fail "an approved install in a script with an escaped quote is read and allowed (got: ${inert_out:0:160})"
-[[ -z "$(jq -r '.hookSpecificOutput.updatedInput.command // ""' <<< "${inert_out}")" ]] \
-  || fail "a script with an escaped quote gets no partial inert rewrite"
-downgrades_after=$(grep -c 'could not make every npm install in this command inert' "${tmp_root}/safe-compound/advisory.log" 2>/dev/null || true)
-(( ${downgrades_after:-0} > ${downgrades_before:-0} )) || fail "a script with an escaped quote is recorded as an inert downgrade"
-pass "a script the inert rewrite cannot reach is a recorded downgrade, or UNDECIDED when it cannot be read"
+(( ${downgrades_after:-0} > ${downgrades_before:-0} )) || fail "a script whose install no verb placement reaches is recorded as a downgrade"
+# The same holds beside an install that already carries the flag: that
+# install is left as written, nothing else gets a flag, and the command is a
+# recorded downgrade with nothing reported inert. The rewrite used to return
+# "every install already true" here and let both pass with no record, where
+# v2.18.0 had recorded a downgrade (caught in review), and the heredoc form
+# passed the same way a round later (x006). Every form is judged before the
+# row fails, so a tree that records none is named for each.
+settled_unread_bad=""
+for inert_in in \
+  'npm i left-pad@1.3.0 --ignore-scripts=true; sh -c "cd \"d\" && npm ci"' \
+  'npm i left-pad@1.3.0 --ignore-scripts && ksh -c "npm ci"' \
+  $'npm i left-pad@1.3.0 --ignore-scripts && sh <<E | tee log\nnpm ci&&true\nE'
+do
+  settled_safe=$(mktemp -d "${tmp_root}/safe-settled-unread.XXXXXX")
+  SAFEDEPS_HOME="${settled_safe}" lib/ledger/ledger.sh approve npm left-pad 1.3.0 1.3.0 smoke >/dev/null
+  inert_out=$(run_hook_command "${tmp_root}/home-settled-unread" "${settled_safe}" "${inert_in}")
+  [[ -z "$(jq -r '.hookSpecificOutput.updatedInput.command // ""' <<< "${inert_out}")" ]] \
+    || settled_unread_bad+=" [a rewrite: $(printf '%q' "${inert_in}") (got: ${inert_out:0:200})]"
+  grep -q 'could not make every npm install in this command inert' "${settled_safe}/advisory.log" 2>/dev/null \
+    || settled_unread_bad+=" [no downgrade line in advisory.log: $(printf '%q' "${inert_in}")]"
+  settled_sid=$(jq -r '.snapshot_id' "${settled_safe}/pending/"*.json 2>/dev/null) || settled_sid=""
+  jq -e '.record == 2 and .ignore_scripts_injected == false and .ignore_scripts_unread == false and (has("updated_command") | not)' "${settled_safe}/snapshots/${settled_sid}_meta.json" >/dev/null 2>&1 \
+    || settled_unread_bad+=" [the meta does not report nothing inert: $(printf '%q' "${inert_in}")]"
+done
+[[ -z "${settled_unread_bad}" ]] \
+  || fail "an install already true beside one no verb placement reaches gets no rewrite and is a recorded downgrade:${settled_unread_bad}"
+pass "an install in text the rewrite cannot read gets the flag where v2.17.2 put it and is recorded as unread, or is a recorded downgrade"
 
-# The floor holds where no place can be read. An install in a double-quoted
-# script handed to a shell, with an escape or a substitution in it, gets no
-# offset; a one-statement command still gets the release's rewrite, its flag
-# at the end, recorded as a downgrade whose flag nobody read. These got no
-# rewrite at all, and `npm ci eval "\npm"` ran its postinstall where the
+# The record does not depend on the kind of text. An npm install the rewrite
+# did not read, beside one it flagged, is recorded as one whose flag nobody
+# read and changes nothing in the rewrite, whatever kept the reading from it:
+# a shell option cluster its head does not take, a script word glued to more
+# quoting, a glued word whose rest turns the flag off, an unquoted script
+# word, a heredoc body handed to a shell with no pipe, and a verb an operator
+# follows at once in a script word the rewrite cannot read, where a flag goes
+# only after a blank, as v2.17.2 put it. Each of these ran its `npm ci`
+# with no flag and no record. At the top level the rewrite now reads a verb an
+# operator follows (`npm ci;true` gets its flag, SAFEDEPS_G_END), so that row
+# carries it inside such a script. The third and fourth script words keep the flags the
+# rewrite placed before (one inside the quoted segment, one on the outer
+# statement), and neither reaches npm as true.
+# scripts/measure/inert-record-invariant.sh holds every form of its corpus to
+# the same rule.
+left_case_in=(
+  'npm i left-pad@1.3.0 && sh -ce "npm ci \"x\""'
+  "npm i left-pad@1.3.0 && sh -c 'npm 'ci"
+  'npm i left-pad@1.3.0 && sh -c "npm ci "--ignore-scripts=false'
+  'npm i left-pad@1.3.0 && sh -c npm\ ci'
+  $'npm i left-pad@1.3.0 && sh <<E\nnpm ci\nE'
+  'npm i left-pad@1.3.0 && sh -c "cd \"d\" && npm ci;true"'
+)
+left_case_tail=(
+  ' && sh -ce "npm ci \"x\""'
+  " && sh -c 'npm 'ci"
+  ' && sh -c "npm ci --ignore-scripts "--ignore-scripts=false'
+  ' && sh -c npm\ ci --ignore-scripts'
+  $' && sh <<E\nnpm ci\nE'
+  ' && sh -c "cd \"d\" && npm ci;true"'
+)
+left_bad=""
+for left_i in "${!left_case_in[@]}"; do
+  inert_in="${left_case_in[${left_i}]}"
+  left_safe=$(mktemp -d "${tmp_root}/safe-left-unread.XXXXXX")
+  SAFEDEPS_HOME="${left_safe}" lib/ledger/ledger.sh approve npm left-pad 1.3.0 1.3.0 smoke >/dev/null
+  inert_out=$(run_hook_command "${tmp_root}/home-left-unread" "${left_safe}" "${inert_in}")
+  inert_got=$(jq -r '.hookSpecificOutput.updatedInput.command // ""' <<< "${inert_out}")
+  [[ "${inert_got}" == "npm i --ignore-scripts left-pad@1.3.0 --ignore-scripts${left_case_tail[${left_i}]}" ]] \
+    || left_bad+=" [the rewrite changed: $(printf '%q' "${inert_in}") (got: $(printf '%q' "${inert_got}"); ${inert_out:0:160})]"
+  grep -q 'safedeps did not read as a command holds an npm install verb' "${left_safe}/advisory.log" 2>/dev/null \
+    || left_bad+=" [no unread line in advisory.log: $(printf '%q' "${inert_in}")]"
+  left_sid=$(jq -r '.snapshot_id' "${left_safe}/pending/"*.json 2>/dev/null) || left_sid=""
+  jq -e '.ignore_scripts_injected == true and .ignore_scripts_unread == true' "${left_safe}/snapshots/${left_sid}_meta.json" >/dev/null 2>&1 \
+    || left_bad+=" [the meta has no unread warning: $(printf '%q' "${inert_in}")]"
+done
+[[ -z "${left_bad}" ]] \
+  || fail "an npm install the rewrite did not read beside one it flagged is recorded as unread, and the rewrite is unchanged:${left_bad}"
+pass "an npm install the rewrite did not read is recorded as unread, whatever kind of text kept the reading from it (${#left_case_in[@]} kinds)"
+
+# The floor holds where no place can be read. Each of these holds an install
+# in front of a double-quoted word with an escape or a substitution in it after
+# `eval` or `sh -c`, which the rewrite reads as a script it cannot read. They
+# got no rewrite at all, and `npm ci eval "\npm"` ran its postinstall where the
 # release's rewrite ran none (validator round 4: six forms, and two from its
-# seeded fuzz). The release floor check in run_hook_command judges each
-# against the release's own rewrite.
+# seeded fuzz). Each now keeps the release's rewrite, the flag at the end,
+# with the flags read for the visible install. The release floor check in
+# run_hook_command judges each against the release's own rewrite.
+#
+# Each is one npm install whose operands spell `eval` or `sh -c`: the shell
+# runs no eval and no sh there. Each keeps its rewrite, the flags read for it
+# and the release's end flag. It is recorded where a rule input applies: a
+# command word the shell computes in a script the command hands on (`$(echo)
+# npm`), or a word the shell decides at run time (`"$HOME"`). The others were
+# recorded while the record listed text that names npm after an `eval` or a
+# `sh -c`; with no npm install verb left in text the rewrite did not read as a
+# command, they are not, and npm reads the flag in every one.
 release_only_safe=$(mktemp -d "${tmp_root}/safe-release-only.XXXXXX")
 SAFEDEPS_HOME="${release_only_safe}" lib/ledger/ledger.sh approve npm left-pad 1.3.0 1.3.0 smoke >/dev/null
-for inert_in in \
-  'npm ci eval "\npm"' \
-  'npm install left-pad@1.3.0 eval "a\b npm"' \
-  'npm install left-pad@1.3.0 eval "npm\ x"' \
-  'npm install left-pad@1.3.0 eval "$(echo) npm"' \
-  'npm install left-pad@1.3.0 sh -c "\npm"' \
-  'npm install left-pad@1.3.0 --userconfig=eval "x\y npm"' \
-  'npm ci left-pad@1.3.0 sh -c "x\y npm" false "$HOME"' \
-  'npm install x\ y -- "$HOME" sh -c "x\y npm"'
+for row in \
+  '0|npm ci eval "\npm"' \
+  '0|npm install left-pad@1.3.0 eval "a\b npm"' \
+  '0|npm install left-pad@1.3.0 eval "npm\ x"' \
+  '1|npm install left-pad@1.3.0 eval "$(echo) npm"' \
+  '0|npm install left-pad@1.3.0 sh -c "\npm"' \
+  '0|npm install left-pad@1.3.0 --userconfig=eval "x\y npm"' \
+  '1|npm ci left-pad@1.3.0 sh -c "x\y npm" false "$HOME"' \
+  '0|npm install x\ y -- "$HOME" sh -c "x\y npm"'
 do
+  release_only_want="${row%%|*}" inert_in="${row#*|}"
   rm -rf "${release_only_safe}/pending"
-  release_only_before=$(grep -c 'could not place --ignore-scripts by reading' "${release_only_safe}/advisory.log" 2>/dev/null || true)
   inert_out=$(run_hook_command "${tmp_root}/home-release-only" "${release_only_safe}" "${inert_in}")
-  [[ "$(jq -r '.hookSpecificOutput.updatedInput.command // ""' <<< "${inert_out}")" == "${inert_in} --ignore-scripts" ]] \
-    || fail "an install no place can be read in keeps the release's rewrite: $(printf '%q' "${inert_in}") (got: ${inert_out:0:240})"
-  release_only_after=$(grep -c 'could not place --ignore-scripts by reading' "${release_only_safe}/advisory.log" 2>/dev/null || true)
-  (( ${release_only_after:-0} > ${release_only_before:-0} )) \
-    || fail "an install no place can be read in is recorded as a downgrade: $(printf '%q' "${inert_in}")"
+  release_only_got=$(jq -r '.hookSpecificOutput.updatedInput.command // ""' <<< "${inert_out}")
+  [[ "${release_only_got}" == *" --ignore-scripts" && "${release_only_got}" != "${inert_in}" ]] \
+    || fail "an npm install whose operands spell eval or sh -c keeps its rewrite: $(printf '%q' "${inert_in}") (got: ${inert_out:0:240})"
   release_only_sid=$(jq -r '.snapshot_id' "${release_only_safe}/pending/"*.json 2>/dev/null) || release_only_sid=""
-  jq -e '.ignore_scripts_injected == true and .ignore_scripts_unread == true' "${release_only_safe}/snapshots/${release_only_sid}_meta.json" >/dev/null 2>&1 \
-    || fail "an install no place can be read in is recorded with the unread warning: $(printf '%q' "${inert_in}")"
+  release_only_unread=$(jq -r '.ignore_scripts_unread' "${release_only_safe}/snapshots/${release_only_sid}_meta.json" 2>/dev/null) || release_only_unread=""
+  if [[ "${release_only_want}" == 1 ]]; then
+    [[ "${release_only_unread}" == true ]] \
+      || fail "an npm install with a computed or run-time word is recorded with the unread warning: $(printf '%q' "${inert_in}") (meta: ${release_only_unread:-none})"
+  else
+    [[ "${release_only_unread}" == false ]] \
+      || fail "an npm install whose operands spell eval or sh -c and npm, with nothing the shell decides, is not recorded as unread: $(printf '%q' "${inert_in}") (meta: ${release_only_unread:-none})"
+  fi
 done
-pass "an install no place can be read in keeps the release's rewrite, recorded as an unread downgrade"
+pass "an npm install whose operands spell eval or sh -c keeps its rewrite, and is recorded only where a word is computed or decided at run time"
 
 # The rewrite changes the text every shell reads, so it is made only where
 # bash, zsh and dash agree where the npm installs are. In I2 and I3 the

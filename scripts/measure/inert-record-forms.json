@@ -1,0 +1,928 @@
+{
+ "about": "Forms outside scripts/measure/inert-downgrade-grid.sh for scripts/measure/inert-record-invariant.sh: j, s and x are the validator's probes of rounds 1 and 2 (jetbi-20261005-042625, jetbi-20261005-073337), y its unmeasured follow-up, z the validator's fourth-round probes of the allow-list record (jetbi-20261005-234803: option values, computed words, bytes glued before npm, npx; the ids after z are the validator's), v an npm install the rewrite cannot read beside one it flags or one already settled, one kind per form. probes: r3q01-r3q21 are the validator's third-round forms and r3k01-r3k04 controls; e001-e016 are text the shell decodes (scope lit: an ANSI-C string, a quoted alias, function, trap or variable) or that another program computes at run time (scope cmp: printf octal, base64, rev, tr, parameter pieces), from the design judgment that made the record an allow-list.",
+ "forms": [
+  {
+   "id": "j001",
+   "tag": "opt|sh -ce",
+   "cmd": "true; sh -ce \"npm ci \\\"x\\\"\""
+  },
+  {
+   "id": "j002",
+   "tag": "opt|bash -e -c",
+   "cmd": "true; bash -e -c \"npm ci \\\"x\\\"\""
+  },
+  {
+   "id": "j003",
+   "tag": "opt|bash --norc -c",
+   "cmd": "true; bash --norc -c \"npm ci \\\"x\\\"\""
+  },
+  {
+   "id": "j004",
+   "tag": "opt|sh -o errexit -c",
+   "cmd": "true; sh -o errexit -c \"npm ci \\\"x\\\"\""
+  },
+  {
+   "id": "j005",
+   "tag": "opt|bash -c --",
+   "cmd": "true; bash -c -- \"npm ci \\\"x\\\"\""
+  },
+  {
+   "id": "j006",
+   "tag": "opt|sh -xc",
+   "cmd": "true; sh -xc \"npm ci \\\"x\\\"\""
+  },
+  {
+   "id": "j007",
+   "tag": "opt|/bin/sh -c",
+   "cmd": "true; /bin/sh -c \"npm ci \\\"x\\\"\""
+  },
+  {
+   "id": "j008",
+   "tag": "opt|env sh -c",
+   "cmd": "true; env sh -c \"npm ci \\\"x\\\"\""
+  },
+  {
+   "id": "j009",
+   "tag": "opt|exec sh -c",
+   "cmd": "true; exec sh -c \"npm ci \\\"x\\\"\""
+  },
+  {
+   "id": "j010",
+   "tag": "opt|time sh -c",
+   "cmd": "true; time sh -c \"npm ci \\\"x\\\"\""
+  },
+  {
+   "id": "j011",
+   "tag": "opt|command sh -c",
+   "cmd": "true; command sh -c \"npm ci \\\"x\\\"\""
+  },
+  {
+   "id": "j012",
+   "tag": "q|sh -c $'..'",
+   "cmd": "true; sh -c $'npm ci \\'x\\''"
+  },
+  {
+   "id": "j013",
+   "tag": "q|eval $'..'",
+   "cmd": "true; eval $'npm ci \\'x\\''"
+  },
+  {
+   "id": "j014",
+   "tag": "q|eval --",
+   "cmd": "true; eval -- \"npm ci \\\"x\\\"\""
+  },
+  {
+   "id": "j015",
+   "tag": "q|command eval",
+   "cmd": "true; command eval \"npm ci \\\"x\\\"\""
+  },
+  {
+   "id": "j016",
+   "tag": "q|builtin eval",
+   "cmd": "true; builtin eval \"npm ci \\\"x\\\"\""
+  },
+  {
+   "id": "j017",
+   "tag": "q|sh -c glued",
+   "cmd": "true; sh -c \"npm ci \"\\\"x\\\""
+  },
+  {
+   "id": "j018",
+   "tag": "q|sh -c glued-sq",
+   "cmd": "true; sh -c 'npm ci '\"$X\""
+  },
+  {
+   "id": "j019",
+   "tag": "sh|mksh -c sq",
+   "cmd": "true; mksh -c 'npm ci'"
+  },
+  {
+   "id": "j020",
+   "tag": "sh|ksh -c dq-esc",
+   "cmd": "true; ksh -c \"npm ci \\\"x\\\"\""
+  },
+  {
+   "id": "j021",
+   "tag": "sh|ksh -c unquoted",
+   "cmd": "true; ksh -c npm\\ ci"
+  },
+  {
+   "id": "j022",
+   "tag": "sh|ksh -c two",
+   "cmd": "true; ksh -c 'npm ci; npm i y'"
+  },
+  {
+   "id": "j023",
+   "tag": "sh|fish -c",
+   "cmd": "true; fish -c 'npm ci'"
+  },
+  {
+   "id": "j024",
+   "tag": "mix|U two installs",
+   "cmd": "true; sh -c \"npm ci \\\"x\\\"; npm i y\""
+  },
+  {
+   "id": "j025",
+   "tag": "mix|U + R",
+   "cmd": "true; sh -c \"npm ci \\\"x\\\"\" && sh -c 'npm i y'"
+  },
+  {
+   "id": "j026",
+   "tag": "mix|eval U + eval R",
+   "cmd": "true; eval \"npm ci \\\"x\\\"\"; eval 'npm i y'"
+  },
+  {
+   "id": "j027",
+   "tag": "mix|visible + U",
+   "cmd": "npm i y && sh -c \"npm ci \\\"x\\\"\""
+  },
+  {
+   "id": "j028",
+   "tag": "mix|visible + ksh",
+   "cmd": "npm i y && ksh -c 'npm ci'"
+  },
+  {
+   "id": "j029",
+   "tag": "mix|func",
+   "cmd": "f() { sh -c \"npm ci \\\"x\\\"\"; }; f"
+  },
+  {
+   "id": "j030",
+   "tag": "mix|bg",
+   "cmd": "true; sh -c \"npm ci \\\"x\\\"\" & wait"
+  },
+  {
+   "id": "j031",
+   "tag": "mix|redir",
+   "cmd": "true; sh -c \"npm ci \\\"x\\\"\" 2>&1"
+  },
+  {
+   "id": "j032",
+   "tag": "mix|nested-sh",
+   "cmd": "true; sh -c \"sh -c \\\"npm ci\\\" && true\""
+  },
+  {
+   "id": "j033",
+   "tag": "mix|subst nested quotes",
+   "cmd": "true; sh -c \"npm ci $(echo \"a b\")\""
+  },
+  {
+   "id": "j034",
+   "tag": "mix|U opts",
+   "cmd": "true; sh -c \"npm --loglevel warn ci \\\"x\\\"\""
+  },
+  {
+   "id": "j035",
+   "tag": "mix|U opt underscore",
+   "cmd": "true; sh -c \"npm --_x ci \\\"x\\\"\""
+  },
+  {
+   "id": "j036",
+   "tag": "mix|U asks",
+   "cmd": "true; sh -c \"npm ci \\\"x\\\" --ignore-scripts=false\""
+  },
+  {
+   "id": "j037",
+   "tag": "mix|U NPM case",
+   "cmd": "true; sh -c \"NPM ci \\\"x\\\"\""
+  },
+  {
+   "id": "j038",
+   "tag": "mix|U newline",
+   "cmd": "true; sh -c \"true\nnpm ci \\\"x\\\"\""
+  },
+  {
+   "id": "j039",
+   "tag": "mix|U verb-end",
+   "cmd": "true; sh -c \"echo \\\"a\\\"; npm ci\""
+  },
+  {
+   "id": "j040",
+   "tag": "hd|cat<<'E'|sh",
+   "cmd": "true; cat <<'E' | sh\nnpm ci\nE"
+  },
+  {
+   "id": "j041",
+   "tag": "hd|cat<<-E|sh",
+   "cmd": "true; cat <<-E | sh\n\tnpm ci\n\tE"
+  },
+  {
+   "id": "j042",
+   "tag": "hd|cat<<E|bash -s",
+   "cmd": "true; cat <<E | bash -s\nnpm ci\nE"
+  },
+  {
+   "id": "j043",
+   "tag": "hd|visible+cat|sh",
+   "cmd": "npm i y && cat <<E | sh\nnpm ci\nE"
+  },
+  {
+   "id": "j044",
+   "tag": "hd|cat|sh two lines",
+   "cmd": "true; cat <<E | sh\necho a\nnpm ci x\nnpm i y\nE"
+  },
+  {
+   "id": "j045",
+   "tag": "hd|cat|sh subst body",
+   "cmd": "true; cat <<E | sh\nnpm ci $(printf x)\nE"
+  },
+  {
+   "id": "j046",
+   "tag": "hd|two heredocs",
+   "cmd": "true; cat <<A <<B | sh\nnpm ci\nA\nnpm i y\nB"
+  },
+  {
+   "id": "j047",
+   "tag": "hd|tee|sh",
+   "cmd": "true; tee <<E /dev/null | sh\nnpm ci\nE"
+  },
+  {
+   "id": "j048",
+   "tag": "hd|cat|sh opts verb",
+   "cmd": "true; cat <<E | sh\nnpm --prefix . ci\nE"
+  },
+  {
+   "id": "j049",
+   "tag": "hd|data heredoc",
+   "cmd": "npm i y && cat <<E | grep -c npm\nnpm ci\nE"
+  },
+  {
+   "id": "s001",
+   "tag": "s|settled+U verb-quote",
+   "cmd": "npm i y --ignore-scripts; sh -c \"cd \\\"d\\\" && npm ci\""
+  },
+  {
+   "id": "s002",
+   "tag": "s|settled+ksh verb-quote",
+   "cmd": "npm i y --ignore-scripts && ksh -c \"npm ci\""
+  },
+  {
+   "id": "s003",
+   "tag": "s|settled+eval verb-esc",
+   "cmd": "npm i y --ignore-scripts; eval \"npm ci\\\"\\\"\""
+  },
+  {
+   "id": "s004",
+   "tag": "s|settled=true+U",
+   "cmd": "npm i y --ignore-scripts=true; sh -c \"cd \\\"d\\\" && npm ci\""
+  },
+  {
+   "id": "s005",
+   "tag": "s|U settled inside+U",
+   "cmd": "sh -c \"npm i \\\"y\\\" --ignore-scripts\"; sh -c \"cd \\\"d\\\" && npm ci\""
+  },
+  {
+   "id": "s006",
+   "tag": "s|control no settled",
+   "cmd": "true; sh -c \"cd \\\"d\\\" && npm ci\""
+  },
+  {
+   "id": "s007",
+   "tag": "s|control visible",
+   "cmd": "npm i y; sh -c \"cd \\\"d\\\" && npm ci\""
+  },
+  {
+   "id": "s008",
+   "tag": "s|settled+U flaggable",
+   "cmd": "npm i y --ignore-scripts; sh -c \"npm ci \\\"x\\\"\""
+  },
+  {
+   "id": "s009",
+   "tag": "s|settled+heredoc",
+   "cmd": "npm i y --ignore-scripts && cat <<E | sh\nnpm ci\nE"
+  },
+  {
+   "id": "x001",
+   "tag": "f|settled+F verb-semicolon",
+   "cmd": "npm i y --ignore-scripts && cat <<E | sh\nnpm ci;\nE"
+  },
+  {
+   "id": "x002",
+   "tag": "f|flagged+F verb-semicolon",
+   "cmd": "npm i y && cat <<E | sh\nnpm ci;\nE"
+  },
+  {
+   "id": "x003",
+   "tag": "f|F alone verb-semicolon",
+   "cmd": "cat <<E | sh\nnpm ci;\nE"
+  },
+  {
+   "id": "x004",
+   "tag": "f|control F verb-eol",
+   "cmd": "true; cat <<E | sh\nnpm ci\nE"
+  },
+  {
+   "id": "x005",
+   "tag": "f|flagged+F sh<<E|tee verb-amp",
+   "cmd": "npm i y && sh <<E | tee log\nnpm ci&&true\nE"
+  },
+  {
+   "id": "x006",
+   "tag": "f|settled+F sh<<E|tee verb-amp",
+   "cmd": "npm i y --ignore-scripts && sh <<E | tee log\nnpm ci&&true\nE"
+  },
+  {
+   "id": "x007",
+   "tag": "f|settled=true+F verb-redir",
+   "cmd": "npm i y --ignore-scripts=true; cat <<E | bash\nnpm ci>log\nE"
+  },
+  {
+   "id": "x008",
+   "tag": "u|settled+U npm mention only",
+   "cmd": "npm i y --ignore-scripts; sh -c \"echo \\\"npm\\\"\""
+  },
+  {
+   "id": "x009",
+   "tag": "u|flagged+U verb-quote",
+   "cmd": "npm i y && sh -c \"cd \\\"d\\\" && npm ci\""
+  },
+  {
+   "id": "x010",
+   "tag": "u|settled+ksh flagged inner",
+   "cmd": "npm i y --ignore-scripts; ksh -c \"npm ci --ignore-scripts\""
+  },
+  {
+   "id": "x011",
+   "tag": "u|settled+ksh no npm",
+   "cmd": "npm ci --ignore-scripts && ksh -c \"make\""
+  },
+  {
+   "id": "x012",
+   "tag": "u|settled+zsh dq subst verb",
+   "cmd": "npm i y --ignore-scripts && zsh -c \"npm ci$(true)\""
+  },
+  {
+   "id": "x013",
+   "tag": "u|settled+ksh verb-semicolon",
+   "cmd": "npm i y --ignore-scripts; ksh -c \"npm ci;true\""
+  },
+  {
+   "id": "x014",
+   "tag": "u|settled+U uppercase NPM",
+   "cmd": "npm i y --ignore-scripts; sh -c \"cd \\\"d\\\" && NPM ci\""
+  },
+  {
+   "id": "y001",
+   "tag": "y|flagged+sh<<E|tee verb-eol",
+   "cmd": "npm i y && sh <<E | tee log\nnpm ci\nE"
+  },
+  {
+   "id": "y002",
+   "tag": "y|flagged+sh<<E no pipe verb-amp",
+   "cmd": "npm i y && sh <<E\nnpm ci&&true\nE"
+  },
+  {
+   "id": "y003",
+   "tag": "y|alone sh<<E|tee verb-amp",
+   "cmd": "true; sh <<E | tee log\nnpm ci&&true\nE"
+  },
+  {
+   "id": "y004",
+   "tag": "y|flagged+bash<<E|cat verb-semicolon",
+   "cmd": "npm i y && bash <<E | cat\nnpm ci;\nE"
+  },
+  {
+   "id": "y005",
+   "tag": "y|settled+bash<<E|cat verb-semicolon",
+   "cmd": "npm i y --ignore-scripts && bash <<E | cat\nnpm ci;\nE"
+  },
+  {
+   "id": "y006",
+   "tag": "y|flagged+cat<<E|grep data verb-semicolon",
+   "cmd": "npm i y && cat <<E | grep -c x\nnpm ci;\nE"
+  },
+  {
+   "id": "v001",
+   "tag": "v|flagged+sh -ce",
+   "cmd": "npm i y && sh -ce \"npm ci \\\"x\\\"\""
+  },
+  {
+   "id": "v002",
+   "tag": "v|flagged+bash -e -c",
+   "cmd": "npm i y && bash -e -c \"npm ci\""
+  },
+  {
+   "id": "v003",
+   "tag": "v|flagged+sh -o errexit -c",
+   "cmd": "npm i y && sh -o errexit -c 'npm ci'"
+  },
+  {
+   "id": "v004",
+   "tag": "v|flagged+glued sq",
+   "cmd": "npm i y && sh -c 'npm 'ci"
+  },
+  {
+   "id": "v005",
+   "tag": "v|flagged+glued dq sets false",
+   "cmd": "npm i y && sh -c \"npm ci \"--ignore-scripts=false"
+  },
+  {
+   "id": "v006",
+   "tag": "v|flagged+glued sq rest",
+   "cmd": "npm i y && sh -c 'true; npm'\" ci\""
+  },
+  {
+   "id": "v007",
+   "tag": "v|flagged+unquoted word",
+   "cmd": "npm i y && sh -c npm\\ ci"
+  },
+  {
+   "id": "v008",
+   "tag": "v|flagged+U npm split by quotes",
+   "cmd": "npm i y && sh -c \"cd \\\"d\\\" && n\"p\"m ci\""
+  },
+  {
+   "id": "v009",
+   "tag": "v|flagged+eval unquoted escaped semicolon",
+   "cmd": "npm i y && eval npm ci\\;true"
+  },
+  {
+   "id": "v010",
+   "tag": "v|flagged+eval two words",
+   "cmd": "npm i y && eval 'npm' ci"
+  },
+  {
+   "id": "v011",
+   "tag": "v|flagged+sh<<E",
+   "cmd": "npm i y && sh <<E\nnpm ci\nE"
+  },
+  {
+   "id": "v012",
+   "tag": "v|flagged+bash -s<<'E'",
+   "cmd": "npm i y && bash -s <<'E'\nnpm ci\nE"
+  },
+  {
+   "id": "v013",
+   "tag": "v|settled+sh<<E verb-amp",
+   "cmd": "npm i y --ignore-scripts && sh <<E\nnpm ci&&true\nE"
+  },
+  {
+   "id": "v014",
+   "tag": "v|settled+sh -ce",
+   "cmd": "npm i y --ignore-scripts && sh -ce \"npm ci\""
+  },
+  {
+   "id": "v015",
+   "tag": "v|flagged+dynamic subst script",
+   "cmd": "npm i y && sh -c \"$(printf 'npm ci')\""
+  },
+  {
+   "id": "v016",
+   "tag": "v|flagged+nested R verb-amp",
+   "cmd": "npm i y && sh -c 'sh -c \"npm ci&&true\"'"
+  },
+  {
+   "id": "v017",
+   "tag": "v|flagged+code verb-amp",
+   "cmd": "npm i y && npm ci&&true"
+  },
+  {
+   "id": "v018",
+   "tag": "v|flagged+code verb-semicolon",
+   "cmd": "npm i y && npm ci;true"
+  },
+  {
+   "id": "v019",
+   "tag": "v|flagged+F sh<<E|tee NPM split by quotes",
+   "cmd": "npm i y && sh <<E | tee log\nN'P'M ci&&true\nE"
+  },
+  {
+   "id": "v020",
+   "tag": "v|data heredoc beside install",
+   "cmd": "npm i y && cat > notes.txt <<'E'\nrun npm ci later\nE"
+  },
+  {
+   "id": "v021",
+   "tag": "v|echo mentions npm beside install",
+   "cmd": "npm i y && echo \"npm ci done\""
+  },
+  {
+   "id": "v022",
+   "tag": "v|commit message mentions npm",
+   "cmd": "npm i y && git commit -q --allow-empty -m 'npm: add y' 2>/dev/null; true"
+  },
+  {
+   "id": "za01",
+   "tag": "r4|A option value empty, beside install",
+   "cmd": "npm i y && npm --heading= ci x"
+  },
+  {
+   "id": "za02",
+   "tag": "r4|A option value with a blank, beside install",
+   "cmd": "npm i y && npm --heading \"a b\" ci x"
+  },
+  {
+   "id": "za03",
+   "tag": "r4|A empty value in sh -c script",
+   "cmd": "npm i y && sh -c 'npm --heading= ci x'"
+  },
+  {
+   "id": "za04",
+   "tag": "r4|A empty value in here-string",
+   "cmd": "npm i y && bash <<< 'npm --heading= ci x'"
+  },
+  {
+   "id": "za05",
+   "tag": "r4|A empty value beside settled install",
+   "cmd": "npm i y --ignore-scripts && npm --heading= ci x"
+  },
+  {
+   "id": "za06",
+   "tag": "r4|A empty value alone",
+   "cmd": "npm --heading= ci x"
+  },
+  {
+   "id": "za07",
+   "tag": "r4|A value with a blank in here-string",
+   "cmd": "npm i y && bash <<< \"npm --heading 'a b' ci x\""
+  },
+  {
+   "id": "za08",
+   "tag": "r4|A empty value in heredoc to sh",
+   "cmd": "npm i y && sh <<'E'\nnpm --heading= ci x\nE"
+  },
+  {
+   "id": "zb01",
+   "tag": "r4|B verb from a variable",
+   "cmd": "npm i y && V=ci && npm $V x"
+  },
+  {
+   "id": "zb02",
+   "tag": "r4|B verb from positional params",
+   "cmd": "npm i y && set -- ci x && npm \"$@\""
+  },
+  {
+   "id": "zb03",
+   "tag": "r4|B verb from default expansion",
+   "cmd": "npm i y && npm ${V:-ci} x"
+  },
+  {
+   "id": "zb04",
+   "tag": "r4|B verb from command substitution",
+   "cmd": "npm i y && npm $(echo ci) x"
+  },
+  {
+   "id": "zb05",
+   "tag": "r4|B verb from brace expansion",
+   "cmd": "npm i y && npm {ci,x}"
+  },
+  {
+   "id": "zb06",
+   "tag": "r4|B verb in ANSI-C quotes",
+   "cmd": "npm i y && npm $'ci' x"
+  },
+  {
+   "id": "zb07",
+   "tag": "r4|B verb from a glob",
+   "cmd": "npm i y && touch ci && npm c? x"
+  },
+  {
+   "id": "zb08",
+   "tag": "r4|B control: verb single-quoted",
+   "cmd": "npm i y && npm 'ci' x"
+  },
+  {
+   "id": "zb09",
+   "tag": "r4|B control: verb split by empty quotes",
+   "cmd": "npm i y && npm c\"\"i x"
+  },
+  {
+   "id": "zb10",
+   "tag": "r4|B verb from an array",
+   "cmd": "npm i y && A=(ci x) && npm \"${A[@]}\""
+  },
+  {
+   "id": "zc01",
+   "tag": "r4|C command word from brace expansion",
+   "cmd": "npm i y && {npm,ci,x}"
+  },
+  {
+   "id": "zc02",
+   "tag": "r4|C command word from brace expansion, args after",
+   "cmd": "npm i y && {npm,ci} x"
+  },
+  {
+   "id": "zc03",
+   "tag": "r4|C command word bound by hash -p",
+   "cmd": "npm i y && hash -p \"$(command -v npm)\" n && n ci x"
+  },
+  {
+   "id": "zc04",
+   "tag": "r4|C command word from an alias on the line before",
+   "cmd": "npm i y && alias n=npm\nn ci x"
+  },
+  {
+   "id": "zc05",
+   "tag": "r4|C command word is a function the command defines",
+   "cmd": "npm i y && n() { npm \"$@\"; } && n ci x"
+  },
+  {
+   "id": "zd01",
+   "tag": "r4|D env -S glued single quotes",
+   "cmd": "npm i y && env -S'npm ci x'"
+  },
+  {
+   "id": "zd02",
+   "tag": "r4|D env -S glued double quotes",
+   "cmd": "npm i y && env -S\"npm ci x\""
+  },
+  {
+   "id": "zd03",
+   "tag": "r4|D sh -c script glued with an ANSI-C newline",
+   "cmd": "npm i y && sh -c 'true'$'\\n''npm ci x'"
+  },
+  {
+   "id": "zd04",
+   "tag": "r4|D eval glued with an ANSI-C newline",
+   "cmd": "npm i y && eval 'true'$'\\n''npm ci x'"
+  },
+  {
+   "id": "zd05",
+   "tag": "r4|D eval words glued with an ANSI-C semicolon",
+   "cmd": "npm i y && eval true$'\\073'npm ci x"
+  },
+  {
+   "id": "zd06",
+   "tag": "r4|D control: escaped semicolon in sh -c word",
+   "cmd": "npm i y && sh -c x\\;npm\\ ci\\ x"
+  },
+  {
+   "id": "zd07",
+   "tag": "r4|D control: env -S with a blank",
+   "cmd": "npm i y && env -S 'npm ci x'"
+  },
+  {
+   "id": "ze01",
+   "tag": "r4|E npx runs npm@10",
+   "cmd": "npm i y && npx npm@10 ci x"
+  },
+  {
+   "id": "ze02",
+   "tag": "r4|E npx --yes runs npm@latest",
+   "cmd": "npm i y && npx --yes npm@latest ci x"
+  },
+  {
+   "id": "ze03",
+   "tag": "r4|E control: npx -p npm@10 npm",
+   "cmd": "npm i y && npx -p npm@10 npm ci x"
+  },
+  {
+   "id": "zf01",
+   "tag": "r4|F control: brace group",
+   "cmd": "npm i y && { npm ci x; }"
+  },
+  {
+   "id": "zf02",
+   "tag": "r4|F control: case arm with open paren",
+   "cmd": "npm i y && case a in (a) npm ci x;; esac"
+  },
+  {
+   "id": "zg01",
+   "tag": "r4|G sh -c ANSI-C script",
+   "cmd": "npm i y && sh -c $'npm ci x'"
+  },
+  {
+   "id": "zg02",
+   "tag": "r4|G sh -c ANSI-C script with escape before npm",
+   "cmd": "npm i y && sh -c $'\\x20npm ci x'"
+  },
+  {
+   "id": "zg03",
+   "tag": "r4|G eval ANSI-C script",
+   "cmd": "npm i y && eval $'npm ci x'"
+  },
+  {
+   "id": "zg04",
+   "tag": "r4|G sh -c ANSI-C escape between npm and verb",
+   "cmd": "npm i y && sh -c $'npm\\x20ci x'"
+  },
+  {
+   "id": "zg05",
+   "tag": "r4|G sh -c ANSI-C newline before npm",
+   "cmd": "npm i y && sh -c $'\\nnpm ci x'"
+  }
+ ],
+ "probes": [
+  {
+   "id": "r3q01",
+   "tag": "A|bash --norc -c dq",
+   "cmd": "npm i y && bash --norc -c \"npm ci x\""
+  },
+  {
+   "id": "r3q02",
+   "tag": "A|bash --norc -c sq",
+   "cmd": "npm i y && bash --norc -c 'npm ci'"
+  },
+  {
+   "id": "r3q03",
+   "tag": "A|bash --login -c",
+   "cmd": "npm i y && bash --login -c 'npm ci x'"
+  },
+  {
+   "id": "r3q04",
+   "tag": "A|bash -O extglob -c",
+   "cmd": "npm i y && bash -O extglob -c 'npm ci x'"
+  },
+  {
+   "id": "r3q05",
+   "tag": "A|bash -c -e (option after -c)",
+   "cmd": "npm i y && bash -c -e 'npm ci x'"
+  },
+  {
+   "id": "r3q06",
+   "tag": "A|eval -- dq",
+   "cmd": "npm i y && eval -- \"npm ci x\""
+  },
+  {
+   "id": "r3q07",
+   "tag": "A|settled + bash --norc -c",
+   "cmd": "npm i y --ignore-scripts && bash --norc -c 'npm ci x'"
+  },
+  {
+   "id": "r3q08",
+   "tag": "A|uppercase BASH -c",
+   "cmd": "npm i y && BASH -c 'npm ci x'"
+  },
+  {
+   "id": "r3q09",
+   "tag": "A|quoted shell name",
+   "cmd": "npm i y && \"bash\" -c 'npm ci x'"
+  },
+  {
+   "id": "r3q10",
+   "tag": "B|here-string sq to bash",
+   "cmd": "npm i y && bash <<< 'npm ci x'"
+  },
+  {
+   "id": "r3q11",
+   "tag": "B|here-string dq to sh",
+   "cmd": "npm i y && sh <<< \"npm ci x\""
+  },
+  {
+   "id": "r3q12",
+   "tag": "B|process substitution to bash",
+   "cmd": "npm i y && bash <(echo 'npm ci x')"
+  },
+  {
+   "id": "r3q13",
+   "tag": "B|source process substitution",
+   "cmd": "npm i y && source <(echo 'npm ci x')"
+  },
+  {
+   "id": "r3q14",
+   "tag": "C|python3 -c",
+   "cmd": "npm i y && python3 -c \"import os; os.system('npm ci x')\""
+  },
+  {
+   "id": "r3q15",
+   "tag": "C|perl -e",
+   "cmd": "npm i y && perl -e 'system(\"npm ci x\")'"
+  },
+  {
+   "id": "r3q16",
+   "tag": "D|quoted command word",
+   "cmd": "npm i y && \"npm\" ci x"
+  },
+  {
+   "id": "r3q17",
+   "tag": "D|escaped command word",
+   "cmd": "npm i y && n\\pm ci x"
+  },
+  {
+   "id": "r3q18",
+   "tag": "D|alone quoted command word",
+   "cmd": "\"npm\" ci x"
+  },
+  {
+   "id": "r3q19",
+   "tag": "E|substituted command word",
+   "cmd": "npm i y && $(echo npm) ci x"
+  },
+  {
+   "id": "r3q20",
+   "tag": "E|script from a variable",
+   "cmd": "npm i y && S='npm ci x' && sh -c \"$S\""
+  },
+  {
+   "id": "r3q21",
+   "tag": "E|heredoc to a file then run",
+   "cmd": "npm i y && cat > s.sh <<'E'\nnpm ci x\nE\nsh s.sh"
+  },
+  {
+   "id": "r3k01",
+   "tag": "control|x005 recorded",
+   "cmd": "npm i y && sh <<E | tee log\nnpm ci&&true\nE"
+  },
+  {
+   "id": "r3k02",
+   "tag": "control|v011 recorded",
+   "cmd": "npm i y && sh <<E\nnpm ci\nE"
+  },
+  {
+   "id": "r3k03",
+   "tag": "control|bash -c sq read",
+   "cmd": "npm i y && bash -c 'npm ci x'"
+  },
+  {
+   "id": "r3k04",
+   "tag": "control|echo data",
+   "cmd": "npm i y && echo \"npm ci done\""
+  },
+  {
+   "id": "e001",
+   "tag": "E|lit|ansi-c hex",
+   "scope": "lit",
+   "cmd": "npm i y && sh -c $'\\x6epm ci x'"
+  },
+  {
+   "id": "e002",
+   "tag": "E|lit|ansi-c octal",
+   "scope": "lit",
+   "cmd": "npm i y && eval $'\\156pm ci x'"
+  },
+  {
+   "id": "e003",
+   "tag": "E|lit|ansi-c cmd word",
+   "scope": "lit",
+   "cmd": "npm i y && $'\\x6epm' ci x"
+  },
+  {
+   "id": "e004",
+   "tag": "E|lit|U sets false after",
+   "scope": "lit",
+   "cmd": "npm i y && sh -c \"npm ci \\\"x\\\" --ignore-scripts=false\""
+  },
+  {
+   "id": "e005",
+   "tag": "E|lit|ksh sets false",
+   "scope": "lit",
+   "cmd": "npm i y && ksh -c 'npm ci x --ignore-scripts=false'"
+  },
+  {
+   "id": "e006",
+   "tag": "E|lit|piped heredoc sets false",
+   "scope": "lit",
+   "cmd": "npm i y && cat <<E | sh\nnpm ci x --ignore-scripts=false\nE"
+  },
+  {
+   "id": "e007",
+   "tag": "E|lit|alias then",
+   "scope": "lit",
+   "cmd": "npm i y && alias n='npm ci x'; eval n"
+  },
+  {
+   "id": "e008",
+   "tag": "E|lit|function from sq",
+   "scope": "lit",
+   "cmd": "npm i y && eval 'f() { npm ci x; }'; f"
+  },
+  {
+   "id": "e009",
+   "tag": "E|lit|trap",
+   "scope": "lit",
+   "cmd": "npm i y && trap 'npm ci x' EXIT"
+  },
+  {
+   "id": "e010",
+   "tag": "E|lit|PROMPT_COMMAND-like var",
+   "scope": "lit",
+   "cmd": "npm i y && X='npm ci x'; $X"
+  },
+  {
+   "id": "e011",
+   "tag": "E|cmp|param pieces",
+   "scope": "cmp",
+   "cmd": "npm i y && e=; sh -c \"n${e}pm ci x\""
+  },
+  {
+   "id": "e012",
+   "tag": "E|cmp|var prefix",
+   "scope": "cmp",
+   "cmd": "npm i y && a=np; sh -c \"${a}m ci x\""
+  },
+  {
+   "id": "e013",
+   "tag": "E|cmp|printf octal|sh",
+   "scope": "cmp",
+   "cmd": "npm i y && printf '\\156pm ci x\\n' | sh"
+  },
+  {
+   "id": "e014",
+   "tag": "E|cmp|base64|sh",
+   "scope": "cmp",
+   "cmd": "npm i y && echo bnBtIGNpIHgK | base64 -d | sh"
+  },
+  {
+   "id": "e015",
+   "tag": "E|cmp|rev|sh",
+   "scope": "cmp",
+   "cmd": "npm i y && echo 'x ic mpn' | rev | sh"
+  },
+  {
+   "id": "e016",
+   "tag": "E|cmp|tr|sh",
+   "scope": "cmp",
+   "cmd": "npm i y && echo 'opn ci x' | tr o n | sh"
+  }
+ ]
+}

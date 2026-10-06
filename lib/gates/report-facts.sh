@@ -178,16 +178,20 @@ fact_inert() {
 }
 
 # The one line said when the pre-guard's record says it rewrote this command
-# and an install in it holds a word the shell decides at run time
-# (ignore_scripts_unread): nobody read where npm keeps the flag, and the words
-# around it can undo it. It is a warning added to the inert line, never a
-# claim that scripts did not run: no line says that. The record states the
+# and did not read all of it as the shell will (ignore_scripts_unread): an
+# install in it holds a word the shell decides at run time, an npm install
+# verb is in text it did not read as a command, or the shell computes a
+# command word. It states what safedeps did not read and nothing about what
+# followed from it; an earlier wording added "so the install's own scripts
+# may have run", which was not a fact anything checked, and beside an install
+# verb in an echo it was not true. It is a warning added to the inert line,
+# never a claim that scripts did not run: no line says that. The record states the
 # warning or it does not; a record that lacks the field loses the warning and
 # makes no other line true or false. Where npm keeps the flag is not in the
 # command text at all (a function or alias from the agent's shell snapshot,
 # .zshenv or BASH_ENV can change the words npm receives), so the line is about
 # what safedeps could not read, and its absence says nothing either way.
-INERT_UNREAD_LINE="safedeps could not read where npm keeps the --ignore-scripts in the command safedeps wrote, so the install's own scripts may have run"
+INERT_UNREAD_LINE="safedeps did not read all of the command it wrote as the shell will"
 fact_inert_unread() {
   [[ "$(jq -r '.record == 2 and .ignore_scripts_injected == true and .ignore_scripts_unread == true' "$1" 2>/dev/null)" == true ]] \
     && printf '%s' "${INERT_UNREAD_LINE}"
