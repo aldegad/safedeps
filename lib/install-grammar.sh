@@ -14,7 +14,7 @@
 # scope; adding a new carrier syntax is not. So this grammar knows each
 # manager's own documented aliases, any number of options between a manager and
 # its verb, version-suffixed interpreters (`pip3.11`), statement positions the
-# shell grammar defines (`(`, `{`, `!`, `then`, `do`, an indented line), and
+# shell grammar defines (read by the lexer, see SAFEDEPS_G_START), and
 # the runner commands that fetch and execute a package. It does not know
 # argv-passing wrappers such as `sudo`, `timeout`, `nohup` or `xargs`. Those
 # stay outside the boundary on purpose, and scripts/test/consumer-forms.sh pins
@@ -73,18 +73,95 @@ SAFEDEPS_G_BUN_VERBS='add|a|install|i|update|upgrade'
 # Every token that can open an install's operand list, for the operand walks.
 SAFEDEPS_G_ALL_VERBS="${SAFEDEPS_G_NPM_VERBS}|${SAFEDEPS_G_NPM_LINK_VERBS}|${SAFEDEPS_G_PNPM_VERBS}|${SAFEDEPS_G_YARN_VERBS}|${SAFEDEPS_G_BUN_VERBS}|${SAFEDEPS_G_NPM_EXEC_VERBS}|dlx|get|run|inject|dependency:get|package"
 
-# Executables the gate names. Used to strip an absolute path prefix, so that
-# `/usr/local/bin/pip3.11` is read as `pip3.11`.
+# Executables the gate names, the one list of them. The lexer reads the last
+# part of a path that stands where a command does against it (prefixes() in
+# shell_lex), so `/usr/local/bin/pip3.11`, `.venv/bin/pip` and `$VENV/bin/pip`
+# read as the name. The match is the whole part, ignoring case, as the
+# recognizers read (macOS volumes ignore case, so `PIP` runs pip there):
+# `pip3` and `pip3.11` are `pip[0-9.]*`; `python3` is `python[0-9.]*`, and
+# `-m pip` after it is the install body's to read; `npm.cmd` is no npm (a
+# Windows shim, and Windows is not a supported platform); `pipx-foo` is no
+# pipx. scripts/test/scan-contract.sh holds the other lists of managers in the
+# hooks to it.
 SAFEDEPS_G_EXECUTABLES='npm|npx|pnpm|pnpx|yarn|bun|bunx|pip[0-9.]*|python[0-9.]*|py|poetry|uv|uvx|pipx|pipenv|cargo|go|gem|bundle|mvn|dotnet'
 
+# The shells: every program that reads a script from `-c STRING` (and from its
+# standard input when nothing else names one), one closed list, from each
+# manual: sh (POSIX sh, `-c`), bash and rbash, dash, ash and hush (BusyBox),
+# ksh and ksh93, rksh, mksh and lksh, pdksh and oksh (OpenBSD ksh), yash,
+# posh, zsh, csh and tcsh (`-c`: commands are read from the following
+# argument), and fish (`-c`, `--command`). Every reader that asks whether a
+# word is a shell reads this: the scripts handed to `sh -c` (cscripts in
+# shell_lex), the consumer of a pipe (PIPE_SHELL_CONSUMER_RE), and a path in
+# front of one (`| /bin/sh`). The `-c` reader used a rule of its own, any name
+# ending in sh, and the pipe check knew three names, so `printf 'pip install
+# x' | dash` passed while `dash -c 'pip install x'` was read. A list keeps
+# `ssh` out, which the suffix rule read as a shell and the pipe check did
+# not: `ssh -c CIPHER` handed the cipher name to the script reader.
+SAFEDEPS_G_SHELLS='sh|bash|rbash|dash|ash|hush|ksh|ksh93|rksh|mksh|lksh|pdksh|oksh|yash|posh|zsh|csh|tcsh|fish'
+
 # --- building blocks ------------------------------------------------------------
-# Where a command starts: the beginning of a line (indented or not), after a
-# separator or an opening subshell, and after the reserved words that begin a
-# statement. A reserved word only counts where a statement starts, so `echo do
-# pip install` stays an echo. `!` and `{` are reserved words too, followed by a
-# blank: they used to open a statement anywhere, so `echo ! pip install x | sh`
-# read as a visible install instead of the piped one it is.
-SAFEDEPS_G_START='(^[[:space:]]*|[;&|(][[:space:]]*)(([!{]|then|do|else|elif|if|while|until|time|coproc)[[:space:]]+)*'
+# Where a command starts: the beginning of a line (indented or not), or after a
+# separator or an opening parenthesis. Nothing else, because the text these
+# patterns read is the lexer's recognize view (command_start_text), where a
+# `;` is put in at every other place a command starts: after a reserved word,
+# a case pattern, a function head, `time` and its options, `coproc`, and the
+# zsh short forms, with the prefixes of the command removed. The shell
+# decides those from its grammar state, and the lexer follows that state
+# (starts() in shell_lex) and hands each start on as an event between two
+# bytes, never written over one; so `echo do pip install` and `echo { pip
+# install x }` stay echoes, and `then>/dev/null pip install x` is a start.
+# This used to carry a chain of the reserved words before a command, a second
+# copy of that knowledge that could not see the state: `f() { pip install x;
+# }; f` passed, and so did every zsh short form, `for ((...)) {`, and a
+# function with more than one name.
+SAFEDEPS_G_START='(^[[:space:]]*|[;&|(][[:space:]]*)'
+
+# Where a word ends, on the same view: before a byte the view prints where the
+# lexer ends a word at the top level, or at the end of the text. The lexer
+# decides it (word_sep in shell_lex, from the depth of its walk), and the view
+# (the stmts bytes it is made of) prints every such byte as one of these: a
+# blank or a newline, `;` `&` `|` (which it prints nowhere else, see
+# SAFEDEPS_G_START), or `(` `)` `<` `>`.
+# scripts/test/scan-contract.sh checks that on the recorded forms and on random
+# input, against the lexer's own answer (the wordends view). The converse does
+# not hold, and is not needed: a blank the view prints for quoted or escaped
+# text, and a `(` `)` `<` `>` nested in a word, read as a word end too, which
+# can only make a recognizer wider. Every recognizer ends a manager or a verb
+# with this, never with a set of its own: the tails used to be
+# `([[:space:]]|$)`, which is not where the shell ends a word, so `npm ci;`,
+# `(npm install)` and `then npm ci; fi` were no install to any recognizer --
+# no check, no `--ignore-scripts`, no pending state. For every manager but npm
+# the pre-guard is the only gate, so that was a complete miss (form `npm ci;
+# echo x`, scripts/measure/glued-verb-reading.sh).
+#
+# Read this way, a quoted operator is blank, which ends the word as a blank.
+# So is the backslash of an escaped one (`npm ci\;` reads as `npm ci` and a
+# blank, though the shell hands npm `ci;`): an over-read that predates this
+# end and costs a check or a rewrite of a command that installs nothing.
+#
+# The rewrite reads the same end on the live view, where the code inside a
+# substitution stands too, so a closing backtick ends a word there as well
+# (`` echo `npm ci` `` hands npm `ci`). A pattern cannot tell a closing
+# backtick from an opening one, and an opening one glued to a word continues
+# it: `` npm ci`echo x` `` hands npm `cix`. The recognizers read that as `npm
+# ci`, an over-read that costs a check or a record. The rewrite, which would
+# turn it into a command that runs `npm ci`, reads the backticks before the
+# verb and places no flag there (inert_flag_offsets).
+#
+# A `}` against one of those ends a word only where zsh closes a `{` group
+# with it: `{ npm ci}` runs `npm ci`, and `{ npm ci}&& x` as well (zsh 5.9,
+# measured). bash and dash refuse that group. Outside a group zsh refuses the
+# `}` and bash hands npm `ci}`, which installs nothing; read as an end there,
+# the rewrite made `npm ci}` into `npm ci --ignore-scripts} --ignore-scripts`,
+# which bash runs as `npm ci` (caught in review). So the lexer decides which
+# `}` closes a group (group_close in the guard's shell_lex), from the groups
+# its walk opened: the views keep that one as `}`, and print a glued `}` that
+# closes nothing as `%`, which ends no word here. A `}` inside a word is the
+# word's (`{ p a}b }` hands `a}b`), and the extractor already blanks a
+# grouping character in a word (guard_word_as_read).
+SAFEDEPS_G_WORD_END_CLASS='[[:space:];&|()<>`]'
+SAFEDEPS_G_END="[}]?(${SAFEDEPS_G_WORD_END_CLASS}|\$)"
 
 # Options between a manager and its verb: any number, each with an optional
 # value, plus the bare `--` that ends them. A value can only be told from the verb by trying both readings, which
@@ -173,10 +250,11 @@ SAFEDEPS_G_INSTALL_BODY="${SAFEDEPS_G_NPM_INSTALL_BODY}\
 |dotnet${SAFEDEPS_G_O}[[:space:]]+tool${SAFEDEPS_G_O}[[:space:]]+(install|update)"
 
 # --- the patterns the gates read --------------------------------------------------
-# Anchored at a statement start. Run these on command_scan_text output, where
-# quoted text is already blanked.
-SAFEDEPS_G_INSTALL_RE="${SAFEDEPS_G_START}(${SAFEDEPS_G_INSTALL_BODY})([[:space:]]|$)"
-SAFEDEPS_G_NPM_INSTALL_RE="${SAFEDEPS_G_START}(${SAFEDEPS_G_NPM_INSTALL_BODY})([[:space:]]|$)"
+# Anchored at a statement start. Run these on command_start_text output, where
+# quoted text is already blanked and every statement start is a separator; the
+# text is lexed once there, and a reader does not lex that output again.
+SAFEDEPS_G_INSTALL_RE="${SAFEDEPS_G_START}(${SAFEDEPS_G_INSTALL_BODY})${SAFEDEPS_G_END}"
+SAFEDEPS_G_NPM_INSTALL_RE="${SAFEDEPS_G_START}(${SAFEDEPS_G_NPM_INSTALL_BODY})${SAFEDEPS_G_END}"
 
 # Unanchored, for raw text nobody has parsed: the jq-missing fail-closed check
 # and the PostToolUse backstop. A false positive there costs a closure diff or a

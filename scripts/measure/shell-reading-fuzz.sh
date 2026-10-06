@@ -44,6 +44,29 @@ GUARD="scripts/safedeps-pre-guard.sh"
 src=$(sed -n '/^shell_lex() {/,/^}/p' "${GUARD}")
 [[ "${src}" == *"shell_lex() {"* ]] || { printf 'shell_lex not found in %s\n' "${GUARD}" >&2; exit 2; }
 eval "${src}"
+# The payload views print where each payload lies, not its bytes; the guard's
+# own builder cuts them out of the text (lex_payloads, lex_payload_build).
+for fn in lex_payload_build lex_payloads; do
+  src=$(sed -n "/^${fn}() {/,/^}/p" "${GUARD}")
+  [[ "${src}" == *"${fn}() {"* ]] || { printf '%s not found in %s\n' "${fn}" "${GUARD}" >&2; exit 2; }
+  eval "${src}"
+done
+eval "$(grep '^SAFEDEPS_PAYLOAD_BAD_CODE=' "${GUARD}")"
+guard_mark_reading_failed() { :; }
+# Each view of <text> as a text: a payload view as its payloads, one per line.
+lex_view_text() { # reading text view
+  local p
+  if [[ "$3" == cscripts || "$3" == substs ]]; then
+    SAFEDEPS_READING="$1" lex_payloads "$2" "$3"
+    for p in ${LEX_PAYLOADS[@]+"${LEX_PAYLOADS[@]}"}; do printf '%s\n' "${p}"; done
+  else
+    SAFEDEPS_READING="$1" shell_lex "$2" "$3" "safedeps:shell-reading-fuzz"
+  fi
+}
+# The lexer reads the lists of the grammar (the shells, the executables), as
+# it does in the guard.
+# shellcheck source=lib/install-grammar.sh
+source lib/install-grammar.sh
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/safedeps-fuzz.XXXXXX")
 trap 'rm -rf "${work}"' EXIT
@@ -60,13 +83,19 @@ fi
 runs() { # shell-binary file -> R or -
   local d out
   d=$(mktemp -d "${work}/cwd.XXXXXX")
-  out=$(cd "${d}" && "$1" -c "$(cat "$2")" 2>/dev/null </dev/null)
+  # zsh with no startup files (-f): a ~/.zshenv runs in every `zsh -c` and can
+  # change what a form runs.
+  if [[ "$1" == */zsh ]]; then
+    out=$(cd "${d}" && "$1" -f -c "$(cat "$2")" 2>/dev/null </dev/null)
+  else
+    out=$(cd "${d}" && "$1" -c "$(cat "$2")" 2>/dev/null </dev/null)
+  fi
   printf '%s\n' "${out}" | grep -qx REACHED && printf 'R' || printf '%s' '-'
 }
 shows() { # reading text -> 0 when that reading shows the tail
   local reading="$1" text="$2" v
   for v in live cscripts shell-bodies; do
-    SAFEDEPS_READING="${reading}" shell_lex "${text}" "${v}" "safedeps:shell-reading-fuzz" | tr -d ' \t\n' \
+    lex_view_text "${reading}" "${text}" "${v}" | tr -d ' \t\n' \
       | grep -q 'pipinstallevil==6\.6\.6' && return 0
   done
   return 1
