@@ -10,7 +10,7 @@ import sys
 from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from core_hook import evidence, native, observe, slots
+from core_hook import evidence, native, observe, slots, compare
 from core_hook.corpus import load_cases
 
 HERE = Path(__file__).resolve().parent
@@ -29,9 +29,13 @@ def retained_errors(report):
         for receipt in receipts:
             if receipt['slot'] == 'snapshot-pid' and receipt['place'].startswith('boundary 2 '):
                 count += 1
-                if receipt['step'] != 0 or receipt['call'] != 'proof-call':
+                source = receipt.get('source') or {}
+                seen = receipt.get('observation') or {}
+                if (receipt['step'] != 0 or receipt['call'] != 'proof-call' or source.get('step') != 0 or
+                        source.get('call') != 'proof-call' or seen.get('boundary') != 2 or seen.get('step') != 1 or
+                        seen.get('call') != 'proof-post'):
                     errors.append({'side': side_name, 'place': receipt['place'],
-                                   'step': receipt['step'], 'call': receipt['call']})
+                                   'step': receipt['step'], 'call': receipt['call'], 'source': source, 'observation': seen})
     return count, errors
 
 
@@ -90,12 +94,55 @@ def main():
                     not ({e['id'] for e in events0} & {e['id'] for e in events1}))
     collision = bool(old0 and old1 and not oldwhy0 and not oldwhy1 and
                      ({e['id'] for e in old0} & {e['id'] for e in old1}))
+    # Same PID value, different generating call. This is a synthetic binding
+    # fault, not another live process assertion. Observation remains step1.
+    fixture_doc = copy.deepcopy(doc)
+    fixture_doc['meta']['collection_kind'] = 'synthetic'
+    for s in fixture_doc['sides'].values():
+        s['steps'][1]['pid'] = s['steps'][0]['pid']
+    fixture_path = out / 'same-pid-identity.fixture.json'
+    observe.write_bundle(str(fixture_path), fixture_doc)
+    fixture = observe.read_bundle(str(fixture_path))
+    evidence.attach(fixture, evidence.admit(fixture, None, synthetic=True))
+    good_fixture = compare.compare_case(case, fixture)
+    original_check = slots.check_pid
+    original_property = slots.RawOccurrence.result
+    def wrong_source(side, k, value):
+        role, result = original_check(side, k, value)
+        if side.doc['side'] == 'candidate' and k == 0 and result.status == 'ok':
+            result.source = side.origin(1)
+        return role, result
+    try:
+        slots.check_pid = wrong_source
+        bad_fixture = compare.compare_case(case, fixture)
+        # Removing just the identity consistency check makes the same wrong
+        # source selection pass the value comparison. The raw oracle stays red.
+        def unchecked(occ):
+            return slots.check_claim(occ.finder.side, occ.claim, occ.read(), occ.finder.claims) if occ.claim else occ._result
+        slots.RawOccurrence.result = property(unchecked)
+        unchecked_fixture = compare.compare_case(case, fixture)
+        unchecked_row = compare.report_row(case['id'], unchecked_fixture)
+        _, unchecked_errors = retained_errors({'cases': [unchecked_row]})
+    finally:
+        slots.check_pid = original_check
+        slots.RawOccurrence.result = original_property
+    for name, result in (('same-pid-normal', good_fixture), ('same-pid-wrong-source', bad_fixture)):
+        # Results retain the receipt values taken during comparison, not the
+        # subsequently restored test monkeypatch's recomputation.
+        evidence.publish(out / (name + '.report.json'), evidence.encoded(compare.report_row(case['id'], result)))
+    evidence.publish(out / 'identity-check-removed.report.json', evidence.encoded(unchecked_row))
     rows = [{'name': 'fresh-final-live', 'ok': run.returncode == 0 and report['cases'][0]['verdict'] == 'equal'},
             {'name': 'retained-occurrence-call', 'ok': count > 0 and not errors, 'count': count, 'errors': errors},
             {'name': 'previous-retained-receipt-control', 'ok': old_count > 0 and bool(old_errors),
              'count': old_count, 'errors': old_errors},
             {'name': 'same-stream-distinct-launch', 'ok': isolated, 'synthetic': True},
-            {'name': 'previous-launch-id-control', 'ok': collision, 'synthetic': True}]
+            {'name': 'previous-launch-id-control', 'ok': collision, 'synthetic': True},
+            {'name': 'same-pid-normal-source', 'ok': good_fixture['verdict'] == 'equal', 'synthetic': True},
+            {'name': 'same-pid-wrong-generating-call', 'ok': bad_fixture['verdict'] == 'different' and
+                any(v['reason'] == 'source launch identity contradicts this consumer binding' for v in bad_fixture['violations']['candidate']),
+             'synthetic': True},
+            {'name': 'identity-check-removed-control', 'ok': unchecked_fixture['verdict'] == 'equal' and bool(unchecked_errors),
+             'synthetic': True, 'independent_receipt_errors': unchecked_errors}]
     evidence.publish(out / 'results.json', evidence.encoded({'rows': rows, 'all_expected': all(r['ok'] for r in rows)}))
     for row in rows:
         print(('ok' if row['ok'] else 'not ok') + ' - ' + row['name'], flush=True)

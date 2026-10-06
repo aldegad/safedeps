@@ -156,7 +156,7 @@ def events(side, k):
         if pid != s['pid'] or ppid != s.get('collector_pid'):
             return [], 'native child/start identity was not independently observed'
         event_id = '%s/%s/step%d/%s/%d/%s' % (side.doc.get('run_id'), side.doc.get('execution_id'), k, s['native_raw'], seq, role)
-        out.append({'id': event_id, 'role': role, 'ordinal': seq, 'seconds': secs if sign == 'after' else 0,
+        out.append({'id': event_id, 'source': dict(side.origin(k), stream=s['native_raw'], event_ordinal=seq, role=role), 'role': role, 'ordinal': seq, 'seconds': secs if sign == 'after' else 0,
                     'nanos': nanos, 'sign': sign})
     return out, None
 
@@ -173,7 +173,7 @@ def claim_result(side, claim, actual, source_role, ordinal=0, count=1):
     if clock_seconds(claim.fmt, actual) != event['seconds']:
         return violation('%s consumer %s differs from raw event %d (%s seconds)' %
                          (source_role, claim.key, event['ordinal'], event['seconds']))
-    return ok(token(claim.role), [event['id']])
+    return ok(token(claim.role), [event['id']], source=event['source'])
 
 
 def snapshot_role(side, claim, actual):

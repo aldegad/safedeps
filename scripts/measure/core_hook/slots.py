@@ -269,6 +269,24 @@ class Side:
         s = self.steps[k] if 0 <= k < len(self.steps) else None
         return s if s and s["kind"] == "hook" else None
 
+    def call(self, k):
+        hook = self.hook(k)
+        if not hook:
+            return None
+        try:
+            payload = json.loads(self.text(hook['stdin']))
+            call = payload.get('tool_use_id') if isinstance(payload, dict) else None
+            return call if isinstance(call, str) else None
+        except ValueError:
+            return None
+
+    def origin(self, k):
+        from .evidence import digest
+        hook = self.hook(k)
+        return {'run': self.doc.get('run_id'), 'side': self.doc.get('side'),
+                'execution': self.doc.get('execution_id'), 'step': k, 'call': self.call(k),
+                'launch': digest(hook['launch']) if hook and hook.get('launch') else None}
+
     def window(self, k):
         s = self.steps[k]
         return s["t0_ns"] // 1_000_000_000, -(-s["t1_ns"] // 1_000_000_000)
@@ -335,14 +353,15 @@ def stat_clock_ns(v):
 # --- the checks --------------------------------------------------------------------------
 
 class Result:
-    __slots__ = ("status", "token", "witness", "reason")
+    __slots__ = ("status", "token", "witness", "reason", "source")
 
-    def __init__(self, status, token=None, witness=None, reason=""):
+    def __init__(self, status, token=None, witness=None, reason="", source=None):
         self.status, self.token, self.witness, self.reason = status, token, witness or [], reason
+        self.source = source
 
 
-def ok(tok, witness, reason=""):
-    return Result("ok", tok, witness, reason)
+def ok(tok, witness, reason="", source=None):
+    return Result("ok", tok, witness, reason, source)
 
 
 def violation(reason):
@@ -393,15 +412,16 @@ def check_pid(side, k, value):
     if not hook or not hook["pid"]:
         return role, unresolved("step %d started no process the harness saw" % k)
     if value == str(hook["pid"]):
-        return role, ok(token(role), ["process:step%d" % k])
+        return role, ok(token(role), ["process:step%d" % k], source=side.origin(k))
     return role, violation("%s is not the pid of step %d's hook (%d)" % (value, k, hook["pid"]))
 
 
 class RawOccurrence:
     """A byte occurrence. The raw slice owns both the check and its receipt."""
-    def __init__(self, finder, place, start, end, slot, role, result=None, claim=None):
+    def __init__(self, finder, place, start, end, slot, role, result=None, claim=None, source_step=None):
         self.finder, self.place, self.start, self.end = finder, place, start, end
         self.slot, self.role, self._result, self.claim = slot, role, result, claim
+        self.source_step = claim.step if claim else source_step
 
     def read(self):
         text = self.finder.side.raw(self.place)
@@ -417,8 +437,14 @@ class RawOccurrence:
     def result(self):
         actual = self.read()
         if self.claim is not None:
-            return check_claim(self.finder.side, self.claim, actual, self.finder.claims)
-        return self._result
+            result = check_claim(self.finder.side, self.claim, actual, self.finder.claims)
+        else:
+            result = self._result
+        if result.status == 'ok' and result.source is not None:
+            required = self.finder.side.origin(self.source_step)
+            if any(result.source.get(key) != value for key, value in required.items()):
+                return Result('violation', reason='source launch identity contradicts this consumer binding', source=result.source)
+        return result
 
     def describe(self):
         raw = self.read()
@@ -429,7 +455,8 @@ class RawOccurrence:
         return {**self.identity, "place": self.place, "span": [self.start, self.end],
                 "raw": raw, "value": raw, "actual": actual, "slot": self.slot,
                 "role": self.role, "event": self.claim.key if self.claim else None, "status": r.status,
-                "witness": r.witness, "reason": r.reason}
+                "witness": r.witness, "reason": r.reason, "source": r.source,
+                "consumer_binding": self.finder.side.origin(self.source_step) if self.source_step is not None else None}
 
 
 def place_name(b, rel):
@@ -484,27 +511,12 @@ class Finder:
             self.claims[key] = SourceBinding(key, step, fmt, chain, order)
         return self.claims[key]
 
-    def add(self, place, start, end, value, slot, role, result=None, claim=None):
-        occurrence = RawOccurrence(self, place, start, end, slot, role, result, claim)
+    def add(self, place, start, end, value, slot, role, result=None, claim=None, source_step=None):
+        occurrence = RawOccurrence(self, place, start, end, slot, role, result, claim, source_step)
         m = re.match(r'(step|boundary) ([0-9]+) (.*)', place)
-        role_step = re.search(r'(?:^|:)step([0-9]+)(?:$|:)', role)
-        if claim:
-            step = claim.step
-        elif role_step:
-            step = int(role_step.group(1))
-        elif m and m.group(1) == 'boundary' and m.group(3).startswith('file '):
-            step = self.side.written_step(m.group(3)[5:], int(m.group(2)))
-        else:
-            step = int(m.group(2)) - (m.group(1) == 'boundary') if m else None
-        call = None
-        hook = self.side.hook(step) if step is not None else None
-        if hook:
-            try:
-                payload = json.loads(self.side.text(hook['stdin']))
-                if isinstance(payload, dict):
-                    call = payload.get('tool_use_id')
-            except ValueError:
-                pass
+        observed_step = int(m.group(2)) - (m.group(1) == 'boundary') if m else None
+        step = occurrence.source_step if occurrence.source_step is not None else observed_step
+        call = self.side.call(step) if step is not None else None
         text = self.side.raw(place)
         raw = occurrence.read()
         if claim is None and raw != value:
@@ -524,7 +536,10 @@ class Finder:
         occurrence.identity = {'run': self.side.doc.get('run_id'), 'case': self.case['id'],
                                'side': self.side.doc.get('side'), 'execution': self.side.doc.get('execution_id'),
                                'step': step, 'call': call, 'channel_record': m.group(3) if m else place,
-                               'generation': generation, 'blob': hashlib.sha256(text.encode('latin-1')).hexdigest(),
+                               'generation': generation,
+                               'observation': {'boundary': int(m.group(2)) if m and m.group(1) == 'boundary' else None,
+                                               'step': observed_step, 'call': self.side.call(observed_step) if observed_step is not None else None},
+                               'blob': hashlib.sha256(text.encode('latin-1')).hexdigest(),
                                'scalar_type': kind, 'scalar_ordinal': scalar_ordinal, 'field': field,
                                'occurrence_ordinal': sum(o.place == place for o in self.occ)}
         self.occ.append(occurrence)
@@ -543,7 +558,7 @@ class Finder:
             s0 = m.start()
             self.add_claim(place, s0 + sm.start(1), s0 + sm.end(1), "snapshot-seconds", self.claims["snapshot %s" % sid])
             prole, pres = check_pid(self.side, self.objs[sid], sm.group(3))
-            self.add(place, s0 + sm.start(3), s0 + sm.end(3), sm.group(3), "snapshot-pid", prole, pres)
+            self.add(place, s0 + sm.start(3), s0 + sm.end(3), sm.group(3), "snapshot-pid", prole, pres, source_step=self.objs[sid])
 
     def run(self):
         side = self.side
@@ -611,7 +626,7 @@ class Finder:
         alts = "|".join(re.escape(r) for r in sorted(s["roots"], key=len, reverse=True))
         for m in re.finditer("(%s)/bin/safedeps(?![A-Za-z0-9_.-])" % alts, text):
             self.add(place_out(k, ch), m.start(1), m.end(1), m.group(1), "impl-root", "root:step%d" % k,
-                     ok(token("root"), ["impl:step%d" % k]))
+                     ok(token("root"), ["impl:step%d" % k]), source_step=k)
 
     def withheld_name(self, b, rel):
         """A record of withheld bytes made by hook step b-1: the event of its
@@ -629,13 +644,13 @@ class Finder:
             claim.native_binding = ('NpmWithheldName', 0, 1)
         self.add_claim(place, m.start(1), m.end(1), "withheld-name", claim)
         role, res = check_pid(side, k, m.group(2))
-        self.add(place, m.start(2), m.end(2), m.group(2), "withheld-name", role, res)
+        self.add(place, m.start(2), m.end(2), m.group(2), "withheld-name", role, res, source_step=k)
         role = "withheld:step%d" % k
         if len(made) == 1:
             res = ok(token(role), ["entry:boundary%d:%s" % (first, rel)])
         else:
             res = unresolved("step %d made %d npm-withheld records, and a tail does not say which is which" % (k, len(made)))
-        self.add(place, m.start(3), m.end(3), m.group(3), "withheld-name", role, res)
+        self.add(place, m.start(3), m.end(3), m.group(3), "withheld-name", role, res, source_step=k)
 
     def log_lines(self, rel):
         """Each line of <rel> at each boundary, placed in the step that
@@ -832,7 +847,7 @@ class Finder:
                     res = ok(token(role), ["lstat:boundary%d:%s" % (k, rel)])
                 else:
                     res = violation("%s is not the %s inode of %s at boundary %d (%s)" % (part, name, rel, k, fact["ino"]))
-                self.add(place, pos, pos + len(part), part, "pending-inode", role, res)
+                self.add(place, pos, pos + len(part), part, "pending-inode", role, res, source_step=k)
             pos += len(part) + 1
 
     def clock_parts(self, place, s0, v, k, d, rel):
@@ -857,7 +872,7 @@ class Finder:
                     res = ok(token(role), ["lstat:boundary%d:%s" % (k, rel)])
                 else:
                     res = violation("%s is not the %s ctime of %s at boundary %d (%d ns)" % (part, name, rel, k, fact["ctime_ns"]))
-                self.add(place, pos, pos + len(part), part, "pending-clock", role, res)
+                self.add(place, pos, pos + len(part), part, "pending-clock", role, res, source_step=k)
             pos += len(part) + 1
 
     def npm_calls(self, k, s):
@@ -878,7 +893,7 @@ class Finder:
                         res = violation("%s was there before step %d" % (rel, k))
                     else:
                         res = ok(token("scratch"), ["npm-call:step%d#%d:%s:%s" % (k, c["seq"], seen["dev"], seen["ino"])])
-                    self.add(place_npm(k, c["seq"], field), m.start(1), m.end(1), m.group(1), "npm-scratch", "scratch", res)
+                    self.add(place_npm(k, c["seq"], field), m.start(1), m.end(1), m.group(1), "npm-scratch", "scratch", res, source_step=k)
 
 
 def npm_fields(call):
