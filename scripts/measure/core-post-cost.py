@@ -116,7 +116,9 @@ def seed(d,n,l):
             package=project/'node_modules'/spec(0);package.mkdir()
             write_json(package/'package.json',dict(name=spec(0),version='1.0.0',scripts=dict(install='node ./fixture-install.cjs')))
             (package/'fixture-install.cjs').write_text("require('fs').writeFileSync('rebuild-receipt', 'fixture lifecycle ran\\n');\n")
-            packages['node_modules/'+spec(0)].update(resolved='https://registry.npmjs.org/'+spec(0)+'/-/'+spec(0)+'-1.0.0.tgz',integrity='sha512-Zml4dHVyZQ==')
+            # A modern npm lock records this flag for lifecycle packages;
+            # Arborist uses it to decide whether to load their script data.
+            packages['node_modules/'+spec(0)].update(resolved='https://registry.npmjs.org/'+spec(0)+'/-/'+spec(0)+'-1.0.0.tgz',integrity='sha512-Zml4dHVyZQ==',hasInstallScript=True)
             write_json(project/'package-lock.json',dict(lockfileVersion=3,packages=packages))
             shutil.copyfile(project/'package-lock.json',project/'node_modules/.package-lock.json')
             write_json(project/'package.json',dict(name='cost-fixture',version='1.0.0',dependencies={spec(0):'1.0.0'}))
