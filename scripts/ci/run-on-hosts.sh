@@ -177,9 +177,11 @@ ssh_host() {
     ${opts[@]+"${opts[@]}"} "${H_DEST[h]}" "$2"
 }
 
-H_STATE=() H_SEEN=() H_RUN=() H_LOAD0=() H_LOAD1=() H_FREE=()
+# Loads: when the tree was shipped (H_LOAD0), when the run took the host's
+# slots and its work began there (H_LOADH), and at the end (H_LOAD1).
+H_STATE=() H_SEEN=() H_RUN=() H_LOAD0=() H_LOADH=() H_LOAD1=()
 for (( h = 0; h < ${#H_NAME[@]}; h++ )); do
-  H_STATE+=(new) H_SEEN+=(0) H_RUN+=("${H_DIR[h]}/${run_id}") H_LOAD0+=("") H_LOAD1+=("") H_FREE+=(0)
+  H_STATE+=(new) H_SEEN+=(0) H_RUN+=("${H_DIR[h]}/${run_id}") H_LOAD0+=("") H_LOADH+=("") H_LOAD1+=("")
 done
 host_dead() { # index reason
   H_STATE[$1]=dead
@@ -277,7 +279,7 @@ while (( $(pending_count) > 0 || $(running_count) > 0 )); do
     H_LOAD1[h]=$(sed -n 's/^load //p' "${poll}")
     held_now=$(sed -n 's/^held //p' "${poll}")
     if [[ "${H_STATE[h]}" == queued ]] && (( ${held_now:-0} >= H_HOLDS[h] )); then
-      H_STATE[h]=held
+      H_STATE[h]=held H_LOADH[h]="${H_LOAD1[h]} at $(stamp)"
       [[ -n "${first_held}" ]] || first_held=$(now)
       event "${H_NAME[h]}: holds ${H_HOLDS[h]} queue slot(s) (load ${H_LOAD1[h]})"
     elif [[ "${H_STATE[h]}" == held ]] && (( ${held_now:-0} < H_HOLDS[h] )); then
@@ -352,8 +354,8 @@ waited=$(( first_held - suite_start ))
   printf 'end %s\n' "$(date '+%Y-%m-%d %H:%M:%S %z')"
   printf 'wall %ss from the first queue slot (budget %ss), after %ss waiting for the queues\n' "${secs}" "${budget}" "${waited}"
   for (( h = 0; h < ${#H_NAME[@]}; h++ )); do
-    printf 'host %s %s cpus %s holds %s load at start %s, at end %s\n' "${H_NAME[h]}" "${H_STATE[h]}" "${H_CPUS[h]}" "${H_HOLDS[h]}" \
-      "${H_LOAD0[h]:-?}" "${H_LOAD1[h]:-?}"
+    printf 'host %s %s cpus %s holds %s load when shipped %s, when its slots were held %s, at end %s\n' \
+      "${H_NAME[h]}" "${H_STATE[h]}" "${H_CPUS[h]}" "${H_HOLDS[h]}" "${H_LOAD0[h]:-?}" "${H_LOADH[h]:-never}" "${H_LOAD1[h]:-?}"
   done
 } >> "${work}/run.txt"
 
