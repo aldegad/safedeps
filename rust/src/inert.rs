@@ -10,8 +10,8 @@
 //!
 //! ```text
 //! places(text):
-//!   for each statement of text's top level (Run::pieces), each word that
-//!   names npm, whose reading (manager::Reader) is an install:
+//!   for each statement of text's top level (Run::pieces) whose command
+//!   word is npm and whose reading (manager::Reader) is an install:
 //!       the place for its flag, among the ends of its words (read.rs)
 //!   for each payload of text (Run::payloads, one level):
 //!       places(payload.text), each carried back through payload.src
@@ -32,17 +32,16 @@
 //! flag at its place. A place that fails is not placed; the install keeps
 //! its floor and is recorded as one.
 //!
-//! One thing is left once the statements are read: a verb the reference's
-//! search finds where the lexer has no statement, such as an array value
-//! (`a=(npm ci x)`), a word a parameter expansion holds (`${u:-npm ci x}`)
-//! or a word with an escaped operator (`eval npm ci\;true`). The bash rewrite
-//! read every verb its search found the same way, statement or not, and a
-//! text with no payload owes its flags and its record. So such a verb, at the
-//! top level of the text it is found in, is read as the bash rewrite read it:
-//! its end finder's positions (`floor::orphan_end`), the text cut there and
-//! read as npm's words (`read::cut_statement`). A verb inside a
-//! substitution's body is never read this way from outside: the body is a
-//! text of its own.
+//! What the structure does not call a command is not read. The reference's
+//! search finds a verb wherever the bytes `npm <verb>` stand: in an argument
+//! of another command (`echo npm ci x`, `sudo npm ci x`), in an array value
+//! (`a=(npm ci x)`), in a word a parameter expansion holds (`${u:-npm ci
+//! x}`), in a word with an escaped operator. The bash rewrite went on to end
+//! a statement at each with its own end finder and read it. Here such a verb
+//! keeps the release's flag after it (floor.rs) and nothing else: no place is
+//! read for it and it is not counted as read, so the record sees it. Where
+//! the shell runs such text as a command, that is the structure's to say,
+//! not a second reader's.
 //!
 //! # The release's floor (floor.rs)
 //!
@@ -64,13 +63,23 @@
 //! # The record (record.rs)
 //!
 //! `inert_bytes_left_unread` and `inert_dynamic_command_word`, ported as they
-//! are. The verbs counted as read (`@`) are the reader's command words npm,
-//! written as their value, in the command or in substitution bodies and
-//! quoted scripts the bash rewrite read as text of their own, and only where
-//! the bash rewrite counted the verb too: its own search found it, and its
-//! command-word test agrees. Those two tests can only keep a verb from
-//! counting, so they can only add a record: where the bash rewrite recorded a
-//! verb it did not read, this records it too, flag or no flag.
+//! are. Two things decide whether a verb counts as read (`@`), and they are
+//! kept apart:
+//!
+//! - What the reader read. The structure and the manager's tables say it: an
+//!   install is a statement whose command word is npm by its value, quoted
+//!   or not (`npm ci`, `"npm" ci`).
+//! - What the bash rewrite left unread. Four facts of its reading are kept
+//!   as duties to record, and each can only keep an install the reader read
+//!   from counting: the command word is written as its bytes, the text is
+//!   one the bash rewrite read as a text of its own (the command, a
+//!   substitution body, a quoted script for sh, bash, zsh, dash or eval),
+//!   its search found the verb, and its command-word test agrees. None of
+//!   them makes an install of text the reader did not read, and none of them
+//!   places a flag or ends a statement.
+//!
+//! So where the bash rewrite recorded a verb it did not read, this records it
+//! too, flag or no flag.
 //!
 //! # Differences from the bash rewrite
 //!
@@ -433,32 +442,15 @@ fn rewrite_with(run: &mut Run, rx: &Rx, command: &[u8], cands: &[u8], detail: &m
     // (its U spans: another shell's script, a double-quoted one with an
     // escape or a substitution) is v2.17.2's flag there, placed whether or
     // not that install is already true: `always` keeps it.
-    //
-    // The search runs over every text: in the command and its scripts its
-    // verbs are the floor, and in every text a verb it finds that no
-    // statement owns is read below as the bash rewrite read it.
-    let mut pair_memo: HashMap<W, Vec<(usize, usize)>> = HashMap::new();
-    let mut node_pairs: Vec<Vec<(usize, usize)>> = Vec::with_capacity(nodes.len());
-    for node in &nodes {
-        let v = if !mentions_npm(&node.text) {
-            Vec::new()
-        } else if let Some(v) = pair_memo.get(&node.text) {
-            v.clone()
-        } else {
-            let v = floor::verb_pairs(run, &rx.floor, &node.text)?;
-            pair_memo.insert(node.text.clone(), v.clone());
-            v
-        };
-        node_pairs.push(v);
-    }
     let mut pairs: Vec<(Option<usize>, usize)> = Vec::new();
     let mut always: Vec<usize> = Vec::new();
     let mut fed: BTreeSet<usize> = BTreeSet::new();
-    for (ni, node) in nodes.iter().enumerate() {
+    for node in &nodes {
         if !matches!(node.kind, b'R' | b'S' | b'E') {
             continue;
         }
-        for &(s, e) in &node_pairs[ni] {
+        let verbs = if mentions_npm(&node.text) { floor::verb_pairs(run, &rx.floor, &node.text)? } else { Vec::new() };
+        for (s, e) in verbs {
             if let Some(er) = node.after(e) {
                 if !pairs.contains(&(node.byte(s), er)) {
                     pairs.push((node.byte(s), er));
@@ -509,10 +501,6 @@ fn rewrite_with(run: &mut Run, rx: &Rx, command: &[u8], cands: &[u8], detail: &m
     // The reader, in every text.
     struct Found {
         node: usize,
-        /// Where its `npm` starts in its own text.
-        local: Option<usize>,
-        /// A verb no statement owns, read as the bash rewrite read it.
-        orphan: bool,
         npm: Option<usize>,
         verb: Option<usize>,
         place: Option<usize>,
@@ -542,75 +530,26 @@ fn rewrite_with(run: &mut Run, rx: &Rx, command: &[u8], cands: &[u8], detail: &m
                 Some(q) if ni == 0 => Some(q),
                 Some(q) => carry(run, &nodes, ni, q),
             };
-            // Counted as read only where the bash rewrite counted it: its
-            // own search found this verb, and its command-word test agrees.
-            // Each of the two can only keep a verb from counting, which can
-            // only add a record.
+            // The reader read this install: its statement's command word is
+            // npm, by the structure. What follows is no part of that reading.
+            // It is what the bash rewrite left unread, kept as a duty to
+            // record: a command word not written as its bytes, a text the
+            // bash rewrite did not read as one of its own, a verb its search
+            // did not find, or one its command-word test did not pass. Each
+            // can only keep a verb from counting as read, which can only add
+            // a record; none makes an install of text the reader did not
+            // read.
             let paired = npm.is_some_and(|x| pairs.iter().any(|(ps, _)| *ps == Some(x)));
-            let mut at = None;
-            if nodes[ni].read_like && inst.command_word && paired {
+            let mut left_unread = !inst.plain || !nodes[ni].read_like || !paired;
+            if !left_unread {
                 if !cmdwords.contains_key(&ni) {
                     let v = run.lex(&text, "cmdword")?;
                     cmdwords.insert(ni, v);
                 }
-                if bash_command_word(&cmdwords[&ni], inst.npm.unwrap_or(0)) {
-                    at = npm;
-                }
+                left_unread = !bash_command_word(&cmdwords[&ni], inst.npm.unwrap_or(0));
             }
-            found.push(Found { node: ni, local: inst.npm, orphan: false, npm, verb, place, wanted: inst.place.is_some(), note: inst.note, at });
-        }
-    }
-    // The verbs no statement owns: one the reference's search found at this
-    // text's own top level (not in the body of a substitution, which is a
-    // text of its own) where the reader found no install. The bash rewrite
-    // read every verb its search found this way; here it is the reading of
-    // what is left once the statements are read, so that a text with no
-    // payload gets the flags and the record the bash rewrite gave it.
-    for ni in 0..nodes.len() {
-        if node_pairs[ni].is_empty() {
-            continue;
-        }
-        let bodies: Vec<(usize, usize)> = nodes
-            .iter()
-            .filter(|c| c.parent == ni && c.depth == nodes[ni].depth + 1 && !matches!(c.kind, b'S' | b'E'))
-            .filter_map(|c| Some((c.src.iter().flatten().min().copied()?, c.src.iter().flatten().max().copied()?)))
-            .collect();
-        let owned: Vec<usize> = found.iter().filter(|f| f.node == ni).filter_map(|f| f.local).collect();
-        let text = nodes[ni].text.clone();
-        let mut views: Option<(W, W, W)> = None;
-        for &(s, e) in &node_pairs[ni] {
-            if owned.contains(&s) || bodies.iter().any(|&(lo, hi)| s >= lo && s <= hi) {
-                continue;
-            }
-            if views.is_none() {
-                let live = run.lex(&text, "live")?;
-                let code = run.lex(&text, "code")?;
-                let noredir = run.lex(&text, "noredir")?;
-                views = Some((live, code, noredir));
-            }
-            let Some((live, code, noredir)) = views.as_ref() else { continue };
-            let inst = match floor::orphan_end(&text, live, code, noredir, e) {
-                floor::End::Unsure => read::Install { npm: Some(s), command_word: false, verb_end: e, place: None, note: read::Note::Floor },
-                floor::End::At { bound, cands } => read::cut_statement(run, &text, s, e, bound, &cands)?,
-            };
-            let npm = nodes[ni].three(s);
-            let verb = nodes[ni].after(e);
-            let place = match inst.place {
-                None => None,
-                Some(q) if ni == 0 => Some(q),
-                Some(q) => carry(run, &nodes, ni, q),
-            };
-            let mut at = None;
-            if nodes[ni].read_like && npm.is_some() {
-                if !cmdwords.contains_key(&ni) {
-                    let v = run.lex(&text, "cmdword")?;
-                    cmdwords.insert(ni, v);
-                }
-                if bash_command_word(&cmdwords[&ni], s) {
-                    at = npm;
-                }
-            }
-            found.push(Found { node: ni, local: Some(s), orphan: true, npm, verb, place, wanted: inst.place.is_some(), note: inst.note, at });
+            let at = if left_unread { None } else { npm };
+            found.push(Found { node: ni, npm, verb, place, wanted: inst.place.is_some(), note: inst.note, at });
         }
     }
     // The flags.
@@ -674,8 +613,7 @@ fn rewrite_with(run: &mut Run, rx: &Rx, command: &[u8], cands: &[u8], detail: &m
         if let Some(d) = detail.as_mut() {
             d.extend_from_slice(
                 format!(
-                    "{} {} {} {} {} {} {} {}\n",
-                    if f.orphan { "orphan" } else { "install" },
+                    "install {} {} {} {} {} {} {}\n",
                     f.node,
                     num(f.npm),
                     note_name(f.note),
@@ -799,6 +737,13 @@ fn reading_inert_detail(run: &mut Run, command: &[u8], detail: &mut Option<W>) -
 /// value `guard_reading_inert` sets), `payloads.<reading>` (how many payloads
 /// the command's own top level hands on) and `detail.<reading>`, and last
 /// `failed` (the scan mark once the rewrite has run).
+///
+/// A detail is this reading's own account, for the comparison to sort rows
+/// by, never evidence of what a shell runs: `pair <npm> <verb end> <kept>`
+/// for each verb the reference search found, `fed <offset>` for each flag of
+/// v2.17.2's in text the bash rewrite did not read, and `install <text>
+/// <npm> <note> <verb end> <place> <wanted> <read at>` for each install the
+/// reader found, each a statement whose command word is npm.
 pub fn cli(input: &[u8]) -> i32 {
     let Some((tool, cmd)) = core::command_of_payload(input) else { return 0 };
     let mut cmd: W = cmd.into_iter().filter(|&b| b != 0).collect();

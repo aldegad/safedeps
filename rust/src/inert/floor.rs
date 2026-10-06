@@ -12,10 +12,13 @@
 //! options; the reader (`read.rs`) and the record (`record.rs`) do, from the
 //! lexer's structure.
 //!
-//! `orphan_end` is the one function here that ends a statement, and it does
-//! so only for a verb the reader found no statement for: there the positions
-//! are the bash rewrite's end finder's, reproduced, so that text that is no
-//! statement keeps the flags the bash rewrite gave it.
+//! No function here ends a statement or reads npm's options. A verb the
+//! search finds where the lexer has no statement (an array value, a word a
+//! parameter expansion holds) keeps the flag after it, which is the
+//! release's, and nothing more: the bash rewrite went on to end a statement
+//! there with its own end finder and to read it, and that reading is not
+//! ported. Such text is not an install the rewrite read, so the record sees
+//! its verb.
 
 use crate::core::Run;
 use crate::ere::Regex;
@@ -333,165 +336,6 @@ pub fn unread_script_ends(run: &mut Run, rx: &Rx, text: &[u8], spans: &[(usize, 
         }
     }
     Some(out)
-}
-
-/// What the reference rewrite's end finder makes of the text after a verb
-/// (`inert_flag_offsets`, its second awk).
-pub enum End {
-    /// It could not tell where the statement ends: the flag after the verb
-    /// alone.
-    Unsure,
-    /// `bound` is the offset of the byte that ends the statement (the text's
-    /// length where none does), `cands` the offsets a flag could go after,
-    /// from the last argument back to the verb.
-    At { bound: usize, cands: Vec<usize> },
-}
-
-/// Where the reference rewrite ended the statement of a verb it found, and
-/// the places it tried, for a verb no statement of the reader owns: one the
-/// search found in text that is no statement of its level (an array value, a
-/// word a parameter expansion holds, a word with an escaped operator). `e` is
-/// the offset just past the verb; the views are the text's own, each with
-/// every byte in place.
-///
-/// This reproduces positions. It is asked only of a verb the reader found no
-/// statement for, at the top level of the text the verb was found in, never
-/// of one inside a substitution's body; the reader's statements, and what
-/// counts as an install, come from the lexer's structure (`read.rs`).
-pub fn orphan_end(text: &[u8], live: &[u8], code: &[u8], noredir: &[u8], e: usize) -> End {
-    // The awk reads the text from a file with `slurp`, which drops one
-    // newline at its end.
-    let n = if text.last() == Some(&b'\n') { text.len() - 1 } else { text.len() };
-    let at_ = |v: &[u8], k: usize| -> u8 {
-        if k >= 1 && k <= v.len() && k <= n {
-            v[k - 1]
-        } else {
-            0
-        }
-    };
-    let blank = |c: u8| matches!(c, b' ' | b'\t' | b'\n' | 0);
-    let sep = |k: usize| matches!(at_(live, k), b';' | b'&' | b'|' | b'(' | b')' | b'<' | b'>' | b'`' | b'\n');
-    let inside = (1..=e).filter(|&k| at_(live, k) == b'`').count() % 2 == 1;
-    let (mut depth, mut brace, mut b, mut unsure) = (0usize, 0usize, 0usize, false);
-    let mut k = e + 1;
-    while k <= n {
-        let c = at_(live, k);
-        if c == b'`' {
-            if depth > 0 || brace > 0 {
-                unsure = true;
-                break;
-            }
-            if inside {
-                b = k;
-                break;
-            }
-            let mut j = k + 1;
-            while j <= n && at_(live, j) != b'`' {
-                j += 1;
-            }
-            if j > n {
-                unsure = true;
-                break;
-            }
-            k = j + 1;
-            continue;
-        }
-        if c == b'}'
-            && depth == 0
-            && brace == 0
-            && !blank(at_(code, k - 1))
-            && (k == n || blank(at_(live, k + 1)) || b";&|)<>`".contains(&at_(live, k + 1)))
-        {
-            b = k;
-            break;
-        }
-        if c == b'(' {
-            depth += 1;
-            k += 1;
-            continue;
-        }
-        if c == b')' {
-            if depth == 0 {
-                b = k;
-                break;
-            }
-            depth -= 1;
-            k += 1;
-            continue;
-        }
-        if c == b'$' && at_(live, k + 1) == b'{' {
-            brace += 1;
-            k += 2;
-            continue;
-        }
-        if c == b'}' && brace > 0 {
-            brace -= 1;
-            k += 1;
-            continue;
-        }
-        if depth > 0 || brace > 0 {
-            k += 1;
-            continue;
-        }
-        if c == b'\n' || c == b';' {
-            b = k;
-            break;
-        }
-        if c == b'&' {
-            if at_(live, k - 1) == b'>' || at_(live, k - 1) == b'<' || at_(live, k + 1) == b'>' {
-                k += 1;
-                continue;
-            }
-            b = k;
-            break;
-        }
-        if c == b'|' {
-            if at_(live, k - 1) == b'>' {
-                k += 1;
-                continue;
-            }
-            b = k;
-            break;
-        }
-        // A word that is only dashes, quoted or escaped or not, ends npm's
-        // options.
-        if !blank(at_(code, k)) && blank(at_(code, k - 1)) {
-            let mut w = Vec::new();
-            let mut j = k;
-            while j <= n && !blank(at_(code, j)) && !sep(j) {
-                w.push(at_(code, j));
-                j += 1;
-            }
-            w.retain(|&x| !matches!(x, b'"' | b'\'' | b'\\'));
-            if w.len() >= 2 && w.iter().all(|&x| x == b'-') {
-                b = k;
-                break;
-            }
-        }
-        k += 1;
-    }
-    if unsure {
-        return End::Unsure;
-    }
-    if b == 0 {
-        b = n + 1;
-    }
-    let mut at = b - 1;
-    while at > e && (blank(at_(code, at)) || blank(at_(noredir, at)) || (at_(text, at) == b'\\' && at_(text, at + 1) == b'\n')) {
-        at -= 1;
-    }
-    let mut cands = vec![at];
-    let mut k = at.saturating_sub(1);
-    while k > e {
-        if !blank(at_(text, k)) && !blank(at_(code, k)) && !blank(at_(noredir, k)) && blank(at_(text, k + 1)) {
-            cands.push(k);
-        }
-        k -= 1;
-    }
-    if e < at {
-        cands.push(e);
-    }
-    End::At { bound: b - 1, cands }
 }
 
 /// `command_is_injectable_npm_install`, given the candidate texts.
