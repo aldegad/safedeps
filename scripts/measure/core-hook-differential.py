@@ -188,6 +188,8 @@ def main():
     for name in ("control", "list", "fixture-provider", "synthetic"):
         ap.add_argument("--" + name, action="store_true")
     a = ap.parse_args()
+    if a.synthetic and (a.evidence_manifest or a.evidence_sha256):
+        die('synthetic replay cannot select a live evidence manifest')
     if a.replay:
         if a.core or a.cand_root or a.control or a.cases or a.only or a.tags or a.native_archive or a.native_build_receipt or a.native_build_sha256:
             die("--replay consumes saved bundles alone; collection options cannot be combined with it")

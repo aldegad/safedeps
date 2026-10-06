@@ -78,6 +78,63 @@ def hex_digest(value, label):
     return value
 
 
+def string_map(value, label):
+    require(value, dict, label)
+    for key, item in value.items():
+        require(key, str, label + ' key')
+        require(item, str, label + ' value')
+
+
+def string_list(value, label):
+    require(value, list, label)
+    for item in value:
+        require(item, str, label + ' item')
+
+
+def validate_side(side):
+    """Types of consumed metadata. Hook JSON inside blobs is deliberately raw."""
+    require(side['box'], str, 'box')
+    for boundary in side['boundaries']:
+        require(boundary, dict, 'boundary')
+        require(boundary['entries'], dict, 'entries')
+        string_list(boundary.get('walk_errors', []), 'walk errors')
+        for path, entry in boundary['entries'].items():
+            require(path, str, 'entry path')
+            require(entry, dict, 'entry')
+            require(entry['kind'], str, 'entry kind')
+            for key in ('ino', 'dev', 'size', 'ctime_ns', 'mtime_ns', 'nlink'):
+                if key in entry:
+                    require(entry[key], int, 'entry ' + key)
+            for key in ('blob', 'mode', 'target'):
+                if key in entry:
+                    require(entry[key], str, 'entry ' + key)
+    for step in side['steps']:
+        require(step, dict, 'step')
+        if step['kind'] == 'effect':
+            continue
+        if step['kind'] != 'hook':
+            raise ValueError('unknown step kind')
+        for key in ('pid', 't0_ns', 't1_ns'):
+            require(step[key], int, 'step ' + key)
+        for key in ('hook', 'impl', 'cwd', 'stdin', 'stdout', 'stderr', 'status'):
+            require(step[key], str, 'step ' + key)
+        if step['hook'] not in ('pre', 'post') or step['impl'] not in ('core', 'bash'):
+            raise ValueError('unknown hook/implementation kind')
+        if 'native' in step:
+            require(step['native'], dict, 'native receipt')
+        if 'native_raw' in step:
+            hex_digest(step['native_raw'], 'native stream')
+        for key in ('argv', 'roots'):
+            string_list(step[key], key)
+        string_map(step['env'], 'step environment')
+        for key in ('date_calls', 'npm_calls', 'incomplete_calls'):
+            require(step[key], list, key)
+        for call in step['npm_calls']:
+            require(call['seq'], int, 'npm call sequence')
+            string_list(call['argv'], 'npm argv')
+            string_map(call['env'], 'npm environment')
+
+
 def builder_relation(receipt, blobs):
     """The builder's exact source -> artifact relation, not set membership."""
     from . import native
@@ -93,6 +150,7 @@ def builder_relation(receipt, blobs):
     build_bytes = blobs.get(hex_digest(receipt['builder'], 'builder'))
     build = strict_load(build_bytes)
     require(build, dict, 'builder')
+    require(build.get('tapped'), bool, 'builder tapped')
     if build.get('format') != BUILD:
         raise ValueError('builder receipt format mismatch')
     expected = {'source': native.CATALOG['source'], 'files': files, 'binary_sha256': receipt['binary'],
@@ -104,10 +162,14 @@ def builder_relation(receipt, blobs):
     blobs.get(hex_digest(receipt['binary'], 'binary'))
     if type(build.get('build_rc')) is not int or build['build_rc'] != 0:
         raise ValueError('builder did not complete successfully')
+    require(build.get('stamp'), dict, 'stamp')
+    require(build['stamp'].get('rc'), int, 'stamp rc')
     if build.get('stamp') != {'rc': 0, 'stdout': 'ok\n', 'stderr': ''}:
         raise ValueError('builder stamp not successful')
     for key, typ in (('argv', list), ('env', dict), ('toolchain', dict), ('target', str), ('build_log_sha256', str)):
         require(build.get(key), typ, 'builder ' + key)
+    string_list(build['argv'], 'build argv')
+    string_map(build['env'], 'build environment')
     if not build['argv'] or not build['target'] or set(build['toolchain']) != {'cargo', 'rustc'}:
         raise ValueError('incomplete builder invocation')
     for tool in build['toolchain'].values():
@@ -243,8 +305,11 @@ def admit(doc, bundle_sha, manifest_path=None, expected=None, synthetic=False):
         require(manifest, dict, 'manifest')
         if manifest.get('format') != MANIFEST:
             raise ValueError('unknown evidence manifest format')
+        if 'complete' in manifest:
+            require(manifest['complete'], bool, 'manifest completion')
         if manifest.get('complete') is not True:
             return state('unresolved', 'collection manifest is incomplete', kind, expected)
+        require(manifest.get('run'), str, 'manifest run')
         if kind != 'live' or manifest.get('collection_kind') != 'live':
             return state('unresolved', 'bundle has no prospective live collection', kind, expected)
         if manifest.get('collector_sources') != sources():
@@ -256,7 +321,12 @@ def admit(doc, bundle_sha, manifest_path=None, expected=None, synthetic=False):
         item = selected[0]
         if item['fixture_sha256'] != digest(doc['case']):
             raise ValueError('fixture relation differs')
+        execution_ids = set()
         for name, side in doc['sides'].items():
+            require(side.get('execution_id'), str, 'execution id')
+            if not side['execution_id'] or side['execution_id'] in execution_ids:
+                raise ValueError('duplicate/empty execution identity')
+            execution_ids.add(side['execution_id'])
             side['_evidence'] = state('accepted', 'completed manifest selected', kind, expected)
             if side.get('run_id') != manifest['run']:
                 raise ValueError('run relation differs')
@@ -269,6 +339,9 @@ def admit(doc, bundle_sha, manifest_path=None, expected=None, synthetic=False):
                 if launch is None:
                     return state('unresolved', 'hook has no prospective launch receipt', kind, expected)
                 require(launch, dict, 'launch')
+                require(launch.get('step'), int, 'launch step')
+                require(launch.get('pid'), int, 'launch pid')
+                require(launch.get('collector_pid'), int, 'collector pid')
                 if launch.get('format') != LAUNCH:
                     raise ValueError('launch format mismatch')
                 relation = {'run': side['run_id'], 'execution': side['execution_id'], 'step': k,
@@ -277,6 +350,10 @@ def admit(doc, bundle_sha, manifest_path=None, expected=None, synthetic=False):
                 for key, value in relation.items():
                     if launch.get(key) != value:
                         raise ValueError('launch relation mismatch: ' + key)
+                for when in ('executable_before', 'executable_after'):
+                    require(launch[when], dict, when)
+                    require(launch[when]['path'], str, when + ' path')
+                    hex_digest(launch[when]['sha256'], when)
                 if launch['executable_before'] != launch['executable_after']:
                     raise ValueError('launch executable changed')
                 if step['impl'] == 'core':

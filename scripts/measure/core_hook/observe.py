@@ -81,6 +81,7 @@ class Blobs:
 
     @classmethod
     def load(cls, doc):
+        evidence.require(doc, dict, 'blobs')
         data = {}
         for digest, encoded in doc.items():
             try:
@@ -745,6 +746,8 @@ def read_bundle(path):
     blobs = Blobs.load(doc["blobs"])
     evidence.require(doc['case'], dict, 'case')
     evidence.require(doc['meta'], dict, 'bundle meta')
+    if 'collection_kind' in doc['meta']:
+        evidence.require(doc['meta']['collection_kind'], str, 'collection kind')
     evidence.require(doc['sides'], dict, 'sides')
     if set(doc['sides']) != {'reference', 'candidate'}:
         fail('bundle must hold exactly reference and candidate')
@@ -756,5 +759,6 @@ def read_bundle(path):
         evidence.require(side['boundaries'], list, 'boundaries')
         if len(side['boundaries']) != len(side['steps']) + 1:
             fail('boundary count differs from steps')
+        evidence.validate_side(side)
         side['blobs'] = blobs
     return doc
