@@ -190,8 +190,9 @@ any step is open.
      `effect-trace-grid.sh` and `e2e.sh`, with the fixture projects on the
      Linux root and on a Windows drive. These four reach what WSL1 does
      differently, the cost of a process and the file metadata of a Windows
-     drive. The whole release set takes hours on that one slot and is not part
-     of a release. `/proc/loadavg` is a constant in WSL1, so record the Windows
+     drive. The four took 3,612s on the Linux root and 3,949s on the Windows
+     drive when measured (2026-10-06); the whole release set there has not
+     been timed and is not part of a release. `/proc/loadavg` is a constant in WSL1, so record the Windows
      CPU beside the run instead of `uptime`.
 
    `npm run test:release` on one host, and each battery run by hand in WSL1,
