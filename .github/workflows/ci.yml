@@ -1,11 +1,9 @@
 name: CI
 
+# Not run automatically (owner, 2026-10-06): the test suite runs on our own
+# hosts, and no release step waits for GitHub. This file stays for a run by
+# hand, with the same split as the hosts use (AGENTS.md, Testing).
 on:
-  push:
-    branches: [main]
-  pull_request:
-  # A run on any branch by hand, to measure a change to this file before it
-  # reaches main. publish.yml reads only runs on a push to main.
   workflow_dispatch:
 
 permissions:

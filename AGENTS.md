@@ -29,6 +29,10 @@ Claude Code + Codex CLI only — not Grok/Hermes yet. When a hook capability dif
 - **No SaaS dependency** — local CLI + public DBs only. The tool itself has **zero npm dependencies**; keep it that way (it is a security property, not an oversight).
 - The ledger is a same-user convenience cache, **not** a security boundary against a same-user attacker (until signing/re-query lands). Do not document it as one.
 
+## CI
+
+GitHub CI is not used: no test workflow is created or run on GitHub. CI runs separately, on the infrastructure Alex set up (the remote runners and test machines named under Testing). The reason is that GitHub's CI is too slow. This section mirrors the owner's global rule (2026-10-06), and a new project copies it into its own `AGENTS.md`. `.github/workflows/ci.yml` stays only as a by-hand reference for the Linux release steps until a script on our hosts replaces it; `publish.yml` is not CI, it is the trusted-publishing job that puts a tagged release on npm.
+
 ## Version SSoT
 
 `package.json` `version` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION` must match it; the smoke test reads `package.json` to enforce the match. Bump them together — a feature (e.g. effect/inert) is a minor bump, docs-only is a patch.
@@ -53,12 +57,13 @@ See the `skill-hook-authoring` skill for the full payload/decision schema. Essen
 
 ## Testing
 
+- **Our CI is our own infrastructure, and a test run finishes within ten minutes** (owner, 2026-10-06). GitHub Actions does not run the suite: `ci.yml` runs only by hand, and no release step waits for it. The suite runs on our hosts: alex-macbook-m1 and carenine for macOS, the Grok VM for Linux (their runners are `~/safedeps-runs/slot.sh` and `~/sd-runs/vm-locked.sh`). The budget is ten minutes of wall clock for a run, development or release. It is not met yet: on one host `npm test` took 21 minutes and `npm run test:release` 46 to 62 (carenine, 2026-10-05), and GitHub's macOS runners took 37 minutes split five ways. Two changes are meant to bring it inside: running the groups and census shards on several hosts at once, and a harness that asks the guard's judgment directly instead of starting the whole hook for every row. Both are items of the v2.18.2 release plan. Until a run fits, the budget is what a change to the suite is measured against, never a reason to leave a battery out.
 - Two commands, one runner (`scripts/test/run-all.sh`). `npm test` is the development run: every battery except the quick scan-failure census and `effect-trace-grid.sh`. `npm run test:release` runs every battery, those two included. The two left out took most of a release's CI time (v2.18.0 on macOS: the census 4,324 of 7,166 seconds, and `effect-trace-grid.sh`, which waits for it, 2,840), and both measure what a release ships. A change that reaches the scan readings or the effect gate runs them by name: `scripts/measure/scan-failure-census.sh --quick`, `scripts/test/effect-trace-grid.sh`. Keep both commands green.
 - `run-all.sh --list` prints the batteries a run would start, with `--release` or `--group NAME` as for a run.
 - The batteries run in parallel. They keep their state apart: each makes its own mktemp root, points `HOME` or `SAFEDEPS_HOME` into it, and starts its fixture servers on a port the kernel picks. Measured with a fresh `HOME` and `TMPDIR`, a full run left only npm's own cache and logs in the inherited `HOME`. A new battery keeps the same isolation, or it cannot run beside the others.
 - The runner never takes the whole machine by default. At most `SAFEDEPS_TEST_JOBS` batteries run at once, and the census runs that many guards. The default is half the CPUs, rounded up. Raise it on a dedicated machine, or set it to 1 for the least load. Developer machines are shared: an uncapped run on a 16-CPU Mac already at load 100 took it past 300. Run alone, the census takes the same default, and `--jobs N` overrides it.
 - Two batteries start only after the census finishes, because a busy machine turns them red without a defect and the census is what loads the machine: `self-budget.sh` times the guard's answers against its budgets, and `effect-trace-grid.sh` needs an npm install to write its lockfile inside the wall-clock second the pre-guard ran in. A run without the census has nothing to wait for, and they start in order.
-- CI splits the release run into five test jobs per OS, so its wall clock is the longest job rather than the sum. Five, because GitHub runs at most five macOS jobs of one account at once (https://docs.github.com/en/actions/reference/limits, read 2026-10-05); a sixth would wait for a free runner. `run-all.sh --group a`, `--group b` and `--group timing` each run on their own runner (`timing` holds `self-budget.sh`, `effect-trace-grid.sh` and `install-dir-differential.sh`, which a loaded runner turns red without a defect, and runs them one at a time: `install-dir-differential.sh` also loads the runner, and two CI reds came from such a battery running beside load); the census runs in two shards (`scan-failure-census.sh --quick --shard I/2 --out DIR`), each making every case's clean and counting runs and every second failing run. A `verdict (<os>)` job then checks, with `scripts/test/ci-verdict.sh`, that the jobs of that OS ran every battery with a CI group once, that no battery printed a skipped row (`ok ... SKIPPED`, or a TAP `# SKIP`) its `SKIP_ALLOWED` list does not name, that the release set outside the CI groups is the census alone, and that the shards made every run of the census once and left no failure mode idle (`scripts/measure/census-shards.sh combine`). A skipped row prints `ok`, so a job is green without it: with gitleaks installed in group a alone, e2e's pre-commit gate rows were skipped on both OSes and every job was green (run 37297541785). Every battery group installs what its batteries need, and the allow list names only a row whose skip follows from the runner, not from what the workflow installs. `scripts/measure/census-shards.sh cover` is the list comparison behind the split: it lists the census's (case, mode, K) runs unsharded and per shard and fails unless the shards' union is the unsharded set. Which battery runs in which group is a column of `run-all.sh`'s table; a group added there needs its job in `ci.yml` and its name in `publish.yml`'s `ci-green`.
+- The release run is split into groups and census shards, so several machines can run it at once and the wall clock is the longest part rather than the sum. `ci.yml` keeps the split it was written for, five test jobs per OS on GitHub (GitHub runs at most five macOS jobs of one account at once: https://docs.github.com/en/actions/reference/limits, read 2026-10-05), for a run by hand. `run-all.sh --group a`, `--group b` and `--group timing` each run on their own runner (`timing` holds `self-budget.sh`, `effect-trace-grid.sh` and `install-dir-differential.sh`, which a loaded runner turns red without a defect, and runs them one at a time: `install-dir-differential.sh` also loads the runner, and two CI reds came from such a battery running beside load); the census runs in two shards (`scan-failure-census.sh --quick --shard I/2 --out DIR`), each making every case's clean and counting runs and every second failing run. A `verdict (<os>)` job then checks, with `scripts/test/ci-verdict.sh`, that the jobs of that OS ran every battery with a CI group once, that no battery printed a skipped row (`ok ... SKIPPED`, or a TAP `# SKIP`) its `SKIP_ALLOWED` list does not name, that the release set outside the CI groups is the census alone, and that the shards made every run of the census once and left no failure mode idle (`scripts/measure/census-shards.sh combine`). A skipped row prints `ok`, so a job is green without it: with gitleaks installed in group a alone, e2e's pre-commit gate rows were skipped on both OSes and every job was green (run 37297541785). Every battery group installs what its batteries need, and the allow list names only a row whose skip follows from the runner, not from what the workflow installs. `scripts/measure/census-shards.sh cover` is the list comparison behind the split: it lists the census's (case, mode, K) runs unsharded and per shard and fails unless the shards' union is the unsharded set. Which battery runs in which group is a column of `run-all.sh`'s table; a group added there needs its job in `ci.yml`, and the verdict is the same check wherever the groups ran.
 - Each battery writes its own log. At the end the runner prints every log in a fixed order, then one summary line per battery: exit code, `ok` and `not ok` counts, seconds, and the load at start and end. Then it prints the tail of each failed log. It exits non-zero when any battery exits non-zero or prints `not ok`, and it names them.
 - `SAFEDEPS_TEST_SERIAL=1 npm test` runs the batteries one at a time, in the order of the old `&&` chain. When a battery fails only in parallel, rerun it this way before you call it a defect or a flake. `SAFEDEPS_TEST_LOG_DIR=<dir>` keeps the logs in a directory you choose.
 - A security change needs **both** a bypass harness (the threat must DENY/REORG) and a regression check (normal installs still pass; no false positives on `echo`/heredoc/`npm run`/`npx`).
@@ -179,11 +184,12 @@ any step is open.
      `./bin/safedeps scan secrets --repo`, and the package-contents step
      (zero runtime dependencies, `npm pack --dry-run`).
 
-   A step the Linux machine cannot run is named in the ROADMAP section with the
-   reason, and step 8's CI run carries it. v2.18.0 ran the full suite on a Debian VM
-   and left the other three to CI after the push; that is the form to record,
-   not to leave unsaid. CI is the authority either way: it runs on GitHub's
-   runners from a clean checkout. This step exists to keep a red tree off `main`:
+   These two runs are the test of the release; no CI on GitHub stands behind
+   them (owner, 2026-10-06). A step the Linux machine cannot run is named in
+   the ROADMAP section with the reason, and the release does not go out until
+   it has run on a Linux host. v2.18.1 pushed before its own suites finished and
+   leaned on GitHub's CI for Linux; that is no longer a way out. This step exists
+   to keep a red tree off `main`:
    Linux-only failures (GNU `stat -f`, the 128KB `E2BIG` limit, ext4 directory
    order) were invisible on macOS and kept CI red for a month.
 6. **Run the release gates.** The package has zero runtime dependencies
@@ -200,12 +206,11 @@ any step is open.
    plan/release-vX.Y.Z`. The installed hooks now run the new code: push one
    benign command and one install through `scripts/safedeps-hook-entry.sh pre`
    and read both answers before going on.
-8. **Push and watch CI.** `git push origin main`, then wait for the run on that
-   commit. Every job must be green: per OS, `batteries a`, `batteries b`,
-   `batteries timing`, `census 1/2`, `census 2/2` and `verdict`. Red stops
-   the release: fix forward, and do not tag a red commit.
+8. **Push.** `git push origin main`. Nothing waits for a CI run: step 5 on our
+   own hosts is the test of this commit, and a red run there stops the release
+   before this step.
 9. **Tag and publish the GitHub release.** An annotated tag `vX.Y.Z` on the
-   green commit, pushed (the push starts step 10's publish), and
+   pushed commit, pushed (the push starts step 10's publish), and
    `gh release create vX.Y.Z --notes-file <notes>`.
    The notes cover every user-visible change since the previous tag (derive them
    from `git log <previous-tag>..vX.Y.Z` and the ROADMAP section): security
@@ -220,13 +225,7 @@ any step is open.
     npm accepts the job's GitHub OIDC token, so there is no npm token, no
     login and no 2FA prompt, and npm attaches provenance. Watch it:
     `gh run list --workflow publish.yml -L 1`, then `gh run watch <id>`. The
-    run must be green. Its jobs, in order:
-    - `ci-green` reads the CI run on a push to `main` for the tagged commit and
-      stops unless the run and every job step 8 names concluded `success`, on
-      both OSes. It also stops on a job in the run it does not name, so a job
-      added to `ci.yml` without its name here stops the release instead of
-      passing unread. It does not run the suite again. A tag pushed before CI
-      finished fails here; rerun it with `gh run rerun <id>` once CI is green.
+    run must be green. Its one job:
     - `publish` checks that npm is at least 11.5.1, that the tag, `package.json`
       and `bin/safedeps` name the same version, runs `npm publish --provenance`,
       then reads the release back from the registry: the version's

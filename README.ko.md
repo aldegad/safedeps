@@ -495,7 +495,7 @@ safedeps/
 
 ### 테스트 실행
 
-`npm test` 는 개발용 실행입니다. 릴리스에만 필요한 두 배터리, 축약 scan-failure census 와 `scripts/test/effect-trace-grid.sh` 를 뺀 모든 테스트 배터리를 돌립니다. `npm run test:release` 는 그 둘을 포함해 모든 배터리를 돌립니다. CI 는 릴리스 세트를 Linux 와 macOS 에서 병렬 잡으로 나눠 돌립니다. `scripts/test/run-all.sh --list` 는 실행이 시작할 배터리 목록을 출력합니다.
+`npm test` 는 개발용 실행입니다. 릴리스에만 필요한 두 배터리, 축약 scan-failure census 와 `scripts/test/effect-trace-grid.sh` 를 뺀 모든 테스트 배터리를 돌립니다. `npm run test:release` 는 그 둘을 포함해 모든 배터리를 돌립니다. 릴리스는 우리 macOS·Linux 장비에서 릴리스 세트를 돌립니다. GitHub Actions 는 테스트를 돌리지 않습니다. `scripts/test/run-all.sh --list` 는 실행이 시작할 배터리 목록을 출력합니다.
 
 ## What's Different
 

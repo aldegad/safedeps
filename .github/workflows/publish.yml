@@ -4,7 +4,9 @@ name: Publish
 # and npm attaches provenance. The npmjs.com side names this workflow by its
 # filename, publish.yml, and the environment below; renaming either breaks
 # publishing until the trusted publisher on npmjs.com is recreated to match.
-# Release procedure: AGENTS.md, steps 8-10.
+# Release procedure: AGENTS.md, steps 5-10. The tag is pushed only after
+# step 5's runs on our own hosts are green; this workflow does not wait for a
+# CI run, because there is none on GitHub (owner, 2026-10-06).
 
 on:
   push:
@@ -17,65 +19,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # Publish only a commit whose CI run on main is green on both platforms.
-  # This reads the CI run that step 8 already waited for instead of running
-  # the suite again. No run, a run still going, or any other conclusion stops
-  # the release; rerun this workflow once CI is green.
-  #
-  # CI is split into jobs (ci.yml), and every one of them is named below. A
-  # job missing from the run, or a job in the run that is not named here, stops
-  # the release too: either one means ci.yml and this list disagree, and a
-  # green run of other jobs says nothing about the ones it did not run.
-  ci-green:
-    runs-on: ubuntu-latest
-    permissions:
-      actions: read
-    steps:
-      - name: Require a green CI run on main for this commit
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          SHA: ${{ github.sha }}
-        run: |
-          set -euo pipefail
-          runs=$(gh api "repos/$REPO/actions/workflows/ci.yml/runs?head_sha=$SHA&event=push&branch=main&per_page=100")
-          run_id=$(jq -r '[.workflow_runs[] | select(.head_sha == env.SHA)] | sort_by(.created_at) | last | .id // empty' <<<"$runs")
-          if [ -z "$run_id" ]; then
-            echo "::error::no CI run on a push to main for $SHA; push main and wait for CI before tagging"
-            exit 1
-          fi
-          run=$(gh api "repos/$REPO/actions/runs/$run_id")
-          status=$(jq -r .status <<<"$run")
-          conclusion=$(jq -r .conclusion <<<"$run")
-          echo "CI run $run_id: status=$status conclusion=$conclusion"
-          if [ "$status" != completed ] || [ "$conclusion" != success ]; then
-            echo "::error::CI run $run_id for $SHA is $status/$conclusion, not completed/success"
-            exit 1
-          fi
-          jobs=$(gh api "repos/$REPO/actions/runs/$run_id/jobs?filter=latest&per_page=100")
-          required=()
-          for os in ubuntu-latest macos-latest; do
-            for group in a b timing; do required+=("batteries $group ($os)"); done
-            for shard in 1 2; do required+=("census $shard/2 ($os)"); done
-            required+=("verdict ($os)")
-          done
-          for name in "${required[@]}"; do
-            c=$(NAME="$name" jq -r '[.jobs[] | select(.name == env.NAME) | .conclusion] | if length == 1 then .[0] else "missing" end' <<<"$jobs")
-            echo "$name: $c"
-            if [ "$c" != success ]; then
-              echo "::error::CI job '$name' for $SHA is $c"
-              exit 1
-            fi
-          done
-          unknown=$(printf '%s\n' "${required[@]}" | jq -R . | jq -s . |
-            jq -r --argjson run "$jobs" '. as $req | $run.jobs[].name | select(. as $n | $req | index($n) | not)')
-          if [ -n "$unknown" ]; then
-            echo "::error::CI run $run_id has jobs this list does not name: ${unknown//$'\n'/, }; update ci-green with ci.yml"
-            exit 1
-          fi
-
   publish:
-    needs: ci-green
     runs-on: ubuntu-latest
     # Named in the trusted publisher on npmjs.com; the OIDC token carries it.
     environment: npm-publish
