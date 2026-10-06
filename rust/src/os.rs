@@ -131,10 +131,94 @@ pub fn child_exited_unreaped(pid: u32) -> std::io::Result<bool> {
     }
 }
 
+/// A closed source role identifies the consumer of one wall-clock read.
+/// Roles never choose a clock or alter its value. Artifact roles cannot stand
+/// in for internal expiry, retention, baseline or temporary-name readings.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WallRole {
+    PreSnapshot,
+    AdvisoryHeader,
+    AdvisoryRotationHeader,
+    AdvisoryRotationName,
+    ProviderHeader,
+    ReorgRefusedHeader,
+    ReorgRollbackHeader,
+    ConfirmWarningsHeader,
+    JournalOpened,
+    JournalStage,
+    JournalRecoveryHeader,
+    VerifiedMeta,
+    NpmObserved,
+    NpmWithheldEntry,
+    NpmWithheldName,
+    PreLedgerExpiry,
+    PostLedgerExpiry,
+    LedgerCliExpiry,
+    ProviderCacheExpiry,
+    StateLockAge,
+    AdvisoryRotationLockAge,
+    StateRetention,
+    StateTempName,
+    PostTempName,
+    BackstopTouch,
+    BackstopFallback,
+    // Removed with the remaining post callers when their owner migrates them.
+    PostMigration,
+}
+
+/// One raw reading. Every accessor is pure; retaining this value retains the
+/// original event, including its subsecond precision and pre-epoch status.
+#[derive(Clone, Copy, Debug)]
+pub struct WallTime(std::time::SystemTime);
+
+impl WallTime {
+    fn epoch_parts(self) -> (i64, u32) {
+        match self.0.duration_since(std::time::UNIX_EPOCH) {
+            Ok(d) => (d.as_secs() as i64, d.subsec_nanos()),
+            Err(_) => (0, 0),
+        }
+    }
+    pub fn seconds(self) -> i64 { self.epoch_parts().0 }
+    pub fn nanos(self) -> u32 { self.epoch_parts().1 }
+    pub fn system_time(self) -> std::time::SystemTime { self.0 }
+}
+
+/// The only wall-clock generator. An independently reviewed measurement
+/// archive can observe `raw` here, before epoch conversion or consumer math.
+/// Production builds have no observer, counter, I/O or selection switch.
+pub fn wall(_role: WallRole) -> WallTime {
+    let raw = std::time::SystemTime::now();
+    WallTime(raw)
+}
+
+/// Transitional post API. Its callers move to explicit roles in the post
+/// owner's next change; this already delegates to the sole read boundary.
 pub fn now() -> (i64, u32) {
-    match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
-        Ok(d) => (d.as_secs() as i64, d.subsec_nanos()),
-        Err(_) => (0, 0),
+    wall(WallRole::PostMigration).epoch_parts()
+}
+
+#[cfg(test)]
+mod wall_tests {
+    use super::WallTime;
+    use std::time::{Duration, UNIX_EPOCH};
+
+    #[test]
+    fn wall_time_accessors_preserve_raw() {
+        for (secs, nanos) in [(0, 0), (0, 1), (1_791_291_940, 999_999_999)] {
+            let raw = UNIX_EPOCH + Duration::new(secs, nanos);
+            let read = WallTime(raw);
+            assert_eq!(read.system_time(), raw);
+            assert_eq!(read.seconds(), secs as i64);
+            assert_eq!(read.nanos(), nanos);
+            assert_eq!(read.system_time(), raw);
+        }
+        // The old seconds/nanos API returned zero before the epoch. The raw
+        // accessor must still preserve the error, not replace it with epoch.
+        let raw = UNIX_EPOCH - Duration::from_nanos(1);
+        let read = WallTime(raw);
+        assert_eq!((read.seconds(), read.nanos()), (0, 0));
+        assert_eq!(read.system_time(), raw);
+        assert!(read.system_time().duration_since(UNIX_EPOCH).is_err());
     }
 }
 

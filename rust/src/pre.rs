@@ -277,7 +277,7 @@ fn backstop_trace_baseline(call: &Call, cwd: &[u8]) {
     let trace = os::path(&trace_text);
     // `touch`: made when it is not there, and its times set to now either way.
     let touched = std::fs::OpenOptions::new().create(true).append(true).mode(0o600).open(&trace).and_then(|f| {
-        let now = SystemTime::now();
+        let now = os::wall(os::WallRole::BackstopTouch).system_time();
         f.set_times(std::fs::FileTimes::new().set_accessed(now).set_modified(now))
     });
     if touched.is_err() {
@@ -287,7 +287,7 @@ fn backstop_trace_baseline(call: &Call, cwd: &[u8]) {
     if present > 0 && subsecond == present && os::clock_has_subsecond(&os::file_clock(&trace, b'm', false)) {
         resolution = "subsecond";
     } else {
-        let (now, _) = os::now();
+        let now = os::wall(os::WallRole::BackstopFallback).seconds();
         let at = SystemTime::UNIX_EPOCH + Duration::from_secs((now - 2).max(0) as u64);
         let set = std::fs::OpenOptions::new().append(true).open(&trace).and_then(|f| f.set_times(std::fs::FileTimes::new().set_accessed(at).set_modified(at)));
         if set.is_err() {

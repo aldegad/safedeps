@@ -191,7 +191,7 @@ pub fn effect_index(dir: &Path, context: &str, now: i64, warnings: &mut Vec<u8>)
 pub fn main(args: &[String], input: &[u8]) -> i32 {
     use std::io::Write;
     let dir = directory();
-    let now = os::now().0;
+    let now = os::wall(os::WallRole::LedgerCliExpiry).seconds();
     match args.first().map(String::as_str) {
         Some("context-probe") => return context::probe(input),
         Some("hash") if (4..=5).contains(&args.len()) => { print!("{}", hash(&args[1], &args[2], &args[3], args.get(4).map(String::as_str).unwrap_or(""))); 0 }

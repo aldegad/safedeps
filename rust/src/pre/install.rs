@@ -146,7 +146,7 @@ fn approved(call:&Call,run:&Run,read:&Readings,project:&[u8],out:&mut Out)->bool
     for line in specs {
         let fields=core::read_fields(line,b"\t",3);let eco=jq::text(&fields[0]);let pkg=jq::text(&fields[1]);let spec=jq::text(&fields[2]);
         if eco.is_empty()||pkg.is_empty()||spec.is_empty(){continue}
-        if ledger::check(&ledger::directory(),&eco,&pkg,&spec,if eco=="npm"{context}else{""},os::now().0).is_ok_and(|v|v.approved){continue}
+        if ledger::check(&ledger::directory(),&eco,&pkg,&spec,if eco=="npm"{context}else{""},os::wall(os::WallRole::PreLedgerExpiry).seconds()).is_ok_and(|v|v.approved){continue}
         let show=|s:&str|s.as_bytes().iter().map(|b|if *b==2{b' '}else{*b}).collect::<W>();
         blocked.push(cat(&[&invoke,b" check ",eco.as_bytes(),b" ",&show(&pkg),b"@",&show(&spec)]));
         if !ecos.contains(&eco){ecos.push(eco)}

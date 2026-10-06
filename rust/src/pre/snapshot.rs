@@ -13,7 +13,7 @@ impl Snapshot {
     pub fn path(&self, name:&[u8])->PathBuf { self.root.join(os::path(&cat(&[self.id.as_bytes(),b"_",name]))) }
     pub fn create(call:&Call, project:&[u8])->Result<Self,Error> {
         let root=call.guard_dir.join("snapshots"); let hash=md5::hex(project);
-        let timestamp=os::now().0; let base=format!("{}_{}-{}",timestamp,hash,std::process::id());
+        let timestamp=os::wall(os::WallRole::PreSnapshot).seconds(); let base=format!("{}_{}-{}",timestamp,hash,std::process::id());
         let mut n=0; let id=loop {
             let id=if n==0{base.clone()}else{format!("{}-{}",base,n)};
             let list=root.join(format!("{}_monitored_files.list",id));
