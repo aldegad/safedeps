@@ -113,8 +113,8 @@ try:
     with tempfile.TemporaryDirectory(prefix='core-post-cost.') as tmp:
         box=Path(tmp).resolve();count_log=box/'invocations.jsonl';bin_dir=box/'count-bin';bin_dir.mkdir()
         if a.bin_count:
-            spec=importlib.util.spec_from_file_location('pre_fixture',Path(__file__).with_name('core-post-pre-fixture.py'))
-            fixture=importlib.util.module_from_spec(spec);spec.loader.exec_module(fixture)
+            fixture_spec=importlib.util.spec_from_file_location('pre_fixture',Path(__file__).with_name('core-post-pre-fixture.py'))
+            fixture=importlib.util.module_from_spec(fixture_spec);fixture_spec.loader.exec_module(fixture)
             pre_evidence=fixture.pre_list(root,box/'normal-pre')
         for name,path in real.items():
             if not path:continue
