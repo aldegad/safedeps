@@ -109,6 +109,8 @@ of this file got wrong.
 Exit: 0 only when every row is `same`, or a named difference the shells show
 to hold (or one where nothing runs on the core's side); 1 otherwise. A row
 undecided on both sides, any `decrease:` row and any row not observed are red.
+A named row whose npm calls are lost on both sides alike is listed as
+`shared-loss` and is not the core's red.
 --control and --selftest have their own.
 
 Usage:
@@ -1298,6 +1300,11 @@ def summarize(results, counts, R, a, extra):
         if s.startswith("class:"):
             cv = res.get("obs", {}).get("core")
             k = cv["npm"] + "/" + cv["effects"].split(":")[0] if cv else "not-observed"
+            # A loss the bash side has, call for call, is the reference's own
+            # (a floor flag that breaks a word): listed apart, and not the
+            # core's.
+            if cv and cv["npm"] == "loss" and npm_calls_identical(res, "bash", "core"):
+                k = "shared-loss/" + cv["effects"].split(":")[0]
             class_obs.setdefault(s, {})
             class_obs[s][k] = class_obs[s].get(k, 0) + 1
     labels = {}
