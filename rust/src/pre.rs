@@ -24,6 +24,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 type W = Vec<u8>;
+mod budget;
 
 const RUNTIME_BUDGET_SECONDS: u64 = 30;
 const SELF_BUDGET_MAX_SECONDS: u64 = 25;
@@ -406,7 +407,7 @@ fn stale(input: &[u8], why: &str, guard: &Path) -> i32 {
     0
 }
 
-pub fn main(input: &[u8]) -> i32 {
+pub fn main(input: &[u8], budget_child: bool) -> i32 {
     let started = Instant::now();
     // `umask 077; mkdir -p "$GUARD_DIR" "$SNAPSHOT_DIR"`, before anything is read.
     os::set_umask(0o077);
@@ -438,7 +439,7 @@ pub fn main(input: &[u8]) -> i32 {
 
     // `safedeps_guard_announce_truth_sources`
     let moved = state::truth_sources_moved();
-    if !moved.is_empty() {
+    if !budget_child && !moved.is_empty() {
         state::log_advisory(
             &guard_dir,
             &cat(&[b"pre-guard: advisory truth source moved: ", &moved, " — this run did not judge against the canonical sources.".as_bytes()]),
@@ -453,8 +454,8 @@ pub fn main(input: &[u8]) -> i32 {
     let call = Call { input: payload, command, guard: state::guard_text(), guard_dir: guard_dir.clone() };
     let mut err = std::io::stderr().lock();
 
-    if size < engage.value || disabled {
-        if disabled && size >= engage.value {
+    if size < engage.value || disabled || budget_child {
+        if disabled && size >= engage.value && !budget_child {
             state::log_advisory(&guard_dir, format!("pre-guard: SAFEDEPS_BUDGET_DISABLED is set — the self-budget deadline is OFF for this command ({} bytes). Past the {}s runtime hook budget this gate is killed and the install proceeds unjudged.", size, RUNTIME_BUDGET_SECONDS).as_bytes());
             let _ = writeln!(err, "safedeps: SAFEDEPS_BUDGET_DISABLED is set, so the self-budget deadline is OFF for this command. The judgment now runs with no deadline of its own, and past the {}s runtime hook budget the runtime kills this gate and the install proceeds unjudged. Unset it to restore the gate.", RUNTIME_BUDGET_SECONDS);
         }
@@ -518,40 +519,12 @@ pub fn main(input: &[u8]) -> i32 {
     }
     drop(err);
 
-    // The judgment runs beside the deadline, and the deadline is read from
-    // the clock, from when this process started. The bash guard spawns itself
-    // as a child for this and kills the child's tree; here the judgment is a
-    // thread, and the process ending is what stops it. Nothing the judgment
-    // has to say is written until it has finished.
-    let (tx, rx) = std::sync::mpsc::channel::<Result<Out, ()>>();
-    let deadline = Duration::from_secs(budget.value);
-    let left = deadline.saturating_sub(started.elapsed());
-    // With no time left there is no judgment to start: the guard's first
-    // look at the clock ends its child.
-    let worker = if left.is_zero() {
-        drop(tx);
-        None
-    } else {
-        Some(std::thread::spawn(move || {
-            let r = judge(&call);
-            let _ = tx.send(r);
-        }))
-    };
-    match rx.recv_timeout(left) {
-        Ok(Ok(out)) => {
-            if let Some(w) = worker {
-                let _ = w.join();
-            }
-            emit(&out)
-        }
-        Ok(Err(())) => {
-            eprintln!("{}", NOT_WRITTEN);
-            2
-        }
-        Err(_) => {
-            // 143 is what the guard records for a judgment it stopped: the
-            // status of a child ended by its TERM.
-            state::log_advisory(&guard_dir, format!("pre-guard DENY: judgment unfinished within the {}s self-budget (command {} bytes, child rc=143) — fail-closed, not a detection.", budget.value, size).as_bytes());
+    // The parent owns the deadline and the child's process group. A thread
+    // cannot clean up npm's children when this process exits at the deadline.
+    match budget::run(&input, started + Duration::from_secs(budget.value)) {
+        Ok(out) => emit(&out),
+        Err(code) => {
+            state::log_advisory(&guard_dir, format!("pre-guard DENY: judgment unfinished within the {}s self-budget (command {} bytes, child rc={}) — fail-closed, not a detection.", budget.value, size, code).as_bytes());
             let mut clamp = W::new();
             if !budget.clamped_from.is_empty() {
                 clamp = format!(" Your SAFEDEPS_SELF_BUDGET_SECONDS={} was clamped to the {}s ceiling: above it the {}s runtime hook budget kills this gate mid-judgment and the install runs unjudged, so raising it removes the check rather than extending it.", b(&budget.clamped_from), SELF_BUDGET_MAX_SECONDS, RUNTIME_BUDGET_SECONDS).into_bytes();
@@ -567,9 +540,7 @@ pub fn main(input: &[u8]) -> i32 {
                 jq::obj(vec![("hookEventName", jq::s("PreToolUse")), ("permissionDecision", jq::s("deny")), ("permissionDecisionReason", jq::arg(&reason))]),
             )]));
             println!("{}", answer);
-            // The judgment is still running; leaving ends it.
-            let _ = std::io::stdout().flush();
-            std::process::exit(0);
+            0
         }
     }
 }
