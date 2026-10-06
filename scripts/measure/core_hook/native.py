@@ -89,8 +89,11 @@ def source_receipt(root, core, tapped, control=None):
 
 
 def pack_receipt(receipt, blobs):
-    return dict(receipt, files={p: blobs.put(data) for p, data in receipt['files'].items()},
-                binary=blobs.put(receipt['binary']))
+    packed = dict(receipt, files={p: blobs.put(data) for p, data in receipt['files'].items()},
+                  binary=blobs.put(receipt['binary']))
+    if 'builder' in receipt:
+        packed['builder'] = blobs.put(receipt['builder'])
+    return packed
 
 
 def run_observed(run_hook, argv, data, env, cwd, timeout):
@@ -116,7 +119,12 @@ def run_observed(run_hook, argv, data, env, cwd, timeout):
 
 def events(side, k):
     s = side.steps[k]
-    receipt = side.doc.get('native')
+    admitted = side.doc.get('_evidence', {})
+    if admitted.get('status') != 'accepted':
+        return [], 'native events require admitted evidence'
+    receipt = s.get('native')
+    if admitted.get('collection_kind') == 'synthetic' and receipt is None:
+        receipt = side.doc.get('native')  # Explicit historical fixture, never live authority.
     if not receipt:
         return [], 'native source/observation receipt absent'
     if receipt.get('catalog_sha256') != sha((HERE / 'native-catalog.json').read_bytes()):
@@ -147,12 +155,13 @@ def events(side, k):
         # needs separate independently collected lifecycle evidence; no PID guess.
         if pid != s['pid'] or ppid != s.get('collector_pid'):
             return [], 'native child/start identity was not independently observed'
-        out.append({'role': role, 'ordinal': seq, 'seconds': secs if sign == 'after' else 0,
+        event_id = '%s/%s/%s/%d/%s' % (side.doc.get('run_id'), side.doc.get('execution_id'), s['native_raw'], seq, role)
+        out.append({'id': event_id, 'role': role, 'ordinal': seq, 'seconds': secs if sign == 'after' else 0,
                     'nanos': nanos, 'sign': sign})
     return out, None
 
 
-def claim_result(side, claim, source_role, ordinal=0, count=1):
+def claim_result(side, claim, actual, source_role, ordinal=0, count=1):
     from .slots import clock_seconds, ok, unresolved, violation, token
     ev, why = events(side, claim.step)
     if why:
@@ -161,13 +170,13 @@ def claim_result(side, claim, source_role, ordinal=0, count=1):
     if len(selected) != count:
         return unresolved('%s expected %d independent events, observed %d' % (source_role, count, len(selected)))
     event = selected[ordinal]
-    if clock_seconds(claim.fmt, claim.value) != event['seconds']:
+    if clock_seconds(claim.fmt, actual) != event['seconds']:
         return violation('%s consumer %s differs from raw event %d (%s seconds)' %
                          (source_role, claim.key, event['ordinal'], event['seconds']))
-    return ok(token(claim.role), ['native:step%d:event%d:%s' % (claim.step, event['ordinal'], source_role)])
+    return ok(token(claim.role), [event['id']])
 
 
-def snapshot_role(side, claim):
+def snapshot_role(side, claim, actual):
     """One exclusive snapshot family for one independently named pre call.
 
     The fixture supplies command/cwd/call, the process supplies PID, and the
@@ -183,10 +192,10 @@ def snapshot_role(side, claim):
                 if rel not in side.bounds[k] and (m := SNAP_ENTRY.match(rel))}
     if len(families) != 1:
         return unresolved('snapshot role requires exactly one newly observed family')
-    return claim_result(side, claim, 'PreSnapshot')
+    return claim_result(side, claim, actual, 'PreSnapshot')
 
 
-def log_role(side, claim, claims):
+def log_role(side, claim, actual, claims):
     """Single append consumers whose subject is independently known.
 
     Several attempts, partial writes, multiple recovered entries or competing
@@ -206,7 +215,7 @@ def log_role(side, claim, claims):
         # Only the single ordinary pre diagnostic is currently bound. Provider
         # and rotation work can interleave and needs further operation evidence.
         if len(headers) == 1 and headers[0]['role'] == 'AdvisoryHeader' and side.hook(k)['hook'] == 'pre':
-            return claim_result(side, claim, 'AdvisoryHeader')
+            return claim_result(side, claim, actual, 'AdvisoryHeader')
     if claim.chain == 'state/reorg.log@step%d' % k:
         seed = [(p, e) for p, e in side.bounds[k].items()
                 if p.startswith('state/rollback-journal/') and p.endswith('.json') and e.get('kind') == 'file']
@@ -215,17 +224,20 @@ def log_role(side, claim, claims):
             incident = path.replace('/rollback-journal/', '/rollback-incidents/', 1)
             after = side.bounds[k + 1].get(incident, {})
             if path not in side.bounds[k + 1] and after.get('blob') == entry.get('blob'):
-                return claim_result(side, claim, 'JournalRecoveryHeader')
+                return claim_result(side, claim, actual, 'JournalRecoveryHeader')
     return unresolved('no frozen independent append/consumer binding for ' + claim.chain)
 
 
 def gaps(side, occurrences):
     """Validate streams even if a broken consumer leaves no timestamp slot."""
-    if not side.doc.get('native', {}).get('tapped'):
-        return []
+    if side.doc.get('_evidence', {}).get('status') != 'accepted':
+        return ['native evidence was not admitted']
     problems = []
     for k, step in enumerate(side.steps):
         if step.get('impl') != 'core':
+            continue
+        receipt = step.get('native', side.doc.get('native', {}))
+        if not receipt.get('tapped'):
             continue
         ev, why = events(side, k)
         if why:
@@ -233,7 +245,7 @@ def gaps(side, occurrences):
             continue
         witnessed = {w for o in occurrences for w in o.result.witness}
         for e in ev:
-            witness = 'native:step%d:event%d:%s' % (k, e['ordinal'], e['role'])
+            witness = e['id']
             if e['role'] in CATALOG['artifact_roles'] and witness not in witnessed:
                 problems.append('unbound native event %s; failed/removed/repeated sinks are not inferred' % witness)
     return problems

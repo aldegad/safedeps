@@ -11,7 +11,7 @@ import sys
 import tempfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from core_hook import observe, compare
+from core_hook import observe, compare, evidence
 
 CASE = {"id": "contract", "steps": [{"hook": "pre", "command": "echo contract"}]}
 
@@ -62,17 +62,22 @@ def clock_claim(value):
     return s
 
 
+def admitted(path):
+    doc = observe.read_bundle(path)
+    return evidence.attach(doc, evidence.admit(doc, None, synthetic=True))
+
+
 def main():
     rows = []
     def check(name, left, right, wanted, channel=None, mutate_document=None):
-        document = observe.bundle_doc(CASE, {"reference": left, "candidate": right}, {"synthetic": True})
+        document = observe.bundle_doc(CASE, {"reference": left, "candidate": right}, {"collection_kind": "synthetic"})
         if mutate_document:
             mutate_document(document)
         with tempfile.TemporaryDirectory() as d:
             path = str(Path(d) / "pair.bundle.json")
             observe.write_bundle(path, document)
-            a = compare.compare_case(CASE, observe.read_bundle(path))
-            b = compare.compare_case(CASE, observe.read_bundle(path))
+            a = compare.compare_case(CASE, admitted(path))
+            b = compare.compare_case(CASE, admitted(path))
             channels = compare.red_channels(a)
             same = compare.verdict_digest([compare.report_row(name, a)]) == compare.verdict_digest([compare.report_row(name, b)])
         ok = a["verdict"] == wanted and same and (channel is None or channel in channels)

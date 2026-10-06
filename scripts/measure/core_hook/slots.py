@@ -79,6 +79,7 @@ A malformed time or a time outside the observed run can contradict a claim;
 neither a plausible value nor another output field can establish its source.
 """
 import calendar
+import hashlib
 import json
 import os
 import re
@@ -249,6 +250,21 @@ class Side:
             return None
         return self.text(e["blob"])
 
+    def raw(self, place):
+        m = re.fullmatch(r'boundary ([0-9]+) (name|file) (.*)', place)
+        if m:
+            return m.group(3) if m.group(2) == 'name' else self.content(int(m.group(1)), m.group(3))
+        m = re.fullmatch(r'step ([0-9]+) (stdout|stderr)', place)
+        if m:
+            return self.text(self.steps[int(m.group(1))][m.group(2)])
+        m = re.fullmatch(r'step ([0-9]+) npm call ([0-9]+) (argv|env) (.*)', place)
+        if m:
+            calls = [c for c in self.steps[int(m.group(1))]['npm_calls'] if c['seq'] == int(m.group(2))]
+            if len(calls) != 1:
+                raise ValueError('ambiguous raw call: ' + place)
+            return calls[0][m.group(3)][int(m.group(4)) if m.group(3) == 'argv' else m.group(4)]
+        raise ValueError('unknown raw place: ' + place)
+
     def hook(self, k):
         s = self.steps[k] if 0 <= k < len(self.steps) else None
         return s if s and s["kind"] == "hook" else None
@@ -337,54 +353,38 @@ def unresolved(reason):
     return Result("unresolved", None, None, reason)
 
 
-class Claim:
-    """An event of step <step> that carries a time: a snapshot taken, a log
-    line appended, a record written, a file named. <chain> and <order> place
-    a log line among the lines of its log appended in the same step."""
+class SourceBinding:
+    """A fixture/observed-object selector, never a consumer value or verdict.
 
-    def __init__(self, key, step, fmt, value, chain=None, order=None):
-        self.key, self.step, self.fmt, self.value = key, step, fmt, value
+    Aliases may share this selector. Each RawOccurrence supplies its own raw
+    scalar to check_claim; no consumer result lives on this object.
+    """
+    def __init__(self, key, step, fmt, chain=None, order=None):
+        self.key, self.step, self.fmt = key, step, fmt
         self.chain, self.order = chain, order
         self.role = "clock:step%d:%s" % (step, fmt)
-        self.result = None
 
 
-def resolve_claims(side, claims):
-    """Check contradictions; never infer a generating role from a value.
-
-    The collector currently records date invocations and process boundaries,
-    not the semantic source event of each clock consumer. Even an exact
-    value/count/order match therefore leaves the required witness missing.
-    """
-    for c in claims.values():
-        hook = side.hook(c.step)
-        impl = hook['impl'] if hook else 'unknown'
-        if impl == 'core' and c.key.startswith('snapshot '):
-            from .native import snapshot_role
-            c.result = snapshot_role(side, c)
-            continue
-        if impl == 'core' and c.chain:
-            from .native import log_role
-            c.result = log_role(side, c, claims)
-            continue
-        if impl == 'core' and getattr(c, 'native_binding', None):
-            from .native import claim_result
-            source_role, ordinal, count = c.native_binding
-            c.result = claim_result(side, c, source_role, ordinal, count)
-            continue
-        lo, hi = side.window(c.step)
-        secs = clock_seconds(c.fmt, c.value)
-        if secs is None:
-            c.result = violation("%r is not a %s time" % (c.value, c.fmt))
-        elif not lo <= secs <= hi:
-            c.result = violation("%s is outside step %d's run (%d..%d)" % (c.value, c.step, lo, hi))
-        else:
-            hook = side.hook(c.step)
-            impl = hook["impl"] if hook else "unknown"
-            c.result = unresolved(
-                "step %d %s clock claim %s needs an independently observed source role "
-                "and consumer occurrence; date value/count/order does not prove that relationship"
-                % (c.step, impl, c.key))
+def check_claim(side, claim, actual, claims):
+    hook = side.hook(claim.step)
+    impl = hook['impl'] if hook else 'unknown'
+    if impl == 'core':
+        from . import native
+        if claim.key.startswith('snapshot '):
+            return native.snapshot_role(side, claim, actual)
+        if claim.chain:
+            return native.log_role(side, claim, actual, claims)
+        if getattr(claim, 'native_binding', None):
+            return native.claim_result(side, claim, actual, *claim.native_binding)
+    lo, hi = side.window(claim.step)
+    secs = clock_seconds(claim.fmt, actual)
+    if secs is None:
+        return violation("%r is not a %s time" % (actual, claim.fmt))
+    if not lo <= secs <= hi:
+        return violation("%s is outside step %d's run (%d..%d)" % (actual, claim.step, lo, hi))
+    return unresolved("step %d %s clock claim %s needs an independently observed source role "
+                      "and consumer occurrence; date value/count/order does not prove that relationship"
+                      % (claim.step, impl, claim.key))
 
 
 def check_pid(side, k, value):
@@ -397,21 +397,37 @@ def check_pid(side, k, value):
     return role, violation("%s is not the pid of step %d's hook (%d)" % (value, k, hook["pid"]))
 
 
-class Occurrence:
-    """One value in one place, and what its check said (directly, or through
-    the claim of the event it belongs to)."""
-
-    def __init__(self, place, start, end, value, slot, role, result=None, claim=None):
-        self.place, self.start, self.end, self.value = place, start, end, value
+class RawOccurrence:
+    """A byte occurrence. The raw slice owns both the check and its receipt."""
+    def __init__(self, finder, place, start, end, slot, role, result=None, claim=None):
+        self.finder, self.place, self.start, self.end = finder, place, start, end
         self.slot, self.role, self._result, self.claim = slot, role, result, claim
+
+    def read(self):
+        text = self.finder.side.raw(self.place)
+        if not 0 <= self.start < self.end <= len(text):
+            raise ValueError('occurrence outside raw bytes: ' + self.place)
+        return text[self.start:self.end]
+
+    @property
+    def value(self):
+        return self.read()
 
     @property
     def result(self):
-        return self._result if self._result is not None else self.claim.result
+        actual = self.read()
+        if self.claim is not None:
+            return check_claim(self.finder.side, self.claim, actual, self.finder.claims)
+        return self._result
 
     def describe(self):
+        raw = self.read()
         r = self.result
-        return {**getattr(self, 'identity', {}), "place": self.place, "span": [self.start, self.end], "value": self.value, "slot": self.slot,
+        # A parsed whole JSON scalar is retained as well as its exact bytes.
+        kind = self.identity['scalar_type']
+        actual = json.loads(raw) if kind == 'number' else (json.loads('"' + raw + '"') if kind == 'string' else raw)
+        return {**self.identity, "place": self.place, "span": [self.start, self.end],
+                "raw": raw, "value": raw, "actual": actual, "slot": self.slot,
                 "role": self.role, "event": self.claim.key if self.claim else None, "status": r.status,
                 "witness": r.witness, "reason": r.reason}
 
@@ -455,11 +471,9 @@ class Finder:
         self.occ = []
         self.claims = {}
         self.objs = snapshot_objects(side)
-        self.obj_pid = {}
         for sid, k in self.objs.items():
             sec, _hash, pid, _suffix = SNAP_ID.match(sid).groups()
             self.claim("snapshot %s" % sid, k, "epoch", sec)
-            self.obj_pid[sid] = check_pid(side, k, pid)
         self.obj_re = None
         if self.objs:
             alts = "|".join(re.escape(s) for s in sorted(self.objs, key=len, reverse=True))
@@ -467,11 +481,11 @@ class Finder:
 
     def claim(self, key, step, fmt, value, chain=None, order=None):
         if key not in self.claims:
-            self.claims[key] = Claim(key, step, fmt, value, chain, order)
+            self.claims[key] = SourceBinding(key, step, fmt, chain, order)
         return self.claims[key]
 
     def add(self, place, start, end, value, slot, role, result=None, claim=None):
-        occurrence = Occurrence(place, start, end, value, slot, role, result, claim)
+        occurrence = RawOccurrence(self, place, start, end, slot, role, result, claim)
         m = re.match(r'(step|boundary) ([0-9]+) (.*)', place)
         step = claim.step if claim else (int(m.group(2)) - (m.group(1) == 'boundary') if m else None)
         call = None
@@ -483,12 +497,32 @@ class Finder:
                     call = payload.get('tool_use_id')
             except ValueError:
                 pass
-        occurrence.identity = {'case': self.case['id'], 'side': self.side.doc.get('side'),
-                               'step': step, 'call': call, 'channel_record': m.group(3) if m else place}
+        text = self.side.raw(place)
+        raw = occurrence.read()
+        if claim is None and raw != value:
+            raise ValueError('occurrence check value differs from raw slice: ' + place)
+        kind, scalar_ordinal, field = 'fragment', None, None
+        if m and m.group(3).startswith('file ') and m.group(3).endswith('.json'):
+            try:
+                for ordinal, (path, scalar_kind, s0, s1) in enumerate(json_scalars(text)):
+                    if s0 <= start and end <= s1:
+                        scalar_ordinal, field = ordinal, list(path)
+                        if (s0, s1) == (start, end):
+                            kind = scalar_kind
+                        break
+            except JsonError:
+                pass
+        generation = int(m.group(2)) if m else None
+        occurrence.identity = {'run': self.side.doc.get('run_id'), 'case': self.case['id'],
+                               'side': self.side.doc.get('side'), 'execution': self.side.doc.get('execution_id'),
+                               'step': step, 'call': call, 'channel_record': m.group(3) if m else place,
+                               'generation': generation, 'blob': hashlib.sha256(text.encode('latin-1')).hexdigest(),
+                               'scalar_type': kind, 'scalar_ordinal': scalar_ordinal, 'field': field,
+                               'occurrence_ordinal': sum(o.place == place for o in self.occ)}
         self.occ.append(occurrence)
 
     def add_claim(self, place, start, end, slot, claim):
-        self.add(place, start, end, claim.value, slot, claim.role, claim=claim)
+        self.add(place, start, end, None, slot, claim.role, claim=claim)
 
     def snapshots_in(self, place, text, spans=None):
         if not self.obj_re:
@@ -500,7 +534,7 @@ class Finder:
             sm = SNAP_ID.match(sid)
             s0 = m.start()
             self.add_claim(place, s0 + sm.start(1), s0 + sm.end(1), "snapshot-seconds", self.claims["snapshot %s" % sid])
-            prole, pres = self.obj_pid[sid]
+            prole, pres = check_pid(self.side, self.objs[sid], sm.group(3))
             self.add(place, s0 + sm.start(3), s0 + sm.end(3), sm.group(3), "snapshot-pid", prole, pres)
 
     def run(self):
@@ -526,7 +560,6 @@ class Finder:
                 if fnmatch_any(rel, SNAP_TEXT_PLACES):
                     self.snapshots_in(place_file(b, rel), text, self.snapshot_spans(rel, text))
                 self.json_slots(b, rel, text)
-        resolve_claims(side, self.claims)
         return self.occ
 
     @staticmethod
@@ -658,7 +691,7 @@ class Finder:
                 what = lines[i] if lines and i < len(lines) else None
                 if m and what not in (None, "seed"):
                     g = 1 if m.group(1) else 2
-                    if isinstance(what, Claim):
+                    if isinstance(what, SourceBinding):
                         self.add_claim(place, pos + m.start(g), pos + m.end(g), "log-time", what)
                     else:
                         self.add(place, pos + m.start(g), pos + m.end(g), m.group(g), "log-time", "clock:?:iso",
@@ -692,7 +725,7 @@ class Finder:
             for path, kind, s0, s1 in scalars:
                 if path == ("timestamp",) and kind == "number":
                     v = text[s0:s1]
-                    if v == c.value:
+                    if v == SNAP_ID.match(sid).group(1):
                         self.add_claim(place, s0, s1, "snapshot-meta-time", c)
                     else:
                         self.add(place, s0, s1, v, "snapshot-meta-time", c.role,
@@ -723,12 +756,20 @@ class Finder:
                         self.add(place, s0, s1, v, "pending-inode", "ino:%s:own" % path[2],
                                  unresolved("the record does not name one project_dir to read %s in" % path[2]))
                         continue
-                    self.inode_parts(place, s0, v, k, pdir[0], path[2], single=True)
+                    if v != text[s0:s1]:
+                        self.add(place, s0, s1, text[s0:s1], 'pending-inode', 'escaped-inode',
+                                 unresolved('escaped scalar has no byte-to-component attribution'))
+                    else:
+                        self.inode_parts(place, s0, v, k, pdir[0], path[2], single=True)
         if is_backstop:
             cwd = self.hook_cwd(k)
             for path, kind, s0, s1 in scalars:
                 if len(path) == 2 and path[0] in ("inodes", "clocks") and kind == "string" and s1 > s0:
                     v = json_string_value(text, s0, s1)
+                    if v != text[s0:s1]:
+                        self.add(place, s0, s1, text[s0:s1], 'pending-' + path[0], 'escaped-stat',
+                                 unresolved('escaped scalar has no byte-to-component attribution'))
+                        continue
                     if path[0] == "inodes":
                         self.inode_parts(place, s0, v, k, cwd, path[1], single=False)
                     else:

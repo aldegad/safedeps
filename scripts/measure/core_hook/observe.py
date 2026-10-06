@@ -36,6 +36,9 @@ import stat
 import subprocess
 import sys
 import time
+import uuid
+
+from . import evidence
 
 BOX_DIRS = ("home", "state", "project", "tmp")
 CLOSED_PORT = "http://127.0.0.1:9"
@@ -259,6 +262,9 @@ with os.fdopen(fd, "w") as f:
 os.rename(name + ".part", name)
 if answer.get("sleep"):
     import time
+import uuid
+
+from . import evidence
     time.sleep(answer["sleep"])
 sys.stdout.write(answer.get("stdout", ""))
 sys.stderr.write(answer.get("stderr", ""))
@@ -609,6 +615,9 @@ def updated_command(out):
 def run_side(ctx, case, box, seed, obs, impl, side):
     """One implementation's run of a case, kept as it happened."""
     blobs = Blobs()
+    collection = getattr(ctx, 'collection', None)
+    run_id = collection.run if collection else None
+    execution_id = str(uuid.uuid4())
     take_calls(obs, Blobs())  # whatever the seed's own commands left
     restore(case, box, seed)
     boundaries = [dict(harvest(box, blobs), t_ns=time.time_ns())]
@@ -652,17 +661,31 @@ def run_side(ctx, case, box, seed, obs, impl, side):
             resolved_input_cwd = os.path.realpath(input_cwd)
             hook = impl.hooks[s["hook"]]
             env = case_env(ctx, case, box, obs, s)
+            before = evidence.before_launch(hook, env, cwd)
             if hook.get("native_receipt", {}).get("tapped"):
                 from .native import run_observed
                 r = run_observed(run_hook, hook["argv"], data, env, cwd, ctx.timeout)
             else:
                 r = run_hook(hook["argv"], data, env, cwd, ctx.timeout)
+            after = evidence.after_launch(hook, env, cwd, before)
             outs[k] = r["out"]
             dates, npms, incomplete = take_calls(obs, blobs)
             steps.append({"kind": "hook", "hook": s["hook"], "impl": hook["kind"], "argv": hook["argv"],
                           "roots": hook["roots"], "cwd": cwd, "input_cwd_resolved": resolved_input_cwd, "env": env, "stdin": blobs.put(data), "pid": r["pid"],
                           "t0_ns": r["t0_ns"], "t1_ns": r["t1_ns"], "status": r["status"], "stdout": blobs.put(r["out"]),
                           "stderr": blobs.put(r["err"]), "date_calls": dates, "npm_calls": npms, "incomplete_calls": incomplete})
+            step = steps[-1]
+            step['collector_pid'] = os.getpid()
+            step['launch'] = {'format': evidence.LAUNCH, 'run': run_id, 'execution': execution_id, 'step': k,
+                              'argv': hook['argv'], 'stdin': step['stdin'], 'pid': r['pid'],
+                              'collector_pid': os.getpid(), 'env': env, 'cwd': cwd,
+                              'executable_before': before, 'executable_after': after,
+                              'builder': None, 'native_fd': None}
+            if 'native_receipt' in hook:
+                from .native import pack_receipt
+                step['native'] = pack_receipt(hook['native_receipt'], blobs)
+                step['launch']['builder'] = step['native'].get('builder')
+                step['launch']['native_fd'] = 198 if step['native']['tapped'] else None
             if "native_raw" in r:
                 steps[-1].update(native_raw=blobs.put(r['native_raw']), collector_pid=r['collector_pid'])
         else:
@@ -674,10 +697,9 @@ def run_side(ctx, case, box, seed, obs, impl, side):
         boundaries.append(dict(harvest(box, blobs), t_ns=time.time_ns()))
     doc = {"format": SIDE_FORMAT, "side": side, "impl": impl.describe(), "box": box, "steps": steps,
            "boundaries": boundaries, "blobs": blobs}
-    native_receipts = [h['native_receipt'] for h in impl.hooks.values() if 'native_receipt' in h]
-    if native_receipts:
-        from .native import pack_receipt
-        doc['native'] = pack_receipt(native_receipts[0], blobs)
+    doc.update(run_id=run_id, execution_id=execution_id)
+    if collection:
+        collection.side_finished(doc)
     return doc
 
 
@@ -697,10 +719,13 @@ def bundle_doc(case, sides, meta):
 
 def write_bundle(path, doc):
     tmp = path + ".part"
-    with open(tmp, "w", encoding="utf-8") as f:
+    if os.path.exists(path):
+        fail("bundle already exists: " + path)
+    with open(tmp, "x", encoding="utf-8") as f:
         json.dump(doc, f, sort_keys=True, ensure_ascii=True)
         f.write("\n")
-    os.rename(tmp, path)
+    os.link(tmp, path)
+    os.unlink(tmp)
     h = hashlib.sha256()
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(1 << 20), b""):
@@ -711,12 +736,25 @@ def write_bundle(path, doc):
 def read_bundle(path):
     try:
         with open(path, encoding="utf-8") as f:
-            doc = json.load(f)
+            doc = evidence.strict_load(f.read())
     except (OSError, ValueError) as e:
         fail("cannot read the bundle %s: %s" % (path, e))
+    evidence.require(doc, dict, "bundle")
     if doc.get("format") != "safedeps-core-hook-bundle/1":
         fail("%s is not a core-hook bundle" % path)
     blobs = Blobs.load(doc["blobs"])
-    for side in doc["sides"].values():
-        side["blobs"] = blobs
+    evidence.require(doc['case'], dict, 'case')
+    evidence.require(doc['meta'], dict, 'bundle meta')
+    evidence.require(doc['sides'], dict, 'sides')
+    if set(doc['sides']) != {'reference', 'candidate'}:
+        fail('bundle must hold exactly reference and candidate')
+    for name, side in doc['sides'].items():
+        evidence.require(side, dict, 'side')
+        if side.get('side') != name:
+            fail('side identity contradicts bundle position')
+        evidence.require(side['steps'], list, 'steps')
+        evidence.require(side['boundaries'], list, 'boundaries')
+        if len(side['boundaries']) != len(side['steps']) + 1:
+            fail('boundary count differs from steps')
+        side['blobs'] = blobs
     return doc

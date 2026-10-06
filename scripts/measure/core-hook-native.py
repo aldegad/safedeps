@@ -18,7 +18,7 @@ import sys
 from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from core_hook import observe, compare, native
+from core_hook import observe, compare, native, evidence
 from core_hook.corpus import load_cases
 
 
@@ -28,6 +28,11 @@ def save(path, doc):
 
 def build(source, out, name, tapped, control=None):
     root = out / name
+    toolchain = {}
+    for tool in ('cargo', 'rustc'):
+        executable = str(Path(shutil.which(tool)).resolve())
+        toolchain[tool] = {'path': executable, 'sha256': native.sha(Path(executable).read_bytes()),
+                           'version': subprocess.check_output([executable, '--version']).decode().strip()}
     shutil.copytree(source, root, ignore=shutil.ignore_patterns('target', '.git', '__pycache__'))
     for filename in native.CATALOG['files']:
         p = root / filename
@@ -53,16 +58,31 @@ def build(source, out, name, tapped, control=None):
     receipt = native.source_receipt(root, core, tapped, control)
     for hook in impl.hooks.values():
         hook['native_receipt'] = receipt
-    save(out / (name + '.build.json'), {'argv': argv, 'source': native.CATALOG['source'],
-         'binary_sha256': native.sha(receipt['binary']), 'files': {p: native.sha(v) for p, v in actual.items()},
-         'tapped': tapped, 'control': control})
+    host = subprocess.check_output(['rustc', '-vV']).decode()
+    target_name = next(line.split(': ', 1)[1] for line in host.splitlines() if line.startswith('host: '))
+    relevant_env = {k: v for k, v in env.items() if k.startswith(('RUST', 'CARGO', 'SAFEDEPS_')) or
+                    k in ('PATH', 'SDKROOT', 'MACOSX_DEPLOYMENT_TARGET', 'CC', 'CXX', 'AR')}
+    build_doc = {'format': evidence.BUILD, 'argv': argv, 'source': native.CATALOG['source'],
+                 'binary_sha256': native.sha(receipt['binary']), 'files': {p: native.sha(v) for p, v in actual.items()},
+                 'tapped': tapped, 'control': control, 'catalog_sha256': receipt['catalog_sha256'],
+                 'tap_sha256': native.CATALOG['tap_sha256'], 'toolchain': toolchain, 'target': target_name,
+                 'env': relevant_env, 'build_rc': rc, 'build_log_sha256': native.sha((out / (name + '.build.log')).read_bytes()),
+                 'stamp': {'rc': r.returncode, 'stdout': r.stdout.decode(), 'stderr': r.stderr.decode()}}
+    receipt['builder'] = evidence.encoded(build_doc)
+    evidence.publish(out / (name + '.build.json'), receipt['builder'])
+    # The hook dictionaries hold this receipt object, completed only by the builder.
+
     return impl
 
 
-def reuse(builds, out, name, tapped, control=None):
+def reuse(builds, out, name, tapped, control=None, expected=None):
     root = builds / name
     core = root / 'rust/target/release/safedeps-core'
-    receipt = native.source_receipt(root, core, tapped, control)
+    if not expected:
+        raise ValueError('reuse requires externally selected builder digest: ' + name)
+    receipt = evidence.accepted_build(root, core, builds / (name + '.build.json'), expected)
+    if receipt['tapped'] != tapped or receipt.get('control') != control:
+        raise ValueError('selected builder has a different observation/control contract')
     r = subprocess.run([str(core), 'stamp', '--check'], capture_output=True)
     if r.returncode or r.stdout.strip() != b'ok':
         raise ValueError('reused build stamp failed: ' + name)
@@ -78,7 +98,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--source', required=True)
     ap.add_argument('--out', required=True)
-    ap.add_argument('--reuse-builds', help='reuse completed named archives after source and stamp rechecks')
+    ap.add_argument('--reuse-builds', help='reuse completed named archives with --build-pins')
+    ap.add_argument('--build-pins', help='external selection: JSON object of build name to builder digest')
     args = ap.parse_args()
     out, source = Path(args.out).resolve(), Path(args.source).resolve()
     out.mkdir(parents=True, exist_ok=False)
@@ -92,7 +113,8 @@ def main():
         if case['id'] == 'pre-pip-unpinned':
             case['id'] = 'native-pre-pip-codex'
             case['steps'][0]['engine'] = 'codex'
-    make = (lambda name, tapped, control=None: reuse(Path(args.reuse_builds), out, name, tapped, control)) if args.reuse_builds else \
+    pins = evidence.strict_load(Path(args.build_pins).read_bytes()) if args.build_pins else {}
+    make = (lambda name, tapped, control=None: reuse(Path(args.reuse_builds), out, name, tapped, control, pins.get(name))) if args.reuse_builds else \
            (lambda name, tapped, control=None: build(source, out, name, tapped, control))
     plain = make('plain', False)
     tapped = make('observed', True)
@@ -100,26 +122,20 @@ def main():
     dirs = observe.system_path()
     ctx = SimpleNamespace(work=str(out), ref_root=str(root), sysdirs=dirs,
                           real_date=observe.first_on(dirs, 'date'), timeout=90, lang='C', provider_env={})
-    rows, bundle_index = [], []
+    ctx.collection = evidence.Collection(out)
+    rows, bundle_index, pending = [], [], []
 
     def record(name, case, left, right, expected, required=None):
+        synthetic = name.startswith('synthetic-') or name in ('missing-event', 'duplicate-event', 'wrong-role', 'source-drift')
         path = out / (name + '.bundle.json')
-        digest = observe.write_bundle(str(path), observe.bundle_doc(case, {'reference': left, 'candidate': right},
-                                     {'native_source': native.CATALOG['source'], 'experiment': name}))
-        doc = observe.read_bundle(str(path))
-        result = compare.compare_case(case, doc)
-        row = compare.report_row(case['id'], result, str(path), digest)
-        replay = compare.report_row(case['id'], compare.compare_case(case, observe.read_bundle(str(path))))
-        same = compare.verdict_digest([row]) == compare.verdict_digest([replay])
-        channels = compare.red_channels(result)
-        ok = result['verdict'] == expected and same and (required is None or required in channels)
-        rows.append({'name': name, 'expected': expected, 'ok': ok, 'replay_same': same, 'result': row})
+        document = observe.bundle_doc(case, {'reference': left, 'candidate': right},
+                    {'native_source': native.CATALOG['source'], 'experiment': name,
+                     'collection_kind': 'synthetic' if synthetic else 'live'})
+        digest = observe.write_bundle(str(path), document)
+        if not synthetic:
+            ctx.collection.bundle_written(path, document)
+        pending.append((name, case, path, digest, expected, required, synthetic))
         bundle_index.append({'path': path.name, 'sha256': digest})
-        print(('ok' if ok else 'not ok') + ' - ' + name + ': ' + result['verdict'], flush=True)
-        if not ok:
-            for line in compare.show(result, 4)[:16]:
-                print(line, flush=True)
-        return result
 
     for i, case in enumerate(cases):
         base = out / ('case%d' % i)
@@ -132,10 +148,7 @@ def main():
         first, second, uninstrumented = run(tapped), run(tapped), run(plain)
         repeated_post = case['id'] == 'npm-install-unapproved-codex'
         record(case['id'] + '-observed', case, first, second, 'unresolved' if repeated_post else 'equal')
-        linked = record(case['id'] + '-plain-link', case, first, uninstrumented, 'unresolved')
-        rows[-1]['nonclock_invariants_match'] = not (linked['different'] or linked['violations']['candidate'] or
-             linked['expectations']['candidate'] or [g for g in linked['gaps'] if g.get('scope') != 'native-clock'])
-        rows[-1]['ok'] &= rows[-1]['nonclock_invariants_match']
+        record(case['id'] + '-plain-link', case, first, uninstrumented, 'unresolved')
         if case['id'] == 'native-pre-pip-codex':
             for name, impl in mutations.items():
                 record(name, case, first, run(impl), 'unresolved' if name.endswith('bypass') else 'different',
@@ -148,8 +161,8 @@ def main():
                 raw = changed['blobs'].get(step['native_raw'])
                 if name == 'source-drift':
                     filename = native.CATALOG['boundary']
-                    old = changed['native']['files'][filename]
-                    changed['native']['files'][filename] = changed['blobs'].put(changed['blobs'].get(old) + b'// drift\n')
+                    old = changed['steps'][0]['native']['files'][filename]
+                    changed['steps'][0]['native']['files'][filename] = changed['blobs'].put(changed['blobs'].get(old) + b'// drift\n')
                 else:
                     if name == 'missing-event': raw = b''
                     elif name == 'duplicate-event': raw += raw
@@ -192,6 +205,24 @@ def main():
             record('state-and-report-day', case, first, run(mutations['snapshot-day']), 'different', 'violation:snapshot-meta-time')
         observe.rmtree(str(base))
     save(out / 'index.json', {'mode': 'native-evidence', 'bundles': bundle_index, 'skipped': []})
+    manifest, pin = ctx.collection.finish()
+    print('evidence manifest: %s; sha256: %s' % (manifest, pin), flush=True)
+    for name, case, path, digest, expected, required, synthetic in pending:
+        doc = observe.read_bundle(str(path))
+        evidence.attach(doc, evidence.admit(doc, digest, manifest, pin, synthetic=synthetic))
+        result = compare.compare_case(case, doc)
+        row = compare.report_row(case['id'], result, str(path), digest)
+        replay_doc = observe.read_bundle(str(path))
+        evidence.attach(replay_doc, evidence.admit(replay_doc, digest, manifest, pin, synthetic=synthetic))
+        replay = compare.report_row(case['id'], compare.compare_case(case, replay_doc))
+        same = compare.verdict_digest([row]) == compare.verdict_digest([replay])
+        ok = result['verdict'] == expected and same and (required is None or required in compare.red_channels(result))
+        rows.append({'name': name, 'expected': expected, 'ok': ok, 'replay_same': same, 'result': row})
+        if name.endswith('-plain-link'):
+            invariant = not (result['different'] or result['violations']['candidate'] or result['expectations']['candidate'] or
+                             [g for g in result['gaps'] if g.get('scope') != 'native-clock'])
+            rows[-1].update(nonclock_invariants_match=invariant, ok=ok and invariant)
+        print(('ok' if rows[-1]['ok'] else 'not ok') + ' - ' + name + ': ' + result['verdict'], flush=True)
     save(out / 'result.json', {'source': native.CATALOG['source'], 'rows': rows,
          'scope': 'Single-consumer public pre and recovery cases; public pre/post mutation with unresolved post writers; synthetic correspondence controls. Repeated/failed writers, supervised child identities and other roles remain unresolved. Plain exact time is unobserved.'})
     return 0 if all(r['ok'] for r in rows) else 1

@@ -49,7 +49,7 @@ def rendered(text, occs):
     pos = 0
     for o in sorted(occs, key=lambda o: (o.start, o.end)):
         if o.start < pos:
-            continue  # SideDoc records this ambiguity as an observation gap.
+            raise ValueError('overlapping raw occurrence spans')
         out.append(["bytes", text[pos:o.start]])
         out.append(["slot", o.role])
         pos = o.end
@@ -115,7 +115,7 @@ class SideDoc:
             self.by_place.setdefault(o.place, []).append(o)
         self.gaps = []
         self.native_gaps = []
-        if self.side.doc.get('native'):
+        if any(s.get('impl') == 'core' for s in self.side.steps):
             from .native import gaps
             self.native_gaps = gaps(self.side, self.occ)
         self.excluded = []
@@ -124,7 +124,7 @@ class SideDoc:
             end = -1
             for o in sorted(occurrences, key=lambda o: (o.start, o.end)):
                 if o.start < end:
-                    self.gaps.append("overlapping occurrence attribution at %s" % place)
+                    raise ValueError("overlapping occurrence attribution at %s" % place)
                 end = max(end, o.end)
         self.rows = self.build()
 
@@ -243,6 +243,15 @@ class SideDoc:
 
 def compare_case(case, bundle):
     """The verdict of one case from its bundle's two sides."""
+    admission = bundle.get('_evidence', {'status': 'unresolved', 'reason': 'no evidence admission',
+                                          'collection_kind': bundle.get('meta', {}).get('collection_kind')})
+    if admission['status'] != 'accepted':
+        return {"verdict": 'invalid' if admission['status'] == 'invalid' else 'unresolved',
+                'evidence': admission, 'different': [], 'violations': {'reference': [], 'candidate': []},
+                'unresolved': [], 'gaps': [{'side': 'evidence', 'gap': admission['reason']}],
+                'collisions': [], 'excluded': [], 'expectations': {'reference': [], 'candidate': []},
+                'receipts': {'reference': [], 'candidate': []}, 'occurrences': {'reference': {}, 'candidate': {}},
+                '_docs': ({}, {}), '_occ': ([], [])}
     ref = SideDoc(case, bundle["sides"]["reference"])
     cand = SideDoc(case, bundle["sides"]["candidate"])
     a, b = dict(ref.rows), dict(cand.rows)
@@ -264,7 +273,7 @@ def compare_case(case, bundle):
     else:
         verdict = "equal"
     excluded = [dict(x, side="reference") for x in ref.excluded] + [dict(x, side="candidate") for x in cand.excluded]
-    return {"verdict": verdict, "different": different, "violations": viol, "unresolved": unres, "gaps": gaps,
+    return {"verdict": verdict, "evidence": admission, "different": different, "violations": viol, "unresolved": unres, "gaps": gaps,
             "collisions": collisions, "excluded": excluded, "expectations": expectations,
             "receipts": {"reference": [o.describe() for o in ref.occ], "candidate": [o.describe() for o in cand.occ]},
             "occurrences": {"reference": count_occ(ref.occ), "candidate": count_occ(cand.occ)},
@@ -349,5 +358,5 @@ def verdict_digest(rows):
     keep = []
     for r in sorted(rows, key=lambda r: r["id"]):
         keep.append({k: r.get(k) for k in ("id", "verdict", "different", "violations", "unresolved", "gaps",
-                                            "collisions", "excluded", "occurrences", "expectations", "receipts", "control")})
+                                            "collisions", "excluded", "occurrences", "expectations", "receipts", "control", "evidence")})
     return hashlib.sha256(json.dumps(keep, sort_keys=True, ensure_ascii=True).encode()).hexdigest()

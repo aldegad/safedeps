@@ -9,7 +9,13 @@ observation archive. Arbitrary source changes or a different tap are refused.
 --bundles DIR (also --dump DIR) retains BOTH sides and their observations.
 If omitted, a new bundle directory is printed and retained. --replay DIR or
 FILE reads only saved bundles, never starts hooks and never consults the disk
-for facts about a recorded run. A report is always saved in that directory.
+for facts about a recorded run. Live replay requires --evidence-manifest FILE
+--evidence-sha256 HEX, selected by the consumer from the collector's completion
+report (never inferred from the bundle/index). --synthetic opts into declared
+synthetic fixtures only. Neither historical bundles nor fixture flags establish
+live provenance. New --core collections use --native-build-receipt FILE and
+--native-build-sha256 HEX from core-hook-native's builder. Missing provenance is
+unresolved, including a --core collection without its builder. A report is saved.
 
 Exit 0: every comparison equal (or each requested control detected).
 Exit 1: different, unresolved, or a missing expected control detection.
@@ -34,7 +40,7 @@ from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from core_hook import observe, compare
+from core_hook import observe, compare, evidence
 from core_hook.corpus import load_cases
 from core_hook.controls import MUTATIONS, mutant_tree
 
@@ -76,7 +82,8 @@ def check_core(core):
     return core
 
 
-def classify(doc, path, digest):
+def classify(doc, path, digest, manifest=None, pin=None, synthetic=False):
+    evidence.attach(doc, evidence.admit(doc, digest, manifest, pin, synthetic))
     result = compare.compare_case(doc["case"], doc)
     row = compare.report_row(doc["case"]["id"], result, str(path), digest)
     row["control"] = doc.get("meta", {}).get("control")
@@ -86,7 +93,7 @@ def classify(doc, path, digest):
 
 def finish(rows, report_path, skipped, mode):
     rows.sort(key=lambda r: (r["id"], r.get("control") or ""))
-    counts = dict.fromkeys(("equal", "different", "unresolved"), 0)
+    counts = dict.fromkeys(("equal", "different", "unresolved", "invalid"), 0)
     exclusions = collections.Counter()
     for row in rows:
         counts[row["verdict"]] += 1
@@ -103,11 +110,13 @@ def finish(rows, report_path, skipped, mode):
         status = 0 if controls and all(c["detected"] for c in controls) else 1
     else:
         status = 0 if rows and counts["equal"] == len(rows) else 1
-    report = {"format": "core-hook-comparison/2", "mode": mode, "cases": rows, "counts": counts,
+    if counts["invalid"]:
+        status = 2
+    report = {"format": "core-hook-comparison/3", "mode": mode, "cases": rows, "counts": counts,
               "excluded": dict(exclusions), "skipped": skipped, "controls": controls,
               "verdict_sha256": compare.verdict_digest(rows), "comparator_sources": source_hashes(), "exit": status}
     save_json(report_path, report)
-    print("equal {equal}, different {different}, unresolved {unresolved}; excluded {ex}".format(**counts, ex=dict(exclusions)), flush=True)
+    print("equal {equal}, different {different}, unresolved {unresolved}, invalid {invalid}; excluded {ex}".format(**counts, ex=dict(exclusions)), flush=True)
     for c in controls:
         print("%s - control %s in %s" % ("ok" if c["detected"] else "not ok", c["name"], c["channel"]), flush=True)
     print("report: %s; verdict sha256: %s" % (report_path, report["verdict_sha256"]), flush=True)
@@ -121,7 +130,7 @@ def replay(a):
         ip = p / "index.json"
         if not ip.is_file():
             die("bundle directory has no completed index.json: %s" % p)
-        index = json.loads(ip.read_text())
+        index = evidence.strict_load(ip.read_text())
         files = [(p / x["path"], x["sha256"]) for x in index["bundles"]]
     else:
         files = [(p, None)]
@@ -133,7 +142,7 @@ def replay(a):
         if expected is not None and digest != expected:
             die("bundle digest mismatch: %s" % path)
         doc = observe.read_bundle(str(path))
-        row, result = classify(doc, path, digest)
+        row, result = classify(doc, path, digest, a.evidence_manifest, a.evidence_sha256, a.synthetic)
         rows.append(row)
         print("%s - %s%s" % (row["verdict"], row["id"], " / " + row["control"] if row["control"] else ""), flush=True)
     mode = index["mode"] if index else ("controls" if rows[0]["control"] else "replay")
@@ -168,24 +177,31 @@ def start_provider(ctx):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    for name in ("core", "cand-root", "only", "tags", "report", "replay", "native-archive"):
+    for name in ("core", "cand-root", "only", "tags", "report", "replay", "native-archive",
+                 "native-build-receipt", "native-build-sha256", "evidence-manifest", "evidence-sha256"):
         ap.add_argument("--" + name, default="")
     ap.add_argument("--bundles", "--dump", dest="bundles", default="")
     ap.add_argument("--stages", default="pre,post")
     ap.add_argument("--cases", action="append", default=[])
     ap.add_argument("--jobs", type=int, choices=(1, 2), default=1)
     ap.add_argument("--timeout", type=int, default=90)
-    for name in ("control", "list", "fixture-provider"):
+    for name in ("control", "list", "fixture-provider", "synthetic"):
         ap.add_argument("--" + name, action="store_true")
     a = ap.parse_args()
     if a.replay:
-        if a.core or a.cand_root or a.control or a.cases or a.only or a.tags or a.native_archive:
+        if a.core or a.cand_root or a.control or a.cases or a.only or a.tags or a.native_archive or a.native_build_receipt or a.native_build_sha256:
             die("--replay consumes saved bundles alone; collection options cannot be combined with it")
         return replay(a)
+    if a.synthetic or a.evidence_manifest or a.evidence_sha256:
+        die('--synthetic and evidence selection flags are replay-only')
     if sum(bool(x) for x in (a.core, a.cand_root, a.control)) > 1:
         die("--core, --cand-root, --control are mutually exclusive")
-    if a.native_archive and not a.core:
-        die('--native-archive requires --core')
+    if (a.native_archive or a.native_build_receipt or a.native_build_sha256) and not a.core:
+        die('native archive/build options require --core')
+    if bool(a.native_build_receipt) != bool(a.native_build_sha256):
+        die('select both --native-build-receipt and --native-build-sha256')
+    if a.native_archive and not a.native_build_receipt:
+        die('--native-archive requires an independently selected builder receipt')
     stages = a.stages.split(",")
     if not stages or any(s not in ("pre", "post") for s in stages):
         die("--stages names pre, post or both")
@@ -216,6 +232,7 @@ def main():
     dirs = observe.system_path()
     ctx = SimpleNamespace(work=work, ref_root=ROOT, sysdirs=dirs, real_date=observe.first_on(dirs, "date"),
                           timeout=a.timeout, lang="C", provider_env={})
+    ctx.collection = evidence.Collection(out)
     provider = None
     rows, receipts = [], []
     ref = observe.bash_impl("reference", ROOT)
@@ -224,9 +241,8 @@ def main():
         core = check_core(a.core)
         tree = str(Path(a.native_archive).resolve()) if a.native_archive else str(Path(core).parent.parent.parent.parent)
         implementation = observe.core_impl(core, tree)
-        if a.native_archive:
-            from core_hook.native import source_receipt
-            receipt = source_receipt(tree, core, True)
+        if a.native_build_receipt:
+            receipt = evidence.accepted_build(tree, core, a.native_build_receipt, a.native_build_sha256)
             for hook in implementation.hooks.values():
                 hook['native_receipt'] = receipt
         cand = observe.mixed(ref, implementation, stages)
@@ -237,7 +253,7 @@ def main():
     elif a.control:
         mode = "controls"
     print("%d cases, jobs %d; bundles: %s" % (len(cases), a.jobs, out), flush=True)
-    meta = {"collector_sources": source_hashes(), "reference": ref.describe(), "mode": mode,
+    meta = {"collection_kind": "live", "collector_sources": source_hashes(), "reference": ref.describe(), "mode": mode,
             "python": sys.version, "platform": sys.platform}
     mutants = [(m, observe.bash_impl(m["name"], mutant_tree(ctx, m))) for m in MUTATIONS
                if a.control and any(c["id"] in m["cases"] for c in cases)]
@@ -258,15 +274,10 @@ def main():
             document = observe.bundle_doc(case, {"reference": reference, "candidate": candidate}, dict(meta, control=name))
             path = out / (case["id"] + ("--" + name if name else "") + ".bundle.json")
             digest = observe.write_bundle(str(path), document)
-            # The live verdict is deliberately computed from the persisted bytes.
-            loaded = observe.read_bundle(str(path))
-            row, result = classify(loaded, path, digest)
-            result_rows.append(row)
+            ctx.collection.bundle_written(path, document)
             result_receipts.append({"path": path.name, "sha256": digest})
-            print("%s - %s%s" % (row["verdict"], case["id"], " / " + name if name else ""), flush=True)
-            if row["verdict"] != "equal":
-                for line in compare.show(result, limit=5)[:14]:
-                    print(line, flush=True)
+            print('collected - %s%s' % (case['id'], ' / ' + name if name else ''), flush=True)
+
         observe.rmtree(d)
         return result_rows, result_receipts
 
@@ -277,6 +288,17 @@ def main():
                 rows.extend(rr)
                 receipts.extend(rb)
         save_json(out / "index.json", {"format": "core-hook-bundles/1", "bundles": receipts, "mode": mode, "skipped": skipped})
+        manifest, pin = ctx.collection.finish()
+        print('evidence manifest: %s; sha256: %s' % (manifest, pin), flush=True)
+        for receipt in receipts:
+            path = out / receipt['path']
+            loaded = observe.read_bundle(str(path))
+            row, result = classify(loaded, path, receipt['sha256'], manifest, pin)
+            rows.append(row)
+            print('%s - %s' % (row['verdict'], row['id']), flush=True)
+            if row['verdict'] != 'equal':
+                for line in compare.show(result, limit=5)[:14]:
+                    print(line, flush=True)
         return finish(rows, a.report or str(out / "report.json"), skipped, mode)
     finally:
         if provider:
