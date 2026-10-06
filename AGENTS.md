@@ -191,6 +191,12 @@ any step is open.
      run is recorded with what it showed and does not hold the release; a
      failure that comes from WSL1 itself is named in the ROADMAP section.
 
+   `npm run test:release` is judged by `run-all.sh` alone, which does not
+   judge skipped rows (Testing, above): a battery that prints `ok ... SKIPPED`
+   or a TAP skip directive and exits 0 is green there, and only the host
+   runner's verdict turns it red. So a release run on one host or in WSL1 has
+   its logs read for skipped rows before it counts.
+
    These runs are the test of the release; no CI on GitHub stands behind them
    (owner, 2026-10-06). Linux is not tested: Kuma Studio ships for Windows and
    macOS only, and the owner dropped the Linux runs on 2026-10-06. v2.18.1
