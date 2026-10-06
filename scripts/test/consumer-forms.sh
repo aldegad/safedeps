@@ -1699,8 +1699,12 @@ expect_rewrite "npm ci closed by a glued } and &&" '{ npm ci}&& echo x' '{ npm c
 # In backticks or in `$(...)` the group is decided where the body is read as
 # a payload, at its own top level: an install to the recognizers there. The
 # rewrite reads the command, where a glued `}` nested in a body is a character
-# (group_close in shell_lex), so it finds no verb, and the install is a
-# recorded downgrade rather than a rewrite or a silent pass.
+# (group_close in shell_lex), so it places no flag there, and the install is a
+# recorded downgrade rather than a rewrite or a silent pass. That holds beside
+# an install the rewrite reaches too: the command keeps that rewrite, and the
+# nested install is recorded as kept to the floor (inert_nested_verb_ends).
+# There the rewrite used to read as done, and zsh ran the nested install's
+# scripts with nothing recorded (verdict tookdaki-20261006-112251, R1).
 expect_recorded_downgrade() {
   local label="$1" command="$2" safe out
   safe=$(mktemp -d "${tmp_root}/safe.XXXXXX")
@@ -1713,6 +1717,33 @@ expect_recorded_downgrade() {
 }
 expect_recorded_downgrade "npm ci in backticks closed by a glued }" 'echo `{ npm ci}`'
 expect_recorded_downgrade "npm ci in a substitution closed by a glued }" 'x=$( { npm ci} )'
+expect_rewrite_recorded() {
+  local label="$1" command="$2" want="$3" safe out got
+  safe=$(mktemp -d "${tmp_root}/safe.XXXXXX")
+  out=$(jq -nc --arg c "${command}" --arg cwd "${project_dir}" \
+    '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
+    HOME="${tmp_root}/home" SAFEDEPS_HOME="${safe}" scripts/safedeps-pre-guard.sh 2>/dev/null)
+  got="(no rewrite)"
+  [[ -z "${out}" ]] || got=$(jq -r '.hookSpecificOutput.updatedInput.command // "(no rewrite)"' <<< "${out}")
+  [[ "${got}" == "${want}" ]] || fail "${label} keeps the rewrite of the visible install [${want}] (got: [${got}])"
+  grep -q 'has no place where safedeps could read npm keeping --ignore-scripts true' "${safe}/advisory.log" 2>/dev/null \
+    || fail "${label} records the nested install as a downgrade (advisory: $(head -3 "${safe}/advisory.log" 2>/dev/null))"
+}
+expect_rewrite_recorded "npm ci in backticks closed by a glued }, before a visible npm ci" \
+  'echo `{ npm ci}`; npm ci' 'echo `{ npm ci}`; npm ci --ignore-scripts'
+expect_rewrite_recorded "npm ci in a substitution closed by a glued }, after a visible npm ci" \
+  'npm ci; x=$( { npm ci} )' 'npm ci --ignore-scripts; x=$( { npm ci} )'
+expect_rewrite_recorded "npm ci in a function body closed by a glued } in a substitution, after a visible npm ci" \
+  'npm ci; x=$(function f { npm ci}; f)' 'npm ci --ignore-scripts; x=$(function f { npm ci}; f)'
+expect_rewrite_recorded "npm ci in a repeat group closed by a glued } in backticks, after a visible npm ci" \
+  'npm ci && echo `repeat 1 { npm ci}`' 'npm ci --ignore-scripts && echo `repeat 1 { npm ci}`'
+# Beside an install whose own arguments already leave ignore-scripts true, and
+# that the release left as written, the rewrite has nothing left to place: the
+# command is a recorded downgrade, never one whose installs all read as inert.
+# (`--ignore-scripts;` the release rewrote, so that form is a rewrite above.)
+expect_recorded_downgrade "npm ci in backticks closed by a glued }, after an npm ci that carries the flag" \
+  'npm ci --ignore-scripts && echo `{ npm ci}`'
+pass "an npm install glued to a } nested in a substitution is a recorded downgrade, alone or beside an install the rewrite reaches"
 expect_rewrite "npm ci after another statement in the group" '{ echo a; npm ci}' '{ echo a; npm ci --ignore-scripts}'
 # A line read on its own has lost the `{` of the line before it.
 expect_rewrite "npm ci on the line after the {" $'{\nnpm ci}' $'{\nnpm ci --ignore-scripts}'
