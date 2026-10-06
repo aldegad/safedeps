@@ -905,14 +905,19 @@ A process start costs 1 to 4 ms on each host, for the core, for bash and for awk
 
 ### How it will ship
 
-- **Binaries in the package, one per platform**, under `bin/native/<os>-<arch>/safedeps-core`. The package already ships `bin/`, so `files` does not change, and no dependency is added. A per-platform optional package would be a dependency, and the release gate counts those.
+- **Binaries in the package, one per platform**, under `bin/native/<os>-<arch>/safedeps-core`: darwin-arm64, darwin-x64 and linux-x64. The package already ships `bin/`, so `files` does not change, and no dependency is added. A per-platform optional package would be a dependency, and the release gate counts those.
 - **Static on Linux.** The linux-x64 binary is built for musl and linked statically, so it does not depend on the host's libc. It is the binary WSL1 runs. Both binaries were built on one Mac: `cargo build --release` for darwin-arm64, and `--target x86_64-unknown-linux-musl` with `rust-lld` as the linker for linux-x64.
 - **The entry shim keeps its contract.** It will run the binary where it runs `bash <hook>` now. The binary exits 0 on every designed path and its decisions travel as JSON. It aborts on a panic, so any other exit still means the hook is unwell, and the shim still turns that into an explained deny. A missing binary, one that cannot run, or a platform with none will be a deny that says so. It will never fall back to the bash guard: two authorities would drift, and a silent second one is what the no-silent-fallback rule forbids. The shim will read the platform from bash's own `OSTYPE` and `HOSTTYPE`, so it starts no process to find its binary.
-- **Where the binaries are built is the owner's decision.** They can be built in the publish job from the tagged source and checked against a build on our own host, or built on our hosts and committed. The first keeps binaries out of git and under provenance, and needs a macOS runner in that job.
+- **The publish job builds them, from the tagged source** (owner, 2026-10-06). No binary is committed to the repository. The run that publishes a tag builds the binaries first, so the provenance npm attaches names the run that built them. `publish.yml` does not do this yet. The plan for it:
+  - A build job on a macOS runner builds all three targets. Linking a darwin binary needs Apple's SDK, so a Linux runner cannot build those two. The build job holds no publish credential.
+  - The build is `cargo build --release --locked --offline`. With no crate to fetch it succeeds offline, and a dependency added later fails it there.
+  - The publish job takes the binaries from the build job, checks their digests against the list that job wrote, restores their exec bits, and runs the linux-x64 one. `publish.yml` keeps its file name and its `npm-publish` environment, because the trusted publisher on npmjs.com names both.
+  - The read-back compares the published file list with `npm pack --dry-run` of the job's tree after the binaries are in place, because the tag's own tree holds none. It also checks that the published tarball holds each binary, with its exec bit and the digest that was built.
+- **A checkout holds no binary until one is built there.** The installed hooks are symlinks into a checkout. Who builds the binary in that checkout, and how a binary older than its source is caught, is not decided yet.
 
 `scripts/measure/core-pack-probe.sh` checks the first two points with npm itself. It packs a copy of the tree with the binary in place, installs the tarball offline into a sandbox project, and runs the installed binary. On macOS (darwin-arm64, npm 11.19.0) and in WSL1 (linux-x64, npm 10.9.8): the package names no dependency, `npm pack` carries the binary and nothing of `rust/`, the exec bit survives the install, and the installed binary is byte for byte the one packed.
 
-Not measured: an Intel Mac binary and an arm64 Linux binary.
+Not measured: an Intel Mac binary and an arm64 Linux binary. The darwin-x64 binary is on the build list above, and it has not been built or run yet.
 
 ### The order of the move, and when the bash guard retires
 
