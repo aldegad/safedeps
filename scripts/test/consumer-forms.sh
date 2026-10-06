@@ -1622,6 +1622,185 @@ do
 done
 pass "a word ends where the shell ends it: array values, case patterns in substitutions, zsh =(...) and glob groups, extglob, subscripts and precommand modifiers (${#word_rows[@]} forms a shell runs)"
 
+# A word ends at an operator, as the shell ends it. `npm ci; echo x` hands npm
+# the word `ci` exactly as `npm ci ; echo x` does, and so do `(npm ci)`, `npm
+# ci&&x` and `npm ci>log`. The recognizers ended the last word only at a blank
+# or the end of the line, so an install whose verb stood against the operator
+# was no install to v2.17.2, 7d66f8c or v2.18.0: no check, no record, no
+# `--ignore-scripts`. For maven, as for pip, cargo, go, gem and nuget, this gate
+# is the only one, so that was a complete miss. The package stands before the
+# verb here, so the verb is the word against the operator; the table for every
+# manager and operator is scripts/measure/glued-verb-reading.sh.
+for glued_form in \
+  'mvn -Dartifact=g:evil:1.0.0 dependency:get;' \
+  'mvn -Dartifact=g:evil:1.0.0 dependency:get; echo x' \
+  'mvn -Dartifact=g:evil:1.0.0 dependency:get&& echo x' \
+  'mvn -Dartifact=g:evil:1.0.0 dependency:get|| echo x' \
+  'mvn -Dartifact=g:evil:1.0.0 dependency:get| cat' \
+  'mvn -Dartifact=g:evil:1.0.0 dependency:get& wait' \
+  '(mvn -Dartifact=g:evil:1.0.0 dependency:get)' \
+  '{ mvn -Dartifact=g:evil:1.0.0 dependency:get;}' \
+  'mvn -Dartifact=g:evil:1.0.0 dependency:get>/dev/null' \
+  'mvn -Dartifact=g:evil:1.0.0 dependency:get</dev/null' \
+  'echo $(mvn -Dartifact=g:evil:1.0.0 dependency:get)' \
+  'x="$(mvn -Dartifact=g:evil:1.0.0 dependency:get)"' \
+  'pip install evil==1.0.0;' \
+  'cargo add evil@1.0.0&& echo x' \
+  'gem install rake -v 13.0.0|| echo x' \
+  'dotnet add package Serilog --version 3.1.1;' \
+  'go get example.com/m@v1.0.0;' \
+  '{ mvn -Dartifact=g:evil:1.0.0 dependency:get}' \
+  '{ mvn -Dartifact=g:evil:1.0.0 dependency:get}&& echo x' \
+  '{ echo a; mvn -Dartifact=g:evil:1.0.0 dependency:get}' \
+  'echo `mvn -Dartifact=g:evil:1.0.0 dependency:get`'
+do
+  expect_deny "an install whose last word stands against an operator: ${glued_form}" "${glued_form}"
+done
+# The npm install with its verb against the operator gets `--ignore-scripts`
+# right after the verb, before the operator, as the spaced form gets it after
+# the verb.
+expect_rewrite() {
+  local label="$1" command="$2" want="$3" safe out got
+  safe=$(mktemp -d "${tmp_root}/safe.XXXXXX")
+  out=$(jq -nc --arg c "${command}" --arg cwd "${project_dir}" \
+    '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
+    HOME="${tmp_root}/home" SAFEDEPS_HOME="${safe}" scripts/safedeps-pre-guard.sh 2>/dev/null)
+  # An empty answer is no rewrite, said here rather than through a `{}`
+  # default: under a mutation that emptied the answer, jq failed on that
+  # default on macOS bash 3.2 and the row died without a `not ok`.
+  got="(no rewrite)"
+  [[ -z "${out}" ]] || got=$(jq -r '.hookSpecificOutput.updatedInput.command // "(no rewrite)"' <<< "${out}")
+  [[ "${got}" == "${want}" ]] || fail "${label} is rewritten to [${want}] (got: [${got}])"
+}
+expect_rewrite "npm ci before ;"          'npm ci; echo x'    'npm ci --ignore-scripts; echo x'
+expect_rewrite "npm ci at the end with ;" 'npm ci;'           'npm ci --ignore-scripts;'
+expect_rewrite "npm ci before &&"         'npm ci&& echo x'   'npm ci --ignore-scripts&& echo x'
+expect_rewrite "npm i before |"           'npm i| cat'        'npm i --ignore-scripts| cat'
+expect_rewrite "npm ci in a subshell"     '(npm ci)'          '(npm ci --ignore-scripts)'
+expect_rewrite "npm ci in a group"        '{ npm ci;}'        '{ npm ci --ignore-scripts;}'
+expect_rewrite "npm ci before >"          'npm ci>/dev/null'  'npm ci --ignore-scripts>/dev/null'
+expect_rewrite "npm ci in a substitution" 'x=$(npm ci)'       'x=$(npm ci --ignore-scripts)'
+
+# A closing backtick ends the word too: `` echo `npm ci` `` hands npm `ci`. An
+# opening one continues it: `` npm ci`echo x` `` hands npm `cix`, which
+# installs nothing, and a flag after `ci` would make it `npm ci`.
+expect_rewrite "npm ci before a closing backtick" 'echo `npm ci`' 'echo `npm ci --ignore-scripts`'
+expect_rewrite "npm i before a closing backtick"  'x=`npm i`'     'x=`npm i --ignore-scripts`'
+expect_rewrite "npm ci before an opening backtick" 'npm ci`echo x`' '(no rewrite)'
+
+# zsh closes a `{` group at a `}` that ends a word and hands the word before it
+# on (`{ npm ci}` runs `npm ci`; zsh 5.9, measured). bash and dash refuse that
+# group. The flag goes before the `}`, where zsh reads it as the last word:
+# after it, `{ npm ci} --ignore-scripts` is a parse error in zsh and in bash.
+# The rewrites below are read by the shells themselves in
+# scripts/measure/glued-verb-reading.sh (its rewrite columns).
+expect_rewrite "npm ci closed by a glued }"        '{ npm ci}'          '{ npm ci --ignore-scripts}'
+expect_rewrite "npm ci closed by a glued } and &&" '{ npm ci}&& echo x' '{ npm ci --ignore-scripts}&& echo x'
+# In backticks or in `$(...)` the group is decided where the body is read as
+# a payload, at its own top level: an install to the recognizers there. The
+# rewrite reads the command, where a glued `}` nested in a body is a character
+# (group_close in shell_lex), so it finds no verb, and the install is a
+# recorded downgrade rather than a rewrite or a silent pass.
+expect_recorded_downgrade() {
+  local label="$1" command="$2" safe out
+  safe=$(mktemp -d "${tmp_root}/safe.XXXXXX")
+  out=$(jq -nc --arg c "${command}" --arg cwd "${project_dir}" \
+    '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
+    HOME="${tmp_root}/home" SAFEDEPS_HOME="${safe}" scripts/safedeps-pre-guard.sh 2>/dev/null)
+  if [[ -n "${out}" ]] || ! grep -q 'could not make every npm install in this command inert' "${safe}/advisory.log" 2>/dev/null; then
+    fail "${label} is a recorded downgrade (got: ${out:-pass}, advisory: $(head -3 "${safe}/advisory.log" 2>/dev/null))"
+  fi
+}
+expect_recorded_downgrade "npm ci in backticks closed by a glued }" 'echo `{ npm ci}`'
+expect_recorded_downgrade "npm ci in a substitution closed by a glued }" 'x=$( { npm ci} )'
+expect_rewrite "npm ci after another statement in the group" '{ echo a; npm ci}' '{ echo a; npm ci --ignore-scripts}'
+# A line read on its own has lost the `{` of the line before it.
+expect_rewrite "npm ci on the line after the {" $'{\nnpm ci}' $'{\nnpm ci --ignore-scripts}'
+# With no group open, zsh refuses the `}` and bash hands npm `ci}`, which npm
+# refuses as a command: no install, and no rewrite that would make it one.
+expect_rewrite "npm ci} outside a group" 'npm ci}'            '(no rewrite)'
+expect_rewrite "npm i} outside a group"  'npm i} ; echo x'    '(no rewrite)'
+# A `}` with a quote or an escape after it is inside the word (`ci}x`), even
+# where the scan view blanks the quote.
+expect_rewrite "npm ci} before a quote"     "npm ci}'x'"       '(no rewrite)'
+expect_rewrite "npm ci} before an escape"   'npm ci}\x'        '(no rewrite)'
+expect_rewrite "npm ci} before a quote in a group" "{ npm ci}'x' ;}" '(no rewrite)'
+expect_pass "npm ci} outside a group, which installs nothing" 'npm ci}'
+expect_pass "a maven goal with a } outside a group, which maven does not know" 'mvn -Dartifact=g:evil:1.0.0 dependency:get}'
+# bash closes this group at the last `}` and runs `npm ci}`; zsh closes it at
+# the glued one and refuses the last. No single rewrite is right for both, so
+# it is undecided, as any command the readings rewrite differently is.
+expect_undecided "a glued } that bash reads as part of the word and zsh as a closer" '{ npm ci}; }'
+
+# zsh opens a group at every `{` its grammar reads as an opener, not only after
+# a separator or a reserved word: after `function NAME`, an empty `()`, `repeat
+# WORD` and the list of `for NAME (WORDS)` too, and it runs each of these
+# (zsh 5.9, measured). Which `{` opens a group is the walk's answer (starts()
+# in shell_lex), the one that puts a command start after it, so the glued form
+# is read as the spaced form is. The `{` used to be read by a byte rule of its
+# own that knew separators and reserved words: after these heads it opened no
+# group, the glued `}` was a character, and the glued form alone passed with
+# nothing recorded once the spaced form was read (verdict
+# tookdaki-20261005-144303, N2). Each row: the glued template, then the spaced
+# one, with %C% for the install.
+glued_group_verdict() {
+  local safe out
+  safe=$(mktemp -d "${tmp_root}/safe.XXXXXX")
+  out=$(jq -nc --arg c "$1" --arg cwd "${project_dir}" \
+    '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
+    HOME="${tmp_root}/home" SAFEDEPS_HOME="${safe}" scripts/safedeps-pre-guard.sh 2>/dev/null)
+  [[ -n "${out}" ]] || out='{}'
+  jq -r '(.hookSpecificOutput.permissionDecision // "pass") + "|" + (if ((.hookSpecificOutput.permissionDecisionReason // "") | test("UNDECIDED")) then "undecided" else "" end) + "|" + (.hookSpecificOutput.updatedInput.command // "")' <<< "${out}"
+}
+glued_group_rows=(
+  'function f { %C%}; f^function f { %C% ;}; f'
+  'f() { %C%}; f^f() { %C% ;}; f'
+  '() { %C%}^() { %C% ;}'
+  'repeat 1 { %C%}^repeat 1 { %C% ;}'
+  'for i (1) { %C%}^for i (1) { %C% ;}'
+)
+glued_close='}'
+for glued_row in "${glued_group_rows[@]}"; do
+  for glued_install in 'npm ci' 'mvn -Dartifact=g:evil:1.0.0 dependency:get'; do
+    glued_cmd="${glued_row%%^*}"; glued_cmd="${glued_cmd//%C%/${glued_install}}"
+    spaced_cmd="${glued_row#*^}"; spaced_cmd="${spaced_cmd//%C%/${glued_install}}"
+    glued_got=$(glued_group_verdict "${glued_cmd}")
+    spaced_got=$(glued_group_verdict "${spaced_cmd}")
+    # The spaced rewrite with its ` ;` before the `}` set aside, as the glued
+    # form has none.
+    spaced_want="${spaced_got// ;${glued_close}/${glued_close}}"
+    [[ "${spaced_got}" != "pass||" ]] || fail "the spaced form is read: ${spaced_cmd}"
+    [[ "${glued_got}" == "${spaced_want}" ]] || fail "a glued } closes the group the walk opened, as the spaced form does: [${glued_cmd}] answered [${glued_got}], [${spaced_cmd}] answered [${spaced_got}]"
+  done
+done
+pass "a glued } closes the group every head the walk reads opens, read as its spaced form (${#glued_group_rows[@]} heads, npm and maven)"
+
+# What the shell does not end there stays what it is. A `}` inside a word is
+# part of it (`ci}x`), a `-`, `:` or letter after the verb makes another word,
+# and an operator after text that is no install, or inside quotes, a comment
+# or a heredoc body to `cat`, is data.
+for glued_data in \
+  'npm cit-helper; echo x' \
+  'npm ci:all; echo x' \
+  'npm run ci; echo x' \
+  'npm view evil@1.0.0| cat' \
+  'pip installer; echo x' \
+  'go getter&& echo x' \
+  'mvn dependency:getx; echo x' \
+  'echo npm ci; echo x' \
+  'echo pip install evil==1.0.0;' \
+  'grep -n "npm ci;" README.md' \
+  "printf '%s\\n' 'mvn -Dartifact=g:evil:1.0.0 dependency:get;'" \
+  'git commit -m "run npm ci; then go get;"' \
+  'ls # npm ci; pip install evil==1.0.0;' \
+  $'cat <<E\nnpm ci; pip install evil==1.0.0;\nE' \
+  'echo $(npm ls)| cat' \
+  '{ npm ci}x; }'
+do
+  expect_pass "data with an operator after a manager's word: ${glued_data}" "${glued_data}"
+done
+pass "a word ends at an operator as the shell ends it, and what the shell does not end there stays data"
+
 # npm takes any unique abbreviation of a command or alias, and the camelCase
 # form of a dashed one (lib/utils/cmd-list.js deref). The grammar holds what
 # deref accepts, measured from npm; where an npm is on PATH, that measurement is
@@ -3273,5 +3452,73 @@ for row in "${heredoc_body_rows[@]}"; do
   esac
 done
 pass "an install on the line after a heredoc body with live code in it is read: pip denied, npm rewritten, and the body itself data (Q01-Q15)"
+
+# --- A payload is read whole, whatever bytes it holds -------------------------
+# The lexer hands the readers the scripts a command passes to `sh -c` and
+# `eval` and the bodies of its substitutions. It used to print their bytes,
+# each payload ending in \035, and the readers cut at that byte: a \035 the
+# command wrote in a body or a script split one payload into two, each lexed
+# alone, and the install after it passed with nothing recorded (verdict
+# buri-20261005-181919, GS01-GS12; GS02, GS04-GS07 and GS12 were denied by
+# v2.18.1). The records are numbers now, and the reader cuts the text it holds.
+# The same rows hold two other payload paths that passed with nothing
+# recorded on every tree to v2.18.1: a substitution inside a script, which no
+# reader followed (C06, X03, X05, X15, Y08, Y09), and a $'...' escape the
+# script reader did not decode, since its table was loaded for one view
+# (X09-X12, Y03). Forms from scripts/measure/payload-boundary-forms.py and
+# Buri's verdict.
+gs=$'\035'
+payload_rows=(
+  "GS01|pip|sh -c 'echo \"${gs}\"; pip install evil==6.6.6'"
+  "GS02|pip|x=\$(echo \"${gs}\"; pip install evil==6.6.6)"
+  "GS03|pip|eval 'echo \"${gs}\"; pip install evil==6.6.6'"
+  "GS04|pip|x=\`echo \"${gs}\"; pip install evil==6.6.6\`"
+  "GS05|pip|cat <(echo \"${gs}\"; pip install evil==6.6.6)"
+  "GS06|pip|echo \"\$(echo '${gs}'; pip install evil==6.6.6)\""
+  "GS07|npm|x=\$(echo \"${gs}\"; npm install evil@6.6.6)"
+  "GS08|npm|sh -c 'echo \"${gs}\"; npm install evil@6.6.6'"
+  "GS09|pip|x=\$(echo \"a\"; pip install evil==6.6.6)"
+  "GS10|pip|echo \"${gs}\"; pip install evil==6.6.6"
+  "GS11|pip|bash -c 'printf \"%s\" \"${gs}\" && pip install evil==6.6.6'"
+  "GS12|pip|git log --format=\"\$(echo '${gs}'; pip install evil==6.6.6)\""
+  "C04|pip|sh -c \$'echo \"\\x1d\"; pip install evil==6.6.6'"
+  "C05|npm|eval \$'echo \\x1d; npm install evil@6.6.6'"
+  "C09|pip|sh -c \"sh -c 'echo ${gs}; pip install evil==6.6.6'\""
+  "S11|npm|x=\$(echo \"a${gs}b\" && npm install evil@6.6.6)"
+  "S13|pip|echo \`echo '${gs}'\` \$(pip install evil==6.6.6)"
+  "C06|pip|sh -c 'x=\$(echo \"${gs}\"; pip install evil==6.6.6)'"
+  "C06a|pip|sh -c 'x=\$(echo \"a\"; pip install evil==6.6.6)'"
+  "X03|pip|sh -c 'x=\$(pip install evil==6.6.6)'"
+  "X05|pip|sh -c 'echo \$(pip install evil==6.6.6)'"
+  "X09|pip|sh -c \$'echo a\\npip install evil==6.6.6'"
+  "X10|pip|eval \$'echo a\\npip install evil==6.6.6'"
+  "X11|pip|sh -c \$'pip\\tinstall evil==6.6.6'"
+  "X12|npm|sh -c \$'echo a\\nnpm install evil@6.6.6'"
+  "X15|npm|sh -c 'x=\$(npm install evil@6.6.6)'"
+  "Y09|pip|sh -c 'sh -c \"x=\\\$(pip install evil==6.6.6)\"'"
+)
+for row in "${payload_rows[@]}"; do
+  id="${row%%|*}"; rest="${row#*|}"; form="${rest#*|}"
+  expect_not_approved "${id}, an install in a payload the shell runs," "${form}"
+done
+# npm ci names no package, so the gate lets it through and the inert rewrite
+# reads the payload: the flag goes inside it, where npm reads it.
+rewrite_holds "x=\$(echo \"${gs}\"; npm ci)" "x=\$(echo \"${gs}\"; npm ci --ignore-scripts)" \
+  || fail "Y04: an npm ci beside a \\035 in a substitution body is rewritten inside it (got: $(gate_rewrite "x=\$(echo \"${gs}\"; npm ci)"))"
+rewrite_holds "sh -c 'echo \"${gs}\"; npm ci'" "sh -c 'echo \"${gs}\"; npm ci --ignore-scripts'" \
+  || fail "Y05: an npm ci beside a \\035 in a script is rewritten inside it (got: $(gate_rewrite "sh -c 'echo \"${gs}\"; npm ci'"))"
+rewrite_holds "sh -c 'x=\$(npm ci)'" "sh -c 'x=\$(npm ci --ignore-scripts)'" \
+  || fail "Y08: an npm ci in a substitution inside a script is rewritten inside it (got: $(gate_rewrite "sh -c 'x=\$(npm ci)'"))"
+# The rewrite cannot place a flag inside a $'...' script, so it says so: a
+# recorded downgrade, never a command reported inert (inert_payload_spans).
+y03_safe=$(mktemp -d "${tmp_root}/safe.XXXXXX")
+y03_out=$(jq -nc --arg c $'bash -c $\'echo a\\nnpm ci\'' --arg cwd "${project_dir}" \
+  '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
+  HOME="${tmp_root}/home" SAFEDEPS_HOME="${y03_safe}" scripts/safedeps-pre-guard.sh 2>/dev/null)
+if [[ -n "${y03_out}" ]] || ! grep -qiE 'downgrade|unread|could not read|could not make' "${y03_safe}/advisory.log" 2>/dev/null; then
+  fail "Y03: an npm ci in a \$'...' script is a recorded downgrade (got: ${y03_out:-pass}, advisory: $(head -3 "${y03_safe}/advisory.log" 2>/dev/null))"
+fi
+expect_pass "DT04, install text inside quotes beside a \\035, is data" "echo \"${gs} pip install evil==6.6.6\""
+pass "a payload is read whole, whatever bytes it holds: ${#payload_rows[@]} forms denied as installs, three npm ci rewritten inside their payload, one recorded downgrade"
 
 printf 'consumer-forms passed\n'
