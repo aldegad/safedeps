@@ -13,6 +13,7 @@ not a claim about the canonical providers' network latency.
 import argparse
 from collections import Counter
 import hashlib
+import importlib.util
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
 import os
@@ -46,6 +47,7 @@ core=str(Path(a.core).resolve(strict=True))
 programs='npm curl file gzip jq date mkdir cat sed grep awk sort find stat sha256sum shasum md5 md5sum mktemp rm mv cp tr head tail cut paste wc ls sleep uname ps diff cmp readlink basename dirname realpath'.split()
 real={name:shutil.which(name) for name in programs}
 requests=[]
+pre_evidence=None
 
 class Provider(BaseHTTPRequestHandler):
     def log_message(self,*args):pass
@@ -96,9 +98,11 @@ def seed(d,n,l):
         record=dict(record=2,snapshot_id='pre',tool_use_id='cost-call',project_dir=str(project),
                     command=payload['tool_input']['command'],ignore_scripts_injected=False)
         write_json(snapshots/'pre_meta.json',record);write_json(pending/'id-cost-call.json',record)
-        (snapshots/'pre_monitored_files.list').write_text('package.json\npackage-lock.json\nyarn.lock\n')
-        (snapshots/'pre_yarn.lock.missing').touch()
-        for name in ['package.json','package-lock.json']:shutil.copyfile(project/name,snapshots/('pre_'+name))
+        (snapshots/'pre_monitored_files.list').write_text(pre_evidence['list'])
+        for name in pre_evidence['list'].splitlines():
+            if not name or '/' in name:raise RuntimeError('unexpected member in root-only pre fixture')
+            if (project/name).is_file():shutil.copyfile(project/name,snapshots/('pre_'+name))
+            else:(snapshots/('pre_'+name+'.missing')).touch()
         for name in ['bins.list','packages.list']:(snapshots/('pre_'+name)).touch()
         shutil.copyfile(project/'package-lock.json',snapshots/'pre_npm-tree-record.json')
     return home,json.dumps(payload).encode()
@@ -108,6 +112,10 @@ print('start:',subprocess.check_output(['uptime'],text=True).strip(),flush=True)
 try:
     with tempfile.TemporaryDirectory(prefix='core-post-cost.') as tmp:
         box=Path(tmp).resolve();count_log=box/'invocations.jsonl';bin_dir=box/'count-bin';bin_dir.mkdir()
+        if a.bin_count:
+            spec=importlib.util.spec_from_file_location('pre_fixture',Path(__file__).with_name('core-post-pre-fixture.py'))
+            fixture=importlib.util.module_from_spec(spec);spec.loader.exec_module(fixture)
+            pre_evidence=fixture.pre_list(root,box/'normal-pre')
         for name,path in real.items():
             if not path:continue
             # Each wrapper replaces itself with the real executable; it does
@@ -166,6 +174,7 @@ finally:
 report=dict(host=dict(system=platform.system(),release=platform.release(),machine=platform.machine()),
             scope='recorded empty install with new text bins' if a.bin_count else 'whole post command-independent backstop; no rebuild',
             bin_count=a.bin_count,rotation_seed_bytes=a.rotate_bytes,
+            pre_generated_fixture=pre_evidence,
             count_unit='selected external program invocations, not forks or subshells',
             programs=real,core=core,entry='post-probe' if a.probe else 'post',rows=rows)
 Path(a.report).write_text(json.dumps(report,indent=2)+'\n')

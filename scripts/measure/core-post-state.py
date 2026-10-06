@@ -6,6 +6,7 @@ Neither npm nor a network request runs. Complete-hook checks remain separate.
 import argparse
 import datetime
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -140,9 +141,9 @@ def record(name,bash,rust):
     same=bash==rust;rows.append(dict(name=name,same=same,reference=bash,core=rust))
     if not same: print('DIFF',name,repr(bash),repr(rust),flush=True)
 def iso(seconds): return datetime.datetime.fromtimestamp(seconds,datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
-def project_bytes(project):
-    return {str(p.relative_to(project)):['link',os.readlink(p)] if p.is_symlink() else ['file',p.read_bytes().hex()]
-            for p in project.rglob('*') if p.is_symlink() or p.is_file()}
+fixture_spec=importlib.util.spec_from_file_location('pre_fixture',Path(__file__).with_name('core-post-pre-fixture.py'))
+pre_fixture=importlib.util.module_from_spec(fixture_spec);fixture_spec.loader.exec_module(pre_fixture)
+project_bytes=pre_fixture.project_bytes
 
 print('start:',subprocess.check_output(['uptime'],text=True).strip(),flush=True)
 with tempfile.TemporaryDirectory(prefix='core-post-state.') as tmp:
@@ -229,23 +230,8 @@ done
         if not wanted('snapshot-'+action): continue
         normal_list=None;pre_evidence=None
         if action=='normal-pre':
-            seed=box/'normal-pre';project=seed/'project';project.mkdir(parents=True)
-            (project/'package.json').write_text('{"name":"fixture","version":"1.0.0"}\n')
-            (project/'package-lock.json').write_text('{"lockfileVersion":3,"packages":{}}\n')
-            (seed/'user-home').mkdir()
-            home=seed/'state'
-            payload=dict(tool_name='Bash',tool_input=dict(command='npm install'),cwd=str(project),tool_use_id='normal-pre-list')
-            env={k:v for k,v in os.environ.items() if not k.startswith('SAFEDEPS_')}
-            env.update(SAFEDEPS_HOME=str(home),HOME=str(seed/'user-home'),NPM_CONFIG_USERCONFIG='/dev/null',LC_ALL='C')
-            before=project_bytes(project)
-            pre=subprocess.run(['bash',str(root/'scripts/safedeps-pre-guard.sh')],input=json.dumps(payload).encode(),
-                               cwd=project,env=env,capture_output=True,timeout=30)
-            pending=home/'pending/id-normal-pre-list.json'
-            if pre.returncode or not pending.is_file():raise SystemExit('normal pre did not produce its record: '+repr((pre.returncode,pre.stdout,pre.stderr)))
-            sid=json.loads(pending.read_text())['snapshot_id']
-            normal_list=(home/'snapshots'/(sid+'_monitored_files.list')).read_text()
-            pre_evidence=dict(rc=pre.returncode,stdout=pre.stdout.decode(),stderr=pre.stderr.decode(),
-                              list=normal_list,project_before=before,project_after=project_bytes(project))
+            pre_evidence=pre_fixture.pre_list(root,box/'normal-pre')
+            normal_list=pre_evidence['list']
         results=[]
         for side in ['bash','rust']:
             # Restore the seed at one absolute path. The confirmed filename
