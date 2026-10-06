@@ -66,10 +66,13 @@ jobs:
           [ "$(wc -l < native.sha256 | tr -d ' ')" = 3 ]
 
       # build-core.sh ran the arm64 binary. The x64 one runs under Rosetta
-      # where the runner has it; the image's readme does not list Rosetta,
-      # and where it is missing that is said, and the binary ships built and
-      # not run. The linux binary is run by the publish job, which is on
-      # Linux.
+      # where the runner has it. The image's readme does not list Rosetta, but
+      # the image installs it: its macOS-15 arm64 template runs
+      # scripts/build/install-rosetta.sh, and its tests require oahd to run
+      # (actions/runner-images, images/macos/templates/macOS-15.arm64.anka.pkr.hcl
+      # and images/macos/scripts/tests/Rosetta.Tests.ps1, read 2026-10-06).
+      # Where it is missing that is said, and the binary ships built and not
+      # run. The linux binary is run by the publish job, which is on Linux.
       - name: Run the darwin-x64 binary
         run: |
           set -euo pipefail
@@ -115,7 +118,9 @@ jobs:
       # it is set again here, after the bytes are checked against the build
       # job's digests. The linux binary is run on this runner. Then the
       # package is listed the way it will be packed: each binary has to be in
-      # it, nothing of rust/ may be, and it names no dependency.
+      # it with mode 755, nothing of rust/ may be, and it names no dependency.
+      # The mode is checked here, before the publish, which cannot be taken
+      # back; the read-back after it checks the tarball the registry serves.
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: native
@@ -132,8 +137,9 @@ jobs:
           [ "${stamp%% *}" = publish ] || { echo "::error::the linux-x64 binary's stamp is not a publish build's"; exit 1; }
           npm pack --dry-run --json > "$RUNNER_TEMP/pack.json"
           for p in darwin-arm64 darwin-x64 linux-x64; do
-            jq -e --arg f "bin/native/$p/safedeps-core" '.[0].files | map(.path) | index($f)' "$RUNNER_TEMP/pack.json" >/dev/null \
-              || { echo "::error::npm pack does not carry bin/native/$p/safedeps-core"; exit 1; }
+            mode=$(jq -r --arg f "bin/native/$p/safedeps-core" '[.[0].files[] | select(.path == $f) | .mode] | if length == 1 then .[0] else "none" end' "$RUNNER_TEMP/pack.json")
+            [ "$mode" != none ] || { echo "::error::npm pack does not carry bin/native/$p/safedeps-core"; exit 1; }
+            [ "$mode" = 493 ] || { echo "::error::npm pack carries bin/native/$p/safedeps-core with mode $mode, not 755 (493)"; exit 1; }
           done
           if jq -e '.[0].files | map(.path) | any(startswith("rust/"))' "$RUNNER_TEMP/pack.json" >/dev/null; then
             echo "::error::npm pack carries rust/ sources"
