@@ -25,7 +25,7 @@ patterns=['packages/*','packages/a','missing/*','packages/[ab]','packages/?',
           r'packages/esc\*/*','linked/*','packages/[!a]','packages/[[:alpha:]]',
           r'packages/esc\*/item',r'packages/a\*?',r'packages/a\\?',
           r'packages/\.*',r'packages/[\?]',r'packages/[a\-c]',
-          r'packages/[',r'packages/\[/*',r'packages/ab\/*']
+          r'packages/[',r'packages/\[/*',r'packages/ab\/*',r'packages/ab\\/*']
 shell='''#!/bin/bash
 shopt -s nullglob
 for dir in "$PROJECT"/${PATTERN}; do
@@ -37,7 +37,7 @@ rows=[]
 with tempfile.TemporaryDirectory(prefix='core-post-workspace-glob.') as temp:
     box=Path(temp).resolve();project=box/'project';project.mkdir()
     (project/'package.json').write_text('{}')
-    for name in ['a','b','c','-','.hidden','{a,b}','a*','?',r'a\b','ab','esc*/item','[/item',r'ab\/item']:
+    for name in ['a','b','c','-','.hidden','{a,b}','a*','?',r'a\b','ab','ab/item','esc*/item','[/item',r'ab\/item']:
         path=project/'packages'/name;path.mkdir(parents=True,exist_ok=True)
         (path/'package.json').write_text('{}')
     (project/'packages/package.json').write_text('{}')
