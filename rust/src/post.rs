@@ -9,6 +9,7 @@ mod sh;
 mod closure;
 mod report;
 mod workspaces;
+mod tree;
 
 /// A measurement entry, fed one JSON request. It calls the same operations
 /// the hook uses; the reference side calls their bash functions.
@@ -33,6 +34,15 @@ pub fn probe(input: &[u8]) -> i32 {
         b"workspace-dirs" => {
             let mut b = workspaces::physical_members(&path, &crate::state::guard_dir()).join(&b'\n');
             if !b.is_empty() { b.push(b'\n'); } Ok(b)
+        }
+        b"tree" => {
+            let query = jv::read_file(&sh::p(bytes("query"))).unwrap_or(jv::Stream { values: Vec::new(), failed: true });
+            let problems = |url: &Value| crate::ask::fetch_problems(get("facts"), &String::from_utf8_lossy(jv::text(url).ok_or(())?))
+                .map(|xs| xs.iter().map(|s| jv::s(s.as_bytes())).collect());
+            let origins = |url: &Value| crate::ask::fetch_origins(get("facts"), &String::from_utf8_lossy(jv::text(url).ok_or(())?))
+                .map(|xs| xs.iter().map(|x| x.value()).collect());
+            tree::judge(&path, &crate::state::guard_dir(), &query, get("withheld"), &problems, &origins)
+                .map(|ls| { let mut b = ls.join(&b'\n'); if !b.is_empty() { b.push(b'\n'); } b }).map_err(|_| 1)
         }
         b"path" => Ok(report::path(&path)),
         b"outside" => Ok(report::outside(&sh::p(bytes("project")), &path).unwrap_or_default()),
