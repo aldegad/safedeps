@@ -1,5 +1,5 @@
 {
- "about": "Forms outside scripts/measure/inert-downgrade-grid.sh for scripts/measure/inert-record-invariant.sh: j, s and x are the validator's probes of rounds 1 and 2 (jetbi-20261005-042625, jetbi-20261005-073337), y its unmeasured follow-up, z the validator's fourth-round probes of the allow-list record (jetbi-20261005-234803: option values, computed words, bytes glued before npm, npx; the ids after z are the validator's), v an npm install the rewrite cannot read beside one it flags or one already settled, one kind per form. probes: r3q01-r3q21 are the validator's third-round forms and r3k01-r3k04 controls; e001-e016 are text the shell decodes (scope lit: an ANSI-C string, a quoted alias, function, trap or variable) or that another program computes at run time (scope cmp: printf octal, base64, rev, tr, parameter pieces), from the design judgment that made the record an allow-list.",
+ "about": "Forms outside scripts/measure/inert-downgrade-grid.sh for scripts/measure/inert-record-invariant.sh: j, s and x are the validator's probes of rounds 1 and 2 (jetbi-20261005-042625, jetbi-20261005-073337), y its unmeasured follow-up, z the validator's fourth-round probes of the allow-list record (jetbi-20261005-234803: option values, computed words, bytes glued before npm, npx; the ids after z are the validator's), v an npm install the rewrite cannot read beside one it flags or one already settled, one kind per form, m a computed word after a prefix the walk sets aside (an assignment, `env`, `command`, a redirection), from the merge with the one-lexing rule: m01, m02, m04 and m05 hold the computed-word clause to the noprefix view, and m03 and m06 are its controls, recorded on noredir too. probes: r3q01-r3q21 are the validator's third-round forms and r3k01-r3k04 controls; e001-e016 are text the shell decodes (scope lit: an ANSI-C string, a quoted alias, function, trap or variable) or that another program computes at run time (scope cmp: printf octal, base64, rev, tr, parameter pieces), from the design judgment that made the record an allow-list.",
  "forms": [
   {
    "id": "j001",
@@ -700,6 +700,36 @@
    "id": "zg05",
    "tag": "r4|G sh -c ANSI-C newline before npm",
    "cmd": "npm i y && sh -c $'\\nnpm ci x'"
+  },
+  {
+   "id": "m01",
+   "tag": "m|assignment before npm $V",
+   "cmd": "npm i y && FOO=1 npm $V x"
+  },
+  {
+   "id": "m02",
+   "tag": "m|env assignment before npm \"$@\"",
+   "cmd": "npm i y && env A=1 npm \"$@\""
+  },
+  {
+   "id": "m03",
+   "tag": "m|control|redirection before npm ${u:-ci}",
+   "cmd": "npm i y && 2>/dev/null npm ${u:-ci} x"
+  },
+  {
+   "id": "m04",
+   "tag": "m|assignment before npm $V in sh -c",
+   "cmd": "npm i y && sh -c 'X=1 npm $V x'"
+  },
+  {
+   "id": "m05",
+   "tag": "m|command before npm $V",
+   "cmd": "npm i y && command npm $V x"
+  },
+  {
+   "id": "m06",
+   "tag": "m|control|plain npm $V",
+   "cmd": "npm i y && npm $V x"
   }
  ],
  "probes": [
