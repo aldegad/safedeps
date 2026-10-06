@@ -138,6 +138,9 @@ def record(name,bash,rust):
     same=bash==rust;rows.append(dict(name=name,same=same,reference=bash,core=rust))
     if not same: print('DIFF',name,repr(bash),repr(rust),flush=True)
 def iso(seconds): return datetime.datetime.fromtimestamp(seconds,datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+def project_bytes(project):
+    return {str(p.relative_to(project)):['link',os.readlink(p)] if p.is_symlink() else ['file',p.read_bytes().hex()]
+            for p in project.rglob('*') if p.is_symlink() or p.is_file()}
 
 print('start:',subprocess.check_output(['uptime'],text=True).strip(),flush=True)
 with tempfile.TemporaryDirectory(prefix='core-post-state.') as tmp:
@@ -220,8 +223,27 @@ done
         req=dict(op='trace',path=str(project),entry=raw,none='fixture names no call')
         # A trace probe reads metadata only, so both readers see this one disk.
         record('trace-'+shape,run('bash',req,d)[:2],run('rust',req,d)[:2])
-    for action in ['unchanged','changed','added','missing-staged','last-present','last-absent','empty-list']:
+    for action in ['unchanged','changed','added','missing-staged','last-present','two-present','normal-pre','last-absent','empty-list']:
         if not wanted('snapshot-'+action): continue
+        normal_list=None;pre_evidence=None
+        if action=='normal-pre':
+            seed=box/'normal-pre';project=seed/'project';project.mkdir(parents=True)
+            (project/'package.json').write_text('{"name":"fixture","version":"1.0.0"}\n')
+            (project/'package-lock.json').write_text('{"lockfileVersion":3,"packages":{}}\n')
+            (seed/'user-home').mkdir()
+            home=seed/'state'
+            payload=dict(tool_name='Bash',tool_input=dict(command='npm install'),cwd=str(project),tool_use_id='normal-pre-list')
+            env={k:v for k,v in os.environ.items() if not k.startswith('SAFEDEPS_')}
+            env.update(SAFEDEPS_HOME=str(home),HOME=str(seed/'user-home'),NPM_CONFIG_USERCONFIG='/dev/null',LC_ALL='C')
+            before=project_bytes(project)
+            pre=subprocess.run(['bash',str(root/'scripts/safedeps-pre-guard.sh')],input=json.dumps(payload).encode(),
+                               cwd=project,env=env,capture_output=True,timeout=30)
+            pending=home/'pending/id-normal-pre-list.json'
+            if pre.returncode or not pending.is_file():raise SystemExit('normal pre did not produce its record: '+repr((pre.returncode,pre.stdout,pre.stderr)))
+            sid=json.loads(pending.read_text())['snapshot_id']
+            normal_list=(home/'snapshots'/(sid+'_monitored_files.list')).read_text()
+            pre_evidence=dict(rc=pre.returncode,stdout=pre.stdout.decode(),stderr=pre.stderr.decode(),
+                              list=normal_list,project_before=before,project_after=project_bytes(project))
         results=[]
         for side in ['bash','rust']:
             # Restore the seed at one absolute path. The confirmed filename
@@ -230,16 +252,23 @@ done
             clock_slots.pop(d,None)
             (d/'project/package.json').write_text('{"name":"kept"}\n')
             (d/'home/snapshots/pre_monitored_files.list').write_text('package.json\npackage-lock.json\npackages/a/package.json\n')
-            if action in ['last-present','last-absent','empty-list']:
-                names={'last-present':'package.json\n','last-absent':'package.json\nyarn.lock\n','empty-list':''}[action]
+            if action in ['last-present','two-present','normal-pre','last-absent','empty-list']:
+                names={'last-present':'package.json\n','two-present':'package.json\npackage-lock.json\n',
+                       'normal-pre':normal_list,'last-absent':'package.json\nyarn.lock\n','empty-list':''}[action]
                 (d/'home/snapshots/pre_monitored_files.list').write_text(names)
+                if action in ['two-present','normal-pre']:(d/'project/package-lock.json').write_text('{"lockfileVersion":3,"packages":{}}\n')
+            before=project_bytes(d/'project')
+            list_before=(d/'home/snapshots/pre_monitored_files.list').read_bytes().hex()
             req=dict(op='snapshot',path=str(d/'project'),id='pre',action='stage')
             stages=[run(side,req,d)[:2]]
             if action=='changed':(d/'project/package.json').write_text('{"name":"changed"}\n')
             if action=='added':(d/'project/package-lock.json').write_text('{}')
             if action=='missing-staged':(d/'home/snapshots/verified-pre_monitored_files.list').unlink()
-            req['action']='confirm';stages.append(run(side,req,d)[:2]);results.append([stages,disk(d)])
+            req['action']='confirm';stages.append(run(side,req,d)[:2]);results.append([stages,disk(d),
+                dict(project_before=before,project_after=project_bytes(d/'project'),list_before=list_before,
+                     list_after=(d/'home/snapshots/pre_monitored_files.list').read_bytes().hex())])
         record('snapshot-'+action,*results)
+        if pre_evidence is not None:rows[-1]['pre_generated_fixture']=pre_evidence
     for shape in ['empty','no-pid','gone','live','unreadable','gone-staged']:
         if not wanted('journal-'+shape): continue
         results=[]
