@@ -246,21 +246,36 @@ fn script_heads(scan: &[u8]) -> Vec<(bool, usize)> {
     out
 }
 
-/// The script words of `text` that the bash rewrite did not read
-/// (`inert_payload_spans`, its U lines), each as `lo..hi` in `text`: the word
-/// after a head whose name is no shell it reads (`ksh -c`, and whatever else
-/// the search takes for one: a name that ends in `sh`), and a double-quoted
-/// script for one it reads with an escape, a substitution or no closing quote
-/// in it. A word runs to the first byte the shell reads outside it, as the
-/// classes view says. None on a failed reading.
+/// The script words the reference rewrite's head search names in `text`
+/// (`inert_payload_spans`), each as `lo..hi` in `text`.
+pub struct Spans {
+    /// A script it read as a text of its own (its R lines): what stands
+    /// between the quotes of a single-quoted word, or of a double-quoted one
+    /// with no escape and no substitution in it, after a head whose name is
+    /// bash, sh, zsh, dash or eval.
+    pub read: Vec<(usize, usize)>,
+    /// A script word it did not read (its U lines): the word after a head
+    /// whose name is no shell it reads (`ksh -c`, and whatever else the
+    /// search takes for one: a name that ends in `sh`), and a double-quoted
+    /// script for one it reads with an escape, a substitution or no closing
+    /// quote in it. A word runs to the first byte the shell reads outside it,
+    /// as the classes view says.
+    pub unread: Vec<(usize, usize)>,
+}
+
+/// `inert_payload_spans`, its R and U lines. None on a failed reading.
 ///
-/// These say where v2.17.2's flags go and nothing else: not that the word is
-/// a script, and not that anything in it was read.
-pub fn unread_spans(run: &mut Run, text: &[u8]) -> Option<Vec<(usize, usize)>> {
+/// These say where the release's bytes go and nothing else: not that a word
+/// is a script any shell is handed, and not that anything in it was read.
+/// The search knows no command position: it names the word after `sh -c` in
+/// `echo sh -c 'npm ci x'` as the bash rewrite did, and the release's flag
+/// stands there.
+pub fn script_spans(run: &mut Run, text: &[u8]) -> Option<Spans> {
+    let mut out = Spans { read: Vec::new(), unread: Vec::new() };
     let scan = subst(run.lex(text, "scan")?);
     let heads = script_heads(&scan);
     if heads.is_empty() {
-        return Some(Vec::new());
+        return Some(out);
     }
     let classes = run.lex(text, "classes")?;
     let n = text.len();
@@ -275,7 +290,6 @@ pub fn unread_spans(run: &mut Run, text: &[u8]) -> Option<Vec<(usize, usize)>> {
             !matches!(classes[z], b'p' | b'F' | b'.')
         }
     };
-    let mut out = Vec::new();
     for (read, pos) in heads {
         let mut p = pos;
         while p < n && matches!(text[p], b' ' | b'\t') {
@@ -295,11 +309,16 @@ pub fn unread_spans(run: &mut Run, text: &[u8]) -> Option<Vec<(usize, usize)>> {
             let unreadable = q == b'"'
                 && body.is_none_or(|b| b.contains(&b'\\') || b.contains(&b'`') || b.windows(2).any(|w| w == b"$("));
             if !unreadable {
+                if let Some(i) = close {
+                    if i >= 1 && !out.read.contains(&(p + 1, p + 1 + i)) {
+                        out.read.push((p + 1, p + 1 + i));
+                    }
+                }
                 continue;
             }
         }
-        if z > p && !out.contains(&(p, z)) {
-            out.push((p, z));
+        if z > p && !out.unread.contains(&(p, z)) {
+            out.unread.push((p, z));
         }
     }
     Some(out)

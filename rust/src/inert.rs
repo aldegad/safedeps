@@ -173,6 +173,11 @@ thread_local! {
 const MAX_DEPTH: u32 = 8;
 const MAX_TEXTS: usize = 1024;
 
+/// How deep the reference rewrite read a script inside a script
+/// (`inert_offsets_of`: a script's own scripts are searched while its depth
+/// is under four).
+const FLOOR_DEPTH: u32 = 4;
+
 const FLAG: &[u8] = b" --ignore-scripts";
 
 /// One text the rewrite reads: the command, or a payload of a text read.
@@ -442,54 +447,51 @@ fn rewrite_with(run: &mut Run, rx: &Rx, command: &[u8], cands: &[u8], detail: &m
         }
         i += 1;
     }
-    // The release's floor: the reference's verbs, and v2.17.2's flags in
-    // piped heredocs, in the texts the reference searched: the command, and
-    // the scripts the bash rewrite read as texts of their own. Such a script
-    // is one quoted segment of the text that holds it, so an offset in it is
-    // that offset in the command, shifted: the floor's bytes are the
-    // reference's, and no source map is trusted for them.
+    // The release's floor: the reference's verbs, v2.17.2's flags in piped
+    // heredocs and its flags in the script words the bash rewrite did not
+    // read, in the texts the reference searched. Which texts those are is the
+    // reference's own search for a script's head (`floor::script_spans`): the
+    // command, and each script it read as a text of its own, to the depth it
+    // read them. Such a script is one quoted segment of the text that holds
+    // it, so an offset in it is that offset in the command, shifted.
     //
-    // No verb is searched for in any other payload. A script the bash
-    // rewrite did not read has v2.17.2's flags, placed below in the bytes of
-    // the word as written; a flag carried there from the script's own text
-    // through its source map, unread, broke the word that holds it
-    // (`sh -c 'npm '\''ci'\'' x'` lost its `x`).
+    // None of this asks the lexer what a payload is. The floor is bytes the
+    // release wrote: it wrote the flag into `echo sh -c 'npm ci x'` too,
+    // where no shell is handed that script and the structure names no
+    // payload, and a floor found only in the payloads the structure names
+    // lost that flag. And a payload is no floor text: a flag carried from a
+    // script's own text through its source map, unread, broke the word that
+    // holds it (a script word of several quoted segments lost its last
+    // argument), and v2.17.2's flags given to every script payload put one
+    // after the `--` of an `npm -- ci x`.
     let mut pairs: Vec<(Option<usize>, usize)> = Vec::new();
     let mut fed: BTreeSet<usize> = BTreeSet::new();
-    for node in &nodes {
-        if node.kind != b'R' && !(matches!(node.kind, b'S' | b'E') && node.read_like) {
-            continue;
-        }
-        let verbs = if mentions_npm(&node.text) { floor::verb_pairs(run, &rx.floor, &node.text)? } else { Vec::new() };
-        for (s, e) in verbs {
-            if let Some(er) = node.after(e) {
-                if !pairs.contains(&(node.byte(s), er)) {
-                    pairs.push((node.byte(s), er));
+    let mut floor_texts: Vec<(W, usize, u32)> = vec![(command.to_vec(), 0, 0)];
+    let mut ft = 0;
+    while ft < floor_texts.len() {
+        let (text, base, depth) = floor_texts[ft].clone();
+        ft += 1;
+        if mentions_npm(&text) {
+            for (s, e) in floor::verb_pairs(run, &rx.floor, &text)? {
+                let pair = (Some(base + s), base + e);
+                if !pairs.contains(&pair) {
+                    pairs.push(pair);
                 }
             }
         }
-        for e in floor::fed_ends(run, &rx.floor, &node.text)? {
-            if let Some(er) = node.after(e) {
-                fed.insert(er);
-            }
-        }
-    }
-    // v2.17.2's flags in a script the bash rewrite did not read, placed in
-    // the word as written. Which words those are is the bash rewrite's own
-    // search for a script's head, in the texts it read (the command, and the
-    // scripts it read as texts of their own), and nothing else: a script
-    // word it gave no flag (one glued to more text, an unquoted one) gets
-    // none here. Every script payload the lexer names used to get them, and
-    // a script nested in another by glued quotes then got one after the `--`
-    // of its `npm -- ci x`.
-    for node in &nodes {
-        if node.kind != b'R' && !(matches!(node.kind, b'S' | b'E') && node.read_like) {
+        if depth >= FLOOR_DEPTH {
             continue;
         }
-        let spans = floor::unread_spans(run, &node.text)?;
-        for e in floor::unread_script_ends(run, &rx.floor, &node.text, &spans)? {
-            if let Some(er) = node.after(e) {
-                fed.insert(er);
+        for e in floor::fed_ends(run, &rx.floor, &text)? {
+            fed.insert(base + e);
+        }
+        let spans = floor::script_spans(run, &text)?;
+        for e in floor::unread_script_ends(run, &rx.floor, &text, &spans.unread)? {
+            fed.insert(base + e);
+        }
+        for (lo, hi) in spans.read {
+            if floor_texts.len() < MAX_TEXTS {
+                floor_texts.push((text[lo..hi].to_vec(), base + lo, depth + 1));
             }
         }
     }
