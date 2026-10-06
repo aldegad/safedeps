@@ -32,6 +32,38 @@ extern "C" {
     fn kill(pid: i32, sig: i32) -> i32;
     fn waitid(kind: i32, id: u32, info: *mut WaitInfo, options: i32) -> i32;
     fn localtime_r(t: *const i64, tm: *mut Tm) -> *mut Tm;
+    fn newlocale(mask: i32, name: *const std::ffi::c_char, base: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
+    fn freelocale(locale: *mut std::ffi::c_void);
+    fn isprint_l(c: i32, locale: *mut std::ffi::c_void) -> i32;
+    #[cfg(not(target_os = "macos"))]
+    fn iswprint_l(c: u32, locale: *mut std::ffi::c_void) -> i32;
+}
+
+/// Printable units for the hook shell's printf %q. Darwin's system bash
+/// uses byte ctype, including in UTF-8 locales; the GNU bash on the Linux
+/// test host uses wide characters. A private locale avoids changing the
+/// process locale while other system helpers are active.
+pub fn bash_quote_units(s: &[u8]) -> Vec<(usize, bool)> {
+    #[cfg(target_os = "macos")]
+    let (mask, widths) = (2, vec![1; s.len()]);
+    #[cfg(not(target_os = "macos"))]
+    let (mask, widths) = (1, bash_chars(s));
+    let locale = unsafe { newlocale(mask, b"\0".as_ptr().cast(), std::ptr::null_mut()) };
+    let mut at = 0;
+    let mut out = Vec::with_capacity(widths.len());
+    for n in widths {
+        let printable = if locale.is_null() { (32..127).contains(&s[at]) }
+            else {
+                #[cfg(target_os = "macos")]
+                { unsafe { isprint_l(s[at] as i32, locale) != 0 } }
+                #[cfg(not(target_os = "macos"))]
+                { if n == 1 { unsafe { isprint_l(s[at] as i32, locale) != 0 } }
+                  else { let c = std::str::from_utf8(&s[at..at+n]).unwrap().chars().next().unwrap(); unsafe { iswprint_l(c as u32, locale) != 0 } } }
+            };
+        out.push((n, printable)); at += n;
+    }
+    if !locale.is_null() { unsafe { freelocale(locale) } }
+    out
 }
 
 /// The hook shell's -r test, including ACLs and symlink targets.

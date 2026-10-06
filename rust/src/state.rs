@@ -232,6 +232,19 @@ fn renamed_file(target: &Path, write: impl FnOnce(&mut std::fs::File) -> std::io
 /// from whole seconds; GNU find compares the times as they are (measured on
 /// macOS and in WSL1: a file 86,400 seconds old goes on GNU and stays on BSD).
 pub fn sweep_day_old(dir: &Path) {
+    sweep_old(dir, |_| true)
+}
+
+/// Install pending records share their directory with other bookkeeping.
+/// Match the hook's find expression: only regular *.json and *.trace files.
+pub fn sweep_pending(dir: &Path) {
+    sweep_old(dir, |p| {
+        use std::os::unix::ffi::OsStrExt;
+        p.file_name().is_some_and(|n| { let n=n.as_bytes(); n.ends_with(b".json")||n.ends_with(b".trace") })
+    })
+}
+
+fn sweep_old(dir: &Path, selected: impl Fn(&Path)->bool) {
     let now = SystemTime::now();
     let mut dirs = vec![dir.to_path_buf()];
     while let Some(d) = dirs.pop() {
@@ -245,6 +258,7 @@ pub fn sweep_day_old(dir: &Path) {
             if !kind.is_file() {
                 continue;
             }
+            if !selected(&entry.path()) { continue; }
             let Ok(modified) = entry.metadata().and_then(|m| m.modified()) else { continue };
             let old = if cfg!(target_os = "macos") {
                 let secs = |t: SystemTime| t.duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);

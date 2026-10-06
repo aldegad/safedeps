@@ -154,6 +154,15 @@ pub fn probe(input:&[u8])->i32 {
         Err(Error::Io(e))=>{eprintln!("{}",e);return 1},
         Err(Error::Workspace(why))=>{let _=std::io::stderr().write_all(&why);return 1},
     };
+    if let Some(record)=value.get("pending") {
+        let bytes=|name|record.get(name).and_then(Value::as_bytes).unwrap_or_default();
+        let cwd=bytes("cwd");let attribution=bytes("attribution");let fetch_why=bytes("fetch_why");
+        let record=super::pending::Record { cwd:&cwd,
+            project_from:record.get("project_from").and_then(Value::as_str).unwrap_or("cwd"),
+            trace:matches!(record.get("trace"),Some(Value::Bool(true))), attribution:&attribution,
+            fetch:record.get("fetch"),fetch_why:&fetch_why };
+        if super::pending::write(&call,&snap,&record).is_err(){return 1}
+    }
     if let Some(Value::Str(rewrite))=value.get("rewrite") {
         let unread=matches!(value.get("unread"),Some(Value::Bool(true)));
         if snap.mark_rewrite(rewrite,unread).is_err(){return 1}

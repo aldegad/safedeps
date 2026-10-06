@@ -202,6 +202,7 @@ impl TargetStatement {
 pub struct Facts {
     pub records: Vec<(String, W)>,
     pub hidden: [bool; 3],
+    pub piped: bool,
 }
 
 pub use crate::lex::{Payload, PayloadOrigin};
@@ -728,7 +729,7 @@ impl<'c> Run<'c> {
         rec.push(("piped".into(), tf(piped)));
         rec.push(("failed.detect".into(), tf(self.failed)));
         if !any {
-            return Facts { records: rec, hidden };
+            return Facts { records: rec, hidden, piped };
         }
         struct Per {
             eco: String,
@@ -801,7 +802,7 @@ impl<'c> Run<'c> {
         }
         rec.push(("ledger_specs".into(), ls));
         rec.push(("failed.facts".into(), tf(self.failed)));
-        Facts { records: rec, hidden }
+        Facts { records: rec, hidden, piped }
     }
 }
 

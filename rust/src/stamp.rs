@@ -62,6 +62,13 @@ fn source_dir() -> Result<(PathBuf, bool), String> {
     source_at(&exe)
 }
 
+/// The package that owns this executable, using the same placement rule as
+/// the source stamp. The hook uses its CLI path in an approval prescription.
+pub fn package_root() -> Result<PathBuf, String> {
+    let (source, _) = source_dir()?;
+    source.parent().map(Path::to_path_buf).ok_or_else(|| "the binary's package has no root".into())
+}
+
 pub fn check() -> Check {
     let (dir, packaged) = match source_dir() {
         Ok(d) => d,

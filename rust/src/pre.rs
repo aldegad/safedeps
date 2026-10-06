@@ -1,11 +1,10 @@
 //! `safedeps-core pre`: the PreToolUse hook.
 //!
-//! What is here is the path of a command that is not an install: reading the
-//! payload, the truth-source notice, the self budget and its deadline, the
-//! detection in each reading, the settlement of a failed reading, and the
-//! backstop's trace baseline. A command the detection reads as an install is
-//! not judged yet: this says so on stderr and exits 2, and
-//! `scripts/safedeps-pre-guard.sh` stays the hook until it is.
+//! The common entry owns payload reading, truth-source notices, the deadline
+//! and scan settlement. Codex installs use the shared target, snapshot,
+//! ledger and pending-state path. The Claude install path still awaits B's
+//! verified rewrite implementation and exits 2. The installed hook remains
+//! `scripts/safedeps-pre-guard.sh` until integration is complete.
 //!
 //! Each step stands for the step of the bash guard named in its comment, and
 //! prints what that step prints. The differences are the ones a process
@@ -16,7 +15,6 @@ use crate::ere::Regex;
 use crate::grammar;
 use crate::jq;
 use crate::json::{self, Value};
-use crate::lex::Reading;
 use crate::{callid, md5, os, state};
 use std::io::Write;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
@@ -26,7 +24,20 @@ use std::time::{Duration, Instant, SystemTime};
 type W = Vec<u8>;
 mod budget;
 mod snapshot;
-pub use snapshot::probe;
+mod targets;
+mod pending;
+mod readings;
+mod effects;
+mod install;
+pub fn probe(input:&[u8])->i32 {
+    match json::parse_one(input).ok().and_then(|v|v.get("op").and_then(Value::as_str).map(str::to_string)).as_deref() {
+        Some("targets"|"target-statements")=>targets::probe(input),
+        Some("readings")=>readings::probe(input),
+        Some("install-codex")=>install::probe(input),
+        Some("invoke-quote")=>install::quote_probe(input),
+        _=>snapshot::probe(input),
+    }
+}
 
 const RUNTIME_BUDGET_SECONDS: u64 = 30;
 const SELF_BUDGET_MAX_SECONDS: u64 = 25;
@@ -323,8 +334,8 @@ fn shell_pwd() -> W {
     std::env::current_dir().map(|p| p.into_os_string().into_vec()).unwrap_or_default()
 }
 
-/// The judgment of one command, from the detection on. `Err(())` is an
-/// install: the part of the hook that judges one is not written.
+/// The shared reading driver detects once and obtains facts only for an
+/// install. Err marks the still-unintegrated Claude rewrite path.
 fn judge(call: &Call) -> Result<Out, ()> {
     let mut out = Out::default();
     let core = Core::new();
@@ -333,31 +344,11 @@ fn judge(call: &Call) -> Result<Out, ()> {
     if cwd.is_empty() {
         cwd = shell_pwd();
     }
-    let mut closed = false;
-    let mut any_install = false;
-    let mut detect = |run: &mut Run, r: Reading| {
-        run.reading = Some(r);
-        if run.command_reads(&call.command) {
-            closed = true;
-        }
-        if run.is_install(&call.command) {
-            any_install = true;
-            let _ = run.pipes_install_to_shell(&call.command);
-        } else if run.hides_install(&call.command) {
-            any_install = true;
-        }
-        run.reading = None;
-    };
-    detect(&mut run, Reading::Bash);
-    if run.diverge {
-        detect(&mut run, Reading::Zsh);
-        detect(&mut run, Reading::Dash);
-    }
-    if !closed {
-        run.failed = true;
-    }
-    if any_install {
-        return Err(());
+    let read = readings::Readings::collect(&mut run, &call.command, &cwd);
+    if read.yes("any_install") {
+        if call.input.get("turn_id").is_none() { return Err(()) }
+        return Ok(install::judge(call, &mut run, &cwd, &read,
+            |_,_| unreachable!("Codex must not ask for a rewrite")));
     }
     if settle_scan_failure(call, run.failed, &mut out) {
         return Ok(out);
@@ -374,7 +365,7 @@ fn emit(out: &Out) -> i32 {
     out.code
 }
 
-const NOT_WRITTEN: &str = "safedeps-core pre: this command reads as a dependency install, and the part of the hook that judges one is not written yet. scripts/safedeps-pre-guard.sh is the PreToolUse hook.";
+const NOT_WRITTEN: &str = "safedeps-core pre: this Claude install needs the inert rewrite implementation, which is not integrated yet. scripts/safedeps-pre-guard.sh is the PreToolUse hook.";
 
 /// A stale checkout can settle only the existing unscanned-manager question.
 /// It never calls the old judgment or creates a snapshot, pending record or
