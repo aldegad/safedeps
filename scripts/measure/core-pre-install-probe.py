@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Compare the Codex install path, without executing the payload command.
 
-The reference is the complete Bash pre hook. The candidate is pre-probe's
-Codex-only component until B is integrated. Each seeded sandbox is restored
+The reference is the complete Bash pre hook. --entry pre exercises the public
+Codex entry; pre-probe exercises its component. Each seeded sandbox is restored
 at the same absolute path. New snapshot dates/pids, advisory dates and trace
 inodes must match the invocation/disk before being normalized. Seed values,
 stderr, other files and unknown temporary names are never normalized.
+The time bounds here do not establish clock source-role provenance. That is
+separate evidence; exact native clock values remain unobserved in this probe.
 """
 import argparse
 from datetime import datetime,timezone
@@ -26,10 +28,64 @@ def module(name,file):
     obj=importlib.util.module_from_spec(spec);spec.loader.exec_module(obj);return obj
 snapshot=module('snapshot_probe','core-pre-snapshot-probe.py')
 target=module('target_probe','core-pre-targets-probe.py')
+context_probe=module('context_probe','core-pre-context-probe.py')
 
-def approval(eco,pkg,version):
-    key='sha256:'+hashlib.sha256(('\n'.join((eco,pkg,version))).encode()).hexdigest()
-    return key.replace(':','-',1)+'.json',dict(hash=key,ecosystem=eco,package=pkg,version=version,version_range=version,approved_at='2020-01-01T00:00:00Z',expires_at='2099-01-01T00:00:00Z',approved_by='synthetic',evidence={})
+def approval(eco,pkg,version,context=None):
+    fields=[eco,pkg,version]
+    if context:fields.append(context['context_hash'])
+    key='sha256:'+hashlib.sha256(('\n'.join(fields)).encode()).hexdigest()
+    entry=dict(hash=key,ecosystem=eco,package=pkg,version=version,version_range=version,approved_at='2020-01-01T00:00:00Z',expires_at='2099-01-01T00:00:00Z',approved_by='synthetic',evidence={})
+    if context:entry['project_context']=context
+    return key.replace(':','-',1)+'.json',entry
+
+def ledger_cases():
+    rows=[]
+    for manager,eco,pkg,pinned,unpinned in [
+        ('cargo','crates.io','example','cargo install example --version 1.0.0','cargo install example'),
+        ('go','go','example.org/pkg','go get example.org/pkg@1.0.0','go get example.org/pkg'),
+        ('gem','rubygems','example','gem install example -v 1.0.0','gem install example'),
+        ('maven','maven','example:lib','mvn dependency:get -Dartifact=example:lib:1.0.0',None),
+        ('dotnet','nuget','Example','dotnet add package Example --version 1.0.0','dotnet add package Example'),
+        ('yarn','npm','example','yarn add example@1.0.0','yarn add example'),
+        ('pnpm','npm','example','pnpm add example@1.0.0','pnpm add example'),
+        ('bun','npm','example','bun add example@1.0.0','bun add example'),
+    ]:
+        rows.extend([dict(id=manager+'-miss',command=pinned,deny=True),
+            dict(id=manager+'-hit',command=pinned,approve=(eco,pkg,'1.0.0'))])
+        if unpinned:rows.append(dict(id=manager+'-unpinned',command=unpinned))
+    for kind,cmd in [('overrides','npm install example@1.0.0'),('resolutions','yarn add example@1.0.0')]:
+        for mode in ('hit','unscoped','changed'):
+            rows.append(dict(id=kind+'-'+mode,command=cmd,context=kind,scope=mode,
+                approve=('npm','example','1.0.0'),deny=mode!='hit'))
+    rows.extend([
+        dict(id='mixed-miss',command='pip install example==1.0; cargo install example --version 1.0.0',deny=True),
+        dict(id='mixed-partial',command='pip install example==1.0; cargo install example --version 1.0.0',approve=('pypi','example','1.0'),deny=True),
+        dict(id='mixed-scoped-hit',command='npm install example@1.0.0; pip install example==1.0',context='overrides',scope='hit',approve=('npm','example','1.0.0'),extra_approve=('pypi','example','1.0')),
+    ])
+    return rows
+
+def seed_approval(box,row,env,reference):
+    context=None;proof=None
+    if row.get('context'):
+        project=box/'project';kind=row['context']
+        manifest=dict(name='example',version='1.0.0',**{kind:{'transitive':'2.0.0'}})
+        snapshot.put(project,'package.json',manifest)
+        snapshot.put(project,'.git',b'synthetic project boundary\n')
+        if kind=='resolutions':snapshot.put(project,'yarn.lock',b'__metadata:\n  version: 8\n')
+        request=dict(op='project',path=str(project))
+        p=subprocess.run(['/bin/bash',str(reference),str(target.ROOT)],input=json.dumps(request).encode(),cwd=project,env=env,capture_output=True,timeout=15)
+        assert p.returncode==0 and not p.stderr,('approval context reference',p.returncode,p.stderr)
+        context=json.loads(p.stdout)
+        proof=dict(request=request,rc=p.returncode,stdout=p.stdout.decode(),stderr=p.stderr.decode())
+        if kind=='overrides':context['type']='npm-overrides-probe'
+        if row['scope']=='changed':
+            manifest[kind]['transitive']='3.0.0';snapshot.put(project,'package.json',manifest)
+        if row['scope']=='unscoped':context=None
+    if row.get('approve'):
+        name,entry=approval(*row['approve'],context=context);snapshot.put(box/'state/approved-specs',name,entry,0o600)
+    if row.get('extra_approve'):
+        name,entry=approval(*row['extra_approve']);snapshot.put(box/'state/approved-specs',name,entry,0o600)
+    return proof
 
 def cases():
     return [
@@ -98,13 +154,13 @@ def observe(box,process,start,end,row):
     return files,calls
 
 def main():
-    ap=argparse.ArgumentParser();ap.add_argument('--core',required=True);ap.add_argument('--report',required=True);ap.add_argument('--only');ap.add_argument('--entry',choices=['pre-probe','pre'],default='pre-probe');ap.add_argument('--expect-difference',action='store_true');a=ap.parse_args()
-    rows=cases()
+    ap=argparse.ArgumentParser();ap.add_argument('--core',required=True);ap.add_argument('--report',required=True);ap.add_argument('--only');ap.add_argument('--group',choices=['base','ledger'],default='base');ap.add_argument('--entry',choices=['pre-probe','pre'],default='pre-probe');ap.add_argument('--expect-difference',action='store_true');a=ap.parse_args()
+    rows=ledger_cases() if a.group=='ledger' else cases()
     if a.only:rows=[r for r in rows if r['id'] in a.only.split(',')]
     assert rows
     results=[]
     with tempfile.TemporaryDirectory(prefix='core-pre-install.') as temp:
-        box=Path(temp).resolve()/'box'
+        box=Path(temp).resolve()/'box';reference=box.parent/'context-reference.sh';reference.write_text(context_probe.REFERENCE)
         for source in rows:
             pair=[];row=dict(source)
             for side in ('bash','core'):
@@ -114,8 +170,6 @@ def main():
                 (box/'state/pending/other.json').write_bytes(b'{"snapshot_id":"seed","timestamp":4102444800}')
                 target.stub(box);(box/'answer.json').write_text('{}')
                 cli=box/'bin/safedeps';cli.write_text('#!/bin/sh\nexit 99\n');cli.chmod(0o755)
-                if row.get('approve'):
-                    name,entry=approval(*row['approve']);snapshot.put(box/'state/approved-specs',name,entry,0o600)
                 if row.get('yarn'):
                     snapshot.put(box/'project','package.json',{'resolutions':{'example':'1.0.0'},'workspaces':['packages/.*']})
                     snapshot.put(box/'project','yarn.lock',b'__metadata:\n  version: 8\n')
@@ -126,6 +180,7 @@ def main():
                 env=dict(os.environ,HOME=str(box/'home'),TMPDIR=str(box/'tmp'),SAFEDEPS_HOME=str(box/'state'),PATH=str(box/'bin')+':'+os.environ['PATH'],PWD=str(box/'project'),LANG='C',LC_ALL='C')
                 for key in list(env):
                     if key.lower().startswith('npm_config_') or key.startswith('SAFEDEPS_') and key!='SAFEDEPS_HOME':env.pop(key)
+                seed_proof=seed_approval(box,row,env,reference)
                 argv=['/bin/bash',str(target.ROOT/'scripts/safedeps-pre-guard.sh')] if side=='bash' else [a.core,a.entry]
                 start=time.time();proc=subprocess.Popen(argv,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=env,cwd=box/'project')
                 stdout,stderr=proc.communicate(json.dumps(payload).encode(),timeout=30);end=time.time()
@@ -138,7 +193,7 @@ def main():
                     assert not (box/'EXECUTED').exists(),'input code was executed'
                     files,calls=observe(box,proc,start,end,row)
                 except (AssertionError,ValueError,OSError,KeyError) as exc:files={};calls=[];error=repr(exc)
-                pair.append(dict(rc=proc.returncode,stdout=stdout.decode(errors='surrogateescape'),stderr=stderr.decode(errors='surrogateescape'),oracle=error,files=files,calls=calls))
+                pair.append(dict(rc=proc.returncode,stdout=stdout.decode(errors='surrogateescape'),stderr=stderr.decode(errors='surrogateescape'),oracle=error,files=files,calls=calls,seed_proof=seed_proof))
             left,right=pair;channels=[key for key in left if left[key]!=right[key]]
             if left['oracle']:channels.append('reference-oracle')
             if right['oracle']:channels.append('candidate-oracle')
