@@ -75,9 +75,8 @@ pub fn check(dir: &Path, ecosystem: &str, package: &str, version: &str, context:
     let key = hash(ecosystem, package, version, context);
     let path = dir.join(format!("{}.json", key.replacen(':', "-", 1)));
     let mut fields = Vec::new();
-    let mut spec = None;
     let reason = if !path.is_file() { "miss" } else {
-        spec = std::fs::read(path).ok().and_then(|b| json::parse_one(&b).ok());
+        let spec = std::fs::read(path).ok().and_then(|b| json::parse_one(&b).ok());
         match spec.as_ref() {
             None => "invalid",
             Some(v) if !valid(v) => "invalid",
@@ -145,9 +144,9 @@ impl EffectIndex {
 pub fn effect_index(dir: &Path, context: &str, now: i64, warnings: &mut Vec<u8>) -> io::Result<EffectIndex> {
     init(dir)?;
     let mut index = EffectIndex { entries: Vec::new(), approved: HashSet::new() };
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        if !entry.file_type()?.is_file() || entry.path().extension().is_none_or(|e| e != "json") { continue; }
+    let Ok(files) = std::fs::read_dir(dir) else { return Ok(index); };
+    for entry in files.flatten() {
+        if !entry.file_type().is_ok_and(|t| t.is_file()) || entry.path().extension().is_none_or(|e| e != "json") { continue; }
         let values = std::fs::read(entry.path()).ok().and_then(|s| json::parse_stream(&s).ok());
         let mut rows = Vec::new();
         let readable = values.is_some_and(|values| {

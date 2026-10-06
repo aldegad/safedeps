@@ -107,6 +107,18 @@ pub fn from_value(v: &crate::json::Value) -> J {
     }
 }
 
+pub fn into_value(v: J) -> crate::json::Value {
+    use crate::json::Value;
+    match v {
+        J::Null => Value::Null,
+        J::Bool(b) => Value::Bool(b),
+        J::Num(n) => Value::Num(n),
+        J::Str(s) => Value::Str(s.into_bytes()),
+        J::Arr(a) => Value::Arr(a.into_iter().map(into_value).collect()),
+        J::Obj(o) => Value::Obj(o.into_iter().map(|(k,v)| (k.into_bytes(), into_value(v))).collect()),
+    }
+}
+
 fn put_str(out: &mut String, v: &str) {
     out.push('"');
     for c in v.chars() {

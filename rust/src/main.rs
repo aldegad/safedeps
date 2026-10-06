@@ -44,6 +44,8 @@
 // `post`, `inert`): they are in the tree before their callers so that the
 // people writing those callers share one copy. The mark goes when the caller
 // lands.
+#[allow(dead_code)]
+mod ask;
 mod callid;
 mod core;
 mod ere;
@@ -408,6 +410,16 @@ fn main() {
         Some("ledger") => match read_stdin() {
             Some(input) => ledger::main(&args[2..], &input),
             None => 1,
+        },
+        Some("json-stream") => match read_stdin() {
+            Some(input) => match json::parse_stream(&input) {
+                Ok(values) => {
+                    for value in values { println!("{}", jq::compact(&jq::from_value(&value))); }
+                    0
+                }
+                Err(_) => 5,
+            },
+            None => 2,
         },
         Some("kat") => cmd_kat(&args[2..]),
         Some("stamp") => cmd_stamp(&args[2..]),

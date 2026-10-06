@@ -26,9 +26,23 @@ struct Tm {
 }
 
 extern "C" {
+    fn mkdtemp(template: *mut std::ffi::c_char) -> *mut std::ffi::c_char;
     fn umask(mask: u32) -> u32;
     fn kill(pid: i32, sig: i32) -> i32;
     fn localtime_r(t: *const i64, tm: *mut Tm) -> *mut Tm;
+}
+
+/// Exclusively claim a scratch directory using libc's mkdtemp, as the shell
+/// helper does. The caller owns removal. No pid/RANDOM naming convention.
+pub fn scratch_dir(prefix: &str) -> std::io::Result<std::path::PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
+    let base = std::env::var_os("TMPDIR").filter(|v| !v.is_empty()).unwrap_or_else(|| "/tmp".into());
+    let mut bytes = std::path::PathBuf::from(base).join(format!("{}.XXXXXX", prefix)).into_os_string().into_vec();
+    if bytes.contains(&0) { return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "NUL in scratch path")); }
+    bytes.push(0);
+    if unsafe { mkdtemp(bytes.as_mut_ptr().cast()) }.is_null() { return Err(std::io::Error::last_os_error()); }
+    bytes.pop();
+    Ok(std::ffi::OsString::from_vec(bytes).into())
 }
 
 pub const SIGTERM: i32 = 15;
