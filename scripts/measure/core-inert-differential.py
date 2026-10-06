@@ -1074,7 +1074,7 @@ def accounting(results, R):
     no count of what ran, of a floor kept or of a call that kept its flag, and
     a row with no run observed is `not observed`, never held."""
     acc = {"rows": len(results), "core": {}, "ran_observed": 0, "ran_unobserved": 0, "npm_rows": {}, "effects_rows": {},
-           "relations": {}, "effects_shells": {}, "floor_of_sent": {}, "sent_not_held": [], "pairs": {}}
+           "relations": {}, "effects_shells": {}, "floor_of_sent": {}, "sent_notes": {}, "sent_not_held": [], "pairs": {}}
     bases = [b for b in ("bash", "v2.18.1", "7d66f8c") if any(b in res.get("sides", {}) for res in results)]
     for k, res in enumerate(results):
         res.pop("true_to_false", None)
@@ -1085,6 +1085,12 @@ def accounting(results, R):
         if d == "sent":
             f = str(res.get("floor", "unmeasured")).split(":")[0]
             acc["floor_of_sent"][f] = acc["floor_of_sent"].get(f, 0) + 1
+            # What the rewrite says of itself. `unverified` is a word the
+            # shell decides at run time: npm was not asked about it, so such a
+            # row is never one where the option was read as true.
+            o = consensus({x: v.encode("latin-1") for x, v in res["core"].items()}, cmd_bytes(res["command"]))
+            for note in sorted(o[1] & set(NOTES)) or ["no note"]:
+                acc["sent_notes"][note] = acc["sent_notes"].get(note, 0) + 1
         if d in ("sent", "as-written"):
             cv = res.get("obs", {}).get("core")
             if cv is None or not isinstance((c or {}).get("shells"), dict):
@@ -1616,7 +1622,8 @@ def summarize(results, counts, R, a, extra):
     def kv(d):
         return ", ".join("%s %d" % (k, v) for k, v in sorted(d.items(), key=lambda x: str(x[0]))) or "none"
 
-    print("blocked (the core sends nothing, its duties collide; in no count of what holds): %d rows" % len(blocked))
+    print("blocked (the core's inert value: it sends nothing, its duties collide; in no count of what holds, and not the "
+          "public pre-guard's answer, which is not asked here): %d rows" % len(blocked))
     for k in sorted(blocked_by):
         print("  %s: %d" % (k, blocked_by[k]))
     print("the core, row by row: %s" % kv(acc["core"]))
@@ -1627,6 +1634,8 @@ def summarize(results, counts, R, a, extra):
     print("  shell runs by how the npm calls relate: %s" % kv(acc["relations"]))
     print("  effect axes that differ or are unknown, in shell runs: %s" % kv(acc["effects_shells"]))
     print("  floor of the rewrites the core sends: %s" % kv(acc["floor_of_sent"]))
+    print("  the rewrites the core sends, by their notes (a row may carry several; `unverified` is never a reading of the option "
+          "as true): %s" % kv(acc["sent_notes"]))
     print("  rewrites sent whose calls or effects are not shown to hold: %d" % len(acc["sent_not_held"]))
     for base in sorted(acc["pairs"]):
         p = acc["pairs"][base]

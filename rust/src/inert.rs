@@ -101,9 +101,14 @@
 //!   more word of the install (`npm install x --cache`: `--cache` takes it as
 //!   its value).
 //!
-//! A statement holding a word the shell decides at run time is not a
-//! collision: npm cannot be asked about it, its flags are placed, and it is
-//! recorded as unverified, as before. The command is never run to find out.
+//! A word the shell decides at run time does not make a collision by
+//! standing in a statement, and it does not excuse one. `npm install $X`
+//! keeps its flags and is recorded as unverified, as before: the flag after
+//! the verb is followed by a word nobody can read, and npm cannot be asked.
+//! `npm -- ci $X` is a collision all the same: the words before the flag are
+//! as written, and they make it an operand whatever `$X` turns out to be
+//! (`read::Install::flag_after`). Unverified is a record, never a reading of
+//! the option as true. The command is never run to find out.
 //!
 //! # The record (record.rs)
 //!

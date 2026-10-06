@@ -62,8 +62,12 @@ pub struct Install {
     pub ends: Vec<usize>,
     /// The words as npm is asked about them, `npm` first.
     words: Vec<W>,
-    /// A word of the statement is one the shell decides at run time.
-    dynamic: bool,
+    /// For each word, whether the shell decides it at run time.
+    shell_decides: Vec<bool>,
+    /// The statement holds something the shell decides that no word of it
+    /// carries (a `$'...'` escape the lexer cannot name): nothing in it can
+    /// be asked of npm.
+    unlocated: bool,
 }
 
 /// What npm makes of the statement with a flag inserted after one of its
@@ -76,33 +80,53 @@ pub enum Check {
     /// before it takes it as its value, or it takes the word after it (`true`,
     /// `false`) as its own value.
     Changes,
-    /// The statement holds a word the shell decides at run time, or a reading
-    /// does not close: nobody can say.
+    /// A word the shell decides at run time stands where it settles the
+    /// answer, or a reading does not close: nobody can say.
     Unread,
+}
+
+fn same_rest(a: &[(String, W)], b: &[(String, W)]) -> bool {
+    a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x.1 == y.1)
 }
 
 impl Install {
     /// `Check` for a flag inserted after word `k` of the statement (0 is the
-    /// command word), asked of npm's tables for the whole statement, the
-    /// words after a `--` included.
+    /// command word), asked of npm's tables.
+    ///
+    /// A word the shell decides at run time does not make the answer unknown
+    /// by standing in the statement. npm reads its arguments in order, so
+    /// what it makes of the flag is settled by the words before the flag and
+    /// by the one word after it:
+    ///
+    /// - a word the shell decides among those before the flag: `Unread`;
+    /// - the words before it make the flag an operand (a `--` stands there)
+    ///   or the value of the option before it: `Changes`, whatever follows;
+    /// - the word after it is one the shell decides: `Unread`, because a
+    ///   `true` or a `false` there would be taken as the flag's value;
+    /// - otherwise the whole statement is read with the flag and without, the
+    ///   later words as written: they are read the same way in both.
     pub fn flag_after(&self, core: &Core, k: usize) -> Check {
-        if self.dynamic || k >= self.words.len() {
+        let n = self.words.len();
+        if k >= n || self.unlocated || self.shell_decides[1..=k].iter().any(|&d| d) {
             return Check::Unread;
         }
         let mut rd = Reader::new(&core.mrx);
+        let mut upto: Vec<W> = self.words[1..=k].to_vec();
+        let Some(before) = rd.npm_inert_reading(&upto) else { return Check::Unread };
+        upto.push(FLAG_WORD.to_vec());
+        let Some(with) = rd.npm_inert_reading(&upto) else { return Check::Unread };
+        if !same_rest(&before, &with) {
+            return Check::Changes;
+        }
+        if k + 1 < n && self.shell_decides[k + 1] {
+            return Check::Unread;
+        }
         let Some(orig) = rd.npm_inert_reading(&self.words[1..]) else { return Check::Unread };
-        let mut a2: Vec<W> = self.words[1..=k].to_vec();
-        a2.push(FLAG_WORD.to_vec());
-        a2.extend_from_slice(&self.words[k + 1..]);
-        match rd.npm_inert_reading(&a2) {
+        upto.extend_from_slice(&self.words[k + 1..]);
+        match rd.npm_inert_reading(&upto) {
             None => Check::Unread,
-            Some(r2) => {
-                if r2.len() == orig.len() && r2.iter().zip(orig.iter()).all(|(a, b)| a.1 == b.1) {
-                    Check::Holds
-                } else {
-                    Check::Changes
-                }
-            }
+            Some(r2) if same_rest(&orig, &r2) => Check::Holds,
+            Some(_) => Check::Changes,
         }
     }
 }
@@ -206,6 +230,18 @@ pub fn installs(run: &mut Run, rx: &Rx, text: &[u8]) -> Option<Vec<Install>> {
             let fl = flat.as_ref().unwrap();
             let span = &fl[head.start.min(fl.len())..last.end.min(fl.len())];
             let dynamic = unreadable || shell_expands(&ws[..cut], span);
+            // The same test a word at a time, for the words up to a `--`
+            // after the verb: past it every word is an operand, whatever the
+            // shell makes of it.
+            let shell_decides: Vec<bool> = (0..ws.len())
+                .map(|i| {
+                    i >= 1 && i < cut && {
+                        let w = &words[i];
+                        shell_expands(std::slice::from_ref(&ws[i]), &fl[w.start.min(fl.len())..w.end.min(fl.len())])
+                    }
+                })
+                .collect();
+            let unlocated = unreadable || (dynamic && !shell_decides.iter().any(|&d| d));
             let mut install = Install {
                 npm,
                 verb_end,
@@ -214,7 +250,8 @@ pub fn installs(run: &mut Run, rx: &Rx, text: &[u8]) -> Option<Vec<Install>> {
                 piece: pi,
                 ends: words.iter().map(|w| w.end).collect(),
                 words: ws.clone(),
-                dynamic,
+                shell_decides,
+                unlocated,
             };
             if ends {
                 out.push(install);
