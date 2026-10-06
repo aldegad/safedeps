@@ -4,6 +4,11 @@
 The hook gets JSON data. Its PATH npm is our bounded fixture, never code
 chosen by that command. The witness and every fixture process belong to
 this run; ps is the independent observation, not the implementation's wait.
+
+
+Child status is sampled after subprocess.run returns, with retries. The stored
+final states establish no descendants remained at those later checks; they do
+not measure descendant exit times relative to the hook response.
 """
 import argparse
 import json
