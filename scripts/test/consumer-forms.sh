@@ -25,6 +25,13 @@ fail() {
   exit 1
 }
 
+# Rows for --shard I/M (scripts/test/lib/shard.sh): each expect_* call below is
+# a row, and so is each pass of a loop that judges forms itself.
+# shellcheck source=lib/shard.sh
+source "${ROOT_DIR}/scripts/test/lib/shard.sh"
+shard_args "$@"
+(( ${#SHARD_REST[@]} == 0 )) || fail "consumer-forms.sh takes --shard I/M or --shard-list, not ${SHARD_REST[0]}"
+
 tmp_root=$(mktemp -d "${TMPDIR:-/tmp}/safedeps-forms.XXXXXX")
 cleanup() {
   rm -rf "${tmp_root}"
@@ -58,12 +65,14 @@ gate_decision() {
 }
 
 expect_deny() {
+  shard_row "expect_deny|$1|$2" || return 0
   local label="$1" command="$2" got
   got=$(gate_decision "${command}")
   [[ "${got}" == "deny" ]] || fail "command gate catches ${label} (got: ${got})"
 }
 
 expect_pass() {
+  shard_row "expect_pass|$1|$2" || return 0
   local label="$1" command="$2" got
   got=$(gate_decision "${command}")
   [[ "${got}" == "pass" ]] || fail "command gate leaves ${label} unjudged as documented (got: ${got})"
@@ -85,6 +94,7 @@ gate_reason() {
 # An UNDECIDED deny: the gate could not finish reading the command, and says so
 # rather than claiming a finding.
 expect_undecided() {
+  shard_row "expect_undecided|$1|$2" || return 0
   local label="$1" command="$2" got
   got=$(gate_reason "${command}")
   [[ "${got}" == "deny "*UNDECIDED* ]] || fail "${label} is UNDECIDED (got: ${got:0:120})"
@@ -142,6 +152,7 @@ for or_form in \
   "false || sh -c 'npm ci'" \
   "printf 'pip install evil==1.0.0' || sh"
 do
+  shard_row "or_form: ${or_form}" || continue
   got=$(gate_reason "${or_form}")
   [[ "${got}" != *'reads like an install into a shell'* ]] \
     || fail "a shell after || is not a pipe into a shell: ${or_form} (got: ${got:0:120})"
@@ -247,6 +258,7 @@ for wrapped_npm in \
   "echo 'npm install evil@1.0.0' | xargs -I{} sh -c '{}'" \
   "printf 'npm install evil@1.0.0' > s.sh; sh s.sh"
 do
+  shard_row "wrapped_npm: ${wrapped_npm}" || continue
   backstop_safe=$(mktemp -d "${tmp_root}/safe-backstop.XXXXXX")
   [[ "$(gate_decision "${wrapped_npm}")" == "pass" ]] || fail "npm delayed-detection fixture is a command-gate miss: ${wrapped_npm}"
   jq -nc --arg c "${wrapped_npm}" --arg cwd "${backstop_proj}" \
@@ -373,6 +385,7 @@ for benign in \
   'npm unlink left-pad' \
   'echo npm create evil@1.0.0'
 do
+  shard_row "benign: ${benign}" || continue
   [[ "$(gate_decision "${benign}")" != "deny" ]] || fail "benign command is not denied: ${benign}"
 done
 pass "quoted idioms, npm run, npx, go run, uv run and echoed install text stay allowed (no false positives from the widening)"
@@ -429,6 +442,7 @@ for named_unpinned in \
   "cargo install -f evil" \
   "cargo install --force evil"
 do
+  shard_row "named_unpinned: ${named_unpinned}" || continue
   logged_ungated "${named_unpinned}" \
     || fail "an unpinned named install is recorded as UNGATED: ${named_unpinned}"
   [[ "$(gate_decision "${named_unpinned}")" != "deny" ]] \
@@ -461,6 +475,7 @@ for stays_quiet in \
   "pip install -e ." \
   'echo "remember to pip install evil"'
 do
+  shard_row "stays_quiet: ${stays_quiet}" || continue
   logged_ungated "${stays_quiet}" \
     && fail "record stays quiet on a routine or already-gated install: ${stays_quiet}"
 done
@@ -624,6 +639,7 @@ pass "an install in a function body is gated"
 # not a deny for some other reason, which would hide a statement start that was
 # never read.
 expect_not_approved() {
+  shard_row "expect_not_approved|$1|$2" || return 0
   local label="$1" command="$2" got
   got=$(gate_reason "${command}")
   [[ "${got}" == "deny "*"install not approved"* ]] || fail "${label} is read as an install and its spec checked (got: ${got:0:120})"
@@ -912,7 +928,9 @@ for not_a_start in \
   'ls &>/dev/null'
 do
   expect_pass "words that open no statement: ${not_a_start}" "${not_a_start}"
-  if logged_ungated "${not_a_start}"; then fail "words that open no statement leave no UNGATED record: ${not_a_start}"; fi
+  if shard_row "no UNGATED record: ${not_a_start}" && logged_ungated "${not_a_start}"; then
+    fail "words that open no statement leave no UNGATED record: ${not_a_start}"
+  fi
 done
 # zsh reads `echo () pip install x` as a definition of a function named echo,
 # so the install words are a function body there. It is recorded, as it was
@@ -940,6 +958,7 @@ for assigned in \
   '{ npm_config_global=true npm install evil; }' \
   'f() { npm_config_global=true npm install evil; }; f'
 do
+  shard_row "assigned: ${assigned}" || continue
   logged_global "${assigned}" || fail "an assignment stays with its install at a statement start: ${assigned}"
 done
 # A start is written into a view of its own, never over the bytes another
@@ -981,6 +1000,7 @@ do
   expect_not_approved "${precmd_row#*|} before an install (${precmd_row%%|*})" "${precmd_row#*|} pip install evil==1.0.0"
 done
 for inert_form in 'command -- npm ci' 'exec -- npm ci' 'exec -aa npm ci' 'command -pp npm ci'; do
+  shard_row "inert_form: ${inert_form}" || continue
   rewrite_holds "${inert_form}" "${inert_form} --ignore-scripts" \
     || fail "an npm install behind ${inert_form% npm ci} gets --ignore-scripts (got: $(gate_rewrite "${inert_form}"))"
 done
@@ -1011,6 +1031,7 @@ do
   expect_not_approved "${close_row#*|} (${close_row%%|*})" "${close_row#*|}"
 done
 for inert_form in 'for ((i=0;i<1;i++)){(npm ci);}' 'for i (1)(npm ci)' 'cat <((npm ci))'; do
+  shard_row "inert_form: ${inert_form}" || continue
   rewrite_holds "${inert_form}" "${inert_form/npm ci/npm ci --ignore-scripts}" \
     || fail "an npm install after a closed head gets --ignore-scripts: ${inert_form} (got: $(gate_rewrite "${inert_form}"))"
 done
@@ -1039,6 +1060,7 @@ for inert_form in \
   'function f while npm install evil; do break; done; f' \
   'npm install evil &>/dev/null'
 do
+  shard_row "inert_form: ${inert_form}" || continue
   rewrite_holds "${inert_form}" "${inert_form/npm install/npm install --ignore-scripts}" \
     || fail "an npm install at a statement start gets --ignore-scripts: ${inert_form} (got: $(gate_rewrite "${inert_form}"))"
 done
@@ -1055,6 +1077,7 @@ for inert_form in \
   'npm ci>/dev/null' 'npm ci</dev/null' 'npm ci&>/dev/null' 'npm ci>&2' 'case x in x) npm ci;; esac' \
   'x=$(npm ci)' 'echo $(npm ci)'
 do
+  shard_row "inert_form: ${inert_form}" || continue
   rewrite_holds "${inert_form}" "${inert_form/npm ci/npm ci --ignore-scripts}" \
     || fail "an npm verb ended by what follows it gets --ignore-scripts: ${inert_form} (got: $(gate_rewrite "${inert_form}"))"
 done
@@ -1079,6 +1102,7 @@ for inert_form in \
   'coproc foo until npm install evil; do :; done; wait' \
   'echo a &>/dev/null npm install evil'
 do
+  shard_row "inert_form: ${inert_form}" || continue
   got=$(gate_reason "${inert_form}")
   [[ "${got}" == "deny "*UNDECIDED*"read the npm installs in this command in different places"* ]] \
     || fail "an npm install at a start only some shells read is UNDECIDED, not rewritten for one: ${inert_form} (got: ${got:0:120})"
@@ -1088,10 +1112,12 @@ done
 # --ignore-scripts and no record before, and zsh alone the last two, where no
 # one text is inert for every shell.
 for inert_form in 'if true; then>/dev/null npm ci; fi' 'for d in a b; do>/dev/null npm ci; done'; do
+  shard_row "inert_form: ${inert_form}" || continue
   rewrite_holds "${inert_form}" "${inert_form/npm ci/npm ci --ignore-scripts}" \
     || fail "an npm install glued behind a reserved word and a redirection gets --ignore-scripts: ${inert_form} (got: $(gate_rewrite "${inert_form}"))"
 done
 for inert_form in '{2>/dev/null npm ci; }' 'true&!npm ci'; do
+  shard_row "inert_form: ${inert_form}" || continue
   got=$(gate_reason "${inert_form}")
   [[ "${got}" == "deny "*UNDECIDED*"read the npm installs in this command in different places"* ]] \
     || fail "an npm install at a start only zsh reads is UNDECIDED, not rewritten for one shell: ${inert_form} (got: ${got:0:120})"
@@ -1113,6 +1139,7 @@ for rewrite_row in \
   'cat <(npm install evil)|cat <(npm install --ignore-scripts evil)' \
   'npm install evil > >(npm install other)|npm install --ignore-scripts evil > >(npm install --ignore-scripts other)'
 do
+  shard_row "rewrite_row: ${rewrite_row}" || continue
   rewrite_holds "${rewrite_row%%|*}" "${rewrite_row#*|}" || fail "the rewrite lands after the verb: ${rewrite_row%%|*} (got: $(gate_rewrite "${rewrite_row%%|*}"))"
 done
 # bash 5 runs `{fd}>/dev/null npm install x` with a descriptor in fd; zsh
@@ -1153,13 +1180,15 @@ for rewrite_row in \
   'npm >$(npm install y) install x|npm >$(npm install --ignore-scripts y) install --ignore-scripts x' \
   'npm install x >$(npm install y)|npm install --ignore-scripts x >$(npm install --ignore-scripts y)'
 do
+  shard_row "rewrite_row: ${rewrite_row}" || continue
   rewrite_holds "${rewrite_row%%|*}" "${rewrite_row#*|}" || fail "the rewrite finds the verb behind a redirection whose target is a substitution: ${rewrite_row%%|*} (got: $(gate_rewrite "${rewrite_row%%|*}"))"
 done
 expect_not_approved "a pip install behind a redirection whose target is a substitution" 'pip >$(echo f) install evil==1.0.0'
 expect_not_approved "an install inside the target's substitution is still a payload" 'npm >$(pip install evil==1.0.0) install x'
 for plain in 'npm >$(echo f) run build' 'echo npm >$(echo f) install evil' 'npm >$(echo f) install --ignore-scripts evil'; do
   expect_pass "no install to rewrite behind a substitution target: ${plain}" "${plain}"
-  [[ -z "$(gate_rewrite "${plain}")" ]] || fail "no rewrite for ${plain} (got: $(gate_rewrite "${plain}"))"
+  ! shard_row "no rewrite: ${plain}" || [[ -z "$(gate_rewrite "${plain}")" ]] \
+    || fail "no rewrite for ${plain} (got: $(gate_rewrite "${plain}"))"
 done
 pass "the inert rewrite finds an npm verb behind a redirection whose target holds a substitution"
 
@@ -1174,6 +1203,7 @@ for rewrite_row in \
   $'npm >"$(cat <<E\nx\nE\n)" install evil|npm >"$(cat <<E\nx\nE\n)" install --ignore-scripts evil' \
   $'npm ci >$(cat <<E\nx\nE\n)|npm ci --ignore-scripts >$(cat <<E\nx\nE\n)'
 do
+  shard_row "rewrite_row: ${rewrite_row}" || continue
   rewrite_holds "${rewrite_row%%|*}" "${rewrite_row#*|}" || fail "the rewrite finds the verb behind a target whose substitution holds a heredoc: ${rewrite_row%%|*} (got: $(gate_rewrite "${rewrite_row%%|*}"))"
 done
 expect_not_approved "a pip install behind a target whose substitution holds a heredoc" $'pip >$(cat <<E\nx\nE\n) install evil==1.0.0'
@@ -1238,6 +1268,7 @@ for pipe_form in \
   "printf 'pip install evil==1.0.0' | csh" "printf 'pip install evil==1.0.0' | /bin/dash" \
   "printf 'pip install evil==1.0.0' | time sh" "printf 'pip install evil==1.0.0' | time -p sh"
 do
+  shard_row "pipe_form: ${pipe_form}" || continue
   [[ "$(gate_decision "${pipe_form}")" == deny ]] || fail "install text piped into a shell is denied: ${pipe_form}"
 done
 for shell_c in ksh csh tcsh fish zsh /bin/dash; do
@@ -1337,7 +1368,7 @@ for plain in \
   $'cat <<EOF\npip install evil==1.0.0\nEOF'
 do
   expect_pass "a redirection or a process substitution with no install: ${plain}" "${plain}"
-  if logged_ungated "${plain}"; then fail "no UNGATED record for ${plain}"; fi
+  if shard_row "no UNGATED record: ${plain}" && logged_ungated "${plain}"; then fail "no UNGATED record for ${plain}"; fi
 done
 pass "plain process substitutions and redirections stay unjudged and unrecorded"
 
@@ -1525,7 +1556,7 @@ for word_data in \
   'pip a=(x) install evil==1.0.0'
 do
   expect_pass "a word the shell reads whole, with the install words as data: ${word_data}" "${word_data}"
-  if logged_ungated "${word_data}"; then fail "no UNGATED record for ${word_data}"; fi
+  if shard_row "no UNGATED record: ${word_data}" && logged_ungated "${word_data}"; then fail "no UNGATED record for ${word_data}"; fi
 done
 # Ordinary commands that hold the same words keep their verdicts.
 for word_plain in \
@@ -1541,7 +1572,7 @@ for word_plain in \
   'echo a (b)'
 do
   expect_pass "an ordinary command with a word parenthesis: ${word_plain}" "${word_plain}"
-  if logged_ungated "${word_plain}"; then fail "no UNGATED record for ${word_plain}"; fi
+  if shard_row "no UNGATED record: ${word_plain}" && logged_ungated "${word_plain}"; then fail "no UNGATED record for ${word_plain}"; fi
 done
 # Declared, not a defect: the precommand list and the glob reading are the
 # manuals', not each shell's behaviour for every combination, so these are
@@ -1565,6 +1596,7 @@ for rewrite_row in \
   '< =(true) npm install evil|< =(true) npm install --ignore-scripts evil' \
   'cat =(npm install evil)|cat =(npm install --ignore-scripts evil)'
 do
+  shard_row "rewrite_row: ${rewrite_row}" || continue
   rewrite_holds "${rewrite_row%%|*}" "${rewrite_row#*|}" || fail "an npm install after a word the shell reads whole gets --ignore-scripts: ${rewrite_row%%|*} (got: $(gate_rewrite "${rewrite_row%%|*}"))"
 done
 # Where only some shells read the word that way the readings put the install
@@ -1582,6 +1614,7 @@ for inert_form in \
   '>/dev/null(N) npm install evil' \
   '>/dev/(null) npm install evil'
 do
+  shard_row "inert_form: ${inert_form}" || continue
   got=$(gate_reason "${inert_form}")
   [[ "${got}" == "deny "*UNDECIDED*"read the npm installs in this command in different places"* ]] \
     || fail "an npm install after a word only some shells read whole is UNDECIDED, not rewritten for one: ${inert_form} (got: ${got:0:120})"
@@ -1618,7 +1651,9 @@ for extglob_form in \
   'ls !(x) && npm test'
 do
   expect_pass "an extglob argument is a word, not a negated subshell: ${extglob_form}" "${extglob_form}"
-  if logged_scan_failure "${extglob_form}"; then fail "an extglob argument fails no reading: ${extglob_form}"; fi
+  if shard_row "no failed reading: ${extglob_form}" && logged_scan_failure "${extglob_form}"; then
+    fail "an extglob argument fails no reading: ${extglob_form}"
+  fi
 done
 pass "a word ends where the shell ends it: array values, case patterns in substitutions, zsh =(...) and glob groups, extglob, subscripts and precommand modifiers (${#word_rows[@]} forms a shell runs)"
 
@@ -1660,6 +1695,7 @@ done
 # right after the verb, before the operator, as the spaced form gets it after
 # the verb.
 expect_rewrite() {
+  shard_row "expect_rewrite|$1|$2|$3" || return 0
   local label="$1" command="$2" want="$3" safe out got
   safe=$(mktemp -d "${tmp_root}/safe.XXXXXX")
   out=$(jq -nc --arg c "${command}" --arg cwd "${project_dir}" \
@@ -1702,6 +1738,7 @@ expect_rewrite "npm ci closed by a glued } and &&" '{ npm ci}&& echo x' '{ npm c
 # (group_close in shell_lex), so it finds no verb, and the install is a
 # recorded downgrade rather than a rewrite or a silent pass.
 expect_recorded_downgrade() {
+  shard_row "expect_recorded_downgrade|$1|$2" || return 0
   local label="$1" command="$2" safe out
   safe=$(mktemp -d "${tmp_root}/safe.XXXXXX")
   out=$(jq -nc --arg c "${command}" --arg cwd "${project_dir}" \
@@ -1761,6 +1798,7 @@ glued_group_rows=(
 )
 glued_close='}'
 for glued_row in "${glued_group_rows[@]}"; do
+  shard_row "glued_row: ${glued_row}" || continue
   for glued_install in 'npm ci' 'mvn -Dartifact=g:evil:1.0.0 dependency:get'; do
     glued_cmd="${glued_row%%^*}"; glued_cmd="${glued_cmd//%C%/${glued_install}}"
     spaced_cmd="${glued_row#*^}"; spaced_cmd="${spaced_cmd//%C%/${glued_install}}"
@@ -1971,6 +2009,7 @@ for no_effect_gate in \
   "pip install evil==1.0.*" \
   "pip install 'evil[x]'"
 do
+  shard_row "no_effect_gate: ${no_effect_gate}" || continue
   logged_ungated "${no_effect_gate}" \
     || fail "an unpinned install with no effect gate behind it is recorded: ${no_effect_gate}"
   [[ "$(gate_decision "${no_effect_gate}")" != "deny" ]] \
@@ -2013,6 +2052,7 @@ for unread_by_text in \
   'pushd sub && popd && npm install evil' \
   'npm install evil --prefix=$HOME/x'
 do
+  shard_row "unread_by_text: ${unread_by_text}" || continue
   logged_ungated "${unread_by_text}" \
     && fail "the pre-guard leaves the record of an npm install to the post hook: ${unread_by_text}"
   state=$(pending_of "${unread_by_text}")
@@ -2039,6 +2079,7 @@ for carrier in \
   "cd sub; npm install evil|sub" \
   "cd sub && npm install evil|sub"
 do
+  shard_row "carrier: ${carrier}" || continue
   form="${carrier%|*}"
   where="${project_dir}"
   [[ "${carrier##*|}" == . ]] || where="${project_dir}/${carrier##*|}"
@@ -2072,6 +2113,7 @@ for carrier in \
   "split|npm install evil; echo \$(rm package.json); npm install other" \
   "split|NPM install evil; command cd sub; Npm install other"
 do
+  shard_row "carrier: ${carrier}" || continue
   expect="${carrier%%|*}"
   form="${carrier#*|}"
   state=$(pending_of "${form}")
@@ -2088,6 +2130,7 @@ pass "lockfile writers share a trace only with inert statements between them and
 # npm, so npm is asked with the statement's own arguments rather than the gate
 # falling back to the cwd.
 for carrier in "npm --prefix sub install evil" "NPM --prefix sub install evil" "X=1 Npm --prefix sub install evil"; do
+  shard_row "carrier: ${carrier}" || continue
   state=$(pending_of "${carrier}")
   [[ "$(jq -r '.project_dir' <<< "${state}")" == "$(cd "${project_dir}/sub" && pwd -P)" ]] \
     || fail "npm in any case is asked where it installs: ${carrier} ($(jq -c . <<< "${state}"))"
@@ -2139,6 +2182,7 @@ for followed in \
   "env -C sub npm install evil" \
   "npm install evil && npm install other"
 do
+  shard_row "followed: ${followed}" || continue
   logged_ungated "${followed}" && fail "an install the effect gate reads is not recorded UNGATED: ${followed}"
 done
 pass "lockless and relocated installs the effect gate reads stay unrecorded"
@@ -2167,10 +2211,12 @@ for form in \
   "npm install left-pad --prefix ${spaced// /\\ }" \
   "npm -C \"${spaced}\" install left-pad"
 do
+  shard_row "form: ${form}" || continue
   got=$(pending_project_dir "${form}")
   [[ "${got}" == "${spaced_real}" ]] || fail "a quoted relocation value is one word: ${form} (verifies ${got})"
 done
 for form in 'cd "my dir" && npm install left-pad' 'cd my\ dir && npm install left-pad'; do
+  shard_row "form: ${form}" || continue
   got=$(pending_project_dir "${form}")
   [[ "${got}" == "${project_real}/my dir" ]] || fail "a quoted cd operand is one word: ${form} (verifies ${got})"
 done
@@ -2238,6 +2284,7 @@ mkdir -p "${project_dir}/node_modules/.bin"
 printf '#!/bin/sh\n' > "${project_dir}/node_modules/.bin/tsc"
 chmod +x "${project_dir}/node_modules/.bin/tsc"
 for local_bin in "npx tsc --noEmit" "npm exec tsc" "npx --yes tsc"; do
+  shard_row "local_bin: ${local_bin}" || continue
   logged_ungated "${local_bin}" && fail "a runner of a local binary is not a fetch: ${local_bin}"
 done
 logged_ungated "npx prettier" || fail "a runner of a name with no local binary is a fetch and is recorded"
@@ -2339,6 +2386,7 @@ prescription() {
     | awk '{ gsub(/ && /, "\n"); print }' | awk 'NF { print $(NF-1), $NF }' | tr '\n' ';'
 }
 expect_prescription() {
+  shard_row "expect_prescription|$*" || return 0
   local want="$1" got
   shift
   got=$(prescription "$@")
@@ -2535,6 +2583,7 @@ for gem_form in \
   $'gem install --document "$(echo ">\'")" rake -v 13.0.0' \
   $'gem install --document "a >\'" rake -v 13.0.0 --no-user-install "\'"'
 do
+  shard_row "gem_form: ${gem_form}" || continue
   got=$(prescription "${gem_form}")
   [[ "${got}" == *'rubygems rake@13.0.0;'* ]] || fail "the deny for \`${gem_form}\` prescribes rubygems rake@13.0.0 (got: ${got})"
 done
@@ -2797,13 +2846,15 @@ pass "every manager's options are read with its own table: values, attached and 
 # Which words a manager takes as option values is the manager's answer, asked
 # of every one on PATH but npm (npm is asked above). A table entry the manager
 # does not read as a value fails; a manager not on PATH is skipped by name.
-manager_rc=0
-manager_out=$(scripts/measure/manager-option-reading.sh 2>&1) || manager_rc=$?
-case "${manager_rc}" in
-  0) pass "every manager on PATH reads its options the way the table says ($(grep -E '^asked:' <<< "${manager_out}" | cut -c1-200))" ;;
-  3) pass "the managers' option reading # SKIP $(grep -E '^skipped:' <<< "${manager_out}" | cut -c1-200)" ;;
-  *) fail "every manager on PATH reads its options the way the table says ($(grep -E '^OVER|forms,' <<< "${manager_out}" | head -5 | tr '\n' ' '))" ;;
-esac
+if shard_row "manager option reading"; then
+  manager_rc=0
+  manager_out=$(scripts/measure/manager-option-reading.sh 2>&1) || manager_rc=$?
+  case "${manager_rc}" in
+    0) pass "every manager on PATH reads its options the way the table says ($(grep -E '^asked:' <<< "${manager_out}" | cut -c1-200))" ;;
+    3) pass "the managers' option reading # SKIP $(grep -E '^skipped:' <<< "${manager_out}" | cut -c1-200)" ;;
+    *) fail "every manager on PATH reads its options the way the table says ($(grep -E '^OVER|forms,' <<< "${manager_out}" | head -5 | tr '\n' ' '))" ;;
+  esac
+fi
 
 # --- 11. The UNGATED record names each operand the gate did not check ---------
 # The record used to be a second parser: it read each statement on its own and
@@ -3084,14 +3135,21 @@ operand_rows=(
 operand_out="${tmp_root}/operand-rows"
 mkdir -p "${operand_out}"
 row_index=0
+# Each row is decided here, in the battery's own shell, before its background
+# judgment starts; the check below reads only the rows this run judged.
+operand_own=()
 for row in "${operand_rows[@]}"; do
-  ( recorded_operands "${row#*$'\t'}" > "${operand_out}/${row_index}" ) &
+  if shard_row "operands: ${row}"; then
+    operand_own[row_index]=1
+    ( recorded_operands "${row#*$'\t'}" > "${operand_out}/${row_index}" ) &
+  fi
   row_index=$((row_index + 1))
   (( row_index % 8 == 0 )) && wait
 done
 wait
 row_index=0
 for row in "${operand_rows[@]}"; do
+  [[ -n "${operand_own[row_index]:-}" ]] || { row_index=$((row_index + 1)); continue; }
   want="${row%%$'\t'*}"
   got=$(cat "${operand_out}/${row_index}")
   [[ "${got}" == "${want}" ]] \
@@ -3117,6 +3175,7 @@ for carrier in \
   "global|npm install -g --prefix x left-pad" \
   "project|npm i -g left-pad --global=false"
 do
+  shard_row "carrier: ${carrier}" || continue
   where="${carrier%%|*}"
   form="${carrier#*|}"
   safe=$(mktemp -d "${tmp_root}/global-answer.XXXXXX")
@@ -3202,6 +3261,8 @@ beside_expect() { # want label marked-form; want is pipe, deny, allow or pass
   local want="$1" label="$2" form="${3//@V@/}" got
   [[ "$3" == *@V@* ]] || fail "beside-visible row has no @V@ marker: ${label}"
   beside_rows+=("$3")
+  # After the append: the S1 loop below reads beside_rows in every shard.
+  shard_row "beside_expect|$1|$2|$3" || return 0
   if [[ "${want}" == pipe ]]; then
     grep -q 'reads like an install into a shell' <<< "$(beside_reason "${form}")" \
       || fail "${label}: denied by the pipe rule: $(printf '%q' "${form}")"
@@ -3343,6 +3404,7 @@ pass "installs a heredoc, a comment or the visible install's own words carry to 
 # S1: every row above, with the visible install switched off by `true `, is
 # denied exactly when the row is.
 for row in "${beside_rows[@]}"; do
+  shard_row "row: ${row}" || continue
   b=$(beside_decision "${row//@V@/}")
   s=$(beside_decision "${row//@V@/true }")
   [[ "${b}" == deny && "${s}" == deny || "${b}" != deny && "${s}" != deny ]] \
@@ -3386,6 +3448,7 @@ for ordinary in \
   'pass|arr=(a b c); echo "${#arr[@]}"' \
   'pass|echo $[1+1]'
 do
+  shard_row "ordinary: ${ordinary}" || continue
   [[ "$(beside_decision "${ordinary#*|}")" == "${ordinary%%|*}" ]] \
     || fail "an ordinary command where the shells differ keeps its verdict (${ordinary%%|*}): ${ordinary#*|} (got: $(beside_decision "${ordinary#*|}"))"
 done
@@ -3441,6 +3504,7 @@ for row in "${heredoc_body_rows[@]}"; do
   case "${kind}" in
     pip) expect_not_approved "${id}, an install after a heredoc body with live code in it," "${form}" ;;
     npm)
+      shard_row "heredoc body rewrite: ${id}" || continue
       # Each form ends in a newline, and every rewrite drops a command's
       # trailing newlines (main 9017f9c does too, measured), so the rewrite
       # is compared with the form without its last newline.
@@ -3521,4 +3585,5 @@ fi
 expect_pass "DT04, install text inside quotes beside a \\035, is data" "echo \"${gs} pip install evil==6.6.6\""
 pass "a payload is read whole, whatever bytes it holds: ${#payload_rows[@]} forms denied as installs, three npm ci rewritten inside their payload, one recorded downgrade"
 
+shard_end
 printf 'consumer-forms passed\n'
