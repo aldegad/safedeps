@@ -234,6 +234,11 @@ def actual_of(run, key, field):
     return 'no such refusal'
 
 
+def refusals_of(run, key):
+    """The fields the runner row refused, in its order."""
+    return [error.get('field') for error in run['table'].get(key, {}).get('errors') or [] if isinstance(error, dict)]
+
+
 def sources_of(run):
     return ((run['results'] or {}).get('inputs') or {}).get('collector_sources') or {}
 
@@ -318,20 +323,34 @@ def fresh_positive(run, baseline):
 
 
 def fresh_record_loss(run, baseline):
+    """A lost record and nothing else: each direct run answered as its fixture
+    says, and the runner found no record file to read for that same run.
+
+    The runner's record row also fails for a record that is there and wrong
+    (its argv, its environment). That is another failure. It is told apart by
+    what the runner read, the list of record files, and is not accepted here.
+    """
     if run['results'] is None:
         return 'not-run', '%s; no results were read from %s' % (FRESH, run['dir'])
     res = run['results']
     problems = consistent(run, 'planned-negative:record-loss', stop_after=res.get('stop_after'), skip_bash=res.get('skip_bash'))
     check(problems, 'stop_after is none or executable', res.get('stop_after') in (None, 'executable'), True)
+    check(problems, 'contract rows', sorted(set(status_of(run, 'contract/' + case) for case in CONTRACT)), ['pass'])
+    check(problems, 'executable launches', (res.get('launches') or {}).get('executable'), len(DIRECT))
     mine, base = sources_of(run), sources_of(baseline)
     check(problems, 'both collector sources are read and the stand-in source differs from the baseline',
           [bool(mine), bool(base), mine.get('core_hook/observe.py') != base.get('core_hook/observe.py')], [True, True, True])
     for name in DIRECT:
-        check(problems, name + ' (answer, record)',
-              [status_of(run, 'executable/response/' + name), status_of(run, 'executable/record/' + name)], ['pass', 'fail'])
+        answered, recorded = 'executable/response/' + name, 'executable/record/' + name
+        check(problems, name + ' answer', status_of(run, answered), 'pass')
+        files = actual_of(run, recorded, 'record files')
+        if status_of(run, recorded) != 'fail' or files != []:
+            read = 'the record file it expects was there' if files == 'no such refusal' else 'the record files it read are %.200r' % (files,)
+            problems.append('%s is not a lost record: its record row is %s, %s, and what the runner refused is %.200r'
+                            % (name, status_of(run, recorded), read, refusals_of(run, recorded)))
     if problems:
         return 'fail', '; '.join(problems)
-    return 'pass', 'detected: each direct run answered as its fixture says and its missing record was refused'
+    return 'pass', 'detected: each direct run answered as its fixture says, and the runner found no record file to read for it'
 
 
 def assess(data, stage):
