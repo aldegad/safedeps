@@ -31,7 +31,7 @@ pub fn acquire(home:&Path)->Result<state::StateLock,()> {
     let result=state::StateLock::acquire(&home.join("state.lock"),&mut warnings,None);
     let _=std::io::stderr().write_all(&warnings);
     result.map_err(|_|{
-        state::log_advisory(home,b"post-verify UNVERIFIED: state lock unavailable (another safedeps run active) — install not verified by this run.");
+        state::log_advisory(home,"post-verify UNVERIFIED: state lock unavailable (another safedeps run active) — install not verified by this run.".as_bytes());
         eprintln!("safedeps: could not acquire state lock; this install is UNVERIFIED by this run (logged to advisory.log).");
     })
 }
@@ -95,7 +95,7 @@ impl Store{
     pub fn confirm(&self,report:&mut Report)->Result<(),()> {
         let mut parent=confirmed(&self.home,&self.hash)?;
         if !parent.is_empty() && !sh::is_file(&self.path(&parent,b"meta.json")){parent.clear();}
-        let why=if !self.staged{b"its files could not be copied".as_slice()}
+        let why:&[u8]=if !self.staged{b"its files could not be copied"}
             else if !self.matches(){b"the dependency files changed while they were being verified, so what they hold now was not read by this check"}
             else if !self.seal(&parent){b"its record could not be written"}else{b""};
         if !why.is_empty(){
