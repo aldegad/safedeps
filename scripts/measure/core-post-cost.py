@@ -189,6 +189,20 @@ try:
                             passed=passed and calls.get('file',0)==min(a.bin_count,20) and calls.get('gzip',0)==bool(a.rotate_bytes)
                             if a.rebuild:passed=passed and npm_commands==dict(config=1,query=1,rebuild=1)
                         sample=dict(rc=result.returncode,passed=passed,stdout=out,stderr=err,requests=list(requests))
+                        if a.rebuild:
+                            # Keep each observation even on a failed sample.
+                            # This does not change its fixture or predicates.
+                            sample['rebuild_evidence']=dict(
+                                receipt_exists=receipt.is_file(),
+                                receipt_hex=receipt.read_bytes().hex() if receipt.is_file() else None,
+                                expected_receipt_hex=b'fixture lifecycle ran\n'.hex(),
+                                pending_exists=(home/'pending/id-cost-call.json').exists(),
+                                confirmed={path.name:path.read_text() for path in home.glob('confirmed_*')},
+                                provider_line=provider_line,provider_line_count=log.count(provider_line),
+                                expected_provider_line_count=n,
+                                advisory_log=log,
+                                reorg_log=(home/'reorg.log').read_text() if (home/'reorg.log').exists() else None,
+                                behavior_predicate=expected,request_predicate=requests==expected_requests)
                         if counted:sample.update(external_program_invocations=dict(calls),npm_commands=dict(npm_commands))
                         else:sample.update(seconds=elapsed,over_30s=elapsed>30)
                         samples['counted' if counted else 'timed']=sample
