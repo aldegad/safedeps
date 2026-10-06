@@ -11,8 +11,9 @@ mod srchash;
 
 fn main() {
     let dir = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
-    // `publish` is the publish job's build, shipped without `rust/`; any
-    // other build is a checkout's and is held to the checkout's source.
+    // `publish` may run without source in the package layout. If that
+    // package carries rust/, stamp.rs still checks it. A checkout build
+    // always requires its source. The choice is fixed in this binary.
     let kind = match std::env::var("SAFEDEPS_CORE_BUILD_KIND") {
         Err(_) => "checkout",
         Ok(k) if k.is_empty() || k == "checkout" => "checkout",
