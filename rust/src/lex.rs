@@ -3330,7 +3330,11 @@ impl<'g> Lex<'g> {
                 a = k;
             }
             let ch = self.sbyte(k);
-            if ch == b';' || ch == b'\n' {
+            // group_close already removed this delimiter from the words.
+            // End their statement here too: text after the group is not an
+            // argument of the command before it. This is a lexical boundary,
+            // not a claim that the whole shell program is valid.
+            if ch == b';' || ch == b'\n' || self.gc.has(k) {
                 self.piece(a, k - 1, nn);
                 nn += 1;
                 a = k + 1;
