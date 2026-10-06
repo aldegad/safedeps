@@ -14,10 +14,13 @@ detection) is listed and not compared.
 What a row is
 -------------
 
-Every row has one status, and the counts add up: total = core-error +
-bash-not-reached + compared, and compared = reading-set + incomplete +
-both-failed + blocked + blocked+failed + both-undecided + same + differ.
+Every row has one status, and the counts add up: total = invalid +
+core-error + bash-not-reached + compared, and compared = reading-set +
+incomplete + both-failed + blocked + blocked+failed + both-undecided + same +
+differ.
 
+  invalid          the row's own records are not what this file writes (see
+                   The intake); it gets no other status, and the run is red
   reading-set      the two sides read the command in different sets of readings
   incomplete       a reading of the set has no value on one side
   both-failed      the reading failed on both sides (UNDECIDED on both)
@@ -116,6 +119,57 @@ the rewrite it sends is that row's floor, where the recorded file has none;
 what its command does under the shells is kept like any side's. A rewrite the
 core sends with no floor to hold it to is `unmeasured`, never `ok`.
 
+The intake
+----------
+
+Every row passes one admission before anything classifies or counts it,
+whether it was measured in this run or read from a saved report; nothing after
+it reads a field the admission did not look at. It strips every value an
+earlier classification derived (statuses, observations, states, labels, the
+floor) and computes them again. It binds the row to where it came from (the
+report and its sha256, the row's place, the sha256 of the command's bytes,
+the schema). And it sorts every field into evidence, `unknown` (not recorded,
+or not observable: a run killed at its deadline, a log that does not decode,
+a file that could not be read, an axis the first schema did not keep) and
+`invalid` (recorded, and not what this file writes, or at odds with another
+record of the same row).
+
+- A row whose own records are invalid is `invalid` and nothing else: a
+  reading set with a name twice or a name this file does not know, a value
+  for a reading outside the set, no payload counts in this schema.
+- A side that ran names the bytes it ran: the command itself for the command
+  as written, what its readings agree on for the bash and core sides, and for
+  a tree's pre-guard bytes whose insertions are its `flags`. A side that sends
+  nothing (blocked, undecided) has no runs, and needs none.
+- A run's axes are its npm calls, the order of every stand-in call, the other
+  calls, the exit status, stdout, stderr and the files. Its `calls` are the
+  record, in order; its npm calls and its other calls are that list cut in
+  two, and where the three disagree they are invalid. An exit status that is
+  not 0, an empty argument and an empty stream are evidence like any other.
+- Two runs compare on an axis only where both hold it as evidence: a null is
+  never equal to a null. A row with any invalid evidence is listed, is in no
+  count of what held, and makes the run red.
+- The floor is computed again from what the row holds (the recorded release
+  rewrites of this tree, or the 7d66f8c side's run); a saved floor that is not
+  that is invalid.
+
+The readers' answers are part of what a run keeps, each bound to its argv.
+--reclassify reads the saved answers and asks no reader: an argv with no
+saved answer is unknown and is not asked, and an argv answered twice is
+believed in neither answer. --reread asks the readers on this host's PATH
+again, as a separate observation the report names as such.
+
+A's words records of a command (`safedeps-core words`: its payloads and their
+source maps, per reading) are read from the row when the run kept them, or
+from a file named with --attach PATH=SHA256, whose bytes must hash to the
+sha256 named. Such a file holds, per command, a line `== <the command as
+JSON>`, and per reading a line `-- <reading> rc <n>` followed by that
+reading's output. Nothing else is read for them: no manifest, and no copy of a
+value.
+
+A report of a schema this file does not read, and an attachment that does not
+hash or does not read, end the run with exit 2 before anything is classified.
+
 The accounting
 --------------
 
@@ -152,17 +206,20 @@ standard input, and the shells as an argument. No package manager runs.
 
 --sets names corpora; --extra alone runs only the files it names; neither runs
 every corpus. --list writes the selection and runs nothing. --reclassify
-classifies a saved report again and runs no guard and no shell; a report of
-the first schema is read with every axis it did not record as `unknown`.
+classifies a saved report again and runs no guard, no shell and no reader; a
+report of the first schema is read with every axis it did not record as
+`unknown`.
 --manifest writes one line for the run and one per row. --selftest checks the
 observation and the statuses against cases each of which an earlier version
 of this file got wrong.
 
 Exit: 0 only when every row is `same`, a named difference the shells show
 to hold (or one where nothing runs on the core's side), or `blocked`, and
-nothing in the accounting is red; 1 otherwise. A row undecided on both sides,
-any `decrease:` row and any row not observed are red. A blocked row is not
-red and not green: it is counted apart.
+nothing in the accounting or the intake is red; 1 otherwise; 2 when a report
+or an attachment cannot be read. A row undecided on both sides, any
+`decrease:` row, any row not observed, an invalid row, a row with invalid
+evidence and a reader answer that is not believed are red. A blocked row is
+not red and not green: it is counted apart.
 A named row whose npm calls are lost on both sides alike is listed as
 `shared-loss` and is not the core's red.
 --control and --selftest have their own.
@@ -174,8 +231,9 @@ Usage:
       [--release-tree DIR --approve eco:name:version ...] [--path-prefix DIRS]
       [--limit N] [--report FILE] [--table FILE] [--manifest FILE]
       [--list FILE] [--control]
-  core-inert-differential.py --reclassify REPORT [--path-prefix DIRS]
-      [--report FILE] [--table FILE] [--manifest FILE]
+  core-inert-differential.py --reclassify REPORT [--reread --path-prefix DIRS]
+      [--attach PATH=SHA256 ...] [--report FILE] [--table FILE]
+      [--manifest FILE]
   core-inert-differential.py --selftest [--path-prefix DIRS]
 """
 import argparse
@@ -201,6 +259,14 @@ FLAGWORD = "--ignore-scripts"
 NOTES = ("asked", "unverified", "floor", "unread", "release")
 SHELLS = ("bash", "zsh", "dash", "zsh-agent")
 COLLISION = b"collision "
+READING_NAMES = ("bash", "zsh", "dash")
+HEX64 = re.compile("^[0-9a-f]{64}$")
+FLOOR_FILE = "scripts/test/inert-release-rewrites.json"
+FLOOR_TREE = "the --floor-tree pre-guard's own answer"
+# A run's axes as the intake sorts them; EFFECTS are those beside the npm
+# calls, compared between two runs as they are. The exit status comes first.
+AXES = ("npm", "order", "other", "rc", "stdout", "stderr", "files")
+EFFECTS = ("rc", "stdout", "stderr", "other", "order", "files")
 
 DUMP = r'''
 # --- core-inert-differential: the inert value of every reading, as records ---
@@ -261,6 +327,9 @@ STUB_SUDO = '#!/bin/sh\nwhile [ $# -gt 0 ]; do case "$1" in -*) shift ;; *) brea
 # one and changes what the other prints has put a flag into data.
 STUB_SUDO_PRINT = '#!/bin/sh\nprintf \'%s\\0\' sudo "$#" "$@" >> "$NPMLOG"\nprintf \'%s\\n\' "$@"\n'
 STAND_INS = ("", "sudo-print")
+# Every program a stand-in writes a call for: a call of any other name in a
+# saved log was not written by this file.
+PROGRAMS = frozenset(["npm", "npx", "sudo"] + OTHERS)
 
 # The gate's own reading of npm's arguments, one argv a call, every field
 # ended by a NUL: `unread`, or `read`, the last value ignore-scripts takes,
@@ -635,6 +704,41 @@ def _grammar_value(name):
 INSTALL_VERB = re.compile("^(%s|%s)$" % (_grammar_value("SAFEDEPS_G_NPM_VERBS"), _grammar_value("SAFEDEPS_G_NPM_LINK_VERBS")), re.I)
 
 
+def reader_install(argv, g, n):
+    """Whether a call's command is an install or link verb, from the two
+    readers' answers for its argv: True or False where both say so, None
+    where one could not answer or the two disagree."""
+    if g is None or n is None or not g.get("read"):
+        return None
+    gw = g["words"][0] if g["words"] else None
+    gi = bool(gw is not None and INSTALL_VERB.match(gw))
+    nw = n["remain"][0] if n.get("remain") else None
+    if n.get("canon") is not None:
+        ni = n["canon"] in CANON_INSTALL
+    else:
+        ni = bool(nw is not None and INSTALL_VERB.match(nw))
+    if gw != nw or gi != ni:
+        return None
+    return gi
+
+
+def reader_flagged(g, n):
+    """Whether ignore-scripts ends true: both readers' answer, or None."""
+    if g is None or n is None or not g.get("read"):
+        return None
+    gt, nt = g["ignore"] == "true", n["ignore"] == "true"
+    return gt if gt == nt else None
+
+
+def reader_rest(g, n):
+    """Everything the readers found but ignore-scripts: two argvs with the
+    same rest differ at most in that option. None where a reader did not
+    answer."""
+    if g is None or n is None or not g.get("read"):
+        return None
+    return (tuple(g["words"]), tuple(g["switches"]), tuple(g["values"]), tuple(n["remain"]))
+
+
 class Readers:
     """What npm makes of an argv, asked of the gate's reader and of npm's own
     parser. Each answer is kept per argv; `None` is a reader that could not
@@ -713,39 +817,13 @@ class Readers:
             self.npm[a] = answers[k] if answers is not None and k < len(answers) else None
 
     def install(self, argv):
-        """Whether the call's command is an install or link verb: True or
-        False where both readers say so, None where one could not answer or
-        the two disagree."""
-        g, n = self.gate.get(tuple(argv)), self.npm.get(tuple(argv))
-        if g is None or n is None or not g.get("read"):
-            return None
-        gw = g["words"][0] if g["words"] else None
-        gi = bool(gw is not None and INSTALL_VERB.match(gw))
-        nw = n["remain"][0] if n.get("remain") else None
-        if n.get("canon") is not None:
-            ni = n["canon"] in CANON_INSTALL
-        else:
-            ni = bool(nw is not None and INSTALL_VERB.match(nw))
-        if gw != nw or gi != ni:
-            return None
-        return gi
+        return reader_install(argv, self.gate.get(tuple(argv)), self.npm.get(tuple(argv)))
 
     def flagged(self, argv):
-        """Whether ignore-scripts ends true: both readers' answer, or None."""
-        g, n = self.gate.get(tuple(argv)), self.npm.get(tuple(argv))
-        if g is None or n is None or not g.get("read"):
-            return None
-        gt, nt = g["ignore"] == "true", n["ignore"] == "true"
-        return gt if gt == nt else None
+        return reader_flagged(self.gate.get(tuple(argv)), self.npm.get(tuple(argv)))
 
     def rest(self, argv):
-        """Everything the readers found but ignore-scripts: two argvs with the
-        same rest differ at most in that option. None where a reader did not
-        answer."""
-        g, n = self.gate.get(tuple(argv)), self.npm.get(tuple(argv))
-        if g is None or n is None or not g.get("read"):
-            return None
-        return (tuple(g["words"]), tuple(g["switches"]), tuple(g["values"]), tuple(n["remain"]))
+        return reader_rest(self.gate.get(tuple(argv)), self.npm.get(tuple(argv)))
 
     def answers(self):
         """Every argv asked, with what each reader said, for the report."""
@@ -753,39 +831,652 @@ class Readers:
                  "install": self.install(list(a)), "flagged": self.flagged(list(a))} for a in sorted(self.gate)]
 
 
-class NoReaders:
-    """Stands where no reader was asked: every answer is unknown."""
-    npm_asked = False
-    npm_error = "no reader asked"
-    npm_version = ""
+# ---------------------------------------------------------------------------
+# The intake (see the header): one admission of every row's evidence.
+# ---------------------------------------------------------------------------
 
-    def ask(self, argvs):
-        pass
+class Unsupported(Exception):
+    """A report or an attachment this file cannot read: the run ends with
+    exit 2 before anything is classified."""
+
+
+MISSING = object()
+
+
+def _is_int(x):
+    return isinstance(x, int) and not isinstance(x, bool)
+
+
+def _strs(x):
+    return isinstance(x, list) and all(isinstance(y, str) for y in x)
+
+
+def _argvs(x):
+    return isinstance(x, list) and all(_strs(y) for y in x)
+
+
+def enc(recs):
+    """A side's records as the bytes they were read as."""
+    return {k: v.encode("latin-1") for k, v in recs.items()}
+
+
+def reader_entry_problem(e):
+    """What is wrong with one saved reader answer, or None. An answer is the
+    argv it is for and what each reader said: null where a reader could not
+    be asked, else exactly the fields GATE_READER and NPM_READER give."""
+    if not isinstance(e, dict):
+        return "not an object"
+    if not _strs(e.get("argv")):
+        return "argv is not a list of strings"
+    if "gate" not in e or "npm" not in e:
+        return "a reader's answer is not there (null stands for one not asked)"
+    g, n = e["gate"], e["npm"]
+    if g is not None:
+        if not isinstance(g, dict) or not isinstance(g.get("read"), bool):
+            return "the gate reader's answer is not one it gives"
+        if g["read"]:
+            if (set(g) != {"read", "ignore", "words", "switches", "values"} or g["ignore"] not in ("true", "false", "unset")
+                    or not all(_strs(g[f]) for f in ("words", "switches", "values"))):
+                return "the gate reader's answer is not one it gives"
+        elif set(g) != {"read"}:
+            return "the gate reader's answer is not one it gives"
+    if n is not None:
+        if (not isinstance(n, dict) or set(n) != {"remain", "ignore", "canon"} or not _strs(n["remain"])
+                or n["ignore"] not in ("true", "false", "unset") or not (n["canon"] is None or isinstance(n["canon"], str))):
+            return "npm's own parser's answer is not one it gives"
+    return None
+
+
+class SavedReaders:
+    """The readers' answers a run kept, admitted once, each bound to the exact
+    argv it is for. Nothing is asked: an argv with no admitted answer is
+    unknown, one answered twice is believed in neither answer, and no gap is
+    filled by asking again. `source` says where the answers come from. What
+    an entry says it derived (`install`, `flagged`) is not read: it is
+    computed again from the two answers, and an entry where the two differ is
+    counted in `rederived`."""
+
+    def __init__(self, entries, source):
+        self.source = dict(source)
+        self.gate, self.npm, self.problems, self.rederived = {}, {}, [], 0
+        twice = set()
+        if entries is not None and not isinstance(entries, list):
+            self.problems.append("readings: not a list")
+            entries = []
+        for k, e in enumerate(entries or []):
+            why = reader_entry_problem(e)
+            if why:
+                self.problems.append("readings[%d]: %s" % (k, why))
+                continue
+            key = tuple(e["argv"])
+            if key in self.gate or key in twice:
+                self.problems.append("readings[%d]: %s is answered twice" % (k, json.dumps(e["argv"])))
+                twice.add(key)
+                self.gate.pop(key, None)
+                self.npm.pop(key, None)
+                continue
+            self.gate[key], self.npm[key] = e["gate"], e["npm"]
+            for f, v in (("install", reader_install(e["argv"], e["gate"], e["npm"])), ("flagged", reader_flagged(e["gate"], e["npm"]))):
+                if f in e and e[f] != v:
+                    self.rederived += 1
+        self.npm_asked = any(n is not None for n in self.npm.values())
+        self.npm_version = self.source.get("npm_version") or ""
+        self.npm_error = self.source.get("npm_error") or ("" if self.npm_asked else "no answer of npm's own parser is held")
 
     def install(self, argv):
-        return None
+        return reader_install(argv, self.gate.get(tuple(argv)), self.npm.get(tuple(argv)))
 
     def flagged(self, argv):
-        return None
+        return reader_flagged(self.gate.get(tuple(argv)), self.npm.get(tuple(argv)))
 
     def rest(self, argv):
-        return None
+        return reader_rest(self.gate.get(tuple(argv)), self.npm.get(tuple(argv)))
 
     def answers(self):
-        return []
+        """Every admitted answer, for the report: what a later replay reads."""
+        return [{"argv": list(a), "gate": self.gate[a], "npm": self.npm[a], "install": self.install(list(a)),
+                 "flagged": self.flagged(list(a))} for a in sorted(self.gate)]
+
+
+def _stream(o, name):
+    n, h, t = o.get(name + "_len"), o.get(name + "_sha256"), o.get(name)
+    if not (_is_int(n) and n >= 0 and isinstance(h, str) and HEX64.match(h) and isinstance(t, str) and len(t) == min(n, 2000)):
+        return "invalid", "not a length, a sha256 and the first bytes"
+    if n <= 2000 and sha256(t.encode("latin-1", "replace")) != h:
+        return "invalid", "the bytes kept are not the sha256's"
+    return "ok", None
+
+
+def _files(f):
+    if not isinstance(f, dict):
+        return "invalid", "not a listing"
+    unreadable = False
+    for k, v in f.items():
+        if not isinstance(v, list) or not v:
+            return "invalid", "%s is not an entry" % k
+        t = v[0]
+        if t == "d" and len(v) == 1:
+            continue
+        if t == "l" and len(v) == 2 and isinstance(v[1], str):
+            continue
+        if t == "f" and len(v) == 3 and _is_int(v[1]) and v[1] >= 0 and isinstance(v[2], str) and HEX64.match(v[2]):
+            continue
+        if t == "?" and len(v) == 2 and isinstance(v[1], str):
+            unreadable = True
+            continue
+        return "invalid", "%s is not an entry" % k
+    return ("unknown", "a file could not be read") if unreadable else ("ok", None)
+
+
+def admit_obs(o, schema):
+    """Sorts one shell's run into its axes (AXES): `ok`, `unknown` or
+    `invalid`, each with why where it is not ok. Sets `_axes` and `_why` on
+    the run and returns (axis, kind, why) for each axis that is not ok."""
+    ax, why = {}, {}
+
+    def put(axis_, val, reason=None):
+        ax[axis_] = val
+        if reason:
+            why[axis_] = reason
+
+    if not isinstance(o, dict):
+        return [(x, "invalid", "the run is not an object") for x in AXES]
+    for k in [k for k in o if k.startswith("_")]:
+        del o[k]
+    if schema == 1:
+        if o.get("lossy"):
+            put("npm", UNKNOWN, "the first schema split its arguments at tabs and newlines")
+        elif o.get("log") == "ok" and _argvs(o.get("npm")):
+            put("npm", "ok")
+        else:
+            put("npm", UNKNOWN, "the first schema kept no npm calls that read")
+        for x in AXES[1:]:
+            put(x, UNKNOWN, "the first schema did not keep it")
+    else:
+        rc, to = o.get("rc", MISSING), o.get("timeout", MISSING)
+        timed = to is True
+        if not isinstance(to, bool):
+            put("rc", "invalid", "timeout is not true or false")
+            timed = True
+        elif rc == "timeout" or (_is_int(rc) and rc == -14):
+            if to:
+                put("rc", UNKNOWN, "killed at its deadline")
+            else:
+                put("rc", "invalid", "a deadline's exit status, and timeout false")
+        elif _is_int(rc):
+            if to:
+                put("rc", "invalid", "timeout true, and an exit status of its own")
+            else:
+                put("rc", "ok")
+        else:
+            put("rc", "invalid", "not an exit status")
+        log, calls = o.get("log"), o.get("calls", MISSING)
+        if log == "undecodable":
+            if all(o.get(k) == UNKNOWN for k in ("calls", "npm", "other")):
+                for x in ("npm", "order", "other"):
+                    put(x, UNKNOWN, "its log does not decode")
+            else:
+                for x in ("npm", "order", "other"):
+                    put(x, "invalid", "calls held for a log that does not decode")
+        elif log == "ok" and isinstance(calls, list) and all(_strs(y) and y and y[0] in PROGRAMS for y in calls):
+            npm_ok = o.get("npm") == [y[1:] for y in calls if y[0] == "npm"]
+            other_ok = o.get("other") == [y for y in calls if y[0] != "npm"]
+            put("npm", "ok" if npm_ok else "invalid", None if npm_ok else "npm is not the npm calls of calls")
+            put("other", "ok" if other_ok else "invalid", None if other_ok else "other is not the other calls of calls")
+            put("order", "ok")
+            if timed:
+                for x in ("npm", "order", "other"):
+                    if ax[x] == "ok":
+                        put(x, UNKNOWN, "killed at its deadline: its calls may stop short")
+        else:
+            for x in ("npm", "order", "other"):
+                put(x, "invalid", "no calls of stand-ins in the order they ran" if log == "ok" else "log is neither ok nor undecodable")
+        for x in ("stdout", "stderr"):
+            put(x, *_stream(o, x))
+        put("files", *_files(o.get("files", MISSING)))
+        if "lossy" in o:
+            for x in ("npm", "order", "other"):
+                put(x, "invalid", "a run of this schema is never split at blanks")
+    o["_axes"], o["_why"] = ax, why
+    return [(x, ax[x], why.get(x, "")) for x in AXES if ax[x] != "ok"]
+
+
+def axis(o, name):
+    """An admitted run's axis: `ok`, `unknown` or `invalid`. A run the intake
+    did not see is evidence of nothing."""
+    ax = o.get("_axes") if isinstance(o, dict) else None
+    if not isinstance(ax, dict):
+        return UNKNOWN
+    return ax.get(name, UNKNOWN)
+
+
+def records_problem(recs, who):
+    """What is wrong with one side's inert records, or None. A reading with
+    no value is not this: it is the status `incomplete`."""
+    if not isinstance(recs, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in recs.items()):
+        return "%s: the records are not names and values" % who
+    try:
+        enc(recs)
+    except UnicodeEncodeError:
+        return "%s: a value is not the bytes it was read as" % who
+    if not recs:
+        return None
+    raw = recs.get("reading_set")
+    if not isinstance(raw, str):
+        return "%s: no reading set" % who
+    rs = raw.split()
+    if recs.get("any_install", "true") not in ("true", "false"):
+        return "%s: any_install is neither true nor false" % who
+    if recs.get("failed") not in ("true", "false"):
+        return "%s: failed is neither true nor false" % who
+    if raw != " ".join(rs):
+        return "%s: the reading set is not names one blank apart" % who
+    strange = [r for r in rs if r not in READING_NAMES]
+    if strange:
+        return "%s: a reading this file does not know (%s)" % (who, strange[0])
+    if len(set(rs)) != len(rs):
+        return "%s: a reading named twice" % who
+    outside = [k for k in recs if "." in k and k.split(".", 1)[0] in ("inert", "payloads", "detail") and k.split(".", 1)[1] not in rs]
+    if outside:
+        return "%s: a value for a reading outside the set (%s)" % (who, outside[0])
+    if recs.get("any_install", "true") == "true" and not rs:
+        return "%s: an install read in no reading" % who
+    return None
+
+
+SIDE_DECISIONS = {"written": ("run",), "bash": ("run", "deny", "blocked"), "core": ("run", "deny", "blocked"),
+                  "v2.18.1": ("run", "deny"), "7d66f8c": ("run", "deny"), "head": ("allow", "deny")}
+DERIVED_ROW = ("status", "tokens", "label", "obs", "payload_free", "payload_free_basis", "class_refused", "class_basis",
+               "readings_differ", "blocked", "expect_failed", "true_to_false", "evidence", "reach", "core_readings")
+DERIVED_SIDE = ("state", "state_words", "state_npm")
+
+
+def admit_side(res, name, v, schema, cb):
+    """The problems of one side of a row: (where, kind, why)."""
+    out = []
+    where = "side %s" % name
+
+    def bad(why, kind="invalid"):
+        out.append((where, kind, why))
+
+    if name not in SIDE_DECISIONS:
+        bad("a side this file does not write")
+        return out
+    if not isinstance(v, dict):
+        bad("not an object")
+        return out
+    for k in DERIVED_SIDE:
+        v.pop(k, None)
+    d = v.get("decision")
+    if d not in SIDE_DECISIONS[name]:
+        bad("decision %r" % (d,))
+        return out
+    if name == "head":
+        if not isinstance(v.get("reason", ""), str) or not _is_int(v.get("guard_rc", 0)):
+            bad("the pre-guard's answer is not one this file writes")
+        return out
+    o = None
+    if name in ("bash", "core"):
+        recs = res.get("ref" if name == "bash" else "core") or {}
+        o = consensus(enc(recs), cb) if recs else None
+        want = None if o is None else "blocked" if o == "blocked" else "deny" if (o == "deny" or recs.get("failed") == "true") else "run"
+        if d != want:
+            bad("decision %s where its readings say %s" % (d, want))
+            return out
+    if d != "run":
+        if "shells" in v:
+            bad("a side that sends nothing has runs")
+        return out
+    run = v.get("run", MISSING)
+    if not isinstance(run, str):
+        if run is MISSING and schema == 1:
+            bad("the first schema kept no run bytes for it", UNKNOWN)
+        else:
+            bad("no run bytes")
+    else:
+        rb = cmd_bytes(run)
+        if name == "written" and rb != cb:
+            bad("the command as written is not what it ran")
+        if name in ("bash", "core"):
+            if o[2] != rb:
+                bad("it ran bytes that are not what its readings agree on")
+            rec = v.get("record", MISSING)
+            if rec is MISSING:
+                v["record"] = bool(records_of(o))
+            elif rec is not bool(records_of(o)):
+                bad("record is not what its value carries")
+        if name in ("v2.18.1", "7d66f8c"):
+            fl = v.get("flags", MISSING)
+            if fl is MISSING and schema == 1:
+                bad("the first schema kept no flags for it", UNKNOWN)
+            elif fl != flag_positions(cb, rb):
+                bad("flags are not where its run inserts them")
+            if not isinstance(v.get("record"), bool):
+                bad("record is not true or false")
+    sh = v.get("shells", MISSING)
+    if not isinstance(sh, dict):
+        if sh is MISSING and schema == 1:
+            bad("the first schema kept no runs for it", UNKNOWN)
+        else:
+            bad("a side that ran has no runs")
+        return out
+    for s_, ob in sh.items():
+        if s_ not in SHELLS:
+            bad("a shell this file does not run (%s)" % s_)
+            continue
+        for x, kind, why in admit_obs(ob, schema):
+            out.append(("%s shell %s %s" % (where, s_, x), kind, why))
+    return out
+
+
+def words_records(b, p=0):
+    """The records of one `safedeps-core words` output in `b` from offset
+    `p`: ({"payloads": [(kind, text, src)], "failed": n}, the offset after its
+    `failed` line), or None where the bytes are not that program's records.
+    Every record that carries bytes says how many, and is read by that."""
+    ys = []
+    while True:
+        nl = b.find(b"\n", p)
+        if nl < 0:
+            return None
+        parts = b[p:nl].split(b" ")
+        p = nl + 1
+        tag = parts[0]
+        try:
+            if tag in (b"unterm", b"unreadable") and len(parts) == 2:
+                int(parts[1])
+            elif tag == b"P" and len(parts) == 5:
+                [int(x) for x in parts[1:]]
+            elif tag in (b"W", b"V") and len(parts) == (4 if tag == b"W" else 2):
+                n = int(parts[-1])
+                if n < 0 or b[p + n:p + n + 1] != b"\n":
+                    return None
+                p += n + 1
+            elif tag == b"Y" and len(parts) == 3 and len(parts[1]) == 1:
+                n = int(parts[2])
+                text = b[p:p + n]
+                if n < 0 or len(text) != n or b[p + n:p + n + 2] != b"\nS":
+                    return None
+                q = b.find(b"\n", p + n + 2)
+                if q < 0:
+                    return None
+                src = [None if t == b"-" else int(t) for t in b[p + n + 2:q].split()]
+                if len(src) != n or any(x is not None and x < 0 for x in src):
+                    return None
+                ys.append((parts[1].decode("latin-1"), text, src))
+                p = q + 1
+            elif tag == b"failed" and len(parts) == 2:
+                return {"payloads": ys, "failed": int(parts[1])}, p
+            else:
+                return None
+        except ValueError:
+            return None
+
+
+def parse_words_file(raw):
+    """A words file (see The intake): {command: {reading: {"rc", "payloads",
+    "failed"}}}. Raises Unsupported where the bytes are not that format."""
+    try:
+        b = raw.decode("utf-8").encode("latin-1")
+    except (UnicodeDecodeError, UnicodeEncodeError):
+        raise Unsupported("not the bytes a words file holds")
+    out, cur, p = {}, None, 0
+    while p < len(b):
+        nl = b.find(b"\n", p)
+        if nl < 0:
+            raise Unsupported("a line with no end at byte %d" % p)
+        line, at = b[p:nl], p
+        p = nl + 1
+        if line.startswith(b"== "):
+            try:
+                text = json.loads(line[3:].decode("latin-1"))
+            except ValueError:
+                raise Unsupported("a command that is not JSON at byte %d" % at)
+            if not isinstance(text, str) or text in out:
+                raise Unsupported("a command named twice, or not a string, at byte %d" % at)
+            cur = out[text] = {}
+            continue
+        m = re.match(rb"^-- ([a-z]+) rc (-?[0-9]+)$", line)
+        if cur is None or not m:
+            raise Unsupported("not a words file at byte %d" % at)
+        rd, rc = m.group(1).decode(), int(m.group(2))
+        if rd not in READING_NAMES or rd in cur:
+            raise Unsupported("a reading this file does not know, or named twice, at byte %d" % at)
+        if rc != 0:
+            cur[rd] = {"rc": rc, "payloads": None, "failed": None}
+            continue
+        got = words_records(b, p)
+        if got is None:
+            raise Unsupported("the words records of %s at byte %d do not read" % (rd, at))
+        rec, p = got
+        cur[rd] = dict(rec, rc=0)
+    return out
+
+
+def core_run(res):
+    """The bytes the core's readings agree to run, or None."""
+    recs = res.get("core") or {}
+    try:
+        o = consensus(enc(recs), cmd_bytes(res["command"])) if recs else None
+    except (UnicodeEncodeError, KeyError, AttributeError):
+        return None
+    return o[2].decode("utf-8", "surrogateescape") if isinstance(o, tuple) else None
+
+
+def admit_words(res, key, text, p3, note):
+    """A's words records a run kept for `text` (`words` for the command,
+    `words_rewrite` for the core's rewrite): {reading: records}, or None where
+    the row holds none that are evidence."""
+    w = res.get(key, MISSING)
+    if w is MISSING:
+        return None
+    if not isinstance(w, dict) or not isinstance(w.get("readings"), dict) or w.get("text") != text:
+        note(key, "invalid", "not A's words records of %s" % ("the command" if key == "words" else "the core's rewrite"))
+        return None
+    out = {}
+    for rd, x in w["readings"].items():
+        if rd not in READING_NAMES or not isinstance(x, dict) or not _is_int(x.get("rc")) or not isinstance(x.get("stdout"), str):
+            note(key, "invalid", "a reading's record is not one this file writes")
+            return None
+        try:
+            raw = x["stdout"].encode("latin-1")
+        except UnicodeEncodeError:
+            note(key, "invalid", "%s: the output is not the bytes it was read as" % rd)
+            return None
+        if sha256(raw) != x.get("stdout_sha256"):
+            note(key, "invalid", "%s: the output is not its sha256's" % rd)
+            return None
+        if x["rc"] != 0:
+            out[rd] = {"rc": x["rc"], "payloads": None, "failed": None}
+            continue
+        got = words_records(raw)
+        if got is None or got[1] != len(raw):
+            note(key, "invalid", "%s: the output is not words records" % rd)
+            return None
+        out[rd] = dict(got[0], rc=0)
+        if key == "words" and isinstance(p3, dict) and p3.get(rd) != len(got[0]["payloads"]):
+            note(key, "invalid", "%s: the row's payload count is not A's" % rd)
+            return None
+    return out
+
+
+def floor_of(res, floor_rows, basis):
+    """The release floor of a row, from what the row holds: (value, basis), or
+    (None, None) where it holds nothing to hold the core's rewrite to."""
+    cmd = res["command"]
+    cb = cmd_bytes(cmd)
+    got = enc(res.get("core") or {})
+    o = consensus(got, cb) if got else None
+    if basis == FLOOR_FILE:
+        if cmd not in floor_rows:
+            return None, None
+        if floor_rows[cmd] is None:
+            return "release-none", basis
+        target = cmd_bytes(floor_rows[cmd])
+    elif basis == FLOOR_TREE:
+        f7 = (res.get("sides") or {}).get("7d66f8c")
+        if not isinstance(f7, dict):
+            return None, None
+        if f7.get("decision") != "run":
+            return "release-deny", basis
+        if not isinstance(f7.get("run"), str):
+            return None, None
+        if f7["run"] == cmd:
+            return "release-none", basis
+        target = cmd_bytes(f7["run"])
+    else:
+        return None, None
+    if o is None or o in ("deny", "blocked"):
+        return {"deny": "core-deny", "blocked": "core-blocked"}.get(o, "core-none"), basis
+    if o[0] != "rewrite":
+        return "NOT: the core writes no rewrite", basis
+    return ("ok" if subseq(o[2], target, cb) else "NOT"), basis
+
+
+def admit(res, k, source, schema, floor_rows, measured_argv):
+    """The intake of one row (see The intake). Sets `evidence`, and
+    `_invalid_row` where the row's own records cannot be read; keeps A's
+    words records that are evidence in `_words`."""
+    if not isinstance(res, dict):
+        return
+    for key in DERIVED_ROW:
+        res.pop(key, None)
+    for key in [x for x in res if x.startswith("_")]:
+        del res[key]
+    ev = {"schema": schema, "from": dict(source, row=k + 1), "invalid": [], "unknown": []}
+    res["evidence"] = ev
+
+    def note(where, kind, why):
+        ev["invalid" if kind == "invalid" else "unknown"].append("%s: %s" % (where, why))
+
+    def row_invalid(why):
+        note("row", "invalid", why)
+        res["_invalid_row"] = why
+
+    cmd = res.get("command")
+    if not isinstance(cmd, str) or not isinstance(res.get("set"), str):
+        return row_invalid("no command or no set")
+    cb = cmd_bytes(cmd)
+    ev["from"]["command_sha256"] = sha256(cb)
+    if not _is_int(res.get("core_rc")):
+        return row_invalid("the core's exit status is not one")
+    for key, who in (("ref", "the bash guard"), ("core", "the core")):
+        why = records_problem(res[key], who) if key in res else "%s: no records" % who
+        if why:
+            return row_invalid(why)
+    p3 = res.get("payloads3", MISSING)
+    if p3 is MISSING:
+        if schema != 1:
+            return row_invalid("no payload counts")
+        note("payloads3", UNKNOWN, "the first schema did not keep them")
+        p3 = None
+    elif not (isinstance(p3, dict) and set(p3) == set(READING_NAMES)
+              and all(p3[r] is None or (_is_int(p3[r]) and p3[r] >= 0) for r in READING_NAMES)):
+        return row_invalid("the payload counts are not three counts")
+    if res.get("stand_ins", "") not in STAND_INS:
+        note("stand_ins", "invalid", "stand-ins this file does not have")
+    if not isinstance(res.get("expect", ""), str):
+        note("expect", "invalid", "not a word")
+    words = {"words": admit_words(res, "words", cmd, p3, note)}
+    run = core_run(res)
+    if run is not None:
+        words["words_rewrite"] = admit_words(res, "words_rewrite", run, p3, note)
+    elif "words_rewrite" in res:
+        note("words_rewrite", "invalid", "words of a rewrite the core does not send")
+    res["_words"] = words
+    saved_floor, basis = res.pop("floor", None), res.pop("floor_basis", None)
+    if basis is None and saved_floor is not None and "--floor" in measured_argv:
+        basis = FLOOR_FILE
+    if saved_floor is not None or basis is not None:
+        v, b = floor_of(res, floor_rows, basis)
+        if v is None:
+            note("floor", UNKNOWN if basis == FLOOR_FILE else "invalid",
+                 "the floor %r has nothing in the row, or in this tree's recorded rewrites, to hold it to" % (saved_floor,))
+        else:
+            if saved_floor is not None and saved_floor != v:
+                note("floor", "invalid", "saved %r, computed again from the row %r" % (saved_floor, v))
+            res["floor"], res["floor_basis"] = v, b
+    sides = res.get("sides", MISSING)
+    if sides is MISSING:
+        return
+    if not isinstance(sides, dict):
+        note("sides", "invalid", "not an object")
+        return
+    for name, v in sides.items():
+        for where, kind, why in admit_side(res, name, v, schema, cb):
+            note(where, kind, why)
+
+
+def words_of(res, which, attachments):
+    """A's words records, per reading, of the command (`words`) or of the
+    core's rewrite (`words_rewrite`): from the row where the run kept them as
+    evidence, else from an attachment that holds the same text. None where
+    neither does."""
+    held = (res.get("_words") or {}).get(which)
+    if held is not None:
+        return held
+    text = res["command"] if which == "words" else core_run(res)
+    return (attachments or {}).get(text) if text is not None else None
+
+
+def decode_report(saved):
+    """The schema a saved report was written in, and its rows read as this
+    file's. The first schema (no `schema` field, each side's npm calls under
+    `calls`) is read with what it did not keep left out; a report this file
+    wrote from one carries `upgraded_from_schema` 1 and is read the same.
+    Raises Unsupported for anything else: it is not guessed at."""
+    if not isinstance(saved, dict) or not isinstance(saved.get("rows"), list):
+        raise Unsupported("no rows")
+    if "schema" in saved:
+        if saved["schema"] != SCHEMA:
+            raise Unsupported("schema %r" % (saved["schema"],))
+        up = saved.get("upgraded_from_schema", MISSING)
+        if up is MISSING:
+            return 2, saved["rows"]
+        if up != 1:
+            raise Unsupported("upgraded from schema %r" % (up,))
+        return 1, saved["rows"]
+    for k, res in enumerate(saved["rows"]):
+        sides = res.get("sides", {}) if isinstance(res, dict) else None
+        if not isinstance(sides, dict) or any(not isinstance(v, dict) or ("calls" not in v and v.get("state") != "DENY")
+                                              for v in sides.values()):
+            raise Unsupported("row %d is in neither schema" % (k + 1))
+    # The first schema kept each side's npm calls split at tabs and newlines
+    # and, for the bash and core sides, nothing else; its `shells` beside the
+    # command as written came from one object two jobs shared, so no exit
+    # status in it belongs to a row for certain. A command that can hand npm a
+    # tab or a newline has its calls marked lossy.
+    risky = re.compile(r"[\t\n]|\\[tn]|\$'")
+    for res in saved["rows"]:
+        lossy = bool(risky.search(res.get("command", "")))
+        for side, v in res.get("sides", {}).items():
+            calls = v.pop("calls", None)
+            old_state = v.pop("state", None)
+            v.pop("state_npm", None)
+            meta = v.pop("shells", None)
+            if old_state == "DENY":
+                v["decision"] = "deny"
+                continue
+            v["decision"] = "run"
+            if meta is not None:
+                v["schema1_shells"] = meta
+            if isinstance(calls, dict):
+                v["shells"] = {sh: {"rc": UNKNOWN, "timeout": False, "log": "ok", "npm": cs, "calls": UNKNOWN, "other": UNKNOWN,
+                                    "files": UNKNOWN, "stdout_sha256": UNKNOWN, "stderr_sha256": UNKNOWN, "lossy": lossy}
+                               for sh, cs in calls.items()}
+    return 1, saved["rows"]
 
 
 def whole(obs):
-    """A run observed whole: it ended by itself, its log decodes, and its
-    exit status is its own."""
-    return calls_known(obs) and obs.get("rc") not in (UNKNOWN, "timeout")
+    """A run observed whole: its npm calls and its exit status are evidence
+    (it ended by itself, its log decoded, and its records are what this file
+    writes)."""
+    return calls_known(obs) and axis(obs, "rc") == "ok"
 
 
 def calls_known(obs):
-    """The npm calls of a run are known: its log decodes and it ended by
-    itself, whatever else of it was recorded."""
-    return (isinstance(obs, dict) and obs.get("log") == "ok" and isinstance(obs.get("npm"), list)
-            and not obs.get("timeout") and obs.get("rc") != "timeout" and not obs.get("lossy"))
+    """The npm calls of a run are evidence (see The intake)."""
+    return axis(obs, "npm") == "ok"
 
 
 def install_calls(obs, R):
@@ -862,14 +1553,24 @@ def flag_edit(w, s):
     return ins if i == len(w) else None
 
 
+def effect_value(o, name):
+    """An admitted run's value on one of EFFECTS."""
+    if name in ("stdout", "stderr"):
+        return (o[name + "_len"], o[name + "_sha256"])
+    if name == "order":
+        return [x[0] for x in o["calls"]]
+    return o[name]
+
+
 def relate(w, s, R):
     """How a side's run relates to the run of the command as written, in one
-    shell. `npm` is `unknown` (a run's calls are not known), `identical`,
-    `flags-added`, `call-lost`, `call-added`, `argument-changed`,
-    `flag-unconsumed` (an inserted flag stands after a `--`, or npm does not
-    read it as a true option, or it changes something else npm reads) or
-    `reading-unknown` (a reader did not answer). The other axes are `same`,
-    `differ` or `unknown`."""
+    shell. `npm` is `unknown` (a run's npm calls are not evidence), `invalid`,
+    `identical`, `flags-added`, `call-lost`, `call-added`,
+    `argument-changed`, `flag-unconsumed` (an inserted flag stands after a
+    `--`, or npm does not read it as a true option, or it changes something
+    else npm reads) or `reading-unknown` (a reader did not answer). Each of
+    EFFECTS is `same`, `differ`, `unknown` or `invalid`: two runs compare only
+    where both hold the axis as evidence."""
     out = {"npm": UNKNOWN}
     if calls_known(w) and calls_known(s):
         wn, sn = w["npm"], s["npm"]
@@ -899,14 +1600,14 @@ def relate(w, s, R):
                     kind = "flag-unconsumed"
                     break
             out["npm"] = kind
-    for axis in ("rc", "stdout_sha256", "stderr_sha256", "other", "files"):
-        a = w.get(axis, UNKNOWN) if isinstance(w, dict) else UNKNOWN
-        b = s.get(axis, UNKNOWN) if isinstance(s, dict) else UNKNOWN
-        name = axis.replace("_sha256", "")
-        if a == UNKNOWN or b == UNKNOWN or a == "timeout" or b == "timeout":
-            out[name] = UNKNOWN
+    elif "invalid" in (axis(w, "npm"), axis(s, "npm")):
+        out["npm"] = "invalid"
+    for name in EFFECTS:
+        aw, as_ = axis(w, name), axis(s, name)
+        if aw == "ok" and as_ == "ok":
+            out[name] = "same" if effect_value(w, name) == effect_value(s, name) else "differ"
         else:
-            out[name] = "same" if a == b else "differ"
+            out[name] = "invalid" if "invalid" in (aw, as_) else UNKNOWN
     return out
 
 
@@ -914,13 +1615,15 @@ def side_verdict(res, side, R):
     """What the shells show of a side beside the command as written:
 
       npm      `deny` or `blocked` (the side sends no command: its readings
-               disagree or one failed, or its duties collide), `unknown`,
-               `loss` (a call
+               disagree or one failed, or its duties collide), `loss` (a call
                gone or added, an argument changed, a flag that is no option
-               to npm, or a SILENT state), `nocall` (no shell made an install
-               call), or `ok`
-      effects  `same`, `differ:<axes>` or `unknown`, over the exit status,
-               stdout, stderr, the other stand-ins' calls and the files left
+               to npm, or a SILENT state: a loss seen in one shell is not
+               hidden by another shell that cannot be read), `invalid` (a run
+               holds a record that is not what this file writes), `unknown`,
+               `nocall` (no shell made an install call), or `ok`
+      effects  `same`, `differ:<axes>`, `invalid` or `unknown`, over the exit
+               status, stdout, stderr, the other stand-ins' calls, the order
+               of every call and the files left
       shells   per shell, the relation and the states
     """
     sides = res.get("sides", {})
@@ -934,6 +1637,7 @@ def side_verdict(res, side, R):
         return v
     rec = bool(s.get("record"))
     unknown = bad = eff_unknown = False
+    has_invalid = eff_invalid = False
     installs = 0
     differ = set()
     for sh in SHELLS:
@@ -945,19 +1649,23 @@ def side_verdict(res, side, R):
         r["state"] = state(ss[sh], rec, R)
         r["written_state"] = state(ws[sh], False, R)
         v["shells"][sh] = r
-        if r["npm"] in (UNKNOWN, "reading-unknown") or r["state"] == "UNKNOWN" or r["written_state"] == "UNKNOWN":
+        if r["npm"] == "invalid":
+            has_invalid = True
+        if r["npm"] in (UNKNOWN, "reading-unknown", "invalid") or r["state"] == "UNKNOWN" or r["written_state"] == "UNKNOWN":
             unknown = True
         if r["npm"] in ("call-lost", "call-added", "argument-changed", "flag-unconsumed") or r["state"] == "SILENT":
             bad = True
         if r["state"] in ("FLAG", "REC", "SILENT"):
             installs += 1
-        for axis in ("rc", "stdout", "stderr", "other", "files"):
-            if r[axis] == "differ":
-                differ.add(axis)
-            elif r[axis] == UNKNOWN:
+        for axis_ in EFFECTS:
+            if r[axis_] == "differ":
+                differ.add(axis_)
+            elif r[axis_] == "invalid":
+                eff_invalid = True
+            elif r[axis_] == UNKNOWN:
                 eff_unknown = True
-    v["npm"] = "loss" if bad else UNKNOWN if unknown else "ok" if installs else "nocall"
-    v["effects"] = "differ:" + ",".join(sorted(differ)) if differ else UNKNOWN if eff_unknown else "same"
+    v["npm"] = "loss" if bad else "invalid" if has_invalid else UNKNOWN if unknown else "ok" if installs else "nocall"
+    v["effects"] = "differ:" + ",".join(sorted(differ)) if differ else "invalid" if eff_invalid else UNKNOWN if eff_unknown else "same"
     return v
 
 
@@ -1046,11 +1754,13 @@ def core_decision(res):
     """What the core does with a row: `sent` (a rewrite every reading agrees
     on), `as-written` (none: the command runs as given), `blocked` (a reading
     holds a collision), `undecided` (its readings disagree or one failed),
-    `no-install` (it reads no install) or `unobserved` (it ended non-zero, or
-    a reading has no value)."""
+    `no-install` (it reads no install), `unobserved` (it ended non-zero, or
+    a reading has no value) or `invalid` (the row's records do not read)."""
+    if res.get("_invalid_row") or res.get("status") == "invalid":
+        return "invalid"
     if res.get("core_rc") != 0 or not res.get("core"):
         return "unobserved"
-    got = {k: v.encode("latin-1") for k, v in res["core"].items()}
+    got = enc(res["core"])
     if got.get("any_install") != b"true":
         return "no-install"
     cb = cmd_bytes(res["command"])
@@ -1078,14 +1788,31 @@ def accounting(results, R):
     A row is in a number only where the thing counted was observed. A row the
     core blocks or leaves UNDECIDED runs nothing on the core's side: it is in
     no count of what ran, of a floor kept or of a call that kept its flag, and
-    a row with no run observed is `not observed`, never held."""
+    a row with no run observed is `not observed`, never held. An invalid row,
+    and a row with any invalid evidence, holds nothing: it is listed apart
+    and is in no other count."""
     acc = {"rows": len(results), "core": {}, "ran_observed": 0, "ran_unobserved": 0, "npm_rows": {}, "effects_rows": {},
-           "relations": {}, "effects_shells": {}, "floor_of_sent": {}, "sent_notes": {}, "sent_not_held": [], "pairs": {}}
-    bases = [b for b in ("bash", "v2.18.1", "7d66f8c") if any(b in res.get("sides", {}) for res in results)]
+           "relations": {}, "effects_shells": {}, "floor_of_sent": {}, "sent_notes": {}, "sent_not_held": [], "pairs": {},
+           "evidence_invalid": []}
+    bases = [b for b in ("bash", "v2.18.1", "7d66f8c") if any(b in (res.get("sides") or {}) for res in results)]
+
+    def pair(base):
+        return acc["pairs"].setdefault(base, dict({x: 0 for x in PAIR_KEYS}, rows=0, true_to_false_rows=0, state_pairs=0,
+                                                  state_unknown=0, new_silent_rows=0, new_silent_shells=0, not_paired={}))
+
     for k, res in enumerate(results):
         res.pop("true_to_false", None)
         d = core_decision(res)
         acc["core"][d] = acc["core"].get(d, 0) + 1
+        ev_invalid = bool((res.get("evidence") or {}).get("invalid"))
+        if d == "invalid" or ev_invalid:
+            if d != "invalid":
+                acc["evidence_invalid"].append(k)
+            why_ = "the row is invalid" if d == "invalid" else "its evidence is invalid"
+            for base in bases:
+                p = pair(base)
+                p["not_paired"][why_] = p["not_paired"].get(why_, 0) + 1
+            continue
         sides = res.get("sides", {})
         c = sides.get("core")
         if d == "sent":
@@ -1094,7 +1821,7 @@ def accounting(results, R):
             # What the rewrite says of itself. `unverified` is a word the
             # shell decides at run time: npm was not asked about it, so such a
             # row is never one where the option was read as true.
-            o = consensus({x: v.encode("latin-1") for x, v in res["core"].items()}, cmd_bytes(res["command"]))
+            o = consensus(enc(res["core"]), cmd_bytes(res["command"]))
             for note in sorted(o[1] & set(NOTES)) or ["no note"]:
                 acc["sent_notes"][note] = acc["sent_notes"].get(note, 0) + 1
         if d in ("sent", "as-written"):
@@ -1108,17 +1835,16 @@ def accounting(results, R):
                 acc["effects_rows"][e] = acc["effects_rows"].get(e, 0) + 1
                 for sh, r in cv["shells"].items():
                     acc["relations"][r.get("npm")] = acc["relations"].get(r.get("npm"), 0) + 1
-                    for axis in ("rc", "stdout", "stderr", "other", "files"):
-                        if r.get(axis) in ("differ", UNKNOWN):
-                            key = "%s %s" % (axis, r[axis])
+                    for axis_ in EFFECTS:
+                        if r.get(axis_) in ("differ", UNKNOWN, "invalid"):
+                            key = "%s %s" % (axis_, r[axis_])
                             acc["effects_shells"][key] = acc["effects_shells"].get(key, 0) + 1
                 # A rewrite the core sends is held to the command as written,
                 # whatever the bash side does with the same bytes.
-                if d == "sent" and (cv["npm"] in ("loss", UNKNOWN) or e != "same"):
+                if d == "sent" and (cv["npm"] in ("loss", UNKNOWN, "invalid") or e != "same"):
                     acc["sent_not_held"].append(k)
         for base in bases:
-            p = acc["pairs"].setdefault(base, dict({x: 0 for x in PAIR_KEYS}, rows=0, true_to_false_rows=0, state_pairs=0,
-                                                   state_unknown=0, new_silent_rows=0, new_silent_shells=0, not_paired={}))
+            p = pair(base)
             b = sides.get(base)
             cs_, bs_ = (c or {}).get("shells"), (b or {}).get("shells")
             why = None
@@ -1189,14 +1915,10 @@ CODE_CHECKED = ("argument-substitution-preserved",)
 # script-payload-read already names (plan safedeps/guard-core-inert,
 # 2026-10-07 05:40), by the conditions of env_split_string_read and by nothing
 # else: no pattern for `env -S` is added and that class's pattern is as it was.
-# The string in quotes is the payload the structure names (its `npm` at byte
-# 18 of the command, its last byte at 25), and the core's one added flag goes
-# after the string's last word, at byte 26, inside the closing quote.
+# Where the payload stands and where its last byte is are A's to say (its words
+# records, held by the row or attached); this file holds no offset of its own.
 ENV_SPLIT_INPUT = "npm i y && env -S'npm ci x'"
-ENV_SPLIT_NPM = 18
-ENV_SPLIT_PLACE = 26
 ENV_SPLIT_CLASS = "script-payload-read"
-ENV_SPLIT_CALLS = [["i", "y"], ["ci", "x"]]
 
 
 def substitution_bodies(cmd):
@@ -1224,6 +1946,8 @@ def argument_substitution_preserved(res):
     cmd = res["command"]
     if cmd != ARGUMENT_SUBSTITUTION_INPUT:
         return "not the input"
+    if (res.get("evidence") or {}).get("invalid"):
+        return "the row's evidence is invalid: %s" % res["evidence"]["invalid"][0]
     if res.get("floor") != "ok":
         return "the release floor is not shown kept (run with --floor)"
     cb = cmd.encode()
@@ -1257,27 +1981,54 @@ def argument_substitution_preserved(res):
     return None
 
 
-def env_split_string_read(res, R):
+def env_split_string_read(res, R, attachments):
     """The one input adopted under script-payload-read by its conditions:
-    every condition holds, or the first that does not. What is asked: the
-    exact bytes; in every reading of the set, a rewrite on both sides, the
-    core's flags being the bash rewrite's and one more at the end of the
-    split string, the core's own detail naming an install read in a payload
-    with its `npm` and its place there, and the unread record kept; the
-    release floor shown kept; and in every shell the command as written making
-    its two calls, the core's command making the same two with flags added
-    that npm reads as a true option and as nothing else, the second being
-    `ci x --ignore-scripts`, with the exit status, stdout, stderr, the other
-    stand-ins' calls and the files as the command as written left them; and
-    beside v2.18.1 no call lost and none gone from true to false. A shell
-    with no run, or a run not observed whole, refuses it."""
+    every condition holds, or the first that does not. Nothing is read but
+    what the intake admitted, and A's words records of the command and of the
+    core's rewrite (the row's own, or attached). What is asked:
+
+      the exact bytes, and no invalid evidence in the row;
+      A's words of the command in all three readings, each one payload whose
+      every byte has a source, the row's payload counts being A's;
+      in every reading of the set: both sides rewrite, the core's flags are
+      the bash rewrite's and one more right after the payload's last byte,
+      the core's detail names an install read in the payload at the payload's
+      first byte with its place there, the unread record and the bash
+      rewrite's records are kept, and A's words of the core's rewrite hold
+      one payload, the same with the flag at its end, every byte of it from
+      one run of the rewrite (the flag read back inside the string);
+      the release floor computed again from the row is kept;
+      in every shell, the command as written, the bash side and the core all
+      ran whole; each core call is the call as written with flags that npm
+      reads as a true option and as nothing else; the core's calls are the
+      bash side's with one flag appended to one call; and every effect,
+      the order of the calls included, is the command's as written;
+      beside v2.18.1 no call is lost, changed, gone from true to false or
+      not known."""
     cmd = res["command"]
     if cmd != ENV_SPLIT_INPUT:
         return "not the input"
-    cb = cmd.encode()
+    ev = res.get("evidence") or {}
+    if ev.get("invalid"):
+        return "the row's evidence is invalid: %s" % ev["invalid"][0]
+    cb = cmd_bytes(cmd)
     rs = res["ref"].get("reading_set", "").split()
     if not rs or res["core"].get("reading_set", "").split() != rs:
         return "the two sides do not read the command in the same readings"
+    p3 = res.get("payloads3")
+    if not (isinstance(p3, dict) and all(_is_int(p3.get(r)) for r in READING_NAMES)):
+        return "the payload counts of the three readings are not known"
+    wc, wr = words_of(res, "words", attachments), words_of(res, "words_rewrite", attachments)
+    if wc is None or wr is None:
+        return "A's words of the command and of the core's rewrite are not held or attached"
+    for r in READING_NAMES:
+        x = wc.get(r)
+        if not x or x["rc"] != 0 or x["failed"] != 0:
+            return "%s: A's words of the command are missing or failed" % r
+        if len(x["payloads"]) != p3[r]:
+            return "%s: the row's payload count is not A's" % r
+        if len(x["payloads"]) != 1 or not x["payloads"][0][2] or any(y is None for y in x["payloads"][0][2]):
+            return "%s: A names no single payload every byte of which has a source" % r
     for r in rs:
         bv, cv_ = res["ref"].get("inert." + r), res["core"].get("inert." + r)
         if bv is None or cv_ is None:
@@ -1285,41 +2036,47 @@ def env_split_string_read(res, R):
         bo, co = outcome(bv.encode("latin-1"), cb), outcome(cv_.encode("latin-1"), cb)
         if bo[0] != "rewrite" or co[0] != "rewrite" or bo[3] is None or co[3] is None:
             return "%s: a side has no rewrite that is the command with flags inserted" % r
-        if set(co[3]) - set(bo[3]) != {ENV_SPLIT_PLACE} or set(bo[3]) - set(co[3]):
-            return "%s: the core's flags are not the bash rewrite's and one more at byte %d" % (r, ENV_SPLIT_PLACE)
+        kind, text, src = wc[r]["payloads"][0]
+        npm_at, place = src[0], src[-1] + 1
+        if set(co[3]) - set(bo[3]) != {place} or set(bo[3]) - set(co[3]):
+            return "%s: the core's flags are not the bash rewrite's and one more after the payload's last byte (%d)" % (r, place)
         if "unread" not in records_of(co) or not records_of(co) >= records_of(bo):
             return "%s: the unread record, or a record of the bash rewrite, is missing" % r
         lines = [l.split() for l in (res["core"].get("detail." + r) or "").split("\n") if l.strip()]
-        if not any(f[0] == "install" and len(f) >= 6 and f[1] != "0" and f[2] == str(ENV_SPLIT_NPM) and f[5] == str(ENV_SPLIT_PLACE)
-                   for f in lines):
-            return "%s: the core's detail names no install read in a payload with its npm at %d and its place at %d" % (
-                r, ENV_SPLIT_NPM, ENV_SPLIT_PLACE)
+        if not any(f[0] == "install" and len(f) >= 6 and f[1] != "0" and f[2] == str(npm_at) and f[5] == str(place) for f in lines):
+            return "%s: the core's detail names no install read in the payload at A's offsets (%d, %d)" % (r, npm_at, place)
+        y = wr.get(r)
+        if not y or y["rc"] != 0 or y["failed"] != 0 or len(y["payloads"]) != 1:
+            return "%s: A's words of the core's rewrite do not hold one payload" % r
+        k2, t2, s2 = y["payloads"][0]
+        if k2 != kind or t2 != text + FLAG:
+            return "%s: the rewrite's payload is not the payload with the flag at its end" % r
+        if any(z is None for z in s2) or any(s2[i + 1] != s2[i] + 1 for i in range(len(s2) - 1)):
+            return "%s: the rewrite's payload is not one run of its bytes: the flag does not read back inside it" % r
     if res.get("floor") != "ok":
-        return "the release floor is not shown kept"
+        return "the release floor computed again from the row is not kept"
     sides = res.get("sides", {})
-    ws, c = sides.get("written", {}).get("shells"), sides.get("core", {})
-    cs = c.get("shells")
-    if c.get("decision") != "run" or not isinstance(ws, dict) or not isinstance(cs, dict):
-        return "the shells did not run the command as written and the core's"
+    ws, bs, cs = (sides.get(n, {}).get("shells") for n in ("written", "bash", "core"))
+    if sides.get("core", {}).get("decision") != "run" or not all(isinstance(x, dict) for x in (ws, bs, cs)):
+        return "the shells did not run the command as written, the bash side's and the core's"
     for sh in SHELLS:
-        a, b = ws.get(sh), cs.get(sh)
-        if not whole(a) or not whole(b):
+        a, bb, b = ws.get(sh), bs.get(sh), cs.get(sh)
+        if not whole(a) or not whole(bb) or not whole(b):
             return "%s: a run is missing or was not observed whole" % sh
-        if a["npm"] != ENV_SPLIT_CALLS:
-            return "%s: the command as written does not make its two calls" % sh
-        if len(b["npm"]) != len(a["npm"]):
-            return "%s: the core's command does not make two calls" % sh
-        for x, y in zip(a["npm"], b["npm"]):
-            if not flag_edit(x, y):
+        if not a["npm"] or len(b["npm"]) != len(a["npm"]) or len(bb["npm"]) != len(a["npm"]):
+            return "%s: the three runs do not make the same number of npm calls" % sh
+        for x, z in zip(a["npm"], b["npm"]):
+            if not flag_edit(x, z):
                 return "%s: a call is not the call as written with a flag added" % sh
-            if R.rest(x) is None or R.rest(x) != R.rest(y) or R.flagged(y) is not True:
+            if R.rest(x) is None or R.rest(x) != R.rest(z) or R.flagged(z) is not True:
                 return "%s: npm does not read a call as before with ignore-scripts true" % sh
-        if b["npm"][1] != ENV_SPLIT_CALLS[1] + [FLAGWORD]:
-            return "%s: the second call is not `ci x --ignore-scripts`" % sh
+        apart = [i for i, (z, q) in enumerate(zip(b["npm"], bb["npm"])) if z != q]
+        if len(apart) != 1 or b["npm"][apart[0]] != bb["npm"][apart[0]] + [FLAGWORD]:
+            return "%s: the core's calls are not the bash side's with one flag appended to one call" % sh
         rel = relate(a, b, R)
-        for axis in ("rc", "stdout", "stderr", "other", "files"):
-            if rel[axis] != "same":
-                return "%s: %s is not the command's as written (%s)" % (sh, axis, rel[axis])
+        for axis_ in EFFECTS:
+            if rel[axis_] != "same":
+                return "%s: %s is not the command's as written (%s)" % (sh, axis_, rel[axis_])
     v = sides.get("v2.18.1", {})
     if v.get("decision") != "run" or not isinstance(v.get("shells"), dict):
         return "no v2.18.1 side that runs (run with --release-tree, --path-prefix and --approve)"
@@ -1360,53 +2117,6 @@ def word_value_label(res):
     return added_any
 
 
-def fill_records(res):
-    """Whether each of the two sides records, from its own value: a side that
-    runs a command records where its value carries a record."""
-    cb = cmd_bytes(res["command"])
-    for side, key in (("bash", "ref"), ("core", "core")):
-        v = res.get("sides", {}).get(side)
-        if not isinstance(v, dict) or v.get("decision") in ("deny", "blocked") or "record" in v:
-            continue
-        o = consensus({k: x.encode("latin-1") for k, x in res[key].items()}, cb)
-        if o not in (None, "deny", "blocked"):
-            v["record"] = bool(records_of(o))
-
-
-def upgrade(saved):
-    """A report of the first schema, read as this one. It kept each side's npm
-    calls split at tabs and newlines and, for the bash and core sides, nothing
-    else; its `shells` beside the command as written came from one object two
-    jobs shared, so no exit status in it belongs to a row for certain. Every
-    such axis is `unknown` here, and a command that can hand npm a tab or a
-    newline has its calls marked lossy."""
-    if saved.get("schema") == SCHEMA:
-        return saved
-    risky = re.compile(r"[\t\n]|\\[tn]|\$'")
-    for res in saved["rows"]:
-        lossy = bool(risky.search(res["command"]))
-        for k in ("status", "tokens", "payload_free", "payload_free_basis", "class_refused", "core_readings", "readings_differ", "reach"):
-            res.pop(k, None)
-        for side, v in res.get("sides", {}).items():
-            calls = v.pop("calls", None)
-            old_state = v.pop("state", None)
-            v.pop("state_npm", None)
-            meta = v.pop("shells", None)
-            if old_state == "DENY":
-                v["decision"] = "deny"
-                continue
-            v["decision"] = "run"
-            if meta is not None:
-                v["schema1_shells"] = meta
-            if isinstance(calls, dict):
-                v["shells"] = {sh: {"rc": UNKNOWN, "timeout": False, "log": "ok", "npm": cs, "calls": UNKNOWN, "other": UNKNOWN,
-                                    "files": UNKNOWN, "stdout_sha256": UNKNOWN, "stderr_sha256": UNKNOWN, "lossy": lossy}
-                               for sh, cs in calls.items()}
-    saved["schema"] = SCHEMA
-    saved["upgraded_from_schema"] = 1
-    return saved
-
-
 def load_classes():
     classes = []
     cpath = os.path.join(MEASURE, "core-intended-inert.tsv")
@@ -1419,9 +2129,10 @@ def load_classes():
     return classes
 
 
-def classify(results, classes, R):
-    """Gives every row its one status. Returns the counts."""
-    counts = {"total": len(results), "core_error": 0, "not_reached": 0, "compared": 0, "reading_set": 0, "incomplete": 0,
+def classify(results, classes, R, attachments=None):
+    """Gives every row its one status, from what the intake admitted (a row
+    it did not see is invalid). Returns the counts."""
+    counts = {"total": len(results), "invalid": 0, "core_error": 0, "not_reached": 0, "compared": 0, "reading_set": 0, "incomplete": 0,
               "both_failed": 0, "blocked": 0, "blocked_failed": 0, "both_undecided": 0, "same": 0, "differ": 0,
               "payload_free_differ": 0}
     per = {}
@@ -1431,12 +2142,18 @@ def classify(results, classes, R):
         per[status] = per.get(status, 0) + 1
 
     for res in results:
-        cmd = res["command"]
-        cb = cmd_bytes(cmd)
-        ref = {k: v.encode("latin-1") for k, v in res["ref"].items()}
-        got = {k: v.encode("latin-1") for k, v in res["core"].items()}
         for k in ("status", "tokens", "payload_free", "class_refused", "obs", "label", "readings_differ", "blocked", "expect_failed", "class_basis"):
             res.pop(k, None)
+        if "evidence" not in res:
+            res["_invalid_row"] = "the intake did not see it"
+        if res.get("_invalid_row"):
+            counts["invalid"] += 1
+            put(res, "invalid")
+            continue
+        cmd = res["command"]
+        cb = cmd_bytes(cmd)
+        ref = enc(res["ref"])
+        got = enc(res["core"])
         if res["core_rc"] != 0:
             counts["core_error"] += 1
             put(res, "core-error")
@@ -1444,7 +2161,6 @@ def classify(results, classes, R):
         # What the shells show of each side that ran, whether or not the
         # bash guard reached its rewrite: a row it left before that is still
         # one whose core command ran, and the accounting reads this.
-        fill_records(res)
         res["obs"] = {s: side_verdict(res, s, R) for s in ("bash", "core", "v2.18.1") if s in res.get("sides", {})}
         if not ref:
             counts["not_reached"] += 1
@@ -1523,7 +2239,7 @@ def classify(results, classes, R):
                 continue
             res["class_refused"] = why
         if cmd == ENV_SPLIT_INPUT:
-            why = env_split_string_read(res, R)
+            why = env_split_string_read(res, R, attachments)
             if why is None:
                 res["class_basis"] = "this exact input, by its conditions (env_split_string_read), not by the class's pattern"
                 put(res, "class:" + ENV_SPLIT_CLASS)
@@ -1543,8 +2259,8 @@ def classify(results, classes, R):
             worse = worse_than_bash(res)
             if "-deny" in toks:
                 put(res, "decrease:minus-deny")
-            elif cv is None or cv["npm"] == UNKNOWN:
-                put(res, "decrease:unknown")
+            elif cv is None or cv["npm"] in (UNKNOWN, "invalid"):
+                put(res, "decrease:" + ("invalid" if cv and cv["npm"] == "invalid" else "unknown"))
             elif worse is True:
                 put(res, "decrease")
             elif cv["npm"] == "loss":
@@ -1679,6 +2395,8 @@ def summarize(results, counts, R, a, extra):
             # core's.
             if cv and cv["npm"] == "loss" and npm_calls_identical(res, "bash", "core"):
                 k = "shared-loss/" + cv["effects"].split(":")[0]
+            if (res.get("evidence") or {}).get("invalid"):
+                k = "invalid"
             class_obs.setdefault(s, {})
             class_obs[s][k] = class_obs[s].get(k, 0) + 1
     labels = {}
@@ -1689,16 +2407,18 @@ def summarize(results, counts, R, a, extra):
     out.update({"reach_judged": judged, "reach_short": len(short), "floor": floor, "class_observation": class_obs, "labels": labels,
                 "accounting": acc, "blocked": blocked_by, "expected": expected, "expect_unmet": len(unmet)})
     per = counts["status"]
-    red = (counts["core_error"] + counts["reading_set"] + counts["incomplete"] + counts["both_failed"] + counts["both_undecided"]
-           + counts["blocked_failed"]
+    red = (counts["invalid"] + counts["core_error"] + counts["reading_set"] + counts["incomplete"] + counts["both_failed"]
+           + counts["both_undecided"] + counts["blocked_failed"] + len(acc["evidence_invalid"]) + len(getattr(R, "problems", []))
            + sum(v for k, v in per.items() if k == "unclassified" or k.startswith("decrease"))
            + len(silent_run) + len(silent_words_run) + len(loss) + len(loss_words) + len(short)
            + sum(v for k, v in floor.items() if k.startswith("NOT")))
     for s, ks in class_obs.items():
         # A named row holds where the shells show its calls and its effects to
         # be the command's own, or where nothing runs on the core's side.
-        red += sum(v for k, v in ks.items() if k == "not-observed" or k.split("/")[0] in ("loss", UNKNOWN)
-                   or k.split("/")[1] in ("differ", UNKNOWN))
+        for k, v in ks.items():
+            head, _, tail = k.partition("/")
+            if k in ("not-observed", "invalid") or head in ("loss", UNKNOWN, "invalid") or tail in ("differ", UNKNOWN, "invalid"):
+                red += v
     # A call that went from a true option to a false one beside the bash side
     # or v2.18.1, a rewrite sent whose calls or effects do not hold, and a row
     # that is not what its line said are red. A blocked row is neither.
@@ -1708,9 +2428,20 @@ def summarize(results, counts, R, a, extra):
 
     print("load start: %s" % extra.get("up0", ""))
     print("load end:   %s" % extra.get("up1", ""))
-    for k in ("total", "core_error", "not_reached", "compared", "reading_set", "incomplete", "both_failed", "blocked", "blocked_failed",
-              "both_undecided", "same", "differ", "payload_free_differ"):
+    for k in ("total", "invalid", "core_error", "not_reached", "compared", "reading_set", "incomplete", "both_failed", "blocked",
+              "blocked_failed", "both_undecided", "same", "differ", "payload_free_differ"):
         print("%-22s %d" % (k, counts[k]))
+    ev_rows = [res for res in results if res.get("status") != "invalid" and (res.get("evidence") or {}).get("invalid")]
+    unk_rows = [res for res in results if (res.get("evidence") or {}).get("unknown")]
+    print("intake: %d rows; invalid rows %d; rows with invalid evidence %d; rows with an axis not recorded or not observable %d"
+          % (len(results), counts["invalid"], len(ev_rows), len(unk_rows)))
+    print("  readers: %s; answers held %d, not believed %d, derived values the saved report says otherwise %d"
+          % (getattr(R, "source", {}).get("source", "?"), len(getattr(R, "gate", {})), len(getattr(R, "problems", [])),
+             getattr(R, "rederived", 0)))
+    for res in [r for r in results if r.get("status") == "invalid"][:40] + ev_rows[:40]:
+        print("INVALID %s %r %s" % (res.get("set"), res.get("command"), "; ".join(res["evidence"]["invalid"][:3])))
+    for p_ in getattr(R, "problems", [])[:20]:
+        print("READER %s" % p_)
     for k in sorted(per):
         print("  status %-34s %d" % (k, per[k]))
     for s in sorted(class_obs):
@@ -1813,14 +2544,15 @@ def manifest(path, results, run):
                    "floor_basis": res.get("floor_basis"), "core": core_decision(res), "blocked": res.get("blocked"),
                    "stand_ins": res.get("stand_ins"), "expect": res.get("expect"), "expect_failed": res.get("expect_failed"),
                    "true_to_false": res.get("true_to_false"), "class_basis": res.get("class_basis"),
-                   "class_refused": res.get("class_refused"), "sides": {}}
+                   "class_refused": res.get("class_refused"), "evidence": res.get("evidence"), "sides": {}}
             for side, v in res.get("sides", {}).items():
                 s = {"decision": v.get("decision"), "record": v.get("record"), "state": v.get("state"), "state_words": v.get("state_words")}
                 if isinstance(v.get("shells"), dict):
                     s["shells"] = {sh: {"rc": o.get("rc"), "timeout": o.get("timeout"), "log": o.get("log"),
                                         "npm_calls": len(o["npm"]) if isinstance(o.get("npm"), list) else UNKNOWN,
                                         "other_calls": len(o["other"]) if isinstance(o.get("other"), list) else UNKNOWN,
-                                        "files": len(o["files"]) if isinstance(o.get("files"), dict) else UNKNOWN}
+                                        "files": len(o["files"]) if isinstance(o.get("files"), dict) else UNKNOWN,
+                                        "axes": o.get("_axes")}
                                    for sh, o in v["shells"].items()}
                 row["sides"][side] = s
             if res.get("obs"):
@@ -1830,7 +2562,8 @@ def manifest(path, results, run):
 
 def selftest(a):
     """Each case is one an earlier version of this file got wrong. Prints
-    `ok` or `not ok` per case; exit 1 on any `not ok`."""
+    `ok` or `not ok` per case; exit 1 on any `not ok`. Every row and run a
+    case builds passes the intake first, as a run's would."""
     work = tempfile.mkdtemp(prefix="safedeps-core-inert-selftest.")
     bad = 0
 
@@ -1846,23 +2579,56 @@ def selftest(a):
     shells = Shells(work)
     R = Readers(work, path)
 
-    def obs(npm, **kw):
-        o = {"rc": 0, "timeout": False, "log": "ok", "npm": npm, "calls": [["npm"] + c for c in npm], "other": [], "files": {"d": ["d"]},
-             "stdout_sha256": "x", "stderr_sha256": "x"}
-        o.update(kw)
+    def saved():
+        """The readers' answers so far, as a run keeps them."""
+        return SavedReaders(R.answers(), {"source": "selftest"})
+
+    def adm(o):
+        admit_obs(o, SCHEMA)
         return o
 
-    def row(written, core, bash=None):
-        res = {"set": "selftest", "command": "selftest", "core_rc": 0, "payloads3": {"bash": 1, "zsh": 1, "dash": 1},
-               "ref": {"reading_set": "bash", "inert.bash": "rewrite\nselftest --ignore-scripts", "failed": "false"},
-               "core": {"reading_set": "bash", "inert.bash": "none", "failed": "false"},
-               "sides": {"written": {"decision": "run", "shells": written}, "core": {"decision": "run", "shells": core}}}
-        if bash is not None:
-            res["sides"]["bash"] = {"decision": "run", "shells": bash}
-        return res
+    def obs(npm, other=(), rc=0, stdout="", stderr=""):
+        """A run whose every record is one observe() writes."""
+        o = {"rc": rc, "timeout": False, "log": "ok", "calls": [["npm"] + list(x) for x in npm] + [list(x) for x in other],
+             "npm": [list(x) for x in npm], "other": [list(x) for x in other], "files": {"d": ["d"]}}
+        o.update(blob("stdout", stdout.encode("latin-1")))
+        o.update(blob("stderr", stderr.encode("latin-1")))
+        return o
 
     def four(o):
-        return {sh: dict(o) for sh in SHELLS}
+        return {sh: json.loads(json.dumps(o)) for sh in SHELLS}
+
+    def recs(rs, value, failed):
+        r = {"reading_set": rs, "any_install": "true", "failed": failed}
+        r.update({"inert." + x: (value[x] if isinstance(value, dict) else value) for x in rs.split()})
+        return r
+
+    def mkrow(command, ref_value, core_value, sides, rs="bash", payloads=1, failed=("false", "false"), **extra):
+        """A row as a run writes it: its records, its payload counts, and each
+        side's run bytes as its records say."""
+        res = {"set": "selftest", "command": command, "core_rc": 0, "payloads3": {x: payloads for x in READING_NAMES},
+               "ref": recs(rs, ref_value, failed[0]), "core": recs(rs, core_value, failed[1]), "sides": sides}
+        res.update(extra)
+        cb = cmd_bytes(command)
+        for name, v in sides.items():
+            if v.get("decision") != "run" or "run" in v:
+                continue
+            if name == "written":
+                v["run"] = command
+            elif name in ("bash", "core"):
+                v["run"] = consensus(enc(res["ref" if name == "bash" else "core"]), cb)[2].decode("utf-8", "surrogateescape")
+        return res
+
+    def prep(*rows):
+        for k, res in enumerate(rows):
+            admit(res, k, {"report": "selftest"}, SCHEMA, {}, [])
+        return rows
+
+    def row(written, core, bash=None):
+        sides = {"written": {"decision": "run", "shells": written}, "core": {"decision": "run", "shells": core}}
+        if bash is not None:
+            sides["bash"] = {"decision": "run", "shells": bash}
+        return prep(mkrow("selftest", "rewrite\nselftest --ignore-scripts", "none", sides))[0]
 
     # 1. A tab and a newline in an argument are one argument each.
     box = tempfile.mkdtemp(prefix="b.", dir=work)
@@ -1870,16 +2636,21 @@ def selftest(a):
     check("argv keeps a tab, a newline and an empty word", o["bash"]["npm"], [["ci", "a\tb", "c\nd", ""]])
     check("another stand-in's call is kept, in order", o["bash"]["calls"], [["npm", "ci", "a\tb", "c\nd", ""], ["pip", "install", "x\ty"]])
     check("every shell has its own run", sorted(o), sorted(SHELLS))
+    check("a run observe() writes is evidence on every axis", admit_obs(o["bash"], SCHEMA), [])
     # 2. What a command writes to a file and to its streams is observed.
     o1 = shells.observe("npm ci; printf '%s' x > f; exit 3", box)
     o2 = shells.observe("npm ci; printf '%s' 'x --ignore-scripts' > f; exit 3", box)
     R.ask([["ci"]])
     check("the exit status is the run's own", o1["dash"]["rc"], 3)
-    check("npm calls alike, a file's content apart: the files differ", relate(o1["bash"], o2["bash"], R)["files"], "differ")
-    check("...and the npm calls are identical", relate(o1["bash"], o2["bash"], R)["npm"], "identical")
+    adm(o1["bash"])
+    adm(o2["bash"])
+    check("npm calls alike, a file's content apart: the files differ", relate(o1["bash"], o2["bash"], saved())["files"], "differ")
+    check("...and the npm calls are identical", relate(o1["bash"], o2["bash"], saved())["npm"], "identical")
     o3 = shells.observe("npm ci; test x", box)
     o4 = shells.observe("npm ci; test x --ignore-scripts", box)
-    check("a flag handed to another command changes the exit status", relate(o3["bash"], o4["bash"], R)["rc"], "differ")
+    adm(o3["bash"])
+    adm(o4["bash"])
+    check("a flag handed to another command changes the exit status", relate(o3["bash"], o4["bash"], saved())["rc"], "differ")
     # 3. Two runs at once each get their own result.
     with ThreadPoolExecutor(max_workers=2) as ex:
         fa = ex.submit(shells.observe, "npm ci a; exit 5", tempfile.mkdtemp(prefix="b.", dir=work))
@@ -1904,35 +2675,37 @@ def selftest(a):
     check("an inserted flag is found", flag_edit(["ci", "x"], ["ci", "--ignore-scripts", "x", "--ignore-scripts"]), [1, 3])
     w = obs([["ci", "--ignore-scripts", "--", "--ignore-scripts"]])
     c = obs([["ci", "--ignore-scripts", "--"]])
-    check("...and the row is a loss", side_verdict(row(four(w), four(c)), "core", R)["npm"], "loss")
+    check("...and the row is a loss", side_verdict(row(four(w), four(c)), "core", saved())["npm"], "loss")
     w, c = obs([["ci", "--"]]), obs([["ci", "--", "--ignore-scripts"]])
-    check("a flag placed after `--` is no option: a loss", side_verdict(row(four(w), four(c)), "core", R)["npm"], "loss")
+    check("a flag placed after `--` is no option: a loss", side_verdict(row(four(w), four(c)), "core", saved())["npm"], "loss")
     w, c = obs([["ci", "--cache"]]), obs([["ci", "--cache", "--ignore-scripts"]])
     if R.npm_asked:
-        check("a flag an option takes as its value is no option: a loss", side_verdict(row(four(w), four(c)), "core", R)["npm"], "loss")
+        check("a flag an option takes as its value is no option: a loss", side_verdict(row(four(w), four(c)), "core", saved())["npm"], "loss")
     # 6. No call is no agreement, and a missing run is not an empty one.
     e = obs([])
-    check("no install call in any shell is `nocall`, not `ok`", side_verdict(row(four(e), four(e)), "core", R)["npm"], "nocall")
-    three = {sh: dict(e) for sh in SHELLS[:3]}
-    check("a shell with no run is unknown, not an empty call", side_verdict(row(four(e), three), "core", R)["npm"], UNKNOWN)
-    check("an undecodable log is unknown", side_verdict(row(four(e), four(dict(e, log="undecodable", npm=UNKNOWN))), "core", R)["npm"], UNKNOWN)
+    check("no install call in any shell is `nocall`, not `ok`", side_verdict(row(four(e), four(e)), "core", saved())["npm"], "nocall")
+    three = {sh: obs([]) for sh in SHELLS[:3]}
+    check("a shell with no run is unknown, not an empty call", side_verdict(row(four(e), three), "core", saved())["npm"], UNKNOWN)
+    undec = dict(obs([]), log="undecodable", calls=UNKNOWN, npm=UNKNOWN, other=UNKNOWN)
+    check("an undecodable log is unknown", side_verdict(row(four(e), four(undec)), "core", saved())["npm"], UNKNOWN)
     w, c = obs([["ci"]]), obs([])
-    check("a call of the command as written that is gone is a loss", side_verdict(row(four(w), four(c)), "core", R)["npm"], "loss")
+    check("a call of the command as written that is gone is a loss", side_verdict(row(four(w), four(c)), "core", saved())["npm"], "loss")
+    kl = row({"bash": obs([["ci"]]), "zsh": obs([["ci"]])}, {"bash": obs([])})
+    check("a loss seen in one shell is not hidden by a shell that did not run", side_verdict(kl, "core", saved())["npm"], "loss")
     # 7. The statuses: disagreement on both sides comes before `same`.
-    both = {"set": "selftest", "command": "selftest", "core_rc": 0, "sides": {},
-            "ref": {"reading_set": "bash zsh dash", "inert.bash": "none", "inert.zsh": "rewrite\nselftest --ignore-scripts", "inert.dash": "none", "failed": "false"},
-            "core": {"reading_set": "bash zsh dash", "inert.bash": "none", "inert.zsh": "rewrite\nselftest --ignore-scripts", "inert.dash": "none", "failed": "false"}}
-    failed = {"set": "selftest", "command": "selftest", "core_rc": 0, "sides": {},
-              "ref": {"reading_set": "bash", "inert.bash": "none", "failed": "true"}, "core": {"reading_set": "bash", "inert.bash": "none", "failed": "true"}}
-    kind_only = {"set": "selftest", "command": "selftest x", "core_rc": 0, "sides": {}, "payloads3": {"bash": 0, "zsh": 0, "dash": 0},
-                 "ref": {"reading_set": "bash", "inert.bash": "rewrite unread\nselftest --ignore-scripts x", "failed": "false"},
-                 "core": {"reading_set": "bash", "inert.bash": "rewrite unverified unread\nselftest --ignore-scripts x", "failed": "false"}}
+    apart = {"bash": "none", "zsh": "rewrite\nselftest --ignore-scripts", "dash": "none"}
+    both = mkrow("selftest", apart, apart, {}, rs="bash zsh dash")
+    failed = mkrow("selftest", "none", "none", {}, failed=("true", "true"))
+    kind_only = mkrow("selftest x", "rewrite unread\nselftest --ignore-scripts x", "rewrite unverified unread\nselftest --ignore-scripts x", {},
+                      payloads=0)
     R.ask([["ci"], ["ci", "--ignore-scripts"]])
     minus = row(four(obs([["ci"]])), four(obs([["ci", "--ignore-scripts"]])), four(obs([["ci", "--ignore-scripts"]])))
     empty = row(four(e), four(e), four(e))
-    worse = row(four(obs([["ci"]])), four(obs([["ci"]])), four(obs([["ci", "--ignore-scripts"]])))
-    worse["core"]["inert.bash"] = "downgrade"
-    classify([both, failed, kind_only, minus, empty, worse], load_classes(), R)
+    worse = mkrow("selftest", "rewrite\nselftest --ignore-scripts", "downgrade",
+                  {"written": {"decision": "run", "shells": four(obs([["ci"]]))}, "core": {"decision": "run", "shells": four(obs([["ci"]]))},
+                   "bash": {"decision": "run", "shells": four(obs([["ci", "--ignore-scripts"]]))}})
+    prep(both, failed, kind_only, worse)
+    classify([both, failed, kind_only, minus, empty, worse], load_classes(), saved())
     check("equal values that disagree among the readings on both sides: both-undecided", both["status"], "both-undecided")
     check("a reading failed on both sides: both-failed", failed["status"], "both-failed")
     check("a text with no payload whose records differ in kind alone is named by no class", kind_only["status"], "unclassified")
@@ -1953,36 +2726,33 @@ def selftest(a):
     b2 = obs([first, kept_arg])
     c2 = obs([first, lost_arg])
 
-    def crow(value, core_side):
-        res = {"set": "selftest", "command": "selftest", "core_rc": 0, "payloads3": {"bash": 0, "zsh": 0, "dash": 0},
-               "ref": {"reading_set": "bash", "any_install": "true", "inert.bash": "rewrite unread\nselftest --ignore-scripts", "failed": "false"},
-               "core": {"reading_set": "bash", "any_install": "true", "inert.bash": value, "failed": "false"},
-               "sides": {"written": {"decision": "run", "shells": four(w2)}, "bash": {"decision": "run", "record": True, "shells": four(b2)}}}
+    def crow(value, core_side, core_failed="false"):
+        sides = {"written": {"decision": "run", "shells": four(w2)}, "bash": {"decision": "run", "shells": four(b2)}}
         if core_side is not None:
-            res["sides"]["core"] = core_side
-        return res
+            sides["core"] = core_side
+        return mkrow("selftest", "rewrite unread\nselftest --ignore-scripts", value, sides, payloads=0, failed=("false", core_failed))
 
-    sent = crow("rewrite unread\nselftest --ignore-scripts", {"decision": "run", "record": True, "shells": four(c2)})
+    sent = crow("rewrite unread\nselftest --ignore-scripts", {"decision": "run", "shells": four(c2)})
     blk = crow("collision floor-outside-command", {"decision": "blocked", "why": "selftest"})
-    und = crow("none", {"decision": "deny", "why": "its reading failed"})
-    und["core"]["failed"] = "true"
+    und = crow("none", {"decision": "deny", "why": "its reading failed"}, core_failed="true")
     gone = crow("rewrite unread\nselftest --ignore-scripts", None)
-    eight = [sent, blk, und, gone]
-    cnt = classify(eight, load_classes(), R)
-    acc = accounting(eight, R)
+    eight = list(prep(sent, blk, und, gone))
+    cnt = classify(eight, load_classes(), saved())
+    acc = accounting(eight, saved())
     check("a row the core blocks has its own status", blk["status"], "blocked:floor-outside-command")
     check("...and is counted apart, not as `same`", [cnt["blocked"], blk["status"] == "same"], [1, False])
+    check("a row the core blocks is admitted with no runs", blk["evidence"]["invalid"], [])
     check("a row expected to be blocked that the core sends does not meet its line", meets("blocked", sent), False)
     check("a blocked row meets the kind its line names, and no other", [meets("blocked:floor-outside-command", blk), meets("blocked:end-flag-not-an-option", blk)],
           [True, False])
     check("a row the core blocks, one it leaves undecided and one with no run are in no count of what ran",
           [acc["pairs"]["bash"]["rows"], acc["core"].get("blocked"), acc["core"].get("undecided"), acc["ran_unobserved"]], [1, 1, 1, 1])
     if R.npm_asked:
-        ch = call_changes(sent, "bash", "core", R)
+        ch = call_changes(sent, "bash", "core", saved())
         check("a second call that goes from true to false is counted, record or no record", [ch["true_to_false"], ch["calls"]], [4, 8])
         check("...and the run's accounting holds it beside the bash side", acc["pairs"]["bash"]["true_to_false_rows"], 1)
-        wa, ca = obs([["ci"]], stdout_sha256="a"), obs([["ci", "--ignore-scripts"]], stdout_sha256="b")
-        check("npm calls that hold do not cover a stdout that differs", side_verdict(row(four(wa), four(ca)), "core", R)["effects"], "differ:stdout")
+        wa, ca = obs([["ci"]], stdout="a"), obs([["ci", "--ignore-scripts"]], stdout="b")
+        check("npm calls that hold do not cover a stdout that differs", side_verdict(row(four(wa), four(ca)), "core", saved())["effects"], "differ:stdout")
     # 9. The other sudo runs nothing and prints what it was handed.
     box9 = tempfile.mkdtemp(prefix="b.", dir=work)
     oe = shells.observe("sudo npm ci x", box9)
@@ -1991,34 +2761,128 @@ def selftest(a):
     check("the other sudo runs nothing, writes its call down and prints its arguments",
           [op["bash"]["npm"], op["bash"]["other"], op["bash"]["stdout"]], [[], [["sudo", "npm", "ci", "x"]], "npm\nci\nx\n"])
     # 10. The one exact env -S input is named by its conditions, never by its
-    # bytes alone: an argument gone from a call, a stdout that differs or a
-    # shell with no run leaves it unclassified.
+    # bytes alone, and A's words of it are the row's own or attached by their
+    # bytes: an argument gone from a call, a stdout that differs, a shell with
+    # no run, words held nowhere, and each record the stage review
+    # (shuksshuki-20261007-054915) took out or emptied leave it unnamed.
+    brw = "npm i --ignore-scripts y --ignore-scripts && env -S'npm ci x'"
+    crw = "npm i --ignore-scripts y --ignore-scripts && env -S'npm ci x --ignore-scripts'"
+    frw = "npm i --ignore-scripts y && env -S'npm ci x'"
+    w10, b10, f10 = obs([["i", "y"], ["ci", "x"]]), obs([first, ["ci", "x"]]), obs([["i", FLAGWORD, "y"], ["ci", "x"]])
+    c10 = obs([first, ["ci", "x", FLAGWORD]])
+
+    def words_out(payload, src):
+        return "unterm 0\nunreadable 0\nV 0\n\nY E %d\n%s\nS%s\nfailed 0\n" % (len(payload), payload, "".join(" %d" % x for x in src))
+
+    def words_rec(text, payload, src):
+        t = words_out(payload, src)
+        return {"text": text, "readings": {r: {"rc": 0, "stdout": t, "stdout_sha256": sha256(t.encode("latin-1"))} for r in READING_NAMES}}
+
+    def erow(core_shells, **kw):
+        cb = cmd_bytes(ENV_SPLIT_INPUT)
+        sides = {"written": {"decision": "run", "shells": four(w10)}, "bash": {"decision": "run", "shells": four(b10)},
+                 "core": {"decision": "run", "shells": core_shells},
+                 "v2.18.1": {"decision": "run", "run": brw, "flags": flag_positions(cb, cmd_bytes(brw)), "record": False, "shells": four(b10)},
+                 "7d66f8c": {"decision": "run", "run": frw, "flags": flag_positions(cb, cmd_bytes(frw)), "record": False, "shells": four(f10)}}
+        res = mkrow(ENV_SPLIT_INPUT, "rewrite unread\n" + brw, "rewrite unread\n" + crw, sides,
+                    words=words_rec(ENV_SPLIT_INPUT, "npm ci x", range(18, 26)),
+                    words_rewrite=words_rec(crw, "npm ci x --ignore-scripts", range(52, 77)), floor_basis=FLOOR_TREE)
+        res["core"]["detail.bash"] = "pair 0 5 1\ninstall 0 0 plain 5 7 1 0\ninstall 1 18 plain 24 26 1 -\ntexts 2 release 1 unread 1\n"
+        res.update(kw)
+        return res
+
+    lie = erow(four(c10), floor="NOT")
+    prep(lie)
+    check("a saved floor its row does not hold is invalid", any(x.startswith("floor") for x in lie["evidence"]["invalid"]), True)
     if R.npm_asked:
-        brw = "npm i --ignore-scripts y --ignore-scripts && env -S'npm ci x'"
-        crw = "npm i --ignore-scripts y --ignore-scripts && env -S'npm ci x --ignore-scripts'"
-        R.ask([["ci", "x"], ["ci", "x", FLAGWORD], ["ci", FLAGWORD]])
-        w10, b10, c10 = obs(ENV_SPLIT_CALLS), obs([first, ["ci", "x"]]), obs([first, ["ci", "x", FLAGWORD]])
-
-        def erow(core_shells):
-            return {"set": "selftest", "command": ENV_SPLIT_INPUT, "core_rc": 0, "floor": "ok", "payloads3": {"bash": 1, "zsh": 1, "dash": 1},
-                    "ref": {"reading_set": "bash", "any_install": "true", "failed": "false", "inert.bash": "rewrite unread\n" + brw},
-                    "core": {"reading_set": "bash", "any_install": "true", "failed": "false", "inert.bash": "rewrite unread\n" + crw,
-                             "detail.bash": "pair 0 5 1\ninstall 0 0 plain 5 7 1 0\ninstall 1 18 plain 24 26 1 -\ntexts 2 release 1 unread 1\n"},
-                    "sides": {"written": {"decision": "run", "shells": four(w10)},
-                              "bash": {"decision": "run", "record": True, "shells": four(b10)},
-                              "core": {"decision": "run", "record": True, "shells": core_shells},
-                              "v2.18.1": {"decision": "run", "record": False, "shells": four(b10)}}}
-
+        R.ask([["i", "y"], ["ci", "x"], ["ci", "x", FLAGWORD], ["ci", FLAGWORD], ["i", FLAGWORD, "y"], first])
         pos = erow(four(c10))
         gone_arg = erow(four(obs([first, ["ci", FLAGWORD]])))
-        other_out = erow(four(dict(c10, stdout_sha256="z")))
-        no_run = erow({sh: dict(c10) for sh in SHELLS[:3]})
-        classify([pos, gone_arg, other_out, no_run], load_classes(), R)
+        other_out = erow(four(obs([first, ["ci", "x", FLAGWORD]], stdout="z")))
+        no_run = erow({sh: obs([first, ["ci", "x", FLAGWORD]]) for sh in SHELLS[:3]})
+        no_words = erow(four(c10))
+        del no_words["words"], no_words["words_rewrite"]
+        no_runs = erow(four(c10))
+        del no_runs["sides"]["written"]["run"], no_runs["sides"]["core"]["run"]
+        no_counts = erow(four(c10))
+        del no_counts["payloads3"]
+        twice, invented, nulls, no_calls = erow(four(c10)), erow(four(c10)), erow(four(c10)), erow(four(c10))
+        for key in ("ref", "core"):
+            twice[key]["reading_set"] = "bash bash"
+            for k_ in [k_ for k_ in invented[key] if k_.endswith(".bash")]:
+                invented[key][k_.replace(".bash", ".invented")] = invented[key].pop(k_)
+            invented[key]["reading_set"] = "invented"
+        for side in ("written", "core"):
+            for o_ in nulls["sides"][side]["shells"].values():
+                o_.update(rc=None, stdout_sha256=None, stderr_sha256=None, other=None, files=None)
+            for o_ in no_calls["sides"][side]["shells"].values():
+                del o_["calls"]
+        ten = list(prep(pos, gone_arg, other_out, no_run, no_words, no_runs, no_counts, twice, invented, nulls, no_calls))
+        cnt10 = classify(ten, load_classes(), saved())
         check("the exact env -S row whose calls and effects hold is named by its conditions", [pos["status"], bool(pos.get("class_basis"))],
               ["class:script-payload-read", True])
         check("an argument gone from a call refuses the exact env -S row", gone_arg["status"], "unclassified")
         check("a stdout that differs refuses the exact env -S row", other_out["status"], "unclassified")
         check("a shell with no run refuses the exact env -S row", no_run["status"], "unclassified")
+        check("A's words held nowhere refuse the exact env -S row", no_words["status"], "unclassified")
+        check("runs that name no bytes refuse the exact env -S row, and their evidence is invalid",
+              [no_runs["status"], bool(no_runs["evidence"]["invalid"])], ["unclassified", True])
+        check("a row with no payload counts is invalid", no_counts["status"], "invalid")
+        check("a reading named twice makes the row invalid", twice["status"], "invalid")
+        check("a reading this file does not know makes the row invalid", invented["status"], "invalid")
+        check("...and the three are counted apart", cnt10["invalid"], 3)
+        check("null exit statuses, streams, other calls and files refuse the exact env -S row",
+              [nulls["status"], bool(nulls["evidence"]["invalid"])], ["unclassified", True])
+        check("runs with no calls refuse the exact env -S row", [no_calls["status"], bool(no_calls["evidence"]["invalid"])], ["unclassified", True])
+        wfile = ""
+        for text, payload, src in ((ENV_SPLIT_INPUT, "npm ci x", range(18, 26)), (crw, "npm ci x --ignore-scripts", range(52, 77))):
+            wfile += "== %s\n" % json.dumps(text) + "".join("-- %s rc 0\n%s" % (r, words_out(payload, src)) for r in READING_NAMES)
+        attached = erow(four(c10))
+        del attached["words"], attached["words_rewrite"]
+        prep(attached)
+        classify([attached], load_classes(), saved(), parse_words_file(wfile.encode("utf-8")))
+        check("A's words attached name the exact env -S row as the row's own do", attached["status"], "class:script-payload-read")
+    # 11. The intake: what is not evidence is never equal to anything, and is
+    # in no count of what held; a reader's answer is read as it was kept and
+    # never asked for again; a schema this file does not read is not guessed.
+    n1, n2 = adm(obs([["ci"]], rc=None)), adm(obs([["ci"]], rc=None))
+    check("a null exit status on both sides is no evidence", relate(n1, n2, saved())["rc"], "invalid")
+    nr = row(four(obs([["ci"]], rc=None)), four(obs([["ci"]], rc=None)))
+    check("an exit status that is no evidence is no effect that held", side_verdict(nr, "core", saved())["effects"], "invalid")
+    z1, z2 = adm(obs([["ci", ""]], rc=3)), adm(obs([["ci", ""]], rc=3))
+    check("an exit status that is not 0, an empty argument and an empty stream are evidence",
+          [axis(z1, "rc"), axis(z1, "npm"), axis(z1, "stdout"), relate(z1, z2, saved())["rc"]], ["ok", "ok", "ok", "same"])
+    m = obs([["ci", "x"]])
+    m["npm"] = [["ci", "y"]]
+    check("npm calls that are not the npm calls of calls are invalid", axis(adm(m), "npm"), "invalid")
+    o_a = adm(obs([["ci"]], other=[["pip", "install", "x"]]))
+    o_b = obs([["ci"]], other=[["pip", "install", "x"]])
+    o_b["calls"] = [["pip", "install", "x"], ["npm", "ci"]]
+    check("npm and another stand-in that ran in another order differ in order", relate(o_a, adm(o_b), saved())["order"], "differ")
+    inv = crow("rewrite unread\nselftest --ignore-scripts", {"decision": "run", "shells": four(obs([first, kept_arg], rc=None))})
+    prep(inv)
+    classify([inv], load_classes(), saved())
+    acc11 = accounting([inv], saved())
+    check("a row whose evidence is invalid is in no count of what ran",
+          [len(acc11["evidence_invalid"]), acc11["ran_observed"], acc11["pairs"]["bash"]["rows"]], [1, 0, 0])
+    sr0 = SavedReaders([{"argv": ["ci"], "gate": {"read": True, "ignore": "unset", "words": ["ci"], "switches": [], "values": []},
+                         "npm": {"remain": ["ci"], "ignore": "unset", "canon": "ci"}}], {"source": "selftest"})
+    check("a saved answer is read, and an argv with none is unknown and nothing asks",
+          [sr0.install(["ci"]), sr0.install(["ci", "x"]), hasattr(sr0, "ask")], [True, None, False])
+    dup = SavedReaders(sr0.answers() + sr0.answers(), {"source": "selftest"})
+    check("an argv answered twice is believed in neither answer", [dup.install(["ci"]), len(dup.problems)], [None, 1])
+    try:
+        decode_report({"schema": 3, "rows": []})
+        refused = False
+    except Unsupported:
+        refused = True
+    check("a report of a schema this file does not read is not read", refused, True)
+    sch, rows1 = decode_report({"rows": [{"set": "s", "command": "npm ci", "core_rc": 0, "ref": {}, "core": {},
+                                          "sides": {"written": {"calls": {sh: [["ci"]] for sh in SHELLS}}}}]})
+    admit(rows1[0], 0, {"report": "selftest"}, sch, {}, [])
+    w1 = rows1[0]["sides"]["written"]["shells"]["bash"]
+    check("the first schema's npm calls are read, and what it did not keep is unknown",
+          [sch, axis(w1, "npm"), axis(w1, "rc"), rows1[0]["evidence"]["invalid"]], [1, "ok", UNKNOWN, []])
     shutil.rmtree(work, ignore_errors=True)
     print("selftest: %d not ok" % bad)
     return 1 if bad else 0
@@ -2041,7 +2905,9 @@ def main():
     ap.add_argument("--seed", type=int, default=20261006)
     ap.add_argument("--report", default="")
     ap.add_argument("--control", action="store_true", help="damage the reference: drop the floor flag after every verb")
-    ap.add_argument("--reclassify", default="", help="a saved --report: classify its rows again, running no guard and no shell")
+    ap.add_argument("--reclassify", default="", help="a saved --report: classify its rows again, running no guard, no shell and no reader")
+    ap.add_argument("--reread", action="store_true", help="with --reclassify: ask the readers on this PATH again, as a new observation")
+    ap.add_argument("--attach", action="append", default=[], help="PATH=SHA256 of a words file (see The intake)")
     ap.add_argument("--list", default="", help="write the selected commands (set, sha256 of the command, command) to this file and run nothing")
     ap.add_argument("--table", default="", help="write one line per row: set, status, label, tokens, what the shells show of the core, command")
     ap.add_argument("--manifest", default="", help="write one JSON line for the run and one per row")
@@ -2052,6 +2918,24 @@ def main():
     a = ap.parse_args()
     if a.selftest:
         sys.exit(selftest(a))
+    attachments, attach_info = {}, []
+    for spec in a.attach:
+        path_, _, want_ = spec.rpartition("=")
+        try:
+            if not path_ or not HEX64.match(want_):
+                raise Unsupported("not PATH=SHA256")
+            raw = open(os.path.expanduser(path_), "rb").read()
+            if sha256(raw) != want_:
+                raise Unsupported("its bytes hash to %s" % sha256(raw))
+            parsed = parse_words_file(raw)
+            for text in parsed:
+                if text in attachments:
+                    raise Unsupported("another attachment holds the same command")
+            attachments.update(parsed)
+        except (OSError, Unsupported) as e:
+            print("core-inert-differential: the attachment %s does not read: %s" % (spec, e), file=sys.stderr)
+            sys.exit(2)
+        attach_info.append({"path": path_, "sha256": want_, "commands": len(parsed)})
     if not a.core and not a.reclassify:
         sys.exit("core-inert-differential: --core is required")
     # A saved report is classified again without a core: none runs, and the
@@ -2149,9 +3033,11 @@ def main():
     for g in (rel_guard, floor_guard):
         if g and not os.path.isfile(g) and not a.reclassify:
             sys.exit("core-inert-differential: no pre-guard at %s" % g)
-    floor_rows = {}
-    if a.floor:
-        for r in json.load(open(os.path.join(TEST, "inert-release-rewrites.json"), encoding="utf-8")):
+    floor_rows, floor_file_sha = {}, None
+    fpath = os.path.join(ROOT, FLOOR_FILE)
+    if os.path.isfile(fpath):
+        floor_file_sha = sha256(open(fpath, "rb").read())
+        for r in json.load(open(fpath, encoding="utf-8")):
             floor_rows[r["command"]] = r["release"]
 
     def box_env(box, extra=None, release=False):
@@ -2241,18 +3127,28 @@ def main():
         c = subprocess.run(["nice", "-n", "10", a.core, "inert"], input=payload(cmd, proj), capture_output=True, env=box_env(box), cwd=proj, timeout=120)
         got = parse_records(c.stdout) if c.returncode == 0 else {}
         res["core_rc"] = c.returncode
-        # How many payloads the command's own top level hands on, in each of
-        # the three readings (`safedeps-core words`, its Y records). A reading
-        # that could not be asked is None, never 0.
-        p3 = {}
-        for rd in ("bash", "zsh", "dash"):
-            w = subprocess.run(["nice", "-n", "10", a.core, "words"], input=cmd_bytes(cmd), capture_output=True,
-                               env=box_env(box, {"SAFEDEPS_READING": rd}), cwd=proj, timeout=60)
-            p3[rd] = sum(1 for line in w.stdout.split(b"\n") if line.startswith(b"Y ")) if w.returncode == 0 else None
-        res["payloads3"] = p3
+        # A's words records of the command in each of the three readings
+        # (`safedeps-core words`), kept whole, and how many payloads the
+        # command's own top level hands on there, read from those records by
+        # their lengths. A reading that could not be asked is None, never 0.
+        def words(text):
+            out = {"text": text.decode("utf-8", "surrogateescape"), "readings": {}}
+            counts_ = {}
+            for rd in READING_NAMES:
+                w = subprocess.run(["nice", "-n", "10", a.core, "words"], input=text, capture_output=True,
+                                   env=box_env(box, {"SAFEDEPS_READING": rd}), cwd=proj, timeout=60)
+                out["readings"][rd] = {"rc": w.returncode, "stdout": w.stdout.decode("latin-1"), "stdout_sha256": sha256(w.stdout)}
+                got_w = words_records(w.stdout) if w.returncode == 0 else None
+                counts_[rd] = len(got_w[0]["payloads"]) if got_w and got_w[1] == len(w.stdout) else None
+            return out, counts_
+
+        cb = cmd_bytes(cmd)
+        res["words"], res["payloads3"] = words(cb)
         res["ref"] = {k: v.decode("latin-1") for k, v in ref.items()}
         res["core"] = {k: v.decode("latin-1") for k, v in got.items()}
-        cb = cmd_bytes(cmd)
+        o_core = consensus(got, cb) if got else None
+        if isinstance(o_core, tuple) and o_core[0] == "rewrite" and o_core[2] != cb:
+            res["words_rewrite"], _ = words(o_core[2])
         differs = ref and got and any(ref.get(k) != got.get(k) for k in set(ref) | set(got) if k.startswith("inert.") or k == "failed")
         if a.shells or rel_guard or floor_guard or (a.evidence and differs):
             sides = {"written": {"decision": "run", "run": cmd, "shells": shells.observe(cmd, box, stand_ins=var)}}
@@ -2276,33 +3172,13 @@ def main():
                 sides["7d66f8c"] = release_side(cmd, idx, box, floor_guard, var)
             res["sides"] = sides
         if a.floor and cmd in floor_rows:
-            o = consensus(got, cb) if got else None
-            rel = floor_rows[cmd]
-            if rel is None:
-                res["floor"] = "release-none"
-            elif o is None or o in ("deny", "blocked"):
-                res["floor"] = {"deny": "core-deny", "blocked": "core-blocked"}.get(o, "core-none")
-            elif o[0] != "rewrite":
-                res["floor"] = "NOT: the core writes no rewrite"
-            else:
-                res["floor"] = "ok" if subseq(o[2], cmd_bytes(rel), cb) else "NOT"
-            res["floor_basis"] = "scripts/test/inert-release-rewrites.json"
-        f7 = res.get("sides", {}).get("7d66f8c")
-        if f7 is not None and "floor" not in res:
+            res["floor"], res["floor_basis"] = floor_of(res, floor_rows, FLOOR_FILE)
+        if "floor" not in res and "7d66f8c" in res.get("sides", {}):
             # The floor of a row the recorded file does not hold: what the
             # 7d66f8c tree's own pre-guard sends for it.
-            o = consensus(got, cb) if got else None
-            if f7.get("decision") != "run":
-                res["floor"] = "release-deny"
-            elif f7.get("run") == cmd:
-                res["floor"] = "release-none"
-            elif o is None or o in ("deny", "blocked"):
-                res["floor"] = {"deny": "core-deny", "blocked": "core-blocked"}.get(o, "core-none")
-            elif o[0] != "rewrite":
-                res["floor"] = "NOT: the core writes no rewrite"
-            else:
-                res["floor"] = "ok" if subseq(o[2], cmd_bytes(f7["run"]), cb) else "NOT"
-            res["floor_basis"] = "the --floor-tree pre-guard's own answer"
+            v_, b_ = floor_of(res, floor_rows, FLOOR_TREE)
+            if v_ is not None:
+                res["floor"], res["floor_basis"] = v_, b_
         shutil.rmtree(box, ignore_errors=True)
         return idx, res
 
@@ -2317,15 +3193,23 @@ def main():
     if os.path.isfile(commit):
         run_info["tree_commit"] = open(commit).read().strip()
     if a.reclassify:
-        saved = upgrade(json.load(open(a.reclassify, encoding="utf-8")))
-        results = saved["rows"]
+        try:
+            raw = open(a.reclassify, "rb").read()
+            saved = json.loads(raw)
+            schema, results = decode_report(saved)
+        except (OSError, ValueError, Unsupported) as e:
+            print("core-inert-differential: %s is not a report this file reads: %s" % (a.reclassify, e), file=sys.stderr)
+            sys.exit(2)
         up0, up1 = (saved.get("load") or ["", ""])[:2]
+        measured = saved.get("run") if isinstance(saved.get("run"), dict) else {}
+        measured_argv = measured.get("argv") if _strs(measured.get("argv")) else []
+        source = {"report": a.reclassify, "report_sha256": sha256(raw)}
         run_info["reclassified_from"] = a.reclassify
-        run_info["reclassified_from_sha256"] = sha256(open(a.reclassify, "rb").read())
-        run_info["measured_by"] = saved.get("run")
-        if saved.get("upgraded_from_schema"):
-            run_info["upgraded_from_schema"] = saved["upgraded_from_schema"]
+        run_info["reclassified_from_sha256"] = source["report_sha256"]
+        run_info["measured_by"] = measured or None
+        run_info["source_schema"] = schema
     else:
+        schema, source, measured_argv = SCHEMA, {"report": "this run"}, sys.argv[1:]
         up0 = subprocess.run(["uptime"], capture_output=True, text=True).stdout.strip()
         results = [None] * len(rows)
         with ThreadPoolExecutor(max_workers=jobs) as ex:
@@ -2333,17 +3217,26 @@ def main():
                 results[idx] = res
         up1 = subprocess.run(["uptime"], capture_output=True, text=True).stdout.strip()
 
-    # The readers, asked of every npm argv any run made.
-    argvs = []
-    for res in results:
-        for v in res.get("sides", {}).values():
-            if isinstance(v.get("shells"), dict):
-                for o in v["shells"].values():
-                    if isinstance(o, dict) and isinstance(o.get("npm"), list):
-                        argvs.extend(o["npm"])
-    R = Readers(work, rpath) if argvs else NoReaders()
-    R.ask(argvs)
+    # The intake: every row, measured now or read back, once.
+    for k, res in enumerate(results):
+        admit(res, k, source, schema, floor_rows, measured_argv)
+    # The readers: the saved answers of a saved report, or asked of every npm
+    # argv that is evidence (in this run, or again with --reread). Either way
+    # the classification reads them as a run keeps them.
+    argvs = [x for res in results if isinstance(res, dict) for v in (res.get("sides") or {}).values()
+             if isinstance(v, dict) and isinstance(v.get("shells"), dict) for o in v["shells"].values() if calls_known(o) for x in o["npm"]]
+    if a.reclassify and not a.reread:
+        R = SavedReaders(saved.get("readings"), {"source": "the saved report's answers", "report_sha256": source["report_sha256"],
+                                                 "npm_version": ((measured.get("npm_parser") or {}).get("version") or "")})
+    else:
+        live = Readers(work, rpath)
+        live.ask(argvs)
+        R = SavedReaders(live.answers(), {"source": "asked again on this PATH (--reread)" if a.reclassify else "asked in this run",
+                                          "path": rpath, "npm_version": live.npm_version, "npm_error": live.npm_error})
     run_info["npm_parser"] = {"asked": R.npm_asked, "version": R.npm_version, "error": R.npm_error}
+    run_info["readers"] = dict(R.source, held=len(R.gate), problems=R.problems[:50], problem_count=len(R.problems), rederived=R.rederived)
+    run_info["attachments"] = attach_info
+    run_info["floor_file_sha256"] = floor_file_sha
 
     reach = {}
     rp = os.path.join(MEASURE, "inert-record-reach.tsv")
@@ -2369,7 +3262,7 @@ def main():
             if fid in ids:
                 reach[ids[fid]] = (fid, int(n))
 
-    counts = classify(results, load_classes(), R)
+    counts = classify(results, load_classes(), R, attachments)
     # A row where the core's side makes a call without the flag and writes no
     # record: what the head's whole pre-guard answers for that command. The
     # inert rewrite is one step of the guard, and a command the guard denies
@@ -2392,8 +3285,11 @@ def main():
     if a.manifest:
         manifest(a.manifest, results, run_info)
     if a.report:
-        json.dump({"schema": SCHEMA, "run": run_info, "summary": summary, "load": [up0, up1], "readings": R.answers(), "rows": results},
-                  open(a.report, "w"), ensure_ascii=False, indent=1)
+        out_ = {"schema": SCHEMA, "run": run_info, "summary": summary, "load": [up0, up1], "readings": R.answers(),
+                "rows": [{k: v for k, v in res.items() if not k.startswith("_")} for res in results]}
+        if schema == 1:
+            out_["upgraded_from_schema"] = 1
+        json.dump(out_, open(a.report, "w"), ensure_ascii=False, indent=1)
     shutil.rmtree(work, ignore_errors=True)
     if a.control:
         print("control: the damaged reference differs on %d commands" % counts["differ"])

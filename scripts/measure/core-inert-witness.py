@@ -51,6 +51,9 @@ def compare_calls(d, orig, now):
     """Each npm call of a run beside the same call of the command as written
     (two observations of one shell): the indices of the `--ignore-scripts`
     words inserted, or both argvs where the call is no such edit."""
+    for o in (orig, now):
+        if isinstance(o, dict) and "_axes" not in o:
+            d.admit_obs(o, d.SCHEMA)
     if not d.calls_known(orig) or not d.calls_known(now):
         return [{"note": "a run's npm calls are not known"}]
     out = []
