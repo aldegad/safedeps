@@ -51,10 +51,14 @@ fn expand(base: &Path, segments: &[&[u8]], include_modules: bool, out: &mut Vec<
             for p in children(base, false, include_modules) { if !sh::is_link(&p) { expand(&p, segments, include_modules, out); } }
         }
         b"node_modules" if !include_modules => {}
-        _ if seg.iter().any(|b| b"*?[".contains(b)) => {
-            for p in children(base, true, include_modules) {
+        _ if include_modules || seg.iter().any(|b| b"*?[".contains(b)) => {
+            let mut entries = children(base, true, include_modules);
+            // Bash 3.2's pathname expansion includes these when a pattern
+            // explicitly names the leading dot. Ordinary members excludes them.
+            if include_modules { entries.extend([base.join("."), base.join("..")]); }
+            for p in entries {
                 let name = sh::basename(sh::bytes(&p));
-                if name.starts_with(b".") && !seg.starts_with(b".") { continue }
+                if name.starts_with(b".") && !(seg.starts_with(b".") || (include_modules && seg.starts_with(b"\\."))) { continue }
                 if sh::fnmatch(seg, &name) { expand(&p, rest, include_modules, out); }
             }
         }
@@ -70,6 +74,12 @@ fn expand(base: &Path, segments: &[&[u8]], include_modules: bool, out: &mut Vec<
 /// manifest hashing. Unlike ordinary workspace membership, this listing
 /// includes node_modules when the pattern names it.
 pub fn glob_members(root: &Path, pattern: &[u8]) -> Vec<Vec<u8>> {
+    if !sh::glob_pattern(pattern) {
+        let path = sh::p(&cat(&[sh::bytes(root), b"/", pattern]));
+        return if sh::is_dir(&path) && sh::is_file(&path.join("package.json")) {
+            vec![sh::bytes(&path).to_vec()]
+        } else { Vec::new() };
+    }
     let mut out = Vec::new();
     expand(root, &pattern.split(|b| *b == b'/').collect::<Vec<_>>(), true, &mut out);
     out

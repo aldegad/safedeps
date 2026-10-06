@@ -155,6 +155,28 @@ fn units(b: &[u8], utf8: bool) -> Vec<u32> {
     b.iter().map(|&x| x as u32).collect()
 }
 
+const QUOTED: u32 = 1 << 31;
+
+fn pattern_units(pattern: &[u8], utf8: bool) -> Vec<u32> {
+    let raw = units(pattern, utf8);
+    let mut out = Vec::new();
+    let mut it = raw.into_iter();
+    while let Some(c) = it.next() {
+        if c == '\\' as u32 {
+            out.push(it.next().unwrap_or(c) | QUOTED);
+        } else { out.push(c); }
+    }
+    out
+}
+
+/// Whether an expanded shell word requests pathname expansion. Backslashes
+/// remain literal when no unquoted metacharacter requests that expansion.
+pub fn glob_pattern(pattern: &[u8]) -> bool {
+    let pat = pattern_units(pattern, false);
+    pat.iter().enumerate().any(|(i, &c)| c == '*' as u32 || c == '?' as u32 ||
+        (c == '[' as u32 && bracket(&pat, i, 0).is_some()))
+}
+
 /// A bracket expression at `pat[i]` (`[`): whether `c` is in it and where the
 /// expression ends, or None when no `]` closes it and the `[` is a character.
 fn bracket(pat: &[u32], i: usize, c: u32) -> Option<(bool, usize)> {
@@ -187,14 +209,14 @@ fn bracket(pat: &[u32], i: usize, c: u32) -> Option<(bool, usize)> {
             }
         }
         if pat.get(k + 1) == Some(&('-' as u32)) && matches!(pat.get(k + 2), Some(&y) if y != ']' as u32) {
-            let y = pat[k + 2];
-            if x <= c && c <= y {
+            let y = pat[k + 2] & !QUOTED;
+            if (x & !QUOTED) <= c && c <= y {
                 hit = true;
             }
             k += 3;
             continue;
         }
-        if x == c {
+        if (x & !QUOTED) == c {
             hit = true;
         }
         k += 1;
@@ -233,7 +255,7 @@ fn glob(pat: &[u32], name: &[u32]) -> bool {
                         }
                     }
                 }
-            } else if x == name[ni] {
+            } else if (x & !QUOTED) == name[ni] {
                 pi += 1;
                 ni += 1;
                 step = true;
@@ -257,11 +279,11 @@ fn glob(pat: &[u32], name: &[u32]) -> bool {
     pi == pat.len()
 }
 
-/// `[[ name == ${pattern} ]]` for a pattern of `*`, `?` and `[...]`: the
-/// patterns with anything else in them never reach this (workspaces.rs).
+/// Shell pattern matching, including backslash quotation for the Yarn
+/// pathname-expansion caller. Ordinary workspace patterns reject backslashes.
 pub fn fnmatch(pattern: &[u8], name: &[u8]) -> bool {
     let utf8 = utf8_locale();
-    glob(&units(pattern, utf8), &units(name, utf8))
+    glob(&pattern_units(pattern, utf8), &units(name, utf8))
 }
 
 fn random_tail() -> [u8; 6] {
