@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # safedeps: the census in shards -- combine them, and show they cover the census.
 #
-# CI splits the quick scan-failure census across machines
-# (scan-failure-census.sh --shard I/M --out DIR). Splitting it is only safe
-# while the shards together make every run the unsharded census makes, and
-# while the one check a shard cannot judge alone, idle-mode, is still judged.
+# The host runner (scripts/ci/run-on-hosts.sh) splits the quick scan-failure
+# census across machines (scan-failure-census.sh --shard I/M --out DIR).
+# Splitting it is only safe while the shards together make every run the
+# unsharded census makes, and while the one check a shard cannot judge alone,
+# idle-mode, is still judged.
 #
-#   combine DIR...   the shards' --out directories, from one CI run. Fails
+#   combine DIR...   the shards' --out directories, from one run. Fails
 #                    unless they are shards 1..M of the same M, once each; all
 #                    hold the same cases and the same list of every failing run;
 #                    the failing runs they made, together, are exactly that

@@ -495,7 +495,7 @@ safedeps/
 
 ### 테스트 실행
 
-`npm test` 는 개발용 실행입니다. 릴리스에만 필요한 두 배터리, 축약 scan-failure census 와 `scripts/test/effect-trace-grid.sh` 를 뺀 모든 테스트 배터리를 돌립니다. `npm run test:release` 는 그 둘을 포함해 모든 배터리를 돌립니다. 릴리스는 우리 macOS 장비와, Windows 용으로 WSL1 에서 릴리스 세트를 돌립니다. Linux 는 테스트하지 않습니다. GitHub Actions 는 테스트를 돌리지 않습니다. `scripts/test/run-all.sh --list` 는 실행이 시작할 배터리 목록을 출력합니다.
+`npm test` 는 개발용 실행입니다. 릴리스에만 필요한 두 배터리, 축약 scan-failure census 와 `scripts/test/effect-trace-grid.sh` 를 뺀 모든 테스트 배터리를 돌립니다. `npm run test:release` 는 그 둘을 포함해 모든 배터리를 돌립니다. 릴리스는 우리 macOS 장비와, Windows 용으로 WSL1 에서 릴리스 세트를 돌립니다. Linux 는 테스트하지 않습니다. GitHub Actions 는 테스트를 돌리지 않습니다. `scripts/ci/run-on-hosts.sh` 는 어느 세트든 우리 macOS 장비 여러 대에 나눠 한꺼번에 돌립니다. 가장 긴 배터리는 행 샤드로 쪼개고, 샤드를 합친 것이 세트 전체이고 도중에 잃은 장비가 없을 때만 초록입니다. `scripts/ci/release-checks.sh` 는 테스트가 아닌 릴리스 검사(ShellCheck, 모든 커밋의 시크릿 스캔, 패키지 내용)를 돌립니다. `scripts/test/run-all.sh --list` 는 실행이 시작할 배터리 목록을 출력합니다.
 
 ## What's Different
 

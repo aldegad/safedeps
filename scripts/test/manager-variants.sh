@@ -27,19 +27,25 @@
 #
 # Commands are fed to the guard as payloads; nothing here runs them.
 #
-# Usage: scripts/test/manager-variants.sh [--tree <dir>]
+# Usage: scripts/test/manager-variants.sh [--tree <dir>] [--shard I/M | --shard-list]
 #   --tree <dir>   judge with the guard in another checkout (the controls)
+#   --shard I/M    run shard I of M (scripts/test/lib/shard.sh): a row is a
+#                  template with all its spellings, a glued form with its
+#                  spaced one, or a runtime-option command
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+pass() { printf 'ok - %s\n' "$1"; }
+fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
+# shellcheck source=lib/shard.sh
+source "${ROOT_DIR}/scripts/test/lib/shard.sh"
+shard_args "$@"
+set -- ${SHARD_REST[@]+"${SHARD_REST[@]}"}
 TREE="${ROOT_DIR}"
 if [[ "${1:-}" == --tree ]]; then
   TREE=$(cd "$2" && pwd)
 fi
 cd "${TREE}"
-
-pass() { printf 'ok - %s\n' "$1"; }
-fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
 # A class that fails is reported and the next one still runs, so a control
 # shows every class it breaks; the battery fails at the end.
 failed=0
@@ -170,12 +176,21 @@ templates=(
   'declared|bunx --cwd=x evil@1.0.0||deny | npm evil@1.0.0; | '
 )
 
-# One command per template, spelling and form; judged eight at a time.
+# How many tuples are judged at a time: SAFEDEPS_TEST_JOBS, which run-all.sh
+# sets (half the CPUs; a unit's weight on a host of scripts/ci/run-on-hosts.sh),
+# or eight when it is unset. It was eight whatever the machine, so the runner
+# could not count what this battery takes.
+batch="${SAFEDEPS_TEST_JOBS:-8}"
+[[ "${batch}" =~ ^[1-9][0-9]*$ ]] || fail "SAFEDEPS_TEST_JOBS must be a whole number of at least 1 (got ${batch:0:40})"
+
+# One command per template, spelling and form; judged batch at a time.
 jobs_dir="${tmp_root}/jobs"
 mkdir -p "${jobs_dir}"
-n=0
+n=0 t_index=0 template_own=()
 for t in "${templates[@]}"; do
   IFS='|' read -r class template option _ <<< "${t}"
+  shard_row "template: ${t}" && template_own[t_index]=1
+  t_index=$((t_index + 1))
   for (( s = 0; s < ${#spellings[@]}; s++ )); do
     [[ "${class}" != declared || "${s}" == 0 ]] || continue
     for form in sep eq; do
@@ -189,26 +204,30 @@ for t in "${templates[@]}"; do
         word="${option}=${value}"
       fi
       command="${template//%V%/${word}}"
-      printf '%s\n' "${command}" > "${jobs_dir}/${n}.cmd"
-      ( tuple "${command}" > "${jobs_dir}/${n}.out" ) &
       n=$((n + 1))
-      (( n % 8 == 0 )) && wait
+      [[ -n "${template_own[t_index - 1]:-}" ]] || continue
+      printf '%s\n' "${command}" > "${jobs_dir}/$((n - 1)).cmd"
+      ( tuple "${command}" > "${jobs_dir}/$((n - 1)).out" ) &
+      (( n % batch == 0 )) && wait
     done
   done
 done
 wait
 
-red=0 k=0
+red=0 k=0 t_index=0
 for t in "${templates[@]}"; do
   IFS='|' read -r class template option want <<< "${t}"
   want="${t#*|*|*|}"
   base="" rows="" bad=false
+  own="${template_own[t_index]:-}"
+  t_index=$((t_index + 1))
   for (( s = 0; s < ${#spellings[@]}; s++ )); do
     [[ "${class}" != declared || "${s}" == 0 ]] || continue
     for form in sep eq; do
       [[ -n "${option}" || "${form}" == sep ]] || continue
-      got=$(cat "${jobs_dir}/${k}.out") cmd=$(cat "${jobs_dir}/${k}.cmd")
       k=$((k + 1))
+      [[ -n "${own}" ]] || continue
+      got=$(cat "${jobs_dir}/$((k - 1)).out") cmd=$(cat "${jobs_dir}/$((k - 1)).cmd")
       rows+="    [${got}] ${cmd}"$'\n'
       if [[ "${class}" == version ]]; then
         # The union: the pinned install is judged whichever version runs it.
@@ -285,20 +304,24 @@ glued_ends=(
 )
 jobs_dir="${tmp_root}/glued"
 mkdir -p "${jobs_dir}"
-n=0
+n=0 glued_own=()
 for base in "${glued_bases[@]}"; do
   for end in "${glued_ends[@]}"; do
     glued="${end%%^*}" spaced="${end#*^}"
+    shard_row "glued: ${base} ^ ${end}" || { n=$((n + 1)); continue; }
+    glued_own[n]=1
     printf '%s\n' "${glued//%C%/${base}}" > "${jobs_dir}/${n}.cmd"
     ( tuple "${glued//%C%/${base}}" > "${jobs_dir}/${n}.glued"
       tuple "${spaced//%C%/${base}}" > "${jobs_dir}/${n}.spaced" ) &
     n=$((n + 1))
-    (( n % 4 == 0 )) && wait
+    # Two tuples a job.
+    (( n % ((batch + 1) / 2) == 0 )) && wait
   done
 done
 wait
 red=0
 for (( k = 0; k < n; k++ )); do
+  [[ -n "${glued_own[k]:-}" ]] || continue
   got=$(cat "${jobs_dir}/${k}.glued") want=$(cat "${jobs_dir}/${k}.spaced")
   [[ "${got}" == "${want}" && "${want}" != pass\ * ]] && continue
   red=$((red + 1))
@@ -334,21 +357,24 @@ packages=('evil@1.0.0' '"evil@1.0.0"' 'ev"il"@1.0.0')
 want_runtime='deny | npm evil@1.0.0; | '
 jobs_dir="${tmp_root}/runtime"
 mkdir -p "${jobs_dir}"
-n=0
+n=0 runtime_own=()
 for option in "${runtime_options[@]}"; do
   for package in "${packages[@]}"; do
     for command in "bun add ${option} ${package}" "bun i ${option} ${package}" \
         "bun install ${option} ${package}" "bun ${option} add ${package}"; do
+      shard_row "runtime: ${command}" || { n=$((n + 1)); continue; }
+      runtime_own[n]=1
       printf '%s\n' "${command}" > "${jobs_dir}/${n}.cmd"
       ( tuple "${command}" > "${jobs_dir}/${n}.out" ) &
       n=$((n + 1))
-      (( n % 8 == 0 )) && wait
+      (( n % batch == 0 )) && wait
     done
   done
 done
 wait
 red=0
 for (( k = 0; k < n; k++ )); do
+  [[ -n "${runtime_own[k]:-}" ]] || continue
   got=$(cat "${jobs_dir}/${k}.out")
   [[ "${got}" == "${want_runtime}" ]] && continue
   red=$((red + 1))
@@ -396,4 +422,5 @@ table_faults=$(
 [[ -z "${table_faults}" ]] || not_ok "the value table has an entry no lookup reads as written: ${table_faults//$'\n'/; }"
 [[ "${order}" != "p v" || -n "${table_faults}" ]] \
   || pass "the value table reads a command's entry first, lists no option for both \`*\` and a command, and every scope is a command path"
+(( failed != 0 )) || shard_end
 exit "${failed}"

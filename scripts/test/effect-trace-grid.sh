@@ -37,12 +37,25 @@ cd "${ROOT_DIR}"
 
 pass() { printf 'ok - %s\n' "$1"; }
 fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
+# Rows for --shard I/M (scripts/test/lib/shard.sh): each row of a table below,
+# each pass of a loop over carriers, and each case that stands alone (LK1,
+# VB4, the same-second trials, the backstop pair). A row makes its own project
+# and safedeps home. The sandbox's npm cache is shared, as it is unsharded:
+# a row that needs a cold cache empties it itself.
+# shellcheck source=lib/shard.sh
+source "${ROOT_DIR}/scripts/test/lib/shard.sh"
+shard_args "$@"
+(( ${#SHARD_REST[@]} == 0 )) || fail "effect-trace-grid.sh takes --shard I/M or --shard-list, not ${SHARD_REST[0]}"
+# Whether this run ran an RH row, the rows the evil registry is there for.
+rh_rows_ran=false
 
 NPM_SANDBOX_NAME=trace-grid
 NPM_SANDBOX_SCRIPT_RE='effect-trace-grid\.sh'
 NPM_SANDBOX_TOLERANT=true
 # shellcheck source=lib/npm-sandbox.sh
 source "${ROOT_DIR}/scripts/test/lib/npm-sandbox.sh"
+# Forms hold paths under the sandbox, so a row's label says <tmp> there.
+shard_mask tmp "${tmp_root}"
 
 # An alternate tree for CDPATH: <alt>/sub is a project of its own, so a `cd sub`
 # that CDPATH sends there installs there.
@@ -176,6 +189,7 @@ run_row() {
 printf '# grid (id engine command | outcome)\n'
 while IFS= read -r row; do
   [[ -n "${row}" && "${row}" != \#* ]] || continue
+  shard_row "grid: ${row}" || continue
   run_row "${row}"
 done <<'ROWS'
 C1|project|.|claude|rollback|npm install sd-victim
@@ -441,6 +455,7 @@ printf '# what an install brought in (id engine command | outcome)\n'
 failures_before=${#FAILURES[@]}
 while IFS= read -r row; do
   [[ -n "${row}" && "${row}" != \#* ]] || continue
+  shard_row "records: ${row}" || continue
   IFS='|' read -r id fixture engine expect form <<< "${row}"
   FIRST_PROJECT=""
   "new_${fixture}"
@@ -1061,7 +1076,9 @@ printf '# install scripts over the whole tree (id engine command | outcome)\n'
 failures_before=${#FAILURES[@]}
 while IFS= read -r row; do
   [[ -n "${row}" && "${row}" != \#* ]] || continue
+  shard_row "whole tree: ${row}" || continue
   IFS='|' read -r id fixture engine expect form <<< "${row}"
+  [[ "${id}" != RH* ]] || rh_rows_ran=true
   FIRST_PROJECT=""
   "new_${fixture}"
   expect="${expect//@FIRST@/${FIRST_PROJECT}}"
@@ -1235,28 +1252,31 @@ ROWS
 # closes this, the row goes red and the boundary in ARCHITECTURE.md moves with
 # it.
 failures_before=${#FAILURES[@]}
-new_evilenvfile
-vb4_before=$(home_records)
-run_install '. ./npmenv.sh && npm install sd-approved@1.0.0'
-vb4_first_ran="${CASE_RAN}" vb4_first_post="${CASE_POST}" vb4_after=$(home_records)
-grep -q 'EVIL-sd-approved' "${CASE_PROJECT}/node_modules/sd-approved/mark.js" 2>/dev/null \
-  || note_failure "VB4: the first command installs the impostor, or the row tests nothing"
-: > "${MARKS}"
-run_install 'npm install sd-swapped@1.0.0'
-printf 'VB4  claude  . ./npmenv.sh && npm install sd-approved@1.0.0, then npm install sd-swapped@1.0.0 | first ran=[%s] ran=[%s] post=[%s]\n' \
-  "$(cut -f1,2 <<< "${vb4_first_ran}" | tr '\t' ':' | paste -sd, -)" "$(cut -f1,2 <<< "${CASE_RAN}" | tr '\t' ':' | paste -sd, -)" \
-  "$(jq -r '.systemMessage // empty' <<< "${CASE_POST}" 2>/dev/null | tr '\n' ' ' | head -c 300)"
-[[ -z "${vb4_first_ran}" ]] || note_failure "VB4: the first command rebuilds nothing (${vb4_first_ran})"
-grep -qF "${SOURCED_SAYS}" <<< "${vb4_first_post}" \
-  || note_failure "VB4: the first command's warning says why nothing is recorded (post: ${vb4_first_post:0:400})"
-[[ "${vb4_after}" == "${vb4_before}" ]] || note_failure "VB4: the first command records nothing withheld and leaves no tree observed ($(paste -sd' ' - <<< "${vb4_after}"))"
-[[ -z "${CASE_PRE_DENY}" && "${CASE_INSTALL_RC}" == 0 ]] && ! rolled_back \
-  || note_failure "VB4: the next approved install is kept (deny: ${CASE_PRE_DENY:0:160}, rc ${CASE_INSTALL_RC}, post: ${CASE_POST:0:300})"
-[[ -z "${CASE_POST}" ]] || note_failure "VB4: the next approved install confirms quietly, as the boundary stands (post: ${CASE_POST:0:300})"
-[[ "$(grep -c '^EVIL' <<< "${CASE_RAN}" || true)" == 3 ]] \
-  || note_failure "VB4: the next approved install rebuilds the impostor's three scripts, as the boundary stands (${CASE_RAN:-nothing ran})"
-[[ ${#FAILURES[@]} -ne ${failures_before} ]] \
-  || pass "VB4: after a sourced file that names the registry, nothing is recorded and the next approved install rebuilds what it served (the boundary as it stands)"
+# One row (scripts/test/lib/shard.sh), from here to its pass line.
+if shard_row "VB4: after a sourced file that names the registry, the next approved install rebuilds what it served"; then
+  new_evilenvfile
+  vb4_before=$(home_records)
+  run_install '. ./npmenv.sh && npm install sd-approved@1.0.0'
+  vb4_first_ran="${CASE_RAN}" vb4_first_post="${CASE_POST}" vb4_after=$(home_records)
+  grep -q 'EVIL-sd-approved' "${CASE_PROJECT}/node_modules/sd-approved/mark.js" 2>/dev/null \
+    || note_failure "VB4: the first command installs the impostor, or the row tests nothing"
+  : > "${MARKS}"
+  run_install 'npm install sd-swapped@1.0.0'
+  printf 'VB4  claude  . ./npmenv.sh && npm install sd-approved@1.0.0, then npm install sd-swapped@1.0.0 | first ran=[%s] ran=[%s] post=[%s]\n' \
+    "$(cut -f1,2 <<< "${vb4_first_ran}" | tr '\t' ':' | paste -sd, -)" "$(cut -f1,2 <<< "${CASE_RAN}" | tr '\t' ':' | paste -sd, -)" \
+    "$(jq -r '.systemMessage // empty' <<< "${CASE_POST}" 2>/dev/null | tr '\n' ' ' | head -c 300)"
+  [[ -z "${vb4_first_ran}" ]] || note_failure "VB4: the first command rebuilds nothing (${vb4_first_ran})"
+  grep -qF "${SOURCED_SAYS}" <<< "${vb4_first_post}" \
+    || note_failure "VB4: the first command's warning says why nothing is recorded (post: ${vb4_first_post:0:400})"
+  [[ "${vb4_after}" == "${vb4_before}" ]] || note_failure "VB4: the first command records nothing withheld and leaves no tree observed ($(paste -sd' ' - <<< "${vb4_after}"))"
+  [[ -z "${CASE_PRE_DENY}" && "${CASE_INSTALL_RC}" == 0 ]] && ! rolled_back \
+    || note_failure "VB4: the next approved install is kept (deny: ${CASE_PRE_DENY:0:160}, rc ${CASE_INSTALL_RC}, post: ${CASE_POST:0:300})"
+  [[ -z "${CASE_POST}" ]] || note_failure "VB4: the next approved install confirms quietly, as the boundary stands (post: ${CASE_POST:0:300})"
+  [[ "$(grep -c '^EVIL' <<< "${CASE_RAN}" || true)" == 3 ]] \
+    || note_failure "VB4: the next approved install rebuilds the impostor's three scripts, as the boundary stands (${CASE_RAN:-nothing ran})"
+  [[ ${#FAILURES[@]} -ne ${failures_before} ]] \
+    || pass "VB4: after a sourced file that names the registry, nothing is recorded and the next approved install rebuilds what it served (the boundary as it stands)"
+fi
 
 # LK1. Each lockfile field the rebuild's check reads vouches for less than it
 # seems to (ARCHITECTURE.md tables them), and every gap is held by a row:
@@ -1268,19 +1288,22 @@ grep -qF "${SOURCED_SAYS}" <<< "${vb4_first_post}" \
 # one, so it is put there between the command and the post hook, as a
 # concurrent writer could.
 swap_member_link() { rm -f "$1/node_modules/a"; make_evil_dir "$1/node_modules/a" a; }
-new_workspace
-[[ -L "${CASE_PROJECT}/node_modules/a" ]] || fail "the workspace fixture links its member"
-: > "${MARKS}"
-run_install 'npm install sd-approved@1.0.0' claude swap_member_link
-printf 'LK1  claude  npm install sd-approved@1.0.0 (a real directory where a link is recorded) | rollback=%s ran=[%s] post=[%s]\n' \
-  "$(rolled_back && echo yes || echo no)" "$(cut -f1,2 <<< "${CASE_RAN}" | tr '\t' ':' | paste -sd, -)" \
-  "$(jq -r '.systemMessage // empty' <<< "${CASE_POST}" 2>/dev/null | tr '\n' ' ' | head -c 300)"
-[[ -z "${CASE_PRE_DENY}" ]] || note_failure "LK1: the gate lets the command through (deny: ${CASE_PRE_DENY:0:160})"
-! rolled_back || note_failure "LK1: not rolled back (post: ${CASE_POST:0:300})"
-grep -qF 'node_modules/a (a@1.0.0 on disk, the lockfile records a link)' <<< "${CASE_POST}" \
-  || note_failure "LK1: the warning names the directory where a link is recorded (post: ${CASE_POST:-<quiet>})"
-grep -q '^EVIL' <<< "${CASE_RAN}" && note_failure "LK1: the skipped rebuild runs no script of the directory (${CASE_RAN})"
-[[ ${#FAILURES[@]} -ne ${failures_before} ]] || pass "a real directory where a link is recorded is named and not rebuilt"
+# One row (scripts/test/lib/shard.sh), from here to its pass line.
+if shard_row "LK1: a real directory where a link is recorded is named and not rebuilt"; then
+  new_workspace
+  [[ -L "${CASE_PROJECT}/node_modules/a" ]] || fail "the workspace fixture links its member"
+  : > "${MARKS}"
+  run_install 'npm install sd-approved@1.0.0' claude swap_member_link
+  printf 'LK1  claude  npm install sd-approved@1.0.0 (a real directory where a link is recorded) | rollback=%s ran=[%s] post=[%s]\n' \
+    "$(rolled_back && echo yes || echo no)" "$(cut -f1,2 <<< "${CASE_RAN}" | tr '\t' ':' | paste -sd, -)" \
+    "$(jq -r '.systemMessage // empty' <<< "${CASE_POST}" 2>/dev/null | tr '\n' ' ' | head -c 300)"
+  [[ -z "${CASE_PRE_DENY}" ]] || note_failure "LK1: the gate lets the command through (deny: ${CASE_PRE_DENY:0:160})"
+  ! rolled_back || note_failure "LK1: not rolled back (post: ${CASE_POST:0:300})"
+  grep -qF 'node_modules/a (a@1.0.0 on disk, the lockfile records a link)' <<< "${CASE_POST}" \
+    || note_failure "LK1: the warning names the directory where a link is recorded (post: ${CASE_POST:-<quiet>})"
+  grep -q '^EVIL' <<< "${CASE_RAN}" && note_failure "LK1: the skipped rebuild runs no script of the directory (${CASE_RAN})"
+  [[ ${#FAILURES[@]} -ne ${failures_before} ]] || pass "a real directory where a link is recorded is named and not rebuilt"
+fi
 
 if [[ "${REPORT_ONLY}" == 1 ]]; then
   printf '# GRID_REPORT_ONLY: %s failure(s) not enforced\n' "${#FAILURES[@]}"
@@ -1295,6 +1318,7 @@ for carrier in \
   "project|.|cd sub && rm -f package.json && npm install sd-victim|sub" \
   "project|.|npm install --dry-run sd-victim|."
 do
+  shard_row "carrier: ${carrier}" || continue
   IFS='|' read -r fixture cwd form where <<< "${carrier}"
   "new_${fixture}"
   CASE_CWD="${CASE_PROJECT}/${cwd}"
@@ -1320,6 +1344,8 @@ npm_masks=no
 # an npm that does not mask, the gate reads where npm said and rolls it back.
 new_uuidproject
 leaf="${CASE_PROJECT##*/}"
+# The carriers below name this mktemp leaf, so a row's label says <leaf> there.
+shard_mask leaf "${leaf}"
 mkdir -p "${UUID_OTHER}/${leaf}" "${UUID_OTHER}/elsewhere"
 printf '{"name":"other","version":"1.0.0"}\n' > "${UUID_OTHER}/${leaf}/package.json"
 printf '{"name":"elsewhere","version":"1.0.0"}\n' > "${UUID_OTHER}/elsewhere/package.json"
@@ -1327,6 +1353,7 @@ for carrier in \
   "alike|npm install --prefix ../../${UUID_OTHER##*/}/${leaf} sd-victim|${UUID_OTHER}/${leaf}" \
   "unlike|npm install --prefix ${UUID_OTHER}/elsewhere sd-victim|${UUID_OTHER}/elsewhere"
 do
+  shard_row "carrier: ${carrier}" || continue
   IFS='|' read -r kind form landed <<< "${carrier}"
   new_safedeps_home
   rm -rf "${landed}/node_modules" "${landed}/package-lock.json"
@@ -1374,6 +1401,7 @@ for carrier in \
   "yes|npm install -D sd-approved" \
   "yes|npm ci && npm ci"
 do
+  shard_row "carrier: ${carrier}" || continue
   IFS='|' read -r approved_first form <<< "${carrier}"
   new_project
   if [[ "${approved_first}" == yes ]]; then
@@ -1401,6 +1429,7 @@ for carrier in \
   "symws|.|cd packages/a && npm install sd-approved|real/a" \
   "symws|real/a|npm install sd-approved|real/a"
 do
+  shard_row "carrier: ${carrier}" || continue
   IFS='|' read -r fixture cwd form where <<< "${carrier}"
   "new_${fixture}"
   CASE_CWD="${CASE_PROJECT}/${cwd}"
@@ -1437,21 +1466,24 @@ record_same_second() {
     } catch (e) { process.stdout.write(`unreadable (${e.code}) same_second=no`); }
   ' "${baseline:-<none>}" "${lock}")
 }
-same_second_seen=0
-for trial in 1 2 3 4 5 6 7 8 9 10 11 12; do
-  new_project
-  (cd "${CASE_PROJECT}" && npm install sd-approved --ignore-scripts >/dev/null 2>&1) || fail "the fixture installs sd-approved first"
-  : > "${MARKS}"
-  TRIAL=""
-  run_install "npm install sd-approved" claude record_same_second
-  [[ "${TRIAL}" != *same_second=yes* ]] || same_second_seen=$(( same_second_seen + 1 ))
-  printf '   trial %s: %s ungated=%s\n' "${trial}" "${TRIAL}" "$(ungated && echo yes || echo no)"
-  ungated && note_failure "a no-op reinstall leaves a trace even in the baseline's second (trial ${trial}: ${TRIAL})"
-  [[ -z "${CASE_POST}" ]] || note_failure "a no-op reinstall confirms quietly (trial ${trial}: ${CASE_POST})"
-  (( same_second_seen < 2 )) || break
-done
-(( same_second_seen > 0 )) || note_failure "no trial put the lockfile write in the baseline's second, so the same-second row observed nothing"
-pass "a no-op reinstall in the second the pre-guard ran in leaves a trace (${same_second_seen} same-second trial(s) observed)"
+# One row (scripts/test/lib/shard.sh), from here to its pass line.
+if shard_row "a no-op reinstall in the second the pre-guard ran in leaves a trace"; then
+  same_second_seen=0
+  for trial in 1 2 3 4 5 6 7 8 9 10 11 12; do
+    new_project
+    (cd "${CASE_PROJECT}" && npm install sd-approved --ignore-scripts >/dev/null 2>&1) || fail "the fixture installs sd-approved first"
+    : > "${MARKS}"
+    TRIAL=""
+    run_install "npm install sd-approved" claude record_same_second
+    [[ "${TRIAL}" != *same_second=yes* ]] || same_second_seen=$(( same_second_seen + 1 ))
+    printf '   trial %s: %s ungated=%s\n' "${trial}" "${TRIAL}" "$(ungated && echo yes || echo no)"
+    ungated && note_failure "a no-op reinstall leaves a trace even in the baseline's second (trial ${trial}: ${TRIAL})"
+    [[ -z "${CASE_POST}" ]] || note_failure "a no-op reinstall confirms quietly (trial ${trial}: ${CASE_POST})"
+    (( same_second_seen < 2 )) || break
+  done
+  (( same_second_seen > 0 )) || note_failure "no trial put the lockfile write in the baseline's second, so the same-second row observed nothing"
+  pass "a no-op reinstall in the second the pre-guard ran in leaves a trace (${same_second_seen} same-second trial(s) observed)"
+fi
 
 # --- 4. The trace check starts no npm -------------------------------------------------------
 # Deciding whether the install was read costs a `find` and two `ls`, never an
@@ -1474,6 +1506,7 @@ for carrier in \
   "command cd sub; npm install sd-approved|" \
   "npm install sd-approved|config query rebuild"
 do
+  shard_row "carrier: ${carrier}" || continue
   IFS='|' read -r form expected <<< "${carrier}"
   new_project
   : > "${tmp_root}/npm-calls.log"
@@ -1501,41 +1534,47 @@ bs_confirmed() {
   [[ -z "${CASE_POST}" ]] || fail "the backstop fixture is confirmed quietly (post: ${CASE_POST})"
   edit_json package.json --arg s "$1" '.scripts["deps:install"] = $s'
 }
-bs_confirmed 'echo nothing to install'
-for spec in "${CASE_HOME}/approved-specs"/*.json; do
-  jq '.expires_at = "2020-01-01T00:00:00Z"' "${spec}" > "${spec}.new" && mv "${spec}.new" "${spec}"
-done
-cp "${CASE_PROJECT}/package-lock.json" "${tmp_root}/bt1-lock.json"
-# On a filesystem that keeps whole seconds the pre-guard's baseline is set two
-# seconds back, and the ledger edit above is then inside it.
-sleep 3
-run_install 'npm run deps:install'
-printf 'BT1  claude  npm run deps:install (installs nothing, ledger expired) | rollback=%s post=[%s]\n' \
-  "$(rolled_back && echo yes || echo no)" "${CASE_POST:0:120}"
-[[ -z "${CASE_PRE_DENY}" ]] || note_failure "BT1: the gate lets npm run through (deny: ${CASE_PRE_DENY:0:160})"
-[[ -z "${CASE_POST}" ]] || note_failure "BT1: the backstop says nothing about a script that installed nothing (post: ${CASE_POST})"
-[[ -f "${CASE_PROJECT}/node_modules/sd-approved/package.json" ]] || note_failure "BT1: node_modules is left in place"
-cmp -s "${CASE_PROJECT}/package-lock.json" "${tmp_root}/bt1-lock.json" || note_failure "BT1: the lockfile is left as it was"
-grep -qF "post-verify BACKSTOP UNTRACED: no trace in ${CASE_PROJECT}: " "${CASE_HOME}/advisory.log" \
-  || note_failure "BT1: advisory.log says which check found no trace"
+# One row (scripts/test/lib/shard.sh), from here to its pass line.
+if shard_row "the backstop rolls back an npm run that installed (BT2) and nothing after one that did not (BT1)"; then
+  bs_confirmed 'echo nothing to install'
+  for spec in "${CASE_HOME}/approved-specs"/*.json; do
+    jq '.expires_at = "2020-01-01T00:00:00Z"' "${spec}" > "${spec}.new" && mv "${spec}.new" "${spec}"
+  done
+  cp "${CASE_PROJECT}/package-lock.json" "${tmp_root}/bt1-lock.json"
+  # On a filesystem that keeps whole seconds the pre-guard's baseline is set two
+  # seconds back, and the ledger edit above is then inside it.
+  sleep 3
+  run_install 'npm run deps:install'
+  printf 'BT1  claude  npm run deps:install (installs nothing, ledger expired) | rollback=%s post=[%s]\n' \
+    "$(rolled_back && echo yes || echo no)" "${CASE_POST:0:120}"
+  [[ -z "${CASE_PRE_DENY}" ]] || note_failure "BT1: the gate lets npm run through (deny: ${CASE_PRE_DENY:0:160})"
+  [[ -z "${CASE_POST}" ]] || note_failure "BT1: the backstop says nothing about a script that installed nothing (post: ${CASE_POST})"
+  [[ -f "${CASE_PROJECT}/node_modules/sd-approved/package.json" ]] || note_failure "BT1: node_modules is left in place"
+  cmp -s "${CASE_PROJECT}/package-lock.json" "${tmp_root}/bt1-lock.json" || note_failure "BT1: the lockfile is left as it was"
+  grep -qF "post-verify BACKSTOP UNTRACED: no trace in ${CASE_PROJECT}: " "${CASE_HOME}/advisory.log" \
+    || note_failure "BT1: advisory.log says which check found no trace"
 
-bs_confirmed 'npm install sd-victim@1.0.0'
-: > "${MARKS}"
-run_install 'npm run deps:install'
-victim=$(victim_on_disk)
-printf 'BT2  claude  npm run deps:install (installs sd-victim) | rollback=%s victim=[%s]\n' \
-  "$(rolled_back && echo yes || echo no)" "${victim}"
-[[ -z "${CASE_PRE_DENY}" ]] || note_failure "BT2: the gate lets npm run through (deny: ${CASE_PRE_DENY:0:160})"
-rolled_back || note_failure "BT2: an install the pre-guard did not read is rolled back (post: ${CASE_POST:-<quiet>})"
-[[ -z "${victim}" ]] || note_failure "BT2: the rollback removes sd-victim from disk (${victim})"
-grep -qF "post-verify BACKSTOP traced: ${CASE_PROJECT}/" "${CASE_HOME}/advisory.log" \
-  || note_failure "BT2: advisory.log says what the trace was"
-pass "the backstop rolls back an npm run that installed (BT2) and nothing after one that did not (BT1)"
+  bs_confirmed 'npm install sd-victim@1.0.0'
+  : > "${MARKS}"
+  run_install 'npm run deps:install'
+  victim=$(victim_on_disk)
+  printf 'BT2  claude  npm run deps:install (installs sd-victim) | rollback=%s victim=[%s]\n' \
+    "$(rolled_back && echo yes || echo no)" "${victim}"
+  [[ -z "${CASE_PRE_DENY}" ]] || note_failure "BT2: the gate lets npm run through (deny: ${CASE_PRE_DENY:0:160})"
+  rolled_back || note_failure "BT2: an install the pre-guard did not read is rolled back (post: ${CASE_POST:-<quiet>})"
+  [[ -z "${victim}" ]] || note_failure "BT2: the rollback removes sd-victim from disk (${victim})"
+  grep -qF "post-verify BACKSTOP traced: ${CASE_PROJECT}/" "${CASE_HOME}/advisory.log" \
+    || note_failure "BT2: advisory.log says what the trace was"
+  pass "the backstop rolls back an npm run that installed (BT2) and nothing after one that did not (BT1)"
+fi
 
-npm_sandbox_registry_was_local
+# A list run (--shard-list) installs nothing, so nothing reached the registry.
+shard_listing || npm_sandbox_registry_was_local
 # The evil registry is asked for the impostor only, and was asked at all: every
 # RH row but RH4 and RH5 fetches through it.
-[[ -s "${EVILREG_DIR}/registry.log" ]] || fail "the RH rows went through the evil registry"
+# A shard that ran no RH row sent nothing there; what was sent is checked in
+# every run.
+[[ "${rh_rows_ran}" == false || -s "${EVILREG_DIR}/registry.log" ]] || fail "the RH rows went through the evil registry"
 if grep -vE '^GET /sd-approved(/-/sd-approved-1\.0\.0\.tgz)?$' "${EVILREG_DIR}/registry.log" | grep -q .; then
   fail "the evil registry saw only sd-approved ($(sort -u "${EVILREG_DIR}/registry.log" | paste -sd, -))"
 fi
@@ -1546,4 +1585,5 @@ if [[ ${#FAILURES[@]} -gt 0 ]]; then
   fail "${#FAILURES[@]} expectation(s) failed in the effect-trace grid"
 fi
 pass "the grid has no silent row, every Claude row ran no sd-victim script, and G1a-c roll back"
+shard_end
 printf 'effect-trace-grid passed\n'

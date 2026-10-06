@@ -1,0 +1,25 @@
+# The hosts scripts/ci/run-on-hosts.sh runs the suite on. Copy this file to
+# ~/.config/safedeps/test-hosts (or pass --hosts-file) and fill in your own
+# hosts there; host addresses do not belong in a public repository.
+#
+# One host per line, seven fields separated by `|`, and an eighth if needed:
+#
+#   name|ssh destination|ssh options|cpus|queue|PATH prefix|runs directory|holds
+#
+#   name             lower-case letters, digits and dashes; --hosts picks by it
+#   ssh destination  user@address, or a Host alias from ~/.ssh/config
+#   ssh options      extra ssh words; a word starting with ~/ is a local path
+#   cpus             how many of the host's CPUs the run may keep busy
+#   queue            the command that waits for the host's turn, given an
+#                    owner name and the command to hold it with, or - for none
+#   PATH prefix      put before the host's PATH for every unit; may use $HOME
+#   runs directory   under the remote home; each run makes a directory there
+#                    and removes it once its logs are collected
+#   holds            how many slots of the queue a run takes (default 1); with
+#                    every slot held the run has the host to itself
+#
+# A run splits one set across the hosts it names, so each platform is tested by
+# a run of its own: --hosts naming the macOS hosts, and later the WSL1 host for
+# Windows. Hosts of two platforms in one run would each run part of the set.
+mac-a|tester@mac-a.example|-i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes|6|~/safedeps-runs/slot.sh|$HOME/.local/node/bin|safedeps-ci
+mac-b|tester@mac-b.example||8|~/safedeps-runs/slot.sh|$HOME/.local/node/bin|safedeps-ci

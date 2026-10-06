@@ -4,11 +4,19 @@
 #   run-all.sh               the development set: every battery but the two
 #                            that only a release needs (`npm test`)
 #   run-all.sh --release     every battery (`npm run test:release`)
-#   run-all.sh --group NAME  the batteries of one CI job (see below)
-#   run-all.sh --list [--release | --group NAME | --ci]
+#   run-all.sh --list [--release]
 #                            print the names of the batteries a run would
-#                            start, one per line, and start nothing; --ci
-#                            lists every battery that has a CI group
+#                            start, one per line, and start nothing
+#   run-all.sh --units [--release]
+#                            print the units scripts/ci/run-on-hosts.sh splits
+#                            that set into, one per line: a battery's name, or
+#                            <name>@<I>of<M> for shard I of a battery the table
+#                            splits into M
+#   run-all.sh --plan [--release]
+#                            the same units as `<unit> <weight> <seconds>`, for
+#                            the runner's scheduler (see the table)
+#   run-all.sh --unit UNIT   run one unit into SAFEDEPS_TEST_LOG_DIR and report
+#                            it; this is what a host runs for the runner
 #
 # The development set leaves out the census and effect-trace-grid. The census
 # took 72 minutes of a 2-hour macOS CI run (v2.18.0, run 37191343467), and
@@ -43,13 +51,24 @@ set -uo pipefail
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "${ROOT_DIR}" || exit 2
 
-# <name>|<phase>|<scope>|<CI job>|<command>, in the old chain's order.
+# <name>|<phase>|<scope>|<shards>|<weight>|<seconds>|<command>, in the old chain's order.
 #
 # scope is `dev` for a battery `npm test` runs and `release` for one only a
-# release runs. CI job names the group a CI job runs with --group; CI runs the
-# census in shards of its own (scan-failure-census.sh --shard), so its group is
-# `-`. .github/workflows/ci.yml runs one job per group and OS, and its verdict
-# job fails unless those jobs ran every battery with a group here, each once.
+# release runs.
+#
+# shards and weight are for scripts/ci/run-on-hosts.sh, which runs a set on
+# several hosts at once and has ten minutes of wall clock for it (AGENTS.md,
+# Testing). shards is how many units the battery is split into: shard I of M
+# runs the battery with `--shard I/M` (scripts/test/lib/shard.sh; the census
+# has its own, with `--out`). weight is how many CPUs one unit keeps busy, so
+# a host is not handed more work than it has CPUs for: manager-variants judges
+# eight forms at a time, install-dir-differential six, and a census shard runs
+# that many guards (SAFEDEPS_TEST_JOBS, which --unit sets to the weight).
+# seconds is the measured wall clock of the whole battery at its weight, from
+# the plan's measurement (safedeps/suite-in-ten-minutes-on-our-hosts, 744ea16,
+# alex-macbook-m1 and carenine at load 2-25; the census from one shard of
+# eight); the runner starts the longest units first. A local
+# run (`npm test`, --release) ignores all three and runs each battery whole.
 #
 # The second phase holds the batteries that a busy machine turns red without a
 # defect:
@@ -68,45 +87,25 @@ cd "${ROOT_DIR}" || exit 2
 # per CPU and is the load these two cannot stand, while every other battery is
 # one process at a time. On the Mac the single-process batteries outlasted the
 # census by six minutes.
-#
-# The CI groups balance the macOS times of v2.18.1 (run 37256605251, seconds
-# under the whole suite's load): a holds manager-variants 1584, shell-reading
-# 545, smoke 416, scan-contract 204 and the small ones; b holds consumer-forms
-# 1541, lockless-forms 1054 and e2e 752. timing holds the batteries a loaded
-# runner turns red without a defect, on a runner of their own: the two of the
-# second phase, and install-dir-differential, which needs npm to answer 237
-# layouts inside the gate's deadline. In group a it ran beside
-# manager-variants, which took a 3-CPU macOS runner from load 5 to 43, and
-# seven of its layouts went UNDECIDED (CI run 37267052867).
-#
-# The timing group runs one battery at a time (SERIAL_GROUPS). Its batteries
-# are sensitive to load and also make it: install-dir-differential judges six
-# layouts at once, and in CI run 37269688992 it left a 3-CPU macOS runner at
-# load 38 for self-budget, whose 64KB install then took 20s to judge and failed.
-# Two reds of one class -- a load-sensitive battery beside load -- so no
-# battery shares that runner with another. Serial, it costs the sum of the
-# three (macOS, measured alone: about 400 + 160 + 1170 seconds), still less
-# than a census shard.
-SERIAL_GROUPS=(timing)
 ALL_BATTERIES=(
-  "smoke|1|dev|a|scripts/test/smoke.sh"
-  "scan-contract|1|dev|a|scripts/test/scan-contract.sh"
-  "statement-batch|1|dev|a|scripts/test/statement-batch.sh"
-  "shell-reading|1|dev|a|scripts/test/shell-reading.sh"
-  "census|1|release|-|scripts/measure/scan-failure-census.sh --quick"
-  "consumer-forms|1|dev|b|scripts/test/consumer-forms.sh"
-  "manager-variants|1|dev|a|scripts/test/manager-variants.sh"
-  "install-dir-differential|1|dev|timing|scripts/test/install-dir-differential.sh"
-  "workspace-snapshot-count|1|dev|a|scripts/test/workspace-snapshot-count.sh"
-  "self-budget|2|dev|timing|scripts/test/self-budget.sh"
-  "advisory-log-retention|1|dev|a|scripts/test/advisory-log-retention.sh"
-  "hook-entry|1|dev|a|scripts/test/hook-entry.sh"
-  "lockless-forms|1|dev|b|scripts/test/lockless-forms.sh"
-  "effect-trace-grid|2|release|timing|scripts/test/effect-trace-grid.sh"
-  "e2e|1|dev|b|scripts/test/e2e.sh"
+  "smoke|1|dev|1|1|350|scripts/test/smoke.sh"
+  "scan-contract|1|dev|3|1|861|scripts/test/scan-contract.sh"
+  "statement-batch|1|dev|1|1|263|scripts/test/statement-batch.sh"
+  "shell-reading|1|dev|1|1|295|scripts/test/shell-reading.sh"
+  "census|1|release|4|2|1030|scripts/measure/scan-failure-census.sh --quick"
+  "consumer-forms|1|dev|4|1|1126|scripts/test/consumer-forms.sh"
+  "manager-variants|1|dev|3|4|650|scripts/test/manager-variants.sh"
+  "install-dir-differential|1|dev|1|6|134|scripts/test/install-dir-differential.sh"
+  "workspace-snapshot-count|1|dev|1|1|8|scripts/test/workspace-snapshot-count.sh"
+  "self-budget|2|dev|1|1|140|scripts/test/self-budget.sh"
+  "advisory-log-retention|1|dev|1|1|1|scripts/test/advisory-log-retention.sh"
+  "hook-entry|1|dev|1|1|2|scripts/test/hook-entry.sh"
+  "lockless-forms|1|dev|2|1|509|scripts/test/lockless-forms.sh"
+  "effect-trace-grid|2|release|2|1|803|scripts/test/effect-trace-grid.sh"
+  "e2e|1|dev|1|1|351|scripts/test/e2e.sh"
 )
 #
-# A run without the census (the development set, a CI group) has no second
+# A run without the census (the development set, one unit) has no second
 # phase to wait for: the load these two cannot stand is the census's, and every
 # other battery is one process at a time. So there they start in the order
 # below like any other battery.
@@ -131,37 +130,79 @@ for first in "${START_FIRST_ALL[@]}"; do
 done
 
 usage() {
-  printf 'usage: %s [--list] [--release | --group NAME | --ci]\n' "$0" >&2
+  printf 'usage: %s [--list | --units] [--release] | --unit UNIT\n' "$0" >&2
   exit 2
 }
-selection=dev group="" list_only=false
+selection=dev list_only=false units_only=false plan_only=false unit=""
 while (( $# > 0 )); do
   case "$1" in
     --release) [[ "${selection}" == dev ]] || usage; selection=release; shift ;;
-    # A group is a name; `-` marks the census, which CI runs in shards.
-    --group) [[ "${selection}" == dev && "${2:-}" =~ ^[a-z][a-z0-9-]*$ ]] || usage; selection=group group="$2"; shift 2 ;;
-    --ci) [[ "${selection}" == dev ]] || usage; selection=ci; shift ;;
     --list) list_only=true; shift ;;
+    --units) units_only=true; shift ;;
+    --plan) units_only=true plan_only=true; shift ;;
+    --unit)
+      [[ "${selection}" == dev && "${2:-}" =~ ^([a-z][a-z0-9-]*)(@([1-9][0-9]*)of([1-9][0-9]*))?$ ]] || usage
+      selection=unit unit="$2"; shift 2 ;;
     *) usage ;;
   esac
 done
-[[ "${selection}" != ci || "${list_only}" == true ]] || usage
+[[ "${list_only}" == false || "${units_only}" == false ]] || usage
+[[ "${selection}" != unit || ( "${list_only}" == false && "${units_only}" == false ) ]] || usage
+
+# The units of a set, as the runner on several hosts runs them.
+if [[ "${units_only}" == true ]]; then
+  for entry in "${ALL_BATTERIES[@]}"; do
+    IFS='|' read -r name _ scope shards weight secs _ <<< "${entry}"
+    [[ "${selection}" == release || "${scope}" == dev ]] || continue
+    each=""
+    [[ "${plan_only}" == false ]] || each=" ${weight} $(( (secs + shards - 1) / shards ))"
+    if (( shards == 1 )); then
+      printf '%s%s\n' "${name}" "${each}"
+    else
+      for (( i = 1; i <= shards; i++ )); do printf '%s@%dof%d%s\n' "${name}" "${i}" "${shards}" "${each}"; done
+    fi
+  done
+  exit 0
+fi
 
 # The batteries of this run, as <name>|<phase>|<command>, in the table's order.
+# A unit is one battery, under its unit's name, with its shard's arguments.
 BATTERIES=()
+unit_weight=""
 for entry in "${ALL_BATTERIES[@]}"; do
-  IFS='|' read -r name phase scope ci_group command <<< "${entry}"
+  IFS='|' read -r name phase scope shards weight _ command <<< "${entry}"
   case "${selection}" in
     dev) [[ "${scope}" == dev ]] || continue ;;
-    group) [[ "${ci_group}" == "${group}" ]] || continue ;;
-    ci) [[ "${ci_group}" != - ]] || continue ;;
+    unit)
+      [[ "${name}" == "${unit%%@*}" ]] || continue
+      if [[ "${unit}" == *@* ]]; then
+        shard="${unit#*@}"
+        [[ "${shard%%of*}" -le "${shard#*of}" && "${shard#*of}" == "${shards}" ]] || {
+          printf 'run-all: %s is not a unit; the table splits %s into %s\n' "${unit}" "${name}" "${shards}" >&2
+          exit 2
+        }
+        command="${command} --shard ${shard%%of*}/${shard#*of}"
+        [[ "${name}" != census ]] || command="${command} --out ${SAFEDEPS_TEST_LOG_DIR:-}/${unit}.out"
+      elif (( shards != 1 )); then
+        printf 'run-all: the table splits %s into %s, so its units are %s@1of%s and on\n' "${name}" "${shards}" "${name}" "${shards}" >&2
+        exit 2
+      fi
+      name="${unit}" phase=1 unit_weight="${weight}"
+      ;;
   esac
   BATTERIES+=("${name}|${phase}|${command}")
 done
 (( ${#BATTERIES[@]} > 0 )) || {
-  printf 'run-all: no battery is in CI group %s\n' "${group:0:40}" >&2
+  printf 'run-all: no battery is named %s\n' "${unit%%@*}" >&2
   exit 2
 }
+if [[ "${selection}" == unit ]]; then
+  # A unit's files are what the runner collects, so they go where it says.
+  [[ -n "${SAFEDEPS_TEST_LOG_DIR:-}" && "${SAFEDEPS_TEST_LOG_DIR}" != *" "* ]] || {
+    printf 'run-all: --unit needs SAFEDEPS_TEST_LOG_DIR, a directory with no blank in its path\n' >&2
+    exit 2
+  }
+fi
 if [[ "${list_only}" == true ]]; then
   for entry in "${BATTERIES[@]}"; do printf '%s\n' "${entry%%|*}"; done
   exit 0
@@ -169,7 +210,7 @@ fi
 case "${selection}" in
   dev) run_label="development set" ;;
   release) run_label="release set" ;;
-  group) run_label="CI group ${group}" ;;
+  unit) run_label="unit ${unit}" ;;
 esac
 selected() { printf '%s\n' "${BATTERIES[@]}" | grep -q "^$1|"; }
 START_FIRST=()
@@ -179,11 +220,6 @@ done
 
 serial=false
 [[ "${SAFEDEPS_TEST_SERIAL:-}" == 1 ]] && serial=true
-if [[ "${selection}" == group ]]; then
-  for serial_group in "${SERIAL_GROUPS[@]}"; do
-    [[ "${group}" != "${serial_group}" ]] || serial=true
-  done
-fi
 
 cpus=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || printf '2')
 [[ "${cpus}" =~ ^[1-9][0-9]*$ ]] || cpus=2
@@ -196,6 +232,8 @@ if [[ -n "${SAFEDEPS_TEST_JOBS:-}" ]]; then
 else
   jobs=$(( (cpus + 1) / 2 ))
 fi
+# A unit runs at its weight: the host runner counts that many CPUs for it.
+[[ -z "${unit_weight}" ]] || jobs="${unit_weight}"
 # The census reads the same value, so one variable sets both.
 export SAFEDEPS_TEST_JOBS="${jobs}"
 

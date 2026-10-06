@@ -89,6 +89,17 @@ GUARD="scripts/safedeps-pre-guard.sh"
 pass() { printf 'ok - %s\n' "$1"; }
 fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
 
+# Rows for --shard I/M (scripts/test/lib/shard.sh): each input of the sections
+# that judge many inputs one at a time: the view properties, the random
+# statement views, the event contract and the word ends (346, 92, 165 and over
+# 200 seconds of a run on carenine at load 7 to 17). The other
+# checks run whole in every shard. A random input is drawn before its row is
+# decided, so every shard draws the same inputs from the same seed.
+# shellcheck source=lib/shard.sh
+source "${ROOT_DIR}/scripts/test/lib/shard.sh"
+shard_args "$@"
+(( ${#SHARD_REST[@]} == 0 )) || fail "scan-contract.sh takes --shard I/M or --shard-list, not ${SHARD_REST[0]}"
+
 # --- load the shipped implementation ------------------------------------------
 # Extracted by name from the guard rather than sourced: the guard is an
 # executable hook with no source guard, and sourcing it would run the whole
@@ -635,6 +646,7 @@ reading_closes() {
   return "${rc}"
 }
 check_view_properties() { # input label
+  shard_row "view properties: $2" || return 0
   local x="$1" v once twice reading bash_views="" views
   for reading in bash zsh dash; do
     views=""
@@ -1592,6 +1604,7 @@ for reading in bash zsh dash; do
     for ((k = 0; k < len; k++)); do
       input+="${heredoc_alphabet[RANDOM % ${#heredoc_alphabet[@]}]}"
     done
+    shard_row "stmts view: ${reading} random ${c}" || continue
     sv=$(SAFEDEPS_READING="${reading}" capture scan_view "${input}"); tv=$(SAFEDEPS_READING="${reading}" capture stmts_view "${input}")
     LC_ALL=C
     for ((k = 0; k < ${#sv}; k++)); do
@@ -1627,6 +1640,7 @@ for reading in bash zsh dash; do
       input+="${grammar_words[RANDOM % ${#grammar_words[@]}]}"
       (( RANDOM % 4 )) && input+=" "
     done
+    shard_row "stmts view: ${reading} grammar ${c}" || continue
     SAFEDEPS_READING="${reading}" reading_closes "${input}" || continue
     grammar_closed=$((grammar_closed + 1))
     once=$(SAFEDEPS_READING="${reading}" stmts_view "${input}"; printf 'X'); once="${once%X}"
@@ -1638,7 +1652,9 @@ for reading in bash zsh dash; do
   done
 done
 [[ ${grammar_failures} -eq 0 ]] || fail "stmts view: ${grammar_failures} of ${grammar_closed} closed readings of grammar words not idempotent (seed ${fuzz_seed})"
-[[ ${grammar_closed} -gt $((fuzz_cases * 3 / 4)) ]] || fail "stmts view: only ${grammar_closed} of $((fuzz_cases * 3)) grammar-word readings closed, too few to say anything"
+# A shard's floor is its share of the inputs, as for the event contract; a
+# list run checks no input, and has no floor.
+shard_listing || [[ $(( grammar_closed * SHARD_M )) -gt $((fuzz_cases * 3 / 4)) ]] || fail "stmts view: only ${grammar_closed} of $((fuzz_cases * 3)) grammar-word readings closed, too few to say anything"
 pass "stmts view: idempotent and length-preserving on ${grammar_closed} closed readings of $((fuzz_cases * 3)) random grammar-word inputs (bash, zsh, dash)"
 
 # --- the event contract -----------------------------------------------------------
@@ -1671,6 +1687,7 @@ event_blanks=$' \t'
 # Whether the offset <n> is in the space-separated list <list>.
 in_list() { [[ " $1 " == *" $2 "* ]]; }
 event_contract() { # input label
+  shard_row "event contract: $2" || return 0
   local x="$1" reading ev cw rv stm line k w pre st sst first ok p head off rec slist="" wlist="" f1 f2 f3 f4 f6
   local LC_ALL=C
   event_inputs=$((event_inputs + 1))
@@ -1775,7 +1792,11 @@ for ((c = 0; c < event_cases; c++)); do
 done
 rm -f "${event_flags}"
 [[ ${event_failures} -eq 0 ]] || fail "event contract: ${event_failures} violation(s) (seed ${fuzz_seed})"
-[[ ${event_checked} -gt 1000 ]] || fail "event contract: only ${event_checked} events checked, too few to say anything"
+# A shard checks its share of the inputs, so the floor is its share too: the
+# shards together check more than 1000, and a run of one shard all of them. A
+# list run checks no input, and has no floor.
+shard_listing || [[ $(( event_checked * SHARD_M )) -gt 1000 ]] \
+  || fail "event contract: only ${event_checked} events checked (shard ${SHARD_I}/${SHARD_M}), too few to say anything"
 pass "event contract: ${event_checked} events of ${event_inputs} inputs (${form_count} shell forms, ${first_place_count} first-place forms, $((event_cases * 2)) random), in bash, zsh and dash: each at top-level code, none between a command's prefixes and its word, each command word after a separator to the recognizers and at a cut of command_statements"
 
 # --- where a word ends (SAFEDEPS_G_END) ------------------------------------------
@@ -1791,6 +1812,7 @@ wordends_view() { shell_lex "$1" wordends "safedeps:scan-contract"; }
 word_end_failures=0
 word_end_checked=0
 check_word_ends() { # input label
+  shard_row "word ends: $2: $1" || return 0
   local x="$1" reading mask tv k b v LC_ALL=C
   for reading in bash zsh dash; do
     mask=$(SAFEDEPS_READING="${reading}" wordends_view "${x}"; printf 'X'); mask="${mask%X}"
@@ -1842,7 +1864,9 @@ for ((c = 0; c < fuzz_cases; c++)); do
   check_word_ends "${input}" "grammar ${c}"
 done
 [[ ${word_end_failures} -eq 0 ]] || fail "word ends: ${word_end_failures} byte(s) where the lexer ends a word print as a byte SAFEDEPS_G_END does not read as one (seed ${fuzz_seed})"
-[[ ${word_end_checked} -gt 1000 ]] || fail "word ends: only ${word_end_checked} word ends checked, too few to say anything"
+# As for the event contract: a shard's floor is its share of the inputs.
+shard_listing || [[ $(( word_end_checked * SHARD_M )) -gt 1000 ]] \
+  || fail "word ends: only ${word_end_checked} word ends checked (shard ${SHARD_I}/${SHARD_M}), too few to say anything"
 for got in "npm ci;" "(npm install)" "npm ci&>log"; do
   SAFEDEPS_READING=bash stmts_view "${got}" | grep -qE "${SAFEDEPS_G_NPM_INSTALL_RE}" \
     || fail "word ends: the npm recognizer reads [${got}] as an install"
@@ -2488,4 +2512,5 @@ for manager in $(tr '|' '\n' <<< "${pipe_managers}" | sed -E 's/\[[^]]*\][*+]?//
 done
 pass "the discriminator names every census form and every manager the pipe check knows"
 
+shard_end
 printf 'scan-contract: all checks passed\n'
