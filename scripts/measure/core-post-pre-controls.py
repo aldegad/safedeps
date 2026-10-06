@@ -39,6 +39,11 @@ wrappers=section('post_message() {','# Children the owner-state tests spawn')
 wrappers=wrappers.replace('"${ROOT_DIR}/scripts/safedeps-pre-guard.sh"','"$PRE_CORE" pre')
 wrappers=wrappers.replace('"${ROOT_DIR}/scripts/safedeps-post-verify.sh"','"$POST_CORE" post')
 wrappers=wrappers.replace('  oracle_before "${call}" "${payload}"','  : > "${call}/native-owner-source"\n  oracle_before "${call}" "${payload}"')
+post_invocation='    "$POST_CORE" post)'
+if wrappers.count(post_invocation)!=1:raise RuntimeError('post wrapper anchor not unique')
+wrappers=wrappers.replace(post_invocation,post_invocation+''' || { printf '%s\\n' "$?" > "$call/hook.rc"; return 1; }
+  printf '0\\n' > "$call/hook.rc"
+  printf '%s' "$out" > "$call/native-hook.stdout"''')
 noid_assert=section('grep -qF "pre-guard: this hook\'s input names no tool_use_id, so the record of this install is kept under its directory and command"', 'touch "${noid_wt}/package-lock.json"')
 untraced=section('bs_assert_untraced() {','bs_assert_rollback() {')
 prologue='''#!/bin/bash
@@ -73,6 +78,13 @@ cases={
         new='if subsecond > 0 && os::clock_has_subsecond',
         faults=[native_edits.PRE_EDITS['coarse'],native_edits.EDITS['coarse']],
         diagnostic='a write into node_modules on a whole-second mount beside a subsecond lockfile: the baseline is set back'),
+    'F1':dict(file='rust/src/pre/snapshot.rs',
+        old='if node.is_dir(){list_packages(&node,0,&mut packages);}',
+        new='if node.is_dir()&&!fs::symlink_metadata(&node).is_ok_and(|m|m.file_type().is_symlink()){list_packages(&node,0,&mut packages);}',
+        also=dict(file='rust/src/post/rollback.rs',
+            old='let mut now=trace::package_files(&tree,true);',
+            new='let mut now=trace::package_files(&tree,false);'),
+        oracle=True,diagnostic='kept, but before the hook ran node_modules showed a write'),
 }
 names=a.names.split(',')
 if not names or any(name not in cases for name in names):p.error('unknown control name')
@@ -81,6 +93,13 @@ def execute(argv,stem,env=None):
     with (run/(stem+'.log')).open('wb') as f:r=subprocess.run(argv,stdout=f,stderr=f,env=env)
     (run/(stem+'.rc')).write_text(str(r.returncode)+'\n')
     return r.returncode
+
+def write_unapproved(path,home):
+    path.write_text(json.dumps(dict(lockfileVersion=3,packages={'node_modules/fixture-unapproved':dict(version='1.0.0')}))+'\n')
+    for sub in ['osv','kev']:(home/'cache'/sub).mkdir(parents=True,exist_ok=True)
+    key=hashlib.sha256(b'osv\nnpm\nfixture-unapproved\n1.0.0').hexdigest()
+    (home/'cache/osv'/(key+'.json')).write_text('{"vulns":[]}\n')
+    (home/'cache/kev/known_exploited_vulnerabilities.json').write_text('{"vulnerabilities":[]}\n')
 
 def build_copy(stem,edits):
     tree=run/(stem+'-source');tree.mkdir()
@@ -101,6 +120,11 @@ def fixture(name,pre,stem,post=None):
     (project/'package.json').write_text('{"name":"fixture","version":"1.0.0","dependencies":{}}\n')
     lock=json.dumps(dict(lockfileVersion=3,packages={}))+'\n'
     (project/'package-lock.json').write_text(lock)
+    if name=='F1':
+        target=box/'linked-target/node_modules/@s/a';target.mkdir(parents=True)
+        (target/'package.json').write_text('{"name":"@s/a","version":"1.0.0"}\n')
+        (project/'node_modules').symlink_to(box/'linked-target/node_modules',target_is_directory=True)
+        write_unapproved(project/'package-lock.json',home)
     call=dict(tool_name='Bash',cwd=str(project),tool_input=dict(command='npm install'),turn_id='fixture-turn')
     if name!='NoIdSilent':call['tool_use_id']='setup-call'
     (box/'install.json').write_text(json.dumps(call))
@@ -113,7 +137,18 @@ printf '%s\n' 'install-pre rc0 and original pre oracle passed'
         script+='''noid_record=$(find "$SAFEDEPS_HOME/pending" -name '*.json' -type f | head -n 1)
 [[ "${noid_record##*/}" == *__*.json ]] || fail "a call with no tool_use_id keeps its record under the directory and the command (${noid_record})"
 '''+noid_assert
-    script+='''touch "$BOX/project/package-lock.json"
+    if name=='F1':
+        script+='''mkdir -p "$BOX/linked-target/node_modules/@s/evil"
+printf '%s\\n' '{"name":"@s/evil","version":"1.0.0"}' > "$BOX/linked-target/node_modules/@s/evil/package.json"
+post=$(post_hook < "$BOX/install.json")
+printf '%s\\n' "$post" > "$BOX/install-post.out"
+printf '%s\\n' 'install-post rc0 and original post oracle passed'
+grep -qx "$BOX/project/node_modules lists $BOX/project/node_modules/@s/evil/package.json, which the pre-command snapshot .* does not" <<< "$(post_message "$post")" || fail "a package written through a linked node_modules is the reason line"
+grep -q '^refused removal of .*/project/node_modules: ' <<< "$(post_message "$post")" || fail "the removal of the linked node_modules is refused"
+[[ -L "$BOX/project/node_modules" && -f "$BOX/linked-target/node_modules/@s/evil/package.json" ]] || fail "a rollback leaves the target of a linked node_modules alone"
+'''
+    else:
+        script+='''touch "$BOX/project/package-lock.json"
 post=$(post_hook < "$BOX/install.json")
 printf '%s\\n' "$post" > "$BOX/install-post.out"
 [[ -z "$post" ]] || fail "the setup install is confirmed quietly"
@@ -123,13 +158,8 @@ printf '%s\n' 'install-post rc0 and original post oracle passed'
         script+='''[[ ! -e "$noid_record" ]] || fail "the post hook consumes the no-id record"
 grep -qF "post-verify: this hook's input names no tool_use_id, so it took the record ${noid_record} by the directory and the command" "$SAFEDEPS_HOME/advisory.log" || fail "the post hook records that it took a record by the key"
 '''
-    else:
-        tampered=json.dumps(dict(lockfileVersion=3,packages={'node_modules/fixture-unapproved':dict(version='1.0.0')}))
-        (box/'tampered.json').write_text(tampered+'\n')
-        for sub in ['osv','kev']:(home/'cache'/sub).mkdir(parents=True)
-        key=hashlib.sha256(b'osv\nnpm\nfixture-unapproved\n1.0.0').hexdigest()
-        (home/'cache/osv'/(key+'.json')).write_text('{"vulns":[]}\n')
-        (home/'cache/kev/known_exploited_vulnerabilities.json').write_text('{"vulnerabilities":[]}\n')
+    elif name!='F1':
+        write_unapproved(box/'tampered.json',home)
         call['tool_input']['command']='grep -n "npm install" README.md';call['tool_use_id']='pull-call'
         (box/'grep.json').write_text(json.dumps(call))
         if name=='Oldest':
@@ -214,9 +244,10 @@ grep -qF "post-verify BACKSTOP traced: $BOX/project/" "$SAFEDEPS_HOME/advisory.l
     raw={str(f.relative_to(box)):f.read_bytes().hex() for f in box.rglob('*') if f.is_file()}
     (run/(stem+'.files.json')).write_text(json.dumps(raw,indent=2)+'\n')
     return dict(rc=rc,expected_diagnostic=cases[name]['diagnostic'],
-                diagnostic_found=('not ok - '+cases[name]['diagnostic']) in log,
+                diagnostic_found=(cases[name]['diagnostic'] if cases[name].get('oracle') else 'not ok - '+cases[name]['diagnostic']) in log,
                 oracle_failed='report oracle:' in log,
-                hook_and_oracle_passed=('install-pre rc0 and original pre oracle passed' if name=='NoIdSilent' else 'grep-post rc0 and original post oracle passed') in log,
+                hook_rcs=[int(f.read_text()) for f in (box/'oracle').glob('call.*/hook.rc')],
+                hook_and_oracle_passed=('install-pre rc0 and original pre oracle passed' if name in ['NoIdSilent','F1'] else 'grep-post rc0 and original post oracle passed') in log,
                 reached='fixture assertion reached and passed' in log)
 
 rows=[]
@@ -233,7 +264,9 @@ for name in names:
         raise SystemExit('baseline failed: '+name)
     build,mutant=build_copy(name,faults+[change]+([change['also']] if 'also' in change else []))
     control=fixture(name,mutant,name+'-control',post=mutant if faults or 'also' in change else None) if build==0 else None
-    passed=build==0 and control['rc']==1 and control['diagnostic_found'] and control['hook_and_oracle_passed'] and not control['oracle_failed']
+    passed=(build==0 and control['rc']==1 and control['diagnostic_found'] and control['hook_and_oracle_passed']
+            and control['oracle_failed']==bool(change.get('oracle')) and all(rc==0 for rc in control['hook_rcs']))
+    if change.get('oracle'):passed=passed and bool(control['hook_rcs'])
     rows.append(dict(name=name,baseline=baseline,build_rc=build,control=control,passed=passed))
     print(name,'caught' if passed else 'FAIL',flush=True)
     (run/'result.json').write_text(json.dumps(dict(rows=rows,full_e2e=False),indent=2)+'\n')
