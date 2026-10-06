@@ -785,9 +785,18 @@ pub fn cli(input: &[u8]) -> i32 {
         }
     }
     recs.push(("failed".into(), if run.failed { b"true".to_vec() } else { b"false".to_vec() }));
+    // The records as `safedeps-core facts` writes its own: `<key> <length>`,
+    // the bytes, a newline. Written here, so that this output does not
+    // depend on what else the shared record type comes to hold.
+    let mut out = W::new();
+    for (k, v) in &recs {
+        out.extend_from_slice(format!("{} {}\n", k, v.len()).as_bytes());
+        out.extend_from_slice(v);
+        out.push(b'\n');
+    }
     use std::io::Write;
     let mut so = std::io::stdout().lock();
-    let _ = so.write_all(&core::render(&core::Facts { records: recs }));
+    let _ = so.write_all(&out);
     let _ = so.flush();
     0
 }
