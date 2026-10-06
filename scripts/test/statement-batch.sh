@@ -71,27 +71,46 @@ while IFS= read -r -d '' c; do INPUTS+=("${c}"); done < <(
 printf '# %d inputs\n' "${#INPUTS[@]}"
 n=${#INPUTS[@]}
 
-# Every function of the guard (definitions only) and the grammar it reads.
+# Every function of the guard (definitions only), the grammar it reads, and
+# the constants its readers read: the payload builder reads
+# SAFEDEPS_PAYLOAD_BAD_CODE, and left unset under `set -u` it ended the
+# reader on both sides of a comparison alike, which then compared as equal.
 # shellcheck source=../../lib/install-grammar.sh
 source lib/install-grammar.sh
-eval "$(sed -n -e '/^[a-z_][a-z_0-9]*() {$/,/^}$/p' -e '/^SAFEDEPS_INSTALL_PATTERN=/p' "${GUARD}")"
+eval "$(sed -n -e '/^[a-z_][a-z_0-9]*() {$/,/^}$/p' -e '/^SAFEDEPS_INSTALL_PATTERN=/p' \
+  -e '/^SAFEDEPS_PAYLOAD_BAD_CODE=/p' -e '/^SAFEDEPS_SHELL_INERT_BYTES=/p' "${GUARD}")"
+[[ -n "${SAFEDEPS_PAYLOAD_BAD_CODE:-}" && -n "${SAFEDEPS_SHELL_INERT_BYTES:-}" ]] \
+  || { printf 'statement-batch: the guard constants did not load\n' >&2; exit 2; }
 
 # --- 1. one grep for many texts answers as one grep per text ------------------
 
 # The texts: every input whole, every line of every input, and each
 # statement's recognize bytes as the landing and the extractor read them
-# (the pieces view's fifth field), then texts with bytes past ASCII, which
-# GNU grep reads as binary in a UTF-8 locale where they are not valid.
+# (the pieces view's fifth field), of the command and of each of its
+# payloads, which the extractor reads from PAYLOADS
+# (command_payload_raw_texts, guard_extract_pieces), then texts with bytes
+# past ASCII, which GNU grep reads as binary in a UTF-8 locale where they are
+# not valid.
 TEXTS=()
 for c in "${INPUTS[@]}"; do
   TEXTS+=("${c}")
   while IFS= read -r line; do TEXTS+=("${line}"); done <<< "${c}"
 done
 SAFEDEPS_READING=bash
+payload_texts=0
 for (( k = 0; k < n; k += 3 )); do
   pieces=$(shell_lex "${INPUTS[k]}" pieces "safedeps:extract_pieces" 2> /dev/null) || pieces=""
   while IFS=$'\037' read -r _ _ _ _ prec; do TEXTS+=("${prec}"); done <<< "${pieces}"
+  command_payload_raw_texts "${INPUTS[k]}" 2> /dev/null
+  pls=(${PAYLOADS[@]+"${PAYLOADS[@]}"})
+  for payload in ${pls[@]+"${pls[@]}"}; do
+    [[ "${payload}" =~ [^[:space:]] ]] || continue
+    pieces=$(shell_lex "${payload}" pieces "safedeps:payload_pieces" 2> /dev/null) || pieces=""
+    while IFS=$'\037' read -r _ _ _ _ prec; do TEXTS+=("${prec}"); payload_texts=$(( payload_texts + 1 )); done <<< "${pieces}"
+  done
 done
+printf '# %d payload pieces\n' "${payload_texts}"
+(( payload_texts > 0 )) || { printf 'statement-batch: no payload piece was read\n' >&2; exit 2; }
 TEXTS+=($'npm install x\xe9' $'echo \xe9; npm install x' $'npm \xc4\xb1nstall x' $'npm in\xc5\xbftall x' \
   $'pip install \xe2\x84\xaaafka==1' $'\xff\xfe' "" " " $'npm install x\nnpm ci' $'echo a\n' "npm install x")
 printf '# %d texts\n' "${#TEXTS[@]}"
