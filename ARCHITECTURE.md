@@ -754,6 +754,7 @@ OSV normalizes ecosystem names, so one API path covers all of them at advisory-c
 | `lib/npm/closure.sh` | npm closure resolution from a lockfile, plus Yarn project context/closure resolution (root `resolutions` + `yarn info`) and isolated candidate materialization. |
 | `lib/gates/` | Release-time repo lane — `scan.sh` (gitleaks runner), `audit.sh` (multi-ecosystem lockfile audit — npm/pnpm/yarn/bun, delegated to each native tool), `hooks.sh` (`install`/`check`/`init`), `doctor.sh` (posture diagnose + `--fix`), `repo-profile.sh` (public/private resolution). Owns *execution*; the repo owns *policy*. |
 | `lib/gates/templates/` | Starter `.gitleaks[.private].toml` + `.githooks/pre-commit`, scaffolded by `hooks init`. Seeds the repo owns and tunes — never overwritten on re-run. |
+| `rust/` | `safedeps-core`, the command guard's judgment core in Rust: the lexer, the grammar, the recognizers and the spec extractor. A second reading held to the bash guard by `scripts/measure/core-*`; nothing on the hook path calls it yet (section 14). |
 
 ---
 
@@ -823,3 +824,109 @@ Migration:
 - Effect-based closure enforcement for the non-npm ecosystems.
 - Ledger tamper resistance (OSV-as-authority + tamper detection; no local signing).
 - Plugin providers, a `.safedeps.toml` policy file, CI mode, multi-machine ledger sync, and agent-suggested safe replacements.
+
+---
+
+## 14. The Rust core
+
+The command guard is moving to Rust, one part at a time. The bash guard stays the authority until its last part has moved. Until then the Rust code is a second reading that has to agree with it.
+
+**Why.** One judgment in bash starts about 93 processes, and nearly all of its time goes there (AGENTS.md, Testing). The lexer is an awk program of some 2,000 lines that bash runs once per view. A Rust binary reads the command in one process.
+
+### What exists (stage 1)
+
+`rust/` holds one crate, `safedeps-core`. It has no dependencies: the regex engine and the JSON reader are its own, so the npm package still has zero runtime dependencies.
+
+| Module | What it carries over |
+|---|---|
+| `lex.rs` | `shell_lex`: every view, the three readings, the start events, `UNTERM`, `DIVERGE`, and the walk's own check. It is written function by function from the awk program, with the same names and the same order of rules. |
+| `ere.rs` | POSIX extended regular expressions, as `grep -E` and bash `=~` read the grammar's patterns. |
+| `grammar.rs`, `tables.rs` | The vocabulary, patterns and tables of `lib/install-grammar.sh`, as the same strings. |
+| `manager.rs` | `safedeps_manager_read`, npm's option reading and npx's first pass. |
+| `extract.rs` | The spec extractor (`guard_extract_specs`) and the readers it calls. |
+| `core.rs` | The payload readers, the recognizers, the pipe checks, the statement split, and the driver that runs detection and the facts per reading. |
+
+Nothing on the hook path calls the crate. The engines still run the bash guard, and the package's `files` do not list `rust/`.
+
+The landing is not ported. The core says which statements the effect gate reads (an npm install, and not `npm link`), which is the part the extractor needs. It does not say where an install lands, it does not ask npm, and it reads no `.npmrc`.
+
+### How it is held to the bash guard
+
+Each layer compares the core with the bash guard on the same input. The bash side is the reference. A difference has to be named in a class file, and an unnamed one fails the run. Each harness has a `--control` that damages the reference and must then report differences, because a comparison that cannot fail measures nothing.
+
+| Layer | Harness (`scripts/measure/`) | What is compared |
+|---|---|---|
+| Grammar | `core-grammar-drift.sh` | Each value the core carries, with the shell file's value after it is sourced |
+| Regex | `core-ere-differential.py` | The recognizers' patterns, through the host's `grep -E` and through the core, on the lines the recognizers read |
+| Lexer | `core-lex-differential.py` | The awk program cut out of the guard and the core: the view, the status, `UNTERM`, `DIVERGE` and the failure mark, for every text, reading and view |
+| Facts | `core-facts-differential.py` | A scratch copy of the guard that writes what it knows after its readings, beside `safedeps-core facts`: the readings run, whether one closes, install or hidden or piped, each statement's kind and fields, the ecosystem, and the extractor's lines |
+| Whole answer | `core-hybrid.py` with `tuple-replay.sh` | A copy of the tree whose guard lexes with the core, replayed against the tree: the verdict, the packages a deny prescribes, the operands a record names |
+
+Measured on 2026-10-06, on the corpora committed under `scripts/measure/` and `scripts/test/` and on seeded random input:
+
+| Layer | Input | Result | Control |
+|---|---|---|---|
+| Grammar | 33 values | none differs, on macOS and in WSL1 | |
+| Regex | 10 patterns over 22,913 lines | no line differs | 1,568 lines differ when the core is asked a pattern with one alternative removed |
+| Lexer | 14,530 texts in 3 readings and 20 views: 871,800 rows | none differs | 345 of 1,665 rows differ when a single quote no longer closes in the awk program |
+| Facts | 4,791 commands on macOS, 982 in WSL1 | 2 differ on each host, all of them the named class `guard-crash` | 21 of 338 commands differ when the guard drops the specs of packages with an `e` in their name |
+| Whole answer | 656 commands | no row moved | 12 of 456 rows moved with a core whose single quote never closes |
+
+The lexer and facts controls damage the reference. The other two damage the core's side, and so do two more mutant cores built from a `git archive` copy. With the regex engine's defect put back (below), 13 of 80 commands differ in the facts layer and every pattern differs in the regex layer. With a dash reading that takes `&>` the way bash does, 22 of 13,020 rows differ in the lexer layer.
+
+The lexer run took 58 minutes on alex-macbook-m1 at load 7 to 11, with two jobs. The facts run took 18 minutes on carenine at load 4 to 5. The guard ran with no npm on its `PATH`, so no landing asked npm anything.
+
+The facts layer found a defect in the bash guard. `pip --cache x install evil==1.0.0` ends the guard with `BASH_REMATCH[2]: unbound variable` (`safedeps_manager_long_option`, under `set -u`). It happens when a long option that is a unique abbreviation stands before the command word, for a parser that takes abbreviations (pip, pipx, gem). The entry shim turns the exit into a deny, so the command does not run. The reason it gives names a broken checkout, which is not the cause. The class file names this case (`guard-crash`). The core reads the unset element as empty, which is what the next line of the shell function expects.
+
+The first facts run also found a defect in the core's regex engine: a cached state was keyed without its match, so two states that differed only there answered for each other. The regex layer now holds the engine on its own, below the layers that use it.
+
+### What a judgment costs
+
+`scripts/measure/core-cost.py` times the whole hook through the entry shim, and `safedeps-core facts` on the same payload. The core's time covers stage 1 only: the lexer in every reading the command needs, the recognizers, the pipe checks and the extractor. It does not cover the ledger, the snapshots or the state the hook writes, so the two columns are not the same work. The `PATH` holds no npm, so neither side waits for npm's answers.
+
+Median of 10 runs after one warm run, in milliseconds:
+
+| Command | Bytes | M1 guard | M1 core | carenine guard | carenine core | WSL1 guard | WSL1 core |
+|---|---|---|---|---|---|---|---|
+| `ls -la` | 6 | 166 | 3.2 | 145 | 2.8 | 317 | 3.3 |
+| `git status --short && git log --oneline -5 \| head -3` | 52 | 171 | 3.2 | 151 | 2.9 | 328 | 3.6 |
+| `npm install left-pad@1.3.0` | 26 | 576 | 3.5 | 499 | 3.0 | 1,276 | 3.9 |
+| `pip install requests==2.0.0` | 27 | 499 | 3.3 | 435 | 3.0 | 1,126 | 4.0 |
+| `cd sub && npm ci && npm run build` | 33 | 1,012 | 3.3 | 886 | 2.9 | 2,225 | 4.2 |
+| `bash -c 'pip install requests==2.0.0'` | 37 | 651 | 3.3 | 574 | 3.0 | 1,506 | 4.7 |
+| a 16 KB heredoc written to a file | 16,558 | 860 | 10.4 | 880 | 12.9 | 884 | 12.9 |
+| `pip install` with 400 pinned packages | 6,191 | 16,828 | 13.0 | 14,834 | 18.9 | 20,030 | 20.2 |
+
+alex-macbook-m1 and carenine run macOS 15.6 and bash 3.2.57; M1 was at load 7.3 when its run started and 11.2 when it ended, carenine at 4.0 and 2.8. WSL1 is Ubuntu's bash 5.2.21 on Windows 10. WSL1 reports no load of its own, so the Windows CPU was read instead: 1% when the run started and 65% when it ended.
+
+The last row is where the bash guard meets its own budget. In WSL1 it did not finish inside the 20-second self budget and answered `UNDECIDED`. On the Macs its median was 15 to 17 seconds, and on M1 the slowest runs reached 20.
+
+A process start costs 1 to 4 ms on each host, for the core, for bash and for awk. The guard's cost is the number of starts, not the price of one.
+
+### How it will ship
+
+- **Binaries in the package, one per platform**, under `bin/native/<os>-<arch>/safedeps-core`. The package already ships `bin/`, so `files` does not change, and no dependency is added. A per-platform optional package would be a dependency, and the release gate counts those.
+- **Static on Linux.** The linux-x64 binary is built for musl and linked statically, so it does not depend on the host's libc. It is the binary WSL1 runs. Both binaries were built on one Mac: `cargo build --release` for darwin-arm64, and `--target x86_64-unknown-linux-musl` with `rust-lld` as the linker for linux-x64.
+- **The entry shim keeps its contract.** It will run the binary where it runs `bash <hook>` now. The binary exits 0 on every designed path and its decisions travel as JSON. It aborts on a panic, so any other exit still means the hook is unwell, and the shim still turns that into an explained deny. A missing binary, one that cannot run, or a platform with none will be a deny that says so. It will never fall back to the bash guard: two authorities would drift, and a silent second one is what the no-silent-fallback rule forbids. The shim will read the platform from bash's own `OSTYPE` and `HOSTTYPE`, so it starts no process to find its binary.
+- **Where the binaries are built is the owner's decision.** They can be built in the publish job from the tagged source and checked against a build on our own host, or built on our hosts and committed. The first keeps binaries out of git and under provenance, and needs a macOS runner in that job.
+
+`scripts/measure/core-pack-probe.sh` checks the first two points with npm itself. It packs a copy of the tree with the binary in place, installs the tarball offline into a sandbox project, and runs the installed binary. On macOS (darwin-arm64, npm 11.19.0) and in WSL1 (linux-x64, npm 10.9.8): the package names no dependency, `npm pack` carries the binary and nothing of `rust/`, the exec bit survives the install, and the installed binary is byte for byte the one packed.
+
+Not measured: an Intel Mac binary and an arm64 Linux binary.
+
+### The order of the move, and when the bash guard retires
+
+1. **Stage 1 (done): what the guard reads.** The lexer, the recognizers and the extractor, held by the layers above.
+2. **Stage 2: the rest of the pre-guard.** The landing with npm's answers, the UNGATED record, the inert rewrite and its record, the ledger check and its prose, the self budget and the failed-reading settlement, and the snapshot and pending state. The unit of comparison becomes the hook's whole output: its JSON on stdout, its stderr, the lines it adds to `advisory.log`, and the files it leaves, byte for byte.
+3. **Stage 3: the shell parts of the effect gate** (`safedeps-post-verify.sh`), compared on the report lines, `reorg.log` and `advisory.log`.
+4. **Stage 4: the shim runs the binary.** The bash hooks stay in the tree for that release as the reference, and the comparisons run in the release checks.
+
+The bash guard retires when all of these hold on the release tree, on the macOS hosts and in WSL1:
+
+- every battery of `npm run test:release` passes with the binary as the hook;
+- every layer above reports no unnamed difference, and each named one is a bash defect fixed in that release or a stated platform note;
+- each layer's control still fails when the reference is damaged;
+- the shim's contract holds with the binary: missing, unrunnable and aborted are each an explained deny, and a judgment past its deadline is `UNDECIDED`;
+- the published tarball carries a binary for each supported platform, built from the tag.
+
+After that the bash hooks are deleted, not kept beside the binary.

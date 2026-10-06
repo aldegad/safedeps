@@ -754,6 +754,7 @@ OSV 가 ecosystem 이름을 정규화해줘서 advisory-check 시점엔 single A
 | `lib/npm/closure.sh` | lockfile 에서 npm closure 해석, 더해 Yarn project context/closure 해석 (루트 `resolutions` + `yarn info`) 과 isolated candidate materialization. |
 | `lib/gates/` | release-time repo lane — `scan.sh`(gitleaks runner), `audit.sh`(멀티-ecosystem lockfile audit — npm/pnpm/yarn/bun, 각 네이티브 도구에 위임), `hooks.sh`(`install`/`check`/`init`), `doctor.sh`(자세 진단 + `--fix`), `repo-profile.sh`(public/private 판별). *실행*을 소유하고 *policy* 는 repo 가 소유. |
 | `lib/gates/templates/` | 시작용 `.gitleaks[.private].toml` + `.githooks/pre-commit`, `hooks init` 가 scaffold. repo 가 소유·튜닝하는 seed — 재실행 시 덮지 않음. |
+| `rust/` | `safedeps-core`, command guard 의 판정 핵심을 Rust 로 옮긴 것: lexer, grammar, recognizer, spec extractor. `scripts/measure/core-*` 가 bash guard 에 맞춰 붙들어 두는 두 번째 읽기이고, 아직 hook 경로의 어느 것도 이것을 부르지 않는다 (14절). |
 
 ---
 
@@ -823,3 +824,109 @@ rm -rf ~/.safedeps/cache/osv/        # OSV cache 비우기 (강제 re-query)
 - non-npm ecosystem 의 effect-기반 closure enforcement.
 - Ledger 변조 내성 (OSV-as-authority + 변조 탐지; 로컬 서명 안 함).
 - Plugin provider, `.safedeps.toml` policy file, CI mode, multi-machine ledger sync, 에이전트의 안전 대체 모듈 제안.
+
+---
+
+## 14. Rust core
+
+command guard 를 한 부분씩 Rust 로 옮기고 있다. 마지막 부분이 옮겨질 때까지 권위는 bash guard 에 있다. 그때까지 Rust 코드는 bash guard 와 답이 같아야 하는 두 번째 읽기다.
+
+**왜.** bash 에서 판정 한 번은 프로세스를 약 93개 띄우고, 시간의 거의 전부가 거기서 나간다 (AGENTS.md, Testing). lexer 는 2,000줄쯤 되는 awk 프로그램이고 bash 는 뷰마다 이것을 한 번씩 돌린다. Rust 바이너리는 명령을 프로세스 하나에서 읽는다.
+
+### 지금 있는 것 (1단계)
+
+`rust/` 에 crate 하나, `safedeps-core` 가 있다. 의존성은 없다. 정규식 엔진과 JSON 판독기를 직접 가지고 있어서, npm 패키지의 runtime 의존성은 여전히 0 이다.
+
+| 모듈 | 옮겨 온 것 |
+|---|---|
+| `lex.rs` | `shell_lex`: 모든 뷰, 세 읽기, 시작 사건, `UNTERM`, `DIVERGE`, walk 의 자체 검사. awk 프로그램을 함수 단위로 옮겼고 이름과 규칙 순서가 같다. |
+| `ere.rs` | POSIX 확장 정규식. `grep -E` 와 bash `=~` 가 grammar 의 패턴을 읽는 방식 그대로다. |
+| `grammar.rs`, `tables.rs` | `lib/install-grammar.sh` 의 어휘, 패턴, 표. 문자열이 같다. |
+| `manager.rs` | `safedeps_manager_read`, npm 의 옵션 읽기, npx 의 첫 패스. |
+| `extract.rs` | spec extractor (`guard_extract_specs`) 와 그것이 부르는 판독기들. |
+| `core.rs` | payload 판독기, recognizer, pipe 검사, statement 분할, 그리고 읽기마다 detection 과 facts 를 돌리는 driver. |
+
+hook 경로의 어느 것도 이 crate 를 부르지 않는다. 엔진은 여전히 bash guard 를 돌리고, 패키지의 `files` 에 `rust/` 는 없다.
+
+landing 은 옮기지 않았다. core 는 effect gate 가 어느 statement 를 읽는지(npm install 이고 `npm link` 는 아닌 것)만 말한다. extractor 에 필요한 부분이 그것이다. install 이 어디에 떨어지는지는 말하지 않고, npm 에 묻지 않으며, `.npmrc` 도 읽지 않는다.
+
+### bash guard 에 맞춰 붙들어 두는 방법
+
+각 층은 같은 입력에 대한 core 의 답과 bash guard 의 답을 비교한다. 정답지는 bash 쪽이다. 다른 곳은 class 파일에 이름이 있어야 하고, 이름 없는 차이가 하나라도 있으면 실행이 실패한다. 하네스마다 `--control` 이 있어서 정답지를 일부러 망가뜨리고, 그때는 차이를 보고해야 한다. 실패할 수 없는 비교는 아무것도 재지 않기 때문이다.
+
+| 층 | 하네스 (`scripts/measure/`) | 비교하는 것 |
+|---|---|---|
+| Grammar | `core-grammar-drift.sh` | core 가 가진 값 하나하나를, shell 파일을 source 한 뒤의 값과 |
+| 정규식 | `core-ere-differential.py` | recognizer 의 패턴을 호스트의 `grep -E` 와 core 로, recognizer 가 읽는 줄들에 대해 |
+| Lexer | `core-lex-differential.py` | guard 에서 잘라 낸 awk 프로그램과 core: 모든 본문·읽기·뷰에서 뷰, 상태, `UNTERM`, `DIVERGE`, 실패 표식 |
+| Facts | `core-facts-differential.py` | 읽기를 마친 뒤 아는 것을 적게 만든 guard 의 임시 사본과 `safedeps-core facts`: 돌린 읽기, 닫히는 읽기가 있는지, install·hidden·piped 여부, statement 마다의 kind 와 필드, ecosystem, extractor 의 줄들 |
+| 답 전체 | `core-hybrid.py` 와 `tuple-replay.sh` | guard 가 core 로 lex 하는 트리 사본을 원래 트리와 replay: verdict, deny 가 처방하는 패키지, 기록이 이름 붙인 operand |
+
+2026-10-06 에 `scripts/measure/` 와 `scripts/test/` 에 커밋된 말뭉치와 seed 로 만든 무작위 입력으로 잰 결과:
+
+| 층 | 입력 | 결과 | Control |
+|---|---|---|---|
+| Grammar | 값 33개 | macOS 와 WSL1 에서 다른 값 없음 | |
+| 정규식 | 패턴 10개, 22,913줄 | 다른 줄 없음 | core 에 대안 하나를 뺀 패턴을 물으면 1,568줄이 다르다 |
+| Lexer | 본문 14,530개를 읽기 3개와 뷰 20개로: 871,800행 | 다른 행 없음 | awk 프로그램에서 작은따옴표가 닫히지 않게 하면 1,665행 중 345행이 다르다 |
+| Facts | macOS 에서 명령 4,791개, WSL1 에서 982개 | 호스트마다 2개가 다르고, 전부 이름 붙은 class `guard-crash` | guard 가 이름에 `e` 가 든 패키지의 spec 을 버리게 하면 338개 중 21개가 다르다 |
+| 답 전체 | 명령 656개 | 움직인 행 없음 | 작은따옴표가 닫히지 않는 core 로는 456행 중 12행이 움직인다 |
+
+lexer 와 facts 의 control 은 정답지를 망가뜨린다. 나머지 둘은 core 쪽을 망가뜨리고, `git archive` 사본에서 빌드한 변이 core 둘도 그렇다. 정규식 엔진의 결함(아래)을 되돌리면 facts 층에서 80개 중 13개가 다르고 정규식 층에서는 모든 패턴이 다르다. dash 읽기가 `&>` 를 bash 처럼 읽게 하면 lexer 층에서 13,020행 중 22행이 다르다.
+
+lexer 실행은 alex-macbook-m1 에서 load 7~11, job 2개로 58분 걸렸다. facts 실행은 carenine 에서 load 4~5 로 18분 걸렸다. guard 는 `PATH` 에 npm 이 없는 상태로 돌았으므로 어느 landing 도 npm 에 묻지 않았다.
+
+facts 층은 bash guard 의 결함을 하나 찾았다. `pip --cache x install evil==1.0.0` 은 guard 를 `BASH_REMATCH[2]: unbound variable` 로 끝낸다 (`safedeps_manager_long_option`, `set -u` 아래). 줄임말을 받는 파서(pip, pipx, gem)에서, 유일한 줄임말인 긴 옵션이 command word 앞에 올 때 일어난다. entry shim 이 그 종료를 deny 로 바꾸므로 명령은 실행되지 않는다. 다만 shim 이 대는 이유는 깨진 checkout 인데, 원인은 그것이 아니다. class 파일이 이 경우를 `guard-crash` 로 이름 붙였다. core 는 설정되지 않은 그 원소를 빈 값으로 읽고, shell 함수의 다음 줄이 기대하는 것도 그것이다.
+
+첫 facts 실행은 core 의 정규식 엔진 결함도 찾았다. 캐시된 상태를 match 여부 없이 식별해서, 그것만 다른 두 상태가 서로의 답을 냈다. 지금은 정규식 층이 엔진을 그것을 쓰는 층들 아래에서 따로 붙든다.
+
+### 판정 한 번의 비용
+
+`scripts/measure/core-cost.py` 는 entry shim 을 거친 hook 전체와, 같은 payload 에 대한 `safedeps-core facts` 의 시간을 잰다. core 의 시간은 1단계만 덮는다: 명령에 필요한 모든 읽기의 lexer, recognizer, pipe 검사, extractor. ledger, snapshot, hook 이 쓰는 상태는 덮지 않으므로 두 열은 같은 일이 아니다. `PATH` 에 npm 이 없어서 어느 쪽도 npm 의 답을 기다리지 않는다.
+
+warm 실행 한 번 뒤 10회의 중앙값, 밀리초:
+
+| 명령 | 바이트 | M1 guard | M1 core | carenine guard | carenine core | WSL1 guard | WSL1 core |
+|---|---|---|---|---|---|---|---|
+| `ls -la` | 6 | 166 | 3.2 | 145 | 2.8 | 317 | 3.3 |
+| `git status --short && git log --oneline -5 \| head -3` | 52 | 171 | 3.2 | 151 | 2.9 | 328 | 3.6 |
+| `npm install left-pad@1.3.0` | 26 | 576 | 3.5 | 499 | 3.0 | 1,276 | 3.9 |
+| `pip install requests==2.0.0` | 27 | 499 | 3.3 | 435 | 3.0 | 1,126 | 4.0 |
+| `cd sub && npm ci && npm run build` | 33 | 1,012 | 3.3 | 886 | 2.9 | 2,225 | 4.2 |
+| `bash -c 'pip install requests==2.0.0'` | 37 | 651 | 3.3 | 574 | 3.0 | 1,506 | 4.7 |
+| 파일로 쓰는 16 KB heredoc | 16,558 | 860 | 10.4 | 880 | 12.9 | 884 | 12.9 |
+| 패키지 400개를 pin 한 `pip install` | 6,191 | 16,828 | 13.0 | 14,834 | 18.9 | 20,030 | 20.2 |
+
+alex-macbook-m1 과 carenine 은 macOS 15.6, bash 3.2.57 이다. M1 은 실행을 시작할 때 load 7.3, 끝날 때 11.2 였고 carenine 은 4.0 과 2.8 이었다. WSL1 은 Windows 10 위 Ubuntu 의 bash 5.2.21 이다. WSL1 은 자체 load 를 알려 주지 않아서 Windows CPU 를 대신 읽었다: 시작할 때 1%, 끝날 때 65%.
+
+마지막 행은 bash guard 가 자기 예산에 닿는 자리다. WSL1 에서는 20초 self budget 안에 끝내지 못해 `UNDECIDED` 로 답했다. 맥에서는 중앙값이 15~17초였고, M1 에서는 가장 느린 실행들이 20초에 닿았다.
+
+프로세스 하나를 띄우는 데는 core 든 bash 든 awk 든 호스트마다 1~4 ms 가 든다. guard 의 비용은 프로세스 하나의 값이 아니라 띄우는 횟수다.
+
+### 배포 방식 (안)
+
+- **패키지 안에 플랫폼마다 바이너리 하나**, `bin/native/<os>-<arch>/safedeps-core` 에 둔다. 패키지는 이미 `bin/` 을 싣기 때문에 `files` 가 바뀌지 않고, 의존성도 늘지 않는다. 플랫폼별 optional 패키지는 의존성이고 release gate 가 그것을 센다.
+- **Linux 는 정적 링크.** linux-x64 바이너리는 musl 대상으로 빌드해 정적으로 링크하므로 호스트의 libc 에 기대지 않는다. WSL1 이 돌리는 바이너리가 이것이다. 두 바이너리 모두 맥 한 대에서 빌드했다: darwin-arm64 는 `cargo build --release`, linux-x64 는 `--target x86_64-unknown-linux-musl` 에 linker 로 `rust-lld`.
+- **entry shim 의 계약은 그대로다.** shim 은 지금 `bash <hook>` 을 돌리는 자리에서 바이너리를 돌리게 된다. 바이너리는 설계된 모든 경로에서 0 으로 끝나고 결정은 JSON 으로 나간다. panic 에는 abort 하므로, 다른 종료 코드는 여전히 hook 이 온전치 않다는 뜻이고 shim 은 그것을 설명 붙은 deny 로 바꾼다. 바이너리가 없거나, 실행할 수 없거나, 그 플랫폼용이 없으면 그렇다고 말하는 deny 가 된다. bash guard 로 떨어지는 일은 없다. 권위가 둘이면 서로 어긋나고, 조용한 두 번째 권위는 no-silent-fallback 규칙이 금하는 바로 그것이다. shim 은 플랫폼을 bash 자체의 `OSTYPE`, `HOSTTYPE` 에서 읽게 되므로 바이너리를 찾느라 프로세스를 띄우지 않는다.
+- **바이너리를 어디서 빌드할지는 owner 의 결정이다.** tag 된 소스에서 publish job 이 빌드하고 우리 호스트의 빌드와 대조하거나, 우리 호스트에서 빌드해 커밋할 수 있다. 앞의 방식은 바이너리를 git 밖에 두고 provenance 아래에 두며, 그 job 에 macOS runner 가 필요하다.
+
+`scripts/measure/core-pack-probe.sh` 가 앞의 두 항목을 npm 으로 직접 확인한다. 바이너리를 넣은 트리 사본을 pack 하고, tarball 을 sandbox 프로젝트에 offline 으로 install 한 뒤, 설치된 바이너리를 실행한다. macOS(darwin-arm64, npm 11.19.0)와 WSL1(linux-x64, npm 10.9.8)에서: 패키지는 의존성을 하나도 이름 붙이지 않고, `npm pack` 은 바이너리를 싣되 `rust/` 는 싣지 않으며, 실행 비트는 install 뒤에도 남고, 설치된 바이너리는 pack 한 것과 바이트 단위로 같다.
+
+재지 않은 것: Intel Mac 바이너리와 arm64 Linux 바이너리.
+
+### 옮기는 순서, 그리고 bash guard 가 은퇴하는 때
+
+1. **1단계 (완료): guard 가 읽는 것.** lexer, recognizer, extractor. 위의 층들이 붙든다.
+2. **2단계: pre-guard 의 나머지.** npm 의 답을 포함한 landing, UNGATED 기록, inert rewrite 와 그 기록, ledger 검사와 그 문장, self budget 과 실패한 읽기의 정산, snapshot 과 pending state. 비교 단위는 hook 의 출력 전체가 된다: stdout 의 JSON, stderr, `advisory.log` 에 더하는 줄, 남기는 파일을 바이트 단위로.
+3. **3단계: effect gate 의 shell 부분** (`safedeps-post-verify.sh`). report 줄, `reorg.log`, `advisory.log` 로 비교한다.
+4. **4단계: shim 이 바이너리를 돌린다.** 그 release 동안 bash hook 은 정답지로 트리에 남고, 비교는 release check 에서 돈다.
+
+bash guard 는 release 트리에서, macOS 호스트들과 WSL1 에서, 아래가 전부 성립할 때 은퇴한다:
+
+- 바이너리를 hook 으로 둔 상태에서 `npm run test:release` 의 모든 battery 가 통과한다;
+- 위의 모든 층이 이름 없는 차이를 보고하지 않고, 이름 붙은 차이는 그 release 에서 고친 bash 결함이거나 명시한 플랫폼 주석이다;
+- 각 층의 control 은 정답지를 망가뜨리면 여전히 실패한다;
+- shim 의 계약이 바이너리에서도 성립한다: 없음, 실행 불가, abort 는 각각 설명 붙은 deny 이고, 기한을 넘긴 판정은 `UNDECIDED` 다;
+- publish 된 tarball 이 지원 플랫폼마다 tag 에서 빌드한 바이너리를 싣는다.
+
+그 뒤 bash hook 은 바이너리 옆에 남기지 않고 지운다.
