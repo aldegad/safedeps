@@ -1350,13 +1350,16 @@ def classify(results, classes, R):
             counts["core_error"] += 1
             put(res, "core-error")
             continue
+        # What the shells show of each side that ran, whether or not the
+        # bash guard reached its rewrite: a row it left before that is still
+        # one whose core command ran, and the accounting reads this.
+        fill_records(res)
+        res["obs"] = {s: side_verdict(res, s, R) for s in ("bash", "core", "v2.18.1") if s in res.get("sides", {})}
         if not ref:
             counts["not_reached"] += 1
             put(res, "bash-not-reached")
             continue
         counts["compared"] += 1
-        fill_records(res)
-        res["obs"] = {s: side_verdict(res, s, R) for s in ("bash", "core", "v2.18.1") if s in res.get("sides", {})}
         if ref.get("reading_set") != got.get("reading_set"):
             counts["reading_set"] += 1
             put(res, "reading-set")

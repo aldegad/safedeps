@@ -88,7 +88,8 @@
 //!   ends: in an argument of another command (`echo npm ci x`, `sudo npm ci
 //!   x`), in an array value, in a word a parameter expansion holds, in a
 //!   script no shell is handed (`echo sh -c 'npm ci x'`), in a heredoc body
-//!   another command reads, in a script word whose flag does not read back.
+//!   another command reads, in a script word whose flag does not read back
+//!   (among them an `env -S` string cut in two by the flag's own blank).
 //!   Whether such text reaches npm is the structure's to say, and it has not
 //!   said so; nothing here guesses what a wrapper runs or follows a value to
 //!   where it is used.
@@ -421,7 +422,33 @@ fn reads_back(run: &mut Run, parent: &[u8], t: usize, index: usize, child: &[u8]
     let ps = run.payloads(&p2);
     run.failed = failed;
     run.diverge = diverge;
-    ps.get(index).is_some_and(|p| p.text == insert(child, q))
+    ps.get(index).is_some_and(|p| p.text == insert(child, q) && (p.origin != PayloadOrigin::EnvSplit || env_split_is_words(p)))
+}
+
+/// Whether an `env -S` payload's text reads as the words env hands on.
+///
+/// The lexer's text of such a payload is the split string and then each word
+/// after it, one blank between them. A blank the lexer put there has no
+/// source; a blank with a source, in a word after the string, is a byte of
+/// that word, and env does not split there. So text with a sourced blank
+/// after the first join reads as more words than env hands on, and a flag
+/// that reads back in it is not shown to be a word: `env -Snpm\ ci\ x` with
+/// the flag after `ci` is `env -Snpm\ ci --ignore-scripts\ x`, whose text
+/// reads `npm ci --ignore-scripts x` while env hands npm `ci` and one word
+/// `--ignore-scripts x`. Such a place is not carried.
+fn env_split_is_words(p: &Payload) -> bool {
+    let mut joined = false;
+    for (i, &b) in p.text.iter().enumerate() {
+        match p.src.get(i).copied().flatten() {
+            None => joined = true,
+            Some(_) => {
+                if joined && matches!(b, b' ' | b'\t' | b'\n') {
+                    return false;
+                }
+            }
+        }
+    }
+    true
 }
 
 /// A place `q` in node `ni`, carried to the command, read back at each level.
