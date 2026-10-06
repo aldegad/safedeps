@@ -62,7 +62,7 @@ pub fn judge(call:&Call,run:&mut Run,cwd:&[u8],read:&Readings,mut inert:impl FnM
         log(call,"pre-guard DENY: hidden dependency install could not be reduced to an approved spec — fail-closed.".as_bytes());
         deny(&mut out,"safedeps: hidden dependency install detected, but no package spec could be extracted for ledger approval — install blocked fail-closed.".as_bytes());return out
     }
-    let codex=call.input.get("turn_id").is_some();
+    let codex=jq::stream_has(&call.input,"turn_id");
     let mut rewrites=Vec::new();let mut trace=false;let mut attribution=W::new();
     for &reading in &read.set {
         run.reading=Some(reading);
@@ -193,7 +193,7 @@ pub fn probe(input:&[u8])->i32 {
     let Some(command)=value.get("tool_input").and_then(|v|v.get("command")).and_then(Value::as_bytes)else{return 2};
     let cwd=super::jq_r(value.get("cwd"));if cwd.is_empty(){return 2}
     os::set_umask(0o077);let guard_dir=state::guard_dir();if state::ensure_dirs(&guard_dir).is_err(){return 1}
-    let call=Call{input:value.clone(),command,guard:state::guard_text(),guard_dir};
+    let call=Call{input:crate::json::Stream{values:vec![value.clone()],failed:false},command,guard:state::guard_text(),guard_dir};
     let core=crate::core::Core::new();let mut run=Run::new(&core);
     let read=Readings::collect(&mut run,&call.command,&cwd);
     if !read.yes("any_install"){return 2}

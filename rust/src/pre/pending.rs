@@ -22,7 +22,7 @@ pub fn write(call:&Call,snapshot:&Snapshot,record:&Record)->io::Result<PathBuf> 
     let dir=call.guard_dir.join("pending");
     fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir)?;
     state::sweep_pending(&dir);
-    let id=callid::call_id(&call.input);
+    let id=callid::from_stream(&call.input);
     let base=if let Some(id)=&id{dir.join(format!("id-{}",id))}else{
         let key=state::pending_key(&md5::hex(record.cwd),&call.command);
         state::log_advisory(&call.guard_dir,&cat(&[b"pre-guard: this hook's input names no tool_use_id, so the record of this install is kept under its directory and command, and another call of the same command in the same directory can use it. Command: ",&call.command]));
