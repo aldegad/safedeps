@@ -40,9 +40,17 @@ def put(path,value):
 
 
 def seed(box,name):
-    root=box/'project';root.mkdir(parents=True);(root/'.git').write_text('synthetic worktree marker\n')
+    root=box/'project'
+    root_names={'backslash-root':r'back\slash','bracket-root':'[abc]',
+        'star-root':'star*','question-root':'question?',
+        'quoted-star-root':r'quoted\*','paired-slash-root':r'paired\\',
+        'unicode-root':'한글*'}
+    if name in root_names:root=root/root_names[name]
+    root.mkdir(parents=True);(root/'.git').write_text('synthetic worktree marker\n')
     manifest={'name':'fixture','version':'1.0.0'}
     env={};op='yarn';where=root
+    if name=='backslash-temp':
+        temp=box/'tmp\\slash';temp.mkdir();env['TMPDIR']=str(temp)
     if name.startswith('override'):
         op='overrides';manifest['overrides']={'z':'2','a':{'z':'3','a':'1'}}
         if name=='override-filter':manifest['overrides']={'ref':'$foo','nested':{'bar':'$bar'},'valid':'2','ignored':False}
@@ -68,10 +76,12 @@ def seed(box,name):
                 'workspace-escape':r'packages/a\*','workspace-dot':'packages/.*','workspace-modules':'node_modules/*',
                 'workspace-outside':'packages/outside','workspace-inside':'packages/inside',
                 'workspace-bad':'packages/**','workspace-space':'packages/a b','workspace-negated':'!packages/*',
-                'workspace-dotdot':'../*'}.get(name,'packages/*')
+                'workspace-dotdot':'../*','workspace-quoted-slash':r'packages/ab\/*','workspace-paired-slash':r'packages/ab\\/*'}.get(name,'packages/*')
             manifest['workspaces']=[pattern]
             for rel in ('packages/a','packages/b','packages/.dot','packages/a*','node_modules/one','inside'):
                 put(root/rel/'package.json',{'name':rel})
+            if name in ('workspace-quoted-slash','workspace-paired-slash'):
+                put(root/'packages'/'ab\\'/'item'/'package.json',{'name':'quoted-slash-fixture'})
             put(box/'outside/package.json',{'name':'outside'})
             (root/'packages/inside').symlink_to(root/'inside',target_is_directory=True)
             (root/'packages/outside').symlink_to(box/'outside',target_is_directory=True)
@@ -83,6 +93,8 @@ def seed(box,name):
 def main():
     ap=argparse.ArgumentParser();ap.add_argument('--core',required=True);ap.add_argument('--only');ap.add_argument('--expect-difference',action='store_true');ap.add_argument('--report',required=True);a=ap.parse_args()
     names=['none','ordinary','classic','no-lock','subdir','boundary','config-inputs','workspace-star','workspace-question','workspace-class','workspace-escape','workspace-dot','workspace-modules','workspace-outside','workspace-inside','workspace-bad','workspace-space','workspace-negated','workspace-dotdot','override','override-filter','override-env','override-subdir','override-boundary','override-empty']
+    names+=['workspace-quoted-slash','workspace-paired-slash','backslash-root','backslash-temp',
+        'bracket-root','star-root','question-root','quoted-star-root','paired-slash-root','unicode-root']
     if a.only:names=[n for n in names if n in a.only.split(',')]
     assert names;rows=[]
     with tempfile.TemporaryDirectory(prefix='core-pre-context.') as temp:

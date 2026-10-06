@@ -18,6 +18,14 @@ fn string(b:impl AsRef<[u8]>)->Value {jq::into_value(jq::arg(b.as_ref()))}
 fn bytes(path:&Path)->W {path.as_os_str().as_bytes().to_vec()}
 fn cat(parts:&[&[u8]])->W {parts.concat()}
 
+// The ledger writer uses shasum/sha256sum's first field. Those tools prefix
+// an escaped filename's line with a backslash; cut preserves that byte.
+// Keep this existing context identity, rather than turning a stored scoped
+// approval into a miss by quietly replacing it with bare hexadecimal.
+fn file_hash(data:&[u8],filename:&[u8])->String {
+    format!("{}{}",if filename.iter().any(|b|matches!(b,b'\\'|b'\n')){"\\"}else{""},sha256::hex(data))
+}
+
 /// safedeps_npm_repo_overrides_json. The source follows the declaration even
 /// when filtering dollar references leaves no supported overrides.
 pub fn overrides(dir:&Path)->(W,W) {
@@ -112,16 +120,24 @@ fn yarn_inputs(root:&Path,manifest:&json::Stream)->Result<(W,Value),W> {
     let prefix=cat(&[&root_bytes,b"/"]);let mut input=W::new();let mut files=Vec::new();
     for full in paths {
         let path=os::path(&full);if !path.is_file(){continue}
-        let relative=full.strip_prefix(prefix.as_slice()).unwrap_or(&full);
+        // ${source_file#${project_root}/}: the expanded root is a shell
+        // pattern, and # removes its shortest matching prefix. Matching
+        // belongs to the shared shell matcher, including quoted bytes.
+        // The pattern ends in a literal slash, so only slash boundaries
+        // can end a match (also avoiding partial multibyte characters).
+        let relative=full.iter().enumerate().filter(|(_,b)|**b==b'/')
+            .find(|(i,_)|crate::post::shell_pattern_matches(&prefix,&full[..i+1]))
+            .map(|(i,_)|&full[i+1..]).unwrap_or(&full);
         if relative==full||relative.is_empty()||relative.iter().any(|b|matches!(b,b'\n'|b'\r'|b'\t')) {
             return Err(b"safedeps npm closure: unsafe Yarn project input path\n".to_vec())
         }
-        let data=fs::read(path).map_err(|_|W::new())?;let hash=format!("sha256:{}",sha256::hex(&data));
+        let data=fs::read(path).map_err(|_|W::new())?;let hash=format!("sha256:{}",file_hash(&data,&full));
         input.extend_from_slice(&cat(&[relative,b"\t",hash.as_bytes(),b"\n"]));
         files.push(Value::Obj(vec![(b"path".to_vec(),string(relative)),(b"sha256".to_vec(),string(hash.as_bytes()))]));
     }
     if input.is_empty(){return Err(b"safedeps npm closure: Yarn materialization has no canonical inputs\n".to_vec())}
-    Ok((format!("sha256:{}",sha256::hex(&input)).into_bytes(),Value::Arr(files)))
+    let tmp=std::env::var_os("TMPDIR").filter(|s|!s.is_empty()).unwrap_or_else(||"/tmp".into());
+    Ok((format!("sha256:{}",file_hash(&input,tmp.as_os_str().as_bytes())).into_bytes(),Value::Arr(files)))
 }
 
 pub fn yarn(project:&Path)->Result<Option<Value>,W> {
@@ -140,7 +156,7 @@ pub fn yarn(project:&Path)->Result<Option<Value>,W> {
                     let (inputs,files)=yarn_inputs(&dir,&stream)?;
                     let (resolutions,rc)=json::each(&stream,|v|Ok(vec![dump(&sorted(field(v,"resolutions")?.unwrap_or(&Value::Null)))]));
                     if rc!=0{return Err(W::new())}
-                    let resolutions=sha256::hex(&json::captured(&resolutions));let lock_hash=sha256::hex(&data);
+                    let resolutions=sha256::hex(&json::captured(&resolutions));let lock_hash=file_hash(&data,&bytes(&lock));
                     let context=sha256::hex(&cat(&[&bytes(&dir),b"\n",resolutions.as_bytes(),b"\n",lock_hash.as_bytes(),b"\n",&inputs]));
                     return Ok(Some(jq::into_value(jq::obj(vec![
                         ("type",jq::s("yarn-project-lockfile")),("context_hash",jq::s(&format!("sha256:{}",context))),
