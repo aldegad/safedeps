@@ -412,13 +412,11 @@ fn main() {
             None => 1,
         },
         Some("json-stream") => match read_stdin() {
-            Some(input) => match json::parse_stream(&input) {
-                Ok(values) => {
-                    for value in values { println!("{}", jq::compact(&jq::from_value(&value))); }
-                    0
-                }
-                Err(_) => 5,
-            },
+            Some(input) => {
+                let stream = json::read(&input);
+                for value in stream.values { println!("{}", jq::compact(&jq::from_value(&value))); }
+                if stream.failed { 5 } else { 0 }
+            }
             None => 2,
         },
         Some("kat") => cmd_kat(&args[2..]),
