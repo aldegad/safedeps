@@ -79,11 +79,17 @@ impl Store{
         let names=self.verified_names();
         let list=sh::cat_captured(&self.path(&self.verified,b"monitored_files.list")).unwrap_or_default();
         if list!=names.join(&b'\n'){return false}
+        let mut final_copy_exists=false;
         for name in names {
             let saved=self.copy(&self.verified,&name);let live=self.project.join(sh::p(&name));
-            if sh::is_file(&saved){if differs(&saved,&live){return false}}
+            final_copy_exists=sh::is_file(&saved);
+            if final_copy_exists{if differs(&saved,&live){return false}}
             else if sh::exists(&live){return false}
-        }true
+        }
+        // The reference returns its final while iteration's status. An equal
+        // existing copy leaves `files_differ && return 1` with status 1;
+        // an absent final entry or an empty loop leaves status 0.
+        !final_copy_exists
     }
     fn seal(&self,parent:&[u8])->bool{
         let value=jv::obj(vec![("snapshot_id",jv::s(&self.verified)),("parent_snapshot_id",if parent.is_empty(){Value::Null}else{jv::s(parent)}),

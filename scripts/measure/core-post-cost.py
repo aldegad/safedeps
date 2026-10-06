@@ -96,7 +96,8 @@ def seed(d,n,l):
         record=dict(record=2,snapshot_id='pre',tool_use_id='cost-call',project_dir=str(project),
                     command=payload['tool_input']['command'],ignore_scripts_injected=False)
         write_json(snapshots/'pre_meta.json',record);write_json(pending/'id-cost-call.json',record)
-        (snapshots/'pre_monitored_files.list').write_text('package.json\npackage-lock.json\n')
+        (snapshots/'pre_monitored_files.list').write_text('package.json\npackage-lock.json\nyarn.lock\n')
+        (snapshots/'pre_yarn.lock.missing').touch()
         for name in ['package.json','package-lock.json']:shutil.copyfile(project/name,snapshots/('pre_'+name))
         for name in ['bins.list','packages.list']:(snapshots/('pre_'+name)).touch()
         shutil.copyfile(project/'package-lock.json',snapshots/'pre_npm-tree-record.json')

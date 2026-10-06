@@ -103,6 +103,8 @@ def seed(d,kind):
         target=d/'outside-lock.json';target.write_bytes((project/'package-lock.json').read_bytes())
         (project/'package-lock.json').unlink();(project/'package-lock.json').symlink_to(target)
     if kind in ['confirm-link','confirm-clean']:
+        (snapshot/'pre_monitored_files.list').write_text('package-lock.json\npackage.json\nyarn.lock\n')
+        (snapshot/'pre_yarn.lock.missing').touch()
         for name in ['package.json','package-lock.json']:
             (snapshot/('pre_'+name)).write_bytes((project/name).read_bytes())
         (snapshot/'pre_bins.list').write_text('drop\n')
