@@ -24,6 +24,7 @@ p.add_argument('--core',required=True)
 p.add_argument('--report',required=True)
 p.add_argument('--only',help='Comma-separated fixture names')
 p.add_argument('--side',choices=['both','bash','rust'],default='both')
+p.add_argument('--meta-shape',choices=['plain','v1','string-version','unstated','asked'],default='plain')
 p.add_argument('--expect-oracle-text',help='Require a Rust-only source mutant to fail at this oracle diagnostic')
 a=p.parse_args()
 if a.expect_oracle_text and (a.side!='rust' or not a.only or ',' in a.only):
@@ -88,6 +89,13 @@ def seed(d,kind):
                 ignore_scripts_injected=False,command=command,updated_command=command)
     (snapshot/'pre_meta.json').write_text(json.dumps(record)+'\n')
     (home/'pending/id-fault-call.json').write_text(json.dumps(record)+'\n')
+    if a.meta_shape!='plain':
+        meta=dict(record)
+        if a.meta_shape=='v1':meta['record']=1
+        elif a.meta_shape=='string-version':meta['record']='2'
+        elif a.meta_shape=='unstated':meta.pop('ignore_scripts_injected')
+        elif a.meta_shape=='asked':meta.update(ignore_scripts_injected=True,updated_command=command+' --ignore-scripts')
+        (snapshot/'pre_meta.json').write_text(json.dumps(meta)+'\n')
     (project/'package.json').write_text(json.dumps(dict(name='after',dependencies={}))+'\n')
     (project/'package-lock.json').write_text(json.dumps(dict(lock,name='after'))+'\n')
     if kind=='restore-readonly':(project/'package-lock.json').chmod(0o444)

@@ -57,6 +57,21 @@ cases={
    'let mut lines=vec![report::path(&project.join("node_modules"))];',
    'let mut lines=Vec::new();',
    'an unfinished-rollback report with no node_modules line'),
+ 'Default':('record-unstated','restore-readonly','report.rs',
+   'b"unstated" => Err(2)', 'b"unstated" => Ok(NONE.to_vec())',
+   "an --ignore-scripts line, and the pre-guard's record does not state it as a version 2 record"),
+ 'Version':('record-v1','restore-readonly','report.rs',
+   'if !jv::eq(jv::field(&m, "record")?, &jv::num(2)) { b"unstated" }',
+   'if false { b"unstated" }',
+   "an --ignore-scripts line, and the pre-guard's record does not state it as a version 2 record"),
+ 'XStr2':('record-string-version','restore-readonly','report.rs',
+   'if !jv::eq(jv::field(&m, "record")?, &jv::num(2)) { b"unstated" }',
+   'if jv::tostring(jv::field(&m, "record")?) != b"2".to_vec() { b"unstated" }',
+   "an --ignore-scripts line, and the pre-guard's record does not state it as a version 2 record"),
+ 'F2':('record-asked','restore-readonly','report.rs',
+   'if jv::eq(jv::path(v, &["tool_input", "command"])?, jv::field(&m, "updated_command")?) { b"added" }',
+   'if true { b"added" }',
+   "the pre-guard's record says it rewrote the command: true; the command this hook received is the one it wrote: false"),
 }
 names=a.names.split(',')
 if not names or any(n not in cases for n in names):p.error('unknown control name')
@@ -67,9 +82,10 @@ def execute(argv,name,env=None):
     return r.returncode
 
 def fixture(kind,shape,binary,name,diagnostic=None):
-    script='core-post-faults.py' if kind=='fault' else 'core-post-oracle.py'
+    script='core-post-oracle.py' if kind=='journal' else 'core-post-faults.py'
     argv=[sys.executable,str(root/'scripts/measure'/script),'--core',str(binary),'--only',shape,'--report',str(run/(name+'.json'))]
-    if kind=='fault':argv+=['--side','rust']
+    if kind!='journal':argv+=['--side','rust']
+    if kind.startswith('record-'):argv+=['--meta-shape',kind[len('record-'):]]
     if diagnostic:
         argv+=['--expect-oracle-text',diagnostic]
         if kind=='journal':argv+=['--expect-difference']
