@@ -47,11 +47,9 @@ pub enum Note {
 pub struct Install {
     /// Where the three bytes `npm` that end the command word start, when the
     /// word is written so (an `npm` the reference's search can match there).
+    /// A command word that is npm by its value and not by these bytes
+    /// (`"npm" ci`, `n\pm ci`) is read all the same.
     pub npm: Option<usize>,
-    /// The command word's bytes are its value: no quote, no escape. Where
-    /// they are not (`"npm" ci`, `n\pm ci`), the install is read all the
-    /// same, and the bash rewrite's search did not find it.
-    pub plain: bool,
     /// The offset just past the verb: the floor flag goes after it.
     pub verb_end: usize,
     /// The offset the read flag goes after.
@@ -122,9 +120,8 @@ pub fn installs(run: &mut Run, rx: &Rx, text: &[u8]) -> Option<Vec<Install>> {
             } else {
                 None
             };
-            let plain = head.end <= text.len() && text[head.start..head.end] == head.value[..];
             let verb_end = words[v].end;
-            let mut install = Install { npm, plain, verb_end, place: None, note: Note::Floor };
+            let mut install = Install { npm, verb_end, place: None, note: Note::Floor };
             if ends {
                 out.push(install);
                 continue;

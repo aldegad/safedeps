@@ -69,14 +69,13 @@
 //! - What the reader read. The structure and the manager's tables say it: an
 //!   install is a statement whose command word is npm by its value, quoted
 //!   or not (`npm ci`, `"npm" ci`).
-//! - What the bash rewrite left unread. Four facts of its reading are kept
+//! - What the bash rewrite left unread. Three facts of its reading are kept
 //!   as duties to record, and each can only keep an install the reader read
-//!   from counting: the command word is written as its bytes, the text is
-//!   one the bash rewrite read as a text of its own (the command, a
-//!   substitution body, a quoted script for sh, bash, zsh, dash or eval),
-//!   its search found the verb, and its command-word test agrees. None of
-//!   them makes an install of text the reader did not read, and none of them
-//!   places a flag or ends a statement.
+//!   from counting: the text is one the bash rewrite read as a text of its
+//!   own (the command, a substitution body, a quoted script for sh, bash,
+//!   zsh, dash or eval), its search found the verb, and its command-word
+//!   test agrees. None of them makes an install of text the reader did not
+//!   read, and none of them places a flag or ends a statement.
 //!
 //! So where the bash rewrite recorded a verb it did not read, this records it
 //! too, flag or no flag.
@@ -533,14 +532,14 @@ fn rewrite_with(run: &mut Run, rx: &Rx, command: &[u8], cands: &[u8], detail: &m
             // The reader read this install: its statement's command word is
             // npm, by the structure. What follows is no part of that reading.
             // It is what the bash rewrite left unread, kept as a duty to
-            // record: a command word not written as its bytes, a text the
-            // bash rewrite did not read as one of its own, a verb its search
-            // did not find, or one its command-word test did not pass. Each
-            // can only keep a verb from counting as read, which can only add
-            // a record; none makes an install of text the reader did not
+            // record: a text the bash rewrite did not read as one of its own,
+            // a verb its search did not find (a quoted or escaped `npm` or
+            // verb among them), or one its command-word test did not pass.
+            // Each can only keep a verb from counting as read, which can only
+            // add a record; none makes an install of text the reader did not
             // read.
             let paired = npm.is_some_and(|x| pairs.iter().any(|(ps, _)| *ps == Some(x)));
-            let mut left_unread = !inst.plain || !nodes[ni].read_like || !paired;
+            let mut left_unread = !nodes[ni].read_like || !paired;
             if !left_unread {
                 if !cmdwords.contains_key(&ni) {
                     let v = run.lex(&text, "cmdword")?;
