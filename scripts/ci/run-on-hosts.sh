@@ -10,7 +10,8 @@
 #   --hosts-file   default ${XDG_CONFIG_HOME:-~/.config}/safedeps/test-hosts
 #   --rev          the commit to test; default HEAD. Uncommitted changes are
 #                  not tested, and the run says so.
-#   --logs         where the logs land; default a new directory under TMPDIR
+#   --logs         where the logs land, a directory that does not exist yet or
+#                  is empty; default a new directory under TMPDIR
 #   --budget       the wall clock a run has, default 600 (AGENTS.md, Testing),
 #                  counted from the first queue slot the run gets: the wait
 #                  for the suites ahead in the queues is printed beside it
@@ -26,7 +27,9 @@
 # scripts/test/ci-verdict.sh.
 #
 # The commit goes to each host as `git archive` output, into a directory of
-# this run's own. On each host the run takes one slot of the host's queue (the
+# this run's own, which mktemp creates there: two runs never share one, and
+# each unit's files name it, so the verdict can tell this run's files from
+# another's. On each host the run takes one slot of the host's queue (the
 # queue command in the host file, e.g. slot.sh) and keeps it until the last
 # unit there ends, so it waits for the suites ahead of it and is counted by the
 # ones behind it. Units start detached and report through files
@@ -42,6 +45,12 @@
 # exit status. Its running units fail with it; the run does not move them
 # elsewhere and call the result green. A host that is reachable but never
 # gets its queue slot runs nothing, and the run says so.
+#
+# A host given up as failed is sent a stop at once, and again at the end if it
+# did not answer then; one that answers at the end has its logs collected like
+# any other. A run that is interrupted (INT, TERM, HUP) stops its units on
+# every host first. A coordinator killed outright stops nothing, so the units
+# watch the run's heartbeat themselves (scripts/ci/remote.sh).
 #
 # Exit status: 0 green within the budget, 1 red, 2 a usage or setup error, 3
 # green but over the budget.
@@ -124,6 +133,9 @@ run_id="$(date +%Y%m%d-%H%M%S)-${sha:0:7}-$$"
 
 if [[ -z "${logs}" ]]; then
   logs=$(mktemp -d "${TMPDIR:-/tmp}/safedeps-hosts.XXXXXX") || die "cannot create a log directory"
+elif [[ -d "${logs}" && -n "$(ls -A "${logs}")" ]]; then
+  # The verdict reads every unit's files under the directory.
+  die "--logs ${logs} is not empty; another run's files there would be judged with this run's"
 fi
 mkdir -p "${logs}/hosts" "${logs}/coordinator" || die "cannot create ${logs}"
 logs=$(cd "${logs}" && pwd)
@@ -180,11 +192,34 @@ ssh_host() {
 }
 
 # Loads: when the tree was shipped (H_LOAD0), when the run took the host's
-# slots and its work began there (H_LOADH), and at the end (H_LOAD1).
-H_STATE=() H_SEEN=() H_RUN=() H_LOAD0=() H_LOADH=() H_LOAD1=()
+# slots and its work began there (H_LOADH), and at the end (H_LOAD1). H_RUN is
+# the run's directory on the host, empty until the host has created it, and
+# H_STOPPED says the host answered a stop.
+H_STATE=() H_SEEN=() H_RUN=() H_STOPPED=() H_LOAD0=() H_LOADH=() H_LOAD1=()
 for (( h = 0; h < ${#H_NAME[@]}; h++ )); do
-  H_STATE+=(new) H_SEEN+=(0) H_RUN+=("${H_DIR[h]}/${run_id}") H_LOAD0+=("") H_LOADH+=("") H_LOAD1+=("")
+  H_STATE+=(new) H_SEEN+=(0) H_RUN+=("") H_STOPPED+=(0) H_LOAD0+=("") H_LOADH+=("") H_LOAD1+=("")
 done
+
+# The run directory a host created, from what the ship command printed: a
+# `run <path>` line naming a directory mktemp made under the host's runs
+# directory for this run, or nothing.
+shipped_run() { # index
+  local run leaf
+  run=$(sed -n 's/^run //p' "${work}/ship-${H_NAME[$1]}.out" 2>/dev/null | head -n 1)
+  leaf="${run#"${H_DIR[$1]}/${run_id}."}"
+  [[ "${run}" == "${H_DIR[$1]}/${run_id}."* && "${leaf}" =~ ^[A-Za-z0-9]+$ ]] || return 1
+  printf '%s' "${run}"
+}
+
+# Stops the run's units on a host and releases its queue slots. Succeeds when
+# the host answered.
+stop_host() { # index
+  [[ -n "${H_RUN[$1]}" ]] || return 1
+  ssh_host "$1" "bash ${H_RUN[$1]}/tree/scripts/ci/remote.sh stop ${H_RUN[$1]}" \
+    >> "${work}/stop-${H_NAME[$1]}.out" 2>&1 || return 1
+  H_STOPPED[$1]=1
+}
+
 host_dead() { # index reason
   H_STATE[$1]=dead
   printf '%s\n' "$2" > "${work}/host-${H_NAME[$1]}.dead"
@@ -194,18 +229,37 @@ host_dead() { # index reason
     [[ "${U_STATE[u]}" == running && "${U_HOST[u]}" == "$1" ]] || continue
     fail_unit "${u}" "its host ${H_NAME[$1]} failed: $2"
   done
+  # A failed host may still be running the run's units: one that gave up its
+  # queue slot answers, and one that stopped answering may come back. Neither
+  # is polled again, so the units would run on, outside the queue once the
+  # hold lets the slot go.
+  if [[ -n "${H_RUN[$1]}" ]]; then
+    if stop_host "$1"; then
+      event "${H_NAME[$1]}: its units are stopped"
+    else
+      event "${H_NAME[$1]}: the stop did not reach it; it is tried again at the end"
+    fi
+  fi
 }
 
-stop_all() {
+interrupted() {
   local h
+  event "interrupted: stopping every unit"
   for (( h = 0; h < ${#H_NAME[@]}; h++ )); do
-    [[ "${H_STATE[h]}" == dead || "${H_STATE[h]}" == new ]] && continue
-    ssh_host "${h}" "bash ${H_RUN[h]}/tree/scripts/ci/remote.sh stop ${H_RUN[h]}" >/dev/null 2>&1 || true
+    # Interrupted while shipping, a host may have created its directory and
+    # started a queue waiter before the coordinator read the name back.
+    [[ -n "${H_RUN[h]}" ]] || H_RUN[h]=$(shipped_run "${h}") || continue
+    stop_host "${h}" \
+      || event "${H_NAME[h]}: the stop did not reach it; its units stop themselves once nothing polls them (scripts/ci/remote.sh)"
+    event "${H_NAME[h]}: the run's directory stays there: ${H_RUN[h]}"
   done
+  exit 130
 }
 cleanup() { rm -rf "${sock}"; }
 trap cleanup EXIT
-trap 'event "interrupted: stopping every unit"; stop_all; exit 130' INT TERM
+# HUP too: a coordinator in a terminal that closes gets HUP, and with no trap
+# for it the run's units went on with nothing to stop them.
+trap interrupted INT TERM HUP
 
 suite_start=$(now)
 first_held=""
@@ -221,9 +275,13 @@ event "safedeps tests on our hosts: $(sed -n 2p "${work}/run.txt" | cut -d' ' -f
 # --- ship and take the queue ----------------------------------------------------------
 for (( h = 0; h < ${#H_NAME[@]}; h++ )); do
   (
-    run="${H_RUN[h]}"
-    ssh_host "${h}" "mkdir -p ${run}/tree ${run}/out && tar -x -C ${run}/tree" < "${archive}" \
-      > "${work}/ship-${H_NAME[h]}.out" 2>&1 || exit 1
+    # mktemp, not `mkdir -p`: a directory another run left under the same
+    # name would be taken as this run's, its units' exit status read as
+    # theirs. The name is printed before anything else, so a ship that fails
+    # half way still names what it left there. \$run is the remote shell's.
+    ssh_host "${h}" "mkdir -p ${H_DIR[h]} && run=\$(mktemp -d ${H_DIR[h]}/${run_id}.XXXXXX) && printf 'run %s\n' \"\$run\" && mkdir \"\$run/tree\" \"\$run/out\" && tar -x -C \"\$run/tree\"" \
+      < "${archive}" > "${work}/ship-${H_NAME[h]}.out" 2>&1 || exit 1
+    run=$(shipped_run "${h}") || { printf 'the host named no run directory of this run\n' >> "${work}/ship-${H_NAME[h]}.out"; exit 1; }
     printf '%s\n' "${H_PATH[h]}" | ssh_host "${h}" "cat > ${run}/path" >> "${work}/ship-${H_NAME[h]}.out" 2>&1 || exit 1
     holders=""
     for (( k = 1; k <= H_HOLDS[h]; k++ )); do
@@ -239,7 +297,15 @@ for (( h = 0; h < ${#H_NAME[@]}; h++ )); do
   ship_pid[h]=$!
 done
 for (( h = 0; h < ${#H_NAME[@]}; h++ )); do
-  if wait "${ship_pid[h]}"; then
+  wait "${ship_pid[h]}"
+  ship_rc=$?
+  # Read back whether the ship worked or not: a ship that failed after the
+  # host created the directory leaves it, and maybe a queue waiter, there.
+  if H_RUN[h]=$(shipped_run "${h}"); then
+    # The verdict takes a unit's files as this run's only when they name this.
+    printf '%s\n' "${H_RUN[h]##*/}" > "${work}/host-${H_NAME[h]}.run"
+  fi
+  if (( ship_rc == 0 )); then
     H_STATE[h]=queued H_SEEN[h]=$(now)
     H_LOAD0[h]=$(sed -E -n 's/.*load averages?: *//p' "${work}/ship-${H_NAME[h]}.out" | tr -d ',' | tail -n 1)
     event "${H_NAME[h]}: shipped, waiting for ${H_HOLDS[h]} queue slot(s) (load ${H_LOAD0[h]})"
@@ -333,15 +399,31 @@ suite_end=$(now)
 
 # --- collect ------------------------------------------------------------------------
 for (( h = 0; h < ${#H_NAME[@]}; h++ )); do
-  [[ "${H_STATE[h]}" != dead ]] || continue
   run="${H_RUN[h]}"
-  ssh_host "${h}" "bash ${run}/tree/scripts/ci/remote.sh stop ${run}" >/dev/null 2>&1 || true
-  [[ "${H_STATE[h]}" == held ]] || event "${H_NAME[h]}: never got its ${H_HOLDS[h]} queue slot(s), so it ran nothing"
+  # A host that never created its run directory has nothing there.
+  [[ -n "${run}" ]] || continue
+  if [[ "${H_STATE[h]}" == dead ]]; then
+    # A failed host the stop did not reach is tried once more. One that
+    # answers now has its units stopped and its logs collected like any other;
+    # the run is red for its failure either way.
+    if (( H_STOPPED[h] == 0 )); then
+      if ! stop_host "${h}"; then
+        event "${H_NAME[h]}: still does not answer; ${run} stays there, and its units stop themselves once nothing polls them (scripts/ci/remote.sh)"
+        continue
+      fi
+      event "${H_NAME[h]}: answers again, and its units are stopped"
+    fi
+  else
+    stop_host "${h}" || true
+    [[ "${H_STATE[h]}" == held ]] || event "${H_NAME[h]}: never got its ${H_HOLDS[h]} queue slot(s), so it ran nothing"
+  fi
   mkdir -p "${logs}/hosts/${H_NAME[h]}"
   if ssh_host "${h}" "uptime; tar -C ${run}/out -cf - . > ${run}/out.tar" > "${work}/end-${H_NAME[h]}.out" 2>&1 \
     && ssh_host "${h}" "cat ${run}/out.tar" | tar -xf - -C "${logs}/hosts/${H_NAME[h]}"; then
     H_LOAD1[h]=$(sed -E -n 's/.*load averages?: *//p' "${work}/end-${H_NAME[h]}.out" | tr -d ',' | tail -n 1)
     ssh_host "${h}" "rm -rf ${run}" >/dev/null 2>&1 || event "${H_NAME[h]}: could not remove ${run}; remove it by hand"
+  elif [[ "${H_STATE[h]}" == dead ]]; then
+    event "${H_NAME[h]}: its logs could not be collected; they stay in ${run} there"
   else
     host_dead "${h}" "its logs could not be collected; they stay in ${run} there"
   fi
