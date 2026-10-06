@@ -1357,6 +1357,15 @@ Linux is no longer tested, also by the owner's decision: Kuma Studio, which this
 
 The publish job no longer waits for a CI run, because there is none; the tag is pushed after the release's own runs. Its read-back now asks the version document and the package document with a fresh query string and no-cache, for up to 20 minutes, and a failed read-back says that the version was published. v2.18.1's read-back timed out after a publish that had succeeded.
 
+### Windows is measured in WSL1
+
+safedeps had never been measured in WSL1, the environment Kuma Studio's Windows build runs in. WSL1 is not a Linux kernel: starting a process costs more there, and a Windows drive mounted in it has file metadata of its own. The measurement ran in a WSL1 distribution made for it on a Windows PC (Ubuntu 24.04, mawk, node 22.23.1, npm 10.9.8), on the tree 2c57af3, with the fixture projects on the Linux root and on a Windows drive.
+
+- **Judgment.** 225 judgments through the installed entry, under the default budget, and none was `UNDECIDED`. Medians with Windows idle: `ls -la` 0.34s, `npm install left-pad@1.3.0` 1.62s, `npm ci` 2.39s, and an install behind 64KB 4.73s. With the PC's CPU at 94 to 100% from other work the same forms took about twice as long, 10.1s at most. The Linux root and the Windows drive did not differ.
+- **Batteries.** On the Linux root: smoke 61 ok and 0 not ok (495s), self-budget 44/0 (148s), effect-trace-grid 13/0 (1,961s) and e2e 125/0 (1,008s). On the Windows drive: smoke 61/0, self-budget 44/0 and effect-trace-grid 13/0. e2e stopped there after 26 rows, at one row's assumption and not at a defect of the gate: the row needs a read-only directory to stop `rm`, and a Windows drive mounted without metadata ignores `chmod`. The row now asks the filesystem first. With that change, on a copy, e2e ran 124/0 on the Windows drive.
+- **What the effect gate leans on holds.** File change times have 100ns precision on both filesystems. An inode survives a write in place and changes on a rename. `ps` reports a start time, a stopped process and a zombie as Linux does. `/proc/loadavg` is a constant in WSL1, so a run there records the Windows CPU instead of the load.
+- **The effect gate's budget.** With an empty ledger and no cache, the effect gate crossed its 30s near 135 packages in WSL1: about 0.19s a package, nearly all of it local processes around one batched OSV request. The same lockfile crossed between 32 and 128 packages on an M1 under load 7 to 18. This is the limit AGENTS.md already states, measured again, and the Rust work of v2.18.3 is aimed at it.
+
 ### Moved to v2.18.3
 
 - **The judgment's cost.** One guard call starts about 93 external processes, and that is nearly all of its 0.6 to 0.9 CPU seconds. v2.18.3 moves the judgment's core to Rust, with this release's bash as the reference it is compared against.

@@ -1182,7 +1182,16 @@ pass "a rollback next to another manager's lockfile says which lockfiles are mis
 # node_modules that cannot be removed: the rollback says it is still there and
 # gives no command. A read-only directory stops rm for an ordinary user; root
 # removes it anyway (the CI image runs as root), so the row is for the others.
-if [[ "$(id -u)" != 0 ]]; then
+# It is also only for a filesystem where a read-only directory does stop rm:
+# a Windows drive mounted in WSL1 without metadata ignores chmod, the rollback
+# then removes the whole tree, and this row's own chmod 755 failed on a path
+# that was gone and ended the battery under set -e (measured in WSL1 on DrvFs,
+# 2026-10-06). So the row asks the filesystem first.
+ro_probe="${tmp_root}/ro-probe"; mkdir -p "${ro_probe}/d"; : > "${ro_probe}/d/f"; chmod 555 "${ro_probe}/d"
+if rm -f "${ro_probe}/d/f" 2>/dev/null; then ro_stops_rm=no; else ro_stops_rm=yes; fi
+chmod 755 "${ro_probe}/d" 2>/dev/null || true; rm -rf "${ro_probe}"
+[[ "${ro_stops_rm}" == yes || "$(id -u)" == 0 ]] || printf '# note - a read-only directory does not stop rm on this filesystem; the stuck node_modules row is not run\n'
+if [[ "$(id -u)" != 0 && "${ro_stops_rm}" == yes ]]; then
   stuck_wt="${tmp_root}/stuck-wt"
   mkdir -p "${stuck_wt}/node_modules/locked-package"
   : > "${stuck_wt}/node_modules/locked-package/index.js"

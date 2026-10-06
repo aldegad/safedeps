@@ -185,17 +185,21 @@ any step is open.
      --dry-run`). The secret scan runs the gitleaks on PATH only when that
      binary's sha256 is the pinned release binary's; `--install-gitleaks DIR`
      installs the pinned release where it is not.
-   - **Windows:** `npm run test:release` in WSL1 on the home Windows PC, the
-     environment Kuma Studio's Windows build runs in. Until plan
-     `safedeps/wsl1-environment-measure` has measured that environment, a WSL1
-     run is recorded with what it showed and does not hold the release; a
-     failure that comes from WSL1 itself is named in the ROADMAP section.
+   - **Windows:** in WSL1 on the home Windows PC, in the distribution made for
+     these tests (`KumaWsl1Probe`, one slot): `smoke.sh`, `self-budget.sh`,
+     `effect-trace-grid.sh` and `e2e.sh`, with the fixture projects on the
+     Linux root and on a Windows drive. These four reach what WSL1 does
+     differently, the cost of a process and the file metadata of a Windows
+     drive. The whole release set takes hours on that one slot and is not part
+     of a release. `/proc/loadavg` is a constant in WSL1, so record the Windows
+     CPU beside the run instead of `uptime`.
 
-   `npm run test:release` is judged by `run-all.sh` alone, which does not
-   judge skipped rows (Testing, above): a battery that prints `ok ... SKIPPED`
-   or a TAP skip directive and exits 0 is green there, and only the host
-   runner's verdict turns it red. So a release run on one host or in WSL1 has
-   its logs read for skipped rows before it counts.
+   `npm run test:release` on one host, and each battery run by hand in WSL1,
+   is judged by `run-all.sh` or by the battery alone, and neither judges
+   skipped rows (Testing, above): a battery that prints `ok ... SKIPPED` or a
+   TAP skip directive and exits 0 is green there, and only the host runner's
+   verdict turns it red. So such a run has its logs read for skipped rows
+   before it counts.
 
    These runs are the test of the release; no CI on GitHub stands behind them
    (owner, 2026-10-06). Linux is not tested: Kuma Studio ships for Windows and
