@@ -25,6 +25,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 type W = Vec<u8>;
 mod budget;
+mod snapshot;
+pub use snapshot::probe;
 
 const RUNTIME_BUDGET_SECONDS: u64 = 30;
 const SELF_BUDGET_MAX_SECONDS: u64 = 25;

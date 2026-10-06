@@ -192,6 +192,17 @@ pub fn pending_key(dir_hash: &str, command: &[u8]) -> String {
 /// `write_state_file`: the value and a newline, through a temporary name in
 /// the same directory.
 pub fn write_state_file(target: &Path, value: &[u8]) -> std::io::Result<()> {
+    renamed_file(target, |f| f.write_all(value).and_then(|_| f.write_all(b"\n")))
+}
+
+/// Keep the source's bytes, through the same private temporary file and
+/// rename as a state record. Unlike write_state_file, this adds no newline.
+pub fn copy_state_file(source: &Path, target: &Path) -> std::io::Result<()> {
+    let mut from = std::fs::File::open(source)?;
+    renamed_file(target, |to| std::io::copy(&mut from, to).map(|_| ()))
+}
+
+fn renamed_file(target: &Path, write: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>) -> std::io::Result<()> {
     let dir = target.parent().unwrap_or(Path::new("."));
     std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
     let base = target.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -201,7 +212,7 @@ pub fn write_state_file(target: &Path, value: &[u8]) -> std::io::Result<()> {
         let temp = dir.join(format!(".{}.{:06x}", base, seed.wrapping_add(n) & 0xff_ffff));
         match std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&temp) {
             Ok(mut f) => {
-                let wrote = f.write_all(value).and_then(|_| f.write_all(b"\n"));
+                let wrote = write(&mut f);
                 drop(f);
                 if let Err(e) = wrote.and_then(|_| std::fs::rename(&temp, target)) {
                     let _ = std::fs::remove_file(&temp);

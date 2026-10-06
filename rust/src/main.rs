@@ -440,6 +440,10 @@ fn main() {
             Some(input) => post::probe(&input),
             None => 2,
         },
+        Some("pre-probe") => match read_stdin() {
+            Some(input) => pre::probe(&input),
+            None => 2,
+        },
         Some("ledger") => match read_stdin() {
             Some(input) => ledger::main(&args[2..], &input),
             None => 1,
