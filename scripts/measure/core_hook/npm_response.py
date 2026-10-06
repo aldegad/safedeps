@@ -19,21 +19,30 @@ What is observed, each by its own channel:
   output       the bytes in each response file, read by the observer while
                the child that wrote them is held before it exits, and again
                just before the observer lets it go
-  exit         that the child's process is gone or a zombie after it was let
-               go, from ps, by the observer; the exit status's value is the
-               child's own record and is not observed from outside
+  exit         that the child's process is gone, a zombie, or a pid another
+               process now holds, from a ps answer that counts (ps_answer);
+               the exit status's value is the child's own record and is not
+               observed from outside
   record       the claim record the child wrote, as the existing stand-in does
   hook         the hook's status, stdout, stderr, pending record, snapshot and
                advisory log, read from the sandbox after the hook ended
 
+A lookup that did not answer is not a value. Every reading below keeps "not
+observed" apart from "observed and different": the first becomes an
+unobserved-* code and the second a defect code, and one never stands in for
+the other.
+
 The stand-in chooses its answer from argv and its working directory alone,
 before it claims a number, and nothing the observer writes changes the choice.
-The observer only decides when a held child goes on.
+The observer only decides when a held child goes on, within one budget per
+launch; when the budget is spent it stops imposing an order, lets every held
+child go and says so, and that order is then not observed.
 
 Nothing here judges while collecting. judge_launch() reads the files a
 collection left, and the contract, and nothing else.
 """
 import copy
+import errno
 import fcntl
 import hashlib
 import json
@@ -48,21 +57,27 @@ import traceback
 
 from . import evidence, observe
 
-CONTRACT = 'core-hook-npm-response-contract/1'
+CONTRACT = 'core-hook-npm-response-contract/2'
 LAUNCH = 'core-hook-npm-response-launch/1'
-OBSERVER = 'core-hook-npm-response-observer/1'
+OBSERVER = 'core-hook-npm-response-observer/2'
 MANIFEST = 'core-hook-npm-response-manifest/1'
-RESULTS = 'core-hook-npm-response-results/1'
+RESULTS = 'core-hook-npm-response-results/2'
 ROLES = ('prefix', 'root', 'config')
 IMPLS = ('native', 'bash')
 CONF = 'npm-response.json'
 NOISE = ('_', 'SHLVL')
-# How long a child waits for the observer at each hold before it goes on by
-# itself. Two holds stay inside the hook's own ask deadline (8s; bash counts
-# whole seconds, so at least 7).
+# How long a child waits at each hold before it goes on by itself.
 HOLD_SECONDS = 3.0
+# The observer's one budget for imposing an order in a launch, counted from
+# the first child's start: the claim gate, the barrier and every ordered exit
+# share it. Whether it, the children's starts, the ps calls and the hook's
+# own work fit inside the hook's ask deadline is not measured here.
+ORDER_BUDGET = 2.5
 POLL = 0.002
 PS_FIELDS = 'pid=,ppid=,pgid=,stat=,lstart=,command='
+TREE = ('pid', 'ppid', 'pgid', 'stat', 'lstart', 'command')
+EXITQ = ('pid', 'stat', 'lstart')
+EXITED = ('gone', 'zombie', 'pid-reused')
 
 
 class HarnessError(Exception):
@@ -126,6 +141,26 @@ def bind_scratch(template, argv):
 
 # --- the contract, before anything starts ---------------------------------------------------
 
+EDITS = {'none': (), 'declare-shared-effect': ('effect',), 'empty': (), 'drop': ('role',), 'duplicate': ('role',),
+         'exchange-descriptors': ('role', 'other'), 'move-to-other-group': ('role',), 'unobserve-output': ('role',),
+         'follow-into-initial-scratch': (), 'exit-ps': ('role', 'ps'), 'fd-self-missing': ('role',),
+         'fd-path-unavailable': ('role',), 'release-content-of': ('role', 'other'), 'pending-bytes': ('bytes',),
+         'pending-null': ('fields',), 'pending-remove': ()}
+SHAPES = {
+    'absolute-path': lambda v: isinstance(v, str) and v.startswith('/') and '\n' not in v,
+    'nonempty-string': lambda v: isinstance(v, str) and bool(v),
+    'md5-hex': lambda v: isinstance(v, str) and len(v) == 32 and all(c in '0123456789abcdef' for c in v),
+    'fetch-facts': lambda v: isinstance(v, dict) and (isinstance(v.get('unknown'), str) or
+                                                      ('registry' in v and 'replace' in v and isinstance(v.get('scopes'), dict))),
+}
+
+
+def shape_ok(rule, value):
+    if isinstance(rule, list):
+        return value in rule
+    return SHAPES[rule](value)
+
+
 def contract_errors(rec):
     """What is wrong with the record on its own. Starts nothing."""
     errors = []
@@ -158,6 +193,9 @@ def contract_errors(rec):
         want(impl + ' initial slot names differ', len(set(slot.get('initial', {}).values())) == len(ROLES), slot.get('initial'))
         want(impl + ' follow slot', sorted(slot.get('follow', {})) == ['config'], slot.get('follow'))
         want(impl + ' err suffix', isinstance(slot.get('err'), str) and bool(slot.get('err')), slot.get('err'))
+    shape = rec.get('pending_shape', {})
+    want('pending shape rules', all(isinstance(r, list) or r in SHAPES for r in list(shape.get('identity', {}).values()) +
+                                    list(shape.get('fields', {}).values())) and bool(shape.get('identity')), shape)
     answers = rec.get('answers', {})
     names = [s.get('name') for s in rec.get('scenarios', [])]
     want('scenario names once each', len(set(names)) == len(names), names)
@@ -174,6 +212,7 @@ def contract_errors(rec):
             order = s.get(key)
             want(label + key, order is None or sorted(order) == sorted(ROLES), order)
             want(label + key + ' differs from the start order', order is None or list(order) != list(ROLES), order)
+        want(label + 'claim and release orders go together', bool(s.get('claim_order')) == bool(s.get('release_order')), s.get('release_order'))
         want(label + 'release order or swap needs the barrier', s.get('barrier') or not (s.get('release_order') or s.get('swap_slots')), s.get('barrier'))
         swap = s.get('swap_slots')
         want(label + 'swap', swap is None or (len(swap) == 2 and len(set(swap)) == 2 and set(swap) <= set(ROLES)), swap)
@@ -182,14 +221,32 @@ def contract_errors(rec):
         want(label + 'expected verdict', s.get('expect', {}).get('verdict') in ('applicable', 'rejected', 'unresolved', 'not-applicable'), s.get('expect'))
         result = s.get('expect', {}).get('result')
         want(label + 'expected result', (isinstance(result, str) and result in rec.get('results', {}))
-             or (isinstance(result, dict) and bool(result.get('differs'))), result)
+             or (isinstance(result, dict) and bool(result.get('differs')) and set(result['differs']) <= set(shape.get('fields', {}))), result)
     forced = [s for s in rec.get('scenarios', []) if s.get('claim_order')]
     want('two forced claim orders that differ', len(forced) >= 2 and len(set(tuple(s['claim_order']) for s in forced)) == len(forced),
          [s.get('claim_order') for s in forced])
-    want('two forced completion orders that differ', len(forced) >= 2 and len(set(tuple(s['release_order']) for s in forced if s.get('release_order'))) == len(forced),
+    want('two forced completion orders that differ', len(forced) >= 2 and len(set(tuple(s['release_order']) for s in forced)) == len(forced),
          [s.get('release_order') for s in forced])
-    for c in rec.get('declared', {}).get('controls', []):
-        want('control %s from a scenario' % c.get('name'), c.get('from') in names, c.get('from'))
+    controls = rec.get('declared', {}).get('controls', [])
+    want('control names once each', len({c.get('name') for c in controls}) == len(controls), [c.get('name') for c in controls])
+    for c in controls:
+        label = 'control %s ' % c.get('name')
+        want(label + 'from a scenario', c.get('from') in names, c.get('from'))
+        edits = c.get('edits')
+        want(label + 'edits', isinstance(edits, list) and bool(edits), edits)
+        for e in edits or []:
+            want(label + 'edit', isinstance(e, dict) and e.get('edit') in EDITS and all(k in e for k in EDITS.get(e.get('edit'), ())), e)
+            if isinstance(e, dict) and e.get('role') is not None:
+                want(label + 'edit role', e['role'] in ROLES and e.get('other', e['role']) in ROLES, e)
+        exp = c.get('expect', {})
+        want(label + 'expectation', bool(exp) and set(exp) <= {'verdict', 'must', 'orders', 'result'}
+             and ('verdict' in exp) == ('must' in exp)
+             and exp.get('orders', 'pass') in ('pass', 'fail', 'unobserved')
+             and exp.get('result', 'invalid') in ('invalid', 'valid-differs', 'not-different', 'expected', 'unexpected'), exp)
+    for r in rec.get('runner_controls', []):
+        label = 'runner control %s ' % r.get('name')
+        want(label + 'edit', all(isinstance(r.get(k), str) and r.get(k) for k in ('file', 'old', 'new')) and r.get('old') != r.get('new'), r)
+        want(label + 'expectation', isinstance(r.get('expect'), dict) and type(r['expect'].get('rc')) is int, r.get('expect'))
     return errors
 
 
@@ -226,7 +283,7 @@ def fd_fact(fd):
     try:
         st = os.fstat(fd)
     except OSError as e:
-        return {"error": e.strerror}
+        return {"error": e.strerror, "errno": e.errno}
     out = {"kind": kind(st.st_mode), "dev": st.st_dev, "ino": st.st_ino, "size": st.st_size}
     try:
         out["path"] = os.fsdecode(fcntl.fcntl(fd, fcntl.F_GETPATH, bytes(1024)).split(b"\0", 1)[0])
@@ -242,7 +299,7 @@ def fact(p):
     try:
         st = os.lstat(p)
     except OSError as e:
-        return {"error": e.strerror}
+        return {"error": e.strerror, "errno": e.errno}
     return {"kind": kind(st.st_mode), "ino": st.st_ino, "dev": st.st_dev}
 
 def publish(name, doc):
@@ -334,39 +391,93 @@ def standin_conf(rec, scenario, where, obs, calls):
             'claim_gate': bool(scenario.get('claim_order')), 'hold_seconds': HOLD_SECONDS}
 
 
-# --- the observer ----------------------------------------------------------------------------------
+# --- ps ------------------------------------------------------------------------------------------
+#
+# macOS ps(1) says of -p only that it displays the processes that match the
+# listed process IDs, and documents no exit status. So a ps answer is read by
+# its rows, never by its status: it counts only when ps ran, wrote nothing to
+# stderr, every line reads as the asked fields, and the collector's own
+# process, listed beside the targets on every query, is among the rows. Then,
+# and only then, a target with no row has no process. Anything else is a
+# lookup that did not answer, and says nothing about the target.
 
-def ps(args):
+def ps(args, timeout=10.0):
     argv = ['ps'] + args
+    t0 = time.time_ns()
     try:
-        r = subprocess.run(argv, capture_output=True, timeout=10)
+        # %c in the C locale: lstart reads as five words.
+        r = subprocess.run(argv, capture_output=True, timeout=timeout, env=dict(os.environ, LC_ALL='C'))
     except (OSError, subprocess.SubprocessError) as e:
-        return {'argv': argv, 'error': str(e), 't_ns': time.time_ns()}
+        return {'argv': argv, 'error': '%s: %s' % (type(e).__name__, e), 't0_ns': t0, 't_ns': time.time_ns()}
     return {'argv': argv, 'rc': r.returncode, 'stdout': r.stdout.decode('utf-8', 'surrogateescape'),
-            'stderr': r.stderr.decode('utf-8', 'surrogateescape'), 't_ns': time.time_ns()}
+            'stderr': r.stderr.decode('utf-8', 'surrogateescape'), 't0_ns': t0, 't_ns': time.time_ns()}
 
 
-def ps_rows(text, fields):
-    """Rows of `ps -o <fields>` output: pid, the named columns, lstart as five words."""
+def ps_line(line, fields):
+    """(pid, row) of one ps line, or None if it does not read as <fields>."""
+    parts = line.split()
+    fixed = sum(5 if f == 'lstart' else 1 for f in fields if f != 'command')
+    if not parts or not parts[0].isdigit():
+        return None
+    if ('command' in fields and len(parts) < fixed + 1) or ('command' not in fields and len(parts) != fixed):
+        return None
+    row, i = {}, 0
+    for name in fields:
+        if name == 'lstart':
+            row[name] = ' '.join(parts[i:i + 5])
+            if not parts[i + 4].isdigit():
+                return None
+            i += 5
+        elif name == 'command':
+            row[name] = ' '.join(parts[i:])
+            i = len(parts)
+        else:
+            row[name] = parts[i]
+            i += 1
+    if any(not row[f].isdigit() for f in ('pid', 'ppid', 'pgid') if f in row):
+        return None
+    return int(parts[0]), row
+
+
+def ps_answer(out, fields, sentinel):
+    """The rows of one ps query, and None; or None and why it does not count."""
+    if not isinstance(out, dict):
+        return None, 'no ps record'
+    if out.get('error'):
+        return None, 'ps did not run: ' + str(out['error'])
+    if out.get('stderr'):
+        return None, 'ps wrote to stderr: %r' % (out['stderr'][:200],)
     rows = {}
-    for line in text.splitlines():
-        parts = line.split()
-        if not parts or not parts[0].isdigit():
+    for line in (out.get('stdout') or '').splitlines():
+        if not line.strip():
             continue
-        row, i = {}, 0
-        for name in fields:
-            if name == 'lstart':
-                row[name] = ' '.join(parts[i:i + 5])
-                i += 5
-            elif name == 'command':
-                row[name] = ' '.join(parts[i:])
-                i = len(parts)
-            else:
-                row[name] = parts[i] if i < len(parts) else None
-                i += 1
-        rows[int(parts[0])] = row
-    return rows
+        got = ps_line(line, fields)
+        if got is None:
+            return None, 'ps printed a line that does not read as %s: %r' % (','.join(fields), line[:200])
+        rows[got[0]] = got[1]
+    if sentinel not in rows:
+        return None, "ps did not print the collector's own process, so its rows are not a complete answer"
+    return rows, None
 
+
+def exit_reading(out, pid, started_lstart, sentinel):
+    """'gone', 'zombie', 'pid-reused' (exited) or 'alive', from an answer that
+    counts; otherwise None and why. A row whose start time cannot be compared
+    is not read as another process."""
+    rows, why = ps_answer(out, EXITQ, sentinel)
+    if rows is None:
+        return None, why
+    row = rows.get(pid)
+    if row is None:
+        return 'gone', None
+    if row['stat'].startswith('Z'):
+        return 'zombie', None
+    if started_lstart is None:
+        return None, 'a row for this pid is there and its start time was not read when the child started'
+    return ('pid-reused', None) if row['lstart'] != started_lstart else ('alive', None)
+
+
+# --- the observer ----------------------------------------------------------------------------------
 
 def kind_of(mode):
     return observe.kind_of(mode)
@@ -374,18 +485,20 @@ def kind_of(mode):
 
 def slot_fact(path, blobs):
     """What a response file is, from outside the child: lstat of the path, and
-    fstat, F_GETPATH and every byte of the observer's own open of it."""
+    fstat, F_GETPATH and every byte of the observer's own open of it. An error
+    keeps its errno, so a path that is not there is told from a lookup that
+    did not answer."""
     out = {'path': path, 't_ns': time.time_ns()}
     try:
         st = os.lstat(path)
         out['lstat'] = {'kind': kind_of(st.st_mode), 'dev': st.st_dev, 'ino': st.st_ino, 'size': st.st_size, 'nlink': st.st_nlink}
     except OSError as e:
-        out['lstat_error'] = e.strerror
+        out['lstat_error'], out['lstat_errno'] = e.strerror, e.errno
         return out
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     except OSError as e:
-        out['open_error'] = e.strerror
+        out['open_error'], out['open_errno'] = e.strerror, e.errno
         return out
     try:
         st = os.fstat(fd)
@@ -403,7 +516,7 @@ def slot_fact(path, blobs):
         data = b''.join(chunks)
         out['read'] = {'dev': st.st_dev, 'ino': st.st_ino, 'getpath': name, 'size': len(data), 'blob': blobs.put(data)}
     except OSError as e:
-        out['read_error'] = e.strerror
+        out['read_error'], out['read_errno'] = e.strerror, e.errno
     finally:
         os.close(fd)
     return out
@@ -413,13 +526,15 @@ class Observer(threading.Thread):
     """Watches one launch's stand-in children and decides when a held child
     goes on. Every fact it keeps is raw: what a file held, what ps printed.
     Its own reading of a child's role only chooses which file to look at and
-    when to let it go; judge_launch() reads the role again from the records."""
+    when to let it go; judge_launch() reads the role again from the records,
+    and reads every ps answer again by ps_answer."""
 
     def __init__(self, rec, scenario, impl, where, obs, calls, blobs):
         super().__init__(daemon=True)
         self.rec, self.scenario, self.impl, self.where = rec, scenario, impl, where
         self.obs, self.calls, self.blobs = obs, calls, blobs
         self.words, self.quiet = rec['statement']['words'], rec['quiet']
+        self.sentinel = os.getpid()
         self.children = {}
         self.order = []
         self.reads = []
@@ -429,10 +544,15 @@ class Observer(threading.Thread):
         self.swaps = []
         self.claims_done = not scenario.get('claim_order')
         self.barrier_done = not scenario.get('barrier')
-        self.first_start = None
-        self.first_written = None
+        self.budget_until = None
         self.hook_done = threading.Event()
         self.finished = False
+
+    def remaining(self):
+        return ORDER_BUDGET if self.budget_until is None else self.budget_until - time.monotonic()
+
+    def ps_timeout(self):
+        return max(0.2, min(10.0, self.remaining()))
 
     # The observer's own identification: which declared ask a child's request is.
     def identify(self, doc):
@@ -464,6 +584,21 @@ class Observer(threading.Thread):
     def initial(self, role):
         found = [c for c in self.children.values() if c['ask'] is not None and c['ask']['attempt'] == 'initial' and c['ask']['role'] == role]
         return found[0] if len(found) == 1 else None
+
+    def give_up(self, why):
+        """Stop imposing an order: say why, and let every held child go. A
+        child that has not written yet is let go at its own written event,
+        after its file was read, as in a launch with no order."""
+        self.errors.append('order not imposed: ' + why)
+        self.claims_done = self.barrier_done = True
+        for c in self.children.values():
+            if self.scenario.get('claim_order') and not os.path.exists(os.path.join(self.obs, c['nonce'] + '.claim-go')):
+                self.touch(c['nonce'], 'claim-go')
+            if c['written'] and not c['released']:
+                if c['slot_paths']:
+                    self.read_slots(c, 'release', 'give-up')
+                self.event('release-all', nonce=c['nonce'], why='order not imposed')
+                self.release(c)
 
     def run(self):
         try:
@@ -507,13 +642,17 @@ class Observer(threading.Thread):
     def started(self, nonce):
         doc = observe_json(os.path.join(self.obs, nonce + '.started.json'))
         name, ask, scratch = self.identify(doc)
-        child = {'nonce': nonce, 'pid': doc.get('pid'), 'ask_name': name, 'ask': ask, 'scratch': scratch,
+        pid = doc.get('pid')
+        out = ps(['-ww', '-o', PS_FIELDS, '-p', '%s,%s' % (self.sentinel, pid)])
+        rows, _ = ps_answer(out, TREE, self.sentinel)
+        child = {'nonce': nonce, 'pid': pid, 'ask_name': name, 'ask': ask, 'scratch': scratch,
                  'slot_paths': self.slot_paths(ask, scratch) if ask else None, 'written': False,
-                 'released': False, 'exited': False, 'ps_started': ps(['-ww', '-o', PS_FIELDS, '-p', str(doc.get('pid'))])}
+                 'released': False, 'exited': False, 'ps_started': out,
+                 'started_lstart': rows[pid]['lstart'] if rows and pid in rows else None, 'exit_polls_uncounted': []}
         self.children[nonce] = child
         self.order.append(nonce)
-        if self.first_start is None:
-            self.first_start = time.monotonic()
+        if self.budget_until is None:
+            self.budget_until = time.monotonic() + ORDER_BUDGET
         self.event('started', nonce=nonce, ask=name)
         if ask is None:
             self.errors.append('a call matched no declared ask: %r' % (doc.get('argv'),))
@@ -525,21 +664,16 @@ class Observer(threading.Thread):
     def gate_claims(self):
         roles = [self.initial(r) for r in self.scenario['claim_order']]
         if any(c is None for c in roles):
-            if self.first_start is not None and time.monotonic() - self.first_start > HOLD_SECONDS / 2:
-                self.errors.append('the claim order was not imposed: not every initial role started exactly once in time')
-                self.claims_done = True
-                for c in self.children.values():
-                    if not os.path.exists(os.path.join(self.obs, c['nonce'] + '.claim-go')):
-                        self.touch(c['nonce'], 'claim-go')
+            if self.remaining() <= 0:
+                self.give_up('not every initial role started exactly once within the observer budget')
             return
         self.claims_done = True
         for child in roles:
             self.touch(child['nonce'], 'claim-go')
-            until = time.monotonic() + HOLD_SECONDS / 2
             while not self.claimed(child['nonce']):
-                if time.monotonic() > until:
-                    self.errors.append('the child %s did not claim in time' % child['nonce'])
-                    break
+                if self.remaining() <= 0:
+                    self.give_up('the %s child did not claim within the observer budget' % child['ask']['role'])
+                    return
                 time.sleep(POLL)
             self.event('claimed', nonce=child['nonce'])
         for c in self.children.values():
@@ -558,13 +692,11 @@ class Observer(threading.Thread):
 
     def written(self, child):
         child['written'] = True
-        if self.first_written is None:
-            self.first_written = time.monotonic()
         self.event('written', nonce=child['nonce'])
         if child['slot_paths']:
             self.read_slots(child, 'written', child['nonce'])
         self.trees.append({'trigger': child['nonce'], 'ps': ps(['-A', '-ww', '-o', PS_FIELDS])})
-        held = self.scenario.get('barrier') and child['ask'] is not None and child['ask']['attempt'] == 'initial'
+        held = not self.barrier_done and child['ask'] is not None and child['ask']['attempt'] == 'initial'
         if not held:
             if child['slot_paths']:
                 self.read_slots(child, 'release', child['nonce'])
@@ -573,10 +705,8 @@ class Observer(threading.Thread):
     def barrier(self):
         held = [self.initial(r) for r in ROLES]
         if any(c is None or not c['written'] for c in held):
-            if self.first_written is not None and time.monotonic() - self.first_written > HOLD_SECONDS / 2:
-                self.errors.append('the barrier was not reached: not every initial role wrote in time')
-                self.barrier_done = True
-                self.release_all('the barrier was not reached')
+            if self.remaining() <= 0:
+                self.give_up('not every initial role wrote within the observer budget')
             return
         self.barrier_done = True
         swap = self.scenario.get('swap_slots')
@@ -597,14 +727,14 @@ class Observer(threading.Thread):
         for role in order:
             child = self.initial(role)
             self.release(child)
-            until = time.monotonic() + HOLD_SECONDS
             while not child['exited']:
-                self.poll_exits(only=[child])
+                self.poll_exits(only=[child], timeout=self.ps_timeout())
                 if child['exited']:
                     break
-                if time.monotonic() > until:
-                    self.errors.append('no exit seen for the released child %s in time' % child['nonce'])
-                    break
+                if self.remaining() <= 0:
+                    # The next child is not let go on the strength of an exit nobody saw.
+                    self.give_up('the exit of the %s child was not seen in a ps answer that counts within the observer budget' % role)
+                    return
                 time.sleep(POLL)
 
     def release(self, child):
@@ -619,39 +749,30 @@ class Observer(threading.Thread):
                 self.event('release-all', nonce=child['nonce'], why=why)
                 self.release(child)
 
-    def poll_exits(self, only=None, final=False):
+    def poll_exits(self, only=None, final=False, timeout=10.0):
         waiting = [c for c in (only or self.children.values()) if c['released'] and not c['exited']]
-        if not waiting:
-            return
         rounds = 50 if final else 1
         for _ in range(rounds):
-            out = ps(['-o', 'pid=,stat=,lstart=', '-p', ','.join(str(c['pid']) for c in waiting)])
-            rows = ps_rows(out.get('stdout', ''), ('pid', 'stat', 'lstart'))
+            if not waiting:
+                return
+            out = ps(['-o', 'pid=,stat=,lstart=', '-p', ','.join([str(self.sentinel)] + [str(c['pid']) for c in waiting])], timeout)
             for child in waiting:
-                started = ps_rows(child['ps_started'].get('stdout', ''), ('pid', 'ppid', 'pgid', 'stat', 'lstart', 'command')).get(child['pid'])
-                row = rows.get(child['pid'])
-                how = None
-                if out.get('error'):
-                    how = None
-                elif row is None:
-                    how = 'gone'
-                elif row['stat'] and row['stat'].startswith('Z'):
-                    how = 'zombie'
-                elif started is not None and row['lstart'] != started['lstart']:
-                    how = 'pid-reused'
-                if how:
+                how, why = exit_reading(out, child['pid'], child['started_lstart'], self.sentinel)
+                if how in EXITED:
                     child['exited'] = True
                     child['exit_seen'] = {'how': how, 'ps': out}
                     self.event('exited', nonce=child['nonce'], how=how)
+                elif how is None and len(child['exit_polls_uncounted']) < 20:
+                    child['exit_polls_uncounted'].append({'why': why, 'ps': out})
             waiting = [c for c in waiting if not c['exited']]
-            if not waiting:
-                return
-            if final:
+            if final and waiting:
                 time.sleep(0.05)
 
     def dump(self):
-        keep = ('nonce', 'pid', 'ask_name', 'scratch', 'slot_paths', 'released', 'exited', 'ps_started', 'exit_seen')
+        keep = ('nonce', 'pid', 'ask_name', 'scratch', 'slot_paths', 'released', 'exited', 'ps_started', 'started_lstart',
+                'exit_seen', 'exit_polls_uncounted')
         return {'format': OBSERVER, 'impl': self.impl, 'scenario': self.scenario['name'], 'order': self.order,
+                'sentinel': self.sentinel, 'order_budget_seconds': ORDER_BUDGET,
                 'children': {n: {k: c.get(k) for k in keep} for n, c in self.children.items()},
                 'reads': self.reads, 'events': self.events, 'trees': self.trees, 'swaps': self.swaps,
                 'errors': self.errors, 'finished': self.finished}
@@ -709,6 +830,7 @@ def launch(ctx, rec, impl, hook, scenario, base):
         else:
             r = observe.run_hook(hook['argv'], data, env, cwd, ctx.timeout)
     finally:
+        # The observer lets every held child go; nothing here signals a child.
         watcher.hook_done.set()
         watcher.join(timeout=90)
     after = evidence.after_launch(hook, env, cwd, before)
@@ -756,9 +878,16 @@ def tree_listing(root, skip=()):
 # each role's child was, which response file held which child's object and
 # bytes when it was let go, and what the hook left. It reads the stand-in's and
 # the observer's files; it does not take the observer's identification of a
-# child or its order of events as a fact about roles.
+# child, its reading of a ps answer, or its order of events as a fact about
+# roles. A value that was not read raises an unobserved-* code; only two values
+# that were both read and differ raise a defect code.
 
 DEFECT_FREE = ('shared-effect-declared',)
+
+
+def unseen(code):
+    base = code[len('follow-'):] if code.startswith('follow-') else code
+    return base.startswith('unobserved-') or base == 'no-observations'
 
 
 def load_view(d):
@@ -828,9 +957,9 @@ def judge_launch(rec, scenario, view, shared_effects=()):
         children[nonce] = {'nonce': nonce, 'ask_name': name, 'ask': ask, 'role': ask['role'], 'attempt': ask['attempt'],
                            'scratch': scratch, 'slot': {'out': slot, 'err': slot + slots['err']}, 'docs': docs}
     if not view['children']:
-        return {'codes': ['no-observations'], 'verdict': 'unresolved', 'others': [], 'roles': {}, 'notes': notes,
-                'claim_order': [], 'claim_nonces': [], 'completion': [], 'initial_scratch': None,
-                'hook': hook_facts(rec, view, where)}
+        return {'codes': sorted(set(codes + ['no-observations'])), 'verdict': verdict(codes + ['no-observations']),
+                'others': [], 'roles': {}, 'notes': notes, 'claim_order': [], 'claim_nonces': [], 'completion': [],
+                'initial_scratch': None, 'hook': hook_facts(rec, view, where)}
     groups = {}
     for c in children.values():
         groups.setdefault(c['scratch'], []).append(c)
@@ -874,7 +1003,7 @@ def judge_launch(rec, scenario, view, shared_effects=()):
         for c in members:
             if len(lone[(c['attempt'], c['role'])]) != 1:
                 continue  # A duplicate is already a code; which copy is which is not read.
-            facts, found = child_facts(rec, c, members, expected, reads, view, where)
+            facts, found = child_facts(c, members, expected, reads, view)
             for code in found:
                 codes.append(code if c['attempt'] == 'initial' or scratch == g1 else 'follow-' + code)
             key = c['role'] if c['attempt'] == 'initial' and scratch == g1 else '%s@%s' % (c['ask_name'], c['nonce'][:8])
@@ -882,18 +1011,16 @@ def judge_launch(rec, scenario, view, shared_effects=()):
     for o in others:
         o['codes'] = sorted({code for m in o['members'] for code in roles.get('%s@%s' % (children[m]['ask_name'], m[:8]), {}).get('codes', [])})
         if o['status'] == 'outside' and o['codes']:
-            o['status'] = 'rejected'
-            codes.append('follow-group-defect')
+            o['status'] = 'rejected' if any(not unseen(c) for c in o['codes']) else 'unresolved'
+            codes.append('follow-group-defect' if o['status'] == 'rejected' else 'follow-unobserved-group')
         del o['members']
-    request_codes, process = request_checks(rec, children, view, where), process_checks(children, view, g1)
-    codes += request_codes + process
+    codes += request_checks(rec, children, view, where) + process_checks(children, view, g1)
     codes = sorted(set(codes))
     claim = [c.get('nonce') for c in sorted(view['records'], key=lambda r: r['_claim'])]
     claim_roles = [children[n]['role'] if n in children else '?' for n in claim]
-    completion = exit_order(children, view, g1)
     return {'codes': codes, 'verdict': verdict(codes), 'others': others, 'roles': roles, 'notes': notes,
-            'claim_order': claim_roles, 'claim_nonces': claim, 'completion': completion, 'initial_scratch': g1,
-            'hook': hook_facts(rec, view, where)}
+            'claim_order': claim_roles, 'claim_nonces': claim, 'completion': exit_order(children, view, g1),
+            'initial_scratch': g1, 'hook': hook_facts(rec, view, where)}
 
 
 def verdict(codes):
@@ -902,11 +1029,11 @@ def verdict(codes):
     if not codes:
         return 'applicable'
     base = [c[len('follow-'):] if c.startswith('follow-') else c for c in codes]
-    unseen = [c for c in base if c.startswith('unobserved-') or c == 'no-observations']
-    defects = [c for c in base if c not in DEFECT_FREE and c not in unseen]
+    missing = [c for c in codes if unseen(c)]
+    defects = [c for c, b in zip(codes, base) if not unseen(c) and b not in DEFECT_FREE]
     if defects:
         return 'rejected'
-    if unseen:
+    if missing:
         return 'unresolved'
     return 'not-applicable'
 
@@ -919,23 +1046,46 @@ def reads_by_path(view):
     return out
 
 
-def object_of(fd):
-    if not isinstance(fd, dict) or 'ino' not in fd or 'dev' not in fd:
+def fd_object(fact):
+    """(dev, ino) of a descriptor fact the child read, or None if it read none."""
+    if not isinstance(fact, dict) or fact.get('error') is not None:
         return None
-    return (fd['dev'], fd['ino'])
+    if type(fact.get('dev')) is not int or type(fact.get('ino')) is not int:
+        return None
+    return (fact['dev'], fact['ino'])
 
 
-def read_object(fact):
+def slot_state(fact):
+    """('object', (dev, ino)), ('absent', None) for a path lstat said is not
+    there, or ('unread', why) for a lookup that did not answer."""
+    if not isinstance(fact, dict):
+        return 'unread', 'no read was kept'
+    lst = fact.get('lstat')
+    if not isinstance(lst, dict):
+        if fact.get('lstat_errno') == errno.ENOENT:
+            return 'absent', None
+        return 'unread', 'lstat: %s' % fact.get('lstat_error')
+    if type(lst.get('dev')) is not int or type(lst.get('ino')) is not int:
+        return 'unread', 'lstat kept no object'
+    return 'object', (lst['dev'], lst['ino'])
+
+
+def slot_bytes(fact, blobs):
+    """((dev, ino), bytes) the observer read through its own open of the
+    object lstat named, or None."""
     rd = fact.get('read') if isinstance(fact, dict) else None
     lst = fact.get('lstat') if isinstance(fact, dict) else None
     if not isinstance(rd, dict) or not isinstance(lst, dict):
         return None
     if (rd.get('dev'), rd.get('ino')) != (lst.get('dev'), lst.get('ino')):
         return None
-    return (rd['dev'], rd['ino'])
+    data = blobs.get(rd.get('blob'))
+    if data is None:
+        return None
+    return (rd['dev'], rd['ino']), data
 
 
-def child_facts(rec, c, members, expected, reads, view, where):
+def child_facts(c, members, expected, reads, view):
     """One child, by its own records and by what the observer read."""
     docs, role, nonce = c['docs'], c['role'], c['nonce']
     codes, facts = [], {'nonce': nonce, 'ask': c['ask_name'], 'scratch': c['scratch'], 'slot': c['slot']}
@@ -943,36 +1093,60 @@ def child_facts(rec, c, members, expected, reads, view, where):
     mine = expected[c['ask_name']]
     group_answers = {m['role']: expected[m['ask_name']] for m in members}
     for ch, fd in (('out', '1'), ('err', '2')):
-        own = object_of(started.get('fds', {}).get(fd))
+        own = fd_object(started.get('fds', {}).get(fd))
         facts[ch + '_object'] = own
+        if own is None:
+            codes.append('unobserved-desc-self:%s' % role)
+        if isinstance(written, dict):
+            later = fd_object(written.get('fds', {}).get(fd))
+            if later is None:
+                codes.append('unobserved-desc-self:%s' % role)
+            elif own is not None and later != own:
+                codes.append('desc-changed:%s' % role)
         at_written = [r for r in reads.get(c['slot'][ch], []) if r['when'] == 'written' and r['trigger'] == nonce]
         if not at_written:
             codes.append('unobserved-desc-object:%s' % role)
         else:
             fact = at_written[-1]['fact']
-            obj = (fact.get('lstat') or {}).get('dev'), (fact.get('lstat') or {}).get('ino')
-            facts[ch + '_slot_at_written'] = list(obj)
-            if own is None or obj != own:
+            state, value = slot_state(fact)
+            facts[ch + '_slot_at_written'] = [state, value]
+            if state == 'unread':
+                codes.append('unobserved-desc-object:%s' % role)
+            elif own is not None and (state == 'absent' or tuple(value) != own):
                 codes.append('desc-object:%s' % role)
-            name = (fact.get('read') or {}).get('getpath')
-            if name is None or started.get('fds', {}).get(fd, {}).get('path') != name:
+            self_path = (started.get('fds', {}).get(fd) or {}).get('path')
+            seen_path = (fact.get('read') or {}).get('getpath')
+            if not isinstance(self_path, str) or not isinstance(seen_path, str):
+                codes.append('unobserved-desc-path:%s' % role)
+            elif self_path != seen_path:
                 codes.append('desc-path:%s' % role)
-        if isinstance(written, dict) and object_of(written.get('fds', {}).get(fd)) != own:
-            codes.append('desc-changed:%s' % role)
         released = [r for r in reads.get(c['slot'][ch], []) if r['when'] == 'release']
         if not released:
             codes.append('unobserved-output:%s' % role)
             continue
         fact = released[-1]['fact']
-        obj = read_object(fact)
-        data = view['blobs'].get((fact.get('read') or {}).get('blob'))
-        if obj is None or data is None:
+        state, _ = slot_state(fact)
+        if state == 'absent':
+            codes.append('slot-absent:%s' % role)
+            continue
+        got = slot_bytes(fact, view['blobs'])
+        if state == 'unread' or got is None:
             codes.append('unobserved-output:%s' % role)
             continue
-        holder = [m['role'] for m in members if object_of(m['docs'].get('started', {}).get('fds', {}).get(fd)) == obj]
+        obj, data = got
+        known = [(m['role'], fd_object(m['docs'].get('started', {}).get('fds', {}).get(fd))) for m in members]
+        holder = [r for r, o in known if o is not None and o == obj]
         facts[ch + '_slot_holds'] = holder
-        if holder != [role]:
-            codes.append('slot-holds:%s:%s' % (role, holder[0]) if len(holder) == 1 else 'slot-unknown-object:%s' % role)
+        if holder == [role]:
+            pass
+        elif len(holder) == 1:
+            codes.append('slot-holds:%s:%s' % (role, holder[0]))
+        elif len(holder) > 1:
+            codes.append('slot-shared-object:%s' % role)
+        elif any(o is None for _, o in known):
+            codes.append('unobserved-slot-holder:%s' % role)
+        else:
+            codes.append('slot-unknown-object:%s' % role)
         key = 'stdout' if ch == 'out' else 'stderr'
         text = data.decode('utf-8', 'surrogateescape')
         facts[ch + '_content_sha256'] = sha(data)
@@ -981,7 +1155,8 @@ def child_facts(rec, c, members, expected, reads, view, where):
         prefix = 'content' if ch == 'out' else 'stderr-content'
         if match != [role]:
             codes.append('%s:%s:%s' % (prefix, role, match[0]) if len(match) == 1 else '%s-unexpected:%s' % (prefix, role))
-    # The child's own output object, wherever it ended up, against its record.
+    # The child's own output objects, wherever they ended up, against its record:
+    # each channel on its own, so one that was not read cannot hide the other.
     records = [r for r in view['records'] if r.get('nonce') == nonce]
     facts['claims'] = [r['_claim'] for r in records]
     if len(records) != 1:
@@ -996,29 +1171,35 @@ def child_facts(rec, c, members, expected, reads, view, where):
         if bad or index is None or conf[index]['stdout'] != mine['stdout'] or conf[index]['stderr'] != mine['stderr'] or conf[index]['exit'] != mine['exit']:
             codes.append('record:%s' % role)
             facts['record_fields_differ'] = bad
-        actual = {}
-        for ch, fd in (('out', '1'), ('err', '2')):
-            own = object_of(started.get('fds', {}).get(fd))
-            hits = [r['fact'] for path, rs in reads.items() for r in rs if r['when'] == 'release' and read_object(r['fact']) == own]
-            if own is None or not hits:
-                actual[ch] = None
+        differs = False
+        for ch, fd, key in (('out', '1', 'stdout'), ('err', '2', 'stderr')):
+            own = fd_object(started.get('fds', {}).get(fd))
+            if own is None:
+                continue  # unobserved-desc-self says so
+            hits = []
+            for rs in reads.values():
+                for r in rs:
+                    got = slot_bytes(r['fact'], view['blobs']) if r['when'] == 'release' else None
+                    if got is not None and got[0] == own:
+                        hits.append((r['fact'].get('t_ns', 0), got[1]))
+            if not hits:
+                codes.append('unobserved-output:%s' % role)
                 continue
-            last = max(hits, key=lambda f: f.get('t_ns', 0))
-            actual[ch] = view['blobs'].get(last['read']['blob'])
-        if actual['out'] is None or actual['err'] is None:
-            codes.append('unobserved-output:%s' % role)
-        elif actual['out'] != record.get('stdout', '').encode('utf-8', 'surrogateescape') or \
-                actual['err'] != record.get('stderr', '').encode('utf-8', 'surrogateescape'):
+            if max(hits)[1] != record.get(key, '').encode('utf-8', 'surrogateescape'):
+                differs = True
+        if differs:
             codes.append('record-not-actual:%s' % role)
-    # Its planned exit status, and the observer's sight of its exit.
-    seen = view['observer'].get('children', {}).get(nonce, {})
-    exit_seen = seen.get('exit_seen') if isinstance(seen, dict) else None
-    facts['exit_planned'] = written.get('exit') if isinstance(written, dict) else None
+    # Its planned exit status, and an exit seen in a ps answer that counts.
+    seen, why = exit_fact(view, c)
+    facts['exit_seen'] = seen if seen else {'unobserved': why}
     facts['exit_value_from_outside'] = 'not observed: only the parent receives an exit status'
-    if not exit_confirmed(exit_seen, c, view):
+    if seen is None:
         codes.append('unobserved-exit:%s' % role)
-    if facts['exit_planned'] != mine['exit']:
+    if not isinstance(written, dict):
+        codes.append('unobserved-exit-planned:%s' % role)
+    elif written.get('exit') != mine['exit']:
         codes.append('exit-planned:%s' % role)
+    facts['exit_planned'] = written.get('exit') if isinstance(written, dict) else None
     exiting = docs.get('exiting')
     facts['released_by_observer'] = bool(isinstance(exiting, dict) and exiting.get('released'))
     if not facts['released_by_observer']:
@@ -1027,32 +1208,33 @@ def child_facts(rec, c, members, expected, reads, view, where):
     return facts, codes
 
 
-def exit_confirmed(exit_seen, c, view):
-    """Re-read the ps output the observer kept: the pid gone, a zombie, or another process's start time."""
-    if not isinstance(exit_seen, dict) or not isinstance(exit_seen.get('ps'), dict):
-        return False
-    out = exit_seen['ps']
-    if out.get('error'):
-        return False
+def exit_fact(view, c):
+    """({'how', 't_ns'}, None) for an exit the kept ps output shows, read
+    again here; otherwise (None, why)."""
+    sentinel = view['launch'].get('collector_pid')
     pid = c['docs'].get('started', {}).get('pid')
-    row = ps_rows(out.get('stdout', ''), ('pid', 'stat', 'lstart')).get(pid)
-    if row is None:
-        return True
-    if row['stat'] and row['stat'].startswith('Z'):
-        return True
-    first = view['observer'].get('children', {}).get(c['nonce'], {}).get('ps_started', {})
-    then = ps_rows(first.get('stdout', ''), ('pid', 'ppid', 'pgid', 'stat', 'lstart', 'command')).get(pid)
-    return then is not None and then['lstart'] != row['lstart']
+    seen = view['observer'].get('children', {}).get(c['nonce'])
+    if not isinstance(seen, dict):
+        return None, 'the observer kept nothing for this child'
+    first, _ = ps_answer(seen.get('ps_started'), TREE, sentinel)
+    lstart = first[pid]['lstart'] if first and pid in first else None
+    e = seen.get('exit_seen')
+    if not isinstance(e, dict):
+        return None, 'no exit was seen in a ps answer that counts'
+    how, why = exit_reading(e.get('ps'), pid, lstart, sentinel)
+    if how in EXITED:
+        return {'how': how, 't_ns': e['ps'].get('t_ns')}, None
+    return None, why or 'the kept ps answer shows the process still there'
 
 
 def exit_order(children, view, g1):
     seen = []
-    for nonce, c in children.items():
+    for c in children.values():
         if c['scratch'] != g1 or c['attempt'] != 'initial':
             continue
-        e = view['observer'].get('children', {}).get(nonce, {}).get('exit_seen')
-        if isinstance(e, dict) and isinstance(e.get('ps'), dict) and exit_confirmed(e, c, view):
-            seen.append((e['ps'].get('t_ns', 0), c['role']))
+        e, _ = exit_fact(view, c)
+        if e is not None:
+            seen.append((e['t_ns'] or 0, c['role']))
     seen.sort()
     out, last = [], None
     for t, role in seen:
@@ -1062,6 +1244,41 @@ def exit_order(children, view, g1):
             out.append([role])
         last = t
     return out
+
+
+def order_status(scenario, view, facts):
+    """A forced scenario's orders: ('pass' | 'fail' | 'unobserved', detail).
+    The claim order is the records' numbers. The completion order is the exits
+    seen in ps answers that count, and it is the planned one only if each
+    child after the first was let go after the exit before it was seen."""
+    plan_claim, plan_end = scenario['claim_order'], scenario['release_order']
+    detail = {'claim_order': facts['claim_order'], 'completion': facts['completion'],
+              'observer_errors': [e for e in view['observer'].get('errors', []) if e.startswith('order not imposed')]}
+    roles = facts['roles']
+    if any(r not in roles for r in ROLES):
+        return 'unobserved', dict(detail, why='not every role has exactly one identified child')
+    claimed = [r for r in facts['claim_order'] if r in ROLES]
+    exits, released = {}, {}
+    for r in ROLES:
+        nonce = roles[r]['nonce']
+        e = roles[r].get('exit_seen') or {}
+        exits[r] = e.get('t_ns') if 'how' in e else None
+        times = [ev['t_ns'] for ev in view['observer'].get('events', []) if ev.get('what') == 'release' and ev.get('nonce') == nonce]
+        released[r] = min(times) if times else None
+    detail.update(exits=exits, released=released)
+    if claimed != plan_claim:
+        if detail['observer_errors']:
+            return 'unobserved', dict(detail, why='the claim order was not imposed')
+        return 'fail', dict(detail, why='the claims came in another order than the one imposed')
+    missing = [r for r in plan_end if exits[r] is None or released[r] is None]
+    if missing:
+        return 'unobserved', dict(detail, why='no exit or release seen for %s' % ', '.join(missing))
+    for before, after in zip(plan_end, plan_end[1:]):
+        if released[after] < exits[before]:
+            return 'unobserved', dict(detail, why='%s was let go before the exit of %s was seen' % (after, before))
+    if sorted(plan_end, key=lambda r: exits[r]) != list(plan_end) or len(set(exits.values())) != len(ROLES):
+        return 'fail', dict(detail, why='the exits were seen in another order than the releases')
+    return 'pass', detail
 
 
 def request_checks(rec, children, view, where):
@@ -1084,28 +1301,35 @@ def request_checks(rec, children, view, where):
         leaf = os.path.basename(scratch)
         if os.path.dirname(scratch) != rule['parent'] or not leaf.startswith(rule['leaf_prefix']) or len(leaf) <= len(rule['leaf_prefix']):
             codes.append('request-scratch:%s' % role)
-        if (started.get('paths', {}).get(scratch) or {}).get('kind') != 'dir':
+        fact = started.get('paths', {}).get(scratch)
+        if not isinstance(fact, dict) or fact.get('error') is not None:
+            codes.append('unobserved-request-scratch-object:%s' % role)
+        elif fact.get('kind') != 'dir':
             codes.append('request-scratch-object:%s' % role)
     return codes
 
 
 def process_checks(children, view, g1):
     """Each child's process in the ps tree the observer kept when it wrote: its
-    parent is the one it reported, and the hook's process is above it."""
+    parent is the one it reported, and the hook's process is above it. A tree
+    answer that does not count says nothing."""
     codes = []
     hook_pid = view['hook'].get('pid')
+    sentinel = view['launch'].get('collector_pid')
     parents = {}
     trees = {t['trigger']: t['ps'] for t in view['observer'].get('trees', [])}
     for nonce, c in children.items():
         started, role = c['docs'].get('started', {}), c['role']
-        tree = trees.get(nonce)
-        if not isinstance(tree, dict) or tree.get('error'):
+        rows, _ = ps_answer(trees.get(nonce), TREE, sentinel)
+        if rows is None:
             codes.append('unobserved-process:%s' % role)
             continue
-        rows = ps_rows(tree.get('stdout', ''), ('pid', 'ppid', 'pgid', 'stat', 'lstart', 'command'))
         row = rows.get(started.get('pid'))
         if row is None:
-            codes.append('process-unseen:%s' % role)
+            exiting = c['docs'].get('exiting')
+            held = isinstance(exiting, dict) and exiting.get('released')
+            # A child whose own hold ran out may be gone already; then its absence is not a finding.
+            codes.append('process-unseen:%s' % role if held else 'unobserved-process:%s' % role)
             continue
         if row['ppid'] != str(started.get('ppid')):
             codes.append('process-parent:%s' % role)
@@ -1127,13 +1351,16 @@ def process_checks(children, view, g1):
     return codes
 
 
+def pending_key(rec, view, where):
+    return os.path.relpath(fill(rec['results']['positive']['pending']['path'], where), view['launch']['box'] + '/state')
+
+
 def hook_facts(rec, view, where):
     state = view['state']
-    pending_rel = os.path.relpath(fill(rec['results']['positive']['pending']['path'], where), view['launch']['box'] + '/state')
     out = {'status': view['hook'].get('status'), 'stdout': view['stdout'].decode('utf-8', 'surrogateescape'),
            'stderr': view['stderr'].decode('utf-8', 'surrogateescape'), 'pending': None, 'snapshot_meta': None,
            'snapshot_package_json_sha256': None, 'advisory': None}
-    raw = state.get(pending_rel)
+    raw = state.get(pending_key(rec, view, where))
     if raw is not None:
         try:
             out['pending'] = json.loads(raw.decode('utf-8'))
@@ -1185,11 +1412,14 @@ def result_errors(rec, name, view, facts):
 
 
 def differs_errors(rec, scenario, view, facts):
-    """A negative's result: the positive's role-linked fields must differ, from
-    a hook that still answered and wrote its record."""
+    """A negative's result. First the pending record and each field it is
+    judged by must be there with the shape the contract names; a missing,
+    null, empty or unreadable record is no functional difference. Then the
+    positive's role-linked fields must differ, from a hook that still answered."""
     where = places(view['launch']['box'], view['launch']['system_dirs'])
     positive = fill(rec['results']['positive'], where)['pending']['fields']
     spec = fill(scenario['expect']['result'], where)
+    shape = rec['pending_shape']
     got = facts['hook']
     errors = []
     if got['status'] != rec['hook']['status'] or got['stdout'] != rec['hook']['stdout']:
@@ -1197,15 +1427,34 @@ def differs_errors(rec, scenario, view, facts):
                        'expected': [rec['hook']['status'], rec['hook']['stdout']]})
     pending = got['pending']
     if not isinstance(pending, dict) or pending.get('unreadable'):
-        errors.append({'field': 'pending record present', 'actual': pending, 'expected': 'a record'})
-        return errors, {}
+        return errors + [{'field': 'valid pending record', 'actual': pending, 'expected': 'a readable JSON object'}], {}
+    valid = []
+    for key, rule in shape['identity'].items():
+        if not shape_ok(rule, pending.get(key)):
+            valid.append({'field': 'valid pending identity ' + key, 'actual': pending.get(key), 'expected': rule})
     for key in spec['differs']:
-        if pending.get(key) == positive.get(key):
-            errors.append({'field': 'pending %s differs from the positive' % key, 'actual': pending.get(key),
+        if key not in pending or not shape_ok(shape['fields'][key], pending[key]):
+            valid.append({'field': 'valid pending ' + key, 'actual': pending.get(key), 'expected': shape['fields'][key]})
+    if valid:
+        return errors + valid, {}
+    for key in spec['differs']:
+        if pending[key] == positive.get(key):
+            errors.append({'field': 'pending %s differs from the positive' % key, 'actual': pending[key],
                            'expected': 'not %r' % (positive.get(key),)})
     predicted = {key: {'predicted': value, 'actual': pending.get(key), 'held': pending.get(key) == value}
                  for key, value in spec.get('predicted', {}).items()}
     return errors, predicted
+
+
+def result_kind(rec, scenario, view, facts):
+    """How a launch's hook result reads against its scenario's expected result."""
+    result = scenario['expect']['result']
+    if isinstance(result, str):
+        return 'expected' if not result_errors(rec, result, view, facts) else 'unexpected'
+    errors, _ = differs_errors(rec, scenario, view, facts)
+    if any(e['field'].startswith('valid ') for e in errors):
+        return 'invalid'
+    return 'valid-differs' if not errors else 'not-different'
 
 
 # --- declared controls ------------------------------------------------------------------------------
@@ -1238,57 +1487,101 @@ def drop_child(view, nonce):
     view['observer']['children'].pop(nonce, None)
 
 
-def mutate(rec, scenario, view, control):
-    """A copy of <view> with the control's edit. Returns (view, shared effects)."""
-    v = copy.deepcopy(view)
-    edit = control['edit']
+def slot_of(rec, view, role, scratch):
+    return scratch + '/' + rec['slots'][view['launch']['impl']]['initial'][role]
+
+
+def apply_edit(rec, scenario, v, e):
+    """One named edit of a launch's records, in place. Returns declared shared effects."""
+    edit = e['edit']
     if edit == 'none':
-        return v, ()
+        return []
     if edit == 'declare-shared-effect':
-        return v, (control['effect'],)
+        return [e['effect']]
     if edit == 'empty':
         v['children'], v['records'] = {}, []
         v['observer']['children'], v['observer']['reads'] = {}, []
-        return v, ()
-    if edit in ('drop', 'duplicate', 'duplicate-and-drop', 'unobserve-output', 'move-to-other-group'):
-        nonce, scratch = role_nonce(rec, scenario, v, control['role'])
+        return []
+    where = places(v['launch']['box'], v['launch']['system_dirs'])
+    if edit in ('pending-bytes', 'pending-null', 'pending-remove'):
+        key = pending_key(rec, v, where)
+        if edit == 'pending-remove':
+            v['state'].pop(key, None)
+        elif edit == 'pending-bytes':
+            v['state'][key] = e['bytes'].encode('utf-8')
+        else:
+            doc = json.loads(v['state'][key].decode('utf-8'))
+            for name in e['fields']:
+                doc[name] = None
+            v['state'][key] = json.dumps(doc).encode('utf-8')
+        return []
+    if edit == 'follow-into-initial-scratch':
+        nonce, follow = role_nonce(rec, scenario, v, 'config', attempt='follow')
+        _, initial = role_nonce(rec, scenario, v, 'prefix')
+        v['children'][nonce] = replace_text(v['children'][nonce], follow, initial)
+        v['records'] = [replace_text(r, follow, initial) if r.get('nonce') == nonce else r for r in v['records']]
+        v['observer']['reads'] = [replace_text(r, follow, initial) if r['trigger'] == nonce else r for r in v['observer']['reads']]
+        return []
+    nonce, scratch = role_nonce(rec, scenario, v, e['role'])
+    slot = slot_of(rec, v, e['role'], scratch)
     if edit == 'drop':
         drop_child(v, nonce)
-    elif edit in ('duplicate', 'duplicate-and-drop'):
+    elif edit == 'duplicate':
         twin = nonce + '-twin'
-        docs = replace_text(v['children'][nonce], nonce, twin)
-        v['children'][twin] = docs
+        v['children'][twin] = replace_text(v['children'][nonce], nonce, twin)
         record = [r for r in v['records'] if r.get('nonce') == nonce][0]
         v['records'].append(dict(replace_text(record, nonce, twin), _claim=max(r['_claim'] for r in v['records']) + 1))
         v['observer']['children'][twin] = replace_text(v['observer']['children'][nonce], nonce, twin)
         v['observer']['reads'] += [replace_text(r, nonce, twin) for r in v['observer']['reads'] if r['trigger'] == nonce]
         v['observer']['trees'] += [dict(t, trigger=twin) for t in v['observer']['trees'] if t['trigger'] == nonce]
-        if edit == 'duplicate-and-drop':
-            other, _ = role_nonce(rec, scenario, view, control['other'])
-            drop_child(v, other)
     elif edit == 'exchange-descriptors':
-        a, _ = role_nonce(rec, scenario, v, control['role'])
-        b, _ = role_nonce(rec, scenario, v, control['other'])
+        other, _ = role_nonce(rec, scenario, v, e['other'])
         for key in ('started', 'written'):
-            da, db = v['children'][a][key], v['children'][b][key]
+            da, db = v['children'][nonce][key], v['children'][other][key]
             for fd in ('1', '2'):
                 da['fds'][fd], db['fds'][fd] = db['fds'][fd], da['fds'][fd]
     elif edit == 'move-to-other-group':
         moved = scratch + '-other'
         v['children'][nonce] = replace_text(v['children'][nonce], scratch, moved)
         v['records'] = [replace_text(r, scratch, moved) if r.get('nonce') == nonce else r for r in v['records']]
-        slot = rec['slots'][v['launch']['impl']]['initial'][control['role']]
-        v['observer']['reads'] = [replace_text(r, scratch, moved) if r['fact'].get('path', '').startswith(scratch + '/' + slot) else r
+        v['observer']['reads'] = [replace_text(r, scratch, moved) if r['fact'].get('path', '').startswith(slot) else r
                                   for r in v['observer']['reads']]
     elif edit == 'unobserve-output':
-        slot = rec['slots'][v['launch']['impl']]['initial'][control['role']]
-        v['observer']['reads'] = [r for r in v['observer']['reads'] if not r['fact'].get('path', '').startswith(scratch + '/' + slot)]
-    elif edit == 'follow-into-initial-scratch':
-        nonce, follow = role_nonce(rec, scenario, v, 'config', attempt='follow')
-        _, initial = role_nonce(rec, scenario, v, 'prefix')
-        v['children'][nonce] = replace_text(v['children'][nonce], follow, initial)
-        v['records'] = [replace_text(r, follow, initial) if r.get('nonce') == nonce else r for r in v['records']]
-        v['observer']['reads'] = [replace_text(r, follow, initial) if r['trigger'] == nonce else r for r in v['observer']['reads']]
+        v['observer']['reads'] = [r for r in v['observer']['reads'] if not r['fact'].get('path', '').startswith(slot)]
+    elif edit == 'exit-ps':
+        kept = v['observer']['children'][nonce]
+        old = kept.get('exit_seen') or {}
+        fill_ps = [('@COLLECTOR@', str(v['launch']['collector_pid'])), ('@CHILD@', str(kept.get('pid')))]
+        ps_out = dict(fill(e['ps'], fill_ps), argv=(old.get('ps') or {}).get('argv'), t_ns=(old.get('ps') or {}).get('t_ns'))
+        kept['exit_seen'] = {'how': old.get('how'), 'ps': ps_out}
+    elif edit == 'fd-self-missing':
+        for key in ('started', 'written'):
+            v['children'][nonce][key]['fds']['1'] = {'error': 'control: fstat did not answer'}
+    elif edit == 'fd-path-unavailable':
+        fd = v['children'][nonce]['started']['fds']['1']
+        fd.pop('path', None)
+        fd['path_error'] = 'control: F_GETPATH did not answer'
+        for r in v['observer']['reads']:
+            if r['when'] == 'written' and r['trigger'] == nonce and r['fact'].get('path') == slot and isinstance(r['fact'].get('read'), dict):
+                r['fact']['read']['getpath'] = None
+                r['fact']['getpath_error'] = 'control: F_GETPATH did not answer'
+    elif edit == 'release-content-of':
+        _, other_scratch = role_nonce(rec, scenario, v, e['other'])
+        source = slot_of(rec, v, e['other'], other_scratch)
+        donors = [r for r in v['observer']['reads'] if r['when'] == 'release' and r['fact'].get('path') == source]
+        blob = donors[-1]['fact']['read']['blob']
+        for r in v['observer']['reads']:
+            if r['when'] == 'release' and r['fact'].get('path') == slot:
+                r['fact']['read']['blob'] = blob
     else:
         raise HarnessError('unknown control edit %r' % edit)
-    return v, ()
+    return []
+
+
+def mutate(rec, scenario, view, control):
+    """A copy of <view> with the control's edits, in order. Returns (view, shared effects)."""
+    v = copy.deepcopy(view)
+    effects = []
+    for e in control['edits']:
+        effects += apply_edit(rec, scenario, v, e)
+    return v, tuple(effects)

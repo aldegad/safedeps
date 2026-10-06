@@ -1,6 +1,6 @@
 {
- "format": "core-hook-npm-response-contract/1",
- "about": "What core-hook-npm-response.py expects of the pre hook's first three npm asks (prefix, root, config), written before any run and from no run's output, product ask function or candidate record. Sources: the product files named under sources, read at the line ranges in each cite, and the ask contract in AGENTS.md. A role is named by the request the expectation declares (argv template and working directory) and by the source's call slot (the file the source names for that role's stdout and stderr). It is never named from a claim number, a completion order or a value the hook produced. The answers are synthetic: each role's stdout and stderr differ from every other role's, and the hook's pending record, snapshot and advisory log each depend on a named role's answer. Placeholders: @W@ the statement's words, @Q@ the quiet flags, @S@ one ask group's scratch directory (bound from the call and then checked), @BOX@ @PROJECT@ @HOME@ @STATE@ @TMP@ the sandbox, @SYSTEM@ the system directories on the hook's PATH. A relation candidate here covers one group, the initial attempt and its three roles; another group, a follow-up attempt and a declared shared effect are outside it and are reported apart.",
+ "format": "core-hook-npm-response-contract/2",
+ "about": "What core-hook-npm-response.py expects of the pre hook's first three npm asks (prefix, root, config). It was written by reading the product source statically at the line ranges each cite names, and the ask contract in AGENTS.md, and declaring a synthetic fixture's expected results from that reading. No product ask was run to produce it, and no run's output or candidate record was read to produce it. A role is named by the request the expectation declares (argv template and working directory) and by the source's call slot (the file the source names for that role's stdout and stderr). It is never named from a claim number, a completion order or a value the hook produced. The answers are synthetic: each role's stdout and stderr differ from every other role's, and the hook's pending record, snapshot and advisory log each depend on a named role's answer. Placeholders: @W@ the statement's words, @Q@ the quiet flags, @S@ one ask group's scratch directory (bound from the call and then checked), @BOX@ @PROJECT@ @HOME@ @STATE@ @TMP@ the sandbox, @SYSTEM@ the system directories on the hook's PATH. A relation candidate here covers one group, the initial attempt and its three roles; another group, a follow-up attempt and a declared shared effect are outside it and are reported apart.",
  "sources": {
   "native": {
    "commit": "baf2ad30244d06f028600914b2669433a87d9712",
@@ -24,14 +24,26 @@
  "slots": {
   "native": {
    "cite": "rust/src/ask.rs 40-48 (Group::start: stdout to <tmp>/ask-<number of jobs started before it>, stderr beside it with the extension err), 124-134 (fetch_facts starts a new Group with one config ask), 200-204 (install_target starts prefix, root, config in that order), 205-221 (joins all three, then reads them by start index)",
-   "initial": {"prefix": "ask-0", "root": "ask-1", "config": "ask-2"},
-   "follow": {"config": "ask-0"},
+   "initial": {
+    "prefix": "ask-0",
+    "root": "ask-1",
+    "config": "ask-2"
+   },
+   "follow": {
+    "config": "ask-0"
+   },
    "err": ".err"
   },
   "bash": {
    "cite": "lib/npm/ask.sh 303-326 (safedeps_npm_ask_start: stdout to <out>, stderr to <out>.err), 223-243 (safedeps_npm_fetch_facts: a new scratch with one config ask), 534-544 (install_target: <tmp>/prefix, <tmp>/root, <tmp>/config), 545-563 (waits for all, then reads them by name and RCS index)",
-   "initial": {"prefix": "prefix", "root": "root", "config": "config"},
-   "follow": {"config": "config"},
+   "initial": {
+    "prefix": "prefix",
+    "root": "root",
+    "config": "config"
+   },
+   "follow": {
+    "config": "config"
+   },
    "err": ".err"
   }
  },
@@ -39,7 +51,11 @@
   "files": {
    "project/package.json": "{\n  \"name\": \"npmresp-root\",\n  \"version\": \"1.0.0\",\n  \"dependencies\": {}\n}\n"
   },
-  "dirs": ["home", "tmp", "project/member"]
+  "dirs": [
+   "home",
+   "tmp",
+   "project/member"
+  ]
  },
  "hook": {
   "cwd": "@PROJECT@/member",
@@ -47,7 +63,9 @@
    "session_id": "core-hook-npm-response",
    "hook_event_name": "PreToolUse",
    "tool_name": "Bash",
-   "tool_input": {"command": "npm install"},
+   "tool_input": {
+    "command": "npm install"
+   },
    "cwd": "@PROJECT@/member",
    "tool_use_id": "toolu_npmresp",
    "turn_id": "turn-1",
@@ -72,33 +90,138 @@
   "stdout": "",
   "stderr": ""
  },
- "statement": {"words": ["install"]},
- "quiet": ["--logs-max=0", "--update-notifier=false"],
+ "statement": {
+  "words": [
+   "install"
+  ]
+ },
+ "quiet": [
+  "--logs-max=0",
+  "--update-notifier=false"
+ ],
  "asks": {
-  "prefix": {"attempt": "initial", "role": "prefix", "cwd": "@PROJECT@/member", "head": ["prefix"],
-             "argv": ["prefix", "@W@", "--global=false", "--location=project", "@Q@", "--cache", "@S@/cache"]},
-  "root": {"attempt": "initial", "role": "root", "cwd": "@PROJECT@/member", "head": ["root"],
-           "argv": ["root", "@W@", "@Q@", "--cache", "@S@/cache"]},
-  "config": {"attempt": "initial", "role": "config", "cwd": "@PROJECT@/member", "head": ["config", "ls"],
-             "argv": ["config", "ls", "@W@", "--json", "@Q@", "--cache", "@S@/cache"]},
-  "follow-config": {"attempt": "follow", "role": "config", "cwd": "@PROJECT@", "head": ["config", "ls"],
-                    "argv": ["config", "ls", "@W@", "--json", "@Q@", "--cache", "@S@/cache"]}
+  "prefix": {
+   "attempt": "initial",
+   "role": "prefix",
+   "cwd": "@PROJECT@/member",
+   "head": [
+    "prefix"
+   ],
+   "argv": [
+    "prefix",
+    "@W@",
+    "--global=false",
+    "--location=project",
+    "@Q@",
+    "--cache",
+    "@S@/cache"
+   ]
+  },
+  "root": {
+   "attempt": "initial",
+   "role": "root",
+   "cwd": "@PROJECT@/member",
+   "head": [
+    "root"
+   ],
+   "argv": [
+    "root",
+    "@W@",
+    "@Q@",
+    "--cache",
+    "@S@/cache"
+   ]
+  },
+  "config": {
+   "attempt": "initial",
+   "role": "config",
+   "cwd": "@PROJECT@/member",
+   "head": [
+    "config",
+    "ls"
+   ],
+   "argv": [
+    "config",
+    "ls",
+    "@W@",
+    "--json",
+    "@Q@",
+    "--cache",
+    "@S@/cache"
+   ]
+  },
+  "follow-config": {
+   "attempt": "follow",
+   "role": "config",
+   "cwd": "@PROJECT@",
+   "head": [
+    "config",
+    "ls"
+   ],
+   "argv": [
+    "config",
+    "ls",
+    "@W@",
+    "--json",
+    "@Q@",
+    "--cache",
+    "@S@/cache"
+   ]
+  }
  },
  "ask_env": {
   "cite": "rust/src/ask.rs 47-69 (the hook's environment, PWD the ask's directory, the hook's PATH, the quiet flags and the scratch cache last); lib/npm/ask.sh 315-323",
-  "inherited": ["PATH", "HOME", "SAFEDEPS_HOME", "TMPDIR", "LANG"],
+  "inherited": [
+   "PATH",
+   "HOME",
+   "SAFEDEPS_HOME",
+   "TMPDIR",
+   "LANG"
+  ],
   "pwd": "the ask's cwd as the expectation writes it",
-  "absent": ["NODE_OPTIONS", "NODE_PATH", "BASH_ENV"]
+  "absent": [
+   "NODE_OPTIONS",
+   "NODE_PATH",
+   "BASH_ENV"
+  ]
  },
- "scratch": {"parent": "@TMP@", "leaf_prefix": "safedeps-npm-ask."},
+ "scratch": {
+  "parent": "@TMP@",
+  "leaf_prefix": "safedeps-npm-ask."
+ },
+ "ps": {
+  "cite": "macOS ps(1): '-p Display information about processes which match the specified process IDs.' The manual documents no exit status.",
+  "mode": "ps -o <fields> -p <collector pid>,<target pids>, and ps -A -ww -o <fields> for a tree, with LC_ALL=C so lstart reads as five words",
+  "counts": "an answer counts only when ps ran, wrote nothing to stderr, every line reads as the asked fields, and the collector's own row is there; its exit status is kept and not read",
+  "absent": "in an answer that counts, a target pid with no row has no process; a Z state is a zombie; a row whose start time differs from the one read when the child started is another process",
+  "otherwise": "a lookup that did not answer: the exit stays unobserved, it is no completion and it lets no next child go"
+ },
  "answers": {
-  "prefix": {"stdout": "@PROJECT@\n", "stderr": "npmresp prefix diagnostic\n", "exit": 0},
-  "root": {"stdout": "@PROJECT@/node_modules\n", "stderr": "npmresp root diagnostic\n", "exit": 0},
-  "config": {"stdout": "{\"registry\": \"https://registry.npmjs.org/\", \"replace-registry-host\": \"npmjs\", \"@npmresp-config:registry\": \"https://registry.npmjs.org/\", \"global\": false, \"location\": \"user\"}\n",
-             "stderr": "npmresp config diagnostic\n", "exit": 0},
-  "config-workspace-refusal": {"stdout": "", "stderr": "npm error code ENOWORKSPACES\nnpm error This command does not support workspaces.\n", "exit": 1},
-  "follow-config": {"stdout": "{\"registry\": \"https://registry.npmjs.org/\", \"replace-registry-host\": \"npmjs\", \"@npmresp-follow:registry\": \"https://registry.npmjs.org/\", \"global\": false, \"location\": \"project\"}\n",
-                    "stderr": "npmresp follow diagnostic\n", "exit": 0}
+  "prefix": {
+   "stdout": "@PROJECT@\n",
+   "stderr": "npmresp prefix diagnostic\n",
+   "exit": 0
+  },
+  "root": {
+   "stdout": "@PROJECT@/node_modules\n",
+   "stderr": "npmresp root diagnostic\n",
+   "exit": 0
+  },
+  "config": {
+   "stdout": "{\"registry\": \"https://registry.npmjs.org/\", \"replace-registry-host\": \"npmjs\", \"@npmresp-config:registry\": \"https://registry.npmjs.org/\", \"global\": false, \"location\": \"user\"}\n",
+   "stderr": "npmresp config diagnostic\n",
+   "exit": 0
+  },
+  "config-workspace-refusal": {
+   "stdout": "",
+   "stderr": "npm error code ENOWORKSPACES\nnpm error This command does not support workspaces.\n",
+   "exit": 1
+  },
+  "follow-config": {
+   "stdout": "{\"registry\": \"https://registry.npmjs.org/\", \"replace-registry-host\": \"npmjs\", \"@npmresp-follow:registry\": \"https://registry.npmjs.org/\", \"global\": false, \"location\": \"project\"}\n",
+   "stderr": "npmresp follow diagnostic\n",
+   "exit": 0
+  }
  },
  "results": {
   "positive": {
@@ -108,13 +231,26 @@
     "fields": {
      "project_dir": "@PROJECT@",
      "project_dir_from": "target",
-     "npm_fetch": {"registry": "https://registry.npmjs.org/", "replace": "npmjs", "scopes": {"@npmresp-config": "https://registry.npmjs.org/"}, "test_registry": null},
+     "npm_fetch": {
+      "registry": "https://registry.npmjs.org/",
+      "replace": "npmjs",
+      "scopes": {
+       "@npmresp-config": "https://registry.npmjs.org/"
+      },
+      "test_registry": null
+     },
      "tool_use_id": "toolu_npmresp"
     },
     "dir_hash_md5_of": "@PROJECT@"
    },
-   "snapshot": {"project_dir": "@PROJECT@", "command": "npm install", "package_json_copy_of": "project/package.json"},
-   "advisory": ["pre-guard: the install lands outside cwd — snapshotting/verifying @PROJECT@ instead of cwd (@PROJECT@/member)."]
+   "snapshot": {
+    "project_dir": "@PROJECT@",
+    "command": "npm install",
+    "package_json_copy_of": "project/package.json"
+   },
+   "advisory": [
+    "pre-guard: the install lands outside cwd — snapshotting/verifying @PROJECT@ instead of cwd (@PROJECT@/member)."
+   ]
   },
   "follow": {
    "cite": "rust/src/ask.rs 221 and lib/npm/ask.sh 552-555, 620-623: a config ask refused with ENOWORKSPACES is asked again, in a new group, in the prefix answer's directory, and that answer replaces the fetch facts",
@@ -123,78 +259,637 @@
     "fields": {
      "project_dir": "@PROJECT@",
      "project_dir_from": "target",
-     "npm_fetch": {"registry": "https://registry.npmjs.org/", "replace": "npmjs", "scopes": {"@npmresp-follow": "https://registry.npmjs.org/"}, "test_registry": null},
+     "npm_fetch": {
+      "registry": "https://registry.npmjs.org/",
+      "replace": "npmjs",
+      "scopes": {
+       "@npmresp-follow": "https://registry.npmjs.org/"
+      },
+      "test_registry": null
+     },
      "tool_use_id": "toolu_npmresp"
     },
     "dir_hash_md5_of": "@PROJECT@"
    },
-   "snapshot": {"project_dir": "@PROJECT@", "command": "npm install", "package_json_copy_of": "project/package.json"},
-   "advisory": ["pre-guard: the install lands outside cwd — snapshotting/verifying @PROJECT@ instead of cwd (@PROJECT@/member)."]
+   "snapshot": {
+    "project_dir": "@PROJECT@",
+    "command": "npm install",
+    "package_json_copy_of": "project/package.json"
+   },
+   "advisory": [
+    "pre-guard: the install lands outside cwd — snapshotting/verifying @PROJECT@ instead of cwd (@PROJECT@/member)."
+   ]
+  }
+ },
+ "pending_shape": {
+  "cite": "rust/src/pre/pending.rs 36-47 and scripts/safedeps-pre-guard.sh 7684-7699 write the record; project_dir_from is target or cwd (scripts/safedeps-pre-guard.sh 7043-7061, rust/src/pre/readings.rs project()); npm_fetch is the fetch facts or an object with unknown (lib/npm/ask.sh 81-90, rust/src/ask.rs 103-122, rust/src/pre/pending.rs 39-41); dir_hash is an md5 (scripts/safedeps-pre-guard.sh 243-253)",
+  "identity": {
+   "tool_use_id": [
+    "toolu_npmresp"
+   ],
+   "snapshot_id": "nonempty-string"
+  },
+  "fields": {
+   "project_dir": "absolute-path",
+   "project_dir_from": [
+    "target",
+    "cwd"
+   ],
+   "npm_fetch": "fetch-facts",
+   "dir_hash": "md5-hex"
   }
  },
  "scenarios": [
-  {"name": "P0-natural", "kind": "positive",
+  {
+   "name": "P0-natural",
+   "kind": "positive",
    "about": "Every child answers and is let go as soon as its output was read; the claim and completion orders are whatever happened, and are recorded.",
-   "answers": {"prefix": "prefix", "root": "root", "config": "config"},
-   "claim_order": null, "barrier": false, "release_order": null, "swap_slots": null, "emit": {},
-   "expect": {"verdict": "applicable", "codes": [], "others": [], "result": "positive"}},
-  {"name": "P1-permuted", "kind": "positive",
+   "answers": {
+    "prefix": "prefix",
+    "root": "root",
+    "config": "config"
+   },
+   "claim_order": null,
+   "barrier": false,
+   "release_order": null,
+   "swap_slots": null,
+   "emit": {},
+   "expect": {
+    "verdict": "applicable",
+    "codes": [],
+    "others": [],
+    "result": "positive"
+   }
+  },
+  {
+   "name": "P1-permuted",
+   "kind": "positive",
    "about": "The observer lets the children claim their record numbers in one order and exit in another, each different from the source's start order.",
-   "answers": {"prefix": "prefix", "root": "root", "config": "config"},
-   "claim_order": ["config", "root", "prefix"], "barrier": true, "release_order": ["root", "config", "prefix"], "swap_slots": null, "emit": {},
-   "expect": {"verdict": "applicable", "codes": [], "others": [], "result": "positive"}},
-  {"name": "P2-permuted", "kind": "positive",
+   "answers": {
+    "prefix": "prefix",
+    "root": "root",
+    "config": "config"
+   },
+   "claim_order": [
+    "config",
+    "root",
+    "prefix"
+   ],
+   "barrier": true,
+   "release_order": [
+    "root",
+    "config",
+    "prefix"
+   ],
+   "swap_slots": null,
+   "emit": {},
+   "expect": {
+    "verdict": "applicable",
+    "codes": [],
+    "others": [],
+    "result": "positive"
+   }
+  },
+  {
+   "name": "P2-permuted",
+   "kind": "positive",
    "about": "A second claim order and a second completion order, each different from P1's and from the start order.",
-   "answers": {"prefix": "prefix", "root": "root", "config": "config"},
-   "claim_order": ["root", "prefix", "config"], "barrier": true, "release_order": ["config", "prefix", "root"], "swap_slots": null, "emit": {},
-   "expect": {"verdict": "applicable", "codes": [], "others": [], "result": "positive"}},
-  {"name": "N3a-slot-swap", "kind": "negative",
+   "answers": {
+    "prefix": "prefix",
+    "root": "root",
+    "config": "config"
+   },
+   "claim_order": [
+    "root",
+    "prefix",
+    "config"
+   ],
+   "barrier": true,
+   "release_order": [
+    "config",
+    "prefix",
+    "root"
+   ],
+   "swap_slots": null,
+   "emit": {},
+   "expect": {
+    "verdict": "applicable",
+    "codes": [],
+    "others": [],
+    "result": "positive"
+   }
+  },
+  {
+   "name": "N3a-slot-swap",
+   "kind": "negative",
    "about": "Every request, record and child output is the positive's. After all three children wrote and before any was let go, the observer exchanges the prefix and root response files in the hook's scratch directory, so the hook reads each of the two roles from the other's file.",
-   "answers": {"prefix": "prefix", "root": "root", "config": "config"},
-   "claim_order": null, "barrier": true, "release_order": null, "swap_slots": ["prefix", "root"], "emit": {},
-   "expect": {"verdict": "rejected",
-              "codes": ["content:prefix:root", "content:root:prefix", "slot-holds:prefix:root", "slot-holds:root:prefix", "stderr-content:prefix:root", "stderr-content:root:prefix"],
-              "others": [],
-              "result": {"differs": ["project_dir", "project_dir_from"],
-                         "predicted": {"project_dir": "@PROJECT@/member", "project_dir_from": "cwd"}}}},
-  {"name": "N3b-output-swap", "kind": "negative",
+   "answers": {
+    "prefix": "prefix",
+    "root": "root",
+    "config": "config"
+   },
+   "claim_order": null,
+   "barrier": true,
+   "release_order": null,
+   "swap_slots": [
+    "prefix",
+    "root"
+   ],
+   "emit": {},
+   "expect": {
+    "verdict": "rejected",
+    "codes": [
+     "content:prefix:root",
+     "content:root:prefix",
+     "slot-holds:prefix:root",
+     "slot-holds:root:prefix",
+     "stderr-content:prefix:root",
+     "stderr-content:root:prefix"
+    ],
+    "others": [],
+    "result": {
+     "differs": [
+      "project_dir",
+      "project_dir_from"
+     ],
+     "predicted": {
+      "project_dir": "@PROJECT@/member",
+      "project_dir_from": "cwd"
+     }
+    }
+   }
+  },
+  {
+   "name": "N3b-output-swap",
+   "kind": "negative",
    "about": "Every request is the positive's and every record names the positive's answer, but the root child writes the config answer's bytes to its own stdout and stderr and the config child writes the root answer's. Each child keeps its own exit status.",
-   "answers": {"prefix": "prefix", "root": "root", "config": "config"},
-   "claim_order": null, "barrier": false, "release_order": null, "swap_slots": null, "emit": {"root": "config", "config": "root"},
-   "expect": {"verdict": "rejected",
-              "codes": ["content:config:root", "content:root:config", "record-not-actual:config", "record-not-actual:root", "stderr-content:config:root", "stderr-content:root:config"],
-              "others": [],
-              "result": {"differs": ["npm_fetch", "project_dir_from"],
-                         "predicted": {"project_dir": "@PROJECT@/member", "project_dir_from": "cwd",
-                                       "npm_fetch": {"unknown": "npm was not asked which registry this install fetches from: no npm install in this command named where it lands"}}}}},
-  {"name": "N4-follow", "kind": "boundary",
+   "answers": {
+    "prefix": "prefix",
+    "root": "root",
+    "config": "config"
+   },
+   "claim_order": null,
+   "barrier": false,
+   "release_order": null,
+   "swap_slots": null,
+   "emit": {
+    "root": "config",
+    "config": "root"
+   },
+   "expect": {
+    "verdict": "rejected",
+    "codes": [
+     "content:config:root",
+     "content:root:config",
+     "record-not-actual:config",
+     "record-not-actual:root",
+     "stderr-content:config:root",
+     "stderr-content:root:config"
+    ],
+    "others": [],
+    "result": {
+     "differs": [
+      "npm_fetch",
+      "project_dir_from"
+     ],
+     "predicted": {
+      "project_dir": "@PROJECT@/member",
+      "project_dir_from": "cwd",
+      "npm_fetch": {
+       "unknown": "npm was not asked which registry this install fetches from: no npm install in this command named where it lands"
+      }
+     }
+    }
+   }
+  },
+  {
+   "name": "N4-follow",
+   "kind": "boundary",
    "about": "The initial config ask is refused with ENOWORKSPACES, so the hook asks config again in a new group, in the directory the prefix answer named. The follow-up depends on the prefix answer and is outside the initial relation; the hook's fetch facts come from it.",
-   "answers": {"prefix": "prefix", "root": "root", "config": "config-workspace-refusal", "follow-config": "follow-config"},
-   "groups": ["initial", "follow"],
-   "claim_order": null, "barrier": false, "release_order": null, "swap_slots": null, "emit": {},
-   "expect": {"verdict": "applicable", "codes": [],
-              "others": [{"attempt": "follow", "roles": ["config"], "status": "outside", "codes": []}],
-              "result": "follow"}}
+   "answers": {
+    "prefix": "prefix",
+    "root": "root",
+    "config": "config-workspace-refusal",
+    "follow-config": "follow-config"
+   },
+   "groups": [
+    "initial",
+    "follow"
+   ],
+   "claim_order": null,
+   "barrier": false,
+   "release_order": null,
+   "swap_slots": null,
+   "emit": {},
+   "expect": {
+    "verdict": "applicable",
+    "codes": [],
+    "others": [
+     {
+      "attempt": "follow",
+      "roles": [
+       "config"
+      ],
+      "status": "outside",
+      "codes": []
+     }
+    ],
+    "result": "follow"
+   }
+  }
  ],
  "declared": {
-  "about": "Inputs made from a live launch's own records by the named edit, judged by the same oracle, to show what it does with a missing, duplicated, misplaced or unobserved child and with a declared shared effect. They are labelled synthetic in the results and are no evidence about a real npm, a real ENOWORKSPACES or a real cache.",
+  "about": "Inputs made from a live launch's own records by the named edits, judged by the same oracle, to show what it does with a missing, duplicated, misplaced or unobserved child, a declared shared effect, a ps answer that does not count, a descriptor lookup that did not answer, and a pending record that is empty, null, unreadable or missing. They are labelled synthetic in the results and are no evidence about a real npm, a real ENOWORKSPACES, a real cache or a real ps failure.",
   "controls": [
-   {"name": "D0-unchanged", "from": "P0-natural", "edit": "none", "expect": {"verdict": "applicable", "must": []}},
-   {"name": "D1-missing-config", "from": "P0-natural", "edit": "drop", "role": "config", "expect": {"verdict": "rejected", "must": ["missing-role:config"]}},
-   {"name": "D2-duplicate-prefix", "from": "P0-natural", "edit": "duplicate", "role": "prefix", "expect": {"verdict": "rejected", "must": ["duplicate-role:prefix"]}},
-   {"name": "D3-duplicate-and-missing", "from": "P0-natural", "edit": "duplicate-and-drop", "role": "prefix", "other": "config", "expect": {"verdict": "rejected", "must": ["duplicate-role:prefix", "missing-role:config"]}},
-   {"name": "D4-descriptor-exchange", "from": "P0-natural", "edit": "exchange-descriptors", "role": "prefix", "other": "root", "expect": {"verdict": "rejected", "must": ["desc-object:prefix", "desc-object:root"]}},
-   {"name": "D5-other-group", "from": "P0-natural", "edit": "move-to-other-group", "role": "root", "expect": {"verdict": "rejected", "must": ["missing-role:root", "undeclared-group"]}},
-   {"name": "D6-follow-in-initial-group", "from": "N4-follow", "edit": "follow-into-initial-scratch", "expect": {"verdict": "rejected", "must": ["group-mixed-attempt"]}},
-   {"name": "D7-output-unobserved", "from": "P0-natural", "edit": "unobserve-output", "role": "root", "expect": {"verdict": "unresolved", "must": ["unobserved-output:root"]}},
-   {"name": "D8-no-observations", "from": "P0-natural", "edit": "empty", "expect": {"verdict": "unresolved", "must": ["no-observations"]}},
-   {"name": "D9-shared-effect-declared", "from": "P0-natural", "edit": "declare-shared-effect", "effect": "the root child reads a file the prefix child writes", "expect": {"verdict": "not-applicable", "must": ["shared-effect-declared"]}}
+   {
+    "name": "D0-unchanged",
+    "from": "P0-natural",
+    "edits": [
+     {
+      "edit": "none"
+     }
+    ],
+    "expect": {
+     "verdict": "applicable",
+     "must": []
+    }
+   },
+   {
+    "name": "D1-missing-config",
+    "from": "P0-natural",
+    "edits": [
+     {
+      "edit": "drop",
+      "role": "config"
+     }
+    ],
+    "expect": {
+     "verdict": "rejected",
+     "must": [
+      "missing-role:config"
+     ]
+    }
+   },
+   {
+    "name": "D2-duplicate-prefix",
+    "from": "P0-natural",
+    "edits": [
+     {
+      "edit": "duplicate",
+      "role": "prefix"
+     }
+    ],
+    "expect": {
+     "verdict": "rejected",
+     "must": [
+      "duplicate-role:prefix"
+     ]
+    }
+   },
+   {
+    "name": "D3-duplicate-and-missing",
+    "from": "P0-natural",
+    "edits": [
+     {
+      "edit": "duplicate",
+      "role": "prefix"
+     },
+     {
+      "edit": "drop",
+      "role": "config"
+     }
+    ],
+    "expect": {
+     "verdict": "rejected",
+     "must": [
+      "duplicate-role:prefix",
+      "missing-role:config"
+     ]
+    }
+   },
+   {
+    "name": "D4-descriptor-exchange",
+    "from": "P0-natural",
+    "edits": [
+     {
+      "edit": "exchange-descriptors",
+      "role": "prefix",
+      "other": "root"
+     }
+    ],
+    "expect": {
+     "verdict": "rejected",
+     "must": [
+      "desc-object:prefix",
+      "desc-object:root"
+     ]
+    }
+   },
+   {
+    "name": "D5-other-group",
+    "from": "P0-natural",
+    "edits": [
+     {
+      "edit": "move-to-other-group",
+      "role": "root"
+     }
+    ],
+    "expect": {
+     "verdict": "rejected",
+     "must": [
+      "missing-role:root",
+      "undeclared-group"
+     ]
+    }
+   },
+   {
+    "name": "D6-follow-in-initial-group",
+    "from": "N4-follow",
+    "edits": [
+     {
+      "edit": "follow-into-initial-scratch"
+     }
+    ],
+    "expect": {
+     "verdict": "rejected",
+     "must": [
+      "group-mixed-attempt"
+     ]
+    }
+   },
+   {
+    "name": "D7-output-unobserved",
+    "from": "P0-natural",
+    "edits": [
+     {
+      "edit": "unobserve-output",
+      "role": "root"
+     }
+    ],
+    "expect": {
+     "verdict": "unresolved",
+     "must": [
+      "unobserved-output:root"
+     ]
+    }
+   },
+   {
+    "name": "D8-no-observations",
+    "from": "P0-natural",
+    "edits": [
+     {
+      "edit": "empty"
+     }
+    ],
+    "expect": {
+     "verdict": "unresolved",
+     "must": [
+      "no-observations"
+     ]
+    }
+   },
+   {
+    "name": "D9-shared-effect-declared",
+    "from": "P0-natural",
+    "edits": [
+     {
+      "edit": "declare-shared-effect",
+      "effect": "the root child reads a file the prefix child writes"
+     }
+    ],
+    "expect": {
+     "verdict": "not-applicable",
+     "must": [
+      "shared-effect-declared"
+     ]
+    }
+   },
+   {
+    "name": "R1a-ps-failed",
+    "from": "P0-natural",
+    "edits": [
+     {
+      "edit": "exit-ps",
+      "role": "config",
+      "ps": {
+       "rc": 2,
+       "stdout": "",
+       "stderr": "ps query failed\n"
+      }
+     }
+    ],
+    "expect": {
+     "verdict": "unresolved",
+     "must": [
+      "unobserved-exit:config"
+     ]
+    }
+   },
+   {
+    "name": "R1b-ps-incomplete",
+    "from": "P0-natural",
+    "edits": [
+     {
+      "edit": "exit-ps",
+      "role": "root",
+      "ps": {
+       "rc": 0,
+       "stdout": "@CHILD@ S\n",
+       "stderr": ""
+      }
+     }
+    ],
+    "expect": {
+     "verdict": "unresolved",
+     "must": [
+      "unobserved-exit:root"
+     ]
+    }
+   },
+   {
+    "name": "R1c-ps-valid-absence",
+    "from": "P0-natural",
+    "edits": [
+     {
+      "edit": "exit-ps",
+      "role": "config",
+      "ps": {
+       "rc": 1,
+       "stdout": "@COLLECTOR@ S Tue Oct  6 21:00:00 2026\n",
+       "stderr": ""
+      }
+     }
+    ],
+    "expect": {
+     "verdict": "applicable",
+     "must": []
+    }
+   },
+   {
+    "name": "R1d-forced-exit-unconfirmed",
+    "from": "P1-permuted",
+    "edits": [
+     {
+      "edit": "exit-ps",
+      "role": "root",
+      "ps": {
+       "rc": 2,
+       "stdout": "",
+       "stderr": "ps query failed\n"
+      }
+     }
+    ],
+    "expect": {
+     "verdict": "unresolved",
+     "must": [
+      "unobserved-exit:root"
+     ],
+     "orders": "unobserved"
+    }
+   },
+   {
+    "name": "R2a-path-lookup-unavailable",
+    "from": "P0-natural",
+    "edits": [
+     {
+      "edit": "fd-path-unavailable",
+      "role": "prefix"
+     }
+    ],
+    "expect": {
+     "verdict": "unresolved",
+     "must": [
+      "unobserved-desc-path:prefix"
+     ]
+    }
+   },
+   {
+    "name": "R2b-self-fstat-unavailable",
+    "from": "P0-natural",
+    "edits": [
+     {
+      "edit": "fd-self-missing",
+      "role": "root"
+     }
+    ],
+    "expect": {
+     "verdict": "unresolved",
+     "must": [
+      "unobserved-desc-self:root"
+     ]
+    }
+   },
+   {
+    "name": "R2c-unavailable-beside-mismatch",
+    "from": "P0-natural",
+    "edits": [
+     {
+      "edit": "fd-path-unavailable",
+      "role": "root"
+     },
+     {
+      "edit": "release-content-of",
+      "role": "root",
+      "other": "config"
+     }
+    ],
+    "expect": {
+     "verdict": "rejected",
+     "must": [
+      "content:root:config",
+      "unobserved-desc-path:root"
+     ]
+    }
+   },
+   {
+    "name": "R3a-pending-empty",
+    "from": "N3a-slot-swap",
+    "edits": [
+     {
+      "edit": "pending-bytes",
+      "bytes": "{}"
+     }
+    ],
+    "expect": {
+     "result": "invalid"
+    }
+   },
+   {
+    "name": "R3b-pending-null",
+    "from": "N3b-output-swap",
+    "edits": [
+     {
+      "edit": "pending-null",
+      "fields": [
+       "npm_fetch",
+       "project_dir_from"
+      ]
+     }
+    ],
+    "expect": {
+     "result": "invalid"
+    }
+   },
+   {
+    "name": "R3c-pending-unreadable",
+    "from": "N3a-slot-swap",
+    "edits": [
+     {
+      "edit": "pending-bytes",
+      "bytes": "{\"snapshot_id\": "
+     }
+    ],
+    "expect": {
+     "result": "invalid"
+    }
+   },
+   {
+    "name": "R3d-pending-missing",
+    "from": "N3b-output-swap",
+    "edits": [
+     {
+      "edit": "pending-remove"
+     }
+    ],
+    "expect": {
+     "result": "invalid"
+    }
+   }
   ]
  },
  "not_observed": [
   "an exit status's value from outside the hook: macOS gives a process's exit status to its parent, and the observer is not the parent of an ask child; the value is the child's own record and the hook's consumption of it",
   "which bytes the hook read: the observer reads the response files while the child is held and the hook's result depends on them, but no read by the hook is traced",
   "the launch order of the three children: the source starts them in one order (the slots above); nothing here observes the start itself",
+  "time: whether the observer budget, the children's starts, the ps calls, file I/O and a follow-up config fit inside the hook's shared ask deadline is not measured; an order the observer could not impose within its budget is reported not observed",
   "real npm: every answer comes from the stand-in; a real npm's shared cache, configuration files and ENOWORKSPACES are not exercised"
+ ],
+ "runner_controls": [
+  {
+   "name": "R4-launch-raises",
+   "about": "A copy of this tree in which the first launch raises after it wrote its launch record and before its hook starts. The collector must exit 2, keep what it wrote, and list every launch as not run; no hook and no stand-in child starts, so none is signalled.",
+   "file": "scripts/measure/core_hook/npm_response.py",
+   "old": "    watcher.start()\n",
+   "new": "    raise OSError('core-hook-npm-response R4 control: the launch stops after its launch record, before the hook starts')\n    watcher.start()\n",
+   "expect": {
+    "rc": 2,
+    "status": "stopped",
+    "stopped_prefix": "OSError: core-hook-npm-response R4 control",
+    "completed": [],
+    "partial": [
+     "collect.json",
+     "observed.reuse.json",
+     "launches/native-P0-natural/launch.json",
+     "launches/native-P0-natural/box/stub/npm",
+     "launches/native-P0-natural/box/stub/npm-response.json"
+    ],
+    "absent": [
+     "manifest.json",
+     "launches/native-P0-natural/hook.json",
+     "launches/native-P0-natural/observer.json",
+     "launches/native-P1-permuted"
+    ]
+   }
+  }
  ]
 }

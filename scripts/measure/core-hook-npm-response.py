@@ -10,12 +10,15 @@ and judge that link against an expectation written before any run.
             each launch kept whole; then a completed manifest, published last.
             It judges nothing.
   judge     a completed collection, selected by its manifest's digest, read
-            against the contract by core_hook.npm_response.judge_launch.
+            against the contract by core_hook.npm_response.judge_launch; and,
+            when given, a collection the R4 runner control stopped.
 
 Rows are pass, fail or not-run. A row nobody judged stays not-run, and
-not-run is never a pass. A relation row summarises launch rows and is never
-judged from anything else. The declared rows are inputs made from a live
-launch's records by a named edit; they test the oracle, not the product.
+not-run is never a pass. A row whose only finding is that something was not
+observed stays not-run with that reason; a row with two observed values that
+differ fails. A relation row summarises launch rows and is never judged from
+anything else. The declared rows are inputs made from a live launch's records
+by named edits; they test the oracle, not the product.
 
 What this does not observe is in the contract's not_observed list, and the
 results repeat it. Claim order and completion order are reported as observed;
@@ -24,8 +27,11 @@ neither is used to name a role.
 Run in a new authorized remote archive with an externally selected observed
 builder. No install command is executed and no real npm is started.
 
-Exit 0: every row passed. 1: a row failed. 3: nothing failed and a row was
-not run. 2: this runner could not do its work; what it had done is kept.
+Exit 0: every row passed (collect: the collection completed). 1: a row
+failed, or the contract or a product input did not hold. 3: nothing failed
+and a row was not run (collect: stopped after the contract, as asked).
+2: this runner could not do its work; what it had done is kept, and what it
+did not reach is listed as not run.
 """
 import argparse
 import importlib.util
@@ -40,9 +46,9 @@ from core_hook import evidence, observe
 from core_hook import npm_response as nr
 
 HERE = Path(__file__).resolve().parent
-COLLECT = 'core-hook-npm-response-collect/1'
+COLLECT = 'core-hook-npm-response-collect/2'
 LAYERS = ('requests', 'records', 'process', 'exit', 'linkage', 'result')
-EXIT = {'pass': 0, 'fail': 1, 'incomplete': 3}
+EXIT = {'pass': 0, 'fail': 1, 'incomplete': 3, 'stopped': 2}
 
 
 def save(path, value):
@@ -62,29 +68,45 @@ def read_contract(path, pin):
     return rec, nr.contract_errors(rec)
 
 
+def launch_names(rec):
+    return ['%s-%s' % (impl, s['name']) for impl in nr.IMPLS for s in rec['scenarios']]
+
+
 # --- collect --------------------------------------------------------------------------------
 
 def collect(a):
     out = Path(a.out).resolve()
     out.mkdir(parents=True, exist_ok=False)
-    report = {'format': COLLECT, 'stop_after': a.stop_after, 'launches': [], 'stopped': None,
-              'inputs': {'contract': {'path': str(Path(a.contract).resolve()), 'selected': a.contract_sha256,
-                                      'read': nr.sha(Path(a.contract).read_bytes())},
-                         'runner': nr.sha(Path(__file__).resolve().read_bytes()),
-                         'module': nr.sha((HERE / 'core_hook' / 'npm_response.py').read_bytes()),
-                         'collector_sources': evidence.sources(), 'python': sys.executable, 'nice': os.nice(0),
-                         'collector_pid': os.getpid(), 'builder': {'root': a.build_root, 'selected': a.build_pin}}}
+    report = {'format': COLLECT, 'stop_after': a.stop_after, 'planned': [], 'launches': [], 'stopped': None,
+              'inputs': {'contract': {'path': str(Path(a.contract).resolve()), 'selected': a.contract_sha256},
+                         'builder': {'root': a.build_root, 'selected': a.build_pin}, 'python': sys.executable,
+                         'collector_pid': os.getpid()}}
 
     def done(status, why=''):
         report['status'], report['why'] = status, why
+        report['not_run'] = [n for n in report['planned'] if n not in [l['launch'] for l in report['launches']]]
         save(out / 'collect.json', report)
         print('collect: %s%s' % (status, ': ' + why if why else ''), flush=True)
         return EXIT[status]
 
+    try:
+        return collect_steps(a, out, report, done)
+    except Exception as e:  # The collector could not do its work: not a finding about the hooks.
+        traceback.print_exc()
+        report['stopped'] = '%s: %s' % (type(e).__name__, e)
+        return done('stopped', 'this collector could not do its work: ' + report['stopped'])
+
+
+def collect_steps(a, out, report, done):
+    report['inputs'].update(contract=dict(report['inputs']['contract'], read=nr.sha(Path(a.contract).read_bytes())),
+                            runner=nr.sha(Path(__file__).resolve().read_bytes()),
+                            module=nr.sha((HERE / 'core_hook' / 'npm_response.py').read_bytes()),
+                            collector_sources=evidence.sources(), nice=os.nice(0))
     rec, errors = read_contract(a.contract, a.contract_sha256)
     report['contract'] = {'status': 'fail' if errors else 'pass', 'errors': errors}
     if errors:
         return done('fail', 'the contract did not hold, so nothing was launched')
+    report['planned'] = launch_names(rec)
     if a.stop_after == 'contract':
         return done('incomplete', 'stopped after the contract, as asked; nothing was launched')
     if not (a.build_root and a.build_pin):
@@ -104,7 +126,7 @@ def collect(a):
         spec.loader.exec_module(builder)
         try:
             impl = builder.reuse(Path(a.build_root), out, 'observed', True, expected=a.build_pin)
-        except (OSError, ValueError) as e:
+        except ValueError as e:  # The selected builder does not hold; OSError is the collector's own failure.
             errors.append({'field': 'observed builder', 'actual': '%s: %s' % (type(e).__name__, e), 'expected': 'the selected builder, reused'})
     if impl is not None:
         receipt = impl.hooks['pre']['native_receipt']
@@ -127,17 +149,12 @@ def collect(a):
                                       'bash': bash_files})
     report['system_dirs'] = ctx.sysdirs
     base = out / 'launches'
-    try:
-        for impl_name in nr.IMPLS:
-            for scenario in rec['scenarios']:
-                summary = nr.launch(ctx, rec, impl_name, hooks[impl_name], scenario, base)
-                report['launches'].append(summary)
-                print('launched %s: %s, observer errors %d' % (summary['launch'], summary['status'], summary['observer_errors']), flush=True)
-    except Exception as e:
-        traceback.print_exc()
-        report['stopped'] = '%s: %s' % (type(e).__name__, e)
-        return done('fail', 'a launch stopped the collection: ' + report['stopped'])
-    report['status'], report['why'] = 'complete', ''
+    for impl_name in nr.IMPLS:
+        for scenario in rec['scenarios']:
+            summary = nr.launch(ctx, rec, impl_name, hooks[impl_name], scenario, base)
+            report['launches'].append(summary)
+            print('launched %s: %s, observer errors %d' % (summary['launch'], summary['status'], summary['observer_errors']), flush=True)
+    report['status'], report['why'], report['not_run'] = 'complete', '', []
     save(out / 'collect.json', report)
     listing = nr.tree_listing(str(out))
     manifest = {'format': nr.MANIFEST, 'complete': True, 'collect_sha256': nr.sha((out / 'collect.json').read_bytes()),
@@ -185,63 +202,75 @@ class Rows:
 def layer_of(code):
     base = code[len('follow-'):] if code.startswith('follow-') else code
     head = base.split(':')[0]
-    if head.startswith('request-') or head == 'unexpected-call':
+    core = head[len('unobserved-'):] if head.startswith('unobserved-') else head
+    if core.startswith('request') or core == 'unexpected-call':
         return 'requests'
-    if head in ('record', 'record-missing', 'record-duplicate', 'exit-planned'):
+    if core in ('record', 'record-missing', 'record-duplicate', 'exit-planned'):
         return 'records'
-    if head.startswith('process-') or head in ('parents-differ', 'unobserved-process'):
+    if core.startswith('process') or core == 'parents-differ':
         return 'process'
-    if head in ('unobserved-exit', 'unobserved-release'):
+    if core in ('exit', 'release'):
         return 'exit'
     return 'linkage'
+
+
+def layer_row(rows, layer, name, impl, codes, **more):
+    """Defects fail the row; only unobserved codes leave it not-run."""
+    defects = [c for c in codes if not nr.unseen(c)]
+    missing = [c for c in codes if nr.unseen(c)]
+    if defects:
+        rows.judge(layer, name, impl, [{'field': 'code', 'actual': c, 'expected': 'none'} for c in defects], unobserved=missing, **more)
+    elif missing:
+        rows.leave(layer, name, impl, 'unobserved: ' + ', '.join(missing), **more)
+    else:
+        rows.judge(layer, name, impl, [], **more)
 
 
 def launch_rows(rows, rec, scenario, impl, view, facts):
     name, expect = scenario['name'], scenario['expect']
     by_layer = {layer: [c for c in facts['codes'] if layer_of(c) == layer] for layer in LAYERS}
     for layer in ('requests', 'records', 'process', 'exit'):
-        errors = [{'field': 'code', 'actual': c, 'expected': 'none'} for c in by_layer[layer]]
-        rows.judge(layer, name, impl, errors)
-    errors = []
-    if by_layer['linkage'] != sorted(expect['codes']):
-        errors.append({'field': 'linkage codes', 'actual': by_layer['linkage'], 'expected': sorted(expect['codes'])})
-    if facts['verdict'] != expect['verdict']:
-        errors.append({'field': 'verdict', 'actual': facts['verdict'], 'expected': expect['verdict']})
+        layer_row(rows, layer, name, impl, by_layer[layer])
+    observer_errors = view['observer'].get('errors', [])
+    swapped = not scenario.get('swap_slots') or len(view['observer'].get('swaps', [])) == 6
+    seen = dict(verdict=facts['verdict'], codes=facts['codes'], others=facts['others'], roles=facts['roles'],
+                initial_scratch=facts['initial_scratch'], observer_errors=observer_errors,
+                claim='which child held which response file and bytes when it was let go; not which bytes the hook read')
+    defects = [c for c in by_layer['linkage'] if not nr.unseen(c)]
+    missing = [c for c in facts['codes'] if nr.unseen(c)]
     others = [{k: o[k] for k in ('attempt', 'roles', 'status', 'codes')} for o in facts['others']]
+    errors = []
+    if defects != sorted(expect['codes']):
+        errors.append({'field': 'linkage defect codes', 'actual': defects, 'expected': sorted(expect['codes'])})
     if others != expect['others']:
         errors.append({'field': 'groups outside the initial one', 'actual': others, 'expected': expect['others']})
-    seen = dict(verdict=facts['verdict'], codes=facts['codes'], others=facts['others'], roles=facts['roles'],
-                initial_scratch=facts['initial_scratch'], observer_errors=view['observer'].get('errors', []),
-                claim='which child held which response file and bytes when it was let go; not which bytes the hook read')
-    if facts['verdict'] == 'unresolved' and expect['verdict'] != 'unresolved':
-        rows.leave('linkage', name, impl, 'unobserved: only what was not observed stands between this launch and its '
-                   'expectation: %s' % ', '.join(facts['codes']), **seen)
+    if not swapped:
+        rows.leave('linkage', name, impl, 'unobserved: the slot swap was not made: %s' % '; '.join(observer_errors), **seen)
+    elif errors:
+        rows.judge('linkage', name, impl, errors, **seen)
+    elif missing:
+        rows.leave('linkage', name, impl, 'unobserved: %s' % ', '.join(missing), **seen)
     else:
+        if facts['verdict'] != expect['verdict']:
+            errors.append({'field': 'verdict', 'actual': facts['verdict'], 'expected': expect['verdict']})
         rows.judge('linkage', name, impl, errors, **seen)
     if scenario.get('claim_order'):
-        errors = []
-        if facts['claim_order'] != scenario['claim_order']:
-            errors.append({'field': 'claim order', 'actual': facts['claim_order'], 'expected': scenario['claim_order']})
-        want = [[r] for r in scenario['release_order']]
-        if facts['completion'] != want:
-            errors.append({'field': 'completion order', 'actual': facts['completion'], 'expected': want})
-        missed = [e for e in view['observer'].get('errors', [])
-                  if e.startswith(('the claim order was not imposed', 'the barrier was not reached', 'no exit seen', 'the child '))]
-        seen = dict(claim_order=facts['claim_order'], completion=facts['completion'],
-                    claim='observed: record numbers as claimed, exits as ps saw them after each release')
-        if missed:
-            # The observer could not produce the order; that is not observed, not a failure of the hooks.
-            rows.leave('orders', name, impl, 'unobserved: ' + '; '.join(missed), **seen)
+        status, detail = nr.order_status(scenario, view, facts)
+        if status == 'unobserved':
+            rows.leave('orders', name, impl, 'unobserved: ' + detail['why'], detail=detail)
         else:
-            rows.judge('orders', name, impl, errors, **seen)
+            errors = [] if status == 'pass' else [{'field': 'orders', 'actual': detail, 'expected': 'the imposed orders'}]
+            rows.judge('orders', name, impl, errors, detail=detail,
+                       claim='observed: record numbers as claimed, exits in ps answers that count, each release after the exit before it')
     result = expect['result']
-    if isinstance(result, str):
-        errors = nr.result_errors(rec, result, view, facts)
-        rows.judge('result', name, impl, errors, hook=facts['hook'])
+    if not swapped:
+        rows.leave('result', name, impl, 'unobserved: the slot swap was not made', hook=facts['hook'])
+    elif isinstance(result, str):
+        rows.judge('result', name, impl, nr.result_errors(rec, result, view, facts), hook=facts['hook'])
     else:
         errors, predicted = nr.differs_errors(rec, scenario, view, facts)
         rows.judge('result', name, impl, errors, hook=facts['hook'], predicted=predicted,
-                   claim='the role-linked fields differ from the positive; predicted values are reported, not counted')
+                   claim='a valid pending record whose role-linked fields differ from the positive; predicted values are reported, not counted')
 
 
 def relation_rows(rows, rec, impl, observed):
@@ -273,6 +302,50 @@ def relation_rows(rows, rec, impl, observed):
     summary('boundary', [s['name'] for s in rec['scenarios'] if s['kind'] == 'boundary'])
 
 
+def control_errors(rec, s, mutated, facts, exp):
+    errors = []
+    if 'verdict' in exp:
+        if facts['verdict'] != exp['verdict']:
+            errors.append({'field': 'verdict', 'actual': facts['verdict'], 'expected': exp['verdict']})
+        if any(m not in facts['codes'] for m in exp['must']):
+            errors.append({'field': 'codes the edit must raise', 'actual': facts['codes'], 'expected': exp['must']})
+        if exp['verdict'] == 'applicable' and facts['codes']:
+            errors.append({'field': 'codes', 'actual': facts['codes'], 'expected': []})
+    if 'orders' in exp:
+        status, detail = nr.order_status(s, mutated, facts)
+        if status != exp['orders']:
+            errors.append({'field': 'orders', 'actual': [status, detail.get('why')], 'expected': exp['orders']})
+    if 'result' in exp:
+        kind = nr.result_kind(rec, s, mutated, facts)
+        if kind != exp['result']:
+            errors.append({'field': 'result', 'actual': kind, 'expected': exp['result']})
+    return errors
+
+
+def runner_row(rows, rec, a):
+    """The R4 runner control: a collection that stopped with exit 2 keeps what it
+    did and names what it did not reach."""
+    control = rec['runner_controls'][0]
+    exp, d = control['expect'], Path(a.stopped_collection)
+    errors = []
+
+    def same(label, actual, expected):
+        if actual != expected:
+            errors.append({'field': label, 'actual': actual, 'expected': expected})
+    same('exit status of the stopped collection', a.stopped_rc, exp['rc'])
+    doc = evidence.strict_load((d / 'collect.json').read_bytes().decode('utf-8')) if (d / 'collect.json').is_file() else {}
+    same('collect status', doc.get('status'), exp['status'])
+    same('stopped by the control', str(doc.get('stopped', '')).startswith(exp['stopped_prefix']), True)
+    same('launches completed', [l.get('launch') for l in doc.get('launches', [])], exp['completed'])
+    same('launches not run', doc.get('not_run'), launch_names(rec))
+    for rel in exp['partial']:
+        same('partial file kept: ' + rel, (d / rel).is_file(), True)
+    for rel in exp['absent']:
+        same('not written: ' + rel, (d / rel).exists(), False)
+    rows.judge('runner', control['name'], None, errors, collect=doc,
+               claim='a collector that stopped exits 2, keeps its partial raw and lists what it did not run')
+
+
 def judge(a):
     raw, out = Path(a.raw).resolve(), Path(a.out).resolve()
     out.mkdir(parents=True, exist_ok=False)
@@ -283,7 +356,8 @@ def judge(a):
     inputs = {'manifest': {'path': str(raw / 'manifest.json'), 'selected': a.manifest_sha256},
               'contract': {'path': str(Path(a.contract).resolve()), 'selected': a.contract_sha256},
               'runner': nr.sha(Path(__file__).resolve().read_bytes()),
-              'module': nr.sha((HERE / 'core_hook' / 'npm_response.py').read_bytes())}
+              'module': nr.sha((HERE / 'core_hook' / 'npm_response.py').read_bytes()),
+              'stopped_collection': {'path': a.stopped_collection, 'rc': a.stopped_rc}}
     stopped = []
     observed = {impl: {} for impl in nr.IMPLS}
     rec = None
@@ -302,6 +376,13 @@ def judge(a):
                     rows.owe('relation', case, impl)
                 for c in rec['declared']['controls']:
                     rows.owe('declared', c['name'], impl)
+            for control in rec.get('runner_controls', []):
+                rows.owe('runner', control['name'])
+        if rec is not None and not errors and rec.get('runner_controls'):
+            if a.stopped_collection is None or a.stopped_rc is None:
+                rows.leave('runner', rec['runner_controls'][0]['name'], None, 'no stopped collection was given')
+            else:
+                runner_row(rows, rec, a)
         manifest_raw = (raw / 'manifest.json').read_bytes()
         errors = []
         if nr.sha(manifest_raw) != a.manifest_sha256:
@@ -339,21 +420,14 @@ def judge(a):
                 s = next(x for x in scenarios if x['name'] == c['from'])
                 try:
                     mutated, effects = nr.mutate(rec, s, base, c)
-                except (KeyError, IndexError, nr.HarnessError) as e:
+                except (KeyError, IndexError, ValueError, nr.HarnessError) as e:
                     rows.leave('declared', c['name'], impl, 'the edit could not be built from %s: %s: %s'
                                % (c['from'], type(e).__name__, e), synthetic=True)
                     continue
                 facts = nr.judge_launch(rec, s, mutated, effects)
-                errors = []
-                if facts['verdict'] != c['expect']['verdict']:
-                    errors.append({'field': 'verdict', 'actual': facts['verdict'], 'expected': c['expect']['verdict']})
-                missing = [m for m in c['expect']['must'] if m not in facts['codes']]
-                if missing:
-                    errors.append({'field': 'codes the edit must raise', 'actual': facts['codes'], 'expected': c['expect']['must']})
-                if c['expect']['verdict'] == 'applicable' and facts['codes']:
-                    errors.append({'field': 'codes', 'actual': facts['codes'], 'expected': []})
-                rows.judge('declared', c['name'], impl, errors, verdict=facts['verdict'], codes=facts['codes'],
-                           synthetic=True, claim='an edit of a live launch\'s records, judged by the same oracle; it tests the oracle')
+                rows.judge('declared', c['name'], impl, control_errors(rec, s, mutated, facts, c['expect']),
+                           verdict=facts['verdict'], codes=facts['codes'], synthetic=True,
+                           claim="an edit of a live launch's records, judged by the same oracle; it tests the oracle")
     except Exception as e:
         traceback.print_exc()
         stopped.append('%s: %s' % (type(e).__name__, e))
@@ -376,7 +450,7 @@ def finish(rows, out, inputs, rec, observed, stopped, why=''):
         'acceptance': {'status': status, 'rows': len(table), 'failed': failed, 'not_run': not_run},
         'scope': 'one group, the initial attempt and its three roles, with stand-in answers; a follow-up attempt, another '
                  'group and a declared shared effect are reported apart; real npm, exit status values from outside the '
-                 'hook and the bytes the hook read are not observed'})
+                 'hook and the bytes the hook read are not observed; declared rows are synthetic'})
     for r in table:
         mark = {'pass': 'ok', 'fail': 'not ok', 'not-run': 'not run'}[r['status']]
         print('%s - %s%s' % (mark, '/'.join(str(p) for p in (r['layer'], r['case'], r['side']) if p),
@@ -401,6 +475,8 @@ def main():
     j.add_argument('--contract', default=str(HERE / 'core-hook-npm-response.contract.json'))
     j.add_argument('--contract-sha256', required=True)
     j.add_argument('--out', required=True)
+    j.add_argument('--stopped-collection', help='the out directory of the R4 runner control')
+    j.add_argument('--stopped-rc', type=int, help="the R4 runner control's exit status, as the driver saw it")
     a = ap.parse_args()
     return collect(a) if a.command == 'collect' else judge(a)
 
