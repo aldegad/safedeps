@@ -47,8 +47,9 @@
 //!
 //! Every rewrite holds 7d66f8c's: the flag right after each verb the
 //! reference rewrite's own search finds (`grep -ob` over the live and flat
-//! views of the command and of each script it hands to a shell), the flag at
-//! the end of a command the release appended to, and v2.17.2's flag in the
+//! views of the command and of each script the bash rewrite read as a text of
+//! its own), the flag at the end of a command the release appended to, and
+//! v2.17.2's flag in the
 //! two texts the bash rewrite did not read: a heredoc body piped into another
 //! command, and a script word that is not one plain quoted segment or goes to
 //! another shell, there in the word's bytes as written. Those positions say
@@ -57,8 +58,13 @@
 //! options. A floor position belongs to an install only where the two name
 //! the same `npm` bytes, and only to drop the floor of an install that is
 //! already true in a command the release left as written, as the bash rewrite
-//! does. In a script the bash rewrite did not read, that floor is never
-//! dropped: there it placed v2.17.2's flag without reading the install.
+//! does. v2.17.2's flags in a script the bash rewrite did not read are never
+//! dropped: it placed them without reading the install.
+//!
+//! Beyond those bytes the rewrite adds one thing, the place the reader read.
+//! No flag goes after a verb the reference's search did not find, and no
+//! offset of a payload's own text becomes an offset of the command without
+//! being read back.
 //!
 //! # The record (record.rs)
 //!
@@ -435,17 +441,22 @@ fn rewrite_with(run: &mut Run, rx: &Rx, command: &[u8], cands: &[u8], detail: &m
         }
         i += 1;
     }
-    // The release's floor: the reference's verbs in the command and in the
-    // scripts it hands to a shell, and v2.17.2's flags in piped heredocs.
-    // A pair in a script the bash rewrite did not read as a text of its own
-    // (its U spans: another shell's script, a double-quoted one with an
-    // escape or a substitution) is v2.17.2's flag there, placed whether or
-    // not that install is already true: `always` keeps it.
+    // The release's floor: the reference's verbs, and v2.17.2's flags in
+    // piped heredocs, in the texts the reference searched: the command, and
+    // the scripts the bash rewrite read as texts of their own. Such a script
+    // is one quoted segment of the text that holds it, so an offset in it is
+    // that offset in the command, shifted: the floor's bytes are the
+    // reference's, and no source map is trusted for them.
+    //
+    // No verb is searched for in any other payload. A script the bash
+    // rewrite did not read has v2.17.2's flags, placed below in the bytes of
+    // the word as written; a flag carried there from the script's own text
+    // through its source map, unread, broke the word that holds it
+    // (`sh -c 'npm '\''ci'\'' x'` lost its `x`).
     let mut pairs: Vec<(Option<usize>, usize)> = Vec::new();
-    let mut always: Vec<usize> = Vec::new();
     let mut fed: BTreeSet<usize> = BTreeSet::new();
     for node in &nodes {
-        if !matches!(node.kind, b'R' | b'S' | b'E') {
+        if node.kind != b'R' && !(matches!(node.kind, b'S' | b'E') && node.read_like) {
             continue;
         }
         let verbs = if mentions_npm(&node.text) { floor::verb_pairs(run, &rx.floor, &node.text)? } else { Vec::new() };
@@ -453,9 +464,6 @@ fn rewrite_with(run: &mut Run, rx: &Rx, command: &[u8], cands: &[u8], detail: &m
             if let Some(er) = node.after(e) {
                 if !pairs.contains(&(node.byte(s), er)) {
                     pairs.push((node.byte(s), er));
-                }
-                if node.kind != b'R' && !node.read_like {
-                    always.push(er);
                 }
             }
         }
@@ -557,7 +565,7 @@ fn rewrite_with(run: &mut Run, rx: &Rx, command: &[u8], cands: &[u8], detail: &m
     let (mut settled, mut asked, mut unverified, mut floor_rec) = (false, false, false, false);
     let mut read_at: Vec<usize> = Vec::new();
     for &(s, e) in &pairs {
-        let kept = release_rewrote || always.contains(&e) || !s.is_some_and(|s| settled_npm.contains(&s));
+        let kept = release_rewrote || !s.is_some_and(|s| settled_npm.contains(&s));
         if kept {
             offsets.insert(e);
         }
@@ -571,20 +579,18 @@ fn rewrite_with(run: &mut Run, rx: &Rx, command: &[u8], cands: &[u8], detail: &m
             d.extend_from_slice(format!("fed {}\n", e).as_bytes());
         }
     }
+    // What the reader adds to the floor is the place it read, and nothing
+    // else: a place in the command is npm's own reading of the statement
+    // with the flag there, and a place in a payload has been read back
+    // through every text above it (`carry`). The flag after a verb is the
+    // floor's, where the reference's search found that verb; where it did
+    // not, no flag after the verb is owed and none is placed. One placed
+    // there unread stood after a `--` (`npm -- ci x`, an operand to npm) or
+    // outside the quotes of the word that holds the script.
     for f in &found {
-        let has_pair = f.npm.is_some_and(|s| pairs.iter().any(|(ps, _)| *ps == Some(s)));
-        let floor_at = if has_pair { None } else { f.verb };
         match f.note {
-            read::Note::Settled => {
-                settled = true;
-                if release_rewrote {
-                    offsets.extend(floor_at);
-                }
-            }
-            read::Note::Floor => {
-                floor_rec = true;
-                offsets.extend(floor_at);
-            }
+            read::Note::Settled => settled = true,
+            read::Note::Floor => floor_rec = true,
             read::Note::Unverified => {
                 unverified = true;
                 match f.place {
@@ -593,20 +599,16 @@ fn rewrite_with(run: &mut Run, rx: &Rx, command: &[u8], cands: &[u8], detail: &m
                     }
                     None => floor_rec = true,
                 }
-                offsets.extend(floor_at);
             }
-            read::Note::Asked | read::Note::Plain => {
-                match f.place {
-                    Some(p) => {
-                        offsets.insert(p);
-                        if f.note == read::Note::Asked {
-                            asked = true;
-                        }
+            read::Note::Asked | read::Note::Plain => match f.place {
+                Some(p) => {
+                    offsets.insert(p);
+                    if f.note == read::Note::Asked {
+                        asked = true;
                     }
-                    None => floor_rec = true,
                 }
-                offsets.extend(floor_at);
-            }
+                None => floor_rec = true,
+            },
         }
         read_at.extend(f.at);
         if let Some(d) = detail.as_mut() {
