@@ -19,4 +19,10 @@ PRE_EDITS = {
             observed.split('|').map(|v|v.split('.').next().unwrap_or(v)).collect::<Vec<_>>().join("|")
         }else{observed};
         if os::clock_has_subsecond(&observed) {'''),
+    'seconds': ('rust/src/pre.rs',
+        '        let now = os::wall(os::WallRole::BackstopTouch).system_time();',
+        '        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(os::wall(os::WallRole::BackstopTouch).seconds().max(0) as u64);'),
+    'mark': ('rust/src/pre/snapshot.rs',
+        '    pub fn mark_rewrite(&self,command:&[u8],unread:bool)->io::Result<()> {',
+        '    pub fn mark_rewrite(&self,command:&[u8],unread:bool)->io::Result<()> {\n        return Err(io::Error::from(io::ErrorKind::PermissionDenied));'),
 }

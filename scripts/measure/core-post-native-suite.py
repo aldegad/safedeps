@@ -3,7 +3,8 @@
 
 No product test switch or PATH injection is used for native operations.
 I/O faults use permissions; this builds copies for native delay, clock
-precision, and process query failure. It does not claim a Rust pre result.
+precision, and process query failure. --pre-core additionally builds native
+pre operation faults; running the default does not claim a Rust pre result.
 """
 import argparse
 import importlib.util
@@ -12,6 +13,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import time
 
 p=argparse.ArgumentParser(description=__doc__)
 p.add_argument('--archive',required=True)
@@ -42,9 +44,29 @@ for name,(relative,old,new) in edits.items():
     rc=execute([str(cargo),'build','--manifest-path',str(target/'rust/Cargo.toml'),'--release','--locked','--offline','-j1'],name+'-build',dict(os.environ,SAFEDEPS_CORE_BUILD_KIND='checkout'))
     if rc:raise SystemExit(rc)
     cores[name]=target/'rust/target/release/safedeps-core'
+pre_faults={}
+if a.pre_core:
+    # The old date fixture fixes the second shared by two snapshot calls.
+    # Embed one fixture-owned second in this selected archive only; the
+    # ordinary clock and every product source remain unchanged.
+    second=int(time.time())
+    edits=dict(fault_edits.PRE_EDITS)
+    edits['same']=('rust/src/pre/snapshot.rs',
+        'let timestamp=os::wall(os::WallRole::PreSnapshot).seconds();',
+        'let _observed=os::wall(os::WallRole::PreSnapshot).seconds(); let timestamp='+str(second)+'i64;')
+    for name,(relative,old,new) in edits.items():
+        target=run/('pre-'+name);target.mkdir();subprocess.run(['tar','xf',str(archive),'-C',str(target)],check=True)
+        path=target/relative;text=path.read_text()
+        if text.count(old)!=1:raise SystemExit(name+': pre source injection is not unique')
+        path.write_text(text.replace(old,new))
+        (run/('pre-'+name+'.mutation.json')).write_text(json.dumps(dict(file=relative,old=old,new=new),indent=2)+'\n')
+        rc=execute([str(cargo),'build','--manifest-path',str(target/'rust/Cargo.toml'),'--release','--locked','--offline','-j1'],'pre-'+name+'-build',dict(os.environ,SAFEDEPS_CORE_BUILD_KIND='checkout'))
+        if rc:raise SystemExit(rc)
+        pre_faults[name]=target/'rust/target/release/safedeps-core'
 argv=[sys.executable,str(root/'scripts/measure/core-post-suite.py'),'--archive',str(archive),'--core',str(core),
       '--native-faults','--suite','e2e','--run-dir',str(run/'e2e'),
       '--walk-core',str(cores['walk']),'--owner-core',str(cores['owner']),'--coarse-core',str(cores['coarse'])]
 if a.pre_core:argv+=['--pre-core',a.pre_core]
+for name,binary in pre_faults.items():argv+=['--pre-'+name+'-core',str(binary)]
 rc=execute(argv,'e2e')
 raise SystemExit(rc)
