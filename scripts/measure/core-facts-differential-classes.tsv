@@ -2,18 +2,12 @@
 #
 # <class><TAB><ERE every differing key matches><TAB><ERE over the command><TAB><reason>
 # The first line whose two expressions both match names a mismatch. A class
-# names a place where the reference itself is wrong or outside stage 1, never
+# names a place where the reference itself is wrong or outside the stage, never
 # a place where the core is.
 #
-# guard-crash: the bash guard exits 1 before it writes its facts. In
-# safedeps_manager_long_option, `first="${BASH_REMATCH[2]}"` reads an array
-# element that is unset when the option stands before the command (the scope
-# pattern then has no group), and under `set -u` bash ends the guard there
-# (lib/install-grammar.sh, measured on macOS bash 3.2.57: `BASH_REMATCH[2]:
-# unbound variable`). The entry shim turns that into an explained deny, so the
-# command does not run; the explanation names a broken checkout, which is not
-# the cause. Only a parser that takes abbreviations (pip, pipx, gem) reaches
-# the line, with a long option that is a unique abbreviation, before the
-# command word. The core reads the element as empty, which is what the line
-# after it expects.
-guard-crash	^(reading_set\.facts|eco\.|targets\.|readings\.|hidden_unreduced|ledger_eco|ledger_specs|failed\.facts)	^(pip[0-9.]*|pipx|gem) --[a-z][a-z-]*([= ]|$)	the bash guard dies on BASH_REMATCH[2] unbound in safedeps_manager_long_option (an abbreviated long option before the command); the shim denies
+# No class is open. The first one, guard-crash, named a defect of the bash
+# guard that this comparison found: in safedeps_manager_long_option,
+# `first="${BASH_REMATCH[2]}"` read an array element that is unset when the
+# option stands before the command, and under `set -u` bash ended the guard
+# there (`pip --cache x install evil==1.0.0`; pip, pipx and gem take
+# abbreviations). The guard was fixed (a4bad97) and the class went with it.
