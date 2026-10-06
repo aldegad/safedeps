@@ -50,8 +50,9 @@ summary prints the counts:
 Two families. A `verdict` case compares answers; one whose command is long
 enough to engage the self budget runs with SAFEDEPS_BUDGET_DISABLED=1 on both
 sides, because the reference is slow enough to lose such a case to its own
-deadline. A `deadline` case gives npm a stand-in that answers late, and both
-sides have to give the same undecided answer.
+deadline. A case about the budget's own settings says `"budget": "on"` and
+keeps the deadline. A `deadline` case gives npm a stand-in that answers late,
+and both sides have to give the same undecided answer.
 
 The environment of a hook is a closed list too: PATH (the system directories,
 after the stand-in's directory when the case has one), HOME, SAFEDEPS_HOME,
@@ -110,7 +111,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 MEASURE = os.path.join(ROOT, "scripts", "measure")
 DEFAULT_CASES = os.path.join(MEASURE, "core-hook-cases.json")
 BOX_DIRS = ("home", "state", "project", "tmp")
-ENGAGE_BYTES = 4096
+# The size at which the pre-guard's self budget engages by default
+# (SAFEDEPS_BUDGET_ENGAGE_DEFAULT_BYTES).
+ENGAGE_BYTES = 1024
 CLOSED_PORT = "http://127.0.0.1:9"
 
 MASKS = ("iso-utc", "epoch", "snapshot-id", "snapshot-id-unlisted", "pid", "mktemp", "inode", "clock",
@@ -499,7 +502,7 @@ def case_env(ctx, case, box, step):
                     "SAFEDEPS_PROVIDER_CACHE_TTL_SECONDS": "0"})
     elif providers == "fixture":
         env.update(ctx.provider_env)
-    if case.get("family", "verdict") == "verdict" and case["_long"]:
+    if case.get("family", "verdict") == "verdict" and case["_long"] and case.get("budget") != "on":
         env["SAFEDEPS_BUDGET_DISABLED"] = "1"
     env.update(fill(case.get("env", {}), box))
     if step is not None:
@@ -1132,6 +1135,7 @@ def main():
             cr.reference(ref)
             row["unmet"] = cr.unmet
             row["secs"] = [round(s["secs"], 2) for s in cr.ref["steps"] if s]
+            row["status"] = [s["status"] for s in cr.ref["steps"] if s]
             for u in cr.unmet:
                 lines.append("not ok - %s: %s" % (case["id"], u))
             if a.control:
