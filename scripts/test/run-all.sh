@@ -64,8 +64,10 @@ cd "${ROOT_DIR}" || exit 2
 # a host is not handed more work than it has CPUs for: manager-variants judges
 # eight forms at a time, install-dir-differential six, and a census shard runs
 # that many guards (SAFEDEPS_TEST_JOBS, which --unit sets to the weight).
-# seconds is the measured wall clock of the whole battery at its weight on a
-# host with room for it; the runner starts the longest units first. A local
+# seconds is the measured wall clock of the whole battery at its weight, from
+# the plan's measurement (safedeps/suite-in-ten-minutes-on-our-hosts, 744ea16,
+# alex-macbook-m1 and carenine at load 2-25; the census from one shard of
+# eight); the runner starts the longest units first. A local
 # run (`npm test`, --release) ignores all three and runs each battery whole.
 #
 # The second phase holds the batteries that a busy machine turns red without a
@@ -86,21 +88,21 @@ cd "${ROOT_DIR}" || exit 2
 # one process at a time. On the Mac the single-process batteries outlasted the
 # census by six minutes.
 ALL_BATTERIES=(
-  "smoke|1|dev|1|1|0|scripts/test/smoke.sh"
-  "scan-contract|1|dev|1|1|0|scripts/test/scan-contract.sh"
-  "statement-batch|1|dev|1|1|0|scripts/test/statement-batch.sh"
-  "shell-reading|1|dev|1|1|0|scripts/test/shell-reading.sh"
-  "census|1|release|8|2|0|scripts/measure/scan-failure-census.sh --quick"
-  "consumer-forms|1|dev|4|1|0|scripts/test/consumer-forms.sh"
-  "manager-variants|1|dev|2|8|0|scripts/test/manager-variants.sh"
-  "install-dir-differential|1|dev|1|6|0|scripts/test/install-dir-differential.sh"
-  "workspace-snapshot-count|1|dev|1|1|0|scripts/test/workspace-snapshot-count.sh"
-  "self-budget|2|dev|1|1|0|scripts/test/self-budget.sh"
-  "advisory-log-retention|1|dev|1|1|0|scripts/test/advisory-log-retention.sh"
-  "hook-entry|1|dev|1|1|0|scripts/test/hook-entry.sh"
-  "lockless-forms|1|dev|2|1|0|scripts/test/lockless-forms.sh"
-  "effect-trace-grid|2|release|1|1|0|scripts/test/effect-trace-grid.sh"
-  "e2e|1|dev|1|1|0|scripts/test/e2e.sh"
+  "smoke|1|dev|1|1|350|scripts/test/smoke.sh"
+  "scan-contract|1|dev|3|1|861|scripts/test/scan-contract.sh"
+  "statement-batch|1|dev|1|1|263|scripts/test/statement-batch.sh"
+  "shell-reading|1|dev|1|1|295|scripts/test/shell-reading.sh"
+  "census|1|release|4|2|1030|scripts/measure/scan-failure-census.sh --quick"
+  "consumer-forms|1|dev|4|1|1126|scripts/test/consumer-forms.sh"
+  "manager-variants|1|dev|3|4|650|scripts/test/manager-variants.sh"
+  "install-dir-differential|1|dev|1|6|134|scripts/test/install-dir-differential.sh"
+  "workspace-snapshot-count|1|dev|1|1|8|scripts/test/workspace-snapshot-count.sh"
+  "self-budget|2|dev|1|1|140|scripts/test/self-budget.sh"
+  "advisory-log-retention|1|dev|1|1|1|scripts/test/advisory-log-retention.sh"
+  "hook-entry|1|dev|1|1|2|scripts/test/hook-entry.sh"
+  "lockless-forms|1|dev|2|1|509|scripts/test/lockless-forms.sh"
+  "effect-trace-grid|2|release|2|1|803|scripts/test/effect-trace-grid.sh"
+  "e2e|1|dev|1|1|351|scripts/test/e2e.sh"
 )
 #
 # A run without the census (the development set, one unit) has no second

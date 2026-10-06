@@ -176,7 +176,14 @@ templates=(
   'declared|bunx --cwd=x evil@1.0.0||deny | npm evil@1.0.0; | '
 )
 
-# One command per template, spelling and form; judged eight at a time.
+# How many tuples are judged at a time: SAFEDEPS_TEST_JOBS, which run-all.sh
+# sets (half the CPUs; a unit's weight on a host of scripts/ci/run-on-hosts.sh),
+# or eight when it is unset. It was eight whatever the machine, so the runner
+# could not count what this battery takes.
+batch="${SAFEDEPS_TEST_JOBS:-8}"
+[[ "${batch}" =~ ^[1-9][0-9]*$ ]] || fail "SAFEDEPS_TEST_JOBS must be a whole number of at least 1 (got ${batch:0:40})"
+
+# One command per template, spelling and form; judged batch at a time.
 jobs_dir="${tmp_root}/jobs"
 mkdir -p "${jobs_dir}"
 n=0 t_index=0 template_own=()
@@ -201,7 +208,7 @@ for t in "${templates[@]}"; do
       [[ -n "${template_own[t_index - 1]:-}" ]] || continue
       printf '%s\n' "${command}" > "${jobs_dir}/$((n - 1)).cmd"
       ( tuple "${command}" > "${jobs_dir}/$((n - 1)).out" ) &
-      (( n % 8 == 0 )) && wait
+      (( n % batch == 0 )) && wait
     done
   done
 done
@@ -307,7 +314,8 @@ for base in "${glued_bases[@]}"; do
     ( tuple "${glued//%C%/${base}}" > "${jobs_dir}/${n}.glued"
       tuple "${spaced//%C%/${base}}" > "${jobs_dir}/${n}.spaced" ) &
     n=$((n + 1))
-    (( n % 4 == 0 )) && wait
+    # Two tuples a job.
+    (( n % ((batch + 1) / 2) == 0 )) && wait
   done
 done
 wait
@@ -359,7 +367,7 @@ for option in "${runtime_options[@]}"; do
       printf '%s\n' "${command}" > "${jobs_dir}/${n}.cmd"
       ( tuple "${command}" > "${jobs_dir}/${n}.out" ) &
       n=$((n + 1))
-      (( n % 8 == 0 )) && wait
+      (( n % batch == 0 )) && wait
     done
   done
 done

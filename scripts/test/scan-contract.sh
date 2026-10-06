@@ -89,6 +89,16 @@ GUARD="scripts/safedeps-pre-guard.sh"
 pass() { printf 'ok - %s\n' "$1"; }
 fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
 
+# Rows for --shard I/M (scripts/test/lib/shard.sh): each input of the sections
+# that judge many inputs one at a time (the view properties above all, which
+# took 346 of the battery's first 392 seconds). The other checks run whole in
+# every shard. A random input is drawn before its row is decided, so every
+# shard draws the same inputs from the same seed.
+# shellcheck source=lib/shard.sh
+source "${ROOT_DIR}/scripts/test/lib/shard.sh"
+shard_args "$@"
+(( ${#SHARD_REST[@]} == 0 )) || fail "scan-contract.sh takes --shard I/M or --shard-list, not ${SHARD_REST[0]}"
+
 # --- load the shipped implementation ------------------------------------------
 # Extracted by name from the guard rather than sourced: the guard is an
 # executable hook with no source guard, and sourcing it would run the whole
@@ -629,6 +639,7 @@ reading_closes() {
   return "${rc}"
 }
 check_view_properties() { # input label
+  shard_row "view properties: $2" || return 0
   local x="$1" v once twice reading bash_views="" views
   for reading in bash zsh dash; do
     views=""
@@ -2465,4 +2476,5 @@ for manager in $(tr '|' '\n' <<< "${pipe_managers}" | sed -E 's/\[[^]]*\][*+]?//
 done
 pass "the discriminator names every census form and every manager the pipe check knows"
 
+shard_end
 printf 'scan-contract: all checks passed\n'
