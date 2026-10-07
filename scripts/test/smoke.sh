@@ -527,14 +527,14 @@ SAFEDEPS_HOME="${tmp_root}/safe-hook-codex" lib/ledger/ledger.sh approve npm lef
 codex_allow_output=$(
   run_codex_hook_command "${tmp_root}/home-hook-codex" "${tmp_root}/safe-hook-codex" "npm install left-pad@1.3.0" quiet
 )
-[[ -z "${codex_allow_output}" ]] || fail "hook keeps Codex approved install as plain allow"
+hook_response_parse "${codex_allow_output}" quiet || fail "hook keeps Codex approved install as plain allow"
 codex_sid=$(jq -r '.snapshot_id' "${tmp_root}/safe-hook-codex/pending/"*.json)
 jq -e '.ignore_scripts_injected == false' "${tmp_root}/safe-hook-codex/snapshots/${codex_sid}_meta.json" >/dev/null || fail "hook does not record injected meta flag for Codex"
 pass "hook keeps Codex approved install as plain allow"
 
 for inert_skip_cmd in "npm view left-pad" "npm run build" "npm --version"; do
   inert_skip_output=$(run_hook_command "${tmp_root}/home-inert-skip" "${tmp_root}/safe-inert-skip" "${inert_skip_cmd}" quiet)
-  [[ -z "${inert_skip_output}" ]] || fail "hook does not inject non-install command: ${inert_skip_cmd}"
+  hook_response_parse "${inert_skip_output}" quiet || fail "hook does not inject non-install command: ${inert_skip_cmd}"
 done
 pass "hook does not inject npm non-install commands"
 
@@ -543,7 +543,7 @@ SAFEDEPS_HOME="${tmp_root}/safe-hook-ignore-scripts" lib/ledger/ledger.sh approv
 ignore_scripts_output=$(
   run_hook_command "${tmp_root}/home-hook-ignore-scripts" "${tmp_root}/safe-hook-ignore-scripts" "npm install left-pad@1.3.0 --ignore-scripts" quiet
 )
-[[ -z "${ignore_scripts_output}" ]] || fail "hook does not duplicate --ignore-scripts"
+hook_response_parse "${ignore_scripts_output}" quiet || fail "hook does not duplicate --ignore-scripts"
 ignore_sid=$(jq -r '.snapshot_id' "${tmp_root}/safe-hook-ignore-scripts/pending/"*.json)
 jq -e '.ignore_scripts_injected == false' "${tmp_root}/safe-hook-ignore-scripts/snapshots/${ignore_sid}_meta.json" >/dev/null || fail "hook does not record injected meta flag when flag already exists"
 pass "hook does not duplicate --ignore-scripts"
@@ -763,7 +763,7 @@ for inert_in in \
   $'npm install left-pad@1.3.0 --ignore-scripts --message "a\nb"'
 do
   inert_out=$(run_hook_command "${tmp_root}/home-compound" "${tmp_root}/safe-compound" "${inert_in}" quiet)
-  [[ -z "${inert_out}" ]] || fail "an install that already carries the flag is not rewritten: $(printf '%q' "${inert_in}") (got: ${inert_out:0:200})"
+  hook_response_parse "${inert_out}" quiet || fail "an install that already carries the flag is not rewritten: $(printf '%q' "${inert_in}") (got: ${inert_out:0:200})"
 done
 # An install that asked for its scripts is made inert, and the override is
 # recorded rather than silent.
@@ -985,7 +985,7 @@ do
   settled_safe=$(mktemp -d "${tmp_root}/safe-settled-unread.XXXXXX")
   SAFEDEPS_HOME="${settled_safe}" lib/ledger/ledger.sh approve npm left-pad 1.3.0 1.3.0 smoke >/dev/null
   inert_out=$(run_hook_command "${tmp_root}/home-settled-unread" "${settled_safe}" "${inert_in}" quiet)
-  [[ -z "${inert_out}" ]] \
+  hook_response_parse "${inert_out}" quiet \
     || settled_unread_bad+=" [a rewrite: $(printf '%q' "${inert_in}") (got: ${inert_out:0:200})]"
   grep -q 'could not make every npm install in this command inert' "${settled_safe}/advisory.log" 2>/dev/null \
     || settled_unread_bad+=" [no downgrade line in advisory.log: $(printf '%q' "${inert_in}")]"
@@ -1186,7 +1186,7 @@ pass "--prefix install targets the override dir for snapshot/effect-gate (findin
 npx_runner_output=$(
   run_hook_command "${tmp_root}/home-npx-run" "${tmp_root}/safe-npx-run" "npx wrangler secret put EXAMPLE_SHARED_SECRET --name example-gateway ops@example.test" quiet
 )
-[[ -z "${npx_runner_output}" ]] || fail "hook allows npx tool run with @-bearing args"
+hook_response_parse "${npx_runner_output}" quiet || fail "hook allows npx tool run with @-bearing args"
 pass "hook allows npx tool run with @-bearing args"
 
 # Regression: a genuine install chained with an npx tool run must STILL be gated
@@ -1243,7 +1243,7 @@ false_positive_cases=(
 for fp_cmd in "${false_positive_cases[@]}"; do
   rm -rf "${false_positive_safe}"
   fp_output=$(run_hook_command "${tmp_root}/home-false-positive" "${false_positive_safe}" "${fp_cmd}" quiet)
-  [[ -z "${fp_output}" ]] || fail "hook ignores non-install text command: ${fp_cmd}"
+  hook_response_parse "${fp_output}" quiet || fail "hook ignores non-install text command: ${fp_cmd}"
   fp_pending=$({ find "${false_positive_safe}/pending" -name '*.json' -type f 2>/dev/null || true; } | wc -l | tr -d ' ')
   fp_snapshots=$({ find "${false_positive_safe}/snapshots" -name '*_meta.json' -type f 2>/dev/null || true; } | wc -l | tr -d ' ')
   [[ "${fp_pending}" == "0" && "${fp_snapshots}" == "0" ]] || fail "hook does not snapshot non-install text command: ${fp_cmd}"
@@ -1399,7 +1399,7 @@ tamper_post=$(
   jq -nc --arg cwd "${project_dir}" '{tool_name:"Bash",tool_input:{command:"npm install ledger-tamper@1.0.0"},cwd:$cwd}' |
     HOME="${tamper_home}" SAFEDEPS_HOME="${tamper_safe}" hook_response_capture "${tmp_root}/tamper-response" scripts/safedeps-hook-entry.sh post
 )
-grep -q 'suspicious dependency change detected' <<< "${tamper_post}" || fail "post hook reorgs safedeps ledger tamper script"
+grep -q 'suspicious dependency change detected' < "${tamper_post}" || fail "post hook reorgs safedeps ledger tamper script"
 pass "post hook reorgs safedeps ledger tamper script"
 
 fixture_json="${tmp_root}/recheck-fixture.json"

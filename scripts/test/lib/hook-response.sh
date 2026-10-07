@@ -19,12 +19,13 @@ hook_response_assert() { [[ ! -s "${HOOK_RESPONSE_FAILURES}" ]]; }
 
 # prefix is owned by this call (normally beside its existing mktemp home).
 # Capture exact bytes and exit status without starting another process.
+# Return the stdout path, not command-substituted bytes (which lose newlines).
 hook_response_capture() {
   local prefix="$1" rc=0
   shift
   "$@" > "${prefix}.stdout" 2> "${prefix}.stderr" || rc=$?
   printf '%s\n' "${rc}" > "${prefix}.rc"
-  printf '%s' "$(< "${prefix}.stdout")"
+  printf '%s' "${prefix}.stdout"
   return "${rc}"
 }
 
@@ -34,20 +35,21 @@ hook_response_stderr() { cat "$1.stderr"; }
 # Parse once when a row needs several fields; read() below replaces a single
 # jq field read. @sh quotes data before the shell assigns the parsed fields.
 hook_response_parse() {
-  local out="$1" expect="${2:-decision}" fields
+  local file="$1" expect="${2:-decision}" fields
   HOOK_QUIET=false HOOK_DECISION='' HOOK_REASON='' HOOK_REWRITE=''
   HOOK_HAS_REWRITE=false HOOK_MESSAGE=''
+  [[ -f "${file}" ]] || { hook_response_error "stdout file is missing: ${file}"; return 1; }
   case "${expect}" in
     quiet)
-      [[ -z "${out}" ]] || { hook_response_error "expected quiet stdout, got: ${out}"; return 1; }
+      [[ ! -s "${file}" ]] || { hook_response_error "expected quiet stdout, got: ${file}"; return 1; }
       HOOK_QUIET=true
       return 0 ;;
     quiet-or-decision)
-      if [[ -z "${out}" ]]; then HOOK_QUIET=true; return 0; fi ;;
+      if [[ ! -s "${file}" ]]; then HOOK_QUIET=true; return 0; fi ;;
     decision|message) ;;
     *) hook_response_error "unknown expectation ${expect}"; return 1 ;;
   esac
-  [[ -n "${out}" ]] || { hook_response_error "expected ${expect}, got no stdout"; return 1; }
+  [[ -s "${file}" ]] || { hook_response_error "expected ${expect}, got no stdout"; return 1; }
   fields=$(jq -ers --arg expect "${expect}" '
     if length != 1 or (.[0] | type != "object") then error("expected one JSON object") else .[0] end
     | if $expect == "message" then
@@ -67,13 +69,13 @@ hook_response_parse() {
            HOOK_HAS_REWRITE: (has("updatedInput") | tostring)}
       end
     | to_entries | map(.key + "=" + (.value | @sh)) | join(" ")
-  ' <<< "${out}") || { hook_response_error "invalid ${expect} stdout: ${out}"; return 1; }
+  ' "${file}") || { hook_response_error "invalid ${expect} stdout: ${file}"; return 1; }
   eval "${fields}"
 }
 
 hook_response_read() {
-  local field="$1" out="$2" expect="${3:-decision}"
-  hook_response_parse "${out}" "${expect}" || return 1
+  local field="$1" file="$2" expect="${3:-decision}"
+  hook_response_parse "${file}" "${expect}" || return 1
   case "${field}" in
     decision) printf '%s' "${HOOK_DECISION}" ;;
     reason) printf '%s' "${HOOK_REASON}" ;;
