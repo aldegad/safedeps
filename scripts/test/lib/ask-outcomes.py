@@ -42,6 +42,42 @@ def check(core, output):
                     lines=[target[2:],json.loads(facts)['unknown']]
                 for line in lines:oracle.npm_failure(observed,line)
                 rows.append(dict(operation=operation,observation=observed,rc=result.returncode,lines=lines))
+
+            # Carry the same independently observed failure all the way to
+            # the hook's systemMessage and advisory.log, not only the probe.
+            project=box/'project';tree=project/'node_modules';tree.mkdir(parents=True)
+            (project/'package.json').write_text('{"name":"fixture","version":"1.0.0"}')
+            lock='{"lockfileVersion":3,"packages":{}}'
+            (project/'package-lock.json').write_text(lock)
+            (tree/'.package-lock.json').write_text(lock)
+            npm.write_text('#!'+sys.executable+'\nimport os,signal,sys\n'
+                f'project={str(project)!r}\n'
+                'if sys.argv[1]=="prefix": print(project)\n'
+                'elif sys.argv[1]=="root": print(project+"/node_modules")\n'
+                'elif sys.argv[1]=="config": print(\'{"registry":"https://registry.npmjs.org/","replace-registry-host":"npmjs"}\')\n'
+                'elif sys.argv[1]=="query": os.kill(os.getpid(),signal.SIGKILL)\n'
+                'else: raise RuntimeError("unexpected npm operation")\n')
+            direct=subprocess.run([str(npm),'query','*'],capture_output=True,env=env)
+            observed=dict(returncode=direct.returncode)
+            assert direct.returncode == -9 and not direct.stdout and not direct.stderr
+            payload=dict(tool_name='Bash',tool_use_id='query-result',cwd=str(project),tool_input=dict(command='npm install'))
+            pre=subprocess.run([str(core),'pre'],input=json.dumps(payload).encode(),capture_output=True,env=env)
+            assert pre.returncode == 0 and not pre.stderr, pre
+            payload['tool_input']['command']=json.loads(pre.stdout)['hookSpecificOutput']['updatedInput']['command']
+            (tree/'.package-lock.json').unlink();(tree/'.package-lock.json').write_text(lock)
+            log=box/'state/advisory.log';before=log.read_bytes() if log.exists() else b''
+            post=subprocess.run([str(core),'post'],input=json.dumps(payload).encode(),capture_output=True,env=env)
+            assert post.returncode == 0 and not post.stderr, post
+            message=json.loads(post.stdout)['systemMessage']
+            result_lines=[line for line in message.splitlines() if line.startswith('npm rebuild was not run:')]
+            assert len(result_lines)==1, message
+            oracle.npm_query_report(observed,result_lines[0],project)
+            after=log.read_bytes();assert after.startswith(before)
+            advisory=[line.split('\t',1)[1] for line in after[len(before):].decode().splitlines()
+                      if '\tpost-verify: npm rebuild after the install skipped in ' in line]
+            assert len(advisory)==1, after
+            oracle.npm_query_report(observed,advisory[0],project,advisory=True)
+            rows.append(dict(operation='post',observation=observed,rc=post.returncode,lines=result_lines,advisory=advisory))
     finally:
         output.write_text(json.dumps(rows,indent=2)+'\n')
 
