@@ -97,10 +97,6 @@ class StoreError(Exception):
     """Bytes this collection read could not be kept: the collection's own failure."""
 
 
-class EditError(Exception):
-    """A control's exact edit did not apply once."""
-
-
 class CollectStop(Exception):
     """A launch could not be completed; the collection stops with exit 2."""
 
@@ -1955,20 +1951,3 @@ def mutate(rec, scenario, view, basis, control):
     for e in control['edits']:
         effects += apply_edit(rec, scenario, v, basis, e)
     return v, tuple(effects)
-
-
-def apply_file_edits(root, edits):
-    """A control's exact edits of the files of a copied tree: each old text
-    occurs exactly once, or nothing after it runs. Returns each file's before
-    and after digest."""
-    notes = []
-    for e in edits:
-        path = Path(root) / e['file']
-        before = path.read_bytes()
-        count = before.count(e['old'].encode('utf-8'))
-        if count != 1:
-            raise EditError('%s: the old text occurs %d times, not once' % (e['file'], count))
-        after = before.replace(e['old'].encode('utf-8'), e['new'].encode('utf-8'))
-        path.write_bytes(after)
-        notes.append({'file': e['file'], 'before_sha256': sha(before), 'after_sha256': sha(after)})
-    return notes
