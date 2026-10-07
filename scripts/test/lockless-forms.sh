@@ -34,7 +34,7 @@ set -euo pipefail
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "${ROOT_DIR}"
 
-pass() { printf 'ok - %s\n' "$1"; }
+pass() { hook_response_assert || fail "a hook response could not be read"; printf 'ok - %s\n' "$1"; }
 fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
 
 # Rows for --shard I/M (scripts/test/lib/shard.sh): each pass of a loop over
@@ -59,6 +59,8 @@ shard_mask tmp "${tmp_root}"
 # shellcheck source=lib/release-floor.sh
 source "${ROOT_DIR}/scripts/test/lib/release-floor.sh"
 NPM_SANDBOX_RELEASE_FLOOR=true
+# These Claude install rows expect decisions; already-inert rows name quiet.
+NPM_SANDBOX_PRE_EXPECT=decision
 RELEASE_FLOOR_FAILS="${tmp_root}/release-floor.fails"
 : > "${RELEASE_FLOOR_FAILS}"
 
@@ -214,7 +216,7 @@ do
   [[ "${engine}" == codex ]] || ! victim_ran || fail "no script of the unverified package runs: ${carrier}"
   [[ -z "$(cd "${CASE_PROJECT}" && find . -path '*/node_modules/sd-victim' -print 2>/dev/null)" ]] \
     || fail "the rollback removes the unapproved package from disk: ${carrier}"
-  grep -q 'packages@' <<< "${CASE_POST}" && fail "a workspace member is not read as a package: ${carrier} (post: ${CASE_POST})"
+  grep -q 'packages@' < "${CASE_POST_FILE}" && fail "a workspace member is not read as a package: ${carrier} (post: ${CASE_POST})"
 done
 pass "an install from a directory without a package.json, a workspace member, or a symlinked member is read where npm put it"
 
@@ -283,9 +285,9 @@ do
     new_project
     : > "${CX_MARKS}"
     cmd="${form//@SPEC@/${spec}}"
-    decision=$(jq -nc --arg c "${cmd}" --arg d "${CASE_CWD}" '{tool_name:"Bash",tool_input:{command:$c},cwd:$d}' \
-      | SAFEDEPS_HOME="${CASE_HOME}" scripts/safedeps-hook-entry.sh pre 2>/dev/null \
-      | jq -r '.hookSpecificOutput.permissionDecision // "allow"')
+    response_file=$(jq -nc --arg c "${cmd}" --arg d "${CASE_CWD}" '{tool_name:"Bash",tool_input:{command:$c},cwd:$d}' \
+      | SAFEDEPS_HOME="${CASE_HOME}" hook_response_capture "${CASE_HOME}.code-choice" scripts/safedeps-hook-entry.sh pre)
+    decision=$(hook_response_read decision "${response_file}")
     want=allow
     [[ "${spec}" != sd-victim@* ]] || want=deny
     marks=$(wc -l < "${CX_MARKS}" | tr -d ' ')
@@ -363,7 +365,7 @@ do
   IFS='|' read -r where setting form lands <<< "${carrier}"
   new_project
   run_install "npm install sd-approved"
-  [[ -z "${CASE_POST}" ]] || fail "an approved install stays quiet before the .npmrc case (post: ${CASE_POST})"
+  hook_response_parse "${CASE_POST_FILE}" quiet || fail "an approved install stays quiet before the .npmrc case (post: ${CASE_POST})"
   case "${where}" in
     project) printf '%s\n' "${setting}" > "${CASE_PROJECT}/.npmrc" ;;
     user) printf '%s\n%s\n' "${USER_NPMRC_BASE}" "${setting}" > "${npm_config_userconfig}" ;;
@@ -401,7 +403,7 @@ do
       # npm's own inventory would skip it and name the package. Either answer
       # is a skipped rebuild that says why.
       [[ -z "${CASE_RAN}" ]] || fail "npm rebuild does not run over a package no lockfile records: ${carrier} (${CASE_RAN})"
-      grep -qE 'no install trace in |neither lockfile records \(node_modules/sd-victim \(sd-victim@1\.0\.0, not in either lockfile\)\)' <<< "${CASE_POST}" \
+      grep -qE 'no install trace in |neither lockfile records \(node_modules/sd-victim \(sd-victim@1\.0\.0, not in either lockfile\)\)' < "${CASE_POST_FILE}" \
         || fail "the skipped rebuild says why: ${carrier} (post: ${CASE_POST:-<quiet>})"
       ;;
   esac
@@ -424,7 +426,7 @@ for setting in global=true location=global; do
   : > "${MARKS}"
   run_install "npm install sd-approved && printf '%s\\n' '${setting}' > .npmrc" claude seed_global_victim
   [[ -e "${tmp_root}/global/lib/node_modules/sd-victim" ]] || fail "sd-victim is in the global prefix during the rebuild: ${setting}"
-  [[ -z "${CASE_POST}" ]] || fail "the approved install confirms quietly: ${setting} (post: ${CASE_POST})"
+  hook_response_parse "${CASE_POST_FILE}" quiet || fail "the approved install confirms quietly: ${setting} (post: ${CASE_POST})"
   grep -q '^sd-approved@[^	]*	install' <<< "${CASE_RAN}" || fail "npm rebuild rebuilds the verified project tree: ${setting} (${CASE_RAN:-nothing ran})"
   victim_ran && fail "npm rebuild does not follow the .npmrc into the global tree: ${setting} ($(cut -f1,3 "${MARKS}" | paste -sd, -))"
 done
@@ -445,7 +447,7 @@ do
   IFS='|' read -r where setting form <<< "${carrier}"
   new_project
   run_install "npm install sd-swapped@1.0.0"
-  [[ -z "${CASE_POST}" ]] || fail "the approved 1.0.0 installs quietly before the version case (post: ${CASE_POST})"
+  hook_response_parse "${CASE_POST_FILE}" quiet || fail "the approved 1.0.0 installs quietly before the version case (post: ${CASE_POST})"
   case "${where}" in
     project) printf '%s\n' "${setting}" > "${CASE_PROJECT}/.npmrc" ;;
     user) printf '%s\n%s\n' "${USER_NPMRC_BASE}" "${setting}" > "${npm_config_userconfig}" ;;
@@ -462,7 +464,7 @@ do
   [[ -z "${CASE_RAN}" ]] || fail "no rebuild runs over the version no lockfile records: ${carrier} (${CASE_RAN})"
   # As above: no trace here (measured), or npm's inventory naming both versions.
   grep -qE 'no install trace in |neither lockfile records \(node_modules/sd-swapped \(sd-swapped@1\.0\.1 on disk, the lockfile records sd-swapped@1\.0\.0\)\)' \
-    <<< "${CASE_POST}" || fail "the skipped rebuild says why: ${carrier} (post: ${CASE_POST:-<quiet>})"
+    < "${CASE_POST_FILE}" || fail "the skipped rebuild says why: ${carrier} (post: ${CASE_POST:-<quiet>})"
 done
 pass "a version written over a recorded one is not rebuilt, and the user is told why"
 
@@ -480,12 +482,12 @@ unpack_swapped_101() {
 if shard_row "where the install left a trace, a version no lockfile records skips the rebuild, and the warning names the key and both versions"; then
   new_project
   run_install "npm install sd-swapped@1.0.0"
-  [[ -z "${CASE_POST}" ]] || fail "the approved 1.0.0 installs quietly before the version case (post: ${CASE_POST})"
+  hook_response_parse "${CASE_POST_FILE}" quiet || fail "the approved 1.0.0 installs quietly before the version case (post: ${CASE_POST})"
   : > "${MARKS}"
   run_install "npm install sd-approved" claude unpack_swapped_101
   grep -q '^sd-swapped@1.0.1' "${MARKS}" && fail "no script of the version no lockfile records runs ($(cut -f1,2 "${MARKS}" | paste -sd, -))"
   grep -q 'neither lockfile records (node_modules/sd-swapped (sd-swapped@1.0.1 on disk, the lockfile records sd-swapped@1.0.0))' \
-    <<< "${CASE_POST}" || fail "the skipped rebuild names the package and both versions (post: ${CASE_POST:-<quiet>})"
+    < "${CASE_POST_FILE}" || fail "the skipped rebuild names the package and both versions (post: ${CASE_POST:-<quiet>})"
   pass "where the install left a trace, a version no lockfile records skips the rebuild, and the warning names the key and both versions"
 fi
 
@@ -529,7 +531,7 @@ if shard_row "a node_modules with no hidden lockfile is not rebuilt, and the use
   : > "${MARKS}"
   run_install "npm install sd-approved" claude drop_hidden_lockfile
   [[ -z "${CASE_RAN}" ]] || fail "npm rebuild does not run over a node_modules with no hidden lockfile (${CASE_RAN})"
-  grep -q 'npm rebuild was not run' <<< "${CASE_POST}" || fail "the skipped rebuild is reported (post: ${CASE_POST:-<quiet>})"
+  grep -q 'npm rebuild was not run' < "${CASE_POST_FILE}" || fail "the skipped rebuild is reported (post: ${CASE_POST:-<quiet>})"
   pass "a node_modules with no hidden lockfile is not rebuilt, and the user is told"
 fi
 
@@ -545,7 +547,7 @@ for behaviour in fail hang; do
   run_install "npm install sd-approved"
   CASE_POST_PATH=""
   [[ -z "${CASE_RAN}" ]] || fail "npm rebuild does not run when npm did not say what it would rebuild: ${behaviour} (${CASE_RAN})"
-  grep -q 'npm rebuild was not run: safedeps asked npm which packages it would rebuild and got no answer' <<< "${CASE_POST}" \
+  grep -q 'npm rebuild was not run: safedeps asked npm which packages it would rebuild and got no answer' < "${CASE_POST_FILE}" \
     || fail "the skipped rebuild says npm did not answer: ${behaviour} (post: ${CASE_POST:-<quiet>})"
 done
 pass "when npm does not say what a rebuild would run over, the rebuild is skipped and the user is told"
@@ -576,7 +578,7 @@ do
   CASE_CWD="${CASE_PROJECT}/${cwd}"
   : > "${MARKS}"
   run_install "${form}"
-  [[ -z "${CASE_POST}" ]] || fail "an approved install is confirmed quietly: ${carrier} (post: ${CASE_POST})"
+  hook_response_parse "${CASE_POST_FILE}" quiet || fail "an approved install is confirmed quietly: ${carrier} (post: ${CASE_POST})"
   ungated && fail "an install the effect gate reads is not recorded UNGATED: ${carrier}"
   grep -q '^sd-approved@[^	]*	install' <<< "${CASE_RAN}" || fail "the verified inert install is rebuilt, so its scripts run: ${carrier}"
   where=$(cd "${CASE_PROJECT}/${where}" && pwd -P)
@@ -602,7 +604,7 @@ records_dependency() {
     && jq -e --arg p "node_modules/${package}" '.packages[$p] != null' "${CASE_PROJECT}/package-lock.json" >/dev/null
 }
 rollback_removed_node_modules() {
-  [[ ! -e "${CASE_PROJECT}/node_modules" ]] && jq -r '.systemMessage // empty' <<< "${CASE_POST}" | grep -qx 'removed .*/node_modules'
+  [[ ! -e "${CASE_PROJECT}/node_modules" ]] && hook_response_read message "${CASE_POST_FILE}" message | grep -x 'removed .*/node_modules' >/dev/null
 }
 lacks_dependency() {
   local package="$1"
@@ -622,7 +624,7 @@ for engine in claude codex; do
   new_project
   approve_too
   run_install "npm install sd-approved" "${engine}"
-  [[ -z "${CASE_POST}" ]] || fail "the first approved install is confirmed quietly on ${engine} (post: ${CASE_POST})"
+  hook_response_parse "${CASE_POST_FILE}" quiet || fail "the first approved install is confirmed quietly on ${engine} (post: ${CASE_POST})"
   : > "${MARKS}"
   run_install "npm install sd-victim" "${engine}"
   rolled_back || fail "an unapproved install after an approved one is rolled back on ${engine} (post: ${CASE_POST:-<quiet>})"
@@ -634,7 +636,7 @@ for engine in claude codex; do
   [[ "${engine}" == codex ]] || ! victim_ran || fail "no script of the unverified package runs on ${engine}"
 
   run_install "npm install sd-approved-too" "${engine}"
-  [[ -z "${CASE_POST}" ]] || fail "the second approved install is confirmed quietly on ${engine} (post: ${CASE_POST})"
+  hook_response_parse "${CASE_POST_FILE}" quiet || fail "the second approved install is confirmed quietly on ${engine} (post: ${CASE_POST})"
   run_install "npm install sd-victim" "${engine}"
   rolled_back || fail "a second unapproved install is rolled back on ${engine} (post: ${CASE_POST:-<quiet>})"
   records_dependency sd-approved && records_dependency sd-approved-too \
@@ -665,7 +667,7 @@ if shard_row "a verified state that cannot be recorded leaves the baseline in pl
   rolled_back && fail "the unrecorded case is an approved install, confirmed rather than rolled back (post: ${CASE_POST})"
   [[ "$(cat "${CASE_HOME}"/confirmed_*)" == "${baseline}" ]] \
     || fail "an unrecorded verified state leaves the baseline where it was"
-  grep -q 'could not record the result as the new rollback baseline' <<< "${CASE_POST}" \
+  grep -q 'could not record the result as the new rollback baseline' < "${CASE_POST_FILE}" \
     || fail "the user is told the baseline did not move (post: ${CASE_POST:-<quiet>})"
   grep -q 'rollback baseline was not moved' "${CASE_HOME}/advisory.log" \
     || fail "advisory.log records that the baseline did not move"
@@ -694,9 +696,11 @@ race_dir=$(mktemp -d "${tmp_root}/race.XXXXXX")
 mkdir -p "${race_dir}/shim"
 cat > "${race_dir}/second-call.sh" <<RACE_EOF
 #!/usr/bin/env bash
+source "${ROOT_DIR}/scripts/test/lib/hook-response.sh"
+HOOK_RESPONSE_FAILURES="${HOOK_RESPONSE_FAILURES}"
 payload=\$(jq -nc --arg c "npm install sd-victim" --arg d "${CASE_PROJECT}" '{tool_name:"Bash",tool_input:{command:\$c},cwd:\$d}')
-pre=\$(printf '%s' "\${payload}" | SAFEDEPS_HOME="${CASE_HOME}" "${ROOT_DIR}/scripts/safedeps-hook-entry.sh" pre 2>/dev/null)
-cmd=\$(jq -r '.hookSpecificOutput.updatedInput.command // empty' <<< "\${pre}")
+pre_file=\$(printf '%s' "\${payload}" | SAFEDEPS_HOME="${CASE_HOME}" hook_response_capture "${race_dir}/second-response" "${ROOT_DIR}/scripts/safedeps-hook-entry.sh" pre)
+cmd=\$(hook_response_read required-rewrite "\${pre_file}") || exit 1
 printf '%s' "\${cmd}" > "${race_dir}/second.cmd"
 [[ -n "\${cmd}" ]] && (cd "${CASE_PROJECT}" && bash -c "\${cmd}") > "${race_dir}/second.log" 2>&1
 printf 'exit=%s\n' "\$?" >> "${race_dir}/second.log"
@@ -715,14 +719,14 @@ chmod +x "${race_dir}/second-call.sh" "${race_dir}/shim/npm"
 
 : > "${MARKS}"
 payload=$(jq -nc --arg c "npm install sd-approved" --arg d "${CASE_PROJECT}" '{tool_name:"Bash",tool_input:{command:$c},cwd:$d}')
-pre=$(printf '%s' "${payload}" | SAFEDEPS_HOME="${CASE_HOME}" scripts/safedeps-hook-entry.sh pre 2>/dev/null)
-first_cmd=$(jq -r '.hookSpecificOutput.updatedInput.command // empty' <<< "${pre}")
-[[ "${first_cmd}" == *--ignore-scripts* ]] || fail "the approved install runs inert on Claude Code (pre: ${pre})"
+pre_file=$(printf '%s' "${payload}" | SAFEDEPS_HOME="${CASE_HOME}" hook_response_capture "${race_dir}/first-pre" scripts/safedeps-hook-entry.sh pre)
+first_cmd=$(hook_response_read required-rewrite "${pre_file}")
+[[ "${first_cmd}" == *--ignore-scripts* ]] || fail "the approved install runs inert on Claude Code (pre: ${pre_file})"
 (cd "${CASE_PROJECT}" && bash -c "${first_cmd}" > "${race_dir}/first.log" 2>&1) || fail "the approved install succeeds"
 payload=$(jq -nc --arg c "${first_cmd}" --arg d "${CASE_PROJECT}" '{tool_name:"Bash",tool_input:{command:$c},cwd:$d}')
-first_post=$(printf '%s' "${payload}" | PATH="${race_dir}/shim:${PATH}" SAFEDEPS_HOME="${CASE_HOME}" \
-  scripts/safedeps-hook-entry.sh post 2>/dev/null)
-[[ -e "${race_dir}/fired" ]] || fail "the second call ran inside the first one's post-verify (post: ${first_post:-<quiet>})"
+first_post_file=$(printf '%s' "${payload}" | PATH="${race_dir}/shim:${PATH}" SAFEDEPS_HOME="${CASE_HOME}" \
+  hook_response_capture "${race_dir}/first-post" scripts/safedeps-hook-entry.sh post)
+[[ -e "${race_dir}/fired" ]] || fail "the second call ran inside the first one's post-verify (post: ${first_post_file:-<quiet>})"
 second_cmd=$(cat "${race_dir}/second.cmd")
 [[ "${second_cmd}" == *--ignore-scripts* ]] || fail "the second call was let through inert to the effect gate"
 grep -qx 'exit=0' "${race_dir}/second.log" || fail "the second install succeeds ($(tail -3 "${race_dir}/second.log"))"
@@ -730,7 +734,8 @@ jq -e '.dependencies["sd-victim"] != null' "${CASE_PROJECT}/package.json" >/dev/
   || fail "the second install landed in the project while the first was verified"
 
 payload=$(jq -nc --arg c "${second_cmd}" --arg d "${CASE_PROJECT}" '{tool_name:"Bash",tool_input:{command:$c},cwd:$d}')
-CASE_POST=$(printf '%s' "${payload}" | SAFEDEPS_HOME="${CASE_HOME}" scripts/safedeps-hook-entry.sh post 2>/dev/null)
+CASE_POST_FILE=$(printf '%s' "${payload}" | SAFEDEPS_HOME="${CASE_HOME}" hook_response_capture "${race_dir}/second-post" scripts/safedeps-hook-entry.sh post)
+CASE_POST=$(< "${CASE_POST_FILE}")
 rolled_back || fail "the unapproved install is rolled back (post: ${CASE_POST:-<quiet>})"
 lacks_dependency sd-victim \
   || fail "the rollback removes the unapproved install that landed during verification (package.json: $(jq -c .dependencies "${CASE_PROJECT}/package.json"))"
@@ -751,8 +756,9 @@ for meta in "${CASE_HOME}"/snapshots/*_meta.json; do
 done
 records_dependency sd-approved \
   || fail "the approved install stays (package.json: $(jq -c .dependencies "${CASE_PROJECT}/package.json"))"
-grep -q 'changed while they were being verified' <<< "${first_post}" \
-  || fail "the first install says its baseline was not recorded because the files changed (post: ${first_post:-<quiet>})"
+first_message=$(hook_response_read message "${first_post_file}" message)
+[[ "${first_message}" == *'changed while they were being verified'* ]] \
+  || fail "the first install says its baseline was not recorded because the files changed (post: ${first_post_file:-<quiet>})"
 grep -q 'changed while they were being verified' "${CASE_HOME}/advisory.log" \
   || fail "advisory.log records why the baseline did not move"
 pass "an unapproved install that lands while an approved one is verified stays out of the baseline and is rolled back"
@@ -768,7 +774,7 @@ fi
 # install is the reinstall, and the gate checks it like any other.
 approve_baseline() {
   run_install "npm install sd-approved"
-  [[ -z "${CASE_POST}" ]] || fail "an approved install stays quiet before the restore case (post: ${CASE_POST})"
+  hook_response_parse "${CASE_POST_FILE}" quiet || fail "an approved install stays quiet before the restore case (post: ${CASE_POST})"
 }
 # One row (scripts/test/lib/shard.sh), from here to its pass line.
 if shard_row "the rollback runs no npm when the project .npmrc says global=true, and installs nothing into the global prefix"; then
@@ -804,8 +810,8 @@ if shard_row "a rollback with no package-lock.json resolves nothing again and ru
   rollback_removed_node_modules \
     || fail "the rollback resolves nothing again: node_modules is removed, not reinstalled (node_modules: $(ls "${CASE_PROJECT}/node_modules" 2>&1 | paste -sd, -))"
   [[ ! -s "${MARKS}" ]] || fail "the rollback runs no install script ($(cut -f1,2 "${MARKS}" | paste -sd, -))"
-  jq -r '.systemMessage // empty' <<< "${CASE_POST}" | grep -qx '.*/package-lock\.json does not exist' \
-    && jq -r '.systemMessage // empty' <<< "${CASE_POST}" | grep -qx '.*/npm-shrinkwrap\.json does not exist' \
+  hook_response_read message "${CASE_POST_FILE}" message | grep -x '.*/package-lock\.json does not exist' >/dev/null \
+    && hook_response_read message "${CASE_POST_FILE}" message | grep -x '.*/npm-shrinkwrap\.json does not exist' >/dev/null \
     || fail "the rollback says the project has no npm lockfile (post: ${CASE_POST})"
   pass "a rollback with no package-lock.json resolves nothing again and runs no install script"
 else
@@ -827,16 +833,16 @@ if shard_row "an unapproved workspace install is rolled back from disk, member m
   : > "${MARKS}"
   run_install "npm install sd-victim -w packages/a"
   rolled_back || fail "an unapproved install into a workspace member is rolled back (post: ${CASE_POST:-<quiet>})"
-  grep -q 'packages@' <<< "${CASE_POST}" && fail "a workspace member is not read as a package (post: ${CASE_POST})"
+  grep -q 'packages@' < "${CASE_POST_FILE}" && fail "a workspace member is not read as a package (post: ${CASE_POST})"
   [[ "$(jq -c '.dependencies // {}' "${CASE_PROJECT}/packages/a/package.json")" == '{}' ]] \
     || fail "the rollback restores the member's package.json ($(cat "${CASE_PROJECT}/packages/a/package.json"))"
   [[ -z "$(cd "${CASE_PROJECT}" && find . -path '*/node_modules/sd-victim' -print 2>/dev/null)" ]] \
     || fail "the rollback removes the unapproved package from disk"
   [[ ! -e "${CASE_PROJECT}/node_modules" ]] \
     || fail "the rollback removes the workspace root's own node_modules"
-  jq -r '.systemMessage // empty' <<< "${CASE_POST}" | grep -qx '.*/package\.json has the key workspaces' \
+  hook_response_read message "${CASE_POST_FILE}" message | grep -x '.*/package\.json has the key workspaces' >/dev/null \
     || fail "the rollback says the root package.json has the key workspaces (post: ${CASE_POST})"
-  [[ "$(jq -r '.systemMessage // empty' <<< "${CASE_POST}" | grep -c '^removed .*/node_modules$')" == 1 ]] \
+  [[ "$(hook_response_read message "${CASE_POST_FILE}" message | grep -c '^removed .*/node_modules$')" == 1 ]] \
     || fail "the rollback names the one node_modules it removed, the workspace root's (post: ${CASE_POST})"
   victim_ran && fail "no script of the unverified package runs in a workspace rollback"
   pass "an unapproved workspace install is rolled back from disk, member manifest included, and no member is read as a package"
@@ -879,7 +885,7 @@ if shard_row "a package in a file: dependency's node_modules that no lockfile re
   run_install "npm install sd-approved@1.0.0"
   [[ -e "${FILELINK_PARENT}/lib/node_modules/sd-victim" ]] || fail "sd-victim is still in the linked library for step 2"
   victim_ran && fail "an approved install in the project runs no script of the package in the linked library ($(cut -f1,3 "${MARKS}" | paste -sd, -))"
-  grep -q 'neither lockfile records (../lib/node_modules/sd-victim (sd-victim@1.0.0, not in either lockfile))' <<< "${CASE_POST}" \
+  grep -q 'neither lockfile records (../lib/node_modules/sd-victim (sd-victim@1.0.0, not in either lockfile))' < "${CASE_POST_FILE}" \
     || fail "the skipped rebuild names the package in the linked library (post: ${CASE_POST:-<quiet>})"
   pass "a package in a file: dependency's node_modules that no lockfile records is not rebuilt, and the warning names it"
 fi
@@ -914,7 +920,9 @@ do
   new_project
   : > "${MARKS}"
   INSTALL_MARKS=""
-  run_install "${form}" claude count_install_marks
+  response_expect=decision
+  [[ "${want}" != "as written" ]] || response_expect=quiet
+  run_install "${form}" claude count_install_marks "${response_expect}"
   [[ "${INSTALL_MARKS}" == 0 ]] \
     || fail "an approved install runs no script during the install: ${form} (ran: $(cut -f1,2 "${MARKS}" | paste -sd, -); command: ${CASE_EXEC})"
   [[ -e "${CASE_PROJECT}/node_modules/sd-approved" ]] || fail "the approved install installs: ${form}"
@@ -924,7 +932,7 @@ do
       # npm is not asked which registry an install inside `sh -c` fetches
       # from, so the rebuild is withheld with a warning; the install stays
       # inert either way.
-      [[ -z "${CASE_RAN}" ]] && grep -q 'did not run npm rebuild' <<< "${CASE_POST}" \
+      [[ -z "${CASE_RAN}" ]] && grep -q 'did not run npm rebuild' < "${CASE_POST_FILE}" \
         || fail "an inert install the gate cannot ask npm about is not rebuilt, and the user is told: ${form} (post: ${CASE_POST:-<quiet>})"
     else
       grep -q '^sd-approved@[^	]*	install' <<< "${CASE_RAN}" \
@@ -969,9 +977,9 @@ expect_unsent() { # form reason advisory
   unset NPM_SANDBOX_TOLERANT
   [[ "${CASE_PRE_DENY}" == *UNDECIDED*"${reason}"* ]] \
     || fail "the gate answers UNDECIDED, saying ${reason}: ${form} (deny: ${CASE_PRE_DENY:-<none>})"
-  [[ "$(jq -r '.hookSpecificOutput | has("updatedInput")' <<< "${CASE_PRE}")" == false ]] \
+  [[ "$(hook_response_read has-rewrite "${CASE_PRE_FILE}")" == false ]] \
     || fail "a command the gate does not let through gets no rewrite: ${form} (${CASE_PRE})"
-  grep "pre-guard DENY: " "${CASE_HOME}/advisory.log" 2>/dev/null | grep -qF -- "${advisory}" \
+  grep "pre-guard DENY: " "${CASE_HOME}/advisory.log" 2>/dev/null | grep -F -- "${advisory}" >/dev/null \
     || fail "advisory.log has a DENY line holding ${advisory}: ${form} ($(tail -2 "${CASE_HOME}/advisory.log" 2>/dev/null))"
   [[ -z "${CASE_EXEC}" && ! -s "${MARKS}" ]] \
     || fail "an install the gate did not let through does not run: ${form} (ran: ${CASE_EXEC}; scripts: $(cut -f1,2 "${MARKS}" | paste -sd, -))"
@@ -1028,14 +1036,14 @@ do
   fi
   case "${want}" in
     withheld)
-      [[ -z "${CASE_RAN}" ]] && grep -q 'did not run npm rebuild' <<< "${CASE_POST}" \
+      [[ -z "${CASE_RAN}" ]] && grep -q 'did not run npm rebuild' < "${CASE_POST_FILE}" \
         || fail "an inert install npm was not asked about is not rebuilt, and the user is told: ${form} (post: ${CASE_POST:-<quiet>})"
       ;;
     unverified)
       # Nobody read whether npm kept the flag, so the post hook does not say
       # the install's scripts did not run.
-      [[ -z "${CASE_RAN}" ]] && grep -q 'safedeps did not read all of the command it wrote as the shell will' <<< "${CASE_POST}" \
-        && ! grep -q 'install scripts were not run' <<< "${CASE_POST}" \
+      [[ -z "${CASE_RAN}" ]] && grep -q 'safedeps did not read all of the command it wrote as the shell will' < "${CASE_POST_FILE}" \
+        && ! grep -q 'install scripts were not run' < "${CASE_POST_FILE}" \
         || fail "an install whose flag nobody read is not rebuilt, and the user is told safedeps did not read all of the command: ${form} (post: ${CASE_POST:-<quiet>})"
       ;;
     rebuilt)
@@ -1091,7 +1099,7 @@ do
   [[ -e "${CASE_PROJECT}/node_modules/sd-approved" ]] || fail "the approved install installs: ${form}"
   grep -q 'holds a word the shell decides at run time' "${CASE_HOME}/advisory.log" \
     || fail "an install holding a word the shell expands is recorded in advisory.log: ${form}"
-  ! grep -qE 'install scripts were not run|no install script was run' <<< "${CASE_POST}" \
+  ! grep -qE 'install scripts were not run|no install script was run' < "${CASE_POST_FILE}" \
     || fail "the post hook does not say the scripts of an install whose flag nobody read did not run: ${form} (post: ${CASE_POST})"
 done
 pass "an install holding a word any shell expansion decides runs no script while it installs, and is recorded"
@@ -1133,13 +1141,13 @@ do
   run_install "${form}" claude capture_meta
   jq -e '.ignore_scripts_injected == true and .ignore_scripts_unread == true' <<< "${CASE_META}" >/dev/null \
     || fail "the meta records that nobody read the flag: ${form} (${setup}) (meta: ${CASE_META:-<none>})"
-  ! grep -qE 'install scripts were not run|no install script was run' <<< "${CASE_POST}" \
+  ! grep -qE 'install scripts were not run|no install script was run' < "${CASE_POST_FILE}" \
     || fail "the post hook does not say no install script ran: ${form} (${setup}) (post: ${CASE_POST})"
   if [[ "${setup}" == lock_victim ]]; then
-    rolled_back && grep -q "safedeps did not read all of the command it wrote as the shell will" <<< "${CASE_POST}" \
+    rolled_back && grep -q "safedeps did not read all of the command it wrote as the shell will" < "${CASE_POST_FILE}" \
       || fail "the rollback says safedeps did not read all of the command it wrote: ${form} (post: ${CASE_POST})"
   else
-    grep -q 'safedeps did not read all of the command it wrote as the shell will' <<< "${CASE_POST}" \
+    grep -q 'safedeps did not read all of the command it wrote as the shell will' < "${CASE_POST_FILE}" \
       || fail "the post hook says safedeps did not read all of the command it wrote: ${form} (post: ${CASE_POST:-<quiet>})"
   fi
 done
@@ -1160,7 +1168,7 @@ do
   new_project
   : > "${MARKS}"
   INSTALL_MARKS=""
-  run_install "${form}" claude count_install_marks
+  run_install "${form}" claude count_install_marks quiet
   [[ "${INSTALL_MARKS}" == 0 ]] \
     || fail "an install that carries the flag after its verb and after its last argument runs no script: ${form} (ran: $(cut -f1,2 "${MARKS}" | paste -sd, -))"
   [[ -e "${CASE_PROJECT}/node_modules/sd-approved" ]] || fail "an install that carries the flag twice installs: ${form}"
@@ -1199,7 +1207,7 @@ do
   [[ -e "${CASE_PROJECT}/node_modules/sd-approved" ]] || fail "the approved install installs: ${form}"
   grep -q 'safedeps did not read as a command holds an npm install verb' "${CASE_HOME}/advisory.log" \
     || fail "an install in text the rewrite cannot read is recorded in advisory.log: ${form}"
-  ! grep -qE 'install scripts were not run|no install script was run' <<< "${CASE_POST}" \
+  ! grep -qE 'install scripts were not run|no install script was run' < "${CASE_POST_FILE}" \
     || fail "the post hook does not say the scripts of an install whose flag nobody read did not run: ${form} (post: ${CASE_POST})"
 done
 pass "an approved install in text the rewrite cannot read runs no script while it installs, and is recorded as one whose flag nobody read"

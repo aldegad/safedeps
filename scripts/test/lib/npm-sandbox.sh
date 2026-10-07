@@ -29,6 +29,9 @@ done
 # equal to the paths npm reports.
 tmp_root=$(mktemp -d "${TMPDIR:-/tmp}/safedeps-${NPM_SANDBOX_NAME}.XXXXXX")
 tmp_root=$(cd "${tmp_root}" && pwd)
+# shellcheck source=hook-response.sh
+source "${ROOT_DIR}/scripts/test/lib/hook-response.sh"
+hook_response_init "${tmp_root}/hook-response.failures"
 # The marker this battery's children carry, so a sweep can name them. See
 # scripts/test/e2e.sh for why children are reaped three ways.
 #
@@ -44,7 +47,7 @@ tmp_root=$(cd "${tmp_root}" && pwd)
 # written. Old-marker orphans are not this sweep's to reap.
 CHILD_MARKER_BASE="safedeps-${NPM_SANDBOX_NAME}-owned"
 CHILD_MARKER="${CHILD_MARKER_BASE}:$$"
-battery_alive() { ps -o args= -p "$1" 2>/dev/null | grep -q "${NPM_SANDBOX_SCRIPT_RE}"; }
+battery_alive() { ps -o args= -p "$1" 2>/dev/null | grep  "${NPM_SANDBOX_SCRIPT_RE}" >/dev/null; }
 sweep_stale_children() {
   local pid args owner
   while read -r pid args; do
@@ -62,13 +65,18 @@ sweep_stale_children() {
 }
 owned_children=()
 cleanup() {
+  local cleanup_rc=$?
   local child
   for child in "${owned_children[@]:-}"; do
     [[ -n "${child}" ]] || continue
     kill "${child}" 2>/dev/null || true
     wait "${child}" 2>/dev/null || true
   done
-  rm -rf "${tmp_root}"
+  if [[ "${cleanup_rc}" == 0 ]] && hook_response_assert; then
+    rm -rf "${tmp_root}"
+  else
+    printf '# failed row artifacts: %s\n' "${tmp_root}" >&2
+  fi
 }
 trap cleanup EXIT
 sweep_stale_children
@@ -287,7 +295,15 @@ stub_npm_path() {
 # needs it.
 NPM_SANDBOX_CALLS=0
 run_install() {
-  local command="$1" engine="${2:-claude}" between="${3:-}" payload pre exec_command marks_before id post_id
+  local command="$1" engine="${2:-claude}" between="${3:-}" payload pre_file exec_command marks_before id post_id
+  # Other sandbox consumers also include already-inert and unjudged commands;
+  # they accept a quiet pre response. Lockless selects decision by default and
+  # names quiet on its already-inert rows.
+  local response_expect="${4:-${NPM_SANDBOX_PRE_EXPECT:-quiet-or-decision}}"
+  # Codex sends no rewrite: an accepted install is quiet, a denied one has a
+  # decision. The engine argument explicitly selects this response contract.
+  [[ "${engine}" != codex ]] || response_expect=quiet-or-decision
+  CASE_PRE_FILE="" CASE_POST_FILE=""
   CASE_PRE_DENY="" CASE_NOT_INERT=false CASE_INSTALL_RC=0 CASE_POST="" CASE_RAN="" CASE_EXEC="" CASE_PRE=""
   rm -rf "${tmp_root}/global"
   NPM_SANDBOX_CALLS=$((NPM_SANDBOX_CALLS + 1))
@@ -299,11 +315,13 @@ run_install() {
   else
     payload=$(jq -nc --arg c "${command}" --arg d "${CASE_CWD}" --arg id "${id}" '{tool_name:"Bash",tool_input:{command:$c},cwd:$d,tool_use_id:$id}')
   fi
-  pre=$(printf '%s' "${payload}" | PATH="${CASE_PRE_PATH:-${PATH}}" SAFEDEPS_HOME="${CASE_HOME}" scripts/safedeps-hook-entry.sh pre 2>/dev/null)
-  CASE_PRE="${pre}"
-  if [[ -n "${pre}" && "$(jq -r '.hookSpecificOutput.permissionDecision // empty' <<< "${pre}")" == deny ]]; then
+  pre_file=$(printf '%s' "${payload}" | PATH="${CASE_PRE_PATH:-${PATH}}" SAFEDEPS_HOME="${CASE_HOME}" hook_response_capture "${CASE_HOME}.${id}-pre" scripts/safedeps-hook-entry.sh pre)
+  CASE_PRE_FILE="${pre_file}"
+  CASE_PRE=$(< "${pre_file}")
+  hook_response_parse "${pre_file}" "${response_expect}" || fail "unreadable pre response: ${command}"
+  if [[ "${HOOK_DECISION}" == deny ]]; then
     [[ "${NPM_SANDBOX_TOLERANT:-false}" == true ]] || fail "the gate lets the install through to the effect gate: ${command}"
-    CASE_PRE_DENY=$(jq -r '.hookSpecificOutput.permissionDecisionReason // ""' <<< "${pre}")
+    CASE_PRE_DENY="${HOOK_REASON}"
     return 0
   fi
   # Engine `crossed`: the pre-guard is Claude Code's and records the rewrite it
@@ -312,8 +330,13 @@ run_install() {
   # records were bound to the call this was a Codex call of the same command in
   # the same directory consuming that record (bamdori r19 X1); a Codex call now
   # reads only its own.
-  exec_command=""
-  [[ -z "${pre}" || "${engine}" == crossed ]] || exec_command=$(jq -r '.hookSpecificOutput.updatedInput.command // empty' <<< "${pre}")
+  exec_command="${HOOK_REWRITE}"
+  # Crossed still validates the Claude response above; only execution ignores
+  # that valid rewrite, to exercise a post hook receiving the original bytes.
+  [[ "${engine}" != crossed ]] || exec_command=""
+  if [[ "${engine}" == codex && "${HOOK_HAS_REWRITE}" == true ]]; then
+    fail "Codex receives no rewrite: ${command}"
+  fi
   # The release floor (lib/release-floor.sh), for a battery that asks for it.
   if [[ "${NPM_SANDBOX_RELEASE_FLOOR:-false}" == true && "${engine}" == claude ]]; then
     release_floor_check "${payload}" "${exec_command}" "${CASE_HOME}" "${tmp_root}" || true
@@ -341,11 +364,27 @@ run_install() {
   else
     payload=$(jq -nc --arg c "${exec_command}" --arg d "${CASE_CWD}" --arg id "${post_id}" '{tool_name:"Bash",tool_input:{command:$c},cwd:$d,tool_use_id:$id}')
   fi
-  CASE_POST=$(printf '%s' "${payload}" | PATH="${CASE_POST_PATH:-${PATH}}" SAFEDEPS_HOME="${CASE_HOME}" scripts/safedeps-hook-entry.sh post 2>/dev/null)
+  CASE_POST_FILE=$(printf '%s' "${payload}" | PATH="${CASE_POST_PATH:-${PATH}}" SAFEDEPS_HOME="${CASE_HOME}" hook_response_capture "${CASE_HOME}.${id}-post" scripts/safedeps-hook-entry.sh post)
+  # A post hook either stays quiet or reports a message; it cannot deny an
+  # install that already ran. Validate both outcomes before phrase checks.
+  hook_response_parse "${CASE_POST_FILE}" quiet-or-message || fail "unreadable post response: ${command}"
+  # Keep the text view for other sandbox consumers; lockless reads the file.
+  CASE_POST=$(< "${CASE_POST_FILE}")
   CASE_RAN=$(tail -n +"$((marks_before + 1))" "${MARKS}")
 }
 
-rolled_back() { grep -q 'A rollback ran\.' <<< "${CASE_POST}"; }
+rolled_back() {
+  # A denied pre call never ran the command or its post hook. This is no
+  # rollback, not a quiet post response; no response file exists to read.
+  [[ -z "${CASE_PRE_DENY}" ]] || return 1
+  # A quiet post response means no rollback; a report must be a valid message.
+  if [[ ! -s "${CASE_POST_FILE}" ]]; then
+    hook_response_parse "${CASE_POST_FILE}" quiet || return 1
+    return 1
+  fi
+  hook_response_parse "${CASE_POST_FILE}" message || return 1
+  [[ "${HOOK_MESSAGE}" == *'A rollback ran.'* ]]
+}
 ungated() { grep -q 'UNGATED' "${CASE_HOME}/advisory.log" 2>/dev/null; }
 victim_ran() { grep -q '^sd-victim' "${MARKS}"; }
 
@@ -355,9 +394,13 @@ victim_ran() { grep -q '^sd-victim' "${MARKS}"; }
 # sd-evilsrc and sd-evilswap are packed by effect-trace-grid.sh, the last two
 # fetched only by their tarball URL.
 npm_sandbox_registry_was_local() {
+  # Readers used in conditional expressions can return false normally. A
+  # malformed or missing response is still a failed battery, including callers
+  # whose pass() does not know about the shared response reader.
+  hook_response_assert || fail "a hook response could not be read"
   [[ -s "${tmp_root}/registry.log" ]] || fail "the installs went through the fixture registry"
   if grep -vE '^GET /sd-(victim|approved|approved-too|swapped|fetchy|bundler|bundlert|nester|nope)(/-/sd-(victim|approved|approved-too|swapped|fetchy|bundler|bundlert|nester)-1\.0\.[01]\.tgz)?$' "${tmp_root}/registry.log" \
-      | grep -vE '^GET /sd-evil(src|swap)/-/sd-evil(src|swap)-1\.0\.0\.tgz$' | grep -q .; then
+      | grep -vE '^GET /sd-evil(src|swap)/-/sd-evil(src|swap)-1\.0\.0\.tgz$' | grep  . >/dev/null; then
     fail "the fixture registry saw only the synthetic packages ($(sort -u "${tmp_root}/registry.log" | paste -sd, -))"
   fi
   pass "every request went to the local fixture registry, for the synthetic packages only"
