@@ -132,15 +132,14 @@ safedeps_npm_new_records() {
 # Scheme and host are matched without regard to case, as URLs compare them. It
 # runs once per new source, so it starts no process.
 #
-# The pattern is the one definition, SAFEDEPS_NPM_PUBLIC_REGISTRY_RE in
-# lib/npm/ask.sh, which the pre-guard sources without this file: post-verify's
-# rebuild check reads every node of the tree in one jq pass and applies the same
-# pattern there, with jq's "i" flag for the case, and the pre-guard judges a
-# configured registry with it. smoke.sh holds both readers to one table.
+# The pattern is SAFEDEPS_NPM_PUBLIC_REGISTRY_RE in lib/npm/ask.sh, which this
+# CLI reads. The core spells the same rule twice, in rust/src/ask/fetch.rs (what
+# npm answers) and rust/src/post/closure.rs (a lockfile's `resolved`), and the
+# three must name the same two hosts. smoke.sh holds this reader to a table.
 #
 # A URL on a public registry says where npm would fetch from with no registry
-# configured, not where it did (lib/npm/ask.sh, the fetch facts). Callers that
-# judge where bytes came from ask that as well.
+# configured, not where it did (the core asks npm for the fetch facts,
+# rust/src/ask.rs). Callers that judge where bytes came from ask that as well.
 if [[ -z "${SAFEDEPS_NPM_PUBLIC_REGISTRY_RE:-}" ]]; then
   # shellcheck source=ask.sh
   source "${BASH_SOURCE[0]%/*}/ask.sh"

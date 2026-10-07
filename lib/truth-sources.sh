@@ -12,12 +12,11 @@
 # happen is a run judged against a moved source looking exactly like a run judged
 # against OSV, so each deviation is named once per run in advisory.log.
 #
-# This file is separate from providers.sh because the PreToolUse guard must be
-# able to say it too, and that hook runs on every Bash call — it cannot afford to
-# source the provider stack, so it sources this instead. It is sourced
-# unconditionally there: making it conditional would mean restating the knob list
-# at the call site to decide whether to read the list, and a second copy of that
-# list is how the first one goes stale.
+# This file serves the CLI. The core says the same notice itself on every Bash
+# call (truth_sources_moved in rust/src/state.rs), from its own copy of this
+# list and of these defaults. A second copy of a list is how the first one goes
+# stale, so change both together. The file is separate from providers.sh so that
+# it can be read without the provider stack.
 
 SAFEDEPS_DEFAULT_OSV_API_URL="https://api.osv.dev/v1/query"
 SAFEDEPS_DEFAULT_OSV_BATCH_API_URL="https://api.osv.dev/v1/querybatch"
@@ -70,8 +69,8 @@ safedeps_truth_sources_moved_list() {
     || moved+=("ledger-ttl-days=${SAFEDEPS_LEDGER_DEFAULT_TTL_DAYS}")
   # Not an advisory source either, but it moves which bytes count as the public
   # registry's: an npm configured with this local registry is taken to fetch
-  # from a public one (lib/npm/ask.sh safedeps_npm_test_registry, which takes
-  # a loopback URL only). A test battery needs it; a run that used it must say so.
+  # from a public one (test_registry in rust/src/ask.rs, which takes a loopback
+  # URL only). A test battery needs it; a run that used it must say so.
   [[ -z "${SAFEDEPS_NPM_TEST_REGISTRY:-}" ]] || moved+=("npm-test-registry=${SAFEDEPS_NPM_TEST_REGISTRY}")
   printf '%s' "${moved[*]:-}"
 }

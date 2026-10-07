@@ -1,6 +1,7 @@
-//! The install grammar's tables, as lib/install-grammar.sh writes them after
-//! `safedeps_g_one_line`: one line, every entry between single blanks. The
-//! drift check compares each with the shell file's value.
+//! The install grammar's tables, carried over from lib/install-grammar.sh
+//! (deleted by the entry switch), where `safedeps_g_one_line` wrote them: one
+//! line, every entry between single blanks. They are now the one definition,
+//! and the drift check against the shell file is retired.
 
 /// The npm whose option definitions NPM_OPTIONS and NPM_SHORTHANDS were taken
 /// from, and the npm whose differences NPM_OTHER tables.

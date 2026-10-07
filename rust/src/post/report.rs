@@ -1,5 +1,6 @@
-//! The closed line forms in lib/gates/report-facts.sh. Each filesystem claim
-//! is read here when it is said; the caller owns the rollback's ordering.
+//! The closed line forms of the rollback report, carried over from
+//! lib/gates/report-facts.sh (deleted by the entry switch). Each filesystem
+//! claim is read here when it is said; the caller owns the rollback's ordering.
 use super::{jv, sh};
 use crate::{json::Value, state};
 use std::{fs, path::Path};

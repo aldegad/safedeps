@@ -1,8 +1,9 @@
-//! The install grammar's vocabulary and patterns, as lib/install-grammar.sh
-//! defines them. The strings are the same strings: `safedeps-core grammar`
-//! prints each one, and scripts/measure/core-grammar-drift.sh compares them
-//! with the values the shell file gives after it is sourced, so the two
-//! cannot drift apart while both exist.
+//! The install grammar's vocabulary and patterns. They were carried over
+//! string for string from lib/install-grammar.sh, which the entry switch
+//! deleted, and this file is now their one definition. `safedeps-core grammar`
+//! prints each one under the name the shell file gave it (`SAFEDEPS_G_*`), and
+//! the measurement scripts and batteries read the grammar through it. The
+//! drift check that compared them with the shell file is retired.
 
 pub const NPM_VERBS: &str = "add|ci|cit|clean-?[iI]nstall|clean-?[iI]nstall-|clean-?[iI]nstall-?[tT]|clean-?[iI]nstall-?[tT]e|clean-?[iI]nstall-?[tT]es|clean-?[iI]nstall-?[tT]est|i|ic|in|ins|inst|insta|instal|install|install-?[cC]i|install-?[cC]i-|install-?[cC]i-?[tT]|install-?[cC]i-?[tT]e|install-?[cC]i-?[tT]es|install-?[cC]i-?[tT]est|install-?[cC]l|install-?[cC]le|install-?[cC]lea|install-?[cC]lean|install-?[tT]|install-?[tT]e|install-?[tT]es|install-?[tT]est|isnt|isnta|isntal|isntall|isntall-|isntall-?[cC]|isntall-?[cC]l|isntall-?[cC]le|isntall-?[cC]lea|isntall-?[cC]lean|it|si|sit|u|ud|udp|udpa|udpat|udpate|up|upd|upda|updat|update|upg|upgr|upgra|upgrad|upgrade";
 pub const NPM_EXEC_VERBS: &str = "exe|exec|x";
