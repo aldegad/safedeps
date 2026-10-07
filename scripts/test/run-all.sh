@@ -86,6 +86,7 @@ cd "${ROOT_DIR}" || exit 2
 # builds may load the host; ordinary first-phase batteries may run beside it.
 ALL_BATTERIES=(
   "rust-core|1|dev|1|1|30|scripts/test/rust-core.sh"
+  "output-sinks|1|dev|1|1|5|scripts/test/output-sinks.sh"
   "smoke|1|dev|1|1|350|scripts/test/smoke.sh"
   "scan-contract|1|dev|3|1|861|scripts/test/scan-contract.sh"
   "statement-batch|1|dev|1|1|263|scripts/test/statement-batch.sh"
