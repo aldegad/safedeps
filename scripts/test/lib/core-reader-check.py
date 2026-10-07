@@ -41,6 +41,19 @@ def table():
 def source_map():
     cases = [json.loads(line) for line in
              (ROOT / "scripts/measure/core-payload-command-cases.jsonl").read_text().splitlines()]
+    # The release's lexing rows: a glued brace belongs to the substitution's
+    # own text; a nested backtick body loses its quoting backslashes once.
+    # Query each level through the native payload API used by inert.
+    cases += [
+        {"command": "npm ci; x=$( { npm ci --ignore-scripts=false} )",
+         "expected": [{"kind": "B", "text": " { npm ci --ignore-scripts=false} ",
+                       "origin": "command-substitution", "shell": None}]},
+        {"command": r"echo `echo \`{ npm ci}\``",
+         "expected": [{"kind": "B", "text": "echo `{ npm ci}`",
+                       "origin": "backquote", "shell": None}],
+         "child_expected": [[{"kind": "B", "text": "{ npm ci}",
+                              "origin": "backquote", "shell": None}]]},
+    ]
     count = mapped = decoded = 0
 
     def check(text, expected, reading, failed=False):

@@ -4,6 +4,7 @@
 source "${ROOT_DIR}/scripts/test/lib/core-reader.sh"
 
 core_smoke_budget() {
+  core_reader_init "${ROOT_DIR}" || return
   local config runtime ceiling timeout version
   version=$("${SAFEDEPS_TEST_CORE}" version)
   [[ "${version}" == "safedeps-core $(jq -r '.version' "${ROOT_DIR}/package.json")" ]] \

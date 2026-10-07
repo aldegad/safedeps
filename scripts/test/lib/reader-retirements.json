@@ -48,8 +48,8 @@
     },
     {
       "source": "scan-contract.sh:1882-1901",
-      "contract": "Manager and shell sets agree with the pipe recognizer, including case and boundaries.",
-      "disposition": "core/reader_tests.rs tests the production grammar and pipe predicate on the original name lists"
+      "contract": "Manager and shell sets agree with the pipe recognizer and each manager has an install body, including case and boundaries.",
+      "disposition": "core/reader_tests.rs tests production executable/shell grammar, the pipe predicate, and actual grammar::patterns().install_body on the original name lists; install-body membership retains the alphanumeric boundaries, removed backslashes, and pip3*/PIP/Npm exceptions"
     },
     {
       "source": "scan-contract.sh:1953-1993",

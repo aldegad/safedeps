@@ -131,10 +131,15 @@ fn manager_pipe_and_shell_names_agree_on_case_and_boundaries() {
     let core = Core::new();
     let ex = Regex::new(&format!("^({})$", grammar::EXECUTABLES), true).unwrap();
     let pipe = Regex::new(&format!("^{PIPE_MANAGER_RE}$"), true).unwrap();
+    let install_body = grammar::patterns().install_body.replace('\\', "");
     for name in ["npm","npx","pnpm","pnpx","yarn","bun","bunx","pip","pip3","pip3.11",
                  "poetry","uv","uvx","pipx","pipenv","cargo","go","gem","bundle","mvn","dotnet","PIP","Npm"] {
         assert!(ex.is_match(name.as_bytes()), "{name}");
         assert!(pipe.is_match(name.as_bytes()), "{name}");
+        let body_name = Regex::new(&format!("(^|[^[:alnum:]]){name}([^[:alnum:]]|$)"), true).unwrap();
+        assert!(body_name.is_match(install_body.as_bytes())
+                || name.starts_with("pip3") || name == "PIP" || name == "Npm",
+                "{name} has an install body");
         let mut run = Run::new(&core);
         run.reading = Some(Reading::Bash);
         assert!(run.pipes_install_to_shell(format!("printf '{name} install x' | sh").as_bytes()), "{name}");

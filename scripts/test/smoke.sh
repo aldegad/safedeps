@@ -27,7 +27,6 @@ trap cleanup EXIT
 # contracts (CLI, provider and hook fault fixtures) still run in the full suite.
 # shellcheck source=lib/core-smoke.sh
 source "${ROOT_DIR}/scripts/test/lib/core-smoke.sh"
-core_reader_init "${ROOT_DIR}"
 if [[ "${1:-}" == --reader-contracts-only ]]; then
   core_smoke_budget
   core_smoke_pending
