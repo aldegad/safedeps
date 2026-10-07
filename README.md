@@ -331,9 +331,15 @@ The binary carries a stamp of the source it was built from. When a hook starts i
 
 Run `scripts/build-core.sh` from a terminal outside the agent. Hooks do not run there. A published binary has no source to compare, so a package install never reads this message.
 
-A missing or unusable binary is explained too, never skipped. The entry names which case it is (no `bin/native` at all, no binary for this platform, the file missing, no exec bit, the system refused to run it, a crash with the signal, a non-zero exit). In every one of them the pre hook blocks, the post hook says to treat the last install as unverified, and nothing runs the old Bash hooks instead. In a checkout the repair is `scripts/build-core.sh`. For a package it is `npm install -g @aldegad/safedeps`, then the installer again.
+A missing or unusable binary is explained too, never skipped. The entry names which case it is (no `bin/native` at all, no binary for this platform, the file missing, no exec bit, the system refused to run it, a crash with the signal, a non-zero exit). In every one of them the pre hook blocks every Bash call, not only installs, the post hook says to treat the last install as unverified, and nothing runs the old Bash hooks instead. In a checkout the repair is `scripts/build-core.sh`. For a package it is `npm install -g @aldegad/safedeps`, then the installer again.
 
-A checkout that other sessions run live through a symlink has one more rule. When you move it to new source, build the binary before the next install. Until you do, installs are blocked as above.
+A checkout that other sessions run live through a symlink has one more rule. When you move it to new source, build the binary at once, in a terminal outside the agent. If the checkout has an out-of-date binary, installs are blocked until you do, as above. If it has no binary at all, every Bash call in every session that uses it is blocked until you do. You can avoid that window by building the binary from a copy of the new source first and putting it in `bin/native/<os>-<arch>/` before you move the checkout.
+
+**Upgrading from v2.18.1.** v2.18.1 ran two Bash scripts and had no binary, so the first v2.19.0 start needs one.
+
+- **Installed from the npm package:** update the package. The registered command is the same, so you do not run the installer again, and the ledger and `~/.safedeps/` carry over.
+- **Using a checkout:** build the binary with `scripts/build-core.sh`, which needs cargo, in a terminal outside the agent. Until the binary is there, every Bash call is blocked, with a message that says what to run.
+- **On a platform other than `darwin-arm64`, `darwin-x64` and `linux-x64`** (a Linux arm64 machine, for example): there is no binary for it. A machine already registered for safedeps blocks every Bash call as soon as it is upgraded, with "no safedeps-core binary for this platform".
 
 ### Setup From GitHub (Skill + Hooks)
 
@@ -455,7 +461,7 @@ The two Bash hook scripts, `safedeps-pre-guard.sh` and `safedeps-post-verify.sh`
 
 What did change:
 
-- **The hook is a binary, and it has to be there.** A checkout builds it with cargo, and the package carries it built. A missing or out-of-date binary is an explained deny, not a skipped gate. See [Where the hook binary comes from](#where-the-hook-binary-comes-from).
+- **The hook is a binary, and it has to be there.** A checkout builds it with cargo, and the package carries it built. A missing binary blocks every Bash call and an out-of-date one blocks installs, each with an explanation, never a skipped gate. See [Where the hook binary comes from](#where-the-hook-binary-comes-from).
 - **Nothing falls back to Bash.** No environment variable chooses the binary or turns it off. The hook starts only `npm`, `curl`, `file` and `gzip`, and its own judgment process, and it needs no `awk`, `grep`, `sed` or `jq`.
 - **Rollback lines name the operating system's error.** A failed restore or removal says `copy returned OS error <n>` or `removal returned OS error <n>`, where it used to say a `cp` or `rm` exit status. No program of that name runs.
 - **A command safedeps cannot rewrite safely is blocked, not rewritten.** That is the cost of this release, and it is next.
