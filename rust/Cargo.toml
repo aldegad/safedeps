@@ -2,7 +2,7 @@
 name = "safedeps-core"
 # The package's version: package.json is the source of truth, and the smoke
 # test holds this line and bin/safedeps to it.
-version = "2.18.1"
+version = "2.19.0"
 edition = "2021"
 description = "The safedeps hooks' core: the shell lexer, the install recognizers, the spec extractor and what is being moved from the bash hooks"
 build = "build.rs"

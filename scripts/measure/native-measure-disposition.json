@@ -275,6 +275,14 @@
     {
       "path": "scripts/measure/inert-unread-scripts.sh",
       "consumer": "canonical public pre; old Bash ref replacement explicitly rejected"
+    },
+    {
+      "path": "scripts/measure/core-cost.py",
+      "consumer": "registered native pre versus the same binary facts query; npm-free PATH, startup baselines and binary identity checked; not a Bash/Rust speedup"
+    },
+    {
+      "path": "scripts/measure/backstop-walk-cost.sh",
+      "consumer": "existing native post-probe trace over a synthetic unchanged node tree, including startup and metadata checks; completed walks and five-second deadline results separated; pre mode uses registered native entry"
     }
   ],
   "preserved": [

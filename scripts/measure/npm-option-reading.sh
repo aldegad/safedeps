@@ -169,7 +169,7 @@ comm -3 <(printf '%s\n' "${have_options}") <(sort "${work}/options") \
 comm -3 <(printf '%s\n' "${have_shorthands}") <(sort "${work}/shorthands") \
   | sed -E 's/^[[:space:]]+//; s/=.*//' | sort -u > "${work}/differ.shorthands"
 if [[ -s "${work}/differ.options" || -s "${work}/differ.shorthands" ]] && [[ "${same_version}" == true ]]; then
-  printf 'npm %s, the version the table is from, defines these differently from lib/install-grammar.sh: %s\n' \
+  printf 'npm %s, the version the table is from, defines these differently from the native core grammar query: %s\n' \
     "${version}" "$(cat "${work}/differ.options" "${work}/differ.shorthands" | paste -sd ' ' -)"
   rc=1
 fi
