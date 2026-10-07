@@ -58,11 +58,14 @@ def main():
             key = hashlib.sha256(f"osv\nnpm\n{name}\n1.0.0".encode()).hexdigest()
             (state / f"cache/osv/{key}.json").write_text('{"vulns":[]}')
         lock(packages)
-        pre = call("pre", "pip install retention-denied==1.0.0")
+        # An unfinished manager command records the scanner's denial. An
+        # ordinary unapproved install denies without writing that log line.
+        denied_command = 'printf "\npip install retention-denied==1.0.0'
+        pre = call("pre", denied_command)
         assert pre["hookSpecificOutput"]["permissionDecision"] == "deny", pre
         call("post", "npm ci")
         before = log.read_bytes()
-        assert b"pre-guard DENY" in before, before
+        assert b"pre-guard DENY" in before, "the native pre denial left no evidence"
         assert sum(bool(TRACE.match(line)) for line in before.splitlines()) == 40, before
         assert before.startswith(evidence), before
         assert len(before) > 1000, len(before)
@@ -109,7 +112,7 @@ def main():
         assert b"SAFEDEPS_ADVISORY_LOG=" in after and b"ignored" in after
         default_env = dict(env)
         del default_env["SAFEDEPS_HOME"]
-        call("pre", "pip install retention-denied==1.0.0", default_env)
+        call("pre", denied_command, default_env)
         assert b"pre-guard DENY" in (root / "home/.safedeps/advisory.log").read_bytes()
         assert not (root / "ignored.log").exists()
         print("ok - native logs follow SAFEDEPS_HOME and default HOME/.safedeps, ignoring a separate log path")
