@@ -2,9 +2,10 @@
 # safedeps: build the Rust core into bin/native/<os>-<arch>/safedeps-core.
 #
 # One build, two callers. A checkout builds its own binary with this script
-# (the installer runs it, and so does release step 7 after main moves), and
-# the publish job builds the three binaries the package ships with it. No
-# binary is committed: the root .gitignore names bin/native/.
+# (the installer runs it, and a release builds in the release worktree before
+# main moves, AGENTS.md step 7), and the publish job builds the three binaries
+# the package ships with it. No binary is committed: the root .gitignore names
+# bin/native/.
 #
 #   scripts/build-core.sh                    this machine's binary, from this
 #                                            checkout's source

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # safedeps — multi-ecosystem dependency install safety gate (CLI).
 # Phase 1 advisory gate: OSV (canonical) + CISA KEV (overlay) + GHSA (enrichment)
-# → approved-spec ledger write. Hook (scripts/safedeps-pre-guard.sh,
-# scripts/safedeps-post-verify.sh) only
-# enforces the ledger; this CLI is the only place that talks to providers.
+# → approved-spec ledger write. The hooks (safedeps-core, run through
+# scripts/safedeps-hook-entry.sh) read and enforce the ledger; this CLI is the
+# only place that writes it.
 
 set -euo pipefail
 

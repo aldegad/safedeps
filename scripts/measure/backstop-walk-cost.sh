@@ -11,8 +11,11 @@
 #
 # Two things are measured:
 #
-#   walk   `find -H node_modules -cnewer <baseline> -print -quit` over a
-#          synthetic tree in which nothing is newer than the baseline. The
+#   walk   the existing native `post-probe` trace query over a synthetic tree
+#          in which nothing is newer than the baseline. It includes core
+#          startup, record/metadata checks and the core's bounded walk, not
+#          the whole post hook. Completed walks and the default five-second
+#          deadline are reported separately; no system find is timed. The
 #          tree is packages of 116 entries each (a package.json, three more
 #          files, a lib directory of ten directories of ten files), copied
 #          side by side until the tree holds about the asked number of
@@ -21,8 +24,8 @@
 #   pre    the whole pre-guard, through the entry shim, on a command that names
 #          no install (`ls -la`) and on one the backstop pattern matches but
 #          the lexer does not read as an install (`grep -n "npm install"
-#          README.md`). Run it once in a tree before the change and once after
-#          to read what the trace entry costs.
+#          README.md`). This measures the registered native pre hook on the
+#          two inputs; it is not a historical Bash comparison.
 #
 # Usage:
 #   scripts/measure/backstop-walk-cost.sh [--reps N] [walk|pre] [ENTRIES...]
@@ -44,17 +47,24 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 [[ ${#SIZES[@]} -eq 0 ]] && SIZES=(10000 50000 100000 250000 500000)
+[[ "${REPS}" =~ ^[1-9][0-9]*$ ]] || { printf 'walk-cost: reps must be positive\n' >&2; exit 2; }
+for size in "${SIZES[@]}"; do
+  [[ "${size}" =~ ^[1-9][0-9]*$ ]] || { printf 'walk-cost: entries must be positive integers\n' >&2; exit 2; }
+done
+ROOT_DIR="${REPO_DIR}"
+source "${ROOT_DIR}/scripts/test/lib/native-measure-core.sh"
+"${MEASURE_CORE}" stamp --check || exit 2
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/safedeps-walk-cost.XXXXXX")
 trap 'rm -rf "${WORK}"' EXIT
 
-printf '# host %s, %s, bash %s, find %s\n' "$(uname -n)" "$(uname -sr)" "${BASH_VERSION}" "$(command -v find)"
+printf '# host %s, %s, bash %s, core %s\n' "$(uname -n)" "$(uname -sr)" "${BASH_VERSION}" "${MEASURE_CORE}"
 printf '# load at start: %s\n' "$(uptime | sed 's/.*load averages*: //')"
 
 # Seconds of one command, with millisecond digits.
 seconds_of() {
   local TIMEFORMAT=%3R
-  { time "$@" > /dev/null 2>&1; } 2>&1
+  { time "$@" > /dev/null 2> "${WORK}/command.err"; } 2>&1
 }
 # min / median / max of the numbers on stdin.
 spread() { sort -n | awk '{ v[NR] = $1 } END { printf "%s / %s / %s", v[1], v[int((NR + 1) / 2)], v[NR] }'; }
@@ -68,7 +78,7 @@ if [[ " ${WHAT} " == *" walk "* ]]; then
     for f in 0 1 2 3 4 5 6 7 8 9; do printf 'x\n' > "${template}/lib/d${d}/f${f}.js"; done
   done
   per_package=$(find "${template}" | wc -l | tr -d ' ')
-  printf '# walk: entries, packages, build seconds, walk seconds min / median / max over %s reps\n' "${REPS}"
+  printf '# native trace: entries, packages, build seconds, completed query seconds min / median / max, completed/deadline counts over %s reps\n' "${REPS}"
   for size in "${SIZES[@]}"; do
     tree="${WORK}/tree-${size}"
     mkdir -p "${tree}/node_modules"
@@ -85,10 +95,36 @@ if [[ " ${WHAT} " == *" walk "* ]]; then
     touch "${tree}/baseline"
     found=$(find -H "${tree}/node_modules" -cnewer "${tree}/baseline" -print -quit 2>/dev/null)
     [[ -z "${found}" ]] || { printf 'walk-cost: %s is newer than the baseline; the walk would stop early\n' "${found}" >&2; exit 1; }
-    times=$(for _ in $(seq 1 "${REPS}"); do
-      seconds_of find -H "${tree}/node_modules" -cnewer "${tree}/baseline" -print -quit
-    done)
-    printf '%s\t%s\t%ss\t%s\n' "${entries}" "${packages}" "${build}" "$(spread <<< "${times}")"
+    result=$(python3 - "${MEASURE_CORE}" "${tree}" "${REPS}" "${ROOT_DIR}" <<'PY'
+import json, os, statistics, subprocess, sys, time
+from pathlib import Path
+sys.path.insert(0, str(Path(sys.argv[4]) / 'scripts/measure'))
+from native_fixture_facts import tree_facts
+core, project, reps = sys.argv[1], Path(sys.argv[2]), int(sys.argv[3])
+inodes, clocks = tree_facts(project)
+entry = dict(baseline=str(project / 'baseline'), resolution='subsecond', inodes=inodes, clocks=clocks)
+payload = json.dumps(dict(op='trace', path=str(project), entry=json.dumps(entry))).encode()
+no_trace = ('no trace in ' + str(project) + ': neither npm lockfile nor node_modules there has another inode, '
+            'neither lockfile changed after the record taken before this command, '
+            'and nothing in node_modules changed after the baseline').encode()
+deadline = ('the walk of ' + str(project / 'node_modules') + ' did not finish within 5s').encode()
+completed, timed_out = [], []
+for _ in range(reps):
+    start = time.perf_counter()
+    result = subprocess.run([core, 'post-probe'], input=payload, capture_output=True,
+                            env=dict(os.environ, SAFEDEPS_BACKSTOP_WALK_SECONDS='5'))
+    elapsed = time.perf_counter() - start
+    if not result.stderr and result.returncode == 1 and result.stdout == no_trace:
+        completed.append(elapsed)
+    elif not result.stderr and result.returncode == 0 and result.stdout == deadline:
+        timed_out.append(elapsed)
+    else:
+        raise SystemExit('walk-cost: unexpected trace answer: ' + repr(result))
+spread = lambda xs: ' / '.join('%.3f' % n for n in (min(xs), statistics.median(xs), max(xs))) if xs else 'none'
+print('%s\tcompleted=%d deadline=%d deadline-seconds=%s' % (spread(completed), len(completed), len(timed_out), spread(timed_out)))
+PY
+    ) || exit 1
+    printf '%s\t%s\t%ss\t%s\n' "${entries}" "${packages}" "${build}" "${result}"
     rm -rf "${tree}"
   done
 fi
@@ -107,8 +143,8 @@ if [[ " ${WHAT} " == *" pre "* ]]; then
     # trace entry under it and writes none without it.
     payload=$(printf '{"tool_name":"Bash","tool_input":{"command":"%s"},"cwd":"%s","tool_use_id":"toolu_walk_cost"}' "${command}" "${project}")
     times=$(for _ in $(seq 1 "${REPS}"); do
-      seconds_of sh -c 'printf "%s" "$1" | "$2" pre' sh "${payload}" "${REPO_DIR}/scripts/safedeps-hook-entry.sh"
-    done)
+      seconds_of sh -c 'printf "%s" "$1" | "$2" pre' sh "${payload}" "${REPO_DIR}/scripts/safedeps-hook-entry.sh" || exit
+    done) || { cat "${WORK}/command.err" >&2; exit 1; }
     printf '%s\t%s\n' "${command}" "$(spread <<< "${times}")"
   done
 fi

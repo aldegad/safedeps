@@ -7,17 +7,17 @@
 # (lib/commands/link.js:92-104). A directory or a file -- npa types directory
 # and file -- is linked as written; every other argument (range, version, tag,
 # alias, git, remote) is fetched and installed. The gate reads the same split
-# twice: lib/install-grammar.sh recognizes a link as an install by the shape of
-# a word npm fetches (SAFEDEPS_G_NPM_REGISTRY_OPERAND or
+# twice: the core's grammar (rust/src/grammar.rs) recognizes a link as an
+# install by the shape of a word npm fetches (SAFEDEPS_G_NPM_REGISTRY_OPERAND or
 # SAFEDEPS_G_NPM_REMOTE_OPERAND, regexes over the scan view), and the operand
-# walk asks safedeps_npa_is_local of each argument.
+# walk asks the manager reader's `npa-local` query of each argument.
 #
 # This runs npa from the npm on PATH over a set of argument words and compares:
-#   - safedeps_npa_is_local must agree with npa on every word;
+#   - the `npa-local` query must agree with npa on every word;
 #   - `npm link ../lib <word>` must be recognized as an install for every word
 #     npa does not read as local. It may also be recognized for a bare tarball
 #     name (`x.tgz`), the one file shape the regex cannot tell from a name
-#     (stated in lib/install-grammar.sh); any other extra is a failure.
+#     (stated in rust/src/grammar.rs); any other extra is a failure.
 # A word npa rejects (it throws) makes npm link fail before it installs
 # anything, so either answer is accepted for it.
 #

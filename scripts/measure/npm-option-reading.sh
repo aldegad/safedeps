@@ -9,8 +9,8 @@
 # matched they picked one; for `npm --prefix x install evil@1.0.0` they picked
 # `npm x`, and the install went unchecked.
 #
-# lib/install-grammar.sh now reads the words the way nopt does
-# (safedeps_npm_read_args), with npm's table copied into it. This checks both
+# The core's manager reader (rust/src/manager.rs) reads the words the way nopt
+# does, with npm's table copied into rust/src/tables.rs. This checks both
 # halves against the npm on PATH:
 #
 #   1. the table: every option's class and every shorthand, derived from npm's
@@ -169,7 +169,7 @@ comm -3 <(printf '%s\n' "${have_options}") <(sort "${work}/options") \
 comm -3 <(printf '%s\n' "${have_shorthands}") <(sort "${work}/shorthands") \
   | sed -E 's/^[[:space:]]+//; s/=.*//' | sort -u > "${work}/differ.shorthands"
 if [[ -s "${work}/differ.options" || -s "${work}/differ.shorthands" ]] && [[ "${same_version}" == true ]]; then
-  printf 'npm %s, the version the table is from, defines these differently from lib/install-grammar.sh: %s\n' \
+  printf 'npm %s, the version the table is from, defines these differently from the native core grammar query: %s\n' \
     "${version}" "$(cat "${work}/differ.options" "${work}/differ.shorthands" | paste -sd ' ' -)"
   rc=1
 fi

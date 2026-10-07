@@ -2369,6 +2369,11 @@ grep -qF "post-verify BACKSTOP traced: $(cd -P "${bs_mix_wt}" && pwd -P)/node_mo
   || fail "a write into node_modules on a whole-second mount beside a subsecond lockfile: the backstop counts it as traced (${bs_mix_post_file})"
 pass "a tree with one part on a whole-second filesystem sets the baseline back"
 
+# This helper asserts an empty post response and the advisory line in full.
+python3 "${ROOT_DIR}/scripts/test/lib/backstop-walk-io.py" --core "${NATIVE_TEST_CORE}" \
+  --output "${tmp_root}/backstop-walk-io.json" || fail "a failed native directory walk preserves its OS error"
+pass "a failed native directory walk is traced and reports its observed OS error in the query and advisory.log"
+
 # A source copy delays the actual native walk past its deadline.
 bs_slow_wt="${tmp_root}/bs-slow-wt"
 bs_project "${bs_slow_wt}"
@@ -2668,6 +2673,15 @@ rebuildquoted_post_file=$(PATH="${rebuildfail_bin}:${PATH}" grammar_post "${rebu
 post_message "${rebuildquoted_post_file}" | grep -x 'safedeps added --ignore-scripts to this install and ran npm rebuild: exit 3' >/dev/null \
   || fail "the command the pre-guard wrote is said as added, quoted words and all (${rebuildquoted_post_file})"
 pass "a rebuild that fails says its exit status, and 'added' only where the command this hook received is the one safedeps wrote"
+
+python3 "${ROOT_DIR}/scripts/test/lib/rebuild-outcomes.py" --core "${NATIVE_TEST_CORE}" \
+  --output "${tmp_root}/rebuild-outcomes" --oracle-dir "${ORACLE_DIR}" \
+  || fail "rebuild start failures and signals retain their observed result"
+pass "rebuild start failure and signal are checked by the report oracle, with added and asked records"
+
+python3 "${ROOT_DIR}/scripts/test/lib/ask-outcomes.py" --core "${NATIVE_TEST_CORE}" \
+  --output "${tmp_root}/ask-outcomes.json" || fail "npm ask distinguishes a signal from an exit code"
+pass "npm query, config and install target report observed signals through closed result forms"
 
 # The command's own second segment rebuilds: whether install scripts ran is not
 # something this hook saw, so the skipped rebuild says what safedeps did and

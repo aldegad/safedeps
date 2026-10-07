@@ -40,7 +40,7 @@ mutation={
         'if false { self.say(cat(&[b"not removed ",',
         'the path is still there'),
     'Kept':('remove-readonly',
-        'self.say(cat(&[b"not removed ", sh::bytes(p), b": ", &io_outcome(b"removal", &result), b"; ", &path(p)]));',
+        'self.say(cat(&[b"not removed ", sh::bytes(p), b": ", &Outcome::Io(result).describe(Action::Removal,Form::Action), b"; ", &path(p)]));',
         'self.say(cat(&[b"kept ", sh::bytes(p)]));',
         'kept, right after a reason to remove it'),
 }

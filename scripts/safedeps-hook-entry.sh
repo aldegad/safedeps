@@ -20,9 +20,9 @@
 #   the binary was stopped        a signal: an abort is a panic in the core
 #   the binary exited non-zero    a defect in the core
 #
-# None of them runs the bash hooks instead. Two authorities drift, and a hook
-# that quietly answers from the older one is the silent fallback AGENTS.md
-# forbids. Nothing in the environment chooses the binary or turns it off.
+# None of them runs anything in the binary's place. The Bash hooks no longer
+# exist, and a hook that quietly answered from a second authority would be the
+# silent fallback AGENTS.md forbids. Nothing in the environment chooses the binary or turns it off.
 #
 # The platform is read from BASH_VERSINFO[5], the machine bash was built for
 # (`arm64-apple-darwin24`, `x86_64-pc-linux-gnu`). Not from OSTYPE and
@@ -31,10 +31,10 @@
 # would send this shim to a binary the Mac cannot run. BASH_VERSINFO is
 # read-only and bash sets it itself. No process is started to find the binary.
 #
-# The shim answers for its own stops as the bash shim does: bash exits 128
-# (3.2) or 254 (5) when it cannot start a process, both engines read either as
-# a non-blocking hook failure, and the EXIT trap turns any exit the shim did
-# not choose into an explained exit 2, written with builtins.
+# The shim answers for its own stops: bash exits 128 (3.2) or 254 (5) when it
+# cannot start a process, both engines read either as a non-blocking hook
+# failure, and the EXIT trap turns any exit the shim did not choose into an
+# explained exit 2, written with builtins.
 #
 # Entry identity. The installer builds or checks the core before registering
 # this entry.

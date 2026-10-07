@@ -2,8 +2,8 @@
 # safedeps: measure the argument words real shells hand to a package manager.
 #
 # The spec extractor reads a statement's words from the lexer's pieces view:
-# redirections taken out and the shell's quote removal applied (shell_lex in
-# scripts/safedeps-pre-guard.sh). scripts/test/scan-contract.sh checks that view
+# redirections taken out and the shell's quote removal applied (the pieces view
+# of rust/src/lex.rs). scripts/test/scan-contract.sh checks that view
 # against the argv recorded in scripts/measure/word-reading-forms.json. Those
 # argv are measurements, and this script is how they are re-measured.
 #

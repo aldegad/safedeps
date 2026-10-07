@@ -44,8 +44,8 @@ for name in ['walk','walk-control','coarse']:
     subprocess.run(['tar','xf',str(archive),'-C',str(target)],check=True)
     edits=[fault_edits.EDITS['walk' if name=='walk-control' else name]]
     if name=='walk-control':
-        edits.append(('rust/src/post/trace.rs','Err(124)=>(true,cat(&[b"the walk of ",',
-                      'Err(124)=>(false,cat(&[b"the walk of ",'))
+        edits.append(('rust/src/post/trace.rs','Err(outcome)=>(true,outcome.describe(Action::Walk(&tree),',
+                      'Err(outcome)=>(false,outcome.describe(Action::Walk(&tree),'))
     for relative,old,new in edits:
         path=target/relative;text=path.read_text()
         if text.count(old)!=1:raise SystemExit(name+': source edit is not unique')

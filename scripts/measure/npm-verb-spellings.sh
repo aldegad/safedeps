@@ -10,8 +10,8 @@
 # abbreviation, so `npm cr vite` fetched and ran create-vite with no judgment.
 #
 # This prints, for the npm on PATH, the spellings deref maps to each command,
-# in the form lib/install-grammar.sh writes them, and compares them with the
-# grammar. A dash before a letter is written `-?[xX]`, because deref also
+# in the form the core's grammar holds them (rust/src/grammar.rs), and compares
+# them with the grammar. A dash before a letter is written `-?[xX]`, because deref also
 # accepts the camelCase form of every dashed spelling. Exit 1 when npm accepts a
 # spelling the grammar does not have.
 #

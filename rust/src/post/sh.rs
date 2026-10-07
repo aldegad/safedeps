@@ -1,8 +1,9 @@
-//! What the bash post hook gets from the shell and from the small commands it
-//! runs, done in this process: the file tests, `cp`, `rm -rf`, `cmp`,
+//! What the Bash post hook got from the shell and from the small commands it
+//! ran, done in this process: the file tests, `cp`, `rm -rf`, `cmp`,
 //! `mktemp`, a `read` with a tab for IFS, and a glob match. Each says in its
-//! comment which behaviour of the command it keeps, because the hook's lines
-//! state what these returned (`cp exit 1`, `rm exit 1`).
+//! comment which behaviour of the command it keeps. The report lines no
+//! longer name `cp`, `rm` or an exit status, because no such program runs:
+//! they state the OS error an operation returned (post/report.rs).
 
 use std::io::{Read, Write};
 use std::os::unix::ffi::OsStrExt;
