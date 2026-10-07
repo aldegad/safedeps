@@ -406,6 +406,67 @@ fn stale(input: &[u8], why: &str, guard: &Path) -> i32 {
     0
 }
 
+fn unfinished_text(failure: &budget::Failure, seconds: u64, size: u64) -> (String, String) {
+    use std::os::unix::process::ExitStatusExt;
+    let status_text = |status: &std::process::ExitStatus| {
+        if let Some(code) = status.code() { format!("exit code {}", code) }
+        else { format!("signal {}", status.signal().unwrap_or(0)) }
+    };
+    if let budget::Failure::Deadline { child } = failure {
+        let child = match child {
+            Some(Ok(status)) => format!(", child {}", status_text(status)),
+            Some(Err(error)) => format!(", waiting for child failed: {}", error),
+            None => String::new(),
+        };
+        return (
+            format!("pre-guard DENY: judgment unfinished within the {}s self-budget (command {} bytes{}) — fail-closed, not a detection.", seconds, size, child),
+            format!("safedeps: UNDECIDED, not unsafe — safedeps could not finish judging this command within its {}s budget ({} bytes of command text), so it is blocked fail-closed. Nothing was detected in it; the gate simply did not get to an answer, and an install it cannot judge must not run. Scan cost grows with command length. Split the command, or write long content with a file-writing tool instead of one very large shell command, and retry.", seconds, size),
+        );
+    }
+    let fact = match failure {
+        budget::Failure::Exited(status) => format!("the judgment process ended without a usable answer ({})", status_text(status)),
+        budget::Failure::Supervision { step, error } => format!("safedeps could not {}: {}", step, error),
+        budget::Failure::Deadline { .. } => unreachable!(),
+    };
+    (
+        format!("pre-guard DENY: {} (command {} bytes) — fail-closed, not a detection.", fact, size),
+        format!("safedeps: UNDECIDED, not unsafe — {}. No dependency judgment was made; nothing was detected in this command. It is blocked fail-closed.", fact),
+    )
+}
+
+#[cfg(test)]
+mod budget_reply_tests {
+    use super::*;
+    use std::{os::unix::process::ExitStatusExt, process::ExitStatus};
+
+    #[test]
+    fn only_a_deadline_claims_the_budget_elapsed() {
+        let (log, reason) = unfinished_text(&budget::Failure::Deadline { child: None }, 2, 40);
+        assert!(reason.contains("within its 2s budget"));
+        assert!(log.contains("within the 2s self-budget"));
+        assert!(!reason.contains("process ended"));
+        for (raw, fact) in [(7 << 8, "exit code 7"), (9, "signal 9")] {
+            let (log, reason) = unfinished_text(&budget::Failure::Exited(ExitStatus::from_raw(raw)), 2, 40);
+            for text in [&log, &reason] {
+                assert!(text.contains(fact), "{}", text);
+                assert!(text.contains("without a usable answer"));
+                assert!(!text.contains("budget"), "{}", text);
+                assert!(!text.contains("within"), "{}", text);
+            }
+            assert!(reason.contains("UNDECIDED, not unsafe"));
+            assert!(reason.contains("nothing was detected"));
+        }
+        let failure = budget::Failure::Supervision { step: "start judgment process",
+            error: std::io::Error::from_raw_os_error(2) };
+        let (log, reason) = unfinished_text(&failure, 2, 40);
+        for text in [&log, &reason] {
+            assert!(text.contains("could not start judgment process"));
+            assert!(!text.contains("budget"));
+            assert!(!text.contains("process ended"));
+        }
+    }
+}
+
 pub fn main(input: &[u8], budget_child: bool) -> i32 {
     let started = Instant::now();
     // `umask 077; mkdir -p "$GUARD_DIR" "$SNAPSHOT_DIR"`, before anything is read.
@@ -512,18 +573,16 @@ pub fn main(input: &[u8], budget_child: bool) -> i32 {
     // cannot clean up npm's children when this process exits at the deadline.
     match budget::run(&input, started + Duration::from_secs(budget.value)) {
         Ok(out) => emit(&out),
-        Err(code) => {
-            state::log_advisory(&guard_dir, format!("pre-guard DENY: judgment unfinished within the {}s self-budget (command {} bytes, child rc={}) — fail-closed, not a detection.", budget.value, size, code).as_bytes());
+        Err(failure) => {
+            let (log, reason) = unfinished_text(&failure, budget.value, size);
+            state::log_advisory(&guard_dir, log.as_bytes());
             let mut clamp = W::new();
-            if !budget.clamped_from.is_empty() {
+            if matches!(failure, budget::Failure::Deadline { .. }) && !budget.clamped_from.is_empty() {
                 clamp = format!(" Your SAFEDEPS_SELF_BUDGET_SECONDS={} was clamped to the {}s ceiling: above it the {}s runtime hook budget kills this gate mid-judgment and the install runs unjudged, so raising it removes the check rather than extending it.", b(&budget.clamped_from), SELF_BUDGET_MAX_SECONDS, RUNTIME_BUDGET_SECONDS).into_bytes();
-            } else if !budget.invalid_from.is_empty() {
+            } else if matches!(failure, budget::Failure::Deadline { .. }) && !budget.invalid_from.is_empty() {
                 clamp = cat(&[b" Your SAFEDEPS_SELF_BUDGET_SECONDS='", &budget.invalid_from, format!("' is not a whole number of seconds, so the {}s default is in force.", budget.value).as_bytes()]);
             }
-            let reason = cat(&[
-                format!("safedeps: UNDECIDED, not unsafe — safedeps could not finish judging this command within its {}s budget ({} bytes of command text), so it is blocked fail-closed. Nothing was detected in it; the gate simply did not get to an answer, and an install it cannot judge must not run. Scan cost grows with command length. Split the command, or write long content with a file-writing tool instead of one very large shell command, and retry.", budget.value, size).as_bytes(),
-                &clamp,
-            ]);
+            let reason = cat(&[reason.as_bytes(), &clamp]);
             let answer = jq::compact(&jq::obj(vec![(
                 "hookSpecificOutput",
                 jq::obj(vec![("hookEventName", jq::s("PreToolUse")), ("permissionDecision", jq::s("deny")), ("permissionDecisionReason", jq::arg(&reason))]),
