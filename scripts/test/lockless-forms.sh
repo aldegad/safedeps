@@ -756,7 +756,8 @@ for meta in "${CASE_HOME}"/snapshots/*_meta.json; do
 done
 records_dependency sd-approved \
   || fail "the approved install stays (package.json: $(jq -c .dependencies "${CASE_PROJECT}/package.json"))"
-grep -q 'changed while they were being verified' <<< "${first_post}" \
+first_message=$(hook_response_read message "${first_post}" message)
+[[ "${first_message}" == *'changed while they were being verified'* ]] \
   || fail "the first install says its baseline was not recorded because the files changed (post: ${first_post:-<quiet>})"
 grep -q 'changed while they were being verified' "${CASE_HOME}/advisory.log" \
   || fail "advisory.log records why the baseline did not move"
