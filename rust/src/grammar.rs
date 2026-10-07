@@ -22,6 +22,13 @@ pub const OPERAND: &str = "[[:space:]]+[^-[:space:]][^[:space:]]*";
 pub const NPM_REGISTRY_OPERAND: &str = "([Nn][Pp][Mm]:[^[:space:]]+|(@[^/@[:space:]]+/[^/@[:space:]]+|[^-./~@:[:space:]][^/@:[:space:]]*)(@([Nn][Pp][Mm]:[^[:space:]]*|[^./:[:space:]][^/:[:space:]]*)?)?)";
 pub const NPM_REMOTE_SPEC: &str = "((git[+][A-Za-z]+|git|github|gitlab|bitbucket|gist|https?):[^[:space:]]+|[^:@%/[:space:].~-][^:@%/[:space:]]*/[^:@[:space:]/%]+(#[^[:space:]]*)?)";
 pub const O: &str = "([[:space:]]+(--|--?[A-Za-z0-9][A-Za-z0-9_.-]*(=[^[:space:]]*)?([[:space:]]+[^-[:space:];&|][^[:space:];&|]*)*))*";
+/// How npm-package-arg reads an argument, as `safedeps_npa_is_local` asks it:
+/// a URL or a git scheme, an scp-style git address, a tarball's suffix, and
+/// hosted-git-info's `user/repo[#ref]` shorthand.
+pub const NPA_URL_RE: &str = "^(git[+])?[A-Za-z]+:";
+pub const NPA_SCP_RE: &str = "^[^@]+@[^:.]+[.][^:]+:.+$";
+pub const NPA_TARBALL_RE: &str = "[.]([Tt][Gg][Zz]|[Tt][Aa][Rr].[Gg][Zz]|[Tt][Aa][Rr])$";
+pub const NPA_HOSTED_RE: &str = "^[^:@%/[:space:].-][^:@%/[:space:]]*/[^:@[:space:]/%]+(#.*)?$";
 
 /// The patterns built from the pieces above, in the order the shell file
 /// builds them.
@@ -144,8 +151,14 @@ pub fn dump() -> String {
         ("SAFEDEPS_G_NPM_INSTALL_RE", p.npm_install_re.clone()),
         ("SAFEDEPS_G_RAW_INSTALL_RE", p.raw_install_re.clone()),
         ("SAFEDEPS_G_BACKSTOP_RE", p.backstop_re.clone()),
+        ("SAFEDEPS_G_NPA_URL_RE", NPA_URL_RE.into()),
+        ("SAFEDEPS_G_NPA_SCP_RE", NPA_SCP_RE.into()),
+        ("SAFEDEPS_G_NPA_TARBALL_RE", NPA_TARBALL_RE.into()),
+        ("SAFEDEPS_G_NPA_HOSTED_RE", NPA_HOSTED_RE.into()),
+        ("SAFEDEPS_G_NPM_OPTIONS_FROM", crate::tables::NPM_OPTIONS_FROM.into()),
         ("SAFEDEPS_G_NPM_OPTIONS", crate::tables::NPM_OPTIONS.into()),
         ("SAFEDEPS_G_NPM_SHORTHANDS", crate::tables::NPM_SHORTHANDS.into()),
+        ("SAFEDEPS_G_NPM_OTHER_FROM", crate::tables::NPM_OTHER_FROM.into()),
         ("SAFEDEPS_G_NPM_OTHER", crate::tables::NPM_OTHER.into()),
         ("SAFEDEPS_G_COMMANDS", crate::tables::COMMANDS.into()),
         ("SAFEDEPS_G_VALUE_OPTIONS", crate::tables::VALUE_OPTIONS.into()),

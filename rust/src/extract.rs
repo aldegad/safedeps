@@ -36,10 +36,10 @@ impl XRegexes {
             email: r("^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}$"),
             gem_version: r("^[0-9]+([.][0-9A-Za-z]+)*(-[0-9A-Za-z-]+([.][0-9A-Za-z-]+)*)?$"),
             go: r("^[A-Za-z0-9][A-Za-z0-9._~/-]*@[A-Za-z0-9._+~-]+$"),
-            npa_url: r("^(git[+])?[A-Za-z]+:"),
-            npa_scp: r("^[^@]+@[^:.]+[.][^:]+:.+$"),
-            npa_tarball: r("[.]([Tt][Gg][Zz]|[Tt][Aa][Rr].[Gg][Zz]|[Tt][Aa][Rr])$"),
-            npa_hosted: r("^[^:@%/[:space:].-][^:@%/[:space:]]*/[^:@[:space:]/%]+(#.*)?$"),
+            npa_url: r(crate::grammar::NPA_URL_RE),
+            npa_scp: r(crate::grammar::NPA_SCP_RE),
+            npa_tarball: r(crate::grammar::NPA_TARBALL_RE),
+            npa_hosted: r(crate::grammar::NPA_HOSTED_RE),
         }
     }
 }
