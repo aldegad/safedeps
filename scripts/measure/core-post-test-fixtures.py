@@ -156,6 +156,7 @@ def hook(a):
                     raise RuntimeError('production discovery did not include the unreadable workspace member')
         elif fault=='twoobj' and call:
             (call/'record-unread').touch()
+            facts.append(dict(record_unread_marker=str(call/'record-unread')))
         result=subprocess.run([binary,a.stage],input=raw,env=env,capture_output=True)
         if selected:
             if not marker.is_file():raise RuntimeError('selected operation was never reached: '+selected)
@@ -175,7 +176,10 @@ def hook(a):
                 raise RuntimeError('native pre did not write the backdated whole-second baseline')
         if fault:
             with open(manifest['receipts'],'a') as f:
-                f.write(json.dumps(dict(stage=a.stage,fault=fault,project=str(project),core=binary,
+                f.write(json.dumps(dict(invocation=os.environ.get('SAFEDEPS_TEST_INVOCATION'),
+                                       payload_sha256=hashlib.sha256(raw).hexdigest(),
+                                       stage=a.stage,fault=fault,project=str(project),core=binary,
+                                       core_sha256=wanted,
                                        source_copy=selected,facts=facts,rc=result.returncode))+'\n')
         sys.stdout.buffer.write(result.stdout);sys.stderr.buffer.write(result.stderr)
         return result.returncode if result.returncode>=0 else 128-result.returncode
@@ -183,11 +187,55 @@ def hook(a):
         for path,mode in reversed(restore):
             if path.exists():path.chmod(mode)
 
+def checked_hook(a):
+    """A separate caller requires this invocation's receipt before returning.
+
+    The failure file also crosses bash command-substitution/conditional scopes;
+    no later row may print ok after a fixture failed in a subshell.
+    """
+    raw=sys.stdin.buffer.read()
+    invocation=os.urandom(16).hex()
+    fault=os.environ.get('SAFEDEPS_TEST_FAULT','')
+    try:
+        manifest=json.loads(Path(a.manifest).read_text())
+        receipts=Path(manifest['receipts'])
+        offset=receipts.stat().st_size if receipts.exists() else 0
+        result=subprocess.run([sys.executable,__file__,'hook','--manifest',a.manifest,'--stage',a.stage],
+                              input=raw,capture_output=True,
+                              env=dict(os.environ,SAFEDEPS_TEST_INVOCATION=invocation))
+        sys.stdout.buffer.write(result.stdout);sys.stderr.buffer.write(result.stderr)
+        allowed=(0,2) if a.stage=='pre' else (0,)
+        if result.returncode not in allowed:
+            raise RuntimeError('helper returned '+str(result.returncode))
+        if fault:
+            with receipts.open('rb') as f:
+                f.seek(offset)
+                rows=[json.loads(line) for line in f if line.strip()]
+            own=[r for r in rows if r.get('invocation')==invocation]
+            if len(own)!=1:raise RuntimeError('expected exactly one receipt for this invocation, got '+str(len(own)))
+            row=own[0]
+            for key,wanted in dict(stage=a.stage,fault=fault,rc=result.returncode,
+                                   payload_sha256=hashlib.sha256(raw).hexdigest()).items():
+                if row.get(key)!=wanted:raise RuntimeError('receipt mismatch: '+key)
+            binary=manifest['copies'].get(row.get('source_copy'),manifest)
+            if (row.get('core'),row.get('core_sha256'))!=(binary['core'],binary['sha256']):
+                raise RuntimeError('receipt names another binary')
+            if not row.get('facts'):raise RuntimeError('receipt has no reached-operation facts')
+        return result.returncode
+    except Exception as error:
+        failure=dict(invocation=invocation,stage=a.stage,fault=fault,
+                     payload_sha256=hashlib.sha256(raw).hexdigest(),error=str(error))
+        with open(os.environ['SAFEDEPS_TEST_FAILURES'],'a') as f:
+            f.write(json.dumps(failure)+'\n')
+        print('not ok - native fixture '+a.stage+'/'+fault+': '+str(error),file=sys.stderr)
+        return 70
+
 def main():
     p=argparse.ArgumentParser(description=__doc__);sub=p.add_subparsers(dest='cmd',required=True)
     q=sub.add_parser('prepare');q.add_argument('--tree',required=True);q.add_argument('--core',required=True)
     q.add_argument('--cargo',default='cargo');q.add_argument('--output',required=True)
-    q=sub.add_parser('hook');q.add_argument('--manifest',required=True);q.add_argument('--stage',choices=['pre','post'],required=True)
+    for mode in ['hook','checked-hook']:
+        q=sub.add_parser(mode);q.add_argument('--manifest',required=True);q.add_argument('--stage',choices=['pre','post'],required=True)
     a=p.parse_args()
-    return hook(a) if a.cmd=='hook' else prepare(a)
+    return {'hook':hook,'checked-hook':checked_hook,'prepare':prepare}[a.cmd](a)
 if __name__=='__main__':sys.exit(main())

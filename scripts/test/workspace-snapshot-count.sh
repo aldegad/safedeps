@@ -32,7 +32,10 @@ set -euo pipefail
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "${ROOT_DIR}"
 
-pass() { printf 'ok - %s\n' "$1"; }
+pass() {
+  native_fixtures_assert || fail "$1: native fixture failed; see invocation receipt/error"
+  printf 'ok - %s\n' "$1"
+}
 fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
 
 for tool in npm node jq; do

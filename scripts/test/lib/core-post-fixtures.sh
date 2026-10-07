@@ -14,9 +14,17 @@ native_fixtures_init() {
     export SAFEDEPS_TEST_FIXTURES
   fi
   NATIVE_TEST_CORE=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["core"])' "${SAFEDEPS_TEST_FIXTURES}") || return
-  export NATIVE_TEST_CORE
+  SAFEDEPS_TEST_FAILURES="${out}.failures.jsonl"
+  : > "${SAFEDEPS_TEST_FAILURES}"
+  export NATIVE_TEST_CORE SAFEDEPS_TEST_FAILURES
 }
 native_fixture_hook() {
-  python3 "${ROOT_DIR}/scripts/measure/core-post-test-fixtures.py" hook \
+  python3 "${ROOT_DIR}/scripts/measure/core-post-test-fixtures.py" checked-hook \
     --manifest "${SAFEDEPS_TEST_FIXTURES}" --stage "$1"
+}
+native_fixtures_assert() {
+  if [[ -s "${SAFEDEPS_TEST_FAILURES:-/dev/null}" ]]; then
+    cat "${SAFEDEPS_TEST_FAILURES}" >&2
+    return 1
+  fi
 }

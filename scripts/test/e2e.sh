@@ -5,6 +5,7 @@ ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "${ROOT_DIR}"
 
 pass() {
+  native_fixtures_assert || fail "$1: native fixture failed; see invocation receipt/error"
   printf 'ok - %s\n' "$1"
 }
 
@@ -58,7 +59,7 @@ post_hook() {
   local path="${PATH}"
   command -v npm >/dev/null 2>&1 && path="${ORACLE_DIR}/bin:${PATH}"
   out=$(printf '%s' "${payload}" | ORACLE_NPM_LOG="${call}/npm.log" ORACLE_CALL="${call}" PATH="${path}" \
-    native_fixture_hook post)
+    native_fixture_hook post) || fail "post hook fixture failed for this invocation"
   printf '%s' "${out}"
   oracle_message "${call}" "${payload}" "${out}" || exit 1
 }
@@ -71,6 +72,7 @@ pre_hook() {
   call=$(mktemp -d "${ORACLE_DIR}/pre.XXXXXX")
   oracle_pre_before "${call}"
   out=$(printf '%s' "${payload}" | native_fixture_hook pre) || rc=$?
+  native_fixtures_assert || fail "pre hook fixture failed for this invocation"
   printf '%s' "${out}"
   oracle_pre "${call}" "${out}" || exit 1
   return "${rc}"
@@ -148,6 +150,7 @@ cleanup() {
   if [[ -n "${SAFEDEPS_TEST_EVIDENCE:-}" ]]; then
     mkdir -p "${SAFEDEPS_TEST_EVIDENCE}"
     cp -R "${tmp_root}/report-oracle" "${SAFEDEPS_TEST_EVIDENCE}/"
+    cp "${SAFEDEPS_TEST_FAILURES}" "${SAFEDEPS_TEST_EVIDENCE}/fixture-failures.jsonl"
   fi
   rm -rf "${tmp_root}"
 }
@@ -2318,6 +2321,10 @@ pass "on a filesystem that keeps whole seconds the baseline is set two seconds b
 # HFS+ mount). Every part has to show one now, so the baseline is set back.
 bs_mix_wt="${tmp_root}/bs-mix-wt"
 bs_project "${bs_mix_wt}"
+# Isolate the mixed-clock walk: an older lockfile must not satisfy the
+# preceding lockfile test against the baseline backdated by two seconds.
+# Other backstop rows above deliberately do not wait after their writes.
+sleep 3
 bs_mix_bin="${tmp_root}/bs-mix-bin"
 mkdir -p "${bs_mix_bin}"
 cat > "${bs_mix_bin}/whole-second-walk.py" <<'EOF'
@@ -2338,8 +2345,7 @@ SAFEDEPS_TEST_FAULT=bs_mix grammar_pre "${bs_mix_wt}" "npm run deps:add" toolu_b
 bs_mix_entry=$(cat "$(bs_entry toolu_bs_mix)" 2>/dev/null || true)
 printf 'x\n' > "${bs_mix_wt}/node_modules/installed-package/added.js"
 # The walk from this entry's baseline, on a copy of it with the same times. The
-# post hook checks the lockfile first, and in this row the lockfile changed
-# just before the baseline too, so its trace line can name either.
+# post hook must now reach the node walk; its source receipt is mandatory.
 bs_mix_base="${tmp_root}/bs-mix-baseline"
 touch -r "$(jq -r .baseline <<< "${bs_mix_entry:-null}")" "${bs_mix_base}" 2>/dev/null || : > "${bs_mix_base}"
 bs_mix_walk=$(python3 "${bs_mix_bin}/whole-second-walk.py" "${bs_mix_wt}/node_modules" "${bs_mix_base}")
@@ -2348,7 +2354,7 @@ bs_mix_post=$(SAFEDEPS_TEST_FAULT=bs_mix PATH="${stub_bin}:${PATH}" grammar_post
   || fail "a write into node_modules on a whole-second mount beside a subsecond lockfile: the baseline is set back (${bs_mix_entry})"
 [[ "${bs_mix_walk}" == "${bs_mix_wt}/node_modules"* ]] \
   || fail "a write into node_modules on a whole-second mount beside a subsecond lockfile: the walk from the entry's baseline finds it (${bs_mix_walk})"
-grep -qF "post-verify BACKSTOP traced: $(cd -P "${bs_mix_wt}" && pwd -P)/" "${SAFEDEPS_HOME}/advisory.log" \
+grep -qF "post-verify BACKSTOP traced: $(cd -P "${bs_mix_wt}" && pwd -P)/node_modules" "${SAFEDEPS_HOME}/advisory.log" \
   || fail "a write into node_modules on a whole-second mount beside a subsecond lockfile: the backstop counts it as traced (${bs_mix_post})"
 pass "a tree with one part on a whole-second filesystem sets the baseline back"
 
