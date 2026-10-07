@@ -1133,7 +1133,7 @@ scan-failure census 는 awk 읽기는 하나씩 실패시켰지만 grep 과 sed 
 - **거부는 상태를 남기지 않는다.** 코어는 마지막 읽기가 정해진 뒤에야 스냅샷, pending 기록, meta 를 쓰므로 차단된 커맨드는 그 셋 어느 것도 남기지 않는다.
 - **롤백 줄이 운영체제의 오류를 말한다.** `not restored <path>: copy returned OS error <n>; ...`, `... copy returned without error; ...`, `not removed <path>: removal returned OS error <n>; ...` 가 `cp exit` 와 `rm exit` 줄을 대신한다. 그런 프로그램이 돌지 않기 때문이다. 닫힌 보고 줄의 집합, 그 오라클, 롤백이 패키지 매니저를 돌리지 않는다는 규칙은 그대로다. 오라클은 네이티브 형식을 검사한다(`scripts/test/lib/report-oracle.sh`).
 - **자기 예산은 감독자다.** pre 훅은 자기 프로세스에서 판정한다. 답은 셋 중 하나다. 답이 오거나, 기한이 지나거나("could not finish judging this command within its Ns budget"), 판정 프로세스가 기한 전에 답 없이 끝난다("the judgment process ended without a usable answer (signal N)", 예산 문구 없음). 답이 아닌 둘은 모두 `UNDECIDED` 거부이고 적발이 아니라고 말한다. 멈춘 판정 프로세스는 끝난 것이 아니므로 감독자는 기한까지 기다린다(macOS 는 멈춘 자식을 `WEXITED` 만으로도 `waitid` 에 보고하고, 코어는 `si_code` 를 읽는다). 상한, `SAFEDEPS_BUDGET_ENGAGE_BYTES`, `SAFEDEPS_BUDGET_DISABLED`, argv 표식은 계약이 그대로다. 아래 절들의 `SECONDS` 와 macOS awk 설명은 Bash 가드를 설명한다.
-- **훅이 띄우는 프로그램은 넷이다.** `npm`(질의와 rebuild), `curl`(어드바이저리 provider), `file`(`node_modules/.bin` 의 새 파일), `gzip`(로그 아카이브)과 자기 판정 프로세스다. `awk`, `grep`, `sed`, `jq` 는 띄우지 않는다. Bash 가드는 호출 하나에 프로세스를 약 93개 띄웠다.
+- **훅이 띄우는 프로그램은 정해진 목록뿐이다.** `npm`(질의와 rebuild), `curl`(어드바이저리 provider), `file`(`node_modules/.bin` 의 새 파일), `gzip`(로그 아카이브)과 자기 판정 프로세스다. `awk`, `grep`, `sed`, `jq` 는 띄우지 않는다. Bash 가드는 호출 하나에 프로세스를 약 93개 띄웠다.
 
 ### Rust 코어를 Bash 가드에 어떻게 맞췄나
 
