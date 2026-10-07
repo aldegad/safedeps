@@ -15,7 +15,7 @@
 # This file serves the CLI. The core says the same notice itself on every Bash
 # call (truth_sources_moved in rust/src/state.rs), from its own copy of this
 # list and of these defaults. A second copy of a list is how the first one goes
-# stale, so change both together. The file is separate from providers.sh so that
+# stale, so change both together (`state::truth_sources_match_cli` in rust/src/state.rs holds them equal). The file is separate from providers.sh so that
 # it can be read without the provider stack.
 
 SAFEDEPS_DEFAULT_OSV_API_URL="https://api.osv.dev/v1/query"
