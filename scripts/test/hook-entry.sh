@@ -287,6 +287,20 @@ jq -e '.hookSpecificOutput | .permissionDecision == "deny" and (.permissionDecis
   && [[ ${entry_rc} -eq 0 ]] || fail "real core: source mismatch denies with its reason (${entry_out} ${entry_err})"
 pass "real core: a source mismatch denies an install through the entry"
 
+# A benign command is allowed without a dependency judgment when the stamp
+# differs, but the same call must disclose that mismatch in both channels.
+advisory="${tmp_root}/core-state/advisory.log"
+advisory_before=$(wc -l < "${advisory}")
+run_core "ls -la"
+[[ ${entry_rc} -eq 0 && -z "${entry_out}" && "${entry_err}" == *"built from another source"* \
+  && "${entry_err}" == *"The command names no package manager and was allowed without a judgment." ]] \
+  || fail "real core: stale benign pre allows with a source warning (${entry_out} ${entry_err})"
+advisory_after=$(wc -l < "${advisory}")
+[[ ${advisory_after} -eq $((advisory_before + 1)) \
+  && "$(tail -n 1 "${advisory}" | cut -f2-)" == "pre-guard: ${entry_err}" ]] \
+  || fail "real core: this stale benign call appends its source warning to advisory.log"
+pass "real core: stale benign pre allows without judgment and warns on stderr and in advisory.log"
+
 run_core "ls -la" post
 [[ ${entry_rc} -eq 0 && -z "${entry_out}" && "${entry_err}" == *"UNVERIFIED"* && "${entry_err}" == *"built from another source"* ]] \
   || fail "real core: post names the source mismatch as unverified (${entry_out} ${entry_err})"
