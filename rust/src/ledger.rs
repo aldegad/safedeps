@@ -233,11 +233,13 @@ fn ledger_defaults_match_cli() {
     ] {
         assert!(cli.lines().any(|line| line == format!("{name}=\"${{{name}:-{default}}}\"")), "CLI default {name}");
     }
-    let script = format!("{cli}\nprintf '%s\\n' \"$SAFEDEPS_HOME\" \"$SAFEDEPS_LEDGER_DIR\" \"$SAFEDEPS_LEDGER_DEFAULT_TTL_DAYS\"\nh=$(safedeps_ledger_hash npm @scope/pkg 1.2.3 context)\nprintf '%s\\n' \"$h\" \"$(safedeps_ledger_hash_to_filename \"$h\")\"");
+    let source = concat!(env!("CARGO_MANIFEST_DIR"), "/../lib/ledger/ledger.sh");
+    assert_eq!(std::fs::read_to_string(source).unwrap(), cli, "CLI file is the compiled source");
+    let script = format!("source \"$1\"\nprintf '%s\\n' \"$SAFEDEPS_HOME\" \"$SAFEDEPS_LEDGER_DIR\" \"$SAFEDEPS_LEDGER_DEFAULT_TTL_DAYS\"\nh=$(safedeps_ledger_hash npm @scope/pkg 1.2.3 context)\nprintf '%s\\n' \"$h\" \"$(safedeps_ledger_hash_to_filename \"$h\")\"");
     let run = |home: &str| {
         let out = std::process::Command::new("/bin/bash").env_clear()
             .env("PATH", "/usr/bin:/bin").env("HOME", "fixture home").env("SAFEDEPS_HOME", home)
-            .args(["-c", &script]).output().unwrap();
+            .args(["-c", &script, "ledger-contract", source]).output().unwrap();
         assert!(out.status.success(), "CLI ledger: {}", String::from_utf8_lossy(&out.stderr));
         String::from_utf8(out.stdout).unwrap()
     };
