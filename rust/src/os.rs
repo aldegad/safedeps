@@ -109,10 +109,12 @@ pub fn kill_group(pgid: u32, sig: i32) {
 }
 
 // siginfo_t is 104 bytes on the supported Darwin ABIs and 128 on Linux;
-// both start with int si_signo and have alignment 8. Only that first field
-// is read. Zeroed storage also handles older WNOHANG implementations.
+// both start with int si_signo, si_errno, si_code at offsets 0, 4, 8 on
+// Darwin arm64/x86_64 and Linux x86_64. The remaining fields are not read.
+// Sources: XNU bsd/sys/signal.h and Linux include/uapi/asm-generic/siginfo.h.
+// Keep storage large/aligned enough for either ABI; zero it for WNOHANG.
 #[repr(C, align(8))]
-struct WaitInfo { signo: i32, rest: [u8; 124] }
+struct WaitInfo { signo: i32, errno: i32, code: i32, rest: [u8; 116] }
 
 /// Observe one owned child's exit without consuming its status or freeing
 /// its pid. POSIX waitid(WNOWAIT) lets the caller clean its process group
@@ -122,12 +124,80 @@ pub fn child_exited_unreaped(pid: u32) -> std::io::Result<bool> {
     const WNOWAIT: i32 = 0x20;
     #[cfg(not(target_os = "macos"))]
     const WNOWAIT: i32 = 0x01000000;
-    let mut info = WaitInfo { signo: 0, rest: [0; 124] };
     loop {
+        let mut info = WaitInfo { signo: 0, errno: 0, code: 0, rest: [0; 116] };
         // P_PID = 1, WEXITED = 4, WNOHANG = 1 in sys/wait.h on both targets.
-        if unsafe { waitid(1, pid, &mut info, 4 | 1 | WNOWAIT) } == 0 { return Ok(info.signo != 0) }
+        if unsafe { waitid(1, pid, &mut info, 4 | 1 | WNOWAIT) } == 0 {
+            // Both signal.h definitions: CLD_EXITED=1, CLD_KILLED=2,
+            // CLD_DUMPED=3. A stop/trap/continue notification is not exit,
+            // even when waitid reports it with only WEXITED requested.
+            return Ok(info.signo != 0 && matches!(info.code, 1 | 2 | 3));
+        }
         let err = std::io::Error::last_os_error();
         if err.kind() != std::io::ErrorKind::Interrupted { return Err(err) }
+    }
+}
+
+#[cfg(test)]
+mod wait_tests {
+    use super::*;
+    use std::{io::{BufRead, BufReader, Write}, process::{Child, Command, Stdio},
+        time::{Duration, Instant}};
+
+    // Own this direct child through its wait, including assertion failures.
+    struct Owned(Child);
+    impl Drop for Owned {
+        fn drop(&mut self) { let _ = self.0.kill(); let _ = self.0.wait(); }
+    }
+
+    #[test]
+    fn stopped_and_continued_children_are_not_exited() {
+        const CHILD: &str = r#"import os,signal,sys
+print('ready',flush=True)
+for line in sys.stdin:
+    if line.strip()=='exit': sys.exit(0)
+    os.kill(os.getpid(),signal.SIGSTOP)
+    print('continued',flush=True)
+"#;
+        #[cfg(target_os = "macos")]
+        const CONT: i32 = 19;
+        #[cfg(not(target_os = "macos"))]
+        const CONT: i32 = 18;
+        for ending in [0, SIGTERM, SIGKILL] {
+            let mut child = Owned(Command::new("python3").args(["-u", "-c", CHILD])
+                .stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap());
+            let pid = child.0.id();
+            let mut input = child.0.stdin.take().unwrap();
+            let mut output = BufReader::new(child.0.stdout.take().unwrap());
+            let mut line = String::new();
+            output.read_line(&mut line).unwrap();
+            assert_eq!(line, "ready\n");
+            assert!(!child_exited_unreaped(pid).unwrap());
+            writeln!(input, "stop").unwrap();
+            let until = Instant::now() + Duration::from_secs(3);
+            loop {
+                let state = Command::new("ps").args(["-o", "stat=", "-p", &pid.to_string()]).output().unwrap();
+                if String::from_utf8_lossy(&state.stdout).trim().starts_with('T') { break }
+                assert!(Instant::now() < until, "child did not stop");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(!child_exited_unreaped(pid).unwrap(), "stopped child");
+            assert_eq!(unsafe { kill(pid as i32, CONT) }, 0);
+            line.clear(); output.read_line(&mut line).unwrap();
+            assert_eq!(line, "continued\n");
+            assert!(!child_exited_unreaped(pid).unwrap(), "continued child");
+            if ending == 0 { writeln!(input, "exit").unwrap(); }
+            else { assert_eq!(unsafe { kill(pid as i32, ending) }, 0); }
+            let until = Instant::now() + Duration::from_secs(3);
+            while !child_exited_unreaped(pid).unwrap() {
+                assert!(Instant::now() < until, "child did not exit: {ending}");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            // Observation must not consume the status or release the pid.
+            assert!(child_exited_unreaped(pid).unwrap());
+            let status = child.0.wait().unwrap();
+            assert_eq!(status.success(), ending == 0);
+        }
     }
 }
 
