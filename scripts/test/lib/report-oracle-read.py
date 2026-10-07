@@ -282,7 +282,11 @@ def native_io_result(evidence, action, target, outcome, source, project):
         # A no-write source copy supplies its raw return, never inferred from
         # the report. The source-copy receipt is checked before the oracle.
         proof = load(os.path.join(os.path.dirname(evidence), 'native-copy-result.json'))
-        return 0 if action == 'copy' and proof == dict(source=source, target=target, result='Ok(())') else 1
+        if not isinstance(proof, dict) or set(proof) != {'source', 'target', 'result'}:
+            return 1
+        return 0 if (action == 'copy' and proof['result']=='Ok(())'
+                     and os.path.realpath(proof['source']) == os.path.realpath(source)
+                     and os.path.realpath(proof['target']) == os.path.realpath(target)) else 1
     if outcome == 'returned an error without an OS code':
         try:
             refused = (os.path.islink(target) and not os.path.exists(target)) or os.path.isdir(source) or os.path.samefile(source, target)
@@ -290,14 +294,14 @@ def native_io_result(evidence, action, target, outcome, source, project):
             refused = False
         return 0 if action == 'copy' and refused else 1
     match = re.fullmatch(r'returned OS error ([1-9][0-9]*)', outcome)
-    if not match or not isinstance(data, dict) or data.get('uid') != os.geteuid() or data.get('project') != project:
+    if not match or not isinstance(data, dict) or data.get('uid') != os.geteuid() or not isinstance(data.get('project'),str) or os.path.realpath(data['project']) != os.path.realpath(project):
         return 1
     number = int(match[1])
-    target = os.path.abspath(target)
+    target = os.path.realpath(target)
     for fact in data.get('errors', []):
         if fact.get('errno') != number:
             continue
-        path = os.path.abspath(fact['path'])
+        path = os.path.realpath(fact['path'])
         if action == 'copy' and fact['method'] == 'open-write' and path == target:
             return 0
         if fact['method'] == 'directory-access':

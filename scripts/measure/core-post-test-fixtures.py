@@ -74,10 +74,11 @@ def check_facts(facts, selected, permission, fault, home, project, payload, call
         elif selected=='copy-noop':
             proof=json.loads(observed)
             records=[json.loads(p.read_text()) for p in (call/'pending').glob('*.json')]
-            records=[r for r in records if isinstance(r,dict) and r.get('project_dir')==str(project)]
+            records=[r for r in records if isinstance(r,dict) and r.get('project_dir')==str(project.resolve())]
             if len(records)!=1:raise RuntimeError('no unique saved pending record for copy fixture')
             snapshot=records[0]['snapshot_id']
-            if proof!=dict(source=str(home/'snapshots'/(snapshot+'_package-lock.json')),target=str(project/'package-lock.json'),result='Ok(())',snapshot=snapshot):
+            proof=dict(proof,source=os.path.realpath(proof['source']),target=os.path.realpath(proof['target']))
+            if proof!=dict(source=str((home/'snapshots'/(snapshot+'_package-lock.json')).resolve()),target=str((project/'package-lock.json').resolve()),result='Ok(())',snapshot=snapshot):
                 raise RuntimeError('copy result does not name the failing lockfile')
         elif selected.startswith('owner'):
             query=json.loads(observed)

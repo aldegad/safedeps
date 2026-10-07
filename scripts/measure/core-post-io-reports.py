@@ -66,7 +66,11 @@ for name in ['copy-differs', 'copy-absent', 'removal']:
         (target/'removable').write_bytes(b'removable\n')
         (target/'held-dir').chmod(0o555); restore.append((target/'held-dir', 0o755))
     try:
-        subprocess.run([sys.executable, str(reader), 'native-io-before', str(project), str(case/'native-io.json')], check=True)
+        alias=case/'project-alias';alias.symlink_to(project,target_is_directory=True)
+        assert os.path.realpath(alias)==os.path.realpath(project)
+        save(case/'path-identity.json',dict(logical=str(alias),physical=str(project),
+                                         logical_realpath=os.path.realpath(alias),physical_realpath=os.path.realpath(project)))
+        subprocess.run([sys.executable, str(reader), 'native-io-before', str(alias), str(case/'native-io.json')], check=True)
         request = dict(op='report', action='remove' if name=='removal' else 'restore', source=str(source), path=str(target))
         save(case/'request.json', request)
         r = subprocess.run([str(core), 'post-probe'], input=json.dumps(request).encode(), capture_output=True,
@@ -87,6 +91,18 @@ for name in ['copy-differs', 'copy-absent', 'removal']:
         with (out/'reached.jsonl').open('a') as f:
             f.write(json.dumps(dict(case=name,core=str(core),core_sha256=hashlib.sha256(core.read_bytes()).hexdigest(),request=request,facts=facts,rc=r.returncode))+'\n')
         oracle(case,line,'baseline',0)
+        evidence=(case/'native-io.json').read_bytes()
+        foreign=case/'another-project';foreign.mkdir()
+        foreign_facts=json.loads(evidence);foreign_facts['project']=str(foreign)
+        save(case/'native-io.json',foreign_facts)
+        oracle(case,line,'another-project',1)
+        (case/'native-io.json').write_bytes(evidence)
+        # Keep the disk suffix valid at a different directory; only the
+        # independent operation/path identity may justify the error.
+        other=foreign/target.name
+        if name=='copy-differs':other.write_bytes(b'changed bytes\n')
+        elif name=='removal':other.mkdir()
+        oracle(case,line.replace(str(target),str(other)),'another-target',1)
         oracle(case,line.replace('OS error 13','OS error 2'),'wrong-error',1)
         oracle(case,line.replace('returned OS error 13','returned without error'),'invented-success',1)
         old = line.replace('removal returned OS error 13','rm exit 1').replace('copy returned OS error 13','cp exit 1')
