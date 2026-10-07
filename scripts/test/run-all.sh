@@ -58,9 +58,8 @@ cd "${ROOT_DIR}" || exit 2
 # release runs.
 #
 # shards and weight are for scripts/ci/run-on-hosts.sh, which runs a set on
-# several hosts at once and has ten minutes of wall clock for it (AGENTS.md,
-# Testing). shards is how many units the battery is split into: shard I of M
-# runs the battery with `--shard I/M` (scripts/test/lib/shard.sh; the census
+# several hosts at once. shards is how many units the battery is split into:
+# shard I of M runs the battery with `--shard I/M` (scripts/test/lib/shard.sh; the census
 # has its own, with `--out`). weight is how many CPUs one unit keeps busy, so
 # a host is not handed more work than it has CPUs for: manager-variants judges
 # eight forms at a time, install-dir-differential six, and a census shard runs
