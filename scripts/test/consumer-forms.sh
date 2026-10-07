@@ -2661,9 +2661,9 @@ pass "a newline inside quotes neither hides the next statement nor turns quoted 
 # same way. Each row asserts the whole prescription; a row with an approval
 # asserts that the old prescription's approval does not pass another package.
 prescription() {
-  local command="$1" safe out
+  local response_expect="$1" command="$2" safe out
   safe=$(mktemp -d "${tmp_root}/prescribe.XXXXXX")
-  shift
+  shift 2
   while [[ $# -ge 3 ]]; do
     ( export SAFEDEPS_HOME="${safe}"
       . lib/ledger/ledger.sh
@@ -2674,7 +2674,7 @@ prescription() {
   out=$(jq -nc --arg c "${command}" --arg cwd "${project_dir}" \
     '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
     HOME="${safe}/home" SAFEDEPS_HOME="${safe}" hook_response_capture "${safe}.response" scripts/safedeps-hook-entry.sh pre)
-  hook_response_parse "${out}" decision || return 1
+  hook_response_parse "${out}" "${response_expect}" || return 1
   [[ "${HOOK_DECISION}" == deny ]] || { printf 'no-deny;'; return 0; }
   printf '%s\n' "${HOOK_REASON}" \
     | sed -nE 's/.*run `([^`]*)` first.*/\1/p' \
@@ -2682,9 +2682,12 @@ prescription() {
 }
 expect_prescription() {
   shard_row "expect_prescription|$*" || return 0
-  local want="$1" got
+  local want="$1" got response_expect=decision
   shift
-  got=$(prescription "$@")
+  # A no-deny row allows an unjudged command as well as a valid non-deny
+  # decision. A row expecting a prescription always requires a decision.
+  [[ "${want}" != 'no-deny;' ]] || response_expect=quiet-or-decision
+  got=$(prescription "${response_expect}" "$@")
   [[ "${got}" == "${want}" ]] || fail "the deny for \`$1\` prescribes ${want} (got: ${got})"
 }
 
