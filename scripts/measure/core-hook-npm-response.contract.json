@@ -1,6 +1,6 @@
 {
- "format": "core-hook-npm-response-contract/4",
- "about": "What core-hook-npm-response.py expects of the pre hook's first three npm asks (prefix, root, config), of its own readers, of its lifetimes and of its controls. It was written by reading the product source statically at the line ranges each cite names, the ask contract in AGENTS.md, the macOS ps(1) and strftime(3) manuals, and declaring a synthetic fixture's expected results from that reading. No product ask, ps call or control was run to produce it, and no run's output or candidate record was read to produce it. A role is named by the request the expectation declares (argv template and working directory) and by the source's call slot, never from a claim number, a completion order or a value the hook produced. Every fact the collector keeps is observed with its value, absent with its basis, or unavailable with the operation that did not answer; a comparison is a match, a mismatch of two observed values, or incomparable. A code is the judgment's input: code_parts reads its kind, channel and roles, and scenario_rows decides the linkage and intervention rows from them. Placeholders: @W@ the statement's words, @Q@ the quiet flags, @S@ one ask group's scratch directory, @BOX@ @PROJECT@ @HOME@ @STATE@ @TMP@ the sandbox, @SYSTEM@ the system directories on the hook's PATH. A relation candidate covers one group, the initial attempt and its three roles; another group, a follow-up attempt and a declared shared effect are reported apart.",
+ "format": "core-hook-npm-response-contract/5",
+ "about": "What core-hook-npm-response.py expects of the pre hook's first three npm asks (prefix, root, config), of its own readers, of its lifetimes and of its controls. It was written by reading the product source statically at the line ranges each cite names, the ask contract in AGENTS.md, the macOS ps(1) and strftime(3) manuals, and declaring a synthetic fixture's expected results from that reading. No product ask, ps call or control was run to produce it, and no run's output or candidate record was read to produce it. A role is named by the request the expectation declares (argv template and working directory) and by the source's call slot, never from a claim number, a completion order or a value the hook produced. Every fact the collector keeps is observed with its value, absent with its basis, or unavailable with the operation that did not answer; a comparison is a match, a mismatch of two observed values, or incomparable. A code is the judgment's input: code_parts reads its kind, channel and roles, and scenario_rows decides the linkage and intervention rows from them. Placeholders: @W@ the statement's words, @Q@ the quiet flags, @S@ one ask group's scratch directory, @BOX@ @PROJECT@ @HOME@ @STATE@ @TMP@ the sandbox, @SYSTEM@ the system directories on the hook's PATH. A relation candidate covers one group, the initial attempt and its three roles; another group, a follow-up attempt and a declared shared effect are reported apart. Format 5: an exit is read only after the start of the pid's process was read (target_exit), the observer's releases say what they went on, and the driver's bundles are run as attempts that refer to completed prerequisites explicitly; S0 is the first, small bundle that observes those boundaries.",
  "sources": {
   "native": {
    "commit": "baf2ad30244d06f028600914b2669433a87d9712",
@@ -204,7 +204,7 @@
   },
   "query": "one ps call is one record: purpose, argv (the scope's ps by path, the mode, the purpose's fields, the collector's own pid as sentinel and the targets), locale C, the timeout, start and end times, and the outcome (exit with its status, signal, timeout or exception) with stdout and stderr as they came",
   "read": "read_ps reads a record only when every key is there with its type (timeout included), the argv is the one the scope's ps, the purpose's fields, the targets and the sentinel make, ps exited by itself with a status, stderr is empty, every line reads as the fields with a start time in the form above, the sentinel's row is there and no row names a pid nobody asked about. It returns the rows with the query they answer; nothing else reads a row",
-  "exit": "target_exit reads an exit only for a pid the answer's own query asked about. No row is gone only under an absence basis; a row whose start time is another date and time than the one read when the child started is another process (pid-reused); Z is a zombie; the same start time is alive. A row with no start time read for that pid is not attributed. The judge reads an exit-poll only through the target it bound to the child, with the pid the child itself recorded; a poll that bound the child to another pid is an exit-binding defect and is read for nothing",
+  "exit": "target_exit reads an exit only for a pid the answer's own query asked about, and only after the start of that pid's process was read for this child: without it, no row, a Z row, another start time and a missing row under an absence basis are all unavailable (attribution). With it: no row is gone only under an absence basis; another start time is another process (pid-reused), before any Z; Z is a zombie; the same start time is alive. The judge reads an exit-poll only through the target it bound to the child, with the pid the child itself recorded, and only when the poll comes after the child's start record. The observer lets the next child of an imposed completion order go only on the exit record of the one before it (after_exit), and a give-up's releases say so (after_give_up). An exit status's value and a pid reused within one second of lstart are not read",
   "scope": "a collection's scope is its run id (32 hex digits from the driver), the host by uname, its boot by the start of pid 1 read with this ps, the user id, and the ps executable by path, real path, device, inode, size, modification time and digest, with the mode. The collector reads its own scope; the judge uses the scope the manifest seals and never reads its own machine",
   "absence": "a missing row means no process only under the basis host_basis gives for a host fact of exactly the collection's scope, and only for a query of the same ps and mode whose status is the one the fact measured for an answer with a missing pid; otherwise it is unavailable. A collection whose selected host fact does not hold is refused; no collection runs without one",
   "host_fact": {
@@ -977,8 +977,27 @@
   ]
  },
  "controls": {
-  "about": "The author's own controls of this change's boundaries, each with literal inputs and literal expectations. readers and adapters run in the check subcommand. copies and sensitivity run from copies of the tree with the exact edits named; check-controls reads what they left with the standard library and the status their parent saw. A control passes only when its copy is this tree with exactly its edits (applied), every reach fact holds (it got to what it injects or removes), and every signature fact is exactly as declared. A control whose reach facts do not hold is not demonstrated and stays not run: no output, an initialization error or an injection never reached is not a detection. None of these is evidence about a real ps failure, a real slot race or a real npm, and none is an independent verification. No sensitivity copy removes the holder parent's lifetime: without it the copy would leave a live holder behind, which this run does not do.",
+  "about": "The author's own controls of this change's boundaries, each with literal inputs and literal expectations. readers and adapters run in the check subcommand. copies and sensitivity run from copies of the tree with the exact edits named; check-controls reads what they left with the standard library and the status their parent saw. A control passes only when its copy is this tree with exactly its edits (applied), every reach fact holds (it got to what it injects or removes), and every signature fact is exactly as declared. A control whose reach facts do not hold is not demonstrated and stays not run: no output, an initialization error or an injection never reached is not a detection. None of these is evidence about a real ps failure, a real slot race or a real npm, and none is an independent verification. No sensitivity copy removes the holder parent's lifetime: without it the copy would leave a live holder behind, which this run does not do. Values are compared as JSON values, so false is not 0. S0's flows, their sensitivity flows and the immutability rows are in the control spec of the external driver.",
   "steps": [
+   {
+    "name": "literal-s0",
+    "layer": "check",
+    "bundle": "S0",
+    "step": "check-s0",
+    "check": "check-run",
+    "about": "the check run of S0's selection: the F1 matrix, the observer and exit_fact adapters, and the host scope comparisons, each as declared",
+    "expect": {
+     "reach": {
+      "results": true,
+      "stopped": null
+     },
+     "signature": {
+      "rc": 0,
+      "acceptance": "pass",
+      "failed": []
+     }
+    }
+   },
    {
     "name": "literal",
     "layer": "check",
@@ -2746,6 +2765,335 @@
       ]
      }
     },
+    "basis": null,
+    "expect": {
+     "read": "observed",
+     "exit": "unavailable"
+    }
+   },
+   {
+    "name": "J1r-no-row-basis-no-start",
+    "layer": "J1",
+    "reader": "ps",
+    "record": {
+     "format": "core-hook-npm-response-ps/2",
+     "purpose": "exit",
+     "argv": [
+      "/bin/ps",
+      "-ww",
+      "-o",
+      "pid=,stat=,lstart=",
+      "-p",
+      "100,200"
+     ],
+     "fields": [
+      "pid",
+      "stat",
+      "lstart"
+     ],
+     "sentinel": 100,
+     "targets": [
+      200
+     ],
+     "locale": "C",
+     "timeout": 1.0,
+     "t0_ns": 1,
+     "t1_ns": 2,
+     "outcome": {
+      "kind": "exit",
+      "rc": 1
+     },
+     "stdout": "100 S Tue Oct  6 21:00:00 2026\n",
+     "stderr": ""
+    },
+    "tool": {
+     "path": "/bin/ps",
+     "realpath": "/bin/ps",
+     "dev": 16777232,
+     "ino": 1152921500312,
+     "size": 137024,
+     "mtime_ns": 1,
+     "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "mode": {
+      "locale": "C",
+      "width": "-ww",
+      "select": "-p",
+      "all": "-A",
+      "header": "none"
+     }
+    },
+    "pid": 200,
+    "start": null,
+    "basis": {
+     "absent_rc": 1,
+     "scope": {
+      "run_id": "00000000000000000000000000000001",
+      "host": {
+       "sysname": "Darwin",
+       "nodename": "host",
+       "release": "25.2.0",
+       "version": "Darwin Kernel Version 25.2.0",
+       "machine": "arm64"
+      },
+      "uid": 501,
+      "boot": {
+       "raw": "Mon Oct 5 09:00:00 2026",
+       "at": [
+        2026,
+        10,
+        5,
+        9,
+        0,
+        0
+       ]
+      },
+      "ps": {
+       "path": "/bin/ps",
+       "realpath": "/bin/ps",
+       "dev": 16777232,
+       "ino": 1152921500312,
+       "size": 137024,
+       "mtime_ns": 1,
+       "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+       "mode": {
+        "locale": "C",
+        "width": "-ww",
+        "select": "-p",
+        "all": "-A",
+        "header": "none"
+       }
+      }
+     }
+    },
+    "expect": {
+     "read": "observed",
+     "exit": "unavailable"
+    }
+   },
+   {
+    "name": "J1r-no-row-basis-other-pid",
+    "layer": "J1",
+    "reader": "ps",
+    "record": {
+     "format": "core-hook-npm-response-ps/2",
+     "purpose": "exit",
+     "argv": [
+      "/bin/ps",
+      "-ww",
+      "-o",
+      "pid=,stat=,lstart=",
+      "-p",
+      "100,200"
+     ],
+     "fields": [
+      "pid",
+      "stat",
+      "lstart"
+     ],
+     "sentinel": 100,
+     "targets": [
+      200
+     ],
+     "locale": "C",
+     "timeout": 1.0,
+     "t0_ns": 1,
+     "t1_ns": 2,
+     "outcome": {
+      "kind": "exit",
+      "rc": 1
+     },
+     "stdout": "100 S Tue Oct  6 21:00:00 2026\n",
+     "stderr": ""
+    },
+    "tool": {
+     "path": "/bin/ps",
+     "realpath": "/bin/ps",
+     "dev": 16777232,
+     "ino": 1152921500312,
+     "size": 137024,
+     "mtime_ns": 1,
+     "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "mode": {
+      "locale": "C",
+      "width": "-ww",
+      "select": "-p",
+      "all": "-A",
+      "header": "none"
+     }
+    },
+    "pid": 200,
+    "start": {
+     "pid": 201,
+     "start": {
+      "raw": "Tue Oct 6 21:00:00 2026",
+      "at": [
+       2026,
+       10,
+       6,
+       21,
+       0,
+       0
+      ]
+     }
+    },
+    "basis": {
+     "absent_rc": 1,
+     "scope": {
+      "run_id": "00000000000000000000000000000001",
+      "host": {
+       "sysname": "Darwin",
+       "nodename": "host",
+       "release": "25.2.0",
+       "version": "Darwin Kernel Version 25.2.0",
+       "machine": "arm64"
+      },
+      "uid": 501,
+      "boot": {
+       "raw": "Mon Oct 5 09:00:00 2026",
+       "at": [
+        2026,
+        10,
+        5,
+        9,
+        0,
+        0
+       ]
+      },
+      "ps": {
+       "path": "/bin/ps",
+       "realpath": "/bin/ps",
+       "dev": 16777232,
+       "ino": 1152921500312,
+       "size": 137024,
+       "mtime_ns": 1,
+       "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+       "mode": {
+        "locale": "C",
+        "width": "-ww",
+        "select": "-p",
+        "all": "-A",
+        "header": "none"
+       }
+      }
+     }
+    },
+    "expect": {
+     "read": "observed",
+     "exit": "unavailable"
+    }
+   },
+   {
+    "name": "J1r-zombie-no-start",
+    "layer": "J1",
+    "reader": "ps",
+    "record": {
+     "format": "core-hook-npm-response-ps/2",
+     "purpose": "exit",
+     "argv": [
+      "/bin/ps",
+      "-ww",
+      "-o",
+      "pid=,stat=,lstart=",
+      "-p",
+      "100,200"
+     ],
+     "fields": [
+      "pid",
+      "stat",
+      "lstart"
+     ],
+     "sentinel": 100,
+     "targets": [
+      200
+     ],
+     "locale": "C",
+     "timeout": 1.0,
+     "t0_ns": 1,
+     "t1_ns": 2,
+     "outcome": {
+      "kind": "exit",
+      "rc": 0
+     },
+     "stdout": "100 S Tue Oct  6 21:00:00 2026\n200 Z Tue Oct  6 21:00:00 2026\n",
+     "stderr": ""
+    },
+    "tool": {
+     "path": "/bin/ps",
+     "realpath": "/bin/ps",
+     "dev": 16777232,
+     "ino": 1152921500312,
+     "size": 137024,
+     "mtime_ns": 1,
+     "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "mode": {
+      "locale": "C",
+      "width": "-ww",
+      "select": "-p",
+      "all": "-A",
+      "header": "none"
+     }
+    },
+    "pid": 200,
+    "start": null,
+    "basis": null,
+    "expect": {
+     "read": "observed",
+     "exit": "unavailable"
+    }
+   },
+   {
+    "name": "J1r-reused-no-start",
+    "layer": "J1",
+    "reader": "ps",
+    "record": {
+     "format": "core-hook-npm-response-ps/2",
+     "purpose": "exit",
+     "argv": [
+      "/bin/ps",
+      "-ww",
+      "-o",
+      "pid=,stat=,lstart=",
+      "-p",
+      "100,200"
+     ],
+     "fields": [
+      "pid",
+      "stat",
+      "lstart"
+     ],
+     "sentinel": 100,
+     "targets": [
+      200
+     ],
+     "locale": "C",
+     "timeout": 1.0,
+     "t0_ns": 1,
+     "t1_ns": 2,
+     "outcome": {
+      "kind": "exit",
+      "rc": 0
+     },
+     "stdout": "100 S Tue Oct  6 21:00:00 2026\n200 S Wed Oct  7 01:00:00 2026\n",
+     "stderr": ""
+    },
+    "tool": {
+     "path": "/bin/ps",
+     "realpath": "/bin/ps",
+     "dev": 16777232,
+     "ino": 1152921500312,
+     "size": 137024,
+     "mtime_ns": 1,
+     "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "mode": {
+      "locale": "C",
+      "width": "-ww",
+      "select": "-p",
+      "all": "-A",
+      "header": "none"
+     }
+    },
+    "pid": 200,
+    "start": null,
     "basis": null,
     "expect": {
      "read": "observed",
@@ -6974,6 +7322,1332 @@
      "read": "not-attempted",
      "blob_kept": false
     }
+   },
+   {
+    "name": "O1-poll-start-none",
+    "layer": "F1",
+    "adapter": "observer",
+    "mode": "poll",
+    "tool": {
+     "path": "/bin/ps",
+     "realpath": "/bin/ps",
+     "dev": 16777232,
+     "ino": 1152921500312,
+     "size": 137024,
+     "mtime_ns": 1,
+     "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "mode": {
+      "locale": "C",
+      "width": "-ww",
+      "select": "-p",
+      "all": "-A",
+      "header": "none"
+     }
+    },
+    "scope": {
+     "run_id": "00000000000000000000000000000001",
+     "ps": {
+      "path": "/bin/ps",
+      "realpath": "/bin/ps",
+      "dev": 16777232,
+      "ino": 1152921500312,
+      "size": 137024,
+      "mtime_ns": 1,
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "mode": {
+       "locale": "C",
+       "width": "-ww",
+       "select": "-p",
+       "all": "-A",
+       "header": "none"
+      }
+     }
+    },
+    "basis": {
+     "absent_rc": 1,
+     "scope": {
+      "run_id": "00000000000000000000000000000001",
+      "host": {
+       "sysname": "Darwin",
+       "nodename": "host",
+       "release": "25.2.0",
+       "version": "Darwin Kernel Version 25.2.0",
+       "machine": "arm64"
+      },
+      "uid": 501,
+      "boot": {
+       "raw": "Mon Oct 5 09:00:00 2026",
+       "at": [
+        2026,
+        10,
+        5,
+        9,
+        0,
+        0
+       ]
+      },
+      "ps": {
+       "path": "/bin/ps",
+       "realpath": "/bin/ps",
+       "dev": 16777232,
+       "ino": 1152921500312,
+       "size": 137024,
+       "mtime_ns": 1,
+       "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+       "mode": {
+        "locale": "C",
+        "width": "-ww",
+        "select": "-p",
+        "all": "-A",
+        "header": "none"
+       }
+      }
+     }
+    },
+    "children": [
+     {
+      "role": "root",
+      "pid": 412,
+      "start": null,
+      "released": true
+     }
+    ],
+    "answers": [
+     {
+      "rc": 1,
+      "stdout": "@SENTINEL@ S Tue Oct  6 21:00:00 2026\n"
+     }
+    ],
+    "expect": {
+     "exited": [],
+     "readings": [
+      "unavailable:attribution"
+     ],
+     "releases": [],
+     "give-ups": 0,
+     "exit-pointers": null,
+     "raised": null
+    }
+   },
+   {
+    "name": "O2-poll-start-valid",
+    "layer": "F1",
+    "adapter": "observer",
+    "mode": "poll",
+    "tool": {
+     "path": "/bin/ps",
+     "realpath": "/bin/ps",
+     "dev": 16777232,
+     "ino": 1152921500312,
+     "size": 137024,
+     "mtime_ns": 1,
+     "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "mode": {
+      "locale": "C",
+      "width": "-ww",
+      "select": "-p",
+      "all": "-A",
+      "header": "none"
+     }
+    },
+    "scope": {
+     "run_id": "00000000000000000000000000000001",
+     "ps": {
+      "path": "/bin/ps",
+      "realpath": "/bin/ps",
+      "dev": 16777232,
+      "ino": 1152921500312,
+      "size": 137024,
+      "mtime_ns": 1,
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "mode": {
+       "locale": "C",
+       "width": "-ww",
+       "select": "-p",
+       "all": "-A",
+       "header": "none"
+      }
+     }
+    },
+    "basis": {
+     "absent_rc": 1,
+     "scope": {
+      "run_id": "00000000000000000000000000000001",
+      "host": {
+       "sysname": "Darwin",
+       "nodename": "host",
+       "release": "25.2.0",
+       "version": "Darwin Kernel Version 25.2.0",
+       "machine": "arm64"
+      },
+      "uid": 501,
+      "boot": {
+       "raw": "Mon Oct 5 09:00:00 2026",
+       "at": [
+        2026,
+        10,
+        5,
+        9,
+        0,
+        0
+       ]
+      },
+      "ps": {
+       "path": "/bin/ps",
+       "realpath": "/bin/ps",
+       "dev": 16777232,
+       "ino": 1152921500312,
+       "size": 137024,
+       "mtime_ns": 1,
+       "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+       "mode": {
+        "locale": "C",
+        "width": "-ww",
+        "select": "-p",
+        "all": "-A",
+        "header": "none"
+       }
+      }
+     }
+    },
+    "children": [
+     {
+      "role": "root",
+      "pid": 412,
+      "start": {
+       "pid": 412,
+       "start": {
+        "raw": "Tue Oct 6 21:00:00 2026",
+        "at": [
+         2026,
+         10,
+         6,
+         21,
+         0,
+         0
+        ]
+       }
+      },
+      "released": true
+     }
+    ],
+    "answers": [
+     {
+      "rc": 1,
+      "stdout": "@SENTINEL@ S Tue Oct  6 21:00:00 2026\n"
+     }
+    ],
+    "expect": {
+     "exited": [
+      "root"
+     ],
+     "readings": [
+      "observed:gone"
+     ],
+     "releases": [],
+     "give-ups": 0,
+     "exit-pointers": null,
+     "raised": null
+    }
+   },
+   {
+    "name": "O3-order-start-none",
+    "layer": "F1",
+    "adapter": "observer",
+    "mode": "barrier",
+    "tool": {
+     "path": "/bin/ps",
+     "realpath": "/bin/ps",
+     "dev": 16777232,
+     "ino": 1152921500312,
+     "size": 137024,
+     "mtime_ns": 1,
+     "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "mode": {
+      "locale": "C",
+      "width": "-ww",
+      "select": "-p",
+      "all": "-A",
+      "header": "none"
+     }
+    },
+    "scope": {
+     "run_id": "00000000000000000000000000000001",
+     "ps": {
+      "path": "/bin/ps",
+      "realpath": "/bin/ps",
+      "dev": 16777232,
+      "ino": 1152921500312,
+      "size": 137024,
+      "mtime_ns": 1,
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "mode": {
+       "locale": "C",
+       "width": "-ww",
+       "select": "-p",
+       "all": "-A",
+       "header": "none"
+      }
+     }
+    },
+    "basis": {
+     "absent_rc": 1,
+     "scope": {
+      "run_id": "00000000000000000000000000000001",
+      "host": {
+       "sysname": "Darwin",
+       "nodename": "host",
+       "release": "25.2.0",
+       "version": "Darwin Kernel Version 25.2.0",
+       "machine": "arm64"
+      },
+      "uid": 501,
+      "boot": {
+       "raw": "Mon Oct 5 09:00:00 2026",
+       "at": [
+        2026,
+        10,
+        5,
+        9,
+        0,
+        0
+       ]
+      },
+      "ps": {
+       "path": "/bin/ps",
+       "realpath": "/bin/ps",
+       "dev": 16777232,
+       "ino": 1152921500312,
+       "size": 137024,
+       "mtime_ns": 1,
+       "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+       "mode": {
+        "locale": "C",
+        "width": "-ww",
+        "select": "-p",
+        "all": "-A",
+        "header": "none"
+       }
+      }
+     }
+    },
+    "children": [
+     {
+      "role": "prefix",
+      "pid": 411,
+      "start": {
+       "pid": 411,
+       "start": {
+        "raw": "Tue Oct 6 21:00:00 2026",
+        "at": [
+         2026,
+         10,
+         6,
+         21,
+         0,
+         0
+        ]
+       }
+      },
+      "released": false
+     },
+     {
+      "role": "root",
+      "pid": 412,
+      "start": null,
+      "released": false
+     },
+     {
+      "role": "config",
+      "pid": 413,
+      "start": {
+       "pid": 413,
+       "start": {
+        "raw": "Tue Oct 6 21:00:00 2026",
+        "at": [
+         2026,
+         10,
+         6,
+         21,
+         0,
+         0
+        ]
+       }
+      },
+      "released": false
+     }
+    ],
+    "answers": [
+     {
+      "rc": 1,
+      "stdout": "@SENTINEL@ S Tue Oct  6 21:00:00 2026\n"
+     },
+     {
+      "rc": 1,
+      "stdout": "@SENTINEL@ S Tue Oct  6 21:00:00 2026\n"
+     },
+     {
+      "rc": 1,
+      "stdout": "@SENTINEL@ S Tue Oct  6 21:00:00 2026\n"
+     }
+    ],
+    "budget": -1,
+    "release_order": [
+     "root",
+     "config",
+     "prefix"
+    ],
+    "expect": {
+     "exited": [],
+     "readings": [
+      "unavailable:attribution"
+     ],
+     "releases": [
+      [
+       "root",
+       "the imposed completion order",
+       "none"
+      ],
+      [
+       "prefix",
+       "order not imposed",
+       "after-give-up"
+      ],
+      [
+       "config",
+       "order not imposed",
+       "after-give-up"
+      ]
+     ],
+     "give-ups": 1,
+     "exit-pointers": null,
+     "raised": null
+    }
+   },
+   {
+    "name": "O4-order-start-valid",
+    "layer": "F1",
+    "adapter": "observer",
+    "mode": "barrier",
+    "tool": {
+     "path": "/bin/ps",
+     "realpath": "/bin/ps",
+     "dev": 16777232,
+     "ino": 1152921500312,
+     "size": 137024,
+     "mtime_ns": 1,
+     "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "mode": {
+      "locale": "C",
+      "width": "-ww",
+      "select": "-p",
+      "all": "-A",
+      "header": "none"
+     }
+    },
+    "scope": {
+     "run_id": "00000000000000000000000000000001",
+     "ps": {
+      "path": "/bin/ps",
+      "realpath": "/bin/ps",
+      "dev": 16777232,
+      "ino": 1152921500312,
+      "size": 137024,
+      "mtime_ns": 1,
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "mode": {
+       "locale": "C",
+       "width": "-ww",
+       "select": "-p",
+       "all": "-A",
+       "header": "none"
+      }
+     }
+    },
+    "basis": {
+     "absent_rc": 1,
+     "scope": {
+      "run_id": "00000000000000000000000000000001",
+      "host": {
+       "sysname": "Darwin",
+       "nodename": "host",
+       "release": "25.2.0",
+       "version": "Darwin Kernel Version 25.2.0",
+       "machine": "arm64"
+      },
+      "uid": 501,
+      "boot": {
+       "raw": "Mon Oct 5 09:00:00 2026",
+       "at": [
+        2026,
+        10,
+        5,
+        9,
+        0,
+        0
+       ]
+      },
+      "ps": {
+       "path": "/bin/ps",
+       "realpath": "/bin/ps",
+       "dev": 16777232,
+       "ino": 1152921500312,
+       "size": 137024,
+       "mtime_ns": 1,
+       "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+       "mode": {
+        "locale": "C",
+        "width": "-ww",
+        "select": "-p",
+        "all": "-A",
+        "header": "none"
+       }
+      }
+     }
+    },
+    "children": [
+     {
+      "role": "prefix",
+      "pid": 411,
+      "start": {
+       "pid": 411,
+       "start": {
+        "raw": "Tue Oct 6 21:00:00 2026",
+        "at": [
+         2026,
+         10,
+         6,
+         21,
+         0,
+         0
+        ]
+       }
+      },
+      "released": false
+     },
+     {
+      "role": "root",
+      "pid": 412,
+      "start": {
+       "pid": 412,
+       "start": {
+        "raw": "Tue Oct 6 21:00:00 2026",
+        "at": [
+         2026,
+         10,
+         6,
+         21,
+         0,
+         0
+        ]
+       }
+      },
+      "released": false
+     },
+     {
+      "role": "config",
+      "pid": 413,
+      "start": {
+       "pid": 413,
+       "start": {
+        "raw": "Tue Oct 6 21:00:00 2026",
+        "at": [
+         2026,
+         10,
+         6,
+         21,
+         0,
+         0
+        ]
+       }
+      },
+      "released": false
+     }
+    ],
+    "answers": [
+     {
+      "rc": 1,
+      "stdout": "@SENTINEL@ S Tue Oct  6 21:00:00 2026\n"
+     },
+     {
+      "rc": 1,
+      "stdout": "@SENTINEL@ S Tue Oct  6 21:00:00 2026\n"
+     },
+     {
+      "rc": 1,
+      "stdout": "@SENTINEL@ S Tue Oct  6 21:00:00 2026\n"
+     }
+    ],
+    "budget": 60,
+    "release_order": [
+     "root",
+     "config",
+     "prefix"
+    ],
+    "expect": {
+     "exited": [
+      "root",
+      "config",
+      "prefix"
+     ],
+     "readings": [
+      "observed:gone",
+      "observed:gone",
+      "observed:gone"
+     ],
+     "releases": [
+      [
+       "root",
+       "the imposed completion order",
+       "none"
+      ],
+      [
+       "config",
+       "the imposed completion order",
+       "after-exit"
+      ],
+      [
+       "prefix",
+       "the imposed completion order",
+       "after-exit"
+      ]
+     ],
+     "give-ups": 0,
+     "exit-pointers": true,
+     "raised": null
+    }
+   },
+   {
+    "name": "E1-no-start-record",
+    "layer": "F1",
+    "adapter": "exit-fact",
+    "pid": 411,
+    "tool": {
+     "path": "/bin/ps",
+     "realpath": "/bin/ps",
+     "dev": 16777232,
+     "ino": 1152921500312,
+     "size": 137024,
+     "mtime_ns": 1,
+     "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "mode": {
+      "locale": "C",
+      "width": "-ww",
+      "select": "-p",
+      "all": "-A",
+      "header": "none"
+     }
+    },
+    "basis": {
+     "absent_rc": 1,
+     "scope": {
+      "run_id": "00000000000000000000000000000001",
+      "host": {
+       "sysname": "Darwin",
+       "nodename": "host",
+       "release": "25.2.0",
+       "version": "Darwin Kernel Version 25.2.0",
+       "machine": "arm64"
+      },
+      "uid": 501,
+      "boot": {
+       "raw": "Mon Oct 5 09:00:00 2026",
+       "at": [
+        2026,
+        10,
+        5,
+        9,
+        0,
+        0
+       ]
+      },
+      "ps": {
+       "path": "/bin/ps",
+       "realpath": "/bin/ps",
+       "dev": 16777232,
+       "ino": 1152921500312,
+       "size": 137024,
+       "mtime_ns": 1,
+       "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+       "mode": {
+        "locale": "C",
+        "width": "-ww",
+        "select": "-p",
+        "all": "-A",
+        "header": "none"
+       }
+      }
+     }
+    },
+    "polls": [
+     {
+      "format": "core-hook-npm-response-record/1",
+      "kind": "exit-poll",
+      "seq": 7,
+      "t_ns": 2,
+      "targets": [
+       {
+        "child": "n",
+        "pid": 411
+       }
+      ],
+      "ps": {
+       "format": "core-hook-npm-response-ps/2",
+       "purpose": "exit",
+       "argv": [
+        "/bin/ps",
+        "-ww",
+        "-o",
+        "pid=,stat=,lstart=",
+        "-p",
+        "101,411"
+       ],
+       "fields": [
+        "pid",
+        "stat",
+        "lstart"
+       ],
+       "sentinel": 101,
+       "targets": [
+        411
+       ],
+       "locale": "C",
+       "timeout": 1.0,
+       "t0_ns": 1,
+       "t1_ns": 2,
+       "outcome": {
+        "kind": "exit",
+        "rc": 1
+       },
+       "stdout": "101 S Tue Oct  6 21:00:00 2026\n",
+       "stderr": ""
+      },
+      "readings": {}
+     }
+    ],
+    "expect": {
+     "exit": null,
+     "binding": false
+    }
+   },
+   {
+    "name": "E2-start-timeout",
+    "layer": "F1",
+    "adapter": "exit-fact",
+    "pid": 411,
+    "tool": {
+     "path": "/bin/ps",
+     "realpath": "/bin/ps",
+     "dev": 16777232,
+     "ino": 1152921500312,
+     "size": 137024,
+     "mtime_ns": 1,
+     "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "mode": {
+      "locale": "C",
+      "width": "-ww",
+      "select": "-p",
+      "all": "-A",
+      "header": "none"
+     }
+    },
+    "basis": {
+     "absent_rc": 1,
+     "scope": {
+      "run_id": "00000000000000000000000000000001",
+      "host": {
+       "sysname": "Darwin",
+       "nodename": "host",
+       "release": "25.2.0",
+       "version": "Darwin Kernel Version 25.2.0",
+       "machine": "arm64"
+      },
+      "uid": 501,
+      "boot": {
+       "raw": "Mon Oct 5 09:00:00 2026",
+       "at": [
+        2026,
+        10,
+        5,
+        9,
+        0,
+        0
+       ]
+      },
+      "ps": {
+       "path": "/bin/ps",
+       "realpath": "/bin/ps",
+       "dev": 16777232,
+       "ino": 1152921500312,
+       "size": 137024,
+       "mtime_ns": 1,
+       "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+       "mode": {
+        "locale": "C",
+        "width": "-ww",
+        "select": "-p",
+        "all": "-A",
+        "header": "none"
+       }
+      }
+     }
+    },
+    "polls": [
+     {
+      "format": "core-hook-npm-response-record/1",
+      "kind": "exit-poll",
+      "seq": 7,
+      "t_ns": 2,
+      "targets": [
+       {
+        "child": "n",
+        "pid": 411
+       }
+      ],
+      "ps": {
+       "format": "core-hook-npm-response-ps/2",
+       "purpose": "exit",
+       "argv": [
+        "/bin/ps",
+        "-ww",
+        "-o",
+        "pid=,stat=,lstart=",
+        "-p",
+        "101,411"
+       ],
+       "fields": [
+        "pid",
+        "stat",
+        "lstart"
+       ],
+       "sentinel": 101,
+       "targets": [
+        411
+       ],
+       "locale": "C",
+       "timeout": 1.0,
+       "t0_ns": 1,
+       "t1_ns": 2,
+       "outcome": {
+        "kind": "exit",
+        "rc": 1
+       },
+       "stdout": "101 S Tue Oct  6 21:00:00 2026\n",
+       "stderr": ""
+      },
+      "readings": {}
+     }
+    ],
+    "start_record": {
+     "format": "core-hook-npm-response-record/1",
+     "kind": "start",
+     "seq": 3,
+     "t_ns": 1,
+     "child": "n",
+     "pid": 411,
+     "ps": {
+      "format": "core-hook-npm-response-ps/2",
+      "purpose": "start",
+      "argv": [
+       "/bin/ps",
+       "-ww",
+       "-o",
+       "pid=,ppid=,pgid=,stat=,lstart=,command=",
+       "-p",
+       "101,411"
+      ],
+      "fields": [
+       "pid",
+       "ppid",
+       "pgid",
+       "stat",
+       "lstart",
+       "command"
+      ],
+      "sentinel": 101,
+      "targets": [
+       411
+      ],
+      "locale": "C",
+      "timeout": 1.0,
+      "t0_ns": 1,
+      "t1_ns": 2,
+      "outcome": {
+       "kind": "timeout"
+      },
+      "stdout": "",
+      "stderr": ""
+     }
+    },
+    "expect": {
+     "exit": null,
+     "binding": false
+    }
+   },
+   {
+    "name": "E3-start-valid",
+    "layer": "F1",
+    "adapter": "exit-fact",
+    "pid": 411,
+    "tool": {
+     "path": "/bin/ps",
+     "realpath": "/bin/ps",
+     "dev": 16777232,
+     "ino": 1152921500312,
+     "size": 137024,
+     "mtime_ns": 1,
+     "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "mode": {
+      "locale": "C",
+      "width": "-ww",
+      "select": "-p",
+      "all": "-A",
+      "header": "none"
+     }
+    },
+    "basis": {
+     "absent_rc": 1,
+     "scope": {
+      "run_id": "00000000000000000000000000000001",
+      "host": {
+       "sysname": "Darwin",
+       "nodename": "host",
+       "release": "25.2.0",
+       "version": "Darwin Kernel Version 25.2.0",
+       "machine": "arm64"
+      },
+      "uid": 501,
+      "boot": {
+       "raw": "Mon Oct 5 09:00:00 2026",
+       "at": [
+        2026,
+        10,
+        5,
+        9,
+        0,
+        0
+       ]
+      },
+      "ps": {
+       "path": "/bin/ps",
+       "realpath": "/bin/ps",
+       "dev": 16777232,
+       "ino": 1152921500312,
+       "size": 137024,
+       "mtime_ns": 1,
+       "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+       "mode": {
+        "locale": "C",
+        "width": "-ww",
+        "select": "-p",
+        "all": "-A",
+        "header": "none"
+       }
+      }
+     }
+    },
+    "polls": [
+     {
+      "format": "core-hook-npm-response-record/1",
+      "kind": "exit-poll",
+      "seq": 7,
+      "t_ns": 2,
+      "targets": [
+       {
+        "child": "n",
+        "pid": 411
+       }
+      ],
+      "ps": {
+       "format": "core-hook-npm-response-ps/2",
+       "purpose": "exit",
+       "argv": [
+        "/bin/ps",
+        "-ww",
+        "-o",
+        "pid=,stat=,lstart=",
+        "-p",
+        "101,411"
+       ],
+       "fields": [
+        "pid",
+        "stat",
+        "lstart"
+       ],
+       "sentinel": 101,
+       "targets": [
+        411
+       ],
+       "locale": "C",
+       "timeout": 1.0,
+       "t0_ns": 1,
+       "t1_ns": 2,
+       "outcome": {
+        "kind": "exit",
+        "rc": 1
+       },
+       "stdout": "101 S Tue Oct  6 21:00:00 2026\n",
+       "stderr": ""
+      },
+      "readings": {}
+     }
+    ],
+    "start_record": {
+     "format": "core-hook-npm-response-record/1",
+     "kind": "start",
+     "seq": 3,
+     "t_ns": 1,
+     "child": "n",
+     "pid": 411,
+     "ps": {
+      "format": "core-hook-npm-response-ps/2",
+      "purpose": "start",
+      "argv": [
+       "/bin/ps",
+       "-ww",
+       "-o",
+       "pid=,ppid=,pgid=,stat=,lstart=,command=",
+       "-p",
+       "101,411"
+      ],
+      "fields": [
+       "pid",
+       "ppid",
+       "pgid",
+       "stat",
+       "lstart",
+       "command"
+      ],
+      "sentinel": 101,
+      "targets": [
+       411
+      ],
+      "locale": "C",
+      "timeout": 1.0,
+      "t0_ns": 1,
+      "t1_ns": 2,
+      "outcome": {
+       "kind": "exit",
+       "rc": 0
+      },
+      "stdout": "101 1 101 S Tue Oct  6 21:00:00 2026 python3 collector\n411 101 101 S Tue Oct  6 21:00:00 2026 npm prefix\n",
+      "stderr": ""
+     }
+    },
+    "expect": {
+     "exit": "gone",
+     "binding": false
+    }
+   },
+   {
+    "name": "E4-start-after-poll",
+    "layer": "F1",
+    "adapter": "exit-fact",
+    "pid": 411,
+    "tool": {
+     "path": "/bin/ps",
+     "realpath": "/bin/ps",
+     "dev": 16777232,
+     "ino": 1152921500312,
+     "size": 137024,
+     "mtime_ns": 1,
+     "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "mode": {
+      "locale": "C",
+      "width": "-ww",
+      "select": "-p",
+      "all": "-A",
+      "header": "none"
+     }
+    },
+    "basis": {
+     "absent_rc": 1,
+     "scope": {
+      "run_id": "00000000000000000000000000000001",
+      "host": {
+       "sysname": "Darwin",
+       "nodename": "host",
+       "release": "25.2.0",
+       "version": "Darwin Kernel Version 25.2.0",
+       "machine": "arm64"
+      },
+      "uid": 501,
+      "boot": {
+       "raw": "Mon Oct 5 09:00:00 2026",
+       "at": [
+        2026,
+        10,
+        5,
+        9,
+        0,
+        0
+       ]
+      },
+      "ps": {
+       "path": "/bin/ps",
+       "realpath": "/bin/ps",
+       "dev": 16777232,
+       "ino": 1152921500312,
+       "size": 137024,
+       "mtime_ns": 1,
+       "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+       "mode": {
+        "locale": "C",
+        "width": "-ww",
+        "select": "-p",
+        "all": "-A",
+        "header": "none"
+       }
+      }
+     }
+    },
+    "polls": [
+     {
+      "format": "core-hook-npm-response-record/1",
+      "kind": "exit-poll",
+      "seq": 7,
+      "t_ns": 2,
+      "targets": [
+       {
+        "child": "n",
+        "pid": 411
+       }
+      ],
+      "ps": {
+       "format": "core-hook-npm-response-ps/2",
+       "purpose": "exit",
+       "argv": [
+        "/bin/ps",
+        "-ww",
+        "-o",
+        "pid=,stat=,lstart=",
+        "-p",
+        "101,411"
+       ],
+       "fields": [
+        "pid",
+        "stat",
+        "lstart"
+       ],
+       "sentinel": 101,
+       "targets": [
+        411
+       ],
+       "locale": "C",
+       "timeout": 1.0,
+       "t0_ns": 1,
+       "t1_ns": 2,
+       "outcome": {
+        "kind": "exit",
+        "rc": 1
+       },
+       "stdout": "101 S Tue Oct  6 21:00:00 2026\n",
+       "stderr": ""
+      },
+      "readings": {}
+     }
+    ],
+    "start_record": {
+     "format": "core-hook-npm-response-record/1",
+     "kind": "start",
+     "seq": 9,
+     "t_ns": 1,
+     "child": "n",
+     "pid": 411,
+     "ps": {
+      "format": "core-hook-npm-response-ps/2",
+      "purpose": "start",
+      "argv": [
+       "/bin/ps",
+       "-ww",
+       "-o",
+       "pid=,ppid=,pgid=,stat=,lstart=,command=",
+       "-p",
+       "101,411"
+      ],
+      "fields": [
+       "pid",
+       "ppid",
+       "pgid",
+       "stat",
+       "lstart",
+       "command"
+      ],
+      "sentinel": 101,
+      "targets": [
+       411
+      ],
+      "locale": "C",
+      "timeout": 1.0,
+      "t0_ns": 1,
+      "t1_ns": 2,
+      "outcome": {
+       "kind": "exit",
+       "rc": 0
+      },
+      "stdout": "101 1 101 S Tue Oct  6 21:00:00 2026 python3 collector\n411 101 101 S Tue Oct  6 21:00:00 2026 npm prefix\n",
+      "stderr": ""
+     }
+    },
+    "expect": {
+     "exit": null,
+     "binding": false
+    }
+   },
+   {
+    "name": "E5-poll-other-pid",
+    "layer": "F1",
+    "adapter": "exit-fact",
+    "pid": 411,
+    "tool": {
+     "path": "/bin/ps",
+     "realpath": "/bin/ps",
+     "dev": 16777232,
+     "ino": 1152921500312,
+     "size": 137024,
+     "mtime_ns": 1,
+     "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "mode": {
+      "locale": "C",
+      "width": "-ww",
+      "select": "-p",
+      "all": "-A",
+      "header": "none"
+     }
+    },
+    "basis": {
+     "absent_rc": 1,
+     "scope": {
+      "run_id": "00000000000000000000000000000001",
+      "host": {
+       "sysname": "Darwin",
+       "nodename": "host",
+       "release": "25.2.0",
+       "version": "Darwin Kernel Version 25.2.0",
+       "machine": "arm64"
+      },
+      "uid": 501,
+      "boot": {
+       "raw": "Mon Oct 5 09:00:00 2026",
+       "at": [
+        2026,
+        10,
+        5,
+        9,
+        0,
+        0
+       ]
+      },
+      "ps": {
+       "path": "/bin/ps",
+       "realpath": "/bin/ps",
+       "dev": 16777232,
+       "ino": 1152921500312,
+       "size": 137024,
+       "mtime_ns": 1,
+       "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+       "mode": {
+        "locale": "C",
+        "width": "-ww",
+        "select": "-p",
+        "all": "-A",
+        "header": "none"
+       }
+      }
+     }
+    },
+    "polls": [
+     {
+      "format": "core-hook-npm-response-record/1",
+      "kind": "exit-poll",
+      "seq": 7,
+      "t_ns": 2,
+      "targets": [
+       {
+        "child": "n",
+        "pid": 412
+       }
+      ],
+      "ps": {
+       "format": "core-hook-npm-response-ps/2",
+       "purpose": "exit",
+       "argv": [
+        "/bin/ps",
+        "-ww",
+        "-o",
+        "pid=,stat=,lstart=",
+        "-p",
+        "101,412"
+       ],
+       "fields": [
+        "pid",
+        "stat",
+        "lstart"
+       ],
+       "sentinel": 101,
+       "targets": [
+        412
+       ],
+       "locale": "C",
+       "timeout": 1.0,
+       "t0_ns": 1,
+       "t1_ns": 2,
+       "outcome": {
+        "kind": "exit",
+        "rc": 1
+       },
+       "stdout": "101 S Tue Oct  6 21:00:00 2026\n",
+       "stderr": ""
+      },
+      "readings": {}
+     }
+    ],
+    "start_record": {
+     "format": "core-hook-npm-response-record/1",
+     "kind": "start",
+     "seq": 3,
+     "t_ns": 1,
+     "child": "n",
+     "pid": 411,
+     "ps": {
+      "format": "core-hook-npm-response-ps/2",
+      "purpose": "start",
+      "argv": [
+       "/bin/ps",
+       "-ww",
+       "-o",
+       "pid=,ppid=,pgid=,stat=,lstart=,command=",
+       "-p",
+       "101,411"
+      ],
+      "fields": [
+       "pid",
+       "ppid",
+       "pgid",
+       "stat",
+       "lstart",
+       "command"
+      ],
+      "sentinel": 101,
+      "targets": [
+       411
+      ],
+      "locale": "C",
+      "timeout": 1.0,
+      "t0_ns": 1,
+      "t1_ns": 2,
+      "outcome": {
+       "kind": "exit",
+       "rc": 0
+      },
+      "stdout": "101 1 101 S Tue Oct  6 21:00:00 2026 python3 collector\n411 101 101 S Tue Oct  6 21:00:00 2026 npm prefix\n",
+      "stderr": ""
+     }
+    },
+    "expect": {
+     "exit": null,
+     "binding": true
+    }
    }
   ],
   "copies": [
@@ -7140,6 +8814,113 @@
    }
   ],
   "sensitivity": [
+   {
+    "name": "S-F1",
+    "bundle": "S0",
+    "step": "sens-S-F1",
+    "check": "check-sensitivity",
+    "select": [
+     "J1r-no-row-basis",
+     "J1r-no-row-basis-no-start",
+     "J1r-no-row-basis-other-pid",
+     "J1r-no-row-no-basis",
+     "J1r-zombie",
+     "J1r-zombie-no-start",
+     "J1r-reused",
+     "J1r-reused-no-start",
+     "J1r-unattributed",
+     "J1r-start-other-pid",
+     "J1r-other-target",
+     "O1-poll-start-none",
+     "O2-poll-start-valid",
+     "O3-order-start-none",
+     "O4-order-start-valid",
+     "E1-no-start-record",
+     "E2-start-timeout",
+     "E3-start-valid",
+     "E4-start-after-poll",
+     "E5-poll-other-pid",
+     "H-holds",
+     "H-other-run",
+     "H-other-boot"
+    ],
+    "about": "target_exit with the start precondition skipped when the pid has no row, as before format 5: a missing row under an absence basis becomes the gone of a child whose start was never read",
+    "edits": [
+     {
+      "file": "scripts/measure/core_hook/npm_response.py",
+      "old": "    if (not isinstance(start, dict) or start.get('pid') != pid or not isinstance(start.get('start'), dict)\n            or not isinstance(start['start'].get('at'), list)):\n",
+      "new": "    if answer['rows'].get(pid) is not None and (not isinstance(start, dict) or start.get('pid') != pid or not isinstance(start.get('start'), dict)\n            or not isinstance(start['start'].get('at'), list)):\n"
+     }
+    ],
+    "expect": {
+     "reach": {
+      "applied": true,
+      "results": true,
+      "stopped": null
+     },
+     "signature": {
+      "rc": 1,
+      "failing": {
+       "J1r-no-row-basis-no-start": {
+        "read": "observed",
+        "exit": "gone"
+       },
+       "J1r-no-row-basis-other-pid": {
+        "read": "observed",
+        "exit": "gone"
+       },
+       "O1-poll-start-none": {
+        "exited": [
+         "root"
+        ],
+        "readings": [
+         "observed:gone"
+        ],
+        "releases": [],
+        "give-ups": 0,
+        "exit-pointers": null,
+        "raised": null
+       },
+       "O3-order-start-none": {
+        "exited": [
+         "root",
+         "config",
+         "prefix"
+        ],
+        "readings": [
+         "observed:gone",
+         "observed:gone",
+         "observed:gone"
+        ],
+        "releases": [
+         [
+          "root",
+          "the imposed completion order",
+          "none"
+         ],
+         [
+          "config",
+          "the imposed completion order",
+          "after-exit"
+         ],
+         [
+          "prefix",
+          "the imposed completion order",
+          "after-exit"
+         ]
+        ],
+        "give-ups": 0,
+        "exit-pointers": true,
+        "raised": null
+       },
+       "E2-start-timeout": {
+        "exit": "gone",
+        "binding": false
+       }
+      }
+     }
+    }
+   },
    {
     "name": "S-J1-read",
     "bundle": "S1",
@@ -7656,14 +9437,100 @@
  },
  "bundles": {
   "order": [
+   "S0",
    "S1",
    "S2",
    "S3",
    "S4"
   ],
-  "about": "Each bundle is one invocation of the external driver (run.py S1|S2|S3|S4), started only on its own acceptance. A bundle needs the one before it to have ended with 0 and never starts the next one. A bundle's judgment is its own; no earlier bundle's control is counted in the N1-N5 rows of S4. Counts are planned from the steps, not measured.",
+  "about": "Each bundle is run as attempts: one invocation of the external wrapper (run.sh <bundle> <attempt> [<ref>]) in a staged run, each in its own new directory, started only on its own acceptance. A bundle that needs another is given one explicit reference to a completed attempt of it (same run, or for S1 only, another run with the same inputs, selection, toolchain and environment). No bundle starts the next. S0 is the first small selection that observes the changed boundaries; its success is not a completed S1. A bundle's judgment is its own; no earlier bundle's control is counted in the N1-N5 rows of S4. Counts are planned from the steps, not measured.",
+  "S0": {
+   "needs": null,
+   "check_step": "check-s0",
+   "check_select": [
+    "J1r-no-row-basis",
+    "J1r-no-row-basis-no-start",
+    "J1r-no-row-basis-other-pid",
+    "J1r-no-row-no-basis",
+    "J1r-zombie",
+    "J1r-zombie-no-start",
+    "J1r-reused",
+    "J1r-reused-no-start",
+    "J1r-unattributed",
+    "J1r-start-other-pid",
+    "J1r-other-target",
+    "O1-poll-start-none",
+    "O2-poll-start-valid",
+    "O3-order-start-none",
+    "O4-order-start-valid",
+    "E1-no-start-record",
+    "E2-start-timeout",
+    "E3-start-valid",
+    "E4-start-after-poll",
+    "E5-poll-other-pid",
+    "H-holds",
+    "H-other-run",
+    "H-other-boot"
+   ],
+   "controls": [
+    "S-F1"
+   ],
+   "steps": [
+    "contract-only",
+    "check-s0",
+    "sens-S-F1",
+    "x-A-stage",
+    "x-A-s1",
+    "x-A-s2-fail",
+    "x-A-s2-new",
+    "x-A-s2-dup",
+    "x-A-s1-stop",
+    "x-A-s1-final3",
+    "x-A-s1-final1",
+    "x-A-s1-raise",
+    "x-A-s1-edit",
+    "x-A-s1-record",
+    "x-A-s3-gate",
+    "x-A-s3-ok",
+    "x-A-s4-collect",
+    "x-A-s1-fx5",
+    "x-A-s1-fx6",
+    "x-B-stage",
+    "x-B-s1",
+    "x-B-s2",
+    "x-D-stage",
+    "x-D-s1",
+    "x-A-p-final-only",
+    "x-A-p-stopped",
+    "x-A-p-rc-contradict",
+    "x-A-p-rc-bool",
+    "x-A-p-selection",
+    "x-A-p-no-ref",
+    "x-A-p-other-run",
+    "x-A-p-reuse-s1",
+    "x-A-p-reuse-s2",
+    "x-A-p-pin",
+    "x-C-stage",
+    "x-C-s2",
+    "x-F-stage",
+    "x-F-s1",
+    "check-controls"
+   ],
+   "processes": {
+    "python-steps": 39,
+    "wrapper-runs": 30,
+    "stages": 5,
+    "hooks": 0,
+    "measurement-ps": 0,
+    "provenance-ps": 30,
+    "holders": 0
+   },
+   "about": "the contract alone (3), the F1 matrix with the observer and exit_fact adapters and the host scope comparisons (check-s0, 0), S-F1 (1 with its exact failing cases), then the flows in five scratch runs and the final check-controls. The provenance ps count is the scratch wrapper runs'; the S0 attempt's own wrapper adds one"
+  },
   "S1": {
    "needs": null,
+   "check_step": "check",
+   "check_select": null,
    "controls": [
     "S-J1-read",
     "S-J1-target",
@@ -7691,35 +9558,16 @@
     "sens-S-H-wait",
     "sens-S-H-zombie",
     "sens-S-N3",
-    "j5-J5-S1-normal",
-    "j5-J5-S1-final-1",
-    "j5-J5-S1-final-3",
-    "j5-J5-S1-final-2",
-    "j5-J5-S1-contract-only-0",
-    "j5-J5-S1-raises",
-    "j5-J5-S1-edit-zero",
-    "j5-J5-S1-edit-two",
-    "j5-J5-S1-record-fails",
-    "j5-J5-S2-host-3",
-    "j5-J5-S2-host-2",
-    "j5-J5-S2-normal",
-    "j5-J5-S2-no-S1",
-    "j5-J5-S2-S1-not-0",
-    "j5-J5-S3-gate-3",
-    "j5-J5-S3-gate-1",
-    "j5-J5-S3-normal",
-    "j5-J5-S4-collect-3",
-    "j5-J5-S4-normal",
-    "j5-S-J5",
     "check-controls"
    ],
    "processes": {
-    "python": 34,
+    "python-steps": 14,
     "hooks": 0,
-    "ps": 0,
+    "measurement-ps": 0,
+    "provenance-ps": 1,
     "holders": 0
    },
-   "about": "the contract alone (expected 3), the literal readers and adapters (expected 0), the check-kind sensitivity copies (each expected 1 with its exact failing cases), the J5 driver copies, and check-controls for S1"
+   "about": "the contract alone (3), every literal reader and adapter (0), the check-kind sensitivity copies (each 1 with its exact failing cases), and check-controls. The driver controls that S1 used to carry are S0's flows"
   },
   "S2": {
    "needs": "S1",
@@ -7802,6 +9650,8 @@
   "the start-time form of any host's ps: the form above is declared, not measured; a host that prints another form leaves every answer unavailable",
   "time: whether the order budget, the children's starts, the ps calls, file I/O and a follow-up config fit inside the hook's shared ask deadline is not measured; an order the observer could not impose within its budget is reported not observed. The close budget bounds the observer's ps calls only, not a scan, a release, a file write or a publish",
   "an observer or a holder that never ends: the collector or the holder parent waits for it without a signal, so the final status is not reached and the pending record is what remains; a record that cannot be written is said on stderr and is not there",
-  "real npm: every answer comes from the stand-in; a real npm's shared cache, configuration files and ENOWORKSPACES are not exercised"
+  "real npm: every answer comes from the stand-in; a real npm's shared cache, configuration files and ENOWORKSPACES are not exercised",
+  "a completed attempt's own wrapper exit: the completion record is the wrapper's record of the driver's status and of the files it closed, written before the wrapper itself returns; the nohup launcher's pid is no evidence of an end",
+  "an S1 reused from another run on another host: accepted only with the same staged inputs, selection, Python and declared environment; an equality that was not shown is not assumed"
  ]
 }

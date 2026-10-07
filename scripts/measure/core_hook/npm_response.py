@@ -68,7 +68,7 @@ import traceback
 
 from . import evidence, observe
 
-CONTRACT = 'core-hook-npm-response-contract/4'
+CONTRACT = 'core-hook-npm-response-contract/5'
 LAUNCH = 'core-hook-npm-response-launch/3'
 RECORD = 'core-hook-npm-response-record/1'
 PSQ = 'core-hook-npm-response-ps/2'
@@ -313,7 +313,7 @@ SHAPES = {
     'nonempty-string': lambda v: isinstance(v, str) and bool(v),
     'md5-hex': lambda v: isinstance(v, str) and len(v) == 32 and all(c in '0123456789abcdef' for c in v),
 }
-BUNDLES = ('S1', 'S2', 'S3', 'S4')
+BUNDLES = ('S0', 'S1', 'S2', 'S3', 'S4')
 
 
 def contract_errors(rec):
@@ -774,20 +774,24 @@ def start_identity(answer, pid):
 def target_exit(answer, pid, start):
     """Whether the process <start> names has exited, read from one answer to a
     query that asked about <pid>: observed gone, zombie, pid-reused or alive;
-    otherwise unavailable."""
+    otherwise unavailable. Every exit is of the process whose start was read
+    for this pid, so that start is required before any row, or its absence,
+    is read: a missing row says the pid has no process now, which is no exit
+    of a child whose start nobody read."""
     if answer.get('state') != 'observed':
         return unavailable('ps', answer.get('why'))
     if not asked(answer, pid):
         return unavailable('ps-target', 'the query did not ask about pid %r' % (pid,))
+    if (not isinstance(start, dict) or start.get('pid') != pid or not isinstance(start.get('start'), dict)
+            or not isinstance(start['start'].get('at'), list)):
+        return unavailable('attribution', 'no start time was read for the process this pid named, so no exit is its own')
     row = answer['rows'].get(pid)
     if row is None:
         if answer['absence']:
             return observed({'exit': 'gone', 'basis': {'absent_rc': answer['absence']['absent_rc'],
                                                        'host_fact_sha256': answer['absence'].get('host_fact_sha256')}})
         return unavailable('ps-absence', 'no row for the pid, and no host basis of this scope says a missing row means no process')
-    if not isinstance(start, dict) or start.get('pid') != pid or not isinstance(start.get('start'), dict):
-        return unavailable('attribution', 'the start time of the process this pid named was not read')
-    if row['lstart']['at'] != start['start'].get('at'):
+    if row['lstart']['at'] != start['start']['at']:
         return observed({'exit': 'pid-reused'})
     if row['stat'].startswith('Z'):
         return observed({'exit': 'zombie'})
@@ -1203,6 +1207,10 @@ class Observer(threading.Thread):
     def ps_timeout(self):
         return max(0.2, min(10.0, self.left()))
 
+    def ask(self, purpose, fields, targets):
+        """One ps query of this launch: the only place the observer runs ps."""
+        return ps_query(purpose, self.tool, fields, self.sentinel, targets, self.ps_timeout())
+
     # --- reading children ---
     def identify(self, doc):
         for name, ask in self.rec['asks'].items():
@@ -1221,11 +1229,11 @@ class Observer(threading.Thread):
         for channel, path in zip(CHANNELS, child['slot_paths']):
             observe_slot(self.journal, self.store, {'child': child['nonce'], 'when': when, 'trigger': trigger, 'channel': channel}, path)
 
-    def touch(self, nonce, what, why):
+    def touch(self, nonce, what, why, **more):
         path = os.path.join(self.obs_dir, nonce + '.' + what)
         with open(path, 'x'):
             pass
-        self.journal.write('gate', {'what': what, 'child': nonce, 'why': why})
+        return self.journal.write('gate', dict(more, what=what, child=nonce, why=why))
 
     def initial(self, role):
         found = [c for c in self.children.values() if c['ask'] is not None and c['ask']['attempt'] == 'initial' and c['ask']['role'] == role]
@@ -1292,9 +1300,10 @@ class Observer(threading.Thread):
             doc = json.load(f)
         name, ask, scratch = self.identify(doc)
         pid = doc.get('pid') if type(doc.get('pid')) is int else None
-        query = ps_query('start', self.tool, TREE, self.sentinel, [pid], self.ps_timeout()) if pid is not None else None
+        query = self.ask('start', TREE, [pid]) if pid is not None else None
         child = {'nonce': nonce, 'pid': pid, 'ask': ask, 'scratch': scratch, 'start': None,
-                 'slot_paths': self.slot_paths(ask, scratch) if ask else None, 'written': False, 'released': False, 'exited': False}
+                 'slot_paths': self.slot_paths(ask, scratch) if ask else None, 'written': False, 'released': False, 'exited': False,
+                 'exited_seq': None}
         self.children[nonce] = child
         self.journal.write('start', {'child': nonce, 'pid': pid, 'ask': name, 'scratch': scratch, 'ps': query})
         if query is not None:
@@ -1336,7 +1345,7 @@ class Observer(threading.Thread):
         child['written'] = True
         if child['slot_paths']:
             self.read_slots(child, 'written', child['nonce'])
-        self.journal.write('tree', {'trigger': child['nonce'], 'ps': ps_query('tree', self.tool, TREE, self.sentinel, None, self.ps_timeout())})
+        self.journal.write('tree', {'trigger': child['nonce'], 'ps': self.ask('tree', TREE, None)})
         held = not self.barrier_done and child['ask'] is not None and child['ask']['attempt'] == 'initial'
         if not held:
             if child['slot_paths']:
@@ -1366,9 +1375,11 @@ class Observer(threading.Thread):
                 self.release(child, 'the barrier')
             self.order_active = False
             return
+        exit_before = None
         for role in order:
             child = self.initial(role)
-            self.release(child, 'the imposed completion order')
+            # The first goes at the barrier; each next one only on the exit record of the one before it.
+            self.release(child, 'the imposed completion order', after_exit=exit_before)
             while not child['exited']:
                 self.poll_exits(only=[child])
                 if child['exited']:
@@ -1378,6 +1389,7 @@ class Observer(threading.Thread):
                     self.give_up('the exit of the %s child was not read in a ps answer within the order budget' % role)
                     return
                 time.sleep(POLL)
+            exit_before = child['exited_seq']
         self.order_active = False
 
     def give_up(self, why):
@@ -1387,20 +1399,22 @@ class Observer(threading.Thread):
         releases are no evidence that any earlier child exited."""
         self.claims_done = self.barrier_done = True
         self.order_active = False
-        self.journal.write('give-up', {'why': why})
+        seq = self.journal.write('give-up', {'why': why})
         for c in self.children.values():
             if self.scenario.get('claim_order') and not os.path.exists(os.path.join(self.obs_dir, c['nonce'] + '.claim-go')):
                 self.touch(c['nonce'], 'claim-go', 'order not imposed')
             if c['written'] and not c['released']:
                 if c['slot_paths']:
                     self.read_slots(c, 'release', 'give-up')
-                self.release(c, 'order not imposed')
+                self.release(c, 'order not imposed', after_give_up=seq)
 
-    def release(self, child, why):
-        """Let a held child go. It counts as released only once its marker is written."""
+    def release(self, child, why, **more):
+        """Let a held child go. It counts as released only once its marker is
+        written; the gate record says what it went on: an exit record, a
+        give-up, or neither."""
         if child['released']:
             return
-        self.touch(child['nonce'], 'release', why)
+        self.touch(child['nonce'], 'release', why, **more)
         child['released'] = True
 
     def release_all(self, why):
@@ -1414,7 +1428,7 @@ class Observer(threading.Thread):
         if not waiting:
             return
         targets = [{'child': c['nonce'], 'pid': c['pid']} for c in waiting]
-        query = ps_query('exit', self.tool, EXITQ, self.sentinel, [t['pid'] for t in targets], self.ps_timeout())
+        query = self.ask('exit', EXITQ, [t['pid'] for t in targets])
         answer = read_ps(query, self.tool, self.basis)
         readings = {c['nonce']: target_exit(answer, c['pid'], c['start']) for c in waiting}
         seq = self.journal.write('exit-poll', {'targets': targets, 'ps': query, 'readings': readings})
@@ -1422,7 +1436,7 @@ class Observer(threading.Thread):
             r = readings[c['nonce']]
             if r['state'] == 'observed' and r['value']['exit'] in EXITED:
                 c['exited'] = True
-                self.journal.write('exited', {'child': c['nonce'], 'poll': seq, 'reading': r})
+                c['exited_seq'] = self.journal.write('exited', {'child': c['nonce'], 'poll': seq, 'reading': r})
 
     def final_polls(self):
         for _ in range(FINAL_POLLS):
@@ -1823,14 +1837,16 @@ def own_object(started, fd):
 def exit_fact(idx, c, tool, basis):
     """The first exit the judge reads for this child: ({'how', 't_ns', 'poll'}, why, binding).
     A poll counts only through the target it bound to this child, with the
-    pid the child itself recorded; a poll that bound the child to another pid
-    is listed in <binding> and read for nothing. Read again here."""
+    pid the child itself recorded, and only after the record of the child's
+    start query; a poll that bound the child to another pid is listed in
+    <binding> and read for nothing. Read again here, with target_exit."""
     nonce = c['nonce']
     pid = c['docs'].get('started', {}).get('pid')
-    start = None
+    start, start_seq = None, None
     record = idx['start'].get(nonce)
     if isinstance(record, dict):
         start, _ = start_identity(read_ps(record.get('ps'), tool), pid)
+        start_seq = record.get('seq') if type(record.get('seq')) is int else None
     last, binding = 'the observer kept no poll for this child', []
     for poll in idx['polls']:
         mine = [t for t in (poll.get('targets') or []) if isinstance(t, dict) and t.get('child') == nonce]
@@ -1838,6 +1854,9 @@ def exit_fact(idx, c, tool, basis):
             continue
         if len(mine) != 1 or mine[0].get('pid') != pid or type(pid) is not int:
             binding.append(poll.get('seq'))
+            continue
+        if start_seq is None or type(poll.get('seq')) is not int or poll['seq'] <= start_seq:
+            last = 'the poll is not after a start record of this child'
             continue
         reading = target_exit(read_ps(poll.get('ps'), tool, basis), pid, start)
         if reading['state'] == 'observed' and reading['value']['exit'] in EXITED:

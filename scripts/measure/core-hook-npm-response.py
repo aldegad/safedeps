@@ -28,14 +28,20 @@ and judge that link against an expectation written before any run.
                    ps-fact.pending.json when a holder is still unreaped after
                    its wait, then, once every holder was reaped with no
                    signal, ps-fact.stopped.json (exit 2).
-  check            the contract's literal reader and adapter controls.
+  check            the contract's literal reader and adapter controls (the
+                   adapters run the slot read, the observer's own exit
+                   readings and releases, and the judge's exit_fact on
+                   literal inputs), every case or those --select names.
   check-controls   one bundle's step and control runs, from what they left
-                   and the status their parent saw. It reads files with the
+                   and the status their parent saw; for S0 also its flows
+                   (scratch runs of the external driver) and the attempts
+                   they must have left unchanged. It reads files with the
                    standard library and calls none of the readers it checks.
                    A control passes only when its copy is the declared edit
                    of this tree, it reached what it injects, and what it left
-                   is its exact signature; a run that left no evidence of
-                   reaching it is not demonstrated (not run), never a pass.
+                   is its exact signature, compared as JSON values; a run
+                   that left no evidence of reaching it is not demonstrated
+                   (not run), never a pass.
 
 Rows are pass, fail or not-run. A row nobody judged stays not-run, and
 not-run is never a pass. A row whose only finding is that something was not
@@ -615,7 +621,102 @@ def reader_case(case, rec):
     raise nr.HarnessError('unknown reader %r' % kind)
 
 
-def adapter_case(case, workdir):
+class LiteralObserver(nr.Observer):
+    """An observer whose ps answers are a case's literal records, in order,
+    and whose response-file reads are journal notes only. Everything else is
+    the observer under test."""
+
+    def __init__(self, rec, case, work):
+        work = Path(work)
+        for d in ('obs', 'calls'):
+            (work / d).mkdir()
+        scenario = {'name': 'adapter', 'claim_order': None, 'barrier': case['mode'] == 'barrier',
+                    'release_order': case.get('release_order'), 'swap_slots': None}
+        super().__init__(rec, scenario, 'native', [], str(work / 'obs'), str(work / 'calls'), nr.Journal(work / 'journal'),
+                         nr.Store(work / 'blobs'), case['tool'], case['scope'], case.get('basis'))
+        self.answers = list(case['answers'])
+
+    def ask(self, purpose, fields, targets):
+        if not self.answers:
+            raise nr.HarnessError('the case has no answer left for a %s query' % purpose)
+        a = self.answers.pop(0)
+        pids = None if targets is None else [self.sentinel] + list(targets)
+        now = time.time_ns()
+        return {'format': nr.PSQ, 'purpose': purpose, 'argv': nr.ps_argv(self.tool, fields, pids), 'fields': list(fields),
+                'sentinel': self.sentinel, 'targets': None if targets is None else list(targets), 'locale': 'C', 'timeout': 1.0,
+                't0_ns': now, 't1_ns': now, 'outcome': {'kind': 'exit', 'rc': a['rc']},
+                'stdout': a['stdout'].replace('@SENTINEL@', str(self.sentinel)), 'stderr': ''}
+
+    def read_slots(self, child, when, trigger):
+        self.journal.write('read-note', {'child': child['nonce'], 'when': when, 'trigger': trigger})
+
+
+def observer_case(case, rec, workdir):
+    """The observer's exit readings and releases from literal ps answers: its
+    journal read back as plain JSON."""
+    base = Path(workdir) / case['name']
+    base.mkdir()
+    obs = LiteralObserver(rec, case, base)
+    roles = {}
+    for c in case['children']:
+        nonce = 'n-' + c['role']
+        roles[nonce] = c['role']
+        obs.children[nonce] = {'nonce': nonce, 'pid': c['pid'], 'ask': {'attempt': 'initial', 'role': c['role']}, 'scratch': '/scratch',
+                               'start': c['start'], 'slot_paths': None, 'written': True, 'released': c['released'],
+                               'exited': False, 'exited_seq': None}
+    raised = None
+    try:
+        if case['mode'] == 'poll':
+            obs.poll_exits()
+        else:
+            obs.order_until = time.monotonic() + case['budget']
+            obs.barrier()
+    except Exception as e:
+        raised = type(e).__name__
+    recs = [json.loads(p.read_bytes()) for p in sorted((base / 'journal').iterdir()) if p.name.endswith('.json')]
+    by_seq = {r.get('seq'): r for r in recs}
+    readings = []
+    for r in recs:
+        if r.get('kind') == 'exit-poll':
+            for nonce in sorted(r.get('readings') or {}):
+                v = r['readings'][nonce]
+                readings.append('observed:%s' % v['value']['exit'] if v.get('state') == 'observed' else 'unavailable:%s' % v.get('op'))
+    releases, pointers, previous = [], [], None
+    for r in recs:
+        if r.get('kind') != 'gate' or r.get('what') != 'release':
+            continue
+        basis = 'after-exit' if r.get('after_exit') is not None else 'after-give-up' if r.get('after_give_up') is not None else 'none'
+        releases.append([roles.get(r.get('child')), r.get('why'), basis])
+        if r.get('after_exit') is not None:
+            target = by_seq.get(r['after_exit']) or {}
+            pointers.append(target.get('kind') == 'exited' and target.get('child') == previous)
+        if r.get('why') == 'the imposed completion order':
+            previous = r.get('child')
+    return {'exited': [roles.get(r.get('child')) for r in recs if r.get('kind') == 'exited'], 'readings': readings,
+            'releases': releases, 'give-ups': sum(1 for r in recs if r.get('kind') == 'give-up'),
+            'exit-pointers': all(pointers) if pointers else None, 'raised': raised}
+
+
+def exit_fact_case(case):
+    """The judge's exit reading of one child from literal journal records."""
+    idx = {'start': {'n': case['start_record']} if case.get('start_record') else {}, 'polls': case['polls']}
+    child = {'nonce': 'n', 'docs': {'started': {'pid': case['pid']}}}
+    seen, _, binding = nr.exit_fact(idx, child, case['tool'], case.get('basis'))
+    return {'exit': seen['how'] if seen else None, 'binding': bool(binding)}
+
+
+def adapter_case(case, rec, workdir):
+    kind = case.get('adapter', 'slot')
+    if kind == 'slot':
+        return slot_adapter_case(case, workdir)
+    if kind == 'observer':
+        return observer_case(case, rec, workdir)
+    if kind == 'exit-fact':
+        return exit_fact_case(case)
+    raise nr.HarnessError('unknown adapter %r' % kind)
+
+
+def slot_adapter_case(case, workdir):
     """One slot read with the case's file operations, its record read back as
     plain JSON. Returns the facts the case names, and any exception raised."""
     base = Path(workdir) / case['name']
@@ -649,7 +750,9 @@ def check(a):
     out = Path(a.out).resolve()
     out.mkdir(parents=True, exist_ok=False)
     rows = Rows()
-    doc = {'format': 'core-hook-npm-response-check/2', 'claim': "the readers and the slot adapter against literal cases; the author's own check, not an independent verification"}
+    select = sorted(set(a.select or []))
+    doc = {'format': 'core-hook-npm-response-check/3', 'select': select or None,
+           'claim': "the readers and adapters against literal cases; the author's own check, not an independent verification"}
     try:
         rec, errors = read_contract(a.contract, a.contract_sha256)
         rows.owe('contract', 'record')
@@ -657,18 +760,24 @@ def check(a):
         if rec is None or errors:
             return finish_rows(rows, out, doc, 'the contract did not hold')
         cases = rec['controls']
-        for c in cases['readers']:
+        readers = [c for c in cases['readers'] if not select or c['name'] in select]
+        adapters = [c for c in cases['adapters'] if not select or c['name'] in select]
+        unknown = sorted(set(select) - {c['name'] for c in cases['readers'] + cases['adapters']})
+        if unknown:
+            rows.owe('select', 'names')
+            rows.judge('select', 'names', None, [{'field': 'selected cases', 'actual': unknown, 'expected': 'cases of this contract'}])
+        for c in readers:
             rows.owe('reader', c['name'])
-        for c in cases['adapters']:
+        for c in adapters:
             rows.owe('adapter', c['name'])
-        for c in cases['readers']:
+        for c in readers:
             got = reader_case(c, rec)
-            errors = [{'field': k, 'actual': got.get(k), 'expected': v} for k, v in c['expect'].items() if got.get(k) != v]
+            errors = [{'field': k, 'actual': got.get(k), 'expected': v} for k, v in c['expect'].items() if not same(got.get(k), v)]
             rows.judge('reader', c['name'], None, errors, got=got, layer_of_control=c['layer'])
         with tempfile.TemporaryDirectory(prefix='npmresp-check.') as work:
-            for c in cases['adapters']:
-                got = adapter_case(c, work)
-                errors = [{'field': k, 'actual': got.get(k), 'expected': v} for k, v in c['expect'].items() if got.get(k) != v]
+            for c in adapters:
+                got = adapter_case(c, rec, work)
+                errors = [{'field': k, 'actual': got.get(k), 'expected': v} for k, v in c['expect'].items() if not same(got.get(k), v)]
                 rows.judge('adapter', c['name'], None, errors, got=got, layer_of_control=c['layer'])
     except Exception as e:
         traceback.print_exc()
@@ -749,14 +858,14 @@ def ps_rows(query):
     return rows
 
 
-def facts_check_run(runs, entry, rec, run_id):
+def facts_check_run(runs, entry, rec, ctx):
     res = jmaybe(Path(runs) / entry['step'] / 'out' / 'results.json') or {}
     acc = res.get('acceptance') or {}
     return {'rc': step_rc(runs, entry['step']), 'results': bool(res), 'stopped': res.get('stopped'),
             'acceptance': acc.get('status'), 'failed': acc.get('failed')}
 
 
-def facts_check_sensitivity(runs, entry, rec, run_id):
+def facts_check_sensitivity(runs, entry, rec, ctx):
     step = entry['step']
     res = jmaybe(Path(runs) / step / 'out' / 'results.json') or {}
     declared = entry['expect']['signature'].get('failing', {})
@@ -770,7 +879,7 @@ def facts_check_sensitivity(runs, entry, rec, run_id):
             'stopped': res.get('stopped'), 'failing': failing}
 
 
-def facts_host(runs, entry, rec, run_id):
+def facts_host(runs, entry, rec, ctx):
     """The ps host fact read with plain JSON and string reading against the contract's sequence."""
     out = Path(runs) / entry['step'] / 'out'
     doc, done = jmaybe(out / 'host.json'), jmaybe(out / 'ps-fact.done.json')
@@ -781,7 +890,7 @@ def facts_host(runs, entry, rec, run_id):
         return facts
     want = rec['ps']['host_fact']
     scope = doc.get('scope') or {}
-    facts['run-id'] = scope.get('run_id') == run_id
+    facts['run-id'] = scope.get('run_id') == ctx['run_id']
     events = doc.get('events') or []
     facts['sequence'] = [[e.get('kind'), e.get('name') if e.get('kind') == 'ps' else e.get('holder'), e.get('when')] for e in events] == \
         [[k, n, w] for k, n, w in want['sequence']] and [e.get('seq') for e in events] == list(range(len(events)))
@@ -812,7 +921,7 @@ def launch_parts(out, name):
     return d, js, terminal
 
 
-def facts_j1(runs, entry, rec, run_id):
+def facts_j1(runs, entry, rec, ctx):
     step = entry['step']
     out = Path(runs) / step / 'out'
     d, js, terminal = launch_parts(out, 'native-P1-permuted')
@@ -842,7 +951,7 @@ def facts_j1(runs, entry, rec, run_id):
             'release-after-give-up': ok}
 
 
-def facts_j4(runs, entry, rec, run_id):
+def facts_j4(runs, entry, rec, ctx):
     step = entry['step']
     out = Path(runs) / step / 'out'
     d, js, terminal = launch_parts(out, 'native-P0-natural')
@@ -851,7 +960,7 @@ def facts_j4(runs, entry, rec, run_id):
     exc = terminal.get('exception') or {}
     end_observer = (end or {}).get('observer') or {}
     return {'applied': applied(runs, step, entry['edits']), 'rc': step_rc(runs, step), 'launch': d.is_dir(),
-            'reached': any(r.get('kind') == 'control-reach' and r.get('control') == entry['reach_control'] and r.get('run_id') == run_id for r in js)
+            'reached': any(r.get('kind') == 'control-reach' and r.get('control') == entry['reach_control'] and r.get('run_id') == ctx['run_id'] for r in js)
             if entry.get('reach_control') else None,
             'injected': terminal.get('state') == 'exception' and 'J4 control' in str(exc.get('error')),
             'cleanup-error': any('J4 control' in str(c.get('error')) for c in terminal.get('cleanup_errors') or []),
@@ -869,7 +978,7 @@ def facts_j4(runs, entry, rec, run_id):
             'done': (out / 'collect.done.json').is_file(), 'manifest': (out / 'manifest.json').is_file()}
 
 
-def facts_j4h(runs, entry, rec, run_id):
+def facts_j4h(runs, entry, rec, ctx):
     step = entry['step']
     out = Path(runs) / step / 'out'
     events = records_in(out / 'events')
@@ -877,7 +986,7 @@ def facts_j4h(runs, entry, rec, run_id):
     final = [e for e in events if e.get('kind') == 'holder-wait' and e.get('holder') == 'first' and e.get('timeout') is None and e.get('returned') is True]
     original = partial.get('original') or {}
     return {'applied': applied(runs, step, entry['edits']), 'rc': step_rc(runs, step),
-            'reached': any(e.get('kind') == 'control-reach' and e.get('control') == 'J4h' and e.get('run_id') == run_id for e in events),
+            'reached': any(e.get('kind') == 'control-reach' and e.get('control') == 'J4h' and e.get('run_id') == ctx['run_id'] for e in events),
             'partial-original': original.get('type') == 'RuntimeError' and 'J4h control' in str(original.get('error')),
             'cleanup-errors': [[c.get('holder'), c.get('type')] for c in pend.get('cleanup_errors') or []],
             'pending-unreaped': pend.get('unreaped'),
@@ -887,32 +996,125 @@ def facts_j4h(runs, entry, rec, run_id):
             'host': (out / 'host.json').exists(), 'done': (out / 'ps-fact.done.json').exists()}
 
 
-def facts_j5(runs, entry, rec, run_id):
-    """What a J5 driver copy did: the status its parent saw, its driver.json, the steps it ran."""
-    step = 'j5-' + entry['name']
-    base = Path(runs) / 'j5' / entry['name']
-    bundle = base / 'bundles' / entry['bundle']
-    dj = bundle / 'driver.json'
-    record = jmaybe(dj) if dj.is_file() else None
+def same(a, b):
+    """Equal as JSON values: false is not 0, and 1.0 is not 1."""
+    return json.dumps(a, sort_keys=True) == json.dumps(b, sort_keys=True)
+
+
+def listing(base, skip=('completion.json', 'completion.json.part', 'complete.log')):
+    """The files, links and directories under <base>, as the driver's completion
+    record lists them, read here with the standard library."""
+    files, links, dirs = {}, {}, []
+    for dirpath, dirnames, filenames in os.walk(str(base), followlinks=False):
+        dirnames.sort()
+        for name in dirnames + sorted(filenames):
+            p = os.path.join(dirpath, name)
+            rel = os.path.relpath(p, str(base))
+            if rel in skip:
+                continue
+            st = os.lstat(p)
+            if os.path.islink(p):
+                links[rel] = os.readlink(p)
+            elif os.path.isdir(p):
+                dirs.append(rel)
+            elif os.path.isfile(p):
+                with open(p, 'rb') as f:
+                    files[rel] = hashlib.sha256(f.read()).hexdigest()
+            else:
+                links[rel] = 'not a file: mode %o' % st.st_mode
+    return {'files': files, 'links': links, 'dirs': dirs}
+
+
+def attempt_parts(scratch, bundle, attempt):
+    base = Path(scratch) / 'attempts' / bundle / attempt
+    dj_path = base / 'driver.json'
+    dj = jmaybe(dj_path) if dj_path.is_file() else None
+    comp = jmaybe(base / 'completion.json')
+    rc_text = (base / 'driver.rc').read_text() if (base / 'driver.rc').is_file() else None
     ran, injected = [], True
-    if (bundle / 'runs').is_dir():
-        for p in sorted((bundle / 'runs').iterdir()):
+    if (base / 'runs').is_dir():
+        for p in sorted((base / 'runs').iterdir()):
             if (p / 'rc').is_file():
                 ran.append(p.name)
-                argv = jmaybe(p / 'argv.json')
-                injected = injected and isinstance(argv, list) and argv[:1] == ['j5-injected']
-    return {'rc': step_rc(runs, step), 'record': 'file' if dj.is_file() else ('directory' if dj.is_dir() else 'absent'),
-            'final': (record or {}).get('final'), 'stopped': (record or {}).get('stopped'),
-            'steps': [[s.get('step'), s.get('rc')] for s in (record or {}).get('steps', [])], 'ran': ran,
-            'injected': injected and bool(ran)}
+                injected = injected and (p / 'injected').is_file()
+    return base, dj, dj_path, comp, rc_text, ran, injected and bool(ran)
+
+
+def stopped_parts(dj):
+    """(kind, detail) of a driver record's stop: a protocol or gate stop's
+    step, an exception's type, or a prerequisite's reason class."""
+    st = (dj or {}).get('stopped')
+    if not isinstance(st, dict):
+        return None, None
+    if st.get('kind') == 'exception':
+        head, _, rest = str(st.get('exception')).partition(': ')
+        return 'exception', rest.split(':')[0] if head == 'PrerequisiteError' else head
+    return st.get('kind'), st.get('step')
+
+
+def unchanged(scratch, bundle, attempt):
+    """True when an attempt's files are still the ones its completion record lists."""
+    base = Path(scratch) / 'attempts' / bundle / attempt
+    comp = jmaybe(base / 'completion.json')
+    return isinstance(comp, dict) and same(listing(base), comp.get('outputs'))
+
+
+def scratch_applied(ctx, root_name):
+    """True when a scratch root's driver is the staged driver with exactly the
+    spec's injected edits and the root's own edits, recomputed here."""
+    spec, staged = ctx['spec'], ctx['staged']
+    if staged is None:
+        return None
+    data = (Path(staged) / 'run.py').read_bytes()
+    inj = spec['injected']
+    edits = [(inj['execute_old'], inj['execute_new'].replace('@TABLES@', json.dumps(spec['tables'], sort_keys=True))),
+             (inj['kind_old'], inj['kind_new'])] + [(e['old'], e['new']) for e in spec['roots'][root_name].get('edits', [])]
+    for old, new in edits:
+        if data.count(old.encode('utf-8')) != 1:
+            return False
+        data = data.replace(old.encode('utf-8'), new.encode('utf-8'))
+    target = Path(ctx['runs']) / 'flows' / root_name / 'run.py'
+    return target.is_file() and hashlib.sha256(target.read_bytes()).hexdigest() == hashlib.sha256(data).hexdigest()
+
+
+def facts_flow(runs, entry, rec, ctx):
+    """One S0 flow step: the status its parent saw and what its scratch run left."""
+    scratch = Path(runs) / 'flows' / entry['root']
+    facts = {'rc': step_rc(runs, entry['name'])}
+    if entry['action'] == 'stage':
+        doc = jmaybe(scratch / 'RUN.json')
+        facts.update({'run-json': doc is not None, 'kind': (doc or {}).get('kind'), 'applied': scratch_applied(ctx, entry['root'])})
+        return facts
+    base, dj, dj_path, comp, rc_text, ran, injected = attempt_parts(scratch, entry['bundle'], entry['attempt'])
+    kind, detail = stopped_parts(dj)
+    facts.update({'attempt': base.is_dir(), 'driver-rc': rc_text,
+                  'driver-json': 'file' if dj_path.is_file() else 'directory' if dj_path.is_dir() else 'absent',
+                  'completion': comp is not None, 'completion-rc': (comp or {}).get('driver_rc', 'absent'),
+                  'final': (dj or {}).get('final'), 'stopped-kind': kind, 'stopped-detail': detail,
+                  'runs-dir': (base / 'runs').is_dir(), 'ran': ran, 'injected': injected,
+                  'prerequisites': [[q.get('bundle'), q.get('origin_attempt_id'), q.get('mode')] for q in (dj or {}).get('prerequisites') or []]})
+    if entry.get('target'):
+        facts['target-unchanged'] = unchanged(scratch, entry['bundle'], entry['target'])
+    if entry.get('sensitivity'):
+        facts['applied'] = scratch_applied(ctx, entry['root'])
+    return facts
+
+
+def facts_immutable(runs, entry, rec, ctx):
+    """An attempt the S0 flows referred to, read at the end: its files are its
+    completion's, and it ran its steps once."""
+    scratch = Path(runs) / 'flows' / entry['root']
+    base, dj, _, comp, rc_text, ran, _ = attempt_parts(scratch, entry['bundle'], entry['attempt'])
+    return {'completion': comp is not None, 'unchanged': unchanged(scratch, entry['bundle'], entry['attempt']),
+            'driver-rc': rc_text, 'ran': ran, 'executed': [s.get('step') for s in (dj or {}).get('steps') or []]}
 
 
 FACTS = {'check-run': facts_check_run, 'check-sensitivity': facts_check_sensitivity, 'host-fact': facts_host,
-         'J1': facts_j1, 'J4': facts_j4, 'J4h': facts_j4h, 'j5': facts_j5}
+         'J1': facts_j1, 'J4': facts_j4, 'J4h': facts_j4h, 'flow': facts_flow, 'immutable': facts_immutable}
 
 
 def owed_controls(rec, spec, bundle):
-    """(layer, name, entry) for every row this bundle's check-controls owes, in the contract's order."""
+    """(layer, name, entry) for every row this bundle's check-controls owes, in the contract's and spec's order."""
     owed = []
     for entry in rec['controls']['steps']:
         if entry['bundle'] == bundle:
@@ -923,21 +1125,22 @@ def owed_controls(rec, spec, bundle):
     for entry in rec['controls']['sensitivity']:
         if entry['bundle'] == bundle:
             owed.append(('sensitivity', entry['name'], entry))
-    if bundle == 'S1':
-        for entry in spec['j5']['cases']:
-            owed.append(('j5', entry['name'], entry))
-        for entry in spec['j5'].get('sensitivity', []):
-            owed.append(('j5-sensitivity', entry['name'], entry))
+    if bundle == 'S0':
+        for entry in spec['flows']:
+            owed.append(('flow-sensitivity' if entry.get('sensitivity') else 'flow', entry['name'], dict(entry, check='flow')))
+        for entry in spec['immutable']:
+            owed.append(('immutable', entry['name'], dict(entry, check='immutable')))
     return owed
 
 
 def control_row(rows, layer, name, expect, facts):
-    """Reached means every reach fact holds; then the row is its signature, exactly."""
-    unmet = {k: facts.get(k) for k, v in expect['reach'].items() if facts.get(k) != v}
+    """Reached means every reach fact holds; then the row is its signature,
+    exactly, compared as JSON values."""
+    unmet = {k: facts.get(k) for k, v in expect['reach'].items() if not same(facts.get(k), v)}
     if unmet:
         rows.leave(layer, name, None, 'not demonstrated: %r' % (unmet,), facts=facts, expected=expect)
         return
-    errors = [{'field': k, 'actual': facts.get(k), 'expected': v} for k, v in expect['signature'].items() if facts.get(k) != v]
+    errors = [{'field': k, 'actual': facts.get(k), 'expected': v} for k, v in expect['signature'].items() if not same(facts.get(k), v)]
     rows.judge(layer, name, None, errors, facts=facts, expected=expect)
 
 
@@ -945,7 +1148,7 @@ def check_controls(a):
     runs, out = Path(a.runs).resolve(), Path(a.out).resolve()
     out.mkdir(parents=True, exist_ok=False)
     rows = Rows()
-    doc = {'format': 'core-hook-npm-response-controls/2', 'bundle': a.bundle, 'only': a.only, 'run_id': a.run_id,
+    doc = {'format': 'core-hook-npm-response-controls/3', 'bundle': a.bundle, 'only': a.only, 'run_id': a.run_id, 'staged_root': a.staged_root,
            'claim': "a bundle's runs read from their files and their parent-observed status; the author's own check, not an independent verification"}
     try:
         rec, errors = read_contract(a.contract, a.contract_sha256)
@@ -965,10 +1168,11 @@ def check_controls(a):
                 rows.owe('control', a.only)
                 rows.judge('control', a.only, None, [{'field': 'control', 'actual': a.only, 'expected': 'a control of bundle %s' % a.bundle}])
                 return finish_rows(rows, out, doc)
+        ctx = {'run_id': a.run_id, 'spec': spec, 'staged': a.staged_root, 'runs': runs}
         for layer, name, _ in owed:
             rows.owe(layer, name)
         for layer, name, entry in owed:
-            facts = FACTS[entry['check']](runs, entry, rec, a.run_id)
+            facts = FACTS[entry['check']](runs, entry, rec, ctx)
             control_row(rows, layer, name, entry['expect'], facts)
     except Exception as e:
         traceback.print_exc()
@@ -1006,6 +1210,7 @@ def main():
     k = sub.add_parser('check')
     k.add_argument('--contract', default=str(HERE / 'core-hook-npm-response.contract.json'))
     k.add_argument('--contract-sha256', required=True)
+    k.add_argument('--select', action='append', help='a reader or adapter case name; repeat for more. Without it every case runs')
     k.add_argument('--out', required=True)
     x = sub.add_parser('check-controls')
     x.add_argument('--runs', required=True)
@@ -1016,6 +1221,7 @@ def main():
     x.add_argument('--contract-sha256', required=True)
     x.add_argument('--control-spec', required=True)
     x.add_argument('--control-spec-sha256', required=True)
+    x.add_argument('--staged-root', help="the staged run root whose driver the S0 scratch drivers are edited from")
     x.add_argument('--out', required=True)
     a = ap.parse_args()
     return {'collect': collect, 'judge': judge, 'ps-fact': ps_fact, 'check': check, 'check-controls': check_controls}[a.command](a)
