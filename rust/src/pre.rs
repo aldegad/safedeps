@@ -47,6 +47,21 @@ const ENGAGE_MAX_BYTES: u64 = 4096;
 const KNOB_MAX_DIGITS: usize = 9;
 const KNOB_MAX_INPUT_CHARS: usize = 32;
 
+/// `safedeps-core budget-config`: the budget numbers this hook judges with,
+/// one JSON object, for a check against the timeout the installer registers.
+pub fn budget_config() -> String {
+    let n = |v: u64| jq::J::Num(v.to_string());
+    jq::compact(&jq::obj(vec![
+        ("runtime_budget_seconds", n(RUNTIME_BUDGET_SECONDS)),
+        ("self_budget_max_seconds", n(SELF_BUDGET_MAX_SECONDS)),
+        ("self_budget_default_seconds", n(SELF_BUDGET_DEFAULT_SECONDS)),
+        ("engage_default_bytes", n(ENGAGE_DEFAULT_BYTES)),
+        ("engage_max_bytes", n(ENGAGE_MAX_BYTES)),
+        ("knob_max_digits", n(KNOB_MAX_DIGITS as u64)),
+        ("knob_max_input_chars", n(KNOB_MAX_INPUT_CHARS as u64)),
+    ]))
+}
+
 /// What one judgment says: the hook's stdout and stderr, and its exit status.
 /// A judgment under the deadline is answered for when it does not finish, so
 /// it writes here and not to the process's own streams.
