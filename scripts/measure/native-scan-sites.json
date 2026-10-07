@@ -1,0 +1,90 @@
+{
+  "schema": 1,
+  "scope": "Every failure assignment in lex_unterm, pieces, payloads, payload_build and lex_payloads; other scanner contracts remain in their native batteries; whole-method hashes also reject new failure returns with no failed assignment",
+  "sites": [
+    {
+      "id": "lex_unterm/1",
+      "statement": "self.failed = true;",
+      "context": "on<W>, bool) {\n        let Some(rd) = self.reading else {\n            self.failed = true;\n            return (None, false);\n        };\n        let r = Lex::new",
+      "method_sha256": "df7e8bf3b0eb98438e689ff4b1d36b70065e2b967501d024cfc2e0eefc736467"
+    },
+    {
+      "id": "lex_unterm/2",
+      "statement": "self.failed = true;",
+      "context": "out, side)) => {\n                if side.smfail {\n                    self.failed = true;\n                }\n                if side.diverge {\n                 ",
+      "method_sha256": "df7e8bf3b0eb98438e689ff4b1d36b70065e2b967501d024cfc2e0eefc736467"
+    },
+    {
+      "id": "lex_unterm/3",
+      "statement": "self.failed = true;",
+      "context": "((_, side)) => {\n                if side.smfail {\n                    self.failed = true;\n                }\n                if side.diverge {\n                 ",
+      "method_sha256": "df7e8bf3b0eb98438e689ff4b1d36b70065e2b967501d024cfc2e0eefc736467"
+    },
+    {
+      "id": "lex_unterm/4",
+      "statement": "self.failed = true;",
+      "context": "               self.diverge = true;\n                }\n                self.failed = true;\n                (None, side.unterm)\n            }\n        }\n    }",
+      "method_sha256": "df7e8bf3b0eb98438e689ff4b1d36b70065e2b967501d024cfc2e0eefc736467"
+    },
+    {
+      "id": "payload_build/1",
+      "statement": "self.failed = true;",
+      "context": "               if a + n - 1 > text.len() as u64 {\n                    self.failed = true;\n                    continue;\n                }\n                out.e",
+      "method_sha256": "1d8d32afd1c202e179d07ad73d553793720096b739b3a981e6f97111f535f709"
+    },
+    {
+      "id": "payload_build/2",
+      "statement": "self.failed = true;",
+      "context": "  out.extend_from_slice(&bytes);\n            } else {\n                self.failed = true;\n            }\n        }\n        out\n    }",
+      "method_sha256": "1d8d32afd1c202e179d07ad73d553793720096b739b3a981e6f97111f535f709"
+    },
+    {
+      "id": "payloads/1",
+      "statement": "self.failed = true;",
+      "context": ": &[u8]) -> Vec<Payload> {\n        let Some(rd) = self.reading else { self.failed = true; return Vec::new(); };\n        let mut res = Vec::new();\n        for v",
+      "method_sha256": "66c0ef4096bda71b273be0d40bfee53a963fe0b9b5adea932f8c42537f8e5303"
+    },
+    {
+      "id": "payloads/2",
+      "statement": "self.failed |= side.smfail;",
+      "context": ") {\n                Ok((mut payloads, side)) => {\n                    self.failed |= side.smfail;\n                    self.diverge |= side.diverge;\n                   ",
+      "method_sha256": "66c0ef4096bda71b273be0d40bfee53a963fe0b9b5adea932f8c42537f8e5303"
+    },
+    {
+      "id": "payloads/3",
+      "statement": "self.failed = true;",
+      "context": "&mut payloads);\n                }\n                Err((_, side)) => { self.failed = true; self.diverge |= side.diverge; }\n            }\n        }\n        res\n ",
+      "method_sha256": "66c0ef4096bda71b273be0d40bfee53a963fe0b9b5adea932f8c42537f8e5303"
+    },
+    {
+      "id": "pieces/1",
+      "statement": "self.failed = true;",
+      "context": "eces, bool)> {\n        let Some(rd) = self.reading else {\n            self.failed = true;\n            return None;\n        };\n        match Lex::new(&self.c.g,",
+      "method_sha256": "55308ee39ba18c71d92cbe021cbeac98567736e50065d7d9834d88e1460ceeea"
+    },
+    {
+      "id": "pieces/2",
+      "statement": "self.failed = true;",
+      "context": "((p, side)) => {\n                if side.smfail {\n                    self.failed = true;\n                }\n                if side.diverge {\n                 ",
+      "method_sha256": "55308ee39ba18c71d92cbe021cbeac98567736e50065d7d9834d88e1460ceeea"
+    },
+    {
+      "id": "pieces/3",
+      "statement": "self.failed = true;",
+      "context": "               self.diverge = true;\n                }\n                self.failed = true;\n                None\n            }\n        }\n    }",
+      "method_sha256": "55308ee39ba18c71d92cbe021cbeac98567736e50065d7d9834d88e1460ceeea"
+    },
+    {
+      "id": "lex_payloads/1",
+      "statement": "self.failed = true;",
+      "context": " continue;\n            }\n            if rec == b\"!\" {\n                self.failed = true;\n                continue;\n            }\n            if rec.iter().any",
+      "method_sha256": "5c4c8979f3f979d2716af1a327773d4adf5442ef1fe0c2c188ea93e82c2bb612"
+    },
+    {
+      "id": "lex_payloads/2",
+      "statement": "self.failed = true;",
+      "context": "_digit())) || !matches!(rec[0], b'B' | b'S' | b'E') {\n                self.failed = true;\n                continue;\n            }\n            let units = ifs_w",
+      "method_sha256": "5c4c8979f3f979d2716af1a327773d4adf5442ef1fe0c2c188ea93e82c2bb612"
+    }
+  ]
+}
