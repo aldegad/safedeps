@@ -178,7 +178,12 @@ def main():
             print(('ok - ' if accepted else 'not ok - ')+label,flush=True)
             if not accepted:
                 print(json.dumps(observed,indent=2),flush=True)
-                return 1
-    return 0
+    # A failure at one producer must not hide the remaining census sites.
+    table=['site\tcontrol\tfixture_passed\taccepted']
+    table += ['\t'.join((r['site'],str(r['control']).lower(),
+                         str(r['fixture_passed']).lower(),str(r['passed']).lower())) for r in rows]
+    (run/'results.tsv').write_text('\n'.join(table)+'\n')
+    print('\n'.join(table),flush=True)
+    return int(any(not r['passed'] for r in rows))
 
 if __name__=='__main__':raise SystemExit(main())
