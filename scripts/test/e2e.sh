@@ -2359,6 +2359,11 @@ grep -qF "post-verify BACKSTOP traced: $(cd -P "${bs_mix_wt}" && pwd -P)/node_mo
   || fail "a write into node_modules on a whole-second mount beside a subsecond lockfile: the backstop counts it as traced (${bs_mix_post})"
 pass "a tree with one part on a whole-second filesystem sets the baseline back"
 
+# This helper asserts an empty post response and the advisory line in full.
+python3 "${ROOT_DIR}/scripts/test/lib/backstop-walk-io.py" --core "${NATIVE_TEST_CORE}" \
+  --output "${tmp_root}/backstop-walk-io.json" || fail "a failed native directory walk preserves its OS error"
+pass "a failed native directory walk is traced and reports its observed OS error in the query and advisory.log"
+
 # A source copy delays the actual native walk past its deadline.
 bs_slow_wt="${tmp_root}/bs-slow-wt"
 bs_project "${bs_slow_wt}"

@@ -88,7 +88,7 @@ pub fn inert_unsaid(home: &Path, meta: &Path, rc: i32) {
 
 // Only the result of our own operation is named. Some local checks return an
 // I/O error without an OS code; none is invented for those checks.
-fn io_outcome(action: &[u8], result: &std::io::Result<()>) -> Vec<u8> {
+pub(super) fn io_outcome(action: &[u8], result: &std::io::Result<()>) -> Vec<u8> {
     match result {
         Ok(()) => cat(&[action, b" returned without error"]),
         Err(error) => match error.raw_os_error() {
