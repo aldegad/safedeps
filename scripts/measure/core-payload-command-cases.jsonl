@@ -25,3 +25,6 @@
 {"id": "data-env-dynamic", "command": "echo env -S'npm $V'", "expected": [], "shell": {"argv": [], "rc": 0, "stdout": "env -Snpm $V\n"}}
 {"id": "unread-env", "command": "env -S'npm $V'", "expected": [], "failed": true}
 {"id": "unterminated", "command": "sh -c 'npm ci", "expected": [], "failed": true}
+{"id": "open-quote-no-script", "command": "npm ci; echo \"${x:-'}\"", "expected": []}
+{"id": "open-quote-beside-script-open", "command": "sh -c 'npm ci'; echo \"${x:-'}\"", "expected": [], "failed": true, "readings": ["bash"]}
+{"id": "open-quote-beside-script-closed", "command": "sh -c 'npm ci'; echo \"${x:-'}\"", "expected": [{"kind": "S", "text": "npm ci", "origin": "shell-c", "shell": "sh"}], "readings": ["zsh", "dash"]}

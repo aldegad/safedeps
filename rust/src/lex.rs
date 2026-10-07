@@ -704,7 +704,25 @@ impl<'g> Lex<'g> {
             "cscripts" => {
                 if self.payloads.is_some() {
                     if self.unterm {
-                        self.smfail = true;
+                        // The text does not close in this reading, so the
+                        // statement walk did not run and no script is read
+                        // from a command position. That fails the reading
+                        // only where the text hands a script on at all, and
+                        // the textual search, which is broader than the
+                        // walk, says whether it does. Where it finds none
+                        // the text has no script payload and the reading
+                        // stands. It failed there before, so a quote one
+                        // shell leaves open in an argument (`echo "${x:-'}"`
+                        // in the bash reading) failed the reading of a
+                        // command with no script in it.
+                        let keep = self.payloads.take();
+                        let at = self.out.len();
+                        self.emit_cscripts();
+                        if self.out.len() > at {
+                            self.smfail = true;
+                        }
+                        self.out.truncate(at);
+                        self.payloads = keep;
                     } else {
                         self.emit_pieces();
                     }

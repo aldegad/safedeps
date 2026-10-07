@@ -276,6 +276,9 @@ impl<'c> Run<'c> {
     /// first, then substitutions, in input-start order within each group.
     /// Bodies use the same units as the text views, but preserve the source
     /// map before compression. Arithmetic itself is not a payload.
+    /// A text that does not close in the run's reading has no statement
+    /// walk: it gives no script, and that fails the reading only where the
+    /// textual search finds a script in it.
     pub fn payloads(&mut self, text: &[u8]) -> Vec<Payload> {
         let Some(rd) = self.reading else { self.failed = true; return Vec::new(); };
         let mut res = Vec::new();
