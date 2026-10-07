@@ -1,0 +1,15 @@
+# Places where a reading of the Rust core's lexer departs from the bash
+# guard's lexer on purpose, with no battery row of their own. One per line:
+#
+#   name  reading  forms  the core's reading  the bash guard's lexer  verdict  basis
+#
+# forms is a JSON array of commands that show it. verdict says which way an
+# answer of the gate can move: `blocks` where the core answers UNDECIDED and
+# the bash guard let the command through, `same` where no answer moves. A
+# reading that could let through what the bash guard stopped has no line
+# here: it is a defect. The verdict is the union of the readings, so a reading
+# that reads less of a command moves no answer while another reading still
+# reads it; where that is the case the basis says which reading does.
+#
+# The battery rows that follow the core are in core-intended-battery-rows.tsv.
+zsh-bare-pattern-word	zsh	["npm install x (--cache|zz)", "print (npm ci)", "ls (a|b)*", "echo a (b)"]	A parenthesized pattern that stands after a blank, where an argument stands, is one word: its `|` and `;` split nothing and no command starts inside it. Not after the names of `function NAME...` or the count of `repeat COUNT`, where the `(` is the head's.	The `(` is an operator in every reading, so the text inside is read as commands of a subshell and a `|` in it ends a statement.	blocks; same	Measured on macOS arm64, 2026-10-07, the same payload to both guards. Blocks: `npm install x (--cache|zz)` and `npm install (a|b)` are UNDECIDED (the readings place the flag apart) where the bash guard rewrote them, and `print (npm ci)` is UNDECIDED (floor-outside-command) where the bash guard rewrote inside the parenthesis. Same: `ls (a|b)*`, `echo a (b)` and `echo a (b|c) | cat` pass under both, `ls (a; npm install evil@1.0.0)` is denied as not approved under both, and `echo a (pip install evil==1.0.0|x)` passes under both. Inside a pattern the zsh reading reads no command; the bash and dash readings read the parenthesis as before, and no measured answer was weaker than the bash guard's.
