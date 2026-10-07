@@ -134,7 +134,7 @@ def prepare(a):
     module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
     edits = dict(module.EDITS)
     edits.update({'pre-'+k:v for k,v in module.PRE_EDITS.items() if k != 'mark'})
-    edits['pre-same'] = ('rust/src/pre/snapshot.rs',
+    edits['pre-same'] = ('rust/src/pre/install.rs',
         'let timestamp=os::wall(os::WallRole::PreSnapshot).seconds();',
         'let timestamp='+str(int(time.time()))+'i64;')
     # The first snapshot and pending writes succeed. Only the atomic rewrite
@@ -174,6 +174,14 @@ def prepare(a):
         else:
             new = receipt_code(name) + new
         edits[name] = relative, old, new
+    anchors=[]
+    for name,(relative,old,_) in edits.items():
+        source=tree/relative;body=source.read_text();count=body.count(old)
+        anchors.append(dict(fault=name,source=relative,source_sha256=digest(source),
+                            anchor=old,count=count,line=body[:body.index(old)].count('\n')+1 if count else None))
+    dump(out/'anchors.json',anchors)
+    for row in anchors:
+        if row['count']!=1:raise RuntimeError(row['fault']+': injection anchor must occur exactly once')
     rows = {}
     for name, (relative, old, new) in edits.items():
         target = out/name
