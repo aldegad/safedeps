@@ -93,6 +93,7 @@ cd "${ROOT_DIR}" || exit 2
 # one process at a time. On the Mac the single-process batteries outlasted the
 # census by six minutes.
 ALL_BATTERIES=(
+  "rust-core|1|dev|1|1|30|scripts/test/rust-core.sh"
   "smoke|1|dev|1|1|350|scripts/test/smoke.sh"
   "scan-contract|1|dev|3|1|861|scripts/test/scan-contract.sh"
   "statement-batch|1|dev|1|1|263|scripts/test/statement-batch.sh"
@@ -296,6 +297,7 @@ if (( prepare_rc != 0 )); then
   exit 1
 fi
 printf '# core receipt %s\n' "${core_receipt}"
+export SAFEDEPS_TEST_CORE_RECEIPT="${core_receipt}" SAFEDEPS_TEST_LOG_DIR="${log_dir}"
 
 # The load averages, without the platform's framing (macOS prints "load
 # averages: a b c", Linux "load average: a, b, c").

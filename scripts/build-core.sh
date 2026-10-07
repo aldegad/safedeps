@@ -146,9 +146,9 @@ host_receipt() {
   [[ "${check}" == ok ]] || stop "${binary} stamp --check said: ${check}"
   digest=$(sha256_of "${binary}") || stop "cannot hash ${binary}"
   [[ "${digest}" =~ ^[0-9a-f]{64}$ ]] || stop "no sha256 for ${binary}"
-  jq -nS --arg tree "${ROOT_DIR}" --arg binary "${binary}" --arg platform "${platform}" \
+  jq -nS --arg tree "${ROOT_DIR}" --arg binary "${binary}" --arg platform "${platform}" --arg target "${target}" \
     --arg stamp "${stamp}" --arg source "${stamp#* }" --arg sha256 "${digest}" \
-    '{version: 1, tree: $tree, platform: $platform, binary: $binary,
+    '{version: 1, tree: $tree, platform: $platform, target: $target, binary: $binary,
       source_digest: $source, stamp: $stamp, stamp_check: "ok", binary_sha256: $sha256}'
 }
 
