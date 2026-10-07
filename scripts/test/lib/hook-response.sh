@@ -78,6 +78,10 @@ hook_response_read() {
     decision) printf '%s' "${HOOK_DECISION}" ;;
     reason) printf '%s' "${HOOK_REASON}" ;;
     rewrite) printf '%s' "${HOOK_REWRITE}" ;;
+    required-rewrite)
+      [[ "${HOOK_HAS_REWRITE}" == true && -n "${HOOK_REWRITE}" ]] \
+        || { hook_response_error "expected a nonempty rewrite"; return 1; }
+      printf '%s' "${HOOK_REWRITE}" ;;
     has-rewrite) printf '%s' "${HOOK_HAS_REWRITE}" ;;
     message) printf '%s' "${HOOK_MESSAGE}" ;;
     quiet) printf '%s' "${HOOK_QUIET}" ;;

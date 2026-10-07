@@ -5,6 +5,7 @@ ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "${ROOT_DIR}"
 
 pass() {
+  hook_response_assert || fail "a hook response could not be read"
   native_fixtures_assert || fail "$1: native fixture failed; see invocation receipt/error"
   printf 'ok - %s\n' "$1"
 }
@@ -12,15 +13,6 @@ pass() {
 fail() {
   printf 'not ok - %s\n' "$1" >&2
   exit 1
-}
-
-# Rewriting rows require an answer; quiet rows assert empty stdout directly.
-call_rewrite() {
-  [[ -n "$1" ]] || fail "expected a hook rewrite, got no output"
-  jq -ers 'if length == 1 and (.[0] | type == "object") then
-      .[0].hookSpecificOutput.updatedInput.command | select(type == "string" and length > 0)
-    else error("expected one response object") end' <<< "$1" \
-    || fail "expected a JSON hook rewrite (got $1)"
 }
 
 # A rollback and its interrupted-rollback report give no command. The pattern
@@ -44,6 +36,9 @@ assert_skipped_rebuild_states_facts() {
 }
 
 tmp_root=$(mktemp -d "${TMPDIR:-/tmp}/safedeps-e2e.XXXXXX")
+# shellcheck source=lib/hook-response.sh
+source "${ROOT_DIR}/scripts/test/lib/hook-response.sh"
+hook_response_init "${tmp_root}/hook-response.failures"
 
 # Every post hook run in this suite goes through post_hook, and post_hook hands
 # every line the hook printed to the report oracle (lib/report-oracle.sh). A
@@ -57,7 +52,7 @@ oracle_native_owner_forms
 oracle_native_io_forms
 source "${ROOT_DIR}/scripts/test/lib/core-post-fixtures.sh"
 native_fixtures_init "${tmp_root}/native-fixtures"
-post_message() { jq -r '.systemMessage // empty' <<< "$1"; }
+post_message() { hook_response_read message "$1" message; }
 post_hook() {
   local payload out call
   payload=$(cat)
@@ -69,7 +64,7 @@ post_hook() {
   local path="${PATH}"
   command -v npm >/dev/null 2>&1 && path="${ORACLE_DIR}/bin:${PATH}"
   out=$(printf '%s' "${payload}" | ORACLE_NPM_LOG="${call}/npm.log" ORACLE_CALL="${call}" PATH="${path}" \
-    native_fixture_hook post) || fail "post hook fixture failed for this invocation"
+    hook_response_capture "${call}/response" native_fixture_hook post) || fail "post hook fixture failed for this invocation"
   printf '%s' "${out}"
   oracle_message "${call}" "${payload}" "${out}" || exit 1
 }
@@ -81,7 +76,7 @@ pre_hook() {
   payload=$(cat)
   call=$(mktemp -d "${ORACLE_DIR}/pre.XXXXXX")
   oracle_pre_before "${call}"
-  out=$(printf '%s' "${payload}" | native_fixture_hook pre) || rc=$?
+  out=$(printf '%s' "${payload}" | hook_response_capture "${call}/response" native_fixture_hook pre) || rc=$?
   native_fixtures_assert || fail "pre hook fixture failed for this invocation"
   printf '%s' "${out}"
   oracle_pre "${call}" "${out}" || exit 1
@@ -260,10 +255,8 @@ go_sub_json=$(./bin/safedeps --json check go example.com/mod/cmd/tool@v1.0.0 2>/
 [[ "$(jq -r '.approved' <<< "${go_sub_json}")" == "false" ]] \
   || fail "a Go import path below a vulnerable module is not approved"
 go_sub_guard=$(jq -nc --arg c "go install example.com/mod/cmd/tool@v1.0.0" --arg cwd "${tmp_root}" \
-  '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' | native_fixture_hook pre 2>/dev/null)
-[[ -n "${go_sub_guard}" ]] || fail "expected a Go install decision, got no output"
-jq -es 'length == 1 and (.[0] | type == "object") and .[0].hookSpecificOutput.permissionDecision == "deny"' \
-  <<< "${go_sub_guard}" >/dev/null \
+  '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' | hook_response_capture "${tmp_root}/go-sub-response" native_fixture_hook pre)
+[[ "$(hook_response_read decision "${go_sub_guard}")" == deny ]] \
   || fail "after the prescribed check, the install of a package below a vulnerable module is still denied"
 go_clean_json=$(./bin/safedeps --json check go example.com/other/cmd/tool@v1.0.0 2>/dev/null) || true
 [[ "$(jq -r '.approved' <<< "${go_clean_json}")" == "true" ]] \
@@ -375,7 +368,7 @@ yarn_unsafe_hook=$(
 {"tool_name":"Bash","tool_input":{"command":"yarn add next@16.2.11"},"cwd":"${yarn_unsafe_project}","turn_id":"turn-yarn-unsafe","model":"codex-test"}
 EOF
 )
-[[ "$(jq -r '.hookSpecificOutput.permissionDecision' <<< "${yarn_unsafe_hook}")" == "deny" ]] || fail "Yarn command gate rejects approval from a different project context"
+[[ "$(hook_response_read decision "${yarn_unsafe_hook}")" == "deny" ]] || fail "Yarn command gate rejects approval from a different project context"
 pass "Yarn root resolutions use actual lockfile closure with project-scoped approval isolation"
 printf '%s\n' '{"vulnerable":[]}' > "${state_file}"
 
@@ -541,7 +534,7 @@ candidate_context_mismatch_hook=$(SAFEDEPS_HOME="${candidate_safe_home}" pre_hoo
 {"tool_name":"Bash","tool_input":{"command":"yarn add next@16.2.11"},"cwd":"${candidate_safe_project}","turn_id":"turn-yarn-candidate-context-drift","model":"codex-test"}
 EOF
 )
-[[ "$(jq -r '.hookSpecificOutput.permissionDecision' <<< "${candidate_context_mismatch_hook}")" == "deny" ]] || fail "candidate approval is rejected after canonical input context drift"
+[[ "$(hook_response_read decision "${candidate_context_mismatch_hook}")" == "deny" ]] || fail "candidate approval is rejected after canonical input context drift"
 printf '__metadata:\n  version: 8\n# caller lockfile stays unchanged\n' > "${candidate_safe_project}/yarn.lock"
 pass "Yarn absent candidates materialize only in an isolated mirror with bound provenance"
 printf '%s\n' '{"vulnerable":[]}' > "${state_file}"
@@ -616,8 +609,8 @@ inert_pre=$(
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${inert_project}"}
 EOF
 )
-[[ "$(jq -r '.hookSpecificOutput.permissionDecision' <<< "${inert_pre}")" == "allow" ]] || fail "inert pre hook emits Claude allow"
-[[ "$(jq -r '.hookSpecificOutput.updatedInput.command' <<< "${inert_pre}")" == "npm install --ignore-scripts fixture-parent@1.0.0 --ignore-scripts" ]] || fail "inert pre hook injects ignore-scripts"
+[[ "$(hook_response_read decision "${inert_pre}")" == "allow" ]] || fail "inert pre hook emits Claude allow"
+[[ "$(hook_response_read required-rewrite "${inert_pre}")" == "npm install --ignore-scripts fixture-parent@1.0.0 --ignore-scripts" ]] || fail "inert pre hook injects ignore-scripts"
 cat > "${inert_project}/package-lock.json" <<'EOF'
 {
   "name": "inert-project",
@@ -807,7 +800,7 @@ link_inert_pre=$(
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${link_inert_wt}"}
 EOF
 )
-[[ "$(jq -r '.hookSpecificOutput.updatedInput.command' <<< "${link_inert_pre}")" == "npm install --ignore-scripts fixture-parent@1.0.0 --ignore-scripts" ]] || fail "linked inert pre hook injects ignore-scripts"
+[[ "$(hook_response_read required-rewrite "${link_inert_pre}")" == "npm install --ignore-scripts fixture-parent@1.0.0 --ignore-scripts" ]] || fail "linked inert pre hook injects ignore-scripts"
 cat > "${link_inert_wt}/package-lock.json" <<'EOF'
 {
   "name": "link-inert-wt",
@@ -1304,7 +1297,7 @@ EOF
 )
 grep -q 'suspicious dependency change detected' <<< "${nosave_link_post}" || fail "reorg fires on a native binary through a linked node_modules"
 grep -q 'refused removal of .*/nosave-link-wt/node_modules: ' <<< "${nosave_link_post}" || fail "the rollback names the linked node_modules it will not remove"
-grep -qx "refused removal of .*/nosave-link-wt/node_modules: .*/nosave-link-wt/node_modules is a symbolic link to ${nosave_link_physical}" <<< "$(jq -r '.systemMessage' <<< "${nosave_link_post}")" || fail "a refused relative link is named by its physical path"
+grep -qx "refused removal of .*/nosave-link-wt/node_modules: .*/nosave-link-wt/node_modules is a symbolic link to ${nosave_link_physical}" <<< "$(hook_response_read message "${nosave_link_post}" message)" || fail "a refused relative link is named by its physical path"
 assert_gives_no_command "${nosave_link_post}" "the rollback through a linked node_modules gives no command"
 [[ -f "${nosave_link_target}/.package-lock.json" ]] || fail "a rollback leaves the target of a linked node_modules alone"
 pass "a rollback names a linked node_modules a --no-save install wrote through"
@@ -1398,7 +1391,8 @@ for r18_form in "sh -c 'npm ci'" 'bash -c "npm ci"' "eval 'npm ci'"; do
   r18_first=$(PATH="${stub_bin}:${PATH}" grammar_post "${r18_wt}" "npm install --ignore-scripts fixture-parent@1.0.0 --ignore-scripts")
   [[ -z "${r18_first}" ]] || fail "the project of ${r18_form} has a confirmed snapshot (${r18_first})"
   r18_wrote=$(jq -nc --arg c "${r18_form}" --arg d "${r18_wt}" '{tool_name:"Bash",tool_input:{command:$c},cwd:$d}' \
-    | pre_hook | jq -r '.hookSpecificOutput.updatedInput.command // empty')
+    | pre_hook)
+  r18_wrote=$(hook_response_read required-rewrite "${r18_wrote}")
   [[ -n "${r18_wrote}" ]] || fail "the pre-guard rewrites ${r18_form}"
   printf '%s\n' "${tampered_lock}" > "${r18_wt}/package-lock.json"
   r18_post=$(jq -nc --arg c "${r18_wrote}" --arg d "${r18_wt}" '{tool_name:"Bash",tool_input:{command:$c},cwd:$d}' \
@@ -1443,7 +1437,7 @@ pass "a rewrite whose record cannot be written is not sent, and the rollback say
 markread_wt=$(mktemp -d "${tmp_root}/markread-wt.XXXXXX")
 grammar_project "${markread_wt}"
 markread_pre=$(grammar_pre "${markread_wt}" "npm install fixture-parent@1.0.0")
-[[ "$(call_rewrite "${markread_pre}")" == 'npm install --ignore-scripts fixture-parent@1.0.0 --ignore-scripts' ]] \
+[[ "$(hook_response_read required-rewrite "${markread_pre}")" == 'npm install --ignore-scripts fixture-parent@1.0.0 --ignore-scripts' ]] \
   || fail "the install whose record the post hook will not read is rewritten (${markread_pre})"
 printf '%s\n' "${tampered_lock}" > "${markread_wt}/package-lock.json"
 markread_post=$(SAFEDEPS_TEST_FAULT=markread PATH="${stub_bin}:${PATH}" grammar_post "${markread_wt}" "npm install fixture-parent@1.0.0")
@@ -1473,7 +1467,7 @@ for unstated_shape in v2172-true v2172-false string-true null-command number-com
   unstated_wt=$(mktemp -d "${tmp_root}/unstated-${unstated_shape}-wt.XXXXXX")
   grammar_project "${unstated_wt}"
   unstated_pre=$(grammar_pre "${unstated_wt}" "npm install fixture-parent@1.0.0")
-  [[ "$(call_rewrite "${unstated_pre}")" == 'npm install --ignore-scripts fixture-parent@1.0.0 --ignore-scripts' ]] \
+  [[ "$(hook_response_read required-rewrite "${unstated_pre}")" == 'npm install --ignore-scripts fixture-parent@1.0.0 --ignore-scripts' ]] \
     || fail "${unstated_shape}: the install is rewritten (${unstated_pre})"
   unstated_meta="${SAFEDEPS_HOME}/snapshots/$(jq -r '.snapshot_id' "$(grammar_pending "${unstated_wt}")")_meta.json"
   case "${unstated_shape}" in
@@ -1520,7 +1514,7 @@ pass "no record file gets no --ignore-scripts line, and advisory.log names the r
 twoobj_wt=$(mktemp -d "${tmp_root}/twoobj-wt.XXXXXX")
 grammar_project "${twoobj_wt}"
 twoobj_pre=$(grammar_pre "${twoobj_wt}" "npm install fixture-parent@1.0.0")
-[[ -n "$(call_rewrite "${twoobj_pre}")" ]] \
+[[ -n "$(hook_response_read required-rewrite "${twoobj_pre}")" ]] \
   || fail "the install whose record becomes two objects is rewritten (${twoobj_pre})"
 twoobj_meta="${SAFEDEPS_HOME}/snapshots/$(jq -r '.snapshot_id' "$(grammar_pending "${twoobj_wt}")")_meta.json"
 { printf '{"record":2,"ignore_scripts_injected":false}\n'; cat "${twoobj_meta}"; } > "${twoobj_meta}.tmp" && mv -f "${twoobj_meta}.tmp" "${twoobj_meta}"
@@ -1859,8 +1853,8 @@ jq -c . "${tmp_root}/same-first-lock.json" > "${same_wt}/package-lock.json"
 cmp -s "${same_wt}/package-lock.json" "${tmp_root}/same-first-lock.json" && fail "the second call sees a lockfile with other bytes"
 cp "${same_wt}/package-lock.json" "${tmp_root}/same-second-lock.json"
 same_second=$(SAFEDEPS_TEST_FAULT=same grammar_pre "${same_wt}" "npm ci")
-same_first_cmd=$(call_rewrite "${same_first}")
-same_second_cmd=$(call_rewrite "${same_second}")
+same_first_cmd=$(hook_response_read required-rewrite "${same_first}")
+same_second_cmd=$(hook_response_read required-rewrite "${same_second}")
 [[ "${same_first_cmd}" == 'npm install --ignore-scripts fixture-parent@1.0.0 --ignore-scripts' && "${same_second_cmd}" == 'npm ci --ignore-scripts' ]] \
   || fail "both calls in one second are rewritten (${same_first}; ${same_second})"
 same_ids=$(for f in $(grep -lF "\"$(cd -P "${same_wt}" && pwd -P)\"" "${SAFEDEPS_HOME}/pending"/*.json); do jq -r .snapshot_id "${f}"; done | sort -u)
@@ -2171,7 +2165,7 @@ call_records_of() { { grep -lF "\"$(cd -P "$1" && pwd -P)\"" "${SAFEDEPS_HOME}/p
 ov1_wt="${tmp_root}/ov1-wt"
 grammar_project "${ov1_wt}"
 ov1_pre=$(grammar_pre "${ov1_wt}" "npm install fixture-parent@1.0.0" toolu_ov1_a)
-ov1_cmd=$(call_rewrite "${ov1_pre}")
+ov1_cmd=$(hook_response_read required-rewrite "${ov1_pre}")
 [[ "${ov1_cmd}" == *--ignore-scripts* ]] || fail "OV1: the pre-guard rewrites A (${ov1_pre})"
 sleep 1
 grammar_pre_codex "${ov1_wt}" "${ov1_cmd}" exec-ov1-b > /dev/null
@@ -2216,7 +2210,7 @@ grammar_pre "${o2_wt}" "npm install fixture-parent@1.0.0" toolu_o2_rejected > /d
 sleep 1
 jq '.description = "edited by the user"' "${o2_wt}/package.json" > "${o2_wt}/package.json.edit" \
   && mv "${o2_wt}/package.json.edit" "${o2_wt}/package.json"
-o2_cmd=$(call_rewrite "$(grammar_pre "${o2_wt}" "npm install fixture-parent@1.0.0" toolu_o2)")
+o2_cmd=$(hook_response_read required-rewrite "$(grammar_pre "${o2_wt}" "npm install fixture-parent@1.0.0" toolu_o2)")
 printf '%s\n' "${tampered_lock}" > "${o2_wt}/package-lock.json"
 o2_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${o2_wt}" "${o2_cmd}" toolu_o2)
 grep -q 'A rollback ran\.' <<< "${o2_post}" || fail "O2: the unapproved lockfile is rolled back (${o2_post})"
@@ -2255,7 +2249,7 @@ pass "a call whose trace entry was taken in another directory reads no record"
 # each other's record.
 noid_wt="${tmp_root}/noid-wt"
 grammar_project "${noid_wt}"
-noid_cmd=$(call_rewrite "$(grammar_pre "${noid_wt}" "npm install fixture-parent@1.0.0")")
+noid_cmd=$(hook_response_read required-rewrite "$(grammar_pre "${noid_wt}" "npm install fixture-parent@1.0.0")")
 noid_record=$(grammar_pending "${noid_wt}")
 [[ "${noid_record##*/}" == *__*.json ]] || fail "a call with no tool_use_id keeps its record under the directory and the command (${noid_record})"
 grep -qF "pre-guard: this hook's input names no tool_use_id, so the record of this install is kept under its directory and command" "${SAFEDEPS_HOME}/advisory.log" \
@@ -2287,7 +2281,7 @@ EOF
 }
 fa_claude_wt="${tmp_root}/fa-claude-wt"
 grammar_project "${fa_claude_wt}"
-fa_claude_cmd=$(call_rewrite "$(grammar_pre "${fa_claude_wt}" "npm install fixture-parent@1.0.0" toolu_fa_claude)")
+fa_claude_cmd=$(hook_response_read required-rewrite "$(grammar_pre "${fa_claude_wt}" "npm install fixture-parent@1.0.0" toolu_fa_claude)")
 [[ -f "$(call_record toolu_fa_claude)" ]] || fail "a failed install on Claude Code: the pre-guard leaves its record"
 printf '%s\n' "${tampered_lock}" > "${fa_claude_wt}/package-lock.json"
 fa_claude_post=$(PATH="${stub_bin}:${PATH}" fail_post_claude "${fa_claude_wt}" "${fa_claude_cmd}" toolu_fa_claude)
@@ -2410,7 +2404,7 @@ for inert_case in \
   fi
   case "${inert_received}" in
     '') inert_received="${inert_cmd}" ;;
-    =) inert_received=$(call_rewrite "${inert_pre}")
+    =) inert_received=$(hook_response_read required-rewrite "${inert_pre}")
        [[ "${inert_received}" == *--ignore-scripts* ]] || fail "${inert_name}: the pre-guard rewrites the command on Claude (${inert_pre})" ;;
   esac
   printf '%s\n' "${tampered_lock}" > "${inert_wt}/package-lock.json"
@@ -2660,7 +2654,7 @@ rebuildquoted_wt="${tmp_root}/rebuildfail-quoted-wt"
 mkdir -p "${rebuildquoted_wt}/node_modules"
 printf '{"dependencies":{}}\n' > "${rebuildquoted_wt}/package.json"
 rebuildquoted_pre=$(grammar_pre "${rebuildquoted_wt}" "npm install 'fixture-parent@1.0.0'")
-rebuildquoted_cmd=$(call_rewrite "${rebuildquoted_pre}")
+rebuildquoted_cmd=$(hook_response_read required-rewrite "${rebuildquoted_pre}")
 [[ "${rebuildquoted_cmd}" == *--ignore-scripts* ]] || fail "the pre-guard rewrites a quoted install on Claude (${rebuildquoted_pre})"
 cp "${inert_project}/package-lock.json" "${rebuildquoted_wt}/package-lock.json"
 cp "${inert_project}/package-lock.json" "${rebuildquoted_wt}/node_modules/.package-lock.json"
@@ -2678,7 +2672,7 @@ mkdir -p "${segment_main}/node_modules" "${segment_wt}"
 ln -s "${segment_main}/node_modules" "${segment_wt}/node_modules"
 printf '{"dependencies":{}}\n' > "${segment_wt}/package.json"
 segment_pre=$(grammar_pre "${segment_wt}" "npm install fixture-parent@1.0.0 && npm rebuild")
-segment_command=$(call_rewrite "${segment_pre}")
+segment_command=$(hook_response_read required-rewrite "${segment_pre}")
 [[ "${segment_command}" == *--ignore-scripts* ]] || fail "the pre-guard makes an install inert when the command rebuilds after it (${segment_pre})"
 cp "${tmp_root}/revert-safe-lock.json" "${segment_wt}/package-lock.json"
 : > "${segment_main}/node_modules/script-ran.txt"
@@ -2803,7 +2797,7 @@ guard_moved_payload=$(jq -nc --arg cwd "${tmp_root}/guard-moved-project" \
   '{tool_name:"Bash",tool_input:{command:"ls -la"},cwd:$cwd}')
 SAFEDEPS_HOME="${guard_moved_home}" SAFEDEPS_OSV_API_URL="http://mirror.invalid/osv" \
   SAFEDEPS_NPM_OVERRIDES_JSON='{"minimist":"1.2.8"}' \
-  scripts/safedeps-hook-entry.sh pre <<< "${guard_moved_payload}" >/dev/null 2>&1 || true
+  hook_response_capture "${tmp_root}/moved-response" scripts/safedeps-hook-entry.sh pre <<< "${guard_moved_payload}" >/dev/null || true
 grep -q 'advisory truth source moved' "${guard_moved_home}/advisory.log" \
   || fail "the guard records a moved advisory source on its own path"
 grep -q 'npm-overrides=set' "${guard_moved_home}/advisory.log" \
@@ -2820,7 +2814,7 @@ env -u SAFEDEPS_OSV_API_URL -u SAFEDEPS_OSV_BATCH_API_URL -u SAFEDEPS_KEV_CATALO
   -u SAFEDEPS_GHSA_API_URL -u SAFEDEPS_NPM_CLOSURE_FIXTURE_JSON -u SAFEDEPS_YARN_INFO_FIXTURE_NDJSON \
   -u SAFEDEPS_NPM_OVERRIDES_JSON -u SAFEDEPS_RECHECK_FIXTURE_JSON -u SAFEDEPS_LEDGER_DEFAULT_TTL_DAYS \
   -u SAFEDEPS_ADVISORY_LOG \
-  env SAFEDEPS_HOME="${guard_clean_home}" scripts/safedeps-hook-entry.sh pre <<< "${guard_moved_payload}" >/dev/null 2>&1 || true
+  SAFEDEPS_HOME="${guard_clean_home}" hook_response_capture "${tmp_root}/moved-response" scripts/safedeps-hook-entry.sh pre <<< "${guard_moved_payload}" >/dev/null || true
 if [[ -f "${guard_clean_home}/advisory.log" ]] && grep -q 'truth source moved' "${guard_clean_home}/advisory.log"; then
   fail "an unmoved run leaves no moved-source line"
 fi
@@ -2835,7 +2829,7 @@ guard_override_home="${tmp_root}/safe-guard-override"
 mkdir -p "${guard_override_home}"
 SAFEDEPS_HOME="${guard_override_home}" SAFEDEPS_OSV_API_URL="http://mirror.invalid/osv" \
   SAFEDEPS_TRUTH_SOURCES_LIB=/dev/null \
-  scripts/safedeps-hook-entry.sh pre <<< "${guard_moved_payload}" >/dev/null 2>&1 || true
+  hook_response_capture "${tmp_root}/moved-response" scripts/safedeps-hook-entry.sh pre <<< "${guard_moved_payload}" >/dev/null || true
 grep -q 'advisory truth source moved' "${guard_override_home}/advisory.log" \
   || fail "no environment variable can silence the moved-source notice"
 pass "the moved-source notice cannot be switched off from the environment"
@@ -3376,12 +3370,12 @@ printf 'ok - npm overrides drive the verdict and their approval stays scoped\n'
 # The guard has to derive the same key the approval was stored under, or a
 # legitimately approved install looks unapproved at the gate.
 ov_guard_decision() {
-  local dir="$1"
-  jq -nc --arg c 'npm install mkdirp@0.5.1' --arg cwd "${dir}" \
+  local dir="$1" out
+  out=$(jq -nc --arg c 'npm install mkdirp@0.5.1' --arg cwd "${dir}" \
     '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' \
     | ( cd "${dir}" && HOME="${ov_home}" SAFEDEPS_HOME="${ov_home}" \
-        PATH="${ov_npm_bin}:${PATH}" native_fixture_hook pre 2>/dev/null ) \
-    | jq -r '.hookSpecificOutput.permissionDecision // "allow"'
+        PATH="${ov_npm_bin}:${PATH}" hook_response_capture "${tmp_root}/override-response" native_fixture_hook pre ))
+  hook_response_read decision "${out}"
 }
 [[ "$(ov_guard_decision "${ov_patched_repo}")" == "allow" ]] \
   || fail "the guard reproduces the overrides approval key for the repo that earned it"
