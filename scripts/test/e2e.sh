@@ -2810,23 +2810,11 @@ grep -q 'advisory truth source moved' "${guard_override_home}/advisory.log" \
   || fail "no environment variable can silence the moved-source notice"
 pass "the moved-source notice cannot be switched off from the environment"
 
-# And when the library genuinely cannot be read, that is an unavailability, said
-# out loud like every other one rather than swallowed by a quiet return.
-guard_nolib_repo="${tmp_root}/guard-nolib-repo"
-mkdir -p "${guard_nolib_repo}/scripts" "${guard_nolib_repo}/lib"
-cp -R lib/. "${guard_nolib_repo}/lib/"
-cp scripts/safedeps-pre-guard.sh "${guard_nolib_repo}/scripts/"
-rm -f "${guard_nolib_repo}/lib/truth-sources.sh"
-guard_nolib_home="${tmp_root}/safe-guard-nolib"
-guard_nolib_err="${tmp_root}/guard-nolib.err"
-mkdir -p "${guard_nolib_home}"
-SAFEDEPS_HOME="${guard_nolib_home}" SAFEDEPS_OSV_API_URL="http://mirror.invalid/osv" \
-  "${guard_nolib_repo}/scripts/safedeps-pre-guard.sh" <<< "${guard_moved_payload}" >/dev/null 2>"${guard_nolib_err}" || true
-grep -q 'truth-sources.sh is unreadable' "${guard_nolib_home}/advisory.log" \
-  || fail "an unreadable truth-source library is recorded as an unavailability"
-grep -q 'truth-sources.sh is unreadable' "${guard_nolib_err}" \
-  || fail "an unreadable truth-source library is reported on stderr"
-pass "an unreadable truth-source library is an announced unavailability, not a quiet skip"
+# Retired: deleting lib/truth-sources.sh cannot damage the native hook, whose
+# notice is compiled in. The moved-source and override assertions above remain.
+# Broken native entry is covered by hook-entry.sh's native_denies cases:
+# nonzero exit/abort, non-executable or missing binary, and missing platform or
+# bin/native directory all require exit 2 plus cause and recovery on stderr.
 
 # A forged ledger entry must be flagged even when advisory.log does not exist at
 # all — file absence is missing provenance, not proof of approval. (Previously
