@@ -2406,7 +2406,12 @@ do
   state=$(pending_of "${form}")
   reason=$(jq -r '.npm_unattributable // empty' <<< "${state}")
   if [[ "${expect}" == one ]]; then
-    [[ -z "${reason}" ]] || fail "lockfile writers with nothing between them share one trace: ${form} (${reason})"
+    jq -es 'length == 1 and (.[0] |
+      type == "object" and
+      (.npm_trace | type == "object") and
+      (.npm_trace.baseline | type == "string" and length > 0) and
+      .npm_unattributable == "")' <<< "${state}" >/dev/null \
+      || fail "lockfile writers with nothing between them have one pending trace: ${form} (${state})"
   else
     [[ -n "${reason}" ]] || fail "lockfile writers that may land apart are not credited to one trace: ${form} ($(jq -c . <<< "${state}"))"
   fi
