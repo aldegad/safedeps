@@ -206,7 +206,7 @@ fn deny_undecided_scan(call: &Call, out: &mut Out, which: &str) {
             &call.command,
         ]),
     );
-    out.say(&jq::deny("safedeps: UNDECIDED, not unsafe — safedeps could not finish reading this command: a scanner step (awk, grep or sed) failed, or the command does not close (an open quote, a heredoc without its terminator). So it could not tell whether the command installs a dependency or what it would install. It is blocked fail-closed, and no finding is claimed. Close the command, or check that `echo x | awk 1` works, then retry."));
+    out.say(&jq::deny("safedeps: UNDECIDED, not unsafe — safedeps could not finish reading this command, so it could not tell whether the command installs a dependency or what it would install. It is blocked fail-closed, and no finding is claimed."));
 }
 
 /// `guard_looks_like_install_unscanned`: the command names a package manager's
@@ -238,7 +238,7 @@ fn settle_scan_failure(call: &Call, failed: bool, out: &mut Out) -> bool {
         &call.guard_dir,
         &cat(&[b"pre-guard: the command scanner failed; the command names no package manager and was allowed. Command: ", &call.command]),
     );
-    out.warn(b"safedeps: this command could not be fully read (a scanner step failed, or the command does not close). It names no package manager, so it was allowed. The failure is recorded in advisory.log.");
+    out.warn(b"safedeps: this command could not be fully read. It names no package manager, so it was allowed. The failure is recorded in advisory.log.");
     false
 }
 

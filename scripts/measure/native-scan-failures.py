@@ -114,7 +114,13 @@ def fixture(binary,out,marker,expect_failure):
         if expect_failure:
             checks.update(witness=marker in err,no_rewrite='updatedInput' not in hook,
                           no_pending=not pending,no_meta=not meta)
-            if deny:checks.update(deny=hook.get('permissionDecision')=='deny',undecided='UNDECIDED' in hook.get('permissionDecisionReason',''))
+            reason=hook.get('permissionDecisionReason','')
+            checks['no_retired_scanner_claim']=not re.search(
+                r'\b(?:awk|grep|sed|jq|judge_grep|SECONDS)\b|safedeps-(?:pre-guard|post-verify)\.sh',reason+err)
+            if deny:checks.update(deny=hook.get('permissionDecision')=='deny',undecided='UNDECIDED' in reason,
+                                  reading_failed='could not finish reading this command' in reason,
+                                  install_undecided='could not tell whether the command installs a dependency or what it would install' in reason,
+                                  no_finding='blocked fail-closed, and no finding is claimed' in reason)
             else:checks.update(allow=hook.get('permissionDecision')!='deny',stderr_failure='could not be fully read' in err,
                                advisory_failure='command scanner failed' in log)
         else:

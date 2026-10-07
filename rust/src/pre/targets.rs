@@ -61,7 +61,7 @@ impl Context {
         let mut out=Target{kind:"-".into(),dir:W::new(),why:W::new(),fetch:None,fields:statement.fields()};
         if statement.before==b"?" {
             run.failed=true;out.kind="?".into();out.dir=b"?".to_vec();
-            out.why=b"the command could not be split into statements (awk failed), so safedeps cannot tell where its installs land".to_vec();out.fields=W::new();return out
+            out.why=b"the command could not be split into statements, so safedeps cannot tell where its installs land".to_vec();out.fields=W::new();return out
         }
         if statement.before!=b"&&"{self.conditional.clear()}
         let here=if self.conditional.is_empty(){self.dir.clone()}else{self.conditional.clone()};
