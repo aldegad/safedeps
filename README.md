@@ -448,7 +448,7 @@ tail -f ~/.safedeps/recheck.log
 
 ## What Changed in v2.19.0
 
-The two Bash hook scripts, `safedeps-pre-guard.sh` and `safedeps-post-verify.sh`, are gone. One Rust program, `safedeps-core`, judges every call. What safedeps blocks, records and says is the same contract as before. The ledger, `~/.safedeps/`, the CLI and the registered entry did not change.
+The two Bash hook scripts, `safedeps-pre-guard.sh` and `safedeps-post-verify.sh`, are gone. One Rust program, `safedeps-core`, judges every call. What safedeps is for did not change: it still blocks what is not approved, records what it cannot gate, and rolls back what diverges. The ledger, `~/.safedeps/`, the CLI and the registered entry are the same. What differs is the verdict on a short list of commands and the wording of some report lines.
 
 What did change:
 
