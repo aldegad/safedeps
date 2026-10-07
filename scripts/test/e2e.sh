@@ -195,7 +195,7 @@ reap_owned_children() {
 }
 
 cleanup() {
-  local cleanup_rc=$? skipped_summary
+  local cleanup_rc=$? skipped_summary kept
   skipped_summary=$(awk 'BEGIN { names="" } { names=names (NR>1 ? ", " : "") $0 } END { printf "# skipped rows: %d; names: %s", NR, NR ? names : "none" }' "${tmp_root}/skipped-rows")
   if [[ -n "${server_pid:-}" ]]; then
     kill "${server_pid}" 2>/dev/null || true
@@ -206,10 +206,12 @@ cleanup() {
     mkdir -p "${SAFEDEPS_TEST_EVIDENCE}"
     cp -R "${tmp_root}/report-oracle" "${SAFEDEPS_TEST_EVIDENCE}/"
     cp "${SAFEDEPS_TEST_FAILURES}" "${SAFEDEPS_TEST_EVIDENCE}/fixture-failures.jsonl"
-    cp "${tmp_root}/skipped-rows" "${SAFEDEPS_TEST_EVIDENCE}/"
-    if [[ -f "${tmp_root}/skipped-forms" ]]; then
-      cp "${tmp_root}/skipped-forms" "${SAFEDEPS_TEST_EVIDENCE}/"
-    fi
+    cp "${tmp_root}/skipped-rows" "${tmp_root}/capability-rows" "${SAFEDEPS_TEST_EVIDENCE}/"
+    for kept in skipped-forms declared-forms; do
+      if [[ -f "${tmp_root}/${kept}" ]]; then
+        cp "${tmp_root}/${kept}" "${SAFEDEPS_TEST_EVIDENCE}/"
+      fi
+    done
   fi
   if [[ "${cleanup_rc}" == 0 ]] && hook_response_assert; then
     rm -rf "${tmp_root}"
