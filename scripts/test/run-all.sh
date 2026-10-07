@@ -123,13 +123,26 @@ START_FIRST_ALL=(census consumer-forms lockless-forms effect-trace-grid)
 # Checked before anything starts, on the whole table: a second phase with
 # nothing to wait for would start at once, under the very load it exists to
 # avoid.
-printf '%s\n' "${ALL_BATTERIES[@]}" | grep -qx "${PHASE_TWO_AFTER}|1|.*" || {
+# Whether an entry of a table starts with <prefix>. Asked with no pipe: under
+# pipefail, `printf ... | grep -q` fails when grep leaves at its first match
+# while printf is still writing (SIGPIPE, 141). On a loaded host that read as
+# "not a battery" and ended a unit before it started, with no exit status
+# (two of 22 units in one run, at load 46).
+starts_entry() { # prefix entry...
+  local prefix="$1" entry
+  shift
+  for entry in "$@"; do
+    [[ "${entry}" != "${prefix}"* ]] || return 0
+  done
+  return 1
+}
+starts_entry "${PHASE_TWO_AFTER}|1|" "${ALL_BATTERIES[@]}" || {
   printf 'run-all: the second phase waits for %s, and no first-phase battery has that name\n' "${PHASE_TWO_AFTER}" >&2
   exit 2
 }
 
 for first in "${START_FIRST_ALL[@]}"; do
-  printf '%s\n' "${ALL_BATTERIES[@]}" | grep -q "^${first}|" || {
+  starts_entry "${first}|" "${ALL_BATTERIES[@]}" || {
     printf 'run-all: START_FIRST_ALL names %s, which is not a battery\n' "${first}" >&2
     exit 2
   }
@@ -222,7 +235,7 @@ case "${selection}" in
   release) run_label="release set" ;;
   unit) run_label="unit ${unit}" ;;
 esac
-selected() { printf '%s\n' "${BATTERIES[@]}" | grep -q "^$1|"; }
+selected() { starts_entry "$1|" "${BATTERIES[@]}"; }
 START_FIRST=()
 for first in "${START_FIRST_ALL[@]}"; do
   ! selected "${first}" || START_FIRST+=("${first}")
