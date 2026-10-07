@@ -180,6 +180,26 @@
       "path": "scripts/measure/core-post-entry-adapter.py",
       "reason": "Replay of the historical Python-as-Bash adapter defect is retired; hook-entry tests own the native shim error contract.",
       "exit_status": 2
+    },
+    {
+      "path": "scripts/measure/core-post-suite.py",
+      "reason": "The archive wrapper and paired Bash fixture adapter are superseded by the native e2e fixture transport in scripts/test/lib/core-post-fixtures.sh.",
+      "exit_status": 2
+    },
+    {
+      "path": "scripts/measure/core-post-suite-adapt.py",
+      "reason": "The archive wrapper and paired Bash fixture adapter are superseded by the native e2e fixture transport in scripts/test/lib/core-post-fixtures.sh.",
+      "exit_status": 2
+    },
+    {
+      "path": "scripts/measure/core-post-native-suite.py",
+      "reason": "The archive wrapper and paired Bash fixture adapter are superseded by the native e2e fixture transport in scripts/test/lib/core-post-fixtures.sh.",
+      "exit_status": 2
+    },
+    {
+      "path": "scripts/measure/core-post-direct-facts.py",
+      "reason": "The archive wrapper and paired Bash fixture adapter are superseded by the native e2e fixture transport in scripts/test/lib/core-post-fixtures.sh.",
+      "exit_status": 2
     }
   ],
   "retained_data": "Existing JSON, JSONL and TSV corpora are retained; historical counts are not native coverage.",
@@ -259,14 +279,6 @@
   ],
   "preserved": [
     {
-      "path": "scripts/measure/core-post-suite-adapt.py",
-      "reason": "Owned by the post battery migration; preserved verbatim until fixtures are absorbed."
-    },
-    {
-      "path": "scripts/measure/core-post-direct-facts.py",
-      "reason": "Owned by the post battery migration; preserved verbatim until fixtures are absorbed."
-    },
-    {
       "path": "scripts/measure/core-post-pre-fixture.py",
       "reason": "Owned by the post battery migration; preserved verbatim along with its helpers."
     },
@@ -277,18 +289,6 @@
     {
       "path": "scripts/measure/tuple-replay.sh",
       "reason": "The Bash ledger writer is still used by the CLI; it only seeds fixture approvals."
-    },
-    {
-      "path": "scripts/measure/core_hook/observe.py",
-      "reason": "Only reachable through the retired paired collector; preserved historical implementation, not a native release gate."
-    },
-    {
-      "path": "scripts/measure/core_hook/controls.py",
-      "reason": "Only reachable through the retired paired collector; no new Bash/native comparison."
-    },
-    {
-      "path": "scripts/measure/core-post-suite.py",
-      "reason": "The native suite driver still calls this adapter. Preserved with its helpers for the post battery migration; legacy wrapper removal belongs to entry cutover."
     }
   ],
   "survey_rows": [
@@ -631,6 +631,42 @@
     {
       "path": "scripts/measure/scan-failure-census.sh",
       "reason": "Bash subprocess failure injection and its shard reducer have no hook target. Native scan-failure controls own propagation coverage."
+    },
+    {
+      "path": "scripts/measure/core_hook/__init__.py",
+      "reason": "Only the retired paired Bash/native collectors imported this module."
+    },
+    {
+      "path": "scripts/measure/core_hook/compare.py",
+      "reason": "Only the retired paired Bash/native collectors imported this module."
+    },
+    {
+      "path": "scripts/measure/core_hook/controls.py",
+      "reason": "Only the retired paired Bash/native collectors imported this module."
+    },
+    {
+      "path": "scripts/measure/core_hook/corpus.py",
+      "reason": "Only the retired paired Bash/native collectors imported this module."
+    },
+    {
+      "path": "scripts/measure/core_hook/evidence.py",
+      "reason": "Only the retired paired Bash/native collectors imported this module."
+    },
+    {
+      "path": "scripts/measure/core_hook/native.py",
+      "reason": "Only the retired paired Bash/native collectors imported this module."
+    },
+    {
+      "path": "scripts/measure/core_hook/npm_response.py",
+      "reason": "Only the retired paired Bash/native collectors imported this module."
+    },
+    {
+      "path": "scripts/measure/core_hook/observe.py",
+      "reason": "Only the retired paired Bash/native collectors imported this module."
+    },
+    {
+      "path": "scripts/measure/core_hook/slots.py",
+      "reason": "Only the retired paired Bash/native collectors imported this module."
     }
   ],
   "removed_census_wiring": [
@@ -639,5 +675,56 @@
     "census shard combiner and shard-cover exclusion",
     "ShellCheck inputs for the removed scripts",
     "phase-two dependency now names native-scan-failures"
+  ],
+  "retained_helpers": [
+    {
+      "path": "scripts/measure/core-inert-differential.py",
+      "exports": [
+        "Shells",
+        "UNKNOWN"
+      ],
+      "kept_dependencies": [
+        "OTHERS",
+        "STUB_NPM",
+        "STUB_NPX",
+        "STUB_OTHER",
+        "STUB_SUDO",
+        "STUB_SUDO_PRINT",
+        "Shells",
+        "UNKNOWN",
+        "blob",
+        "listing",
+        "parse_log",
+        "sha256"
+      ]
+    },
+    {
+      "path": "scripts/measure/core-pre-targets-probe.py",
+      "exports": [
+        "stub"
+      ],
+      "kept_dependencies": [
+        "stub"
+      ]
+    },
+    {
+      "path": "scripts/measure/core-pre-snapshot-probe.py",
+      "exports": [
+        "seed"
+      ],
+      "kept_dependencies": [
+        "put",
+        "seed"
+      ]
+    },
+    {
+      "path": "scripts/measure/core-zsh-glob-probe.py",
+      "exports": [
+        "words"
+      ],
+      "kept_dependencies": [
+        "words"
+      ]
+    }
   ]
 }
