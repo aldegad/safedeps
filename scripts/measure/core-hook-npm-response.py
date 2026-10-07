@@ -3,45 +3,57 @@
 and judge that link against an expectation written before any run.
 
   collect          one archive's run, or the launches --only names. The
-                   contract, selected by digest, is checked on its own; then a
-                   ps host fact, if one is selected by digest; then the
-                   product inputs; then each launch, which returns only when
-                   its hook returned and its observer ended. Files are written
-                   once each: collect.start.json first; collect.done.json and
-                   then manifest.json when every launch completed;
-                   collect.stopped.json when the collector could not go on
-                   (exit 2); collect.pending.json first when an observer
-                   outlived its launch's wait, and collect.stopped.json once
-                   it ended; collect.refused.json when the contract, the host
-                   fact selection or a product input did not hold (exit 1).
-                   It judges nothing.
+                   contract, selected by digest, is checked on its own; then
+                   this collection's scope (run, host, boot, user, ps) is
+                   read and the selected ps host fact must hold in exactly
+                   that scope; then the product inputs; then each launch,
+                   which returns only when its hook returned and its observer
+                   ended. Files are written once each: collect.start.json
+                   first; collect.done.json and then manifest.json when every
+                   launch completed; collect.stopped.json when the collector
+                   could not go on (exit 2); collect.pending.json first when
+                   an observer outlived its launch's wait, and
+                   collect.stopped.json once it ended; collect.refused.json
+                   when the contract, the scope, the host fact or a product
+                   input did not hold (exit 1). It judges nothing.
   judge            a completed full collection, selected by its manifest's
-                   digest, read against the contract.
-  ps-fact          the ps host fact: how this host's ps answers for a pid
-                   this process has just reaped, beside a live one.
-  check            the contract's reader and adapter controls, with literal
-                   inputs and literal expectations.
-  check-controls   the contract's copy and sensitivity controls and the
-                   driver's J5 cases, from what their runs left and the
-                   status their parent saw. It reads files with the standard
-                   library and calls none of the readers it checks.
+                   digest, read against the contract, with the ps and the
+                   host basis of the scope the manifest seals.
+  ps-fact          the ps host fact of this scope. Its process starts the
+                   holders and owns each one until it is reaped. Files, each
+                   written once: ps-fact.start.json; host.json and
+                   ps-fact.done.json when the measurement completed (exit 0
+                   when the fact holds in its scope, 3 when it does not);
+                   on a failure ps-fact.partial.json, then
+                   ps-fact.pending.json when a holder is still unreaped after
+                   its wait, then, once every holder was reaped with no
+                   signal, ps-fact.stopped.json (exit 2).
+  check            the contract's literal reader and adapter controls.
+  check-controls   one bundle's step and control runs, from what they left
+                   and the status their parent saw. It reads files with the
+                   standard library and calls none of the readers it checks.
+                   A control passes only when its copy is the declared edit
+                   of this tree, it reached what it injects, and what it left
+                   is its exact signature; a run that left no evidence of
+                   reaching it is not demonstrated (not run), never a pass.
 
 Rows are pass, fail or not-run. A row nobody judged stays not-run, and
 not-run is never a pass. A row whose only finding is that something was not
 observed stays not-run with that reason; a row with two observed values that
 differ fails.
 
-Exit 0: every row passed (collect: completed; ps-fact: written). 1: a row
-failed, or an input did not hold. 3: nothing failed and a row was not run
-(collect: stopped after the contract, as asked). 2: this runner could not
-do its work; what it had done is kept, and what it did not reach is named.
+Exit 0: every row passed (collect: completed; ps-fact: the fact holds). 1: a
+row failed, or an input did not hold. 3: nothing failed and a row was not run
+(collect: stopped after the contract, as asked; ps-fact: measured, does not
+hold). 2: this runner could not do its work; what it had done is kept, and
+what it did not reach is named.
 """
 import argparse
+import hashlib
 import importlib.util
 import json
 import os
 from pathlib import Path
-import re
 import sys
 import tempfile
 import time
@@ -53,12 +65,21 @@ from core_hook import evidence, observe
 from core_hook import npm_response as nr
 
 HERE = Path(__file__).resolve().parent
-LAYERS = ('requests', 'records', 'process', 'exit', 'linkage', 'result')
+TREE = HERE.parents[1]
 EXIT = {'pass': 0, 'fail': 1, 'incomplete': 3}
 
 
 def save(path, value):
     return evidence.publish(path, evidence.encoded(value))
+
+
+def save_quietly(path, value):
+    """Publish a record; a record that cannot be written is said on stderr, and nothing else changes."""
+    try:
+        return save(path, value)
+    except Exception as e:
+        print('could not write %s: %s: %s' % (path, type(e).__name__, e), file=sys.stderr, flush=True)
+        return None
 
 
 def read_contract(path, pin):
@@ -75,15 +96,17 @@ def read_contract(path, pin):
 
 
 def read_host_fact(path, pin):
-    """(record, basis, why) of a selected ps host fact; (None, None, why) when none was selected."""
-    if not path:
-        return None, None, 'no ps host fact was selected'
-    raw = Path(path).read_bytes()
+    """(record, None) of the selected ps host fact, or (None, why)."""
+    try:
+        raw = Path(path).read_bytes()
+    except OSError as e:
+        return None, 'the ps host fact could not be read: %s' % e
     if nr.sha(raw) != pin:
-        raise ValueError('the ps host fact is not the selected one: %s' % nr.sha(raw))
-    doc = evidence.strict_load(raw.decode('utf-8'))
-    basis, why = nr.host_basis(doc)
-    return doc, basis, why
+        return None, 'the ps host fact is not the selected one: %s' % nr.sha(raw)
+    try:
+        return evidence.strict_load(raw.decode('utf-8')), None
+    except (ValueError, UnicodeDecodeError) as e:
+        return None, 'the ps host fact is not strict JSON: %s' % e
 
 
 # --- collect --------------------------------------------------------------------------------
@@ -107,10 +130,7 @@ def stopped(out, state, e, extra=None):
            'detail': getattr(e, 'detail', None), 'completed': done, 'current': state['current'],
            'not_started': [n for n in state['planned'] if n not in done and n != state['current']], 't_ns': time.time_ns()}
     doc.update(extra or {})
-    try:
-        save(out / 'collect.stopped.json', doc)
-    except Exception as w:
-        print('collect: could not write collect.stopped.json: %s: %s' % (type(w).__name__, w), file=sys.stderr, flush=True)
+    save_quietly(out / 'collect.stopped.json', doc)
     print('collect: stopped: %s' % doc['reason'], flush=True)
     return 2
 
@@ -119,12 +139,9 @@ def pending(out, state, lp):
     """An observer outlived its launch's wait. Say so, run nothing more, and
     wait for it to end by itself: no signal is sent. If it never ends, this
     process keeps its lifetime and its final status is not reached."""
-    try:
-        save(out / 'collect.pending.json', {'format': 'core-hook-npm-response-collect-pending/1', 'launch': lp.name,
-                                            'reason': str(lp), 'cause': None if lp.cause is None else repr(lp.cause),
-                                            'completed': [c['launch'] for c in state['completed']], 't_ns': time.time_ns()})
-    except Exception as w:
-        print('collect: could not write collect.pending.json: %s: %s' % (type(w).__name__, w), file=sys.stderr, flush=True)
+    save_quietly(out / 'collect.pending.json', {'format': 'core-hook-npm-response-collect-pending/1', 'launch': lp.name,
+                                                'reason': str(lp), 'cause': None if lp.cause is None else repr(lp.cause),
+                                                'completed': [c['launch'] for c in state['completed']], 't_ns': time.time_ns()})
     print('collect: the observer of %s is still running; waiting for it to end' % lp.name, flush=True)
     lp.watcher.join()
     secondary = None
@@ -151,27 +168,38 @@ def collect_steps(a, out, state):
     if unknown:
         return refused(out, 'an --only name is no launch of this contract', unknown)
     state['planned'] = [n for n in names if not a.only or n in a.only]
-    try:
-        host, basis, why = read_host_fact(a.ps_host_fact, a.ps_host_fact_sha256)
-    except ValueError as e:
-        return refused(out, 'the ps host fact is not the selected one', [str(e)])
-    save(out / 'collect.start.json', {
-        'format': 'core-hook-npm-response-collect-start/1', 'planned': state['planned'], 'scope': 'all' if not a.only else 'only',
-        'contract': {'path': str(Path(a.contract).resolve()), 'selected': a.contract_sha256},
-        'ps_host_fact': {'path': a.ps_host_fact, 'selected': a.ps_host_fact_sha256, 'basis': basis, 'why': why},
-        'builder': {'root': a.build_root, 'selected': a.build_pin}, 'python': sys.executable, 'collector_pid': os.getpid(),
-        'nice': os.nice(0), 'runner': nr.sha(Path(__file__).resolve().read_bytes()),
-        'module': nr.sha((HERE / 'core_hook' / 'npm_response.py').read_bytes()), 'collector_sources': evidence.sources(),
-        't_ns': time.time_ns()})
+    start = {'format': 'core-hook-npm-response-collect-start/2', 'planned': state['planned'], 'scope': 'all' if not a.only else 'only',
+             'contract': {'path': str(Path(a.contract).resolve()), 'selected': a.contract_sha256}, 'run_id': a.run_id,
+             'builder': {'root': a.build_root, 'selected': a.build_pin}, 'python': sys.executable, 'collector_pid': os.getpid(),
+             'nice': os.nice(0), 'runner': nr.sha(Path(__file__).resolve().read_bytes()),
+             'module': nr.sha((HERE / 'core_hook' / 'npm_response.py').read_bytes()), 'collector_sources': evidence.sources(),
+             't_ns': time.time_ns()}
     if a.stop_after == 'contract':
-        save(out / 'collect.contract-only.json', {'why': 'stopped after the contract, as asked; nothing was launched'})
+        save(out / 'collect.start.json', start)
+        save(out / 'collect.contract-only.json', {'why': 'stopped after the contract, as asked; nothing was launched and no ps was asked'})
         print('collect: stopped after the contract, as asked', flush=True)
         return 3
-    if not (a.build_root and a.build_pin):
-        return refused(out, 'the launches need --build-root and --build-pin', [])
-    tree = HERE.parents[1]
+    need = [flag for flag, value in (('--run-id', a.run_id), ('--ps-host-fact', a.ps_host_fact), ('--ps-host-fact-sha256', a.ps_host_fact_sha256),
+                                     ('--build-root', a.build_root), ('--build-pin', a.build_pin)) if not value]
+    if need:
+        return refused(out, 'the launches need ' + ', '.join(need), [])
+    tool = nr.ps_tool()
+    scope, scope_query, why = nr.collection_scope(tool, a.run_id)
+    start['ps'] = {'tool': tool, 'scope': scope, 'scope_query': scope_query, 'why': why}
+    if scope is None:
+        save(out / 'collect.start.json', start)
+        return refused(out, 'the scope of this collection was not read, so no host fact can be compared with it', [why])
+    host, why = read_host_fact(a.ps_host_fact, a.ps_host_fact_sha256)
+    basis = None
+    if host is not None:
+        basis, why = nr.host_basis(host, scope)
+    start['ps'].update(host_fact={'path': a.ps_host_fact, 'selected': a.ps_host_fact_sha256}, basis=basis, basis_why=why)
+    save(out / 'collect.start.json', start)
+    if basis is None:
+        return refused(out, 'the selected ps host fact does not hold for this collection, so a missing row could mean nothing', [why])
+    basis = dict(basis, host_fact_sha256=a.ps_host_fact_sha256)
     errors = []
-    bash_files = {rel: nr.sha((tree / rel).read_bytes()) for rel in rec['sources']['bash']['files']}
+    bash_files = {rel: nr.sha((TREE / rel).read_bytes()) for rel in rec['sources']['bash']['files']}
     for rel, value in bash_files.items():
         if value != rec['sources']['bash']['files'][rel]:
             errors.append({'field': 'bash ' + rel, 'actual': value, 'expected': rec['sources']['bash']['files'][rel]})
@@ -199,7 +227,7 @@ def collect_steps(a, out, state):
             errors.append({'field': 'native source commit', 'actual': native.CATALOG['source'], 'expected': rec['sources']['native']['commit']})
     if errors:
         return refused(out, 'a product input is not the one the contract names, so nothing was launched', errors)
-    hooks = {'native': impl.hooks['pre'], 'bash': observe.bash_impl('bash', str(tree)).hooks['pre']}
+    hooks = {'native': impl.hooks['pre'], 'bash': observe.bash_impl('bash', str(TREE)).hooks['pre']}
     ctx = SimpleNamespace(sysdirs=observe.system_path(), timeout=60,
                           hook_files={'native': dict(native_files, binary=nr.sha(receipt['binary']), builder=a.build_pin), 'bash': bash_files})
     scenarios = {'%s-%s' % (i, s['name']): (i, s) for i in nr.IMPLS for s in rec['scenarios']}
@@ -207,7 +235,7 @@ def collect_steps(a, out, state):
     for name in state['planned']:
         state['current'] = name
         impl_name, scenario = scenarios[name]
-        summary = nr.launch(ctx, rec, impl_name, hooks[impl_name], scenario, base, basis)
+        summary = nr.launch(ctx, rec, impl_name, hooks[impl_name], scenario, base, tool, scope, basis)
         state['completed'].append(summary)
         state['current'] = None
         print('launched %s: %s' % (name, summary['status']), flush=True)
@@ -217,7 +245,7 @@ def collect_steps(a, out, state):
     listing = nr.tree_listing(str(out))
     manifest = {'format': nr.MANIFEST, 'complete': True, 'scope': 'all' if not a.only else 'only', 'planned': state['planned'],
                 'contract_sha256': a.contract_sha256, 'builder_sha256': a.build_pin, 'ps_host_fact_sha256': a.ps_host_fact_sha256,
-                'listing': listing}
+                'run_id': a.run_id, 'ps_scope': scope, 'listing': listing}
     pin = save(out / 'manifest.json', manifest)
     print('completed manifest: %s %s' % (out / 'manifest.json', pin), flush=True)
     return 0
@@ -237,7 +265,7 @@ class Rows:
 
     def judge(self, layer, case, side, errors, **more):
         row = self.rows[(layer, case, side)]
-        if row['status'] != 'not-run':
+        if row['status'] != 'not-run' or row['reason'] != 'not reached':
             raise ValueError('row judged twice: %s/%s/%s' % (layer, case, side))
         reason = 'checked'
         if errors:
@@ -250,9 +278,16 @@ class Rows:
     def leave(self, layer, case, side, reason, **more):
         """The row stays not-run, with the reason and what was seen."""
         row = self.rows[(layer, case, side)]
-        if row['status'] != 'not-run':
+        if row['status'] != 'not-run' or row['reason'] != 'not reached':
             raise ValueError('row judged twice: %s/%s/%s' % (layer, case, side))
         row.update(more, reason=reason)
+
+    def record(self, layer, case, side, decision, **more):
+        """A decision the module made: recorded as it is."""
+        if decision['status'] == 'not-run':
+            self.leave(layer, case, side, decision['reason'], **dict(more, decision=decision))
+        else:
+            self.judge(layer, case, side, decision['errors'], **dict(more, decision=decision))
 
     def status(self, layer, case, side=None):
         return self.rows[(layer, case, side)]['status']
@@ -277,60 +312,29 @@ def finish_rows(rows, out, doc, why=''):
 
 # --- judge ------------------------------------------------------------------------------------
 
-def layer_of(code):
-    base = code[len('follow-'):] if code.startswith('follow-') else code
-    head = base.split(':')[0]
-    core = head[len('unobserved-'):] if head.startswith('unobserved-') else head
-    if core.startswith('request') or core == 'unexpected-call':
-        return 'requests'
-    if core in ('record', 'record-missing', 'record-duplicate', 'exit-planned'):
-        return 'records'
-    if core.startswith('process') or core == 'parents-differ':
-        return 'process'
-    if core in ('exit', 'release', 'observer-exit-unsupported'):
-        return 'exit'
-    return 'linkage'
-
-
-def layer_row(rows, layer, name, impl, codes, **more):
-    """Defects fail the row; only unobserved codes leave it not-run."""
-    defects = [c for c in codes if not nr.unseen(c)]
-    missing = [c for c in codes if nr.unseen(c)]
-    if defects:
-        rows.judge(layer, name, impl, [{'field': 'code', 'actual': c, 'expected': 'none'} for c in defects], unobserved=missing, **more)
-    elif missing:
-        rows.leave(layer, name, impl, 'unobserved: ' + ', '.join(missing), **more)
-    else:
-        rows.judge(layer, name, impl, [], **more)
+def scenario_layers(s):
+    return list(nr.LAYERS) + (['intervention'] if s.get('intervention') else []) + (['orders'] if s.get('claim_order') else [])
 
 
 def launch_rows(rows, rec, scenario, impl, view, facts):
-    name, expect = scenario['name'], scenario['expect']
-    by_layer = {layer: [c for c in facts['codes'] if layer_of(c) == layer] for layer in LAYERS}
+    name = scenario['name']
+    by_layer = {layer: [c for c in facts['codes'] if nr.code_layer(c) == layer] for layer in nr.LAYERS}
     for layer in ('requests', 'records', 'process', 'exit'):
-        layer_row(rows, layer, name, impl, by_layer[layer])
-    swapped = not scenario.get('swap_slots') or sum(1 for r in view['journal'] if r.get('kind') == 'swap') == 6
+        defects = [c for c in by_layer[layer] if not nr.unseen(c)]
+        missing = [c for c in by_layer[layer] if nr.unseen(c)]
+        if defects:
+            rows.judge(layer, name, impl, [{'field': 'code', 'actual': c, 'expected': 'none'} for c in defects], unobserved=missing)
+        elif missing:
+            rows.leave(layer, name, impl, 'unobserved: ' + ', '.join(missing))
+        else:
+            rows.judge(layer, name, impl, [])
     seen = dict(verdict=facts['verdict'], codes=facts['codes'], others=facts['others'], roles=facts['roles'],
-                initial_scratch=facts['initial_scratch'],
+                initial_scratch=facts['initial_scratch'], intervention=facts['intervention'],
                 claim='which child held which response file and bytes when it was let go; not which bytes the hook read')
-    defects = [c for c in by_layer['linkage'] if not nr.unseen(c)]
-    missing = [c for c in facts['codes'] if nr.unseen(c)]
-    others = [{k: o[k] for k in ('attempt', 'roles', 'status', 'codes')} for o in facts['others']]
-    errors = []
-    if defects != sorted(expect['codes']):
-        errors.append({'field': 'linkage defect codes', 'actual': defects, 'expected': sorted(expect['codes'])})
-    if others != expect['others']:
-        errors.append({'field': 'groups outside the initial one', 'actual': others, 'expected': expect['others']})
-    if not swapped:
-        rows.leave('linkage', name, impl, 'unobserved: the slot swap was not made', **seen)
-    elif errors:
-        rows.judge('linkage', name, impl, errors, **seen)
-    elif missing:
-        rows.leave('linkage', name, impl, 'unobserved: %s' % ', '.join(missing), **seen)
-    else:
-        if facts['verdict'] != expect['verdict']:
-            errors.append({'field': 'verdict', 'actual': facts['verdict'], 'expected': expect['verdict']})
-        rows.judge('linkage', name, impl, errors, **seen)
+    decided = nr.scenario_rows(scenario, facts)
+    rows.record('linkage', name, impl, decided['linkage'], **seen)
+    if decided['intervention'] is not None:
+        rows.record('intervention', name, impl, decided['intervention'])
     if scenario.get('claim_order'):
         status, detail = nr.order_status(scenario, view, facts)
         if status == 'unobserved':
@@ -338,10 +342,10 @@ def launch_rows(rows, rec, scenario, impl, view, facts):
         else:
             rows.judge('orders', name, impl, [] if status == 'pass' else [{'field': 'orders', 'actual': detail, 'expected': 'the imposed orders'}],
                        detail=detail, claim='record numbers as claimed; exits as the judge read them; each release after the exit before it')
-    result = expect['result']
+    result = scenario['expect']['result']
     hook = dict(facts['hook'], pending_raw=None if facts['hook']['pending_raw'] is None else facts['hook']['pending_raw'].decode('utf-8', 'replace'))
-    if not swapped:
-        rows.leave('result', name, impl, 'unobserved: the slot swap was not made', hook=hook)
+    if not decided['result_premise']['held']:
+        rows.leave('result', name, impl, 'the result depends on a premise that did not hold: ' + decided['result_premise']['why'], hook=hook)
     elif isinstance(result, str):
         rows.judge('result', name, impl, nr.result_errors(rec, result, view, facts), hook=hook)
     else:
@@ -351,12 +355,12 @@ def launch_rows(rows, rec, scenario, impl, view, facts):
 
 
 def relation_rows(rows, rec, impl, observed):
-    def layers_of(name):
+    def keys_of(name):
         scenario = next(s for s in rec['scenarios'] if s['name'] == name)
-        return [(layer, name, impl) for layer in list(LAYERS) + (['orders'] if scenario.get('claim_order') else [])]
+        return [(layer, name, impl) for layer in scenario_layers(scenario)]
 
     def summary(case, names, extra=()):
-        keys = [k for n in names for k in layers_of(n)]
+        keys = [k for n in names for k in keys_of(n)]
         states = [rows.rows[k]['status'] for k in keys]
         if 'not-run' in states and 'fail' not in states:
             return
@@ -382,6 +386,7 @@ def judge(a):
     out.mkdir(parents=True, exist_ok=False)
     rows = Rows()
     rows.owe('collection', 'manifest')
+    rows.owe('collection', 'host-fact')
     rows.owe('contract', 'record')
     doc = {'format': nr.RESULTS, 'inputs': {'manifest': {'path': str(raw / 'manifest.json'), 'selected': a.manifest_sha256},
                                            'contract': {'path': str(Path(a.contract).resolve()), 'selected': a.contract_sha256},
@@ -400,10 +405,8 @@ def judge(a):
         doc['not_observed'] = rec.get('not_observed')
         for impl in nr.IMPLS:
             for s in rec['scenarios']:
-                for layer in LAYERS:
+                for layer in scenario_layers(s):
                     rows.owe(layer, s['name'], impl)
-                if s.get('claim_order'):
-                    rows.owe('orders', s['name'], impl)
             for case in ('permutation-positive', 'actual-swap-negative', 'boundary'):
                 rows.owe('relation', case, impl)
             for c in rec['declared']['controls']:
@@ -431,17 +434,30 @@ def judge(a):
                    claim='the selected manifest lists exactly these bytes, after a completed collection; not that the collection is right')
         if errors:
             return finish_rows(rows, out, doc, 'the collection is not a completed, selected one')
-        host, basis, why = read_host_fact(a.ps_host_fact, a.ps_host_fact_sha256)
-        doc['ps_host_basis'] = {'basis': basis, 'why': why}
-        views = {}
+        # The ps and the host basis are the sealed scope's, never this machine's.
+        scope = manifest.get('ps_scope')
+        host, why = read_host_fact(a.ps_host_fact, a.ps_host_fact_sha256)
+        basis = None
+        if host is not None:
+            basis, why = nr.host_basis(host, scope)
+        doc['ps_host_basis'] = {'absent_rc': (basis or {}).get('absent_rc'), 'why': why}
+        rows.judge('collection', 'host-fact', None, [] if basis else [{'field': 'the host fact in the sealed scope', 'actual': why, 'expected': 'holds'}],
+                   claim='the selected host fact holds in the scope the manifest seals')
+        if basis is None:
+            return finish_rows(rows, out, doc, 'the host fact does not hold in the sealed scope')
+        basis = dict(basis, host_fact_sha256=a.ps_host_fact_sha256)
+        tool = scope['ps']
+        views, judged = {}, {}
         for impl in nr.IMPLS:
             for s in rec['scenarios']:
                 d = raw / 'launches' / ('%s-%s' % (impl, s['name']))
                 view = nr.load_view(d)
-                facts = nr.judge_launch(rec, s, view, basis)
+                facts = nr.judge_launch(rec, s, view, tool, basis)
                 views[(impl, s['name'])] = view
+                judged[(impl, s['name'])] = facts
                 doc['observed_orders'][impl][s['name']] = {'claim_order': facts['claim_order'], 'completion': facts['completion'],
-                                                           'verdict': facts['verdict'], 'codes': facts['codes']}
+                                                           'verdict': facts['verdict'], 'codes': facts['codes'],
+                                                           'intervention': facts['intervention']}
                 facts_doc = dict(facts, hook=dict(facts['hook'], pending_raw=None if facts['hook']['pending_raw'] is None
                                                   else facts['hook']['pending_raw'].decode('utf-8', 'replace')))
                 save(out / 'facts' / ('%s-%s.json' % (impl, s['name'])), facts_doc)
@@ -449,19 +465,24 @@ def judge(a):
             relation_rows(rows, rec, impl, doc['observed_orders'][impl])
             for c in rec['declared']['controls']:
                 s = next(x for x in rec['scenarios'] if x['name'] == c['from'])
-                base_codes = doc['observed_orders'][impl][c['from']]['codes']
-                base_defects = sorted(code for code in base_codes if layer_of(code) == 'linkage' and not nr.unseen(code))
-                if 'verdict' in c['expect'] and (any(nr.unseen(code) for code in base_codes) or base_defects != sorted(s['expect']['codes'])):
+                base = judged[(impl, c['from'])]
+                base_defects = sorted(code for code in base['codes'] if nr.code_layer(code) == 'linkage' and not nr.unseen(code))
+                expected = sorted(s['expect']['codes'] + s['expect'].get('intervention_codes', []))
+                if 'verdict' in c['expect'] and (any(nr.unseen(code) for code in base['codes']) or base_defects != expected):
                     # An edit's verdict means something only beside a base launch that is as its scenario expects.
-                    rows.leave('declared', c['name'], impl, 'the base launch %s is not as its scenario expects: %s' % (c['from'], ', '.join(base_codes)),
+                    rows.leave('declared', c['name'], impl, 'the base launch %s is not as its scenario expects: %s' % (c['from'], ', '.join(base['codes'])),
+                               synthetic=True)
+                    continue
+                if 'result' in c['expect'] and s.get('intervention') and base['intervention']['state'] != 'made':
+                    rows.leave('declared', c['name'], impl, 'the base launch %s did not make its intervention: %s' % (c['from'], base['intervention']['why']),
                                synthetic=True)
                     continue
                 try:
-                    mutated, effects = nr.mutate(rec, s, views[(impl, c['from'])], basis, c)
+                    mutated, effects = nr.mutate(rec, s, views[(impl, c['from'])], tool, basis, c)
                 except (KeyError, IndexError, ValueError, nr.HarnessError) as e:
                     rows.leave('declared', c['name'], impl, 'the edit could not be built from %s: %s: %s' % (c['from'], type(e).__name__, e), synthetic=True)
                     continue
-                facts = nr.judge_launch(rec, s, mutated, basis, effects)
+                facts = nr.judge_launch(rec, s, mutated, tool, basis, effects)
                 exp, errors = c['expect'], []
                 if 'verdict' in exp:
                     if facts['verdict'] != exp['verdict']:
@@ -488,21 +509,55 @@ def judge(a):
 
 def ps_fact(a):
     out = Path(a.out).resolve()
-    if out.exists():
-        print('ps-fact: %s exists' % out, file=sys.stderr)
-        return 2
+    out.mkdir(parents=True, exist_ok=False)
+    tool = nr.ps_tool()
+    scope, query, why = nr.collection_scope(tool, a.run_id)
+    save(out / 'ps-fact.start.json', {'format': 'core-hook-npm-response-ps-fact-start/1', 'run_id': a.run_id, 'tool': tool, 'scope': scope,
+                                      'scope_query': query, 'why': why, 'pid': os.getpid(), 'python': sys.executable,
+                                      'holder': nr.holder_fixture(), 'holder_wait_seconds': nr.HOLDER_WAIT, 't_ns': time.time_ns()})
+    if scope is None:
+        save(out / 'ps-fact.done.json', {'format': 'core-hook-npm-response-ps-fact-done/1', 'host_sha256': None, 'basis': None,
+                                         'why': why, 't_ns': time.time_ns()})
+        print('ps-fact: the scope was not read: %s' % why, flush=True)
+        return 3
+    parent = nr.HolderParent(out)
     try:
-        doc = nr.measure_ps_host()
-    except Exception:
-        traceback.print_exc()
-        return 2
-    pin = save(out, doc)
-    basis, why = nr.host_basis(doc)
-    print('ps host fact: %s %s; basis %s' % (out, pin, basis if basis else 'not established: ' + why), flush=True)
-    return 0
+        doc = nr.measure_ps_host(parent, tool, scope)
+    except Exception as e:
+        return ps_fact_stopped(out, parent, e)
+    pin = save(out / 'host.json', doc)
+    basis, why = nr.host_basis(doc, scope)
+    save(out / 'ps-fact.done.json', {'format': 'core-hook-npm-response-ps-fact-done/1', 'host_sha256': pin,
+                                     'basis': None if basis is None else {'absent_rc': basis['absent_rc']}, 'why': why, 't_ns': time.time_ns()})
+    print('ps host fact: %s %s; %s' % (out / 'host.json', pin, 'holds, absent rc %d' % basis['absent_rc'] if basis else 'does not hold: ' + why), flush=True)
+    return 0 if basis else 3
 
 
-# --- check: the contract's reader and adapter controls, literal in and literal out -------------------
+def ps_fact_stopped(out, parent, e):
+    """The measurement failed. Publish the original failure first, then clean
+    up within the holders' wait and keep that cleanup's errors apart; a holder
+    still unreaped makes a pending record, and this process then waits for it
+    with no bound and no signal. The stopped record comes after every holder
+    was reaped; if one never ends, it never comes."""
+    original = {'type': type(e).__name__, 'error': str(e), 'traceback': traceback.format_exc()}
+    pids = {n: p.pid for n, p in parent.handles.items()}
+    save_quietly(out / 'ps-fact.partial.json', {'format': 'core-hook-npm-response-ps-fact-partial/1', 'original': original,
+                                                'started': pids, 'reaped': dict(parent.reaped), 't_ns': time.time_ns()})
+    cleanup = parent.cleanup(nr.HOLDER_WAIT)
+    unreaped, reap_errors = parent.unreaped(), []
+    if unreaped:
+        save_quietly(out / 'ps-fact.pending.json', {'format': 'core-hook-npm-response-ps-fact-pending/1', 'unreaped': unreaped,
+                                                    'pids': {n: pids[n] for n in unreaped}, 'cleanup_errors': cleanup, 't_ns': time.time_ns()})
+        print('ps-fact: waiting with no signal for %s' % ', '.join(unreaped), flush=True)
+        reap_errors = parent.reap()
+    save_quietly(out / 'ps-fact.stopped.json', {'format': 'core-hook-npm-response-ps-fact-stopped/1', 'original': original,
+                                                'cleanup_errors': cleanup, 'pending': bool(unreaped), 'reap_errors': reap_errors,
+                                                'reaped': dict(parent.reaped), 'unreaped': parent.unreaped(), 't_ns': time.time_ns()})
+    print('ps-fact: stopped: %s: %s' % (original['type'], original['error']), flush=True)
+    return 2
+
+
+# --- check: the contract's literal reader and adapter controls -------------------------------------
 
 class ControlOps(nr.FileOps):
     """File operations that answer as a control says: a dev and inode for
@@ -539,9 +594,9 @@ def reader_case(case, rec):
     """What the reader under test answers for one literal case."""
     kind = case['reader']
     if kind == 'ps':
-        read = nr.read_ps(case['record'], case.get('basis'))
-        exit_ = nr.exit_reading(read, case['pid'], case.get('start_lstart'))
-        return {'read': read['state'], 'exit': exit_['value']['exit'] if exit_['state'] == 'observed' else 'unavailable'}
+        answer = nr.read_ps(case['record'], case['tool'], case.get('basis'))
+        exit_ = nr.target_exit(answer, case['pid'], case.get('start'))
+        return {'read': answer['state'], 'exit': exit_['value']['exit'] if exit_['state'] == 'observed' else 'unavailable'}
     if kind == 'slot':
         blobs = {nr.sha(b.encode('utf-8')): b.encode('utf-8') for b in case.get('blobs', [])}
         seen = nr.slot_reading(case['fact'], blobs)
@@ -549,6 +604,14 @@ def reader_case(case, rec):
     if kind == 'pending':
         raw = None if case['raw'] is None else case['raw'].encode('utf-8')
         return {'pending': nr.read_pending(raw, rec['pending_shape'], case['fields'])['state']}
+    if kind == 'host':
+        basis, _ = nr.host_basis(case['doc'], case['scope'])
+        return {'basis': 'established' if basis else 'none', 'absent_rc': basis['absent_rc'] if basis else None}
+    if kind == 'n3':
+        scenario = next(s for s in rec['scenarios'] if s['name'] == case['scenario'])
+        out = nr.scenario_rows(scenario, case['facts'])
+        return {'linkage': out['linkage']['status'], 'intervention': out['intervention']['status'] if out['intervention'] else None,
+                'result_premise': out['result_premise']['held']}
     raise nr.HarnessError('unknown reader %r' % kind)
 
 
@@ -586,7 +649,7 @@ def check(a):
     out = Path(a.out).resolve()
     out.mkdir(parents=True, exist_ok=False)
     rows = Rows()
-    doc = {'format': 'core-hook-npm-response-check/1', 'claim': "the readers and the slot adapter against literal cases; the author's own check, not an independent verification"}
+    doc = {'format': 'core-hook-npm-response-check/2', 'claim': "the readers and the slot adapter against literal cases; the author's own check, not an independent verification"}
     try:
         rec, errors = read_contract(a.contract, a.contract_sha256)
         rows.owe('contract', 'record')
@@ -615,15 +678,22 @@ def check(a):
     return finish_rows(rows, out, doc)
 
 
-# --- check-controls: what the control runs left, read with the standard library -------------------
+# --- check-controls: what the bundle's runs left, read with the standard library ---------------------
 #
-# Nothing here calls read_ps, slot_reading, read_pending, judge_launch or
-# bind_scratch. A child's role is read from its own argv's first word; a ps
-# outcome, a record's kind and a file's presence are read as they are.
+# Nothing here calls read_ps, target_exit, host_basis, slot_reading,
+# read_pending, scenario_rows, judge_launch or bind_scratch. Expectations
+# come from the contract and the control spec as literals. A child's role is
+# read from its own argv's first word; a ps line is split on blanks; a
+# record's kind and a file's presence are read as they are.
 
 def jload(path):
     with open(path, 'rb') as f:
         return json.loads(f.read().decode('utf-8', 'surrogateescape'))
+
+
+def jmaybe(path):
+    p = Path(path)
+    return jload(p) if p.is_file() else None
 
 
 def step_rc(runs, step):
@@ -631,8 +701,8 @@ def step_rc(runs, step):
     return int(p.read_text().strip()) if p.is_file() else None
 
 
-def journal_of(launch_dir):
-    d = Path(launch_dir) / 'observer'
+def records_in(directory):
+    d = Path(directory)
     return [jload(p) for p in sorted(d.iterdir()) if p.name.endswith('.json')] if d.is_dir() else []
 
 
@@ -644,71 +714,239 @@ def role_of(launch_dir, nonce):
     return argv[0] if argv else None
 
 
-def j1_checks(out):
-    d = Path(out) / 'launches' / 'native-P1-permuted'
-    js = journal_of(d)
+def applied(runs, step, edits):
+    """True when the copy a step ran is this tree with exactly the declared
+    edits, by the driver's before and after digests recomputed here; False
+    when they differ; None when the driver left no record of them."""
+    notes = jmaybe(Path(runs) / step / 'edits.json')
+    if notes is None:
+        return None
+    files, want = {}, []
+    for e in edits:
+        if e['file'] not in files:
+            files[e['file']] = (TREE / e['file']).read_bytes()
+        before = files[e['file']]
+        if before.count(e['old'].encode('utf-8')) != 1:
+            return False
+        files[e['file']] = before.replace(e['old'].encode('utf-8'), e['new'].encode('utf-8'))
+        want.append({'file': e['file'], 'before_sha256': hashlib.sha256(before).hexdigest(),
+                     'after_sha256': hashlib.sha256(files[e['file']]).hexdigest()})
+    return notes == want
+
+
+def ps_rows(query):
+    """{pid: stat} of a ps query's stdout split on blanks, or None when ps did not exit cleanly."""
+    if not isinstance(query, dict) or (query.get('outcome') or {}).get('kind') != 'exit' or query.get('stderr') != '':
+        return None
+    rows = {}
+    for line in (query.get('stdout') or '').splitlines():
+        parts = line.split()
+        if not parts:
+            continue
+        if not parts[0].isascii() or not parts[0].isdigit() or len(parts) < 2 or int(parts[0]) in rows:
+            return None
+        rows[int(parts[0])] = parts[1]
+    return rows
+
+
+def facts_check_run(runs, entry, rec, run_id):
+    res = jmaybe(Path(runs) / entry['step'] / 'out' / 'results.json') or {}
+    acc = res.get('acceptance') or {}
+    return {'rc': step_rc(runs, entry['step']), 'results': bool(res), 'stopped': res.get('stopped'),
+            'acceptance': acc.get('status'), 'failed': acc.get('failed')}
+
+
+def facts_check_sensitivity(runs, entry, rec, run_id):
+    step = entry['step']
+    res = jmaybe(Path(runs) / step / 'out' / 'results.json') or {}
+    declared = entry['expect']['signature'].get('failing', {})
+    failing = {}
+    for r in res.get('rows', []):
+        if r.get('status') == 'fail':
+            got = r.get('got') or {}
+            keys = declared.get(r.get('case'), got)
+            failing[r.get('case')] = {k: got.get(k) for k in keys}
+    return {'applied': applied(runs, step, entry['edits']), 'rc': step_rc(runs, step), 'results': bool(res),
+            'stopped': res.get('stopped'), 'failing': failing}
+
+
+def facts_host(runs, entry, rec, run_id):
+    """The ps host fact read with plain JSON and string reading against the contract's sequence."""
+    out = Path(runs) / entry['step'] / 'out'
+    doc, done = jmaybe(out / 'host.json'), jmaybe(out / 'ps-fact.done.json')
+    facts = {'rc': step_rc(runs, entry['step']), 'host': doc is not None, 'done': done is not None,
+             'pending': (out / 'ps-fact.pending.json').exists(), 'stopped': (out / 'ps-fact.stopped.json').exists(),
+             'run-id': None, 'sequence': None, 'live': None, 'reaped': None, 'rows': None, 'order': None, 'absent-rc-same': None}
+    if not isinstance(doc, dict):
+        return facts
+    want = rec['ps']['host_fact']
+    scope = doc.get('scope') or {}
+    facts['run-id'] = scope.get('run_id') == run_id
+    events = doc.get('events') or []
+    facts['sequence'] = [[e.get('kind'), e.get('name') if e.get('kind') == 'ps' else e.get('holder'), e.get('when')] for e in events] == \
+        [[k, n, w] for k, n, w in want['sequence']] and [e.get('seq') for e in events] == list(range(len(events)))
+    if not facts['sequence']:
+        return facts
+    facts['live'] = all('poll' in events[i] and events[i]['poll'] is None for i in (1, 3, 8, 10))
+    facts['reaped'] = [events[i].get('rc') if events[i].get('returned') is True else None for i in (5, 12)] == [want['holder']['exit']] * 2
+    sentinel, first, second = doc.get('sentinel'), events[0].get('pid'), events[6].get('pid')
+    ps_path = (scope.get('ps') or {}).get('path')
+    queries = {name: events[i].get('query') or {} for i, name in ((2, 'alive'), (7, 'gone'), (9, 'mixed'))}
+    rows = {name: ps_rows(q) if (q.get('argv') or [None])[0] == ps_path else None for name, q in queries.items()}
+    facts['rows'] = (rows['alive'] is not None and set(rows['alive']) == {sentinel, first} and not rows['alive'][first].startswith('Z')
+                     and rows['gone'] is not None and set(rows['gone']) == {sentinel}
+                     and rows['mixed'] is not None and set(rows['mixed']) == {sentinel, second} and not rows['mixed'][second].startswith('Z'))
+    t = lambda i: events[i].get('t_ns', 0)
+    facts['order'] = (t(1) <= queries['alive'].get('t0_ns', -1) and queries['alive'].get('t1_ns', 1 << 62) <= t(3)
+                      and t(5) < queries['gone'].get('t0_ns', -1)
+                      and t(8) <= queries['mixed'].get('t0_ns', -1) and queries['mixed'].get('t1_ns', 1 << 62) <= t(10))
+    facts['absent-rc-same'] = (queries['gone'].get('outcome') or {}).get('rc') == (queries['mixed'].get('outcome') or {}).get('rc') \
+        and type((queries['gone'].get('outcome') or {}).get('rc')) is int
+    return facts
+
+
+def launch_parts(out, name):
+    d = Path(out) / 'launches' / name
+    js = records_in(d / 'observer')
+    terminal = js[-1] if js and js[-1].get('kind') == 'terminal' else {}
+    return d, js, terminal
+
+
+def facts_j1(runs, entry, rec, run_id):
+    step = entry['step']
+    out = Path(runs) / step / 'out'
+    d, js, terminal = launch_parts(out, 'native-P1-permuted')
     polls = [r for r in js if r.get('kind') == 'exit-poll']
     exited = [r for r in js if r.get('kind') == 'exited']
     giveups = [r for r in js if r.get('kind') == 'give-up']
     releases = [r for r in js if r.get('kind') == 'gate' and r.get('what') == 'release']
-    zrows = any(re.search(r'^\s*\d+\s+Z\s', (p.get('ps') or {}).get('stdout', ''), re.M) for p in polls)
-    checks = {
-        'done': (Path(out) / 'collect.done.json').is_file() and (Path(out) / 'manifest.json').is_file(),
-        'injected': bool(polls) and all((p.get('ps') or {}).get('outcome') == {'kind': 'signal', 'signal': 9} for p in polls) and zrows,
-        'no-exit-from-signal': not exited,
-        'gave-up': len(giveups) == 1,
-    }
+
+    def injected(p):
+        q = p.get('ps') or {}
+        lines = [line.split() for line in (q.get('stdout') or '').splitlines() if line.strip()]
+        return q.get('outcome') == {'kind': 'signal', 'signal': 9} and bool(lines) and \
+            all(parts[1] == 'Z' for parts in lines if parts and parts[0] != str(q.get('sentinel')))
+    signal_polls = {p.get('seq') for p in polls if injected(p)}
     ok = False
     if len(giveups) == 1:
-        t = giveups[0]['t_ns']
-        before = [r for r in releases if r['t_ns'] < t]
-        ok = len(before) == 1 and role_of(d, before[0].get('child')) == 'root' and all(r['t_ns'] >= t for r in releases if r not in before)
-    checks['release-after-give-up'] = ok
-    return checks
+        t = giveups[0].get('t_ns', 0)
+        before = [r for r in releases if r.get('t_ns', 0) < t]
+        ok = len(before) == 1 and role_of(d, before[0].get('child')) == 'root' and all(r.get('t_ns', 0) >= t for r in releases if r not in before)
+    return {'applied': applied(runs, step, entry['edits']), 'rc': step_rc(runs, step), 'launch': d.is_dir(),
+            'injected': bool(polls) and len(signal_polls) == len(polls), 'terminal': terminal.get('state'),
+            'ordered-release': any(r.get('why') == 'the imposed completion order' and role_of(d, r.get('child')) == 'root' for r in releases),
+            'done': (out / 'collect.done.json').is_file() and (out / 'manifest.json').is_file(),
+            'exited': len(exited), 'exit-from-signal': any(e.get('poll') in signal_polls for e in exited),
+            'give-ups': [g.get('why') for g in giveups],
+            'gave-up-on-root-exit': len(giveups) == 1 and 'exit of the root child' in str(giveups[0].get('why')),
+            'release-after-give-up': ok}
 
 
-def j4a_checks(out):
-    out = Path(out)
-    d = out / 'launches' / 'native-P0-natural'
-    js = journal_of(d)
-    terminal = js[-1] if js and js[-1].get('kind') == 'terminal' else {}
-    stopped_doc = jload(out / 'collect.stopped.json') if (out / 'collect.stopped.json').is_file() else {}
+def facts_j4(runs, entry, rec, run_id):
+    step = entry['step']
+    out = Path(runs) / step / 'out'
+    d, js, terminal = launch_parts(out, 'native-P0-natural')
+    p1, _, p1_terminal = launch_parts(out, 'native-P1-permuted')
+    stop, pend, end = jmaybe(out / 'collect.stopped.json') or {}, jmaybe(out / 'collect.pending.json') or {}, jmaybe(d / 'launch-end.json')
     exc = terminal.get('exception') or {}
-    return {
-        'stopped': 'J4 control' in json.dumps(stopped_doc.get('detail') or {}) or 'J4 control' in str(stopped_doc.get('reason')),
-        'terminal-exception': terminal.get('state') == 'exception' and 'J4 control' in str(exc.get('error'))
-                              and any('J4 control' in str(c.get('error')) for c in terminal.get('cleanup_errors') or []),
-        'partial-before': any(r.get('kind') in ('start', 'read') and r.get('seq', 0) < terminal.get('seq', -1) for r in js),
-        'not-started': not (out / 'launches' / 'native-P1-permuted').exists() and stopped_doc.get('not_started') == ['native-P1-permuted'],
-        'no-manifest': not (out / 'manifest.json').exists() and not (out / 'collect.done.json').exists(),
-    }
+    end_observer = (end or {}).get('observer') or {}
+    return {'applied': applied(runs, step, entry['edits']), 'rc': step_rc(runs, step), 'launch': d.is_dir(),
+            'reached': any(r.get('kind') == 'control-reach' and r.get('control') == entry['reach_control'] and r.get('run_id') == run_id for r in js)
+            if entry.get('reach_control') else None,
+            'injected': terminal.get('state') == 'exception' and 'J4 control' in str(exc.get('error')),
+            'cleanup-error': any('J4 control' in str(c.get('error')) for c in terminal.get('cleanup_errors') or []),
+            'partial-before': any(r.get('kind') in ('start', 'read') and r.get('seq', 0) < terminal.get('seq', -1) for r in js),
+            'terminal': terminal.get('state'),
+            'end-written': end is not None, 'end-ended': end_observer.get('ended'),
+            'end-terminal': (end_observer.get('terminal') or {}).get('state') if end is not None else None,
+            'pending': pend.get('launch'),
+            'stopped-unfinished': 'did not finish' in str(stop.get('reason')) and (stop.get('detail') or {}).get('launch') == 'native-P0-natural',
+            'stopped-after-pending': bool(pend) and stop.get('pending') is True and pend.get('t_ns', 0) < stop.get('t_ns', 0),
+            'terminal-after-pending': bool(pend) and terminal.get('t_ns', 0) > pend.get('t_ns', 0),
+            'terminal-after-stopped': bool(stop) and terminal.get('t_ns', 0) > stop.get('t_ns', 0),
+            'not-started': stop.get('not_started') == ['native-P1-permuted'] and not p1.exists(),
+            'p1-launched': p1.is_dir(), 'p1-terminal': p1_terminal.get('state'),
+            'done': (out / 'collect.done.json').is_file(), 'manifest': (out / 'manifest.json').is_file()}
 
 
-def j4b_checks(out):
-    out = Path(out)
-    d = out / 'launches' / 'native-P0-natural'
-    js = journal_of(d)
-    terminal = js[-1] if js and js[-1].get('kind') == 'terminal' else {}
-    pend = jload(out / 'collect.pending.json') if (out / 'collect.pending.json').is_file() else {}
-    stop = jload(out / 'collect.stopped.json') if (out / 'collect.stopped.json').is_file() else {}
-    return {
-        'pending': pend.get('launch') == 'native-P0-natural',
-        'stopped-after-pending': bool(pend) and stop.get('pending') is True and pend.get('t_ns', 0) < stop.get('t_ns', 0),
-        'terminal-after-pending': bool(pend) and terminal.get('state') == 'finished' and terminal.get('t_ns', 0) > pend.get('t_ns', 0),
-        'not-started': not (out / 'launches' / 'native-P1-permuted').exists(),
-        'no-manifest': not (out / 'manifest.json').exists() and not (out / 'collect.done.json').exists(),
-    }
+def facts_j4h(runs, entry, rec, run_id):
+    step = entry['step']
+    out = Path(runs) / step / 'out'
+    events = records_in(out / 'events')
+    partial, pend, stop = jmaybe(out / 'ps-fact.partial.json') or {}, jmaybe(out / 'ps-fact.pending.json') or {}, jmaybe(out / 'ps-fact.stopped.json') or {}
+    final = [e for e in events if e.get('kind') == 'holder-wait' and e.get('holder') == 'first' and e.get('timeout') is None and e.get('returned') is True]
+    original = partial.get('original') or {}
+    return {'applied': applied(runs, step, entry['edits']), 'rc': step_rc(runs, step),
+            'reached': any(e.get('kind') == 'control-reach' and e.get('control') == 'J4h' and e.get('run_id') == run_id for e in events),
+            'partial-original': original.get('type') == 'RuntimeError' and 'J4h control' in str(original.get('error')),
+            'cleanup-errors': [[c.get('holder'), c.get('type')] for c in pend.get('cleanup_errors') or []],
+            'pending-unreaped': pend.get('unreaped'),
+            'reap-after-pending': len(final) == 1 and final[0].get('rc') == rec['ps']['host_fact']['holder']['exit'] and final[0].get('t_ns', 0) > pend.get('t_ns', 1 << 62),
+            'stopped-unreaped': stop.get('unreaped'), 'stopped-reaped': stop.get('reaped'),
+            'stopped-after-reap': len(final) == 1 and stop.get('t_ns', 0) > final[0].get('t_ns', 1 << 62),
+            'host': (out / 'host.json').exists(), 'done': (out / 'ps-fact.done.json').exists()}
 
 
-CHECKS = {'J1-acq': j1_checks, 'J4a': j4a_checks, 'J4b': j4b_checks}
+def facts_j5(runs, entry, rec, run_id):
+    """What a J5 driver copy did: the status its parent saw, its driver.json, the steps it ran."""
+    step = 'j5-' + entry['name']
+    base = Path(runs) / 'j5' / entry['name']
+    bundle = base / 'bundles' / entry['bundle']
+    dj = bundle / 'driver.json'
+    record = jmaybe(dj) if dj.is_file() else None
+    ran, injected = [], True
+    if (bundle / 'runs').is_dir():
+        for p in sorted((bundle / 'runs').iterdir()):
+            if (p / 'rc').is_file():
+                ran.append(p.name)
+                argv = jmaybe(p / 'argv.json')
+                injected = injected and isinstance(argv, list) and argv[:1] == ['j5-injected']
+    return {'rc': step_rc(runs, step), 'record': 'file' if dj.is_file() else ('directory' if dj.is_dir() else 'absent'),
+            'final': (record or {}).get('final'), 'stopped': (record or {}).get('stopped'),
+            'steps': [[s.get('step'), s.get('rc')] for s in (record or {}).get('steps', [])], 'ran': ran,
+            'injected': injected and bool(ran)}
+
+
+FACTS = {'check-run': facts_check_run, 'check-sensitivity': facts_check_sensitivity, 'host-fact': facts_host,
+         'J1': facts_j1, 'J4': facts_j4, 'J4h': facts_j4h, 'j5': facts_j5}
+
+
+def owed_controls(rec, spec, bundle):
+    """(layer, name, entry) for every row this bundle's check-controls owes, in the contract's order."""
+    owed = []
+    for entry in rec['controls']['steps']:
+        if entry['bundle'] == bundle:
+            owed.append((entry['layer'], entry['name'], entry))
+    for entry in rec['controls']['copies']:
+        if entry['bundle'] == bundle:
+            owed.append(('copy', entry['name'], entry))
+    for entry in rec['controls']['sensitivity']:
+        if entry['bundle'] == bundle:
+            owed.append(('sensitivity', entry['name'], entry))
+    if bundle == 'S1':
+        for entry in spec['j5']['cases']:
+            owed.append(('j5', entry['name'], entry))
+        for entry in spec['j5'].get('sensitivity', []):
+            owed.append(('j5-sensitivity', entry['name'], entry))
+    return owed
+
+
+def control_row(rows, layer, name, expect, facts):
+    """Reached means every reach fact holds; then the row is its signature, exactly."""
+    unmet = {k: facts.get(k) for k, v in expect['reach'].items() if facts.get(k) != v}
+    if unmet:
+        rows.leave(layer, name, None, 'not demonstrated: %r' % (unmet,), facts=facts, expected=expect)
+        return
+    errors = [{'field': k, 'actual': facts.get(k), 'expected': v} for k, v in expect['signature'].items() if facts.get(k) != v]
+    rows.judge(layer, name, None, errors, facts=facts, expected=expect)
 
 
 def check_controls(a):
     runs, out = Path(a.runs).resolve(), Path(a.out).resolve()
     out.mkdir(parents=True, exist_ok=False)
     rows = Rows()
-    doc = {'format': 'core-hook-npm-response-controls/1', 'claim': 'control runs read from their files and their parent-observed status; '
-           "the author's own check, not an independent verification"}
+    doc = {'format': 'core-hook-npm-response-controls/2', 'bundle': a.bundle, 'only': a.only, 'run_id': a.run_id,
+           'claim': "a bundle's runs read from their files and their parent-observed status; the author's own check, not an independent verification"}
     try:
         rec, errors = read_contract(a.contract, a.contract_sha256)
         rows.owe('contract', 'record')
@@ -720,104 +958,24 @@ def check_controls(a):
         if rec is None or errors or rows.status('contract', 'control-spec') != 'pass':
             return finish_rows(rows, out, doc, 'an input did not hold')
         spec = json.loads(spec_raw.decode('utf-8'))
-        controls = rec['controls']
-        rows.owe('check', 'literal')
-        rows.owe('host', 'ps-fact')
-        for c in controls['copies']:
-            rows.owe('copy', c['name'])
-        for c in controls['sensitivity']:
-            rows.owe('sensitivity', c['name'])
-        for c in spec['j5']['cases']:
-            rows.owe('j5', c['name'])
-        for c in spec['j5'].get('sensitivity', []):
-            rows.owe('j5-sensitivity', c['name'])
-        # The main check run: exit 0 and every row passed.
-        rc = step_rc(runs, 'check')
-        res = jload(runs / 'check' / 'out' / 'results.json') if (runs / 'check' / 'out' / 'results.json').is_file() else {}
-        rows.judge('check', 'literal', None, [] if rc == 0 and (res.get('acceptance') or {}).get('status') == 'pass' else
-                   [{'field': 'check', 'actual': [rc, (res.get('acceptance') or {}).get('failed')], 'expected': [0, []]}])
-        # The ps host fact, read here on its own terms.
-        host_errors, established = host_independent(runs / 'ps-fact' / 'host.json')
-        if host_errors:
-            rows.judge('host', 'ps-fact', None, host_errors)
-        elif not established:
-            rows.leave('host', 'ps-fact', None, 'not established: the record does not show an absence form; a missing row stays unobserved')
-        else:
-            rows.judge('host', 'ps-fact', None, [], established=established)
-        for c in controls['copies']:
-            rc = step_rc(runs, 'copy-' + c['name'])
-            got = CHECKS[c['check']](runs / ('copy-' + c['name']) / 'out')
-            errors = [{'field': k, 'actual': v, 'expected': True} for k, v in got.items() if v is not True]
-            if rc != c['expect']['rc']:
-                errors.insert(0, {'field': 'rc', 'actual': rc, 'expected': c['expect']['rc']})
-            rows.judge('copy', c['name'], None, errors, checks=got, rc=rc)
-        for c in controls['sensitivity']:
-            step = 'sens-' + c['name']
-            rc = step_rc(runs, step)
-            if c['kind'] == 'check':
-                res = jload(runs / step / 'out' / 'results.json') if (runs / step / 'out' / 'results.json').is_file() else {}
-                failed = [r['case'] for r in res.get('rows', []) if r.get('status') == 'fail']
-                missing = [n for n in c['expect']['failing'] if n not in failed]
-                errors = ([] if rc == 1 else [{'field': 'rc', 'actual': rc, 'expected': 1}]) + \
-                         ([{'field': 'cases that must fail without the boundary', 'actual': failed, 'expected': c['expect']['failing']}] if missing else [])
-                rows.judge('sensitivity', c['name'], None, errors, failed=failed)
-            else:
-                got = CHECKS[c['check']](runs / step / 'out')
-                held = [k for k in c['expect']['failing'] if got.get(k) is True]
-                errors = [{'field': 'checks that must fail without the boundary', 'actual': got, 'expected': c['expect']['failing']}] if held else []
-                rows.judge('sensitivity', c['name'], None, errors, checks=got, rc=rc)
-        for c in spec['j5']['cases'] + spec['j5'].get('sensitivity', []):
-            layer = 'j5' if c in spec['j5']['cases'] else 'j5-sensitivity'
-            step = 'j5-' + c['name']
-            got = j5_facts(runs, step, c)
-            exp = c['expect']
-            errors = [{'field': k, 'actual': got.get(k), 'expected': v} for k, v in exp.items() if got.get(k) != v]
-            if layer == 'j5-sensitivity':
-                errors = [] if errors else [{'field': 'the case must fail without the boundary', 'actual': got, 'expected': exp}]
-            rows.judge(layer, c['name'], None, errors, got=got)
+        owed = owed_controls(rec, spec, a.bundle)
+        if a.only:
+            owed = [o for o in owed if o[1] == a.only]
+            if not owed:
+                rows.owe('control', a.only)
+                rows.judge('control', a.only, None, [{'field': 'control', 'actual': a.only, 'expected': 'a control of bundle %s' % a.bundle}])
+                return finish_rows(rows, out, doc)
+        for layer, name, _ in owed:
+            rows.owe(layer, name)
+        for layer, name, entry in owed:
+            facts = FACTS[entry['check']](runs, entry, rec, a.run_id)
+            control_row(rows, layer, name, entry['expect'], facts)
     except Exception as e:
         traceback.print_exc()
         doc['stopped'] = '%s: %s' % (type(e).__name__, e)
         finish_rows(rows, out, doc, 'this runner stopped before the row was judged: ' + doc['stopped'])
         return 2
     return finish_rows(rows, out, doc)
-
-
-def j5_facts(runs, step, case):
-    """What a J5 driver copy did: the status its parent saw, its driver.json, the steps it ran."""
-    base = Path(runs) / 'j5' / case['name']
-    dj = base / 'driver.json'
-    record = jload(dj) if dj.is_file() else None
-    ran = sorted(p.name for p in (base / 'runs').iterdir() if (p / 'rc').is_file()) if (base / 'runs').is_dir() else []
-    return {'rc': step_rc(runs, step), 'final': (record or {}).get('final'),
-            'stopped_step': ((record or {}).get('stopped') or {}).get('step'),
-            'steps': [s.get('step') for s in (record or {}).get('steps', [])],
-            'record': 'file' if dj.is_file() else ('directory' if dj.is_dir() else 'absent'), 'ran': ran}
-
-
-def host_independent(path):
-    """The ps host fact read with plain string and JSON reading: (errors, absence rc or None)."""
-    if not Path(path).is_file():
-        return [{'field': 'ps host fact', 'actual': 'absent', 'expected': 'present'}], None
-    doc = jload(path)
-    q = doc.get('queries') or {}
-    sentinel, first, second = doc.get('sentinel'), doc.get('first'), doc.get('second')
-
-    def pids(name):
-        out = q.get(name) or {}
-        if (out.get('outcome') or {}).get('kind') != 'exit' or out.get('stderr') != '':
-            return None
-        return sorted(int(line.split()[0]) for line in (out.get('stdout') or '').splitlines() if line.strip())
-    alive, gone, mixed = pids('alive'), pids('gone'), pids('mixed')
-    if alive is None or gone is None or mixed is None:
-        return [], None
-    if not (first in alive and sentinel in alive and gone == [sentinel] and mixed == sorted([sentinel, second])):
-        return [], None
-    if (q['gone']['outcome'].get('rc')) != (q['mixed']['outcome'].get('rc')):
-        return [], None
-    if not ((doc.get('first_wait') or {}).get('t_ns', 0) < q['gone'].get('t0_ns', 0)):
-        return [], None
-    return [], {'absent_rc': q['gone']['outcome'].get('rc')}
 
 
 def main():
@@ -828,6 +986,7 @@ def main():
     c.add_argument('--contract-sha256', required=True, help='external selection: the digest of the reviewed record')
     c.add_argument('--build-root')
     c.add_argument('--build-pin', help='external selection: the observed builder record digest')
+    c.add_argument('--run-id', help="the driver's run: 32 lowercase hex digits")
     c.add_argument('--ps-host-fact')
     c.add_argument('--ps-host-fact-sha256')
     c.add_argument('--only', action='append', help='a launch name; repeat for more. A collection with --only is not one judge reads')
@@ -838,10 +997,11 @@ def main():
     j.add_argument('--manifest-sha256', required=True, help='external selection: the digest of the completed manifest')
     j.add_argument('--contract', default=str(HERE / 'core-hook-npm-response.contract.json'))
     j.add_argument('--contract-sha256', required=True)
-    j.add_argument('--ps-host-fact')
-    j.add_argument('--ps-host-fact-sha256')
+    j.add_argument('--ps-host-fact', required=True)
+    j.add_argument('--ps-host-fact-sha256', required=True)
     j.add_argument('--out', required=True)
     p = sub.add_parser('ps-fact')
+    p.add_argument('--run-id', required=True)
     p.add_argument('--out', required=True)
     k = sub.add_parser('check')
     k.add_argument('--contract', default=str(HERE / 'core-hook-npm-response.contract.json'))
@@ -849,6 +1009,9 @@ def main():
     k.add_argument('--out', required=True)
     x = sub.add_parser('check-controls')
     x.add_argument('--runs', required=True)
+    x.add_argument('--bundle', required=True, choices=nr.BUNDLES)
+    x.add_argument('--only')
+    x.add_argument('--run-id', required=True)
     x.add_argument('--contract', default=str(HERE / 'core-hook-npm-response.contract.json'))
     x.add_argument('--contract-sha256', required=True)
     x.add_argument('--control-spec', required=True)

@@ -17,35 +17,48 @@ mismatch another channel shows.
 
 Who writes what:
 
-  stand-in    each child's own files: how it was called, the objects its
-              descriptors are open on, its claim record, what it wrote, its
-              planned exit status (self)
-  observer    one thread per launch, the only writer of that launch's
-              journal (one record file per fact, each written once) and of
-              its blobs: every ps query whole (argv, outcome, stdout,
-              stderr), every response file read step by step, every hold it
-              let go, and a terminal record that says whether it finished,
-              was stopped, or failed and where
-  launch      the hook's call and the observer's lifetime: it reads the
-              journal only after the observer thread has ended, and writes
-              launch-end.json; an observer still alive after its wait is a
-              pending lifetime, never a completed launch
+  stand-in       each child's own files: how it was called, the objects its
+                 descriptors are open on, its claim record, what it wrote,
+                 its planned exit status (self)
+  observer       one thread per launch, the only writer of that launch's
+                 journal (one record file per fact, each written once) and of
+                 its blobs: every ps query whole, every response file read
+                 step by step, every hold it let go, and a terminal record
+                 that says whether it finished, was stopped, or failed
+  launch         the hook's call and the observer's lifetime: it reads the
+                 journal only after the observer thread has ended; an
+                 observer still alive after its wait is a pending lifetime,
+                 never a completed launch
+  holder parent  the ps host fact's own process: it starts each holder, sees
+                 it alive, closes its input and reaps it, and writes each of
+                 those facts once; a holder it could not reap within its wait
+                 stays its own until the holder ends by itself
 
-A ps answer is read by read_ps alone, and a missing row means no process
-only under a host fact record selected by digest (host_basis). A response
-file's lstat and fstat are kept apart and compared; the pending record is
-read by read_pending against the shapes the product writers give.
+A ps answer is read by read_ps alone, and it is the answer to the query that
+produced it, never to another: target_exit reads an exit only for a pid that
+query asked about, against a start time read in the one form this file
+supports, and a missing row means no process only under a host basis whose
+scope (run, host, boot, user, ps executable and mode) is the collection's own
+(host_basis).
+
+A code the judge raises is the judgment's input, not a label: code_parts reads
+its kind, channel and roles, and scenario_rows decides each row from them. A
+declared intervention's effect is decided apart from the comparisons that do
+not depend on it, so an intervention that was not made leaves its own effect
+not run and never erases a contradiction elsewhere.
 
 Nothing here judges while collecting. judge_launch() reads the files a
 collection left, and the contract, and nothing else.
 """
 import copy
+import datetime
 import errno
 import fcntl
 import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import stat
 import subprocess
 import sys
@@ -55,14 +68,15 @@ import traceback
 
 from . import evidence, observe
 
-CONTRACT = 'core-hook-npm-response-contract/3'
-LAUNCH = 'core-hook-npm-response-launch/2'
+CONTRACT = 'core-hook-npm-response-contract/4'
+LAUNCH = 'core-hook-npm-response-launch/3'
 RECORD = 'core-hook-npm-response-record/1'
-PSQ = 'core-hook-npm-response-ps/1'
-PSHOST = 'core-hook-npm-response-ps-host/1'
-MANIFEST = 'core-hook-npm-response-manifest/2'
-RESULTS = 'core-hook-npm-response-results/3'
+PSQ = 'core-hook-npm-response-ps/2'
+PSHOST = 'core-hook-npm-response-ps-host/2'
+MANIFEST = 'core-hook-npm-response-manifest/3'
+RESULTS = 'core-hook-npm-response-results/4'
 ROLES = ('prefix', 'root', 'config')
+CHANNELS = ('out', 'err')
 IMPLS = ('native', 'bash')
 CONF = 'npm-response.json'
 NOISE = ('_', 'SHLVL')
@@ -72,8 +86,9 @@ HOLD_SECONDS = 3.0
 # thread, before the hook starts: children's starts, file I/O and ps calls
 # all spend it. Whether it fits the hook's own ask deadline is not measured.
 ORDER_BUDGET = 2.5
-# After the hook returned or the launch asked it to stop, the observer has
-# this long to close; every wait and ps call it makes then is bounded by it.
+# After the hook returned or the launch asked it to stop, the observer bounds
+# each ps call it makes by what is left of this. It bounds nothing else: a
+# scan in progress, file I/O, a release or a publish has no deadline here.
 CLOSE_BUDGET = 4.0
 # How long the launch waits for the observer to end after the hook returned.
 JOIN_SECONDS = 8.0
@@ -82,11 +97,21 @@ EXIT_POLL_EVERY = 0.01
 FINAL_POLLS = 5
 TREE = ('pid', 'ppid', 'pgid', 'stat', 'lstart', 'command')
 EXITQ = ('pid', 'stat', 'lstart')
-PURPOSE_FIELDS = {'start': TREE, 'tree': TREE, 'exit': EXITQ, 'host-alive': EXITQ, 'host-gone': EXITQ, 'host-mixed': EXITQ}
+PURPOSE_FIELDS = {'start': TREE, 'tree': TREE, 'exit': EXITQ, 'session': EXITQ,
+                  'host-alive': EXITQ, 'host-gone': EXITQ, 'host-mixed': EXITQ}
+# The one way this file asks ps: C locale, unlimited width, empty headers,
+# processes chosen with -p (or all with -A for the tree).
+PS_MODE = {'locale': 'C', 'width': '-ww', 'select': '-p', 'all': '-A', 'header': 'none'}
 EXITED = ('gone', 'zombie', 'pid-reused')
 # The cause a writer puts beside an unknown answer: rust/src/pre/targets.rs
 # fetch_after and scripts/safedeps-pre-guard.sh write "sourced" or nothing.
 FETCH_CAUSES = ('sourced',)
+# A ps host fact's holder: it reads its input to the end and exits 0 by itself.
+HOLDER_CODE = 'import sys; sys.stdin.buffer.read()'
+HOLDER_EXIT = 0
+# How long the holder parent waits for a holder whose input it closed before
+# the wait counts as run out; after that it waits with no bound.
+HOLDER_WAIT = 30.0
 
 
 class HarnessError(Exception):
@@ -111,6 +136,14 @@ class LifetimePending(Exception):
     def __init__(self, name, watcher, finish, cause):
         super().__init__('the observer of %s is still running after %s seconds' % (name, JOIN_SECONDS))
         self.name, self.watcher, self.finish, self.cause = name, watcher, finish, cause
+
+
+class HolderTimeout(Exception):
+    """A holder did not end within its wait; it is still the parent's."""
+
+    def __init__(self, name, seconds):
+        super().__init__('the %s holder did not end within %s seconds' % (name, seconds))
+        self.name, self.seconds = name, seconds
 
 
 def sha(data):
@@ -150,6 +183,15 @@ def text(b):
     if isinstance(b, (bytes, bytearray)):
         return bytes(b).decode('utf-8', 'surrogateescape')
     return b if isinstance(b, str) else ''
+
+
+def digits(s):
+    """True for a nonempty string of ASCII digits only."""
+    return isinstance(s, str) and bool(s) and all(c in '0123456789' for c in s)
+
+
+def valid_run_id(value):
+    return isinstance(value, str) and len(value) == 32 and all(c in '0123456789abcdef' for c in value)
 
 
 # --- places ---------------------------------------------------------------------------
@@ -198,6 +240,68 @@ def launch_names(rec):
     return ['%s-%s' % (impl, s['name']) for impl in IMPLS for s in rec['scenarios']]
 
 
+# --- codes: the judgment's input -------------------------------------------------------------
+#
+# Every code the judge raises, by kind, and what each part after the kind
+# names. code_parts is the one reader of a code; the rows, the layers and the
+# intervention scope read its answer, never the string.
+
+CODE_PARTS = {
+    'shared-effect-declared': (), 'start': ('nonce',), 'unexpected-call': (), 'no-observations': (),
+    'group-mixed-attempt': (), 'missing-role': ('role',), 'duplicate-role': ('role',), 'undeclared-group': (),
+    'group-defect': (), 'group': (),
+    'request-env': ('role', 'key'), 'request-scratch': ('role',), 'request-scratch-object': ('role',),
+    'process': ('role',), 'process-unseen': ('role',), 'process-parent': ('role',), 'process-command': ('role',),
+    'process-not-under-hook': ('role',), 'parents-differ': (),
+    'desc-self': ('channel', 'role'), 'desc-changed': ('channel', 'role'), 'desc-object': ('channel', 'role'),
+    'desc-path': ('channel', 'role'), 'slot-object-mismatch': ('channel', 'role'), 'slot-absent': ('channel', 'role'),
+    'slot-object': ('channel', 'role'), 'slot-holder': ('channel', 'role'), 'slot-holds': ('channel', 'role', 'other'),
+    'slot-shared-object': ('channel', 'role'), 'slot-unknown-object': ('channel', 'role'), 'output': ('channel', 'role'),
+    'content': ('channel', 'role', 'other'), 'content-unexpected': ('channel', 'role'),
+    'record': ('role',), 'record-missing': ('role',), 'record-duplicate': ('role',), 'record-not-actual': ('channel', 'role'),
+    'exit': ('role',), 'exit-planned': ('role',), 'release': ('role',), 'observer-exit-unsupported': ('role',),
+    'exit-binding': ('role',),
+}
+LAYERS = ('requests', 'records', 'process', 'exit', 'linkage', 'result')
+
+
+def code_parts(code):
+    """{'code', 'follow', 'unseen', 'kind', 'known', and the named parts} of one code."""
+    follow = code.startswith('follow-')
+    base = code[len('follow-'):] if follow else code
+    head, _, rest = base.partition(':')
+    unseen = head.startswith('unobserved-') or head == 'no-observations'
+    kind = head[len('unobserved-'):] if head.startswith('unobserved-') else head
+    names = CODE_PARTS.get(kind)
+    values = rest.split(':') if rest else []
+    parts = {'code': code, 'follow': follow, 'unseen': unseen, 'kind': kind,
+             'known': names is not None and len(values) == len(names)}
+    if parts['known']:
+        parts.update(zip(names, values))
+    return parts
+
+
+def unseen(code):
+    return code_parts(code)['unseen']
+
+
+def code_layer(code):
+    kind = code_parts(code)['kind']
+    if kind.startswith('request') or kind == 'unexpected-call':
+        return 'requests'
+    if kind in ('record', 'record-missing', 'record-duplicate', 'exit-planned'):
+        return 'records'
+    if kind.startswith('process') or kind == 'parents-differ':
+        return 'process'
+    if kind in ('exit', 'release', 'observer-exit-unsupported', 'exit-binding'):
+        return 'exit'
+    return 'linkage'
+
+
+def code(kind, *parts):
+    return ':'.join((kind,) + tuple(str(p) for p in parts))
+
+
 # --- the contract, before anything starts ---------------------------------------------------
 
 EDITS = {'none': (), 'declare-shared-effect': ('effect',), 'empty': (), 'drop': ('role',), 'duplicate': ('role',),
@@ -209,6 +313,7 @@ SHAPES = {
     'nonempty-string': lambda v: isinstance(v, str) and bool(v),
     'md5-hex': lambda v: isinstance(v, str) and len(v) == 32 and all(c in '0123456789abcdef' for c in v),
 }
+BUNDLES = ('S1', 'S2', 'S3', 'S4')
 
 
 def contract_errors(rec):
@@ -238,6 +343,11 @@ def contract_errors(rec):
         want(impl + ' initial slot names differ', len(set(slot.get('initial', {}).values())) == len(ROLES), slot.get('initial'))
         want(impl + ' follow slot', sorted(slot.get('follow', {})) == ['config'], slot.get('follow'))
         want(impl + ' err suffix', isinstance(slot.get('err'), str) and bool(slot.get('err')), slot.get('err'))
+    ps = rec.get('ps', {})
+    want('ps mode', ps.get('mode') == PS_MODE, ps.get('mode'))
+    want('ps lstart form', ps.get('lstart', {}).get('form') == LSTART_FORM, ps.get('lstart'))
+    want('ps host fixture', ps.get('host_fact', {}).get('holder') == holder_fixture(), ps.get('host_fact', {}).get('holder'))
+    want('ps host sequence', ps.get('host_fact', {}).get('sequence') == [list(s) for s in HOST_SEQUENCE], ps.get('host_fact', {}).get('sequence'))
     shape = rec.get('pending_shape', {})
     rules = list(shape.get('identity', {}).values()) + list(shape.get('fields', {}).values())
     want('pending shape rules', bool(shape.get('identity')) and all(isinstance(r, list) or r in SHAPES or r == 'fetch-facts' for r in rules), shape)
@@ -263,10 +373,33 @@ def contract_errors(rec):
         want(label + 'swap', swap is None or (len(swap) == 2 and len(set(swap)) == 2 and set(swap) <= set(ROLES)), swap)
         emit = s.get('emit', {})
         want(label + 'emit', set(emit) <= set(ROLES) and set(emit.values()) <= set(ROLES) and sorted(emit) == sorted(emit.values()), emit)
-        want(label + 'expected verdict', s.get('expect', {}).get('verdict') in ('applicable', 'rejected', 'unresolved', 'not-applicable'), s.get('expect'))
-        result = s.get('expect', {}).get('result')
+        iv = s.get('intervention')
+        if swap:
+            want(label + 'the swap is declared as its intervention', isinstance(iv, dict) and iv.get('kind') == 'swap-slots'
+                 and sorted(iv.get('roles', [])) == sorted(swap), iv)
+        elif emit:
+            want(label + 'the emit is declared as its intervention', isinstance(iv, dict) and iv.get('kind') == 'emit'
+                 and sorted(iv.get('roles', [])) == sorted(emit), iv)
+        else:
+            want(label + 'no intervention without a swap or an emit', iv is None, iv)
+        exp = s.get('expect', {})
+        if isinstance(iv, dict):
+            scoped = (isinstance(iv.get('channels'), list) and bool(iv['channels']) and set(iv['channels']) <= set(CHANNELS)
+                      and isinstance(iv.get('kinds'), list) and set(iv['kinds']) <= set(CODE_PARTS)
+                      and isinstance(iv.get('unseen_kinds'), list) and set(iv['unseen_kinds']) <= set(CODE_PARTS)
+                      and isinstance(iv.get('roles'), list) and set(iv['roles']) <= set(ROLES) and bool(iv.get('premise')))
+            want(label + 'intervention scope', scoped, iv)
+            inside = [c for c in exp.get('intervention_codes', []) if not scoped or not in_scope(code_parts(c), iv)]
+            want(label + 'intervention codes inside its scope', bool(exp.get('intervention_codes')) and not inside, inside)
+        else:
+            want(label + 'no intervention codes without an intervention', 'intervention_codes' not in exp, exp.get('intervention_codes'))
+        want(label + 'expected codes are known', all(code_parts(c)['known'] for c in exp.get('codes', []) + exp.get('intervention_codes', [])),
+             exp.get('codes'))
+        want(label + 'expected verdict', exp.get('verdict') in ('applicable', 'rejected', 'unresolved', 'not-applicable'), exp)
+        result = exp.get('result')
         want(label + 'expected result', (isinstance(result, str) and result in rec.get('results', {}))
              or (isinstance(result, dict) and bool(result.get('differs')) and set(result['differs']) <= set(shape.get('fields', {}))), result)
+        want(label + 'a negative has an intervention', s.get('kind') != 'negative' or isinstance(iv, dict), s.get('kind'))
     forced = [s for s in rec.get('scenarios', []) if s.get('claim_order')]
     want('two forced claim orders that differ', len(forced) >= 2 and len(set(tuple(s['claim_order']) for s in forced)) == len(forced),
          [s.get('claim_order') for s in forced])
@@ -286,6 +419,7 @@ def contract_errors(rec):
         exp = c.get('expect', {})
         want(label + 'expectation', bool(exp) and set(exp) <= {'verdict', 'must', 'result'} and ('verdict' in exp) == ('must' in exp)
              and exp.get('result', 'invalid') in ('invalid', 'valid-differs', 'not-different', 'expected', 'unexpected'), exp)
+        want(label + 'must codes are known', all(code_parts(m)['known'] for m in exp.get('must', [])), exp.get('must'))
     checks = rec.get('controls', {})
     for layer in ('readers', 'adapters'):
         cases = checks.get(layer, [])
@@ -293,8 +427,16 @@ def contract_errors(rec):
     seen = [c.get('name') for layer in ('readers', 'adapters', 'copies', 'sensitivity') for c in checks.get(layer, [])]
     want('control names once each', len(set(seen)) == len(seen), seen)
     for c in checks.get('copies', []) + checks.get('sensitivity', []):
+        label = 'control %s ' % c.get('name')
+        want(label + 'bundle', c.get('bundle') in BUNDLES, c.get('bundle'))
+        want(label + 'edits', isinstance(c.get('edits'), list) and bool(c.get('edits')), c.get('edits'))
         for e in c.get('edits', []):
-            want('control %s edit' % c.get('name'), all(isinstance(e.get(k), str) and e.get(k) for k in ('file', 'old', 'new')) and e['old'] != e['new'], e)
+            want(label + 'edit', all(isinstance(e.get(k), str) and e.get(k) for k in ('file', 'old', 'new')) and e['old'] != e['new'], e)
+        exp = c.get('expect', {})
+        want(label + 'reach and signature', isinstance(exp.get('reach'), dict) and bool(exp.get('reach'))
+             and isinstance(exp.get('signature'), dict) and bool(exp.get('signature')), exp)
+    bundles = rec.get('bundles', {})
+    want('bundles', sorted(bundles.get('order', [])) == sorted(BUNDLES) and all(b in bundles for b in BUNDLES), sorted(bundles))
     return errors
 
 
@@ -442,32 +584,76 @@ def standin_conf(rec, scenario, where, obs, calls):
 # --- ps: one query kept whole, and its one reader ---------------------------------------------------
 #
 # macOS ps(1) says of -p only that it displays the processes that match the
-# listed process IDs, and documents no exit status. So the reader asks of a
-# query record: every field there with its type; the argv the one its
-# purpose's fields, its targets and the collector's own pid (the sentinel)
-# make; ps exited by itself with a status; nothing on stderr; every line read
-# as the fields; the sentinel's row there; no row for a pid nobody asked
-# about. Rows then are rows ps printed. A missing row says the pid has no
-# process only under a host basis (host_basis), and only for a query whose
-# status is the one that basis measured for an answer with a missing pid.
+# listed process IDs, and of lstart that it is the start time in strftime's
+# %c form; it documents no exit status, and strftime(3) leaves %c to the
+# locale. So a ps answer counts only as the answer to the query that produced
+# it. read_ps checks the record whole: every key with its type, the argv this
+# scope's ps executable, the purpose's fields, the targets and the sentinel
+# make, an exit with a status, an empty stderr, every line read as the fields
+# with a start time in LSTART_FORM (the POSIX locale's date and time form),
+# the sentinel's row, and no row for a pid nobody asked about. It returns the
+# rows together with the query they answer, and nothing else reads a row.
+
+WEEKDAYS = ('Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun')
+MONTHS = ('Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec')
+LSTART_FORM = '%a %b %e %H:%M:%S %Y'
+
+
+def parse_lstart(words):
+    """[year, month, day, hour, minute, second] of five words in LSTART_FORM
+    whose weekday is the date's own, or None for anything else."""
+    if len(words) != 5:
+        return None
+    wd, mon, day, clock, year = words
+    if wd not in WEEKDAYS or mon not in MONTHS or not digits(day) or len(day) > 2 or not digits(year) or len(year) != 4:
+        return None
+    hms = clock.split(':')
+    if len(hms) != 3 or any(not digits(p) or len(p) != 2 for p in hms):
+        return None
+    h, mi, s = (int(p) for p in hms)
+    if h > 23 or mi > 59 or s > 60:
+        return None
+    try:
+        date = datetime.date(int(year), MONTHS.index(mon) + 1, int(day))
+    except ValueError:
+        return None
+    if WEEKDAYS[date.weekday()] != wd:
+        return None
+    return [date.year, date.month, date.day, h, mi, s]
+
 
 def ps_env():
     return dict(os.environ, LC_ALL='C')
 
 
-def ps_argv(fields, pids):
+def ps_tool():
+    """The ps this process runs, named by its path and by what the file is,
+    and the mode every query asks it in."""
+    found = shutil.which('ps', path=ps_env().get('PATH', os.defpath))
+    if found is None:
+        raise HarnessError('no ps on PATH')
+    path = os.path.abspath(found)
+    real = os.path.realpath(path)
+    st = os.stat(real)
+    with open(real, 'rb') as f:
+        digest = sha(f.read())
+    return {'path': path, 'realpath': real, 'dev': st.st_dev, 'ino': st.st_ino, 'size': st.st_size,
+            'mtime_ns': st.st_mtime_ns, 'sha256': digest, 'mode': dict(PS_MODE)}
+
+
+def ps_argv(tool, fields, pids):
     o = ','.join(f + '=' for f in fields)
     if pids is None:
-        return ['ps', '-A', '-ww', '-o', o]
-    return ['ps', '-ww', '-o', o, '-p', ','.join(str(p) for p in pids)]
+        return [tool['path'], '-A', '-ww', '-o', o]
+    return [tool['path'], '-ww', '-o', o, '-p', ','.join(str(p) for p in pids)]
 
 
-def ps_query(purpose, fields, sentinel, targets, timeout):
+def ps_query(purpose, tool, fields, sentinel, targets, timeout):
     """One ps call: what was asked, and what came back or why nothing did.
     A query that does not end within its timeout is stopped by subprocess.run
     itself, as every ps call in this file has been."""
     pids = None if targets is None else [sentinel] + list(targets)
-    argv = ps_argv(fields, pids)
+    argv = ps_argv(tool, fields, pids)
     rec = {'format': PSQ, 'purpose': purpose, 'argv': argv, 'fields': list(fields), 'sentinel': sentinel,
            'targets': None if targets is None else list(targets), 'locale': 'C', 'timeout': timeout, 't0_ns': time.time_ns()}
     try:
@@ -484,19 +670,21 @@ def ps_query(purpose, fields, sentinel, targets, timeout):
 
 
 def ps_line(line, fields):
-    """(pid, row) of one ps line, or None if it does not read as <fields>."""
+    """(pid, row) of one ps line read as <fields>, or None. A start time is
+    read only in LSTART_FORM, as {'raw', 'at'}."""
     parts = line.split()
     fixed = sum(5 if f == 'lstart' else 1 for f in fields if f != 'command')
-    if not parts or not parts[0].isdigit():
+    if not parts or not digits(parts[0]):
         return None
     if ('command' in fields and len(parts) < fixed + 1) or ('command' not in fields and len(parts) != fixed):
         return None
     row, i = {}, 0
     for name in fields:
         if name == 'lstart':
-            row[name] = ' '.join(parts[i:i + 5])
-            if not parts[i + 4].isdigit():
+            at = parse_lstart(parts[i:i + 5])
+            if at is None:
                 return None
+            row[name] = {'raw': ' '.join(parts[i:i + 5]), 'at': at}
             i += 5
         elif name == 'command':
             row[name] = ' '.join(parts[i:])
@@ -504,25 +692,29 @@ def ps_line(line, fields):
         else:
             row[name] = parts[i]
             i += 1
-    if any(not row[f].isdigit() for f in ('pid', 'ppid', 'pgid') if f in row):
+    if any(not digits(row[f]) for f in ('pid', 'ppid', 'pgid') if f in row):
         return None
     return int(parts[0]), row
 
 
-PS_KEYS = (('format', str), ('purpose', str), ('argv', list), ('fields', list), ('sentinel', int), ('locale', str),
-           ('outcome', dict), ('stdout', str), ('stderr', str), ('t0_ns', int), ('t1_ns', int))
+PS_KEYS = (('format', (str,)), ('purpose', (str,)), ('argv', (list,)), ('fields', (list,)), ('sentinel', (int,)),
+           ('locale', (str,)), ('timeout', (int, float)), ('outcome', (dict,)), ('stdout', (str,)), ('stderr', (str,)),
+           ('t0_ns', (int,)), ('t1_ns', (int,)))
 
 
-def read_ps(rec, basis=None):
-    """{'state': 'observed', 'rows', 'absence'} for a ps record that holds a
-    complete answer to the question it names; otherwise unavailable."""
+def read_ps(rec, tool, basis=None):
+    """The answer a ps record holds, bound to the query that produced it:
+    {'state': 'observed', 'query', 'rows', 'absence'}; otherwise unavailable.
+    'absence' is the basis when this answer may show a missing pid: a basis
+    of the same ps and mode, for a query that ended with the status that
+    basis measured for one."""
     if type(rec) is not dict:
         return unavailable('ps-record', 'not a ps record')
-    for key, kind in PS_KEYS:
-        if type(rec.get(key)) is not kind:
+    for key, kinds in PS_KEYS:
+        if type(rec.get(key)) not in kinds:
             return unavailable('ps-record', 'the record has no %s of its type' % key)
     targets = rec.get('targets', 'missing')
-    if not (targets is None or (type(targets) is list and all(type(p) is int for p in targets))):
+    if not (targets is None or (type(targets) is list and targets and all(type(p) is int for p in targets))):
         return unavailable('ps-record', 'the record has no targets of their type')
     if rec['format'] != PSQ or rec['locale'] != 'C':
         return unavailable('ps-record', 'the record is not a C-locale ps query')
@@ -530,8 +722,8 @@ def read_ps(rec, basis=None):
     if fields is None or tuple(rec['fields']) != fields or (targets is None) != (rec['purpose'] == 'tree'):
         return unavailable('ps-request', 'the fields or targets are not the ones a %r query asks' % rec['purpose'])
     pids = None if targets is None else [rec['sentinel']] + targets
-    if rec['argv'] != ps_argv(fields, pids):
-        return unavailable('ps-request', 'the argv is not the one its fields, targets and sentinel make')
+    if not isinstance(tool, dict) or type(tool.get('path')) is not str or rec['argv'] != ps_argv(tool, fields, pids):
+        return unavailable('ps-request', "the argv is not the one this scope's ps, its fields, targets and sentinel make")
     outcome = rec['outcome']
     if outcome.get('kind') != 'exit' or type(outcome.get('rc')) is not int:
         return unavailable('ps', 'ps did not exit by itself with a status: %r' % (outcome,))
@@ -552,97 +744,256 @@ def read_ps(rec, basis=None):
     if pids is not None and set(rows) - set(pids):
         return unavailable('ps', 'a row for a pid nobody asked about')
     absence = None
-    if basis is not None and pids is not None and outcome.get('rc') == basis.get('absent_rc'):
+    if (isinstance(basis, dict) and pids is not None and isinstance(basis.get('scope'), dict)
+            and basis['scope'].get('ps') == tool and type(outcome.get('rc')) is int and outcome.get('rc') == basis.get('absent_rc')):
         absence = basis
-    return {'state': 'observed', 'rows': rows, 'absence': absence}
+    query = {'purpose': rec['purpose'], 'sentinel': rec['sentinel'], 'targets': None if targets is None else list(targets),
+             'argv': list(rec['argv']), 'rc': outcome.get('rc'), 't0_ns': rec['t0_ns'], 't1_ns': rec['t1_ns']}
+    return {'state': 'observed', 'query': query, 'rows': rows, 'absence': absence}
 
 
-def exit_reading(read, pid, start_lstart):
-    """Whether the process that was <pid> when it started has exited, from one
-    read_ps answer: observed gone, zombie, pid-reused or alive; or unavailable."""
-    if read.get('state') != 'observed':
-        return unavailable('ps', read.get('why'))
-    row = read['rows'].get(pid)
+def asked(answer, pid):
+    """True when <answer> is an observed answer to a query that named <pid>."""
+    return (answer.get('state') == 'observed' and type(pid) is int and answer['query']['targets'] is not None
+            and pid in answer['query']['targets'])
+
+
+def start_identity(answer, pid):
+    """({'pid', 'start'}, None): the start time of the process that held <pid>
+    when the query asked about it; (None, why) otherwise."""
+    if answer.get('state') != 'observed':
+        return None, 'the start query did not answer: %s' % (answer.get('why'),)
+    if not asked(answer, pid):
+        return None, 'the start query did not ask about pid %r' % (pid,)
+    row = answer['rows'].get(pid)
     if row is None:
-        if read.get('absence'):
-            return observed({'exit': 'gone', 'basis': read['absence']})
-        return unavailable('ps-absence', 'no row for the pid, and no host basis says a missing row means no process')
-    if start_lstart is None:
-        return unavailable('attribution', 'the start time of the child was not read when it started')
-    if row['lstart'] != start_lstart:
+        return None, 'the start query shows no row for pid %d' % pid
+    return {'pid': pid, 'start': row['lstart']}, None
+
+
+def target_exit(answer, pid, start):
+    """Whether the process <start> names has exited, read from one answer to a
+    query that asked about <pid>: observed gone, zombie, pid-reused or alive;
+    otherwise unavailable."""
+    if answer.get('state') != 'observed':
+        return unavailable('ps', answer.get('why'))
+    if not asked(answer, pid):
+        return unavailable('ps-target', 'the query did not ask about pid %r' % (pid,))
+    row = answer['rows'].get(pid)
+    if row is None:
+        if answer['absence']:
+            return observed({'exit': 'gone', 'basis': {'absent_rc': answer['absence']['absent_rc'],
+                                                       'host_fact_sha256': answer['absence'].get('host_fact_sha256')}})
+        return unavailable('ps-absence', 'no row for the pid, and no host basis of this scope says a missing row means no process')
+    if not isinstance(start, dict) or start.get('pid') != pid or not isinstance(start.get('start'), dict):
+        return unavailable('attribution', 'the start time of the process this pid named was not read')
+    if row['lstart']['at'] != start['start'].get('at'):
         return observed({'exit': 'pid-reused'})
     if row['stat'].startswith('Z'):
         return observed({'exit': 'zombie'})
     return observed({'exit': 'alive'})
 
 
-def start_lstart(start_record):
-    """The lstart a child's start query read for its pid, or None."""
-    if not isinstance(start_record, dict):
-        return None
-    read = read_ps(start_record.get('ps'))
-    pid = start_record.get('pid')
-    if read.get('state') != 'observed' or pid not in read['rows']:
-        return None
-    return read['rows'][pid]['lstart']
+def collection_scope(tool, run_id):
+    """(scope, query, None), or (None, query, why): what every ps answer of
+    this process is an answer in. The run, the host by uname, its boot by the
+    start of pid 1 read with this ps, the user, and the ps itself."""
+    query = ps_query('session', tool, EXITQ, os.getpid(), [1], 10.0)
+    if not valid_run_id(run_id):
+        return None, query, 'the run id is not 32 lowercase hex digits'
+    ident, why = start_identity(read_ps(query, tool), 1)
+    if ident is None:
+        return None, query, 'the boot of this host was not read: ' + why
+    u = os.uname()
+    host = {'sysname': u.sysname, 'nodename': u.nodename, 'release': u.release, 'version': u.version, 'machine': u.machine}
+    return {'run_id': run_id, 'host': host, 'uid': os.getuid(), 'boot': ident['start'], 'ps': tool}, query, None
 
 
-def measure_ps_host():
-    """The host fact: how this host's ps answers for a pid this process has
-    just reaped, beside one that is alive. Its children end by themselves when
-    their input closes; nothing is signalled."""
+# --- the ps host fact ---------------------------------------------------------------------------------
+#
+# What a missing row means is measured, never assumed: the holder parent
+# starts a holder, sees it alive with its own poll before and after ps is
+# asked for it, closes its input, reaps it, and asks again; a second holder,
+# seen alive the same way, stands beside it. The events are the parent's own,
+# written once each in order; host_basis reads them back with read_ps and
+# accepts only this sequence in this scope.
+
+HOST_SEQUENCE = (
+    ('holder-start', 'first', None), ('holder-live', 'first', 'before alive'), ('ps', 'alive', None),
+    ('holder-live', 'first', 'after alive'), ('holder-close', 'first', None), ('holder-wait', 'first', None),
+    ('holder-start', 'second', None), ('ps', 'gone', None), ('holder-live', 'second', 'before mixed'),
+    ('ps', 'mixed', None), ('holder-live', 'second', 'after mixed'), ('holder-close', 'second', None),
+    ('holder-wait', 'second', None))
+
+
+def holder_fixture():
+    return {'code': HOLDER_CODE, 'exit': HOLDER_EXIT}
+
+
+class HolderParent:
+    """The process that starts a host fact's holders. It owns each holder it
+    started until it reaps it, and writes each fact about them once, in
+    order, under <directory>/events."""
+
+    def __init__(self, directory):
+        self.dir = Path(directory)
+        self.journal = Journal(self.dir / 'events')
+        self.handles, self.reaped = {}, {}
+
+    def start(self, name):
+        p = subprocess.Popen([sys.executable, '-I', '-c', HOLDER_CODE], stdin=subprocess.PIPE)
+        self.handles[name] = p
+        self.journal.write('holder-start', {'holder': name, 'pid': p.pid})
+        return p.pid
+
+    def live(self, name, when):
+        self.journal.write('holder-live', {'holder': name, 'when': when, 'poll': self.handles[name].poll()})
+
+    def ps(self, name, query):
+        self.journal.write('ps', {'name': name, 'query': query})
+
+    def close(self, name):
+        p = self.handles[name]
+        if not p.stdin.closed:
+            p.stdin.close()
+        self.journal.write('holder-close', {'holder': name})
+
+    def wait(self, name, timeout):
+        """Wait for one holder up to <timeout>. A wait that runs out raises
+        HolderTimeout and leaves the holder unreaped and still this parent's."""
+        p = self.handles[name]
+        try:
+            rc = p.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            self.journal.write('holder-wait', {'holder': name, 'timeout': timeout, 'returned': False})
+            raise HolderTimeout(name, timeout)
+        self.reaped[name] = rc
+        self.journal.write('holder-wait', {'holder': name, 'timeout': timeout, 'returned': True, 'rc': rc})
+        return rc
+
+    def unreaped(self):
+        return [n for n in self.handles if n not in self.reaped]
+
+    def cleanup(self, timeout):
+        """After a failure: close each unreaped holder's input and wait for it
+        up to <timeout>. Returns what went wrong, each apart; raises nothing."""
+        errors = []
+        for name in self.unreaped():
+            try:
+                self.close(name)
+                self.wait(name, timeout)
+            except Exception as e:
+                errors.append({'holder': name, 'type': type(e).__name__, 'error': str(e)})
+        return errors
+
+    def reap(self):
+        """Wait for every unreaped holder with no bound and no signal, each in
+        turn: a record that cannot be written is returned and does not stop the
+        next wait. A holder that never ends keeps this process waiting, and
+        nothing says it was reaped."""
+        errors = []
+        for name in self.unreaped():
+            rc = self.handles[name].wait()
+            self.reaped[name] = rc
+            try:
+                self.journal.write('holder-wait', {'holder': name, 'timeout': None, 'returned': True, 'rc': rc})
+            except Exception as e:
+                errors.append({'holder': name, 'type': type(e).__name__, 'error': str(e)})
+        return errors
+
+
+def measure_ps_host(parent, tool, scope):
+    """The host fact: how this ps, asked in this mode, answers for a pid its
+    parent has just reaped, beside a live one. Every holder ends by itself
+    when its input closes; nothing is signalled. Raises on any failure; every
+    holder it started stays with <parent>."""
     sentinel = os.getpid()
-    holder = [sys.executable, '-I', '-c', 'import sys; sys.stdin.buffer.read()']
-    first = subprocess.Popen(holder, stdin=subprocess.PIPE)
-    second = None
-    try:
-        alive = ps_query('host-alive', EXITQ, sentinel, [first.pid], 10.0)
-        first.stdin.close()
-        first_rc = first.wait(timeout=30)
-        reaped = time.time_ns()
-        second = subprocess.Popen(holder, stdin=subprocess.PIPE)
-        gone = ps_query('host-gone', EXITQ, sentinel, [first.pid], 10.0)
-        mixed = ps_query('host-mixed', EXITQ, sentinel, [first.pid, second.pid], 10.0)
-    finally:
-        for p in (first, second):
-            if p is not None and p.poll() is None:
-                p.stdin.close()
-                p.wait(timeout=30)
-    return {'format': PSHOST, 'sentinel': sentinel, 'first': first.pid, 'second': second.pid,
-            'first_wait': {'rc': first_rc, 't_ns': reaped}, 'queries': {'alive': alive, 'gone': gone, 'mixed': mixed},
-            'uname': os.uname().release, 'python': sys.version.split()[0]}
+    first = parent.start('first')
+    parent.live('first', 'before alive')
+    parent.ps('alive', ps_query('host-alive', tool, EXITQ, sentinel, [first], 10.0))
+    parent.live('first', 'after alive')
+    parent.close('first')
+    parent.wait('first', HOLDER_WAIT)
+    second = parent.start('second')
+    parent.ps('gone', ps_query('host-gone', tool, EXITQ, sentinel, [first], 10.0))
+    parent.live('second', 'before mixed')
+    parent.ps('mixed', ps_query('host-mixed', tool, EXITQ, sentinel, [first, second], 10.0))
+    parent.live('second', 'after mixed')
+    parent.close('second')
+    parent.wait('second', HOLDER_WAIT)
+    return {'format': PSHOST, 'scope': scope, 'sentinel': sentinel, 'holder': holder_fixture(),
+            'events': journal_records(parent.dir / 'events')}
 
 
-def host_basis(doc):
-    """({'absent_rc'}, None) when a host fact record shows what an answer with
-    a missing pid looks like on its host; (None, why) otherwise."""
+def scope_differs(a, b):
+    """The top-level keys in which two scopes differ."""
+    if not isinstance(a, dict) or not isinstance(b, dict):
+        return ['scope']
+    return sorted(k for k in set(a) | set(b) if a.get(k) != b.get(k))
+
+
+def host_basis(doc, scope):
+    """({'absent_rc', 'scope'}, None) when a host fact record of exactly this
+    scope shows what an answer with a missing pid looks like, from holders
+    its parent started, saw alive, closed and reaped, each with its own end;
+    (None, why) otherwise. Nothing here is taken from the record's word alone."""
     if type(doc) is not dict or doc.get('format') != PSHOST:
         return None, 'not a ps host fact record'
-    sentinel, first, second = doc.get('sentinel'), doc.get('first'), doc.get('second')
+    if not isinstance(scope, dict) or not isinstance(scope.get('ps'), dict):
+        return None, 'no scope to compare the host fact with'
+    differs = scope_differs(doc.get('scope'), scope)
+    if differs:
+        return None, 'the host fact is of another scope: %s' % ', '.join(differs)
+    if doc.get('holder') != holder_fixture():
+        return None, 'the host fact used another holder than this one'
+    events = doc.get('events')
+    if type(events) is not list or len(events) != len(HOST_SEQUENCE):
+        return None, 'the host fact does not hold the %d events of the measurement' % len(HOST_SEQUENCE)
+    for i, (e, (kind, name, when)) in enumerate(zip(events, HOST_SEQUENCE)):
+        if type(e) is not dict or e.get('kind') != kind or e.get('seq') != i or type(e.get('t_ns')) is not int:
+            return None, 'event %d is not the %s the measurement makes there' % (i, kind)
+        if e.get('name' if kind == 'ps' else 'holder') != name or (when is not None and e.get('when') != when):
+            return None, 'event %d is not the %s of the %s %s' % (i, kind, name, when or '')
+    times = [e['t_ns'] for e in events]
+    if times != sorted(times):
+        return None, 'the events are not in the order of their times'
+    sentinel, first, second = doc.get('sentinel'), events[0].get('pid'), events[6].get('pid')
     if not all(type(v) is int for v in (sentinel, first, second)) or len({sentinel, first, second}) != 3:
         return None, 'the record does not name three distinct pids'
-    q = doc.get('queries') if type(doc.get('queries')) is dict else {}
-    wait = doc.get('first_wait') if type(doc.get('first_wait')) is dict else {}
-    expect = {'alive': [first], 'gone': [first], 'mixed': [first, second]}
-    reads = {}
-    for name, targets in expect.items():
-        rec = q.get(name)
-        if type(rec) is not dict or rec.get('targets') != targets or rec.get('sentinel') != sentinel:
+    for i in (1, 3, 8, 10):
+        if 'poll' not in events[i] or events[i]['poll'] is not None:
+            return None, 'the parent did not see the %s holder alive %s' % (events[i]['holder'], events[i]['when'])
+    for i in (5, 12):
+        w = events[i]
+        if w.get('returned') is not True or type(w.get('rc')) is not int:
+            return None, 'the parent did not reap the %s holder with a status' % w['holder']
+        if w['rc'] != HOLDER_EXIT:
+            return None, 'the %s holder ended with %r, not with its own end %r' % (w['holder'], w['rc'], HOLDER_EXIT)
+    tool, reads = scope['ps'], {}
+    for i, name, targets in ((2, 'alive', [first]), (7, 'gone', [first]), (9, 'mixed', [first, second])):
+        answer = read_ps(events[i].get('query'), tool)
+        if answer.get('state') != 'observed':
+            return None, 'the %s query did not answer: %s' % (name, answer.get('why'))
+        q = answer['query']
+        if q['purpose'] != 'host-' + name or q['targets'] != targets or q['sentinel'] != sentinel:
             return None, 'the %s query is not the one asked' % name
-        reads[name] = read_ps(rec)
-        if reads[name].get('state') != 'observed':
-            return None, 'the %s query did not answer: %s' % (name, reads[name].get('why'))
-    if not (type(wait.get('t_ns')) is int and wait['t_ns'] < q['gone'].get('t0_ns', 0)):
-        return None, 'the first child was not reaped before the gone query'
-    if first not in reads['alive']['rows'] or reads['alive']['rows'][first]['stat'].startswith('Z'):
-        return None, 'the alive query did not show the first child alive'
-    if set(reads['gone']['rows']) != {sentinel}:
+        reads[name] = answer
+    alive, gone, mixed = reads['alive'], reads['gone'], reads['mixed']
+    if set(alive['rows']) != {sentinel, first} or alive['rows'][first]['stat'].startswith('Z'):
+        return None, 'the alive query does not show the first holder alive beside the collector'
+    if set(gone['rows']) != {sentinel}:
         return None, 'the gone query shows more than the collector'
-    if set(reads['mixed']['rows']) != {sentinel, second}:
-        return None, 'the mixed query does not show exactly the collector and the second child'
-    if q['gone']['outcome']['rc'] != q['mixed']['outcome']['rc']:
+    if set(mixed['rows']) != {sentinel, second} or mixed['rows'][second]['stat'].startswith('Z'):
+        return None, 'the mixed query does not show exactly the collector and the second holder alive'
+    if not (events[1]['t_ns'] <= alive['query']['t0_ns'] and alive['query']['t1_ns'] <= events[3]['t_ns']):
+        return None, 'the alive query did not run between the two times the parent saw the first holder alive'
+    if not events[5]['t_ns'] < gone['query']['t0_ns']:
+        return None, 'the gone query did not start after the parent reaped the first holder'
+    if not (events[8]['t_ns'] <= mixed['query']['t0_ns'] and mixed['query']['t1_ns'] <= events[10]['t_ns']):
+        return None, 'the mixed query did not run between the two times the parent saw the second holder alive'
+    if gone['query']['rc'] != mixed['query']['rc']:
         return None, 'the two answers with a missing pid end with different statuses'
-    return {'absent_rc': q['gone']['outcome']['rc'], 'record': 'ps host fact'}, None
+    return {'absent_rc': gone['query']['rc'], 'scope': scope}, None
 
 
 # --- response files: each step kept as it went -------------------------------------------------------
@@ -794,7 +1145,7 @@ class Store:
 
 
 class Journal:
-    """The observer's records, each written once, in order. Nothing else writes here."""
+    """Records, each written once, in order. One writer per journal."""
 
     def __init__(self, directory):
         self.dir = Path(directory)
@@ -817,10 +1168,11 @@ class Observer(threading.Thread):
     reads them only after this thread has ended. It is not a daemon: a
     process that started it lives until it ends."""
 
-    def __init__(self, rec, scenario, impl, where, obs_dir, calls_dir, journal, store, basis):
+    def __init__(self, rec, scenario, impl, where, obs_dir, calls_dir, journal, store, tool, scope, basis):
         super().__init__(daemon=False, name='npm-response-observer')
         self.rec, self.scenario, self.impl, self.where = rec, scenario, impl, where
-        self.obs_dir, self.calls_dir, self.journal, self.store, self.basis = obs_dir, calls_dir, journal, store, basis
+        self.obs_dir, self.calls_dir, self.journal, self.store = obs_dir, calls_dir, journal, store
+        self.tool, self.scope, self.basis = tool, scope, basis
         self.words, self.quiet = rec['statement']['words'], rec['quiet']
         self.sentinel = os.getpid()
         self.children = {}
@@ -866,7 +1218,7 @@ class Observer(threading.Thread):
         return scratch + '/' + name, scratch + '/' + name + slots['err']
 
     def read_slots(self, child, when, trigger):
-        for channel, path in zip(('out', 'err'), child['slot_paths']):
+        for channel, path in zip(CHANNELS, child['slot_paths']):
             observe_slot(self.journal, self.store, {'child': child['nonce'], 'when': when, 'trigger': trigger, 'channel': channel}, path)
 
     def touch(self, nonce, what, why):
@@ -886,7 +1238,8 @@ class Observer(threading.Thread):
         try:
             self.journal.write('observer-start', {'sentinel': self.sentinel, 'scenario': self.scenario['name'], 'impl': self.impl,
                                                   'order_budget_seconds': ORDER_BUDGET, 'close_budget_seconds': CLOSE_BUDGET,
-                                                  'basis': self.basis})
+                                                  'run_id': self.scope['run_id'], 'ps': self.tool['path'],
+                                                  'basis_absent_rc': (self.basis or {}).get('absent_rc')})
             while not self.ending():
                 phase = 'scan'
                 self.scan()
@@ -938,14 +1291,14 @@ class Observer(threading.Thread):
         with open(os.path.join(self.obs_dir, nonce + '.started.json'), encoding='utf-8', errors='surrogateescape') as f:
             doc = json.load(f)
         name, ask, scratch = self.identify(doc)
-        pid = doc.get('pid')
-        query = ps_query('start', TREE, self.sentinel, [pid], self.ps_timeout()) if type(pid) is int else None
-        child = {'nonce': nonce, 'pid': pid if type(pid) is int else None, 'ask': ask, 'scratch': scratch,
+        pid = doc.get('pid') if type(doc.get('pid')) is int else None
+        query = ps_query('start', self.tool, TREE, self.sentinel, [pid], self.ps_timeout()) if pid is not None else None
+        child = {'nonce': nonce, 'pid': pid, 'ask': ask, 'scratch': scratch, 'start': None,
                  'slot_paths': self.slot_paths(ask, scratch) if ask else None, 'written': False, 'released': False, 'exited': False}
         self.children[nonce] = child
-        record = {'child': nonce, 'pid': pid, 'ask': name, 'scratch': scratch, 'ps': query}
-        self.journal.write('start', record)
-        child['start_lstart'] = start_lstart(record)
+        self.journal.write('start', {'child': nonce, 'pid': pid, 'ask': name, 'scratch': scratch, 'ps': query})
+        if query is not None:
+            child['start'], _ = start_identity(read_ps(query, self.tool), pid)
         if self.scenario.get('claim_order') and (ask is None or self.claims_done):
             self.touch(nonce, 'claim-go', 'not held at the claim')
 
@@ -983,7 +1336,7 @@ class Observer(threading.Thread):
         child['written'] = True
         if child['slot_paths']:
             self.read_slots(child, 'written', child['nonce'])
-        self.journal.write('tree', {'trigger': child['nonce'], 'ps': ps_query('tree', TREE, self.sentinel, None, self.ps_timeout())})
+        self.journal.write('tree', {'trigger': child['nonce'], 'ps': ps_query('tree', self.tool, TREE, self.sentinel, None, self.ps_timeout())})
         held = not self.barrier_done and child['ask'] is not None and child['ask']['attempt'] == 'initial'
         if not held:
             if child['slot_paths']:
@@ -1060,10 +1413,11 @@ class Observer(threading.Thread):
         self.last_poll = time.monotonic()
         if not waiting:
             return
-        query = ps_query('exit', EXITQ, self.sentinel, [c['pid'] for c in waiting], self.ps_timeout())
-        read = read_ps(query, self.basis)
-        readings = {c['nonce']: exit_reading(read, c['pid'], c['start_lstart']) for c in waiting}
-        seq = self.journal.write('exit-poll', {'children': [c['nonce'] for c in waiting], 'ps': query, 'readings': readings})
+        targets = [{'child': c['nonce'], 'pid': c['pid']} for c in waiting]
+        query = ps_query('exit', self.tool, EXITQ, self.sentinel, [t['pid'] for t in targets], self.ps_timeout())
+        answer = read_ps(query, self.tool, self.basis)
+        readings = {c['nonce']: target_exit(answer, c['pid'], c['start']) for c in waiting}
+        seq = self.journal.write('exit-poll', {'targets': targets, 'ps': query, 'readings': readings})
         for c in waiting:
             r = readings[c['nonce']]
             if r['state'] == 'observed' and r['value']['exit'] in EXITED:
@@ -1087,7 +1441,7 @@ def hook_env(rec, where):
 
 
 def journal_records(directory):
-    """Every record of an observer journal, in order."""
+    """Every record of a journal, in order."""
     out = []
     d = Path(directory)
     if d.is_dir():
@@ -1097,7 +1451,7 @@ def journal_records(directory):
     return out
 
 
-def launch(ctx, rec, impl, hook, scenario, base, basis):
+def launch(ctx, rec, impl, hook, scenario, base, tool, scope, basis):
     """One implementation's pre hook under one scenario, kept whole under <base>.
     Returns only when the hook returned and the observer ended and its records
     were handed over; otherwise raises CollectStop or LifetimePending."""
@@ -1127,12 +1481,13 @@ def launch(ctx, rec, impl, hook, scenario, base, basis):
     cwd = fill(rec['hook']['cwd'], where)
     before = evidence.before_launch(hook, env, cwd)
     journal, store = Journal(d / 'observer'), Store(d / 'blobs')
-    watcher = Observer(rec, scenario, impl, where, str(obs), str(calls), journal, store, basis)
+    watcher = Observer(rec, scenario, impl, where, str(obs), str(calls), journal, store, tool, scope, basis)
     write_json(d / 'launch.json', {
         'format': LAUNCH, 'impl': impl, 'scenario': scenario['name'], 'argv': hook['argv'], 'env': env, 'cwd': cwd,
         'stdin': data.decode('utf-8'), 'box': str(box), 'system_dirs': ctx.sysdirs, 'collector_pid': os.getpid(),
         'standin_sha256': sha(code.encode('utf-8')), 'standin_python': sys.executable, 'conf_sha256': sha(conf_bytes),
-        'executable_before': before, 'hook_files': ctx.hook_files[impl], 'basis': basis,
+        'executable_before': before, 'hook_files': ctx.hook_files[impl], 'run_id': scope['run_id'],
+        'ps_tool': tool['path'], 'basis_absent_rc': (basis or {}).get('absent_rc'),
         'budgets': {'order': ORDER_BUDGET, 'close': CLOSE_BUDGET, 'join': JOIN_SECONDS, 'hold': HOLD_SECONDS}})
     result, failure = None, None
     watcher.start()
@@ -1152,7 +1507,8 @@ def launch(ctx, rec, impl, hook, scenario, base, basis):
     def finish():
         """Hand over the launch once the observer has ended: what the hook left,
         and what the observer's journal ends with."""
-        end = {'format': LAUNCH, 'observer': {'ended': not watcher.is_alive(), 'fatal': watcher.fatal}, 'failure': None, 'hook': None}
+        end = {'format': LAUNCH, 'observer': {'ended': not watcher.is_alive(), 'fatal': watcher.fatal}, 'failure': None, 'hook': None,
+               't_ns': time.time_ns()}
         if failure is not None:
             end['failure'] = {'type': type(failure).__name__, 'error': str(failure)}
         if result is not None:
@@ -1283,11 +1639,6 @@ def read_pending(raw, shape, fields):
 DEFECT_FREE = ('shared-effect-declared',)
 
 
-def unseen(code):
-    base = code[len('follow-'):] if code.startswith('follow-') else code
-    return base.startswith('unobserved-') or base == 'no-observations'
-
-
 def load_view(d):
     """Everything a completed launch left, as plain data. Declared controls edit a copy of this."""
     d = Path(d)
@@ -1344,9 +1695,11 @@ def journal_index(view):
     return idx
 
 
-def judge_launch(rec, scenario, view, basis, shared_effects=()):
+def judge_launch(rec, scenario, view, tool, basis, shared_effects=()):
     """The facts of one launch and the codes they raise. Each code names a
-    role and what was wrong; the verdict is a function of the codes alone."""
+    role, a channel where it has one, and what was wrong; the verdict is a
+    function of the codes alone. <tool> and <basis> are the collection's
+    sealed ps and host basis, never this machine's."""
     launch_doc = view['launch']
     impl = launch_doc['impl']
     where = places(launch_doc['box'], launch_doc['system_dirs'])
@@ -1358,7 +1711,7 @@ def judge_launch(rec, scenario, view, basis, shared_effects=()):
     for nonce, docs in view['children'].items():
         started = docs.get('started')
         if not isinstance(started, dict):
-            codes.append('unobserved-start:%s' % nonce)
+            codes.append(code('unobserved-start', nonce))
             continue
         found = None
         for name, ask in rec['asks'].items():
@@ -1377,8 +1730,10 @@ def judge_launch(rec, scenario, view, basis, shared_effects=()):
                            'scratch': scratch, 'slot': {'out': slot, 'err': slot + slots['err']}, 'docs': docs}
     if not view['children']:
         codes.append('no-observations')
-        return {'codes': sorted(set(codes)), 'verdict': verdict(codes), 'others': [], 'roles': {}, 'claim_order': [],
-                'completion': [], 'initial_scratch': None, 'hook': hook_facts(rec, view, where)}
+        codes = sorted(set(codes))
+        return {'codes': codes, 'verdict': verdict(codes), 'others': [], 'roles': {}, 'claim_order': [],
+                'completion': [], 'initial_scratch': None, 'hook': hook_facts(rec, view, where),
+                'intervention': intervention_state(rec, scenario, view, {})}
     groups = {}
     for c in children.values():
         groups.setdefault(c['scratch'], []).append(c)
@@ -1398,9 +1753,9 @@ def judge_launch(rec, scenario, view, basis, shared_effects=()):
     for role in ROLES:
         n = len(by_role.get(role, []))
         if n == 0:
-            codes.append('missing-role:%s' % role)
+            codes.append(code('missing-role', role))
         elif n > 1:
-            codes.append('duplicate-role:%s' % role)
+            codes.append(code('duplicate-role', role))
     others = []
     declared = scenario.get('groups', ['initial'])
     for scratch, members in sorted(groups.items()):
@@ -1412,7 +1767,7 @@ def judge_launch(rec, scenario, view, basis, shared_effects=()):
             codes.append('undeclared-group')
         others.append({'scratch': scratch, 'attempt': attempts[0] if len(attempts) == 1 else attempts,
                        'roles': sorted(c['role'] for c in members), 'status': status, 'members': [c['nonce'] for c in members]})
-    exits = {n: exit_fact(idx, c, basis) for n, c in children.items()}
+    exits = {n: exit_fact(idx, c, tool, basis) for n, c in children.items()}
     expected = {name: fill(rec['answers'][answer], where) for name, answer in scenario['answers'].items()}
     roles = {}
     for scratch, members in groups.items():
@@ -1423,22 +1778,23 @@ def judge_launch(rec, scenario, view, basis, shared_effects=()):
             if len(lone[(c['attempt'], c['role'])]) != 1:
                 continue  # A duplicate is already a code; which copy is which is not read.
             facts, found = child_facts(c, members, expected, idx, view, exits[c['nonce']])
-            for code in found:
-                codes.append(code if c['attempt'] == 'initial' or scratch == g1 else 'follow-' + code)
+            for one in found:
+                codes.append(one if c['attempt'] == 'initial' or scratch == g1 else 'follow-' + one)
             key = c['role'] if c['attempt'] == 'initial' and scratch == g1 else '%s@%s' % (c['ask_name'], c['nonce'][:8])
             roles[key] = facts
     for o in others:
-        o['codes'] = sorted({code for m in o['members'] for code in roles.get('%s@%s' % (children[m]['ask_name'], m[:8]), {}).get('codes', [])})
+        o['codes'] = sorted({one for m in o['members'] for one in roles.get('%s@%s' % (children[m]['ask_name'], m[:8]), {}).get('codes', [])})
         if o['status'] == 'outside' and o['codes']:
             o['status'] = 'rejected' if any(not unseen(c) for c in o['codes']) else 'unresolved'
             codes.append('follow-group-defect' if o['status'] == 'rejected' else 'follow-unobserved-group')
         del o['members']
-    codes += request_checks(rec, children, view, where) + process_checks(children, view, idx, g1)
+    codes += request_checks(rec, children, view, where) + process_checks(children, view, idx, g1, tool)
     codes = sorted(set(codes))
     claim = [c.get('nonce') for c in sorted(view['calls'], key=lambda r: r['_claim'])]
     return {'codes': codes, 'verdict': verdict(codes), 'others': others, 'roles': roles,
             'claim_order': [children[n]['role'] if n in children else '?' for n in claim],
-            'completion': exit_order(children, exits, g1), 'initial_scratch': g1, 'hook': hook_facts(rec, view, where)}
+            'completion': exit_order(children, exits, g1), 'initial_scratch': g1, 'hook': hook_facts(rec, view, where),
+            'intervention': intervention_state(rec, scenario, view, roles)}
 
 
 def verdict(codes):
@@ -1446,9 +1802,9 @@ def verdict(codes):
     observed. not-applicable: only a declared shared effect."""
     if not codes:
         return 'applicable'
-    base = [c[len('follow-'):] if c.startswith('follow-') else c for c in codes]
-    missing = [c for c in codes if unseen(c)]
-    defects = [c for c, b in zip(codes, base) if not unseen(c) and b not in DEFECT_FREE]
+    parts = [code_parts(c) for c in codes]
+    missing = [p for p in parts if p['unseen']]
+    defects = [p for p in parts if not p['unseen'] and p['kind'] not in DEFECT_FREE]
     if defects:
         return 'rejected'
     if missing:
@@ -1464,21 +1820,30 @@ def own_object(started, fd):
     return (f['dev'], f['ino'])
 
 
-def exit_fact(idx, c, basis):
-    """The first exit the judge reads in the observer's polls for this child:
-    ({'how', 't_ns', 'poll'}, None), or (None, why). Read again here."""
+def exit_fact(idx, c, tool, basis):
+    """The first exit the judge reads for this child: ({'how', 't_ns', 'poll'}, why, binding).
+    A poll counts only through the target it bound to this child, with the
+    pid the child itself recorded; a poll that bound the child to another pid
+    is listed in <binding> and read for nothing. Read again here."""
     nonce = c['nonce']
     pid = c['docs'].get('started', {}).get('pid')
-    lstart = start_lstart(idx['start'].get(nonce))
-    last = 'the observer kept no poll for this child'
+    start = None
+    record = idx['start'].get(nonce)
+    if isinstance(record, dict):
+        start, _ = start_identity(read_ps(record.get('ps'), tool), pid)
+    last, binding = 'the observer kept no poll for this child', []
     for poll in idx['polls']:
-        if nonce not in (poll.get('children') or []):
+        mine = [t for t in (poll.get('targets') or []) if isinstance(t, dict) and t.get('child') == nonce]
+        if not mine:
             continue
-        reading = exit_reading(read_ps(poll.get('ps'), basis), pid, lstart)
+        if len(mine) != 1 or mine[0].get('pid') != pid or type(pid) is not int:
+            binding.append(poll.get('seq'))
+            continue
+        reading = target_exit(read_ps(poll.get('ps'), tool, basis), pid, start)
         if reading['state'] == 'observed' and reading['value']['exit'] in EXITED:
-            return {'how': reading['value']['exit'], 't_ns': poll['ps'].get('t1_ns'), 'poll': poll.get('seq')}, None
+            return {'how': reading['value']['exit'], 't_ns': poll['ps'].get('t1_ns'), 'poll': poll.get('seq')}, None, binding
         last = reading.get('why') if reading['state'] != 'observed' else 'the process was still there'
-    return None, last
+    return None, last, binding
 
 
 def child_facts(c, members, expected, idx, view, exit_seen):
@@ -1493,84 +1858,83 @@ def child_facts(c, members, expected, idx, view, exit_seen):
         own = own_object(started, fd)
         facts[ch + '_object'] = own
         if own is None:
-            codes.append('unobserved-desc-self:%s' % role)
+            codes.append(code('unobserved-desc-self', ch, role))
         if isinstance(written, dict):
             later = own_object(written, fd)
             if later is None:
-                codes.append('unobserved-desc-self:%s' % role)
+                codes.append(code('unobserved-desc-self', ch, role))
             elif own is not None and later != own:
-                codes.append('desc-changed:%s' % role)
+                codes.append(code('desc-changed', ch, role))
         at_written = [r for r in reads if r.get('when') == 'written' and r.get('child') == nonce and r.get('channel') == ch]
         if not at_written:
-            codes.append('unobserved-desc-object:%s' % role)
+            codes.append(code('unobserved-desc-object', ch, role))
         else:
             fact = at_written[-1].get('fact')
             seen = slot_reading(fact, view['blobs'])
             facts[ch + '_at_written'] = {k: seen[k] for k in ('lstat', 'lstat_object', 'fstat_object', 'identity')}
             if seen['identity'] == 'mismatch':
-                codes.append('slot-object-mismatch:%s' % role)
+                codes.append(code('slot-object-mismatch', ch, role))
             if seen['lstat'] == 'absent':
                 if own is not None:
-                    codes.append('desc-object:%s' % role)
+                    codes.append(code('desc-object', ch, role))
             elif compare(own, seen['lstat_object']) == 'mismatch':
-                codes.append('desc-object:%s' % role)
+                codes.append(code('desc-object', ch, role))
             elif compare(own, seen['lstat_object']) == 'incomparable':
-                codes.append('unobserved-desc-object:%s' % role)
+                codes.append(code('unobserved-desc-object', ch, role))
             self_path = (started.get('fds', {}).get(fd) or {}).get('path')
             getpath = (fact or {}).get('getpath') if isinstance(fact, dict) else None
             seen_path = getpath.get('value') if isinstance(getpath, dict) and getpath.get('state') == 'observed' else None
             if not isinstance(self_path, str) or not isinstance(seen_path, str):
-                codes.append('unobserved-desc-path:%s' % role)
+                codes.append(code('unobserved-desc-path', ch, role))
             elif self_path != seen_path:
-                codes.append('desc-path:%s' % role)
+                codes.append(code('desc-path', ch, role))
         released = [r for r in reads if r.get('when') == 'release' and isinstance(r.get('fact'), dict) and r['fact'].get('path') == c['slot'][ch]]
         if not released:
-            codes.append('unobserved-output:%s' % role)
+            codes.append(code('unobserved-output', ch, role))
             continue
         seen = slot_reading(released[-1]['fact'], view['blobs'])
         facts[ch + '_at_release'] = {k: seen[k] for k in ('lstat', 'lstat_object', 'fstat_object', 'identity')}
         if seen['lstat'] == 'absent':
-            codes.append('slot-absent:%s' % role)
+            codes.append(code('slot-absent', ch, role))
             continue
         if seen['identity'] == 'mismatch':
-            codes.append('slot-object-mismatch:%s' % role)
+            codes.append(code('slot-object-mismatch', ch, role))
         elif seen['identity'] == 'incomparable':
-            codes.append('unobserved-slot-object:%s' % role)
+            codes.append(code('unobserved-slot-object', ch, role))
         known = [(m['role'], own_object(m['docs'].get('started', {}), fd)) for m in members]
         obj = seen['fstat_object']
         if obj is None:
-            codes.append('unobserved-slot-holder:%s' % role)
+            codes.append(code('unobserved-slot-holder', ch, role))
         else:
             holder = [r for r, o in known if o is not None and o == obj]
             facts[ch + '_slot_holds'] = holder
             if holder == [role]:
                 pass
             elif len(holder) == 1:
-                codes.append('slot-holds:%s:%s' % (role, holder[0]))
+                codes.append(code('slot-holds', ch, role, holder[0]))
             elif len(holder) > 1:
-                codes.append('slot-shared-object:%s' % role)
+                codes.append(code('slot-shared-object', ch, role))
             elif any(o is None for _, o in known):
-                codes.append('unobserved-slot-holder:%s' % role)
+                codes.append(code('unobserved-slot-holder', ch, role))
             else:
-                codes.append('slot-unknown-object:%s' % role)
+                codes.append(code('slot-unknown-object', ch, role))
         data = seen['bytes']
         if data is None:
-            codes.append('unobserved-output:%s' % role)
+            codes.append(code('unobserved-output', ch, role))
             continue
         key = 'stdout' if ch == 'out' else 'stderr'
         txt = data.decode('utf-8', 'surrogateescape')
         facts[ch + '_content_sha256'] = sha(data)
         match = [r for r, a in sorted(group_answers.items()) if a[key] == txt]
         facts[ch + '_content_is'] = match
-        prefix = 'content' if ch == 'out' else 'stderr-content'
         if match != [role]:
-            codes.append('%s:%s:%s' % (prefix, role, match[0]) if len(match) == 1 else '%s-unexpected:%s' % (prefix, role))
+            codes.append(code('content', ch, role, match[0]) if len(match) == 1 else code('content-unexpected', ch, role))
     # The child's own output objects, wherever they ended up, against its
     # record: each channel on its own, so one that was not read cannot hide the other.
     records = [r for r in view['calls'] if r.get('nonce') == nonce]
     facts['claims'] = [r['_claim'] for r in records]
     if len(records) != 1:
-        codes.append('record-missing:%s' % role if not records else 'record-duplicate:%s' % role)
+        codes.append(code('record-missing', role) if not records else code('record-duplicate', role))
     else:
         record = records[0]
         conf = view['conf']['answers']
@@ -1579,9 +1943,8 @@ def child_facts(c, members, expected, idx, view, exit_seen):
                   'stdout': mine['stdout'], 'stderr': mine['stderr'], 'exit': mine['exit']}
         bad = [k for k, v in wanted.items() if record.get(k) != v]
         if bad or index is None or conf[index]['stdout'] != mine['stdout'] or conf[index]['stderr'] != mine['stderr'] or conf[index]['exit'] != mine['exit']:
-            codes.append('record:%s' % role)
+            codes.append(code('record', role))
             facts['record_fields_differ'] = bad
-        differs = False
         for ch, fd, key in (('out', '1', 'stdout'), ('err', '2', 'stderr')):
             own = own_object(started, fd)
             if own is None:
@@ -1594,30 +1957,31 @@ def child_facts(c, members, expected, idx, view, exit_seen):
                 if seen['fstat_object'] == own and seen['bytes'] is not None:
                     hits.append((r['fact'].get('t_ns', 0), seen['bytes']))
             if not hits:
-                codes.append('unobserved-output:%s' % role)
+                codes.append(code('unobserved-output', ch, role))
                 continue
             if max(hits)[1] != record.get(key, '').encode('utf-8', 'surrogateescape'):
-                differs = True
-        if differs:
-            codes.append('record-not-actual:%s' % role)
+                codes.append(code('record-not-actual', ch, role))
     # Its planned exit status, and an exit the judge reads in the observer's polls.
-    seen_exit, why = exit_seen
+    seen_exit, why, binding = exit_seen
     facts['exit_seen'] = seen_exit if seen_exit else {'unobserved': why}
     facts['exit_value_from_outside'] = 'not observed: only the parent receives an exit status'
+    if binding:
+        facts['exit_polls_bound_elsewhere'] = binding
+        codes.append(code('exit-binding', role))
     if seen_exit is None:
-        codes.append('unobserved-exit:%s' % role)
+        codes.append(code('unobserved-exit', role))
     for r in idx['exited']:
         if r.get('child') == nonce and (seen_exit is None or r.get('poll') != seen_exit['poll']):
             if seen_exit is None or (isinstance(r.get('poll'), int) and r['poll'] < seen_exit['poll']):
-                codes.append('observer-exit-unsupported:%s' % role)
+                codes.append(code('observer-exit-unsupported', role))
     if not isinstance(written, dict):
-        codes.append('unobserved-exit-planned:%s' % role)
+        codes.append(code('unobserved-exit-planned', role))
     elif written.get('exit') != mine['exit']:
-        codes.append('exit-planned:%s' % role)
+        codes.append(code('exit-planned', role))
     exiting = docs.get('exiting')
     facts['released_by_observer'] = bool(isinstance(exiting, dict) and exiting.get('released'))
     if not facts['released_by_observer']:
-        codes.append('unobserved-release:%s' % role)
+        codes.append(code('unobserved-release', role))
     facts['codes'] = sorted(set(codes))
     return facts, codes
 
@@ -1629,7 +1993,7 @@ def exit_order(children, exits, g1):
     for n, c in children.items():
         if c['scratch'] != g1 or c['attempt'] != 'initial':
             continue
-        e, _ = exits[n]
+        e = exits[n][0]
         if e is not None:
             seen.append((e['poll'], e['t_ns'] or 0, c['role']))
     seen.sort()
@@ -1691,25 +2055,25 @@ def request_checks(rec, children, view, where):
         got = started.get('env', {})
         for key in spec['inherited']:
             if got.get(key) != env.get(key):
-                codes.append('request-env:%s:%s' % (role, key))
+                codes.append(code('request-env', role, key))
         if got.get('PWD') != fill(c['ask']['cwd'], where):
-            codes.append('request-env:%s:PWD' % role)
+            codes.append(code('request-env', role, 'PWD'))
         for key in spec['absent']:
             if key in got:
-                codes.append('request-env:%s:%s' % (role, key))
+                codes.append(code('request-env', role, key))
         scratch = c['scratch']
         leaf = os.path.basename(scratch)
         if os.path.dirname(scratch) != rule['parent'] or not leaf.startswith(rule['leaf_prefix']) or len(leaf) <= len(rule['leaf_prefix']):
-            codes.append('request-scratch:%s' % role)
+            codes.append(code('request-scratch', role))
         fact = started.get('paths', {}).get(scratch)
         if not isinstance(fact, dict) or fact.get('error') is not None:
-            codes.append('unobserved-request-scratch-object:%s' % role)
+            codes.append(code('unobserved-request-scratch-object', role))
         elif fact.get('kind') != 'dir':
-            codes.append('request-scratch-object:%s' % role)
+            codes.append(code('request-scratch-object', role))
     return codes
 
 
-def process_checks(children, view, idx, g1):
+def process_checks(children, view, idx, g1, tool):
     """Each child's process in the ps tree the observer read when it wrote: its
     parent is the one it reported, and the hook's process is above it."""
     codes = []
@@ -1718,9 +2082,9 @@ def process_checks(children, view, idx, g1):
     for nonce, c in children.items():
         started, role = c['docs'].get('started', {}), c['role']
         tree = idx['trees'].get(nonce)
-        read = read_ps(tree.get('ps')) if isinstance(tree, dict) else unavailable('tree', 'no tree was read')
+        read = read_ps(tree.get('ps'), tool) if isinstance(tree, dict) else unavailable('tree', 'no tree was read')
         if read.get('state') != 'observed':
-            codes.append('unobserved-process:%s' % role)
+            codes.append(code('unobserved-process', role))
             continue
         rows = read['rows']
         row = rows.get(started.get('pid'))
@@ -1728,26 +2092,165 @@ def process_checks(children, view, idx, g1):
             exiting = c['docs'].get('exiting')
             held = isinstance(exiting, dict) and exiting.get('released')
             # A child whose own hold ran out may be gone already; then its absence is not a finding.
-            codes.append('process-unseen:%s' % role if held else 'unobserved-process:%s' % role)
+            codes.append(code('process-unseen', role) if held else code('unobserved-process', role))
             continue
         if row['ppid'] != str(started.get('ppid')):
-            codes.append('process-parent:%s' % role)
+            codes.append(code('process-parent', role))
         if not row['command'].endswith(' ' + ' '.join(started.get('argv', []))):
-            codes.append('process-command:%s' % role)
+            codes.append(code('process-command', role))
         chain, p, hops = [], row['ppid'], 0
-        while p and p.isdigit() and int(p) in rows and hops < 64:
+        while digits(p) and int(p) in rows and hops < 64:
             chain.append(int(p))
             if int(p) == hook_pid:
                 break
             p, hops = rows[int(p)]['ppid'], hops + 1
         if hook_pid not in chain:
-            codes.append('process-not-under-hook:%s' % role)
+            codes.append(code('process-not-under-hook', role))
         if c['scratch'] == g1 and c['attempt'] == 'initial':
             parents.setdefault(row['ppid'], []).append(role)
     if len(parents) > 1:
         codes.append('parents-differ')
     return codes
 
+
+# --- the scenario's intervention, and the rows it decides ----------------------------------------------
+#
+# A negative scenario changes one thing on purpose (its intervention). Its
+# premise is a fact of the records: the six renames of a slot swap as
+# planned, or each emitting child's own record of the other answer's bytes.
+# scenario_rows reads every code through code_parts and keeps two questions
+# apart: the comparisons the intervention cannot touch (the linkage row) and
+# the intervention's own effect (the intervention row). An intervention that
+# was not made leaves only its own effect and the result not run.
+
+def planned_swaps(roles, iv):
+    """The renames a slot swap of <iv>'s roles makes, in order, or None."""
+    a, b = iv['roles']
+    if a not in roles or b not in roles:
+        return None
+    out = []
+    for ch in CHANNELS:
+        pa, pb = roles[a]['slot'][ch], roles[b]['slot'][ch]
+        spare = pa + '.npmresp-swap'
+        out += [[pa, spare], [pb, pa], [spare, pb]]
+    return out
+
+
+def intervention_state(rec, scenario, view, roles):
+    """{'state': 'none' | 'made' | 'not-made' | 'contradicted' | 'unobserved', 'why'}."""
+    iv = scenario.get('intervention')
+    if not iv:
+        return {'state': 'none', 'why': None}
+    if iv['kind'] == 'swap-slots':
+        planned = planned_swaps(roles, iv)
+        if planned is None:
+            return {'state': 'unobserved', 'why': 'the initial children of the swapped roles were not identified'}
+        got = [r.get('rename') for r in view['journal'] if r.get('kind') == 'swap']
+        if got == planned:
+            return {'state': 'made', 'why': 'the %d planned renames were recorded in order' % len(planned)}
+        if got == planned[:len(got)]:
+            return {'state': 'not-made', 'why': '%d of the %d planned renames were recorded' % (len(got), len(planned))}
+        return {'state': 'contradicted', 'why': 'a recorded rename is not the planned one', 'renames': got}
+    if iv['kind'] == 'emit':
+        where = places(view['launch']['box'], view['launch']['system_dirs'])
+        made = []
+        for role, other in sorted(scenario['emit'].items()):
+            if role not in roles:
+                return {'state': 'unobserved', 'why': 'the %s child was not identified' % role}
+            written = view['children'].get(roles[role]['nonce'], {}).get('written')
+            wrote = written.get('wrote') if isinstance(written, dict) else None
+            if not isinstance(wrote, dict):
+                return {'state': 'unobserved', 'why': 'the %s child left no record of what it wrote' % role}
+            want = fill(rec['answers'][scenario['answers'][other]], where)
+            own = fill(rec['answers'][scenario['answers'][role]], where)
+            got = [(wrote.get(fd) or {}).get('sha256') for fd in ('1', '2')]
+            if got == [sha(want[k].encode('utf-8', 'surrogateescape')) for k in ('stdout', 'stderr')]:
+                made.append(role)
+            elif got == [sha(own[k].encode('utf-8', 'surrogateescape')) for k in ('stdout', 'stderr')]:
+                return {'state': 'not-made', 'why': 'the %s child wrote its own answer' % role}
+            else:
+                return {'state': 'contradicted', 'why': 'the %s child wrote neither answer' % role}
+        return {'state': 'made', 'why': 'each emitting child recorded the other answer\'s bytes: %s' % ', '.join(made)}
+    return {'state': 'contradicted', 'why': 'an intervention of unknown kind %r' % iv['kind']}
+
+
+def in_scope(parts, iv):
+    """True for a defect the intervention can raise: its kind, its roles and its channel."""
+    if not parts['known'] or parts['follow'] or parts['kind'] not in iv['kinds']:
+        return False
+    if parts.get('role') not in iv['roles'] or ('other' in parts and parts['other'] not in iv['roles']):
+        return False
+    return 'channel' not in parts or parts['channel'] in iv['channels']
+
+
+def blocks(parts, iv):
+    """True for an unobserved code that keeps the intervention's effect from being read."""
+    return (parts['known'] and not parts['follow'] and parts['kind'] in iv['unseen_kinds'] and parts.get('role') in iv['roles']
+            and ('channel' not in parts or parts['channel'] in iv['channels']))
+
+
+def decided(status, errors=(), reason='checked', **more):
+    return dict(more, status=status, errors=list(errors), reason=reason)
+
+
+def scenario_rows(scenario, facts):
+    """The linkage row, the intervention row (None without one) and whether
+    the result's premise held, decided from the codes' parts and the
+    intervention's state. Rows only record these decisions."""
+    expect = scenario['expect']
+    iv = scenario.get('intervention')
+    linkage = [code_parts(c) for c in facts['codes'] if code_layer(c) == 'linkage']
+    independent = [p['code'] for p in linkage if not p['unseen'] and not (iv and in_scope(p, iv))]
+    dependent = [p['code'] for p in linkage if not p['unseen'] and iv and in_scope(p, iv)]
+    unseen_linkage = [p['code'] for p in linkage if p['unseen']]
+    unseen_any = [c for c in facts['codes'] if unseen(c)]
+    others = [{k: o[k] for k in ('attempt', 'roles', 'status', 'codes')} for o in facts['others']]
+    extra = sorted(set(independent) - set(expect['codes']))
+    missing = sorted(set(expect['codes']) - set(independent))
+    errors = []
+    if extra or (missing and not unseen_linkage):
+        errors.append({'field': 'defect codes the intervention cannot raise', 'actual': sorted(independent), 'expected': sorted(expect['codes'])})
+    if others != expect['others']:
+        errors.append({'field': 'groups outside the initial one', 'actual': others, 'expected': expect['others']})
+    if errors:
+        row = decided('fail', errors, independent=independent)
+    elif unseen_linkage:
+        row = decided('not-run', reason='unobserved: ' + ', '.join(unseen_linkage), independent=independent)
+    else:
+        if iv is None and not unseen_any and facts['verdict'] != expect['verdict']:
+            errors.append({'field': 'verdict', 'actual': facts['verdict'], 'expected': expect['verdict']})
+        row = decided('fail' if errors else 'pass', errors, independent=independent)
+    out = {'linkage': row, 'intervention': None, 'result_premise': {'held': True, 'why': None}}
+    if iv is None:
+        return out
+    state = facts['intervention']
+    blocking = [p['code'] for p in linkage if p['unseen'] and blocks(p, iv)]
+    if state['state'] == 'contradicted':
+        out['intervention'] = decided('fail', [{'field': 'intervention', 'actual': state, 'expected': iv['premise']}],
+                                      state=state, dependent=dependent)
+    elif state['state'] != 'made':
+        out['intervention'] = decided('not-run', reason='the intervention was not made: %s' % state['why'], state=state,
+                                      unattributed=sorted(dependent + blocking))
+    else:
+        errs = []
+        extra = sorted(set(dependent) - set(expect['intervention_codes']))
+        missing = sorted(set(expect['intervention_codes']) - set(dependent))
+        if extra or (missing and not blocking):
+            errs.append({'field': 'defect codes the intervention raised', 'actual': sorted(dependent), 'expected': sorted(expect['intervention_codes'])})
+        if errs:
+            out['intervention'] = decided('fail', errs, state=state, dependent=dependent)
+        elif blocking:
+            out['intervention'] = decided('not-run', reason='unobserved: ' + ', '.join(blocking), state=state, dependent=dependent, missing=missing)
+        else:
+            if facts['verdict'] != expect['verdict']:
+                errs.append({'field': 'verdict', 'actual': facts['verdict'], 'expected': expect['verdict']})
+            out['intervention'] = decided('fail' if errs else 'pass', errs, state=state, dependent=dependent)
+    if state['state'] != 'made':
+        out['result_premise'] = {'held': False, 'why': 'the intervention was not made: %s' % state['why']}
+    return out
+
+
+# --- the hook's own result ----------------------------------------------------------------------------
 
 def pending_key(rec, view, where):
     return os.path.relpath(fill(rec['results']['positive']['pending']['path'], where), view['launch']['box'] + '/state')
@@ -1861,8 +2364,8 @@ def replace_text(value, old, new):
     return value
 
 
-def role_nonce(rec, scenario, view, basis, role, attempt='initial'):
-    facts = judge_launch(rec, scenario, view, basis)
+def role_nonce(rec, scenario, view, tool, basis, role, attempt='initial'):
+    facts = judge_launch(rec, scenario, view, tool, basis)
     if attempt == 'initial':
         return facts['roles'][role]['nonce'], facts['initial_scratch']
     for key, f in facts['roles'].items():
@@ -1871,7 +2374,7 @@ def role_nonce(rec, scenario, view, basis, role, attempt='initial'):
     raise HarnessError('no %s child of role %s' % (attempt, role))
 
 
-def apply_edit(rec, scenario, v, basis, e):
+def apply_edit(rec, scenario, v, tool, basis, e):
     """One named edit of a launch's records, in place. Returns declared shared effects."""
     edit = e['edit']
     if edit == 'none':
@@ -1899,13 +2402,13 @@ def apply_edit(rec, scenario, v, basis, e):
             v['state'][key] = json.dumps(doc).encode('utf-8')
         return []
     if edit == 'follow-into-initial-scratch':
-        nonce, follow = role_nonce(rec, scenario, v, basis, 'config', attempt='follow')
-        _, initial = role_nonce(rec, scenario, v, basis, 'prefix')
+        nonce, follow = role_nonce(rec, scenario, v, tool, basis, 'config', attempt='follow')
+        _, initial = role_nonce(rec, scenario, v, tool, basis, 'prefix')
         v['children'][nonce] = replace_text(v['children'][nonce], follow, initial)
         v['calls'] = [replace_text(r, follow, initial) if r.get('nonce') == nonce else r for r in v['calls']]
         v['journal'] = [replace_text(r, follow, initial) if r.get('child') == nonce else r for r in v['journal']]
         return []
-    nonce, scratch = role_nonce(rec, scenario, v, basis, e['role'])
+    nonce, scratch = role_nonce(rec, scenario, v, tool, basis, e['role'])
     slot = scratch + '/' + rec['slots'][v['launch']['impl']]['initial'][e['role']]
     if edit == 'drop':
         v['children'].pop(nonce, None)
@@ -1920,12 +2423,12 @@ def apply_edit(rec, scenario, v, basis, e):
         for r in v['journal']:
             if r.get('child') == nonce or r.get('trigger') == nonce:
                 extra.append(replace_text(r, nonce, twin))
-            elif r.get('kind') == 'exit-poll' and nonce in (r.get('children') or []):
-                r['children'] = r['children'] + [twin]
+            elif r.get('kind') == 'exit-poll' and any(isinstance(t, dict) and t.get('child') == nonce for t in r.get('targets') or []):
+                r['targets'] = r['targets'] + [dict(t, child=twin) for t in r['targets'] if isinstance(t, dict) and t.get('child') == nonce]
                 r['readings'][twin] = r['readings'].get(nonce)
         v['journal'] += extra
     elif edit == 'exchange-descriptors':
-        other, _ = role_nonce(rec, scenario, v, basis, e['other'])
+        other, _ = role_nonce(rec, scenario, v, tool, basis, e['other'])
         for key in ('started', 'written'):
             da, db = v['children'][nonce][key], v['children'][other][key]
             for fd in ('1', '2'):
@@ -1944,10 +2447,10 @@ def apply_edit(rec, scenario, v, basis, e):
     return []
 
 
-def mutate(rec, scenario, view, basis, control):
+def mutate(rec, scenario, view, tool, basis, control):
     """A copy of <view> with the control's edits, in order. Returns (view, shared effects)."""
     v = copy.deepcopy(view)
     effects = []
     for e in control['edits']:
-        effects += apply_edit(rec, scenario, v, basis, e)
+        effects += apply_edit(rec, scenario, v, tool, basis, e)
     return v, tuple(effects)
