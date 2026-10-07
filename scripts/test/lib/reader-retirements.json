@@ -90,6 +90,16 @@
       "contract": "Command-specific options are selected correctly; table entries are unique and reachable.",
       "disposition": "core grammar table checks plus direct native option_class and command tests",
       "reason": "The mutable synthetic zz table is retired because the native table is a compiled constant. The concrete bun x -p regression and all actual table lookups remain tested."
+    },
+    {
+      "source": "smoke.sh CLI ledger source rows and fixtures",
+      "contract": "The CLI ledger writer, validation and approval fixtures still use the Bash library.",
+      "disposition": "preserve; these rows still exercise shipped CLI code and are not counted as native reader coverage"
+    },
+    {
+      "source": "advisory-log-retention.sh:38",
+      "contract": "Compaction keeps evidence bytes, archives INFO, bounds retained generations, honors the rotation lock and derives advisory.log from the state directory.",
+      "disposition": "preserve all seven CLI Bash rows; add core-advisory-retention.py with real pre/post log growth, disk and gzip readback, exact generation membership, and state-path assertions"
     }
   ]
 }
