@@ -3702,7 +3702,10 @@ if [[ "$(ps -o stat= -p "${race_stopped_pid}" 2>/dev/null)" == *T* ]]; then
   race_stopped_out=$(race_report)
   grep -q 'has not finished' <<< "${race_stopped_out}" \
     || fail "a stopped owner is reported as a rollback that has not finished, not as one that did not"
-  grep -q "Owner: pid ${race_stopped_pid} is stopped (ps state " <<< "${race_stopped_out}" \
+  # The bash hook asks ps and says `ps state`; the core reads the process
+  # table itself and says `process state`, since it ran no ps. The report
+  # oracle takes both spellings, and so does this row.
+  grep -qE "Owner: pid ${race_stopped_pid} is stopped \((ps|process) state " <<< "${race_stopped_out}" \
     || fail "the stopped report says the owner pid is stopped"
   if grep -qE 'kill -|SIGCONT|resume' <<< "${race_stopped_out}"; then
     fail "the stopped report gives no command"

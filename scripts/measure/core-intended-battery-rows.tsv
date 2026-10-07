@@ -1,22 +1,42 @@
 # Battery rows whose expectation follows the Rust core where it answers apart
 # from the bash guard on purpose. One per line:
 #
-#   battery  command  kind  bash guard's answer  basis
+#   battery  command  effect  kind  bash guard's answer  basis
 #
-# Each row here expects the core's contract for a rewrite whose duties collide
-# (rust/src/inert.rs, "Duties that collide"): no rewrite is sent, the answer is
-# an UNDECIDED deny with a reason of its own that claims no finding, and
-# advisory.log names the kind. The bash guard's answer is the one the row
-# expected before. The basis is what was measured for the row, with
-# `safedeps-core inert` for the readings' values (2026-10-07, macOS arm64).
+# effect:
+#   blocks   the core stops a command the bash guard let through: no rewrite
+#            is sent and the answer is an UNDECIDED deny. These rows narrow
+#            what is allowed, which is a cost to state where the release is
+#            described.
+#   adds     the core sends a flag or writes a record the bash guard did not.
+#   wording  a report line is spelled differently and says the same.
+#
+# kind is the collision kind advisory.log names (rust/src/inert.rs, "Duties
+# that collide"), the class of scripts/measure/core-intended-inert.tsv the
+# difference belongs to, or a word for a difference that has neither. The
+# bash guard's answer is the one the row expected before. The basis is what
+# was measured for the row, with `safedeps-core inert` for the readings'
+# values (2026-10-07, macOS arm64).
 #
 # A row is added here by the plan owner's decision, one command at a time. This
-# is not the class table of the inert comparison
-# (core-intended-inert.tsv): that one names differences in what is sent, and a
-# command the core blocks is no class there.
-consumer-forms	for ((i=0;i<1;i++)){(npm ci);}	floor-outside-command	allow, rewritten with the flag after the verb	The dash reading has no install after `for ((...))`: its value is the collision, and the bash and zsh readings place the flag after the verb. The spaced form answers the same.
-consumer-forms	for ((i=0;i<1;i++)) { (npm ci); }	floor-outside-command	allow, rewritten with the flag after the verb	The spaced form of the row above, with the same three values.
-consumer-forms	for i (1)(npm ci)	floor-outside-command	allow, rewritten with the flag after the verb	The bash and dash readings have no install after zsh's `for NAME (WORDS)`: their values are the collision, and the zsh reading places the flag after the verb. The spaced form answers the same.
-consumer-forms	for i (1) (npm ci)	floor-outside-command	allow, rewritten with the flag after the verb	The spaced form of the row above, with the same three values.
-lockless-forms	npm install sd-approved@1.0.0 --cache	end-flag-not-an-option	allow, rewritten with the flag after the verb, after the package and at the end, where npm reads the last one as the value of --cache	A one-statement command owes the release's flag at its end, and npm reads it there as the option's value. With `&& echo ok` after it the command owes no end flag and both sides rewrite it alike.
-lockless-forms	npm install sd-approved@1.0.0 -C	end-flag-not-an-option	allow, rewritten the same way, where npm reads the last flag as the value of -C	As the row above.
+# is not the class table of the inert comparison (core-intended-inert.tsv):
+# that one names differences in what is sent, and a command the core blocks is
+# no class there.
+consumer-forms	for ((i=0;i<1;i++)){(npm ci);}	blocks	floor-outside-command	allow, rewritten with the flag after the verb	The dash reading has no install after `for ((...))`: its value is the collision, and the bash and zsh readings place the flag after the verb. The spaced form answers the same.
+consumer-forms	for ((i=0;i<1;i++)) { (npm ci); }	blocks	floor-outside-command	allow, rewritten with the flag after the verb	The spaced form of the row above, with the same three values.
+consumer-forms	for i (1)(npm ci)	blocks	floor-outside-command	allow, rewritten with the flag after the verb	The bash and dash readings have no install after zsh's `for NAME (WORDS)`: their values are the collision, and the zsh reading places the flag after the verb. The spaced form answers the same.
+consumer-forms	for i (1) (npm ci)	blocks	floor-outside-command	allow, rewritten with the flag after the verb	The spaced form of the row above, with the same three values.
+lockless-forms	npm install sd-approved@1.0.0 --cache	blocks	end-flag-not-an-option	allow, rewritten with the flag after the verb, after the package and at the end, where npm reads the last one as the value of --cache	A one-statement command owes the release's flag at its end, and npm reads it there as the option's value. With `&& echo ok` after it the command owes no end flag and both sides rewrite it alike.
+lockless-forms	npm install sd-approved@1.0.0 -C	blocks	end-flag-not-an-option	allow, rewritten the same way, where npm reads the last flag as the value of -C	As the row above.
+consumer-forms	echo `{ npm ci}`	adds	nested-brace	no rewrite, a downgrade recorded	The core reads the body at its own top level and places the flag before the `}`; the command is recorded as holding an install the bash rewrite did not read.
+consumer-forms	x=$( { npm ci} )	adds	nested-brace	no rewrite, a downgrade recorded	As the row above.
+consumer-forms	echo `{ npm ci}`; npm ci	adds	nested-brace	allow, the visible install rewritten, the nested one recorded as kept to the floor	The core places a flag in the body too and records the command as holding an install the bash rewrite did not read.
+consumer-forms	npm ci; x=$( { npm ci} )	adds	nested-brace	allow, the visible install rewritten, the nested one recorded as kept to the floor	As the row above.
+consumer-forms	npm ci; x=$(function f { npm ci}; f)	adds	nested-brace	allow, the visible install rewritten, the nested one recorded as kept to the floor	As the row above.
+consumer-forms	npm ci --ignore-scripts && echo `{ npm ci}`	adds	nested-brace	no rewrite, a downgrade recorded	The visible install carries the flag already; the core places one in the body and records the command as holding an install the bash rewrite did not read.
+consumer-forms	npm ci && echo `repeat 1 { npm ci}`	blocks	readings-place-apart	allow, the visible install rewritten, the nested one recorded as kept to the floor	Only the zsh reading has an install in the backticks and places a flag there, so the three values differ.
+consumer-forms	bash -c $'echo a\nnpm ci'	adds	script-payload-read	no rewrite, a downgrade recorded	The core reads the $'...' script as a payload and places the flag in it, after the verb; the command is recorded as holding an install the bash rewrite did not read.
+lockless-forms	shopt -s extglob; npm install sd-approved@1.0.0 @(--cache)	blocks	readings-place-apart	allow, rewritten with the flag after the verb and after the group, recorded as an install whose flag nobody read	The battery writes the two statements on two lines. The dash reading ends the last word inside the group and places the flag there; the bash and zsh readings place it after the group.
+lockless-forms	npm install sd-approved@1.0.0 && cat <<E | wc -l (body: npm install sd-approved@1.0.0)	blocks	floor-outside-command	allow, the visible install rewritten, v2.17.2's flag put in the heredoc body, recorded as holding an install nobody read	The flag owed in the body stands in data another command reads; no word of a command ends there.
+consumer-forms	sh -c 'npm ci'; echo "${x:-'}"	blocks	reading-fails	allow, rewritten with the flag in the script	The text does not close in the bash reading, so that reading walks no statements and fails where the text holds a script; the zsh and dash readings place the flag in the script, and the three values differ. Without the script (`npm ci; echo "${x:-'}"`) both sides rewrite alike.
+e2e	the report of a rollback whose owner is stopped	wording	owner-line	Owner: pid <pid> is stopped (ps state <state>)	The core runs no ps and says `Owner: pid <pid> is stopped (process state <state>)`. The row and the report oracle take both spellings.

@@ -123,6 +123,24 @@ expect_collision() { # label command kind
     || fail "${label} is recorded in advisory.log as ${kind} (advisory: $(head -3 "${safe}/advisory.log" 2>/dev/null))"
 }
 
+# An UNDECIDED deny where the readings place a command's npm installs apart:
+# no one rewrite is inert for every shell, so none is sent, and the reason
+# says the shells read the installs in different places.
+expect_readings_apart() { # label command
+  shard_row "expect_readings_apart|$1|$2" || return 0
+  local label="$1" command="$2" safe out
+  safe=$(mktemp -d "${tmp_root}/safe.XXXXXX")
+  out=$(jq -nc --arg c "${command}" --arg cwd "${project_dir}" \
+    '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
+    HOME="${tmp_root}/home" SAFEDEPS_HOME="${safe}" scripts/safedeps-pre-guard.sh 2>/dev/null)
+  [[ -n "${out}" ]] || out='{}'
+  [[ "$(jq -r '.hookSpecificOutput.permissionDecision // "pass"' <<< "${out}")" == deny \
+    && "$(jq -r '.hookSpecificOutput.permissionDecisionReason // ""' <<< "${out}")" == *UNDECIDED*"read the npm installs in this command in different places"* ]] \
+    || fail "${label} is UNDECIDED because the shells read its installs in different places (got: ${out:0:200})"
+  [[ "$(jq -r '.hookSpecificOutput | has("updatedInput")' <<< "${out}")" == false ]] \
+    || fail "${label} gets no rewrite (got: ${out:0:200})"
+}
+
 # --- 1. Carrier forms the command gate catches --------------------------------
 # Regression against narrowing. Tightening the gate for false positives must not
 # quietly shrink this set — that would be a trade, not a net gain.
@@ -1770,55 +1788,53 @@ expect_rewrite "npm ci before an opening backtick" 'npm ci`echo x`' '(no rewrite
 expect_rewrite "npm ci closed by a glued }"        '{ npm ci}'          '{ npm ci --ignore-scripts}'
 expect_rewrite "npm ci closed by a glued } and &&" '{ npm ci}&& echo x' '{ npm ci --ignore-scripts}&& echo x'
 # In backticks or in `$(...)` the group is decided where the body is read as
-# a payload, at its own top level: an install to the recognizers there. The
-# rewrite reads the command, where a glued `}` nested in a body is a character
-# (group_close in shell_lex), so it places no flag there, and the install is a
-# recorded downgrade rather than a rewrite or a silent pass. That holds beside
-# an install the rewrite reaches too: the command keeps that rewrite, and the
-# nested install is recorded as kept to the floor (inert_nested_verb_ends).
-# There the rewrite used to read as done, and zsh ran the nested install's
-# scripts with nothing recorded (verdict tookdaki-20261006-112251, R1).
-expect_recorded_downgrade() {
-  shard_row "expect_recorded_downgrade|$1|$2" || return 0
-  local label="$1" command="$2" safe out
+# a payload, at its own top level, and the rewrite reads the body there too:
+# the flag goes before the `}` as it does at the top level, alone or beside an
+# install in the command itself. The command is also recorded as one that
+# holds an install the bash rewrite did not read (rust/src/inert.rs, "The
+# record"). The bash guard read the body with the command's bytes, where a
+# glued `}` nested in a body is a character, placed no flag there and recorded
+# a downgrade (scripts/measure/core-intended-battery-rows.tsv, nested-brace).
+#
+# The gate's rewrite has a flag at least wherever <want> has one and adds
+# nothing but flags, and advisory.log has the record.
+expect_rewrite_unread() { # label command want
+  shard_row "expect_rewrite_unread|$1|$2|$3" || return 0
+  local label="$1" command="$2" want="$3" safe out got p places
   safe=$(mktemp -d "${tmp_root}/safe.XXXXXX")
   out=$(jq -nc --arg c "${command}" --arg cwd "${project_dir}" \
     '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
     HOME="${tmp_root}/home" SAFEDEPS_HOME="${safe}" scripts/safedeps-pre-guard.sh 2>/dev/null)
-  if [[ -n "${out}" ]] || ! grep -q 'could not make every npm install in this command inert' "${safe}/advisory.log" 2>/dev/null; then
-    fail "${label} is a recorded downgrade (got: ${out:-pass}, advisory: $(head -3 "${safe}/advisory.log" 2>/dev/null))"
-  fi
+  got=""
+  [[ -z "${out}" ]] || got=$(jq -r '.hookSpecificOutput.updatedInput.command // ""' <<< "${out}")
+  [[ -n "${got}" && "${got// --ignore-scripts/}" == "${command// --ignore-scripts/}" && "${want// --ignore-scripts/}" == "${command// --ignore-scripts/}" ]] \
+    || fail "${label} is rewritten with flags alone, as [${want}] (got: [${got:-(no rewrite)}])"
+  places=$(flag_places "${got}")
+  for p in $(flag_places "${want}"); do
+    [[ " ${places}" == *" ${p} "* ]] || fail "${label} gets a flag at each place of [${want}] (got: [${got}])"
+  done
+  grep -q 'safedeps did not read as a command holds an npm install verb' "${safe}/advisory.log" 2>/dev/null \
+    || fail "${label} is recorded as holding an install nobody read (advisory: $(head -3 "${safe}/advisory.log" 2>/dev/null))"
 }
-expect_recorded_downgrade "npm ci in backticks closed by a glued }" 'echo `{ npm ci}`'
-expect_recorded_downgrade "npm ci in a substitution closed by a glued }" 'x=$( { npm ci} )'
-expect_rewrite_recorded() {
-  shard_row "expect_rewrite_recorded|$1|$2|$3" || return 0
-  local label="$1" command="$2" want="$3" safe out got
-  safe=$(mktemp -d "${tmp_root}/safe.XXXXXX")
-  out=$(jq -nc --arg c "${command}" --arg cwd "${project_dir}" \
-    '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
-    HOME="${tmp_root}/home" SAFEDEPS_HOME="${safe}" scripts/safedeps-pre-guard.sh 2>/dev/null)
-  got="(no rewrite)"
-  [[ -z "${out}" ]] || got=$(jq -r '.hookSpecificOutput.updatedInput.command // "(no rewrite)"' <<< "${out}")
-  [[ "${got}" == "${want}" ]] || fail "${label} keeps the rewrite of the visible install [${want}] (got: [${got}])"
-  grep -q 'has no place where safedeps could read npm keeping --ignore-scripts true' "${safe}/advisory.log" 2>/dev/null \
-    || fail "${label} records the nested install as a downgrade (advisory: $(head -3 "${safe}/advisory.log" 2>/dev/null))"
-}
-expect_rewrite_recorded "npm ci in backticks closed by a glued }, before a visible npm ci" \
-  'echo `{ npm ci}`; npm ci' 'echo `{ npm ci}`; npm ci --ignore-scripts'
-expect_rewrite_recorded "npm ci in a substitution closed by a glued }, after a visible npm ci" \
-  'npm ci; x=$( { npm ci} )' 'npm ci --ignore-scripts; x=$( { npm ci} )'
-expect_rewrite_recorded "npm ci in a function body closed by a glued } in a substitution, after a visible npm ci" \
-  'npm ci; x=$(function f { npm ci}; f)' 'npm ci --ignore-scripts; x=$(function f { npm ci}; f)'
-expect_rewrite_recorded "npm ci in a repeat group closed by a glued } in backticks, after a visible npm ci" \
-  'npm ci && echo `repeat 1 { npm ci}`' 'npm ci --ignore-scripts && echo `repeat 1 { npm ci}`'
-# Beside an install whose own arguments already leave ignore-scripts true, and
-# that the release left as written, the rewrite has nothing left to place: the
-# command is a recorded downgrade, never one whose installs all read as inert.
-# (`--ignore-scripts;` the release rewrote, so that form is a rewrite above.)
-expect_recorded_downgrade "npm ci in backticks closed by a glued }, after an npm ci that carries the flag" \
-  'npm ci --ignore-scripts && echo `{ npm ci}`'
-pass "an npm install glued to a } nested in a substitution is a recorded downgrade, alone or beside an install the rewrite reaches"
+expect_rewrite_unread "npm ci in backticks closed by a glued }" 'echo `{ npm ci}`' 'echo `{ npm ci --ignore-scripts}`'
+expect_rewrite_unread "npm ci in a substitution closed by a glued }" 'x=$( { npm ci} )' 'x=$( { npm ci --ignore-scripts} )'
+expect_rewrite_unread "npm ci in backticks closed by a glued }, before a visible npm ci" \
+  'echo `{ npm ci}`; npm ci' 'echo `{ npm ci --ignore-scripts}`; npm ci --ignore-scripts'
+expect_rewrite_unread "npm ci in a substitution closed by a glued }, after a visible npm ci" \
+  'npm ci; x=$( { npm ci} )' 'npm ci --ignore-scripts; x=$( { npm ci --ignore-scripts} )'
+expect_rewrite_unread "npm ci in a function body closed by a glued } in a substitution, after a visible npm ci" \
+  'npm ci; x=$(function f { npm ci}; f)' 'npm ci --ignore-scripts; x=$(function f { npm ci --ignore-scripts}; f)'
+# Beside an install that already carries the flag, the nested one still gets
+# its own.
+expect_rewrite_unread "npm ci in backticks closed by a glued }, after an npm ci that carries the flag" \
+  'npm ci --ignore-scripts && echo `{ npm ci}`' 'npm ci --ignore-scripts && echo `{ npm ci --ignore-scripts}`'
+# zsh's `repeat` makes the body an install in the zsh reading alone, so only
+# that reading places a flag in the backticks and the readings' rewrites
+# differ: UNDECIDED, no rewrite. The bash guard rewrote the visible install
+# and recorded the nested one as kept to the floor.
+expect_readings_apart "npm ci in a repeat group closed by a glued } in backticks, after a visible npm ci," \
+  'npm ci && echo `repeat 1 { npm ci}`'
+pass "an npm install glued to a } nested in a substitution gets its flag where the body is read and is recorded, and one only zsh reads there is UNDECIDED"
 expect_rewrite "npm ci after another statement in the group" '{ echo a; npm ci}' '{ echo a; npm ci --ignore-scripts}'
 # A line read on its own has lost the `{` of the line before it.
 expect_rewrite "npm ci on the line after the {" $'{\nnpm ci}' $'{\nnpm ci --ignore-scripts}'
@@ -3525,6 +3541,13 @@ do
     || fail "an ordinary command where the shells differ keeps its verdict (${ordinary%%|*}): ${ordinary#*|} (got: $(beside_decision "${ordinary#*|}"))"
 done
 pass "ordinary commands where bash, zsh and dash read differently keep their verdicts (25)"
+# With a script in the command the same open quote is not ordinary. In the bash
+# reading the text does not close, so its statements are not walked and the
+# script is not read from a command position there; the zsh and dash readings
+# place the flag in the script. The readings' rewrites differ: UNDECIDED, no
+# rewrite. The bash guard rewrote the script
+# (scripts/measure/core-intended-battery-rows.tsv).
+expect_readings_apart "an npm ci in a script beside a quote the bash reading leaves open" "sh -c 'npm ci'; echo \"\${x:-'}\""
 
 # A reader that lexed the joined lines again read them out of the context of
 # the first lexing. Here an arithmetic expansion left open in an unquoted
@@ -3645,15 +3668,12 @@ rewrite_holds "sh -c 'echo \"${gs}\"; npm ci'" "sh -c 'echo \"${gs}\"; npm ci --
   || fail "Y05: an npm ci beside a \\035 in a script is rewritten inside it (got: $(gate_rewrite "sh -c 'echo \"${gs}\"; npm ci'"))"
 rewrite_holds "sh -c 'x=\$(npm ci)'" "sh -c 'x=\$(npm ci --ignore-scripts)'" \
   || fail "Y08: an npm ci in a substitution inside a script is rewritten inside it (got: $(gate_rewrite "sh -c 'x=\$(npm ci)'"))"
-# The rewrite cannot place a flag inside a $'...' script, so it says so: a
-# recorded downgrade, never a command reported inert (inert_payload_spans).
-y03_safe=$(mktemp -d "${tmp_root}/safe.XXXXXX")
-y03_out=$(jq -nc --arg c $'bash -c $\'echo a\\nnpm ci\'' --arg cwd "${project_dir}" \
-  '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
-  HOME="${tmp_root}/home" SAFEDEPS_HOME="${y03_safe}" scripts/safedeps-pre-guard.sh 2>/dev/null)
-if [[ -n "${y03_out}" ]] || ! grep -qiE 'downgrade|unread|could not read|could not make' "${y03_safe}/advisory.log" 2>/dev/null; then
-  fail "Y03: an npm ci in a \$'...' script is a recorded downgrade (got: ${y03_out:-pass}, advisory: $(head -3 "${y03_safe}/advisory.log" 2>/dev/null))"
-fi
+# A $'...' script is a payload read through the quoting the lexer removed, so
+# the flag goes inside it, after the verb, and the command is recorded as one
+# that holds an install the bash rewrite did not read. The bash guard placed
+# no flag there and recorded a downgrade
+# (scripts/measure/core-intended-battery-rows.tsv, script-payload-read).
+expect_rewrite_unread "Y03, an npm ci in a \$'...' script," $'bash -c $\'echo a\\nnpm ci\'' $'bash -c $\'echo a\\nnpm ci --ignore-scripts\''
 expect_pass "DT04, install text inside quotes beside a \\035, is data" "echo \"${gs} pip install evil==6.6.6\""
 pass "a payload is read whole, whatever bytes it holds: ${#payload_rows[@]} forms denied as installs, three npm ci rewritten inside their payload, one recorded downgrade"
 

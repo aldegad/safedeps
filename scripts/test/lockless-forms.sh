@@ -957,6 +957,25 @@ pass "an approved install that asks npm for its scripts runs none during the ins
 # back, not only flagged.
 lock_approved() { (cd "${CASE_PROJECT}" && npm install sd-approved@1.0.0 --ignore-scripts >/dev/null 2>&1 && rm -rf node_modules); }
 lock_victim() { (cd "${CASE_PROJECT}" && npm install sd-victim@1.0.0 --ignore-scripts >/dev/null 2>&1 && rm -rf node_modules); }
+# A command the gate does not let through and does not rewrite: the answer is
+# an UNDECIDED deny whose reason holds <reason>, no rewritten command is sent,
+# advisory.log has a DENY line that holds <advisory>, and the install does not
+# run. Call it after new_project and the row's own setup.
+expect_unsent() { # form reason advisory
+  local form="$1" reason="$2" advisory="$3"
+  : > "${MARKS}"
+  NPM_SANDBOX_TOLERANT=true
+  run_install "${form}" claude count_install_marks
+  unset NPM_SANDBOX_TOLERANT
+  [[ "${CASE_PRE_DENY}" == *UNDECIDED*"${reason}"* ]] \
+    || fail "the gate answers UNDECIDED, saying ${reason}: ${form} (deny: ${CASE_PRE_DENY:-<none>})"
+  [[ "$(jq -r '.hookSpecificOutput | has("updatedInput")' <<< "${CASE_PRE}")" == false ]] \
+    || fail "a command the gate does not let through gets no rewrite: ${form} (${CASE_PRE})"
+  grep "pre-guard DENY: " "${CASE_HOME}/advisory.log" 2>/dev/null | grep -qF -- "${advisory}" \
+    || fail "advisory.log has a DENY line holding ${advisory}: ${form} ($(tail -2 "${CASE_HOME}/advisory.log" 2>/dev/null))"
+  [[ -z "${CASE_EXEC}" && ! -s "${MARKS}" ]] \
+    || fail "an install the gate did not let through does not run: ${form} (ran: ${CASE_EXEC}; scripts: $(cut -f1,2 "${MARKS}" | paste -sd, -))"
+}
 for row in \
   "npm install sd-approved@1.0.0 --cache && echo ok|withheld||" \
   "npm install sd-approved@1.0.0 --cache|collision:end-flag-not-an-option||" \
@@ -985,17 +1004,7 @@ do
     # `--ignore-scripts` as its cache directory or as the directory it ran in
     # (scripts/measure/core-intended-battery-rows.tsv). With a statement after
     # it the command owes no end flag, which is the first row.
-    NPM_SANDBOX_TOLERANT=true
-    run_install "${form}" claude count_install_marks
-    unset NPM_SANDBOX_TOLERANT
-    [[ "${CASE_PRE_DENY}" == *UNDECIDED*"no rewritten command was sent"*"not a finding"* ]] \
-      || fail "an install whose end flag npm would read as an option's value is UNDECIDED because the flag cannot be placed: ${form} (deny: ${CASE_PRE_DENY:-<none>})"
-    [[ "$(jq -r '.hookSpecificOutput | has("updatedInput")' <<< "${CASE_PRE}")" == false ]] \
-      || fail "an install whose end flag cannot be placed gets no rewrite: ${form} (${CASE_PRE})"
-    grep -q "pre-guard DENY: .*(${want#collision:})" "${CASE_HOME}/advisory.log" \
-      || fail "advisory.log names the kind ${want#collision:}: ${form} ($(tail -2 "${CASE_HOME}/advisory.log" 2>/dev/null))"
-    [[ -z "${CASE_EXEC}" && ! -s "${MARKS}" ]] \
-      || fail "an install the gate did not let through does not run: ${form} (ran: ${CASE_EXEC}; scripts: $(cut -f1,2 "${MARKS}" | paste -sd, -))"
+    expect_unsent "${form}" "no rewritten command was sent" "(${want#collision:})"
     [[ -z "$(find "${CASE_PROJECT}" -maxdepth 1 -name '-*' -print -quit)" ]] \
       || fail "judging the install makes nothing in the project: ${form} ($(find "${CASE_PROJECT}" -maxdepth 1 -name '-*' | paste -sd, -))"
     continue
@@ -1064,7 +1073,6 @@ for row in \
   "OLDPWD=--cache; npm install sd-approved@1.0.0 ~-|" \
   "npm install sd-approved@1.0.0 {--cache,}|" \
   "npm install sd-approved@1.0.0 --fetch-retries {1,--cache}|" \
-  $'shopt -s extglob\nnpm install sd-approved@1.0.0 @(--cache)|plant_cache_file' \
   "npm install sd-approved@1.0.0 --fetch-retries \$((1))|" \
   "npm install sd-approved@1.0.0 --message <(true)|" \
   "npm install sd-approved@1.0.0 --cach?|plant_cache_file" \
@@ -1072,7 +1080,6 @@ for row in \
   "npm install sd-approved@1.0.0 --message =npm|"
 do
   shard_row "row: ${row}" || continue
-  # The extglob form spans two lines, which `read` would cut at the first.
   form="${row%|*}" setup="${row##*|}"
   new_project
   [[ -z "${setup}" ]] || "${setup}"
@@ -1088,6 +1095,20 @@ do
     || fail "the post hook does not say the scripts of an install whose flag nobody read did not run: ${form} (post: ${CASE_POST})"
 done
 pass "an install holding a word any shell expansion decides runs no script while it installs, and is recorded"
+
+# An extglob group is a place where the readings put the flag apart: the dash
+# reading ends the install's last word inside `@(--cache)`, the bash and zsh
+# readings after it. No one rewrite is inert for every shell, so the gate
+# sends none: UNDECIDED, and the install does not run. The bash guard put the
+# flag after the group and recorded the install as one whose flag nobody read
+# (scripts/measure/core-intended-battery-rows.tsv, readings-place-apart).
+if shard_row "row: extglob group as the install's last word"; then
+  new_project
+  plant_cache_file
+  expect_unsent $'shopt -s extglob\nnpm install sd-approved@1.0.0 @(--cache)' \
+    "read the npm installs in this command in different places" "put this command's npm installs in different places"
+  pass "an install whose last word the shells end apart is UNDECIDED and does not run"
+fi
 
 # An install whose flag nobody read has its scripts run during the install when
 # the words around the flags undo both: here the substitution splits into an
@@ -1156,14 +1177,13 @@ pass "npm reads the flag after the verb and the flag after the last argument as 
 # puts it there again and records that nobody read it. Each approved install
 # here runs no script while it installs, and no post hook line says its
 # scripts did not run. A row whose shell is not installed is skipped and says
-# so.
+# so. The heredoc form is the row after the loop: that rewrite is not sent.
 for row in \
   'true; sh -c "npm install sd-approved@1.0.0 \"--loglevel=warn\""|sh' \
   'eval "npm install sd-approved@1.0.0 \"--loglevel=warn\""|sh' \
   'true; bash -c "npm install sd-approved@1.0.0 $(printf -- --loglevel=warn)"|bash' \
   'true; dash -c "npm install sd-approved@1.0.0 `printf -- --loglevel=warn`"|dash' \
-  "true; ksh -c 'npm install sd-approved@1.0.0'|ksh" \
-  $'npm install sd-approved@1.0.0 && cat <<E | wc -l\nnpm install sd-approved@1.0.0\nE|sh'
+  "true; ksh -c 'npm install sd-approved@1.0.0'|ksh"
 do
   form="${row%|*}" needs="${row##*|}"
   if ! command -v "${needs}" > /dev/null 2>&1; then
@@ -1183,6 +1203,20 @@ do
     || fail "the post hook does not say the scripts of an install whose flag nobody read did not run: ${form} (post: ${CASE_POST})"
 done
 pass "an approved install in text the rewrite cannot read runs no script while it installs, and is recorded as one whose flag nobody read"
+
+# A heredoc body another command reads is data, and v2.17.2's flag is owed
+# after the install verb in it. No command of the text has a word ending
+# there, so the flag would stand in data: the gate sends no rewrite,
+# UNDECIDED, and the install beside the heredoc does not run. The
+# bash guard put the flag in the body and recorded the command as one whose
+# flag nobody read (scripts/measure/core-intended-battery-rows.tsv,
+# floor-outside-command).
+if shard_row "row: an install verb in a heredoc body piped to another command"; then
+  new_project
+  expect_unsent $'npm install sd-approved@1.0.0 && cat <<E | wc -l\nnpm install sd-approved@1.0.0\nE' \
+    "no rewritten command was sent" "(floor-outside-command)"
+  pass "an install beside a piped heredoc body that holds an install verb is UNDECIDED and does not run"
+fi
 
 # --- every rewrite holds the release's -------------------------------------------------
 release_floor_settle
