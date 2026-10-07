@@ -39,4 +39,8 @@ for name in names:
     receipt['load_end']=os.getloadavg()
     (run/'result.json').write_text(json.dumps(receipt,indent=2)+'\n')
     print(('ok - ' if r.returncode==0 else 'not ok - ')+name+': native source control',flush=True)
-    if r.returncode:raise SystemExit(r.returncode)
+table=['mutation\tharness_rc\texpected_rejection_observed']
+table += [str(r['name'])+'\t'+str(r['rc'])+'\t'+str(r['passed']).lower() for r in rows]
+(run/'results.tsv').write_text('\n'.join(table)+'\n')
+print('\n'.join(table),flush=True)
+raise SystemExit(int(any(not r['passed'] for r in rows)))
