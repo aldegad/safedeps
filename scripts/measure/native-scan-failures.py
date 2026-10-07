@@ -153,35 +153,42 @@ def main():
     for name in names:
         for control in ([False,True] if a.control and name==names[0] else [False]):
             label=name.replace('/','-')+('-control' if control else '')
-            tree=run/(label+'-source');tree.mkdir()
-            subprocess.run(['tar','xf',str(archive),'-C',str(tree)],check=True)
-            path=tree/'rust/src/core.rs';text=path.read_text()
-            if inventory(text)!=registered['sites']:raise RuntimeError('archive reader inventory differs')
-            changed,marker=fault(text,name);path.write_text(changed)
-            pre=tree/'rust/src/pre.rs';text=pre.read_text();anchor='    let read = readings::Readings::collect(&mut run, &call.command, &cwd);'
-            if text.count(anchor)!=1:raise RuntimeError('pre driver anchor changed')
-            text=text.replace(anchor,'    run.measure_inject();\n'+anchor+('\n    run.failed=false;' if control else ''))
-            pre.write_text(text)
-            with (run/(label+'-build.log')).open('wb') as log:
-                r=subprocess.run([str(cargo),'build','--manifest-path',str(tree/'rust/Cargo.toml'),'--release','--locked','--offline','-j1'],stdout=log,stderr=log,env=dict(os.environ,CARGO_TARGET_DIR=str(tree/'rust/target')))
-            (run/(label+'-build.rc')).write_text(str(r.returncode)+'\n')
-            if r.returncode:raise RuntimeError('fault build failed; no detection claimed')
-            out=run/label;out.mkdir()
-            passed=fixture(tree/'rust/target/release/safedeps-core',out,marker,True)
-            accepted=not passed if control else passed
-            # A countercontrol is only valid if the injected failure ran and
-            # every hook returned normally; crashes are never negative proof.
-            observed=json.loads((out/'result.json').read_bytes())
-            if control:accepted=accepted and all(r['checks']['witness'] and r['checks']['hook_rc'] for r in observed)
-            rows.append(dict(site=name,control=control,fixture_passed=passed,passed=accepted))
+            observed=[];passed=False;accepted=False;error=''
+            try:
+                tree=run/(label+'-source');tree.mkdir()
+                subprocess.run(['tar','xf',str(archive),'-C',str(tree)],check=True)
+                path=tree/'rust/src/core.rs';text=path.read_text()
+                if inventory(text)!=registered['sites']:raise RuntimeError('archive reader inventory differs')
+                changed,marker=fault(text,name);path.write_text(changed)
+                pre=tree/'rust/src/pre.rs';text=pre.read_text();anchor='    let read = readings::Readings::collect(&mut run, &call.command, &cwd);'
+                if text.count(anchor)!=1:raise RuntimeError('pre driver anchor changed')
+                text=text.replace(anchor,'    run.measure_inject();\n'+anchor+('\n    run.failed=false;' if control else ''))
+                pre.write_text(text)
+                with (run/(label+'-build.log')).open('wb') as log:
+                    r=subprocess.run([str(cargo),'build','--manifest-path',str(tree/'rust/Cargo.toml'),'--release','--locked','--offline','-j1'],stdout=log,stderr=log,env=dict(os.environ,CARGO_TARGET_DIR=str(tree/'rust/target')))
+                (run/(label+'-build.rc')).write_text(str(r.returncode)+'\n')
+                if r.returncode:raise RuntimeError('fault build failed; no detection claimed')
+                out=run/label;out.mkdir()
+                passed=fixture(tree/'rust/target/release/safedeps-core',out,marker,True)
+                accepted=not passed if control else passed
+                # A countercontrol is only valid if the injected failure ran and
+                # every hook returned normally; crashes are never negative proof.
+                observed=json.loads((out/'result.json').read_bytes())
+                if control:accepted=accepted and all(r['checks']['witness'] and r['checks']['hook_rc'] for r in observed)
+            except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as exc:
+                passed=False;accepted=False
+                error=type(exc).__name__+': '+str(exc)
+            failed_checks={r['name']:[k for k,v in r['checks'].items() if not v] for r in observed}
+            rows.append(dict(site=name,control=control,fixture_passed=passed,passed=accepted,failed_checks=failed_checks,error=error))
             (run/'result.json').write_text(json.dumps(dict(rows=rows),indent=2)+'\n')
             print(('ok - ' if accepted else 'not ok - ')+label,flush=True)
             if not accepted:
-                print(json.dumps(observed,indent=2),flush=True)
+                print(error or json.dumps(observed,indent=2),flush=True)
     # A failure at one producer must not hide the remaining census sites.
-    table=['site\tcontrol\tfixture_passed\taccepted']
+    table=['site\tcontrol\tfixture_passed\taccepted\tfailed_checks\terror']
     table += ['\t'.join((r['site'],str(r['control']).lower(),
-                         str(r['fixture_passed']).lower(),str(r['passed']).lower())) for r in rows]
+                         str(r['fixture_passed']).lower(),str(r['passed']).lower(),
+                         json.dumps(r['failed_checks'],sort_keys=True),r['error'].replace('\n',' '))) for r in rows]
     (run/'results.tsv').write_text('\n'.join(table)+'\n')
     print('\n'.join(table),flush=True)
     return int(any(not r['passed'] for r in rows))

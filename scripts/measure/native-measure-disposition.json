@@ -242,7 +242,7 @@
     },
     {
       "path": "scripts/measure/shell-reading-fuzz.sh",
-      "consumer": "actual shell REACHED corpus, native lex/payloads; optional canonical pre"
+      "consumer": "actual shell REACHED corpus, native lex and reader lex-payloads views; optional canonical pre"
     },
     {
       "path": "scripts/measure/effect-gate-cost.sh",
