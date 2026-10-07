@@ -23,8 +23,17 @@ hook_response_assert() { [[ ! -s "${HOOK_RESPONSE_FAILURES}" ]]; }
 hook_response_capture() {
   local prefix="$1" rc=0
   shift
+  # An absence assertion must not pass when capture itself could not run.
+  : > "${prefix}.stdout" && : > "${prefix}.stderr" \
+    || { hook_response_error "cannot create capture files: ${prefix}"; return 1; }
   "$@" > "${prefix}.stdout" 2> "${prefix}.stderr" || rc=$?
-  printf '%s\n' "${rc}" > "${prefix}.rc"
+  printf '%s\n' "${rc}" > "${prefix}.rc" \
+    || { hook_response_error "cannot record hook exit status: ${prefix}"; return 1; }
+  # The entry explains core startup failures with exit 2. Shell execution
+  # failures must stay red even when a caller tests only for absent output.
+  if [[ "${rc}" == 126 || "${rc}" == 127 ]]; then
+    hook_response_error "hook command returned ${rc}: ${prefix}" || true
+  fi
   printf '%s' "${prefix}.stdout"
   return "${rc}"
 }

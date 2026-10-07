@@ -2837,6 +2837,9 @@ guard_clean_response_file=$(hook_response_capture "${tmp_root}/guard-clean-respo
   -u SAFEDEPS_ADVISORY_LOG \
   SAFEDEPS_HOME="${guard_clean_home}" scripts/safedeps-hook-entry.sh pre <<< "${guard_moved_payload}") \
   || fail "an unmoved hook call completes successfully"
+[[ -f "${tmp_root}/guard-clean-response.rc" \
+  && "$(hook_response_status "${tmp_root}/guard-clean-response")" == 0 ]] \
+  || fail "an unmoved hook call leaves a successful exit receipt"
 hook_response_parse "${guard_clean_response_file}" quiet \
   || fail "an unmoved hook call has quiet stdout"
 if [[ -f "${guard_clean_home}/advisory.log" ]] && grep -q 'truth source moved' "${guard_clean_home}/advisory.log"; then
