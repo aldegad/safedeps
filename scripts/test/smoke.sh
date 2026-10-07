@@ -635,7 +635,8 @@ pass "inert flag lands on an install whose npm is spelled in another case"
 # Each adopted native conflict has an explicit reason supplied by its row.
 # A fresh approval/state home keeps earlier installs from hiding new records.
 expect_inert_conflict() {
-  local command="$1" reason="$2" safe out state_dir
+  local command="$1" reason="$2" safe out state_dir advisory expected extra
+  shift 2
   safe=$(mktemp -d "${tmp_root}/safe-conflict.XXXXXX")
   SAFEDEPS_HOME="${safe}" lib/ledger/ledger.sh approve npm left-pad 1.3.0 1.3.0 smoke >/dev/null
   out=$(run_hook_command "${tmp_root}/home-compound" "${safe}" "${command}")
@@ -643,9 +644,21 @@ expect_inert_conflict() {
     (.permissionDecisionReason | contains("UNDECIDED")) and
     (has("updatedInput") | not)' <<< "${out}" >/dev/null \
     || fail "expected ${reason} undecided without a rewrite: ${command} (got ${out})"
-  cut -f2- "${safe}/advisory.log" | grep -Fx \
-    "pre-guard DENY: inert rewrite obligations conflict (${reason}); UNDECIDED, no rewrite was sent. Command: ${command%%$'\n'*}" >/dev/null \
+  if [[ "${reason}" == readings-place-apart ]]; then
+    jq -e '.hookSpecificOutput.permissionDecisionReason | contains("read the npm installs in this command in different places")' <<< "${out}" >/dev/null \
+      || fail "the decision names the readings that disagree: ${command}"
+    expected="pre-guard DENY: the readings (bash zsh dash) put this command's npm installs in different places, so no single --ignore-scripts rewrite is inert for every shell — undecided, fail-closed. Command: ${command}"
+  else
+    expected="pre-guard DENY: inert rewrite obligations conflict (${reason}); UNDECIDED, no rewrite was sent. Command: ${command}"
+  fi
+  advisory=$(cut -f2- "${safe}/advisory.log")
+  [[ $'\n'"${advisory}"$'\n' == *$'\n'"${expected}"$'\n'* ]] \
     || fail "the exact ${reason} conflict is recorded: ${command}"
+  for extra in "$@"; do
+    expected="${extra} Command: ${command}"
+    [[ $'\n'"${advisory}"$'\n' == *$'\n'"${expected}"$'\n'* ]] \
+      || fail "the conflict retains its accompanying advisory: ${expected}"
+  done
   for state_dir in pending snapshots; do
     if [[ -d "${safe}/${state_dir}" ]]; then
       [[ -z "$(find "${safe}/${state_dir}" -mindepth 1 -print)" ]] \
@@ -666,39 +679,44 @@ done
 
 # A one-statement end flag would be the last option's value. These commands
 # send no rewrite; the compound --cache row below owes no such end flag.
+ask_option_advisories=(
+  "pre-guard: the install's last option takes the next word as its value, or its words end npm's options, so npm cannot be asked with them without reading the ask's own flags as the install's."
+  "pre-guard: the install's last option takes the next word as its value, or its words end npm's options, so npm cannot be asked which registry it fetches from with them."
+)
 for inert_in in \
   'npm install left-pad@1.3.0 --cache' \
   'npm install left-pad@1.3.0 -C' \
   'npm install --no-ignore-scripts left-pad@1.3.0 --reg' \
-  "npm install left-pad@1.3.0 --message 'a b' --fetch-retries"
+  "npm install left-pad@1.3.0 --message 'a b' --fetch-retries" \
+  'npm ci -- x' \
+  "npm ci --no-ignore-scripts '--' x"
 do
-  expect_inert_conflict "${inert_in}" end-flag-not-an-option
+  expect_inert_conflict "${inert_in}" end-flag-not-an-option "${ask_option_advisories[@]}"
 done
 
-# Whether an install already carries the flag is read from that install's own
-# arguments, the way npm reads them, and the flag goes after its last argument,
-# because npm keeps the last value an option is given. The bare text
-# `--ignore-scripts` anywhere in the command used to skip the rewrite: an
-# install with `--ignore-scripts=false`, or followed by `&& echo
-# --ignore-scripts`, ran its lifecycle scripts with nothing recorded. Placed
-# right after the verb, the flag lost to a later `--no-ignore-scripts`, to an
-# abbreviation npm expands (`--no-ignore`, `--ign=false`) and to a word the
-# shell expands at run time. A `--` ends npm's options, so the flag goes before
-# it: after it, `npm ci` ignores the flag and runs the scripts. The words are
-# read as the shell joins them, so a quoted line that reads like the flag is
-# part of an option's value, not the flag. A place stands only where npm reads
-# the placed flag as true: after a trailing `--cache` or `-C` it became the
-# option's value, so the flag goes before that word. A word the shell decides
-# at run time can be either kind, so such an install gets the flag after the
-# verb and after its last argument. Every other install gets it after the verb
-# too, as a floor under the reading: a word the reading misses as one the shell
-# expands can take the flag after the last argument, and the flag after the
-# verb, where the release put it, still stands. It goes there even where it
-# changes what npm reads (`npm install true` makes `true` its value), as the
-# release's did, and a one-statement command also keeps the release's flag at
-# its end. The exception that left it off let a shell alias take the one flag
-# left (`alias -g left-pad@1.3.0='left-pad@1.3.0 --cache'`), where the
-# release's flag after the verb stood.
+# A floor flag must preserve npm's operands and be an option in every reading.
+expect_inert_conflict 'npm install true' floor-not-an-option
+expect_inert_conflict "alias -g left-pad@1.3.0='left-pad@1.3.0 --cache'; eval 'npm install true left-pad@1.3.0'" floor-not-an-option \
+  'pre-guard UNGATED: npm install names a package with no version spec, so the ledger gate did not run. No effect gate reads the result of this install, so it is unverified. Unpinned: npm:true.'
+expect_inert_conflict 'npm -- ci -- x' floor-not-an-option "${ask_option_advisories[@]}"
+expect_inert_conflict 'npm install x\ y -- "$HOME" sh -c "x\y npm"' end-flag-not-an-option \
+  'pre-guard: this npm install depends on $HOME, which the shell decides at run time or this gate does not reproduce, so safedeps cannot ask npm where it lands.'
+expect_inert_conflict 'npm i left-pad@1.3.0 && sh -c npm\ ci' floor-outside-command
+
+# Shell-specific grouping can put install words at different offsets.
+for inert_in in \
+  'npm install left-pad@1.3.0 --ignore-scripts } --no-ignore-scripts' \
+  'npm install left-pad@1.3.0 --message x(.)' \
+  'npm install left-pad@1.3.0 (--cache|zz)' \
+  $'shopt -s extglob\nnpm install left-pad@1.3.0 @(--cache)'
+do
+  expect_inert_conflict "${inert_in}" readings-place-apart
+done
+
+# npm keeps the last value an option is given. These readable installs get
+# the floor flag and the flag after the last argument; quoted data stays data.
+# The explicit conflict rows above cover positions where an owed floor flag
+# would change npm's operands or be read as a value instead of an option.
 for inert_case in \
   "npm install left-pad@1.3.0 --ignore-scripts=false|npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts=false --ignore-scripts" \
   "npm install left-pad@1.3.0 --no-ignore-scripts|npm install --ignore-scripts left-pad@1.3.0 --no-ignore-scripts --ignore-scripts" \
@@ -715,15 +733,10 @@ for inert_case in \
   "npm ci \$(printf -- --)|npm ci --ignore-scripts \$(printf -- --) --ignore-scripts" \
   "npm install left-pad@1.3.0>install.log|npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts>install.log --ignore-scripts" \
   "npm install left-pad@1.3.0 --ignore-scripts=false > log 2>&1|npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts=false --ignore-scripts > log 2>&1" \
-  "npm ci -- x|npm ci --ignore-scripts -- x --ignore-scripts" \
-  "npm ci --no-ignore-scripts '--' x|npm ci --ignore-scripts --no-ignore-scripts --ignore-scripts '--' x --ignore-scripts" \
   "sh -c 'npm install left-pad@1.3.0 --ignore-scripts=false'|sh -c 'npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts=false --ignore-scripts'" \
   'echo "$(npm install left-pad@1.3.0 --no-ignore-scripts)"|echo "$(npm install --ignore-scripts left-pad@1.3.0 --no-ignore-scripts --ignore-scripts)"' \
   "(npm install left-pad@1.3.0 --ignore-scripts=false) && echo ok|(npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts=false --ignore-scripts) && echo ok" \
-  $'npm install left-pad@1.3.0 --message "a\n--ignore-scripts"|npm install --ignore-scripts left-pad@1.3.0 --message "a\n--ignore-scripts" --ignore-scripts' \
-  "npm install left-pad@1.3.0 --ignore-scripts } --no-ignore-scripts|npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts } --no-ignore-scripts --ignore-scripts" \
-  "npm install true|npm install --ignore-scripts true --ignore-scripts" \
-  "alias -g left-pad@1.3.0='left-pad@1.3.0 --cache'; eval 'npm install true left-pad@1.3.0'|alias -g left-pad@1.3.0='left-pad@1.3.0 --cache'; eval 'npm install --ignore-scripts true left-pad@1.3.0 --ignore-scripts'"
+  $'npm install left-pad@1.3.0 --message "a\n--ignore-scripts"|npm install --ignore-scripts left-pad@1.3.0 --message "a\n--ignore-scripts" --ignore-scripts'
 do
   inert_in="${inert_case%%|*}"
   inert_want="${inert_case#*|}"
@@ -797,13 +810,10 @@ for inert_in in \
   'npm install left-pad@1.3.0 `printf -- --cache`' \
   'npm install left-pad@1.3.0 --message $((1))' \
   'npm install left-pad@1.3.0 --message <(true)' \
-  'npm install left-pad@1.3.0 --message x(.)' \
   'npm install left-pad@1.3.0 --c?che' \
   'npm install left-pad@1.3.0 --[c]ache' \
   'npm install left-pad@1.3.0 {--cache,}' \
   'hash -d c=--cache; npm install left-pad@1.3.0 ~c' \
-  'npm install left-pad@1.3.0 (--cache|zz)' \
-  $'shopt -s extglob\nnpm install left-pad@1.3.0 @(--cache)' \
   'npm install left-pad@1.3.0 --message x~y' \
   'npm install left-pad@1.3.0 --message a^b' \
   'npm install left-pad@1.3.0 --message a#b' \
@@ -887,15 +897,6 @@ grep -q "the install's last option takes the next word as its value" "${tmp_root
 # was flagged but not rolled back.
 core_smoke_pending
 
-# A `--` before the verb leaves no place where npm reads the flag as an option.
-# The install still gets the release's rewrite, the floor, and the downgrade is
-# recorded: dropping the rewrite gave it less than the release did.
-downgrades_before=$(grep -c 'has no place where safedeps could read npm keeping --ignore-scripts true' "${tmp_root}/safe-compound/advisory.log" 2>/dev/null || true)
-inert_out=$(run_hook_command "${tmp_root}/home-compound" "${tmp_root}/safe-compound" "npm -- ci -- x")
-[[ "$(jq -r '.hookSpecificOutput.updatedInput.command // ""' <<< "${inert_out}")" == "npm -- ci --ignore-scripts -- x --ignore-scripts" ]] \
-  || fail "an install with a -- before its verb keeps the release's rewrite (got: ${inert_out:0:200})"
-downgrades_after=$(grep -c 'has no place where safedeps could read npm keeping --ignore-scripts true' "${tmp_root}/safe-compound/advisory.log" 2>/dev/null || true)
-(( ${downgrades_after:-0} > ${downgrades_before:-0} )) || fail "an install with a -- before its verb is recorded as an inert downgrade"
 pass "the inert flag is read from each install's own arguments and goes where npm reads it last; one already true is left as written"
 
 # Text the rewrite cannot read as the shell will -- a double-quoted script
@@ -998,7 +999,6 @@ left_case_in=(
   'npm i left-pad@1.3.0 && sh -ce "npm ci \"x\""'
   "npm i left-pad@1.3.0 && sh -c 'npm 'ci"
   'npm i left-pad@1.3.0 && sh -c "npm ci "--ignore-scripts=false'
-  'npm i left-pad@1.3.0 && sh -c npm\ ci'
   $'npm i left-pad@1.3.0 && sh <<E\nnpm ci\nE'
   'npm i left-pad@1.3.0 && sh -c "cd \"d\" && npm ci;true"'
 )
@@ -1006,7 +1006,6 @@ left_case_tail=(
   ' && sh -ce "npm ci \"x\""'
   " && sh -c 'npm 'ci"
   ' && sh -c "npm ci --ignore-scripts "--ignore-scripts=false'
-  ' && sh -c npm\ ci --ignore-scripts'
   $' && sh <<E\nnpm ci\nE'
   ' && sh -c "cd \"d\" && npm ci;true"'
 )
@@ -1055,8 +1054,7 @@ for row in \
   '1|npm install left-pad@1.3.0 eval "$(echo) npm"' \
   '0|npm install left-pad@1.3.0 sh -c "\npm"' \
   '0|npm install left-pad@1.3.0 --userconfig=eval "x\y npm"' \
-  '1|npm ci left-pad@1.3.0 sh -c "x\y npm" false "$HOME"' \
-  '0|npm install x\ y -- "$HOME" sh -c "x\y npm"'
+  '1|npm ci left-pad@1.3.0 sh -c "x\y npm" false "$HOME"'
 do
   release_only_want="${row%%|*}" inert_in="${row#*|}"
   rm -rf "${release_only_safe}/pending"
