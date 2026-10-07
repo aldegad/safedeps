@@ -97,6 +97,87 @@ pub fn truth_sources_moved() -> W {
     moved.join(&b' ')
 }
 
+#[cfg(test)]
+#[test]
+fn truth_sources_match_cli() {
+    use std::{collections::BTreeSet, process::Command};
+    if let Ok(expected) = std::env::var("SAFEDEPS_TRUTH_TEST_EXPECTED") {
+        assert_eq!(truth_sources_moved(), expected.as_bytes(), "native truth-source notice");
+        return;
+    }
+    let cli = include_str!("../../lib/truth-sources.sh");
+    let native = include_str!("state.rs").split_once("pub fn truth_sources_moved() -> W {").unwrap().1
+        .split_once("\n}\n").unwrap().0;
+    let moved = cli.split_once("safedeps_truth_sources_moved_list() {").unwrap().1
+        .split_once("\n}\n").unwrap().0;
+    let names = |source: &str| -> BTreeSet<String> {
+        source.split("SAFEDEPS_").skip(1).map(|tail| {
+            let end = tail.find(|c: char| !c.is_ascii_uppercase() && c != '_' && !c.is_ascii_digit())
+                .unwrap_or(tail.len());
+            format!("SAFEDEPS_{}", &tail[..end])
+        }).filter(|name| !name.starts_with("SAFEDEPS_DEFAULT_")).collect()
+    };
+    let sources = [
+        ("SAFEDEPS_OSV_API_URL", "osv", Some("https://api.osv.dev/v1/query")),
+        ("SAFEDEPS_OSV_BATCH_API_URL", "osv-batch", Some("https://api.osv.dev/v1/querybatch")),
+        ("SAFEDEPS_KEV_CATALOG_URL", "kev", Some("https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json")),
+        ("SAFEDEPS_GHSA_API_URL", "ghsa", Some("https://api.github.com/advisories")),
+        ("SAFEDEPS_NPM_CLOSURE_FIXTURE_JSON", "npm-closure-fixture", None),
+        ("SAFEDEPS_YARN_INFO_FIXTURE_NDJSON", "yarn-info-fixture", None),
+        ("SAFEDEPS_NPM_OVERRIDES_JSON", "npm-overrides", None),
+        ("SAFEDEPS_RECHECK_FIXTURE_JSON", "recheck-fixture", None),
+        ("SAFEDEPS_LEDGER_DEFAULT_TTL_DAYS", "ledger-ttl-days", Some("30")),
+        ("SAFEDEPS_NPM_TEST_REGISTRY", "npm-test-registry", None),
+    ];
+    let expected_names: BTreeSet<_> = sources.iter().map(|(name, _, _)| name.to_string()).collect();
+    assert_eq!(names(native), expected_names, "native truth-source inputs");
+    assert_eq!(names(moved), expected_names, "CLI truth-source inputs");
+    let possible = cli.split_once("safedeps_truth_sources_possibly_moved() {").unwrap().1
+        .split_once("\n}\n").unwrap().0;
+    let mut possible_names = expected_names.clone();
+    possible_names.insert("SAFEDEPS_ADVISORY_LOG".into());
+    assert_eq!(names(possible), possible_names, "CLI prefilter also observes the retired log override");
+
+    let check = |env: &[(&str, String)], expected: &str, possibly: bool| {
+        let mut shell = Command::new("/bin/bash");
+        shell.env_clear().env("PATH", "/usr/bin:/bin").env("LC_ALL", "C");
+        shell.args(["-c", &format!("{cli}\nsafedeps_truth_sources_moved_list\nprintf '\\0'\nif safedeps_truth_sources_possibly_moved; then printf true; else printf false; fi")]);
+        for (name, value) in env { shell.env(name, value); }
+        let result = shell.output().expect("run CLI truth-source reader");
+        assert!(result.status.success(), "CLI reader failed: {:?}", result);
+        let fields: Vec<_> = result.stdout.split(|b| *b == 0).collect();
+        assert_eq!(fields, [expected.as_bytes(), if possibly { b"true" } else { b"false" }], "CLI environment: {env:?}");
+        // A child owns the environment; other Rust unit tests keep theirs.
+        let mut child = Command::new(std::env::current_exe().unwrap());
+        child.env_clear().env("PATH", "/usr/bin:/bin").env("LC_ALL", "C")
+            .env("SAFEDEPS_TRUTH_TEST_EXPECTED", expected)
+            .args(["--exact", "state::truth_sources_match_cli", "--nocapture"]);
+        for (name, value) in env { child.env(name, value); }
+        let result = child.output().expect("run native truth-source reader in isolation");
+        assert!(result.status.success(), "native environment {env:?}: {}{}",
+            String::from_utf8_lossy(&result.stdout), String::from_utf8_lossy(&result.stderr));
+    };
+    check(&[], "", false);
+    for (name, label, default) in sources {
+        check(&[(name, String::new())], "", false);
+        if let Some(default) = default {
+            check(&[(name, default.into())], "", true);
+            for changed in [format!("{default}/"), format!(" {default}"), default.to_ascii_uppercase()] {
+                if changed != default { check(&[(name, changed.clone())], &format!("{label}={changed}"), true); }
+            }
+        }
+        let value = "fixture with spaces\t한글\nend";
+        let shown = if name == "SAFEDEPS_NPM_OVERRIDES_JSON" { "set" } else { value };
+        check(&[(name, value.into())], &format!("{label}={shown}"), true);
+    }
+    let all: Vec<_> = sources.iter().map(|(name, _, _)| (*name, "changed".to_string())).collect();
+    let notice = sources.iter().map(|(name, label, _)| format!("{label}={}",
+        if *name == "SAFEDEPS_NPM_OVERRIDES_JSON" { "set" } else { "changed" })).collect::<Vec<_>>().join(" ");
+    check(&all, &notice, true);
+    check(&[("SAFEDEPS_ADVISORY_LOG", "ignored.log".into())], "", true);
+    check(&[("SAFEDEPS_UNLISTED_SOURCE", "ignored".into())], "", false);
+}
+
 /// The two hooks use the same mkdir lock, but answer failure differently.
 /// Keep the verdict in the caller. Dropping an acquired lock releases it;
 /// a failed acquisition never owns (and must never remove) the directory.
