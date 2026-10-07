@@ -66,8 +66,9 @@ if [[ "${1:-}" == --print ]]; then
   exit 0
 fi
 
-# shellcheck source=../../lib/install-grammar.sh
-. "${ROOT_DIR}/lib/install-grammar.sh"
+# shellcheck source=../test/lib/native-measure-core.sh
+source "${ROOT_DIR}/scripts/test/lib/native-measure-core.sh"
+measure_grammar
 rc=0
 while IFS='=' read -r name want; do
   case "${name}" in
@@ -79,7 +80,7 @@ while IFS='=' read -r name want; do
   missing=$(comm -13 <(tr '|' '\n' <<< "${have}" | sort) <(tr '|' '\n' <<< "${want}" | sort))
   extra=$(comm -23 <(tr '|' '\n' <<< "${have}" | sort) <(tr '|' '\n' <<< "${want}" | sort))
   if [[ -n "${missing}" ]]; then
-    printf 'npm %s accepts %s spellings lib/install-grammar.sh does not have:\n%s\n' \
+    printf 'npm %s accepts %s spellings the native grammar does not have:\n%s\n' \
       "${version}" "${name}" "$(sed 's/^/  /' <<< "${missing}")"
     rc=1
   fi

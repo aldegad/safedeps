@@ -68,8 +68,8 @@ if [[ "${1:-}" == --print ]]; then
   exit 0
 fi
 
-# shellcheck source=../../lib/install-grammar.sh
-. "${ROOT_DIR}/lib/install-grammar.sh"
+source "${ROOT_DIR}/scripts/test/lib/native-measure-core.sh"
+measure_grammar
 rc=0
 while IFS=$'\t' read -r word type; do
   [[ "${type}" == error ]] && continue
@@ -77,7 +77,9 @@ while IFS=$'\t' read -r word type; do
     directory|file) registry=false ;;
     *) registry=true ;;
   esac
-  if safedeps_npa_is_local "${word}"; then said=false; else said=true; fi
+  answer=$(jq -cn --arg word "${word}" '{op:"npa-local",word:$word}' | "${MEASURE_CORE}" manager)
+  local_word=$(jq -er '.local | tostring' <<< "${answer}")
+  if [[ "${local_word}" == true ]]; then said=false; else said=true; fi
   if [[ "${said}" != "${registry}" ]]; then
     printf 'npm %s reads %s as %s; safedeps_npa_is_local says local=%s\n' "${version}" "${word}" "${type}" "$([[ "${said}" == true ]] && echo false || echo true)"
     rc=1

@@ -63,8 +63,9 @@ if [[ "${1:-}" == --tree ]]; then
   TREE=$(cd "$2" && pwd)
   shift 2
 fi
-# shellcheck source=../../lib/install-grammar.sh
-source "${TREE}/lib/install-grammar.sh"
+# The queried native grammar and reader own the hook reading.
+source "${ROOT_DIR}/scripts/test/lib/native-measure-core.sh"
+measure_grammar
 
 families=(bun pip python uv cargo go)
 [[ $# -eq 0 ]] || families=("$@")
@@ -93,15 +94,16 @@ control() {
 grammar_role() {
   local k="$1"
   shift
-  safedeps_manager_read "$@" || { printf '!'; return 0; }
-  printf '%s' "${SAFEDEPS_G_M_ROLE[k]:--}"
+  local answer
+  answer=$(jq -cn --args '{op:"read",words:$ARGS.positional}' -- "$@" | "${MEASURE_CORE}" manager) || return 2
+  jq -er --argjson k "${k}" '.roles | .[$k:$k+1] | select(length == 1)' <<< "${answer}"
 }
 
 # judge <family> <manager answer> <target index> <words...>
 judge() {
   local family="$1" answer="$2" k="$3" role pkg=false
   shift 3
-  role=$(grammar_role "${k}" "$@")
+  role=$(grammar_role "${k}" "$@") || return 2
   case "${role}" in o|r|C|p|w|D) pkg=true ;; esac
   # A value the grammar reads as the package an option names (`bunx -p x`,
   # `uvx --from x`) is both.

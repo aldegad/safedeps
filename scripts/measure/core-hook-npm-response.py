@@ -54,6 +54,12 @@ row failed, or an input did not hold. 3: nothing failed and a row was not run
 hold). 2: this runner could not do its work; what it had done is kept, and
 what it did not reach is named.
 """
+
+if __name__ == "__main__":
+    import sys
+    sys.stderr.write('retired: The Bash source-hash/channel comparison contract is historical evidence, not a native release gate. See native-measure-disposition.json.\n')
+    raise SystemExit(2)
+
 import argparse
 import hashlib
 import importlib.util

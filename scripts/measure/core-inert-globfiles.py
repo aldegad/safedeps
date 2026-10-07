@@ -10,7 +10,7 @@ stand-ins for npm and the other tools, in a fresh directory that holds the
 files of one set (`--set zz`, `--set --cache`, `--set zz,--cache`). Each run
 is kept whole, as core-inert-differential.py observes one, and each npm call
 with what the guard's own reading of npm's arguments
-(safedeps_npm_read_args in lib/install-grammar.sh, the last value
+(the native manager query, the last value
 ignore-scripts takes) makes of it. Nothing is judged again: the guards are
 not run, so the rewrites are the ones the bundle saved. No package manager
 runs.
@@ -29,21 +29,12 @@ import tempfile
 MEASURE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(MEASURE))
 
-READER = r'''
-set -u
-source "$1/lib/install-grammar.sh" || exit 3
-shift
-safedeps_npm_read_args "$@" || { echo "unread"; exit 0; }
-last=unset
-for w in "${SAFEDEPS_G_NPM_SWITCHES[@]+"${SAFEDEPS_G_NPM_SWITCHES[@]}"}"; do
-  [[ "${w}" != ignore-scripts=* ]] || last="${w#*=}"
-done
-echo "${last}"
-'''
+
 
 
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("--core", required=True)
     ap.add_argument("--witness", required=True)
     ap.add_argument("--set", action="append", default=[])
     ap.add_argument("--out", required=True)
@@ -53,12 +44,15 @@ def main():
     spec.loader.exec_module(d)
     work = tempfile.mkdtemp(prefix="safedeps-core-globfiles.")
     shells = d.Shells(work)
-    reader = os.path.join(work, "read.sh")
-    open(reader, "w").write(READER)
 
     def reading(argv):
-        r = subprocess.run(["bash", reader, ROOT] + [x.encode("latin-1") for x in argv], capture_output=True, timeout=30)
-        return r.stdout.decode("latin-1").strip() if r.returncode == 0 else "failed: rc %d" % r.returncode
+        query={"op":"npm-read","words":argv}
+        r = subprocess.run([os.path.abspath(a.core), "manager"], input=json.dumps(query).encode(), capture_output=True, timeout=30, check=True)
+        answer=json.loads(r.stdout)
+        if not answer['reads']:return 'unread'
+        switches=dict(answer['switches'])
+        return str(switches['ignore-scripts']).lower() if 'ignore-scripts' in switches else 'unset'
+
 
     up0 = subprocess.run(["uptime"], capture_output=True, text=True).stdout.strip()
     out = open(a.out, "w", encoding="utf-8")

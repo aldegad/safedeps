@@ -4,6 +4,12 @@
 Old comparator files are explicit inputs pinned by the caller's source
 manifest. They are controls only, never a fallback in the shipping CLI.
 """
+
+if __name__ == "__main__":
+    import sys
+    sys.stderr.write('retired: Bash source comparator mutations are retired with the channel comparison. See native-measure-disposition.json.\n')
+    raise SystemExit(2)
+
 import argparse
 import hashlib
 import json

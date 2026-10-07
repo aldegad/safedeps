@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
 """Focused launch and retained-occurrence identity control; remote archives only."""
+
+if __name__ == "__main__":
+    import sys
+    sys.stderr.write('retired: Historical paired collector identity replay is retired with that collector. See native-measure-disposition.json.\n')
+    raise SystemExit(2)
+
 import argparse
 import copy
 import importlib.util

@@ -99,6 +99,7 @@ ALL_BATTERIES=(
   "statement-batch|1|dev|1|1|263|scripts/test/statement-batch.sh"
   "shell-reading|1|dev|1|1|295|scripts/test/shell-reading.sh"
   "census|1|release|4|2|1030|scripts/measure/scan-failure-census.sh --quick"
+  "native-scan-failures|1|release|1|1|600|scripts/test/native-scan-failures.sh"
   "consumer-forms|1|dev|4|1|1126|scripts/test/consumer-forms.sh"
   "manager-variants|1|dev|3|4|650|scripts/test/manager-variants.sh"
   "install-dir-differential|1|dev|1|6|134|scripts/test/install-dir-differential.sh"

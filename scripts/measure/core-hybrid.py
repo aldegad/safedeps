@@ -12,6 +12,12 @@ shipped, and the tree it was made from is not touched.
 
 Usage: core-hybrid.py <dest> <safedeps-core>
 """
+
+if __name__ == "__main__":
+    import sys
+    sys.stderr.write('retired: The temporary Bash hook with a native lexer is retired; production uses one native hook. See native-measure-disposition.json.\n')
+    raise SystemExit(2)
+
 import os
 import shutil
 import sys

@@ -149,8 +149,8 @@ if [[ "${1:-}" == --print ]]; then
   exit 0
 fi
 
-# shellcheck source=../../lib/install-grammar.sh
-. "${ROOT_DIR}/lib/install-grammar.sh"
+source "${ROOT_DIR}/scripts/test/lib/native-measure-core.sh"
+measure_grammar
 
 rc=0
 same_version=false
@@ -208,6 +208,11 @@ explained_by() {
   done
   return 1
 }
+reader_table=plain
+[[ "${other_version}" != true ]] || reader_table=other
+python3 "${ROOT_DIR}/scripts/measure/native-manager-corpus.py" --core "${MEASURE_CORE}" \
+  --table "${reader_table}" --corpus "${work}/corpus" --out "${work}/native-readings"
+exec 3< "${work}/native-readings"
 total=0 wrong=0 boundary=0
 while IFS=$'\036' read -r args want; do
   total=$((total + 1))
@@ -218,22 +223,12 @@ while IFS=$'\036' read -r args want; do
   words=( ${args} )
   unset IFS
   set +f
-  got=""
+  IFS= read -r got <&3 || { printf 'native reader omitted a corpus row\n' >&2; exit 2; }
   # `--no-local-address <word>` takes the word when it is one of this
   # machine's addresses; the reading says it cannot tell.
   if [[ "${args}" == --no-local-address$'\037'* ]]; then
     total=$((total - 1))
     continue
-  fi
-  if [[ "${other_version}" == true ]]; then
-    reader=(safedeps_npm_as_other safedeps_npm_read_args)
-  else
-    reader=(safedeps_npm_read_args)
-  fi
-  if "${reader[@]}" "${words[@]}"; then
-    got=$(IFS=$'\037'; printf '%s' "${SAFEDEPS_G_NPM_WORDS[*]+"${SAFEDEPS_G_NPM_WORDS[*]}"}")
-  else
-    got="<no reading>"
   fi
   if [[ "${got}" != "${want}" ]]; then
     if [[ "${same_version}" != true && "${other_version}" != true ]] && explained_by "${words[@]}" > /dev/null; then
@@ -247,6 +242,7 @@ while IFS=$'\036' read -r args want; do
     fi
   fi
 done < "${work}/corpus"
+exec 3<&-
 if (( wrong > 0 )); then
   printf '%s of %s argument lists read differently from npm %s\n' "${wrong}" "${total}" "${version}"
   rc=1

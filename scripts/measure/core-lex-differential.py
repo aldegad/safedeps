@@ -29,6 +29,12 @@ With --control the awk program is mutated in memory (a single quote no longer
 closes) and the run has to find mismatches: a differential that cannot fail
 measures nothing. It exits 0 only when the mutation is seen.
 """
+
+if __name__ == "__main__":
+    import sys
+    sys.stderr.write('retired: The Bash awk lexer comparison has no reference after the native hook switch. Fixed corpora remain inputs to native reader batteries. See native-measure-disposition.json.\n')
+    raise SystemExit(2)
+
 import argparse
 import json
 import os

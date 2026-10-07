@@ -5,6 +5,12 @@ No command is evaluated. The same npm stub records every argument and the
 full carried environment. Field values and the trace-attribution sentence
 are compared without text/path normalization. A saved JSONL is the input.
 """
+
+if __name__ == "__main__":
+    import sys
+    sys.stderr.write('retired: The patched Bash reading-state reference is retired. Native reader batteries own fixed expectations. See native-measure-disposition.json.\n')
+    raise SystemExit(2)
+
 import argparse
 import importlib.util
 import json

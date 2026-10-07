@@ -4,6 +4,12 @@
 The inode/clock/output numbers below are fixture facts, not live hook evidence.
 No expected verdict is derived from the comparator's tokens or implementation.
 """
+
+if __name__ == "__main__":
+    import sys
+    sys.stderr.write('retired: The paired collector contract test is retired with its Bash reference. See native-measure-disposition.json.\n')
+    raise SystemExit(2)
+
 import copy
 import json
 from pathlib import Path
