@@ -24,13 +24,15 @@ cd "$(npm root -g)/@aldegad/safedeps" && node scripts/install/install-safedeps-h
 
 > `safedeps`는 CLI 명령어이며, npm 패키지는 **`@aldegad/safedeps`**입니다. npm의 스코프 없는 `safedeps`는 다른 패키지입니다. 정식 소스 트리를 사용하려면 [Installation](#installation)을 참고하세요.
 
+> 훅은 Rust 로 쓴 프로그램 하나, `safedeps-core` 입니다. npm 패키지는 macOS(Apple silicon 과 Intel)와 Linux x64 용으로 빌드한 것을 담고 있고, 설치기가 아무것도 등록하기 전에 그것을 한 번 실행해 봅니다. 체크아웃에서는 cargo 로 직접 빌드합니다. 바이너리가 어디서 오는지, 없거나 소스와 어긋났을 때 무엇이 보이는지는 [Where the hook binary comes from](#where-the-hook-binary-comes-from) 에, v2.19.0 에서 달라진 점은 [What Changed in v2.19.0](#what-changed-in-v2190) 에 있습니다.
+
 ![safedeps withholds a vulnerable install, then clears the patched version](assets/demo.gif)
 
 ## Distribution Model
 
 Safedeps에는 두 가지 배포 채널이 있습니다.
 
-1. **에이전트 스킬 + 훅 (표준)** — 저장소 자체가 스킬 폴더입니다. `SKILL.md`, 훅 스크립트, provider/ledger 라이브러리, 설치 헬퍼가 하나의 디렉터리에 함께 있습니다.
+1. **에이전트 스킬 + 훅 (표준)** — 저장소 자체가 스킬 폴더입니다. `SKILL.md`, 훅 엔트리와 그 Rust 코어, provider/ledger 라이브러리, 설치 헬퍼가 하나의 디렉터리에 함께 있습니다. 체크아웃은 코어의 소스를 담고 바이너리를 직접 빌드하며, npm 패키지는 빌드된 바이너리를 담습니다.
 2. **npm 패키지 (CLI 편의성)** — `@aldegad/safedeps`가 `safedeps` 명령어를 설치합니다. npm 설치만으로는 Claude Code나 Codex가 스킬을 자동으로 발견하지 않으므로, 사용자는 여전히 훅/스킬 설치자를 실행하거나 스킬 폴더를 수동 등록해야 합니다.
 
 GitHub 릴리스는 정식 스킬/훅 소스 트리를 기준 아티팩트로 사용하려는 경우에 사용합니다. 버전 관리된 전역 CLI가 필요한 경우에는 npm을 사용하세요.
@@ -55,21 +57,21 @@ GitHub 릴리스는 정식 스킬/훅 소스 트리를 기준 아티팩트로 �
 - **이전 단계** — `safedeps check`가 패키지를 OSV(표준), CISA KEV, GitHub Advisory로 확인한 뒤 로컬 ledger에 승인 기록을 남깁니다. npm의 경우 패키지의 전체 의존성 폐쇄성을 해결해 모든 전이적 패키지도 검사합니다.
 - **이후 단계** — PostToolUse 훅이 npm 이 쓰는 lockfile 에서 실제로 설치된 내용을 다시 읽고, ledger에 없는 항목이나 advisory DB에서 새로 위험으로 표시된 항목을 롤백(리오그)합니다.
 
-두 훅 이벤트에 등록되는 커맨드는 작은 엔트리 셔틀(`safedeps-hook-entry.sh`)입니다. 훅은 심링크를 거쳐 레포 체크아웃을 라이브로 실행하므로, 체크아웃이 일시적으로 깨진 상태(머지 진행 중, 저장이 덜 된 편집)에서는 종료코드에 따라 모든 Bash 호출이 문법 오류 한 줄로 막히거나 게이트가 조용히 꺼지곤 했습니다. 셔틀은 둘 다 설명이 붙은 fail-closed 거부로 바꿉니다. 무엇이 깨졌는지, 머지가 진행 중인지, 어떻게 복구하는지를 말합니다. 머신이 프로세스를 띄우지 못한 순간의 호출도 게이트 없이 통과시키지 않고 거부합니다. 상세: [ARCHITECTURE — Phase 0](./ARCHITECTURE.ko.md).
+두 훅 이벤트에 등록되는 커맨드는 작은 엔트리 셔틀 `scripts/safedeps-hook-entry.sh` 에 `pre` 또는 `post` 를 붙인 것입니다. 셔틀은 이 머신의 바이너리 `bin/native/<os>-<arch>/safedeps-core` 를 찾아 실행합니다. 그 바이너리가 훅입니다. 의존성이 없는 Rust 프로그램 하나이고, 이전 버전이 등록하던 Bash 스크립트 둘을 대신합니다. 훅은 심링크를 거쳐 레포 체크아웃을 라이브로 실행하므로, 체크아웃이 일시적으로 깨진 상태(빌드가 덜 된 바이너리, 없는 바이너리, 크래시)에서는 종료코드에 따라 모든 Bash 호출이 오류 한 줄로 막히거나 게이트가 조용히 꺼지곤 했습니다. 셔틀은 그 각각을 설명이 붙은 fail-closed 거부로 바꿉니다. 무엇이 깨졌는지, 어떻게 복구하는지를 말합니다. 머신이 프로세스를 띄우지 못한 순간의 호출도 게이트 없이 통과시키지 않고 거부합니다. Bash 로 되돌아가는 경로는 없고, 환경 변수로 바이너리를 고르거나 끌 수도 없습니다. 상세: [ARCHITECTURE — Phase 0](./ARCHITECTURE.ko.md).
 
-**시간이 다하는 것도 답이지 공백이 아닙니다.** 에이전트 런타임은 훅마다 고정 예산을 주고 그게 지나면 훅을 죽이는데, 그다음 tool call 은 그대로 진행됩니다 — 즉 오래 걸리는 게이트는 그냥 사라집니다. 커맨드 스캔 비용은 커맨드가 길수록 커지므로, 패딩을 붙이는 것만으로 그 선을 넘길 수 있었습니다. 이제 설치 전 guard 는 더 작은 자기 예산을 갖고, 시간 안에 판정을 못 끝내면 차단하고 그 사실을 말합니다. 메시지가 `UNDECIDED, not unsafe` 로 시작해서 아무도 타임아웃을 적발로 읽지 않게 합니다. 예산 근처에도 못 가는 짧은 커맨드는 영향받지 않습니다.
+**시간이 다하는 것도 답이지 공백이 아닙니다.** 에이전트 런타임은 훅마다 고정 예산을 주고 그게 지나면 훅을 죽이는데, 그다음 tool call 은 그대로 진행됩니다 — 즉 오래 걸리는 게이트는 그냥 사라집니다. 커맨드를 읽는 비용은 커맨드가 길수록 커지므로, 패딩을 붙이는 것만으로 그 선을 넘길 수 있었습니다. 이제 설치 전 guard 는 더 작은 자기 예산을 갖고, 시간 안에 판정을 못 끝내면 차단하고 그 사실을 말합니다. 메시지가 `UNDECIDED, not unsafe` 로 시작해서 아무도 타임아웃을 적발로 읽지 않게 합니다. 판정은 guard 자신의 프로세스에서 돌므로, 답 없이 끝난 판정(크래시나 시그널)도 같은 방식으로 차단하고 메시지가 그 시그널을 말합니다. 끝난 것이 아니라 멈춘 판정 프로세스는 기한까지 기다립니다. 예산과 한참 거리가 먼 짧은 커맨드는 영향이 없습니다.
 
-**읽지 못한 커맨드도 같은 방식으로 다룹니다.** guard 는 커맨드를 `awk`·`grep`·`sed` 로 읽는데, 실패한 도구는 아무것도 돌려주지 않았고, 그것이 "설치 아님" 으로 읽혔습니다. 이제 실패한 읽기를 기록하고, 무엇이든 실행을 허용하기 전에 확인합니다. 커맨드 어디에든 패키지 매니저 이름이 있으면 `UNDECIDED` 로 차단하고, 없으면 실행하되 실패를 stderr 와 `~/.safedeps/advisory.log` 에 남깁니다. 읽기가 실패한 뒤에 적발을 보고할 deny 는 대신 `UNDECIDED` 를 보고합니다. guard 는 따옴표·주석·heredoc·중첩 치환을 한 번에, 셸이 읽는 방식대로 읽습니다. 그래서 heredoc, 아포스트로피가 든 주석, 여러 줄 문자열이 그 뒤의 설치를 가리지 못하고, 끝내 닫히지 않는 명령은 읽지 못한 것으로 다룹니다. 설치 앞의 대입(`FOO="a b" pip install ...`)도 같은 방식으로 읽으므로 그 값도 설치를 가리지 못하고, `case` 갈래나 중첩 치환 안의 설치도 마찬가지입니다. bash, zsh, dash 가 한 커맨드를 다르게 읽는 곳에서는 각 셸이 읽는 방식대로 모두 읽고, 그중 어느 셸이라도 실행할 설치를 전부 판정합니다. `--ignore-scripts` 는 세 셸이 npm 설치 자리를 똑같이 읽을 때만 넣고, 그렇지 않으면 커맨드를 `UNDECIDED` 로 차단합니다.
+**읽지 못한 커맨드도 같은 방식으로 다룹니다.** 실패한 읽기는 예전에 아무것도 돌려주지 않았고, 그것이 "설치 아님" 으로 읽혔습니다. 이제 실패한 읽기를 기록하고, 무엇이든 실행을 허용하기 전에 확인합니다. 커맨드 어디에든 패키지 매니저 이름이 있으면 `UNDECIDED` 로 차단하고, 없으면 실행하되 실패를 stderr 와 `~/.safedeps/advisory.log` 에 남깁니다. 읽기가 실패한 뒤에 적발을 보고할 deny 는 대신 `UNDECIDED` 를 보고합니다. 코어는 커맨드를 셸이 읽는 방식 — 따옴표, 주석, heredoc, 중첩 치환을 한 번에 — 으로 읽으므로, heredoc 이나 아포스트로피가 든 주석이나 여러 줄 문자열이 그 뒤의 설치를 가릴 수 없고, 닫히지 않는 커맨드는 읽지 못한 것으로 다룹니다. 설치 앞의 대입(`FOO="a b" pip install ...`)도 같은 방식으로 읽으므로 그 값이 설치를 가릴 수 없고, `case` 팔이나 중첩 치환 안의 설치도 마찬가지입니다. bash, zsh, dash 가 커맨드를 다르게 읽는 곳에서는 각 셸이 읽는 방식대로 읽고, 셋 중 하나라도 실행할 설치를 모두 판정합니다. `--ignore-scripts` 는 세 셸이 npm 설치의 위치에 동의하는 곳에만 넣고, 아니면 커맨드를 `UNDECIDED` 로 차단합니다.
 
 PreToolUse 명령 훅은 빠른 advisory 안내 장치로서, 명백히 승인되지 않은 설치 및 위험한 명령 형태를 차단해 에이전트에게 즉시 피드백을 제공합니다. 하지만 npm에서는 실제 권한 판단이 설치 후 효과 게이트에 있으며, 실제로 설치된 결과를 기준으로 판단하므로 래핑되거나 난독화된 설치 명령으로 패키지를 우회할 수 없습니다.
 
-**스크립트 안전성(비활성 설치).** Claude Code에서는 PreToolUse 훅이 npm install에 `--ignore-scripts`를 추가합니다. 목표는 **비활성(inert)** 설치입니다. 패키지는 디스크에 기록되고, 라이프사이클 스크립트는 closure 가 검증된 뒤 아래의 rebuild 를 통해서만 돕니다. 이것은 목표이지 약속이 아닙니다. npm 이 플래그를 지키는지는 명령이 도는 셸이 정하므로, safedeps 는 플래그를 더했다는 것만 말합니다. 플래그는 npm 이 참으로 읽는 자리에 붙습니다. npm 은 같은 옵션이 여러 번 오면 마지막 값을 따르므로, 훅은 먼저 그 설치의 마지막 인자 뒤에 플래그를 둡니다. 거기서는 설치에 `--ignore-scripts=false` 나 `--no-ignore-scripts` 가 있어도 스크립트를 다시 켤 수 없습니다. 그다음 플래그를 둔 설치를 npm 이 읽는 방식대로 다시 읽고, 플래그가 참이고 다른 것은 바뀌지 않았을 때만 그 자리를 씁니다. `--cache` 처럼 다음 단어를 값으로 받는 옵션이 마지막 단어이면 플래그가 캐시 디렉터리가 되어 버리므로, 플래그는 그 단어 앞에 갑니다. 다시 쓰는 설치는 safedeps 가 설치의 단어를 읽기 전에 하던 재작성도 그대로 담습니다. 한 문장짜리 명령이면 끝에 플래그 하나, 그 밖에는 동사마다 바로 뒤에 하나입니다. 그리고 어느 경우든 동사마다 바로 뒤에 하나를 둡니다. 이것이 바닥입니다. 훅이 더한 플래그 몇 개를 지우면 그 이전의 재작성이 되므로, 훅이 단어를 잘못 읽거나 셸이 단어를 바꿔도 npm 은 적어도 그 재작성이 준 것을 받습니다. 훅이 셸처럼 읽을 수 없는 텍스트도 있습니다. 이스케이프나 치환이 든 채 셸에 넘기는 큰따옴표 스크립트, `ksh` 에 넘기는 스크립트, 다른 명령에 파이프로 넘기는 heredoc 본문입니다. 그 안의 설치는 v2.17.2 가 넣던 자리, 곧 동사 바로 뒤에 플래그를 받습니다. 명령이 기록되는지는 그 텍스트가 어디로 가는지에 기대지 않습니다. 훅은 읽지 않은 것의 목록이 아니라 읽은 것의 목록을 가집니다. npm 설치 동사는 그 `npm` 이 훅이 읽은 텍스트의 명령 단어일 때만 읽은 것으로 칩니다. 문장의 처음이나 훅이 읽은 스크립트의 처음에 있는 `npm ci` 가 그 예입니다. 훅은 그런 `npm` 을 모두 명령에서 빼고 따옴표와 백슬래시를 지웁니다. 또 명령을 셸 자신의 따옴표 제거로 한 단계씩, 세 단계까지 읽습니다. 넘겨받은 스크립트가 윗단계가 남긴 텍스트를 읽는 것과 같고, `$'...'` 문자열은 그 자리에서 풀어 읽습니다. 그중 어디든 npm 설치 동사가 남아 있으면, 훅이 명령으로 읽지 않은 텍스트가 그것을 담고 있다고 `advisory.log` 에 기록됩니다. 여기서 설치 동사는 설치 검사가 읽는 그 동사입니다. `npm` 과 동사 사이에 옵션이 올 수 있고, 그 값은 비어 있거나 여러 단어일 수 있습니다. `npm` 앞에는 아무것도 없어도 됩니다. `env -S'npm ci'` 처럼 옵션에 명령을 붙여 받는 프로그램이 있기 때문입니다. 셸이 만드는 단어는 명령의 어느 글자도 쓰지 않은 채 `npm` 이나 그 명령이 될 수 있으므로, 셸에 넘기는 here-string 이나 heredoc 본문을 포함해 텍스트가 어디로 가든 같은 방식으로 기록됩니다. 셸이 만드는 명령 단어(`$(echo npm) ci`, `{npm,ci}`), npm 이 자기 명령으로 읽는 단어를 셸이 만들 때(`npm $V x`, `npm "$@"`), 그리고 치환 안의 `npm`(`hash -p "$(command -v npm)" n`)이 그렇습니다. 단어를 셸이 만드는지는 아래에서 설치 자신의 단어에 쓰는 것과 같은 검사로 정합니다. 훅이 다른 설치에 플래그를 넣었으면 아무도 플래그를 읽지 못했다고 기록됩니다. 아무 데도 넣지 못했으면, 이미 플래그를 가진 설치가 옆에 있어도 downgrade 가 기록되고, 한 문장짜리 명령은 그래도 이전 재작성의 끝 플래그를 받습니다. 대가는 소음입니다. 설치 옆에서 데이터일 뿐인 설치 텍스트, 곧 `echo`, 커밋 메시지, 파일에 쓰는 heredoc 안의 텍스트도 기록되고, 설치 옆의 `pnpm i` 와 `$(npm root -g)` 도 기록됩니다. 주석은 기록되지 않습니다. 기록 밖에 남는 것이 셋 있습니다. `printf '\156pm ci' | sh` 나 `base64 -d | sh` 처럼 명령이 실행되는 동안 다른 프로그램이 만드는 텍스트는 명령 안에서 설치를 쓰지 않으므로, 그것은 effect gate 가 확인합니다. alias 가 npm 에 묶은 이름은 `npm` 을 쓰지 않은 문장에서 npm 을 돌립니다. bash 는 스크립트에서 `shopt -s expand_aliases` 뒤에만 alias 를 씁니다. 그리고 설치 검사가 아예 npm 설치로 보지 않는 명령은 여기서 다시 쓰이지도, 기록되지도 않습니다. 셸이 명령을 실행할 때 바꾸는 단어는 무엇이든 될 수 있습니다. 훅은 셸이 펼치는 것을 나열하지 않습니다. 셸이 건드리지 않는 것을 나열합니다. 따옴표 밖의 모든 글자가 영문자, 숫자, `. _ / @ : + , = % -` 중 하나이고 단어가 `~` 나 `=` 로 시작하지 않을 때만, 그 단어를 쓴 그대로로 칩니다. 틸드, 중괄호, `$`, glob, 괄호처럼 그 밖의 글자가 있으면 셸이 실행 때 정할 수 있는 단어입니다. 큰따옴표 안의 `$` 도 셉니다. 거기서도 펼쳐지기 때문입니다. 그런 단어가 있는 설치는 미리 읽을 수 없습니다. 그 설치는 두 플래그를 그대로 두고, npm 이 어느 쪽을 따를지 아무도 읽지 못했다는 사실을 `advisory.log` 에 기록합니다. PostToolUse 훅은 설치가 스크립트를 돌리지 않았다고 말하는 일이 없습니다. 그런 설치에는 safedeps 가 자기가 쓴 명령을 셸이 읽을 방식대로 다 읽지 못했다는 말을 더합니다. `--ignore-scripts=false` 처럼 스크립트를 요청한 설치도 거기에 기록되고, 그 스크립트는 아래의 rebuild 를 통해서만 돕니다. 훅이 설치를 그대로 두는 것은 그 설치 자신의 인자가 이미 플래그를 참으로 두고 이전 재작성도 그대로 두었을 때뿐이고, 인자는 npm 이 인자를 읽는 방식으로 읽습니다. `echo` 나 다른 문장에 있는 같은 글자는 세지 않습니다. 훅은 각 설치의 인자를 셸이 이어 붙이는 방식대로 읽습니다. 그래서 따옴표 안에서 플래그처럼 보이는 줄은 옵션 값의 일부입니다. 동사 앞에 `--` 가 있는 설치는 npm 이 플래그를 옵션으로 읽을 자리가 없으므로 바닥만 남기고 downgrade 로 기록됩니다. 이후 효과 게이트가 폐쇄성을 검증하고 통과 시에만 PostToolUse 훅이 `npm rebuild`를 실행해 검증된 스크립트를 실행합니다. 게이트가 거부한 패키지는 어떤 스크립트도 실행되기 전에 리오그됩니다. rebuild 는 게이트가 읽은 트리만 다룹니다. 게이트가 읽은 디렉터리에서 `--global=false --location=project` 로 돌기 때문에 프로젝트 `.npmrc` 가 rebuild 를 전역 트리로 돌릴 수 없습니다. rebuild 는 트리 전체에 대해 돌기 때문에, 이번 설치가 바꾼 것만이 아니라 트리 전체를 묻습니다. `node_modules` 에 `.package-lock.json` 기록이 없거나, rebuild 가 돌 트리에 다음 중 하나가 있다고 npm 이 답하면 그 패키지를 지목한 경고와 함께 건너뜁니다. 어느 lockfile 에도 기록되지 않은 패키지나 패키지 버전, lockfile 이 공개 registry 에서 왔다고 기록하지 않은 패키지(사설 registry, git URL, tarball), 공개 registry 로 기록됐지만 npm 이 다른 registry 에서 받은 패키지, 선언된 워크스페이스 멤버가 아닌 디렉터리(`file:` 디렉터리 의존성)입니다. 이 질문은 `npm query '*'` 로 npm 에게 묻고, 이 질의는 `npm rebuild` 처럼 `file:` 의존성 안의 `node_modules` 까지 따라갑니다. npm 이 답하지 않아도 rebuild 를 건너뜁니다. `registry.npmjs.org` 기록은 바이트가 어디서 왔는지 말해 주지 않습니다. npm 의 기본값 `replace-registry-host=npmjs` 는 그 URL 을 npm 에 설정된 registry 에서 받고, 기록에는 URL 을 그대로 적습니다. 그래서 npm 이 어느 registry 에서 받는지도 `npm config ls --json` 으로 npm 에게 묻습니다. 명령 전에 설치 자신의 인자와 환경으로 한 번, 명령 뒤에 게이트가 읽은 디렉터리에서 한 번입니다. 두 답이 모두 공개 registry 라고 할 때만 그 기록을 공개 registry 의 것으로 칩니다. (이 기능은 Claude Code의 `updatedInput` capability를 사용합니다. Codex CLI는 이 기능을 노출하지 않으므로, Codex에서는 설치가 일반 실행되고 효과 게이트는 detect-and-rollback 방식입니다. 즉 악성 설치 스크립트가 롤백 전 1회 실행될 수 있습니다.)
+**스크립트 안전성(비활성 설치).** Claude Code에서는 PreToolUse 훅이 npm install에 `--ignore-scripts`를 추가합니다. 목표는 **비활성(inert)** 설치입니다. 패키지는 디스크에 기록되고, 라이프사이클 스크립트는 closure 가 검증된 뒤 아래의 rebuild 를 통해서만 돕니다. 이것은 목표이지 약속이 아닙니다. npm 이 플래그를 지키는지는 명령이 도는 셸이 정하므로, safedeps 는 플래그를 더했다는 것만 말합니다. 플래그는 npm 이 참으로 읽는 자리에 붙습니다. npm 은 같은 옵션이 여러 번 오면 마지막 값을 따르므로, 훅은 먼저 그 설치의 마지막 인자 뒤에 플래그를 둡니다. 거기서는 설치에 `--ignore-scripts=false` 나 `--no-ignore-scripts` 가 있어도 스크립트를 다시 켤 수 없습니다. 그다음 플래그를 둔 설치를 npm 이 읽는 방식대로 다시 읽고, 플래그가 참이고 다른 것은 바뀌지 않았을 때만 그 자리를 씁니다. `--cache` 처럼 다음 단어를 값으로 받는 옵션이 마지막 단어이면 플래그가 캐시 디렉터리가 되어 버립니다. 문장이 더 있는 명령에서는 플래그가 그 단어 앞에 갑니다. 한 문장짜리 명령에서는 끝에 둘 플래그의 자리가 없으므로 그 명령은 `UNDECIDED` 입니다(아래). 다시 쓰는 설치는 safedeps 가 설치의 단어를 읽기 전에 하던 재작성도 그대로 담습니다. 한 문장짜리 명령이면 끝에 플래그 하나, 그 밖에는 동사마다 바로 뒤에 하나입니다. 그리고 어느 경우든 동사마다 바로 뒤에 하나를 둡니다. 이것이 바닥입니다. 훅이 더한 플래그 몇 개를 지우면 그 이전의 재작성이 되므로, 훅이 단어를 잘못 읽거나 셸이 단어를 바꿔도 npm 은 적어도 그 재작성이 준 것을 받습니다. 플래그가 들어갈 자리가 늘 있는 것은 아닙니다. 세 가지가 한꺼번에 요구됩니다: 위의 바닥, 쓴 그대로의 명령 인자와 데이터, 그리고 npm 이 옵션으로 읽는 플래그입니다. 셋을 다 줄 수 없는 명령이 있습니다. `npm install left-pad@1.3.0 --cache` 가 그렇습니다. 끝의 플래그가 `--cache` 의 값이 되어 버립니다. `npm install true` 도 그렇습니다. 동사 뒤의 플래그가 `true` 를 자기 값으로 가져갑니다. 셋째는 다른 명령이 읽는 heredoc 본문 안의 설치 단어입니다. 거기에 플래그를 쓰면 그 명령이 출력하는 내용이 바뀝니다. 이런 명령에서 훅은 의무들 사이에서 고르지 않고, 바닥도 버리지 않습니다. 재작성을 보내지 않고 명령을 `UNDECIDED` 로 차단하며, `advisory.log` 가 이유를 이름으로 적습니다. 그 비용과 그런 명령을 쓰는 법은 [What Changed in v2.19.0](#what-changed-in-v2190) 에 있습니다. Codex CLI 에서는 재작성을 보내지 않으므로 거기서는 플래그를 놓을 일이 없습니다. `sh -c`, `bash -c`, `zsh -c`, `dash -c`, `ksh -c`, `eval` 에 넘기는 스크립트는 스크립트로 읽고, 플래그는 그 안에 들어갑니다. 여전히 기록만 하는 텍스트는 이미 플래그를 가진 설치 옆에서 출력을 파이프로 넘기는 셸에 먹이는 heredoc(`sh <<E | tee log`) 하나입니다. 명령이 기록되는지는 그 텍스트가 어디로 가는지에 기대지 않습니다. 훅은 읽지 않은 것의 목록이 아니라 읽은 것의 목록을 가집니다. npm 설치 동사는 그 `npm` 이 훅이 읽은 텍스트의 명령 단어일 때만 읽은 것으로 칩니다. 문장의 처음이나 훅이 읽은 스크립트의 처음에 있는 `npm ci` 가 그 예입니다. 훅은 그런 `npm` 을 모두 명령에서 빼고 따옴표와 백슬래시를 지웁니다. 또 명령을 셸 자신의 따옴표 제거로 한 단계씩, 세 단계까지 읽습니다. 넘겨받은 스크립트가 윗단계가 남긴 텍스트를 읽는 것과 같고, `$'...'` 문자열은 그 자리에서 풀어 읽습니다. 그중 어디든 npm 설치 동사가 남아 있으면, 훅이 명령으로 읽지 않은 텍스트가 그것을 담고 있다고 `advisory.log` 에 기록됩니다. 여기서 설치 동사는 설치 검사가 읽는 그 동사입니다. `npm` 과 동사 사이에 옵션이 올 수 있고, 그 값은 비어 있거나 여러 단어일 수 있습니다. `npm` 앞에는 아무것도 없어도 됩니다. `env -S'npm ci'` 처럼 옵션에 명령을 붙여 받는 프로그램이 있기 때문입니다. 셸이 만드는 단어는 명령의 어느 글자도 쓰지 않은 채 `npm` 이나 그 명령이 될 수 있으므로, 셸에 넘기는 here-string 이나 heredoc 본문을 포함해 텍스트가 어디로 가든 같은 방식으로 기록됩니다. 셸이 만드는 명령 단어(`$(echo npm) ci`, `{npm,ci}`), npm 이 자기 명령으로 읽는 단어를 셸이 만들 때(`npm $V x`, `npm "$@"`), 그리고 치환 안의 `npm`(`hash -p "$(command -v npm)" n`)이 그렇습니다. 단어를 셸이 만드는지는 아래에서 설치 자신의 단어에 쓰는 것과 같은 검사로 정합니다. 훅이 다른 설치에 플래그를 넣었으면 아무도 플래그를 읽지 못했다고 기록됩니다. 아무 데도 넣지 못했으면, 이미 플래그를 가진 설치가 옆에 있어도 downgrade 가 기록됩니다. 대가는 소음입니다. 설치 옆에서 데이터일 뿐인 설치 텍스트, 곧 `echo`, 커밋 메시지, 파일에 쓰는 heredoc 안의 텍스트도 기록되고, 설치 옆의 `pnpm i` 와 `$(npm root -g)` 도 기록됩니다. 주석은 기록되지 않습니다. 기록 밖에 남는 것이 셋 있습니다. `printf '\156pm ci' | sh` 나 `base64 -d | sh` 처럼 명령이 실행되는 동안 다른 프로그램이 만드는 텍스트는 명령 안에서 설치를 쓰지 않으므로, 그것은 effect gate 가 확인합니다. alias 가 npm 에 묶은 이름은 `npm` 을 쓰지 않은 문장에서 npm 을 돌립니다. bash 는 스크립트에서 `shopt -s expand_aliases` 뒤에만 alias 를 씁니다. 그리고 설치 검사가 아예 npm 설치로 보지 않는 명령은 여기서 다시 쓰이지도, 기록되지도 않습니다. 셸이 명령을 실행할 때 바꾸는 단어는 무엇이든 될 수 있습니다. 훅은 셸이 펼치는 것을 나열하지 않습니다. 셸이 건드리지 않는 것을 나열합니다. 따옴표 밖의 모든 글자가 영문자, 숫자, `. _ / @ : + , = % -` 중 하나이고 단어가 `~` 나 `=` 로 시작하지 않을 때만, 그 단어를 쓴 그대로로 칩니다. 틸드, 중괄호, `$`, glob, 괄호처럼 그 밖의 글자가 있으면 셸이 실행 때 정할 수 있는 단어입니다. 큰따옴표 안의 `$` 도 셉니다. 거기서도 펼쳐지기 때문입니다. 그런 단어가 있는 설치는 미리 읽을 수 없습니다. 그 설치는 두 플래그를 그대로 두고, npm 이 어느 쪽을 따를지 아무도 읽지 못했다는 사실을 `advisory.log` 에 기록합니다. PostToolUse 훅은 설치가 스크립트를 돌리지 않았다고 말하는 일이 없습니다. 그런 설치에는 safedeps 가 자기가 쓴 명령을 셸이 읽을 방식대로 다 읽지 못했다는 말을 더합니다. `--ignore-scripts=false` 처럼 스크립트를 요청한 설치도 거기에 기록되고, 그 스크립트는 아래의 rebuild 를 통해서만 돕니다. 훅이 설치를 그대로 두는 것은 그 설치 자신의 인자가 이미 플래그를 참으로 두고 이전 재작성도 그대로 두었을 때뿐이고, 인자는 npm 이 인자를 읽는 방식으로 읽습니다. `echo` 나 다른 문장에 있는 같은 글자는 세지 않습니다. 훅은 각 설치의 인자를 셸이 이어 붙이는 방식대로 읽습니다. 그래서 따옴표 안에서 플래그처럼 보이는 줄은 옵션 값의 일부입니다. 동사 앞에 `--` 가 있는 설치는 npm 이 플래그를 옵션으로 읽을 자리가 없으므로 그 명령은 `UNDECIDED` 입니다(`npm -- ci -- x`). 이후 효과 게이트가 폐쇄성을 검증하고 통과 시에만 PostToolUse 훅이 `npm rebuild`를 실행해 검증된 스크립트를 실행합니다. 게이트가 거부한 패키지는 어떤 스크립트도 실행되기 전에 리오그됩니다. rebuild 는 게이트가 읽은 트리만 다룹니다. 게이트가 읽은 디렉터리에서 `--global=false --location=project` 로 돌기 때문에 프로젝트 `.npmrc` 가 rebuild 를 전역 트리로 돌릴 수 없습니다. rebuild 는 트리 전체에 대해 돌기 때문에, 이번 설치가 바꾼 것만이 아니라 트리 전체를 묻습니다. `node_modules` 에 `.package-lock.json` 기록이 없거나, rebuild 가 돌 트리에 다음 중 하나가 있다고 npm 이 답하면 그 패키지를 지목한 경고와 함께 건너뜁니다. 어느 lockfile 에도 기록되지 않은 패키지나 패키지 버전, lockfile 이 공개 registry 에서 왔다고 기록하지 않은 패키지(사설 registry, git URL, tarball), 공개 registry 로 기록됐지만 npm 이 다른 registry 에서 받은 패키지, 선언된 워크스페이스 멤버가 아닌 디렉터리(`file:` 디렉터리 의존성)입니다. 이 질문은 `npm query '*'` 로 npm 에게 묻고, 이 질의는 `npm rebuild` 처럼 `file:` 의존성 안의 `node_modules` 까지 따라갑니다. npm 이 답하지 않아도 rebuild 를 건너뜁니다. `registry.npmjs.org` 기록은 바이트가 어디서 왔는지 말해 주지 않습니다. npm 의 기본값 `replace-registry-host=npmjs` 는 그 URL 을 npm 에 설정된 registry 에서 받고, 기록에는 URL 을 그대로 적습니다. 그래서 npm 이 어느 registry 에서 받는지도 `npm config ls --json` 으로 npm 에게 묻습니다. 명령 전에 설치 자신의 인자와 환경으로 한 번, 명령 뒤에 게이트가 읽은 디렉터리에서 한 번입니다. 두 답이 모두 공개 registry 라고 할 때만 그 기록을 공개 registry 의 것으로 칩니다. (이 기능은 Claude Code의 `updatedInput` capability를 사용합니다. Codex CLI는 이 기능을 노출하지 않으므로, Codex에서는 설치가 일반 실행되고 효과 게이트는 detect-and-rollback 방식입니다. 즉 악성 설치 스크립트가 롤백 전 1회 실행될 수 있습니다.)
 
 이 효과 우선 모델은 현재 npm에만 적용됩니다. `pip`, `cargo`, `go`, `gem`, `maven`, `nuget`은 closure resolver가 추가될 때까지 v2.1 명령 게이트 + reorg 모델을 유지합니다.
 
 ```
                          PreToolUse                          PostToolUse
-                  (safedeps-pre-guard.sh)          (safedeps-post-verify.sh)
+                  (safedeps-core pre)              (safedeps-core post)
                             |                                    |
   install cmd ──> [ Advisory/ledger UX ] ──> [ Execute ] ──> [ npm effect gate ]
                      |            |                           |       |
@@ -124,9 +126,9 @@ ledger 게이트나 사전 비행 체크에 실패하면 해당 명령은 실행
 
 **명령 가드가 읽는 것.** 매니저가 문서화한 방식이나 셸이 허용하는 방식으로 쓴 설치입니다. 별칭(`npm i`, `pnpm i`, `bun a`)과 npm 파서가 받아들이는 모든 명령어 철자(`npm upd`, `npm installTest`), 동사 앞의 옵션(`pip --quiet install`), 버전이 붙은 인터프리터(`pip3.11`, `python3.11 -m pip`), 패키지를 받아 실행하는 실행기(`npx`, `npm exec`, `pnpm dlx`, `yarn dlx`, `bunx`, `uvx`, `pipx run`, `go run <모듈>@<버전>`), 매니저별 `create`(`npm create vite` 와 `npm init vite` 는 `create-vite` 를 실행하므로 검사하고 기록하는 패키지도 `create-vite` 입니다. `pnpm create`, `yarn create`, `bun create` 도 같습니다), 묶음·제어문(`( ... )`, `if ...; then ...`), 예약어·`!`·zsh 의 `{` 에 리다이렉션이나 대입을 앞세워 붙인 명령(`then>/dev/null pip install`, zsh `{X=1 pip install ...; }`), zsh 의 `&!`(`true&!pip install`), 어느 자리에 있든 리다이렉션(`pip 2>/dev/null install`, `{fd}>/dev/null npm install`, `< <(true) pip install`), 셸이 명령 앞이나 리다이렉션 대상 안에 허용하는 단어(배열 대입 `a=(x) pip install`, zsh 의 `noglob pip install`, glob 한정자 `>/dev/null(N) pip install`), 따옴표로 감싼 spec, 줄 이음을 모두 읽습니다. 설치의 마지막 단어가 바로 뒤의 연산자나 닫는 백쿼트에 붙어 있어도(`npm ci; echo x`, `(go get)`) 셸이 거기서 단어를 끝내므로 설치로 읽습니다. 백슬래시와 따옴표도 셸과 같은 규칙으로 읽습니다. 어느 단어가 명령이고, 어느 것이 옵션 값이고, 어느 것이 패키지인지는 매니저마다의 옵션 표로 읽습니다. 그래서 `npm --prefix x install evil@1.0.0`, `pnpm --dir x add`, `cargo --config x install`, `pip install --log x` 도 실제 그대로의 설치로 읽고, npm 은 npm 11 과 npm 10 이 각자 옵션을 읽는 방식 둘 다로 읽습니다. v2.18.0 전까지는 이 표기 대부분이 판정도 기록도 없이 가드를 통과했습니다.
 
-**명령 가드가 못 보는 것과, 그 비용이 생태계마다 다르다는 것.** 셸에게 넘기는 텍스트는 가드가 열거한 형태에서만 인식합니다 — `sh -c`, `eval`, 명령 치환과 프로세스 치환, 셸로 들어가는 파이프. `sh -c`·`eval` script 는 셸이 넘기는 단어 그대로(이스케이프된 따옴표까지) 읽으므로, 그 안의 설치는 실제 패키지로 판정됩니다. 셸로 들어가는 파이프에는 가드가 읽는 설치 옆에서도 단독일 때와 같은 질문을 묻고, 그 질문은 보이는 설치 자신의 단어도 셉니다. 그래서 설치 옆의 그런 파이프는 소비자가 검사가 이름으로 아는 것일 때 거부됩니다. 이름으로 부른 셸(`sh`, `bash`, `zsh` 와 목록의 나머지)이고, 복합 명령 안에 있어도 그렇습니다. 검사가 이름으로 모르는 소비자는 단독이든 설치 옆이든 기록 없이 통과합니다. 셸 함수, `source` 나 `. /dev/stdin`, `eval`, `coproc`, 줄을 읽어 실행하는 루프가 그렇습니다. v2.18.3 이 목록을 닫힌 규칙으로 바꿉니다. `npm install x && cat setup.sh | sh` 처럼 설치와 상관없는 셸 파이프를 설치와 한 명령에 섞으면 거부되니, 둘은 따로 실행하세요. 명령 치환, 백쿼트, 큰따옴표 `sh -c`, `eval` 안의 파이프는 그 안쪽 텍스트에만 질문을 물으므로, `$_` 로 설치의 단어를 다시 만드는 파이프는 v2.17.2 때처럼 기록 없이 통과합니다. v2.18.3 이 맡습니다. 그 목록 바깥의 형태는 통과합니다: herestring, 셸의 표준 입력으로 먹이는 heredoc(본문에 설치가 든 `bash <<E`), `xargs` 가 조립한 명령줄, 파일로 쓴 뒤 실행하는 스크립트. 설치를 인자 그대로 실행하는 래퍼(`sudo`, `timeout`, `nohup`, `nice`)도 통과합니다. 셸이 따옴표를 벗겨 만드는 명령어 단어나 러너의 패키지도 가드는 알아보지 못합니다. `'pip' install x==1`, 그리고 패키지 뒤에 옵션만 오는 `npx "evil@1.0.0"` 이 그렇습니다. 매니저와 동사 사이에서 셸이 실행 때 값을 정하는 단어도 넘어 보지 못합니다. `pip $x install x==1` 에서 `x` 가 비면 셸은 `pip install x==1` 을 실행합니다. v2.17.2 도 이것들을 놓쳤고, 셸처럼 읽는 것은 계획돼 있습니다. 자기 문법으로 실행되는 문자열 둘도 아직 그 문법으로 읽지 않습니다. env(1) 이 자기 규칙(옵션, `--`, `\_`, `#`)으로 나누는 `env -S` 문자열과, zsh glob 한정자 안의 코드(`ls *(e:'pip install x':)`)입니다. `env -S` 문자열은 셸 스크립트로 읽으므로 대부분의 설치는 찾지만 전부는 아닙니다. npm 에서는 이것이 미탐이 아니라 **지연 탐지**입니다. 효과 게이트가 살아 있는 lockfile 을 읽어서 명령을 어떻게 썼든 결과를 잡기 때문입니다 — 단 게이트가 30초 훅 예산 안에서 끝날 때까지만이고, 그 범위는 주어진 것이 아니라 측정된 값입니다(아래 참고). `pip`, `cargo`, `go`, `gem`, `maven`, `nuget` 에는 가드 뒤에 closure resolver 가 없으므로 같은 형태가 **완전 미탐**입니다 — `~/.safedeps/advisory.log` 에 `UNVERIFIED` 로 기록되고 그걸로 끝입니다. "가드가 이 형태를 파싱하지 않는다" 를 npm 기준으로 읽지 마세요. 경계는 `scripts/test/consumer-forms.sh` 에 측정되어 고정돼 있고, 왜 경계를 넓히는 게 답이 아닌지는 `ARCHITECTURE.md` 가 설명합니다.
+**명령 가드가 못 보는 것과, 그 비용이 생태계마다 다르다는 것.** 셸에게 넘기는 텍스트는 가드가 열거한 형태에서만 인식합니다 — `sh -c`, `eval`, 명령 치환과 프로세스 치환, 셸로 들어가는 파이프. `sh -c`·`eval` script 는 셸이 넘기는 단어 그대로(이스케이프된 따옴표까지) 읽으므로, 그 안의 설치는 실제 패키지로 판정됩니다. 셸로 들어가는 파이프에는 가드가 읽는 설치 옆에서도 단독일 때와 같은 질문을 묻고, 그 질문은 보이는 설치 자신의 단어도 셉니다. 그래서 설치 옆의 그런 파이프는 소비자가 검사가 이름으로 아는 것일 때 거부됩니다. 이름으로 부른 셸(`sh`, `bash`, `zsh` 와 목록의 나머지)이고, 복합 명령 안에 있어도 그렇습니다. 검사가 이름으로 모르는 소비자는 단독이든 설치 옆이든 기록 없이 통과합니다. 셸 함수, `source` 나 `. /dev/stdin`, `eval`, `coproc`, 줄을 읽어 실행하는 루프가 그렇습니다. 이후 릴리스가 목록을 닫힌 규칙으로 바꿉니다. `npm install x && cat setup.sh | sh` 처럼 설치와 상관없는 셸 파이프를 설치와 한 명령에 섞으면 거부되니, 둘은 따로 실행하세요. 명령 치환, 백쿼트, 큰따옴표 `sh -c`, `eval` 안의 파이프는 그 안쪽 텍스트에만 질문을 물으므로, `$_` 로 설치의 단어를 다시 만드는 파이프는 v2.17.2 때처럼 기록 없이 통과합니다. 이후 릴리스가 맡습니다. 그 목록 바깥의 형태는 통과합니다: herestring, 셸의 표준 입력으로 먹이는 heredoc(본문에 설치가 든 `bash <<E`), `xargs` 가 조립한 명령줄, 파일로 쓴 뒤 실행하는 스크립트. 설치를 인자 그대로 실행하는 래퍼(`sudo`, `timeout`, `nohup`, `nice`)도 통과합니다. 셸이 따옴표를 벗겨 만드는 명령어 단어나 러너의 패키지도 가드는 알아보지 못합니다. `'pip' install x==1`, 그리고 패키지 뒤에 옵션만 오는 `npx "evil@1.0.0"` 이 그렇습니다. 매니저와 동사 사이에서 셸이 실행 때 값을 정하는 단어도 넘어 보지 못합니다. `pip $x install x==1` 에서 `x` 가 비면 셸은 `pip install x==1` 을 실행합니다. v2.17.2 도 이것들을 놓쳤고, 셸처럼 읽는 것은 계획돼 있습니다. 자기 문법으로 실행되는 문자열 둘도 아직 그 문법으로 읽지 않습니다. env(1) 이 자기 규칙(옵션, `--`, `\_`, `#`)으로 나누는 `env -S` 문자열과, zsh glob 한정자 안의 코드(`ls *(e:'pip install x':)`)입니다. `env -S` 문자열은 셸 스크립트로 읽으므로 대부분의 설치는 찾지만 전부는 아닙니다. npm 에서는 이것이 미탐이 아니라 **지연 탐지**입니다. 효과 게이트가 살아 있는 lockfile 을 읽어서 명령을 어떻게 썼든 결과를 잡기 때문입니다 — 단 게이트가 30초 훅 예산 안에서 끝날 때까지만이고, 그 범위는 주어진 것이 아니라 측정된 값입니다(아래 참고). `pip`, `cargo`, `go`, `gem`, `maven`, `nuget` 에는 가드 뒤에 closure resolver 가 없으므로 같은 형태가 **완전 미탐**입니다 — `~/.safedeps/advisory.log` 에 `UNVERIFIED` 로 기록되고 그걸로 끝입니다. "가드가 이 형태를 파싱하지 않는다" 를 npm 기준으로 읽지 마세요. 경계는 `scripts/test/consumer-forms.sh` 에 측정되어 고정돼 있고, 왜 경계를 넓히는 게 답이 아닌지는 `ARCHITECTURE.md` 가 설명합니다.
 
-**"지연 탐지" 가 실제로 어디까지 닿나.** 효과 게이트는 30초로 등록돼 있고 런타임은 거기서 게이트를 죽입니다. 그래서 npm 의 지연 탐지는 게이트가 끝나는 동안에만 실재합니다. 게이트 비용은 프로젝트 lockfile closure 크기를 탑니다. 예전에는 승인 스펙 원장 크기까지 같이 탔습니다 — 게이트가 closure 패키지마다 원장에 따로 물었고 그 질문 하나하나가 원장 디렉터리 전체를 읽었습니다 — 그래서 738개짜리 원장에서는 closure **4개**에서 이미 30초를 넘었습니다. v2.16.0 은 원장을 closure 당 한 번만 읽습니다. 원장 축은 이제 평평하고, 같은 머신에서 어드바이저리 캐시가 비어 있을 때 게이트는 closure **390개** 근처에서 30초를 넘습니다. 그 아래에서는 백스톱이 실재하고, 그 위 — 큰 애플리케이션의 lockfile — 에서는 게이트가 죽고 설치는 판정되지 않습니다. 교차 지점은 머신·네트워크·캐시에 따라 움직이므로 본인 것을 재세요: `scripts/measure/effect-gate-cost.sh <package-lock.json> --ledger ~/.safedeps/approved-specs`.
+**"지연 탐지" 가 실제로 어디까지 닿나.** 효과 게이트는 30초로 등록돼 있고 런타임은 거기서 게이트를 죽입니다. 그래서 npm 의 지연 탐지는 게이트가 끝나는 동안에만 실재합니다. 게이트 비용은 프로젝트 lockfile closure 크기를 탑니다. 예전에는 승인 스펙 원장 크기까지 같이 탔습니다 — 게이트가 closure 패키지마다 원장에 따로 물었고 그 질문 하나하나가 원장 디렉터리 전체를 읽었습니다 — 그래서 738개짜리 원장에서는 closure **4개**에서 이미 30초를 넘었습니다. v2.16.0 은 원장을 closure 당 한 번만 읽고, 같은 머신에서 어드바이저리 캐시가 비어 있을 때 Bash 게이트는 그 뒤 closure **390개** 근처에서 30초를 넘었습니다. 이 숫자는 Bash 훅의 것입니다. Rust post 훅은 그 크기에서 재지 않았으므로 그 훅에는 숫자를 주장하지 않습니다. 교차 지점 아래에서는 백스톱이 실재하고, 그 위 — 큰 애플리케이션의 lockfile — 에서는 게이트가 죽고 설치는 판정되지 않습니다. 교차 지점은 머신·네트워크·캐시에 따라 움직이고, `scripts/measure/effect-gate-cost.sh` 는 Rust post 훅을 합성 closure 로 잽니다(`--help` 참고). 사용자의 lockfile 을 읽지는 않습니다.
 
 **롤백이 도중에 끊기면 safedeps 가 그렇게 말합니다.** 게이트가 closure 를 거부하면 프로젝트를 되돌립니다 — lock 과 manifest 파일을 복원한 뒤 프로젝트 자신의 `node_modules` 를 지웁니다. v2.16.0 이전에는 로그 기록과 보고가 맨 마지막이라, 롤백 도중에 죽은 훅은 아무 기록도 남기지 않았습니다. 어떤 경우에는 프로젝트가 이미 되돌아간 채였고, 그건 설치가 이유 없이 스스로 취소된 것처럼 보입니다. 이제 게이트는 무엇을 하려는지 행동 전에 적고, 롤백이 스스로를 보고한 뒤에 그 메모를 지웁니다. 자기 실행보다 오래 살아남은 메모가 곧 끝나지 않은 롤백입니다. 다음 명령이 그것을 한 번 보고하고, `~/.safedeps/rollback-incidents/` 에 기록하고, `~/.safedeps/reorg.log` 에 `REORG INTERRUPTED` 를 덧붙이고, 어느 단계까지 갔는지, 롤백을 돌리던 프로세스를 검사한 결과, 프로젝트의 의존성 파일 가운데 스냅샷과 다른 것을 말합니다. 원인도 복구 명령도 주지 않습니다. [읽는 법](#롤백-뒤에-safedeps-가-하는-말-읽는-법)은 아래에 있습니다. "오래 살아남았다" 는 메모가 남아 있다는 뜻이 아니라 그것을 쓴 프로세스가 사라졌다는 뜻입니다. 아직 일하는 롤백은 일부러 메모를 디스크에 두므로, 그동안 상관없는 명령은 조용합니다(v2.16.1).
 
@@ -136,7 +138,7 @@ ledger 게이트나 사전 비행 체크에 실패하면 해당 명령은 실행
 
 **설치는 흔적을 남긴 곳에서만 읽힙니다.** 명령 텍스트로 디렉터리를 고르는 방식은 세 차례 리뷰에서 매번 틀렸고, 그때마다 결과는 조용한 통과였습니다. `false && cd sub; npm install x` 는 현재 디렉터리에 설치하는데, 게이트는 실행되지 않은 `cd` 를 따라갔습니다. `command cd sub; npm install x` 는 `sub` 에 설치하는데, 게이트는 그 철자를 따라가지 않았습니다. 어느 쪽이든 설치가 건드리지 않은 디렉터리를 읽고 깨끗하다고 했습니다. 철자 목록으로는 이것이 닫히지 않습니다. 명령이 먼저 `npm init` 을 돌리거나 `.npmrc` 를 써서 npm 이 읽는 것 자체를 바꿀 수도 있기 때문입니다. 그래서 이제 텍스트는 볼 곳만 고릅니다. 명령이 돌기 직전에 safedeps 는 그곳의 시각과 npm lockfile 두 개를 적어 두고, 명령 뒤에 둘 중 하나가 다시 쓰였는지 봅니다. npm 은 무언가를 설치하면 이미 있던 것을 다시 설치할 때도 `node_modules/.package-lock.json` 을 다시 씁니다. 둘 다 다시 쓰이지 않았으면 그 설치를 `UNGATED` 로 기록하고, 아무것도 찾지 못한 검사를 그대로 적습니다: `no install trace in <dir>: neither npm lockfile there is newer than the baseline taken before this command or has another inode`. 거기서는 아무것도 rebuild 하지 않으며, Claude Code 에서는 사용자에게 알립니다. 설치가 다른 곳에 떨어졌는지 아무것도 설치하지 않았는지는 말하지 않습니다. safedeps 가 구분할 수 없기 때문입니다. `--dry-run` 이나 실패한 설치도 같은 모양으로 나타나는데, 이것은 통과가 아니라 소음입니다. `npm install a; cd sub; npm install b` 처럼 한 명령의 npm 설치 둘 사이에 무언가가 있어도 기록됩니다. 앞 설치의 흔적이 뒤 설치를 대신 답해 버리기 때문입니다. 실행되지 않을 수 있는 `cd` 는 실행이 증명되는 데까지만 따라가므로, `false && cd sub; npm install x` 는 현재 디렉터리에서 읽혀 롤백되고 `cd sub || exit` 은 여전히 따라갑니다. `scripts/test/effect-trace-grid.sh` 가 모든 형태를 종단으로 돌립니다.
 
-### Phase 3: Post-install Effect Enforcement (`safedeps-post-verify.sh` -- PostToolUse)
+### Phase 3: Post-install Effect Enforcement (`safedeps-core post` -- PostToolUse)
 
 설치 명령이 끝난 뒤 verify 훅이 변경 사항을 분석합니다. npm에서는 이것이 주요 집행 지점입니다. `package-lock.json` 과 npm 의 숨은 `node_modules/.package-lock.json` 에서 실제 폐쇄성을 읽고, 각 패키지를 승인된 direct entry와 해당 `transitive_specs`로 검증한 뒤 OSV 배치 조회를 다시 수행합니다.
 
@@ -167,7 +169,7 @@ ledger 게이트나 사전 비행 체크에 실패하면 해당 명령은 실행
 - **검사 실패 발생** — **reorg**가 트리거됩니다:
   1. lock file을 마지막 confirmed 스냅샷에서 복원. 확정 스냅샷이 아직 없는 프로젝트는 명령 직전에 뜬 스냅샷으로 돌아갑니다. 그 상태는 아무도 검증하지 않았고 거부된 것이 남아 있을 수 있으므로, 메시지와 `reorg.log`, `advisory.log` 가 모두 그 스냅샷이 이 명령 전에 뜬 것이고 어떤 확정 스냅샷도 그것을 가리키지 않는다고 말합니다.
   2. 변경된 경우 `package.json` 복원
-  3. 악성 아티팩트를 치우려고 프로젝트 자신의 `node_modules` 를 지움. 단, 명령이 프로젝트에 무언가를 쓴 것이 보일 때만입니다: 설치 흔적이 있거나, `package.json`·lockfile 이 명령 직전에 뜬 스냅샷과 다르거나, `node_modules` 가 그때 뜬 목록과 다르거나 그 뒤에 수정됐을 때입니다. 아무것도 쓰지 않은 명령이면 `node_modules` 를 그대로 두고, 메시지가 아무것도 찾지 못한 검사를 하나씩 적습니다. 롤백은 패키지 매니저를 부르지 않으므로 설치 스크립트도 돌리지 않고, 재설치 명령도 주지 않습니다. 무엇을 복원하고 지웠는지, 그 뒤 `package.json`·`package-lock.json`·`npm-shrinkwrap.json` 을 검사한 결과를 말합니다. 재설치가 어디에 쓸지는 npm 이 정하고, 그 설치도 다른 설치처럼 게이트를 지납니다. 복원이나 제거가 실패하면 종료 코드와 함께 한 줄로 적고, 롤백은 나머지를 계속합니다.
+  3. 악성 아티팩트를 치우려고 프로젝트 자신의 `node_modules` 를 지움. 단, 명령이 프로젝트에 무언가를 쓴 것이 보일 때만입니다: 설치 흔적이 있거나, `package.json`·lockfile 이 명령 직전에 뜬 스냅샷과 다르거나, `node_modules` 가 그때 뜬 목록과 다르거나 그 뒤에 수정됐을 때입니다. 아무것도 쓰지 않은 명령이면 `node_modules` 를 그대로 두고, 메시지가 아무것도 찾지 못한 검사를 하나씩 적습니다. 롤백은 패키지 매니저를 부르지 않으므로 설치 스크립트도 돌리지 않고, 재설치 명령도 주지 않습니다. 무엇을 복원하고 지웠는지, 그 뒤 `package.json`·`package-lock.json`·`npm-shrinkwrap.json` 을 검사한 결과를 말합니다. 재설치가 어디에 쓸지는 npm 이 정하고, 그 설치도 다른 설치처럼 게이트를 지납니다. 복원이나 제거가 실패하면 운영체제가 돌려준 오류와 함께 한 줄로 적고, 롤백은 나머지를 계속합니다.
      롤백은 심볼릭 링크를 따라 프로젝트 밖으로 나가지 않습니다. `node_modules`·`package.json`·lockfile 이 다른 디렉터리를 가리키는 링크면 그 단계는 거부되고, 메시지와 `reorg.log`(`REORG REFUSED`)에 그 이름과 링크가 가리키는 곳이 남습니다.
   4. 이벤트를 `~/.safedeps/reorg.log`에 기록. 메시지에 실린 줄과 같은 줄입니다.
   5. Claude Code에 탐지 위협과 롤백 동작을 상세히 담은 시스템 메시지 전달
@@ -181,13 +183,13 @@ ledger 게이트나 사전 비행 체크에 실패하면 해당 명령은 실행
 | `Rollback snapshot: <id>, a confirmed snapshot` | 프로젝트의 확정 기록이 이 스냅샷을 가리킵니다. safedeps 가 검증한 설치가 남긴 파일입니다. |
 | `Rollback snapshot: <id>, taken before this command; no confirmed snapshot names it` | 프로젝트에 확정 스냅샷이 없었습니다. 파일은 명령 전 상태로 돌아갔습니다. 그 상태는 아무도 검증하지 않았고, 거부된 패키지가 남아 있을 수 있습니다. |
 | `restored <path>` / `removed <path>` | 파일이 이제 스냅샷과 같거나, 경로가 없습니다. safedeps 가 행동한 뒤에 확인했습니다. |
-| `not restored <path>: cp exit <n>; ...` / `not removed <path>: rm exit <n>; <path> exists` | 그 단계가 실패했습니다. 줄은 종료 코드와 그 경로를 검사한 결과를 말합니다. 디렉터리 안에 무엇이 남았는지는 말하지 않습니다. `rm -rf` 는 지울 수 있는 것을 지운 뒤에 실패합니다. |
-| `not restored <path>: <path> exists and is not a regular file` | 그 경로가 디렉터리이거나 다른 종류의 파일이라서 safedeps 가 그 위에 복사하지 않았습니다. 디렉터리에 `cp` 하면 그 안에 파일을 씁니다. |
+| `not restored <path>: copy returned OS error <n>; ...` / `not removed <path>: removal returned OS error <n>; <path> exists` | 그 단계가 실패했습니다. 줄은 운영체제가 돌려준 오류와 그 경로를 검사한 결과를 말합니다. 디렉터리 안에 무엇이 남았는지는 말하지 않습니다. 제거는 지울 수 있는 것을 지운 뒤에 실패합니다. `copy returned without error` 가 붙은 같은 줄은 복사가 오류 없이 끝났다고 보고했는데도 파일이 스냅샷과 다르다는 뜻입니다. |
+| `not restored <path>: <path> exists and is not a regular file` | 그 경로가 디렉터리이거나 다른 종류의 파일이라서 safedeps 가 그 위에 복사하지 않았습니다. |
 | `refused restore of <path>: ...` / `refused removal of <path>: ...` | 그 경로가 심볼릭 링크이고, 줄이 링크가 가리키는 곳을 말합니다. safedeps 는 링크를 따라가지 않고, 읽은 프로젝트 밖에 쓰지 않습니다. |
 | `kept <path>` 와 그 아래 검사 줄 | 명령이 `node_modules` 에 썼다는 것을 어떤 검사도 보이지 못해서 지우지 않았습니다. 아래 줄들이 그 검사입니다. `node_modules` 가 심볼릭 링크면 다음 줄이 그 사실과 링크가 가리키는 곳을 말하고, 검사는 링크가 가리키는 곳을 읽습니다. 패키지 목록은 `node_modules` 아래 세 단계까지의 `package.json` 만 읽으므로, 더 깊이 쓰인 패키지(`node_modules/<a>/node_modules/<b>`)는 목록에 나오지 않습니다. |
 | 이유 줄 하나, 그 다음 `removed <path>/node_modules` | 명령이 `node_modules` 에 썼다는 것을 처음 보인 검사입니다. 설치 흔적, 명령 직전 스냅샷과 달랐던 node manifest·lockfile, 그 스냅샷의 목록에 없는 항목, 그 스냅샷보다 새로운 것, 또는 명령 전 스냅샷이 아예 없음 가운데 하나입니다. |
 | `<path> exists` / `<path> does not exist` / `<path>/package.json has the key workspaces` | 롤백 뒤 프로젝트 루트에 있는 것입니다. safedeps 는 패키지를 재설치하지 않고, 재설치가 어디에 쓸지 판단하지 않습니다. 프로젝트 자신의 `node_modules` 만 지우고, 워크스페이스 멤버의 것은 지우지 않습니다. |
-| `The rollback changed nothing.` | 어떤 단계도 `cp` 나 `rm` 을 돌리지 않았습니다. 돌다가 실패한 단계는 바꾼 것이 없다고 하지 않습니다. `rm -rf` 는 지울 수 있는 것을 지운 뒤에 실패합니다. |
+| `The rollback changed nothing.` | 복원이나 제거를 시도한 단계가 없습니다. 시도했다가 실패한 단계는 바꾼 것이 없다고 하지 않습니다. 제거는 지울 수 있는 것을 지운 뒤에 실패합니다. |
 | `no install trace in <dir>: ...` | 그 디렉터리의 npm lockfile 둘 다 명령 동안 바뀌지 않았습니다. 거기에는 이 설치의 흔적이 없습니다. |
 | `safedeps added --ignore-scripts to this install` | 이 훅이 쓴 pre-guard 기록이 safedeps 가 설치를 플래그를 달아 고쳐 썼다고 말하고, post 훅이 받은 명령이 바이트 하나 다르지 않게 그 기록에 담긴 명령입니다. 그 기록은 이 호출 자신의 것입니다(아래). safedeps 가 쓴 명령에는 플래그가 실려 있었습니다. 명령이 스스로 `npm rebuild` 를 돌리면 설치 스크립트는 그래도 돕니다. rebuild 건너뜀 줄과 같습니다. |
 | `safedeps asked for --ignore-scripts on this install; the command this hook received is not the one safedeps wrote` | 이 훅이 쓴 pre-guard 기록이 safedeps 가 명령을 고쳐 썼다고 말하는데, post 훅은 다른 명령을 받았습니다. 런타임이 safedeps 가 쓴 그대로 돌리지 않은 것입니다. 설치의 스크립트가 돌았다고 보십시오. |
@@ -298,9 +300,11 @@ $ safedeps doctor --fix
 ### Prerequisites
 
 - 훅 지원이 되는 [Claude Code](https://docs.anthropic.com/en/docs/claude-code)
-- `jq` — JSON 파싱 (누락 시 훅은 우아하게 종료)
-- `shasum` 또는 `sha256sum` — 해시 계산
-- `file` (선택) — 바이너리 탐지
+- `curl` — 훅과 CLI 가 어드바이저리를 질의할 때 사용
+- `jq` — CLI, 빌드 스크립트, 릴리스 검사의 JSON 파싱. 훅 바이너리는 쓰지 않습니다.
+- `shasum` 또는 `sha256sum` — CLI 와 빌드 스크립트의 해시 계산
+- `file` (선택) — post 훅이 `node_modules/.bin` 의 새 파일이 네이티브 바이너리인지 스크립트인지 가를 때 사용
+- `cargo` — 체크아웃에서 훅 바이너리를 빌드할 때만 필요합니다. 버전 4 `Cargo.lock` 을 읽을 수 있어야 합니다. npm 패키지는 빌드된 바이너리를 담고 있어 Rust 가 필요 없습니다.
 
 ```bash
 # macOS
@@ -309,6 +313,24 @@ brew install jq
 # Ubuntu / Debian
 sudo apt-get install jq
 ```
+
+### Where the hook binary comes from
+
+훅은 Rust 프로그램 하나, `safedeps-core` 입니다. 엔트리 셔틀이 `bin/native/<os>-<arch>/safedeps-core` 를 실행합니다. 바이너리는 git 에 커밋하지 않으므로 둘 중 한 곳에서 옵니다.
+
+- **체크아웃이 빌드합니다.** `scripts/build-core.sh` 가 `rust/` 에 `cargo build --release --locked --offline` 을 돌려 이 머신용 결과를 제자리에 놓습니다. 크레이트에 의존성이 없으므로 오프라인 빌드에는 툴체인만 있으면 됩니다. 설치기가 이 빌드를 대신 돌리고, 이어서 엔트리를 판정하지 않는 호출 하나로 실행해 봅니다. 빌드나 그 실행이 실패하면 설치기는 이유를 말하고 멈추며 아무것도 등록하지 않습니다.
+- **npm 패키지가 빌드된 것을 담고 있습니다.** 게시 워크플로가 `darwin-arm64`, `darwin-x64`, `linux-x64`(정적 musl 빌드) 세 바이너리를 빌드하고, 패키지는 그 옆에 `rust/` 디렉터리 없이 그것들을 담습니다. 설치기는 엔트리를 한 번 실행해 볼 뿐입니다. 다른 플랫폼에는 바이너리가 없고, 엔트리가 그렇게 말합니다.
+
+바이너리는 자기가 빌드된 소스의 스탬프를 지닙니다. 체크아웃에서 훅이 시작할 때 바이너리는 자기 옆의 `rust/` 디렉터리를 해시해 비교합니다. `git pull`, 브랜치 전환, `rust/` 편집 뒤에는 바이너리가 더 이상 맞지 않고, 다시 빌드할 때까지 다음이 보입니다.
+
+- **설치 전에** pre 훅이 커맨드를 `UNDECIDED` 로 차단합니다. 메시지는 바이너리가 옆의 소스와 다른 소스에서 빌드되었다고 말하고 `Rebuild it: scripts/build-core.sh` 를 안내합니다. 패키지 매니저 이름이 없는 커맨드는 그대로 실행되고, 같은 메시지가 stderr 와 `~/.safedeps/advisory.log` 에 남습니다.
+- **설치 뒤에** post 훅이 같은 이유와 함께 `post-verify UNVERIFIED` 를 보고하고 아무것도 판정하지 않습니다. 그 설치는 확인되지 않은 것으로 다루세요.
+
+`scripts/build-core.sh` 는 에이전트 밖의 터미널에서 실행하세요. 거기서는 훅이 돌지 않습니다. 게시된 바이너리는 비교할 소스가 없으므로, 패키지 설치에서는 이 메시지를 볼 일이 없습니다.
+
+바이너리가 없거나 쓸 수 없는 경우도 건너뛰지 않고 설명합니다. 엔트리가 어느 경우인지 이름을 댑니다(`bin/native` 자체가 없음, 이 플랫폼용 바이너리가 없음, 파일이 없음, 실행 권한이 없음, 시스템이 실행을 거부함, 시그널과 함께 크래시, 0 이 아닌 종료). 어느 경우든 pre 훅은 차단하고, post 훅은 마지막 설치를 확인되지 않은 것으로 다루라고 말하며, 옛 Bash 훅을 대신 돌리는 것은 없습니다. 체크아웃에서는 `scripts/build-core.sh` 로 고칩니다. 패키지는 `npm install -g @aldegad/safedeps` 를 하고 설치기를 다시 돌립니다.
+
+다른 세션이 심링크로 라이브 실행하는 체크아웃에는 규칙이 하나 더 있습니다. 새 소스로 옮기면 다음 설치 전에 바이너리를 빌드하세요. 그때까지는 설치가 위처럼 차단됩니다.
 
 ### Setup From GitHub (Skill + Hooks)
 
@@ -325,11 +347,11 @@ cd safedeps
 node scripts/install/install-safedeps-hooks.mjs
 ```
 
-이 설치기는 멱등적입니다. 해당 경로가 존재하면 skill을 `~/.claude/skills/safedeps`와 `~/.codex/skills/safedeps`에 symlink로 연결하고, 일치하는 훅 설정을 패치합니다. `--link-bin` 옵션은 `safedeps`를 `~/.local/bin`에 PATH로 추가할 수도 있습니다. 이 PATH 링크는 선택 사항입니다. 훅 블록 메시지는 절대 경로 fallback를 지정하므로, PATH 설정이 없어도 게이트는 자체적으로 동작합니다.
+체크아웃에서는 설치기가 먼저 훅 바이너리를 빌드하고 위에서 설명한 대로 엔트리를 한 번 실행하며, 둘 중 하나라도 실패하면 아무것도 등록하지 않습니다. 이 설치기는 멱등적입니다. 해당 경로가 존재하면 skill을 `~/.claude/skills/safedeps`와 `~/.codex/skills/safedeps`에 symlink로 연결하고, 일치하는 훅 설정을 패치합니다. `--link-bin` 옵션은 `safedeps`를 `~/.local/bin`에 PATH로 추가할 수도 있습니다. 이 PATH 링크는 선택 사항입니다. 훅 블록 메시지는 절대 경로 fallback를 지정하므로, PATH 설정이 없어도 게이트는 자체적으로 동작합니다.
 
 **3. 필요한 경우 수동 훅 등록:**
 
-등록되는 커맨드는 훅 스크립트 자체가 아니라 엔트리 셔틀에 `pre` 또는 `post` 를 붙인 것입니다. 설치기가 쓰는 것이 그것이고, 체크아웃이 깨졌을 때 게이트가 조용히 사라지는 대신 설명이 붙은 fail-closed 거부가 되게 하는 것도 그것입니다. 훅 스크립트를 직접 등록해도 설치는 막히지만, 그 보호는 빠집니다.
+등록되는 커맨드는 바이너리 자체가 아니라 엔트리 셔틀에 `pre` 또는 `post` 를 붙인 것입니다. 설치기가 쓰는 것이 그것이고, 바이너리가 없거나 소스와 어긋났을 때 게이트가 조용히 사라지는 대신 설명이 붙은 fail-closed 거부가 되게 하는 것도 그것입니다. 엔트리는 실행할 바이너리가 없으면 할 수 있는 것이 없으므로 바이너리를 먼저 빌드하세요(위).
 
 `.claude/settings.json`(프로젝트 수준) 또는 `~/.claude/settings.json`(전역)을 편집합니다.
 
@@ -382,9 +404,9 @@ Claude Code 는 실행된 뒤 실패한 Bash 호출에 `PostToolUse` 가 아니�
 
 ```bash
 chmod +x ~/.claude/skills/safedeps/scripts/safedeps-hook-entry.sh
-chmod +x ~/.claude/skills/safedeps/scripts/safedeps-pre-guard.sh
-chmod +x ~/.claude/skills/safedeps/scripts/safedeps-post-verify.sh
 ```
+
+`bin/native/` 아래 바이너리도 실행 가능해야 합니다. `scripts/build-core.sh` 와 패키지는 둘 다 그렇게 만들고, 실행 권한을 잃은 바이너리는 엔트리가 보고합니다.
 
 이것으로 완료됩니다. Claude Code 또는 Codex CLI가 패키지 설치 명령을 실행할 때마다 가드가 자동 활성화됩니다.
 
@@ -395,7 +417,7 @@ npm install -g @aldegad/safedeps
 safedeps version
 ```
 
-npm은 표준 `bin` 항목을 통해 `safedeps`를 PATH에 배치합니다. 다만 Claude Code / Codex의 에이전트 스킬이나 훅은 자동 등록되지 않습니다. npm으로 설치한 복사본에서 훅을 사용하려면 설치된 패키지 루트에서 설치기를 실행하세요.
+npm은 표준 `bin` 항목을 통해 `safedeps`를 PATH에 배치합니다. 다만 Claude Code / Codex의 에이전트 스킬이나 훅은 자동 등록되지 않습니다. npm으로 설치한 복사본에서 훅을 사용하려면 설치된 패키지 루트에서 설치기를 실행하세요. 설치기는 아무것도 등록하기 전에 패키지에 든 바이너리를 한 번 실행해 봅니다.
 
 ```bash
 cd "$(npm root -g)/@aldegad/safedeps"
@@ -423,6 +445,41 @@ node scripts/install/install-safedeps-recheck-agent.mjs status
 node scripts/install/install-safedeps-recheck-agent.mjs uninstall
 tail -f ~/.safedeps/recheck.log
 ```
+
+## What Changed in v2.19.0
+
+Bash 훅 스크립트 둘, `safedeps-pre-guard.sh` 와 `safedeps-post-verify.sh` 는 사라졌습니다. 이제 Rust 프로그램 하나, `safedeps-core` 가 모든 호출을 판정합니다. safedeps 가 무엇을 위한 것인지는 달라지지 않았습니다. 승인되지 않은 것은 여전히 막고, 게이트로 검사할 수 없는 것은 기록하고, 어긋난 것은 롤백합니다. ledger, `~/.safedeps/`, CLI, 등록되는 엔트리는 그대로입니다. 달라진 것은 일부 커맨드의 판정과 일부 보고 문구입니다.
+
+달라진 것:
+
+- **훅이 바이너리이고, 그것이 있어야 합니다.** 체크아웃은 cargo 로 빌드하고, 패키지는 빌드된 것을 담습니다. 없거나 낡은 바이너리는 게이트를 건너뛰는 것이 아니라 설명이 붙은 거부입니다. [Where the hook binary comes from](#where-the-hook-binary-comes-from) 을 보세요.
+- **Bash 로 되돌아가지 않습니다.** 환경 변수로 바이너리를 고르거나 끌 수 없습니다. 훅이 띄우는 것은 `npm`, `curl`, `file`, `gzip` 과 자기 판정 프로세스뿐이고, `awk`, `grep`, `sed`, `jq` 는 필요 없습니다.
+- **롤백 줄이 운영체제의 오류를 말합니다.** 실패한 복원이나 제거는 예전의 `cp` 나 `rm` 종료 코드 대신 `copy returned OS error <n>` 이나 `removal returned OS error <n>` 이라고 말합니다. 그런 이름의 프로그램은 돌지 않기 때문입니다.
+- **safedeps 가 안전하게 다시 쓸 수 없는 커맨드는 다시 쓰지 않고 차단합니다.** 이것이 이번 릴리스의 비용이고, 다음에 있습니다.
+
+### The cost: some commands stop as `UNDECIDED`
+
+Claude Code 에서 safedeps 는 npm 설치에 `--ignore-scripts` 를 더합니다. 그 플래그는 npm 이 옵션으로 읽는 자리, 나머지 커맨드가 쓴 그대로 남는 자리, 이전 릴리스의 바닥을 지키는 자리에 놓여야 합니다. 그런 자리가 없는 커맨드가 있습니다. Bash 훅은 그래도 거기에 플래그를 놓았고, 커맨드는 플래그가 엉뚱한 자리에 있거나 데이터가 바뀐 채 실행됐습니다. Rust 훅은 그런 커맨드에 재작성을 보내지 않습니다. `UNDECIDED` 로 차단하고 그렇게 말합니다:
+
+```
+safedeps: UNDECIDED - required --ignore-scripts flags could not be placed while preserving command data and how npm reads its options. This command is blocked and no rewritten command was sent. This is not a finding about the packages.
+```
+
+`~/.safedeps/advisory.log` 가 이유를 `pre-guard DENY: inert rewrite obligations conflict (<reason>); UNDECIDED, no rewrite was sent.` 로 적고, 차단된 커맨드는 스냅샷도 pending 기록도 남기지 않습니다. 예 셋은 모두 `scripts/test/smoke.sh` 가 가진 행입니다:
+
+- **값을 받는 옵션으로 끝나는 한 문장짜리 설치.** `npm install left-pad@1.3.0 --cache` (이유 `end-flag-not-an-option`). 끝의 플래그가 캐시 디렉터리가 됩니다. `-C` 도 같습니다.
+- **npm 이 패키지를 플래그의 값으로 읽을 설치.** `npm install true` (이유 `floor-not-an-option`). 동사 뒤의 플래그가 `true` 를 값으로 가져갑니다.
+- **다른 명령이 읽는 heredoc 본문 안의 설치 단어.** `npm install left-pad@1.3.0 && cat <<E | wc -l`, 본문은 `npm install left-pad@1.3.0` (이유 `floor-outside-command`). 플래그가 `wc` 가 세는 텍스트에 쓰이게 됩니다.
+
+통과하게 쓰는 법:
+
+- 옵션과 그 값을 패키지 앞에 두세요: `npm install --cache ./cache left-pad@1.3.0`. 그러면 마지막 단어가 패키지이고, 그 뒤의 플래그는 옵션입니다.
+- npm 이 값으로 읽을 수 있는 이름의 패키지는 버전과 함께 쓰세요: `npm install true@1.0.0`.
+- 설치를 따로 실행하고, 설치 텍스트를 다른 명령이 읽는 본문에 두지 마세요. 그런 파일은 파일 쓰기 도구로 쓰세요.
+
+같은 규칙이 같은 이유로 몇 가지 커맨드를 더 차단합니다. `--` 뒤의 설치(`npm ci -- x`, `npm -- ci -- x`)는 npm 이 플래그를 옵션으로 읽을 자리를 남기지 않습니다. bash, zsh, dash 가 커맨드의 npm 설치를 서로 다른 곳에 놓는 경우에는 셋 모두에게 비활성인 재작성이 하나도 없어서, 커맨드가 `the readings (bash zsh dash) put this command's npm installs in different places` 와 함께 차단됩니다. zsh 읽기가 전보다 zsh 를 더 가깝게 따르므로(홀로 선 닫는 중괄호, glob 한정자, 대안 패턴, extglob 그룹) 서로 다르게 읽히는 커맨드가 늘었습니다. Codex CLI 에서는 재작성을 보내지 않으므로 이 차단 가운데 어느 것도 거기에는 적용되지 않습니다.
+
+반대로 움직인 것이 둘 있습니다. `sh -c`, `bash -c`, `zsh -c`, `dash -c`, `ksh -c`, `eval` 에 넘기는 스크립트는 스크립트로 읽어 플래그를 그 안에 넣습니다. Bash 훅은 거기서 downgrade 를 기록했습니다. 그리고 차단된 커맨드는 `~/.safedeps/` 에 아무것도 남기지 않습니다.
 
 ## Real-World Attack Coverage
 
@@ -461,8 +518,8 @@ ls -la ~/.safedeps/snapshots/
 
 | 조치 | 예방 효과 |
 |---|---|
-| **JSON-safe metadata** | `project_dir`은 `jq -Rs`로 이스케이프되어 스냅샷 메타데이터에서 JSON 인젝션을 방지 |
-| **Path canonicalization** | `realpath`/`readlink -f`로 `cwd`의 심볼릭 링크와 `..` 경로를 사용 전 해석 |
+| **JSON-safe metadata** | `project_dir` 은 이스케이프된 JSON 문자열로 기록되어 스냅샷 메타데이터에서 JSON 인젝션을 방지 |
+| **Path canonicalization** | `cwd` 의 심볼릭 링크와 `..` 경로를 사용 전에 해석 |
 | **Atomic state files** | 스냅샷 ID와 프로젝트 디렉터리를 단일 JSON 파일로 기록해 TOCTOU 레이스를 방지 |
 | **Stale lock recovery** | 60초 이상 된 락은 자동 제거해 `SIGKILL`/OOM으로 인한 영구 DoS 방지 |
 | **Project-scoped state** | 프로젝트마다 개별 confirmed chain(`confirmed_${dir_hash}`) 사용으로 cross-project 간 간섭 방지 |
@@ -480,13 +537,17 @@ safedeps/
     ledger/       # approved-spec ledger
     npm/          # lockfile closure resolver
     gates/        # repo-tree lane: scan / audit / hooks / doctor + templates/
+  rust/             # the hook core's source: PreToolUse judgment + PostToolUse npm effect verification and reorg
+  bin/native/       # built hook binaries, bin/native/<os>-<arch>/safedeps-core (not in git; a checkout builds them, the package carries them)
   scripts/
-    safedeps-pre-guard.sh       # PreToolUse hook -- advisory ledger UX + snapshots
-    safedeps-post-verify.sh     # PostToolUse hook -- npm primary effect verification + reorg
+    safedeps-hook-entry.sh      # the registered entry: runs the binary for this platform, explains it when it cannot
+    build-core.sh               # builds the binary from rust/ for this machine, or the publish targets
     install/install-safedeps-hooks.mjs
     install/install-safedeps-recheck-agent.mjs
     install/migrate-safedeps-state.mjs
     safedeps-recheck-alert.sh
+    ci/               # run the tests on our own hosts, release checks
+    measure/          # measurements the docs cite
     test/
   package.json
   SKILL.md        # Claude Code / Codex skill manifest
@@ -495,7 +556,7 @@ safedeps/
 
 ### 테스트 실행
 
-`npm test` 는 개발용 실행입니다. 릴리스에만 필요한 두 배터리, 축약 scan-failure census 와 `scripts/test/effect-trace-grid.sh` 를 뺀 모든 테스트 배터리를 돌립니다. `npm run test:release` 는 그 둘을 포함해 모든 배터리를 돌립니다. 릴리스는 우리 macOS 장비와, Windows 용으로 WSL1 에서 릴리스 세트를 돌립니다. Linux 는 테스트하지 않습니다. GitHub Actions 는 테스트를 돌리지 않습니다. `scripts/ci/run-on-hosts.sh` 는 어느 세트든 우리 macOS 장비 여러 대에 나눠 한꺼번에 돌립니다. 가장 긴 배터리는 행 샤드로 쪼개고, 샤드를 합친 것이 세트 전체이고, 모든 배터리가 통과한 행을 하나 이상 출력했고, 모든 로그가 이 실행의 것이고, 도중에 잃은 장비가 없을 때만 초록입니다. `scripts/ci/release-checks.sh` 는 테스트가 아닌 릴리스 검사(ShellCheck, 핀으로 고정한 gitleaks 바이너리로 하는 모든 커밋의 시크릿 스캔, 패키지 내용)를 돌립니다. `scripts/test/run-all.sh --list` 는 실행이 시작할 배터리 목록을 출력합니다.
+`npm test` 는 개발용 실행입니다. 릴리스에만 필요한 두 배터리, `scripts/test/native-scan-failures.sh`(코어가 커맨드를 읽는 자리를 소스 사본에서 하나씩 망가뜨리는 census)와 `scripts/test/effect-trace-grid.sh` 를 뺀 모든 테스트 배터리를 돌립니다. `npm run test:release` 는 그 둘을 포함해 모든 배터리를 돌립니다. 릴리스는 우리 macOS 장비와, Windows 용으로 WSL1 에서 릴리스 세트를 돌립니다. Linux 는 테스트하지 않습니다. GitHub Actions 는 테스트를 돌리지 않습니다. `scripts/ci/run-on-hosts.sh` 는 어느 세트든 우리 macOS 장비 여러 대에 나눠 한꺼번에 돌립니다. 가장 긴 배터리는 행 샤드로 쪼개고, 샤드를 합친 것이 세트 전체이고, 모든 배터리가 통과한 행을 하나 이상 출력했고, 모든 로그가 이 실행의 것이고, 도중에 잃은 장비가 없을 때만 초록입니다. `scripts/ci/release-checks.sh` 는 테스트가 아닌 릴리스 검사(ShellCheck, 핀으로 고정한 gitleaks 바이너리로 하는 모든 커밋의 시크릿 스캔, 패키지 내용)를 돌립니다. `scripts/test/run-all.sh --list` 는 실행이 시작할 배터리 목록을 출력합니다. 배터리는 Rust 코어를 돌립니다. 호스트가 코어 바이너리를 하나 빌드해 스탬프를 확인한 뒤에야 첫 단위가 시작하고, 각 단위는 다시 빌드하지 않고 한 번 더 확인합니다.
 
 ## What's Different
 
