@@ -2882,7 +2882,7 @@ for gem_form in \
   $'gem install --document "a >\'" rake -v 13.0.0 --no-user-install "\'"'
 do
   shard_row "gem_form: ${gem_form}" || continue
-  got=$(prescription "${gem_form}")
+  got=$(prescription decision "${gem_form}")
   [[ "${got}" == *'rubygems rake@13.0.0;'* ]] || fail "the deny for \`${gem_form}\` prescribes rubygems rake@13.0.0 (got: ${got})"
 done
 pass "quotes, redirections and statement cuts are read by the one lexer, and each pinned install is checked as its package"
