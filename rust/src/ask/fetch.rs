@@ -135,12 +135,19 @@ fn public_registry_rule_matches_cli() {
 
     let cases = [
         ("https://registry.npmjs.org/", true, true),
+        ("https://registry.yarnpkg.com/", true, true),
         ("HTTPS://REGISTRY.NPMJS.ORG/pkg", true, true),
         ("hTtPs://ReGiStRy.YaRnPkG.cOm/pkg", true, true),
         ("https://registry.npmjs.org.example/", false, false),
+        ("https://registry.yarnpkg.com.example/", false, false),
+        ("https://registry.npmjs.org:443/", false, false),
+        ("https://user@registry.npmjs.org/", false, false),
+        ("https://registry.npmjs.org?x", false, false),
+        ("https://regiſtry.npmjs.org/", false, false),
         ("file:registry.npmjs.org/pkg", false, false),
         ("http://registry.npmjs.org/", false, false),
         ("https://registry.npmjs.org", false, true),
+        ("HTTPS://REGISTRY.YARNPKG.COM", false, true),
     ];
     let output = std::process::Command::new("/bin/bash")
         .env_clear().env("PATH", "/usr/bin:/bin").env("LC_ALL", "C")
@@ -162,6 +169,7 @@ done
     assert_eq!(answers.len(), cases.len(), "one CLI answer per URL");
     for ((url, cli, hook), answer) in cases.into_iter().zip(answers) {
         assert_eq!(answer, if cli { "true" } else { "false" }, "CLI: {url}");
+        assert_eq!(crate::post::public_registry_url(url.as_bytes()), cli, "post resolved URL: {url}");
         let registry = jq::into_value(jq::s(url));
         assert_eq!(registry_public(Some(&registry), &Value::Null), hook, "hook: {url}");
     }

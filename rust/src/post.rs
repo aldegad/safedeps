@@ -6,6 +6,8 @@ mod jv;
 mod sh;
 pub use sh::fnmatch as shell_pattern_matches;
 mod closure;
+#[cfg(test)]
+pub(crate) use closure::public_registry_url;
 mod report;
 mod workspaces;
 pub use workspaces::members as workspace_members;
