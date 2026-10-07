@@ -73,6 +73,7 @@ MACROS = set('print println eprint eprintln write writeln dbg panic assert asser
              'unreachable unimplemented todo'.split())
 DATA_MACROS = set('format format_args vec matches concat concat_bytes stringify env option_env '
                   'include_str include_bytes cfg file line column module_path'.split())
+KEYWORDS = set('if while return match else let const static break continue'.split())
 # Only the closed result API belongs here; report::io_outcome's free actor
 # argument is not one. Unknown rendering calls are conservatively "other".
 RESULT_RENDERERS = {'Outcome::describe'}
@@ -369,6 +370,14 @@ def origins(name, args, bindings, typed):
     if name in ('write', 'writeln'): args = args[1:]
     kinds = set()
     for arg in args: kinds.update(origin(arg, bindings, typed).split('+'))
+    if name in MACROS and args and len(args[0]) == 1:
+        # Rust's format strings can capture a binding without another argument.
+        # Escaped braces are text, and diagnostic-looking words remain data.
+        fmt = args[0][0].replace('{{', '').replace('}}', '')
+        for field in re.findall(r'\{([^{}]*)\}', fmt):
+            capture = re.match(r'([A-Za-z_]\w*)(?=:|$)', field)
+            names = ([capture[1]] if capture else []) + re.findall(r'([A-Za-z_]\w*)\$', field)
+            for captured in names: kinds.update(origin([captured], bindings, typed).split('+'))
     return '+'.join(sorted(kinds)) or 'other'
 
 
@@ -396,7 +405,7 @@ def entries(path, ts, foreign_names):
         structural = t in ('use', 'extern', 'macro_rules')
         if not structural:
             if before == 'fn': continue
-            if after == '!' and name not in DATA_MACROS and ts[i+2:i+3] in (['('], ['{'], ['[']): pass
+            if after == '!' and name not in DATA_MACROS | KEYWORDS and ts[i+2:i+3] in (['('], ['{'], ['[']): pass
             elif name in foreign_names and after == '(': pass
             elif name in HUMAN | WRITES | COPIES | CAPABILITIES:
                 if before not in ('.', '::') and after not in ('(', '::'): continue

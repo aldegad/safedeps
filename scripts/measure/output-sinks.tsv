@@ -17,7 +17,7 @@ rust/src/ask.rs	start	boundary	capability	Stdio	-	1
 rust/src/ask.rs	start	boundary	capability	spawn	-	1
 rust/src/ask.rs	start	boundary	capability	stderr	-	1
 rust/src/ask.rs	start	boundary	capability	stdout	-	1
-rust/src/core.rs	parse_codes	boundary	macro-call	if!	-	1
+rust/src/ask.rs	wait	boundary	capability	Outcome::status	-	1
 rust/src/core.rs	payloads	data	raw-or-serialized	append	-	1
 rust/src/inert.rs	<module>	boundary	macro-call	thread_local!	-	1
 rust/src/inert.rs	cli	boundary	capability	flush	-	1
@@ -25,9 +25,7 @@ rust/src/inert.rs	cli	boundary	capability	std::io::stdout	-	1
 rust/src/inert.rs	cli	boundary	import	std::io::Write	-	1
 rust/src/inert.rs	cli	data	raw-or-serialized	write_all	-	1
 rust/src/json.rs	each	data	raw-or-serialized	append	-	1
-rust/src/json.rs	string	boundary	macro-call	if!	-	1
 rust/src/ledger.rs	<module>	boundary	import	std::io	-	1
-rust/src/ledger.rs	epoch	boundary	macro-call	if!	-	1
 rust/src/ledger.rs	init	boundary	capability	create	-	1
 rust/src/ledger.rs	main	boundary	capability	std::io::stderr	-	1
 rust/src/ledger.rs	main	boundary	import	std::io::Write	-	1
@@ -41,8 +39,6 @@ rust/src/ledger/context.rs	probe	boundary	import	std::io::Write	-	1
 rust/src/ledger/context.rs	probe	data	raw-or-serialized	println!	-	1
 rust/src/ledger/context.rs	probe	human	stderr	write_all	data-field	1
 rust/src/lex.rs	<module>	boundary	import	std::io::Write	-	1
-rust/src/lex.rs	aq_escape	boundary	macro-call	if!	-	1
-rust/src/lex.rs	ascii_run	boundary	macro-call	if!	-	1
 rust/src/lex.rs	heredoc_op	boundary	capability	truncate	-	1
 rust/src/lex.rs	lex_with_files	boundary	capability	create	-	1
 rust/src/lex.rs	lex_with_files	boundary	capability	open	-	1
@@ -52,9 +48,7 @@ rust/src/lex.rs	lex_with_files	data	lexer-record	append	-	3
 rust/src/lex.rs	lex_with_files	data	lexer-record	std::fs::write	-	1
 rust/src/lex.rs	lex_with_files	data	lexer-record	write_all	-	1
 rust/src/lex.rs	pop	boundary	capability	truncate	-	1
-rust/src/lex.rs	redirs	boundary	macro-call	if!	-	1
 rust/src/lex.rs	run_passes	boundary	capability	truncate	-	1
-rust/src/lex.rs	starts	boundary	macro-call	if!	-	1
 rust/src/main.rs	<module>	boundary	import	std::io::Write	-	1
 rust/src/main.rs	cmd_facts	boundary	capability	flush	-	1
 rust/src/main.rs	cmd_facts	boundary	capability	std::io::stdout	-	1
@@ -95,7 +89,6 @@ rust/src/main.rs	mark_failed	boundary	capability	std::fs::OpenOptions	-	1
 rust/src/main.rs	mark_failed	boundary	file-mode	append	-	1
 rust/src/main.rs	mark_failed	data	raw-or-serialized	write_all	-	1
 rust/src/manager.rs	npm_read_args	boundary	capability	truncate	-	1
-rust/src/manager.rs	npm_read_args	boundary	macro-call	if!	-	1
 rust/src/manager.rs	npx_first_pass	boundary	capability	truncate	-	1
 rust/src/os.rs	<module>	boundary	foreign-function	access	-	1
 rust/src/os.rs	<module>	boundary	foreign-function	freelocale	-	1
@@ -117,6 +110,7 @@ rust/src/os.rs	kill_group	boundary	foreign-call	kill	-	1
 rust/src/os.rs	scratch_dir	boundary	foreign-call	mkdtemp	-	1
 rust/src/os.rs	set_umask	boundary	foreign-call	umask	-	1
 rust/src/os.rs	stat_clock	boundary	foreign-call	localtime_r	-	1
+rust/src/outcome.rs	<module>	boundary	import	std::io	-	1
 rust/src/post.rs	main	boundary	capability	create	-	1
 rust/src/post.rs	main	human	diagnostic	eprintln!	data-field+fixed-literal	1
 rust/src/post.rs	main	human	log-or-report	crate::state::log_advisory	data-field+fixed-literal	1
@@ -150,8 +144,9 @@ rust/src/post/npm.rs	fresh_integrities	human	log-or-report	state::log_advisory	f
 rust/src/post/npm.rs	observe	data	raw-or-serialized	state::write_state_file	-	1
 rust/src/post/npm.rs	observe	human	log-or-report	state::log_advisory	fixed-literal+other	1
 rust/src/post/npm.rs	rebuild	boundary	capability	Command	-	1
+rust/src/post/npm.rs	rebuild	boundary	capability	Outcome::status	-	1
 rust/src/post/npm.rs	rebuild	boundary	capability	Stdio	-	3
-rust/src/post/npm.rs	rebuild	boundary	capability	status	-	1
+rust/src/post/npm.rs	rebuild	boundary	capability	spawn	-	1
 rust/src/post/npm.rs	rebuild	boundary	capability	stderr	-	1
 rust/src/post/npm.rs	rebuild	boundary	capability	stdout	-	1
 rust/src/post/npm.rs	rebuild	boundary	import	std::process::Command	-	1
@@ -196,9 +191,11 @@ rust/src/post/report.rs	inert_unsaid	human	log-or-report	state::log_advisory	oth
 rust/src/post/report.rs	path	human	log-or-report	say	other	1
 rust/src/post/report.rs	rebuild	human	log-or-report	say	data-field	1
 rust/src/post/report.rs	rebuild	human	log-or-report	say	data-field+fixed-literal	3
-rust/src/post/report.rs	remove	human	log-or-report	say	fixed-literal+other	2
+rust/src/post/report.rs	remove	human	log-or-report	say	fixed-literal+other	1
+rust/src/post/report.rs	remove	human	log-or-report	say	fixed-literal+other+result-renderer	1
 rust/src/post/report.rs	restore	data	copy-or-publish	sh::copy_file	-	1
-rust/src/post/report.rs	restore	human	log-or-report	say	fixed-literal+other	3
+rust/src/post/report.rs	restore	human	log-or-report	say	fixed-literal+other	2
+rust/src/post/report.rs	restore	human	log-or-report	say	fixed-literal+other+result-renderer	1
 rust/src/post/report.rs	unread	human	log-or-report	say	data-field	1
 rust/src/post/report.rs	workspaces_key	human	log-or-report	say	fixed-literal+other	1
 rust/src/post/rollback.rs	message	human	advisory-or-reorg	sh::append	data-field+fixed-literal+other	1
@@ -265,7 +262,6 @@ rust/src/post/snapshot.rs	stage_inner	data	raw-or-serialized	fs::write	-	1
 rust/src/post/trace.rs	<module>	boundary	import	std::fs	-	1
 rust/src/post/trace.rs	settle	human	log-or-report	state::log_advisory	data-field+fixed-literal	1
 rust/src/post/trace.rs	settle	human	log-or-report	state::log_advisory	data-field+fixed-literal+other	1
-rust/src/post/tree.rs	judge	boundary	macro-call	if!	-	1
 rust/src/post/workspaces.rs	<module>	boundary	import	std::fs	-	1
 rust/src/post/workspaces.rs	physical_members	human	log-or-report	state::log_advisory	fixed-literal+other	1
 rust/src/pre.rs	<module>	boundary	import	std::io::Write	-	1
@@ -297,6 +293,7 @@ rust/src/pre.rs	stale	human	diagnostic	eprintln!	fixed-literal+other	2
 rust/src/pre.rs	stale	human	hook-answer	println!	fixed-literal+other	1
 rust/src/pre.rs	stale	human	log-or-report	state::log_advisory	data-field+fixed-literal+other	1
 rust/src/pre.rs	stale	human	log-or-report	state::log_advisory	fixed-literal+other	2
+rust/src/pre.rs	unfinished_text	boundary	capability	Outcome::status	-	1
 rust/src/pre.rs	unfinished_text	human	diagnostic	unreachable!	other	1
 rust/src/pre/budget.rs	<module>	boundary	import	std::fs	-	1
 rust/src/pre/budget.rs	<module>	boundary	import	std::io	-	1
@@ -382,7 +379,6 @@ rust/src/pre/targets.rs	probe	boundary	capability	std::io::stdout	-	1
 rust/src/pre/targets.rs	probe	boundary	import	std::io::Write	-	1
 rust/src/pre/targets.rs	probe	data	raw-or-serialized	println!	-	1
 rust/src/pre/targets.rs	probe	data	raw-or-serialized	write_all	-	1
-rust/src/pre/targets/env.rs	statement	boundary	macro-call	if!	-	1
 rust/src/query.rs	each	boundary	capability	flush	-	1
 rust/src/query.rs	each	boundary	capability	std::io::stdout	-	1
 rust/src/query.rs	each	boundary	import	std::io::Write	-	1
