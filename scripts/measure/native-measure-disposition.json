@@ -275,6 +275,10 @@
     {
       "path": "scripts/measure/inert-unread-scripts.sh",
       "consumer": "canonical public pre; old Bash ref replacement explicitly rejected"
+    },
+    {
+      "path": "scripts/measure/core-cost.py",
+      "consumer": "registered native pre versus the same binary facts query; npm-free PATH, startup baselines and binary identity checked; not a Bash/Rust speedup"
     }
   ],
   "preserved": [

@@ -1,27 +1,30 @@
 #!/usr/bin/env python3
-"""safedeps: what a judgment costs, the bash guard beside the Rust core.
+"""safedeps: native pre judgment and its command-facts query.
 
 For each command of a fixed set this times, from one Python process:
 
-  guard     the whole PreToolUse hook as the engines run it, through the
+  pre       the whole native PreToolUse hook, through the registered
             entry shim (`bash scripts/safedeps-hook-entry.sh pre`), from the
             payload on stdin to the answer on stdout
-  core      `safedeps-core facts` on the same payload: the lexer in every
+  facts     the same binary's `facts` query on the same payload: the lexer in every
             reading the command needs, the recognizers, the pipe checks, the
-            statements' kinds and the spec extractor -- the part stage 1
-            ported, which is not the whole hook
+            statements' kinds and the spec extractor. This excludes the
+            pre hook's state, target, ledger and rewrite work.
   start     process starts, for scale: `safedeps-core version`, `bash -c :`
             and `awk 'BEGIN{}'`
 
 Each command runs in a fresh sandbox (HOME, SAFEDEPS_HOME, a project with a
-package.json). The PATH holds no npm, so the guard's landing asks npm nothing
-(an npm install's directory reads `?`); the times of npm's own answers are
-npm's, a Rust guard would ask them too, and they are left out of both sides.
+package.json). The restricted system PATH must hold no npm (checked before
+measurement), so an npm install's directory reads `?`. These timings exclude
+npm's answers. The pre/facts ratio compares different operations in the same
+native implementation; it is not a Bash-to-Rust speedup. A failed process or
+malformed pre answer aborts the measurement instead of becoming a timing.
 `uptime` is printed at the start and the end.
 
 Usage: core-cost.py --core <safedeps-core> [--reps N] [--bash PATH] [--json FILE]
 """
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -63,6 +66,8 @@ def sandbox():
 def timed(argv, data, env, cwd):
     t = time.perf_counter()
     r = subprocess.run(argv, input=data, capture_output=True, env=env, cwd=cwd)
+    if r.returncode:
+        sys.exit("core-cost: %r exited %s: %s" % (argv, r.returncode, r.stderr.decode(errors="replace")))
     return (time.perf_counter() - t) * 1000.0, r
 
 
@@ -79,13 +84,27 @@ def main():
     ap.add_argument("--bash", default="bash")
     ap.add_argument("--json", default="")
     a = ap.parse_args()
+    if a.reps < 1:
+        ap.error("--reps must be positive")
     core = os.path.abspath(a.core)
     path = ":".join(d for d in ("/usr/bin", "/bin", "/usr/sbin", "/sbin") if os.path.isdir(d))
+    if shutil.which("npm", path=path):
+        sys.exit("core-cost: the restricted system PATH contains npm; no npm-free timing claimed")
+    machine = subprocess.check_output([a.bash, "-c", 'printf "%s" "${BASH_VERSINFO[5]}"'], text=True)
+    cpu = {"arm64": "arm64", "aarch64": "arm64", "x86_64": "x64", "amd64": "x64"}.get(machine.split("-")[0])
+    system = "darwin" if "-darwin" in machine else "linux" if "-linux" in machine else None
+    if not cpu or not system:
+        sys.exit("core-cost: unsupported entry platform: " + machine)
+    entry_core = os.path.join(ROOT, "bin", "native", system + "-" + cpu, "safedeps-core")
+    digest = lambda file: hashlib.sha256(open(file, "rb").read()).hexdigest()
+    if digest(core) != digest(entry_core):
+        sys.exit("core-cost: --core differs from the binary the registered entry uses")
+    subprocess.run([core, "stamp", "--check"], check=True)
     up0 = subprocess.run(["uptime"], capture_output=True, text=True).stdout.strip()
     print("start: %s" % up0)
     bash_ver = subprocess.run([a.bash, "--version"], capture_output=True, text=True).stdout.splitlines()[0]
     print("bash: %s (%s)" % (a.bash, bash_ver))
-    out = {"uptime_start": up0, "bash": bash_ver, "rows": []}
+    out = {"uptime_start": up0, "bash": bash_ver, "binary_sha256": digest(core), "rows": []}
 
     starts = {"core version": [], "bash -c :": [], "awk BEGIN": []}
     env0 = {"PATH": path, "HOME": tempfile.mkdtemp()}
@@ -97,6 +116,7 @@ def main():
         s = stats(v)
         print("start %-14s median %7.1f ms  p90 %7.1f  min %7.1f" % (k, s["median"], s["p90"], s["min"]))
         out["rows"].append({"name": "start " + k, **s})
+    shutil.rmtree(env0["HOME"])
 
     for name, cmd in commands():
         gt, ct = [], []
@@ -108,24 +128,27 @@ def main():
             data = json.dumps({"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": proj}).encode()
             g, gr = timed([a.bash, SHIM, "pre"], data, env, proj)
             c, cr = timed([core, "facts"], data, env, proj)
-            if cr.returncode != 0:
-                sys.exit("core-cost: safedeps-core facts failed on %s" % name)
+            try:
+                response = json.loads(gr.stdout) if gr.stdout else {}
+                if not isinstance(response, dict):
+                    raise ValueError("pre answer is not an object")
+                hs = response.get("hookSpecificOutput", {})
+                if not isinstance(hs, dict):
+                    raise ValueError("hookSpecificOutput is not an object")
+            except ValueError as error:
+                sys.exit("core-cost: malformed pre answer on %s: %s" % (name, error))
             if i > 0:
                 gt.append(g)
                 ct.append(c)
             else:
-                try:
-                    hs = json.loads(gr.stdout or b"{}").get("hookSpecificOutput", {})
-                    answer = hs.get("permissionDecision", "allow")
-                    if "UNDECIDED" in hs.get("permissionDecisionReason", ""):
-                        answer = "deny (UNDECIDED)"
-                except ValueError:
-                    answer = "?"
+                answer = hs.get("permissionDecision", "allow")
+                if "UNDECIDED" in hs.get("permissionDecisionReason", ""):
+                    answer = "deny (UNDECIDED)"
             shutil.rmtree(box, ignore_errors=True)
         gs, cs = stats(gt), stats(ct)
-        print("%-17s %6d B  guard median %8.1f ms p90 %8.1f | core median %6.1f ms p90 %6.1f | guard/core %5.0fx  (guard said %s)" % (
+        print("%-17s %6d B  pre median %8.1f ms p90 %8.1f | facts median %6.1f ms p90 %6.1f | pre/facts %5.0fx  (pre said %s)" % (
             name, len(cmd.encode()), gs["median"], gs["p90"], cs["median"], cs["p90"], gs["median"] / max(cs["median"], 0.01), answer))
-        out["rows"].append({"name": name, "bytes": len(cmd.encode()), "guard": gs, "core": cs, "answer": answer})
+        out["rows"].append({"name": name, "bytes": len(cmd.encode()), "pre": gs, "facts": cs, "answer": answer})
     up1 = subprocess.run(["uptime"], capture_output=True, text=True).stdout.strip()
     print("end: %s" % up1)
     out["uptime_end"] = up1
