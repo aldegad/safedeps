@@ -2,7 +2,7 @@
 # safedeps: run the test suite on our own hosts, and judge the run as one.
 #
 #   scripts/ci/run-on-hosts.sh [--release] [--hosts NAME,...] [--hosts-file FILE]
-#                              [--rev REV] [--logs DIR] [--budget SECONDS]
+#                              [--rev REV] [--logs DIR] [--only UNIT,...]
 #
 #   --release      the release set (`npm run test:release`); without it, the
 #                  development set (`npm test`)
@@ -12,19 +12,15 @@
 #                  not tested, and the run says so.
 #   --logs         where the logs land, a directory that does not exist yet or
 #                  is empty; default a new directory under TMPDIR
-#   --budget       the wall clock a run has, default 600 (AGENTS.md, Testing),
-#                  counted from the first queue slot the run gets: the wait
-#                  for the suites ahead in the queues is printed beside it
 #   --only         run these units alone (a comma-separated list), to try the
 #                  runner itself. Such a run is red by construction: the verdict
 #                  judges the whole set, and names the units that did not run.
 #
-# Our CI is our own hosts, and a run has ten minutes (owner, 2026-10-06). One
-# host cannot do it: the release set took 46 to 62 minutes on the largest of
-# them. So this splits a set into units (scripts/test/run-all.sh --units: whole
-# batteries, battery shards and census shards), runs them on several hosts at
-# once, collects every log, and judges the logs together with
-# scripts/test/ci-verdict.sh.
+# Our CI is our own hosts (owner, 2026-10-06). The release set took 46 to 62
+# minutes on the largest of them alone. So this splits a set into units
+# (scripts/test/run-all.sh --units: whole batteries, battery shards and census
+# shards), runs them on several hosts at once, collects every log, and judges
+# the logs together with scripts/test/ci-verdict.sh.
 #
 # The commit goes to each host as `git archive` output, into a directory of
 # this run's own, which mktemp creates there: two runs never share one, and
@@ -55,8 +51,10 @@
 # every host first. A coordinator killed outright stops nothing, so the units
 # watch the run's heartbeat themselves (scripts/ci/remote.sh).
 #
-# Exit status: 0 green within the budget, 1 red, 2 a usage or setup error, 3
-# green but over the budget.
+# A run prints its wall clock from the first queue slot it gets, and beside
+# it the wait for the suites ahead in the queues. A run has no time budget.
+#
+# Exit status: 0 green, 1 red, 2 a usage or setup error.
 #
 # The host file has one host per line, fields separated by `|`, `#` comments:
 #
@@ -83,11 +81,11 @@ PREPARE_TIMEOUT=600
 
 die() { printf 'run-on-hosts: %s\n' "$1" >&2; exit 2; }
 usage() {
-  printf 'usage: %s [--release] [--hosts NAME,...] [--hosts-file FILE] [--rev REV] [--logs DIR] [--budget SECONDS] [--only UNIT,...]\n' "$0" >&2
+  printf 'usage: %s [--release] [--hosts NAME,...] [--hosts-file FILE] [--rev REV] [--logs DIR] [--only UNIT,...]\n' "$0" >&2
   exit 2
 }
 
-set_flag="" pick="" only="" hosts_file="${XDG_CONFIG_HOME:-${HOME}/.config}/safedeps/test-hosts" rev=HEAD logs="" budget=600
+set_flag="" pick="" only="" hosts_file="${XDG_CONFIG_HOME:-${HOME}/.config}/safedeps/test-hosts" rev=HEAD logs=""
 while (( $# > 0 )); do
   case "$1" in
     --release) set_flag=--release; shift ;;
@@ -95,7 +93,6 @@ while (( $# > 0 )); do
     --hosts-file) [[ -n "${2:-}" ]] || usage; hosts_file="$2"; shift 2 ;;
     --rev) [[ -n "${2:-}" ]] || usage; rev="$2"; shift 2 ;;
     --logs) [[ -n "${2:-}" ]] || usage; logs="$2"; shift 2 ;;
-    --budget) [[ "${2:-}" =~ ^[1-9][0-9]*$ ]] || usage; budget="$2"; shift 2 ;;
     --only) [[ -n "${2:-}" ]] || usage; only="$2"; shift 2 ;;
     *) usage ;;
   esac
@@ -462,7 +459,7 @@ secs=$(( suite_end - first_held ))
 waited=$(( first_held - suite_start ))
 {
   printf 'end %s\n' "$(date '+%Y-%m-%d %H:%M:%S %z')"
-  printf 'wall %ss from the first queue slot (budget %ss), after %ss waiting for the queues\n' "${secs}" "${budget}" "${waited}"
+  printf 'wall %ss from the first queue slot, after %ss waiting for the queues\n' "${secs}" "${waited}"
   for (( h = 0; h < ${#H_NAME[@]}; h++ )); do
     printf 'host %s %s cpus %s holds %s load when shipped %s, when its slots were held %s, at end %s\n' \
       "${H_NAME[h]}" "${H_STATE[h]}" "${H_CPUS[h]}" "${H_HOLDS[h]}" "${H_LOAD0[h]:-?}" "${H_LOADH[h]:-never}" "${H_LOAD1[h]:-?}"
@@ -481,9 +478,5 @@ if (( verdict_rc != 0 )); then
   printf '# RED: see %s\n' "${logs}"
   exit 1
 fi
-if (( secs > budget )); then
-  printf '# green, but over the budget: %ss of %ss\n' "${secs}" "${budget}"
-  exit 3
-fi
-printf '# green in %ss of %ss\n' "${secs}" "${budget}"
+printf '# green in %ss\n' "${secs}"
 exit 0

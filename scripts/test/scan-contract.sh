@@ -1825,7 +1825,7 @@ pass "words: the pieces view reads the argv bash and zsh hand the manager on ${w
 # modules. Bash disk memo and awk/grep/sed call-index injection have no target
 # in the native reader and are retired (see reader-retirements.json).
 python3 "${ROOT_DIR}/scripts/test/lib/core-reader-check.py" "${SAFEDEPS_TEST_CORE}" source-map
-pass "native payload bytes retain their original source offsets"
+pass "native payload bytes retain their original source offsets, including nested brace bodies"
 python3 "${ROOT_DIR}/scripts/test/lib/core-reader-check.py" "${SAFEDEPS_TEST_CORE}" settlement
 
 shard_end
