@@ -39,7 +39,12 @@ source "${ROOT_DIR}/scripts/test/lib/hook-response.sh"
 hook_response_init "${tmp_root}/hook-response.failures"
 
 cleanup() {
-  rm -rf "${tmp_root}"
+  local cleanup_rc=$?
+  if [[ "${cleanup_rc}" == 0 ]] && hook_response_assert; then
+    rm -rf "${tmp_root}"
+  else
+    printf '# failed row artifacts: %s\n' "${tmp_root}" >&2
+  fi
 }
 trap cleanup EXIT
 # Forms hold paths under it, so a row's label says <tmp> there.

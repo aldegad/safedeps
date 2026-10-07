@@ -44,7 +44,7 @@ hook_response_parse() {
       [[ ! -s "${file}" ]] || { hook_response_error "expected quiet stdout, got: ${file}"; return 1; }
       HOOK_QUIET=true
       return 0 ;;
-    quiet-or-decision)
+    quiet-or-decision|quiet-or-message)
       if [[ ! -s "${file}" ]]; then HOOK_QUIET=true; return 0; fi ;;
     decision|message) ;;
     *) hook_response_error "unknown expectation ${expect}"; return 1 ;;
@@ -52,7 +52,7 @@ hook_response_parse() {
   [[ -s "${file}" ]] || { hook_response_error "expected ${expect}, got no stdout"; return 1; }
   fields=$(jq -ers --arg expect "${expect}" '
     if length != 1 or (.[0] | type != "object") then error("expected one JSON object") else .[0] end
-    | if $expect == "message" then
+    | if $expect == "message" or $expect == "quiet-or-message" then
         if (.systemMessage | type) != "string" then error("expected a systemMessage string")
         else {HOOK_MESSAGE: .systemMessage} end
       else

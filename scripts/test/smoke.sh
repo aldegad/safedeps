@@ -23,7 +23,12 @@ source scripts/test/lib/release-floor.sh
 RELEASE_FLOOR_FAILS="${tmp_root}/release-floor.fails"
 : > "${RELEASE_FLOOR_FAILS}"
 cleanup() {
-  rm -rf "${tmp_root}"
+  local cleanup_rc=$?
+  if [[ "${cleanup_rc}" == 0 ]] && hook_response_assert; then
+    rm -rf "${tmp_root}"
+  else
+    printf '# failed row artifacts: %s\n' "${tmp_root}" >&2
+  fi
 }
 trap cleanup EXIT
 

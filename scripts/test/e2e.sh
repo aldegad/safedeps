@@ -148,6 +148,7 @@ reap_owned_children() {
 }
 
 cleanup() {
+  local cleanup_rc=$?
   if [[ -n "${server_pid:-}" ]]; then
     kill "${server_pid}" 2>/dev/null || true
     wait "${server_pid}" 2>/dev/null || true
@@ -158,7 +159,11 @@ cleanup() {
     cp -R "${tmp_root}/report-oracle" "${SAFEDEPS_TEST_EVIDENCE}/"
     cp "${SAFEDEPS_TEST_FAILURES}" "${SAFEDEPS_TEST_EVIDENCE}/fixture-failures.jsonl"
   fi
-  rm -rf "${tmp_root}"
+  if [[ "${cleanup_rc}" == 0 ]] && hook_response_assert; then
+    rm -rf "${tmp_root}"
+  else
+    printf '# failed row artifacts: %s\n' "${tmp_root}" >&2
+  fi
 }
 trap cleanup EXIT
 sweep_stale_children
