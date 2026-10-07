@@ -275,6 +275,8 @@ stub_npm_path() {
 # A strict battery (the default) fails on a denied, non-inert or failed install.
 # With NPM_SANDBOX_TOLERANT=true those are outcomes instead: CASE_PRE_DENY holds
 # the deny reason, CASE_NOT_INERT is true, CASE_INSTALL_RC the exit status.
+# CASE_PRE is the pre-guard's whole answer, for a row that reads more of it
+# than the reason.
 # CASE_CMD_ENV is an array of NAME=value the command runs with and the hooks do
 # not see, as an agent's shell can carry state its hooks were not given.
 #
@@ -286,7 +288,7 @@ stub_npm_path() {
 NPM_SANDBOX_CALLS=0
 run_install() {
   local command="$1" engine="${2:-claude}" between="${3:-}" payload pre exec_command marks_before id post_id
-  CASE_PRE_DENY="" CASE_NOT_INERT=false CASE_INSTALL_RC=0 CASE_POST="" CASE_RAN="" CASE_EXEC=""
+  CASE_PRE_DENY="" CASE_NOT_INERT=false CASE_INSTALL_RC=0 CASE_POST="" CASE_RAN="" CASE_EXEC="" CASE_PRE=""
   rm -rf "${tmp_root}/global"
   NPM_SANDBOX_CALLS=$((NPM_SANDBOX_CALLS + 1))
   id="toolu_sandbox_$$_${NPM_SANDBOX_CALLS}"
@@ -298,6 +300,7 @@ run_install() {
     payload=$(jq -nc --arg c "${command}" --arg d "${CASE_CWD}" --arg id "${id}" '{tool_name:"Bash",tool_input:{command:$c},cwd:$d,tool_use_id:$id}')
   fi
   pre=$(printf '%s' "${payload}" | PATH="${CASE_PRE_PATH:-${PATH}}" SAFEDEPS_HOME="${CASE_HOME}" scripts/safedeps-hook-entry.sh pre 2>/dev/null)
+  CASE_PRE="${pre}"
   if [[ -n "${pre}" && "$(jq -r '.hookSpecificOutput.permissionDecision // empty' <<< "${pre}")" == deny ]]; then
     [[ "${NPM_SANDBOX_TOLERANT:-false}" == true ]] || fail "the gate lets the install through to the effect gate: ${command}"
     CASE_PRE_DENY=$(jq -r '.hookSpecificOutput.permissionDecisionReason // ""' <<< "${pre}")

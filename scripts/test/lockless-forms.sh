@@ -959,8 +959,8 @@ lock_approved() { (cd "${CASE_PROJECT}" && npm install sd-approved@1.0.0 --ignor
 lock_victim() { (cd "${CASE_PROJECT}" && npm install sd-victim@1.0.0 --ignore-scripts >/dev/null 2>&1 && rm -rf node_modules); }
 for row in \
   "npm install sd-approved@1.0.0 --cache && echo ok|withheld||" \
-  "npm install sd-approved@1.0.0 --cache|withheld||" \
-  "npm install sd-approved@1.0.0 -C|elsewhere||" \
+  "npm install sd-approved@1.0.0 --cache|collision:end-flag-not-an-option||" \
+  "npm install sd-approved@1.0.0 -C|collision:end-flag-not-an-option||" \
   "npm ci \$(printf -- --)|unverified|lock_approved|" \
   "npm install sd-approved@1.0.0 \$FLAGS|unverified||FLAGS=--no-ignore-scripts" \
   "npm install sd-approved@1.0.0 \$FLAGS|unverified||FLAGS=--cache" \
@@ -975,6 +975,31 @@ do
   INSTALL_MARKS=""
   CASE_CMD_ENV=()
   [[ -z "${cmd_env}" ]] || CASE_CMD_ENV=("${cmd_env}")
+  if [[ "${want}" == collision:* ]]; then
+    # A one-statement command owes the release's flag at its end, and after an
+    # option that takes the next word as its value (`--cache`, `-C`) npm reads
+    # that flag as the value. No rewrite keeps both the flag and npm's reading
+    # of the options as written, so the gate sends none: UNDECIDED with a
+    # reason of its own, the kind in advisory.log, and the install does not
+    # run. The bash guard sent the rewrite, and the install took
+    # `--ignore-scripts` as its cache directory or as the directory it ran in
+    # (scripts/measure/core-intended-battery-rows.tsv). With a statement after
+    # it the command owes no end flag, which is the first row.
+    NPM_SANDBOX_TOLERANT=true
+    run_install "${form}" claude count_install_marks
+    unset NPM_SANDBOX_TOLERANT
+    [[ "${CASE_PRE_DENY}" == *UNDECIDED*"no rewritten command was sent"*"not a finding"* ]] \
+      || fail "an install whose end flag npm would read as an option's value is UNDECIDED because the flag cannot be placed: ${form} (deny: ${CASE_PRE_DENY:-<none>})"
+    [[ "$(jq -r '.hookSpecificOutput | has("updatedInput")' <<< "${CASE_PRE}")" == false ]] \
+      || fail "an install whose end flag cannot be placed gets no rewrite: ${form} (${CASE_PRE})"
+    grep -q "pre-guard DENY: .*(${want#collision:})" "${CASE_HOME}/advisory.log" \
+      || fail "advisory.log names the kind ${want#collision:}: ${form} ($(tail -2 "${CASE_HOME}/advisory.log" 2>/dev/null))"
+    [[ -z "${CASE_EXEC}" && ! -s "${MARKS}" ]] \
+      || fail "an install the gate did not let through does not run: ${form} (ran: ${CASE_EXEC}; scripts: $(cut -f1,2 "${MARKS}" | paste -sd, -))"
+    [[ -z "$(find "${CASE_PROJECT}" -maxdepth 1 -name '-*' -print -quit)" ]] \
+      || fail "judging the install makes nothing in the project: ${form} ($(find "${CASE_PROJECT}" -maxdepth 1 -name '-*' | paste -sd, -))"
+    continue
+  fi
   run_install "${form}" claude count_install_marks
   CASE_CMD_ENV=()
   [[ "${INSTALL_MARKS}" == 0 ]] \
@@ -984,23 +1009,15 @@ do
   # created in the project while the gate judged the command. (Under
   # FLAGS=--cache the install itself takes the trailing flag as its cache,
   # which is the command's doing and the reason the flag is also after the
-  # verb.) A one-statement command also keeps the release's flag at its end,
-  # and after a trailing `--cache` the install takes that flag as its cache
-  # directory and makes `--ignore-scripts` in the project, as the release's
-  # rewrite did: that one is the install's, not the ask's.
+  # verb.) A one-statement command owed the release's flag at its end, where
+  # the install took it as its cache directory and made `--ignore-scripts` in
+  # the project; that command is the collision row above, and the name stays
+  # set aside here as the install's, not the ask's.
   if [[ "${want}" == withheld ]]; then
     [[ -z "$(find "${CASE_PROJECT}" -maxdepth 1 -name '-*' ! -name '--ignore-scripts' -print -quit)" ]] \
       || fail "asking npm about the install makes nothing in the project: ${form} ($(find "${CASE_PROJECT}" -maxdepth 1 -name '-*' ! -name '--ignore-scripts' | paste -sd, -))"
   fi
   case "${want}" in
-    elsewhere)
-      # The release's flag at the end of a one-statement command is `-C`'s
-      # value, so npm installs into ./--ignore-scripts, as the release's
-      # rewrite did. No script runs (the flags before it stand), and the gate,
-      # which reads the project, says it saw no install trace there.
-      [[ -z "${CASE_RAN}" ]] && grep -q 'did not run npm rebuild: no install trace in' <<< "${CASE_POST}" \
-        || fail "an install the release's flag sends elsewhere runs no script and is reported as leaving no trace: ${form} (post: ${CASE_POST:-<quiet>})"
-      ;;
     withheld)
       [[ -z "${CASE_RAN}" ]] && grep -q 'did not run npm rebuild' <<< "${CASE_POST}" \
         || fail "an inert install npm was not asked about is not rebuilt, and the user is told: ${form} (post: ${CASE_POST:-<quiet>})"

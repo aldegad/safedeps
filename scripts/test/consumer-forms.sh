@@ -102,6 +102,27 @@ expect_undecided() {
   [[ "${got}" == "deny "*UNDECIDED* ]] || fail "${label} is UNDECIDED (got: ${got:0:120})"
 }
 
+# An UNDECIDED deny for a rewrite whose duties collide: a flag the release owes
+# cannot stand where npm reads it as the option with the command's own words
+# and data as written. The gate sends no rewrite, its reason says so and claims
+# no finding, and advisory.log names the kind.
+expect_collision() { # label command kind
+  shard_row "expect_collision|$1|$2|$3" || return 0
+  local label="$1" command="$2" kind="$3" safe out
+  safe=$(mktemp -d "${tmp_root}/safe.XXXXXX")
+  out=$(jq -nc --arg c "${command}" --arg cwd "${project_dir}" \
+    '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
+    HOME="${tmp_root}/home" SAFEDEPS_HOME="${safe}" scripts/safedeps-pre-guard.sh 2>/dev/null)
+  [[ -n "${out}" ]] || out='{}'
+  [[ "$(jq -r '.hookSpecificOutput.permissionDecision // "pass"' <<< "${out}")" == deny \
+    && "$(jq -r '.hookSpecificOutput.permissionDecisionReason // ""' <<< "${out}")" == *UNDECIDED*"no rewritten command was sent"*"not a finding"* ]] \
+    || fail "${label} is UNDECIDED because a flag it owes cannot be placed (got: ${out:0:200})"
+  [[ "$(jq -r '.hookSpecificOutput | has("updatedInput")' <<< "${out}")" == false ]] \
+    || fail "${label} gets no rewrite (got: ${out:0:200})"
+  grep -q "pre-guard DENY: .*(${kind})" "${safe}/advisory.log" 2>/dev/null \
+    || fail "${label} is recorded in advisory.log as ${kind} (advisory: $(head -3 "${safe}/advisory.log" 2>/dev/null))"
+}
+
 # --- 1. Carrier forms the command gate catches --------------------------------
 # Regression against narrowing. Tightening the gate for false positives must not
 # quietly shrink this set — that would be a trade, not a net gain.
@@ -1032,10 +1053,24 @@ for close_row in \
 do
   expect_not_approved "${close_row#*|} (${close_row%%|*})" "${close_row#*|}"
 done
-for inert_form in 'for ((i=0;i<1;i++)){(npm ci);}' 'for i (1)(npm ci)' 'cat <((npm ci))'; do
+for inert_form in 'cat <((npm ci))'; do
   shard_row "inert_form: ${inert_form}" || continue
   rewrite_holds "${inert_form}" "${inert_form/npm ci/npm ci --ignore-scripts}" \
     || fail "an npm install after a closed head gets --ignore-scripts: ${inert_form} (got: $(gate_rewrite "${inert_form}"))"
+done
+# The other two closed heads are an install in some shells only: the dash
+# reading has none after `for ((...))`, and the bash and dash readings have
+# none after zsh's `for NAME (WORDS)`. The release owes its flag after the verb
+# whatever the reading, and in a reading with no install there the flag would
+# stand outside a command. So the gate sends no rewrite: UNDECIDED with a
+# reason of its own, and the kind in advisory.log. The spaced form gets the
+# answer of the glued one. The bash guard rewrote all four; the rows are
+# listed in scripts/measure/core-intended-battery-rows.tsv.
+for collide_form in \
+  'for ((i=0;i<1;i++)){(npm ci);}' 'for ((i=0;i<1;i++)) { (npm ci); }' \
+  'for i (1)(npm ci)' 'for i (1) (npm ci)'
+do
+  expect_collision "an npm install after a closed head that only some shells read there, ${collide_form}," "${collide_form}" floor-outside-command
 done
 # dash reads `((` as two subshells, so it puts these installs elsewhere, and no
 # one rewrite is inert for every shell: UNDECIDED, as for the other forms only
