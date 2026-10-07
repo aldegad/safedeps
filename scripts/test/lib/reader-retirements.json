@@ -100,7 +100,10 @@
     {
       "source": "advisory-log-retention.sh:38",
       "contract": "Compaction keeps evidence bytes, archives INFO, bounds retained generations, honors the rotation lock and derives advisory.log from the state directory.",
-      "disposition": "preserve all seven CLI Bash rows; add core-advisory-retention.py with real pre/post log growth, disk and gzip readback, exact generation membership, and state-path assertions"
+      "disposition": "preserve all seven CLI Bash rows; add core-advisory-retention.py with real pre/post log growth, disk and gzip readback, exact generation membership, and state-path assertions",
+      "native_rows_added": 5,
+      "cli_rows_preserved": 7,
+      "rows_retired": 0
     }
   ]
 }
