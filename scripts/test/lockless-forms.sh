@@ -604,7 +604,7 @@ records_dependency() {
     && jq -e --arg p "node_modules/${package}" '.packages[$p] != null' "${CASE_PROJECT}/package-lock.json" >/dev/null
 }
 rollback_removed_node_modules() {
-  [[ ! -e "${CASE_PROJECT}/node_modules" ]] && hook_response_read message "${CASE_POST_FILE}" message | grep -qx 'removed .*/node_modules'
+  [[ ! -e "${CASE_PROJECT}/node_modules" ]] && hook_response_read message "${CASE_POST_FILE}" message | grep -x 'removed .*/node_modules' >/dev/null
 }
 lacks_dependency() {
   local package="$1"
@@ -809,8 +809,8 @@ if shard_row "a rollback with no package-lock.json resolves nothing again and ru
   rollback_removed_node_modules \
     || fail "the rollback resolves nothing again: node_modules is removed, not reinstalled (node_modules: $(ls "${CASE_PROJECT}/node_modules" 2>&1 | paste -sd, -))"
   [[ ! -s "${MARKS}" ]] || fail "the rollback runs no install script ($(cut -f1,2 "${MARKS}" | paste -sd, -))"
-  hook_response_read message "${CASE_POST_FILE}" message | grep -qx '.*/package-lock\.json does not exist' \
-    && hook_response_read message "${CASE_POST_FILE}" message | grep -qx '.*/npm-shrinkwrap\.json does not exist' \
+  hook_response_read message "${CASE_POST_FILE}" message | grep -x '.*/package-lock\.json does not exist' >/dev/null \
+    && hook_response_read message "${CASE_POST_FILE}" message | grep -x '.*/npm-shrinkwrap\.json does not exist' >/dev/null \
     || fail "the rollback says the project has no npm lockfile (post: ${CASE_POST})"
   pass "a rollback with no package-lock.json resolves nothing again and runs no install script"
 else
@@ -839,7 +839,7 @@ if shard_row "an unapproved workspace install is rolled back from disk, member m
     || fail "the rollback removes the unapproved package from disk"
   [[ ! -e "${CASE_PROJECT}/node_modules" ]] \
     || fail "the rollback removes the workspace root's own node_modules"
-  hook_response_read message "${CASE_POST_FILE}" message | grep -qx '.*/package\.json has the key workspaces' \
+  hook_response_read message "${CASE_POST_FILE}" message | grep -x '.*/package\.json has the key workspaces' >/dev/null \
     || fail "the rollback says the root package.json has the key workspaces (post: ${CASE_POST})"
   [[ "$(hook_response_read message "${CASE_POST_FILE}" message | grep -c '^removed .*/node_modules$')" == 1 ]] \
     || fail "the rollback names the one node_modules it removed, the workspace root's (post: ${CASE_POST})"
@@ -978,7 +978,7 @@ expect_unsent() { # form reason advisory
     || fail "the gate answers UNDECIDED, saying ${reason}: ${form} (deny: ${CASE_PRE_DENY:-<none>})"
   [[ "$(hook_response_read has-rewrite "${CASE_PRE_FILE}")" == false ]] \
     || fail "a command the gate does not let through gets no rewrite: ${form} (${CASE_PRE})"
-  grep "pre-guard DENY: " "${CASE_HOME}/advisory.log" 2>/dev/null | grep -qF -- "${advisory}" \
+  grep "pre-guard DENY: " "${CASE_HOME}/advisory.log" 2>/dev/null | grep -F -- "${advisory}" >/dev/null \
     || fail "advisory.log has a DENY line holding ${advisory}: ${form} ($(tail -2 "${CASE_HOME}/advisory.log" 2>/dev/null))"
   [[ -z "${CASE_EXEC}" && ! -s "${MARKS}" ]] \
     || fail "an install the gate did not let through does not run: ${form} (ran: ${CASE_EXEC}; scripts: $(cut -f1,2 "${MARKS}" | paste -sd, -))"

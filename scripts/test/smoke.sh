@@ -136,7 +136,7 @@ done
 grep -q '^  claude: \["PostToolUse", "PostToolUseFailure"\],$' scripts/install/install-safedeps-hooks.mjs \
   || fail "the installer registers the claude post hook for PostToolUse and PostToolUseFailure"
 for doc in README.md README.ko.md; do
-  grep -A6 '"PostToolUseFailure": \[' "${doc}" | grep -q "${installer_entry} post" \
+  grep -A6 '"PostToolUseFailure": \[' "${doc}" | grep  "${installer_entry} post" >/dev/null \
     || fail "${doc} registers the entry shim with 'post' for PostToolUseFailure"
 done
 if grep -qE '^\s*script:\s*scripts/safedeps-' SKILL.md; then
@@ -1121,7 +1121,7 @@ do
   SAFEDEPS_HOME="${readings_safe}" lib/ledger/ledger.sh approve npm left-pad 1.3.0 1.3.0 smoke >/dev/null
   readings_out=$(run_hook_command "${tmp_root}/home-readings" "${readings_safe}" "${readings_case}")
   [[ "$(hook_response_read decision "${readings_out}")" == deny ]] \
-    && hook_response_read reason "${readings_out}" | grep -q 'UNDECIDED.*read the npm installs in this command in different places' \
+    && hook_response_read reason "${readings_out}" | grep 'UNDECIDED.*read the npm installs in this command in different places' >/dev/null \
     || fail "readings that put the npm installs in different places are UNDECIDED: $(printf '%q' "${readings_case}") (got: ${readings_out:0:200})"
   ! grep -qs '"ignore_scripts_injected": true' "${readings_safe}/snapshots/"*_meta.json \
     || fail "the meta never says inert when nothing was injected: $(printf '%q' "${readings_case}")"

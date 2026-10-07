@@ -2160,9 +2160,9 @@ identity_reason() {
     HOME="${tmp_root}/home-identity" SAFEDEPS_HOME="${safe}" hook_response_capture "${safe}.response" scripts/safedeps-hook-entry.sh pre)
   hook_response_read reason "${out}"
 }
-grep -q 'check go example.com/evil@v1.0.0' <<< "$(identity_reason 'go get example.com/evil@v1.0.0')" \
+identity_reason 'go get example.com/evil@v1.0.0' | grep 'check go example.com/evil@v1.0.0' >/dev/null \
   || fail "a Go module is checked by its whole path, not its last element"
-grep -q 'check pypi evil@1.0.0' <<< "$(identity_reason 'npm run build && pip install evil==1.0.0')" \
+identity_reason 'npm run build && pip install evil==1.0.0' | grep 'check pypi evil@1.0.0' >/dev/null \
   || fail "a spec is checked under the ecosystem of the statement it came from"
 pass "Go modules keep their path and each spec keeps its own statement's ecosystem"
 
@@ -3562,7 +3562,7 @@ beside_expect() { # want label marked-form; want is pipe, deny, allow or pass
   # After the append: the S1 loop below reads beside_rows in every shard.
   shard_row "beside_expect|$1|$2|$3" || return 0
   if [[ "${want}" == pipe ]]; then
-    grep -q 'reads like an install into a shell' <<< "$(beside_reason "${form}")" \
+    beside_reason "${form}" | grep 'reads like an install into a shell' >/dev/null \
       || fail "${label}: denied by the pipe rule: $(printf '%q' "${form}")"
   else
     if [[ "${want}" == pass ]]; then response_expect=quiet; else response_expect=decision; fi

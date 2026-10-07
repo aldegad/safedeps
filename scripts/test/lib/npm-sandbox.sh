@@ -47,7 +47,7 @@ hook_response_init "${tmp_root}/hook-response.failures"
 # written. Old-marker orphans are not this sweep's to reap.
 CHILD_MARKER_BASE="safedeps-${NPM_SANDBOX_NAME}-owned"
 CHILD_MARKER="${CHILD_MARKER_BASE}:$$"
-battery_alive() { ps -o args= -p "$1" 2>/dev/null | grep -q "${NPM_SANDBOX_SCRIPT_RE}"; }
+battery_alive() { ps -o args= -p "$1" 2>/dev/null | grep  "${NPM_SANDBOX_SCRIPT_RE}" >/dev/null; }
 sweep_stale_children() {
   local pid args owner
   while read -r pid args; do
@@ -379,7 +379,8 @@ rolled_back() {
     hook_response_parse "${CASE_POST_FILE}" quiet || return 1
     return 1
   fi
-  hook_response_read message "${CASE_POST_FILE}" message | grep -q 'A rollback ran\.'
+  hook_response_parse "${CASE_POST_FILE}" message || return 1
+  [[ "${HOOK_MESSAGE}" == *'A rollback ran.'* ]]
 }
 ungated() { grep -q 'UNGATED' "${CASE_HOME}/advisory.log" 2>/dev/null; }
 victim_ran() { grep -q '^sd-victim' "${MARKS}"; }
@@ -392,7 +393,7 @@ victim_ran() { grep -q '^sd-victim' "${MARKS}"; }
 npm_sandbox_registry_was_local() {
   [[ -s "${tmp_root}/registry.log" ]] || fail "the installs went through the fixture registry"
   if grep -vE '^GET /sd-(victim|approved|approved-too|swapped|fetchy|bundler|bundlert|nester|nope)(/-/sd-(victim|approved|approved-too|swapped|fetchy|bundler|bundlert|nester)-1\.0\.[01]\.tgz)?$' "${tmp_root}/registry.log" \
-      | grep -vE '^GET /sd-evil(src|swap)/-/sd-evil(src|swap)-1\.0\.0\.tgz$' | grep -q .; then
+      | grep -vE '^GET /sd-evil(src|swap)/-/sd-evil(src|swap)-1\.0\.0\.tgz$' | grep  . >/dev/null; then
     fail "the fixture registry saw only the synthetic packages ($(sort -u "${tmp_root}/registry.log" | paste -sd, -))"
   fi
   pass "every request went to the local fixture registry, for the synthetic packages only"
