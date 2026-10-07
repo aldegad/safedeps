@@ -325,7 +325,7 @@ impl<'c> Run<'c> {
     }
 
     /// `lex_payloads`: (kind, payload) for each record.
-    fn lex_payloads(&mut self, text: &[u8], view: &str) -> Vec<(u8, W)> {
+    pub fn lex_payloads(&mut self, text: &[u8], view: &str) -> Vec<(u8, W)> {
         let Some(out) = self.lex(text, view) else { return vec![] };
         let out = subst(out);
         let mut res = Vec::new();

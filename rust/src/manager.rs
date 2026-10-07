@@ -257,6 +257,20 @@ fn opt_word(w: &[u8]) -> bool {
     w.len() >= 2 && w[0] == b'-'
 }
 
+/// One reading of npm's arguments, as `Reader::npm_reading` answers it.
+pub struct NpmReading {
+    /// Whether the reading closes.
+    pub reads: bool,
+    /// Whether an option the other npm defines differently is named.
+    pub other_applies: bool,
+    /// The positional words, in order.
+    pub words: Vec<W>,
+    /// Each switch read, with the value it was given.
+    pub switches: Vec<(W, bool)>,
+    /// Each option that took the next word, with that word.
+    pub values: Vec<(W, W)>,
+}
+
 /// The reader's state, the globals the shell functions share.
 pub struct Reader<'r> {
     pub rx: &'r Regexes,
@@ -597,6 +611,26 @@ impl<'r> Reader<'r> {
             if !ok || self.npm_words.contains(&probe) || self.npm_values.iter().any(|(_, _, v)| v == &probe) { return false; }
         }
         true
+    }
+
+    /// What `safedeps_npm_read_args` leaves for the words after `npm`, read
+    /// with npm's table as it is or as the other npm's
+    /// (`safedeps_npm_as_other`), for a query. Not a judgment: the hooks ask
+    /// `npm_inert_reading` and the readers above.
+    pub fn npm_reading(&mut self, args: &[W], other: bool) -> NpmReading {
+        let saved = self.npm_options.clone();
+        if other {
+            self.npm_options = self.options_as_other();
+        }
+        let reads = self.npm_read_args(args);
+        self.npm_options = saved;
+        NpmReading {
+            reads,
+            other_applies: self.npm_other_applies(args),
+            words: self.npm_words.clone(),
+            switches: self.npm_switches.clone(),
+            values: self.npm_values.iter().map(|(_, k, v)| (k.clone(), v.clone())).collect(),
+        }
     }
 
     /// Whether npm's tables, read either way, take `next` as the value of
