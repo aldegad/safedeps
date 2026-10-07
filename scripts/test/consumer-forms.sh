@@ -563,7 +563,7 @@ pass "an unknown value-taking flag still leaks a spurious record (declared, not 
 # be pinned as silent, on the reading that options before the verb are carrier
 # enumeration. They are not: a carrier hands text to an interpreter, and an
 # option between a manager and its verb is the install command itself, which
-# the gate already allowed for npm (one option). lib/install-grammar.sh applies
+# the gate already allowed for npm (one option). The install grammar applies
 # that rule to every manager, so the unpinned form is recorded and the pinned
 # form is gated (section 6).
 logged_ungated "mvn -Dartifact=g:evil dependency:get" \
@@ -573,8 +573,8 @@ pass "flag-before-goal maven is an install like any other: recorded when unpinne
 # --- 6. The install grammar: forms the command itself spells -----------------
 # Not carriers. Each of these IS the install command, spelled a way the manager
 # documents or the shell grammar allows, and each passed the gate with no record
-# before lib/install-grammar.sh (measured 2026-10-01 against the guard that was
-# live on the development machine). The scope rule is ARCHITECTURE.md's: a rule
+# before the grammar was defined once (measured 2026-10-01 against the Bash guard
+# that was live on the development machine). The scope rule is ARCHITECTURE.md's: a rule
 # the gate already states, applied where it was skipped.
 for grammar_form in \
   "pnpm i evil@1.0.0" \

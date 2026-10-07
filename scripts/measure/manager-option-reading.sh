@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # safedeps: every manager's option reading but npm's, asked of the manager.
 #
-# lib/install-grammar.sh reads a manager's words with a table of the options
-# that take a value (SAFEDEPS_G_VALUE_OPTIONS). An option the table leaves out
+# The core's manager reader (rust/src/manager.rs) reads a manager's words with
+# a table of the options that take a value (SAFEDEPS_G_VALUE_OPTIONS, as
+# `safedeps-core grammar` prints it). An option the table leaves out
 # is read as a switch, so its value becomes an extra operand: a spurious check
 # at worst. The other direction hides a package. An entry for an option the
 # manager reads as a switch takes the next word for its value, and when that

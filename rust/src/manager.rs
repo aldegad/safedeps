@@ -1,13 +1,14 @@
-//! The manager word grammar of lib/install-grammar.sh: which word of a
+//! The manager word grammar, carried over from lib/install-grammar.sh (deleted
+//! by the entry switch): which word of a
 //! statement is the manager, which are its command, its options and their
 //! values, and which are the packages it installs or runs
 //! (`safedeps_manager_read`), npm's own option reading (`safedeps_npm_read_args`,
 //! nopt) and npx's first pass.
 //!
 //! The tables are the shell file's one-line tables (tables.rs), searched the
-//! way its `=~` lookups search them: a lookup here scans for the same entry the
-//! regex would match first, so a key that is no option at all reads the same
-//! way in both.
+//! way its `=~` lookups searched them: a lookup here scans for the same entry
+//! the regex would match first, so a key that is no option at all reads as it
+//! did there.
 
 use crate::ere::Regex;
 use crate::grammar;

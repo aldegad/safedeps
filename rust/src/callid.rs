@@ -1,6 +1,7 @@
-//! Which tool call a hook input belongs to (lib/gates/call-id.sh). Both hooks
-//! read it with this, so the pre-guard and the post hook of one call name its
-//! files the same way.
+//! Which tool call a hook input belongs to. Both halves of the core read it
+//! with this, so the pre hook and the post hook of one call name its files the
+//! same way. It carries over `safedeps_call_id` and `safedeps_call_base` of
+//! the Bash hooks (lib/gates/call-id.sh, deleted with them).
 
 use crate::{jq, json::{self, Value}};
 
