@@ -277,15 +277,15 @@ cp rust/Cargo.toml rust/Cargo.lock rust/build.rs "${stale_repo}/rust/"
 cp -R rust/src "${stale_repo}/rust/"
 cp "${real_core}" "${stale_repo}/bin/native/${native_os}-${native_arch}/safedeps-core"
 core_entry="${stale_repo}/scripts/safedeps-hook-entry.sh"
-run_core "ls -la"
-[[ ${entry_rc} -eq 0 && -z "${entry_out}" && -z "${entry_err}" ]] \
-  || fail "real core: copied source and binary answer before mutation (${entry_out} ${entry_err})"
+run_core "npm install left-pad"
+jq -e '.hookSpecificOutput.permissionDecision == "allow"' <<< "${entry_out}" >/dev/null \
+  && [[ ${entry_rc} -eq 0 ]] || fail "real core: copied source and binary answer before mutation (${entry_out} ${entry_err})"
 printf '\n// entry battery source mutation\n' >> "${stale_repo}/rust/src/main.rs"
-run_core "ls -la"
+run_core "npm install left-pad"
 jq -e '.hookSpecificOutput | .permissionDecision == "deny" and (.permissionDecisionReason | contains("built from another source"))' \
   <<< "${entry_out}" >/dev/null \
   && [[ ${entry_rc} -eq 0 ]] || fail "real core: source mismatch denies with its reason (${entry_out} ${entry_err})"
-pass "real core: a source mismatch is a deny passed through the entry"
+pass "real core: a source mismatch denies an install through the entry"
 
 run_core "ls -la" post
 [[ ${entry_rc} -eq 0 && -z "${entry_out}" && "${entry_err}" == *"UNVERIFIED"* && "${entry_err}" == *"built from another source"* ]] \
