@@ -667,6 +667,14 @@
     {
       "path": "scripts/measure/core_hook/slots.py",
       "reason": "Only the retired paired Bash/native collectors imported this module."
+    },
+    {
+      "path": "lib/gates/backstop-trace.sh",
+      "reason": "No remaining caller after removing the Bash hooks and the unused backstop trace reader."
+    },
+    {
+      "path": "lib/gates/call-id.sh",
+      "reason": "No remaining caller after removing the Bash hooks and the unused backstop trace reader."
     }
   ],
   "removed_census_wiring": [
