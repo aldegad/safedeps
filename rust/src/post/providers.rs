@@ -44,7 +44,7 @@ impl Providers{
                 return if sh::is_file(&cache){obj0(&cache).ok()}else{None};
             }
             let Some(tmp)=sh::mktemp(&cat(&[sh::bytes(&self.cache),b"/kev/.known_exploited_vulnerabilities.json."]))else{return None};
-            let status=Self::curl(&env("SAFEDEPS_KEV_CATALOG_URL","https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"),&tmp,None,"15");
+            let status=Self::curl(&env("SAFEDEPS_KEV_CATALOG_URL",state::DEFAULT_KEV_CATALOG_URL),&tmp,None,"15");
             let st=jv::read_file(&tmp);
             let valid=st.as_ref().is_some_and(|s|!s.failed&&s.values.last().is_some_and(|v|matches!(jv::field(v,"vulnerabilities"),Ok(Value::Arr(_)))));
             if status==b"200"&&valid{
@@ -77,7 +77,7 @@ impl Providers{
             let queries=Value::Arr(missing.iter().map(|i|{let (p,v,_,_)=&items[*i];jv::obj(vec![("version",jv::s(v)),("package",jv::obj(vec![("name",jv::s(p)),("ecosystem",jv::s(b"npm"))]))])}).collect());
             let payload=scratch.0.join("payload.json");let response=scratch.0.join("response.json");
             fs::write(&payload,cat(&[&jv::dump(&jv::obj(vec![("queries",queries)])),b"\n"])).map_err(|_|())?;
-            let status=Self::curl(&env("SAFEDEPS_OSV_BATCH_API_URL","https://api.osv.dev/v1/querybatch"),&response,Some(&payload),"20");
+            let status=Self::curl(&env("SAFEDEPS_OSV_BATCH_API_URL",state::DEFAULT_OSV_BATCH_API_URL),&response,Some(&payload),"20");
             let st=jv::read_file(&response);
             if status!=b"200"||!st.as_ref().is_some_and(|s|!s.failed&&s.values.last().is_some_and(|v|matches!(jv::field(v,"results"),Ok(Value::Arr(_))))){
                 self.log(b"ERROR",&cat(&[b"OSV batch query failed status=",if status.is_empty(){b"none"}else{&status}]));return Err(());
@@ -105,5 +105,20 @@ impl Providers{
             let count=match vulns{Value::Arr(a)=>a.len(),Value::Obj(o)=>o.len(),Value::Str(s)=>String::from_utf8_lossy(s).chars().count(),Value::Null|Value::Bool(false)=>0,_=>return Err(())};
             output.push((package,version,if exploited{"hard_block"}else if count>0{"vulnerable"}else{"clean"}));
         }Ok(output)
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn provider_endpoints_match_cli() {
+    let truth = include_str!("../../../lib/truth-sources.sh");
+    let cli = include_str!("../../../lib/providers/providers.sh");
+    for (name, value) in [("OSV_BATCH_API_URL", state::DEFAULT_OSV_BATCH_API_URL),
+                          ("KEV_CATALOG_URL", state::DEFAULT_KEV_CATALOG_URL)] {
+        let default = format!("SAFEDEPS_DEFAULT_{name}=\"{value}\"");
+        assert!(truth.lines().any(|line| line == default), "CLI default {name}");
+        let assignment = format!("SAFEDEPS_{name}=\"${{SAFEDEPS_{name}:-${{SAFEDEPS_DEFAULT_{name}}}}}\"");
+        assert!(cli.lines().any(|line| line == assignment), "CLI request default {name}");
+        assert!(cli.contains(&format!("\"${{SAFEDEPS_{name}}}\" 2>/dev/null")), "CLI request uses {name}");
     }
 }
