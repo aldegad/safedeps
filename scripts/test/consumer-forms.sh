@@ -1358,7 +1358,7 @@ do
   expect_not_approved "env with its options before an install: ${env_form}" "${env_form}"
 done
 expect_undecided "an env -S string decided at run time, beside a manager" 'env -S "$X" pip'
-got=$(gate_reason 'env -S "$X"')
+got=$(gate_reason 'env -S "$X"' quiet)
 [[ "${got}" == "pass"* ]] || fail "an env -S string decided at run time with no manager named runs, recorded (got: ${got:0:80})"
 pass "env reads its options before the command, and its -S string is read as a script"
 
