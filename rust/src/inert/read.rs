@@ -83,6 +83,12 @@ pub enum Check {
     /// A word the shell decides at run time stands where it settles the
     /// answer, or a reading does not close: nobody can say.
     Unread,
+    /// A word the shell decides stands before the flag, and the word right
+    /// before the flag is written and takes the flag as its value where
+    /// npm's tables read the two alone (`npm install $X --cache`). Nobody
+    /// can say what the run-time word is, and the one reading the written
+    /// words have gives the flag to that word.
+    ValueAfterUnread,
 }
 
 fn same_rest(a: &[(String, W)], b: &[(String, W)]) -> bool {
@@ -98,7 +104,10 @@ impl Install {
     /// what it makes of the flag is settled by the words before the flag and
     /// by the one word after it:
     ///
-    /// - a word the shell decides among those before the flag: `Unread`;
+    /// - a word the shell decides among those before the flag: `Unread`,
+    ///   except where the word right before the flag is written and npm's
+    ///   tables read it and the flag, the two alone, with the flag as its
+    ///   value: `ValueAfterUnread`;
     /// - the words before it make the flag an operand (a `--` stands there)
     ///   or the value of the option before it: `Changes`, whatever follows;
     /// - the word after it is one the shell decides: `Unread`, because a
@@ -107,10 +116,16 @@ impl Install {
     ///   later words as written: they are read the same way in both.
     pub fn flag_after(&self, core: &Core, k: usize) -> Check {
         let n = self.words.len();
-        if k >= n || self.unlocated || self.shell_decides[1..=k].iter().any(|&d| d) {
+        if k >= n || self.unlocated {
             return Check::Unread;
         }
         let mut rd = Reader::new(&core.mrx);
+        if self.shell_decides[1..=k].iter().any(|&d| d) {
+            if k >= 1 && !self.shell_decides[k] && rd.npm_takes_next_as_value(&self.words[k], FLAG_WORD) == Some(true) {
+                return Check::ValueAfterUnread;
+            }
+            return Check::Unread;
+        }
         let mut upto: Vec<W> = self.words[1..=k].to_vec();
         let Some(before) = rd.npm_inert_reading(&upto) else { return Check::Unread };
         upto.push(FLAG_WORD.to_vec());

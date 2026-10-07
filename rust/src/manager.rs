@@ -599,6 +599,24 @@ impl<'r> Reader<'r> {
         true
     }
 
+    /// Whether npm's tables, read either way, take `next` as the value of
+    /// `word` when the two stand alone, `next` right after `word`. None
+    /// where a reading does not close.
+    pub fn npm_takes_next_as_value(&mut self, word: &[u8], next: &[u8]) -> Option<bool> {
+        let args = [word.to_vec(), next.to_vec()];
+        let mut taken = false;
+        for other in [false, true] {
+            if other && !self.npm_other_applies(&args) { break; }
+            let saved = self.npm_options.clone();
+            if other { self.npm_options = self.options_as_other(); }
+            let ok = self.npm_read_args(&args);
+            self.npm_options = saved;
+            if !ok { return None; }
+            taken |= self.npm_values.iter().any(|(_, _, v)| v.as_slice() == next);
+        }
+        Some(taken)
+    }
+
     fn npm_other_applies(&self, words: &[W]) -> bool {
         let t = tables::NPM_OTHER.as_bytes();
         for word in words {

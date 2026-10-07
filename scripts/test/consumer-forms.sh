@@ -1090,6 +1090,23 @@ for collide_form in \
 do
   expect_collision "an npm install after a closed head that only some shells read there, ${collide_form}," "${collide_form}" floor-outside-command
 done
+# A statement that holds a word the shell decides at run time gets the flag
+# after its verb and after its last argument, unread. One answer does not wait
+# on that word: where the last argument is written and takes the next word as
+# its value, npm's tables read the flag after it as that value, and the
+# command would run with an argument it did not have. No rewrite is sent:
+# UNDECIDED, with a kind of its own, in a one-statement command and beside
+# another statement alike. With the run-time word last, or a switch last, the
+# statement keeps its two flags. The bash guard rewrote all of these
+# (scripts/measure/core-intended-battery-rows.tsv).
+for collide_form in 'npm install $X --cache' 'npm install $X --cache && echo ok'; do
+  expect_collision "an npm install whose last option would take the flag as its value, after a run-time word, ${collide_form}," "${collide_form}" end-flag-value-unread
+done
+for inert_form in 'npm install $X' 'npm install --cache $X' 'npm install $X --save-dev'; do
+  shard_row "inert_form: ${inert_form}" || continue
+  rewrite_holds "${inert_form}" "${inert_form/npm install/npm install --ignore-scripts} --ignore-scripts" \
+    || fail "an npm install with a run-time word keeps the flag after its verb and after its last argument: ${inert_form} (got: $(gate_rewrite "${inert_form}"))"
+done
 # dash reads `((` as two subshells, so it puts these installs elsewhere, and no
 # one rewrite is inert for every shell: UNDECIDED, as for the other forms only
 # some shells parse.

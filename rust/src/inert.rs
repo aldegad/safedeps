@@ -101,6 +101,11 @@
 //!   flag the release appended to a one-statement command, read back as one
 //!   more word of the install (`npm install x --cache`: `--cache` takes it as
 //!   its value).
+//! - `end-flag-value-unread`: a flag stands after the last argument of an
+//!   install that holds a run-time word, and that argument is written and
+//!   takes the flag as its value where npm's tables read the two alone
+//!   (`npm install $X --cache`). `floor-value-unread` is the same answer for
+//!   a flag the release owes.
 //!
 //! A word the shell decides at run time does not make a collision by
 //! standing in a statement, and it does not excuse one. `npm install $X`
@@ -108,8 +113,14 @@
 //! the verb is followed by a word nobody can read, and npm cannot be asked.
 //! `npm -- ci $X` is a collision all the same: the words before the flag are
 //! as written, and they make it an operand whatever `$X` turns out to be
-//! (`read::Install::flag_after`). Unverified is a record, never a reading of
-//! the option as true. The command is never run to find out.
+//! (`read::Install::flag_after`). So is `npm install $X --cache`: the flag
+//! after the last argument is the one place the reader can speak of with the
+//! run-time word unknown, and what it reads there is the flag as the value of
+//! `--cache`. It is asked of the install that put the flag there, whether or
+//! not the release owes one at the same offset: bytes that stand at the end
+//! say nothing of whether the duty was looked at. Unverified is a record,
+//! never a reading of the option as true. The command is never run to find
+//! out.
 //!
 //! # The record (record.rs)
 //!
@@ -730,7 +741,26 @@ fn rewrite_with(run: &mut Run, rx: &Rx, command: &[u8], cands: &[u8], detail: &m
         match check {
             None => collision = Some(("floor-outside-command", e)),
             Some(read::Check::Changes) => collision = Some(("floor-not-an-option", e)),
+            Some(read::Check::ValueAfterUnread) => collision = Some(("floor-value-unread", e)),
             Some(_) => {}
+        }
+    }
+    // The flag after the last argument of an install that holds a run-time
+    // word is placed with nobody having read it. It is asked here of the
+    // install that placed it, at the word it stands after, and not only
+    // where the release owes an end flag no other flag covers: one answer
+    // does not wait on the run-time word.
+    if collision.is_none() {
+        for f in &found {
+            if f.note != read::Note::Unverified {
+                continue;
+            }
+            let (Some(at), Some(q)) = (f.place, f.inst.place) else { continue };
+            let Some(k) = f.inst.ends.iter().position(|&e| e == q) else { continue };
+            if f.inst.flag_after(run.c, k) == read::Check::ValueAfterUnread {
+                collision = Some(("end-flag-value-unread", at));
+                break;
+            }
         }
     }
     if collision.is_none() && append && !offsets.contains(&n) {
@@ -750,6 +780,7 @@ fn rewrite_with(run: &mut Run, rx: &Rx, command: &[u8], cands: &[u8], detail: &m
         match check {
             None => collision = Some(("end-flag-outside-command", n)),
             Some(read::Check::Changes) => collision = Some(("end-flag-not-an-option", n)),
+            Some(read::Check::ValueAfterUnread) => collision = Some(("end-flag-value-unread", n)),
             Some(_) => {}
         }
     }
