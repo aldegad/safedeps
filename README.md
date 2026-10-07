@@ -556,7 +556,7 @@ safedeps/
     test/
   package.json
   SKILL.md        # Claude Code / Codex skill manifest
-  LICENSE         # Apache-2.0
+  LICENSE         # PolyForm Noncommercial 1.0.0
 ```
 
 ### Running the tests
@@ -600,4 +600,10 @@ safedeps migrate
 
 ## License
 
-[Apache License 2.0](LICENSE)
+From v2.19.0 on, safedeps is under the [PolyForm Noncommercial License 1.0.0](LICENSE). The text is in `LICENSE`.
+
+The license lets you use, change and share the software for any noncommercial purpose. It names three kinds of use that count: personal use (research, experiment, testing, study, hobby projects, private entertainment), use by a charitable, educational, public research, public safety or health, or environmental protection organization or a government institution, and any other noncommercial purpose. If you share a copy, you must pass on the license (or its URL) and the `Required Notice:` line in `LICENSE`.
+
+Use for a commercial purpose needs a separate license from the copyright holder. To ask for one, open an issue in this repository or write to the copyright holder through the profile at [github.com/aldegad](https://github.com/aldegad).
+
+Versions up to and including v2.18.1 were released under the Apache License 2.0, and they stay under it.
