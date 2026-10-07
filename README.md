@@ -471,13 +471,15 @@ safedeps: UNDECIDED - required --ignore-scripts flags could not be placed while 
 - **An install whose package npm would read as the flag's value.** `npm install true` (reason `floor-not-an-option`). A flag after the verb takes `true` as its value.
 - **Install words in a heredoc body that another command reads.** `npm install left-pad@1.3.0 && cat <<E | wc -l`, with `npm install left-pad@1.3.0` as the body (reason `floor-outside-command`). The flag would be written into the text `wc` counts.
 
-How to write them so they pass:
+How to write them so safedeps can rewrite them. Each of these was put to the registered entry as a hook payload (the commands were not run), with `left-pad@1.3.0` approved in the ledger:
 
-- Put an option and its value before the package: `npm install --cache ./cache left-pad@1.3.0`. The last word is then the package, and a flag after it is an option.
-- Write a package whose name npm could read as a value with its version: `npm install true@1.0.0`.
-- Run the install as its own command, and keep install text out of a body that another command reads. Write such a file with a file-writing tool.
+- Put an option and its value before the package. `npm install --cache ./cache left-pad@1.3.0` is rewritten to `npm install --ignore-scripts --cache ./cache left-pad@1.3.0 --ignore-scripts`. The last word is then the package, and a flag after it is an option.
+- Write a package whose name npm could read as a value with its version: `npm install true@1.0.0`. The version removes the collision, and the command is rewritten like any other install (`npm install --ignore-scripts true@1.0.0 --ignore-scripts`). What happens next is the ledger's question, as for every install: it passes when `true@1.0.0` is approved, and it is blocked as an unapproved install when it is not.
+- Run the install as its own command, and keep install text out of a body that another command reads. `npm install left-pad@1.3.0` alone is rewritten to `npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts`. Write a file that holds install text with a file-writing tool.
 
-The same rule blocks a few more commands, for the same reason. An install after `--` (`npm ci -- x`, `npm -- ci -- x`) leaves npm no place to read the flag as an option. Where bash, zsh and dash would put a command's npm installs in different places, no single rewrite is inert for all three, and the command is blocked with `the readings (bash zsh dash) put this command's npm installs in different places`. The zsh reading follows zsh more closely than before, so more commands read apart (a lone closing brace, a glob qualifier, an alternation or an extglob group). On Codex CLI no rewrite is sent, so none of these blocks applies there.
+A rewrite is not an approval. Run `safedeps check` for the package first, as for any install.
+
+The same rule blocks a few more commands, for the same reason. An install after `--` (`npm ci -- x`, `npm -- ci -- x`) leaves npm no place to read the flag as an option. Where bash, zsh and dash would put a command's npm installs in different places, no single rewrite is inert for all three, and the command is blocked with `the readings (bash zsh dash) put this command's npm installs in different places`. The zsh reading follows zsh more closely than before, so more commands read apart (a lone closing brace, a glob qualifier, an alternation or an extglob group). On Codex CLI no rewrite is sent, so none of these blocks applies there. That does not mean the install was checked: on Codex the install runs as written, and the post-install check and the rollback judge it, as before.
 
 Two things went the other way. A script handed to `sh -c`, `bash -c`, `zsh -c`, `dash -c`, `ksh -c` or `eval` is read as a script, and the flag goes inside it, where the Bash hook recorded a downgrade. And a denied command leaves nothing behind in `~/.safedeps/`.
 

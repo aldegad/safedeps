@@ -471,13 +471,15 @@ safedeps: UNDECIDED - required --ignore-scripts flags could not be placed while 
 - **npm 이 패키지를 플래그의 값으로 읽을 설치.** `npm install true` (이유 `floor-not-an-option`). 동사 뒤의 플래그가 `true` 를 값으로 가져갑니다.
 - **다른 명령이 읽는 heredoc 본문 안의 설치 단어.** `npm install left-pad@1.3.0 && cat <<E | wc -l`, 본문은 `npm install left-pad@1.3.0` (이유 `floor-outside-command`). 플래그가 `wc` 가 세는 텍스트에 쓰이게 됩니다.
 
-통과하게 쓰는 법:
+safedeps 가 다시 쓸 수 있게 쓰는 법입니다. 아래는 모두 등록된 엔트리에 훅 payload 로 넣어 본 것이고(명령을 실행하지는 않았습니다), ledger 에는 `left-pad@1.3.0` 이 승인돼 있었습니다:
 
-- 옵션과 그 값을 패키지 앞에 두세요: `npm install --cache ./cache left-pad@1.3.0`. 그러면 마지막 단어가 패키지이고, 그 뒤의 플래그는 옵션입니다.
-- npm 이 값으로 읽을 수 있는 이름의 패키지는 버전과 함께 쓰세요: `npm install true@1.0.0`.
-- 설치를 따로 실행하고, 설치 텍스트를 다른 명령이 읽는 본문에 두지 마세요. 그런 파일은 파일 쓰기 도구로 쓰세요.
+- 옵션과 그 값을 패키지 앞에 두세요. `npm install --cache ./cache left-pad@1.3.0` 은 `npm install --ignore-scripts --cache ./cache left-pad@1.3.0 --ignore-scripts` 로 다시 쓰입니다. 그러면 마지막 단어가 패키지이고, 그 뒤의 플래그는 옵션입니다.
+- npm 이 값으로 읽을 수 있는 이름의 패키지는 버전과 함께 쓰세요: `npm install true@1.0.0`. 버전을 붙이면 충돌이 사라지고, 다른 설치와 똑같이 다시 쓰입니다(`npm install --ignore-scripts true@1.0.0 --ignore-scripts`). 그다음은 모든 설치와 같이 ledger 가 답할 문제입니다. `true@1.0.0` 이 승인돼 있으면 통과하고, 없으면 승인되지 않은 설치로 차단됩니다.
+- 설치를 따로 실행하고, 설치 텍스트를 다른 명령이 읽는 본문에 두지 마세요. `npm install left-pad@1.3.0` 하나만 실행하면 `npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts` 로 다시 쓰입니다. 설치 텍스트가 든 파일은 파일 쓰기 도구로 쓰세요.
 
-같은 규칙이 같은 이유로 몇 가지 커맨드를 더 차단합니다. `--` 뒤의 설치(`npm ci -- x`, `npm -- ci -- x`)는 npm 이 플래그를 옵션으로 읽을 자리를 남기지 않습니다. bash, zsh, dash 가 커맨드의 npm 설치를 서로 다른 곳에 놓는 경우에는 셋 모두에게 비활성인 재작성이 하나도 없어서, 커맨드가 `the readings (bash zsh dash) put this command's npm installs in different places` 와 함께 차단됩니다. zsh 읽기가 전보다 zsh 를 더 가깝게 따르므로(홀로 선 닫는 중괄호, glob 한정자, 대안 패턴, extglob 그룹) 서로 다르게 읽히는 커맨드가 늘었습니다. Codex CLI 에서는 재작성을 보내지 않으므로 이 차단 가운데 어느 것도 거기에는 적용되지 않습니다.
+다시 쓰는 것은 승인이 아닙니다. 어떤 설치든 그렇듯 먼저 그 패키지에 `safedeps check` 를 돌리세요.
+
+같은 규칙이 같은 이유로 몇 가지 커맨드를 더 차단합니다. `--` 뒤의 설치(`npm ci -- x`, `npm -- ci -- x`)는 npm 이 플래그를 옵션으로 읽을 자리를 남기지 않습니다. bash, zsh, dash 가 커맨드의 npm 설치를 서로 다른 곳에 놓는 경우에는 셋 모두에게 비활성인 재작성이 하나도 없어서, 커맨드가 `the readings (bash zsh dash) put this command's npm installs in different places` 와 함께 차단됩니다. zsh 읽기가 전보다 zsh 를 더 가깝게 따르므로(홀로 선 닫는 중괄호, glob 한정자, 대안 패턴, extglob 그룹) 서로 다르게 읽히는 커맨드가 늘었습니다. Codex CLI 에서는 재작성을 보내지 않으므로 이 차단 가운데 어느 것도 거기에는 적용되지 않습니다. 그렇다고 그 설치가 확인됐다는 뜻은 아닙니다. Codex 에서는 설치가 쓴 그대로 실행되고, 설치 뒤의 검사와 롤백이 예전처럼 판정합니다.
 
 반대로 움직인 것이 둘 있습니다. `sh -c`, `bash -c`, `zsh -c`, `dash -c`, `ksh -c`, `eval` 에 넘기는 스크립트는 스크립트로 읽어 플래그를 그 안에 넣습니다. Bash 훅은 거기서 downgrade 를 기록했습니다. 그리고 차단된 커맨드는 `~/.safedeps/` 에 아무것도 남기지 않습니다.
 
