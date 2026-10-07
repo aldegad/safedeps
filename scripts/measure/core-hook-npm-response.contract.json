@@ -1,6 +1,6 @@
 {
- "format": "core-hook-npm-response-contract/2",
- "about": "What core-hook-npm-response.py expects of the pre hook's first three npm asks (prefix, root, config). It was written by reading the product source statically at the line ranges each cite names, and the ask contract in AGENTS.md, and declaring a synthetic fixture's expected results from that reading. No product ask was run to produce it, and no run's output or candidate record was read to produce it. A role is named by the request the expectation declares (argv template and working directory) and by the source's call slot (the file the source names for that role's stdout and stderr). It is never named from a claim number, a completion order or a value the hook produced. The answers are synthetic: each role's stdout and stderr differ from every other role's, and the hook's pending record, snapshot and advisory log each depend on a named role's answer. Placeholders: @W@ the statement's words, @Q@ the quiet flags, @S@ one ask group's scratch directory (bound from the call and then checked), @BOX@ @PROJECT@ @HOME@ @STATE@ @TMP@ the sandbox, @SYSTEM@ the system directories on the hook's PATH. A relation candidate here covers one group, the initial attempt and its three roles; another group, a follow-up attempt and a declared shared effect are outside it and are reported apart.",
+ "format": "core-hook-npm-response-contract/3",
+ "about": "What core-hook-npm-response.py expects of the pre hook's first three npm asks (prefix, root, config), and of its own readers and lifecycle. It was written by reading the product source statically at the line ranges each cite names, and the ask contract in AGENTS.md, and declaring a synthetic fixture's expected results from that reading. No product ask was run to produce it, and no run's output or candidate record was read to produce it. A role is named by the request the expectation declares (argv template and working directory) and by the source's call slot. It is never named from a claim number, a completion order or a value the hook produced. Every fact the collector keeps is observed with its value, absent with its basis, or unavailable with the operation that did not answer; a comparison is a match, a mismatch of two observed values, or incomparable. Placeholders: @W@ the statement's words, @Q@ the quiet flags, @S@ one ask group's scratch directory, @BOX@ @PROJECT@ @HOME@ @STATE@ @TMP@ the sandbox, @SYSTEM@ the system directories on the hook's PATH. A relation candidate covers one group, the initial attempt and its three roles; another group, a follow-up attempt and a declared shared effect are reported apart.",
  "sources": {
   "native": {
    "commit": "baf2ad30244d06f028600914b2669433a87d9712",
@@ -190,11 +190,16 @@
   "leaf_prefix": "safedeps-npm-ask."
  },
  "ps": {
-  "cite": "macOS ps(1): '-p Display information about processes which match the specified process IDs.' The manual documents no exit status.",
-  "mode": "ps -o <fields> -p <collector pid>,<target pids>, and ps -A -ww -o <fields> for a tree, with LC_ALL=C so lstart reads as five words",
-  "counts": "an answer counts only when ps ran, wrote nothing to stderr, every line reads as the asked fields, and the collector's own row is there; its exit status is kept and not read",
-  "absent": "in an answer that counts, a target pid with no row has no process; a Z state is a zombie; a row whose start time differs from the one read when the child started is another process",
-  "otherwise": "a lookup that did not answer: the exit stays unobserved, it is no completion and it lets no next child go"
+  "cite": "macOS ps(1): '-p Display information about processes which match the specified process IDs.' The manual has no EXIT STATUS section.",
+  "query": "one ps call is one record: purpose, argv, fields, the collector's own pid (the sentinel), the targets, locale C, the timeout, start and end times, and the outcome (exit with its status, signal, timeout or exception) with stdout and stderr as they came",
+  "read": "read_ps reads a record only when every field is there with its type, the argv is the one its purpose's fields, its targets and the sentinel make, ps exited by itself with a status, stderr is empty, every line reads as the fields, the sentinel's row is there and no row names a pid nobody asked about; otherwise the answer is unavailable and is no exit, no completion and no reason to let a next child go",
+  "exit": "with a row for the pid and the start time read when the child started: Z is a zombie, another start time is another process (pid-reused), the same start time is alive; without that start time the row is not attributed",
+  "absence": "a missing row means no process only under a ps host fact record selected by digest whose expectation held, and only for a query whose status is the one that record measured for an answer with a missing pid; without one a missing row is unavailable",
+  "host_fact": {
+   "format": "core-hook-npm-response-ps-host/1",
+   "measure": "the collector starts a child that ends when its input closes, asks ps for it alive, closes its input and reaps it, starts a second such child, then asks for the first alone and for both; nothing is signalled",
+   "expect": "alive: rows include the sentinel and the first child, not a zombie; gone: rows are exactly the sentinel; mixed: rows are exactly the sentinel and the second child; the gone and mixed queries exited with the same status, which becomes the absence status; the first child was reaped before the gone query started"
+  }
  },
  "answers": {
   "prefix": {
@@ -282,7 +287,7 @@
   }
  },
  "pending_shape": {
-  "cite": "rust/src/pre/pending.rs 36-47 and scripts/safedeps-pre-guard.sh 7684-7699 write the record; project_dir_from is target or cwd (scripts/safedeps-pre-guard.sh 7043-7061, rust/src/pre/readings.rs project()); npm_fetch is the fetch facts or an object with unknown (lib/npm/ask.sh 81-90, rust/src/ask.rs 103-122, rust/src/pre/pending.rs 39-41); dir_hash is an md5 (scripts/safedeps-pre-guard.sh 243-253)",
+  "cite": "rust/src/pre/pending.rs 36-47 and scripts/safedeps-pre-guard.sh 7684-7699 write the record. project_dir_from is target or cwd (scripts/safedeps-pre-guard.sh 7043-7061, rust/src/pre/readings.rs 55-61). A known npm_fetch has exactly registry, replace, scopes and test_registry: registry, replace and test_registry are a string or null and each scope value a string (rust/src/ask.rs 109-122, lib/npm/ask.sh 194-215). An unknown npm_fetch is a nonempty unknown reason, with cause 'sourced' or no cause (rust/src/pre/targets.rs 41-56, scripts/safedeps-pre-guard.sh 5190-5210, rust/src/pre/pending.rs 39-41). dir_hash is an md5 (scripts/safedeps-pre-guard.sh 243-253).",
   "identity": {
    "tool_use_id": [
     "toolu_npmresp"
@@ -499,7 +504,7 @@
   }
  ],
  "declared": {
-  "about": "Inputs made from a live launch's own records by the named edits, judged by the same oracle, to show what it does with a missing, duplicated, misplaced or unobserved child, a declared shared effect, a ps answer that does not count, a descriptor lookup that did not answer, and a pending record that is empty, null, unreadable or missing. They are labelled synthetic in the results and are no evidence about a real npm, a real ENOWORKSPACES, a real cache or a real ps failure.",
+  "about": "Inputs made from a live launch's own records by named edits, judged by the same oracle and read_pending. D0-D9 test what the oracle does with a missing, duplicated, misplaced or unobserved child and a declared shared effect; J3v put writer-shaped and damaged npm_fetch values into a real exchange's pending record. They are synthetic and are no evidence about a real npm, a real ENOWORKSPACES or a real cache.",
   "controls": [
    {
     "name": "D0-unchanged",
@@ -665,144 +670,124 @@
     }
    },
    {
-    "name": "R1a-ps-failed",
-    "from": "P0-natural",
+    "name": "J3v-unchanged",
+    "from": "N3b-output-swap",
     "edits": [
      {
-      "edit": "exit-ps",
-      "role": "config",
-      "ps": {
-       "rc": 2,
-       "stdout": "",
-       "stderr": "ps query failed\n"
+      "edit": "none"
+     }
+    ],
+    "expect": {
+     "result": "valid-differs"
+    }
+   },
+   {
+    "name": "J3v-registry-array",
+    "from": "N3b-output-swap",
+    "edits": [
+     {
+      "edit": "pending-fetch",
+      "value": {
+       "registry": [],
+       "replace": "npmjs",
+       "scopes": {},
+       "test_registry": null
       }
      }
     ],
     "expect": {
-     "verdict": "unresolved",
-     "must": [
-      "unobserved-exit:config"
-     ]
+     "result": "invalid"
     }
    },
    {
-    "name": "R1b-ps-incomplete",
-    "from": "P0-natural",
+    "name": "J3v-replace-object",
+    "from": "N3b-output-swap",
     "edits": [
      {
-      "edit": "exit-ps",
-      "role": "root",
-      "ps": {
-       "rc": 0,
-       "stdout": "@CHILD@ S\n",
-       "stderr": ""
+      "edit": "pending-fetch",
+      "value": {
+       "registry": "https://registry.npmjs.org/",
+       "replace": {},
+       "scopes": {},
+       "test_registry": null
       }
      }
     ],
     "expect": {
-     "verdict": "unresolved",
-     "must": [
-      "unobserved-exit:root"
-     ]
+     "result": "invalid"
     }
    },
    {
-    "name": "R1c-ps-valid-absence",
-    "from": "P0-natural",
+    "name": "J3v-scope-bool",
+    "from": "N3b-output-swap",
     "edits": [
      {
-      "edit": "exit-ps",
-      "role": "config",
-      "ps": {
-       "rc": 1,
-       "stdout": "@COLLECTOR@ S Tue Oct  6 21:00:00 2026\n",
-       "stderr": ""
+      "edit": "pending-fetch",
+      "value": {
+       "registry": "https://registry.npmjs.org/",
+       "replace": "npmjs",
+       "scopes": {
+        "@bad": false
+       },
+       "test_registry": null
       }
      }
     ],
     "expect": {
-     "verdict": "applicable",
-     "must": []
+     "result": "invalid"
     }
    },
    {
-    "name": "R1d-forced-exit-unconfirmed",
-    "from": "P1-permuted",
+    "name": "J3v-mixed",
+    "from": "N3b-output-swap",
     "edits": [
      {
-      "edit": "exit-ps",
-      "role": "root",
-      "ps": {
-       "rc": 2,
-       "stdout": "",
-       "stderr": "ps query failed\n"
+      "edit": "pending-fetch",
+      "value": {
+       "unknown": "x",
+       "registry": "https://registry.npmjs.org/"
       }
      }
     ],
     "expect": {
-     "verdict": "unresolved",
-     "must": [
-      "unobserved-exit:root"
-     ],
-     "orders": "unobserved"
+     "result": "invalid"
     }
    },
    {
-    "name": "R2a-path-lookup-unavailable",
-    "from": "P0-natural",
+    "name": "J3v-known-null",
+    "from": "N3b-output-swap",
     "edits": [
      {
-      "edit": "fd-path-unavailable",
-      "role": "prefix"
+      "edit": "pending-fetch",
+      "value": {
+       "registry": null,
+       "replace": null,
+       "scopes": {},
+       "test_registry": null
+      }
      }
     ],
     "expect": {
-     "verdict": "unresolved",
-     "must": [
-      "unobserved-desc-path:prefix"
-     ]
+     "result": "valid-differs"
     }
    },
    {
-    "name": "R2b-self-fstat-unavailable",
-    "from": "P0-natural",
+    "name": "J3v-unknown-legal",
+    "from": "N3b-output-swap",
     "edits": [
      {
-      "edit": "fd-self-missing",
-      "role": "root"
+      "edit": "pending-fetch",
+      "value": {
+       "unknown": "npm config failed (exit 1: x), so safedeps cannot tell which registry this install fetches from"
+      }
      }
     ],
     "expect": {
-     "verdict": "unresolved",
-     "must": [
-      "unobserved-desc-self:root"
-     ]
+     "result": "valid-differs"
     }
    },
    {
-    "name": "R2c-unavailable-beside-mismatch",
-    "from": "P0-natural",
-    "edits": [
-     {
-      "edit": "fd-path-unavailable",
-      "role": "root"
-     },
-     {
-      "edit": "release-content-of",
-      "role": "root",
-      "other": "config"
-     }
-    ],
-    "expect": {
-     "verdict": "rejected",
-     "must": [
-      "content:root:config",
-      "unobserved-desc-path:root"
-     ]
-    }
-   },
-   {
-    "name": "R3a-pending-empty",
+    "name": "J3v-empty",
     "from": "N3a-slot-swap",
     "edits": [
      {
@@ -815,7 +800,7 @@
     }
    },
    {
-    "name": "R3b-pending-null",
+    "name": "J3v-null-fields",
     "from": "N3b-output-swap",
     "edits": [
      {
@@ -831,7 +816,7 @@
     }
    },
    {
-    "name": "R3c-pending-unreadable",
+    "name": "J3v-unreadable",
     "from": "N3a-slot-swap",
     "edits": [
      {
@@ -844,7 +829,7 @@
     }
    },
    {
-    "name": "R3d-pending-missing",
+    "name": "J3v-missing",
     "from": "N3b-output-swap",
     "edits": [
      {
@@ -857,39 +842,1327 @@
    }
   ]
  },
+ "controls": {
+  "about": "The author's own controls of this change's boundaries, each with literal inputs and literal expectations. readers and adapters run in the check subcommand; copies and sensitivity run from copies of the tree with the exact edits named, and check-controls reads what they left with the standard library and the status their parent saw. A sensitivity control removes one boundary from a copy and must make the named cases or checks fail. None of these is evidence about a real ps failure, a real slot race or a real npm, and none is an independent verification.",
+  "readers": [
+   {
+    "name": "J1r-zombie",
+    "layer": "J1",
+    "reader": "ps",
+    "record": {
+     "format": "core-hook-npm-response-ps/1",
+     "purpose": "exit",
+     "argv": [
+      "ps",
+      "-ww",
+      "-o",
+      "pid=,stat=,lstart=",
+      "-p",
+      "100,200"
+     ],
+     "fields": [
+      "pid",
+      "stat",
+      "lstart"
+     ],
+     "sentinel": 100,
+     "targets": [
+      200
+     ],
+     "locale": "C",
+     "timeout": 1.0,
+     "t0_ns": 1,
+     "t1_ns": 2,
+     "outcome": {
+      "kind": "exit",
+      "rc": 0
+     },
+     "stdout": "100 S Tue Oct  6 21:00:00 2026\n200 Z Tue Oct  6 21:00:00 2026\n",
+     "stderr": ""
+    },
+    "pid": 200,
+    "start_lstart": "Tue Oct 6 21:00:00 2026",
+    "basis": null,
+    "expect": {
+     "read": "observed",
+     "exit": "zombie"
+    }
+   },
+   {
+    "name": "J1r-signal",
+    "layer": "J1",
+    "reader": "ps",
+    "record": {
+     "format": "core-hook-npm-response-ps/1",
+     "purpose": "exit",
+     "argv": [
+      "ps",
+      "-ww",
+      "-o",
+      "pid=,stat=,lstart=",
+      "-p",
+      "100,200"
+     ],
+     "fields": [
+      "pid",
+      "stat",
+      "lstart"
+     ],
+     "sentinel": 100,
+     "targets": [
+      200
+     ],
+     "locale": "C",
+     "timeout": 1.0,
+     "t0_ns": 1,
+     "t1_ns": 2,
+     "outcome": {
+      "kind": "signal",
+      "signal": 9
+     },
+     "stdout": "100 S Tue Oct  6 21:00:00 2026\n200 Z Tue Oct  6 21:00:00 2026\n",
+     "stderr": ""
+    },
+    "pid": 200,
+    "start_lstart": "Tue Oct 6 21:00:00 2026",
+    "basis": null,
+    "expect": {
+     "read": "unavailable",
+     "exit": "unavailable"
+    }
+   },
+   {
+    "name": "J1r-timeout",
+    "layer": "J1",
+    "reader": "ps",
+    "record": {
+     "format": "core-hook-npm-response-ps/1",
+     "purpose": "exit",
+     "argv": [
+      "ps",
+      "-ww",
+      "-o",
+      "pid=,stat=,lstart=",
+      "-p",
+      "100,200"
+     ],
+     "fields": [
+      "pid",
+      "stat",
+      "lstart"
+     ],
+     "sentinel": 100,
+     "targets": [
+      200
+     ],
+     "locale": "C",
+     "timeout": 1.0,
+     "t0_ns": 1,
+     "t1_ns": 2,
+     "outcome": {
+      "kind": "timeout"
+     },
+     "stdout": "100 S Tue Oct  6 21:00:00 2026\n200 Z Tue Oct  6 21:00:00 2026\n",
+     "stderr": ""
+    },
+    "pid": 200,
+    "start_lstart": "Tue Oct 6 21:00:00 2026",
+    "basis": null,
+    "expect": {
+     "read": "unavailable",
+     "exit": "unavailable"
+    }
+   },
+   {
+    "name": "J1r-no-status",
+    "layer": "J1",
+    "reader": "ps",
+    "record": {
+     "format": "core-hook-npm-response-ps/1",
+     "purpose": "exit",
+     "argv": [
+      "ps",
+      "-ww",
+      "-o",
+      "pid=,stat=,lstart=",
+      "-p",
+      "100,200"
+     ],
+     "fields": [
+      "pid",
+      "stat",
+      "lstart"
+     ],
+     "sentinel": 100,
+     "targets": [
+      200
+     ],
+     "locale": "C",
+     "timeout": 1.0,
+     "t0_ns": 1,
+     "t1_ns": 2,
+     "outcome": {
+      "kind": "exit"
+     },
+     "stdout": "100 S Tue Oct  6 21:00:00 2026\n200 Z Tue Oct  6 21:00:00 2026\n",
+     "stderr": ""
+    },
+    "pid": 200,
+    "start_lstart": "Tue Oct 6 21:00:00 2026",
+    "basis": null,
+    "expect": {
+     "read": "unavailable",
+     "exit": "unavailable"
+    }
+   },
+   {
+    "name": "J1r-no-stderr",
+    "layer": "J1",
+    "reader": "ps",
+    "record": {
+     "format": "core-hook-npm-response-ps/1",
+     "purpose": "exit",
+     "argv": [
+      "ps",
+      "-ww",
+      "-o",
+      "pid=,stat=,lstart=",
+      "-p",
+      "100,200"
+     ],
+     "fields": [
+      "pid",
+      "stat",
+      "lstart"
+     ],
+     "sentinel": 100,
+     "targets": [
+      200
+     ],
+     "locale": "C",
+     "timeout": 1.0,
+     "t0_ns": 1,
+     "t1_ns": 2,
+     "outcome": {
+      "kind": "exit",
+      "rc": 0
+     },
+     "stdout": "100 S Tue Oct  6 21:00:00 2026\n200 Z Tue Oct  6 21:00:00 2026\n"
+    },
+    "pid": 200,
+    "start_lstart": "Tue Oct 6 21:00:00 2026",
+    "basis": null,
+    "expect": {
+     "read": "unavailable",
+     "exit": "unavailable"
+    }
+   },
+   {
+    "name": "J1r-stderr",
+    "layer": "J1",
+    "reader": "ps",
+    "record": {
+     "format": "core-hook-npm-response-ps/1",
+     "purpose": "exit",
+     "argv": [
+      "ps",
+      "-ww",
+      "-o",
+      "pid=,stat=,lstart=",
+      "-p",
+      "100,200"
+     ],
+     "fields": [
+      "pid",
+      "stat",
+      "lstart"
+     ],
+     "sentinel": 100,
+     "targets": [
+      200
+     ],
+     "locale": "C",
+     "timeout": 1.0,
+     "t0_ns": 1,
+     "t1_ns": 2,
+     "outcome": {
+      "kind": "exit",
+      "rc": 0
+     },
+     "stdout": "100 S Tue Oct  6 21:00:00 2026\n200 Z Tue Oct  6 21:00:00 2026\n",
+     "stderr": "ps: warning\n"
+    },
+    "pid": 200,
+    "start_lstart": "Tue Oct 6 21:00:00 2026",
+    "basis": null,
+    "expect": {
+     "read": "unavailable",
+     "exit": "unavailable"
+    }
+   },
+   {
+    "name": "J1r-wrong-argv",
+    "layer": "J1",
+    "reader": "ps",
+    "record": {
+     "format": "core-hook-npm-response-ps/1",
+     "purpose": "exit",
+     "argv": [
+      "ps",
+      "-ww",
+      "-o",
+      "pid=,stat=,lstart=",
+      "-p",
+      "100,300"
+     ],
+     "fields": [
+      "pid",
+      "stat",
+      "lstart"
+     ],
+     "sentinel": 100,
+     "targets": [
+      200
+     ],
+     "locale": "C",
+     "timeout": 1.0,
+     "t0_ns": 1,
+     "t1_ns": 2,
+     "outcome": {
+      "kind": "exit",
+      "rc": 0
+     },
+     "stdout": "100 S Tue Oct  6 21:00:00 2026\n200 Z Tue Oct  6 21:00:00 2026\n",
+     "stderr": ""
+    },
+    "pid": 200,
+    "start_lstart": "Tue Oct 6 21:00:00 2026",
+    "basis": null,
+    "expect": {
+     "read": "unavailable",
+     "exit": "unavailable"
+    }
+   },
+   {
+    "name": "J1r-wrong-fields",
+    "layer": "J1",
+    "reader": "ps",
+    "record": {
+     "format": "core-hook-npm-response-ps/1",
+     "purpose": "exit",
+     "argv": [
+      "ps",
+      "-ww",
+      "-o",
+      "pid=,stat=",
+      "-p",
+      "100,200"
+     ],
+     "fields": [
+      "pid",
+      "stat"
+     ],
+     "sentinel": 100,
+     "targets": [
+      200
+     ],
+     "locale": "C",
+     "timeout": 1.0,
+     "t0_ns": 1,
+     "t1_ns": 2,
+     "outcome": {
+      "kind": "exit",
+      "rc": 0
+     },
+     "stdout": "100 S Tue Oct  6 21:00:00 2026\n200 Z Tue Oct  6 21:00:00 2026\n",
+     "stderr": ""
+    },
+    "pid": 200,
+    "start_lstart": "Tue Oct 6 21:00:00 2026",
+    "basis": null,
+    "expect": {
+     "read": "unavailable",
+     "exit": "unavailable"
+    }
+   },
+   {
+    "name": "J1r-truncated",
+    "layer": "J1",
+    "reader": "ps",
+    "record": {
+     "format": "core-hook-npm-response-ps/1",
+     "purpose": "exit",
+     "argv": [
+      "ps",
+      "-ww",
+      "-o",
+      "pid=,stat=,lstart=",
+      "-p",
+      "100,200"
+     ],
+     "fields": [
+      "pid",
+      "stat",
+      "lstart"
+     ],
+     "sentinel": 100,
+     "targets": [
+      200
+     ],
+     "locale": "C",
+     "timeout": 1.0,
+     "t0_ns": 1,
+     "t1_ns": 2,
+     "outcome": {
+      "kind": "exit",
+      "rc": 0
+     },
+     "stdout": "100 S Tue Oct  6 21:00:00 2026\n200 Z Tue Oc",
+     "stderr": ""
+    },
+    "pid": 200,
+    "start_lstart": "Tue Oct 6 21:00:00 2026",
+    "basis": null,
+    "expect": {
+     "read": "unavailable",
+     "exit": "unavailable"
+    }
+   },
+   {
+    "name": "J1r-no-row-no-basis",
+    "layer": "J1",
+    "reader": "ps",
+    "record": {
+     "format": "core-hook-npm-response-ps/1",
+     "purpose": "exit",
+     "argv": [
+      "ps",
+      "-ww",
+      "-o",
+      "pid=,stat=,lstart=",
+      "-p",
+      "100,200"
+     ],
+     "fields": [
+      "pid",
+      "stat",
+      "lstart"
+     ],
+     "sentinel": 100,
+     "targets": [
+      200
+     ],
+     "locale": "C",
+     "timeout": 1.0,
+     "t0_ns": 1,
+     "t1_ns": 2,
+     "outcome": {
+      "kind": "exit",
+      "rc": 1
+     },
+     "stdout": "100 S Tue Oct  6 21:00:00 2026\n",
+     "stderr": ""
+    },
+    "pid": 200,
+    "start_lstart": "Tue Oct 6 21:00:00 2026",
+    "basis": null,
+    "expect": {
+     "read": "observed",
+     "exit": "unavailable"
+    }
+   },
+   {
+    "name": "J1r-no-row-basis",
+    "layer": "J1",
+    "reader": "ps",
+    "record": {
+     "format": "core-hook-npm-response-ps/1",
+     "purpose": "exit",
+     "argv": [
+      "ps",
+      "-ww",
+      "-o",
+      "pid=,stat=,lstart=",
+      "-p",
+      "100,200"
+     ],
+     "fields": [
+      "pid",
+      "stat",
+      "lstart"
+     ],
+     "sentinel": 100,
+     "targets": [
+      200
+     ],
+     "locale": "C",
+     "timeout": 1.0,
+     "t0_ns": 1,
+     "t1_ns": 2,
+     "outcome": {
+      "kind": "exit",
+      "rc": 1
+     },
+     "stdout": "100 S Tue Oct  6 21:00:00 2026\n",
+     "stderr": ""
+    },
+    "pid": 200,
+    "start_lstart": "Tue Oct 6 21:00:00 2026",
+    "basis": {
+     "absent_rc": 1
+    },
+    "expect": {
+     "read": "observed",
+     "exit": "gone"
+    }
+   },
+   {
+    "name": "J1r-no-row-basis-other-rc",
+    "layer": "J1",
+    "reader": "ps",
+    "record": {
+     "format": "core-hook-npm-response-ps/1",
+     "purpose": "exit",
+     "argv": [
+      "ps",
+      "-ww",
+      "-o",
+      "pid=,stat=,lstart=",
+      "-p",
+      "100,200"
+     ],
+     "fields": [
+      "pid",
+      "stat",
+      "lstart"
+     ],
+     "sentinel": 100,
+     "targets": [
+      200
+     ],
+     "locale": "C",
+     "timeout": 1.0,
+     "t0_ns": 1,
+     "t1_ns": 2,
+     "outcome": {
+      "kind": "exit",
+      "rc": 0
+     },
+     "stdout": "100 S Tue Oct  6 21:00:00 2026\n",
+     "stderr": ""
+    },
+    "pid": 200,
+    "start_lstart": "Tue Oct 6 21:00:00 2026",
+    "basis": {
+     "absent_rc": 1
+    },
+    "expect": {
+     "read": "observed",
+     "exit": "unavailable"
+    }
+   },
+   {
+    "name": "J1r-reused",
+    "layer": "J1",
+    "reader": "ps",
+    "record": {
+     "format": "core-hook-npm-response-ps/1",
+     "purpose": "exit",
+     "argv": [
+      "ps",
+      "-ww",
+      "-o",
+      "pid=,stat=,lstart=",
+      "-p",
+      "100,200"
+     ],
+     "fields": [
+      "pid",
+      "stat",
+      "lstart"
+     ],
+     "sentinel": 100,
+     "targets": [
+      200
+     ],
+     "locale": "C",
+     "timeout": 1.0,
+     "t0_ns": 1,
+     "t1_ns": 2,
+     "outcome": {
+      "kind": "exit",
+      "rc": 0
+     },
+     "stdout": "100 S Tue Oct  6 21:00:00 2026\n200 S Wed Oct  7 01:00:00 2026\n",
+     "stderr": ""
+    },
+    "pid": 200,
+    "start_lstart": "Tue Oct 6 21:00:00 2026",
+    "basis": null,
+    "expect": {
+     "read": "observed",
+     "exit": "pid-reused"
+    }
+   },
+   {
+    "name": "J1r-alive",
+    "layer": "J1",
+    "reader": "ps",
+    "record": {
+     "format": "core-hook-npm-response-ps/1",
+     "purpose": "exit",
+     "argv": [
+      "ps",
+      "-ww",
+      "-o",
+      "pid=,stat=,lstart=",
+      "-p",
+      "100,200"
+     ],
+     "fields": [
+      "pid",
+      "stat",
+      "lstart"
+     ],
+     "sentinel": 100,
+     "targets": [
+      200
+     ],
+     "locale": "C",
+     "timeout": 1.0,
+     "t0_ns": 1,
+     "t1_ns": 2,
+     "outcome": {
+      "kind": "exit",
+      "rc": 0
+     },
+     "stdout": "100 S Tue Oct  6 21:00:00 2026\n200 S Tue Oct  6 21:00:00 2026\n",
+     "stderr": ""
+    },
+    "pid": 200,
+    "start_lstart": "Tue Oct 6 21:00:00 2026",
+    "basis": null,
+    "expect": {
+     "read": "observed",
+     "exit": "alive"
+    }
+   },
+   {
+    "name": "J1r-unattributed",
+    "layer": "J1",
+    "reader": "ps",
+    "record": {
+     "format": "core-hook-npm-response-ps/1",
+     "purpose": "exit",
+     "argv": [
+      "ps",
+      "-ww",
+      "-o",
+      "pid=,stat=,lstart=",
+      "-p",
+      "100,200"
+     ],
+     "fields": [
+      "pid",
+      "stat",
+      "lstart"
+     ],
+     "sentinel": 100,
+     "targets": [
+      200
+     ],
+     "locale": "C",
+     "timeout": 1.0,
+     "t0_ns": 1,
+     "t1_ns": 2,
+     "outcome": {
+      "kind": "exit",
+      "rc": 0
+     },
+     "stdout": "100 S Tue Oct  6 21:00:00 2026\n200 S Tue Oct  6 21:00:00 2026\n",
+     "stderr": ""
+    },
+    "pid": 200,
+    "start_lstart": null,
+    "basis": null,
+    "expect": {
+     "read": "observed",
+     "exit": "unavailable"
+    }
+   },
+   {
+    "name": "J2r-same",
+    "layer": "J2",
+    "reader": "slot",
+    "fact": {
+     "path": "/slot",
+     "lstat": {
+      "state": "observed",
+      "value": {
+       "kind": "file",
+       "dev": 1,
+       "ino": 10,
+       "size": 3,
+       "nlink": 1
+      }
+     },
+     "open": {
+      "state": "observed",
+      "value": true
+     },
+     "fstat": {
+      "state": "observed",
+      "value": {
+       "dev": 1,
+       "ino": 10,
+       "size": 3
+      }
+     },
+     "read": {
+      "state": "observed",
+      "value": {
+       "size": 3,
+       "sha256": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+      }
+     }
+    },
+    "blobs": [
+     "abc"
+    ],
+    "expect": {
+     "lstat": "observed",
+     "identity": "match",
+     "bytes": true
+    }
+   },
+   {
+    "name": "J2r-lstat-fstat-mismatch",
+    "layer": "J2",
+    "reader": "slot",
+    "fact": {
+     "path": "/slot",
+     "lstat": {
+      "state": "observed",
+      "value": {
+       "kind": "file",
+       "dev": 1,
+       "ino": 10,
+       "size": 3,
+       "nlink": 1
+      }
+     },
+     "open": {
+      "state": "observed",
+      "value": true
+     },
+     "fstat": {
+      "state": "observed",
+      "value": {
+       "dev": 1,
+       "ino": 20,
+       "size": 3
+      }
+     },
+     "read": {
+      "state": "observed",
+      "value": {
+       "size": 3,
+       "sha256": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+      }
+     }
+    },
+    "blobs": [
+     "abc"
+    ],
+    "expect": {
+     "lstat": "observed",
+     "identity": "mismatch",
+     "bytes": true
+    }
+   },
+   {
+    "name": "J2r-mismatch-unkept",
+    "layer": "J2",
+    "reader": "slot",
+    "fact": {
+     "path": "/slot",
+     "lstat": {
+      "state": "observed",
+      "value": {
+       "kind": "file",
+       "dev": 1,
+       "ino": 10,
+       "size": 3,
+       "nlink": 1
+      }
+     },
+     "open": {
+      "state": "observed",
+      "value": true
+     },
+     "fstat": {
+      "state": "observed",
+      "value": {
+       "dev": 1,
+       "ino": 20,
+       "size": 3
+      }
+     },
+     "read": {
+      "state": "observed",
+      "value": {
+       "size": 3,
+       "sha256": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+      }
+     }
+    },
+    "blobs": [],
+    "expect": {
+     "lstat": "observed",
+     "identity": "mismatch",
+     "bytes": false
+    }
+   },
+   {
+    "name": "J2r-fstat-unavailable",
+    "layer": "J2",
+    "reader": "slot",
+    "fact": {
+     "path": "/slot",
+     "lstat": {
+      "state": "observed",
+      "value": {
+       "kind": "file",
+       "dev": 1,
+       "ino": 10,
+       "size": 3,
+       "nlink": 1
+      }
+     },
+     "open": {
+      "state": "observed",
+      "value": true
+     },
+     "fstat": {
+      "state": "unavailable",
+      "op": "fstat",
+      "why": {
+       "type": "OSError",
+       "errno": 5,
+       "strerror": "Input/output error"
+      }
+     },
+     "read": {
+      "state": "observed",
+      "value": {
+       "size": 3,
+       "sha256": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+      }
+     }
+    },
+    "blobs": [
+     "abc"
+    ],
+    "expect": {
+     "lstat": "observed",
+     "identity": "incomparable",
+     "bytes": true
+    }
+   },
+   {
+    "name": "J2r-lstat-absent",
+    "layer": "J2",
+    "reader": "slot",
+    "fact": {
+     "path": "/slot",
+     "lstat": {
+      "state": "absent",
+      "basis": {
+       "op": "lstat",
+       "errno": 2
+      }
+     },
+     "open": {
+      "state": "not-attempted",
+      "after": "lstat"
+     },
+     "fstat": {
+      "state": "not-attempted",
+      "after": "lstat"
+     },
+     "getpath": {
+      "state": "not-attempted",
+      "after": "lstat"
+     },
+     "read": {
+      "state": "not-attempted",
+      "after": "lstat"
+     }
+    },
+    "blobs": [],
+    "expect": {
+     "lstat": "absent",
+     "identity": "incomparable",
+     "bytes": false
+    }
+   },
+   {
+    "name": "J3r-known",
+    "layer": "J3",
+    "reader": "pending",
+    "raw": "{\"snapshot_id\": \"1791322277_0123456789abcdef0123456789abcdef-1\", \"project_dir\": \"/p\", \"dir_hash\": \"0123456789abcdef0123456789abcdef\", \"project_dir_from\": \"cwd\", \"npm_fetch\": {\"registry\": \"https://registry.npmjs.org/\", \"replace\": \"npmjs\", \"scopes\": {\"@a\": \"https://registry.npmjs.org/\"}, \"test_registry\": null}, \"tool_use_id\": \"toolu_npmresp\"}",
+    "fields": [
+     "npm_fetch"
+    ],
+    "expect": {
+     "pending": "valid"
+    }
+   },
+   {
+    "name": "J3r-known-null",
+    "layer": "J3",
+    "reader": "pending",
+    "raw": "{\"snapshot_id\": \"1791322277_0123456789abcdef0123456789abcdef-1\", \"project_dir\": \"/p\", \"dir_hash\": \"0123456789abcdef0123456789abcdef\", \"project_dir_from\": \"cwd\", \"npm_fetch\": {\"registry\": null, \"replace\": null, \"scopes\": {}, \"test_registry\": null}, \"tool_use_id\": \"toolu_npmresp\"}",
+    "fields": [
+     "npm_fetch"
+    ],
+    "expect": {
+     "pending": "valid"
+    }
+   },
+   {
+    "name": "J3r-unknown",
+    "layer": "J3",
+    "reader": "pending",
+    "raw": "{\"snapshot_id\": \"1791322277_0123456789abcdef0123456789abcdef-1\", \"project_dir\": \"/p\", \"dir_hash\": \"0123456789abcdef0123456789abcdef\", \"project_dir_from\": \"cwd\", \"npm_fetch\": {\"unknown\": \"npm config failed (exit 1: x), so safedeps cannot tell which registry this install fetches from\"}, \"tool_use_id\": \"toolu_npmresp\"}",
+    "fields": [
+     "npm_fetch"
+    ],
+    "expect": {
+     "pending": "valid"
+    }
+   },
+   {
+    "name": "J3r-unknown-cause",
+    "layer": "J3",
+    "reader": "pending",
+    "raw": "{\"snapshot_id\": \"1791322277_0123456789abcdef0123456789abcdef-1\", \"project_dir\": \"/p\", \"dir_hash\": \"0123456789abcdef0123456789abcdef\", \"project_dir_from\": \"cwd\", \"npm_fetch\": {\"unknown\": \"npm config failed (exit 1: x), so safedeps cannot tell which registry this install fetches from\", \"cause\": \"sourced\"}, \"tool_use_id\": \"toolu_npmresp\"}",
+    "fields": [
+     "npm_fetch"
+    ],
+    "expect": {
+     "pending": "valid"
+    }
+   },
+   {
+    "name": "J3r-registry-array",
+    "layer": "J3",
+    "reader": "pending",
+    "raw": "{\"snapshot_id\": \"1791322277_0123456789abcdef0123456789abcdef-1\", \"project_dir\": \"/p\", \"dir_hash\": \"0123456789abcdef0123456789abcdef\", \"project_dir_from\": \"cwd\", \"npm_fetch\": {\"registry\": [], \"replace\": \"npmjs\", \"scopes\": {}, \"test_registry\": null}, \"tool_use_id\": \"toolu_npmresp\"}",
+    "fields": [
+     "npm_fetch"
+    ],
+    "expect": {
+     "pending": "invalid"
+    }
+   },
+   {
+    "name": "J3r-replace-object",
+    "layer": "J3",
+    "reader": "pending",
+    "raw": "{\"snapshot_id\": \"1791322277_0123456789abcdef0123456789abcdef-1\", \"project_dir\": \"/p\", \"dir_hash\": \"0123456789abcdef0123456789abcdef\", \"project_dir_from\": \"cwd\", \"npm_fetch\": {\"registry\": \"https://registry.npmjs.org/\", \"replace\": {}, \"scopes\": {}, \"test_registry\": null}, \"tool_use_id\": \"toolu_npmresp\"}",
+    "fields": [
+     "npm_fetch"
+    ],
+    "expect": {
+     "pending": "invalid"
+    }
+   },
+   {
+    "name": "J3r-scope-bool",
+    "layer": "J3",
+    "reader": "pending",
+    "raw": "{\"snapshot_id\": \"1791322277_0123456789abcdef0123456789abcdef-1\", \"project_dir\": \"/p\", \"dir_hash\": \"0123456789abcdef0123456789abcdef\", \"project_dir_from\": \"cwd\", \"npm_fetch\": {\"registry\": \"https://registry.npmjs.org/\", \"replace\": \"npmjs\", \"scopes\": {\"@bad\": false}, \"test_registry\": null}, \"tool_use_id\": \"toolu_npmresp\"}",
+    "fields": [
+     "npm_fetch"
+    ],
+    "expect": {
+     "pending": "invalid"
+    }
+   },
+   {
+    "name": "J3r-mixed",
+    "layer": "J3",
+    "reader": "pending",
+    "raw": "{\"snapshot_id\": \"1791322277_0123456789abcdef0123456789abcdef-1\", \"project_dir\": \"/p\", \"dir_hash\": \"0123456789abcdef0123456789abcdef\", \"project_dir_from\": \"cwd\", \"npm_fetch\": {\"unknown\": \"x\", \"registry\": \"https://registry.npmjs.org/\"}, \"tool_use_id\": \"toolu_npmresp\"}",
+    "fields": [
+     "npm_fetch"
+    ],
+    "expect": {
+     "pending": "invalid"
+    }
+   },
+   {
+    "name": "J3r-cause-other",
+    "layer": "J3",
+    "reader": "pending",
+    "raw": "{\"snapshot_id\": \"1791322277_0123456789abcdef0123456789abcdef-1\", \"project_dir\": \"/p\", \"dir_hash\": \"0123456789abcdef0123456789abcdef\", \"project_dir_from\": \"cwd\", \"npm_fetch\": {\"unknown\": \"x\", \"cause\": \"answered\"}, \"tool_use_id\": \"toolu_npmresp\"}",
+    "fields": [
+     "npm_fetch"
+    ],
+    "expect": {
+     "pending": "invalid"
+    }
+   },
+   {
+    "name": "J3r-fetch-null",
+    "layer": "J3",
+    "reader": "pending",
+    "raw": "{\"snapshot_id\": \"1791322277_0123456789abcdef0123456789abcdef-1\", \"project_dir\": \"/p\", \"dir_hash\": \"0123456789abcdef0123456789abcdef\", \"project_dir_from\": \"cwd\", \"npm_fetch\": null, \"tool_use_id\": \"toolu_npmresp\"}",
+    "fields": [
+     "npm_fetch"
+    ],
+    "expect": {
+     "pending": "invalid"
+    }
+   },
+   {
+    "name": "J3r-empty-record",
+    "layer": "J3",
+    "reader": "pending",
+    "raw": "{}",
+    "fields": [
+     "npm_fetch"
+    ],
+    "expect": {
+     "pending": "invalid"
+    }
+   },
+   {
+    "name": "J3r-not-json",
+    "layer": "J3",
+    "reader": "pending",
+    "raw": "{\"snapshot_id\": ",
+    "fields": [
+     "npm_fetch"
+    ],
+    "expect": {
+     "pending": "invalid"
+    }
+   },
+   {
+    "name": "J3r-missing",
+    "layer": "J3",
+    "reader": "pending",
+    "raw": null,
+    "fields": [
+     "npm_fetch"
+    ],
+    "expect": {
+     "pending": "invalid"
+    }
+   }
+  ],
+  "adapters": [
+   {
+    "name": "J2a-mismatch",
+    "layer": "J2",
+    "bytes": "npmresp J2\n",
+    "ops": {
+     "lstat": {
+      "dev": 1,
+      "ino": 10
+     },
+     "fstat": {
+      "dev": 1,
+      "ino": 20
+     }
+    },
+    "store": "kept",
+    "expect": {
+     "raised": null,
+     "records": 1,
+     "lstat": "observed",
+     "lstat_object": [
+      1,
+      10
+     ],
+     "fstat": "observed",
+     "fstat_object": [
+      1,
+      20
+     ],
+     "read": "observed",
+     "blob_kept": true
+    }
+   },
+   {
+    "name": "J2a-read-fails-after-fstat",
+    "layer": "J2",
+    "bytes": "npmresp J2\n",
+    "ops": {
+     "read_errno": 5
+    },
+    "store": "kept",
+    "expect": {
+     "raised": null,
+     "records": 1,
+     "lstat": "observed",
+     "fstat": "observed",
+     "read": "unavailable",
+     "read_errno": 5,
+     "blob_kept": false
+    }
+   },
+   {
+    "name": "J2a-store-fails",
+    "layer": "J2",
+    "bytes": "npmresp J2\n",
+    "ops": {},
+    "store": "fails",
+    "expect": {
+     "raised": "StoreError",
+     "records": 1,
+     "read": "observed",
+     "blob_kept": false
+    }
+   },
+   {
+    "name": "J2a-lstat-enoent",
+    "layer": "J2",
+    "bytes": null,
+    "ops": {},
+    "store": "kept",
+    "expect": {
+     "raised": null,
+     "records": 1,
+     "lstat": "absent",
+     "fstat": "not-attempted",
+     "read": "not-attempted",
+     "blob_kept": false
+    }
+   }
+  ],
+  "copies": [
+   {
+    "name": "J1-acq",
+    "layer": "J1",
+    "check": "J1-acq",
+    "only": [
+     "native-P1-permuted"
+    ],
+    "edits": [
+     {
+      "file": "scripts/measure/core_hook/npm_response.py",
+      "old": "        r = subprocess.run(argv, capture_output=True, timeout=timeout, env=ps_env())\n",
+      "new": "        r = subprocess.run(argv, capture_output=True, timeout=timeout, env=ps_env())\n        if purpose == 'exit':\n            rows = [line.split() for line in r.stdout.decode('utf-8', 'surrogateescape').splitlines() if line.strip()]\n            rows = [p[:1] + ['Z'] + p[2:] if p[0] != str(sentinel) else p for p in rows]\n            r = subprocess.CompletedProcess(argv, -9, ''.join(' '.join(p) + '\\n' for p in rows).encode('utf-8'), b'')\n"
+     }
+    ],
+    "about": "At the ps acquisition boundary, before the record is built, every exit query of the copy returns the status a signal 9 gives, with each child's row turned into a zombie row. The observer must take no exit from it, give the order up within its budget and let no next child go before it gave up.",
+    "expect": {
+     "rc": 0
+    }
+   },
+   {
+    "name": "J4a",
+    "layer": "J4",
+    "check": "J4a",
+    "only": [
+     "native-P0-natural",
+     "native-P1-permuted"
+    ],
+    "edits": [
+     {
+      "file": "scripts/measure/core_hook/npm_response.py",
+      "old": "        path = os.path.join(self.obs_dir, nonce + '.' + what)\n",
+      "new": "        if what == 'release':\n            raise OSError('J4 control: the release marker could not be written')\n        path = os.path.join(self.obs_dir, nonce + '.' + what)\n"
+     }
+    ],
+    "about": "After the observer started and wrote records, its first release raises, and so does its cleanup's. The collector must end the observer's launch as stopped (exit 2) once the observer ended, keep the journal with its terminal exception and cleanup error, start no next launch and publish no manifest. No hook child is released by the observer; each goes on after its own hold.",
+    "expect": {
+     "rc": 2
+    }
+   },
+   {
+    "name": "J4b",
+    "layer": "J4",
+    "check": "J4b",
+    "only": [
+     "native-P0-natural",
+     "native-P1-permuted"
+    ],
+    "edits": [
+     {
+      "file": "scripts/measure/core_hook/npm_response.py",
+      "old": "            self.write_terminal('stopped' if self.stop.is_set() else 'finished', phase, None, [])\n",
+      "new": "            time.sleep(JOIN_SECONDS + 3)\n            self.write_terminal('stopped' if self.stop.is_set() else 'finished', phase, None, [])\n"
+     }
+    ],
+    "about": "The observer sleeps past the launch's wait before its terminal record, then ends by itself. The collector must write collect.pending.json, start nothing more, wait, and write collect.stopped.json after the observer ended (exit 2); no manifest.",
+    "expect": {
+     "rc": 2
+    }
+   }
+  ],
+  "sensitivity": [
+   {
+    "name": "S-J1-read",
+    "kind": "check",
+    "edits": [
+     {
+      "file": "scripts/measure/core_hook/npm_response.py",
+      "old": "    if outcome.get('kind') != 'exit' or type(outcome.get('rc')) is not int:\n        return unavailable('ps', 'ps did not exit by itself with a status: %r' % (outcome,))\n",
+      "new": "    pass\n"
+     }
+    ],
+    "expect": {
+     "failing": [
+      "J1r-signal"
+     ]
+    }
+   },
+   {
+    "name": "S-J1-acq",
+    "kind": "copy",
+    "check": "J1-acq",
+    "only": [
+     "native-P1-permuted"
+    ],
+    "edits": [
+     {
+      "file": "scripts/measure/core_hook/npm_response.py",
+      "old": "        r = subprocess.run(argv, capture_output=True, timeout=timeout, env=ps_env())\n",
+      "new": "        r = subprocess.run(argv, capture_output=True, timeout=timeout, env=ps_env())\n        if purpose == 'exit':\n            rows = [line.split() for line in r.stdout.decode('utf-8', 'surrogateescape').splitlines() if line.strip()]\n            rows = [p[:1] + ['Z'] + p[2:] if p[0] != str(sentinel) else p for p in rows]\n            r = subprocess.CompletedProcess(argv, -9, ''.join(' '.join(p) + '\\n' for p in rows).encode('utf-8'), b'')\n"
+     },
+     {
+      "file": "scripts/measure/core_hook/npm_response.py",
+      "old": "    if outcome.get('kind') != 'exit' or type(outcome.get('rc')) is not int:\n        return unavailable('ps', 'ps did not exit by itself with a status: %r' % (outcome,))\n",
+      "new": "    pass\n"
+     }
+    ],
+    "expect": {
+     "failing": [
+      "no-exit-from-signal",
+      "gave-up"
+     ]
+    }
+   },
+   {
+    "name": "S-J2-identity",
+    "kind": "check",
+    "edits": [
+     {
+      "file": "scripts/measure/core_hook/npm_response.py",
+      "old": "    identity = compare(lst, fst)\n",
+      "new": "    identity = compare(lst, fst) if lst == fst else 'incomparable'\n"
+     }
+    ],
+    "expect": {
+     "failing": [
+      "J2r-lstat-fstat-mismatch",
+      "J2r-mismatch-unkept"
+     ]
+    }
+   },
+   {
+    "name": "S-J2-store",
+    "kind": "check",
+    "edits": [
+     {
+      "file": "scripts/measure/core_hook/npm_response.py",
+      "old": "        store.put(data)\n",
+      "new": "        try:\n            store.put(data)\n        except StoreError:\n            pass\n"
+     }
+    ],
+    "expect": {
+     "failing": [
+      "J2a-store-fails"
+     ]
+    }
+   },
+   {
+    "name": "S-J3",
+    "kind": "check",
+    "edits": [
+     {
+      "file": "scripts/measure/core_hook/npm_response.py",
+      "old": "def fetch_facts_problem(v):\n    \"\"\"None for an npm_fetch value a product writer makes, or why it is not one.\"\"\"\n",
+      "new": "def fetch_facts_problem(v):\n    \"\"\"None for an npm_fetch value a product writer makes, or why it is not one.\"\"\"\n    return None if isinstance(v, dict) and (isinstance(v.get('unknown'), str) or ('registry' in v and 'replace' in v and isinstance(v.get('scopes'), dict))) else 'not fetch facts'\n"
+     }
+    ],
+    "expect": {
+     "failing": [
+      "J3r-registry-array",
+      "J3r-replace-object",
+      "J3r-scope-bool",
+      "J3r-mixed"
+     ]
+    }
+   },
+   {
+    "name": "S-J4a",
+    "kind": "copy",
+    "check": "J4a",
+    "only": [
+     "native-P0-natural",
+     "native-P1-permuted"
+    ],
+    "edits": [
+     {
+      "file": "scripts/measure/core_hook/npm_response.py",
+      "old": "        path = os.path.join(self.obs_dir, nonce + '.' + what)\n",
+      "new": "        if what == 'release':\n            raise OSError('J4 control: the release marker could not be written')\n        path = os.path.join(self.obs_dir, nonce + '.' + what)\n"
+     },
+     {
+      "file": "scripts/measure/core_hook/npm_response.py",
+      "old": "    if terminal is None or terminal.get('state') != 'finished':\n",
+      "new": "    if False:\n"
+     }
+    ],
+    "expect": {
+     "failing": [
+      "stopped",
+      "not-started",
+      "no-manifest"
+     ]
+    }
+   },
+   {
+    "name": "S-J4b",
+    "kind": "copy",
+    "check": "J4b",
+    "only": [
+     "native-P0-natural",
+     "native-P1-permuted"
+    ],
+    "edits": [
+     {
+      "file": "scripts/measure/core_hook/npm_response.py",
+      "old": "            self.write_terminal('stopped' if self.stop.is_set() else 'finished', phase, None, [])\n",
+      "new": "            time.sleep(JOIN_SECONDS + 3)\n            self.write_terminal('stopped' if self.stop.is_set() else 'finished', phase, None, [])\n"
+     },
+     {
+      "file": "scripts/measure/core_hook/npm_response.py",
+      "old": "    if watcher.is_alive():\n        raise LifetimePending(name, watcher, finish, failure)\n",
+      "new": "    pass\n"
+     }
+    ],
+    "expect": {
+     "failing": [
+      "pending",
+      "stopped-after-pending"
+     ]
+    }
+   }
+  ]
+ },
  "not_observed": [
   "an exit status's value from outside the hook: macOS gives a process's exit status to its parent, and the observer is not the parent of an ask child; the value is the child's own record and the hook's consumption of it",
   "which bytes the hook read: the observer reads the response files while the child is held and the hook's result depends on them, but no read by the hook is traced",
   "the launch order of the three children: the source starts them in one order (the slots above); nothing here observes the start itself",
-  "time: whether the observer budget, the children's starts, the ps calls, file I/O and a follow-up config fit inside the hook's shared ask deadline is not measured; an order the observer could not impose within its budget is reported not observed",
+  "a process's absence without a ps host fact: a missing row is unavailable unless a selected host fact record measured what an answer with a missing pid looks like",
+  "time: whether the order budget, the children's starts, the ps calls, file I/O and a follow-up config fit inside the hook's shared ask deadline is not measured; an order the observer could not impose within its budget is reported not observed",
+  "an observer that never ends: the collector waits for it without a signal, so its final status is not reached and the run's pending record is what remains",
   "real npm: every answer comes from the stand-in; a real npm's shared cache, configuration files and ENOWORKSPACES are not exercised"
- ],
- "runner_controls": [
-  {
-   "name": "R4-launch-raises",
-   "about": "A copy of this tree in which the first launch raises after it wrote its launch record and before its hook starts. The collector must exit 2, keep what it wrote, and list every launch as not run; no hook and no stand-in child starts, so none is signalled.",
-   "file": "scripts/measure/core_hook/npm_response.py",
-   "old": "    watcher.start()\n",
-   "new": "    raise OSError('core-hook-npm-response R4 control: the launch stops after its launch record, before the hook starts')\n    watcher.start()\n",
-   "expect": {
-    "rc": 2,
-    "status": "stopped",
-    "stopped_prefix": "OSError: core-hook-npm-response R4 control",
-    "completed": [],
-    "partial": [
-     "collect.json",
-     "observed.reuse.json",
-     "launches/native-P0-natural/launch.json",
-     "launches/native-P0-natural/box/stub/npm",
-     "launches/native-P0-natural/box/stub/npm-response.json"
-    ],
-    "absent": [
-     "manifest.json",
-     "launches/native-P0-natural/hook.json",
-     "launches/native-P0-natural/observer.json",
-     "launches/native-P1-permuted"
-    ]
-   }
-  }
  ]
 }
