@@ -20,7 +20,13 @@
 #                             In that case it first stops the run's units and
 #                             waits for them, so none runs on outside the
 #                             queue.
-#   remote.sh start RUN UNIT  Starts one unit detached and returns. The unit
+#   remote.sh prepare RUN JOBS
+#                             Starts one detached build after the coordinator
+#                             has acquired the queue slots. Never retries a
+#                             build in this run. Writes out/core-prepare's
+#                             build.log, receipt.json and exit before units.
+#   remote.sh start RUN UNIT  Requires successful preparation, then starts one
+#                             unit detached and returns. The unit
 #                             writes RUN's name into out/<unit>.run, and stops
 #                             itself when the coordinator has not polled for
 #                             HEARTBEAT_MINUTES: a coordinator killed outright,
@@ -54,12 +60,21 @@ die() { printf 'remote: %s\n' "$1" >&2; exit 2; }
 
 action="${1:-}"
 RUN="${2:-}"
-[[ -n "${RUN}" && -d "${RUN}/tree" ]] || die "usage: remote.sh hold|start|status|stop RUN [UNIT]; RUN must hold the shipped tree"
+[[ -n "${RUN}" && -d "${RUN}/tree" ]] || die "usage: remote.sh hold|prepare|start|status|stop RUN [UNIT]; RUN must hold the shipped tree"
 # Absolute from here on: `run` changes directory, and a unit's process is
 # recognized by the path in its arguments.
 RUN=$(cd "${RUN}" && pwd) || die "cannot enter ${RUN}"
 OUT="${RUN}/out"
 mkdir -p "${OUT}" || die "cannot create ${OUT}"
+PREP="${OUT}/core-prepare"
+
+host_path() {
+  local prefix=""
+  [[ ! -f "${RUN}/path" ]] || prefix=$(cat "${RUN}/path")
+  prefix="${prefix//\$HOME/${HOME}}"
+  [[ -z "${prefix}" ]] || PATH="${prefix}:${PATH}"
+  export PATH
+}
 
 load_now() { uptime | sed -E 's/.*load averages?: *//; s/,//g'; }
 
@@ -94,6 +109,13 @@ heartbeat_stale() {
 # Stops each running unit of the run, or UNIT alone, and prints what it stopped.
 stop_units() {
   local only="${1:-}" pid_file unit pid
+  if [[ -z "${only}" && -f "${RUN}/prepare.pid" && ! -f "${PREP}/exit" ]]; then
+    pid=$(cat "${RUN}/prepare.pid")
+    if run_process "${pid}" prepare-run; then
+      signal_tree TERM "${pid}"
+      printf 'stopped core preparation (pid %s)\n' "${pid}"
+    fi
+  fi
   for pid_file in "${OUT}"/*.pid; do
     [[ -e "${pid_file}" ]] || continue
     unit=$(basename "${pid_file}" .pid)
@@ -109,11 +131,29 @@ stop_units() {
 # True while any unit of the run is alive.
 units_alive() {
   local pid_file
+  if [[ -f "${RUN}/prepare.pid" ]]; then
+    run_process "$(cat "${RUN}/prepare.pid")" prepare-run && return 0
+  fi
   for pid_file in "${OUT}"/*.pid; do
     [[ -e "${pid_file}" ]] || continue
     unit_alive "$(cat "${pid_file}")" && return 0
   done
   return 1
+}
+
+# Both detached jobs retain their heartbeat watch while their child runs.
+watch_child() { # pid log
+  local child="$1" log="$2"
+  while kill -0 "${child}" 2>/dev/null; do
+    if heartbeat_stale; then
+      printf 'remote: no status call for %s minutes; stopping the child\n' "${HEARTBEAT_MINUTES}" >> "${log}"
+      signal_tree TERM "${child}"
+      wait "${child}" 2>/dev/null
+      return 1
+    fi
+    sleep "${WATCH_SECONDS}"
+  done
+  wait "${child}"
 }
 
 case "${action}" in
@@ -144,48 +184,83 @@ case "${action}" in
     done
     rm -f "${RUN}/held-${k}"
     ;;
+  prepare)
+    jobs="${3:-}"
+    [[ "${jobs}" =~ ^[1-9][0-9]*$ ]] || die "prepare needs the host's jobs limit"
+    [[ ! -e "${RUN}/release" ]] || die "this run has been released"
+    # The directory is the single attempt claim. A repeated request observes
+    # this attempt, including a failed/lost one, and never rebuilds underneath
+    # units. The status call reports the result or a missing process.
+    if ! mkdir "${PREP}" 2>/dev/null; then
+      [[ -d "${PREP}" ]] || die "cannot claim core preparation"
+      printf 'preparation already requested\n'
+      exit 0
+    fi
+    printf '%s\n' "${jobs}" > "${RUN}/jobs" || die "cannot record the jobs limit"
+    nohup nice -n 10 bash "${RUN}/tree/scripts/ci/remote.sh" prepare-run "${RUN}" \
+      </dev/null >"${PREP}/runner.log" 2>&1 &
+    printf '%s\n' "$!" > "${RUN}/prepare.pid"
+    ;;
+  prepare-run)
+    host_path
+    cd "${RUN}/tree" || exit 2
+    load_now > "${PREP}/load-start"
+    ps -o ni= -p "$$" > "${PREP}/nice"
+    start=$(date +%s)
+    bash scripts/build-core.sh --receipt "${PREP}/receipt.json" >> "${PREP}/build.log" 2>&1 &
+    rc=0
+    watch_child "$!" "${PREP}/build.log" || rc=$?
+    printf '%s\n' "$(( $(date +%s) - start ))" > "${PREP}/secs"
+    load_now > "${PREP}/load-end"
+    # `exit` is published last; it is not a unit .rc file.
+    printf '%s\n' "${rc}" > "${PREP}/exit"
+    ;;
   start)
     unit="${3:-}"
     [[ "${unit}" =~ ^[a-z][a-z0-9-]*(@[1-9][0-9]*of[1-9][0-9]*)?$ ]] || die "not a unit name: ${unit:0:60}"
+    [[ "$(cat "${PREP}/exit" 2>/dev/null)" == 0 && -f "${PREP}/receipt.json" ]] \
+      || die "core preparation did not succeed; no unit started"
+    [[ ! -e "${RUN}/release" ]] || die "this run has been released"
     [[ ! -e "${OUT}/${unit}.pid" ]] || die "unit ${unit} was already started here"
     # The run directory's name, which the coordinator created exclusively on
     # this host: ci-verdict.sh takes a unit's files as this run's only when
     # they name it.
     printf '%s\n' "${RUN##*/}" > "${OUT}/${unit}.run" || die "cannot write ${OUT}/${unit}.run"
-    nohup bash "${RUN}/tree/scripts/ci/remote.sh" run "${RUN}" "${unit}" </dev/null >/dev/null 2>&1 &
+    nohup nice -n 10 bash "${RUN}/tree/scripts/ci/remote.sh" run "${RUN}" "${unit}" </dev/null >/dev/null 2>&1 &
     printf '%s\n' "$!" > "${OUT}/${unit}.pid"
     ;;
   run)
     # The detached unit itself (started by `start`, never by the coordinator).
     unit="${3:-}"
-    prefix=""
-    [[ ! -f "${RUN}/path" ]] || prefix=$(cat "${RUN}/path")
-    # The host file writes the prefix for any host, so it may say $HOME.
-    prefix="${prefix//\$HOME/${HOME}}"
-    [[ -z "${prefix}" ]] || PATH="${prefix}:${PATH}"
-    export PATH
+    jobs=$(cat "${RUN}/jobs") || die "cannot read the host's jobs limit"
+    [[ "${jobs}" =~ ^[1-9][0-9]*$ ]] || die "invalid host jobs limit"
+    host_path
     cd "${RUN}/tree" || exit 2
     # Appended, not truncated: the watch below writes to the same file, and
     # run-all.sh writing at its own offset overwrote that line (measured).
-    SAFEDEPS_TEST_LOG_DIR="${OUT}" bash scripts/test/run-all.sh --unit "${unit}" >> "${OUT}/${unit}.runner" 2>&1 &
+    ps -o ni= -p "$$" > "${OUT}/${unit}.nice"
+    SAFEDEPS_TEST_JOBS="${jobs}" SAFEDEPS_TEST_LOG_DIR="${OUT}" \
+      bash scripts/test/run-all.sh --unit "${unit}" --core-receipt "${PREP}/receipt.json" >> "${OUT}/${unit}.runner" 2>&1 &
     child=$!
     # The unit watches the heartbeat itself. A coordinator killed outright
     # (SIGKILL runs no trap) or one that gave this host up as dead sends no
     # stop and no longer polls; the hold would stop the unit, but the hold may
     # be gone, and then nothing else would.
-    while kill -0 "${child}" 2>/dev/null; do
-      if heartbeat_stale; then
-        printf 'remote: no status call for %s minutes; the coordinator is gone, so the unit stops itself\n' \
-          "${HEARTBEAT_MINUTES}" >> "${OUT}/${unit}.runner"
-        signal_tree TERM "${child}"
-        break
-      fi
-      sleep "${WATCH_SECONDS}"
-    done
-    wait "${child}"
+    watch_child "${child}" "${OUT}/${unit}.runner"
     ;;
   status)
     : > "${RUN}/heartbeat"
+    if [[ -f "${PREP}/exit" ]]; then
+      printf 'prepare done %s\n' "$(cat "${PREP}/exit")"
+    elif [[ -d "${PREP}" ]]; then
+      if run_process "$(cat "${RUN}/prepare.pid" 2>/dev/null)" prepare-run; then
+        printf 'prepare running\n'
+      else
+        printf 'prepare lost\n'
+      fi
+    else
+      printf 'prepare pending\n'
+    fi
     for pid_file in "${OUT}"/*.pid; do
       [[ -e "${pid_file}" ]] || continue
       unit=$(basename "${pid_file}" .pid)

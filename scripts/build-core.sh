@@ -13,6 +13,11 @@
 #   scripts/build-core.sh --sums <file>      also write `<sha256>  <dir>/safedeps-core`
 #                                            per binary built, for a later
 #                                            read-back
+#   scripts/build-core.sh --receipt <file>  build this host's checkout binary
+#                                            and write its checked identity
+#   scripts/build-core.sh --check-receipt <file>
+#                                          check that identity and source again,
+#                                            without building or needing cargo
 #
 # What every build holds:
 #
@@ -102,6 +107,7 @@ sha256_of() {
 
 kind=checkout
 sums=""
+receipt="" check_receipt=""
 targets=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -115,18 +121,59 @@ while [[ $# -gt 0 ]]; do
       [[ $# -ge 2 ]] || stop "--sums needs a file"
       sums="$2"
       shift ;;
+    --receipt|--check-receipt)
+      [[ $# -ge 2 && -n "$2" ]] || stop "$1 needs a file"
+      if [[ "$1" == --receipt ]]; then receipt="$2"; else check_receipt="$2"; fi
+      shift ;;
     -h|--help) awk 'NR > 1 && !/^#/ { exit } NR > 1 { sub(/^# ?/, ""); print }' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) stop "unknown argument $1 (see --help)" ;;
   esac
   shift
 done
 
+# A receipt names this tree's host binary, never a path supplied by a receipt.
+# The source digest is the stamp's digest after the binary checked the source
+# beside it. Keep the live check and the saved identity in this one reader.
+host_receipt() {
+  local target platform binary stamp check digest
+  target=$(host_target) || stop "no host binary for ${BASH_VERSINFO[5]:-no machine}"
+  platform=$(platform_of "${target}")
+  binary="${NATIVE_DIR}/${platform}/safedeps-core"
+  [[ -x "${binary}" && ! -L "${binary}" ]] || stop "no executable host binary at ${binary}"
+  stamp=$("${binary}" stamp) || stop "${binary} did not print its stamp"
+  [[ "${stamp}" =~ ^checkout\ [0-9a-f]{64}$ ]] || stop "not a checkout stamp: ${stamp}"
+  check=$("${binary}" stamp --check 2>&1) || stop "${binary} stamp --check failed: ${check}"
+  [[ "${check}" == ok ]] || stop "${binary} stamp --check said: ${check}"
+  digest=$(sha256_of "${binary}") || stop "cannot hash ${binary}"
+  [[ "${digest}" =~ ^[0-9a-f]{64}$ ]] || stop "no sha256 for ${binary}"
+  jq -nS --arg tree "${ROOT_DIR}" --arg binary "${binary}" --arg platform "${platform}" --arg target "${target}" \
+    --arg stamp "${stamp}" --arg source "${stamp#* }" --arg sha256 "${digest}" \
+    '{version: 1, tree: $tree, platform: $platform, target: $target, binary: $binary,
+      source_digest: $source, stamp: $stamp, stamp_check: "ok", binary_sha256: $sha256}'
+}
+
+if [[ -n "${receipt}${check_receipt}" ]]; then
+  [[ "${kind}" == checkout && ${#targets[@]} -eq 0 && -z "${sums}" ]] \
+    || stop "a receipt is only for this host's checkout build"
+  [[ -z "${receipt}" || -z "${check_receipt}" ]] || stop "choose --receipt or --check-receipt"
+fi
+# Invalidate an earlier receipt before any build can fail. A failed build may
+# preserve an older binary, but it never preserves permission to run tests.
+[[ -z "${receipt}" ]] || rm -f "${receipt}"
+command -v jq >/dev/null 2>&1 \
+  || stop "jq is not on PATH. The build and its receipt need jq."
+if [[ -n "${check_receipt}" ]]; then
+  saved=$(jq -eS -s 'if length == 1 and (.[0] | type == "object") then .[0] else error("expected one receipt") end' "${check_receipt}") \
+    || stop "cannot read one receipt from ${check_receipt}"
+  live=$(host_receipt) || exit 1
+  [[ "${saved}" == "${live}" ]] || stop "${check_receipt} does not match this tree's host binary"
+  printf '%s\n' "${live}"
+  exit 0
+fi
 [[ -f "${CRATE_DIR}/Cargo.toml" ]] \
   || stop "${CRATE_DIR}/Cargo.toml is not there. An installed package has no source to build from; it ships its binaries. Reinstall the package instead."
 command -v cargo >/dev/null 2>&1 \
   || stop "cargo is not on PATH, so the core cannot be built from this checkout. Install Rust (https://rustup.rs), or install the published package, which ships built binaries."
-command -v jq >/dev/null 2>&1 \
-  || stop "jq is not on PATH. The build reads which file cargo built from cargo's own JSON report, and safedeps' hooks need jq as well."
 
 if [[ ${#targets[@]} -eq 0 ]]; then
   host=$(host_target) || stop "bash reports ${BASH_VERSINFO[5]:-no machine}, and safedeps builds no binary for it (darwin-arm64, darwin-x64, linux-x64)"
@@ -168,7 +215,7 @@ for target in "${targets[@]}"; do
   report=$(mktemp "${TMPDIR:-/tmp}/safedeps-build-core.XXXXXX") || stop "could not make a file for cargo's report"
   if ! ( cd "${CRATE_DIR}" \
       && SAFEDEPS_CORE_BUILD_KIND="${kind}" CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=rust-lld \
-         cargo build --release --locked --offline --target "${target}" --message-format=json-render-diagnostics ) > "${report}"; then
+         cargo build --release --locked --offline -j1 --target "${target}" --message-format=json-render-diagnostics ) > "${report}"; then
     rm -f "${report}"
     stop "cargo build failed for ${target}. --offline: a crate that had to be fetched fails here. A cross target also needs its standard library (rustup target add ${target})."
   fi
@@ -200,3 +247,13 @@ for target in "${targets[@]}"; do
   printf 'build-core: %s\n' "${ran}"
   [[ -z "${sums}" ]] || printf '%s  %s/safedeps-core\n' "${digest}" "${platform}" >> "${sums}"
 done
+
+if [[ -n "${receipt}" ]]; then
+  checked=$(host_receipt) || exit 1
+  receipt_tmp=$(mktemp "${receipt}.XXXXXX") || stop "cannot stage ${receipt}"
+  if ! { printf '%s\n' "${checked}" > "${receipt_tmp}" && mv -f "${receipt_tmp}" "${receipt}"; }; then
+    rm -f "${receipt_tmp}"
+    stop "cannot write ${receipt}"
+  fi
+  printf 'build-core: receipt %s\n%s\n' "${receipt}" "${checked}"
+fi
