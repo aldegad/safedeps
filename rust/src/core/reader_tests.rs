@@ -90,23 +90,29 @@ fn readings_and_views_do_not_reuse_another_commands_bytes() {
 fn multiline_statement_ecosystems_have_fixed_expectations() {
     let core = Core::new();
     for reading in [Reading::Bash, Reading::Zsh, Reading::Dash] {
-        for (text, expected) in [
-            ("echo a\nnpm install left-pad@1.0.0", "npm"),
-            ("echo one\necho two\npip install evil==1.0\nnpm ci", "pypi"),
-            ("cat <<EOF\nnpm install y@1\nEOF\npip install z==1", "pypi"),
-            ("echo \"a\nb\" ; yarn add c@1 | tee log", "npm"),
-            ("npm run x && \\\n  pip install q==2", "pypi"),
-            ("sh -c 'echo a\npip install q==1'; echo done", "pypi"),
-            ("x=1\n\ny=2; gem install rake -v 13.0.0", "rubygems"),
-            ("echo \"npm install no\"\ncargo install c@1\nnpm i d@1", "crates.io"),
-            ("f() {\n  echo hi\n}\ngo install a@v1", "go"),
-            ("true\n\n\n\nmvn -Dartifact=g:a:1 dependency:get", "maven"),
-        ] {
+        let rows = crate::json::parse_one(include_bytes!("../../../scripts/test/lib/reader-ecosystems.json")).unwrap();
+        let crate::json::Value::Arr(rows) = rows else { panic!("expected ecosystem cases") };
+        for row in rows {
+            let text = row.get("command").unwrap().as_str().unwrap();
+            let expected = row.get("ecosystem").unwrap().as_str().unwrap();
             let mut run = Run::new(&core);
             run.reading = Some(reading);
             assert_eq!(run.detect_ecosystem(text.as_bytes()), expected, "{text:?}");
             assert!(!run.failed, "{text:?}");
         }
+    }
+}
+
+#[test]
+fn recognition_keeps_multiline_and_non_utf8_bytes() {
+    let core = Core::new();
+    let run = Run::new(&core);
+    for text in [b"npm install x\xe9".as_slice(), b"echo \xe9; npm install x",
+                 b"pip install \xe2\x84\xaaafka==1", b"npm install x\nnpm ci"] {
+        assert!(run.recognized(text), "{text:?}");
+    }
+    for text in [b"npm \xc4\xb1nstall x".as_slice(), b"npm in\xc5\xbftall x", b"\xff\xfe", b"", b" ", b"echo a\n"] {
+        assert!(!run.recognized(text), "{text:?}");
     }
 }
 

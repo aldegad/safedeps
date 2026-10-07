@@ -31,7 +31,7 @@ def table():
             assert f"{family}:{scope}" in commands or any(
                 command.startswith(f"{family}:{scope},") for command in commands
             ), ("unreachable", word)
-            assert f"{family}/*:{option}" not in grammar["SAFEDEPS_G_VALUE_OPTIONS"], (
+            assert f" {family}/*:{option}=" not in grammar["SAFEDEPS_G_VALUE_OPTIONS"], (
                 "global and command overlap", word)
     assert len(entries) > 100, "empty or truncated native table"
     print(f"ok - native grammar: {len(entries)} unique, reachable value options")
@@ -94,6 +94,9 @@ def corpus():
     installs = failed = 0
     for text in inputs:
         result = facts(text)
+        if not text.rstrip("\n"):
+            assert not result, ("empty command produced facts", result)
+            continue
         for key in ("closed", "any_install", "piped", "failed.detect"):
             assert result[key] in (b"true", b"false"), (key, text, result)
         assert result["reading_set"] in (b"bash", b"bash zsh dash"), (text, result)
@@ -108,18 +111,8 @@ def corpus():
         failed += result["failed.detect"] == b"true"
     # Fixed expectations for the multiline ecosystem cases from the former
     # batch comparison. These are an oracle, not another parser's answers.
-    for text, expected in [
-        ("echo a\nnpm install left-pad@1.0.0", b"npm"),
-        ("echo one\necho two\npip install evil==1.0\nnpm ci", b"pypi"),
-        ("cat <<EOF\nnpm install y@1\nEOF\npip install z==1", b"pypi"),
-        ('echo "a\nb" ; yarn add c@1 | tee log', b"npm"),
-        ("npm run x && \\\n  pip install q==2", b"pypi"),
-        ("sh -c 'echo a\npip install q==1'; echo done", b"pypi"),
-        ("x=1\n\ny=2; gem install rake -v 13.0.0", b"rubygems"),
-        ('echo "npm install no"\ncargo install c@1\nnpm i d@1', b"crates.io"),
-        ("f() {\n  echo hi\n}\ngo install a@v1", b"go"),
-        ("true\n\n\n\nmvn -Dartifact=g:a:1 dependency:get", b"maven"),
-    ]:
+    for row in json.loads((ROOT / "scripts/test/lib/reader-ecosystems.json").read_text()):
+        text, expected = row["command"], row["ecosystem"].encode()
         result = facts(text)
         assert result["ledger_eco"] == expected, (text, result)
         assert result["failed.facts"] == b"false", (text, result)
