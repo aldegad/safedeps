@@ -19,7 +19,7 @@ def pre_list(root,seed):
     env={k:v for k,v in os.environ.items() if not k.startswith('SAFEDEPS_')}
     env.update(SAFEDEPS_HOME=str(home),HOME=str(seed/'user-home'),NPM_CONFIG_USERCONFIG='/dev/null',LC_ALL='C')
     before=project_bytes(project)
-    pre=subprocess.run(['bash',str(root/'scripts/safedeps-pre-guard.sh')],input=json.dumps(payload).encode(),
+    pre=subprocess.run([str(root/'scripts/safedeps-hook-entry.sh'),'pre'],input=json.dumps(payload).encode(),
                        cwd=project,env=env,capture_output=True,timeout=30)
     pending=home/'pending/id-normal-pre-list.json'
     if pre.returncode or not pending.is_file():raise RuntimeError('normal pre did not produce its record: '+repr((pre.returncode,pre.stdout,pre.stderr)))

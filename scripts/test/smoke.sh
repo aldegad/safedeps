@@ -38,7 +38,6 @@ bash -n lib/providers/providers.sh
 bash -n lib/ledger/ledger.sh
 bash -n lib/npm/closure.sh
 bash -n lib/npm/ask.sh
-bash -n lib/npm/workspaces.sh
 # Native hooks have no Bash body to syntax-check. The canonical shim does.
 bash -n scripts/safedeps-hook-entry.sh
 bash -n scripts/safedeps-recheck-alert.sh
@@ -49,7 +48,6 @@ bash -n lib/gates/scan.sh
 bash -n lib/gates/audit.sh
 bash -n lib/gates/hooks.sh
 bash -n lib/gates/doctor.sh
-bash -n lib/gates/npm-reach.sh
 pass "bash syntax"
 
 node --check scripts/install/install-safedeps-hooks.mjs >/dev/null
@@ -415,13 +413,25 @@ run_hook_command() {
   local home_dir="$1"
   local safe_dir="$2"
   local command="$3"
-  local payload out
+  local payload out rewritten response_contract="${4:-decision}"
 
   payload=$(jq -nc --arg command "${command}" --arg cwd "${project_dir}" \
     '{tool_name:"Bash",tool_input:{command:$command},cwd:$cwd}')
-  out=$(printf '%s' "${payload}" | HOME="${home_dir}" SAFEDEPS_HOME="${safe_dir}" scripts/safedeps-pre-guard.sh)
+  out=$(printf '%s' "${payload}" | HOME="${home_dir}" SAFEDEPS_HOME="${safe_dir}" scripts/safedeps-hook-entry.sh pre)
+  case "${response_contract}" in
+    quiet) [[ -z "${out}" ]] || fail "expected no hook output: ${command} (got ${out})" ;;
+    decision)
+      [[ -n "${out}" ]] || fail "expected a hook decision, got no output: ${command}"
+      jq -e 'type == "object" and (.hookSpecificOutput | type == "object")' <<< "${out}" >/dev/null \
+        || fail "expected a JSON hook decision: ${command} (got ${out})" ;;
+    *) fail "unknown hook response contract: ${response_contract}" ;;
+  esac
   if [[ -z "${out}" || "$(jq -r '.hookSpecificOutput.permissionDecision // empty' <<< "${out}")" == allow ]]; then
-    release_floor_check "${payload}" "$(jq -r '.hookSpecificOutput.updatedInput.command // empty' <<< "${out:-{\}}")" "${safe_dir}" "${tmp_root}" || true
+    rewritten=""
+    if [[ -n "${out}" ]]; then
+      rewritten=$(jq -r '.hookSpecificOutput.updatedInput.command // empty' <<< "${out}")
+    fi
+    release_floor_check "${payload}" "${rewritten}" "${safe_dir}" "${tmp_root}" || true
   fi
   printf '%s\n' "${out}"
 }
@@ -433,7 +443,7 @@ run_codex_hook_command() {
 
   jq -nc --arg command "${command}" --arg cwd "${project_dir}" \
     '{tool_name:"Bash",tool_input:{command:$command},cwd:$cwd,turn_id:"turn-smoke",model:"codex-test"}' |
-    HOME="${home_dir}" SAFEDEPS_HOME="${safe_dir}" scripts/safedeps-pre-guard.sh
+    HOME="${home_dir}" SAFEDEPS_HOME="${safe_dir}" scripts/safedeps-hook-entry.sh pre
 }
 
 deny_json=$(
@@ -528,7 +538,7 @@ jq -e '.ignore_scripts_injected == false' "${tmp_root}/safe-hook-codex/snapshots
 pass "hook keeps Codex approved install as plain allow"
 
 for inert_skip_cmd in "npm view left-pad" "npm run build" "npm --version"; do
-  inert_skip_output=$(run_hook_command "${tmp_root}/home-inert-skip" "${tmp_root}/safe-inert-skip" "${inert_skip_cmd}")
+  inert_skip_output=$(run_hook_command "${tmp_root}/home-inert-skip" "${tmp_root}/safe-inert-skip" "${inert_skip_cmd}" quiet)
   [[ -z "${inert_skip_output}" ]] || fail "hook does not inject non-install command: ${inert_skip_cmd}"
 done
 pass "hook does not inject npm non-install commands"
@@ -536,7 +546,7 @@ pass "hook does not inject npm non-install commands"
 mkdir -p "${tmp_root}/safe-hook-ignore-scripts"
 SAFEDEPS_HOME="${tmp_root}/safe-hook-ignore-scripts" lib/ledger/ledger.sh approve npm left-pad 1.3.0 1.3.0 smoke >/dev/null
 ignore_scripts_output=$(
-  run_hook_command "${tmp_root}/home-hook-ignore-scripts" "${tmp_root}/safe-hook-ignore-scripts" "npm install left-pad@1.3.0 --ignore-scripts"
+  run_hook_command "${tmp_root}/home-hook-ignore-scripts" "${tmp_root}/safe-hook-ignore-scripts" "npm install left-pad@1.3.0 --ignore-scripts" quiet
 )
 [[ -z "${ignore_scripts_output}" ]] || fail "hook does not duplicate --ignore-scripts"
 ignore_sid=$(jq -r '.snapshot_id' "${tmp_root}/safe-hook-ignore-scripts/pending/"*.json)
@@ -620,56 +630,91 @@ do
 done
 pass "inert flag lands on an install whose npm is spelled in another case"
 
-# A heredoc body piped to a command, with `Npm install` in it, withheld every
-# rewrite once the check for an npm verb there was read in any case, so the
-# visible install got none of the flags the release gave it and ran its
-# scripts. Nothing withholds the rewrite now: the visible install keeps its
-# flags, and the body, text the rewrite cannot read, gets the flag after its
-# verb as v2.17.2 put it, in any case.
-# The commands hold a pipe, so each row is a pair of array entries rather than
-# one `in|want` string.
-heredoc_case_in=(
-  $'npm install left-pad@1.3.0 && cat <<E | wc -l\nNpm install left-pad@1.3.0\nE'
-  $'npm install evil && cat <<E | wc -l\nNPM install evil\nE'
-)
-heredoc_case_want=(
-  $'npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts && cat <<E | wc -l\nNpm install --ignore-scripts left-pad@1.3.0\nE'
-  $'npm install --ignore-scripts evil --ignore-scripts && cat <<E | wc -l\nNPM install --ignore-scripts evil\nE'
-)
-for heredoc_i in "${!heredoc_case_in[@]}"; do
-  inert_in="${heredoc_case_in[${heredoc_i}]}"
-  inert_want="${heredoc_case_want[${heredoc_i}]}"
-  inert_out=$(run_hook_command "${tmp_root}/home-compound" "${tmp_root}/safe-compound" "${inert_in}")
-  inert_got=$(jq -r '.hookSpecificOutput.updatedInput.command' <<< "${inert_out}")
-  [[ "${inert_got}" == "${inert_want}" ]] \
-    || fail "inert flag lands on the install beside a heredoc body that spells npm in another case: $(printf '%q' "${inert_in}") (got: $(printf '%q' "${inert_got}"))"
-done
-pass "inert flag lands on the install beside a heredoc body that spells npm in another case"
+# Each adopted native conflict has an explicit reason supplied by its row.
+# A fresh approval/state home keeps earlier installs from hiding new records.
+expect_inert_conflict() {
+  local command="$1" reason="$2" safe out state_dir advisory expected extra
+  shift 2
+  safe=$(mktemp -d "${tmp_root}/safe-conflict.XXXXXX")
+  SAFEDEPS_HOME="${safe}" lib/ledger/ledger.sh approve npm left-pad 1.3.0 1.3.0 smoke >/dev/null
+  out=$(run_hook_command "${tmp_root}/home-compound" "${safe}" "${command}")
+  jq -e '.hookSpecificOutput | .permissionDecision == "deny" and
+    (.permissionDecisionReason | contains("UNDECIDED")) and
+    (has("updatedInput") | not)' <<< "${out}" >/dev/null \
+    || fail "expected ${reason} undecided without a rewrite: ${command} (got ${out})"
+  if [[ "${reason}" == readings-place-apart ]]; then
+    jq -e '.hookSpecificOutput.permissionDecisionReason | contains("read the npm installs in this command in different places")' <<< "${out}" >/dev/null \
+      || fail "the decision names the readings that disagree: ${command}"
+    expected="pre-guard DENY: the readings (bash zsh dash) put this command's npm installs in different places, so no single --ignore-scripts rewrite is inert for every shell — undecided, fail-closed. Command: ${command}"
+  else
+    expected="pre-guard DENY: inert rewrite obligations conflict (${reason}); UNDECIDED, no rewrite was sent. Command: ${command}"
+  fi
+  advisory=$(cut -f2- "${safe}/advisory.log")
+  [[ $'\n'"${advisory}"$'\n' == *$'\n'"${expected}"$'\n'* ]] \
+    || fail "the exact ${reason} conflict is recorded: ${command}"
+  for extra in "$@"; do
+    expected="${extra} Command: ${command}"
+    [[ $'\n'"${advisory}"$'\n' == *$'\n'"${expected}"$'\n'* ]] \
+      || fail "the conflict retains its accompanying advisory: ${expected}"
+  done
+  for state_dir in pending snapshots; do
+    if [[ -d "${safe}/${state_dir}" ]]; then
+      [[ -z "$(find "${safe}/${state_dir}" -mindepth 1 -print)" ]] \
+        || fail "${reason} leaves no pending record, snapshot or meta (${state_dir}): ${command}"
+    fi
+  done
+  pass "${reason}: UNDECIDED with no rewrite or state: $(printf '%q' "${command}")"
+}
 
-# Whether an install already carries the flag is read from that install's own
-# arguments, the way npm reads them, and the flag goes after its last argument,
-# because npm keeps the last value an option is given. The bare text
-# `--ignore-scripts` anywhere in the command used to skip the rewrite: an
-# install with `--ignore-scripts=false`, or followed by `&& echo
-# --ignore-scripts`, ran its lifecycle scripts with nothing recorded. Placed
-# right after the verb, the flag lost to a later `--no-ignore-scripts`, to an
-# abbreviation npm expands (`--no-ignore`, `--ign=false`) and to a word the
-# shell expands at run time. A `--` ends npm's options, so the flag goes before
-# it: after it, `npm ci` ignores the flag and runs the scripts. The words are
-# read as the shell joins them, so a quoted line that reads like the flag is
-# part of an option's value, not the flag. A place stands only where npm reads
-# the placed flag as true: after a trailing `--cache` or `-C` it became the
-# option's value, so the flag goes before that word. A word the shell decides
-# at run time can be either kind, so such an install gets the flag after the
-# verb and after its last argument. Every other install gets it after the verb
-# too, as a floor under the reading: a word the reading misses as one the shell
-# expands can take the flag after the last argument, and the flag after the
-# verb, where the release put it, still stands. It goes there even where it
-# changes what npm reads (`npm install true` makes `true` its value), as the
-# release's did, and a one-statement command also keeps the release's flag at
-# its end. The exception that left it off let a shell alias take the one flag
-# left (`alias -g left-pad@1.3.0='left-pad@1.3.0 --cache'`), where the
-# release's flag after the verb stood.
+# A floor flag in piped heredoc data is outside the words of a command.
+for inert_in in \
+  $'npm install left-pad@1.3.0 && cat <<E | wc -l\nnpm install left-pad@1.3.0\nE' \
+  $'npm install left-pad@1.3.0 && cat <<E | wc -l\nNpm install left-pad@1.3.0\nE' \
+  $'npm install evil && cat <<E | wc -l\nNPM install evil\nE'
+do
+  expect_inert_conflict "${inert_in}" floor-outside-command
+done
+
+# A one-statement end flag would be the last option's value. These commands
+# send no rewrite; the compound --cache row below owes no such end flag.
+ask_option_advisories=(
+  "pre-guard: the install's last option takes the next word as its value, or its words end npm's options, so npm cannot be asked with them without reading the ask's own flags as the install's."
+  "pre-guard: the install's last option takes the next word as its value, or its words end npm's options, so npm cannot be asked which registry it fetches from with them."
+)
+for inert_in in \
+  'npm install left-pad@1.3.0 --cache' \
+  'npm install left-pad@1.3.0 -C' \
+  'npm install --no-ignore-scripts left-pad@1.3.0 --reg' \
+  "npm install left-pad@1.3.0 --message 'a b' --fetch-retries" \
+  'npm ci -- x' \
+  "npm ci --no-ignore-scripts '--' x"
+do
+  expect_inert_conflict "${inert_in}" end-flag-not-an-option "${ask_option_advisories[@]}"
+done
+
+# A floor flag must preserve npm's operands and be an option in every reading.
+expect_inert_conflict 'npm install true' floor-not-an-option
+expect_inert_conflict "alias -g left-pad@1.3.0='left-pad@1.3.0 --cache'; eval 'npm install true left-pad@1.3.0'" floor-not-an-option \
+  'pre-guard UNGATED: npm install names a package with no version spec, so the ledger gate did not run. No effect gate reads the result of this install, so it is unverified. Unpinned: npm:true.'
+expect_inert_conflict 'npm -- ci -- x' floor-not-an-option "${ask_option_advisories[@]}"
+expect_inert_conflict 'npm install x\ y -- "$HOME" sh -c "x\y npm"' end-flag-not-an-option \
+  'pre-guard: this npm install depends on $HOME, which the shell decides at run time or this gate does not reproduce, so safedeps cannot ask npm where it lands.'
+expect_inert_conflict 'npm i left-pad@1.3.0 && sh -c npm\ ci' floor-outside-command
+
+# Shell-specific grouping can put install words at different offsets.
+for inert_in in \
+  'npm install left-pad@1.3.0 --ignore-scripts } --no-ignore-scripts' \
+  'npm install left-pad@1.3.0 --message x(.)' \
+  'npm install left-pad@1.3.0 (--cache|zz)' \
+  $'shopt -s extglob\nnpm install left-pad@1.3.0 @(--cache)'
+do
+  expect_inert_conflict "${inert_in}" readings-place-apart
+done
+
+# npm keeps the last value an option is given. These readable installs get
+# the floor flag and the flag after the last argument; quoted data stays data.
+# The explicit conflict rows above cover positions where an owed floor flag
+# would change npm's operands or be read as a value instead of an option.
 for inert_case in \
   "npm install left-pad@1.3.0 --ignore-scripts=false|npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts=false --ignore-scripts" \
   "npm install left-pad@1.3.0 --no-ignore-scripts|npm install --ignore-scripts left-pad@1.3.0 --no-ignore-scripts --ignore-scripts" \
@@ -683,22 +728,13 @@ for inert_case in \
   "npm install left-pad@1.3.0 --cache --ignore-scripts|npm install --ignore-scripts left-pad@1.3.0 --cache --ignore-scripts --ignore-scripts" \
   "npm install left-pad@1.3.0 \$FLAGS|npm install --ignore-scripts left-pad@1.3.0 \$FLAGS --ignore-scripts" \
   "npm install left-pad@1.3.0 --cache && echo ok|npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts --cache && echo ok" \
-  "npm install left-pad@1.3.0 --cache|npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts --cache --ignore-scripts" \
-  "npm install left-pad@1.3.0 -C|npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts -C --ignore-scripts" \
-  "npm install --no-ignore-scripts left-pad@1.3.0 --reg|npm install --ignore-scripts --no-ignore-scripts left-pad@1.3.0 --ignore-scripts --reg --ignore-scripts" \
-  "npm install left-pad@1.3.0 --message 'a b' --fetch-retries|npm install --ignore-scripts left-pad@1.3.0 --message 'a b' --ignore-scripts --fetch-retries --ignore-scripts" \
   "npm ci \$(printf -- --)|npm ci --ignore-scripts \$(printf -- --) --ignore-scripts" \
   "npm install left-pad@1.3.0>install.log|npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts>install.log --ignore-scripts" \
   "npm install left-pad@1.3.0 --ignore-scripts=false > log 2>&1|npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts=false --ignore-scripts > log 2>&1" \
-  "npm ci -- x|npm ci --ignore-scripts -- x --ignore-scripts" \
-  "npm ci --no-ignore-scripts '--' x|npm ci --ignore-scripts --no-ignore-scripts --ignore-scripts '--' x --ignore-scripts" \
   "sh -c 'npm install left-pad@1.3.0 --ignore-scripts=false'|sh -c 'npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts=false --ignore-scripts'" \
   'echo "$(npm install left-pad@1.3.0 --no-ignore-scripts)"|echo "$(npm install --ignore-scripts left-pad@1.3.0 --no-ignore-scripts --ignore-scripts)"' \
   "(npm install left-pad@1.3.0 --ignore-scripts=false) && echo ok|(npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts=false --ignore-scripts) && echo ok" \
-  $'npm install left-pad@1.3.0 --message "a\n--ignore-scripts"|npm install --ignore-scripts left-pad@1.3.0 --message "a\n--ignore-scripts" --ignore-scripts' \
-  "npm install left-pad@1.3.0 --ignore-scripts } --no-ignore-scripts|npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts } --no-ignore-scripts --ignore-scripts" \
-  "npm install true|npm install --ignore-scripts true --ignore-scripts" \
-  "alias -g left-pad@1.3.0='left-pad@1.3.0 --cache'; eval 'npm install true left-pad@1.3.0'|alias -g left-pad@1.3.0='left-pad@1.3.0 --cache'; eval 'npm install --ignore-scripts true left-pad@1.3.0 --ignore-scripts'"
+  $'npm install left-pad@1.3.0 --message "a\n--ignore-scripts"|npm install --ignore-scripts left-pad@1.3.0 --message "a\n--ignore-scripts" --ignore-scripts'
 do
   inert_in="${inert_case%%|*}"
   inert_want="${inert_case#*|}"
@@ -732,7 +768,7 @@ for inert_in in \
   "npm install left-pad@1.3.0 --ignore-scripts && npm run build" \
   $'npm install left-pad@1.3.0 --ignore-scripts --message "a\nb"'
 do
-  inert_out=$(run_hook_command "${tmp_root}/home-compound" "${tmp_root}/safe-compound" "${inert_in}")
+  inert_out=$(run_hook_command "${tmp_root}/home-compound" "${tmp_root}/safe-compound" "${inert_in}" quiet)
   [[ -z "${inert_out}" ]] || fail "an install that already carries the flag is not rewritten: $(printf '%q' "${inert_in}") (got: ${inert_out:0:200})"
 done
 # An install that asked for its scripts is made inert, and the override is
@@ -772,13 +808,10 @@ for inert_in in \
   'npm install left-pad@1.3.0 `printf -- --cache`' \
   'npm install left-pad@1.3.0 --message $((1))' \
   'npm install left-pad@1.3.0 --message <(true)' \
-  'npm install left-pad@1.3.0 --message x(.)' \
   'npm install left-pad@1.3.0 --c?che' \
   'npm install left-pad@1.3.0 --[c]ache' \
   'npm install left-pad@1.3.0 {--cache,}' \
   'hash -d c=--cache; npm install left-pad@1.3.0 ~c' \
-  'npm install left-pad@1.3.0 (--cache|zz)' \
-  $'shopt -s extglob\nnpm install left-pad@1.3.0 @(--cache)' \
   'npm install left-pad@1.3.0 --message x~y' \
   'npm install left-pad@1.3.0 --message a^b' \
   'npm install left-pad@1.3.0 --message a#b' \
@@ -862,33 +895,32 @@ grep -q "the install's last option takes the next word as its value" "${tmp_root
 # was flagged but not rolled back.
 core_smoke_pending
 
-# A `--` before the verb leaves no place where npm reads the flag as an option.
-# The install still gets the release's rewrite, the floor, and the downgrade is
-# recorded: dropping the rewrite gave it less than the release did.
-downgrades_before=$(grep -c 'has no place where safedeps could read npm keeping --ignore-scripts true' "${tmp_root}/safe-compound/advisory.log" 2>/dev/null || true)
-inert_out=$(run_hook_command "${tmp_root}/home-compound" "${tmp_root}/safe-compound" "npm -- ci -- x")
-[[ "$(jq -r '.hookSpecificOutput.updatedInput.command // ""' <<< "${inert_out}")" == "npm -- ci --ignore-scripts -- x --ignore-scripts" ]] \
-  || fail "an install with a -- before its verb keeps the release's rewrite (got: ${inert_out:0:200})"
-downgrades_after=$(grep -c 'has no place where safedeps could read npm keeping --ignore-scripts true' "${tmp_root}/safe-compound/advisory.log" 2>/dev/null || true)
-(( ${downgrades_after:-0} > ${downgrades_before:-0} )) || fail "an install with a -- before its verb is recorded as an inert downgrade"
 pass "the inert flag is read from each install's own arguments and goes where npm reads it last; one already true is left as written"
 
-# Text the rewrite cannot read as the shell will -- a double-quoted script
-# with an escape or a substitution in it, a script handed to ksh, a heredoc
-# body piped into another command -- gets the flag where v2.17.2 put it: right
-# after each npm install verb there that is followed by a blank or ends its
-# line. The command is recorded as one whose flag nobody read, and the meta
-# says so. The rewrite used to drop every flag in such a command, the visible
-# install's too, and record a downgrade, where v2.17.2 had flagged them
-# (scripts/measure/inert-downgrade-grid.sh). An
-# approved install in a script with an escaped quote is read to its end and
-# allowed. The heredoc body is text a shell could be handed, so it is flagged
-# as v2.17.2 flagged it; the npm in it is read in any case, as everywhere the
-# rewrite looks for a verb. The last two rows' hidden installs have no verb a
-# blank follows, so they get no flag, as in v2.17.2; the visible one keeps its
-# flags, and the command is still recorded as one whose flag nobody read. The
-# heredoc body fed to `sh` and piped to `tee` was recorded for no kind but a
-# script word, and passed with no flag and no record (validator round 2, x005).
+# Reuse the release-floor relation with the previous row expectation as a
+# second floor. It proves both that only flags were inserted into the input
+# and that every flag the old expectation contained is still present. The
+# normal run_hook_command check still uses the measured 7d66f8c corpus.
+assert_script_payload_additions() {
+  local command="$1" previous="$2" out="$3" safe="$4" payload got corpus
+  jq -e '.hookSpecificOutput | .permissionDecision == "allow" and
+    (.updatedInput.command | type == "string")' <<< "${out}" >/dev/null \
+    || fail "a script-payload row allows with a rewrite: ${command}"
+  got=$(jq -r '.hookSpecificOutput.updatedInput.command' <<< "${out}")
+  payload=$(jq -nc --arg command "${command}" '{tool_input:{command:$command}}')
+  corpus=$(mktemp "${tmp_root}/previous-rewrite.XXXXXX")
+  jq -nc --arg command "${command}" --arg previous "${previous}" \
+    '[{command:$command,release:$previous}]' > "${corpus}"
+  RELEASE_FLOOR_CORPUS="${corpus}" release_floor_check "${payload}" "${got}" "${safe}" "${tmp_root}" \
+    || fail "the script-payload rewrite only adds flags to the previous expectation: ${command}"
+  release_floor_settle
+}
+
+# Native payload reading adds flags inside scripts that the Bash rewrite
+# left to its floor. Keep both expectations: the old one is the insertion
+# floor, and the native one pins the measured bytes. The unread record stays.
+# The cat heredoc bodies piped to wc are covered by the explicit
+# floor-outside-command conflict rows above, not by this rewrite loop.
 unread_case_in=(
   'npm install left-pad@1.3.0; sh -c "echo $(date); npm install left-pad@1.3.0"'
   'npm install left-pad@1.3.0; sh -c "echo \"hi\"; npm install left-pad@1.3.0"'
@@ -898,10 +930,11 @@ unread_case_in=(
   'true; bash -lc "npm install left-pad@1.3.0 `printf -- --loglevel=warn`"'
   'true; zsh -c "npm install left-pad@1.3.0 --fetch-retries $((1))"'
   "true; ksh -c 'npm install left-pad@1.3.0'"
-  $'npm install left-pad@1.3.0 && cat <<E | wc -l\nnpm install left-pad@1.3.0\nE'
-  $'npm install left-pad@1.3.0 && cat <<E | wc -l\nNpm install left-pad@1.3.0\nE'
   'npm install left-pad@1.3.0; sh -c "npm install\"\" left-pad@1.3.0"'
   $'npm i left-pad@1.3.0 && sh <<E | tee log\nnpm ci&&true\nE'
+  'true; sh -c "npm install\"\" left-pad@1.3.0"'
+  'npm i left-pad@1.3.0 --ignore-scripts=true; sh -c "cd \"d\" && npm ci"'
+  'npm i left-pad@1.3.0 --ignore-scripts && ksh -c "npm ci"'
 )
 unread_case_want=(
   'npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts; sh -c "echo $(date); npm install --ignore-scripts left-pad@1.3.0"'
@@ -912,51 +945,52 @@ unread_case_want=(
   'true; bash -lc "npm install --ignore-scripts left-pad@1.3.0 `printf -- --loglevel=warn`"'
   'true; zsh -c "npm install --ignore-scripts left-pad@1.3.0 --fetch-retries $((1))"'
   "true; ksh -c 'npm install --ignore-scripts left-pad@1.3.0'"
-  $'npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts && cat <<E | wc -l\nnpm install --ignore-scripts left-pad@1.3.0\nE'
-  $'npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts && cat <<E | wc -l\nNpm install --ignore-scripts left-pad@1.3.0\nE'
   'npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts; sh -c "npm install\"\" left-pad@1.3.0"'
   $'npm i --ignore-scripts left-pad@1.3.0 --ignore-scripts && sh <<E | tee log\nnpm ci&&true\nE'
+  'true; sh -c "npm install\"\" left-pad@1.3.0"'
+  'npm i left-pad@1.3.0 --ignore-scripts=true; sh -c "cd \"d\" && npm ci"'
+  'npm i left-pad@1.3.0 --ignore-scripts && ksh -c "npm ci"'
+)
+unread_case_native=(
+  'npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts; sh -c "echo $(date); npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts"'
+  'npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts; sh -c "echo \"hi\"; npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts"'
+  'true; sh -c "npm install --ignore-scripts left-pad@1.3.0 \"--loglevel=warn\" --ignore-scripts"'
+  'sh -c "npm install --ignore-scripts left-pad@1.3.0 \"--loglevel=warn\" --ignore-scripts"'
+  'eval "npm install --ignore-scripts left-pad@1.3.0 \"--loglevel=warn\" --ignore-scripts"'
+  'true; bash -lc "npm install --ignore-scripts left-pad@1.3.0 `printf -- --loglevel=warn` --ignore-scripts"'
+  'true; zsh -c "npm install --ignore-scripts left-pad@1.3.0 --fetch-retries $((1)) --ignore-scripts"'
+  "true; ksh -c 'npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts'"
+  'npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts; sh -c "npm install\"\" left-pad@1.3.0 --ignore-scripts"'
+  $'npm i --ignore-scripts left-pad@1.3.0 --ignore-scripts && sh <<E | tee log\nnpm ci&&true\nE'
+  'true; sh -c "npm install\"\" left-pad@1.3.0 --ignore-scripts"'
+  'npm i left-pad@1.3.0 --ignore-scripts=true; sh -c "cd \"d\" && npm ci --ignore-scripts"'
+  'npm i left-pad@1.3.0 --ignore-scripts && ksh -c "npm ci --ignore-scripts"'
 )
 for unread_i in "${!unread_case_in[@]}"; do
   inert_in="${unread_case_in[${unread_i}]}"
-  inert_want="${unread_case_want[${unread_i}]}"
+  inert_want="${unread_case_native[${unread_i}]}"
   unread_safe=$(mktemp -d "${tmp_root}/safe-unread.XXXXXX")
   SAFEDEPS_HOME="${unread_safe}" lib/ledger/ledger.sh approve npm left-pad 1.3.0 1.3.0 smoke >/dev/null
   inert_out=$(run_hook_command "${tmp_root}/home-unread" "${unread_safe}" "${inert_in}")
   inert_got=$(jq -r '.hookSpecificOutput.updatedInput.command // ""' <<< "${inert_out}")
   [[ "${inert_got}" == "${inert_want}" ]] \
-    || fail "an install in text the rewrite cannot read gets the flag where v2.17.2 put it: $(printf '%q' "${inert_in}") (got: $(printf '%q' "${inert_got}"); ${inert_out:0:200})"
+    || fail "a script-payload install gets the measured native rewrite: $(printf '%q' "${inert_in}") (got: $(printf '%q' "${inert_got}"); ${inert_out:0:200})"
+  assert_script_payload_additions "${inert_in}" "${unread_case_want[${unread_i}]}" "${inert_out}" "${unread_safe}"
   grep -q 'safedeps did not read as a command holds an npm install verb' "${unread_safe}/advisory.log" 2>/dev/null \
     || fail "an install in text the rewrite cannot read is recorded as one whose flag nobody read: $(printf '%q' "${inert_in}")"
   unread_sid=$(jq -r '.snapshot_id' "${unread_safe}/pending/"*.json 2>/dev/null) || unread_sid=""
   jq -e '.ignore_scripts_injected == true and .ignore_scripts_unread == true' "${unread_safe}/snapshots/${unread_sid}_meta.json" >/dev/null 2>&1 \
     || fail "an install in text the rewrite cannot read is recorded with the unread warning: $(printf '%q' "${inert_in}")"
 done
-# Where that text holds `npm` and no verb in it can be flagged, and nothing
-# else in the command is an install, the command is a recorded downgrade, as
-# before: nothing is reported inert.
-downgrades_before=$(grep -c 'could not make every npm install in this command inert' "${tmp_root}/safe-compound/advisory.log" 2>/dev/null || true)
-inert_out=$(run_hook_command "${tmp_root}/home-compound" "${tmp_root}/safe-compound" 'true; sh -c "npm install\"\" left-pad@1.3.0"')
-[[ -z "$(jq -r '.hookSpecificOutput.updatedInput.command // ""' <<< "${inert_out}")" ]] \
-  || fail "a script whose install no verb placement reaches gets no rewrite (got: ${inert_out:0:200})"
-downgrades_after=$(grep -c 'could not make every npm install in this command inert' "${tmp_root}/safe-compound/advisory.log" 2>/dev/null || true)
-(( ${downgrades_after:-0} > ${downgrades_before:-0} )) || fail "a script whose install no verb placement reaches is recorded as a downgrade"
-# The same holds beside an install that already carries the flag: that
-# install is left as written, nothing else gets a flag, and the command is a
-# recorded downgrade with nothing reported inert. The rewrite used to return
-# "every install already true" here and let both pass with no record, where
-# v2.18.0 had recorded a downgrade (caught in review), and the heredoc form
-# passed the same way a round later (x006). Every form is judged before the
-# row fails, so a tree that records none is named for each.
+# This piped heredoc still has no rewrite and remains a recorded downgrade.
+# Its stdout must be empty; the advisory and false meta facts are mandatory.
 settled_unread_bad=""
 for inert_in in \
-  'npm i left-pad@1.3.0 --ignore-scripts=true; sh -c "cd \"d\" && npm ci"' \
-  'npm i left-pad@1.3.0 --ignore-scripts && ksh -c "npm ci"' \
   $'npm i left-pad@1.3.0 --ignore-scripts && sh <<E | tee log\nnpm ci&&true\nE'
 do
   settled_safe=$(mktemp -d "${tmp_root}/safe-settled-unread.XXXXXX")
   SAFEDEPS_HOME="${settled_safe}" lib/ledger/ledger.sh approve npm left-pad 1.3.0 1.3.0 smoke >/dev/null
-  inert_out=$(run_hook_command "${tmp_root}/home-settled-unread" "${settled_safe}" "${inert_in}")
+  inert_out=$(run_hook_command "${tmp_root}/home-settled-unread" "${settled_safe}" "${inert_in}" quiet)
   [[ -z "$(jq -r '.hookSpecificOutput.updatedInput.command // ""' <<< "${inert_out}")" ]] \
     || settled_unread_bad+=" [a rewrite: $(printf '%q' "${inert_in}") (got: ${inert_out:0:200})]"
   grep -q 'could not make every npm install in this command inert' "${settled_safe}/advisory.log" 2>/dev/null \
@@ -967,7 +1001,7 @@ do
 done
 [[ -z "${settled_unread_bad}" ]] \
   || fail "an install already true beside one no verb placement reaches gets no rewrite and is a recorded downgrade:${settled_unread_bad}"
-pass "an install in text the rewrite cannot read gets the flag where v2.17.2 put it and is recorded as unread, or is a recorded downgrade"
+pass "script payload additions preserve both rewrite floors and unread records; the piped heredoc remains a recorded downgrade"
 
 # The record does not depend on the kind of text. An npm install the rewrite
 # did not read, beside one it flagged, is recorded as one whose flag nobody
@@ -988,7 +1022,6 @@ left_case_in=(
   'npm i left-pad@1.3.0 && sh -ce "npm ci \"x\""'
   "npm i left-pad@1.3.0 && sh -c 'npm 'ci"
   'npm i left-pad@1.3.0 && sh -c "npm ci "--ignore-scripts=false'
-  'npm i left-pad@1.3.0 && sh -c npm\ ci'
   $'npm i left-pad@1.3.0 && sh <<E\nnpm ci\nE'
   'npm i left-pad@1.3.0 && sh -c "cd \"d\" && npm ci;true"'
 )
@@ -996,9 +1029,15 @@ left_case_tail=(
   ' && sh -ce "npm ci \"x\""'
   " && sh -c 'npm 'ci"
   ' && sh -c "npm ci --ignore-scripts "--ignore-scripts=false'
-  ' && sh -c npm\ ci --ignore-scripts'
   $' && sh <<E\nnpm ci\nE'
   ' && sh -c "cd \"d\" && npm ci;true"'
+)
+left_case_native=(
+  'npm i --ignore-scripts left-pad@1.3.0 --ignore-scripts && sh -ce "npm ci \"x\" --ignore-scripts"'
+  "npm i --ignore-scripts left-pad@1.3.0 --ignore-scripts && sh -c 'npm 'ci"
+  'npm i --ignore-scripts left-pad@1.3.0 --ignore-scripts && sh -c "npm ci --ignore-scripts "--ignore-scripts=false'
+  $'npm i --ignore-scripts left-pad@1.3.0 --ignore-scripts && sh <<E\nnpm ci\nE'
+  'npm i --ignore-scripts left-pad@1.3.0 --ignore-scripts && sh -c "cd \"d\" && npm ci --ignore-scripts;true"'
 )
 left_bad=""
 for left_i in "${!left_case_in[@]}"; do
@@ -1007,7 +1046,8 @@ for left_i in "${!left_case_in[@]}"; do
   SAFEDEPS_HOME="${left_safe}" lib/ledger/ledger.sh approve npm left-pad 1.3.0 1.3.0 smoke >/dev/null
   inert_out=$(run_hook_command "${tmp_root}/home-left-unread" "${left_safe}" "${inert_in}")
   inert_got=$(jq -r '.hookSpecificOutput.updatedInput.command // ""' <<< "${inert_out}")
-  [[ "${inert_got}" == "npm i --ignore-scripts left-pad@1.3.0 --ignore-scripts${left_case_tail[${left_i}]}" ]] \
+  assert_script_payload_additions "${inert_in}" "npm i --ignore-scripts left-pad@1.3.0 --ignore-scripts${left_case_tail[${left_i}]}" "${inert_out}" "${left_safe}"
+  [[ "${inert_got}" == "${left_case_native[${left_i}]}" ]] \
     || left_bad+=" [the rewrite changed: $(printf '%q' "${inert_in}") (got: $(printf '%q' "${inert_got}"); ${inert_out:0:160})]"
   grep -q 'safedeps did not read as a command holds an npm install verb' "${left_safe}/advisory.log" 2>/dev/null \
     || left_bad+=" [no unread line in advisory.log: $(printf '%q' "${inert_in}")]"
@@ -1045,8 +1085,7 @@ for row in \
   '1|npm install left-pad@1.3.0 eval "$(echo) npm"' \
   '0|npm install left-pad@1.3.0 sh -c "\npm"' \
   '0|npm install left-pad@1.3.0 --userconfig=eval "x\y npm"' \
-  '1|npm ci left-pad@1.3.0 sh -c "x\y npm" false "$HOME"' \
-  '0|npm install x\ y -- "$HOME" sh -c "x\y npm"'
+  '1|npm ci left-pad@1.3.0 sh -c "x\y npm" false "$HOME"'
 do
   release_only_want="${row%%|*}" inert_in="${row#*|}"
   rm -rf "${release_only_safe}/pending"
@@ -1143,7 +1182,7 @@ printf '{"dependencies":{}}\n' > "${prefix_proj}/package.json"
 SAFEDEPS_HOME="${prefix_safe}" lib/ledger/ledger.sh approve npm left-pad 1.3.0 1.3.0 smoke >/dev/null
 jq -nc --arg c "npm install --prefix ${prefix_proj} left-pad@1.3.0" --arg cwd "${project_dir}" \
   '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
-  HOME="${tmp_root}/home-prefix" SAFEDEPS_HOME="${prefix_safe}" scripts/safedeps-pre-guard.sh >/dev/null
+  HOME="${tmp_root}/home-prefix" SAFEDEPS_HOME="${prefix_safe}" scripts/safedeps-hook-entry.sh pre >/dev/null
 prefix_pending_dir=$(jq -r '.project_dir' "${prefix_safe}/pending/"*.json | head -1)
 [[ "${prefix_pending_dir}" == "${prefix_proj}" ]] || fail "--prefix install snapshots the override dir, not cwd (got: ${prefix_pending_dir}, want ${prefix_proj})"
 pass "--prefix install targets the override dir for snapshot/effect-gate (finding #3)"
@@ -1151,7 +1190,7 @@ pass "--prefix install targets the override dir for snapshot/effect-gate (findin
 # Regression: `npx <tool> <args>` runs an already-installed binary. Arguments to
 # the tool (e.g. an email) must NOT be misread as a pkg@spec install and denied.
 npx_runner_output=$(
-  run_hook_command "${tmp_root}/home-npx-run" "${tmp_root}/safe-npx-run" "npx wrangler secret put EXAMPLE_SHARED_SECRET --name example-gateway ops@example.test"
+  run_hook_command "${tmp_root}/home-npx-run" "${tmp_root}/safe-npx-run" "npx wrangler secret put EXAMPLE_SHARED_SECRET --name example-gateway ops@example.test" quiet
 )
 [[ -z "${npx_runner_output}" ]] || fail "hook allows npx tool run with @-bearing args"
 pass "hook allows npx tool run with @-bearing args"
@@ -1209,7 +1248,7 @@ false_positive_cases=(
 )
 for fp_cmd in "${false_positive_cases[@]}"; do
   rm -rf "${false_positive_safe}"
-  fp_output=$(run_hook_command "${tmp_root}/home-false-positive" "${false_positive_safe}" "${fp_cmd}")
+  fp_output=$(run_hook_command "${tmp_root}/home-false-positive" "${false_positive_safe}" "${fp_cmd}" quiet)
   [[ -z "${fp_output}" ]] || fail "hook ignores non-install text command: ${fp_cmd}"
   fp_pending=$({ find "${false_positive_safe}/pending" -name '*.json' -type f 2>/dev/null || true; } | wc -l | tr -d ' ')
   fp_snapshots=$({ find "${false_positive_safe}/snapshots" -name '*_meta.json' -type f 2>/dev/null || true; } | wc -l | tr -d ' ')
@@ -1230,13 +1269,17 @@ hidden_install_cases=(
   $'cat <<EOF | sh\npip install hidden-heredoc@1.0.0\nEOF'
 )
 for hidden_cmd in "${hidden_install_cases[@]}"; do
-  hidden_safe="${tmp_root}/safe-hidden-$(printf '%s' "${hidden_cmd}" | cksum | cut -d' ' -f1)"
+  hidden_safe=$(mktemp -d "${tmp_root}/safe-hidden.XXXXXX")
   hidden_output=$(run_hook_command "${tmp_root}/home-hidden" "${hidden_safe}" "${hidden_cmd}")
   [[ "$(jq -r '.hookSpecificOutput.permissionDecision' <<< "${hidden_output}")" == "deny" ]] || fail "hook denies hidden install command: ${hidden_cmd}"
-  hidden_snapshots=$({ find "${hidden_safe}/snapshots" -name '*_meta.json' -type f 2>/dev/null || true; } | wc -l | tr -d ' ')
-  [[ "${hidden_snapshots}" -gt 0 ]] || fail "hook snapshots hidden install command before denying: ${hidden_cmd}"
+  for hidden_state_dir in pending snapshots; do
+    if [[ -e "${hidden_safe}/${hidden_state_dir}" ]]; then
+      [[ -d "${hidden_safe}/${hidden_state_dir}" && -z "$(find "${hidden_safe}/${hidden_state_dir}" -mindepth 1 -print)" ]] \
+        || fail "a denied hidden install leaves no pending record, snapshot or meta (${hidden_state_dir}): ${hidden_cmd}"
+    fi
+  done
 done
-pass "hook denies and snapshots hidden install indirection"
+pass "hook denies hidden install indirection without pending records, snapshots or meta"
 
 bypass_cases=(
   "/usr/bin/npm install evil@1.2.3"
@@ -1288,40 +1331,21 @@ mkdir -p "${fc_safe}/state.lock"
 fc_deny=$(
   jq -nc --arg c "npm install evil@1.0.0" --arg cwd "${project_dir}" \
     '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
-    HOME="${fc_home}" SAFEDEPS_HOME="${fc_safe}" SAFEDEPS_LOCK_MAX_ATTEMPTS=2 scripts/safedeps-pre-guard.sh
+    HOME="${fc_home}" SAFEDEPS_HOME="${fc_safe}" SAFEDEPS_LOCK_MAX_ATTEMPTS=2 scripts/safedeps-hook-entry.sh pre
 )
 rmdir "${fc_safe}/state.lock" 2>/dev/null || true
 [[ "$(jq -r '.hookSpecificOutput.permissionDecision' <<< "${fc_deny}")" == "deny" ]] || fail "pre-guard fails closed (deny) when the state lock is unavailable for an install"
 grep -q 'pre-guard DENY' "${fc_safe}/advisory.log" || fail "pre-guard logs the fail-closed deny to advisory.log"
 pass "pre-guard fails closed on lock contention (observable)"
 
-# (b) jq missing → best-effort fail-closed: a likely install DENIES, a non-install
-# is allowed, both recorded in advisory.log (never a silent skip).
-fc_nojq=$(mktemp -d "${tmp_root}/nojq.XXXXXX")
-for fc_tool in bash mkdir date printf cat grep; do
-  ln -sf "$(command -v "${fc_tool}")" "${fc_nojq}/${fc_tool}" 2>/dev/null || true
-done
-fc_nojq_deny=$(
-  jq -nc --arg c "npm install x@1" --arg cwd "${project_dir}" '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
-    HOME="${fc_home}" SAFEDEPS_HOME="${fc_safe}" PATH="${fc_nojq}" scripts/safedeps-pre-guard.sh 2>/dev/null
-)
-[[ "$(jq -r '.hookSpecificOutput.permissionDecision' <<< "${fc_nojq_deny}")" == "deny" ]] || fail "pre-guard denies a likely install when jq is missing (best-effort fail-closed)"
-grep -q 'DENY: jq missing' "${fc_safe}/advisory.log" || fail "pre-guard logs the jq-missing install deny to advisory.log"
-fc_nojq_allow=$(
-  jq -nc --arg c "ls -la" --arg cwd "${project_dir}" '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
-    HOME="${fc_home}" SAFEDEPS_HOME="${fc_safe}" PATH="${fc_nojq}" scripts/safedeps-pre-guard.sh 2>/dev/null
-)
-[[ "$(jq -r '.hookSpecificOutput.permissionDecision // "allow"' <<< "${fc_nojq_allow}" 2>/dev/null || echo allow)" != "deny" ]] || fail "pre-guard allows a non-install command when jq is missing"
-pass "pre-guard fails closed on jq-missing installs, allows non-installs (observable)"
-
-# (c) ledger library missing → DENY (fail-closed), logged — not a silent fall-through allow.
-fc_noledger=$(
-  jq -nc --arg c "npm install x@1" --arg cwd "${project_dir}" '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
-    HOME="${fc_home}" SAFEDEPS_HOME="${fc_safe}" SAFEDEPS_LEDGER_LIB="${tmp_root}/does-not-exist.sh" scripts/safedeps-pre-guard.sh 2>/dev/null
-)
-[[ "$(jq -r '.hookSpecificOutput.permissionDecision' <<< "${fc_noledger}")" == "deny" ]] || fail "pre-guard denies an install when the ledger library is missing (fail-closed)"
-grep -q 'ledger library missing' "${fc_safe}/advisory.log" || fail "pre-guard logs the missing-ledger deny to advisory.log"
-pass "pre-guard fails closed when the ledger library is missing (observable)"
+# Retired dependency-fault rows at the native entry cutover:
+# - jq missing: rust/src/jq.rs reads/writes JSON in-process; no jq subprocess.
+# - SAFEDEPS_LEDGER_LIB missing: pre/install.rs calls ledger::check directly;
+#   the core does not source the Bash ledger reader or read that override.
+# Their unavailable-dependency contract is covered in hook-entry.sh by the
+# real-core copy with its binary removed (explained deny), and the shim's
+# non-executable/126/127 rows. A stale source has separate real-core rows:
+# installs deny; benign calls allow and warn on stderr and in advisory.log.
 
 # Concurrency (issue #5): two installs of the SAME command in one project must
 # keep separate pending state — the per-install snapshot+PID suffix isolates them,
@@ -1334,7 +1358,7 @@ run_hook_command "${tmp_root}/home-conc" "${conc_safe}" "npm install conc-a@1.0.
 conc_pending=$(find "${conc_safe}/pending" -name '*.json' -type f | wc -l | tr -d ' ')
 [[ "${conc_pending}" == "2" ]] || fail "two identical concurrent installs keep two separate pending files (got ${conc_pending}, want 2)"
 jq -nc --arg c "npm install conc-a@1.0.0" --arg cwd "${project_dir}" '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
-  HOME="${tmp_root}/home-conc" SAFEDEPS_HOME="${conc_safe}" scripts/safedeps-post-verify.sh >/dev/null 2>&1 || true
+  HOME="${tmp_root}/home-conc" SAFEDEPS_HOME="${conc_safe}" scripts/safedeps-hook-entry.sh post >/dev/null 2>&1 || true
 conc_left=$(find "${conc_safe}/pending" -name '*.json' -type f | wc -l | tr -d ' ')
 [[ "${conc_left}" == "1" ]] || fail "post hook consumes exactly one identical-command install's pending state (left ${conc_left}, want 1)"
 pass "concurrent installs (even identical commands) keep isolated pending state (issue #5)"
@@ -1347,7 +1371,7 @@ mkdir -p "${nolock_dir}"
 printf '{"dependencies":{}}\n' > "${nolock_dir}/package.json"
 nolock_safe="${tmp_root}/safe-nolock"
 jq -nc --arg cwd "${nolock_dir}" '{tool_name:"Bash",tool_input:{command:"pip install orphan==1.0.0"},cwd:$cwd}' |
-  HOME="${tmp_root}/home-conc" SAFEDEPS_HOME="${nolock_safe}" scripts/safedeps-post-verify.sh >/dev/null 2>&1 || true
+  HOME="${tmp_root}/home-conc" SAFEDEPS_HOME="${nolock_safe}" scripts/safedeps-hook-entry.sh post >/dev/null 2>&1 || true
 grep -q 'UNVERIFIED:.*no pending state.*no package-lock.json' "${nolock_safe}/advisory.log" || fail "post hook records a no-lockfile no-pending install as UNVERIFIED"
 pass "post hook records an install-looking command with no pending state (no lockfile) as UNVERIFIED"
 
@@ -1362,7 +1386,7 @@ mkdir -p "${backstop_safe}" "${backstop_proj}"
 printf '{"name":"p","version":"1.0.0","lockfileVersion":3,"packages":{"":{"name":"p","version":"1.0.0"}}}\n' > "${backstop_proj}/package-lock.json"
 printf '{"name":"p","version":"1.0.0"}\n' > "${backstop_proj}/package.json"
 jq -nc --arg cwd "${backstop_proj}" '{tool_name:"Bash",tool_input:{command:" npm install left-pad@1.3.0"},cwd:$cwd}' |
-  HOME="${tmp_root}/home-backstop" SAFEDEPS_HOME="${backstop_safe}" scripts/safedeps-post-verify.sh >/dev/null 2>&1 || true
+  HOME="${tmp_root}/home-backstop" SAFEDEPS_HOME="${backstop_safe}" scripts/safedeps-hook-entry.sh post >/dev/null 2>&1 || true
 grep -q 'BACKSTOP clean' "${backstop_safe}/advisory.log" || fail "npm effect gate runs command-independently as a backstop with no pending state (finding #5)"
 pass "npm effect gate runs command-independently as a backstop (finding #5)"
 
@@ -1379,7 +1403,7 @@ cat > "${project_dir}/node_modules/ledger-tamper/package.json" <<'EOF'
 EOF
 tamper_post=$(
   jq -nc --arg cwd "${project_dir}" '{tool_name:"Bash",tool_input:{command:"npm install ledger-tamper@1.0.0"},cwd:$cwd}' |
-    HOME="${tamper_home}" SAFEDEPS_HOME="${tamper_safe}" scripts/safedeps-post-verify.sh
+    HOME="${tamper_home}" SAFEDEPS_HOME="${tamper_safe}" scripts/safedeps-hook-entry.sh post
 )
 grep -q 'suspicious dependency change detected' <<< "${tamper_post}" || fail "post hook reorgs safedeps ledger tamper script"
 pass "post hook reorgs safedeps ledger tamper script"

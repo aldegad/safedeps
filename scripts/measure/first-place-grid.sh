@@ -113,7 +113,7 @@ decide() { # work tree command
   safe=$(mktemp -d "${w}/safe.XXXXXX")
   out=$(cd "${tree}" && jq -nc --arg c "${cmd}" --arg cwd "${w}/project" \
     '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
-    HOME="${w}/home" SAFEDEPS_HOME="${safe}" perl -e 'alarm 60; exec @ARGV' scripts/safedeps-pre-guard.sh 2>/dev/null) || true
+    HOME="${w}/home" SAFEDEPS_HOME="${safe}" perl -e 'alarm 60; exec @ARGV' scripts/safedeps-hook-entry.sh pre 2>/dev/null) || true
   rm -rf "${safe}"
   if [[ -z "${out}" ]]; then printf 'pass'; return; fi
   jq -r '.hookSpecificOutput as $h

@@ -65,9 +65,9 @@ JSON
 
 cmd_baseline="npm install ${BASELINE_DEP}@${BASELINE_VER}"
 hook_payload "${cmd_baseline}" "${project}" \
-  | bash "${REPO_DIR}/scripts/safedeps-pre-guard.sh" >/dev/null 2>&1
+  | bash "${REPO_DIR}/scripts/safedeps-hook-entry.sh" pre >/dev/null 2>&1
 hook_payload "${cmd_baseline}" "${project}" \
-  | bash "${REPO_DIR}/scripts/safedeps-post-verify.sh" >/dev/null 2>&1
+  | bash "${REPO_DIR}/scripts/safedeps-hook-entry.sh" post >/dev/null 2>&1
 
 if [[ $(find "${sd_home}" -maxdepth 1 -name 'confirmed_*' | wc -l | tr -d ' ') -eq 0 ]]; then
   echo "SETUP FAILED: no confirmed baseline snapshot" >&2
@@ -76,14 +76,14 @@ fi
 
 cmd_bad="npm install ${BAD_DEP}@${BAD_VER}"
 hook_payload "${cmd_bad}" "${project}" \
-  | bash "${REPO_DIR}/scripts/safedeps-pre-guard.sh" >/dev/null 2>&1
+  | bash "${REPO_DIR}/scripts/safedeps-hook-entry.sh" pre >/dev/null 2>&1
 (cd "${project}" && npm install --ignore-scripts --silent "${BAD_DEP}@${BAD_VER}" >/dev/null 2>&1)
 
 pre_pkg_hash=$(shasum -a 256 "${project}/package.json" | cut -d' ' -f1)
 
 # --- the rollback run ---
 hook_payload "${cmd_bad}" "${project}" \
-  | bash "${REPO_DIR}/scripts/safedeps-post-verify.sh" > "${WORK}/rollback.out" 2>&1 &
+  | bash "${REPO_DIR}/scripts/safedeps-hook-entry.sh" post > "${WORK}/rollback.out" 2>&1 &
 rollback_pid=$!
 
 # Wait for the rollback's first visible act, exactly as the kill harness does.
@@ -103,7 +103,7 @@ kill -0 "${rollback_pid}" 2>/dev/null && rollback_alive='yes'
 
 # --- the innocent bystander: an unrelated Bash call during the rollback ---
 hook_payload "echo hello" "${project}" \
-  | bash "${REPO_DIR}/scripts/safedeps-post-verify.sh" > "${WORK}/bystander.out" 2>&1
+  | bash "${REPO_DIR}/scripts/safedeps-hook-entry.sh" post > "${WORK}/bystander.out" 2>&1
 
 wait "${rollback_pid}" 2>/dev/null
 

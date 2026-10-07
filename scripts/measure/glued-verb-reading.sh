@@ -147,7 +147,7 @@ tuple() {
   for iter in 1 2 3 4; do
     out=$(jq -nc --arg c "${command}" --arg cwd "${project_dir}" \
       '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
-      HOME="${safe}/home" SAFEDEPS_HOME="${safe}" "${TREE}/scripts/safedeps-pre-guard.sh" 2>/dev/null) || true
+      HOME="${safe}/home" SAFEDEPS_HOME="${safe}" "${TREE}/scripts/safedeps-hook-entry.sh" pre 2>/dev/null) || true
     reason=$(jq -r '.hookSpecificOutput.permissionDecisionReason // empty' <<< "${out:-{\}}" 2>/dev/null) || true
     last=$(jq -r '.hookSpecificOutput.permissionDecision // "pass"' <<< "${out:-{\}}" 2>/dev/null) || last=pass
     [[ "${reason}" != *UNDECIDED* ]] || last=undecided

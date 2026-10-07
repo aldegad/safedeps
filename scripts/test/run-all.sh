@@ -22,29 +22,25 @@
 # A whole set builds the host binary once before starting any battery. The
 # host runner prepares it once for all its units and passes the receipt.
 #
-# The development set leaves out the census and effect-trace-grid. The census
-# took 72 minutes of a 2-hour macOS CI run (v2.18.0, run 37191343467), and
-# effect-trace-grid waits for it and then runs another 19 to 47. Both measure
-# what a release ships, and AGENTS.md ("What to run, and where") runs them per
-# release, not per change; a change that reaches the scan readings or the
-# effect gate runs them by name.
+# The development set leaves out native-scan-failures and effect-trace-grid.
+# Both are release batteries; run them by name when a change reaches their
+# fault propagation or install-trace contracts.
 #
 # Runs the batteries it selects and reports on each one. The batteries used to
 # run as one `&&` chain, so a full run cost the sum of thirteen batteries and
 # stopped at the first red. They do not share state: each makes its own mktemp root and
 # points HOME or SAFEDEPS_HOME into it, and every fixture server listens on a
 # port the kernel picks (or the closed port 9). So the batteries of a phase run
-# at the same time. The second phase waits for the census, not for the whole
+# at the same time. The second phase waits for native-scan-failures, not the whole
 # first phase (see below).
 #
 # Every battery runs, whatever another one answered. Each writes one log. At the
 # end the runner prints every log in the order below, then one summary line per
 # battery, then the tail of each failed battery's log. It exits non-zero when
-# any battery exited non-zero, printed a `not ok` line, or (the census aside)
-# printed no `ok` line, and names them.
+# any battery exited non-zero, printed a `not ok` line, or printed no `ok` line, and names them.
 #
 # The runner never takes the whole machine by default. At most SAFEDEPS_TEST_JOBS
-# batteries run at once, and the census runs that many guards; the default is
+# batteries run at once; the default is
 # half the CPUs, rounded up. Developer machines are shared: an uncapped run on a
 # 16-CPU Mac already at load 100 took it past 300 and starved other sessions.
 # SAFEDEPS_TEST_SERIAL=1 runs the batteries one at a time, in the order below,
@@ -63,15 +59,15 @@ cd "${ROOT_DIR}" || exit 2
 #
 # shards and weight are for scripts/ci/run-on-hosts.sh, which runs a set on
 # several hosts at once. shards is how many units the battery is split into:
-# shard I of M runs the battery with `--shard I/M` (scripts/test/lib/shard.sh; the census
-# has its own, with `--out`). weight is how many CPUs one unit keeps busy, so
+# shard I of M runs the battery with `--shard I/M` (scripts/test/lib/shard.sh).
+# weight is how many CPUs one unit keeps busy, so
 # a host is not handed more work than it has CPUs for: manager-variants judges
-# eight forms at a time, install-dir-differential six, and a census shard runs
-# that many guards (SAFEDEPS_TEST_JOBS, which --unit sets to the weight).
+# eight forms at a time and install-dir-differential six.
+# --unit sets SAFEDEPS_TEST_JOBS to the weight.
 # seconds is the measured wall clock of the whole battery at its weight, from
 # the plan's measurement (safedeps/suite-in-ten-minutes-on-our-hosts, 744ea16,
-# alex-macbook-m1 and carenine at load 2-25; the census from one shard of
-# eight); the runner starts the longest units first. A local
+# alex-macbook-m1 and carenine at load 2-25); the runner starts the longest
+# units first. A local
 # run (`npm test`, --release) ignores all three and runs each battery whole.
 #
 # The second phase holds the batteries that a busy machine turns red without a
@@ -86,18 +82,14 @@ cd "${ROOT_DIR}" || exit 2
 #                      pre-guard in every try and the battery failed; on the
 #                      8-CPU Linux VM at load 17 it landed after 0.4s.
 #
-# Neither loads the machine much, so they share the phase. It starts when the
-# census finishes, not when the whole first phase does: the census runs a guard
-# per CPU and is the load these two cannot stand, while every other battery is
-# one process at a time. On the Mac the single-process batteries outlasted the
-# census by six minutes.
+# The timed second phase waits for native source-copy failure controls. Their
+# builds may load the host; ordinary first-phase batteries may run beside it.
 ALL_BATTERIES=(
   "rust-core|1|dev|1|1|30|scripts/test/rust-core.sh"
   "smoke|1|dev|1|1|350|scripts/test/smoke.sh"
   "scan-contract|1|dev|3|1|861|scripts/test/scan-contract.sh"
   "statement-batch|1|dev|1|1|263|scripts/test/statement-batch.sh"
   "shell-reading|1|dev|1|1|295|scripts/test/shell-reading.sh"
-  "census|1|release|4|2|1030|scripts/measure/scan-failure-census.sh --quick"
   "native-scan-failures|1|release|1|1|600|scripts/test/native-scan-failures.sh"
   "consumer-forms|1|dev|4|1|1126|scripts/test/consumer-forms.sh"
   "manager-variants|1|dev|3|4|650|scripts/test/manager-variants.sh"
@@ -111,15 +103,10 @@ ALL_BATTERIES=(
   "e2e|1|dev|1|1|351|scripts/test/e2e.sh"
 )
 #
-# A run without the census (the development set, one unit) has no second
-# phase to wait for: the load these two cannot stand is the census's, and every
-# other battery is one process at a time. So there they start in the order
-# below like any other battery.
-PHASE_TWO_AFTER=census
-# The batteries that start first when slots are short, longest first (alone on
-# the 8-CPU Linux VM: census 431s, consumer-forms 373s, lockless-forms 313s,
-# effect-trace-grid 214s). The rest follow in the order above.
-START_FIRST_ALL=(census consumer-forms lockless-forms effect-trace-grid)
+# Development runs omit native failure controls and can start phase two at
+# once. A release waits for that battery before its timing-sensitive rows.
+PHASE_TWO_AFTER=native-scan-failures
+START_FIRST_ALL=(native-scan-failures consumer-forms lockless-forms effect-trace-grid)
 # Checked before anything starts, on the whole table: a second phase with
 # nothing to wait for would start at once, under the very load it exists to
 # avoid.
@@ -207,9 +194,6 @@ for entry in "${ALL_BATTERIES[@]}"; do
         printf 'run-all: the table splits %s into %s, so its units are %s@1of%s and on\n' "${name}" "${shards}" "${name}" "${shards}" >&2
         exit 2
       fi
-      # The census prints no `ok` lines; ci-verdict.sh judges a census unit,
-      # a shard or the whole census, from this directory.
-      [[ "${name}" != census ]] || command="${command} --out ${SAFEDEPS_TEST_LOG_DIR:-}/${unit}.out"
       name="${unit}" phase=1 unit_weight="${weight}"
       ;;
   esac
@@ -259,7 +243,6 @@ fi
 if [[ -n "${unit_weight}" ]]; then
   if [[ -z "${SAFEDEPS_TEST_JOBS:-}" ]] || (( unit_weight < jobs )); then jobs="${unit_weight}"; fi
 fi
-# The census reads the same value, so one variable sets both.
 export SAFEDEPS_TEST_JOBS="${jobs}"
 
 if [[ -n "${SAFEDEPS_TEST_LOG_DIR:-}" ]]; then
@@ -438,10 +421,8 @@ for entry in "${BATTERIES[@]}"; do
   # A battery fails on a non-zero exit, and also on a `not ok` line it printed
   # and then exited 0 over: either one is a red the old chain would have shown.
   # It also fails when it printed no `ok` line: an empty log with exit status 0
-  # passed both. Every battery prints `ok` lines but the census, which judges
-  # itself in its exit status (ci-verdict.sh holds the host runner's units to
-  # the same floor).
-  if [[ "${rc}" != 0 || "${not_ok:-0}" != 0 ]] || [[ "${name%%@*}" != census && ! "${ok:-0}" =~ ^[1-9] ]]; then
+  # passed both. ci-verdict.sh holds the host runner's units to the same floor.
+  if [[ "${rc}" != 0 || "${not_ok:-0}" != 0 ]] || [[ ! "${ok:-0}" =~ ^[1-9] ]]; then
     failed+=("${name}")
   fi
 done

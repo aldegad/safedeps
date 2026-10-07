@@ -31,7 +31,7 @@ fail=0
 red() { printf 'shard-cover: %s\n' "$1" >&2; fail=1; }
 
 # <battery> <M> <script>, for each battery the table splits into row shards.
-table=$(bash scripts/test/run-all.sh --units --release | sed -n 's/^\([a-z][a-z0-9-]*\)@1of\([0-9]*\)$/\1 \2/p' | grep -v '^census ')
+table=$(bash scripts/test/run-all.sh --units --release | sed -n 's/^\([a-z][a-z0-9-]*\)@1of\([0-9]*\)$/\1 \2/p')
 (( $# == 0 )) || table=$(for b in "$@"; do grep "^${b} " <<< "${table}" || red "${b} is not split into row shards"; done)
 [[ -n "${table}" ]] || { red "no battery to compare"; exit 1; }
 

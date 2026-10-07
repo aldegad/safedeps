@@ -12,9 +12,11 @@
 # exactly as it did before. A budget that denies too eagerly is not a safer
 # gate, it is a gate people switch off.
 #
-# The budget under test is deliberately tiny (seconds, not the 20s default) so
-# this battery runs in seconds. What is being pinned is the mechanism, not the
-# particular number: the default is a deployment choice, the behavior is not.
+# Most rows use small budgets; three ceiling rows deliberately wait out the
+# configured ceiling. This checks the mechanism and the registered boundary.
+# Retired Bash rows:
+# - Library source startup: native pre sources no Bash libraries; entry latency remains checked.
+# - PATH sleep's 50ms first poll: native polling is internal; fast response and elapsed deadlines remain checked.
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
@@ -24,7 +26,14 @@ pass() { printf 'ok - %s\n' "$1"; }
 fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
 
 tmp_root=$(mktemp -d "${TMPDIR:-/tmp}/safedeps-budget.XXXXXX")
-cleanup() { rm -rf "${tmp_root}"; }
+cleanup() {
+  python3 "${ROOT_DIR}/scripts/test/lib/native_budget_owners.py" cleanup "$$"
+  if [[ -n "${SAFEDEPS_TEST_BUDGET_REPORT_DIR:-}" ]]; then
+    mkdir -p "${SAFEDEPS_TEST_BUDGET_REPORT_DIR}"
+    cp -R "${tmp_root}/." "${SAFEDEPS_TEST_BUDGET_REPORT_DIR}/"
+  fi
+  rm -rf "${tmp_root}"
+}
 trap cleanup EXIT
 
 project_dir="${tmp_root}/project"
@@ -33,203 +42,49 @@ printf '{"dependencies":{}}\n' > "${project_dir}/package.json"
 
 pad() { head -c "$1" < /dev/zero | tr '\0' 'x'; }
 
-# --- a judgment that does not finish, on demand ------------------------------
-# Every over-budget case below needs a judgment that outlasts its budget. This
-# battery used to get one from input size: 12KB of padding took ~5.5s to scan
-# on the machine it was written on. That was never a property of the gate. It
-# was a property of the scanner's cost curve and of the machine, and both moved:
-# the linear scanner answers 12KB in 0.2s, and the ubuntu CI runner was already
-# finishing the 11s "deep" case inside its budget before that.
-#
-# So the delay comes from the one input a test controls and the guard does not
-# read: PATH. `slow_guard` puts an awk in front of the real one that sleeps once
-# before it runs. awk is on the judgment's path (command_scan_text) and not on
-# the parent's — the parent reads the payload with jq, keeps the deadline with
-# kill and sleep, and answers with jq — so the delay lands inside the child the
-# deadline watches and nowhere else. The guard gains no knob for this. A delay
-# the environment could set would be one more thing an attacker could set.
-#
-# The sleep is a foreground external command of the child, which is the
-# condition the deadline has to survive: a shell does not act on a signal while
-# one runs. The shim sleeps once per guard run, not once per awk call, so a case
-# costs the same however many times the judgment reaches for awk. It sleeps from
-# `/`, so a sleeper that outlives a regressed kill cannot pin the worktree.
-real_awk=$(command -v awk)
-slow_bin="${tmp_root}/slow-bin"
-slow_delay_file="${tmp_root}/slow-delay"
-slow_once_dir="${tmp_root}/slow-once"
-slow_pid_file="${tmp_root}/slow-pid"
-mkdir -p "${slow_bin}"
-cat > "${slow_bin}/awk" <<SHIM
-#!/usr/bin/env bash
-if mkdir '${slow_once_dir}' 2>/dev/null; then
-  printf '%s' "\$\$" > '${slow_pid_file}'
-  cd / && sleep "\$(cat '${slow_delay_file}')"
-  cd "\${OLDPWD}" || exit 1
-fi
-exec '${real_awk}' "\$@"
-SHIM
-chmod +x "${slow_bin}/awk"
-
-# --- a loaded machine, on demand ---------------------------------------------
-# The deadline used to add up the sleeps it asked for, and on a loaded machine
-# a sleep takes longer than it asks for. `loaded_bin` holds a `sleep` that
-# stretches every sleep by the factor in a file: 3 stands in for load, and 1
-# only records. Either way it writes down what it was asked and its own pid.
-# Unlike the awk shim, it sits on the PARENT's path on purpose, because the
-# parent keeps the deadline with `sleep` and that is the clock under test. It
-# also stretches the awk shim's sleep, which only makes the judgment longer.
-# Like the awk shim it sleeps from `/`, and it execs the real sleep, so the pid
-# it records is the sleeper's own.
-real_sleep=$(command -v sleep)
-loaded_bin="${tmp_root}/loaded-bin"
-loaded_factor_file="${tmp_root}/loaded-factor"
-loaded_log="${tmp_root}/loaded-log"
-loaded_pids="${tmp_root}/loaded-pids"
-mkdir -p "${loaded_bin}"
-{
-  printf '#!/usr/bin/env bash\n'
-  printf "real_sleep='%s'\nfactor_file='%s'\nlog='%s'\npids='%s'\n" \
-    "${real_sleep}" "${loaded_factor_file}" "${loaded_log}" "${loaded_pids}"
-  cat <<'SHIM'
-arg="${1:-}"
-printf '%s\n' "${arg}" >> "${log}"
-printf '%s\n' "$$" >> "${pids}"
-factor=""
-IFS= read -r factor < "${factor_file}" || true
-[[ "${factor}" =~ ^[0-9]+$ ]] || factor=1
-number='^([0-9]+)(\.([0-9]{1,3}))?$'
-if [[ "${arg}" =~ ${number} ]]; then
-  frac="${BASH_REMATCH[3]}000"
-  ms=$(( (10#${BASH_REMATCH[1]} * 1000 + 10#${frac:0:3}) * factor ))
-  printf -v arg '%d.%03d' $(( ms / 1000 )) $(( ms % 1000 ))
-fi
-cd / || exit 1
-exec "${real_sleep}" "${arg}"
-SHIM
-} > "${loaded_bin}/sleep"
-chmod +x "${loaded_bin}/sleep"
-
-# Puts the loaded `sleep` in front of the next guard run, with every sleep
-# stretched <factor> times, and starts its records fresh.
-LOADED_PATH=""
-load_machine() {
-  printf '%s\n' "$1" > "${loaded_factor_file}"
-  : > "${loaded_log}"
-  : > "${loaded_pids}"
-  LOADED_PATH="${loaded_bin}:"
-}
-
-# True once every sleep the loaded shim ran is gone, waiting up to two seconds
-# for each to be reaped, as slow_sleeper_gone does.
-loaded_sleepers_gone() {
-  local pid tries
-  while IFS= read -r pid; do
-    [[ -n "${pid}" ]] || continue
-    tries=0
-    while kill -0 "${pid}" 2>/dev/null; do
-      (( tries++ < 40 )) || return 1
-      sleep 0.05
-    done
-  done < "${loaded_pids}"
-}
-
-# A millisecond clock that bash 3.2 lacks, as scripts/measure/npm-ask-cost.sh
-# reads it. Only the runs that ask for it pay for the two node starts.
-now_ms() { node -e 'process.stdout.write(String(Date.now()))'; }
-
-# Long enough that nothing but the deadline can answer inside the runtime's 30s.
+# The npm fixture is hook-owned PATH code, never code from the command.
+# It records three npm questions and descendants, suspends only its judgment
+# parent, and resumes after a finite delay. This crosses the outer deadline
+# without depending on scanner cost or the ask's own eight-second limit.
+python3 "${ROOT_DIR}/scripts/test/lib/native_budget_owners.py" sweep
 never=60
-
-# Runs the guard and captures decision, whether the reason is the undecided
-# one, and how long the answer took.
-GUARD_PATH=""
-GUARD_IGNORE_TERM=""
-# A SECONDS value for the guard's environment, which bash seeds its clock from.
-GUARD_SECONDS=""
-# Set to also time the run in milliseconds, into GUARD_ELAPSED_MS.
-GUARD_CLOCK_MS=""
+[[ "${1:-}" != --deadline-control-row ]] || never=4
+GUARD_IGNORE_TERM=""; GUARD_SECONDS=""
+GUARD_DELAY=0; GUARD_LOAD=""; GUARD_KILL_JUDGMENT=""
 guard() {
   local command="$1" budget="${2:-2}" engage="${3:-1024}" disabled="${4:-}" legacy_child="${5:-}"
-  # mktemp for the same reason as consumer-forms.sh: `$$` is constant within a
-  # run so isolation rested on RANDOM alone, and `mkdir -p` cannot report a
-  # collision. Uniqueness is the kernel's job.
-  local safe
+  local safe rc=0
   safe=$(mktemp -d "${tmp_root}/safe.XXXXXX")
-  GUARD_STATE_DIR="${safe}"
-  local start end rc=0
-  local launch=(scripts/safedeps-pre-guard.sh)
-  if [[ -n "${GUARD_IGNORE_TERM}" ]]; then
-    # A signal ignored on entry stays ignored across exec, and bash cannot trap
-    # or reset it, so every process in the judgment inherits a deaf TERM.
-    launch=(bash -c 'trap "" TERM; exec "$@"' ignore-term scripts/safedeps-pre-guard.sh)
-  fi
-  if [[ -n "${GUARD_SECONDS}" ]]; then
-    # Through env, because an assignment in front of a command would be read
-    # by this shell's own SECONDS.
-    launch=(env "SECONDS=${GUARD_SECONDS}" "${launch[@]}")
-  fi
-  local start_ms=0 end_ms=0
-  start=$(date +%s)
-  [[ -z "${GUARD_CLOCK_MS}" ]] || start_ms=$(now_ms)
-  GUARD_OUT=$(jq -nc --arg c "${command}" --arg cwd "${project_dir}" \
-    '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
-    PATH="${GUARD_PATH:-${PATH}}" \
-    HOME="${tmp_root}/home" SAFEDEPS_HOME="${safe}" \
-    SAFEDEPS_SELF_BUDGET_SECONDS="${budget}" \
-    SAFEDEPS_BUDGET_ENGAGE_BYTES="${engage}" \
-    SAFEDEPS_BUDGET_DISABLED="${disabled}" \
-    SAFEDEPS_BUDGET_CHILD="${legacy_child}" \
-    "${launch[@]}" 2>"${tmp_root}/stderr") || rc=$?
-  [[ -z "${GUARD_CLOCK_MS}" ]] || end_ms=$(now_ms)
-  GUARD_STDERR=$(cat "${tmp_root}/stderr" 2>/dev/null || printf '')
-  end=$(date +%s)
-  GUARD_ELAPSED=$(( end - start ))
-  GUARD_ELAPSED_MS=$(( end_ms - start_ms ))
-  # The hook exits 0 on every designed path, so anything else means it never
-  # answered. Reading that as an empty answer reads it as `pass`, and that is
-  # how a Linux launch failure (E2BIG) passed for a verdict in CI.
-  (( rc == 0 )) \
-    || fail "the guard ran and answered (it exited ${rc}: $(printf '%s' "${GUARD_STDERR}" | head -c 120))"
-  if [[ -z "${GUARD_OUT}" ]]; then
-    GUARD_DECISION="pass"
-  else
-    GUARD_DECISION=$(jq -r '.hookSpecificOutput.permissionDecision // "pass"' <<< "${GUARD_OUT}")
-  fi
-  GUARD_REASON=$(jq -r '.hookSpecificOutput.permissionDecisionReason // ""' <<< "${GUARD_OUT:-{\}}" 2>/dev/null || printf '')
+  GUARD_STATE_DIR="${safe}/state"
+  printf '%s' "${command}" > "${safe}/command"
+  local args=(--root "${ROOT_DIR}" --box "${safe}" --project "${project_dir}"
+    --command "${safe}/command" --budget "${budget}" --engage "${engage}"
+    --disabled "${disabled}" --legacy-child "${legacy_child}" --delay "${GUARD_DELAY}"
+    --seconds="${GUARD_SECONDS}" --suite-pid "$$")
+  [[ -z "${GUARD_IGNORE_TERM}" ]] || args+=(--ignore-term)
+  [[ -z "${GUARD_LOAD}" ]] || args+=(--pause-supervisor)
+  [[ -z "${GUARD_KILL_JUDGMENT}" ]] || args+=(--kill-judgment)
+  python3 "${ROOT_DIR}/scripts/test/lib/native-budget-run.py" "${args[@]}" > "${safe}/transport.json" || rc=$?
+  (( rc == 0 )) || fail "native budget fixture ran (helper rc ${rc}; ${safe})"
+  GUARD_RC=$(jq -r .rc "${safe}/result.json")
+  GUARD_OUT=$(jq -r .stdout "${safe}/result.json")
+  GUARD_STDERR=$(jq -r .stderr "${safe}/result.json")
+  GUARD_ELAPSED=$(jq -r .elapsed_seconds "${safe}/result.json")
+  GUARD_ELAPSED_MS=$(jq -r .elapsed_ms "${safe}/result.json")
+  GUARD_DECISION=$(jq -r .decision "${safe}/result.json")
+  GUARD_REASON=$(jq -r .reason "${safe}/result.json")
+  GUARD_GONE=$(jq -r .descendants_gone "${safe}/result.json")
+  GUARD_RESUME=$(jq -r .response_after_resume "${safe}/result.json")
+  (( GUARD_RC == 0 )) || fail "the registered entry ran and answered (exit ${GUARD_RC})"
 }
-
-# `guard`, with the judgment held up for <seconds> first.
 slow_guard() {
-  local delay="$1"
-  shift
-  printf '%s' "${delay}" > "${slow_delay_file}"
-  rm -f "${slow_pid_file}"
-  rmdir "${slow_once_dir}" 2>/dev/null || true
-  GUARD_PATH="${slow_bin}:${LOADED_PATH}${PATH}"
-  guard "$@"
-  GUARD_PATH=""
-  LOADED_PATH=""
+  GUARD_DELAY="$1"; shift
+  # Put npm before a trailing comment in the original corpus word.
+  local command="$1"; shift
+  guard "npm ci; ${command}" "$@"
+  GUARD_DELAY=0; GUARD_LOAD=""
 }
-
-# `guard`, on the loaded machine load_machine set up.
-loaded_guard() {
-  GUARD_PATH="${LOADED_PATH}${PATH}"
-  guard "$@"
-  GUARD_PATH=""
-  LOADED_PATH=""
-}
-
-# True once the process the shim ran as is gone. A killed process can sit as a
-# zombie for a moment before it is reaped, so this waits up to two seconds.
-slow_sleeper_gone() {
-  local pid tries=0
-  pid=$(cat "${slow_pid_file}" 2>/dev/null) || return 0
-  while kill -0 "${pid}" 2>/dev/null; do
-    (( tries++ < 40 )) || return 1
-    sleep 0.05
-  done
-}
+slow_sleeper_gone() { [[ "${GUARD_GONE}" == true ]]; }
 
 # The size only has to engage the deadline, including under the 4KB engage
 # ceiling; the delay above is what makes it outlast the budget.
@@ -237,9 +92,7 @@ big=$(pad 12288)
 # Comfortably inside any budget.
 small=$(pad 256)
 
-# The deadline is checked between polls on a whole-second clock that starts
-# with the guard, so it fires up to a second early and at most one poll step
-# late, and the longest step is 1s.
+# Native supervision reads monotonic elapsed time; the fixture records it too.
 tiny_budget=1
 
 # --- past the budget: the gate answers instead of being killed --------------
@@ -247,6 +100,8 @@ tiny_budget=1
 slow_guard "${never}" "echo ${big}" "${tiny_budget}"
 [[ "${GUARD_DECISION}" == "deny" ]] || fail "over-budget command is denied (got: ${GUARD_DECISION})"
 grep -q 'UNDECIDED' <<< "${GUARD_REASON}" || fail "over-budget deny is marked UNDECIDED"
+(( GUARD_ELAPSED_MS >= tiny_budget * 1000 )) \
+  || fail "the stopped judgment is not treated as ended before its deadline (${GUARD_ELAPSED_MS}ms against ${tiny_budget}s)"
 pass "over-budget command is denied rather than silently allowed"
 
 # The whole point is answering BEFORE the runtime's own budget expires. Allow
@@ -273,6 +128,10 @@ pass "undecided deny leaves the hook's stderr clean"
 # Every bypass or unavailability is observable (AGENTS.md invariant).
 grep -q 'unfinished' "${GUARD_STATE_DIR}/advisory.log" || fail "undecided deny is recorded in advisory.log"
 pass "undecided deny is recorded in advisory.log"
+if [[ "${1:-}" == --deadline-control-row ]]; then
+  pass "native deadline control row finished"
+  exit 0
+fi
 
 # The install carriers the command gate is the AUTHORITY for — padding one of
 # these past the budget was the actual bypass.
@@ -338,93 +197,38 @@ pass "the deadline takes the blocked command down with the shell, leaving no orp
 # not the judgment's natural length.
 slow_guard "${never}" "echo ${big}" 2
 budget_two=${GUARD_ELAPSED}
+(( GUARD_ELAPSED_MS >= 2000 )) || fail "the two-second deadline did not fire early (${GUARD_ELAPSED_MS}ms)"
 slow_guard "${never}" "echo ${big}" 6
 budget_six=${GUARD_ELAPSED}
+(( GUARD_ELAPSED_MS >= 6000 )) || fail "the six-second deadline did not fire early (${GUARD_ELAPSED_MS}ms)"
 (( budget_six > budget_two )) \
   || fail "answer time tracks the configured budget (2s->${budget_two}s, 6s->${budget_six}s)"
 (( budget_six <= 9 )) \
   || fail "a longer budget is still honoured rather than overrun (6s->${budget_six}s)"
 pass "answer time tracks the configured budget, not the judgment's natural length"
 
-# --- what every Bash call pays to start ---------------------------------------
-# Both hooks source these libraries on every Bash call, before they read the
-# command, so their load time is added to `ls` as much as to an install. The
-# install grammar once spent 0.9s here under macOS /bin/bash (bash 3.2), whose
-# `${table//$'\n'/ }` is quadratic in a table's length; bash 5 did not show it,
-# and neither did a measurement that timed installs instead of plain commands.
-# So each file is timed by itself, under the bash on PATH and under /bin/bash
-# when that is another one, as the fastest of five loads: a slow load measures
-# the machine, a fast one bounds the file. A healthy load is about 10ms.
-startup_libs=(lib/truth-sources.sh lib/install-grammar.sh lib/npm/ask.sh
-  lib/npm/workspaces.sh lib/ledger/ledger.sh lib/providers/providers.sh
-  lib/npm/closure.sh lib/gates/rollback-journal.sh)
-startup_shells=(bash)
-[[ ! -x /bin/bash || "$(command -v bash)" == /bin/bash ]] || startup_shells+=(/bin/bash)
-startup_bound_ms=250
-# The fastest of <tries> loads of <file> under <shell>, in ms, as LOAD_MS. The
-# shell's own `time` reads the clock, so the figure excludes starting the shell.
-load_ms() {
-  local sh="$1" file="$2" tries="$3" i t ms
-  LOAD_MS=""
-  for (( i = 0; i < tries; i++ )); do
-    # shellcheck disable=SC2016  # expanded by the shell under test
-    t=$("${sh}" -c 'TIMEFORMAT=%3R; { time source "$1" >/dev/null 2>&1; } 2>&1' load-cost "${file}") || true
-    [[ "${t}" =~ ^[0-9]+[.][0-9]{3}$ ]] \
-      || fail "loading ${file} under ${sh} is timed (got: '${t}')"
-    ms=$(( 10#${t/./} ))
-    [[ -n "${LOAD_MS}" ]] && (( ms >= LOAD_MS )) || LOAD_MS=${ms}
-  done
-}
-# The control: a file that takes 0.3s to load reads as over the bound, so a
-# clean result below is the clock's answer, not a reading that cannot fail.
-printf 'sleep 0.3\n' > "${tmp_root}/slow-load.sh"
-load_ms bash "${tmp_root}/slow-load.sh" 1
-(( LOAD_MS >= startup_bound_ms )) \
-  || fail "the load clock reads a 0.3s load as over ${startup_bound_ms}ms (read ${LOAD_MS}ms)"
-startup_note=""
-for sh in "${startup_shells[@]}"; do
-  for lib in "${startup_libs[@]}"; do
-    load_ms "${sh}" "${ROOT_DIR}/${lib}" 5
-    startup_note+=" ${lib##*/}=${LOAD_MS}"
-    (( LOAD_MS < startup_bound_ms )) \
-      || fail "${lib} loads in under ${startup_bound_ms}ms under ${sh} (fastest of 5: ${LOAD_MS}ms); every Bash call pays this, twice"
-  done
-  # shellcheck disable=SC2016  # expanded by the shell under test
-  printf '# note - load under %s (%s), fastest of 5, ms:%s\n' "${sh}" \
-    "$("${sh}" -c 'printf %s "${BASH_VERSION}"')" "${startup_note}"
-  startup_note=""
-done
-pass "every library the hooks load on every Bash call loads in under ${startup_bound_ms}ms, under each bash here"
+# A judgment killed before its deadline is undecided for a different reason.
+# The fixture owns this signal; neither text channel may claim time expired.
+GUARD_KILL_JUDGMENT=1
+slow_guard "${never}" "echo ${big}" 20
+GUARD_KILL_JUDGMENT=""
+[[ "${GUARD_DECISION}" == deny ]] || fail "an early killed judgment is denied"
+grep -q 'UNDECIDED' <<< "${GUARD_REASON}" || fail "an early killed judgment is undecided"
+(( GUARD_ELAPSED_MS < 20000 )) || fail "the early-exit fixture ended before its deadline (${GUARD_ELAPSED_MS}ms)"
+exit_fact='the judgment process ended without a usable answer (signal 9)'
+grep -Fq "${exit_fact}" <<< "${GUARD_REASON}" || fail "the early-exit reason states the observed signal"
+grep -Fq "${exit_fact}" "${GUARD_STATE_DIR}/advisory.log" || fail "the early-exit advisory states the observed signal"
+if grep -Eiq 'budget|deadline|within' <<< "${GUARD_REASON}"; then fail "the early-exit reason does not claim a budget expiry"; fi
+if grep -Eiq 'budget|deadline|within' "${GUARD_STATE_DIR}/advisory.log"; then fail "the early-exit advisory does not claim a budget expiry"; fi
+slow_sleeper_gone || fail "an early killed judgment leaves no npm descendant behind"
+pass "judgment killed before its deadline yields UNDECIDED with exit status, without a budget-expiry claim"
 
-# --- a fast judgment is answered as fast as before ---------------------------
-# The rows after this one make the deadline read the clock. Doing that must not
-# cost the fast path anything: the parent still polls in steps that start at
-# 50ms, so a judgment that finishes inside the first step is answered at 50ms.
-# A clock-only loop that slept a whole second per check would pass every
-# deadline row below and add up to a second to every engaged call.
-#
-# Two rows, because a time measurement alone cannot tell that apart from a slow
-# machine. The schedule row reads the sleeps the parent asked for, through the
-# loaded shim at factor 1, and fails on a coarse first step on any machine. The
-# timing row measures it in real time, engaged against inline on the same
-# command, and fails when the engaged path adds a second or more on top of the
-# child it spawns. "ls -la" engages at 1 byte and reaches no package manager,
-# so the judgment is as short as the guard makes one.
-command -v node >/dev/null 2>&1 || fail "node is on PATH for the millisecond clock"
-
-load_machine 1
-loaded_guard "ls -la" 20 1
-[[ "${GUARD_DECISION}" == "pass" ]] || fail "an engaged fast judgment passes (got: ${GUARD_DECISION})"
-fast_first_step=$(head -n 1 "${loaded_log}")
-[[ "${fast_first_step}" == "0.050" ]] \
-  || fail "the parent's first poll is the 50ms step (asked for: '${fast_first_step}'; sleeps: $(tr '\n' ' ' < "${loaded_log}"))"
-while IFS= read -r fast_step; do
-  case "${fast_step}" in
-    0.*|1.000) ;;
-    *) fail "no poll step is longer than 1s (asked for: ${fast_step})" ;;
-  esac
-done < "${loaded_log}"
-pass "the parent still polls from a 50ms first step, capped at 1s"
+# Retired old rows 397 and 427: native pre sources no Bash hook libraries
+# and does not call PATH sleep with the Bash 50ms poll schedule. The whole
+# entry startup/engaged overhead and descheduled-supervisor rows below retain
+# the latency and elapsed-clock contracts. CLI library startup is not measured.
+printf '# retired - Bash hook-library source startup; covered by whole-entry latency below\n'
+printf '# retired - Bash 50ms poll-call schedule; covered by fast response and elapsed deadline below\n'
 
 # The fastest of three runs, because a slow run measures the machine, not the
 # path. Inline is the baseline: it is the same judgment without the machinery.
@@ -432,9 +236,7 @@ fastest_ms() {
   local engage="$1" _
   FASTEST_MS=""
   for _ in 1 2 3; do
-    GUARD_CLOCK_MS=1
     guard "ls -la" 20 "${engage}"
-    GUARD_CLOCK_MS=""
     [[ "${GUARD_DECISION}" == "pass" ]] || fail "a fast judgment passes, engage ${engage} (got: ${GUARD_DECISION})"
     if [[ -z "${FASTEST_MS}" ]] || (( GUARD_ELAPSED_MS < FASTEST_MS )); then
       FASTEST_MS=${GUARD_ELAPSED_MS}
@@ -446,9 +248,7 @@ fast_inline_ms=${FASTEST_MS}
 fastest_ms 1
 fast_engaged_ms=${FASTEST_MS}
 printf '# note - fast judgment, fastest of 3: engaged %sms, inline %sms\n' "${fast_engaged_ms}" "${fast_inline_ms}"
-# The whole guard on a plain command, inline. The rows above bound each file
-# it loads; this one bounds whatever else a change might add to every call.
-# About 140ms on an M1 at load 20; a second more is the regression it catches.
+# The full registered entry on a plain command, including native startup.
 (( fast_inline_ms < 1000 )) \
   || fail "a plain command's guard answers in under a second, inline (fastest of 3: ${fast_inline_ms}ms)"
 pass "a plain command's guard answers in under a second"
@@ -456,47 +256,33 @@ pass "a plain command's guard answers in under a second"
   || fail "an engaged fast judgment adds less than a second to the inline one (engaged ${fast_engaged_ms}ms, inline ${fast_inline_ms}ms)"
 pass "an engaged fast judgment is answered without waiting out a whole second"
 
-# --- the deadline is read from the clock, not added up from its sleeps -------
-# The deadline used to count the time its sleeps asked for. On a loaded machine
-# a sleep takes longer than it asks, so the real wait ran past the budget by
-# whatever load added to every step. Against the 4s budget below, that loop
-# stops once its requests add up to 4.55s, which at three times per sleep is
-# about 13.7s of real time. Past the runtime's 30s the hook is killed and the
-# install proceeds unjudged.
-#
-# The loaded shim stretches every sleep threefold, and the awk shim holds the
-# judgment so nothing but the deadline answers. The margin is one stretched 1s
-# step (3s), plus a second for the grace, the reap and jq. It does not grow
-# with the budget, because only the last step is late.
+# --- elapsed time while the supervisor is not scheduled --------------------
+# Pause only this fixture's native supervisor until after its deadline. On
+# CONT it must answer promptly, not wait out another requested-sleep budget.
+# The helper records monotonic resume/response times and checks the difference.
 loaded_budget=4
 loaded_margin=4
-load_machine 3
-GUARD_CLOCK_MS=1
+GUARD_LOAD=1
 slow_guard "${never}" "pip install requests==2.31.0 # ${big}" "${loaded_budget}"
-GUARD_CLOCK_MS=""
 [[ "${GUARD_DECISION}" == "deny" ]] || fail "on a loaded machine the stuck judgment is denied (got: ${GUARD_DECISION})"
 grep -q 'UNDECIDED' <<< "${GUARD_REASON}" || fail "on a loaded machine the deny is the undecided one"
-printf '# note - loaded machine, sleeps x3: UNDECIDED after %sms against a %ss budget\n' "${GUARD_ELAPSED_MS}" "${loaded_budget}"
+printf '# note - supervisor descheduled past its deadline: UNDECIDED after %sms against a %ss budget\n' "${GUARD_ELAPSED_MS}" "${loaded_budget}"
 (( GUARD_ELAPSED_MS <= (loaded_budget + loaded_margin) * 1000 )) \
   || fail "on a loaded machine the answer lands within the ${loaded_budget}s budget plus ${loaded_margin}s (took ${GUARD_ELAPSED_MS}ms; a deadline that adds up its sleeps lands near three times the budget)"
 pass "on a loaded machine the deadline holds in wall-clock time"
 
 slow_sleeper_gone \
   || fail "on a loaded machine the deadline still takes the blocked command down"
-loaded_sleepers_gone \
-  || fail "no sleep the loaded run started outlives the answer"
 pass "on a loaded machine the deadline leaves no sleeper behind"
 
 # Bash seeds SECONDS from the environment. A deadline that compared SECONDS
 # itself, rather than its distance from the guard's start, would never arrive
 # under an exported SECONDS=-1000000, and only the requested-sleep bound would
 # end the wait: the late answer above, through a different door.
-load_machine 3
-GUARD_CLOCK_MS=1
+GUARD_LOAD=1
 GUARD_SECONDS=-1000000
 slow_guard "${never}" "pip install requests==2.31.0 # ${big}" "${loaded_budget}"
 GUARD_SECONDS=""
-GUARD_CLOCK_MS=""
 [[ "${GUARD_DECISION}" == "deny" ]] || fail "an exported SECONDS does not turn the deadline into a pass (got: ${GUARD_DECISION})"
 grep -q 'UNDECIDED' <<< "${GUARD_REASON}" || fail "an exported SECONDS still ends in the undecided deny"
 (( GUARD_ELAPSED_MS <= (loaded_budget + loaded_margin) * 1000 )) \
@@ -509,9 +295,24 @@ pass "an exported SECONDS does not move the deadline"
 # fail-open the machinery above exists to remove. The value is therefore clamped
 # to a ceiling below the runtime budget. Both constants are read from the guard
 # so this battery tracks them instead of restating them.
-runtime_budget=$(grep -m1 '^SAFEDEPS_RUNTIME_BUDGET_SECONDS=' scripts/safedeps-pre-guard.sh | cut -d= -f2)
-budget_ceiling=$(grep -m1 '^SAFEDEPS_SELF_BUDGET_MAX_SECONDS=' scripts/safedeps-pre-guard.sh | cut -d= -f2)
+# Read the production budget values without extracting a Bash hook body.
+source "${ROOT_DIR}/scripts/test/lib/core-reader.sh"
+core_reader_init "${ROOT_DIR}"
+budget_config=$("${SAFEDEPS_TEST_CORE}" budget-config)
+runtime_budget=$(jq -r '.runtime_budget_seconds' <<< "${budget_config}")
+budget_ceiling=$(jq -r '.self_budget_max_seconds' <<< "${budget_config}")
 [[ -n "${runtime_budget}" && -n "${budget_ceiling}" ]] || fail "budget constants are readable from the guard"
+registered_timeout=$(python3 - "${ROOT_DIR}/scripts/install/install-safedeps-hooks.mjs" <<'PYTIME'
+import re,sys
+from pathlib import Path
+values=re.findall(r'^const PRE_HOOK_TIMEOUT_SECONDS = (\d+);$',Path(sys.argv[1]).read_text(),re.M)
+if len(values)!=1:raise SystemExit('registered pre timeout declaration changed')
+print(values[0])
+PYTIME
+)
+[[ "${runtime_budget}" == "${registered_timeout}" ]] || fail "core runtime budget matches the registered pre timeout"
+(( budget_ceiling < registered_timeout )) || fail "self-budget ceiling is below the registered pre timeout"
+
 
 # The judgment is held up for a minute, so nothing but the ceiling can bring the
 # answer back under the runtime budget. If the clamp ever regresses this case
@@ -672,9 +473,12 @@ pass "a non-numeric engage size falls back to the default and says so"
 # from the deadline and not from something the delay did to the judgment.
 mutation_delay=4
 slow_guard "${mutation_delay}" "echo ${big}" "${tiny_budget}" 1024 1
-[[ "${GUARD_DECISION}" == "pass" ]] \
+[[ "${GUARD_DECISION}" == "allow" ]] \
   || fail "with the deadline disabled the same command is allowed (got: ${GUARD_DECISION})"
-(( GUARD_ELAPSED >= mutation_delay )) \
+jq -e '.hookSpecificOutput.updatedInput.command | contains("npm ci") and contains("--ignore-scripts")' \
+  <<< "${GUARD_OUT}" >/dev/null || fail "the allowed npm judgment sends its inert-install rewrite"
+if grep -q 'UNDECIDED' <<< "${GUARD_REASON}"; then fail "the allowed npm judgment is not undecided"; fi
+(( GUARD_ELAPSED_MS >= mutation_delay * 1000 )) \
   || fail "with the deadline disabled the judgment runs past the budget instead of being cut (took ${GUARD_ELAPSED}s)"
 pass "battery is meaningful: with the deadline disabled the same command walks through"
 
@@ -683,6 +487,9 @@ grep -q 'DISABLED' <<< "${GUARD_STDERR}" \
   || fail "the disabled deadline is announced on stderr (got: $(printf '%s' "${GUARD_STDERR}" | head -c 80))"
 grep -q 'deadline is OFF' "${GUARD_STATE_DIR}/advisory.log" \
   || fail "the disabled deadline is recorded in advisory.log"
+guard "echo ${big}" "${tiny_budget}" 1024 1
+grep -q 'DISABLED' <<< "${GUARD_STDERR}" || fail "a second disabled call announces itself"
+grep -q 'deadline is OFF' "${GUARD_STATE_DIR}/advisory.log" || fail "a second disabled call records the bypass"
 pass "a disabled deadline announces itself every time it is used"
 
 # --- the parent/child marker cannot be set from outside ----------------------
@@ -773,11 +580,8 @@ guard "npm install left-pad@1.3.0" 2
 [[ "${GUARD_DECISION}" == "deny" ]] || fail "unapproved npm install still denies (got: ${GUARD_DECISION})"
 pass "unapproved npm install still denies"
 
-# Engaged but comfortably inside the budget: the machinery must be transparent,
-# including the Claude-only inert-install rewrite that travels in the same
-# payload. This is the case a naive budget breaks. The budget is 3s, not 2s,
-# because the whole-second clock can end a budget up to a second early. 3s
-# still leaves the judgment more than 2s, as this row always has.
+# Engaged but comfortably inside the budget: supervision must preserve the
+# judgment. Keep the original three-second fixture budget.
 guard "echo ${small}" 3 128
 [[ "${GUARD_DECISION}" == "pass" ]] || fail "engaged in-budget benign command still passes (got: ${GUARD_DECISION})"
 pass "engaged but in-budget benign command still passes"

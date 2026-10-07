@@ -85,7 +85,7 @@ tuple() {
   for iter in 1 2 3 4 5 6; do
     out=$(cd "${tree}" && jq -nc --arg c "${command}" --arg cwd "${PROJECT}" \
       '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
-      HOME="${safe}/home" SAFEDEPS_HOME="${safe}" bash scripts/safedeps-pre-guard.sh 2>/dev/null) || true
+      HOME="${safe}/home" SAFEDEPS_HOME="${safe}" bash scripts/safedeps-hook-entry.sh pre 2>/dev/null) || true
     reason=$(jq -r '.hookSpecificOutput.permissionDecisionReason // empty' <<< "${out:-{\}}" 2>/dev/null) || true
     if [[ "${iter}" == 1 ]]; then
       first=$(jq -r '.hookSpecificOutput.permissionDecision // "pass"' <<< "${out:-{\}}" 2>/dev/null) || first=pass
