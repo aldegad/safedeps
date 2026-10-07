@@ -1,6 +1,6 @@
 //! File metadata and bounded walks used by the install and backstop traces.
 use super::{jv, sh, report::cat};
-use crate::{json::Value, os, state, outcome::{Outcome,Form}};
+use crate::{json::Value, os, state, outcome::{Outcome,Action,Form}};
 use std::{fs, path::{Path,PathBuf}, os::unix::fs::MetadataExt, time::{Duration,Instant}};
 
 pub const RECORDS: [&str;2] = ["package-lock.json","node_modules/.package-lock.json"];
@@ -117,7 +117,7 @@ pub fn backstop(project:&Path,entry:&[u8],none:&[u8])->(bool,Vec<u8>) {
     });
     if !found.is_empty(){return(true,cat(&[&found,b" changed after the baseline taken before this command"]))}
     match rc {
-        Err(outcome)=>(true,outcome.describe(&cat(&[b"the walk of ",sh::bytes(&tree)]),Form::Within(seconds))),
+        Err(outcome)=>(true,outcome.describe(Action::Walk(&tree),Form::Within(seconds))),
         Ok(())=>(false,cat(&[&no,b", neither lockfile changed after the record taken before this command, and nothing in node_modules changed after the baseline"])),
     }
 }
@@ -138,7 +138,7 @@ mod tests {
         assert_eq!(error.kind(),expected.kind());
         assert!(matches!(walk(&missing,usize::MAX,false,Some(Instant::now()),|_,_|false),Err(Outcome::Deadline)));
         assert!(walk(&root,usize::MAX,false,None,|_,_|true).is_ok());
-        assert_eq!(super::super::report::io_outcome(b"the walk of fixture",Err(std::io::Error::other("no code"))),
+        assert_eq!(Outcome::Io(Err(std::io::Error::other("no code"))).describe(Action::Walk(Path::new("fixture")),Form::Action),
             b"the walk of fixture returned an error without an OS code");
         fs::remove_dir(&root).unwrap();
     }

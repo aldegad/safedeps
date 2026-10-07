@@ -1,6 +1,6 @@
 //! Observed operation results and the one vocabulary used to report them.
 //! A process signal, a failed start and a failed wait are never exit codes.
-use std::{io, os::unix::process::ExitStatusExt, process::ExitStatus};
+use std::{io, os::unix::{process::ExitStatusExt, ffi::OsStrExt}, path::Path, process::ExitStatus};
 
 #[derive(Debug)]
 pub enum Outcome {
@@ -12,6 +12,9 @@ pub enum Outcome {
 }
 
 #[derive(Clone, Copy)]
+pub enum Action<'a> { Npm, NpmConfig, NpmQuery, NpmRebuild, Judgment, Walk(&'a Path), Copy, Removal }
+
+#[derive(Clone, Copy)]
 pub enum Form { Action, Detail, Judgment, Within(u64) }
 
 impl Outcome {
@@ -20,7 +23,14 @@ impl Outcome {
         match self { Self::Finished(status)=>status.success(), Self::Io(Ok(()))=>true, _=>false }
     }
 
-    pub fn describe(&self, action: &[u8], form: Form) -> Vec<u8> {
+    pub fn describe(&self, action: Action<'_>, form: Form) -> Vec<u8> {
+        let named;
+        let action: &[u8] = match action {
+            Action::Npm=>b"npm", Action::NpmConfig=>b"npm config", Action::NpmQuery=>b"npm query",
+            Action::NpmRebuild=>b"npm rebuild", Action::Judgment=>b"judgment",
+            Action::Copy=>b"copy", Action::Removal=>b"removal",
+            Action::Walk(path)=>{named=[b"the walk of ".as_slice(),path.as_os_str().as_bytes()].concat();&named},
+        };
         let cat=|parts: &[&[u8]]| parts.concat();
         let error=|error: &io::Error| match error.raw_os_error() {
             Some(code)=>format!("OS error {}",code).into_bytes(),
@@ -68,11 +78,11 @@ mod tests {
         ];
         for (outcome,line) in rows {
             assert!(!outcome.success());
-            assert_eq!(outcome.describe(b"npm rebuild",Form::Action),line.as_bytes());
+            assert_eq!(outcome.describe(Action::NpmRebuild,Form::Action),line.as_bytes());
         }
-        assert_eq!(Outcome::status(ExitStatus::from_raw(0x7f)).describe(b"",Form::Judgment),b"no exit code or signal");
-        assert_eq!(Outcome::status(ExitStatus::from_raw(9)).describe(b"",Form::Detail),b"signal 9");
-        assert_eq!(Outcome::Deadline.describe(b"the walk of fixture",Form::Within(5)),b"the walk of fixture did not finish within 5s");
+        assert_eq!(Outcome::status(ExitStatus::from_raw(0x7f)).describe(Action::Judgment,Form::Judgment),b"no exit code or signal");
+        assert_eq!(Outcome::status(ExitStatus::from_raw(9)).describe(Action::Npm,Form::Detail),b"signal 9");
+        assert_eq!(Outcome::Deadline.describe(Action::Walk(Path::new("fixture")),Form::Within(5)),b"the walk of fixture did not finish within 5s");
         assert!(Outcome::status(ExitStatus::from_raw(0)).success());
     }
 }

@@ -304,13 +304,13 @@ impl Npm{
             let rest:Vec<_>=blockers.into_iter().filter(|l|![b"fetched\t".as_slice(),b"origin\t",b"withheld\t",b"held\t"].iter().any(|p|l.starts_with(p))).collect();
             if !rest.is_empty(){report.say(cat(&[b"npm rebuild was not run: the tree npm would rebuild in ",project,b" holds ",&clauses(&rest),b". safedeps runs install scripts only over a tree whose every package is on record and comes from the public registry or a declared workspace member. safedeps did not run npm rebuild; review it, then run `npm rebuild` yourself if it is what you expect"]));}return;
         }
-        use std::process::{Command,Stdio};use crate::outcome::{Outcome,Form};
+        use std::process::{Command,Stdio};use crate::outcome::{Outcome,Action,Form};
         let child=Command::new("npm").current_dir(&store.project).args(["rebuild","--global=false","--location=project","--prefix"]).arg(&store.project)
             .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
         let outcome=match child {
             Err(error)=>Outcome::StartFailure(error),
             Ok(mut child)=>match child.wait() {Ok(status)=>Outcome::status(status),Err(error)=>Outcome::StatusFailure(error)},
         };
-        if !outcome.success(){report.rebuild(home,&meta,input,&outcome.describe(b"npm rebuild",Form::Action));}
+        if !outcome.success(){report.rebuild(home,&meta,input,&outcome.describe(Action::NpmRebuild,Form::Action));}
     }
 }
