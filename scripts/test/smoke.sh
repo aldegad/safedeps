@@ -416,11 +416,19 @@ run_hook_command() {
   local home_dir="$1"
   local safe_dir="$2"
   local command="$3"
-  local payload out rewritten
+  local payload out rewritten response_contract="${4:-decision}"
 
   payload=$(jq -nc --arg command "${command}" --arg cwd "${project_dir}" \
     '{tool_name:"Bash",tool_input:{command:$command},cwd:$cwd}')
   out=$(printf '%s' "${payload}" | HOME="${home_dir}" SAFEDEPS_HOME="${safe_dir}" scripts/safedeps-hook-entry.sh pre)
+  case "${response_contract}" in
+    quiet) [[ -z "${out}" ]] || fail "expected no hook output: ${command} (got ${out})" ;;
+    decision)
+      [[ -n "${out}" ]] || fail "expected a hook decision, got no output: ${command}"
+      jq -e 'type == "object" and (.hookSpecificOutput | type == "object")' <<< "${out}" >/dev/null \
+        || fail "expected a JSON hook decision: ${command} (got ${out})" ;;
+    *) fail "unknown hook response contract: ${response_contract}" ;;
+  esac
   if [[ -z "${out}" || "$(jq -r '.hookSpecificOutput.permissionDecision // empty' <<< "${out}")" == allow ]]; then
     rewritten=""
     if [[ -n "${out}" ]]; then
@@ -533,7 +541,7 @@ jq -e '.ignore_scripts_injected == false' "${tmp_root}/safe-hook-codex/snapshots
 pass "hook keeps Codex approved install as plain allow"
 
 for inert_skip_cmd in "npm view left-pad" "npm run build" "npm --version"; do
-  inert_skip_output=$(run_hook_command "${tmp_root}/home-inert-skip" "${tmp_root}/safe-inert-skip" "${inert_skip_cmd}")
+  inert_skip_output=$(run_hook_command "${tmp_root}/home-inert-skip" "${tmp_root}/safe-inert-skip" "${inert_skip_cmd}" quiet)
   [[ -z "${inert_skip_output}" ]] || fail "hook does not inject non-install command: ${inert_skip_cmd}"
 done
 pass "hook does not inject npm non-install commands"
@@ -541,7 +549,7 @@ pass "hook does not inject npm non-install commands"
 mkdir -p "${tmp_root}/safe-hook-ignore-scripts"
 SAFEDEPS_HOME="${tmp_root}/safe-hook-ignore-scripts" lib/ledger/ledger.sh approve npm left-pad 1.3.0 1.3.0 smoke >/dev/null
 ignore_scripts_output=$(
-  run_hook_command "${tmp_root}/home-hook-ignore-scripts" "${tmp_root}/safe-hook-ignore-scripts" "npm install left-pad@1.3.0 --ignore-scripts"
+  run_hook_command "${tmp_root}/home-hook-ignore-scripts" "${tmp_root}/safe-hook-ignore-scripts" "npm install left-pad@1.3.0 --ignore-scripts" quiet
 )
 [[ -z "${ignore_scripts_output}" ]] || fail "hook does not duplicate --ignore-scripts"
 ignore_sid=$(jq -r '.snapshot_id' "${tmp_root}/safe-hook-ignore-scripts/pending/"*.json)
@@ -1158,7 +1166,7 @@ pass "--prefix install targets the override dir for snapshot/effect-gate (findin
 # Regression: `npx <tool> <args>` runs an already-installed binary. Arguments to
 # the tool (e.g. an email) must NOT be misread as a pkg@spec install and denied.
 npx_runner_output=$(
-  run_hook_command "${tmp_root}/home-npx-run" "${tmp_root}/safe-npx-run" "npx wrangler secret put EXAMPLE_SHARED_SECRET --name example-gateway ops@example.test"
+  run_hook_command "${tmp_root}/home-npx-run" "${tmp_root}/safe-npx-run" "npx wrangler secret put EXAMPLE_SHARED_SECRET --name example-gateway ops@example.test" quiet
 )
 [[ -z "${npx_runner_output}" ]] || fail "hook allows npx tool run with @-bearing args"
 pass "hook allows npx tool run with @-bearing args"
@@ -1216,7 +1224,7 @@ false_positive_cases=(
 )
 for fp_cmd in "${false_positive_cases[@]}"; do
   rm -rf "${false_positive_safe}"
-  fp_output=$(run_hook_command "${tmp_root}/home-false-positive" "${false_positive_safe}" "${fp_cmd}")
+  fp_output=$(run_hook_command "${tmp_root}/home-false-positive" "${false_positive_safe}" "${fp_cmd}" quiet)
   [[ -z "${fp_output}" ]] || fail "hook ignores non-install text command: ${fp_cmd}"
   fp_pending=$({ find "${false_positive_safe}/pending" -name '*.json' -type f 2>/dev/null || true; } | wc -l | tr -d ' ')
   fp_snapshots=$({ find "${false_positive_safe}/snapshots" -name '*_meta.json' -type f 2>/dev/null || true; } | wc -l | tr -d ' ')
