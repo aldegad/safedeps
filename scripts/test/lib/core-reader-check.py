@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 
 ROOT = Path(__file__).resolve().parents[3]
 CORE = sys.argv[1]
@@ -121,9 +122,37 @@ def corpus():
     print("ok - ten multiline ecosystem expectations")
 
 
+def settlement():
+    # Public counterexamples connect the reader's failed state to pre's
+    # settlement; internal invalid-view controls live beside Run in Rust.
+    with tempfile.TemporaryDirectory(prefix="safedeps-reader-settlement.") as temp:
+        root = Path(temp)
+        for index, (command, denied) in enumerate([
+            ('printf "\npip install evil==6.6.6', True), ("echo '", False)
+        ]):
+            state = root / str(index)
+            payload = json.dumps({"tool_name": "Bash", "cwd": str(root),
+                                  "tool_input": {"command": command}}).encode()
+            result = subprocess.run([CORE, "pre"], input=payload, capture_output=True,
+                                    env=dict(os.environ, HOME=str(root / "home"),
+                                             SAFEDEPS_HOME=str(state)), check=True, timeout=20)
+            log = (state / "advisory.log").read_text()
+            assert "scanner failed" in log, (command, log)
+            if denied:
+                hook = json.loads(result.stdout)["hookSpecificOutput"]
+                assert hook["permissionDecision"] == "deny", hook
+                assert "UNDECIDED" in hook["permissionDecisionReason"], hook
+                assert not list((state / "pending").glob("*.json")), command
+            else:
+                assert not result.stdout, result.stdout
+                assert b"could not be fully read" in result.stderr, result.stderr
+    print("ok - native pre settles unclosed manager input as UNDECIDED and reports unread non-installs")
+
+
 if __name__ == "__main__":
     try:
-        {"table": table, "source-map": source_map, "corpus": corpus}[sys.argv[2]]()
+        {"table": table, "source-map": source_map, "corpus": corpus,
+         "settlement": settlement}[sys.argv[2]]()
     except (AssertionError, subprocess.SubprocessError, ValueError, KeyError) as error:
         print(f"not ok - native reader: {error}", file=sys.stderr)
         sys.exit(1)
