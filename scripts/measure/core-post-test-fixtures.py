@@ -20,6 +20,88 @@ import time
 
 ROOT = Path(__file__).resolve().parents[2]
 
+# Selection belongs to the requested invocation, never to its receipt.
+FAULT_COPIES = {
+    ('pre','markfail'):'pre-mark', ('pre','same'):'pre-same',
+    ('pre','bs_sec'):'pre-seconds', ('pre','bs_mix'):'pre-coarse',
+    ('post','bs_mix'):'coarse', ('post','bs_slow'):'walk',
+    ('post','owner-empty'):'owner', ('post','owner-short'):'owner-short',
+    ('post','owner-wrong-pid'):'owner-wrong-pid',
+    ('post','markread'):None, ('post','cpfail'):None,
+    ('post','cpgone'):None, ('post','rmfail'):None,
+    ('post','twoobj'):None, ('pre','workspace'):None,
+}
+
+def selection(manifest, stage, fault):
+    selected=FAULT_COPIES[(stage,fault)] if fault else None
+    return selected, manifest['copies'][selected] if selected else manifest
+
+def permission_fixture(fault, project, home):
+    if fault=='markread':
+        records=[]
+        for path in (home/'pending').glob('*.json'):
+            try:r=json.loads(path.read_text())
+            except (OSError,ValueError):continue
+            if isinstance(r,dict) and r.get('project_dir')==str(project.resolve()):records.append(r)
+        if len(records)!=1:raise RuntimeError('expected exactly one pending record')
+        target=home/'snapshots'/(records[0]['snapshot_id']+'_meta.json')
+        return target,0,'read',target
+    if fault=='workspace':
+        target=project/'packages/m0/package.json'
+        return target,0,'read',target
+    if fault=='cpfail':
+        target=project/'package-lock.json'
+        return target,0o444,'write',target
+    if fault=='cpgone':return project,0o555,'create',project/'package-lock.json'
+    if fault=='rmfail':
+        target=project/'node_modules/installed-package'
+        return target,0o555,'unlink',target/'held'
+    return None
+
+def clock_fact(home, project, payload):
+    record=json.loads((home/'pending/backstop'/('id-'+payload['tool_use_id']+'.json')).read_text())
+    return dict(entry=record,baseline_mtime_ns=Path(record['baseline']).stat().st_mtime_ns,
+                node_ctime_ns=(project/'node_modules').stat().st_ctime_ns,
+                lock_ctime_ns=(project/'package-lock.json').stat().st_ctime_ns)
+
+def check_facts(facts, selected, permission, fault, home, project, payload, call):
+    expected=[]
+    if selected:
+        observed=(home/'.c3-reached').read_text()
+        if selected=='pre-mark':
+            if observed!='Err(Os { code: 13, kind: PermissionDenied, message: "Permission denied" })':
+                raise RuntimeError('rewrite writer did not return the expected permission error')
+        elif selected.startswith('owner'):
+            query=json.loads(observed)
+            if not str(query['pid']).isdigit() or type(query['expected_bytes']) is not int or query['expected_bytes']<=8:
+                raise RuntimeError('invalid owner query receipt')
+            n=query['expected_bytes']
+            returned={'owner':0,'owner-short':n-8,'owner-wrong-pid':n}[selected]
+            if query['returned_bytes']!=returned or (selected=='owner-wrong-pid' and query['returned_pid']==query['pid']):
+                raise RuntimeError('owner query did not exhibit the selected failure')
+        elif observed!='reached':raise RuntimeError('source operation was not reached')
+        expected.append(dict(source_operation=selected,observed=observed))
+        if selected in ['pre-seconds','pre-coarse']:
+            clocks=clock_fact(home,project,payload)
+            if clocks['entry']['resolution']!='seconds' or clocks['baseline_mtime_ns']%1_000_000_000:
+                raise RuntimeError('baseline does not have the expected seconds precision')
+            expected.append(clocks)
+    elif permission:
+        _,_,operation,path=permission
+        expected.append(dict(path=str(path),operation=operation,errno=13,uid=os.geteuid(),reached=True))
+        if fault=='workspace':
+            # This fact is a production discovery result, not a free-form tag.
+            if len(facts)!=2 or set(facts[1])!={'discovery_rc','discovery_stdout','discovery_stderr'}:
+                raise RuntimeError('workspace discovery fact is missing')
+            q=facts[1]
+            if q['discovery_rc']!=0 or q['discovery_stderr']!='' or str(path.parent) not in q['discovery_stdout'].splitlines():
+                raise RuntimeError('workspace discovery does not name the failing member')
+            expected.append(q)
+    elif fault=='twoobj':
+        expected.append(dict(record_unread_marker=str(call/'record-unread')))
+        if not (call/'record-unread').is_file():raise RuntimeError('record-unread marker is missing')
+    if facts!=expected:raise RuntimeError('receipt facts do not match the requested fault and location')
+
 def dump(path, value):
     path.write_text(json.dumps(value, indent=2) + '\n')
 
@@ -119,33 +201,16 @@ def hook(a):
     fault=os.environ.get('SAFEDEPS_TEST_FAULT','')
     env=dict(os.environ);env.pop('SAFEDEPS_TEST_FAULT',None)
     if a.stage=='post' and call:(call/'native-owner-source').touch()
-    selected={'bs_sec':'pre-seconds','same':'pre-same','markfail':'pre-mark',
-              'bs_slow':'walk','owner-empty':'owner','owner-short':'owner-short','owner-wrong-pid':'owner-wrong-pid'}.get(fault)
-    if fault=='bs_mix':selected='pre-coarse' if a.stage=='pre' else 'coarse'
-    binary=manifest['copies'][selected]['core'] if selected else manifest['core']
-    wanted=manifest['copies'][selected]['sha256'] if selected else manifest['sha256']
+    selected,chosen=selection(manifest,a.stage,fault)
+    binary=chosen['core'];wanted=chosen['sha256']
     if digest(Path(binary))!=wanted:raise RuntimeError('fixture binary changed')
     restore=[]; facts=[]; marker=home/'.c3-reached'
     marker.unlink(missing_ok=True)
     try:
         if fault in ['markread','cpfail','cpgone','rmfail','workspace']:
             if os.geteuid()==0:raise RuntimeError('root cannot exercise permissions')
-            if fault=='markread':
-                records=[]
-                for record_path in (home/'pending').glob('*.json'):
-                    try: r=json.loads(record_path.read_text())
-                    except (OSError,ValueError): continue
-                    if isinstance(r,dict) and r.get('project_dir')==str(project.resolve()):records.append(r)
-                if len(records)!=1:raise RuntimeError('expected exactly one pending record')
-                target=home/'snapshots'/(records[0]['snapshot_id']+'_meta.json');mode=0;op='read';probe=target
-            elif fault=='workspace':
-                # Explicitly show production discovery includes the unreadable member.
-                target=project/'packages/m0/package.json';mode=0;op='read';probe=target
-            elif fault=='cpfail':target=project/'package-lock.json';mode=0o444;op='write';probe=target
-            elif fault=='cpgone':target=project;mode=0o555;op='create';probe=project/'package-lock.json'
-            else:
-                target=project/'node_modules/installed-package';mode=0o555;op='unlink';probe=target/'held'
-                probe.write_bytes(b'held fixture bytes\n')
+            target,mode,op,probe=permission_fixture(fault,project,home)
+            if fault=='rmfail':probe.write_bytes(b'held fixture bytes\n')
             restore.append((target,stat.S_IMODE(target.stat().st_mode)));target.chmod(mode)
             facts.append(denied(probe,op))
             if fault=='markread' and call:(call/'record-unread').touch()
@@ -167,12 +232,8 @@ def hook(a):
                 evidence=json.loads(reached)
                 (call/'native-query-failure.json').write_text(json.dumps(evidence))
         if selected in ['pre-seconds','pre-coarse']:
-            entry=home/'pending/backstop'/('id-'+payload['tool_use_id']+'.json')
-            record=json.loads(entry.read_text());baseline=Path(record['baseline'])
-            facts.append(dict(entry=record,baseline_mtime_ns=baseline.stat().st_mtime_ns,
-                              node_ctime_ns=(project/'node_modules').stat().st_ctime_ns,
-                              lock_ctime_ns=(project/'package-lock.json').stat().st_ctime_ns))
-            if record['resolution']!='seconds' or baseline.stat().st_mtime_ns % 1_000_000_000:
+            clocks=clock_fact(home,project,payload);facts.append(clocks)
+            if clocks['entry']['resolution']!='seconds' or clocks['baseline_mtime_ns'] % 1_000_000_000:
                 raise RuntimeError('native pre did not write the backdated whole-second baseline')
         if fault:
             with open(manifest['receipts'],'a') as f:
@@ -198,6 +259,10 @@ def checked_hook(a):
     fault=os.environ.get('SAFEDEPS_TEST_FAULT','')
     try:
         manifest=json.loads(Path(a.manifest).read_text())
+        selected,binary=selection(manifest,a.stage,fault)
+        payload=json.loads(raw);project=Path(payload['cwd']);home=Path(os.environ['SAFEDEPS_HOME'])
+        call=Path(os.environ['ORACLE_CALL']) if os.environ.get('ORACLE_CALL') else None
+        permission=permission_fixture(fault,project,home)
         receipts=Path(manifest['receipts'])
         offset=receipts.stat().st_size if receipts.exists() else 0
         result=subprocess.run([sys.executable,__file__,'hook','--manifest',a.manifest,'--stage',a.stage],
@@ -217,10 +282,10 @@ def checked_hook(a):
             for key,wanted in dict(stage=a.stage,fault=fault,rc=result.returncode,
                                    payload_sha256=hashlib.sha256(raw).hexdigest()).items():
                 if row.get(key)!=wanted:raise RuntimeError('receipt mismatch: '+key)
-            binary=manifest['copies'].get(row.get('source_copy'),manifest)
+            if row.get('source_copy')!=selected:raise RuntimeError('receipt names another source operation')
             if (row.get('core'),row.get('core_sha256'))!=(binary['core'],binary['sha256']):
                 raise RuntimeError('receipt names another binary')
-            if not row.get('facts'):raise RuntimeError('receipt has no reached-operation facts')
+            check_facts(row.get('facts'),selected,permission,fault,home,project,payload,call)
         return result.returncode
     except Exception as error:
         failure=dict(invocation=invocation,stage=a.stage,fault=fault,
