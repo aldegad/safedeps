@@ -119,9 +119,15 @@ def fixture(binary,out,marker,expect_failure):
                                advisory_failure='command scanner failed' in log)
         else:
             checks['no_fault_witness']='native-scan-site:' not in err
-            # The baseline only exercises a benign manager mention/ordinary
-            # command. An actual install may legitimately produce its record.
             checks['baseline_allow']=hook.get('permissionDecision')!='deny'
+            checks['baseline_decided']='UNDECIDED' not in hook.get('permissionDecisionReason','')
+            if label=='install':
+                # Contract: Claude's plain npm install receives the inert
+                # rewrite with its record. Do not derive this from core output.
+                checks['baseline_rewrite']=hook.get('updatedInput',{}).get('command')=='npm install --ignore-scripts'
+                checks['baseline_record']=len(pending)==1 and len(meta)==1
+            else:
+                checks['baseline_inert']='updatedInput' not in hook and not pending and not meta
         row=dict(name=label,input=payload,rc=r.returncode,stdout=raw,stderr=err,advisory=log,
                  pending=[str(p) for p in pending],meta=[str(p) for p in meta],checks=checks,passed=all(checks.values()))
         rows.append(row)
