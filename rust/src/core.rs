@@ -1309,6 +1309,10 @@ pub fn command_of_payload(input: &[u8]) -> Option<(String, W)> {
 fn unused(_: &manager::Regexes) {}
 
 #[cfg(test)]
+#[path = "core/reader_tests.rs"]
+mod reader_tests;
+
+#[cfg(test)]
 mod field_tests {
     use super::read_fields;
     #[test]
