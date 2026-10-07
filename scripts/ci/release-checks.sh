@@ -60,9 +60,9 @@ SHELLCHECK_FILES=(
   scripts/safedeps-pre-guard.sh scripts/safedeps-post-verify.sh
   scripts/safedeps-recheck-alert.sh scripts/release-gates.sh
   scripts/test/smoke.sh scripts/test/e2e.sh
-  scripts/test/run-all.sh scripts/test/ci-verdict.sh scripts/test/shard-cover.sh scripts/test/lib/shard.sh
+  scripts/test/run-all.sh scripts/test/rust-core.sh scripts/test/ci-verdict.sh scripts/test/shard-cover.sh scripts/test/lib/shard.sh
   scripts/measure/scan-failure-census.sh scripts/measure/census-shards.sh
-  scripts/ci/run-on-hosts.sh scripts/ci/remote.sh scripts/ci/release-checks.sh
+  scripts/ci/run-on-hosts.sh scripts/ci/remote.sh scripts/ci/release-checks.sh scripts/build-core.sh
 )
 
 die() { printf 'release-checks: %s\n' "$1" >&2; exit 2; }

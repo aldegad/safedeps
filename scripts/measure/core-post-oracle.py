@@ -17,7 +17,7 @@ p=argparse.ArgumentParser(description=__doc__)
 p.add_argument('--core',required=True)
 p.add_argument('--report',required=True)
 p.add_argument('--only')
-p.add_argument('--implementation',choices=['bash','rust'],default='rust')
+p.add_argument('--implementation',choices=['rust'],default='rust')
 p.add_argument('--entry',choices=['probe','post'],default='probe')
 p.add_argument('--no-reorg',action='store_true',help='Leave reorg.log absent before the existing fixture')
 p.add_argument('--expect-difference',action='store_true')
@@ -36,9 +36,7 @@ call="$BOX/oracle/call"
 mkdir -p "$call"
 [[ "$IMPLEMENTATION" != rust ]] || : > "$call/native-owner-source"
 oracle_before "$call" "$payload"
-if [[ "$IMPLEMENTATION" == bash ]]; then
-  out=$(printf '%s' "$payload" | "$ROOT/scripts/safedeps-post-verify.sh")
-elif [[ "$ENTRY" == post ]]; then
+if [[ "$ENTRY" == post ]]; then
   out=$(printf '%s' "$payload" | "$CORE" post)
 else
   request=$(jq -cn --arg input "$payload" '{op:"hook",input:$input}')

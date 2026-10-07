@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Remaining report controls reachable through public Codex pre and post.
 
-The hook wrappers, pre/post oracle, and the named assertions are taken from
-the existing e2e source. Synthetic projects use empty initial closures; the
+The hooks run through a native-only test adapter and the independent report
+oracle. The named fixed assertions also appear in e2e. Synthetic projects use empty initial closures; the
 pull fixture then writes an unapproved package with a warm advisory cache.
 Copies alone receive a source mutation. A build error, missed fixture, or
 oracle error is not an assertion control. This is not the full e2e suite.
@@ -29,23 +29,9 @@ native_edits=importlib.util.module_from_spec(spec);spec.loader.exec_module(nativ
 archive=Path(a.archive).resolve(strict=True);core=Path(a.core).resolve(strict=True)
 cargo=Path(a.cargo).resolve(strict=True)
 run=Path(a.run_dir).resolve();run.mkdir(parents=True,exist_ok=False)
-e2e=(root/'scripts/test/e2e.sh').read_text()
-
-def section(start,end):
-    if e2e.count(start)!=1 or e2e.count(end)!=1:raise RuntimeError('e2e anchor not unique')
-    return e2e[e2e.index(start):e2e.index(end)]
-
-wrappers=section('post_message() {','# Children the owner-state tests spawn')
-wrappers=wrappers.replace('"${ROOT_DIR}/scripts/safedeps-pre-guard.sh"','"$PRE_CORE" pre')
-wrappers=wrappers.replace('"${ROOT_DIR}/scripts/safedeps-post-verify.sh"','"$POST_CORE" post')
-wrappers=wrappers.replace('  oracle_before "${call}" "${payload}"','  : > "${call}/native-owner-source"\n  oracle_before "${call}" "${payload}"')
-post_invocation='    "$POST_CORE" post)'
-if wrappers.count(post_invocation)!=1:raise RuntimeError('post wrapper anchor not unique')
-wrappers=wrappers.replace(post_invocation,post_invocation+''' || { printf '%s\\n' "$?" > "$call/hook.rc"; return 1; }
-  printf '0\\n' > "$call/hook.rc"
-  printf '%s' "$out" > "$call/native-hook.stdout"''')
-noid_assert=section('grep -qF "pre-guard: this hook\'s input names no tool_use_id, so the record of this install is kept under its directory and command"', 'touch "${noid_wt}/package-lock.json"')
-untraced=section('bs_assert_untraced() {','bs_assert_rollback() {')
+wrappers=(root/'scripts/test/lib/native-control-hooks.sh').read_text()
+noid_assert='grep -qF "pre-guard: this hook\'s input names no tool_use_id, so the record of this install is kept under its directory and command" "${SAFEDEPS_HOME}/advisory.log" \\\n  || fail "the pre-guard records that a call names no tool_use_id"\n'
+untraced='bs_assert_untraced() {\n  local dir="$1" post="$2" label="$3" home="${4:-${SAFEDEPS_HOME}}"\n  [[ -z "${post}" ]] || fail "${label}: the backstop says nothing (${post})"\n  [[ -f "${dir}/node_modules/installed-package/package.json" ]] || fail "${label}: node_modules is left in place"\n  cmp -s "${dir}/package-lock.json" <(printf \'%s\\n\' "${tampered_lock}") || fail "${label}: the lockfile is left as it was"\n  grep -qF "post-verify BACKSTOP UNTRACED: no trace in $(cd -P "${dir}" && pwd -P): " "${home}/advisory.log" \\\n    || fail "${label}: advisory.log says which check found no trace"\n}\n'
 prologue='''#!/bin/bash
 set -euo pipefail
 cd "$BOX/project"
@@ -216,7 +202,7 @@ printf '%s\n' 'grep-post rc0 and original post oracle passed'
 '''
         if name=='AnySubsecond':
             script+='''bs_mix_entry=$(cat "$BOX/entry.json")
-'''+section('[[ "$(jq -r .resolution <<< "${bs_mix_entry:-null}")" == seconds ]]', '[[ "${bs_mix_walk}"')
+'''+'[[ "$(jq -r .resolution <<< "${bs_mix_entry:-null}")" == seconds ]] \\\n  || fail "a write into node_modules on a whole-second mount beside a subsecond lockfile: the baseline is set back (${bs_mix_entry})"\n'
             script+='''python3 - "$BOX/precision.json" <<'PY'
 import json,sys
 d=json.load(open(sys.argv[1]))

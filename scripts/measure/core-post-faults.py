@@ -2,8 +2,7 @@
 """Exercise native I/O failures with disk permissions and the report oracle.
 
 Run remotely as an unprivileged user. These fixtures replace e2e's jq/cp/rm
-PATH shims with the same failed operation on disk. Each side receives the
-same synthetic pending record and snapshot at the same absolute path. The
+PATH shims with the same failed operation on disk. The native hook receives a synthetic pending record and snapshot. The
 existing independent oracle is unchanged, and the expected failure line is
 required separately, so an injection that never reached the operation fails.
 This is a focused supplement, not a complete e2e or form-coverage result.
@@ -20,12 +19,13 @@ import shutil
 import subprocess
 import tempfile
 import time
+from native_fixture_facts import tree_facts
 
 p=argparse.ArgumentParser(description=__doc__)
 p.add_argument('--core',required=True)
 p.add_argument('--report',required=True)
 p.add_argument('--only',help='Comma-separated fixture names')
-p.add_argument('--side',choices=['both','bash','rust'],default='both')
+p.add_argument('--side',choices=['rust'],default='rust')
 p.add_argument('--meta-shape',choices=['plain','v1','string-version','unstated','asked'],default='plain')
 p.add_argument('--expect-oracle-text',help='Require a Rust-only source mutant to fail at this oracle diagnostic')
 p.add_argument('--expect-assertion',help='Require a source mutant to violate this focused original e2e assertion')
@@ -51,14 +51,8 @@ if [[ "$FAULT" == unread-meta ]]; then
   : > "$call/record-unread"
   chmod 000 "$SAFEDEPS_HOME/snapshots/pre_meta.json"
 fi
-if [[ "$SIDE" == bash ]]; then
-  out=$(printf '%s' "$payload" | "$ROOT/scripts/safedeps-post-verify.sh")
-  rc=$?
-else
-  request=$(jq -cn --arg input "$payload" '{op:"hook",input:$input}')
-  out=$(printf '%s' "$request" | "$CORE" post-probe)
-  rc=$?
-fi
+out=$(printf '%s' "$payload" | "$CORE" post)
+rc=$?
 printf '%s\\n' "$out" > "$BOX/hook.out"
 printf '%s\\n' "$rc" > "$BOX/hook.rc"
 # Restore only the test's permissions, after the hook. The oracle's unread
@@ -153,18 +147,7 @@ def seed(d,kind):
         if kind.startswith('trace-'):
             lock=project/'package-lock.json'
             if kind=='trace-link':lock.rename(project/'target.json');lock.symlink_to('target.json')
-            facts=d/'trace-facts.sh'
-            facts.write_text('''#!/bin/bash
-set -eu
-source "$ROOT/lib/gates/backstop-trace.sh"
-for rel in package-lock.json node_modules/.package-lock.json node_modules; do
- printf '%s\\t%s\\t%s\\n' "$rel" "$(safedeps_tree_inode "$1/$rel")" "$(safedeps_tree_clock "$1/$rel")"
-done
-''')
-            raw=subprocess.check_output(['bash',str(facts),str(project)],env=dict(os.environ,ROOT=str(root),LC_ALL='C'),text=True)
-            inodes={};clocks={}
-            for line in raw.splitlines():
-                name,inode,clock=line.split('\t');inodes[name]=inode;clocks[name]=clock
+            inodes,clocks=tree_facts(project)
             directory=home/'pending/backstop';directory.mkdir()
             baseline=directory/'id-fault-call.trace';baseline.touch()
             dh=hashlib.md5(str(project).encode()).hexdigest()
@@ -213,7 +196,7 @@ with tempfile.TemporaryDirectory(prefix='core-post-faults.') as tmp:
     if any(kind not in allowed for kind in kinds):p.error('unknown fixture')
     for kind in kinds:
         if a.only and kind not in a.only.split(','):continue
-        for side in (['bash','rust'] if a.side=='both' else [a.side]):
+        for side in [a.side]:
             home,project=seed(d,kind)
             env=dict(os.environ,ROOT=str(root),CORE=core,BOX=str(d),SAFEDEPS_HOME=str(home),LC_ALL='C',FAULT=kind,SIDE=side)
             if kind=='trace-deadline':env['SAFEDEPS_BACKSTOP_WALK_SECONDS']='1'

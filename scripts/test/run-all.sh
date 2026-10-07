@@ -15,8 +15,12 @@
 #   run-all.sh --plan [--release]
 #                            the same units as `<unit> <weight> <seconds>`, for
 #                            the runner's scheduler (see the table)
-#   run-all.sh --unit UNIT   run one unit into SAFEDEPS_TEST_LOG_DIR and report
-#                            it; this is what a host runs for the runner
+#   run-all.sh --unit UNIT --core-receipt FILE
+#                            check the host's prepared binary, then run one
+#                            unit into SAFEDEPS_TEST_LOG_DIR; never build here
+#
+# A whole set builds the host binary once before starting any battery. The
+# host runner prepares it once for all its units and passes the receipt.
 #
 # The development set leaves out the census and effect-trace-grid. The census
 # took 72 minutes of a 2-hour macOS CI run (v2.18.0, run 37191343467), and
@@ -89,11 +93,13 @@ cd "${ROOT_DIR}" || exit 2
 # one process at a time. On the Mac the single-process batteries outlasted the
 # census by six minutes.
 ALL_BATTERIES=(
+  "rust-core|1|dev|1|1|30|scripts/test/rust-core.sh"
   "smoke|1|dev|1|1|350|scripts/test/smoke.sh"
   "scan-contract|1|dev|3|1|861|scripts/test/scan-contract.sh"
   "statement-batch|1|dev|1|1|263|scripts/test/statement-batch.sh"
   "shell-reading|1|dev|1|1|295|scripts/test/shell-reading.sh"
   "census|1|release|4|2|1030|scripts/measure/scan-failure-census.sh --quick"
+  "native-scan-failures|1|release|1|1|600|scripts/test/native-scan-failures.sh"
   "consumer-forms|1|dev|4|1|1126|scripts/test/consumer-forms.sh"
   "manager-variants|1|dev|3|4|650|scripts/test/manager-variants.sh"
   "install-dir-differential|1|dev|1|6|134|scripts/test/install-dir-differential.sh"
@@ -118,23 +124,36 @@ START_FIRST_ALL=(census consumer-forms lockless-forms effect-trace-grid)
 # Checked before anything starts, on the whole table: a second phase with
 # nothing to wait for would start at once, under the very load it exists to
 # avoid.
-printf '%s\n' "${ALL_BATTERIES[@]}" | grep -qx "${PHASE_TWO_AFTER}|1|.*" || {
+# Whether an entry of a table starts with <prefix>. Asked with no pipe: under
+# pipefail, `printf ... | grep -q` fails when grep leaves at its first match
+# while printf is still writing (SIGPIPE, 141). On a loaded host that read as
+# "not a battery" and ended a unit before it started, with no exit status
+# (two of 22 units in one run, at load 46).
+starts_entry() { # prefix entry...
+  local prefix="$1" entry
+  shift
+  for entry in "$@"; do
+    [[ "${entry}" != "${prefix}"* ]] || return 0
+  done
+  return 1
+}
+starts_entry "${PHASE_TWO_AFTER}|1|" "${ALL_BATTERIES[@]}" || {
   printf 'run-all: the second phase waits for %s, and no first-phase battery has that name\n' "${PHASE_TWO_AFTER}" >&2
   exit 2
 }
 
 for first in "${START_FIRST_ALL[@]}"; do
-  printf '%s\n' "${ALL_BATTERIES[@]}" | grep -q "^${first}|" || {
+  starts_entry "${first}|" "${ALL_BATTERIES[@]}" || {
     printf 'run-all: START_FIRST_ALL names %s, which is not a battery\n' "${first}" >&2
     exit 2
   }
 done
 
 usage() {
-  printf 'usage: %s [--list | --units] [--release] | --unit UNIT\n' "$0" >&2
+  printf 'usage: %s [--list | --units | --plan] [--release] | --unit UNIT --core-receipt FILE\n' "$0" >&2
   exit 2
 }
-selection=dev list_only=false units_only=false plan_only=false unit=""
+selection=dev list_only=false units_only=false plan_only=false unit="" core_receipt=""
 while (( $# > 0 )); do
   case "$1" in
     --release) [[ "${selection}" == dev ]] || usage; selection=release; shift ;;
@@ -144,11 +163,13 @@ while (( $# > 0 )); do
     --unit)
       [[ "${selection}" == dev && "${2:-}" =~ ^([a-z][a-z0-9-]*)(@([1-9][0-9]*)of([1-9][0-9]*))?$ ]] || usage
       selection=unit unit="$2"; shift 2 ;;
+    --core-receipt) [[ -n "${2:-}" ]] || usage; core_receipt="$2"; shift 2 ;;
     *) usage ;;
   esac
 done
 [[ "${list_only}" == false || "${units_only}" == false ]] || usage
 [[ "${selection}" != unit || ( "${list_only}" == false && "${units_only}" == false ) ]] || usage
+[[ -z "${core_receipt}" || "${selection}" == unit ]] || usage
 
 # The units of a set, as the runner on several hosts runs them.
 if [[ "${units_only}" == true ]]; then
@@ -215,7 +236,7 @@ case "${selection}" in
   release) run_label="release set" ;;
   unit) run_label="unit ${unit}" ;;
 esac
-selected() { printf '%s\n' "${BATTERIES[@]}" | grep -q "^$1|"; }
+selected() { starts_entry "$1|" "${BATTERIES[@]}"; }
 START_FIRST=()
 for first in "${START_FIRST_ALL[@]}"; do
   ! selected "${first}" || START_FIRST+=("${first}")
@@ -235,8 +256,10 @@ if [[ -n "${SAFEDEPS_TEST_JOBS:-}" ]]; then
 else
   jobs=$(( (cpus + 1) / 2 ))
 fi
-# A unit runs at its weight: the host runner counts that many CPUs for it.
-[[ -z "${unit_weight}" ]] || jobs="${unit_weight}"
+# A unit runs at its weight, capped by an explicit host/user jobs limit.
+if [[ -n "${unit_weight}" ]]; then
+  if [[ -z "${SAFEDEPS_TEST_JOBS:-}" ]] || (( unit_weight < jobs )); then jobs="${unit_weight}"; fi
+fi
 # The census reads the same value, so one variable sets both.
 export SAFEDEPS_TEST_JOBS="${jobs}"
 
@@ -254,8 +277,41 @@ fi
 for entry in "${BATTERIES[@]}"; do
   IFS='|' read -r name _ _ <<< "${entry}"
   rm -f "${log_dir}/${name}.log" "${log_dir}/${name}.rc" "${log_dir}/${name}.secs" \
-    "${log_dir}/${name}.load-start" "${log_dir}/${name}.load-end"
+    "${log_dir}/${name}.load-start" "${log_dir}/${name}.load-end" \
+    "${log_dir}/${name}.core.json" "${log_dir}/${name}.prepare.log"
 done
+
+# Preparation owns the build; units only check its receipt against the live
+# binary and source. Keep preparation's exit under a different suffix from
+# unit .rc files, which ci-verdict.sh counts as members of the set.
+if [[ "${selection}" == unit ]]; then
+  prepare_log="${log_dir}/${unit}.prepare.log"
+  prepare_rc=0
+  if [[ -z "${core_receipt}" ]]; then
+    printf 'run-all: --unit requires --core-receipt from the host preparation\n' > "${prepare_log}"
+    prepare_rc=1
+  else
+    bash scripts/build-core.sh --check-receipt "${core_receipt}" > "${prepare_log}" 2>&1 || prepare_rc=$?
+  fi
+else
+  mkdir -p "${log_dir}/core-prepare" || exit 2
+  core_receipt="${log_dir}/core-prepare/receipt.json"
+  prepare_log="${log_dir}/core-prepare/build.log"
+  prepare_rc=0
+  bash scripts/build-core.sh --receipt "${core_receipt}" > "${prepare_log}" 2>&1 || prepare_rc=$?
+  printf '%s\n' "${prepare_rc}" > "${log_dir}/core-prepare/exit"
+fi
+if (( prepare_rc != 0 )); then
+  cat "${prepare_log}" >&2
+  printf 'run-all: core preparation failed (exit %s); no battery started\n' "${prepare_rc}" >&2
+  if [[ "${selection}" == unit ]]; then
+    cp "${prepare_log}" "${log_dir}/${unit}.log"
+    printf '%s\n' "${prepare_rc}" > "${log_dir}/${unit}.rc"
+  fi
+  exit 1
+fi
+printf '# core receipt %s\n' "${core_receipt}"
+export SAFEDEPS_TEST_CORE_RECEIPT="${core_receipt}" SAFEDEPS_TEST_LOG_DIR="${log_dir}"
 
 # The load averages, without the platform's framing (macOS prints "load
 # averages: a b c", Linux "load average: a, b, c").
@@ -266,6 +322,12 @@ run_one() {
   local name="$1" command="$2" start rc=0
   printf '%s\n' "$(load_now)" > "${log_dir}/${name}.load-start"
   start=$(date +%s)
+  # This is the checked identity every battery of the run was handed.
+  if ! cp "${core_receipt}" "${log_dir}/${name}.core.json"; then
+    printf 'run-all: cannot record the prepared core identity\n' > "${log_dir}/${name}.log"
+    printf '1\n' > "${log_dir}/${name}.rc"
+    return
+  fi
   # shellcheck disable=SC2086 # the command is a script path plus fixed flags
   bash ${command} > "${log_dir}/${name}.log" 2>&1 < /dev/null || rc=$?
   printf '%s\n' "$(( $(date +%s) - start ))" > "${log_dir}/${name}.secs"

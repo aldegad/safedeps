@@ -6,6 +6,12 @@ restored absolute fixture. Field/status errors and early exits compare all
 bytes literally. Installs reuse the snapshot/call-record oracle; its bounded
 time checks are component evidence, not the independent clock-role proof.
 """
+
+if __name__ == "__main__":
+    import sys
+    sys.stderr.write('retired: Bash/native payload channel comparison is retired. Its data corpus remains available for native input regressions. See native-measure-disposition.json.\n')
+    raise SystemExit(2)
+
 import argparse
 import hashlib
 import importlib.util

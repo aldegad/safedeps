@@ -11,9 +11,12 @@ impl From<io::Error> for Error { fn from(e:io::Error)->Self{Self::Io(e)} }
 pub struct Snapshot { pub id:String, pub hash:String, pub project:W, pub parent:W, root:PathBuf }
 impl Snapshot {
     pub fn path(&self, name:&[u8])->PathBuf { self.root.join(os::path(&cat(&[self.id.as_bytes(),b"_",name]))) }
-    pub fn create(call:&Call, project:&[u8])->Result<Self,Error> {
+    /// `timestamp` is the clock as the caller read it when it began to judge
+    /// the install: the snapshot is written after the last reading, and its
+    /// id and record keep the time the judgment started at.
+    pub fn create(call:&Call, project:&[u8], timestamp:i64)->Result<Self,Error> {
         let root=call.guard_dir.join("snapshots"); let hash=md5::hex(project);
-        let timestamp=os::wall(os::WallRole::PreSnapshot).seconds(); let base=format!("{}_{}-{}",timestamp,hash,std::process::id());
+        let base=format!("{}_{}-{}",timestamp,hash,std::process::id());
         let mut n=0; let id=loop {
             let id=if n==0{base.clone()}else{format!("{}-{}",base,n)};
             let list=root.join(format!("{}_monitored_files.list",id));
@@ -149,7 +152,7 @@ pub fn probe(input:&[u8])->i32 {
     let Ok(_lock)=state::StateLock::acquire(&guard_dir.join("state.lock"),&mut warnings,None)else{return 1};
     let _=std::io::stderr().write_all(&warnings);
     let call=Call{input:json::Stream{values:vec![value.clone()],failed:false},command:command.clone(),guard:state::guard_text(),guard_dir};
-    let snap=match Snapshot::create(&call,project){
+    let snap=match Snapshot::create(&call,project,os::wall(os::WallRole::PreSnapshot).seconds()){
         Ok(snap)=>snap,
         Err(Error::Io(e))=>{eprintln!("{}",e);return 1},
         Err(Error::Workspace(why))=>{let _=std::io::stderr().write_all(&why);return 1},

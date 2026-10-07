@@ -6,6 +6,12 @@ no install, network request, or rebuild runs. This is a component comparison,
 not the complete hook/oracle/e2e result. --control alters one Rust answer to
 prove the comparator rejects it. Every report action runs on twin disks.
 """
+
+if __name__ == "__main__":
+    import sys
+    sys.stderr.write('retired: The extracted Bash post functions are retired references. Native report controls use the independent disk oracle. See native-measure-disposition.json.\n')
+    raise SystemExit(2)
+
 import argparse
 import copy
 import json

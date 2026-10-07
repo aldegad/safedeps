@@ -5,6 +5,12 @@ Uses the original Bash write operations, no install command evaluation.
 Generated ids, log times and inode values are checked against the invocation
 and disk before normalization. Seed records and dates are never normalized.
 """
+
+if __name__ == "__main__":
+    import sys
+    sys.stderr.write('retired: The Bash pending-state comparison is retired. Native record controls check fixed call and snapshot ownership. See native-measure-disposition.json.\n')
+    raise SystemExit(2)
+
 import argparse
 from datetime import datetime
 import hashlib

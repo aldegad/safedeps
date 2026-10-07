@@ -26,6 +26,12 @@ Usage:
   core-inert-witness.py --core <safedeps-core> --tree NAME=DIR ... --forms FILE.jsonl
       --out FILE.jsonl [--saved REPORT.json ...]
 """
+
+if __name__ == "__main__":
+    import sys
+    sys.stderr.write('retired: The witness requires two Bash/Rust comparison channels that are retired. See native-measure-disposition.json.\n')
+    raise SystemExit(2)
+
 import argparse
 import importlib.util
 import json

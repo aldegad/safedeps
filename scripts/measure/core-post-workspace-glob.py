@@ -63,12 +63,10 @@ with tempfile.TemporaryDirectory(prefix='core-post-workspace-glob.') as temp:
         print('same' if same else 'DIFF',repr(pattern),flush=True)
     if not a.only:
         (project/'package.json').write_text(json.dumps(dict(workspaces=['*/item','node_modules/*'])))
-        script.write_text('source "$REPO/lib/npm/workspaces.sh"\nsafedeps_npm_workspace_members "$PROJECT"\n')
-        env=dict(os.environ,REPO=str(root),PROJECT=str(project),LC_ALL='C')
-        left=subprocess.run(['bash',str(script)],env=env,capture_output=True)
-        right=subprocess.run([core,'post-probe'],input=json.dumps(dict(op='workspaces',path=str(project))).encode(),env=env,capture_output=True)
-        rows.append(dict(pattern='ordinary-members-exclusion',same=(left.returncode,left.stdout)==(right.returncode,right.stdout),
-                         reference=left.stdout.decode(),core=right.stdout.decode(),reference_rc=left.returncode,core_rc=right.returncode))
+        right=subprocess.run([core,'post-probe'],input=json.dumps(dict(op='workspaces',path=str(project))).encode(),capture_output=True)
+        expected='ok\n'+str(project/'ordinary/item')+'\n'
+        rows.append(dict(pattern='ordinary-members-exclusion',same=right.returncode==0 and right.stdout.decode()==expected,
+                         expected=expected,core=right.stdout.decode(),core_rc=right.returncode))
 report=dict(cases=len(rows),differences=sum(not r['same'] for r in rows),rows=rows)
 Path(a.report).write_text(json.dumps(report,indent=2)+'\n')
 raise SystemExit(0 if rows and report['differences']==0 else 1)

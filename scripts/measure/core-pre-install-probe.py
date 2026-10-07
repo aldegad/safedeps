@@ -9,6 +9,12 @@ stderr, other files and unknown temporary names are never normalized.
 The time bounds here do not establish clock source-role provenance. That is
 separate evidence; exact native clock values remain unobserved in this probe.
 """
+
+if __name__ == "__main__":
+    import sys
+    sys.stderr.write('retired: The Bash install-driver channel comparison is retired. Native pre fixtures and public batteries check decisions. See native-measure-disposition.json.\n')
+    raise SystemExit(2)
+
 import argparse
 from datetime import datetime,timezone
 import hashlib

@@ -141,6 +141,29 @@ expect_readings_apart() { # label command
     || fail "${label} gets no rewrite (got: ${out:0:200})"
 }
 
+# A command the gate denies leaves nothing under the guard's state: no
+# snapshot, no meta and no pending record. Every reading is settled before the
+# first of them is written, so a deny for a finding, for a rewrite that cannot
+# be sent or for a reading that failed all end the same way. The bash guard
+# took its snapshot before it judged, and a denied install left it behind
+# (scripts/measure/core-intended-battery-rows.tsv).
+expect_deny_leaves_no_state() { # label command
+  shard_row "expect_deny_leaves_no_state|$1|$2" || return 0
+  local label="$1" command="$2" safe out left
+  safe=$(mktemp -d "${tmp_root}/safe.XXXXXX")
+  out=$(jq -nc --arg c "${command}" --arg cwd "${project_dir}" \
+    '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
+    HOME="${tmp_root}/home" SAFEDEPS_HOME="${safe}" scripts/safedeps-pre-guard.sh 2>/dev/null)
+  [[ -n "${out}" ]] || out='{}'
+  [[ "$(jq -r '.hookSpecificOutput.permissionDecision // "pass"' <<< "${out}")" == deny ]] \
+    || fail "${label} is denied (got: ${out:0:160})"
+  # Listed from the state directory itself: the two directories are not there
+  # when nothing was written, and a find that is given a missing directory
+  # fails, which under pipefail ended the battery with no line.
+  left=$(find "${safe}" -type f \( -path "${safe}/snapshots/*" -o -path "${safe}/pending/*" \) 2>/dev/null | sed "s#^${safe}/##" | sort | paste -sd, -)
+  [[ -z "${left}" ]] || fail "${label} leaves no snapshot and no pending record (left: ${left:0:300})"
+}
+
 # --- 1. Carrier forms the command gate catches --------------------------------
 # Regression against narrowing. Tightening the gate for false positives must not
 # quietly shrink this set — that would be a trade, not a net gain.
@@ -1106,6 +1129,12 @@ for inert_form in 'npm install $X' 'npm install --cache $X' 'npm install $X --sa
   shard_row "inert_form: ${inert_form}" || continue
   rewrite_holds "${inert_form}" "${inert_form/npm install/npm install --ignore-scripts} --ignore-scripts" \
     || fail "an npm install with a run-time word keeps the flag after its verb and after its last argument: ${inert_form} (got: $(gate_rewrite "${inert_form}"))"
+done
+# One of each deny: a spec the ledger has not approved, a flag that cannot be
+# placed, readings that place the installs apart, and a command that does not
+# close.
+for denied_form in 'npm install evil@1.0.0' 'npm install x --cache' 'for i (1) { npm install evil; }' "npm install evil 'x"; do
+  expect_deny_leaves_no_state "a denied install, ${denied_form}," "${denied_form}"
 done
 # dash reads `((` as two subshells, so it puts these installs elsewhere, and no
 # one rewrite is inert for every shell: UNDECIDED, as for the other forms only

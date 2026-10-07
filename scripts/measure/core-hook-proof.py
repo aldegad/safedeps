@@ -5,6 +5,12 @@ No dependency install is executed: the live inputs are hook payloads. Synthetic
 consumer controls and storage corruption controls are reported separately from
 new live source mutations. --source is the catalog's extracted native source.
 """
+
+if __name__ == "__main__":
+    import sys
+    sys.stderr.write('retired: Controls for the retired paired-channel collector are historical evidence. See native-measure-disposition.json.\n')
+    raise SystemExit(2)
+
 import argparse
 import base64
 import copy

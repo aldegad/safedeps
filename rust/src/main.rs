@@ -30,6 +30,20 @@
 //!       The inert rewrite of one hook payload (stdin). Not written yet.
 //!   safedeps-core pre | post
 //!       The PreToolUse and PostToolUse hooks. Not written yet: each exits 2.
+//!   safedeps-core budget-config
+//!       The pre hook's budget numbers, one JSON object: the runtime budget
+//!       it assumes, the self budget's default and ceiling, the engage size's
+//!       default and ceiling, and the limits on a knob's digits and length.
+//!   safedeps-core reader
+//!       One reader function of the core per query: `statements`,
+//!       `raw-texts` or `lex-payloads` of a text in a reading. A query is a
+//!       JSON object on a line of stdin, its answer one on a line of stdout
+//!       (query.rs has the fields).
+//!   safedeps-core manager
+//!       The manager reader, the same way: `npa-local` of a word, `npm-read`
+//!       of npm's words under its table or the other npm's, `read` of a
+//!       statement's words (each word's role), and `option-class` of an
+//!       option after a command path.
 //!   safedeps-core kat [<path>]
 //!       Known answers from the modules the hooks share (the digests, the
 //!       JSON writer, how a file's times and inodes are spelled), one per
@@ -65,6 +79,7 @@ mod md5;
 mod os;
 mod post;
 mod pre;
+mod query;
 #[allow(dead_code)]
 mod sha256;
 mod srchash;
@@ -472,6 +487,20 @@ fn main() {
             }
             None => 2,
         },
+        // Read-only queries: none is on a hook's path, and none takes an
+        // argument or an environment variable that changes an answer.
+        Some("budget-config") => {
+            println!("{}", pre::budget_config());
+            0
+        }
+        Some("reader") => match read_stdin() {
+            Some(input) => query::reader(&input),
+            None => 1,
+        },
+        Some("manager") => match read_stdin() {
+            Some(input) => query::manager(&input),
+            None => 1,
+        },
         Some("kat") => cmd_kat(&args[2..]),
         Some("stamp") => cmd_stamp(&args[2..]),
         Some("version") => {
@@ -479,7 +508,7 @@ fn main() {
             0
         }
         _ => {
-            eprintln!("usage: safedeps-core lex <view> | lex-batch | grammar | grep [-i] [-n] <pattern> | facts | words | inert | pre | post | kat [<path>] | stamp [--check] | version");
+            eprintln!("usage: safedeps-core lex <view> | lex-batch | grammar | grep [-i] [-n] <pattern> | facts | words | inert | pre | post | budget-config | reader | manager | kat [<path>] | stamp [--check] | version");
             2
         }
     };

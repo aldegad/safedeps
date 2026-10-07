@@ -1280,10 +1280,16 @@ impl<'g> Lex<'g> {
                 && !self.cmdpos(i)
                 && !self.forlist(i)
             {
-                if self.shz {
+                if self.shz && !self.headparen(i) {
                     // A bare parenthesized pattern is one zsh word even
                     // after whitespace. Use the same word context as an
                     // attached pattern so its | cannot become a pipeline.
+                    // Not after a head that takes a command: the names of
+                    // `function NAME...` or the count of `repeat COUNT`.
+                    // That `(` is the walk's to read, and read as a pattern
+                    // it took the start of `function f ( pip i )` and the
+                    // command in `repeat 1 (pip i)` away from the zsh
+                    // reading alone.
                     self.ctxd(d).par -= 1;
                     self.div = true;
                     self.i = i;
@@ -2478,6 +2484,36 @@ impl<'g> Lex<'g> {
             }
             let w = &self.x[(k + 1) as usize..(e + 1) as usize];
             if (w == b"for" || w == b"foreach") && n > 0 {
+                return self.wordstart(k + 1) && self.cmdpos(k + 1);
+            }
+            n += 1;
+            if k >= 1 && !is_blank(self.xb(k)) {
+                return false;
+            }
+        }
+    }
+
+    /// Whether the `(` at byte j follows a head that takes a command, the
+    /// keyword where a command stands: the names of `function NAME...` (any
+    /// words up to the keyword, as the walk reads them) or the one word
+    /// after `repeat`. A parenthesis of that head, never a zsh pattern word.
+    fn headparen(&self, j: I) -> bool {
+        let cj = self.cb(j);
+        let mut k = j - 1;
+        let mut n = 0;
+        loop {
+            while k >= 1 && is_blank(self.xb(k)) && self.cb(k) == cj {
+                k -= 1;
+            }
+            let e = k;
+            while k >= 1 && !is_sep(self.xb(k)) && self.cb(k) == cj {
+                k -= 1;
+            }
+            if e == k {
+                return false;
+            }
+            let w = &self.x[(k + 1) as usize..(e + 1) as usize];
+            if w == b"function" && n > 0 || w == b"repeat" && n == 1 {
                 return self.wordstart(k + 1) && self.cmdpos(k + 1);
             }
             n += 1;

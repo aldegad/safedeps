@@ -1,0 +1,270 @@
+{
+  "schema": 1,
+  "scope": "Focused native source controls; not the full e2e suite or full form coverage",
+  "mutations": [
+    {
+      "name": "P2",
+      "status": "native-source-copy",
+      "harness": "scripts/measure/core-post-report-controls.py",
+      "selector": "P2"
+    },
+    {
+      "name": "R3",
+      "status": "native-source-copy",
+      "harness": "scripts/measure/core-post-report-controls.py",
+      "selector": "R3"
+    },
+    {
+      "name": "K",
+      "status": "native-source-copy",
+      "harness": "scripts/measure/core-post-fault-controls.py",
+      "selector": "K"
+    },
+    {
+      "name": "Lie",
+      "status": "native-source-copy",
+      "harness": "scripts/measure/core-post-fault-controls.py",
+      "selector": "Lie"
+    },
+    {
+      "name": "Bypass",
+      "status": "native-source-copy",
+      "harness": "scripts/measure/core-post-report-controls.py",
+      "selector": "Bypass"
+    },
+    {
+      "name": "Head",
+      "status": "native-source-copy",
+      "harness": "scripts/measure/core-post-report-controls.py",
+      "selector": "Head"
+    },
+    {
+      "name": "NoCheck",
+      "status": "native-source-copy",
+      "harness": "scripts/measure/core-post-report-controls.py",
+      "selector": "NoCheck"
+    },
+    {
+      "name": "Snap",
+      "status": "native-source-copy",
+      "harness": "scripts/measure/core-post-report-controls.py",
+      "selector": "Snap"
+    },
+    {
+      "name": "Cause",
+      "status": "native-source-copy",
+      "harness": "scripts/measure/core-post-report-controls.py",
+      "selector": "Cause"
+    },
+    {
+      "name": "Prose",
+      "status": "native-source-copy",
+      "harness": "scripts/measure/core-post-report-controls.py",
+      "selector": "Prose"
+    },
+    {
+      "name": "LogOnly",
+      "status": "native-source-copy",
+      "harness": "scripts/measure/core-post-report-controls.py",
+      "selector": "LogOnly"
+    },
+    {
+      "name": "Reasons",
+      "status": "native-source-copy",
+      "harness": "scripts/measure/core-post-report-controls.py",
+      "selector": "Reasons"
+    },
+    {
+      "name": "Kept",
+      "status": "native-source-copy",
+      "harness": "scripts/measure/core-post-fault-controls.py",
+      "selector": "Kept"
+    },
+    {
+      "name": "Silent",
+      "status": "native-source-copy",
+      "harness": "scripts/measure/core-post-report-controls.py",
+      "selector": "Silent"
+    },
+    {
+      "name": "JOmit",
+      "status": "native-source-copy",
+      "harness": "scripts/measure/core-post-report-controls.py",
+      "selector": "JOmit"
+    },
+    {
+      "name": "RefuseSilent",
+      "status": "native-source-copy",
+      "harness": "scripts/measure/core-post-report-controls.py",
+      "selector": "RefuseSilent"
+    },
+    {
+      "name": "F1",
+      "status": "native-source-copy",
+      "harness": "scripts/measure/core-post-pre-controls.py",
+      "selector": "F1"
+    },
+    {
+      "name": "F2",
+      "status": "native-source-copy",
+      "harness": "scripts/measure/core-post-report-controls.py",
+      "selector": "F2"
+    },
+    {
+      "name": "LogSilent",
+      "status": "native-source-copy",
+      "harness": "scripts/measure/core-post-report-controls.py",
+      "selector": "LogSilent"
+    },
+    {
+      "name": "F4",
+      "status": "native-source-copy",
+      "harness": "scripts/measure/core-post-report-controls.py",
+      "selector": "F4"
+    },
+    {
+      "name": "MarkOrig",
+      "status": "native-source-copy",
+      "harness": "scripts/measure/core-pre-record-controls.py",
+      "selector": "MarkOrig"
+    },
+    {
+      "name": "MarkSkip",
+      "status": "native-source-copy",
+      "harness": "scripts/measure/core-pre-record-controls.py",
+      "selector": "MarkSkip"
+    },
+    {
+      "name": "Unread",
+      "status": "native-source-copy",
+      "harness": "scripts/measure/core-post-fault-controls.py",
+      "selector": "Unread"
+    },
+    {
+      "name": "Same",
+      "status": "native-source-copy",
+      "harness": "scripts/measure/core-pre-record-controls.py",
+      "selector": "Same"
+    },
+    {
+      "name": "Default",
+      "status": "native-source-copy",
+      "harness": "scripts/measure/core-post-report-controls.py",
+      "selector": "Default"
+    },
+    {
+      "name": "Version",
+      "status": "native-source-copy",
+      "harness": "scripts/measure/core-post-report-controls.py",
+      "selector": "Version"
+    },
+    {
+      "name": "XStr2",
+      "status": "native-source-copy",
+      "harness": "scripts/measure/core-post-report-controls.py",
+      "selector": "XStr2"
+    },
+    {
+      "name": "Gone",
+      "status": "native-source-copy",
+      "harness": "scripts/measure/core-post-report-controls.py",
+      "selector": "Gone"
+    },
+    {
+      "name": "Empty",
+      "status": "native-source-copy",
+      "harness": "scripts/measure/core-post-report-controls.py",
+      "selector": "Empty"
+    },
+    {
+      "name": "NotObject",
+      "status": "native-source-copy",
+      "harness": "scripts/measure/core-post-report-controls.py",
+      "selector": "NotObject"
+    },
+    {
+      "name": "NoDir",
+      "status": "native-source-copy",
+      "harness": "scripts/measure/core-post-report-controls.py",
+      "selector": "NoDir"
+    },
+    {
+      "name": "RecordHash",
+      "status": "native-source-copy",
+      "harness": "scripts/measure/core-post-report-controls.py",
+      "selector": "RecordHash"
+    },
+    {
+      "name": "KeyRecords",
+      "status": "native-source-copy",
+      "harness": "scripts/measure/core-pre-record-controls.py",
+      "selector": "KeyRecords"
+    },
+    {
+      "name": "IdFallsBackToKey",
+      "status": "native-source-copy",
+      "harness": "scripts/measure/core-post-report-controls.py",
+      "selector": "IdFallsBackToKey"
+    },
+    {
+      "name": "Legacy",
+      "status": "native-source-copy",
+      "harness": "scripts/measure/core-post-report-controls.py",
+      "selector": "Legacy"
+    },
+    {
+      "name": "CodexEverywhere",
+      "status": "native-source-copy",
+      "harness": "scripts/measure/core-post-report-controls.py",
+      "selector": "CodexEverywhere"
+    },
+    {
+      "name": "TraceNever",
+      "status": "native-source-copy",
+      "harness": "scripts/measure/core-post-report-controls.py",
+      "selector": "TraceNever"
+    },
+    {
+      "name": "TraceAlways",
+      "status": "native-source-copy",
+      "harness": "scripts/measure/core-post-report-controls.py",
+      "selector": "TraceAlways"
+    },
+    {
+      "name": "WalkOff",
+      "status": "native-source-copy",
+      "harness": "scripts/measure/core-post-report-controls.py",
+      "selector": "WalkOff"
+    },
+    {
+      "name": "PullAlways",
+      "status": "native-source-copy",
+      "harness": "scripts/measure/core-post-pre-controls.py",
+      "selector": "PullAlways"
+    },
+    {
+      "name": "Oldest",
+      "status": "native-source-copy",
+      "harness": "scripts/measure/core-post-pre-controls.py",
+      "selector": "Oldest"
+    },
+    {
+      "name": "LinkLstat",
+      "status": "native-source-copy",
+      "harness": "scripts/measure/core-post-report-controls.py",
+      "selector": "LinkLstat"
+    },
+    {
+      "name": "AnySubsecond",
+      "status": "native-source-copy",
+      "harness": "scripts/measure/core-post-pre-controls.py",
+      "selector": "AnySubsecond"
+    },
+    {
+      "name": "NoIdSilent",
+      "status": "native-source-copy",
+      "harness": "scripts/measure/core-post-pre-controls.py",
+      "selector": "NoIdSilent"
+    }
+  ]
+}

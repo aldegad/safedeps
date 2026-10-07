@@ -35,6 +35,12 @@ Usage:
 scripts/measure/core-harvest.sh collected from the batteries that keep theirs
 in shell code.
 """
+
+if __name__ == "__main__":
+    import sys
+    sys.stderr.write('retired: The Bash fact-channel recorder is retired; native facts and public reader batteries own fixed expectations. See native-measure-disposition.json.\n')
+    raise SystemExit(2)
+
 import argparse
 import json
 import os

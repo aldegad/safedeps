@@ -36,6 +36,9 @@
 # (scripts/ci/remote.sh), because a link to a host can drop for minutes while
 # its work runs on. The longest units start first, each on a host with enough
 # free CPUs for its weight, so a slow host takes fewer of them.
+# Before any unit, each host builds its checkout binary once inside those
+# slots. Only a successful build and source stamp check open that host to
+# units. The receipt and preparation log travel back with the unit logs.
 #
 # A run is red when any unit failed, printed `not ok`, skipped a row the
 # verdict does not allow, or never ran; when the shards of a battery or of the
@@ -76,6 +79,7 @@ cd "${ROOT_DIR}" || exit 2
 POLL_SECONDS=5
 HOST_TIMEOUT=180
 UNIT_TIMEOUT=1500
+PREPARE_TIMEOUT=600
 
 die() { printf 'run-on-hosts: %s\n' "$1" >&2; exit 2; }
 usage() {
@@ -195,9 +199,9 @@ ssh_host() {
 # slots and its work began there (H_LOADH), and at the end (H_LOAD1). H_RUN is
 # the run's directory on the host, empty until the host has created it, and
 # H_STOPPED says the host answered a stop.
-H_STATE=() H_SEEN=() H_RUN=() H_STOPPED=() H_LOAD0=() H_LOADH=() H_LOAD1=()
+H_STATE=() H_SEEN=() H_RUN=() H_STOPPED=() H_LOAD0=() H_LOADH=() H_LOAD1=() H_PREPSTART=()
 for (( h = 0; h < ${#H_NAME[@]}; h++ )); do
-  H_STATE+=(new) H_SEEN+=(0) H_RUN+=("") H_STOPPED+=(0) H_LOAD0+=("") H_LOADH+=("") H_LOAD1+=("")
+  H_STATE+=(new) H_SEEN+=(0) H_RUN+=("") H_STOPPED+=(0) H_LOAD0+=("") H_LOADH+=("") H_LOAD1+=("") H_PREPSTART+=(0)
 done
 
 # The run directory a host created, from what the ship command printed: a
@@ -319,8 +323,9 @@ pending_count() { local u n=0; for (( u = 0; u < ${#U_NAME[@]}; u++ )); do [[ "$
 running_count() { local u n=0; for (( u = 0; u < ${#U_NAME[@]}; u++ )); do [[ "${U_STATE[u]}" != running ]] || n=$((n + 1)); done; printf '%s' "${n}"; }
 unit_index() { local u; for (( u = 0; u < ${#U_NAME[@]}; u++ )); do [[ "${U_NAME[u]}" != "$1" ]] || { printf '%s' "${u}"; return 0; }; done; return 1; }
 live_hosts() { local h n=0; for (( h = 0; h < ${#H_NAME[@]}; h++ )); do [[ "${H_STATE[h]}" == dead ]] || n=$((n + 1)); done; printf '%s' "${n}"; }
+preparing_count() { local h n=0; for (( h = 0; h < ${#H_NAME[@]}; h++ )); do [[ "${H_STATE[h]}" != preparing ]] || n=$((n + 1)); done; printf '%s' "${n}"; }
 
-while (( $(pending_count) > 0 || $(running_count) > 0 )); do
+while (( $(pending_count) > 0 || $(running_count) > 0 || $(preparing_count) > 0 )); do
   if (( $(live_hosts) == 0 )); then
     for (( u = 0; u < ${#U_NAME[@]}; u++ )); do
       [[ "${U_STATE[u]}" != pending ]] || fail_unit "${u}" "no host was left to run it"
@@ -347,12 +352,33 @@ while (( $(pending_count) > 0 || $(running_count) > 0 )); do
     H_LOAD1[h]=$(sed -n 's/^load //p' "${poll}")
     held_now=$(sed -n 's/^held //p' "${poll}")
     if [[ "${H_STATE[h]}" == queued ]] && (( ${held_now:-0} >= H_HOLDS[h] )); then
-      H_STATE[h]=held H_LOADH[h]="${H_LOAD1[h]} at $(stamp)"
+      H_STATE[h]=preparing H_LOADH[h]="${H_LOAD1[h]} at $(stamp)" H_PREPSTART[h]=$(now)
       [[ -n "${first_held}" ]] || first_held=$(now)
-      event "${H_NAME[h]}: holds ${H_HOLDS[h]} queue slot(s) (load ${H_LOAD1[h]})"
-    elif [[ "${H_STATE[h]}" == held ]] && (( ${held_now:-0} < H_HOLDS[h] )); then
+      event "${H_NAME[h]}: holds ${H_HOLDS[h]} queue slot(s); preparing core (load ${H_LOAD1[h]})"
+      if ! out=$(ssh_host "${h}" "bash ${H_RUN[h]}/tree/scripts/ci/remote.sh prepare ${H_RUN[h]} ${H_CPUS[h]}" 2>&1); then
+        host_dead "${h}" "core preparation could not start: ${out:0:200}"
+      fi
+      continue
+    elif [[ "${H_STATE[h]}" == preparing || "${H_STATE[h]}" == ready ]] && (( ${held_now:-0} < H_HOLDS[h] )); then
       host_dead "${h}" "it gave up its queue slot while the run still had work"
       continue
+    fi
+    if [[ "${H_STATE[h]}" == preparing ]]; then
+      preparation=$(sed -n 's/^prepare //p' "${poll}")
+      case "${preparation}" in
+        'done 0')
+          H_STATE[h]=ready
+          event "${H_NAME[h]}: core prepared and stamp checked in $(( $(now) - H_PREPSTART[h] ))s; units may start" ;;
+        done*|lost|pending|'')
+          host_dead "${h}" "core preparation failed (${preparation:-no status}); see core-prepare logs"
+          continue ;;
+        running)
+          if (( $(now) - H_PREPSTART[h] > PREPARE_TIMEOUT )); then
+            host_dead "${h}" "core preparation exceeded ${PREPARE_TIMEOUT}s"
+          fi
+          continue ;;
+        *) host_dead "${h}" "unreadable core preparation status: ${preparation}"; continue ;;
+      esac
     fi
     while read -r _ unit state rc; do
       u=$(unit_index "${unit}") || continue
@@ -373,7 +399,7 @@ while (( $(pending_count) > 0 || $(running_count) > 0 )); do
   # Start the longest pending units on hosts with room for them. A unit
   # heavier than a whole host runs there alone.
   for (( h = 0; h < ${#H_NAME[@]}; h++ )); do
-    [[ "${H_STATE[h]}" == held ]] || continue
+    [[ "${H_STATE[h]}" == ready ]] || continue
     used=0
     for (( u = 0; u < ${#U_NAME[@]}; u++ )); do
       [[ "${U_STATE[u]}" == running && "${U_HOST[u]}" == "${h}" ]] && used=$(( used + U_WEIGHT[u] ))
@@ -387,12 +413,12 @@ while (( $(pending_count) > 0 || $(running_count) > 0 )); do
         used=$(( used + U_WEIGHT[u] ))
         event "${H_NAME[h]}: start ${U_NAME[u]} (weight ${U_WEIGHT[u]}, ${used}/${H_CPUS[h]} CPUs)"
       else
-        event "${H_NAME[h]}: could not start ${U_NAME[u]} (${out:0:160}); trying again"
+        host_dead "${h}" "could not start ${U_NAME[u]} (${out:0:160})"
         break
       fi
     done
   done
-  (( $(pending_count) > 0 || $(running_count) > 0 )) || break
+  (( $(pending_count) > 0 || $(running_count) > 0 || $(preparing_count) > 0 )) || break
   sleep "${POLL_SECONDS}"
 done
 suite_end=$(now)
@@ -415,7 +441,7 @@ for (( h = 0; h < ${#H_NAME[@]}; h++ )); do
     fi
   else
     stop_host "${h}" || true
-    [[ "${H_STATE[h]}" == held ]] || event "${H_NAME[h]}: never got its ${H_HOLDS[h]} queue slot(s), so it ran nothing"
+    [[ "${H_STATE[h]}" == ready ]] || event "${H_NAME[h]}: never got its ${H_HOLDS[h]} queue slot(s), so it ran nothing"
   fi
   mkdir -p "${logs}/hosts/${H_NAME[h]}"
   if ssh_host "${h}" "uptime; tar -C ${run}/out -cf - . > ${run}/out.tar" > "${work}/end-${H_NAME[h]}.out" 2>&1 \
@@ -440,6 +466,8 @@ waited=$(( first_held - suite_start ))
   for (( h = 0; h < ${#H_NAME[@]}; h++ )); do
     printf 'host %s %s cpus %s holds %s load when shipped %s, when its slots were held %s, at end %s\n' \
       "${H_NAME[h]}" "${H_STATE[h]}" "${H_CPUS[h]}" "${H_HOLDS[h]}" "${H_LOAD0[h]:-?}" "${H_LOADH[h]:-never}" "${H_LOAD1[h]:-?}"
+    printf 'host %s preparation exit %s receipt hosts/%s/core-prepare/receipt.json\n' \
+      "${H_NAME[h]}" "$(cat "${logs}/hosts/${H_NAME[h]}/core-prepare/exit" 2>/dev/null || printf 'none')" "${H_NAME[h]}"
   done
 } >> "${work}/run.txt"
 

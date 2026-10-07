@@ -7,6 +7,12 @@ header timestamps are retained raw but their exact provenance is unobserved;
 only the messages, line count and order are compared here. This does not
 replace the independent report oracle or C's clock catalog.
 """
+
+if __name__ == "__main__":
+    import sys
+    sys.stderr.write('retired: Bash/native payload channel comparison is retired; public native batteries check malformed input. See native-measure-disposition.json.\n')
+    raise SystemExit(2)
+
 import argparse
 import importlib.util
 import json

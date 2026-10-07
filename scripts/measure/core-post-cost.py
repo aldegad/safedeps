@@ -125,6 +125,8 @@ def seed(d,n,l):
             (project/'.npmrc').write_text('registry=https://registry.npmjs.org/\nignore-scripts=false\n')
     return home,json.dumps(payload).encode()
 
+load_start=os.getloadavg()
+source_hashes={str(f.relative_to(root)):hashlib.sha256(f.read_bytes()).hexdigest() for f in sorted((root/'rust').rglob('*')) if f.is_file() and 'target' not in f.parts}
 rows=[]
 print('start:',subprocess.check_output(['uptime'],text=True).strip(),flush=True)
 try:
@@ -145,7 +147,7 @@ try:
             wrapper.chmod(0o755)
         for n in sizes:
             for l in ledgers:
-                for side in ['bash','rust']:
+                for side in ['rust']:
                     samples={}
                     for counted in ([False,True] if a.count else [False]):
                         home,payload=seed(box/'paired',n,l);requests.clear();count_log.write_text('')
@@ -159,10 +161,8 @@ try:
                             env.update(HOME=str(user),NPM_CONFIG_USERCONFIG='/dev/null',NPM_CONFIG_IGNORE_SCRIPTS='false')
                         if a.rotate_bytes:env['SAFEDEPS_ADVISORY_LOG_MAX_BYTES']=str(a.rotate_bytes)
                         if counted:env['PATH']=str(bin_dir)+os.pathsep+env['PATH']
-                        if side=='bash':argv=['bash',str(root/'scripts/safedeps-post-verify.sh')]
-                        else:
-                            argv=[core,'post-probe' if a.probe else 'post']
-                            if a.probe:payload=json.dumps(dict(op='hook',input=payload.decode())).encode()
+                        argv=[core,'post-probe' if a.probe else 'post']
+                        if a.probe:payload=json.dumps(dict(op='hook',input=payload.decode())).encode()
                         start=time.monotonic()
                         result=subprocess.run(argv,input=payload,env=env,cwd=box,capture_output=True)
                         elapsed=time.monotonic()-start
@@ -213,7 +213,9 @@ try:
                     rows.append(dict(side=side,closure_size=n,ledger_size=l,cache=a.cache,**samples))
 finally:
     server.shutdown();server.server_close();thread.join()
-report=dict(host=dict(system=platform.system(),release=platform.release(),machine=platform.machine()),
+report=dict(source_sha256=source_hashes,core_sha256=hashlib.sha256(Path(core).read_bytes()).hexdigest(),
+            load_start=load_start,load_end=os.getloadavg(),nice=os.getpriority(os.PRIO_PROCESS,0),
+            host=dict(system=platform.system(),release=platform.release(),machine=platform.machine()),
             scope='verified rebuild of one approved fixture package' if a.rebuild else 'recorded empty install with new text bins' if a.bin_count else 'whole post command-independent backstop; no rebuild',
             bin_count=a.bin_count,rotation_seed_bytes=a.rotate_bytes,
             pre_generated_fixture=pre_evidence,

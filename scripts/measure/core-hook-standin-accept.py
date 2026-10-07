@@ -25,6 +25,12 @@ and from a fresh validator fresh-positive and fresh-record-loss.
 Exit 0: every row passed. Exit 1: a row failed. Exit 3: nothing failed and a
 row was not run. Exit 2: this file could not do its work.
 """
+
+if __name__ == "__main__":
+    import sys
+    sys.stderr.write('retired: Acceptance of the historical Bash stand-in is not a native hook gate. See native-measure-disposition.json.\n')
+    raise SystemExit(2)
+
 import argparse
 import copy
 import hashlib
