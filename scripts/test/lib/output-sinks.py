@@ -71,6 +71,7 @@ def main():
         mutations = [
             ('new-stdout', 'fn census_extra() { println!("synthetic stdout"); }', 'println'),
             ('new-stderr', 'fn census_extra() { std :: eprintln ! { "synthetic stderr" }; }', 'eprintln'),
+            ('raw-identifier-stdout', 'fn census_extra() { r#println!("synthetic stdout"); }', 'println'),
             ('new-file-append', '''fn census_extra() {
                 use std::io::Write;
                 let mut file = std::fs::OpenOptions::new().create(true).append(true).open("advisory.log").unwrap();

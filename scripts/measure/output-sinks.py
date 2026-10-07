@@ -71,6 +71,8 @@ CAPABILITIES = set('stdout stderr File OpenOptions Stdio Command create create_n
                    'truncate flush set_len spawn status output from_raw_fd from_raw_handle'.split())
 MACROS = set('print println eprint eprintln write writeln dbg panic assert assert_eq assert_ne '
              'unreachable unimplemented todo'.split())
+DATA_MACROS = set('format format_args vec matches concat concat_bytes stringify env option_env '
+                  'include_str include_bytes cfg file line column module_path'.split())
 # Only the closed result API belongs here; report::io_outcome's free actor
 # argument is not one. Unknown rendering calls are conservatively "other".
 RESULT_RENDERERS = {'Outcome::describe'}
@@ -117,7 +119,8 @@ def lex(text):
             if word: i = word.end()
             elif text.startswith('::', i): i += 2
             else: i += 1
-        out.append(text[start:i])
+        token = text[start:i]
+        out.append(token[2:] if token.startswith('r#') and IDENT.fullmatch(token) else token)
     return out
 
 
@@ -369,18 +372,16 @@ def origins(name, args, bindings, typed):
     return '+'.join(sorted(kinds)) or 'other'
 
 
-def entries(path, ts):
+def entries(path, ts, foreign_names):
     ps = pairs(ts)
     scopes = functions(ts, ps)
-    aliases, declarations, macro_names = {}, set(), set()
+    aliases, declarations = {}, set()
     for i, t in enumerate(ts):
         if t == 'use':
             end = use_end(ts, ps, i)
             declarations.update(range(i+1, end))
             for imported, alias in use_paths(ts[i+1:end-1]):
                 if alias and output_import(imported): aliases[alias] = imported.split('::')[-1]
-        elif t == 'macro_rules' and ts[i+1:i+2] == ['!']:
-            macro_names.add(ts[i+2])
     rows = []
     provenance = {(a, b): local_origins(ts[a:b]) for a, b, _ in scopes}
     def add(scope, kind, channel, callee, source='-'):
@@ -395,7 +396,8 @@ def entries(path, ts):
         structural = t in ('use', 'extern', 'macro_rules')
         if not structural:
             if before == 'fn': continue
-            if name in MACROS | macro_names | {'include'} and after == '!': pass
+            if after == '!' and name not in DATA_MACROS and ts[i+2:i+3] in (['('], ['{'], ['[']): pass
+            elif name in foreign_names and after == '(': pass
             elif name in HUMAN | WRITES | COPIES | CAPABILITIES:
                 if before not in ('.', '::') and after not in ('(', '::'): continue
                 # Merely reading child.stdout or record.status is no capability.
@@ -427,7 +429,8 @@ def entries(path, ts):
         if i and ts[i-1] in ('.', '::'): begin = receiver_start(ts, ps, i)
         expression = ts[begin:end]
         kind, channel = role(path, scope, name, expression)
-        if name in macro_names or name == 'include': kind, channel = 'boundary', 'macro-call'
+        if after == '!' and name not in MACROS: kind, channel = 'boundary', 'macro-call'
+        if name in foreign_names: kind, channel = 'boundary', 'foreign-call'
         # For methods the callee is the method name, not the receiver expression.
         # Qualified free-function names keep their namespace.
         qualified = i
@@ -455,10 +458,18 @@ def inventory(root):
         base = path.parent if path.name == 'mod.rs' else path.with_suffix('')
         if base.is_dir(): excluded.update(p.resolve() for p in base.rglob('*.rs'))
     rows = []
+    foreign_names = set()
+    for path, ts in parsed.items():
+        if path.resolve() in excluded: continue
+        ps = pairs(ts)
+        for i, t in enumerate(ts):
+            if t == 'extern':
+                end = item_end(ts, ps, i)
+                foreign_names.update(ts[j+1] for j in range(i, end-1) if ts[j] == 'fn')
     for path, ts in parsed.items():
         if path.resolve() in excluded: continue
         rel = path.relative_to(root).as_posix()
-        rows.extend(entries(rel, ts))
+        rows.extend(entries(rel, ts, foreign_names))
     counts = Counter(tuple(row[key] for key in COLUMNS[:-1]) for row in rows)
     return [dict(zip(COLUMNS, key + (count,))) for key, count in sorted(counts.items())]
 
