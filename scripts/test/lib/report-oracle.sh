@@ -156,6 +156,7 @@ oracle_init() {
   ORACLE_DIR="$1"
   mkdir -p "${ORACLE_DIR}/bin"
   : > "${ORACLE_DIR}/forms.log"
+  : > "${ORACLE_DIR}/forms.rows"
   # Every npm the hook runs is noted, with its exit status, and then handed to
   # the npm the row put on PATH. "safedeps did not run npm rebuild" is checked
   # against this, not against the row's own stub.
@@ -176,7 +177,14 @@ SHIM
   chmod +x "${ORACLE_DIR}/bin/npm"
 }
 
-oracle_count() { printf '%s\n' "$1" >> "${ORACLE_DIR}/forms.log"; }
+# A form is counted here and nowhere else. forms.rows keeps beside it the row a
+# suite that skips rows says it is in (ORACLE_ROW, empty for a row that cannot
+# be skipped), so oracle_form_rows_census can hold the suite's list of forms
+# that only skippable rows show to what the rows showed.
+oracle_count() {
+  printf '%s\n' "$1" >> "${ORACLE_DIR}/forms.log"
+  printf '%s\t%s\n' "$1" "${ORACLE_ROW:-}" >> "${ORACLE_DIR}/forms.rows"
+}
 oracle_red() {
   printf 'not ok - report oracle: %s: [%s]\n' "$1" "${O_LINE:-}" >&2
   ORACLE_FAILED=1
@@ -1480,6 +1488,15 @@ oracle_direct() {
   oracle_read_lines "$3"
   O_BLOCK=""
   [[ "${ORACLE_FAILED}" == 0 ]]
+}
+
+# oracle_form_rows_census <declared forms> <capability rows>: when every
+# skippable row ran, the forms the suite names as shown only by skippable rows
+# are the forms only skippable rows showed, each with the rows that showed it.
+# Where a row was skipped the rows that ran are not all of them, and it says so.
+oracle_form_rows_census() {
+  python3 "$(dirname "${ORACLE_READ}")/form-rows-census.py" --observed "${ORACLE_DIR}/forms.rows" \
+    --declared "$1" --rows "$2" --required "${ORACLE_FORMS}"
 }
 
 # The form table: every form with the number of lines that matched it. A form

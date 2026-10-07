@@ -4,11 +4,17 @@ set -euo pipefail
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "${ROOT_DIR}"
 
+# The row the report oracle attributes the forms of a hook call to, set by
+# row_if. A row's pass ends it; a row that has no pass of its own calls row_end.
+ORACLE_ROW=""
+
 pass() {
   hook_response_assert || fail "a hook response could not be read"
   native_fixtures_assert || fail "$1: native fixture failed; see invocation receipt/error"
   printf 'ok - %s\n' "$1"
+  ORACLE_ROW=""
 }
+row_end() { ORACLE_ROW=""; }
 
 # A skip is a TAP row, recognized by ci-verdict, but never goes through pass.
 # Keep its stable name separately so the last line exposes the lost coverage.
@@ -17,6 +23,36 @@ skip() {
   native_fixtures_assert || fail "a native fixture failed before a skip"
   printf '%s\n' "$1" >> "${tmp_root}/skipped-rows"
   printf 'ok - %s: SKIPPED (%s)\n' "$1" "$2"
+}
+
+# A row that needs something of the host runs only where the host has it.
+# row_if NAME CAPABILITY...: `copies` is the source-copy fixtures, any other
+# word is a permission operation the row's fixture needs (read, write, create,
+# unlink, scandir). It returns 0 and names the row for the oracle, which
+# attributes the report forms of the hook calls that follow to it, or it says
+# the row is SKIPPED, once per name, and returns 1. The name is written here
+# and nowhere else, so the row that is skipped and the row the oracle sees are
+# one string. A row may be entered more than once (its fixture is in two places).
+row_if() {
+  local name="$1" capability reason="" operations=()
+  shift
+  for capability in "$@"; do
+    if [[ "${capability}" == copies ]]; then
+      native_copies_available || reason+="${reason:+; }${NATIVE_SKIP_REASON}"
+    else
+      operations+=("${capability}")
+    fi
+  done
+  if (( ${#operations[@]} )); then
+    native_permissions_available "${operations[@]}" || reason+="${reason:+; }${NATIVE_SKIP_REASON}"
+  fi
+  if [[ -n "${reason}" ]]; then
+    printf '%s\tskipped\n' "${name}" >> "${tmp_root}/capability-rows"
+    grep -qxF -- "${name}" "${tmp_root}/skipped-rows" || skip "${name}" "${reason}"
+    return 1
+  fi
+  printf '%s\tran\n' "${name}" >> "${tmp_root}/capability-rows"
+  ORACLE_ROW="${name}"
 }
 
 fail() {
@@ -47,6 +83,7 @@ assert_skipped_rebuild_states_facts() {
 
 tmp_root=$(mktemp -d "${TMPDIR:-/tmp}/safedeps-e2e.XXXXXX")
 : > "${tmp_root}/skipped-rows"
+: > "${tmp_root}/capability-rows"
 # shellcheck source=lib/hook-response.sh
 source "${ROOT_DIR}/scripts/test/lib/hook-response.sh"
 hook_response_init "${tmp_root}/hook-response.failures"
@@ -1226,7 +1263,7 @@ pass "a rollback next to another manager's lockfile says which lockfiles are mis
 # the battery under set -e (measured in WSL1 on DrvFs, 2026-10-06). So the row
 # asks the filesystem first, and a row that is not run says so as a skipped
 # row, where the verdict and a reader of the log look for one.
-if native_permissions_available unlink; then
+if row_if "stuck-wt" unlink; then
   stuck_wt="${tmp_root}/stuck-wt"
   mkdir -p "${stuck_wt}/node_modules/locked-package"
   : > "${stuck_wt}/node_modules/locked-package/index.js"
@@ -1257,8 +1294,6 @@ EOF
   assert_gives_no_command "$(< "${stuck_post_file}")" "the rollback that could not remove node_modules gives no command"
   cmp -s "${stuck_wt}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "the lockfile is still restored where node_modules cannot be removed"
   pass "a rollback that cannot remove node_modules says so and gives no command"
-else
-  skip "stuck-wt" "${NATIVE_SKIP_REASON}"
 fi
 
 # `npm install --no-save <pkg>` in a directory without package.json writes
@@ -1432,7 +1467,7 @@ pass "a rewritten command whose record the post hook does not find gets no --ign
 # to fail quietly and the rewrite went out anyway, so the post hook said "did
 # not add" of a command safedeps had written. An archive copy makes only the rewrite writer
 # directory readonly after initial snapshot/pending creation; the real writer fails.
-if native_copies_available && native_permissions_available create; then
+if row_if "markfail" copies create; then
 markfail_wt=$(mktemp -d "${tmp_root}/markfail-wt.XXXXXX")
 grammar_project "${markfail_wt}"
 markfail_pre_file=$(SAFEDEPS_TEST_FAULT=markfail grammar_pre "${markfail_wt}" "npm install fixture-parent@1.0.0")
@@ -1445,15 +1480,13 @@ markfail_post_file=$(PATH="${stub_bin}:${PATH}" grammar_post "${markfail_wt}" "n
 post_message "${markfail_post_file}" | grep -x 'safedeps did not add --ignore-scripts to this install' >/dev/null \
   || fail "the install whose rewrite was withheld says safedeps did not add --ignore-scripts (${markfail_post_file})"
 pass "a rewrite whose record cannot be written is not sent, and the rollback says safedeps did not add the flag"
-else
-  skip "markfail" "${NATIVE_SKIP_REASON}"
 fi
 
 # A record the post hook cannot read gets no --ignore-scripts line. A failed
 # read used to fall through to "did not add", which was false of this command:
 # safedeps had rewritten it. The fixture removes meta read permission after oracle_before, confirms
 # EACCES as the same uid, and supplies record-unread independently of the hook.
-if native_permissions_available read; then
+if row_if "markread" read; then
 markread_wt=$(mktemp -d "${tmp_root}/markread-wt.XXXXXX")
 grammar_project "${markread_wt}"
 markread_pre_file=$(grammar_pre "${markread_wt}" "npm install fixture-parent@1.0.0")
@@ -1468,8 +1501,6 @@ post_message "${markread_post_file}" | grep 'A rollback ran\.' >/dev/null \
 grep -q "post-verify: could not read the pre-guard's record of this command in .*, so no --ignore-scripts line was said" "${SAFEDEPS_HOME}/advisory.log" \
   || fail "a record the post hook cannot read is said in advisory.log"
 pass "a record the post hook cannot read gets no --ignore-scripts line, and advisory.log says so"
-else
-  skip "markread" "${NATIVE_SKIP_REASON}"
 fi
 
 # A line is said only from a fact the record states as version 2. Each shape
@@ -1868,7 +1899,7 @@ pass "a pending state whose snapshot_id is a number names no snapshot, for the h
 # restored the second call's files (bamdori r19, SAME). A `date` that answers
 # one second for `+%s` puts both calls in it every time; the lockfile changes
 # between them, as an install in progress would change it.
-if native_copies_available; then
+if row_if "same" copies; then
 same_wt=$(mktemp -d "${tmp_root}/same-wt.XXXXXX")
 grammar_project "${same_wt}"
 same_first_file=$(SAFEDEPS_TEST_FAULT=same grammar_pre "${same_wt}" "npm install fixture-parent@1.0.0")
@@ -1899,8 +1930,6 @@ post_message "${same_second_post_file}" | grep -x 'safedeps added --ignore-scrip
 cmp -s "${same_wt}/package-lock.json" "${tmp_root}/same-second-lock.json" \
   || fail "the second call in one second is rolled back to its own snapshot"
 pass "two pre-guard calls in one project within one second keep a record and a snapshot each"
-else
-  skip "same" "${NATIVE_SKIP_REASON}"
 fi
 
 # The backstop with nothing to roll back to: no confirmed record, and a
@@ -2332,7 +2361,7 @@ pass "a failed install is judged and leaves no record, on both engines"
 # writing the actual baseline with integer-second FileTimes. A write in the second the baseline is touched in would not
 # be newer than it, so there the baseline is set two seconds back, and a pull
 # just before the grep is counted as the grep's.
-if native_copies_available; then
+if row_if "bs_sec" copies; then
 bs_sec_wt="${tmp_root}/bs-sec-wt"
 bs_project "${bs_sec_wt}"
 printf '%s\n' "${tampered_lock}" > "${bs_sec_wt}/package-lock.json"
@@ -2343,8 +2372,6 @@ bs_sec_post_file=$(PATH="${stub_bin}:${PATH}" grammar_post "${bs_sec_wt}" "${bs_
 bs_assert_rollback "${bs_sec_wt}" "${bs_sec_post_file}" "a grep on a whole-second filesystem" \
   "$(cd -P "${bs_sec_wt}" && pwd -P)/package-lock.json changed after the baseline taken before this command"
 pass "on a filesystem that keeps whole seconds the baseline is set two seconds back"
-else
-  skip "bs_sec" "${NATIVE_SKIP_REASON}"
 fi
 
 # A node tree on two filesystems (lumi r2 P3): the lockfile keeps nanoseconds
@@ -2355,7 +2382,7 @@ fi
 # not set back. Where one part with a time below the second was enough, the
 # tree was read as subsecond and the walk missed such a write (2 of 5 on a real
 # HFS+ mount). Every part has to show one now, so the baseline is set back.
-if native_copies_available; then
+if row_if "bs_mix" copies; then
 bs_mix_wt="${tmp_root}/bs-mix-wt"
 bs_project "${bs_mix_wt}"
 # Isolate the mixed-clock walk: an older lockfile must not satisfy the
@@ -2394,21 +2421,17 @@ bs_mix_post_file=$(SAFEDEPS_TEST_FAULT=bs_mix PATH="${stub_bin}:${PATH}" grammar
 grep -qF "post-verify BACKSTOP traced: $(cd -P "${bs_mix_wt}" && pwd -P)/node_modules" "${SAFEDEPS_HOME}/advisory.log" \
   || fail "a write into node_modules on a whole-second mount beside a subsecond lockfile: the backstop counts it as traced (${bs_mix_post_file})"
 pass "a tree with one part on a whole-second filesystem sets the baseline back"
-else
-  skip "bs_mix" "${NATIVE_SKIP_REASON}"
 fi
 
 # This helper asserts an empty post response and the advisory line in full.
-if native_permissions_available scandir; then
+if row_if "walk-io" scandir; then
 python3 "${ROOT_DIR}/scripts/test/lib/backstop-walk-io.py" --core "${NATIVE_TEST_CORE}" \
   --output "${tmp_root}/backstop-walk-io.json" || fail "a failed native directory walk preserves its OS error"
 pass "a failed native directory walk is traced and reports its observed OS error in the query and advisory.log"
-else
-  skip "walk-io" "${NATIVE_SKIP_REASON}"
 fi
 
 # A source copy delays the actual native walk past its deadline.
-if native_copies_available; then
+if row_if "bs_slow" copies; then
 bs_slow_wt="${tmp_root}/bs-slow-wt"
 bs_project "${bs_slow_wt}"
 bs_pull "${bs_slow_wt}"
@@ -2417,8 +2440,6 @@ bs_slow_post_file=$(SAFEDEPS_TEST_FAULT=bs_slow PATH="${stub_bin}:${PATH}" SAFED
 bs_assert_rollback "${bs_slow_wt}" "${bs_slow_post_file}" "a walk past its deadline" \
   "the walk of $(cd -P "${bs_slow_wt}" && pwd -P)/node_modules did not finish within 1s"
 pass "a walk that does not finish within its deadline counts as a trace"
-else
-  skip "bs_slow" "${NATIVE_SKIP_REASON}"
 fi
 
 # The --ignore-scripts line reads no command. It is the pre-guard's record of
@@ -2577,9 +2598,7 @@ pass "a restore target that is not a regular file is named and left alone"
 # A permission error is a line, and rollback continues through node_modules
 # and journal close. The fixture reaches the native destination open; a
 # separate Python open records the OS error before the mode is restored.
-restore_permissions=no
-if native_permissions_available write create; then
-restore_permissions=yes
+if row_if "restore-failures (cpfail, cpgone, readonly)" write create; then
 cpfail_wt="${tmp_root}/cpfail-wt"
 grammar_project "${cpfail_wt}"
 mkdir -p "${cpfail_wt}/node_modules/installed-package"
@@ -2591,13 +2610,12 @@ post_message "${cpfail_post_file}" | grep -E '^not restored .*/cpfail-wt/package
 [[ ! -e "${cpfail_wt}/node_modules" ]] || fail "the rollback goes on to node_modules after a restore that failed"
 [[ -z "$(find "${SAFEDEPS_HOME}/rollback-journal" -maxdepth 1 -name '*.json' 2>/dev/null)" ]] \
   || fail "a rollback that reported a failed restore closes its journal entry"
-else
-  skip "restore-failures (cpfail, cpgone, readonly)" "${NATIVE_SKIP_REASON}"
+row_end
 fi
 
 # A source copy returns Ok without writing this lockfile. This is a separate
 # operation/result observation, not a nonzero error recast as success.
-if native_copies_available; then
+if row_if "copy-noop" copies; then
 copy_noop_wt="${tmp_root}/copy-noop-wt"
 grammar_project "${copy_noop_wt}"
 mkdir -p "${copy_noop_wt}/node_modules/installed-package"
@@ -2610,13 +2628,11 @@ post_message "${copy_noop_post_file}" | grep -E '^not restored .*/copy-noop-wt/p
 [[ -z "$(find "${SAFEDEPS_HOME}/rollback-journal" -maxdepth 1 -name '*.json' 2>/dev/null)" ]] \
   || fail "rollback closes the journal after a copy returned without restoring bytes"
 pass "a no-error copy with differing bytes has its own checked report form"
-else
-  skip "copy-noop" "${NATIVE_SKIP_REASON}"
 fi
 
 # The same with the file gone: the command removed the lockfile, and the copy
 # that would put it back fails.
-if [[ "${restore_permissions}" == yes ]]; then
+if row_if "restore-failures (cpfail, cpgone, readonly)" write create; then
 cpgone_wt="${tmp_root}/cpgone-wt"
 grammar_project "${cpgone_wt}"
 grammar_pre "${cpgone_wt}" "npm install fixture-parent@1.0.0" > /dev/null
@@ -2643,7 +2659,7 @@ fi
 
 # A nonempty readonly child refuses unlink for this uid. Root or a filesystem
 # that ignores chmod skips this row before entering the fixture.
-if native_permissions_available unlink; then
+if row_if "rmfail" unlink; then
 rmfail_wt="${tmp_root}/rmfail-wt"
 grammar_project "${rmfail_wt}"
 mkdir -p "${rmfail_wt}/node_modules/installed-package"
@@ -2653,8 +2669,6 @@ rmfail_post_file=$(SAFEDEPS_TEST_FAULT=rmfail PATH="${emptying_bin}:${PATH}" gra
 post_message "${rmfail_post_file}" | grep -E '^not removed .*/rmfail-wt/node_modules: removal returned OS error 13; .*/rmfail-wt/node_modules exists$' >/dev/null \
   || fail "a removal that failed is reported with the removal's OS error and what a test of the path returned"
 pass "a removal that fails says the OS error and that the path exists"
-else
-  skip "rmfail" "${NATIVE_SKIP_REASON}"
 fi
 
 # The install trace, where the baseline file the pre-guard touched is gone, and
@@ -3836,15 +3850,13 @@ post_message "$(forms_report)" | grep '^Owner: the opening time of the journal c
 # ps lstart garbage-date parsing has no native equivalent. Integer API
 # zero/short/wrong-owner responses replace that parser coverage; the malformed
 # journal opening-time assertion above remains independent and unchanged.
-if native_copies_available; then
+if row_if "owner-empty/owner-short/owner-wrong-pid" copies; then
 for forms_query_case in owner-empty owner-short owner-wrong-pid; do
   forms_entry "${forms_owner_pid}" "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
   post_message "$(SAFEDEPS_TEST_FAULT="${forms_query_case}" forms_report)" | grep "^Owner: native process query supplied no usable owner data for pid ${forms_owner_pid}\$" >/dev/null \
     || fail "a native owner query failure is reported as the test that answered (${forms_query_case})"
 done
-printf 'ok - an owner that cannot be placed is reported as the test that could not place it\n'
-else
-  skip "owner-empty/owner-short/owner-wrong-pid" "${NATIVE_SKIP_REASON}"
+pass "an owner that cannot be placed is reported as the test that could not place it"
 fi
 kill -9 "${forms_owner_pid}" 2>/dev/null
 forms_reap=0
@@ -3972,11 +3984,18 @@ printf '%s\n' '{"vulnerable":[]}' > "${state_file}"
 # oracle's green says nothing about that form.
 # A form may be absent only when all the rows responsible for showing it
 # were explicitly skipped. Shared forms still need a non-skipped producer.
+# The list is the suite's claim about which rows show a form; the census below
+# holds it, in a run that skipped none of them, to the rows that showed it.
 optional_forms="${tmp_root}/skipped-forms"
+declared_forms="${tmp_root}/declared-forms"
 : > "${optional_forms}"
+: > "${declared_forms}"
 form_rows() {
   local form="$1" row names=""
   shift
+  for row in "$@"; do
+    printf '%s\t%s\n' "${form}" "${row}" >> "${declared_forms}"
+  done
   for row in "$@"; do
     grep -qxF "${row}" "${tmp_root}/skipped-rows" || return 0
     names+="${names:+, }${row}"
@@ -3987,7 +4006,9 @@ form_rows not-restored-native-no-error copy-noop
 form_rows owner-native-query-failed owner-empty/owner-short/owner-wrong-pid
 form_rows not-restored-native-differs 'restore-failures (cpfail, cpgone, readonly)'
 form_rows not-restored-native-absent 'restore-failures (cpfail, cpgone, readonly)'
-form_rows not-removed-native stuck-wt rmfail
+form_rows reason-file 'restore-failures (cpfail, cpgone, readonly)'
+form_rows not-removed-native stuck-wt rmfail 'restore-failures (cpfail, cpgone, readonly)'
+oracle_form_rows_census "${declared_forms}" "${tmp_root}/capability-rows" || exit 1
 oracle_table "${optional_forms}" || exit 1
 if [[ "${ORACLE_UNOBSERVED_FORMS}" == 0 ]]; then
   printf 'ok - every line the post hook printed is a known form whose claim held on disk, and every form appeared\n'
