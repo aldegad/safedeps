@@ -42,6 +42,7 @@ runner='''#!/bin/bash
 set -uo pipefail
 source "$ROOT/scripts/test/lib/report-oracle.sh"
 oracle_init "$BOX/oracle"
+oracle_native_io_forms
 payload=$(cat "$BOX/payload.json")
 call="$BOX/oracle/call"
 mkdir -p "$call"
@@ -51,6 +52,9 @@ if [[ "$FAULT" == unread-meta ]]; then
   : > "$call/record-unread"
   chmod 000 "$SAFEDEPS_HOME/snapshots/pre_meta.json"
 fi
+# Read the failed operation independently while this fixture's permissions
+# are still in force; native reports name an OS error, not a child exit.
+python3 "$ROOT/scripts/test/lib/report-oracle-read.py" native-io-before "$BOX/project" "$call/native-io.json" || exit $?
 out=$(printf '%s' "$payload" | "$CORE" post)
 rc=$?
 printf '%s\\n' "$out" > "$BOX/hook.out"
@@ -236,16 +240,16 @@ with tempfile.TemporaryDirectory(prefix='core-post-faults.') as tmp:
                     else:reached=reached and (home/'current_snapshot_id').read_text()=='pre\n'
                 elif kind.startswith('restore-'):
                     suffix='does not exist' if kind=='restore-absent' else 'differs from the snapshot'
-                    reached=f'not restored {project}/package-lock.json: cp exit 1; {project}/package-lock.json {suffix}' in message
+                    reached=f'not restored {project}/package-lock.json: copy returned OS error 13; {project}/package-lock.json {suffix}' in message
                 else:
-                    reached=f'not removed {project}/node_modules: rm exit 1; {project}/node_modules exists' in message
+                    reached=f'not removed {project}/node_modules: removal returned OS error 13; {project}/node_modules exists' in message
                 journal_closed=not list((home/'rollback-journal').glob('*.json'))
                 tree_exists=(project/'node_modules').exists()
                 continued=True
                 if kind=='restore-readonly':
                     continued=not tree_exists and f'removed {project}/node_modules' in message
                 elif kind=='restore-absent':
-                    continued=(tree_exists and f'not removed {project}/node_modules: rm exit 1; {project}/node_modules exists' in message)
+                    continued=(tree_exists and f'not removed {project}/node_modules: removal returned OS error 13; {project}/node_modules exists' in message)
                 # The closed oracle checks the bytes/logs/disk, while this
                 # assertion verifies this fixture reached its failure path.
                 passed=hook_rc==0 and result.returncode==0 and reached and continued and journal_closed
@@ -261,6 +265,7 @@ with tempfile.TemporaryDirectory(prefix='core-post-faults.') as tmp:
                 rows.append(dict(name=kind,side=side,passed=passed,injection_reached=reached,
                                  rollback_continued=continued,journal_closed=journal_closed,node_modules_exists=tree_exists,
                                  rc=result.returncode,hook_rc=hook_rc,hook_stdout=raw,
+                                 native_io_facts=(d/'oracle/call/native-io.json').read_text(),
                                  oracle_stdout=result.stdout,oracle_stderr=result.stderr))
                 rows[-1]['assertion']=assertion
                 print(('ok' if passed else 'FAIL'),side,kind,flush=True)

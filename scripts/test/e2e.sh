@@ -45,6 +45,7 @@ tmp_root=$(mktemp -d "${TMPDIR:-/tmp}/safedeps-e2e.XXXXXX")
 source "${ROOT_DIR}/scripts/test/lib/report-oracle.sh"
 oracle_init "${tmp_root}/report-oracle"
 oracle_native_owner_forms
+oracle_native_io_forms
 source "${ROOT_DIR}/scripts/test/lib/core-post-fixtures.sh"
 native_fixtures_init "${tmp_root}/native-fixtures"
 post_message() { jq -r '.systemMessage // empty' <<< "$1"; }
@@ -1229,7 +1230,7 @@ EOF
   grep -q 'suspicious dependency change detected' <<< "${stuck_post}" || fail "reorg fires where node_modules cannot be removed"
   [[ ! -e "${stuck_wt}/node_modules/removable-package" && -e "${stuck_wt}/node_modules/locked-package/index.js" ]] \
     || fail "this row removes part of node_modules and leaves part, or it does not test what the line may say"
-  grep -qE 'not removed .*/stuck-wt/node_modules: rm exit [1-9][0-9]*; .*/stuck-wt/node_modules exists$' <<< "$(post_message "${stuck_post}")" \
+  grep -qE 'not removed .*/stuck-wt/node_modules: removal returned OS error 13; .*/stuck-wt/node_modules exists$' <<< "$(post_message "${stuck_post}")" \
     || fail "the rollback says the node_modules it could not remove is still there"
   # rm -rf removes what it can before it fails, so the line says the path
   # exists and nothing about what is left in it.
@@ -2520,23 +2521,35 @@ grep -qx 'not restored .*/cpdir-wt/package-lock.json: .*/cpdir-wt/package-lock.j
 [[ -z "$(ls -A "${cpdir_wt}/package-lock.json")" ]] || fail "the rollback writes nothing inside a directory where the lockfile was"
 pass "a restore target that is not a regular file is named and left alone"
 
-# A restore whose copy fails is a line, and the rollback goes on: under set -e
-# the bare cp ended the hook there, with the rejected lockfile in place,
-# node_modules untouched and the journal entry left for the next hook to call
-# an interrupted rollback. This cp fails for one target on every platform; the
-# read-only lockfile below is the same failure from a real cp, where the user
-# is not root.
+# A permission error is a line, and rollback continues through node_modules
+# and journal close. The fixture reaches the native destination open; a
+# separate Python open records the OS error before the mode is restored.
 cpfail_wt="${tmp_root}/cpfail-wt"
 grammar_project "${cpfail_wt}"
 mkdir -p "${cpfail_wt}/node_modules/installed-package"
 grammar_pre "${cpfail_wt}" "npm install fixture-parent@1.0.0" > /dev/null
 printf '%s\n' "${tampered_lock}" > "${cpfail_wt}/package-lock.json"
 cpfail_post=$(SAFEDEPS_TEST_FAULT=cpfail PATH="${emptying_bin}:${PATH}" grammar_post "${cpfail_wt}" "npm install fixture-parent@1.0.0")
-grep -qE '^not restored .*/cpfail-wt/package-lock.json: cp exit 1; .*/cpfail-wt/package-lock.json differs from the snapshot$' <<< "$(post_message "${cpfail_post}")" \
-  || fail "a restore whose copy failed is reported with cp's exit status"
+grep -qE '^not restored .*/cpfail-wt/package-lock.json: copy returned OS error 13; .*/cpfail-wt/package-lock.json differs from the snapshot$' <<< "$(post_message "${cpfail_post}")" \
+  || fail "a restore whose copy failed is reported with the copy's OS error"
 [[ ! -e "${cpfail_wt}/node_modules" ]] || fail "the rollback goes on to node_modules after a restore that failed"
 [[ -z "$(find "${SAFEDEPS_HOME}/rollback-journal" -maxdepth 1 -name '*.json' 2>/dev/null)" ]] \
   || fail "a rollback that reported a failed restore closes its journal entry"
+# A source copy returns Ok without writing this lockfile. This is a separate
+# operation/result observation, not a nonzero error recast as success.
+copy_noop_wt="${tmp_root}/copy-noop-wt"
+grammar_project "${copy_noop_wt}"
+mkdir -p "${copy_noop_wt}/node_modules/installed-package"
+grammar_pre "${copy_noop_wt}" "npm install fixture-parent@1.0.0" > /dev/null
+printf '%s\n' "${tampered_lock}" > "${copy_noop_wt}/package-lock.json"
+copy_noop_post=$(SAFEDEPS_TEST_FAULT=copy-noop PATH="${emptying_bin}:${PATH}" grammar_post "${copy_noop_wt}" "npm install fixture-parent@1.0.0")
+grep -qE '^not restored .*/copy-noop-wt/package-lock.json: copy returned without error; .*/copy-noop-wt/package-lock.json differs from the snapshot$' <<< "$(post_message "${copy_noop_post}")" \
+  || fail "a copy returning without error still reports the differing bytes"
+[[ ! -e "${copy_noop_wt}/node_modules" ]] || fail "rollback continues after a copy returned without restoring bytes"
+[[ -z "$(find "${SAFEDEPS_HOME}/rollback-journal" -maxdepth 1 -name '*.json' 2>/dev/null)" ]] \
+  || fail "rollback closes the journal after a copy returned without restoring bytes"
+pass "a no-error copy with differing bytes has its own checked report form"
+
 # The same with the file gone: the command removed the lockfile, and the copy
 # that would put it back fails.
 cpgone_wt="${tmp_root}/cpgone-wt"
@@ -2547,7 +2560,7 @@ mkdir -p "${cpgone_wt}/node_modules/.bin" "${cpgone_wt}/node_modules/fixture-par
 printf '{"name":"fixture-parent","version":"1.0.0"}\n' > "${cpgone_wt}/node_modules/fixture-parent/package.json"
 cp /bin/echo "${cpgone_wt}/node_modules/.bin/native-drop"
 cpgone_post=$(SAFEDEPS_TEST_FAULT=cpgone PATH="${emptying_bin}:${PATH}" grammar_post "${cpgone_wt}" "npm install fixture-parent@1.0.0")
-grep -qE '^not restored .*/cpgone-wt/package-lock.json: cp exit 1; .*/cpgone-wt/package-lock.json does not exist$' <<< "$(post_message "${cpgone_post}")" \
+grep -qE '^not restored .*/cpgone-wt/package-lock.json: copy returned OS error 13; .*/cpgone-wt/package-lock.json does not exist$' <<< "$(post_message "${cpgone_post}")" \
   || fail "a restore that failed over a missing file says the file does not exist (${cpgone_post})"
 if [[ "$(id -u)" != 0 ]]; then
   readonly_wt="${tmp_root}/readonly-wt"
@@ -2558,7 +2571,7 @@ if [[ "$(id -u)" != 0 ]]; then
   chmod 444 "${readonly_wt}/package-lock.json"
   readonly_post=$(PATH="${emptying_bin}:${PATH}" grammar_post "${readonly_wt}" "npm install fixture-parent@1.0.0")
   chmod 644 "${readonly_wt}/package-lock.json"
-  grep -qE '^not restored .*/readonly-wt/package-lock.json: cp exit [1-9][0-9]*; ' <<< "$(post_message "${readonly_post}")" \
+  grep -qE '^not restored .*/readonly-wt/package-lock.json: copy returned OS error 13; ' <<< "$(post_message "${readonly_post}")" \
     || fail "a read-only lockfile is reported as not restored (${readonly_post})"
   [[ ! -e "${readonly_wt}/node_modules" ]] || fail "the rollback goes on to node_modules past a read-only lockfile"
 fi
@@ -2572,9 +2585,9 @@ mkdir -p "${rmfail_wt}/node_modules/installed-package"
 grammar_pre "${rmfail_wt}" "npm install fixture-parent@1.0.0" > /dev/null
 printf '%s\n' "${tampered_lock}" > "${rmfail_wt}/package-lock.json"
 rmfail_post=$(SAFEDEPS_TEST_FAULT=rmfail PATH="${emptying_bin}:${PATH}" grammar_post "${rmfail_wt}" "npm install fixture-parent@1.0.0")
-grep -qE '^not removed .*/rmfail-wt/node_modules: rm exit 1; .*/rmfail-wt/node_modules exists$' <<< "$(post_message "${rmfail_post}")" \
-  || fail "a removal that failed is reported with rm's exit status and what a test of the path returned"
-pass "a removal that fails says the exit status and that the path exists"
+grep -qE '^not removed .*/rmfail-wt/node_modules: removal returned OS error 13; .*/rmfail-wt/node_modules exists$' <<< "$(post_message "${rmfail_post}")" \
+  || fail "a removal that failed is reported with the removal's OS error and what a test of the path returned"
+pass "a removal that fails says the OS error and that the path exists"
 
 # The install trace, where the baseline file the pre-guard touched is gone, and
 # where the pending state names none.

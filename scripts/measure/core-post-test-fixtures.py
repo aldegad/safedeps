@@ -29,7 +29,7 @@ FAULT_COPIES = {
     ('post','owner-wrong-pid'):'owner-wrong-pid',
     ('post','markread'):None, ('post','cpfail'):None,
     ('post','cpgone'):None, ('post','rmfail'):None,
-    ('post','twoobj'):None, ('pre','workspace'):None,
+    ('post','twoobj'):None, ('pre','workspace'):None, ('post','copy-noop'):'copy-noop',
 }
 
 def selection(manifest, stage, fault):
@@ -71,6 +71,15 @@ def check_facts(facts, selected, permission, fault, home, project, payload, call
         if selected=='pre-mark':
             if observed!='Err(Os { code: 13, kind: PermissionDenied, message: "Permission denied" })':
                 raise RuntimeError('rewrite writer did not return the expected permission error')
+        elif selected=='copy-noop':
+            proof=json.loads(observed)
+            records=[json.loads(p.read_text()) for p in (call/'pending').glob('*.json')]
+            records=[r for r in records if isinstance(r,dict) and r.get('project_dir')==str(project.resolve())]
+            if len(records)!=1:raise RuntimeError('no unique saved pending record for copy fixture')
+            snapshot=records[0]['snapshot_id']
+            proof=dict(proof,source=os.path.realpath(proof['source']),target=os.path.realpath(proof['target']))
+            if proof!=dict(source=str((home/'snapshots'/(snapshot+'_package-lock.json')).resolve()),target=str((project/'package-lock.json').resolve()),result='Ok(())',snapshot=snapshot):
+                raise RuntimeError('copy result does not name the failing lockfile')
         elif selected.startswith('owner'):
             query=json.loads(observed)
             if not str(query['pid']).isdigit() or type(query['expected_bytes']) is not int or query['expected_bytes']<=8:
@@ -125,7 +134,7 @@ def prepare(a):
     module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
     edits = dict(module.EDITS)
     edits.update({'pre-'+k:v for k,v in module.PRE_EDITS.items() if k != 'mark'})
-    edits['pre-same'] = ('rust/src/pre/snapshot.rs',
+    edits['pre-same'] = ('rust/src/pre/install.rs',
         'let timestamp=os::wall(os::WallRole::PreSnapshot).seconds();',
         'let timestamp='+str(int(time.time()))+'i64;')
     # The first snapshot and pending writes succeed. Only the atomic rewrite
@@ -139,6 +148,17 @@ def prepare(a):
         let evidence=format!("{:?}",result);
         let _=fs::write(crate::state::guard_dir().join(".c3-reached"),evidence);
         result''')
+    edits['copy-noop'] = ('rust/src/post/report.rs',
+        'let result = sh::copy_file(src, dst);',
+        '''let result = if dst.file_name().is_some_and(|name| name=="package-lock.json") {
+            let source_name=sh::basename(sh::bytes(src));
+            let snapshot=source_name.as_slice();
+            let snapshot=snapshot.strip_suffix(b"_package-lock.json").unwrap_or(snapshot);
+            let proof=jv::obj(vec![("source",jv::s(sh::bytes(src))),("target",jv::s(sh::bytes(dst))),
+                ("result",jv::s(b"Ok(())")),("snapshot",jv::s(snapshot))]);
+            let _=fs::write(crate::state::guard_dir().join(".c3-reached"),jv::dump(&proof));
+            Ok(())
+        } else { sh::copy_file(src,dst) };''')
     call = 'unsafe{proc_pidinfo(pid,3,1,&mut b as *mut _ as *mut _,size)}'
     edits['owner'] = ('rust/src/post/process.rs', call,
         '{'+receipt_code('query zero','format!(r#"{{"pid":"{}","expected_bytes":{},"returned_bytes":0}}"#,pid,size)')+'0}')
@@ -154,6 +174,14 @@ def prepare(a):
         else:
             new = receipt_code(name) + new
         edits[name] = relative, old, new
+    anchors=[]
+    for name,(relative,old,_) in edits.items():
+        source=tree/relative;body=source.read_text();count=body.count(old)
+        anchors.append(dict(fault=name,source=relative,source_sha256=digest(source),
+                            anchor=old,count=count,line=body[:body.index(old)].count('\n')+1 if count else None))
+    dump(out/'anchors.json',anchors)
+    for row in anchors:
+        if row['count']!=1:raise RuntimeError(row['fault']+': injection anchor must occur exactly once')
     rows = {}
     for name, (relative, old, new) in edits.items():
         target = out/name
@@ -222,12 +250,18 @@ def hook(a):
         elif fault=='twoobj' and call:
             (call/'record-unread').touch()
             facts.append(dict(record_unread_marker=str(call/'record-unread')))
+        if a.stage=='post' and call:
+            subprocess.run([sys.executable,str(ROOT/'scripts/test/lib/report-oracle-read.py'),
+                            'native-io-before',str(project),str(call/'native-io.json')],check=True)
         result=subprocess.run([binary,a.stage],input=raw,env=env,capture_output=True)
         if selected:
             if not marker.is_file():raise RuntimeError('selected operation was never reached: '+selected)
             reached=marker.read_text(); facts.append(dict(source_operation=selected,observed=reached))
             if selected=='pre-mark' and 'PermissionDenied' not in reached:
                 raise RuntimeError('atomic rewrite did not fail with PermissionDenied')
+            if selected=='copy-noop' and call:
+                evidence=json.loads(reached);evidence.pop('snapshot')
+                (call/'native-copy-result.json').write_text(json.dumps(evidence))
             if selected.startswith('owner') and call:
                 evidence=json.loads(reached)
                 (call/'native-query-failure.json').write_text(json.dumps(evidence))

@@ -383,78 +383,70 @@ fn read_full(f: &mut std::fs::File, buf: &mut [u8]) -> std::io::Result<usize> {
     Ok(n)
 }
 
-/// `cp src dst`, as its exit status: 0, or 1 where cp fails. The target is
-/// opened for writing and cut to nothing before the bytes go in, as cp does
-/// it, so a copy that fails part way leaves what cp would leave; a target
-/// that is not there is made with the source's mode under the umask.
-pub fn cp(src: &Path, dst: &Path) -> i32 {
-    // cp will follow a link to a file, but refuses a dangling destination
-    // link rather than creating a file at its missing target.
-    if is_link(dst) && !exists(dst) { return 1; }
-    let Ok(mut from) = std::fs::File::open(src) else { return 1 };
-    let Ok(meta) = from.metadata() else { return 1 };
-    if meta.is_dir() {
-        return 1;
+/// Copy bytes without replacing the destination inode. Preserve the OS error
+/// for the report; the integer wrapper remains for callers needing only success.
+pub fn copy_file(src: &Path, dst: &Path) -> std::io::Result<()> {
+    use std::io::{Error, ErrorKind};
+    if is_link(dst) && !exists(dst) {
+        return Err(Error::new(ErrorKind::InvalidInput, "dangling destination link"));
     }
-    // cp refuses to copy a file onto itself.
+    let mut from = std::fs::File::open(src)?;
+    let meta = from.metadata()?;
+    if meta.is_dir() {
+        return Err(Error::new(ErrorKind::InvalidInput, "source is a directory"));
+    }
     if let Ok(d) = std::fs::metadata(dst) {
         if d.dev() == meta.dev() && d.ino() == meta.ino() {
-            return 1;
+            return Err(Error::new(ErrorKind::InvalidInput, "source and destination are the same file"));
         }
     }
     let mode = meta.permissions().mode() & 0o777;
-    let Ok(mut to) = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(mode).open(dst) else {
-        return 1;
-    };
+    let mut to = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(mode).open(dst)?;
     let mut buf = vec![0u8; 65536];
     loop {
         match from.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => {
-                if to.write_all(&buf[..n]).is_err() {
-                    return 1;
-                }
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(_) => return 1,
+            Ok(0) => return Ok(()),
+            Ok(n) => to.write_all(&buf[..n])?,
+            Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
         }
     }
-    0
 }
 
-fn remove_tree(path: &Path) -> bool {
-    let Ok(meta) = std::fs::symlink_metadata(path) else {
-        // Gone already: rm -f does not count it.
-        return true;
-    };
-    if !meta.is_dir() {
-        return std::fs::remove_file(path).is_ok() || !present(path);
+pub fn cp(src: &Path, dst: &Path) -> i32 { if copy_file(src, dst).is_ok() { 0 } else { 1 } }
+
+fn absent_ok(result: std::io::Result<()>) -> std::io::Result<()> {
+    match result {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        other => other,
     }
-    let mut ok = true;
+}
+
+/// Remove each reachable entry, preserving the first error while continuing
+/// through siblings and the final directory removal. Never follow a link.
+pub fn remove_tree(path: &Path) -> std::io::Result<()> {
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(e) => return absent_ok(Err(e)),
+    };
+    if !meta.is_dir() { return absent_ok(std::fs::remove_file(path)); }
+    let mut first = None;
     match std::fs::read_dir(path) {
         Ok(entries) => {
-            for e in entries {
-                match e {
-                    Ok(e) => ok &= remove_tree(&e.path()),
-                    Err(_) => ok = false,
-                }
+            for entry in entries {
+                let result = entry.and_then(|e| remove_tree(&e.path()));
+                if let Err(e) = result { if first.is_none() { first = Some(e); } }
             }
         }
-        Err(_) => ok = false,
+        Err(e) => first = Some(e),
     }
-    ok & (std::fs::remove_dir(path).is_ok() || !present(path))
+    if let Err(e) = absent_ok(std::fs::remove_dir(path)) {
+        if first.is_none() { first = Some(e); }
+    }
+    match first { Some(e) => Err(e), None => Ok(()) }
 }
 
-/// `rm -rf path`, as its exit status: 0, or 1 where something could not be
-/// removed. Like rm it removes what it can and goes on past what it cannot,
-/// and it removes a link, never what the link names.
-pub fn rm_rf(path: &Path) -> i32 {
-    if remove_tree(path) {
-        0
-    } else {
-        1
-    }
-}
+pub fn rm_rf(path: &Path) -> i32 { if remove_tree(path).is_ok() { 0 } else { 1 } }
 
 /// `rm -f path`
 pub fn rm_f(path: &Path) {
