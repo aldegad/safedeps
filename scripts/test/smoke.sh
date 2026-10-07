@@ -638,6 +638,7 @@ pass "inert flag lands on an install whose npm is spelled in another case"
 # with no rewrite or pending/snapshot state, including mixed-case verbs.
 # Measured cases are listed in core-intended-battery-rows.tsv.
 heredoc_case_in=(
+  $'npm install left-pad@1.3.0 && cat <<E | wc -l\nnpm install left-pad@1.3.0\nE'
   $'npm install left-pad@1.3.0 && cat <<E | wc -l\nNpm install left-pad@1.3.0\nE'
   $'npm install evil && cat <<E | wc -l\nNPM install evil\nE'
 )
@@ -658,7 +659,7 @@ for inert_in in "${heredoc_case_in[@]}"; do
         || fail "the piped heredoc conflict leaves no pending record, snapshot or meta (${state_dir})"
     fi
   done
-  pass "a piped heredoc with a mixed-case install verb is UNDECIDED with no rewrite or state: $(printf '%q' "${inert_in}")"
+  pass "a piped heredoc with an install verb is UNDECIDED with no rewrite or state: $(printf '%q' "${inert_in}")"
 done
 
 # Whether an install already carries the flag is read from that install's own
@@ -889,21 +890,10 @@ downgrades_after=$(grep -c 'has no place where safedeps could read npm keeping -
 pass "the inert flag is read from each install's own arguments and goes where npm reads it last; one already true is left as written"
 
 # Text the rewrite cannot read as the shell will -- a double-quoted script
-# with an escape or a substitution in it, a script handed to ksh, a heredoc
-# body piped into another command -- gets the flag where v2.17.2 put it: right
-# after each npm install verb there that is followed by a blank or ends its
-# line. The command is recorded as one whose flag nobody read, and the meta
-# says so. The rewrite used to drop every flag in such a command, the visible
-# install's too, and record a downgrade, where v2.17.2 had flagged them
-# (scripts/measure/inert-downgrade-grid.sh). An
-# approved install in a script with an escaped quote is read to its end and
-# allowed. The heredoc body is text a shell could be handed, so it is flagged
-# as v2.17.2 flagged it; the npm in it is read in any case, as everywhere the
-# rewrite looks for a verb. The last two rows' hidden installs have no verb a
-# blank follows, so they get no flag, as in v2.17.2; the visible one keeps its
-# flags, and the command is still recorded as one whose flag nobody read. The
-# heredoc body fed to `sh` and piped to `tee` was recorded for no kind but a
-# script word, and passed with no flag and no record (validator round 2, x005).
+# with an escape or a substitution in it, or a script handed to ksh -- has
+# the per-row rewrite expectations below and must record its unread install.
+# The cat heredoc bodies piped to wc are covered by the explicit
+# floor-outside-command conflict rows above, not by this rewrite loop.
 unread_case_in=(
   'npm install left-pad@1.3.0; sh -c "echo $(date); npm install left-pad@1.3.0"'
   'npm install left-pad@1.3.0; sh -c "echo \"hi\"; npm install left-pad@1.3.0"'
@@ -913,8 +903,6 @@ unread_case_in=(
   'true; bash -lc "npm install left-pad@1.3.0 `printf -- --loglevel=warn`"'
   'true; zsh -c "npm install left-pad@1.3.0 --fetch-retries $((1))"'
   "true; ksh -c 'npm install left-pad@1.3.0'"
-  $'npm install left-pad@1.3.0 && cat <<E | wc -l\nnpm install left-pad@1.3.0\nE'
-  $'npm install left-pad@1.3.0 && cat <<E | wc -l\nNpm install left-pad@1.3.0\nE'
   'npm install left-pad@1.3.0; sh -c "npm install\"\" left-pad@1.3.0"'
   $'npm i left-pad@1.3.0 && sh <<E | tee log\nnpm ci&&true\nE'
 )
@@ -927,8 +915,6 @@ unread_case_want=(
   'true; bash -lc "npm install --ignore-scripts left-pad@1.3.0 `printf -- --loglevel=warn`"'
   'true; zsh -c "npm install --ignore-scripts left-pad@1.3.0 --fetch-retries $((1))"'
   "true; ksh -c 'npm install --ignore-scripts left-pad@1.3.0'"
-  $'npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts && cat <<E | wc -l\nnpm install --ignore-scripts left-pad@1.3.0\nE'
-  $'npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts && cat <<E | wc -l\nNpm install --ignore-scripts left-pad@1.3.0\nE'
   'npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts; sh -c "npm install\"\" left-pad@1.3.0"'
   $'npm i --ignore-scripts left-pad@1.3.0 --ignore-scripts && sh <<E | tee log\nnpm ci&&true\nE'
 )
