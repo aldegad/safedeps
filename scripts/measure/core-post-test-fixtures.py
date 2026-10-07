@@ -29,7 +29,7 @@ FAULT_COPIES = {
     ('post','owner-wrong-pid'):'owner-wrong-pid',
     ('post','markread'):None, ('post','cpfail'):None,
     ('post','cpgone'):None, ('post','rmfail'):None,
-    ('post','twoobj'):None, ('pre','workspace'):None,
+    ('post','twoobj'):None, ('pre','workspace'):None, ('post','copy-noop'):'copy-noop',
 }
 
 def selection(manifest, stage, fault):
@@ -71,6 +71,14 @@ def check_facts(facts, selected, permission, fault, home, project, payload, call
         if selected=='pre-mark':
             if observed!='Err(Os { code: 13, kind: PermissionDenied, message: "Permission denied" })':
                 raise RuntimeError('rewrite writer did not return the expected permission error')
+        elif selected=='copy-noop':
+            proof=json.loads(observed)
+            records=[json.loads(p.read_text()) for p in (call/'pending').glob('*.json')]
+            records=[r for r in records if isinstance(r,dict) and r.get('project_dir')==str(project)]
+            if len(records)!=1:raise RuntimeError('no unique saved pending record for copy fixture')
+            snapshot=records[0]['snapshot_id']
+            if proof!=dict(source=str(home/'snapshots'/(snapshot+'_package-lock.json')),target=str(project/'package-lock.json'),result='Ok(())',snapshot=snapshot):
+                raise RuntimeError('copy result does not name the failing lockfile')
         elif selected.startswith('owner'):
             query=json.loads(observed)
             if not str(query['pid']).isdigit() or type(query['expected_bytes']) is not int or query['expected_bytes']<=8:
@@ -139,6 +147,17 @@ def prepare(a):
         let evidence=format!("{:?}",result);
         let _=fs::write(crate::state::guard_dir().join(".c3-reached"),evidence);
         result''')
+    edits['copy-noop'] = ('rust/src/post/report.rs',
+        'let result = sh::copy_file(src, dst);',
+        '''let result = if dst.file_name().is_some_and(|name| name=="package-lock.json") {
+            let source_name=sh::basename(sh::bytes(src));
+            let snapshot=source_name.as_slice();
+            let snapshot=snapshot.strip_suffix(b"_package-lock.json").unwrap_or(snapshot);
+            let proof=jv::obj(vec![("source",jv::s(sh::bytes(src))),("target",jv::s(sh::bytes(dst))),
+                ("result",jv::s(b"Ok(())")),("snapshot",jv::s(snapshot))]);
+            let _=fs::write(crate::state::guard_dir().join(".c3-reached"),jv::dump(&proof));
+            Ok(())
+        } else { sh::copy_file(src,dst) };''')
     call = 'unsafe{proc_pidinfo(pid,3,1,&mut b as *mut _ as *mut _,size)}'
     edits['owner'] = ('rust/src/post/process.rs', call,
         '{'+receipt_code('query zero','format!(r#"{{"pid":"{}","expected_bytes":{},"returned_bytes":0}}"#,pid,size)')+'0}')
@@ -222,12 +241,18 @@ def hook(a):
         elif fault=='twoobj' and call:
             (call/'record-unread').touch()
             facts.append(dict(record_unread_marker=str(call/'record-unread')))
+        if a.stage=='post' and call:
+            subprocess.run([sys.executable,str(ROOT/'scripts/test/lib/report-oracle-read.py'),
+                            'native-io-before',str(project),str(call/'native-io.json')],check=True)
         result=subprocess.run([binary,a.stage],input=raw,env=env,capture_output=True)
         if selected:
             if not marker.is_file():raise RuntimeError('selected operation was never reached: '+selected)
             reached=marker.read_text(); facts.append(dict(source_operation=selected,observed=reached))
             if selected=='pre-mark' and 'PermissionDenied' not in reached:
                 raise RuntimeError('atomic rewrite did not fail with PermissionDenied')
+            if selected=='copy-noop' and call:
+                evidence=json.loads(reached);evidence.pop('snapshot')
+                (call/'native-copy-result.json').write_text(json.dumps(evidence))
             if selected.startswith('owner') and call:
                 evidence=json.loads(reached)
                 (call/'native-query-failure.json').write_text(json.dumps(evidence))

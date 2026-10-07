@@ -240,7 +240,79 @@ def native_query_failure(path, pid):
     return 0 if returned != size or evidence.get('returned_pid', pid) != pid else 1
 
 
+def native_io_before(project, output):
+    """Independent non-destructive readings while the fixture's modes apply.
+
+    A copy opens its destination; read that permission with a non-truncating
+    Python open. A recursive removal unlinks entries; read directory write
+    and search permission through access(2), not the hook's unlink/rmdir walk.
+    This does not predict arbitrary future I/O errors. Unobserved errors fail
+    the oracle instead of being accepted because their number is nonzero.
+    """
+    import ctypes
+    import stat
+    if os.getuid() != os.geteuid() or os.geteuid() == 0:
+        raise RuntimeError('native I/O oracle requires the fixture non-root uid')
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.access.argtypes = [ctypes.c_char_p, ctypes.c_int]
+    libc.access.restype = ctypes.c_int
+    errors = []
+    for directory, dirs, files in os.walk(project, followlinks=False):
+        dirs[:] = [name for name in dirs if name != '.git' and not os.path.islink(os.path.join(directory, name))]
+        if libc.access(os.fsencode(directory), os.W_OK | os.X_OK):
+            errors.append(dict(path=directory, method='directory-access', errno=ctypes.get_errno()))
+        for name in files:
+            path = os.path.join(directory, name)
+            try:
+                if not stat.S_ISREG(os.lstat(path).st_mode):
+                    continue
+                fd = os.open(path, os.O_WRONLY)
+                os.close(fd)
+            except OSError as e:
+                errors.append(dict(path=path, method='open-write', errno=e.errno))
+    with open(output, 'w') as f:
+        json.dump(dict(project=project, uid=os.geteuid(), errors=errors), f)
+    return 0
+
+
+def native_io_result(evidence, action, target, outcome, source, project):
+    """Check only an independently observed error at this operation's path."""
+    data = load(evidence)
+    if outcome == 'returned without error':
+        # A no-write source copy supplies its raw return, never inferred from
+        # the report. The source-copy receipt is checked before the oracle.
+        proof = load(os.path.join(os.path.dirname(evidence), 'native-copy-result.json'))
+        return 0 if action == 'copy' and proof == dict(source=source, target=target, result='Ok(())') else 1
+    if outcome == 'returned an error without an OS code':
+        try:
+            refused = (os.path.islink(target) and not os.path.exists(target)) or os.path.isdir(source) or os.path.samefile(source, target)
+        except OSError:
+            refused = False
+        return 0 if action == 'copy' and refused else 1
+    match = re.fullmatch(r'returned OS error ([1-9][0-9]*)', outcome)
+    if not match or not isinstance(data, dict) or data.get('uid') != os.geteuid() or data.get('project') != project:
+        return 1
+    number = int(match[1])
+    target = os.path.abspath(target)
+    for fact in data.get('errors', []):
+        if fact.get('errno') != number:
+            continue
+        path = os.path.abspath(fact['path'])
+        if action == 'copy' and fact['method'] == 'open-write' and path == target:
+            return 0
+        if fact['method'] == 'directory-access':
+            if action == 'copy' and os.path.dirname(target) == path:
+                return 0
+            if action == 'removal' and (os.path.dirname(target) == path or path == target or path.startswith(target + os.sep)):
+                return 0
+    return 1
+
+
 def main():
+    if sys.argv[1] == "native-io-before":
+        return native_io_before(sys.argv[2], sys.argv[3])
+    if sys.argv[1] == "native-io-result":
+        return native_io_result(*sys.argv[2:])
     if sys.argv[1] == "process-stat":
         return process_stat(sys.argv[2])
     if sys.argv[1] == "native-query-failure":

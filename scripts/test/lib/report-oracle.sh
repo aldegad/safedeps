@@ -118,6 +118,18 @@ oracle_native_owner_forms() {
   ORACLE_FORMS="${ORACLE_FORMS/ owner-no-start owner-bad-start / owner-native-query-failed }"
 }
 
+# Native file operations have no child process exit status. Keep the Bash
+# forms for Bash-only callers, but never accept them from a native suite.
+oracle_native_io_forms() {
+  ORACLE_NATIVE_IO=1
+  ORACLE_FORMS="${ORACLE_FORMS/ not-restored-differs not-restored-absent / not-restored-native-differs not-restored-native-absent not-restored-native-no-error }"
+  ORACLE_FORMS="${ORACLE_FORMS/ not-removed$'\n'/ not-removed-native$'\n'}"
+}
+oracle_native_io_result() {
+  python3 "${ORACLE_READ}" native-io-result "${O_CALL}/native-io.json" "$1" "$2" "$3" "${4:-}" "${O_PROJECT}" \
+    || oracle_red "native $1 outcome is not independently observed at this path"
+}
+
 # The effect gate's prose: id | the blocks it may appear in | the most lines
 # of it this suite may show | the exact prefix the sentence starts with. The
 # rebuild warnings and "the install is kept" are said only of an install that
@@ -791,6 +803,8 @@ oracle_line() {
   local re_not_restored_absent='^not restored (/.+): cp exit ([0-9]+); (/.+) does not exist$'
   local re_not_restored_not_file='^not restored (/.+): (/.+) exists and is not a regular file$'
   local re_removed='^removed (/.+)$'
+  local re_native_copy='^not restored (/.+): copy (returned OS error [1-9][0-9]*|returned without error|returned an error without an OS code); (/.+) (differs from the snapshot|does not exist)$'
+  local re_native_remove='^not removed (/.+): removal (returned OS error [1-9][0-9]*|returned without error|returned an error without an OS code); (.+)$'
   local re_not_removed='^not removed (/.+): rm exit ([0-9]+); (.+)$'
   local re_refused='^refused (restore|removal) of (/.+): (.+)$'
   local re_unresolved='^the project directory (/.+) cannot be resolved$'
@@ -1032,13 +1046,41 @@ oracle_line() {
     [[ "${BASH_REMATCH[1]}" == "${BASH_REMATCH[2]}" ]] || oracle_red "two paths"
     [[ -e "${BASH_REMATCH[1]}" && ! -L "${BASH_REMATCH[1]}" && ! -f "${BASH_REMATCH[1]}" ]] || oracle_red "it is a regular file, a link, or not there"
     O_STEP_PATHS+="${BASH_REMATCH[1]}"$'\n'
+  elif [[ "${line}" =~ ${re_native_copy} ]]; then
+    local nc_path="${BASH_REMATCH[1]}" nc_outcome="${BASH_REMATCH[2]}" nc_other="${BASH_REMATCH[3]}" nc_fact="${BASH_REMATCH[4]}" nc_source
+    O_CHANGED=1; O_STEP_PATHS+="${nc_path}"$'\n'
+    [[ "${nc_path}" == "${nc_other}" ]] || oracle_red "two paths"
+    nc_source=$(oracle_stored "${O_SNAP}" "${nc_path#"${O_PROJECT}/"}")
+    oracle_native_io_result copy "${nc_path}" "${nc_outcome}" "${nc_source}"
+    if [[ "${nc_outcome}" == 'returned without error' ]]; then
+      oracle_count not-restored-native-no-error
+    elif [[ "${nc_fact}" == 'does not exist' ]]; then
+      oracle_count not-restored-native-absent
+    else
+      oracle_count not-restored-native-differs
+    fi
+    if [[ "${nc_fact}" == 'does not exist' ]]; then
+      [[ ! -e "${nc_path}" && ! -L "${nc_path}" ]] || oracle_red "the file exists"
+    else
+      { [[ -e "${nc_path}" ]] && ! cmp -s "${nc_source}" "${nc_path}"; } || oracle_red "the file is gone, or equals the snapshot"
+    fi
+  elif [[ "${line}" =~ ${re_native_remove} ]]; then
+    local nn_path="${BASH_REMATCH[1]}" nn_outcome="${BASH_REMATCH[2]}" nn_fact="${BASH_REMATCH[3]}"
+    oracle_count not-removed-native; O_CHANGED=1
+    O_STEP_PATHS+="${nn_path}"$'\n'
+    oracle_nm_step "${nn_path}"
+    oracle_native_io_result removal "${nn_path}" "${nn_outcome}"
+    oracle_path_fact "${nn_fact}" || rc=$?
+    [[ ${rc} -eq 0 && "${O_FACT_PATH}" == "${nn_path}" && "${O_FACT_KIND}" != absent ]] || oracle_red "the path is gone, or the fact names another path"
   elif [[ "${line}" =~ ${re_not_restored_differs} ]]; then
+    [[ "${ORACLE_NATIVE_IO:-0}" != 1 ]] || oracle_red "native operation reported a subprocess exit status"
     oracle_count not-restored-differs; O_CHANGED=1
     O_STEP_PATHS+="${BASH_REMATCH[1]}"$'\n'
     [[ "${BASH_REMATCH[1]}" == "${BASH_REMATCH[3]}" ]] || oracle_red "two paths"
     [[ "${BASH_REMATCH[2]}" != 0 ]] || oracle_red "cp exit 0"
     { [[ -e "${BASH_REMATCH[1]}" ]] && ! cmp -s "$(oracle_stored "${O_SNAP}" "${BASH_REMATCH[1]#"${O_PROJECT}/"}")" "${BASH_REMATCH[1]}"; } || oracle_red "the file is gone, or equals the snapshot"
   elif [[ "${line}" =~ ${re_not_restored_absent} ]]; then
+    [[ "${ORACLE_NATIVE_IO:-0}" != 1 ]] || oracle_red "native operation reported a subprocess exit status"
     oracle_count not-restored-absent; O_CHANGED=1
     O_STEP_PATHS+="${BASH_REMATCH[1]}"$'\n'
     [[ "${BASH_REMATCH[1]}" == "${BASH_REMATCH[3]}" ]] || oracle_red "two paths"
@@ -1048,6 +1090,7 @@ oracle_line() {
     O_STEP_PATHS+="${BASH_REMATCH[1]}"$'\n'
     cmp -s "$(oracle_stored "${O_SNAP}" "${BASH_REMATCH[1]#"${O_PROJECT}/"}")" "${BASH_REMATCH[1]}" || oracle_red "the file does not equal the snapshot"
   elif [[ "${line}" =~ ${re_not_removed} ]]; then
+    [[ "${ORACLE_NATIVE_IO:-0}" != 1 ]] || oracle_red "native operation reported a subprocess exit status"
     oracle_count not-removed; O_CHANGED=1
     local nr_path="${BASH_REMATCH[1]}" nr_rc="${BASH_REMATCH[2]}" nr_fact="${BASH_REMATCH[3]}"
     O_STEP_PATHS+="${nr_path}"$'\n'
