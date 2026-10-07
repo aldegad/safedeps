@@ -243,11 +243,21 @@ grep -qF "post-verify BACKSTOP traced: $BOX/project/" "$SAFEDEPS_HOME/advisory.l
     # are raw observations only, not claimed clock-provenance equalities.
     raw={str(f.relative_to(box)):f.read_bytes().hex() for f in box.rglob('*') if f.is_file()}
     (run/(stem+'.files.json')).write_text(json.dumps(raw,indent=2)+'\n')
+    stages=dict(
+        install_pre='install-pre rc0 and original pre oracle passed' in log,
+        install_post='install-post rc0 and original post oracle passed' in log,
+        grep_post='grep-post rc0 and original post oracle passed' in log)
+    # F1 must pass the pre oracle, then fail the post oracle. NoIdSilent's
+    # assertion likewise runs before post. Report the actual prerequisite,
+    # without describing it as a successful post-oracle run.
+    required_stage='install_pre' if name in ['NoIdSilent','F1'] else 'grep_post'
     return dict(rc=rc,expected_diagnostic=cases[name]['diagnostic'],
                 diagnostic_found=(cases[name]['diagnostic'] if cases[name].get('oracle') else 'not ok - '+cases[name]['diagnostic']) in log,
                 oracle_failed='report oracle:' in log,
                 hook_rcs=[int(f.read_text()) for f in (box/'oracle').glob('call.*/hook.rc')],
-                hook_and_oracle_passed=('install-pre rc0 and original pre oracle passed' if name in ['NoIdSilent','F1'] else 'grep-post rc0 and original post oracle passed') in log,
+                completed_hook_and_oracle_stages=stages,
+                required_preceding_stage=required_stage,
+                required_preceding_stage_passed=stages[required_stage],
                 reached='fixture assertion reached and passed' in log)
 
 rows=[]
@@ -264,7 +274,7 @@ for name in names:
         raise SystemExit('baseline failed: '+name)
     build,mutant=build_copy(name,faults+[change]+([change['also']] if 'also' in change else []))
     control=fixture(name,mutant,name+'-control',post=mutant if faults or 'also' in change else None) if build==0 else None
-    passed=(build==0 and control['rc']==1 and control['diagnostic_found'] and control['hook_and_oracle_passed']
+    passed=(build==0 and control['rc']==1 and control['diagnostic_found'] and control['required_preceding_stage_passed']
             and control['oracle_failed']==bool(change.get('oracle')) and all(rc==0 for rc in control['hook_rcs']))
     if change.get('oracle'):passed=passed and bool(control['hook_rcs'])
     rows.append(dict(name=name,baseline=baseline,build_rc=build,control=control,passed=passed))

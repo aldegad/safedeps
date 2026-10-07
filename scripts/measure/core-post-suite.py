@@ -26,6 +26,7 @@ p.add_argument('--native-faults',action='store_true',help='Adapt removed subproc
 p.add_argument('--walk-core')
 p.add_argument('--owner-core')
 p.add_argument('--coarse-core')
+for name in ['coarse','seconds','mark','same']:p.add_argument('--pre-'+name+'-core')
 p.add_argument('--suite', choices=['e2e', 'effect-trace-grid'], required=True)
 p.add_argument('--grid-rows', help='Only these comma-separated table IDs, preserving original row assertions')
 p.add_argument('--run-dir', required=True, help='A new evidence directory; existing paths are refused')
@@ -35,6 +36,9 @@ if selected and (a.suite!='effect-trace-grid' or any(not re.fullmatch(r'[A-Za-z0
     p.error('--grid-rows requires unique alphanumeric effect-grid table IDs')
 if a.native_faults and (a.probe or a.suite!='e2e' or not all([a.walk_core,a.owner_core,a.coarse_core])):
     p.error('--native-faults requires public e2e entry and all three injection cores')
+pre_faults={name:getattr(a,'pre_'+name+'_core') for name in ['coarse','seconds','mark','same']}
+if a.native_faults and a.pre_core and not all(pre_faults.values()):
+    p.error('native pre e2e needs all four pre operation fault copies')
 archive = Path(a.archive).resolve(strict=True)
 core = Path(a.core).resolve(strict=True)
 pre = Path(a.pre_core).resolve(strict=True) if a.pre_core else None
@@ -75,7 +79,8 @@ entry(tree/'scripts/safedeps-post-verify.sh', core, 'post', a.probe)
 if pre:
     entry(tree/'scripts/safedeps-pre-guard.sh', pre, 'pre')
 if a.native_faults:
-    adapter.adapt(tree,core,Path(a.walk_core).resolve(strict=True),Path(a.owner_core).resolve(strict=True),Path(a.coarse_core).resolve(strict=True),run)
+    adapter.adapt(tree,core,Path(a.walk_core).resolve(strict=True),Path(a.owner_core).resolve(strict=True),Path(a.coarse_core).resolve(strict=True),run,
+                  pre,pre_faults if pre else None)
 started = time.time()
 with (run/'suite.log').open('wb') as log:
     subprocess.run(['uptime'], stdout=log, stderr=log)

@@ -28,7 +28,7 @@ def direct_calls(text,core):
         text=text[:start]+replacement+text[end:]
     return text
 
-def adapt(tree,core,walk_core,owner_core,coarse_core,run):
+def adapt(tree,core,walk_core,owner_core,coarse_core,run,pre=None,pre_faults=None):
     path=tree/'scripts/test/e2e.sh';text=path.read_text();edits=[]
     def replace(old,new,why):
         nonlocal text
@@ -51,6 +51,12 @@ def adapt(tree,core,walk_core,owner_core,coarse_core,run):
           '--receipts',str(run/'native-injections.jsonl')]
     wrapper=tree/'scripts/safedeps-post-verify.sh'
     python_entry(wrapper,'import os\nos.execv('+repr(sys.executable)+','+repr(argv)+')\n')
+    if pre:
+        argv=[sys.executable,str(tree/'scripts/measure/core-post-native-pre-hook.py'),'--core',str(pre),
+              '--receipts',str(run/'native-injections.jsonl')]
+        for name,binary in pre_faults.items():argv+=['--'+name+'-core',str(Path(binary).resolve(strict=True))]
+        python_entry(tree/'scripts/safedeps-pre-guard.sh','import os\nos.execv('+repr(sys.executable)+','+repr(argv)+')\n')
+        edits.append(dict(reason='native pre uses archive operation faults for markfail, bs_sec, bs_mix, and same snapshot second; payloads and assertions unchanged'))
     (run/'fixture-adapters.json').write_text(json.dumps(dict(edits=edits,
         absent_native_path=['ps garbage lstart parsing'],
-        still_bash=['pre hook']),indent=2)+'\n')
+        still_bash=[] if pre else ['pre hook']),indent=2)+'\n')
