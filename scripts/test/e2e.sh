@@ -3397,17 +3397,16 @@ ln -s "${tmp_root}/journal-linked-modules" "${journal_project}/node_modules"
 
 # An unfinished rollback, written the way the gate writes it before it starts
 # restoring files.
-( export SAFEDEPS_HOME="${journal_home}"
-  . "${ROOT_DIR}/lib/gates/rollback-journal.sh"
-  safedeps_journal_open 'test-interrupted' "${journal_project}" 'snap-baseline' \
-    'npm closure contains 1 unapproved package(s): fixture-evil@9.9.9' \
-    'removing-node-modules' )
+python3 "${ROOT_DIR}/scripts/test/lib/rollback-journal-fixture.py" \
+  "${journal_home}/rollback-journal/test-interrupted.json" \
+  'test-interrupted' "${journal_project}" 'snap-baseline' \
+  'npm closure contains 1 unapproved package(s): fixture-evil@9.9.9' \
+  'removing-node-modules' "$$"
 
 # ...and its owner has to be genuinely gone, because "interrupted" now means
-# "the process that opened this is not running". `safedeps_journal_open` stamps
-# `$$`, which inside `( … )` is this script's pid, not the subshell's — so the
-# fixture above describes a rollback owned by a live process. That went unnoticed
-# while nothing read the field. Substitute a pid that is really dead.
+# "the process that opened this is not running". The synthetic record above
+# names this script's pid, so it describes a rollback owned by a live process.
+# Substitute a pid that is really dead.
 # The redirect is load-bearing: a background job inheriting the command
 # substitution's stdout keeps that pipe open, so `$( … )` would block until the
 # sleep exited rather than returning its pid.

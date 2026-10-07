@@ -38,7 +38,6 @@ bash -n lib/providers/providers.sh
 bash -n lib/ledger/ledger.sh
 bash -n lib/npm/closure.sh
 bash -n lib/npm/ask.sh
-bash -n lib/npm/workspaces.sh
 # Native hooks have no Bash body to syntax-check. The canonical shim does.
 bash -n scripts/safedeps-hook-entry.sh
 bash -n scripts/safedeps-recheck-alert.sh
@@ -49,7 +48,6 @@ bash -n lib/gates/scan.sh
 bash -n lib/gates/audit.sh
 bash -n lib/gates/hooks.sh
 bash -n lib/gates/doctor.sh
-bash -n lib/gates/npm-reach.sh
 pass "bash syntax"
 
 node --check scripts/install/install-safedeps-hooks.mjs >/dev/null

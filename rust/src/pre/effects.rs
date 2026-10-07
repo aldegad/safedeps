@@ -26,7 +26,7 @@ fn attribution(run:&mut Run,command:&[u8],payloads:usize)->W {
     let mut writers=0;let mut pending=W::new();let mut between=W::new();let mut moved=W::new();
     for line in run.statements(command).split(|b|*b==b'\n').filter(|s|!s.is_empty()) {
         let f=core::read_fields(line,&[0x1d],5);
-        if f[0]==b"?"{return b"the command could not be split into statements (awk failed)".to_vec()}
+        if f[0]==b"?"{return b"the command could not be split into statements".to_vec()}
         let toks=core::read_array(&f[3],0x1f);let Some(head)=toks.first()else{continue};
         let scan=without_matches(without_matches(f[1].clone(),&null),&fd);
         if matches!(head.as_slice(),b"echo"|b"printf"|b"tail"|b"head"|b"grep"|b"ls"|b"cat"|b"true")&&!scan.iter().any(|b|b"<>(){}`$?".contains(b))&&!f[3].contains(&1){continue}

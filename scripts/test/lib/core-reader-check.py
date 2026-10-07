@@ -155,6 +155,8 @@ def settlement():
                 hook = json.loads(result.stdout)["hookSpecificOutput"]
                 assert hook["permissionDecision"] == "deny", hook
                 assert "UNDECIDED" in hook["permissionDecisionReason"], hook
+                assert "could not finish reading this command" in hook["permissionDecisionReason"], hook
+                assert "blocked fail-closed, and no finding is claimed" in hook["permissionDecisionReason"], hook
                 assert not list((state / "pending").glob("*.json")), command
             else:
                 assert not result.stdout, result.stdout

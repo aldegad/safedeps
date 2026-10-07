@@ -56,7 +56,7 @@ sha256_of() {
 # its remaining warnings are unused variables and intentional literal tildes.
 SHELLCHECK_FILES=(
   bin/safedeps
-  lib/install-grammar.sh lib/gates/*.sh lib/ledger/*.sh lib/npm/*.sh lib/providers/*.sh
+  lib/gates/*.sh lib/ledger/*.sh lib/npm/*.sh lib/providers/*.sh
   scripts/safedeps-hook-entry.sh
   scripts/safedeps-recheck-alert.sh scripts/release-gates.sh
   scripts/test/smoke.sh scripts/test/e2e.sh

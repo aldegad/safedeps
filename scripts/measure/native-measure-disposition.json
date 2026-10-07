@@ -675,6 +675,26 @@
     {
       "path": "lib/gates/call-id.sh",
       "reason": "No remaining caller after removing the Bash hooks and the unused backstop trace reader."
+    },
+    {
+      "path": "lib/install-grammar.sh",
+      "reason": "The native core owns hook grammar. No CLI-reachable ask function uses this file; only the public-registry constant remains in ask.sh."
+    },
+    {
+      "path": "lib/npm/workspaces.sh",
+      "reason": "No runtime caller or CLI-reachable symbol remains after native target and workspace readers replaced the Bash hooks."
+    },
+    {
+      "path": "lib/gates/rollback-journal.sh",
+      "reason": "Its only remaining consumer wrote one e2e fixture record; scripts/test/lib/rollback-journal-fixture.py now writes that synthetic record without judgment logic."
+    },
+    {
+      "path": "lib/gates/report-facts.sh",
+      "reason": "Only the removed Bash journal library sourced it; native report checks remain in the independent test oracle."
+    },
+    {
+      "path": "lib/gates/npm-reach.sh",
+      "reason": "Only the removed Bash journal library sourced it; no CLI path uses its hook-specific functions."
     }
   ],
   "removed_census_wiring": [
@@ -732,6 +752,25 @@
       ],
       "kept_dependencies": [
         "words"
+      ]
+    }
+  ],
+  "pruned_hook_only_functions": [
+    {
+      "path": "lib/npm/ask.sh",
+      "retained": "SAFEDEPS_NPM_PUBLIC_REGISTRY_RE, byte-for-byte; sourced by lib/npm/closure.sh",
+      "reason": "CLI calls no function defined in ask.sh, so its reachable function set is empty.",
+      "functions": [
+        "safedeps_npm_test_registry",
+        "safedeps_npm_fetch_read",
+        "safedeps_npm_fetch_facts",
+        "safedeps_npm_code_name",
+        "safedeps_npm_ask_start",
+        "safedeps_npm_ask_words_end",
+        "safedeps_npm_ask_wait",
+        "safedeps_npm_ask_error",
+        "safedeps_npm_unmask",
+        "safedeps_npm_install_target"
       ]
     }
   ]
