@@ -64,7 +64,7 @@ with tempfile.TemporaryDirectory(prefix='core-post-workspace-glob.') as temp:
     if not a.only:
         (project/'package.json').write_text(json.dumps(dict(workspaces=['*/item','node_modules/*'])))
         right=subprocess.run([core,'post-probe'],input=json.dumps(dict(op='workspaces',path=str(project))).encode(),capture_output=True)
-        expected=str(project/'ordinary/item')+'\n'
+        expected='ok\n'+str(project/'ordinary/item')+'\n'
         rows.append(dict(pattern='ordinary-members-exclusion',same=right.returncode==0 and right.stdout.decode()==expected,
                          expected=expected,core=right.stdout.decode(),core_rc=right.returncode))
 report=dict(cases=len(rows),differences=sum(not r['same'] for r in rows),rows=rows)

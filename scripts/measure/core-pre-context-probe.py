@@ -89,14 +89,23 @@ def main():
             absent={'none','no-lock','boundary','override-boundary','override-empty'}
             unsafe={'workspace-bad','workspace-space','workspace-negated','workspace-dotdot','workspace-outside',
                     'backslash-root','bracket-root','quoted-star-root','paired-slash-root'}
+            project=Path(row['path'])
+            if name in ('subdir','override-subdir'):project=project.parent
+            members=[]
+            if name.startswith('workspace'):
+                pattern=json.loads((project/'package.json').read_text())['workspaces'][0]
+                # Ask the real shell's filename expansion, not a hook helper.
+                expanded=subprocess.run(['bash','-c', 'shopt -s nullglob; for d in "$PROJECT"/${PATTERN}; do [[ -f "$d/package.json" ]] && printf "%s\\0" "$d"; done; true'],env=dict(os.environ,PROJECT=str(project),PATTERN=pattern),capture_output=True,check=True)
+                resolved=[Path(os.fsdecode(x)).resolve() for x in expanded.stdout.split(b'\0') if x]
+                if any(x==project or project not in x.parents for x in resolved):unsafe.add(name)
+                else:members=[str(x.relative_to(project)) for x in resolved]
             expected_rc=1 if name in absent else 2 if name in unsafe or name=='classic' else 0
             checks={'status':p.returncode==expected_rc}
             if expected_rc:
                 checks['empty_output']=not p.stdout
                 checks['diagnostic']=bool(p.stderr)==(expected_rc==2)
-            else:
-                answer=json.loads(p.stdout);project=Path(row['path'])
-                if name in ('subdir','override-subdir'):project=project.parent
+            elif p.returncode==0 and p.stdout:
+                answer=json.loads(p.stdout)
                 root_name='env' if name=='override-env' else str(project)
                 checks['root']=answer['project_root']==root_name
                 checks['context_hash']=answer['context_hash'].startswith('sha256:') and len(answer['context_hash'])==71
@@ -109,12 +118,6 @@ def main():
                     checks['digest']=answer['overrides_sha256']=='sha256:'+digest
                     checks['context_hash']=answer['context_hash']=='sha256:'+hashlib.sha256((root_name+'\n'+digest).encode()).hexdigest()
                 else:
-                    members={'workspace-star':['packages/a','packages/a*','packages/b','inside'],
-                             'workspace-question':['packages/a','packages/b'],
-                             'workspace-class':['packages/a','packages/b'],
-                             'workspace-escape':['packages/a*'],'workspace-dot':['packages/.dot'],
-                             'workspace-inside':['inside'],
-                             'workspace-paired-slash':[r'packages/ab\/item']}.get(name,[])
                     paths=['package.json','yarn.lock']+[m+'/package.json' for m in members]
                     if name=='config-inputs':paths+=['.yarnrc.yml','.yarn/releases/yarn.cjs','.yarn/plugins/a.js','.yarn/patches/pkg.patch']
                     expected_files=[dict(path=rel,sha256='sha256:'+('\\' if '\\' in str(project/rel) else '')+hashlib.sha256((project/rel).read_bytes()).hexdigest()) for rel in sorted(set(paths))]
@@ -125,6 +128,7 @@ def main():
                 checks['stderr']=not p.stderr
             passed=all(checks.values())
             rows.append(dict(case=name,checks=checks,passed=passed,rc=p.returncode,stdout=p.stdout.decode(),stderr=p.stderr.decode()))
+            Path(a.report).write_text(json.dumps(rows,indent=2)+'\n')
             print(('ok - ' if passed else 'not ok - ')+name,flush=True)
     Path(a.report).write_text(json.dumps(rows,indent=2))
     bad=sum(not r['passed'] for r in rows)

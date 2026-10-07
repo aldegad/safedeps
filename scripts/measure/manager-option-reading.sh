@@ -95,7 +95,7 @@ grammar_role() {
   local k="$1"
   shift
   local answer
-  answer=$(jq -cn --args '{op:"read",words:$ARGS.positional}' "$@" | "${MEASURE_CORE}" manager) || return 2
+  answer=$(jq -cn --args '{op:"read",words:$ARGS.positional}' -- "$@" | "${MEASURE_CORE}" manager) || return 2
   jq -er --argjson k "${k}" '.roles | .[$k:$k+1] | select(length == 1)' <<< "${answer}"
 }
 
