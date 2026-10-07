@@ -409,11 +409,8 @@ fn stale(input: &[u8], why: &str, guard: &Path) -> i32 {
 }
 
 fn unfinished_text(failure: &budget::Failure, seconds: u64, size: u64) -> (String, String) {
-    use std::os::unix::process::ExitStatusExt;
-    let status_text = |status: &std::process::ExitStatus| {
-        if let Some(code) = status.code() { format!("exit code {}", code) }
-        else { format!("signal {}", status.signal().unwrap_or(0)) }
-    };
+    use crate::outcome::{Outcome, Form};
+    let status_text = |status: &std::process::ExitStatus| jq::text(&Outcome::status(*status).describe(b"judgment",Form::Judgment));
     if let budget::Failure::Deadline { child } = failure {
         let child = match child {
             Some(Ok(status)) => format!(", child {}", status_text(status)),

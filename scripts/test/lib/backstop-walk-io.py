@@ -6,6 +6,7 @@ that the directory read, rather than that change's ctime, decides the trace.
 The post hook must be silent; its advisory line is checked here in full.
 """
 import argparse
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -18,6 +19,8 @@ import time
 def check(core, output):
     if os.geteuid() == 0:
         raise RuntimeError('the walk permission fixture requires a non-root uid')
+    spec = importlib.util.spec_from_file_location('outcome_oracle', Path(__file__).with_name('outcome-oracle.py'))
+    oracle = importlib.util.module_from_spec(spec); spec.loader.exec_module(oracle)
     observed = dict(uid=os.geteuid())
     try:
         with tempfile.TemporaryDirectory(prefix='safedeps-walk-io.') as tmp:
@@ -31,6 +34,7 @@ def check(core, output):
             (project/'package-lock.json').write_text(json.dumps(dict(
                 name='fixture', version='1.0.0', lockfileVersion=3,
                 packages={'': dict(name='fixture', version='1.0.0')}))+'\n')
+            (tree/'.package-lock.json').write_bytes((project/'package-lock.json').read_bytes())
             home = box/'state'
             env = {k: v for k, v in os.environ.items() if not k.startswith('SAFEDEPS_')}
             env.update(SAFEDEPS_HOME=str(home), SAFEDEPS_BACKSTOP_WALK_SECONDS='5')
@@ -71,6 +75,7 @@ def check(core, output):
                 line = f'the walk of {tree} returned OS error {errno}'
                 probe = invoke('post-probe', dict(op='trace', path=str(project), entry=json.dumps(entry)))
                 assert probe == dict(rc=0, stdout=line, stderr=''), ('walk I/O trace query', probe, line)
+                oracle.walk(observed, probe['stdout'])
                 before = (home/'advisory.log').read_bytes() if (home/'advisory.log').exists() else b''
                 post = invoke('post', payload)
                 assert post == dict(rc=0, stdout='', stderr=''), ('walk I/O silent post', post)
@@ -81,6 +86,7 @@ def check(core, output):
                 bodies = [row.split('\t', 1)[1] for row in added]
                 expected = f'post-verify BACKSTOP traced: {line}. Command: {command}'
                 assert bodies.count(expected) == 1, ('walk I/O advisory line', bodies, expected)
+                oracle.walk(observed, bodies[0].removeprefix('post-verify BACKSTOP traced: ').removesuffix('. Command: '+command))
                 assert len(bodies) == 2 and bodies[1].startswith('post-verify BACKSTOP clean: '), bodies
                 assert not entry_path.exists() and not baseline.exists()
                 assert not (home/'reorg.log').exists() or not (home/'reorg.log').read_bytes()

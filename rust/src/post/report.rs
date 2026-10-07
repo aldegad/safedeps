@@ -88,14 +88,8 @@ pub fn inert_unsaid(home: &Path, meta: &Path, rc: i32) {
 
 // Only the result of our own operation is named. Some local checks return an
 // I/O error without an OS code; none is invented for those checks.
-pub(super) fn io_outcome(action: &[u8], result: &std::io::Result<()>) -> Vec<u8> {
-    match result {
-        Ok(()) => cat(&[action, b" returned without error"]),
-        Err(error) => match error.raw_os_error() {
-            Some(code) => cat(&[action, b" returned OS error ", code.to_string().as_bytes()]),
-            None => cat(&[action, b" returned an error without an OS code"]),
-        },
-    }
+pub(super) fn io_outcome(action: &[u8], result: std::io::Result<()>) -> Vec<u8> {
+    crate::outcome::Outcome::Io(result).describe(action,crate::outcome::Form::Action)
 }
 
 #[derive(Default)]
@@ -117,13 +111,13 @@ impl Report {
         self.changed += 1;
         let result = sh::copy_file(src, dst);
         if sh::same_bytes(src, dst) { self.say(cat(&[b"restored ", sh::bytes(dst)])); }
-        else { self.say(cat(&[b"not restored ", sh::bytes(dst), b": ", &io_outcome(b"copy", &result), b"; ", sh::bytes(dst),
+        else { self.say(cat(&[b"not restored ", sh::bytes(dst), b": ", &io_outcome(b"copy", result), b"; ", sh::bytes(dst),
             if sh::present(dst) { b" differs from the snapshot" } else { b" does not exist" }])); }
     }
     pub fn remove(&mut self, p: &Path) {
         self.changed += 1;
         let result = sh::remove_tree(p);
-        if sh::present(p) { self.say(cat(&[b"not removed ", sh::bytes(p), b": ", &io_outcome(b"removal", &result), b"; ", &path(p)])); }
+        if sh::present(p) { self.say(cat(&[b"not removed ", sh::bytes(p), b": ", &io_outcome(b"removal", result), b"; ", &path(p)])); }
         else { self.say(cat(&[b"removed ", sh::bytes(p)])); }
     }
     pub fn changed_nothing(&mut self) { if self.changed == 0 { self.say(b"The rollback changed nothing."); } }

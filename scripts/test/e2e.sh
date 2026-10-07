@@ -2663,6 +2663,15 @@ grep -qx 'safedeps added --ignore-scripts to this install and ran npm rebuild: e
   || fail "the command the pre-guard wrote is said as added, quoted words and all (${rebuildquoted_post})"
 pass "a rebuild that fails says its exit status, and 'added' only where the command this hook received is the one safedeps wrote"
 
+python3 "${ROOT_DIR}/scripts/test/lib/rebuild-outcomes.py" --core "${NATIVE_TEST_CORE}" \
+  --output "${tmp_root}/rebuild-outcomes" --oracle-dir "${ORACLE_DIR}" \
+  || fail "rebuild start failures and signals retain their observed result"
+pass "rebuild start failure and signal are checked by the report oracle, with added and asked records"
+
+python3 "${ROOT_DIR}/scripts/test/lib/ask-outcomes.py" --core "${NATIVE_TEST_CORE}" \
+  --output "${tmp_root}/ask-outcomes.json" || fail "npm ask distinguishes a signal from an exit code"
+pass "npm query, config and install target report observed signals through closed result forms"
+
 # The command's own second segment rebuilds: whether install scripts ran is not
 # something this hook saw, so the skipped rebuild says what safedeps did and
 # nothing about the scripts.

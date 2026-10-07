@@ -1,6 +1,6 @@
 //! File metadata and bounded walks used by the install and backstop traces.
-use super::{jv, sh, report::{cat, io_outcome}};
-use crate::{json::Value, os, state};
+use super::{jv, sh, report::cat};
+use crate::{json::Value, os, state, outcome::{Outcome,Form}};
 use std::{fs, path::{Path,PathBuf}, os::unix::fs::MetadataExt, time::{Duration,Instant}};
 
 pub const RECORDS: [&str;2] = ["package-lock.json","node_modules/.package-lock.json"];
@@ -23,14 +23,11 @@ pub fn newer(path: &Path, baseline: &Path, change: bool, follow: bool) -> bool {
 /// find -H: follow the argument only; links below it are visited, not walked.
 /// Entries keep the directory's order, as find does. Deadline checked between
 /// operations; any incomplete walk is an error, never evidence of no trace.
-#[derive(Debug)]
-pub enum WalkFailure { Deadline, Io(std::io::Error) }
-
-pub fn walk(root:&Path, max:usize, follow_root:bool, until:Option<Instant>, mut visit:impl FnMut(&Path,&fs::Metadata)->bool) -> Result<(),WalkFailure> {
+pub fn walk(root:&Path, max:usize, follow_root:bool, until:Option<Instant>, mut visit:impl FnMut(&Path,&fs::Metadata)->bool) -> Result<(),Outcome> {
     let mut todo=vec![(root.to_path_buf(),0)];
     let mut failed=None;
     while let Some((p,depth))=todo.pop() {
-        if until.is_some_and(|t| Instant::now()>=t) { return Err(WalkFailure::Deadline) }
+        if until.is_some_and(|t| Instant::now()>=t) { return Err(Outcome::Deadline) }
         let m=if depth==0 && follow_root { fs::metadata(&p).or_else(|_| fs::symlink_metadata(&p)) } else { fs::symlink_metadata(&p) };
         let m=match m { Ok(m)=>m, Err(error)=>{failed.get_or_insert(error);continue} };
         if visit(&p,&m) { return Ok(()) }
@@ -45,7 +42,7 @@ pub fn walk(root:&Path, max:usize, follow_root:bool, until:Option<Instant>, mut 
             }
         }
     }
-    if let Some(error)=failed {Err(WalkFailure::Io(error))} else {Ok(())}
+    if let Some(error)=failed {Err(Outcome::Io(Err(error)))} else {Ok(())}
 }
 pub fn package_files(root:&Path, follow:bool) -> Vec<Vec<u8>> {
     let mut out=Vec::new();
@@ -120,8 +117,7 @@ pub fn backstop(project:&Path,entry:&[u8],none:&[u8])->(bool,Vec<u8>) {
     });
     if !found.is_empty(){return(true,cat(&[&found,b" changed after the baseline taken before this command"]))}
     match rc {
-        Err(WalkFailure::Deadline)=>(true,cat(&[b"the walk of ",sh::bytes(&tree),b" did not finish within ",seconds.to_string().as_bytes(),b"s"])),
-        Err(WalkFailure::Io(error))=>(true,io_outcome(&cat(&[b"the walk of ",sh::bytes(&tree)]),&Err(error))),
+        Err(outcome)=>(true,outcome.describe(&cat(&[b"the walk of ",sh::bytes(&tree)]),Form::Within(seconds))),
         Ok(())=>(false,cat(&[&no,b", neither lockfile changed after the record taken before this command, and nothing in node_modules changed after the baseline"])),
     }
 }
@@ -137,12 +133,12 @@ mod tests {
         let missing=root.join("missing");
         let expected=fs::symlink_metadata(&missing).unwrap_err();
         let result=walk(&missing,usize::MAX,false,None,|_,_|false);
-        let Err(WalkFailure::Io(error))=result else {panic!("missing path must preserve its I/O error")};
+        let Err(Outcome::Io(Err(error)))=result else {panic!("missing path must preserve its I/O error")};
         assert_eq!(error.raw_os_error(),expected.raw_os_error());
         assert_eq!(error.kind(),expected.kind());
-        assert!(matches!(walk(&missing,usize::MAX,false,Some(Instant::now()),|_,_|false),Err(WalkFailure::Deadline)));
+        assert!(matches!(walk(&missing,usize::MAX,false,Some(Instant::now()),|_,_|false),Err(Outcome::Deadline)));
         assert!(walk(&root,usize::MAX,false,None,|_,_|true).is_ok());
-        assert_eq!(io_outcome(b"the walk of fixture",&Err(std::io::Error::other("no code"))),
+        assert_eq!(super::super::report::io_outcome(b"the walk of fixture",Err(std::io::Error::other("no code"))),
             b"the walk of fixture returned an error without an OS code");
         fs::remove_dir(&root).unwrap();
     }
