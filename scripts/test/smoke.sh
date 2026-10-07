@@ -899,9 +899,28 @@ core_smoke_pending
 
 pass "the inert flag is read from each install's own arguments and goes where npm reads it last; one already true is left as written"
 
-# Text the rewrite cannot read as the shell will -- a double-quoted script
-# with an escape or a substitution in it, or a script handed to ksh -- has
-# the per-row rewrite expectations below and must record its unread install.
+# Reuse the release-floor relation with the previous row expectation as a
+# second floor. It proves both that only flags were inserted into the input
+# and that every flag the old expectation contained is still present. The
+# normal run_hook_command check still uses the measured 7d66f8c corpus.
+assert_script_payload_additions() {
+  local command="$1" previous="$2" out="$3" safe="$4" payload got corpus
+  jq -e '.hookSpecificOutput | .permissionDecision == "allow" and
+    (.updatedInput.command | type == "string")' <<< "${out}" >/dev/null \
+    || fail "a script-payload row allows with a rewrite: ${command}"
+  got=$(jq -r '.hookSpecificOutput.updatedInput.command' <<< "${out}")
+  payload=$(jq -nc --arg command "${command}" '{tool_input:{command:$command}}')
+  corpus=$(mktemp "${tmp_root}/previous-rewrite.XXXXXX")
+  jq -nc --arg command "${command}" --arg previous "${previous}" \
+    '[{command:$command,release:$previous}]' > "${corpus}"
+  RELEASE_FLOOR_CORPUS="${corpus}" release_floor_check "${payload}" "${got}" "${safe}" "${tmp_root}" \
+    || fail "the script-payload rewrite only adds flags to the previous expectation: ${command}"
+  release_floor_settle
+}
+
+# Native payload reading adds flags inside scripts that the Bash rewrite
+# left to its floor. Keep both expectations: the old one is the insertion
+# floor, and the native one pins the measured bytes. The unread record stays.
 # The cat heredoc bodies piped to wc are covered by the explicit
 # floor-outside-command conflict rows above, not by this rewrite loop.
 unread_case_in=(
@@ -928,15 +947,28 @@ unread_case_want=(
   'npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts; sh -c "npm install\"\" left-pad@1.3.0"'
   $'npm i --ignore-scripts left-pad@1.3.0 --ignore-scripts && sh <<E | tee log\nnpm ci&&true\nE'
 )
+unread_case_native=(
+  'npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts; sh -c "echo $(date); npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts"'
+  'npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts; sh -c "echo \"hi\"; npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts"'
+  'true; sh -c "npm install --ignore-scripts left-pad@1.3.0 \"--loglevel=warn\" --ignore-scripts"'
+  'sh -c "npm install --ignore-scripts left-pad@1.3.0 \"--loglevel=warn\" --ignore-scripts"'
+  'eval "npm install --ignore-scripts left-pad@1.3.0 \"--loglevel=warn\" --ignore-scripts"'
+  'true; bash -lc "npm install --ignore-scripts left-pad@1.3.0 `printf -- --loglevel=warn` --ignore-scripts"'
+  'true; zsh -c "npm install --ignore-scripts left-pad@1.3.0 --fetch-retries $((1)) --ignore-scripts"'
+  "true; ksh -c 'npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts'"
+  'npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts; sh -c "npm install\"\" left-pad@1.3.0 --ignore-scripts"'
+  $'npm i --ignore-scripts left-pad@1.3.0 --ignore-scripts && sh <<E | tee log\nnpm ci&&true\nE'
+)
 for unread_i in "${!unread_case_in[@]}"; do
   inert_in="${unread_case_in[${unread_i}]}"
-  inert_want="${unread_case_want[${unread_i}]}"
+  inert_want="${unread_case_native[${unread_i}]}"
   unread_safe=$(mktemp -d "${tmp_root}/safe-unread.XXXXXX")
   SAFEDEPS_HOME="${unread_safe}" lib/ledger/ledger.sh approve npm left-pad 1.3.0 1.3.0 smoke >/dev/null
   inert_out=$(run_hook_command "${tmp_root}/home-unread" "${unread_safe}" "${inert_in}")
   inert_got=$(jq -r '.hookSpecificOutput.updatedInput.command // ""' <<< "${inert_out}")
   [[ "${inert_got}" == "${inert_want}" ]] \
-    || fail "an install in text the rewrite cannot read gets the flag where v2.17.2 put it: $(printf '%q' "${inert_in}") (got: $(printf '%q' "${inert_got}"); ${inert_out:0:200})"
+    || fail "a script-payload install gets the measured native rewrite: $(printf '%q' "${inert_in}") (got: $(printf '%q' "${inert_got}"); ${inert_out:0:200})"
+  assert_script_payload_additions "${inert_in}" "${unread_case_want[${unread_i}]}" "${inert_out}" "${unread_safe}"
   grep -q 'safedeps did not read as a command holds an npm install verb' "${unread_safe}/advisory.log" 2>/dev/null \
     || fail "an install in text the rewrite cannot read is recorded as one whose flag nobody read: $(printf '%q' "${inert_in}")"
   unread_sid=$(jq -r '.snapshot_id' "${unread_safe}/pending/"*.json 2>/dev/null) || unread_sid=""
@@ -1009,6 +1041,13 @@ left_case_tail=(
   $' && sh <<E\nnpm ci\nE'
   ' && sh -c "cd \"d\" && npm ci;true"'
 )
+left_case_native=(
+  'npm i --ignore-scripts left-pad@1.3.0 --ignore-scripts && sh -ce "npm ci \"x\" --ignore-scripts"'
+  "npm i --ignore-scripts left-pad@1.3.0 --ignore-scripts && sh -c 'npm 'ci"
+  'npm i --ignore-scripts left-pad@1.3.0 --ignore-scripts && sh -c "npm ci --ignore-scripts "--ignore-scripts=false'
+  $'npm i --ignore-scripts left-pad@1.3.0 --ignore-scripts && sh <<E\nnpm ci\nE'
+  'npm i --ignore-scripts left-pad@1.3.0 --ignore-scripts && sh -c "cd \"d\" && npm ci --ignore-scripts;true"'
+)
 left_bad=""
 for left_i in "${!left_case_in[@]}"; do
   inert_in="${left_case_in[${left_i}]}"
@@ -1016,7 +1055,8 @@ for left_i in "${!left_case_in[@]}"; do
   SAFEDEPS_HOME="${left_safe}" lib/ledger/ledger.sh approve npm left-pad 1.3.0 1.3.0 smoke >/dev/null
   inert_out=$(run_hook_command "${tmp_root}/home-left-unread" "${left_safe}" "${inert_in}")
   inert_got=$(jq -r '.hookSpecificOutput.updatedInput.command // ""' <<< "${inert_out}")
-  [[ "${inert_got}" == "npm i --ignore-scripts left-pad@1.3.0 --ignore-scripts${left_case_tail[${left_i}]}" ]] \
+  assert_script_payload_additions "${inert_in}" "npm i --ignore-scripts left-pad@1.3.0 --ignore-scripts${left_case_tail[${left_i}]}" "${inert_out}" "${left_safe}"
+  [[ "${inert_got}" == "${left_case_native[${left_i}]}" ]] \
     || left_bad+=" [the rewrite changed: $(printf '%q' "${inert_in}") (got: $(printf '%q' "${inert_got}"); ${inert_out:0:160})]"
   grep -q 'safedeps did not read as a command holds an npm install verb' "${left_safe}/advisory.log" 2>/dev/null \
     || left_bad+=" [no unread line in advisory.log: $(printf '%q' "${inert_in}")]"
