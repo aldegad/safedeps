@@ -237,8 +237,11 @@ any step is open.
      80.5s and 79.7s, self-budget 126.1s and 125.0s, effect-trace-grid 750.9s
      and 887.2s, e2e 418.7s and 350.0s, about 1,376s on the Linux root and
      1,442s on the Windows drive, all green. The 3,612s and 3,949s of
-     2026-10-06 are values of the Bash hooks, and the conditions differ
-     (ROADMAP.md, v2.19.0, compares the batteries one by one). e2e prints
+     2026-10-06 are sums of the four batteries' times with the Bash hooks:
+     495+148+1,961+1,008 on the Linux root, and 537+160+2,341+911 on the
+     Windows drive, where the 911s is the e2e time of a copy with one row
+     guarded. The conditions differ from today's. ROADMAP.md (v2.19.0)
+     compares the batteries one by one and holds none of the sums. e2e prints
      `# skipped rows: N; names: …` at its end, and a person reads that line:
      the rows that copy the source need Darwin and skip on Linux, and on a
      Windows drive the permission rows skip as well. A skipped row is not a
@@ -292,8 +295,10 @@ any step is open.
      binary goes in first: `mkdir -p bin/native/darwin-arm64` in the main
      checkout, copy the binary to a name beside the final one, mode 755, and
      rename it to `safedeps-core`. The v2.18.1 Bash hooks do not look in
-     that directory, so nothing changes while it waits. Then, from the main
-     checkout, `git merge --ff-only plan/release-vX.Y.Z`. The new entry shim
+     that directory, so nothing changes while it waits. Before the merge, run
+     `bin/native/darwin-arm64/safedeps-core version` there by hand, to see
+     that the file runs on this Mac. Then, from the main checkout,
+     `git merge --ff-only plan/release-vX.Y.Z`. The new entry shim
      finds the binary at once, and the stamp matches, because it covers the
      source only and the path does not matter. This order was checked on a
      copy with a file swap standing in for the merge, and the merge in the
@@ -312,12 +317,15 @@ any step is open.
      session on the machine in that state for the length of a build.
 
    Then run `bin/native/<os>-<arch>/safedeps-core stamp --check` in the main
-   checkout and read `ok`. If it does not say `ok`, run
-   `scripts/build-core.sh` in the main checkout. That is the second path, and
-   it is written here so that it is never a silent alternative; the window
-   then lasts as long as the build, and in the first case it is the "no
-   binary" state above for every session. Then push one benign command and
-   one install through `scripts/safedeps-hook-entry.sh pre` and read both
+   checkout and read `ok`. If it does not say `ok`, the binary does not
+   match the source, and the state is the out-of-date one: an install is
+   denied `UNDECIDED` and every other command runs with the mismatch said on
+   stderr. It is not the "no binary" state. Build again on a remote macOS
+   host from the release head, and replace the binary the same way, by
+   copying it beside and renaming it over. That is the second path, and it
+   is written here so that it is never a silent alternative; the window then
+   lasts as long as the rebuild and the copy. Then push one benign command
+   and one install through `scripts/safedeps-hook-entry.sh pre` and read both
    answers before going on.
 8. **Push.** `git push origin main`. Nothing waits for a CI run: step 5 on our
    own hosts is the test of this commit, and a red run there stops the release
