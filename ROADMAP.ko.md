@@ -1137,7 +1137,7 @@ scan-failure census 는 awk 읽기는 하나씩 실패시켰지만 grep 과 sed 
 
 ### Rust 코어를 Bash 가드에 어떻게 맞췄나
 
-두 가드를 말뭉치로 비교하지 않았다. 기준은 기존 테스트 세트가 Rust 코어에서 돌아가는 것이고, 코어가 Bash 가드와 다르게 답하는 자리를 모두 적어 두는 것이다. 그 자리는 `scripts/measure/core-intended-battery-rows.tsv`(배터리 행 63개)와 `scripts/measure/core-intended-readings.tsv`(읽기 하나)다. 63행 가운데 30행은 코어가 차단하고 Bash 가드는 통과시킨 커맨드, 21행은 Bash 가드에 없던 플래그나 기록을 더하는 것, 11행은 가드의 상태 아래에 남기는 파일이 더 적은 것, 1행은 줄을 다르게 쓰는 것이다. Bash 가드가 막은 것을 통과시키는 차이는 두 파일 어디에도 줄이 없다. 그것은 결정이 아니라 결함이기 때문이다. 릴리스 바닥 속성은 그대로이고 여전히 검사한다. 코어가 넣은 플래그 몇 개를 지우면 7d66f8c 의 재작성이 나온다(`scripts/test/lib/release-floor.sh`).
+두 가드를 말뭉치로 비교하지 않았다. 기준은 기존 테스트 세트가 Rust 코어에서 돌아가는 것이고, 코어가 Bash 가드와 다르게 답하는 자리를 모두 적어 두는 것이다. 그 자리는 `scripts/measure/core-intended-battery-rows.tsv`(배터리 행 63개)와 `scripts/measure/core-intended-readings.tsv`(읽기 하나)다. 63행 가운데 30행은 코어가 차단하고 Bash 가드는 통과시킨 커맨드, 21행은 Bash 가드에 없던 플래그나 기록을 더하는 것, 11행은 가드의 상태 아래에 남기는 파일이 더 적은 것, 1행은 줄을 다르게 쓰는 것이다. Bash 가드가 막은 것을 통과시키는 차이는 두 파일 어디에도 줄이 없다. 그것은 결정이 아니라 결함이기 때문이다. 공개 registry 규칙은 CLI(`lib/npm/ask.sh`)와 코어(`rust/src/ask/fetch.rs`)에 두 번 적혀 있고, 코어의 단위 시험 하나(`ask::fetch::public_registry_rule_matches_cli`)가 둘을 묶어 둔다. 두 패턴 문자열이 같고, CLI 의 읽기, post 훅의 해석된 URL 검사, fetch 규칙이 같은 URL 14개를 판정한다. 그 시험에는 숨기지 않은 차이 하나가 적혀 있다. 끝 슬래시가 없는 registry URL(`https://registry.npmjs.org`)은 CLI 와 post 훅에서는 공개가 아니고, fetch 규칙은 슬래시를 보충한 뒤 공개로 판정한다. 릴리스 바닥 속성은 그대로이고 여전히 검사한다. 코어가 넣은 플래그 몇 개를 지우면 7d66f8c 의 재작성이 나온다(`scripts/test/lib/release-floor.sh`).
 
 ### 어떻게 확인했나
 
