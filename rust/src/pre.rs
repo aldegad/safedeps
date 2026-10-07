@@ -1,13 +1,15 @@
 //! `safedeps-core pre`: the PreToolUse hook.
 //!
 //! The common entry owns payload reading, truth-source notices, the deadline
-//! and scan settlement. Codex installs use the shared target, snapshot,
-//! ledger and pending-state path. The Claude install path still awaits B's
-//! verified rewrite implementation and exits 2. The installed hook remains
-//! `scripts/safedeps-pre-guard.sh` until integration is complete.
+//! and scan settlement. Codex and Claude installs share the target, snapshot,
+//! ledger and pending-state path, and for Claude the install driver asks the
+//! inert rewrite (`inert.rs`) and sends its answer as `updatedInput`. The
+//! registered hook is `scripts/safedeps-hook-entry.sh pre`, which runs this.
 //!
-//! Each step stands for the step of the bash guard named in its comment, and
-//! prints what that step prints. The differences are the ones a process
+//! Each step was carried over from the step of the Bash guard that its
+//! comment names (scripts/safedeps-pre-guard.sh, deleted by the entry
+//! switch), and prints what that step printed. The names stay so a step's
+//! history can be followed in git. The differences are the ones a process
 //! without a shell has, and each is stated where it stands.
 
 use crate::core::{Core, Run};

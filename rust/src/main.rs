@@ -1,39 +1,54 @@
-//! safedeps-core: the judgment core of the safedeps PreToolUse guard.
+//! safedeps-core: the PreToolUse and PostToolUse hooks of safedeps, and the
+//! read-only queries the batteries ask of the code the hooks run.
 //!
-//!   safedeps-core lex <view> [<marker>] [--divmemo FILE]
-//!       One lexing, a drop-in for the guard's `shell_lex`: the text on
-//!       stdin, the reading in SAFEDEPS_READING, the flags file in
-//!       SAFEDEPS_LEX_FLAGS, the divergence file in SAFEDEPS_LEX_DIVERGE and
-//!       the scan mark in SAFEDEPS_SCAN_MARK. The view on stdout. A reading
-//!       that is not set is a failed reading (exit 1, `failed` on the mark),
-//!       and so is a view no branch names (exit 2), as in the awk program.
-//!   safedeps-core lex-batch
-//!       Many lexings in one process, for the differential: records on stdin,
-//!       `<reading> <view> <length>\n<bytes>`, answers on stdout,
-//!       `<status> <unterm> <diverge> <smfail> <length>\n<bytes>`.
-//!   safedeps-core grammar
-//!       The grammar's values, `name=value` per line, for the drift check.
-//!   safedeps-core grep [-i] [-n] <pattern>
-//!       grep -E over stdin with this crate's engine, for the differential.
-//!   safedeps-core facts
-//!       The judgment facts of one hook payload (stdin), per reading: whether
-//!       the command closes and installs, the statements' kinds, the
-//!       ecosystem and the extractor's readings, as `<key> <length>\n<bytes>\n`
-//!       records. The guard's own facts are dumped the same way by
-//!       scripts/measure/core-facts-differential.py.
-//!   safedeps-core words
-//!       The statements of a text (stdin, the reading in SAFEDEPS_READING)
-//!       with where their words stand, and its payloads with where their
-//!       bytes stand: the structure the inert rewrite reads, as records, for
-//!       the contract check.
-//!   safedeps-core inert
-//!       The inert rewrite of one hook payload (stdin). Not written yet.
 //!   safedeps-core pre | post
-//!       The PreToolUse and PostToolUse hooks. Not written yet: each exits 2.
+//!       The hooks. The registered entry, scripts/safedeps-hook-entry.sh,
+//!       runs them with the payload on stdin. They take the subcommand and
+//!       nothing else: no argument and no environment variable chooses how
+//!       one judges. `pre --budget-child` is the one extra argument, which
+//!       the pre hook gives its own judgment process (see pre/budget.rs).
+//!   safedeps-core stamp [--check]
+//!       `<kind> <sha256>`: the kind of build (`checkout` or `publish`) and
+//!       the digest of the source it was built from. With --check, whether a
+//!       checkout's binary still stands beside that source: exit 0 and `ok`,
+//!       or exit 1 and the reason. Both hooks check it before they judge.
 //!   safedeps-core budget-config
 //!       The pre hook's budget numbers, one JSON object: the runtime budget
 //!       it assumes, the self budget's default and ceiling, the engage size's
 //!       default and ceiling, and the limits on a knob's digits and length.
+//!   safedeps-core version
+//!
+//! The queries below are read-only and none is on a hook's path. The
+//! batteries read the lexer, the grammar and the readers through them.
+//!
+//!   safedeps-core lex <view> [<marker>] [--divmemo FILE]
+//!       One lexing: the text on stdin, the reading in SAFEDEPS_READING, the
+//!       flags file in SAFEDEPS_LEX_FLAGS, the divergence file in
+//!       SAFEDEPS_LEX_DIVERGE and the scan mark in SAFEDEPS_SCAN_MARK. The
+//!       view on stdout. A reading that is not set is a failed reading (exit
+//!       1, `failed` on the mark), and so is a view no branch names (exit 2).
+//!   safedeps-core lex-batch
+//!       Many lexings in one process: records on stdin, `<reading> <view>
+//!       <length>\n<bytes>`, answers on stdout, `<status> <unterm> <diverge>
+//!       <smfail> <length>\n<bytes>`.
+//!   safedeps-core grammar
+//!       The grammar's values, `name=value` per line.
+//!   safedeps-core grep [-i] [-n] <pattern>
+//!       grep -E over stdin with this crate's regex engine.
+//!   safedeps-core facts
+//!       The judgment facts of one hook payload (stdin), per reading: whether
+//!       the command closes and installs, the statements' kinds, the
+//!       ecosystem and the extractor's readings, as `<key> <length>\n<bytes>\n`
+//!       records.
+//!   safedeps-core words
+//!       The statements of a text (stdin, the reading in SAFEDEPS_READING)
+//!       with where their words stand, and its payloads with where their
+//!       bytes stand: the structure the inert rewrite reads, as records.
+//!   safedeps-core payloads
+//!       The payloads of a text as one JSON object, with each byte's source.
+//!   safedeps-core inert
+//!       The inert rewrite of one hook payload (stdin), as the reading's own
+//!       account: the places it found and any collision (see inert.rs).
 //!   safedeps-core reader
 //!       One reader function of the core per query: `statements`,
 //!       `raw-texts` or `lex-payloads` of a text in a reading. A query is a
@@ -46,18 +61,15 @@
 //!       option after a command path.
 //!   safedeps-core kat [<path>]
 //!       Known answers from the modules the hooks share (the digests, the
-//!       JSON writer, how a file's times and inodes are spelled), one per
-//!       line, for a check against the tools the bash hooks use.
-//!   safedeps-core stamp [--check]
-//!       `<kind> <sha256>`: the kind of build (`checkout` or `publish`) and
-//!       the digest of the source it was built from. With --check, whether a
-//!       checkout's binary still stands beside that source: exit 0 and `ok`,
-//!       or exit 1 and the reason.
+//!       JSON writer, how a file's times and inodes are spelled).
+//!
+//! `pre-probe`, `post-probe`, `ask-probe`, `ledger`, `state-rotate` and
+//! `json-stream` are measurement entries: each takes data on stdin and calls
+//! the operation a hook calls, and none takes a shell program.
 
-// The modules marked `dead_code` are what the hooks being moved read (`pre`,
-// `post`, `inert`): they are in the tree before their callers so that the
-// people writing those callers share one copy. The mark goes when the caller
-// lands.
+// The modules marked `dead_code` carry items the hooks do not all call. The
+// mark dates from when the callers were being moved in, and it has not been
+// revisited.
 #[allow(dead_code)]
 mod ask;
 mod callid;

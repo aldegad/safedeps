@@ -1,15 +1,21 @@
-//! The guard's shell lexer, `shell_lex` in scripts/safedeps-pre-guard.sh,
-//! carried over function by function.
+//! The shell lexer of the hooks.
 //!
 //! One pass over the command as the shell lexes it gives every byte a class,
 //! the walk over the words (`starts`) gives the events where commands start,
-//! and every view is printed from those. The awk program is the reference:
-//! each function here has the name, the order of rules and the state of its
-//! awk counterpart, so a view the two print differently is a defect in this
-//! file, found by the differential (scripts/measure/core-lex-differential.sh).
-//! The comments that say why a rule is there live in the awk program; the
-//! ones here only say where this code has to differ from awk to mean the
-//! same thing.
+//! and every view is printed from those.
+//!
+//! It was carried over function by function from the awk program of the Bash
+//! guard (`shell_lex` in scripts/safedeps-pre-guard.sh, which the entry switch
+//! deleted), and it keeps that program's names, order of rules and state, so
+//! a rule's history can be followed in git from before the switch. The awk
+//! program was the reference while the port was checked against it; that
+//! comparison is retired with the program (scripts/measure/native-measure-disposition.json),
+//! and the lexer is held now by the batteries that read it through
+//! `safedeps-core lex` and the reader queries (scan-contract, shell-reading,
+//! statement-batch, manager-variants, consumer-forms). The comments that say
+//! why a rule is there lived in the awk program, and AGENTS.md keeps the
+//! reasons; the ones here only say where this code has to differ from awk to
+//! mean the same thing.
 //!
 //! awk semantics kept on purpose:
 //! - every array is 1-based, and a read past either end is the empty string
