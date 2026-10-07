@@ -112,6 +112,14 @@ def main():
         check('human-origin-changed-to-other', run(root), 1, 'other')
 
         root = copy()
+        path = root / 'rust/src/post/npm.rs'
+        before = path.read_text()
+        renderer = '&outcome.describe(Action::NpmRebuild,Form::Action)'
+        if before.count(renderer) != 1: raise ValueError('rebuild renderer control anchor is not unique')
+        path.write_text(before.replace(renderer, '&Vec::new()', 1))
+        check('rebuild-renderer-origin-changed-to-other', run(root), 1, 'Report::rebuild')
+
+        root = copy()
         path = root / 'rust/src/post/providers.rs'
         path.write_text(source.replace(original, 'use std::collections::HashSet; let _unrelated = HashSet::<u8>::new(); ' + original, 1))
         check('unrelated-line-and-ordinary-import-stay-green', run(root), 0, 'ok - output-sinks:')

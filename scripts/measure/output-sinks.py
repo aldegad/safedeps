@@ -30,6 +30,11 @@ field access), and other. Computations/calls not recognized as the renderer
 stay other. A change of origin kind is red; different bytes of the same kind
 are the output oracle's concern. In particular no string blacklist reads
 user commands, paths or quoted data. Raw data writes have origin '-'.
+Immutable local bindings and explicit Outcome parameters/constructors are
+followed, including a match whose every arm constructs an Outcome. The fact
+argument of Report::rebuild is counted at the typed Report parameter's call
+site, before forwarding it to say loses the caller's origin. Other function
+returns, record round trips and loop bindings are not followed across calls.
 
 BOUNDARY rows change only when the counts/names of output capabilities, output
 API imports (including aliases), FFI declarations, or macro definitions change.
@@ -338,16 +343,39 @@ def origin(arg, bindings=None, typed=(), visiting=()):
     return 'other'
 
 
+def outcome_value(expr):
+    """A constructor, or a match whose every arm is such an Outcome value."""
+    if not expr: return False
+    ps = pairs(expr)
+    if expr[-1] == ')' and ps[len(expr)-1] > 0:
+        callee = ''.join(expr[:ps[len(expr)-1]]).removeprefix('crate::outcome::')
+        if re.fullmatch(r'Outcome::[A-Za-z_]\w*', callee): return True
+    if expr[0] != 'match': return False
+    i = 1
+    while i < len(expr) and expr[i] != '{':
+        if expr[i] in ('(', '['): i = ps[i]
+        i += 1
+    if i == len(expr) or ps[i] != len(expr)-1: return False
+    arms = arguments(expr[i+1:-1])
+    values = []
+    for arm in arms:
+        arrow = next((j for j in range(len(arm)-1) if arm[j:j+2] == ['=', '>']), None)
+        if arrow is None: return False
+        values.append(arm[arrow+2:])
+    return bool(values) and all(outcome_value(value) for value in values)
+
+
 def local_origins(ts):
     """Only unambiguous immutable let bindings; no interprocedural inference."""
     ps = pairs(ts)
-    bindings, typed = {}, set()
+    bindings, typed, reports = {}, set(), set()
     for i, t in enumerate(ts):
         if t == ':' and i and i+1 < len(ts):
             j = i+1
             while j < len(ts) and ts[j] in ('&', 'mut'): j += 1
             if ts[j:j+1] == ['Outcome'] or ts[j:j+5] == ['crate', '::', 'outcome', '::', 'Outcome']:
                 typed.add(ts[i-1])
+            if ts[j:j+1] == ['Report']: reports.add(ts[i-1])
         if t != 'let' or i+2 >= len(ts): continue
         name, eq = ts[i+1], i+2
         if not IDENT.fullmatch(name) or name == 'mut': continue
@@ -361,12 +389,13 @@ def local_origins(ts):
         writes = sum(ts[j] == name and ts[j+1:j+2] == ['='] and ts[j+2:j+3] != ['=']
                      for j in range(len(ts)-2))
         bindings[name] = ts[eq+1:end] if writes == 1 else None
-    return bindings, typed
+        if writes == 1 and outcome_value(ts[eq+1:end]): typed.add(name)
+    return bindings, typed, reports
 
 
 def origins(name, args, bindings, typed):
     # Omit destinations and logger levels; classify the payload, not its path.
-    if name in HUMAN | WRITES and name not in ('write',): args = args[-1:]
+    if name in HUMAN | WRITES | {'rebuild'} and name not in ('write',): args = args[-1:]
     if name in ('write', 'writeln'): args = args[1:]
     kinds = set()
     for arg in args: kinds.update(origin(arg, bindings, typed).split('+'))
@@ -402,10 +431,16 @@ def entries(path, ts, foreign_names):
         name = aliases.get(t, t)
         before = ts[i-1] if i else ''
         after = ts[i+1] if i+1 < len(ts) else ''
+        # Report::rebuild forwards its fact bytes to say. Keep that one-hop
+        # entry visible before the parameter erases the renderer's origin.
+        report_entry = False
+        if name == 'rebuild' and before == '.' and i >= 2:
+            report_entry = any(a <= i < b and ts[i-2] in provenance[(a, b)][2] for a, b, _ in scopes)
         structural = t in ('use', 'extern', 'macro_rules')
         if not structural:
             if before == 'fn': continue
-            if after == '!' and name not in DATA_MACROS | KEYWORDS and ts[i+2:i+3] in (['('], ['{'], ['[']): pass
+            if report_entry: pass
+            elif after == '!' and name not in DATA_MACROS | KEYWORDS and ts[i+2:i+3] in (['('], ['{'], ['[']): pass
             elif name in foreign_names and after == '(': pass
             elif name in HUMAN | WRITES | COPIES | CAPABILITIES:
                 if before not in ('.', '::') and after not in ('(', '::'): continue
@@ -440,14 +475,16 @@ def entries(path, ts, foreign_names):
         kind, channel = role(path, scope, name, expression)
         if after == '!' and name not in MACROS: kind, channel = 'boundary', 'macro-call'
         if name in foreign_names: kind, channel = 'boundary', 'foreign-call'
+        if report_entry: kind, channel = 'human', 'report-entry'
         # For methods the callee is the method name, not the receiver expression.
         # Qualified free-function names keep their namespace.
         qualified = i
         while qualified >= 2 and ts[qualified-1] == '::' and IDENT.fullmatch(ts[qualified-2]): qualified -= 2
         callee = ''.join(ts[qualified:i+1]) + ('!' if after == '!' else '')
+        if report_entry: callee = 'Report::rebuild'
         j = i+2 if after == '!' else i+1
         args = arguments(ts[j+1:end-1]) if j < len(ts) and ts[j] in ('(', '[', '{') else []
-        bindings, typed = provenance.get((start, stop), ({}, set()))
+        bindings, typed, _ = provenance.get((start, stop), ({}, set(), set()))
         source = origins(name, args, bindings, typed) if kind == 'human' else '-'
         add(scope, kind, channel, callee, source)
     return rows

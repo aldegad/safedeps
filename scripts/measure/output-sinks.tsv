@@ -154,6 +154,9 @@ rust/src/post/npm.rs	rebuild	boundary	import	std::process::Stdio	-	1
 rust/src/post/npm.rs	rebuild	human	log-or-report	say	fixed-literal+other	4
 rust/src/post/npm.rs	rebuild	human	log-or-report	say	other	2
 rust/src/post/npm.rs	rebuild	human	log-or-report	state::log_advisory	fixed-literal+other	5
+rust/src/post/npm.rs	rebuild	human	report-entry	Report::rebuild	data-field+fixed-literal	1
+rust/src/post/npm.rs	rebuild	human	report-entry	Report::rebuild	fixed-literal+other	1
+rust/src/post/npm.rs	rebuild	human	report-entry	Report::rebuild	result-renderer	1
 rust/src/post/npm.rs	record_inner	data	copy-or-publish	fs::rename	-	1
 rust/src/post/npm.rs	record_inner	data	raw-or-serialized	fs::write	-	1
 rust/src/post/npm.rs	record_inner	human	log-or-report	say	fixed-literal+other	3
