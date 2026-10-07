@@ -420,7 +420,7 @@ run_hook_command() {
 
   payload=$(jq -nc --arg command "${command}" --arg cwd "${project_dir}" \
     '{tool_name:"Bash",tool_input:{command:$command},cwd:$cwd}')
-  out=$(printf '%s' "${payload}" | HOME="${home_dir}" SAFEDEPS_HOME="${safe_dir}" scripts/safedeps-pre-guard.sh)
+  out=$(printf '%s' "${payload}" | HOME="${home_dir}" SAFEDEPS_HOME="${safe_dir}" scripts/safedeps-hook-entry.sh pre)
   if [[ -z "${out}" || "$(jq -r '.hookSpecificOutput.permissionDecision // empty' <<< "${out}")" == allow ]]; then
     release_floor_check "${payload}" "$(jq -r '.hookSpecificOutput.updatedInput.command // empty' <<< "${out:-{\}}")" "${safe_dir}" "${tmp_root}" || true
   fi
@@ -434,7 +434,7 @@ run_codex_hook_command() {
 
   jq -nc --arg command "${command}" --arg cwd "${project_dir}" \
     '{tool_name:"Bash",tool_input:{command:$command},cwd:$cwd,turn_id:"turn-smoke",model:"codex-test"}' |
-    HOME="${home_dir}" SAFEDEPS_HOME="${safe_dir}" scripts/safedeps-pre-guard.sh
+    HOME="${home_dir}" SAFEDEPS_HOME="${safe_dir}" scripts/safedeps-hook-entry.sh pre
 }
 
 deny_json=$(
@@ -1144,7 +1144,7 @@ printf '{"dependencies":{}}\n' > "${prefix_proj}/package.json"
 SAFEDEPS_HOME="${prefix_safe}" lib/ledger/ledger.sh approve npm left-pad 1.3.0 1.3.0 smoke >/dev/null
 jq -nc --arg c "npm install --prefix ${prefix_proj} left-pad@1.3.0" --arg cwd "${project_dir}" \
   '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
-  HOME="${tmp_root}/home-prefix" SAFEDEPS_HOME="${prefix_safe}" scripts/safedeps-pre-guard.sh >/dev/null
+  HOME="${tmp_root}/home-prefix" SAFEDEPS_HOME="${prefix_safe}" scripts/safedeps-hook-entry.sh pre >/dev/null
 prefix_pending_dir=$(jq -r '.project_dir' "${prefix_safe}/pending/"*.json | head -1)
 [[ "${prefix_pending_dir}" == "${prefix_proj}" ]] || fail "--prefix install snapshots the override dir, not cwd (got: ${prefix_pending_dir}, want ${prefix_proj})"
 pass "--prefix install targets the override dir for snapshot/effect-gate (finding #3)"
@@ -1289,7 +1289,7 @@ mkdir -p "${fc_safe}/state.lock"
 fc_deny=$(
   jq -nc --arg c "npm install evil@1.0.0" --arg cwd "${project_dir}" \
     '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
-    HOME="${fc_home}" SAFEDEPS_HOME="${fc_safe}" SAFEDEPS_LOCK_MAX_ATTEMPTS=2 scripts/safedeps-pre-guard.sh
+    HOME="${fc_home}" SAFEDEPS_HOME="${fc_safe}" SAFEDEPS_LOCK_MAX_ATTEMPTS=2 scripts/safedeps-hook-entry.sh pre
 )
 rmdir "${fc_safe}/state.lock" 2>/dev/null || true
 [[ "$(jq -r '.hookSpecificOutput.permissionDecision' <<< "${fc_deny}")" == "deny" ]] || fail "pre-guard fails closed (deny) when the state lock is unavailable for an install"
@@ -1304,13 +1304,13 @@ for fc_tool in bash mkdir date printf cat grep; do
 done
 fc_nojq_deny=$(
   jq -nc --arg c "npm install x@1" --arg cwd "${project_dir}" '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
-    HOME="${fc_home}" SAFEDEPS_HOME="${fc_safe}" PATH="${fc_nojq}" scripts/safedeps-pre-guard.sh 2>/dev/null
+    HOME="${fc_home}" SAFEDEPS_HOME="${fc_safe}" PATH="${fc_nojq}" scripts/safedeps-hook-entry.sh pre 2>/dev/null
 )
 [[ "$(jq -r '.hookSpecificOutput.permissionDecision' <<< "${fc_nojq_deny}")" == "deny" ]] || fail "pre-guard denies a likely install when jq is missing (best-effort fail-closed)"
 grep -q 'DENY: jq missing' "${fc_safe}/advisory.log" || fail "pre-guard logs the jq-missing install deny to advisory.log"
 fc_nojq_allow=$(
   jq -nc --arg c "ls -la" --arg cwd "${project_dir}" '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
-    HOME="${fc_home}" SAFEDEPS_HOME="${fc_safe}" PATH="${fc_nojq}" scripts/safedeps-pre-guard.sh 2>/dev/null
+    HOME="${fc_home}" SAFEDEPS_HOME="${fc_safe}" PATH="${fc_nojq}" scripts/safedeps-hook-entry.sh pre 2>/dev/null
 )
 [[ "$(jq -r '.hookSpecificOutput.permissionDecision // "allow"' <<< "${fc_nojq_allow}" 2>/dev/null || echo allow)" != "deny" ]] || fail "pre-guard allows a non-install command when jq is missing"
 pass "pre-guard fails closed on jq-missing installs, allows non-installs (observable)"
@@ -1318,7 +1318,7 @@ pass "pre-guard fails closed on jq-missing installs, allows non-installs (observ
 # (c) ledger library missing → DENY (fail-closed), logged — not a silent fall-through allow.
 fc_noledger=$(
   jq -nc --arg c "npm install x@1" --arg cwd "${project_dir}" '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
-    HOME="${fc_home}" SAFEDEPS_HOME="${fc_safe}" SAFEDEPS_LEDGER_LIB="${tmp_root}/does-not-exist.sh" scripts/safedeps-pre-guard.sh 2>/dev/null
+    HOME="${fc_home}" SAFEDEPS_HOME="${fc_safe}" SAFEDEPS_LEDGER_LIB="${tmp_root}/does-not-exist.sh" scripts/safedeps-hook-entry.sh pre 2>/dev/null
 )
 [[ "$(jq -r '.hookSpecificOutput.permissionDecision' <<< "${fc_noledger}")" == "deny" ]] || fail "pre-guard denies an install when the ledger library is missing (fail-closed)"
 grep -q 'ledger library missing' "${fc_safe}/advisory.log" || fail "pre-guard logs the missing-ledger deny to advisory.log"
@@ -1335,7 +1335,7 @@ run_hook_command "${tmp_root}/home-conc" "${conc_safe}" "npm install conc-a@1.0.
 conc_pending=$(find "${conc_safe}/pending" -name '*.json' -type f | wc -l | tr -d ' ')
 [[ "${conc_pending}" == "2" ]] || fail "two identical concurrent installs keep two separate pending files (got ${conc_pending}, want 2)"
 jq -nc --arg c "npm install conc-a@1.0.0" --arg cwd "${project_dir}" '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
-  HOME="${tmp_root}/home-conc" SAFEDEPS_HOME="${conc_safe}" scripts/safedeps-post-verify.sh >/dev/null 2>&1 || true
+  HOME="${tmp_root}/home-conc" SAFEDEPS_HOME="${conc_safe}" scripts/safedeps-hook-entry.sh post >/dev/null 2>&1 || true
 conc_left=$(find "${conc_safe}/pending" -name '*.json' -type f | wc -l | tr -d ' ')
 [[ "${conc_left}" == "1" ]] || fail "post hook consumes exactly one identical-command install's pending state (left ${conc_left}, want 1)"
 pass "concurrent installs (even identical commands) keep isolated pending state (issue #5)"
@@ -1348,7 +1348,7 @@ mkdir -p "${nolock_dir}"
 printf '{"dependencies":{}}\n' > "${nolock_dir}/package.json"
 nolock_safe="${tmp_root}/safe-nolock"
 jq -nc --arg cwd "${nolock_dir}" '{tool_name:"Bash",tool_input:{command:"pip install orphan==1.0.0"},cwd:$cwd}' |
-  HOME="${tmp_root}/home-conc" SAFEDEPS_HOME="${nolock_safe}" scripts/safedeps-post-verify.sh >/dev/null 2>&1 || true
+  HOME="${tmp_root}/home-conc" SAFEDEPS_HOME="${nolock_safe}" scripts/safedeps-hook-entry.sh post >/dev/null 2>&1 || true
 grep -q 'UNVERIFIED:.*no pending state.*no package-lock.json' "${nolock_safe}/advisory.log" || fail "post hook records a no-lockfile no-pending install as UNVERIFIED"
 pass "post hook records an install-looking command with no pending state (no lockfile) as UNVERIFIED"
 
@@ -1363,7 +1363,7 @@ mkdir -p "${backstop_safe}" "${backstop_proj}"
 printf '{"name":"p","version":"1.0.0","lockfileVersion":3,"packages":{"":{"name":"p","version":"1.0.0"}}}\n' > "${backstop_proj}/package-lock.json"
 printf '{"name":"p","version":"1.0.0"}\n' > "${backstop_proj}/package.json"
 jq -nc --arg cwd "${backstop_proj}" '{tool_name:"Bash",tool_input:{command:" npm install left-pad@1.3.0"},cwd:$cwd}' |
-  HOME="${tmp_root}/home-backstop" SAFEDEPS_HOME="${backstop_safe}" scripts/safedeps-post-verify.sh >/dev/null 2>&1 || true
+  HOME="${tmp_root}/home-backstop" SAFEDEPS_HOME="${backstop_safe}" scripts/safedeps-hook-entry.sh post >/dev/null 2>&1 || true
 grep -q 'BACKSTOP clean' "${backstop_safe}/advisory.log" || fail "npm effect gate runs command-independently as a backstop with no pending state (finding #5)"
 pass "npm effect gate runs command-independently as a backstop (finding #5)"
 
@@ -1380,7 +1380,7 @@ cat > "${project_dir}/node_modules/ledger-tamper/package.json" <<'EOF'
 EOF
 tamper_post=$(
   jq -nc --arg cwd "${project_dir}" '{tool_name:"Bash",tool_input:{command:"npm install ledger-tamper@1.0.0"},cwd:$cwd}' |
-    HOME="${tamper_home}" SAFEDEPS_HOME="${tamper_safe}" scripts/safedeps-post-verify.sh
+    HOME="${tamper_home}" SAFEDEPS_HOME="${tamper_safe}" scripts/safedeps-hook-entry.sh post
 )
 grep -q 'suspicious dependency change detected' <<< "${tamper_post}" || fail "post hook reorgs safedeps ledger tamper script"
 pass "post hook reorgs safedeps ledger tamper script"

@@ -66,7 +66,7 @@ NATIVE_DIR="${ROOT_DIR}/bin/native"
 stop() { printf 'build-core: %s\n' "$1" >&2; exit 1; }
 
 # The platform directory of a target triple. A closed table: the shim finds a
-# binary by these names (scripts/safedeps-hook-entry-native.sh), so a target
+# binary by these names (scripts/safedeps-hook-entry.sh), so a target
 # that is not here has no directory the shim would look in.
 platform_of() {
   case "$1" in

@@ -58,7 +58,6 @@ SHELLCHECK_FILES=(
   bin/safedeps
   lib/install-grammar.sh lib/gates/*.sh lib/ledger/*.sh lib/npm/*.sh lib/providers/*.sh
   scripts/safedeps-hook-entry.sh
-  scripts/safedeps-pre-guard.sh scripts/safedeps-post-verify.sh
   scripts/safedeps-recheck-alert.sh scripts/release-gates.sh
   scripts/test/smoke.sh scripts/test/e2e.sh
   scripts/test/run-all.sh scripts/test/rust-core.sh scripts/test/ci-verdict.sh scripts/test/shard-cover.sh scripts/test/lib/shard.sh

@@ -158,11 +158,11 @@ guard() {
   safe=$(mktemp -d "${tmp_root}/safe.XXXXXX")
   GUARD_STATE_DIR="${safe}"
   local start end rc=0
-  local launch=(scripts/safedeps-pre-guard.sh)
+  local launch=(scripts/safedeps-hook-entry.sh pre)
   if [[ -n "${GUARD_IGNORE_TERM}" ]]; then
     # A signal ignored on entry stays ignored across exec, and bash cannot trap
     # or reset it, so every process in the judgment inherits a deaf TERM.
-    launch=(bash -c 'trap "" TERM; exec "$@"' ignore-term scripts/safedeps-pre-guard.sh)
+    launch=(bash -c 'trap "" TERM; exec "$@"' ignore-term scripts/safedeps-hook-entry.sh pre)
   fi
   if [[ -n "${GUARD_SECONDS}" ]]; then
     # Through env, because an assignment in front of a command would be read
@@ -509,8 +509,12 @@ pass "an exported SECONDS does not move the deadline"
 # fail-open the machinery above exists to remove. The value is therefore clamped
 # to a ceiling below the runtime budget. Both constants are read from the guard
 # so this battery tracks them instead of restating them.
-runtime_budget=$(grep -m1 '^SAFEDEPS_RUNTIME_BUDGET_SECONDS=' scripts/safedeps-pre-guard.sh | cut -d= -f2)
-budget_ceiling=$(grep -m1 '^SAFEDEPS_SELF_BUDGET_MAX_SECONDS=' scripts/safedeps-pre-guard.sh | cut -d= -f2)
+# Read the production budget values without extracting a Bash hook body.
+source "${ROOT_DIR}/scripts/test/lib/core-reader.sh"
+core_reader_init "${ROOT_DIR}"
+budget_config=$("${SAFEDEPS_TEST_CORE}" budget-config)
+runtime_budget=$(jq -r '.runtime_budget_seconds' <<< "${budget_config}")
+budget_ceiling=$(jq -r '.self_budget_max_seconds' <<< "${budget_config}")
 [[ -n "${runtime_budget}" && -n "${budget_ceiling}" ]] || fail "budget constants are readable from the guard"
 
 # The judgment is held up for a minute, so nothing but the ceiling can bring the

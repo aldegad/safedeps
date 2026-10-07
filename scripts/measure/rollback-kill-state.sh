@@ -67,9 +67,9 @@ JSON
   # that is what the rollback restores from.
   local cmd_baseline="npm install ${BASELINE_DEP}@${BASELINE_VER}"
   hook_payload "${cmd_baseline}" "${project}" \
-    | bash "${REPO_DIR}/scripts/safedeps-pre-guard.sh" >/dev/null 2>&1
+    | bash "${REPO_DIR}/scripts/safedeps-hook-entry.sh" pre >/dev/null 2>&1
   hook_payload "${cmd_baseline}" "${project}" \
-    | bash "${REPO_DIR}/scripts/safedeps-post-verify.sh" >/dev/null 2>&1
+    | bash "${REPO_DIR}/scripts/safedeps-hook-entry.sh" post >/dev/null 2>&1
 
   local confirmed_count
   confirmed_count=$(find "${sd_home}" -maxdepth 1 -name 'confirmed_*' | wc -l | tr -d ' ')
@@ -81,7 +81,7 @@ JSON
   # --- the install the gate must roll back ---
   local cmd_bad="npm install ${BAD_DEP}@${BAD_VER}"
   hook_payload "${cmd_bad}" "${project}" \
-    | bash "${REPO_DIR}/scripts/safedeps-pre-guard.sh" >/dev/null 2>&1
+    | bash "${REPO_DIR}/scripts/safedeps-hook-entry.sh" pre >/dev/null 2>&1
   (cd "${project}" && npm install --ignore-scripts --silent "${BAD_DEP}@${BAD_VER}" >/dev/null 2>&1)
 
   local pre_pkg_hash pre_lock_entries
@@ -94,12 +94,12 @@ JSON
     local t_start t_end
     t_start=$(python3 -c 'import time; print(time.time())')
     hook_payload "${cmd_bad}" "${project}" \
-      | bash "${REPO_DIR}/scripts/safedeps-post-verify.sh" >/dev/null 2>&1
+      | bash "${REPO_DIR}/scripts/safedeps-hook-entry.sh" post >/dev/null 2>&1
     t_end=$(python3 -c 'import time; print(time.time())')
     CONTROL_SECONDS=$(python3 -c "print('%.2f' % ($t_end - $t_start))")
   else
     hook_payload "${cmd_bad}" "${project}" \
-      | bash "${REPO_DIR}/scripts/safedeps-post-verify.sh" >/dev/null 2>&1 &
+      | bash "${REPO_DIR}/scripts/safedeps-hook-entry.sh" post >/dev/null 2>&1 &
     local hook_pid=$!
     if [[ "${offset}" == rollback+* ]]; then
       # Wall-clock offsets cannot land reliably inside the reinstall, because

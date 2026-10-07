@@ -2779,7 +2779,7 @@ guard_moved_payload=$(jq -nc --arg cwd "${tmp_root}/guard-moved-project" \
   '{tool_name:"Bash",tool_input:{command:"ls -la"},cwd:$cwd}')
 SAFEDEPS_HOME="${guard_moved_home}" SAFEDEPS_OSV_API_URL="http://mirror.invalid/osv" \
   SAFEDEPS_NPM_OVERRIDES_JSON='{"minimist":"1.2.8"}' \
-  scripts/safedeps-pre-guard.sh <<< "${guard_moved_payload}" >/dev/null 2>&1 || true
+  scripts/safedeps-hook-entry.sh pre <<< "${guard_moved_payload}" >/dev/null 2>&1 || true
 grep -q 'advisory truth source moved' "${guard_moved_home}/advisory.log" \
   || fail "the guard records a moved advisory source on its own path"
 grep -q 'npm-overrides=set' "${guard_moved_home}/advisory.log" \
@@ -2796,7 +2796,7 @@ env -u SAFEDEPS_OSV_API_URL -u SAFEDEPS_OSV_BATCH_API_URL -u SAFEDEPS_KEV_CATALO
   -u SAFEDEPS_GHSA_API_URL -u SAFEDEPS_NPM_CLOSURE_FIXTURE_JSON -u SAFEDEPS_YARN_INFO_FIXTURE_NDJSON \
   -u SAFEDEPS_NPM_OVERRIDES_JSON -u SAFEDEPS_RECHECK_FIXTURE_JSON -u SAFEDEPS_LEDGER_DEFAULT_TTL_DAYS \
   -u SAFEDEPS_ADVISORY_LOG \
-  env SAFEDEPS_HOME="${guard_clean_home}" scripts/safedeps-pre-guard.sh <<< "${guard_moved_payload}" >/dev/null 2>&1 || true
+  env SAFEDEPS_HOME="${guard_clean_home}" scripts/safedeps-hook-entry.sh pre <<< "${guard_moved_payload}" >/dev/null 2>&1 || true
 if [[ -f "${guard_clean_home}/advisory.log" ]] && grep -q 'truth source moved' "${guard_clean_home}/advisory.log"; then
   fail "an unmoved run leaves no moved-source line"
 fi
@@ -2811,7 +2811,7 @@ guard_override_home="${tmp_root}/safe-guard-override"
 mkdir -p "${guard_override_home}"
 SAFEDEPS_HOME="${guard_override_home}" SAFEDEPS_OSV_API_URL="http://mirror.invalid/osv" \
   SAFEDEPS_TRUTH_SOURCES_LIB=/dev/null \
-  scripts/safedeps-pre-guard.sh <<< "${guard_moved_payload}" >/dev/null 2>&1 || true
+  scripts/safedeps-hook-entry.sh pre <<< "${guard_moved_payload}" >/dev/null 2>&1 || true
 grep -q 'advisory truth source moved' "${guard_override_home}/advisory.log" \
   || fail "no environment variable can silence the moved-source notice"
 pass "the moved-source notice cannot be switched off from the environment"
