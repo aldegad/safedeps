@@ -64,12 +64,12 @@ gate_decision() {
   # collision handed one command's sandbox to another with no way to notice. The
   # point is not that collisions were likely; it is that nothing could detect
   # one. The kernel guarantees uniqueness here.
-  local safe out
+  local safe out_file
   safe=$(mktemp -d "${tmp_root}/safe.XXXXXX")
-  out=$(jq -nc --arg c "${command}" --arg cwd "${project_dir}" \
+  out_file=$(jq -nc --arg c "${command}" --arg cwd "${project_dir}" \
     '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
     HOME="${tmp_root}/home" SAFEDEPS_HOME="${safe}" hook_response_capture "${safe}.response" scripts/safedeps-hook-entry.sh pre)
-  hook_response_parse "${out}" "${2:-decision}" || return 1
+  hook_response_parse "${out_file}" "${2:-decision}" || return 1
   if [[ "${HOOK_QUIET}" == true ]]; then printf 'pass'; else printf '%s' "${HOOK_DECISION}"; fi
 }
 
@@ -89,12 +89,12 @@ expect_pass() {
 
 # deny or allow or pass, then the reason, for one command.
 gate_reason() {
-  local safe out
+  local safe out_file
   safe=$(mktemp -d "${tmp_root}/safe.XXXXXX")
-  out=$(jq -nc --arg c "$1" --arg cwd "${project_dir}" \
+  out_file=$(jq -nc --arg c "$1" --arg cwd "${project_dir}" \
     '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
     HOME="${tmp_root}/home" SAFEDEPS_HOME="${safe}" hook_response_capture "${safe}.response" scripts/safedeps-hook-entry.sh pre)
-  hook_response_parse "${out}" "${2:-decision}" || return 1
+  hook_response_parse "${out_file}" "${2:-decision}" || return 1
   printf '%s %s' "${HOOK_DECISION:-pass}" "${HOOK_REASON}"
 }
 
@@ -113,16 +113,16 @@ expect_undecided() {
 # no finding, and advisory.log names the kind.
 expect_collision() { # label command kind
   shard_row "expect_collision|$1|$2|$3" || return 0
-  local label="$1" command="$2" kind="$3" safe out
+  local label="$1" command="$2" kind="$3" safe out_file
   safe=$(mktemp -d "${tmp_root}/safe.XXXXXX")
-  out=$(jq -nc --arg c "${command}" --arg cwd "${project_dir}" \
+  out_file=$(jq -nc --arg c "${command}" --arg cwd "${project_dir}" \
     '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
     HOME="${tmp_root}/home" SAFEDEPS_HOME="${safe}" hook_response_capture "${safe}.response" scripts/safedeps-hook-entry.sh pre)
-  [[ "$(hook_response_read decision "${out}")" == deny \
-    && "$(hook_response_read reason "${out}")" == *UNDECIDED*"no rewritten command was sent"*"not a finding"* ]] \
-    || fail "${label} is UNDECIDED because a flag it owes cannot be placed (got: ${out:0:200})"
-  [[ "$(hook_response_read has-rewrite "${out}")" == false ]] \
-    || fail "${label} gets no rewrite (got: ${out:0:200})"
+  [[ "$(hook_response_read decision "${out_file}")" == deny \
+    && "$(hook_response_read reason "${out_file}")" == *UNDECIDED*"no rewritten command was sent"*"not a finding"* ]] \
+    || fail "${label} is UNDECIDED because a flag it owes cannot be placed (got: ${out_file:0:200})"
+  [[ "$(hook_response_read has-rewrite "${out_file}")" == false ]] \
+    || fail "${label} gets no rewrite (got: ${out_file:0:200})"
   grep -q "pre-guard DENY: .*(${kind})" "${safe}/advisory.log" 2>/dev/null \
     || fail "${label} is recorded in advisory.log as ${kind} (advisory: $(head -3 "${safe}/advisory.log" 2>/dev/null))"
 }
@@ -132,16 +132,16 @@ expect_collision() { # label command kind
 # says the shells read the installs in different places.
 expect_readings_apart() { # label command
   shard_row "expect_readings_apart|$1|$2" || return 0
-  local label="$1" command="$2" safe out
+  local label="$1" command="$2" safe out_file
   safe=$(mktemp -d "${tmp_root}/safe.XXXXXX")
-  out=$(jq -nc --arg c "${command}" --arg cwd "${project_dir}" \
+  out_file=$(jq -nc --arg c "${command}" --arg cwd "${project_dir}" \
     '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
     HOME="${tmp_root}/home" SAFEDEPS_HOME="${safe}" hook_response_capture "${safe}.response" scripts/safedeps-hook-entry.sh pre)
-  [[ "$(hook_response_read decision "${out}")" == deny \
-    && "$(hook_response_read reason "${out}")" == *UNDECIDED*"read the npm installs in this command in different places"* ]] \
-    || fail "${label} is UNDECIDED because the shells read its installs in different places (got: ${out:0:200})"
-  [[ "$(hook_response_read has-rewrite "${out}")" == false ]] \
-    || fail "${label} gets no rewrite (got: ${out:0:200})"
+  [[ "$(hook_response_read decision "${out_file}")" == deny \
+    && "$(hook_response_read reason "${out_file}")" == *UNDECIDED*"read the npm installs in this command in different places"* ]] \
+    || fail "${label} is UNDECIDED because the shells read its installs in different places (got: ${out_file:0:200})"
+  [[ "$(hook_response_read has-rewrite "${out_file}")" == false ]] \
+    || fail "${label} gets no rewrite (got: ${out_file:0:200})"
 }
 
 # A command the gate denies leaves nothing under the guard's state: no
@@ -152,13 +152,13 @@ expect_readings_apart() { # label command
 # (scripts/measure/core-intended-battery-rows.tsv).
 expect_deny_leaves_no_state() { # label command
   shard_row "expect_deny_leaves_no_state|$1|$2" || return 0
-  local label="$1" command="$2" safe out left
+  local label="$1" command="$2" safe out_file left
   safe=$(mktemp -d "${tmp_root}/safe.XXXXXX")
-  out=$(jq -nc --arg c "${command}" --arg cwd "${project_dir}" \
+  out_file=$(jq -nc --arg c "${command}" --arg cwd "${project_dir}" \
     '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
     HOME="${tmp_root}/home" SAFEDEPS_HOME="${safe}" hook_response_capture "${safe}.response" scripts/safedeps-hook-entry.sh pre)
-  [[ "$(hook_response_read decision "${out}")" == deny ]] \
-    || fail "${label} is denied (got: ${out:0:160})"
+  [[ "$(hook_response_read decision "${out_file}")" == deny ]] \
+    || fail "${label} is denied (got: ${out_file:0:160})"
   # Listed from the state directory itself: the two directories are not there
   # when nothing was written, and a find that is given a missing directory
   # fails, which under pipefail ended the battery with no line.
@@ -717,23 +717,23 @@ expect_not_approved() {
 # The command after the inert rewrite, or nothing when the gate did not
 # rewrite it.
 gate_rewrite() {
-  local safe out
+  local safe out_file
   safe=$(mktemp -d "${tmp_root}/safe.XXXXXX")
-  out=$(jq -nc --arg c "$1" --arg cwd "${project_dir}" \
+  out_file=$(jq -nc --arg c "$1" --arg cwd "${project_dir}" \
     '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
     HOME="${tmp_root}/home" SAFEDEPS_HOME="${safe}" hook_response_capture "${safe}.response" scripts/safedeps-hook-entry.sh pre)
-  hook_response_read rewrite "${out}" "${2:-decision}"
+  hook_response_read rewrite "${out_file}" "${2:-decision}"
 }
 # Where `--ignore-scripts` stands in a rewritten command, as offsets into the
 # command as written, one per flag.
 flag_places() {
-  local rest="$1" head out="" at=0
+  local rest="$1" head positions="" at=0
   while [[ "${rest}" == *" --ignore-scripts"* ]]; do
     head="${rest%%" --ignore-scripts"*}"
-    at=$(( at + ${#head} )); out+=" ${at}"
+    at=$(( at + ${#head} )); positions+=" ${at}"
     rest="${rest#*" --ignore-scripts"}"
   done
-  printf '%s ' "${out}"
+  printf '%s ' "${positions}"
 }
 # Whether the gate rewrites <form> with a flag at least where <expected> has
 # one, and adds nothing but flags. Since v2.18.0 a statement gets the flag
@@ -1802,17 +1802,17 @@ done
 # the verb.
 expect_rewrite() {
   shard_row "expect_rewrite|$1|$2|$3" || return 0
-  local label="$1" command="$2" want="$3" safe out got
+  local label="$1" command="$2" want="$3" safe out_file got
   safe=$(mktemp -d "${tmp_root}/safe.XXXXXX")
-  out=$(jq -nc --arg c "${command}" --arg cwd "${project_dir}" \
+  out_file=$(jq -nc --arg c "${command}" --arg cwd "${project_dir}" \
     '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
     HOME="${tmp_root}/home" SAFEDEPS_HOME="${safe}" hook_response_capture "${safe}.response" scripts/safedeps-hook-entry.sh pre)
   if [[ "${want}" == "(no rewrite)" ]]; then
     # These rows pin absence of a rewrite, whether unjudged or a decision.
-    hook_response_parse "${out}" quiet-or-decision || return 1
+    hook_response_parse "${out_file}" quiet-or-decision || return 1
     if [[ "${HOOK_HAS_REWRITE}" == true ]]; then got="${HOOK_REWRITE}"; else got="(no rewrite)"; fi
   else
-    got=$(hook_response_read required-rewrite "${out}") || return 1
+    got=$(hook_response_read required-rewrite "${out_file}") || return 1
   fi
   [[ "${got}" == "${want}" ]] || fail "${label} is rewritten to [${want}] (got: [${got}])"
 }
@@ -1853,12 +1853,12 @@ expect_rewrite "npm ci closed by a glued } and &&" '{ npm ci}&& echo x' '{ npm c
 # nothing but flags, and advisory.log has the record.
 expect_rewrite_unread() { # label command want
   shard_row "expect_rewrite_unread|$1|$2|$3" || return 0
-  local label="$1" command="$2" want="$3" safe out got p places
+  local label="$1" command="$2" want="$3" safe out_file got p places
   safe=$(mktemp -d "${tmp_root}/safe.XXXXXX")
-  out=$(jq -nc --arg c "${command}" --arg cwd "${project_dir}" \
+  out_file=$(jq -nc --arg c "${command}" --arg cwd "${project_dir}" \
     '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
     HOME="${tmp_root}/home" SAFEDEPS_HOME="${safe}" hook_response_capture "${safe}.response" scripts/safedeps-hook-entry.sh pre)
-  got=$(hook_response_read required-rewrite "${out}") || return 1
+  got=$(hook_response_read required-rewrite "${out_file}") || return 1
   [[ -n "${got}" && "${got// --ignore-scripts/}" == "${command// --ignore-scripts/}" && "${want// --ignore-scripts/}" == "${command// --ignore-scripts/}" ]] \
     || fail "${label} is rewritten with flags alone, as [${want}] (got: [${got:-(no rewrite)}])"
   places=$(flag_places "${got}")
@@ -1904,17 +1904,17 @@ pass "an npm install glued to a } nested in a substitution gets its flag where t
 # reading.
 expect_rewrite_read() {
   shard_row "expect_rewrite_read|$1|$2|$3" || return 0
-  local label="$1" command="$2" want="$3" safe out got
+  local label="$1" command="$2" want="$3" safe out_file got
   safe=$(mktemp -d "${tmp_root}/safe.XXXXXX")
-  out=$(jq -nc --arg c "${command}" --arg cwd "${project_dir}" \
+  out_file=$(jq -nc --arg c "${command}" --arg cwd "${project_dir}" \
     '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
     HOME="${tmp_root}/home" SAFEDEPS_HOME="${safe}" hook_response_capture "${safe}.response" scripts/safedeps-hook-entry.sh pre)
   if [[ "${want}" == "(no rewrite)" ]]; then
     # These rows pin absence of a rewrite, whether unjudged or a decision.
-    hook_response_parse "${out}" quiet-or-decision || return 1
+    hook_response_parse "${out_file}" quiet-or-decision || return 1
     if [[ "${HOOK_HAS_REWRITE}" == true ]]; then got="${HOOK_REWRITE}"; else got="(no rewrite)"; fi
   else
-    got=$(hook_response_read required-rewrite "${out}") || return 1
+    got=$(hook_response_read required-rewrite "${out_file}") || return 1
   fi
   [[ "${got}" == "${want}" ]] || fail "${label} is rewritten to [${want}] (got: [${got}])"
   ! grep -qE 'has no place where safedeps could read npm keeping|could not make every npm install in this command inert' "${safe}/advisory.log" 2>/dev/null \
@@ -2069,12 +2069,12 @@ expect_undecided "a glued } that bash reads as part of the word and zsh as a clo
 # tookdaki-20261005-144303, N2). Each row: the glued template, then the spaced
 # one, with %C% for the install.
 glued_group_verdict() {
-  local safe out
+  local safe out_file
   safe=$(mktemp -d "${tmp_root}/safe.XXXXXX")
-  out=$(jq -nc --arg c "$1" --arg cwd "${project_dir}" \
+  out_file=$(jq -nc --arg c "$1" --arg cwd "${project_dir}" \
     '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
     HOME="${tmp_root}/home" SAFEDEPS_HOME="${safe}" hook_response_capture "${safe}.response" scripts/safedeps-hook-entry.sh pre)
-  hook_response_parse "${out}" decision || return 1
+  hook_response_parse "${out_file}" decision || return 1
   local undecided=''
   [[ "${HOOK_REASON}" != *UNDECIDED* ]] || undecided=undecided
   printf '%s|%s|%s' "${HOOK_DECISION}" "${undecided}" "${HOOK_REWRITE}"
@@ -2153,12 +2153,12 @@ fi
 # An agent follows the prescription on its own, so the wrong identity was a
 # bypass, not a typo.
 identity_reason() {
-  local safe out
+  local safe out_file
   safe=$(mktemp -d "${tmp_root}/safe-identity.XXXXXX")
-  out=$(jq -nc --arg c "$1" --arg cwd "${project_dir}" \
+  out_file=$(jq -nc --arg c "$1" --arg cwd "${project_dir}" \
     '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
     HOME="${tmp_root}/home-identity" SAFEDEPS_HOME="${safe}" hook_response_capture "${safe}.response" scripts/safedeps-hook-entry.sh pre)
-  hook_response_read reason "${out}"
+  hook_response_read reason "${out_file}"
 }
 identity_reason 'go get example.com/evil@v1.0.0' | grep 'check go example.com/evil@v1.0.0' >/dev/null \
   || fail "a Go module is checked by its whole path, not its last element"
@@ -2179,11 +2179,11 @@ mkdir -p "${identity_home}"
   safedeps_ledger_write_approved_spec npm evil 1.0.0 >/dev/null ) \
   || fail "the identity fixture approvals could be written"
 approved_decision() {
-  local out
-  out=$(jq -nc --arg c "$1" --arg cwd "${project_dir}" \
+  local out_file
+  out_file=$(jq -nc --arg c "$1" --arg cwd "${project_dir}" \
     '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
     HOME="${tmp_root}/home-identity" SAFEDEPS_HOME="${identity_home}" hook_response_capture "${identity_home}.response" scripts/safedeps-hook-entry.sh pre)
-  hook_response_parse "${out}" "${2:-decision}" || return 1
+  hook_response_parse "${out_file}" "${2:-decision}" || return 1
   if [[ "${HOOK_QUIET}" == true ]]; then printf 'pass'; else printf '%s' "${HOOK_DECISION}"; fi
 }
 [[ "$(approved_decision 'go get x@v1.0.0' quiet)" != "deny" ]] \
@@ -2526,11 +2526,11 @@ got=$(pending_project_dir 'echo "a; cd sub" && npm install left-pad')
 mkdir -p "${tmp_root}/a b"
 printf '{"name":"ab"}\n' > "${tmp_root}/a b/package.json"
 printf '__metadata:\n  version: 8\n' > "${tmp_root}/a b/yarn.lock"
-yarn_response=$(jq -nc --arg c "yarn --cwd \"${tmp_root}/a b\" add x@1.0.0" --arg cwd "${project_dir}" \
+yarn_response_file=$(jq -nc --arg c "yarn --cwd \"${tmp_root}/a b\" add x@1.0.0" --arg cwd "${project_dir}" \
     '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
   HOME="${tmp_root}/home-where" SAFEDEPS_HOME="$(mktemp -d "${tmp_root}/safe-yarn.XXXXXX")" \
     hook_response_capture "${tmp_root}/yarn-response" scripts/safedeps-hook-entry.sh pre)
-yarn_reason=$(hook_response_read reason "${yarn_response}")
+yarn_reason=$(hook_response_read reason "${yarn_response_file}")
 [[ "${yarn_reason}" == *"not approved"* ]] \
   || fail "yarn --cwd with a quoted directory is judged in that directory, not in <cwd>/add (reason: ${yarn_reason})"
 pass "quoted and escaped relocation values are read as one word, as the shell reads them"
@@ -2619,9 +2619,9 @@ pass "an escaped backslash closes a region, an escaped quote opens none, and a c
 # The region stays open to the end of the command, which the shell refuses to
 # run at all. The gate reads an input that never closes as unread and answers
 # UNDECIDED for it -- a line the lexer could not finish is not a line it read.
-unclosed_response=$(jq -nc --arg c 'echo "a\\\" ; pip install evil==1.0.0' --arg cwd "${project_dir}" '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
+unclosed_response_file=$(jq -nc --arg c 'echo "a\\\" ; pip install evil==1.0.0' --arg cwd "${project_dir}" '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
   HOME="${tmp_root}/home" SAFEDEPS_HOME="$(mktemp -d "${tmp_root}/safe.XXXXXX")" hook_response_capture "${tmp_root}/unclosed-response" scripts/safedeps-hook-entry.sh pre)
-unclosed_reason=$(hook_response_read reason "${unclosed_response}")
+unclosed_reason=$(hook_response_read reason "${unclosed_response_file}")
 grep -q 'UNDECIDED' <<< "${unclosed_reason}" || fail "an install inside a region an escaped quote keeps open is undecided, not passed or claimed"
 expect_pass "an install inside single quotes across a backslash-newline" $'echo \'a\\\npip install evil==1.0.0\''
 pass "text the shell treats as data stays data"
@@ -2661,7 +2661,7 @@ pass "a newline inside quotes neither hides the next statement nor turns quoted 
 # same way. Each row asserts the whole prescription; a row with an approval
 # asserts that the old prescription's approval does not pass another package.
 prescription() {
-  local response_expect="$1" command="$2" safe out
+  local response_expect="$1" command="$2" safe out_file
   safe=$(mktemp -d "${tmp_root}/prescribe.XXXXXX")
   shift 2
   while [[ $# -ge 3 ]]; do
@@ -2671,10 +2671,10 @@ prescription() {
       || fail "the prescription fixture approval could be written"
     shift 3
   done
-  out=$(jq -nc --arg c "${command}" --arg cwd "${project_dir}" \
+  out_file=$(jq -nc --arg c "${command}" --arg cwd "${project_dir}" \
     '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
     HOME="${safe}/home" SAFEDEPS_HOME="${safe}" hook_response_capture "${safe}.response" scripts/safedeps-hook-entry.sh pre)
-  hook_response_parse "${out}" "${response_expect}" || return 1
+  hook_response_parse "${out_file}" "${response_expect}" || return 1
   [[ "${HOOK_DECISION}" == deny ]] || { printf 'no-deny;'; return 0; }
   printf '%s\n' "${HOOK_REASON}" \
     | sed -nE 's/.*run `([^`]*)` first.*/\1/p' \
@@ -3170,15 +3170,15 @@ fi
 # recorded operands: a line merely existing hides a missing operand next to a
 # present one. An empty set means no line at all.
 recorded_operands() {
-  local command="$1" safe out reason approved eco ps iter
+  local command="$1" safe out_file reason approved eco ps iter
   safe=$(mktemp -d "${tmp_root}/operands.XXXXXX")
   for iter in 1 2 3 4 5 6; do
-    out=$(jq -nc --arg c "${command}" --arg cwd "${project_dir}" \
+    out_file=$(jq -nc --arg c "${command}" --arg cwd "${project_dir}" \
       '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
       HOME="${safe}/home" SAFEDEPS_HOME="${safe}" hook_response_capture "${safe}.response" scripts/safedeps-hook-entry.sh pre) || true
     # The approval loop ends at a quiet pass, or at a decision that needs no
     # further approval; earlier iterations require the parsed deny reason.
-    hook_response_parse "${out}" quiet-or-decision || return 1
+    hook_response_parse "${out_file}" quiet-or-decision || return 1
     [[ "${HOOK_QUIET}" == false ]] || break
     reason="${HOOK_REASON}"
     [[ "${reason}" == *"install not approved"* ]] || break
@@ -3531,15 +3531,15 @@ beside_guard() {
     HOME="${tmp_root}/home-beside" SAFEDEPS_HOME="${beside_home}" hook_response_capture "${beside_home}.response" scripts/safedeps-hook-entry.sh pre
 }
 beside_decision() {
-  local out
-  out=$(beside_guard "$1")
-  hook_response_parse "${out}" "${2:-decision}" || return 1
+  local out_file
+  out_file=$(beside_guard "$1")
+  hook_response_parse "${out_file}" "${2:-decision}" || return 1
   if [[ "${HOOK_QUIET}" == true ]]; then printf 'pass'; else printf '%s' "${HOOK_DECISION}"; fi
 }
 beside_reason() {
-  local out
-  out=$(beside_guard "$1")
-  hook_response_read reason "${out}"
+  local out_file
+  out_file=$(beside_guard "$1")
+  hook_response_read reason "${out_file}"
 }
 [[ "$(beside_decision 'pip install requests==2.0.0' quiet)" == "pass" ]] \
   || fail "beside-visible fixture: the approved pip install itself passes"

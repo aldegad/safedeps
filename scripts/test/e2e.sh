@@ -29,10 +29,10 @@ assert_gives_no_command() {
 # before the same pattern is applied; a check for three fixed phrases stayed
 # green when review appended "Finish it with npm rebuild --prefix <dir>".
 assert_skipped_rebuild_states_facts() {
-  local post label="$2" rest
-  post=$(< "$1")
-  grep -q 'safedeps added --ignore-scripts to this install and did not run npm rebuild: ' <<< "${post}" || fail "${label}: the skipped rebuild is reported"
-  rest="${post//did not run npm rebuild/}"
+  local post_text label="$2" rest
+  post_text=$(< "$1")
+  grep -q 'safedeps added --ignore-scripts to this install and did not run npm rebuild: ' <<< "${post_text}" || fail "${label}: the skipped rebuild is reported"
+  rest="${post_text//did not run npm rebuild/}"
   assert_gives_no_command "${rest}" "${label}: the skipped rebuild names no place to run npm"
 }
 
@@ -55,7 +55,7 @@ source "${ROOT_DIR}/scripts/test/lib/core-post-fixtures.sh"
 native_fixtures_init "${tmp_root}/native-fixtures"
 post_message() { hook_response_read message "$1" message; }
 post_hook() {
-  local payload out call
+  local payload out_file call
   payload=$(cat)
   call=$(mktemp -d "${ORACLE_DIR}/call.XXXXXX")
   oracle_before "${call}" "${payload}"
@@ -64,23 +64,23 @@ post_hook() {
   # hook that has one.
   local path="${PATH}"
   command -v npm >/dev/null 2>&1 && path="${ORACLE_DIR}/bin:${PATH}"
-  out=$(printf '%s' "${payload}" | ORACLE_NPM_LOG="${call}/npm.log" ORACLE_CALL="${call}" PATH="${path}" \
+  out_file=$(printf '%s' "${payload}" | ORACLE_NPM_LOG="${call}/npm.log" ORACLE_CALL="${call}" PATH="${path}" \
     hook_response_capture "${call}/response" native_fixture_hook post) || fail "post hook fixture failed for this invocation"
-  printf '%s' "${out}"
-  oracle_message "${call}" "${payload}" "$(< "${out}")" || exit 1
+  printf '%s' "${out_file}"
+  oracle_message "${call}" "${payload}" "$(< "${out_file}")" || exit 1
 }
 # Every pre-guard call goes through here too, so the oracle reads the rewrite
 # the pre-guard printed and holds the record it wrote against it
 # (oracle_pre). The response file keeps stdout bytes; status passes through.
 pre_hook() {
-  local payload out call rc=0
+  local payload out_file call rc=0
   payload=$(cat)
   call=$(mktemp -d "${ORACLE_DIR}/pre.XXXXXX")
   oracle_pre_before "${call}"
-  out=$(printf '%s' "${payload}" | hook_response_capture "${call}/response" native_fixture_hook pre) || rc=$?
+  out_file=$(printf '%s' "${payload}" | hook_response_capture "${call}/response" native_fixture_hook pre) || rc=$?
   native_fixtures_assert || fail "pre hook fixture failed for this invocation"
-  printf '%s' "${out}"
-  oracle_pre "${call}" "$(< "${out}")" || exit 1
+  printf '%s' "${out_file}"
+  oracle_pre "${call}" "$(< "${out_file}")" || exit 1
   return "${rc}"
 }
 # Children the owner-state tests spawn, so an exit anywhere can reap them. The
@@ -260,9 +260,9 @@ printf '%s\n' '{"vulnerable":["example.com/mod@v1.0.0"]}' > "${state_file}"
 go_sub_json=$(./bin/safedeps --json check go example.com/mod/cmd/tool@v1.0.0 2>/dev/null) || true
 [[ "$(jq -r '.approved' <<< "${go_sub_json}")" == "false" ]] \
   || fail "a Go import path below a vulnerable module is not approved"
-go_sub_guard=$(jq -nc --arg c "go install example.com/mod/cmd/tool@v1.0.0" --arg cwd "${tmp_root}" \
+go_sub_guard_file=$(jq -nc --arg c "go install example.com/mod/cmd/tool@v1.0.0" --arg cwd "${tmp_root}" \
   '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' | hook_response_capture "${tmp_root}/go-sub-response" native_fixture_hook pre)
-[[ "$(hook_response_read decision "${go_sub_guard}")" == deny ]] \
+[[ "$(hook_response_read decision "${go_sub_guard_file}")" == deny ]] \
   || fail "after the prescribed check, the install of a package below a vulnerable module is still denied"
 go_clean_json=$(./bin/safedeps --json check go example.com/other/cmd/tool@v1.0.0 2>/dev/null) || true
 [[ "$(jq -r '.approved' <<< "${go_clean_json}")" == "true" ]] \
@@ -363,18 +363,18 @@ set -e
 [[ "${yarn_absent_status}" -eq 2 ]] || fail "project without resolutions keeps package-only deny"
 [[ "$(jq -r '.closure_source.type' <<< "${yarn_absent_json}")" == "fixture" ]] || fail "absent resolutions keep published closure source"
 
-yarn_safe_hook=$(
+yarn_safe_hook_file=$(
   SAFEDEPS_HOME="${yarn_safe_home}" pre_hook <<EOF
 {"tool_name":"Bash","tool_input":{"command":"yarn add next@16.2.11"},"cwd":"${yarn_safe_project}","turn_id":"turn-yarn-safe","model":"codex-test"}
 EOF
 )
-hook_response_parse "${yarn_safe_hook}" quiet || fail "Yarn command gate accepts matching project-scoped approval"
-yarn_unsafe_hook=$(
+hook_response_parse "${yarn_safe_hook_file}" quiet || fail "Yarn command gate accepts matching project-scoped approval"
+yarn_unsafe_hook_file=$(
   SAFEDEPS_HOME="${yarn_safe_home}" pre_hook <<EOF
 {"tool_name":"Bash","tool_input":{"command":"yarn add next@16.2.11"},"cwd":"${yarn_unsafe_project}","turn_id":"turn-yarn-unsafe","model":"codex-test"}
 EOF
 )
-[[ "$(hook_response_read decision "${yarn_unsafe_hook}")" == "deny" ]] || fail "Yarn command gate rejects approval from a different project context"
+[[ "$(hook_response_read decision "${yarn_unsafe_hook_file}")" == "deny" ]] || fail "Yarn command gate rejects approval from a different project context"
 pass "Yarn root resolutions use actual lockfile closure with project-scoped approval isolation"
 printf '%s\n' '{"vulnerable":[]}' > "${state_file}"
 
@@ -536,11 +536,11 @@ if find "${tmp_root}/safe-yarn-candidate-failure/approved-specs" -name '*.json' 
 fi
 
 printf '%s\n' '# context drift' >> "${candidate_safe_project}/yarn.lock"
-candidate_context_mismatch_hook=$(SAFEDEPS_HOME="${candidate_safe_home}" pre_hook <<EOF
+candidate_context_mismatch_hook_file=$(SAFEDEPS_HOME="${candidate_safe_home}" pre_hook <<EOF
 {"tool_name":"Bash","tool_input":{"command":"yarn add next@16.2.11"},"cwd":"${candidate_safe_project}","turn_id":"turn-yarn-candidate-context-drift","model":"codex-test"}
 EOF
 )
-[[ "$(hook_response_read decision "${candidate_context_mismatch_hook}")" == "deny" ]] || fail "candidate approval is rejected after canonical input context drift"
+[[ "$(hook_response_read decision "${candidate_context_mismatch_hook_file}")" == "deny" ]] || fail "candidate approval is rejected after canonical input context drift"
 printf '__metadata:\n  version: 8\n# caller lockfile stays unchanged\n' > "${candidate_safe_project}/yarn.lock"
 pass "Yarn absent candidates materialize only in an isolated mirror with bound provenance"
 printf '%s\n' '{"vulnerable":[]}' > "${state_file}"
@@ -570,24 +570,24 @@ pass "block classifications"
 project_dir="${tmp_root}/project"
 mkdir -p "${project_dir}"
 printf '{"dependencies":{}}\n' > "${project_dir}/package.json"
-hook_allow=$(
+hook_allow_file=$(
   pre_hook <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-vuln@1.0.1"},"cwd":"${project_dir}","turn_id":"turn-e2e","model":"codex-test"}
 EOF
 )
-hook_response_parse "${hook_allow}" quiet || fail "hook allows narrowed approved spec"
+hook_response_parse "${hook_allow_file}" quiet || fail "hook allows narrowed approved spec"
 pass "hook allows approved narrowed spec"
 
 effect_project="${tmp_root}/effect-project"
 mkdir -p "${effect_project}"
 printf '{"dependencies":{}}\n' > "${effect_project}/package.json"
 
-effect_clean_pre=$(
+effect_clean_pre_file=$(
   pre_hook <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${effect_project}","turn_id":"turn-e2e","model":"codex-test"}
 EOF
 )
-hook_response_parse "${effect_clean_pre}" quiet || fail "effect clean pre hook allows closure-approved direct spec"
+hook_response_parse "${effect_clean_pre_file}" quiet || fail "effect clean pre hook allows closure-approved direct spec"
 cat > "${effect_project}/package-lock.json" <<'EOF'
 {
   "name": "effect-project",
@@ -599,24 +599,24 @@ cat > "${effect_project}/package-lock.json" <<'EOF'
   }
 }
 EOF
-effect_clean_post=$(
+effect_clean_post_file=$(
   post_hook <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${effect_project}"}
 EOF
 )
-hook_response_parse "${effect_clean_post}" quiet || fail "post hook passes approved full closure"
+hook_response_parse "${effect_clean_post_file}" quiet || fail "post hook passes approved full closure"
 pass "post hook passes approved full closure"
 
 inert_project="${tmp_root}/inert-project"
 mkdir -p "${inert_project}"
 printf '{"dependencies":{}}\n' > "${inert_project}/package.json"
-inert_pre=$(
+inert_pre_file=$(
   pre_hook <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${inert_project}"}
 EOF
 )
-[[ "$(hook_response_read decision "${inert_pre}")" == "allow" ]] || fail "inert pre hook emits Claude allow"
-[[ "$(hook_response_read required-rewrite "${inert_pre}")" == "npm install --ignore-scripts fixture-parent@1.0.0 --ignore-scripts" ]] || fail "inert pre hook injects ignore-scripts"
+[[ "$(hook_response_read decision "${inert_pre_file}")" == "allow" ]] || fail "inert pre hook emits Claude allow"
+[[ "$(hook_response_read required-rewrite "${inert_pre_file}")" == "npm install --ignore-scripts fixture-parent@1.0.0 --ignore-scripts" ]] || fail "inert pre hook injects ignore-scripts"
 cat > "${inert_project}/package-lock.json" <<'EOF'
 {
   "name": "inert-project",
@@ -652,12 +652,12 @@ fi
 exit 0
 EOF
 chmod +x "${stub_bin}/npm"
-inert_post=$(
+inert_post_file=$(
   PATH="${stub_bin}:${PATH}" post_hook <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install --ignore-scripts fixture-parent@1.0.0 --ignore-scripts"},"cwd":"${inert_project}"}
 EOF
 )
-hook_response_parse "${inert_post}" quiet || fail "post hook keeps verified inert rebuild success quiet"
+hook_response_parse "${inert_post_file}" quiet || fail "post hook keeps verified inert rebuild success quiet"
 grep -qxE 'rebuild --global=false --location=project --prefix .*/inert-project' "${tmp_root}/npm-calls.log" \
   || fail "post hook runs npm rebuild, pinned to the project tree, after verified injected install"
 pass "post hook rebuilds after verified inert install"
@@ -697,17 +697,17 @@ cat > "${revert_project}/package-lock.json" <<'EOF'
   }
 }
 EOF
-revert_post=$(
+revert_post_file=$(
   PATH="${stub_bin}:${PATH}" post_hook <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${revert_project}"}
 EOF
 )
-grep -q 'suspicious dependency change detected' < "${revert_post}" || fail "reorg fires on a tampered lockfile"
+grep -q 'suspicious dependency change detected' < "${revert_post_file}" || fail "reorg fires on a tampered lockfile"
 cmp -s "${revert_project}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "reorg restores the exact safe lockfile content on disk"
 if grep -qE '^(ci|install)' "${tmp_root}/npm-calls.log" 2>/dev/null; then
   fail "a rollback runs no npm: the reinstall is the next install"
 fi
-assert_gives_no_command "$(< "${revert_post}")" "the rollback of a tampered lockfile gives no command"
+assert_gives_no_command "$(< "${revert_post_file}")" "the rollback of a tampered lockfile gives no command"
 pass "reorg reverts a tampered lockfile to safe content on disk"
 
 # A rollback never acts outside the project it read. Some worktree layouts link
@@ -750,15 +750,15 @@ pre_hook > /dev/null <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${link_wt}"}
 EOF
 printf '%s\n' "${tampered_lock}" > "${link_wt}/package-lock.json"
-link_post=$(
+link_post_file=$(
   PATH="${emptying_bin}:${PATH}" post_hook <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${link_wt}"}
 EOF
 )
-grep -q 'suspicious dependency change detected' < "${link_post}" || fail "reorg fires in a project whose node_modules is a link"
+grep -q 'suspicious dependency change detected' < "${link_post_file}" || fail "reorg fires in a project whose node_modules is a link"
 [[ -f "${link_main}/node_modules/kept-package/package.json" ]] || fail "a rollback never empties the directory a linked node_modules points to"
-grep -q "refused removal of .*/link-wt/node_modules: .*/link-wt/node_modules is a symbolic link to " < "${link_post}" || fail "the reorg message names the refused node_modules removal"
-assert_gives_no_command "$(< "${link_post}")" "the rollback next to a linked node_modules gives no command"
+grep -q "refused removal of .*/link-wt/node_modules: .*/link-wt/node_modules is a symbolic link to " < "${link_post_file}" || fail "the reorg message names the refused node_modules removal"
+assert_gives_no_command "$(< "${link_post_file}")" "the rollback next to a linked node_modules gives no command"
 grep -A2 'REORG REFUSED$' "${reorg_log}" | grep  '^  refused removal of .*/link-wt/node_modules: ' >/dev/null || fail "reorg.log records the refused node_modules removal"
 if grep -q '^ci' "${tmp_root}/emptying-npm-calls.log" 2>/dev/null; then
   fail "npm ci never runs on a node_modules that links outside the project"
@@ -780,17 +780,17 @@ EOF
 printf '{"dependencies":{"fixture-parent":"1.0.0","fixture-evil":"6.6.6"}}\n' > "${link_pkg_outside}/package.json"
 cp "${link_pkg_outside}/package.json" "${tmp_root}/link-pkg-expected.json"
 printf '%s\n' "${tampered_lock}" > "${link_pkg_wt}/package-lock.json"
-link_pkg_post=$(
+link_pkg_post_file=$(
   PATH="${stub_bin}:${PATH}" post_hook <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${link_pkg_wt}"}
 EOF
 )
-grep -q 'suspicious dependency change detected' < "${link_pkg_post}" || fail "reorg fires in a project whose package.json is a link"
+grep -q 'suspicious dependency change detected' < "${link_pkg_post_file}" || fail "reorg fires in a project whose package.json is a link"
 cmp -s "${link_pkg_outside}/package.json" "${tmp_root}/link-pkg-expected.json" || fail "a rollback never writes through a package.json that links outside the project"
 [[ -L "${link_pkg_wt}/package.json" ]] || fail "a rollback leaves the linked package.json a link"
-[[ "$(grep -o 'refused restore of [^ ]*/link-pkg-wt/package.json: ' < "${link_pkg_post}" | wc -l | tr -d ' ')" == 1 ]] || fail "the reorg message names the refused package.json restore once"
+[[ "$(grep -o 'refused restore of [^ ]*/link-pkg-wt/package.json: ' < "${link_pkg_post_file}" | wc -l | tr -d ' ')" == 1 ]] || fail "the reorg message names the refused package.json restore once"
 grep -A2 'REORG REFUSED$' "${reorg_log}" | grep  '^  refused restore of .*/link-pkg-wt/package.json: ' >/dev/null || fail "reorg.log records the refused package.json restore"
-assert_gives_no_command "$(< "${link_pkg_post}")" "the rollback next to a linked package.json gives no command"
+assert_gives_no_command "$(< "${link_pkg_post_file}")" "the rollback next to a linked package.json gives no command"
 cmp -s "${link_pkg_wt}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "the lockfile inside the project is still restored next to a linked package.json"
 pass "a rollback refuses to write back a file that links outside the project"
 
@@ -801,12 +801,12 @@ link_inert_wt="${tmp_root}/link-inert-wt"
 mkdir -p "${link_inert_main}/node_modules" "${link_inert_wt}"
 ln -s "${link_inert_main}/node_modules" "${link_inert_wt}/node_modules"
 printf '{"dependencies":{}}\n' > "${link_inert_wt}/package.json"
-link_inert_pre=$(
+link_inert_pre_file=$(
   pre_hook <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${link_inert_wt}"}
 EOF
 )
-[[ "$(hook_response_read required-rewrite "${link_inert_pre}")" == "npm install --ignore-scripts fixture-parent@1.0.0 --ignore-scripts" ]] || fail "linked inert pre hook injects ignore-scripts"
+[[ "$(hook_response_read required-rewrite "${link_inert_pre_file}")" == "npm install --ignore-scripts fixture-parent@1.0.0 --ignore-scripts" ]] || fail "linked inert pre hook injects ignore-scripts"
 cat > "${link_inert_wt}/package-lock.json" <<'EOF'
 {
   "name": "link-inert-wt",
@@ -819,7 +819,7 @@ cat > "${link_inert_wt}/package-lock.json" <<'EOF'
 }
 EOF
 : > "${tmp_root}/emptying-npm-calls.log"
-link_inert_post=$(
+link_inert_post_file=$(
   PATH="${emptying_bin}:${PATH}" post_hook <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install --ignore-scripts fixture-parent@1.0.0 --ignore-scripts"},"cwd":"${link_inert_wt}"}
 EOF
@@ -827,8 +827,8 @@ EOF
 if grep -q 'rebuild' "${tmp_root}/emptying-npm-calls.log" 2>/dev/null; then
   fail "npm rebuild never runs through a node_modules that links outside the project"
 fi
-assert_skipped_rebuild_states_facts "${link_inert_post}" "linked node_modules"
-grep -qF "/link-inert-wt/node_modules is a symbolic link to" < "${link_inert_post}" || fail "the skipped rebuild names the linked node_modules"
+assert_skipped_rebuild_states_facts "${link_inert_post_file}" "linked node_modules"
+grep -qF "/link-inert-wt/node_modules is a symbolic link to" < "${link_inert_post_file}" || fail "the skipped rebuild names the linked node_modules"
 pass "a verified inert install skips the rebuild through a linked node_modules"
 
 # npm leads outside without any link: in a directory with no package.json and
@@ -871,13 +871,13 @@ pre_hook > /dev/null <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${walk_wt}"}
 EOF
 printf '%s\n' "${tampered_lock}" > "${walk_wt}/package-lock.json"
-walk_post=$(
+walk_post_file=$(
   PATH="${walkup_bin}:${PATH}" post_hook <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${walk_wt}"}
 EOF
 )
-grep -q 'no install trace in .*/walk-main' < "${walk_post}" || fail "the gate reads the enclosing project npm works in, and records the install UNGATED"
-if grep -q 'suspicious dependency change detected' < "${walk_post}"; then
+grep -q 'no install trace in .*/walk-main' < "${walk_post_file}" || fail "the gate reads the enclosing project npm works in, and records the install UNGATED"
+if grep -q 'suspicious dependency change detected' < "${walk_post_file}"; then
   fail "nothing is rolled back where the gate read no install"
 fi
 [[ -f "${walk_main}/node_modules/kept-package/package.json" ]] || fail "the enclosing project's node_modules is left alone"
@@ -899,19 +899,19 @@ EOF
 printf '{"dependencies":{"fixture-parent":"1.0.0"}}\n' > "${walk2_wt}/package.json"
 printf '%s\n' "${tampered_lock}" > "${walk2_wt}/package-lock.json"
 : > "${tmp_root}/walkup-npm-calls.log"
-walk2_post=$(
+walk2_post_file=$(
   PATH="${walkup_bin}:${PATH}" post_hook <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${walk2_wt}"}
 EOF
 )
-grep -q 'suspicious dependency change detected' < "${walk2_post}" || fail "reorg fires in a fresh project nested inside another"
+grep -q 'suspicious dependency change detected' < "${walk2_post_file}" || fail "reorg fires in a fresh project nested inside another"
 [[ -f "${walk2_main}/node_modules/kept-package/package.json" ]] || fail "a rollback's npm install never walks up to prune the enclosing project's node_modules"
 if grep -q '^install' "${tmp_root}/walkup-npm-calls.log" 2>/dev/null; then
   fail "a rollback runs no npm install once it has removed the package.json the install created"
 fi
 [[ ! -e "${walk2_wt}/node_modules" ]] || fail "a rollback removes the project's own node_modules"
-grep -q '/nested/worktree/package.json does not exist' < "${walk2_post}" || fail "the rollback says the restore left no package.json"
-assert_gives_no_command "$(< "${walk2_post}")" "the rollback gives no reinstall command"
+grep -q '/nested/worktree/package.json does not exist' < "${walk2_post_file}" || fail "the rollback says the restore left no package.json"
+assert_gives_no_command "$(< "${walk2_post_file}")" "the rollback gives no reinstall command"
 pass "a rollback runs no npm install where npm would walk up to an enclosing project"
 
 # A lockfile that links to another checkout's: the restore of it is refused,
@@ -940,18 +940,18 @@ pre_hook > /dev/null <<EOF
 EOF
 printf '%s\n' "${tampered_lock}" > "${linklock_outside}/package-lock.json"
 cp "${linklock_outside}/package-lock.json" "${tmp_root}/linklock-expected.json"
-linklock_post=$(
+linklock_post_file=$(
   PATH="${lockwrite_bin}:${PATH}" post_hook <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${linklock_wt}"}
 EOF
 )
-grep -q 'suspicious dependency change detected' < "${linklock_post}" || fail "reorg fires in a project whose lockfile is a link"
+grep -q 'suspicious dependency change detected' < "${linklock_post_file}" || fail "reorg fires in a project whose lockfile is a link"
 cmp -s "${linklock_outside}/package-lock.json" "${tmp_root}/linklock-expected.json" || fail "a rollback never writes the lockfile a link points to, by restore or by reinstall"
 if grep -qE '^(ci|install)' "${tmp_root}/lockwrite-npm-calls.log" 2>/dev/null; then
   fail "a rollback runs no npm in a project whose lockfile is a link"
 fi
-grep -q 'refused restore of .*/linklock-wt/package-lock.json: ' < "${linklock_post}" || fail "the refused lockfile restore is named"
-assert_gives_no_command "$(< "${linklock_post}")" "the rollback next to a linked lockfile gives no command"
+grep -q 'refused restore of .*/linklock-wt/package-lock.json: ' < "${linklock_post_file}" || fail "the refused lockfile restore is named"
+assert_gives_no_command "$(< "${linklock_post_file}")" "the rollback next to a linked lockfile gives no command"
 pass "a rollback writes nothing through a lockfile that links outside the project"
 
 # A workspace may lie outside the project, and npm ci empties every
@@ -980,21 +980,21 @@ pre_hook > /dev/null <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${ws_wt}"}
 EOF
 printf '%s\n' "${tampered_lock}" > "${ws_wt}/package-lock.json"
-ws_post=$(
+ws_post_file=$(
   PATH="${ws_bin}:${PATH}" post_hook <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${ws_wt}"}
 EOF
 )
-grep -q 'suspicious dependency change detected' < "${ws_post}" || fail "reorg fires in a project that declares workspaces"
+grep -q 'suspicious dependency change detected' < "${ws_post_file}" || fail "reorg fires in a project that declares workspaces"
 [[ -f "${ws_outside}/node_modules/kept-package/package.json" ]] || fail "a rollback never empties a workspace outside the project"
 if grep -q '^ci' "${tmp_root}/ws-npm-calls.log" 2>/dev/null; then
   fail "a rollback runs no npm ci in a project that declares workspaces"
 fi
 [[ ! -e "${ws_wt}/node_modules" ]] || fail "a rollback removes a workspace project's own node_modules"
-grep -q '/ws-wt/package.json has the key workspaces' < "${ws_post}" || fail "the rollback says the project's package.json has the key workspaces"
-post_message "${ws_post}" | grep 'removed .*/ws-wt/node_modules$' >/dev/null || fail "the rollback names the one node_modules it removed"
-assert_gives_no_command "$(< "${ws_post}")" "the rollback in a workspace project gives no command"
-if grep -q 'remove them' < "${ws_post}"; then
+grep -q '/ws-wt/package.json has the key workspaces' < "${ws_post_file}" || fail "the rollback says the project's package.json has the key workspaces"
+post_message "${ws_post_file}" | grep 'removed .*/ws-wt/node_modules$' >/dev/null || fail "the rollback names the one node_modules it removed"
+assert_gives_no_command "$(< "${ws_post_file}")" "the rollback in a workspace project gives no command"
+if grep -q 'remove them' < "${ws_post_file}"; then
   fail "the rollback in a workspace project sends no removal anywhere"
 fi
 cmp -s "${ws_wt}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "the lockfile of a workspace project is still restored"
@@ -1015,18 +1015,18 @@ pre_hook > /dev/null <<EOF
 EOF
 printf '%s\n' "${tampered_lock}" > "${own_wt}/package-lock.json"
 : > "${tmp_root}/emptying-npm-calls.log"
-own_post=$(
+own_post_file=$(
   PATH="${emptying_bin}:${PATH}" post_hook <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${own_wt}"}
 EOF
 )
-grep -q 'suspicious dependency change detected' < "${own_post}" || fail "reorg fires in an ordinary npm project"
+grep -q 'suspicious dependency change detected' < "${own_post_file}" || fail "reorg fires in an ordinary npm project"
 [[ ! -e "${own_wt}/node_modules" ]] || fail "a rollback removes the project's own node_modules"
 [[ -f "${own_outside}/kept-package/package.json" ]] || fail "removing node_modules does not follow a link inside it"
-post_message "${own_post}" | grep 'removed .*/own-wt/node_modules$' >/dev/null || fail "the rollback says which node_modules it removed"
-post_message "${own_post}" | grep '/own-wt/package-lock.json exists$' >/dev/null || fail "the rollback says the lockfile is there after the restore"
-post_message "${own_post}" | grep '/own-wt/npm-shrinkwrap.json does not exist$' >/dev/null || fail "the rollback says there is no npm-shrinkwrap.json"
-assert_gives_no_command "$(< "${own_post}")" "the rollback gives no reinstall command in an ordinary project either"
+post_message "${own_post_file}" | grep 'removed .*/own-wt/node_modules$' >/dev/null || fail "the rollback says which node_modules it removed"
+post_message "${own_post_file}" | grep '/own-wt/package-lock.json exists$' >/dev/null || fail "the rollback says the lockfile is there after the restore"
+post_message "${own_post_file}" | grep '/own-wt/npm-shrinkwrap.json does not exist$' >/dev/null || fail "the rollback says there is no npm-shrinkwrap.json"
+assert_gives_no_command "$(< "${own_post_file}")" "the rollback gives no reinstall command in an ordinary project either"
 if grep -qE '^(ci|install)' "${tmp_root}/emptying-npm-calls.log" 2>/dev/null; then
   fail "a rollback runs no npm in an ordinary project either"
 fi
@@ -1047,21 +1047,21 @@ pre_hook > /dev/null <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${nochange_wt}"}
 EOF
 : > "${tmp_root}/emptying-npm-calls.log"
-nochange_post=$(
+nochange_post_file=$(
   PATH="${emptying_bin}:${PATH}" post_hook <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${nochange_wt}"}
 EOF
 )
-grep -q 'suspicious dependency change detected' < "${nochange_post}" || fail "the gate still rejects an unapproved closure the command did not change"
+grep -q 'suspicious dependency change detected' < "${nochange_post_file}" || fail "the gate still rejects an unapproved closure the command did not change"
 [[ -f "${nochange_wt}/node_modules/installed-package/package.json" ]] || fail "a rollback with nothing to roll back leaves the project's node_modules in place"
-post_message "${nochange_post}" | grep 'kept .*/nochange-wt/node_modules$' >/dev/null || fail "the rollback says node_modules was kept"
-grep -q '/nochange-wt/node_modules lists no package.json the pre-command snapshot ' < "${nochange_post}" || fail "the rollback says what it looked at before keeping node_modules"
-grep -q 'The rollback changed nothing\.' < "${nochange_post}" || fail "a rollback that wrote and removed nothing says so"
-grep -q 'no install trace in .*/nochange-wt' < "${nochange_post}" || fail "the same message says the directory shows no install trace"
+post_message "${nochange_post_file}" | grep 'kept .*/nochange-wt/node_modules$' >/dev/null || fail "the rollback says node_modules was kept"
+grep -q '/nochange-wt/node_modules lists no package.json the pre-command snapshot ' < "${nochange_post_file}" || fail "the rollback says what it looked at before keeping node_modules"
+grep -q 'The rollback changed nothing\.' < "${nochange_post_file}" || fail "a rollback that wrote and removed nothing says so"
+grep -q 'no install trace in .*/nochange-wt' < "${nochange_post_file}" || fail "the same message says the directory shows no install trace"
 if grep -qE '^(ci|install)' "${tmp_root}/emptying-npm-calls.log" 2>/dev/null; then
   fail "a rollback with nothing to roll back runs no npm"
 fi
-assert_gives_no_command "$(< "${nochange_post}")" "the rollback with nothing to roll back gives no command"
+assert_gives_no_command "$(< "${nochange_post_file}")" "the rollback with nothing to roll back gives no command"
 pass "a rollback with nothing to roll back leaves node_modules in place"
 
 # The same project once the command has written into node_modules without
@@ -1072,14 +1072,14 @@ pre_hook > /dev/null <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${nochange_wt}"}
 EOF
 printf '{"name":"written-later","version":"1.0.0"}\n' > "${nochange_wt}/node_modules/written-package/package.json"
-written_post=$(
+written_post_file=$(
   PATH="${emptying_bin}:${PATH}" post_hook <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${nochange_wt}"}
 EOF
 )
-grep -q 'suspicious dependency change detected' < "${written_post}" || fail "the gate rejects the unapproved closure again"
+grep -q 'suspicious dependency change detected' < "${written_post_file}" || fail "the gate rejects the unapproved closure again"
 [[ ! -e "${nochange_wt}/node_modules" ]] || fail "a node_modules the command wrote into is removed"
-post_message "${written_post}" | grep 'removed .*/nochange-wt/node_modules$' >/dev/null || fail "the rollback says node_modules was removed"
+post_message "${written_post_file}" | grep 'removed .*/nochange-wt/node_modules$' >/dev/null || fail "the rollback says node_modules was removed"
 pass "a rollback removes node_modules once the command has written into it"
 
 # The other two reasons a node_modules is removed, each as the line that says
@@ -1098,17 +1098,17 @@ EOF
     bin) : > "${reason_wt}/node_modules/.bin/new-entry" ;;
     newer) sleep 1; : > "${reason_wt}/node_modules/.yarn-integrity" ;;
   esac
-  reason_post=$(
+  reason_post_file=$(
     PATH="${emptying_bin}:${PATH}" post_hook <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${reason_wt}"}
 EOF
   )
   [[ ! -e "${reason_wt}/node_modules" ]] || fail "a node_modules the command wrote into is removed (${reason_case})"
   case "${reason_case}" in
-    bin) post_message "${reason_post}" | grep '/node_modules/.bin lists new-entry, which the pre-command snapshot .* does not$' >/dev/null \
-           || fail "the removal says which .bin entry the snapshot lacks (${reason_post})" ;;
-    newer) post_message "${reason_post}" | grep '/reason-newer-wt/node_modules is newer than the pre-command snapshot ' >/dev/null \
-           || fail "the removal says node_modules is newer than the snapshot (${reason_post})" ;;
+    bin) post_message "${reason_post_file}" | grep '/node_modules/.bin lists new-entry, which the pre-command snapshot .* does not$' >/dev/null \
+           || fail "the removal says which .bin entry the snapshot lacks (${reason_post_file})" ;;
+    newer) post_message "${reason_post_file}" | grep '/reason-newer-wt/node_modules is newer than the pre-command snapshot ' >/dev/null \
+           || fail "the removal says node_modules is newer than the snapshot (${reason_post_file})" ;;
   esac
 done
 pass "every removal of node_modules says the first check that showed the command wrote it"
@@ -1127,12 +1127,12 @@ pre_hook > /dev/null <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm ci"},"cwd":"${inplace_wt}"}
 EOF
 printf '{"name":"inplace-wt","lockfileVersion":3,"packages":{"node_modules/installed-package":{"version":"2.0.0"}}}\n' > "${inplace_wt}/node_modules/.package-lock.json"
-inplace_post=$(
+inplace_post_file=$(
   PATH="${emptying_bin}:${PATH}" post_hook <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm ci"},"cwd":"${inplace_wt}"}
 EOF
 )
-grep -q 'suspicious dependency change detected' < "${inplace_post}" || fail "the gate rejects the unapproved closure after an in-place write"
+grep -q 'suspicious dependency change detected' < "${inplace_post_file}" || fail "the gate rejects the unapproved closure after an in-place write"
 [[ ! -e "${inplace_wt}/node_modules" ]] || fail "a node_modules rewritten in place within the snapshot's second is removed"
 pass "a rollback sees a write that finished within the second the snapshot was taken in"
 
@@ -1149,29 +1149,29 @@ cp "${tmp_root}/revert-safe-lock.json" "${lag_wt}/package-lock.json"
 pre_hook > /dev/null <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${lag_wt}"}
 EOF
-lag_first_post=$(
+lag_first_post_file=$(
   PATH="${emptying_bin}:${PATH}" post_hook <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${lag_wt}"}
 EOF
 )
-if grep -q 'suspicious dependency change detected' < "${lag_first_post}"; then
+if grep -q 'suspicious dependency change detected' < "${lag_first_post_file}"; then
   fail "the approved install that sets the confirmed snapshot is not rolled back"
 fi
 printf '%s\n' "${tampered_lock}" > "${lag_wt}/package-lock.json"
 pre_hook > /dev/null <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm ci"},"cwd":"${lag_wt}"}
 EOF
-lag_post=$(
+lag_post_file=$(
   PATH="${emptying_bin}:${PATH}" post_hook <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm ci"},"cwd":"${lag_wt}"}
 EOF
 )
-grep -q 'suspicious dependency change detected' < "${lag_post}" || fail "the gate rejects the closure that changed outside it"
+grep -q 'suspicious dependency change detected' < "${lag_post_file}" || fail "the gate rejects the closure that changed outside it"
 [[ -f "${lag_wt}/node_modules/installed-package/package.json" ]] || fail "a file the restore put back from an older snapshot does not count as written by the command"
-post_message "${lag_post}" | grep 'kept .*/lag-wt/node_modules$' >/dev/null || fail "the rollback says node_modules was kept after restoring from an older snapshot"
-post_message "${lag_post}" | grep '^when this rollback began, none of .* in .*/lag-wt differed from the pre-command snapshot ' >/dev/null \
+post_message "${lag_post_file}" | grep 'kept .*/lag-wt/node_modules$' >/dev/null || fail "the rollback says node_modules was kept after restoring from an older snapshot"
+post_message "${lag_post_file}" | grep '^when this rollback began, none of .* in .*/lag-wt differed from the pre-command snapshot ' >/dev/null \
   || fail "the rollback says the node files matched the snapshot from before the command, not the one it restored"
-post_message "${lag_post}" | grep '^restored .*/lag-wt/package-lock.json$' >/dev/null || fail "the rollback still restores the lockfile from the older snapshot"
+post_message "${lag_post_file}" | grep '^restored .*/lag-wt/package-lock.json$' >/dev/null || fail "the rollback still restores the lockfile from the older snapshot"
 pass "a rollback to an older confirmed snapshot leaves node_modules in place when the command wrote nothing"
 
 # A project that keeps another manager's lockfile. After the restore it has a
@@ -1185,19 +1185,19 @@ pre_hook > /dev/null <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${yarn_wt}"}
 EOF
 printf '%s\n' "${tampered_lock}" > "${yarn_wt}/package-lock.json"
-yarn_post=$(
+yarn_post_file=$(
   PATH="${emptying_bin}:${PATH}" post_hook <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${yarn_wt}"}
 EOF
 )
-grep -q 'suspicious dependency change detected' < "${yarn_post}" || fail "reorg fires in a project that keeps a yarn.lock"
+grep -q 'suspicious dependency change detected' < "${yarn_post_file}" || fail "reorg fires in a project that keeps a yarn.lock"
 [[ -f "${yarn_wt}/yarn.lock" ]] || fail "the rollback leaves the yarn.lock it found"
-post_message "${yarn_post}" | grep '/yarn-wt/package-lock.json does not exist$' >/dev/null && post_message "${yarn_post}" | grep '/yarn-wt/npm-shrinkwrap.json does not exist$' >/dev/null \
+post_message "${yarn_post_file}" | grep '/yarn-wt/package-lock.json does not exist$' >/dev/null && post_message "${yarn_post_file}" | grep '/yarn-wt/npm-shrinkwrap.json does not exist$' >/dev/null \
   || fail "the rollback names the npm lockfiles it looked for"
-if grep -q 'no lockfile' < "${yarn_post}"; then
+if grep -q 'no lockfile' < "${yarn_post_file}"; then
   fail "the rollback does not call a yarn project lockless"
 fi
-assert_gives_no_command "$(< "${yarn_post}")" "the rollback in a yarn project gives no command"
+assert_gives_no_command "$(< "${yarn_post_file}")" "the rollback in a yarn project gives no command"
 pass "a rollback next to another manager's lockfile says which lockfiles are missing"
 
 # node_modules that cannot be removed: the rollback says it is still there and
@@ -1231,23 +1231,23 @@ if [[ "$(id -u)" != 0 && "${ro_stops_rm}" == yes ]]; then
 EOF
   printf '%s\n' "${tampered_lock}" > "${stuck_wt}/package-lock.json"
   chmod 555 "${stuck_wt}/node_modules/locked-package"
-  stuck_post=$(
+  stuck_post_file=$(
     PATH="${emptying_bin}:${PATH}" post_hook <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${stuck_wt}"}
 EOF
   )
   chmod 755 "${stuck_wt}/node_modules/locked-package"
-  grep -q 'suspicious dependency change detected' < "${stuck_post}" || fail "reorg fires where node_modules cannot be removed"
+  grep -q 'suspicious dependency change detected' < "${stuck_post_file}" || fail "reorg fires where node_modules cannot be removed"
   [[ ! -e "${stuck_wt}/node_modules/removable-package" && -e "${stuck_wt}/node_modules/locked-package/index.js" ]] \
     || fail "this row removes part of node_modules and leaves part, or it does not test what the line may say"
-  post_message "${stuck_post}" | grep -E 'not removed .*/stuck-wt/node_modules: removal returned OS error 13; .*/stuck-wt/node_modules exists$' >/dev/null \
+  post_message "${stuck_post_file}" | grep -E 'not removed .*/stuck-wt/node_modules: removal returned OS error 13; .*/stuck-wt/node_modules exists$' >/dev/null \
     || fail "the rollback says the node_modules it could not remove is still there"
   # rm -rf removes what it can before it fails, so the line says the path
   # exists and nothing about what is left in it.
-  if grep -q 'whatever this install wrote' < "${stuck_post}"; then
+  if grep -q 'whatever this install wrote' < "${stuck_post_file}"; then
     fail "the rollback does not say what is left in a node_modules it could not remove"
   fi
-  assert_gives_no_command "$(< "${stuck_post}")" "the rollback that could not remove node_modules gives no command"
+  assert_gives_no_command "$(< "${stuck_post_file}")" "the rollback that could not remove node_modules gives no command"
   cmp -s "${stuck_wt}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "the lockfile is still restored where node_modules cannot be removed"
   pass "a rollback that cannot remove node_modules says so and gives no command"
 fi
@@ -1264,21 +1264,21 @@ mkdir -p "${nosave_wt}/node_modules/.bin" "${nosave_wt}/node_modules/fixture-par
 printf '{"name":"nosave-wt","lockfileVersion":3,"packages":{}}\n' > "${nosave_wt}/node_modules/.package-lock.json"
 printf '{"name":"fixture-parent","version":"1.0.0"}\n' > "${nosave_wt}/node_modules/fixture-parent/package.json"
 cp /bin/echo "${nosave_wt}/node_modules/.bin/native-drop"
-nosave_post=$(
+nosave_post_file=$(
   PATH="${emptying_bin}:${PATH}" post_hook <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install --no-save fixture-parent@1.0.0"},"cwd":"${nosave_wt}"}
 EOF
 )
-grep -q 'suspicious dependency change detected' < "${nosave_post}" || fail "reorg fires on a native binary in a --no-save install"
+grep -q 'suspicious dependency change detected' < "${nosave_post_file}" || fail "reorg fires on a native binary in a --no-save install"
 [[ ! -e "${nosave_wt}/node_modules" ]] || fail "a rollback removes the node_modules of a --no-save install with no package.json"
-post_message "${nosave_post}" | grep '/nosave-wt/package.json does not exist$' >/dev/null || fail "the --no-save rollback says there is no package.json"
+post_message "${nosave_post_file}" | grep '/nosave-wt/package.json does not exist$' >/dev/null || fail "the --no-save rollback says there is no package.json"
 # The restore target is the last confirmed snapshot, which can be older than
 # this install, so what the project held "before this install" is not
 # something the rollback knows. It states only what is there now.
-if grep -q 'before this install' < "${nosave_post}"; then
+if grep -q 'before this install' < "${nosave_post_file}"; then
   fail "the rollback does not infer what the project held before this install"
 fi
-assert_gives_no_command "$(< "${nosave_post}")" "the --no-save rollback gives no command"
+assert_gives_no_command "$(< "${nosave_post_file}")" "the --no-save rollback gives no command"
 pass "a rollback removes the node_modules a --no-save install wrote without a package.json"
 
 # The same --no-save install through a node_modules that links elsewhere: the
@@ -1296,15 +1296,15 @@ pre_hook > /dev/null <<EOF
 EOF
 printf '{"name":"nosave-link-wt","lockfileVersion":3,"packages":{}}\n' > "${nosave_link_target}/.package-lock.json"
 cp /bin/echo "${nosave_link_target}/.bin/native-drop"
-nosave_link_post=$(
+nosave_link_post_file=$(
   PATH="${emptying_bin}:${PATH}" post_hook <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install --no-save fixture-parent@1.0.0"},"cwd":"${nosave_link_wt}"}
 EOF
 )
-grep -q 'suspicious dependency change detected' < "${nosave_link_post}" || fail "reorg fires on a native binary through a linked node_modules"
-grep -q 'refused removal of .*/nosave-link-wt/node_modules: ' < "${nosave_link_post}" || fail "the rollback names the linked node_modules it will not remove"
-hook_response_read message "${nosave_link_post}" message | grep -x "refused removal of .*/nosave-link-wt/node_modules: .*/nosave-link-wt/node_modules is a symbolic link to ${nosave_link_physical}" >/dev/null || fail "a refused relative link is named by its physical path"
-assert_gives_no_command "$(< "${nosave_link_post}")" "the rollback through a linked node_modules gives no command"
+grep -q 'suspicious dependency change detected' < "${nosave_link_post_file}" || fail "reorg fires on a native binary through a linked node_modules"
+grep -q 'refused removal of .*/nosave-link-wt/node_modules: ' < "${nosave_link_post_file}" || fail "the rollback names the linked node_modules it will not remove"
+hook_response_read message "${nosave_link_post_file}" message | grep -x "refused removal of .*/nosave-link-wt/node_modules: .*/nosave-link-wt/node_modules is a symbolic link to ${nosave_link_physical}" >/dev/null || fail "a refused relative link is named by its physical path"
+assert_gives_no_command "$(< "${nosave_link_post_file}")" "the rollback through a linked node_modules gives no command"
 [[ -f "${nosave_link_target}/.package-lock.json" ]] || fail "a rollback leaves the target of a linked node_modules alone"
 pass "a rollback names a linked node_modules a --no-save install wrote through"
 
@@ -1357,13 +1357,13 @@ confirmed_wt="${tmp_root}/confirmed-wt"
 grammar_project "${confirmed_wt}"
 grammar_pre "${confirmed_wt}" "npm install fixture-parent@1.0.0" > /dev/null
 touch "${confirmed_wt}/package-lock.json"
-confirmed_first=$(PATH="${stub_bin}:${PATH}" grammar_post "${confirmed_wt}" "npm install --ignore-scripts fixture-parent@1.0.0 --ignore-scripts")
-hook_response_parse "${confirmed_first}" quiet || fail "a verified install with nothing to rebuild is confirmed quietly (${confirmed_first})"
+confirmed_first_file=$(PATH="${stub_bin}:${PATH}" grammar_post "${confirmed_wt}" "npm install --ignore-scripts fixture-parent@1.0.0 --ignore-scripts")
+hook_response_parse "${confirmed_first_file}" quiet || fail "a verified install with nothing to rebuild is confirmed quietly (${confirmed_first_file})"
 grammar_pre "${confirmed_wt}" "npm install fixture-parent@1.0.0" > /dev/null
 printf '%s\n' "${tampered_lock}" > "${confirmed_wt}/package-lock.json"
-confirmed_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${confirmed_wt}" "npm install --ignore-scripts fixture-parent@1.0.0 --ignore-scripts")
-post_message "${confirmed_post}" | grep ', a confirmed snapshot$' >/dev/null || fail "a rollback to a confirmed snapshot says the snapshot is a confirmed one"
-post_message "${confirmed_post}" | grep '^safedeps added --ignore-scripts to this install$' >/dev/null \
+confirmed_post_file=$(PATH="${stub_bin}:${PATH}" grammar_post "${confirmed_wt}" "npm install --ignore-scripts fixture-parent@1.0.0 --ignore-scripts")
+post_message "${confirmed_post_file}" | grep ', a confirmed snapshot$' >/dev/null || fail "a rollback to a confirmed snapshot says the snapshot is a confirmed one"
+post_message "${confirmed_post_file}" | grep '^safedeps added --ignore-scripts to this install$' >/dev/null \
   || fail "a rollback after an inert install says safedeps added --ignore-scripts"
 cmp -s "${confirmed_wt}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "the rollback restores the confirmed lockfile"
 pass "a rollback to a confirmed snapshot says so, and says the install ran with --ignore-scripts"
@@ -1373,11 +1373,11 @@ pass "a rollback to a confirmed snapshot says so, and says the install ran with 
 # confirmed snapshot. With no record it says nothing about --ignore-scripts.
 printf '%s\n' "${tampered_lock}" > "${confirmed_wt}/package-lock.json"
 mkdir -p "${confirmed_wt}/node_modules/installed-package"
-backstop_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${confirmed_wt}" "npm install fixture-parent@1.0.0")
-post_message "${backstop_post}" | grep -A1 -x 'this rollback has no snapshot from before the command' | grep '^removed .*/confirmed-wt/node_modules$' >/dev/null \
-  || fail "the backstop says why it removed node_modules, right before it says so (${backstop_post})"
-grep -q 'this hook found no record of this command from before it ran. A rollback ran\.' < "${backstop_post}" || fail "the backstop rolls back to the confirmed snapshot"
-! post_message "${backstop_post}" | grep -- '--ignore-scripts' >/dev/null \
+backstop_post_file=$(PATH="${stub_bin}:${PATH}" grammar_post "${confirmed_wt}" "npm install fixture-parent@1.0.0")
+post_message "${backstop_post_file}" | grep -A1 -x 'this rollback has no snapshot from before the command' | grep '^removed .*/confirmed-wt/node_modules$' >/dev/null \
+  || fail "the backstop says why it removed node_modules, right before it says so (${backstop_post_file})"
+grep -q 'this hook found no record of this command from before it ran. A rollback ran\.' < "${backstop_post_file}" || fail "the backstop rolls back to the confirmed snapshot"
+! post_message "${backstop_post_file}" | grep -- '--ignore-scripts' >/dev/null \
   || fail "the backstop, which found no record of the command, says nothing about --ignore-scripts"
 cmp -s "${confirmed_wt}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "the backstop restores the confirmed lockfile"
 pass "the backstop's rollback speaks the same lines"
@@ -1394,27 +1394,27 @@ for r18_form in "sh -c 'npm ci'" 'bash -c "npm ci"' "eval 'npm ci'"; do
   grammar_project "${r18_wt}"
   grammar_pre "${r18_wt}" "npm install fixture-parent@1.0.0" > /dev/null
   touch "${r18_wt}/package-lock.json"
-  r18_first=$(PATH="${stub_bin}:${PATH}" grammar_post "${r18_wt}" "npm install --ignore-scripts fixture-parent@1.0.0 --ignore-scripts")
-  hook_response_parse "${r18_first}" quiet || fail "the project of ${r18_form} has a confirmed snapshot (${r18_first})"
-  r18_wrote=$(jq -nc --arg c "${r18_form}" --arg d "${r18_wt}" '{tool_name:"Bash",tool_input:{command:$c},cwd:$d}' \
+  r18_first_file=$(PATH="${stub_bin}:${PATH}" grammar_post "${r18_wt}" "npm install --ignore-scripts fixture-parent@1.0.0 --ignore-scripts")
+  hook_response_parse "${r18_first_file}" quiet || fail "the project of ${r18_form} has a confirmed snapshot (${r18_first_file})"
+  r18_wrote_file=$(jq -nc --arg c "${r18_form}" --arg d "${r18_wt}" '{tool_name:"Bash",tool_input:{command:$c},cwd:$d}' \
     | pre_hook)
-  r18_wrote=$(hook_response_read required-rewrite "${r18_wrote}")
-  [[ -n "${r18_wrote}" ]] || fail "the pre-guard rewrites ${r18_form}"
+  r18_wrote_file=$(hook_response_read required-rewrite "${r18_wrote_file}")
+  [[ -n "${r18_wrote_file}" ]] || fail "the pre-guard rewrites ${r18_form}"
   printf '%s\n' "${tampered_lock}" > "${r18_wt}/package-lock.json"
-  r18_post=$(jq -nc --arg c "${r18_wrote}" --arg d "${r18_wt}" '{tool_name:"Bash",tool_input:{command:$c},cwd:$d}' \
+  r18_post_file=$(jq -nc --arg c "${r18_wrote_file}" --arg d "${r18_wt}" '{tool_name:"Bash",tool_input:{command:$c},cwd:$d}' \
     | PATH="${stub_bin}:${PATH}" post_hook)
   # Where the post hook's key finds the record (the pending key strips every
   # --ignore-scripts the rewrite put in, a quote after it included), the
   # rollback says what the record states; where it does not, the backstop
   # says nothing about the flag. Either way no line says "did not add".
-  if grep -q 'this hook found no record of this command from before it ran. A rollback ran\.' < "${r18_post}"; then
-    ! post_message "${r18_post}" | grep -- '--ignore-scripts' >/dev/null \
-      || fail "${r18_wrote}: the backstop says nothing about --ignore-scripts (${r18_post})"
+  if grep -q 'this hook found no record of this command from before it ran. A rollback ran\.' < "${r18_post_file}"; then
+    ! post_message "${r18_post_file}" | grep -- '--ignore-scripts' >/dev/null \
+      || fail "${r18_wrote_file}: the backstop says nothing about --ignore-scripts (${r18_post_file})"
   else
-    post_message "${r18_post}" | grep -x 'safedeps added --ignore-scripts to this install' >/dev/null \
-      || fail "${r18_wrote}: a rollback that found the record says safedeps added --ignore-scripts (${r18_post})"
+    post_message "${r18_post_file}" | grep -x 'safedeps added --ignore-scripts to this install' >/dev/null \
+      || fail "${r18_wrote_file}: a rollback that found the record says safedeps added --ignore-scripts (${r18_post_file})"
   fi
-  cmp -s "${r18_wt}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "${r18_wrote}: the backstop restores the confirmed lockfile"
+  cmp -s "${r18_wt}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "${r18_wrote_file}: the backstop restores the confirmed lockfile"
   rm -f "$(grammar_pending "${r18_wt}")"
 done
 pass "a rewritten command whose record the post hook does not find gets no --ignore-scripts line"
@@ -1425,15 +1425,15 @@ pass "a rewritten command whose record the post hook does not find gets no --ign
 # directory readonly after initial snapshot/pending creation; the real writer fails.
 markfail_wt=$(mktemp -d "${tmp_root}/markfail-wt.XXXXXX")
 grammar_project "${markfail_wt}"
-markfail_pre=$(SAFEDEPS_TEST_FAULT=markfail grammar_pre "${markfail_wt}" "npm install fixture-parent@1.0.0")
-hook_response_parse "${markfail_pre}" quiet \
-  || fail "a rewrite whose record could not be written leaves stdout quiet (${markfail_pre})"
+markfail_pre_file=$(SAFEDEPS_TEST_FAULT=markfail grammar_pre "${markfail_wt}" "npm install fixture-parent@1.0.0")
+hook_response_parse "${markfail_pre_file}" quiet \
+  || fail "a rewrite whose record could not be written leaves stdout quiet (${markfail_pre_file})"
 grep -q 'pre-guard: could not record the command safedeps would write in .*, so it was not rewritten' "${SAFEDEPS_HOME}/advisory.log" \
   || fail "a rewrite withheld for a failed record is said in advisory.log"
 printf '%s\n' "${tampered_lock}" > "${markfail_wt}/package-lock.json"
-markfail_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${markfail_wt}" "npm install fixture-parent@1.0.0")
-post_message "${markfail_post}" | grep -x 'safedeps did not add --ignore-scripts to this install' >/dev/null \
-  || fail "the install whose rewrite was withheld says safedeps did not add --ignore-scripts (${markfail_post})"
+markfail_post_file=$(PATH="${stub_bin}:${PATH}" grammar_post "${markfail_wt}" "npm install fixture-parent@1.0.0")
+post_message "${markfail_post_file}" | grep -x 'safedeps did not add --ignore-scripts to this install' >/dev/null \
+  || fail "the install whose rewrite was withheld says safedeps did not add --ignore-scripts (${markfail_post_file})"
 pass "a rewrite whose record cannot be written is not sent, and the rollback says safedeps did not add the flag"
 
 # A record the post hook cannot read gets no --ignore-scripts line. A failed
@@ -1442,15 +1442,15 @@ pass "a rewrite whose record cannot be written is not sent, and the rollback say
 # EACCES as the same uid, and supplies record-unread independently of the hook.
 markread_wt=$(mktemp -d "${tmp_root}/markread-wt.XXXXXX")
 grammar_project "${markread_wt}"
-markread_pre=$(grammar_pre "${markread_wt}" "npm install fixture-parent@1.0.0")
-[[ "$(hook_response_read required-rewrite "${markread_pre}")" == 'npm install --ignore-scripts fixture-parent@1.0.0 --ignore-scripts' ]] \
-  || fail "the install whose record the post hook will not read is rewritten (${markread_pre})"
+markread_pre_file=$(grammar_pre "${markread_wt}" "npm install fixture-parent@1.0.0")
+[[ "$(hook_response_read required-rewrite "${markread_pre_file}")" == 'npm install --ignore-scripts fixture-parent@1.0.0 --ignore-scripts' ]] \
+  || fail "the install whose record the post hook will not read is rewritten (${markread_pre_file})"
 printf '%s\n' "${tampered_lock}" > "${markread_wt}/package-lock.json"
-markread_post=$(SAFEDEPS_TEST_FAULT=markread PATH="${stub_bin}:${PATH}" grammar_post "${markread_wt}" "npm install fixture-parent@1.0.0")
-post_message "${markread_post}" | grep 'A rollback ran\.' >/dev/null \
-  || fail "the install whose record the post hook cannot read is rolled back (${markread_post})"
-! post_message "${markread_post}" | grep -- '--ignore-scripts' >/dev/null \
-  || fail "a record the post hook cannot read gets no --ignore-scripts line (${markread_post})"
+markread_post_file=$(SAFEDEPS_TEST_FAULT=markread PATH="${stub_bin}:${PATH}" grammar_post "${markread_wt}" "npm install fixture-parent@1.0.0")
+post_message "${markread_post_file}" | grep 'A rollback ran\.' >/dev/null \
+  || fail "the install whose record the post hook cannot read is rolled back (${markread_post_file})"
+! post_message "${markread_post_file}" | grep -- '--ignore-scripts' >/dev/null \
+  || fail "a record the post hook cannot read gets no --ignore-scripts line (${markread_post_file})"
 grep -q "post-verify: could not read the pre-guard's record of this command in .*, so no --ignore-scripts line was said" "${SAFEDEPS_HOME}/advisory.log" \
   || fail "a record the post hook cannot read is said in advisory.log"
 pass "a record the post hook cannot read gets no --ignore-scripts line, and advisory.log says so"
@@ -1472,9 +1472,9 @@ pass "a record the post hook cannot read gets no --ignore-scripts line, and advi
 for unstated_shape in v2172-true v2172-false string-true null-command number-command record-3 record-str2; do
   unstated_wt=$(mktemp -d "${tmp_root}/unstated-${unstated_shape}-wt.XXXXXX")
   grammar_project "${unstated_wt}"
-  unstated_pre=$(grammar_pre "${unstated_wt}" "npm install fixture-parent@1.0.0")
-  [[ "$(hook_response_read required-rewrite "${unstated_pre}")" == 'npm install --ignore-scripts fixture-parent@1.0.0 --ignore-scripts' ]] \
-    || fail "${unstated_shape}: the install is rewritten (${unstated_pre})"
+  unstated_pre_file=$(grammar_pre "${unstated_wt}" "npm install fixture-parent@1.0.0")
+  [[ "$(hook_response_read required-rewrite "${unstated_pre_file}")" == 'npm install --ignore-scripts fixture-parent@1.0.0 --ignore-scripts' ]] \
+    || fail "${unstated_shape}: the install is rewritten (${unstated_pre_file})"
   unstated_meta="${SAFEDEPS_HOME}/snapshots/$(jq -r '.snapshot_id' "$(grammar_pending "${unstated_wt}")")_meta.json"
   case "${unstated_shape}" in
     v2172-true) unstated_jq='del(.record, .updated_command)' ;;
@@ -1487,11 +1487,11 @@ for unstated_shape in v2172-true v2172-false string-true null-command number-com
   esac
   jq "${unstated_jq}" "${unstated_meta}" > "${unstated_meta}.tmp" && mv -f "${unstated_meta}.tmp" "${unstated_meta}"
   printf '%s\n' "${tampered_lock}" > "${unstated_wt}/package-lock.json"
-  unstated_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${unstated_wt}" "npm install --ignore-scripts fixture-parent@1.0.0 --ignore-scripts")
-  post_message "${unstated_post}" | grep 'A rollback ran\.' >/dev/null \
-    || fail "${unstated_shape}: the install is rolled back (${unstated_post})"
-  ! post_message "${unstated_post}" | grep -- '--ignore-scripts' >/dev/null \
-    || fail "${unstated_shape}: a record that does not state the fact gets no --ignore-scripts line (${unstated_post})"
+  unstated_post_file=$(PATH="${stub_bin}:${PATH}" grammar_post "${unstated_wt}" "npm install --ignore-scripts fixture-parent@1.0.0 --ignore-scripts")
+  post_message "${unstated_post_file}" | grep 'A rollback ran\.' >/dev/null \
+    || fail "${unstated_shape}: the install is rolled back (${unstated_post_file})"
+  ! post_message "${unstated_post_file}" | grep -- '--ignore-scripts' >/dev/null \
+    || fail "${unstated_shape}: a record that does not state the fact gets no --ignore-scripts line (${unstated_post_file})"
   [[ "$(grep -cF "post-verify: ${unstated_meta} is not a version 2 pre-guard record that states whether safedeps rewrote this command, so no --ignore-scripts line was said" "${SAFEDEPS_HOME}/advisory.log")" == 1 ]] \
     || fail "${unstated_shape}: advisory.log names the record once"
   rm -f "$(grammar_pending "${unstated_wt}")"
@@ -1519,17 +1519,17 @@ pass "no record file gets no --ignore-scripts line, and advisory.log names the r
 # that reads it is the real one.
 twoobj_wt=$(mktemp -d "${tmp_root}/twoobj-wt.XXXXXX")
 grammar_project "${twoobj_wt}"
-twoobj_pre=$(grammar_pre "${twoobj_wt}" "npm install fixture-parent@1.0.0")
-[[ -n "$(hook_response_read required-rewrite "${twoobj_pre}")" ]] \
-  || fail "the install whose record becomes two objects is rewritten (${twoobj_pre})"
+twoobj_pre_file=$(grammar_pre "${twoobj_wt}" "npm install fixture-parent@1.0.0")
+[[ -n "$(hook_response_read required-rewrite "${twoobj_pre_file}")" ]] \
+  || fail "the install whose record becomes two objects is rewritten (${twoobj_pre_file})"
 twoobj_meta="${SAFEDEPS_HOME}/snapshots/$(jq -r '.snapshot_id' "$(grammar_pending "${twoobj_wt}")")_meta.json"
 { printf '{"record":2,"ignore_scripts_injected":false}\n'; cat "${twoobj_meta}"; } > "${twoobj_meta}.tmp" && mv -f "${twoobj_meta}.tmp" "${twoobj_meta}"
 printf '%s\n' "${tampered_lock}" > "${twoobj_wt}/package-lock.json"
-twoobj_post=$(SAFEDEPS_TEST_FAULT=twoobj PATH="${stub_bin}:${PATH}" grammar_post "${twoobj_wt}" "npm install --ignore-scripts fixture-parent@1.0.0 --ignore-scripts")
-post_message "${twoobj_post}" | grep 'A rollback ran\.' >/dev/null \
-  || fail "the install whose record is two objects is rolled back (${twoobj_post})"
-! post_message "${twoobj_post}" | grep -- '--ignore-scripts' >/dev/null \
-  || fail "a record that is two objects gets no --ignore-scripts line (${twoobj_post})"
+twoobj_post_file=$(SAFEDEPS_TEST_FAULT=twoobj PATH="${stub_bin}:${PATH}" grammar_post "${twoobj_wt}" "npm install --ignore-scripts fixture-parent@1.0.0 --ignore-scripts")
+post_message "${twoobj_post_file}" | grep 'A rollback ran\.' >/dev/null \
+  || fail "the install whose record is two objects is rolled back (${twoobj_post_file})"
+! post_message "${twoobj_post_file}" | grep -- '--ignore-scripts' >/dev/null \
+  || fail "a record that is two objects gets no --ignore-scripts line (${twoobj_post_file})"
 [[ "$(grep -cF "post-verify: could not read the pre-guard's record of this command in ${twoobj_meta}, so no --ignore-scripts line was said" "${SAFEDEPS_HOME}/advisory.log")" == 1 ]] \
   || fail "a record that is two objects is said in advisory.log once"
 rm -f "$(grammar_pending "${twoobj_wt}")"
@@ -1566,11 +1566,11 @@ grammar_pre "${gone_a_wt}" "npm install fixture-parent@1.0.0" > /dev/null
 gone_a_pending=$(grammar_pending "${gone_a_wt}")
 rm -f "$(gone_meta_of "${gone_a_pending}")"
 gone_a_line=$(gone_line_of "${gone_a_pending}")
-gone_a_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${gone_a_wt}" "npm install fixture-parent@1.0.0 --ignore-scripts")
+gone_a_post_file=$(PATH="${stub_bin}:${PATH}" grammar_post "${gone_a_wt}" "npm install fixture-parent@1.0.0 --ignore-scripts")
 [[ "$(grep -cF "${gone_a_line}" "${SAFEDEPS_HOME}/advisory.log")" == 1 ]] \
   || fail "A: advisory.log names the record whose snapshot has no meta file once"
 grep -qF "post-verify BACKSTOP clean: a command whose pre-guard record names a snapshot with no meta file; the npm closure in $(cd -P "${gone_a_wt}" && pwd -P) passed" "${SAFEDEPS_HOME}/advisory.log" \
-  || fail "A: the backstop judges the install and says it passed (${gone_a_post})"
+  || fail "A: the backstop judges the install and says it passed (${gone_a_post_file})"
 [[ ! -e "${gone_a_pending}" ]] || fail "A: the record is set aside"
 pass "a record whose snapshot has no meta file is named in advisory.log, and the backstop judges the install"
 
@@ -1588,9 +1588,9 @@ gone_b_pending=$(grammar_pending "${gone_b_wt}")
 rm -f "$(gone_meta_of "${gone_b_pending}")"
 gone_b_line=$(gone_line_of "${gone_b_pending}")
 printf '%s\n' "${tampered_lock}" > "${gone_b_wt}/package-lock.json"
-gone_b_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${gone_b_wt}" "npm install fixture-parent@1.0.0 --ignore-scripts")
-post_message "${gone_b_post}" | grep -x 'safedeps: suspicious dependency change detected; this hook found a pre-guard record, and the snapshot it names has no meta file. No rollback ran.' >/dev/null \
-  || fail "B: the backstop flags the unapproved lockfile, and says the record was found and its snapshot has no meta file (${gone_b_post})"
+gone_b_post_file=$(PATH="${stub_bin}:${PATH}" grammar_post "${gone_b_wt}" "npm install fixture-parent@1.0.0 --ignore-scripts")
+post_message "${gone_b_post_file}" | grep -x 'safedeps: suspicious dependency change detected; this hook found a pre-guard record, and the snapshot it names has no meta file. No rollback ran.' >/dev/null \
+  || fail "B: the backstop flags the unapproved lockfile, and says the record was found and its snapshot has no meta file (${gone_b_post_file})"
 [[ "$(grep -cF "${gone_b_line}" "${SAFEDEPS_HOME}/advisory.log")" == 1 ]] \
   || fail "B: advisory.log names the record whose snapshot has no meta file once"
 grep -qF "post-verify BACKSTOP FLAGGED (no baseline): a command whose pre-guard record names a snapshot with no meta file; the npm closure in $(cd -P "${gone_b_wt}" && pwd -P) failed" "${SAFEDEPS_HOME}/advisory.log" \
@@ -1604,18 +1604,18 @@ gone_c_wt=$(mktemp -d "${tmp_root}/gone-c-wt.XXXXXX")
 grammar_project "${gone_c_wt}"
 grammar_pre "${gone_c_wt}" "npm install fixture-parent@1.0.0" > /dev/null
 touch "${gone_c_wt}/package-lock.json"
-gone_c_first=$(PATH="${stub_bin}:${PATH}" grammar_post "${gone_c_wt}" "npm install fixture-parent@1.0.0 --ignore-scripts")
-hook_response_parse "${gone_c_first}" quiet || fail "C: the project has a confirmed snapshot (${gone_c_first})"
+gone_c_first_file=$(PATH="${stub_bin}:${PATH}" grammar_post "${gone_c_wt}" "npm install fixture-parent@1.0.0 --ignore-scripts")
+hook_response_parse "${gone_c_first_file}" quiet || fail "C: the project has a confirmed snapshot (${gone_c_first_file})"
 grammar_pre "${gone_c_wt}" "npm install fixture-parent@1.0.0" toolu_gone_c > /dev/null
 gone_c_pending=$(grammar_pending "${gone_c_wt}")
 rm -f "$(gone_meta_of "${gone_c_pending}")"
 printf '%s\n' "${tampered_lock}" > "${gone_c_wt}/package-lock.json"
 record_traced_before=$(record_traced_count)
-gone_c_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${gone_c_wt}" "npm install fixture-parent@1.0.0 --ignore-scripts" toolu_gone_c)
-post_message "${gone_c_post}" | grep -x 'safedeps: suspicious dependency change detected; this hook found a pre-guard record, and the snapshot it names has no meta file. A rollback ran.' >/dev/null \
-  || fail "C: the backstop rolls back, and says the record was found and its snapshot has no meta file (${gone_c_post})"
-! post_message "${gone_c_post}" | grep -- '--ignore-scripts' >/dev/null \
-  || fail "C: the backstop says nothing about --ignore-scripts (${gone_c_post})"
+gone_c_post_file=$(PATH="${stub_bin}:${PATH}" grammar_post "${gone_c_wt}" "npm install fixture-parent@1.0.0 --ignore-scripts" toolu_gone_c)
+post_message "${gone_c_post_file}" | grep -x 'safedeps: suspicious dependency change detected; this hook found a pre-guard record, and the snapshot it names has no meta file. A rollback ran.' >/dev/null \
+  || fail "C: the backstop rolls back, and says the record was found and its snapshot has no meta file (${gone_c_post_file})"
+! post_message "${gone_c_post_file}" | grep -- '--ignore-scripts' >/dev/null \
+  || fail "C: the backstop says nothing about --ignore-scripts (${gone_c_post_file})"
 cmp -s "${gone_c_wt}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "C: the backstop restores the confirmed lockfile"
 [[ "$(record_traced_count)" == "$(( record_traced_before + 1 ))" && ! -e "$(bs_entry toolu_gone_c)" ]] \
   || fail "C: this call has no trace entry, and the backstop counts the command as traced for the record"
@@ -1637,17 +1637,17 @@ empty_wt=$(mktemp -d "${tmp_root}/empty-wt.XXXXXX")
 grammar_project "${empty_wt}"
 grammar_pre "${empty_wt}" "npm install fixture-parent@1.0.0" > /dev/null
 touch "${empty_wt}/package-lock.json"
-empty_first=$(PATH="${stub_bin}:${PATH}" grammar_post "${empty_wt}" "npm install fixture-parent@1.0.0 --ignore-scripts")
-hook_response_parse "${empty_first}" quiet || fail "D: the project has a confirmed snapshot (${empty_first})"
+empty_first_file=$(PATH="${stub_bin}:${PATH}" grammar_post "${empty_wt}" "npm install fixture-parent@1.0.0 --ignore-scripts")
+hook_response_parse "${empty_first_file}" quiet || fail "D: the project has a confirmed snapshot (${empty_first_file})"
 grammar_pre "${empty_wt}" "npm install fixture-parent@1.0.0" toolu_empty_d > /dev/null
 empty_pending=$(grammar_pending "${empty_wt}")
 jq '.snapshot_id = ""' "${empty_pending}" > "${empty_pending}.edit" && mv "${empty_pending}.edit" "${empty_pending}"
 empty_line=$(empty_line_of "${empty_pending}")
 printf '%s\n' "${tampered_lock}" > "${empty_wt}/package-lock.json"
 record_traced_before=$(record_traced_count)
-empty_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${empty_wt}" "npm install fixture-parent@1.0.0 --ignore-scripts" toolu_empty_d)
-post_message "${empty_post}" | grep -x 'safedeps: suspicious dependency change detected; this hook found a pre-guard record, and the record names no snapshot. A rollback ran.' >/dev/null \
-  || fail "D: the backstop rolls back, and says the record was found and names no snapshot (${empty_post})"
+empty_post_file=$(PATH="${stub_bin}:${PATH}" grammar_post "${empty_wt}" "npm install fixture-parent@1.0.0 --ignore-scripts" toolu_empty_d)
+post_message "${empty_post_file}" | grep -x 'safedeps: suspicious dependency change detected; this hook found a pre-guard record, and the record names no snapshot. A rollback ran.' >/dev/null \
+  || fail "D: the backstop rolls back, and says the record was found and names no snapshot (${empty_post_file})"
 [[ "$(grep -cF "${empty_line}" "${SAFEDEPS_HOME}/advisory.log")" == 1 ]] \
   || fail "D: advisory.log names the record that names no snapshot once"
 [[ ! -e "${empty_pending}" ]] || fail "D: the record is set aside"
@@ -1667,9 +1667,9 @@ grammar_project "${legacy_wt}"
 : > "${SAFEDEPS_HOME}/current_snapshot_id"
 printf '%s\n' "$(cd -P "${legacy_wt}" && pwd -P)" > "${SAFEDEPS_HOME}/current_project_dir"
 printf '%s\n' "${tampered_lock}" > "${legacy_wt}/package-lock.json"
-legacy_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${legacy_wt}" "npm install fixture-parent@1.0.0")
-post_message "${legacy_post}" | grep -x 'safedeps: suspicious dependency change detected; this hook found no record of this command from before it ran. No rollback ran.' >/dev/null \
-  || fail "E: the backstop flags the unapproved lockfile, and says it found no record (${legacy_post})"
+legacy_post_file=$(PATH="${stub_bin}:${PATH}" grammar_post "${legacy_wt}" "npm install fixture-parent@1.0.0")
+post_message "${legacy_post_file}" | grep -x 'safedeps: suspicious dependency change detected; this hook found no record of this command from before it ran. No rollback ran.' >/dev/null \
+  || fail "E: the backstop flags the unapproved lockfile, and says it found no record (${legacy_post_file})"
 [[ -e "${SAFEDEPS_HOME}/current_snapshot_id" && -e "${SAFEDEPS_HOME}/current_project_dir" ]] || fail "E: the legacy record stays"
 rm -f "${SAFEDEPS_HOME}/current_snapshot_id" "${SAFEDEPS_HOME}/current_project_dir"
 pass "a record a pre-#5 pre-guard left is not read, and the backstop judges the install"
@@ -1688,9 +1688,9 @@ jq '.project_dir = ""' "${nodir_pending}" > "${nodir_pending}.edit" && mv "${nod
 printf '%s\n' "${tampered_lock}" > "${nodir_wt}/package-lock.json"
 printf '%s\n' "${tampered_lock}" > "${nodir_other}/package-lock.json"
 mkdir -p "${nodir_other}/node_modules/keep-me"
-nodir_post=$(cd "${nodir_other}" && PATH="${stub_bin}:${PATH}" grammar_post "${nodir_wt}" "npm install fixture-parent@1.0.0 --ignore-scripts")
-post_message "${nodir_post}" | grep -x 'safedeps: suspicious dependency change detected. A rollback ran.' >/dev/null \
-  || fail "F: the install in the payload's directory is rolled back (${nodir_post})"
+nodir_post_file=$(cd "${nodir_other}" && PATH="${stub_bin}:${PATH}" grammar_post "${nodir_wt}" "npm install fixture-parent@1.0.0 --ignore-scripts")
+post_message "${nodir_post_file}" | grep -x 'safedeps: suspicious dependency change detected. A rollback ran.' >/dev/null \
+  || fail "F: the install in the payload's directory is rolled back (${nodir_post_file})"
 grep -q "^Project: $(cd -P "${nodir_wt}" && pwd -P)\$" <<< "$(tail -n 20 "${SAFEDEPS_HOME}/reorg.log" | sed 's/^  //')" \
   || fail "F: reorg.log names the payload's directory as the project"
 cmp -s "${nodir_wt}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "F: the payload's directory gets its lockfile from before the command back"
@@ -1714,8 +1714,8 @@ for nodir2_p in "${nodir2_x}" "${nodir2_y}"; do
   grammar_pre "${nodir2_p}" "npm install fixture-parent@1.0.0" > /dev/null
   [[ "${nodir2_p}" != "${nodir2_y}" ]] || nodir2_y_hash=$(jq -r '.dir_hash' "$(grammar_pending "${nodir2_y}")")
   touch "${nodir2_p}/package-lock.json"
-  nodir2_first=$(PATH="${stub_bin}:${PATH}" grammar_post "${nodir2_p}" "npm install fixture-parent@1.0.0 --ignore-scripts")
-  hook_response_parse "${nodir2_first}" quiet || fail "F2: ${nodir2_p} has a confirmed snapshot (${nodir2_first})"
+  nodir2_first_file=$(PATH="${stub_bin}:${PATH}" grammar_post "${nodir2_p}" "npm install fixture-parent@1.0.0 --ignore-scripts")
+  hook_response_parse "${nodir2_first_file}" quiet || fail "F2: ${nodir2_p} has a confirmed snapshot (${nodir2_first_file})"
 done
 grammar_pre "${nodir2_x}" "npm install fixture-parent@1.0.0" > /dev/null
 nodir2_pending=$(grammar_pending "${nodir2_x}")
@@ -1726,11 +1726,11 @@ jq --arg h "${nodir2_y_hash}" '.snapshot_id = "" | .project_dir = "" | .dir_hash
 printf '%s\n' "${tampered_lock}" > "${nodir2_x}/package-lock.json"
 printf '%s\n' "${tampered_lock}" > "${nodir2_y}/package-lock.json"
 mkdir -p "${nodir2_y}/node_modules/keep-me"
-nodir2_post=$(cd "${nodir2_y}" && PATH="${stub_bin}:${PATH}" grammar_post "${nodir2_x}" "npm install fixture-parent@1.0.0 --ignore-scripts")
-post_message "${nodir2_post}" | grep -x 'safedeps: suspicious dependency change detected; this hook found a pre-guard record, and the record names no snapshot. A rollback ran.' >/dev/null \
-  || fail "F2: the backstop rolls back the payload's directory (${nodir2_post})"
-post_message "${nodir2_post}" | grep -x "Rollback snapshot: $(cat "${SAFEDEPS_HOME}/confirmed_${nodir2_x_hash}"), a confirmed snapshot" >/dev/null \
-  || fail "F2: the rollback restores X's confirmed snapshot, not Y's (${nodir2_post})"
+nodir2_post_file=$(cd "${nodir2_y}" && PATH="${stub_bin}:${PATH}" grammar_post "${nodir2_x}" "npm install fixture-parent@1.0.0 --ignore-scripts")
+post_message "${nodir2_post_file}" | grep -x 'safedeps: suspicious dependency change detected; this hook found a pre-guard record, and the record names no snapshot. A rollback ran.' >/dev/null \
+  || fail "F2: the backstop rolls back the payload's directory (${nodir2_post_file})"
+post_message "${nodir2_post_file}" | grep -x "Rollback snapshot: $(cat "${SAFEDEPS_HOME}/confirmed_${nodir2_x_hash}"), a confirmed snapshot" >/dev/null \
+  || fail "F2: the rollback restores X's confirmed snapshot, not Y's (${nodir2_post_file})"
 cmp -s "${nodir2_x}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "F2: the payload's directory gets its confirmed lockfile back"
 [[ "$(cat "${nodir2_y}/package-lock.json")" == "${tampered_lock}" && -d "${nodir2_y}/node_modules/keep-me" ]] \
   || fail "F2: the hook's working directory is not judged, restored or emptied"
@@ -1750,8 +1750,8 @@ for hashj_p in "${hashj_x}" "${hashj_z}"; do
   grammar_pre "${hashj_p}" "npm install fixture-parent@1.0.0" > /dev/null
   [[ "${hashj_p}" != "${hashj_z}" ]] || hashj_z_hash=$(jq -r '.dir_hash' "$(grammar_pending "${hashj_z}")")
   touch "${hashj_p}/package-lock.json"
-  hashj_first=$(PATH="${stub_bin}:${PATH}" grammar_post "${hashj_p}" "npm install fixture-parent@1.0.0 --ignore-scripts")
-  hook_response_parse "${hashj_first}" quiet || fail "J: ${hashj_p} has a confirmed snapshot (${hashj_first})"
+  hashj_first_file=$(PATH="${stub_bin}:${PATH}" grammar_post "${hashj_p}" "npm install fixture-parent@1.0.0 --ignore-scripts")
+  hook_response_parse "${hashj_first_file}" quiet || fail "J: ${hashj_p} has a confirmed snapshot (${hashj_first_file})"
 done
 cp "${hashj_x}/package.json" "${tmp_root}/hashj-x-package.json"
 grammar_pre "${hashj_x}" "npm install fixture-parent@1.0.0" > /dev/null
@@ -1761,9 +1761,9 @@ hashj_x_hash=$(jq -r '.dir_hash' "${hashj_pending}")
 jq --arg h "${hashj_z_hash}" '.snapshot_id = "" | .dir_hash = $h' "${hashj_pending}" > "${hashj_pending}.edit" \
   && mv "${hashj_pending}.edit" "${hashj_pending}"
 printf '%s\n' "${tampered_lock}" > "${hashj_x}/package-lock.json"
-hashj_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${hashj_x}" "npm install fixture-parent@1.0.0 --ignore-scripts")
-post_message "${hashj_post}" | grep -x "Rollback snapshot: $(cat "${SAFEDEPS_HOME}/confirmed_${hashj_x_hash}"), a confirmed snapshot" >/dev/null \
-  || fail "J: the rollback restores X's confirmed snapshot, not Z's (${hashj_post})"
+hashj_post_file=$(PATH="${stub_bin}:${PATH}" grammar_post "${hashj_x}" "npm install fixture-parent@1.0.0 --ignore-scripts")
+post_message "${hashj_post_file}" | grep -x "Rollback snapshot: $(cat "${SAFEDEPS_HOME}/confirmed_${hashj_x_hash}"), a confirmed snapshot" >/dev/null \
+  || fail "J: the rollback restores X's confirmed snapshot, not Z's (${hashj_post_file})"
 cmp -s "${hashj_x}/package.json" "${tmp_root}/hashj-x-package.json" || fail "J: X's package.json is X's, not Z's"
 cmp -s "${hashj_x}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "J: X gets its confirmed lockfile back"
 pass "a record's dir_hash does not pick the confirmed snapshot: the project's own hash does"
@@ -1780,24 +1780,24 @@ unread_line_of() {
 }
 # unread_row <label> <record contents> <confirmed: yes|no> <lockfile: tampered|safe>
 unread_row() {
-  local wt pending post first
+  local wt pending post_file first_file
   wt=$(mktemp -d "${tmp_root}/unread-$1-wt.XXXXXX")
   grammar_project "${wt}"
   if [[ "$3" == yes ]]; then
     grammar_pre "${wt}" "npm install fixture-parent@1.0.0" > /dev/null
     touch "${wt}/package-lock.json"
-    first=$(PATH="${stub_bin}:${PATH}" grammar_post "${wt}" "npm install fixture-parent@1.0.0 --ignore-scripts")
-    hook_response_parse "${first}" quiet || fail "$1: the project has a confirmed snapshot (${first})"
+    first_file=$(PATH="${stub_bin}:${PATH}" grammar_post "${wt}" "npm install fixture-parent@1.0.0 --ignore-scripts")
+    hook_response_parse "${first_file}" quiet || fail "$1: the project has a confirmed snapshot (${first_file})"
   fi
   grammar_pre "${wt}" "npm install fixture-parent@1.0.0" > /dev/null
   pending=$(grammar_pending "${wt}")
   printf '%s' "$2" > "${pending}"
   [[ "$4" != tampered ]] || printf '%s\n' "${tampered_lock}" > "${wt}/package-lock.json"
-  post=$(PATH="${stub_bin}:${PATH}" grammar_post "${wt}" "npm install fixture-parent@1.0.0 --ignore-scripts")
+  post_file=$(PATH="${stub_bin}:${PATH}" grammar_post "${wt}" "npm install fixture-parent@1.0.0 --ignore-scripts")
   [[ "$(grep -cF "$(unread_line_of "${pending}")" "${SAFEDEPS_HOME}/advisory.log")" == 1 ]] \
     || fail "$1: advisory.log names the record that is not one JSON object once"
   [[ ! -e "${pending}" ]] || fail "$1: the record is set aside"
-  UNREAD_WT=$(cd -P "${wt}" && pwd -P) UNREAD_POST="${post}"
+  UNREAD_WT=$(cd -P "${wt}" && pwd -P) UNREAD_POST_FILE="${post_file}"
 }
 
 # U1: garbage, an unapproved lockfile and a confirmed snapshot. The backstop
@@ -1806,16 +1806,16 @@ record_traced_before=$(record_traced_count)
 unread_row U1 'not json {' yes tampered
 [[ "$(record_traced_count)" == "$(( record_traced_before + 1 ))" ]] \
   || fail "U1: the backstop counts the command as traced for the record"
-post_message "${UNREAD_POST}" | grep -x 'safedeps: suspicious dependency change detected; this hook found a pre-guard record, and the record is not one JSON object. A rollback ran.' >/dev/null \
-  || fail "U1: the backstop rolls back, and says the record was found and is not one JSON object (${UNREAD_POST})"
+post_message "${UNREAD_POST_FILE}" | grep -x 'safedeps: suspicious dependency change detected; this hook found a pre-guard record, and the record is not one JSON object. A rollback ran.' >/dev/null \
+  || fail "U1: the backstop rolls back, and says the record was found and is not one JSON object (${UNREAD_POST_FILE})"
 cmp -s "${UNREAD_WT}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "U1: the backstop restores the confirmed lockfile"
 pass "a pending state that is not JSON goes to the backstop, which rolls back to a confirmed snapshot"
 
 # U2: an array, an unapproved lockfile and no confirmed snapshot. The backstop
 # flags the install.
 unread_row U2 '[{"snapshot_id":"x"}]' no tampered
-post_message "${UNREAD_POST}" | grep -x 'safedeps: suspicious dependency change detected; this hook found a pre-guard record, and the record is not one JSON object. No rollback ran.' >/dev/null \
-  || fail "U2: the backstop flags the unapproved lockfile, and says the record is not one JSON object (${UNREAD_POST})"
+post_message "${UNREAD_POST_FILE}" | grep -x 'safedeps: suspicious dependency change detected; this hook found a pre-guard record, and the record is not one JSON object. No rollback ran.' >/dev/null \
+  || fail "U2: the backstop flags the unapproved lockfile, and says the record is not one JSON object (${UNREAD_POST_FILE})"
 grep -qF "post-verify BACKSTOP FLAGGED (no baseline): a command with a pre-guard record that is not one JSON object; the npm closure in ${UNREAD_WT} failed" "${SAFEDEPS_HOME}/advisory.log" \
   || fail "U2: advisory.log says the backstop flagged the install, and why it ran"
 pass "a pending state that is a JSON array goes to the backstop, which flags an unapproved lockfile"
@@ -1823,7 +1823,7 @@ pass "a pending state that is a JSON array goes to the backstop, which flags an 
 # U3: a JSON string and an approved lockfile. The backstop judges it clean,
 # and the next call of the same command is not killed by the same record.
 unread_row U3 '"a string"' no safe
-hook_response_parse "${UNREAD_POST}" quiet || fail "U3: the backstop passes an approved lockfile quietly (${UNREAD_POST})"
+hook_response_parse "${UNREAD_POST_FILE}" quiet || fail "U3: the backstop passes an approved lockfile quietly (${UNREAD_POST_FILE})"
 grep -qF "post-verify BACKSTOP clean: a command with a pre-guard record that is not one JSON object; the npm closure in ${UNREAD_WT} passed" "${SAFEDEPS_HOME}/advisory.log" \
   || fail "U3: advisory.log says the backstop judged the install clean, and why it ran"
 pass "a pending state that is a JSON string goes to the backstop, which judges an approved lockfile clean"
@@ -1837,9 +1837,9 @@ grammar_pre "${num_wt}" "npm install fixture-parent@1.0.0" > /dev/null
 num_pending=$(grammar_pending "${num_wt}")
 jq '.snapshot_id = 5' "${num_pending}" > "${num_pending}.edit" && mv "${num_pending}.edit" "${num_pending}"
 printf '%s\n' "${tampered_lock}" > "${num_wt}/package-lock.json"
-num_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${num_wt}" "npm install fixture-parent@1.0.0 --ignore-scripts")
-post_message "${num_post}" | grep -x 'safedeps: suspicious dependency change detected; this hook found a pre-guard record, and the record names no snapshot. No rollback ran.' >/dev/null \
-  || fail "G: a snapshot_id that is a number names no snapshot (${num_post})"
+num_post_file=$(PATH="${stub_bin}:${PATH}" grammar_post "${num_wt}" "npm install fixture-parent@1.0.0 --ignore-scripts")
+post_message "${num_post_file}" | grep -x 'safedeps: suspicious dependency change detected; this hook found a pre-guard record, and the record names no snapshot. No rollback ran.' >/dev/null \
+  || fail "G: a snapshot_id that is a number names no snapshot (${num_post_file})"
 [[ "$(grep -cF "$(empty_line_of "${num_pending}")" "${SAFEDEPS_HOME}/advisory.log")" == 1 ]] \
   || fail "G: advisory.log names the record that names no snapshot once"
 pass "a pending state whose snapshot_id is a number names no snapshot, for the hook and the oracle alike"
@@ -1853,31 +1853,31 @@ pass "a pending state whose snapshot_id is a number names no snapshot, for the h
 # between them, as an install in progress would change it.
 same_wt=$(mktemp -d "${tmp_root}/same-wt.XXXXXX")
 grammar_project "${same_wt}"
-same_first=$(SAFEDEPS_TEST_FAULT=same grammar_pre "${same_wt}" "npm install fixture-parent@1.0.0")
+same_first_file=$(SAFEDEPS_TEST_FAULT=same grammar_pre "${same_wt}" "npm install fixture-parent@1.0.0")
 cp "${same_wt}/package-lock.json" "${tmp_root}/same-first-lock.json"
 jq -c . "${tmp_root}/same-first-lock.json" > "${same_wt}/package-lock.json"
 cmp -s "${same_wt}/package-lock.json" "${tmp_root}/same-first-lock.json" && fail "the second call sees a lockfile with other bytes"
 cp "${same_wt}/package-lock.json" "${tmp_root}/same-second-lock.json"
-same_second=$(SAFEDEPS_TEST_FAULT=same grammar_pre "${same_wt}" "npm ci")
-same_first_cmd=$(hook_response_read required-rewrite "${same_first}")
-same_second_cmd=$(hook_response_read required-rewrite "${same_second}")
+same_second_file=$(SAFEDEPS_TEST_FAULT=same grammar_pre "${same_wt}" "npm ci")
+same_first_cmd=$(hook_response_read required-rewrite "${same_first_file}")
+same_second_cmd=$(hook_response_read required-rewrite "${same_second_file}")
 [[ "${same_first_cmd}" == 'npm install --ignore-scripts fixture-parent@1.0.0 --ignore-scripts' && "${same_second_cmd}" == 'npm ci --ignore-scripts' ]] \
-  || fail "both calls in one second are rewritten (${same_first}; ${same_second})"
+  || fail "both calls in one second are rewritten (${same_first_file}; ${same_second_file})"
 same_ids=$(for f in $(grep -lF "\"$(cd -P "${same_wt}" && pwd -P)\"" "${SAFEDEPS_HOME}/pending"/*.json); do jq -r .snapshot_id "${f}"; done | sort -u)
 [[ "$(grep -c . <<< "${same_ids}")" == 2 ]] || fail "two calls in one project within one second have a snapshot id each (${same_ids})"
 for same_id in ${same_ids}; do
   [[ -f "${SAFEDEPS_HOME}/snapshots/${same_id}_meta.json" ]] || fail "each call in one second keeps its own record (${same_id})"
 done
 printf '%s\n' "${tampered_lock}" > "${same_wt}/package-lock.json"
-same_first_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${same_wt}" "${same_first_cmd}")
-post_message "${same_first_post}" | grep -x 'safedeps added --ignore-scripts to this install' >/dev/null \
-  || fail "the first call in one second speaks from its own record (${same_first_post})"
+same_first_post_file=$(PATH="${stub_bin}:${PATH}" grammar_post "${same_wt}" "${same_first_cmd}")
+post_message "${same_first_post_file}" | grep -x 'safedeps added --ignore-scripts to this install' >/dev/null \
+  || fail "the first call in one second speaks from its own record (${same_first_post_file})"
 cmp -s "${same_wt}/package-lock.json" "${tmp_root}/same-first-lock.json" \
   || fail "the first call in one second is rolled back to its own snapshot"
 printf '%s\n' "${tampered_lock}" > "${same_wt}/package-lock.json"
-same_second_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${same_wt}" "${same_second_cmd}")
-post_message "${same_second_post}" | grep -x 'safedeps added --ignore-scripts to this install' >/dev/null \
-  || fail "the second call in one second speaks from its own record (${same_second_post})"
+same_second_post_file=$(PATH="${stub_bin}:${PATH}" grammar_post "${same_wt}" "${same_second_cmd}")
+post_message "${same_second_post_file}" | grep -x 'safedeps added --ignore-scripts to this install' >/dev/null \
+  || fail "the second call in one second speaks from its own record (${same_second_post_file})"
 cmp -s "${same_wt}/package-lock.json" "${tmp_root}/same-second-lock.json" \
   || fail "the second call in one second is rolled back to its own snapshot"
 pass "two pre-guard calls in one project within one second keep a record and a snapshot each"
@@ -1888,14 +1888,14 @@ backstop_none_wt="${tmp_root}/backstop-none-wt"
 mkdir -p "${backstop_none_wt}"
 printf '{"dependencies":{"fixture-parent":"1.0.0"}}\n' > "${backstop_none_wt}/package.json"
 printf '%s\n' "${tampered_lock}" > "${backstop_none_wt}/package-lock.json"
-backstop_none_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${backstop_none_wt}" "npm install fixture-parent@1.0.0")
-grep -q 'No rollback ran\.' < "${backstop_none_post}" || fail "the backstop says no rollback ran where there is no confirmed snapshot"
-post_message "${backstop_none_post}" | grep "no confirmed snapshot is recorded for .*/backstop-none-wt$" >/dev/null || fail "the backstop says no confirmed snapshot is recorded"
+backstop_none_post_file=$(PATH="${stub_bin}:${PATH}" grammar_post "${backstop_none_wt}" "npm install fixture-parent@1.0.0")
+grep -q 'No rollback ran\.' < "${backstop_none_post_file}" || fail "the backstop says no rollback ran where there is no confirmed snapshot"
+post_message "${backstop_none_post_file}" | grep "no confirmed snapshot is recorded for .*/backstop-none-wt$" >/dev/null || fail "the backstop says no confirmed snapshot is recorded"
 grep -q "fixture-evil" "${backstop_none_wt}/package-lock.json" || fail "the backstop changes nothing where it rolls nothing back"
-assert_gives_no_command "$(< "${backstop_none_post}")" "the backstop that rolls nothing back gives no command"
+assert_gives_no_command "$(< "${backstop_none_post_file}")" "the backstop that rolls nothing back gives no command"
 printf 'ghost-snapshot\n' > "${SAFEDEPS_HOME}/confirmed_$(oracle_dir_hash "$(cd -P "${backstop_none_wt}" && pwd -P)")"
-backstop_ghost_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${backstop_none_wt}" "npm install fixture-parent@1.0.0")
-post_message "${backstop_ghost_post}" | grep "the confirmed snapshot ghost-snapshot of .*/backstop-none-wt: .*/snapshots/ghost-snapshot_meta.json does not exist$" >/dev/null \
+backstop_ghost_post_file=$(PATH="${stub_bin}:${PATH}" grammar_post "${backstop_none_wt}" "npm install fixture-parent@1.0.0")
+post_message "${backstop_ghost_post_file}" | grep "the confirmed snapshot ghost-snapshot of .*/backstop-none-wt: .*/snapshots/ghost-snapshot_meta.json does not exist$" >/dev/null \
   || fail "the backstop names the confirmed snapshot whose meta file is missing"
 pass "the backstop that rolls nothing back says which record it looked for"
 
@@ -1929,16 +1929,16 @@ bs_pull() {
 # A backstop row that rolled nothing back: no message, the project as it was,
 # and the check that found no trace in advisory.log.
 bs_assert_untraced() {
-  local dir="$1" post="$2" label="$3" home="${4:-${SAFEDEPS_HOME}}"
-  hook_response_parse "${post}" quiet || fail "${label}: the backstop says nothing (${post})"
+  local dir="$1" post_file="$2" label="$3" home="${4:-${SAFEDEPS_HOME}}"
+  hook_response_parse "${post_file}" quiet || fail "${label}: the backstop says nothing (${post_file})"
   [[ -f "${dir}/node_modules/installed-package/package.json" ]] || fail "${label}: node_modules is left in place"
   cmp -s "${dir}/package-lock.json" <(printf '%s\n' "${tampered_lock}") || fail "${label}: the lockfile is left as it was"
   grep -qF "post-verify BACKSTOP UNTRACED: no trace in $(cd -P "${dir}" && pwd -P): " "${home}/advisory.log" \
     || fail "${label}: advisory.log says which check found no trace"
 }
 bs_assert_rollback() {
-  local dir="$1" post="$2" label="$3" trace="$4" home="${5:-${SAFEDEPS_HOME}}"
-  grep -q 'A rollback ran\.' < "${post}" || fail "${label}: the backstop rolls back (${post})"
+  local dir="$1" post_file="$2" label="$3" trace="$4" home="${5:-${SAFEDEPS_HOME}}"
+  grep -q 'A rollback ran\.' < "${post_file}" || fail "${label}: the backstop rolls back (${post_file})"
   [[ ! -e "${dir}/node_modules" ]] || fail "${label}: the rollback removes node_modules"
   cmp -s "${dir}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "${label}: the rollback restores the confirmed lockfile"
   grep -qF "post-verify BACKSTOP traced: ${trace}" "${home}/advisory.log" || fail "${label}: advisory.log says what the trace was"
@@ -1954,23 +1954,23 @@ bs_lock_wt="${tmp_root}/bs-lock-wt"
 bs_project "${bs_lock_wt}"
 bs_pull "${bs_lock_wt}"
 bs_entries_before=$(bs_entries "${SAFEDEPS_HOME}")
-bs_lock_pre=$(grammar_pre "${bs_lock_wt}" "${bs_grep}" toolu_bs_lock)
-hook_response_parse "${bs_lock_pre}" quiet || fail "the pre-guard lets a grep run (${bs_lock_pre})"
+bs_lock_pre_file=$(grammar_pre "${bs_lock_wt}" "${bs_grep}" toolu_bs_lock)
+hook_response_parse "${bs_lock_pre_file}" quiet || fail "the pre-guard lets a grep run (${bs_lock_pre_file})"
 [[ "$(bs_entries "${SAFEDEPS_HOME}")" == "$(( bs_entries_before + 2 ))" ]] \
   || fail "the pre-guard leaves a trace entry and its baseline for a grep the backstop pattern matches"
 # The entry the pre-guard just wrote, read before the post hook removes it and
 # checked after the row's own assertion, so a mutation is red at the row first.
 bs_lock_entry=$(cat "$(ls -t "${SAFEDEPS_HOME}/pending/backstop/"*.json | head -n 1)" 2>/dev/null || true)
-bs_lock_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${bs_lock_wt}" "${bs_grep}" toolu_bs_lock)
-bs_assert_untraced "${bs_lock_wt}" "${bs_lock_post}" "a grep right after a pull outside the gate"
+bs_lock_post_file=$(PATH="${stub_bin}:${PATH}" grammar_post "${bs_lock_wt}" "${bs_grep}" toolu_bs_lock)
+bs_assert_untraced "${bs_lock_wt}" "${bs_lock_post_file}" "a grep right after a pull outside the gate"
 [[ "$(jq -r .resolution <<< "${bs_lock_entry:-null}")" == subsecond ]] \
   || fail "on a filesystem that keeps time below one second the baseline is not set back (${bs_lock_entry})"
 [[ "$(bs_entries "${SAFEDEPS_HOME}")" == "${bs_entries_before}" ]] || fail "the backstop removes the trace entry and its baseline it read"
 # The same, with the lockfile written in place rather than replaced.
 printf '%s\n' "${tampered_lock}" > "${bs_lock_wt}/package-lock.json"
 grammar_pre "${bs_lock_wt}" "${bs_grep}" toolu_bs_lock_inplace > /dev/null
-bs_lock_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${bs_lock_wt}" "${bs_grep}" toolu_bs_lock_inplace)
-bs_assert_untraced "${bs_lock_wt}" "${bs_lock_post}" "a grep right after the lockfile was written in place"
+bs_lock_post_file=$(PATH="${stub_bin}:${PATH}" grammar_post "${bs_lock_wt}" "${bs_grep}" toolu_bs_lock_inplace)
+bs_assert_untraced "${bs_lock_wt}" "${bs_lock_post_file}" "a grep right after the lockfile was written in place"
 grammar_pre "${bs_lock_wt}" "ls -la" toolu_bs_ls > /dev/null
 [[ "$(bs_entries "${SAFEDEPS_HOME}")" == "${bs_entries_before}" ]] || fail "the pre-guard leaves no trace entry for a command the backstop pattern does not match"
 pass "a grep right after a lockfile change outside the gate rolls nothing back"
@@ -1982,8 +1982,8 @@ bs_project "${bs_t4_wt}"
 grammar_pre "${bs_t4_wt}" "npm run deps:install" toolu_bs_t4 > /dev/null
 printf '%s\n' "${tampered_lock}" > "${bs_t4_wt}/package-lock.json"
 mkdir -p "${bs_t4_wt}/node_modules/fixture-evil"
-bs_t4_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${bs_t4_wt}" "npm run deps:install" toolu_bs_t4)
-bs_assert_rollback "${bs_t4_wt}" "${bs_t4_post}" "an install the pre-guard did not read" \
+bs_t4_post_file=$(PATH="${stub_bin}:${PATH}" grammar_post "${bs_t4_wt}" "npm run deps:install" toolu_bs_t4)
+bs_assert_rollback "${bs_t4_wt}" "${bs_t4_post_file}" "an install the pre-guard did not read" \
   "$(cd -P "${bs_t4_wt}" && pwd -P)/package-lock.json has another status change time than the one recorded before this command"
 pass "an install the pre-guard did not read is rolled back"
 
@@ -1999,8 +1999,8 @@ mv "${bs_s1_wt}/package-lock.json" "${bs_s1_wt}/real-lock.json"
 ln -s real-lock.json "${bs_s1_wt}/package-lock.json"
 grammar_pre "${bs_s1_wt}" "npm run deps:install" toolu_bs_s1 > /dev/null
 printf '%s\n' "${tampered_lock}" > "${bs_s1_wt}/package-lock.json"
-bs_s1_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${bs_s1_wt}" "npm run deps:install" toolu_bs_s1)
-grep -q 'A rollback ran\.' < "${bs_s1_post}" || fail "a write through a linked lockfile is a trace (${bs_s1_post})"
+bs_s1_post_file=$(PATH="${stub_bin}:${PATH}" grammar_post "${bs_s1_wt}" "npm run deps:install" toolu_bs_s1)
+grep -q 'A rollback ran\.' < "${bs_s1_post_file}" || fail "a write through a linked lockfile is a trace (${bs_s1_post_file})"
 grep -qF "post-verify BACKSTOP traced: $(cd -P "${bs_s1_wt}" && pwd -P)/package-lock.json has another status change time than the one recorded before this command" "${SAFEDEPS_HOME}/advisory.log" \
   || fail "a write through a linked lockfile: advisory.log names the lockfile's status change time"
 [[ -L "${bs_s1_wt}/package-lock.json" ]] || fail "a write through a linked lockfile: the rollback leaves the link a link"
@@ -2011,8 +2011,8 @@ ln -s real-lock.json "${bs_s1b_wt}/package-lock.json"
 printf '%s\n' "${tampered_lock}" > "${bs_s1b_wt}/other-lock.json"
 grammar_pre "${bs_s1b_wt}" "npm run deps:install" toolu_bs_s1b > /dev/null
 ln -sfn other-lock.json "${bs_s1b_wt}/package-lock.json"
-bs_s1b_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${bs_s1b_wt}" "npm run deps:install" toolu_bs_s1b)
-grep -q 'A rollback ran\.' < "${bs_s1b_post}" || fail "a lockfile link pointed at another file is a trace (${bs_s1b_post})"
+bs_s1b_post_file=$(PATH="${stub_bin}:${PATH}" grammar_post "${bs_s1b_wt}" "npm run deps:install" toolu_bs_s1b)
+grep -q 'A rollback ran\.' < "${bs_s1b_post_file}" || fail "a lockfile link pointed at another file is a trace (${bs_s1b_post_file})"
 grep -qF "post-verify BACKSTOP traced: $(cd -P "${bs_s1b_wt}" && pwd -P)/package-lock.json has another inode than before this command" "${SAFEDEPS_HOME}/advisory.log" \
   || fail "a lockfile link pointed at another file: advisory.log names the inode"
 pass "a write through a linked lockfile, and a lockfile link pointed elsewhere, are traces"
@@ -2028,10 +2028,10 @@ for bs_spec in "${bs_ttl_home}/approved-specs"/*.json; do
 done
 bs_ttl_cmd='git log --grep=\"npm install\"'
 SAFEDEPS_HOME="${bs_ttl_home}" grammar_pre "${bs_ttl_wt}" "${bs_ttl_cmd}" toolu_bs_ttl > /dev/null
-bs_ttl_post=$(PATH="${stub_bin}:${PATH}" SAFEDEPS_HOME="${bs_ttl_home}" grammar_post "${bs_ttl_wt}" "${bs_ttl_cmd}" toolu_bs_ttl)
+bs_ttl_post_file=$(PATH="${stub_bin}:${PATH}" SAFEDEPS_HOME="${bs_ttl_home}" grammar_post "${bs_ttl_wt}" "${bs_ttl_cmd}" toolu_bs_ttl)
 cmp -s "${bs_ttl_wt}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "the ledger row leaves the confirmed lockfile"
-hook_response_parse "${bs_ttl_post}" quiet && [[ -f "${bs_ttl_wt}/node_modules/installed-package/package.json" ]] \
-  || fail "a git log after the ledger expired rolls nothing back (${bs_ttl_post})"
+hook_response_parse "${bs_ttl_post_file}" quiet && [[ -f "${bs_ttl_wt}/node_modules/installed-package/package.json" ]] \
+  || fail "a git log after the ledger expired rolls nothing back (${bs_ttl_post_file})"
 grep -qF "post-verify BACKSTOP UNTRACED: no trace in $(cd -P "${bs_ttl_wt}" && pwd -P): " "${bs_ttl_home}/advisory.log" \
   || fail "a git log after the ledger expired is recorded as untraced"
 # The same project, a command that writes only into node_modules (a manager
@@ -2039,8 +2039,8 @@ grep -qF "post-verify BACKSTOP UNTRACED: no trace in $(cd -P "${bs_ttl_wt}" && p
 # why the closure check rejects it.
 SAFEDEPS_HOME="${bs_ttl_home}" grammar_pre "${bs_ttl_wt}" "npm run deps:add" toolu_bs_tree > /dev/null
 printf 'x\n' > "${bs_ttl_wt}/node_modules/installed-package/added.js"
-bs_tree_post=$(PATH="${stub_bin}:${PATH}" SAFEDEPS_HOME="${bs_ttl_home}" grammar_post "${bs_ttl_wt}" "npm run deps:add" toolu_bs_tree)
-grep -q 'A rollback ran\.' < "${bs_tree_post}" || fail "a write only into node_modules is a trace (${bs_tree_post})"
+bs_tree_post_file=$(PATH="${stub_bin}:${PATH}" SAFEDEPS_HOME="${bs_ttl_home}" grammar_post "${bs_ttl_wt}" "npm run deps:add" toolu_bs_tree)
+grep -q 'A rollback ran\.' < "${bs_tree_post_file}" || fail "a write only into node_modules is a trace (${bs_tree_post_file})"
 [[ ! -e "${bs_ttl_wt}/node_modules" ]] || fail "the rollback after a write only into node_modules removes node_modules"
 grep -qF "post-verify BACKSTOP traced: $(cd -P "${bs_ttl_wt}" && pwd -P)/node_modules" "${bs_ttl_home}/advisory.log" \
   || fail "advisory.log names what the walk found"
@@ -2057,8 +2057,8 @@ bs_project "${bs_p1_wt}"
 grammar_pre "${bs_p1_wt}" "${bs_grep}" toolu_bs_p1_failed > /dev/null
 bs_pull "${bs_p1_wt}"
 grammar_pre "${bs_p1_wt}" "${bs_grep}" toolu_bs_p1 > /dev/null
-bs_p1_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${bs_p1_wt}" "${bs_grep}" toolu_bs_p1)
-bs_assert_untraced "${bs_p1_wt}" "${bs_p1_post}" "a grep after a failed grep and a pull"
+bs_p1_post_file=$(PATH="${stub_bin}:${PATH}" grammar_post "${bs_p1_wt}" "${bs_grep}" toolu_bs_p1)
+bs_assert_untraced "${bs_p1_wt}" "${bs_p1_post_file}" "a grep after a failed grep and a pull"
 [[ -f "$(bs_entry toolu_bs_p1_failed)" && ! -e "$(bs_entry toolu_bs_p1)" ]] \
   || fail "the failed call's entry stays and the read one is gone"
 pass "an entry a failed call left is not read by the next call"
@@ -2070,13 +2070,13 @@ bs_p1b_wt="${tmp_root}/bs-p1b-wt"
 bs_project "${bs_p1b_wt}"
 grammar_pre "${bs_p1b_wt}" "${bs_grep}" toolu_bs_p1b_failed > /dev/null
 grammar_pre "${bs_p1b_wt}" "${bs_grep}" toolu_bs_p1b_clean > /dev/null
-bs_p1b_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${bs_p1b_wt}" "${bs_grep}" toolu_bs_p1b_clean)
-hook_response_parse "${bs_p1b_post}" quiet && [[ "$(bs_untraced_count "${bs_p1b_wt}")" == 1 ]] \
-  || fail "a grep after a failed grep, with nothing changed: the backstop says nothing (${bs_p1b_post})"
+bs_p1b_post_file=$(PATH="${stub_bin}:${PATH}" grammar_post "${bs_p1b_wt}" "${bs_grep}" toolu_bs_p1b_clean)
+hook_response_parse "${bs_p1b_post_file}" quiet && [[ "$(bs_untraced_count "${bs_p1b_wt}")" == 1 ]] \
+  || fail "a grep after a failed grep, with nothing changed: the backstop says nothing (${bs_p1b_post_file})"
 bs_pull "${bs_p1b_wt}"
 grammar_pre "${bs_p1b_wt}" "${bs_grep}" toolu_bs_p1b > /dev/null
-bs_p1b_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${bs_p1b_wt}" "${bs_grep}" toolu_bs_p1b)
-bs_assert_untraced "${bs_p1b_wt}" "${bs_p1b_post}" "a grep after a failed grep, a clean grep and a pull"
+bs_p1b_post_file=$(PATH="${stub_bin}:${PATH}" grammar_post "${bs_p1b_wt}" "${bs_grep}" toolu_bs_p1b)
+bs_assert_untraced "${bs_p1b_wt}" "${bs_p1b_post_file}" "a grep after a failed grep, a clean grep and a pull"
 [[ "$(bs_untraced_count "${bs_p1b_wt}")" == 2 ]] || fail "each grep after the failed one is recorded as untraced"
 pass "a failed call's entry moves no later call's baseline"
 
@@ -2095,11 +2095,11 @@ bs_reck_record=$(grammar_pending "${bs_reck_wt}")
 [[ -f "${bs_reck_record}" ]] || fail "REC-K: the install A leaves a record"
 rm -f "$(gone_meta_of "${bs_reck_record}")"
 bs_pull "${bs_reck_wt}"
-bs_reck_pre=$(grammar_pre "${bs_reck_wt}" 'FOO=a\\ npm install fixture-parent@1.0.0' toolu_bs_reck_b)
-hook_response_parse "${bs_reck_pre}" quiet && [[ -f "$(bs_entry toolu_bs_reck_b)" ]] \
-  || fail "REC-K: the pre-guard lets B run and leaves B a trace entry (${bs_reck_pre})"
-bs_reck_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${bs_reck_wt}" 'FOO=a\\ npm install fixture-parent@1.0.0' toolu_bs_reck_b)
-bs_assert_untraced "${bs_reck_wt}" "${bs_reck_post}" "REC-K: a call with a trace entry and the key of another call's record whose snapshot is gone"
+bs_reck_pre_file=$(grammar_pre "${bs_reck_wt}" 'FOO=a\\ npm install fixture-parent@1.0.0' toolu_bs_reck_b)
+hook_response_parse "${bs_reck_pre_file}" quiet && [[ -f "$(bs_entry toolu_bs_reck_b)" ]] \
+  || fail "REC-K: the pre-guard lets B run and leaves B a trace entry (${bs_reck_pre_file})"
+bs_reck_post_file=$(PATH="${stub_bin}:${PATH}" grammar_post "${bs_reck_wt}" 'FOO=a\\ npm install fixture-parent@1.0.0' toolu_bs_reck_b)
+bs_assert_untraced "${bs_reck_wt}" "${bs_reck_post_file}" "REC-K: a call with a trace entry and the key of another call's record whose snapshot is gone"
 [[ -f "${bs_reck_record}" && ! -e "$(bs_entry toolu_bs_reck_b)" ]] \
   || fail "REC-K: the other call's record stays, and B's entry is read"
 rm -f "${bs_reck_record}"
@@ -2114,8 +2114,8 @@ bs_project "${bs_recl_wt}"
 printf '%s\n' "$(cd -P "${bs_recl_wt}" && pwd -P)" > "${SAFEDEPS_HOME}/current_project_dir"
 bs_pull "${bs_recl_wt}"
 grammar_pre "${bs_recl_wt}" "${bs_grep}" toolu_bs_recl > /dev/null
-bs_recl_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${bs_recl_wt}" "${bs_grep}" toolu_bs_recl)
-bs_assert_untraced "${bs_recl_wt}" "${bs_recl_post}" "REC-L: a call with a trace entry and an empty legacy record for its project"
+bs_recl_post_file=$(PATH="${stub_bin}:${PATH}" grammar_post "${bs_recl_wt}" "${bs_grep}" toolu_bs_recl)
+bs_assert_untraced "${bs_recl_wt}" "${bs_recl_post_file}" "REC-L: a call with a trace entry and an empty legacy record for its project"
 [[ -e "${SAFEDEPS_HOME}/current_snapshot_id" && -e "${SAFEDEPS_HOME}/current_project_dir" ]] \
   || fail "REC-L: the legacy record stays"
 rm -f "${SAFEDEPS_HOME}/current_snapshot_id" "${SAFEDEPS_HOME}/current_project_dir"
@@ -2130,8 +2130,8 @@ bs_x1_record=$(grammar_pending "${bs_x1_wt}")
 [[ -f "${bs_x1_record}" && -f "$(gone_meta_of "${bs_x1_record}")" ]] || fail "X1: the install A leaves a record and its snapshot"
 bs_pull "${bs_x1_wt}"
 grammar_pre "${bs_x1_wt}" 'FOO=a\\ npm install fixture-parent@1.0.0' toolu_bs_x1_b > /dev/null
-bs_x1_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${bs_x1_wt}" 'FOO=a\\ npm install fixture-parent@1.0.0' toolu_bs_x1_b)
-bs_assert_untraced "${bs_x1_wt}" "${bs_x1_post}" "X1: a call with a trace entry and the key of another call's whole record"
+bs_x1_post_file=$(PATH="${stub_bin}:${PATH}" grammar_post "${bs_x1_wt}" 'FOO=a\\ npm install fixture-parent@1.0.0' toolu_bs_x1_b)
+bs_assert_untraced "${bs_x1_wt}" "${bs_x1_post_file}" "X1: a call with a trace entry and the key of another call's whole record"
 [[ -f "${bs_x1_record}" ]] || fail "X1: the other call's record stays"
 rm -f "${bs_x1_record}"
 pass "a call with a trace entry is not judged by another call's record"
@@ -2144,8 +2144,8 @@ bs_pull "${bs_noid_wt}"
 bs_entries_before=$(bs_entries "${SAFEDEPS_HOME}")
 grammar_pre "${bs_noid_wt}" "${bs_grep}" > /dev/null
 [[ "$(bs_entries "${SAFEDEPS_HOME}")" == "${bs_entries_before}" ]] || fail "the pre-guard writes no trace entry for a call with no tool_use_id"
-bs_noid_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${bs_noid_wt}" "${bs_grep}")
-bs_assert_rollback "${bs_noid_wt}" "${bs_noid_post}" "a grep with no tool_use_id" \
+bs_noid_post_file=$(PATH="${stub_bin}:${PATH}" grammar_post "${bs_noid_wt}" "${bs_grep}")
+bs_assert_rollback "${bs_noid_wt}" "${bs_noid_post_file}" "a grep with no tool_use_id" \
   "this hook's input names no tool_use_id, so no trace entry belongs to this call"
 pass "a call with no tool_use_id is judged as before: a trace"
 
@@ -2170,22 +2170,22 @@ call_records_of() { { grep -lF "\"$(cd -P "$1" && pwd -P)\"" "${SAFEDEPS_HOME}/p
 # wrote.
 ov1_wt="${tmp_root}/ov1-wt"
 grammar_project "${ov1_wt}"
-ov1_pre=$(grammar_pre "${ov1_wt}" "npm install fixture-parent@1.0.0" toolu_ov1_a)
-ov1_cmd=$(hook_response_read required-rewrite "${ov1_pre}")
-[[ "${ov1_cmd}" == *--ignore-scripts* ]] || fail "OV1: the pre-guard rewrites A (${ov1_pre})"
+ov1_pre_file=$(grammar_pre "${ov1_wt}" "npm install fixture-parent@1.0.0" toolu_ov1_a)
+ov1_cmd=$(hook_response_read required-rewrite "${ov1_pre_file}")
+[[ "${ov1_cmd}" == *--ignore-scripts* ]] || fail "OV1: the pre-guard rewrites A (${ov1_pre_file})"
 sleep 1
 grammar_pre_codex "${ov1_wt}" "${ov1_cmd}" exec-ov1-b > /dev/null
 [[ "$(call_records_of "${ov1_wt}")" == 2 ]] || fail "OV1: the two calls leave a record each"
 printf '%s\n' "${tampered_lock}" > "${ov1_wt}/package-lock.json"
-ov1_b_post=$(PATH="${stub_bin}:${PATH}" grammar_post_codex "${ov1_wt}" "${ov1_cmd}" exec-ov1-b)
-post_message "${ov1_b_post}" | grep -x 'safedeps did not add --ignore-scripts to this install' >/dev/null \
-  || fail "OV1: the Codex call B speaks from its own record: safedeps did not add the flag (${ov1_b_post})"
+ov1_b_post_file=$(PATH="${stub_bin}:${PATH}" grammar_post_codex "${ov1_wt}" "${ov1_cmd}" exec-ov1-b)
+post_message "${ov1_b_post_file}" | grep -x 'safedeps did not add --ignore-scripts to this install' >/dev/null \
+  || fail "OV1: the Codex call B speaks from its own record: safedeps did not add the flag (${ov1_b_post_file})"
 [[ ! -e "$(call_record exec-ov1-b)" && -f "$(call_record toolu_ov1_a)" ]] \
   || fail "OV1: B's post hook takes B's record and leaves A's"
 printf '%s\n' "${tampered_lock}" > "${ov1_wt}/package-lock.json"
-ov1_a_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${ov1_wt}" "${ov1_cmd}" toolu_ov1_a)
-post_message "${ov1_a_post}" | grep -x 'safedeps added --ignore-scripts to this install' >/dev/null \
-  || fail "OV1: the Claude Code call A speaks from its own record: safedeps added the flag (${ov1_a_post})"
+ov1_a_post_file=$(PATH="${stub_bin}:${PATH}" grammar_post "${ov1_wt}" "${ov1_cmd}" toolu_ov1_a)
+post_message "${ov1_a_post_file}" | grep -x 'safedeps added --ignore-scripts to this install' >/dev/null \
+  || fail "OV1: the Claude Code call A speaks from its own record: safedeps added the flag (${ov1_a_post_file})"
 [[ ! -e "$(call_record toolu_ov1_a)" ]] || fail "OV1: A's post hook takes A's record"
 pass "two overlapping calls of one install each speak from their own record"
 
@@ -2198,9 +2198,9 @@ grammar_project "${ov2_wt}"
 grammar_pre "${ov2_wt}" "npm install fixture-parent@1.0.0" > /dev/null
 ov2_record=$(grammar_pending "${ov2_wt}")
 printf '%s\n' "${tampered_lock}" > "${ov2_wt}/package-lock.json"
-ov2_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${ov2_wt}" "npm install fixture-parent@1.0.0" toolu_ov2_b)
-post_message "${ov2_post}" | grep 'this hook found no record of this command from before it ran\.' >/dev/null \
-  || fail "OV2: a call with no record of its own goes to the backstop (${ov2_post})"
+ov2_post_file=$(PATH="${stub_bin}:${PATH}" grammar_post "${ov2_wt}" "npm install fixture-parent@1.0.0" toolu_ov2_b)
+post_message "${ov2_post_file}" | grep 'this hook found no record of this command from before it ran\.' >/dev/null \
+  || fail "OV2: a call with no record of its own goes to the backstop (${ov2_post_file})"
 [[ -n "${ov2_record}" && -f "${ov2_record}" ]] || fail "OV2: the other call's record stays"
 rm -f "${ov2_record}" "${ov2_record%.json}.trace"
 pass "a call that names a tool_use_id does not take the record of a call that named none"
@@ -2218,8 +2218,8 @@ jq '.description = "edited by the user"' "${o2_wt}/package.json" > "${o2_wt}/pac
   && mv "${o2_wt}/package.json.edit" "${o2_wt}/package.json"
 o2_cmd=$(hook_response_read required-rewrite "$(grammar_pre "${o2_wt}" "npm install fixture-parent@1.0.0" toolu_o2)")
 printf '%s\n' "${tampered_lock}" > "${o2_wt}/package-lock.json"
-o2_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${o2_wt}" "${o2_cmd}" toolu_o2)
-grep -q 'A rollback ran\.' < "${o2_post}" || fail "O2: the unapproved lockfile is rolled back (${o2_post})"
+o2_post_file=$(PATH="${stub_bin}:${PATH}" grammar_post "${o2_wt}" "${o2_cmd}" toolu_o2)
+grep -q 'A rollback ran\.' < "${o2_post_file}" || fail "O2: the unapproved lockfile is rolled back (${o2_post_file})"
 [[ "$(jq -r '.description // empty' "${o2_wt}/package.json")" == 'edited by the user' ]] \
   || fail "O2: the rollback keeps the edit made after the rejected call ($(cat "${o2_wt}/package.json"))"
 [[ -f "$(call_record toolu_o2_rejected)" ]] || fail "O2: the rejected call's record stays for the age sweep"
@@ -2241,9 +2241,9 @@ mm_record=$(grammar_pending "${mm_wt}")
 rm -f "$(gone_meta_of "${mm_record}")"
 grammar_pre "${mm_parent}" 'FOO=a\\ npm install fixture-parent@1.0.0' toolu_mm > /dev/null
 [[ -f "$(bs_entry toolu_mm)" ]] || fail "MM: the pre-guard leaves the call a trace entry"
-mm_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${mm_wt}" 'FOO=a\\ npm install fixture-parent@1.0.0' toolu_mm)
-! grep -q 'this hook found a pre-guard record' < "${mm_post}" \
-  || fail "MM: a call with a trace entry is not judged by another call's record (${mm_post})"
+mm_post_file=$(PATH="${stub_bin}:${PATH}" grammar_post "${mm_wt}" 'FOO=a\\ npm install fixture-parent@1.0.0' toolu_mm)
+! grep -q 'this hook found a pre-guard record' < "${mm_post_file}" \
+  || fail "MM: a call with a trace entry is not judged by another call's record (${mm_post_file})"
 [[ -f "${mm_record}" ]] || fail "MM: the other call's record stays"
 grep -qF "the trace entry for this call was taken for another directory or command" "${SAFEDEPS_HOME}/advisory.log" \
   || fail "MM: advisory.log says the entry was taken for another directory"
@@ -2261,8 +2261,8 @@ noid_record=$(grammar_pending "${noid_wt}")
 grep -qF "pre-guard: this hook's input names no tool_use_id, so the record of this install is kept under its directory and command" "${SAFEDEPS_HOME}/advisory.log" \
   || fail "the pre-guard records that a call names no tool_use_id"
 touch "${noid_wt}/package-lock.json"
-noid_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${noid_wt}" "${noid_cmd}")
-hook_response_parse "${noid_post}" quiet && [[ ! -e "${noid_record}" ]] || fail "a call with no tool_use_id is judged from the record found by the key (${noid_post})"
+noid_post_file=$(PATH="${stub_bin}:${PATH}" grammar_post "${noid_wt}" "${noid_cmd}")
+hook_response_parse "${noid_post_file}" quiet && [[ ! -e "${noid_record}" ]] || fail "a call with no tool_use_id is judged from the record found by the key (${noid_post_file})"
 grep -qF "post-verify: this hook's input names no tool_use_id, so it took the record ${noid_record} by the directory and the command" "${SAFEDEPS_HOME}/advisory.log" \
   || fail "the post hook records that it took a record by the key"
 pass "a call with no tool_use_id is judged as before, and both hooks record it"
@@ -2290,9 +2290,9 @@ grammar_project "${fa_claude_wt}"
 fa_claude_cmd=$(hook_response_read required-rewrite "$(grammar_pre "${fa_claude_wt}" "npm install fixture-parent@1.0.0" toolu_fa_claude)")
 [[ -f "$(call_record toolu_fa_claude)" ]] || fail "a failed install on Claude Code: the pre-guard leaves its record"
 printf '%s\n' "${tampered_lock}" > "${fa_claude_wt}/package-lock.json"
-fa_claude_post=$(PATH="${stub_bin}:${PATH}" fail_post_claude "${fa_claude_wt}" "${fa_claude_cmd}" toolu_fa_claude)
-grep -q 'A rollback ran\.' < "${fa_claude_post}" || fail "a failed install on Claude Code is judged and rolled back (${fa_claude_post})"
-post_message "${fa_claude_post}" | grep -x 'safedeps added --ignore-scripts to this install' >/dev/null \
+fa_claude_post_file=$(PATH="${stub_bin}:${PATH}" fail_post_claude "${fa_claude_wt}" "${fa_claude_cmd}" toolu_fa_claude)
+grep -q 'A rollback ran\.' < "${fa_claude_post_file}" || fail "a failed install on Claude Code is judged and rolled back (${fa_claude_post_file})"
+post_message "${fa_claude_post_file}" | grep -x 'safedeps added --ignore-scripts to this install' >/dev/null \
   || fail "a failed install on Claude Code speaks from its own record"
 [[ ! -e "$(call_record toolu_fa_claude)" && "$(call_records_of "${fa_claude_wt}")" == 0 ]] \
   || fail "a failed install on Claude Code leaves no record"
@@ -2300,9 +2300,9 @@ fa_codex_wt="${tmp_root}/fa-codex-wt"
 grammar_project "${fa_codex_wt}"
 grammar_pre_codex "${fa_codex_wt}" "npm install fixture-parent@1.0.0" exec-fa-codex > /dev/null
 printf '%s\n' "${tampered_lock}" > "${fa_codex_wt}/package-lock.json"
-fa_codex_post=$(PATH="${stub_bin}:${PATH}" fail_post_codex "${fa_codex_wt}" "npm install fixture-parent@1.0.0" exec-fa-codex)
-grep -q 'A rollback ran\.' < "${fa_codex_post}" || fail "a failed install on Codex is judged and rolled back (${fa_codex_post})"
-post_message "${fa_codex_post}" | grep -x 'safedeps did not add --ignore-scripts to this install' >/dev/null \
+fa_codex_post_file=$(PATH="${stub_bin}:${PATH}" fail_post_codex "${fa_codex_wt}" "npm install fixture-parent@1.0.0" exec-fa-codex)
+grep -q 'A rollback ran\.' < "${fa_codex_post_file}" || fail "a failed install on Codex is judged and rolled back (${fa_codex_post_file})"
+post_message "${fa_codex_post_file}" | grep -x 'safedeps did not add --ignore-scripts to this install' >/dev/null \
   || fail "a failed install on Codex speaks from its own record"
 [[ "$(call_records_of "${fa_codex_wt}")" == 0 ]] || fail "a failed install on Codex leaves no record"
 pass "a failed install is judged and leaves no record, on both engines"
@@ -2317,8 +2317,8 @@ printf '%s\n' "${tampered_lock}" > "${bs_sec_wt}/package-lock.json"
 SAFEDEPS_TEST_FAULT=bs_sec grammar_pre "${bs_sec_wt}" "${bs_grep}" toolu_bs_sec > /dev/null
 [[ "$(jq -r .resolution "$(bs_entry toolu_bs_sec)")" == seconds ]] \
   || fail "a baseline with no part below the second is set back ($(cat "$(bs_entry toolu_bs_sec)"))"
-bs_sec_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${bs_sec_wt}" "${bs_grep}" toolu_bs_sec)
-bs_assert_rollback "${bs_sec_wt}" "${bs_sec_post}" "a grep on a whole-second filesystem" \
+bs_sec_post_file=$(PATH="${stub_bin}:${PATH}" grammar_post "${bs_sec_wt}" "${bs_grep}" toolu_bs_sec)
+bs_assert_rollback "${bs_sec_wt}" "${bs_sec_post_file}" "a grep on a whole-second filesystem" \
   "$(cd -P "${bs_sec_wt}" && pwd -P)/package-lock.json changed after the baseline taken before this command"
 pass "on a filesystem that keeps whole seconds the baseline is set two seconds back"
 
@@ -2360,13 +2360,13 @@ printf 'x\n' > "${bs_mix_wt}/node_modules/installed-package/added.js"
 bs_mix_base="${tmp_root}/bs-mix-baseline"
 touch -r "$(jq -r .baseline <<< "${bs_mix_entry:-null}")" "${bs_mix_base}" 2>/dev/null || : > "${bs_mix_base}"
 bs_mix_walk=$(python3 "${bs_mix_bin}/whole-second-walk.py" "${bs_mix_wt}/node_modules" "${bs_mix_base}")
-bs_mix_post=$(SAFEDEPS_TEST_FAULT=bs_mix PATH="${stub_bin}:${PATH}" grammar_post "${bs_mix_wt}" "npm run deps:add" toolu_bs_mix)
+bs_mix_post_file=$(SAFEDEPS_TEST_FAULT=bs_mix PATH="${stub_bin}:${PATH}" grammar_post "${bs_mix_wt}" "npm run deps:add" toolu_bs_mix)
 [[ "$(jq -r .resolution <<< "${bs_mix_entry:-null}")" == seconds ]] \
   || fail "a write into node_modules on a whole-second mount beside a subsecond lockfile: the baseline is set back (${bs_mix_entry})"
 [[ "${bs_mix_walk}" == "${bs_mix_wt}/node_modules"* ]] \
   || fail "a write into node_modules on a whole-second mount beside a subsecond lockfile: the walk from the entry's baseline finds it (${bs_mix_walk})"
 grep -qF "post-verify BACKSTOP traced: $(cd -P "${bs_mix_wt}" && pwd -P)/node_modules" "${SAFEDEPS_HOME}/advisory.log" \
-  || fail "a write into node_modules on a whole-second mount beside a subsecond lockfile: the backstop counts it as traced (${bs_mix_post})"
+  || fail "a write into node_modules on a whole-second mount beside a subsecond lockfile: the backstop counts it as traced (${bs_mix_post_file})"
 pass "a tree with one part on a whole-second filesystem sets the baseline back"
 
 # A source copy delays the actual native walk past its deadline.
@@ -2374,8 +2374,8 @@ bs_slow_wt="${tmp_root}/bs-slow-wt"
 bs_project "${bs_slow_wt}"
 bs_pull "${bs_slow_wt}"
 grammar_pre "${bs_slow_wt}" "${bs_grep}" toolu_bs_slow > /dev/null
-bs_slow_post=$(SAFEDEPS_TEST_FAULT=bs_slow PATH="${stub_bin}:${PATH}" SAFEDEPS_BACKSTOP_WALK_SECONDS=1 grammar_post "${bs_slow_wt}" "${bs_grep}" toolu_bs_slow)
-bs_assert_rollback "${bs_slow_wt}" "${bs_slow_post}" "a walk past its deadline" \
+bs_slow_post_file=$(SAFEDEPS_TEST_FAULT=bs_slow PATH="${stub_bin}:${PATH}" SAFEDEPS_BACKSTOP_WALK_SECONDS=1 grammar_post "${bs_slow_wt}" "${bs_grep}" toolu_bs_slow)
+bs_assert_rollback "${bs_slow_wt}" "${bs_slow_post_file}" "a walk past its deadline" \
   "the walk of $(cd -P "${bs_slow_wt}" && pwd -P)/node_modules did not finish within 1s"
 pass "a walk that does not finish within its deadline counts as a trace"
 
@@ -2404,23 +2404,23 @@ for inert_case in \
   inert_wt="${tmp_root}/inert-${inert_engine}-${inert_name}-wt"
   grammar_project "${inert_wt}"
   if [[ "${inert_engine}" == codex ]]; then
-    inert_pre=$(grammar_pre_codex "${inert_wt}" "${inert_cmd}")
+    inert_pre_file=$(grammar_pre_codex "${inert_wt}" "${inert_cmd}")
   else
-    inert_pre=$(grammar_pre "${inert_wt}" "${inert_cmd}")
+    inert_pre_file=$(grammar_pre "${inert_wt}" "${inert_cmd}")
   fi
   case "${inert_received}" in
     '') inert_received="${inert_cmd}" ;;
-    =) inert_received=$(hook_response_read required-rewrite "${inert_pre}")
-       [[ "${inert_received}" == *--ignore-scripts* ]] || fail "${inert_name}: the pre-guard rewrites the command on Claude (${inert_pre})" ;;
+    =) inert_received=$(hook_response_read required-rewrite "${inert_pre_file}")
+       [[ "${inert_received}" == *--ignore-scripts* ]] || fail "${inert_name}: the pre-guard rewrites the command on Claude (${inert_pre_file})" ;;
   esac
   printf '%s\n' "${tampered_lock}" > "${inert_wt}/package-lock.json"
   if [[ "${inert_engine}" == codex ]]; then
-    inert_post=$(PATH="${stub_bin}:${PATH}" grammar_post_codex "${inert_wt}" "${inert_received}")
+    inert_post_file=$(PATH="${stub_bin}:${PATH}" grammar_post_codex "${inert_wt}" "${inert_received}")
   else
-    inert_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${inert_wt}" "${inert_received}")
+    inert_post_file=$(PATH="${stub_bin}:${PATH}" grammar_post "${inert_wt}" "${inert_received}")
   fi
-  post_message "${inert_post}" | grep -xF "${inert_said}" >/dev/null \
-    || fail "${inert_engine} ${inert_name}: the --ignore-scripts line says '${inert_said}' (${inert_post})"
+  post_message "${inert_post_file}" | grep -xF "${inert_said}" >/dev/null \
+    || fail "${inert_engine} ${inert_name}: the --ignore-scripts line says '${inert_said}' (${inert_post_file})"
 done
 pass "the --ignore-scripts line is the pre-guard's record and a comparison of bytes, and reads no command"
 
@@ -2453,9 +2453,9 @@ for fetched_engine in claude codex; do
     grammar_pre_codex "${fetched_wt}" "${fetched_cmd}" "exec-fetched-${fetched_engine}" > /dev/null
   else
     fetched_cmd="npm install --ignore-scripts fixture-parent@1.0.0"
-    fetched_pre=$(grammar_pre "${fetched_wt}" "${fetched_cmd}" "toolu_fetched_${fetched_engine}")
-    hook_response_parse "${fetched_pre}" quiet \
-      || fail "fetched (${fetched_engine}): a command that keeps ignore-scripts true leaves stdout quiet (${fetched_pre})"
+    fetched_pre_file=$(grammar_pre "${fetched_wt}" "${fetched_cmd}" "toolu_fetched_${fetched_engine}")
+    hook_response_parse "${fetched_pre_file}" quiet \
+      || fail "fetched (${fetched_engine}): a command that keeps ignore-scripts true leaves stdout quiet (${fetched_pre_file})"
   fi
   cat > "${fetched_wt}/package-lock.json" <<EOF
 {
@@ -2469,17 +2469,17 @@ for fetched_engine in claude codex; do
 }
 EOF
   if [[ "${fetched_engine}" == codex ]]; then
-    fetched_post=$(PATH="${fetched_bin}:${PATH}" grammar_post_codex "${fetched_wt}" "${fetched_cmd}" "exec-fetched-${fetched_engine}")
+    fetched_post_file=$(PATH="${fetched_bin}:${PATH}" grammar_post_codex "${fetched_wt}" "${fetched_cmd}" "exec-fetched-${fetched_engine}")
     fetched_said='. safedeps did not add --ignore-scripts to this install (on Codex it cannot), so their install scripts may already have run. '
   else
-    fetched_post=$(PATH="${fetched_bin}:${PATH}" grammar_post "${fetched_wt}" "${fetched_cmd}" "toolu_fetched_${fetched_engine}")
+    fetched_post_file=$(PATH="${fetched_bin}:${PATH}" grammar_post "${fetched_wt}" "${fetched_cmd}" "toolu_fetched_${fetched_engine}")
     fetched_said='. safedeps did not add --ignore-scripts to this install, so their install scripts may already have run. '
   fi
-  ! grep -q 'A rollback ran\.' < "${fetched_post}" || fail "fetched (${fetched_engine}): the install is kept (${fetched_post})"
-  post_message "${fetched_post}" | grep '^this install fetched packages from a registry that is not the public npm registry (' >/dev/null \
-    || fail "fetched (${fetched_engine}): the warning names the registry (${fetched_post})"
-  post_message "${fetched_post}" | grep -F "${fetched_said}" >/dev/null \
-    || fail "fetched (${fetched_engine}): the warning says why safedeps did not add --ignore-scripts for this engine (${fetched_post})"
+  ! grep -q 'A rollback ran\.' < "${fetched_post_file}" || fail "fetched (${fetched_engine}): the install is kept (${fetched_post_file})"
+  post_message "${fetched_post_file}" | grep '^this install fetched packages from a registry that is not the public npm registry (' >/dev/null \
+    || fail "fetched (${fetched_engine}): the warning names the registry (${fetched_post_file})"
+  post_message "${fetched_post_file}" | grep -F "${fetched_said}" >/dev/null \
+    || fail "fetched (${fetched_engine}): the warning says why safedeps did not add --ignore-scripts for this engine (${fetched_post_file})"
 done
 pass "the registry warning says safedeps cannot add --ignore-scripts on Codex only of a Codex call"
 
@@ -2501,16 +2501,16 @@ for lk_case in write keep; do
     mkdir -p "${lk_target}/node_modules/@s/evil"
     printf '{"name":"@s/evil","version":"1.0.0"}\n' > "${lk_target}/node_modules/@s/evil/package.json"
   fi
-  lk_post=$(PATH="${emptying_bin}:${PATH}" grammar_post "${lk_wt}" "npm install --ignore-scripts fixture-parent@1.0.0 --ignore-scripts")
-  lk_message=$(post_message "${lk_post}")
+  lk_post_file=$(PATH="${emptying_bin}:${PATH}" grammar_post "${lk_wt}" "npm install --ignore-scripts fixture-parent@1.0.0 --ignore-scripts")
+  lk_message=$(post_message "${lk_post_file}")
   if [[ "${lk_case}" == write ]]; then
     grep -qx ".*/lk-write-wt/node_modules lists .*/lk-write-wt/node_modules/@s/evil/package.json, which the pre-command snapshot .* does not" <<< "${lk_message}" \
-      || fail "a package written through a linked node_modules is the reason line (${lk_post})"
+      || fail "a package written through a linked node_modules is the reason line (${lk_post_file})"
     grep -q '^refused removal of .*/lk-write-wt/node_modules: ' <<< "${lk_message}" || fail "the removal of the linked node_modules is refused"
     [[ -f "${lk_target}/node_modules/@s/evil/package.json" ]] || fail "a rollback leaves the target of a linked node_modules alone"
   else
     grep -A1 -x 'kept .*/lk-keep-wt/node_modules' <<< "${lk_message}" | grep  '/lk-keep-wt/node_modules is a symbolic link to ' >/dev/null \
-      || fail "a kept node_modules that is a link is said as one, right after the kept line (${lk_post})"
+      || fail "a kept node_modules that is a link is said as one, right after the kept line (${lk_post_file})"
     [[ -f "${lk_target}/node_modules/@s/a/package.json" ]] || fail "a kept linked node_modules keeps what it holds"
   fi
 done
@@ -2526,9 +2526,9 @@ rm -f "${cpdir_wt}/package-lock.json"
 mkdir "${cpdir_wt}/package-lock.json" "${cpdir_wt}/node_modules/.bin"
 # A native binary is what rejects this install; the lockfile is a directory.
 cp /bin/echo "${cpdir_wt}/node_modules/.bin/native-drop"
-cpdir_post=$(PATH="${emptying_bin}:${PATH}" grammar_post "${cpdir_wt}" "npm install --ignore-scripts fixture-parent@1.0.0 --ignore-scripts")
-post_message "${cpdir_post}" | grep -x 'not restored .*/cpdir-wt/package-lock.json: .*/cpdir-wt/package-lock.json exists and is not a regular file' >/dev/null \
-  || fail "a restore target that is a directory is said as one (${cpdir_post})"
+cpdir_post_file=$(PATH="${emptying_bin}:${PATH}" grammar_post "${cpdir_wt}" "npm install --ignore-scripts fixture-parent@1.0.0 --ignore-scripts")
+post_message "${cpdir_post_file}" | grep -x 'not restored .*/cpdir-wt/package-lock.json: .*/cpdir-wt/package-lock.json exists and is not a regular file' >/dev/null \
+  || fail "a restore target that is a directory is said as one (${cpdir_post_file})"
 [[ -z "$(ls -A "${cpdir_wt}/package-lock.json")" ]] || fail "the rollback writes nothing inside a directory where the lockfile was"
 pass "a restore target that is not a regular file is named and left alone"
 
@@ -2540,8 +2540,8 @@ grammar_project "${cpfail_wt}"
 mkdir -p "${cpfail_wt}/node_modules/installed-package"
 grammar_pre "${cpfail_wt}" "npm install fixture-parent@1.0.0" > /dev/null
 printf '%s\n' "${tampered_lock}" > "${cpfail_wt}/package-lock.json"
-cpfail_post=$(SAFEDEPS_TEST_FAULT=cpfail PATH="${emptying_bin}:${PATH}" grammar_post "${cpfail_wt}" "npm install fixture-parent@1.0.0")
-post_message "${cpfail_post}" | grep -E '^not restored .*/cpfail-wt/package-lock.json: copy returned OS error 13; .*/cpfail-wt/package-lock.json differs from the snapshot$' >/dev/null \
+cpfail_post_file=$(SAFEDEPS_TEST_FAULT=cpfail PATH="${emptying_bin}:${PATH}" grammar_post "${cpfail_wt}" "npm install fixture-parent@1.0.0")
+post_message "${cpfail_post_file}" | grep -E '^not restored .*/cpfail-wt/package-lock.json: copy returned OS error 13; .*/cpfail-wt/package-lock.json differs from the snapshot$' >/dev/null \
   || fail "a restore whose copy failed is reported with the copy's OS error"
 [[ ! -e "${cpfail_wt}/node_modules" ]] || fail "the rollback goes on to node_modules after a restore that failed"
 [[ -z "$(find "${SAFEDEPS_HOME}/rollback-journal" -maxdepth 1 -name '*.json' 2>/dev/null)" ]] \
@@ -2553,8 +2553,8 @@ grammar_project "${copy_noop_wt}"
 mkdir -p "${copy_noop_wt}/node_modules/installed-package"
 grammar_pre "${copy_noop_wt}" "npm install fixture-parent@1.0.0" > /dev/null
 printf '%s\n' "${tampered_lock}" > "${copy_noop_wt}/package-lock.json"
-copy_noop_post=$(SAFEDEPS_TEST_FAULT=copy-noop PATH="${emptying_bin}:${PATH}" grammar_post "${copy_noop_wt}" "npm install fixture-parent@1.0.0")
-post_message "${copy_noop_post}" | grep -E '^not restored .*/copy-noop-wt/package-lock.json: copy returned without error; .*/copy-noop-wt/package-lock.json differs from the snapshot$' >/dev/null \
+copy_noop_post_file=$(SAFEDEPS_TEST_FAULT=copy-noop PATH="${emptying_bin}:${PATH}" grammar_post "${copy_noop_wt}" "npm install fixture-parent@1.0.0")
+post_message "${copy_noop_post_file}" | grep -E '^not restored .*/copy-noop-wt/package-lock.json: copy returned without error; .*/copy-noop-wt/package-lock.json differs from the snapshot$' >/dev/null \
   || fail "a copy returning without error still reports the differing bytes"
 [[ ! -e "${copy_noop_wt}/node_modules" ]] || fail "rollback continues after a copy returned without restoring bytes"
 [[ -z "$(find "${SAFEDEPS_HOME}/rollback-journal" -maxdepth 1 -name '*.json' 2>/dev/null)" ]] \
@@ -2570,9 +2570,9 @@ rm -f "${cpgone_wt}/package-lock.json"
 mkdir -p "${cpgone_wt}/node_modules/.bin" "${cpgone_wt}/node_modules/fixture-parent"
 printf '{"name":"fixture-parent","version":"1.0.0"}\n' > "${cpgone_wt}/node_modules/fixture-parent/package.json"
 cp /bin/echo "${cpgone_wt}/node_modules/.bin/native-drop"
-cpgone_post=$(SAFEDEPS_TEST_FAULT=cpgone PATH="${emptying_bin}:${PATH}" grammar_post "${cpgone_wt}" "npm install fixture-parent@1.0.0")
-post_message "${cpgone_post}" | grep -E '^not restored .*/cpgone-wt/package-lock.json: copy returned OS error 13; .*/cpgone-wt/package-lock.json does not exist$' >/dev/null \
-  || fail "a restore that failed over a missing file says the file does not exist (${cpgone_post})"
+cpgone_post_file=$(SAFEDEPS_TEST_FAULT=cpgone PATH="${emptying_bin}:${PATH}" grammar_post "${cpgone_wt}" "npm install fixture-parent@1.0.0")
+post_message "${cpgone_post_file}" | grep -E '^not restored .*/cpgone-wt/package-lock.json: copy returned OS error 13; .*/cpgone-wt/package-lock.json does not exist$' >/dev/null \
+  || fail "a restore that failed over a missing file says the file does not exist (${cpgone_post_file})"
 if [[ "$(id -u)" != 0 ]]; then
   readonly_wt="${tmp_root}/readonly-wt"
   grammar_project "${readonly_wt}"
@@ -2580,10 +2580,10 @@ if [[ "$(id -u)" != 0 ]]; then
   grammar_pre "${readonly_wt}" "npm install fixture-parent@1.0.0" > /dev/null
   printf '%s\n' "${tampered_lock}" > "${readonly_wt}/package-lock.json"
   chmod 444 "${readonly_wt}/package-lock.json"
-  readonly_post=$(PATH="${emptying_bin}:${PATH}" grammar_post "${readonly_wt}" "npm install fixture-parent@1.0.0")
+  readonly_post_file=$(PATH="${emptying_bin}:${PATH}" grammar_post "${readonly_wt}" "npm install fixture-parent@1.0.0")
   chmod 644 "${readonly_wt}/package-lock.json"
-  post_message "${readonly_post}" | grep -E '^not restored .*/readonly-wt/package-lock.json: copy returned OS error 13; ' >/dev/null \
-    || fail "a read-only lockfile is reported as not restored (${readonly_post})"
+  post_message "${readonly_post_file}" | grep -E '^not restored .*/readonly-wt/package-lock.json: copy returned OS error 13; ' >/dev/null \
+    || fail "a read-only lockfile is reported as not restored (${readonly_post_file})"
   [[ ! -e "${readonly_wt}/node_modules" ]] || fail "the rollback goes on to node_modules past a read-only lockfile"
 fi
 pass "a restore that fails is a line of the rollback, not the end of the hook"
@@ -2595,8 +2595,8 @@ grammar_project "${rmfail_wt}"
 mkdir -p "${rmfail_wt}/node_modules/installed-package"
 grammar_pre "${rmfail_wt}" "npm install fixture-parent@1.0.0" > /dev/null
 printf '%s\n' "${tampered_lock}" > "${rmfail_wt}/package-lock.json"
-rmfail_post=$(SAFEDEPS_TEST_FAULT=rmfail PATH="${emptying_bin}:${PATH}" grammar_post "${rmfail_wt}" "npm install fixture-parent@1.0.0")
-post_message "${rmfail_post}" | grep -E '^not removed .*/rmfail-wt/node_modules: removal returned OS error 13; .*/rmfail-wt/node_modules exists$' >/dev/null \
+rmfail_post_file=$(SAFEDEPS_TEST_FAULT=rmfail PATH="${emptying_bin}:${PATH}" grammar_post "${rmfail_wt}" "npm install fixture-parent@1.0.0")
+post_message "${rmfail_post_file}" | grep -E '^not removed .*/rmfail-wt/node_modules: removal returned OS error 13; .*/rmfail-wt/node_modules exists$' >/dev/null \
   || fail "a removal that failed is reported with the removal's OS error and what a test of the path returned"
 pass "a removal that fails says the OS error and that the path exists"
 
@@ -2608,9 +2608,9 @@ printf '{"dependencies":{}}\n' > "${gone_wt}/package.json"
 grammar_pre "${gone_wt}" "npm install fixture-parent@1.0.0" > /dev/null
 rm -f "$(jq -r '.npm_trace.baseline' "$(grammar_pending "${gone_wt}")")"
 cp "${tmp_root}/revert-safe-lock.json" "${gone_wt}/package-lock.json"
-gone_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${gone_wt}" "npm install --ignore-scripts fixture-parent@1.0.0 --ignore-scripts")
-post_message "${gone_post}" | grep 'did not run npm rebuild: no install trace in .*/baseline-gone-wt: the baseline file .* does not exist$' >/dev/null \
-  || fail "an install whose trace baseline is gone is reported as that, not as an install that changed nothing (${gone_post})"
+gone_post_file=$(PATH="${stub_bin}:${PATH}" grammar_post "${gone_wt}" "npm install --ignore-scripts fixture-parent@1.0.0 --ignore-scripts")
+post_message "${gone_post_file}" | grep 'did not run npm rebuild: no install trace in .*/baseline-gone-wt: the baseline file .* does not exist$' >/dev/null \
+  || fail "an install whose trace baseline is gone is reported as that, not as an install that changed nothing (${gone_post_file})"
 unset_wt="${tmp_root}/baseline-unset-wt"
 mkdir -p "${unset_wt}/node_modules/installed-package"
 printf '{"dependencies":{"fixture-parent":"1.0.0"}}\n' > "${unset_wt}/package.json"
@@ -2618,9 +2618,9 @@ printf '%s\n' "${tampered_lock}" > "${unset_wt}/package-lock.json"
 grammar_pre "${unset_wt}" "npm install fixture-parent@1.0.0" > /dev/null
 unset_pending=$(grammar_pending "${unset_wt}")
 jq -c 'del(.npm_trace)' "${unset_pending}" > "${unset_pending}.tmp" && mv "${unset_pending}.tmp" "${unset_pending}"
-unset_post=$(PATH="${emptying_bin}:${PATH}" grammar_post "${unset_wt}" "npm install fixture-parent@1.0.0")
-post_message "${unset_post}" | grep '^the pending state of this command names no install-trace baseline$' >/dev/null \
-  || fail "a node_modules kept without a trace baseline says there was none to read (${unset_post})"
+unset_post_file=$(PATH="${emptying_bin}:${PATH}" grammar_post "${unset_wt}" "npm install fixture-parent@1.0.0")
+post_message "${unset_post_file}" | grep '^the pending state of this command names no install-trace baseline$' >/dev/null \
+  || fail "a node_modules kept without a trace baseline says there was none to read (${unset_post_file})"
 [[ -d "${unset_wt}/node_modules/installed-package" ]] || fail "node_modules is kept where no check shows the command wrote it"
 pass "a missing install trace is said as the check that found none"
 
@@ -2642,14 +2642,14 @@ for rebuildfail_case in "added|npm install --ignore-scripts fixture-parent@1.0.0
   grammar_pre "${rebuildfail_wt}" "npm install fixture-parent@1.0.0" > /dev/null
   cp "${inert_project}/package-lock.json" "${rebuildfail_wt}/package-lock.json"
   cp "${inert_project}/package-lock.json" "${rebuildfail_wt}/node_modules/.package-lock.json"
-  rebuildfail_post=$(PATH="${rebuildfail_bin}:${PATH}" grammar_post "${rebuildfail_wt}" "${rebuildfail_case#*|}")
+  rebuildfail_post_file=$(PATH="${rebuildfail_bin}:${PATH}" grammar_post "${rebuildfail_wt}" "${rebuildfail_case#*|}")
   if [[ "${rebuildfail_case%%|*}" == added ]]; then
-    post_message "${rebuildfail_post}" | grep '^safedeps added --ignore-scripts to this install and ran npm rebuild: exit 3$' >/dev/null \
-      || fail "a failed rebuild says its exit status (${rebuildfail_post})"
+    post_message "${rebuildfail_post_file}" | grep '^safedeps added --ignore-scripts to this install and ran npm rebuild: exit 3$' >/dev/null \
+      || fail "a failed rebuild says its exit status (${rebuildfail_post_file})"
   else
-    post_message "${rebuildfail_post}" | grep '^safedeps ran npm rebuild: exit 3$' >/dev/null \
-      || fail "a failed rebuild says its exit status where the command did not carry the flag (${rebuildfail_post})"
-    post_message "${rebuildfail_post}" | grep '^safedeps asked for --ignore-scripts on this install; the command this hook received is not the one safedeps wrote$' >/dev/null \
+    post_message "${rebuildfail_post_file}" | grep '^safedeps ran npm rebuild: exit 3$' >/dev/null \
+      || fail "a failed rebuild says its exit status where the command did not carry the flag (${rebuildfail_post_file})"
+    post_message "${rebuildfail_post_file}" | grep '^safedeps asked for --ignore-scripts on this install; the command this hook received is not the one safedeps wrote$' >/dev/null \
       || fail "safedeps does not say it added a flag to a command this hook did not receive"
   fi
 done
@@ -2659,14 +2659,14 @@ done
 rebuildquoted_wt="${tmp_root}/rebuildfail-quoted-wt"
 mkdir -p "${rebuildquoted_wt}/node_modules"
 printf '{"dependencies":{}}\n' > "${rebuildquoted_wt}/package.json"
-rebuildquoted_pre=$(grammar_pre "${rebuildquoted_wt}" "npm install 'fixture-parent@1.0.0'")
-rebuildquoted_cmd=$(hook_response_read required-rewrite "${rebuildquoted_pre}")
-[[ "${rebuildquoted_cmd}" == *--ignore-scripts* ]] || fail "the pre-guard rewrites a quoted install on Claude (${rebuildquoted_pre})"
+rebuildquoted_pre_file=$(grammar_pre "${rebuildquoted_wt}" "npm install 'fixture-parent@1.0.0'")
+rebuildquoted_cmd=$(hook_response_read required-rewrite "${rebuildquoted_pre_file}")
+[[ "${rebuildquoted_cmd}" == *--ignore-scripts* ]] || fail "the pre-guard rewrites a quoted install on Claude (${rebuildquoted_pre_file})"
 cp "${inert_project}/package-lock.json" "${rebuildquoted_wt}/package-lock.json"
 cp "${inert_project}/package-lock.json" "${rebuildquoted_wt}/node_modules/.package-lock.json"
-rebuildquoted_post=$(PATH="${rebuildfail_bin}:${PATH}" grammar_post "${rebuildquoted_wt}" "${rebuildquoted_cmd}")
-post_message "${rebuildquoted_post}" | grep -x 'safedeps added --ignore-scripts to this install and ran npm rebuild: exit 3' >/dev/null \
-  || fail "the command the pre-guard wrote is said as added, quoted words and all (${rebuildquoted_post})"
+rebuildquoted_post_file=$(PATH="${rebuildfail_bin}:${PATH}" grammar_post "${rebuildquoted_wt}" "${rebuildquoted_cmd}")
+post_message "${rebuildquoted_post_file}" | grep -x 'safedeps added --ignore-scripts to this install and ran npm rebuild: exit 3' >/dev/null \
+  || fail "the command the pre-guard wrote is said as added, quoted words and all (${rebuildquoted_post_file})"
 pass "a rebuild that fails says its exit status, and 'added' only where the command this hook received is the one safedeps wrote"
 
 # The command's own second segment rebuilds: whether install scripts ran is not
@@ -2677,14 +2677,14 @@ segment_wt="${tmp_root}/segment-wt"
 mkdir -p "${segment_main}/node_modules" "${segment_wt}"
 ln -s "${segment_main}/node_modules" "${segment_wt}/node_modules"
 printf '{"dependencies":{}}\n' > "${segment_wt}/package.json"
-segment_pre=$(grammar_pre "${segment_wt}" "npm install fixture-parent@1.0.0 && npm rebuild")
-segment_command=$(hook_response_read required-rewrite "${segment_pre}")
-[[ "${segment_command}" == *--ignore-scripts* ]] || fail "the pre-guard makes an install inert when the command rebuilds after it (${segment_pre})"
+segment_pre_file=$(grammar_pre "${segment_wt}" "npm install fixture-parent@1.0.0 && npm rebuild")
+segment_command=$(hook_response_read required-rewrite "${segment_pre_file}")
+[[ "${segment_command}" == *--ignore-scripts* ]] || fail "the pre-guard makes an install inert when the command rebuilds after it (${segment_pre_file})"
 cp "${tmp_root}/revert-safe-lock.json" "${segment_wt}/package-lock.json"
 : > "${segment_main}/node_modules/script-ran.txt"
-segment_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${segment_wt}" "${segment_command}")
-grep -q 'safedeps added --ignore-scripts to this install and did not run npm rebuild: ' < "${segment_post}" || fail "the skipped rebuild is reported (${segment_post})"
-if grep -qi 'scripts have not run' < "${segment_post}"; then
+segment_post_file=$(PATH="${stub_bin}:${PATH}" grammar_post "${segment_wt}" "${segment_command}")
+grep -q 'safedeps added --ignore-scripts to this install and did not run npm rebuild: ' < "${segment_post_file}" || fail "the skipped rebuild is reported (${segment_post_file})"
+if grep -qi 'scripts have not run' < "${segment_post_file}"; then
   fail "a skipped rebuild does not say install scripts have not run: the command's own rebuild may have run them"
 fi
 pass "a skipped rebuild says what safedeps did, not whether install scripts ran"
@@ -2712,12 +2712,12 @@ missing_project="${tmp_root}/missing-project"
 mkdir -p "${missing_project}"
 printf '{"dependencies":{}}\n' > "${missing_project}/package.json"
 SAFEDEPS_HOME="${SAFEDEPS_HOME}" lib/ledger/ledger.sh approve npm fixture-parent 1.0.0 1.0.0 direct-only >/dev/null
-missing_pre=$(
+missing_pre_file=$(
   pre_hook <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${missing_project}","turn_id":"turn-e2e","model":"codex-test"}
 EOF
 )
-hook_response_parse "${missing_pre}" quiet || fail "missing-transitive pre hook allows direct-only approved spec"
+hook_response_parse "${missing_pre_file}" quiet || fail "missing-transitive pre hook allows direct-only approved spec"
 cat > "${missing_project}/package-lock.json" <<'EOF'
 {
   "name": "missing-project",
@@ -2729,13 +2729,13 @@ cat > "${missing_project}/package-lock.json" <<'EOF'
   }
 }
 EOF
-missing_post=$(
+missing_post_file=$(
   post_hook <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${missing_project}"}
 EOF
 )
-grep -q 'suspicious dependency change detected' < "${missing_post}" || fail "post hook reorgs unapproved transitive package"
-grep -q 'fixture-child@1.0.0' < "${missing_post}" || fail "post hook names unapproved transitive package"
+grep -q 'suspicious dependency change detected' < "${missing_post_file}" || fail "post hook reorgs unapproved transitive package"
+grep -q 'fixture-child@1.0.0' < "${missing_post_file}" || fail "post hook names unapproved transitive package"
 # Not just the message — the unapproved transitive must be gone from the on-disk
 # lockfile. (Reorg removes the tampered lockfile; a no-network reinstall may recreate
 # an empty one, so assert fixture-child is absent rather than the file itself.)
@@ -3011,12 +3011,12 @@ EOF
 cat > "${legacy_skip_safe}/snapshots/${legacy_sid}_meta.json" <<EOF
 {"snapshot_id":"${legacy_sid}","project_dir":"${legacy_pending_project}"}
 EOF
-legacy_skip_out=$(
+legacy_skip_out_file=$(
   SAFEDEPS_HOME="${legacy_skip_safe}" post_hook <<EOF
 {"tool_name":"Bash","tool_input":{"command":"echo done"},"cwd":"${legacy_post_project}"}
 EOF
 )
-hook_response_parse "${legacy_skip_out}" quiet || fail "post hook keeps unrelated Bash quiet beside a pre-#5 record"
+hook_response_parse "${legacy_skip_out_file}" quiet || fail "post hook keeps unrelated Bash quiet beside a pre-#5 record"
 ! grep -q 'post-verify SKIP: legacy' "${legacy_skip_safe}/advisory.log" 2>/dev/null || fail "post hook reads no pre-#5 record, so it skips nothing for one"
 [[ -f "${legacy_skip_safe}/current_state" ]] || fail "post hook does not consume a pre-#5 record"
 pass "post hook leaves a pre-#5 record alone"
@@ -3376,12 +3376,12 @@ printf 'ok - npm overrides drive the verdict and their approval stays scoped\n'
 # The guard has to derive the same key the approval was stored under, or a
 # legitimately approved install looks unapproved at the gate.
 ov_guard_decision() {
-  local dir="$1" out
-  out=$(jq -nc --arg c 'npm install mkdirp@0.5.1' --arg cwd "${dir}" \
+  local dir="$1" out_file
+  out_file=$(jq -nc --arg c 'npm install mkdirp@0.5.1' --arg cwd "${dir}" \
     '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' \
     | ( cd "${dir}" && HOME="${ov_home}" SAFEDEPS_HOME="${ov_home}" \
         PATH="${ov_npm_bin}:${PATH}" hook_response_capture "${tmp_root}/override-response" native_fixture_hook pre ))
-  hook_response_read decision "${out}"
+  hook_response_read decision "${out_file}"
 }
 [[ "$(ov_guard_decision "${ov_patched_repo}")" == "allow" ]] \
   || fail "the guard reproduces the overrides approval key for the repo that earned it"
@@ -3598,8 +3598,8 @@ done
 race_zombie_pid=$(cat "${tmp_root}/zombie-pid" 2>/dev/null)
 if [[ -n "${race_zombie_pid}" ]] && [[ "$(ps -o stat= -p "${race_zombie_pid}" 2>/dev/null)" == Z* ]]; then
   race_write_entry "${race_zombie_pid}" "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-  race_zombie_out=$(race_report)
-  grep -q 'did not finish' < "${race_zombie_out}" \
+  race_zombie_out_file=$(race_report)
+  grep -q 'did not finish' < "${race_zombie_out_file}" \
     || fail "a rollback whose owner is an unreaped zombie is reported, not suppressed"
   printf 'ok - an unreaped (zombie) owner does not suppress the report\n'
 
@@ -3618,15 +3618,15 @@ kill -STOP "${race_stopped_pid}" 2>/dev/null
 sleep 0.3
 if [[ "$(ps -o stat= -p "${race_stopped_pid}" 2>/dev/null)" == *T* ]]; then
   race_write_entry "${race_stopped_pid}" "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-  race_stopped_out=$(race_report)
-  grep -q 'has not finished' < "${race_stopped_out}" \
+  race_stopped_out_file=$(race_report)
+  grep -q 'has not finished' < "${race_stopped_out_file}" \
     || fail "a stopped owner is reported as a rollback that has not finished, not as one that did not"
   # The bash hook asks ps and says `ps state`; the core reads the process
   # table itself and says `process state`, since it ran no ps. The report
   # oracle takes both spellings, and so does this row.
-  grep -qE "Owner: pid ${race_stopped_pid} is stopped \((ps|process) state " < "${race_stopped_out}" \
+  grep -qE "Owner: pid ${race_stopped_pid} is stopped \((ps|process) state " < "${race_stopped_out_file}" \
     || fail "the stopped report says the owner pid is stopped"
-  if grep -qE 'kill -|SIGCONT|resume' < "${race_stopped_out}"; then
+  if grep -qE 'kill -|SIGCONT|resume' < "${race_stopped_out_file}"; then
     fail "the stopped report gives no command"
   fi
   grep -q 'REORG STOPPED' "${race_home}/reorg.log" \
@@ -3659,10 +3659,10 @@ jq -nc --arg pid "${stage_at_pid}" \
     stage:"removing-node-modules",
     opened_at:"2026-08-05T00:00:00Z", stage_at:"2026-08-05T00:00:07Z", pid:$pid}' \
   > "${race_home}/rollback-journal/test-race.json"
-stage_at_out=$(race_report)
-grep -q 'entered 2026-08-05T00:00:07Z' < "${stage_at_out}" \
+stage_at_out_file=$(race_report)
+grep -q 'entered 2026-08-05T00:00:07Z' < "${stage_at_out_file}" \
   || fail "the report says when the interrupted rollback entered its last stage"
-grep -q '7s into the rollback' < "${stage_at_out}" \
+grep -q '7s into the rollback' < "${stage_at_out_file}" \
   || fail "the report says how far into the rollback that stage was entered"
 
 # An entry that never reached a stage change has no stage_at, and the report

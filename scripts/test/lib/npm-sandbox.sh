@@ -295,7 +295,7 @@ stub_npm_path() {
 # needs it.
 NPM_SANDBOX_CALLS=0
 run_install() {
-  local command="$1" engine="${2:-claude}" between="${3:-}" payload pre exec_command marks_before id post_id
+  local command="$1" engine="${2:-claude}" between="${3:-}" payload pre_file exec_command marks_before id post_id
   # Other sandbox consumers also include already-inert and unjudged commands;
   # they accept a quiet pre response. Lockless selects decision by default and
   # names quiet on its already-inert rows.
@@ -315,10 +315,10 @@ run_install() {
   else
     payload=$(jq -nc --arg c "${command}" --arg d "${CASE_CWD}" --arg id "${id}" '{tool_name:"Bash",tool_input:{command:$c},cwd:$d,tool_use_id:$id}')
   fi
-  pre=$(printf '%s' "${payload}" | PATH="${CASE_PRE_PATH:-${PATH}}" SAFEDEPS_HOME="${CASE_HOME}" hook_response_capture "${CASE_HOME}.${id}-pre" scripts/safedeps-hook-entry.sh pre)
-  CASE_PRE_FILE="${pre}"
-  CASE_PRE=$(< "${pre}")
-  hook_response_parse "${pre}" "${response_expect}" || fail "unreadable pre response: ${command}"
+  pre_file=$(printf '%s' "${payload}" | PATH="${CASE_PRE_PATH:-${PATH}}" SAFEDEPS_HOME="${CASE_HOME}" hook_response_capture "${CASE_HOME}.${id}-pre" scripts/safedeps-hook-entry.sh pre)
+  CASE_PRE_FILE="${pre_file}"
+  CASE_PRE=$(< "${pre_file}")
+  hook_response_parse "${pre_file}" "${response_expect}" || fail "unreadable pre response: ${command}"
   if [[ "${HOOK_DECISION}" == deny ]]; then
     [[ "${NPM_SANDBOX_TOLERANT:-false}" == true ]] || fail "the gate lets the install through to the effect gate: ${command}"
     CASE_PRE_DENY="${HOOK_REASON}"

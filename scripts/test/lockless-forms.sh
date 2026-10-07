@@ -285,9 +285,9 @@ do
     new_project
     : > "${CX_MARKS}"
     cmd="${form//@SPEC@/${spec}}"
-    response=$(jq -nc --arg c "${cmd}" --arg d "${CASE_CWD}" '{tool_name:"Bash",tool_input:{command:$c},cwd:$d}' \
+    response_file=$(jq -nc --arg c "${cmd}" --arg d "${CASE_CWD}" '{tool_name:"Bash",tool_input:{command:$c},cwd:$d}' \
       | SAFEDEPS_HOME="${CASE_HOME}" hook_response_capture "${CASE_HOME}.code-choice" scripts/safedeps-hook-entry.sh pre)
-    decision=$(hook_response_read decision "${response}")
+    decision=$(hook_response_read decision "${response_file}")
     want=allow
     [[ "${spec}" != sd-victim@* ]] || want=deny
     marks=$(wc -l < "${CX_MARKS}" | tr -d ' ')
@@ -699,8 +699,8 @@ cat > "${race_dir}/second-call.sh" <<RACE_EOF
 source "${ROOT_DIR}/scripts/test/lib/hook-response.sh"
 HOOK_RESPONSE_FAILURES="${HOOK_RESPONSE_FAILURES}"
 payload=\$(jq -nc --arg c "npm install sd-victim" --arg d "${CASE_PROJECT}" '{tool_name:"Bash",tool_input:{command:\$c},cwd:\$d}')
-pre=\$(printf '%s' "\${payload}" | SAFEDEPS_HOME="${CASE_HOME}" hook_response_capture "${race_dir}/second-response" "${ROOT_DIR}/scripts/safedeps-hook-entry.sh" pre)
-cmd=\$(hook_response_read required-rewrite "\${pre}") || exit 1
+pre_file=\$(printf '%s' "\${payload}" | SAFEDEPS_HOME="${CASE_HOME}" hook_response_capture "${race_dir}/second-response" "${ROOT_DIR}/scripts/safedeps-hook-entry.sh" pre)
+cmd=\$(hook_response_read required-rewrite "\${pre_file}") || exit 1
 printf '%s' "\${cmd}" > "${race_dir}/second.cmd"
 [[ -n "\${cmd}" ]] && (cd "${CASE_PROJECT}" && bash -c "\${cmd}") > "${race_dir}/second.log" 2>&1
 printf 'exit=%s\n' "\$?" >> "${race_dir}/second.log"
@@ -719,14 +719,14 @@ chmod +x "${race_dir}/second-call.sh" "${race_dir}/shim/npm"
 
 : > "${MARKS}"
 payload=$(jq -nc --arg c "npm install sd-approved" --arg d "${CASE_PROJECT}" '{tool_name:"Bash",tool_input:{command:$c},cwd:$d}')
-pre=$(printf '%s' "${payload}" | SAFEDEPS_HOME="${CASE_HOME}" hook_response_capture "${race_dir}/first-pre" scripts/safedeps-hook-entry.sh pre)
-first_cmd=$(hook_response_read required-rewrite "${pre}")
-[[ "${first_cmd}" == *--ignore-scripts* ]] || fail "the approved install runs inert on Claude Code (pre: ${pre})"
+pre_file=$(printf '%s' "${payload}" | SAFEDEPS_HOME="${CASE_HOME}" hook_response_capture "${race_dir}/first-pre" scripts/safedeps-hook-entry.sh pre)
+first_cmd=$(hook_response_read required-rewrite "${pre_file}")
+[[ "${first_cmd}" == *--ignore-scripts* ]] || fail "the approved install runs inert on Claude Code (pre: ${pre_file})"
 (cd "${CASE_PROJECT}" && bash -c "${first_cmd}" > "${race_dir}/first.log" 2>&1) || fail "the approved install succeeds"
 payload=$(jq -nc --arg c "${first_cmd}" --arg d "${CASE_PROJECT}" '{tool_name:"Bash",tool_input:{command:$c},cwd:$d}')
-first_post=$(printf '%s' "${payload}" | PATH="${race_dir}/shim:${PATH}" SAFEDEPS_HOME="${CASE_HOME}" \
+first_post_file=$(printf '%s' "${payload}" | PATH="${race_dir}/shim:${PATH}" SAFEDEPS_HOME="${CASE_HOME}" \
   hook_response_capture "${race_dir}/first-post" scripts/safedeps-hook-entry.sh post)
-[[ -e "${race_dir}/fired" ]] || fail "the second call ran inside the first one's post-verify (post: ${first_post:-<quiet>})"
+[[ -e "${race_dir}/fired" ]] || fail "the second call ran inside the first one's post-verify (post: ${first_post_file:-<quiet>})"
 second_cmd=$(cat "${race_dir}/second.cmd")
 [[ "${second_cmd}" == *--ignore-scripts* ]] || fail "the second call was let through inert to the effect gate"
 grep -qx 'exit=0' "${race_dir}/second.log" || fail "the second install succeeds ($(tail -3 "${race_dir}/second.log"))"
@@ -756,9 +756,9 @@ for meta in "${CASE_HOME}"/snapshots/*_meta.json; do
 done
 records_dependency sd-approved \
   || fail "the approved install stays (package.json: $(jq -c .dependencies "${CASE_PROJECT}/package.json"))"
-first_message=$(hook_response_read message "${first_post}" message)
+first_message=$(hook_response_read message "${first_post_file}" message)
 [[ "${first_message}" == *'changed while they were being verified'* ]] \
-  || fail "the first install says its baseline was not recorded because the files changed (post: ${first_post:-<quiet>})"
+  || fail "the first install says its baseline was not recorded because the files changed (post: ${first_post_file:-<quiet>})"
 grep -q 'changed while they were being verified' "${CASE_HOME}/advisory.log" \
   || fail "advisory.log records why the baseline did not move"
 pass "an unapproved install that lands while an approved one is verified stays out of the baseline and is rolled back"
