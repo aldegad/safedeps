@@ -16,6 +16,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -122,14 +123,18 @@ def receipt_code(label, detail='b"reached"'):
             + detail + '); /* ' + label + ' */ ')
 
 def prepare(a):
-    if os.geteuid() == 0:
-        raise RuntimeError('permission fixtures require a non-root uid')
-    if platform.system() != 'Darwin':
-        raise RuntimeError('native query source copies currently require Darwin; not a passing unsupported run')
     tree = Path(a.tree).resolve(strict=True)
     core = Path(a.core).resolve(strict=True)
     out = Path(a.output).resolve()
     out.mkdir(parents=True, exist_ok=False)
+    manifest=dict(schema='native-test-fixtures/1',core=str(core),sha256=digest(core),copies={},
+                  receipts=str(out/'reached.jsonl'),uid=os.geteuid(),copies_unavailable='')
+    host = platform.system()
+    if host != 'Darwin':
+        manifest['copies_unavailable'] = 'source-copy fixtures require Darwin; this host is '+host
+        dump(out/'manifest.json',manifest)
+        print(out/'manifest.json')
+        return
     spec = importlib.util.spec_from_file_location('edits', ROOT/'scripts/measure/core-post-native-injections.py')
     module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
     edits = dict(module.EDITS)
@@ -201,9 +206,7 @@ def prepare(a):
         (out/(name+'.stamp.log')).write_bytes(check.stdout+check.stderr)
         if check.returncode:raise RuntimeError(name+': source stamp mismatch')
         rows[name]=dict(core=str(binary),sha256=digest(binary),source=relative,source_sha256=digest(file))
-    manifest=dict(schema='native-test-fixtures/1',core=str(core),sha256=digest(core),copies=rows,
-                  receipts=str(out/'reached.jsonl'),uid=os.geteuid(),
-                  retired={'owner-bad-start':'ps lstart text parser absent; native zero/short/wrong pid and malformed journal opening remain'})
+    manifest.update(copies=rows,retired={'owner-bad-start':'ps lstart text parser absent; native zero/short/wrong pid and malformed journal opening remain'})
     dump(out/'manifest.json',manifest)
     print(out/'manifest.json')
 
@@ -220,6 +223,32 @@ def denied(path, operation):
     except PermissionError as e:
         return dict(path=str(path),operation=operation,errno=e.errno,uid=os.geteuid(),reached=True)
     raise RuntimeError('permission fault did not prevent '+operation+': '+str(path))
+
+def permission_probe(a):
+    """Ask the fixture filesystem as this uid before entering a permission row."""
+    with tempfile.TemporaryDirectory(prefix='permission-probe.',dir=a.directory) as tmp:
+        directory=Path(tmp)/'d';directory.mkdir()
+        path=directory/'f';path.write_bytes(b'fixture bytes')
+        target=path if a.operation in ('read','write') else directory
+        mode=0 if a.operation in ('read','scandir') else 0o444 if a.operation=='write' else 0o555
+        try:
+            target.chmod(mode)
+            try:
+                if a.operation=='scandir':
+                    with os.scandir(directory) as entries:list(entries)
+                elif a.operation=='unlink':path.unlink()
+                else:
+                    flags={'read':os.O_RDONLY,'write':os.O_WRONLY,
+                           'create':os.O_WRONLY|os.O_CREAT|os.O_EXCL}[a.operation]
+                    fd=os.open(directory/'new' if a.operation=='create' else path,flags,0o600)
+                    os.close(fd)
+            except PermissionError as error:
+                if error.errno!=13:raise
+                return
+            print('chmod '+oct(mode)+' does not prevent '+a.operation+' on this filesystem for uid '+str(os.geteuid()))
+        finally:
+            target.chmod(0o700 if target==directory else 0o600)
+
 
 def hook(a):
     manifest=json.loads(Path(a.manifest).read_text())
@@ -335,6 +364,8 @@ def main():
     q.add_argument('--cargo',default='cargo');q.add_argument('--output',required=True)
     for mode in ['hook','checked-hook']:
         q=sub.add_parser(mode);q.add_argument('--manifest',required=True);q.add_argument('--stage',choices=['pre','post'],required=True)
+    q=sub.add_parser('permission-probe');q.add_argument('--directory',required=True)
+    q.add_argument('--operation',choices=['read','write','create','unlink','scandir'],required=True)
     a=p.parse_args()
-    return {'hook':hook,'checked-hook':checked_hook,'prepare':prepare}[a.cmd](a)
+    return {'hook':hook,'checked-hook':checked_hook,'prepare':prepare,'permission-probe':permission_probe}[a.cmd](a)
 if __name__=='__main__':sys.exit(main())

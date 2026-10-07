@@ -10,6 +10,15 @@ pass() {
   printf 'ok - %s\n' "$1"
 }
 
+# A skip is a TAP row, recognized by ci-verdict, but never goes through pass.
+# Keep its stable name separately so the last line exposes the lost coverage.
+skip() {
+  hook_response_assert || fail "a hook response could not be read before a skip"
+  native_fixtures_assert || fail "a native fixture failed before a skip"
+  printf '%s\n' "$1" >> "${tmp_root}/skipped-rows"
+  printf 'ok - %s: SKIPPED (%s)\n' "$1" "$2"
+}
+
 fail() {
   printf 'not ok - %s\n' "$1" >&2
   exit 1
@@ -37,6 +46,7 @@ assert_skipped_rebuild_states_facts() {
 }
 
 tmp_root=$(mktemp -d "${TMPDIR:-/tmp}/safedeps-e2e.XXXXXX")
+: > "${tmp_root}/skipped-rows"
 # shellcheck source=lib/hook-response.sh
 source "${ROOT_DIR}/scripts/test/lib/hook-response.sh"
 hook_response_init "${tmp_root}/hook-response.failures"
@@ -148,7 +158,8 @@ reap_owned_children() {
 }
 
 cleanup() {
-  local cleanup_rc=$?
+  local cleanup_rc=$? skipped_summary
+  skipped_summary=$(awk 'BEGIN { names="" } { names=names (NR>1 ? ", " : "") $0 } END { printf "# skipped rows: %d; names: %s", NR, NR ? names : "none" }' "${tmp_root}/skipped-rows")
   if [[ -n "${server_pid:-}" ]]; then
     kill "${server_pid}" 2>/dev/null || true
     wait "${server_pid}" 2>/dev/null || true
@@ -158,12 +169,17 @@ cleanup() {
     mkdir -p "${SAFEDEPS_TEST_EVIDENCE}"
     cp -R "${tmp_root}/report-oracle" "${SAFEDEPS_TEST_EVIDENCE}/"
     cp "${SAFEDEPS_TEST_FAILURES}" "${SAFEDEPS_TEST_EVIDENCE}/fixture-failures.jsonl"
+    cp "${tmp_root}/skipped-rows" "${SAFEDEPS_TEST_EVIDENCE}/"
+    if [[ -f "${tmp_root}/skipped-forms" ]]; then
+      cp "${tmp_root}/skipped-forms" "${SAFEDEPS_TEST_EVIDENCE}/"
+    fi
   fi
   if [[ "${cleanup_rc}" == 0 ]] && hook_response_assert; then
     rm -rf "${tmp_root}"
   else
     printf '# failed row artifacts: %s\n' "${tmp_root}" >&2
   fi
+  printf '%s\n' "${skipped_summary}"
 }
 trap cleanup EXIT
 sweep_stale_children
@@ -1210,16 +1226,7 @@ pass "a rollback next to another manager's lockfile says which lockfiles are mis
 # the battery under set -e (measured in WSL1 on DrvFs, 2026-10-06). So the row
 # asks the filesystem first, and a row that is not run says so as a skipped
 # row, where the verdict and a reader of the log look for one.
-ro_probe="${tmp_root}/ro-probe"; mkdir -p "${ro_probe}/d"; : > "${ro_probe}/d/f"
-chmod 555 "${ro_probe}/d" 2>/dev/null || true
-if rm -f "${ro_probe}/d/f" 2>/dev/null; then ro_stops_rm=no; else ro_stops_rm=yes; fi
-chmod 755 "${ro_probe}/d" 2>/dev/null || true; rm -rf "${ro_probe}"
-if [[ "$(id -u)" == 0 ]]; then
-  pass "a rollback that cannot remove node_modules: SKIPPED (root removes a read-only directory)"
-elif [[ "${ro_stops_rm}" != yes ]]; then
-  pass "a rollback that cannot remove node_modules: SKIPPED (a read-only directory does not stop rm on this filesystem)"
-fi
-if [[ "$(id -u)" != 0 && "${ro_stops_rm}" == yes ]]; then
+if native_permissions_available unlink; then
   stuck_wt="${tmp_root}/stuck-wt"
   mkdir -p "${stuck_wt}/node_modules/locked-package"
   : > "${stuck_wt}/node_modules/locked-package/index.js"
@@ -1250,6 +1257,8 @@ EOF
   assert_gives_no_command "$(< "${stuck_post_file}")" "the rollback that could not remove node_modules gives no command"
   cmp -s "${stuck_wt}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "the lockfile is still restored where node_modules cannot be removed"
   pass "a rollback that cannot remove node_modules says so and gives no command"
+else
+  skip "stuck-wt" "${NATIVE_SKIP_REASON}"
 fi
 
 # `npm install --no-save <pkg>` in a directory without package.json writes
@@ -1423,6 +1432,7 @@ pass "a rewritten command whose record the post hook does not find gets no --ign
 # to fail quietly and the rewrite went out anyway, so the post hook said "did
 # not add" of a command safedeps had written. An archive copy makes only the rewrite writer
 # directory readonly after initial snapshot/pending creation; the real writer fails.
+if native_copies_available && native_permissions_available create; then
 markfail_wt=$(mktemp -d "${tmp_root}/markfail-wt.XXXXXX")
 grammar_project "${markfail_wt}"
 markfail_pre_file=$(SAFEDEPS_TEST_FAULT=markfail grammar_pre "${markfail_wt}" "npm install fixture-parent@1.0.0")
@@ -1435,11 +1445,15 @@ markfail_post_file=$(PATH="${stub_bin}:${PATH}" grammar_post "${markfail_wt}" "n
 post_message "${markfail_post_file}" | grep -x 'safedeps did not add --ignore-scripts to this install' >/dev/null \
   || fail "the install whose rewrite was withheld says safedeps did not add --ignore-scripts (${markfail_post_file})"
 pass "a rewrite whose record cannot be written is not sent, and the rollback says safedeps did not add the flag"
+else
+  skip "markfail" "${NATIVE_SKIP_REASON}"
+fi
 
 # A record the post hook cannot read gets no --ignore-scripts line. A failed
 # read used to fall through to "did not add", which was false of this command:
 # safedeps had rewritten it. The fixture removes meta read permission after oracle_before, confirms
 # EACCES as the same uid, and supplies record-unread independently of the hook.
+if native_permissions_available read; then
 markread_wt=$(mktemp -d "${tmp_root}/markread-wt.XXXXXX")
 grammar_project "${markread_wt}"
 markread_pre_file=$(grammar_pre "${markread_wt}" "npm install fixture-parent@1.0.0")
@@ -1454,6 +1468,9 @@ post_message "${markread_post_file}" | grep 'A rollback ran\.' >/dev/null \
 grep -q "post-verify: could not read the pre-guard's record of this command in .*, so no --ignore-scripts line was said" "${SAFEDEPS_HOME}/advisory.log" \
   || fail "a record the post hook cannot read is said in advisory.log"
 pass "a record the post hook cannot read gets no --ignore-scripts line, and advisory.log says so"
+else
+  skip "markread" "${NATIVE_SKIP_REASON}"
+fi
 
 # A line is said only from a fact the record states as version 2. Each shape
 # below is a record that lacks the fact a line needs, and each used to be
@@ -1851,6 +1868,7 @@ pass "a pending state whose snapshot_id is a number names no snapshot, for the h
 # restored the second call's files (bamdori r19, SAME). A `date` that answers
 # one second for `+%s` puts both calls in it every time; the lockfile changes
 # between them, as an install in progress would change it.
+if native_copies_available; then
 same_wt=$(mktemp -d "${tmp_root}/same-wt.XXXXXX")
 grammar_project "${same_wt}"
 same_first_file=$(SAFEDEPS_TEST_FAULT=same grammar_pre "${same_wt}" "npm install fixture-parent@1.0.0")
@@ -1881,6 +1899,9 @@ post_message "${same_second_post_file}" | grep -x 'safedeps added --ignore-scrip
 cmp -s "${same_wt}/package-lock.json" "${tmp_root}/same-second-lock.json" \
   || fail "the second call in one second is rolled back to its own snapshot"
 pass "two pre-guard calls in one project within one second keep a record and a snapshot each"
+else
+  skip "same" "${NATIVE_SKIP_REASON}"
+fi
 
 # The backstop with nothing to roll back to: no confirmed record, and a
 # confirmed record that names a snapshot with no meta file.
@@ -2311,6 +2332,7 @@ pass "a failed install is judged and leaves no record, on both engines"
 # writing the actual baseline with integer-second FileTimes. A write in the second the baseline is touched in would not
 # be newer than it, so there the baseline is set two seconds back, and a pull
 # just before the grep is counted as the grep's.
+if native_copies_available; then
 bs_sec_wt="${tmp_root}/bs-sec-wt"
 bs_project "${bs_sec_wt}"
 printf '%s\n' "${tampered_lock}" > "${bs_sec_wt}/package-lock.json"
@@ -2321,6 +2343,9 @@ bs_sec_post_file=$(PATH="${stub_bin}:${PATH}" grammar_post "${bs_sec_wt}" "${bs_
 bs_assert_rollback "${bs_sec_wt}" "${bs_sec_post_file}" "a grep on a whole-second filesystem" \
   "$(cd -P "${bs_sec_wt}" && pwd -P)/package-lock.json changed after the baseline taken before this command"
 pass "on a filesystem that keeps whole seconds the baseline is set two seconds back"
+else
+  skip "bs_sec" "${NATIVE_SKIP_REASON}"
+fi
 
 # A node tree on two filesystems (lumi r2 P3): the lockfile keeps nanoseconds
 # and node_modules is on a mount that keeps whole seconds, simulated by an
@@ -2330,6 +2355,7 @@ pass "on a filesystem that keeps whole seconds the baseline is set two seconds b
 # not set back. Where one part with a time below the second was enough, the
 # tree was read as subsecond and the walk missed such a write (2 of 5 on a real
 # HFS+ mount). Every part has to show one now, so the baseline is set back.
+if native_copies_available; then
 bs_mix_wt="${tmp_root}/bs-mix-wt"
 bs_project "${bs_mix_wt}"
 # Isolate the mixed-clock walk: an older lockfile must not satisfy the
@@ -2368,13 +2394,21 @@ bs_mix_post_file=$(SAFEDEPS_TEST_FAULT=bs_mix PATH="${stub_bin}:${PATH}" grammar
 grep -qF "post-verify BACKSTOP traced: $(cd -P "${bs_mix_wt}" && pwd -P)/node_modules" "${SAFEDEPS_HOME}/advisory.log" \
   || fail "a write into node_modules on a whole-second mount beside a subsecond lockfile: the backstop counts it as traced (${bs_mix_post_file})"
 pass "a tree with one part on a whole-second filesystem sets the baseline back"
+else
+  skip "bs_mix" "${NATIVE_SKIP_REASON}"
+fi
 
 # This helper asserts an empty post response and the advisory line in full.
+if native_permissions_available scandir; then
 python3 "${ROOT_DIR}/scripts/test/lib/backstop-walk-io.py" --core "${NATIVE_TEST_CORE}" \
   --output "${tmp_root}/backstop-walk-io.json" || fail "a failed native directory walk preserves its OS error"
 pass "a failed native directory walk is traced and reports its observed OS error in the query and advisory.log"
+else
+  skip "walk-io" "${NATIVE_SKIP_REASON}"
+fi
 
 # A source copy delays the actual native walk past its deadline.
+if native_copies_available; then
 bs_slow_wt="${tmp_root}/bs-slow-wt"
 bs_project "${bs_slow_wt}"
 bs_pull "${bs_slow_wt}"
@@ -2383,6 +2417,9 @@ bs_slow_post_file=$(SAFEDEPS_TEST_FAULT=bs_slow PATH="${stub_bin}:${PATH}" SAFED
 bs_assert_rollback "${bs_slow_wt}" "${bs_slow_post_file}" "a walk past its deadline" \
   "the walk of $(cd -P "${bs_slow_wt}" && pwd -P)/node_modules did not finish within 1s"
 pass "a walk that does not finish within its deadline counts as a trace"
+else
+  skip "bs_slow" "${NATIVE_SKIP_REASON}"
+fi
 
 # The --ignore-scripts line reads no command. It is the pre-guard's record of
 # the command it wrote, and whether the command this hook received is that
@@ -2540,6 +2577,9 @@ pass "a restore target that is not a regular file is named and left alone"
 # A permission error is a line, and rollback continues through node_modules
 # and journal close. The fixture reaches the native destination open; a
 # separate Python open records the OS error before the mode is restored.
+restore_permissions=no
+if native_permissions_available write create; then
+restore_permissions=yes
 cpfail_wt="${tmp_root}/cpfail-wt"
 grammar_project "${cpfail_wt}"
 mkdir -p "${cpfail_wt}/node_modules/installed-package"
@@ -2551,8 +2591,13 @@ post_message "${cpfail_post_file}" | grep -E '^not restored .*/cpfail-wt/package
 [[ ! -e "${cpfail_wt}/node_modules" ]] || fail "the rollback goes on to node_modules after a restore that failed"
 [[ -z "$(find "${SAFEDEPS_HOME}/rollback-journal" -maxdepth 1 -name '*.json' 2>/dev/null)" ]] \
   || fail "a rollback that reported a failed restore closes its journal entry"
+else
+  skip "restore-failures (cpfail, cpgone, readonly)" "${NATIVE_SKIP_REASON}"
+fi
+
 # A source copy returns Ok without writing this lockfile. This is a separate
 # operation/result observation, not a nonzero error recast as success.
+if native_copies_available; then
 copy_noop_wt="${tmp_root}/copy-noop-wt"
 grammar_project "${copy_noop_wt}"
 mkdir -p "${copy_noop_wt}/node_modules/installed-package"
@@ -2565,9 +2610,13 @@ post_message "${copy_noop_post_file}" | grep -E '^not restored .*/copy-noop-wt/p
 [[ -z "$(find "${SAFEDEPS_HOME}/rollback-journal" -maxdepth 1 -name '*.json' 2>/dev/null)" ]] \
   || fail "rollback closes the journal after a copy returned without restoring bytes"
 pass "a no-error copy with differing bytes has its own checked report form"
+else
+  skip "copy-noop" "${NATIVE_SKIP_REASON}"
+fi
 
 # The same with the file gone: the command removed the lockfile, and the copy
 # that would put it back fails.
+if [[ "${restore_permissions}" == yes ]]; then
 cpgone_wt="${tmp_root}/cpgone-wt"
 grammar_project "${cpgone_wt}"
 grammar_pre "${cpgone_wt}" "npm install fixture-parent@1.0.0" > /dev/null
@@ -2578,7 +2627,6 @@ cp /bin/echo "${cpgone_wt}/node_modules/.bin/native-drop"
 cpgone_post_file=$(SAFEDEPS_TEST_FAULT=cpgone PATH="${emptying_bin}:${PATH}" grammar_post "${cpgone_wt}" "npm install fixture-parent@1.0.0")
 post_message "${cpgone_post_file}" | grep -E '^not restored .*/cpgone-wt/package-lock.json: copy returned OS error 13; .*/cpgone-wt/package-lock.json does not exist$' >/dev/null \
   || fail "a restore that failed over a missing file says the file does not exist (${cpgone_post_file})"
-if [[ "$(id -u)" != 0 ]]; then
   readonly_wt="${tmp_root}/readonly-wt"
   grammar_project "${readonly_wt}"
   mkdir -p "${readonly_wt}/node_modules/installed-package"
@@ -2590,11 +2638,12 @@ if [[ "$(id -u)" != 0 ]]; then
   post_message "${readonly_post_file}" | grep -E '^not restored .*/readonly-wt/package-lock.json: copy returned OS error 13; ' >/dev/null \
     || fail "a read-only lockfile is reported as not restored (${readonly_post_file})"
   [[ ! -e "${readonly_wt}/node_modules" ]] || fail "the rollback goes on to node_modules past a read-only lockfile"
-fi
 pass "a restore that fails is a line of the rollback, not the end of the hook"
+fi
 
 # A nonempty readonly child refuses unlink for this uid. Root or a filesystem
-# that ignores chmod fails the fixture instead of counting an unexercised fault.
+# that ignores chmod skips this row before entering the fixture.
+if native_permissions_available unlink; then
 rmfail_wt="${tmp_root}/rmfail-wt"
 grammar_project "${rmfail_wt}"
 mkdir -p "${rmfail_wt}/node_modules/installed-package"
@@ -2604,6 +2653,9 @@ rmfail_post_file=$(SAFEDEPS_TEST_FAULT=rmfail PATH="${emptying_bin}:${PATH}" gra
 post_message "${rmfail_post_file}" | grep -E '^not removed .*/rmfail-wt/node_modules: removal returned OS error 13; .*/rmfail-wt/node_modules exists$' >/dev/null \
   || fail "a removal that failed is reported with the removal's OS error and what a test of the path returned"
 pass "a removal that fails says the OS error and that the path exists"
+else
+  skip "rmfail" "${NATIVE_SKIP_REASON}"
+fi
 
 # The install trace, where the baseline file the pre-guard touched is gone, and
 # where the pending state names none.
@@ -3077,7 +3129,7 @@ remote_json=$(HOME="${tmp_root}/doc-home" "${ROOT_DIR}/bin/safedeps" --json doct
 if [[ "${scanner_present}" == true ]]; then
   [[ "$(jq -r '.ok' <<< "${remote_json}")" == "true" ]] || fail "doctor remains OK after local lane fix even when remote is opt-in"
 else
-  printf 'ok - doctor posture after --fix SKIPPED (needs gitleaks or docker)\n'
+  skip "doctor posture after --fix" "needs gitleaks or docker"
 fi
 remote_gap_count=$(jq -r '[.checks[] | select(.lane == "remote" and .status == "gap")] | length' <<< "${remote_json}")
 [[ "${remote_gap_count}" -ge 1 ]] || fail "doctor reports missing remote workflow as opt-in gap"
@@ -3108,7 +3160,7 @@ if command -v gitleaks >/dev/null 2>&1 && command -v openssl >/dev/null 2>&1; th
   git -C "${secret_repo}" commit -q -m "example" || fail "pre-commit allows the .env.example placeholder"
   pass "pre-commit gate denies a secret, passes clean and example commits"
 else
-  printf 'ok - pre-commit gate behavior SKIPPED (needs gitleaks + openssl)\n'
+  skip "pre-commit gate behavior" "needs gitleaks + openssl"
 fi
 
 # --- Dependency audit gate (npm/pnpm/yarn/bun) — v2.5.0, multi-eco v2.9 ------
@@ -3281,7 +3333,7 @@ if command -v jq >/dev/null 2>&1; then
   [ "${rc}" = "0" ] || fail "no-jq fallback routes Yarn Berry to 'yarn npm audit'; a clean Berry repo must return 0 (got ${rc})"
   pass "no-jq fallback version-routes yarn with '--all --recursive' (clean Berry not falsely blocked)"
 else
-  printf 'ok - audit exit-code contract SKIPPED (needs jq)\n'
+  skip "audit exit-code contract" "needs jq"
 fi
 
 if command -v gitleaks >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
@@ -3323,7 +3375,7 @@ if command -v gitleaks >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   fi
   pass "pre-commit dep gate: blocks on vuln, warns+allows when offline (npm + pnpm)"
 else
-  printf 'ok - pre-commit dep gate SKIPPED (needs gitleaks + jq)\n'
+  skip "pre-commit dep gate" "needs gitleaks + jq"
 fi
 
 
@@ -3784,17 +3836,21 @@ post_message "$(forms_report)" | grep '^Owner: the opening time of the journal c
 # ps lstart garbage-date parsing has no native equivalent. Integer API
 # zero/short/wrong-owner responses replace that parser coverage; the malformed
 # journal opening-time assertion above remains independent and unchanged.
+if native_copies_available; then
 for forms_query_case in owner-empty owner-short owner-wrong-pid; do
   forms_entry "${forms_owner_pid}" "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
   post_message "$(SAFEDEPS_TEST_FAULT="${forms_query_case}" forms_report)" | grep "^Owner: native process query supplied no usable owner data for pid ${forms_owner_pid}\$" >/dev/null \
     || fail "a native owner query failure is reported as the test that answered (${forms_query_case})"
 done
+printf 'ok - an owner that cannot be placed is reported as the test that could not place it\n'
+else
+  skip "owner-empty/owner-short/owner-wrong-pid" "${NATIVE_SKIP_REASON}"
+fi
 kill -9 "${forms_owner_pid}" 2>/dev/null
 forms_reap=0
 while kill -0 "${forms_owner_pid}" 2>/dev/null && (( forms_reap < 100 )); do
   sleep 0.05; forms_reap=$((forms_reap + 1))
 done
-printf 'ok - an owner that cannot be placed is reported as the test that could not place it\n'
 
 # An incident record that could not be written is said as that: the report
 # names the file only after looking for it.
@@ -3914,7 +3970,29 @@ printf '%s\n' '{"vulnerable":[]}' > "${state_file}"
 
 # Every form the report grammar has was read at least once above, or the
 # oracle's green says nothing about that form.
-oracle_table || exit 1
-printf 'ok - every line the post hook printed is a known form whose claim held on disk, and every form appeared\n'
+# A form may be absent only when all the rows responsible for showing it
+# were explicitly skipped. Shared forms still need a non-skipped producer.
+optional_forms="${tmp_root}/skipped-forms"
+: > "${optional_forms}"
+form_rows() {
+  local form="$1" row names=""
+  shift
+  for row in "$@"; do
+    grep -qxF "${row}" "${tmp_root}/skipped-rows" || return 0
+    names+="${names:+, }${row}"
+  done
+  printf '%s\t%s\n' "${form}" "${names}" >> "${optional_forms}"
+}
+form_rows not-restored-native-no-error copy-noop
+form_rows owner-native-query-failed owner-empty/owner-short/owner-wrong-pid
+form_rows not-restored-native-differs 'restore-failures (cpfail, cpgone, readonly)'
+form_rows not-restored-native-absent 'restore-failures (cpfail, cpgone, readonly)'
+form_rows not-removed-native stuck-wt rmfail
+oracle_table "${optional_forms}" || exit 1
+if [[ "${ORACLE_UNOBSERVED_FORMS}" == 0 ]]; then
+  printf 'ok - every line the post hook printed is a known form whose claim held on disk, and every form appeared\n'
+else
+  printf 'ok - every line the post hook printed is a known form whose claim held on disk; absent forms belong only to the named skipped rows\n'
+fi
 
 printf 'e2e passed\n'

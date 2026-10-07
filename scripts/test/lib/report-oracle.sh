@@ -1486,12 +1486,24 @@ oracle_direct() {
 # no line matched fails the run; the effect gate's prose is counted, may be
 # zero, and fails the run above the most lines its row allows.
 oracle_table() {
-  local form count entry missing="" over="" cap
+  local form count entry missing="" over="" cap skipped_by
+  ORACLE_UNOBSERVED_FORMS=0
   printf '# report forms (lines read by the oracle, per form)\n'
   for form in ${ORACLE_FORMS}; do
     count=$(grep -cxF -- "${form}" "${ORACLE_DIR}/forms.log" || true)
     printf '#   %-26s %s\n' "${form}" "${count}"
-    [[ "${count}" != 0 ]] || missing+=" ${form}"
+    if [[ "${count}" == 0 ]]; then
+      skipped_by=""
+      if [[ -n "${1:-}" ]]; then
+        skipped_by=$(awk -F '\t' -v form="${form}" '$1 == form { print $2 }' "$1") || return 1
+      fi
+      if [[ -n "${skipped_by}" ]]; then
+        printf '#   unobserved form %s: skipped rows %s\n' "${form}" "${skipped_by}"
+        ORACLE_UNOBSERVED_FORMS=$((ORACLE_UNOBSERVED_FORMS + 1))
+      else
+        missing+=" ${form}"
+      fi
+    fi
   done
   printf '# effect-gate prose, out of this grammar (owned by a follow-up plan), by exact prefix: lines / most allowed\n'
   for entry in "${ORACLE_PROSE[@]}"; do

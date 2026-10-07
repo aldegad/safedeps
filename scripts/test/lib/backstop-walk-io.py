@@ -23,7 +23,7 @@ def check(core, output):
     oracle = importlib.util.module_from_spec(spec); spec.loader.exec_module(oracle)
     observed = dict(uid=os.geteuid())
     try:
-        with tempfile.TemporaryDirectory(prefix='safedeps-walk-io.') as tmp:
+        with tempfile.TemporaryDirectory(prefix='safedeps-walk-io.', dir=output.parent) as tmp:
             box = Path(tmp).resolve()
             project = box/'project'
             tree = project/'node_modules'
