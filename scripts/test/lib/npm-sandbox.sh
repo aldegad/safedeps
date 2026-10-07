@@ -374,6 +374,9 @@ run_install() {
 }
 
 rolled_back() {
+  # A denied pre call never ran the command or its post hook. This is no
+  # rollback, not a quiet post response; no response file exists to read.
+  [[ -z "${CASE_PRE_DENY}" ]] || return 1
   # A quiet post response means no rollback; a report must be a valid message.
   if [[ ! -s "${CASE_POST_FILE}" ]]; then
     hook_response_parse "${CASE_POST_FILE}" quiet || return 1
@@ -391,6 +394,10 @@ victim_ran() { grep -q '^sd-victim' "${MARKS}"; }
 # sd-evilsrc and sd-evilswap are packed by effect-trace-grid.sh, the last two
 # fetched only by their tarball URL.
 npm_sandbox_registry_was_local() {
+  # Readers used in conditional expressions can return false normally. A
+  # malformed or missing response is still a failed battery, including callers
+  # whose pass() does not know about the shared response reader.
+  hook_response_assert || fail "a hook response could not be read"
   [[ -s "${tmp_root}/registry.log" ]] || fail "the installs went through the fixture registry"
   if grep -vE '^GET /sd-(victim|approved|approved-too|swapped|fetchy|bundler|bundlert|nester|nope)(/-/sd-(victim|approved|approved-too|swapped|fetchy|bundler|bundlert|nester)-1\.0\.[01]\.tgz)?$' "${tmp_root}/registry.log" \
       | grep -vE '^GET /sd-evil(src|swap)/-/sd-evil(src|swap)-1\.0\.0\.tgz$' | grep  . >/dev/null; then
