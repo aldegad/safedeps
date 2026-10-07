@@ -56,7 +56,7 @@ Safedeps 는 **개발 의존성 install** (npm / pip / cargo / go / gem / maven 
 
 ### 릴리즈 메모
 
-- npm 패키지 version 은 `package.json` 이 SSoT. `bin/safedeps` `SAFEDEPS_VERSION` 이 이를 따라가고, smoke 테스트는 `package.json` 을 읽어 대조한다 (현재 v2.18.1).
+- npm 패키지 version 은 `package.json` 이 SSoT. `bin/safedeps` `SAFEDEPS_VERSION` 이 이를 따라가고, smoke 테스트는 `package.json` 을 읽어 대조한다 (현재 v2.19.0).
 - `npm test` 는 release smoke suite 를 실행한다. full fixture E2E 는 `v2.1-tests` 에 있다.
 - daily re-check 는 LLM 토큰을 쓰지 않는다. opt-in 이며, macOS `launchd` user agent 가 매일 `safedeps re-check --json` 을 실행한다 (`install-safedeps-recheck-agent.mjs` 로 atomic install). `~/.safedeps/recheck.log` 와 `~/.safedeps/recheck-alerts.jsonl` 를 쓰고, 새 CVE/KEV/revoke/provider-skip/위조-의심 시 macOS notification 을 띄운다. 네트워크는 OSV / CISA / GHSA query 에만 쓴다.
 
@@ -1116,9 +1116,54 @@ scan-failure census 는 awk 읽기는 하나씩 실패시켰지만 grep 과 sed 
 - **목록 밖의 파이프 소비자.** 파이프 검사가 이름으로 모르는 소비자(함수, `source`, `dash`, `coproc` 등)에 넘어가는 설치 텍스트는 단독이든 보이는 설치 옆이든 기록 없이 통과한다. 목록 대신 닫힌 규칙으로 바꾼다.
 - **한 단계 안의 같은 파이프 생산자.** 명령 치환, 백쿼트, 큰따옴표 `sh -c`, `eval` 안에서 `$_` 나 실행 문자열로 보이는 설치의 단어를 읽어 셸로 넘기는 파이프는 기록 없이 통과한다. 제안된 규칙은 설치 텍스트가 든 명령의 모든 payload 에서 셸로 가는 파이프를 거부한다.
 
-## v2.18.2 — 명령은 셸이 말하는 자리에서 시작하고 단어는 거기서 끝나며, 테스트는 우리 장비에서 돈다 (출하)
+## v2.19.0 — 훅은 Rust 바이너리 하나이고, v2.18.2 가 예고한 수리를 함께 담는다 (미출하)
 
-이 릴리스는 v2.18.1 이 넘긴 것 가운데 준비된 것을 닫는다. 렉서에서 명령이 시작하는 자리, 연산자에 붙은 동사, v2.17.2 가 `--ignore-scripts` 를 주고 v2.18.0 이 강등한 명령, 문장 수에 따라 늘던 비용, 게시 잡의 다시 읽기다. 그리고 테스트를 GitHub 에서 뗀다. 이제 테스트는 우리 장비에서 돌고, Linux 는 더 테스트하지 않으며, Windows 는 WSL1 에서 잰다. 아직 열린 것은 v2.18.3 으로 넘기고 이 절 끝에 적었다.
+이 릴리스는 두 가지를 한다. Bash 훅 스크립트 둘을 Rust 바이너리 하나로 바꾸고, v2.18.1 이 v2.18.2 로 넘긴 수리를 함께 담는다. 둘 다 판정을 옮기므로 minor 릴리스다. v2.18.2 는 게시된 적이 없다. 그 절은 이 절의 뒷절이고, 그 절이 이름 붙인 커밋 시점의 Bash 가드를 설명한다.
+
+### 훅은 Rust 바이너리 하나다
+
+`scripts/safedeps-pre-guard.sh` 와 `scripts/safedeps-post-verify.sh` 는 지웠다. 등록되는 커맨드는 여전히 `scripts/safedeps-hook-entry.sh pre|post` 이고, 이제 `bin/native/<os>-<arch>/safedeps-core` 를 실행할 뿐 다른 것은 하지 않는다. 바이너리를 고르거나 끄는 환경 변수는 없고, Bash 로 되돌아가지도 않는다. 이 바이너리는 두 훅이자 모든 읽기 코드가 뷰를 가져가는 렉서이며, 배터리가 쓰는 읽기 전용 질의 몇 개(`lex`, `words`, `grammar`, `facts`, `reader`, `manager`, `budget-config`)다. 크레이트에 의존성이 없고 npm 패키지에도 여전히 없다.
+
+달라지지 않은 것: ledger, `~/.safedeps/`, CLI(`bin/safedeps` 는 여전히 Bash 이고 `lib/providers`, `lib/ledger`, `lib/npm/closure.sh` 를 그대로 source 한다), 등록(설치기 하나), 게이트가 막고 기록하고 롤백하는 것의 계약. 달라진 것은 아래에 있다.
+
+- **바이너리가 있어야 하고 소스와 맞아야 한다.** 체크아웃은 `scripts/build-core.sh`(`cargo build --release --locked --offline`)로 빌드하고, 설치기는 그것을 빌드한 뒤 아무것도 등록하기 전에 판정하지 않는 호출 하나로 엔트리를 실행해 본다. 게시 워크플로가 `darwin-arm64`, `darwin-x64`, `linux-x64` 를 빌드하고 패키지가 그것들을 담는다. 바이너리는 자기가 빌드된 소스의 스탬프를 지니고, 체크아웃에서는 시작할 때마다 옆의 `rust/` 를 해시한다. 어긋나면 pre 훅은 설치를 `UNDECIDED` 로 차단하고 패키지 매니저 이름이 없는 커맨드는 그대로 실행시키며(어긋남은 stderr 와 `advisory.log` 에 남긴다), post 훅은 `UNVERIFIED` 를 보고한다. 바이너리 없음, 다른 플랫폼, 사라진 실행 권한, 종료 126·127, abort, 시그널은 각각 설명이 붙은 거부다. v2.14.0 의 엔트리 셔틀과 같은 규칙이고, 스크립트 자리에 바이너리가 있을 뿐이다. 사용자가 보는 것은 README 에 있다(Where the hook binary comes from).
+- **`--ignore-scripts` 가 들어갈 자리가 없는 커맨드는 `UNDECIDED` 다.** 이것이 이 릴리스의 비용이다. 릴리스가 지켜야 할 플래그를 커맨드의 데이터와 npm 이 옵션을 읽는 방식을 쓴 그대로 둔 채 놓을 수 없으면, 커맨드 전체를 차단하고 재작성을 보내지 않는다. Bash 가드는 그래도 플래그를 놓았다. `advisory.log` 가 적는 이유는 `floor-outside-command`, `floor-not-an-option`, `end-flag-outside-command`, `end-flag-not-an-option`, `end-flag-value-unread` 다. 사용자에게 보이는 문구는 "required --ignore-scripts flags could not be placed while preserving command data and how npm reads its options" 다. 예는 모두 `scripts/test/smoke.sh` 의 행이다. `npm install left-pad@1.3.0 --cache`(끝의 플래그가 캐시 디렉터리가 된다), `npm install true`(동사 뒤의 플래그가 `true` 를 값으로 가져간다), 본문에 설치가 든 `npm install left-pad@1.3.0 && cat <<E | wc -l`(플래그가 `wc` 가 세는 텍스트에 쓰인다). 그런 커맨드를 실행시키려고 바닥을 버리지 않는다. Codex CLI 는 재작성을 보내지 않으므로 영향이 없다.
+- **더 많은 커맨드가 갈라져 읽힌다.** zsh 읽기가 zsh 를 더 가깝게 따라서(홀로 선 닫는 중괄호, glob 한정자, 대안 패턴, extglob 그룹, 공백 뒤의 괄호 단어) 세 읽기가 npm 설치를 서로 다른 자리에 놓는 커맨드가 늘었다. 그런 커맨드는 "the readings (bash zsh dash) put this command's npm installs in different places" 와 함께 차단한다.
+- **스크립트 payload 를 읽는다.** `sh -c`, `bash -c`, `zsh -c`, `dash -c`, `ksh -c`, `eval` 에 넘기는 스크립트는 그 안에 플래그를 받는다. Bash 가드는 거기서 강등을 기록했고 `ksh -c` 스크립트에는 아무것도 주지 않았다. 이미 플래그를 가진 설치 옆에서 출력을 파이프로 넘기는 셸에 먹이는 heredoc(`sh <<E | tee log`)은 여전히 기록된 강등이다.
+- **거부는 상태를 남기지 않는다.** 코어는 마지막 읽기가 정해진 뒤에야 스냅샷, pending 기록, meta 를 쓰므로 차단된 커맨드는 그 셋 어느 것도 남기지 않는다.
+- **롤백 줄이 운영체제의 오류를 말한다.** `not restored <path>: copy returned OS error <n>; ...`, `... copy returned without error; ...`, `not removed <path>: removal returned OS error <n>; ...` 가 `cp exit` 와 `rm exit` 줄을 대신한다. 그런 프로그램이 돌지 않기 때문이다. 닫힌 보고 줄의 집합, 그 오라클, 롤백이 패키지 매니저를 돌리지 않는다는 규칙은 그대로다. 오라클은 네이티브 형식을 검사한다(`scripts/test/lib/report-oracle.sh`).
+- **자기 예산은 감독자다.** pre 훅은 자기 프로세스에서 판정한다. 답은 셋 중 하나다. 답이 오거나, 기한이 지나거나("could not finish judging this command within its Ns budget"), 판정 프로세스가 기한 전에 답 없이 끝난다("the judgment process ended without a usable answer (signal N)", 예산 문구 없음). 답이 아닌 둘은 모두 `UNDECIDED` 거부이고 적발이 아니라고 말한다. 멈춘 판정 프로세스는 끝난 것이 아니므로 감독자는 기한까지 기다린다(macOS 는 멈춘 자식을 `WEXITED` 만으로도 `waitid` 에 보고하고, 코어는 `si_code` 를 읽는다). 상한, `SAFEDEPS_BUDGET_ENGAGE_BYTES`, `SAFEDEPS_BUDGET_DISABLED`, argv 표식은 계약이 그대로다. 아래 절들의 `SECONDS` 와 macOS awk 설명은 Bash 가드를 설명한다.
+- **훅이 띄우는 프로그램은 넷이다.** `npm`(질의와 rebuild), `curl`(어드바이저리 provider), `file`(`node_modules/.bin` 의 새 파일), `gzip`(로그 아카이브)과 자기 판정 프로세스다. `awk`, `grep`, `sed`, `jq` 는 띄우지 않는다. Bash 가드는 호출 하나에 프로세스를 약 93개 띄웠다.
+
+### Rust 코어를 Bash 가드에 어떻게 맞췄나
+
+두 가드를 말뭉치로 비교하지 않았다. 기준은 기존 테스트 세트가 Rust 코어에서 돌아가는 것이고, 코어가 Bash 가드와 다르게 답하는 자리를 모두 적어 두는 것이다. 그 자리는 `scripts/measure/core-intended-battery-rows.tsv`(배터리 행 63개)와 `scripts/measure/core-intended-readings.tsv`(읽기 하나)다. 63행 가운데 30행은 코어가 차단하고 Bash 가드는 통과시킨 커맨드, 21행은 Bash 가드에 없던 플래그나 기록을 더하는 것, 11행은 가드의 상태 아래에 남기는 파일이 더 적은 것, 1행은 줄을 다르게 쓰는 것이다. Bash 가드가 막은 것을 통과시키는 차이는 두 파일 어디에도 줄이 없다. 그것은 결정이 아니라 결함이기 때문이다. 릴리스 바닥 속성은 그대로이고 여전히 검사한다. 코어가 넣은 플래그 몇 개를 지우면 7d66f8c 의 재작성이 나온다(`scripts/test/lib/release-floor.sh`).
+
+### 어떻게 확인했나
+
+모든 실행은 테스트 호스트의 큐를 거쳤고 작성자의 머신에서는 돌지 않았다. 호스트는 코어 바이너리 하나를 빌드해 첫 단위가 시작하기 전에 스탬프를 확인하고, 각 단위는 빌드하지 않고 다시 확인한다.
+
+- **74e72b0 의 개발 세트, 22단위, 2026-10-07, 실행기 기본값.** M1(CPU 5, 슬롯 2): 모든 단위 rc 0, 907 ok 와 0 not ok, 건너뜀 0, 첫 큐 슬롯부터 847초, load 는 시작 3.72, 끝 20.79. carenine(CPU 9, 슬롯 2): 모든 단위 rc 0, 907 ok 와 0 not ok, 건너뜀 0, 529초, load 는 시작 2.92, 끝 10.08, 도중에는 100 을 넘었다. 실행기가 센 행은 consumer-forms 1754, lockless-forms 150, manager-variants 813, scan-contract 4755 이다. 다른 단위가 인쇄한 ok 는 e2e 125, smoke 79, self-budget 43, hook-entry 34, rust-core 15 다. 이 수치는 74e72b0 커밋의 것이다. 릴리스 트리에는 그 뒤 커밋(훅이 쓰던 `lib` 파일의 제거, 문서, 버전)이 더 붙으므로 아래 릴리스 세트가 이 수치를 대신한다.
+- **판정 기한, 1f22aec.** 물려받은 nice 15 의 M1(배터리 시작과 끝의 load 7.52 와 6.79, 2026-10-07, 조용하지 않은 호스트): `scripts/test/self-budget.sh` 가 43 ok 와 0 not ok 였다. 2초와 6초 예산은 2.084초와 6.077초에 답했고, 25초 상한 세 번은 25.083, 25.094, 25.091초에 답했으며(런타임 30초 제한보다 먼저), 기한 전에 죽인 판정은 345ms 에 시그널이 든 메시지와 예산 문구 없이 답했다. 옛 배터리의 두 행은 코어에 대응이 없어 퇴역했고(Bash 라이브러리 시작과 PATH 의 `sleep` 이 놓던 정확한 50ms 폴링), 기한 전에 끝난 판정을 다루는 행 하나가 새로 생겼다. 사본에서 기한 검사를 지우면 첫 기한 행이 빨개진다.
+- **변이.** `scripts/test/report-mutations.sh` 는 코어 소스의 변이 44개를 담고, 각각 사본에서 돌려 보고 오라클이나 그 end-to-end 행에서 빨개져야 한다(`scripts/test/lib/report-mutations.json`). 이름으로 돌리고 `run-all.sh` 에는 들어 있지 않다. 위 수치에는 이 트리에 대한 실행 기록이 없다.
+
+### 아직 재지 않은 것
+
+- **최종 트리의 릴리스 세트**, M1 과 carenine 에서. 측정 전.
+- **WSL1**, Windows 를 테스트하는 곳(smoke, self-budget, effect-trace-grid, e2e 배터리를 Linux 루트와 Windows 드라이브에서). 측정 전.
+- **ShellCheck, `native-scan-failures`**(코어가 커맨드를 읽는 자리를 소스 사본에서 하나씩 망가뜨리는 census), **`effect-trace-grid`, `report-mutations`** 는 위 개발 실행에 들어 있지 않았다.
+- **Linux.** v2.18.2 가 정했듯 Linux 는 테스트하지 않는다. 패키지는 `linux-x64` 바이너리를 담고, 게시 잡이 한 번 실행해 본다(`version`, `stamp`, `stamp --check`).
+- **Intel macOS 바이너리.** 게시 잡이 빌드하고 러너가 되면 Rosetta 로 실행한다. 여기에는 그 실행 기록이 없다.
+- **게시 다시 읽기**(레지스트리, 출처 증명, tarball 의 세 바이너리)는 아직 돌지 않았다. 게시한 것이 없기 때문이다.
+- **Rust post 훅의 효과 게이트가 30초를 넘는 자리.** v2.16.0 의 390 패키지는 Bash 훅의 수치다. `scripts/measure/effect-gate-cost.sh` 가 Rust 훅을 합성 closure 로 재지만, 이 절에는 기록된 결과가 없다.
+- **Rust pre 훅의 호출 시간**, 위 기한 행을 넘어서는 것.
+- **상태 쓰기 구간 안의 kill 과 낡은 `state.lock`.** 둘 다 Rust 훅에서는 재지 않았다. Bash 가드에서도 열려 있었다.
+
+### v2.18.2 가 예고한 수리 (Bash 가드)
+
+여기서 "아직 열린 것" 까지는 v2.18.2 의 절이고, Bash 가드가 훅이던 때 쓴 것이다. 여기 나오는 명령, 파일, `lib/*.sh` 함수 이름은 그 가드의 것이고 수치도 그 가드에서 이름 붙은 커밋 시점에 쟀다. Rust 코어가 그 가드를 대신하고, 코어가 다르게 답하는 자리는 위에 적었다. 이 부분을 남기는 것은 각 판정을 왜 그렇게 했는지의 기록이기 때문이다.
+
+이 릴리스는 v2.18.1 이 넘긴 것 가운데 준비된 것을 닫는다. 렉서에서 명령이 시작하는 자리, 연산자에 붙은 동사, v2.17.2 가 `--ignore-scripts` 를 주고 v2.18.0 이 강등한 명령, 문장 수에 따라 늘던 비용, 게시 잡의 다시 읽기다. 그리고 테스트를 GitHub 에서 뗀다. 이제 테스트는 우리 장비에서 돌고, Linux 는 더 테스트하지 않으며, Windows 는 WSL1 에서 잰다.
 
 ### 동사는 셸이 단어를 끝내는 자리에서 끝난다
 
@@ -1364,13 +1409,15 @@ safedeps 는 Kuma Studio 의 Windows 빌드가 도는 환경인 WSL1 에서 한 
 - **판정.** 설치된 진입 경로로 기본 예산을 켜고 225번 판정했고 `UNDECIDED` 는 하나도 없었다. Windows 가 한가할 때(CPU 0~8%, mawk)의 중앙값은 `ls -la` 0.34초, `npm install left-pad@1.3.0` 1.62초, `npm ci` 2.39초, 64KB 뒤의 설치 4.73초다. 다른 작업으로 PC 의 CPU 가 94~100% 일 때는 같은 꼴이 약 두 배, 최대 10.1초였다. 그 실행들(225번 중 135번)은 배포판의 awk 를 제품과 같은 mawk 로 바꾸기 전에 gawk 로 잰 것이고, 바쁜 CPU 에서 mawk 를 잰 실행은 없다. 리눅스 루트와 Windows 드라이브 사이에 차이는 없었다.
 - **배터리.** 리눅스 루트에서 smoke 61 ok, 0 not ok(495초), self-budget 44/0(148초), effect-trace-grid 13/0(1,961초), e2e 125/0(1,008초)이다. Windows 드라이브에서 smoke 61/0, self-budget 44/0, effect-trace-grid 13/0 이다. e2e 는 거기서 26행 뒤에 멈췄는데, 게이트의 결함이 아니라 한 행의 가정 때문이다. 그 행은 읽기 전용 디렉터리가 `rm` 을 막는 것에 기대는데, 메타데이터 없이 붙인 Windows 드라이브는 디렉터리의 모드를 지니지 않아서 `chmod 555` 가 거기서 아무것도 막지 못한다. 이제 그 행은 파일시스템에 먼저 묻고, 돌지 않을 때는 건너뛴 행으로 자신을 찍는다. 그 조건을 넣은 사본에서 e2e 는 Windows 드라이브에서 124/0 이었다.
 - **효과 게이트가 기대는 것은 성립한다.** 파일 변경 시각은 두 파일시스템 모두 100ns 정밀도다. inode 는 제자리 쓰기에서 유지되고 rename 에서 바뀐다. `ps` 는 시작 시각, 멈춘 프로세스, 좀비를 리눅스처럼 보고한다. `/proc/loadavg` 는 WSL1 에서 상수라서, 거기서 돈 실행은 부하 대신 Windows CPU 를 적는다.
-- **효과 게이트의 예산.** 빈 원장에 캐시 없이, WSL1 에서 128 패키지가 28.4초 걸렸다(Windows CPU 38% 에서 6% 로 내려가는 동안). 고정분 약 4초에 패키지당 약 0.19초이고, 거의 전부가 묶음 OSV 요청 한 번을 둘러싼 로컬 프로세스다. 이대로 이으면 30초를 넘는 자리는 135 패키지 근처다. CPU 가 51~59% 일 때는 같은 128 패키지가 41.5초였다. 같은 lockfile 은 부하 7~18 의 M1 에서 32와 128 패키지 사이에서 넘었다. AGENTS.md 가 이미 적어 둔 한계를 다시 잰 것이고, v2.18.3 의 Rust 작업이 이것을 겨눈다.
+- **효과 게이트의 예산.** 빈 원장에 캐시 없이, WSL1 에서 128 패키지가 28.4초 걸렸다(Windows CPU 38% 에서 6% 로 내려가는 동안). 고정분 약 4초에 패키지당 약 0.19초이고, 거의 전부가 묶음 OSV 요청 한 번을 둘러싼 로컬 프로세스다. 이대로 이으면 30초를 넘는 자리는 135 패키지 근처다. CPU 가 51~59% 일 때는 같은 128 패키지가 41.5초였다. 같은 lockfile 은 부하 7~18 의 M1 에서 32와 128 패키지 사이에서 넘었다. AGENTS.md 가 이미 적어 둔 한계를 다시 잰 것이고, 이 릴리스의 Rust 훅이 이것을 겨눈다.
 
-### v2.18.3 으로 넘긴 것
+### 아직 열린 것
 
-- **판정 비용.** 가드 호출 한 번이 외부 프로세스를 약 93개 띄우고, 0.6~0.9 CPU초의 거의 전부가 거기서 나간다. v2.18.3 은 판정의 핵심을 Rust 로 옮기고, 이 릴리스의 bash 판을 대조 기준으로 삼는다.
-- **셸의 표준 입력으로 넘기는 스크립트.** here-string 이나 heredoc 본문이 스크립트를 `sh -c`·`bash -c`·`eval` 로 다시 넘기고, 그 안의 npm 문장이 동사나 명령 단어를 실행 때 만들면(`bash <<<` 스크립트가 `sh -c` 를 돌리고 그 안에 `npm ${u:-ci} x` 가 있는 꼴) 플래그도 기록도 없이 실행된다. 생성한 42꼴이고 v2.17.2 와 v2.18.1 에서도 같다. 또 하나의 모양 수리가 아니라 설계 판정부터 시작한다.
-- **따옴표 친 스크립트 단어 뒤에 붙은 `}`.** `{ sh -c 'npm ci'}` 는 zsh 에서 `npm ci` 를 실행하고 아무 기록 없이 통과한다. v2.18.1 에서도 같다.
+v2.18.2 를 쓸 때 Bash 가드에 열려 있던 것들이다. Rust 코어는 이 목록에 대해 재지 않았으므로, `scripts/test/smoke.sh`, `consumer-forms.sh`, 의도한 차이 표의 행이 다르게 말하기 전까지 각 항목은 열려 있다. 위 절들에서 v2.18.3 으로 넘기거나 v2.18.3 용으로 적었다고 한 것은 "아직 열려 있다" 로 읽는다.
+
+- **판정 비용.** Bash 가드는 호출 하나에 외부 프로세스를 약 93개 띄웠고, 0.6~0.9 CPU초의 거의 전부가 거기서 나갔다. Rust 훅은 `awk`, `grep`, `sed`, `jq` 를 띄우지 않으므로 그 수는 사라졌다. 호출 시간과 효과 게이트가 30초를 넘는 자리는 이 릴리스에서 Rust 훅으로 재지 않았다("아직 재지 않은 것" 참고).
+- **셸의 표준 입력으로 넘기는 스크립트.** here-string 이나 heredoc 본문이 스크립트를 `sh -c`·`bash -c`·`eval` 로 다시 넘기고, 그 안의 npm 문장이 동사나 명령 단어를 실행 때 만들면(`bash <<<` 스크립트가 `sh -c` 를 돌리고 그 안에 `npm ${u:-ci} x` 가 있는 꼴) Bash 가드에서는 플래그도 기록도 없이 실행됐다. 생성한 42꼴이고 v2.17.2 와 v2.18.1 에서도 같다.
+- **따옴표 친 스크립트 단어 뒤에 붙은 `}`.** `{ sh -c 'npm ci'}` 는 zsh 에서 `npm ci` 를 실행하고 Bash 가드에서는 아무 기록 없이 통과했다. v2.18.1 에서도 같다.
 - **인식기가 읽지 않는 설치.** 셸의 표준 입력으로 먹이는 heredoc(`bash <<E`), `bash --norc -c`, `eval --`, `npm --_x ci`, 따옴표나 백슬래시로 쓴 명령 단어(`"npm" ci x`).
 - **목록 밖의 파이프 소비자, 그리고 한 단계 안의 같은 생산자.** v2.18.1 의 목록 그대로다.
 - **셸이 코드로 읽는 payload.** `env -S` 문자열과 zsh 글롭 한정자.
