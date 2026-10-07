@@ -416,13 +416,17 @@ run_hook_command() {
   local home_dir="$1"
   local safe_dir="$2"
   local command="$3"
-  local payload out
+  local payload out rewritten
 
   payload=$(jq -nc --arg command "${command}" --arg cwd "${project_dir}" \
     '{tool_name:"Bash",tool_input:{command:$command},cwd:$cwd}')
   out=$(printf '%s' "${payload}" | HOME="${home_dir}" SAFEDEPS_HOME="${safe_dir}" scripts/safedeps-hook-entry.sh pre)
   if [[ -z "${out}" || "$(jq -r '.hookSpecificOutput.permissionDecision // empty' <<< "${out}")" == allow ]]; then
-    release_floor_check "${payload}" "$(jq -r '.hookSpecificOutput.updatedInput.command // empty' <<< "${out:-{\}}")" "${safe_dir}" "${tmp_root}" || true
+    rewritten=""
+    if [[ -n "${out}" ]]; then
+      rewritten=$(jq -r '.hookSpecificOutput.updatedInput.command // empty' <<< "${out}")
+    fi
+    release_floor_check "${payload}" "${rewritten}" "${safe_dir}" "${tmp_root}" || true
   fi
   printf '%s\n' "${out}"
 }
@@ -621,31 +625,33 @@ do
 done
 pass "inert flag lands on an install whose npm is spelled in another case"
 
-# A heredoc body piped to a command, with `Npm install` in it, withheld every
-# rewrite once the check for an npm verb there was read in any case, so the
-# visible install got none of the flags the release gave it and ran its
-# scripts. Nothing withholds the rewrite now: the visible install keeps its
-# flags, and the body, text the rewrite cannot read, gets the flag after its
-# verb as v2.17.2 put it, in any case.
-# The commands hold a pipe, so each row is a pair of array entries rather than
-# one `in|want` string.
+# The floor flag owed after an install verb in a piped heredoc would stand
+# in data another command reads. The native contract is an UNDECIDED deny,
+# with no rewrite or pending/snapshot state, including mixed-case verbs.
+# Measured cases are listed in core-intended-battery-rows.tsv.
 heredoc_case_in=(
   $'npm install left-pad@1.3.0 && cat <<E | wc -l\nNpm install left-pad@1.3.0\nE'
   $'npm install evil && cat <<E | wc -l\nNPM install evil\nE'
 )
-heredoc_case_want=(
-  $'npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts && cat <<E | wc -l\nNpm install --ignore-scripts left-pad@1.3.0\nE'
-  $'npm install --ignore-scripts evil --ignore-scripts && cat <<E | wc -l\nNPM install --ignore-scripts evil\nE'
-)
-for heredoc_i in "${!heredoc_case_in[@]}"; do
-  inert_in="${heredoc_case_in[${heredoc_i}]}"
-  inert_want="${heredoc_case_want[${heredoc_i}]}"
-  inert_out=$(run_hook_command "${tmp_root}/home-compound" "${tmp_root}/safe-compound" "${inert_in}")
-  inert_got=$(jq -r '.hookSpecificOutput.updatedInput.command' <<< "${inert_out}")
-  [[ "${inert_got}" == "${inert_want}" ]] \
-    || fail "inert flag lands on the install beside a heredoc body that spells npm in another case: $(printf '%q' "${inert_in}") (got: $(printf '%q' "${inert_got}"))"
+for inert_in in "${heredoc_case_in[@]}"; do
+  heredoc_safe=$(mktemp -d "${tmp_root}/safe-heredoc-conflict.XXXXXX")
+  SAFEDEPS_HOME="${heredoc_safe}" lib/ledger/ledger.sh approve npm left-pad 1.3.0 1.3.0 smoke >/dev/null
+  inert_out=$(run_hook_command "${tmp_root}/home-compound" "${heredoc_safe}" "${inert_in}")
+  jq -e '.hookSpecificOutput | .permissionDecision == "deny" and
+    (.permissionDecisionReason | contains("UNDECIDED")) and
+    (has("updatedInput") | not)' <<< "${inert_out}" >/dev/null \
+    || fail "a piped heredoc floor conflict denies as undecided without a rewrite: ${inert_out}"
+  cut -f2- "${heredoc_safe}/advisory.log" | grep -Fx \
+    "pre-guard DENY: inert rewrite obligations conflict (floor-outside-command); UNDECIDED, no rewrite was sent. Command: ${inert_in%%$'\n'*}" >/dev/null \
+    || fail "the piped heredoc's exact floor-outside-command conflict is recorded"
+  for state_dir in pending snapshots; do
+    if [[ -d "${heredoc_safe}/${state_dir}" ]]; then
+      [[ -z "$(find "${heredoc_safe}/${state_dir}" -mindepth 1 -print)" ]] \
+        || fail "the piped heredoc conflict leaves no pending record, snapshot or meta (${state_dir})"
+    fi
+  done
+  pass "a piped heredoc with a mixed-case install verb is UNDECIDED with no rewrite or state: $(printf '%q' "${inert_in}")"
 done
-pass "inert flag lands on the install beside a heredoc body that spells npm in another case"
 
 # Whether an install already carries the flag is read from that install's own
 # arguments, the way npm reads them, and the flag goes after its last argument,
