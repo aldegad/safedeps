@@ -32,7 +32,10 @@ set -euo pipefail
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "${ROOT_DIR}"
 
-pass() { printf 'ok - %s\n' "$1"; }
+pass() {
+  native_fixtures_assert || fail "$1: native fixture failed; see invocation receipt/error"
+  printf 'ok - %s\n' "$1"
+}
 fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
 
 for tool in npm node jq; do
@@ -42,6 +45,8 @@ done
 T=$(mktemp -d "${TMPDIR:-/tmp}/safedeps-ws-count.XXXXXX")
 T=$(cd "${T}" && pwd -P)
 trap 'rm -rf "${T}"' EXIT
+source "${ROOT_DIR}/scripts/test/lib/core-post-fixtures.sh"
+native_fixtures_init "${T}/native-fixtures"
 
 while IFS= read -r inherited; do
   unset "${inherited}"
@@ -117,7 +122,7 @@ judge() {
   : > "${log}"
   jq -nc --arg d "${dir}" '{tool_name:"Bash",tool_input:{command:"npm install sd-victim -w packages/m0"},cwd:$d}' \
     | SAFEDEPS_HOME="${home}" SAFEDEPS_COUNT_LOG="${log}" PATH="${SHIMS}" \
-      "${SHIMS}/bash" "${ROOT_DIR}/scripts/safedeps-hook-entry.sh" pre > "${log}.out" 2> "${log}.err" \
+      "${NATIVE_TEST_CORE}" pre > "${log}.out" 2> "${log}.err" \
     || fail "the pre-guard judges the install ($(cat "${log}.err"))"
   find "${home}/snapshots" -maxdepth 1 -name '*_meta.json' | sed 's#.*/##; s#_meta\.json$##'
 }
@@ -174,14 +179,13 @@ pass "the snapshot keeps every member's manifest, byte for byte, and hashes each
 
 # A snapshot that cannot keep the members is a rollback that cannot undo the
 # install, so the install waits, and says it is undecided rather than detected.
-# tar is made to fail with a stub, which holds for root as well as for a user.
-mkdir -p "${T}/broken"
-printf '#!/bin/sh\necho "tar: stub failure" >&2\nexit 2\n' > "${T}/broken/tar"
-chmod +x "${T}/broken/tar"
+# A real unreadable member, still found by production workspace discovery,
+# makes native copying fail. The fixture checks EACCES as the same uid and
+# restores permissions after the hook; root/ineffective chmod is an error.
 mkdir -p "${T}/safe-broken"
 out=$(jq -nc --arg d "${T}/ws-10" '{tool_name:"Bash",tool_input:{command:"npm install sd-victim -w packages/m0"},cwd:$d}' \
-  | SAFEDEPS_HOME="${T}/safe-broken" PATH="${T}/broken:${PATH}" \
-    bash "${ROOT_DIR}/scripts/safedeps-hook-entry.sh" pre 2>/dev/null) || fail "the pre-guard answers when the copy fails"
+  | SAFEDEPS_HOME="${T}/safe-broken" SAFEDEPS_TEST_FAULT=workspace \
+    native_fixture_hook pre) || fail "the pre-guard answers when the copy fails"
 [[ "$(jq -r '.hookSpecificOutput.permissionDecision // empty' <<< "${out}")" == deny ]] \
   || fail "a failed member snapshot denies the install (got ${out})"
 jq -r '.hookSpecificOutput.permissionDecisionReason' <<< "${out}" | grep -q 'undecided' \

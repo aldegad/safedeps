@@ -34,7 +34,9 @@ def call(**request):
 
 lines=b''
 if a.kind=='unresolved':
-    lines+=call(op='report',action='refuse-outside',project=a.project,path=str(Path(a.project)/'package-lock.json'),kind='restore')
+    # The report states the supplied path. Keep repeated separators just as
+    # the fixture's project string does; Path would normalize only one side.
+    lines+=call(op='report',action='refuse-outside',project=a.project,path=a.project+'/package-lock.json',kind='restore')
 why=call(op='reach',path=a.project)
 if not why:raise RuntimeError('the direct unresolved fixture unexpectedly resolves')
 lines+=call(op='report',action='rebuild',path=a.meta,input=a.input,fact='did not run npm rebuild: '+why.decode())

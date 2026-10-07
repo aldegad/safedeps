@@ -5,6 +5,7 @@ ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "${ROOT_DIR}"
 
 pass() {
+  native_fixtures_assert || fail "$1: native fixture failed; see invocation receipt/error"
   printf 'ok - %s\n' "$1"
 }
 
@@ -43,6 +44,9 @@ tmp_root=$(mktemp -d "${TMPDIR:-/tmp}/safedeps-e2e.XXXXXX")
 # shellcheck source=./lib/report-oracle.sh
 source "${ROOT_DIR}/scripts/test/lib/report-oracle.sh"
 oracle_init "${tmp_root}/report-oracle"
+oracle_native_owner_forms
+source "${ROOT_DIR}/scripts/test/lib/core-post-fixtures.sh"
+native_fixtures_init "${tmp_root}/native-fixtures"
 post_message() { jq -r '.systemMessage // empty' <<< "$1"; }
 post_hook() {
   local payload out call
@@ -55,7 +59,7 @@ post_hook() {
   local path="${PATH}"
   command -v npm >/dev/null 2>&1 && path="${ORACLE_DIR}/bin:${PATH}"
   out=$(printf '%s' "${payload}" | ORACLE_NPM_LOG="${call}/npm.log" ORACLE_CALL="${call}" PATH="${path}" \
-    "${ROOT_DIR}/scripts/safedeps-post-verify.sh")
+    native_fixture_hook post) || fail "post hook fixture failed for this invocation"
   printf '%s' "${out}"
   oracle_message "${call}" "${payload}" "${out}" || exit 1
 }
@@ -67,7 +71,8 @@ pre_hook() {
   payload=$(cat)
   call=$(mktemp -d "${ORACLE_DIR}/pre.XXXXXX")
   oracle_pre_before "${call}"
-  out=$(printf '%s' "${payload}" | "${ROOT_DIR}/scripts/safedeps-pre-guard.sh") || rc=$?
+  out=$(printf '%s' "${payload}" | native_fixture_hook pre) || rc=$?
+  native_fixtures_assert || fail "pre hook fixture failed for this invocation"
   printf '%s' "${out}"
   oracle_pre "${call}" "${out}" || exit 1
   return "${rc}"
@@ -142,6 +147,11 @@ cleanup() {
     wait "${server_pid}" 2>/dev/null || true
   fi
   reap_owned_children
+  if [[ -n "${SAFEDEPS_TEST_EVIDENCE:-}" ]]; then
+    mkdir -p "${SAFEDEPS_TEST_EVIDENCE}"
+    cp -R "${tmp_root}/report-oracle" "${SAFEDEPS_TEST_EVIDENCE}/"
+    cp "${SAFEDEPS_TEST_FAILURES}" "${SAFEDEPS_TEST_EVIDENCE}/fixture-failures.jsonl"
+  fi
   rm -rf "${tmp_root}"
 }
 trap cleanup EXIT
@@ -240,7 +250,7 @@ go_sub_json=$(./bin/safedeps --json check go example.com/mod/cmd/tool@v1.0.0 2>/
 [[ "$(jq -r '.approved' <<< "${go_sub_json}")" == "false" ]] \
   || fail "a Go import path below a vulnerable module is not approved"
 go_sub_guard=$(jq -nc --arg c "go install example.com/mod/cmd/tool@v1.0.0" --arg cwd "${tmp_root}" \
-  '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' | scripts/safedeps-pre-guard.sh 2>/dev/null)
+  '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' | native_fixture_hook pre 2>/dev/null)
 [[ "$(jq -r '.hookSpecificOutput.permissionDecision // "pass"' <<< "${go_sub_guard:-{\}}")" == "deny" ]] \
   || fail "after the prescribed check, the install of a package below a vulnerable module is still denied"
 go_clean_json=$(./bin/safedeps --json check go example.com/other/cmd/tool@v1.0.0 2>/dev/null) || true
@@ -1399,18 +1409,11 @@ pass "a rewritten command whose record the post hook does not find gets no --ign
 
 # A rewrite whose record cannot be written is not sent. The record write used
 # to fail quietly and the rewrite went out anyway, so the post hook said "did
-# not add" of a command safedeps had written. A jq that fails only that write
-# stands in for a write that fails.
+# not add" of a command safedeps had written. An archive copy makes only the rewrite writer
+# directory readonly after initial snapshot/pending creation; the real writer fails.
 markfail_wt=$(mktemp -d "${tmp_root}/markfail-wt.XXXXXX")
-markfail_bin=$(mktemp -d "${tmp_root}/markfail-bin.XXXXXX")
 grammar_project "${markfail_wt}"
-cat > "${markfail_bin}/jq" <<SHIM
-#!/usr/bin/env bash
-for a in "\$@"; do [[ "\${a}" == *'.ignore_scripts_injected = true'* ]] && exit 5; done
-exec "$(command -v jq)" "\$@"
-SHIM
-chmod +x "${markfail_bin}/jq"
-markfail_pre=$(PATH="${markfail_bin}:${PATH}" grammar_pre "${markfail_wt}" "npm install fixture-parent@1.0.0")
+markfail_pre=$(SAFEDEPS_TEST_FAULT=markfail grammar_pre "${markfail_wt}" "npm install fixture-parent@1.0.0")
 [[ -z "$(jq -r '.hookSpecificOutput.updatedInput.command // empty' <<< "${markfail_pre:-{\}}")" ]] \
   || fail "a rewrite whose record could not be written is not sent (${markfail_pre})"
 grep -q 'pre-guard: could not record the command safedeps would write in .*, so it was not rewritten' "${SAFEDEPS_HOME}/advisory.log" \
@@ -1423,28 +1426,15 @@ pass "a rewrite whose record cannot be written is not sent, and the rollback say
 
 # A record the post hook cannot read gets no --ignore-scripts line. A failed
 # read used to fall through to "did not add", which was false of this command:
-# safedeps had rewritten it. A jq that fails only that read stands in for a
-# read that fails, and leaves record-unread for the oracle, which learns of the
-# failure from the row and not from the hook.
+# safedeps had rewritten it. The fixture removes meta read permission after oracle_before, confirms
+# EACCES as the same uid, and supplies record-unread independently of the hook.
 markread_wt=$(mktemp -d "${tmp_root}/markread-wt.XXXXXX")
-markread_bin=$(mktemp -d "${tmp_root}/markread-bin.XXXXXX")
 grammar_project "${markread_wt}"
-cat > "${markread_bin}/jq" <<SHIM
-#!/usr/bin/env bash
-for a in "\$@"; do
-  if [[ "\${a}" == *'(if (\$meta | length) == 1'* ]]; then
-    [[ -z "\${ORACLE_CALL:-}" ]] || : > "\${ORACLE_CALL}/record-unread"
-    exit 5
-  fi
-done
-exec "$(command -v jq)" "\$@"
-SHIM
-chmod +x "${markread_bin}/jq"
 markread_pre=$(grammar_pre "${markread_wt}" "npm install fixture-parent@1.0.0")
 [[ "$(jq -r '.hookSpecificOutput.updatedInput.command // empty' <<< "${markread_pre:-{\}}")" == 'npm install --ignore-scripts fixture-parent@1.0.0 --ignore-scripts' ]] \
   || fail "the install whose record the post hook will not read is rewritten (${markread_pre})"
 printf '%s\n' "${tampered_lock}" > "${markread_wt}/package-lock.json"
-markread_post=$(PATH="${markread_bin}:${stub_bin}:${PATH}" grammar_post "${markread_wt}" "npm install fixture-parent@1.0.0")
+markread_post=$(SAFEDEPS_TEST_FAULT=markread PATH="${stub_bin}:${PATH}" grammar_post "${markread_wt}" "npm install fixture-parent@1.0.0")
 grep -q 'A rollback ran\.' <<< "$(post_message "${markread_post}")" \
   || fail "the install whose record the post hook cannot read is rolled back (${markread_post})"
 ! grep -q -- '--ignore-scripts' <<< "$(post_message "${markread_post}")" \
@@ -1504,14 +1494,7 @@ pass "a record that does not state, as version 2, whether safedeps rewrote the c
 nofile_meta="${tmp_root}/nofile-meta.json"
 nofile_log="${tmp_root}/nofile-advisory.log"
 nofile_input='{"tool_name":"Bash","tool_input":{"command":"npm install x --ignore-scripts"}}'
-nofile_lines=$(
-  log_advisory() { printf '%s\n' "$1" >> "${nofile_log}"; }
-  # shellcheck source=../../lib/gates/report-facts.sh
-  source "${ROOT_DIR}/lib/gates/report-facts.sh"
-  ROLLBACK_WARNINGS=()
-  did_not_rebuild "${nofile_meta}" "${nofile_input}" "the directory ${tmp_root}/no-such-project cannot be resolved"
-  printf '%s\n' "${ROLLBACK_WARNINGS[@]}"
-)
+nofile_lines=$(python3 "${ROOT_DIR}/scripts/measure/core-post-direct-call.py" --core "${NATIVE_TEST_CORE}" --meta "${nofile_meta}" --input "${nofile_input}" --project "${tmp_root}/no-such-project" --kind missing --log-body "${nofile_log}")
 oracle_direct "${nofile_meta}" "${nofile_input}" "${nofile_lines}" || exit 1
 ! grep -q -- '--ignore-scripts' <<< "${nofile_lines}" || fail "no record file gets no --ignore-scripts line (${nofile_lines})"
 [[ "$(cat "${nofile_log}" 2>/dev/null)" == "post-verify: ${nofile_meta} is not a version 2 pre-guard record that states whether safedeps rewrote this command, so no --ignore-scripts line was said" ]] \
@@ -1523,25 +1506,14 @@ pass "no record file gets no --ignore-scripts line, and advisory.log names the r
 # record-unread for the oracle, as the row of a failed read does, and the jq
 # that reads it is the real one.
 twoobj_wt=$(mktemp -d "${tmp_root}/twoobj-wt.XXXXXX")
-twoobj_bin=$(mktemp -d "${tmp_root}/twoobj-bin.XXXXXX")
 grammar_project "${twoobj_wt}"
-cat > "${twoobj_bin}/jq" <<SHIM
-#!/usr/bin/env bash
-for a in "\$@"; do
-  if [[ "\${a}" == *'(if (\$meta | length) == 1'* ]]; then
-    [[ -z "\${ORACLE_CALL:-}" ]] || : > "\${ORACLE_CALL}/record-unread"
-  fi
-done
-exec "$(command -v jq)" "\$@"
-SHIM
-chmod +x "${twoobj_bin}/jq"
 twoobj_pre=$(grammar_pre "${twoobj_wt}" "npm install fixture-parent@1.0.0")
 [[ -n "$(jq -r '.hookSpecificOutput.updatedInput.command // empty' <<< "${twoobj_pre:-{\}}")" ]] \
   || fail "the install whose record becomes two objects is rewritten (${twoobj_pre})"
 twoobj_meta="${SAFEDEPS_HOME}/snapshots/$(jq -r '.snapshot_id' "$(grammar_pending "${twoobj_wt}")")_meta.json"
 { printf '{"record":2,"ignore_scripts_injected":false}\n'; cat "${twoobj_meta}"; } > "${twoobj_meta}.tmp" && mv -f "${twoobj_meta}.tmp" "${twoobj_meta}"
 printf '%s\n' "${tampered_lock}" > "${twoobj_wt}/package-lock.json"
-twoobj_post=$(PATH="${twoobj_bin}:${stub_bin}:${PATH}" grammar_post "${twoobj_wt}" "npm install --ignore-scripts fixture-parent@1.0.0 --ignore-scripts")
+twoobj_post=$(SAFEDEPS_TEST_FAULT=twoobj PATH="${stub_bin}:${PATH}" grammar_post "${twoobj_wt}" "npm install --ignore-scripts fixture-parent@1.0.0 --ignore-scripts")
 grep -q 'A rollback ran\.' <<< "$(post_message "${twoobj_post}")" \
   || fail "the install whose record is two objects is rolled back (${twoobj_post})"
 ! grep -q -- '--ignore-scripts' <<< "$(post_message "${twoobj_post}")" \
@@ -1868,20 +1840,13 @@ pass "a pending state whose snapshot_id is a number names no snapshot, for the h
 # one second for `+%s` puts both calls in it every time; the lockfile changes
 # between them, as an install in progress would change it.
 same_wt=$(mktemp -d "${tmp_root}/same-wt.XXXXXX")
-same_bin=$(mktemp -d "${tmp_root}/same-bin.XXXXXX")
 grammar_project "${same_wt}"
-cat > "${same_bin}/date" <<SHIM
-#!/usr/bin/env bash
-[[ "\$#" == 1 && "\$1" == +%s ]] && { printf '%s\\n' "$(date +%s)"; exit 0; }
-exec "$(command -v date)" "\$@"
-SHIM
-chmod +x "${same_bin}/date"
-same_first=$(PATH="${same_bin}:${PATH}" grammar_pre "${same_wt}" "npm install fixture-parent@1.0.0")
+same_first=$(SAFEDEPS_TEST_FAULT=same grammar_pre "${same_wt}" "npm install fixture-parent@1.0.0")
 cp "${same_wt}/package-lock.json" "${tmp_root}/same-first-lock.json"
 jq -c . "${tmp_root}/same-first-lock.json" > "${same_wt}/package-lock.json"
 cmp -s "${same_wt}/package-lock.json" "${tmp_root}/same-first-lock.json" && fail "the second call sees a lockfile with other bytes"
 cp "${same_wt}/package-lock.json" "${tmp_root}/same-second-lock.json"
-same_second=$(PATH="${same_bin}:${PATH}" grammar_pre "${same_wt}" "npm ci")
+same_second=$(SAFEDEPS_TEST_FAULT=same grammar_pre "${same_wt}" "npm ci")
 same_first_cmd=$(jq -r '.hookSpecificOutput.updatedInput.command // empty' <<< "${same_first:-{\}}")
 same_second_cmd=$(jq -r '.hookSpecificOutput.updatedInput.command // empty' <<< "${same_second:-{\}}")
 [[ "${same_first_cmd}" == 'npm install --ignore-scripts fixture-parent@1.0.0 --ignore-scripts' && "${same_second_cmd}" == 'npm ci --ignore-scripts' ]] \
@@ -2331,23 +2296,14 @@ grep -qx 'safedeps did not add --ignore-scripts to this install' <<< "$(post_mes
 [[ "$(call_records_of "${fa_codex_wt}")" == 0 ]] || fail "a failed install on Codex leaves no record"
 pass "a failed install is judged and leaves no record, on both engines"
 
-# A filesystem that keeps whole seconds, simulated: a touch that drops the part
-# below the second. A write in the second the baseline is touched in would not
+# A filesystem that keeps whole seconds, simulated in an archive copy by
+# writing the actual baseline with integer-second FileTimes. A write in the second the baseline is touched in would not
 # be newer than it, so there the baseline is set two seconds back, and a pull
 # just before the grep is counted as the grep's.
 bs_sec_wt="${tmp_root}/bs-sec-wt"
 bs_project "${bs_sec_wt}"
-bs_sec_bin="${tmp_root}/bs-sec-bin"
-mkdir -p "${bs_sec_bin}"
-cat > "${bs_sec_bin}/touch" <<EOF
-#!/usr/bin/env bash
-"$(command -v touch)" "\$@" || exit
-[[ "\$#" == 1 ]] && exec "$(command -v touch)" -t "\$(date +%Y%m%d%H%M.%S)" "\$1"
-exit 0
-EOF
-chmod +x "${bs_sec_bin}/touch"
 printf '%s\n' "${tampered_lock}" > "${bs_sec_wt}/package-lock.json"
-PATH="${bs_sec_bin}:${PATH}" grammar_pre "${bs_sec_wt}" "${bs_grep}" toolu_bs_sec > /dev/null
+SAFEDEPS_TEST_FAULT=bs_sec grammar_pre "${bs_sec_wt}" "${bs_grep}" toolu_bs_sec > /dev/null
 [[ "$(jq -r .resolution "$(bs_entry toolu_bs_sec)")" == seconds ]] \
   || fail "a baseline with no part below the second is set back ($(cat "$(bs_entry toolu_bs_sec)"))"
 bs_sec_post=$(PATH="${stub_bin}:${PATH}" grammar_post "${bs_sec_wt}" "${bs_grep}" toolu_bs_sec)
@@ -2356,8 +2312,8 @@ bs_assert_rollback "${bs_sec_wt}" "${bs_sec_post}" "a grep on a whole-second fil
 pass "on a filesystem that keeps whole seconds the baseline is set two seconds back"
 
 # A node tree on two filesystems (lumi r2 P3): the lockfile keeps nanoseconds
-# and node_modules is on a mount that keeps whole seconds, simulated by a stat
-# that prints no part below the second for node_modules and a walk that reads
+# and node_modules is on a mount that keeps whole seconds, simulated by an
+# archive copy that quantizes native observations and a native walk that reads
 # each time there as the start of its second. A write into node_modules in the
 # second the baseline was touched in is then not newer than a baseline that is
 # not set back. Where one part with a time below the second was enough, the
@@ -2365,16 +2321,12 @@ pass "on a filesystem that keeps whole seconds the baseline is set two seconds b
 # HFS+ mount). Every part has to show one now, so the baseline is set back.
 bs_mix_wt="${tmp_root}/bs-mix-wt"
 bs_project "${bs_mix_wt}"
+# Isolate the mixed-clock walk: an older lockfile must not satisfy the
+# preceding lockfile test against the baseline backdated by two seconds.
+# Other backstop rows above deliberately do not wait after their writes.
+sleep 3
 bs_mix_bin="${tmp_root}/bs-mix-bin"
 mkdir -p "${bs_mix_bin}"
-cat > "${bs_mix_bin}/stat" <<EOF
-#!/usr/bin/env bash
-out=\$("$(command -v stat)" "\$@") || exit
-case "\${!#}" in
-  */node_modules) printf '%s\n' "\${out}" | sed -E 's/\.[0-9]+/.000000000/' ;;
-  *) printf '%s\n' "\${out}" ;;
-esac
-EOF
 cat > "${bs_mix_bin}/whole-second-walk.py" <<'EOF'
 import os, sys
 # find -cnewer compares a status change time with the reference's modification time.
@@ -2389,48 +2341,29 @@ for parent, dirs, files in os.walk(root):
         if newer(os.path.join(parent, name), False):
             print(os.path.join(parent, name)); sys.exit(0)
 EOF
-cat > "${bs_mix_bin}/find" <<EOF
-#!/usr/bin/env bash
-if [[ "\$1" == -H && "\$2" == */node_modules && "\$3" == -cnewer ]]; then
-  exec python3 "${bs_mix_bin}/whole-second-walk.py" "\$2" "\$4"
-fi
-exec "$(command -v find)" "\$@"
-EOF
-chmod +x "${bs_mix_bin}/stat" "${bs_mix_bin}/find"
-PATH="${bs_mix_bin}:${PATH}" grammar_pre "${bs_mix_wt}" "npm run deps:add" toolu_bs_mix > /dev/null
+SAFEDEPS_TEST_FAULT=bs_mix grammar_pre "${bs_mix_wt}" "npm run deps:add" toolu_bs_mix > /dev/null
 bs_mix_entry=$(cat "$(bs_entry toolu_bs_mix)" 2>/dev/null || true)
 printf 'x\n' > "${bs_mix_wt}/node_modules/installed-package/added.js"
 # The walk from this entry's baseline, on a copy of it with the same times. The
-# post hook checks the lockfile first, and in this row the lockfile changed
-# just before the baseline too, so its trace line can name either.
+# post hook must now reach the node walk; its source receipt is mandatory.
 bs_mix_base="${tmp_root}/bs-mix-baseline"
 touch -r "$(jq -r .baseline <<< "${bs_mix_entry:-null}")" "${bs_mix_base}" 2>/dev/null || : > "${bs_mix_base}"
-bs_mix_walk=$(PATH="${bs_mix_bin}:${PATH}" find -H "${bs_mix_wt}/node_modules" -cnewer "${bs_mix_base}" -print -quit)
-bs_mix_post=$(PATH="${bs_mix_bin}:${stub_bin}:${PATH}" grammar_post "${bs_mix_wt}" "npm run deps:add" toolu_bs_mix)
+bs_mix_walk=$(python3 "${bs_mix_bin}/whole-second-walk.py" "${bs_mix_wt}/node_modules" "${bs_mix_base}")
+bs_mix_post=$(SAFEDEPS_TEST_FAULT=bs_mix PATH="${stub_bin}:${PATH}" grammar_post "${bs_mix_wt}" "npm run deps:add" toolu_bs_mix)
 [[ "$(jq -r .resolution <<< "${bs_mix_entry:-null}")" == seconds ]] \
   || fail "a write into node_modules on a whole-second mount beside a subsecond lockfile: the baseline is set back (${bs_mix_entry})"
 [[ "${bs_mix_walk}" == "${bs_mix_wt}/node_modules"* ]] \
   || fail "a write into node_modules on a whole-second mount beside a subsecond lockfile: the walk from the entry's baseline finds it (${bs_mix_walk})"
-grep -qF "post-verify BACKSTOP traced: $(cd -P "${bs_mix_wt}" && pwd -P)/" "${SAFEDEPS_HOME}/advisory.log" \
+grep -qF "post-verify BACKSTOP traced: $(cd -P "${bs_mix_wt}" && pwd -P)/node_modules" "${SAFEDEPS_HOME}/advisory.log" \
   || fail "a write into node_modules on a whole-second mount beside a subsecond lockfile: the backstop counts it as traced (${bs_mix_post})"
 pass "a tree with one part on a whole-second filesystem sets the baseline back"
 
-# A walk that does not finish within its deadline: a find that never answers.
+# A source copy delays the actual native walk past its deadline.
 bs_slow_wt="${tmp_root}/bs-slow-wt"
 bs_project "${bs_slow_wt}"
 bs_pull "${bs_slow_wt}"
-bs_slow_bin="${tmp_root}/bs-slow-bin"
-mkdir -p "${bs_slow_bin}"
-cat > "${bs_slow_bin}/find" <<EOF
-#!/usr/bin/env bash
-case " \$* " in
-  *" -cnewer "*" -quit "*) exec sleep 30 ;;
-esac
-exec $(command -v find) "\$@"
-EOF
-chmod +x "${bs_slow_bin}/find"
 grammar_pre "${bs_slow_wt}" "${bs_grep}" toolu_bs_slow > /dev/null
-bs_slow_post=$(PATH="${bs_slow_bin}:${stub_bin}:${PATH}" SAFEDEPS_BACKSTOP_WALK_SECONDS=1 grammar_post "${bs_slow_wt}" "${bs_grep}" toolu_bs_slow)
+bs_slow_post=$(SAFEDEPS_TEST_FAULT=bs_slow PATH="${stub_bin}:${PATH}" SAFEDEPS_BACKSTOP_WALK_SECONDS=1 grammar_post "${bs_slow_wt}" "${bs_grep}" toolu_bs_slow)
 bs_assert_rollback "${bs_slow_wt}" "${bs_slow_post}" "a walk past its deadline" \
   "the walk of $(cd -P "${bs_slow_wt}" && pwd -P)/node_modules did not finish within 1s"
 pass "a walk that does not finish within its deadline counts as a trace"
@@ -2593,20 +2526,12 @@ pass "a restore target that is not a regular file is named and left alone"
 # an interrupted rollback. This cp fails for one target on every platform; the
 # read-only lockfile below is the same failure from a real cp, where the user
 # is not root.
-cpfail_bin="${tmp_root}/cpfail-bin"
-mkdir -p "${cpfail_bin}"
-cat > "${cpfail_bin}/cp" <<EOF
-#!/usr/bin/env bash
-case "\$*" in *"/cpfail-wt/package-lock.json"|*"/cpgone-wt/package-lock.json") exit 1 ;; esac
-exec "$(command -v cp)" "\$@"
-EOF
-chmod +x "${cpfail_bin}/cp"
 cpfail_wt="${tmp_root}/cpfail-wt"
 grammar_project "${cpfail_wt}"
 mkdir -p "${cpfail_wt}/node_modules/installed-package"
 grammar_pre "${cpfail_wt}" "npm install fixture-parent@1.0.0" > /dev/null
 printf '%s\n' "${tampered_lock}" > "${cpfail_wt}/package-lock.json"
-cpfail_post=$(PATH="${cpfail_bin}:${emptying_bin}:${PATH}" grammar_post "${cpfail_wt}" "npm install fixture-parent@1.0.0")
+cpfail_post=$(SAFEDEPS_TEST_FAULT=cpfail PATH="${emptying_bin}:${PATH}" grammar_post "${cpfail_wt}" "npm install fixture-parent@1.0.0")
 grep -qE '^not restored .*/cpfail-wt/package-lock.json: cp exit 1; .*/cpfail-wt/package-lock.json differs from the snapshot$' <<< "$(post_message "${cpfail_post}")" \
   || fail "a restore whose copy failed is reported with cp's exit status"
 [[ ! -e "${cpfail_wt}/node_modules" ]] || fail "the rollback goes on to node_modules after a restore that failed"
@@ -2621,7 +2546,7 @@ rm -f "${cpgone_wt}/package-lock.json"
 mkdir -p "${cpgone_wt}/node_modules/.bin" "${cpgone_wt}/node_modules/fixture-parent"
 printf '{"name":"fixture-parent","version":"1.0.0"}\n' > "${cpgone_wt}/node_modules/fixture-parent/package.json"
 cp /bin/echo "${cpgone_wt}/node_modules/.bin/native-drop"
-cpgone_post=$(PATH="${cpfail_bin}:${emptying_bin}:${PATH}" grammar_post "${cpgone_wt}" "npm install fixture-parent@1.0.0")
+cpgone_post=$(SAFEDEPS_TEST_FAULT=cpgone PATH="${emptying_bin}:${PATH}" grammar_post "${cpgone_wt}" "npm install fixture-parent@1.0.0")
 grep -qE '^not restored .*/cpgone-wt/package-lock.json: cp exit 1; .*/cpgone-wt/package-lock.json does not exist$' <<< "$(post_message "${cpgone_post}")" \
   || fail "a restore that failed over a missing file says the file does not exist (${cpgone_post})"
 if [[ "$(id -u)" != 0 ]]; then
@@ -2639,22 +2564,14 @@ if [[ "$(id -u)" != 0 ]]; then
 fi
 pass "a restore that fails is a line of the rollback, not the end of the hook"
 
-# A removal that fails on every platform (the read-only directory above stops
-# rm only for a user who is not root).
-rmfail_bin="${tmp_root}/rmfail-bin"
-mkdir -p "${rmfail_bin}"
-cat > "${rmfail_bin}/rm" <<EOF
-#!/usr/bin/env bash
-case "\$*" in *"/rmfail-wt/node_modules") exit 1 ;; esac
-exec "$(command -v rm)" "\$@"
-EOF
-chmod +x "${rmfail_bin}/rm"
+# A nonempty readonly child refuses unlink for this uid. Root or a filesystem
+# that ignores chmod fails the fixture instead of counting an unexercised fault.
 rmfail_wt="${tmp_root}/rmfail-wt"
 grammar_project "${rmfail_wt}"
 mkdir -p "${rmfail_wt}/node_modules/installed-package"
 grammar_pre "${rmfail_wt}" "npm install fixture-parent@1.0.0" > /dev/null
 printf '%s\n' "${tampered_lock}" > "${rmfail_wt}/package-lock.json"
-rmfail_post=$(PATH="${rmfail_bin}:${emptying_bin}:${PATH}" grammar_post "${rmfail_wt}" "npm install fixture-parent@1.0.0")
+rmfail_post=$(SAFEDEPS_TEST_FAULT=rmfail PATH="${emptying_bin}:${PATH}" grammar_post "${rmfail_wt}" "npm install fixture-parent@1.0.0")
 grep -qE '^not removed .*/rmfail-wt/node_modules: rm exit 1; .*/rmfail-wt/node_modules exists$' <<< "$(post_message "${rmfail_post}")" \
   || fail "a removal that failed is reported with rm's exit status and what a test of the path returned"
 pass "a removal that fails says the exit status and that the path exists"
@@ -2754,16 +2671,7 @@ unresolved_dir="${tmp_root}/no-such-project"
 unresolved_meta="${tmp_root}/unresolved-meta.json"
 printf '{"record":2,"ignore_scripts_injected":true,"updated_command":"npm install x --ignore-scripts"}\n' > "${unresolved_meta}"
 unresolved_input='{"tool_name":"Bash","tool_input":{"command":"npm install x --ignore-scripts"}}'
-unresolved_lines=$(
-  # shellcheck source=../../lib/gates/npm-reach.sh
-  source "${ROOT_DIR}/lib/gates/npm-reach.sh"
-  # shellcheck source=../../lib/gates/report-facts.sh
-  source "${ROOT_DIR}/lib/gates/report-facts.sh"
-  ROLLBACK_WARNINGS=()
-  report_say "$(did_refuse restore "${unresolved_dir}/package-lock.json" "$(fact_outside "${unresolved_dir}" "${unresolved_dir}/package-lock.json")")"
-  did_not_rebuild "${unresolved_meta}" "${unresolved_input}" "$(safedeps_npm_reach_blocker "${unresolved_dir}")"
-  printf '%s\n' "${ROLLBACK_WARNINGS[@]}"
-)
+unresolved_lines=$(python3 "${ROOT_DIR}/scripts/measure/core-post-direct-call.py" --core "${NATIVE_TEST_CORE}" --meta "${unresolved_meta}" --input "${unresolved_input}" --project "${unresolved_dir}" --kind unresolved)
 oracle_direct "${unresolved_meta}" "${unresolved_input}" "${unresolved_lines}" || exit 1
 grep -q "^refused restore of ${unresolved_dir}/package-lock.json: the project directory ${unresolved_dir} cannot be resolved$" <<< "${unresolved_lines}" \
   || fail "a restore in a directory that does not resolve is refused with that as the reason"
@@ -2908,23 +2816,11 @@ grep -q 'advisory truth source moved' "${guard_override_home}/advisory.log" \
   || fail "no environment variable can silence the moved-source notice"
 pass "the moved-source notice cannot be switched off from the environment"
 
-# And when the library genuinely cannot be read, that is an unavailability, said
-# out loud like every other one rather than swallowed by a quiet return.
-guard_nolib_repo="${tmp_root}/guard-nolib-repo"
-mkdir -p "${guard_nolib_repo}/scripts" "${guard_nolib_repo}/lib"
-cp -R lib/. "${guard_nolib_repo}/lib/"
-cp scripts/safedeps-pre-guard.sh "${guard_nolib_repo}/scripts/"
-rm -f "${guard_nolib_repo}/lib/truth-sources.sh"
-guard_nolib_home="${tmp_root}/safe-guard-nolib"
-guard_nolib_err="${tmp_root}/guard-nolib.err"
-mkdir -p "${guard_nolib_home}"
-SAFEDEPS_HOME="${guard_nolib_home}" SAFEDEPS_OSV_API_URL="http://mirror.invalid/osv" \
-  "${guard_nolib_repo}/scripts/safedeps-pre-guard.sh" <<< "${guard_moved_payload}" >/dev/null 2>"${guard_nolib_err}" || true
-grep -q 'truth-sources.sh is unreadable' "${guard_nolib_home}/advisory.log" \
-  || fail "an unreadable truth-source library is recorded as an unavailability"
-grep -q 'truth-sources.sh is unreadable' "${guard_nolib_err}" \
-  || fail "an unreadable truth-source library is reported on stderr"
-pass "an unreadable truth-source library is an announced unavailability, not a quiet skip"
+# Retired: deleting lib/truth-sources.sh cannot damage the native hook, whose
+# notice is compiled in. The moved-source and override assertions above remain.
+# Broken native entry is covered by hook-entry.sh's native_denies cases:
+# nonzero exit/abort, non-executable or missing binary, and missing platform or
+# bin/native directory all require exit 2 plus cause and recovery on stderr.
 
 # A forged ledger entry must be flagged even when advisory.log does not exist at
 # all — file absence is missing provenance, not proof of approval. (Previously
@@ -3460,7 +3356,7 @@ ov_guard_decision() {
   jq -nc --arg c 'npm install mkdirp@0.5.1' --arg cwd "${dir}" \
     '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' \
     | ( cd "${dir}" && HOME="${ov_home}" SAFEDEPS_HOME="${ov_home}" \
-        PATH="${ov_npm_bin}:${PATH}" "${ROOT_DIR}/scripts/safedeps-pre-guard.sh" 2>/dev/null ) \
+        PATH="${ov_npm_bin}:${PATH}" native_fixture_hook pre 2>/dev/null ) \
     | jq -r '.hookSpecificOutput.permissionDecision // "allow"'
 }
 [[ "$(ov_guard_decision "${ov_patched_repo}")" == "allow" ]] \
@@ -3841,21 +3737,13 @@ sleep 0.3
 forms_entry "${forms_owner_pid}" "not-a-date"
 grep -q '^Owner: the opening time of the journal cannot be parsed$' <<< "$(post_message "$(forms_report)")" \
   || fail "an entry whose opening time does not parse is reported as that"
-forms_real_ps=$(command -v ps)
-for forms_ps_case in "empty|ps gives no start time for pid ${forms_owner_pid}" "garbage|the start time ps gives for pid ${forms_owner_pid} cannot be parsed"; do
-  forms_ps_bin="${tmp_root}/ps-${forms_ps_case%%|*}-bin"
-  mkdir -p "${forms_ps_bin}"
-  cat > "${forms_ps_bin}/ps" <<EOF
-#!/usr/bin/env bash
-case "\$*" in
-  *lstart=*) [[ "${forms_ps_case%%|*}" == empty ]] || printf 'no date here\n'; exit 0 ;;
-esac
-exec "${forms_real_ps}" "\$@"
-EOF
-  chmod +x "${forms_ps_bin}/ps"
+# ps lstart garbage-date parsing has no native equivalent. Integer API
+# zero/short/wrong-owner responses replace that parser coverage; the malformed
+# journal opening-time assertion above remains independent and unchanged.
+for forms_query_case in owner-empty owner-short owner-wrong-pid; do
   forms_entry "${forms_owner_pid}" "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-  grep -q "^Owner: ${forms_ps_case#*|}\$" <<< "$(post_message "$(PATH="${forms_ps_bin}:${PATH}" forms_report)")" \
-    || fail "an owner ps cannot place is reported as the test that answered (${forms_ps_case%%|*})"
+  grep -q "^Owner: native process query supplied no usable owner data for pid ${forms_owner_pid}\$" <<< "$(post_message "$(SAFEDEPS_TEST_FAULT="${forms_query_case}" forms_report)")" \
+    || fail "a native owner query failure is reported as the test that answered (${forms_query_case})"
 done
 kill -9 "${forms_owner_pid}" 2>/dev/null
 forms_reap=0
