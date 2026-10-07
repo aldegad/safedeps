@@ -103,6 +103,7 @@ reason-trace reason-file reason-package reason-bin reason-newer reason-no-snapsh
 trace-none trace-baseline-gone trace-no-baseline
 inert-added inert-asked inert-none
 rebuild-skipped-added rebuild-ran-added rebuild-skipped rebuild-ran
+rebuild-start-added rebuild-start rebuild-signal-added rebuild-signal
 skip-fact-link skip-fact-unresolved skip-fact-trace
 backstop-no-confirmed backstop-no-meta
 journal owner-not-running owner-zombie owner-stopped owner-later owner-no-pid owner-no-start owner-bad-start owner-bad-opened
@@ -825,6 +826,8 @@ oracle_line() {
   local re_ran_added='^safedeps added --ignore-scripts to this install and ran npm rebuild: exit ([0-9]+)$'
   local re_skip='^safedeps did not run npm rebuild: (.+)$'
   local re_ran='^safedeps ran npm rebuild: exit ([0-9]+)$'
+  local re_outcome_added='^safedeps added --ignore-scripts to this install and (could not start npm rebuild: (OS error [0-9]+|error without an OS code)|npm rebuild terminated by signal [0-9]+|npm rebuild ended without an exit code or signal|could not read npm rebuild process status: (OS error [0-9]+|error without an OS code))$'
+  local re_outcome='^safedeps (could not start npm rebuild: (OS error [0-9]+|error without an OS code)|npm rebuild terminated by signal [0-9]+|npm rebuild ended without an exit code or signal|could not read npm rebuild process status: (OS error [0-9]+|error without an OS code))$'
   local re_no_confirmed='^no confirmed snapshot is recorded for (/.+)$'
   local re_no_meta='^the confirmed snapshot ([^ ]+) of (/.+): (/.+) does not exist$'
   local re_journal='^Journal: ([^,]+), opened ([^;]+); last recorded stage ([a-z-]+)(, entered ([^ ]+)( [^ ]+ ([0-9]+)s into the rollback)?)?$'
@@ -1206,6 +1209,18 @@ oracle_line() {
     oracle_count rebuild-ran
     oracle_after_asked_line
     grep -q "^rebuild.*"$'\t'"rc=${BASH_REMATCH[1]}\$" "${O_NPM_LOG}" 2>/dev/null || oracle_red "no npm rebuild with that exit status was run"
+  elif [[ "${line}" =~ ${re_outcome_added} ]]; then
+    local outcome_fact="${BASH_REMATCH[1]}" outcome_kind
+    oracle_inert_holds added
+    outcome_kind=$(python3 "${ORACLE_READ%/*}/outcome-oracle.py" rebuild "${O_CALL}/rebuild-outcome.json" "${outcome_fact}") \
+      || oracle_red "the rebuild outcome was not independently observed"
+    [[ -n "${outcome_kind}" ]] && oracle_count "rebuild-${outcome_kind}-added"
+  elif [[ "${line}" =~ ${re_outcome} ]]; then
+    local outcome_fact="${BASH_REMATCH[1]}" outcome_kind
+    oracle_after_asked_line
+    outcome_kind=$(python3 "${ORACLE_READ%/*}/outcome-oracle.py" rebuild "${O_CALL}/rebuild-outcome.json" "${outcome_fact}") \
+      || oracle_red "the rebuild outcome was not independently observed"
+    [[ -n "${outcome_kind}" ]] && oracle_count "rebuild-${outcome_kind}"
   elif [[ "${line}" == 'safedeps added --ignore-scripts to this install' ]]; then
     oracle_inert_line inert-added added
   elif [[ "${line}" == 'safedeps asked for --ignore-scripts on this install; the command this hook received is not the one safedeps wrote' ]]; then

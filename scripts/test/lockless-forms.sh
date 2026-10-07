@@ -227,7 +227,7 @@ pass "an install from a directory without a package.json, a workspace member, or
 # `<stub>|<commands>|<the reason the record gives>`.
 for carrier in \
   "fail|prefix|root|npm prefix failed (exit 7: code EFAKE)" \
-  "hang|prefix|root|npm did not say where this install lands within" \
+  "hang|prefix|root|npm did not finish within" \
   "missing|||npm is not on the PATH this hook runs with"
 do
   shard_row "carrier: ${carrier}" || continue

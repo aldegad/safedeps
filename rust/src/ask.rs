@@ -1,8 +1,8 @@
 //! Ask the hook's npm directly. Command text is never executed. The only
 //! carried environment is parsed argv, with code-selecting names removed.
 //! Each group shares a clock deadline and owns all its children and scratch.
-use crate::{ere::Regex, jq, json::{self, Value}, manager, os};
-use std::{ffi::{OsStr}, fs::{self, File}, io, os::unix::{ffi::{OsStrExt, OsStringExt}, fs::PermissionsExt, process::ExitStatusExt}, path::{Path, PathBuf}, process::{Child, Command, Stdio}, time::{Duration, Instant}};
+use crate::{ere::Regex, jq, json::{self, Value}, manager, os, outcome::{Outcome, Action, Form}};
+use std::{ffi::{OsStr}, fs::{self, File}, io, os::unix::{ffi::{OsStrExt, OsStringExt}, fs::PermissionsExt}, path::{Path, PathBuf}, process::{Child, Command, Stdio, ExitStatus}, time::{Duration, Instant}};
 
 type W = Vec<u8>;
 mod fetch;
@@ -26,7 +26,7 @@ pub fn npm_on_path() -> Option<PathBuf> {
     None
 }
 
-pub struct Answer { pub status: i32, pub stdout: W, pub stderr: W }
+pub struct Answer { pub status: Outcome, pub stdout: W, pub stderr: W }
 impl Answer {
     pub fn error(&self) -> String {
         let re = Regex::new("npm (error|ERR!) (code )?[A-Z]", false).expect("npm error pattern");
@@ -37,7 +37,7 @@ impl Answer {
         if line.is_empty() { "no output".into() } else { jq::text(line) }
     }
 }
-struct Job { child: Child, out: PathBuf, err: PathBuf, status: Option<i32> }
+struct Job { child: Child, out: PathBuf, err: PathBuf, status: Option<ExitStatus> }
 struct Group { tmp: PathBuf, jobs: Vec<Job> }
 impl Group {
     fn new() -> io::Result<Self> { Ok(Self { tmp: os::scratch_dir("safedeps-npm-ask")?, jobs: Vec::new() }) }
@@ -71,25 +71,25 @@ impl Group {
         self.jobs.push(Job { child, out, err, status: None });
         Ok(())
     }
-    fn wait(&mut self, until: Instant) -> Result<Vec<Answer>, ()> {
+    fn wait(&mut self, until: Instant) -> Result<Vec<Answer>, Outcome> {
         let mut step = 0;
         loop {
             let mut alive = false;
             for j in &mut self.jobs {
                 if j.status.is_some() { continue; }
                 match j.child.try_wait() {
-                    Ok(Some(s)) => j.status = Some(s.code().unwrap_or_else(|| 128 + s.signal().unwrap_or(0))),
+                    Ok(Some(s)) => j.status = Some(s),
                     Ok(None) => alive = true,
-                    Err(_) => return Err(()),
+                    Err(error) => return Err(Outcome::StatusFailure(error)),
                 }
             }
             if !alive { break; }
-            if Instant::now() >= until { return Err(()); }
+            if Instant::now() >= until { return Err(Outcome::Deadline); }
             let delay = [20,50,100,200][step.min(3)];
             std::thread::sleep(Duration::from_millis(delay).min(until.saturating_duration_since(Instant::now())));
             step += 1;
         }
-        Ok(self.jobs.iter().map(|j| Answer { status: j.status.unwrap(), stdout: fs::read(&j.out).unwrap_or_default(), stderr: fs::read(&j.err).unwrap_or_default() }).collect())
+        Ok(self.jobs.iter().map(|j| Answer { status: Outcome::status(j.status.unwrap()), stdout: fs::read(&j.out).unwrap_or_default(), stderr: fs::read(&j.err).unwrap_or_default() }).collect())
     }
 }
 impl Drop for Group {
@@ -107,7 +107,7 @@ pub fn test_registry() -> Option<String> {
     Regex::new(r"^https?://(127\.0\.0\.1|localhost|\[::1\])(:[0-9]+)?/$", false).ok()?.is_match(s.as_bytes()).then_some(s)
 }
 pub fn fetch_read(answer: &Answer, what: &str) -> Value {
-    if answer.status != 0 { return unknown(format!("npm config failed (exit {}: {}), so safedeps cannot tell which registry {} fetches from", answer.status, answer.error(), what)); }
+    if !answer.status.success() { return unknown(format!("npm config failed ({}: {}), so safedeps cannot tell which registry {} fetches from", jq::text(&answer.status.describe(Action::NpmConfig,Form::Detail)), answer.error(), what)); }
     let Ok(Value::Obj(values)) = json::parse_one(&answer.stdout) else {
         return unknown(format!("npm config answered with something safedeps could not read, so it cannot tell which registry {} fetches from", what));
     };
@@ -126,10 +126,10 @@ pub fn fetch_facts(dir: &Path, until: Instant, env: &[W], args: &[W]) -> Value {
     let Ok(mut group) = Group::new() else { return unknown("safedeps could not make a scratch directory to ask npm which registry it fetches from"); };
     let mut words = vec![b"config".to_vec(), b"ls".to_vec()];
     words.extend_from_slice(args); words.push(b"--json".to_vec());
-    if let Err(e) = group.start(&npm, dir, env, &words) { return unknown(format!("npm config could not start: {}", e)); }
+    if let Err(e) = group.start(&npm, dir, env, &words) { return unknown(jq::text(&Outcome::StartFailure(e).describe(Action::NpmConfig,Form::Action))); }
     match group.wait(until) {
         Ok(a) => fetch_read(&a[0], "this install"),
-        Err(()) => unknown("npm did not say which registry it fetches from before the deadline"),
+        Err(outcome) => unknown(format!("{}, so safedeps cannot tell which registry this install fetches from",jq::text(&outcome.describe(Action::Npm,Form::Action)))),
     }
 }
 
@@ -139,10 +139,10 @@ pub fn query(dir: &Path, until: Instant) -> Result<Answer, String> {
     let npm = npm_on_path().ok_or("npm is not on the PATH this hook runs with")?;
     let mut group = Group::new().map_err(|_| "safedeps could not make a scratch directory to ask npm")?;
     let args = vec![b"query".to_vec(), b"*".to_vec(), b"--global=false".to_vec(), b"--location=project".to_vec(), b"--prefix".to_vec(), dir.as_os_str().as_bytes().to_vec()];
-    group.start(&npm, dir, &[], &args).map_err(|e| format!("npm query could not start: {}", e))?;
-    let answers = group.wait(until).map_err(|_| format!("npm query did not answer within {}s", POST_SECONDS))?;
+    group.start(&npm, dir, &[], &args).map_err(|e| jq::text(&Outcome::StartFailure(e).describe(Action::NpmQuery,Form::Action)))?;
+    let answers = group.wait(until).map_err(|outcome| jq::text(&outcome.describe(Action::NpmQuery,Form::Within(POST_SECONDS))))?;
     let a = answers.into_iter().next().unwrap();
-    if a.status != 0 { return Err(format!("npm query failed (exit {}: {})", a.status, a.error())); }
+    if !a.status.success() { return Err(format!("npm query failed ({}: {})", jq::text(&a.status.describe(Action::NpmQuery,Form::Detail)), a.error())); }
     Ok(a)
 }
 
@@ -200,12 +200,12 @@ pub fn install_target(dir: &Path, until: Instant, env: &[W], args: &[W]) -> Targ
     let Ok(mut group) = Group::new() else { return no_target("safedeps could not make a scratch directory to ask npm where this install lands", unknown("safedeps could not make a scratch directory to ask npm which registry this install fetches from")); };
     for (head, tail) in [(vec![b"prefix".to_vec()], vec![b"--global=false".to_vec(), b"--location=project".to_vec()]), (vec![b"root".to_vec()], vec![]), (vec![b"config".to_vec(), b"ls".to_vec()], vec![b"--json".to_vec()])] {
         let mut a = head; a.extend_from_slice(&words); a.extend(tail);
-        if let Err(e) = group.start(&npm, dir, env, &a) { return no_target(&format!("npm could not start: {}", e), unknown(format!("npm could not start: {}", e))); }
+        if let Err(e) = group.start(&npm, dir, env, &a) { let why=jq::text(&Outcome::StartFailure(e).describe(Action::Npm,Form::Action)); return no_target(&why, unknown(&why)); }
     }
-    let Ok(a) = group.wait(until) else { return no_target(&format!("npm did not say where this install lands within {}s", PRE_SECONDS), unknown(format!("npm did not say which registry this install fetches from within {}s", PRE_SECONDS))); };
+    let a = match group.wait(until) { Ok(a)=>a, Err(outcome)=>{let why=jq::text(&outcome.describe(Action::Npm,Form::Within(PRE_SECONDS)));return no_target(&why,unknown(&why))} };
     let mut fetch = fetch_read(&a[2], "this install");
     for n in 0..2 {
-        if a[n].status != 0 { return no_target(&format!("npm {} failed (exit {}: {}), so safedeps cannot tell where this install lands", ["prefix", "root"][n], a[n].status, a[n].error()), fetch); }
+        if !a[n].status.success() { return no_target(&format!("npm {} failed ({}: {}), so safedeps cannot tell where this install lands", ["prefix", "root"][n], jq::text(&a[n].status.describe(Action::Npm,Form::Detail)), a[n].error()), fetch); }
     }
     let mut prefix = last_line(&a[0].stdout); let root = last_line(&a[1].stdout);
     if !prefix.starts_with(b"/") || !root.starts_with(b"/") {
@@ -218,7 +218,7 @@ pub fn install_target(dir: &Path, until: Instant, env: &[W], args: &[W]) -> Targ
     let mut local = base.to_vec(); local.extend_from_slice(b"/node_modules");
     if root != local { let mut location = b"global\t".to_vec(); location.extend_from_slice(&prefix); return Target { location, fetch }; }
     if masked.is_some() && prefix.is_empty() { return no_target(&format!("npm masked part of the directory it named ({}), the way it masks anything shaped like a UUID or a token, and no directory from {} up reads the same, so safedeps cannot tell where this install lands", jq::text(masked.as_ref().unwrap()), dir.display()), fetch); }
-    if a[2].status != 0 && a[2].stderr.windows(13).any(|w| w == b"ENOWORKSPACES") { fetch = fetch_facts(&os::path(&prefix), until, env, &words); }
+    if !a[2].status.success() && a[2].stderr.windows(13).any(|w| w == b"ENOWORKSPACES") { fetch = fetch_facts(&os::path(&prefix), until, env, &words); }
     let location = fs::canonicalize(os::path(&prefix)).map(|p| p.into_os_string().into_vec()).unwrap_or(prefix);
     Target { location, fetch }
 }
@@ -264,4 +264,32 @@ pub fn probe(input: &[u8]) -> i32 {
         _ => return 2,
     };
     println!("{}", jq::compact(&jq::from_value(&result))); 0
+}
+
+#[cfg(test)]
+mod outcome_tests {
+    use super::*;
+    #[test]
+    fn wait_failure_is_not_a_deadline() {
+        let mut group=Group::new().unwrap();
+        group.start(Path::new("/bin/sh"),Path::new("/"),&[],&[b"-c".to_vec(),b"exit 0".to_vec()]).unwrap();
+        // Reap this test's own child through an independent interface. The
+        // next real try_wait gets ECHILD; no product fault selector is used.
+        extern "C" { fn waitpid(pid:i32,status:*mut i32,options:i32)->i32; }
+        let pid=group.jobs[0].child.id() as i32;let mut status=0;
+        assert_eq!(unsafe{waitpid(pid,&mut status,0)},pid);
+        let result=group.wait(Instant::now()+Duration::from_secs(2));
+        // Ownership was deliberately removed above; never signal that pid.
+        group.jobs.clear();
+        let Err(Outcome::StatusFailure(error))=result else {panic!("wait I/O error must stay distinct")};
+        assert_eq!(error.raw_os_error(),Some(10));
+        assert_eq!(Outcome::StatusFailure(error).describe(Action::Npm,Form::Within(8)),b"could not read npm process status: OS error 10");
+
+        let mut group=Group::new().unwrap();
+        group.start(Path::new("/bin/sh"),Path::new("/"),&[],&[b"-c".to_vec(),b"while :; do :; done".to_vec()]).unwrap();
+        assert!(matches!(group.wait(Instant::now()),Err(Outcome::Deadline)));
+        let error=group.start(&group.tmp.join("missing"),Path::new("/"),&[],&[]).unwrap_err();
+        assert_eq!(error.raw_os_error(),Some(2));
+        assert_eq!(Outcome::StartFailure(error).describe(Action::Npm,Form::Action),b"could not start npm: OS error 2");
+    }
 }

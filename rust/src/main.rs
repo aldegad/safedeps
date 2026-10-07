@@ -89,6 +89,7 @@ mod manager;
 mod md5;
 #[allow(dead_code)]
 mod os;
+mod outcome;
 mod post;
 mod pre;
 mod query;

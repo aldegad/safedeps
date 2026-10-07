@@ -125,7 +125,7 @@ cases={
    '''    let rc=walk(&tree,usize::MAX,true,Some(until),|p,m|{
         if (m.ctime(),m.ctime_nsec())>(b.mtime(),b.mtime_nsec()){found=sh::bytes(p).to_vec();true}else{false}
     });''',
-   '    let rc:Result<(),i32>=Ok(());',
+   '    let rc:Result<(),Outcome>=Ok(());',
    'a write only into node_modules is a trace'),
  'LinkLstat':('assertion','trace-link','trace.rs',
    'os::tree_clock(&file).as_bytes()!=lines[5+i]',
