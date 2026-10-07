@@ -1271,13 +1271,17 @@ hidden_install_cases=(
   $'cat <<EOF | sh\npip install hidden-heredoc@1.0.0\nEOF'
 )
 for hidden_cmd in "${hidden_install_cases[@]}"; do
-  hidden_safe="${tmp_root}/safe-hidden-$(printf '%s' "${hidden_cmd}" | cksum | cut -d' ' -f1)"
+  hidden_safe=$(mktemp -d "${tmp_root}/safe-hidden.XXXXXX")
   hidden_output=$(run_hook_command "${tmp_root}/home-hidden" "${hidden_safe}" "${hidden_cmd}")
   [[ "$(jq -r '.hookSpecificOutput.permissionDecision' <<< "${hidden_output}")" == "deny" ]] || fail "hook denies hidden install command: ${hidden_cmd}"
-  hidden_snapshots=$({ find "${hidden_safe}/snapshots" -name '*_meta.json' -type f 2>/dev/null || true; } | wc -l | tr -d ' ')
-  [[ "${hidden_snapshots}" -gt 0 ]] || fail "hook snapshots hidden install command before denying: ${hidden_cmd}"
+  for hidden_state_dir in pending snapshots; do
+    if [[ -e "${hidden_safe}/${hidden_state_dir}" ]]; then
+      [[ -d "${hidden_safe}/${hidden_state_dir}" && -z "$(find "${hidden_safe}/${hidden_state_dir}" -mindepth 1 -print)" ]] \
+        || fail "a denied hidden install leaves no pending record, snapshot or meta (${hidden_state_dir}): ${hidden_cmd}"
+    fi
+  done
 done
-pass "hook denies and snapshots hidden install indirection"
+pass "hook denies hidden install indirection without pending records, snapshots or meta"
 
 bypass_cases=(
   "/usr/bin/npm install evil@1.2.3"
