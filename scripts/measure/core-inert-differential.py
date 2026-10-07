@@ -182,14 +182,26 @@ row).
   is `rejected`: it keeps its ordinal, the row's JSON type, its set and its
   command where they are strings, and where and why it was rejected, and no
   other field of the row. The values are in the source, at the pointer named.
+- The evaluation's row, each of its sides and each of their runs are made
+  by the admission from what it decoded and checked, and hold nothing else.
+  No value of the source is carried into them as it was read, so no name a
+  source holds (`rejected`, `admission`, `decision` or any other) steers what
+  the evaluation decides, and a field the admission does not read stays in
+  the source and nowhere else. Whether a node was admitted, its place in the
+  source and why it was rejected are values the admission writes
+  (`admission`, `at`, the evidence).
 - Inside an admitted row, what is not what this file writes is rejected the
   same way, with its pointer and why, and the rest of the row keeps its
-  evidence: a side (it stands in its place as `decision` invalid), a side's
+  evidence: a side (it stands in its place as a rejected side), a side's
   runs, a shell's run that is not an object (it stands in its place as a
   rejected run, invalid on every axis and never read as a shell that did not
-  run, and the other shells keep theirs), A's words that do not read,
-  `stand_ins` and `expect`. A side this file does not write and a shell it
-  does not run are left out, and so is any field it does not read.
+  run, and the other shells keep theirs), a side's run bytes, record or flags
+  at odds with its value, A's words that do not read, `stand_ins`, `expect`
+  and the bash guard's own exit fields. A side this file does not write and a
+  shell it does not run are left out.
+- A run holds the facts of an axis only where the axis holds them as
+  evidence; its listing of files also where a file could not be read, since
+  every entry of it was checked.
 - `any_install` is decoded once per side and every consumer reads that
   decoding. The core's payload count of a reading, A's words of the same text,
   reading and core, and the row's stored count are records of one fact, each
@@ -211,8 +223,9 @@ row).
   release rewrites (attached), or the 7d66f8c side's run. A saved floor that
   is not that is invalid; one saved with no basis, or held to rewrites not
   attached, is unknown. A --floor request is not a basis.
-- A side's record that the run did not keep is computed from its value and
-  kept apart (`_record`), never written as one the run kept.
+- A side's record is the one the run kept where it agrees with the side's
+  value, and where the run kept none, the one its value carries
+  (`record_from` says which). One at odds with its value is invalid.
 
 The readers' answers are part of what a run keeps, each bound to its argv.
 --reclassify reads the saved answers and asks no reader: an argv with no
@@ -1111,14 +1124,11 @@ def admit_obs(o, schema):
 
 
 def side_record(v):
-    """A side's record: as its run kept it, else as its value carries it
-    (`_record`, computed by the intake and never written as one kept)."""
-    if not isinstance(v, dict):
-        return False
-    r = v.get("record", MISSING)
-    if isinstance(r, bool):
-        return r
-    return bool(v.get("_record"))
+    """A side's record as the evaluation holds it (see side_of): the run's own
+    where it agrees with the side's value, else the one the value carries;
+    False where the side holds none."""
+    r = v.get("record") if isinstance(v, dict) else None
+    return r if isinstance(r, bool) else False
 
 
 def axis(o, name):
@@ -1148,11 +1158,46 @@ def pointer(*parts):
     return "".join("/" + str(p).replace("~", "~0").replace("/", "~1") for p in parts)
 
 
-def rejected_run(at):
-    """A shell's run that is not an object, in its place: invalid on every
-    axis, so that it is never read as a shell that did not run. Its value is
-    in the source at `at`."""
-    return {"rejected": at, "_axes": {x: "invalid" for x in AXES}, "_why": {x: "the run is not an object" for x in AXES}}
+def run_of(o, schema, at):
+    """The evaluation's run of one shell, made from the source's run `o`,
+    whose place in the source is `at`: (its problems as (axis, kind, why),
+    the run). Its axes are what admit_obs reads of a copy of `o` (the source's
+    run is not changed), and it holds an axis's facts only where the axis
+    holds them as evidence, the listing of files also where a file could not
+    be read (every entry of it was checked). A run that is not an object is a
+    rejected run in its place, invalid on every axis."""
+    if not isinstance(o, dict):
+        return admit_obs(o, schema), {"admission": "rejected", "at": at, "_axes": {x: "invalid" for x in AXES},
+                                      "_why": {x: "the run is not an object" for x in AXES}}
+    seen = dict(o)
+    problems = admit_obs(seen, schema)
+    ax = seen["_axes"]
+    run = {"admission": "admitted", "at": at, "_axes": dict(ax), "_why": dict(seen["_why"])}
+    for axis_, key in (("npm", "npm"), ("other", "other"), ("order", "calls")):
+        if ax[axis_] == "ok":
+            run[key] = [list(c) for c in o[key]]
+    if ax["rc"] == "ok":
+        run["rc"] = o["rc"]
+    if ax["rc"] != "invalid" and isinstance(o.get("timeout"), bool):
+        run["timeout"] = o["timeout"]
+    if o.get("log") in ("ok", "undecodable"):
+        run["log"] = o["log"]
+    for name in ("stdout", "stderr"):
+        if ax[name] == "ok":
+            for key in (name + "_len", name + "_sha256", name):
+                run[key] = o[key]
+    if ax["files"] in ("ok", UNKNOWN) and isinstance(o.get("files"), dict):
+        run["files"] = {k: list(v) for k, v in o["files"].items()}
+    return problems, run
+
+
+def records_facts(recs):
+    """The records of a side the evaluation reads, once records_problem found
+    them sound: the reading set, `any_install`, `failed`, and for each reading
+    of the set its value, its payload count and the core's detail."""
+    rs = recs.get("reading_set", "").split()
+    names = {"reading_set", "any_install", "failed"} | {"%s.%s" % (p, r) for p in ("inert", "payloads", "detail") for r in rs}
+    return {k: v for k, v in recs.items() if k in names}
 
 
 def admitted(results):
@@ -1202,22 +1247,22 @@ def records_problem(recs, who, schema=SCHEMA):
 
 SIDE_DECISIONS = {"written": ("run",), "bash": ("run", "deny", "blocked"), "core": ("run", "deny", "blocked"),
                   "v2.18.1": ("run", "deny"), "7d66f8c": ("run", "deny"), "head": ("allow", "deny")}
-# The fields of a row the intake reads. Any other field (a value an older
-# classification derived, or one this file does not write) is not carried.
-ROW_FIELDS = ("set", "command", "core_rc", "bash_rc", "bash_exit", "bash_timeout", "ref", "core", "payloads3", "sides",
-              "stand_ins", "expect", "words", "words_rewrite", "floor", "floor_basis")
 DERIVED_SIDE = ("state", "state_words", "state_npm")
 
 
-def admit_side(res, name, v, schema, cb, at=()):
-    """The intake of one side of the row whose place in the source is `at`:
-    (its problems as (where, kind, why), what it rejected as {pointer, type,
-    why}, and the side the slot keeps: the side admitted, a rejected side
-    (`decision` invalid) in its place, or None for a side this file does not
-    write)."""
+def side_of(row, name, v, schema, cb, at=()):
+    """The evaluation's side `name` of the row whose place in the source is
+    `at`, made from what the admission checks of the source's side `v`: (its
+    problems as (where, kind, why), what it rejected as {pointer, type, why},
+    and the side, or None for a side this file does not write). `row` is the
+    evaluation's row, its records already checked. The side holds its
+    decision and, where it sent a command, the bytes it ran, its record and
+    flags where they agree with its value, and its runs. A source side that
+    is not one this file writes is a rejected side in its place."""
     out, rej = [], []
     where = "side %s" % name
     here = at + ("sides", name)
+    me = pointer(*here)
 
     def bad(why, kind="invalid"):
         out.append((where, kind, why))
@@ -1225,63 +1270,82 @@ def admit_side(res, name, v, schema, cb, at=()):
     def reject(why, path=(), value=v):
         rej.append({"pointer": pointer(*(here + path)), "type": jtype(value), "why": why})
 
-    def instead(why):
+    def rejected(why):
         bad(why)
         reject(why)
-        return out, rej, {"decision": "invalid", "rejected": pointer(*here)}
+        return out, rej, {"admission": "rejected", "at": me}
 
     if name not in SIDE_DECISIONS:
         bad("a side this file does not write")
         reject("a side this file does not write")
         return out, rej, None
     if not isinstance(v, dict):
-        return instead("not an object")
-    for k in DERIVED_SIDE:
-        v.pop(k, None)
+        return rejected("not an object")
     d = v.get("decision")
     if d not in SIDE_DECISIONS[name]:
-        return instead("decision %r" % (d,))
+        return rejected("decision %r" % (d,))
+    side = {"admission": "admitted", "at": me, "decision": d}
     if name == "head":
         if not isinstance(v.get("reason", ""), str) or not _is_int(v.get("guard_rc", 0)):
-            return instead("the pre-guard's answer is not one this file writes")
-        return out, rej, v
+            return rejected("the pre-guard's answer is not one this file writes")
+        for key in ("reason", "guard_rc"):
+            if key in v:
+                side[key] = v[key]
+        return out, rej, side
     o = None
     if name in ("bash", "core"):
-        recs = res.get("ref" if name == "bash" else "core") or {}
+        recs = row["ref" if name == "bash" else "core"]
         o = consensus(enc(recs), cb) if recs else None
         want = None if o is None else "blocked" if o == "blocked" else "deny" if (o == "deny" or recs.get("failed") == "true") else "run"
         if d != want:
-            return instead("decision %s where its readings say %s" % (d, want))
+            return rejected("decision %s where its readings say %s" % (d, want))
     if d != "run":
         if "shells" in v:
-            return instead("a side that sends nothing has runs")
-        return out, rej, v
+            return rejected("a side that sends nothing has runs")
+        return out, rej, side
     run = v.get("run", MISSING)
     if not isinstance(run, str):
         if run is MISSING and schema == 1:
             bad("the first schema kept no run bytes for it", UNKNOWN)
         else:
             bad("no run bytes")
+            if run is not MISSING:
+                reject("no run bytes", ("run",), run)
     else:
         rb = cmd_bytes(run)
+        held = True
         if name == "written" and rb != cb:
             bad("the command as written is not what it ran")
+            held = False
         if name in ("bash", "core"):
             if o[2] != rb:
                 bad("it ran bytes that are not what its readings agree on")
-            rec = v.get("record", MISSING)
+                held = False
+            rec, carried = v.get("record", MISSING), bool(records_of(o))
             if rec is MISSING:
-                v["_record"] = bool(records_of(o))
-            elif rec is not bool(records_of(o)):
+                side["record"], side["record_from"] = carried, "computed"
+            elif rec is carried:
+                side["record"], side["record_from"] = rec, "kept"
+            else:
                 bad("record is not what its value carries")
+                reject("record is not what its value carries", ("record",), rec)
         if name in ("v2.18.1", "7d66f8c"):
             fl = v.get("flags", MISSING)
             if fl is MISSING and schema == 1:
                 bad("the first schema kept no flags for it", UNKNOWN)
             elif fl != flag_positions(cb, rb):
                 bad("flags are not where its run inserts them")
-            if not isinstance(v.get("record"), bool):
+                reject("flags are not where its run inserts them", ("flags",), fl)
+            else:
+                side["flags"] = list(fl) if isinstance(fl, list) else None
+            rec = v.get("record", MISSING)
+            if isinstance(rec, bool):
+                side["record"], side["record_from"] = rec, "kept"
+            else:
                 bad("record is not true or false")
+                reject("record is not true or false", ("record",), rec)
+        if held:
+            side["run"] = run
     sh = v.get("shells", MISSING)
     if not isinstance(sh, dict):
         if sh is MISSING and schema == 1:
@@ -1290,20 +1354,19 @@ def admit_side(res, name, v, schema, cb, at=()):
             bad("a side that ran has no runs")
             if sh is not MISSING:
                 reject("a side that ran has no runs", ("shells",), sh)
-                del v["shells"]
-        return out, rej, v
-    for s_, ob in list(sh.items()):
+        return out, rej, side
+    side["shells"] = {}
+    for s_, ob in sh.items():
         if s_ not in SHELLS:
             bad("a shell this file does not run (%s)" % s_)
             reject("a shell this file does not run", ("shells", s_), ob)
-            del sh[s_]
             continue
-        for x, kind, why in admit_obs(ob, schema):
-            out.append(("%s shell %s %s" % (where, s_, x), kind, why))
-        if not isinstance(ob, dict):
+        problems, run_ = run_of(ob, schema, pointer(*(here + ("shells", s_))))
+        out.extend(("%s shell %s %s" % (where, s_, x), kind, why) for x, kind, why in problems)
+        if run_["admission"] == "rejected":
             reject("the run is not an object", ("shells", s_), ob)
-            sh[s_] = rejected_run(pointer(*(here + ("shells", s_))))
-    return out, rej, v
+        side["shells"][s_] = run_
+    return out, rej, side
 
 
 def words_records(b, p=0):
@@ -1452,7 +1515,7 @@ def floor_of(res, floor_rows, basis):
         target = cmd_bytes(floor_rows[cmd])
     elif basis == FLOOR_TREE:
         f7 = (res.get("sides") or {}).get("7d66f8c")
-        if not isinstance(f7, dict) or "rejected" in f7:
+        if not isinstance(f7, dict) or f7.get("admission") != "admitted":
             return None, None
         if f7.get("decision") != "run":
             return "release-deny", basis
@@ -1471,23 +1534,23 @@ def floor_of(res, floor_rows, basis):
 
 
 def admit(res, k, ctx, raw_type="object"):
-    """The intake of the source's row `k` (see The intake) on its slot `res`,
-    in place: a copy of the row, or an empty slot for a row that is not an
-    object, whose JSON type is `raw_type`. The slot becomes `admitted` or
-    `rejected` and gets `evidence`. `ctx` holds what the source says of all
-    its rows: its schema and sha256, the provenance of the run that measured
-    it, A's words records bound to it, and the recorded release rewrites
-    attached. An admitted slot keeps what it decodes once for every consumer
-    in `_facts` (whether each side reads an install) and A's words that are
-    evidence for this row (its own, or attached) in `_words`."""
-    for key in [x for x in res if x not in ROW_FIELDS]:
-        del res[key]
+    """The intake of the source's row `k` (see The intake). `res` is the
+    slot: a copy of the row as the source holds it, or an empty one for a row
+    that is not an object, whose JSON type is `raw_type`. The admission reads
+    the row from it, makes the evaluation's row from what it decoded and
+    checked, and leaves that in the slot, `admitted` or `rejected`, with its
+    `evidence`; nothing of the copy stays. `ctx` holds what the source says of
+    all its rows: its schema and sha256, the provenance of the run that
+    measured it, A's words records bound to it, and the recorded release
+    rewrites attached. An admitted row keeps what it decodes once for every
+    consumer in `_facts` (whether each side reads an install) and A's words
+    that are evidence for it (its own, or attached) in `_words`."""
+    raw = dict(res)
     at = ("rows", k)
     schema = ctx["schema"]
     prov, prov_why = ctx["provenance"]
     ev = {"schema": schema, "from": {"source_sha256": ctx["source_sha256"], "row": k + 1, "pointer": pointer(*at)},
           "provenance": prov, "invalid": [], "unknown": [], "rejected": []}
-    res["evidence"] = ev
 
     def note(where, kind, why):
         ev["invalid" if kind == "invalid" else "unknown"].append("%s: %s" % (where, why))
@@ -1495,47 +1558,48 @@ def admit(res, k, ctx, raw_type="object"):
     def reject(path, why, type_):
         ev["rejected"].append({"pointer": pointer(*(at + path)), "type": type_, "why": why})
 
+    def done(row):
+        """The slot a caller holds becomes the evaluation's row."""
+        res.clear()
+        res.update(row)
+
     def row_invalid(why, path, type_):
         note("row", "invalid", why)
         reject(path, why, type_)
-        shown = {f: res.get(f) if isinstance(res.get(f), str) else None for f in ("set", "command")}
+        shown = {f: raw.get(f) if isinstance(raw.get(f), str) else None for f in ("set", "command")}
         if shown["command"] is not None:
             ev["from"]["command_sha256"] = sha256(cmd_bytes(shown["command"]))
-        res.clear()
-        res.update(slot="rejected", raw_type=raw_type, set=shown["set"], command=shown["command"], evidence=ev)
-
-    def drop(key, why):
-        note(key, "invalid", why)
-        reject((key,), why, jtype(res[key]))
-        del res[key]
+        done({"slot": "rejected", "raw_type": raw_type, "set": shown["set"], "command": shown["command"], "evidence": ev})
 
     if prov != "ok":
         note("source", prov, prov_why)
     if raw_type != "object":
         return row_invalid("row %d is not an object (%s)" % (k + 1, raw_type), (), raw_type)
     for key in ("command", "set"):
-        if not isinstance(res.get(key), str):
-            return row_invalid("no command or no set", (key,), jtype(res.get(key, MISSING)))
-    cmd = res["command"]
+        if not isinstance(raw.get(key), str):
+            return row_invalid("no command or no set", (key,), jtype(raw.get(key, MISSING)))
+    cmd = raw["command"]
     cb = cmd_bytes(cmd)
     ev["from"]["command_sha256"] = sha256(cb)
-    if not _is_int(res.get("core_rc")):
-        return row_invalid("the core's exit status is not one", ("core_rc",), jtype(res.get("core_rc", MISSING)))
+    if not _is_int(raw.get("core_rc")):
+        return row_invalid("the core's exit status is not one", ("core_rc",), jtype(raw.get("core_rc", MISSING)))
     for key, who in (("ref", "the bash guard"), ("core", "the core")):
-        why = records_problem(res[key], who, schema) if key in res else "%s: no records" % who
+        why = records_problem(raw[key], who, schema) if key in raw else "%s: no records" % who
         if why:
-            return row_invalid(why, (key,), jtype(res.get(key, MISSING)))
-    sides = res.get("sides", MISSING)
+            return row_invalid(why, (key,), jtype(raw.get(key, MISSING)))
+    sides = raw.get("sides", MISSING)
     if sides is not MISSING and not isinstance(sides, dict):
         return row_invalid("sides is not an object (%s)" % type(sides).__name__, ("sides",), jtype(sides))
+    row = {"slot": "admitted", "set": raw["set"], "command": cmd, "core_rc": raw["core_rc"], "ref": records_facts(raw["ref"]),
+           "core": records_facts(raw["core"]), "evidence": ev}
     facts = {}
     for key, name in (("ref", "bash_install"), ("core", "core_install")):
-        v = res[key].get("any_install") if res[key] else None
+        v = row[key].get("any_install") if row[key] else None
         facts[name] = True if v == "true" else False if v == "false" else None
-        if res[key] and v is None:
+        if row[key] and v is None:
             note(key + ".any_install", UNKNOWN, "the first schema did not keep it")
-    res["_facts"] = facts
-    p3 = res.get("payloads3", MISSING)
+    row["_facts"] = facts
+    p3 = raw.get("payloads3", MISSING)
     if p3 is MISSING:
         if schema != 1:
             return row_invalid("no payload counts", ("payloads3",), "missing")
@@ -1544,18 +1608,29 @@ def admit(res, k, ctx, raw_type="object"):
     elif not (isinstance(p3, dict) and set(p3) == set(READING_NAMES)
               and all(p3[r] is None or (_is_int(p3[r]) and p3[r] >= 0) for r in READING_NAMES)):
         return row_invalid("the payload counts are not three counts", ("payloads3",), jtype(p3))
-    if "stand_ins" in res and res["stand_ins"] not in STAND_INS:
-        drop("stand_ins", "stand-ins this file does not have")
-    if "expect" in res and not isinstance(res["expect"], str):
-        drop("expect", "not a word")
+    else:
+        row["payloads3"] = {r: p3[r] for r in READING_NAMES}
+    # The fields this file writes beside a row's records, each kept only as
+    # what it is.
+    for key, ok, why in (("stand_ins", lambda x: x in STAND_INS, "stand-ins this file does not have"),
+                         ("expect", lambda x: isinstance(x, str), "not a word"),
+                         ("bash_rc", _is_int, "not an exit status"),
+                         ("bash_exit", lambda x: isinstance(x, str), "not the pre-guard's answer"),
+                         ("bash_timeout", lambda x: isinstance(x, bool), "not true or false")):
+        if key not in raw:
+            continue
+        if ok(raw[key]):
+            row[key] = raw[key]
+        else:
+            note(key, "invalid", why)
+            reject((key,), why, jtype(raw[key]))
 
     def words_of(key, text):
-        """A's words the row kept for `text`; ones that are not evidence are
-        rejected and not kept."""
-        got = admit_words(res, key, text, p3, note)
-        if got is None and key in res:
-            reject((key,), ev["invalid"][-1].split(": ", 1)[1], jtype(res[key]))
-            del res[key]
+        """A's words the row kept for `text`, as records; ones that are not
+        evidence are rejected. The row's own words stay in the source."""
+        got = admit_words(raw, key, text, p3, note)
+        if got is None and key in raw:
+            reject((key,), ev["invalid"][-1].split(": ", 1)[1], jtype(raw[key]))
         return got
 
     # A's words: the row's own, else attached from the source's own core.
@@ -1565,20 +1640,21 @@ def admit(res, k, ctx, raw_type="object"):
         for rd, x in sorted(wc.items()):
             if x.get("rc") == 0 and _is_int(p3.get(rd)) and p3[rd] != len(x["payloads"]):
                 note("words", "invalid", "%s: the row's payload count is not A's attached" % rd)
-    run = core_run(res)
+    run = core_run(row)
     wr = None
     if run is not None:
         wr = words_of("words_rewrite", run)
         if wr is None:
             wr = ctx["words"].get(run)
-    elif "words_rewrite" in res:
-        drop("words_rewrite", "words of a rewrite the core does not send")
-    res["_words"] = {"words": wc, "words_rewrite": wr}
+    elif "words_rewrite" in raw:
+        note("words_rewrite", "invalid", "words of a rewrite the core does not send")
+        reject(("words_rewrite",), "words of a rewrite the core does not send", jtype(raw["words_rewrite"]))
+    row["_words"] = {"words": wc, "words_rewrite": wr}
     # The core's own payload counts, beside A's and the row's.
     if facts["core_install"]:
         same_text = cb.replace(b"\0", b"").rstrip(b"\n") == cb
-        for r in res["core"]["reading_set"].split():
-            w_ = res["core"].get("payloads." + r)
+        for r in row["core"]["reading_set"].split():
+            w_ = row["core"].get("payloads." + r)
             if w_ is None:
                 note("core.payloads." + r, "invalid" if schema != 1 else UNKNOWN,
                      "the core writes a payload count for every reading, and this one is not there")
@@ -1595,38 +1671,46 @@ def admit(res, k, ctx, raw_type="object"):
                     note("core.payloads." + r, "invalid", "the core counts %d payloads, A's words of the same text %d" % (n, len(x["payloads"])))
             elif isinstance(p3, dict) and _is_int(p3.get(r)) and p3[r] != n:
                 note("core.payloads." + r, "invalid", "the core counts %d payloads, the row's payload count %d" % (n, p3[r]))
-    # The sides, each in its place, before anything compares them.
+    # The sides, each made in its place, before anything compares them.
     if sides is not MISSING:
-        for name, v in list(sides.items()):
-            problems, rej, keep = admit_side(res, name, v, schema, cb, at)
+        row["sides"] = {}
+        for name, v in sides.items():
+            problems, rej, side = side_of(row, name, v, schema, cb, at)
             for where, kind, why in problems:
                 note(where, kind, why)
             ev["rejected"].extend(rej)
-            if keep is None:
-                del sides[name]
-            else:
-                sides[name] = keep
-    # The floor, computed again from the basis the row declares.
-    saved_floor, basis = res.pop("floor", None), res.pop("floor_basis", None)
+            if side is not None:
+                row["sides"][name] = side
+    # The floor, computed again from the basis the row declares. The
+    # declaration is kept beside it where it is one this file writes.
+    saved_floor, basis = raw.get("floor"), raw.get("floor_basis")
+    declared = {"floor": saved_floor if isinstance(saved_floor, str) else None,
+                "basis": basis if basis in (FLOOR_FILE, FLOOR_TREE) else None}
     if saved_floor is not None or basis is not None:
-        res["floor_declared"] = {"floor": saved_floor, "basis": basis}
+        row["floor_declared"] = declared
+    if saved_floor is not None and declared["floor"] is None:
+        note("floor", "invalid", "the saved floor is not a word")
+        reject(("floor",), "the saved floor is not a word", jtype(saved_floor))
     if basis is None:
-        if saved_floor is not None:
+        if declared["floor"] is not None:
             note("floor", UNKNOWN, "the floor %r was kept with no basis: what it was held to is not recorded, and a --floor request "
                  "is not that" % (saved_floor,))
-    elif basis not in (FLOOR_FILE, FLOOR_TREE):
-        note("floor", "invalid", "a basis this file does not write (%r)" % (basis,))
+    elif declared["basis"] is None:
+        why = "a basis this file does not write (%r)" % (basis,)
+        note("floor", "invalid", why)
+        reject(("floor_basis",), why, jtype(basis))
     elif basis == FLOOR_FILE and ctx["floor_rows"] is None:
         note("floor", UNKNOWN, "held to the recorded release rewrites, which are not attached")
     else:
-        v, b = floor_of(res, ctx["floor_rows"] or {}, basis)
+        v, b = floor_of(row, ctx["floor_rows"] or {}, basis)
         if v is None:
             note("floor", "invalid", "its basis holds nothing for this row")
         else:
+            saved_floor = declared["floor"]
             if saved_floor is not None and saved_floor != v:
                 note("floor", "invalid", "saved %r, computed again from the row %r" % (saved_floor, v))
-            res["floor"], res["floor_basis"] = v, b
-    res["slot"] = "admitted"
+            row["floor"], row["floor_basis"] = v, b
+    done(row)
 
 
 def _hex(x):
@@ -2939,12 +3023,23 @@ def summarize(results, counts, R, a, extra):
     return out, bool(red)
 
 
+def run_view(o):
+    """A run of the evaluation as the manifest shows it."""
+    v = {"admission": o["admission"], "at": o["at"], "axes": o["_axes"]}
+    if o["admission"] == "admitted":
+        v.update(rc=o.get("rc"), timeout=o.get("timeout"), log=o.get("log"),
+                 npm_calls=len(o["npm"]) if "npm" in o else UNKNOWN, other_calls=len(o["other"]) if "other" in o else UNKNOWN,
+                 files=len(o["files"]) if "files" in o else UNKNOWN)
+    return v
+
+
 def manifest(path, results, head):
     """One JSON line for the report (`head`: the source, its provenance and
     the classifier) and one per slot, in the source's order: a projection of
     the slot. A rejected slot shows what it keeps (its display, where and why
     it was rejected) and nothing of the row's fields; a rejected side or run
-    shows where it is in the source."""
+    shows where it is in the source. Every branch reads what the evaluation
+    wrote (`slot`, `admission`), never a name the source holds."""
     with open(path, "w", encoding="utf-8") as f:
         f.write(json.dumps(head, ensure_ascii=False) + "\n")
         for res in results:
@@ -2963,19 +3058,12 @@ def manifest(path, results, head):
                         "expect_failed": res.get("expect_failed"), "true_to_false": res.get("true_to_false"),
                         "class_basis": res.get("class_basis"), "class_refused": res.get("class_refused"), "sides": {}})
             for side, v in res.get("sides", {}).items():
-                if "rejected" in v:
-                    row["sides"][side] = {"decision": v["decision"], "rejected": v["rejected"]}
-                    continue
-                s = {"decision": v.get("decision"), "record": v.get("record"), "record_computed": v.get("_record"), "state": v.get("state"),
-                     "state_words": v.get("state_words")}
-                if isinstance(v.get("shells"), dict):
-                    s["shells"] = {sh: {"rejected": o["rejected"], "axes": o["_axes"]} if "rejected" in o else
-                                   {"rc": o.get("rc"), "timeout": o.get("timeout"), "log": o.get("log"),
-                                    "npm_calls": len(o["npm"]) if isinstance(o.get("npm"), list) else UNKNOWN,
-                                    "other_calls": len(o["other"]) if isinstance(o.get("other"), list) else UNKNOWN,
-                                    "files": len(o["files"]) if isinstance(o.get("files"), dict) else UNKNOWN,
-                                    "axes": o.get("_axes")}
-                                   for sh, o in v["shells"].items()}
+                s = {"admission": v["admission"], "at": v["at"]}
+                if v["admission"] == "admitted":
+                    s.update(decision=v["decision"], record=v.get("record"), record_from=v.get("record_from"), state=v.get("state"),
+                             state_words=v.get("state_words"))
+                    if "shells" in v:
+                        s["shells"] = {sh: run_view(o) for sh, o in v["shells"].items()}
                 row["sides"][side] = s
             if res.get("obs"):
                 row["observed"] = {s: {"npm": v["npm"], "effects": v["effects"]} for s, v in res["obs"].items()}
@@ -3361,8 +3449,18 @@ def selftest(a):
     r0_ = evaluate(source([ro]), [])["rows"][0]
     sh_ = r0_["sides"]["core"]["shells"]
     check("a shell's run that is no object is rejected in its place, invalid and not missing, and the other shells keep theirs",
-          [r0_["slot"], sh_["bash"].get("rejected"), axis(sh_["bash"], "npm"), axis(sh_["zsh"], "npm")],
-          ["admitted", "/rows/0/sides/core/shells/bash", "invalid", "ok"])
+          [r0_["slot"], sh_["bash"]["admission"], sh_["bash"]["at"], axis(sh_["bash"], "npm"), axis(sh_["zsh"], "npm")],
+          ["admitted", "rejected", "/rows/0/sides/core/shells/bash", "invalid", "ok"])
+    mk = erow(four(c10))
+    for node in (mk["sides"]["core"], mk["sides"]["core"]["shells"]["bash"], mk["sides"]["7d66f8c"]):
+        node.update(rejected={"from": "the source"}, admission="rejected", metadata=["the source's own"])
+    ev_mk = evaluate(source([mk, erow(four(c10))]), [])
+    m0, m1 = ev_mk["rows"]
+    check("names a source holds that the evaluation also writes steer nothing, and fields it does not read are not carried",
+          [m0["sides"]["core"]["admission"], m0["sides"]["core"]["shells"]["bash"]["admission"], axis(m0["sides"]["core"]["shells"]["bash"], "npm"),
+           m0["evidence"]["invalid"], m0["floor"] == m1["floor"], m0["status"] == m1["status"],
+           "the source" in json.dumps(m0["sides"]) or "metadata" in json.dumps(m0["sides"])],
+          ["admitted", "admitted", "ok", [], True, True, False])
     pc = erow(four(c10))
     pc["core"]["payloads.bash"] = "99"
     prep(pc)
@@ -3370,8 +3468,8 @@ def selftest(a):
           any(x.startswith("core.payloads.bash") for x in pc["evidence"]["invalid"]), True)
     rec_ = erow(four(c10))
     prep(rec_)
-    check("a record the run did not keep is computed apart, never written as kept",
-          ["record" in rec_["sides"]["core"], rec_["sides"]["core"].get("_record")], [False, True])
+    check("a record the run did not keep is computed from its value, and says so",
+          [rec_["sides"]["core"]["record"], rec_["sides"]["core"]["record_from"]], [True, "computed"])
     flipped = [dict(e_, install=not e_["install"]) if e_["argv"] == ["ci"] else e_ for e_ in R.answers()]
     rr = SavedReaders(flipped, {"source": "selftest"})
     check("a saved reader value at odds with its answers is not believed, and stays found",

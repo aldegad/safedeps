@@ -23,9 +23,11 @@ must turn red on what it wrote. The checks read the input's JSON and the
 outputs with this file's own code and import nothing of the comparison. A run
 that ends with no report, table and manifest that read is not a detection,
 and no mutation is counted while the unmutated copy fails a check.
+--cli-only KEY,... runs those mutations, and the unmutated copy on their
+inputs only. The CLI runs at the nice value this control was started with.
 
 Usage: core-inert-selftest-control.py [--path-prefix DIRS]
-       core-inert-selftest-control.py --cli DIR [--cli-out DIR]
+       core-inert-selftest-control.py --cli DIR [--cli-only KEYS] [--cli-out DIR]
 """
 import argparse
 import base64
@@ -159,24 +161,29 @@ MUTATIONS = [
 ]
 
 
-# The control of what the CLI writes (--cli): (name, the saved input it is
-# run on, the text to find, what replaces it, the check that must turn red).
+# The control of what the CLI writes (--cli): (key, name, the saved input it
+# is run on, the text to find, what replaces it, the check that must turn red).
 CLI_MUTATIONS = [
-    ("a rejected slot is left out of what the run writes, its counts kept", "null-row.json",
+    ("row-drop", "a rejected slot is left out of what the run writes, its counts kept", "null-row.json",
      '    head = {"contract": CONTRACT, "source": dict(src_info, sha256=sha256(src_bytes)),\n',
      '    results = [r for r in results if r.get("slot") == "admitted"]\n'
      '    head = {"contract": CONTRACT, "source": dict(src_info, sha256=sha256(src_bytes)),\n',
      "slots"),
-    ("a row whose evidence is invalid counts as one that held", "mixed-slots.json",
+    ("ineligible", "a row whose evidence is invalid counts as one that held", "mixed-slots.json",
      '    if ev.get("invalid"):\n        return "its evidence is invalid"\n',
      '    if False:\n        return "its evidence is invalid"\n',
      "held"),
-    ("the report keeps a source made to agree with its evaluation, under that source's own sha256", "floor-conflict.json",
+    ("source-rewrite", "the report keeps a source made to agree with its evaluation, under that source's own sha256",
+     "floor-conflict.json",
      '            "source": dict(src_info, sha256=sha256(src_bytes), bytes_b64=base64.b64encode(src_bytes).decode("ascii")),',
      '            "source": (lambda b: dict(src_info, sha256=sha256(b), bytes_b64=base64.b64encode(b).decode("ascii")))(json.dumps(dict(\n'
      '                json.loads(src_bytes), rows=[dict(r, floor=e["floor"]) if isinstance(r, dict) and e.get("floor") else r\n'
      '                                             for r, e in zip(json.loads(src_bytes)["rows"], evaluation["rows"])])).encode("ascii")),',
      "source"),
+    ("marker-authority", "the evaluation's side takes whether it was admitted from a name the source's side holds", "markers.json",
+     '    side = {"admission": "admitted", "at": me, "decision": d}\n',
+     '    side = {"admission": "rejected" if "rejected" in v else "admitted", "at": me, "decision": d}\n',
+     "marker-facts"),
 ]
 # The keys a rejected slot may hold: what it shows, and nothing of the row.
 REJECTED_KEYS = {"slot", "raw_type", "set", "command", "evidence", "status"}
@@ -201,9 +208,9 @@ def cli_tree(work):
 
 def cli_run(tree, args, out):
     """One run of the copy's CLI, its three outputs in `out`: its rc, or None
-    where it did not end in time."""
+    where it did not end in time. It runs at this control's nice value."""
     os.makedirs(out)
-    cmd = ["nice", "-n", "10", sys.executable, os.path.join(tree, "scripts", "measure", NAME)] + args + [
+    cmd = [sys.executable, os.path.join(tree, "scripts", "measure", NAME)] + args + [
         "--report", os.path.join(out, "report.json"), "--table", os.path.join(out, "table.tsv"),
         "--manifest", os.path.join(out, "manifest.jsonl")]
     try:
@@ -279,9 +286,39 @@ def chk_floor(inp, src, rep, table, man):
             and rep["evaluation"]["summary"]["accounting"]["ran_observed"] == 0)
 
 
-CLI_CHECKS = {"slots": chk_slots, "source": chk_source, "invalid": chk_invalid, "held": chk_held, "floor": chk_floor}
+def chk_marker_held(inp, src, rep, table, man):
+    """markers.json: its one row, whose core side and core bash run hold a
+    `rejected` the source wrote, is named and counted as held: 1 row ran, 1
+    row, 4 shell runs and 8 calls paired beside the bash side, nothing
+    invalid."""
+    ev = rep["evaluation"]
+    c, acc, r = ev["summary"]["counts"], ev["summary"]["accounting"], ev["rows"][0]
+    b = acc["pairs"]["bash"]
+    return ([c["total"], c["invalid"], r["slot"], r["status"], r["evidence"]["invalid"], acc["ran_observed"], acc["evidence_invalid"]]
+            == [1, 0, "admitted", "class:script-payload-read", [], 1, []] and [b["rows"], b["shells"], b["calls"]] == [1, 4, 8])
+
+
+def chk_marker_facts(inp, src, rep, table, man):
+    """markers.json: the core side and its four runs are admitted in the
+    report and in the manifest, each with its npm calls, and neither value
+    the source wrote under `rejected` is anywhere in the evaluation or the
+    manifest's rows."""
+    shells = ["bash", "dash", "zsh", "zsh-agent"]
+    core, mcore = rep["evaluation"]["rows"][0]["sides"]["core"], man[1]["sides"]["core"]
+    text = json.dumps(rep["evaluation"]["rows"]) + json.dumps(man[1:])
+    return (core["admission"] == "admitted" and sorted(core["shells"]) == shells
+            and all(core["shells"][x]["admission"] == "admitted" and isinstance(core["shells"][x].get("npm"), list) for x in shells)
+            and mcore["admission"] == "admitted" and sorted(mcore.get("shells", {})) == shells
+            and all(mcore["shells"][x]["admission"] == "admitted" and isinstance(mcore["shells"][x].get("npm_calls"), int) for x in shells)
+            and "source-side-marker" not in text and "source-run-marker" not in text)
+
+
+CLI_CHECKS = {"slots": chk_slots, "source": chk_source, "invalid": chk_invalid, "held": chk_held, "floor": chk_floor,
+              "marker-held": chk_marker_held, "marker-facts": chk_marker_facts}
 CLI_INPUTS = {"null-row.json": ("slots", "source", "invalid"), "mixed-slots.json": ("slots", "source", "held"),
-              "floor-conflict.json": ("slots", "source", "floor")}
+              "floor-conflict.json": ("slots", "source", "floor"), "markers.json": ("slots", "source", "marker-held", "marker-facts")}
+# The exit status the unmutated copy gives each input, first and replay.
+CLI_RC = {"null-row.json": 1, "mixed-slots.json": 1, "floor-conflict.json": 1, "markers.json": 0}
 
 
 def cli_view(rep):
@@ -324,32 +361,37 @@ def cli_case(tree, d, name, out):
     return got
 
 
-def cli_holds(got):
-    """Every check holds on both runs, both end 1, and the replay says what
-    the first run said."""
-    return (got["rc"] == 1 and got["rc_replay"] == 1 and got["same"] is True
+def cli_holds(got, name):
+    """Every check holds on both runs, both end as CLI_RC says, and the
+    replay says what the first run said."""
+    return (got["rc"] == CLI_RC[name] and got["rc_replay"] == CLI_RC[name] and got["same"] is True
             and all(isinstance(got[w], dict) and all(v is True for v in got[w].values()) for w in ("first", "replay")))
 
 
-def cli_main(d, keep):
+def cli_main(d, keep, only):
+    chosen = [m for m in CLI_MUTATIONS if not only or m[0] in only]
+    unknown = sorted(set(only) - set(m[0] for m in CLI_MUTATIONS))
+    if unknown or not chosen:
+        print("not ok --cli-only names no mutation of this control: %s" % (unknown or only))
+        sys.exit(1)
     work = tempfile.mkdtemp(prefix="safedeps-core-inert-cli-control.")
     out = keep or os.path.join(work, "out")
     os.makedirs(out, exist_ok=True)
     tree = cli_tree(work)
     target = os.path.join(tree, "scripts", "measure", NAME)
     source = open(target, encoding="utf-8").read()
-    record = {"comparison_sha256": sha(source.encode("utf-8")), "baseline": {}, "mutations": []}
+    record = {"comparison_sha256": sha(source.encode("utf-8")), "chosen": [m[0] for m in chosen], "baseline": {}, "mutations": []}
     bad = 0
-    for name in CLI_INPUTS:
+    for name in sorted(set(m[2] for m in chosen)):
         got = cli_case(tree, d, name, os.path.join(out, "baseline", name))
         record["baseline"][name] = got
-        print("%s the copy as it is, %s: %s" % ("ok" if cli_holds(got) else "not ok", name, json.dumps(got, sort_keys=True)))
-        bad += 0 if cli_holds(got) else 1
+        print("%s the copy as it is, %s: %s" % ("ok" if cli_holds(got, name) else "not ok", name, json.dumps(got, sort_keys=True)))
+        bad += 0 if cli_holds(got, name) else 1
     if bad:
         print("cli control: the copy as it is fails a check; no mutation is counted")
     else:
-        for name, inp, old, new, check in CLI_MUTATIONS:
-            m = {"name": name, "input": inp, "old": old, "new": new, "check": check}
+        for key, name, inp, old, new, check in chosen:
+            m = {"key": key, "name": name, "input": inp, "old": old, "new": new, "check": check}
             record["mutations"].append(m)
             if source.count(old) != 1:
                 m["result"] = "its site is in the comparison %d times, not once" % source.count(old)
@@ -377,7 +419,7 @@ def cli_main(d, keep):
     # The copy of the tree goes whatever is kept: what --cli-out keeps is
     # the runs' outputs, outside it.
     shutil.rmtree(work, ignore_errors=True)
-    print("cli control: %d mutations, %d not ok" % (len(CLI_MUTATIONS), bad))
+    print("cli control: %d mutations, %d not ok" % (len(chosen), bad))
     sys.exit(1 if bad else 0)
 
 
@@ -395,9 +437,10 @@ def main():
     ap.add_argument("--path-prefix", default="")
     ap.add_argument("--cli", default="", help="a directory of saved inputs: the control of what the CLI writes")
     ap.add_argument("--cli-out", default="", help="keep every run of --cli here")
+    ap.add_argument("--cli-only", default="", help="the keys of the --cli mutations to run (all by default)")
     a = ap.parse_args()
     if a.cli:
-        cli_main(os.path.abspath(a.cli), os.path.abspath(a.cli_out) if a.cli_out else "")
+        cli_main(os.path.abspath(a.cli), os.path.abspath(a.cli_out) if a.cli_out else "", [k for k in a.cli_only.split(",") if k])
     work = tempfile.mkdtemp(prefix="safedeps-core-inert-control.")
     tree = os.path.join(work, "tree")
     # What the selftest reads: the grammar and the comparison's own files.
