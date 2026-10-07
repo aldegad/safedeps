@@ -431,6 +431,12 @@ def entries(path, ts, foreign_names):
         name = aliases.get(t, t)
         before = ts[i-1] if i else ''
         after = ts[i+1] if i+1 < len(ts) else ''
+        # File::open only reads. Outcome::status wraps an observed status; it
+        # starts no child. Neither is an output capability despite its name.
+        qualifier = aliases.get(ts[i-2], ts[i-2]) if i >= 2 and before == '::' else ''
+        if name == 'File' and ts[i+1:i+3] == ['::', 'open']: continue
+        if name == 'open' and qualifier == 'File': continue
+        if name == 'status' and qualifier == 'Outcome': continue
         # Report::rebuild forwards its fact bytes to say. Keep that one-hop
         # entry visible before the parameter erases the renderer's origin.
         report_entry = False
@@ -481,6 +487,8 @@ def entries(path, ts, foreign_names):
         qualified = i
         while qualified >= 2 and ts[qualified-1] == '::' and IDENT.fullmatch(ts[qualified-2]): qualified -= 2
         callee = ''.join(ts[qualified:i+1]) + ('!' if after == '!' else '')
+        if name in ('Command', 'Stdio', 'OpenOptions') and ts[i+1:i+2] == ['::']:
+            callee += '::' + ts[i+2]
         if report_entry: callee = 'Report::rebuild'
         j = i+2 if after == '!' else i+1
         args = arguments(ts[j+1:end-1]) if j < len(ts) and ts[j] in ('(', '[', '{') else []

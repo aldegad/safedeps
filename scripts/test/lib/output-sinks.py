@@ -125,6 +125,11 @@ def main():
         check('unrelated-line-and-ordinary-import-stay-green', run(root), 0, 'ok - output-sinks:')
 
         root = copy()
+        path = root / 'rust/src/post/providers.rs'
+        path.write_text(source.replace(original, 'let _unrelated_read = std::fs::File::open("input-data"); ' + original, 1))
+        check('unrelated-read-only-file-open-stays-green', run(root), 0, 'ok - output-sinks:')
+
+        root = copy()
         path = root / 'rust/src/state/log.rs'
         before = path.read_text()
         if 'use std::{fs,' not in before: raise ValueError('use-tree control anchor is missing')
