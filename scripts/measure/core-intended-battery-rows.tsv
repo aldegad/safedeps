@@ -10,6 +10,9 @@
 #            described.
 #   adds     the core sends a flag or writes a record the bash guard did not.
 #   wording  a report line is spelled differently and says the same.
+#   leaves-less
+#            the answer is the bash guard's and the core leaves fewer files
+#            under the guard's state.
 #
 # kind is the collision kind advisory.log names (rust/src/inert.rs, "Duties
 # that collide"), the class of scripts/measure/core-intended-inert.tsv the
@@ -41,5 +44,9 @@ lockless-forms	npm install sd-approved@1.0.0 && cat <<E | wc -l (body: npm insta
 consumer-forms	sh -c 'npm ci'; echo "${x:-'}"	blocks	reading-fails	allow, rewritten with the flag in the script	The text does not close in the bash reading, so that reading walks no statements and fails where the text holds a script; the zsh and dash readings place the flag in the script, and the three values differ. Without the script (`npm ci; echo "${x:-'}"`) both sides rewrite alike.
 consumer-forms	npm install $X --cache	blocks	end-flag-value-unread	allow, rewritten with the flag after the verb and after --cache, recorded as an install whose flag nobody read	The last argument is written, stands after a run-time word, and takes the flag as its value where npm's tables read the two alone. `-C`, `--browser`, a quoted `"$X"`, a `--` after the option and the same statement in an `sh -c` script answer alike; `npm install $X`, `npm install --cache $X` and `npm install $X --save-dev` keep the bash guard's rewrite.
 consumer-forms	npm install $X --cache && echo ok	blocks	end-flag-value-unread	allow, rewritten with the flag after the verb and after --cache, recorded the same way	The flag after the last argument is the statement's own, placed there for the run-time word, so the answer does not depend on the release owing an end flag. The written form (`npm install x --cache && echo ok`) is rewritten alike by both.
+consumer-forms	npm install evil@1.0.0	leaves-less	no-state-on-deny	deny (install not approved), with the snapshot it took before judging left behind: 25 files, one of them the meta	The core writes its snapshot after the last settled reading, so a denied command leaves no snapshot, no meta and no pending record. Measured with a state directory per call: the bash guard and the core before the change left 25 snapshot files, the core after it none. An allowed install leaves the same files under all three (25 snapshot files, 2 pending).
+consumer-forms	npm install x --cache	leaves-less	no-state-on-deny	allow, rewritten, with a snapshot and a pending record (the bash guard does not deny this one: see the lockless-forms row for the same form)	The core's deny for a flag that cannot be placed left the 25 snapshot files before the change and leaves none after it.
+consumer-forms	for i (1) { npm install evil; }	leaves-less	no-state-on-deny	deny (the shells read the installs apart), with the snapshot left behind	As the first row of this kind.
+consumer-forms	npm install evil 'x	leaves-less	no-state-on-deny	deny (the command does not close), with the snapshot left behind	As the first row of this kind: a reading that failed is settled before anything is written.
 e2e	the report of a rollback whose owner is stopped	wording	owner-line	Owner: pid <pid> is stopped (ps state <state>)	The core runs no ps and says `Owner: pid <pid> is stopped (process state <state>)`. The row and the report oracle take both spellings.
 smoke	npm install left-pad@1.3.0 --cache	blocks	end-flag-not-an-option	allow, rewritten with a pending record whose key was compared after rewriting	The one-statement end flag would be the value of --cache. Native pre denies without a rewrite or pending record; the pending-key comparison has no record to consume.

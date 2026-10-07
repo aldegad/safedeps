@@ -1,5 +1,9 @@
-//! Install verdict order: target evidence, snapshot, command/ledger checks,
-//! per-reading effects, final scan settlement, then the call's record.
+//! Install verdict order: target evidence, command/ledger checks, per-reading
+//! effects, final scan settlement, then the snapshot and the call's record.
+//! Nothing is written under the guard's state before the last reading is
+//! settled: a command that is denied, for a finding or for a reading that
+//! failed, leaves no snapshot, no meta and no pending record. The bash guard
+//! took its snapshot first, so a denied install left one behind.
 //! The rewrite callback is B's reading_inert contract. It is called only
 //! after the direct-spec gate, and never for Codex.
 use super::{cat, effects, pending, readings::{self,Readings}, snapshot::{self,Snapshot}, Call, Out, W};
@@ -34,16 +38,9 @@ pub fn judge(call:&Call,run:&mut Run,cwd:&[u8],read:&Readings,mut inert:impl FnM
         log(call,"pre-guard DENY: state lock unavailable for an install command — fail-closed.".as_bytes());
         deny(&mut out,"safedeps: could not acquire the state lock (another safedeps run may be active). Install blocked fail-closed — retry in a moment.".as_bytes());return out
     };
-    let snap=match Snapshot::create(call,&project) {
-        Ok(snap)=>snap,
-        Err(snapshot::Error::Workspace(why))=>{
-            let mut why:W=why.into_iter().map(|b|if b==b'\n'{b' '}else{b}).collect();
-            if why.last()==Some(&b' '){why.pop();}
-            log_command(call,&cat(&[b"pre-guard: could not snapshot the workspace members' package.json files in ",&project,b" (",&why,b")."]));
-            deny(&mut out,&cat(&["safedeps: undecided — safedeps could not keep a copy of the workspace members' package.json files in ".as_bytes(),&project,b" (",&why,b"), so it could not roll this install back. This is not a finding about the packages. Make the members' package.json files readable and retry."]));return out
-        }
-        Err(snapshot::Error::Io(error))=>{out.warn(format!("safedeps: could not keep the pre-install snapshot: {}",error).as_bytes());out.code=1;return out}
-    };
+    // The clock is read where the guard reads it. The snapshot it names is
+    // written after the last reading, below.
+    let timestamp=os::wall(os::WallRole::PreSnapshot).seconds();
     let reasons=suspicious(&call.command);
     registry_notice(call,read);
     if !reasons.is_empty() {
@@ -87,6 +84,18 @@ pub fn judge(call:&Call,run:&mut Run,cwd:&[u8],read:&Readings,mut inert:impl FnM
         deny(&mut out,notices::READINGS.as_bytes());return out
     }
     if super::settle_scan_failure(call,run.failed,&mut out){return out}
+    // Every reading is done and none failed. The first files this call
+    // leaves under the guard's state are written from here on.
+    let snap=match Snapshot::create(call,&project,timestamp) {
+        Ok(snap)=>snap,
+        Err(snapshot::Error::Workspace(why))=>{
+            let mut why:W=why.into_iter().map(|b|if b==b'\n'{b' '}else{b}).collect();
+            if why.last()==Some(&b' '){why.pop();}
+            log_command(call,&cat(&[b"pre-guard: could not snapshot the workspace members' package.json files in ",&project,b" (",&why,b")."]));
+            deny(&mut out,&cat(&["safedeps: undecided — safedeps could not keep a copy of the workspace members' package.json files in ".as_bytes(),&project,b" (",&why,b"), so it could not roll this install back. This is not a finding about the packages. Make the members' package.json files readable and retry."]));return out
+        }
+        Err(snapshot::Error::Io(error))=>{out.warn(format!("safedeps: could not keep the pre-install snapshot: {}",error).as_bytes());out.code=1;return out}
+    };
     let rewrite=rewrites.first().map(Vec::as_slice).unwrap_or(b"none");
     let (flags,command)=rewrite.split_once_byte(b'\n');
     for (flag,message) in notices::INERT {
