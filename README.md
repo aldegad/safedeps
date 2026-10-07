@@ -602,7 +602,7 @@ safedeps migrate
 
 From v2.19.0 on, safedeps is under the [PolyForm Noncommercial License 1.0.0](LICENSE). The text is in `LICENSE`, and this README does not stand in for it.
 
-The license permits use for noncommercial purposes. What counts as one, and the conditions that go with it, are set by `LICENSE`. It names the categories Personal Uses and Noncommercial Organizations.
+The license permits use for noncommercial purposes. The categories it names, Personal Uses and Noncommercial Organizations, and the conditions are in `LICENSE`.
 
 If you give anyone a copy, the Notices section of `LICENSE` applies: they must also get a copy of the license terms or their URL, and the `Required Notice:` line in `LICENSE`.
 

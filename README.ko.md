@@ -602,7 +602,7 @@ safedeps migrate
 
 v2.19.0 부터 safedeps 는 [PolyForm Noncommercial License 1.0.0](LICENSE) 을 따릅니다. 본문은 `LICENSE` 에 있고, 이 README 가 본문을 대신하지 않습니다.
 
-이 라이선스는 비상업적 목적의 사용을 허락합니다. 무엇이 비상업적 목적에 드는지와 그 조건은 `LICENSE` 가 정합니다. 본문은 Personal Uses 와 Noncommercial Organizations 라는 범주를 둡니다.
+이 라이선스는 비상업적 목적의 사용을 허락합니다. 본문이 꼽는 범주인 Personal Uses 와 Noncommercial Organizations, 그리고 조건은 `LICENSE` 에 있습니다.
 
 사본을 누구에게 주든 `LICENSE` 의 Notices 절이 적용됩니다. 받는 사람도 라이선스 조건의 사본이나 그 URL 을, 그리고 `LICENSE` 의 `Required Notice:` 줄을 함께 받아야 합니다.
 
