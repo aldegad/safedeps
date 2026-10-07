@@ -7,6 +7,13 @@ name: Publish
 # Release procedure: AGENTS.md, steps 5-10. The tag is pushed only after
 # step 5's runs on our own hosts are green; this workflow does not wait for a
 # CI run, because there is none on GitHub (owner, 2026-10-06).
+#
+# The package ships the Rust core as one binary per platform, under
+# bin/native/<os>-<arch>/safedeps-core, and none of them is in git (owner,
+# 2026-10-06): the `build` job builds them from the tagged source and the
+# `publish` job packs them. The two jobs are apart so that the job that
+# installs a toolchain holds no OIDC token: only `publish` can ask npm for a
+# credential, and it runs no compiler.
 
 on:
   push:
@@ -19,7 +26,75 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  build:
+    # An arm64 Mac builds all three: the darwin binaries link against Apple's
+    # SDK, which a Linux runner does not have, and the linux-x64 binary is a
+    # static musl build linked with the linker the Rust toolchain ships, which
+    # needs nothing of Linux on the runner.
+    runs-on: macos-15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      # The toolchain is pinned here and nowhere else. rustup is on the
+      # runner image (actions/runner-images, macos-15-arm64-Readme.md lists
+      # Rustup 1.29.0 in image 20260907); this fetches the compiler and the
+      # three targets' standard libraries, and nothing after this step
+      # fetches anything.
+      - name: Toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.94.0 --profile minimal --no-self-update \
+            --target aarch64-apple-darwin --target x86_64-apple-darwin --target x86_64-unknown-linux-musl
+          echo "RUSTUP_TOOLCHAIN=1.94.0" >> "$GITHUB_ENV"
+
+      # scripts/build-core.sh is the one build, the same script a checkout
+      # runs. It refuses a Cargo.lock that lists anything but the crate, and
+      # builds --locked --offline, so a crate that would have to be fetched
+      # fails the release here. --publish marks the binaries' stamp: they ship
+      # without rust/, and a publish binary skips its source check only where
+      # its own tree has no rust/ at all. Here, beside the tagged source,
+      # build-core.sh checks the arm64 binary against it before placing it.
+      - name: Build the binaries
+        run: |
+          set -euo pipefail
+          scripts/build-core.sh --publish --sums native.sha256 \
+            --target aarch64-apple-darwin --target x86_64-apple-darwin --target x86_64-unknown-linux-musl
+          cat native.sha256
+          [ "$(wc -l < native.sha256 | tr -d ' ')" = 3 ]
+
+      # build-core.sh ran the arm64 binary. The x64 one runs under Rosetta
+      # where the runner has it. The image's readme does not list Rosetta, but
+      # the image installs it: its macOS-15 arm64 template runs
+      # scripts/build/install-rosetta.sh, and its tests require oahd to run
+      # (actions/runner-images, images/macos/templates/macOS-15.arm64.anka.pkr.hcl
+      # and images/macos/scripts/tests/Rosetta.Tests.ps1, read 2026-10-06).
+      # Where it is missing that is said, and the binary ships built and not
+      # run. The linux binary is run by the publish job, which is on Linux.
+      - name: Run the darwin-x64 binary
+        run: |
+          set -euo pipefail
+          if arch -x86_64 /usr/bin/true 2>/dev/null; then
+            arch -x86_64 ./bin/native/darwin-x64/safedeps-core version
+            arch -x86_64 ./bin/native/darwin-x64/safedeps-core stamp
+          else
+            echo "::warning::this runner cannot run x86_64 programs, so bin/native/darwin-x64/safedeps-core was built and not run"
+          fi
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native
+          path: |
+            bin/native/
+            native.sha256
+          if-no-files-found: error
+          retention-days: 7
+
   publish:
+    needs: build
     runs-on: ubuntu-latest
     # Named in the trusted publisher on npmjs.com; the OIDC token carries it.
     environment: npm-publish
@@ -39,6 +114,46 @@ jobs:
           registry-url: "https://registry.npmjs.org"
           package-manager-cache: false
 
+      # The binaries land where the build job had them: bin/native/ and
+      # native.sha256, at the root. An artifact does not keep the exec bit, so
+      # it is set again here, after the bytes are checked against the build
+      # job's digests. The linux binary is run on this runner, beside the
+      # tag's rust/: it prints a publish stamp, and its check against that
+      # source says ok, so it was built from this tag. Then the
+      # package is listed the way it will be packed: each binary has to be in
+      # it with mode 755, nothing of rust/ may be, and it names no dependency.
+      # The mode is checked here, before the publish, which cannot be taken
+      # back; the read-back after it checks the tarball the registry serves.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: native
+
+      - name: Place and check the binaries
+        run: |
+          set -euo pipefail
+          [ "$(wc -l < native.sha256 | tr -d ' ')" = 3 ]
+          ( cd bin/native && sha256sum -c ../../native.sha256 )
+          chmod 755 bin/native/*/safedeps-core
+          ./bin/native/linux-x64/safedeps-core version
+          stamp=$(./bin/native/linux-x64/safedeps-core stamp)
+          echo "stamp: $stamp"
+          [ "${stamp%% *}" = publish ] || { echo "::error::the linux-x64 binary's stamp is not a publish build's"; exit 1; }
+          check=$(./bin/native/linux-x64/safedeps-core stamp --check 2>&1) \
+            || { echo "::error::the linux-x64 binary was not built from this tag's rust/: $check"; exit 1; }
+          [ "$check" = ok ] || { echo "::error::the linux-x64 binary's stamp check said: $check"; exit 1; }
+          npm pack --dry-run --json > "$RUNNER_TEMP/pack.json"
+          for p in darwin-arm64 darwin-x64 linux-x64; do
+            mode=$(jq -r --arg f "bin/native/$p/safedeps-core" '[.[0].files[] | select(.path == $f) | .mode] | if length == 1 then .[0] else "none" end' "$RUNNER_TEMP/pack.json")
+            [ "$mode" != none ] || { echo "::error::npm pack does not carry bin/native/$p/safedeps-core"; exit 1; }
+            [ "$mode" = 493 ] || { echo "::error::npm pack carries bin/native/$p/safedeps-core with mode $mode, not 755 (493)"; exit 1; }
+          done
+          if jq -e '.[0].files | map(.path) | any(startswith("rust/"))' "$RUNNER_TEMP/pack.json" >/dev/null; then
+            echo "::error::npm pack carries rust/ sources"
+            exit 1
+          fi
+          deps=$(jq '(.dependencies // {}) + (.optionalDependencies // {}) + (.peerDependencies // {}) | length' package.json)
+          [ "$deps" = 0 ] || { echo "::error::package.json names $deps dependencies"; exit 1; }
+
       - name: Check npm and the version
         env:
           TAG: ${{ github.ref_name }}
@@ -54,16 +169,20 @@ jobs:
             }' "$npm_version"
           pkg_version=$(jq -r .version package.json)
           bin_version=$(./bin/safedeps --json version | jq -r .version)
-          echo "tag $TAG, package.json $pkg_version, bin/safedeps $bin_version"
-          if [ "$TAG" != "v$pkg_version" ] || [ "$bin_version" != "$pkg_version" ]; then
-            echo "::error::tag, package.json and bin/safedeps disagree on the version"
+          crate_version=$(sed -n 's/^version = "\(.*\)"$/\1/p' rust/Cargo.toml | head -n 1)
+          core_version=$(./bin/native/linux-x64/safedeps-core version)
+          echo "tag $TAG, package.json $pkg_version, bin/safedeps $bin_version, rust/Cargo.toml $crate_version, the binary: $core_version"
+          if [ "$TAG" != "v$pkg_version" ] || [ "$bin_version" != "$pkg_version" ] \
+            || [ "$crate_version" != "$pkg_version" ] || [ "$core_version" != "safedeps-core $pkg_version" ]; then
+            echo "::error::tag, package.json, bin/safedeps, rust/Cargo.toml and the built binary disagree on the version"
             exit 1
           fi
 
       # No token: npm exchanges the job's OIDC token for a short-lived publish
       # credential. Provenance is automatic under trusted publishing; the flag
       # asks for it by name as well. The package has no dependencies and no
-      # lockfile, so there is nothing to install.
+      # lockfile, so there is nothing to install. What is packed is this
+      # working tree: the tag's files and the binaries the build job made.
       - name: Publish
         run: |
           rc=0
@@ -128,8 +247,10 @@ jobs:
           if [ "$publisher" != github ] || [ "$predicate" = none ]; then
             unconfirmed "the registry does not mark it as published by GitHub with provenance"
           fi
+          # The list is this working tree's, binaries in place: the tag's
+          # tree alone has none.
           npm pack --dry-run --json | jq -r '.[0].files[].path' | sort > "$RUNNER_TEMP/local.txt" \
-            || unconfirmed "npm pack --dry-run of the tag did not list its files"
+            || unconfirmed "npm pack --dry-run of this tree did not list its files"
           # The tarball named by the document read above, not
           # `npm pack <name>@<version>`: that reads the package document,
           # which the registry can update later than the version's.
@@ -141,6 +262,22 @@ jobs:
           tar -tzf "$tarball" | sed 's#^package/##' | sort > "$RUNNER_TEMP/published.txt" \
             || unconfirmed "the tarball from $tarball_url did not list as a gzip tar"
           if ! diff -u "$RUNNER_TEMP/local.txt" "$RUNNER_TEMP/published.txt"; then
-            unconfirmed "the published file list differs from npm pack --dry-run of the tag"
+            unconfirmed "the published file list differs from npm pack --dry-run of this tree"
           fi
-          echo "published file list matches the tag ($(wc -l < "$RUNNER_TEMP/published.txt") files)"
+          echo "published file list matches this tree ($(wc -l < "$RUNNER_TEMP/published.txt") files)"
+          # The binaries as the registry serves them: each keeps its exec bit,
+          # each is byte for byte the one the build job made, and the one this
+          # runner can run says the version that was published.
+          for p in darwin-arm64 darwin-x64 linux-x64; do
+            tar -tvzf "$tarball" "package/bin/native/$p/safedeps-core" | grep -q '^-rwxr-xr-x' \
+              || unconfirmed "bin/native/$p/safedeps-core in the published tarball is not mode 755"
+          done
+          mkdir -p "$RUNNER_TEMP/published"
+          tar -xzf "$tarball" -C "$RUNNER_TEMP/published" || unconfirmed "the published tarball did not unpack"
+          ( cd "$RUNNER_TEMP/published/package/bin/native" && sha256sum -c "$GITHUB_WORKSPACE/native.sha256" ) \
+            || unconfirmed "a published binary is not the bytes the build job made"
+          served=$("$RUNNER_TEMP/published/package/bin/native/linux-x64/safedeps-core" version) \
+            || unconfirmed "the published linux-x64 binary does not run"
+          [ "$served" = "safedeps-core $version" ] \
+            || unconfirmed "the published linux-x64 binary says '$served', not safedeps-core $version"
+          echo "published binaries: mode 755, the build job's bytes, and $served"

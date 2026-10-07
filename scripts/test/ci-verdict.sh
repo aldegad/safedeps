@@ -52,8 +52,11 @@ dir="${1:?usage: ci-verdict.sh [--release] DIR}"
 SKIP_LINE='^ok .*(SKIPPED|#[[:space:]]*[Ss][Kk][Ii][Pp])'
 SKIP_ALLOWED=(
   # Root is exempt from the process limit the row sets; a host that runs the
-  # suite as root skips it.
+  # suite as root skips it. WSL1 skips it too, as uid 1000: the limit does not
+  # bind there (measured in KumaWsl1Probe, 2026-10-06). The native entry's row
+  # sets the same limit and skips where this one does.
   "hook-entry|ok - out-of-processes row SKIPPED (the process limit does not bind this user)"
+  "hook-entry|ok - native out-of-processes row SKIPPED (the process limit does not bind this user)"
 )
 
 fail=0

@@ -13,6 +13,7 @@
 //   node scripts/install/install-safedeps-hooks.mjs --link-bin   (optional ~/.local/bin/safedeps)
 
 import { existsSync, lstatSync, readFileSync, writeFileSync, copyFileSync, mkdirSync, symlinkSync, unlinkSync, readlinkSync, renameSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -32,6 +33,13 @@ const REPO_PRE_HOOK = join(REPO_ROOT, "scripts", PRE_HOOK_NAME);
 const REPO_POST_HOOK = join(REPO_ROOT, "scripts", POST_HOOK_NAME);
 const REPO_ENTRY_HOOK = join(REPO_ROOT, "scripts", ENTRY_HOOK_NAME);
 const CLI_BIN = join(REPO_ROOT, "bin", "safedeps");
+// An entry that runs the Rust core says so on a line of its own
+// (scripts/safedeps-hook-entry-native.sh, which takes the entry's name when
+// the hooks move to the core). Read from the file being registered, so what
+// the installer prepares is decided by the entry it installs, and nothing
+// else chooses.
+const ENTRY_RUNS_CORE_LINE = "# safedeps-entry: runs bin/native/<os>-<arch>/safedeps-core";
+const BUILD_CORE = join(REPO_ROOT, "scripts", "build-core.sh");
 const PRE_HOOK_TIMEOUT_SECONDS = 30;
 const POST_HOOK_TIMEOUT_SECONDS = 30;
 // The events the post hook is registered for, by engine. Claude Code runs
@@ -314,9 +322,60 @@ function printRecommendedSetup() {
   console.log(out.join("\n"));
 }
 
+function entryRunsCore() {
+  return readFileSync(REPO_ENTRY_HOOK, "utf8").split("\n").includes(ENTRY_RUNS_CORE_LINE);
+}
+
+// The entry, run the way an engine runs it, on a call it does not judge (a
+// Read): it finds the binary for this platform by its own reading of the
+// platform, runs it, and has to end with nothing to say. So the installer
+// keeps no platform table of its own: the one that decides is the entry's.
+function probeEntry() {
+  const payload = JSON.stringify({ session_id: "safedeps-install", hook_event_name: "PreToolUse",
+    tool_name: "Read", tool_input: { file_path: "/dev/null" } });
+  const run = spawnSync(REPO_ENTRY_HOOK, ["pre"], { input: payload, encoding: "utf8" });
+  if (run.error || run.status !== 0 || run.stdout.trim() !== "") {
+    const said = [run.error ? run.error.message : "", run.stderr, run.stdout].map((x) => (x || "").trim()).filter(Boolean).join("\n");
+    return `the entry ${REPO_ENTRY_HOOK} did not answer a call it does not judge (${run.error ? "it did not start" : `exit ${run.status}`}): ${said || "it said nothing"}`;
+  }
+  return null;
+}
+
+// When the entry runs the core, the core has to be there before the hooks
+// are registered: a checkout builds it (scripts/build-core.sh, which needs
+// cargo), and an installed package must already carry it. Either way the
+// entry then has to run it, and a failure stops the install with the reason,
+// before any engine config is written. The entry would deny every Bash call
+// without it.
+function prepareCore() {
+  if (existsSync(join(REPO_ROOT, "rust", "Cargo.toml"))) {
+    log(`building the core from this checkout: ${BUILD_CORE}`);
+    const run = spawnSync("bash", [BUILD_CORE], { stdio: "inherit" });
+    if (run.error || run.status !== 0) {
+      throw new Error(`scripts/build-core.sh did not build the core (${run.error ? run.error.message : `exit ${run.status}`}); its reason is above. Nothing was registered.`);
+    }
+    const failed = probeEntry();
+    if (failed) throw new Error(`${failed}. Nothing was registered.`);
+    log("the entry runs the core it built");
+    return;
+  }
+  const failed = probeEntry();
+  if (failed) throw new Error(`${failed}. Reinstall the package. Nothing was registered.`);
+  log("the entry runs this package's core");
+}
+
 function main() {
-  if (!existsSync(REPO_PRE_HOOK) || !existsSync(REPO_POST_HOOK) || !existsSync(REPO_ENTRY_HOOK)) {
-    throw new Error(`hook scripts not found at ${REPO_PRE_HOOK} / ${REPO_POST_HOOK} / ${REPO_ENTRY_HOOK}`);
+  if (!existsSync(REPO_ENTRY_HOOK)) {
+    throw new Error(`the hook entry is not at ${REPO_ENTRY_HOOK}`);
+  }
+  // The bash hooks are needed by an entry that runs them, and only by it.
+  const runsCore = entryRunsCore();
+  if (!runsCore && (!existsSync(REPO_PRE_HOOK) || !existsSync(REPO_POST_HOOK))) {
+    throw new Error(`hook scripts not found at ${REPO_PRE_HOOK} / ${REPO_POST_HOOK}`);
+  }
+  if (!UNINSTALL) {
+    if (runsCore) prepareCore();
+    else log("the entry runs the bash hooks; no core binary is needed");
   }
 
   installInEngine({

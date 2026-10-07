@@ -2832,7 +2832,7 @@
   },
   {
    "id": "post-journal-unfinished",
-   "note": "A rollback journal entry whose owner is gone is reported once.",
+   "note": "A rollback journal entry whose owner is gone is reported once. Its times, pid and ids are seeded and compared as written; `at` is there for the seed-epoch control: the incident record is the entry, moved.",
    "tags": [
     "post",
     "journal"
@@ -2848,7 +2848,8 @@
       "stage": "restoring-files",
       "opened_at": "2026-01-01T00:00:00Z",
       "stage_at": "2026-01-01T00:00:01Z",
-      "pid": "999999"
+      "pid": "999999",
+      "at": 1767225600
      }
     }
    },
@@ -2857,6 +2858,1181 @@
      "hook": "post",
      "command": "ls -la",
      "id": "toolu_01"
+    }
+   ]
+  },
+  {
+   "id": "p1-plain-ls",
+   "note": "plain ls (from the first twin probe of the non-install path)",
+   "tags": [
+    "pre",
+    "p1"
+   ],
+   "bare": true,
+   "lang": "C",
+   "steps": [
+    {
+     "hook": "pre",
+     "proc_cwd": "@PROJECT@",
+     "payload": {
+      "tool_name": "Bash",
+      "tool_input": {
+       "command": "ls -la"
+      },
+      "cwd": "@PROJECT@"
+     }
+    }
+   ]
+  },
+  {
+   "id": "p1-plain-echo-no-cwd-in-the-payload",
+   "note": "plain echo, no cwd in the payload (from the first twin probe of the non-install path)",
+   "tags": [
+    "pre",
+    "p1"
+   ],
+   "bare": true,
+   "lang": "C",
+   "steps": [
+    {
+     "hook": "pre",
+     "proc_cwd": "@PROJECT@",
+     "payload": {
+      "tool_name": "Bash",
+      "tool_input": {
+       "command": "echo hi"
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "p1-not-the-bash-tool",
+   "note": "not the Bash tool (from the first twin probe of the non-install path)",
+   "tags": [
+    "pre",
+    "p1"
+   ],
+   "bare": true,
+   "lang": "C",
+   "steps": [
+    {
+     "hook": "pre",
+     "proc_cwd": "@PROJECT@",
+     "payload": {
+      "tool_name": "Read",
+      "tool_input": {
+       "command": "ls"
+      },
+      "cwd": "@PROJECT@"
+     }
+    }
+   ]
+  },
+  {
+   "id": "p1-empty-command",
+   "note": "empty command (from the first twin probe of the non-install path)",
+   "tags": [
+    "pre",
+    "p1"
+   ],
+   "bare": true,
+   "lang": "C",
+   "steps": [
+    {
+     "hook": "pre",
+     "proc_cwd": "@PROJECT@",
+     "payload": {
+      "tool_name": "Bash",
+      "tool_input": {
+       "command": ""
+      },
+      "cwd": "@PROJECT@"
+     }
+    }
+   ]
+  },
+  {
+   "id": "p1-backstop-text-no-id",
+   "note": "backstop text, no id (from the first twin probe of the non-install path)",
+   "tags": [
+    "pre",
+    "p1"
+   ],
+   "bare": true,
+   "lang": "C",
+   "steps": [
+    {
+     "hook": "pre",
+     "proc_cwd": "@PROJECT@",
+     "payload": {
+      "tool_name": "Bash",
+      "tool_input": {
+       "command": "grep -n \"npm install\" README.md"
+      },
+      "cwd": "@PROJECT@"
+     }
+    }
+   ]
+  },
+  {
+   "id": "p1-backstop-text-id-empty-project",
+   "note": "backstop text, id, empty project (from the first twin probe of the non-install path)",
+   "tags": [
+    "pre",
+    "p1"
+   ],
+   "bare": true,
+   "lang": "C",
+   "steps": [
+    {
+     "hook": "pre",
+     "proc_cwd": "@PROJECT@",
+     "payload": {
+      "tool_name": "Bash",
+      "tool_input": {
+       "command": "grep -n \"npm install\" README.md"
+      },
+      "cwd": "@PROJECT@",
+      "tool_use_id": "toolu_01AbC-d_9"
+     }
+    }
+   ]
+  },
+  {
+   "id": "p1-backstop-text-id-node-tree",
+   "note": "backstop text, id, node tree (from the first twin probe of the non-install path)",
+   "tags": [
+    "pre",
+    "p1"
+   ],
+   "bare": true,
+   "files": {
+    "project/package-lock.json": "{}\n",
+    "project/node_modules/.package-lock.json": "{}\n"
+   },
+   "lang": "C",
+   "steps": [
+    {
+     "hook": "pre",
+     "proc_cwd": "@PROJECT@",
+     "payload": {
+      "tool_name": "Bash",
+      "tool_input": {
+       "command": "grep -n \"npm install\" README.md"
+      },
+      "cwd": "@PROJECT@",
+      "tool_use_id": "toolu_tree"
+     }
+    }
+   ]
+  },
+  {
+   "id": "p1-backstop-text-id-linked-lockfile-and-a-dangling-hidden-one",
+   "note": "backstop text, id, linked lockfile and a dangling hidden one (from the first twin probe of the non-install path)",
+   "tags": [
+    "pre",
+    "p1"
+   ],
+   "bare": true,
+   "files": {
+    "project/real/package-lock.json": "{}\n",
+    "project/package-lock.json": {
+     "symlink": "real/package-lock.json"
+    },
+    "project/node_modules/.package-lock.json": {
+     "symlink": "nowhere"
+    }
+   },
+   "lang": "C",
+   "steps": [
+    {
+     "hook": "pre",
+     "proc_cwd": "@PROJECT@",
+     "payload": {
+      "tool_name": "Bash",
+      "tool_input": {
+       "command": "cat x | grep \"yarn add\""
+      },
+      "cwd": "@PROJECT@",
+      "tool_use_id": "exec-0a1b"
+     }
+    }
+   ]
+  },
+  {
+   "id": "p1-backstop-text-id-with-a-slash",
+   "note": "backstop text, id with a slash (from the first twin probe of the non-install path)",
+   "tags": [
+    "pre",
+    "p1"
+   ],
+   "bare": true,
+   "lang": "C",
+   "steps": [
+    {
+     "hook": "pre",
+     "proc_cwd": "@PROJECT@",
+     "payload": {
+      "tool_name": "Bash",
+      "tool_input": {
+       "command": "grep \"npm install\" x"
+      },
+      "cwd": "@PROJECT@",
+      "tool_use_id": "a/b"
+     }
+    }
+   ]
+  },
+  {
+   "id": "p1-backstop-text-id-not-a-string",
+   "note": "backstop text, id not a string (from the first twin probe of the non-install path)",
+   "tags": [
+    "pre",
+    "p1"
+   ],
+   "bare": true,
+   "lang": "C",
+   "steps": [
+    {
+     "hook": "pre",
+     "proc_cwd": "@PROJECT@",
+     "payload": {
+      "tool_name": "Bash",
+      "tool_input": {
+       "command": "grep \"npm install\" x"
+      },
+      "cwd": "@PROJECT@",
+      "tool_use_id": 5
+     }
+    }
+   ]
+  },
+  {
+   "id": "p1-backstop-text-id-ends-in-a-newline",
+   "note": "backstop text, id ends in a newline (from the first twin probe of the non-install path)",
+   "tags": [
+    "pre",
+    "p1"
+   ],
+   "bare": true,
+   "lang": "C",
+   "steps": [
+    {
+     "hook": "pre",
+     "proc_cwd": "@PROJECT@",
+     "payload": {
+      "tool_name": "Bash",
+      "tool_input": {
+       "command": "grep \"npm install\" x"
+      },
+      "cwd": "@PROJECT@",
+      "tool_use_id": "abc\n"
+     }
+    }
+   ]
+  },
+  {
+   "id": "p1-backstop-text-over-two-lines-flags-to-normalize",
+   "note": "backstop text over two lines, flags to normalize (from the first twin probe of the non-install path)",
+   "tags": [
+    "pre",
+    "p1"
+   ],
+   "bare": true,
+   "lang": "C",
+   "steps": [
+    {
+     "hook": "pre",
+     "proc_cwd": "@PROJECT@",
+     "payload": {
+      "tool_name": "Bash",
+      "tool_input": {
+       "command": "echo a   --ignore-scripts  b\n  grep  \"npm install --ignore-scripts\"\tx --ignore-scripts"
+      },
+      "cwd": "@PROJECT@",
+      "tool_use_id": "norm1"
+     }
+    }
+   ]
+  },
+  {
+   "id": "p1-npm-run-script-named-install",
+   "note": "npm run script named install (from the first twin probe of the non-install path)",
+   "tags": [
+    "pre",
+    "p1"
+   ],
+   "bare": true,
+   "files": {
+    "project/package-lock.json": "{}\n",
+    "project/node_modules/.package-lock.json": "{}\n"
+   },
+   "lang": "C",
+   "steps": [
+    {
+     "hook": "pre",
+     "proc_cwd": "@PROJECT@",
+     "payload": {
+      "tool_name": "Bash",
+      "tool_input": {
+       "command": "npm run deps:install"
+      },
+      "cwd": "@PROJECT@",
+      "tool_use_id": "run1"
+     }
+    }
+   ]
+  },
+  {
+   "id": "p1-open-quote-names-no-manager",
+   "note": "open quote, names no manager (from the first twin probe of the non-install path)",
+   "tags": [
+    "pre",
+    "p1"
+   ],
+   "bare": true,
+   "lang": "C",
+   "steps": [
+    {
+     "hook": "pre",
+     "proc_cwd": "@PROJECT@",
+     "payload": {
+      "tool_name": "Bash",
+      "tool_input": {
+       "command": "echo 'abc"
+      },
+      "cwd": "@PROJECT@"
+     }
+    }
+   ]
+  },
+  {
+   "id": "p1-open-quote-names-a-manager",
+   "note": "open quote, names a manager (from the first twin probe of the non-install path)",
+   "tags": [
+    "pre",
+    "p1"
+   ],
+   "bare": true,
+   "lang": "C",
+   "steps": [
+    {
+     "hook": "pre",
+     "proc_cwd": "@PROJECT@",
+     "payload": {
+      "tool_name": "Bash",
+      "tool_input": {
+       "command": "echo 'pip"
+      },
+      "cwd": "@PROJECT@"
+     }
+    }
+   ]
+  },
+  {
+   "id": "p1-open-quote-a-manager-across-a-continuation",
+   "note": "open quote, a manager across a continuation (from the first twin probe of the non-install path)",
+   "tags": [
+    "pre",
+    "p1"
+   ],
+   "bare": true,
+   "lang": "C",
+   "steps": [
+    {
+     "hook": "pre",
+     "proc_cwd": "@PROJECT@",
+     "payload": {
+      "tool_name": "Bash",
+      "tool_input": {
+       "command": "echo 'pi\\\np"
+      },
+      "cwd": "@PROJECT@"
+     }
+    }
+   ]
+  },
+  {
+   "id": "p1-heredoc-without-its-end",
+   "note": "heredoc without its end (from the first twin probe of the non-install path)",
+   "tags": [
+    "pre",
+    "p1"
+   ],
+   "bare": true,
+   "lang": "C",
+   "steps": [
+    {
+     "hook": "pre",
+     "proc_cwd": "@PROJECT@",
+     "payload": {
+      "tool_name": "Bash",
+      "tool_input": {
+       "command": "cat <<EOF\nhello"
+      },
+      "cwd": "@PROJECT@"
+     }
+    }
+   ]
+  },
+  {
+   "id": "p1-budget-clamped-engaged",
+   "note": "budget clamped, engaged (from the first twin probe of the non-install path)",
+   "tags": [
+    "pre",
+    "p1"
+   ],
+   "bare": true,
+   "lang": "C",
+   "env": {
+    "SAFEDEPS_SELF_BUDGET_SECONDS": "40"
+   },
+   "budget": "on",
+   "steps": [
+    {
+     "hook": "pre",
+     "proc_cwd": "@PROJECT@",
+     "payload": {
+      "tool_name": "Bash",
+      "tool_input": {
+       "command": "echo a # xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      },
+      "cwd": "@PROJECT@"
+     }
+    }
+   ]
+  },
+  {
+   "id": "p1-budget-not-a-number-engaged",
+   "note": "budget not a number, engaged (from the first twin probe of the non-install path)",
+   "tags": [
+    "pre",
+    "p1"
+   ],
+   "bare": true,
+   "lang": "C",
+   "env": {
+    "SAFEDEPS_SELF_BUDGET_SECONDS": "abc"
+   },
+   "budget": "on",
+   "steps": [
+    {
+     "hook": "pre",
+     "proc_cwd": "@PROJECT@",
+     "payload": {
+      "tool_name": "Bash",
+      "tool_input": {
+       "command": "echo a # xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      },
+      "cwd": "@PROJECT@"
+     }
+    }
+   ]
+  },
+  {
+   "id": "p1-budget-far-too-long-a-value-engaged",
+   "note": "budget far too long a value, engaged (from the first twin probe of the non-install path)",
+   "tags": [
+    "pre",
+    "p1"
+   ],
+   "bare": true,
+   "lang": "C",
+   "env": {
+    "SAFEDEPS_SELF_BUDGET_SECONDS": "99999999999999999999999999999999999999999999999999"
+   },
+   "budget": "on",
+   "steps": [
+    {
+     "hook": "pre",
+     "proc_cwd": "@PROJECT@",
+     "payload": {
+      "tool_name": "Bash",
+      "tool_input": {
+       "command": "echo a # xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      },
+      "cwd": "@PROJECT@"
+     }
+    }
+   ]
+  },
+  {
+   "id": "p1-budget-with-a-plus-and-blanks-engaged",
+   "note": "budget with a plus and blanks, engaged (from the first twin probe of the non-install path)",
+   "tags": [
+    "pre",
+    "p1"
+   ],
+   "bare": true,
+   "lang": "C",
+   "env": {
+    "SAFEDEPS_SELF_BUDGET_SECONDS": " +0007 "
+   },
+   "budget": "on",
+   "steps": [
+    {
+     "hook": "pre",
+     "proc_cwd": "@PROJECT@",
+     "payload": {
+      "tool_name": "Bash",
+      "tool_input": {
+       "command": "echo a # xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      },
+      "cwd": "@PROJECT@"
+     }
+    }
+   ]
+  },
+  {
+   "id": "p1-budget-clamped-not-engaged",
+   "note": "budget clamped, not engaged (from the first twin probe of the non-install path)",
+   "tags": [
+    "pre",
+    "p1"
+   ],
+   "bare": true,
+   "lang": "C",
+   "env": {
+    "SAFEDEPS_SELF_BUDGET_SECONDS": "40"
+   },
+   "steps": [
+    {
+     "hook": "pre",
+     "proc_cwd": "@PROJECT@",
+     "payload": {
+      "tool_name": "Bash",
+      "tool_input": {
+       "command": "echo a"
+      },
+      "cwd": "@PROJECT@"
+     }
+    }
+   ]
+  },
+  {
+   "id": "p1-engage-clamped",
+   "note": "engage clamped (from the first twin probe of the non-install path)",
+   "tags": [
+    "pre",
+    "p1"
+   ],
+   "bare": true,
+   "lang": "C",
+   "env": {
+    "SAFEDEPS_BUDGET_ENGAGE_BYTES": "99999"
+   },
+   "budget": "on",
+   "steps": [
+    {
+     "hook": "pre",
+     "proc_cwd": "@PROJECT@",
+     "payload": {
+      "tool_name": "Bash",
+      "tool_input": {
+       "command": "echo a # xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      },
+      "cwd": "@PROJECT@"
+     }
+    }
+   ]
+  },
+  {
+   "id": "p1-engage-not-a-number",
+   "note": "engage not a number (from the first twin probe of the non-install path)",
+   "tags": [
+    "pre",
+    "p1"
+   ],
+   "bare": true,
+   "lang": "C",
+   "env": {
+    "SAFEDEPS_BUDGET_ENGAGE_BYTES": "1k"
+   },
+   "budget": "on",
+   "steps": [
+    {
+     "hook": "pre",
+     "proc_cwd": "@PROJECT@",
+     "payload": {
+      "tool_name": "Bash",
+      "tool_input": {
+       "command": "echo a # xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      },
+      "cwd": "@PROJECT@"
+     }
+    }
+   ]
+  },
+  {
+   "id": "p1-engage-zero",
+   "note": "engage zero (from the first twin probe of the non-install path)",
+   "tags": [
+    "pre",
+    "p1"
+   ],
+   "bare": true,
+   "lang": "C",
+   "env": {
+    "SAFEDEPS_BUDGET_ENGAGE_BYTES": "0"
+   },
+   "steps": [
+    {
+     "hook": "pre",
+     "proc_cwd": "@PROJECT@",
+     "payload": {
+      "tool_name": "Bash",
+      "tool_input": {
+       "command": "echo a"
+      },
+      "cwd": "@PROJECT@"
+     }
+    }
+   ]
+  },
+  {
+   "id": "p1-the-old-child-marker-in-the-environment",
+   "note": "the old child marker in the environment (from the first twin probe of the non-install path)",
+   "tags": [
+    "pre",
+    "p1"
+   ],
+   "bare": true,
+   "lang": "C",
+   "env": {
+    "SAFEDEPS_BUDGET_CHILD": "1"
+   },
+   "budget": "on",
+   "steps": [
+    {
+     "hook": "pre",
+     "proc_cwd": "@PROJECT@",
+     "payload": {
+      "tool_name": "Bash",
+      "tool_input": {
+       "command": "echo a # xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      },
+      "cwd": "@PROJECT@"
+     }
+    }
+   ]
+  },
+  {
+   "id": "p1-deadline-off-large",
+   "note": "deadline off, large (from the first twin probe of the non-install path)",
+   "tags": [
+    "pre",
+    "p1"
+   ],
+   "bare": true,
+   "lang": "C",
+   "env": {
+    "SAFEDEPS_BUDGET_DISABLED": "1"
+   },
+   "steps": [
+    {
+     "hook": "pre",
+     "proc_cwd": "@PROJECT@",
+     "payload": {
+      "tool_name": "Bash",
+      "tool_input": {
+       "command": "echo a # xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      },
+      "cwd": "@PROJECT@"
+     }
+    }
+   ]
+  },
+  {
+   "id": "p1-deadline-off-small",
+   "note": "deadline off, small (from the first twin probe of the non-install path)",
+   "tags": [
+    "pre",
+    "p1"
+   ],
+   "bare": true,
+   "lang": "C",
+   "env": {
+    "SAFEDEPS_BUDGET_DISABLED": "1"
+   },
+   "steps": [
+    {
+     "hook": "pre",
+     "proc_cwd": "@PROJECT@",
+     "payload": {
+      "tool_name": "Bash",
+      "tool_input": {
+       "command": "echo a"
+      },
+      "cwd": "@PROJECT@"
+     }
+    }
+   ]
+  },
+  {
+   "id": "p1-budget-zero-engaged",
+   "note": "budget zero, engaged (from the first twin probe of the non-install path)",
+   "tags": [
+    "pre",
+    "p1"
+   ],
+   "bare": true,
+   "lang": "C",
+   "env": {
+    "SAFEDEPS_SELF_BUDGET_SECONDS": "0"
+   },
+   "budget": "on",
+   "steps": [
+    {
+     "hook": "pre",
+     "proc_cwd": "@PROJECT@",
+     "payload": {
+      "tool_name": "Bash",
+      "tool_input": {
+       "command": "echo a # xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      },
+      "cwd": "@PROJECT@"
+     }
+    }
+   ]
+  },
+  {
+   "id": "p1-truth-sources-moved",
+   "note": "truth sources moved (from the first twin probe of the non-install path)",
+   "tags": [
+    "pre",
+    "p1"
+   ],
+   "bare": true,
+   "lang": "C",
+   "env": {
+    "SAFEDEPS_OSV_API_URL": "http://127.0.0.1:9/q",
+    "SAFEDEPS_NPM_OVERRIDES_JSON": "{}",
+    "SAFEDEPS_LEDGER_DEFAULT_TTL_DAYS": "31",
+    "SAFEDEPS_NPM_TEST_REGISTRY": "http://127.0.0.1:9/"
+   },
+   "steps": [
+    {
+     "hook": "pre",
+     "proc_cwd": "@PROJECT@",
+     "payload": {
+      "tool_name": "Bash",
+      "tool_input": {
+       "command": "ls"
+      },
+      "cwd": "@PROJECT@"
+     }
+    }
+   ]
+  },
+  {
+   "id": "p1-truth-sources-at-their-defaults",
+   "note": "truth sources at their defaults (from the first twin probe of the non-install path)",
+   "tags": [
+    "pre",
+    "p1"
+   ],
+   "bare": true,
+   "lang": "C",
+   "env": {
+    "SAFEDEPS_OSV_API_URL": "https://api.osv.dev/v1/query",
+    "SAFEDEPS_LEDGER_DEFAULT_TTL_DAYS": "30",
+    "SAFEDEPS_ADVISORY_LOG": "/tmp/x"
+   },
+   "steps": [
+    {
+     "hook": "pre",
+     "proc_cwd": "@PROJECT@",
+     "payload": {
+      "tool_name": "Bash",
+      "tool_input": {
+       "command": "ls"
+      },
+      "cwd": "@PROJECT@"
+     }
+    }
+   ]
+  },
+  {
+   "id": "p1-payload-is-not-json",
+   "note": "payload is not JSON (from the first twin probe of the non-install path) The bash guard ends with jq's exit status 5 here (measured on carenine); the entry shim turns that into a deny that blames the checkout.",
+   "tags": [
+    "pre",
+    "p1"
+   ],
+   "bare": true,
+   "lang": "C",
+   "steps": [
+    {
+     "hook": "pre",
+     "proc_cwd": "@PROJECT@",
+     "payload_raw": "{",
+     "expect": {
+      "status": "exit 5"
+     }
+    }
+   ]
+  },
+  {
+   "id": "p1-payload-is-an-array",
+   "note": "payload is an array (from the first twin probe of the non-install path) The bash guard ends with jq's exit status 5 here (measured on carenine); the entry shim turns that into a deny that blames the checkout.",
+   "tags": [
+    "pre",
+    "p1"
+   ],
+   "bare": true,
+   "lang": "C",
+   "steps": [
+    {
+     "hook": "pre",
+     "proc_cwd": "@PROJECT@",
+     "payload_raw": "[1]",
+     "expect": {
+      "status": "exit 5"
+     }
+    }
+   ]
+  },
+  {
+   "id": "p1-payload-is-null",
+   "note": "payload is null (from the first twin probe of the non-install path)",
+   "tags": [
+    "pre",
+    "p1"
+   ],
+   "bare": true,
+   "lang": "C",
+   "steps": [
+    {
+     "hook": "pre",
+     "proc_cwd": "@PROJECT@",
+     "payload_raw": "null"
+    }
+   ]
+  },
+  {
+   "id": "p1-payload-is-empty",
+   "note": "payload is empty (from the first twin probe of the non-install path)",
+   "tags": [
+    "pre",
+    "p1"
+   ],
+   "bare": true,
+   "lang": "C",
+   "steps": [
+    {
+     "hook": "pre",
+     "proc_cwd": "@PROJECT@",
+     "payload_raw": ""
+    }
+   ]
+  },
+  {
+   "id": "p1-tool-input-is-a-string",
+   "note": "tool_input is a string (from the first twin probe of the non-install path) The bash guard ends with jq's exit status 5 here (measured on carenine); the entry shim turns that into a deny that blames the checkout.",
+   "tags": [
+    "pre",
+    "p1"
+   ],
+   "bare": true,
+   "lang": "C",
+   "steps": [
+    {
+     "hook": "pre",
+     "proc_cwd": "@PROJECT@",
+     "payload_raw": "{\"tool_name\":\"Bash\",\"tool_input\":\"x\"}",
+     "expect": {
+      "status": "exit 5"
+     }
+    }
+   ]
+  },
+  {
+   "id": "p1-tool-input-is-null",
+   "note": "tool_input is null (from the first twin probe of the non-install path)",
+   "tags": [
+    "pre",
+    "p1"
+   ],
+   "bare": true,
+   "lang": "C",
+   "steps": [
+    {
+     "hook": "pre",
+     "proc_cwd": "@PROJECT@",
+     "payload_raw": "{\"tool_name\":\"Bash\",\"tool_input\":null}"
+    }
+   ]
+  },
+  {
+   "id": "p1-command-is-a-number",
+   "note": "command is a number (from the first twin probe of the non-install path)",
+   "tags": [
+    "pre",
+    "p1"
+   ],
+   "bare": true,
+   "lang": "C",
+   "steps": [
+    {
+     "hook": "pre",
+     "proc_cwd": "@PROJECT@",
+     "payload_raw": "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":5}}"
+    }
+   ]
+  },
+  {
+   "id": "p1-command-is-an-array",
+   "note": "command is an array (from the first twin probe of the non-install path)",
+   "tags": [
+    "pre",
+    "p1"
+   ],
+   "bare": true,
+   "lang": "C",
+   "steps": [
+    {
+     "hook": "pre",
+     "proc_cwd": "@PROJECT@",
+     "payload_raw": "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":[\"echo\",\"hi\"]}}"
+    }
+   ]
+  },
+  {
+   "id": "p1-command-ends-in-newlines",
+   "note": "command ends in newlines (from the first twin probe of the non-install path)",
+   "tags": [
+    "pre",
+    "p1"
+   ],
+   "bare": true,
+   "lang": "C",
+   "steps": [
+    {
+     "hook": "pre",
+     "proc_cwd": "@PROJECT@",
+     "payload": {
+      "tool_name": "Bash",
+      "tool_input": {
+       "command": "echo hi\n\n"
+      },
+      "cwd": "@PROJECT@"
+     }
+    }
+   ]
+  },
+  {
+   "id": "p1-tool-name-ends-in-a-newline",
+   "note": "tool name ends in a newline (from the first twin probe of the non-install path)",
+   "tags": [
+    "pre",
+    "p1"
+   ],
+   "bare": true,
+   "lang": "C",
+   "steps": [
+    {
+     "hook": "pre",
+     "proc_cwd": "@PROJECT@",
+     "payload_raw": "{\"tool_name\":\"Bash\\n\",\"tool_input\":{\"command\":\"echo hi\"}}"
+    }
+   ]
+  },
+  {
+   "id": "p1-non-ascii-command-large-deadline-off-lang-c",
+   "note": "non-ASCII command, large, deadline off, LANG=C (from the first twin probe of the non-install path)",
+   "tags": [
+    "pre",
+    "p1"
+   ],
+   "bare": true,
+   "lang": "C",
+   "env": {
+    "SAFEDEPS_BUDGET_DISABLED": "1"
+   },
+   "steps": [
+    {
+     "hook": "pre",
+     "proc_cwd": "@PROJECT@",
+     "payload": {
+      "tool_name": "Bash",
+      "tool_input": {
+       "command": "echo 한글 é # xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      },
+      "cwd": "@PROJECT@"
+     }
+    }
+   ]
+  },
+  {
+   "id": "p1-non-ascii-command-large-deadline-off-utf-8",
+   "note": "non-ASCII command, large, deadline off, UTF-8 (from the first twin probe of the non-install path)",
+   "tags": [
+    "pre",
+    "p1"
+   ],
+   "bare": true,
+   "env": {
+    "SAFEDEPS_BUDGET_DISABLED": "1"
+   },
+   "steps": [
+    {
+     "hook": "pre",
+     "proc_cwd": "@PROJECT@",
+     "payload": {
+      "tool_name": "Bash",
+      "tool_input": {
+       "command": "echo 한글 é # xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      },
+      "cwd": "@PROJECT@"
+     }
+    }
+   ]
+  },
+  {
+   "id": "p1-non-ascii-budget-value-utf-8",
+   "note": "non-ASCII budget value, UTF-8 (from the first twin probe of the non-install path)",
+   "tags": [
+    "pre",
+    "p1"
+   ],
+   "bare": true,
+   "env": {
+    "SAFEDEPS_SELF_BUDGET_SECONDS": "한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한"
+   },
+   "budget": "on",
+   "steps": [
+    {
+     "hook": "pre",
+     "proc_cwd": "@PROJECT@",
+     "payload": {
+      "tool_name": "Bash",
+      "tool_input": {
+       "command": "echo a # xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      },
+      "cwd": "@PROJECT@"
+     }
+    }
+   ]
+  },
+  {
+   "id": "p1-non-ascii-budget-value-lang-c",
+   "note": "non-ASCII budget value, LANG=C (from the first twin probe of the non-install path)",
+   "tags": [
+    "pre",
+    "p1"
+   ],
+   "bare": true,
+   "lang": "C",
+   "env": {
+    "SAFEDEPS_SELF_BUDGET_SECONDS": "한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한"
+   },
+   "budget": "on",
+   "steps": [
+    {
+     "hook": "pre",
+     "proc_cwd": "@PROJECT@",
+     "payload": {
+      "tool_name": "Bash",
+      "tool_input": {
+       "command": "echo a # xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      },
+      "cwd": "@PROJECT@"
+     }
+    }
+   ]
+  },
+  {
+   "id": "p1-a-comment-that-names-a-manager",
+   "note": "a comment that names a manager (from the first twin probe of the non-install path)",
+   "tags": [
+    "pre",
+    "p1"
+   ],
+   "bare": true,
+   "lang": "C",
+   "steps": [
+    {
+     "hook": "pre",
+     "proc_cwd": "@PROJECT@",
+     "payload": {
+      "tool_name": "Bash",
+      "tool_input": {
+       "command": "ls # pip install x"
+      },
+      "cwd": "@PROJECT@"
+     }
+    }
+   ]
+  },
+  {
+   "id": "p1-a-quoted-install-is-data",
+   "note": "a quoted install is data (from the first twin probe of the non-install path)",
+   "tags": [
+    "pre",
+    "p1"
+   ],
+   "bare": true,
+   "lang": "C",
+   "steps": [
+    {
+     "hook": "pre",
+     "proc_cwd": "@PROJECT@",
+     "payload": {
+      "tool_name": "Bash",
+      "tool_input": {
+       "command": "echo \"npm install left-pad\""
+      },
+      "cwd": "@PROJECT@",
+      "tool_use_id": "q1"
+     }
+    }
+   ]
+  },
+  {
+   "id": "p1-zsh-only-start",
+   "note": "zsh-only start (from the first twin probe of the non-install path)",
+   "tags": [
+    "pre",
+    "p1"
+   ],
+   "bare": true,
+   "lang": "C",
+   "steps": [
+    {
+     "hook": "pre",
+     "proc_cwd": "@PROJECT@",
+     "payload": {
+      "tool_name": "Bash",
+      "tool_input": {
+       "command": "repeat 1 { echo hi }"
+      },
+      "cwd": "@PROJECT@"
+     }
+    }
+   ]
+  },
+  {
+   "id": "p1-cwd-in-the-payload-is-not-there",
+   "note": "cwd in the payload is not there (from the first twin probe of the non-install path)",
+   "tags": [
+    "pre",
+    "p1"
+   ],
+   "bare": true,
+   "lang": "C",
+   "steps": [
+    {
+     "hook": "pre",
+     "proc_cwd": "@PROJECT@",
+     "payload": {
+      "tool_name": "Bash",
+      "tool_input": {
+       "command": "grep \"npm install\" x"
+      },
+      "cwd": "/nonexistent/dir/x",
+      "tool_use_id": "nocwd"
+     }
     }
    ]
   }

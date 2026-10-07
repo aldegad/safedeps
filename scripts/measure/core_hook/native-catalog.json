@@ -1,0 +1,140 @@
+{
+  "artifact_roles": {
+    "AdvisoryHeader": [
+      "rust/src/state.rs",
+      "one append header; body bytes never carry header authority"
+    ],
+    "AdvisoryRotationHeader": [
+      "rust/src/state/log.rs",
+      "rotation notice header; append attempts may fail"
+    ],
+    "AdvisoryRotationName": [
+      "rust/src/state/log.rs",
+      "rotation destination name; distinct event from header"
+    ],
+    "ConfirmWarningsHeader": [
+      "rust/src/post/run.rs",
+      "CONFIRM warnings block prefix"
+    ],
+    "JournalOpened": [
+      "rust/src/post/journal.rs",
+      "new journal opened_at; copied into later stages and incident/report; failed write may leave no sink"
+    ],
+    "JournalRecoveryHeader": [
+      "rust/src/post/journal.rs",
+      "one recovered seeded journal block header; seed opened/stage fields remain bytes"
+    ],
+    "JournalStage": [
+      "rust/src/post/journal.rs",
+      "each input stream object/null stage_at; invalid later value or failed write can discard all sinks"
+    ],
+    "NpmObserved": [
+      "rust/src/post/npm.rs",
+      "project observed-tree record at; hash refers to independently collected tree"
+    ],
+    "NpmWithheldEntry": [
+      "rust/src/post/npm.rs",
+      "one retained entry at; integrity-token aliases clone same event; iteration subject must come from fixture"
+    ],
+    "NpmWithheldName": [
+      "rust/src/post/npm.rs",
+      "withheld filename seconds; separate later read, not equal to entry by assumption"
+    ],
+    "PreSnapshot": [
+      "rust/src/pre/snapshot.rs",
+      "exclusive snapshot family, id seconds and initial meta.timestamp; one per call, shared event"
+    ],
+    "ProviderHeader": [
+      "rust/src/post/providers.rs",
+      "provider log append header; repeated providers require independent subject binding"
+    ],
+    "ReorgRefusedHeader": [
+      "rust/src/post/rollback.rs",
+      "REORG REFUSED block prefix"
+    ],
+    "ReorgRollbackHeader": [
+      "rust/src/post/rollback.rs",
+      "rollback block prefix; not advisory copies"
+    ],
+    "VerifiedMeta": [
+      "rust/src/post/snapshot.rs",
+      "new verified meta timestamp; source snapshot timestamp is separate"
+    ]
+  },
+  "boundary": "rust/src/os.rs",
+  "files": {
+    "rust/.gitignore": "306fd52e74fca6746e12acc750f232de15e71da917756a1270d74c91f5eb7368",
+    "rust/Cargo.lock": "8fe18df3cb769ad2194d698b4b8a6d098956f1d6ace5e8825d916a33a73744e6",
+    "rust/Cargo.toml": "f718000f31926b5f2c6129e40124dff4b80e66b0951e89a4db6d293d9e7a60e2",
+    "rust/build.rs": "053f1a2ee6c4dbfc36363ccb986aba1b2b2dcb1674a12ae564a2b912b077f00a",
+    "rust/src/ask.rs": "9d70de639fed4e1432d554b37147649c6865aec2326a016c7ab7b8b414e4d8d4",
+    "rust/src/ask/fetch.rs": "5fb7ba0f16a9977e8ca9e244faa5f9869a3be5dfb492a89601450ebb625ee897",
+    "rust/src/callid.rs": "70a76f07a43c029fc72504b814d613f509dbf57c22b2ff0075f18406db7265cc",
+    "rust/src/core.rs": "a9bcac9f40abdfc70f271c6d307b9ef609982849fbf0db96cdca8d4fdb1f8a88",
+    "rust/src/ere.rs": "40c833324b680aafb2162a9081342376757b50c7547eb6c4d851eaacdb8062a4",
+    "rust/src/extract.rs": "036f3696223b56610ab0b7635e4e0db6f0f25bd52d9dd4e1b81099e173759e08",
+    "rust/src/grammar.rs": "0a9c6eca5d6f98e05663101b45c2638ec3b211cebd2bf5914a9ca0b8a8e2f9e9",
+    "rust/src/inert.rs": "ed88c21b8cfb6beab3b7d55d130d6f95f829bc5c1b6acd4e0de0bd52de77e2d9",
+    "rust/src/jq.rs": "7f1e8895155d52575f0469d2a51898de8c6f479c6a59730ae71b21687de5e7ea",
+    "rust/src/json.rs": "2396ab19c36fe05a1390cc55e0455dfbf79aa7d3cd3739274719c3eb39b77c47",
+    "rust/src/ledger.rs": "736ef0ba641744c71e3272819de77f2962385b708ebac67a8c71a02a938bf9d5",
+    "rust/src/ledger/context.rs": "d1c6d4650373cf831bae662e203b23c5c70844630d6c9749a3424e6531de3a8b",
+    "rust/src/lex.rs": "60f777cf3c8d9572348c958e6ba45559fe546fa95741da1e45e6a610da913f40",
+    "rust/src/main.rs": "ebb7dbc70d7d416a4028b1fb49527a6040075fe58123f677b3b33896b8f2e4ff",
+    "rust/src/manager.rs": "22704508692d6349aa2cc4d05b9b9d2e28c623aae833d87b17732e3bc3532538",
+    "rust/src/md5.rs": "267377bc51d83f639c77c185e883ce0a352dedf042aff0df4b8b9d50ff1b0ef6",
+    "rust/src/os.rs": "7809935b7ae5643d32639e9e0f7d35b67d3417e3f7cf02039e20ee16779e9a44",
+    "rust/src/post.rs": "99c39b91180e65ffb3b533ce29db64cfd1cb1fe2d0092cbb311285bb733e3ef1",
+    "rust/src/post/call.rs": "6cc3d36099c3912a5bd4cc74548e2db64b28024f58d3aea8fe733d3b37688584",
+    "rust/src/post/closure.rs": "b164596317929eadebf0b8dc282270b616831a6b3ede69e2e0aa71867773edc3",
+    "rust/src/post/effect.rs": "cc5228b285761772667a043e7ee4ac7dbbf5ea1e2d6bb26cae777338e7a9e9cf",
+    "rust/src/post/heuristics.rs": "ba3c43cbad088137cbab7fd51f72cb15e3be73b98de6a21dbea455b9b126c3d3",
+    "rust/src/post/journal.rs": "002e14107363eb0fd2e77df2c52e8e946c6b505ca6eca1a423d1d66ed9ae465b",
+    "rust/src/post/jv.rs": "837fa78afd77feda1ff712a98e81f49dfbf2a1d1a82c035455593eaab5a1c78a",
+    "rust/src/post/npm.rs": "6f6270315a4a42d4bc939bce79d6c94cc3df7e80fac4fcb51d25d9aee3a45104",
+    "rust/src/post/process.rs": "f7e766087c7656870c1ad77553f29923234c87daf71c56d661aa46c5dddf6c2a",
+    "rust/src/post/providers.rs": "32578cec52ef92532aeee803bb42828d785a144050f05252cbfdd4fde8f938f0",
+    "rust/src/post/report.rs": "b221b7cac75abcef90a118cf7e0cd8b69f69cf3d07c6e31b352a8f6c2a52d28d",
+    "rust/src/post/rollback.rs": "9debaf3accd693fe3ceda612f772806bf1e505f65c60d72cb6fea5a047242bc0",
+    "rust/src/post/run.rs": "469c66adab9b01d06289b51a70b5691487599a67e0c42ce785a9f295e8f328ab",
+    "rust/src/post/sh.rs": "86c39e1e2aceeb07bd7890c6498bec1de04a1e978a352631d37d59d892ead097",
+    "rust/src/post/snapshot.rs": "8fad0ac8779a4fe0840ddc383ce03a6c2dbdedada245bb49263abfad7b6f2ad6",
+    "rust/src/post/trace.rs": "0a73e95c2f6c8006d638ea163b23c8bb988604c6dc1e99e6aba1f90b3675fd6f",
+    "rust/src/post/tree.rs": "7ba7e08df3e206b7be50e498b2736f71ed0471832e2b4c11fc567f446505f040",
+    "rust/src/post/workspaces.rs": "378bfa0eb0ced6f720da39d46d8b4224971d38efbab7c60918fd7f01ad3ab44c",
+    "rust/src/pre.rs": "51813e525c542416a524a5b55cd8979095d1c817a81a537deb66b3b1822edf7b",
+    "rust/src/pre/budget.rs": "fbb02bea81e9ffce83f982fc096535465652995aaffdf64602874dbb48cdadd1",
+    "rust/src/pre/effects.rs": "4f4edb1a5ce0f63e97287856499d54d0d35d755275eb2720616da1faae78fd48",
+    "rust/src/pre/install.rs": "be59f038b11c250851d2c65a5f59de7a6cc545fc2d6f803ac9634317daac50e0",
+    "rust/src/pre/install/notices.rs": "be8125e202c393bb8b3e32de951bad326972240638d1e65f7c67e17f238345b1",
+    "rust/src/pre/pending.rs": "c2bca46e2dd4018eaeeb291d72479038b9f43927d786c6c2fde70a7eba2b9b2d",
+    "rust/src/pre/readings.rs": "eb460f241420d87ae96de16a94ec6a2c5f8268418c810a0dba69ccbda8e65bcc",
+    "rust/src/pre/snapshot.rs": "0aac39c2e03020a2c60e3d6b19a3dc45399164001683256dc44afe9c8b9ae6ba",
+    "rust/src/pre/targets.rs": "7f9635a7cabfd2e90fdec3f4c73f1529fe51e77b5683ddf7a9b2eb3ed72d4494",
+    "rust/src/pre/targets/env.rs": "938abbde9466348a82195e24d0e762180162607d1b3421518cbcf1f6d938ef6e",
+    "rust/src/pre/targets/npmrc.rs": "bf56912703edefe888029ba73a6e963304294b185f83ee35e577b7081bbe5fac",
+    "rust/src/sha256.rs": "fb1d838632b1e560efa2687b49f1c406c7b3cafb7a0b41b213600a5b1ed4fe82",
+    "rust/src/srchash.rs": "73508c808ac0143b86d0b51b93e7df60f7e4a6a1cda308ea590a46641639d8bc",
+    "rust/src/stamp.rs": "000b405683f1786b4bcdfabb705fe5eb2c708be2508e9d1f3475b42439e31347",
+    "rust/src/state.rs": "0fcb0aa644c46b4012949a9bfb75c8617eb2590129e27daef02dabec8768bffa",
+    "rust/src/state/log.rs": "f564847cc4cae73d499256345842e3371bddd0108fba3de1923bb39837c9c49d",
+    "rust/src/tables.rs": "27b2e461be0d02c712832f01fa06bd6ebf19777d9519e2f2618dbdc8b67e3565"
+  },
+  "format": "core-hook-native-catalog/1",
+  "internal_roles": {
+    "AdvisoryRotationLockAge": "rust/src/state/log.rs",
+    "BackstopFallback": "rust/src/pre.rs",
+    "BackstopTouch": "rust/src/pre.rs",
+    "LedgerCliExpiry": "rust/src/ledger.rs",
+    "PostLedgerExpiry": "rust/src/post/effect.rs",
+    "PostTempName": "rust/src/post/sh.rs",
+    "PreLedgerExpiry": "rust/src/pre/install.rs",
+    "ProviderCacheExpiry": "rust/src/post/providers.rs",
+    "StateLockAge": "rust/src/state.rs",
+    "StateRetention": "rust/src/state.rs",
+    "StateTempName": "rust/src/state.rs"
+  },
+  "scope": "Exact source plus named C control edits only. Ambiguous repeated/failed consumers and supervised children are unresolved. Source catalog is not execution coverage.",
+  "source": "baf2ad30244d06f028600914b2669433a87d9712",
+  "tap_sha256": "d811fa6c553180fc212bf7c6db165e4a7b29554f6d534583c1dca5ecaa6430d0"
+}

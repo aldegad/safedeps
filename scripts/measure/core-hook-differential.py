@@ -1,963 +1,154 @@
 #!/usr/bin/env python3
-"""safedeps: two implementations of the hooks, run on the same disk.
+"""Compare hooks from immutable raw bundles, with occurrence-specific evidence.
 
-The facts comparison (core-facts-differential.py) holds what the Rust core
-reads of a command to what the bash guard reads. This one holds everything a
-hook does: what it prints, how it ends, and every file it leaves behind.
+--core FILE / --cand-root TREE selects the candidate; --stages pre,post keeps
+reference hooks in other stages. Without either option, collect Bash twice.
+--native-archive TREE with --core collects the fixed native tap from a pinned
+observation archive. Arbitrary source changes or a different tap are refused.
+--control runs source mutations in private copies and checks their channels.
+--bundles DIR (also --dump DIR) retains BOTH sides and their observations.
+If omitted, a new bundle directory is printed and retained. --replay DIR or
+FILE reads only saved bundles, never starts hooks and never consults the disk
+for facts about a recorded run. Live replay requires --evidence-manifest FILE
+--evidence-sha256 HEX, selected by the consumer from the collector's completion
+report (never inferred from the bundle/index). --synthetic opts into declared
+synthetic fixtures only. Neither historical bundles nor fixture flags establish
+live provenance. New --core collections use --native-build-receipt FILE and
+--native-build-sha256 HEX from core-hook-native's builder. Missing provenance is
+unresolved, including a --core collection without its builder. A report is saved.
 
-A case is a seed (files in a sandbox, a ledger, a stand-in npm) and a list of
-steps. A step is a hook call (pre or post, with its payload) or an effect: the
-file changes the command would have made, written by this harness, because a
-harness judges commands and never runs them. The case runs twice in one
-directory, once per implementation, each time on the seed restored from one
-copy. The two runs therefore see the same absolute paths, so no path is masked.
-
-After every step this harness records the exit status, stdout and stderr of a
-hook, and the whole sandbox: SAFEDEPS_HOME, the project, HOME, TMPDIR and the
-stand-in's call records, each entry's name, kind, mode and bytes. The two
-records must be equal after the masks below, and nothing else is set aside.
-
-The masks are a closed list (MASKS). Each has a name, each is counted, and the
-summary prints the counts:
-
-  iso-utc             a UTC time `2026-10-06T13:14:53Z`
-  epoch               epoch seconds in a JSON field named in EPOCH_KEYS, and
-                      the seconds that start an npm-withheld record's name
-  snapshot-id         the id of a snapshot that appeared on disk during the
-                      case, as `<snap#N>`: N counts ids in the order they
-                      appeared, so two snapshots are never read as one
-  snapshot-id-unlisted an id of the same shape that never was on disk
-  pid                 a number in a pid position (after a snapshot id in a
-                      journal id, a JSON `pid`, `pid N` in prose, an
-                      npm-withheld record's name): `<pid:stepK>` when it is
-                      the pid of the hook this harness started for step K,
-                      `<pid:other>` otherwise
-  mktemp              the six characters mktemp chose in a name the hooks make
-  inode               in a pending record's `inodes`, each number replaced by
-                      the path that had that inode when the record was written
-  clock               in a backstop entry's `clocks`, each time stat printed
-  bash-diagnostic     a line bash itself wrote to stderr
-                      (`<script>: line N: ...`), which no other implementation
-                      can write: set aside, counted per case and listed
-  stub-call-name      a stand-in npm's call record is named by its process id;
-                      it is compared under a name made from its argv and cwd
-  tree-root           the directory of the implementation's own tree, which a
-                      hook prints when it names its `bin/safedeps`: `@TREE@`
-  deadline-tmp        in a case of the `deadline` family, what is left in
-                      TMPDIR is listed and not compared (the reference kills
-                      its child at the deadline and the child leaves files)
-
-Two families. A `verdict` case compares answers; one whose command is long
-enough to engage the self budget runs with SAFEDEPS_BUDGET_DISABLED=1 on both
-sides, because the reference is slow enough to lose such a case to its own
-deadline. A `deadline` case gives npm a stand-in that answers late, and both
-sides have to give the same undecided answer.
-
-The environment of a hook is a closed list too: PATH (the system directories,
-after the stand-in's directory when the case has one), HOME, SAFEDEPS_HOME,
-TMPDIR, LANG (no LC_ALL and no LC_CTYPE), every proxy variable pointed at a
-closed local port, and what the case names. A case with a post step may not
-leave the advisory providers at their defaults: it names `closed` or `fixture`,
-so no run of this harness asks the real OSV.
-
-The reference is this tree's bash hooks, started as the entry shim starts
-them: the script, no argument. The candidate is one of
-
-  --core <safedeps-core>   `<core> pre` and `<core> post`; `<core> stamp
-                           --check` has to print `ok` first, or no case runs
-  --cand-root <tree>       the bash hooks of another tree
-  (neither)                the reference again: the masks are enough exactly
-                           when this is green
-  --control                the reference against copies of it with one line
-                           changed (MUTATIONS); each copy has to be red, in
-                           the channel the mutation names
-
---stages names which hooks the candidate answers (default pre,post). The other
-hook is the reference's on both sides, so a `post` alone is compared on the
-records the bash pre-guard wrote, and a `pre` alone is followed through the
-bash post hook.
-
-Each case names what the reference has to do in it (`expect`). A reference
-that does not is red whatever the candidate does: a corpus that stopped
-reaching a path would otherwise compare two silences.
-
-Usage:
-  core-hook-differential.py [--core BIN | --cand-root DIR | --control]
-      [--stages pre,post] [--cases FILE]... [--only ID,...] [--tags T,...]
-      [--jobs N] [--report FILE] [--dump DIR] [--list] [--fixture-provider]
-      [--timeout SECONDS]
-
-Exit status: 0 green, 1 red, 2 the harness could not run.
+Exit 0: every comparison equal (or each requested control detected).
+Exit 1: different, unresolved, or a missing expected control detection.
+Exit 2: invalid invocation, incomplete/corrupt bundle, or collection failure.
+Bash date values without a source-role witness remain unresolved. Native
+clock provenance without an independently collected tap remains unresolved.
 """
 import argparse
-import difflib
+import collections
 import fnmatch
 import hashlib
 import json
 import os
+from pathlib import Path
 import re
 import shutil
-import signal
-import stat
 import subprocess
 import sys
 import tempfile
-import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 
-ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-MEASURE = os.path.join(ROOT, "scripts", "measure")
-DEFAULT_CASES = os.path.join(MEASURE, "core-hook-cases.json")
-BOX_DIRS = ("home", "state", "project", "tmp")
-ENGAGE_BYTES = 4096
-CLOSED_PORT = "http://127.0.0.1:9"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from core_hook import observe, compare, evidence
+from core_hook.corpus import load_cases
+from core_hook.controls import MUTATIONS, mutant_tree
 
-MASKS = ("iso-utc", "epoch", "snapshot-id", "snapshot-id-unlisted", "pid", "mktemp", "inode", "clock",
-         "bash-diagnostic", "stub-call-name", "tree-root", "deadline-tmp")
-
-# JSON fields that hold epoch seconds. A field that is not here is compared.
-EPOCH_KEYS = ("timestamp", "at", "verified_at", "confirmed_at")
-
-# What a stand-in npm leaves out of the environment it records: names the
-# shell that starts it sets by itself, which say nothing of what the hook
-# chose to pass.
-STUB_ENV_NOISE = ("_", "SHLVL")
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+DEFAULT_CASES = os.path.join(ROOT, "scripts/measure/core-hook-cases.json")
+die = observe.fail
 
 
-def die(msg):
-    sys.stderr.write("core-hook-differential: %s\n" % msg)
-    sys.exit(2)
+def engage_bytes(root):
+    path = os.path.join(root, "scripts/safedeps-pre-guard.sh")
+    with open(path, encoding="utf-8") as f:
+        found = re.findall(r"^SAFEDEPS_BUDGET_ENGAGE_DEFAULT_BYTES=([0-9]+)$", f.read(), re.M)
+    if len(found) != 1:
+        die("%s must assign SAFEDEPS_BUDGET_ENGAGE_DEFAULT_BYTES exactly once" % path)
+    return int(found[0])
 
 
-# --- the corpus ----------------------------------------------------------------
-
-def load_cases(paths):
-    cases = []
-    seen = {}
-    for p in paths:
-        try:
-            doc = json.load(open(p, encoding="utf-8"))
-        except (OSError, ValueError) as e:
-            die("cannot read cases from %s: %s" % (p, e))
-        defaults = doc.get("defaults", {})
-        for c in doc.get("cases", []):
-            if not c.get("bare"):
-                # A case starts from the file's defaults; what it names itself wins.
-                c["files"] = dict(defaults.get("files", {}), **c.get("files", {}))
-            if isinstance(c.get("npm"), str):
-                c["npm"] = doc.get("npm", {}).get(c["npm"]) or die("%s: no stand-in npm named %s" % (p, c["npm"]))
-            cid = c.get("id")
-            if not cid or not re.match(r"^[a-z0-9][a-z0-9-]*$", cid):
-                die("%s: a case needs an id of lower-case letters, digits and dashes (%r)" % (p, cid))
-            if cid in seen:
-                die("case id %s is in both %s and %s" % (cid, seen[cid], p))
-            seen[cid] = p
-            check_case(c)
-            cases.append(c)
-    return cases
+def source_hashes():
+    files = [Path(__file__)] + sorted(p for p in Path(__file__).with_name("core_hook").iterdir()
+                                    if p.is_file() and p.suffix in ('.py', '.json', '.rs'))
+    return {str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest() for p in files}
 
 
-def check_case(c):
-    cid = c["id"]
-    steps = c.get("steps")
-    if not steps:
-        die("case %s has no steps" % cid)
-    has_post = False
-    longest = 0
-    for k, s in enumerate(steps):
-        if "hook" in s:
-            if s["hook"] not in ("pre", "post"):
-                die("case %s step %d: hook is pre or post" % (cid, k))
-            if sum(x in s for x in ("command", "payload", "payload_raw")) != 1 and "command_from_step" not in s:
-                die("case %s step %d: a hook step has command, payload or payload_raw, one of them" % (cid, k))
-            if s.get("engine", "claude") not in ("claude", "codex"):
-                die("case %s step %d: engine is claude or codex" % (cid, k))
-            has_post = has_post or s["hook"] == "post"
-            cmd = s.get("command", ((s.get("payload") or {}).get("tool_input") or {}).get("command"))
-            if isinstance(cmd, str):
-                longest = max(longest, len(cmd.encode("utf-8")))
-            src = s.get("command_from_step")
-            if src is not None and not (isinstance(src, int) and 0 <= src < k and "hook" in steps[src]):
-                die("case %s step %d: command_from_step names an earlier hook step" % (cid, k))
-        elif "effect" not in s:
-            die("case %s step %d is neither a hook nor an effect" % (cid, k))
-    family = c.get("family", "verdict")
-    if family not in ("verdict", "deadline"):
-        die("case %s: family is verdict or deadline" % cid)
-    providers = c.get("providers", "default")
-    if providers not in ("default", "closed", "fixture"):
-        die("case %s: providers is default, closed or fixture" % cid)
-    if has_post and providers == "default":
-        die("case %s has a post step and leaves the advisory providers at their defaults; name closed or fixture" % cid)
-    if c.get("seed_cli") and providers == "default":
-        die("case %s runs the safedeps CLI in its seed and leaves the providers at their defaults" % cid)
-    c["_long"] = longest >= ENGAGE_BYTES
+def save_json(path, value):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".part")
+    tmp.write_text(json.dumps(value, indent=2, sort_keys=True, ensure_ascii=True) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
 
 
-def inside(box, rel):
-    if not isinstance(rel, str) or rel.startswith("/") or ".." in rel.split("/") or not rel:
-        die("a path in a case is relative to the sandbox and stays inside it: %r" % (rel,))
-    return os.path.join(box, rel)
+def check_core(core):
+    core = os.path.abspath(core)
+    if not os.path.isfile(core) or not os.access(core, os.X_OK):
+        die("not an executable core: %s" % core)
+    r = subprocess.run([core, "stamp", "--check"], capture_output=True, timeout=60)
+    if r.returncode or r.stdout.strip() != b"ok":
+        die("%s stamp --check failed: %r %r" % (core, r.stdout, r.stderr))
+    return core
 
 
-def fill(v, box):
-    if isinstance(v, str):
-        return (v.replace("@BOX@", box).replace("@PROJECT@", box + "/project").replace("@HOME@", box + "/home")
-                 .replace("@STATE@", box + "/state").replace("@TMP@", box + "/tmp"))
-    if isinstance(v, list):
-        return [fill(x, box) for x in v]
-    if isinstance(v, dict):
-        return {k: fill(x, box) for k, x in v.items()}
-    return v
+def classify(doc, path, digest, manifest=None, pin=None, synthetic=False):
+    evidence.attach(doc, evidence.admit(doc, digest, manifest, pin, synthetic))
+    result = compare.compare_case(doc["case"], doc)
+    row = compare.report_row(doc["case"]["id"], result, str(path), digest)
+    row["control"] = doc.get("meta", {}).get("control")
+    row["red_channels"] = compare.red_channels(result)
+    return row, result
 
 
-def spec_bytes(spec, box):
-    if isinstance(spec, str):
-        return fill(spec, box).encode("utf-8")
-    if "json" in spec:
-        return (json.dumps(fill(spec["json"], box), indent=2) + "\n").encode("utf-8")
-    if "lines" in spec:
-        return "".join(fill(l, box) + "\n" for l in spec["lines"]).encode("utf-8")
-    if "base64" in spec:
-        import base64
-        return base64.b64decode(spec["base64"])
-    return fill(spec.get("content", ""), box).encode("utf-8")
-
-
-def put(box, rel, spec):
-    path = inside(box, rel)
-    if isinstance(spec, dict) and "symlink" in spec:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        if os.path.lexists(path):
-            os.remove(path)
-        os.symlink(fill(spec["symlink"], box), path)
-        return
-    if isinstance(spec, dict) and spec.get("dir"):
-        os.makedirs(path, exist_ok=True)
-        return
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    if os.path.islink(path):
-        os.remove(path)
-    with open(path, "wb") as f:
-        f.write(spec_bytes(spec, box))
-
-
-def late(box, rel, spec, now):
-    """What a copy of the seed cannot carry: a mode that would stop the copy,
-    an age counted from the run, and the inode a restored file got."""
-    if not isinstance(spec, dict):
-        return
-    path = inside(box, rel)
-    if "inode_of" in spec:
-        text = open(path, "rb").read().decode("latin-1")
-
-        def ino(m):
-            p = inside(box, m.group(1))
-            try:
-                return str(os.lstat(p).st_ino)
-            except OSError:
-                return ""
-        with open(path, "wb") as f:
-            f.write(re.sub(r"@INODE\(([^)]*)\)@", ino, text).encode("latin-1"))
-    if "age" in spec:
-        t = now - float(spec["age"])
-        os.utime(path, (t, t), follow_symlinks=False)
-    if "mode" in spec and "symlink" not in spec:
-        os.chmod(path, int(str(spec["mode"]), 8))
-
-
-def apply_effect(box, ops):
-    for op in ops:
-        if "write" in op:
-            put(box, op["write"], op)
-            late(box, op["write"], op, time.time())
-        elif "remove" in op:
-            p = inside(box, op["remove"])
-            if os.path.isdir(p) and not os.path.islink(p):
-                rmtree(p)
-            elif os.path.lexists(p):
-                os.remove(p)
-        elif "mkdir" in op:
-            os.makedirs(inside(box, op["mkdir"]), exist_ok=True)
-        elif "symlink" in op:
-            put(box, op["symlink"], {"symlink": op["target"]})
-        elif "touch" in op:
-            p = inside(box, op["touch"])
-            os.makedirs(os.path.dirname(p), exist_ok=True)
-            with open(p, "ab"):
-                pass
-            os.utime(p, None)
-        elif "rename" in op:
-            os.rename(inside(box, op["rename"][0]), inside(box, op["rename"][1]))
-        elif "chmod" in op:
-            os.chmod(inside(box, op["chmod"][0]), int(str(op["chmod"][1]), 8))
-        elif "sleep" in op:
-            time.sleep(float(op["sleep"]))
-        else:
-            die("an effect does not know the operation %r" % (op,))
-
-
-def rmtree(path):
-    def onerror(func, p, _exc):
-        try:
-            os.chmod(os.path.dirname(p), 0o700)
-            if not os.path.islink(p):
-                os.chmod(p, 0o700)
-            func(p)
-        except OSError:
-            pass
-    if os.path.lexists(path):
-        shutil.rmtree(path, onerror=onerror)
-
-
-# --- the stand-in npm ------------------------------------------------------------
-
-STUB_NPM = r'''#!%(python)s -I
-# safedeps core-hook-differential: a stand-in npm. It records how it was
-# called and prints the answer its case wrote for that call. It installs
-# nothing and starts nothing.
-import json, os, sys, time
-here = os.path.dirname(os.path.abspath(__file__))
-conf = json.load(open(os.path.join(here, "npm.answers.json")))
-argv = sys.argv[1:]
-record = {"argv": argv, "cwd": os.getcwd(),
-          "env": {k: v for k, v in os.environ.items() if k not in conf["noise"]}}
-os.makedirs(conf["calls"], exist_ok=True)
-n = 0
-while True:
-    name = os.path.join(conf["calls"], "call.%%d.%%d" %% (os.getpid(), n))
-    try:
-        fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        break
-    except FileExistsError:
-        n += 1
-with os.fdopen(fd, "w") as f:
-    json.dump(record, f, sort_keys=True, indent=1)
-    f.write("\n")
-answer = conf["default"]
-for a in conf["answers"]:
-    words = a.get("argv", [])
-    if argv[:len(words)] == words:
-        answer = a
-        break
-if answer.get("sleep"):
-    time.sleep(answer["sleep"])
-sys.stdout.write(answer.get("stdout", ""))
-sys.stderr.write(answer.get("stderr", ""))
-sys.stdout.flush()
-sys.exit(answer.get("exit", 0))
-'''
-
-
-def write_stub(box, npm):
-    d = os.path.join(box, "stub")
-    os.makedirs(d, exist_ok=True)
-    conf = {"calls": os.path.join(box, "calls", "npm"), "noise": list(STUB_ENV_NOISE),
-            "answers": fill(npm.get("answers", []), box),
-            "default": fill(npm.get("default", {"exit": 1, "stderr": "stand-in npm: no answer for this call\n"}), box)}
-    with open(os.path.join(d, "npm.answers.json"), "w", encoding="utf-8") as f:
-        json.dump(conf, f, indent=1, sort_keys=True)
-        f.write("\n")
-    with open(os.path.join(d, "npm"), "w", encoding="utf-8") as f:
-        f.write(STUB_NPM % {"python": sys.executable})
-    os.chmod(os.path.join(d, "npm"), 0o755)
-
-
-# --- running -----------------------------------------------------------------------
-
-def system_path():
-    dirs = [d for d in ("/usr/bin", "/bin", "/usr/sbin", "/sbin") if os.path.isdir(d)]
-    for tool in ("bash", "jq", "awk", "sed", "grep", "find", "curl", "mktemp", "date", "stat"):
-        if any(os.access(os.path.join(d, tool), os.X_OK) for d in dirs):
-            continue
-        found = shutil.which(tool)
-        if not found:
-            die("%s is not on PATH; the hooks need it" % tool)
-        dirs.append(os.path.dirname(os.path.realpath(found)))
-    return dirs
-
-
-def descendants(pid):
-    try:
-        out = subprocess.run(["ps", "-Ao", "pid=,ppid="], capture_output=True, timeout=20).stdout.decode("latin-1")
-    except (OSError, subprocess.SubprocessError):
-        return []
-    kids = {}
-    for line in out.splitlines():
-        parts = line.split()
-        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
-            kids.setdefault(int(parts[1]), []).append(int(parts[0]))
-    order = []
-    todo = [pid]
-    while todo:
-        p = todo.pop()
-        for k in kids.get(p, []):
-            order.append(k)
-            todo.append(k)
-    return order
-
-
-def stop_tree(pid):
-    """One pid at a time, the deepest first. Never a process group."""
-    for p in reversed(descendants(pid)) + [pid]:
-        try:
-            os.kill(p, signal.SIGKILL)
-        except OSError:
-            pass
-
-
-def run_hook(argv, data, env, cwd, timeout):
-    t0 = time.time()
-    try:
-        p = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, cwd=cwd)
-    except OSError as e:
-        return {"status": "did not start: %s" % e.strerror, "out": b"", "err": b"", "secs": 0.0, "pid": 0}
-    try:
-        out, err = p.communicate(data, timeout=timeout)
-        status = "exit %d" % p.returncode if p.returncode >= 0 else "signal %d" % -p.returncode
-    except subprocess.TimeoutExpired:
-        stop_tree(p.pid)
-        out, err = p.communicate()
-        status = "no answer in %d seconds" % timeout
-    return {"status": status, "out": out, "err": err, "secs": time.time() - t0, "pid": p.pid}
-
-
-def harvest(box):
-    entries = {}
-    inodes = {}
-    for dirpath, dirnames, filenames in os.walk(box, followlinks=False):
-        for name in dirnames + filenames:
-            p = os.path.join(dirpath, name)
-            rel = os.path.relpath(p, box)
-            try:
-                st = os.lstat(p)
-            except OSError:
+def finish(rows, report_path, skipped, mode):
+    rows.sort(key=lambda r: (r["id"], r.get("control") or ""))
+    counts = dict.fromkeys(("equal", "different", "unresolved", "invalid"), 0)
+    exclusions = collections.Counter()
+    for row in rows:
+        counts[row["verdict"]] += 1
+        exclusions.update(x["exclusion"] for x in row["excluded"])
+    controls = []
+    if mode == "controls":
+        for mutation in MUTATIONS:
+            matched = [r for r in rows if r.get("control") == mutation["name"]]
+            if not matched:
                 continue
-            inodes.setdefault(st.st_ino, []).append(rel)
-            mode = "%04o" % stat.S_IMODE(st.st_mode)
-            if stat.S_ISLNK(st.st_mode):
-                entries[rel] = ("link", "", os.readlink(p).encode("utf-8", "surrogateescape"))
-            elif stat.S_ISDIR(st.st_mode):
-                entries[rel] = ("dir", mode, b"")
-            elif stat.S_ISREG(st.st_mode):
-                try:
-                    with open(p, "rb") as f:
-                        entries[rel] = ("file", mode, f.read())
-                except OSError as e:
-                    entries[rel] = ("file", mode, ("<unreadable: %s>" % e.strerror).encode())
-            else:
-                entries[rel] = ("other", mode, b"")
-    return entries, {k: sorted(v) for k, v in inodes.items()}
+            hit = [r["id"] for r in matched if r["verdict"] == "different" and
+                   any(fnmatch.fnmatchcase(ch, mutation["channel"]) for ch in r["red_channels"])]
+            controls.append({"name": mutation["name"], "channel": mutation["channel"], "detected": hit})
+        status = 0 if controls and all(c["detected"] for c in controls) else 1
+    else:
+        status = 0 if rows and counts["equal"] == len(rows) else 1
+    if counts["invalid"]:
+        status = 2
+    report = {"format": "core-hook-comparison/3", "mode": mode, "cases": rows, "counts": counts,
+              "excluded": dict(exclusions), "skipped": skipped, "controls": controls,
+              "verdict_sha256": compare.verdict_digest(rows), "comparator_sources": source_hashes(), "exit": status}
+    save_json(report_path, report)
+    print("equal {equal}, different {different}, unresolved {unresolved}, invalid {invalid}; excluded {ex}".format(**counts, ex=dict(exclusions)), flush=True)
+    for c in controls:
+        print("%s - control %s in %s" % ("ok" if c["detected"] else "not ok", c["name"], c["channel"]), flush=True)
+    print("report: %s; verdict sha256: %s" % (report_path, report["verdict_sha256"]), flush=True)
+    return status
 
 
-class Impl:
-    def __init__(self, name, pre, post, roots):
-        self.name, self.pre, self.post = name, pre, post
-        # The trees its hooks live in, the longest first.
-        self.roots = sorted(set(roots), key=len, reverse=True)
+def replay(a):
+    p = Path(a.replay).resolve()
+    index = None
+    if p.is_dir():
+        ip = p / "index.json"
+        if not ip.is_file():
+            die("bundle directory has no completed index.json: %s" % p)
+        index = evidence.strict_load(ip.read_text())
+        files = [(p / x["path"], x["sha256"]) for x in index["bundles"]]
+    else:
+        files = [(p, None)]
+    if not files:
+        die("no bundle to replay")
+    rows = []
+    for path, expected in files:
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        if expected is not None and digest != expected:
+            die("bundle digest mismatch: %s" % path)
+        doc = observe.read_bundle(str(path))
+        row, result = classify(doc, path, digest, a.evidence_manifest, a.evidence_sha256, a.synthetic)
+        rows.append(row)
+        print("%s - %s%s" % (row["verdict"], row["id"], " / " + row["control"] if row["control"] else ""), flush=True)
+    mode = index["mode"] if index else ("controls" if rows[0]["control"] else "replay")
+    report = a.report or str((p if p.is_dir() else p.parent) / "replay-report.json")
+    return finish(rows, report, index.get("skipped", []) if index else [], mode)
 
-    def argv(self, hook):
-        return self.pre if hook == "pre" else self.post
-
-
-def bash_impl(name, root):
-    for f in ("scripts/safedeps-pre-guard.sh", "scripts/safedeps-post-verify.sh"):
-        if not os.path.isfile(os.path.join(root, f)):
-            die("%s has no %s" % (root, f))
-    return Impl(name, ["bash", os.path.join(root, "scripts", "safedeps-pre-guard.sh")],
-                ["bash", os.path.join(root, "scripts", "safedeps-post-verify.sh")], [root, os.path.realpath(root)])
-
-
-def mixed(ref, cand, stages):
-    return Impl(cand.name, cand.pre if "pre" in stages else ref.pre, cand.post if "post" in stages else ref.post,
-                cand.roots + ref.roots)
-
-
-class Ctx:
-    def __init__(self, a, work):
-        self.work = work
-        self.timeout = a.timeout
-        self.sysdirs = system_path()
-        self.lang = "en_US.UTF-8" if sys.platform == "darwin" else "C.UTF-8"
-        self.provider_env = None
-        self.ref_root = ROOT
-
-
-def case_env(ctx, case, box, step):
-    dirs = list(ctx.sysdirs)
-    if case.get("npm"):
-        dirs.insert(0, os.path.join(box, "stub"))
-    env = {"PATH": ":".join(dirs), "HOME": box + "/home", "SAFEDEPS_HOME": box + "/state", "TMPDIR": box + "/tmp",
-           "LANG": case.get("lang", ctx.lang),
-           "http_proxy": CLOSED_PORT, "https_proxy": CLOSED_PORT, "HTTP_PROXY": CLOSED_PORT, "HTTPS_PROXY": CLOSED_PORT,
-           "ALL_PROXY": CLOSED_PORT, "all_proxy": CLOSED_PORT, "no_proxy": "127.0.0.1,localhost", "NO_PROXY": "127.0.0.1,localhost"}
-    providers = case.get("providers", "default")
-    if providers == "closed":
-        env.update({"SAFEDEPS_OSV_API_URL": CLOSED_PORT + "/osv/v1/query", "SAFEDEPS_OSV_BATCH_API_URL": CLOSED_PORT + "/osv/v1/querybatch",
-                    "SAFEDEPS_KEV_CATALOG_URL": CLOSED_PORT + "/kev.json", "SAFEDEPS_GHSA_API_URL": CLOSED_PORT + "/advisories",
-                    "SAFEDEPS_PROVIDER_CACHE_TTL_SECONDS": "0"})
-    elif providers == "fixture":
-        env.update(ctx.provider_env)
-    if case.get("family", "verdict") == "verdict" and case["_long"]:
-        env["SAFEDEPS_BUDGET_DISABLED"] = "1"
-    env.update(fill(case.get("env", {}), box))
-    if step is not None:
-        env.update(fill(step.get("env", {}), box))
-    return env
-
-
-def build_seed(ctx, case, box, seed):
-    """The seed, made once in the sandbox and kept as a copy both runs start from."""
-    rmtree(box)
-    rmtree(seed)
-    for d in BOX_DIRS:
-        if d != "state":
-            os.makedirs(os.path.join(box, d))
-    for rel, spec in case.get("files", {}).items():
-        put(box, rel, spec)
-    if case.get("npm"):
-        write_stub(box, case["npm"])
-    for argv in case.get("seed_cli", []):
-        env = case_env(ctx, case, box, None)
-        r = subprocess.run(["bash", os.path.join(ctx.ref_root, "bin", "safedeps")] + fill(argv, box), capture_output=True,
-                           env=env, cwd=box + "/project", timeout=120)
-        allowed = case.get("seed_cli_exit", [0])
-        if r.returncode not in allowed:
-            return "the seed command safedeps %s ended with %d: %s" % (" ".join(argv), r.returncode, r.stderr.decode("latin-1")[-400:])
-    shutil.copytree(box, seed, symlinks=True)
-    return None
-
-
-def restore(case, box, seed):
-    rmtree(box)
-    shutil.copytree(seed, box, symlinks=True)
-    now = time.time()
-    for rel, spec in case.get("files", {}).items():
-        late(box, rel, spec, now)
-
-
-def step_payload(s, command):
-    """The hook input of a step written as a command: the fields both engines
-    send, in the order they send them. Codex adds turn_id and model."""
-    p = {"session_id": "core-hook-differential", "hook_event_name": "PreToolUse" if s["hook"] == "pre" else "PostToolUse",
-         "tool_name": s.get("tool", "Bash"), "tool_input": {"command": command}}
-    if "cwd" not in s or s["cwd"] is not None:
-        p["cwd"] = s.get("cwd", "@PROJECT@")
-    if s.get("id"):
-        p["tool_use_id"] = s["id"]
-    if s.get("engine") == "codex":
-        p["turn_id"] = "turn-1"
-        p["model"] = "codex-test"
-    if s["hook"] == "post":
-        if s.get("failed"):
-            p["hook_event_name"] = "PostToolUseFailure"
-            p["error"] = "Command failed with exit code 1"
-        else:
-            p["tool_response"] = {"stdout": "", "stderr": "", "interrupted": False}
-    p.update(s.get("payload_extra", {}))
-    return p
-
-
-def updated_command(out):
-    try:
-        doc = json.loads(out.decode("utf-8"))
-        cmd = doc["hookSpecificOutput"]["updatedInput"]["command"]
-        return cmd if isinstance(cmd, str) else None
-    except (ValueError, KeyError, TypeError):
-        return None
-
-
-def run_side(ctx, case, box, seed, impl):
-    restore(case, box, seed)
-    trees = [harvest(box)]
-    steps = []
-    sent = {}
-    for k, s in enumerate(case["steps"]):
-        rec = None
-        if "hook" in s:
-            if "payload_raw" in s:
-                data = fill(s["payload_raw"], box).encode("utf-8", "surrogateescape")
-            else:
-                src = s.get("command_from_step")
-                if "payload" in s:
-                    payload = fill(s["payload"], box)
-                else:
-                    payload = fill(step_payload(s, s.get("command", "")), box)
-                if src is not None:
-                    # The command the tool ran is the one this side's pre-guard
-                    # wrote, where it wrote one.
-                    cmd = updated_command(steps[src]["out"])
-                    if cmd is None:
-                        cmd = sent[src]
-                    payload.setdefault("tool_input", {})["command"] = cmd
-                sent[k] = (payload.get("tool_input") or {}).get("command", "") if isinstance(payload, dict) else ""
-                data = json.dumps(payload, ensure_ascii=False).encode("utf-8", "surrogateescape")
-            cwd = s.get("proc_cwd")
-            if cwd is None:
-                cwd = s.get("cwd") or (s.get("payload") or {}).get("cwd") or "@PROJECT@"
-            cwd = fill(cwd, box)
-            if not os.path.isdir(cwd):
-                cwd = box
-            rec = run_hook(impl.argv(s["hook"]), data, case_env(ctx, case, box, s), cwd, ctx.timeout)
-            rec["hook"] = s["hook"]
-        else:
-            apply_effect(box, s["effect"])
-        steps.append(rec)
-        trees.append(harvest(box))
-    return {"steps": steps, "trees": trees}
-
-
-# --- the masks -----------------------------------------------------------------------
-
-SNAP_NAME = re.compile(r"^\.?([0-9]+_[0-9a-f]+-[0-9]+(?:-[0-9]+)*)_")
-SNAP_SHAPE = re.compile(r"(?<![0-9A-Za-z])[0-9]{9,11}_[0-9a-f]{32}-[0-9]+(?![0-9])")
-ISO = re.compile(r"(?<![0-9])20[0-9]{2}-[01][0-9]-[0-3][0-9]T[0-2][0-9]:[0-5][0-9]:[0-6][0-9]Z")
-EPOCH_FIELD = re.compile(r'("(?:%s)"\s*:\s*"?)([0-9]{9,11})(?![0-9])' % "|".join(EPOCH_KEYS))
-PID_AFTER_SNAP = re.compile(r"(<snap#[0-9]+>-)([0-9]+)(?![0-9])")
-PID_FIELD = re.compile(r'("pid"\s*:\s*"?)([0-9]+)(?![0-9])')
-PID_PROSE = re.compile(r"(\bpid )([0-9]+)(?![0-9])")
-WITHHELD_NAME = re.compile(r"(^|/)([0-9]{9,11})-([0-9]+)-([A-Za-z0-9]{6})\.json$")
-MKTEMP = re.compile(r"(safedeps-[a-z-]+\.|\.compact\.)([A-Za-z0-9]{6})(?![A-Za-z0-9])")
-HIDDEN_TMP_NAME = re.compile(r"(/\.[^/]*\.)([A-Za-z0-9]{6})(?=/|$)")
-INODES_OBJ = re.compile(r'"inodes"\s*:\s*\{[^{}]*\}')
-CLOCKS_OBJ = re.compile(r'"clocks"\s*:\s*\{[^{}]*\}')
-CLOCK = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9:]{8}(?:\.[0-9]+)? [+-][0-9]{4}|[0-9]{9,11}\.[0-9]+")
-BASH_DIAG = re.compile(r"^(?:\S*/)?[A-Za-z0-9_.-]+\.sh: line [0-9]+: .*$|^bash: .*$")
-
-
-class Canon:
-    """One side's record of a case, in the form the two sides are compared in."""
-
-    def __init__(self, case, box, run, roots):
-        self.case, self.box, self.run, self.roots = case, box, run, roots
-        self.counts = dict.fromkeys(MASKS, 0)
-        self.diag = []
-        self.noted = []
-        trees = run["trees"]
-        self.snaps = {}
-        seeded = self.snapshot_ids(trees[0][0])
-        for b in range(1, len(trees)):
-            for sid in sorted(self.snapshot_ids(trees[b][0]) - seeded - set(self.snaps)):
-                self.snaps[sid] = len(self.snaps) + 1
-        self.snap_re = None
-        if self.snaps:
-            self.snap_re = re.compile("(?:%s)(?![0-9])" % "|".join(re.escape(s) for s in sorted(self.snaps, key=len, reverse=True)))
-        self.pids = {}
-        for k, s in enumerate(run["steps"]):
-            if s and s["pid"]:
-                self.pids[str(s["pid"])] = k
-
-    @staticmethod
-    def snapshot_ids(entries):
-        ids = set()
-        for rel in entries:
-            if rel.startswith("state/snapshots/") and rel.count("/") == 2:
-                m = SNAP_NAME.match(rel.rsplit("/", 1)[1])
-                if m:
-                    ids.add(m.group(1))
-        return ids
-
-    def bump(self, name, n=1):
-        self.counts[name] += n
-
-    def pid_token(self, value):
-        self.bump("pid")
-        return "<pid:step%d>" % self.pids[value] if value in self.pids else "<pid:other>"
-
-    def text(self, t):
-        if self.snap_re:
-            def snap(m):
-                self.bump("snapshot-id")
-                return "<snap#%d>" % self.snaps[m.group(0)]
-            t = self.snap_re.sub(snap, t)
-
-        def unlisted(m):
-            self.bump("snapshot-id-unlisted")
-            return "<snap?>"
-        t = SNAP_SHAPE.sub(unlisted, t)
-        for rx in (PID_AFTER_SNAP, PID_FIELD, PID_PROSE):
-            t = rx.sub(lambda m: m.group(1) + self.pid_token(m.group(2)), t)
-
-        def epoch(m):
-            self.bump("epoch")
-            return m.group(1) + "<epoch>"
-        t = EPOCH_FIELD.sub(epoch, t)
-
-        def iso(_m):
-            self.bump("iso-utc")
-            return "<iso>"
-        t = ISO.sub(iso, t)
-
-        def tmp(m):
-            self.bump("mktemp")
-            return m.group(1) + "<tmp>"
-        t = MKTEMP.sub(tmp, t)
-        t = t.replace(self.box, "@BOX@")
-        for root in self.roots:
-            if root in t:
-                self.bump("tree-root", t.count(root))
-                t = t.replace(root, "@TREE@")
-        return t
-
-    def name(self, rel):
-        def withheld(m):
-            self.bump("epoch")
-            self.bump("mktemp")
-            return "%s<epoch>-%s-<tmp>.json" % (m.group(1), self.pid_token(m.group(3)))
-        def hidden(m):
-            self.bump("mktemp")
-            return m.group(1) + "<tmp>"
-        if rel.startswith("state/npm-withheld/"):
-            rel = WITHHELD_NAME.sub(withheld, rel)
-        rel = self.text(rel)
-        if rel.startswith("state/"):
-            rel = HIDDEN_TMP_NAME.sub(hidden, rel)
-        return rel
-
-    def written_at(self, rel, b):
-        """The first boundary since which this entry holds the bytes it holds at b."""
-        trees = self.run["trees"]
-        while b > 0 and trees[b - 1][0].get(rel) == trees[b][0][rel]:
-            b -= 1
-        return b
-
-    def inode_text(self, rel, b, t):
-        b0 = self.written_at(rel, b)
-        spec = self.case.get("files", {}).get(rel)
-        if b0 == 0 and not (isinstance(spec, dict) and "inode_of" in spec):
-            return t  # as seeded: the same bytes on both sides, and no file's inode
-        tables = [self.run["trees"][x][1] for x in ([b0 - 1, b0] if b0 > 0 else [0])]
-
-        def one(m):
-            for table in tables:
-                if int(m.group(0)) in table:
-                    self.bump("inode")
-                    return "<ino:%s>" % table[int(m.group(0))][0]
-            return m.group(0)
-        return INODES_OBJ.sub(lambda m: re.sub(r'(?<=[":|])[0-9]+(?=["|])', one, m.group(0)), t)
-
-    def clock_text(self, t):
-        def one(_m):
-            self.bump("clock")
-            return "<clock>"
-        return CLOCKS_OBJ.sub(lambda m: CLOCK.sub(one, m.group(0)), t)
-
-    def stderr(self, k, raw):
-        kept = []
-        for line in raw.decode("latin-1").split("\n"):
-            if BASH_DIAG.match(line):
-                self.bump("bash-diagnostic")
-                self.diag.append("step %d: %s" % (k, self.text(line)))
-            else:
-                kept.append(line)
-        return self.text("\n".join(kept))
-
-    def tree(self, b):
-        entries = self.run["trees"][b][0]
-        deadline = self.case.get("family") == "deadline"
-        rows = []
-        for rel, (kind, mode, data) in entries.items():
-            if deadline and rel.startswith("tmp/"):
-                self.bump("deadline-tmp")
-                self.noted.append("left in TMPDIR, not compared: %s" % self.name(rel))
-                continue
-            body = data.decode("latin-1")
-            if kind == "file" and rel.startswith("state/pending/") and rel.endswith(".json"):
-                body = self.clock_text(self.inode_text(rel, b, body))
-            body = self.text(body)
-            name = self.name(rel)
-            if rel.startswith("calls/") and kind == "file":
-                self.bump("stub-call-name")
-                try:
-                    rec = json.loads(body)
-                    key = json.dumps([rec.get("argv"), rec.get("cwd")], sort_keys=True)
-                except ValueError:
-                    key = body
-                name = "%s/%s" % (rel.rsplit("/", 1)[0], hashlib.sha1(key.encode("latin-1", "replace")).hexdigest()[:12])
-            head = {"dir": "dir %s" % mode, "file": "file %s" % mode, "link": "link", "other": "other %s" % mode}[kind]
-            rows.append((name, self.written_at(rel, b), body, rel, head))
-        rows.sort()
-        out = []
-        seen = {}
-        for name, _since, body, _rel, head in rows:
-            seen[name] = seen.get(name, 0) + 1
-            key = name if seen[name] == 1 else "%s #%d" % (name, seen[name])
-            out.append((key, head + ("\n" + body if head.startswith(("file", "link")) else "")))
-        return out
-
-    def document(self):
-        doc = []
-        for k, s in enumerate(self.run["steps"]):
-            if s is None:
-                continue
-            p = "step %d %s" % (k, s["hook"])
-            doc.append((p + " status", s["status"]))
-            doc.append((p + " stdout", self.text(s["out"].decode("latin-1"))))
-            doc.append((p + " stderr", self.stderr(k, s["err"])))
-            for key, body in self.tree(k + 1):
-                doc.append(("%s tree %s" % (p, key), body))
-        return doc
-
-
-def compare(a_doc, b_doc):
-    a, b = dict(a_doc), dict(b_doc)
-    diffs = []
-    for key in list(dict.fromkeys([k for k, _ in a_doc] + [k for k, _ in b_doc])):
-        if a.get(key) != b.get(key):
-            diffs.append(key)
-    return diffs
-
-
-def channel(key):
-    m = re.match(r"step [0-9]+ (?:pre|post) (status|stdout|stderr|tree (.*))$", key)
-    if not m:
-        return key
-    return m.group(1) if not m.group(2) else "tree:" + re.sub(r" #[0-9]+$", "", m.group(2))
-
-
-def show_diff(key, a, b, limit=24):
-    if a is None or b is None:
-        return ["  %s: only in the %s" % (key, "reference" if b is None else "candidate")]
-    lines = list(difflib.unified_diff(a.split("\n"), b.split("\n"), "reference", "candidate", lineterm="", n=1))
-    out = ["  %s:" % key] + ["    " + l[:400] for l in lines[2:limit + 2]]
-    if len(lines) > limit + 2:
-        out.append("    ... %d more lines" % (len(lines) - limit - 2))
-    return out
-
-
-# --- what the reference has to do in a case -----------------------------------------------
-
-def decision_of(out):
-    try:
-        doc = json.loads(out.decode("utf-8"))
-        return doc.get("hookSpecificOutput", {}).get("permissionDecision") or "none"
-    except (ValueError, AttributeError):
-        return "none"
-
-
-def unmet(case, box, run):
-    out = []
-    for k, s in enumerate(case["steps"]):
-        got = run["steps"][k]
-        if got is None:
-            continue
-        exp = s.get("expect", {})
-        entries = run["trees"][k + 1][0]
-        want_status = exp.get("status", "exit 0")
-        if got["status"] != want_status:
-            out.append("step %d: the reference ended with %s, the case says %s" % (k, got["status"], want_status))
-        if "decision" in exp and decision_of(got["out"]) != exp["decision"]:
-            out.append("step %d: the reference decided %s, the case says %s" % (k, decision_of(got["out"]), exp["decision"]))
-        for field, raw in (("stdout_has", got["out"]), ("stderr_has", got["err"])):
-            for needle in exp.get(field, []):
-                if fill(needle, box) not in raw.decode("utf-8", "replace"):
-                    out.append("step %d: the reference's %s lacks %r" % (k, field[:-4], needle))
-        if exp.get("stdout_empty") and got["out"]:
-            out.append("step %d: the reference printed to stdout, the case says it prints nothing" % k)
-        for pat in exp.get("tree_has", []):
-            if not any(fnmatch.fnmatchcase(rel, pat) for rel in entries):
-                out.append("step %d: the reference left nothing named %s" % (k, pat))
-        for pat in exp.get("tree_lacks", []):
-            hit = [rel for rel in entries if fnmatch.fnmatchcase(rel, pat)]
-            if hit:
-                out.append("step %d: the reference left %s, the case says nothing is named %s" % (k, hit[0], pat))
-        for rel, needles in exp.get("file_has", {}).items():
-            body = entries.get(rel, ("", "", b""))[2].decode("utf-8", "replace")
-            for needle in needles:
-                if fill(needle, box) not in body:
-                    out.append("step %d: the reference's %s lacks %r" % (k, rel, needle))
-    return out
-
-
-def reach(run):
-    """What a case's reference run touched, for the summary."""
-    got = set()
-    for k, s in enumerate(run["steps"]):
-        if s is None:
-            continue
-        got.add("%s %s" % (s["hook"], decision_of(s["out"]) if s["hook"] == "pre" else ("message" if s["out"].strip() else "silent")))
-        if updated_command(s["out"]) is not None:
-            got.add("pre rewrite")
-        if s["err"].strip():
-            got.add("%s stderr" % s["hook"])
-    last = run["trees"][-1][0]
-    seen = set()
-    for entries, _ in run["trees"][1:]:
-        seen.update(entries)
-    for label, pat in (("snapshot", "state/snapshots/*_meta.json"), ("call record", "state/pending/id-*.json"),
-                       ("keyed record", "state/pending/*__*.json"), ("backstop entry", "state/pending/backstop/*.json"),
-                       ("reorg.log", "state/reorg.log"), ("advisory.log", "state/advisory.log"),
-                       ("confirmed snapshot", "state/confirmed_*"), ("rollback incident", "state/rollback-incidents/*"),
-                       ("npm-withheld record", "state/npm-withheld/*"), ("npm-observed record", "state/npm-observed/*"),
-                       ("stand-in npm call", "calls/npm/*"), ("ledger entry", "state/approved-specs/*")):
-        if any(fnmatch.fnmatchcase(rel, pat) for rel in seen):
-            got.add(label)
-    first = run["trees"][0][0]
-    if any(rel.startswith("project/") and last.get(rel) != first.get(rel) for rel in set(first) | set(last)):
-        got.add("project changed")
-    return got
-
-
-# --- the controls ------------------------------------------------------------------------
-
-# One line of the reference changed per copy. `channel` is where the copy has
-# to turn red: a control that is red somewhere else has not shown that its
-# channel is compared. `cases` are the cases that reach the line; a control
-# runs those and no others.
-MUTATIONS = [
-    {"name": "exit-status", "cases": ["pre-npm-install-codex"], "file": "scripts/safedeps-pre-guard.sh", "channel": "status",
-     "old": "# Allow the command to proceed — PostToolUse will verify the result\nexit 0\n",
-     "new": "# Allow the command to proceed — PostToolUse will verify the result\nexit 3\n"},
-    {"name": "stdout-bytes", "cases": ["pre-npm-install", "pre-npm-ci-tree"], "file": "scripts/safedeps-pre-guard.sh", "channel": "stdout",
-     "old": """      '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"allow",updatedInput:{command:$command}}}'\n    exit 0\n""",
-     "new": """      '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"allow",updatedInput:{command:($command + " ")}}}'\n    exit 0\n"""},
-    {"name": "advisory-to-stderr", "cases": ["pre-npm-install"], "file": "scripts/safedeps-pre-guard.sh", "channel": "stderr",
-     "old": """  printf '%s\\t%s\\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" >> "${GUARD_DIR}/advisory.log" 2>/dev/null || true\n""",
-     "new": """  printf '%s\\t%s\\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" >&2 || true\n"""},
-    {"name": "advisory-wording", "cases": ["pre-npm-install-no-call-id"], "file": "scripts/safedeps-pre-guard.sh", "channel": "tree:state/advisory.log",
-     "old": """  CALL_ID_WHY="this hook's input names no tool_use_id"\n""",
-     "new": """  CALL_ID_WHY="this hook's input names no tool use id"\n"""},
-    {"name": "time-format", "cases": ["pre-npm-install"], "file": "scripts/safedeps-pre-guard.sh", "channel": "tree:state/advisory.log",
-     "old": """  printf '%s\\t%s\\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" >> "${GUARD_DIR}/advisory.log" 2>/dev/null || true\n""",
-     "new": """  printf '%s\\t%s\\n' "$(date -u +%Y-%m-%dT%H:%MZ)" "$1" >> "${GUARD_DIR}/advisory.log" 2>/dev/null || true\n"""},
-    {"name": "record-field", "cases": ["pre-npm-install"], "file": "scripts/safedeps-pre-guard.sh", "channel": "tree:state/snapshots/<snap#1>_meta.json",
-     "old": '  "record": 2,\n', "new": '  "record": 3,\n'},
-    {"name": "file-mode", "cases": ["pre-npm-install"], "file": "scripts/safedeps-pre-guard.sh", "channel": "tree:state/advisory.log",
-     "old": 'umask 077\nmkdir -p "${GUARD_DIR}" "${SNAPSHOT_DIR}"\n', "new": 'umask 022\nmkdir -p "${GUARD_DIR}" "${SNAPSHOT_DIR}"\n'},
-    {"name": "wrong-inode", "cases": ["pre-npm-ci-tree"], "file": "scripts/safedeps-pre-guard.sh", "channel": "tree:state/pending/id-*.json",
-     "old": """    --arg lock "$(guard_file_inode "${PROJECT_DIR}/package-lock.json")" \\\n""",
-     "new": """    --arg lock "$(guard_file_inode "${PROJECT_DIR}/package.json")" \\\n"""},
-    {"name": "snapshot-named", "cases": ["pre-npm-install"], "file": "scripts/safedeps-pre-guard.sh", "channel": "tree:state/pending/id-*.json",
-     "old": """  '{snapshot_id: $sid, project_dir: $pdir, dir_hash: $dhash, project_dir_from: $from,\n""",
-     "new": """  '{snapshot_id: ($sid + "-1"), project_dir: $pdir, dir_hash: $dhash, project_dir_from: $from,\n"""},
-    {"name": "tmp-left-behind", "cases": ["pre-npm-install"], "file": "scripts/safedeps-pre-guard.sh", "channel": "tree:tmp/safedeps-lex.<tmp>",
-     "old": """trap 'release_state_lock; rm -f "${SAFEDEPS_SCAN_MARK:-}"; rm -rf "${SAFEDEPS_LEX_CACHE:-}"' EXIT\n""",
-     "new": """trap 'release_state_lock; rm -f "${SAFEDEPS_SCAN_MARK:-}"' EXIT\n"""},
-    {"name": "post-log-entry", "cases": ["npm-install-no-trace"], "file": "scripts/safedeps-post-verify.sh", "channel": "tree:state/advisory.log",
-     "old": """  printf '%s\\t%s\\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" >> "${GUARD_DIR}/advisory.log" 2>/dev/null || true\n""",
-     "new": """  printf '%s\\t%s\\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1 " >> "${GUARD_DIR}/advisory.log" 2>/dev/null || true\n"""},
-]
-
-
-def mutant_tree(ctx, m):
-    src = os.path.join(ctx.ref_root, m["file"])
-    with open(src, "rb") as f:
-        text = f.read()
-    old, new = m["old"].encode("utf-8"), m["new"].encode("utf-8")
-    if text.count(old) != 1:
-        die("control %s: its line is not in %s exactly once (found %d times)" % (m["name"], m["file"], text.count(old)))
-    root = os.path.join(ctx.work, "mutant-" + m["name"])
-    os.makedirs(root)
-    for d in ("scripts", "lib", "bin"):
-        shutil.copytree(os.path.join(ctx.ref_root, d), os.path.join(root, d), symlinks=True,
-                        ignore=shutil.ignore_patterns("measure", "test", "ci", "native"))
-    with open(os.path.join(root, m["file"]), "wb") as f:
-        f.write(text.replace(old, new))
-    return root
-
-
-# --- the fixture provider ------------------------------------------------------------------
 
 def start_provider(ctx):
     node = shutil.which("node")
@@ -966,9 +157,8 @@ def start_provider(ctx):
     d = os.path.join(ctx.work, "provider")
     os.makedirs(d)
     port_file, state_file = os.path.join(d, "port"), os.path.join(d, "state.json")
-    with open(state_file, "w") as f:
-        f.write('{"vulnerable":[]}\n')
-    p = subprocess.Popen([node, os.path.join(ROOT, "scripts", "test", "fixture-provider.mjs"), port_file, state_file],
+    Path(state_file).write_text('{"vulnerable":[]}\n')
+    p = subprocess.Popen([node, os.path.join(ROOT, "scripts/test/fixture-provider.mjs"), port_file, state_file],
                          cwd=d, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     for _ in range(100):
         if os.path.exists(port_file) and os.path.getsize(port_file):
@@ -976,261 +166,152 @@ def start_provider(ctx):
         time.sleep(0.1)
     else:
         p.kill()
-        die("the fixture provider did not start")
-    base = "http://127.0.0.1:%s" % open(port_file).read().strip()
+        p.wait()
+        die("fixture provider did not start")
+    base = "http://127.0.0.1:%s" % Path(port_file).read_text().strip()
     ctx.provider_env = {"SAFEDEPS_OSV_API_URL": base + "/osv/v1/query", "SAFEDEPS_OSV_BATCH_API_URL": base + "/osv/v1/querybatch",
                         "SAFEDEPS_KEV_CATALOG_URL": base + "/kev.json", "SAFEDEPS_GHSA_API_URL": base + "/advisories",
                         "SAFEDEPS_PROVIDER_CACHE_TTL_SECONDS": "0"}
-    ctx.provider_state = state_file
     return p
 
 
-# --- one case ---------------------------------------------------------------------------
-
-class CaseRun:
-    """A case's seed and its reference run, kept for every comparison of the case."""
-
-    def __init__(self, ctx, case, index):
-        self.ctx, self.case = ctx, case
-        self.dir = os.path.join(ctx.work, "c%04d" % index)
-        os.makedirs(self.dir)
-        self.box = os.path.join(self.dir, "box")
-        self.seed = os.path.join(self.dir, "seed")
-        self.error = build_seed(ctx, case, self.box, self.seed)
-        self.ref = None
-        self.ref_canon = None
-        self.ref_doc = None
-        self.unmet = []
-        self.reach = set()
-
-    def reference(self, impl):
-        if self.error:
-            return
-        self.ref = run_side(self.ctx, self.case, self.box, self.seed, impl)
-        self.ref_canon = Canon(self.case, self.box, self.ref, impl.roots)
-        self.ref_doc = self.ref_canon.document()
-        self.unmet = unmet(self.case, self.box, self.ref)
-        self.reach = reach(self.ref)
-
-    def against(self, impl):
-        run = run_side(self.ctx, self.case, self.box, self.seed, impl)
-        canon = Canon(self.case, self.box, run, impl.roots)
-        doc = canon.document()
-        return compare(self.ref_doc, doc), doc, canon, run
-
-    def close(self):
-        rmtree(self.box)
-        rmtree(self.seed)
-
-
-def uptime():
-    try:
-        return subprocess.run(["uptime"], capture_output=True, timeout=10).stdout.decode("latin-1").strip()
-    except (OSError, subprocess.SubprocessError):
-        return "uptime did not answer"
-
-
 def main():
-    ap = argparse.ArgumentParser(add_help=True)
-    ap.add_argument("--core", default="")
-    ap.add_argument("--cand-root", default="")
-    ap.add_argument("--control", action="store_true")
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    for name in ("core", "cand-root", "only", "tags", "report", "replay", "native-archive",
+                 "native-build-receipt", "native-build-sha256", "evidence-manifest", "evidence-sha256"):
+        ap.add_argument("--" + name, default="")
+    ap.add_argument("--bundles", "--dump", dest="bundles", default="")
     ap.add_argument("--stages", default="pre,post")
     ap.add_argument("--cases", action="append", default=[])
-    ap.add_argument("--only", default="")
-    ap.add_argument("--tags", default="")
-    ap.add_argument("--jobs", type=int, default=1)
-    ap.add_argument("--report", default="")
-    ap.add_argument("--dump", default="")
-    ap.add_argument("--list", action="store_true")
-    ap.add_argument("--fixture-provider", action="store_true")
+    ap.add_argument("--jobs", type=int, choices=(1, 2), default=1)
     ap.add_argument("--timeout", type=int, default=90)
+    for name in ("control", "list", "fixture-provider", "synthetic"):
+        ap.add_argument("--" + name, action="store_true")
     a = ap.parse_args()
+    if a.synthetic and (a.evidence_manifest or a.evidence_sha256):
+        die('synthetic replay cannot select a live evidence manifest')
+    if a.replay:
+        if a.core or a.cand_root or a.control or a.cases or a.only or a.tags or a.native_archive or a.native_build_receipt or a.native_build_sha256:
+            die("--replay consumes saved bundles alone; collection options cannot be combined with it")
+        return replay(a)
+    if a.synthetic or a.evidence_manifest or a.evidence_sha256:
+        die('--synthetic and evidence selection flags are replay-only')
     if sum(bool(x) for x in (a.core, a.cand_root, a.control)) > 1:
-        die("--core, --cand-root and --control are one at a time")
-    stages = [s for s in a.stages.split(",") if s]
+        die("--core, --cand-root, --control are mutually exclusive")
+    if (a.native_archive or a.native_build_receipt or a.native_build_sha256) and not a.core:
+        die('native archive/build options require --core')
+    if bool(a.native_build_receipt) != bool(a.native_build_sha256):
+        die('select both --native-build-receipt and --native-build-sha256')
+    if a.native_archive and not a.native_build_receipt:
+        die('--native-archive requires an independently selected builder receipt')
+    stages = a.stages.split(",")
     if not stages or any(s not in ("pre", "post") for s in stages):
         die("--stages names pre, post or both")
-    jobs = max(1, min(a.jobs, 2))
-
-    cases = load_cases(a.cases or [DEFAULT_CASES])
+    cases = load_cases(a.cases or [DEFAULT_CASES], engage_bytes(ROOT))
     if a.only:
-        want = a.only.split(",")
-        missing = [w for w in want if w not in [c["id"] for c in cases]]
+        ids = set(a.only.split(","))
+        missing = ids - {c["id"] for c in cases}
         if missing:
-            die("no case named %s" % ", ".join(missing))
-        cases = [c for c in cases if c["id"] in want]
+            die("unknown cases: %s" % sorted(missing))
+        cases = [c for c in cases if c["id"] in ids]
     if a.tags:
-        want = set(a.tags.split(","))
-        cases = [c for c in cases if want & set(c.get("tags", []))]
+        cases = [c for c in cases if set(a.tags.split(",")) & set(c.get("tags", []))]
     if a.list:
         for c in cases:
             print("%s\t%s\t%s" % (c["id"], ",".join(c.get("tags", [])), c.get("note", "")))
         return 0
     if a.control:
-        named = set(c for m in MUTATIONS for c in m.get("cases", []))
-        missing = sorted(named - set(c["id"] for c in cases))
-        if missing:
-            die("a control names a case that is not in the corpus: %s" % ", ".join(missing))
-        cases = [c for c in cases if c["id"] in named]
-    skipped = []
-    if not a.fixture_provider:
-        skipped = [c["id"] for c in cases if c.get("providers") == "fixture"]
-        cases = [c for c in cases if c.get("providers") != "fixture"]
+        cases = [c for c in cases if any(c["id"] in m["cases"] for m in MUTATIONS)]
+    skipped = [c["id"] for c in cases if c.get("providers") == "fixture" and not a.fixture_provider]
+    cases = [c for c in cases if c["id"] not in skipped]
     if not cases:
         die("no case to run")
-
+    out = Path(a.bundles).resolve() if a.bundles else Path(tempfile.mkdtemp(prefix="core-hook-bundles."))
+    out.mkdir(parents=True, exist_ok=True)
+    if list(out.glob("*.bundle.json")) or (out / "index.json").exists():
+        die("bundle directory already holds a run: %s" % out)
     work = os.path.realpath(tempfile.mkdtemp(prefix="safedeps-core-hook."))
-    ctx = Ctx(a, work)
-    provider = start_provider(ctx) if a.fixture_provider else None
-    ref = bash_impl("reference", ROOT)
-    mode = "the reference again"
-    cand = ref
+    dirs = observe.system_path()
+    ctx = SimpleNamespace(work=work, ref_root=ROOT, sysdirs=dirs, real_date=observe.first_on(dirs, "date"),
+                          timeout=a.timeout, lang="C", provider_env={})
+    ctx.collection = evidence.Collection(out)
+    provider = None
+    rows, receipts = [], []
+    ref = observe.bash_impl("reference", ROOT)
+    cand, mode = ref, "bash-self"
     if a.core:
-        core = os.path.abspath(a.core)
-        if not os.access(core, os.X_OK):
-            die("%s is not an executable file" % core)
-        try:
-            r = subprocess.run([core, "stamp", "--check"], capture_output=True, timeout=60)
-        except (OSError, subprocess.SubprocessError) as e:
-            die("%s stamp --check did not run: %s" % (core, e))
-        if r.returncode != 0 or r.stdout.decode("latin-1").strip() != "ok":
-            die("%s stamp --check did not print ok (exit %d): %s %s\nno case was run: every hook of this binary would deny for the same reason"
-                % (core, r.returncode, r.stdout.decode("latin-1").strip(), r.stderr.decode("latin-1").strip()))
-        # The binary's tree is three directories up: <tree>/bin/native/<os>-<arch>/safedeps-core.
-        core_tree = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(core))))
-        cand = mixed(ref, Impl("core", [core, "pre"], [core, "post"], [core_tree, os.path.realpath(core_tree)]), stages)
-        mode = "%s, stages %s" % (core, ",".join(stages))
+        core = check_core(a.core)
+        tree = str(Path(a.native_archive).resolve()) if a.native_archive else str(Path(core).parent.parent.parent.parent)
+        implementation = observe.core_impl(core, tree)
+        if a.native_build_receipt:
+            receipt = evidence.accepted_build(tree, core, a.native_build_receipt, a.native_build_sha256)
+            for hook in implementation.hooks.values():
+                hook['native_receipt'] = receipt
+        cand = observe.mixed(ref, implementation, stages)
+        mode = "core:" + ",".join(stages)
     elif a.cand_root:
-        cand = mixed(ref, bash_impl("candidate", os.path.abspath(a.cand_root)), stages)
-        mode = "the bash hooks of %s, stages %s" % (os.path.abspath(a.cand_root), ",".join(stages))
+        cand = observe.mixed(ref, observe.bash_impl("candidate", os.path.abspath(a.cand_root)), stages)
+        mode = "bash-candidate:" + ",".join(stages)
     elif a.control:
         mode = "controls"
+    print("%d cases, jobs %d; bundles: %s" % (len(cases), a.jobs, out), flush=True)
+    meta = {"collection_kind": "live", "collector_sources": source_hashes(), "reference": ref.describe(), "mode": mode,
+            "python": sys.version, "platform": sys.platform}
+    mutants = [(m, observe.bash_impl(m["name"], mutant_tree(ctx, m))) for m in MUTATIONS
+               if a.control and any(c["id"] in m["cases"] for c in cases)]
 
-    print("core-hook-differential: %d cases against %s, jobs %d" % (len(cases), mode, jobs), flush=True)
-    print("start: %s" % uptime(), flush=True)
-    if skipped:
-        print("not run, %d cases that need --fixture-provider: %s" % (len(skipped), ", ".join(skipped)), flush=True)
+    def one(item):
+        ix, case = item
+        d = os.path.join(work, "c%04d" % ix)
+        os.makedirs(d)
+        box, seed, obs = [os.path.join(d, n) for n in ("box", "seed", "observations")]
+        error = observe.build_seed(ctx, case, box, seed, obs)
+        if error:
+            die("%s: %s" % (case["id"], error))
+        reference = observe.run_side(ctx, case, box, seed, obs, ref, "reference")
+        result_rows, result_receipts = [], []
+        targets = [(m["name"], impl) for m, impl in mutants if case["id"] in m["cases"]] if a.control else [(None, cand)]
+        for name, impl in targets:
+            candidate = observe.run_side(ctx, case, box, seed, obs, impl, "candidate")
+            document = observe.bundle_doc(case, {"reference": reference, "candidate": candidate}, dict(meta, control=name))
+            path = out / (case["id"] + ("--" + name if name else "") + ".bundle.json")
+            digest = observe.write_bundle(str(path), document)
+            ctx.collection.bundle_written(path, document)
+            result_receipts.append({"path": path.name, "sha256": digest})
+            print('collected - %s%s' % (case['id'], ' / ' + name if name else ''), flush=True)
 
-    lock = threading.Lock()
-    report = {"mode": mode, "cases": [], "controls": []}
-    red = []
-    totals = dict.fromkeys(MASKS, 0)
-    reached = {}
-    hook_steps = [0]
-    diag_cases = [0]
+        observe.rmtree(d)
+        return result_rows, result_receipts
 
-    def one(ix_case):
-        ix, case = ix_case
-        cr = CaseRun(ctx, case, ix)
-        row = {"id": case["id"], "different": [], "unmet": [], "error": cr.error, "diagnostics": [], "noted": []}
-        lines = []
-        mutant_rows = []
-        if cr.error:
-            lines.append("not ok - %s: %s" % (case["id"], cr.error))
-        else:
-            cr.reference(ref)
-            row["unmet"] = cr.unmet
-            row["secs"] = [round(s["secs"], 2) for s in cr.ref["steps"] if s]
-            for u in cr.unmet:
-                lines.append("not ok - %s: %s" % (case["id"], u))
-            if a.control:
-                for m, root in mutants:
-                    if m.get("cases") and case["id"] not in m["cases"]:
-                        continue
-                    diffs, _doc, _canon, _run = cr.against(bash_impl(m["name"], root))
-                    mutant_rows.append((m["name"], sorted(set(channel(d) for d in diffs))))
-            else:
-                diffs, doc, canon, run = cr.against(cand)
-                row["different"] = diffs
-                row["diagnostics"] = cr.ref_canon.diag + canon.diag
-                row["noted"] = cr.ref_canon.noted + canon.noted
-                if diffs:
-                    a_map, b_map = dict(cr.ref_doc), dict(doc)
-                    lines.append("not ok - %s: %d entries differ (%s)" % (
-                        case["id"], len(diffs), ", ".join(sorted(set(channel(d) for d in diffs))[:6])))
-                    shown = set()
-                    for d in diffs:
-                        if channel(d) in shown:
-                            continue
-                        shown.add(channel(d))
-                        if len(shown) > 8:
-                            lines.append("  ... more channels differ; see --report")
-                            break
-                        lines.extend(show_diff(d, a_map.get(d), b_map.get(d)))
-                    row["diff"] = {d: {"reference": a_map.get(d), "candidate": b_map.get(d)} for d in diffs[:200]}
-                    row["candidate_secs"] = [round(s["secs"], 2) for s in run["steps"] if s]
-            if a.dump:
-                with open(os.path.join(a.dump, case["id"] + ".txt"), "w", encoding="latin-1") as f:
-                    for key, body in cr.ref_doc:
-                        f.write("=== %s ===\n%s\n" % (key, body))
-        with lock:
-            if lines:
-                print("\n".join(lines), flush=True)
-            if cr.error or cr.unmet or row["different"]:
-                red.append(case["id"])
-            report["cases"].append(row)
-            if cr.ref:
-                hook_steps[0] += len([s for s in cr.ref["steps"] if s])
-                for k, v in cr.ref_canon.counts.items():
-                    totals[k] += v
-                for r in cr.reach:
-                    reached[r] = reached.get(r, 0) + 1
-                if cr.ref_canon.diag:
-                    diag_cases[0] += 1
-            for name, chans in mutant_rows:
-                control_hits.setdefault(name, {})[case["id"]] = chans
-        cr.close()
-
-    mutants = []
-    control_hits = {}
-    if a.control:
-        mutants = [(m, mutant_tree(ctx, m)) for m in MUTATIONS]
-    if a.dump:
-        os.makedirs(a.dump, exist_ok=True)
     try:
-        with ThreadPoolExecutor(max_workers=jobs) as ex:
-            list(ex.map(one, list(enumerate(cases))))
+        provider = start_provider(ctx) if a.fixture_provider else None
+        with ThreadPoolExecutor(max_workers=a.jobs) as executor:
+            for rr, rb in executor.map(one, enumerate(cases)):
+                rows.extend(rr)
+                receipts.extend(rb)
+        save_json(out / "index.json", {"format": "core-hook-bundles/1", "bundles": receipts, "mode": mode, "skipped": skipped})
+        manifest, pin = ctx.collection.finish()
+        print('evidence manifest: %s; sha256: %s' % (manifest, pin), flush=True)
+        for receipt in receipts:
+            path = out / receipt['path']
+            loaded = observe.read_bundle(str(path))
+            row, result = classify(loaded, path, receipt['sha256'], manifest, pin)
+            rows.append(row)
+            print('%s - %s' % (row['verdict'], row['id']), flush=True)
+            if row['verdict'] != 'equal':
+                for line in compare.show(result, limit=5)[:14]:
+                    print(line, flush=True)
+        return finish(rows, a.report or str(out / "report.json"), skipped, mode)
     finally:
         if provider:
-            provider.kill()
-            provider.wait()
-
-    status = 0
-    print("cases %d, hook calls per side %d, red %d%s" % (len(cases), hook_steps[0], len(red), (": " + ", ".join(sorted(red))) if red else ""))
-    print("masks applied on the reference side: %s" % ", ".join("%s %d" % (k, totals[k]) for k in MASKS))
-    print("bash diagnostics set aside in %d cases" % diag_cases[0])
-    print("reached by the reference: %s" % ", ".join("%s %d" % (k, reached[k]) for k in sorted(reached)))
-    if red:
-        status = 1
-    if a.control:
-        for m in MUTATIONS:
-            hits = control_hits.get(m["name"], {})
-            red_cases = sorted(c for c, chans in hits.items() if chans)
-            want = m["channel"]
-            in_channel = sorted(c for c, chans in hits.items() if any(fnmatch.fnmatchcase(ch, want) for ch in chans))
-            ok = bool(in_channel)
-            print("%s - control %s: red in %d of %d cases, %d of them in %s" % (
-                "ok" if ok else "not ok", m["name"], len(red_cases), len(hits), len(in_channel), want))
-            if not ok:
-                status = 1
-                seen = sorted(set(ch for chans in hits.values() for ch in chans))
-                print("  it was red in: %s" % (", ".join(seen[:12]) or "nothing"))
-            report["controls"].append({"name": m["name"], "channel": want, "red_cases": red_cases, "in_channel": in_channel})
-    elif not red:
-        print("ok - %d cases: the two sides are equal after the masks" % len(cases))
-    if skipped:
-        print("not run: %d cases need --fixture-provider" % len(skipped))
-    print("end: %s" % uptime(), flush=True)
-    if a.report:
-        report["masks"] = totals
-        report["reached"] = reached
-        report["skipped"] = skipped
-        with open(a.report, "w", encoding="utf-8") as f:
-            json.dump(report, f, ensure_ascii=False, indent=1)
-    rmtree(work)
-    return status
+            provider.terminate()
+            provider.wait(timeout=10)
+        observe.rmtree(work)
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except (observe.HarnessError, OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as e:
+        print("core-hook-differential: %s" % e, file=sys.stderr)
+        sys.exit(2)
