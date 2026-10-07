@@ -71,6 +71,13 @@ pub fn judge(call:&Call,run:&mut Run,cwd:&[u8],read:&Readings,mut inert:impl FnM
         if attribution.is_empty(){attribution=why}
         run.reading=None;
     }
+    // A collision is an obligation the rewrite cannot meet, even when all
+    // readings agree. Settle it before comparing readings or writing a call
+    // record; a missing rewrite alone must never turn it into permission.
+    if let Some(kind)=rewrites.iter().find_map(|value|crate::inert::collision_kind(value)) {
+        log_command(call,&cat(&[b"pre-guard DENY: inert rewrite obligations conflict (",kind,b"); UNDECIDED, no rewrite was sent."]));
+        deny(&mut out,notices::COLLISION.as_bytes());return out
+    }
     if read.set==[Reading::Bash]&&run.diverge {
         log_command(call,b"pre-guard: a place where the shells read differently was first met while deciding the inert rewrite; the zsh and dash readings were not judged.");run.failed=true;
     }

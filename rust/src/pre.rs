@@ -325,29 +325,27 @@ fn shell_pwd() -> W {
 }
 
 /// The shared reading driver detects once and obtains facts only for an
-/// install. Err marks the still-unintegrated Claude rewrite path.
-fn judge(call: &Call) -> Result<Out, ()> {
+/// install. The install driver invokes the rewrite only for Claude.
+fn judge(call: &Call) -> Out {
     let mut out = Out::default();
     let core = Core::new();
     let mut run = Run::new(&core);
     let mut cwd = match jq::capture_field(&call.input, &["cwd"]) {
         Ok(cwd) => cwd,
-        Err(code) => return Ok(Out { code, ..Out::default() }),
+        Err(code) => return Out { code, ..Out::default() },
     };
     if cwd.is_empty() {
         cwd = shell_pwd();
     }
     let read = readings::Readings::collect(&mut run, &call.command, &cwd);
     if read.yes("any_install") {
-        if !jq::stream_has(&call.input, "turn_id") { return Err(()) }
-        return Ok(install::judge(call, &mut run, &cwd, &read,
-            |_,_| unreachable!("Codex must not ask for a rewrite")));
+        return install::judge(call, &mut run, &cwd, &read, crate::inert::reading_inert);
     }
     if settle_scan_failure(call, run.failed, &mut out) {
-        return Ok(out);
+        return out;
     }
     backstop_trace_baseline(call, &cwd);
-    Ok(out)
+    out
 }
 
 fn emit(out: &Out) -> i32 {
@@ -357,8 +355,6 @@ fn emit(out: &Out) -> i32 {
     let _ = so.flush();
     out.code
 }
-
-const NOT_WRITTEN: &str = "safedeps-core pre: this Claude install needs the inert rewrite implementation, which is not integrated yet. scripts/safedeps-pre-guard.sh is the PreToolUse hook.";
 
 /// A stale checkout can settle only the existing unscanned-manager question.
 /// It never calls the old judgment or creates a snapshot, pending record or
@@ -442,13 +438,7 @@ pub fn main(input: &[u8], budget_child: bool) -> i32 {
             let _ = writeln!(err, "safedeps: SAFEDEPS_BUDGET_DISABLED is set, so the self-budget deadline is OFF for this command. The judgment now runs with no deadline of its own, and past the {}s runtime hook budget the runtime kills this gate and the install proceeds unjudged. Unset it to restore the gate.", RUNTIME_BUDGET_SECONDS);
         }
         drop(err);
-        return match judge(&call) {
-            Ok(out) => emit(&out),
-            Err(()) => {
-                eprintln!("{}", NOT_WRITTEN);
-                2
-            }
-        };
+        return emit(&judge(&call));
     }
 
     // The deadline is in play: say what the knobs came to, as the guard does
