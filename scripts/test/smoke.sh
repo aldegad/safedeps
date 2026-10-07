@@ -5,6 +5,7 @@ ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "${ROOT_DIR}"
 
 pass() {
+  hook_response_assert || fail "a hook response could not be read"
   printf 'ok - %s\n' "$1"
 }
 
@@ -14,6 +15,9 @@ fail() {
 }
 
 tmp_root=$(mktemp -d "${TMPDIR:-/tmp}/safedeps-smoke.XXXXXX")
+# shellcheck source=lib/hook-response.sh
+source "${ROOT_DIR}/scripts/test/lib/hook-response.sh"
+hook_response_init "${tmp_root}/hook-response.failures"
 # shellcheck source=lib/release-floor.sh
 source scripts/test/lib/release-floor.sh
 RELEASE_FLOOR_FAILS="${tmp_root}/release-floor.fails"
@@ -417,39 +421,30 @@ run_hook_command() {
 
   payload=$(jq -nc --arg command "${command}" --arg cwd "${project_dir}" \
     '{tool_name:"Bash",tool_input:{command:$command},cwd:$cwd}')
-  out=$(printf '%s' "${payload}" | HOME="${home_dir}" SAFEDEPS_HOME="${safe_dir}" scripts/safedeps-hook-entry.sh pre)
-  case "${response_contract}" in
-    quiet) [[ -z "${out}" ]] || fail "expected no hook output: ${command} (got ${out})" ;;
-    decision)
-      [[ -n "${out}" ]] || fail "expected a hook decision, got no output: ${command}"
-      jq -e 'type == "object" and (.hookSpecificOutput | type == "object")' <<< "${out}" >/dev/null \
-        || fail "expected a JSON hook decision: ${command} (got ${out})" ;;
-    *) fail "unknown hook response contract: ${response_contract}" ;;
-  esac
-  if [[ -z "${out}" || "$(jq -r '.hookSpecificOutput.permissionDecision // empty' <<< "${out}")" == allow ]]; then
-    rewritten=""
-    if [[ -n "${out}" ]]; then
-      rewritten=$(jq -r '.hookSpecificOutput.updatedInput.command // empty' <<< "${out}")
-    fi
+  out=$(printf '%s' "${payload}" | HOME="${home_dir}" SAFEDEPS_HOME="${safe_dir}" \
+    hook_response_capture "${home_dir}.response" scripts/safedeps-hook-entry.sh pre)
+  hook_response_parse "${out}" "${response_contract}" || fail "hook response: ${command}"
+  if [[ "${HOOK_QUIET}" == true || "${HOOK_DECISION}" == allow ]]; then
+    rewritten="${HOOK_REWRITE}"
     release_floor_check "${payload}" "${rewritten}" "${safe_dir}" "${tmp_root}" || true
   fi
   printf '%s\n' "${out}"
 }
 
 run_codex_hook_command() {
-  local home_dir="$1"
-  local safe_dir="$2"
-  local command="$3"
-
-  jq -nc --arg command "${command}" --arg cwd "${project_dir}" \
+  local home_dir="$1" safe_dir="$2" command="$3" out
+  out=$(jq -nc --arg command "${command}" --arg cwd "${project_dir}" \
     '{tool_name:"Bash",tool_input:{command:$command},cwd:$cwd,turn_id:"turn-smoke",model:"codex-test"}' |
-    HOME="${home_dir}" SAFEDEPS_HOME="${safe_dir}" scripts/safedeps-hook-entry.sh pre
+    HOME="${home_dir}" SAFEDEPS_HOME="${safe_dir}" \
+      hook_response_capture "${home_dir}.response" scripts/safedeps-hook-entry.sh pre)
+  hook_response_parse "${out}" "$4" || fail "Codex hook response: ${command}"
+  printf '%s' "${out}"
 }
 
 deny_json=$(
   run_hook_command "${tmp_root}/home-hook" "${tmp_root}/safe-hook" "npm install left-pad@1.3.0"
 )
-[[ "$(jq -r '.hookSpecificOutput.permissionDecision' <<< "${deny_json}")" == "deny" ]] || fail "hook denies unapproved install"
+[[ "$(hook_response_read decision "${deny_json}")" == "deny" ]] || fail "hook denies unapproved install"
 pass "hook denies unapproved install"
 
 mkdir -p "${tmp_root}/safe-hook-allow"
@@ -457,8 +452,8 @@ SAFEDEPS_HOME="${tmp_root}/safe-hook-allow" lib/ledger/ledger.sh approve npm lef
 allow_output=$(
   run_hook_command "${tmp_root}/home-hook-allow" "${tmp_root}/safe-hook-allow" "npm install left-pad@1.3.0"
 )
-[[ "$(jq -r '.hookSpecificOutput.permissionDecision' <<< "${allow_output}")" == "allow" ]] || fail "hook emits Claude allow decision for approved install"
-[[ "$(jq -r '.hookSpecificOutput.updatedInput.command' <<< "${allow_output}")" == "npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts" ]] || fail "hook injects --ignore-scripts for Claude npm install"
+[[ "$(hook_response_read decision "${allow_output}")" == "allow" ]] || fail "hook emits Claude allow decision for approved install"
+[[ "$(hook_response_read rewrite "${allow_output}")" == "npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts" ]] || fail "hook injects --ignore-scripts for Claude npm install"
 allow_sid=$(jq -r '.snapshot_id' "${tmp_root}/safe-hook-allow/pending/"*.json)
 jq -e '.ignore_scripts_injected == true' "${tmp_root}/safe-hook-allow/snapshots/${allow_sid}_meta.json" >/dev/null || fail "hook records injected meta flag"
 jq -e '.ignore_scripts_unread == false' "${tmp_root}/safe-hook-allow/snapshots/${allow_sid}_meta.json" >/dev/null || fail "hook records no unread warning for a rewrite it read"
@@ -492,23 +487,23 @@ for i in "${!global_forms[@]}"; do
   mkdir -p "${global_safe}"
   SAFEDEPS_HOME="${global_safe}" lib/ledger/ledger.sh approve npm left-pad 1.3.0 1.3.0 smoke >/dev/null
   global_output=$(run_hook_command "${tmp_root}/home-global-context-${i}" "${global_safe}" "${global_forms[$i]}")
-  [[ "$(jq -r '.hookSpecificOutput.permissionDecision // "allow"' <<< "${global_output}")" != "deny" ]] \
+  [[ "$(hook_response_read decision "${global_output}")" != "deny" ]] \
     || fail "approved global npm install ignores cwd project context: ${global_forms[$i]}"
 done
 
 global_unapproved=$(run_hook_command "${tmp_root}/home-global-unapproved" "${tmp_root}/safe-global-unapproved" "npm install -g unapproved-global@9.9.9")
-[[ "$(jq -r '.hookSpecificOutput.permissionDecision' <<< "${global_unapproved}")" == "deny" ]] \
+[[ "$(hook_response_read decision "${global_unapproved}")" == "deny" ]] \
   || fail "unapproved global npm install remains denied"
 
 local_context_safe="${tmp_root}/safe-local-context-control"
 mkdir -p "${local_context_safe}"
 SAFEDEPS_HOME="${local_context_safe}" lib/ledger/ledger.sh approve npm left-pad 1.3.0 1.3.0 smoke >/dev/null
 local_context_output=$(run_hook_command "${tmp_root}/home-local-context-control" "${local_context_safe}" "npm install left-pad@1.3.0")
-[[ "$(jq -r '.hookSpecificOutput.permissionDecision' <<< "${local_context_output}")" == "deny" ]] \
+[[ "$(hook_response_read decision "${local_context_output}")" == "deny" ]] \
   || fail "local npm install still requires its cwd project context"
 
 global_false_output=$(run_hook_command "${tmp_root}/home-global-false-control" "${local_context_safe}" "npm install --global=false left-pad@1.3.0")
-[[ "$(jq -r '.hookSpecificOutput.permissionDecision' <<< "${global_false_output}")" == "deny" ]] \
+[[ "$(hook_response_read decision "${global_false_output}")" == "deny" ]] \
   || fail "--global=false remains project-scoped"
 
 mixed_safe="${tmp_root}/safe-mixed-global-local-control"
@@ -516,13 +511,13 @@ mkdir -p "${mixed_safe}"
 SAFEDEPS_HOME="${mixed_safe}" lib/ledger/ledger.sh approve npm left-pad 1.3.0 1.3.0 smoke >/dev/null
 SAFEDEPS_HOME="${mixed_safe}" lib/ledger/ledger.sh approve npm other-local 2.0.0 2.0.0 smoke >/dev/null
 mixed_context_output=$(run_hook_command "${tmp_root}/home-mixed-global-local-control" "${mixed_safe}" "npm install -g left-pad@1.3.0 && npm install other-local@2.0.0")
-[[ "$(jq -r '.hookSpecificOutput.permissionDecision' <<< "${mixed_context_output}")" == "deny" ]] \
+[[ "$(hook_response_read decision "${mixed_context_output}")" == "deny" ]] \
   || fail "mixed global and local npm operations stay project-scoped"
 # A payload's install lands where the payload decides, which the landing does
 # not read, so it keeps the project's context (declared: the direction that
 # can deny an approved package, never one that drops the context).
 payload_context_output=$(run_hook_command "${tmp_root}/home-payload-global-control" "${local_context_safe}" "sh -c 'npm install -g left-pad@1.3.0'")
-[[ "$(jq -r '.hookSpecificOutput.permissionDecision' <<< "${payload_context_output}")" == "deny" ]] \
+[[ "$(hook_response_read decision "${payload_context_output}")" == "deny" ]] \
   || fail "a global npm install inside a payload stays project-scoped"
 printf '{"dependencies":{}}\n' > "${project_dir}/package.json"
 pass "global npm approvals are context-free while local approvals remain project-scoped"
@@ -530,7 +525,7 @@ pass "global npm approvals are context-free while local approvals remain project
 mkdir -p "${tmp_root}/safe-hook-codex"
 SAFEDEPS_HOME="${tmp_root}/safe-hook-codex" lib/ledger/ledger.sh approve npm left-pad 1.3.0 1.3.0 smoke >/dev/null
 codex_allow_output=$(
-  run_codex_hook_command "${tmp_root}/home-hook-codex" "${tmp_root}/safe-hook-codex" "npm install left-pad@1.3.0"
+  run_codex_hook_command "${tmp_root}/home-hook-codex" "${tmp_root}/safe-hook-codex" "npm install left-pad@1.3.0" quiet
 )
 [[ -z "${codex_allow_output}" ]] || fail "hook keeps Codex approved install as plain allow"
 codex_sid=$(jq -r '.snapshot_id' "${tmp_root}/safe-hook-codex/pending/"*.json)
@@ -559,7 +554,7 @@ pass "hook does not duplicate --ignore-scripts"
 mkdir -p "${tmp_root}/safe-compound"
 SAFEDEPS_HOME="${tmp_root}/safe-compound" lib/ledger/ledger.sh approve npm left-pad 1.3.0 1.3.0 smoke >/dev/null
 compound_out=$(run_hook_command "${tmp_root}/home-compound" "${tmp_root}/safe-compound" "npm install left-pad@1.3.0 && npm run build")
-compound_cmd=$(jq -r '.hookSpecificOutput.updatedInput.command' <<< "${compound_out}")
+compound_cmd=$(hook_response_read rewrite "${compound_out}")
 [[ "${compound_cmd}" == "npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts && npm run build" ]] || fail "compound inert-install injects --ignore-scripts on the install, not the trailing command (got: ${compound_cmd})"
 pass "compound install puts --ignore-scripts on the npm install, after its last argument (finding #7)"
 
@@ -579,7 +574,7 @@ do
   inert_in="${inert_case%%|*}"
   inert_want="${inert_case#*|}"
   inert_out=$(run_hook_command "${tmp_root}/home-compound" "${tmp_root}/safe-compound" "${inert_in}")
-  inert_got=$(jq -r '.hookSpecificOutput.updatedInput.command' <<< "${inert_out}")
+  inert_got=$(hook_response_read rewrite "${inert_out}")
   [[ "${inert_got}" == "${inert_want}" ]] \
     || fail "inert flag lands on the install: $(printf '%q' "${inert_in}") (got: $(printf '%q' "${inert_got}"))"
 done
@@ -603,7 +598,7 @@ do
   inert_in="${inert_case%%|*}"
   inert_want="${inert_case#*|}"
   inert_out=$(run_hook_command "${tmp_root}/home-compound" "${tmp_root}/safe-compound" "${inert_in}")
-  inert_got=$(jq -r '.hookSpecificOutput.updatedInput.command' <<< "${inert_out}")
+  inert_got=$(hook_response_read rewrite "${inert_out}")
   [[ "${inert_got}" == "${inert_want}" ]] \
     || fail "inert flag lands inside the script a shell runs: $(printf '%q' "${inert_in}") (got: $(printf '%q' "${inert_got}"))"
 done
@@ -624,7 +619,7 @@ do
   inert_in="${inert_case%%|*}"
   inert_want="${inert_case#*|}"
   inert_out=$(run_hook_command "${tmp_root}/home-compound" "${tmp_root}/safe-compound" "${inert_in}")
-  inert_got=$(jq -r '.hookSpecificOutput.updatedInput.command' <<< "${inert_out}")
+  inert_got=$(hook_response_read rewrite "${inert_out}")
   [[ "${inert_got}" == "${inert_want}" ]] \
     || fail "inert flag lands on an install whose npm is spelled in another case: $(printf '%q' "${inert_in}") (got: $(printf '%q' "${inert_got}"))"
 done
@@ -638,12 +633,11 @@ expect_inert_conflict() {
   safe=$(mktemp -d "${tmp_root}/safe-conflict.XXXXXX")
   SAFEDEPS_HOME="${safe}" lib/ledger/ledger.sh approve npm left-pad 1.3.0 1.3.0 smoke >/dev/null
   out=$(run_hook_command "${tmp_root}/home-compound" "${safe}" "${command}")
-  jq -e '.hookSpecificOutput | .permissionDecision == "deny" and
-    (.permissionDecisionReason | contains("UNDECIDED")) and
-    (has("updatedInput") | not)' <<< "${out}" >/dev/null \
+  hook_response_parse "${out}" decision || fail "conflict response: ${command}"
+  [[ "${HOOK_DECISION}" == deny && "${HOOK_REASON}" == *UNDECIDED* && "${HOOK_HAS_REWRITE}" == false ]] \
     || fail "expected ${reason} undecided without a rewrite: ${command} (got ${out})"
   if [[ "${reason}" == readings-place-apart ]]; then
-    jq -e '.hookSpecificOutput.permissionDecisionReason | contains("read the npm installs in this command in different places")' <<< "${out}" >/dev/null \
+    [[ "${HOOK_REASON}" == *"read the npm installs in this command in different places"* ]] \
       || fail "the decision names the readings that disagree: ${command}"
     expected="pre-guard DENY: the readings (bash zsh dash) put this command's npm installs in different places, so no single --ignore-scripts rewrite is inert for every shell — undecided, fail-closed. Command: ${command}"
   else
@@ -739,7 +733,7 @@ do
   inert_in="${inert_case%%|*}"
   inert_want="${inert_case#*|}"
   inert_out=$(run_hook_command "${tmp_root}/home-compound" "${tmp_root}/safe-compound" "${inert_in}")
-  inert_got=$(jq -r '.hookSpecificOutput.updatedInput.command' <<< "${inert_out}")
+  inert_got=$(hook_response_read rewrite "${inert_out}")
   [[ "${inert_got}" == "${inert_want}" ]] \
     || fail "the inert flag goes after the install's last argument, wherever --ignore-scripts appears otherwise: $(printf '%q' "${inert_in}") (got: $(printf '%q' "${inert_got}"))"
 done
@@ -754,7 +748,7 @@ do
   inert_in="${inert_case%%|*}"
   inert_want="${inert_case#*|}"
   inert_out=$(run_hook_command "${tmp_root}/home-compound" "${tmp_root}/safe-compound" "${inert_in}")
-  inert_got=$(jq -r '.hookSpecificOutput.updatedInput.command' <<< "${inert_out}")
+  inert_got=$(hook_response_read rewrite "${inert_out}")
   [[ "${inert_got}" == "${inert_want}" ]] \
     || fail "an install already true that the release rewrote keeps the release's rewrite: $(printf '%q' "${inert_in}") (got: $(printf '%q' "${inert_got}"))"
 done
@@ -821,7 +815,7 @@ do
   unverified_before=$(grep -c 'holds a word the shell decides at run time' "${tmp_root}/safe-compound/advisory.log" 2>/dev/null || true)
   inert_out=$(run_hook_command "${tmp_root}/home-compound" "${tmp_root}/safe-compound" "${inert_in}")
   unverified_after=$(grep -c 'holds a word the shell decides at run time' "${tmp_root}/safe-compound/advisory.log" 2>/dev/null || true)
-  inert_got=$(jq -r '.hookSpecificOutput.updatedInput.command' <<< "${inert_out}")
+  inert_got=$(hook_response_read rewrite "${inert_out}")
   [[ "${inert_got}" == "${inert_want}" ]] \
     || fail "an install holding a word the shell expands gets the flag after the verb and after its last argument: $(printf '%q' "${inert_in}") (got: $(printf '%q' "${inert_got}"))"
   (( ${unverified_after:-0} > ${unverified_before:-0} )) \
@@ -843,7 +837,7 @@ do
   unverified_before=$(grep -c 'holds a word the shell decides at run time' "${tmp_root}/safe-compound/advisory.log" 2>/dev/null || true)
   inert_out=$(run_hook_command "${tmp_root}/home-compound" "${tmp_root}/safe-compound" "${inert_in}")
   unverified_after=$(grep -c 'holds a word the shell decides at run time' "${tmp_root}/safe-compound/advisory.log" 2>/dev/null || true)
-  inert_got=$(jq -r '.hookSpecificOutput.updatedInput.command' <<< "${inert_out}")
+  inert_got=$(hook_response_read rewrite "${inert_out}")
   [[ "${inert_got}" == "${inert_want}" ]] \
     || fail "an install whose words the shell leaves as written is read, and gets the flag after the verb and after its last argument: $(printf '%q' "${inert_in}") (got: $(printf '%q' "${inert_got}"))"
   (( ${unverified_after:-0} == ${unverified_before:-0} )) \
@@ -903,10 +897,10 @@ pass "the inert flag is read from each install's own arguments and goes where np
 # normal run_hook_command check still uses the measured 7d66f8c corpus.
 assert_script_payload_additions() {
   local command="$1" previous="$2" out="$3" safe="$4" payload got corpus
-  jq -e '.hookSpecificOutput | .permissionDecision == "allow" and
-    (.updatedInput.command | type == "string")' <<< "${out}" >/dev/null \
+  hook_response_parse "${out}" decision || fail "script-payload response: ${command}"
+  [[ "${HOOK_DECISION}" == allow && "${HOOK_HAS_REWRITE}" == true ]] \
     || fail "a script-payload row allows with a rewrite: ${command}"
-  got=$(jq -r '.hookSpecificOutput.updatedInput.command' <<< "${out}")
+  got="${HOOK_REWRITE}"
   payload=$(jq -nc --arg command "${command}" '{tool_input:{command:$command}}')
   corpus=$(mktemp "${tmp_root}/previous-rewrite.XXXXXX")
   jq -nc --arg command "${command}" --arg previous "${previous}" \
@@ -972,7 +966,7 @@ for unread_i in "${!unread_case_in[@]}"; do
   unread_safe=$(mktemp -d "${tmp_root}/safe-unread.XXXXXX")
   SAFEDEPS_HOME="${unread_safe}" lib/ledger/ledger.sh approve npm left-pad 1.3.0 1.3.0 smoke >/dev/null
   inert_out=$(run_hook_command "${tmp_root}/home-unread" "${unread_safe}" "${inert_in}")
-  inert_got=$(jq -r '.hookSpecificOutput.updatedInput.command // ""' <<< "${inert_out}")
+  inert_got=$(hook_response_read rewrite "${inert_out}")
   [[ "${inert_got}" == "${inert_want}" ]] \
     || fail "a script-payload install gets the measured native rewrite: $(printf '%q' "${inert_in}") (got: $(printf '%q' "${inert_got}"); ${inert_out:0:200})"
   assert_script_payload_additions "${inert_in}" "${unread_case_want[${unread_i}]}" "${inert_out}" "${unread_safe}"
@@ -991,7 +985,7 @@ do
   settled_safe=$(mktemp -d "${tmp_root}/safe-settled-unread.XXXXXX")
   SAFEDEPS_HOME="${settled_safe}" lib/ledger/ledger.sh approve npm left-pad 1.3.0 1.3.0 smoke >/dev/null
   inert_out=$(run_hook_command "${tmp_root}/home-settled-unread" "${settled_safe}" "${inert_in}" quiet)
-  [[ -z "$(jq -r '.hookSpecificOutput.updatedInput.command // ""' <<< "${inert_out}")" ]] \
+  [[ -z "${inert_out}" ]] \
     || settled_unread_bad+=" [a rewrite: $(printf '%q' "${inert_in}") (got: ${inert_out:0:200})]"
   grep -q 'could not make every npm install in this command inert' "${settled_safe}/advisory.log" 2>/dev/null \
     || settled_unread_bad+=" [no downgrade line in advisory.log: $(printf '%q' "${inert_in}")]"
@@ -1045,7 +1039,7 @@ for left_i in "${!left_case_in[@]}"; do
   left_safe=$(mktemp -d "${tmp_root}/safe-left-unread.XXXXXX")
   SAFEDEPS_HOME="${left_safe}" lib/ledger/ledger.sh approve npm left-pad 1.3.0 1.3.0 smoke >/dev/null
   inert_out=$(run_hook_command "${tmp_root}/home-left-unread" "${left_safe}" "${inert_in}")
-  inert_got=$(jq -r '.hookSpecificOutput.updatedInput.command // ""' <<< "${inert_out}")
+  inert_got=$(hook_response_read rewrite "${inert_out}")
   assert_script_payload_additions "${inert_in}" "npm i --ignore-scripts left-pad@1.3.0 --ignore-scripts${left_case_tail[${left_i}]}" "${inert_out}" "${left_safe}"
   [[ "${inert_got}" == "${left_case_native[${left_i}]}" ]] \
     || left_bad+=" [the rewrite changed: $(printf '%q' "${inert_in}") (got: $(printf '%q' "${inert_got}"); ${inert_out:0:160})]"
@@ -1090,7 +1084,7 @@ do
   release_only_want="${row%%|*}" inert_in="${row#*|}"
   rm -rf "${release_only_safe}/pending"
   inert_out=$(run_hook_command "${tmp_root}/home-release-only" "${release_only_safe}" "${inert_in}")
-  release_only_got=$(jq -r '.hookSpecificOutput.updatedInput.command // ""' <<< "${inert_out}")
+  release_only_got=$(hook_response_read rewrite "${inert_out}")
   [[ "${release_only_got}" == *" --ignore-scripts" && "${release_only_got}" != "${inert_in}" ]] \
     || fail "an npm install whose operands spell eval or sh -c keeps its rewrite: $(printf '%q' "${inert_in}") (got: ${inert_out:0:240})"
   release_only_sid=$(jq -r '.snapshot_id' "${release_only_safe}/pending/"*.json 2>/dev/null) || release_only_sid=""
@@ -1121,8 +1115,8 @@ do
   readings_safe=$(mktemp -d "${tmp_root}/safe-readings.XXXXXX")
   SAFEDEPS_HOME="${readings_safe}" lib/ledger/ledger.sh approve npm left-pad 1.3.0 1.3.0 smoke >/dev/null
   readings_out=$(run_hook_command "${tmp_root}/home-readings" "${readings_safe}" "${readings_case}")
-  [[ "$(jq -r '.hookSpecificOutput.permissionDecision // "pass"' <<< "${readings_out}")" == deny ]] \
-    && jq -r '.hookSpecificOutput.permissionDecisionReason' <<< "${readings_out}" | grep -q 'UNDECIDED.*read the npm installs in this command in different places' \
+  [[ "$(hook_response_read decision "${readings_out}")" == deny ]] \
+    && hook_response_read reason "${readings_out}" | grep -q 'UNDECIDED.*read the npm installs in this command in different places' \
     || fail "readings that put the npm installs in different places are UNDECIDED: $(printf '%q' "${readings_case}") (got: ${readings_out:0:200})"
   ! grep -qs '"ignore_scripts_injected": true' "${readings_safe}/snapshots/"*_meta.json \
     || fail "the meta never says inert when nothing was injected: $(printf '%q' "${readings_case}")"
@@ -1155,7 +1149,7 @@ do
   readings_safe=$(mktemp -d "${tmp_root}/safe-readings.XXXXXX")
   SAFEDEPS_HOME="${readings_safe}" lib/ledger/ledger.sh approve npm left-pad 1.3.0 1.3.0 smoke >/dev/null
   readings_out=$(run_hook_command "${tmp_root}/home-readings" "${readings_safe}" "${readings_case}")
-  readings_cmd=$(jq -r '.hookSpecificOutput.updatedInput.command // empty' <<< "${readings_out}")
+  readings_cmd=$(hook_response_read rewrite "${readings_out}")
   [[ -n "${readings_cmd}" ]] || fail "readings that agree get the rewrite: $(printf '%q' "${readings_case}") (got: ${readings_out:0:200})"
   grep -qs '"ignore_scripts_injected": true' "${readings_safe}/snapshots/"*_meta.json \
     || fail "the meta says inert when the rewrite was injected: $(printf '%q' "${readings_case}")"
@@ -1182,7 +1176,7 @@ printf '{"dependencies":{}}\n' > "${prefix_proj}/package.json"
 SAFEDEPS_HOME="${prefix_safe}" lib/ledger/ledger.sh approve npm left-pad 1.3.0 1.3.0 smoke >/dev/null
 jq -nc --arg c "npm install --prefix ${prefix_proj} left-pad@1.3.0" --arg cwd "${project_dir}" \
   '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
-  HOME="${tmp_root}/home-prefix" SAFEDEPS_HOME="${prefix_safe}" scripts/safedeps-hook-entry.sh pre >/dev/null
+  HOME="${tmp_root}/home-prefix" SAFEDEPS_HOME="${prefix_safe}" hook_response_capture "${tmp_root}/prefix-response" scripts/safedeps-hook-entry.sh pre >/dev/null
 prefix_pending_dir=$(jq -r '.project_dir' "${prefix_safe}/pending/"*.json | head -1)
 [[ "${prefix_pending_dir}" == "${prefix_proj}" ]] || fail "--prefix install snapshots the override dir, not cwd (got: ${prefix_pending_dir}, want ${prefix_proj})"
 pass "--prefix install targets the override dir for snapshot/effect-gate (finding #3)"
@@ -1200,8 +1194,8 @@ pass "hook allows npx tool run with @-bearing args"
 mixed_output=$(
   run_hook_command "${tmp_root}/home-mixed" "${tmp_root}/safe-mixed" "npm install evil-pkg@9.9.9 && npx wrangler secret put X ops@example.test"
 )
-[[ "$(jq -r '.hookSpecificOutput.permissionDecision' <<< "${mixed_output}")" == "deny" ]] || fail "hook gates real install chained with npx run"
-reason=$(jq -r '.hookSpecificOutput.permissionDecisionReason' <<< "${mixed_output}")
+[[ "$(hook_response_read decision "${mixed_output}")" == "deny" ]] || fail "hook gates real install chained with npx run"
+reason=$(hook_response_read reason "${mixed_output}")
 grep -q 'evil-pkg@9.9.9' <<< "${reason}" || fail "deny reason names the real package"
 [[ "${reason}" != *"ops@example.test"* ]] || fail "deny reason must not name the email arg"
 pass "hook gates real install chained with npx run (email not polluted)"
@@ -1212,8 +1206,8 @@ pass "hook gates real install chained with npx run (email not polluted)"
 echo_mention_output=$(
   run_hook_command "${tmp_root}/home-echo-mention" "${tmp_root}/safe-echo-mention" 'npm install evil-pkg@9.9.9; echo "bumped other-pkg@2.0.0"'
 )
-[[ "$(jq -r '.hookSpecificOutput.permissionDecision' <<< "${echo_mention_output}")" == "deny" ]] || fail "hook still gates the real install when another segment merely echoes a pkg@version"
-echo_mention_reason=$(jq -r '.hookSpecificOutput.permissionDecisionReason' <<< "${echo_mention_output}")
+[[ "$(hook_response_read decision "${echo_mention_output}")" == "deny" ]] || fail "hook still gates the real install when another segment merely echoes a pkg@version"
+echo_mention_reason=$(hook_response_read reason "${echo_mention_output}")
 grep -q 'evil-pkg@9.9.9' <<< "${echo_mention_reason}" || fail "deny reason names the real install spec"
 [[ "${echo_mention_reason}" != *"other-pkg@2.0.0"* ]] || fail "deny reason must not name a pkg@version that only appears in an echo segment"
 pass "hook extracts specs only from install segments, not from echoed pkg@version mentions"
@@ -1223,7 +1217,7 @@ pass "hook extracts specs only from install segments, not from echoed pkg@versio
 bare_mention_output=$(
   run_hook_command "${tmp_root}/home-bare-mention" "${tmp_root}/safe-bare-mention" 'echo "bumped left-pad@1.0.0 -> 1.0.1"; npm install'
 )
-[[ "$(jq -r '.hookSpecificOutput.permissionDecision // "allow"' <<< "${bare_mention_output}" 2>/dev/null || echo allow)" != "deny" ]] || fail "bare npm install must not be denied because of a pkg@version in an echo segment"
+[[ "$(hook_response_read decision "${bare_mention_output}")" != "deny" ]] || fail "bare npm install must not be denied because of a pkg@version in an echo segment"
 pass "echoed pkg@version beside a bare install does not trigger a false deny"
 
 false_positive_safe="${tmp_root}/safe-false-positive"
@@ -1271,7 +1265,7 @@ hidden_install_cases=(
 for hidden_cmd in "${hidden_install_cases[@]}"; do
   hidden_safe=$(mktemp -d "${tmp_root}/safe-hidden.XXXXXX")
   hidden_output=$(run_hook_command "${tmp_root}/home-hidden" "${hidden_safe}" "${hidden_cmd}")
-  [[ "$(jq -r '.hookSpecificOutput.permissionDecision' <<< "${hidden_output}")" == "deny" ]] || fail "hook denies hidden install command: ${hidden_cmd}"
+  [[ "$(hook_response_read decision "${hidden_output}")" == "deny" ]] || fail "hook denies hidden install command: ${hidden_cmd}"
   for hidden_state_dir in pending snapshots; do
     if [[ -e "${hidden_safe}/${hidden_state_dir}" ]]; then
       [[ -d "${hidden_safe}/${hidden_state_dir}" && -z "$(find "${hidden_safe}/${hidden_state_dir}" -mindepth 1 -print)" ]] \
@@ -1317,7 +1311,7 @@ bypass_cases=(
 )
 for bypass_cmd in "${bypass_cases[@]}"; do
   bypass_output=$(run_hook_command "${tmp_root}/home-bypass" "${tmp_root}/safe-bypass" "${bypass_cmd}")
-  [[ "$(jq -r '.hookSpecificOutput.permissionDecision' <<< "${bypass_output}")" == "deny" ]] || fail "hook denies bypass: ${bypass_cmd}"
+  [[ "$(hook_response_read decision "${bypass_output}")" == "deny" ]] || fail "hook denies bypass: ${bypass_cmd}"
 done
 pass "hook denies install bypass forms"
 
@@ -1331,10 +1325,10 @@ mkdir -p "${fc_safe}/state.lock"
 fc_deny=$(
   jq -nc --arg c "npm install evil@1.0.0" --arg cwd "${project_dir}" \
     '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
-    HOME="${fc_home}" SAFEDEPS_HOME="${fc_safe}" SAFEDEPS_LOCK_MAX_ATTEMPTS=2 scripts/safedeps-hook-entry.sh pre
+    HOME="${fc_home}" SAFEDEPS_HOME="${fc_safe}" SAFEDEPS_LOCK_MAX_ATTEMPTS=2 hook_response_capture "${tmp_root}/lock-response" scripts/safedeps-hook-entry.sh pre
 )
 rmdir "${fc_safe}/state.lock" 2>/dev/null || true
-[[ "$(jq -r '.hookSpecificOutput.permissionDecision' <<< "${fc_deny}")" == "deny" ]] || fail "pre-guard fails closed (deny) when the state lock is unavailable for an install"
+[[ "$(hook_response_read decision "${fc_deny}")" == "deny" ]] || fail "pre-guard fails closed (deny) when the state lock is unavailable for an install"
 grep -q 'pre-guard DENY' "${fc_safe}/advisory.log" || fail "pre-guard logs the fail-closed deny to advisory.log"
 pass "pre-guard fails closed on lock contention (observable)"
 
@@ -1358,7 +1352,7 @@ run_hook_command "${tmp_root}/home-conc" "${conc_safe}" "npm install conc-a@1.0.
 conc_pending=$(find "${conc_safe}/pending" -name '*.json' -type f | wc -l | tr -d ' ')
 [[ "${conc_pending}" == "2" ]] || fail "two identical concurrent installs keep two separate pending files (got ${conc_pending}, want 2)"
 jq -nc --arg c "npm install conc-a@1.0.0" --arg cwd "${project_dir}" '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
-  HOME="${tmp_root}/home-conc" SAFEDEPS_HOME="${conc_safe}" scripts/safedeps-hook-entry.sh post >/dev/null 2>&1 || true
+  HOME="${tmp_root}/home-conc" SAFEDEPS_HOME="${conc_safe}" hook_response_capture "${tmp_root}/concurrent-response" scripts/safedeps-hook-entry.sh post >/dev/null || true
 conc_left=$(find "${conc_safe}/pending" -name '*.json' -type f | wc -l | tr -d ' ')
 [[ "${conc_left}" == "1" ]] || fail "post hook consumes exactly one identical-command install's pending state (left ${conc_left}, want 1)"
 pass "concurrent installs (even identical commands) keep isolated pending state (issue #5)"
@@ -1371,7 +1365,7 @@ mkdir -p "${nolock_dir}"
 printf '{"dependencies":{}}\n' > "${nolock_dir}/package.json"
 nolock_safe="${tmp_root}/safe-nolock"
 jq -nc --arg cwd "${nolock_dir}" '{tool_name:"Bash",tool_input:{command:"pip install orphan==1.0.0"},cwd:$cwd}' |
-  HOME="${tmp_root}/home-conc" SAFEDEPS_HOME="${nolock_safe}" scripts/safedeps-hook-entry.sh post >/dev/null 2>&1 || true
+  HOME="${tmp_root}/home-conc" SAFEDEPS_HOME="${nolock_safe}" hook_response_capture "${tmp_root}/no-lock-response" scripts/safedeps-hook-entry.sh post >/dev/null || true
 grep -q 'UNVERIFIED:.*no pending state.*no package-lock.json' "${nolock_safe}/advisory.log" || fail "post hook records a no-lockfile no-pending install as UNVERIFIED"
 pass "post hook records an install-looking command with no pending state (no lockfile) as UNVERIFIED"
 
@@ -1386,7 +1380,7 @@ mkdir -p "${backstop_safe}" "${backstop_proj}"
 printf '{"name":"p","version":"1.0.0","lockfileVersion":3,"packages":{"":{"name":"p","version":"1.0.0"}}}\n' > "${backstop_proj}/package-lock.json"
 printf '{"name":"p","version":"1.0.0"}\n' > "${backstop_proj}/package.json"
 jq -nc --arg cwd "${backstop_proj}" '{tool_name:"Bash",tool_input:{command:" npm install left-pad@1.3.0"},cwd:$cwd}' |
-  HOME="${tmp_root}/home-backstop" SAFEDEPS_HOME="${backstop_safe}" scripts/safedeps-hook-entry.sh post >/dev/null 2>&1 || true
+  HOME="${tmp_root}/home-backstop" SAFEDEPS_HOME="${backstop_safe}" hook_response_capture "${tmp_root}/backstop-response" scripts/safedeps-hook-entry.sh post >/dev/null || true
 grep -q 'BACKSTOP clean' "${backstop_safe}/advisory.log" || fail "npm effect gate runs command-independently as a backstop with no pending state (finding #5)"
 pass "npm effect gate runs command-independently as a backstop (finding #5)"
 
@@ -1394,7 +1388,7 @@ tamper_safe="${tmp_root}/safe-tamper"
 tamper_home="${tmp_root}/home-tamper"
 SAFEDEPS_HOME="${tamper_safe}" lib/ledger/ledger.sh approve npm ledger-tamper 1.0.0 1.0.0 smoke >/dev/null
 tamper_pre=$(run_hook_command "${tamper_home}" "${tamper_safe}" "npm install ledger-tamper@1.0.0")
-[[ "$(jq -r '.hookSpecificOutput.permissionDecision' <<< "${tamper_pre}")" == "allow" ]] || fail "tamper fixture pre hook allows approved install"
+[[ "$(hook_response_read decision "${tamper_pre}")" == "allow" ]] || fail "tamper fixture pre hook allows approved install"
 mkdir -p "${project_dir}/node_modules/ledger-tamper"
 jq '.dependencies["ledger-tamper"]="1.0.0"' "${project_dir}/package.json" > "${project_dir}/package.json.tmp"
 mv "${project_dir}/package.json.tmp" "${project_dir}/package.json"
@@ -1403,7 +1397,7 @@ cat > "${project_dir}/node_modules/ledger-tamper/package.json" <<'EOF'
 EOF
 tamper_post=$(
   jq -nc --arg cwd "${project_dir}" '{tool_name:"Bash",tool_input:{command:"npm install ledger-tamper@1.0.0"},cwd:$cwd}' |
-    HOME="${tamper_home}" SAFEDEPS_HOME="${tamper_safe}" scripts/safedeps-hook-entry.sh post
+    HOME="${tamper_home}" SAFEDEPS_HOME="${tamper_safe}" hook_response_capture "${tmp_root}/tamper-response" scripts/safedeps-hook-entry.sh post
 )
 grep -q 'suspicious dependency change detected' <<< "${tamper_post}" || fail "post hook reorgs safedeps ledger tamper script"
 pass "post hook reorgs safedeps ledger tamper script"
