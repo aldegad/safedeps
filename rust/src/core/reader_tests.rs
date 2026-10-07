@@ -39,9 +39,19 @@ fn recursive_payloads_reach_substitutions_and_bound_their_depth() {
         let deep = b"eval eval eval eval eval 'x=$(pip i)'";
         let texts = run.raw_texts(deep);
         assert!(!texts.is_empty());
-        assert!(!texts.contains(&b"pip i".to_vec()), "depth limit must stop recursion");
         assert!(!run.failed);
         assert!(!run.candidate_texts(deep).is_empty());
+        // Substitutions can be found in an outer payload as well. Hold the
+        // recursion limit with plain eval words, without that second route.
+        let deep = b"eval eval eval eval eval pwd";
+        let mut scripts = Vec::new();
+        run.read_payload_scripts(deep, b'E', 3, &mut scripts);
+        assert_eq!(scripts, vec![b"eval eval eval eval pwd".to_vec()]);
+        scripts.clear();
+        run.read_payload_scripts(deep, b'E', 0, &mut scripts);
+        assert_eq!(scripts, ["eval eval eval eval pwd", "eval eval eval pwd",
+                            "eval eval pwd", "eval pwd"].map(|s| s.as_bytes().to_vec()));
+        assert!(!run.failed);
     }
 }
 
