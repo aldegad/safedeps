@@ -37,9 +37,21 @@ core_smoke_pending() {
     out=$(jq -nc --arg c "${command}" --arg cwd "${project}" \
       '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
       HOME="${safe}/home" SAFEDEPS_HOME="${safe}/state" "${SAFEDEPS_TEST_CORE}" pre)
-    rewritten=$(jq -er '.hookSpecificOutput.updatedInput.command | strings' <<< "${out}")
-    [[ -n "${rewritten}" ]] || fail "the pending-key input was rewritten: ${command}"
     before=$(find "${safe}/state/pending" -maxdepth 1 -type f -name '*.json' | wc -l | tr -d ' ')
+    if [[ "${command}" == 'npm install left-pad@1.3.0 --cache' ]]; then
+      # The end flag owed by this one-statement command would be --cache's
+      # value. Native pre refuses that collision before it creates a record.
+      jq -e '.hookSpecificOutput | .permissionDecision == "deny" and
+        (.permissionDecisionReason | contains("UNDECIDED")) and
+        (.updatedInput == null)' <<< "${out}" >/dev/null \
+        || fail "a trailing --cache is denied without a rewrite: ${out}"
+      [[ "${before}" == 0 ]] || fail "a trailing --cache denial writes no pending record"
+      pass "the trailing value-option collision is denied with no rewrite or pending record"
+      continue
+    fi
+    rewritten=$(jq -er '.hookSpecificOutput.updatedInput.command | strings' <<< "${out}") \
+      || fail "the pending-key input was rewritten: ${command} (got ${out})"
+    [[ -n "${rewritten}" ]] || fail "the pending-key input was rewritten: ${command}"
     [[ "${before}" == 1 ]] || fail "one native pending record before post: ${command}"
     # A real post of the rewritten no-id call must consume the record created
     # above. This checks the production lookup, without recomputing its hash.
@@ -49,5 +61,5 @@ core_smoke_pending() {
     after=$(find "${safe}/state/pending" -maxdepth 1 -type f -name '*.json' | wc -l | tr -d ' ')
     [[ "${after}" == 0 ]] || fail "native post consumes its rewritten no-id record: ${command}"
   done
-  pass "native post consumes all eight no-id records from their inert rewrites"
+  pass "native post consumes all seven no-id records from their inert rewrites"
 }

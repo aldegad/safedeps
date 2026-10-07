@@ -15,7 +15,8 @@
     {
       "source": "smoke.sh:868-891",
       "contract": "A rewritten no-id command finds the pre hook's pending record.",
-      "disposition": "core-smoke.sh core_smoke_pending executes native pre and post for all eight commands and checks record consumption"
+      "disposition": "core-smoke.sh core_smoke_pending executes native pre/post record consumption for seven rewritten commands; the trailing --cache command explicitly requires UNDECIDED deny, no rewrite and no pending record",
+      "reason": "The trailing --cache command is an intended end-flag-not-an-option collision in Rust. No rewrite or record exists on which to compare a pending key; its rejection remains a public contract (core-intended-battery-rows.tsv)."
     },
     {
       "source": "scan-contract.sh:108-128; shell-reading.sh:85-110",
