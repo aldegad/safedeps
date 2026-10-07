@@ -85,7 +85,7 @@ See the `skill-hook-authoring` skill for the full payload/decision schema. Essen
 
 ## Testing
 
-- **Our CI is our own infrastructure** (owner, 2026-10-06). GitHub Actions does not run the suite, and no release step waits for it. The suite runs on our hosts: alex-macbook-m1 and carenine for macOS (runner `~/safedeps-runs/slot.sh`), and WSL1 on the home Windows PC for Windows, the environment Kuma Studio's Windows build runs in. Linux is not tested (owner, 2026-10-06): Kuma Studio ships for Windows and macOS only. A run has no time budget, and speed is not a goal (owner, 2026-10-06; the ten-minute budget written here that day was removed on 2026-10-07). `scripts/ci/run-on-hosts.sh` runs a set on several hosts at once (below). These figures are from the Bash hooks, and none describes the core. On one host `npm test` took 21 minutes and `npm run test:release` 46 to 62 (carenine, 2026-10-05). With both macOS hosts held whole, the development set took 901 seconds and was green (2026-10-06), with M1 already at load 15 from other work. One Bash guard call was 0.6 to 0.9 CPU seconds, nearly all of it spent starting about 93 external processes (measured 2026-10-06). The owner's direction for that cost was Rust, and the core starts no process per statement. **The first whole development set on the tree without the Bash hooks** ran on commit 74e72b0 on both macOS hosts on 2026-10-07: 22 units on each, every unit rc 0, 907 `ok` and 0 `not ok` on each, no skipped row. M1 took 847 seconds (5 CPUs, load 3.72 at the start and 20.79 at the end, with other work on the host). carenine took 529 seconds (9 CPUs, load 2.92 at the start and 10.08 at the end). That set does not include the release batteries, `native-scan-failures` and `effect-trace-grid`. They have not run on this tree, and neither has WSL1. Do not write "covered" beyond what is listed here. No per-call cost of the core is recorded in this document.
+- **Our CI is our own infrastructure** (owner, 2026-10-06). GitHub Actions does not run the suite, and no release step waits for it. The suite runs on our hosts: alex-macbook-m1 and carenine for macOS (runner `~/safedeps-runs/slot.sh`), and WSL1 on the home Windows PC for Windows, the environment Kuma Studio's Windows build runs in. Linux is not tested (owner, 2026-10-06): Kuma Studio ships for Windows and macOS only. A run has no time budget, and speed is not a goal (owner, 2026-10-06; the ten-minute budget written here that day was removed on 2026-10-07). `scripts/ci/run-on-hosts.sh` runs a set on several hosts at once (below). These figures are from the Bash hooks, and none describes the core. On one host `npm test` took 21 minutes and `npm run test:release` 46 to 62 (carenine, 2026-10-05). With both macOS hosts held whole, the development set took 901 seconds and was green (2026-10-06), with M1 already at load 15 from other work. One Bash guard call was 0.6 to 0.9 CPU seconds, nearly all of it spent starting about 93 external processes (measured 2026-10-06). The owner's direction for that cost was Rust, and the core starts no process per statement. **The first whole development set on the tree without the Bash hooks** ran on commit 74e72b0 on both macOS hosts on 2026-10-07: 22 units on each, every unit rc 0, 907 `ok` and 0 `not ok` on each, no skipped row. M1 took 847 seconds (5 CPUs, load 3.72 at the start and 20.79 at the end, with other work on the host). carenine took 529 seconds (9 CPUs, load 2.92 at the start and 10.08 at the end). That set does not include the release batteries, `native-scan-failures` and `effect-trace-grid`. They had not run on this tree at that commit. The release set and the WSL1 batteries ran later, at 32bf06e (Release procedure, step 5). Do not write "covered" beyond what is listed here. No per-call cost of the core is recorded in this document.
 - Two commands, one runner (`scripts/test/run-all.sh`). `npm test` is the development run: every battery except the native scan-failure census (`native-scan-failures.sh`) and `effect-trace-grid.sh`. `npm run test:release` runs every battery, those two included. The two left out are the release batteries, and both measure what a release ships. The Bash census and `effect-trace-grid.sh`, which waits for it, took most of a release's time in v2.18.0 on macOS (the census 4,324 of 7,166 seconds, and `effect-trace-grid.sh` 2,840). The native census builds the core once per registered failure site, and no time for it is recorded here. A change that reaches the scan readings or the effect gate runs them by name: `scripts/test/native-scan-failures.sh`, `scripts/test/effect-trace-grid.sh`. Keep both commands green.
 - `run-all.sh --list` prints the batteries a run would start, with `--release` as for a run. `--units` prints the units the host runner splits that set into, and `--plan` adds each unit's weight and seconds.
 - The batteries run in parallel. They keep their state apart: each makes its own mktemp root, points `HOME` or `SAFEDEPS_HOME` into it, and starts its fixture servers on a port the kernel picks. Measured with a fresh `HOME` and `TMPDIR`, a full run left only npm's own cache and logs in the inherited `HOME`. A new battery keeps the same isolation, or it cannot run beside the others.
@@ -214,20 +214,43 @@ any step is open.
      --repo`, and the package contents (zero runtime dependencies, `npm pack
      --dry-run`). The secret scan runs the gitleaks on PATH only when that
      binary's sha256 is the pinned release binary's; `--install-gitleaks DIR`
-     installs the pinned release where it is not.
+     installs the pinned release where it is not. ShellCheck has no such
+     path: `release-checks.sh` has `--install-gitleaks` and nothing that
+     prepares ShellCheck, and the tree pins no ShellCheck version. At 32bf06e
+     the official 0.11.0 release was placed under the host's runs directory
+     and put on PATH.
    - **Windows:** in WSL1 on the home Windows PC, in the distribution made for
      these tests (`KumaWsl1Probe`, one slot): `smoke.sh`, `self-budget.sh`,
      `effect-trace-grid.sh` and `e2e.sh`, with the fixture projects on the
-     Linux root and on a Windows drive. These four reach what WSL1 does
-     differently, the cost of a process and the file metadata of a Windows
-     drive. The four took 3,612s on the Linux root and 3,949s on the Windows
-     drive when measured (2026-10-06, with the Bash hooks). The core has not
-     run in WSL1 on the tree without the Bash hooks, and nothing here says it
-     passes there: the linux-x64 binary is built for
-     `x86_64-unknown-linux-musl`, and no run of it in WSL1 is recorded. The
-     whole release set there has not been timed and is not part of a release.
-     `/proc/loadavg` is a constant in WSL1, so record the Windows CPU beside
-     the run instead of `uptime`.
+     Linux root and on a Windows drive, at nice 0 (no `nice` around the
+     battery). These four reach what WSL1 does differently, the cost of a
+     process and the file metadata of a Windows drive. The binary is the
+     `linux-x64` one, built on a macOS host the way the publish job builds it
+     (`scripts/build-core.sh --publish --target x86_64-unknown-linux-musl`)
+     and checked in WSL1 with `stamp --check`. `smoke.sh`, `self-budget.sh`
+     and `effect-trace-grid.sh` run from the `git archive` of the release
+     head, `rust/` included (`smoke.sh` reads `rust/Cargo.toml`). `e2e.sh`
+     runs from the tree a user receives: that archive without `rust/`, and
+     the binary in `bin/native/linux-x64/`. With `rust/` beside it, e2e's
+     installer rows require cargo, and WSL1 has none. The four batteries ran on
+     the core there at 32bf06e (2026-10-08), once on each filesystem: smoke
+     80.5s and 79.7s, self-budget 126.1s and 125.0s, effect-trace-grid 750.9s
+     and 887.2s, e2e 418.7s and 350.0s, about 1,376s on the Linux root and
+     1,442s on the Windows drive, all green. The 3,612s and 3,949s of
+     2026-10-06 are values of the Bash hooks, and the conditions differ
+     (ROADMAP.md, v2.19.0, has both and says how). e2e prints
+     `# skipped rows: N; names: …` at its end, and a person reads that line:
+     the rows that copy the source need Darwin and skip on Linux, and on a
+     Windows drive the permission rows skip as well. A skipped row is not a
+     pass. The whole release set has not been run there and is not part of a
+     release. `/proc/loadavg` is a constant in WSL1, so record the Windows CPU
+     beside the run instead of `uptime`. Two limits, both in ROADMAP.md
+     ("Known limits in WSL1"): if effect-trace-grid goes red on one provider
+     call with no answer for 20s (`OSV batch query failed status=000` in
+     `advisory.log`), run the battery once more, and two reds in a row are a
+     defect; and `/proc/<pid>/stat` gives a wrong nice in WSL1, so a battery
+     run at a positive nice goes red at e2e's stopped-owner row, which is why
+     the batteries run at nice 0.
 
    `npm run test:release` on one host, and each battery run by hand in WSL1,
    is judged by `run-all.sh` or by the battery alone, and neither judges
