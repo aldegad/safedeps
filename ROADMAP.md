@@ -1173,6 +1173,10 @@ Every run went through a test host's queue, never on the author's machine. A hos
 - **A call's time on the Rust pre hook,** beyond the deadline rows above.
 - **A kill inside the state write window and a stale `state.lock`.** Neither is measured on the Rust hook. The Bash guard had both open too.
 
+### The license changes
+
+v2.19.0 is released under the PolyForm Noncommercial License 1.0.0 (SPDX `PolyForm-Noncommercial-1.0.0`). Use for a commercial purpose is outside what that license permits, and the copyright holder is the contact for a license for it. `LICENSE`, the `license` field of `package.json` and of `rust/Cargo.toml`, and the License section of the README say so. The text of `LICENSE` is the official one, unchanged, with one `Required Notice:` line above it. The boundary is the last published version: v2.18.1 and every version before it were released under the Apache License 2.0. A license cannot be taken back from copies already given, so those copies keep their terms. How it was checked: the text in `LICENSE` is byte for byte the file in the official repository (`polyformproject/polyform-licenses`, `PolyForm-Noncommercial-1.0.0.md`), and the sha256 of the license text below the `Required Notice:` line and its blank line is `c0ea4a896d2c8c394b29f9427589996db826cd501c512279ff0ed3ef48fabbe5`. Check it with `tail -n +3 LICENSE | shasum -a 256`.
+
 ### The repairs v2.18.2 announced (the Bash guard)
 
 Everything from here to "Still open" is v2.18.2's section, written when the Bash guard was the hook. The commands, files and `lib/*.sh` function names in it are that guard's, and its numbers are measured on it, at the commits it names. The Rust core replaces that guard, and its answers differ in the places listed above. This part stays because it records why each verdict was made.

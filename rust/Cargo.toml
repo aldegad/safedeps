@@ -6,7 +6,7 @@ version = "2.19.0"
 edition = "2021"
 description = "The safedeps hooks' core: the shell lexer, the install recognizers, the spec extractor and what is being moved from the bash hooks"
 build = "build.rs"
-license = "Apache-2.0"
+license = "PolyForm-Noncommercial-1.0.0"
 publish = false
 
 # No dependencies, on purpose: safedeps has zero runtime dependencies and the

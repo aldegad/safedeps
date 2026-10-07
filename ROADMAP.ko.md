@@ -1173,6 +1173,10 @@ scan-failure census 는 awk 읽기는 하나씩 실패시켰지만 grep 과 sed 
 - **Rust pre 훅의 호출 시간**, 위 기한 행을 넘어서는 것.
 - **상태 쓰기 구간 안의 kill 과 낡은 `state.lock`.** 둘 다 Rust 훅에서는 재지 않았다. Bash 가드에서도 열려 있었다.
 
+### 라이선스가 바뀐다
+
+v2.19.0 은 PolyForm Noncommercial License 1.0.0(SPDX `PolyForm-Noncommercial-1.0.0`)으로 배포된다. 상업적 목적의 사용은 그 라이선스가 허락하는 범위 밖이고, 그 사용을 위한 라이선스는 저작권자에게 문의한다. `LICENSE`, `package.json` 과 `rust/Cargo.toml` 의 `license` 필드, README 의 License 절이 그렇게 말한다. `LICENSE` 본문은 공식 원문 그대로이고, 그 위에 `Required Notice:` 줄이 하나 있다. 경계는 마지막으로 게시된 버전이다. v2.18.1 과 그 이전의 모든 버전은 Apache License 2.0 으로 배포되었다. 이미 건네진 사본에서 라이선스를 거둘 수는 없으므로, 그 사본들은 자기 조건을 유지한다. 확인한 방법: `LICENSE` 의 본문은 공식 저장소(`polyformproject/polyform-licenses`, `PolyForm-Noncommercial-1.0.0.md`)의 파일과 바이트 단위로 같고, `Required Notice:` 줄과 그 뒤 빈 줄 아래의 라이선스 본문의 sha256 은 `c0ea4a896d2c8c394b29f9427589996db826cd501c512279ff0ed3ef48fabbe5` 이다. `tail -n +3 LICENSE | shasum -a 256` 으로 확인한다.
+
 ### v2.18.2 가 예고한 수리 (Bash 가드)
 
 여기서 "아직 열린 것" 까지는 v2.18.2 의 절이고, Bash 가드가 훅이던 때 쓴 것이다. 여기 나오는 명령, 파일, `lib/*.sh` 함수 이름은 그 가드의 것이고 수치도 그 가드에서 이름 붙은 커밋 시점에 쟀다. Rust 코어가 그 가드를 대신하고, 코어가 다르게 답하는 자리는 위에 적었다. 이 부분을 남기는 것은 각 판정을 왜 그렇게 했는지의 기록이기 때문이다.
