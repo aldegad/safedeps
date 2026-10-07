@@ -21,16 +21,21 @@ pub fn guard_dir() -> PathBuf {
     crate::os::path(&guard_text())
 }
 
+pub const GUARD_ENV: &str = "SAFEDEPS_HOME";
+pub const HOME_ENV: &str = "HOME";
+pub const GUARD_SUFFIX: &[u8] = b"/.safedeps";
+pub const DEFAULT_LEDGER_TTL_DAYS: &str = "30";
+
 /// The same directory as the text the hooks build their paths from. A record
 /// that names a path holds that text, so `x/` and `/pending` make `x//pending`
 /// there, as the shell's expansion does.
 pub fn guard_text() -> Vec<u8> {
     use std::os::unix::ffi::OsStringExt;
-    match std::env::var_os("SAFEDEPS_HOME") {
+    match std::env::var_os(GUARD_ENV) {
         Some(h) if !h.is_empty() => h.into_vec(),
         _ => {
-            let mut p = std::env::var_os("HOME").unwrap_or_default().into_vec();
-            p.extend_from_slice(b"/.safedeps");
+            let mut p = std::env::var_os(HOME_ENV).unwrap_or_default().into_vec();
+            p.extend_from_slice(GUARD_SUFFIX);
             p
         }
     }
@@ -95,7 +100,7 @@ pub fn truth_sources_moved() -> W {
         put(&mut moved, "npm-overrides", b"set");
     }
     named(&mut moved, "SAFEDEPS_RECHECK_FIXTURE_JSON", "recheck-fixture");
-    url(&mut moved, "SAFEDEPS_LEDGER_DEFAULT_TTL_DAYS", "30", "ledger-ttl-days");
+    url(&mut moved, "SAFEDEPS_LEDGER_DEFAULT_TTL_DAYS", DEFAULT_LEDGER_TTL_DAYS, "ledger-ttl-days");
     named(&mut moved, "SAFEDEPS_NPM_TEST_REGISTRY", "npm-test-registry");
     moved.join(&b' ')
 }

@@ -60,10 +60,15 @@ pub fn hash(ecosystem: &str, package: &str, version: &str, context: &str) -> Str
     format!("sha256:{}", sha256::hex(text.as_bytes()))
 }
 
+fn filename(key: &str) -> String { format!("{}.json", key.replacen(':', "-", 1)) }
+
+const DIRECTORY_ENV: &str = "SAFEDEPS_LEDGER_DIR";
+const DIRECTORY_NAME: &str = "approved-specs";
+
 pub fn directory() -> PathBuf {
-    match std::env::var_os("SAFEDEPS_LEDGER_DIR") {
+    match std::env::var_os(DIRECTORY_ENV) {
         Some(p) if !p.is_empty() => p.into(),
-        _ => state::guard_dir().join("approved-specs"),
+        _ => state::guard_dir().join(DIRECTORY_NAME),
     }
 }
 fn init(dir: &Path) -> io::Result<()> { std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir) }
@@ -75,7 +80,7 @@ pub struct Check { pub approved: bool, pub answer: jq::J }
 pub fn check(dir: &Path, ecosystem: &str, package: &str, version: &str, context: &str, now: i64) -> io::Result<Check> {
     init(dir)?;
     let key = hash(ecosystem, package, version, context);
-    let path = dir.join(format!("{}.json", key.replacen(':', "-", 1)));
+    let path = dir.join(filename(&key));
     let mut fields = Vec::new();
     let reason = if !path.is_file() { "miss" } else {
         let spec = std::fs::read(path).ok().and_then(|b| json::parse_one(&b).ok());
@@ -215,4 +220,32 @@ pub fn main(args: &[String], input: &[u8]) -> i32 {
         }
         _ => 2,
     }
+}
+
+#[cfg(test)]
+#[test]
+fn ledger_defaults_match_cli() {
+    let cli = include_str!("../../lib/ledger/ledger.sh");
+    for (name, default) in [
+        (state::GUARD_ENV, format!("${{{}}}{}", state::HOME_ENV, std::str::from_utf8(state::GUARD_SUFFIX).unwrap())),
+        (DIRECTORY_ENV, format!("${{{}}}/{}", state::GUARD_ENV, DIRECTORY_NAME)),
+        ("SAFEDEPS_LEDGER_DEFAULT_TTL_DAYS", state::DEFAULT_LEDGER_TTL_DAYS.into()),
+    ] {
+        assert!(cli.lines().any(|line| line == format!("{name}=\"${{{name}:-{default}}}\"")), "CLI default {name}");
+    }
+    let script = format!("{cli}\nprintf '%s\\n' \"$SAFEDEPS_HOME\" \"$SAFEDEPS_LEDGER_DIR\" \"$SAFEDEPS_LEDGER_DEFAULT_TTL_DAYS\"\nh=$(safedeps_ledger_hash npm @scope/pkg 1.2.3 context)\nprintf '%s\\n' \"$h\" \"$(safedeps_ledger_hash_to_filename \"$h\")\"");
+    let run = |home: &str| {
+        let out = std::process::Command::new("/bin/bash").env_clear()
+            .env("PATH", "/usr/bin:/bin").env("HOME", "fixture home").env("SAFEDEPS_HOME", home)
+            .args(["-c", &script]).output().unwrap();
+        assert!(out.status.success(), "CLI ledger: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8(out.stdout).unwrap()
+    };
+    let key = hash("npm", "@scope/pkg", "1.2.3", "context");
+    let tail = format!("{}\n{}\n", key, filename(&key));
+    assert_eq!(run(""), format!("fixture home/.safedeps\nfixture home/.safedeps/approved-specs\n30\n{tail}"));
+    assert_eq!(run("x/"), format!("x/\nx//approved-specs\n30\n{tail}"));
+    // Text expansion retains the extra slash; native Path::join normalizes it.
+    assert_eq!(Path::new("x/").join(DIRECTORY_NAME).as_os_str(), "x/approved-specs");
+    assert_ne!(Path::new("x/").join(DIRECTORY_NAME).as_os_str(), "x//approved-specs");
 }
