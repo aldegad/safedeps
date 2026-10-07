@@ -600,10 +600,12 @@ safedeps migrate
 
 ## License
 
-From v2.19.0 on, safedeps is under the [PolyForm Noncommercial License 1.0.0](LICENSE). The text is in `LICENSE`.
+From v2.19.0 on, safedeps is under the [PolyForm Noncommercial License 1.0.0](LICENSE). The text is in `LICENSE`, and this README does not stand in for it.
 
-The license lets you use, change and share the software for any noncommercial purpose. It names three kinds of use that count: personal use (research, experiment, testing, study, hobby projects, private entertainment), use by a charitable, educational, public research, public safety or health, or environmental protection organization or a government institution, and any other noncommercial purpose. If you share a copy, you must pass on the license (or its URL) and the `Required Notice:` line in `LICENSE`.
+The license permits use for noncommercial purposes. What counts as one, and the conditions that go with it, are set by `LICENSE`. It names the categories Personal Uses and Noncommercial Organizations.
 
-Use for a commercial purpose needs a separate license from the copyright holder. To ask for one, open an issue in this repository or write to the copyright holder through the profile at [github.com/aldegad](https://github.com/aldegad).
+If you give anyone a copy, the Notices section of `LICENSE` applies: they must also get a copy of the license terms or their URL, and the `Required Notice:` line in `LICENSE`.
 
-Versions up to and including v2.18.1 were released under the Apache License 2.0, and they stay under it.
+Use for a commercial purpose is outside what this license permits. For a license for that use, ask the copyright holder: open an issue in this repository, or write through the profile at [github.com/aldegad](https://github.com/aldegad).
+
+Versions up to and including v2.18.1 were released under the Apache License 2.0.

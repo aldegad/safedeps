@@ -600,10 +600,12 @@ safedeps migrate
 
 ## License
 
-v2.19.0 부터 safedeps 는 [PolyForm Noncommercial License 1.0.0](LICENSE) 을 따릅니다. 본문은 `LICENSE` 에 있습니다.
+v2.19.0 부터 safedeps 는 [PolyForm Noncommercial License 1.0.0](LICENSE) 을 따릅니다. 본문은 `LICENSE` 에 있고, 이 README 가 본문을 대신하지 않습니다.
 
-이 라이선스는 비상업적인 목적이라면 소프트웨어를 쓰고, 고치고, 나누는 것을 허락합니다. 본문이 허용 목적으로 꼽는 것은 세 가지입니다. 개인적인 사용(연구, 실험, 시험, 개인 공부, 취미 프로젝트, 사적인 즐거움), 자선단체·교육기관·공공 연구기관·공공 안전 또는 보건 기관·환경 보호 단체·정부 기관의 사용, 그 밖의 모든 비상업적 목적입니다. 사본을 나눠 줄 때는 라이선스 본문(또는 그 URL)과 `LICENSE` 의 `Required Notice:` 줄을 함께 전해야 합니다.
+이 라이선스는 비상업적 목적의 사용을 허락합니다. 무엇이 비상업적 목적에 드는지와 그 조건은 `LICENSE` 가 정합니다. 본문은 Personal Uses 와 Noncommercial Organizations 라는 범주를 둡니다.
 
-상업적인 목적으로 쓰려면 저작권자에게 별도의 라이선스를 받아야 합니다. 문의는 이 저장소에 이슈를 열거나, [github.com/aldegad](https://github.com/aldegad) 프로필로 저작권자에게 연락해 주십시오.
+사본을 누구에게 주든 `LICENSE` 의 Notices 절이 적용됩니다. 받는 사람도 라이선스 조건의 사본이나 그 URL 을, 그리고 `LICENSE` 의 `Required Notice:` 줄을 함께 받아야 합니다.
 
-v2.18.1 까지의 버전은 Apache License 2.0 으로 배포되었고, 그대로 Apache License 2.0 을 따릅니다.
+상업적 목적의 사용은 이 라이선스가 허락하는 범위 밖입니다. 그 사용을 위한 라이선스는 저작권자에게 문의해 주십시오. 이 저장소에 이슈를 열거나, [github.com/aldegad](https://github.com/aldegad) 프로필로 연락하면 됩니다.
+
+v2.18.1 까지의 버전은 Apache License 2.0 으로 배포되었습니다.
