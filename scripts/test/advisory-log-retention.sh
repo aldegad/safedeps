@@ -108,4 +108,11 @@ rotate 100000
 rmdir "${log}.rotate.lock"
 pass "a held lock defers rotation instead of racing it"
 
+# The CLI above still uses the Bash library. Hooks must honor the same
+# retention contract through their own pre/post path.
+# shellcheck source=lib/core-reader.sh
+source "${ROOT_DIR}/scripts/test/lib/core-reader.sh"
+core_reader_init "${ROOT_DIR}"
+python3 "${ROOT_DIR}/scripts/test/lib/core-advisory-retention.py" "${SAFEDEPS_TEST_CORE}"
+
 printf 'advisory-log retention passed\n'

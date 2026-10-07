@@ -1,0 +1,42 @@
+[
+  {
+    "command": "echo a\nnpm install left-pad@1.0.0",
+    "ecosystem": "npm"
+  },
+  {
+    "command": "echo one\necho two\npip install evil==1.0\nnpm ci",
+    "ecosystem": "pypi"
+  },
+  {
+    "command": "cat <<EOF\nnpm install y@1\nEOF\npip install z==1",
+    "ecosystem": "pypi"
+  },
+  {
+    "command": "echo \"a\nb\" ; yarn add c@1 | tee log",
+    "ecosystem": "npm"
+  },
+  {
+    "command": "npm run x && \\\n  pip install q==2",
+    "ecosystem": "pypi"
+  },
+  {
+    "command": "sh -c 'echo a\npip install q==1'; echo done",
+    "ecosystem": "pypi"
+  },
+  {
+    "command": "x=1\n\ny=2; gem install rake -v 13.0.0",
+    "ecosystem": "rubygems"
+  },
+  {
+    "command": "echo \"npm install no\"\ncargo install c@1\nnpm i d@1",
+    "ecosystem": "crates.io"
+  },
+  {
+    "command": "f() {\n  echo hi\n}\ngo install a@v1",
+    "ecosystem": "go"
+  },
+  {
+    "command": "true\n\n\n\nmvn -Dartifact=g:a:1 dependency:get",
+    "ecosystem": "maven"
+  }
+]

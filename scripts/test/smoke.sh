@@ -23,14 +23,24 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# The reader-only entry executes exactly the migrated contracts. Other smoke
+# contracts (CLI, provider and hook fault fixtures) still run in the full suite.
+# shellcheck source=lib/core-smoke.sh
+source "${ROOT_DIR}/scripts/test/lib/core-smoke.sh"
+if [[ "${1:-}" == --reader-contracts-only ]]; then
+  core_smoke_budget
+  core_smoke_pending
+  exit 0
+fi
+
 bash -n bin/safedeps
 bash -n lib/providers/providers.sh
 bash -n lib/ledger/ledger.sh
 bash -n lib/npm/closure.sh
 bash -n lib/npm/ask.sh
 bash -n lib/npm/workspaces.sh
-bash -n scripts/safedeps-pre-guard.sh
-bash -n scripts/safedeps-post-verify.sh
+# Native hooks have no Bash body to syntax-check. The canonical shim does.
+bash -n scripts/safedeps-hook-entry.sh
 bash -n scripts/safedeps-recheck-alert.sh
 bash -n scripts/release-gates.sh
 bash -n scripts/test/consumer-forms.sh
@@ -63,22 +73,7 @@ lock_version=$(awk -F'"' '/^name = "safedeps-core"$/ { hit = 1; next } hit && /^
 [[ "${lock_version}" == "${pkg_version}" ]] || fail "rust/Cargo.lock names safedeps-core ${lock_version}, package.json ${pkg_version}"
 pass "crate version"
 
-# The guard clamps its self budget below the runtime hook budget, and it cannot
-# read that budget at runtime — the payload does not carry it and any of several
-# settings files may have registered the hook. So it names the number safedeps
-# itself registers. These two constants are one fact in two files; pin them
-# together, because an installer that raises the registered timeout while the
-# guard still assumes 30s leaves the clamp computed against a stale number.
-guard_runtime_budget=$(grep -m1 '^SAFEDEPS_RUNTIME_BUDGET_SECONDS=' scripts/safedeps-pre-guard.sh | cut -d= -f2)
-guard_budget_ceiling=$(grep -m1 '^SAFEDEPS_SELF_BUDGET_MAX_SECONDS=' scripts/safedeps-pre-guard.sh | cut -d= -f2)
-installer_pre_timeout=$(grep -m1 '^const PRE_HOOK_TIMEOUT_SECONDS = ' scripts/install/install-safedeps-hooks.mjs | tr -dc '0-9')
-[[ -n "${guard_runtime_budget}" && -n "${guard_budget_ceiling}" && -n "${installer_pre_timeout}" ]] \
-  || fail "budget constants are readable (guard=${guard_runtime_budget}/${guard_budget_ceiling}, installer=${installer_pre_timeout})"
-[[ "${guard_runtime_budget}" == "${installer_pre_timeout}" ]] \
-  || fail "guard's runtime budget matches the timeout the installer registers (guard=${guard_runtime_budget}s, installer=${installer_pre_timeout}s)"
-(( guard_budget_ceiling < guard_runtime_budget )) \
-  || fail "self-budget ceiling sits below the runtime budget (ceiling=${guard_budget_ceiling}s, runtime=${guard_runtime_budget}s)"
-pass "self-budget ceiling is pinned below the hook timeout the installer registers"
+core_smoke_budget
 
 # The manual-install docs and the installer describe the same registration, and
 # they are different files — which is exactly how they drifted: the docs told
@@ -865,30 +860,7 @@ grep -q "the install's last option takes the next word as its value" "${tmp_root
 # strip that listed the bytes allowed after the flag missed `>` and `<`, so
 # `x>log` keyed apart from `x --ignore-scripts>log`, and an unapproved lockfile
 # was flagged but not rolled back.
-post_key_src=$(sed -n '/^compute_pending_key() {/,/^}/p' scripts/safedeps-post-verify.sh)
-[[ "${post_key_src}" == *"compute_pending_key() {"* ]] || fail "compute_pending_key is found in the post hook (renamed? then update this check)"
-key_safe=$(mktemp -d "${tmp_root}/safe-key.XXXXXX")
-SAFEDEPS_HOME="${key_safe}" lib/ledger/ledger.sh approve npm left-pad 1.3.0 1.3.0 smoke >/dev/null
-for key_in in \
-  "npm install left-pad@1.3.0 --cache --ignore-scripts" \
-  "npm install left-pad@1.3.0 --ignore-scripts=false" \
-  "sh -c 'npm install left-pad@1.3.0'" \
-  "npm install left-pad@1.3.0>install.log" \
-  "npm install left-pad@1.3.0<input" \
-  "npm install left-pad@1.3.0 --cache" \
-  'npm ci $(printf -- --)' \
-  'HOME=--cache; npm install left-pad@1.3.0 ~'
-do
-  rm -rf "${key_safe}/pending"
-  key_out=$(run_hook_command "${tmp_root}/home-key" "${key_safe}" "${key_in}")
-  key_cmd=$(jq -r '.hookSpecificOutput.updatedInput.command // empty' <<< "${key_out}")
-  [[ -n "${key_cmd}" ]] || fail "the key case is rewritten: ${key_in}"
-  key_pre=$(find "${key_safe}/pending" -name '*.json' | sed -E 's#.*/##; s/__.*//')
-  key_post=$(eval "${post_key_src}"; compute_pending_key "${key_pre%%_*}" "${key_cmd}")
-  [[ -n "${key_pre}" && "${key_pre}" == "${key_post}" ]] \
-    || fail "the post hook derives the pre hook's pending key from the rewritten command: ${key_in} (pre ${key_pre}, post ${key_post})"
-done
-pass "the pending key is the same for the command and its inert rewrite, wherever the flag lands"
+core_smoke_pending
 
 # A `--` before the verb leaves no place where npm reads the flag as an option.
 # The install still gets the release's rewrite, the floor, and the downgrade is

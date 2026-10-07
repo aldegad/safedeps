@@ -59,14 +59,19 @@ decision_of() { # text file -> deny | undecided | allow | pass
   local safe out decision
   safe=$(mktemp -d "${tmp_root}/safe.XXXXXX")
   out=$(jq -nc --rawfile c "$1" --arg cwd "${tmp_root}/project" '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
-    HOME="${safe}/home" SAFEDEPS_HOME="${safe}/state" scripts/safedeps-pre-guard.sh 2>/dev/null)
+    HOME="${safe}/home" SAFEDEPS_HOME="${safe}/state" "${SAFEDEPS_TEST_CORE}" pre 2>/dev/null) || return
   if [[ -z "${out}" ]]; then printf 'pass'; return; fi
+  jq -e 'type == "object"' <<< "${out}" >/dev/null || return
   decision=$(jq -r '.hookSpecificOutput.permissionDecision // "pass"' <<< "${out}")
   if [[ "${decision}" == "deny" ]] && jq -r '.hookSpecificOutput.permissionDecisionReason // ""' <<< "${out}" | grep -q 'UNDECIDED'; then
     decision=undecided
   fi
   printf '%s' "${decision}"
 }
+
+# shellcheck source=lib/core-reader.sh
+source "${ROOT_DIR}/scripts/test/lib/core-reader.sh"
+core_reader_init "${ROOT_DIR}"
 
 # Control: the harness tells a judged install from data.
 printf 'pip install evil==6.6.6' > "${tmp_root}/k.cmd"
@@ -82,32 +87,15 @@ pass "control: the harness separates a judged install from data"
 # The last is the one for a redirection between a command and its arguments
 # whose target holds a substitution: the live view keeps that body, which
 # runs, so there the command and its arguments are not side by side.
-lex_src=$(sed -n '/^shell_lex() {/,/^}/p' scripts/safedeps-pre-guard.sh)
-[[ "${lex_src}" == *"shell_lex() {"* ]] || fail "shell_lex not found in the guard (renamed? then update this battery)"
-eval "${lex_src}"
-# The payload views print where each payload lies, not its bytes; the guard's
-# own builder cuts them out of the text (lex_payloads, lex_payload_build).
-for fn in lex_payload_build lex_payloads; do
-  fn_src=$(sed -n "/^${fn}() {/,/^}/p" scripts/safedeps-pre-guard.sh)
-  [[ "${fn_src}" == *"${fn}() {"* ]] || fail "${fn} not found in the guard (renamed? then update this battery)"
-  eval "${fn_src}"
-done
-eval "$(grep '^SAFEDEPS_PAYLOAD_BAD_CODE=' scripts/safedeps-pre-guard.sh)"
-guard_mark_reading_failed() { :; }
-# Each view of <text> as a text: a payload view as its payloads, one per line.
 lex_view_text() { # reading text view
   local p
   if [[ "$3" == cscripts || "$3" == substs ]]; then
-    SAFEDEPS_READING="$1" lex_payloads "$2" "$3"
+    SAFEDEPS_READING="$1" lex_payloads "$2" "$3" || return
     for p in ${LEX_PAYLOADS[@]+"${LEX_PAYLOADS[@]}"}; do printf '%s\n' "${p}"; done
   else
-    SAFEDEPS_READING="$1" shell_lex "$2" "$3" "safedeps:shell-reading"
+    SAFEDEPS_READING="$1" shell_lex "$2" "$3"
   fi
 }
-# The lexer reads the lists of the grammar (the shells, the executables), as
-# it does in the guard.
-# shellcheck source=lib/install-grammar.sh
-source lib/install-grammar.sh
 reading_shows_tail() { # reading text
   local v
   for v in live cscripts shell-bodies unprefixed; do
