@@ -29,6 +29,8 @@ mod pending;
 mod readings;
 mod effects;
 mod install;
+#[cfg(test)]
+mod reader_tests;
 pub fn probe(input:&[u8])->i32 {
     match json::parse_one(input).ok().and_then(|v|v.get("op").and_then(Value::as_str).map(str::to_string)).as_deref() {
         Some("targets"|"target-statements")=>targets::probe(input),

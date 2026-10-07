@@ -1,0 +1,109 @@
+{
+  "baseline": "47ef6c4ce72e1a265c576e19f0cdb01edba784af",
+  "rows": [
+    {
+      "source": "smoke.sh:27-42",
+      "contract": "Executable hook source parses before it is used.",
+      "disposition": "retire the two Bash hook syntax checks; retain canonical shim syntax and execute native version/pre/post",
+      "reason": "The native hook has no Bash body to parse. Rust compilation and the actual core calls cover the replacement."
+    },
+    {
+      "source": "smoke.sh:72-81",
+      "contract": "The self budget ceiling is below the registered runtime timeout.",
+      "disposition": "core-smoke.sh core_smoke_budget calls native budget-config and reads the installer timeout"
+    },
+    {
+      "source": "smoke.sh:868-891",
+      "contract": "A rewritten no-id command finds the pre hook's pending record.",
+      "disposition": "core-smoke.sh core_smoke_pending executes native pre/post record consumption for seven rewritten commands; the trailing --cache command explicitly requires UNDECIDED deny, no rewrite and no pending record",
+      "reason": "The trailing --cache command is an intended end-flag-not-an-option collision in Rust. No rewrite or record exists on which to compare a pending key; its rejection remains a public contract (core-intended-battery-rows.tsv)."
+    },
+    {
+      "source": "scan-contract.sh:108-128; shell-reading.sh:85-110",
+      "contract": "Views, payload reconstruction and grammar are read from the shipped reader.",
+      "disposition": "core-reader.sh calls lex, grammar and reader; existing fixed and measured expectations remain"
+    },
+    {
+      "source": "scan-contract.sh:138-141",
+      "contract": "An apostrophe inside a single-quoted awk program must not execute shell code.",
+      "disposition": "retire",
+      "reason": "The Rust lexer is compiled code, not a Bash string evaluated as awk. Quoted input and byte-preservation expectations remain in scan-contract."
+    },
+    {
+      "source": "scan-contract.sh:149-166",
+      "contract": "The driver owns the shell reading; callers cannot silently switch readings.",
+      "disposition": "core/reader_tests.rs tests missing reading, explicit reading/view separation, and driver cleanup",
+      "reason": "Bash call-site and global-assignment greps have no native target."
+    },
+    {
+      "source": "scan-contract.sh:854-917",
+      "contract": "Invalid payload units fail explicitly; recursive scripts reach substitutions without silently ending the reader.",
+      "disposition": "core/reader_tests.rs preserves all twelve unit cases, deep recursion and failure propagation",
+      "reason": "Rust has no set -e subshell return-status hazard; the Bash setE_script control is retired."
+    },
+    {
+      "source": "scan-contract.sh:1445-1482",
+      "contract": "Statement cuts and words respect reading-specific redirections, comments and heredocs.",
+      "disposition": "reader statements supplies the production result to the unchanged fixed expectations and event contract"
+    },
+    {
+      "source": "scan-contract.sh:1882-1901",
+      "contract": "Manager and shell sets agree with the pipe recognizer, including case and boundaries.",
+      "disposition": "core/reader_tests.rs tests the production grammar and pipe predicate on the original name lists"
+    },
+    {
+      "source": "scan-contract.sh:1953-1993",
+      "contract": "One text, view or reading must not reuse another's cached bytes or lose DIVERGE.",
+      "disposition": "core/reader_tests.rs reuses one Run across texts, views and readings and checks DIVERGE",
+      "reason": "Native Run has no checksum-keyed disk memo. Planting cksum files and requiring PLANTED to be returned is retired, not counted as native cache coverage."
+    },
+    {
+      "source": "scan-contract.sh:1994-2225",
+      "contract": "Scanner failure is distinguishable from no-match and reaches UNDECIDED settlement.",
+      "disposition": "core/reader_tests.rs checks invalid view/reading propagation; pre/reader_tests.rs calls the production settlement with failure and working controls; core-reader-check.py settlement exercises public pre with unclosed install and non-install input",
+      "reason": "The native reader starts no awk/grep/sed processes. Their call-index failures and grep flag-file failures are retired. No injected subprocess failure is claimed."
+    },
+    {
+      "source": "scan-contract.sh:2230-2416",
+      "contract": "Reader inputs and offsets belong to original command or executable payload bytes.",
+      "disposition": "core-reader-check.py source-map checks native payload shape and every source byte against the original command, including nested child fixtures",
+      "reason": "The awk-call trace is retired. Source-map checks cover payload attribution, not an inventory of every native lex call."
+    },
+    {
+      "source": "scan-contract.sh:2427-2476",
+      "contract": "Spec and statement read failures cannot become empty successful readings.",
+      "disposition": "core/reader_tests.rs checks missing-reading pieces and invalid-view failure propagation through facts; pre/reader_tests.rs checks final settlement",
+      "reason": "Bash function-body bans on sed/tr/awk/grep and failing awk executables no longer target the native reader."
+    },
+    {
+      "source": "scan-contract.sh:2484-2513",
+      "contract": "The failure discriminator names census managers, ignores case, and needs no scanner subprocess.",
+      "disposition": "pre/reader_tests.rs calls the exact discriminator on the census and fixed controls, and checks its connection to settlement"
+    },
+    {
+      "source": "statement-batch.sh:79-83,118-278",
+      "contract": "Batched grep answers and ecosystem selection equal individual grep calls despite multiline and invalid-byte input.",
+      "disposition": "retire batch/single equivalence; retain four corpora and seeded generator in the native facts battery, and ten fixed ecosystem expectations in both public and unit tests",
+      "reason": "Rust has no Bash grep batching or line-number map. The historical comparison count and failgrep controls are not native evidence."
+    },
+    {
+      "source": "manager-variants.sh:395-420",
+      "contract": "Command-specific options are selected correctly; table entries are unique and reachable.",
+      "disposition": "core grammar table checks plus direct native option_class and command tests",
+      "reason": "The mutable synthetic zz table is retired because the native table is a compiled constant. The concrete bun x -p regression and all actual table lookups remain tested."
+    },
+    {
+      "source": "smoke.sh CLI ledger source rows and fixtures",
+      "contract": "The CLI ledger writer, validation and approval fixtures still use the Bash library.",
+      "disposition": "preserve; these rows still exercise shipped CLI code and are not counted as native reader coverage"
+    },
+    {
+      "source": "advisory-log-retention.sh:38",
+      "contract": "Compaction keeps evidence bytes, archives INFO, bounds retained generations, honors the rotation lock and derives advisory.log from the state directory.",
+      "disposition": "preserve all seven CLI Bash rows; add core-advisory-retention.py with real pre/post log growth, disk and gzip readback, exact generation membership, and state-path assertions",
+      "native_rows_added": 5,
+      "cli_rows_preserved": 7,
+      "rows_retired": 0
+    }
+  ]
+}

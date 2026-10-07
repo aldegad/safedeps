@@ -46,6 +46,10 @@ if [[ "${1:-}" == --tree ]]; then
   TREE=$(cd "$2" && pwd)
 fi
 cd "${TREE}"
+# shellcheck source=lib/core-reader.sh
+source "${ROOT_DIR}/scripts/test/lib/core-reader.sh"
+core_reader_init "${TREE}"
+
 # A class that fails is reported and the next one still runs, so a control
 # shows every class it breaks; the battery fails at the end.
 failed=0
@@ -75,7 +79,16 @@ tuple() {
   for iter in 1 2 3 4 5 6; do
     out=$(jq -nc --arg c "${command}" --arg cwd "${project_dir}" \
       '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
-      HOME="${safe}/home" SAFEDEPS_HOME="${safe}" scripts/safedeps-pre-guard.sh 2>/dev/null) || true
+      HOME="${safe}/home" SAFEDEPS_HOME="${safe}" "${SAFEDEPS_TEST_CORE}" pre 2>/dev/null) || {
+      : > "${tmp_root}/native-failed"
+      printf 'native core failed for: %s\n' "${command}" >&2
+      return 1
+    }
+    if [[ -n "${out}" ]] && ! jq -e 'type == "object"' <<< "${out}" >/dev/null; then
+      : > "${tmp_root}/native-failed"
+      printf 'native core returned malformed JSON for: %s\n' "${command}" >&2
+      return 1
+    fi
     reason=$(jq -r '.hookSpecificOutput.permissionDecisionReason // empty' <<< "${out:-{\}}" 2>/dev/null) || true
     if [[ "${iter}" == 1 ]]; then
       first=$(jq -r '.hookSpecificOutput.permissionDecision // "pass"' <<< "${out:-{\}}" 2>/dev/null) || first=pass
@@ -386,41 +399,12 @@ else
   pass "bun's runtime options take no value where bun installs (${#runtime_options[@]} options, ${#packages[@]} spellings, ${n} commands)"
 fi
 
-# --- The table itself ----------------------------------------------------------
-# A command's entry is looked up before `*`: with `*` first, `bun x -p` was
-# read as bun's runtime `-p` and the package it names was never checked.
-# A synthetic table holds the order: one option, two classes.
-order=$(
-  # shellcheck source=../../lib/install-grammar.sh
-  source "${TREE}/lib/install-grammar.sh"
-  SAFEDEPS_G_VALUE_OPTIONS+=" zz/*:-q=v zz/run:-q=p "
-  safedeps_manager_option_class zz run -q && printf '%s' "${SAFEDEPS_G_VALUE}"
-  safedeps_manager_option_class zz "" -q && printf ' %s' "${SAFEDEPS_G_VALUE}"
-  true
-)
-[[ "${order}" == "p v" ]] || not_ok "a command's own entry is read before \`*\` (got [${order}], want [p v])"
-# No option is listed both for `*` and for a command of the same manager: the
-# command's entry would silently decide one reading and `*` the other. And
-# every scope names a command path the manager has, or no lookup reaches it.
-table_faults=$(
-  # shellcheck source=../../lib/install-grammar.sh
-  source "${TREE}/lib/install-grammar.sh"
-  set -f
-  for e in ${SAFEDEPS_G_VALUE_OPTIONS}; do
-    family="${e%%/*}" scope="${e#*/}" scope="${scope%%:*}" option="${e#*:}" option="${option%=*}"
-    if [[ "${scope}" == '*' ]]; then
-      for f in ${SAFEDEPS_G_VALUE_OPTIONS}; do
-        [[ "${f}" == "${family}/"* && "${f}" != "${family}/*:"* && "${f#*:}" == "${option}="* ]] \
-          && printf 'both %s and %s\n' "${e}" "${f}"
-      done
-    elif ! safedeps_manager_command "${family}" "${scope}"; then
-      printf 'no command path %s:%s for %s\n' "${family}" "${scope}" "${e}"
-    fi
-  done
-  true
-)
-[[ -z "${table_faults}" ]] || not_ok "the value table has an entry no lookup reads as written: ${table_faults//$'\n'/; }"
-[[ "${order}" != "p v" || -n "${table_faults}" ]] \
-  || pass "the value table reads a command's entry first, lists no option for both \`*\` and a command, and every scope is a command path"
+# --- The native table ---------------------------------------------------------
+# Production tables come from core grammar; the historical synthetic mutable
+# zz table has no native runtime equivalent. Direct lookup precedence and
+# reachability are also held in rust/src/core/reader_tests.rs.
+python3 "${ROOT_DIR}/scripts/test/lib/core-reader-check.py" "${SAFEDEPS_TEST_CORE}" table \
+  || not_ok "native value table has an ambiguous or unreachable entry"
+[[ ! -e "${tmp_root}/native-failed" ]] || not_ok "a native core invocation failed"
 (( failed != 0 )) || shard_end
 exit "${failed}"
