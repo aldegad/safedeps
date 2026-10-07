@@ -238,7 +238,7 @@ any step is open.
      and 887.2s, e2e 418.7s and 350.0s, about 1,376s on the Linux root and
      1,442s on the Windows drive, all green. The 3,612s and 3,949s of
      2026-10-06 are values of the Bash hooks, and the conditions differ
-     (ROADMAP.md, v2.19.0, has both and says how). e2e prints
+     (ROADMAP.md, v2.19.0, compares the batteries one by one). e2e prints
      `# skipped rows: N; names: …` at its end, and a person reads that line:
      the rows that copy the source need Darwin and skip on Linux, and on a
      Windows drive the permission rows skip as well. A skipped row is not a
