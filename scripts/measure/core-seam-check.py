@@ -9,8 +9,7 @@ bash hooks' own tools print, because the other hook, the engines and the
 batteries read those bytes. This asks the binary and the tools the same
 questions and compares:
 
-  - `safedeps-core kat` against hashlib, jq, lib/gates/backstop-trace.sh (stat,
-    ls -di), realpath and bash's ${#s};
+  - `safedeps-core kat` against hashlib, jq, Python stat/lstat, realpath and bash's ${#s};
   - `safedeps-core stamp` against the same digest scheme written here, with
     two controls (a byte added to the source, the source removed);
   - `safedeps-core words` on a few texts in each reading: every word's span
@@ -23,6 +22,7 @@ Usage, from the tree's root: scripts/measure/core-seam-check.py <safedeps-core>
 The binary has to stand where its stamp finds rust/ (in the tree, at most
 five directories below its root).
 """
+from native_fixture_facts import file_clock, tree_clock, tree_inode
 import subprocess, hashlib, os, re, sys, tempfile, shutil, time, platform
 if len(sys.argv) != 2:
     sys.exit(__doc__)
@@ -97,14 +97,13 @@ try:
     for name, n in (('utc-0', 0), ('utc-leap', 951782400), ('utc-2026', 1791291940)):
         check(name, k[name], time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(n)).encode())
     check('subsecond', k['subsecond'], b'1 0 0')
-    lib = 'source lib/gates/backstop-trace.sh; '
     for p in (f, T + '/l', T + '/dangling', T + '/dir', T + '/missing', T + '/missing/deeper', uni):
         kk = kat(p)
         nm = os.path.basename(p)
-        check('tree clock of ' + nm, kk['clock-c'], sh(['bash', '-c', lib + 'safedeps_tree_clock "$1"', '_', p])[1])
-        check('file clock m of ' + nm, kk['clock-m'], sh(['bash', '-c', lib + 'safedeps_file_clock "$1" m', '_', p])[1].rstrip(b'\n'))
-        check('file clock m follow of ' + nm, kk['clock-m-follow'], sh(['bash', '-c', lib + 'safedeps_file_clock "$1" m follow', '_', p])[1].rstrip(b'\n'))
-        check('tree inode of ' + nm, kk['inode'], sh(['bash', '-c', lib + 'safedeps_tree_inode "$1"', '_', p])[1])
+        check('tree clock of ' + nm, kk['clock-c'], tree_clock(p).encode())
+        check('file clock m of ' + nm, kk['clock-m'], file_clock(p, 'm').encode())
+        check('file clock m follow of ' + nm, kk['clock-m-follow'], file_clock(p, 'm', True).encode())
+        check('tree inode of ' + nm, kk['inode'], tree_inode(p).encode())
         check('realpath of ' + nm, kk['realpath'], sh(['bash', '-c', 'realpath "$1" 2>/dev/null || printf %s "$1"', '_', p])[1].rstrip(b'\n'))
     utf = 'en_US.UTF-8' if platform.system() == 'Darwin' else 'C.UTF-8'
     for lang in ('C', utf):

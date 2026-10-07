@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Four report-mutations controls at real I/O failures, on archive copies.
 
-The unmodified Bash and Rust must pass the permission fixtures first. Each
+The unmodified core must pass the permission fixtures first. Each
 source mutant then must build, run its hook successfully, and fail at its
 specific existing report-oracle diagnostic. A build failure or missed
 injection never counts as a caught mutation. Run on a remote build host.
