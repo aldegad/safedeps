@@ -14,6 +14,15 @@ fail() {
   exit 1
 }
 
+# Rewriting rows require an answer; quiet rows assert empty stdout directly.
+call_rewrite() {
+  [[ -n "$1" ]] || fail "expected a hook rewrite, got no output"
+  jq -ers 'if length == 1 and (.[0] | type == "object") then
+      .[0].hookSpecificOutput.updatedInput.command | select(type == "string" and length > 0)
+    else error("expected one response object") end' <<< "$1" \
+    || fail "expected a JSON hook rewrite (got $1)"
+}
+
 # A rollback and its interrupted-rollback report give no command. The pattern
 # is broad on purpose: a check for "npm ci" alone stayed green when review put
 # "To reinstall, run npm install in <dir>" into both messages.
@@ -252,7 +261,9 @@ go_sub_json=$(./bin/safedeps --json check go example.com/mod/cmd/tool@v1.0.0 2>/
   || fail "a Go import path below a vulnerable module is not approved"
 go_sub_guard=$(jq -nc --arg c "go install example.com/mod/cmd/tool@v1.0.0" --arg cwd "${tmp_root}" \
   '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' | native_fixture_hook pre 2>/dev/null)
-[[ "$(jq -r '.hookSpecificOutput.permissionDecision // "pass"' <<< "${go_sub_guard:-{\}}")" == "deny" ]] \
+[[ -n "${go_sub_guard}" ]] || fail "expected a Go install decision, got no output"
+jq -es 'length == 1 and (.[0] | type == "object") and .[0].hookSpecificOutput.permissionDecision == "deny"' \
+  <<< "${go_sub_guard}" >/dev/null \
   || fail "after the prescribed check, the install of a package below a vulnerable module is still denied"
 go_clean_json=$(./bin/safedeps --json check go example.com/other/cmd/tool@v1.0.0 2>/dev/null) || true
 [[ "$(jq -r '.approved' <<< "${go_clean_json}")" == "true" ]] \
@@ -1415,8 +1426,8 @@ pass "a rewritten command whose record the post hook does not find gets no --ign
 markfail_wt=$(mktemp -d "${tmp_root}/markfail-wt.XXXXXX")
 grammar_project "${markfail_wt}"
 markfail_pre=$(SAFEDEPS_TEST_FAULT=markfail grammar_pre "${markfail_wt}" "npm install fixture-parent@1.0.0")
-[[ -z "$(jq -r '.hookSpecificOutput.updatedInput.command // empty' <<< "${markfail_pre:-{\}}")" ]] \
-  || fail "a rewrite whose record could not be written is not sent (${markfail_pre})"
+[[ -z "${markfail_pre}" ]] \
+  || fail "a rewrite whose record could not be written leaves stdout quiet (${markfail_pre})"
 grep -q 'pre-guard: could not record the command safedeps would write in .*, so it was not rewritten' "${SAFEDEPS_HOME}/advisory.log" \
   || fail "a rewrite withheld for a failed record is said in advisory.log"
 printf '%s\n' "${tampered_lock}" > "${markfail_wt}/package-lock.json"
@@ -1432,7 +1443,7 @@ pass "a rewrite whose record cannot be written is not sent, and the rollback say
 markread_wt=$(mktemp -d "${tmp_root}/markread-wt.XXXXXX")
 grammar_project "${markread_wt}"
 markread_pre=$(grammar_pre "${markread_wt}" "npm install fixture-parent@1.0.0")
-[[ "$(jq -r '.hookSpecificOutput.updatedInput.command // empty' <<< "${markread_pre:-{\}}")" == 'npm install --ignore-scripts fixture-parent@1.0.0 --ignore-scripts' ]] \
+[[ "$(call_rewrite "${markread_pre}")" == 'npm install --ignore-scripts fixture-parent@1.0.0 --ignore-scripts' ]] \
   || fail "the install whose record the post hook will not read is rewritten (${markread_pre})"
 printf '%s\n' "${tampered_lock}" > "${markread_wt}/package-lock.json"
 markread_post=$(SAFEDEPS_TEST_FAULT=markread PATH="${stub_bin}:${PATH}" grammar_post "${markread_wt}" "npm install fixture-parent@1.0.0")
@@ -1462,7 +1473,7 @@ for unstated_shape in v2172-true v2172-false string-true null-command number-com
   unstated_wt=$(mktemp -d "${tmp_root}/unstated-${unstated_shape}-wt.XXXXXX")
   grammar_project "${unstated_wt}"
   unstated_pre=$(grammar_pre "${unstated_wt}" "npm install fixture-parent@1.0.0")
-  [[ "$(jq -r '.hookSpecificOutput.updatedInput.command // empty' <<< "${unstated_pre:-{\}}")" == 'npm install --ignore-scripts fixture-parent@1.0.0 --ignore-scripts' ]] \
+  [[ "$(call_rewrite "${unstated_pre}")" == 'npm install --ignore-scripts fixture-parent@1.0.0 --ignore-scripts' ]] \
     || fail "${unstated_shape}: the install is rewritten (${unstated_pre})"
   unstated_meta="${SAFEDEPS_HOME}/snapshots/$(jq -r '.snapshot_id' "$(grammar_pending "${unstated_wt}")")_meta.json"
   case "${unstated_shape}" in
@@ -1509,7 +1520,7 @@ pass "no record file gets no --ignore-scripts line, and advisory.log names the r
 twoobj_wt=$(mktemp -d "${tmp_root}/twoobj-wt.XXXXXX")
 grammar_project "${twoobj_wt}"
 twoobj_pre=$(grammar_pre "${twoobj_wt}" "npm install fixture-parent@1.0.0")
-[[ -n "$(jq -r '.hookSpecificOutput.updatedInput.command // empty' <<< "${twoobj_pre:-{\}}")" ]] \
+[[ -n "$(call_rewrite "${twoobj_pre}")" ]] \
   || fail "the install whose record becomes two objects is rewritten (${twoobj_pre})"
 twoobj_meta="${SAFEDEPS_HOME}/snapshots/$(jq -r '.snapshot_id' "$(grammar_pending "${twoobj_wt}")")_meta.json"
 { printf '{"record":2,"ignore_scripts_injected":false}\n'; cat "${twoobj_meta}"; } > "${twoobj_meta}.tmp" && mv -f "${twoobj_meta}.tmp" "${twoobj_meta}"
@@ -1848,8 +1859,8 @@ jq -c . "${tmp_root}/same-first-lock.json" > "${same_wt}/package-lock.json"
 cmp -s "${same_wt}/package-lock.json" "${tmp_root}/same-first-lock.json" && fail "the second call sees a lockfile with other bytes"
 cp "${same_wt}/package-lock.json" "${tmp_root}/same-second-lock.json"
 same_second=$(SAFEDEPS_TEST_FAULT=same grammar_pre "${same_wt}" "npm ci")
-same_first_cmd=$(jq -r '.hookSpecificOutput.updatedInput.command // empty' <<< "${same_first:-{\}}")
-same_second_cmd=$(jq -r '.hookSpecificOutput.updatedInput.command // empty' <<< "${same_second:-{\}}")
+same_first_cmd=$(call_rewrite "${same_first}")
+same_second_cmd=$(call_rewrite "${same_second}")
 [[ "${same_first_cmd}" == 'npm install --ignore-scripts fixture-parent@1.0.0 --ignore-scripts' && "${same_second_cmd}" == 'npm ci --ignore-scripts' ]] \
   || fail "both calls in one second are rewritten (${same_first}; ${same_second})"
 same_ids=$(for f in $(grep -lF "\"$(cd -P "${same_wt}" && pwd -P)\"" "${SAFEDEPS_HOME}/pending"/*.json); do jq -r .snapshot_id "${f}"; done | sort -u)
@@ -2148,7 +2159,6 @@ pass "a call with no tool_use_id is judged as before: a trace"
 # name order, and a record's name starts with its second, so where a row needs
 # the other call's record to be the one a search by key finds first, that call
 # runs a second earlier.
-call_rewrite() { jq -r '.hookSpecificOutput.updatedInput.command // empty' <<< "${1:-{\}}"; }
 call_record() { printf '%s/pending/id-%s.json' "${2:-${SAFEDEPS_HOME}}" "$1"; }
 call_records_of() { { grep -lF "\"$(cd -P "$1" && pwd -P)\"" "${SAFEDEPS_HOME}/pending"/*.json 2>/dev/null || true; } | wc -l | tr -d ' '; }
 
@@ -2400,7 +2410,7 @@ for inert_case in \
   fi
   case "${inert_received}" in
     '') inert_received="${inert_cmd}" ;;
-    =) inert_received=$(jq -r '.hookSpecificOutput.updatedInput.command // empty' <<< "${inert_pre:-{\}}")
+    =) inert_received=$(call_rewrite "${inert_pre}")
        [[ "${inert_received}" == *--ignore-scripts* ]] || fail "${inert_name}: the pre-guard rewrites the command on Claude (${inert_pre})" ;;
   esac
   printf '%s\n' "${tampered_lock}" > "${inert_wt}/package-lock.json"
@@ -2443,8 +2453,9 @@ for fetched_engine in claude codex; do
     grammar_pre_codex "${fetched_wt}" "${fetched_cmd}" "exec-fetched-${fetched_engine}" > /dev/null
   else
     fetched_cmd="npm install --ignore-scripts fixture-parent@1.0.0"
-    [[ -z "$(call_rewrite "$(grammar_pre "${fetched_wt}" "${fetched_cmd}" "toolu_fetched_${fetched_engine}")")" ]] \
-      || fail "fetched (${fetched_engine}): safedeps leaves a command that keeps ignore-scripts true as written"
+    fetched_pre=$(grammar_pre "${fetched_wt}" "${fetched_cmd}" "toolu_fetched_${fetched_engine}")
+    [[ -z "${fetched_pre}" ]] \
+      || fail "fetched (${fetched_engine}): a command that keeps ignore-scripts true leaves stdout quiet (${fetched_pre})"
   fi
   cat > "${fetched_wt}/package-lock.json" <<EOF
 {
@@ -2649,7 +2660,7 @@ rebuildquoted_wt="${tmp_root}/rebuildfail-quoted-wt"
 mkdir -p "${rebuildquoted_wt}/node_modules"
 printf '{"dependencies":{}}\n' > "${rebuildquoted_wt}/package.json"
 rebuildquoted_pre=$(grammar_pre "${rebuildquoted_wt}" "npm install 'fixture-parent@1.0.0'")
-rebuildquoted_cmd=$(jq -r '.hookSpecificOutput.updatedInput.command // empty' <<< "${rebuildquoted_pre:-{\}}")
+rebuildquoted_cmd=$(call_rewrite "${rebuildquoted_pre}")
 [[ "${rebuildquoted_cmd}" == *--ignore-scripts* ]] || fail "the pre-guard rewrites a quoted install on Claude (${rebuildquoted_pre})"
 cp "${inert_project}/package-lock.json" "${rebuildquoted_wt}/package-lock.json"
 cp "${inert_project}/package-lock.json" "${rebuildquoted_wt}/node_modules/.package-lock.json"
@@ -2667,7 +2678,7 @@ mkdir -p "${segment_main}/node_modules" "${segment_wt}"
 ln -s "${segment_main}/node_modules" "${segment_wt}/node_modules"
 printf '{"dependencies":{}}\n' > "${segment_wt}/package.json"
 segment_pre=$(grammar_pre "${segment_wt}" "npm install fixture-parent@1.0.0 && npm rebuild")
-segment_command=$(jq -r '.hookSpecificOutput.updatedInput.command // empty' <<< "${segment_pre:-{\}}")
+segment_command=$(call_rewrite "${segment_pre}")
 [[ "${segment_command}" == *--ignore-scripts* ]] || fail "the pre-guard makes an install inert when the command rebuilds after it (${segment_pre})"
 cp "${tmp_root}/revert-safe-lock.json" "${segment_wt}/package-lock.json"
 : > "${segment_main}/node_modules/script-ran.txt"

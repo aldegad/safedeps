@@ -284,8 +284,16 @@ oracle_note_listing() {
 oracle_before() {
   local call="$1" home="${SAFEDEPS_HOME:-${HOME}/.safedeps}" file id cwd=""
   mkdir -p "${call}/pending" "${call}/journal"
-  wc -c < "${home}/reorg.log" 2>/dev/null | tr -d ' ' > "${call}/reorg.size" || true
-  wc -c < "${home}/advisory.log" 2>/dev/null | tr -d ' ' > "${call}/advisory.size" || true
+  if [[ -e "${home}/reorg.log" ]]; then
+    wc -c < "${home}/reorg.log" 2>/dev/null | tr -d ' ' > "${call}/reorg.size" || true
+  else
+    printf '0\n' > "${call}/reorg.size"
+  fi
+  if [[ -e "${home}/advisory.log" ]]; then
+    wc -c < "${home}/advisory.log" 2>/dev/null | tr -d ' ' > "${call}/advisory.size" || true
+  else
+    printf '0\n' > "${call}/advisory.size"
+  fi
   if [[ -n "${2:-}" ]]; then
     cwd=$(jq -r '.cwd // empty' <<< "$2")
     [[ -z "${cwd}" ]] || { cwd=$(oracle_phys "${cwd}"); oracle_note_listing "${call}" "${cwd}"; }
@@ -1392,7 +1400,10 @@ oracle_message() {
   # message, so an entry from a quiet call is one nobody was told about.
   if [[ -z "${out}" ]]; then
     size=$(cat "${call}/reorg.size" 2>/dev/null); size="${size:-0}"
-    now=$(wc -c < "${O_HOME}/reorg.log" 2>/dev/null | tr -d ' '); now="${now:-0}"
+    now=0
+    if [[ -e "${O_HOME}/reorg.log" ]]; then
+      now=$(wc -c < "${O_HOME}/reorg.log" 2>/dev/null | tr -d ' '); now="${now:-0}"
+    fi
     [[ "${now}" == "${size}" ]] && { [[ "${ORACLE_FAILED}" == 0 ]]; return; }
     O_LINE=$(tail -c +"$(( size + 1 ))" "${O_HOME}/reorg.log" 2>/dev/null | head -1)
     oracle_red "reorg.log grew by $(( now - size )) bytes in a call that printed no message"
