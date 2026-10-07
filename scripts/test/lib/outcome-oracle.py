@@ -63,6 +63,19 @@ def npm_failure(observed, line):
                         ', so safedeps cannot tell which registry this install fetches from'), line
 
 
+def npm_query_report(observed, line, project, advisory=False):
+    if advisory:
+        prefix = (f'post-verify: npm rebuild after the install skipped in {project}'
+                  ' — safedeps asked npm which packages a rebuild would run over and got no answer (')
+        suffix = '), so it cannot tell that tree is one it can vouch for.'
+    else:
+        prefix = 'npm rebuild was not run: safedeps asked npm which packages it would rebuild and got no answer ('
+        suffix = ("), so it could not tell they are the ones it read. safedeps did not run npm rebuild; "
+                  "review node_modules, then run `npm rebuild` yourself if it is what you expect")
+    assert line.startswith(prefix) and line.endswith(suffix), line
+    npm_failure(observed, line[len(prefix):-len(suffix)])
+
+
 if __name__ == '__main__':
     assert sys.argv[1] == 'rebuild'
     print(rebuild(sys.argv[2], sys.argv[3]))
