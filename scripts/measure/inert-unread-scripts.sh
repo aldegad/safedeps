@@ -13,28 +13,16 @@
 # Nothing leaves the machine (scripts/test/lib/npm-sandbox.sh: a local fixture
 # registry, its own home, cache and prefix).
 #
-# usage: scripts/measure/inert-unread-scripts.sh [--guard <ref>]
-#
-# --guard <ref> measures that commit's pre-guard: the script copies this tree,
-# puts <ref>'s scripts/safedeps-pre-guard.sh in the copy, and runs there; this
-# tree is not changed. A form whose shell is not installed is skipped and says
-# so. Prints one tab-separated row per form:
-#   rewritten (yes/no)  install marks  rebuild marks  form
+# usage: scripts/measure/inert-unread-scripts.sh
+# Historical guard overlays are retired; use a complete historical archive.
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "${ROOT_DIR}"
 
-if [[ "${1:-}" == --guard ]]; then
-  ref="${2:?--guard needs a ref}"
-  copy=$(mktemp -d "${TMPDIR:-/tmp}/inert-unread-scripts.XXXXXX")
-  trap 'rm -rf "${copy}"' EXIT
-  git ls-files -z --cached --others --exclude-standard | xargs -0 tar -cf - | tar -xf - -C "${copy}"
-  git show "${ref}:scripts/safedeps-pre-guard.sh" > "${copy}/scripts/safedeps-pre-guard.sh"
-  chmod +x "${copy}/scripts/safedeps-pre-guard.sh"
-  printf 'pre-guard\t%s\t%s\n' "${ref}" "$(git rev-parse --short "${ref}")"
-  bash "${copy}/scripts/measure/inert-unread-scripts.sh"
-  exit $?
+if [[ $# -gt 0 ]]; then
+  printf '%s\n' 'The --guard overlay is retired. Run historical measurements from that commit’s complete archive.' >&2
+  exit 2
 fi
 
 pass() { printf 'ok - %s\n' "$1"; }

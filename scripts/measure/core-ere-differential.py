@@ -16,6 +16,11 @@ has to disagree somewhere.
 
 Usage: core-ere-differential.py --core <safedeps-core> [--random N] [--control]
 """
+
+if __name__ == "__main__":
+    import sys
+    sys.stderr.write('retired: The host grep comparison and Bash grammar reference are retired; native regex unit fixtures retain the fixed recognizer expectations. See native-measure-disposition.json.\n')
+    raise SystemExit(2)
 import argparse
 import importlib.util
 import os

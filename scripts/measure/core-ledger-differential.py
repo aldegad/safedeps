@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
-"""Compare the Rust shared ledger reader with lib/ledger/ledger.sh.
-Run on a test host, with --core. --control replaces the bash hash on a copy
-of the wrapper; it must produce differences. No installs or network calls.
+"""Check native ledger output against fixed fixture expectations.
+The historical filename is retained; no Bash hook or reference is executed.
 """
 import argparse
 import hashlib
@@ -13,7 +12,6 @@ import tempfile
 
 p = argparse.ArgumentParser(description=__doc__)
 p.add_argument('--core', required=True)
-p.add_argument('--control', action='store_true')
 a = p.parse_args()
 root = Path(__file__).resolve().parents[2]
 core = str(Path(a.core).resolve())
@@ -23,19 +21,6 @@ with tempfile.TemporaryDirectory(prefix='core-ledger.') as tmp:
     ledger = box / 'ledger'
     ledger.mkdir()
     env = dict(os.environ, SAFEDEPS_HOME=str(box / 'home'), SAFEDEPS_LEDGER_DIR=str(ledger), LC_ALL='C')
-    wrapper = box / 'reference.sh'
-    wrapper.write_text('''#!/bin/bash
-set -euo pipefail
-source "$1/lib/ledger/ledger.sh"
-shift
-''' + ('''safedeps_ledger_hash() { printf 'sha256:control'; }
-''' if a.control else '') + '''case "$1" in
-hash) shift; safedeps_ledger_hash "$@" ;;
-check) shift; safedeps_ledger_check "$@" ;;
-index) safedeps_ledger_effect_index "${3:-}" ;;
-misses) if safedeps_ledger_effect_check_batch "$2" "$4" "${3:-}"; then exit 0; else exit $?; fi ;;
-esac
-''')
     def key(eco, pkg, version, context=''):
         value = '\n'.join([eco, pkg, version] + ([context] if context else []))
         return 'sha256:' + hashlib.sha256(value.encode()).hexdigest()
@@ -80,21 +65,31 @@ esac
         data = closure if isinstance(closure, bytes) else json.dumps(closure).encode()
         closure_file = box / 'closure.json'
         closure_file.write_bytes(data)
-        refargs = list(command)
-        if command[0] == 'misses': refargs += [''] * (3-len(refargs)) + [str(closure_file)]
-        ref = subprocess.run(['bash', str(wrapper), str(root), *refargs], env=env, input=data, capture_output=True)
         rust = subprocess.run([core,'ledger',*command], env=env, input=data, capture_output=True)
-        # index follows the filesystem's enumeration; its order is not a verdict.
-        left, right = ref.stdout, rust.stdout
-        if command[0] == 'index': left, right = sorted(left.splitlines()), sorted(right.splitlines())
-        # jq's parse diagnostics are implementation-specific; retain named skips.
-        def warnings(s): return [l for l in s.splitlines() if b'skipping unreadable ledger entry' in l]
-        same = (ref.returncode,left,warnings(ref.stderr)) == (rust.returncode,right,warnings(rust.stderr))
-        print(('ok ' if same else 'DIFF ') + name, flush=True)
-        if not same:
-            bad += 1
-            print('  bash', ref.returncode, repr(ref.stdout), repr(ref.stderr))
-            print('  core', rust.returncode, repr(rust.stdout), repr(rust.stderr))
+        op=command[0]; expected_rc=0; ok=False
+        if op=='hash':
+            ok=rust.stdout.decode()==key(*command[1:])
+        elif op=='check':
+            reason='hit' if name in ('hit','context-hit') else 'miss' if name=='missing' else 'expired' if name in ('expired','bad-time') else 'invalid'
+            expected_rc=0 if reason=='hit' else 1
+            answer=json.loads(rust.stdout)
+            ok=(answer['approved']==(reason=='hit') and answer['reason']==reason
+                and answer['hash']==key(*command[1:]))
+        elif op=='index':
+            owner=rows[0]
+            wanted=[['npm','fixture','1',owner['hash'],'fixture','1']]
+            if name=='own-and-transitive':wanted.append(['npm','child','2',owner['hash'],'fixture','1'])
+            ok=sorted(line.split('\t') for line in rust.stdout.decode().splitlines())==sorted(wanted)
+        else:
+            missing={'owner-ecosystem':'child\t2\n','revoked':'fixture\t1\n',
+                     'damaged-neighbor':'miss\t2\n','context-free-excludes':'fixture\t1\n'}
+            wanted=missing.get(name,'')
+            expected_rc=2 if name in ('unreadable-closure','null-closure') else 1 if wanted else 0
+            ok=rust.stdout.decode()==wanted
+            if name=='damaged-neighbor':ok=ok and b'skipping unreadable ledger entry' in rust.stderr
+        ok=ok and rust.returncode==expected_rc
+        bad+=not ok
+        print(('ok - ' if ok else 'not ok - ')+name,flush=True)
+        if not ok:print(rust.returncode,repr(rust.stdout),repr(rust.stderr),flush=True)
 print('end:', subprocess.check_output(['uptime'], text=True).strip())
-print(f'core-ledger-differential: {len(cases)} cases, {bad} differ, control={a.control}')
-raise SystemExit(0 if (bad > 0 if a.control else bad == 0) else 1)
+raise SystemExit(bool(bad))

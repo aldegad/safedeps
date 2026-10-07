@@ -23,6 +23,12 @@ Exit 2: invalid invocation, incomplete/corrupt bundle, or collection failure.
 Bash date values without a source-role witness remain unresolved. Native
 clock provenance without an independently collected tap remains unresolved.
 """
+
+if __name__ == "__main__":
+    import sys
+    sys.stderr.write('retired: Bash versus native full-channel equivalence is retired. See native-measure-disposition.json.\n')
+    raise SystemExit(2)
+
 import argparse
 import collections
 import fnmatch

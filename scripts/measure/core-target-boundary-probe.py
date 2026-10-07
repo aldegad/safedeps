@@ -5,6 +5,12 @@ The JSONL input is unchanged through the lexer and structured fields. Only
 facts serializes the resolver record through Bash's IFS read contract.
 An older core must fail at that boundary, not at the lexer or process layer.
 """
+
+if __name__ == "__main__":
+    import sys
+    sys.stderr.write('retired: This extracted Bash fact/lexer comparison is retired with those references. See native-measure-disposition.json.\n')
+    raise SystemExit(2)
+
 import argparse
 import importlib.util
 import json

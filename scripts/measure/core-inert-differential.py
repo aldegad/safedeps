@@ -312,6 +312,12 @@ Usage:
       [--report FILE] [--table FILE] [--manifest FILE]
   core-inert-differential.py --selftest [--path-prefix DIRS]
 """
+
+if __name__ == "__main__":
+    import sys
+    sys.stderr.write('retired: Bash versus Rust rewrite channel comparison is retired. Recorded release-floor fixtures and native inert tests remain. See native-measure-disposition.json.\n')
+    raise SystemExit(2)
+
 import argparse
 import base64
 import copy

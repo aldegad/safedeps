@@ -6,6 +6,12 @@ by PATH. --source is an extracted archive of the catalog's exact source SHA.
 No checkout source is edited. --out must not exist. Raw bundles replay through
 core-hook-differential.py --replay FILE, including all source/tap checks.
 """
+
+if __name__ == "__main__":
+    import sys
+    sys.stderr.write('retired: This paired channel collector requires the retired Bash reference. See native-measure-disposition.json.\n')
+    raise SystemExit(2)
+
 import argparse
 import copy
 import hashlib

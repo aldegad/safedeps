@@ -33,6 +33,12 @@ Exit 0: every acceptance row passed. Exit 1: a row failed. Exit 3: nothing
 failed and a row was not run. Exit 2: this runner could not do its work; the
 rows it had judged are saved, and the rest say what stopped it.
 """
+
+if __name__ == "__main__":
+    import sys
+    sys.stderr.write('retired: The Bash comparison stand-in is retired with the paired collector. See native-measure-disposition.json.\n')
+    raise SystemExit(2)
+
 import argparse
 import importlib.util
 import json
