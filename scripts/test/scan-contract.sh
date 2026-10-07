@@ -91,8 +91,9 @@ fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
 # that judge many inputs one at a time: the view properties, the random
 # statement views, the event contract and the word ends (346, 92, 165 and over
 # 200 seconds of a run on carenine at load 7 to 17). The other
-# checks run whole in every shard. A random input is drawn before its row is
-# decided, so every shard draws the same inputs from the same seed.
+# checks run whole in every shard. All random inputs are drawn into arrays
+# before any random-input checker runs. A checker's here-strings cannot
+# change which input a later row receives in another shard.
 # shellcheck source=lib/shard.sh
 source "${ROOT_DIR}/scripts/test/lib/shard.sh"
 shard_args "$@"
@@ -492,16 +493,12 @@ pass "case table: ${checks} cases"
 # braces through all three readings.
 fuzz_seed="${SAFEDEPS_SCAN_FUZZ_SEED:-20260805}"
 fuzz_cases="${SAFEDEPS_SCAN_FUZZ_CASES:-400}"
-RANDOM="${fuzz_seed}"
-alphabet=(\' \" \\ ' ' a b n p m i s t l 1 . @ - / \; \& \| $'\n' '=' '(' ')' '$' '한')
+# shellcheck source=lib/scan-inputs.sh
+source "${ROOT_DIR}/scripts/test/lib/scan-inputs.sh"
 
 fuzz_divergences=0
 for ((c = 0; c < fuzz_cases; c++)); do
-  len=$((RANDOM % 40))
-  input=""
-  for ((k = 0; k < len; k++)); do
-    input+="${alphabet[RANDOM % ${#alphabet[@]}]}"
-  done
+  input="${scan_random[c]}"
   got=$(capture command_scan_text "${input}")
   ref=$(capture reference_scan_text "${input}")
   if [[ "${got}" != "${ref}" ]]; then
@@ -519,13 +516,8 @@ control_hit=0
 reference_scan_text() {
   REF_SQ_CLOSES=0 reference_spec_scan_text "$@"
 }
-RANDOM="${fuzz_seed}"
 for ((c = 0; c < fuzz_cases; c++)); do
-  len=$((RANDOM % 40))
-  input=""
-  for ((k = 0; k < len; k++)); do
-    input+="${alphabet[RANDOM % ${#alphabet[@]}]}"
-  done
+  input="${scan_random[c]}"
   [[ "$(capture command_scan_text "${input}")" == "$(capture reference_scan_text "${input}")" ]] || control_hit=$((control_hit + 1))
 done
 [[ ${control_hit} -gt 0 ]] || fail "control: a mutated spec produced no divergence, so the differential above measures nothing"
@@ -653,14 +645,8 @@ for ((i = 0; i < form_count; i++)); do
 p install evil==6.6.6/'; printf 'X')
   check_view_properties "${form%X}" "$(jq -r ".[${i}].id" "${forms_file}")"
 done
-RANDOM="${fuzz_seed}"
-heredoc_alphabet=(\' \" \\ ' ' '<' '<' '>' '-' '#' '`' '$' '(' '(' ')' ')' '{' '}' '[' ']' E O F p i $'\n' $'\n' $'\t' ';' '|' '&' '=' '1')
 for ((c = 0; c < fuzz_cases; c++)); do
-  len=$((RANDOM % 40))
-  input=""
-  for ((k = 0; k < len; k++)); do
-    input+="${heredoc_alphabet[RANDOM % ${#heredoc_alphabet[@]}]}"
-  done
+  input="${heredoc_random[c]}"
   check_view_properties "${input}" "random ${c}"
 done
 [[ ${property_failures} -eq 0 ]] || fail "view properties: ${property_failures} violation(s) (seed ${fuzz_seed})"
@@ -740,22 +726,8 @@ for code in $(seq 1 31) 127; do
     check_records bash "${form}" "control byte ${hex}"
   done
 done
-record_alphabet=('sh -c ' 'eval ' 'env -S ' 'bash -c ' '$(' ')' '`' "'" '"' '\' "\$'" '\x1d' '\n' ' ' ';' '<(' '#' 'pip install x' '--split-string=')
-for code in $(seq 1 127); do
-  # shellcheck disable=SC2059 # an octal escape
-  printf -v b "\\$(printf '%03o' "${code}")"
-  record_alphabet+=("${b}")
-done
-RANDOM="${fuzz_seed}"
-record_cases="${SAFEDEPS_SCAN_RECORD_CASES:-200}"
 for ((c = 0; c < record_cases; c++)); do
-  len=$((RANDOM % 24))
-  input=""
-  for ((k = 0; k < len; k++)); do
-    # Half the draws from the payload grammar, half from every byte.
-    if (( RANDOM % 2 )); then input+="${record_alphabet[RANDOM % 19]}"
-    else input+="${record_alphabet[RANDOM % ${#record_alphabet[@]}]}"; fi
-  done
+  input="${record_random[c]}"
   record_readings=(bash zsh dash)
   check_records "${record_readings[c % 3]}" "${input}" "random ${c}"
 done
@@ -1486,13 +1458,8 @@ fi
 # over was a start lost.
 stmts_diffs=0
 for reading in bash zsh dash; do
-  RANDOM="${fuzz_seed}"
   for ((c = 0; c < fuzz_cases; c++)); do
-    len=$((RANDOM % 40))
-    input=""
-    for ((k = 0; k < len; k++)); do
-      input+="${heredoc_alphabet[RANDOM % ${#heredoc_alphabet[@]}]}"
-    done
+    input="${heredoc_random[c]}"
     shard_row "stmts view: ${reading} random ${c}" || continue
     sv=$(SAFEDEPS_READING="${reading}" capture scan_view "${input}"); tv=$(SAFEDEPS_READING="${reading}" capture stmts_view "${input}")
     LC_ALL=C
@@ -1515,20 +1482,11 @@ pass "stmts view: on ${fuzz_cases} random inputs in each reading it differs from
 # reads -- reserved words, heads, short forms, redirections, arithmetic,
 # assignments -- with no escape and no quote, so most readings close, and each
 # that closes must read the same the second time, in its own reading.
-grammar_words=('{' '}' '(' ')' '()' ';' '|' '&&' $'\n' '!' if then else fi do done for i in foreach end '(1)' \
-  repeat 1 time -p '[[' ']]' '((i=0;i<1;i++))' '$((1;2))' '$(a; b)' coproc case x 'x)' ';;' ';|' ';;&' esac function f g \
-  always '>' 'out' '2>&1' '<(a)' 'X=1' while true pip install)
 grammar_closed=0
 grammar_failures=0
 for reading in bash zsh dash; do
-  RANDOM="${fuzz_seed}"
   for ((c = 0; c < fuzz_cases; c++)); do
-    len=$((RANDOM % 12 + 1))
-    input=""
-    for ((k = 0; k < len; k++)); do
-      input+="${grammar_words[RANDOM % ${#grammar_words[@]}]}"
-      (( RANDOM % 4 )) && input+=" "
-    done
+    input="${grammar_random[c]}"
     shard_row "stmts view: ${reading} grammar ${c}" || continue
     SAFEDEPS_READING="${reading}" reading_closes "${input}" || continue
     grammar_closed=$((grammar_closed + 1))
@@ -1552,9 +1510,10 @@ pass "stmts view: idempotent and length-preserving on ${grammar_closed} closed r
 # of the grid and random input (scripts/measure/first-place-grid.sh generates
 # the places from the simple-command grammar):
 #
-#   E1. A start or a command word is an event at top-level code: depth 1, and
-#       a byte of code, an escape or the quote a word opens with -- never a
-#       byte inside quotes, a substitution, arithmetic or a heredoc.
+#   E1. A start or a command word is at top-level code or the opening of a
+#       top-level word (including a zsh bare-pattern word), never an interior
+#       byte of quotes, a substitution, arithmetic or a heredoc. The closed
+#       opening exceptions are checked in event_top_level below.
 #   E2. No start falls between a command's prefixes and its command word: the
 #       prefixes of each start (the cwords view) run to a command word the
 #       walk read, and no other start stands among them. Splitting
@@ -1575,10 +1534,49 @@ event_flags=$(mktemp "${TMPDIR:-/tmp}/safedeps-event-flags.XXXXXX")
 event_blanks=$' \t'
 # Whether the offset <n> is in the space-separated list <list>.
 in_list() { [[ " $1 " == *" $2 "* ]]; }
+# Depth counts lexical word contexts as well as substitutions. A zsh bare
+# parenthesized pattern is one word, and its opening byte has depth 2. Only
+# that opening byte, at a top-level word start from the structured words API,
+# is exempt. An interior byte or a substitution's opening is not a word start.
+zsh_pattern_starts() {
+  printf '%s' "$1" | python3 "${ROOT_DIR}/scripts/test/lib/core-reader-check.py" \
+    "${SAFEDEPS_TEST_CORE}" pattern-starts
+}
+event_top_level() { # kind offset class depth ending-class; x/reading/pattern_starts from caller
+  local kind="$1" offset="$2" class="$3" depth="$4" ending="$5"
+  [[ "${depth}" == 1 \
+    || "${depth}" == 0 && "${x:offset-1:1}" == "(" && "${x:offset-2:1}" == "(" \
+    || "${depth}" == 2 && "${x:offset-1:1}" == [\<\>] && "${x:offset:1}" == "(" \
+    || "${reading}" == zsh && "${class}" == c && "${depth}" == 2 \
+      && "${x:offset-1:1}" == "(" && " ${pattern_starts} " == *" ${offset} "* ]] || return 1
+  case "${class}" in
+    c|x|l) return 0 ;;
+    q) [[ "${x:offset-1:1}" == [\'\"\$] && ( "${kind}" == W || "${ending}" != q ) ]] ;;
+    *) return 1 ;;
+  esac
+}
+check_event_depth_control() {
+  local reading=zsh x='noglob (echo y)' pattern_starts kind
+  pattern_starts=$(zsh_pattern_starts "${x}") || fail "cannot read pattern word starts"
+  for kind in S W; do
+    event_top_level "${kind}" 8 c 2 c || fail "E1 rejects a zsh bare-pattern word start"
+    ! event_top_level "${kind}" 9 c 2 c || fail "E1 control accepted the inside of a pattern word"
+  done
+  # Inject exactly the same depth-2 code event at the opening and inside a
+  # real command substitution. Neither position is a top-level word start.
+  x='echo $(echo hi)'
+  pattern_starts=$(zsh_pattern_starts "${x}") || fail "cannot read nested control word starts"
+  for kind in S W; do
+    ! event_top_level "${kind}" 7 c 2 c || fail "E1 control accepted a substitution opening"
+    ! event_top_level "${kind}" 8 c 2 c || fail "E1 control accepted nested code"
+  done
+}
+check_event_depth_control
+pass "event depth control: a zsh pattern word starts at its opening, and injected nested events fail E1"
 event_contract() { # input label
   shard_row "event contract: $2" || return 0
   local x="$1" reading ev cw rv stm line k w pre st sst first ok p head off rec slist="" wlist="" f1 f2 f3 f4 f6
-  local LC_ALL=C
+  local LC_ALL=C pattern_starts pattern_queried
   event_inputs=$((event_inputs + 1))
   for reading in bash zsh dash; do
     : > "${event_flags}"
@@ -1587,7 +1585,7 @@ event_contract() { # input label
     cw=$(SAFEDEPS_READING="${reading}" shell_lex "${x}" cwords "safedeps:scan-contract")
     rv=$(SAFEDEPS_READING="${reading}" recognize_view "${x}"; printf 'X'); rv="${rv%X}"
     stm=$(SAFEDEPS_READING="${reading}" command_statements "${x}" | cut -d $'\035' -f2)
-    slist=""; wlist=""
+    slist=""; wlist=""; pattern_starts=""; pattern_queried=false
     while read -r f1 f2 f3 f4 _ f6; do
       [[ -n "${f1}" ]] || continue
       event_checked=$((event_checked + 1))
@@ -1598,13 +1596,11 @@ event_contract() { # input label
       # gives it no depth of its own.
       # A process substitution that stands as a word (`<(a)`) takes its `<`
       # or `>` into the nested depth of its body, as the lexing reads it.
-      [[ "${f4}" == 1 || "${f4}" == 0 && "${x:f2-1:1}" == "(" && "${x:f2-2:1}" == "(" \
-        || "${f4}" == 2 && "${x:f2-1:1}" == [\<\>] && "${x:f2:1}" == "(" ]] || ok=0
-      case "${f3}" in
-        c|x|l) ;;
-        q) [[ "${x:f2-1:1}" == [\'\"\$] && ( "${f1}" == W || "${f6}" != q ) ]] || ok=0 ;;
-        *) ok=0 ;;
-      esac
+      if [[ "${reading}" == zsh && "${f3}" == c && "${f4}" == 2 && "${x:f2-1:1}" == "(" && "${pattern_queried}" == false ]]; then
+        pattern_starts=$(zsh_pattern_starts "${x}") || fail "cannot read event pattern starts"
+        pattern_queried=true
+      fi
+      event_top_level "${f1}" "${f2}" "${f3}" "${f4}" "${f6}" || ok=0
       [[ ${ok} == 1 ]] || { printf 'E1 (%s): event [%s %s %s %s] of [%q] (%s) is not at top-level code\n' "${reading}" "${f1}" "${f2}" "${f3}" "${f4}" "${x}" "$2" >&2; event_failures=$((event_failures + 1)); }
     done <<< "${ev}"
     while IFS=$'\037' read -r k w pre st sst; do
@@ -1648,6 +1644,8 @@ event_contract() { # input label
     done <<< "${cw}"
   done
 }
+event_contract 'if $((1;2)) } (1) ;; 2>&1 ' 'zsh pattern word after a brace in malformed grammar'
+event_contract 'noglob (echo y)' 'zsh bare-pattern command word after noglob'
 for ((i = 0; i < form_count; i++)); do
   form=$(jq -j ".[${i}].text" "${forms_file}" | sed -e 's/@@TAIL@@/pip install evil==6.6.6/' -e 's/@@HEAD@@/pip/g' -e 's/@@TAIL_SPLIT@@/pi\\\
 p install evil==6.6.6/'; printf 'X')
@@ -1662,21 +1660,11 @@ while IFS= read -r line; do
   event_contract "${form%X}" "$(jq -r .id <<< "${line}")"
   first_place_count=$((first_place_count + 1))
 done <<< "${first_place_forms}"
-RANDOM="${fuzz_seed}"
 event_cases=$((fuzz_cases / 4))
 for ((c = 0; c < event_cases; c++)); do
-  len=$((RANDOM % 40))
-  input=""
-  for ((k = 0; k < len; k++)); do
-    input+="${heredoc_alphabet[RANDOM % ${#heredoc_alphabet[@]}]}"
-  done
+  input="${paired_random[c]}"
   event_contract "${input}" "random ${c}"
-  len=$((RANDOM % 12 + 1))
-  input=""
-  for ((k = 0; k < len; k++)); do
-    input+="${grammar_words[RANDOM % ${#grammar_words[@]}]}"
-    (( RANDOM % 4 )) && input+=" "
-  done
+  input="${paired_grammar[c]}"
   event_contract "${input}" "grammar ${c}"
 done
 rm -f "${event_flags}"
@@ -1736,20 +1724,10 @@ x
 E'; do
   check_word_ends "${form}" "row"
 done
-RANDOM="${fuzz_seed}"
 for ((c = 0; c < fuzz_cases; c++)); do
-  len=$((RANDOM % 40))
-  input=""
-  for ((k = 0; k < len; k++)); do
-    input+="${heredoc_alphabet[RANDOM % ${#heredoc_alphabet[@]}]}"
-  done
+  input="${paired_random[c]}"
   check_word_ends "${input}" "random ${c}"
-  len=$((RANDOM % 12 + 1))
-  input=""
-  for ((k = 0; k < len; k++)); do
-    input+="${grammar_words[RANDOM % ${#grammar_words[@]}]}"
-    (( RANDOM % 4 )) && input+=" "
-  done
+  input="${paired_grammar[c]}"
   check_word_ends "${input}" "grammar ${c}"
 done
 [[ ${word_end_failures} -eq 0 ]] || fail "word ends: ${word_end_failures} byte(s) where the lexer ends a word print as a byte SAFEDEPS_G_END does not read as one (seed ${fuzz_seed})"

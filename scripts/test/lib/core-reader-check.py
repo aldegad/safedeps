@@ -162,10 +162,49 @@ def settlement():
     print("ok - native pre settles unclosed manager input as UNDECIDED and reports unread non-installs")
 
 
+def pattern_starts():
+    """One-based starts of zsh top-level words whose first byte is bare (."""
+    text = sys.stdin.buffer.read()
+    stream = io.BytesIO(query(["words"], text, "zsh"))
+    assert stream.readline() == b"unterm 0\n", "unclosed pattern reading"
+    assert stream.readline() in (b"unreadable 0\n", b"unreadable 1\n")
+    starts = []
+
+    def body(length):
+        data = stream.read(length)
+        assert len(data) == length and stream.read(1) == b"\n", "truncated words response"
+        return data
+
+    while True:
+        fields = stream.readline().split()
+        assert fields, "missing words response"
+        if fields[0] == b"V":
+            body(int(fields[1]))
+            break
+        assert fields[0] == b"P" and len(fields) == 5, fields
+        for _ in range(int(fields[4])):
+            word = stream.readline().split()
+            assert len(word) == 4 and word[0] == b"W", word
+            start, end, length = map(int, word[1:])
+            body(length)
+            assert 0 <= start < end <= len(text), word
+            if text[start:start+1] == b"(":
+                starts.append(start + 1)
+    while True:
+        fields = stream.readline().split()
+        if fields == [b"failed", b"0"]:
+            assert not stream.read(), "trailing words response"
+            break
+        assert len(fields) == 3 and fields[0] == b"Y", fields
+        body(int(fields[2]))
+        assert stream.readline().split()[0] == b"S", "missing payload source map"
+    print(" ".join(map(str, starts)))
+
+
 if __name__ == "__main__":
     try:
         {"table": table, "source-map": source_map, "corpus": corpus,
-         "settlement": settlement}[sys.argv[2]]()
+         "settlement": settlement, "pattern-starts": pattern_starts}[sys.argv[2]]()
     except (AssertionError, subprocess.SubprocessError, ValueError, KeyError) as error:
         print(f"not ok - native reader: {error}", file=sys.stderr)
         sys.exit(1)
