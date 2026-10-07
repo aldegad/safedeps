@@ -157,7 +157,10 @@ expect_deny_leaves_no_state() { # label command
   [[ -n "${out}" ]] || out='{}'
   [[ "$(jq -r '.hookSpecificOutput.permissionDecision // "pass"' <<< "${out}")" == deny ]] \
     || fail "${label} is denied (got: ${out:0:160})"
-  left=$(find "${safe}/snapshots" "${safe}/pending" -type f 2>/dev/null | sed "s#^${safe}/##" | sort | paste -sd, -)
+  # Listed from the state directory itself: the two directories are not there
+  # when nothing was written, and a find that is given a missing directory
+  # fails, which under pipefail ended the battery with no line.
+  left=$(find "${safe}" -type f \( -path "${safe}/snapshots/*" -o -path "${safe}/pending/*" \) 2>/dev/null | sed "s#^${safe}/##" | sort | paste -sd, -)
   [[ -z "${left}" ]] || fail "${label} leaves no snapshot and no pending record (left: ${left:0:300})"
 }
 
