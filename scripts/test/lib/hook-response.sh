@@ -26,6 +26,15 @@ hook_response_capture() {
   # An absence assertion must not pass when capture itself could not run.
   : > "${prefix}.stdout" && : > "${prefix}.stderr" \
     || { hook_response_error "cannot create capture files: ${prefix}"; return 1; }
+  # Some shells return 1 for a missing/non-executable direct path. Check the
+  # target before calling it, while still capturing its actual status below.
+  if [[ "$1" == */* ]]; then
+    [[ -f "$1" && -x "$1" ]] \
+      || hook_response_error "hook command is not an executable file: $1" || true
+  else
+    command -v "$1" >/dev/null 2>&1 \
+      || hook_response_error "hook command cannot be resolved: $1" || true
+  fi
   "$@" > "${prefix}.stdout" 2> "${prefix}.stderr" || rc=$?
   printf '%s\n' "${rc}" > "${prefix}.rc" \
     || { hook_response_error "cannot record hook exit status: ${prefix}"; return 1; }
