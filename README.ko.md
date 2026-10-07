@@ -59,7 +59,7 @@ GitHub 릴리스는 정식 스킬/훅 소스 트리를 기준 아티팩트로 �
 
 두 훅 이벤트에 등록되는 커맨드는 작은 엔트리 셔틀 `scripts/safedeps-hook-entry.sh` 에 `pre` 또는 `post` 를 붙인 것입니다. 셔틀은 이 머신의 바이너리 `bin/native/<os>-<arch>/safedeps-core` 를 찾아 실행합니다. 그 바이너리가 훅입니다. 의존성이 없는 Rust 프로그램 하나이고, 이전 버전이 등록하던 Bash 스크립트 둘을 대신합니다. 훅은 심링크를 거쳐 레포 체크아웃을 라이브로 실행하므로, 체크아웃이 일시적으로 깨진 상태(빌드가 덜 된 바이너리, 없는 바이너리, 크래시)에서는 종료코드에 따라 모든 Bash 호출이 오류 한 줄로 막히거나 게이트가 조용히 꺼지곤 했습니다. 셔틀은 그 각각을 설명이 붙은 fail-closed 거부로 바꿉니다. 무엇이 깨졌는지, 어떻게 복구하는지를 말합니다. 머신이 프로세스를 띄우지 못한 순간의 호출도 게이트 없이 통과시키지 않고 거부합니다. Bash 로 되돌아가는 경로는 없고, 환경 변수로 바이너리를 고르거나 끌 수도 없습니다. 상세: [ARCHITECTURE — Phase 0](./ARCHITECTURE.ko.md).
 
-**시간이 다하는 것도 답이지 공백이 아닙니다.** 에이전트 런타임은 훅마다 고정 예산을 주고 그게 지나면 훅을 죽이는데, 그다음 tool call 은 그대로 진행됩니다 — 즉 오래 걸리는 게이트는 그냥 사라집니다. 커맨드를 읽는 비용은 커맨드가 길수록 커지므로, 패딩을 붙이는 것만으로 그 선을 넘길 수 있었습니다. 이제 설치 전 guard 는 더 작은 자기 예산을 갖고, 시간 안에 판정을 못 끝내면 차단하고 그 사실을 말합니다. 메시지가 `UNDECIDED, not unsafe` 로 시작해서 아무도 타임아웃을 적발로 읽지 않게 합니다. 판정은 guard 자신의 프로세스에서 돌므로, 답 없이 끝난 판정(크래시나 시그널)도 같은 방식으로 차단하고 메시지가 그 시그널을 말합니다. 끝난 것이 아니라 멈춘 판정 프로세스는 기한까지 기다립니다. 예산과 한참 거리가 먼 짧은 커맨드는 영향이 없습니다.
+**시간이 다하는 것도 답이지 공백이 아닙니다.** 에이전트 런타임은 훅마다 고정 예산을 주고 그게 지나면 훅을 죽이는데, 그다음 tool call 은 그대로 진행됩니다 — 즉 오래 걸리는 게이트는 그냥 사라집니다. 커맨드를 읽는 비용은 커맨드가 길수록 커지므로, 패딩을 붙이는 것만으로 그 선을 넘길 수 있었습니다. 이제 설치 전 guard 는 더 작은 자기 예산을 갖고, 시간 안에 판정을 못 끝내면 차단하고 그 사실을 말합니다. 메시지가 `UNDECIDED, not unsafe` 로 시작해서 아무도 타임아웃을 적발로 읽지 않게 합니다. 판정은 guard 자신의 프로세스에서 돌므로, 답 없이 끝난 판정(크래시나 시그널)도 같은 방식으로 차단하고 메시지가 어떻게 끝났는지(종료 코드, 시그널, 또는 둘 다 없음)를 말합니다. 끝난 것이 아니라 멈춘 판정 프로세스는 기한까지 기다립니다. 예산과 한참 거리가 먼 짧은 커맨드는 영향이 없습니다.
 
 **읽지 못한 커맨드도 같은 방식으로 다룹니다.** 실패한 읽기는 예전에 아무것도 돌려주지 않았고, 그것이 "설치 아님" 으로 읽혔습니다. 이제 실패한 읽기를 기록하고, 무엇이든 실행을 허용하기 전에 확인합니다. 커맨드 어디에든 패키지 매니저 이름이 있으면 `UNDECIDED` 로 차단하고, 없으면 실행하되 실패를 stderr 와 `~/.safedeps/advisory.log` 에 남깁니다. 읽기가 실패한 뒤에 적발을 보고할 deny 는 대신 `UNDECIDED` 를 보고합니다. 코어는 커맨드를 셸이 읽는 방식 — 따옴표, 주석, heredoc, 중첩 치환을 한 번에 — 으로 읽으므로, heredoc 이나 아포스트로피가 든 주석이나 여러 줄 문자열이 그 뒤의 설치를 가릴 수 없고, 닫히지 않는 커맨드는 읽지 못한 것으로 다룹니다. 설치 앞의 대입(`FOO="a b" pip install ...`)도 같은 방식으로 읽으므로 그 값이 설치를 가릴 수 없고, `case` 팔이나 중첩 치환 안의 설치도 마찬가지입니다. bash, zsh, dash 가 커맨드를 다르게 읽는 곳에서는 각 셸이 읽는 방식대로 읽고, 셋 중 하나라도 실행할 설치를 모두 판정합니다. `--ignore-scripts` 는 세 셸이 npm 설치의 위치에 동의하는 곳에만 넣고, 아니면 커맨드를 `UNDECIDED` 로 차단합니다.
 
@@ -195,7 +195,10 @@ ledger 게이트나 사전 비행 체크에 실패하면 해당 명령은 실행
 | `safedeps asked for --ignore-scripts on this install; the command this hook received is not the one safedeps wrote` | 이 훅이 쓴 pre-guard 기록이 safedeps 가 명령을 고쳐 썼다고 말하는데, post 훅은 다른 명령을 받았습니다. 런타임이 safedeps 가 쓴 그대로 돌리지 않은 것입니다. 설치의 스크립트가 돌았다고 보십시오. |
 | `safedeps did not add --ignore-scripts to this install` | 이 훅이 쓴 pre-guard 기록이 safedeps 가 명령을 고쳐 쓰지 않았다고 말합니다. Codex 에서는 할 수 없습니다. 기록을 쓰지 못한 pre-guard 는 명령을 고쳐 쓰지 않고, 그 사실을 `advisory.log` 에 남깁니다. 기록 파일이 없으면 줄을 내지 않습니다(아래). |
 | `... did not run npm rebuild: <fact>` | safedeps 는 프로젝트 루트의 `package.json`·lockfile·`node_modules` 가 링크가 아니고 이 설치의 흔적이 있는 디렉터리에서만 rebuild 합니다. 이 줄은 safedeps 가 한 일을 말합니다. 설치 스크립트가 돌았는지는 말하지 않습니다. 명령이 스스로 rebuild 했다면 스크립트는 이미 돌았습니다. |
-| `... ran npm rebuild: exit <n>` | safedeps 가 돌린 rebuild 가 그 종료 코드로 실패했습니다. |
+| `... ran npm rebuild: exit <n>` | safedeps 가 돌린 rebuild 가 그 종료 코드로 끝나 실패했습니다. |
+| `... npm rebuild terminated by signal <n>` | rebuild 가 그 시그널 때문에 끝났습니다. 종료 코드가 없고, 줄은 코드를 지어내지 않습니다. |
+| `... could not start npm rebuild: OS error <n>` / `... could not start npm rebuild: error without an OS code` | rebuild 가 시작되지 못했습니다. 줄은 운영체제가 돌려준 오류를 말하거나, 오류에 코드가 없었다고 말합니다. |
+| `... could not read npm rebuild process status: OS error <n>` / `... npm rebuild ended without an exit code or signal` | safedeps 가 rebuild 를 시작했지만 어떻게 끝났는지 알지 못했습니다. 앞의 줄은 기다리기가 실패했다는 뜻이고, 뒤의 줄은 상태에 종료 코드도 시그널도 없었다는 뜻입니다. |
 
 이 세 줄은 명령이 무엇을 다는지가 아니라 safedeps 가 한 일을 말합니다. safedeps 는 명령에서 플래그를 읽지 않습니다. "did not add" 는 설치 스크립트가 돌았는지 말하지 않습니다. 명령이 단어나 환경이나 `.npmrc` 로 스스로 플래그를 걸 수 있습니다. Codex 에서는 safedeps 가 플래그를 넣을 수 없습니다.
 
