@@ -4,6 +4,16 @@ use super::{jv,sh,closure::Spec,report::cat};
 use crate::{json::Value,state,os,sha256,ere::Regex};
 use std::{fs,path::{Path,PathBuf},process::{Command,Stdio},os::unix::fs::MetadataExt};
 type W=Vec<u8>;
+const CACHE_ENV: &str = "SAFEDEPS_CACHE_DIR";
+const CACHE_DIR: &str = "cache";
+const CACHE_TTL_ENV: &str = "SAFEDEPS_PROVIDER_CACHE_TTL_SECONDS";
+const CACHE_TTL: i64 = 86400;
+const CACHE_NAMESPACES: [&str; 3] = ["osv", "kev", "ghsa"];
+const KEV_CACHE_PATH: &str = "kev/known_exploited_vulnerabilities.json";
+fn osv_cache_path(cache: &Path, package: &[u8], version: &[u8]) -> PathBuf {
+    let key = sha256::hex(&cat(&[b"osv\nnpm\n", package, b"\n", version]));
+    cache.join("osv").join(format!("{}.json", key))
+}
 fn env(name:&str,default:&str)->String{std::env::var(name).ok().filter(|s|!s.is_empty()).unwrap_or_else(||default.into())}
 fn fresh(p:&Path,ttl:i64)->bool{fs::metadata(p).is_ok_and(|m|m.is_file()&&os::wall(os::WallRole::ProviderCacheExpiry).seconds()-m.mtime()<=ttl)}
 fn obj0(path:&Path)->Result<Value,()>{let s=jv::read_file(path).ok_or(())?;if s.failed{return Err(())}Ok(s.values.into_iter().next().filter(jv::truthy).unwrap_or_else(||jv::obj(vec![("vulns",Value::Arr(Vec::new()))])))}
@@ -14,10 +24,10 @@ impl Drop for Scratch{fn drop(&mut self){sh::rm_rf(&self.0);}}
 pub struct Providers{home:PathBuf,cache:PathBuf,ttl:i64,announced:bool}
 impl Providers{
     pub fn new(home:&Path)->Self{
-        let cache=std::env::var_os("SAFEDEPS_CACHE_DIR").filter(|p|!p.is_empty()).map(PathBuf::from).unwrap_or_else(||home.join("cache"));
-        Self{home:home.into(),cache,ttl:env("SAFEDEPS_PROVIDER_CACHE_TTL_SECONDS","86400").parse().unwrap_or(86400),announced:false}
+        let cache=std::env::var_os(CACHE_ENV).filter(|p|!p.is_empty()).map(PathBuf::from).unwrap_or_else(||home.join(CACHE_DIR));
+        Self{home:home.into(),cache,ttl:env(CACHE_TTL_ENV,&CACHE_TTL.to_string()).parse().unwrap_or(CACHE_TTL),announced:false}
     }
-    fn init(&self){for sub in ["osv","kev","ghsa"]{sh::mkdir_p(&self.cache.join(sub));}sh::mkdir_p(&self.home);state::advisory_rotate_once(&self.home.join("advisory.log"));}
+    fn init(&self){for sub in CACHE_NAMESPACES{sh::mkdir_p(&self.cache.join(sub));}sh::mkdir_p(&self.home);state::advisory_rotate_once(&self.home.join("advisory.log"));}
     fn raw_log(&self,level:&[u8],line:&[u8]){sh::append(&self.home.join("advisory.log"),&cat(&[b"[",os::utc_stamp(os::wall(os::WallRole::ProviderHeader).seconds()).as_bytes(),b"] ",level,b" ",line,b"\n"]));}
     fn log(&mut self,level:&[u8],line:&[u8]){
         self.init();
@@ -37,7 +47,7 @@ impl Providers{
         c.output().map(|o|jv::captured(&[o.stdout])).unwrap_or_default()
     }
     fn kev(&mut self)->Option<Value>{
-        let cache=self.cache.join("kev/known_exploited_vulnerabilities.json");
+        let cache=self.cache.join(KEV_CACHE_PATH);
         if !fresh(&cache,self.ttl){
             if !sh::command_exists("curl"){
                 eprintln!("safedeps providers: curl is required for provider queries");
@@ -64,7 +74,7 @@ impl Providers{
         for spec in specs{
             let package=match &spec.package{Value::Str(s)=>tsv(s),Value::Null=>Vec::new(),_=>return Err(())};let version=tsv(&spec.version);
             if package.is_empty()||version.is_empty(){continue}
-            let key=sha256::hex(&cat(&[b"osv\nnpm\n",&package,b"\n",&version]));let path=self.cache.join("osv").join(format!("{}.json",key));
+            let path=osv_cache_path(&self.cache,&package,&version);
             let value=if fresh(&path,self.ttl){
                 self.log(b"INFO",&cat(&[b"OSV batch cache hit ecosystem=npm package=",&package,b" version=",&version]));Some(obj0(&path)?)
             }else{None};items.push((package,version,path,value));
@@ -120,5 +130,34 @@ fn provider_endpoints_match_cli() {
         let assignment = format!("SAFEDEPS_{name}=\"${{SAFEDEPS_{name}:-${{SAFEDEPS_DEFAULT_{name}}}}}\"");
         assert!(cli.lines().any(|line| line == assignment), "CLI request default {name}");
         assert!(cli.contains(&format!("\"${{SAFEDEPS_{name}}}\" 2>/dev/null")), "CLI request uses {name}");
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn provider_cache_constants_match_cli() {
+    let cli = include_str!("../../../lib/providers/providers.sh");
+    for (name, default) in [(CACHE_ENV, format!("${{SAFEDEPS_HOME}}/{CACHE_DIR}")),
+                            (CACHE_TTL_ENV, CACHE_TTL.to_string())] {
+        assert!(cli.lines().any(|line| line == format!("{name}=\"${{{name}:-{default}}}\"")), "CLI cache default {name}");
+    }
+    for namespace in CACHE_NAMESPACES {
+        assert!(cli.contains(&format!("\"${{SAFEDEPS_CACHE_DIR}}/{namespace}\"")), "CLI namespace {namespace}");
+    }
+    assert!(cli.contains(&format!("printf '%s/{KEV_CACHE_PATH}' \"${{SAFEDEPS_CACHE_DIR}}\"")), "CLI KEV filename");
+    assert!(cli.contains("\"${SAFEDEPS_CACHE_DIR}/osv/${cache_key}.json\""), "CLI OSV filename");
+    let function = |name: &str| -> String {
+        let head = format!("{name}() {{");
+        let body = cli.split_once(&head).unwrap().1.split_once("\n}").unwrap().0;
+        format!("{head}{body}\n}}\n")
+    };
+    let script = format!("{}{}safedeps_cache_key osv npm \"$1\" \"$2\"", function("safedeps_hash_text"), function("safedeps_cache_key"));
+    for (package, version) in [("@scope/pkg", "1.2.3"), ("Case sensitive", "v1+meta"), ("line\nnext", "tab\tvalue")] {
+        let out = std::process::Command::new("/bin/bash").env_clear().env("PATH", "/usr/bin:/bin")
+            .args(["-c", &script, "cache-contract", package, version]).output().unwrap();
+        assert!(out.status.success(), "CLI cache hash: {}", String::from_utf8_lossy(&out.stderr));
+        let key = String::from_utf8(out.stdout).unwrap();
+        assert_eq!(osv_cache_path(Path::new("cache root"), package.as_bytes(), version.as_bytes()),
+            Path::new("cache root/osv").join(format!("{}.json", key.trim_end_matches('\n'))));
     }
 }
