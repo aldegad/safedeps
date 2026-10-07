@@ -1190,6 +1190,13 @@ scan-failure census 는 awk 읽기는 하나씩 실패시켰지만 grep 과 sed 
 - **macOS 에서 Rust pre 훅의 호출 시간**, 위 기한 행을 넘어서는 것. WSL1 의 중앙값은 위에 있다.
 - **상태 쓰기 구간 안의 kill 과 낡은 `state.lock`.** 둘 다 Rust 훅에서는 재지 않았다. Bash 가드에서도 열려 있었다.
 
+### WSL1 에서 알려진 한계
+
+두 한계 모두 Windows 를 테스트하는 WSL1 의 것이다. macOS 에서는 보이지 않았다.
+
+- **provider 호출이 20초 동안 답을 받지 못할 수 있고, 그러면 Linux 루트에서 effect-trace-grid 가 빨강이 된다.** 90069e4 의 전체 실행 넷 중 둘에서, 격자의 OSV 호출 하나(127.0.0.1 의 fixture 로 간 것)가 답을 받지 못했고 curl 은 종료 코드 28 과 `0 bytes received` 로 끝났다. 32bf06e 의 두 실행(파일시스템마다 하나)에서는 나타나지 않았다. 원인은 관측되지 않았다. 알아보는 법: `advisory.log` 에 `ERROR OSV batch query failed status=000` 이 있고, 그 호출의 post 훅이 약 20초 걸렸다. 처리: 그 배터리를 한 번 더 돌린다. 연속 두 번 빨강이면 이 한계가 아니라 결함으로 본다.
+- **WSL1 에서 `/proc/<pid>/stat` 가 틀린 nice 를 낸다.** nice 칸이 양의 nice 를 부호가 뒤집힌 무부호 값으로 담기 때문에, 거기서는 `process state …` 의 상태 글자 뒤 글자(`N`, `<`)가 틀릴 수 있고, e2e 의 멈춘 소유자 행은 그것을 `ps` 와 비교하므로 양의 nice 에서 빨강이 된다. 프로세스가 멈췄다는 판정은 상태 글자 `T` 에서 읽으며 맞다. 처리: WSL1 배터리는 nice 0 으로, `nice` 로 감싸지 않고 돌린다.
+
 ### 라이선스가 바뀐다
 
 v2.19.0 은 PolyForm Noncommercial License 1.0.0(SPDX `PolyForm-Noncommercial-1.0.0`)으로 배포된다. 상업적 목적의 사용은 그 라이선스가 허락하는 범위 밖이고, 그 사용을 위한 라이선스는 저작권자에게 문의한다. `LICENSE`, `package.json` 과 `rust/Cargo.toml` 의 `license` 필드, README 의 License 절이 그렇게 말한다. `LICENSE` 본문은 공식 원문 그대로이고, 그 위에 `Required Notice:` 줄이 하나 있다. 경계는 마지막으로 게시된 버전이다. v2.18.1 과 그 이전의 모든 버전은 Apache License 2.0 으로 배포되었다. 이미 건네진 사본에서 라이선스를 거둘 수는 없으므로, 그 사본들은 자기 조건을 유지한다. 확인한 방법: `LICENSE` 의 본문은 공식 저장소(`polyformproject/polyform-licenses`, `PolyForm-Noncommercial-1.0.0.md`)의 파일과 바이트 단위로 같고, `Required Notice:` 줄과 그 뒤 빈 줄 아래의 라이선스 본문의 sha256 은 `c0ea4a896d2c8c394b29f9427589996db826cd501c512279ff0ed3ef48fabbe5` 이다. `tail -n +3 LICENSE | shasum -a 256` 으로 확인한다.

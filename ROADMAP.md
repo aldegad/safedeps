@@ -1190,6 +1190,13 @@ Every run went through a test host's queue, never on the author's machine. A hos
 - **A call's time on the Rust pre hook on macOS,** beyond the deadline rows above. The WSL1 medians are above.
 - **A kill inside the state write window and a stale `state.lock`.** Neither is measured on the Rust hook. The Bash guard had both open too.
 
+### Known limits in WSL1
+
+Both limits are in WSL1, where Windows is tested. Neither was seen on macOS.
+
+- **A provider call can get no answer for 20 s, and effect-trace-grid goes red on the Linux root.** One OSV call of the grid, to the fixture on 127.0.0.1, got no answer in two of four full runs at 90069e4, and curl ended with code 28 and `0 bytes received`. The two runs at 32bf06e, one on each filesystem, did not show it. The cause was not observed. To recognize it: `advisory.log` holds `ERROR OSV batch query failed status=000`, and the post hook of that call took about 20 s. What to do: run the battery once more. If it is red twice in a row, treat it as a defect and not as this limit.
+- **`/proc/<pid>/stat` gives a wrong nice in WSL1.** The nice field holds a positive nice as a sign-flipped unsigned value, so the letters after the state in `process state …` (`N`, `<`) can be wrong there, and the stopped-owner row of e2e compares them with `ps` and goes red at a positive nice. That a process is stopped is read from the state letter `T`, which is right. What to do: run the WSL1 batteries at nice 0, with no `nice` around them.
+
 ### The license changes
 
 v2.19.0 is released under the PolyForm Noncommercial License 1.0.0 (SPDX `PolyForm-Noncommercial-1.0.0`). Use for a commercial purpose is outside what that license permits, and the copyright holder is the contact for a license for it. `LICENSE`, the `license` field of `package.json` and of `rust/Cargo.toml`, and the License section of the README say so. The text of `LICENSE` is the official one, unchanged, with one `Required Notice:` line above it. The boundary is the last published version: v2.18.1 and every version before it were released under the Apache License 2.0. A license cannot be taken back from copies already given, so those copies keep their terms. How it was checked: the text in `LICENSE` is byte for byte the file in the official repository (`polyformproject/polyform-licenses`, `PolyForm-Noncommercial-1.0.0.md`), and the sha256 of the license text below the `Required Notice:` line and its blank line is `c0ea4a896d2c8c394b29f9427589996db826cd501c512279ff0ed3ef48fabbe5`. Check it with `tail -n +3 LICENSE | shasum -a 256`.
