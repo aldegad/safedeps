@@ -466,7 +466,7 @@ Claude runs: npm install @jackwener/opencli@^1.7.16
         └─ miss / expired ──────────────► BLOCK + "run `safedeps check …` first, then retry"
 ```
 
-The guard also snapshots lockfiles/manifests and keeps the v1 hardcoded pattern blocks (see section 5). It is fast and advisory; the authority is the post-install gate.
+The guard also snapshots lockfiles/manifests and keeps the v1 hardcoded pattern blocks (see section 5). It is fast and advisory; the authority is the post-install gate. In this document the pre-guard is `safedeps-core pre` and the post hook is `safedeps-core post`; the advisory and deny lines the core prints still say `pre-guard` and `post-verify`.
 
 **The guard keeps a budget of its own.** The runtime gives this hook a fixed budget (the installer registers it) and kills it when that expires, after which the tool call proceeds — measured on Claude Code, 2026-08-04. The Bash guard's command scan was superlinear in command length, so that budget was reachable by padding: measured then, 28KB of command text took 29s and 32KB took 38s. The scan was linear from v2.18.0 and the whole judgment on macOS from v2.18.1. The core is a different program, and no battery measures how its cost grows with the command (`scripts/test/self-budget.sh` holds a 64KB install inside the default budget), so a command large enough to reach the budget is still assumed to exist. Past that line the gate used to disappear without saying anything, which for `pip`/`cargo`/`go`/`gem` — where this gate is the authority, not an advisory layer — is a bypass that needs no knowledge of the scanner at all.
 
