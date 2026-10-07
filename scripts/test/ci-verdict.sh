@@ -7,12 +7,11 @@
 # --units) and runs them on several hosts. A unit that passed says only that
 # what it ran passed. This says that together the units ran the set: every unit
 # once, each green, no row skipped that is not named below, the row shards of
-# every split battery adding up to the whole battery, the census shards adding
-# up to the whole census, and no host lost on the way.
+# every split battery adding up to the whole battery, and no host lost on the way.
 #
 # DIR holds what the runner collected: each host's files in DIR/hosts/<host>
 # (a unit's <unit>.rc, <unit>.log, <unit>.run, and .secs, .load-start,
-# .load-end; a census unit's <unit>.out directory), and the runner's own record
+# .load-end), and the runner's own record
 # in DIR/coordinator: host-<name>.run for the run directory the run created on
 # each host, <unit>.failed for a unit it saw fail (lost, stopped, its host gone)
 # and host-<name>.dead for a host that failed.
@@ -23,12 +22,11 @@
 #   - a unit's files do not name the run directory this run created on its
 #     host: they are another run's
 #   - a unit exited non-zero or printed a `not ok` line
-#   - a unit outside the census printed no `ok` line
+#   - a unit printed no `ok` line
 #   - a unit printed a skipped row SKIP_ALLOWED does not name
 #   - the row shards of a battery do not add up: shards 1..M of one M must all
 #     print their shard-end line, agree on the number of rows and the list, and
 #     run each row once (scripts/test/lib/shard.sh)
-#   - the census shards do not combine (scripts/measure/census-shards.sh)
 set -uo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
@@ -118,9 +116,8 @@ while IFS= read -r rc_file; do
   [[ "${not_ok}" == 0 ]] || red "${unit} printed ${not_ok} not ok line(s)"
   # An empty log with exit status 0 passed every check above. A row shard is
   # also held by its shard-end line, but a whole battery by nothing else. Every
-  # battery prints `ok` lines, the fewest one (install-dir-differential); the
-  # census prints none, and its units are held by census-shards.sh combine.
-  [[ "${battery}" == census || "${ok}" =~ ^[1-9] ]] || red "${unit} printed no ok line"
+  # battery prints at least one `ok` line.
+  [[ "${ok}" =~ ^[1-9] ]] || red "${unit} printed no ok line"
   grep_rc=0
   lines=$(grep -E "${SKIP_LINE}" "${log}") || grep_rc=$?
   (( grep_rc <= 1 )) || { red "cannot read ${log} (grep exit ${grep_rc})"; continue; }
@@ -137,10 +134,8 @@ done < <(find "${dir}" -type f -name '*.rc' | sort)
 printf 'units: %d in the set; skipped rows: %d\n' "$(grep -c . <<< "${units}")" "${skips}"
 
 # --- row shards ------------------------------------------------------------------------
-# For each battery split into M > 1 row shards (not the census, which has its
-# own shards), the shards' logs must add up to the whole battery.
+# For each battery split into M > 1 row shards, the logs add up to the whole battery.
 for battery in $(sed -n 's/@.*//p' <<< "${units}" | sort -u); do
-  [[ "${battery}" != census ]] || continue
   m=$(grep -m1 "^${battery}@" <<< "${units}" | sed 's/.*of//')
   logs=()
   for (( i = 1; i <= m; i++ )); do
@@ -174,21 +169,5 @@ for battery in $(sed -n 's/@.*//p' <<< "${units}" | sort -u); do
     printf '%s: %s\n' "${battery}" "${out}"
   fi
 done
-
-# --- census shards ---------------------------------------------------------------------
-# The census prints no `ok` lines, so its units are held here: each one, a shard
-# or the whole census, leaves an --out directory (run-all.sh --unit), and
-# census-shards.sh combine judges them together (one directory of one shard
-# when the table does not split the census).
-if grep -Eq '^census(@|$)' <<< "${units}"; then
-  shards=()
-  while IFS= read -r f; do [[ -n "${f}" ]] && shards+=("${f%/shard}"); done \
-    < <(find "${dir}" -type f \( -path '*/census.out/shard' -o -path '*/census@*.out/shard' \) | sort)
-  if (( ${#shards[@]} == 0 )); then
-    red "no census unit left its output directory"
-  else
-    bash "${ROOT_DIR}/scripts/measure/census-shards.sh" combine "${shards[@]}" || red "the census shards do not combine"
-  fi
-fi
 
 exit "${fail}"

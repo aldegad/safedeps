@@ -22,7 +22,7 @@
 # Our CI is our own hosts, and a run has ten minutes (owner, 2026-10-06). One
 # host cannot do it: the release set took 46 to 62 minutes on the largest of
 # them. So this splits a set into units (scripts/test/run-all.sh --units: whole
-# batteries, battery shards and census shards), runs them on several hosts at
+# batteries and battery shards), runs them on several hosts at
 # once, collects every log, and judges the logs together with
 # scripts/test/ci-verdict.sh.
 #
@@ -41,8 +41,8 @@
 # units. The receipt and preparation log travel back with the unit logs.
 #
 # A run is red when any unit failed, printed `not ok`, skipped a row the
-# verdict does not allow, or never ran; when the shards of a battery or of the
-# census do not add up to the whole; and when a host failed. A host fails when
+# verdict does not allow, or never ran; when the shards of a battery
+# do not add up to the whole; and when a host failed. A host fails when
 # the run cannot reach it at the start, when it stops answering for
 # HOST_TIMEOUT seconds, or when a unit's process there is gone without its
 # exit status. Its running units fail with it; the run does not move them

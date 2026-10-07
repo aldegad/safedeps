@@ -287,14 +287,6 @@
       "reason": "Only reachable through the retired paired collector; no new Bash/native comparison."
     },
     {
-      "path": "scripts/measure/scan-failure-census.sh",
-      "reason": "Bash injection registration retained until entry cutover. Native property coverage is in native-failure-coverage.json."
-    },
-    {
-      "path": "scripts/measure/census-shards.sh",
-      "reason": "Census phase/shard removal is owned by host runner and entry cutover; untouched."
-    },
-    {
       "path": "scripts/measure/core-post-suite.py",
       "reason": "The native suite driver still calls this adapter. Preserved with its helpers for the post battery migration; legacy wrapper removal belongs to entry cutover."
     }
@@ -630,5 +622,22 @@
     "Historical Bash comparison counts are not native coverage.",
     "The three post battery migration helpers and their dependencies are preserved until their owner absorbs them.",
     "Source-copy controls test propagation, not natural reachability of every producer branch."
+  ],
+  "removed_at_entry_cutover": [
+    {
+      "path": "scripts/measure/census-shards.sh",
+      "reason": "Bash subprocess failure injection and its shard reducer have no hook target. Native scan-failure controls own propagation coverage."
+    },
+    {
+      "path": "scripts/measure/scan-failure-census.sh",
+      "reason": "Bash subprocess failure injection and its shard reducer have no hook target. Native scan-failure controls own propagation coverage."
+    }
+  ],
+  "removed_census_wiring": [
+    "run-all release quick census and four shards",
+    "census output directory and no-ok exception",
+    "census shard combiner and shard-cover exclusion",
+    "ShellCheck inputs for the removed scripts",
+    "phase-two dependency now names native-scan-failures"
   ]
 }
