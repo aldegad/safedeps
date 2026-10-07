@@ -279,24 +279,46 @@ any step is open.
    what it now holds.** The installed hooks execute the main checkout, and
    the core refuses to judge from a source other than the one it was built
    from (the stamp). So the binary in the main checkout's `bin/native/` has
-   to be the one built from the new source. Build it in the release worktree
-   first with `scripts/build-core.sh`. Then, from the main checkout, `git
-   merge --ff-only plan/release-vX.Y.Z`, and put that binary in the main
-   checkout's `bin/native/<os>-<arch>/` by copying it to a name beside the
-   old one and renaming it over, never by writing over the old file: a hook
-   may be running it, and macOS kills a process whose executable was written
-   under it. The source is the same, so the stamp check passes: run
-   `bin/native/<os>-<arch>/safedeps-core stamp --check` in the main checkout
-   and read `ok`. Between the move and the rename every install is denied
-   `UNDECIDED` and every other command runs with the mismatch said on
-   stderr. That window is fail-closed and lasts seconds, which is why the
-   build comes first: building after main moves would hold every session on
-   the machine in that state for the length of a build. If the stamp check
-   does not say `ok`, run `scripts/build-core.sh` in the main checkout. That
-   is the second path, and it is written here so that it is never a silent
-   alternative; the window then lasts as long as the build. Then push one
-   benign command and one install through `scripts/safedeps-hook-entry.sh
-   pre` and read both answers before going on.
+   to be the one built from the new source. Build it before main moves, on a
+   remote macOS host (carenine or the M1), from an archive of the release
+   head with `scripts/build-core.sh`, and bring the `darwin-arm64` binary
+   back: the machine that holds the main checkout does not build with cargo.
+   There are two cases, and the order differs.
+   - **v2.19.0, the first release with a binary.** v2.18.1 has no native
+     binary, and the main checkout has no `bin/native` at all. Once main
+     moves, the new entry shim finds no binary, and every Bash call in every
+     session on the machine, `mkdir` and `cp` included, exits 2 with "this
+     install has no safedeps-core binary at all" (measured on a copy). So the
+     binary goes in first: `mkdir -p bin/native/darwin-arm64` in the main
+     checkout, copy the binary to a name beside the final one, mode 755, and
+     rename it to `safedeps-core`. The v2.18.1 Bash hooks do not look in
+     that directory, so nothing changes while it waits. Then, from the main
+     checkout, `git merge --ff-only plan/release-vX.Y.Z`. The new entry shim
+     finds the binary at once, and the stamp matches, because it covers the
+     source only and the path does not matter. This order was checked on a
+     copy with a file swap standing in for the merge, and the merge in the
+     main checkout itself has not run. Doing the merge, `mkdir -p`, the copy
+     and the rename in one Bash command, or from a human terminal (`!`),
+     also works, because the pre hook of that call has already passed.
+   - **Later releases, with a binary already there.** Build first, then
+     `git merge --ff-only`, then put the new binary in the main checkout's
+     `bin/native/<os>-<arch>/` by copying it to a name beside the old one and
+     renaming it over, never by writing over the old file: a hook may be
+     running it, and macOS kills a process whose executable was written under
+     it. Between the move and the rename every install is denied `UNDECIDED`
+     and every other command runs with the mismatch said on stderr (measured
+     on a copy). That window is fail-closed and lasts seconds, which is why
+     the build comes first: building after main moves would hold every
+     session on the machine in that state for the length of a build.
+
+   Then run `bin/native/<os>-<arch>/safedeps-core stamp --check` in the main
+   checkout and read `ok`. If it does not say `ok`, run
+   `scripts/build-core.sh` in the main checkout. That is the second path, and
+   it is written here so that it is never a silent alternative; the window
+   then lasts as long as the build, and in the first case it is the "no
+   binary" state above for every session. Then push one benign command and
+   one install through `scripts/safedeps-hook-entry.sh pre` and read both
+   answers before going on.
 8. **Push.** `git push origin main`. Nothing waits for a CI run: step 5 on our
    own hosts is the test of this commit, and a red run there stops the release
    before this step.
