@@ -632,33 +632,47 @@ do
 done
 pass "inert flag lands on an install whose npm is spelled in another case"
 
-# The floor flag owed after an install verb in a piped heredoc would stand
-# in data another command reads. The native contract is an UNDECIDED deny,
-# with no rewrite or pending/snapshot state, including mixed-case verbs.
-# Measured cases are listed in core-intended-battery-rows.tsv.
-heredoc_case_in=(
-  $'npm install left-pad@1.3.0 && cat <<E | wc -l\nnpm install left-pad@1.3.0\nE'
-  $'npm install left-pad@1.3.0 && cat <<E | wc -l\nNpm install left-pad@1.3.0\nE'
-  $'npm install evil && cat <<E | wc -l\nNPM install evil\nE'
-)
-for inert_in in "${heredoc_case_in[@]}"; do
-  heredoc_safe=$(mktemp -d "${tmp_root}/safe-heredoc-conflict.XXXXXX")
-  SAFEDEPS_HOME="${heredoc_safe}" lib/ledger/ledger.sh approve npm left-pad 1.3.0 1.3.0 smoke >/dev/null
-  inert_out=$(run_hook_command "${tmp_root}/home-compound" "${heredoc_safe}" "${inert_in}")
+# Each adopted native conflict has an explicit reason supplied by its row.
+# A fresh approval/state home keeps earlier installs from hiding new records.
+expect_inert_conflict() {
+  local command="$1" reason="$2" safe out state_dir
+  safe=$(mktemp -d "${tmp_root}/safe-conflict.XXXXXX")
+  SAFEDEPS_HOME="${safe}" lib/ledger/ledger.sh approve npm left-pad 1.3.0 1.3.0 smoke >/dev/null
+  out=$(run_hook_command "${tmp_root}/home-compound" "${safe}" "${command}")
   jq -e '.hookSpecificOutput | .permissionDecision == "deny" and
     (.permissionDecisionReason | contains("UNDECIDED")) and
-    (has("updatedInput") | not)' <<< "${inert_out}" >/dev/null \
-    || fail "a piped heredoc floor conflict denies as undecided without a rewrite: ${inert_out}"
-  cut -f2- "${heredoc_safe}/advisory.log" | grep -Fx \
-    "pre-guard DENY: inert rewrite obligations conflict (floor-outside-command); UNDECIDED, no rewrite was sent. Command: ${inert_in%%$'\n'*}" >/dev/null \
-    || fail "the piped heredoc's exact floor-outside-command conflict is recorded"
+    (has("updatedInput") | not)' <<< "${out}" >/dev/null \
+    || fail "expected ${reason} undecided without a rewrite: ${command} (got ${out})"
+  cut -f2- "${safe}/advisory.log" | grep -Fx \
+    "pre-guard DENY: inert rewrite obligations conflict (${reason}); UNDECIDED, no rewrite was sent. Command: ${command%%$'\n'*}" >/dev/null \
+    || fail "the exact ${reason} conflict is recorded: ${command}"
   for state_dir in pending snapshots; do
-    if [[ -d "${heredoc_safe}/${state_dir}" ]]; then
-      [[ -z "$(find "${heredoc_safe}/${state_dir}" -mindepth 1 -print)" ]] \
-        || fail "the piped heredoc conflict leaves no pending record, snapshot or meta (${state_dir})"
+    if [[ -d "${safe}/${state_dir}" ]]; then
+      [[ -z "$(find "${safe}/${state_dir}" -mindepth 1 -print)" ]] \
+        || fail "${reason} leaves no pending record, snapshot or meta (${state_dir}): ${command}"
     fi
   done
-  pass "a piped heredoc with an install verb is UNDECIDED with no rewrite or state: $(printf '%q' "${inert_in}")"
+  pass "${reason}: UNDECIDED with no rewrite or state: $(printf '%q' "${command}")"
+}
+
+# A floor flag in piped heredoc data is outside the words of a command.
+for inert_in in \
+  $'npm install left-pad@1.3.0 && cat <<E | wc -l\nnpm install left-pad@1.3.0\nE' \
+  $'npm install left-pad@1.3.0 && cat <<E | wc -l\nNpm install left-pad@1.3.0\nE' \
+  $'npm install evil && cat <<E | wc -l\nNPM install evil\nE'
+do
+  expect_inert_conflict "${inert_in}" floor-outside-command
+done
+
+# A one-statement end flag would be the last option's value. These commands
+# send no rewrite; the compound --cache row below owes no such end flag.
+for inert_in in \
+  'npm install left-pad@1.3.0 --cache' \
+  'npm install left-pad@1.3.0 -C' \
+  'npm install --no-ignore-scripts left-pad@1.3.0 --reg' \
+  "npm install left-pad@1.3.0 --message 'a b' --fetch-retries"
+do
+  expect_inert_conflict "${inert_in}" end-flag-not-an-option
 done
 
 # Whether an install already carries the flag is read from that install's own
@@ -698,10 +712,6 @@ for inert_case in \
   "npm install left-pad@1.3.0 --cache --ignore-scripts|npm install --ignore-scripts left-pad@1.3.0 --cache --ignore-scripts --ignore-scripts" \
   "npm install left-pad@1.3.0 \$FLAGS|npm install --ignore-scripts left-pad@1.3.0 \$FLAGS --ignore-scripts" \
   "npm install left-pad@1.3.0 --cache && echo ok|npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts --cache && echo ok" \
-  "npm install left-pad@1.3.0 --cache|npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts --cache --ignore-scripts" \
-  "npm install left-pad@1.3.0 -C|npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts -C --ignore-scripts" \
-  "npm install --no-ignore-scripts left-pad@1.3.0 --reg|npm install --ignore-scripts --no-ignore-scripts left-pad@1.3.0 --ignore-scripts --reg --ignore-scripts" \
-  "npm install left-pad@1.3.0 --message 'a b' --fetch-retries|npm install --ignore-scripts left-pad@1.3.0 --message 'a b' --ignore-scripts --fetch-retries --ignore-scripts" \
   "npm ci \$(printf -- --)|npm ci --ignore-scripts \$(printf -- --) --ignore-scripts" \
   "npm install left-pad@1.3.0>install.log|npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts>install.log --ignore-scripts" \
   "npm install left-pad@1.3.0 --ignore-scripts=false > log 2>&1|npm install --ignore-scripts left-pad@1.3.0 --ignore-scripts=false --ignore-scripts > log 2>&1" \
@@ -747,7 +757,7 @@ for inert_in in \
   "npm install left-pad@1.3.0 --ignore-scripts && npm run build" \
   $'npm install left-pad@1.3.0 --ignore-scripts --message "a\nb"'
 do
-  inert_out=$(run_hook_command "${tmp_root}/home-compound" "${tmp_root}/safe-compound" "${inert_in}")
+  inert_out=$(run_hook_command "${tmp_root}/home-compound" "${tmp_root}/safe-compound" "${inert_in}" quiet)
   [[ -z "${inert_out}" ]] || fail "an install that already carries the flag is not rewritten: $(printf '%q' "${inert_in}") (got: ${inert_out:0:200})"
 done
 # An install that asked for its scripts is made inert, and the override is
