@@ -44,8 +44,9 @@ source "${ROOT_DIR}/scripts/test/lib/native-measure-core.sh"
 GUARD="${ROOT_DIR}/scripts/safedeps-hook-entry.sh"
 lex_view_text() { # reading text view; the core query owns payload boundaries
   if [[ "$3" == cscripts || "$3" == substs ]]; then
-    printf '%s' "$2" | SAFEDEPS_READING="$1" "${MEASURE_CORE}" payloads |
-      jq -r --arg view "$3" '.payloads[] | select(if $view == "cscripts" then (.kind == "B" or .kind == "S") else .kind == "E" end) | .text'
+    jq -cn --arg reading "$1" --arg text "$2" --arg view "$3" \
+      '{op:"lex-payloads",reading:$reading,text:$text,view:$view}' |
+      "${MEASURE_CORE}" reader | jq -r '.payloads[].text'
   else
     printf '%s' "$2" | SAFEDEPS_READING="$1" "${MEASURE_CORE}" lex "$3"
   fi
