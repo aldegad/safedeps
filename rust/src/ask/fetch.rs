@@ -2,6 +2,8 @@
 //! answers; they never infer a registry when npm gave no answer.
 use crate::{ere::Regex, jq, json::Value};
 
+const PUBLIC_REGISTRY_RE: &str = r"^https://registry\.(npmjs\.org|yarnpkg\.com)/";
+
 fn text(v: Option<&Value>) -> Option<&str> { v.and_then(Value::as_str) }
 fn null(v: Option<&Value>) -> bool { v.is_none_or(|v| matches!(v, Value::Null)) }
 fn defaulted(v: Option<&Value>) -> Option<&Value> { v.filter(|v| !matches!(v, Value::Null | Value::Bool(false))) }
@@ -27,7 +29,7 @@ pub fn host(url: &str) -> String {
 pub fn registry_public(registry: Option<&Value>, facts: &Value) -> bool {
     let Some(registry) = text(registry) else { return false; };
     let s = if registry.ends_with('/') { registry.to_string() } else { format!("{}/", registry) };
-    Regex::new(r"^https://registry\.(npmjs\.org|yarnpkg\.com)/", true).expect("public registry").is_match(s.as_bytes())
+    Regex::new(PUBLIC_REGISTRY_RE, true).expect("public registry").is_match(s.as_bytes())
         || (!null(facts.get("test_registry")) && text(facts.get("test_registry")) == Some(s.as_str()))
 }
 
@@ -118,4 +120,57 @@ pub fn fetch_known_problems(facts: &Value, url: &str) -> Result<Vec<String>, ()>
         }
     }
     out.sort(); out.dedup(); Ok(out)
+}
+
+#[cfg(test)]
+#[test]
+fn public_registry_rule_matches_cli() {
+    let definitions: Vec<_> = include_str!("../../../lib/npm/ask.sh").lines()
+        .filter_map(|line| line.strip_prefix("SAFEDEPS_NPM_PUBLIC_REGISTRY_RE="))
+        .collect();
+    assert_eq!(definitions.len(), 1, "the CLI must define one public-registry pattern");
+    let pattern = definitions[0].strip_prefix('\'').and_then(|s| s.strip_suffix('\''))
+        .expect("the CLI pattern must be a single-quoted literal");
+    assert_eq!(pattern, PUBLIC_REGISTRY_RE, "CLI and hook public-registry patterns differ");
+
+    let cases = [
+        ("https://registry.npmjs.org/", true, true),
+        ("https://registry.yarnpkg.com/", true, true),
+        ("HTTPS://REGISTRY.NPMJS.ORG/pkg", true, true),
+        ("hTtPs://ReGiStRy.YaRnPkG.cOm/pkg", true, true),
+        ("https://registry.npmjs.org.example/", false, false),
+        ("https://registry.yarnpkg.com.example/", false, false),
+        ("https://registry.npmjs.org:443/", false, false),
+        ("https://user@registry.npmjs.org/", false, false),
+        ("https://registry.npmjs.org?x", false, false),
+        ("https://regiſtry.npmjs.org/", false, false),
+        ("file:registry.npmjs.org/pkg", false, false),
+        ("http://registry.npmjs.org/", false, false),
+        ("https://registry.npmjs.org", false, true),
+        ("HTTPS://REGISTRY.YARNPKG.COM", false, true),
+    ];
+    let output = std::process::Command::new("/bin/bash")
+        .env_clear().env("PATH", "/usr/bin:/bin").env("LC_ALL", "C")
+        .current_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap())
+        .args(["-c", r#"
+set -euo pipefail
+source lib/npm/ask.sh
+source lib/npm/closure.sh
+shopt -u nocasematch
+for url do
+    if safedeps_npm_public_registry_url "$url"; then printf 'true\n'; else printf 'false\n'; fi
+done
+"#, "public-registry-test"])
+        .args(cases.iter().map(|(url, _, _)| *url))
+        .output().expect("run the CLI public-registry reader");
+    assert!(output.status.success(), "CLI reader failed: {}", String::from_utf8_lossy(&output.stderr));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let answers: Vec<_> = stdout.lines().collect();
+    assert_eq!(answers.len(), cases.len(), "one CLI answer per URL");
+    for ((url, cli, hook), answer) in cases.into_iter().zip(answers) {
+        assert_eq!(answer, if cli { "true" } else { "false" }, "CLI: {url}");
+        assert_eq!(crate::post::public_registry_url(url.as_bytes()), cli, "post resolved URL: {url}");
+        let registry = jq::into_value(jq::s(url));
+        assert_eq!(registry_public(Some(&registry), &Value::Null), hook, "hook: {url}");
+    }
 }

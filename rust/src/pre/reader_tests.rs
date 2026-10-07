@@ -37,7 +37,11 @@ fn failed_reading_reaches_the_public_undecided_settlement() {
             let v = json::parse_one(&out.stdout).unwrap();
             let hook = v.get("hookSpecificOutput").unwrap();
             assert_eq!(hook.get("permissionDecision").unwrap().as_str(), Some("deny"));
-            assert!(hook.get("permissionDecisionReason").unwrap().as_str().unwrap().contains("UNDECIDED"));
+            let reason = hook.get("permissionDecisionReason").unwrap().as_str().unwrap();
+            assert!(reason.contains("UNDECIDED"));
+            assert!(reason.contains("could not finish reading this command"));
+            assert!(reason.contains("could not tell whether the command installs a dependency or what it would install"));
+            assert!(reason.contains("blocked fail-closed, and no finding is claimed"));
         } else {
             assert!(out.stdout.is_empty());
             assert!(String::from_utf8_lossy(&out.stderr).contains("could not be fully read"));
