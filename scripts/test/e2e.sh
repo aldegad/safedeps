@@ -2830,11 +2830,15 @@ mkdir -p "${guard_clean_home}"
 # The suite itself runs under moved sources, so the unmoved case has to be
 # built by removing them — which is also the honest control: this asserts the
 # notice tracks the environment rather than always firing.
-env -u SAFEDEPS_OSV_API_URL -u SAFEDEPS_OSV_BATCH_API_URL -u SAFEDEPS_KEV_CATALOG_URL \
+guard_clean_response_file=$(hook_response_capture "${tmp_root}/guard-clean-response" \
+  env -u SAFEDEPS_OSV_API_URL -u SAFEDEPS_OSV_BATCH_API_URL -u SAFEDEPS_KEV_CATALOG_URL \
   -u SAFEDEPS_GHSA_API_URL -u SAFEDEPS_NPM_CLOSURE_FIXTURE_JSON -u SAFEDEPS_YARN_INFO_FIXTURE_NDJSON \
   -u SAFEDEPS_NPM_OVERRIDES_JSON -u SAFEDEPS_RECHECK_FIXTURE_JSON -u SAFEDEPS_LEDGER_DEFAULT_TTL_DAYS \
   -u SAFEDEPS_ADVISORY_LOG \
-  SAFEDEPS_HOME="${guard_clean_home}" hook_response_capture "${tmp_root}/moved-response" scripts/safedeps-hook-entry.sh pre <<< "${guard_moved_payload}" >/dev/null || true
+  SAFEDEPS_HOME="${guard_clean_home}" scripts/safedeps-hook-entry.sh pre <<< "${guard_moved_payload}") \
+  || fail "an unmoved hook call completes successfully"
+hook_response_parse "${guard_clean_response_file}" quiet \
+  || fail "an unmoved hook call has quiet stdout"
 if [[ -f "${guard_clean_home}/advisory.log" ]] && grep -q 'truth source moved' "${guard_clean_home}/advisory.log"; then
   fail "an unmoved run leaves no moved-source line"
 fi
