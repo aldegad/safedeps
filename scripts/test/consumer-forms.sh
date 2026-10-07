@@ -1807,10 +1807,10 @@ expect_rewrite() {
   out_file=$(jq -nc --arg c "${command}" --arg cwd "${project_dir}" \
     '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
     HOME="${tmp_root}/home" SAFEDEPS_HOME="${safe}" hook_response_capture "${safe}.response" scripts/safedeps-hook-entry.sh pre)
-  if [[ "${want}" == "(no rewrite)" ]]; then
-    # These rows pin absence of a rewrite, whether unjudged or a decision.
-    hook_response_parse "${out_file}" quiet-or-decision || return 1
-    if [[ "${HOOK_HAS_REWRITE}" == true ]]; then got="${HOOK_REWRITE}"; else got="(no rewrite)"; fi
+  if [[ "${want}" == "(no rewrite, quiet)" ]]; then
+    # Zero stdout bytes pins both the quiet verdict and absence of a rewrite.
+    hook_response_parse "${out_file}" quiet || return 1
+    got="(no rewrite, quiet)"
   else
     got=$(hook_response_read required-rewrite "${out_file}") || return 1
   fi
@@ -1830,7 +1830,7 @@ expect_rewrite "npm ci in a substitution" 'x=$(npm ci)'       'x=$(npm ci --igno
 # installs nothing, and a flag after `ci` would make it `npm ci`.
 expect_rewrite "npm ci before a closing backtick" 'echo `npm ci`' 'echo `npm ci --ignore-scripts`'
 expect_rewrite "npm i before a closing backtick"  'x=`npm i`'     'x=`npm i --ignore-scripts`'
-expect_rewrite "npm ci before an opening backtick" 'npm ci`echo x`' '(no rewrite)'
+expect_rewrite "npm ci before an opening backtick" 'npm ci`echo x`' '(no rewrite, quiet)'
 
 # zsh closes a `{` group at a `}` that ends a word and hands the word before it
 # on (`{ npm ci}` runs `npm ci`; zsh 5.9, measured). bash and dash refuse that
@@ -1909,13 +1909,7 @@ expect_rewrite_read() {
   out_file=$(jq -nc --arg c "${command}" --arg cwd "${project_dir}" \
     '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
     HOME="${tmp_root}/home" SAFEDEPS_HOME="${safe}" hook_response_capture "${safe}.response" scripts/safedeps-hook-entry.sh pre)
-  if [[ "${want}" == "(no rewrite)" ]]; then
-    # These rows pin absence of a rewrite, whether unjudged or a decision.
-    hook_response_parse "${out_file}" quiet-or-decision || return 1
-    if [[ "${HOOK_HAS_REWRITE}" == true ]]; then got="${HOOK_REWRITE}"; else got="(no rewrite)"; fi
-  else
-    got=$(hook_response_read required-rewrite "${out_file}") || return 1
-  fi
+  got=$(hook_response_read required-rewrite "${out_file}") || return 1
   [[ "${got}" == "${want}" ]] || fail "${label} is rewritten to [${want}] (got: [${got}])"
   ! grep -qE 'has no place where safedeps could read npm keeping|could not make every npm install in this command inert' "${safe}/advisory.log" 2>/dev/null \
     || fail "${label} reads the nested install, with no floor or downgrade (advisory: $(head -3 "${safe}/advisory.log" 2>/dev/null))"
@@ -2036,20 +2030,20 @@ expect_rewrite "the validator's G20" 'npm ci; x=$( { npm ci --ignore-scripts=fal
 # Its own arguments leave the option true, so there is nothing to place, as
 # at the top level.
 expect_rewrite "an npm install that sets the flag last, glued to a } in a substitution" \
-  'x=$( { npm ci --ignore-scripts=false --ignore-scripts} )' '(no rewrite)'
+  'x=$( { npm ci --ignore-scripts=false --ignore-scripts} )' '(no rewrite, quiet)'
 pass "an npm install in a substitution body with a nested } is read where the body is read as a payload, and gets the flag before the }"
 expect_rewrite "npm ci after another statement in the group" '{ echo a; npm ci}' '{ echo a; npm ci --ignore-scripts}'
 # A line read on its own has lost the `{` of the line before it.
 expect_rewrite "npm ci on the line after the {" $'{\nnpm ci}' $'{\nnpm ci --ignore-scripts}'
 # With no group open, zsh refuses the `}` and bash hands npm `ci}`, which npm
 # refuses as a command: no install, and no rewrite that would make it one.
-expect_rewrite "npm ci} outside a group" 'npm ci}'            '(no rewrite)'
-expect_rewrite "npm i} outside a group"  'npm i} ; echo x'    '(no rewrite)'
+expect_rewrite "npm ci} outside a group" 'npm ci}'            '(no rewrite, quiet)'
+expect_rewrite "npm i} outside a group"  'npm i} ; echo x'    '(no rewrite, quiet)'
 # A `}` with a quote or an escape after it is inside the word (`ci}x`), even
 # where the scan view blanks the quote.
-expect_rewrite "npm ci} before a quote"     "npm ci}'x'"       '(no rewrite)'
-expect_rewrite "npm ci} before an escape"   'npm ci}\x'        '(no rewrite)'
-expect_rewrite "npm ci} before a quote in a group" "{ npm ci}'x' ;}" '(no rewrite)'
+expect_rewrite "npm ci} before a quote"     "npm ci}'x'"       '(no rewrite, quiet)'
+expect_rewrite "npm ci} before an escape"   'npm ci}\x'        '(no rewrite, quiet)'
+expect_rewrite "npm ci} before a quote in a group" "{ npm ci}'x' ;}" '(no rewrite, quiet)'
 expect_pass "npm ci} outside a group, which installs nothing" 'npm ci}'
 expect_pass "a maven goal with a } outside a group, which maven does not know" 'mvn -Dartifact=g:evil:1.0.0 dependency:get}'
 # bash closes this group at the last `}` and runs `npm ci}`; zsh closes it at
