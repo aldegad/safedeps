@@ -1,0 +1,634 @@
+{
+  "schema": 1,
+  "retired": [
+    {
+      "path": "scripts/measure/core-lex-differential.py",
+      "reason": "The Bash awk lexer comparison has no reference after the native hook switch. Fixed corpora remain inputs to native reader batteries.",
+      "exit_status": 2
+    },
+    {
+      "path": "scripts/measure/core-facts-differential.py",
+      "reason": "The Bash fact-channel recorder is retired; native facts and public reader batteries own fixed expectations.",
+      "exit_status": 2
+    },
+    {
+      "path": "scripts/measure/core-grammar-drift.sh",
+      "reason": "The Bash grammar is no longer a hook truth source. Native grammar is checked against actual manager observations.",
+      "exit_status": 2
+    },
+    {
+      "path": "scripts/measure/core-inert-differential.py",
+      "reason": "Bash versus Rust rewrite channel comparison is retired. Recorded release-floor fixtures and native inert tests remain.",
+      "exit_status": 2
+    },
+    {
+      "path": "scripts/measure/core-inert-witness.py",
+      "reason": "The witness requires two Bash/Rust comparison channels that are retired.",
+      "exit_status": 2
+    },
+    {
+      "path": "scripts/measure/core-inert-selftest-control.py",
+      "reason": "These mutants validate the retired Bash/Rust comparator, not native hook behavior.",
+      "exit_status": 2
+    },
+    {
+      "path": "scripts/measure/core-hybrid.py",
+      "reason": "The temporary Bash hook with a native lexer is retired; production uses one native hook.",
+      "exit_status": 2
+    },
+    {
+      "path": "scripts/measure/core-harvest.sh",
+      "reason": "The recorder rewrites Bash hook function bodies that no longer implement the hook.",
+      "exit_status": 2
+    },
+    {
+      "path": "scripts/measure/core-hook-differential.py",
+      "reason": "Bash versus native full-channel equivalence is retired.",
+      "exit_status": 2
+    },
+    {
+      "path": "scripts/measure/core-hook-fullpath.py",
+      "reason": "Bash source comparator mutations are retired with the channel comparison.",
+      "exit_status": 2
+    },
+    {
+      "path": "scripts/measure/core-hook-npm-response.py",
+      "reason": "The Bash source-hash/channel comparison contract is historical evidence, not a native release gate.",
+      "exit_status": 2
+    },
+    {
+      "path": "scripts/measure/core-hook-native.py",
+      "reason": "This paired channel collector requires the retired Bash reference.",
+      "exit_status": 2
+    },
+    {
+      "path": "scripts/measure/core-hook-proof.py",
+      "reason": "Controls for the retired paired-channel collector are historical evidence.",
+      "exit_status": 2
+    },
+    {
+      "path": "scripts/measure/core-hook-standin.py",
+      "reason": "The Bash comparison stand-in is retired with the paired collector.",
+      "exit_status": 2
+    },
+    {
+      "path": "scripts/measure/core-hook-standin-accept.py",
+      "reason": "Acceptance of the historical Bash stand-in is not a native hook gate.",
+      "exit_status": 2
+    },
+    {
+      "path": "scripts/measure/core-hook-identity.py",
+      "reason": "Historical paired collector identity replay is retired with that collector.",
+      "exit_status": 2
+    },
+    {
+      "path": "scripts/measure/core-hook-contract.py",
+      "reason": "The paired collector contract test is retired with its Bash reference.",
+      "exit_status": 2
+    },
+    {
+      "path": "scripts/measure/core-post-pure.py",
+      "reason": "The extracted Bash post functions are retired references. Native report controls use the independent disk oracle.",
+      "exit_status": 2
+    },
+    {
+      "path": "scripts/measure/core-post-state.py",
+      "reason": "Bash journal/trace/workspace comparison is retired. Native owner, trace and report controls retain independent fixtures.",
+      "exit_status": 2
+    },
+    {
+      "path": "scripts/measure/core-post-heuristics.py",
+      "reason": "The extracted Bash heuristic comparison is retired. Native post heuristic tests own fixed input expectations.",
+      "exit_status": 2
+    },
+    {
+      "path": "scripts/measure/core-pre-readings-probe.py",
+      "reason": "The patched Bash reading-state reference is retired. Native reader batteries own fixed expectations.",
+      "exit_status": 2
+    },
+    {
+      "path": "scripts/measure/core-pre-targets-probe.py",
+      "reason": "The extracted Bash target reader comparison is retired. Synthetic npm capture helpers remain for native pre probes.",
+      "exit_status": 2
+    },
+    {
+      "path": "scripts/measure/core-pre-snapshot-probe.py",
+      "reason": "The extracted Bash snapshot comparison is retired. Synthetic seed and independent harvest helpers remain for native controls.",
+      "exit_status": 2
+    },
+    {
+      "path": "scripts/measure/core-pre-pending-probe.py",
+      "reason": "The Bash pending-state comparison is retired. Native record controls check fixed call and snapshot ownership.",
+      "exit_status": 2
+    },
+    {
+      "path": "scripts/measure/core-pre-install-probe.py",
+      "reason": "The Bash install-driver channel comparison is retired. Native pre fixtures and public batteries check decisions.",
+      "exit_status": 2
+    },
+    {
+      "path": "scripts/measure/core-pre-input-probe.py",
+      "reason": "Bash/native payload channel comparison is retired. Its data corpus remains available for native input regressions.",
+      "exit_status": 2
+    },
+    {
+      "path": "scripts/measure/core-post-input-probe.py",
+      "reason": "Bash/native payload channel comparison is retired; public native batteries check malformed input.",
+      "exit_status": 2
+    },
+    {
+      "path": "scripts/measure/core-target-boundary-probe.py",
+      "reason": "This extracted Bash fact/lexer comparison is retired with those references.",
+      "exit_status": 2
+    },
+    {
+      "path": "scripts/measure/core-zsh-glob-probe.py",
+      "reason": "This Bash reference lexer comparison is retired; actual shell corpus observations remain available.",
+      "exit_status": 2
+    },
+    {
+      "path": "scripts/measure/scan-verdict-replay.sh",
+      "reason": "The old-versus-new Bash source replay is retired; native public reader batteries keep expected verdicts.",
+      "exit_status": 2
+    },
+    {
+      "path": "scripts/measure/scan-cost.sh",
+      "reason": "Bash startup/library/awk cost decomposition does not measure the native hook.",
+      "exit_status": 2
+    },
+    {
+      "path": "scripts/measure/lex-trace.sh",
+      "reason": "The Bash awk process trace has no target in the native lexer. Native source-map tests own payload boundaries.",
+      "exit_status": 2
+    },
+    {
+      "path": "scripts/measure/inert-downgrade-grid.sh",
+      "reason": "Historical Bash rewrite comparison is retired; native inert corpus and stored release-floor checks remain.",
+      "exit_status": 2
+    },
+    {
+      "path": "scripts/measure/inert-record-invariant.sh",
+      "reason": "Historical Bash rewrite comparison is retired; native source controls check rewrite records.",
+      "exit_status": 2
+    },
+    {
+      "path": "scripts/measure/core-ere-differential.py",
+      "reason": "The host grep comparison and Bash grammar reference are retired; native regex unit fixtures retain the fixed recognizer expectations.",
+      "exit_status": 2
+    },
+    {
+      "path": "scripts/measure/core-post-entry-adapter.py",
+      "reason": "Replay of the historical Python-as-Bash adapter defect is retired; hook-entry tests own the native shim error contract.",
+      "exit_status": 2
+    }
+  ],
+  "retained_data": "Existing JSON, JSONL and TSV corpora are retained; historical counts are not native coverage.",
+  "migrated": [
+    {
+      "path": "scripts/measure/core-ask-differential.py",
+      "consumer": "native ask-probe; owned npm argv/env recorder and fixed fetch/host facts"
+    },
+    {
+      "path": "scripts/measure/core-ledger-differential.py",
+      "consumer": "native ledger; Python hashes and fixed approval/miss expectations"
+    },
+    {
+      "path": "scripts/measure/core-log-differential.py",
+      "consumer": "native state-rotate; fixed retained bytes, gzip contents, inode and pruning expectations"
+    },
+    {
+      "path": "scripts/measure/core-pre-context-probe.py",
+      "consumer": "native ledger context-probe; fixed fixture paths and Python file hashes"
+    },
+    {
+      "path": "scripts/measure/core-post-workspace-glob.py",
+      "consumer": "native post-probe; actual shell expansion plus independently declared exclusion fixture"
+    },
+    {
+      "path": "scripts/measure/core-seam-check.py",
+      "consumer": "Python stat/lstat fixture facts and existing native seam queries"
+    },
+    {
+      "path": "scripts/measure/core-post-faults.py",
+      "consumer": "Python stat/lstat fixture writer; native public post and independent disk oracle"
+    },
+    {
+      "path": "scripts/measure/core-post-trace-controls.py",
+      "consumer": "Python stat/lstat fixture writer and native source-copy mutants"
+    },
+    {
+      "path": "scripts/measure/core-post-pre-controls.py",
+      "consumer": "explicit native pre/post helper and source-copy mutants; no product Bash body extraction"
+    },
+    {
+      "path": "scripts/measure/core-inert-globfiles.py",
+      "consumer": "existing saved command/glob observations, with native manager npm-read query"
+    },
+    {
+      "path": "scripts/measure/manager-option-reading.sh",
+      "consumer": "actual managers and their existing fixtures, native grammar and manager read query"
+    },
+    {
+      "path": "scripts/measure/npm-option-reading.sh",
+      "consumer": "actual npm nopt corpus, native grammar and batched manager npm-read query (plain/other)"
+    },
+    {
+      "path": "scripts/measure/npm-link-operands.sh",
+      "consumer": "actual npm-package-arg corpus, native grammar and manager npa-local query"
+    },
+    {
+      "path": "scripts/measure/npm-verb-spellings.sh",
+      "consumer": "actual npm command list and native grammar"
+    },
+    {
+      "path": "scripts/measure/shell-reading-fuzz.sh",
+      "consumer": "actual shell REACHED corpus, native lex and reader lex-payloads views; optional canonical pre"
+    },
+    {
+      "path": "scripts/measure/effect-gate-cost.sh",
+      "consumer": "core-post-cost native post timing; historical Bash stage sum retired"
+    },
+    {
+      "path": "scripts/measure/core-post-cost.py",
+      "consumer": "native post timing and separate child counts; source/binary hashes and load/nice receipt"
+    },
+    {
+      "path": "scripts/measure/inert-unread-scripts.sh",
+      "consumer": "canonical public pre; old Bash ref replacement explicitly rejected"
+    }
+  ],
+  "preserved": [
+    {
+      "path": "scripts/measure/core-post-suite-adapt.py",
+      "reason": "Owned by the post battery migration; preserved verbatim until fixtures are absorbed."
+    },
+    {
+      "path": "scripts/measure/core-post-direct-facts.py",
+      "reason": "Owned by the post battery migration; preserved verbatim until fixtures are absorbed."
+    },
+    {
+      "path": "scripts/measure/core-post-pre-fixture.py",
+      "reason": "Owned by the post battery migration; preserved verbatim along with its helpers."
+    },
+    {
+      "path": "scripts/measure/glued-verb-reading.sh",
+      "reason": "The Bash ledger writer is still used by the CLI; it only seeds fixture approvals."
+    },
+    {
+      "path": "scripts/measure/tuple-replay.sh",
+      "reason": "The Bash ledger writer is still used by the CLI; it only seeds fixture approvals."
+    },
+    {
+      "path": "scripts/measure/core_hook/observe.py",
+      "reason": "Only reachable through the retired paired collector; preserved historical implementation, not a native release gate."
+    },
+    {
+      "path": "scripts/measure/core_hook/controls.py",
+      "reason": "Only reachable through the retired paired collector; no new Bash/native comparison."
+    },
+    {
+      "path": "scripts/measure/scan-failure-census.sh",
+      "reason": "Bash injection registration retained until entry cutover. Native property coverage is in native-failure-coverage.json."
+    },
+    {
+      "path": "scripts/measure/census-shards.sh",
+      "reason": "Census phase/shard removal is owned by host runner and entry cutover; untouched."
+    },
+    {
+      "path": "scripts/measure/core-post-suite.py",
+      "reason": "The native suite driver still calls this adapter. Preserved with its helpers for the post battery migration; legacy wrapper removal belongs to entry cutover."
+    }
+  ],
+  "survey_rows": [
+    {
+      "path": "scripts/measure/core-ask-differential.py",
+      "source_lines": [
+        "42",
+        "42\u201343",
+        "43"
+      ]
+    },
+    {
+      "path": "scripts/measure/core-ere-differential.py",
+      "source_lines": [
+        "39"
+      ]
+    },
+    {
+      "path": "scripts/measure/core-facts-differential.py",
+      "source_lines": [
+        "206",
+        "93"
+      ]
+    },
+    {
+      "path": "scripts/measure/core-grammar-drift.sh",
+      "source_lines": [
+        "15"
+      ]
+    },
+    {
+      "path": "scripts/measure/core-harvest.sh",
+      "source_lines": [
+        "32",
+        "33",
+        "58",
+        "62"
+      ]
+    },
+    {
+      "path": "scripts/measure/core-hook-differential.py",
+      "source_lines": [
+        "53",
+        "54"
+      ]
+    },
+    {
+      "path": "scripts/measure/core-hook-fullpath.py",
+      "source_lines": [
+        "36",
+        "37",
+        "40",
+        "41"
+      ]
+    },
+    {
+      "path": "scripts/measure/core-hook-npm-response.py",
+      "source_lines": [
+        "208"
+      ]
+    },
+    {
+      "path": "scripts/measure/core-hybrid.py",
+      "source_lines": [
+        "29",
+        "30",
+        "36"
+      ]
+    },
+    {
+      "path": "scripts/measure/core-inert-differential.py",
+      "source_lines": [
+        "335",
+        "3572,3812\u20133815",
+        "3581",
+        "3652",
+        "3653",
+        "423"
+      ]
+    },
+    {
+      "path": "scripts/measure/core-inert-globfiles.py",
+      "source_lines": [
+        "34"
+      ]
+    },
+    {
+      "path": "scripts/measure/core-ledger-differential.py",
+      "source_lines": [
+        "29"
+      ]
+    },
+    {
+      "path": "scripts/measure/core-lex-differential.py",
+      "source_lines": [
+        "57",
+        "68"
+      ]
+    },
+    {
+      "path": "scripts/measure/core-log-differential.py",
+      "source_lines": [
+        "20",
+        "20,47"
+      ]
+    },
+    {
+      "path": "scripts/measure/core-post-direct-facts.py",
+      "source_lines": [
+        "20,33"
+      ]
+    },
+    {
+      "path": "scripts/measure/core-post-entry-adapter.py",
+      "source_lines": [
+        "30\u201345"
+      ]
+    },
+    {
+      "path": "scripts/measure/core-post-faults.py",
+      "source_lines": [
+        "159"
+      ]
+    },
+    {
+      "path": "scripts/measure/core-post-heuristics.py",
+      "source_lines": [
+        "24"
+      ]
+    },
+    {
+      "path": "scripts/measure/core-post-pre-controls.py",
+      "source_lines": [
+        "39\u201340"
+      ]
+    },
+    {
+      "path": "scripts/measure/core-post-pre-fixture.py",
+      "source_lines": [
+        "22"
+      ]
+    },
+    {
+      "path": "scripts/measure/core-post-pure.py",
+      "source_lines": [
+        "27",
+        "37",
+        "38",
+        "39",
+        "40",
+        "41",
+        "53"
+      ]
+    },
+    {
+      "path": "scripts/measure/core-post-state.py",
+      "source_lines": [
+        "196",
+        "31",
+        "39",
+        "40",
+        "41",
+        "42"
+      ]
+    },
+    {
+      "path": "scripts/measure/core-post-suite-adapt.py",
+      "source_lines": [
+        "31\u201362"
+      ]
+    },
+    {
+      "path": "scripts/measure/core-post-suite.py",
+      "source_lines": [
+        "63\u201383"
+      ]
+    },
+    {
+      "path": "scripts/measure/core-post-trace-controls.py",
+      "source_lines": [
+        "89"
+      ]
+    },
+    {
+      "path": "scripts/measure/core-post-workspace-glob.py",
+      "source_lines": [
+        "66"
+      ]
+    },
+    {
+      "path": "scripts/measure/core-pre-context-probe.py",
+      "source_lines": [
+        "18"
+      ]
+    },
+    {
+      "path": "scripts/measure/core-pre-readings-probe.py",
+      "source_lines": [
+        "21"
+      ]
+    },
+    {
+      "path": "scripts/measure/core-pre-snapshot-probe.py",
+      "source_lines": [
+        "22",
+        "50"
+      ]
+    },
+    {
+      "path": "scripts/measure/core-pre-targets-probe.py",
+      "source_lines": [
+        "23"
+      ]
+    },
+    {
+      "path": "scripts/measure/core-seam-check.py",
+      "source_lines": [
+        "100"
+      ]
+    },
+    {
+      "path": "scripts/measure/core_hook/controls.py",
+      "source_lines": [
+        "10",
+        "13",
+        "16",
+        "19",
+        "22",
+        "24",
+        "26",
+        "29",
+        "32",
+        "35",
+        "41",
+        "44",
+        "47",
+        "52",
+        "7"
+      ]
+    },
+    {
+      "path": "scripts/measure/core_hook/observe.py",
+      "source_lines": [
+        "502",
+        "507",
+        "508"
+      ]
+    },
+    {
+      "path": "scripts/measure/effect-gate-cost.sh",
+      "source_lines": [
+        "55",
+        "55\u201359,77,101\u2013104",
+        "57",
+        "59"
+      ]
+    },
+    {
+      "path": "scripts/measure/glued-verb-reading.sh",
+      "source_lines": [
+        "165"
+      ]
+    },
+    {
+      "path": "scripts/measure/inert-unread-scripts.sh",
+      "source_lines": [
+        "33",
+        "34"
+      ]
+    },
+    {
+      "path": "scripts/measure/manager-option-reading.sh",
+      "source_lines": [
+        "67",
+        "67,96"
+      ]
+    },
+    {
+      "path": "scripts/measure/npm-link-operands.sh",
+      "source_lines": [
+        "72",
+        "72,80"
+      ]
+    },
+    {
+      "path": "scripts/measure/npm-option-reading.sh",
+      "source_lines": [
+        "153",
+        "153,229\u2013231"
+      ]
+    },
+    {
+      "path": "scripts/measure/npm-verb-spellings.sh",
+      "source_lines": [
+        "70"
+      ]
+    },
+    {
+      "path": "scripts/measure/scan-failure-census.sh",
+      "source_lines": [
+        "266\u2013355,440\u2013484"
+      ]
+    },
+    {
+      "path": "scripts/measure/scan-verdict-replay.sh",
+      "source_lines": [
+        "174",
+        "65",
+        "79"
+      ]
+    },
+    {
+      "path": "scripts/measure/shell-reading-fuzz.sh",
+      "source_lines": [
+        "44",
+        "50",
+        "54",
+        "69"
+      ]
+    },
+    {
+      "path": "scripts/measure/tuple-replay.sh",
+      "source_lines": [
+        "101"
+      ]
+    }
+  ],
+  "report_mutations": "scripts/test/lib/report-mutations.json",
+  "census_property": "scripts/measure/native-failure-coverage.json",
+  "limits": [
+    "Historical Bash comparison counts are not native coverage.",
+    "The three post battery migration helpers and their dependencies are preserved until their owner absorbs them.",
+    "Source-copy controls test propagation, not natural reachability of every producer branch."
+  ]
+}

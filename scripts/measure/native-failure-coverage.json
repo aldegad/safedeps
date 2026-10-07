@@ -1,0 +1,48 @@
+{
+  "schema": 1,
+  "property": "A failed reading must not become an absent install; commands naming a manager receive UNDECIDED",
+  "legacy_injection": "Bash awk/grep/sed call-k process failure",
+  "registration": "native-scan-failures is added; legacy census removal belongs to entry cutover",
+  "rows": [
+    {
+      "failure": "lexer failure, missing reading, smfail",
+      "producer": "rust/src/core.rs: Run::lex_unterm and Run::pieces",
+      "consumer": "rust/src/pre.rs: settle_scan_failure; rust/src/pre/install.rs: judge",
+      "coverage": "native source-copy propagation census; execution evidence reported separately",
+      "control": "scripts/test/native-scan-failures.sh",
+      "inventory": "scripts/measure/native-scan-sites.json",
+      "limit": "Each actual producer failure branch is forced on a source copy, witnessed, then judged through public pre. Natural branch reachability is not claimed."
+    },
+    {
+      "failure": "unclosed shell command (UNTERM)",
+      "producer": "rust/src/core.rs: command_reads",
+      "consumer": "rust/src/pre/install.rs: judge",
+      "coverage": "public battery owned by shell-reader migration",
+      "control": "scripts/test/scan-contract.sh",
+      "limit": "The native conversion and execution belong to the shell-reader battery; old Bash census counts are not native coverage."
+    },
+    {
+      "failure": "payload cannot be read (dynamic env -S, malformed source-map units)",
+      "producer": "rust/src/core.rs: payloads, payload_build, lex_payloads",
+      "control": "scripts/test/native-scan-failures.sh",
+      "coverage": "native source-copy propagation census; execution evidence reported separately",
+      "inventory": "scripts/measure/native-scan-sites.json",
+      "limit": "Each actual producer failure branch is forced on a source copy, witnessed, then judged through public pre. Natural branch reachability is not claimed."
+    },
+    {
+      "failure": "self-budget expires during npm questions",
+      "producer": "rust/src/pre/budget.rs: execute",
+      "consumer": "rust/src/pre.rs: main",
+      "control": "scripts/measure/core-pre-budget-entry-probe.py",
+      "coverage": "public native fixture",
+      "limit": "The fixture asserts deny plus UNDECIDED, no rewrite, pending-state absence and descendant cleanup. It is not an all-reader fault census."
+    },
+    {
+      "failure": "conflicting inert rewrite obligations",
+      "producer": "rust/src/pre/install.rs: judge",
+      "control": "scripts/measure/core-pre-claude-controls.py: removed-consumer",
+      "coverage": "public native source control",
+      "limit": "Consumer precedence is covered; it does not inject a lexer or payload failure."
+    }
+  ]
+}

@@ -7,6 +7,12 @@ private cache argv is normalized, after checking its location. Every other
 argument and environment entry (except shell bookkeeping _ and SHLVL) stays.
 This is a component comparison, not a full hook verdict or real npm model.
 """
+
+if __name__ == "__main__":
+    import sys
+    sys.stderr.write('retired: The extracted Bash target reader comparison is retired. Synthetic npm capture helpers remain for native pre probes. See native-measure-disposition.json.\n')
+    raise SystemExit(2)
+
 import argparse
 import json
 import os

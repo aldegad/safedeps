@@ -17,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from native_fixture_facts import tree_facts
 
 p=argparse.ArgumentParser(description=__doc__)
 p.add_argument('--archive',required=True)
@@ -83,18 +84,8 @@ with tempfile.TemporaryDirectory(prefix='core-post-clock.') as tmp:
     lock=project/'package-lock.json';lock.write_text('{}\n')
     (tree/'.package-lock.json').write_text('{}\n')
     leaf=tree/'fixture/observed';leaf.write_text('before\n')
-    script=box/'facts.sh'
-    script.write_text('''#!/bin/bash
-set -eu
-source "$ROOT/lib/gates/backstop-trace.sh"
-for rel in package-lock.json node_modules/.package-lock.json node_modules; do
- printf '%s\\t%s\\t%s\\n' "$rel" "$(safedeps_tree_inode "$1/$rel")" "$(safedeps_tree_clock "$1/$rel")"
-done
-''')
-    raw=subprocess.check_output(['bash',str(script),str(project)],env=dict(os.environ,ROOT=str(root),LC_ALL='C'),text=True)
-    inodes={};clocks={}
-    for line in raw.splitlines():
-        name,inode,clock=line.split('\t');inodes[name]=inode;clocks[name]=clock
+    inodes,clocks=tree_facts(project)
+    raw=json.dumps([inodes,clocks],sort_keys=True)
     # All lockfile clocks predate even the shifted baseline. This makes the
     # leaf walk, rather than a lockfile shortcut, own the observed result.
     second=time.time_ns()//10**9+4
@@ -106,7 +97,7 @@ done
         raise SystemExit('clock fixture missed its same-second window; no result claimed')
     baseline=box/'baseline';baseline.touch()
     entry=dict(baseline=str(baseline),resolution='seconds',inodes=inodes,clocks=clocks)
-    clocks_after=subprocess.check_output(['bash',str(script),str(project)],env=dict(os.environ,ROOT=str(root),LC_ALL='C'),text=True)
+    clocks_after=json.dumps(tree_facts(project),sort_keys=True)
     if raw!=clocks_after:raise SystemExit('clock fixture changed an entry field; no walk result claimed')
     observed=[dict(path=str(tree),ctime_ns=tree.stat().st_ctime_ns)]
     for parent,dirs,files in os.walk(tree):

@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
-"""Compare shared npm ask/fetch functions with bash. Uses an owned npm stand-in,
-never a real install or network call. --control removes the reference's code
-name filter; the unsafe PATH is an owned recorder, so the control is harmless.
+"""Check native npm questions against an owned recorder and fixed facts.
+No Bash reference, real install, or network call is used.
 """
 import argparse
 import json
@@ -13,7 +12,6 @@ import subprocess
 import tempfile
 p=argparse.ArgumentParser(description=__doc__)
 p.add_argument('--core',required=True)
-p.add_argument('--control',action='store_true')
 a=p.parse_args()
 root=Path(__file__).resolve().parents[2]
 core=str(Path(a.core).resolve())
@@ -36,34 +34,6 @@ elif args[0]=='query': print('[]')
 else: print(json.dumps({'registry':os.environ.get('npm_config_registry','https://registry.npmjs.org/'),'replace-registry-host':'npmjs','@scope:registry':'https://mirror.example/'}))
 ''')
     stub.chmod(0o700)
-    wrapper=box/'reference.sh'
-    wrapper.write_text('''#!/bin/bash
-set -u
-source "$1/lib/install-grammar.sh"
-source "$1/lib/npm/ask.sh"
-shift
-'''+('safedeps_npm_code_name() { return 1; }\n' if a.control else '')+'''
-op="$1"; shift
-case "$op" in
- target) safedeps_npm_install_target "$1" $((SECONDS+8)) "${@:2}" ;;
- fetch) safedeps_npm_fetch_facts "$1" $((SECONDS+8)) "${@:2}" ;;
- query)
-  tmp=$(mktemp -d "$TMPDIR/query.XXXXXX")
-  safedeps_npm_ask_start "$tmp/query" "$1" -- query '*' --global=false --location=project --prefix "$1"
-  safedeps_npm_ask_wait $((SECONDS+10))
-  cat "$tmp/query"
-  rm -rf "$tmp" ;;
- *)
-  case "$op" in
-   host) filter='.url | sd_host';;
-   public) filter='. as $q | .registry | sd_registry_public($q.facts)';;
-   origins) filter='sd_fetch_origins(.facts; .url)';;
-   problems) filter='sd_fetch_problems(.facts; .url)';;
-   known-problems) filter='sd_fetch_known_problems(.facts; .url)';;
-  esac
-  jq -c --arg public "$SAFEDEPS_NPM_PUBLIC_REGISTRY_RE" "$SAFEDEPS_NPM_FETCH_JQ $filter" ;;
-esac
-''')
     env=dict(os.environ,PATH=str(bindir)+':'+os.environ['PATH'],HOME=str(box/'home'),TMPDIR=str(scratch),LANG='C',LC_ALL='C')
     for k in list(env):
         if k.lower().startswith('npm_config_') or k.startswith(('NODE_','LD_','DYLD_')) or k in ['BASH_ENV','OPENSSL_CONF','OPENSSL_MODULES']: del env[k]
@@ -93,18 +63,48 @@ esac
     bad=0
     for label,req in cases:
         data=json.dumps(req).encode()
-        op=req['op']; argv=[op]
-        if op in ['target','fetch','query']: argv += [str(project),*req.get('env',[]),'--',*req.get('args',[])]
-        ref=subprocess.run(['bash',str(wrapper),str(root),*argv],input=data,env=env,cwd=root,capture_output=True,timeout=15)
-        refcalls=recordings()
+        op=req['op']
         rust=subprocess.run([core,'ask-probe'],input=data,env=env,cwd=root,capture_output=True,timeout=15)
-        rustcalls=recordings()
-        same=(ref.returncode,ref.stdout,refcalls)==(rust.returncode,rust.stdout,rustcalls)
-        print(('ok ' if same else 'DIFF ')+label,flush=True)
+        observed=recordings()
+        same=rust.returncode==0 and not rust.stderr
+        answer=rust.stdout.decode().splitlines()
+        if op in ('target','fetch','query'):
+            blocked=op=='target' and req.get('args') in (['--cache'],['--'],['-C'])
+            if blocked:
+                same=same and not observed and answer[0].startswith('?\t') and 'unknown' in json.loads(answer[1])
+            else:
+                same=same and len(observed)==(3 if op=='target' else 1)
+                for call in observed:
+                    same=same and call['cwd']==str(project) and call['env']['PATH']==env['PATH']
+                    same=same and all(call['env'][k] is None for k in ('NODE_OPTIONS','NODE_PATH','npm_config_node_options'))
+                    same=same and call['env']['ASK_SETTING']==('x' if label=='target-setting' else None)
+                    same=same and call['env']['HOME']==(None if label in ('target-unset','target-empty') else env['HOME'])
+                    same=same and call['argv'][-4:]==['--logs-max=0','--update-notifier=false','--cache','@CACHE@']
+                if op=='query':same=same and json.loads(rust.stdout)==[]
+                else:
+                    if op=='target':same=same and answer[0]==str(project)
+                    want=dict(registry='https://registry.npmjs.org/',replace='npmjs',scopes={'@scope':'https://mirror.example/'},test_registry=None)
+                    same=same and json.loads(answer[-1])==want
+        elif op=='host':
+            wanted=['registry.npmjs.org','h.example','[::1]','[','','github.com','','É.example','b@c','','']
+            urls=[r['url'] for _,r in cases if r['op']=='host']
+            same=same and not observed and json.loads(rust.stdout)==wanted[urls.index(req['url'])]
+        else:
+            index=int(label.rsplit('-',1)[1])
+            unknown='safedeps has no answer from npm about the registry'
+            origins={0:[{'unknown':unknown}],1:[{'unknown':unknown}],2:[{'unknown':unknown}],
+                     3:[{'unknown':'missing'}],5:[{'registry':'https://mirror.example/','replace':'npmjs'}],
+                     7:[{'registry':'https://mirror.example/','replace':'npmjs','scope':'@scope'}],9:[{'unknown':'missing'}]}
+            problems={0:[unknown],1:[unknown],2:[unknown],3:['missing'],
+                      5:['npm fetches it from the registry https://mirror.example/ (replace-registry-host=npmjs)'],
+                      7:['npm has @scope:registry=https://mirror.example/ (replace-registry-host=npmjs)'],9:['missing']}
+            wanted=origins.get(index,[]) if op=='origins' else problems.get(index,[])
+            if op=='known-problems' and index not in (5,7):wanted=[]
+            same=same and not observed and json.loads(rust.stdout)==wanted
+        print(('ok - ' if same else 'not ok - ')+label,flush=True)
         if not same:
             bad+=1
-            print('  bash',ref.returncode,repr(ref.stdout),refcalls,repr(ref.stderr))
-            print('  core',rust.returncode,repr(rust.stdout),rustcalls,repr(rust.stderr))
+            print('  core',rust.returncode,repr(rust.stdout),observed,repr(rust.stderr))
     print('end:',subprocess.check_output(['uptime'],text=True).strip())
-    print(f'core-ask-differential: {len(cases)} cases, {bad} differ, control={a.control}')
-    raise SystemExit(0 if (bad>0 if a.control else bad==0) else 1)
+    print(f'core-ask: {len(cases)} cases, {bad} failures')
+    raise SystemExit(1 if bad else 0)

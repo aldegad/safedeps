@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Project ledger context against the original Yarn/override file readers.
-
-Every invocation uses the same restored absolute paths. No hash, path or
-source date is normalized. Inputs are JSON, no package manager is executed.
+"""Check native project context using fixed fixtures and Python file hashes.
+The historical Bash comparison is retired. No package manager is executed.
 """
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -13,25 +12,7 @@ import subprocess
 import tempfile
 
 ROOT=Path(__file__).resolve().parents[2]
-REFERENCE=r'''#!/bin/bash
-set -euo pipefail
-source "$1/lib/npm/closure.sh"
-input=$(cat)
-project=$(jq -r .path <<< "$input")
-op=$(jq -r .op <<< "$input")
-output=$(mktemp)
-source_file=$(mktemp)
-trap 'rm -f "$output" "$source_file"' EXIT
-if [[ "$op" == yarn || "$op" == project ]]; then
-  rc=0
-  safedeps_npm_yarn_project_context "$output" "$project" || rc=$?
-  if [[ "$rc" == 0 ]]; then cat "$output"; exit 0; fi
-  if [[ "$op" == yarn || "$rc" != 1 ]]; then exit "$rc"; fi
-fi
-raw=$(SAFEDEPS_NPM_OVERRIDES_DIR="$project" safedeps_npm_repo_overrides_json "$source_file")
-safedeps_npm_overrides_context "$output" "$raw" "$(cat "$source_file")" || exit 1
-cat "$output"
-'''
+
 
 
 def put(path,value):
@@ -91,29 +72,68 @@ def seed(box,name):
 
 
 def main():
-    ap=argparse.ArgumentParser();ap.add_argument('--core',required=True);ap.add_argument('--only');ap.add_argument('--expect-difference',action='store_true');ap.add_argument('--report',required=True);a=ap.parse_args()
+    ap=argparse.ArgumentParser();ap.add_argument('--core',required=True);ap.add_argument('--only');ap.add_argument('--report',required=True);a=ap.parse_args()
     names=['none','ordinary','classic','no-lock','subdir','boundary','config-inputs','workspace-star','workspace-question','workspace-class','workspace-escape','workspace-dot','workspace-modules','workspace-outside','workspace-inside','workspace-bad','workspace-space','workspace-negated','workspace-dotdot','override','override-filter','override-env','override-subdir','override-boundary','override-empty']
     names+=['workspace-quoted-slash','workspace-paired-slash','backslash-root','backslash-temp',
         'bracket-root','star-root','question-root','quoted-star-root','paired-slash-root','unicode-root']
     if a.only:names=[n for n in names if n in a.only.split(',')]
     assert names;rows=[]
     with tempfile.TemporaryDirectory(prefix='core-pre-context.') as temp:
-        outer=Path(temp).resolve();box=outer/'box';ref=outer/'reference.sh';ref.write_text(REFERENCE)
+        outer=Path(temp).resolve();box=outer/'box'
         for name in names:
-            pair=[]
-            for side in ('bash','core'):
-                if box.exists():shutil.rmtree(box)
-                row,extra=seed(box,name)
-                env={k:v for k,v in os.environ.items() if not k.startswith('SAFEDEPS_')}
-                env.update(extra,LC_ALL='C',LANG='C')
-                cmd=['/bin/bash',str(ref),str(ROOT)] if side=='bash' else [str(Path(a.core).resolve()),'ledger','context-probe']
-                p=subprocess.run(cmd,input=json.dumps(row).encode(),cwd=box/'project',env=env,capture_output=True,timeout=15)
-                pair.append(dict(rc=p.returncode,stdout=p.stdout.decode(errors='surrogateescape'),stderr=p.stderr.decode(errors='surrogateescape')))
-            channels=[k for k in pair[0] if pair[0][k]!=pair[1][k]]
-            rows.append(dict(case=name,channels=channels,reference=pair[0],candidate=pair[1]))
-            print(('DIFF' if channels else 'ok')+' '+name+' '+','.join(channels),flush=True)
+            if box.exists():shutil.rmtree(box)
+            row,extra=seed(box,name)
+            env={k:v for k,v in os.environ.items() if not k.startswith('SAFEDEPS_')}
+            env.update(extra,LC_ALL='C',LANG='C')
+            p=subprocess.run([str(Path(a.core).resolve()),'ledger','context-probe'],input=json.dumps(row).encode(),cwd=box/'project',env=env,capture_output=True,timeout=15)
+            absent={'none','no-lock','boundary','override-boundary','override-empty'}
+            unsafe={'workspace-bad','workspace-space','workspace-negated','workspace-dotdot','workspace-outside',
+                    'backslash-root','bracket-root','quoted-star-root','paired-slash-root'}
+            project=Path(row['path'])
+            if name in ('subdir','override-subdir'):project=project.parent
+            members=[]
+            if name.startswith('workspace'):
+                pattern=json.loads((project/'package.json').read_text())['workspaces'][0]
+                # Ask the real shell's filename expansion, not a hook helper.
+                expanded=subprocess.run(['bash','-c', 'shopt -s nullglob; for d in "$PROJECT"/${PATTERN}; do [[ -f "$d/package.json" ]] && printf "%s\\0" "$d"; done; true'],env=dict(os.environ,PROJECT=str(project),PATTERN=pattern),capture_output=True,check=True)
+                resolved=[Path(os.fsdecode(x)).resolve() for x in expanded.stdout.split(b'\0') if x]
+                if any(x==project or project not in x.parents for x in resolved):unsafe.add(name)
+                else:members=[str(x.relative_to(project)) for x in resolved]
+            expected_rc=1 if name in absent else 2 if name in unsafe or name=='classic' else 0
+            checks={'status':p.returncode==expected_rc}
+            if expected_rc:
+                checks['empty_output']=not p.stdout
+                checks['diagnostic']=bool(p.stderr)==(expected_rc==2)
+            elif p.returncode==0 and p.stdout:
+                answer=json.loads(p.stdout)
+                root_name='env' if name=='override-env' else str(project)
+                checks['root']=answer['project_root']==root_name
+                checks['context_hash']=answer['context_hash'].startswith('sha256:') and len(answer['context_hash'])==71
+                if name.startswith('override'):
+                    want={'valid':'2'} if name=='override-filter' else {'z':'3','a':'1'} if name=='override-env' else {'z':'2','a':{'z':'3','a':'1'}}
+                    canonical=json.dumps(want,sort_keys=True,separators=(',',':')).encode()
+                    digest=hashlib.sha256(canonical).hexdigest()
+                    checks['overrides']=answer['overrides']==want
+                    checks['source']=answer['overrides_source']==('env' if name=='override-env' else str(project/'package.json'))
+                    checks['digest']=answer['overrides_sha256']=='sha256:'+digest
+                    checks['context_hash']=answer['context_hash']=='sha256:'+hashlib.sha256((root_name+'\n'+digest).encode()).hexdigest()
+                else:
+                    paths=['package.json','yarn.lock']+[m+'/package.json' for m in members]
+                    if name=='config-inputs':paths+=['.yarnrc.yml','.yarn/releases/yarn.cjs','.yarn/plugins/a.js','.yarn/patches/pkg.patch']
+                    expected_files=[dict(path=rel,sha256='sha256:'+('\\' if '\\' in str(project/rel) else '')+hashlib.sha256((project/rel).read_bytes()).hexdigest()) for rel in sorted(set(paths))]
+                    checks['inputs']=answer['input_files']==expected_files
+                    checks['manifest']=answer['manifest_path']==str(project/'package.json')
+                    checks['lockfile']=answer['lockfile_path']==str(project/'yarn.lock')
+                    checks['type']=answer['type']=='yarn-project-lockfile'
+                checks['stderr']=not p.stderr
+            passed=all(checks.values())
+            rows.append(dict(case=name,checks=checks,passed=passed,rc=p.returncode,stdout=p.stdout.decode(),stderr=p.stderr.decode()))
+            Path(a.report).write_text(json.dumps(rows,indent=2)+'\n')
+            print(('ok - ' if passed else 'not ok - ')+name,flush=True)
     Path(a.report).write_text(json.dumps(rows,indent=2))
-    bad=sum(bool(r['channels']) for r in rows);print(f'core-pre-context: {len(rows)} cases, {bad} differ',flush=True)
-    return int(not bad if a.expect_difference else bool(bad))
+    bad=sum(not r['passed'] for r in rows)
+    print(f'core-pre-context: {len(rows)} cases, {bad} failures',flush=True)
+    return int(bool(bad))
+
 
 if __name__=='__main__':raise SystemExit(main())

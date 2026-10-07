@@ -4,6 +4,12 @@
 Uses synthetic files and the original Bash functions. No package install,
 registry request, or command from a hook payload is executed. Run remotely.
 """
+
+if __name__ == "__main__":
+    import sys
+    sys.stderr.write('retired: The extracted Bash heuristic comparison is retired. Native post heuristic tests own fixed input expectations. See native-measure-disposition.json.\n')
+    raise SystemExit(2)
+
 import argparse
 import json
 import os

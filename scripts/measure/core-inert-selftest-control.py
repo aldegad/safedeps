@@ -29,6 +29,12 @@ inputs only. The CLI runs at the nice value this control was started with.
 Usage: core-inert-selftest-control.py [--path-prefix DIRS]
        core-inert-selftest-control.py --cli DIR [--cli-only KEYS] [--cli-out DIR]
 """
+
+if __name__ == "__main__":
+    import sys
+    sys.stderr.write('retired: These mutants validate the retired Bash/Rust comparator, not native hook behavior. See native-measure-disposition.json.\n')
+    raise SystemExit(2)
+
 import argparse
 import base64
 import hashlib

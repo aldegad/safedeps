@@ -5,6 +5,11 @@ The before entry is read verbatim from the failed measurement archive. Only
 its wrapper is changed on the after side. Neither product code nor the shim
 is changed, and every raw stderr is preserved.
 """
+
+if __name__ == "__main__":
+    import sys
+    sys.stderr.write('retired: Replay of the historical Python-as-Bash adapter defect is retired; hook-entry tests own the native shim error contract. See native-measure-disposition.json.\n')
+    raise SystemExit(2)
 import argparse
 import hashlib
 import importlib.util

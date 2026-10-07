@@ -3,6 +3,12 @@
 Run on a test host. Signals target only this script's own fixture child.
 Neither npm nor a network request runs. Complete-hook checks remain separate.
 """
+
+if __name__ == "__main__":
+    import sys
+    sys.stderr.write('retired: Bash journal/trace/workspace comparison is retired. Native owner, trace and report controls retain independent fixtures. See native-measure-disposition.json.\n')
+    raise SystemExit(2)
+
 import argparse
 import datetime
 import hashlib

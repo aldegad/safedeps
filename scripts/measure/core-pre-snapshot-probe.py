@@ -5,6 +5,12 @@ Both sides use the same absolute paths restored from one seed. Only the
 returned, validated snapshot id and its meta timestamp are normalized. Seed
 values and all other bytes stay literal. No payload command is executed.
 """
+
+if __name__ == "__main__":
+    import sys
+    sys.stderr.write('retired: The extracted Bash snapshot comparison is retired. Synthetic seed and independent harvest helpers remain for native controls. See native-measure-disposition.json.\n')
+    raise SystemExit(2)
+
 import argparse
 import hashlib
 import json

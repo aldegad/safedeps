@@ -5,6 +5,12 @@ Inputs remain JSONL data. The old core is the removal control. Bash/dash
 views are compared byte for byte to it; the corrected zsh boundary is held
 to original offsets and the existing shell-argv witness, not old awk output.
 """
+
+if __name__ == "__main__":
+    import sys
+    sys.stderr.write('retired: This Bash reference lexer comparison is retired; actual shell corpus observations remain available. See native-measure-disposition.json.\n')
+    raise SystemExit(2)
+
 import argparse
 import importlib.util
 import io

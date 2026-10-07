@@ -40,33 +40,17 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-GUARD="scripts/safedeps-pre-guard.sh"
-src=$(sed -n '/^shell_lex() {/,/^}/p' "${GUARD}")
-[[ "${src}" == *"shell_lex() {"* ]] || { printf 'shell_lex not found in %s\n' "${GUARD}" >&2; exit 2; }
-eval "${src}"
-# The payload views print where each payload lies, not its bytes; the guard's
-# own builder cuts them out of the text (lex_payloads, lex_payload_build).
-for fn in lex_payload_build lex_payloads; do
-  src=$(sed -n "/^${fn}() {/,/^}/p" "${GUARD}")
-  [[ "${src}" == *"${fn}() {"* ]] || { printf '%s not found in %s\n' "${fn}" "${GUARD}" >&2; exit 2; }
-  eval "${src}"
-done
-eval "$(grep '^SAFEDEPS_PAYLOAD_BAD_CODE=' "${GUARD}")"
-guard_mark_reading_failed() { :; }
-# Each view of <text> as a text: a payload view as its payloads, one per line.
-lex_view_text() { # reading text view
-  local p
+source "${ROOT_DIR}/scripts/test/lib/native-measure-core.sh"
+GUARD="${ROOT_DIR}/scripts/safedeps-hook-entry.sh"
+lex_view_text() { # reading text view; the core query owns payload boundaries
   if [[ "$3" == cscripts || "$3" == substs ]]; then
-    SAFEDEPS_READING="$1" lex_payloads "$2" "$3"
-    for p in ${LEX_PAYLOADS[@]+"${LEX_PAYLOADS[@]}"}; do printf '%s\n' "${p}"; done
+    jq -cn --arg reading "$1" --arg text "$2" --arg view "$3" \
+      '{op:"lex-payloads",reading:$reading,text:$text,view:$view}' |
+      "${MEASURE_CORE}" reader | jq -r '.payloads[].text'
   else
-    SAFEDEPS_READING="$1" shell_lex "$2" "$3" "safedeps:shell-reading-fuzz"
+    printf '%s' "$2" | SAFEDEPS_READING="$1" "${MEASURE_CORE}" lex "$3"
   fi
 }
-# The lexer reads the lists of the grammar (the shells, the executables), as
-# it does in the guard.
-# shellcheck source=lib/install-grammar.sh
-source lib/install-grammar.sh
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/safedeps-fuzz.XXXXXX")
 trap 'rm -rf "${work}"' EXIT
@@ -106,7 +90,7 @@ decision_of() { # text -> deny | undecided | allow | pass
   mkdir -p "${safe}/project"
   printf '{"dependencies":{}}\n' > "${safe}/project/package.json"
   out=$(jq -nc --arg c "$1" --arg cwd "${safe}/project" '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd}' |
-    HOME="${safe}/home" SAFEDEPS_HOME="${safe}/state" "${GUARD}" 2>/dev/null)
+    HOME="${safe}/home" SAFEDEPS_HOME="${safe}/state" "${GUARD}" pre 2>/dev/null)
   [[ -n "${out}" ]] || { printf 'pass'; return; }
   decision=$(jq -r '.hookSpecificOutput.permissionDecision // "pass"' <<< "${out}")
   if [[ "${decision}" == deny ]] && jq -r '.hookSpecificOutput.permissionDecisionReason // ""' <<< "${out}" | grep -q UNDECIDED; then
