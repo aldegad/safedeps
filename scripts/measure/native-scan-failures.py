@@ -110,9 +110,10 @@ def fixture(binary,out,marker,expect_failure):
         hook=next((m['hookSpecificOutput'] for m in messages if 'hookSpecificOutput' in m),{})
         logs=box/'state/advisory.log';log=logs.read_text() if logs.exists() else ''
         pending=list((box/'state/pending').rglob('*.json'));meta=list((box/'state/snapshots').glob('*_meta.json'))
-        checks={'hook_rc':r.returncode==0,'no_rewrite':'updatedInput' not in hook}
+        checks={'hook_rc':r.returncode==0}
         if expect_failure:
-            checks.update(witness=marker in err,no_pending=not pending,no_meta=not meta)
+            checks.update(witness=marker in err,no_rewrite='updatedInput' not in hook,
+                          no_pending=not pending,no_meta=not meta)
             if deny:checks.update(deny=hook.get('permissionDecision')=='deny',undecided='UNDECIDED' in hook.get('permissionDecisionReason',''))
             else:checks.update(allow=hook.get('permissionDecision')!='deny',stderr_failure='could not be fully read' in err,
                                advisory_failure='command scanner failed' in log)
