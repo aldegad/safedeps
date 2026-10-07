@@ -15,7 +15,7 @@ import tempfile
 
 ROOT = Path(sys.argv[1]).resolve()
 TOOL = ROOT / 'scripts/measure/output-sinks.py'
-REGISTRY = Path('scripts/measure/output-sinks.json')
+REGISTRY = Path('scripts/measure/output-sinks.tsv')
 spec = importlib.util.spec_from_file_location('output_sinks', TOOL)
 census = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(census)
@@ -101,6 +101,28 @@ def main():
         check('removed-listed-stderr', run(root), 1, 'eprintln')
 
         root = copy()
+        path = root / 'rust/src/post/providers.rs'
+        path.write_text(source.replace(original, original + original, 1))
+        check('same-callee-added-at-existing-function', run(root), 1, 'eprintln')
+
+        root = copy()
+        path = root / 'rust/src/post/providers.rs'
+        path.write_text(source.replace(original, 'eprintln!("{}", std::env::var("SYNTHETIC").unwrap_or_default());', 1))
+        check('human-origin-changed-to-other', run(root), 1, 'other')
+
+        root = copy()
+        path = root / 'rust/src/post/providers.rs'
+        path.write_text(source.replace(original, 'use std::collections::HashSet; let _unrelated = HashSet::<u8>::new(); ' + original, 1))
+        check('unrelated-line-and-ordinary-import-stay-green', run(root), 0, 'ok - output-sinks:')
+
+        root = copy()
+        path = root / 'rust/src/state/log.rs'
+        before = path.read_text()
+        if 'use std::{fs,' not in before: raise ValueError('use-tree control anchor is missing')
+        path.write_text(before.replace('use std::{fs,', 'use std::{collections::HashSet, fs,', 1))
+        check('unrelated-use-tree-member-stays-green', run(root), 0, 'ok - output-sinks:')
+
+        root = copy()
         append(root, r'''// eprintln!("comment"); fs::write("log", b"comment");
             /* nested /* println!("comment") */ write!(file, "comment") */
             const CENSUS_QUOTE: &str = r###"user command: awk failed; cp exit 1; println!("data"); /*"###;
@@ -121,11 +143,24 @@ def main():
                 let _ = std::fs::write(path, b"user path: /awk failed/cp exit 1");
             }\n''')
         check('new-data-exits-still-require-review', run(root), 1, 'census_quote')
-        rows = census.inventory(root)['files']['rust/src/pre/snapshot.rs']
-        writes = [row for row in rows if row['scope'] == 'census_quote' and row['operation'] == 'write']
-        ok = len(writes) == 2 and all(row['role'] == 'data' for row in writes)
+        rows = census.inventory(root)
+        writes = [row for row in rows if row['function'] == 'census_quote' and row['callee'] == 'std::fs::write']
+        ok = sum(row['count'] for row in writes) == 2 and all(row['role'] == 'data' for row in writes)
         print(('ok' if ok else 'not ok') + ' - output-sinks: command/path bytes are data, not authored claims')
         results.append(dict(name='data-role', passed=ok, rows=writes))
+        failed += not ok
+
+        root = copy()
+        append(root, '''fn census_result(observed: &crate::outcome::Outcome) {
+            let rendered = observed.describe(Action::Copy, Form::Action);
+            let message = cat(&[b"prefix: ", &rendered]);
+            crate::state::log_advisory(std::path::Path::new("."), &message);
+        }''')
+        rows = census.inventory(root)
+        rendered = [row for row in rows if row['function'] == 'census_result' and row['role'] == 'human']
+        ok = len(rendered) == 1 and rendered[0]['origins'] == 'fixed-literal+result-renderer'
+        print(('ok' if ok else 'not ok') + ' - output-sinks: Outcome renderer through local binding and fixed prefix')
+        results.append(dict(name='renderer-origin', passed=ok, rows=rendered))
         failed += not ok
 
     (logs / 'results.json').write_text(json.dumps(results, indent=2) + '\n')
