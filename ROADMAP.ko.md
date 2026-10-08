@@ -56,7 +56,7 @@ Safedeps 는 **개발 의존성 install** (npm / pip / cargo / go / gem / maven 
 
 ### 릴리즈 메모
 
-- npm 패키지 version 은 `package.json` 이 SSoT. `bin/safedeps` `SAFEDEPS_VERSION` 이 이를 따라가고, smoke 테스트는 `package.json` 을 읽어 대조한다 (현재 v2.19.0).
+- npm 패키지 version 은 `package.json` 이 SSoT. `bin/safedeps` `SAFEDEPS_VERSION` 이 이를 따라가고, smoke 테스트는 `package.json` 을 읽어 대조한다 (현재 v2.19.1).
 - `npm test` 는 release smoke suite 를 실행한다. full fixture E2E 는 `v2.1-tests` 에 있다.
 - daily re-check 는 LLM 토큰을 쓰지 않는다. opt-in 이며, macOS `launchd` user agent 가 매일 `safedeps re-check --json` 을 실행한다 (`install-safedeps-recheck-agent.mjs` 로 atomic install). `~/.safedeps/recheck.log` 와 `~/.safedeps/recheck-alerts.jsonl` 를 쓰고, 새 CVE/KEV/revoke/provider-skip/위조-의심 시 macOS notification 을 띄운다. 네트워크는 OSV / CISA / GHSA query 에만 쓴다.
 
@@ -1467,6 +1467,23 @@ v2.18.2 를 쓸 때 Bash 가드에 열려 있던 것들이다. Rust 코어는 �
 - **inert 기록의 잡음.** 따옴표 안 괄호 뒤의 단어를 명령 단어로 읽는다. 그래서 설치 옆의 `git commit -m "fix: handle (null) values!"` 같은 해 없는 명령이 기록된다.
 - **훅보다 오래 걸리는 작은 명령.** 가드 자신의 기한은 4KB 이상인 명령에만 걸린다. 한 측정은 치환 백 개짜리 2.6KB 명령을 30초 너머에 두었고 다른 측정은 비슷한 명령을 9초에 두었다. 두 수치는 아직 맞춰 보지 못했다.
 - **`run-all.sh` 는 건너뛴 행을 판정하지 않는다.** 호스트 실행기의 판정은 한다. `run-all.sh` 만으로 판정한 실행은 건너뛴 행에 초록이므로 그 로그에서 건너뛴 행을 읽는다.
+
+## v2.19.1 — 재검사 에이전트가 다시 설치되고, 한국어 문서가 패키지에 들어간다 (출하)
+
+패치 릴리스다. 판정은 옮기지 않는다. 훅은 v2.19.0 과 같게 판정한다. 버전 올림이 코어의 소스 스탬프를 바꾸므로 바이너리는 다시 빌드했다.
+
+- **매일 도는 재검사 에이전트가 다시 설치된다.** `node scripts/install/install-safedeps-recheck-agent.mjs install` 은 CLI 를 `~/.safedeps/agent` 로 복사하고, 무엇이든 등록하기 전에 복사된 `bin/safedeps` 를 한 번 돌린다. 복사는 손으로 적은 파일 다섯 개 목록을 따랐다. `lib/providers/providers.sh` 는 v2.15.8 부터 `lib/truth-sources.sh` 를, v2.18.0 부터 `lib/advisory-log-rotate.sh` 를 source 하고, `lib/npm/closure.sh` 는 v2.18.0 부터 `lib/npm/ask.sh` 를 source 한다. 셋 다 목록에 없었다. 그래서 복사된 bin 이 뜨지 못했고 설치는 "runtime smoke failed" 로 멈췄다. 이제 설치기는 `lib/` 트리 전체를 복사하므로 맞춰 둘 목록이 없다. 에이전트 설치가 실패했다면 다시 돌리면 된다.
+- **한국어 문서가 패키지에 들어간다.** `README.ko.md` 는 `ARCHITECTURE.ko.md` 와 `ROADMAP.ko.md` 로 링크하는데, 둘 다 패키지의 `files` 에 없어서 설치된 패키지 안에서는 두 링크가 깨져 있었다.
+
+### 어떻게 확인했나
+
+이 릴리스의 코드는 커밋 8e80f92 이고, 이 절은 그 뒤에 썼다.
+
+- **macOS.** 릴리스 세트를 호스트 실행기로 `--hosts m1,carenine` 을 주어 돌렸고, 모든 단위가 carenine 에 떨어졌다. 26 단위, 모두 종료 상태 0, `ok` 979, `not ok` 0, 건너뛴 행 0, 597초. smoke 는 80행으로 v2.19.0 보다 하나 많다. 그 하나가 새 행이다.
+- **통제.** 트리 사본에서 트리 전체 대신 옛 복사 목록을 되돌려 놓았다. 거기서 새 행은 빨강이었고, 복사된 bin 은 사용자가 본 오류와 같은 `lib/truth-sources.sh: No such file or directory` 를 냈다.
+- **릴리스 점검.** 이력 전체가 있는 clone 에서 통과했다. ShellCheck 0.11.0 은 파일 24개, gitleaks 8.30.1 은 커밋 1,036개, 의존성 0, 패키지는 파일 234개이고 `ARCHITECTURE.ko.md` 와 `ROADMAP.ko.md` 가 있고 `rust/` 는 없다.
+- **WSL1.** `linux-x64` 바이너리는 게시 방식으로 빌드했고, 거기서 `stamp --check` 는 `rust/` 가 있을 때와 없을 때 모두 ok 였다. 배터리는 nice 0 으로 돌렸다. Linux 루트에서 smoke 80/0 (112.7초), self-budget 43/0 (126.3초), effect-trace-grid 13/0 (768.4초), e2e 132/0 (338.8초, 건너뛴 행 7). Windows 드라이브에서 80/0 (83.6초), 43/0 (125.7초), 13/0 (733.8초), 132/0 (311.5초, 건너뛴 행 12). 건너뛴 행은 v2.19.0 이 건너뛴 것과 같다. Windows CPU 는 배터리마다 평균 21~77 퍼센트였다.
+- **한 번 빨강, 그다음 초록.** Linux 루트의 첫 effect-trace-grid 실행은 한 행에서 빨강이었다. OSV 조회 하나가 답을 받지 못했고(`advisory.log` 에 `OSV batch query failed status=000`), 게이트는 fail-closed 로 롤백했다. 위의 WSL1 에서 알려진 한계의 첫째다. 절차가 요구하는 한 번 더 실행은 초록이었다.
 
 ---
 

@@ -56,7 +56,7 @@ The internal engine keeps the v1 `reorg-guard` assets.
 
 ### Release notes
 
-- The npm package version in `package.json` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION` tracks it and the smoke test reads `package.json` to compare (current: v2.19.0).
+- The npm package version in `package.json` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION` tracks it and the smoke test reads `package.json` to compare (current: v2.19.1).
 - `npm test` runs the release smoke suite; the full fixture E2E lives under `v2.1-tests`.
 - The daily re-check uses no LLM tokens. It is opt-in: a macOS `launchd` user agent runs `safedeps re-check --json` daily, installed atomically by `install-safedeps-recheck-agent.mjs`. It writes `~/.safedeps/recheck.log` and `~/.safedeps/recheck-alerts.jsonl` and raises a macOS notification on a new CVE/KEV/revoke/provider-skip/suspected-forgery. Network is used only for OSV / CISA / GHSA queries.
 
@@ -1467,6 +1467,23 @@ These were open against the Bash guard when v2.18.2 was written. The Rust core w
 - **Noise in the inert record.** A word after a parenthesis inside quotes is read as a command word, so harmless commands such as `git commit -m "fix: handle (null) values!"` beside an install are recorded.
 - **A small command that outlasts the hook.** The guard's own deadline runs only for commands of 4KB and more. One measurement put a 2.6KB command of a hundred substitutions past 30s, and another put a similar one at 9s; the two are not reconciled yet.
 - **`run-all.sh` does not judge skipped rows.** The host runner's verdict does. A run judged by `run-all.sh` alone is green on a skipped row, so its log is read for them.
+
+## v2.19.1 — the re-check agent installs again, and the Korean documents ship (shipped)
+
+A patch release. It moves no verdict: the hooks judge as v2.19.0 does. The version bump changes the core's source stamp, so the binaries were built again.
+
+- **The daily re-check agent installs again.** `node scripts/install/install-safedeps-recheck-agent.mjs install` copies the CLI into `~/.safedeps/agent` and runs the copied `bin/safedeps` once before it registers anything. It copied a hand-kept list of five files. `lib/providers/providers.sh` has sourced `lib/truth-sources.sh` since v2.15.8 and `lib/advisory-log-rotate.sh` since v2.18.0, and `lib/npm/closure.sh` has sourced `lib/npm/ask.sh` since v2.18.0. None of the three was on the list, so the copied bin could not load, and the install stopped with "runtime smoke failed". The installer now copies the whole `lib/` tree, so there is no list to keep. If an install of the agent failed for you, run it again.
+- **The Korean documents are in the package.** `README.ko.md` links to `ARCHITECTURE.ko.md` and `ROADMAP.ko.md`, and neither was in the package's `files`, so both links were broken in an installed package.
+
+### How it was checked
+
+Commit 8e80f92 holds this release's code; this section was written after it.
+
+- **macOS.** The release set ran through the host runner with `--hosts m1,carenine`, and every unit landed on carenine: 26 units, each with exit status 0, 979 `ok`, 0 `not ok`, no skipped row, 597 seconds. smoke has 80 rows, one more than in v2.19.0: the new one.
+- **The control.** A copy of the tree put the old copy list back in place of the whole tree. The new row went red there, and the copied bin said `lib/truth-sources.sh: No such file or directory`, the error a user saw.
+- **Release checks.** They passed in a clone with full history: ShellCheck 0.11.0 on 24 files, gitleaks 8.30.1 over 1,036 commits, zero dependencies, and a package of 234 files that lists `ARCHITECTURE.ko.md` and `ROADMAP.ko.md` and no `rust/`.
+- **WSL1.** The `linux-x64` binary was built the publish way, and `stamp --check` said ok there with and without `rust/`. The batteries ran at nice 0. On the Linux root: smoke 80/0 (112.7 s), self-budget 43/0 (126.3 s), effect-trace-grid 13/0 (768.4 s) and e2e 132/0 (338.8 s, 7 skipped rows). On the Windows drive: 80/0 (83.6 s), 43/0 (125.7 s), 13/0 (733.8 s) and 132/0 (311.5 s, 12 skipped rows). The skipped rows are the ones v2.19.0 skipped. Windows CPU averaged 21 to 77 percent per battery.
+- **One red, then green.** The first effect-trace-grid run on the Linux root went red on one row. One OSV query got no answer (`OSV batch query failed status=000` in `advisory.log`), and the gate rolled back, fail-closed. That is the first of the known limits in WSL1 above. The procedure calls for one more run, and it was green.
 
 ---
 
