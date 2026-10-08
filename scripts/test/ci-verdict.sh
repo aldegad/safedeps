@@ -55,6 +55,10 @@ SKIP_ALLOWED=(
   # sets the same limit and skips where this one does.
   "hook-entry|ok - out-of-processes row SKIPPED (the process limit does not bind this user)"
   "hook-entry|ok - native out-of-processes row SKIPPED (the process limit does not bind this user)"
+  # `install` registers a launchd agent, and launchd is macOS's.
+  "recheck-agent|ok - install registers an agent whose runtime was built whole: SKIPPED (launchd agent install is macOS only)"
+  "recheck-agent|ok - install replaces an agent an earlier version built, which has no marker: SKIPPED (launchd agent install is macOS only)"
+  "recheck-agent|ok - a failed install leaves the registered agent, its plist and launchd as they were: SKIPPED (launchd agent install is macOS only)"
 )
 
 fail=0

@@ -19,14 +19,19 @@ const launchAgentsDir = path.join(os.homedir(), 'Library', 'LaunchAgents');
 const plistPath = path.join(launchAgentsDir, `${LABEL}.plist`);
 const launchdStdoutPath = path.join(safedepsHome, 'launchd-recheck.out.log');
 const launchdStderrPath = path.join(safedepsHome, 'launchd-recheck.err.log');
+// Written into every runtime this installer builds. A root that holds files and
+// has no marker is not ours to replace.
+const MARKER = '.safedeps-recheck-runtime';
 
 function usage() {
   console.log(`usage: install-safedeps-recheck-agent.mjs <install|uninstall|status> [--hour HH] [--minute MM]
        install-safedeps-recheck-agent.mjs stage --root DIR
 
 Default schedule: 09:00 local time.
-stage copies the agent's runtime into DIR and checks that the copied bin
-loads, without launchd. The tests use it.
+stage builds the agent's runtime as DIR and checks that the built bin loads,
+without launchd. DIR is replaced as a whole, so it must be absent, empty or a
+runtime that stage built before, and it can not be this checkout, hold it or lie
+inside it. The tests use it.
 `);
 }
 
@@ -105,7 +110,9 @@ function copyRuntimeFile(root, relativePath, mode) {
 
   fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
   fs.copyFileSync(source, target);
-  fs.chmodSync(target, mode);
+  // The source's own mode, without the write bits of group and other, so a
+  // runtime built from a group-writable checkout is not group-writable too.
+  fs.chmodSync(target, mode ?? (fs.statSync(source).mode & 0o755));
 }
 
 function copyRuntimeTree(root, relativeDir) {
@@ -114,36 +121,147 @@ function copyRuntimeTree(root, relativeDir) {
     if (entry.isDirectory()) {
       copyRuntimeTree(root, relativePath);
     } else if (entry.isFile()) {
-      copyRuntimeFile(root, relativePath, entry.name.endsWith('.sh') ? 0o755 : 0o644);
+      copyRuntimeFile(root, relativePath);
     } else {
       throw new Error(`runtime entry is neither a file nor a directory: ${relativePath}`);
     }
   }
 }
 
-function installRuntime(root) {
-  copyRuntimeFile(root, 'bin/safedeps', 0o755);
+function within(outer, inner) {
+  const relative = path.relative(outer, inner);
+  return relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+}
+
+// The real path of `target`, where the part of it that does not exist yet is
+// taken as written.
+function realpathLoose(target) {
+  const rest = [];
+  let current = path.resolve(target);
+  for (;;) {
+    try {
+      return path.join(fs.realpathSync.native(current), ...rest);
+    } catch (error) {
+      const parent = path.dirname(current);
+      if ((error.code !== 'ENOENT' && error.code !== 'ENOTDIR') || parent === current) {
+        throw error;
+      }
+      rest.unshift(path.basename(current));
+      current = parent;
+    }
+  }
+}
+
+// What replacing `root` as a whole may take away: 'absent', 'empty', or 'ours'
+// for a runtime this installer built. `ownsRoot` is for the agent's fixed home,
+// where an earlier version built the runtime before there was a marker.
+function rootState(root, ownsRoot) {
+  const realRoot = realpathLoose(root);
+  const realRepo = fs.realpathSync.native(repoRoot);
+  if (within(realRepo, realRoot) || within(realRoot, realRepo)) {
+    throw new Error(`${root} is, holds or lies inside this checkout (${repoRoot}); the runtime is copied out of the checkout, never into it`);
+  }
+  let stat;
+  try {
+    stat = fs.lstatSync(root);
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      return 'absent';
+    }
+    throw error;
+  }
+  if (!stat.isDirectory()) {
+    throw new Error(`${root} exists and is not a plain directory`);
+  }
+  if (fs.readdirSync(root).length === 0) {
+    return 'empty';
+  }
+  if (fs.lstatSync(path.join(root, MARKER), { throwIfNoEntry: false })?.isFile()) {
+    return 'ours';
+  }
+  if (ownsRoot) {
+    return 'ours';
+  }
+  throw new Error(
+    `${root} has files in it and was not built by this installer (it has no ${MARKER}). ` +
+    'The runtime replaces its root as a whole, so that is not done to a directory that may hold something else.',
+  );
+}
+
+function buildRuntime(dir) {
+  copyRuntimeFile(dir, 'bin/safedeps', 0o755);
   // bin/safedeps sources lib/ files under `set -euo pipefail`, and they source
   // each other. A hand-kept list of them missed one twice, and each time the
   // copied bin aborted at source time, so the daily re-check never ran: first
   // lib/npm/closure.sh (finding #6), then lib/truth-sources.sh from v2.15.8 and
   // lib/advisory-log-rotate.sh and lib/npm/ask.sh from v2.18.0. So the whole
-  // lib/ tree is copied, and there is no list to keep in step. It is removed
-  // first, so the copy holds what this checkout holds and nothing older.
-  fs.rmSync(path.join(root, 'lib'), { recursive: true, force: true });
-  copyRuntimeTree(root, 'lib');
-  copyRuntimeFile(root, 'scripts/safedeps-recheck-alert.sh', 0o755);
+  // lib/ tree is copied, and there is no list to keep in step.
+  copyRuntimeTree(dir, 'lib');
+  copyRuntimeFile(dir, 'scripts/safedeps-recheck-alert.sh', 0o755);
+  fs.writeFileSync(path.join(dir, MARKER), 'built by install-safedeps-recheck-agent.mjs; the runtime is replaced as a whole\n', { mode: 0o644 });
+}
 
-  // Smoke the copied runtime: the copied bin must at least load and answer
-  // `version`.
-  const copiedBin = path.join(root, 'bin/safedeps');
-  const smoke = spawnSync(copiedBin, ['--json', 'version'], { encoding: 'utf8' });
+// Smoke the built runtime: its bin must at least load and answer `version`.
+function smokeRuntime(dir) {
+  const smoke = spawnSync(path.join(dir, 'bin/safedeps'), ['--json', 'version'], { encoding: 'utf8' });
   if (smoke.status !== 0) {
     const detail = [smoke.stdout, smoke.stderr].filter(Boolean).join('\n').trim();
     throw new Error(
-      `safedeps re-check agent runtime smoke failed — the copied bin did not load ` +
-      `(a runtime file is likely missing from what installRuntime() copies).${detail ? `\n${detail}` : ''}`,
+      `safedeps re-check agent runtime smoke failed — the built bin did not load ` +
+      `(a runtime file is likely missing from what buildRuntime() copies).${detail ? `\n${detail}` : ''}`,
     );
+  }
+}
+
+// Puts a runtime already built and smoked at `staging` where `root` is. An
+// absent or empty root takes it with one rename. A root that holds a runtime is
+// moved aside first and put back if the second rename fails; between the two
+// renames `root` does not exist, and that is as short as two renames can make
+// it. The old runtime is removed only once the new one is in place.
+function swapRuntime(staging, root, state) {
+  if (state !== 'ours') {
+    fs.renameSync(staging, root);
+    return;
+  }
+  const aside = fs.mkdtempSync(path.join(path.dirname(root), `.${path.basename(root)}.old-`));
+  fs.renameSync(root, aside);
+  try {
+    fs.renameSync(staging, root);
+  } catch (error) {
+    try {
+      fs.renameSync(aside, root);
+    } catch (restore) {
+      throw new Error(`${error.message}; the old runtime could not be put back either (${restore.message}) and is in ${aside}`);
+    }
+    throw error;
+  }
+  try {
+    fs.rmSync(aside, { recursive: true, force: true });
+  } catch (error) {
+    console.error(`safedeps re-check agent: the new runtime is in place; the old one could not be removed from ${aside}: ${error.message}`);
+  }
+}
+
+// The runtime is built whole beside `root`, smoked, and only then put in place,
+// so a copy that fails, a runtime that does not load or a root that was not
+// ours leaves what was there as it was. Removing the old lib/ and copying the
+// new one into its place did not: a symbolic link in lib/ threw after the old
+// lib/ was gone, and `stage --root <this checkout>` deleted the checkout's own.
+function installRuntime(root, { ownsRoot = false } = {}) {
+  const state = rootState(root, ownsRoot);
+  const parent = path.dirname(root);
+  fs.mkdirSync(parent, { recursive: true, mode: 0o700 });
+  const staging = fs.mkdtempSync(path.join(parent, `.${path.basename(root)}.new-`));
+  let placed = false;
+  try {
+    buildRuntime(staging);
+    smokeRuntime(staging);
+    swapRuntime(staging, root, state);
+    placed = true;
+  } finally {
+    if (!placed) {
+      fs.rmSync(staging, { recursive: true, force: true });
+    }
   }
 }
 
@@ -175,7 +293,7 @@ function install(args) {
   fs.mkdirSync(launchAgentsDir, { recursive: true, mode: 0o700 });
   fs.mkdirSync(safedepsHome, { recursive: true, mode: 0o700 });
   fs.chmodSync(wrapperPath, 0o755);
-  installRuntime(agentRoot);
+  installRuntime(agentRoot, { ownsRoot: true });
   fs.writeFileSync(launchdStdoutPath, '');
   fs.writeFileSync(launchdStderrPath, '');
 
