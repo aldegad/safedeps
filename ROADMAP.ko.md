@@ -1473,7 +1473,7 @@ v2.18.2 를 쓸 때 Bash 가드에 열려 있던 것들이다. Rust 코어는 �
 패치 릴리스다. 판정은 옮기지 않는다. 훅은 v2.19.0 과 같게 판정한다. 버전 올림이 코어의 소스 스탬프를 바꾸므로 바이너리는 다시 빌드했다.
 
 - **매일 도는 재검사 에이전트가 다시 설치된다.** `node scripts/install/install-safedeps-recheck-agent.mjs install` 은 CLI 를 `~/.safedeps/agent` 로 복사하고, 무엇이든 등록하기 전에 복사된 `bin/safedeps` 를 한 번 돌린다. 복사는 손으로 적은 파일 다섯 개 목록을 따랐다. `lib/providers/providers.sh` 는 v2.15.8 부터 `lib/truth-sources.sh` 를, v2.18.0 부터 `lib/advisory-log-rotate.sh` 를 source 하고, `lib/npm/closure.sh` 는 v2.18.0 부터 `lib/npm/ask.sh` 를 source 한다. 셋 다 목록에 없었다. 그래서 복사된 bin 이 뜨지 못했고 설치는 "runtime smoke failed" 로 멈췄다. 이제 설치기는 `lib/` 트리 전체를 복사하므로 맞춰 둘 목록이 없다. 에이전트 설치가 실패했다면 다시 돌리면 된다.
-- **한국어 문서가 패키지에 들어간다.** `README.ko.md` 는 `ARCHITECTURE.ko.md` 와 `ROADMAP.ko.md` 로 링크하는데, 둘 다 패키지의 `files` 에 없어서 설치된 패키지 안에서는 두 링크가 깨져 있었다.
+- **한국어 문서가 패키지에 들어간다.** `README.ko.md` 와 `ARCHITECTURE.md` 는 `ARCHITECTURE.ko.md` 로, `ROADMAP.md` 는 `ROADMAP.ko.md` 로 링크한다. 두 한국어 문서가 다 패키지의 `files` 에 없어서, 설치된 패키지 안에서는 그 세 링크가 깨져 있었다.
 
 ### 어떻게 확인했나
 
@@ -1483,7 +1483,7 @@ v2.18.2 를 쓸 때 Bash 가드에 열려 있던 것들이다. Rust 코어는 �
 - **통제.** 트리 사본에서 트리 전체 대신 옛 복사 목록을 되돌려 놓았다. 거기서 새 행은 빨강이었고, 복사된 bin 은 사용자가 본 오류와 같은 `lib/truth-sources.sh: No such file or directory` 를 냈다.
 - **릴리스 점검.** 이력 전체가 있는 clone 에서 통과했다. ShellCheck 0.11.0 은 파일 24개, gitleaks 8.30.1 은 커밋 1,036개, 의존성 0, 패키지는 파일 234개이고 `ARCHITECTURE.ko.md` 와 `ROADMAP.ko.md` 가 있고 `rust/` 는 없다.
 - **WSL1.** `linux-x64` 바이너리는 게시 방식으로 빌드했고, 거기서 `stamp --check` 는 `rust/` 가 있을 때와 없을 때 모두 ok 였다. 배터리는 nice 0 으로 돌렸다. Linux 루트에서 smoke 80/0 (112.7초), self-budget 43/0 (126.3초), effect-trace-grid 13/0 (768.4초), e2e 132/0 (338.8초, 건너뛴 행 7). Windows 드라이브에서 80/0 (83.6초), 43/0 (125.7초), 13/0 (733.8초), 132/0 (311.5초, 건너뛴 행 12). 건너뛴 행은 v2.19.0 이 건너뛴 것과 같다. Windows CPU 는 배터리마다 평균 21~77 퍼센트였다.
-- **한 번 빨강, 그다음 초록.** Linux 루트의 첫 effect-trace-grid 실행은 한 행에서 빨강이었다. OSV 조회 하나가 답을 받지 못했고(`advisory.log` 에 `OSV batch query failed status=000`), 게이트는 fail-closed 로 롤백했다. 위의 WSL1 에서 알려진 한계의 첫째다. 절차가 요구하는 한 번 더 실행은 초록이었다.
+- **한 번 빨강, 그다음 초록.** Linux 루트의 첫 effect-trace-grid 실행은 한 행에서 빨강이었다. 그 실행에서 OSV 조회 두 번이 답을 받지 못했다(`advisory.log` 에 `OSV batch query failed status=000`). 게이트는 그때마다 fail-closed 로 롤백했고, 두 번째 롤백은 롤백이 없어야 하는 행에서 났다. 위의 WSL1 에서 알려진 한계의 첫째다. 절차가 요구하는 한 번 더 실행은 초록이었다.
 
 ---
 

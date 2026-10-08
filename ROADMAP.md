@@ -1473,7 +1473,7 @@ These were open against the Bash guard when v2.18.2 was written. The Rust core w
 A patch release. It moves no verdict: the hooks judge as v2.19.0 does. The version bump changes the core's source stamp, so the binaries were built again.
 
 - **The daily re-check agent installs again.** `node scripts/install/install-safedeps-recheck-agent.mjs install` copies the CLI into `~/.safedeps/agent` and runs the copied `bin/safedeps` once before it registers anything. It copied a hand-kept list of five files. `lib/providers/providers.sh` has sourced `lib/truth-sources.sh` since v2.15.8 and `lib/advisory-log-rotate.sh` since v2.18.0, and `lib/npm/closure.sh` has sourced `lib/npm/ask.sh` since v2.18.0. None of the three was on the list, so the copied bin could not load, and the install stopped with "runtime smoke failed". The installer now copies the whole `lib/` tree, so there is no list to keep. If an install of the agent failed for you, run it again.
-- **The Korean documents are in the package.** `README.ko.md` links to `ARCHITECTURE.ko.md` and `ROADMAP.ko.md`, and neither was in the package's `files`, so both links were broken in an installed package.
+- **The Korean documents are in the package.** `README.ko.md` and `ARCHITECTURE.md` link to `ARCHITECTURE.ko.md`, and `ROADMAP.md` links to `ROADMAP.ko.md`. Neither Korean document was in the package's `files`, so those three links were broken in an installed package.
 
 ### How it was checked
 
@@ -1483,7 +1483,7 @@ Commit 8e80f92 holds this release's code; this section was written after it.
 - **The control.** A copy of the tree put the old copy list back in place of the whole tree. The new row went red there, and the copied bin said `lib/truth-sources.sh: No such file or directory`, the error a user saw.
 - **Release checks.** They passed in a clone with full history: ShellCheck 0.11.0 on 24 files, gitleaks 8.30.1 over 1,036 commits, zero dependencies, and a package of 234 files that lists `ARCHITECTURE.ko.md` and `ROADMAP.ko.md` and no `rust/`.
 - **WSL1.** The `linux-x64` binary was built the publish way, and `stamp --check` said ok there with and without `rust/`. The batteries ran at nice 0. On the Linux root: smoke 80/0 (112.7 s), self-budget 43/0 (126.3 s), effect-trace-grid 13/0 (768.4 s) and e2e 132/0 (338.8 s, 7 skipped rows). On the Windows drive: 80/0 (83.6 s), 43/0 (125.7 s), 13/0 (733.8 s) and 132/0 (311.5 s, 12 skipped rows). The skipped rows are the ones v2.19.0 skipped. Windows CPU averaged 21 to 77 percent per battery.
-- **One red, then green.** The first effect-trace-grid run on the Linux root went red on one row. One OSV query got no answer (`OSV batch query failed status=000` in `advisory.log`), and the gate rolled back, fail-closed. That is the first of the known limits in WSL1 above. The procedure calls for one more run, and it was green.
+- **One red, then green.** The first effect-trace-grid run on the Linux root went red on one row. In that run two OSV queries got no answer (`OSV batch query failed status=000` in `advisory.log`). Each time the gate rolled back, fail-closed, and the second rollback was in a row that expects none. That is the first of the known limits in WSL1 above. The procedure calls for one more run, and it was green.
 
 ---
 
