@@ -175,21 +175,29 @@ fail_unit() { # index reason
   event "FAIL ${U_NAME[$1]}: $2"
 }
 
-# ssh_host INDEX COMMAND: one short command on a host, through a shared
-# connection. The command is built here from names this script checked.
-ssh_host() {
-  local h="$1" opts=() word
+# ssh_words INDEX: the host file's ssh options for a host, as words in the
+# array ssh_opts.
+ssh_words() {
+  local word
   # shellcheck disable=SC2206 # the host file's ssh options are words
-  local given=(${H_OPTS[h]})
+  local given=(${H_OPTS[$1]})
+  ssh_opts=()
   for word in ${given[@]+"${given[@]}"}; do
     # A word of the host file that starts with ~/ names a local file.
     # shellcheck disable=SC2088 # the literal ~/ is what is matched
     [[ "${word}" != "~/"* ]] || word="${HOME}/${word#\~/}"
-    opts+=("${word}")
+    ssh_opts+=("${word}")
   done
+}
+
+# ssh_host INDEX COMMAND: one short command on a host, through a shared
+# connection. The command is built here from names this script checked.
+ssh_host() {
+  local ssh_opts
+  ssh_words "$1"
   ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=3 \
     -o ControlMaster=auto -o "ControlPath=${sock}/%C" -o ControlPersist=120 \
-    ${opts[@]+"${opts[@]}"} "${H_DEST[h]}" "$2"
+    ${ssh_opts[@]+"${ssh_opts[@]}"} "${H_DEST[$1]}" "$2"
 }
 
 # Loads: when the tree was shipped (H_LOAD0), when the run took the host's
@@ -256,7 +264,37 @@ interrupted() {
   done
   exit 130
 }
-cleanup() { rm -rf "${sock}"; }
+# The shared connection each host's calls opened is a master process. It
+# outlives its last call by ControlPersist seconds, and removing the directory
+# of its socket does not end it: it is then a process nothing can reach, with
+# this run's directory as its working directory, which kept the plan worktree
+# of a run from being removed. So each master is asked to exit through its own
+# socket first, the same way it was reached, and the directory goes after. A
+# host the run never reached has no master and the ask fails; that is not told.
+# What is left in the directory afterwards is a master that did not exit, and
+# that is.
+close_masters() {
+  local h ssh_opts left
+  for (( h = 0; h < ${#H_NAME[@]}; h++ )); do
+    ssh_words "${h}"
+    ssh -o BatchMode=yes -o "ControlPath=${sock}/%C" -O exit \
+      ${ssh_opts[@]+"${ssh_opts[@]}"} "${H_DEST[h]}" >> "${work}/ssh-master-${H_NAME[h]}.out" 2>&1 || true
+  done
+  # The master removes its socket as it goes; give the last one a moment.
+  for (( h = 0; h < 20; h++ )); do
+    left=$(find "${sock}" -type s 2>/dev/null)
+    [[ -n "${left}" ]] || break
+    sleep 0.1
+  done
+  if [[ -n "${left}" ]]; then
+    printf 'run-on-hosts: an ssh master did not exit when asked; its socket stays at %s\n' "${left//$'\n'/ }" >&2
+    return 0
+  fi
+}
+cleanup() {
+  close_masters
+  rm -rf "${sock}"
+}
 trap cleanup EXIT
 # HUP too: a coordinator in a terminal that closes gets HUP, and with no trap
 # for it the run's units went on with nothing to stop them.
