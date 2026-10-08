@@ -1116,7 +1116,7 @@ Each of these has its own plan, and the work goes on. They were cut from this re
 - **Pipe consumers outside the list.** Install text piped to a consumer the pipe check does not name (a function, `source`, `dash`, `coproc` and others) passes with no record, alone and beside a visible install alike. A closed rule replaces the list.
 - **The same piped producer one level in.** A pipe into a shell inside a command substitution, a backquote, a double-quoted `sh -c` or `eval` that reads the visible install's words through `$_` or the exec string passes with no record. The proposed rule denies any pipe into a shell in any payload of a command that holds install text.
 
-## v2.19.0 — the hooks are one Rust binary, and the repairs v2.18.2 announced (not yet released)
+## v2.19.0 — the hooks are one Rust binary, and the repairs v2.18.2 announced (shipped)
 
 This release does two things. It replaces the two Bash hook scripts with one Rust binary, and it carries the repairs that v2.18.1 moved to v2.18.2. Both move verdicts, so it is a minor release. v2.18.2 was never published. Its section is the second half of this one, and it describes the Bash guard as it stood at the commits it names.
 
