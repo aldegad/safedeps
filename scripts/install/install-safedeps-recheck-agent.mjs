@@ -22,13 +22,16 @@ const launchdStderrPath = path.join(safedepsHome, 'launchd-recheck.err.log');
 
 function usage() {
   console.log(`usage: install-safedeps-recheck-agent.mjs <install|uninstall|status> [--hour HH] [--minute MM]
+       install-safedeps-recheck-agent.mjs stage --root DIR
 
 Default schedule: 09:00 local time.
+stage copies the agent's runtime into DIR and checks that the copied bin
+loads, without launchd. The tests use it.
 `);
 }
 
 function parseArgs(argv) {
-  const args = { command: argv[0] || 'install', hour: 9, minute: 0 };
+  const args = { command: argv[0] || 'install', hour: 9, minute: 0, root: '' };
   if (args.command === '-h' || args.command === '--help') {
     args.command = 'help';
   }
@@ -38,6 +41,8 @@ function parseArgs(argv) {
       args.hour = Number(argv[++i]);
     } else if (arg === '--minute') {
       args.minute = Number(argv[++i]);
+    } else if (arg === '--root') {
+      args.root = argv[++i] || '';
     } else if (arg === '-h' || arg === '--help') {
       args.command = 'help';
     } else {
@@ -94,35 +99,50 @@ function plistXml({ hour, minute }) {
 `;
 }
 
-function copyRuntimeFile(relativePath, mode) {
+function copyRuntimeFile(root, relativePath, mode) {
   const source = path.join(repoRoot, relativePath);
-  const target = path.join(agentRoot, relativePath);
+  const target = path.join(root, relativePath);
 
   fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
   fs.copyFileSync(source, target);
   fs.chmodSync(target, mode);
 }
 
-function installRuntime() {
-  copyRuntimeFile('bin/safedeps', 0o755);
-  copyRuntimeFile('lib/providers/providers.sh', 0o755);
-  copyRuntimeFile('lib/ledger/ledger.sh', 0o755);
-  // bin/safedeps sources lib/npm/closure.sh under `set -euo pipefail`, so omitting
-  // it made the copied agent bin abort at source time on every scheduled run — the
-  // daily re-check never actually ran (finding #6). Keep this list in sync with the
-  // `source` set in bin/safedeps; the post-install smoke below guards against drift.
-  copyRuntimeFile('lib/npm/closure.sh', 0o755);
-  copyRuntimeFile('scripts/safedeps-recheck-alert.sh', 0o755);
+function copyRuntimeTree(root, relativeDir) {
+  for (const entry of fs.readdirSync(path.join(repoRoot, relativeDir), { withFileTypes: true })) {
+    const relativePath = path.join(relativeDir, entry.name);
+    if (entry.isDirectory()) {
+      copyRuntimeTree(root, relativePath);
+    } else if (entry.isFile()) {
+      copyRuntimeFile(root, relativePath, entry.name.endsWith('.sh') ? 0o755 : 0o644);
+    } else {
+      throw new Error(`runtime entry is neither a file nor a directory: ${relativePath}`);
+    }
+  }
+}
 
-  // Smoke the copied runtime so a future added lib dependency cannot silently
-  // re-break the agent: the copied bin must at least load and answer `version`.
-  const copiedBin = path.join(agentRoot, 'bin/safedeps');
+function installRuntime(root) {
+  copyRuntimeFile(root, 'bin/safedeps', 0o755);
+  // bin/safedeps sources lib/ files under `set -euo pipefail`, and they source
+  // each other. A hand-kept list of them missed one twice, and each time the
+  // copied bin aborted at source time, so the daily re-check never ran: first
+  // lib/npm/closure.sh (finding #6), then lib/truth-sources.sh from v2.15.8 and
+  // lib/advisory-log-rotate.sh and lib/npm/ask.sh from v2.18.0. So the whole
+  // lib/ tree is copied, and there is no list to keep in step. It is removed
+  // first, so the copy holds what this checkout holds and nothing older.
+  fs.rmSync(path.join(root, 'lib'), { recursive: true, force: true });
+  copyRuntimeTree(root, 'lib');
+  copyRuntimeFile(root, 'scripts/safedeps-recheck-alert.sh', 0o755);
+
+  // Smoke the copied runtime: the copied bin must at least load and answer
+  // `version`.
+  const copiedBin = path.join(root, 'bin/safedeps');
   const smoke = spawnSync(copiedBin, ['--json', 'version'], { encoding: 'utf8' });
   if (smoke.status !== 0) {
     const detail = [smoke.stdout, smoke.stderr].filter(Boolean).join('\n').trim();
     throw new Error(
       `safedeps re-check agent runtime smoke failed — the copied bin did not load ` +
-      `(a runtime file is likely missing from installRuntime()).${detail ? `\n${detail}` : ''}`,
+      `(a runtime file is likely missing from what installRuntime() copies).${detail ? `\n${detail}` : ''}`,
     );
   }
 }
@@ -155,7 +175,7 @@ function install(args) {
   fs.mkdirSync(launchAgentsDir, { recursive: true, mode: 0o700 });
   fs.mkdirSync(safedepsHome, { recursive: true, mode: 0o700 });
   fs.chmodSync(wrapperPath, 0o755);
-  installRuntime();
+  installRuntime(agentRoot);
   fs.writeFileSync(launchdStdoutPath, '');
   fs.writeFileSync(launchdStderrPath, '');
 
@@ -211,6 +231,13 @@ try {
     uninstall();
   } else if (args.command === 'status') {
     status();
+  } else if (args.command === 'stage') {
+    if (!args.root) {
+      throw new Error('stage needs --root DIR');
+    }
+    const root = path.resolve(args.root);
+    installRuntime(root);
+    console.log(JSON.stringify({ staged: true, root }, null, 2));
   } else {
     throw new Error(`unknown command: ${args.command}`);
   }

@@ -71,6 +71,21 @@ pkg_version=$(jq -r '.version' package.json)
 [[ "$(jq -r '.version' <<< "${version_json}")" == "${pkg_version}" ]] || fail "cli version matches package.json (${pkg_version})"
 pass "cli version"
 
+# The daily re-check agent runs a copy of the CLI, not this checkout. Its copy
+# list was kept by hand and missed a sourced file twice, and each time the
+# copied bin could not load, so the agent could not be installed. Stage the
+# runtime the way the installer does (without launchd), then check that the
+# whole lib/ tree is there and that the copied bin answers.
+agent_root="${tmp_root}/agent-runtime"
+HOME="${tmp_root}/home-agent" SAFEDEPS_HOME="${tmp_root}/safe-agent" \
+  node scripts/install/install-safedeps-recheck-agent.mjs stage --root "${agent_root}" >/dev/null \
+  || fail "re-check agent runtime stages and its copied bin loads"
+diff -r lib "${agent_root}/lib" >/dev/null || fail "re-check agent runtime carries the whole lib/ tree"
+agent_json=$(HOME="${tmp_root}/home-agent" SAFEDEPS_HOME="${tmp_root}/safe-agent" "${agent_root}/bin/safedeps" --json version) \
+  || fail "re-check agent's copied bin answers version"
+[[ "$(jq -r '.version' <<< "${agent_json}")" == "${pkg_version}" ]] || fail "re-check agent's copied bin names ${pkg_version}"
+pass "re-check agent runtime"
+
 # The core's crate is the third place the version is written: `safedeps-core
 # version` prints it, so a release that bumped the other two would ship a
 # binary that names the old one.
