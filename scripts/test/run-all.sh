@@ -103,6 +103,7 @@ ALL_BATTERIES=(
   "lockless-forms|1|dev|2|1|509|scripts/test/lockless-forms.sh"
   "effect-trace-grid|2|release|2|1|803|scripts/test/effect-trace-grid.sh"
   "e2e|1|dev|1|1|351|scripts/test/e2e.sh"
+  "npx-judgment|1|dev|1|1|32|scripts/test/npx-judgment.sh"
 )
 #
 # Development runs omit native failure controls and can start phase two at
