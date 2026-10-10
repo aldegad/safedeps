@@ -16,16 +16,20 @@ fn osv_cache_path(cache: &Path, package: &[u8], version: &[u8]) -> PathBuf {
 }
 fn env(name:&str,default:&str)->String{std::env::var(name).ok().filter(|s|!s.is_empty()).unwrap_or_else(||default.into())}
 fn fresh(p:&Path,ttl:i64)->bool{fs::metadata(p).is_ok_and(|m|m.is_file()&&os::wall(os::WallRole::ProviderCacheExpiry).seconds()-m.mtime()<=ttl)}
-fn obj0(path:&Path)->Result<Value,()>{let s=jv::read_file(path).ok_or(())?;if s.failed{return Err(())}Ok(s.values.into_iter().next().filter(jv::truthy).unwrap_or_else(||jv::obj(vec![("vulns",Value::Arr(Vec::new()))])))}
+fn obj0(path:&Path)->Result<Value,()>{let s=jv::read_file(path).ok_or(())?;if s.failed{return Err(())}Ok(first(s))}
+fn first(s:jv::Stream)->Value{s.values.into_iter().next().filter(jv::truthy).unwrap_or_else(||jv::obj(vec![("vulns",Value::Arr(Vec::new()))]))}
 fn tsv(s:&[u8])->W{let mut out=Vec::new();for b in s{match b{b'\\'=>out.extend(b"\\\\"),b'\t'=>out.extend(b"\\t"),b'\r'=>out.extend(b"\\r"),b'\n'=>out.extend(b"\\n"),_=>out.push(*b)}}out}
 struct Scratch(PathBuf);
 impl Drop for Scratch{fn drop(&mut self){sh::rm_rf(&self.0);}}
 
-pub struct Providers{home:PathBuf,cache:PathBuf,ttl:i64,announced:bool}
+/// `kev_reads` counts the parses of the KEV catalog: one `batch` reads the
+/// catalog at most once, whatever the number of packages. Read per package,
+/// the whole catalog was parsed again for every package of the closure.
+pub struct Providers{home:PathBuf,cache:PathBuf,ttl:i64,announced:bool,kev_reads:usize}
 impl Providers{
     pub fn new(home:&Path)->Self{
         let cache=std::env::var_os(CACHE_ENV).filter(|p|!p.is_empty()).map(PathBuf::from).unwrap_or_else(||home.join(CACHE_DIR));
-        Self{home:home.into(),cache,ttl:env(CACHE_TTL_ENV,&CACHE_TTL.to_string()).parse().unwrap_or(CACHE_TTL),announced:false}
+        Self{home:home.into(),cache,ttl:env(CACHE_TTL_ENV,&CACHE_TTL.to_string()).parse().unwrap_or(CACHE_TTL),announced:false,kev_reads:0}
     }
     fn init(&self){for sub in CACHE_NAMESPACES{sh::mkdir_p(&self.cache.join(sub));}sh::mkdir_p(&self.home);state::advisory_rotate_once(&self.home.join("advisory.log"));}
     fn raw_log(&self,level:&[u8],line:&[u8]){sh::append(&self.home.join("advisory.log"),&cat(&[b"[",os::utc_stamp(os::wall(os::WallRole::ProviderHeader).seconds()).as_bytes(),b"] ",level,b" ",line,b"\n"]));}
@@ -46,12 +50,13 @@ impl Providers{
         c.arg(url).stdin(Stdio::null()).stderr(Stdio::null());
         c.output().map(|o|jv::captured(&[o.stdout])).unwrap_or_default()
     }
+    fn catalog(&mut self,path:&Path)->Option<Value>{self.kev_reads+=1;obj0(path).ok()}
     fn kev(&mut self)->Option<Value>{
         let cache=self.cache.join(KEV_CACHE_PATH);
         if !fresh(&cache,self.ttl){
             if !sh::command_exists("curl"){
                 eprintln!("safedeps providers: curl is required for provider queries");
-                return if sh::is_file(&cache){obj0(&cache).ok()}else{None};
+                return if sh::is_file(&cache){self.catalog(&cache)}else{None};
             }
             let Some(tmp)=sh::mktemp(&cat(&[sh::bytes(&self.cache),b"/kev/.known_exploited_vulnerabilities.json."]))else{return None};
             let status=Self::curl(&env("SAFEDEPS_KEV_CATALOG_URL",state::DEFAULT_KEV_CATALOG_URL),&tmp,None,"15");
@@ -60,12 +65,16 @@ impl Providers{
             if status==b"200"&&valid{
                 if fs::rename(&tmp,&cache).is_err(){sh::rm_f(&tmp);return None}
                 self.log(b"INFO",b"CISA KEV catalog refresh ok");
+                // The bytes just checked are the catalog now in place: they
+                // are the one read, not a second parse of the same file.
+                self.kev_reads+=1;
+                return st.map(first);
             }else{
                 sh::rm_f(&tmp);let status=if status.is_empty(){b"none".as_slice()}else{&status};
                 if sh::is_file(&cache){self.log(b"WARN",&cat(&[b"CISA KEV refresh failed; using stale local catalog status=",status]));}
                 else{self.log(b"WARN",&cat(&[b"CISA KEV unavailable and no local catalog status=",status]));return None}
             }
-        }obj0(&cache).ok()
+        }self.catalog(&cache)
     }
     /// Status per package; post uses only hard_block and vulnerable summaries.
     pub fn batch(&mut self,specs:&[Spec])->Result<Vec<(W,W,&'static str)>,()>{
@@ -102,6 +111,9 @@ impl Providers{
             }
         }
         let cve=Regex::new("^CVE-[0-9]{4}-[0-9]+$",false).unwrap();let mut output=Vec::new();
+        // Asked where the first package asks for it, as before, and kept for
+        // the rest: a refresh, its log line and the parse happen once.
+        let mut catalog:Option<Option<Value>>=None;
         for (package,version,_,value) in items{
             let osv=value.ok_or(())?;let vulns=jv::field(&osv,"vulns")?;
             let mut cves=Vec::new();
@@ -110,8 +122,8 @@ impl Providers{
                 if let Ok(Value::Str(s))=jv::field(v,"id"){if cve.is_match(s){cves.push(s.clone());}}
                 if let Ok(Value::Arr(a))=jv::field(v,"aliases"){for x in a{if let Value::Str(s)=x{if cve.is_match(s){cves.push(s.clone());}}}}
             }
-            let catalog=self.kev();let mut exploited=false;
-            if let Some(c)=catalog{if let Ok(Value::Arr(a))=jv::field(&c,"vulnerabilities"){exploited=a.iter().any(|v|matches!(jv::field(v,"cveID"),Ok(Value::Str(s)) if cves.contains(s)));}}
+            let catalog=catalog.get_or_insert_with(||self.kev());let mut exploited=false;
+            if let Some(c)=catalog{if let Ok(Value::Arr(a))=jv::field(c,"vulnerabilities"){exploited=a.iter().any(|v|matches!(jv::field(v,"cveID"),Ok(Value::Str(s)) if cves.contains(s)));}}
             let count=match vulns{Value::Arr(a)=>a.len(),Value::Obj(o)=>o.len(),Value::Str(s)=>String::from_utf8_lossy(s).chars().count(),Value::Null|Value::Bool(false)=>0,_=>return Err(())};
             output.push((package,version,if exploited{"hard_block"}else if count>0{"vulnerable"}else{"clean"}));
         }Ok(output)
@@ -159,5 +171,68 @@ fn provider_cache_constants_match_cli() {
         let key = String::from_utf8(out.stdout).unwrap();
         assert_eq!(osv_cache_path(Path::new("cache root"), package.as_bytes(), version.as_bytes()),
             Path::new("cache root/osv").join(format!("{}.json", key.trim_end_matches('\n'))));
+    }
+}
+
+#[cfg(test)]
+mod catalog_tests {
+    use super::*;
+
+    struct Fixture { root: PathBuf, providers: Providers }
+    impl Drop for Fixture { fn drop(&mut self) { let _ = fs::remove_dir_all(&self.root); } }
+    /// A home whose OSV answers and KEV catalog are all in the cache and fresh,
+    /// so a batch starts no curl.
+    fn fixture(name: &str, osv: &[(&str, &str)], kev: &[&str]) -> Fixture {
+        let root = std::env::temp_dir().join(format!("safedeps-kev-{}-{}", name, std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let cache = root.join("cache");
+        for sub in CACHE_NAMESPACES { fs::create_dir_all(cache.join(sub)).unwrap(); }
+        for (spec, body) in osv {
+            let (package, version) = spec.split_once('@').unwrap();
+            fs::write(osv_cache_path(&cache, package.as_bytes(), version.as_bytes()), body).unwrap();
+        }
+        let entries: Vec<String> = kev.iter().map(|id| format!("{{\"cveID\":\"{}\"}}", id)).collect();
+        fs::write(cache.join(KEV_CACHE_PATH), format!("{{\"vulnerabilities\":[{}]}}", entries.join(","))).unwrap();
+        let providers = Providers { home: root.join("home"), cache, ttl: CACHE_TTL, announced: false, kev_reads: 0 };
+        Fixture { root, providers }
+    }
+    fn specs(names: &[String]) -> Vec<Spec> {
+        names.iter().map(|spec| {
+            let (package, version) = spec.split_once('@').unwrap();
+            Spec { package: Value::Str(package.as_bytes().to_vec()), version: version.as_bytes().to_vec() }
+        }).collect()
+    }
+
+    #[test]
+    fn one_batch_reads_the_kev_catalog_once() {
+        let names: Vec<String> = (0..60).map(|n| format!("fixture-{}@1.0.{}", n, n)).collect();
+        let osv: Vec<(&str, &str)> = names.iter().map(|n| (n.as_str(), "{}")).collect();
+        let mut f = fixture("once", &osv, &["CVE-2026-9999"]);
+        let out = f.providers.batch(&specs(&names)).unwrap();
+        assert_eq!(out.len(), 60);
+        assert_eq!(f.providers.kev_reads, 1, "the KEV catalog is read once for 60 packages");
+        let mut empty = fixture("none", &[], &["CVE-2026-9999"]);
+        empty.providers.batch(&[]).unwrap();
+        assert_eq!(empty.providers.kev_reads, 0, "a batch with no package does not read the catalog");
+    }
+
+    /// One package of each state. Holds without the read counter, so it reads
+    /// the same against the per-package reading this replaced.
+    #[test]
+    fn batch_states_are_hard_block_vulnerable_and_clean() {
+        let osv = [
+            ("fixture-kev@1.0.0", r#"{"vulns":[{"id":"GHSA-xxxx","aliases":["CVE-2026-0001"]}]}"#),
+            ("fixture-vuln@1.0.0", r#"{"vulns":[{"id":"CVE-2026-0002"}]}"#),
+            ("fixture-clean@1.0.0", "{}"),
+        ];
+        let names: Vec<String> = osv.iter().map(|(n, _)| n.to_string()).collect();
+        let mut f = fixture("states", &osv, &["CVE-2026-0001"]);
+        let out = f.providers.batch(&specs(&names)).unwrap();
+        let states: Vec<(String, &str)> = out.iter().map(|(p, v, s)| (format!("{}@{}", String::from_utf8_lossy(p), String::from_utf8_lossy(v)), *s)).collect();
+        assert_eq!(states, vec![
+            ("fixture-kev@1.0.0".to_string(), "hard_block"),
+            ("fixture-vuln@1.0.0".to_string(), "vulnerable"),
+            ("fixture-clean@1.0.0".to_string(), "clean"),
+        ]);
     }
 }
