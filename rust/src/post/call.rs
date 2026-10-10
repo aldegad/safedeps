@@ -29,6 +29,10 @@ impl Record {
 pub struct Call {
     pub store: Store, pub current: Value, pub command: W, pub codex: bool,
     pub record: Record, pub entry: W, pub trace_none: W,
+    /// The entry was taken for this command in another directory than the
+    /// one this hook is given (the command ran a `cd`). It is kept and read
+    /// against its baseline time only (trace::backstop).
+    pub moved: bool,
 }
 fn string(v: &Value, key: &str) -> W {
     jv::field(v, key).ok().and_then(jv::text).map(|s| jv::captured(&[s.to_vec()])).unwrap_or_default()
@@ -52,6 +56,7 @@ impl Call {
         let mut entry = Vec::new();
         let mut found = false;
         let mut trace_none = b"the pre-guard left no trace entry for this call".to_vec();
+        let mut moved = false;
         if let Some(id) = &id {
             let base = call_base(&home.join("pending/backstop"), id);
             let file = base.with_extension("json");
@@ -62,10 +67,18 @@ impl Call {
                 if entry.is_empty() {
                     trace_none = b"the trace entry for this call could not be read".to_vec();
                     sh::rm_f(&base.with_extension("trace"));
-                } else if field(&jv::read(&entry), &["key"]).unwrap_or_default() != key.as_bytes() {
-                    trace_none = b"the trace entry for this call was taken for another directory or command".to_vec();
-                    sh::rm_f(&base.with_extension("trace"));
-                    entry.clear();
+                } else {
+                    // A key is `<directory hash>_<command hash>`.
+                    let taken = field(&jv::read(&entry), &["key"]).unwrap_or_default();
+                    let command_of = |k: &[u8]| k.iter().position(|b| *b == b'_').map(|i| k[i..].to_vec());
+                    if taken == key.as_bytes() {
+                    } else if command_of(&taken).is_some_and(|c| Some(c) == command_of(key.as_bytes())) {
+                        moved = true;
+                    } else {
+                        trace_none = b"the trace entry for this call was taken for another command".to_vec();
+                        sh::rm_f(&base.with_extension("trace"));
+                        entry.clear();
+                    }
                 }
             }
         } else { trace_none = b"this hook's input names no tool_use_id, so no trace entry belongs to this call".to_vec(); }
@@ -120,11 +133,11 @@ impl Call {
         if matches!(record, Record::Unread | Record::Empty | Record::Gone) {
             trace_none = cat(&[b"the command reached the backstop through a pre-guard record, and ", &trace_none]);
         }
-        Ok(Some(Self { store, current, command, codex, record, entry, trace_none }))
+        Ok(Some(Self { store, current, command, codex, record, entry, trace_none, moved }))
     }
     pub fn backstop_trace(&self) -> bool {
         let home = &self.store.home;
-        let (traced, line) = trace::backstop(&self.store.project, &self.entry, &self.trace_none);
+        let (traced, line) = trace::backstop(&self.store.project, &self.entry, &self.trace_none, self.moved);
         trace::drop_baseline(home, &self.entry);
         let line = if traced { cat(&[b"post-verify BACKSTOP traced: ", &line, b". Command: ", &self.command]) }
             else { cat(&[b"post-verify BACKSTOP UNTRACED: ", &line, b". No closure check ran and nothing was rolled back. Command: ", &self.command]) };

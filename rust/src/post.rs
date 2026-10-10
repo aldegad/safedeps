@@ -89,7 +89,7 @@ pub fn probe(input: &[u8]) -> i32 {
             }
         }
         b"trace" => {
-            let (traced,line)=trace::backstop(&path,bytes("entry"),bytes("none"));
+            let (traced,line)=trace::backstop(&path,bytes("entry"),bytes("none"),matches!(get("moved"),Value::Bool(true)));
             let _=std::io::stdout().write_all(&line);return if traced{0}else{1};
         }
         b"snapshot" => {

@@ -2363,8 +2363,11 @@ mm_post_file=$(PATH="${stub_bin}:${PATH}" grammar_post "${mm_wt}" 'FOO=a\\ npm i
 ! grep -q 'this hook found a pre-guard record' < "${mm_post_file}" \
   || fail "MM: a call with a trace entry is not judged by another call's record (${mm_post_file})"
 [[ -f "${mm_record}" ]] || fail "MM: the other call's record stays"
-grep -qF "the trace entry for this call was taken for another directory or command" "${SAFEDEPS_HOME}/advisory.log" \
-  || fail "MM: advisory.log says the entry was taken for another directory"
+# The entry is kept and read in the directory the post hook is given, by its
+# baseline time alone (traced or not, depending on how recent that
+# directory's files are); either line names the other directory.
+grep -qE "post-verify BACKSTOP (traced: .* changed after the baseline taken before this command in another directory|UNTRACED: no trace in .*/mm-wt/sub, a directory other than the one the trace entry for this call was taken in)" "${SAFEDEPS_HOME}/advisory.log" \
+  || fail "MM: advisory.log says the entry was taken in another directory"
 rm -f "${mm_record}" "${mm_record%.json}.trace"
 pass "a call whose trace entry was taken in another directory reads no record"
 

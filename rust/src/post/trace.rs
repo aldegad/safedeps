@@ -101,7 +101,14 @@ impl Install {
     }
 }
 
-pub fn backstop(project:&Path,entry:&[u8],none:&[u8])->(bool,Vec<u8>) {
+/// `moved`: the entry was taken in another directory. Its inodes and status
+/// change times are that directory's, so they are not compared; the two npm
+/// records and node_modules here are read against the entry's baseline time
+/// alone, and a path whose clock holds no fraction of a second counts from
+/// the baseline's second on (the baseline was set back for the other
+/// directory's clocks, not for these). A `cd` used to make every such call
+/// count as traced, and the backstop judged the closure it landed in.
+pub fn backstop(project:&Path,entry:&[u8],none:&[u8],moved:bool)->(bool,Vec<u8>) {
     if entry.is_empty() {return (true,if none.is_empty(){b"the pre-guard left no trace entry for this call".to_vec()}else{none.to_vec()})}
     let st=jv::read(entry);
     let mut lines=Vec::new();
@@ -114,32 +121,54 @@ pub fn backstop(project:&Path,entry:&[u8],none:&[u8])->(bool,Vec<u8>) {
     let baseline=sh::p(&lines[0]);
     if lines[0].is_empty(){return(true,b"the trace entry for this call names no baseline".to_vec())}
     if !sh::is_file(&baseline){return(true,cat(&[b"the trace baseline ",&lines[0],b" does not exist"]))}
-    for (i,rel) in [RECORDS[0],RECORDS[1],"node_modules"].iter().enumerate() {
-        let recorded=&lines[2+i];let file=project.join(rel);
-        if !sh::present(&file) {
-            if !recorded.is_empty(){return(true,cat(&[sh::bytes(&file),b" existed before this command and does not exist now"]))} continue;
+    let elsewhere:&[u8]=if moved{b" in another directory"}else{b""};
+    if moved {
+        let Ok(b)=fs::metadata(&baseline) else{return(true,cat(&[b"the trace baseline ",sh::bytes(&baseline),b" does not exist"]))};
+        for rel in RECORDS {
+            let file=project.join(rel);
+            let Ok(m)=fs::symlink_metadata(&file) else{continue};
+            if after(&m,&b,true)||fs::metadata(&file).is_ok_and(|t|after(&t,&b,true)) {
+                return(true,cat(&[sh::bytes(&file),b" changed after the baseline taken before this command",elsewhere]))
+            }
         }
-        if recorded.is_empty(){return(true,cat(&[sh::bytes(&file),b" exists now, and the entry recorded no inode for it before this command"]))}
-        if os::tree_inode(&file).as_bytes()!=recorded{return(true,cat(&[sh::bytes(&file),b" has another inode than before this command"]))}
-        if i==2 {continue}
-        if lines[5+i].is_empty() || os::tree_clock(&file).as_bytes()!=lines[5+i]{return(true,cat(&[sh::bytes(&file),b" has another status change time than the one recorded before this command"]))}
-        if lines[1]!=b"subsecond" && newer(&file,&baseline,true,true){return(true,cat(&[sh::bytes(&file),b" changed after the baseline taken before this command"]))}
+    } else {
+        for (i,rel) in [RECORDS[0],RECORDS[1],"node_modules"].iter().enumerate() {
+            let recorded=&lines[2+i];let file=project.join(rel);
+            if !sh::present(&file) {
+                if !recorded.is_empty(){return(true,cat(&[sh::bytes(&file),b" existed before this command and does not exist now"]))} continue;
+            }
+            if recorded.is_empty(){return(true,cat(&[sh::bytes(&file),b" exists now, and the entry recorded no inode for it before this command"]))}
+            if os::tree_inode(&file).as_bytes()!=recorded{return(true,cat(&[sh::bytes(&file),b" has another inode than before this command"]))}
+            if i==2 {continue}
+            if lines[5+i].is_empty() || os::tree_clock(&file).as_bytes()!=lines[5+i]{return(true,cat(&[sh::bytes(&file),b" has another status change time than the one recorded before this command"]))}
+            if lines[1]!=b"subsecond" && newer(&file,&baseline,true,true){return(true,cat(&[sh::bytes(&file),b" changed after the baseline taken before this command"]))}
+        }
     }
     let tree=project.join("node_modules");
-    let no=cat(&[b"no trace in ",sh::bytes(project),b": neither npm lockfile nor node_modules there has another inode"]);
-    if !sh::exists(&tree){return(false,cat(&[&no,b", and neither lockfile changed after the record taken before this command"]))}
+    let no=if moved {cat(&[b"no trace in ",sh::bytes(project),b", a directory other than the one the trace entry for this call was taken in: neither npm lockfile there changed after the baseline taken before this command"])}
+        else {cat(&[b"no trace in ",sh::bytes(project),b": neither npm lockfile nor node_modules there has another inode"])};
+    if !sh::exists(&tree){return(false,if moved{no}else{cat(&[&no,b", and neither lockfile changed after the record taken before this command"])})}
     let seconds=std::env::var("SAFEDEPS_BACKSTOP_WALK_SECONDS").ok().filter(|s|!s.is_empty() && s.bytes().all(|b|b.is_ascii_digit())).and_then(|s|s.parse::<u64>().ok()).filter(|s|*s<=5).unwrap_or(5);
     let until=Instant::now()+Duration::from_secs(seconds);
     let Ok(b)=fs::metadata(&baseline) else{return(true,cat(&[b"the trace baseline ",sh::bytes(&baseline),b" does not exist"]))};
     let mut found=Vec::new();
     let rc=walk(&tree,usize::MAX,true,Some(until),|p,m|{
-        if (m.ctime(),m.ctime_nsec())>(b.mtime(),b.mtime_nsec()){found=sh::bytes(p).to_vec();true}else{false}
+        if (m.ctime(),m.ctime_nsec())>(b.mtime(),b.mtime_nsec()){found=sh::bytes(p).to_vec();true}
+        else if after(m,&b,moved){found=sh::bytes(p).to_vec();true}else{false}
     });
-    if !found.is_empty(){return(true,cat(&[&found,b" changed after the baseline taken before this command"]))}
+    if !found.is_empty(){return(true,cat(&[&found,b" changed after the baseline taken before this command",elsewhere]))}
     match rc {
         Err(outcome)=>(true,outcome.describe(Action::Walk(&tree),Form::Within(seconds))),
-        Ok(())=>(false,cat(&[&no,b", neither lockfile changed after the record taken before this command, and nothing in node_modules changed after the baseline"])),
+        Ok(())=>(false,if moved{cat(&[&no,b", and nothing in node_modules changed after it"])}
+            else{cat(&[&no,b", neither lockfile changed after the record taken before this command, and nothing in node_modules changed after the baseline"])}),
     }
+}
+
+/// For an entry taken in another directory: a status change later than the
+/// baseline, or, where the path's clock holds no fraction of a second, one
+/// in the baseline's second or later.
+fn after(m:&fs::Metadata,b:&fs::Metadata,moved:bool)->bool {
+    moved && ((m.ctime(),m.ctime_nsec())>(b.mtime(),b.mtime_nsec()) || (m.ctime_nsec()==0 && m.ctime()>=b.mtime()))
 }
 
 #[cfg(test)]
