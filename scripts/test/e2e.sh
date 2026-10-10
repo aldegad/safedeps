@@ -1119,6 +1119,29 @@ fi
 assert_gives_no_command "$(< "${nochange_post_file}")" "the rollback with nothing to roll back gives no command"
 pass "a rollback with nothing to roll back leaves node_modules in place"
 
+# A recorded call that holds no npm install statement and leaves no trace in
+# npm's records is not judged. `npx <name>` is such a call: what it fetches
+# goes to npm's own cache. The closure on disk was never approved, and the
+# call says nothing, rolls nothing back and keeps node_modules.
+npx_wt="${tmp_root}/npx-untraced-wt"
+mkdir -p "${npx_wt}/node_modules/installed-package"
+printf '{"name":"installed-package","version":"1.0.0"}\n' > "${npx_wt}/node_modules/installed-package/package.json"
+printf '{"dependencies":{"fixture-parent":"1.0.0"}}\n' > "${npx_wt}/package.json"
+printf '%s\n' "${tampered_lock}" > "${npx_wt}/package-lock.json"
+npx_reorg_before=$(wc -c < "${reorg_log}" 2>/dev/null || printf 0)
+pre_hook > /dev/null <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npx --no-install fixture-tool --version"},"cwd":"${npx_wt}"}
+EOF
+npx_post_file=$(
+  PATH="${emptying_bin}:${PATH}" post_hook <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npx --no-install fixture-tool --version"},"cwd":"${npx_wt}"}
+EOF
+)
+hook_response_parse "${npx_post_file}" quiet || fail "an npx call that left no trace is not judged"
+[[ -f "${npx_wt}/node_modules/installed-package/package.json" ]] || fail "an npx call that left no trace keeps node_modules"
+[[ "$(wc -c < "${reorg_log}" 2>/dev/null || printf 0)" == "${npx_reorg_before}" ]] || fail "an npx call that left no trace adds nothing to reorg.log"
+pass "an npx call that left no trace in npm's records is not judged"
+
 # The same project once the command has written into node_modules without
 # touching a lockfile: the tree is no longer the one the pre-guard listed, and
 # it is removed.

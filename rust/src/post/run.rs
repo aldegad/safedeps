@@ -1,7 +1,7 @@
 //! The effect hook's call ordering. File selection and facts belong to the
 //! domain modules; this is where their ordering becomes a single judgment.
 use super::{call::{Call, Record}, effect, heuristics, journal::Journal, jv,
-    npm::Npm, report::{self, Report, cat}, rollback::Rollback, sh, snapshot,
+    npm::{self, Npm}, report::{self, Report, cat}, rollback::Rollback, sh, snapshot,
     trace::{self, Install}};
 use crate::{os, state};
 use std::{fs, io::Write};
@@ -71,10 +71,25 @@ fn backstop(call: &mut Call, journal: &Journal, input: &[u8]) -> Result<Option<W
     rollback(call, journal, &mut Install::default(), &mut Report::default(), target, &reasons, input, true).map(Some)
 }
 
+/// A recorded call that holds no npm install statement and left no trace in
+/// either npm record is not judged: no closure check, no rollback, no
+/// confirm. The record says the first (`npm_install` false, never a missing
+/// field) and the trace check the second, with the baseline read and nothing
+/// newer or replaced. `npx <name>` is read as an install, and its packages go
+/// to npm's own cache, not to the project. Judging the project's closure for
+/// it rolled projects back and recorded their whole tree as withheld. A
+/// command safedeps rewrote with --ignore-scripts is judged as before.
+fn left_npm_untouched(call: &Call, trace: &Install) -> bool {
+    trace.absent && trace.read
+        && matches!(jv::path(&call.current, &["npm_install"]), Ok(crate::json::Value::Bool(false)))
+        && !npm::meta_true(&call.store.meta(), "ignore_scripts_injected")
+}
+
 fn judge(call: &mut Call, journal: &Journal, input: &[u8]) -> Result<Option<W>, i32> {
     if call.record != Record::Install { return backstop(call, journal, input) }
-    call.store.stage();
     let mut trace = Install::settle(&call.store.project, &call.store.home, &call.current, &call.command);
+    if left_npm_untouched(call, &trace) { call.store.remove(); return Ok(None) }
+    call.store.stage();
     let mut npm = Npm::default();
     let mut reasons = Vec::new();
     let mut report = Report::default();

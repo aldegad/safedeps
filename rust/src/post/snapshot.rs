@@ -68,9 +68,12 @@ impl Store{
         }Some(())
     }
     pub fn stage(&mut self){self.staged=self.stage_inner().is_some();if !self.staged{self.discard();}}
-    pub fn discard(&self){
-        sh::rm_rf(&self.path(&self.verified,b"members"));
-        let prefix=cat(&[&self.verified,b"_"]);
+    pub fn discard(&self){self.drop_files(&self.verified);}
+    /// The call's own snapshot, for a call that is not judged.
+    pub fn remove(&self){if !self.id.is_empty()&&!self.id.contains(&b'/'){self.drop_files(&self.id);}}
+    fn drop_files(&self,id:&[u8]){
+        sh::rm_rf(&self.path(id,b"members"));
+        let prefix=cat(&[id,b"_"]);
         for e in fs::read_dir(self.home.join("snapshots")).into_iter().flatten().filter_map(Result::ok){
             if sh::basename(sh::bytes(&e.path())).starts_with(&prefix){sh::rm_f(&e.path());}
         }

@@ -162,7 +162,7 @@ pub fn probe(input:&[u8])->i32 {
         let cwd=bytes("cwd");let attribution=bytes("attribution");let fetch_why=bytes("fetch_why");
         let record=super::pending::Record { cwd:&cwd,
             project_from:record.get("project_from").and_then(Value::as_str).unwrap_or("cwd"),
-            trace:matches!(record.get("trace"),Some(Value::Bool(true))), attribution:&attribution,
+            npm_install:matches!(record.get("npm_install").or(record.get("trace")),Some(Value::Bool(true))), attribution:&attribution,
             fetch:record.get("fetch"),fetch_why:&fetch_why };
         if super::pending::write(&call,&snap,&record).is_err(){return 1}
     }

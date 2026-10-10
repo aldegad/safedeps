@@ -55,8 +55,11 @@ pub fn listing(dir:&Path) -> Vec<Vec<u8>> {
     out.sort();out
 }
 
+/// `read` is set only where the baseline file was there and neither npm
+/// record showed this call's trace: a check that found nothing, as opposed to
+/// one that could not be made (no baseline named, or the file gone).
 #[derive(Default)]
-pub struct Install { pub absent:bool,pub records:Vec<Vec<u8>>,pub line:Vec<u8>,pub said:bool }
+pub struct Install { pub absent:bool,pub read:bool,pub records:Vec<Vec<u8>>,pub line:Vec<u8>,pub said:bool }
 impl Install {
     pub fn settle(project:&Path,home:&Path,current:&Value,command:&[u8])->Self {
         let mut out=Self::default();
@@ -70,7 +73,7 @@ impl Install {
                 let inode=fs::symlink_metadata(&file).map(|m|m.ino().to_string().into_bytes()).unwrap_or_default();
                 if (!inode.is_empty() && inode!=recorded) || newer(&file,&baseline,false,true) {out.records.push(rel.as_bytes().to_vec());}
             }
-            if out.records.is_empty() {out.absent=true;out.line=cat(&[b"no install trace in ",sh::bytes(project),b": neither npm lockfile there is newer than the baseline taken before this command or has another inode"]);}
+            if out.records.is_empty() {out.absent=true;out.read=true;out.line=cat(&[b"no install trace in ",sh::bytes(project),b": neither npm lockfile there is newer than the baseline taken before this command or has another inode"]);}
             else {
                 let why=read(current,&["npm_unattributable"],b"");
                 if !why.is_empty() {state::log_advisory(home,&cat(&[b"post-verify UNGATED: the install trace in ",sh::bytes(project),b" cannot answer for every npm install in this command: ",&why,b", so one of them may have landed elsewhere unread. Command: ",command]));}

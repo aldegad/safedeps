@@ -60,11 +60,11 @@ pub fn judge(call:&Call,run:&mut Run,cwd:&[u8],read:&Readings,mut inert:impl FnM
         deny(&mut out,"safedeps: hidden dependency install detected, but no package spec could be extracted for ledger approval — install blocked fail-closed.".as_bytes());return out
     }
     let codex=jq::stream_has(&call.input,"turn_id");
-    let mut rewrites=Vec::new();let mut trace=false;let mut attribution=W::new();
+    let mut rewrites=Vec::new();let mut npm_install=false;let mut attribution=W::new();
     for &reading in &read.set {
         run.reading=Some(reading);
         if !codex{rewrites.push(inert(run,&call.command))}
-        let (wanted,why)=effects::trace(run,&call.command);trace|=wanted;
+        let (wanted,why)=effects::trace(run,&call.command);npm_install|=wanted;
         if attribution.is_empty(){attribution=why}
         run.reading=None;
     }
@@ -101,7 +101,7 @@ pub fn judge(call:&Call,run:&mut Run,cwd:&[u8],read:&Readings,mut inert:impl FnM
     for (flag,message) in notices::INERT {
         if if *flag=="downgrade"{flags==b"downgrade"}else{flags.split(|b|*b==b' ').any(|s|s==flag.as_bytes())}{log_command(call,message.as_bytes())}
     }
-    let record=pending::Record{cwd:&cwd,project_from:from,trace,attribution:&attribution,fetch:fetch.as_ref(),fetch_why:&fetch_why};
+    let record=pending::Record{cwd:&cwd,project_from:from,npm_install,attribution:&attribution,fetch:fetch.as_ref(),fetch_why:&fetch_why};
     if let Err(error)=pending::write(call,&snap,&record){out.warn(format!("safedeps: could not write this install's pending state: {}",error).as_bytes());out.code=1;return out}
     if flags.starts_with(b"rewrite")&&!command.is_empty() {
         let unread=flags.split(|b|*b==b' ').any(|s|matches!(s,b"unverified"|b"unread"|b"release"));

@@ -99,7 +99,7 @@ restored not-restored-differs not-restored-absent not-restored-not-file removed 
 refused-restore-link refused-removal-link refused-unresolved
 path-exists path-absent path-link workspaces-key changed-nothing
 kept kept-files kept-packages kept-bins kept-not-newer
-reason-trace reason-file reason-package reason-bin reason-newer reason-no-snapshot
+reason-trace reason-file reason-package reason-bin reason-newer reason-no-snapshot unjudged
 trace-none trace-baseline-gone trace-no-baseline
 inert-added inert-asked inert-none
 rebuild-skipped-added rebuild-ran-added rebuild-skipped rebuild-ran
@@ -314,6 +314,10 @@ oracle_before() {
     oracle_trace_state "${file}" "${cwd}" > "${call}/pending/${file##*/}.trace"
     oracle_node_files_state "${file}" "${cwd}" > "${call}/pending/${file##*/}.nodefiles"
     oracle_tree_state "${file}" "${cwd}" > "${call}/pending/${file##*/}.tree"
+    # Whether the record's snapshot had its meta file before the hook ran: a
+    # call the hook does not judge has its snapshot removed by the hook.
+    python3 "${ORACLE_READ}" isfile "${home}/snapshots/$(jq -r '.snapshot_id | strings' "${file}" 2>/dev/null)_meta.json" \
+      && printf 'present\n' > "${call}/pending/${file##*/}.meta" || printf 'absent\n' > "${call}/pending/${file##*/}.meta"
     oracle_note_listing "${call}" "$(jq -r '.project_dir // empty' "${file}" 2>/dev/null)"
   done
   # The records a pre-#5 pre-guard left, which the hook must not read.
@@ -1345,7 +1349,13 @@ oracle_record_gone() {
       want="post-verify: the pre-guard's record $2 names no snapshot; this hook set the record aside, and the command goes to the command-independent backstop"
     else
       meta="${O_HOME}/snapshots/${snap}_meta.json"
-      python3 -c 'import os, sys; sys.exit(0 if os.path.isfile(sys.argv[1]) else 1)' "${meta}" && return 0
+      # Read before the hook ran where that was noted: the hook removes the
+      # snapshot of a call it does not judge.
+      if [[ -f "$1.meta" ]]; then
+        [[ "$(cat "$1.meta")" != present ]] || return 0
+      else
+        python3 -c 'import os, sys; sys.exit(0 if os.path.isfile(sys.argv[1]) else 1)' "${meta}" && return 0
+      fi
       O_GONE=1 form=log-record-gone what="a pending state whose snapshot has no meta file"
       want="post-verify: the pre-guard's record $2 names the snapshot ${snap}, and ${meta} is not a file; this hook set the record aside, and the command goes to the command-independent backstop"
     fi
@@ -1375,6 +1385,25 @@ oracle_record_empty_head() {
 }
 oracle_record_unread_head() {
   [[ "${O_UNREAD}" == 1 ]] || oracle_red "the head says the record is not one JSON object, and the hook consumed no such record"
+}
+
+# oracle_unjudged <consumed record> <quiet|message>: a record that states no
+# npm install statement (npm_install false, read in Python), whose snapshot
+# had its meta file and whose install trace showed none, both read before the
+# hook ran, belongs to a call the hook does not judge. It says nothing, and
+# the call's snapshot is gone. Judged, such a call (`npx <name>`) rolled
+# projects back and recorded their whole tree as withheld.
+oracle_unjudged() {
+  local record="$1" snap left
+  [[ -n "${record}" && "${O_UNREAD:-0}" != 1 ]] || return 0
+  python3 "${ORACLE_READ}" isfalse "${record}" npm_install || return 0
+  [[ "$(cat "${record}.trace" 2>/dev/null)" == none && "$(cat "${record}.meta" 2>/dev/null)" == present ]] || return 0
+  O_LINE="record ${record##*/}"
+  [[ "$2" == quiet ]] || { oracle_red "a call with no npm install statement that left no install trace was judged"; return 0; }
+  snap=$(python3 "${ORACLE_READ}" string "${record}" snapshot_id 2>/dev/null) || snap=""
+  left=$(python3 "${ORACLE_READ}" snapshot-files "${O_HOME}" "${snap}")
+  [[ -n "${snap}" && "${left}" == 0 ]] || oracle_red "a call the hook did not judge left ${left} files of its snapshot ${snap}"
+  oracle_count unjudged
 }
 
 # oracle_message <call dir> <payload> <hook stdout>: reads every line.
@@ -1427,11 +1456,16 @@ oracle_message() {
     if [[ -e "${O_HOME}/reorg.log" ]]; then
       now=$(wc -c < "${O_HOME}/reorg.log" 2>/dev/null | tr -d ' '); now="${now:-0}"
     fi
-    [[ "${now}" == "${size}" ]] && { [[ "${ORACLE_FAILED}" == 0 ]]; return; }
+    if [[ "${now}" == "${size}" ]]; then
+      oracle_unjudged "${consumed}" quiet
+      [[ "${ORACLE_FAILED}" == 0 ]]
+      return
+    fi
     O_LINE=$(tail -c +"$(( size + 1 ))" "${O_HOME}/reorg.log" 2>/dev/null | head -1)
     oracle_red "reorg.log grew by $(( now - size )) bytes in a call that printed no message"
     return 1
   fi
+  oracle_unjudged "${consumed}" message
   O_DIRECT=0 O_RECORD_UNREAD=0
   [[ ! -e "${call}/record-unread" ]] || O_RECORD_UNREAD=1
   O_NPM_LOG="${call}/npm.log"

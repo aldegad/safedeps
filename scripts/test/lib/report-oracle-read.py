@@ -341,6 +341,19 @@ def main():
     if sys.argv[1] == "listing":
         listing(sys.argv[2])
         return 0
+    if sys.argv[1] == "isfalse":
+        value = load(sys.argv[2])
+        return 0 if isinstance(value, dict) and value.get(sys.argv[3], None) is False else 1
+    if sys.argv[1] == "isfile":
+        return 0 if os.path.isfile(sys.argv[2]) else 1
+    if sys.argv[1] == "snapshot-files":
+        home, snap = sys.argv[2], sys.argv[3]
+        try:
+            names = os.listdir(os.path.join(home, "snapshots"))
+        except OSError:
+            names = []
+        print(sum(1 for n in names if n.startswith(snap + "_")))
+        return 0
     return 2
 
 
