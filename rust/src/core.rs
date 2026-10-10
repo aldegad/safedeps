@@ -920,8 +920,9 @@ fn parse_codes(t: &[u8]) -> Option<W> {
 /// statement is the builtin's words alone, so a prefix (an assignment, `env`,
 /// `command`, `exec`), a redirection or a comment makes it another statement,
 /// and every word after the name is read as written: a builtin is inert only
-/// on such words, because `test -v` and `printf -v` run a substitution held in
-/// a subscript, and an expansion runs what it names. `[` ends at its `]`.
+/// on such words, because an expansion runs what it names, and zsh's `printf
+/// -v 'a[$(cmd)]' x` runs `cmd` though the word is quoted (measured with
+/// `echo`, zsh 5.9). `[` ends at its `]`.
 /// `pushd` and `popd` are not dash builtins, so dash looks them up on PATH.
 fn inert_builtin(reading: Option<Reading>, text: &[u8], piece: &lex::PieceSpan) -> bool {
     let blank = |gap: Option<&[u8]>| gap.is_some_and(|g| g.iter().all(|&b| matches!(b, b' ' | b'\t' | b'\n')));
