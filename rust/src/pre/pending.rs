@@ -9,12 +9,14 @@ pub struct Record<'a> {
     pub project_from:&'a str,
     /// Whether the readings found an npm install statement (`npm_install`).
     pub npm_install:bool,
-    /// Whether every install the readings found is a node package runner
-    /// (`runner_only`, `Run::runner_only`). The trace baseline is written for
-    /// an npm install and for such a call, so the post hook can tell whether a
-    /// runner left a trace in npm's records before it judges the project's
-    /// closure. Any other install (`yarn add`, `pip install`, a runner beside
-    /// one) gets none, as before, and is judged as before.
+    /// Whether the call only runs node packages: in every reading, every
+    /// statement is a node package runner or an inert builtin, and one is a
+    /// runner (`runner_only`, `Run::runner_only`). The trace baseline is
+    /// written for an npm install and for such a call, so the post hook can
+    /// tell whether a runner left a trace in npm's records before it judges
+    /// the project's closure. Any other call (`yarn add`, `pip install`, a
+    /// runner beside one or beside any other program) gets none, as before,
+    /// and is judged as before.
     pub runner_only:bool,
     pub attribution:&'a [u8],
     pub fetch:Option<&'a Value>,

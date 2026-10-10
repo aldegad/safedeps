@@ -61,9 +61,10 @@ pub fn judge(call:&Call,run:&mut Run,cwd:&[u8],read:&Readings,mut inert:impl FnM
     }
     let codex=jq::stream_has(&call.input,"turn_id");
     let mut rewrites=Vec::new();let mut npm_install=false;let mut attribution=W::new();
-    // A call whose installs are node package runners alone, in every reading
-    // and with none hidden, may be left unjudged where it leaves no trace in
-    // npm's records. An install of any manager beside it keeps the call judged.
+    // A call that only runs node packages, in every reading and with no
+    // install hidden, may be left unjudged where it leaves no trace in npm's
+    // records. Any statement beside its runners that is not an inert builtin
+    // keeps the call judged.
     let mut runner_only=!read.set.is_empty()&&!read.facts.hidden.iter().any(|h|*h);
     for &reading in &read.set {
         run.reading=Some(reading);

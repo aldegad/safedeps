@@ -10,10 +10,13 @@
 # tool made a cache directory under it, removed it. The rows are numbered by
 # the four repairs, R1 to R4, each beside the threat it must still catch:
 #
-#   R1  a recorded call whose installs are node package runners alone is
-#       judged only where it left a trace in npm's records; an install by any
-#       manager (`yarn add`, `pnpm add`, `bun add`), alone or beside a runner,
-#       and a runner that runs a package manager are judged as before
+#   R1  a recorded call whose every statement is a node package runner or an
+#       inert builtin (`cd`, `pushd`, `popd`, `echo`, `printf`, `export`
+#       with assignments, `true`, `:`, `test`, `[`, its words read as
+#       written) is judged only where it left a trace in npm's records; any
+#       other statement beside a runner (an install by any manager, one the
+#       recognizers do not read, any other program) and a runner that runs a
+#       package manager keep the call judged as before
 #   R2  the KEV catalog is read once per closure check (the read count is a
 #       unit test, post::providers::catalog_tests; the row here is the stale
 #       catalog with a refresh that fails, which says so once)
@@ -179,29 +182,31 @@ dir_hash() { python3 -c 'import hashlib,os,sys; print(hashlib.md5(os.path.realpa
 # between the two hooks.
 tick() { sleep 1.1; }
 
-# --- R1: a recorded call whose installs are node package runners alone -------
+# --- R1: a recorded call that only runs node packages ------------------------
 
-# r1_quiet <row> <command> [between]: the post hook judges nothing, and the
-# project is as it was. <between> runs between the two hooks.
+# r1_quiet <row> <command> [between] [cwd]: the post hook judges nothing, and
+# the project is as it was. <between> runs between the two hooks. The hooks
+# are given <cwd>, the project by default.
 r1_quiet() {
-  local name="$1" command="$2" between="${3:-}" dir id snap hash confirmed_before confirmed_after out reorg withheld
+  local name="$1" command="$2" between="${3:-}" cwd dir id snap hash confirmed_before confirmed_after out reorg withheld
   fresh_home
   export SAFEDEPS_PROVIDER_CACHE_TTL_SECONDS=0
   dir="${tmp_root}/${name}"
   project "${dir}"
+  cwd="${4:-${dir}}"
   id=$(next_id)
   hash=$(dir_hash "${dir}")
   # A confirmed snapshot the row must leave in place, named by its pointer.
   printf 'verified-earlier\n' > "${SAFEDEPS_HOME}/confirmed_${hash}"
   confirmed_before=$(cat "${SAFEDEPS_HOME}/confirmed_${hash}")
   reorg=$(reorg_entries); withheld=$(withheld_files)
-  pre_hook "${dir}" "${command}" "${id}" > "${tmp_root}/${name}.pre"
+  pre_hook "${cwd}" "${command}" "${id}" > "${tmp_root}/${name}.pre"
   [[ ! -s "${tmp_root}/${name}.pre" ]] || fail "${name}: the pre hook lets the call run as it is ($(cat "${tmp_root}/${name}.pre"))"
   snap=$(pending_snapshot "${id}")
   [[ -n "${snap}" ]] || fail "${name}: the pre hook records the call (no pending record for ${id})"
   [[ -z "${between}" ]] || { tick; eval "${between}"; }
   adv_mark
-  out=$(post_hook "${dir}" "${command}" "${id}")
+  out=$(post_hook "${cwd}" "${command}" "${id}")
   [[ -z "${out}" ]] || fail "${name}: the post hook says nothing ($(message "${out}" | head -3 | tr '\n' '|'))"
   [[ "$(reorg_entries)" == "${reorg}" ]] || fail "${name}: reorg.log has no new entry ($(reorg_entries) after ${reorg})"
   [[ "$(withheld_files)" == "${withheld}" ]] || fail "${name}: npm-withheld has no new file ($(withheld_files) after ${withheld})"
@@ -322,6 +327,51 @@ r1_quiet r1-9b 'yarn dlx vitest run x'
 row "R1.9b yarn dlx vitest run, tree untouched: no judgment, no record, no rollback"
 r1_quiet r1-9c 'bunx vitest run x'
 row "R1.9c bunx vitest run, tree untouched: no judgment, no record, no rollback"
+
+# A yarn install the recognizers do not read, beside a runner: bare `yarn` is
+# yarn's install, and a quoted or `sudo` manager is not a statement the
+# recognizers call an install. Alone, none of them is recorded. Beside a
+# runner, the call is recorded, and it must be judged: neither statement is a
+# runner or an inert builtin.
+r1_threat r1-10a 'yarn && npx fixture-tool@1.0.0' yarn.lock
+row "R1.10a (threat) bare yarn before a runner, bringing a network postinstall: REORG and removal"
+r1_threat r1-10b 'npx fixture-tool@1.0.0; "yarn" add fixture-tool@1.0.0' yarn.lock
+row "R1.10b (threat) a runner beside a quoted yarn add that brings a network postinstall: REORG and removal"
+r1_threat r1-10c 'npx fixture-tool@1.0.0; sudo yarn add fixture-tool@1.0.0' yarn.lock
+row "R1.10c (threat) a runner beside sudo yarn add that brings a network postinstall: REORG and removal"
+
+# An inert builtin beside a runner: the hooks are given the directory above
+# the project, and the command changes into it.
+r1_quiet r1-11/app 'cd app && npx vitest run x' '' "${tmp_root}/r1-11"
+row "R1.11 cd into the project and npx vitest run, tree untouched: no judgment, no record, no rollback"
+
+# r1_judged <row> <command>: a runner beside a statement that is neither a
+# runner nor an inert builtin keeps the call judged as before: the closure
+# check runs and the unapproved closure is rolled back.
+r1_judged() {
+  local name="$1" command="$2" id out
+  fresh_home
+  export SAFEDEPS_PROVIDER_CACHE_TTL_SECONDS=0
+  dir="${tmp_root}/${name}"
+  project "${dir}"
+  id=$(next_id)
+  pre_hook "${dir}" "${command}" "${id}" > "${tmp_root}/${name}.pre"
+  [[ ! -s "${tmp_root}/${name}.pre" ]] || fail "${name}: the pre hook lets the call run as it is ($(cat "${tmp_root}/${name}.pre"))"
+  [[ -n "$(pending_snapshot "${id}")" ]] || fail "${name}: the pre hook records the call (no pending record for ${id})"
+  adv_mark
+  out=$(post_hook "${dir}" "${command}" "${id}")
+  message "${out}" | grep -qxF 'safedeps: suspicious dependency change detected. A rollback ran.' \
+    || fail "${name}: the call is judged and rolled back ($(message "${out}" | head -2 | tr '\n' '|'))"
+  message "${out}" | grep -q 'npm closure contains 1 unapproved package(s): fixture-child@1.0.0' \
+    || fail "${name}: the closure check ran"
+  [[ "$(adv_count 'post-verify UNGATED: no install trace in ')" == 0 ]] \
+    || fail "${name}: the call is not left unjudged for want of a trace"
+  [[ "$(reorg_entries)" -ge 1 ]] || fail "${name}: reorg.log has the rollback"
+  unset SAFEDEPS_PROVIDER_CACHE_TTL_SECONDS
+}
+
+r1_judged r1-12 'make && npx vitest run x'
+row "R1.12 a program the gate does not know before a runner: judged as before"
 
 # --- R2: the KEV catalog -------------------------------------------------------
 

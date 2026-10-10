@@ -180,11 +180,16 @@ fn native_manager_value_entries_are_reachable_and_unambiguous() {
 #[test]
 fn runner_only_holds_node_runners_and_nothing_beside_them() {
     let core = Core::new();
+    // Every statement is a runner or an inert builtin read as written.
     let runners = [
         "npx --no-install tsc --noEmit x", "npx vitest run x", "npm exec -- vitest run x", "npm x vitest",
         "pnpx vitest", "pnpm dlx vitest run x", "yarn dlx vitest run x", "bunx vitest run x", "bun x vitest run x",
-        "npx -p @scope/tool@2 tool run", "bash -c 'npx tsc'", "x=$(npx tsc --version)",
+        "npx -p @scope/tool@2 tool run", "cd sub && npx tsc", "cd /a/b-c && npx --no-install tsc --noEmit",
+        "echo --- && npx vitest run x", "\"cd\" sub; npx tsc", "export CI=1 NODE_ENV=test && npx vitest run x",
+        "test -d node_modules && npx tsc", "[ -d node_modules ] && npx tsc", "true; : ; npx tsc", "printf x; npx tsc",
+        "npx tsc || true", "npx tsc && echo OK", "npx tsc 2>/dev/null", "# check\nnpx tsc", "FOO=1 npx tsc",
     ];
+    // A statement that is neither keeps the call judged, whatever it is.
     let judged = [
         "yarn add fixture-tool@1.0.0", "pnpm add fixture-tool@1.0.0", "bun add fixture-tool@1.0.0",
         "npm install fixture-tool@1.0.0", "npx vitest run x && yarn add fixture-tool@1.0.0",
@@ -192,6 +197,21 @@ fn runner_only_holds_node_runners_and_nothing_beside_them() {
         "npx -p yarn yarn add x", "pnpm dlx --package=yarn yarn add x", "npx corepack yarn add x",
         "npx ./node_modules/.bin/pnpm add x", "npx -c 'yarn add x' fixture", "pnpm dlx -c 'yarn add x'",
         "npx $TOOL add x", "npx bash script.sh", "uvx ruff check", "pipx run black", "npm init vite@5", "echo hi",
+        // unread installs beside a runner
+        "yarn && npx fixture-tool@1.0.0", "npx fixture-tool@1.0.0; \"yarn\" add fixture-tool@1.0.0",
+        "npx fixture-tool@1.0.0; sudo yarn add fixture-tool@1.0.0", "npx tsc; timeout 60 yarn add x",
+        "npx tsc; corepack yarn add x", "npx tsc; y\\arn add x",
+        // any other program, a shell, a group, an assignment
+        "make && npx tsc", "npx tsc | head -1", "npx tsc; node --check x.js", "bash -c 'npx tsc'",
+        "x=$(npx tsc --version)", "X=1; npx tsc", "(cd sub && npx tsc)", "{ cd sub; npx tsc; }",
+        "if true; then npx tsc; fi", "npx tsc; source ./x.sh", "npx tsc; exit 0",
+        // a builtin with a prefix, a redirection, a comment or a word the shell decides
+        "X=1 cd sub && npx tsc", "command cd sub && npx tsc", "env echo x; npx tsc", "echo x > out; npx tsc",
+        "cd sub # go\nnpx tsc", "echo $HOME && npx tsc", "echo $(yarn add x) && npx tsc", "cd ~ && npx tsc",
+        "test -v 'a[$(yarn add x)]' && npx tsc", "printf -v 'a[$(yarn add x)]' x; npx tsc", "echo \"\" && npx tsc",
+        "export X && npx tsc", "export -n X && npx tsc", "export PATH=/x:$PATH && npx tsc",
+        // a text the payload walk does not go into
+        "npx a $(npx b $(npx c $(npx d $(npx e $(yarn add x)))))",
     ];
     for reading in [Reading::Bash, Reading::Zsh, Reading::Dash] {
         for cmd in runners {
@@ -205,5 +225,9 @@ fn runner_only_holds_node_runners_and_nothing_beside_them() {
             run.reading = Some(reading);
             assert!(!run.runner_only(cmd.as_bytes()), "{reading:?}: {cmd}");
         }
+        // dash has no pushd or popd builtin and looks them up on PATH.
+        let mut run = Run::new(&core);
+        run.reading = Some(reading);
+        assert_eq!(run.runner_only(b"pushd sub && npx tsc && popd"), reading != Reading::Dash, "{reading:?}");
     }
 }

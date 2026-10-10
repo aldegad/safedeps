@@ -1429,15 +1429,15 @@ oracle_record_unread_head() {
   [[ "${O_UNREAD}" == 1 ]] || oracle_red "the head says the record is not one JSON object, and the hook consumed no such record"
 }
 
-# oracle_unjudged <consumed record> <quiet|message>: a record that states its
-# installs are node package runners alone and no npm install statement
+# oracle_unjudged <consumed record> <quiet|message>: a record that states the
+# call only runs node packages and holds no npm install statement
 # (runner_only true and npm_install false, read in Python), whose snapshot had
 # its meta file and whose install trace showed none, both read before the
 # hook ran, belongs to a call the hook does not judge. It says nothing, and
 # the call's snapshot is gone. Judged, such a call (`npx <name>`) rolled
 # projects back and recorded their whole tree as withheld. A record that does
-# not state both (`yarn add`, a runner beside an install) is judged, and the
-# other forms read its lines.
+# not state both (`yarn add`, a runner beside an install or beside any other
+# program) is judged, and the other forms read its lines.
 oracle_unjudged() {
   local record="$1" snap left
   [[ -n "${record}" && "${O_UNREAD:-0}" != 1 ]] || return 0

@@ -71,16 +71,17 @@ fn backstop(call: &mut Call, journal: &Journal, input: &[u8]) -> Result<Option<W
     rollback(call, journal, &mut Install::default(), &mut Report::default(), target, &reasons, input, true).map(Some)
 }
 
-/// A recorded call whose installs are node package runners alone and that
-/// left no trace in either npm record is not judged: no closure check, no
-/// rollback, no confirm. The record says the first (`runner_only` true and
-/// `npm_install` false, never a missing field) and the trace check the
-/// second, with the baseline read and nothing newer or replaced. `npx <name>`
-/// is read as an install, and its packages go to npm's own cache, not to the
-/// project. Judging the project's closure for it rolled projects back and
-/// recorded their whole tree as withheld. An install of any manager (`yarn
-/// add` writes neither npm record) keeps the call judged, and so does a
-/// command safedeps rewrote with --ignore-scripts.
+/// A recorded call that only runs node packages and left no trace in either
+/// npm record is not judged: no closure check, no rollback, no confirm. The
+/// record says the first (`runner_only` true and `npm_install` false, never a
+/// missing field) and the trace check the second, with the baseline read and
+/// nothing newer or replaced. `npx <name>` is read as an install, and its
+/// packages go to npm's own cache, not to the project. Judging the project's
+/// closure for it rolled projects back and recorded their whole tree as
+/// withheld. A statement beside the runners that the pre hook cannot vouch
+/// installs nothing keeps the call judged: an install of any manager, read
+/// by the recognizers or not (`yarn add` writes neither npm record), or any
+/// other program. So does a command safedeps rewrote with --ignore-scripts.
 fn runner_left_npm_untouched(call: &Call, trace: &Install) -> bool {
     let fact = |key: &str, want: bool| matches!(jv::path(&call.current, &[key]), Ok(crate::json::Value::Bool(v)) if *v == want);
     trace.absent && trace.read && fact("runner_only", true) && fact("npm_install", false)

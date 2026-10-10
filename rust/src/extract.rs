@@ -474,8 +474,13 @@ pub fn node_runner(rd: &mut Reader, words: &[u8]) -> bool {
     if runs.is_empty() {
         return false;
     }
-    runs.iter().all(|word| !word.is_empty() && !word.starts_with(b"~") && !word.starts_with(b"=")
-        && word.iter().all(|b| crate::inert::INERT_BYTES.contains(b)) && !runs_manager(rd, word))
+    runs.iter().all(|word| read_as_written(word) && !runs_manager(rd, word))
+}
+
+/// A word the shell hands on as it is written: not empty, not starting with
+/// `~` or `=`, and every byte one no shell expansion acts on.
+pub fn read_as_written(word: &[u8]) -> bool {
+    !word.is_empty() && !word.starts_with(b"~") && !word.starts_with(b"=") && word.iter().all(|b| crate::inert::INERT_BYTES.contains(b))
 }
 
 /// A package or program name that is a package manager, a shell or

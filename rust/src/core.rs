@@ -376,6 +376,13 @@ impl<'c> Run<'c> {
 
     /// `command_payload_raw_texts`.
     pub fn raw_texts(&mut self, text: &[u8]) -> Vec<W> {
+        self.raw_text_walk(text).into_iter().map(|(p, _)| p).collect()
+    }
+
+    /// The texts `raw_texts` finds, each with whether the walk went no
+    /// further into it: a text found at the last depth is read, and the
+    /// texts it hands on are not.
+    fn raw_text_walk(&mut self, text: &[u8]) -> Vec<(W, bool)> {
         let mut queue: Vec<(W, u32)> = vec![(text.to_vec(), 0)];
         let mut found = Vec::new();
         let mut i = 0;
@@ -384,7 +391,7 @@ impl<'c> Run<'c> {
             i += 1;
             for k in ["cscripts", "substs"] {
                 for (_, p) in self.lex_payloads(&t, k) {
-                    found.push(p.clone());
+                    found.push((p.clone(), d >= 3));
                     if d < 3 {
                         queue.push((p, d + 1));
                     }
@@ -640,24 +647,55 @@ impl<'c> Run<'c> {
         out
     }
 
-    /// Whether the command's installs are node package runners alone: every
-    /// statement the extractor reads (the command's and every payload's) that
-    /// the recognizers call an install is one `extract::node_runner` accepts,
-    /// and there is at least one. A runner beside an install of any manager is
-    /// not, and neither is a runner that runs a package manager or a shell.
+    /// Whether the command only runs node packages, decided by what the
+    /// gate can vouch installs nothing. Every statement of the command, and
+    /// of every text it hands on, must be a statement the recognizers call an
+    /// install that `extract::node_runner` accepts, or one of the inert
+    /// builtins (`inert_builtin`), and at least one must be a runner. Any
+    /// other statement makes it false: a program the gate does not know, a
+    /// manager the recognizers do not read (bare `yarn`, `"yarn" add`, `sudo
+    /// yarn add`), an assignment, a shell, a group. So does a text the
+    /// payload walk does not go into, a text that does not close and one
+    /// whose escapes cannot be read. The statements are the pieces view's,
+    /// the recognizers' own.
     pub fn runner_only(&mut self, cmd: &[u8]) -> bool {
-        let targets = self.targets(cmd);
-        let lines = self.statement_lines(cmd, &targets);
-        let mut rd = Reader::new(&self.c.mrx);
-        let mut found = false;
-        for (_, seg, words) in lines {
-            if !has_nonspace(&seg) || !self.recognized(&seg) {
-                continue;
-            }
-            if !extract::node_runner(&mut rd, &words) {
+        let mut texts = vec![cmd.to_vec()];
+        for (p, last) in self.raw_text_walk(cmd) {
+            if last {
                 return false;
             }
-            found = true;
+            texts.push(p);
+        }
+        let mut rd = Reader::new(&self.c.mrx);
+        let mut found = false;
+        for text in texts {
+            let Some((pieces, unterm)) = self.pieces(&text) else { return false };
+            if pieces.unreadable {
+                self.failed = true;
+                return false;
+            }
+            if unterm {
+                return false;
+            }
+            let mut fields: std::collections::HashMap<usize, (W, W)> = Default::default();
+            for line in herestring_lines(&subst(pieces.view.clone())) {
+                let f = read_fields(line, &[0x1f], 5);
+                if let Ok(n) = std::str::from_utf8(&f[0]).unwrap_or("x").parse::<usize>() {
+                    fields.insert(n, (f[3].clone(), f[4].clone()));
+                }
+            }
+            for piece in &pieces.pieces {
+                let Some(raw) = text.get(piece.start..piece.end) else { return false };
+                if !has_nonspace(raw) {
+                    continue;
+                }
+                let Some((words, rec)) = fields.get(&piece.nn) else { return false };
+                if self.recognized(rec) && extract::node_runner(&mut rd, words) {
+                    found = true;
+                } else if !inert_builtin(self.reading, &text, piece) {
+                    return false;
+                }
+            }
         }
         found
     }
@@ -874,6 +912,41 @@ fn parse_codes(t: &[u8]) -> Option<W> {
         out.push(v as u8);
     }
     Some(out)
+}
+
+/// One of the shell builtins a call that runs node packages may hold beside
+/// its runners: `cd`, `pushd`, `popd`, `echo`, `printf`, `export` with
+/// assignment words only, `true`, `:`, `test` and `[`, a closed list. The
+/// statement is the builtin's words alone, so a prefix (an assignment, `env`,
+/// `command`, `exec`), a redirection or a comment makes it another statement,
+/// and every word after the name is read as written: a builtin is inert only
+/// on such words, because `test -v` and `printf -v` run a substitution held in
+/// a subscript, and an expansion runs what it names. `[` ends at its `]`.
+/// `pushd` and `popd` are not dash builtins, so dash looks them up on PATH.
+fn inert_builtin(reading: Option<Reading>, text: &[u8], piece: &lex::PieceSpan) -> bool {
+    let blank = |gap: Option<&[u8]>| gap.is_some_and(|g| g.iter().all(|&b| matches!(b, b' ' | b'\t' | b'\n')));
+    let Some(head) = piece.words.first() else { return false };
+    let mut at = piece.start;
+    for word in &piece.words {
+        if !blank(text.get(at..word.start)) {
+            return false;
+        }
+        at = word.end;
+    }
+    if !blank(text.get(at..piece.end)) {
+        return false;
+    }
+    let args = &piece.words[1..];
+    let listed = match head.value.as_slice() {
+        b"cd" | b"echo" | b"printf" | b"true" | b":" | b"test" | b"[" => true,
+        b"pushd" | b"popd" => reading != Some(Reading::Dash),
+        b"export" => !args.is_empty() && args.iter().all(|w| assign_word(&w.value)),
+        _ => false,
+    };
+    listed
+        && args.iter().enumerate().all(|(i, w)| {
+            extract::read_as_written(&w.value) || head.value == b"[" && i + 1 == args.len() && w.value == b"]"
+        })
 }
 
 /// `^[A-Za-z_][A-Za-z0-9_]*\+?=`
