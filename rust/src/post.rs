@@ -14,6 +14,7 @@ pub use workspaces::members as workspace_members;
 pub use workspaces::glob_members as workspace_glob_members;
 mod tree;
 mod trace;
+pub use trace::package_links;
 mod snapshot;
 pub use snapshot::{LOCKS, MANIFESTS};
 mod process;

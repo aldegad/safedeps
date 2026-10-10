@@ -49,6 +49,23 @@ pub fn package_files(root:&Path, follow:bool) -> Vec<Vec<u8>> {
     let _=walk(root,3,follow,None,|p,_| {if sh::basename(sh::bytes(p))==b"package.json" {out.push(sh::bytes(p).to_vec());} false});
     out
 }
+/// The links among node_modules' package entries: a name right under it, or
+/// a name under one of its `@scope` directories, that is a symbolic link (the
+/// way pnpm and `npm link` place a package). The package.json list does not
+/// see them: a link below the top is visited, not walked. Sorted.
+pub fn package_links(tree:&Path) -> Vec<Vec<u8>> {
+    let mut out=Vec::new();
+    for e in fs::read_dir(tree).into_iter().flatten().filter_map(Result::ok) {
+        let Ok(kind)=e.file_type() else {continue};
+        if kind.is_symlink() {out.push(sh::bytes(&e.path()).to_vec());}
+        else if kind.is_dir() && e.file_name().to_string_lossy().starts_with('@') {
+            for s in fs::read_dir(e.path()).into_iter().flatten().filter_map(Result::ok) {
+                if s.file_type().is_ok_and(|k|k.is_symlink()) {out.push(sh::bytes(&s.path()).to_vec());}
+            }
+        }
+    }
+    out.sort();out
+}
 pub fn listing(dir:&Path) -> Vec<Vec<u8>> {
     let mut out:Vec<_>=fs::read_dir(dir).into_iter().flatten().filter_map(Result::ok).map(|e|sh::basename(sh::bytes(&e.path())))
         .filter(|n|!n.starts_with(b".")).collect();

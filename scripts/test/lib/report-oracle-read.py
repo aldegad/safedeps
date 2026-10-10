@@ -91,6 +91,28 @@ def packages(nm):
         print(path)
 
 
+def links(nm):
+    """The links among node_modules' package entries: a name right under it, or
+    under one of its @scope directories, that is a symbolic link."""
+    out = []
+    try:
+        entries = list(os.scandir(nm))
+    except OSError:
+        return
+    for entry in entries:
+        path = os.path.join(nm, entry.name)
+        if entry.is_symlink():
+            out.append(path)
+        elif entry.name.startswith("@") and entry.is_dir(follow_symlinks=False):
+            try:
+                inner = list(os.scandir(path))
+            except OSError:
+                continue
+            out.extend(os.path.join(path, e.name) for e in inner if e.is_symlink())
+    for path in sorted(out):
+        print(path)
+
+
 def listing(directory):
     try:
         entries = sorted(os.scandir(directory), key=lambda entry: entry.name)
@@ -340,6 +362,9 @@ def main():
         return 0
     if sys.argv[1] == "listing":
         listing(sys.argv[2])
+        return 0
+    if sys.argv[1] == "links":
+        links(sys.argv[2])
         return 0
     if sys.argv[1] == "isfalse":
         value = load(sys.argv[2])

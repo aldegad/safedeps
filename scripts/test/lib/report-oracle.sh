@@ -98,8 +98,8 @@ snapshot-confirmed snapshot-pre snapshot-journal-confirmed snapshot-journal-pre
 restored not-restored-differs not-restored-absent not-restored-not-file removed not-removed
 refused-restore-link refused-removal-link refused-unresolved
 path-exists path-absent path-link workspaces-key changed-nothing
-kept kept-files kept-packages kept-bins kept-not-newer
-reason-trace reason-file reason-package reason-bin reason-newer reason-no-snapshot unjudged
+kept kept-files kept-packages kept-bins kept-links kept-not-newer kept-itself
+reason-trace reason-file reason-package reason-bin reason-link reason-newer reason-no-snapshot unjudged
 trace-none trace-baseline-gone trace-no-baseline
 inert-added inert-asked inert-none
 rebuild-skipped-added rebuild-ran-added rebuild-skipped rebuild-ran
@@ -255,8 +255,11 @@ oracle_node_files_state() {
 
 # What node_modules of a pending install's project holds that the pre-command
 # listings lack, and what in it is newer than the snapshot, read before the
-# hook removes it: one `package <path>`, `bin <name>` or `newer <path>` per line.
-# The package.json files are listed by Python's walk, not by the hook's find.
+# hook removes it: one `package <path>`, `bin <name>`, `link <path>` or
+# `newer <path>` per line, each a write. node_modules' own time is
+# `dir-newer <path>`, which is not one: a tool makes a cache directory there.
+# The package.json files and the links are listed by Python's walk, not by
+# the hook's.
 oracle_tree_state() {
   local pending="$1" snap project nm home="${SAFEDEPS_HOME:-${HOME}/.safedeps}" path
   snap=$(jq -r '.snapshot_id | strings' "${pending}" 2>/dev/null)
@@ -265,10 +268,18 @@ oracle_tree_state() {
   nm="${project}/node_modules"
   [[ -f "${home}/snapshots/${snap}_packages.list" ]] && oracle_packages_lacking "${nm}" "${home}/snapshots/${snap}_packages.list" | sed 's/^/package /'
   [[ -f "${home}/snapshots/${snap}_bins.list" ]] && { ls "${nm}/.bin/" 2>/dev/null || true; } | sort | comm -13 "${home}/snapshots/${snap}_bins.list" - | sed 's/^/bin /'
-  for path in "${nm}/.package-lock.json" "${nm}"; do
-    [[ -n "$(find -H "${path}" -prune -newer "${home}/snapshots/${snap}_meta.json" 2>/dev/null)" ]] && printf 'newer %s\n' "${path}"
-  done
+  [[ -f "${home}/snapshots/${snap}_links.list" ]] && oracle_links_lacking "${nm}" "${home}/snapshots/${snap}_links.list" | sed 's/^/link /'
+  [[ -n "$(find -H "${nm}/.package-lock.json" -prune -newer "${home}/snapshots/${snap}_meta.json" 2>/dev/null)" ]] && printf 'newer %s\n' "${nm}/.package-lock.json"
+  [[ -n "$(find -H "${nm}" -prune -newer "${home}/snapshots/${snap}_meta.json" 2>/dev/null)" ]] && printf 'dir-newer %s\n' "${nm}"
   return 0
+}
+# The links among node_modules' package entries (Python's walk) that the
+# listing file <list> does not hold, one per line.
+oracle_links_lacking() {
+  local walked
+  walked=$(python3 "${ORACLE_READ}" links "$1") || { O_LINE="$1"; oracle_red "the oracle's walk of node_modules' links failed"; return 0; }
+  [[ -n "${walked}" ]] || return 0
+  printf '%s\n' "${walked}" | LC_ALL=C sort | LC_ALL=C comm -13 <(LC_ALL=C sort "$2") -
 }
 
 # The package.json files under <node_modules> (Python's walk) that the listing
@@ -557,8 +568,9 @@ oracle_kept_token() {
     'when this rollback began, none of '*) printf 'kept-files'; return ;;
     "${nm} lists no package.json the pre-command snapshot "*) printf 'kept-packages'; return ;;
     "${nm}/.bin lists no entry the pre-command snapshot "*) printf 'kept-bins'; return ;;
+    "${nm} lists no link the pre-command snapshot "*) printf 'kept-links'; return ;;
     "${nm}/.package-lock.json is not newer than the pre-command snapshot "*|"${nm}/.package-lock.json does not exist") printf 'lockfile'; return ;;
-    "${nm} is not newer than the pre-command snapshot "*) printf 'kept-not-newer'; return ;;
+    "${nm} is not newer than the pre-command snapshot "*|"${nm} itself is newer than the pre-command snapshot "*) printf 'tree'; return ;;
   esac
   printf 'other'
 }
@@ -641,6 +653,7 @@ oracle_block_end() {
 # Whether a line is one of the reasons a node_modules step is taken for.
 oracle_is_reason() {
   [[ "$1" == 'this rollback has no snapshot from before the command' ]] && return 0
+  [[ "$1" =~ \ itself\ is\ newer\ than\ the\ pre-command\ snapshot\ [^\ ]+$ ]] && return 1
   [[ "$1" =~ ^/.+\ is\ newer\ than\ (the\ baseline|the\ pre-command\ snapshot) ]] && return 0
   [[ "$1" =~ \ differed\ from\ the\ pre-command\ snapshot\ .+\ when\ this\ rollback\ began$ ]] && return 0
   [[ "$1" =~ ,\ which\ the\ pre-command\ snapshot\ [^\ ]+\ does\ not$ ]] && return 0
@@ -835,6 +848,9 @@ oracle_line() {
   local re_kept_packages='^(/.+) lists no package\.json the pre-command snapshot ([^ ]+) lacks$'
   local re_kept_bins='^(/.+)/\.bin lists no entry the pre-command snapshot ([^ ]+) lacks$'
   local re_kept_newer='^(/.+) is not newer than the pre-command snapshot ([^ ]+)$'
+  local re_kept_links='^(/.+) lists no link the pre-command snapshot ([^ ]+) lacks$'
+  local re_kept_itself='^(/.+) itself is newer than the pre-command snapshot ([^ ]+)$'
+  local re_reason_link='^(/.+) lists the link (/.+), which the pre-command snapshot ([^ ]+) does not$'
   local re_reason_trace='^(/.+) is newer than the baseline taken before this command or has another inode$'
   local re_reason_file='^(/.+)/([^/]+) differed from the pre-command snapshot ([^ ]+) when this rollback began$'
   local re_reason_bin='^(/.+)/\.bin lists ([^/]+), which the pre-command snapshot ([^ ]+) does not$'
@@ -1157,14 +1173,28 @@ oracle_line() {
     oracle_count reason-bin
     [[ "${BASH_REMATCH[1]}" == "${O_PROJECT}/node_modules" && "${BASH_REMATCH[3]}" == "${O_PRE}" ]] || oracle_red "another directory or another snapshot"
     grep -qxF -- "bin ${BASH_REMATCH[2]}" <<< "${O_TREE}" || oracle_red "before the hook ran, .bin did not list that entry, or the snapshot did"
+  elif [[ "${line}" =~ ${re_reason_link} ]]; then
+    oracle_count reason-link
+    [[ "${BASH_REMATCH[1]}" == "${O_PROJECT}/node_modules" && "${BASH_REMATCH[2]}" == "${BASH_REMATCH[1]}"/* && "${BASH_REMATCH[3]}" == "${O_PRE}" ]] || oracle_red "another directory or another snapshot"
+    grep -qxF -- "link ${BASH_REMATCH[2]}" <<< "${O_TREE}" || oracle_red "before the hook ran, node_modules did not hold that link, or the snapshot did"
   elif [[ "${line}" =~ ${re_reason_package} ]]; then
     oracle_count reason-package
     [[ "${BASH_REMATCH[1]}" == "${O_PROJECT}/node_modules" && "${BASH_REMATCH[2]}" == "${BASH_REMATCH[1]}"/* && "${BASH_REMATCH[3]}" == "${O_PRE}" ]] || oracle_red "another directory or another snapshot"
     grep -qxF -- "package ${BASH_REMATCH[2]}" <<< "${O_TREE}" || oracle_red "before the hook ran, node_modules did not list that file, or the snapshot did"
+  elif [[ "${line}" =~ ${re_kept_itself} ]]; then
+    oracle_count kept-itself
+    [[ "${BASH_REMATCH[1]}" == "${O_PROJECT}/node_modules" && "${BASH_REMATCH[2]}" == "${O_PRE}" ]] || oracle_red "another directory or another snapshot"
+    grep -qxF -- "dir-newer ${BASH_REMATCH[1]}" <<< "${O_TREE}" || oracle_red "before the hook ran, node_modules was not newer than the snapshot"
   elif [[ "${line}" =~ ${re_reason_newer} ]]; then
     oracle_count reason-newer
     [[ "${BASH_REMATCH[2]}" == "${O_PRE}" ]] || oracle_red "another snapshot"
-    grep -qxF -- "newer ${BASH_REMATCH[1]}" <<< "${O_TREE}" || oracle_red "before the hook ran, that path was not newer than the snapshot"
+    if [[ "${BASH_REMATCH[1]}" == "${O_PROJECT}/node_modules" ]]; then
+      # A fact, and not a write: node_modules' own time is said as the kept
+      # line `itself is newer`, never as a reason to remove it.
+      oracle_red "node_modules' own time is given as the reason to remove it"
+    else
+      grep -qxF -- "newer ${BASH_REMATCH[1]}" <<< "${O_TREE}" || oracle_red "before the hook ran, that path was not newer than the snapshot"
+    fi
   elif [[ "${line}" =~ ${re_kept_files} ]]; then
     oracle_count kept-files
     [[ "${BASH_REMATCH[2]}" == "${O_PROJECT}" && "${BASH_REMATCH[3]}" == "${O_PRE}" ]] || oracle_red "another project or another snapshot"
@@ -1173,6 +1203,16 @@ oracle_line() {
     oracle_count kept-bins
     [[ "${BASH_REMATCH[2]}" == "${O_PRE}" && "${BASH_REMATCH[1]}" == "${O_PROJECT}/node_modules" ]] || oracle_red "another snapshot or another directory"
     [[ -z "$({ ls "${BASH_REMATCH[1]}/.bin/" 2>/dev/null || true; } | sort | comm -13 "${O_HOME}/snapshots/${O_PRE}_bins.list" - 2>&1)" ]] || oracle_red ".bin lists an entry the snapshot lacks, or the snapshot has no list"
+  elif [[ "${line}" =~ ${re_kept_links} ]]; then
+    oracle_count kept-links
+    [[ "${BASH_REMATCH[2]}" == "${O_PRE}" && "${BASH_REMATCH[1]}" == "${O_PROJECT}/node_modules" ]] || oracle_red "another snapshot or another directory"
+    if [[ ! -f "${O_HOME}/snapshots/${O_PRE}_links.list" ]]; then
+      oracle_red "the snapshot has no list of links"
+    else
+      local lacking_links
+      lacking_links=$(oracle_links_lacking "${BASH_REMATCH[1]}" "${O_HOME}/snapshots/${O_PRE}_links.list")
+      [[ -z "${lacking_links}" ]] || oracle_red "node_modules holds a link the snapshot lacks: ${lacking_links//$'\n'/ }"
+    fi
   elif [[ "${line}" =~ ${re_kept_packages} ]]; then
     oracle_count kept-packages
     [[ "${BASH_REMATCH[2]}" == "${O_PRE}" && "${BASH_REMATCH[1]}" == "${O_PROJECT}/node_modules" ]] || oracle_red "another snapshot or another directory"
@@ -1196,9 +1236,11 @@ oracle_line() {
     # Before the hook ran, every check of the install showed no write.
     [[ "${O_TRACE}" != present ]] || oracle_red "kept, but before the hook ran the install trace was present"
     [[ "$(sed -n 2p <<< "${O_NODE_FILES}")" == same ]] || oracle_red "kept, but before the hook ran a node file differed from the snapshot: ${O_NODE_FILES//$'\n'/ -> }"
-    [[ -z "${O_TREE}" ]] || oracle_red "kept, but before the hook ran node_modules showed a write: ${O_TREE//$'\n'/ | }"
+    local writes
+    writes=$(grep -v '^dir-newer ' <<< "${O_TREE}" || true)
+    [[ -z "${writes}" ]] || oracle_red "kept, but before the hook ran node_modules showed a write: ${writes//$'\n'/ | }"
     # The form is the line and the checks that follow it, in this order.
-    O_KEPT_EXPECT="link trace kept-files kept-packages kept-bins lockfile kept-not-newer"
+    O_KEPT_EXPECT="link trace kept-files kept-packages kept-bins kept-links lockfile tree"
     [[ -L "${kp}" ]] || O_KEPT_EXPECT="${O_KEPT_EXPECT#link }"
   elif [[ "${line}" =~ ${re_trace_none} ]]; then
     oracle_count trace-none

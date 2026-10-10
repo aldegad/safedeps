@@ -343,7 +343,7 @@ rust/src/pre/snapshot.rs	create	boundary	capability	fs::OpenOptions::new	-	1
 rust/src/pre/snapshot.rs	create	boundary	capability	open	-	1
 rust/src/pre/snapshot.rs	create	boundary	file-mode	write	-	1
 rust/src/pre/snapshot.rs	create	data	copy-or-publish	state::copy_state_file	-	1
-rust/src/pre/snapshot.rs	create	data	raw-or-serialized	fs::write	-	3
+rust/src/pre/snapshot.rs	create	data	raw-or-serialized	fs::write	-	4
 rust/src/pre/snapshot.rs	create	human	log-or-report	state::log_advisory	data-field+fixed-literal+other	1
 rust/src/pre/snapshot.rs	file	boundary	capability	fs::File	-	1
 rust/src/pre/snapshot.rs	file	boundary	capability	fs::File::create	-	1

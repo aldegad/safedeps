@@ -1160,13 +1160,16 @@ grep -q 'suspicious dependency change detected' < "${written_post_file}" || fail
 post_message "${written_post_file}" | grep 'removed .*/nochange-wt/node_modules$' >/dev/null || fail "the rollback says node_modules was removed"
 pass "a rollback removes node_modules once the command has written into it"
 
-# The other two reasons a node_modules is removed, each as the line that says
-# it: a .bin entry the pre-command listing lacks, and a node_modules modified
-# after the snapshot with nothing new listed.
-for reason_case in bin newer; do
+# The other reasons a node_modules is removed, each as the line that says it:
+# a .bin entry the pre-command listing lacks, a link to a package placed right
+# under node_modules (the way pnpm and `npm link` place one), and npm's hidden
+# lockfile written after the snapshot where the record names no trace
+# baseline to read it by.
+for reason_case in bin link lock; do
   reason_wt="${tmp_root}/reason-${reason_case}-wt"
   mkdir -p "${reason_wt}/node_modules/installed-package" "${reason_wt}/node_modules/.bin"
   printf '{"name":"installed-package","version":"1.0.0"}\n' > "${reason_wt}/node_modules/installed-package/package.json"
+  printf '{"name":"reason","lockfileVersion":3,"packages":{}}\n' > "${reason_wt}/node_modules/.package-lock.json"
   printf '{"dependencies":{"fixture-parent":"1.0.0"}}\n' > "${reason_wt}/package.json"
   printf '%s\n' "${tampered_lock}" > "${reason_wt}/package-lock.json"
   pre_hook > /dev/null <<EOF
@@ -1174,7 +1177,13 @@ for reason_case in bin newer; do
 EOF
   case "${reason_case}" in
     bin) : > "${reason_wt}/node_modules/.bin/new-entry" ;;
-    newer) sleep 1; : > "${reason_wt}/node_modules/.yarn-integrity" ;;
+    link) mkdir -p "${reason_wt}-store/linked-package"
+          printf '{"name":"linked-package","version":"1.0.0"}\n' > "${reason_wt}-store/linked-package/package.json"
+          ln -s "${reason_wt}-store/linked-package" "${reason_wt}/node_modules/linked-package" ;;
+    lock) reason_pending=$(grep -lF "\"$(cd -P "${reason_wt}" && pwd -P)\"" "${SAFEDEPS_HOME}/pending"/*.json | head -1)
+          jq -c 'del(.npm_trace)' "${reason_pending}" > "${reason_pending}.tmp" && mv "${reason_pending}.tmp" "${reason_pending}"
+          sleep 1
+          printf '{"name":"reason","lockfileVersion":3,"packages":{"node_modules/written":{"version":"1.0.0"}}}\n' > "${reason_wt}/node_modules/.package-lock.json" ;;
   esac
   reason_post_file=$(
     PATH="${emptying_bin}:${PATH}" post_hook <<EOF
@@ -1185,11 +1194,45 @@ EOF
   case "${reason_case}" in
     bin) post_message "${reason_post_file}" | grep '/node_modules/.bin lists new-entry, which the pre-command snapshot .* does not$' >/dev/null \
            || fail "the removal says which .bin entry the snapshot lacks (${reason_post_file})" ;;
-    newer) post_message "${reason_post_file}" | grep '/reason-newer-wt/node_modules is newer than the pre-command snapshot ' >/dev/null \
-           || fail "the removal says node_modules is newer than the snapshot (${reason_post_file})" ;;
+    link) post_message "${reason_post_file}" | grep '/reason-link-wt/node_modules lists the link .*/reason-link-wt/node_modules/linked-package, which the pre-command snapshot .* does not$' >/dev/null \
+           || fail "the removal says which link the snapshot lacks (${reason_post_file})"
+          [[ -f "${reason_wt}-store/linked-package/package.json" ]] || fail "removing node_modules does not follow the new link" ;;
+    lock) post_message "${reason_post_file}" | grep '/reason-lock-wt/node_modules/.package-lock.json is newer than the pre-command snapshot ' >/dev/null \
+           || fail "the removal says npm's hidden lockfile is newer than the snapshot (${reason_post_file})" ;;
   esac
 done
 pass "every removal of node_modules says the first check that showed the command wrote it"
+
+# node_modules' own time is not a write. A tool the command runs makes a cache
+# directory or file under it (vite's .vite, yarn's .yarn-integrity), and the
+# rollback removed the whole tree for it, with no package manager behind it.
+# It is kept, and the kept
+# lines say what was read, the directory's own time included.
+itself_wt="${tmp_root}/itself-newer-wt"
+mkdir -p "${itself_wt}/node_modules/installed-package" "${itself_wt}/node_modules/.bin"
+printf '{"name":"installed-package","version":"1.0.0"}\n' > "${itself_wt}/node_modules/installed-package/package.json"
+printf '{"dependencies":{"fixture-parent":"1.0.0"}}\n' > "${itself_wt}/package.json"
+printf '%s\n' "${tampered_lock}" > "${itself_wt}/package-lock.json"
+pre_hook > /dev/null <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${itself_wt}"}
+EOF
+sleep 1
+mkdir "${itself_wt}/node_modules/.vite"
+: > "${itself_wt}/node_modules/.yarn-integrity"
+itself_post_file=$(
+  PATH="${emptying_bin}:${PATH}" post_hook <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${itself_wt}"}
+EOF
+)
+grep -q 'suspicious dependency change detected' < "${itself_post_file}" || fail "the gate still rejects the unapproved closure"
+[[ -f "${itself_wt}/node_modules/installed-package/package.json" && -d "${itself_wt}/node_modules/.vite" ]] \
+  || fail "a node_modules that only a cache entry was added to is kept"
+post_message "${itself_post_file}" | grep 'kept .*/itself-newer-wt/node_modules$' >/dev/null || fail "the rollback says node_modules was kept"
+post_message "${itself_post_file}" | grep '/itself-newer-wt/node_modules lists no link the pre-command snapshot .* lacks$' >/dev/null \
+  || fail "the kept lines say no new link was found"
+post_message "${itself_post_file}" | grep '/itself-newer-wt/node_modules itself is newer than the pre-command snapshot ' >/dev/null \
+  || fail "the kept lines say node_modules itself is newer than the snapshot (${itself_post_file})"
+pass "a node_modules whose own time alone is newer than the snapshot is kept"
 
 # A write that lists nothing new and finishes at once: the hidden lockfile is
 # rewritten in place right after the pre-guard, the way a fast `npm ci` that

@@ -51,6 +51,7 @@ impl Snapshot {
         let mut bins:Vec<W>=fs::read_dir(node.join(".bin")).into_iter().flatten().filter_map(Result::ok)
             .map(|e|e.file_name().as_bytes().to_vec()).filter(|n|!n.starts_with(b".")).collect();
         bins.sort();fs::write(snap.path(b"bins.list"),lines(&bins))?;
+        fs::write(snap.path(b"links.list"),lines(&post::package_links(&node)))?;
         let parent=if snap.parent.is_empty(){"null".to_owned()}else{jq::compact(&jq::arg(&snap.parent))};
         // The original writes this initial record as a here-document; later
         // rewrite updates use jq's object writer. Both spellings are observed.

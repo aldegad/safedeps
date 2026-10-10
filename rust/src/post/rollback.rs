@@ -53,26 +53,35 @@ impl<'a> Rollback<'a>{
     fn node_facts(&self)->(bool,Vec<Vec<u8>>){
         let tree=self.store.project.join("node_modules");let pre=&self.pre;
         let meta=self.store.path(pre,b"meta.json");let packages=self.store.path(pre,b"packages.list");let bins=self.store.path(pre,b"bins.list");
+        let links=self.store.path(pre,b"links.list");
         if let Some(rel)=self.trace.records.first(){return(false,vec![cat(&[sh::bytes(&self.store.project),b"/",rel,b" is newer than the baseline taken before this command or has another inode"])])}
         if pre.is_empty(){return(false,vec![b"this rollback has no snapshot from before the command".to_vec()])}
         if !sh::is_file(&meta){return(false,vec![report::path(&meta)])}
         if !self.different.is_empty(){return(false,vec![cat(&[sh::bytes(&self.store.project),b"/",&self.different,b" differed from the pre-command snapshot ",pre,b" when this rollback began"])])}
         if self.wrote!=Some(false)||self.compared.is_empty(){return(false,vec![report::path(&self.store.path(pre,b"package.json"))])}
-        for f in [&packages,&bins]{if !sh::is_file(f){return(false,vec![report::path(f)])}}
+        for f in [&packages,&bins,&links]{if !sh::is_file(f){return(false,vec![report::path(f)])}}
         let old=snapshot::sorted_lines(&packages);let mut now=trace::package_files(&tree,true);now.sort();
         if let Some(found)=now.iter().find(|n|!old.contains(n)){return(false,vec![cat(&[sh::bytes(&tree),b" lists ",found,b", which the pre-command snapshot ",pre,b" does not"])])}
         let old=snapshot::sorted_lines(&bins);let now=trace::listing(&tree.join(".bin"));
         if let Some(found)=now.iter().find(|n|!old.contains(n)){return(false,vec![cat(&[sh::bytes(&tree),b"/.bin lists ",found,b", which the pre-command snapshot ",pre,b" does not"])])}
-        for f in [tree.join(".package-lock.json"),tree.clone()]{if trace::newer(&f,&meta,false,true){return(false,vec![cat(&[sh::bytes(&f),b" is newer than the pre-command snapshot ",pre])])}}
+        let old=snapshot::sorted_lines(&links);let now=trace::package_links(&tree);
+        if let Some(found)=now.iter().find(|n|!old.contains(n)){return(false,vec![cat(&[sh::bytes(&tree),b" lists the link ",found,b", which the pre-command snapshot ",pre,b" does not"])])}
+        // node_modules' own time is not a write: a tool the command ran makes
+        // a cache directory under it (`.vite`), and the whole tree went with
+        // it. A package manager's write shows as one of the checks above or
+        // below.
+        let hidden=tree.join(".package-lock.json");
+        if trace::newer(&hidden,&meta,false,true){return(false,vec![cat(&[sh::bytes(&hidden),b" is newer than the pre-command snapshot ",pre])])}
         if !sh::present(&tree){return(true,Vec::new())}
         let mut lines=vec![cat(&[b"kept ",sh::bytes(&tree)])];if sh::is_link(&tree){lines.push(report::path(&tree));}
         lines.push(self.trace.line.clone());
         lines.push(cat(&[b"when this rollback began, none of ",&self.compared.join(b", ".as_slice()),b" in ",sh::bytes(&self.store.project),b" differed from the pre-command snapshot ",pre]));
         lines.push(cat(&[sh::bytes(&tree),b" lists no package.json the pre-command snapshot ",pre,b" lacks"]));
         lines.push(cat(&[sh::bytes(&tree),b"/.bin lists no entry the pre-command snapshot ",pre,b" lacks"]));
-        let hidden=tree.join(".package-lock.json");
+        lines.push(cat(&[sh::bytes(&tree),b" lists no link the pre-command snapshot ",pre,b" lacks"]));
         lines.push(if sh::exists(&hidden){cat(&[sh::bytes(&hidden),b" is not newer than the pre-command snapshot ",pre])}else{report::path(&hidden)});
-        lines.push(cat(&[sh::bytes(&tree),b" is not newer than the pre-command snapshot ",pre]));(true,lines)
+        lines.push(if trace::newer(&tree,&meta,false,true){cat(&[sh::bytes(&tree),b" itself is newer than the pre-command snapshot ",pre])}
+            else{cat(&[sh::bytes(&tree),b" is not newer than the pre-command snapshot ",pre])});(true,lines)
     }
     pub fn node_modules(&mut self){
         if !self.npm_project{return}
