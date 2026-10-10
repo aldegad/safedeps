@@ -7,12 +7,15 @@ use std::{fs,io,os::unix::{fs::{DirBuilderExt,MetadataExt,OpenOptionsExt},ffi::O
 pub struct Record<'a> {
     pub cwd:&'a [u8],
     pub project_from:&'a str,
-    /// Whether the readings found an npm install statement. The record says
-    /// so in `npm_install`; the trace baseline is written either way, so the
-    /// post hook can tell whether a recorded call that is not an npm install
-    /// (`npx <name>`, a runner) left a trace in npm's records before it
-    /// judges the project's closure.
+    /// Whether the readings found an npm install statement (`npm_install`).
     pub npm_install:bool,
+    /// Whether every install the readings found is a node package runner
+    /// (`runner_only`, `Run::runner_only`). The trace baseline is written for
+    /// an npm install and for such a call, so the post hook can tell whether a
+    /// runner left a trace in npm's records before it judges the project's
+    /// closure. Any other install (`yarn add`, `pip install`, a runner beside
+    /// one) gets none, as before, and is judged as before.
+    pub runner_only:bool,
     pub attribution:&'a [u8],
     pub fetch:Option<&'a Value>,
     pub fetch_why:&'a [u8],
@@ -35,16 +38,19 @@ pub fn write(call:&Call,snapshot:&Snapshot,record:&Record)->io::Result<PathBuf> 
     };
     let trace_path=os::path(&cat(&[base.as_os_str().as_bytes(),b".trace"]));
     let project=os::path(&snapshot.project);
-    let trace=jq::obj(vec![("baseline",jq::arg(trace_path.as_os_str().as_bytes())),("inodes",jq::obj(vec![
-        ("package-lock.json",jq::s(&inode(&project.join("package-lock.json")))),
-        ("node_modules/.package-lock.json",jq::s(&inode(&project.join("node_modules/.package-lock.json"))))]))]);
-    fs::OpenOptions::new().create(true).truncate(true).write(true).mode(0o600).open(&trace_path)?;
+    let trace=if record.npm_install||record.runner_only{
+        let value=jq::obj(vec![("baseline",jq::arg(trace_path.as_os_str().as_bytes())),("inodes",jq::obj(vec![
+            ("package-lock.json",jq::s(&inode(&project.join("package-lock.json")))),
+            ("node_modules/.package-lock.json",jq::s(&inode(&project.join("node_modules/.package-lock.json"))))]))]);
+        fs::OpenOptions::new().create(true).truncate(true).write(true).mode(0o600).open(&trace_path)?;
+        value
+    }else{jq::J::Null};
     let fetch=if !record.npm_install{jq::J::Null}else if let Some(v @ Value::Obj(_))=record.fetch{jq::from_value(v)}else{
         jq::obj(vec![("unknown",jq::arg(&cat(&[b"npm was not asked which registry this install fetches from: ",record.fetch_why])))])
     };
     let value=jq::obj(vec![
         ("snapshot_id",jq::s(&snapshot.id)),("project_dir",jq::arg(&snapshot.project)),("dir_hash",jq::s(&snapshot.hash)),
-        ("project_dir_from",jq::s(record.project_from)),("npm_install",jq::J::Bool(record.npm_install)),
+        ("project_dir_from",jq::s(record.project_from)),("npm_install",jq::J::Bool(record.npm_install)),("runner_only",jq::J::Bool(record.runner_only)),
         ("npm_trace",trace),("npm_unattributable",jq::arg(record.attribution)),
         ("npm_fetch",fetch),("tool_use_id",id.as_deref().map(jq::s).unwrap_or(jq::J::Null)),
     ]);

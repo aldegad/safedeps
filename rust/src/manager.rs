@@ -282,6 +282,9 @@ pub struct Reader<'r> {
     pub family: String,
     pub kind: String,
     pub localbin: bool,
+    /// Whether npm read a `--call` (`-c`) script in this statement, in any
+    /// of its readings: the script is shell text the reader does not read.
+    pub call: bool,
     ambiguous: i64,
     force_value: i64,
     other: bool,
@@ -306,6 +309,7 @@ impl<'r> Reader<'r> {
             family: "none".into(),
             kind: "none".into(),
             localbin: false,
+            call: false,
             ambiguous: -1,
             force_value: -1,
             other: false,
@@ -820,6 +824,7 @@ impl<'r> Reader<'r> {
     // ---- the manager reading ---------------------------------------------------
     /// `safedeps_manager_read`. Always "succeeds", as the shell function does.
     pub fn read(&mut self, w: &[W]) {
+        self.call = false;
         self.ambiguous = -1;
         self.force_value = -1;
         self.other = false;
@@ -1266,6 +1271,7 @@ impl<'r> Reader<'r> {
                 b"call" => {
                     if !text.is_empty() {
                         call = true;
+                        self.call = true;
                     }
                 }
                 _ => {}

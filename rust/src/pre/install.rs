@@ -61,11 +61,16 @@ pub fn judge(call:&Call,run:&mut Run,cwd:&[u8],read:&Readings,mut inert:impl FnM
     }
     let codex=jq::stream_has(&call.input,"turn_id");
     let mut rewrites=Vec::new();let mut npm_install=false;let mut attribution=W::new();
+    // A call whose installs are node package runners alone, in every reading
+    // and with none hidden, may be left unjudged where it leaves no trace in
+    // npm's records. An install of any manager beside it keeps the call judged.
+    let mut runner_only=!read.set.is_empty()&&!read.facts.hidden.iter().any(|h|*h);
     for &reading in &read.set {
         run.reading=Some(reading);
         if !codex{rewrites.push(inert(run,&call.command))}
         let (wanted,why)=effects::trace(run,&call.command);npm_install|=wanted;
         if attribution.is_empty(){attribution=why}
+        runner_only&=run.runner_only(&call.command);
         run.reading=None;
     }
     // A collision is an obligation the rewrite cannot meet, even when all
@@ -101,7 +106,7 @@ pub fn judge(call:&Call,run:&mut Run,cwd:&[u8],read:&Readings,mut inert:impl FnM
     for (flag,message) in notices::INERT {
         if if *flag=="downgrade"{flags==b"downgrade"}else{flags.split(|b|*b==b' ').any(|s|s==flag.as_bytes())}{log_command(call,message.as_bytes())}
     }
-    let record=pending::Record{cwd:&cwd,project_from:from,npm_install,attribution:&attribution,fetch:fetch.as_ref(),fetch_why:&fetch_why};
+    let record=pending::Record{cwd:&cwd,project_from:from,npm_install,runner_only,attribution:&attribution,fetch:fetch.as_ref(),fetch_why:&fetch_why};
     if let Err(error)=pending::write(call,&snap,&record){out.warn(format!("safedeps: could not write this install's pending state: {}",error).as_bytes());out.code=1;return out}
     if flags.starts_with(b"rewrite")&&!command.is_empty() {
         let unread=flags.split(|b|*b==b' ').any(|s|matches!(s,b"unverified"|b"unread"|b"release"));

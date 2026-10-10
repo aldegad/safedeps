@@ -71,24 +71,26 @@ fn backstop(call: &mut Call, journal: &Journal, input: &[u8]) -> Result<Option<W
     rollback(call, journal, &mut Install::default(), &mut Report::default(), target, &reasons, input, true).map(Some)
 }
 
-/// A recorded call that holds no npm install statement and left no trace in
-/// either npm record is not judged: no closure check, no rollback, no
-/// confirm. The record says the first (`npm_install` false, never a missing
-/// field) and the trace check the second, with the baseline read and nothing
-/// newer or replaced. `npx <name>` is read as an install, and its packages go
-/// to npm's own cache, not to the project. Judging the project's closure for
-/// it rolled projects back and recorded their whole tree as withheld. A
-/// command safedeps rewrote with --ignore-scripts is judged as before.
-fn left_npm_untouched(call: &Call, trace: &Install) -> bool {
-    trace.absent && trace.read
-        && matches!(jv::path(&call.current, &["npm_install"]), Ok(crate::json::Value::Bool(false)))
+/// A recorded call whose installs are node package runners alone and that
+/// left no trace in either npm record is not judged: no closure check, no
+/// rollback, no confirm. The record says the first (`runner_only` true and
+/// `npm_install` false, never a missing field) and the trace check the
+/// second, with the baseline read and nothing newer or replaced. `npx <name>`
+/// is read as an install, and its packages go to npm's own cache, not to the
+/// project. Judging the project's closure for it rolled projects back and
+/// recorded their whole tree as withheld. An install of any manager (`yarn
+/// add` writes neither npm record) keeps the call judged, and so does a
+/// command safedeps rewrote with --ignore-scripts.
+fn runner_left_npm_untouched(call: &Call, trace: &Install) -> bool {
+    let fact = |key: &str, want: bool| matches!(jv::path(&call.current, &[key]), Ok(crate::json::Value::Bool(v)) if *v == want);
+    trace.absent && trace.read && fact("runner_only", true) && fact("npm_install", false)
         && !npm::meta_true(&call.store.meta(), "ignore_scripts_injected")
 }
 
 fn judge(call: &mut Call, journal: &Journal, input: &[u8]) -> Result<Option<W>, i32> {
     if call.record != Record::Install { return backstop(call, journal, input) }
     let mut trace = Install::settle(&call.store.project, &call.store.home, &call.current, &call.command);
-    if left_npm_untouched(call, &trace) { call.store.remove(); return Ok(None) }
+    if runner_left_npm_untouched(call, &trace) { call.store.remove(); return Ok(None) }
     call.store.stage();
     let mut npm = Npm::default();
     let mut reasons = Vec::new();

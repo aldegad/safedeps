@@ -421,17 +421,80 @@ fn maven_coordinate(t: &[u8]) -> Option<(W, W, W)> {
     Some((parts[0].clone(), parts[1].clone(), parts[2].clone()))
 }
 
+/// The words of one statement as the extractor hands them to the manager
+/// reader.
+fn statement_words(words: &[u8]) -> Vec<W> {
+    let words: W = words.iter().map(|&b| if matches!(b, b'(' | b')' | b'{' | b'}') { b' ' } else { b }).collect();
+    words
+        .split(|&b| b == b' ' || b == b'\t' || b == b'\n')
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_vec())
+        .collect()
+}
+
+/// Whether one statement the recognizers call an install is a node package
+/// runner and nothing else: the manager reader reads it as a runner of npm
+/// (`npx`, `npm exec`, `npm x`), pnpm (`pnpx`, `pnpm dlx`), yarn (`yarn
+/// dlx`) or bun (`bunx`, `bun x`), with no `--call` script, and the command
+/// it runs is read as written and is not a package manager, a shell or
+/// corepack. That command is the package it runs (`r`), each package it
+/// names (`p`), and, where it names one or runs none, the program it runs
+/// from it (the first `a`). Read as written means every byte is one no
+/// shell expansion acts on, so a quoted blank (`pnpm dlx -c 'yarn add x'`),
+/// a parameter or a glob makes it unread, and an unread runner is not one.
+/// A runner of another ecosystem (`uvx`, `pipx run`, `go run`) is not one
+/// either. What a runner's own code does is not read here.
+pub fn node_runner(rd: &mut Reader, words: &[u8]) -> bool {
+    let w = statement_words(words);
+    if w.is_empty() {
+        return false;
+    }
+    rd.read(&w);
+    if rd.kind != "runner" || rd.call || !matches!(rd.family.as_str(), "npm" | "npx" | "pnpm" | "pnpx" | "yarn" | "bun" | "bunx") {
+        return false;
+    }
+    let word_of = |k: usize| -> W {
+        match rd.text.get(k) {
+            Some(t) if !t.is_empty() => t.clone(),
+            _ => w[k].clone(),
+        }
+    };
+    let mut runs: Vec<W> = Vec::new();
+    for (k, &role) in rd.role.iter().enumerate() {
+        if matches!(role, b'r' | b'p') && k < w.len() {
+            runs.push(word_of(k));
+        }
+    }
+    let named = rd.role.iter().any(|&r| r == b'p');
+    if named || runs.is_empty() {
+        if let Some(k) = rd.role.iter().position(|&r| r == b'a').filter(|&k| k < w.len()) {
+            runs.push(word_of(k));
+        }
+    }
+    if runs.is_empty() {
+        return false;
+    }
+    runs.iter().all(|word| !word.is_empty() && !word.starts_with(b"~") && !word.starts_with(b"=")
+        && word.iter().all(|b| crate::inert::INERT_BYTES.contains(b)) && !runs_manager(rd, word))
+}
+
+/// A package or program name that is a package manager, a shell or
+/// corepack, with a version, a path and an alias prefix set aside
+/// (`yarn@1`, `./node_modules/.bin/pnpm`, `npm:yarn`).
+fn runs_manager(rd: &Reader, word: &[u8]) -> bool {
+    let cut = if word.first() == Some(&b'@') { word[1..].iter().position(|&b| b == b'@').map(|p| p + 1) } else { word.iter().position(|&b| b == b'@') };
+    let name = &word[..cut.unwrap_or(word.len())];
+    let name = &name[name.iter().rposition(|&b| b == b'/' || b == b':').map(|p| p + 1).unwrap_or(0)..];
+    crate::manager::family_of(rd.rx, name).is_some()
+        || crate::grammar::SHELLS.split('|').chain(["corepack"]).any(|s| name.eq_ignore_ascii_case(s.as_bytes()))
+}
+
 /// One statement of the extractor: the words after the shell's quote
 /// removal (the pieces view, `\002` inside a word), whether the effect gate
 /// reads it, and the reading of its manager. The lines it prints, in
 /// readings mode.
 pub fn extract_statement(x: &XRegexes, rd: &mut Reader, gate_reads: bool, words: &[u8], out: &mut W) {
-    let words: W = words.iter().map(|&b| if matches!(b, b'(' | b')' | b'{' | b'}') { b' ' } else { b }).collect();
-    let w: Vec<W> = words
-        .split(|&b| b == b' ' || b == b'\t' || b == b'\n')
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_vec())
-        .collect();
+    let w = statement_words(words);
     if w.is_empty() {
         return;
     }

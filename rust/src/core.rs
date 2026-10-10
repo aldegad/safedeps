@@ -625,6 +625,47 @@ impl<'c> Run<'c> {
 
     /// `guard_extract_pieces` then `guard_extract_specs ... readings`.
     pub fn extract_specs(&mut self, cmd: &[u8], targets: &[(String, W)]) -> W {
+        let lines = self.statement_lines(cmd, targets);
+        let mut out = W::new();
+        let mut rd = Reader::new(&self.c.mrx);
+        for (gate_reads, seg, words) in lines {
+            if !has_nonspace(&seg) {
+                continue;
+            }
+            if !self.recognized(&seg) {
+                continue;
+            }
+            extract::extract_statement(&self.c.x, &mut rd, gate_reads, &words, &mut out);
+        }
+        out
+    }
+
+    /// Whether the command's installs are node package runners alone: every
+    /// statement the extractor reads (the command's and every payload's) that
+    /// the recognizers call an install is one `extract::node_runner` accepts,
+    /// and there is at least one. A runner beside an install of any manager is
+    /// not, and neither is a runner that runs a package manager or a shell.
+    pub fn runner_only(&mut self, cmd: &[u8]) -> bool {
+        let targets = self.targets(cmd);
+        let lines = self.statement_lines(cmd, &targets);
+        let mut rd = Reader::new(&self.c.mrx);
+        let mut found = false;
+        for (_, seg, words) in lines {
+            if !has_nonspace(&seg) || !self.recognized(&seg) {
+                continue;
+            }
+            if !extract::node_runner(&mut rd, &words) {
+                return false;
+            }
+            found = true;
+        }
+        found
+    }
+
+    /// The statements the extractor reads, each with whether the effect gate
+    /// reads it, its recognize-view text and its words: the command's own from
+    /// the target records, then every payload's from its pieces view.
+    fn statement_lines(&mut self, cmd: &[u8], targets: &[(String, W)]) -> Vec<(bool, W, W)> {
         let mut lines: Vec<(bool, W, W)> = Vec::new();
         let mut piece_lines: Vec<W> = Vec::new();
         for (kind, fields) in targets {
@@ -661,18 +702,7 @@ impl<'c> Run<'c> {
                 lines.push((f[0] == b"true", f[1].clone(), f[2].clone()));
             }
         }
-        let mut out = W::new();
-        let mut rd = Reader::new(&self.c.mrx);
-        for (gate_reads, seg, words) in lines {
-            if !has_nonspace(&seg) {
-                continue;
-            }
-            if !self.recognized(&seg) {
-                continue;
-            }
-            extract::extract_statement(&self.c.x, &mut rd, gate_reads, &words, &mut out);
-        }
-        out
+        lines
     }
 
     // ---- the driver -------------------------------------------------------------------

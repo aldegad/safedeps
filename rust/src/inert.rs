@@ -179,6 +179,8 @@ mod floor;
 mod read;
 mod record;
 
+pub(crate) use record::INERT_BYTES;
+
 use std::collections::{BTreeSet, HashMap};
 
 use crate::core::{self, Core, Payload, PayloadOrigin, Run};

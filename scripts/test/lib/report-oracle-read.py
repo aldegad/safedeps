@@ -366,9 +366,10 @@ def main():
     if sys.argv[1] == "links":
         links(sys.argv[2])
         return 0
-    if sys.argv[1] == "isfalse":
+    if sys.argv[1] in ("isfalse", "istrue"):
         value = load(sys.argv[2])
-        return 0 if isinstance(value, dict) and value.get(sys.argv[3], None) is False else 1
+        want = sys.argv[1] == "istrue"
+        return 0 if isinstance(value, dict) and value.get(sys.argv[3], None) is want else 1
     if sys.argv[1] == "isfile":
         return 0 if os.path.isfile(sys.argv[2]) else 1
     if sys.argv[1] == "snapshot-files":

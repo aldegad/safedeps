@@ -176,3 +176,34 @@ fn native_manager_value_entries_are_reachable_and_unambiguous() {
     assert_eq!(manager::option_class("bun", "x", b"-p"), Some(b'p'));
     assert_eq!(manager::option_class("bun", "", b"-p"), None);
 }
+
+#[test]
+fn runner_only_holds_node_runners_and_nothing_beside_them() {
+    let core = Core::new();
+    let runners = [
+        "npx --no-install tsc --noEmit x", "npx vitest run x", "npm exec -- vitest run x", "npm x vitest",
+        "pnpx vitest", "pnpm dlx vitest run x", "yarn dlx vitest run x", "bunx vitest run x", "bun x vitest run x",
+        "npx -p @scope/tool@2 tool run", "bash -c 'npx tsc'", "x=$(npx tsc --version)",
+    ];
+    let judged = [
+        "yarn add fixture-tool@1.0.0", "pnpm add fixture-tool@1.0.0", "bun add fixture-tool@1.0.0",
+        "npm install fixture-tool@1.0.0", "npx vitest run x && yarn add fixture-tool@1.0.0",
+        "npx tsc; pip install requests==2.0.0", "npx yarn add x", "npx yarn@1.22.0 add x",
+        "npx -p yarn yarn add x", "pnpm dlx --package=yarn yarn add x", "npx corepack yarn add x",
+        "npx ./node_modules/.bin/pnpm add x", "npx -c 'yarn add x' fixture", "pnpm dlx -c 'yarn add x'",
+        "npx $TOOL add x", "npx bash script.sh", "uvx ruff check", "pipx run black", "npm init vite@5", "echo hi",
+    ];
+    for reading in [Reading::Bash, Reading::Zsh, Reading::Dash] {
+        for cmd in runners {
+            let mut run = Run::new(&core);
+            run.reading = Some(reading);
+            assert!(run.runner_only(cmd.as_bytes()), "{reading:?}: {cmd}");
+            assert!(!run.failed, "{reading:?}: {cmd}");
+        }
+        for cmd in judged {
+            let mut run = Run::new(&core);
+            run.reading = Some(reading);
+            assert!(!run.runner_only(cmd.as_bytes()), "{reading:?}: {cmd}");
+        }
+    }
+}
