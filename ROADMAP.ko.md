@@ -56,7 +56,7 @@ Safedeps 는 **개발 의존성 install** (npm / pip / cargo / go / gem / maven 
 
 ### 릴리즈 메모
 
-- npm 패키지 version 은 `package.json` 이 SSoT. `bin/safedeps` `SAFEDEPS_VERSION` 이 이를 따라가고, smoke 테스트는 `package.json` 을 읽어 대조한다 (현재 v2.19.1).
+- npm 패키지 version 은 `package.json` 이 SSoT. `bin/safedeps` `SAFEDEPS_VERSION` 이 이를 따라가고, smoke 테스트는 `package.json` 을 읽어 대조한다 (현재 v2.20.0).
 - `npm test` 는 release smoke suite 를 실행한다. full fixture E2E 는 `v2.1-tests` 에 있다.
 - daily re-check 는 LLM 토큰을 쓰지 않는다. opt-in 이며, macOS `launchd` user agent 가 매일 `safedeps re-check --json` 을 실행한다 (`install-safedeps-recheck-agent.mjs` 로 atomic install). `~/.safedeps/recheck.log` 와 `~/.safedeps/recheck-alerts.jsonl` 를 쓰고, 새 CVE/KEV/revoke/provider-skip/위조-의심 시 macOS notification 을 띄운다. 네트워크는 OSV / CISA / GHSA query 에만 쓴다.
 
@@ -1484,6 +1484,19 @@ v2.18.2 를 쓸 때 Bash 가드에 열려 있던 것들이다. Rust 코어는 �
 - **릴리스 점검.** 이력 전체가 있는 clone 에서 통과했다. ShellCheck 0.11.0 은 파일 24개, gitleaks 8.30.1 은 커밋 1,036개, 의존성 0, 패키지는 파일 234개이고 `ARCHITECTURE.ko.md` 와 `ROADMAP.ko.md` 가 있고 `rust/` 는 없다.
 - **WSL1.** `linux-x64` 바이너리는 게시 방식으로 빌드했고, 거기서 `stamp --check` 는 `rust/` 가 있을 때와 없을 때 모두 ok 였다. 배터리는 nice 0 으로 돌렸다. Linux 루트에서 smoke 80/0 (112.7초), self-budget 43/0 (126.3초), effect-trace-grid 13/0 (768.4초), e2e 132/0 (338.8초, 건너뛴 행 7). Windows 드라이브에서 80/0 (83.6초), 43/0 (125.7초), 13/0 (733.8초), 132/0 (311.5초, 건너뛴 행 12). 건너뛴 행은 v2.19.0 이 건너뛴 것과 같다. Windows CPU 는 배터리마다 평균 21~77 퍼센트였다.
 - **한 번 빨강, 그다음 초록.** Linux 루트의 첫 effect-trace-grid 실행은 한 행에서 빨강이었다. 그 실행에서 OSV 조회 두 번이 답을 받지 못했다(`advisory.log` 에 `OSV batch query failed status=000`). 게이트는 그때마다 fail-closed 로 롤백했고, 두 번째 롤백은 롤백이 없어야 하는 행에서 났다. 위의 WSL1 에서 알려진 한계의 첫째다. 절차가 요구하는 한 번 더 실행은 초록이었다.
+
+## v2.20.0 — 패키지를 실행하기만 하는 호출은 흔적이 없으면 판정하지 않고, 롤백은 패키지 매니저가 쓰지 않은 `node_modules` 를 남긴다 (출하)
+
+마이너 릴리스다. 판정을 옮기기 때문이다. v2.19.1 이 판정하고 롤백하던 호출 일부를 이제 판정하지 않고, 지우던 `node_modules` 일부를 이제 남긴다. 버전 올림이 코어의 소스 스탬프를 바꾸므로 바이너리는 다시 빌드했다.
+
+- **패키지를 실행하기만 하는 호출은 흔적이 없으면 판정하지 않는다.** safedeps 는 `npx <이름>` 과 `npx --no-install <이름>` 을 설치로 읽는다. 패키지를 받아 실행할 수 있기 때문이다. 받은 것은 npm 자신의 캐시로 가고 프로젝트로는 가지 않는다. 그런데도 post 훅은 그런 호출마다 프로젝트의 closure 전체를 판정했다. closure 가 한 번도 승인되지 않은 프로젝트에서는 프로젝트를 롤백했고, 프로젝트의 트리 전체를 `~/.safedeps/npm-withheld` 에 기록했다. 그 기록이 다음 진짜 설치의 rebuild 를 막았다. 그런 호출마다 closure 검사 한 번 전체를 쓰기도 했다. 이제 호출을 판정하지 않는 것은 그 안의 무엇도 패키지를 설치하지 않는다고 safedeps 가 보증할 수 있을 때뿐이다. 명령과 그것이 담은 모든 스크립트와 치환의 모든 문장이 러너이거나 닫힌 목록의 셸 builtin 이어야 하고, 적어도 하나는 러너여야 한다. 러너는 `npx`, `pnpx`, `bunx`, `npm exec`, `npm x`, `pnpm dlx`, `yarn dlx`, `bun x` 이고, `-c` 스크립트가 없어야 하며, 실행하는 것이 패키지 매니저나 corepack 이나 셸이 아닌 패키지를 평범한 단어로 적은 것이어야 한다. builtin 은 `cd`, `pushd`, `popd`, `echo`, `printf`, 대입만 있는 `export`, `true`, `:`, `test`, `[` 이고, 각자 혼자 평범한 단어로 서 있어야 한다. 그리고 그 호출이 npm 의 lockfile 둘에 흔적을 남기지 않아야 한다. 그러면 아무것도 롤백하지도 기록하지도 확정하지도 않고, `advisory.log` 의 `UNGATED` 줄이 그 호출의 기록이다. 그 밖의 것은 호출을 예전처럼 판정되게 둔다. 어느 매니저의 설치든, 게이트가 설치로 읽지 않는 설치(맨 `yarn`, `"yarn" add`, `sudo yarn add`)든, 다른 프로그램, 파이프, 서브셸, 복합 명령이든 그렇다. 그래서 `npx tsc | head` 와 `make && npx tsc` 는 여전히 판정되고, `npx yarn add <패키지>` 도 그렇다. npm lockfile 을 실제로 다시 쓰는 호출은 설치처럼 판정된다. 러너 자신의 코드가 npm 의 lockfile 둘 밖에 쓰는 것은 판정하지 않는다.
+- **그런 호출이 이 릴리스 전에 쓴 기록은 남는다.** 이 버전에는 `npm-withheld` 기록을 풀 방법이 없다. 기록된 바이트를 담은 트리는 자동으로 rebuild 되지 않고, 경고가 패키지마다 이름을 댄다. 그것을 확인한 사람이 직접 `npm rebuild` 를 돌린다.
+- **롤백은 디렉터리 자신의 시각만 새로우면 `node_modules` 를 남긴다.** 롤백은 프로젝트의 `node_modules` 의 수정 시각이 명령 직전에 뜬 스냅샷보다 늦으면 그것을 지웠다. 명령이 돌리는 도구가 거기에 캐시 디렉터리나 파일을 만들면 그 시각이 바뀐다. vite 의 `.vite`, `.yarn-integrity` 가 그렇다. 그래서 패키지 매니저가 바꾼 것이 없는데도 실제 `node_modules` 가 사라졌고, 롤백은 패키지 매니저를 돌리지 않으므로 그것을 되돌려 놓지 않는다. 이제 `node_modules` 는 패키지 매니저가 하는 쓰기가 보일 때만 지운다. 이 호출의 설치 흔적, 스냅샷과 다른 node 매니페스트나 lockfile, 명령 전 목록에 없는 `package.json` 이나 `.bin` 항목, 스냅샷보다 새로운 npm 의 숨은 lockfile, 또는 패키지로 가는 새 링크다. 마지막 검사가 새로 생겼다. `node_modules` 바로 아래나 `@scope` 디렉터리 아래의 링크는, pnpm 과 `npm link` 가 패키지를 놓는 방식인데, 그동안 디렉터리의 시각으로만 보였다. 남긴 줄은 이제 `node_modules` 자신이 스냅샷보다 새로운지도 말한다.
+- **backstop 은 `cd` 를 돌린 호출을 그 호출이 돈 디렉터리에서 읽는다.** backstop 패턴에는 맞지만 pre 훅이 설치로 읽지 않는 호출에 대해, pre 훅은 호출의 디렉터리에서 흔적 항목을 뜬다. 명령이 `cd` 를 돌렸으면 post 훅은 다른 디렉터리를 받고, 그 항목은 다른 디렉터리의 것으로 치워졌다. 그러면 그 호출은 흔적이 있는 것으로 세어졌고, backstop 은 `cd` 가 닿은 곳의 closure 를 판정하고 경고했다. `cd <디렉터리> && cat <파일>` 처럼 아무것도 설치하지 않은 명령에 대해서였다. 이제 그런 항목은 post 훅의 디렉터리에서 그 시각만으로 읽는다. 그곳의 lockfile, 또는 그곳의 `node_modules` 아래의 무엇이든 항목을 뜬 뒤에 바뀌었으면 흔적이다. 바뀐 것이 없으면 `BACKSTOP UNTRACED` 이고, 그 디렉터리가 항목을 뜬 곳이 아니라는 줄이 붙는다. 다른 명령으로 뜬 항목은 여전히 치운다.
+- **closure 검사는 KEV 카탈로그를 한 번 파싱한다.** post 훅은 캐시된 CISA KEV 카탈로그를 closure 의 패키지마다 한 번씩 파싱했다. closure 가 크면 그것이 훅 시간의 대부분이었고, 부하가 걸리면 런타임의 30초 훅 타임아웃에 닿았다. 그 타임아웃은 아무것도 기록하지 않은 채 훅을 취소한다. 이제 카탈로그는 closure 검사마다 한 번 파싱하고, 새로 받기와 그 로그 줄도 한 번이다. 유닛 `catalog_tests::one_batch_reads_the_kev_catalog_once` 가 캐시된 패키지 60개에 파싱 한 번을 지킨다.
+- **재검사 에이전트의 설치기는 옛 런타임을 건드리기 전에 새 런타임을 다 만든다.** `install-safedeps-recheck-agent.mjs stage --root <디렉터리>` 는 루트의 `lib/` 를 지우고 새것을 복사해 넣었다. 체크아웃 자체를 루트로 주면 체크아웃 자신의 `lib/` 를 지웠다. `lib/` 안의 심볼릭 링크는 옛 `lib/` 가 사라진 뒤에 예외를 던졌고, 설치된 에이전트에 런타임 절반을 남겼다. 이제 런타임은 루트 옆에서 통째로 만들고, 그 `bin/safedeps` 를 한 번 돌리고, 그다음에야 이름 바꾸기 두 번으로 바꿔 넣는다. 루트는 없거나, 비었거나, 설치기가 쓰는 표지를 가져야 한다. 체크아웃이거나, 체크아웃을 담거나, 체크아웃 안에 있는 루트는 거부하고, 링크도 거부한다. 파일은 원본의 모드를 그대로 갖되 그룹과 다른 사용자의 쓰기 비트는 뺀다. `scripts/test/recheck-agent.sh` 가 각각을 지킨다.
+
+이 릴리스에 함께 들어간 것: `scripts/ci/run-on-hosts.sh` 는 실행 끝에 공유 ssh 연결마다 끝내라고 요청한다. 전에는 그것들을 돈 채로 남겼다. `scripts/test/npx-judgment.sh` 가 새로 생겼고 개발 세트에서 돈다. 각 행은 합성 프로젝트에서 한 호출의 두 훅을 돌리고, 위협 행(네트워크에 닿는 설치 스크립트를 가진 패키지를 들여오는 yarn, pnpm, bun 설치, 러너 옆이든 혼자든)은 계속 롤백된다.
 
 ---
 
