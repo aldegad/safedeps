@@ -1498,6 +1498,16 @@ A minor release, because it moves verdicts: some calls that v2.19.1 judged and r
 
 Also in this release: `scripts/ci/run-on-hosts.sh` asks each shared ssh connection to exit at the end of a run, where it used to leave them running. `scripts/test/npx-judgment.sh` is new and runs in the development set: each row runs both hooks of one call on a synthetic project, and the threat rows (a yarn, pnpm or bun install bringing a package whose install script reaches the network, beside a runner or alone) stay rolled back.
 
+### How it was checked
+
+Commit ecd3e72 holds this release's code and version. The corrections to this section and this subsection came after it, and change nothing outside the two roadmaps.
+
+- **macOS.** The release set ran through the host runner with `--hosts m1,carenine` on ecd3e72: 28 units, 8 on m1 and 20 on carenine, each with exit status 0, 1,023 `ok`, 0 `not ok`, no skipped row, 552 seconds. Each host built its core once and checked its stamp before any unit started. carenine's one-minute load was 2.4 when the run took its slots and above 90 at times during the run. The two new batteries ran there: npx-judgment with 28 rows and recheck-agent with 11.
+- **Release checks.** They passed on carenine in a clone with full history: ShellCheck 0.11.0 on 24 files, gitleaks 8.30.1 over 1,049 commits, zero dependencies, and a package of 236 files that lists the three Korean documents and no `rust/`.
+- **WSL1.** The `linux-x64` binary was built the publish way on carenine from ecd3e72, and `stamp --check` said ok in WSL1 with and without `rust/`. The batteries ran at nice 0. On the Linux root: smoke 80/0 (78 s), self-budget 43/0 (123 s), effect-trace-grid 13/0 (720 s) and e2e 134/0 (349 s, 7 skipped rows). On the Windows drive: 80/0 (73 s), 43/0 (123 s), 13/0 (668 s, the second run) and 134/0 (328 s, 12 skipped rows). The skipped rows are the ones v2.19.0 and v2.19.1 skipped. Windows CPU averaged 4 to 23 percent per battery.
+- **One red, then green.** The first effect-trace-grid run on the Windows drive went red on one row: an approved install that should confirm quietly was rolled back with `npm closure OSV batch verification failed; fail-closed`. That row's `advisory.log` holds `ERROR OSV batch query failed status=000`, and the post hook failed about 20 seconds after the pre hook ran. That is the first of the known limits in WSL1 above, seen this time on the Windows drive. The procedure calls for one more run, and it was green.
+- **An independent re-read.** A reviewer who did not write this section read it against the ten commits and the code. Five claims were wider than the code, and they were narrowed before the release.
+
 ---
 
 ## v3 (future)
