@@ -59,11 +59,11 @@ Claude Code + Codex CLI only — not Grok/Hermes yet. When a hook capability dif
 
 ## CI
 
-GitHub CI is not used: no test workflow is created or run on GitHub. CI runs separately, on the infrastructure Alex set up (the remote runners and test machines named under Testing). The reason is that GitHub's CI is too slow. This section mirrors the owner's global rule (2026-10-06), and a new project copies it into its own `AGENTS.md`. `scripts/ci/run-on-hosts.sh` runs a test set on those hosts, and `scripts/ci/release-checks.sh` runs the release checks that are not batteries. `.github/workflows/` holds `publish.yml` alone. It is not CI: it is the trusted-publishing job that puts a tagged release on npm.
+GitHub CI is not used: no test workflow is created or run on GitHub. CI runs separately, on the infrastructure Alex set up (the remote runners and test machines named under Testing). The reason is that GitHub's CI is too slow. This section mirrors the owner's global rule (2026-10-06), and a new project copies it into its own `AGENTS.md`. `scripts/ci/run-on-hosts.sh` runs a test set on those hosts, and `scripts/ci/release-checks.sh` runs the release checks that are not batteries. The repository has no `.github/workflows/`: publishing to npm is a release step on our own hosts too (Release procedure, step 10), so nothing runs on GitHub.
 
 ## Version SSoT
 
-`package.json` `version` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION`, the `version` in `rust/Cargo.toml` and the `safedeps-core` entry of `rust/Cargo.lock` must match it; the smoke test reads `package.json` to enforce all three, and the publish job checks the tag against `package.json`, `bin/safedeps`, `rust/Cargo.toml` and the built binary. Bump them together — a feature (e.g. effect/inert) is a minor bump, docs-only is a patch. A change that moves a verdict is a feature, and the bump changes the crate's source digest, so the binaries are built again.
+`package.json` `version` is the single source of truth. `bin/safedeps` `SAFEDEPS_VERSION`, the `version` in `rust/Cargo.toml` and the `safedeps-core` entry of `rust/Cargo.lock` must match it; the smoke test reads `package.json` to enforce all three, and the publish step (Release procedure, step 10) checks the tag against `package.json`, `bin/safedeps`, `rust/Cargo.toml` and the built binary. Bump them together — a feature (e.g. effect/inert) is a minor bump, docs-only is a patch. A change that moves a verdict is a feature, and the bump changes the crate's source digest, so the binaries are built again.
 
 ## Docs
 
@@ -77,7 +77,7 @@ GitHub CI is not used: no test workflow is created or run on GitHub. CI runs sep
 See the `skill-hook-authoring` skill for the full payload/decision schema. Essentials:
 
 - Read `tool_input.command` (single field). `permissionDecision` is `allow`/`deny`/`ask`. `updatedInput` rewrites the command but is **Claude-only** — gate it on engine.
-- The hooks are one binary, `safedeps-core`: `safedeps-core pre` is the PreToolUse hook (its advisory and deny lines still say "pre-guard") and `safedeps-core post` the PostToolUse hook. `chmod +x` the entry shim and commit it as mode `100755`; a missing exec bit is `Permission denied` in every session. The binary is not committed (the root `.gitignore` names `bin/native/`): a checkout builds its own with `scripts/build-core.sh`, which gives it its mode, and the publish job builds the package's. The installer builds the core and probes the entry before it registers anything (`prepareCore` and `probeEntry` in `scripts/install/install-safedeps-hooks.mjs`).
+- The hooks are one binary, `safedeps-core`: `safedeps-core pre` is the PreToolUse hook (its advisory and deny lines still say "pre-guard") and `safedeps-core post` the PostToolUse hook. `chmod +x` the entry shim and commit it as mode `100755`; a missing exec bit is `Permission denied` in every session. The binary is not committed (the root `.gitignore` names `bin/native/`): a checkout builds its own with `scripts/build-core.sh`, which gives it its mode, and the release builds the package's (Release procedure, step 10). The installer builds the core and probes the entry before it registers anything (`prepareCore` and `probeEntry` in `scripts/install/install-safedeps-hooks.mjs`).
 - **Registration has one channel: the installer.** `SKILL.md` does not declare hooks, and that is a decision, not an oversight. Claude does document skill-frontmatter hooks (`hooks: {PreToolUse: [{matcher, hooks: [{type, command}]}]}`), but they are **scoped to the skill's lifecycle — they only run while the skill is active**, and this gate has to judge every Bash call whether or not the skill was invoked. So the documented form cannot do this job, and a second declaration of a registration is a second thing to keep true. The smoke drift check deliberately fails only on the legacy `script:` shape that no schema reads; it does not forbid the documented shape, because blocking a working feature by grep is not the same as removing a dead one.
 - The registered command for both events is the entry shim `scripts/safedeps-hook-entry.sh pre|post`, not the binary directly. The shim turns a broken hook (a missing binary, one that cannot run, an abort or a signal, a mid-merge checkout) into an explained fail-closed exit 2. Each way the binary can fail to answer has its own sentence, and none of them runs anything in its place. It relies on one contract: **the core exits 0 on every designed path** (decisions travel as JSON) — never add an intentional non-zero exit to the core. It reads its platform from `BASH_VERSINFO`, never from `OSTYPE` or `HOSTTYPE`, which bash keeps from the environment (measured, bash 3.2.57 and 5.2.21). `scripts/test/hook-entry.sh` holds the shim's cases. The shim also answers for its own stops: bash exits 128 (3.2) or 254 (5, after about 15 seconds of retries) when it cannot start a process, both engines read either as non-blocking, so an EXIT trap turns any exit the shim did not choose into an explained exit 2. Every designed exit sets `answered=1` first, and the messages are written with builtins, because a report that needs a process cannot report that no process can start.
 - Hooks block clearly and explain; never a silent fallback.
@@ -225,7 +225,7 @@ any step is open.
      Linux root and on a Windows drive, at nice 0 (no `nice` around the
      battery). These four reach what WSL1 does differently, the cost of a
      process and the file metadata of a Windows drive. The binary is the
-     `linux-x64` one, built on a macOS host the way the publish job builds it
+     `linux-x64` one, built on a macOS host the way step 10 builds it
      (`scripts/build-core.sh --publish --target x86_64-unknown-linux-musl`)
      and checked in WSL1 with `stamp --check`. `smoke.sh`, `self-budget.sh`
      and `effect-trace-grid.sh` run from the `git archive` of the release
@@ -331,8 +331,8 @@ any step is open.
    own hosts is the test of this commit, and a red run there stops the release
    before this step.
 9. **Tag and publish the GitHub release.** An annotated tag `vX.Y.Z` on the
-   pushed commit, pushed (the push starts step 10's publish), and
-   `gh release create vX.Y.Z --notes-file <notes>`.
+   pushed commit, pushed, and `gh release create vX.Y.Z --notes-file <notes>`.
+   Pushing the tag starts nothing: step 10 publishes to npm by hand.
    The notes cover every user-visible change since the previous tag (derive them
    from `git log <previous-tag>..vX.Y.Z` and the ROADMAP section): security
    fixes first, each with what could get past before and how it is verified
@@ -341,69 +341,151 @@ any step is open.
    `false`, `false` and the tag, and `gh release view --json tagName` (the
    latest release) must name it. A draft is not a release: users and
    `releases/latest` never see it.
-10. **Publish to npm.** Pushing the tag in step 9 starts
-    `.github/workflows/publish.yml`, which publishes by trusted publishing:
-    npm accepts the job's GitHub OIDC token, so there is no npm token, no
-    login and no 2FA prompt, and npm attaches provenance. Watch it:
-    `gh run list --workflow publish.yml -L 1`, then `gh run watch <id>`. The
-    run must be green. Its two jobs:
-    - `build`, on a macOS runner, builds the three binaries from the tagged
-      source with `scripts/build-core.sh --publish` (`darwin-arm64`,
-      `darwin-x64` and `linux-x64`, the last a static musl build), checks
-      that it made three, and runs the `darwin-x64` binary under Rosetta
-      where the runner has it. It holds no OIDC token and installs the
-      toolchain, and `publish` runs no compiler.
-    - `publish` places the binaries, checks them against the build job's
-      digests, sets mode 755, runs the `linux-x64` one and checks its stamp
-      is a publish build's, and lists what `npm pack` would carry: each
-      binary with mode 755, no `rust/`, no dependency. It checks that npm is
-      at least 11.5.1, that the tag, `package.json`, `bin/safedeps` and
-      `rust/Cargo.toml` name the same version, runs `npm publish --provenance`,
-      then reads the release back from the registry: the version's
-      `_npmUser.trustedPublisher.id` must be `github`, its
-      `dist.attestations.provenance` must exist, and the published tarball's
-      file list must equal `npm pack --dry-run` of the tag. The registry can
-      answer 404 for minutes after a publish (v2.18.1, run 37265447356: five
-      minutes of 404 on the runner), so each try asks the version document and
-      the package document with a fresh query string and no-cache, for up to
-      20 minutes. A failed `npm publish` and a failed read-back print different
-      errors: the second says the version was published.
+10. **Publish to npm, from our own hosts.** No GitHub workflow publishes
+    (owner, 2026-10-12): GitHub runs no CI and no release job. npm's trusted
+    publishing and its provenance attestations need a cloud-hosted CI runner
+    (GitHub-hosted, GitLab.com shared or CircleCI cloud), and our hosts are
+    not one (npm Docs, "Trusted publishing for npm packages" and "Generating
+    provenance statements", read 2026-10-12). So a version published here
+    names the owner's npm account as its publisher and carries no provenance,
+    as 2.18.0 did; 2.18.1 to 2.20.0 came from the GitHub workflow this step
+    replaces and carry it. Do not pass `--provenance`.
 
-    **Not yet observed.** This workflow, with its build job and the three
-    binaries, has not run on GitHub; the `darwin-x64` binary has not run on
-    Intel hardware; and no registry read-back of a package that carries the
-    binaries has happened. Do not write any of these as verified before a run
-    has shown it.
+    The workflow's two jobs stay two machines. A remote macOS host (step 7)
+    builds, with the toolchain pinned below and nowhere else, and holds no npm
+    credential. The publishing machine, an Apple silicon Mac with the owner's
+    npm login, `jq` and npm, runs no compiler. Both start from one archive of
+    the tag, `rust/` included. Each block below runs as one bash script with
+    `set -euo pipefail` and `V=X.Y.Z`, so a failed line stops it.
 
-    Then confirm it yourself: `npm view @aldegad/safedeps version` is X.Y.Z, and
-    `npm view @aldegad/safedeps@X.Y.Z dist.attestations.provenance.predicateType`
-    prints an SLSA provenance URL. A failure at `npm publish` (ENEEDAUTH, 403)
-    means the trusted publisher on npmjs.com does not match this workflow; check
-    it against the setup below, then rerun. A failure in the read-back comes
-    after the publish: the version is already published and cannot be published
-    again. Read `npm view` first, then fix forward in the next patch. Do not fall back to publishing
-    from a laptop. That needs the owner's login and 2FA and ships without
-    provenance, so it is the owner's decision, and the ROADMAP section says so
-    if it happens.
+    - **Archive** (publishing machine, main checkout, after step 9):
+      `git archive --format=tar.gz -o "$R/safedeps-v$V.tar.gz" "v$V"`, where
+      `$R` is a new empty directory. Copy the archive to the build host and
+      to WSL1.
+    - **Build** (build host, in a new empty directory holding the archive):
 
-    **One-time setup on npmjs.com (owner, logged in).** Package
-    `@aldegad/safedeps` → Settings → Trusted publishing → GitHub Actions, with
-    the fields exactly as below (npm does not check them when they are saved,
-    and a mismatch first shows as a failed publish):
-    Organization or user `aldegad`, Repository `safedeps`, Workflow filename
-    `publish.yml`, Environment name `npm-publish`, and under Allowed actions
-    select `npm publish` (a connection created after 2026-09-03 allows only
-    `npm stage publish` until it is selected). A connection cannot be edited,
-    only deleted and created again, so renaming the workflow file or its
-    `environment` means doing this again. On GitHub, the `npm-publish`
-    environment allows deployments only from tags matching `v*` (Settings →
-    Environments → npm-publish → Deployment branches and tags; set on
-    2026-10-05). npm checks only the workflow filename and the environment, so
-    without that rule anyone with write access could run the workflow from
-    another ref and publish. After the
-    first green publish, Settings → Publishing access → "Require two-factor
-    authentication and disallow tokens" closes the token path; that and staged
-    publishing (`npm stage publish`, approved with 2FA) are the owner's choices.
+      ```bash
+      mkdir src && tar -xzf "safedeps-v$V.tar.gz" -C src && cd src
+      rustup toolchain install 1.94.0 --profile minimal --no-self-update \
+        --target aarch64-apple-darwin --target x86_64-apple-darwin --target x86_64-unknown-linux-musl
+      RUSTUP_TOOLCHAIN=1.94.0 scripts/build-core.sh --publish --sums native.sha256 \
+        --target aarch64-apple-darwin --target x86_64-apple-darwin --target x86_64-unknown-linux-musl
+      [ "$(wc -l < native.sha256 | tr -d ' ')" = 3 ]
+      if arch -x86_64 /usr/bin/true 2>/dev/null; then
+        arch -x86_64 ./bin/native/darwin-x64/safedeps-core version
+        arch -x86_64 ./bin/native/darwin-x64/safedeps-core stamp
+      else
+        echo "this host cannot run x86_64 programs: darwin-x64 was built and not run"
+      fi
+      COPYFILE_DISABLE=1 tar -czf ../native.tar.gz bin/native native.sha256
+      ```
+
+      `build-core.sh` runs the `darwin-arm64` binary and checks its stamp
+      against the tag's `rust/` before it places it. Bring `native.tar.gz` to
+      `$R` on the publishing machine and to WSL1.
+    - **Linux check** (WSL1, the distribution of step 5, in a new empty
+      directory holding both files). The package ships this binary, and no
+      other host runs it before the publish:
+
+      ```bash
+      mkdir pkg && tar -xzf "safedeps-v$V.tar.gz" -C pkg && tar -xzf native.tar.gz -C pkg && cd pkg
+      ( cd bin/native && sha256sum -c ../../native.sha256 )
+      core=./bin/native/linux-x64/safedeps-core
+      [ "$("$core" version)" = "safedeps-core $V" ]
+      stamp=$("$core" stamp); [ "${stamp%% *}" = publish ]
+      [ "$("$core" stamp --check 2>&1)" = ok ]
+      ```
+
+    - **Check the package** (publishing machine, in `$R`):
+
+      ```bash
+      mkdir pkg && tar -xzf "safedeps-v$V.tar.gz" -C pkg && tar -xzf native.tar.gz -C pkg && cd pkg
+      [ "$(wc -l < native.sha256 | tr -d ' ')" = 3 ]
+      ( cd bin/native && shasum -a 256 -c ../../native.sha256 )
+      chmod 755 bin/native/*/safedeps-core
+      core=./bin/native/darwin-arm64/safedeps-core
+      stamp=$("$core" stamp); [ "${stamp%% *}" = publish ]
+      [ "$("$core" stamp --check 2>&1)" = ok ]
+      [ "$(jq -r .version package.json)" = "$V" ]
+      [ "$(./bin/safedeps --json version | jq -r .version)" = "$V" ]
+      [ "$(sed -n 's/^version = "\(.*\)"$/\1/p' rust/Cargo.toml | head -n 1)" = "$V" ]
+      [ "$("$core" version)" = "safedeps-core $V" ]
+      [ "$(jq '(.dependencies // {}) + (.optionalDependencies // {}) + (.peerDependencies // {}) | length' package.json)" = 0 ]
+      npm pack --dry-run --json > ../pack.json
+      for p in darwin-arm64 darwin-x64 linux-x64; do
+        [ "$(jq -r --arg f "bin/native/$p/safedeps-core" '[.[0].files[] | select(.path == $f) | .mode] | if length == 1 then .[0] else "none" end' ../pack.json)" = 493 ]
+      done
+      [ "$(jq '.[0].files | map(.path) | any(startswith("rust/"))' ../pack.json)" = false ]
+      [ "$(npm config get provenance)" = false ]
+      ```
+
+    - **Publish** (publishing machine, in `$R/pkg`, by hand, because npm asks
+      for the second factor). `npm whoami` must print an account that
+      `npm owner ls @aldegad/safedeps` lists; if it prints none, `npm login`
+      first (a browser login by default). Then `npm publish`, and answer
+      npm's one-time password challenge. Nothing is installed: the package
+      has no dependencies and no lockfile. What is packed is this tree, the
+      tag's files and the binaries the build made.
+    - **Read the release back** (publishing machine, in `$R/pkg`). The
+      registry can answer 404 for minutes after a publish (v2.18.1: five
+      minutes of 404), so each try asks the version document and the package
+      document with a fresh query string and no-cache, for up to 20 minutes:
+
+      ```bash
+      name=@aldegad/safedeps base=https://registry.npmjs.org/@aldegad%2fsafedeps
+      sums="$PWD/native.sha256"
+      unconfirmed() { echo "$name@$V was published, but the read-back failed: $1. Do not publish it again; read 'npm view $name@$V' and fix forward in the next patch." >&2; exit 1; }
+      meta="" deadline=$(( $(date +%s) + 1200 )) try=0
+      while [ -z "$meta" ]; do
+        try=$((try + 1)); fresh="t=$(date +%s)-$try-$RANDOM"
+        code=$(curl -sS -o ../version.json -w '%{http_code}' -H 'Cache-Control: no-cache' "$base/$V?$fresh" || true)
+        if [ "$code" = 200 ] && jq -e --arg v "$V" '.version == $v' ../version.json >/dev/null; then meta=$(cat ../version.json); break; fi
+        pcode=$(curl -sS -o ../document.json -w '%{http_code}' -H 'Cache-Control: no-cache' "$base?$fresh" || true)
+        if [ "$pcode" = 200 ] && jq -e --arg v "$V" '.versions[$v]' ../document.json >/dev/null; then meta=$(jq --arg v "$V" '.versions[$v]' ../document.json); break; fi
+        echo "try $try: version document $code, package document $pcode without $V"
+        [ "$(date +%s)" -lt "$deadline" ] || unconfirmed "the registry did not name $V for 20 minutes"
+        sleep 20
+      done
+      jq -r '"publisher: \(._npmUser.name // "none"), trusted publisher: \(._npmUser.trustedPublisher.id // "none"), provenance: \(.dist.attestations.provenance.predicateType // "none")"' <<<"$meta"
+      [ "$(jq -r '._npmUser.name // empty' <<<"$meta")" = "$(npm whoami)" ] || unconfirmed "the registry names another publisher"
+      npm pack --dry-run --json | jq -r '.[0].files[].path' | sort > ../local.txt || unconfirmed "npm pack --dry-run of this tree did not list its files"
+      url=$(jq -r '.dist.tarball // empty' <<<"$meta"); [ -n "$url" ] || unconfirmed "the registry names no dist.tarball"
+      curl -sSfL --retry 10 --retry-delay 15 --retry-all-errors -o ../published.tgz "$url" || unconfirmed "$url did not download"
+      tar -tzf ../published.tgz | sed 's#^package/##' | sort > ../published.txt || unconfirmed "the tarball did not list as a gzip tar"
+      diff -u ../local.txt ../published.txt || unconfirmed "the published file list differs from npm pack --dry-run of this tree"
+      for p in darwin-arm64 darwin-x64 linux-x64; do
+        tar -tvzf ../published.tgz "package/bin/native/$p/safedeps-core" | grep -q '^-rwxr-xr-x' || unconfirmed "bin/native/$p/safedeps-core is not mode 755 in the tarball"
+      done
+      mkdir ../published && tar -xzf ../published.tgz -C ../published || unconfirmed "the tarball did not unpack"
+      ( cd ../published/package/bin/native && shasum -a 256 -c "$sums" ) || unconfirmed "a published binary is not the bytes the build made"
+      [ "$(../published/package/bin/native/darwin-arm64/safedeps-core version)" = "safedeps-core $V" ] || unconfirmed "the published darwin-arm64 binary does not say safedeps-core $V"
+      ```
+
+    Then confirm it by hand: `npm view @aldegad/safedeps version` is X.Y.Z.
+    A failure at `npm publish` is a login, second-factor or permission
+    failure. Read `npm view @aldegad/safedeps@X.Y.Z version` before trying
+    again, because a publish that failed late can still have published. A
+    failure in the read-back comes after the publish: the version is
+    published and cannot be published again, so fix forward in the next
+    patch.
+
+    **Not yet run.** No version has been built and published by this step,
+    the `darwin-x64` binary has not run on Intel hardware, and no version
+    published this way has been read back. Do not write any of these as
+    verified before a run has shown it.
+
+    **Publishing access is the owner's choice** (npmjs.com, the package's
+    Settings → Publishing access). Under "Require two-factor authentication
+    and disallow tokens", only an interactive publish with the second factor
+    works, which is this step. A granular access token with "Bypass 2FA"
+    publishes only under the default setting, and npm removes direct
+    publishing with such a token in January 2027 (npm Docs, "About access
+    tokens"), so this step uses none. The trusted publisher on npmjs.com that
+    names `publish.yml` and the `npm-publish` environment, and that
+    environment on GitHub, no longer have a workflow. While they stay, a
+    workflow file of that name in this repository, run from a `v*` tag, could
+    still publish with an OIDC token. Deleting them is the owner's choice; a
+    trusted publisher connection can be deleted, not edited.
 11. **Close the loop.** Reply on every GitHub issue the release fixes with the
     fix commit and the release link, and close it.
 

@@ -26,7 +26,7 @@ cd "$(npm root -g)/@aldegad/safedeps" && node scripts/install/install-safedeps-h
 
 > 훅은 Rust 로 쓴 프로그램 하나, `safedeps-core` 입니다. npm 패키지는 macOS(Apple silicon 과 Intel)와 Linux x64 용으로 빌드한 것을 담고 있고, 설치기가 아무것도 등록하기 전에 그것을 한 번 실행해 봅니다. 체크아웃에서는 cargo 로 직접 빌드합니다. 바이너리가 어디서 오는지, 없거나 소스와 어긋났을 때 무엇이 보이는지는 [Where the hook binary comes from](#where-the-hook-binary-comes-from) 에, v2.19.0 에서 달라진 점은 [What Changed in v2.19.0](#what-changed-in-v2190) 에 있습니다.
 
-![safedeps withholds a vulnerable install, then clears the patched version](assets/demo.gif)
+![safedeps가 취약한 설치를 보류한 뒤 패치된 버전을 승인합니다](assets/demo.gif)
 
 ## Distribution Model
 
@@ -324,7 +324,7 @@ sudo apt-get install jq
 훅은 Rust 프로그램 하나, `safedeps-core` 입니다. 엔트리 셔틀이 `bin/native/<os>-<arch>/safedeps-core` 를 실행합니다. 바이너리는 git 에 커밋하지 않으므로 둘 중 한 곳에서 옵니다.
 
 - **체크아웃이 빌드합니다.** `scripts/build-core.sh` 가 `rust/` 에 `cargo build --release --locked --offline` 을 돌려 이 머신용 결과를 제자리에 놓습니다. 크레이트에 의존성이 없으므로 오프라인 빌드에는 툴체인만 있으면 됩니다. 설치기가 이 빌드를 대신 돌리고, 이어서 엔트리를 판정하지 않는 호출 하나로 실행해 봅니다. 빌드나 그 실행이 실패하면 설치기는 이유를 말하고 멈추며 아무것도 등록하지 않습니다.
-- **npm 패키지가 빌드된 것을 담고 있습니다.** 게시 워크플로가 `darwin-arm64`, `darwin-x64`, `linux-x64`(정적 musl 빌드) 세 바이너리를 빌드하고, 패키지는 그 옆에 `rust/` 디렉터리 없이 그것들을 담습니다. 설치기는 엔트리를 한 번 실행해 볼 뿐입니다. 다른 플랫폼에는 바이너리가 없고, 엔트리가 그렇게 말합니다.
+- **npm 패키지는 빌드된 상태로 이를 포함합니다.** 릴리스는 `darwin-arm64`, `darwin-x64`, `linux-x64`(정적 musl 빌드) 세 가지 바이너리를 빌드하며, 패키지는 이 바이너리들을 담고 있고 그 옆에 `rust/` 디렉터리는 없습니다. 설치 프로그램은 엔트리를 한 번만 실행합니다. 그 외 플랫폼에는 바이너리가 없으며, 엔트리가 그 사실을 알려 줍니다.
 
 바이너리는 자기가 빌드된 소스의 스탬프를 지닙니다. 체크아웃에서 훅이 시작할 때 바이너리는 자기 옆의 `rust/` 디렉터리를 해시해 비교합니다. `git pull`, 브랜치 전환, `rust/` 편집 뒤에는 바이너리가 더 이상 맞지 않고, 다시 빌드할 때까지 다음이 보입니다.
 
