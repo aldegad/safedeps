@@ -1,6 +1,6 @@
 //! The post hook's script, lockfile-change, and new-bin heuristics.
 use super::{jv, sh, snapshot::{self, Store}, trace, report::cat};
-use crate::{ere::Regex, json::Value, sha256};
+use crate::{ere::Regex, json::Value, outcome::{Action, Form, Outcome}, sha256, state};
 use std::{fs, io::{self, Read, Seek, SeekFrom}, path::Path};
 type W = Vec<u8>;
 
@@ -128,7 +128,9 @@ fn native_file(path: &Path) -> io::Result<bool> {
         return Ok(offset >= 0x40 && header_at::<4>(&mut file, offset)? == *b"PE\0\0");
     }
     // Apple mach-o/fat.h: 32/64-bit architecture tables. CAFEBABE alone also
-    // names Java bytecode, so require a table and a Mach-O header in its first slice.
+    // names Java bytecode, so require a table and a Mach-O header in any slice.
+    // https://github.com/apple-oss-distributions/cctools/blob/main/include/mach-o/fat.h
+    // (verified 2026-10-13).
     let (little, wide) = match magic {
         [0xca,0xfe,0xba,0xbe] => (false, false),
         [0xbe,0xba,0xfe,0xca] => (true, false),
@@ -138,17 +140,24 @@ fn native_file(path: &Path) -> io::Result<bool> {
     };
     let bytes = header_at(&mut file, 4)?;
     let count = if little { u32::from_le_bytes(bytes) } else { u32::from_be_bytes(bytes) } as u64;
-    let table_end = 8 + count * if wide { 32 } else { 20 };
+    let stride = if wide { 32 } else { 20 };
+    let table_end = 8 + count * stride;
     let len = file.metadata()?.len();
     if count == 0 || table_end > len { return Ok(false) }
-    let offset = if wide {
-        let bytes = header_at(&mut file, 16)?;
-        if little { u64::from_le_bytes(bytes) } else { u64::from_be_bytes(bytes) }
-    } else {
-        let bytes = header_at(&mut file, 16)?;
-        (if little { u32::from_le_bytes(bytes) } else { u32::from_be_bytes(bytes) }) as u64
-    };
-    Ok(offset >= table_end && offset <= len.saturating_sub(4) && mach_magic(header_at(&mut file, offset)?))
+    for index in 0..count {
+        let start = 16 + index * stride;
+        let offset = if wide {
+            let bytes = header_at(&mut file, start)?;
+            if little { u64::from_le_bytes(bytes) } else { u64::from_be_bytes(bytes) }
+        } else {
+            let bytes = header_at(&mut file, start)?;
+            (if little { u32::from_le_bytes(bytes) } else { u32::from_be_bytes(bytes) }) as u64
+        };
+        if offset >= table_end && offset <= len.saturating_sub(4) && mach_magic(header_at(&mut file, offset)?) {
+            return Ok(true)
+        }
+    }
+    Ok(false)
 }
 
 pub fn binaries(store: &Store, reasons: &mut Vec<W>) {
@@ -160,8 +169,11 @@ pub fn binaries(store: &Store, reasons: &mut Vec<W>) {
     for name in names {
         let path = dir.join(sh::p(&name));
         if !sh::is_file(&path) { continue }
-        if native_file(&path).is_ok_and(|native| native) {
-            reasons.push(cat(&[b"Native binary '", &name, b"' found in node_modules/.bin"]));
+        match native_file(&path) {
+            Ok(true) => reasons.push(cat(&[b"Native binary '", &name, b"' found in node_modules/.bin"])),
+            Ok(false) => (),
+            Err(error) => state::log_advisory(&store.home, &cat(&[b"post-verify: ",
+                &Outcome::Io(Err(error)).describe(Action::NativeInspection(&path), Form::Action)])),
         }
     }
 }

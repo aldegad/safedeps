@@ -102,3 +102,68 @@ fn universal_mach_o_requires_a_mach_o_slice_and_pe_requires_its_signature() {
     f.bin("windows", &pe);
     assert!(f.reasons().is_empty());
 }
+
+#[test]
+fn universal_mach_o_with_junk_first_slice_still_detects_native() {
+    // Two slices, as in a universal executable with a damaged x86_64 header
+    // and an intact arm64 slice. The host's selected slice need not be first.
+    for (magic, little, wide) in [
+        ([0xca,0xfe,0xba,0xbe], false, false), ([0xbe,0xba,0xfe,0xca], true, false),
+        ([0xca,0xfe,0xba,0xbf], false, true), ([0xbf,0xba,0xfe,0xca], true, true),
+    ] {
+        let f = Fixture::new();
+        let mut bytes = [0u8; 160];
+        bytes[..4].copy_from_slice(&magic);
+        bytes[4..8].copy_from_slice(&if little { 2u32.to_le_bytes() } else { 2u32.to_be_bytes() });
+        let stride = if wide { 32 } else { 20 };
+        for (index, offset) in [96u64, 128].into_iter().enumerate() {
+            let start = 16 + index * stride;
+            if wide {
+                bytes[start..start+8].copy_from_slice(&if little { offset.to_le_bytes() } else { offset.to_be_bytes() });
+            } else {
+                bytes[start..start+4].copy_from_slice(&if little { (offset as u32).to_le_bytes() } else { (offset as u32).to_be_bytes() });
+            }
+        }
+        bytes[128..132].copy_from_slice(&[0xcf,0xfa,0xed,0xfe]);
+        f.bin("fat-junk-first", &bytes);
+        f.native("fat-junk-first");
+
+        // An out-of-file first offset cannot hide a later native slice either.
+        bytes[16..16+if wide { 8 } else { 4 }].fill(0xff);
+        f.bin("fat-junk-first", &bytes);
+        f.native("fat-junk-first");
+
+        // A table alone is insufficient, including CAFEBABE shared with Java.
+        bytes[128..132].fill(0);
+        f.bin("fat-junk-first", &bytes);
+        assert!(f.reasons().is_empty());
+    }
+}
+
+#[test]
+fn failed_native_header_read_is_logged() {
+    let f = Fixture::new();
+    f.bin("short-header", b"\x7fEL");
+    assert!(f.reasons().is_empty());
+    let log = fs::read_to_string(f.store.home.join("advisory.log")).unwrap();
+    assert_eq!(log.lines().count(), 1);
+    let path = f.store.project.join("node_modules/.bin/short-header");
+    assert_eq!(log.split_once('\t').unwrap().1,
+        format!("post-verify: native binary inspection of {} returned an error without an OS code\n", path.display()));
+}
+
+#[test]
+fn unreadable_native_bin_is_logged() {
+    let f = Fixture::new();
+    f.bin("execute-only", b"\x7fELF");
+    let path = f.store.project.join("node_modules/.bin/execute-only");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o100)).unwrap();
+    // Require an observed permission failure, not just a successful chmod.
+    let error = fs::File::open(&path).expect_err("fixture requires enforced file read permissions");
+    assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    assert!(f.reasons().is_empty());
+    let log = fs::read_to_string(f.store.home.join("advisory.log")).unwrap();
+    assert_eq!(log.lines().count(), 1);
+    assert_eq!(log.split_once('\t').unwrap().1,
+        format!("post-verify: native binary inspection of {} returned OS error {}\n", path.display(), error.raw_os_error().unwrap()));
+}
