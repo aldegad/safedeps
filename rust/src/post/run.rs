@@ -4,7 +4,7 @@ use super::{call::{Call, Record}, effect, heuristics, journal::Journal, jv,
     npm::{self, Npm}, report::{self, Report, cat}, rollback::Rollback, sh, snapshot,
     trace::{self, Install}};
 use crate::{os, state};
-use std::{fs, io::Write};
+use std::{fs, io::Write, time::Instant};
 type W = Vec<u8>;
 
 fn rollback(call: &mut Call, journal: &Journal, trace: &mut Install, report: &mut Report,
@@ -88,7 +88,7 @@ fn runner_left_npm_untouched(call: &Call, trace: &Install) -> bool {
         && !npm::meta_true(&call.store.meta(), "ignore_scripts_injected")
 }
 
-fn judge(call: &mut Call, journal: &Journal, input: &[u8]) -> Result<Option<W>, i32> {
+fn judge(call: &mut Call, journal: &Journal, input: &[u8], post_started: Instant) -> Result<Option<W>, i32> {
     if call.record != Record::Install { return backstop(call, journal, input) }
     let mut trace = Install::settle(&call.store.project, &call.store.home, &call.current, &call.command);
     if runner_left_npm_untouched(call, &trace) { call.store.remove(); return Ok(None) }
@@ -103,7 +103,7 @@ fn judge(call: &mut Call, journal: &Journal, input: &[u8]) -> Result<Option<W>, 
     heuristics::lockfile(&call.store, &mut reasons);
     npm.record(&call.store, &call.current, &trace, &mut report);
     npm.sources(&call.store, &call.current, input, call.codex, &mut reasons, &mut confirm);
-    heuristics::binaries(&call.store, &mut reasons);
+    if reasons.is_empty() { heuristics::binaries(&call.store, &mut reasons, post_started); }
     if !reasons.is_empty() {
         call.store.discard();
         let mut target = snapshot::confirmed(&call.store.home, &call.store.hash).map_err(|_| 0)?;
@@ -121,14 +121,14 @@ fn judge(call: &mut Call, journal: &Journal, input: &[u8]) -> Result<Option<W>, 
     Ok(Some(cat(&[b"safedeps: this install was not rolled back.\n", &report.lines.join(&b'\n')])))
 }
 
-pub fn main(input: &[u8]) -> i32 {
+pub fn main(input: &[u8], post_started: Instant) -> i32 {
     os::set_umask(0o077);
     let home = state::guard_dir();
     if state::ensure_dirs(&home).is_err() { return 1 }
     let journal = Journal::new(&home);
     let unfinished = journal.unfinished();
     let result = Call::take(&home, input).and_then(|call| match call {
-        Some(mut call) => judge(&mut call, &journal, input), None => Ok(None),
+        Some(mut call) => judge(&mut call, &journal, input, post_started), None => Ok(None),
     });
     let (rc, message) = match result { Ok(m) => (0,m), Err(rc) => (rc,None) };
     let message = match (unfinished.is_empty(), message) {

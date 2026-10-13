@@ -1392,6 +1392,8 @@ fi
   || fail "a script-only bin addition preserves new and existing dependencies"
 pass "a linked shebang CLI is kept without rolling back existing dependencies"
 
+python3 "${ROOT_DIR}/scripts/test/lib/native-inspection.py" "${NATIVE_TEST_CORE}" || fail "native inspection preserves scripts, bounds blocked reads and respects prior rejection"
+
 # `npm install --no-save <pkg>` in a directory without package.json writes
 # node_modules (with npm's hidden lockfile) and nothing else. That is still an
 # npm project to the rollback, and its node_modules is removed.

@@ -1,11 +1,10 @@
 //! The post hook's script, lockfile-change, and new-bin heuristics.
 use super::{jv, sh, snapshot::{self, Store}, trace, report::cat};
-use crate::{ere::Regex, json::Value, outcome::{Action, Form, Outcome}, sha256, state};
-use std::{fs, io::{self, Read, Seek, SeekFrom}, path::Path};
+use crate::{ere::Regex, json::Value, sha256};
+use std::{fs, path::Path, time::Instant};
 type W = Vec<u8>;
 
-#[cfg(test)]
-mod tests;
+pub(super) mod native;
 
 fn raw_field(st: &jv::Stream, keys: &[&str], default: &[u8]) -> Result<W, i32> {
     let (lines, rc) = jv::each(st, |v| {
@@ -105,75 +104,9 @@ pub fn lockfile(store: &Store, reasons: &mut Vec<W>) {
     let count = match (fs::read(old), fs::read(now)) { (Ok(a),Ok(b)) => added_resolved(&a,&b), _ => 0 };
     if count > 50 { reasons.push(cat(&[b"Unusually large number of new dependencies added: ", count.to_string().as_bytes()])); }
 }
-fn header_at<const N: usize>(file: &mut fs::File, offset: u64) -> io::Result<[u8; N]> {
-    let mut bytes = [0; N];
-    file.seek(SeekFrom::Start(offset))?;
-    file.read_exact(&mut bytes)?;
-    Ok(bytes)
-}
-fn mach_magic(magic: [u8; 4]) -> bool {
-    matches!(magic, [0xfe,0xed,0xfa,0xce] | [0xce,0xfa,0xed,0xfe]
-        | [0xfe,0xed,0xfa,0xcf] | [0xcf,0xfa,0xed,0xfe])
-}
-fn native_file(path: &Path) -> io::Result<bool> {
-    // Open follows .bin symlinks, as npm's command invocation does. Read only
-    // fixed-size headers; neither the candidate nor a classifier is executed.
-    let mut file = fs::File::open(path)?;
-    let magic = header_at::<4>(&mut file, 0)?;
-    if magic.starts_with(b"#!") { return Ok(false) }
-    if magic == *b"\x7fELF" || mach_magic(magic) { return Ok(true) }
-    // PE's DOS header points to its signature (Microsoft PE/COFF spec).
-    if magic.starts_with(b"MZ") {
-        let offset = u32::from_le_bytes(header_at(&mut file, 0x3c)?) as u64;
-        return Ok(offset >= 0x40 && header_at::<4>(&mut file, offset)? == *b"PE\0\0");
-    }
-    // Apple mach-o/fat.h: 32/64-bit architecture tables. CAFEBABE alone also
-    // names Java bytecode, so require a table and a Mach-O header in any slice.
-    // https://github.com/apple-oss-distributions/cctools/blob/main/include/mach-o/fat.h
-    // (verified 2026-10-13).
-    let (little, wide) = match magic {
-        [0xca,0xfe,0xba,0xbe] => (false, false),
-        [0xbe,0xba,0xfe,0xca] => (true, false),
-        [0xca,0xfe,0xba,0xbf] => (false, true),
-        [0xbf,0xba,0xfe,0xca] => (true, true),
-        _ => return Ok(false),
-    };
-    let bytes = header_at(&mut file, 4)?;
-    let count = if little { u32::from_le_bytes(bytes) } else { u32::from_be_bytes(bytes) } as u64;
-    let stride = if wide { 32 } else { 20 };
-    let table_end = 8 + count * stride;
-    let len = file.metadata()?.len();
-    if count == 0 || table_end > len { return Ok(false) }
-    for index in 0..count {
-        let start = 16 + index * stride;
-        let offset = if wide {
-            let bytes = header_at(&mut file, start)?;
-            if little { u64::from_le_bytes(bytes) } else { u64::from_be_bytes(bytes) }
-        } else {
-            let bytes = header_at(&mut file, start)?;
-            (if little { u32::from_le_bytes(bytes) } else { u32::from_be_bytes(bytes) }) as u64
-        };
-        if offset >= table_end && offset <= len.saturating_sub(4) && mach_magic(header_at(&mut file, offset)?) {
-            return Ok(true)
-        }
-    }
-    Ok(false)
-}
-
-pub fn binaries(store: &Store, reasons: &mut Vec<W>) {
-    let dir = store.project.join("node_modules/.bin");
-    if !sh::is_dir(&dir) { return }
-    let old = store.path(&store.id, b"bins.list");
-    let old = if sh::is_file(&old) { snapshot::sorted_lines(&old) } else { Vec::new() };
-    let names: Vec<_> = trace::listing(&dir).into_iter().filter(|n| !old.contains(n)).take(20).collect();
-    for name in names {
-        let path = dir.join(sh::p(&name));
-        if !sh::is_file(&path) { continue }
-        match native_file(&path) {
-            Ok(true) => reasons.push(cat(&[b"Native binary '", &name, b"' found in node_modules/.bin"])),
-            Ok(false) => (),
-            Err(error) => state::log_advisory(&store.home, &cat(&[b"post-verify: ",
-                &Outcome::Io(Err(error)).describe(Action::NativeInspection(&path), Form::Action)])),
-        }
-    }
+/// Keep the native heuristic out of an already rejected install's path.
+pub fn binaries(store: &Store, reasons: &mut Vec<W>, post_started: Instant) {
+    if !reasons.is_empty() { return }
+    let result = native::supervise::inspect(store, post_started);
+    if let Some(reason) = result.reason() { reasons.push(reason); }
 }

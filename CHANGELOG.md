@@ -4,4 +4,4 @@
 
 ## Unreleased
 
-- Replaced external `file` command execution with direct header signature checks for ELF (including shared objects), Mach-O (including shared libraries and universal binaries), and Windows PE across up to 20 newly added regular files and symlink targets in `node_modules/.bin/` against the snapshot, removing the optional `file` prerequisite. This eliminates false-positive native binary detections on shebang scripts and ordinary text files containing binary keywords without executing files or performing full binary execution validation.
+- Replaced external `file` command with a supervised core child reading coherent image headers directly (ignoring scripts and text) across up to 20 sorted `.bin` targets and symlinks for ELF, Mach-O, and PE images. Candidates are strictly read without execution, offering no loadability or safety guarantee; inspection inability triggers fail-closed rollback. Core processes now run `npm`, `curl`, `gzip`, judgment, and native-inspection child, removing `file`.
