@@ -12,7 +12,7 @@ pub enum Outcome {
 }
 
 #[derive(Clone, Copy)]
-pub enum Action<'a> { Npm, NpmConfig, NpmQuery, NpmRebuild, Judgment, Walk(&'a Path), Copy, Removal }
+pub enum Action<'a> { Npm, NpmConfig, NpmQuery, NpmRebuild, Judgment, Walk(&'a Path), NativeInspection(&'a Path), Copy, Removal }
 
 #[derive(Clone, Copy)]
 pub enum Form { Action, Detail, Judgment, Within(u64) }
@@ -30,6 +30,7 @@ impl Outcome {
             Action::NpmRebuild=>b"npm rebuild", Action::Judgment=>b"judgment",
             Action::Copy=>b"copy", Action::Removal=>b"removal",
             Action::Walk(path)=>{named=[b"the walk of ".as_slice(),path.as_os_str().as_bytes()].concat();&named},
+            Action::NativeInspection(path)=>{named=[b"native binary inspection of ".as_slice(),path.as_os_str().as_bytes()].concat();&named},
         };
         let cat=|parts: &[&[u8]]| parts.concat();
         let error=|error: &io::Error| match error.raw_os_error() {

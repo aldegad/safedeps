@@ -1364,6 +1364,45 @@ EOF
   pass "a rollback that cannot remove node_modules says so and gives no command"
 fi
 
+# A newly linked shebang CLI is not a native binary. The post hook must keep
+# both its target and the dependencies that preceded this install.
+script_bin_wt="${tmp_root}/script-bin-wt"
+mkdir -p "${script_bin_wt}/node_modules/fixture-child"
+printf '{"name":"inert-project","dependencies":{"fixture-child":"1.0.0"}}\n' > "${script_bin_wt}/package.json"
+jq --slurpfile manifest "${script_bin_wt}/package.json" \
+  '.packages[""] = $manifest[0] | del(.packages["node_modules/fixture-parent"])' \
+  "${inert_project}/package-lock.json" > "${script_bin_wt}/package-lock.json"
+jq 'del(.packages[""])' "${script_bin_wt}/package-lock.json" > "${script_bin_wt}/node_modules/.package-lock.json"
+printf '{"name":"fixture-child","version":"1.0.0"}\n' > "${script_bin_wt}/node_modules/fixture-child/package.json"
+pre_hook > /dev/null <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${script_bin_wt}","tool_use_id":"script-bin-install"}
+EOF
+mkdir -p "${script_bin_wt}/node_modules/.bin" "${script_bin_wt}/node_modules/fixture-parent/dist"
+printf '{"name":"inert-project","dependencies":{"fixture-child":"1.0.0","fixture-parent":"1.0.0"}}\n' > "${script_bin_wt}/package.json"
+printf '{"name":"fixture-parent","version":"1.0.0","dependencies":{"fixture-child":"1.0.0"},"bin":{"fixture-cli":"dist/cli.js"}}\n' > "${script_bin_wt}/node_modules/fixture-parent/package.json"
+jq --slurpfile manifest "${script_bin_wt}/package.json" \
+  '.packages[""] = $manifest[0] | .packages["node_modules/fixture-parent"].bin = {"fixture-cli":"dist/cli.js"}' \
+  "${inert_project}/package-lock.json" > "${script_bin_wt}/package-lock.json"
+printf '#!/usr/bin/env node\nconsole.log("fixture");\n' > "${script_bin_wt}/node_modules/fixture-parent/dist/cli.js"
+chmod +x "${script_bin_wt}/node_modules/fixture-parent/dist/cli.js"
+ln -s ../fixture-parent/dist/cli.js "${script_bin_wt}/node_modules/.bin/fixture-cli"
+jq 'del(.packages[""])' "${script_bin_wt}/package-lock.json" > "${script_bin_wt}/node_modules/.package-lock.json"
+script_bin_post_file=$(
+  PATH="${stub_bin}:${PATH}" post_hook <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${script_bin_wt}","tool_use_id":"script-bin-install"}
+EOF
+)
+if grep -Eq 'Native binary|suspicious dependency change detected' "${script_bin_post_file}"; then
+  fail "a linked shebang CLI does not trigger native-binary rollback"
+fi
+hook_response_parse "${script_bin_post_file}" quiet || fail "the coherent script-bin fixture confirms without rebuild warnings"
+[[ -L "${script_bin_wt}/node_modules/.bin/fixture-cli" && -f "${script_bin_wt}/node_modules/fixture-parent/dist/cli.js" \
+  && -f "${script_bin_wt}/node_modules/fixture-child/package.json" ]] \
+  || fail "a script-only bin addition preserves new and existing dependencies"
+pass "a linked shebang CLI is kept without rolling back existing dependencies"
+
+python3 "${ROOT_DIR}/scripts/test/lib/native-inspection.py" "${NATIVE_TEST_CORE}" || fail "native inspection preserves scripts, bounds blocked reads and respects prior rejection"
+
 # `npm install --no-save <pkg>` in a directory without package.json writes
 # node_modules (with npm's hidden lockfile) and nothing else. That is still an
 # npm project to the rollback, and its node_modules is removed.

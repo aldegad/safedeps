@@ -1,9 +1,10 @@
-//! The post hook's script, lockfile-change, and new-bin heuristics. `file`
-//! retains the host's classifier; it receives only an inspected path as argv.
+//! The post hook's script, lockfile-change, and new-bin heuristics.
 use super::{jv, sh, snapshot::{self, Store}, trace, report::cat};
 use crate::{ere::Regex, json::Value, sha256};
-use std::{fs, path::Path, process::{Command, Stdio}};
+use std::{fs, path::Path, time::Instant};
 type W = Vec<u8>;
+
+pub(super) mod native;
 
 fn raw_field(st: &jv::Stream, keys: &[&str], default: &[u8]) -> Result<W, i32> {
     let (lines, rc) = jv::each(st, |v| {
@@ -103,21 +104,9 @@ pub fn lockfile(store: &Store, reasons: &mut Vec<W>) {
     let count = match (fs::read(old), fs::read(now)) { (Ok(a),Ok(b)) => added_resolved(&a,&b), _ => 0 };
     if count > 50 { reasons.push(cat(&[b"Unusually large number of new dependencies added: ", count.to_string().as_bytes()])); }
 }
-pub fn binaries(store: &Store, reasons: &mut Vec<W>) {
-    let dir = store.project.join("node_modules/.bin");
-    if !sh::is_dir(&dir) { return }
-    let old = store.path(&store.id, b"bins.list");
-    let old = if sh::is_file(&old) { snapshot::sorted_lines(&old) } else { Vec::new() };
-    let names: Vec<_> = trace::listing(&dir).into_iter().filter(|n| !old.contains(n)).take(20).collect();
-    // The original `for bin in ${new_bins}` splits names on shell IFS.
-    let names = names.join(&b'\n');
-    let pattern = Regex::new("(executable|shared object|Mach-O|ELF)", true).unwrap();
-    for name in names.split(|b| matches!(b, b' ' | b'\t' | b'\n')).filter(|s| !s.is_empty()) {
-        let path = dir.join(sh::p(name));
-        if !sh::is_file(&path) { continue }
-        let answer = Command::new("file").arg(&path).stdin(Stdio::null()).stderr(Stdio::null()).output();
-        if answer.is_ok_and(|o| o.status.success() && pattern.is_match(&o.stdout)) {
-            reasons.push(cat(&[b"Native binary '", name, b"' found in node_modules/.bin"]));
-        }
-    }
+/// Keep the native heuristic out of an already rejected install's path.
+pub fn binaries(store: &Store, reasons: &mut Vec<W>, post_started: Instant) {
+    if !reasons.is_empty() { return }
+    let result = native::supervise::inspect(store, post_started);
+    if let Some(reason) = result.reason() { reasons.push(reason); }
 }

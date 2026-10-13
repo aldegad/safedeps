@@ -464,6 +464,7 @@ fn main() {
             Some(input) => post::main(&input),
             None => 2,
         },
+        Some("native-inspect") => post::native_child(),
         Some("post-probe") => match read_stdin() {
             Some(input) => post::probe(&input),
             None => 2,

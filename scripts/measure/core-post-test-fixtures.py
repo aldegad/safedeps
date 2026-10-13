@@ -188,9 +188,15 @@ def prepare(a):
     for row in anchors:
         if row['count']!=1:raise RuntimeError(row['fault']+': injection anchor must occur exactly once')
     rows = {}
+    def source_only(directory, names):
+        excluded = set(names) & {'.git', '.kuma', 'target', '__pycache__'}
+        # Only the built cores are omitted; source domains can be named native.
+        if Path(directory) == tree/'bin':
+            excluded.add('native')
+        return excluded
     for name, (relative, old, new) in edits.items():
         target = out/name
-        shutil.copytree(tree, target, ignore=shutil.ignore_patterns('.git','.kuma','target','native','__pycache__'))
+        shutil.copytree(tree, target, ignore=source_only)
         file = target/relative; before = file.read_text()
         if before.count(old) != 1:
             raise RuntimeError(name+': injection anchor must occur exactly once')
