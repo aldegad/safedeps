@@ -59,6 +59,26 @@ fn mach() -> Vec<u8> {
     for (i,n) in [(4,0x0100_000c_u32),(12,6),(16,1),(20,8)] { h[i..i+4].copy_from_slice(&n.to_le_bytes()); }
     h
 }
+
+#[test]
+fn candidate_names_do_not_rediscover_existing_dot_names() {
+    let f = Fixture::new();
+    fs::write(f.dir.join(".existing-native"),mach()).unwrap();
+    let before = crate::post::trace::listing(&f.dir);
+    assert!(before.is_empty());
+    fs::write(&f.old,before.join(&b'\n')).unwrap();
+    assert!(matches!(f.check(),Inspection::NotNative));
+}
+
+#[test]
+fn candidate_names_still_detect_a_new_native_beside_dot_names() {
+    let f = Fixture::new();
+    fs::write(f.dir.join(".existing-native"),mach()).unwrap();
+    fs::write(&f.old,crate::post::trace::listing(&f.dir).join(&b'\n')).unwrap();
+    f.bin(&mach());
+    assert!(matches!(f.check(),Inspection::NativeImage(Format::Mach,ev) if ev.name == b"candidate"));
+}
+
 fn fat(count: u32, wide: bool) -> Vec<u8> {
     let mut b = vec![0;32*1024+40];
     b[..4].copy_from_slice(&if wide { 0xcafebabfu32 } else { 0xcafebabeu32 }.to_be_bytes());

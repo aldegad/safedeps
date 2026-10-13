@@ -104,7 +104,7 @@ fn scan_inner(dir: &Path, old: &Path) -> Result<Inspection, Cause> {
         let name = entry.file_name();
         let name = sh::bytes(Path::new(&name));
         budget.list(name.len(), 1)?;
-        if !before.contains(name) { names.push(name.to_vec()); }
+        if !name.starts_with(b".") && !before.contains(name) { names.push(name.to_vec()); }
     }
     names.sort();
     // This is the existing 20-name sample, not a complete directory audit.
