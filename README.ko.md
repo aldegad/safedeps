@@ -157,7 +157,7 @@ ledger 게이트나 사전 비행 체크에 실패하면 해당 명령은 실행
    - resolved URL의 보안 취약 프로토콜 (`http://`, `git://`)
    - 과도한 의존성 증가 (`package-lock.json` 의 신규 resolved 항목 50개 초과, 의존성 혼란 공격 가능성)
 
-4. **바이너리 검사** — `node_modules/.bin/`에서 새로 추가된 네이티브 바이너리(ELF, Mach-O, 공유 객체)를 확인해 JavaScript 프로젝트에서 나타나면 안 되는 항목 탐지.
+4. **바이너리 검사** -- 스냅샷 대비 새로 추가된 `node_modules/.bin/` 항목을 최대 20개까지 검사하며, 일반 파일과 심볼릭 링크 대상을 모두 읽어 파일을 실행하지 않고 ELF(공유 객체 포함), Mach-O(공유 라이브러리 및 유니버설 바이너리 포함), Windows PE의 헤더 시그니처를 직접 확인합니다. 쉬뱅(shebang) 스크립트와 바이너리 키워드가 포함된 일반 텍스트 파일은 네이티브 바이너리로 분류되지 않으며, 전체 실행 검증이 아닌 포맷 시그니처만 식별합니다.
 
 ### Confirm or Reorg
 
@@ -308,7 +308,6 @@ $ safedeps doctor --fix
 - `curl` — 훅과 CLI 가 어드바이저리를 질의할 때 사용
 - `jq` — CLI, 빌드 스크립트, 릴리스 검사의 JSON 파싱. 훅 바이너리는 쓰지 않습니다.
 - `shasum` 또는 `sha256sum` — CLI 와 빌드 스크립트의 해시 계산
-- `file` (선택) — post 훅이 `node_modules/.bin` 의 새 파일이 네이티브 바이너리인지 스크립트인지 가를 때 사용
 - `cargo` — 체크아웃에서 훅 바이너리를 빌드할 때만 필요합니다. 버전 4 `Cargo.lock` 을 읽을 수 있어야 합니다. npm 패키지는 빌드된 바이너리를 담고 있어 Rust 가 필요 없습니다.
 
 ```bash
@@ -464,7 +463,7 @@ Bash 훅 스크립트 둘, `safedeps-pre-guard.sh` 와 `safedeps-post-verify.sh`
 달라진 것:
 
 - **훅이 바이너리이고, 그것이 있어야 합니다.** 체크아웃은 cargo 로 빌드하고, 패키지는 빌드된 것을 담습니다. 바이너리가 없으면 모든 Bash 호출이, 낡았으면 설치가 설명과 함께 차단되며, 게이트를 건너뛰는 일은 없습니다. [Where the hook binary comes from](#where-the-hook-binary-comes-from) 을 보세요.
-- **Bash 로 되돌아가지 않습니다.** 환경 변수로 바이너리를 고르거나 끌 수 없습니다. 훅이 띄우는 것은 `npm`, `curl`, `file`, `gzip` 과 자기 판정 프로세스뿐이고, `awk`, `grep`, `sed`, `jq` 는 필요 없습니다.
+- **Bash 로 되돌아가지 않습니다.** 환경 변수로 바이너리를 고르거나 끌 수 없습니다. 훅이 띄우는 것은 `npm`, `curl`, `gzip` 과 자기 판정 프로세스뿐이고, `awk`, `grep`, `sed`, `jq` 는 필요 없습니다.
 - **롤백 줄이 운영체제의 오류를 말합니다.** 실패한 복원이나 제거는 예전의 `cp` 나 `rm` 종료 코드 대신 `copy returned OS error <n>` 이나 `removal returned OS error <n>` 이라고 말합니다. 그런 이름의 프로그램은 돌지 않기 때문입니다.
 - **safedeps 가 안전하게 다시 쓸 수 없는 커맨드는 다시 쓰지 않고 차단합니다.** 이것이 이번 릴리스의 비용이고, 다음에 있습니다.
 

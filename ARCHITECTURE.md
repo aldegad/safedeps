@@ -854,7 +854,7 @@ Migration:
 
 The PreToolUse and PostToolUse hooks are one Rust binary, `safedeps-core`, at `bin/native/<os>-<arch>/safedeps-core`. The registered entry is still `scripts/safedeps-hook-entry.sh pre|post`, and it runs the binary. The two Bash hooks, `scripts/safedeps-pre-guard.sh` and `scripts/safedeps-post-verify.sh`, no longer exist, and nothing falls back to Bash: the entry reads no environment variable that chooses the binary or switches it off. Two authorities drift, and a silent second one is what the no-silent-fallback rule forbids. The CLI, `bin/safedeps`, is still Bash.
 
-**Why.** One judgment in the Bash guard started about 93 processes, and nearly all of its time went there (AGENTS.md, Testing). Its lexer was an awk program of some 2,000 lines that bash ran once per view. A Rust binary reads the command in one process. The core starts only `npm`, `curl`, `file` and `gzip`, and its own judgment process under the pre hook's budget.
+**Why.** One judgment in the Bash guard started about 93 processes, and nearly all of its time went there (AGENTS.md, Testing). Its lexer was an awk program of some 2,000 lines that bash ran once per view. A Rust binary reads the command in one process. The core starts only `npm`, `curl` and `gzip`, and its own judgment process under the pre hook's budget.
 
 ### What is in the crate
 

@@ -854,7 +854,7 @@ rm -rf ~/.safedeps/cache/osv/        # OSV cache 비우기 (강제 re-query)
 
 PreToolUse 와 PostToolUse hook 은 Rust 바이너리 하나, `bin/native/<os>-<arch>/safedeps-core` 에 있는 `safedeps-core` 다. 등록된 entry 는 여전히 `scripts/safedeps-hook-entry.sh pre|post` 이고, 그것이 바이너리를 돌린다. 두 Bash hook, `scripts/safedeps-pre-guard.sh` 와 `scripts/safedeps-post-verify.sh` 는 더 이상 없고, Bash 로 떨어지는 일도 없다: entry 는 바이너리를 고르거나 끄는 환경 변수를 하나도 읽지 않는다. 권위가 둘이면 서로 어긋나고, 조용한 두 번째 권위는 no-silent-fallback 규칙이 금하는 바로 그것이다. CLI 인 `bin/safedeps` 는 여전히 Bash 다.
 
-**왜.** Bash guard 에서 판정 한 번은 프로세스를 약 93개 띄웠고, 시간의 거의 전부가 거기서 나갔다 (AGENTS.md, Testing). 그 lexer 는 2,000줄쯤 되는 awk 프로그램이었고 bash 는 뷰마다 이것을 한 번씩 돌렸다. Rust 바이너리는 명령을 프로세스 하나에서 읽는다. core 가 띄우는 것은 `npm`, `curl`, `file`, `gzip`, 그리고 pre hook 의 예산 아래에서 도는 자기 판정 프로세스뿐이다.
+**왜.** Bash guard 에서 판정 한 번은 프로세스를 약 93개 띄웠고, 시간의 거의 전부가 거기서 나갔다 (AGENTS.md, Testing). 그 lexer 는 2,000줄쯤 되는 awk 프로그램이었고 bash 는 뷰마다 이것을 한 번씩 돌렸다. Rust 바이너리는 명령을 프로세스 하나에서 읽는다. core 가 띄우는 것은 `npm`, `curl`, `gzip`, 그리고 pre hook 의 예산 아래에서 도는 자기 판정 프로세스뿐이다.
 
 ### crate 에 있는 것
 

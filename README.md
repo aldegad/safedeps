@@ -157,7 +157,7 @@ After the install command completes, the verify hook analyzes what changed. For 
    - Insecure protocols (`http://`, `git://`) in resolved URLs
    - Unusually large dependency additions (>50 new resolved entries in `package-lock.json`, indicating potential dependency confusion)
 
-4. **Binary inspection** -- Checks `node_modules/.bin/` for newly added native binaries (ELF, Mach-O, shared objects) that should not appear in a JavaScript project.
+4. **Binary inspection** -- Inspects up to 20 newly added entries in `node_modules/.bin/` against the snapshot, reading both regular files and symlink targets to directly check header signatures for ELF (including shared objects), Mach-O (including shared libraries and universal binaries), and Windows PE without executing files. Shebang scripts and ordinary text files containing binary keywords are not flagged as native binaries, identifying format signatures rather than performing full executable validation.
 
 ### Confirm or Reorg
 
@@ -308,7 +308,6 @@ The scaffolded `.gitleaks.toml` is a **starter you tune**: it extends gitleaks' 
 - `curl` -- advisory queries, from the hook and from the CLI
 - `jq` -- JSON parsing in the CLI, the build script and the release checks. The hook binary does not use it.
 - `shasum` or `sha256sum` -- hash computation in the CLI and the build script
-- `file` (optional) -- the post hook uses it to tell a native binary from a script among new files in `node_modules/.bin`
 - `cargo`, to build the hook binary from a checkout only. It has to read a version 4 `Cargo.lock`. The npm package carries the binary built and needs no Rust.
 
 ```bash
@@ -464,7 +463,7 @@ The two Bash hook scripts, `safedeps-pre-guard.sh` and `safedeps-post-verify.sh`
 What did change:
 
 - **The hook is a binary, and it has to be there.** A checkout builds it with cargo, and the package carries it built. A missing binary blocks every Bash call and an out-of-date one blocks installs, each with an explanation, never a skipped gate. See [Where the hook binary comes from](#where-the-hook-binary-comes-from).
-- **Nothing falls back to Bash.** No environment variable chooses the binary or turns it off. The hook starts only `npm`, `curl`, `file` and `gzip`, and its own judgment process, and it needs no `awk`, `grep`, `sed` or `jq`.
+- **Nothing falls back to Bash.** No environment variable chooses the binary or turns it off. The hook starts only `npm`, `curl` and `gzip`, and its own judgment process, and it needs no `awk`, `grep`, `sed` or `jq`.
 - **Rollback lines name the operating system's error.** A failed restore or removal says `copy returned OS error <n>` or `removal returned OS error <n>`, where it used to say a `cp` or `rm` exit status. No program of that name runs.
 - **A command safedeps cannot rewrite safely is blocked, not rewritten.** That is the cost of this release, and it is next.
 

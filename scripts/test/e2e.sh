@@ -1364,6 +1364,34 @@ EOF
   pass "a rollback that cannot remove node_modules says so and gives no command"
 fi
 
+# A newly linked shebang CLI is not a native binary. The post hook must keep
+# both its target and the dependencies that preceded this install.
+script_bin_wt="${tmp_root}/script-bin-wt"
+mkdir -p "${script_bin_wt}/node_modules/existing-package"
+printf '{"dependencies":{"fixture-parent":"1.0.0"}}\n' > "${script_bin_wt}/package.json"
+cp "${tmp_root}/revert-safe-lock.json" "${script_bin_wt}/package-lock.json"
+printf '{"name":"existing-package","version":"1.0.0"}\n' > "${script_bin_wt}/node_modules/existing-package/package.json"
+pre_hook > /dev/null <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${script_bin_wt}","tool_use_id":"script-bin-install"}
+EOF
+mkdir -p "${script_bin_wt}/node_modules/.bin" "${script_bin_wt}/node_modules/fixture-parent/dist"
+printf '#!/usr/bin/env node\nconsole.log("fixture");\n' > "${script_bin_wt}/node_modules/fixture-parent/dist/cli.js"
+chmod +x "${script_bin_wt}/node_modules/fixture-parent/dist/cli.js"
+ln -s ../fixture-parent/dist/cli.js "${script_bin_wt}/node_modules/.bin/fixture-cli"
+cp "${script_bin_wt}/package-lock.json" "${script_bin_wt}/node_modules/.package-lock.json"
+script_bin_post_file=$(
+  PATH="${emptying_bin}:${PATH}" post_hook <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${script_bin_wt}","tool_use_id":"script-bin-install"}
+EOF
+)
+if grep -Eq 'Native binary|suspicious dependency change detected' "${script_bin_post_file}"; then
+  fail "a linked shebang CLI does not trigger native-binary rollback"
+fi
+[[ -L "${script_bin_wt}/node_modules/.bin/fixture-cli" && -f "${script_bin_wt}/node_modules/fixture-parent/dist/cli.js" \
+  && -f "${script_bin_wt}/node_modules/existing-package/package.json" ]] \
+  || fail "a script-only bin addition preserves new and existing dependencies"
+pass "a linked shebang CLI is kept without rolling back existing dependencies"
+
 # `npm install --no-save <pkg>` in a directory without package.json writes
 # node_modules (with npm's hidden lockfile) and nothing else. That is still an
 # npm project to the rollback, and its node_modules is removed.
