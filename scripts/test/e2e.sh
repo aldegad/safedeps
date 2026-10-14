@@ -3919,6 +3919,118 @@ for ov_repo in "${ov_patched_repo}" "${ov_bare_repo}"; do
 done
 pass "the post-install gate counts the approvals scoped to the project it judges"
 
+# --- a probe resolution npm could not finish, repeated with a self pin -------
+# npm 10.9.4 ends `npm install vitest@4.1.11 --package-lock-only` with
+# `Cannot read properties of null (reading 'edgesOut')`, with or without repo
+# overrides (lib/npm/closure.sh, safedeps_npm_probe_self_pinned). The stub
+# fails that way unless the probe manifest pins the package, and answers the
+# second read of the pinned lockfile the way each row names: it keeps the
+# lockfile, changes it, or fails. scripts/measure/npm-peer-cycle.sh runs the
+# same shapes through a real npm.
+pc_npm_bin="${tmp_root}/pc-npm-bin"
+mkdir -p "${pc_npm_bin}"
+cat > "${pc_npm_bin}/npm" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+# Only the closure probe is stubbed; anything else is not part of this test.
+[[ "${1:-}" == "install" ]] || exit 64
+shift
+spec=""
+[[ -z "${1:-}" || "${1}" == --* ]] || spec="$1"
+printf '%s\t%s\n' "${spec:-lockfile}" "$(jq -c '.overrides // {}' package.json)" >> "${PC_NPM_CALLS}"
+if [[ -n "${spec}" ]]; then
+  pin=$(jq -r '.overrides["sd-cycle"] // ""' package.json)
+  if [[ "${PC_NPM_MODE}" != resolves && ( -z "${pin}" || "${PC_NPM_MODE}" == fails ) ]]; then
+    printf "npm error Cannot read properties of null (reading 'edgesOut')\n" >&2
+    exit 1
+  fi
+  jq '.dependencies = {"sd-cycle": "1.0.0"}' package.json > package.json.next
+  mv package.json.next package.json
+  cat > package-lock.json <<'JSON'
+{"lockfileVersion":3,"packages":{
+  "":{"name":"safedeps-closure-probe","version":"0.0.0","dependencies":{"sd-cycle":"1.0.0"}},
+  "node_modules/sd-cycle":{"version":"1.0.0","dependencies":{"sd-cycle-dep":"^1.0.0"}},
+  "node_modules/sd-cycle-dep":{"version":"1.0.0"}
+}}
+JSON
+  exit 0
+fi
+case "${PC_NPM_MODE}" in
+  keeps) ;;
+  changes)
+    jq '.packages["node_modules/sd-cycle-dep/node_modules/sd-cycle"] = {"version":"2.0.0"}' \
+      package-lock.json > package-lock.json.next
+    mv package-lock.json.next package-lock.json
+    ;;
+  *) printf 'npm error the stub fails the second read\n' >&2; exit 1 ;;
+esac
+EOF
+chmod +x "${pc_npm_bin}/npm"
+pc_repo="${tmp_root}/pc-repo"
+mkdir -p "${pc_repo}"; git -C "${pc_repo}" init -q
+printf '{"name":"pc","version":"0.0.0","private":true,"overrides":{"esbuild":"0.28.1"}}\n' > "${pc_repo}/package.json"
+pc_named_repo="${tmp_root}/pc-named-repo"
+mkdir -p "${pc_named_repo}"; git -C "${pc_named_repo}" init -q
+printf '{"name":"pc","version":"0.0.0","private":true,"overrides":{"sd-cycle@<2":"1.0.0"}}\n' > "${pc_named_repo}/package.json"
+# pc_check MODE REPO: sets pc_json, and pc_calls and pc_err, the files that
+# hold the stub's npm runs (spec or `lockfile`, then the overrides it read)
+# and the check's stderr.
+pc_check() {
+  local mode="$1" dir="$2"
+  pc_calls="${tmp_root}/pc-calls-${mode}-${dir##*/}"
+  pc_err="${pc_calls}.stderr"
+  : > "${pc_calls}"
+  pc_json=$( cd "${dir}" && env -u SAFEDEPS_NPM_CLOSURE_FIXTURE_JSON \
+      PATH="${pc_npm_bin}:${PATH}" PC_NPM_MODE="${mode}" PC_NPM_CALLS="${pc_calls}" \
+      SAFEDEPS_HOME="$(mktemp -d "${tmp_root}/pc-home.XXXXXX")" \
+      "${ROOT_DIR}/bin/safedeps" --json check npm sd-cycle@1.0.0 2>"${pc_err}" ) || true
+}
+pc_failed() {
+  [[ "$(jq -r '.approved' <<< "${pc_json}")" == "false" && "$(jq -r '.error' <<< "${pc_json}")" == "npm_closure_resolution_failed" ]]
+}
+
+pc_check resolves "${pc_repo}"
+[[ "$(jq -r '.result' <<< "${pc_json}")" == "clean" ]] || fail "a probe npm resolves on the first run is judged (got: ${pc_json})"
+[[ "$(wc -l < "${pc_calls}" | tr -d ' ')" == 1 ]] || fail "a probe npm resolves on the first run runs npm once ($(cat "${pc_calls}"))"
+! grep -q 'pinned' "${pc_err}" || fail "a probe npm resolves on the first run is not pinned"
+pass "a probe resolution that npm finishes runs npm once, with no pin"
+
+pc_check keeps "${pc_repo}"
+[[ "$(jq -r '.result' <<< "${pc_json}")" == "clean" ]] \
+  || fail "a pinned lockfile npm keeps without the pin is judged (got: ${pc_json}; $(cat "${pc_err}"))"
+[[ "$(cut -f1 "${pc_calls}" | paste -sd' ' -)" == "sd-cycle@1.0.0 sd-cycle@1.0.0 lockfile" ]] \
+  || fail "the probe resolves, resolves pinned, then reads the pinned lockfile ($(cat "${pc_calls}"))"
+[[ "$(cut -f2 "${pc_calls}" | paste -sd' ' -)" == '{"esbuild":"0.28.1"} {"esbuild":"0.28.1","sd-cycle":"1.0.0"} {"esbuild":"0.28.1"}' ]] \
+  || fail "only the pinned resolution carries the pin, beside the repo overrides ($(cat "${pc_calls}"))"
+grep -qF 'resolving sd-cycle@1.0.0 again with sd-cycle pinned to 1.0.0 in the probe overrides' "${pc_err}" \
+  || fail "the check says it resolves again with a pin"
+grep -qF 'npm kept the pinned lockfile of sd-cycle@1.0.0 unchanged without the pin; judging that closure' "${pc_err}" \
+  || fail "the check says npm kept the pinned lockfile"
+[[ "$(jq -c '.resolved_closure | map(.package + "@" + .version) | sort' <<< "${pc_json}")" == '["sd-cycle-dep@1.0.0","sd-cycle@1.0.0"]' ]] \
+  || fail "the judged closure is the pinned lockfile's (got: $(jq -c '.resolved_closure' <<< "${pc_json}"))"
+[[ "$(jq -c '.closure_source.overrides' <<< "${pc_json}")" == '{"esbuild":"0.28.1"}' ]] \
+  || fail "the approval is keyed to the repo overrides, not to the probe's pin (got: $(jq -c '.closure_source' <<< "${pc_json}"))"
+pass "a probe resolution npm could not finish is judged pinned only when npm keeps that lockfile without the pin"
+
+pc_check changes "${pc_repo}"
+pc_failed || fail "a pinned lockfile npm changes without the pin is not judged (got: ${pc_json})"
+grep -qF 'npm changed the pinned lockfile of sd-cycle@1.0.0 once the pin was removed; the pinned closure is not used' "${pc_err}" \
+  || fail "the check says npm changed the pinned lockfile ($(cat "${pc_err}"))"
+pc_check rereads-fail "${pc_repo}"
+pc_failed || fail "a pinned lockfile npm cannot read without the pin is not judged (got: ${pc_json})"
+grep -qF 'npm returned an error reading the pinned lockfile of sd-cycle@1.0.0 without the pin; the pinned closure is not used' "${pc_err}" \
+  || fail "the check says npm could not read the pinned lockfile without the pin ($(cat "${pc_err}"))"
+pc_check fails "${pc_repo}"
+pc_failed || fail "a resolution that fails pinned too is not judged (got: ${pc_json})"
+[[ "$(wc -l < "${pc_calls}" | tr -d ' ')" == 2 ]] || fail "a resolution that fails pinned too is not read again ($(cat "${pc_calls}"))"
+grep -qF 'the pinned resolution of sd-cycle@1.0.0 failed too' "${pc_err}" || fail "the check says the pinned resolution failed too"
+pc_check keeps "${pc_named_repo}"
+pc_failed || fail "a probe whose repo overrides name the package is not pinned (got: ${pc_json})"
+[[ "$(wc -l < "${pc_calls}" | tr -d ' ')" == 1 ]] || fail "a probe whose repo overrides name the package runs npm once ($(cat "${pc_calls}"))"
+grep -qF 'the repo overrides name sd-cycle, so the probe does not pin it' "${pc_err}" \
+  || fail "the check says the repo overrides name the package"
+pass "a pinned lockfile npm changes or cannot read without the pin, a pinned failure and a repo override of the package leave the resolution failed"
+
 # --- rollback journal: an interrupted rollback must not vanish ---------------
 #
 # Measured before this existed (scripts/measure/rollback-kill-state.sh): kill the

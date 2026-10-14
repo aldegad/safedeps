@@ -828,6 +828,108 @@ ${overrides_sha}") || return 1
     }' > "${output_file}"
 }
 
+# One npm run of the closure probe in its directory: the lockfile only, no
+# scripts, no audit. The words given are put before the flags: a spec and
+# --save-exact add the package to the probe manifest, and no words resolve the
+# manifest as it stands, reading the lockfile already there.
+safedeps_npm_probe_install() {
+  local dir="$1"
+  shift
+  (
+    cd "${dir}" &&
+      npm install "$@" \
+        --package-lock-only \
+        --ignore-scripts \
+        --audit=false \
+        --fund=false \
+        >/dev/null
+  )
+}
+
+# npm before 11.6.0 can end a resolution with `Cannot read properties of null
+# (reading 'edgesOut')` (Arborist #loadPeerSet; the guard that stops it came in
+# @npmcli/arborist 9.1.4, and no npm 10 release has it). It happens when the
+# optional peers of a package's dependencies lead back to that package by
+# name and the registry's `latest` of it is another version. vitest@4.1.11 is
+# one: vite has the optional peer @vitejs/devtools, whose optional peer
+# @vitejs/devtools-vitest has the peer `vitest@*`, which npm resolves to the
+# `latest` vitest 5.x. Placing that version in the virtual root that holds
+# 4.1.11 detaches a node npm is still reading. Measured on npm 10.9.4 with an
+# empty probe manifest, so the repo overrides play no part, and npm 11.19.0
+# resolves the same input.
+#
+# When the first resolution fails, the probe resolves once more with the
+# package pinned to its own version in the probe overrides. Every edge to the
+# package then resolves to the one in the probe root, and npm fetches no other
+# version of it. But a pin also bends an edge that version does not satisfy,
+# so the pinned lockfile could leave out a version the real install brings.
+# It is used only when npm, reading it under the probe manifest without the
+# pin, changes nothing in it. npm re-resolves every node with an edge the
+# lockfile does not satisfy (Arborist #initTree) and prunes what no edge
+# reaches, so an unchanged lockfile is one in which every edge holds without
+# the pin. Anything else leaves the resolution failed, as before.
+#
+# A repo override that already names the package is the repo's choice for it,
+# and the probe does not add a second one.
+safedeps_npm_probe_self_pinned() {
+  local dir="$1"
+  local package_name="$2"
+  local version="$3"
+  local overrides_json="$4"
+  local named
+
+  named=$(jq -r --arg name "${package_name}" \
+    'if type == "object" then any(keys[]; . == $name or startswith($name + "@")) else "unread" end' \
+    <<< "${overrides_json}" 2>/dev/null) || named="unread"
+  case "${named}" in
+    false) ;;
+    true)
+      printf 'safedeps npm closure: the repo overrides name %s, so the probe does not pin it\n' "${package_name}" >&2
+      return 1
+      ;;
+    *)
+      printf 'safedeps npm closure: the repo overrides are not a JSON object, so the probe does not pin %s\n' "${package_name}" >&2
+      return 1
+      ;;
+  esac
+
+  printf 'safedeps npm closure: resolving %s@%s again with %s pinned to %s in the probe overrides\n' \
+    "${package_name}" "${version}" "${package_name}" "${version}" >&2
+  rm -f "${dir}/package-lock.json" "${dir}/pinned-package-lock.json"
+  if ! jq -n --argjson overrides "${overrides_json}" --arg name "${package_name}" --arg version "${version}" \
+    '{name:"safedeps-closure-probe",version:"0.0.0",private:true,overrides:($overrides + {($name): $version})}' \
+    > "${dir}/package.json" 2>/dev/null; then
+    printf 'safedeps npm closure: could not write the pinned probe manifest for %s@%s\n' "${package_name}" "${version}" >&2
+    return 1
+  fi
+  if ! safedeps_npm_probe_install "${dir}" "${package_name}@${version}" --save-exact; then
+    printf 'safedeps npm closure: the pinned resolution of %s@%s failed too\n' "${package_name}" "${version}" >&2
+    return 1
+  fi
+
+  cp "${dir}/package-lock.json" "${dir}/pinned-package-lock.json" || return 1
+  if ! jq --arg name "${package_name}" \
+    '.overrides |= del(.[$name]) | if .overrides == {} then del(.overrides) else . end' \
+    "${dir}/package.json" > "${dir}/package.json.unpinned" 2>/dev/null ||
+    ! mv "${dir}/package.json.unpinned" "${dir}/package.json"; then
+    printf 'safedeps npm closure: could not remove the pin from the probe manifest for %s@%s\n' "${package_name}" "${version}" >&2
+    return 1
+  fi
+  if ! safedeps_npm_probe_install "${dir}"; then
+    printf 'safedeps npm closure: npm returned an error reading the pinned lockfile of %s@%s without the pin; the pinned closure is not used\n' \
+      "${package_name}" "${version}" >&2
+    return 1
+  fi
+  if [[ "$(jq -n --slurpfile pinned "${dir}/pinned-package-lock.json" --slurpfile kept "${dir}/package-lock.json" \
+    '$pinned == $kept' 2>/dev/null)" != "true" ]]; then
+    printf 'safedeps npm closure: npm changed the pinned lockfile of %s@%s once the pin was removed; the pinned closure is not used\n' \
+      "${package_name}" "${version}" >&2
+    return 1
+  fi
+  printf 'safedeps npm closure: npm kept the pinned lockfile of %s@%s unchanged without the pin; judging that closure\n' \
+    "${package_name}" "${version}" >&2
+}
+
 safedeps_npm_resolve_spec_closure() {
   local package_name="$1"
   local version="$2"
@@ -913,16 +1015,8 @@ safedeps_npm_resolve_spec_closure() {
     printf 'safedeps npm closure: applied %s repo override(s) to closure probe\n' \
       "$(jq 'length' <<<"${overrides_json}" 2>/dev/null || printf '?')" >&2
   fi
-  if ! (
-    cd "${tmp_dir}" &&
-      npm install "${package_name}@${version}" \
-        --package-lock-only \
-        --ignore-scripts \
-        --audit=false \
-        --fund=false \
-        --save-exact \
-        >/dev/null
-  ); then
+  if ! safedeps_npm_probe_install "${tmp_dir}" "${package_name}@${version}" --save-exact &&
+      ! safedeps_npm_probe_self_pinned "${tmp_dir}" "${package_name}" "${version}" "${overrides_json}"; then
     printf 'safedeps npm closure: npm lockfile resolution failed for %s@%s\n' "${package_name}" "${version}" >&2
     rm -rf "${tmp_dir}"
     return 1
