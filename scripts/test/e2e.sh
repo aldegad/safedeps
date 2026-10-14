@@ -3735,7 +3735,8 @@ for ov_repo in "${ov_patched_repo}" "${ov_bare_repo}"; do
   ov_post=$(PATH="${stub_bin}:${PATH}" post_hook <<< "${ov_payload}")
   if [[ "${ov_repo}" == "${ov_patched_repo}" ]]; then
     ! grep -q 'A rollback ran' < "${ov_post}" || fail "an install in the repo whose overrides earned the approval is not rolled back"
-    grep -q '"minimist"' "${ov_repo}/package-lock.json" || fail "the approved install's lockfile is kept"
+    ! grep -q 'unapproved package(s)' < "${ov_post}" || fail "the repo's own scoped approvals cover its closure"
+    grep -q '"node_modules/minimist"' "${ov_repo}/package-lock.json" || fail "the approved install's lockfile is kept"
   else
     grep -q 'unapproved package(s): ' < "${ov_post}" || fail "a repo without those overrides does not inherit the scoped approval"
   fi
