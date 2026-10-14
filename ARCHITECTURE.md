@@ -526,6 +526,10 @@ install done → safedeps-core post
                  • append to reorg.log; message the agent
 ```
 
+**The `SAFEDEPS_ACCEPT_RISK` override turns a qualifying REORG outcome into a kept install with an audit trail.** The reason string travels only in this call's own pending record, keyed by `tool_use_id`, so it reaches this command's post-install hook and no other call. When the post-install effect gate identifies issues, it checks whether every finding is an unapproved ledger package or a vulnerable package from the OSV batch. If so, safedeps first appends a single JSON line to `~/.safedeps/accepted-risk.jsonl`. Writing the audit line first guarantees that an override nobody can read back is not kept; if this write fails, safedeps rolls back the install immediately. When the record is written, safedeps logs the event to `~/.safedeps/reorg.log` and `~/.safedeps/advisory.log`, warns the agent, and keeps the install files in place.
+
+safedeps executes no `npm rebuild`, keeping install scripts withheld on Claude Code until a person decides to rebuild them. The verified baseline (`confirmed_<dir hash>`) does not move because no check verified this state, so a later rollback returns to the last verified state, or to the state before that later command if no baseline exists. Several findings remain strictly excluded from the override: a CISA KEV listing is an existing contract with no override; a closure that cannot be read or a ledger or OSV check that cannot run means the risk is unknown rather than a known risk a person accepted; and suspicious scripts, non-standard sources, lockfile growth, or native binaries are not advisories a person can have measured. Finally, the pre-install hook does not lift the ledger check for named specs on Codex CLI because Codex cannot withhold install scripts, meaning a package no check has cleared, possibly one listed in CISA KEV, would run its scripts before any check.
+
 **The baseline is the state the last verified install left behind, as the checks read it.** Before the checks read the project, post-verify copies its lock and manifest files into a new snapshot (`verified-<id>`, whose `verified_from` names the pre-install snapshot). On CONFIRM it compares the project with that copy. Only if every file still holds the same bytes does it write the snapshot's `meta.json` and point `confirmed_${dir_hash}` at it. It used to confirm the pre-install snapshot instead, so the baseline ran one install behind. Measured with a real npm against a local registry, on Claude Code and Codex: an approved `npm install a` followed by an unapproved `npm install b` rolled back to a project without `a` in `package.json`, `package-lock.json` or `node_modules`, and after a second approved install the one lost was the last verified, not the first. `scripts/test/lockless-forms.sh` pins both, and it no longer needs the extra verified `npm install` it used to move the baseline forward.
 
 The copy comes before the checks because a copy taken after them recorded whatever the project held by then. Measured with the same battery and a pinned schedule: a second Bash call's unapproved install finished between the closure check and the copy, and went into the baseline. Its own rollback could not remove it, and the rollback's `npm ci` ran its install scripts. The battery pins that schedule on Claude Code, where `npm rebuild` sits between the checks and the record. Codex has no rebuild there, so its window is shorter but has the same shape, and the same code closes it (not measured). The comparison is what ties the copy to the checks. Without it, a file that changed between the copy and the closure check would be recorded although the check read something else; with the copy alone, the pinned schedule above already stays out of the baseline, so the battery pins the comparison by the message it produces. What is compared is equal bytes before and after the checks. A change undone to the same bytes in between is not seen, but the bytes recorded are still the ones the project held at both ends.
@@ -730,6 +734,7 @@ Design principle: **no silent fallback.** When the canonical truth (OSV) cannot 
 │   ├── osv/                   ← OSV query responses (24h TTL)
 │   └── kev/                   ← CISA KEV daily catalog
 ├── locks/                     ← atomic state (TOCTOU guard)
+├── accepted-risk.jsonl       ← append-only audit trail of installs kept under SAFEDEPS_ACCEPT_RISK
 ├── reorg.log                  ← reorg events (append-only)
 └── advisory.log               ← advisory-gate decisions (approve / block)
 ```
@@ -738,6 +743,7 @@ Design principle: **no silent fallback.** When the canonical truth (OSV) cannot 
 - `snapshots/` keeps the v1 design plus the Python/Rust/Go/Ruby lockfiles.
 - `cache/osv/` and `cache/kev/` hold provider responses under TTL.
 - `advisory.log` is the audit trail of every approve/block decision.
+- `accepted-risk.jsonl` is the audit record of every install kept by `SAFEDEPS_ACCEPT_RISK`, storing timestamps, tool use IDs, projects, commands, reasons, and accepted problems.
 
 ---
 

@@ -526,6 +526,10 @@ install 완료 → safedeps-core post
                  • reorg.log 기록; 에이전트에 경고
 ```
 
+**`SAFEDEPS_ACCEPT_RISK` 오버라이드(override)는 적격한 REORG 결과를 감사 기록을 남기는 유지 상태로 전환한다.** 사유 문자열은 `tool_use_id`로 식별되는 해당 호출 자체의 보류 레코드에만 담겨 전달되므로, 이 명령어의 설치 후 훅에만 전달되고 다른 호출에는 도달하지 않는다. 설치 후 효과 게이트에서 문제가 감지되면, 발견된 모든 항목이 미승인 원장 패키지 또는 OSV 일괄 검사의 취약한 패키지에만 해당하는지 확인한다. 조건에 부합하면 safedeps는 먼저 `~/.safedeps/accepted-risk.jsonl`에 단일 JSON 라인을 추가한다. 감사 라인을 먼저 기록하는 것은 다시 읽을 수 없는 오버라이드를 유지하지 않도록 보장하기 위함이다. 이 파일 기록에 실패하면 safedeps는 즉시 설치를 롤백한다. 기록에 성공하면 safedeps는 `~/.safedeps/reorg.log` 및 `~/.safedeps/advisory.log`에 이벤트를 기록하고, 에이전트에 경고를 보낸 뒤 설치된 파일들을 그대로 유지한다.
+
+safedeps는 `npm rebuild`를 실행하지 않으며, Claude Code에서는 사람이 다시 빌드하기로 결정할 때까지 설치 스크립트가 보류된 상태로 유지된다. 어떤 검증도 이 상태를 검증하지 않았기 때문에 검증된 기준점(`confirmed_<dir hash>`)은 이동하지 않는다. 따라서 이후의 롤백은 마지막으로 검증된 상태로 돌아가거나, 검증된 상태가 없는 경우에는 해당 후속 명령어 실행 전 상태로 되돌아간다. 몇몇 문제는 오버라이드 대상에서 엄격히 제외된다. CISA KEV 등재는 오버라이드가 불가능한 기존 계약이다. 읽을 수 없는 클로저나 실행할 수 없는 원장 또는 OSV 검사는 사람이 수용한 알려진 위험이 아니라 알려지지 않은 위험을 의미한다. 의심스러운 스크립트, 비표준 소스, 락파일 급증, 네이티브 바이너리는 사람이 측정할 수 있는 권고가 아니다. 마지막으로 Codex CLI에서는 사전 설치 훅이 명시된 스펙에 대해 원장 검사를 면제하지 않는다. Codex는 설치 스크립트를 보류할 수 없으므로, 어떤 검사도 통과하지 않은 패키지(CISA KEV 등재 패키지 포함 가능)가 검사 전에 스크립트를 실행하게 되기 때문이다.
+
 **기준점은 마지막으로 검증된 설치가 남긴 상태, 그것도 검사가 읽은 그대로다.** post-verify 는 검사가 프로젝트를 읽기 전에 lock·manifest 파일을 새 스냅샷(`verified-<id>`, `verified_from` 이 설치 전 스냅샷을 가리킨다)으로 복사한다. CONFIRM 때 프로젝트를 그 사본과 비교하고, 모든 파일의 바이트가 그대로일 때만 스냅샷의 `meta.json` 을 쓰고 `confirmed_${dir_hash}` 를 그것으로 옮긴다. 예전에는 설치 전 스냅샷을 확정했기 때문에 기준점이 설치 한 번만큼 뒤처져 있었다. 로컬 레지스트리에 실제 npm 으로, Claude Code 와 Codex 양쪽에서 측정했다: 승인된 `npm install a` 다음 승인되지 않은 `npm install b` 는 `package.json`, `package-lock.json`, `node_modules` 어디에도 `a` 가 없는 프로젝트로 롤백됐고, 승인 설치를 하나 더 하면 빠지는 쪽은 처음이 아니라 마지막으로 검증된 설치였다. `scripts/test/lockless-forms.sh` 가 둘 다 고정하며, 기준점을 앞으로 옮기려고 넣었던 검증된 `npm install` 한 번은 더 이상 필요 없다.
 
 복사를 검사 앞에 두는 이유는, 검사 뒤에 뜬 사본은 그때 프로젝트에 있던 것을 무엇이든 기록했기 때문이다. 같은 배터리에서 일정을 고정해 측정했다: 다른 Bash 호출의 미승인 설치가 closure 검사와 복사 사이에 끝나자 그 설치가 기준점에 들어갔다. 그 설치 자신의 롤백은 그것을 지우지 못했고, 롤백의 `npm ci` 가 그 설치 스크립트를 실행했다. 배터리는 이 일정을 Claude Code 에서 고정한다. 거기서는 `npm rebuild` 가 검사와 기록 사이에 있다. Codex 에는 그 자리에 rebuild 가 없어서 창이 더 짧을 뿐 모양은 같고, 같은 코드가 닫는다(미측정). 사본을 검사에 묶는 것은 비교다. 비교가 없으면 복사와 closure 검사 사이에 바뀐 파일이, 검사가 다른 것을 읽었는데도 기록된다. 위의 고정 일정은 복사만으로도 기준점에 들어가지 않으므로, 배터리는 비교가 내는 메시지로 비교를 고정한다. 비교하는 것은 검사 전과 후의 바이트가 같은가이다. 그 사이에 바뀌었다가 같은 바이트로 되돌아온 변화는 보지 못하지만, 기록되는 바이트는 여전히 양 끝에서 프로젝트가 담고 있던 그것이다.
@@ -730,6 +734,7 @@ GHSA / NVD — 응답 무
 │   ├── osv/                   ← OSV query 응답 (24h TTL)
 │   └── kev/                   ← CISA KEV daily catalog
 ├── locks/                     ← atomic state (TOCTOU 방지)
+├── accepted-risk.jsonl       ← SAFEDEPS_ACCEPT_RISK에 의해 유지된 설치의 추가 전용 감사 기록
 ├── reorg.log                  ← reorg event (append-only)
 └── advisory.log               ← advisory-gate 결정 (approve / block)
 ```
@@ -738,6 +743,7 @@ GHSA / NVD — 응답 무
 - `snapshots/` 는 v1 설계 + Python/Rust/Go/Ruby lockfile 추가.
 - `cache/osv/`, `cache/kev/` 는 provider 응답을 TTL 로 보관.
 - `advisory.log` 는 모든 approve/block 결정의 audit trail.
+- `accepted-risk.jsonl`은 `SAFEDEPS_ACCEPT_RISK`에 의해 유지된 모든 설치의 타임스탬프, 도구 사용 ID, 프로젝트, 명령어, 사유 및 수용된 문제를 저장하는 감사 기록이다.
 
 ---
 

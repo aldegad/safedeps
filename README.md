@@ -214,6 +214,56 @@ The report of an unfinished rollback has the same shape. Its `Rollback snapshot:
 
 Warnings about a registry that is not the public one, and about a tree safedeps would not rebuild, are still sentences. They tell you to confirm with the user before you rebuild, and that is on purpose.
 
+### Accepting a known risk: `SAFEDEPS_ACCEPT_RISK`
+
+On 2026-10-14, an `npm install` in a large project was rolled back by safedeps' post-install gate. Its lockfile closure held 639 packages that the approved-spec ledger had never approved. The closure also held four packages with published OSV advisories that had no fixed version or no fix in the active major line. The maintainers of the project had measured those advisories as unreachable in their code and recorded that decision in their repository. safedeps did not know about that decision. The gate rolled back the reinstallation of the existing development tree and removed `node_modules`. The `SAFEDEPS_ACCEPT_RISK` override lets a person's recorded decision through, with a warning and an audit record.
+
+The override takes the form of an assignment placed in front of each npm install statement in the command:
+
+```sh
+SAFEDEPS_ACCEPT_RISK='<who decided and why>' npm ci
+```
+
+The override counts only when all of the following conditions hold across bash, zsh, and dash readings of the command:
+- Every npm install statement in the command carries the assignment among its leading assignments.
+- All of those assignments carry one identical value.
+- The value is read as written, with no `$`, no backticks, and no command substitutions.
+- The value is not empty or blank, and it contains no control characters.
+- Besides the npm install statements, the command holds only these shell builtins, each appearing as its own word and read as written: `cd`, `pushd`, `popd`, `echo`, `printf`, `export`, `true`, `:`, `test`, and `[`.
+- The command hands no text to another shell via `sh -c`, `eval`, or command substitutions.
+- Every npm install lands where npm records it in a lockfile. Global installs do not qualify.
+
+The override does not count if it appears earlier via `export SAFEDEPS_ACCEPT_RISK=...` or `env SAFEDEPS_ACCEPT_RISK=... npm ci`. It does not count if the variable is set in the environment of the agent or the hook. safedeps never reads its own environment for this override; it reads only the command text. When the variable name appears in an install command but does not count, the pre-install hook denies the install before it runs. The denial starts with `safedeps: SAFEDEPS_ACCEPT_RISK is in this command and does not count:` followed by the reason. safedeps never falls back to running the install without the override.
+
+Before the install, where the override counts, the pre-install hook applies these rules:
+- On Claude Code, the ledger check lets unapproved npm specs through. `~/.safedeps/advisory.log` records them in a `pre-guard ACCEPTED RISK` line. safedeps rewrites the command to run with `--ignore-scripts`, as it does for every npm install on Claude Code.
+- On Codex CLI, the ledger check is not lifted for any spec named on the command line. Codex cannot withhold install scripts. A package cleared by no check, possibly one listed in CISA KEV, would run its scripts before any check. The denial says so. Commands with no named spec, such as `npm ci` or a bare `npm install`, are not blocked by the ledger check on either engine.
+- Specs of other ecosystems are never let through.
+- Other pre-install checks still deny typosquatting names, non-standard `--registry` flags, piping remote content into a shell, and `npm config set ignore-scripts false`.
+
+After the install, the npm effect gate runs the ledger closure check and the OSV batch check as before. If every problem found is an unapproved package or a vulnerable package, the install is kept:
+1. safedeps first appends one JSON line to `~/.safedeps/accepted-risk.jsonl`. The entry holds `at` (UTC time), `tool_use_id`, `project`, `command`, `reason`, `snapshot`, `problems`, and `packages`. Each package entry records name, version, problem type, and OSV advisory IDs for vulnerable packages.
+2. If that line cannot be written, safedeps rolls back the install instead. An override that nobody can read back is not kept.
+3. `~/.safedeps/reorg.log` receives an `ACCEPTED RISK` block with the snapshot, project, reason, problems, and message lines. `~/.safedeps/advisory.log` receives a `post-verify ACCEPTED RISK` line.
+4. safedeps runs no `npm rebuild`. On Claude Code, package install scripts stay withheld. Running `npm rebuild <pkg>` is for a person to decide after confirming with the user.
+5. The verified baseline `confirmed_<dir hash>` does not move because no check verified this state.
+
+The agent receives the following message lines in order:
+
+| Message line | Meaning |
+|---|---|
+| `safedeps: WARNING: SAFEDEPS_ACCEPT_RISK kept this install. Its checks found problems that would have rolled it back, and no rollback ran.` | The post-install gate kept an install that found problems that would have rolled it back, and no rollback ran. |
+| `Accepted risk: <reason>` | The reason recorded in the command assignment. |
+| `Accepted problems:` | Header followed on the next line by the accepted problems, joined by semicolons. |
+| `safedeps added --ignore-scripts to this install and did not run npm rebuild: SAFEDEPS_ACCEPT_RISK kept this install, which no check verified` | On Claude Code, install scripts were withheld and safedeps did not run `npm rebuild`. |
+| `safedeps did not add --ignore-scripts to this install` | On Codex CLI, install scripts were not withheld. |
+| `Audit record: <path of accepted-risk.jsonl>` | Path to the audit record file. |
+| `Details log: <path of reorg.log>` | Path to the reorg log file. |
+
+The override never covers packages listed in CISA KEV. It never covers an unreadable closure, a ledger check that cannot run, or an OSV batch that cannot run. It never covers suspicious install scripts, non-standard or insecure resolved sources, unusually large lockfile additions, or native binary findings. These always roll the install back. When the override was set and an install is rolled back anyway, the problems line ends with: `SAFEDEPS_ACCEPT_RISK was set for this install, and it keeps an install only where every problem is an unapproved or vulnerable package`. The problems the override would have covered are listed there too.
+
+The override applies to one command only. The reason lives only in that call's own pending record, keyed by `tool_use_id`. Nothing persists: no ledger entry and no approval. A subsequent install in the same project without the override is judged as before, so an unapproved closure is rolled back again. Accepting a risk is not approving a package; `safedeps check` and the ledger are unchanged. The override applies exclusively to the npm effect gate. It does not exist for pip, cargo, go, gem, maven, nuget, pnpm, yarn, or bun. Commands that the pre-install hook did not read as an install reach the post-install backstop with no record, so no override applies there.
+
 ## Why "reorg"?
 
 The name borrows from blockchain, where a **reorganization (reorg)** invalidates a sequence of unconfirmed blocks and reverts the chain to its last confirmed safe state. `safedeps` treats every install the same way: an unconfirmed block candidate until it passes a battery of supply-chain checks. If the installed effect diverges, the tool performs a **reorg**. It rolls the lock file and `package.json` back to the last confirmed safe snapshot, or to the state before the command when the project has none yet. It removes `node_modules` when the command is seen to have written it, and the next install puts it back through the gate.
@@ -510,6 +560,7 @@ Two things went the other way. A script handed to `sh -c`, `bash -c`, `zsh -c`, 
 | `~/.safedeps/reorg.log` | Full reorg event history with timestamps, reasons, and rolled-back files |
 | `~/.safedeps/confirmed` | Current confirmed (safe) snapshot ID |
 | `~/.safedeps/snapshots/` | All snapshot files (lock files, package.json copies, metadata) |
+| `~/.safedeps/accepted-risk.jsonl` | Audit record of installs kept by `SAFEDEPS_ACCEPT_RISK` with timestamps, reasons, problems, and packages |
 
 ```bash
 # View reorg history

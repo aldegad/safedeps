@@ -214,6 +214,56 @@ ledger 게이트나 사전 비행 체크에 실패하면 해당 명령은 실행
 
 공개 레지스트리가 아닌 레지스트리에 대한 경고와 safedeps 가 rebuild 하지 않은 트리에 대한 경고는 지금도 문장입니다. rebuild 하기 전에 사용자에게 확인하라고 말하며, 그것은 의도입니다.
 
+### 알려진 위험 수용: `SAFEDEPS_ACCEPT_RISK`
+
+2026-10-14에 대규모 프로젝트의 `npm install` 실행이 safedeps의 설치 후 게이트에 의해 롤백되었습니다. 당시 락파일 클로저에는 승인된 스펙 원장에 등록되지 않은 패키지가 639개 포함되어 있었습니다. 또한 패치 버전이 없거나 현재 메이저 라인에 수정본이 없는 공개 OSV 권고를 가진 패키지가 4개 포함되어 있었습니다. 프로젝트 유지보수자는 코드 분석을 통해 해당 보안 권고가 도달 불가능하다는 점을 확인하고, 그 결정을 저장소에 기록해 두었습니다. safedeps는 해당 결정을 알지 못했습니다. 기존 개발 트리를 재설치하는 작업조차 롤백되었고 `node_modules` 디렉터리가 삭제되었습니다. `SAFEDEPS_ACCEPT_RISK` 오버라이드(override) 기능은 명시적인 경고 및 감사 기록과 함께 사람이 기록한 결정을 통과시킵니다.
+
+오버라이드는 명령어 내 각 npm 설치 구문 앞에 할당문을 배치하는 형식으로 지정합니다:
+
+```sh
+SAFEDEPS_ACCEPT_RISK='<who decided and why>' npm ci
+```
+
+이 오버라이드는 bash, zsh, dash 해석기 모두에서 다음 조건을 모두 충족할 때만 유효하게 인정됩니다:
+- 명령어 내 모든 npm 설치 구문이 선두 할당문에 해당 할당을 포함해야 합니다.
+- 모든 할당문은 단 하나의 동일한 값을 가져야 합니다.
+- 값은 입력된 그대로 해석되어야 하며, `$`, 백틱, 명령어 치환을 포함할 수 없습니다.
+- 값은 비어 있거나 공백 문자만으로 구성될 수 없으며, 제어 문자를 포함할 수 없습니다.
+- npm 설치 구문 외에 명령어에 포함될 수 있는 셸 내장 명령은 `cd`, `pushd`, `popd`, `echo`, `printf`, `export`, `true`, `:`, `test`, `[`로 제한됩니다. 각 내장 명령은 독립된 단어로 쓰여야 하며 입력된 그대로 해석되어야 합니다.
+- 명령어는 `sh -c`, `eval`, 명령어 치환 등을 통해 다른 셸로 텍스트를 전달할 수 없습니다.
+- 모든 npm 설치는 npm이 락파일에 기록하는 위치에 설치되어야 합니다. 전역 설치는 인정되지 않습니다.
+
+명령어 앞부분에서 `export SAFEDEPS_ACCEPT_RISK=...`를 실행하거나 `env SAFEDEPS_ACCEPT_RISK=... npm ci` 형식을 사용하는 것은 인정되지 않습니다. 에이전트 또는 훅이 실행되는 환경 변수에 설정된 값도 인정되지 않습니다. safedeps는 이 오버라이드를 위해 자체 환경 변수를 읽지 않으며 오직 명령어 텍스트만 읽습니다. 설치 명령에 변수명이 포함되었으나 유효 조건을 만족하지 못하면 사전 설치 훅이 설치 시작 전에 실행을 거부합니다. 거부 메시지는 `safedeps: SAFEDEPS_ACCEPT_RISK is in this command and does not count:`로 시작하며 그 뒤에 이유가 이어집니다. safedeps는 오버라이드 없이 설치를 실행하는 방식으로 물러서지 않습니다.
+
+사전 설치 단계에서 오버라이드가 유효할 때 사전 설치 훅은 다음 규칙을 적용합니다:
+- Claude Code에서는 원장 검사가 미승인 npm 스펙을 통과시킵니다. `~/.safedeps/advisory.log`는 `pre-guard ACCEPTED RISK` 라인에 해당 패키지를 기록합니다. 설치 명령은 Claude Code의 모든 npm 설치와 마찬가지로 `--ignore-scripts`가 추가되도록 재작성됩니다.
+- Codex CLI에서는 명령어 라인에 명시된 스펙에 대해 원장 검사를 면제하지 않습니다. Codex는 설치 스크립트 실행을 보류할 수 없으므로, 검증되지 않은 패키지나 CISA KEV에 등재된 패키지가 검사 전에 스크립트를 실행할 수 있습니다. 거부 메시지에 이 사실이 명시됩니다. 스펙이 명시되지 않은 명령어(`npm ci`, 인자 없는 `npm install`)는 양쪽 엔진 모두에서 원장 검사로 차단되지 않습니다.
+- 다른 생태계의 스펙은 결코 통과시키지 않습니다.
+- 타이포스쿼팅 이름, 비표준 `--registry`, 원격 콘텐츠 셸 파이핑, `npm config set ignore-scripts false` 등 다른 사전 설치 검사는 기존과 동일하게 설치를 거부합니다.
+
+설치 후 단계에서 npm 효과 게이트는 기존과 동일하게 원장 클로저 검사와 OSV 일괄 검사를 실행합니다. 발견된 모든 문제가 미승인 패키지 또는 취약한 패키지인 경우 설치가 유지됩니다:
+1. safedeps는 먼저 `~/.safedeps/accepted-risk.jsonl`에 단일 JSON 라인을 추가합니다. 항목에는 `at`(UTC 시간), `tool_use_id`, `project`, `command`, `reason`, `snapshot`, `problems`, `packages`가 포함됩니다. 각 패키지 항목에는 이름, 버전, 문제 유형이 기록되며, 취약 패키지의 경우 OSV 권고 ID가 함께 기록됩니다.
+2. 해당 라인을 기록하지 못하면 설치는 대신 롤백됩니다. 다시 읽을 수 없는 오버라이드는 유지되지 않습니다.
+3. `~/.safedeps/reorg.log`에 `ACCEPTED RISK` 블록이 기록되고, `~/.safedeps/advisory.log`에 `post-verify ACCEPTED RISK` 라인이 기록됩니다.
+4. safedeps는 `npm rebuild`를 실행하지 않습니다. Claude Code에서는 패키지 설치 스크립트가 보류된 상태로 유지됩니다. `npm rebuild <pkg>` 실행 여부는 사용자와 확인한 후 사람이 결정합니다.
+5. 검증을 거치지 않은 상태이므로 검증된 기준점 `confirmed_<dir hash>`는 이동하지 않습니다.
+
+에이전트는 다음 순서대로 메시지 라인을 수신합니다:
+
+| 메시지 라인 | 의미 |
+|---|---|
+| `safedeps: WARNING: SAFEDEPS_ACCEPT_RISK kept this install. Its checks found problems that would have rolled it back, and no rollback ran.` | 검사에서 롤백 대상 문제가 발견되었으나 오버라이드로 인해 롤백이 실행되지 않고 설치가 유지되었음을 알립니다. |
+| `Accepted risk: <reason>` | 명령어 할당문에 기록된 사유 문자열입니다. |
+| `Accepted problems:` | 다음 줄에 세미콜론으로 구분되어 나열되는 수용된 문제 목록의 헤더입니다. |
+| `safedeps added --ignore-scripts to this install and did not run npm rebuild: SAFEDEPS_ACCEPT_RISK kept this install, which no check verified` | Claude Code에서 설치 스크립트가 보류되었으며 safedeps가 `npm rebuild`를 실행하지 않았음을 알립니다. |
+| `safedeps did not add --ignore-scripts to this install` | Codex CLI에서 설치 스크립트가 보류되지 않았음을 알립니다. |
+| `Audit record: <path of accepted-risk.jsonl>` | 감사 기록 파일의 경로입니다. |
+| `Details log: <path of reorg.log>` | 상세 로그 파일의 경로입니다. |
+
+CISA KEV에 등재된 패키지는 오버라이드 대상에 포함되지 않습니다. 읽을 수 없는 클로저, 실행할 수 없는 원장 검사 또는 실행할 수 없는 OSV 일괄 검사도 대상에 포함되지 않습니다. 의심스러운 설치 스크립트, 비표준 또는 안전하지 않은 확인 소스, 락파일의 비정상적인 대규모 추가, 네이티브 바이너리 발견도 대상에 포함되지 않습니다. 이러한 항목은 오버라이드 유무와 관계없이 항상 설치를 롤백합니다. 오버라이드가 설정되었으나 롤백되는 경우, 롤백 메시지의 문제 라인은 다음 문장으로 끝납니다: `SAFEDEPS_ACCEPT_RISK was set for this install, and it keeps an install only where every problem is an unapproved or vulnerable package`. 오버라이드가 수용할 수 있었던 문제들도 여기에 함께 나열됩니다.
+
+오버라이드는 단 하나의 명령어에만 적용됩니다. 사유는 `tool_use_id`로 식별되는 해당 호출의 보류 레코드에만 존재합니다. 원장 항목이나 승인은 영구 저장되지 않습니다. 오버라이드가 없는 후속 설치는 기존과 동일하게 판단되므로 미승인 클로저는 다시 롤백됩니다. 위험을 수용하는 것은 패키지를 승인하는 것이 아니며, `safedeps check`와 원장은 변경되지 않습니다. 오버라이드는 오직 npm 효과 게이트에만 적용됩니다. pip, cargo, go, gem, maven, nuget, pnpm, yarn, bun에는 오버라이드가 없습니다. 사전 설치 훅이 설치로 읽지 못한 명령어는 레코드 없이 사후 백스톱에 도달하므로 오버라이드가 적용되지 않습니다.
+
 ## Why "reorg"?
 
 이름은 블록체인에서 **reorganization(reorg)**, 즉 확인되지 않은 블록열을 무효화하고 마지막으로 확인된 안전 상태로 체인을 되돌리는 개념에서 가져왔습니다. `safedeps`도 모든 설치를 동일하게 취급합니다. 확인되지 않은 블록 후보처럼, 공급망 점검 배터리를 통과할 때까지 설치는 잠정 상태에 머뭅니다. 실제 설치 결과가 다르면 툴이 **reorg**를 실행합니다. lock file 과 `package.json` 을 마지막 안전 스냅샷으로, 프로젝트에 아직 그것이 없으면 명령 직전 상태로 되돌립니다. 명령이 `node_modules` 에 쓴 것이 보이면 `node_modules` 를 지우고, 다음 설치가 게이트를 지나 다시 깝니다.
@@ -510,6 +560,7 @@ safedeps 가 다시 쓸 수 있게 쓰는 법입니다. 아래는 모두 등록�
 | `~/.safedeps/reorg.log` | 타임스탬프, 사유, 롤백된 파일까지 포함한 전체 reorg 이벤트 기록 |
 | `~/.safedeps/confirmed` | 현재 confirmed(안전) 스냅샷 ID |
 | `~/.safedeps/snapshots/` | 모든 스냅샷 파일(lock file, package.json 사본, 메타데이터) |
+| `~/.safedeps/accepted-risk.jsonl` | `SAFEDEPS_ACCEPT_RISK`에 의해 유지된 설치의 타임스탬프, 사유, 문제 목록, 패키지 목록을 담은 감사 기록 |
 
 ```bash
 # View reorg history
