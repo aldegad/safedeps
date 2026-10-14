@@ -106,7 +106,7 @@ safedeps check <ecosystem> <pkg>@<version|range> --json
 
 `overrides` 를 반영해도 취약점을 숨길 수는 없습니다. probe 는 여전히 각 override 를 구체 버전으로 해석하고 OSV 는 바로 그 버전으로 조회되므로, 여전히 취약한 릴리스를 가리키는 override 는 다른 것과 똑같이 걸립니다. overrides 를 probe manifest 에 반영하지 못하면 safedeps 가 그 사실을 알리고 overrides 없이 진행하는데, 이는 검사를 더 엄격하게 만들 뿐입니다.
 
-closure 가 소비 프로젝트에 의존하게 됐으므로 승인도 거기에 스코프됩니다. published-package 승인이 전역인 건 정확히 그것이 프로젝트 무관이기 때문이고, `overrides` 에서 유도된 승인은 그렇지 않습니다. 그래서 ledger entry 가 project root, override 집합, 그리고 둘의 hash 를 싣고 키가 그 hash 를 포함합니다. transitive 를 patch 한 레포에서 얻은 승인은 patch 하지 않은 레포의 검사를 만족시키지 못합니다. 그 레포의 실제 설치는 취약한 버전을 해석하니까요. override 집합이 바뀌면 키도 바뀝니다. `overrides` 가 없는 레포는 영향이 없고 기존 전역 승인 그대로입니다.
+closure 가 소비 프로젝트에 의존하게 됐으므로 승인도 거기에 스코프됩니다. published-package 승인이 전역인 건 정확히 그것이 프로젝트 무관이기 때문이고, `overrides` 에서 유도된 승인은 그렇지 않습니다. 그래서 ledger entry 가 project root, override 집합, 그리고 둘의 hash 를 싣고 키가 그 hash 를 포함합니다. transitive 를 patch 한 레포에서 얻은 승인은 patch 하지 않은 레포의 검사를 만족시키지 못합니다. 그 레포의 실제 설치는 취약한 버전을 해석하니까요. override 집합이 바뀌면 키도 바뀝니다. `overrides` 가 없는 레포는 영향이 없고 기존 전역 승인 그대로입니다. post-install gate 는 이제 pre-install hook 과 동일한 방식으로 프로젝트 context 를 읽습니다. 이 게이트는 context 가 없는 승인과 해당 프로젝트 context 의 승인이라는 두 집합을 집계합니다. 다른 프로젝트의 스코프된 승인은 여전히 인정되지 않습니다. context 에는 `overrides` 를 선언한 `package.json` 의 경로가 포함되므로, 한 체크아웃(예: git worktree)에서 얻은 승인은 동일한 레포의 다른 체크아웃에서 인정되지 않습니다.
 
 ### Phase 2: Fast Command Guard + Snapshots (PreToolUse)
 
