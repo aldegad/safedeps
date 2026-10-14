@@ -253,13 +253,13 @@ any step is open.
      compares the batteries one by one and holds none of the sums. e2e prints
      `# skipped rows: N; names: …` at its end, and a person reads that line:
      the rows that copy the source need Darwin and skip on Linux, and on a
-     Windows drive the permission rows skip as well. A skipped row is not a
-     pass. The whole release set has not been run there and is not part of a
-     release. `/proc/loadavg` is a constant in WSL1, so record the Windows CPU
-     beside the run instead of `uptime`. Two limits, both in ROADMAP.md
-     ("Known limits in WSL1"): if effect-trace-grid goes red on one provider
-     call with no answer for 20s (`OSV batch query failed status=000` in
-     `advisory.log`), run the battery once more, and two reds in a row are a
+     Windows drive the permission rows and the FIFO row skip as well. A skipped
+     row is not a pass. The whole release set has not been run there and is not
+     part of a release. `/proc/loadavg` is a constant in WSL1, so record the
+     Windows CPU beside the run instead of `uptime`. Two limits, both in
+     ROADMAP.md ("Known limits in WSL1"): if effect-trace-grid goes red on one
+     provider call with no answer for 20s (`OSV batch query failed status=000`
+     in `advisory.log`), run the battery once more, and two reds in a row are a
      defect; and `/proc/<pid>/stat` gives a wrong nice in WSL1, so a battery
      run at a positive nice goes red at e2e's stopped-owner row, which is why
      the batteries run at nice 0.

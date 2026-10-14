@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Public post ordering and blocked-I/O controls, using only local fixtures."""
+"""Public post ordering and blocked-I/O controls, using only local fixtures.
+
+Usage: native-inspection.py CORE DIRECTORY CASE...
+The cases run in a new directory under DIRECTORY. `blocked` and
+`prior-reason` put a FIFO in place of the snapshot's bin list, so e2e asks
+the same DIRECTORY whether its filesystem makes one before it names them.
+"""
 import json
 import os
 from pathlib import Path
@@ -9,9 +15,12 @@ import tempfile
 import time
 
 core = str(Path(sys.argv[1]).resolve())
-with tempfile.TemporaryDirectory(prefix='native-inspection-public-') as temp:
+cases = sys.argv[3:]
+if not cases or any(case not in ('script', 'blocked', 'prior-reason') for case in cases):
+    sys.exit('usage: native-inspection.py CORE DIRECTORY {script|blocked|prior-reason}...')
+with tempfile.TemporaryDirectory(prefix='native-inspection-public-', dir=sys.argv[2]) as temp:
     root = Path(temp)
-    for case in ('script', 'blocked', 'prior-reason'):
+    for case in cases:
         project = root/case
         project.mkdir()
         home = root/(case+'-state')

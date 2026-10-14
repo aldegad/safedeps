@@ -28,9 +28,10 @@ skip() {
 # A row that needs something of the host runs only where the host has it.
 # row_if NAME CAPABILITY...: `copies` is the source-copy fixtures, any other
 # word is a permission operation the row's fixture needs (read, write, create,
-# unlink, scandir). It returns 0 and names the row for the oracle, which
-# attributes the report forms of the hook calls that follow to it, or it says
-# the row is SKIPPED, once per name, and returns 1. The name is written here
+# unlink, scandir) or `fifo`, a FIFO the filesystem has to make. It returns 0
+# and names the row for the oracle, which attributes the report forms of the
+# hook calls that follow to it, or it says the row is SKIPPED, once per name,
+# and returns 1. The name is written here
 # and nowhere else, so the row that is skipped and the row the oracle sees are
 # one string. A row may be entered more than once (its fixture is in two places).
 row_if() {
@@ -1688,7 +1689,15 @@ hook_response_parse "${script_bin_post_file}" quiet || fail "the coherent script
   || fail "a script-only bin addition preserves new and existing dependencies"
 pass "a linked shebang CLI is kept without rolling back existing dependencies"
 
-python3 "${ROOT_DIR}/scripts/test/lib/native-inspection.py" "${NATIVE_TEST_CORE}" || fail "native inspection preserves scripts, bounds blocked reads and respects prior rejection"
+python3 "${ROOT_DIR}/scripts/test/lib/native-inspection.py" "${NATIVE_TEST_CORE}" "${tmp_root}" script \
+  || fail "native inspection preserves a script bin"
+# These two block the inspection's read on a FIFO, which WSL1's Windows drive
+# cannot make (os.mkfifo returns EPERM there).
+if row_if "native-inspection (blocked, prior-reason)" fifo; then
+python3 "${ROOT_DIR}/scripts/test/lib/native-inspection.py" "${NATIVE_TEST_CORE}" "${tmp_root}" blocked prior-reason \
+  || fail "native inspection bounds blocked reads and respects prior rejection"
+pass "native inspection bounds blocked reads and respects prior rejection"
+fi
 
 # `npm install --no-save <pkg>` in a directory without package.json writes
 # node_modules (with npm's hidden lockfile) and nothing else. That is still an

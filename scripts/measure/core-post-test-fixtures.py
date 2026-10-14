@@ -6,6 +6,7 @@ never installed, and their identity and reached operation are recorded apart
 from the ordinary binary. No product environment switch is added.
 """
 import argparse
+import errno
 import hashlib
 import importlib.util
 import json
@@ -233,6 +234,14 @@ def denied(path, operation):
 def permission_probe(a):
     """Ask the fixture filesystem as this uid before entering a permission row."""
     with tempfile.TemporaryDirectory(prefix='permission-probe.',dir=a.directory) as tmp:
+        if a.operation=='fifo':
+            # Not a permission: whether this filesystem makes a FIFO at all.
+            # WSL1's Windows drive answers EPERM; any other error is a failure.
+            try:os.mkfifo(Path(tmp)/'fifo')
+            except OSError as error:
+                if error.errno not in (errno.EPERM,errno.ENOTSUP,errno.EOPNOTSUPP):raise
+                print('mkfifo returned OS error '+str(error.errno)+' on this filesystem for uid '+str(os.geteuid()))
+            return
         directory=Path(tmp)/'d';directory.mkdir()
         path=directory/'f';path.write_bytes(b'fixture bytes')
         target=path if a.operation in ('read','write') else directory
@@ -371,7 +380,7 @@ def main():
     for mode in ['hook','checked-hook']:
         q=sub.add_parser(mode);q.add_argument('--manifest',required=True);q.add_argument('--stage',choices=['pre','post'],required=True)
     q=sub.add_parser('permission-probe');q.add_argument('--directory',required=True)
-    q.add_argument('--operation',choices=['read','write','create','unlink','scandir'],required=True)
+    q.add_argument('--operation',choices=['read','write','create','unlink','scandir','fifo'],required=True)
     a=p.parse_args()
     return {'hook':hook,'checked-hook':checked_hook,'prepare':prepare,'permission-probe':permission_probe}[a.cmd](a)
 if __name__=='__main__':sys.exit(main())
