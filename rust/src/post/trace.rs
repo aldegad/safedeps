@@ -1,7 +1,7 @@
 //! File metadata and bounded walks used by the install and backstop traces.
 use super::{jv, sh, report::cat};
 use crate::{json::Value, os, state, outcome::{Outcome,Action,Form}};
-use std::{fs, path::{Path,PathBuf}, os::unix::fs::MetadataExt, time::{Duration,Instant}};
+use std::{fs, path::{Path,PathBuf}, os::unix::{ffi::OsStrExt,fs::MetadataExt}, time::{Duration,Instant}};
 
 pub const RECORDS: [&str;2] = ["package-lock.json","node_modules/.package-lock.json"];
 
@@ -70,6 +70,47 @@ pub fn listing(dir:&Path) -> Vec<Vec<u8>> {
     let mut out:Vec<_>=fs::read_dir(dir).into_iter().flatten().filter_map(Result::ok).map(|e|sh::basename(sh::bytes(&e.path())))
         .filter(|n|!n.starts_with(b".")).collect();
     out.sort();out
+}
+
+/// The entries a rollback compares in a node_modules directory, the same
+/// for both hooks: each name right under it, and each name inside a
+/// directory right under it that is a scope (`@name`) or `.bin`, as
+/// `<dir>/<name>`. A link is an entry and is not walked. Sorted. The error
+/// is the first read that failed; what a failed read would have listed is
+/// not in the list.
+pub fn tree_entries(tree:&Path) -> (Vec<Vec<u8>>,Option<std::io::Error>) {
+    let (mut out,mut inner,mut failed)=(Vec::new(),Vec::new(),None);
+    match fs::read_dir(tree) {
+        Err(error)=>return (out,Some(error)),
+        Ok(entries)=>for e in entries {
+            match e.and_then(|e|Ok((e.file_name(),e.file_type()?))) {
+                Err(error)=>{failed.get_or_insert(error);},
+                Ok((name,kind))=>{
+                    let name=name.as_bytes().to_vec();
+                    if kind.is_dir() && (name.starts_with(b"@") || name==b".bin") {inner.push(name.clone());}
+                    out.push(name);
+                },
+            }
+        },
+    }
+    for dir in inner {
+        match fs::read_dir(tree.join(sh::p(&dir))) {
+            Err(error)=>{failed.get_or_insert(error);},
+            Ok(entries)=>for e in entries {
+                match e {Err(error)=>{failed.get_or_insert(error);},Ok(e)=>out.push(cat(&[&dir,b"/",e.file_name().as_bytes()]))}
+            },
+        }
+    }
+    out.sort();(out,failed)
+}
+
+/// The entries of `now` that `before` lacks, each one inside an entry that
+/// is itself added left out: its directory goes with it.
+pub fn added_entries(before:&[Vec<u8>],now:&[Vec<u8>]) -> Vec<Vec<u8>> {
+    let old:std::collections::HashSet<&[u8]>=before.iter().map(Vec::as_slice).collect();
+    let added:Vec<&Vec<u8>>=now.iter().filter(|e|!old.contains(e.as_slice())).collect();
+    let tops:std::collections::HashSet<&[u8]>=added.iter().filter(|e|!e.contains(&b'/')).map(|e|e.as_slice()).collect();
+    added.into_iter().filter(|e|e.iter().position(|b|*b==b'/').is_none_or(|i|!tops.contains(&e[..i]))).cloned().collect()
 }
 
 /// `read` is set only where the baseline file was there and neither npm
@@ -190,6 +231,32 @@ mod tests {
         assert_eq!(Outcome::Io(Err(std::io::Error::other("no code"))).describe(Action::Walk(Path::new("fixture")),Form::Action),
             b"the walk of fixture returned an error without an OS code");
         fs::remove_dir(&root).unwrap();
+    }
+
+    #[test]
+    fn tree_entries_list_scopes_and_bin_and_do_not_walk_a_link() {
+        let root=std::env::temp_dir().join(format!("safedeps-entries-{}",std::process::id()));
+        let tree=root.join("node_modules");
+        for dir in ["kept/lib",".bin","@s/a/node_modules/deep","outside/x"] {fs::create_dir_all(tree.join(dir)).unwrap();}
+        fs::write(tree.join(".package-lock.json"),b"{}\n").unwrap();
+        fs::write(tree.join(".bin/a"),b"").unwrap();
+        std::os::unix::fs::symlink(tree.join("outside"),tree.join("@link")).unwrap();
+        let (entries,failed)=tree_entries(&tree);
+        assert!(failed.is_none());
+        let names:Vec<&[u8]>=entries.iter().map(Vec::as_slice).collect();
+        assert_eq!(names,[b".bin".as_slice(),b".bin/a",b".package-lock.json",b"@link",b"@s",b"@s/a",b"kept",b"outside"]);
+        let (none,error)=tree_entries(&root.join("missing"));
+        assert!(none.is_empty() && error.is_some());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn added_entries_leave_out_what_an_added_directory_holds() {
+        let v=|xs:&[&str]|xs.iter().map(|s|s.as_bytes().to_vec()).collect::<Vec<_>>();
+        let before=v(&[".bin",".bin/kept","@s","@s/kept","kept"]);
+        let now=v(&[".bin",".bin/added",".bin/kept","@new","@new/x","@s","@s/added","@s/kept","@s-x","added","kept"]);
+        assert_eq!(added_entries(&before,&now),v(&[".bin/added","@new","@s/added","@s-x","added"]));
+        assert!(added_entries(&now,&before).is_empty());
     }
 }
 pub fn drop_baseline(home:&Path,entry:&[u8]) {

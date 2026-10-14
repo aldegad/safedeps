@@ -79,6 +79,15 @@
 # what it was, the checks of the install from before the hook all showing no
 # write, and the check lines the form is made of right after it.
 #
+# A node_modules that was a directory before the command is not removed. The
+# oracle reads what it was right after the pre-guard ran, in Python, by the
+# snapshot the call wrote and by the call's tool_use_id (oracle_pre): the
+# pre-guard writes nothing in a project. A rollback that removes such a
+# node_modules is red, unless the record the hook read states nothing about
+# it. "kept <path>, which was a directory ..." needs every entry the oracle
+# read then, and still read before the hook, to be there after it, and every
+# entry it did not read then to be named by a step line.
+#
 # The effect gate's own warnings are prose, owned by a follow-up plan, and
 # their bytes are not checked here. They are listed in ORACLE_PROSE by exact
 # prefix, with the blocks each may appear in and the most lines this suite may
@@ -98,8 +107,8 @@ snapshot-confirmed snapshot-pre snapshot-journal-confirmed snapshot-journal-pre
 restored not-restored-differs not-restored-absent not-restored-not-file removed not-removed
 refused-restore-link refused-removal-link refused-unresolved
 path-exists path-absent path-link workspaces-key changed-nothing
-kept kept-files kept-packages kept-bins kept-links kept-not-newer kept-itself
-reason-trace reason-file reason-package reason-bin reason-link reason-newer reason-no-snapshot unjudged
+kept kept-files kept-packages kept-bins kept-links kept-not-newer kept-itself kept-before kept-before-backstop walk-io
+reason-trace reason-file reason-package reason-bin reason-link reason-entry reason-entry-backstop reason-newer reason-no-snapshot unjudged
 trace-none trace-baseline-gone trace-no-baseline
 inert-added inert-asked inert-none
 rebuild-skipped-added rebuild-ran-added rebuild-skipped rebuild-ran
@@ -272,7 +281,24 @@ oracle_tree_state() {
   [[ -f "${home}/snapshots/${snap}_links.list" ]] && oracle_links_lacking "${nm}" "${home}/snapshots/${snap}_links.list" | sed 's/^/link /'
   [[ -n "$(find -H "${nm}/.package-lock.json" -prune -newer "${home}/snapshots/${snap}_meta.json" 2>/dev/null)" ]] && printf 'newer %s\n' "${nm}/.package-lock.json"
   [[ -n "$(find -H "${nm}" -prune -newer "${home}/snapshots/${snap}_meta.json" 2>/dev/null)" ]] && printf 'dir-newer %s\n' "${nm}"
+  oracle_entries_lacking "${ORACLE_DIR}/pre-tree/${snap}" "${nm}" | sed "s|^|entry ${nm}/|"
   return 0
+}
+# The entries of <node_modules> now (Python's tree reading) that the reading
+# <file> took right after the pre-guard ran lacks, an entry inside one that is
+# itself lacking left out. Nothing when that reading is not of a directory.
+oracle_entries_lacking() {
+  [[ "$(head -1 "$1" 2>/dev/null)" == directory ]] || return 0
+  python3 - "$1" "$2" "${ORACLE_READ}" <<'PY'
+import subprocess, sys
+before = {l[6:] for l in open(sys.argv[1], encoding="utf-8", errors="surrogateescape").read().splitlines() if l.startswith("entry ")}
+now = subprocess.run([sys.executable, sys.argv[3], "tree", sys.argv[2]], capture_output=True, text=True, errors="surrogateescape").stdout.splitlines()
+added = [l[6:] for l in now if l.startswith("entry ") and l[6:] not in before]
+tops = {e for e in added if "/" not in e}
+for e in added:
+    if "/" not in e or e.split("/", 1)[0] not in tops:
+        print(e)
+PY
 }
 # The links among node_modules' package entries (Python's walk) that the
 # listing file <list> does not hold, one per line.
@@ -318,6 +344,15 @@ oracle_before() {
   if [[ -n "${2:-}" ]]; then
     cwd=$(jq -r '.cwd // empty' <<< "$2")
     [[ -z "${cwd}" ]] || { cwd=$(oracle_phys "${cwd}"); oracle_note_listing "${call}" "${cwd}"; }
+    if [[ -n "${cwd}" ]]; then
+      python3 "${ORACLE_READ}" tree "${cwd}/node_modules" > "${call}/cwd.entries" 2>/dev/null || true
+      # The entries the oracle's reading right after this call's pre-guard
+      # lacks, for the backstop, which has no snapshot.
+      printf '%s' "$2" > "${call}/before-input.json"
+      if id=$(python3 "${ORACLE_READ}" call "${call}/before-input.json" 2>/dev/null); then
+        oracle_entries_lacking "${ORACLE_DIR}/pre-tree/id-${id}.tree" "${cwd}/node_modules" > "${call}/cwd.added"
+      fi
+    fi
   fi
   for file in "${home}/pending"/*.json; do
     [[ -f "${file}" ]] || continue
@@ -326,6 +361,8 @@ oracle_before() {
     oracle_trace_state "${file}" "${cwd}" > "${call}/pending/${file##*/}.trace"
     oracle_node_files_state "${file}" "${cwd}" > "${call}/pending/${file##*/}.nodefiles"
     oracle_tree_state "${file}" "${cwd}" > "${call}/pending/${file##*/}.tree"
+    # node_modules as Python reads it right before the hook, for kept-before.
+    python3 "${ORACLE_READ}" tree "$(oracle_record_project "${file}" "${cwd}")/node_modules" > "${call}/pending/${file##*/}.entries" 2>/dev/null || true
     # Whether the record's snapshot had its meta file before the hook ran: a
     # call the hook does not judge has its snapshot removed by the hook.
     python3 "${ORACLE_READ}" isfile "${home}/snapshots/$(jq -r '.snapshot_id | strings' "${file}" 2>/dev/null)_meta.json" \
@@ -493,7 +530,36 @@ oracle_pre() {
     esac
   done < "${call}/metas.written"
   [[ "${printed}" != true || "${n}" == 1 ]] || oracle_red "the pre-guard printed a rewrite and no single record says it wrote one (${n} do)"
+  # What node_modules was before the command, read in Python right after the
+  # pre-guard ran, which writes nothing in a project: by the snapshot this
+  # call wrote, in the project its record names, and, for the backstop's
+  # trace entry, by the call's tool_use_id in the directory it ran in.
+  local snap project id cwd
+  mkdir -p "${ORACLE_DIR}/pre-tree"
+  while IFS= read -r meta; do
+    [[ -n "${meta}" ]] || continue
+    snap="${meta##*/}"; snap="${snap%_meta.json}"
+    project=$(python3 "${ORACLE_READ}" string "${meta}" project_dir 2>/dev/null) || continue
+    python3 "${ORACLE_READ}" tree "${project}/node_modules" > "${ORACLE_DIR}/pre-tree/${snap}" \
+      || oracle_red "the oracle's reading of ${project}/node_modules failed"
+  done < "${call}/metas.written"
+  if [[ -n "${3:-}" ]]; then
+    printf '%s' "$3" > "${call}/pre-input.json"
+    cwd=$(jq -r '.cwd // empty' <<< "$3")
+    if id=$(python3 "${ORACLE_READ}" call "${call}/pre-input.json" 2>/dev/null) && [[ -n "${cwd}" ]]; then
+      python3 "${ORACLE_READ}" inode "$(oracle_phys "${cwd}")/node_modules" > "${ORACLE_DIR}/pre-tree/id-${id}"
+      python3 "${ORACLE_READ}" tree "$(oracle_phys "${cwd}")/node_modules" > "${ORACLE_DIR}/pre-tree/id-${id}.tree"
+    fi
+  fi
   [[ "${ORACLE_FAILED}" == 0 ]]
+}
+
+# The project a pending record is judged in: its project_dir, or the payload's
+# directory where it names none.
+oracle_record_project() {
+  local project
+  project=$(python3 "${ORACLE_READ}" string "$1" project_dir 2>/dev/null) || project=""
+  printf '%s' "${project:-$2}"
 }
 
 # The fact a skipped rebuild gives as its reason.
@@ -561,6 +627,42 @@ oracle_journal_expected() {
       printf '%s exists; the snapshot %s recorded it as absent\n' "${project}/${name}" "${snap}"
     fi
   done < <(sort -u "${list}")
+}
+
+# kept <path>, which was a directory when the pre-command snapshot <id> was
+# taken: the oracle read a directory there right after the pre-guard ran;
+# every entry it read then, and read again before the hook, is there after
+# it; and every entry it did not read then is named by a step line.
+oracle_kept_before() {
+  local path="$1" snap="$2" pre="${ORACLE_DIR}/pre-tree/$2" lost added
+  [[ "${path}" == "${O_PROJECT}/node_modules" && "${snap}" == "${O_PRE}" ]] || oracle_red "another directory or another snapshot"
+  [[ "${O_BLOCK}" == rollback ]] || oracle_red "said outside a rollback that consumed this call's record"
+  [[ -d "${path}" && ! -L "${path}" ]] || oracle_red "it is not a directory now"
+  [[ "$(head -1 "${pre}" 2>/dev/null)" == directory ]] || { oracle_red "right after the pre-guard ran, the oracle read no directory there"; return 0; }
+  oracle_kept_entries "${pre}" "${path}"
+}
+# oracle_kept_entries <reading right after the pre-guard ran> <node_modules>:
+# every entry the oracle read then, and read again before the hook, is there
+# after it, and every entry it did not read then is named by a step line.
+oracle_kept_entries() {
+  local pre="$1" path="$2" lost added
+  [[ "$(head -1 "${pre}" 2>/dev/null)" == directory ]] || { oracle_red "right after the pre-guard ran, the oracle read no directory there"; return 0; }
+  lost=$(python3 - "${pre}" "${O_ENTRIES}" "${path}" "${ORACLE_READ}" <<'PY'
+import subprocess, sys
+def entries(lines):
+    return {l[6:] for l in lines if l.startswith("entry ")}
+read = lambda p: open(p, encoding="utf-8", errors="surrogateescape").read().splitlines()
+pre, before = entries(read(sys.argv[1])), entries(read(sys.argv[2]))
+now = entries(subprocess.run([sys.executable, sys.argv[4], "tree", sys.argv[3]], capture_output=True, text=True, errors="surrogateescape").stdout.splitlines())
+for e in sorted((pre & before) - now):
+    print(e)
+PY
+)
+  [[ -z "${lost}" ]] || oracle_red "the rollback removed entries node_modules held before the command: ${lost//$'\n'/ }"
+  while IFS= read -r added; do
+    [[ -n "${added}" ]] || continue
+    grep -qxF -- "${path}/${added}" <<< "${O_STEP_PATHS}" || oracle_red "node_modules holds ${added}, which it did not hold before the command, and no step line names it"
+  done < <(oracle_entries_lacking "${pre}" "${path}")
 }
 
 # Which of the kept form's check lines <line> is, if any.
@@ -888,6 +990,11 @@ oracle_line() {
   local re_reason_bin='^(/.+)/\.bin lists ([^/]+), which the pre-command snapshot ([^ ]+) does not$'
   local re_reason_package='^(/.+) lists (/.+), which the pre-command snapshot ([^ ]+) does not$'
   local re_reason_newer='^(/.+) is newer than the pre-command snapshot ([^ ]+)$'
+  local re_reason_entry='^(/.+) lists the entry (/.+), which the pre-command snapshot ([^ ]+) does not$'
+  local re_kept_before='^kept (/.+), which was a directory when the pre-command snapshot ([^ ]+) was taken$'
+  local re_kept_backstop='^kept (/.+): it has the inode the trace entry for this call recorded before this command$'
+  local re_reason_entry_backstop='^(/.+) lists the entry (/.+), which the trace entry for this call did not list before this command$'
+  local re_walk_io='^the walk of (/.+) returned (OS error ([1-9][0-9]*)|an error without an OS code)$'
   local re_trace_none='^no install trace in (/.*): neither npm lockfile there is newer than the baseline taken before this command or has another inode$'
   local re_trace_gone='^no install trace in (/.*): the baseline file (/.+) does not exist$'
   local re_skip_added='^safedeps added --ignore-scripts to this install and did not run npm rebuild: (.+)$'
@@ -1201,6 +1308,13 @@ oracle_line() {
     O_STEP_PATHS+="${rm_path}"$'\n'
     oracle_nm_step "${rm_path}"
     [[ ! -e "${rm_path}" && ! -L "${rm_path}" ]] || oracle_red "the path is still there"
+    # A node_modules that was a directory before the command stays, unless
+    # the record the hook read states nothing about it.
+    if [[ "${rm_path}" == "${O_PROJECT}/node_modules" && -n "${O_PRE}" \
+          && "$(head -1 "${ORACLE_DIR}/pre-tree/${O_PRE}" 2>/dev/null)" == directory ]] \
+       && python3 "${ORACLE_READ}" string "${O_META}" node_modules >/dev/null 2>&1; then
+      oracle_red "the rollback removed a node_modules that was a directory before the command"
+    fi
   elif [[ "${line}" =~ ${re_refused} ]]; then
     local rf_kind="${BASH_REMATCH[1]}" rf_path="${BASH_REMATCH[2]}" rf_fact="${BASH_REMATCH[3]}"
     [[ "${rf_kind}" != removal ]] || oracle_nm_step "${rf_path}"
@@ -1219,6 +1333,33 @@ oracle_line() {
   elif [[ "${line}" == 'this rollback has no snapshot from before the command' ]]; then
     oracle_count reason-no-snapshot
     [[ "${O_BLOCK}" == backstop-rollback && -z "${O_PRE}" ]] || oracle_red "said outside the backstop, or a pending state was consumed for this command"
+  elif [[ "${line}" =~ ${re_reason_entry} ]]; then
+    oracle_count reason-entry
+    [[ "${BASH_REMATCH[1]}" == "${O_PROJECT}/node_modules" && "${BASH_REMATCH[2]}" == "${BASH_REMATCH[1]}"/* && "${BASH_REMATCH[3]}" == "${O_PRE}" ]] || oracle_red "another directory or another snapshot"
+    grep -qxF -- "entry ${BASH_REMATCH[2]}" <<< "${O_TREE}" || oracle_red "before the hook ran, node_modules did not hold that entry, or it held it right after the pre-guard ran"
+  elif [[ "${line}" =~ ${re_reason_entry_backstop} ]]; then
+    oracle_count reason-entry-backstop
+    [[ "${O_BLOCK}" == backstop-rollback ]] || oracle_red "said outside the backstop"
+    [[ "${BASH_REMATCH[1]}" == "${O_PROJECT}/node_modules" && "${BASH_REMATCH[2]}" == "${BASH_REMATCH[1]}"/* ]] || oracle_red "another directory"
+    grep -qxF -- "${BASH_REMATCH[2]#"${BASH_REMATCH[1]}/"}" "${O_CALL}/cwd.added" 2>/dev/null \
+      || oracle_red "before the hook ran, node_modules did not hold that entry, or it held it right after this call's pre-guard ran"
+  elif [[ "${line}" =~ ${re_kept_before} ]]; then
+    oracle_count kept-before
+    oracle_kept_before "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+  elif [[ "${line}" =~ ${re_kept_backstop} ]]; then
+    oracle_count kept-before-backstop
+    local kb_path="${BASH_REMATCH[1]}" kb_inode
+    [[ "${O_BLOCK}" == backstop-rollback ]] || oracle_red "said outside the backstop"
+    [[ "${kb_path}" == "${O_PROJECT}/node_modules" && -d "${kb_path}" && ! -L "${kb_path}" ]] || oracle_red "not the project's node_modules, or not a directory"
+    kb_inode=$(cat "${ORACLE_DIR}/pre-tree/id-${O_CALL_ID}" 2>/dev/null)
+    [[ -n "${O_CALL_ID}" && -n "${kb_inode}" && "$(python3 "${ORACLE_READ}" inode "${kb_path}")" == "${kb_inode}" ]] \
+      || oracle_red "the oracle read another inode, or none, for node_modules right after the pre-guard ran for this call"
+    oracle_kept_entries "${ORACLE_DIR}/pre-tree/id-${O_CALL_ID}.tree" "${kb_path}"
+  elif [[ "${line}" =~ ${re_walk_io} ]]; then
+    oracle_count walk-io
+    [[ "${O_BLOCK}" == rollback && "${BASH_REMATCH[1]}" == "${O_PROJECT}/node_modules" ]] || oracle_red "said outside a rollback, or of another path"
+    [[ -n "${BASH_REMATCH[3]}" ]] && python3 "${ORACLE_READ}" tree "${BASH_REMATCH[1]}" | grep -q " ${BASH_REMATCH[3]}\$" \
+      || oracle_red "the oracle's own reading of node_modules returns no error with that number"
   elif [[ "${line}" =~ ${re_reason_trace} ]]; then
     oracle_count reason-trace
     [[ "${O_TRACE}" == present ]] || oracle_red "the trace this file read before the hook is '${O_TRACE}'"
@@ -1295,7 +1436,9 @@ oracle_line() {
     [[ "${O_TRACE}" != present ]] || oracle_red "kept, but before the hook ran the install trace was present"
     [[ "$(sed -n 2p <<< "${O_NODE_FILES}")" == same ]] || oracle_red "kept, but before the hook ran a node file differed from the snapshot: ${O_NODE_FILES//$'\n'/ -> }"
     local writes
-    writes=$(grep -v '^dir-newer ' <<< "${O_TREE}" || true)
+    # An entry the pre-guard's listing lacks is not a write here: a tool the
+    # command ran makes a cache directory under node_modules (vite's .vite).
+    writes=$(grep -v -e '^dir-newer ' -e '^entry ' <<< "${O_TREE}" || true)
     [[ -z "${writes}" ]] || oracle_red "kept, but before the hook ran node_modules showed a write: ${writes//$'\n'/ | }"
     # The form is the line and the checks that follow it, in this order.
     O_KEPT_EXPECT="link trace kept-files kept-packages kept-bins kept-links lockfile tree"
@@ -1577,7 +1720,7 @@ oracle_message() {
   O_CMD=$(jq -r '.tool_input.command // empty' <<< "${payload}")
   O_PROJECT=$(jq -r '.cwd // empty' <<< "${payload}")
   O_PROJECT=$(oracle_phys "${O_PROJECT}")
-  O_PRE="" O_META="" O_TRACE="unread" O_NODE_FILES="" O_TREE="" O_DIR_HASH=""
+  O_PRE="" O_META="" O_TRACE="unread" O_NODE_FILES="" O_TREE="" O_DIR_HASH="" O_ENTRIES="${call}/cwd.entries"
   if [[ -n "${consumed}" && "${O_UNREAD}" != 1 ]]; then
     # The record's fields count only as strings, as the hook reads them; read
     # in Python, not with the hook's jq.
@@ -1589,6 +1732,7 @@ oracle_message() {
     O_TRACE=$(cat "${consumed}.trace")
     O_NODE_FILES=$(cat "${consumed}.nodefiles")
     O_TREE=$(cat "${consumed}.tree")
+    O_ENTRIES="${consumed}.entries"
     [[ -z "${project}" ]] || O_PROJECT="${project}"
     # A snapshot with no meta file is not one the backstop restores from or
     # compares with, so the call has no snapshot from before the command.
@@ -1619,7 +1763,7 @@ oracle_message() {
 oracle_direct() {
   local line
   O_CALL="${ORACLE_DIR}" O_DIRECT=1 O_RECORD_UNREAD=0 O_CALL_ID="" O_CONSUMED="" O_GONE=0 O_EMPTY=0 O_UNREAD=0 O_HOME="${SAFEDEPS_HOME:-${HOME}/.safedeps}" O_NPM_LOG=/dev/null
-  O_META="$1" O_PAYLOAD="$2" O_CMD=$(jq -r '.tool_input.command // empty' <<< "$2") O_PROJECT="" O_PRE="" O_TRACE="unread" O_NODE_FILES="" O_TREE="" O_DIR_HASH=""
+  O_META="$1" O_PAYLOAD="$2" O_CMD=$(jq -r '.tool_input.command // empty' <<< "$2") O_PROJECT="" O_PRE="" O_TRACE="unread" O_NODE_FILES="" O_TREE="" O_DIR_HASH="" O_ENTRIES=/dev/null
   oracle_reset
   oracle_verdict
   O_BLOCK=confirm

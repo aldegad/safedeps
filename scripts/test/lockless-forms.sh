@@ -596,15 +596,17 @@ pass "approved installs, including --no-save, sub-project, subdirectory, workspa
 # three, on both engines, and a second approved install pins the lag itself: the
 # package that goes missing is the last one verified, not the first.
 # What a rollback keeps is what the files it restored record. It runs no
-# package manager and removes the project's own node_modules, so nothing is
-# installed until the next install.
+# package manager. node_modules was there before the install, so it stays, and
+# the rollback removes the entries the install added to it.
 records_dependency() {
   local package="$1"
   jq -e --arg p "${package}" '.dependencies[$p] != null' "${CASE_PROJECT}/package.json" >/dev/null \
     && jq -e --arg p "node_modules/${package}" '.packages[$p] != null' "${CASE_PROJECT}/package-lock.json" >/dev/null
 }
-rollback_removed_node_modules() {
-  [[ ! -e "${CASE_PROJECT}/node_modules" ]] && hook_response_read message "${CASE_POST_FILE}" message | grep -x 'removed .*/node_modules' >/dev/null
+rollback_kept_node_modules() {
+  [[ -d "${CASE_PROJECT}/node_modules" && ! -e "${CASE_PROJECT}/node_modules/sd-victim" ]] \
+    && hook_response_read message "${CASE_POST_FILE}" message | grep -x 'removed .*/node_modules/sd-victim' >/dev/null \
+    && hook_response_read message "${CASE_POST_FILE}" message | grep -x 'kept .*/node_modules, which was a directory when the pre-command snapshot .* was taken' >/dev/null
 }
 lacks_dependency() {
   local package="$1"
@@ -631,8 +633,9 @@ for engine in claude codex; do
   records_dependency sd-approved \
     || fail "the rollback keeps the approved install verified just before it on ${engine} (package.json: $(jq -c .dependencies "${CASE_PROJECT}/package.json"))"
   lacks_dependency sd-victim || fail "the rollback removes the unapproved install on ${engine}"
-  rollback_removed_node_modules \
-    || fail "the rollback removes node_modules and says so on ${engine} (post: ${CASE_POST:0:300})"
+  rollback_kept_node_modules \
+    || fail "the rollback keeps node_modules, removes what the install added and says so on ${engine} (post: ${CASE_POST:0:300})"
+  [[ -f "${CASE_PROJECT}/node_modules/sd-approved/package.json" ]] || fail "the package the verified install put in node_modules stays on ${engine}"
   [[ "${engine}" == codex ]] || ! victim_ran || fail "no script of the unverified package runs on ${engine}"
 
   run_install "npm install sd-approved-too" "${engine}"
@@ -784,8 +787,8 @@ if shard_row "the rollback runs no npm when the project .npmrc says global=true,
   : > "${MARKS}"
   run_install "npm install --global=false sd-victim"
   rolled_back || fail "an unapproved install beside a global .npmrc is rolled back (post: ${CASE_POST:-<quiet>})"
-  rollback_removed_node_modules \
-    || fail "the rollback removes the project's own node_modules and says so (node_modules: $(ls "${CASE_PROJECT}/node_modules" 2>&1 | paste -sd, -))"
+  rollback_kept_node_modules \
+    || fail "the rollback keeps the project's own node_modules, removes what the install added and says so (node_modules: $(ls "${CASE_PROJECT}/node_modules" 2>&1 | paste -sd, -))"
   records_dependency sd-approved || fail "the restored files still record the approved install"
   [[ ! -e "${tmp_root}/global/lib/node_modules" ]] \
     || fail "the rollback installs nothing into the global prefix ($(ls "${tmp_root}/global/lib/node_modules" | paste -sd, -))"
@@ -807,8 +810,8 @@ if shard_row "a rollback with no package-lock.json resolves nothing again and ru
   : > "${MARKS}"
   run_install "npm install sd-victim"
   rolled_back || fail "an unapproved install in a project with no package-lock.json is rolled back (post: ${CASE_POST:-<quiet>})"
-  rollback_removed_node_modules \
-    || fail "the rollback resolves nothing again: node_modules is removed, not reinstalled (node_modules: $(ls "${CASE_PROJECT}/node_modules" 2>&1 | paste -sd, -))"
+  rollback_kept_node_modules \
+    || fail "the rollback resolves nothing again: what the install added is removed, not reinstalled (node_modules: $(ls "${CASE_PROJECT}/node_modules" 2>&1 | paste -sd, -))"
   [[ ! -s "${MARKS}" ]] || fail "the rollback runs no install script ($(cut -f1,2 "${MARKS}" | paste -sd, -))"
   hook_response_read message "${CASE_POST_FILE}" message | grep -x '.*/package-lock\.json does not exist' >/dev/null \
     && hook_response_read message "${CASE_POST_FILE}" message | grep -x '.*/npm-shrinkwrap\.json does not exist' >/dev/null \
@@ -838,12 +841,13 @@ if shard_row "an unapproved workspace install is rolled back from disk, member m
     || fail "the rollback restores the member's package.json ($(cat "${CASE_PROJECT}/packages/a/package.json"))"
   [[ -z "$(cd "${CASE_PROJECT}" && find . -path '*/node_modules/sd-victim' -print 2>/dev/null)" ]] \
     || fail "the rollback removes the unapproved package from disk"
-  [[ ! -e "${CASE_PROJECT}/node_modules" ]] \
-    || fail "the rollback removes the workspace root's own node_modules"
+  [[ -L "${CASE_PROJECT}/node_modules/a" ]] \
+    || fail "the rollback keeps the workspace root's node_modules, which was there before the install, and its link to the member"
   hook_response_read message "${CASE_POST_FILE}" message | grep -x '.*/package\.json has the key workspaces' >/dev/null \
     || fail "the rollback says the root package.json has the key workspaces (post: ${CASE_POST})"
-  [[ "$(hook_response_read message "${CASE_POST_FILE}" message | grep -c '^removed .*/node_modules$')" == 1 ]] \
-    || fail "the rollback names the one node_modules it removed, the workspace root's (post: ${CASE_POST})"
+  [[ "$(hook_response_read message "${CASE_POST_FILE}" message | grep -c '^kept .*/node_modules, which was a directory when the pre-command snapshot .* was taken$')" == 1 ]] \
+    && ! hook_response_read message "${CASE_POST_FILE}" message | grep '^removed .*/node_modules$' >/dev/null \
+    || fail "the rollback names the one node_modules it kept, the workspace root's, and removes none (post: ${CASE_POST})"
   victim_ran && fail "no script of the unverified package runs in a workspace rollback"
   pass "an unapproved workspace install is rolled back from disk, member manifest included, and no member is read as a package"
 fi

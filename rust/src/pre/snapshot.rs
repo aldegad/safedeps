@@ -52,10 +52,27 @@ impl Snapshot {
             .map(|e|e.file_name().as_bytes().to_vec()).filter(|n|!n.starts_with(b".")).collect();
         bins.sort();fs::write(snap.path(b"bins.list"),lines(&bins))?;
         fs::write(snap.path(b"links.list"),lines(&post::package_links(&node)))?;
+        // What node_modules is before the command, and for a directory the
+        // entries a rollback compares, NUL-terminated. A rollback removes
+        // only the entries this list lacks, and keeps a directory this
+        // record names. A listing that failed somewhere is not written: an
+        // entry it missed would read as one the command added.
+        let tree_kind=match fs::symlink_metadata(&node) {
+            Ok(m) if m.file_type().is_symlink()=>Some("link"),
+            Ok(m) if m.is_dir()=>Some("directory"),
+            Ok(_)=>Some("other"),
+            Err(e) if e.kind()==io::ErrorKind::NotFound=>Some("absent"),
+            Err(_)=>None,
+        };
+        if tree_kind==Some("directory") {
+            let (entries,failed)=post::tree_entries(&node);
+            if failed.is_none() {fs::write(snap.path(b"entries.list"),entries.iter().flat_map(|e|e.iter().copied().chain([0])).collect::<W>())?;}
+        }
+        let tree_kind=tree_kind.map(|k|format!("  \"node_modules\": \"{}\",\n",k)).unwrap_or_default();
         let parent=if snap.parent.is_empty(){"null".to_owned()}else{jq::compact(&jq::arg(&snap.parent))};
         // The original writes this initial record as a here-document; later
         // rewrite updates use jq's object writer. Both spellings are observed.
-        let meta=format!("{{\n  \"record\": 2,\n  \"snapshot_id\": \"{}\",\n  \"parent_snapshot_id\": {},\n  \"timestamp\": {},\n  \"project_dir\": {},\n  \"command\": {},\n  \"ignore_scripts_injected\": false,\n  \"ignore_scripts_unread\": false,\n  \"lock_files_found\": {}\n}}\n",snap.id,parent,timestamp,jq::compact(&jq::arg(project)),jq::compact(&jq::arg(&call.command)),found);
+        let meta=format!("{{\n  \"record\": 2,\n  \"snapshot_id\": \"{}\",\n  \"parent_snapshot_id\": {},\n  \"timestamp\": {},\n  \"project_dir\": {},\n  \"command\": {},\n  \"ignore_scripts_injected\": false,\n  \"ignore_scripts_unread\": false,\n{}  \"lock_files_found\": {}\n}}\n",snap.id,parent,timestamp,jq::compact(&jq::arg(project)),jq::compact(&jq::arg(&call.command)),tree_kind,found);
         fs::write(snap.path(b"meta.json"),meta)?;
         Ok(snap)
     }

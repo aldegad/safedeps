@@ -59,6 +59,6 @@ pre_hook() {
   native_pre_clock_ready "${call}" || return $?
   out=$(printf '%s' "${payload}" | "$PRE_CORE" pre) || rc=$?
   printf '%s' "${out}"
-  oracle_pre "${call}" "${out}" || exit 1
+  oracle_pre "${call}" "${out}" "${payload}" || exit 1
   return "${rc}"
 }

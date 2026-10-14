@@ -17,6 +17,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from native_fixture_facts import tree_facts
@@ -152,6 +153,12 @@ def seed(d,kind):
             lock=project/'package-lock.json'
             if kind=='trace-link':lock.rename(project/'target.json');lock.symlink_to('target.json')
             inodes,clocks=tree_facts(project)
+            # The oracle's own reading of node_modules when the entry is
+            # taken, as oracle_pre makes it for a hook's pre-guard call.
+            observed=d/'oracle/pre-tree';observed.mkdir(parents=True)
+            reader=str(root/'scripts/test/lib/report-oracle-read.py')
+            (observed/'id-fault-call').write_bytes(subprocess.run([sys.executable,reader,'inode',str(project/'node_modules')],check=True,capture_output=True).stdout)
+            (observed/'id-fault-call.tree').write_bytes(subprocess.run([sys.executable,reader,'tree',str(project/'node_modules')],check=True,capture_output=True).stdout)
             directory=home/'pending/backstop';directory.mkdir()
             baseline=directory/'id-fault-call.trace';baseline.touch()
             dh=hashlib.md5(str(project).encode()).hexdigest()
@@ -224,7 +231,10 @@ with tempfile.TemporaryDirectory(prefix='core-post-faults.') as tmp:
                     reached='this install fetched packages from a registry that is not the public npm registry (' in message and '(on Codex it cannot)' not in message
                 elif kind=='trace-untraced':reached=not message and 'BACKSTOP UNTRACED:' in log
                 elif kind=='trace-deadline':
-                    reached=('A rollback ran.' in message and not (project/'node_modules').exists()
+                    # The entry recorded node_modules' inode before the
+                    # command, and it has it still: the rollback keeps it.
+                    reached=('A rollback ran.' in message and (project/'node_modules').is_dir()
+                             and f'kept {project}/node_modules: it has the inode the trace entry for this call recorded before this command' in message
                              and f'the walk of {project}/node_modules did not finish within 1s' in log)
                 elif kind.startswith('trace-'):reached='A rollback ran.' in message and 'BACKSTOP traced:' in log
                 elif kind in ['pending-gone','pending-empty','pending-object']:

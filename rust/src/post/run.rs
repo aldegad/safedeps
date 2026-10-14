@@ -1,7 +1,7 @@
 //! The effect hook's call ordering. File selection and facts belong to the
 //! domain modules; this is where their ordering becomes a single judgment.
 use super::{call::{Call, Record}, effect, heuristics, journal::Journal, jv,
-    npm::{self, Npm}, report::{self, Report, cat}, rollback::Rollback, sh, snapshot,
+    npm::{self, Npm}, report::{self, Report, cat}, rollback::{Before, Rollback}, sh, snapshot,
     trace::{self, Install}};
 use crate::{os, state};
 use std::{fs, io::Write, time::Instant};
@@ -13,8 +13,12 @@ fn rollback(call: &mut Call, journal: &Journal, trace: &mut Install, report: &mu
     let journal_id = cat(&[if backstop { b"backstop-" } else { b"reorg-" },
         if backstop { &target } else { &pre }, b"-", std::process::id().to_string().as_bytes()]);
     journal.open(&journal_id, &call.store.project, &target, reasons, b"restoring-files").map_err(|_| 1)?;
+    // Read before any file is restored: what node_modules was before the
+    // command, from the record taken then.
+    let before = if backstop { Before::of_entry(&call.store.project, &call.entry, call.moved) }
+        else { Before::of_snapshot(&call.store, &pre) };
     if backstop { call.store.id = target.clone(); }
-    let mut rb = Rollback::new(&call.store, report, trace, pre, target.clone(), backstop);
+    let mut rb = Rollback::new(&call.store, report, trace, pre, target.clone(), backstop, before);
     for name in call.store.monitored().iter().filter(|n| !n.is_empty()) { rb.restore(name); }
     if !backstop {
         for name in snapshot::csproj(&call.store.project) { rb.restore(&name); }

@@ -1,19 +1,55 @@
 //! Rollback writes only the paths it inspected. It never runs npm.
-use super::{snapshot::{self,Store},trace::{self,Install},report::{self,Report,cat},sh};
-use crate::{state,os};
-use std::collections::HashSet;
+use super::{jv,snapshot::{self,Store},trace::{self,Install},report::{self,Report,cat},sh};
+use crate::{json::Value,state,os,outcome::{Outcome,Action,Form}};
+use std::{collections::HashSet,path::Path};
+
+/// What node_modules was before the command, as a record taken then states
+/// it. A rollback keeps a tree only on such a fact: a record that states
+/// none leaves the removal as it was.
+pub enum Before {
+    /// The pre-command snapshot says it was a directory. The rollback removes
+    /// only the entries the snapshot's listing of it lacks.
+    Directory,
+    /// The backstop's trace entry recorded its inode before the command, and
+    /// it has that inode still. The rollback removes the entries the entry's
+    /// listing lacks; an entry with no listing keeps the whole tree.
+    Same(Option<Vec<Vec<u8>>>),
+    Unknown,
+}
+impl Before {
+    pub fn of_snapshot(store:&Store,pre:&[u8])->Self{
+        if pre.is_empty(){return Self::Unknown}
+        let meta=jv::read_one_object(&store.path(pre,b"meta.json"));
+        match meta.as_ref().map(|m|jv::field(m,"node_modules")) {Some(Ok(Value::Str(k))) if k==b"directory"=>Self::Directory,_=>Self::Unknown}
+    }
+    /// An entry taken in another directory holds that directory's inodes.
+    pub fn of_entry(project:&Path,entry:&[u8],moved:bool)->Self{
+        if moved||entry.is_empty(){return Self::Unknown}
+        let Ok(v)=crate::json::parse_one(entry) else{return Self::Unknown};
+        match jv::path(&v,&["inodes","node_modules"]) {
+            Ok(Value::Str(i)) if !i.is_empty()&&os::tree_inode(&project.join("node_modules")).as_bytes()==i.as_slice()=>{
+                let listed=match jv::field(&v,"entries") {
+                    Ok(Value::Arr(xs))=>xs.iter().map(|x|match x {Value::Str(s)=>Some(s.clone()),_=>None}).collect::<Option<Vec<_>>>(),
+                    _=>None,
+                };
+                Self::Same(listed)
+            },
+            _=>Self::Unknown,
+        }
+    }
+}
 
 pub struct Rollback<'a>{
     pub store:&'a Store,pub report:&'a mut Report,pub trace:&'a mut Install,
-    pub pre:Vec<u8>,pub target:Vec<u8>,pub backstop:bool,
+    pub pre:Vec<u8>,pub target:Vec<u8>,pub backstop:bool,before:Before,
     npm_project:bool,wrote:Option<bool>,compared:Vec<Vec<u8>>,different:Vec<u8>,refused:HashSet<Vec<u8>>,stepped:HashSet<Vec<u8>>,
 }
 impl<'a> Rollback<'a>{
     /// Construct before restoring any file: comparisons are against the
     /// command's snapshot, even when the rollback target is an older one.
-    pub fn new(store:&'a Store,report:&'a mut Report,trace:&'a mut Install,pre:Vec<u8>,target:Vec<u8>,backstop:bool)->Self{
+    pub fn new(store:&'a Store,report:&'a mut Report,trace:&'a mut Install,pre:Vec<u8>,target:Vec<u8>,backstop:bool,before:Before)->Self{
         let npm_project=["package.json","package-lock.json","node_modules/.package-lock.json"].iter().any(|n|sh::is_file(&store.project.join(n)));
-        let mut out=Self{store,report,trace,pre,target,backstop,npm_project,wrote:None,compared:Vec::new(),different:Vec::new(),refused:HashSet::new(),stepped:HashSet::new()};
+        let mut out=Self{store,report,trace,pre,target,backstop,before,npm_project,wrote:None,compared:Vec::new(),different:Vec::new(),refused:HashSet::new(),stepped:HashSet::new()};
         if out.pre.is_empty()||!sh::is_file(&store.path(&out.pre,b"meta.json")){return out}
         if !out.trace.records.is_empty(){out.wrote=Some(true);return out}
         out.wrote=Some(false);
@@ -91,9 +127,43 @@ impl<'a> Rollback<'a>{
         for l in facts{self.report.say(l);}
         if sh::is_link(&tree){self.refuse(b"removal",&tree,&report::path(&tree));return}
         if !sh::is_dir(&tree){return}
-        self.report.remove(&tree);
+        match std::mem::replace(&mut self.before,Before::Unknown) {
+            Before::Directory=>{
+                let pre=self.pre.clone();
+                let list=self.store.path(&pre,b"entries.list");
+                match sh::is_file(&list).then(||std::fs::read(&list).ok()).flatten() {
+                    Some(raw)=>{
+                        let listed:Vec<Vec<u8>>=raw.split(|b|*b==0).filter(|e|!e.is_empty()).map(Vec::from).collect();
+                        self.added(&tree,&listed,&cat(&[b", which the pre-command snapshot ",&pre,b" does not"]));
+                    },
+                    None=>self.report.path(&list),
+                }
+                self.report.say(cat(&[b"kept ",sh::bytes(&tree),b", which was a directory when the pre-command snapshot ",&pre,b" was taken"]));
+            },
+            Before::Same(listed)=>{
+                if let Some(listed)=listed {self.added(&tree,&listed,b", which the trace entry for this call did not list before this command");}
+                self.report.say(cat(&[b"kept ",sh::bytes(&tree),b": it has the inode the trace entry for this call recorded before this command"]));
+            },
+            Before::Unknown=>{
+                self.report.remove(&tree);
+            },
+        }
         for n in ["package.json","package-lock.json","npm-shrinkwrap.json"]{self.report.path(&self.store.project.join(n));}
         self.report.workspaces_key(&self.store.project);
+    }
+    /// A node_modules that was a directory before the command stays. What
+    /// the listing from then lacks is what the command added, and only that
+    /// is removed, each entry after the fact that names it. What the command
+    /// changed in place keeps the command's bytes: the listing names entries
+    /// and holds none of their files.
+    fn added(&mut self,tree:&Path,before:&[Vec<u8>],source:&[u8]){
+        let (now,failed)=trace::tree_entries(tree);
+        for entry in trace::added_entries(before,&now) {
+            let path=tree.join(sh::p(&entry));
+            self.report.say(cat(&[sh::bytes(tree),b" lists the entry ",sh::bytes(&path),source]));
+            if let Some(why)=report::outside(&self.store.project,tree){self.refuse(b"removal",&path,&why);}else{self.report.remove(&path);}
+        }
+        if let Some(error)=failed {self.report.say(Outcome::Io(Err(error)).describe(Action::Walk(tree),Form::Action));}
     }
     pub fn tail(&mut self,input:&[u8]){
         self.report.changed_nothing();

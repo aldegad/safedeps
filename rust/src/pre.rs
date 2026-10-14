@@ -304,7 +304,19 @@ fn backstop_trace_baseline(call: &Call, cwd: &[u8]) {
             return;
         }
     }
-    let entry = jq::obj(vec![
+    // The entries of a node_modules directory a rollback compares (the same
+    // listing the install snapshot keeps), for the backstop to remove only
+    // what the command added. Written only when every read succeeded and
+    // every name is text JSON holds as it is: a name it would alter, or one a
+    // failed read left out, would read as one the command added.
+    let mut listed = None;
+    if std::fs::symlink_metadata(d.join("node_modules")).is_ok_and(|m| m.is_dir()) {
+        let (entries, failed) = crate::post::tree_entries(&d.join("node_modules"));
+        if failed.is_none() && entries.iter().all(|e| std::str::from_utf8(e).is_ok()) {
+            listed = Some(jq::J::Arr(entries.iter().map(|e| jq::arg(e)).collect()));
+        }
+    }
+    let mut fields = vec![
         ("key", jq::s(&state::pending_key(&dir_hash, &call.command))),
         ("baseline", jq::arg(&trace_text)),
         ("resolution", jq::s(resolution)),
@@ -319,7 +331,11 @@ fn backstop_trace_baseline(call: &Call, cwd: &[u8]) {
                 ("node_modules/.package-lock.json", jq::s(&os::tree_clock(&d.join("node_modules/.package-lock.json")))),
             ]),
         ),
-    ]);
+    ];
+    if let Some(listed) = listed {
+        fields.push(("entries", listed));
+    }
+    let entry = jq::obj(fields);
     if state::write_state_file(&os::path(&cat(&[&base, b".json"])), jq::compact(&entry).as_bytes()).is_err() {
         let _ = std::fs::remove_file(&trace);
     }

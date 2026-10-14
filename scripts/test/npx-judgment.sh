@@ -29,6 +29,10 @@
 # fails says `not ok` and the battery goes on, so a run against an older core
 # shows every row it fails.
 #
+# A node_modules that was there before the call stays, and the rollback removes
+# what the call added to it (the README, "Any check fails"). The threat rows
+# below hold that the package the call brought in is gone.
+#
 # The core is the tree's own (stamp-checked) or one SAFEDEPS_TEST_CORE names.
 set -uo pipefail
 
@@ -158,7 +162,7 @@ pre_hook() { # <cwd> <command> <tool_use_id>: the pre hook's stdout
   call=$(mktemp -d "${ORACLE_DIR}/pre.XXXXXX")
   oracle_pre_before "${call}"
   out=$(payload "$1" "$2" "$3" | "${CORE}" pre 2>"${call}/stderr")
-  oracle_pre "${call}" "${out}" 2>&1 || : > "${tmp_root}/oracle-red"
+  oracle_pre "${call}" "${out}" "$(payload "$1" "$2" "$3")" 2>&1 || : > "${tmp_root}/oracle-red"
   printf '%s' "${out}"
 }
 post_hook() { # <cwd> <command> <tool_use_id>: the post hook's stdout
@@ -245,10 +249,11 @@ jq '.packages["node_modules/fixture-tool"]={"version":"6.6.6","resolved":"https:
 out=$(post_hook "${dir}" 'npx fixture-tool' "${id}")
 message "${out}" | grep -qxF 'safedeps: suspicious dependency change detected. A rollback ran.' \
   || fail "r1-4: the call is rolled back ($(message "${out}" | head -2 | tr '\n' '|'))"
-[[ ! -e "${dir}/node_modules" ]] || fail "r1-4: the node_modules the call wrote is removed"
+[[ ! -e "${dir}/node_modules/fixture-tool" ]] || fail "r1-4: the package the call added is removed"
+[[ -d "${dir}/node_modules/fixture-parent" ]] || fail "r1-4: the node_modules that was there before the call stays"
 [[ "$(reorg_entries)" -ge 1 ]] || fail "r1-4: reorg.log has the rollback"
 unset SAFEDEPS_PROVIDER_CACHE_TTL_SECONDS
-row "R1.4 (threat) npx during which the hidden lockfile is written again and a package lands: REORG and removal"
+row "R1.4 (threat) npx during which the hidden lockfile is written again and a package lands: REORG and removal of the package"
 
 # R1.5 (regression): an npm install statement is judged with no trace, and an
 # approved one passes.
@@ -421,18 +426,21 @@ message "${out}" | grep -qxF "kept ${dir}/node_modules" || fail "r3-1: the rollb
 row "R3.1 a dot directory with no package.json made under a real node_modules: kept"
 
 r3 r3-2 real 'mkdir "${nm}/fixture-new"; printf "{\"name\":\"fixture-new\",\"version\":\"1.0.0\"}\n" > "${nm}/fixture-new/package.json"'
-[[ ! -e "${dir}/node_modules" ]] || fail "r3-2: node_modules is removed"
-message "${out}" | grep -qF "lists ${dir}/node_modules/fixture-new/package.json, which the pre-command snapshot " || fail "r3-2: the removal names the new package"
-row "R3.2 (threat) a new package directory under node_modules: removed"
+[[ ! -e "${dir}/node_modules/fixture-new" && -d "${dir}/node_modules/fixture-parent" ]] || fail "r3-2: the new package is removed and node_modules stays"
+message "${out}" | grep -qF "lists ${dir}/node_modules/fixture-new/package.json, which the pre-command snapshot " || fail "r3-2: the rollback names the new package"
+message "${out}" | grep -qxF "removed ${dir}/node_modules/fixture-new" || fail "r3-2: the rollback says it removed the new package"
+row "R3.2 (threat) a new package directory under node_modules: the package is removed"
 
 r3 r3-3 real 'printf "{\"name\":\"r3-3\",\"lockfileVersion\":3,\"packages\":{}}\n" > "${nm}/.package-lock.json"'
-[[ ! -e "${dir}/node_modules" ]] || fail "r3-3: node_modules is removed"
-row "R3.3 (threat) npm's hidden lockfile written again: removed"
+[[ -d "${dir}/node_modules/fixture-parent" ]] || fail "r3-3: node_modules stays"
+message "${out}" | grep -qF "${dir}/node_modules/.package-lock.json is newer than the " || fail "r3-3: the rollback says the hidden lockfile was written"
+message "${out}" | grep -qx "kept ${dir}/node_modules, which was a directory when the pre-command snapshot .* was taken" || fail "r3-3: the rollback says it kept node_modules"
+row "R3.3 (threat) npm's hidden lockfile written again: said, and node_modules stays"
 
 r3 r3-4 real 'mkdir -p "${dir}.store/fixture-linked"; printf "{\"name\":\"fixture-linked\",\"version\":\"1.0.0\"}\n" > "${dir}.store/fixture-linked/package.json"; ln -s "${dir}.store/fixture-linked" "${nm}/fixture-linked"'
-[[ ! -e "${dir}/node_modules" ]] || fail "r3-4: node_modules is removed"
+[[ ! -e "${dir}/node_modules/fixture-linked" && ! -L "${dir}/node_modules/fixture-linked" && -d "${dir}/node_modules/fixture-parent" ]] || fail "r3-4: the new link is removed and node_modules stays"
 [[ -f "${dir}.store/fixture-linked/package.json" ]] || fail "r3-4: the removal does not follow the link"
-row "R3.4 (threat) a new link to a package directory right under node_modules: removed"
+row "R3.4 (threat) a new link to a package directory right under node_modules: the link is removed"
 
 r3 r3-5a link 'mkdir "${nm}/.vite"'
 [[ -L "${dir}/node_modules" && -d "${dir}.target/fixture-parent" && -d "${dir}.target/.vite" ]] || fail "r3-5a: the link and what it points to stay"

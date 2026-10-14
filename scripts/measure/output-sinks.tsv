@@ -207,9 +207,12 @@ rust/src/post/report.rs	restore	human	log-or-report	say	fixed-literal+other	2
 rust/src/post/report.rs	restore	human	log-or-report	say	fixed-literal+other+result-renderer	1
 rust/src/post/report.rs	unread	human	log-or-report	say	data-field	1
 rust/src/post/report.rs	workspaces_key	human	log-or-report	say	fixed-literal+other	1
+rust/src/post/rollback.rs	added	human	log-or-report	say	data-field+fixed-literal+other	1
+rust/src/post/rollback.rs	added	human	log-or-report	say	result-renderer	1
 rust/src/post/rollback.rs	message	human	advisory-or-reorg	sh::append	data-field+fixed-literal+other	1
 rust/src/post/rollback.rs	message	human	log-or-report	state::log_advisory	data-field+fixed-literal+other	1
 rust/src/post/rollback.rs	node_modules	human	log-or-report	say	data-field	2
+rust/src/post/rollback.rs	node_modules	human	log-or-report	say	fixed-literal+other	2
 rust/src/post/rollback.rs	refuse	human	advisory-or-reorg	sh::append	fixed-literal+other	1
 rust/src/post/rollback.rs	refuse	human	log-or-report	say	other	1
 rust/src/post/rollback.rs	refuse	human	log-or-report	state::log_advisory	fixed-literal+other	1
@@ -358,7 +361,7 @@ rust/src/pre/snapshot.rs	create	boundary	capability	fs::OpenOptions::new	-	1
 rust/src/pre/snapshot.rs	create	boundary	capability	open	-	1
 rust/src/pre/snapshot.rs	create	boundary	file-mode	write	-	1
 rust/src/pre/snapshot.rs	create	data	copy-or-publish	state::copy_state_file	-	1
-rust/src/pre/snapshot.rs	create	data	raw-or-serialized	fs::write	-	4
+rust/src/pre/snapshot.rs	create	data	raw-or-serialized	fs::write	-	5
 rust/src/pre/snapshot.rs	create	human	log-or-report	state::log_advisory	data-field+fixed-literal+other	1
 rust/src/pre/snapshot.rs	file	boundary	capability	fs::File	-	1
 rust/src/pre/snapshot.rs	file	boundary	capability	fs::File::create	-	1

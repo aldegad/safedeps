@@ -127,7 +127,7 @@ pre_hook() {
   out_file=$(printf '%s' "${payload}" | hook_response_capture "${call}/response" native_fixture_hook pre) || rc=$?
   native_fixtures_assert || fail "pre hook fixture failed for this invocation"
   printf '%s' "${out_file}"
-  oracle_pre "${call}" "$(< "${out_file}")" || exit 1
+  oracle_pre "${call}" "$(< "${out_file}")" "${payload}" || exit 1
   return "${rc}"
 }
 # Children the owner-state tests spawn, so an exit anywhere can reap them. The
@@ -1100,7 +1100,9 @@ grep -q 'suspicious dependency change detected' < "${walk2_post_file}" || fail "
 if grep -q '^install' "${tmp_root}/walkup-npm-calls.log" 2>/dev/null; then
   fail "a rollback runs no npm install once it has removed the package.json the install created"
 fi
-[[ ! -e "${walk2_wt}/node_modules" ]] || fail "a rollback removes the project's own node_modules"
+[[ -d "${walk2_wt}/node_modules" ]] || fail "a rollback keeps the node_modules that was there before the command"
+post_message "${walk2_post_file}" | grep -x 'kept .*/nested/worktree/node_modules, which was a directory when the pre-command snapshot .* was taken' >/dev/null \
+  || fail "the rollback says it kept node_modules (${walk2_post_file})"
 grep -q '/nested/worktree/package.json does not exist' < "${walk2_post_file}" || fail "the rollback says the restore left no package.json"
 assert_gives_no_command "$(< "${walk2_post_file}")" "the rollback gives no reinstall command"
 pass "a rollback runs no npm install where npm would walk up to an enclosing project"
@@ -1162,7 +1164,7 @@ EOF
 chmod +x "${ws_bin}/npm"
 ws_wt="${tmp_root}/ws-wt"
 ws_outside="${tmp_root}/ws-outside"
-mkdir -p "${ws_wt}/node_modules/installed-package" "${ws_outside}/node_modules/kept-package"
+mkdir -p "${ws_wt}" "${ws_outside}/node_modules/kept-package"
 printf '{"name":"shared","version":"1.0.0"}\n' > "${ws_outside}/package.json"
 printf '{"name":"kept-package","version":"1.0.0"}\n' > "${ws_outside}/node_modules/kept-package/package.json"
 printf '{"name":"ws","workspaces":["../ws-outside"],"dependencies":{"fixture-parent":"1.0.0"}}\n' > "${ws_wt}/package.json"
@@ -1170,6 +1172,8 @@ cp "${tmp_root}/revert-safe-lock.json" "${ws_wt}/package-lock.json"
 pre_hook > /dev/null <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${ws_wt}"}
 EOF
+# The command makes the project's own node_modules.
+mkdir -p "${ws_wt}/node_modules/installed-package"
 printf '%s\n' "${tampered_lock}" > "${ws_wt}/package-lock.json"
 ws_post_file=$(
   PATH="${ws_bin}:${PATH}" post_hook <<EOF
@@ -1191,19 +1195,21 @@ fi
 cmp -s "${ws_wt}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "the lockfile of a workspace project is still restored"
 pass "a rollback leaves a workspace outside the project alone"
 
-# The rollback's own node_modules step: a real directory is removed, links
-# inside it are removed without being followed, and the message says which
-# directory was removed and what the project root holds after it.
+# The rollback's own node_modules step, for a node_modules the command made:
+# a real directory is removed, links inside it are removed without being
+# followed, and the message says which directory was removed and what the
+# project root holds after it.
 own_wt="${tmp_root}/own-wt"
 own_outside="${tmp_root}/own-outside"
-mkdir -p "${own_wt}/node_modules/installed-package" "${own_outside}/kept-package"
+mkdir -p "${own_wt}" "${own_outside}/kept-package"
 printf '{"name":"kept-package","version":"1.0.0"}\n' > "${own_outside}/kept-package/package.json"
-ln -s "${own_outside}/kept-package" "${own_wt}/node_modules/linked-package"
 printf '{"dependencies":{"fixture-parent":"1.0.0"}}\n' > "${own_wt}/package.json"
 cp "${tmp_root}/revert-safe-lock.json" "${own_wt}/package-lock.json"
 pre_hook > /dev/null <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${own_wt}"}
 EOF
+mkdir -p "${own_wt}/node_modules/installed-package"
+ln -s "${own_outside}/kept-package" "${own_wt}/node_modules/linked-package"
 printf '%s\n' "${tampered_lock}" > "${own_wt}/package-lock.json"
 : > "${tmp_root}/emptying-npm-calls.log"
 own_post_file=$(
@@ -1222,7 +1228,129 @@ if grep -qE '^(ci|install)' "${tmp_root}/emptying-npm-calls.log" 2>/dev/null; th
   fail "a rollback runs no npm in an ordinary project either"
 fi
 cmp -s "${own_wt}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "the lockfile is restored before node_modules is removed"
-pass "a rollback removes the project's own node_modules and runs no npm"
+pass "a rollback removes a node_modules the command made and runs no npm"
+
+# A node_modules that was there before the command stays. On 2026-10-14 a
+# rejected `npm install` that added three packages removed a project's whole
+# tree of about 800, and every worktree linked to it lost its tools. The
+# snapshot lists the tree and holds none of its files, so the rollback removes
+# only the entries the pre-command listing lacks: a package, a scoped package,
+# a whole new scope and a .bin entry, each right after the line that names
+# it. Everything that was there stays byte for byte, and npm's hidden lockfile
+# stays as the command left it.
+pre_wt="${tmp_root}/preexist-wt"
+pre_nm="${pre_wt}/node_modules"
+mkdir -p "${pre_nm}/kept-package/lib" "${pre_nm}/@scope/kept-scoped" "${pre_nm}/.bin"
+printf '{"name":"kept-package","version":"1.0.0","bin":{"kept-cli":"lib/cli.js"}}\n' > "${pre_nm}/kept-package/package.json"
+printf 'module.exports = 1;\n' > "${pre_nm}/kept-package/lib/cli.js"
+printf '{"name":"@scope/kept-scoped","version":"1.0.0"}\n' > "${pre_nm}/@scope/kept-scoped/package.json"
+ln -s ../kept-package/lib/cli.js "${pre_nm}/.bin/kept-cli"
+printf '{"name":"preexist","lockfileVersion":3,"packages":{"node_modules/kept-package":{"version":"1.0.0"}}}\n' > "${pre_nm}/.package-lock.json"
+printf '{"dependencies":{"fixture-parent":"1.0.0"}}\n' > "${pre_wt}/package.json"
+cp "${tmp_root}/revert-safe-lock.json" "${pre_wt}/package-lock.json"
+cp -pR "${pre_nm}" "${tmp_root}/preexist-before"
+pre_hook > /dev/null <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${pre_wt}"}
+EOF
+mkdir -p "${pre_nm}/fixture-parent" "${pre_nm}/@scope/added-scoped" "${pre_nm}/@newscope/added"
+printf '{"name":"fixture-parent","version":"1.0.0","bin":{"fixture-cli":"cli.js"}}\n' > "${pre_nm}/fixture-parent/package.json"
+printf '{"name":"@scope/added-scoped","version":"1.0.0"}\n' > "${pre_nm}/@scope/added-scoped/package.json"
+printf '{"name":"@newscope/added","version":"1.0.0"}\n' > "${pre_nm}/@newscope/added/package.json"
+ln -s ../fixture-parent/cli.js "${pre_nm}/.bin/fixture-cli"
+printf '{"name":"preexist","lockfileVersion":3,"packages":{"node_modules/kept-package":{"version":"1.0.0"},"node_modules/fixture-parent":{"version":"1.0.0"}}}\n' > "${pre_nm}/.package-lock.json"
+cp "${pre_nm}/.package-lock.json" "${tmp_root}/preexist-hidden-after.json"
+printf '%s\n' "${tampered_lock}" > "${pre_wt}/package-lock.json"
+pre_post_file=$(
+  PATH="${emptying_bin}:${PATH}" post_hook <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${pre_wt}"}
+EOF
+)
+grep -q 'suspicious dependency change detected' < "${pre_post_file}" || fail "the gate rejects the install into a node_modules that was there before it"
+cmp -s "${pre_wt}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "the lockfile is restored beside a kept node_modules"
+diff -r "${tmp_root}/preexist-before/kept-package" "${pre_nm}/kept-package" >/dev/null \
+  && diff -r "${tmp_root}/preexist-before/@scope/kept-scoped" "${pre_nm}/@scope/kept-scoped" >/dev/null \
+  && [[ "$(readlink "${pre_nm}/.bin/kept-cli")" == ../kept-package/lib/cli.js ]] \
+  || fail "every entry node_modules held before the command is there after the rollback, byte for byte"
+cmp -s "${pre_nm}/.package-lock.json" "${tmp_root}/preexist-hidden-after.json" || fail "npm's hidden lockfile stays as the command left it"
+for pre_added in fixture-parent @scope/added-scoped @newscope .bin/fixture-cli; do
+  [[ ! -e "${pre_nm}/${pre_added}" && ! -L "${pre_nm}/${pre_added}" ]] || fail "the rollback removes ${pre_added}, which the command added"
+  post_message "${pre_post_file}" | grep -x -A1 "$(cd -P "${pre_wt}" && pwd -P)/node_modules lists the entry $(cd -P "${pre_wt}" && pwd -P)/node_modules/${pre_added}, which the pre-command snapshot .* does not" \
+    | grep -x "removed $(cd -P "${pre_wt}" && pwd -P)/node_modules/${pre_added}" >/dev/null || fail "the rollback names ${pre_added} and then says it removed it (${pre_post_file})"
+done
+[[ -z "$(post_message "${pre_post_file}" | grep '/@newscope/added' || true)" ]] || fail "an entry inside a scope the command added goes with the scope, with no line of its own"
+post_message "${pre_post_file}" | grep -x 'kept .*/preexist-wt/node_modules, which was a directory when the pre-command snapshot .* was taken' >/dev/null \
+  || fail "the rollback says it kept node_modules, and why"
+! post_message "${pre_post_file}" | grep 'removed .*/preexist-wt/node_modules$' >/dev/null || fail "the rollback does not remove a node_modules that was there before the command"
+assert_gives_no_command "$(< "${pre_post_file}")" "the rollback that keeps node_modules gives no command"
+pass "a rollback keeps a node_modules that was there before the command and removes only what the command added"
+
+# The same tree when the command empties node_modules and installs it again,
+# the way `npm ci` does (sh -c 'npm ci' did this on 2026-10-14): every package
+# directory is new, nothing is added, and npm rewrites its hidden lockfile. The
+# closure was never approved, so the gate rejects it, and the rollback has
+# nothing the command added to remove. node_modules stays.
+reci_wt="${tmp_root}/reci-wt"
+mkdir -p "${reci_wt}/node_modules/installed-package" "${reci_wt}/node_modules/@scope/scoped"
+printf '{"name":"installed-package","version":"1.0.0"}\n' > "${reci_wt}/node_modules/installed-package/package.json"
+printf '{"name":"@scope/scoped","version":"1.0.0"}\n' > "${reci_wt}/node_modules/@scope/scoped/package.json"
+printf '{"name":"reci","lockfileVersion":3,"packages":{}}\n' > "${reci_wt}/node_modules/.package-lock.json"
+printf '{"dependencies":{"fixture-parent":"1.0.0"}}\n' > "${reci_wt}/package.json"
+printf '%s\n' "${tampered_lock}" > "${reci_wt}/package-lock.json"
+pre_hook > /dev/null <<EOF
+{"tool_name":"Bash","tool_input":{"command":"sh -c 'npm ci'"},"cwd":"${reci_wt}"}
+EOF
+rm -rf "${reci_wt}/node_modules/"* "${reci_wt}/node_modules/.package-lock.json"
+mkdir -p "${reci_wt}/node_modules/installed-package" "${reci_wt}/node_modules/@scope/scoped"
+printf '{"name":"installed-package","version":"1.0.0"}\n' > "${reci_wt}/node_modules/installed-package/package.json"
+printf '{"name":"@scope/scoped","version":"1.0.0"}\n' > "${reci_wt}/node_modules/@scope/scoped/package.json"
+printf '{"name":"reci","lockfileVersion":3,"packages":{"node_modules/installed-package":{"version":"1.0.0"}}}\n' > "${reci_wt}/node_modules/.package-lock.json"
+reci_post_file=$(
+  PATH="${emptying_bin}:${PATH}" post_hook <<EOF
+{"tool_name":"Bash","tool_input":{"command":"sh -c 'npm ci'"},"cwd":"${reci_wt}"}
+EOF
+)
+grep -q 'suspicious dependency change detected' < "${reci_post_file}" || fail "the gate rejects the unapproved closure npm ci installed again"
+[[ -f "${reci_wt}/node_modules/installed-package/package.json" && -f "${reci_wt}/node_modules/@scope/scoped/package.json" ]] \
+  || fail "a node_modules the command emptied and filled again with the same entries is kept"
+post_message "${reci_post_file}" | grep -x 'kept .*/reci-wt/node_modules, which was a directory when the pre-command snapshot .* was taken' >/dev/null \
+  || fail "the rollback says it kept node_modules (${reci_post_file})"
+! post_message "${reci_post_file}" | grep ' lists the entry ' >/dev/null || fail "nothing the pre-command listing lacks, so no entry is named"
+grep -q 'The rollback changed nothing\.' < "${reci_post_file}" || fail "a rollback that removed nothing says it changed nothing"
+pass "a rollback keeps a node_modules the command emptied and installed again"
+
+# A directory of the kept node_modules that cannot be read when the rollback
+# lists it: what the rollback could list and the command added is removed, the
+# failed read is a line with the operating system's error, and nothing in the
+# unread directory is removed or named.
+if row_if "preexist-unreadable" scandir; then
+  unread_wt="${tmp_root}/preexist-unreadable-wt"
+  mkdir -p "${unread_wt}/node_modules/kept-package" "${unread_wt}/node_modules/@locked/inner"
+  printf '{"name":"kept-package","version":"1.0.0"}\n' > "${unread_wt}/node_modules/kept-package/package.json"
+  printf '{"name":"@locked/inner","version":"1.0.0"}\n' > "${unread_wt}/node_modules/@locked/inner/package.json"
+  printf '{"dependencies":{"fixture-parent":"1.0.0"}}\n' > "${unread_wt}/package.json"
+  cp "${tmp_root}/revert-safe-lock.json" "${unread_wt}/package-lock.json"
+  pre_hook > /dev/null <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${unread_wt}"}
+EOF
+  mkdir -p "${unread_wt}/node_modules/fixture-parent"
+  printf '{"name":"fixture-parent","version":"1.0.0"}\n' > "${unread_wt}/node_modules/fixture-parent/package.json"
+  printf '%s\n' "${tampered_lock}" > "${unread_wt}/package-lock.json"
+  chmod 000 "${unread_wt}/node_modules/@locked"
+  unread_post_file=$(
+    PATH="${emptying_bin}:${PATH}" post_hook <<EOF
+{"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${unread_wt}"}
+EOF
+  )
+  chmod 755 "${unread_wt}/node_modules/@locked"
+  grep -q 'suspicious dependency change detected' < "${unread_post_file}" || fail "the gate rejects the install beside an unreadable scope"
+  [[ ! -e "${unread_wt}/node_modules/fixture-parent" && -f "${unread_wt}/node_modules/@locked/inner/package.json" && -f "${unread_wt}/node_modules/kept-package/package.json" ]] \
+    || fail "the rollback removes what it could list and the command added, and nothing in the directory it could not read"
+  post_message "${unread_post_file}" | grep -x "the walk of $(cd -P "${unread_wt}" && pwd -P)/node_modules returned OS error 13" >/dev/null \
+    || fail "the failed read of the kept node_modules is a line with the OS error (${unread_post_file})"
+  post_message "${unread_post_file}" | grep -x 'kept .*/preexist-unreadable-wt/node_modules, which was a directory when the pre-command snapshot .* was taken' >/dev/null \
+    || fail "the rollback says it kept node_modules"
+  pass "a rollback that cannot read part of a kept node_modules says so and removes nothing there"
+fi
 
 # A command that wrote nothing. The closure on disk was never approved, and
 # the gate judges the whole closure whether or not the command changed it: no
@@ -1279,28 +1407,40 @@ hook_response_parse "${npx_post_file}" quiet || fail "an npx call that left no t
 pass "an npx call that left no trace in npm's records is not judged"
 
 # The same project once the command has written into node_modules without
-# touching a lockfile: the tree is no longer the one the pre-guard listed, and
-# it is removed.
+# touching a lockfile: into a directory that was there before, and a new one.
+# The tree is no longer the one the pre-guard listed. It was there before the
+# command, so it stays: the new directory is removed, and what the command
+# wrote into the old one keeps the command's bytes.
 mkdir -p "${nochange_wt}/node_modules/written-package"
 pre_hook > /dev/null <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${nochange_wt}"}
 EOF
 printf '{"name":"written-later","version":"1.0.0"}\n' > "${nochange_wt}/node_modules/written-package/package.json"
+mkdir -p "${nochange_wt}/node_modules/added-package"
+printf '{"name":"added-package","version":"1.0.0"}\n' > "${nochange_wt}/node_modules/added-package/package.json"
 written_post_file=$(
   PATH="${emptying_bin}:${PATH}" post_hook <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${nochange_wt}"}
 EOF
 )
 grep -q 'suspicious dependency change detected' < "${written_post_file}" || fail "the gate rejects the unapproved closure again"
-[[ ! -e "${nochange_wt}/node_modules" ]] || fail "a node_modules the command wrote into is removed"
-post_message "${written_post_file}" | grep 'removed .*/nochange-wt/node_modules$' >/dev/null || fail "the rollback says node_modules was removed"
-pass "a rollback removes node_modules once the command has written into it"
+[[ -f "${nochange_wt}/node_modules/installed-package/package.json" && -f "${nochange_wt}/node_modules/written-package/package.json" ]] \
+  || fail "a node_modules the command wrote into stays when it was there before the command"
+[[ ! -e "${nochange_wt}/node_modules/added-package" ]] || fail "the directory the command added is removed"
+post_message "${written_post_file}" | grep -x '.*/nochange-wt/node_modules lists .*/nochange-wt/node_modules/added-package/package.json, which the pre-command snapshot .* does not' >/dev/null \
+  || fail "the first line says the first check that showed the command wrote node_modules (${written_post_file})"
+post_message "${written_post_file}" | grep -x 'removed .*/nochange-wt/node_modules/added-package' >/dev/null || fail "the rollback says it removed the added directory"
+post_message "${written_post_file}" | grep -x 'kept .*/nochange-wt/node_modules, which was a directory when the pre-command snapshot .* was taken' >/dev/null \
+  || fail "the rollback says node_modules was kept"
+pass "a rollback keeps a node_modules the command wrote into and removes what it added"
 
-# The other reasons a node_modules is removed, each as the line that says it:
-# a .bin entry the pre-command listing lacks, a link to a package placed right
-# under node_modules (the way pnpm and `npm link` place one), and npm's hidden
-# lockfile written after the snapshot where the record names no trace
-# baseline to read it by.
+# The other checks that show the command wrote node_modules, each as the line
+# that says it: a .bin entry the pre-command listing lacks, a link to a
+# package placed right under node_modules (the way pnpm and `npm link` place
+# one), and npm's hidden lockfile written after the snapshot where the record
+# names no trace baseline to read it by. node_modules was there before the
+# command, so it stays, and what the command added is removed: a link without
+# being followed.
 for reason_case in bin link lock; do
   reason_wt="${tmp_root}/reason-${reason_case}-wt"
   mkdir -p "${reason_wt}/node_modules/installed-package" "${reason_wt}/node_modules/.bin"
@@ -1326,18 +1466,23 @@ EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${reason_wt}"}
 EOF
   )
-  [[ ! -e "${reason_wt}/node_modules" ]] || fail "a node_modules the command wrote into is removed (${reason_case})"
+  [[ -f "${reason_wt}/node_modules/installed-package/package.json" ]] || fail "a node_modules that was there before the command stays (${reason_case})"
+  post_message "${reason_post_file}" | grep -x "kept .*/reason-${reason_case}-wt/node_modules, which was a directory when the pre-command snapshot .* was taken" >/dev/null \
+    || fail "the rollback says node_modules was kept (${reason_case}: ${reason_post_file})"
   case "${reason_case}" in
     bin) post_message "${reason_post_file}" | grep '/node_modules/.bin lists new-entry, which the pre-command snapshot .* does not$' >/dev/null \
-           || fail "the removal says which .bin entry the snapshot lacks (${reason_post_file})" ;;
+           || fail "the rollback says which .bin entry the snapshot lacks (${reason_post_file})"
+         [[ ! -e "${reason_wt}/node_modules/.bin/new-entry" ]] || fail "the .bin entry the command added is removed"
+         post_message "${reason_post_file}" | grep -x 'removed .*/reason-bin-wt/node_modules/.bin/new-entry' >/dev/null || fail "the rollback says it removed the .bin entry" ;;
     link) post_message "${reason_post_file}" | grep '/reason-link-wt/node_modules lists the link .*/reason-link-wt/node_modules/linked-package, which the pre-command snapshot .* does not$' >/dev/null \
-           || fail "the removal says which link the snapshot lacks (${reason_post_file})"
-          [[ -f "${reason_wt}-store/linked-package/package.json" ]] || fail "removing node_modules does not follow the new link" ;;
+           || fail "the rollback says which link the snapshot lacks (${reason_post_file})"
+          [[ ! -e "${reason_wt}/node_modules/linked-package" && ! -L "${reason_wt}/node_modules/linked-package" ]] || fail "the link the command added is removed"
+          [[ -f "${reason_wt}-store/linked-package/package.json" ]] || fail "removing the new link does not follow it" ;;
     lock) post_message "${reason_post_file}" | grep '/reason-lock-wt/node_modules/.package-lock.json is newer than the pre-command snapshot ' >/dev/null \
-           || fail "the removal says npm's hidden lockfile is newer than the snapshot (${reason_post_file})" ;;
+           || fail "the rollback says npm's hidden lockfile is newer than the snapshot (${reason_post_file})" ;;
   esac
 done
-pass "every removal of node_modules says the first check that showed the command wrote it"
+pass "every rollback of a node_modules the command wrote says the first check that showed it"
 
 # node_modules' own time is not a write. A tool the command runs makes a cache
 # directory or file under it (vite's .vite, yarn's .yarn-integrity), and the
@@ -1390,7 +1535,11 @@ inplace_post_file=$(
 EOF
 )
 grep -q 'suspicious dependency change detected' < "${inplace_post_file}" || fail "the gate rejects the unapproved closure after an in-place write"
-[[ ! -e "${inplace_wt}/node_modules" ]] || fail "a node_modules rewritten in place within the snapshot's second is removed"
+post_message "${inplace_post_file}" | grep -x '.*/inplace-wt/node_modules/.package-lock.json is newer than the .*' >/dev/null \
+  || fail "a node_modules rewritten in place within the snapshot's second shows the write (${inplace_post_file})"
+[[ -f "${inplace_wt}/node_modules/installed-package/package.json" ]] || fail "a node_modules that was there before the command stays after an in-place write"
+post_message "${inplace_post_file}" | grep -x 'kept .*/inplace-wt/node_modules, which was a directory when the pre-command snapshot .* was taken' >/dev/null \
+  || fail "the rollback says it kept node_modules after an in-place write (${inplace_post_file})"
 pass "a rollback sees a write that finished within the second the snapshot was taken in"
 
 # A confirmed snapshot older than what the command found. An approved install
@@ -1469,14 +1618,16 @@ pass "a rollback next to another manager's lockfile says which lockfiles are mis
 # row, where the verdict and a reader of the log look for one.
 if row_if "stuck-wt" unlink; then
   stuck_wt="${tmp_root}/stuck-wt"
-  mkdir -p "${stuck_wt}/node_modules/locked-package"
-  : > "${stuck_wt}/node_modules/locked-package/index.js"
-  mkdir -p "${stuck_wt}/node_modules/removable-package"
+  mkdir -p "${stuck_wt}"
   printf '{"dependencies":{"fixture-parent":"1.0.0"}}\n' > "${stuck_wt}/package.json"
   cp "${tmp_root}/revert-safe-lock.json" "${stuck_wt}/package-lock.json"
   pre_hook > /dev/null <<EOF
 {"tool_name":"Bash","tool_input":{"command":"npm install fixture-parent@1.0.0"},"cwd":"${stuck_wt}"}
 EOF
+  # The command makes node_modules, so the rollback removes the whole tree.
+  mkdir -p "${stuck_wt}/node_modules/locked-package"
+  : > "${stuck_wt}/node_modules/locked-package/index.js"
+  mkdir -p "${stuck_wt}/node_modules/removable-package"
   printf '%s\n' "${tampered_lock}" > "${stuck_wt}/package-lock.json"
   chmod 555 "${stuck_wt}/node_modules/locked-package"
   stuck_post_file=$(
@@ -2232,9 +2383,23 @@ bs_assert_untraced() {
 bs_assert_rollback() {
   local dir="$1" post_file="$2" label="$3" trace="$4" home="${5:-${SAFEDEPS_HOME}}"
   grep -q 'A rollback ran\.' < "${post_file}" || fail "${label}: the backstop rolls back (${post_file})"
-  [[ ! -e "${dir}/node_modules" ]] || fail "${label}: the rollback removes node_modules"
   cmp -s "${dir}/package-lock.json" "${tmp_root}/revert-safe-lock.json" || fail "${label}: the rollback restores the confirmed lockfile"
   grep -qF "post-verify BACKSTOP traced: ${trace}" "${home}/advisory.log" || fail "${label}: advisory.log says what the trace was"
+}
+# The backstop has no snapshot from before the command; the call's trace entry
+# is its record. Where the entry recorded node_modules' inode before the
+# command and it has that inode still, the tree is the one that was there:
+# the rollback keeps it, and removes the entries the entry's listing of it
+# lacks. Where no entry says so (a call with no tool_use_id), the rollback
+# removes it, as it did before.
+bs_assert_kept() {
+  [[ -f "$1/node_modules/installed-package/package.json" ]] || fail "$3: the rollback keeps a node_modules that has the inode it had before the command"
+  post_message "$2" | grep -x "kept .*/${1##*/}/node_modules: it has the inode the trace entry for this call recorded before this command" >/dev/null \
+    || fail "$3: the rollback says it kept node_modules ($2)"
+}
+bs_assert_removed() {
+  [[ ! -e "$1/node_modules" ]] || fail "$3: the rollback removes a node_modules no trace entry recorded"
+  post_message "$2" | grep -x "removed .*/${1##*/}/node_modules" >/dev/null || fail "$3: the rollback says it removed node_modules ($2)"
 }
 bs_grep='grep -n \"npm install\" README.md'
 bs_entries() { { find "$1/pending/backstop" -type f 2>/dev/null || true; } | wc -l | tr -d ' '; }
@@ -2278,7 +2443,11 @@ mkdir -p "${bs_t4_wt}/node_modules/fixture-evil"
 bs_t4_post_file=$(PATH="${stub_bin}:${PATH}" grammar_post "${bs_t4_wt}" "npm run deps:install" toolu_bs_t4)
 bs_assert_rollback "${bs_t4_wt}" "${bs_t4_post_file}" "an install the pre-guard did not read" \
   "$(cd -P "${bs_t4_wt}" && pwd -P)/package-lock.json has another status change time than the one recorded before this command"
-pass "an install the pre-guard did not read is rolled back"
+bs_assert_kept "${bs_t4_wt}" "${bs_t4_post_file}" "an install the pre-guard did not read"
+[[ ! -e "${bs_t4_wt}/node_modules/fixture-evil" ]] || fail "the backstop removes the package the command added"
+post_message "${bs_t4_post_file}" | grep -x -A1 '.*/bs-t4-wt/node_modules lists the entry .*/bs-t4-wt/node_modules/fixture-evil, which the trace entry for this call did not list before this command' \
+  | grep -x 'removed .*/bs-t4-wt/node_modules/fixture-evil' >/dev/null || fail "the backstop names the added package and then says it removed it (${bs_t4_post_file})"
+pass "an install the pre-guard did not read is rolled back: what it added is removed, and node_modules is kept"
 
 # A lockfile that is a symbolic link (lumi r2 S1). A write through the link
 # changes the target's status change time and not the link's, so the entry
@@ -2334,7 +2503,7 @@ SAFEDEPS_HOME="${bs_ttl_home}" grammar_pre "${bs_ttl_wt}" "npm run deps:add" too
 printf 'x\n' > "${bs_ttl_wt}/node_modules/installed-package/added.js"
 bs_tree_post_file=$(PATH="${stub_bin}:${PATH}" SAFEDEPS_HOME="${bs_ttl_home}" grammar_post "${bs_ttl_wt}" "npm run deps:add" toolu_bs_tree)
 grep -q 'A rollback ran\.' < "${bs_tree_post_file}" || fail "a write only into node_modules is a trace (${bs_tree_post_file})"
-[[ ! -e "${bs_ttl_wt}/node_modules" ]] || fail "the rollback after a write only into node_modules removes node_modules"
+bs_assert_kept "${bs_ttl_wt}" "${bs_tree_post_file}" "the rollback after a write only into node_modules"
 grep -qF "post-verify BACKSTOP traced: $(cd -P "${bs_ttl_wt}" && pwd -P)/node_modules" "${bs_ttl_home}/advisory.log" \
   || fail "advisory.log names what the walk found"
 pass "after the ledger expired, a git log rolls nothing back and a write into node_modules rolls back"
@@ -2440,6 +2609,7 @@ grammar_pre "${bs_noid_wt}" "${bs_grep}" > /dev/null
 bs_noid_post_file=$(PATH="${stub_bin}:${PATH}" grammar_post "${bs_noid_wt}" "${bs_grep}")
 bs_assert_rollback "${bs_noid_wt}" "${bs_noid_post_file}" "a grep with no tool_use_id" \
   "this hook's input names no tool_use_id, so no trace entry belongs to this call"
+bs_assert_removed "${bs_noid_wt}" "${bs_noid_post_file}" "a grep with no tool_use_id"
 pass "a call with no tool_use_id is judged as before: a trace"
 
 # --- Records bound to the call ---------------------------------------------
@@ -2617,6 +2787,7 @@ SAFEDEPS_TEST_FAULT=bs_sec grammar_pre "${bs_sec_wt}" "${bs_grep}" toolu_bs_sec 
 bs_sec_post_file=$(PATH="${stub_bin}:${PATH}" grammar_post "${bs_sec_wt}" "${bs_grep}" toolu_bs_sec)
 bs_assert_rollback "${bs_sec_wt}" "${bs_sec_post_file}" "a grep on a whole-second filesystem" \
   "$(cd -P "${bs_sec_wt}" && pwd -P)/package-lock.json changed after the baseline taken before this command"
+bs_assert_kept "${bs_sec_wt}" "${bs_sec_post_file}" "a grep on a whole-second filesystem"
 pass "on a filesystem that keeps whole seconds the baseline is set two seconds back"
 fi
 
@@ -2685,6 +2856,7 @@ grammar_pre "${bs_slow_wt}" "${bs_grep}" toolu_bs_slow > /dev/null
 bs_slow_post_file=$(SAFEDEPS_TEST_FAULT=bs_slow PATH="${stub_bin}:${PATH}" SAFEDEPS_BACKSTOP_WALK_SECONDS=1 grammar_post "${bs_slow_wt}" "${bs_grep}" toolu_bs_slow)
 bs_assert_rollback "${bs_slow_wt}" "${bs_slow_post_file}" "a walk past its deadline" \
   "the walk of $(cd -P "${bs_slow_wt}" && pwd -P)/node_modules did not finish within 1s"
+bs_assert_kept "${bs_slow_wt}" "${bs_slow_post_file}" "a walk past its deadline"
 pass "a walk that does not finish within its deadline counts as a trace"
 fi
 
@@ -2847,8 +3019,9 @@ pass "a restore target that is not a regular file is named and left alone"
 if row_if "restore-failures (cpfail, cpgone, readonly)" write create; then
 cpfail_wt="${tmp_root}/cpfail-wt"
 grammar_project "${cpfail_wt}"
-mkdir -p "${cpfail_wt}/node_modules/installed-package"
 grammar_pre "${cpfail_wt}" "npm install fixture-parent@1.0.0" > /dev/null
+# The command makes node_modules, so the rollback's node_modules step is a removal.
+mkdir -p "${cpfail_wt}/node_modules/installed-package"
 printf '%s\n' "${tampered_lock}" > "${cpfail_wt}/package-lock.json"
 cpfail_post_file=$(SAFEDEPS_TEST_FAULT=cpfail PATH="${emptying_bin}:${PATH}" grammar_post "${cpfail_wt}" "npm install fixture-parent@1.0.0")
 post_message "${cpfail_post_file}" | grep -E '^not restored .*/cpfail-wt/package-lock.json: copy returned OS error 13; .*/cpfail-wt/package-lock.json differs from the snapshot$' >/dev/null \
@@ -2864,8 +3037,9 @@ fi
 if row_if "copy-noop" copies; then
 copy_noop_wt="${tmp_root}/copy-noop-wt"
 grammar_project "${copy_noop_wt}"
-mkdir -p "${copy_noop_wt}/node_modules/installed-package"
 grammar_pre "${copy_noop_wt}" "npm install fixture-parent@1.0.0" > /dev/null
+# The command makes node_modules, so the rollback's node_modules step is a removal.
+mkdir -p "${copy_noop_wt}/node_modules/installed-package"
 printf '%s\n' "${tampered_lock}" > "${copy_noop_wt}/package-lock.json"
 copy_noop_post_file=$(SAFEDEPS_TEST_FAULT=copy-noop PATH="${emptying_bin}:${PATH}" grammar_post "${copy_noop_wt}" "npm install fixture-parent@1.0.0")
 post_message "${copy_noop_post_file}" | grep -E '^not restored .*/copy-noop-wt/package-lock.json: copy returned without error; .*/copy-noop-wt/package-lock.json differs from the snapshot$' >/dev/null \
@@ -2891,8 +3065,9 @@ post_message "${cpgone_post_file}" | grep -E '^not restored .*/cpgone-wt/package
   || fail "a restore that failed over a missing file says the file does not exist (${cpgone_post_file})"
   readonly_wt="${tmp_root}/readonly-wt"
   grammar_project "${readonly_wt}"
-  mkdir -p "${readonly_wt}/node_modules/installed-package"
   grammar_pre "${readonly_wt}" "npm install fixture-parent@1.0.0" > /dev/null
+  # The command makes node_modules, so the rollback's node_modules step is a removal.
+  mkdir -p "${readonly_wt}/node_modules/installed-package"
   printf '%s\n' "${tampered_lock}" > "${readonly_wt}/package-lock.json"
   chmod 444 "${readonly_wt}/package-lock.json"
   readonly_post_file=$(PATH="${emptying_bin}:${PATH}" grammar_post "${readonly_wt}" "npm install fixture-parent@1.0.0")
@@ -2908,8 +3083,9 @@ fi
 if row_if "rmfail" unlink; then
 rmfail_wt="${tmp_root}/rmfail-wt"
 grammar_project "${rmfail_wt}"
-mkdir -p "${rmfail_wt}/node_modules/installed-package"
 grammar_pre "${rmfail_wt}" "npm install fixture-parent@1.0.0" > /dev/null
+# The command makes node_modules, so the rollback's node_modules step is a removal.
+mkdir -p "${rmfail_wt}/node_modules/installed-package"
 printf '%s\n' "${tampered_lock}" > "${rmfail_wt}/package-lock.json"
 rmfail_post_file=$(SAFEDEPS_TEST_FAULT=rmfail PATH="${emptying_bin}:${PATH}" grammar_post "${rmfail_wt}" "npm install fixture-parent@1.0.0")
 post_message "${rmfail_post_file}" | grep -E '^not removed .*/rmfail-wt/node_modules: removal returned OS error 13; .*/rmfail-wt/node_modules exists$' >/dev/null \
@@ -4275,6 +4451,7 @@ form_rows not-restored-native-differs 'restore-failures (cpfail, cpgone, readonl
 form_rows not-restored-native-absent 'restore-failures (cpfail, cpgone, readonly)'
 form_rows reason-file 'restore-failures (cpfail, cpgone, readonly)'
 form_rows not-removed-native stuck-wt rmfail 'restore-failures (cpfail, cpgone, readonly)'
+form_rows walk-io preexist-unreadable
 oracle_form_rows_census "${declared_forms}" "${tmp_root}/capability-rows" || exit 1
 oracle_table "${optional_forms}" || exit 1
 if [[ "${ORACLE_UNOBSERVED_FORMS}" == 0 ]]; then

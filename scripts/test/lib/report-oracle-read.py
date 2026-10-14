@@ -23,6 +23,20 @@ command for the flag, so neither does this file.
       and what it is: l:<link target>, d, f:<sha256 of the bytes>, or o. A
       directory that cannot be read prints nothing.
 
+  tree <node_modules>
+      What the path is, on the first line: directory, link, absent or other
+      (lstat). For a directory, then one line per entry a rollback compares:
+      `entry <name>` for each name right under it, and `entry <dir>/<name>`
+      inside each directory right under it that is a scope (@name) or .bin,
+      a link not walked. A directory that cannot be read is one line
+      `error <path> <errno>`. The hook lists the same entries with its own
+      reader; this one is Python's scandir.
+
+  inode <path>
+      The path's own inode, a bar, and its target's when it resolves: the
+      hook records node_modules this way in the backstop's trace entry.
+      Prints nothing when the path is not there.
+
   string <JSON file> <key>...
       The string at that path of keys, its bytes and nothing else. Exit 1
       when there is no string there, 3 when the file is not JSON.
@@ -68,6 +82,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 
@@ -117,6 +132,55 @@ def links(nm):
             out.extend(os.path.join(path, e.name) for e in inner if e.is_symlink())
     for path in sorted(out):
         print(path)
+
+
+def tree(nm):
+    try:
+        st = os.lstat(nm)
+    except FileNotFoundError:
+        print("absent")
+        return
+    if stat.S_ISLNK(st.st_mode):
+        print("link")
+        return
+    if not stat.S_ISDIR(st.st_mode):
+        print("other")
+        return
+    print("directory")
+    out, errors = [], []
+
+    def scan(directory, prefix):
+        try:
+            with os.scandir(directory) as entries:
+                found = list(entries)
+        except OSError as e:
+            errors.append("error %s %d" % (directory, e.errno))
+            return []
+        inner = []
+        for entry in found:
+            out.append(prefix + entry.name)
+            if prefix == "" and (entry.name.startswith("@") or entry.name == ".bin") and entry.is_dir(follow_symlinks=False):
+                inner.append(entry.name)
+        return inner
+
+    for name in scan(nm, ""):
+        scan(os.path.join(nm, name), name + "/")
+    for name in sorted(out):
+        print("entry " + name)
+    for line in errors:
+        print(line)
+
+
+def inode(path):
+    try:
+        own = os.lstat(path).st_ino
+    except OSError:
+        return
+    try:
+        target = str(os.stat(path).st_ino)
+    except OSError:
+        target = ""
+    print("%d|%s" % (own, target))
 
 
 def listing(directory):
@@ -388,6 +452,12 @@ def main():
         return 0
     if sys.argv[1] == "listing":
         listing(sys.argv[2])
+        return 0
+    if sys.argv[1] == "tree":
+        tree(sys.argv[2])
+        return 0
+    if sys.argv[1] == "inode":
+        inode(sys.argv[2])
         return 0
     if sys.argv[1] == "links":
         links(sys.argv[2])
