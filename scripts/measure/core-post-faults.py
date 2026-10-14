@@ -81,7 +81,10 @@ def seed(d,kind):
     (project/'node_modules/.bin').mkdir(parents=True)
     (project/'node_modules/kept').mkdir()
     (project/'node_modules/kept/data').write_text('fixture bytes\n')
-    (project/'node_modules/.bin/drop').write_text('#!/bin/sh\nexit 0\n')
+    # A native image the snapshot's bin list lacks rejects a recorded install,
+    # as in e2e. A shell script stopped being one at 3057353, and these
+    # fixtures then rolled nothing back and said nothing.
+    shutil.copyfile('/bin/echo',project/'node_modules/.bin/drop')
     before={'name':'before','dependencies':{}}
     lock={'lockfileVersion':3,'packages':{}}
     (snapshot/'pre_package.json').write_text(json.dumps(before)+'\n')

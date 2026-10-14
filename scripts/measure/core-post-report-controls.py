@@ -122,10 +122,12 @@ cases={
    'if entry.is_empty() {return (true,', 'if true {return (true,',
    'a grep right after a pull outside the gate: the backstop says nothing'),
  'WalkOff':('assertion','trace-tree','trace.rs',
-   '''    let rc=walk(&tree,usize::MAX,true,Some(until),|p,m|{
-        if (m.ctime(),m.ctime_nsec())>(b.mtime(),b.mtime_nsec()){found=sh::bytes(p).to_vec();true}else{false}
+   '''    let mut found=Vec::new();
+    let rc=walk(&tree,usize::MAX,true,Some(until),|p,m|{
+        if (m.ctime(),m.ctime_nsec())>(b.mtime(),b.mtime_nsec()){found=sh::bytes(p).to_vec();true}
+        else if after(m,&b,moved){found=sh::bytes(p).to_vec();true}else{false}
     });''',
-   '    let rc:Result<(),Outcome>=Ok(());',
+   '    let found:Vec<u8>=Vec::new();\n    let rc:Result<(),Outcome>=Ok(());',
    'a write only into node_modules is a trace'),
  'LinkLstat':('assertion','trace-link','trace.rs',
    'os::tree_clock(&file).as_bytes()!=lines[5+i]',
