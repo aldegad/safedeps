@@ -55,7 +55,7 @@ fn backstop(call: &mut Call, journal: &Journal, input: &[u8]) -> Result<Option<W
     }
     if !call.backstop_trace() { return Ok(None) }
     let mut reasons = Vec::new();
-    effect::check(&call.store, &mut reasons);
+    effect::check(&call.store, &mut reasons, None);
     if reasons.is_empty() {
         state::log_advisory(&call.store.home, &cat(&[b"post-verify BACKSTOP clean: ", call.record.subject(), b"; the npm closure in ", sh::bytes(&call.store.project), b" passed the command-independent npm closure check."]));
         return Ok(None)
@@ -88,6 +88,62 @@ fn runner_left_npm_untouched(call: &Call, trace: &Install) -> bool {
         && !npm::meta_true(&call.store.meta(), "ignore_scripts_injected")
 }
 
+/// The reason `SAFEDEPS_ACCEPT_RISK` gave for this call, from this call's
+/// own pending record (`accept_risk`), where the pre-guard found that it
+/// counts. A record that does not hold it as a string that is not blank
+/// holds none: the override is never inferred from a missing field.
+fn accept_risk(call: &Call) -> Option<W> {
+    match jv::field(&call.current, "accept_risk") {
+        Ok(crate::json::Value::Str(reason)) if reason.iter().any(|b| *b != b' ') => Some(reason.clone()),
+        _ => None,
+    }
+}
+
+pub const ACCEPTED_FACT: &[u8] = b"SAFEDEPS_ACCEPT_RISK kept this install, which no check verified";
+const ACCEPTED_HEAD: &[u8] = b"safedeps: WARNING: SAFEDEPS_ACCEPT_RISK kept this install. Its checks found problems that would have rolled it back, and no rollback ran.";
+const NOT_COVERED: &[u8] = b"SAFEDEPS_ACCEPT_RISK was set for this install, and it keeps an install only where every problem is an unapproved or vulnerable package";
+
+/// An install kept under `SAFEDEPS_ACCEPT_RISK`: every problem the checks
+/// found is one the override covers (`effect::Accepted`). The audit record is
+/// written first, and an install whose record cannot be written is not kept.
+/// The verified baseline does not move, because nothing verified this state,
+/// and no rebuild runs, because the closure did not verify.
+fn keep(call: &mut Call, trace: &mut Install, report: &mut Report, confirm: Vec<W>, reason: &[u8],
+    accepted: &effect::Accepted, input: &[u8]) -> Result<W, W> {
+    let home = call.store.home.clone();
+    let problems = accepted.problems.join(b"; ".as_slice());
+    let audit = state::accepted_risk_path(&home);
+    let entry = jv::obj(vec![
+        ("at", jv::s(os::utc_stamp(os::wall(os::WallRole::AcceptedRiskEntry).seconds()).as_bytes())),
+        ("tool_use_id", jv::field(&call.current, "tool_use_id").ok().filter(|v| matches!(v, crate::json::Value::Str(_))).cloned().unwrap_or(crate::json::Value::Null)),
+        ("project", jv::s(sh::bytes(&call.store.project))), ("command", jv::s(&call.command)), ("reason", jv::s(reason)),
+        ("snapshot", jv::s(&call.store.id)), ("problems", crate::json::Value::Arr(accepted.problems.iter().map(|p| jv::s(p)).collect())),
+        ("packages", crate::json::Value::Arr(accepted.packages.clone())),
+    ]);
+    if let Err(error) = state::append_accepted_risk(&home, &jv::dump(&entry)) {
+        return Err(cat(&[b"SAFEDEPS_ACCEPT_RISK was set for this install, and its audit record ", sh::bytes(&audit), b" could not be written (", error.to_string().as_bytes(), b"), so the install was not kept"]));
+    }
+    call.store.discard();
+    report.lines.extend(confirm);
+    let meta = call.store.meta();
+    let fact = if trace.absent { trace.said = true; trace.line.clone() } else { ACCEPTED_FACT.to_vec() };
+    if npm::meta_true(&meta, "ignore_scripts_injected") {
+        report.rebuild(&home, &meta, input, &cat(&[b"did not run npm rebuild: ", &fact]));
+    } else {
+        report.inert(&home, &meta, input);
+        if trace.absent { report.say(&trace.line); }
+    }
+    report.say(report::file(b"Audit record", &audit));
+    let mut lines = Vec::new();
+    for line in &report.lines { lines.extend(cat(&[b"  ", line, b"\n"])); }
+    let log = home.join("reorg.log");
+    sh::append(&log, &cat(&[b"[", os::utc_stamp(os::wall(os::WallRole::AcceptedRiskHeader).seconds()).as_bytes(), b"] ACCEPTED RISK\n  Snapshot: ", &call.store.id,
+        b"\n  Project: ", sh::bytes(&call.store.project), b"\n  Accepted risk: ", reason, b"\n  Accepted problems: ", &problems, b"\n", &lines]));
+    state::log_advisory(&home, &cat(&[b"post-verify ACCEPTED RISK in ", sh::bytes(&call.store.project), b": kept under SAFEDEPS_ACCEPT_RISK (", reason, b"), not rolled back. Problems: ", &problems, b". Command: ", &call.command]));
+    let _ = call.store.cleanup();
+    Ok(cat(&[ACCEPTED_HEAD, b"\nAccepted risk: ", reason, b"\n\nAccepted problems:\n", &problems, b"\n\n", &report.lines.join(&b'\n'), b"\n\n", &report::file(b"Details log", &log)]))
+}
+
 fn judge(call: &mut Call, journal: &Journal, input: &[u8], post_started: Instant) -> Result<Option<W>, i32> {
     if call.record != Record::Install { return backstop(call, journal, input) }
     let mut trace = Install::settle(&call.store.project, &call.store.home, &call.current, &call.command);
@@ -97,14 +153,30 @@ fn judge(call: &mut Call, journal: &Journal, input: &[u8], post_started: Instant
     let mut reasons = Vec::new();
     let mut report = Report::default();
     let mut confirm = Vec::new();
+    let accept = accept_risk(call);
+    let mut accepted = effect::Accepted::default();
     npm.collect(&call.store, &mut reasons);
-    effect::check(&call.store, &mut reasons);
+    effect::check(&call.store, &mut reasons, accept.as_ref().map(|_| &mut accepted));
     heuristics::scripts(&call.store, &npm.nodes, &mut reasons)?;
     heuristics::lockfile(&call.store, &mut reasons);
     npm.record(&call.store, &call.current, &trace, &mut report);
     npm.sources(&call.store, &call.current, input, call.codex, &mut reasons, &mut confirm);
     if reasons.is_empty() { heuristics::binaries(&call.store, &mut reasons, post_started); }
+    let mut unrecorded = false;
+    if reasons.is_empty() && !accepted.problems.is_empty() {
+        let reason = accept.clone().unwrap_or_default();
+        match keep(call, &mut trace, &mut report, std::mem::take(&mut confirm), &reason, &accepted, input) {
+            Ok(message) => return Ok(Some(message)),
+            Err(why) => { state::log_advisory(&call.store.home, &cat(&[b"post-verify: ", &why, b"."])); reasons.push(why); unrecorded = true; }
+        }
+    }
     if !reasons.is_empty() {
+        // The problems an override would cover are reasons again where it
+        // does not keep the install, beside the ones it never covers.
+        if accept.is_some() {
+            reasons.extend(std::mem::take(&mut accepted.problems));
+            if !unrecorded { reasons.push(NOT_COVERED.to_vec()); }
+        }
         call.store.discard();
         let mut target = snapshot::confirmed(&call.store.home, &call.store.hash).map_err(|_| 0)?;
         if target.is_empty() || !sh::is_file(&call.store.path(&target, b"meta.json")) { target = call.store.id.clone(); }

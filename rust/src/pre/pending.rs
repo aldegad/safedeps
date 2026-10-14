@@ -21,6 +21,11 @@ pub struct Record<'a> {
     pub attribution:&'a [u8],
     pub fetch:Option<&'a Value>,
     pub fetch_why:&'a [u8],
+    /// The reason a `SAFEDEPS_ACCEPT_RISK` assignment in front of this
+    /// call's npm installs gives, where it counts (`accept_risk` in
+    /// install.rs). It belongs to this call's record alone, so the override
+    /// reaches this command's post hook and no other call.
+    pub accept_risk:Option<&'a [u8]>,
 }
 fn inode(path:&Path)->String {
     // ls -di names the link's own inode, but only when its target exists.
@@ -55,6 +60,7 @@ pub fn write(call:&Call,snapshot:&Snapshot,record:&Record)->io::Result<PathBuf> 
         ("project_dir_from",jq::s(record.project_from)),("npm_install",jq::J::Bool(record.npm_install)),("runner_only",jq::J::Bool(record.runner_only)),
         ("npm_trace",trace),("npm_unattributable",jq::arg(record.attribution)),
         ("npm_fetch",fetch),("tool_use_id",id.as_deref().map(jq::s).unwrap_or(jq::J::Null)),
+        ("accept_risk",record.accept_risk.map(jq::arg).unwrap_or(jq::J::Null)),
     ]);
     let path=os::path(&cat(&[base.as_os_str().as_bytes(),b".json"]));
     state::write_state_file(&path,jq::pretty(&value).as_bytes())?;

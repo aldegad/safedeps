@@ -110,6 +110,7 @@ journal owner-not-running owner-zombie owner-stopped owner-later owner-no-pid ow
 journal-differs journal-gone journal-extra journal-no-list
 file-line file-line-absent
 log-rollback log-backstop log-confirm log-refused log-journal log-inert-unread log-inert-unstated log-record-gone log-record-empty log-record-unread
+head-accepted accepted-reason audit-line skip-fact-accepted log-accepted
 "
 
 # The native owner API supplies integer start times, so the ps empty/date
@@ -139,10 +140,10 @@ oracle_native_io_result() {
 ORACLE_PROSE=(
   "prose-rebuild-not-run|confirm|0|npm rebuild was not run: "
   "prose-baseline-not-moved|confirm|0|safedeps verified this install but could not record the result as the new rollback baseline ("
-  "prose-bytes-unread|rollback confirm|0|safedeps could not read which bytes this install brought into "
-  "prose-fetch-unknown|rollback confirm|0|safedeps could not tell where npm fetched the bytes this install brought into "
-  "prose-record-failed|rollback confirm|0|safedeps could not record the bytes this install fetched from a registry that is not the public npm registry ("
-  "prose-fetched-elsewhere|confirm|2|this install fetched packages from a registry that is not the public npm registry ("
+  "prose-bytes-unread|rollback confirm accepted|0|safedeps could not read which bytes this install brought into "
+  "prose-fetch-unknown|rollback confirm accepted|0|safedeps could not tell where npm fetched the bytes this install brought into "
+  "prose-record-failed|rollback confirm accepted|0|safedeps could not record the bytes this install fetched from a registry that is not the public npm registry ("
+  "prose-fetched-elsewhere|confirm accepted|2|this install fetched packages from a registry that is not the public npm registry ("
 )
 oracle_prose_field() {
   local entry="$1" n="$2"
@@ -501,7 +502,10 @@ oracle_skip_fact() {
   local re_unresolved='^the directory (/.+) cannot be resolved$'
   local re_trace='^no install trace in (/.*): neither npm lockfile there is newer than the baseline taken before this command or has another inode$'
   local re_gone='^no install trace in (/.*): the baseline file (/.+) does not exist$'
-  if [[ "${fact}" =~ ${re_unresolved} ]]; then
+  if [[ "${fact}" == 'SAFEDEPS_ACCEPT_RISK kept this install, which no check verified' ]]; then
+    oracle_count skip-fact-accepted
+    [[ "${O_BLOCK}" == accepted ]] || oracle_red "the accepted-risk fact outside an accepted-risk message"
+  elif [[ "${fact}" =~ ${re_unresolved} ]]; then
     oracle_count skip-fact-unresolved
     ! (cd -P "${BASH_REMATCH[1]}" 2>/dev/null) || oracle_red "the directory resolves"
   elif [[ "${fact}" =~ ${re_trace} ]]; then
@@ -630,6 +634,19 @@ oracle_block_end() {
         O_LINE="${path}"; oracle_red "a step line names a path outside ${O_PROJECT}"
       done <<< "${O_STEP_PATHS}"
       ;;
+    accepted)
+      # The install was kept: the message says why, from this call's record,
+      # where the audit entry is, and what safedeps did about scripts.
+      O_INERT_EXPECTED=1
+      [[ "${O_SAW_ACCEPT}" == 1 ]] || { O_LINE="${O_HEAD}"; oracle_red "an accepted-risk message with no Accepted risk line"; }
+      [[ "${O_SAW_AUDIT}" == 1 ]] || { O_LINE="${O_HEAD}"; oracle_red "an accepted-risk message with no Audit record line"; }
+      [[ -n "${O_REASONS}" ]] || { O_LINE="${O_HEAD}"; oracle_red "an accepted-risk message with no accepted problems"; }
+      [[ "${O_SAW_DETAILS}" == 1 ]] || { O_LINE="${O_HEAD}"; oracle_red "an accepted-risk message with no Details log line"; }
+      [[ "$(oracle_rebuild_calls)" == 0 ]] || { O_LINE="${O_HEAD}"; oracle_red "the hook ran npm rebuild for an install it did not verify"; }
+      # Nothing was restored or removed, and the baseline did not move.
+      [[ "$(cat "${O_HOME}/confirmed_${O_DIR_HASH}" 2>/dev/null)" != "verified-${O_PRE}" ]] \
+        || { O_LINE="${O_HEAD}"; oracle_red "the kept install became the confirmed baseline"; }
+      ;;
     journal)
       local expected reported
       expected=$(oracle_journal_expected "${O_JOURNAL_PROJECT}" "${O_SNAP}" | sort)
@@ -646,6 +663,7 @@ oracle_block_end() {
   O_BLOCK="" O_SNAP="" O_SAW_INERT=0 O_SAW_DETAILS=0 O_SAW_NOTHING=0 O_CHANGED=0 O_SKIP=0
   O_JOURNAL_PROJECT="" O_JOURNAL_LINES="" O_JOURNAL_ID="" O_SAW_OWNER=0 O_SECTION=""
   O_KEPT_EXPECT="" O_STEP_PATHS="" O_SAW_JNM=0 O_BODY="" O_REASONS="" O_REFUSED="" O_JFIELDS=""
+  O_SAW_ACCEPT=0 O_SAW_AUDIT=0 O_ACCEPT=""
 }
 
 # A line of a rollback, a confirm or a backstop block must also be a line of
@@ -688,6 +706,13 @@ oracle_expect_log() {
       done <<< "${O_BODY}"
       O_EXPECT+=$'\036'
       ;;
+    accepted)
+      O_EXPECT+="log-accepted"$'\037'"ACCEPTED RISK"$'\n'"  Snapshot: ${O_PRE}"$'\n'"  Project: ${O_PROJECT}"$'\n'"  Accepted risk: ${O_ACCEPT}"$'\n'"  Accepted problems: ${O_REASONS}"
+      while IFS= read -r l; do
+        [[ -n "${l}" ]] && O_EXPECT+=$'\n'"  ${l}"
+      done <<< "${O_BODY}"
+      O_EXPECT+=$'\036'
+      ;;
     confirm)
       O_EXPECT+="log-confirm"$'\037'"CONFIRM warnings"$'\n'"  Snapshot: ${O_PRE}"$'\n'"  Project: ${O_PROJECT}"
       while IFS= read -r l; do
@@ -721,6 +746,13 @@ oracle_collect() {
       ;;
     confirm)
       [[ -z "${line}" || "${line}" == "${O_HEAD}" ]] || O_BODY+="${line}"$'\n'
+      ;;
+    accepted)
+      if [[ "$2" == 1 ]]; then
+        O_REASONS="${line}"
+      elif [[ -n "${line}" && "${line}" != "${O_HEAD}" && "${line}" != 'Accepted problems:' && "${line}" != 'Accepted risk: '* && "${line}" != 'Details log: '* ]]; then
+        O_BODY+="${line}"$'\n'
+      fi
       ;;
     journal)
       if [[ "$2" == 1 ]]; then
@@ -872,8 +904,8 @@ oracle_line() {
   local re_j_gone='^(/.+) does not exist; the snapshot ([^ ]+) has it$'
   local re_j_extra='^(/.+) exists; the snapshot ([^ ]+) recorded it as absent$'
   local re_j_nolist='^the snapshot ([^ ]+) has no list of monitored files$'
-  local re_file_absent='^(Details log|Incident record|Rollback log): (/.+) is not a file$'
-  local re_file='^(Details log|Incident record|Rollback log): (/.+)$'
+  local re_file_absent='^(Details log|Incident record|Rollback log|Audit record): (/.+) is not a file$'
+  local re_file='^(Details log|Incident record|Rollback log|Audit record): (/.+)$'
 
   # The reasons a rollback was started are the checks' own strings and are not
   # read here: exactly one line, then a blank one.
@@ -917,6 +949,13 @@ oracle_line() {
       oracle_record_unread_head; return 0 ;;
     'safedeps: this install was not rolled back.')
       oracle_block_end; O_BLOCK=confirm; O_HEAD="${line}"; oracle_count head-confirm; return 0 ;;
+    'safedeps: WARNING: SAFEDEPS_ACCEPT_RISK kept this install. Its checks found problems that would have rolled it back, and no rollback ran.')
+      oracle_block_end; O_BLOCK=accepted; O_HEAD="${line}"; oracle_count head-accepted
+      [[ -n "${O_CONSUMED}" && "${O_UNREAD}" != 1 ]] || oracle_red "an accepted-risk message from a hook that consumed no record of this call"
+      return 0 ;;
+    'Accepted problems:')
+      [[ "${O_BLOCK}" == accepted ]] || oracle_red "an accepted-problems header outside an accepted-risk message"
+      O_SKIP=1; return 0 ;;
     'Detected problems:')
       [[ "${O_BLOCK}" == rollback || "${O_BLOCK}" == backstop-rollback || "${O_BLOCK}" == backstop-none ]] || oracle_red "a reasons header outside a rollback message"
       O_SKIP=1; return 0 ;;
@@ -1066,6 +1105,25 @@ oracle_line() {
     else
       oracle_red "a line outside the grammar"
     fi
+    return 0
+  fi
+
+  # The reason an install was kept under SAFEDEPS_ACCEPT_RISK is the one this
+  # call's record holds, read in Python, and the audit entry is the last line
+  # of the audit record, naming this call's project, command and reason.
+  if [[ "${line}" == 'Accepted risk: '* ]]; then
+    oracle_count accepted-reason; O_SAW_ACCEPT=1; O_ACCEPT="${line#Accepted risk: }"
+    [[ "${O_BLOCK}" == accepted ]] || oracle_red "an Accepted risk line outside an accepted-risk message"
+    [[ "$(python3 "${ORACLE_READ}" string "${O_CONSUMED}" accept_risk 2>/dev/null)" == "${O_ACCEPT}" ]] \
+      || oracle_red "the reason is not the one this call's record holds"
+    return 0
+  fi
+  if [[ "${line}" =~ ${re_file} && "${BASH_REMATCH[1]}" == 'Audit record' ]]; then
+    oracle_count audit-line; O_SAW_AUDIT=1
+    [[ "${O_BLOCK}" == accepted ]] || oracle_red "an Audit record line outside an accepted-risk message"
+    [[ "${BASH_REMATCH[2]}" == "${O_HOME}/accepted-risk.jsonl" ]] || oracle_red "not the audit record under SAFEDEPS_HOME"
+    python3 "${ORACLE_READ}" accepted "${BASH_REMATCH[2]}" "${O_PROJECT}" "${O_CMD}" "${O_ACCEPT}" "${O_CALL_ID}" \
+      || oracle_red "the last audit entry does not name this call's project, command and reason"
     return 0
   fi
 
@@ -1329,7 +1387,7 @@ oracle_reset() {
   O_BLOCK="" O_HEAD="" O_SNAP="" O_SAW_INERT=0 O_SAW_DETAILS=0 O_SAW_NOTHING=0 O_CHANGED=0 O_SKIP=0
   O_JOURNAL_PROJECT="" O_JOURNAL_LINES="" O_JOURNAL_ID="" O_JOURNAL_HEAD="" O_SAW_OWNER=0 O_SECTION="" O_PREV="" O_LINE=""
   O_KEPT_EXPECT="" O_STEP_PATHS="" O_SAW_JNM=0 O_BODY="" O_REASONS="" O_REFUSED="" O_JFIELDS="" O_JREASONS=""
-  O_EXPECT="" O_ALL_LINES="" O_INERT_EXPECTED=0 O_VERDICT=""
+  O_EXPECT="" O_ALL_LINES="" O_INERT_EXPECTED=0 O_VERDICT="" O_SAW_ACCEPT=0 O_SAW_AUDIT=0 O_ACCEPT=""
 }
 
 # One line of the kept form's sequence: after `kept`, the next lines are its

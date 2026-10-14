@@ -76,8 +76,10 @@ impl Providers{
             }
         }self.catalog(&cache)
     }
-    /// Status per package; post uses only hard_block and vulnerable summaries.
-    pub fn batch(&mut self,specs:&[Spec])->Result<Vec<(W,W,&'static str)>,()>{
+    /// Status per package, with the ids of the OSV records it has; post uses
+    /// the hard_block and vulnerable summaries, and the ids name what an
+    /// install kept under SAFEDEPS_ACCEPT_RISK accepted.
+    pub fn batch(&mut self,specs:&[Spec])->Result<Vec<(W,W,&'static str,Vec<W>)>,()>{
         self.init();let temp=sh::mktemp_dir(&sh::tmp_prefix("safedeps-providers")).ok_or(())?;let scratch=Scratch(temp);
         let mut items:Vec<(W,W,PathBuf,Option<Value>)>=Vec::new();
         for spec in specs{
@@ -116,16 +118,16 @@ impl Providers{
         let mut catalog:Option<Option<Value>>=None;
         for (package,version,_,value) in items{
             let osv=value.ok_or(())?;let vulns=jv::field(&osv,"vulns")?;
-            let mut cves=Vec::new();
+            let mut cves=Vec::new();let mut ids=Vec::new();
             let values:Vec<&Value>=match vulns{Value::Arr(a)=>a.iter().collect(),Value::Obj(o)=>o.iter().map(|(_,v)|v).collect(),_=>Vec::new()};
             for v in &values{
-                if let Ok(Value::Str(s))=jv::field(v,"id"){if cve.is_match(s){cves.push(s.clone());}}
+                if let Ok(Value::Str(s))=jv::field(v,"id"){ids.push(s.clone());if cve.is_match(s){cves.push(s.clone());}}
                 if let Ok(Value::Arr(a))=jv::field(v,"aliases"){for x in a{if let Value::Str(s)=x{if cve.is_match(s){cves.push(s.clone());}}}}
             }
             let catalog=catalog.get_or_insert_with(||self.kev());let mut exploited=false;
             if let Some(c)=catalog{if let Ok(Value::Arr(a))=jv::field(c,"vulnerabilities"){exploited=a.iter().any(|v|matches!(jv::field(v,"cveID"),Ok(Value::Str(s)) if cves.contains(s)));}}
             let count=match vulns{Value::Arr(a)=>a.len(),Value::Obj(o)=>o.len(),Value::Str(s)=>String::from_utf8_lossy(s).chars().count(),Value::Null|Value::Bool(false)=>0,_=>return Err(())};
-            output.push((package,version,if exploited{"hard_block"}else if count>0{"vulnerable"}else{"clean"}));
+            output.push((package,version,if exploited{"hard_block"}else if count>0{"vulnerable"}else{"clean"},ids));
         }Ok(output)
     }
 }
@@ -228,11 +230,13 @@ mod catalog_tests {
         let names: Vec<String> = osv.iter().map(|(n, _)| n.to_string()).collect();
         let mut f = fixture("states", &osv, &["CVE-2026-0001"]);
         let out = f.providers.batch(&specs(&names)).unwrap();
-        let states: Vec<(String, &str)> = out.iter().map(|(p, v, s)| (format!("{}@{}", String::from_utf8_lossy(p), String::from_utf8_lossy(v)), *s)).collect();
+        let states: Vec<(String, &str)> = out.iter().map(|(p, v, s, _)| (format!("{}@{}", String::from_utf8_lossy(p), String::from_utf8_lossy(v)), *s)).collect();
         assert_eq!(states, vec![
             ("fixture-kev@1.0.0".to_string(), "hard_block"),
             ("fixture-vuln@1.0.0".to_string(), "vulnerable"),
             ("fixture-clean@1.0.0".to_string(), "clean"),
         ]);
+        let ids: Vec<Vec<W>> = out.iter().map(|(_, _, _, ids)| ids.clone()).collect();
+        assert_eq!(ids, vec![vec![b"GHSA-xxxx".to_vec()], vec![b"CVE-2026-0002".to_vec()], vec![]], "each package keeps the ids of its OSV records");
     }
 }

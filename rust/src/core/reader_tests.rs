@@ -231,3 +231,51 @@ fn runner_only_holds_node_runners_and_nothing_beside_them() {
         assert_eq!(run.runner_only(b"pushd sub && npx tsc && popd"), reading != Reading::Dash, "{reading:?}");
     }
 }
+
+#[test]
+fn accept_risk_counts_only_in_front_of_each_npm_install() {
+    use crate::core::AcceptRisk;
+    let core = Core::new();
+    let read = |reading: Reading, cmd: &str| {
+        let mut run = Run::new(&core);
+        run.reading = Some(reading);
+        let answer = run.accept_risk(cmd.as_bytes());
+        assert!(!run.failed, "{reading:?}: {cmd}");
+        answer
+    };
+    // The reason is the value the shell gives the npm install.
+    let counted = [
+        ("SAFEDEPS_ACCEPT_RISK='user, 2026-10-14: restore the tree' npm ci", "user, 2026-10-14: restore the tree"),
+        ("SAFEDEPS_ACCEPT_RISK=\"user (chat): katex unreachable\" npm install", "user (chat): katex unreachable"),
+        ("SAFEDEPS_ACCEPT_RISK=owner-decided npm i fixture@1.0.0", "owner-decided"),
+        ("cd sub && SAFEDEPS_ACCEPT_RISK='a; b' npm ci", "a; b"),
+        ("CI=1 SAFEDEPS_ACCEPT_RISK='x' NODE_ENV=test npm ci", "x"),
+        ("SAFEDEPS_ACCEPT_RISK=old SAFEDEPS_ACCEPT_RISK='new' npm ci", "new"),
+        ("SAFEDEPS_ACCEPT_RISK=r npm ci && echo done", "r"),
+        ("SAFEDEPS_ACCEPT_RISK=r npm ci; SAFEDEPS_ACCEPT_RISK=r npm install x@1", "r"),
+        ("SAFEDEPS_ACCEPT_RISK='x' npm ci 2>/dev/null", "x"),
+    ];
+    // Present and not counted: the reason says why, and nothing is guessed.
+    let refused = [
+        "SAFEDEPS_ACCEPT_RISK= npm ci", "SAFEDEPS_ACCEPT_RISK='' npm ci", "SAFEDEPS_ACCEPT_RISK='   ' npm ci",
+        "SAFEDEPS_ACCEPT_RISK=\"$WHY\" npm ci", "SAFEDEPS_ACCEPT_RISK=$(whoami) npm ci", "SAFEDEPS_ACCEPT_RISK+=x npm ci",
+        "export SAFEDEPS_ACCEPT_RISK=x; npm ci", "export SAFEDEPS_ACCEPT_RISK=x && npm ci",
+        "SAFEDEPS_ACCEPT_RISK=x; npm ci", "SAFEDEPS_ACCEPT_RISK=x npm ci && npm install y@1",
+        "SAFEDEPS_ACCEPT_RISK=a npm ci; SAFEDEPS_ACCEPT_RISK=b npm install y@1",
+        "SAFEDEPS_ACCEPT_RISK=x npm ci && make", "SAFEDEPS_ACCEPT_RISK=x npm ci | tee log",
+        "env SAFEDEPS_ACCEPT_RISK=x npm ci",
+        "sh -c 'SAFEDEPS_ACCEPT_RISK=x npm ci'", "SAFEDEPS_ACCEPT_RISK=x npm ci $(echo y)",
+        "SAFEDEPS_ACCEPT_RISK=x pip install requests==2.0.0", "SAFEDEPS_ACCEPT_RISK=x yarn add y@1",
+        "echo SAFEDEPS_ACCEPT_RISK && npm ci",
+    ];
+    for reading in [Reading::Bash, Reading::Zsh, Reading::Dash] {
+        assert_eq!(read(reading, "npm ci"), AcceptRisk::Absent, "{reading:?}");
+        assert_eq!(read(reading, "cd sub && npm install x@1"), AcceptRisk::Absent, "{reading:?}");
+        for (cmd, reason) in counted {
+            assert_eq!(read(reading, cmd), AcceptRisk::Reason(reason.as_bytes().to_vec()), "{reading:?}: {cmd}");
+        }
+        for cmd in refused {
+            assert!(matches!(read(reading, cmd), AcceptRisk::Invalid(_)), "{reading:?}: {cmd}");
+        }
+    }
+}

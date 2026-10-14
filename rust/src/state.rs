@@ -48,6 +48,24 @@ pub fn ensure_dirs(dir: &Path) -> std::io::Result<()> {
     std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir.join("snapshots"))
 }
 
+/// The audit record of installs kept under `SAFEDEPS_ACCEPT_RISK`, one JSON
+/// object per line. Derived from `SAFEDEPS_HOME` like advisory.log, never
+/// from a variable of its own: the record of an override moves with the
+/// state it overrides, or not at all.
+pub fn accepted_risk_path(dir: &Path) -> PathBuf {
+    dir.join("accepted-risk.jsonl")
+}
+
+/// Appends one entry to the accepted-risk record in one write. Unlike
+/// advisory.log, a line that cannot be written is an error the caller acts
+/// on: an override nobody can read back is not kept.
+pub fn append_accepted_risk(dir: &Path, entry: &[u8]) -> std::io::Result<()> {
+    let mut line = entry.to_vec();
+    line.push(b'\n');
+    let mut f = std::fs::OpenOptions::new().create(true).append(true).mode(0o600).open(accepted_risk_path(dir))?;
+    f.write_all(&line)
+}
+
 /// `log_advisory`: one line, `<UTC time>\t<text>\n`, appended to
 /// `advisory.log`. A line that cannot be written is dropped, as the shell's
 /// `|| true` drops it.

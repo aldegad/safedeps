@@ -51,6 +51,12 @@ command for the flag, so neither does this file.
       unstated (no line, the record does not state the fact), or unreadable
       (no line, the file is not one JSON object).
 
+  accepted <audit record> <project> <command> <reason> <tool_use_id or empty>
+      Exit 0 when the last line of the accepted-risk audit record is one JSON
+      object that names this project, command and reason, this call's
+      tool_use_id (null for a call that names none), and at least one
+      problem and one package. Exit 1 otherwise.
+
 A record states a fact only as version 2 ("record": 2): ignore_scripts_injected
 false (the JSON false) is "safedeps wrote none", and true with updated_command a
 string is "safedeps wrote this command". Every other shape states neither: no
@@ -334,7 +340,27 @@ def native_io_result(evidence, action, target, outcome, source, project):
     return 1
 
 
+def accepted(path, project, command, reason, call_id):
+    try:
+        with open(path, "rb") as handle:
+            lines = [l for l in handle.read().decode("utf-8", "surrogateescape").split("\n") if l]
+        entry = json.loads(lines[-1])
+    except (OSError, ValueError, IndexError):
+        return 1
+    if not isinstance(entry, dict):
+        return 1
+    want = {"project": project, "command": command, "reason": reason, "tool_use_id": call_id or None}
+    if any(entry.get(key) != value for key, value in want.items()):
+        return 1
+    problems, packages = entry.get("problems"), entry.get("packages")
+    if not (isinstance(problems, list) and problems and isinstance(packages, list) and packages):
+        return 1
+    return 0
+
+
 def main():
+    if sys.argv[1] == "accepted":
+        return accepted(*sys.argv[2:7])
     if sys.argv[1] == "native-io-before":
         return native_io_before(sys.argv[2], sys.argv[3])
     if sys.argv[1] == "native-io-result":

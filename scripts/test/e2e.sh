@@ -765,6 +765,142 @@ fi
 assert_gives_no_command "$(< "${revert_post_file}")" "the rollback of a tampered lockfile gives no command"
 pass "reorg reverts a tampered lockfile to safe content on disk"
 
+# SAFEDEPS_ACCEPT_RISK: a person's decision to keep an install whose closure
+# holds unapproved or vulnerable packages, said in front of each npm install
+# and recorded. Without it the same install is rolled back; with an empty or
+# blank value, or in another shape, the install is denied before it runs; a
+# KEV listing is rolled back whatever it says. accept_payload <id> <command>
+# <cwd> [codex] builds a hook input whose tool_use_id is <id>, so the record
+# the post hook reads is this call's.
+accept_payload() {
+  if [[ "${4:-}" == codex ]]; then
+    jq -nc --arg id "$1" --arg c "$2" --arg cwd "$3" \
+      '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd,tool_use_id:$id,turn_id:"turn-accept",model:"codex-test"}'
+  else
+    jq -nc --arg id "$1" --arg c "$2" --arg cwd "$3" '{tool_name:"Bash",tool_input:{command:$c},cwd:$cwd,tool_use_id:$id}'
+  fi
+}
+accept_lock() {
+  # <project> <extra package entries as JSON members>
+  cat > "$1/package-lock.json" <<EOF
+{
+  "name": "accept-project",
+  "lockfileVersion": 3,
+  "packages": {
+    "": {"dependencies": {"fixture-parent": "1.0.0"}},
+    "node_modules/fixture-parent": {"version": "1.0.0", "dependencies": {"fixture-child": "1.0.0"}},
+    "node_modules/fixture-child": {"version": "1.0.0"}$2
+  }
+}
+EOF
+}
+accept_project() {
+  rm -rf "$1"; mkdir -p "$1"
+  printf '{"dependencies":{"fixture-parent":"1.0.0"}}\n' > "$1/package.json"
+  accept_lock "$1" ""
+}
+accept_audit="${SAFEDEPS_HOME}/accepted-risk.jsonl"
+accept_entries() { { grep -c . "${accept_audit}" 2>/dev/null || true; } | tr -d ' '; }
+accept_extra=',
+    "node_modules/fixture-vuln": {"version": "1.0.0"},
+    "node_modules/fixture-accept-extra": {"version": "1.0.0"}'
+accept_reason='owner (e2e 2026-10-14): fixture-vuln measured unreachable; see the repo exception file'
+
+# No override: the unapproved, vulnerable closure is rolled back as before.
+accept_project "${tmp_root}/accept-none"
+accept_before=$(accept_entries)
+payload=$(accept_payload accept-none "npm ci" "${tmp_root}/accept-none")
+pre_hook > /dev/null <<< "${payload}"
+accept_lock "${tmp_root}/accept-none" "${accept_extra}"
+accept_none_post=$(PATH="${stub_bin}:${PATH}" post_hook <<< "${payload}")
+grep -q 'suspicious dependency change detected. A rollback ran.' < "${accept_none_post}" || fail "without SAFEDEPS_ACCEPT_RISK an unapproved, vulnerable closure is rolled back"
+grep -q 'fixture-accept-extra' "${tmp_root}/accept-none/package-lock.json" && fail "without SAFEDEPS_ACCEPT_RISK the lockfile is restored"
+[[ "$(accept_entries)" == "${accept_before}" ]] || fail "a rollback writes no accepted-risk entry"
+pass "without SAFEDEPS_ACCEPT_RISK an unapproved, vulnerable closure is rolled back"
+
+# An empty, blank or misplaced override is denied before the install runs,
+# and leaves no record of the call.
+accept_project "${tmp_root}/accept-blank"
+accept_i=0
+for accept_cmd in "SAFEDEPS_ACCEPT_RISK='   ' npm ci" "SAFEDEPS_ACCEPT_RISK= npm ci" \
+    "export SAFEDEPS_ACCEPT_RISK='${accept_reason}'; npm ci" "SAFEDEPS_ACCEPT_RISK=\"\$WHY\" npm ci" \
+    "SAFEDEPS_ACCEPT_RISK='${accept_reason}' npm ci && npm install fixture-vuln@1.0.0"; do
+  pending_before=$(find "${SAFEDEPS_HOME}/pending" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')
+  accept_i=$((accept_i + 1))
+  blank_pre=$(accept_payload "accept-blank-${accept_i}" "${accept_cmd}" "${tmp_root}/accept-blank" | pre_hook)
+  [[ "$(hook_response_read decision "${blank_pre}")" == deny ]] || fail "an override that does not count is denied: ${accept_cmd}"
+  hook_response_read reason "${blank_pre}" | grep -q 'SAFEDEPS_ACCEPT_RISK is in this command and does not count: ' \
+    || fail "the denial says the override does not count: ${accept_cmd}"
+  [[ "$(find "${SAFEDEPS_HOME}/pending" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')" == "${pending_before}" ]] \
+    || fail "a denied override leaves no record: ${accept_cmd}"
+done
+hook_response_read reason "$(accept_payload accept-blank-named "SAFEDEPS_ACCEPT_RISK='  ' npm ci" "${tmp_root}/accept-blank" | pre_hook)" \
+  | grep -q 'its value is empty or blank' || fail "a blank override is named as blank"
+pass "an empty, blank or misplaced SAFEDEPS_ACCEPT_RISK is denied before the install runs"
+
+# The override keeps the install, says so, and records it: the reason, the
+# problems and the advisory ids. The pre-guard lets the unapproved spec
+# through on Claude, rewritten with --ignore-scripts; no rebuild runs, and the
+# baseline does not move.
+accept_project "${tmp_root}/accept-kept"
+cp "${tmp_root}/accept-kept/package-lock.json" "${tmp_root}/accept-kept-lock.before"
+accept_before=$(accept_entries)
+denied_pre=$(accept_payload accept-denied "npm install fixture-vuln@1.0.0" "${tmp_root}/accept-kept" | pre_hook)
+[[ "$(hook_response_read decision "${denied_pre}")" == deny ]] || fail "without the override the unapproved spec is denied"
+accept_cmd="SAFEDEPS_ACCEPT_RISK='${accept_reason}' npm install fixture-vuln@1.0.0"
+kept_pre=$(accept_payload accept-kept "${accept_cmd}" "${tmp_root}/accept-kept" | pre_hook)
+[[ "$(hook_response_read decision "${kept_pre}")" == allow ]] || fail "the override lets the unapproved npm spec through on Claude"
+kept_cmd=$(hook_response_read required-rewrite "${kept_pre}")
+[[ "${kept_cmd}" == "SAFEDEPS_ACCEPT_RISK='${accept_reason}' npm install --ignore-scripts fixture-vuln@1.0.0 --ignore-scripts" ]] \
+  || fail "the kept install still runs with --ignore-scripts (${kept_cmd})"
+payload=$(accept_payload accept-kept "${kept_cmd}" "${tmp_root}/accept-kept")
+accept_lock "${tmp_root}/accept-kept" "${accept_extra}"
+cp "${tmp_root}/accept-kept/package-lock.json" "${tmp_root}/accept-kept-lock.after"
+kept_post=$(PATH="${stub_bin}:${PATH}" post_hook <<< "${payload}")
+grep -qxF 'safedeps: WARNING: SAFEDEPS_ACCEPT_RISK kept this install. Its checks found problems that would have rolled it back, and no rollback ran.' \
+  <<< "$(post_message "${kept_post}")" || fail "the kept install is announced as a warning"
+cmp -s "${tmp_root}/accept-kept/package-lock.json" "${tmp_root}/accept-kept-lock.after" || fail "the kept install's lockfile is left as the install wrote it"
+[[ "$(accept_entries)" == "$((accept_before + 1))" ]] || fail "the kept install writes one accepted-risk entry"
+tail -n 1 "${accept_audit}" | jq -e --arg r "${accept_reason}" '
+  .reason == $r and (.problems | length) == 2
+  and ([.packages[] | select(.package == "fixture-vuln@1.0.0" and .problem == "vulnerable" and .advisories == ["CVE-2026-1001"])] | length) == 1
+  and ([.packages[] | select(.package == "fixture-accept-extra@1.0.0" and .problem == "unapproved")] | length) == 1' >/dev/null \
+  || fail "the entry holds the reason, the problems and the advisory ids"
+grep -q 'ACCEPTED RISK$' "${SAFEDEPS_HOME}/reorg.log" || fail "reorg.log records the kept install"
+assert_gives_no_command "$(post_message "${kept_post}" | grep -v 'did not run npm rebuild')" "the accepted-risk message gives no command"
+pass "SAFEDEPS_ACCEPT_RISK keeps an unapproved, vulnerable install, warns, and records it"
+
+# A KEV listing is rolled back whatever the override says.
+accept_project "${tmp_root}/accept-kev"
+accept_before=$(accept_entries)
+kev_pre=$(accept_payload accept-kev "SAFEDEPS_ACCEPT_RISK='${accept_reason}' npm ci" "${tmp_root}/accept-kev" | pre_hook)
+[[ "$(hook_response_read decision "${kev_pre}")" == allow ]] || fail "npm ci with the override runs"
+payload=$(accept_payload accept-kev "$(hook_response_read required-rewrite "${kev_pre}")" "${tmp_root}/accept-kev")
+accept_lock "${tmp_root}/accept-kev" "${accept_extra}"',
+    "node_modules/fixture-kev": {"version": "1.0.0"}'
+kev_post=$(PATH="${stub_bin}:${PATH}" post_hook <<< "${payload}")
+grep -q 'suspicious dependency change detected. A rollback ran.' < "${kev_post}" || fail "a KEV-listed package is rolled back under the override"
+grep -q 'KEV-blocked package(s): fixture-kev@1.0.0' < "${kev_post}" || fail "the rollback names the KEV-listed package"
+grep -q 'it keeps an install only where every problem is an unapproved or vulnerable package' < "${kev_post}" \
+  || fail "the rollback says the override does not cover a KEV listing"
+grep -q 'fixture-kev' "${tmp_root}/accept-kev/package-lock.json" && fail "the KEV-listed lockfile is restored"
+[[ "$(accept_entries)" == "${accept_before}" ]] || fail "a KEV rollback writes no accepted-risk entry"
+pass "SAFEDEPS_ACCEPT_RISK never keeps a KEV-listed package"
+
+# On Codex the pre-guard cannot withhold install scripts, so the override does
+# not lift the ledger check for a spec; the post-install override still holds.
+accept_project "${tmp_root}/accept-codex"
+codex_pre=$(accept_payload accept-codex-spec "SAFEDEPS_ACCEPT_RISK='${accept_reason}' npm install fixture-vuln@1.0.0" "${tmp_root}/accept-codex" codex | pre_hook)
+[[ "$(hook_response_read decision "${codex_pre}")" == deny ]] || fail "on Codex the override does not lift the ledger check"
+hook_response_read reason "${codex_pre}" | grep -q 'does not lift this check on Codex' || fail "the Codex denial says why"
+payload=$(accept_payload accept-codex "SAFEDEPS_ACCEPT_RISK='${accept_reason}' npm ci" "${tmp_root}/accept-codex" codex)
+pre_hook > /dev/null <<< "${payload}"
+accept_lock "${tmp_root}/accept-codex" "${accept_extra}"
+codex_post=$(PATH="${stub_bin}:${PATH}" post_hook <<< "${payload}")
+grep -q 'SAFEDEPS_ACCEPT_RISK kept this install' < "${codex_post}" || fail "on Codex the override keeps the install"
+grep -q 'safedeps did not add --ignore-scripts to this install' < "${codex_post}" || fail "on Codex the message says safedeps did not add the flag"
+pass "on Codex SAFEDEPS_ACCEPT_RISK keeps the install and does not lift the ledger check"
+
 # A rollback never acts outside the project it read. Some worktree layouts link
 # node_modules to another checkout's, and `npm ci` empties whatever node_modules
 # resolves to before it installs. This stub npm does what that first step of

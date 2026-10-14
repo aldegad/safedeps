@@ -700,6 +700,67 @@ impl<'c> Run<'c> {
         found
     }
 
+    /// What a `SAFEDEPS_ACCEPT_RISK=<who decided and why>` assignment says in
+    /// this reading. A command that does not hold the name is `Absent`, and
+    /// nothing else is read. One that holds it counts only in one shape:
+    /// the command hands no text on, and every statement of it is an npm
+    /// install or one of the inert builtins (`inert_builtin`). Every npm
+    /// install carries the assignment among its own prefix assignments, read
+    /// as written, with the same value, and the value is not blank and holds
+    /// no control byte. Any other shape is `Invalid` with the reason, never
+    /// a guess: an assignment read from an `export`, a payload, a group or
+    /// another statement would let the risk accepted for one install cover
+    /// another. The statements are the pieces view's, and the prefixes are
+    /// the target statements' tokens, joined by their ordinal as
+    /// `target_statements` joins them.
+    pub fn accept_risk(&mut self, cmd: &[u8]) -> AcceptRisk {
+        use AcceptRisk::{Absent, Invalid, Reason};
+        if !cmd.windows(ACCEPT_RISK.len()).any(|w| w == ACCEPT_RISK) {
+            return Absent;
+        }
+        if !self.raw_text_walk(cmd).is_empty() {
+            return Invalid("the command hands text on to a shell or a substitution, which the override does not read");
+        }
+        let Some((pieces, unterm)) = self.pieces(cmd) else { return Invalid("the command could not be read") };
+        if pieces.unreadable {
+            self.failed = true;
+            return Invalid("the command could not be read");
+        }
+        if unterm {
+            return Invalid("the command does not close");
+        }
+        let statements = self.target_statements(cmd);
+        let mut rd = Reader::new(&self.c.mrx);
+        let mut reason: Option<W> = None;
+        for piece in &pieces.pieces {
+            let Some(raw) = cmd.get(piece.start..piece.end) else { return Invalid("the command could not be read") };
+            if !has_nonspace(raw) {
+                continue;
+            }
+            let Some(statement) = piece.nn.checked_sub(1).and_then(|i| statements.get(i)) else {
+                return Invalid("the command could not be read");
+            };
+            rd.read(&statement.manager_words());
+            if self.recognized(&statement.rec) && rd.family == "npm" && rd.kind == "install" {
+                let value = match accept_risk_value(&statement.tokens) {
+                    Ok(Some(value)) => value,
+                    Ok(None) => return Invalid("an npm install in this command does not carry it among its own prefix assignments"),
+                    Err(why) => return Invalid(why),
+                };
+                match &reason {
+                    Some(seen) if *seen != value => return Invalid("the npm installs in this command carry different values"),
+                    _ => reason = Some(value),
+                }
+            } else if !inert_builtin(self.reading, cmd, piece) {
+                return Invalid("a statement beside the npm install is neither an npm install nor one of the inert builtins (cd, pushd, popd, echo, printf, export, true, :, test, [)");
+            }
+        }
+        match reason {
+            Some(value) => Reason(value),
+            None => Invalid("no npm install in this command carries it"),
+        }
+    }
+
     /// The statements the extractor reads, each with whether the effect gate
     /// reads it, its recognize-view text and its words: the command's own from
     /// the target records, then every payload's from its pieces view.
@@ -948,6 +1009,50 @@ fn inert_builtin(reading: Option<Reading>, text: &[u8], piece: &lex::PieceSpan) 
         && args.iter().enumerate().all(|(i, w)| {
             extract::read_as_written(&w.value) || head.value == b"[" && i + 1 == args.len() && w.value == b"]"
         })
+}
+
+/// The shell variable that accepts the risk of one npm install.
+pub const ACCEPT_RISK: &[u8] = b"SAFEDEPS_ACCEPT_RISK";
+
+/// What `Run::accept_risk` read in one reading.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AcceptRisk {
+    Absent,
+    Invalid(&'static str),
+    Reason(W),
+}
+
+/// The value of the last `SAFEDEPS_ACCEPT_RISK=` among a statement's
+/// leading assignment words (its tokens, quotes removed, a word the shell
+/// decides at run time marked by \001 at its end), the way the shell keeps
+/// the last one. None where no leading assignment names it.
+fn accept_risk_value(tokens: &[W]) -> Result<Option<W>, &'static str> {
+    let mut found = None;
+    for token in tokens {
+        if !assign_word(token) {
+            break;
+        }
+        let eq = token.iter().position(|&b| b == b'=').unwrap_or(token.len());
+        let key = &token[..eq];
+        if key.strip_suffix(b"+").unwrap_or(key) != ACCEPT_RISK {
+            continue;
+        }
+        if key.ends_with(b"+") {
+            return Err("it is appended to with +=, not assigned");
+        }
+        found = Some(token[eq + 1..].to_vec());
+    }
+    let Some(value) = found else { return Ok(None) };
+    if value.contains(&0x01) {
+        return Err("its value holds a word the shell decides when it runs");
+    }
+    if value.iter().any(|&b| b < 0x20 || b == 0x7f) {
+        return Err("its value holds a control character");
+    }
+    if value.iter().all(|&b| b == b' ') {
+        return Err("its value is empty or blank");
+    }
+    Ok(Some(value))
 }
 
 /// `^[A-Za-z_][A-Za-z0-9_]*\+?=`

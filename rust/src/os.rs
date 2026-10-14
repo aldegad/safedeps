@@ -214,6 +214,8 @@ pub enum WallRole {
     ReorgRefusedHeader,
     ReorgRollbackHeader,
     ConfirmWarningsHeader,
+    AcceptedRiskHeader,
+    AcceptedRiskEntry,
     JournalOpened,
     JournalStage,
     JournalRecoveryHeader,

@@ -47,7 +47,20 @@ pub fn judge(call:&Call,run:&mut Run,cwd:&[u8],read:&Readings,mut inert:impl FnM
         if !undecided(call,run,&mut out){deny(&mut out,&cat(&[b"safedeps: ",&reasons.join(&b"; "[..])]))}
         return out
     }
-    if !approved(call,run,read,&project,&mut out){return out}
+    let codex=jq::stream_has(&call.input,"turn_id");
+    let accept=match accept_risk(call,run,read) {
+        Ok(accept)=>accept,
+        Err(why)=>{
+            if undecided(call,run,&mut out){return out}
+            log_command(call,&cat(&[b"pre-guard DENY: SAFEDEPS_ACCEPT_RISK is in this command and does not count (",&why,b")."]));
+            deny(&mut out,&cat(&[b"safedeps: SAFEDEPS_ACCEPT_RISK is in this command and does not count: ",&why,b". The install was not run. The override counts only as an assignment in front of each npm install, `SAFEDEPS_ACCEPT_RISK='<who decided and why>' npm ci`, with nothing beside the installs but cd, pushd, popd, echo, printf, export, true, :, test or [. Fix the command, or run it without the name."]));
+            return out
+        }
+    };
+    if let Some(reason)=&accept {
+        log_command(call,&cat(&[b"pre-guard: SAFEDEPS_ACCEPT_RISK is set for this npm install (",reason,b"). The post-install gate still judges the closure; where its only problems are unapproved or vulnerable packages it keeps the install, warns, and records it in ",&state::accepted_risk_path(&call.guard_dir).as_os_str().as_bytes(),b"."]));
+    }
+    if !approved(call,run,read,&project,&mut out,accept.as_deref(),codex){return out}
     if !ungated.is_empty(){log_command(call,&cat(&[b"pre-guard UNGATED: ",&ungated_eco,b" install names a package with no version spec, so the ledger gate did not run. No effect gate reads the result of this install, so it is unverified. Unpinned: ",&ungated,b"."]))}
     if read.yes("piped") {
         if undecided(call,run,&mut out){return out}
@@ -59,7 +72,6 @@ pub fn judge(call:&Call,run:&mut Run,cwd:&[u8],read:&Readings,mut inert:impl FnM
         log(call,"pre-guard DENY: hidden dependency install could not be reduced to an approved spec — fail-closed.".as_bytes());
         deny(&mut out,"safedeps: hidden dependency install detected, but no package spec could be extracted for ledger approval — install blocked fail-closed.".as_bytes());return out
     }
-    let codex=jq::stream_has(&call.input,"turn_id");
     let mut rewrites=Vec::new();let mut npm_install=false;let mut attribution=W::new();
     // A call that only runs node packages, in every reading and with no
     // install hidden, may be left unjudged where it leaves no trace in npm's
@@ -107,7 +119,7 @@ pub fn judge(call:&Call,run:&mut Run,cwd:&[u8],read:&Readings,mut inert:impl FnM
     for (flag,message) in notices::INERT {
         if if *flag=="downgrade"{flags==b"downgrade"}else{flags.split(|b|*b==b' ').any(|s|s==flag.as_bytes())}{log_command(call,message.as_bytes())}
     }
-    let record=pending::Record{cwd:&cwd,project_from:from,npm_install,runner_only,attribution:&attribution,fetch:fetch.as_ref(),fetch_why:&fetch_why};
+    let record=pending::Record{cwd:&cwd,project_from:from,npm_install,runner_only,attribution:&attribution,fetch:fetch.as_ref(),fetch_why:&fetch_why,accept_risk:accept.as_deref()};
     if let Err(error)=pending::write(call,&snap,&record){out.warn(format!("safedeps: could not write this install's pending state: {}",error).as_bytes());out.code=1;return out}
     if flags.starts_with(b"rewrite")&&!command.is_empty() {
         let unread=flags.split(|b|*b==b' ').any(|s|matches!(s,b"unverified"|b"unread"|b"release"));
@@ -147,7 +159,43 @@ fn registry_notice(call:&Call,read:&Readings) {
     if !registries.is_empty(){log_command(call,&cat(&[b"pre-guard: npm reads ",&registries.join(&b", "[..]),b" for this install from its configuration (an .npmrc or the environment), which is not the public npm registry. That alone does not deny the install; safedeps will not rebuild what npm fetched from there (on Codex the install runs its own scripts before any hook can withhold them)."]))}
 }
 
-fn approved(call:&Call,run:&Run,read:&Readings,project:&[u8],out:&mut Out)->bool {
+/// The reason `SAFEDEPS_ACCEPT_RISK` gives for this command, where it
+/// counts: every reading reads the same value (`Run::accept_risk`), and every
+/// npm install in the command lands where npm records it, so the effect gate
+/// reads what the override keeps. Ok(None) where the command does not hold
+/// the name; Err with the reason where it holds it and it does not count.
+fn accept_risk(call:&Call,run:&mut Run,read:&Readings)->Result<Option<W>,W> {
+    let mut seen:Option<core::AcceptRisk>=None;
+    for &reading in &read.set {
+        run.reading=Some(reading);
+        let answer=run.accept_risk(&call.command);
+        run.reading=None;
+        match &seen {
+            None=>seen=Some(answer),
+            Some(earlier) if *earlier==answer=>{},
+            Some(_)=>return Err(b"the shells read the command differently".to_vec()),
+        }
+    }
+    match seen {
+        None|Some(core::AcceptRisk::Absent)=>Ok(None),
+        Some(core::AcceptRisk::Invalid(why))=>Err(why.as_bytes().to_vec()),
+        Some(core::AcceptRisk::Reason(reason))=>{
+            if read.targets.iter().any(|t|t.kind.starts_with("npm")&&t.kind!="npm") {
+                return Err(b"an npm install in this command lands where no lockfile records it, so the post-install gate cannot read what the override would keep".to_vec())
+            }
+            Ok(Some(reason))
+        }
+    }
+}
+
+/// The ledger gate. With `SAFEDEPS_ACCEPT_RISK` counting (`accept`), an
+/// unapproved npm spec is let through and named in advisory.log, on Claude
+/// only: there the install runs with --ignore-scripts and the post-install
+/// gate judges the closure, a KEV listing included, before any script can
+/// run. Codex cannot withhold install scripts, so a package the ledger never
+/// cleared, which may be KEV-listed, would run its scripts before any check;
+/// there the gate stands. Other ecosystems' specs are never let through.
+fn approved(call:&Call,run:&Run,read:&Readings,project:&[u8],out:&mut Out,accept:Option<&[u8]>,codex:bool)->bool {
     let specs:Vec<_>=read.field("ledger_specs").split(|b|*b==b'\n').filter(|s|!s.is_empty()).collect();
     if specs.is_empty(){return true}
     let npm=specs.iter().any(|s|s.starts_with(b"npm\t"));
@@ -164,17 +212,23 @@ fn approved(call:&Call,run:&Run,read:&Readings,project:&[u8],out:&mut Out)->bool
     let context=context.as_ref().and_then(|v|v.get("context_hash")).and_then(Value::as_str).unwrap_or("");
     let invoke=if std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).any(|p|{let p=p.join("safedeps");p.is_file()&&os::executable(&p)}) {b"safedeps".to_vec()}
         else{match stamp::package_root(){Ok(root)=>quote(root.join("bin/safedeps").as_os_str().as_bytes()),Err(why)=>{deny(out,format!("safedeps: {}. Install blocked fail-closed.",why).as_bytes());return false}}};
-    let mut blocked=Vec::new();let mut ecos=Vec::new();
+    let mut blocked=Vec::new();let mut ecos=Vec::new();let mut accepted=Vec::new();
     for line in specs {
         let fields=core::read_fields(line,b"\t",3);let eco=jq::text(&fields[0]);let pkg=jq::text(&fields[1]);let spec=jq::text(&fields[2]);
         if eco.is_empty()||pkg.is_empty()||spec.is_empty(){continue}
         if ledger::check(&ledger::directory(),&eco,&pkg,&spec,if eco=="npm"{context}else{""},os::wall(os::WallRole::PreLedgerExpiry).seconds()).is_ok_and(|v|v.approved){continue}
         let show=|s:&str|s.as_bytes().iter().map(|b|if *b==2{b' '}else{*b}).collect::<W>();
+        if eco=="npm"&&accept.is_some()&&!codex{accepted.push(cat(&[&show(&pkg),b"@",&show(&spec)]));continue}
         blocked.push(cat(&[&invoke,b" check ",eco.as_bytes(),b" ",&show(&pkg),b"@",&show(&spec)]));
         if !ecos.contains(&eco){ecos.push(eco)}
     }
-    if blocked.is_empty(){return true}
-    if !undecided(call,run,out){deny(out,&cat(&[b"safedeps: install not approved (ecosystem=",ecos.join(",").as_bytes(),") — run `".as_bytes(),&blocked.join(&b" && "[..]),b"` first, then retry the install using the approved version (see install_hint in the check output)."]));}
+    if blocked.is_empty() {
+        if !accepted.is_empty(){log_command(call,&cat(&[b"pre-guard ACCEPTED RISK: SAFEDEPS_ACCEPT_RISK let these npm specs through the ledger gate unapproved: ",&accepted.join(&b", "[..]),b". The post-install gate judges what they bring in."]))}
+        return true
+    }
+    let note:&[u8]=if accept.is_some()&&codex&&ecos.iter().any(|e|e=="npm"){b" SAFEDEPS_ACCEPT_RISK does not lift this check on Codex: Codex cannot withhold install scripts, so a package no check has cleared would run them first."}
+        else if accept.is_some(){b" SAFEDEPS_ACCEPT_RISK covers only npm specs."}else{b""};
+    if !undecided(call,run,out){deny(out,&cat(&[b"safedeps: install not approved (ecosystem=",ecos.join(",").as_bytes(),") — run `".as_bytes(),&blocked.join(&b" && "[..]),b"` first, then retry the install using the approved version (see install_hint in the check output).",note]));}
     false
 }
 

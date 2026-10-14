@@ -1,9 +1,17 @@
 //! One closure over npm's two records, one ledger index, and one OSV batch.
-use super::{closure, providers::Providers, report::cat, sh, snapshot::Store, trace};
+use super::{closure, jv, providers::Providers, report::cat, sh, snapshot::Store, trace};
 use crate::{json::Value, ledger, os, state};
 use std::io::Write;
 
-pub fn check(store: &Store, reasons: &mut Vec<Vec<u8>>) {
+/// What an install kept under `SAFEDEPS_ACCEPT_RISK` accepted: the problems
+/// as the gate states them, and each package with the reason it was named.
+/// Only a package the ledger does not approve and a package OSV reports
+/// vulnerable can be here. A KEV listing, a closure that cannot be read and
+/// a check that cannot run are never accepted: they stay reasons.
+#[derive(Default)]
+pub struct Accepted { pub problems: Vec<Vec<u8>>, pub packages: Vec<Value> }
+
+pub fn check(store: &Store, reasons: &mut Vec<Vec<u8>>, mut accepted: Option<&mut Accepted>) {
     let lockfiles: Vec<_> = trace::RECORDS.iter().filter(|rel| sh::is_file(&store.project.join(rel))).collect();
     if lockfiles.is_empty() { return }
     if sh::is_dir(&store.project.join("node_modules")) && !sh::is_file(&store.project.join(trace::RECORDS[1])) {
@@ -34,16 +42,34 @@ pub fn check(store: &Store, reasons: &mut Vec<Vec<u8>>) {
             if i > 0 { summary.push(if i % 2 == 1 { b',' } else { b' ' }); }
             summary.extend(m);
         }
-        reasons.push(cat(&[b"npm closure contains ", misses.len().to_string().as_bytes(), b" unapproved package(s): ", &summary]));
+        let problem = cat(&[b"npm closure contains ", misses.len().to_string().as_bytes(), b" unapproved package(s): ", &summary]);
+        match accepted.as_deref_mut() {
+            Some(accepted) => {
+                accepted.problems.push(problem);
+                accepted.packages.extend(misses.iter().map(|m| jv::obj(vec![("package", jv::s(m)), ("problem", jv::s(b"unapproved"))])));
+            }
+            None => reasons.push(problem),
+        }
     }
     let Ok(results) = Providers::new(&store.home).batch(&all) else {
         reasons.push(b"npm closure OSV batch verification failed; fail-closed".to_vec()); return
     };
     for (status, label) in [("hard_block", "KEV-blocked"), ("vulnerable", "vulnerable")] {
-        let packages: Vec<_> = results.iter().filter(|(_,_,s)| *s == status)
-            .map(|(p,v,_)| cat(&[p,b"@",v])).collect();
-        if !packages.is_empty() {
-            reasons.push(cat(&[b"npm closure contains ", label.as_bytes(), b" package(s): ", &packages.join(b", ".as_slice())]));
+        let found: Vec<_> = results.iter().filter(|(_,_,s,_)| *s == status).collect();
+        if found.is_empty() { continue }
+        let packages: Vec<_> = found.iter().map(|(p,v,_,_)| cat(&[p,b"@",v])).collect();
+        let problem = cat(&[b"npm closure contains ", label.as_bytes(), b" package(s): ", &packages.join(b", ".as_slice())]);
+        match accepted.as_deref_mut().filter(|_| status == "vulnerable") {
+            Some(accepted) => {
+                // The ids are said where the risk is accepted, so the record
+                // names what was accepted and not only a package.
+                let named: Vec<_> = found.iter().map(|(p,v,_,ids)| if ids.is_empty() { cat(&[p, b"@", v]) }
+                    else { cat(&[p, b"@", v, b" (", &ids.join(b", ".as_slice()), b")"]) }).collect();
+                accepted.problems.push(cat(&[b"npm closure contains vulnerable package(s): ", &named.join(b", ".as_slice())]));
+                accepted.packages.extend(found.iter().map(|(p,v,_,ids)| jv::obj(vec![("package", jv::s(&cat(&[p, b"@", v]))),
+                    ("problem", jv::s(b"vulnerable")), ("advisories", Value::Arr(ids.iter().map(|id| jv::s(id)).collect()))])));
+            }
+            None => reasons.push(problem),
         }
     }
 }

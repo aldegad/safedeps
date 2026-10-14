@@ -161,11 +161,12 @@ pub fn probe(input:&[u8])->i32 {
     if let Some(record)=value.get("pending") {
         let bytes=|name|record.get(name).and_then(Value::as_bytes).unwrap_or_default();
         let cwd=bytes("cwd");let attribution=bytes("attribution");let fetch_why=bytes("fetch_why");
+        let accept=record.get("accept_risk").and_then(Value::as_bytes);
         let record=super::pending::Record { cwd:&cwd,
             project_from:record.get("project_from").and_then(Value::as_str).unwrap_or("cwd"),
             npm_install:matches!(record.get("npm_install").or(record.get("trace")),Some(Value::Bool(true))),
             runner_only:matches!(record.get("runner_only"),Some(Value::Bool(true))), attribution:&attribution,
-            fetch:record.get("fetch"),fetch_why:&fetch_why };
+            fetch:record.get("fetch"),fetch_why:&fetch_why,accept_risk:accept.as_deref() };
         if super::pending::write(&call,&snap,&record).is_err(){return 1}
     }
     if let Some(Value::Str(rewrite))=value.get("rewrite") {
