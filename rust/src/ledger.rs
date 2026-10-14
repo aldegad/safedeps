@@ -121,6 +121,14 @@ fn field(v: Option<&Value>) -> Result<String, ()> {
     match v { None | Some(Value::Null) => Ok(String::new()), Some(Value::Arr(_) | Value::Obj(_)) => Err(()), Some(v) => Ok(tostring(Some(v))) }
 }
 impl EffectIndex {
+    /// The union with another index: a package either one approves is
+    /// approved. The post hook joins the approvals with no project context
+    /// and the approvals of the project it judges, each read by
+    /// `effect_index` under its own context rule.
+    pub fn merge(&mut self, other: EffectIndex) {
+        self.approved.extend(other.approved);
+        self.entries.extend(other.entries);
+    }
     pub fn contains(&self, ecosystem: &str, package: &str, version: &str) -> bool {
         self.approved.contains(&(ecosystem.into(), package.into(), version.into()))
     }

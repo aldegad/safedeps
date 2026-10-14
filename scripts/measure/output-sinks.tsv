@@ -124,7 +124,7 @@ rust/src/post/call.rs	take	human	log-or-report	state::log_advisory	data-field+fi
 rust/src/post/call.rs	take	human	log-or-report	state::log_advisory	fixed-literal+other	3
 rust/src/post/effect.rs	<module>	boundary	import	std::io::Write	-	1
 rust/src/post/effect.rs	check	boundary	capability	std::io::stderr	-	1
-rust/src/post/effect.rs	check	human	log-or-report	state::log_advisory	fixed-literal+other	1
+rust/src/post/effect.rs	check	human	log-or-report	state::log_advisory	fixed-literal+other	3
 rust/src/post/effect.rs	check	human	stderr	write_all	data-field	1
 rust/src/post/heuristics.rs	<module>	boundary	import	std::fs	-	1
 rust/src/post/heuristics/native.rs	<module>	boundary	import	std::fs	-	1

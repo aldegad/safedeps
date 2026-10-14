@@ -3722,6 +3722,26 @@ ov_guard_decision() {
   || fail "the guard does not accept an overrides-scoped approval in a repo without those overrides"
 printf 'ok - pre-guard derives the same overrides approval key as the check\n'
 
+# The post-install gate counts the approvals scoped to the project it judges.
+# It used to read only the approvals with no project context, so an install
+# in a repo with overrides was rolled back for packages its own approvals
+# named, and a repo without those overrides still is.
+cp "${ov_home}/approved-specs/"*.json "${SAFEDEPS_HOME}/approved-specs/"
+ov_lock='{"lockfileVersion":3,"packages":{"":{"name":"p","version":"0.0.0","dependencies":{"mkdirp":"0.5.1"}},"node_modules/mkdirp":{"version":"0.5.1"},"node_modules/minimist":{"version":"1.2.8"}}}'
+for ov_repo in "${ov_patched_repo}" "${ov_bare_repo}"; do
+  ov_payload=$(jq -nc --arg cwd "${ov_repo}" --arg id "ov-post-${ov_repo##*-}" '{tool_name:"Bash",tool_input:{command:"npm ci"},cwd:$cwd,tool_use_id:$id}')
+  pre_hook > /dev/null <<< "${ov_payload}"
+  printf '%s\n' "${ov_lock}" > "${ov_repo}/package-lock.json"
+  ov_post=$(PATH="${stub_bin}:${PATH}" post_hook <<< "${ov_payload}")
+  if [[ "${ov_repo}" == "${ov_patched_repo}" ]]; then
+    ! grep -q 'A rollback ran' < "${ov_post}" || fail "an install in the repo whose overrides earned the approval is not rolled back"
+    grep -q '"minimist"' "${ov_repo}/package-lock.json" || fail "the approved install's lockfile is kept"
+  else
+    grep -q 'unapproved package(s): ' < "${ov_post}" || fail "a repo without those overrides does not inherit the scoped approval"
+  fi
+done
+pass "the post-install gate counts the approvals scoped to the project it judges"
+
 # --- rollback journal: an interrupted rollback must not vanish ---------------
 #
 # Measured before this existed (scripts/measure/rollback-kill-state.sh): kill the

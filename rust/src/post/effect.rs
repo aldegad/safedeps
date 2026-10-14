@@ -27,7 +27,32 @@ pub fn check(store: &Store, reasons: &mut Vec<Vec<u8>>, mut accepted: Option<&mu
     let all = closure::unique_sorted(all);
     let value = Value::Arr(all.iter().map(closure::Spec::to_value).collect());
     let mut warnings = Vec::new();
-    let index = ledger::effect_index(&ledger::directory(), "", os::wall(os::WallRole::PostLedgerExpiry).seconds(), &mut warnings);
+    let now = os::wall(os::WallRole::PostLedgerExpiry).seconds();
+    let mut index = ledger::effect_index(&ledger::directory(), "", now, &mut warnings);
+    // `safedeps check` scopes an approval to the project whose npm overrides
+    // or Yarn resolutions it was resolved with, and the pre-guard asks the
+    // ledger with that context. This gate read only the approvals with no
+    // context, so a project with overrides was rolled back for packages its
+    // own approvals named. It now counts both: the approvals with no context,
+    // and those of the context this project has, never another project's.
+    if let Ok(index) = index.as_mut() {
+        match ledger::context::project_context(&store.project) {
+            Ok(Some(context)) => {
+                let hash = context.get("context_hash").and_then(Value::as_str).unwrap_or("");
+                if !hash.is_empty() {
+                    match ledger::effect_index(&ledger::directory(), hash, now, &mut warnings) {
+                        Ok(scoped) => index.merge(scoped),
+                        Err(_) => state::log_advisory(&store.home, &cat(&[b"post-verify: the approvals scoped to ", sh::bytes(&store.project), b" could not be read, so only the approvals with no project context were counted."])),
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(why) => {
+                let why: Vec<u8> = why.iter().map(|b| if matches!(b, b'\n' | b'\r') { b' ' } else { *b }).collect();
+                state::log_advisory(&store.home, &cat(&[b"post-verify: the project resolution context of ", sh::bytes(&store.project), b" could not be read (", why.trim_ascii(), b"), so only the approvals with no project context were counted."]))
+            }
+        }
+    }
     let _ = std::io::stderr().write_all(&warnings);
     let misses = index.map_err(|_| ()).and_then(|index| index.misses("npm", &value));
     let Ok(misses) = misses else {
