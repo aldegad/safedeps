@@ -3,3 +3,7 @@
 # the package's: package.json "files" names bin/, and a .gitignore at the root
 # does not take out what "files" names. One inside bin/native would.
 /bin/native/
+
+# Local Kuma state (plan worktrees, evidence) and macOS Finder files are this machine's, never the repo's.
+/.kuma/
+.DS_Store
