@@ -3,14 +3,14 @@
 #
 # One build, two callers. A checkout builds its own binary with this script
 # (the installer runs it, and a release builds in the release worktree before
-# main moves, AGENTS.md step 7), and the publish job builds the three binaries
-# the package ships with it. No binary is committed: the root .gitignore names
-# bin/native/.
+# main moves, AGENTS.md step 7), and the release's publish build (AGENTS.md
+# step 10) builds the three binaries the package ships with it. No binary is
+# committed: the root .gitignore names bin/native/.
 #
 #   scripts/build-core.sh                    this machine's binary, from this
 #                                            checkout's source
 #   scripts/build-core.sh --target <triple>  that target's binary; repeatable
-#   scripts/build-core.sh --publish ...      the publish job's build (below)
+#   scripts/build-core.sh --publish ...      the release's publish build (below)
 #   scripts/build-core.sh --sums <file>      also write `<sha256>  <dir>/safedeps-core`
 #                                            per binary built, for a later
 #                                            read-back
@@ -48,16 +48,16 @@
 #     run.
 #
 # --publish marks the stamp `publish`. The mark is fixed when the binary is
-# built, here, by the publish job; nothing at run time can set it. It changes
+# built, here, by the publish build; nothing at run time can set it. It changes
 # one thing: a publish binary whose own tree has no rust/ at all, which is the
 # package npm installs, skips the check, because there is no source to hold
 # it to. Where its own rust/ is there, unreadable or a dangling link, it is
-# checked or refused like any other binary. So the publish job's build is
+# checked or refused like any other binary. So the publish build is
 # checked against the tagged source here, and a checkout's --publish build
 # still notices that the source moved.
 #
-# The toolchain is whatever `cargo` is on PATH. The publish job pins it; a
-# checkout's is the developer's.
+# The toolchain is whatever `cargo` is on PATH. AGENTS.md step 10 pins it for
+# the publish build; a checkout's is the developer's.
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)

@@ -385,7 +385,7 @@ sudo apt-get install jq
 The hooks are one Rust program, `safedeps-core`. The entry shim runs it from `bin/native/<os>-<arch>/safedeps-core`. No binary is committed to git, so it comes from one of two places.
 
 - **A checkout builds it.** `scripts/build-core.sh` runs `cargo build --release --locked --offline` on `rust/` and places the result for this machine. The crate has no dependencies, so the offline build needs only the toolchain. The installer runs this build for you, then runs the entry once on a call it does not judge. If the build or that run fails, the installer stops with the reason and registers nothing.
-- **The npm package carries it built.** The publish workflow builds three binaries, `darwin-arm64`, `darwin-x64` and `linux-x64` (a static musl build), and the package holds them with no `rust/` directory beside them. The installer only runs the entry once. Another platform has no binary, and the entry says so.
+- **The npm package carries it built.** The release builds three binaries, `darwin-arm64`, `darwin-x64` and `linux-x64` (a static musl build), and the package holds them with no `rust/` directory beside them. The installer only runs the entry once. Another platform has no binary, and the entry says so.
 
 The binary carries a stamp of the source it was built from. When a hook starts in a checkout, the binary hashes the `rust/` directory beside it and compares. After a `git pull`, a branch switch or an edit to `rust/`, the binary no longer matches, and until you rebuild it you see this:
 

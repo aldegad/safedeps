@@ -88,7 +88,7 @@ if [ -z "${entry_dir}" ] || [ -z "${repo_root}" ]; then
 fi
 
 # A checkout holds the core's source and builds its own binary; an installed
-# package holds only the binaries the publish job built.
+# package holds only the binaries the release built.
 if [ -d "${repo_root}/rust" ]; then
   repair="Repair: build it from this checkout with ${repo_root}/scripts/build-core.sh (it needs cargo), from a human terminal — hooks do not run there."
 else

@@ -1,7 +1,8 @@
 # The Rust core's binaries. A checkout builds its own (scripts/build-core.sh),
-# the publish job builds the package's, and none is committed. npm still packs
-# the package's: package.json "files" names bin/, and a .gitignore at the root
-# does not take out what "files" names. One inside bin/native would.
+# the release builds the package's (AGENTS.md step 10), and none is committed.
+# npm still packs the package's: package.json "files" names bin/, and a
+# .gitignore at the root does not take out what "files" names. One inside
+# bin/native would.
 /bin/native/
 
 # Local Kuma state (plan worktrees, evidence) and macOS Finder files are this machine's, never the repo's.
