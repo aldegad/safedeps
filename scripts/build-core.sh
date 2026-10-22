@@ -3,8 +3,8 @@
 #
 # One build, two callers. A checkout builds its own binary with this script
 # (the installer runs it, and a release builds in the release worktree before
-# main moves, AGENTS.md step 7), and the release's publish build (AGENTS.md
-# step 10) builds the three binaries the package ships with it. No binary is
+# main moves, RELEASING.md step 7), and the release's publish build
+# (RELEASING.md step 10) builds the three binaries the package ships with it. No binary is
 # committed: the root .gitignore names bin/native/.
 #
 #   scripts/build-core.sh                    this machine's binary, from this
@@ -56,7 +56,7 @@
 # checked against the tagged source here, and a checkout's --publish build
 # still notices that the source moved.
 #
-# The toolchain is whatever `cargo` is on PATH. AGENTS.md step 10 pins it for
+# The toolchain is whatever `cargo` is on PATH. RELEASING.md step 10 pins it for
 # the publish build; a checkout's is the developer's.
 set -euo pipefail
 
