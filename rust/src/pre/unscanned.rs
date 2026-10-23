@@ -831,15 +831,16 @@ fn closing(text: &[u8], at: usize, open: u8, close: u8) -> Option<usize> {
 }
 
 /// Whether the command holds an escape that stands for NUL (`\0`, `\x00`,
-/// `\c@`, `\C-@`, an octal value a multiple of 256, `\u0000`), under the way
-/// printf and `$'...'` read it or the way `echo -e` does. bash ends a `$'...'`
-/// at the first such escape and glues what follows the closing quote, so the
-/// manager or verb the command assembles (`$'pi\0junk'p` is `pip`) is a word
-/// no view reconstructs without lexing the shell's nested quotes. The escape
-/// serves no install and is in none of the parent's real failed-reading
-/// denials, so a command that holds one is denied rather than read.
+/// `\c@`, `\C-@`, an octal value a multiple of 256, `\u0000`), as printf and
+/// `$'...'` expand it. bash ends a `$'...'` at the first such escape and glues
+/// what follows the closing quote, so the manager or verb the command
+/// assembles (`$'pi\0junk'p` is `pip`) is a word no view reconstructs without
+/// lexing the shell's nested quotes. The escape serves no install and is in
+/// none of the parent's real failed-reading denials, so a command that holds
+/// one is denied rather than read. The `echo -e` reading finds no NUL this one
+/// misses, since `\0` is already NUL here, so it is not asked.
 fn nul_escape(command: &[u8]) -> bool {
-    escapes_expanded(command).contains(&0) || echo_escapes_expanded(command).contains(&0)
+    escapes_expanded(command).contains(&0)
 }
 
 /// The text without its quote characters and backslashes.
