@@ -240,6 +240,7 @@ const HIDDEN_INSTALLS: &[&str] = &[
     r"$'pip\x00junk' install x",
     r"$'pip\c@junk' install x",
     r"$'pip\400junk' install x",
+    r"$'pip\C-@junk' install x",
     r"$'pi\0x'p install x",
     r"$'pi\0\'x'p install x",
     r"pip $'install\0junk' x",

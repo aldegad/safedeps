@@ -903,8 +903,9 @@ pub(super) fn unquoted(text: &[u8]) -> W {
 }
 
 /// The text with each escape printf and `$'...'` expand replaced by the byte
-/// it stands for: a letter escape, `\cX` (the low five bits of `X`), `\\`,
-/// one to three octal digits, and `\x`, `\u` or `\U` with their hex digits.
+/// it stands for: a letter escape, `\cX` and zsh's `\C-X` (the low five bits
+/// of `X`), zsh's `\M-X`, `\\`, one to three octal digits, and `\x`, `\u` or
+/// `\U` with their hex digits.
 /// An octal value past 255 stands for its low byte, as the shells write it
 /// (`\560` is `p`). A byte past ASCII, and a
 /// character `\u` or `\U` names past it, is no byte of a name, so it stands
@@ -941,6 +942,8 @@ fn escapes(text: &[u8], echo: bool) -> W {
             Some(b't') => Some((2, 0x09)),
             Some(b'v') => Some((2, 0x0b)),
             Some(b'c') => text.get(i + 2).map(|&b| (3, u32::from(b & 0x1f))),
+            Some(b'C') if text.get(i + 2) == Some(&b'-') => text.get(i + 3).map(|&b| (4, u32::from(b & 0x1f))),
+            Some(b'M') if text.get(i + 2) == Some(&b'-') => text.get(i + 3).map(|&b| (4, u32::from(b | 0x80))),
             Some(b'0') if echo => number(i + 2, 3, 8).map(|(len, v)| (len, v & 0xff)).or(Some((2, 0))),
             Some(b'0'..=b'7') => number(i + 1, 3, 8).map(|(len, v)| (len, v & 0xff)),
             Some(b'x') => number(i + 2, 2, 16),
