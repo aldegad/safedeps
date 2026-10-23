@@ -866,8 +866,14 @@ pub(super) fn echo_escapes_expanded(text: &[u8]) -> W {
 /// once, the way a name split across a `$'...'` is assembled: outside, `\n` is
 /// the letter `n` and `\3` the digit `3`; inside, `$'\x70'` is the byte `p`;
 /// and `\pi$'\x70'\3 install` is `pip3 install`, which no all-expanded or
-/// all-stripped view reconstructs. A `$'...'` whose opening `$'` the outer
-/// quotes split is read instead by the quote drops and `escapes_expanded`.
+/// all-stripped view reconstructs. Only a `$'...'` that closes inside one word
+/// is expanded: its scan stops at a word-ending byte (`BREAKS`, but not the
+/// backslash an escape needs), so a decoy `$'` in a double-quoted string or a
+/// comment, whose quote is found only across the blank before a real opener,
+/// is left for the bare cut and cannot swallow that opener (`: "$'"; pip
+/// $'\x69'\nstall` still assembles `pip install`). A `$'...'` whose opening
+/// `$'` the outer quotes split is read instead by the quote drops and
+/// `escapes_expanded`.
 pub(super) fn dollar_numeric_expanded(text: &[u8]) -> W {
     let mut out = W::with_capacity(text.len());
     let mut i = 0;
@@ -877,19 +883,21 @@ pub(super) fn dollar_numeric_expanded(text: &[u8]) -> W {
             i += 1;
             continue;
         }
+        // Scan the opener's own word: a word-ending byte (`BREAKS`, but not the
+        // backslash an escape needs) before the closing quote means this `$'`
+        // closes outside one word, so it is not an install token's and a decoy
+        // `$'` in a double-quoted string or a comment cannot reach a real
+        // opener's quote across the blank before it.
         let mut j = i + 2;
-        while j < text.len() && text[j] != b'\'' {
+        while j < text.len() && text[j] != b'\'' && !BREAKS[usize::from(text[j])] {
             j += if text[j] == b'\\' { 2 } else { 1 };
         }
-        match (j < text.len()).then_some(j) {
-            Some(close) => {
-                out.extend_from_slice(&escapes_expanded(&text[i + 2..close]));
-                i = close + 1;
-            }
-            None => {
-                out.push(text[i]);
-                i += 1;
-            }
+        if j < text.len() && text[j] == b'\'' {
+            out.extend_from_slice(&escapes_expanded(&text[i + 2..j]));
+            i = j + 1;
+        } else {
+            out.push(text[i]);
+            i += 1;
         }
     }
     out

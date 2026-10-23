@@ -330,6 +330,29 @@ fn a_verb_assembled_across_a_whole_dollar_quote_boundary_is_an_install() {
         assert!(!looks_like_install_unscanned(format!("{FAILS}; {text}").as_bytes()), "{text}");
     }
 }
+/// A decoy `$'` in a double-quoted string or a comment, placed before a real
+/// escape-assembled install, used to swallow the real opener's quote and hide
+/// the install (eve's checkpoint-8c3c833a reject). The opener's scan now stops
+/// at the blank before it, so the real install still assembles and denies.
+const DECOY_PREFIXED_INSTALLS: &[&str] = &[
+    r#": "$'"; pip $'\x69'\nstall sample==1.0.0"#,
+    r#": "$'"; cargo i\n$'\x73'tall sample"#,
+    r#": "$'"; yarn \a$'\x64'd sample"#,
+    "# $'\npip3 i\\n$'\\x73'tall sample",
+];
+
+#[test]
+fn a_decoy_dollar_quote_does_not_swallow_a_real_opener() {
+    for text in DECOY_PREFIXED_INSTALLS {
+        assert!(looks_like_install_unscanned(text.as_bytes()), "{text}");
+        assert!(looks_like_install_unscanned(format!("{FAILS}; {text}").as_bytes()), "{text}");
+    }
+    // The decoy alone, with no real install after it, is still not an install.
+    for text in [r#": "$'"; echo hello sample"#] {
+        assert!(!looks_like_install_unscanned(format!("{FAILS}; {text}").as_bytes()), "{text}");
+    }
+}
+
 /// The words of each form of the install body, and nothing more, alone and
 /// in another order: one install for each form, in the order of
 /// `grammar::install_forms`. Each matches its alternative of the body.
