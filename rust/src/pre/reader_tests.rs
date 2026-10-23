@@ -310,6 +310,7 @@ fn a_manager_pairs_only_with_its_own_verbs() {
         "npm run build && echo done",
         "npm_config_registry=x node a.js install",
         "./mynpm install x",
+        "echo junk\\npm; echo i",
         "pipx list --include-injected",
         "echo i; python3 -m pytest",
         "mvn test && ls target/*",
@@ -349,7 +350,7 @@ fn discriminator_reads_a_text_past_its_views_as_an_install() {
 
 /// `k` groups of two words side by side make `2^k` texts. Past `BRACE_BYTES`
 /// of them, the text reads as an install, though none of them names a
-/// manager.
+/// manager. Groups a blank stands between are not side by side.
 #[test]
 fn discriminator_reads_a_text_past_its_brace_expansions_as_an_install() {
     let groups = |k: usize| format!("echo x{}", "{a,b}".repeat(k));
@@ -357,6 +358,9 @@ fn discriminator_reads_a_text_past_its_brace_expansions_as_an_install() {
     assert!(!looks_like_install_unscanned(groups(12).as_bytes()));
     assert!(looks_like_install_unscanned(groups(20).as_bytes()));
     assert!(looks_like_install_unscanned(groups(100_000).as_bytes()));
+    // A pair of braces with blanks in it holds no group, though the groups in
+    // it would make far more than `BRACE_BYTES` side by side.
+    assert!(!looks_like_install_unscanned(format!("echo {{ {}}}", "{a,b} ".repeat(30)).as_bytes()));
 }
 
 /// What the bounds cost, printed by `cargo test --release unscanned_views_cost

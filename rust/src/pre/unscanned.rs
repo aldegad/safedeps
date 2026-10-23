@@ -20,9 +20,9 @@ use std::ops::Range;
 /// group written as a brace group), in any order and as often as one changes
 /// the text. Each view is cut into words as it is
 /// and again without its quote characters and backslashes (`"npm"`, `n''pm`,
-/// `\npm`). A word ends at each byte of `BREAKS`: a blank, a quote, a
-/// backslash, `$`, a backquote, a bracket of any kind, a redirection or an
-/// operator character, `,`, `=` and a glob character. So a redirection, a
+/// `\npm`). A word ends at each byte of `BREAKS`: a blank, a quote, `$`, a
+/// backquote, a bracket of any kind, a redirection or an operator character,
+/// `,`, `=` and a glob character. So a redirection, a
 /// group, a glob qualifier, an expansion or a substitution beside a name
 /// leaves the name a word (`pip>/dev/null`, `pip(N)`, `pip$IFS'install'`,
 /// `$(npm`). A brace expansion adds the words it makes
@@ -106,10 +106,11 @@ pub(super) const UNSCANNED_DEPTH: usize = 64;
 /// text an expansion takes a step through.
 pub(super) const BRACE_BYTES: usize = 1 << 24;
 
-/// The bytes that end a word: a blank, a quote, a backslash, `$`, a
-/// backquote, a bracket of any kind, a redirection or an operator character,
-/// `,`, `=` and a glob character.
-const BREAKS: [bool; 256] = table(b"'\"`$\\()[]{}<>;&|,=*? \t\n\x0b\x0c\r");
+/// The bytes that end a word: a blank, a quote, `$`, a backquote, a bracket
+/// of any kind, a redirection or an operator character, `,`, `=` and a glob
+/// character. A backslash ends none, as in the shell (`junk\npm` is one word);
+/// the cut without backslashes reads `\npm` and `n\pm`.
+const BREAKS: [bool; 256] = table(b"'\"`$()[]{}<>;&|,=*? \t\n\x0b\x0c\r");
 
 /// Of those, the glob characters, which a word read as a pattern keeps.
 const GLOB: [bool; 256] = table(b"[]*?");
