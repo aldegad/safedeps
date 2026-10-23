@@ -197,8 +197,10 @@ fn discriminator_reads_installs_two_rewrites_make_together() {
 /// is not an escape or a quote, each one in bash or zsh: a brace expansion, a
 /// glob that a file of the name matches, the value of a `${name-word}`, zsh's
 /// `=name`, words that `,` parts once IFS splits them, a name and verb that
-/// the blanks of `$IFS` part, a name or verb an empty expansion splits, and a
-/// glob's group of zsh or of bash's extended globs.
+/// the blanks of `$IFS` part, a name or verb an empty expansion splits, a
+/// glob's group of zsh or of bash's extended globs, and a NUL: bash cuts a
+/// `$'...'` there, exec cuts a name there, and bash and dash drop it from a
+/// script they read.
 const HIDDEN_INSTALLS: &[&str] = &[
     "pip in{stall,} x",
     "{pip,install} x",
@@ -234,6 +236,14 @@ const HIDDEN_INSTALLS: &[&str] = &[
     "/opt/homebrew/bin/!(q)pm i x",
     "pip i(n|q)stall y",
     "# it's\npip in{stall,' '} x",
+    r"$'pip\0junk' install x",
+    r"$'pip\x00junk' install x",
+    r"$'pip\c@junk' install x",
+    r"$'pip\400junk' install x",
+    r"$'pi\0x'p install x",
+    r"$'pi\0\'x'p install x",
+    r"pip $'install\0junk' x",
+    r"printf 'p\0ip install x' | sh",
 ];
 
 #[test]

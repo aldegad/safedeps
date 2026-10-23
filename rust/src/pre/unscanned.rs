@@ -17,8 +17,8 @@ use std::ops::Range;
 /// before a manager runs (line continuations joined, the escapes printf,
 /// `echo -e` and `$'...'` expand, the quote characters dropped, a
 /// `${name-word}` taken as its word, an expansion taken as empty, a glob's
-/// group written as a brace group), in any order and as often as one changes
-/// the text. Each view is cut into words as it is
+/// group written as a brace group, a `$'...'` cut at its NUL, the NUL bytes
+/// dropped), in any order and as often as one changes the text. Each view is cut into words as it is
 /// and again without its quote characters and backslashes (`"npm"`, `n''pm`,
 /// `\npm`). A word ends at each byte of `BREAKS`: a blank, a quote, `$`, a
 /// backquote, a bracket of any kind, a redirection or an operator character,
@@ -85,7 +85,7 @@ pub(super) fn looks_like_install_unscanned(command: &[u8]) -> bool {
 /// it changes; that one leaves fewer parentheses, which only an escape, and
 /// so a shorter text, brings back. So every sequence of them that changes the
 /// text ends.
-pub(super) const REWRITES: [fn(&[u8]) -> W; 7] = [
+pub(super) const REWRITES: [fn(&[u8]) -> W; 9] = [
     continuations_joined,
     escapes_expanded,
     echo_escapes_expanded,
@@ -93,6 +93,8 @@ pub(super) const REWRITES: [fn(&[u8]) -> W; 7] = [
     defaults_taken,
     expansions_dropped,
     glob_groups_braced,
+    dollar_quotes_cut,
+    nuls_dropped,
 ];
 
 /// The most views `looks_like_install_unscanned` reads of one command, and
@@ -107,10 +109,11 @@ pub(super) const UNSCANNED_DEPTH: usize = 64;
 pub(super) const BRACE_BYTES: usize = 1 << 24;
 
 /// The bytes that end a word: a blank, a quote, `$`, a backquote, a bracket
-/// of any kind, a redirection or an operator character, `,`, `=` and a glob
-/// character. A backslash ends none, as in the shell (`junk\npm` is one word);
-/// the cut without backslashes reads `\npm` and `n\pm`.
-const BREAKS: [bool; 256] = table(b"'\"`$()[]{}<>;&|,=*? \t\n\x0b\x0c\r");
+/// of any kind, a redirection or an operator character, `,`, `=`, a glob
+/// character and NUL, where zsh ends a word and exec ends a name. A backslash
+/// ends none, as in the shell (`junk\npm` is one word); the cut without
+/// backslashes reads `\npm` and `n\pm`.
+const BREAKS: [bool; 256] = table(b"'\"`$()[]{}<>;&|,=*? \t\n\x0b\x0c\r\0");
 
 /// Of those, the glob characters, which a word read as a pattern keeps.
 const GLOB: [bool; 256] = table(b"[]*?");
@@ -803,15 +806,92 @@ fn closing(text: &[u8], at: usize, open: u8, close: u8) -> Option<usize> {
     None
 }
 
+/// The text with each `$'...'` cut where bash cuts it: at the first escape
+/// that stands for NUL (`\0`, `\x00`, `\c@`, `\400`, ...), whose bytes and
+/// the rest of the string up to its closing quote bash drops, so
+/// `$'pi\0x'p` is `pip`.
+pub(super) fn dollar_quotes_cut(text: &[u8]) -> W {
+    let mut out = W::with_capacity(text.len());
+    let mut i = 0;
+    while i < text.len() {
+        if !text[i..].starts_with(b"$'") {
+            out.push(text[i]);
+            i += 1;
+            continue;
+        }
+        let mut j = i + 2;
+        let mut cut = None;
+        while j < text.len() && text[j] != b'\'' {
+            if text[j] != b'\\' {
+                j += 1;
+                continue;
+            }
+            let (len, nul) = dollar_escape(&text[j..]);
+            cut = cut.or(nul.then_some(j));
+            j += len;
+        }
+        match cut.filter(|_| j < text.len()) {
+            Some(cut) => {
+                out.extend_from_slice(&text[i..cut]);
+                i = j;
+            }
+            None => {
+                out.extend_from_slice(&text[i..j.min(text.len())]);
+                i = j;
+            }
+        }
+    }
+    out
+}
+
+/// How many bytes the escape at the start of `text`, inside a `$'...'`,
+/// takes, and whether it stands for NUL. An octal value stands for its low
+/// byte, and `\cX` for the low five bits of `X`.
+fn dollar_escape(text: &[u8]) -> (usize, bool) {
+    let digits = |from: usize, max: usize, radix: u32| {
+        let n = text.iter().skip(from).take(max).take_while(|&&b| (b as char).is_digit(radix)).count();
+        let value = text[from..from + n].iter().fold(0u32, |v, &b| v * radix + (b as char).to_digit(radix).unwrap_or(0));
+        (n, value)
+    };
+    match text.get(1) {
+        Some(b'0'..=b'7') => {
+            let (n, v) = digits(1, 3, 8);
+            (1 + n, v & 0xff == 0)
+        }
+        Some(b'x') => {
+            let (n, v) = digits(2, 2, 16);
+            (2 + n, n > 0 && v == 0)
+        }
+        Some(b'u') => {
+            let (n, v) = digits(2, 4, 16);
+            (2 + n, n > 0 && v == 0)
+        }
+        Some(b'U') => {
+            let (n, v) = digits(2, 8, 16);
+            (2 + n, n > 0 && v == 0)
+        }
+        Some(b'c') => (text.len().min(3), text.get(2).is_some_and(|b| b & 0x1f == 0)),
+        Some(_) => (2, false),
+        None => (1, false),
+    }
+}
+
+/// The text without its NUL bytes, which bash and dash drop from a script
+/// they read (`printf 'p\0ip install x' | sh` runs `pip`).
+pub(super) fn nuls_dropped(text: &[u8]) -> W {
+    text.iter().copied().filter(|&b| b != 0).collect()
+}
+
 /// The text without its quote characters and backslashes.
 pub(super) fn unquoted(text: &[u8]) -> W {
     quotes_dropped(text).into_iter().filter(|&b| b != b'\\').collect()
 }
 
 /// The text with each escape printf and `$'...'` expand replaced by the byte
-/// it stands for: a letter escape, `\\`, one to three octal digits, and `\x`,
-/// `\u` or `\U` with their hex digits. An octal value past 255 stands for its
-/// low byte, as the shells write it (`\560` is `p`). A byte past ASCII, and a
+/// it stands for: a letter escape, `\cX` (the low five bits of `X`), `\\`,
+/// one to three octal digits, and `\x`, `\u` or `\U` with their hex digits.
+/// An octal value past 255 stands for its low byte, as the shells write it
+/// (`\560` is `p`). A byte past ASCII, and a
 /// character `\u` or `\U` names past it, is no byte of a name, so it stands
 /// as 0x80.
 pub(super) fn escapes_expanded(text: &[u8]) -> W {
@@ -845,6 +925,7 @@ fn escapes(text: &[u8], echo: bool) -> W {
             Some(b'r') => Some((2, 0x0d)),
             Some(b't') => Some((2, 0x09)),
             Some(b'v') => Some((2, 0x0b)),
+            Some(b'c') => text.get(i + 2).map(|&b| (3, u32::from(b & 0x1f))),
             Some(b'0') if echo => number(i + 2, 3, 8).map(|(len, v)| (len, v & 0xff)).or(Some((2, 0))),
             Some(b'0'..=b'7') => number(i + 1, 3, 8).map(|(len, v)| (len, v & 0xff)),
             Some(b'x') => number(i + 2, 2, 16),
