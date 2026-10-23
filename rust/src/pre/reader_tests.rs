@@ -167,6 +167,28 @@ fn discriminator_reads_a_text_past_its_views_as_an_install() {
     assert!(looks_like_install_unscanned(grid(31, 32).as_bytes()));
 }
 
+/// What the bounds cost, printed by `cargo test --release unscanned_views_cost
+/// -- --ignored --nocapture`: the shape above at `UNSCANNED_VIEWS` after 100 kB
+/// and 1 MB of other text, and a browser eval with escapes, groups, quotes and
+/// a redirection, repeated to about 245 kB.
+#[test]
+#[ignore]
+fn unscanned_views_cost() {
+    let nested = |n: usize| format!("echo \\{}x41", "x5c".repeat(n - 1));
+    let grid = format!("echo {}{} {}", "(".repeat(31), ")".repeat(31), nested(31));
+    let eval = r#"browser-cli eval --expr '(()=>{const a=[...document.querySelectorAll("a")].map(x=>(x.innerText||"").trim()).filter(t=>t.length>0&&(t.indexOf("\\n")<0)); return JSON.stringify({n:a.length, s:"a\"b\nc\x41", m:(((1+2)*3)>2)})})()' > out.json 2>&1"#;
+    let shapes = [
+        ("bound after 100 kB", format!("{} {grid}", "x".repeat(100_000))),
+        ("bound after 1 MB", format!("{} {grid}", "x".repeat(1_000_000))),
+        ("eval x1000", vec![eval; 1000].join("; ")),
+    ];
+    for (name, text) in shapes {
+        let start = Instant::now();
+        let answer = looks_like_install_unscanned(text.as_bytes());
+        eprintln!("{name}: {} bytes, {:.3}s, install={answer}", text.len(), start.elapsed().as_secs_f64());
+    }
+}
+
 #[test]
 fn discriminator_covers_the_failure_census_without_shell_tools() {
     let corpus = json::parse_one(include_bytes!("../../../scripts/measure/scan-failure-corpus.json")).unwrap();
