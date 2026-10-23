@@ -244,7 +244,9 @@ const HIDDEN_INSTALLS: &[&str] = &[
 /// (`$'pi\0junk'p` is `pip`, `pip $'inst\0junk'all` runs `pip install`), and a
 /// script piped to a shell loses its NUL bytes. The escape is written as `\0`,
 /// `\x00`, `\c@`, `\C-@`, an octal multiple of 256, and under outer quotes a
-/// validator split with `shlex.quote`. `nul_escape` denies them all.
+/// validator split with `shlex.quote` or doubled the backslash in a
+/// double-quoted `bash -c` carrier, where the NUL appears only in a later
+/// view. A view that holds the NUL byte, at whatever escape depth, is denied.
 const NUL_INSTALLS: &[&str] = &[
     r"$'pip\0junk' install x",
     r"$'pip\x00junk' install x",
@@ -258,6 +260,11 @@ const NUL_INSTALLS: &[&str] = &[
     r"pip $'inst\0junk'all x",
     r"printf 'p\0ip install x' | sh",
     r#"bash -c '$'"'"'pi\0junk'"'"'p install sample==1.0.0'"#,
+    r"$'pi\\0junk'p install x",
+    r"pip $'inst\\0junk'all x",
+    r#"bash -c "$'pi\\0junk'p install sample==1.0.0""#,
+    r#"bash -c "pip $'inst\\0junk'all sample==1.0.0""#,
+    r#"bash -c "$'pip\\0junk' install sample==1.0.0""#,
 ];
 
 #[test]
@@ -279,7 +286,7 @@ fn discriminator_denies_a_nul_producing_escape() {
         assert!(looks_like_install_unscanned(text.as_bytes()), "{text}");
         assert!(looks_like_install_unscanned(format!("{FAILS}; {text}").as_bytes()), "{text}");
     }
-    for text in [r"$'\0'", r"echo $'a\0b'", r"printf '\x00'", r"grep -c . a; : $'\c@'", r"x=$'\U00000000'; echo i"] {
+    for text in [r"$'\0'", r"echo $'a\0b'", r"printf '\x00'", r"grep -c . a; : $'\c@'", r"x=$'\U00000000'; echo i", r#"bash -c "echo $'a\0b'""#] {
         assert!(looks_like_install_unscanned(text.as_bytes()), "{text}");
     }
     for text in [r"$'\560ip' --version", r"printf 'a\012b'", r"echo -e 'a\0560b'", "ls -la", "echo npm"] {
