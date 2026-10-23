@@ -295,27 +295,38 @@ fn discriminator_denies_a_nul_producing_escape() {
 }
 
 
-/// Out of scope, like a run-time name `$(printf npm)`: a manager or verb
-/// assembled across a `$'...'` escape-context boundary, where the shell makes
-/// an escape a byte inside `$'...'` and the ordinary char outside, so `\n` is
-/// the letter `n` outside and `$'\x70'` the byte `p` inside. No uniform view
-/// reconstructs the name without lexing the shell's nested quotes (which this
-/// fallback does not do), and the outer quotes can split the opening `$'`
-/// (shlex). The old names-a-manager rule missed these too, and the fallback
-/// blocks only when it is sure, so these read as no install. A redesign that
-/// takes this on (a quote lexer) would move these rows to the deny set; this
-/// test pins the documented boundary so that move is deliberate.
-const OUT_OF_SCOPE_DOLLAR_QUOTE_ASSEMBLY: &[&str] = &[
+/// A manager or verb assembled across a `$'...'` escape-context boundary, the
+/// opening `$'` left whole, where the shell makes an escape a byte inside
+/// `$'...'` and the ordinary char outside: `\n` is the letter `n` and `\3` the
+/// digit `3` outside, `$'\x70'` the byte `p` inside, so `\pi$'\x70'\3 install`
+/// is `pip3 install` and `pip $'\x69'\nstall` is `pip install`. These run a
+/// real install, so the discriminator denies them: `dollar_numeric_expanded`
+/// expands each whole `$'...'` to its bytes and leaves the outside for the bare
+/// cut to strip to the letter, so one view holds `<manager> <verb>` as words.
+/// The old predicate blocked these too (a failed-reading command whose text
+/// reads as an install), so allowing them was a regression. Rows drawn from
+/// eve's checkpoint grid at `eve-redesign-checkpoint-3wzb1j63/results.json`.
+const ESCAPE_MIXED_VERB_INSTALLS: &[&str] = &[
     r"\n$'\x70'm i sample==1.0.0",
     r"pip $'\x69'\nstall sample==1.0.0",
+    r"pip3 i\n$'\x73'tall sample==1.0.0",
+    r"cargo i\n$'\x73'tall sample",
+    r"npm $'\x69'\nstall sample@1.0.0",
+    r"gem i\n$'\x73'tall sample",
+    r"bun \a$'\x64'd sample",
+    r"yarn \a$'\x64'd sample",
     r"\pi$'\x70'\3 install requests==2.0.0",
-    r#"bash -c "\n$'\x70'm i sample==1.0.0""#,
-    r#"bash -c '\n$'"'"'\x70'"'"'m i sample==1.0.0'"#,
 ];
 
 #[test]
-fn a_name_assembled_across_a_dollar_quote_escape_boundary_is_out_of_scope() {
-    for text in OUT_OF_SCOPE_DOLLAR_QUOTE_ASSEMBLY {
+fn a_verb_assembled_across_a_whole_dollar_quote_boundary_is_an_install() {
+    for text in ESCAPE_MIXED_VERB_INSTALLS {
+        assert!(looks_like_install_unscanned(text.as_bytes()), "{text}");
+        assert!(looks_like_install_unscanned(format!("{FAILS}; {text}").as_bytes()), "{text}");
+    }
+    // A failed reading with no manager word is still not an install (eve's
+    // no-manager control), and a verb needs its manager (a bare verb is not).
+    for text in [r"echo hello sample", r"i\n$'\x73'tall sample"] {
         assert!(!looks_like_install_unscanned(format!("{FAILS}; {text}").as_bytes()), "{text}");
     }
 }

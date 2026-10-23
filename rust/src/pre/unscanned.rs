@@ -15,7 +15,8 @@ use std::ops::Range;
 /// view of the command: the text after a sequence of the rewrites in
 /// `REWRITES`, each a step the shell or a program it hands the text to takes
 /// before a manager runs (line continuations joined, the escapes printf,
-/// `echo -e` and `$'...'` expand, the quote characters dropped, a
+/// `echo -e` and `$'...'` expand, each `$'...'` expanded with the text
+/// outside it left for the bare cut, the quote characters dropped, a
 /// `${name-word}` taken as its word, an expansion taken as empty, a glob's
 /// group written as a brace group), in any order and as often as one changes
 /// the text. Each view is cut into words as it is
@@ -112,10 +113,11 @@ fn bytes_held(text: &[u8]) -> [bool; 256] {
 /// shortens a text it changes; that one leaves fewer parentheses, which only
 /// an escape, and so a shorter text, brings back. So every sequence of them
 /// that changes the text ends.
-pub(super) const REWRITES: [(fn(&[u8]) -> W, &[u8]); 7] = [
+pub(super) const REWRITES: [(fn(&[u8]) -> W, &[u8]); 8] = [
     (continuations_joined, b"\\"),
     (escapes_expanded, b"\\"),
     (echo_escapes_expanded, b"\\"),
+    (dollar_numeric_expanded, b"$"),
     (quotes_dropped, b"'\""),
     (defaults_taken, b"$"),
     (expansions_dropped, b"$`"),
@@ -855,6 +857,42 @@ pub(super) fn escapes_expanded(text: &[u8]) -> W {
 /// three octal digits after it.
 pub(super) fn echo_escapes_expanded(text: &[u8]) -> W {
     escapes(text, true)
+}
+
+/// The text with each `$'...'` replaced by its ANSI-C expansion (the escapes
+/// become their bytes) and everything outside a `$'...'` left as it is, for
+/// the bare cut in `read` to strip to the ordinary char a backslash escapes.
+/// So one view holds a `$'...'` escape's byte and an outside escape's char at
+/// once, the way a name split across a `$'...'` is assembled: outside, `\n` is
+/// the letter `n` and `\3` the digit `3`; inside, `$'\x70'` is the byte `p`;
+/// and `\pi$'\x70'\3 install` is `pip3 install`, which no all-expanded or
+/// all-stripped view reconstructs. A `$'...'` whose opening `$'` the outer
+/// quotes split is read instead by the quote drops and `escapes_expanded`.
+pub(super) fn dollar_numeric_expanded(text: &[u8]) -> W {
+    let mut out = W::with_capacity(text.len());
+    let mut i = 0;
+    while i < text.len() {
+        if !text[i..].starts_with(b"$'") {
+            out.push(text[i]);
+            i += 1;
+            continue;
+        }
+        let mut j = i + 2;
+        while j < text.len() && text[j] != b'\'' {
+            j += if text[j] == b'\\' { 2 } else { 1 };
+        }
+        match (j < text.len()).then_some(j) {
+            Some(close) => {
+                out.extend_from_slice(&escapes_expanded(&text[i + 2..close]));
+                i = close + 1;
+            }
+            None => {
+                out.push(text[i]);
+                i += 1;
+            }
+        }
+    }
+    out
 }
 
 fn escapes(text: &[u8], echo: bool) -> W {
