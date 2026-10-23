@@ -168,11 +168,10 @@ fn discriminator_reads_a_text_past_its_views_as_an_install() {
 }
 
 /// What the bounds cost, printed by `cargo test --release unscanned_views_cost
-/// -- --ignored --nocapture`: the shape above at `UNSCANNED_VIEWS` after 100 kB
-/// and 1 MB of other text, and a browser eval with escapes, groups, quotes and
-/// a redirection, repeated to about 245 kB.
+/// -- --nocapture`: the shape above at `UNSCANNED_VIEWS` after 100 kB and 1 MB
+/// of other text, and a browser eval with escapes, groups, quotes and a
+/// redirection, repeated to about 245 kB. None of them reads as an install.
 #[test]
-#[ignore]
 fn unscanned_views_cost() {
     let nested = |n: usize| format!("echo \\{}x41", "x5c".repeat(n - 1));
     let grid = format!("echo {}{} {}", "(".repeat(31), ")".repeat(31), nested(31));
@@ -186,6 +185,7 @@ fn unscanned_views_cost() {
         let start = Instant::now();
         let answer = looks_like_install_unscanned(text.as_bytes());
         eprintln!("{name}: {} bytes, {:.3}s, install={answer}", text.len(), start.elapsed().as_secs_f64());
+        assert!(!answer, "{name}");
     }
 }
 
