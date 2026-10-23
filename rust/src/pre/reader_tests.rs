@@ -361,6 +361,28 @@ fn discriminator_reads_a_text_past_its_views_as_an_install() {
 /// `k` groups of two words side by side make `2^k` texts. Past `BRACE_BYTES`
 /// of them, the text reads as an install, though none of them names a
 /// manager. Groups a blank stands between are not side by side.
+/// A rewrite changes no text that holds none of the bytes it needs, so the
+/// walk passes it by there. Every row above and every view one rewrite makes
+/// of it that a rewrite changes holds one of the bytes that rewrite needs.
+#[test]
+fn a_rewrite_changes_no_text_without_the_bytes_it_needs() {
+    let rewrites = super::unscanned::REWRITES;
+    let rows = INSTALLS.iter().chain(COMPOSED_INSTALLS).chain(COMPOSED_NAMED).chain(HIDDEN_INSTALLS).chain(NOT_INSTALLS);
+    let mut texts: Vec<W> = rows.map(|t| t.as_bytes().to_vec()).collect();
+    let views: Vec<W> = texts.iter().flat_map(|t| rewrites.iter().map(move |(rewrite, _)| rewrite(t))).collect();
+    texts.extend(views);
+    let mut changed = 0;
+    for text in &texts {
+        for (rewrite, needs) in rewrites {
+            if rewrite(text) != *text {
+                changed += 1;
+                assert!(needs.iter().any(|b| text.contains(b)), "{needs:?} {}", String::from_utf8_lossy(text));
+            }
+        }
+    }
+    assert!(changed > 100);
+}
+
 #[test]
 fn discriminator_reads_a_text_past_its_brace_expansions_as_an_install() {
     let groups = |k: usize| format!("echo x{}", "{a,b}".repeat(k));

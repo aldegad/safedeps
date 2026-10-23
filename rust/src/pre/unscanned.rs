@@ -58,16 +58,20 @@ pub(super) fn looks_like_install_unscanned(command: &[u8]) -> bool {
     if words.read(&first, &run_time) {
         return true;
     }
-    // A depth-first walk: each entry of `path` is a view and the next
-    // rewrite to take of it.
+    // A depth-first walk: each entry of `path` is a view, the next rewrite
+    // to take of it, and which bytes it holds.
     let mut seen = HashSet::from([words.key(&first)]);
-    let mut path = vec![(first, 0)];
-    while let Some((view, next)) = path.last_mut() {
-        let Some(rewrite) = REWRITES.get(*next) else {
+    let held = bytes_held(&first);
+    let mut path = vec![(first, 0, held)];
+    while let Some((view, next, held)) = path.last_mut() {
+        let Some(&(rewrite, needs)) = REWRITES.get(*next) else {
             path.pop();
             continue;
         };
         *next += 1;
+        if !needs.iter().any(|&b| held[usize::from(b)]) {
+            continue;
+        }
         let text = rewrite(view);
         if text == *view || !seen.insert(words.key(&text)) {
             continue;
@@ -75,26 +79,37 @@ pub(super) fn looks_like_install_unscanned(command: &[u8]) -> bool {
         if seen.len() > UNSCANNED_VIEWS || path.len() == UNSCANNED_DEPTH || words.read(&text, &run_time) {
             return true;
         }
-        path.push((text, 0));
+        let held = bytes_held(&text);
+        path.push((text, 0, held));
     }
     words.install()
 }
 
-/// The rewrites `looks_like_install_unscanned` makes its views with. None of
-/// them lengthens the text, and each but `glob_groups_braced` shortens a text
-/// it changes; that one leaves fewer parentheses, which only an escape, and
-/// so a shorter text, brings back. So every sequence of them that changes the
-/// text ends.
-pub(super) const REWRITES: [fn(&[u8]) -> W; 9] = [
-    continuations_joined,
-    escapes_expanded,
-    echo_escapes_expanded,
-    quotes_dropped,
-    defaults_taken,
-    expansions_dropped,
-    glob_groups_braced,
-    dollar_quotes_cut,
-    nuls_dropped,
+/// Which bytes `text` holds.
+fn bytes_held(text: &[u8]) -> [bool; 256] {
+    let mut held = [false; 256];
+    for &b in text {
+        held[usize::from(b)] = true;
+    }
+    held
+}
+
+/// The rewrites `looks_like_install_unscanned` makes its views with, each
+/// with the bytes one of which a text must hold for it to change the text.
+/// None of them lengthens the text, and each but `glob_groups_braced`
+/// shortens a text it changes; that one leaves fewer parentheses, which only
+/// an escape, and so a shorter text, brings back. So every sequence of them
+/// that changes the text ends.
+pub(super) const REWRITES: [(fn(&[u8]) -> W, &[u8]); 9] = [
+    (continuations_joined, b"\\"),
+    (escapes_expanded, b"\\"),
+    (echo_escapes_expanded, b"\\"),
+    (quotes_dropped, b"'\""),
+    (defaults_taken, b"$"),
+    (expansions_dropped, b"$`"),
+    (glob_groups_braced, b"("),
+    (dollar_quotes_cut, b"$"),
+    (nuls_dropped, b"\0"),
 ];
 
 /// The most views `looks_like_install_unscanned` reads of one command, and
