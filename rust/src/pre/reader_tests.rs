@@ -27,13 +27,15 @@ const NOT_INSTALLS: &[&str] = &[
     "browser-cli eval --expr '(()=>1)()'; pip --version; python3 -m pytest -q; node -e 'const gem = 1'",
     "browser-cli eval --expr '(()=>1)()'; echo npm",
     "browser-cli eval --expr '(()=>1)()'; ./mynpm install x && ./algo install",
+    "browser-cli eval --expr '(()=>1)()'; BUILD_TARGET=$TARGET python3 tools/build.py && python3 $D/crop.py in.png out.png",
 ];
 
 /// Installs the text shows without a reading: behind a wrapper or an
 /// assignment, inside a quoted script, a substitution, a heredoc body or a
-/// group, split by a line continuation or a redirection, quoted or escaped,
-/// spelled with a path, and written with the escapes printf and `$'...'`
-/// expand.
+/// group, split by a line continuation, a redirection or a zsh glob
+/// qualifier, quoted or escaped, spelled with a path, written with the
+/// escapes printf and `$'...'` expand, and a manager beside a script decided
+/// at run time.
 const INSTALLS: &[&str] = &[
     "npm install left-pad@1.3.0",
     "pip install requests==2.0.0",
@@ -68,6 +70,9 @@ const INSTALLS: &[&str] = &[
     "printf 'echo a\\012pip install x' | sh",
     "$'\\x6e\\x70\\x6d' install x",
     "NPM INSTALL x",
+    "pip(N) install evil==1.0.0",
+    "pip ((x) y) install evil==1.0.0",
+    "env -S \"$X\" pip",
 ];
 
 /// Each row of `NOT_INSTALLS` is a reading that fails, finds no install and
@@ -94,7 +99,7 @@ fn discriminator_reads_installs_and_not_names() {
     for text in NOT_INSTALLS {
         assert!(!looks_like_install_unscanned(text.as_bytes()), "{text}");
     }
-    for text in ["ls -la", "git commit -m 'fix'", "echo \"pipe the pipefail\"", "go version", "python3 -c 'print(1)'"] {
+    for text in ["ls -la", "git commit -m 'fix'", "echo \"pipe the pipefail\"", "go version", "python3 -c 'print(1)'", "env -S \"$X\""] {
         assert!(!looks_like_install_unscanned(text.as_bytes()), "{text}");
     }
 }

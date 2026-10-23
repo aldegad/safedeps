@@ -211,22 +211,37 @@ fn deny_undecided_scan(call: &Call, out: &mut Out, which: &str) {
 
 /// `guard_looks_like_install_unscanned`: whether the command's text reads as
 /// an install when no reading of it finished. With no reader's answer in
-/// hand, its words are taken without the lexer, in three views of the text
+/// hand, its words are taken without the lexer, in four views of the text
 /// with its line continuations joined, each without its quote characters and
 /// backslashes: a quoted or escaped name (`"npm"`, `\npm`) and the script of
 /// a `sh -c '...'` are then the words the shell would run. The second view
 /// first expands the escapes printf, `echo -e` and `$'...'` expand, so a
 /// `\n` there ends a line; the third first turns each redirection into a
-/// blank, since `pip>/dev/null install` installs. A line of a view reads as an
-/// install where a package manager's name follows no byte of a name and the
-/// grammar's install body goes on from there: options, then one of that
+/// blank, since `pip>/dev/null install` installs; the fourth first drops each
+/// parenthesis group, since zsh runs `pip(N) install` as `pip install` when a
+/// file of that name is there, and a group the walk could not place
+/// (`pip ((x) y) install`) is a misreading, not an answer. A line of a view reads as
+/// an install where a package manager's name follows no byte of a name and
+/// the grammar's install body goes on from there: options, then one of that
 /// manager's install verbs. So a wrapper, a heredoc or a payload around it
 /// changes nothing, while a name inside another word (`pipefail`, `Google`)
 /// and a manager that installs nothing (`python3 -c`, `npm run`) are not an
-/// install.
+/// install. One more line of a view reads as one though no verb is in it: a word whose
+/// value is decided at run time (`$X`, not an assignment's value) and, after
+/// it in the same statement, a manager's name as a word of its own, as in
+/// `env -S "$X" pip`. That word can be the script that names the verb.
 fn looks_like_install_unscanned(command: &[u8]) -> bool {
     let p = grammar::patterns();
     let Ok(re) = Regex::new(&format!("(^|[^A-Za-z0-9_.-])({}){}", p.install_body, p.end), true) else { return true };
+    let Ok(run_time) = Regex::new(
+        &format!(
+            "(^|[[:space:];&|(){{}}`])[$][^[:space:];&|]*([[:space:]]+[^[:space:];&|]+)*[[:space:]]+([^[:space:];&|()<>`]*/)?({})([[:space:];&|)<>`]|$)",
+            grammar::EXECUTABLES
+        ),
+        true,
+    ) else {
+        return true;
+    };
     let mut joined = W::with_capacity(command.len());
     let mut i = 0;
     while i < command.len() {
@@ -237,9 +252,36 @@ fn looks_like_install_unscanned(command: &[u8]) -> bool {
         joined.push(command[i]);
         i += 1;
     }
-    [unquoted(&joined), unquoted(&escapes_expanded(&joined)), unquoted(&redirections_blank(&joined))]
+    [unquoted(&joined), unquoted(&escapes_expanded(&joined)), unquoted(&redirections_blank(&joined)), unquoted(&groups_dropped(&joined))]
         .iter()
-        .any(|view| re.grep_any(view))
+        .any(|view| re.grep_any(view) || run_time.grep_any(view))
+}
+
+/// The text without each parenthesis group that closes on its line, nested
+/// groups with it.
+fn groups_dropped(text: &[u8]) -> W {
+    let mut out = W::with_capacity(text.len());
+    let mut i = 0;
+    while i < text.len() {
+        if text[i] == b'(' {
+            let mut depth = 0;
+            let close = text[i..].iter().take_while(|&&b| b != b'\n').position(|&b| {
+                depth += match b {
+                    b'(' => 1,
+                    b')' => -1,
+                    _ => 0,
+                };
+                depth == 0
+            });
+            if let Some(n) = close {
+                i += n + 1;
+                continue;
+            }
+        }
+        out.push(text[i]);
+        i += 1;
+    }
+    out
 }
 
 /// The text without its quote characters and backslashes.
