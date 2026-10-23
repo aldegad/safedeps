@@ -294,6 +294,31 @@ fn discriminator_denies_a_nul_producing_escape() {
     }
 }
 
+
+/// Out of scope, like a run-time name `$(printf npm)`: a manager or verb
+/// assembled across a `$'...'` escape-context boundary, where the shell makes
+/// an escape a byte inside `$'...'` and the ordinary char outside, so `\n` is
+/// the letter `n` outside and `$'\x70'` the byte `p` inside. No uniform view
+/// reconstructs the name without lexing the shell's nested quotes (which this
+/// fallback does not do), and the outer quotes can split the opening `$'`
+/// (shlex). The old names-a-manager rule missed these too, and the fallback
+/// blocks only when it is sure, so these read as no install. A redesign that
+/// takes this on (a quote lexer) would move these rows to the deny set; this
+/// test pins the documented boundary so that move is deliberate.
+const OUT_OF_SCOPE_DOLLAR_QUOTE_ASSEMBLY: &[&str] = &[
+    r"\n$'\x70'm i sample==1.0.0",
+    r"pip $'\x69'\nstall sample==1.0.0",
+    r"\pi$'\x70'\3 install requests==2.0.0",
+    r#"bash -c "\n$'\x70'm i sample==1.0.0""#,
+    r#"bash -c '\n$'"'"'\x70'"'"'m i sample==1.0.0'"#,
+];
+
+#[test]
+fn a_name_assembled_across_a_dollar_quote_escape_boundary_is_out_of_scope() {
+    for text in OUT_OF_SCOPE_DOLLAR_QUOTE_ASSEMBLY {
+        assert!(!looks_like_install_unscanned(format!("{FAILS}; {text}").as_bytes()), "{text}");
+    }
+}
 /// The words of each form of the install body, and nothing more, alone and
 /// in another order: one install for each form, in the order of
 /// `grammar::install_forms`. Each matches its alternative of the body.
