@@ -211,25 +211,32 @@ fn deny_undecided_scan(call: &Call, out: &mut Out, which: &str) {
 
 /// `guard_looks_like_install_unscanned`: whether the command's text reads as
 /// an install when no reading of it finished. With no reader's answer in
-/// hand, its words are taken without the lexer, in four views of the text
-/// with its line continuations joined, each without its quote characters and
-/// backslashes: a quoted or escaped name (`"npm"`, `\npm`) and the script of
-/// a `sh -c '...'` are then the words the shell would run. The second view
-/// first expands the escapes printf, `echo -e` and `$'...'` expand, so a
-/// `\n` there ends a line; the third first turns each redirection into a
-/// blank, since `pip>/dev/null install` installs; the fourth first drops each
-/// parenthesis group, since zsh runs `pip(N) install` as `pip install` when a
-/// file of that name is there, and a group the walk could not place
-/// (`pip ((x) y) install`) is a misreading, not an answer. A line of a view reads as
-/// an install where a package manager's name follows no byte of a name and
-/// the grammar's install body goes on from there: options, then one of that
-/// manager's install verbs. So a wrapper, a heredoc or a payload around it
-/// changes nothing, while a name inside another word (`pipefail`, `Google`)
-/// and a manager that installs nothing (`python3 -c`, `npm run`) are not an
-/// install. One more line of a view reads as one though no verb is in it: a word whose
-/// value is decided at run time (`$X`, not an assignment's value) and, after
-/// it in the same statement, a manager's name as a word of its own, as in
-/// `env -S "$X" pip`. That word can be the script that names the verb.
+/// hand, its words are taken without the lexer, in views of the text. A view
+/// is the text after a sequence of the rewrites in `REWRITES`, each a step
+/// the shell or a program it hands the text to takes before a manager runs:
+/// line continuations joined, the escapes printf, `echo -e` and `$'...'`
+/// expand, each redirection a blank (`pip>/dev/null install` installs), each
+/// parenthesis group dropped (zsh runs `pip(N) install` as `pip install` when
+/// a file of that name is there, and a group the walk could not place, as in
+/// `pip ((x) y) install`, is a misreading, not an answer), and the quote
+/// characters dropped. The views are every text the rewrites reach, in any
+/// order and as often as one changes the text, so two of them that overlap
+/// in one install (`$'\x70ip'>/dev/null install`) are read together. Each
+/// view is read without its quote characters and backslashes: a quoted or
+/// escaped name (`"npm"`, `\npm`) and the script of a `sh -c '...'` are then
+/// the words the shell would run. A line of a view reads as an install where
+/// a package manager's name follows no byte of a name and the grammar's
+/// install body goes on from there: options, then one of that manager's
+/// install verbs. So a wrapper, a heredoc or a payload around it changes
+/// nothing, while a name inside another word (`pipefail`, `Google`) and a
+/// manager that installs nothing (`python3 -c`, `npm run`) are not an
+/// install. One more line of a view reads as one though no verb is in it: a
+/// word whose value is decided at run time (`$X`, not an assignment's value)
+/// and, after it in the same statement, a manager's name as a word of its
+/// own, as in `env -S "$X" pip`. That word can be the script that names the
+/// verb. A text with more views than `UNSCANNED_VIEWS`, or a sequence of
+/// more than `UNSCANNED_DEPTH`, reads as an install: its views were not all
+/// read.
 fn looks_like_install_unscanned(command: &[u8]) -> bool {
     let p = grammar::patterns();
     let Ok(re) = Regex::new(&format!("(^|[^A-Za-z0-9_.-])({}){}", p.install_body, p.end), true) else { return true };
@@ -242,39 +249,85 @@ fn looks_like_install_unscanned(command: &[u8]) -> bool {
     ) else {
         return true;
     };
-    let mut joined = W::with_capacity(command.len());
+    // A text is told apart from another by two hashes under keys drawn for
+    // this call, so the sets hold no text and no command can be written to
+    // collide.
+    use std::hash::BuildHasher;
+    let keys = (std::collections::hash_map::RandomState::new(), std::collections::hash_map::RandomState::new());
+    let key = |text: &[u8]| (keys.0.hash_one(text), keys.1.hash_one(text));
+    let mut read = std::collections::HashSet::new();
+    let mut reads = |view: &[u8]| {
+        let words = unquoted(view);
+        read.insert(key(&words)) && (re.grep_any(&words) || run_time.grep_any(&words))
+    };
+    let first = continuations_joined(command);
+    if reads(&first) {
+        return true;
+    }
+    // A depth-first walk: each entry of `path` is a view and the next
+    // rewrite to take of it.
+    let mut seen = std::collections::HashSet::from([key(&first)]);
+    let mut path = vec![(first, 0)];
+    while let Some((view, next)) = path.last_mut() {
+        let Some(rewrite) = REWRITES.get(*next) else {
+            path.pop();
+            continue;
+        };
+        *next += 1;
+        let text = rewrite(view);
+        if text == *view || !seen.insert(key(&text)) {
+            continue;
+        }
+        if seen.len() > UNSCANNED_VIEWS || path.len() == UNSCANNED_DEPTH || reads(&text) {
+            return true;
+        }
+        path.push((text, 0));
+    }
+    false
+}
+
+/// The rewrites `looks_like_install_unscanned` makes its views with. None of
+/// them lengthens the text, and each but `redirections_blank` shortens a text
+/// it changes; that one leaves no `<` or `>`, which only an escape, and so a
+/// shorter text, brings back. So every sequence of them that changes the
+/// text ends.
+const REWRITES: [fn(&[u8]) -> W; 6] =
+    [continuations_joined, escapes_expanded, echo_escapes_expanded, redirections_blank, groups_dropped, quotes_dropped];
+
+/// The most views `looks_like_install_unscanned` reads of one command, and
+/// the most it holds at once, the views of one sequence of rewrites. The walk
+/// takes the time of a pass over the command for each rewrite of each view,
+/// and holds a copy of the command for each view of the sequence it is on.
+const UNSCANNED_VIEWS: usize = 1024;
+const UNSCANNED_DEPTH: usize = 64;
+
+/// The text with each line continuation, a backslash and the newline after
+/// it, dropped.
+fn continuations_joined(text: &[u8]) -> W {
+    let mut out = W::with_capacity(text.len());
     let mut i = 0;
-    while i < command.len() {
-        if command[i] == b'\\' && command.get(i + 1) == Some(&b'\n') {
+    while i < text.len() {
+        if text[i] == b'\\' && text.get(i + 1) == Some(&b'\n') {
             i += 2;
             continue;
         }
-        joined.push(command[i]);
+        out.push(text[i]);
         i += 1;
     }
-    [unquoted(&joined), unquoted(&escapes_expanded(&joined)), unquoted(&redirections_blank(&joined)), unquoted(&groups_dropped(&joined))]
-        .iter()
-        .any(|view| re.grep_any(view) || run_time.grep_any(view))
+    out
 }
 
-/// The text without each parenthesis group that closes on its line, nested
-/// groups with it.
+/// The text without each parenthesis group that closes on its line and holds
+/// no other group. Taken again, it drops the groups around those, so a
+/// `$(...)` around `pip(N)` is a view both with and without its script.
 fn groups_dropped(text: &[u8]) -> W {
     let mut out = W::with_capacity(text.len());
     let mut i = 0;
     while i < text.len() {
         if text[i] == b'(' {
-            let mut depth = 0;
-            let close = text[i..].iter().take_while(|&&b| b != b'\n').position(|&b| {
-                depth += match b {
-                    b'(' => 1,
-                    b')' => -1,
-                    _ => 0,
-                };
-                depth == 0
-            });
-            if let Some(n) = close {
-                i += n + 1;
+            let close = text[i + 1..].iter().position(|&b| matches!(b, b'(' | b')' | b'\n'));
+            if let Some(n) = close.filter(|&n| text[i + 1 + n] == b')') {
+                i += n + 2;
                 continue;
             }
         }
@@ -284,16 +337,40 @@ fn groups_dropped(text: &[u8]) -> W {
     out
 }
 
-/// The text without its quote characters and backslashes.
-fn unquoted(text: &[u8]) -> W {
-    text.iter().copied().filter(|b| !matches!(b, b'\'' | b'"' | b'\\')).collect()
+/// The text without its quote characters, with the `$` that opens a `$'...'`
+/// or `$"..."` taken as one of them. Its backslashes stay, so an escape the
+/// quotes split (`'\''x70ip`) is whole again.
+fn quotes_dropped(text: &[u8]) -> W {
+    let mut out = W::with_capacity(text.len());
+    for (i, &b) in text.iter().enumerate() {
+        let opens = b == b'$' && matches!(text.get(i + 1), Some(b'\'' | b'"'));
+        if !opens && !matches!(b, b'\'' | b'"') {
+            out.push(b);
+        }
+    }
+    out
 }
 
-/// The text with each escape printf, `echo -e` and `$'...'` expand replaced
-/// by the byte it stands for: a letter escape, one to three octal digits, and
-/// `\x`, `\u` or `\U` with their hex digits. A byte past ASCII is no byte of
-/// a name, so it stands as 0x80.
+/// The text without its quote characters and backslashes.
+fn unquoted(text: &[u8]) -> W {
+    quotes_dropped(text).into_iter().filter(|&b| b != b'\\').collect()
+}
+
+/// The text with each escape printf and `$'...'` expand replaced by the byte
+/// it stands for: a letter escape, `\\`, one to three octal digits, and `\x`,
+/// `\u` or `\U` with their hex digits. A byte past ASCII is no byte of a
+/// name, so it stands as 0x80.
 fn escapes_expanded(text: &[u8]) -> W {
+    escapes(text, false)
+}
+
+/// The same, read as `echo -e` and printf's `%b` read it: `\0` takes up to
+/// three octal digits after it.
+fn echo_escapes_expanded(text: &[u8]) -> W {
+    escapes(text, true)
+}
+
+fn escapes(text: &[u8], echo: bool) -> W {
     let mut out = W::with_capacity(text.len());
     let mut i = 0;
     while i < text.len() {
@@ -305,6 +382,7 @@ fn escapes_expanded(text: &[u8]) -> W {
         };
         let escape = match text.get(i + 1) {
             _ if text[i] != b'\\' => None,
+            Some(b'\\') => Some((2, u32::from(b'\\'))),
             Some(b'a') => Some((2, 0x07)),
             Some(b'b') => Some((2, 0x08)),
             Some(b'e' | b'E') => Some((2, 0x1b)),
@@ -313,6 +391,7 @@ fn escapes_expanded(text: &[u8]) -> W {
             Some(b'r') => Some((2, 0x0d)),
             Some(b't') => Some((2, 0x09)),
             Some(b'v') => Some((2, 0x0b)),
+            Some(b'0') if echo => number(i + 2, 3, 8).or(Some((2, 0))),
             Some(b'0'..=b'7') => number(i + 1, 3, 8),
             Some(b'x') => number(i + 2, 2, 16),
             Some(b'u') => number(i + 2, 4, 16),
@@ -335,8 +414,8 @@ fn escapes_expanded(text: &[u8]) -> W {
 
 /// The text with each redirection replaced by a blank: the digits or `&` in
 /// front of its operator, the operator (a run of `<` and `>`, and one `&`,
-/// `|` or `-` after it), the blanks after that, and the word it names, up to
-/// the next blank or operator. A `<(` or `>(` keeps its `(`.
+/// `|` or `-` after it), the blanks after that, and the word it names (see
+/// `word_end`). A `<(` or `>(` keeps its `(`.
 fn redirections_blank(text: &[u8]) -> W {
     let mut out = W::with_capacity(text.len());
     let mut i = 0;
@@ -361,12 +440,49 @@ fn redirections_blank(text: &[u8]) -> W {
         while i < text.len() && matches!(text[i], b' ' | b'\t') {
             i += 1;
         }
-        while i < text.len() && !is_space(text[i]) && !b";&|()<>`".contains(&text[i]) {
-            i += 1;
-        }
+        i = word_end(text, i);
         out.push(b' ');
     }
     out
+}
+
+/// Where the word that starts at `i` ends: at the next blank or operator
+/// outside a quote, an escape, a backquote, a `$(...)` or a `${...}`. A quote
+/// or a `$(`/`${` that does not close is a byte of the word, and a backquote
+/// that does not close ends it.
+fn word_end(text: &[u8], mut i: usize) -> usize {
+    // The index after the byte that closes what opens at `at`.
+    let closing = |at: usize, close: u8, escapes: bool| {
+        let mut j = at + 1;
+        while j < text.len() && text[j] != close {
+            j += if escapes && text[j] == b'\\' { 2 } else { 1 };
+        }
+        (j < text.len()).then_some(j + 1)
+    };
+    let balanced = |at: usize, open: u8, close: u8| {
+        let mut depth = 0;
+        text[at..].iter().position(|&b| {
+            depth += i32::from(b == open) - i32::from(b == close);
+            depth == 0
+        })
+        .map(|n| at + n + 1)
+    };
+    while i < text.len() && !is_space(text[i]) && !b";&|()<>".contains(&text[i]) {
+        let span = match text[i] {
+            b'\\' => Some(i + 2),
+            b'\'' => closing(i, b'\'', false),
+            b'"' => closing(i, b'"', true),
+            b'`' => match closing(i, b'`', true) {
+                Some(end) => Some(end),
+                None => break,
+            },
+            b'$' if text.get(i + 1) == Some(&b'(') => balanced(i + 1, b'(', b')'),
+            b'$' if text.get(i + 1) == Some(&b'{') => balanced(i + 1, b'{', b'}'),
+            _ => None,
+        };
+        i = span.unwrap_or(i + 1);
+    }
+    i.min(text.len())
 }
 
 /// `guard_settle_scan_failure`. True when the command is denied. `found` says

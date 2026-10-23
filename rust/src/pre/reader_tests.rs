@@ -75,6 +75,37 @@ const INSTALLS: &[&str] = &[
     "env -S \"$X\" pip",
 ];
 
+/// Installs that only two or more of the rewrites read together: an escape
+/// and a redirection, a group and a redirection, an escape that makes a
+/// group, a redirection or a line continuation, a continuation beside a
+/// redirection or a group, quotes that split an escape or open a `$'...'`
+/// inside a word, a quoted or substituted redirection target, an escape
+/// expanded twice, and three at once.
+const COMPOSED_INSTALLS: &[&str] = &[
+    r"$'\x70ip'>/dev/null install sample==1.0.0",
+    r"printf '\x70ip>/dev/null install sample==1.0.0' | sh",
+    "pip(N)>/dev/null install sample==1.0.0",
+    r"$'\x70ip'(N) install x",
+    r"printf 'pip\x28N\x29 install x' | sh",
+    r"printf 'pip\x3e/dev/null install x' | sh",
+    r"printf 'pip\076/dev/null install x' | sh",
+    r"printf 'pi\\\np install x' | sh",
+    "pi\\\np>/dev/null install x",
+    "pi\\\np(N) install x",
+    r#"printf '\''x70ip install x' | sh"#,
+    r"p$'\x69'p install x",
+    "pip>'a b' install x",
+    "pip 2>\"$(mktemp)\" install x",
+    "pip>`mktemp` install x",
+    "pip>$(mktemp) install x",
+    "pip>a\\ b install x",
+    r"echo -e '\0160ip install x' | sh",
+    r"printf '\\x70ip install x' | xargs -0 printf | sh",
+    "$'\\x70'\\\nip>/dev/null install x",
+    "pip(N)\\\n2>&1 install x",
+    r#"sh -c "$(printf '\x70ip(N)>/dev/null install x')""#,
+];
+
 /// Each row of `NOT_INSTALLS` is a reading that fails, finds no install and
 /// names a manager's executable, which the test this one replaced denied.
 #[test]
@@ -102,6 +133,38 @@ fn discriminator_reads_installs_and_not_names() {
     for text in ["ls -la", "git commit -m 'fix'", "echo \"pipe the pipefail\"", "go version", "python3 -c 'print(1)'", "env -S \"$X\""] {
         assert!(!looks_like_install_unscanned(text.as_bytes()), "{text}");
     }
+}
+
+#[test]
+fn discriminator_reads_installs_two_rewrites_make_together() {
+    for text in COMPOSED_INSTALLS {
+        assert!(looks_like_install_unscanned(text.as_bytes()), "{text}");
+        assert!(looks_like_install_unscanned(format!("{FAILS}; {text}").as_bytes()), "{text}");
+    }
+}
+
+/// `\x5c` stands for a backslash, so an escape written inside `n - 1` of them
+/// is expanded once more by each of `n` rewrites: its views are one sequence
+/// of `n + 1`. Of `a` nested groups, each rewrite drops the innermost. The
+/// two kinds apart are `(a + 1) * (n + 1)` views, in sequences of
+/// `a + n + 1`. Past `UNSCANNED_VIEWS` views or `UNSCANNED_DEPTH` in a
+/// sequence, the text reads as an install, though none of its views names a
+/// manager.
+#[test]
+fn discriminator_reads_a_text_past_its_views_as_an_install() {
+    let nested = |n: usize| format!("echo \\{}x41", "x5c".repeat(n - 1));
+    let mut view = nested(4).into_bytes();
+    for _ in 0..4 {
+        view = escapes_expanded(&view);
+    }
+    assert_eq!(view, b"echo A");
+    assert!(!looks_like_install_unscanned(nested(UNSCANNED_DEPTH - 1).as_bytes()));
+    assert!(looks_like_install_unscanned(nested(UNSCANNED_DEPTH).as_bytes()));
+    let grid = |a: usize, n: usize| format!("echo {}{} {}", "(".repeat(a), ")".repeat(a), nested(n));
+    assert_eq!(groups_dropped(b"echo ((()))"), b"echo (())");
+    assert_eq!((32 * 32, 31 + 31 + 1), (UNSCANNED_VIEWS, UNSCANNED_DEPTH - 1));
+    assert!(!looks_like_install_unscanned(grid(31, 31).as_bytes()));
+    assert!(looks_like_install_unscanned(grid(31, 32).as_bytes()));
 }
 
 #[test]
