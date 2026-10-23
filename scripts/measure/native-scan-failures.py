@@ -97,7 +97,7 @@ def fault(text,name):
 
 def fixture(binary,out,marker,expect_failure):
     rows=[]
-    for label,command,deny in [('manager-name','echo npm',True),('install','npm install',True),('ordinary','echo fixture',False)]:
+    for label,command,deny in [('manager-name','echo npm',False),('install','npm install',True),('ordinary','echo fixture',False)]:
         box=out/label;project=box/'project';project.mkdir(parents=True)
         (project/'package.json').write_text('{"name":"fixture"}\n')
         env={k:v for k,v in os.environ.items() if not k.startswith('SAFEDEPS_') and not k.lower().startswith('npm_config_')}

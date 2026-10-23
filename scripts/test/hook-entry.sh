@@ -293,7 +293,7 @@ advisory="${tmp_root}/core-state/advisory.log"
 advisory_before=$(wc -l < "${advisory}")
 run_core "ls -la"
 [[ ${entry_rc} -eq 0 && -z "${entry_out}" && "${entry_err}" == *"built from another source"* \
-  && "${entry_err}" == *"The command names no package manager and was allowed without a judgment." ]] \
+  && "${entry_err}" == *"The command does not read as an install and was allowed without a judgment." ]] \
   || fail "real core: stale benign pre allows with a source warning (${entry_out} ${entry_err})"
 advisory_after=$(wc -l < "${advisory}")
 [[ ${advisory_after} -eq $((advisory_before + 1)) \

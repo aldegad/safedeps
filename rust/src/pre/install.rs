@@ -101,7 +101,7 @@ pub fn judge(call:&Call,run:&mut Run,cwd:&[u8],read:&Readings,mut inert:impl FnM
         log_command(call,&cat(&[b"pre-guard DENY: the readings (",names.as_bytes(),") put this command's npm installs in different places, so no single --ignore-scripts rewrite is inert for every shell — undecided, fail-closed.".as_bytes()]));
         deny(&mut out,notices::READINGS.as_bytes());return out
     }
-    if super::settle_scan_failure(call,run.failed,&mut out){return out}
+    if super::settle_scan_failure(call,run.failed,true,&mut out){return out}
     // Every reading is done and none failed. The first files this call
     // leaves under the guard's state are written from here on.
     let snap=match Snapshot::create(call,&project,timestamp) {

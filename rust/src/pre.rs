@@ -209,9 +209,24 @@ fn deny_undecided_scan(call: &Call, out: &mut Out, which: &str) {
     out.say(&jq::deny("safedeps: UNDECIDED, not unsafe — safedeps could not finish reading this command, so it could not tell whether the command installs a dependency or what it would install. It is blocked fail-closed, and no finding is claimed."));
 }
 
-/// `guard_looks_like_install_unscanned`: the command names a package manager's
-/// executable anywhere, in any case, once its line continuations are out.
+/// `guard_looks_like_install_unscanned`: whether the command's text reads as
+/// an install when no reading of it finished. With no reader's answer in
+/// hand, its words are taken without the lexer, in three views of the text
+/// with its line continuations joined, each without its quote characters and
+/// backslashes: a quoted or escaped name (`"npm"`, `\npm`) and the script of
+/// a `sh -c '...'` are then the words the shell would run. The second view
+/// first expands the escapes printf, `echo -e` and `$'...'` expand, so a
+/// `\n` there ends a line; the third first turns each redirection into a
+/// blank, since `pip>/dev/null install` installs. A line of a view reads as an
+/// install where a package manager's name follows no byte of a name and the
+/// grammar's install body goes on from there: options, then one of that
+/// manager's install verbs. So a wrapper, a heredoc or a payload around it
+/// changes nothing, while a name inside another word (`pipefail`, `Google`)
+/// and a manager that installs nothing (`python3 -c`, `npm run`) are not an
+/// install.
 fn looks_like_install_unscanned(command: &[u8]) -> bool {
+    let p = grammar::patterns();
+    let Ok(re) = Regex::new(&format!("(^|[^A-Za-z0-9_.-])({}){}", p.install_body, p.end), true) else { return true };
     let mut joined = W::with_capacity(command.len());
     let mut i = 0;
     while i < command.len() {
@@ -222,23 +237,116 @@ fn looks_like_install_unscanned(command: &[u8]) -> bool {
         joined.push(command[i]);
         i += 1;
     }
-    Regex::new(&format!("({})", grammar::EXECUTABLES), true).map(|re| re.is_match(&joined)).unwrap_or(true)
+    [unquoted(&joined), unquoted(&escapes_expanded(&joined)), unquoted(&redirections_blank(&joined))]
+        .iter()
+        .any(|view| re.grep_any(view))
 }
 
-/// `guard_settle_scan_failure`. True when the command is denied.
-fn settle_scan_failure(call: &Call, failed: bool, out: &mut Out) -> bool {
+/// The text without its quote characters and backslashes.
+fn unquoted(text: &[u8]) -> W {
+    text.iter().copied().filter(|b| !matches!(b, b'\'' | b'"' | b'\\')).collect()
+}
+
+/// The text with each escape printf, `echo -e` and `$'...'` expand replaced
+/// by the byte it stands for: a letter escape, one to three octal digits, and
+/// `\x`, `\u` or `\U` with their hex digits. A byte past ASCII is no byte of
+/// a name, so it stands as 0x80.
+fn escapes_expanded(text: &[u8]) -> W {
+    let mut out = W::with_capacity(text.len());
+    let mut i = 0;
+    while i < text.len() {
+        // The bytes the escape at `i` takes, and the value it stands for.
+        let number = |from: usize, max: usize, radix: u32| {
+            let n = text[from..].iter().take(max).take_while(|&&b| (b as char).is_digit(radix)).count();
+            let value = text[from..from + n].iter().fold(0u32, |v, &b| v * radix + (b as char).to_digit(radix).unwrap_or(0));
+            (n > 0).then_some((from + n - i, value))
+        };
+        let escape = match text.get(i + 1) {
+            _ if text[i] != b'\\' => None,
+            Some(b'a') => Some((2, 0x07)),
+            Some(b'b') => Some((2, 0x08)),
+            Some(b'e' | b'E') => Some((2, 0x1b)),
+            Some(b'f') => Some((2, 0x0c)),
+            Some(b'n') => Some((2, 0x0a)),
+            Some(b'r') => Some((2, 0x0d)),
+            Some(b't') => Some((2, 0x09)),
+            Some(b'v') => Some((2, 0x0b)),
+            Some(b'0'..=b'7') => number(i + 1, 3, 8),
+            Some(b'x') => number(i + 2, 2, 16),
+            Some(b'u') => number(i + 2, 4, 16),
+            Some(b'U') => number(i + 2, 8, 16),
+            _ => None,
+        };
+        match escape {
+            Some((len, value)) => {
+                out.push(if value < 0x80 { value as u8 } else { 0x80 });
+                i += len;
+            }
+            None => {
+                out.push(text[i]);
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+/// The text with each redirection replaced by a blank: the digits or `&` in
+/// front of its operator, the operator (a run of `<` and `>`, and one `&`,
+/// `|` or `-` after it), the blanks after that, and the word it names, up to
+/// the next blank or operator. A `<(` or `>(` keeps its `(`.
+fn redirections_blank(text: &[u8]) -> W {
+    let mut out = W::with_capacity(text.len());
+    let mut i = 0;
+    while i < text.len() {
+        if !matches!(text[i], b'<' | b'>') {
+            out.push(text[i]);
+            i += 1;
+            continue;
+        }
+        while out.last().is_some_and(|b| b.is_ascii_digit()) {
+            out.pop();
+        }
+        if out.last() == Some(&b'&') {
+            out.pop();
+        }
+        while i < text.len() && matches!(text[i], b'<' | b'>') {
+            i += 1;
+        }
+        if i < text.len() && matches!(text[i], b'&' | b'|' | b'-') {
+            i += 1;
+        }
+        while i < text.len() && matches!(text[i], b' ' | b'\t') {
+            i += 1;
+        }
+        while i < text.len() && !is_space(text[i]) && !b";&|()<>`".contains(&text[i]) {
+            i += 1;
+        }
+        out.push(b' ');
+    }
+    out
+}
+
+/// `guard_settle_scan_failure`. True when the command is denied. `found` says
+/// a reading found an install: that answer stands, and the text is asked
+/// only where no reading found one.
+fn settle_scan_failure(call: &Call, failed: bool, found: bool, out: &mut Out) -> bool {
     if !failed {
         return false;
     }
+    if found {
+        deny_undecided_scan(call, out, "a reading found an install");
+        return true;
+    }
     if looks_like_install_unscanned(&call.command) {
-        deny_undecided_scan(call, out, "the command names a package manager");
+        deny_undecided_scan(call, out, "the command reads as an install");
         return true;
     }
     state::log_advisory(
         &call.guard_dir,
-        &cat(&[b"pre-guard: the command scanner failed; the command names no package manager and was allowed. Command: ", &call.command]),
+        &cat(&[b"pre-guard: the command scanner failed; the command does not read as an install and was allowed. Command: ", &call.command]),
     );
-    out.warn(b"safedeps: this command could not be fully read. It names no package manager, so it was allowed. The failure is recorded in advisory.log.");
+    out.warn(b"safedeps: this command could not be fully read. It does not read as a dependency install, so it was allowed. The failure is recorded in advisory.log.");
     false
 }
 
@@ -376,7 +484,7 @@ fn judge(call: &Call) -> Out {
     if read.yes("any_install") {
         return install::judge(call, &mut run, &cwd, &read, crate::inert::reading_inert);
     }
-    if settle_scan_failure(call, run.failed, &mut out) {
+    if settle_scan_failure(call, run.failed, false, &mut out) {
         return out;
     }
     backstop_trace_baseline(call, &cwd);
@@ -391,9 +499,9 @@ fn emit(out: &Out) -> i32 {
     out.code
 }
 
-/// A stale checkout can settle only the existing unscanned-manager question.
+/// A stale checkout can settle only the unscanned-install question.
 /// It never calls the old judgment or creates a snapshot, pending record or
-/// trace baseline. An unreadable payload is not evidence of an absent name.
+/// trace baseline. An unreadable payload is not evidence of an absent install.
 fn stale(input: &[u8], why: &str, guard: &Path) -> i32 {
     let _ = std::fs::DirBuilder::new().recursive(true).mode(0o700).create(guard);
     let payload = json::parse_one(input).ok();
@@ -401,9 +509,9 @@ fn stale(input: &[u8], why: &str, guard: &Path) -> i32 {
     let command = payload.as_ref().and_then(|p| p.get("tool_input")).and_then(|p| p.get("command"));
     let disposition = match (tool, command) {
         (Some("Bash"), Some(Value::Str(command))) => {
-            if looks_like_install_unscanned(command) { "the command names a package manager" }
+            if looks_like_install_unscanned(command) { "the command reads as an install" }
             else {
-                let message = format!("{} The command names no package manager and was allowed without a judgment.", why);
+                let message = format!("{} The command does not read as an install and was allowed without a judgment.", why);
                 state::log_advisory(guard, format!("pre-guard: {}", message).as_bytes());
                 eprintln!("{}", message);
                 return 0;

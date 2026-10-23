@@ -138,10 +138,16 @@ def corpus():
 def settlement():
     # Public counterexamples connect the reader's failed state to pre's
     # settlement; internal invalid-view controls live beside Run in Rust.
+    # The argument after `eval` fails the reading of the last three; a
+    # manager's name alone is no install, and an install beside it is one.
+    fails = "browser-cli eval --expr '(()=>1)()'"
     with tempfile.TemporaryDirectory(prefix="safedeps-reader-settlement.") as temp:
         root = Path(temp)
         for index, (command, denied) in enumerate([
-            ('printf "\npip install evil==6.6.6', True), ("echo '", False)
+            ('printf "\npip install evil==6.6.6', True), ("echo '", False),
+            (f"{fails} | python3 -c 'import sys; print(sys.stdin.read())'", False),
+            (f"{fails}; npm install left-pad@1.3.0", True),
+            (f"{fails}; bash -c 'pip install requests==2.0.0'", True),
         ]):
             state = root / str(index)
             payload = json.dumps({"tool_name": "Bash", "cwd": str(root),
@@ -161,7 +167,8 @@ def settlement():
             else:
                 assert not result.stdout, result.stdout
                 assert b"could not be fully read" in result.stderr, result.stderr
-    print("ok - native pre settles unclosed manager input as UNDECIDED and reports unread non-installs")
+                assert b"does not read as a dependency install" in result.stderr, result.stderr
+    print("ok - native pre settles an unread install as UNDECIDED and reports unread non-installs, a manager's name included")
 
 
 def pattern_starts():
