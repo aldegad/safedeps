@@ -40,6 +40,10 @@ pub struct Patterns {
     pub npm_install_body: String,
     pub create_body: String,
     pub install_body: String,
+    /// The alternatives `install_body` joins, in its order. The test that
+    /// holds `install_forms` to them reads it.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub install_bodies: Vec<String>,
     pub install_re: String,
     pub npm_install_re: String,
     pub raw_install_re: String,
@@ -71,7 +75,7 @@ pub fn patterns() -> Patterns {
     );
     let o = O;
     let op = OPERAND;
-    let install_body = [
+    let install_bodies = vec![
         npm_install_body.clone(),
         format!("(npx|pnpx|bunx|uvx){o}{op}"),
         format!("npm{o}[[:space:]]+({ev}){o}{op}", ev = NPM_EXEC_VERBS),
@@ -99,8 +103,8 @@ pub fn patterns() -> Patterns {
         format!("dotnet{o}[[:space:]]+add([[:space:]]+[^-[:space:]][^[:space:]]*)?{o}[[:space:]]+package"),
         format!("dotnet{o}[[:space:]]+package{o}[[:space:]]+(add|update)"),
         format!("dotnet{o}[[:space:]]+tool{o}[[:space:]]+(install|update)"),
-    ]
-    .join("|");
+    ];
+    let install_body = install_bodies.join("|");
     let install_re = format!("{}({}){}", START, install_body, end);
     let npm_install_re = format!("{}({}){}", START, npm_install_body, end);
     let raw_install_re = format!(
@@ -115,11 +119,58 @@ pub fn patterns() -> Patterns {
         npm_install_body,
         create_body,
         install_body,
+        install_bodies,
         install_re,
         npm_install_re,
         raw_install_re,
         backstop_re,
     }
+}
+
+/// One form of the install body as words: a manager, one of `EXECUTABLES`,
+/// and the words that stand beside it. Each is an alternation of this file's
+/// patterns that a whole word matches.
+pub struct Form {
+    pub manager: &'static str,
+    pub words: Vec<String>,
+}
+
+/// The forms of each alternative of the install body, in its order, for the
+/// test that reads a command no reading finished
+/// (`looks_like_install_unscanned`). That test reads the words of the command
+/// in no order, so a form keeps the words of a body and nothing that stands
+/// between them. An operand is any word, and the manager is one, so a body
+/// that only adds an operand adds no word.
+pub fn install_forms() -> Vec<Vec<Form>> {
+    let form = |manager, words: &[&str]| Form { manager, words: words.iter().map(|w| w.to_string()).collect() };
+    let pnpm = format!("{}|dlx", PNPM_VERBS);
+    let yarn = format!("{}|dlx", YARN_VERBS);
+    vec![
+        vec![form("npm", &[NPM_VERBS]), form("npm", &[NPM_LINK_VERBS])],
+        vec![form("npx|pnpx|bunx|uvx", &[])],
+        vec![form("npm", &[NPM_EXEC_VERBS])],
+        vec![form("npm", &[NPM_INIT_VERBS]), form("pnpm", &["create"]), form("yarn", &["create"]), form("bun", &["create|c"])],
+        vec![form("pnpm", &[&pnpm])],
+        vec![form("yarn", &[&yarn])],
+        vec![form("bun", &[BUN_VERBS])],
+        vec![form("bun", &["x"])],
+        vec![form("pip[0-9.]*", &["install"]), form("python[0-9.]*|py", &["-[A-Za-z0-9]*mpip", "install"])],
+        vec![form("poetry", &["add"])],
+        vec![form("uv", &["add"]), form("uv", &["pip", "install"]), form("uv", &["tool", "install"])],
+        vec![form("uv", &["tool", "run"])],
+        vec![form("pipx", &["install|inject"])],
+        vec![form("pipx", &["run"])],
+        vec![form("pipenv", &["install"])],
+        vec![form("cargo", &["add|install"])],
+        vec![form("go", &["get|install"])],
+        vec![form("go", &["run", "[^-][^[:space:]]*@[^[:space:]]+"])],
+        vec![form("gem", &["install"])],
+        vec![form("bundle", &["add"])],
+        vec![form("mvn", &["[^[:space:]]*maven-dependency-plugin[^[:space:]]*:get|dependency:get"])],
+        vec![form("dotnet", &["add", "package"])],
+        vec![form("dotnet", &["package", "add|update"])],
+        vec![form("dotnet", &["tool", "install|update"])],
+    ]
 }
 
 /// `name=value` lines for every value the drift check compares.

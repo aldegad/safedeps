@@ -1,5 +1,6 @@
 //! Native scan-failure settlement and the discriminator used by that path.
 use super::*;
+use super::unscanned::{escapes_expanded, BRACE_BYTES, UNSCANNED_DEPTH, UNSCANNED_VIEWS};
 use std::os::unix::ffi::OsStrExt;
 
 /// A failed reading the core makes today: the textual script search takes the
@@ -69,6 +70,11 @@ const INSTALLS: &[&str] = &[
     "printf 'echo a\\npip install x' | sh",
     "printf 'echo a\\012pip install x' | sh",
     "$'\\x6e\\x70\\x6d' install x",
+    "printf 'mvn x:maven-dependency-plugin\\0723.6.0:get' | sh",
+    "printf 'pip3\\05612 install x' | sh",
+    "printf '\\560ip install x' | sh",
+    "echo -e '\\0560ip install x' | sh",
+    "$'\\560ip' install x",
     "NPM INSTALL x",
     "pip(N) install evil==1.0.0",
     "pip ((x) y) install evil==1.0.0",
@@ -135,21 +141,196 @@ fn discriminator_reads_installs_and_not_names() {
     }
 }
 
+/// The heads and the redirection targets a validator put together into
+/// installs after a reading that fails, each head before each target: an
+/// escape, a split or quoted name, and a glob qualifier, in front of a target
+/// that is quoted, substituted, escaped, or holds a parenthesis inside quotes
+/// that a count of parentheses takes for a close or an open.
+const COMPOSED_HEADS: &[&str] = &[r"$'\x70'ip", r"p$'\151'p", "p\\\nip", r"'p'\i'p'", r"$'\160'ip(N)"];
+const COMPOSED_TARGETS: &[&str] = &[
+    "/dev/null",
+    "'a b'",
+    r#""${TMPDIR:-/tmp}/a b""#,
+    r#"$(printf "%s" /dev/null)"#,
+    r#""$(printf "%s" /dev/null)""#,
+    r#"$(printf "%s" ")")"#,
+    r#"$(printf "%s" "(")"#,
+    r"a\ b",
+    "$(echo $(echo /dev/null))",
+    r#"$(printf "%s" "a;b")"#,
+];
+
+/// More installs of the same validator: a verb escaped inside quotes, and an
+/// escape that makes a group, a quote, a newline or two redirections.
+const COMPOSED_NAMED: &[&str] = &[
+    r"$'\x70'ip>'a b' i$'\x6e'stall sample==1.0.0",
+    r"printf '\x70ip\x28N\x29\x3e/dev/null install sample==1.0.0' | sh",
+    r#"echo -e '\0160ip\0076"a b" install sample==1.0.0' | sh"#,
+    r"printf 'p\x5c\nip>/dev/null install sample==1.0.0' | sh",
+    r#"$'\x70ip' 3>"a b" 4>$(printf x) install sample==1.0.0"#,
+    r"p$'\x69'p((N))>'a b' install sample==1.0.0",
+];
+
+/// That validator's controls: a name inside a word, a manager with no verb,
+/// and a manager that installs nothing, each behind the same escapes.
+const COMPOSED_CONTROLS: &[&str] = &[
+    r"printf '%s\n' pipefail",
+    r#"$'\x70ip'>"a b" --version"#,
+    r#"p$'\x79'thon3 >"a b" -c 'print(1)' "#,
+];
+
 #[test]
 fn discriminator_reads_installs_two_rewrites_make_together() {
-    for text in COMPOSED_INSTALLS {
+    let grid = COMPOSED_HEADS.iter().flat_map(|h| COMPOSED_TARGETS.iter().map(move |t| format!("{h}>{t} install sample==1.0.0")));
+    let rows: Vec<String> = COMPOSED_INSTALLS.iter().chain(COMPOSED_NAMED).map(|t| t.to_string()).chain(grid).collect();
+    assert_eq!(rows.len(), 22 + 6 + 50);
+    for text in &rows {
+        assert!(looks_like_install_unscanned(text.as_bytes()), "{text}");
+        assert!(looks_like_install_unscanned(format!("{FAILS}; {text}").as_bytes()), "{text}");
+    }
+    for text in COMPOSED_CONTROLS {
+        assert!(!looks_like_install_unscanned(format!("{FAILS}; {text}").as_bytes()), "{text}");
+    }
+}
+
+/// Installs whose name or verb is a word only after a step of the shell that
+/// is not an escape or a quote, each one in bash or zsh: a brace expansion, a
+/// glob that a file of the name matches, the value of a `${name-word}`, zsh's
+/// `=name`, words that `,` parts once IFS splits them, a name and verb that
+/// the blanks of `$IFS` part, a name or verb an empty expansion splits, and a
+/// glob's group of zsh or of bash's extended globs.
+const HIDDEN_INSTALLS: &[&str] = &[
+    "pip in{stall,} x",
+    "{pip,install} x",
+    "p{i..i}p install x",
+    "cargo {a,x}dd x",
+    "pip in{\"s\"tall,' '} x",
+    "pip {{in,}s,}tall x",
+    "/usr/bin/pi[p] install x",
+    "/opt/homebrew/bin/n?m i x",
+    "/usr/local/bin/pip3.1[0-9] install x",
+    "/usr/local/bin/pip3.1* install x",
+    "pip i[n]stall x",
+    "${x:-npm} i y",
+    "${x-pip} install y",
+    "${:-npm} i y",
+    "pip ${x:-install} y",
+    "${(L)x-npm} i y",
+    "=npm install x",
+    "x=npm,i; IFS=,; $x y",
+    "pip$IFS'install' x",
+    "npm${IFS}i x",
+    "pip in${:-stall} x",
+    "pip in${x:-st}all y",
+    "n$()pm i x",
+    "n``pm i x",
+    "n${x}pm i y",
+    "n$(: \")\")pm i y",
+    "p$(echo)i$x\"p\" install y",
+    "/opt/homebrew/bin/(n|q)pm i x",
+    "/usr/local/bin/n(p)m i x",
+    "/usr/bin/@(pip|q) install y",
+    "/usr/bin/p?(i)p install y",
+    "/opt/homebrew/bin/!(q)pm i x",
+    "pip i(n|q)stall y",
+    "# it's\npip in{stall,' '} x",
+];
+
+#[test]
+fn discriminator_reads_words_the_shell_makes_without_a_rewrite() {
+    for text in HIDDEN_INSTALLS {
         assert!(looks_like_install_unscanned(text.as_bytes()), "{text}");
         assert!(looks_like_install_unscanned(format!("{FAILS}; {text}").as_bytes()), "{text}");
     }
 }
 
+/// The words of each form of the install body, and nothing more, alone and
+/// in another order: one install for each form, in the order of
+/// `grammar::install_forms`. Each matches its alternative of the body.
+const FORM_INSTALLS: &[&[&str]] = &[
+    &["npm install x", "npm link x"],
+    &["npx cowsay"],
+    &["npm exec cowsay"],
+    &["npm init vite", "pnpm create vite", "yarn create vite", "bun c vite"],
+    &["pnpm dlx cowsay"],
+    &["yarn add x"],
+    &["bun add x"],
+    &["bun x cowsay"],
+    &["pip3.12 install x", "python3 -mpip install x"],
+    &["poetry add x"],
+    &["uv add x", "uv pip install x", "uv tool install x"],
+    &["uv tool run x"],
+    &["pipx inject x y"],
+    &["pipx run x"],
+    &["pipenv install x"],
+    &["cargo install x"],
+    &["go get x"],
+    &["go run example.com/x@v1"],
+    &["gem install x"],
+    &["bundle add x"],
+    &["mvn org.apache.maven.plugins:maven-dependency-plugin:3.6.0:get"],
+    &["dotnet add app.csproj package x"],
+    &["dotnet package update x"],
+    &["dotnet tool update x"],
+];
+
+#[test]
+fn every_form_of_the_install_body_is_read_from_its_words() {
+    let p = grammar::patterns();
+    let forms = grammar::install_forms();
+    let executables: Vec<&str> = grammar::EXECUTABLES.split('|').collect();
+    assert_eq!((forms.len(), FORM_INSTALLS.len()), (p.install_bodies.len(), p.install_bodies.len()));
+    for ((body, forms), samples) in p.install_bodies.iter().zip(&forms).zip(FORM_INSTALLS) {
+        assert_eq!(forms.len(), samples.len(), "{body}");
+        let re = Regex::new(&format!("^({body}){}", p.end), true).unwrap();
+        for (form, sample) in forms.iter().zip(*samples) {
+            assert!(form.manager.split('|').all(|m| executables.contains(&m)), "{}", form.manager);
+            assert!(re.is_match(sample.as_bytes()), "{sample}");
+            assert!(looks_like_install_unscanned(sample.as_bytes()), "{sample}");
+            let mut words: Vec<&str> = sample.split(' ').collect();
+            words.reverse();
+            assert!(looks_like_install_unscanned(words.join(" ").as_bytes()), "{sample}");
+        }
+    }
+}
+
+/// A manager beside a verb that is not its own, a body cut short, a name that
+/// is part of another word, and a glob that stands for no verb's file or for
+/// any name at all: none is an install. A verb anywhere beside
+/// the manager is one, though: the words are read in no order.
+#[test]
+fn a_manager_pairs_only_with_its_own_verbs() {
+    for text in [
+        "pip add x",
+        "cargo get x",
+        "uv install x",
+        "go run main.go",
+        "dotnet add reference x",
+        "gem add x",
+        "npm run build && echo done",
+        "npm_config_registry=x node a.js install",
+        "./mynpm install x",
+        "pipx list --include-injected",
+        "echo i; python3 -m pytest",
+        "mvn test && ls target/*",
+        "go run main.go && ls *.go",
+        "ls src/*; echo i",
+        "grep -o '[a-z]*' a.txt; npm --version",
+        "python3 -c 'print(b[jump_repair][rounds])'; echo a",
+    ] {
+        assert!(!looks_like_install_unscanned(format!("{FAILS}; {text}").as_bytes()), "{text}");
+    }
+    assert!(looks_like_install_unscanned(format!("{FAILS}; echo install; pip --version").as_bytes()));
+}
+
 /// `\x5c` stands for a backslash, so an escape written inside `n - 1` of them
 /// is expanded once more by each of `n` rewrites: its views are one sequence
-/// of `n + 1`. Of `a` nested groups, each rewrite drops the innermost. The
-/// two kinds apart are `(a + 1) * (n + 1)` views, in sequences of
-/// `a + n + 1`. Past `UNSCANNED_VIEWS` views or `UNSCANNED_DEPTH` in a
-/// sequence, the text reads as an install, though none of its views names a
-/// manager.
+/// of `n + 1`. `\0101` is two bytes to printf and one to `echo -e`, so a
+/// text whose `k`-th escape is that one inside `k` backslashes takes a
+/// different view from each of the two rewrites at each step, and `c` of
+/// them make `2^(c + 1) - 1` views. Past `UNSCANNED_VIEWS` views or
+/// `UNSCANNED_DEPTH` in a sequence, the text reads as an install, though
+/// none of its views names a manager.
 #[test]
 fn discriminator_reads_a_text_past_its_views_as_an_install() {
     let nested = |n: usize| format!("echo \\{}x41", "x5c".repeat(n - 1));
@@ -160,26 +341,48 @@ fn discriminator_reads_a_text_past_its_views_as_an_install() {
     assert_eq!(view, b"echo A");
     assert!(!looks_like_install_unscanned(nested(UNSCANNED_DEPTH - 1).as_bytes()));
     assert!(looks_like_install_unscanned(nested(UNSCANNED_DEPTH).as_bytes()));
-    let grid = |a: usize, n: usize| format!("echo {}{} {}", "(".repeat(a), ")".repeat(a), nested(n));
-    assert_eq!(groups_dropped(b"echo ((()))"), b"echo (())");
-    assert_eq!((32 * 32, 31 + 31 + 1), (UNSCANNED_VIEWS, UNSCANNED_DEPTH - 1));
-    assert!(!looks_like_install_unscanned(grid(31, 31).as_bytes()));
-    assert!(looks_like_install_unscanned(grid(31, 32).as_bytes()));
+    let forks = |c: usize| format!("echo {}", (0..c).map(|k| format!("\\{}0101", "x5c".repeat(k))).collect::<Vec<_>>().join(" "));
+    assert_eq!(((1 << 10) - 1, 1 << 10), (UNSCANNED_VIEWS - 1, UNSCANNED_VIEWS));
+    assert!(!looks_like_install_unscanned(forks(9).as_bytes()));
+    assert!(looks_like_install_unscanned(forks(10).as_bytes()));
+}
+
+/// `k` groups of two words side by side make `2^k` texts. Past `BRACE_BYTES`
+/// of them, the text reads as an install, though none of them names a
+/// manager.
+#[test]
+fn discriminator_reads_a_text_past_its_brace_expansions_as_an_install() {
+    let groups = |k: usize| format!("echo x{}", "{a,b}".repeat(k));
+    assert_eq!(BRACE_BYTES, 1 << 24);
+    assert!(!looks_like_install_unscanned(groups(12).as_bytes()));
+    assert!(looks_like_install_unscanned(groups(20).as_bytes()));
+    assert!(looks_like_install_unscanned(groups(100_000).as_bytes()));
 }
 
 /// What the bounds cost, printed by `cargo test --release unscanned_views_cost
-/// -- --nocapture`: the shape above at `UNSCANNED_VIEWS` after 100 kB and 1 MB
-/// of other text, and a browser eval with escapes, groups, quotes and a
-/// redirection, repeated to about 245 kB. None of them reads as an install.
+/// -- --nocapture`: the shape above just under `UNSCANNED_VIEWS` after 100 kB
+/// and 1 MB of other text, 100 kB and 1 MB of words, 1 MB of words and of
+/// words read as patterns beside the name of every manager that needs a verb,
+/// a browser eval with escapes, groups, globs, braces,
+/// quotes and a redirection, repeated to about 360 kB, brace groups just
+/// under `BRACE_BYTES`, 250 kB of objects one segment holds, each a group of
+/// its own, and 250 kB of code whose braces hold blanks and so are no group.
+/// None of them reads as an install.
 #[test]
 fn unscanned_views_cost() {
-    let nested = |n: usize| format!("echo \\{}x41", "x5c".repeat(n - 1));
-    let grid = format!("echo {}{} {}", "(".repeat(31), ")".repeat(31), nested(31));
-    let eval = r#"browser-cli eval --expr '(()=>{const a=[...document.querySelectorAll("a")].map(x=>(x.innerText||"").trim()).filter(t=>t.length>0&&(t.indexOf("\\n")<0)); return JSON.stringify({n:a.length, s:"a\"b\nc\x41", m:(((1+2)*3)>2)})})()' > out.json 2>&1"#;
+    let forks = format!("echo {}", (0..9).map(|k| format!("\\{}0101", "x5c".repeat(k))).collect::<Vec<_>>().join(" "));
+    let words = |n: usize| (0..n).map(|i| format!("w{i}")).collect::<Vec<_>>().join(" ");
+    let eval = r#"browser-cli eval --expr '(()=>{const a=[...document.querySelectorAll("a")].map(x=>(x.innerText||"").trim()).filter(t=>t.length>0&&(t.indexOf("\\n")<0)); const go=a[0]?.get; return JSON.stringify({n:a.length, s:"a\"b\nc\x41", m:(((1+2)*3)>2), p:{q:[1,2],r:{s:3,t:4}}, g:a.map(x=>x*2)})})()' > out.json 2>&1"#;
     let shapes = [
-        ("bound after 100 kB", format!("{} {grid}", "x".repeat(100_000))),
-        ("bound after 1 MB", format!("{} {grid}", "x".repeat(1_000_000))),
+        ("views after 100 kB", format!("{} {forks}", "x".repeat(100_000))),
+        ("views after 1 MB", format!("{} {forks}", "x".repeat(1_000_000))),
+        ("100 kB of words", words(15_000)),
+        ("1 MB of words", words(130_000)),
+        ("1 MB of words and patterns beside each manager", format!("{} {}", grammar::EXECUTABLES.split('|').filter(|m| !m.ends_with('x')).collect::<Vec<_>>().join(" "), (0..90_000).map(|i| format!("w{i} q[{i}]?")).collect::<Vec<_>>().join(" "))),
         ("eval x1000", vec![eval; 1000].join("; ")),
+        ("braces", format!("echo x{}", "{a,b}".repeat(18))),
+        ("objects", format!("browser-cli eval --expr '[{}]'", vec!["{a:1,b:[2,3],c:{d:4,e:5}}"; 10_000].join(","))),
+        ("blocks", format!("cat > a.cs <<'EOF'\n{}\nEOF", vec!["class A { void F(int a, int b) { var x = new[] { a, b }; if (a > b) { G(a, b); } } }"; 3_000].join("\n"))),
     ];
     for (name, text) in shapes {
         let start = Instant::now();
