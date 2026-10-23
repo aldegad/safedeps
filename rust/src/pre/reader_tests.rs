@@ -26,6 +26,7 @@ const NOT_INSTALLS: &[&str] = &[
     "browser-cli eval --expr '(()=>1)()'; npm run build && npm test && go test ./... && cargo build --release",
     "browser-cli eval --expr '(()=>1)()'; pip --version; python3 -m pytest -q; node -e 'const gem = 1'",
     "browser-cli eval --expr '(()=>1)()'; echo npm",
+    "browser-cli eval --expr '(()=>1)()'; ./mynpm install x && ./algo install",
 ];
 
 /// Installs the text shows without a reading: behind a wrapper or an
