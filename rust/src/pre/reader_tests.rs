@@ -236,6 +236,16 @@ const HIDDEN_INSTALLS: &[&str] = &[
     "/opt/homebrew/bin/!(q)pm i x",
     "pip i(n|q)stall y",
     "# it's\npip in{stall,' '} x",
+];
+
+/// Commands that a NUL-producing escape makes an install of, which no view
+/// reconstructs: bash ends a `$'...'` at the first NUL escape and glues what
+/// follows the closing quote, so a manager or verb is truncated and rejoined
+/// (`$'pi\0junk'p` is `pip`, `pip $'inst\0junk'all` runs `pip install`), and a
+/// script piped to a shell loses its NUL bytes. The escape is written as `\0`,
+/// `\x00`, `\c@`, `\C-@`, an octal multiple of 256, and under outer quotes a
+/// validator split with `shlex.quote`. `nul_escape` denies them all.
+const NUL_INSTALLS: &[&str] = &[
     r"$'pip\0junk' install x",
     r"$'pip\x00junk' install x",
     r"$'pip\c@junk' install x",
@@ -243,8 +253,11 @@ const HIDDEN_INSTALLS: &[&str] = &[
     r"$'pip\C-@junk' install x",
     r"$'pi\0x'p install x",
     r"$'pi\0\'x'p install x",
+    r"$'pi\0junk'p install x",
     r"pip $'install\0junk' x",
+    r"pip $'inst\0junk'all x",
     r"printf 'p\0ip install x' | sh",
+    r#"bash -c '$'"'"'pi\0junk'"'"'p install sample==1.0.0'"#,
 ];
 
 #[test]
@@ -252,6 +265,25 @@ fn discriminator_reads_words_the_shell_makes_without_a_rewrite() {
     for text in HIDDEN_INSTALLS {
         assert!(looks_like_install_unscanned(text.as_bytes()), "{text}");
         assert!(looks_like_install_unscanned(format!("{FAILS}; {text}").as_bytes()), "{text}");
+    }
+}
+
+/// A NUL-producing escape denies the command, alone and after a failed
+/// reading, whatever words it holds, because bash can truncate and glue a
+/// manager or verb through it that no view reconstructs. A command with no
+/// such escape is read as usual, so `\560` (a `p`) and `\012` (a newline)
+/// are not NUL and do not deny on their own.
+#[test]
+fn discriminator_denies_a_nul_producing_escape() {
+    for text in NUL_INSTALLS {
+        assert!(looks_like_install_unscanned(text.as_bytes()), "{text}");
+        assert!(looks_like_install_unscanned(format!("{FAILS}; {text}").as_bytes()), "{text}");
+    }
+    for text in [r"$'\0'", r"echo $'a\0b'", r"printf '\x00'", r"grep -c . a; : $'\c@'", r"x=$'\U00000000'; echo i"] {
+        assert!(looks_like_install_unscanned(text.as_bytes()), "{text}");
+    }
+    for text in [r"$'\560ip' --version", r"printf 'a\012b'", r"echo -e 'a\0560b'", "ls -la", "echo npm"] {
+        assert!(!looks_like_install_unscanned(text.as_bytes()), "{text}");
     }
 }
 
