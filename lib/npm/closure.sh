@@ -344,7 +344,10 @@ safedeps_npm_yarn_materialization_inputs() {
   jq -cn \
     --arg input_sha256 "sha256:${input_sha}" \
     --argjson input_files "${input_json}" \
-    '{input_sha256: $input_sha256, input_files: $input_files}' > "${output_file}"
+    '{input_sha256: $input_sha256, input_files: $input_files}' > "${output_file}" || {
+    rm -f "${input_list}" "${workspace_patterns}" "${workspace_manifests}"
+    return 1
+  }
   rm -f "${input_list}" "${workspace_patterns}" "${workspace_manifests}"
 }
 
@@ -453,13 +456,13 @@ safedeps_npm_yarn_materialize_candidate_closure() {
   if ! jq --arg package "${package_name}" --arg version "${version}" '
     .dependencies = (.dependencies // {})
     | .dependencies[$package] = $version
-  ' "${mirror_manifest}" > "${mirror_manifest_tmp}"; then
+  ' "${mirror_manifest}" > "${mirror_manifest_tmp}" \
+    || ! mv -f "${mirror_manifest_tmp}" "${mirror_manifest}"; then
     rm -f "${mirror_manifest_tmp}"
     rm -rf "${mirror_root}"
     rm -f "${verify_context_file}" "${mirror_inputs_file}" "${closure_file}"
     return 1
   fi
-  mv -f "${mirror_manifest_tmp}" "${mirror_manifest}"
 
   if ! (
     cd "${mirror_root}" &&
@@ -518,7 +521,11 @@ safedeps_npm_yarn_materialize_candidate_closure() {
       rm -f "${verify_context_file}" "${mirror_inputs_file}" "${closure_file}"
       return 1
     }
-  cat "${closure_file}"
+  cat "${closure_file}" || {
+    rm -rf "${mirror_root}"
+    rm -f "${verify_context_file}" "${mirror_inputs_file}" "${closure_file}"
+    return 1
+  }
   rm -rf "${mirror_root}"
   rm -f "${verify_context_file}" "${mirror_inputs_file}" "${closure_file}"
 }
@@ -620,7 +627,7 @@ safedeps_npm_yarn_info_graph() {
       return 1
     }
     cat "${fixture_file}"
-    return 0
+    return
   fi
 
   command -v yarn >/dev/null 2>&1 || {

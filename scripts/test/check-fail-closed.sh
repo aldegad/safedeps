@@ -767,6 +767,20 @@ esac
 STUB
 chmod +x "${after_bin}"/*
 after_path="${after_bin}:${stub_bin}:${PATH}"
+# yarn with no network, the shape of the one in e2e.sh: a project holds the
+# candidate only once the install has written the mirror's lockfile. It stands
+# apart from after_bin because the rows there read a project with no yarn.
+yarn_bin="${tmp_root}/yarn-bin"
+mkdir -p "${yarn_bin}"
+cat > "${yarn_bin}/yarn" <<'STUB'
+#!/usr/bin/env bash
+case "$*" in
+  *"install --mode=update-lockfile"*) printf '__metadata:\n  version: 8\n# candidate\n' > yarn.lock ;;
+  *"info -A -R --json"*) if grep -q '^# candidate$' yarn.lock; then cat "${STUB_YARN_GRAPH}"; fi ;;
+  *) exit 64 ;;
+esac
+STUB
+chmod +x "${yarn_bin}/yarn"
 # The hash tool the libraries pick: shasum, where there is one.
 hash_tool=sha256sum hash_match=''
 if command -v shasum >/dev/null 2>&1; then hash_tool=shasum hash_match='-a 256'; fi
@@ -1164,6 +1178,7 @@ yarn_context_failed() {
 row "a Yarn manifest that answered none and then failed is no project with no resolutions" yarn_declares_failed
 row "a Yarn manifest that answered some and then failed is a failed read" yarn_context_failed '.resolutions | type'
 row "a Yarn context jq printed and failed on is no context" yarn_context_failed 'resolutions_sha256: $resolutions_sha256'
+row "a Yarn input list jq wrote and failed on is no context" yarn_context_failed 'input_sha256: $input_sha256, input_files: $input_files'
 row "a deny-only mark that does not read is no permission" fails_as refused npm fixture-clean@1.0.0 'source_approval_scope // ""'
 row "a patch candidate whose deny-only mark does not read is no patch" fails_as candidate_withheld npm fixture-vuln@1.0.0 'source_approval_scope // ""'
 row "overrides jq printed and failed on are not a project with none" overrides_refused refused npm fixture-clean@1.0.0 '.overrides | type'
@@ -1289,6 +1304,34 @@ yarn_root_failed() {
   closure_failed
 }
 row "a Yarn project root jq printed and failed on stops the check" yarn_root_failed
+yarn_graph() {
+  printf '%s\n' '{"value":"fixture-clean@npm:1.0.0","children":{"Version":"1.0.0","Dependencies":[]}}' > "${tmp_root}/yarn.ndjson"
+}
+yarn_graph_failed() {
+  yarn_project
+  yarn_graph
+  in_project npm fixture-clean@1.0.0 yarn.ndjson STUB_TOOL_ONLY=cat SAFEDEPS_YARN_INFO_FIXTURE_NDJSON="${tmp_root}/yarn.ndjson"
+  refused
+}
+row "a Yarn graph cat printed and failed on is no graph" yarn_graph_failed
+# A locator the project does not hold yet is read from a private mirror.
+yarn_candidate() {
+  yarn_project
+  yarn_graph
+  in_project npm fixture-clean@1.0.0 "$1" STUB_TOOL_ONLY="${2:-}" PATH="${yarn_bin}:${after_path}" STUB_YARN_GRAPH="${tmp_root}/yarn.ndjson"
+}
+yarn_candidate_control() {
+  yarn_candidate 'a call no row fails'
+  [[ "${rc}" == 0 ]] || no "exit ${rc}: ${json}"
+  jq -e '.result == "clean" and .closure_source.type == "yarn-project-materialized-lockfile"' <<< "${json}" >/dev/null || no "the report: ${json}"
+}
+yarn_candidate_failed() {
+  yarn_candidate "$@"
+  refused
+}
+row "control: a locator the Yarn project does not hold is read from its mirror" yarn_candidate_control
+row "a candidate manifest mv moved and failed on is no candidate" yarn_candidate_failed .safedeps-package mv
+row "a candidate closure cat printed and failed on is no closure" yarn_candidate_failed safedeps-yarn-candidate-closure cat
 pinned_equality() {
   local dir
   dir=$(mktemp -d "${tmp_root}/probe.XXXXXX")
