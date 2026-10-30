@@ -3298,6 +3298,31 @@ recheck_json=$(./bin/safedeps --json re-check)
 [[ "$(jq -r '.revoked[0].package' <<< "${recheck_json}")" == "fixture-clean" ]] || fail "re-check revoked expected package"
 pass "re-check revocation"
 
+# An approval whose package is KEV-listed after it is revoked as a KEV hit.
+# Re-check branches on the status a provider batch gives, under the names the
+# CLI declares; a status it read under another name would leave the approval
+# live and the report without the hit. The exit code is 0 either way, so the
+# report and the ledger entry are read.
+later_kev_home="${tmp_root}/safe-later-kev"
+later_kev_state=$(cat "${state_file}")
+later_kev_check=$(SAFEDEPS_HOME="${later_kev_home}" ./bin/safedeps --json check PyPI fixture-later-kev@1.0.0)
+[[ "$(jq -r '.result + " " + (.approved | tostring)' <<< "${later_kev_check}")" == "clean true" ]] || fail "a package is approved clean before its KEV listing: ${later_kev_check}"
+later_kev_entry="${later_kev_home}/approved-specs/$(jq -r '.spec_hash | sub(":"; "-")' <<< "${later_kev_check}").json"
+# A cached answer from the same second would be the one before the listing.
+rm -rf "${later_kev_home}/cache"
+printf '%s\n' '{"vulnerable":[],"kev":["fixture-later-kev@1.0.0"]}' > "${state_file}"
+set +e
+later_kev_json=$(SAFEDEPS_HOME="${later_kev_home}" ./bin/safedeps --json re-check)
+later_kev_status=$?
+set -e
+printf '%s\n' "${later_kev_state}" > "${state_file}"
+[[ "${later_kev_status}" -eq 0 ]] || fail "re-check of a KEV-listed approval exits 0 (got ${later_kev_status})"
+jq -e '([.kev_hit[] | select(.package == "fixture-later-kev" and .status == "hard_block")] | length) == 1
+  and ([.revoked[] | select(.package == "fixture-later-kev")] | length) == 1' \
+  <<< "${later_kev_json}" >/dev/null || fail "re-check reports a KEV hit and revokes it: ${later_kev_json}"
+jq -e '.revoked_at != null' "${later_kev_entry}" >/dev/null || fail "the ledger entry of an approval KEV-listed after it is revoked"
+pass "re-check revokes an approval whose package is KEV-listed after it"
+
 SAFEDEPS_HOME="${SAFEDEPS_HOME}" lib/ledger/ledger.sh approve npm fixture-forged 1.0.0 1.0.0 forged-test >/dev/null
 forgery_json=$(./bin/safedeps --json re-check)
 [[ "$(jq -r '.suspected_forgery | length' <<< "${forgery_json}")" == "1" ]] || fail "re-check flags direct ledger write without approval provenance"

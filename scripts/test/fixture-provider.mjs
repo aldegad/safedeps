@@ -49,6 +49,9 @@ function osvVuln(id, fixed) {
 function osvResponse(packageName, version) {
   const key = `${packageName}@${version}`;
   const current = state();
+  if (current.kev?.includes(key)) {
+    return { vulns: [osvVuln('CVE-2026-9999', null)] };
+  }
   if (current.vulnerable?.includes(key)) {
     return { vulns: [osvVuln('CVE-2026-1000', null)] };
   }
