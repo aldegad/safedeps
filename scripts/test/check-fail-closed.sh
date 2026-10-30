@@ -15,6 +15,10 @@
 # hold every line of STUB_MATCH fails, or, with STUB_STATUS set, has its output's
 # status replaced. No row runs an install; `check` only reads and judges.
 #
+# The last section fails each read a verdict rests on in the way that hides
+# best: the tool runs, prints what it prints, and exits non-zero. Most of these
+# reads run where errexit is off, so only their own check can see that.
+#
 # Every row runs and reports whatever another one answered: a row's state root
 # is its own, and one run says which rows a change turns red.
 set -euo pipefail
@@ -108,7 +112,9 @@ exec "${real_jq}" "\${args[@]}"
 STUB
 chmod +x "${stub_bin}/jq"
 # curl, answering an OSV query with STUB_OSV_BODY and a KEV download with
-# STUB_KEV_BODY where those are set.
+# STUB_KEV_BODY where those are set. A request whose arguments hold
+# STUB_CURL_FAILS gets its real answer, code included, and exits 18: curl's
+# status for a body cut short, and the code it printed is still 200.
 real_curl=$(command -v curl)
 cat > "${stub_bin}/curl" <<STUB
 #!/usr/bin/env bash
@@ -117,7 +123,10 @@ args=("\$@")
 for ((i = 0; i < \${#args[@]}; i++)); do
   [[ "\${args[i]}" != -o ]] || out="\${args[i + 1]}"
 done
-if [[ -n "\${STUB_OSV_BODY+set}" && "\$*" == *"/osv/v1/"* ]]; then
+if [[ -n "\${STUB_CURL_FAILS:-}" && "\$*" == *"\${STUB_CURL_FAILS}"* ]]; then
+  "${real_curl}" "\$@"
+  exit 18
+elif [[ -n "\${STUB_OSV_BODY+set}" && "\$*" == *"/osv/v1/"* ]]; then
   printf '%s' "\${STUB_OSV_BODY}" > "\${out}"
 elif [[ -n "\${STUB_KEV_BODY+set}" && "\$*" == *"/kev.json"* ]]; then
   printf '%s' "\${STUB_KEV_BODY}" > "\${out}"
@@ -699,5 +708,523 @@ listing_expiry() {
   [[ "$(jq -r '.result' <<< "${json}")" == "clean" ]] || no "check reads the entry as live: ${json}"
 }
 row "the ledger listing and check read an unpadded expires_at the way the core does" listing_expiry
+
+# ---- a tool that prints, then fails ---------------------------------------
+#
+# Each call whose arguments hold every line of STUB_MATCH, and start with
+# STUB_PREFIX when that is set, runs, prints what it prints, and exits 5. With
+# STUB_BEFORE set it exits 5 and prints nothing. A read a verdict rests on is
+# checked by its own return, so a row below names one read, and turning that
+# check off turns the row red.
+after_bin="${tmp_root}/after-bin"
+mkdir -p "${after_bin}"
+for tool in jq date shasum sha256sum cat cut dirname mv find awk; do
+  real=$(command -v "${tool}") || continue
+  cat > "${after_bin}/${tool}" <<STUB
+#!/usr/bin/env bash
+hit=1
+while IFS= read -r wanted; do
+  [[ -n "\${wanted}" ]] || continue
+  [[ "\$*" == *"\${wanted}"* ]] || hit=0
+done <<< "\${STUB_MATCH:-}"
+[[ -n "\${STUB_TOOL_ONLY:-}" && "\${STUB_TOOL_ONLY}" != ${tool} ]] && hit=0
+[[ -z "\${STUB_PREFIX:-}" || "\$*" == "\${STUB_PREFIX}"* ]] || hit=0
+[[ "\${hit}" -eq 1 ]] || exec "${real}" "\$@"
+[[ -n "\${STUB_BEFORE:-}" ]] && exit 5
+"${real}" "\$@"
+[[ -z "\${STUB_THEN:-}" ]] || eval "\${STUB_THEN}"
+exit 5
+STUB
+done
+# npm with no network: a view prints a version, an install writes a lockfile with
+# the spec and one dependency. STUB_NPM_FAILS names a subcommand that prints what
+# it prints and exits 5; STUB_NPM_FIRST_INSTALL_FAILS fails the first install.
+real_jq=$(command -v jq)
+cat > "${after_bin}/npm" <<STUB
+#!/usr/bin/env bash
+case "\${1:-}" in
+  view) printf '"1.0.0"\n' ;;
+  install)
+    if [[ -n "\${STUB_NPM_FIRST_INSTALL_FAILS:-}" && ! -e "\${STUB_NPM_FIRST_INSTALL_FAILS}" ]]; then
+      : > "\${STUB_NPM_FIRST_INSTALL_FAILS}"
+      exit 1
+    fi
+    spec="\${2:-}"
+    [[ "\${spec}" == *@* ]] || spec=\$("${real_jq}" -r '.dependencies // {} | to_entries | map(.key + "@" + .value) | .[0] // "fixture-clean@1.0.0"' package.json)
+    name="\${spec%@*}" version="\${spec##*@}"
+    printf '{"lockfileVersion":3,"packages":{"":{"name":"p","version":"0.0.0"},"node_modules/%s":{"name":"%s","version":"%s"}}}\n' "\${name}" "\${name}" "\${version}" > package-lock.json
+    ;;
+  *) exit 64 ;;
+esac
+[[ "\${STUB_NPM_FAILS:-}" != "\${1:-}" ]] || exit 5
+STUB
+chmod +x "${after_bin}"/*
+after_path="${after_bin}:${stub_bin}:${PATH}"
+
+# Fails one call of `check`, and leaves `home`, `json` and `rc`.
+after_check() {
+  local ecosystem="$1" spec="$2" match="$3"
+  shift 3
+  check_with "${ecosystem}" "${spec}" PATH="${after_path}" STUB_MATCH="${match}" "$@"
+}
+# The same in a project, with the fixture closures out of the way, so the check
+# reads the project and asks the npm above. `project` is the row's directory.
+project_dir() {
+  project=$(mktemp -d "${tmp_root}/project.XXXXXX")
+  mkdir "${project}/.git"
+}
+in_project() {
+  local ecosystem="$1" spec="$2" match="$3"
+  shift 3
+  fresh_home
+  rc=0
+  json=$(cd "${project}" && env -u SAFEDEPS_NPM_CLOSURE_FIXTURE_JSON SAFEDEPS_HOME="${home}" PATH="${after_path}" STUB_MATCH="${match}" "$@" \
+    "${ROOT_DIR}/bin/safedeps" --json check "${ecosystem}" "${spec}" 2>"${home}/stderr") || rc=$?
+}
+refused() {
+  [[ "${rc}" == 4 ]] || no "exit ${rc}, not 4: ${json}"
+  jq -e '.command == "check" and .result == "error" and .approved == false' <<< "${json}" >/dev/null || no "the report: ${json}"
+  no_approval
+}
+not_written() {
+  refused
+  jq -e '.error == "ledger_write_failed"' <<< "${json}" >/dev/null || no "the report: ${json}"
+  grep -q 'check fail-closed ledger-write' "${home}/advisory.log" 2>/dev/null || no "advisory.log has no fail-closed line"
+}
+did_not_finish() {
+  refused
+  jq -e '.error == "check_did_not_finish"' <<< "${json}" >/dev/null || no "the report: ${json}"
+  grep -q 'check fail-closed did-not-finish' "${home}/advisory.log" 2>/dev/null || no "advisory.log has no fail-closed line"
+}
+version_unresolved() {
+  [[ "${rc}" == 4 ]] || no "exit ${rc}: ${json}"
+  jq -e '.result == "error" and .error == "version_resolution_failed"' <<< "${json}" >/dev/null || no "the report: ${json}"
+  no_approval
+}
+candidate_withheld() {
+  [[ "${rc}" != 0 ]] || no "exit ${rc}: ${json}"
+  jq -e '.approved != true' <<< "${json}" >/dev/null || no "the report: ${json}"
+  no_approval
+}
+closure_failed() {
+  [[ "${rc}" == 4 ]] || no "exit ${rc}: ${json}"
+  jq -e '.result == "error" and .error == "npm_closure_resolution_failed" and .approved == false' <<< "${json}" >/dev/null || no "the report: ${json}"
+  no_approval
+}
+fails_as() {
+  local oracle="$1"
+  shift
+  after_check "$@"
+  "${oracle}"
+}
+in_project_fails_as() {
+  local oracle="$1"
+  shift
+  in_project "$@"
+  "${oracle}"
+}
+
+# A function called under `if`, as `check` calls it, with the libraries sourced.
+function_rc() {
+  local match="$1"
+  shift
+  fresh_home
+  rc=0
+  env SAFEDEPS_HOME="${home}" PATH="${after_path}" STUB_MATCH="${match}" \
+    bash -c 'source lib/providers/providers.sh; source lib/ledger/ledger.sh; source lib/npm/closure.sh; if "$@"; then exit 0; fi; exit 1' function "$@" >/dev/null 2>"${tmp_root}/function-stderr" || rc=$?
+}
+function_fails() {
+  local tool="$1" match="$2"
+  shift 2
+  function_rc 'a call no function makes' "$@"
+  [[ "${rc}" == 0 ]] || no "the control exits ${rc}: $(cat "${tmp_root}/function-stderr")"
+  STUB_TOOL_ONLY="${tool}" function_rc "${match}" "$@"
+  [[ "${rc}" != 0 ]] || no "the function returned 0"
+}
+
+# The validator's two injections: both left a report of clean, one approval and
+# one `check approve` line.
+row "npm: an OSV batch payload that jq printed and failed on is not sent" fails_as unavailable npm fixture-clean@1.0.0 'queries: ['
+row "npm: an OSV batch item that jq printed and failed on is not read as an answer" fails_as unavailable npm fixture-clean@1.0.0 '.results[$i]'
+row "the OSV batch returns when jq prints the payload and fails" function_fails jq 'queries: [' safedeps_osv_query_batch npm "${one_package}"
+row "the OSV batch returns when jq prints an item and fails" function_fails jq '.results[$i]' safedeps_osv_query_batch npm "${one_package}"
+
+# What a provider answered.
+row "non-npm: an OSV query that jq printed and failed on is not sent" fails_as unavailable pypi fixture-clean@1.0.0 '{version: $version, package: {name: $package, ecosystem: $ecosystem}}'
+row "npm: the count of OSV batch misses is read or the batch fails" fails_as unavailable npm fixture-clean@1.0.0 $'-s length\nmisses.jsonl'
+row "npm: the count of OSV batch results is read or the batch fails" fails_as unavailable npm fixture-clean@1.0.0 '.results | length'
+row "npm: the cache path of an OSV batch miss is read or the batch fails" fails_as unavailable npm fixture-clean@1.0.0 '-r .cache_path'
+row "npm: a curl that printed 200 and failed is not an OSV batch answer" fails_as unavailable npm fixture-clean@1.0.0 'a call no row fails' STUB_CURL_FAILS=/osv/v1/querybatch
+row "non-npm: a curl that printed 200 and failed is not an OSV answer" fails_as unavailable pypi fixture-clean@1.0.0 'a call no row fails' STUB_CURL_FAILS=/osv/v1/query
+row "npm: a curl that printed 200 and failed is not a KEV catalog" fails_as unavailable npm fixture-clean@1.0.0 'a call no row fails' STUB_CURL_FAILS=/kev.json
+row "non-npm: a curl that printed 200 and failed is not a KEV catalog" fails_as unavailable pypi fixture-clean@1.0.0 'a call no row fails' STUB_CURL_FAILS=/kev.json
+curl_failure_recorded() {
+  after_check npm fixture-clean@1.0.0 'a call no row fails' STUB_CURL_FAILS=/osv/v1/querybatch
+  grep -q 'ERROR OSV batch query failed status=200 exit 18' "${home}/advisory.log" || no "advisory.log does not say both: $(cat "${home}/advisory.log")"
+  after_check npm fixture-clean@1.0.0 'a call no row fails' STUB_CURL_FAILS=/kev.json
+  grep -q 'WARN CISA KEV unavailable and no readable local catalog status=200 exit 18' "${home}/advisory.log" || no "advisory.log does not say both: $(cat "${home}/advisory.log")"
+}
+row "the record says a failed request printed 200 and how it ended" curl_failure_recorded
+cache_file="${tmp_root}/fresh-cache-file"
+: > "${cache_file}"
+row "a cache file's age is read from a clock that answered" function_fails date '+%s' safedeps_cache_is_fresh "${cache_file}"
+row "an OSV cache key that shasum printed and failed on is no cache path" function_fails shasum '-a 256' safedeps_osv_query_batch npm "${one_package}"
+row "an OSV single-query cache key that shasum printed and failed on is no cache path" function_fails shasum '-a 256' safedeps_osv_query pypi fixture-clean 1.0.0
+
+# What the ledger reads and writes.
+row "the ledger hash returns when shasum prints and fails" function_fails shasum '-a 256' safedeps_ledger_hash npm fixture-clean 1.0.0
+row "the ledger hash with a context returns when shasum prints and fails" function_fails shasum '-a 256' safedeps_ledger_hash npm fixture-clean 1.0.0 sha256:c
+row "the ledger path returns when shasum prints and fails" function_fails shasum '-a 256' safedeps_ledger_path npm fixture-clean 1.0.0
+ledger_read_failed() {
+  fresh_home
+  SAFEDEPS_HOME="${home}" lib/ledger/ledger.sh approve npm fixture-clean 1.0.0 >/dev/null
+  rc=0
+  env SAFEDEPS_HOME="${home}" PATH="${after_path}" STUB_MATCH='-a 256' STUB_TOOL_ONLY=shasum \
+    bash -c 'source lib/ledger/ledger.sh; if safedeps_ledger_read npm fixture-clean 1.0.0 >/dev/null; then exit 0; fi; exit 1' >/dev/null 2>&1 || rc=$?
+  [[ "${rc}" != 0 ]] || no "the entry was read"
+}
+ledger_with_entry() {
+  local want="$1" match="$2"
+  fresh_home
+  SAFEDEPS_HOME="${home}" lib/ledger/ledger.sh approve npm fixture-clean 1.0.0 >/dev/null
+  rc=0
+  env SAFEDEPS_HOME="${home}" PATH="${after_path}" STUB_MATCH="${match}" STUB_TOOL_ONLY="${want}" \
+    bash -c 'source lib/ledger/ledger.sh; if safedeps_ledger_check npm fixture-clean 1.0.0 >/dev/null; then exit 0; fi; exit 1' >/dev/null 2>&1 || rc=$?
+  [[ "${rc}" != 0 ]] || no "the entry reads as approved"
+}
+ledger_check_control() {
+  fresh_home
+  SAFEDEPS_HOME="${home}" lib/ledger/ledger.sh approve npm fixture-clean 1.0.0 >/dev/null
+  rc=0
+  env SAFEDEPS_HOME="${home}" PATH="${after_path}" STUB_MATCH='a call no row fails' \
+    bash -c 'source lib/ledger/ledger.sh; if safedeps_ledger_check npm fixture-clean 1.0.0 >/dev/null; then exit 0; fi; exit 1' >/dev/null 2>&1 || rc=$?
+  [[ "${rc}" == 0 ]] || no "the control exits ${rc}"
+}
+row "control: a ledger entry reads as approved under the stubs" ledger_check_control
+row "a ledger read returns when shasum prints and fails" ledger_read_failed
+row "a ledger check returns when shasum prints and fails" ledger_with_entry shasum '-a 256'
+row "a ledger check does not take a stored hash jq printed and failed on" ledger_with_entry jq '-r .hash'
+row "a ledger check does not take a stored context jq printed and failed on" ledger_with_entry jq 'ledger_context_hash'
+atomic_write_cat() {
+  fresh_home
+  rc=0
+  env SAFEDEPS_HOME="${home}" PATH="${after_path}" STUB_TOOL_ONLY=cat \
+    bash -c 'source lib/ledger/ledger.sh; if safedeps_ledger_atomic_write "${SAFEDEPS_HOME}/approved-specs/x.json" <<< "{}"; then exit 0; fi; exit 1' >/dev/null 2>&1 || rc=$?
+  [[ "${rc}" != 0 ]] || no "the write returned 0"
+  [[ -z "$(find "${home}/approved-specs" -type f 2>/dev/null)" ]] || no "the failed write left a file: $(ls -a "${home}/approved-specs")"
+}
+row "a ledger write that cat failed on leaves nothing and returns" atomic_write_cat
+row "an approval's dates come from a clock that answered" function_fails date '%Y-%m-%dT%H:%M:%SZ' safedeps_ledger_render_approved_spec npm fixture-clean 1.0.0
+row "an approval's expiry comes from a clock that answered" function_fails date '+%s' safedeps_ledger_add_days_iso 30
+row "an approval's expiry is no date a failed clock left" function_fails date '-r' safedeps_ledger_add_days_iso 30
+project_context_file="${tmp_root}/project-context.json"
+printf '{"type":"npm-overrides-probe","context_hash":"sha256:c","project_root":"/r"}\n' > "${project_context_file}"
+row "an approval's context hash is read or there is no approval" function_fails jq 'context_scopes' safedeps_ledger_render_approved_spec npm fixture-clean 1.0.0 1.0.0 local '' 30 '' "${project_context_file}"
+row "an approval's hash is read or there is no approval" function_fails shasum '-a 256' safedeps_ledger_render_approved_spec npm fixture-clean 1.0.0
+row "the entry an approval writes is one jq finished" function_fails jq 'version_range: $version_range' safedeps_ledger_render_approved_spec npm fixture-clean 1.0.0
+
+# An approval is made whole and then written, or it is not written.
+row "npm: a ledger entry jq printed and failed on is not written" fails_as not_written npm fixture-clean@1.0.0 'version_range: $version_range'
+row "non-npm: a ledger entry jq printed and failed on is not written" fails_as not_written pypi fixture-clean@1.0.0 'version_range: $version_range'
+row "npm patched: a ledger entry jq printed and failed on is not written" fails_as not_written npm fixture-vuln@1.0.0 'version_range: $version_range'
+row "non-npm patched: a ledger entry jq printed and failed on is not written" fails_as not_written pypi fixture-vuln@1.0.0 'version_range: $version_range'
+for field in hash expires_at; do
+  row "npm: an approval's ${field} jq printed and failed on writes nothing" fails_as not_written npm fixture-clean@1.0.0 "-r .${field}"
+  row "non-npm: an approval's ${field} jq printed and failed on writes nothing" fails_as not_written pypi fixture-clean@1.0.0 "-r .${field}"
+  row "npm patched: an approval's ${field} jq printed and failed on writes nothing" fails_as not_written npm fixture-vuln@1.0.0 "-r .${field}"
+  row "non-npm patched: an approval's ${field} jq printed and failed on writes nothing" fails_as not_written pypi fixture-vuln@1.0.0 "-r .${field}"
+done
+row "npm: a transitive count jq printed and failed on writes nothing" fails_as not_written npm fixture-clean@1.0.0 'safedeps-closure' STUB_PREFIX='length /'
+row "npm patched: a transitive count jq printed and failed on writes nothing" fails_as not_written npm fixture-vuln@1.0.0 'safedeps-closure' STUB_PREFIX='length /'
+row "npm: a closure source cat printed and failed on writes nothing" fails_as not_written npm fixture-clean@1.0.0 'safedeps-evidence' STUB_TOOL_ONLY=cat
+row "npm: a resolved closure cat printed and failed on writes nothing" fails_as not_written npm fixture-clean@1.0.0 'safedeps-closure' STUB_TOOL_ONLY=cat
+row "npm patched: a closure source cat printed and failed on writes nothing" fails_as not_written npm fixture-vuln@1.0.0 'safedeps-evidence' STUB_TOOL_ONLY=cat
+row "npm patched: a resolved closure cat printed and failed on writes nothing" fails_as not_written npm fixture-vuln@1.0.0 'safedeps-closure' STUB_TOOL_ONLY=cat
+row "npm: a closure source type jq printed and failed on writes nothing" fails_as not_written npm fixture-clean@1.0.0 '-r .type'
+row "npm patched: a closure source type jq printed and failed on writes nothing" fails_as not_written npm fixture-vuln@1.0.0 '-r .type'
+row "npm: a report jq printed and failed on writes nothing" fails_as not_written npm fixture-clean@1.0.0 'install_hint:install_hint($version)'
+row "non-npm: a report jq printed and failed on writes nothing" fails_as not_written pypi fixture-clean@1.0.0 'install_hint:install_hint($version)'
+row "npm patched: a report jq printed and failed on writes nothing" fails_as not_written npm fixture-vuln@1.0.0 'install_hint:install_hint($patched)'
+row "non-npm patched: a report jq printed and failed on writes nothing" fails_as not_written pypi fixture-vuln@1.0.0 'install_hint:install_hint($patched)'
+row "an entry mv moved and then failed on is taken back" fails_as not_written npm fixture-clean@1.0.0 'approved-specs' STUB_TOOL_ONLY=mv
+# jq, and once the report has been made the record can no longer be written.
+record_stub="${tmp_root}/record-stub"
+mkdir -p "${record_stub}"
+cat > "${record_stub}/jq" <<STUB
+#!/usr/bin/env bash
+"${real_jq}" "\$@"
+status=\$?
+[[ "\$*" != *"\${RECORD_DIES_ON}"* ]] || chmod 000 "\${SAFEDEPS_HOME}/advisory.log"
+exit "\${status}"
+STUB
+chmod +x "${record_stub}/jq"
+record_refused() {
+  fresh_home
+  rc=0
+  json=$(env SAFEDEPS_HOME="${home}" PATH="${record_stub}:${PATH}" RECORD_DIES_ON='install_hint' ./bin/safedeps --json check "$1" "$2" 2>"${home}/stderr") || rc=$?
+  [[ "${rc}" == 4 ]] || no "exit ${rc}: ${json}"
+  jq -e '.approved == false' <<< "${json}" >/dev/null || no "the report: ${json}"
+  [[ -z "$(find "${home}/approved-specs" -name '*.json' -type f 2>/dev/null)" ]] || no "a ledger entry stands with no record"
+}
+row "npm: an approval the record could not take is taken back" record_refused npm fixture-clean@1.0.0
+row "non-npm: an approval the record could not take is taken back" record_refused pypi fixture-clean@1.0.0
+
+# What the report is read from.
+row "npm: a vulnerable count jq printed and failed on is no count" fails_as unavailable npm fixture-clean@1.0.0 'select(.status == status_vulnerable)] | length'
+row "npm: a KEV count jq printed and failed on is no count" fails_as unavailable npm fixture-clean@1.0.0 'select(.status == status_hard_block)] | length'
+row "npm: a direct status jq printed and failed on is no status" fails_as unavailable npm fixture-clean@1.0.0 '"missing"'
+row "npm patched: a candidate's count jq printed and failed on is no count" fails_as unavailable npm fixture-vuln@1.0.0 'select(.status | status_risky)] | length'
+row "non-npm: a status jq printed and failed on is no status" fails_as unavailable pypi fixture-clean@1.0.0 'select(status_known)'
+row "non-npm patched: a candidate's status jq printed and failed on is no status" fails_as unavailable pypi fixture-vuln@1.0.0 'select(status_known)'
+row "npm patched: a direct status jq printed and failed on is no status" fails_as unavailable npm fixture-vuln@1.0.0 'select(status_known)'
+row "a range npm printed and failed on resolves to nothing" fails_as version_unresolved npm 'fixture-clean@^1.0.0' 'a call no row fails' STUB_NPM_FAILS=view
+row "a resolved version jq printed and failed on is no version" fails_as version_unresolved npm 'fixture-clean@^1.0.0' 'if type=="array" then .[-1]'
+approved_read_failed() {
+  fresh_home
+  check_in npm fixture-clean@1.0.0
+  [[ "${rc}" == 0 ]] || no "the first run exits ${rc}: ${json}"
+  check_in npm fixture-clean@1.0.0 PATH="${after_path}" STUB_MATCH='.approved == true'
+  [[ "${rc}" == 0 ]] || no "exit ${rc}: ${json}"
+  jq -e '.result == "clean"' <<< "${json}" >/dev/null || no "the ledger hit was read: ${json}"
+}
+row "an entry whose approved field jq printed and failed on is judged again" approved_read_failed
+cached_report_failed() {
+  fresh_home
+  check_in npm fixture-clean@1.0.0
+  [[ "${rc}" == 0 ]] || no "the first run exits ${rc}: ${json}"
+  check_in npm fixture-clean@1.0.0 PATH="${after_path}" STUB_MATCH="$1"
+  [[ "${rc}" == 4 ]] || no "exit ${rc}: ${json}"
+  jq -es 'length == 1 and .[0].error == "check_did_not_finish"' <<< "${json}" >/dev/null || no "the report: ${json}"
+}
+row "a ledger hit's context jq printed and failed on is no report" cached_report_failed '.spec.project_context // null'
+row "a ledger hit's closure jq printed and failed on is no report" cached_report_failed '.spec.evidence.closure // []'
+
+# A command that stops the run under set -e still ends in a report.
+row "npm: a run stopped by the evidence jq says so" fails_as did_not_finish npm fixture-clean@1.0.0 'closure_checked: true'
+row "npm: a run stopped by the transitive list jq says so" fails_as did_not_finish npm fixture-clean@1.0.0 '{ecosystem: "npm", package: .package, version: (.version | tostring)}'
+row "non-npm: a run stopped by the CVE count says so" fails_as did_not_finish pypi fixture-vuln@1.0.0 '(.vulnerabilities // []) | length'
+human_stop() {
+  fresh_home
+  rc=0
+  env SAFEDEPS_HOME="${home}" PATH="${after_path}" STUB_MATCH='closure_checked: true' ./bin/safedeps check npm fixture-clean@1.0.0 >/dev/null 2>"${home}/stderr" || rc=$?
+  [[ "${rc}" == 4 ]] || no "exit ${rc}, not 4"
+  grep -q 'check fail-closed did-not-finish' "${home}/advisory.log" || no "advisory.log has no fail-closed line"
+}
+row "a human run stopped under set -e exits 4 and has a record" human_stop
+one_report() {
+  fresh_home
+  rc=0
+  json=$(env SAFEDEPS_HOME="${home}" ./bin/safedeps --json check 2>/dev/null) || rc=$?
+  [[ "${rc}" == 4 ]] || no "exit ${rc}: ${json}"
+  jq -es 'length == 1 and (.[0].approved == false)' <<< "${json}" >/dev/null || no "the report: ${json}"
+}
+row "a check with no arguments still answers in JSON" one_report
+no_home() {
+  rc=0
+  json=$(env SAFEDEPS_HOME=/dev/null/home ./bin/safedeps --json check pypi fixture-clean@1.0.0 2>/dev/null) || rc=$?
+  [[ "${rc}" == 4 ]] || no "exit ${rc}: ${json}"
+  jq -es 'length == 1 and (.[0].approved == false)' <<< "${json}" >/dev/null || no "the report: ${json}"
+}
+row "a check with a home it cannot make still answers in JSON" no_home
+
+# A find in a process substitution has no exit anyone can see, so what lists the
+# ledger keeps it apart, and an unreadable ledger is not an empty one.
+ledger_listed() {
+  fresh_home
+  check_in pypi fixture-clean@1.0.0
+  [[ "${rc}" == 0 ]] || no "the first run exits ${rc}: ${json}"
+}
+unlisted() {
+  [[ "${rc}" == 4 ]] || no "exit ${rc}: ${json}"
+  jq -es --arg command "$1" 'length == 1 and .[0].command == $command and .[0].error == "ledger_unlisted"' <<< "${json}" >/dev/null || no "the report: ${json}"
+  grep -q "$1 fail-closed ledger-unlisted" "${home}/advisory.log" || no "advisory.log has no fail-closed line"
+}
+ledger_unlisted_as() {
+  local command="$1" before="$2"
+  shift 2
+  ledger_listed
+  rc=0
+  json=$(env SAFEDEPS_HOME="${home}" PATH="${after_path}" STUB_MATCH='approved-specs' STUB_TOOL_ONLY=find STUB_BEFORE="${before}" ./bin/safedeps --json "${command}" "$@" 2>"${home}/stderr") || rc=$?
+  unlisted "${command}"
+  jq -e '.revoked_at == null' "${home}"/approved-specs/*.json >/dev/null || no "an entry was revoked"
+}
+row "a re-check that find printed and failed under is no whole listing" ledger_unlisted_as re-check ''
+row "a re-check that find failed under is no empty ledger" ledger_unlisted_as re-check 1
+row "a ledger listing that find printed and failed under is no whole listing" ledger_unlisted_as ledger ''
+row "a ledger listing that find failed under is no empty ledger" ledger_unlisted_as ledger 1
+row "a revoke that find failed under is no missing entry" ledger_unlisted_as revoke 1 pypi fixture-clean@1.0.0
+row "a revoke by name that find failed under is no missing entry" ledger_unlisted_as revoke 1 fixture-clean@1.0.0
+real_unreadable_ledger() {
+  ledger_listed
+  chmod 000 "${home}/approved-specs"
+  rc=0
+  json=$(env SAFEDEPS_HOME="${home}" ./bin/safedeps --json re-check 2>"${home}/stderr") || rc=$?
+  chmod 700 "${home}/approved-specs"
+  unlisted re-check
+}
+row "a re-check of a ledger it may not read checked nothing and says so" real_unreadable_ledger
+ledger_listing_control() {
+  ledger_listed
+  rc=0
+  json=$(env SAFEDEPS_HOME="${home}" PATH="${after_path}" STUB_MATCH='a call no row fails' ./bin/safedeps --json re-check 2>"${home}/stderr") || rc=$?
+  [[ "${rc}" == 0 ]] || no "exit ${rc}: ${json}"
+  jq -e '.checked == 1 and .still_clean == 1' <<< "${json}" >/dev/null || no "the report: ${json}"
+  rc=0
+  json=$(env SAFEDEPS_HOME="${home}" PATH="${after_path}" STUB_MATCH='a call no row fails' ./bin/safedeps --json ledger 2>"${home}/stderr") || rc=$?
+  [[ "${rc}" == 0 ]] || no "exit ${rc}: ${json}"
+  jq -e '.count == 1' <<< "${json}" >/dev/null || no "the report: ${json}"
+}
+row "control: a ledger that lists is read whole" ledger_listing_control
+
+# What the closure is read from.
+yarn_project() {
+  project_dir
+  printf '{"name":"p","version":"0.0.0","resolutions":{"fixture-child":"1.0.0"}}\n' > "${project}/package.json"
+  printf '__metadata:\n  version: 8\n' > "${project}/yarn.lock"
+}
+overrides_project() {
+  project_dir
+  printf '{"name":"p","version":"0.0.0","overrides":{"fixture-child":"1.0.0"}}\n' > "${project}/package.json"
+}
+yarn_refused() {
+  yarn_project
+  in_project_fails_as "$1" npm fixture-clean@1.0.0 "$2"
+}
+overrides_refused() {
+  overrides_project
+  in_project_fails_as "$@"
+}
+control_project() {
+  overrides_project
+  in_project npm fixture-clean@1.0.0 'a call no row fails'
+  [[ "${rc}" == 0 ]] || no "exit ${rc}: ${json}"
+  jq -e '.result == "clean" and .closure_source.type == "npm-overrides-probe"' <<< "${json}" >/dev/null || no "the report: ${json}"
+  project_dir
+  in_project npm fixture-clean@1.0.0 'a call no row fails'
+  [[ "${rc}" == 0 ]] || no "exit ${rc}: ${json}"
+  jq -e '.result == "clean" and .closure_source.type == "npm-package-probe"' <<< "${json}" >/dev/null || no "the report: ${json}"
+}
+row "control: a project with overrides and one without clear the closure probe" control_project
+row "a Yarn manifest jq printed and failed on is not a project with no resolutions" yarn_refused refused '.resolutions | type'
+row "a Yarn context jq printed and failed on is no context" yarn_refused refused 'resolutions_sha256: $resolutions_sha256'
+row "a deny-only mark that does not read is no permission" fails_as refused npm fixture-clean@1.0.0 'source_approval_scope'
+row "a patch candidate whose deny-only mark does not read is no patch" fails_as candidate_withheld npm fixture-vuln@1.0.0 'source_approval_scope'
+row "overrides jq printed and failed on are not a project with none" overrides_refused refused npm fixture-clean@1.0.0 '.overrides | type'
+row "overrides whose filter jq printed and failed on are not a project with none" overrides_refused refused npm fixture-clean@1.0.0 'to_entries'
+row "an overrides context jq printed and failed on is not the global key" overrides_refused refused npm fixture-clean@1.0.0 'overrides_sha256: $overrides_sha256'
+row "a canonical override set jq printed and failed on is not the global key" overrides_refused refused npm fixture-clean@1.0.0 '-cS .'
+overrides_source_lost() {
+  overrides_project
+  in_project npm fixture-clean@1.0.0 'safedeps-npm-overrides-src' STUB_TOOL_ONLY=cat
+  refused
+}
+row "an overrides source cat printed and failed on is not an unnamed source" overrides_source_lost
+overrides_shasum() {
+  overrides_project
+  in_project npm fixture-clean@1.0.0 '-a 256' STUB_TOOL_ONLY=shasum
+  refused
+}
+row "an overrides hash shasum printed and failed on is not the global key" overrides_shasum
+walk_dirname() {
+  project_dir
+  mkdir -p "${project}/inner"
+  printf '{"name":"p","overrides":{"fixture-child":"1.0.0"}}\n' > "${project}/package.json"
+  project="${project}/inner"
+  in_project npm fixture-clean@1.0.0 'inner' STUB_TOOL_ONLY=dirname
+  refused
+}
+row "a walk to the overrides that dirname failed on is not a walk that found none" walk_dirname
+yarn_walk_dirname() {
+  yarn_project
+  mkdir -p "${project}/inner"
+  project="${project}/inner"
+  in_project npm fixture-clean@1.0.0 'inner' STUB_TOOL_ONLY=dirname
+  refused
+}
+row "a walk to the Yarn project that dirname failed on is not a walk that found none" yarn_walk_dirname
+yarn_inputs_unread() {
+  local mirror inputs
+  mirror=$(mktemp -d "${tmp_root}/mirror.XXXXXX")
+  inputs="${mirror}.inputs"
+  project_dir
+  printf '{"name":"p"}\n' > "${project}/package.json"
+  printf '{"input_files":[{"path":"package.json"}]}\n' > "${inputs}"
+  rc=0
+  env PATH="${after_path}" STUB_MATCH="$1" bash -c 'source lib/npm/closure.sh; if safedeps_npm_yarn_copy_materialization_inputs "$@"; then exit 0; fi; exit 1' inputs "${project}" "${mirror}" "${inputs}" >/dev/null 2>&1 || rc=$?
+  [[ "${rc}" == "$2" ]] || no "exit ${rc}, not $2"
+  [[ "$2" == 1 || -f "${mirror}/package.json" ]] || no "nothing was copied"
+}
+row "control: a mirror's inputs are copied" yarn_inputs_unread 'a call no row fails' 0
+row "a mirror's inputs jq printed and failed on are no list of inputs" yarn_inputs_unread '.input_files[]?.path' 1
+fixture_read_failed() {
+  project_dir
+  closure=$(cd "${project}" && env PATH="${after_path}" STUB_MATCH='--arg key' bash -c 'source "$1/lib/npm/closure.sh"; safedeps_npm_resolve_spec_closure fixture-clean 1.0.0' closure "${ROOT_DIR}" 2>/dev/null) || no "the real resolution failed"
+  jq -es 'length == 1' <<< "${closure}" >/dev/null || no "two closures on stdout: ${closure}"
+}
+row "a fixture closure jq printed and failed on is not printed before the real one" fixture_read_failed
+row "a source jq wrote and failed on stops the fixture path" fails_as closure_failed npm fixture-clean@1.0.0 '{type: $type}'
+source_write_failed() {
+  "$1"
+  in_project npm fixture-clean@1.0.0 '{type: $type}'
+  closure_failed
+}
+row "a closure source jq wrote and failed on stops the probe" source_write_failed project_dir
+row "an overrides source jq wrote and failed on stops the probe" source_write_failed overrides_project
+yarn_source_failed() {
+  yarn_project
+  printf '%s\n' '{"value":"fixture-clean@npm:1.0.0","children":{"Version":"1.0.0","Dependencies":[]}}' > "${tmp_root}/yarn.ndjson"
+  in_project npm fixture-clean@1.0.0 '{type: $type}' SAFEDEPS_YARN_INFO_FIXTURE_NDJSON="${tmp_root}/yarn.ndjson"
+  closure_failed
+}
+row "a Yarn closure source jq wrote and failed on stops the check" yarn_source_failed
+yarn_root_failed() {
+  yarn_project
+  printf '%s\n' '{"value":"fixture-clean@npm:1.0.0","children":{"Version":"1.0.0","Dependencies":[]}}' > "${tmp_root}/yarn.ndjson"
+  in_project npm fixture-clean@1.0.0 '.project_root' SAFEDEPS_YARN_INFO_FIXTURE_NDJSON="${tmp_root}/yarn.ndjson"
+  closure_failed
+}
+row "a Yarn project root jq printed and failed on stops the check" yarn_root_failed
+pinned_equality() {
+  local dir
+  dir=$(mktemp -d "${tmp_root}/probe.XXXXXX")
+  printf '{}\n' > "${dir}/package.json"
+  rc=0
+  env PATH="${after_path}" STUB_MATCH="$1" bash -c 'source lib/npm/closure.sh; if safedeps_npm_probe_self_pinned "$1" fixture-clean 1.0.0 "{}"; then exit 0; fi; exit 1' pinned "${dir}" >/dev/null 2>&1 || rc=$?
+}
+pinned_equal() {
+  pinned_equality 'a call no row fails'
+  [[ "${rc}" == 0 ]] || no "the control exits ${rc}"
+  pinned_equality '$pinned == $kept'
+  [[ "${rc}" != 0 ]] || no "the pinned lockfile was used"
+}
+row "a pinned lockfile compared by a jq that failed is not used" pinned_equal
+
+# revoke says what it did.
+revoke_faulted() {
+  local match="$1"
+  fresh_home
+  SAFEDEPS_HOME="${home}" lib/ledger/ledger.sh approve pypi fixture-clean 1.0.0 >/dev/null
+  shift
+  rc=0
+  json=$(env SAFEDEPS_HOME="${home}" PATH="${after_path}" STUB_MATCH="${match}" "$@" ./bin/safedeps --json revoke pypi fixture-clean@1.0.0 2>"${home}/stderr") || rc=$?
+  [[ "${rc}" != 0 ]] || no "the revoke exits 0: ${json}"
+  [[ -z "${json}" ]] || jq -e '.revoked != true' <<< "${json}" >/dev/null || no "the report says revoked: ${json}"
+}
+row "a revoked entry jq printed and failed on is not reported revoked" revoke_faulted 'revoked_reason: $reason'
+row "a revoked entry jq failed on before printing is not reported revoked" revoke_faulted 'revoked_reason: $reason' STUB_BEFORE=1
+row "a revoke with no clock is not reported revoked" revoke_faulted '%Y-%m-%dT%H:%M:%SZ' STUB_TOOL_ONLY=date
+misses_run() {
+  local closure index
+  closure=$(mktemp "${tmp_root}/closure.XXXXXX")
+  index=$(mktemp "${tmp_root}/index.XXXXXX")
+  printf '[{"package":"fixture-clean","version":"1.0.0"}]\n' > "${closure}"
+  rc=0
+  env PATH="${after_path}" STUB_MATCH="$1" STUB_TOOL_ONLY="$2" STUB_BEFORE="$3" bash -c 'source lib/ledger/ledger.sh; rc=0; safedeps_ledger_effect_misses "$@" || rc=$?; exit "${rc}"' misses "${index}" npm "${closure}" >/dev/null 2>&1 || rc=$?
+  [[ "${rc}" == "$4" ]] || no "exit ${rc}, not $4"
+}
+row "control: a closure the index does not approve has a miss" misses_run 'a call no row fails' '' '' 1
+row "a comparison awk failed on is no list of misses" misses_run 'SUBSEP' awk 1 2
+row "a comparison awk printed and failed on is no list of misses" misses_run 'SUBSEP' awk '' 2
+row "a closure jq failed on is no list of misses" misses_run '@tsv' jq 1 2
 
 [[ "${failures}" -eq 0 ]]
